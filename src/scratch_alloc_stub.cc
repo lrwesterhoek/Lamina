@@ -9,4 +9,7 @@ namespace ScratchAlloc
     bool scratchArm(char const *, std::size_t) { return false; }
     long scratchLiveBytes()   { return 0; }
     long scratchTotalAllocs() { return 0; }
+    long scratchZeroFillMoves() { return 0; }
+    ZeroFillScope::ZeroFillScope(bool) : on_( false ) {}
+    ZeroFillScope::~ZeroFillScope() { (void)on_; }
 }

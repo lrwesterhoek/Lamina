@@ -38,10 +38,11 @@ BUILTIN_PRESETS: dict[str, tuple[str, dict]] = {
                      "vertex_mass": True, "volume_weighted": True, "caustics": True,
                      "caustic_cusps": False, "slice_plane": "largest", "slice_vel_grad": True}),
     "Exact deposit": ("256³ grid with the exact tetrahedron-cell clipping instead of sampling: "
-                      "noise-free cell values, for accuracy checks (on the GPU: half a minute for a "
-                      "0.26M-particle snapshot, a minute on the CPU, the GPU's lead growing with size)",
+                      "noise-free cell values. PS-DTFE runs it on the CPU (9 s for a 0.26M-particle snapshot; at "
+                      "512³ TNG100-3-Dark takes as long as the sampled GPU deposit, 14.5 min), standard DTFE's "
+                      "exact average on the GPU",
                       {"grid": 256, "deposit": "exact", "fields": ["density_a", "velocity_a"],
-                       "vertex_mass": True, "volume_weighted": True, "gpu": True, "slice_plane": ""}),
+                       "vertex_mass": True, "volume_weighted": True, "slice_plane": ""}),
 }
 
 
@@ -106,7 +107,7 @@ OPTION_TEXT = {
     "slice_vel_grad":  ("Velocity gradient at each slice point (divergence, shear, vorticity maps)",
                         "--pts-vel-grad"),
     "pts_conventions": ("Plane conventions", "--pts-conventions"),     # the image plane's estimators
-    "exact":           ("Exact: analytic tetrahedron-cell clipping (noise-free; best on the GPU)", "--ps-exact-deposit"),
+    "exact":           ("Exact: analytic tetrahedron-cell clipping (noise-free; best on the CPU)", "--ps-exact-deposit"),
     "parallel_triangulation": ("Parallel triangulation (faster; repeats differ at float rounding)",
                                "--parallel-triangulation"),
     "ordered_merge":   ("Merge the partitions in index order (bit-identical repeats; the default, off = as they finish)",

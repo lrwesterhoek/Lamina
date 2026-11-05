@@ -25,6 +25,7 @@
    summed density-weighted moments into mass-weighted means. */
 
 #include "quantities.h"
+#include "scratch_alloc.h"
 #include "message.h"
 
 
@@ -153,7 +154,7 @@ void addField(std::vector<T> const &src, std::vector<T> *dst)
     if (src.empty()) return;
     // Grow an unsized dst (zero-filled) so accumulation starts from zero.
     if (dst->size() < src.size())
-        dst->resize(src.size(), T());
+        ScratchAlloc::zeroResize(*dst, src.size(), T());   // (scratch: an empty dst's zeros write nothing)
     for (size_t i = 0; i < src.size(); ++i)
         (*dst)[i] += src[i];
 }
@@ -167,7 +168,7 @@ void orField(std::vector<Real> const &src, std::vector<Real> *dst)
 {
     if (src.empty()) return;
     if (dst->size() < src.size())
-        dst->resize(src.size(), Real(0.));
+        ScratchAlloc::zeroResize(*dst, src.size(), Real(0.));
     for (size_t i = 0; i < src.size(); ++i)
         (*dst)[i] = Real( int((*dst)[i]) | int(src[i]) );
 }
@@ -303,7 +304,7 @@ void addFieldSubgrid(std::vector<T> const &src, std::vector<T> *dst,
 {
     if (src.empty()) return;
     size_t dstTotal = 1; for (int d = 0; d < NO_DIM; ++d) dstTotal *= mainOrigin ? mainDims[d] : full[d];
-    if (dst->size() < dstTotal) dst->resize(dstTotal, T());
+    if (dst->size() < dstTotal) ScratchAlloc::zeroResize(*dst, dstTotal, T());   // (scratch: an empty dst's zeros write nothing)
     size_t subTotal = 1; for (int d = 0; d < NO_DIM; ++d) subTotal *= m[d];
     for (size_t l = 0; l < subTotal; ++l)
     {
@@ -325,7 +326,7 @@ void orFieldSubgrid(std::vector<Real> const &src, std::vector<Real> *dst,
 {
     if (src.empty()) return;
     size_t dstTotal = 1; for (int d = 0; d < NO_DIM; ++d) dstTotal *= mainOrigin ? mainDims[d] : full[d];
-    if (dst->size() < dstTotal) dst->resize(dstTotal, Real(0.));
+    if (dst->size() < dstTotal) ScratchAlloc::zeroResize(*dst, dstTotal, Real(0.));
     size_t subTotal = 1; for (int d = 0; d < NO_DIM; ++d) subTotal *= m[d];
     for (size_t l = 0; l < subTotal; ++l)
     {
@@ -388,34 +389,34 @@ void Quantities::reserveMemory(size_t *gridSize, Field &field)
         totalSize *= gridSize[i];
     
     if ( field.density )
-        this->density.resize( totalSize, Real(0.) );
+        ScratchAlloc::zeroResize( this->density, totalSize, Real(0.) );
     if ( field.velocity || field.velocity_dispersion )   // dispersion needs <v> too, so allocate velocity even if only dispersion is requested
-        this->velocity.resize( totalSize, Pvector<Real,noVelComp>::zero() );
+        ScratchAlloc::zeroResize( this->velocity, totalSize, Pvector<Real,noVelComp>::zero() );
     if ( field.velocity_gradient )
-        this->velocity_gradient.resize( totalSize, Pvector<Real,noGradComp>::zero() );
+        ScratchAlloc::zeroResize( this->velocity_gradient, totalSize, Pvector<Real,noGradComp>::zero() );
     if ( field.velocity_divergence )
-        this->velocity_divergence.resize( totalSize, Real(0.) );
+        ScratchAlloc::zeroResize( this->velocity_divergence, totalSize, Real(0.) );
     if ( field.velocity_shear )
-        this->velocity_shear.resize( totalSize, Pvector<Real,noShearComp>::zero() );
+        ScratchAlloc::zeroResize( this->velocity_shear, totalSize, Pvector<Real,noShearComp>::zero() );
     if ( field.velocity_vorticity )
-        this->velocity_vorticity.resize( totalSize, Pvector<Real,noVortComp>::zero() );
+        ScratchAlloc::zeroResize( this->velocity_vorticity, totalSize, Pvector<Real,noVortComp>::zero() );
     if ( field.velocity_std )
-        this->velocity_std.resize( totalSize, Real(0.) );
+        ScratchAlloc::zeroResize( this->velocity_std, totalSize, Real(0.) );
     if ( field.velocity_dispersion )
-        this->velocity_dispersion.resize( totalSize, Pvector<Real,noDispComp>::zero() );
+        ScratchAlloc::zeroResize( this->velocity_dispersion, totalSize, Pvector<Real,noDispComp>::zero() );
     if ( field.scalar )
-        this->scalar.resize( totalSize, Pvector<Real,noScalarComp>::zero() );
+        ScratchAlloc::zeroResize( this->scalar, totalSize, Pvector<Real,noScalarComp>::zero() );
     if ( field.scalar_gradient )
-        this->scalar_gradient.resize( totalSize, Pvector<Real,noScalarGradComp>::zero() );
+        ScratchAlloc::zeroResize( this->scalar_gradient, totalSize, Pvector<Real,noScalarGradComp>::zero() );
     if ( field.velocity_tweb )
     {
-        this->velocity_tweb.resize( totalSize, Real(0.) );
-        this->velocity_tweb_eigenvalues.resize( totalSize, Pvector<Real,NO_DIM>::zero() );
+        ScratchAlloc::zeroResize( this->velocity_tweb, totalSize, Real(0.) );
+        ScratchAlloc::zeroResize( this->velocity_tweb_eigenvalues, totalSize, Pvector<Real,NO_DIM>::zero() );
     }
     if ( field.velocity_vweb )
     {
-        this->velocity_vweb.resize( totalSize, Real(0.) );
-        this->velocity_vweb_eigenvalues.resize( totalSize, Pvector<Real,NO_DIM>::zero() );
+        ScratchAlloc::zeroResize( this->velocity_vweb, totalSize, Real(0.) );
+        ScratchAlloc::zeroResize( this->velocity_vweb_eigenvalues, totalSize, Pvector<Real,NO_DIM>::zero() );
     }
 }
 

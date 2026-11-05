@@ -1743,6 +1743,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
     def shutdown(self):
         """Stop the server and the threads (the window is closing). Idempotent."""
         self._shut = True
+        self._3d_cancel()                               # a 3D volume being read: the slice thread comes back soon
         if self._server_log is not None:
             try:
                 self._server_log.unlink(missing_ok=True)

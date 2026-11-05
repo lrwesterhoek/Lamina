@@ -45,7 +45,7 @@ namespace {
 
 using DepositParams = PSDepositParams;   // the shared host struct (ps_deposit_params.h)
 
-#include "gpu_exact_clip.cuh"   // V3, det3/inverse3, the r3d clip helpers (shared with dtfe_gpu_cuda.cu)
+#include "gpu_exact_clip.cuh"   // V3, det3/inverse3, the exact tet-cell sweep (shared with dtfe_gpu_cuda.cu)
 
 // ---- the per-tetrahedron record: PS_TET_STRIDE floats per tet, see ps_deposit_params.h /
 // metal/ps_deposit.metal (ic0 as int bits, f0, the three edges, the centroid cell as uint bits)
@@ -279,6 +279,8 @@ struct ExactTet {
     int    ic0[3];
     float  f0[3];
     float  u0[3], vG[3][3];
+    float  vc[3], vh[3];     // the centre and half the range of each velocity component over the 4 vertices
+                             // (metal/ps_deposit.metal ExactTet: the bounds exact_cell_deposit clamps to)
     float  s0, sG[3];        // the linear scalar (fScal / fSGrad; else zero)
     float  d0, dG[3];
     unsigned obits;
@@ -287,6 +289,45 @@ struct ExactTet {
     float  wFull;
     float  wScale;           // the unit of its fixed-point sumW (PS_FX_SUMW_BIT; metal/ps_deposit.metal ExactTet)
 };
+
+// The exact dispersion's float32 limit (metal/ps_deposit.metal, where the derivation is): a tet whose velocity
+// gradient makes G^T Cov G cancel beyond EX_DISP_KAPPA2 for any component goes to the CPU's double deposit.
+#ifndef EX_DISP_KAPPA2
+#define EX_DISP_KAPPA2 1.0e4f
+#endif
+#ifndef EX_DISP_KAPPA2_L
+#define EX_DISP_KAPPA2_L 1.0e10f
+#endif
+__device__ __forceinline__ void exact_vel_range(const float Ax[3][3], const float vG[3][3], const float u0[3],
+                                                float vc[3], float vh[3])
+{
+    for (int j=0; j<3; ++j) {
+        float lo = 0.0f, hi = 0.0f;   // vertex 0's offset is 0
+        for (int e=0; e<3; ++e) {
+            float const dv = Ax[e][0]*vG[0][j] + Ax[e][1]*vG[1][j] + Ax[e][2]*vG[2][j];
+            lo = fminf(lo, dv); hi = fmaxf(hi, dv);
+        }
+        vc[j] = u0[j] + 0.5f*(lo + hi);
+        vh[j] = 0.5f*(hi - lo);
+    }
+}
+__device__ __forceinline__ bool exact_disp_illcond(const float Ax[3][3], const float vG[3][3], const float vh[3],
+                                                   const float dx[3])
+{
+    float L = 0.0f;
+    for (int d=0; d<3; ++d) {
+        float lo = 0.0f, hi = 0.0f;
+        for (int e=0; e<3; ++e) { lo = fminf(lo, Ax[e][d]); hi = fmaxf(hi, Ax[e][d]); }
+        L = fmaxf(L, hi - lo);
+    }
+    float const ell = fminf(L, sqrtf(dx[0]*dx[0] + dx[1]*dx[1] + dx[2]*dx[2]));
+    for (int j=0; j<3; ++j) {
+        float const g2 = vG[0][j]*vG[0][j] + vG[1][j]*vG[1][j] + vG[2][j]*vG[2][j];
+        float const r2 = 4.0f*vh[j]*vh[j];
+        if (g2*ell*ell > EX_DISP_KAPPA2 * r2 || g2*L*L > EX_DISP_KAPPA2_L * r2) return true;
+    }
+    return false;
+}
 
 __device__ __forceinline__ float exact_full_weight(float vol, bool fLinear, float d0, const float dG[3],
                                                    V3 t1, V3 t2, V3 t3)
@@ -304,21 +345,13 @@ __device__ bool exact_cell_clip(const ExactTet& E, const int raw[3], const Depos
                        (float(raw[2] - E.ic0[2]) - E.f0[2] + 0.5f) * P.dx[2]);
     if (box_outside_tet(E.faces, ccen, E.hcell)) return false;
 
-    // clip in the OVERLAP frame (gpu_exact_clip.cuh: origin at the centre of the tet bbox's overlap
-    // with the cell, where the piece lies); the moments come out about that origin cc, which the
-    // caller adds back to the centroid
+    // the tet ∩ cell moments in the OVERLAP frame (gpu_exact_clip.cuh: origin at the centre of the tet
+    // bbox's overlap with the cell, where the piece lies), by the z-sweep (sweep_moments; order 2 only
+    // when 'full' -- pass 0 needs V and the first moments, bit-identical to pass 1's); the moments come
+    // out about that origin cc, which the caller adds back to the centroid
+    V3 const clo = sub3(ccen, E.hcell), chi = add3(ccen, E.hcell);
     V3 const org = overlap_origin(ccen, E.hcell, E.t1, E.t2, E.t3);
-    float const cc3[3] = { ccen.x, ccen.y, ccen.z }, hc[3] = { E.hcell.x, E.hcell.y, E.hcell.z };
-    float const og[3] = { org.x, org.y, org.z };
-    ExPoly piece;
-    exact_init_tet4(piece, neg3(org), sub3(E.t1, org), sub3(E.t2, org), sub3(E.t3, org));
-    for (int dd=0; dd<3; ++dd) {
-        exact_clip_plane(piece, dd,  1.0f, og[dd] - (cc3[dd] - hc[dd]));   // x_d >= clo - org
-        exact_clip_plane(piece, dd, -1.0f, (cc3[dd] + hc[dd]) - og[dd]);   // x_d <= chi - org
-    }
-    if (piece.nv == 0) return false;
-    if (full) exact_reduce2(piece, mo);
-    else      exact_reduce1(piece, mo);
+    sweep_moments(neg3(org), sub3(E.t1, org), sub3(E.t2, org), sub3(E.t3, org), sub3(clo, org), sub3(chi, org), full, mo);
     if (!(mo[0] > 0.0f)) return false;
 
     cc = org;
@@ -347,6 +380,7 @@ __device__ void exact_cell_deposit(const FieldGrids& G, unsigned flat, const flo
         for (int j=0; j<3; ++j) {
             vb[j] = E.u0[j];
             for (int i=0; i<3; ++i) vb[j] += E.vG[i][j]*cen[i];
+            vb[j] = fminf(fmaxf(vb[j], E.vc[j] - E.vh[j]), E.vc[j] + E.vh[j]);   // within the vertices' range
             if (fVel)
                 addMoment(G.mom, G, PS_FX_MOM, base*3ull+ull(j), vb[j]*wmEx);
         }
@@ -359,15 +393,24 @@ __device__ void exact_cell_deposit(const FieldGrids& G, unsigned flat, const flo
             cov[1][1] = mo[7]*invV - loc[1]*loc[1];
             cov[1][2] = cov[2][1] = mo[8]*invV - loc[1]*loc[2];
             cov[2][2] = mo[9]*invV - loc[2]*loc[2];
-            ull c2 = 0;
+            // S = G^T Cov G clamped to what a linear field on a part of the tet can have (metal/ps_deposit.metal)
+            float S[3][3];
             for (int a=0; a<3; ++a)
                 for (int b=a; b<3; ++b) {
                     float gcg = 0.0f;
                     for (int i=0; i<3; ++i)
                         for (int k=0; k<3; ++k)
                             gcg += E.vG[i][a]*cov[i][k]*E.vG[k][b];
-                    addMoment(G.m2, G, PS_FX_M2, base*6ull + c2++, massShare*(vb[a]*vb[b] + gcg));
+                    S[a][b] = gcg;
                 }
+            for (int a=0; a<3; ++a) {
+                S[a][a] = fminf(fmaxf(S[a][a], 0.0f), E.vh[a]*E.vh[a]);
+                for (int b=a+1; b<3; ++b) S[a][b] = fminf(fmaxf(S[a][b], -E.vh[a]*E.vh[b]), E.vh[a]*E.vh[b]);
+            }
+            ull c2 = 0;
+            for (int a=0; a<3; ++a)
+                for (int b=a; b<3; ++b)
+                    addMoment(G.m2, G, PS_FX_M2, base*6ull + c2++, massShare*(vb[a]*vb[b] + S[a][b]));
             if (fVolW) {
                 for (int j=0;j<3;++j)
                     addMoment(G.dispvel, G, PS_FX_DV, base*3ull+ull(j), vb[j]*massShare);
@@ -694,6 +737,8 @@ depositFields(const float* __restrict__ verts, const float* __restrict__ vels, f
             E.ic0[i] = ic0[i];  E.f0[i] = f0[i];  E.u0[i] = u0[i];  E.dG[i] = dG[i];  E.sG[i] = sG[i];
             for (int j=0; j<3; ++j) E.vG[i][j] = vG[i][j];
         }
+        for (int j=0; j<3; ++j) { E.vc[j] = 0.0f; E.vh[j] = 0.0f; }
+        if (fVel || fDisp) exact_vel_range(Ax, vG, u0, E.vc, E.vh);
         E.d0 = d0;  E.s0 = s0;  E.obits = obits;  E.invCellVol = invCellVol;
         E.straddle = straddle;
         E.wFull = exact_full_weight(tetVol, fLinear, d0, dG, E.t1, E.t2, E.t3);
@@ -704,6 +749,8 @@ depositFields(const float* __restrict__ verts, const float* __restrict__ vels, f
         if (P.windowMode != 0)
             for (int dd=0; dd<3; ++dd)
                 if (!window_hull(iMinC[dd], iMaxC[dd], P.nGrid[dd], P.periodic != 0, P.subOrigin[dd], P.subDims[dd])) return;
+        // a dispersion float32 cannot resolve: the CPU's double deposit takes the tet (EX_DISP_KAPPA2)
+        if (fDisp && exact_disp_illcond(Ax, vG, E.vh, P.dx)) { masses[tid] = -m; return; }
         float sumW = 0.0f;
         float shareFac = 0.0f;
         bool  deposited = false;
@@ -808,9 +855,11 @@ depositFields(const float* __restrict__ verts, const float* __restrict__ vels, f
 // ================================================================================================
 struct ExactItemParams { unsigned nItems; unsigned phase; unsigned blockCells; unsigned pad; };
 
+// decide: also defer an ill-conditioned dispersion (EX_DISP_KAPPA2) by returning false -- phase 0 only, as in
+// metal/ps_deposit.metal (a borderline tet phase 1 re-decided after phase 0 summed its weights would be lost)
 __device__ bool exact_tet_setup(unsigned tet, const float* verts, const float* vels,
                                 const float* dens, const float* scal, const DepositParams& P,
-                                ExactTet& E, int iMin[3], int iMax[3])
+                                ExactTet& E, int iMin[3], int iMax[3], bool decide)
 {
     const float* R = verts + ull(tet) * ull(TET_STRIDE);
     float Ax[3][3];
@@ -840,6 +889,10 @@ __device__ bool exact_tet_setup(unsigned tet, const float* verts, const float* v
                 E.vG[i][j]=s;
             }
     }
+    for (int j=0; j<3; ++j) { E.vc[j] = 0.0f; E.vh[j] = 0.0f; }
+    if (P.fVel != 0 || P.fDisp != 0) exact_vel_range(Ax, E.vG, E.u0, E.vc, E.vh);
+    // ill-conditioned: left to depositFields, which defers it to the CPU (EX_DISP_KAPPA2)
+    if (P.fDisp != 0 && decide && exact_disp_illcond(Ax, E.vG, E.vh, P.dx)) return false;
     E.s0 = 0.0f;
     for (int i=0; i<3; ++i) E.sG[i] = 0.0f;
     if (P.fScal != 0 || P.fSGrad != 0) {
@@ -900,6 +953,9 @@ __device__ bool exact_tet_setup(unsigned tet, const float* verts, const float* v
     return true;
 }
 
+// PHASE: the pass (== IP.phase), a template parameter as Metal's kItemsPhase is a function constant: the summing
+// pass then carries none of the deposit's registers
+template <int PHASE>
 __global__ void __launch_bounds__(256)
 depositExactItems(const float* __restrict__ verts, const float* __restrict__ vels, const float* __restrict__ masses,
                   float* massGrid, float* momGrid, float* m2Grid, float* gradGrid, unsigned* strGrid,
@@ -914,7 +970,7 @@ depositExactItems(const float* __restrict__ verts, const float* __restrict__ vel
     unsigned const tet = it.x;
     float const m = masses[tet];
     if (m <= 0.0f) return;
-    bool const deposit = IP.phase == 1u;
+    bool const deposit = PHASE == 1;
     bool const sumWFixed = (P.fxMask & PS_FX_SUMW_BIT) != 0u;
     float s = 0.0f;
     if (deposit && !sumWFixed) {
@@ -924,7 +980,7 @@ depositExactItems(const float* __restrict__ verts, const float* __restrict__ vel
 
     ExactTet E;
     int iMin[3], iMax[3];
-    if (!exact_tet_setup(tet, verts, vels, dens, scal, P, E, iMin, iMax)) return;
+    if (!exact_tet_setup(tet, verts, vels, dens, scal, P, E, iMin, iMax, !deposit)) return;
     if (deposit && sumWFixed) {      // the exact total in the tet's own unit (two words), as the Metal kernel forms it
         unsigned const* x = reinterpret_cast<unsigned const*>(sumW);
         unsigned const lo = x[ull(tet)*2ull];
@@ -1602,11 +1658,18 @@ bool psGpuDepositFields(std::vector<float>& verts,
                           [&](size_t start, uint32_t n)
         {
             ExactItemParams const IP{ n, phase, blockCells, 0u };
-            GPU_LAUNCH(depositExactItems, blocksFor(n, tpb), tpb, 0,
-                dV, dU, dM, dMass, dMom, dM2, dGrad, reinterpret_cast<unsigned*>(dStr), P, dD,
-                dMomW, reinterpret_cast<unsigned*>(dCaust), dSV, dDV, dDW,
-                reinterpret_cast<const uint2*>(dItems) + start, dSumW, IP, dSc, dScal, dSG,
-                reinterpret_cast<unsigned*>(dMassFx), dBad);
+            if (phase == 0)
+                GPU_LAUNCH(depositExactItems<0>, blocksFor(n, tpb), tpb, 0,
+                    dV, dU, dM, dMass, dMom, dM2, dGrad, reinterpret_cast<unsigned*>(dStr), P, dD,
+                    dMomW, reinterpret_cast<unsigned*>(dCaust), dSV, dDV, dDW,
+                    reinterpret_cast<const uint2*>(dItems) + start, dSumW, IP, dSc, dScal, dSG,
+                    reinterpret_cast<unsigned*>(dMassFx), dBad);
+            else
+                GPU_LAUNCH(depositExactItems<1>, blocksFor(n, tpb), tpb, 0,
+                    dV, dU, dM, dMass, dMom, dM2, dGrad, reinterpret_cast<unsigned*>(dStr), P, dD,
+                    dMomW, reinterpret_cast<unsigned*>(dCaust), dSV, dDV, dDW,
+                    reinterpret_cast<const uint2*>(dItems) + start, dSumW, IP, dSc, dScal, dSG,
+                    reinterpret_cast<unsigned*>(dMassFx), dBad);
         });
     };
 

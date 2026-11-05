@@ -548,20 +548,41 @@ head -c 20000 "${TMP}/snap_099.2.keep" > "${DL2}/snapdir_099/snap_099.2.hdf5"   
 touch -t 209901010000 "${DL2}/snapdir_099/snap_099.2.hdf5"   # ... and stays "just now" however loaded the machine (the guard keeps a chunk younger than 60 s; a slow run would age a real 'now' past that)
 cat > "${TMP}/fakebin/wget" <<'WEOF'
 #!/usr/bin/env bash
-# no network: records every argument, fails for snapshot-98, else leaves the product's first chunk
-# (a 'fake' byte file) in -P <dir> unless a file of that name exists (as -nc would)
-url=""; dest=""; all="$*"
-while [ $# -gt 0 ]; do case "$1" in http*) url="$1" ;; -P) dest="$2"; shift ;; esac; shift; done
-echo "ARGS: $all" >> "${FAKE_WGET_LOG}"; echo "$url" >> "${FAKE_WGET_LOG}"
+# no network: records every argument and URL, fails for snapshot-98. '-O - <listing>?format=json' prints
+# the product's listing with chunk 0 as an http:// link (as the real API does since 2026-11); '-i -' reads
+# the chunk links from stdin, REFUSES a plain-http one, and leaves each chunk (a 'fake' byte file, named as
+# the API's Content-Disposition names it) in -P <dir> unless that file exists (as -nc would); a direct URL
+# (ics.hdf5) is fetched the same way. FAKE_WGET_EMPTY=1: the listing names nothing.
+url=""; dest=""; out=""; list=""; all="$*"
+while [ $# -gt 0 ]; do case "$1" in http*) url="$1" ;; -P) dest="$2"; shift ;; -O) out="$2"; shift ;; -i) list="$2"; shift ;; esac; shift; done
+echo "ARGS: $all" >> "${FAKE_WGET_LOG}"; [ -n "$url" ] && echo "$url" >> "${FAKE_WGET_LOG}"
 case "$url" in *snapshot-98*) echo "fake wget: 404 for $url" >&2; exit 8 ;; esac
-name=""
-case "$url" in
-    */snapshot-*) n=$(echo "$url" | sed -n 's|.*/snapshot-\([0-9]*\)/.*|\1|p'); name=$(printf "snap_%03d.0.hdf5" "$n") ;;
-    */groupcat-*) n=$(echo "$url" | sed -n 's|.*/groupcat-\([0-9]*\)/.*|\1|p'); name=$(printf "fof_subhalo_tab_%03d.0.hdf5" "$n") ;;
-    */sublink/*) name="tree_extended.0.hdf5" ;;
-    */ics.hdf5) name="ics.hdf5" ;;
-esac
-[ -z "${FAKE_WGET_EMPTY:-}" ] && [ -n "$name" ] && [ -n "$dest" ] && [ ! -e "$dest/$name" ] && echo fake > "$dest/$name"
+if [ "$out" = "-" ]; then
+    [ -n "${FAKE_WGET_EMPTY:-}" ] && { echo '{"files":[]}'; exit 0; }
+    base="${url%%\?*}"; base="${base%/}"
+    echo "{\"files\":[\"$(echo "$base" | sed 's|^https://|http://|').0.hdf5\"]}"; exit 0
+fi
+fetch_one() {
+    local u="$1" f name=""
+    f="${u##*/}"
+    case "$f" in
+        snapshot-*) name=$(echo "$f" | sed -n 's|^snapshot-\([0-9]*\)\.\([0-9]*\)\.hdf5$|\1 \2|p' | { read -r n k; printf "snap_%03d.%d.hdf5" "$n" "$k"; }) ;;
+        groupcat-*) name=$(echo "$f" | sed -n 's|^groupcat-\([0-9]*\)\.\([0-9]*\)\.hdf5$|\1 \2|p' | { read -r n k; printf "fof_subhalo_tab_%03d.%d.hdf5" "$n" "$k"; }) ;;
+        sublink.*)  name="tree_extended.${f#sublink.}" ;;
+        ics.hdf5)   name="ics.hdf5" ;;
+    esac
+    [ -n "$name" ] && [ -n "$dest" ] && [ ! -e "$dest/$name" ] && echo fake > "$dest/$name"
+    return 0
+}
+if [ "$list" = "-" ]; then
+    while read -r u; do
+        echo "$u" >> "${FAKE_WGET_LOG}"
+        case "$u" in https://*) ;; *) echo "fake wget: refusing non-https $u" >&2; exit 9 ;; esac
+        fetch_one "$u"
+    done
+    exit 0
+fi
+fetch_one "$url"
 exit 0
 WEOF
 chmod +x "${TMP}/fakebin/wget"
@@ -571,7 +592,9 @@ check "$([ "${rc}" = "1" ] && echo 0 || echo 1)" "download_snapshots.sh exits 1 
 check "$(has "${TMP}/i_download.log" 'Error downloading snapshot-98')" "... the failed endpoint is reported"
 check "$(has "${TMP}/i_download.log" 'Download finished with 2 error')" "... and the last line counts it and the kept unreadable chunk (no 'Download complete!')"
 check "$(has "${TMP}/i_download.log" 'Error downloading snapshot-99: an unreadable chunk is still in place')" "... a kept unreadable chunk is an error of this run (wget -nc would skip it for ever)"
-check "$(has "${TMP}/i_urls.log" '^ARGS: .*--https-only')" "the recursive fetch is https-only (redirects and links with the key header too)"
+check "$(has "${TMP}/i_urls.log" '^ARGS: .*--https-only')" "the fetches are https-only (redirects with the key header too)"
+check "$(has "${TMP}/i_urls.log" '^https://www.tng-project.org/api/SIMX/files/snapshot-99\.0\.hdf5$')" "the listing's http:// chunk link is fetched, upgraded to https"
+check "$(lacks "${TMP}/i_urls.log" '^http://')" "... and no plain-http URL is ever requested"
 check "$(has "${TMP}/i_urls.log" '^ARGS: .*--header=API-Key: dummykey')" "... and the key travels as a header"
 check "$(lacks "${TMP}/i_download.log" 'Download complete!')" "... really no 'Download complete!'"
 check "$([ "$(grep -c '^https://www.tng-project.org/api/SIMX/files/snapshot-9[89]/' "${TMP}/i_urls.log")" = "2" ] && echo 0 || echo 1)" \
@@ -600,12 +623,13 @@ check "$([ "${rc_i}" = "0" ] && [ "${rc_t}" = "0" ] && [ "${rc_c}" = "0" ] && ec
 check "$(has "${TMP}/i_urls_i.log" '^https://www.tng-project.org/api/SIMX/files/ics.hdf5$')" "-i: https, and '-Dark' stripped for the API name"
 check "$(has "${TMP}/i_urls_t.log" '^https://www.tng-project.org/api/SIMX/files/sublink/')" "-t: https"
 check "$(has "${TMP}/i_urls_c.log" '^https://www.tng-project.org/api/SIMX/files/groupcat-99/')" "-c: https"
-check "$([ "$(cat "${TMP}"/i_urls_i.log "${TMP}"/i_urls_t.log "${TMP}"/i_urls_c.log | grep -c 'header=API-Key: dummykey')" = "3" ] && echo 0 || echo 1)" "the key is a header in all three"
+check "$([ "$(cat "${TMP}"/i_urls_i.log "${TMP}"/i_urls_t.log "${TMP}"/i_urls_c.log | grep -c 'header=API-Key: dummykey')" = "5" ] && echo 0 || echo 1)" "the key is a header in all five wget calls (ics; listing + chunks for trees and catalogues)"
+check "$([ -f "${DL3}/Merger Trees/tree_extended.0.hdf5" ] && [ -f "${DL3}/groups_099/fof_subhalo_tab_099.0.hdf5" ] && echo 0 || echo 1)" "-t and -c fetch the chunks their listings name"
 check "$(lacks "${TMP}/i_urls_i.log" '^https.*dummykey')" "... never in a URL"
 check "$(has "${TMP}/i_dl_ics.log" 'Removed incomplete chunk ics\.hdf5')" "-i prunes an aged truncated ics.hdf5 first"
 check "$(has "${TMP}/i_dl_trees.log" 'Removed incomplete chunk tree_extended\.0\.hdf5')" "-t prunes an aged truncated tree chunk first"
 check "$(has "${TMP}/i_dl_gc.log" 'Removed incomplete chunk fof_subhalo_tab_099\.0\.hdf5')" "-c prunes an aged truncated catalogue chunk first"
-# a recursive fetch that exits 0 but fetched nothing is an error (the listing offered nothing https)
+# a fetch that exits 0 but fetched nothing is an error (the listing named no chunk)
 DL4="${TMP}/DL4/SIMX"; mkdir -p "${DL4}"
 rc=0; PATH="${TMP}/fakebin:${PATH}" FAKE_WGET_LOG="${TMP}/i_urls4.log" FAKE_WGET_EMPTY=1 TNG_API_KEY=dummykey \
     scripts/download_snapshots.sh -d "${DL4}" -s SIMX 99 >"${TMP}/i_dl_empty.log" 2>&1 || rc=$?
@@ -1071,7 +1095,7 @@ SDATA="${TMP}/sup_data"; SSD="${SDATA}/SIM/snapdir_099"; rm -rf "${SDATA}"; mkdi
 sdrive() {   # <driver> <log> [VAR=value ...]: the copied driver on SDATA's SIM 99; echoes its exit status
     local scr="$1" log="$2"; shift 2
     local rc=0
-    env -u DTFE_METAL -u PS_METAL -u DTFE_EXACT_AVERAGE -u PS_VOLUME_WEIGHTED -u PS_CAUSTICS -u FIELDS -u OUTPUT_PREFIX \
+    env -u DTFE_METAL -u PS_METAL -u PS_EXACT -u DTFE_EXACT_AVERAGE -u PS_VOLUME_WEIGHTED -u PS_CAUSTICS -u FIELDS -u OUTPUT_PREFIX \
         -u PS_LINEAR_DEPOSIT -u DTFE_PRECISION DTFE_DATA_ROOT="${SDATA}" "$@" "${MREPO}/scripts/${scr}" -s SIM -g 16 99 >"${log}" 2>&1 || rc=$?
     echo "${rc}"
 }
@@ -1097,6 +1121,9 @@ g="${g} $(gpu_of run_dtfe.sh o_d/.gpu_mode_metal DTFE_PRECISION=double)"
 check "$([ "${g}" = "cpu cpu gpu cpu gpu" ] && echo 0 || echo 1)" \
       "... DTFE_METAL / PS_METAL = 0 or 1 wins over the stamp; the double pair reads o_d (${g})"
 check "$(has "${TMP}/s_gpu.log" "^'_a' interpolation: GPU \(--gpu\) \(DTFE_METAL unset: DTFE-double is a GPU build")" "... and the driver says which, and why"
+g="$(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_EXACT=1) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_EXACT=1 PS_METAL=1)"
+check "$([ "${g}" = "cpu gpu" ] && echo 0 || echo 1)" \
+      "... the exact deposit (PS_EXACT=1) runs on the CPU on a GPU build, faster there; PS_METAL=1 still moves it (${g})"
 rm -rf "${MREPO}/o" "${MREPO}/o_ps" "${MREPO}/o_d" "${MREPO}/o_ps_d"
 rc=$(sdrive run_ps_dtfe.sh "${TMP}/s_psdef.log" DRY_RUN=1)
 check "$([ "${rc}" = "0" ] && sline "${TMP}/s_psdef.log" | grep -qE -e '--field +density_a +velocity_a +gradient_a +divergence_a +shear_a +vorticity_a +dispersion_a +tweb_a +vweb_a +--lambda_th +0\.3 .*--ps-volume-weighted .*--ps-caustics' \
@@ -1157,7 +1184,7 @@ pgpu_of() {   # <stamp or none> [VAR=value ...]: 'gpu' / 'cpu' as the pipeline's
     local st="$1"; shift
     rm -rf "${MREPO}/o" "${MREPO}/o_ps" "${MREPO}/o_d" "${MREPO}/o_ps_d"
     if [ "${st}" != "none" ]; then mkdir -p "${MREPO}/${st%%/*}"; : > "${MREPO}/${st}"; fi
-    env -u PS_GPU -u PS_METAL -u DTFE_PRECISION -u SIMS -u SNAPS DTFE_DATA_ROOT="${SDATA}" SIMS=SIM NU=8 DRY_RUN=1 "$@" \
+    env -u PS_GPU -u PS_METAL -u PS_EXACT -u DTFE_PRECISION -u SIMS -u SNAPS DTFE_DATA_ROOT="${SDATA}" SIMS=SIM NU=8 DRY_RUN=1 "$@" \
         "${MREPO}/scripts/run_ps_pipeline.sh" >"${TMP}/s_pgpu.log" 2>&1 || true
     local line
     line="$(grep -aE -e 'run_ps_dtfe\.sh -s SIM ' "${TMP}/s_pgpu.log" | tail -1)"
@@ -1177,6 +1204,8 @@ g="$(pgpu_of o_ps/.gpu_mode_metal PS_GPU=0) $(pgpu_of o_ps/.gpu_mode_off PS_GPU=
 g="${g} $(pgpu_of o_ps/.gpu_mode_metal DTFE_PRECISION=double) $(pgpu_of o_ps_d/.gpu_mode_metal DTFE_PRECISION=double)"
 check "$([ "${g}" = "cpu gpu cpu gpu" ] && echo 0 || echo 1)" "... PS_GPU = 0 or 1 wins over the stamp; the double pair reads o_ps_d (${g})"
 check "$(has "${TMP}/s_pgpu.log" 'GPU: 1 \(PS_GPU unset: PS-DTFE-double is a GPU build\)')" "... and the header says which, and why"
+g="$(pgpu_of o_ps/.gpu_mode_metal PS_EXACT=1) $(pgpu_of o_ps/.gpu_mode_metal PS_EXACT=1 PS_GPU=1)"
+check "$([ "${g}" = "cpu gpu" ] && echo 0 || echo 1)" "... the exact deposit (PS_EXACT=1): the CPU unless PS_GPU=1 (${g})"
 rm -rf "${MREPO}/o" "${MREPO}/o_ps" "${MREPO}/o_d" "${MREPO}/o_ps_d"
 rm -rf "${SDATA}"
 

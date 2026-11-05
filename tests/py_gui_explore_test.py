@@ -52,8 +52,20 @@
      view replace each other; the PNG is written; the map comes back. The Sizes range keeps the same voids on the
      map, the grid's panels and the 3D view (by R_v; the ellipsoids by R_eff), says how many, keeps a close-up's void
      and is remembered.
+ 11. the 3D view's volume (volume3d.py, explore_3d.py): the grid averaged over blocks as equal as whole cells allow
+     (each the block's mean, the integral kept), a window across the faces read periodically, a vector's component
+     as slice() takes it, plain reads (a cube the map cached used, none added), a grid written again read again,
+     an averaging cancelled; the levels within half a step; the transfer function transparent below the range,
+     monotone, premultiplied, corrected for the path through a slice, |value| for a diverging field; the slices'
+     images placed where their 3D corners project, front first. QPainter's 16-bit compositing equals the reference
+     'under' compositing; the front half is what is seen from either side; a dense ball is opaque, a ray missing it
+     transparent. In the window: the volume is the default (the planes one choice away), of the stored values, a
+     density from rho/rho_bar = 1 in the map's colours with the bar on that range; the ray through a void is
+     clearer than the densest column, as the reference says; the range sliders keep their order, Default range
+     restores; a colour map recolours without a read; the voids are drawn over it; a close-up reads the void's cube
+     at the grid's cells, Whole box comes from memory; Save image; the planes back; leaving frees the slices.
 
-The pure parts (grids.void_at, void_circles_mpc, void_info, void_outlines.write_csv, view3d) run without Qt; the rest needs
+The pure parts (grids.void_at, void_circles_mpc, void_info, void_outlines.write_csv, view3d, volume3d) run without Qt; the rest needs
 PySide6 and reports SKIP (exit 0) without it. Usage: ~/.venvs/dtfe-gui/bin/python tests/py_gui_explore_test.py
 """
 
@@ -61,6 +73,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -1177,6 +1190,7 @@ def view3d_gui():
     except ImportError as e:
         print(f"SKIP (3D view): PySide6 is not importable ({e})")
         return
+    from PySide6.QtCore import QAbstractAnimation
     import explore as E
     import explore_3d as X3
     import runspec as rs
@@ -1204,7 +1218,13 @@ def view3d_gui():
             return
         o = x.current
         axis, index = x.axis.currentIndex(), x.index.value()
-        x.view3d_toggle.setChecked(True)
+        check("10. the 3D view draws a volume by default (the planes one choice away), the planes' controls hidden; "
+              "in perspective", x.view3d_style.currentData() == "volume" and view.view3d.style == "volume"
+              and x.volume3d_box.isVisibleTo(x) and not x.planes3d_box.isVisibleTo(x)
+              and x.view3d_persp.isChecked() and view.view3d.cam.perspective)
+        x.view3d_style.setCurrentIndex(x.view3d_style.findData("planes"))     # the planes' checks (view3d_volume_gui:
+        x.view3d_persp.setChecked(False)                                       # the volume's), orthographic: the
+        x.view3d_toggle.setChecked(True)                                       # voids at their true size
         ok = wait_for(qa, lambda: x._3d_res is not None and not x._3d_busy, 30)
         qa.processEvents()
         v3, pl = view.view3d, (x._3d_res or {}).get("planes") or [None] * 3
@@ -1279,7 +1299,8 @@ def view3d_gui():
               and np.allclose(x._3d_res["lo"], wlo) and sorted(int(r) for r in v3.voids["rows"]) == sorted(inside)
               and f"close-up on void {k0}" in view.title.text() and x.void3d_back.isEnabled(),
               f"{x._3d_index} {through} {crop_ok} {list(v3.voids['rows'])} {inside}")
-        spin(qa, 400)                                       # the flight
+        wait_for(qa, lambda: v3._anim is None or v3._anim.state() == QAbstractAnimation.Stopped, 10)   # the flight
+        qa.processEvents()                                  # (320 ms; longer on a busy machine: never a fixed wait)
         seen = next(((cc[0], cc[1], float(np.hypot(*cc[2]))) for cc in v3._outlines if cc[4] == k0), None)
         check("10. ... the camera flown to the void's window: the void in the middle of the view, still a circle of "
               "R_v x the new scale", np.allclose(v3.cam.target, 0.5 * (lo + hi)) and seen is not None
@@ -1390,6 +1411,861 @@ def view3d_gui():
               all("--" not in t for t in (X3.VIEW3D_TIP, X3.CLOSE_TIP))
               and X3.View3DMixin.view3d_applicable(type("Flat", (), {"dim": 2})()) == "only for 3D grids"
               and X3.View3DMixin.view3d_applicable(o) == "")
+    finally:
+        rs.dtfe_processes = real_procs
+        x.shutdown()
+
+
+# ---------------------------------------------------------------------- 11. the volume
+def _vol_set(d: Path, n: int = 20, seed: int = 11):
+    """A small grid set of a side no power of two (density lognormal, velocity of three components) in a box of n
+    Mpc: one cell a Mpc."""
+    d.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(seed)
+    rho = np.exp(rng.normal(size=(n, n, n))).astype(np.float32)
+    vel = rng.normal(size=(n, n, n, 3)).astype(np.float32)
+    rho.tofile(str(d / "vol.a_den"))
+    vel.tofile(str(d / "vol.a_vel"))
+    return G.OutputSet(d / "vol", box=((0.0,) * 3, (float(n),) * 3), redshift=0.0), rho, vel
+
+
+def _block_mean_ref(a, edges) -> np.ndarray:
+    """The block means of a, block by block (the reference for volume3d.average_window)."""
+    m = [len(e) - 1 for e in edges]
+    out = np.empty(m)
+    for i in range(m[0]):
+        for j in range(m[1]):
+            for k in range(m[2]):
+                out[i, j, k] = a[edges[0][i]:edges[0][i + 1], edges[1][j]:edges[1][j + 1],
+                                 edges[2][k]:edges[2][k + 1]].mean()
+    return out
+
+
+def _rgba64(img) -> np.ndarray:
+    """A Format_RGBA64_Premultiplied QImage's pixels: (h, w, 4) floats in 0..1, premultiplied."""
+    h, w = img.height(), img.width()
+    raw = np.frombuffer(img.constBits(), dtype=np.uint16, count=img.bytesPerLine() * h // 2)
+    return raw.reshape(h, img.bytesPerLine() // 2)[:, :4 * w].reshape(h, w, 4).astype(np.float64) / 65535.0
+
+
+def perspective_pure():
+    """12. the perspective camera's geometry (view3d), no Qt."""
+    import view3d as V
+    import volume3d as VOL
+    print("3D perspective (pure)")
+    rng = np.random.default_rng(12)
+    lo, hi = np.zeros(3), np.full(3, 100.0)
+    cam = V.Camera(width=800, height=700, yaw=-35, pitch=25, perspective=True)
+    cam.bounds = (lo, hi)
+    cam.fit(lo, hi)
+    ortho = cam.copy()
+    ortho.perspective = False
+    # on the plane through the target facing the viewer the scale is 'scale' (as orthographic); nearer is larger
+    R = cam.R
+    flat = cam.target + rng.uniform(-40, 40, (20, 1)) * R[0] + rng.uniform(-40, 40, (20, 1)) * R[1]
+    corners = V.box_corners(lo, hi)
+    xy, depth = cam.project(corners)
+    lens = {k: sorted((np.hypot(*(xy[a | (1 << k)] - xy[a])), depth[a] + depth[a | (1 << k)])
+                      for a in range(8) if not a & (1 << k)) for k in range(3)}
+    k_across = int(np.argmin(np.abs(cam.toward())))       # the axis most across the view (no foreshortening)
+    near_longer = [e_[0] for e_ in sorted(lens[k_across], key=lambda e: e[1])]
+    near_longer = all(a_ > b_ for a_, b_ in zip(near_longer, near_longer[1:]))
+    seg = rng.uniform(0, 100, (2, 3))
+    mid, _ = cam.project(0.5 * (seg[0] + seg[1]))
+    ends, _ = cam.project(seg)
+    cross = (ends[1] - ends[0])[0] * (mid[0] - ends[0])[1] - (ends[1] - ends[0])[1] * (mid[0] - ends[0])[0]
+    m = V.FIT_MARGIN
+    inside = np.all(np.abs(xy - [400, 350]) <= [m * 400 + 1e-6, m * 350 + 1e-6]) and \
+        np.isclose(max(np.abs(xy[:, 0] - 400).max() / 400, np.abs(xy[:, 1] - 350).max() / 350), m)
+    check("12. perspective: the plane through the target at 'scale' (as orthographic), a box's near edges drawn "
+          "longer than its far ones (those across the view), a straight line straight; fitted, its corners inside the margin, one on it; the "
+          "eye some 2.2 sides away", np.allclose(cam.project(flat)[0], ortho.project(flat)[0]) and near_longer
+          and abs(cross) < 1e-6 * np.hypot(*(ends[1] - ends[0])) ** 2 and inside
+          and 1.8 < cam.distance() / 100.0 < 2.8, f"{near_longer} {cross} {inside} {cam.distance()}")
+    pts = rng.uniform(-20, 120, (50, 3))
+    ok_m = True
+    for c in (cam, ortho):
+        h = np.c_[pts, np.ones(len(pts))] @ c.matrix().T
+        ok_m &= bool(np.allclose(h[:, :2] / h[:, 2:], c.project(pts)[0]))
+    z = cam.copy()
+    z.zoom(80.0)
+    zv = (corners - z.target) @ z.R[2]
+    check("12. the camera matrix gives project()'s pixels (either projection); zoomed far in the eye stops NEAR of "
+          "the window's side short of its nearest corner and the view narrows instead (the scale still holds at the "
+          "target, every corner in front)", ok_m and np.isclose(z.distance(), zv.max() + V.NEAR * 100.0)
+          and np.all(np.isfinite(z.project(corners)[0])) and z.focal / z.scale < z.distance(), f"{z.distance()}")
+    # a plane's texture through a homography: corners and inside land where they project; orthographic = texture_map
+    tex = np.array([[0, 0], [80, 0], [0, 100], [80, 100], [23.0, 61.0]], dtype=float)
+    want, _ = cam.project([[10.0, 45.0, 90.0], [90.0, 45.0, 90.0], [10.0, 45.0, 5.0], [90.0, 45.0, 5.0],
+                           [10.0 + 23.0, 45.0, 90.0 - 61.0 * 0.85]])
+    T = V.texture_transform(1, 45.0, (10.0, 5.0), (90.0, 90.0), 80, 100, cam)
+    wt = T[2] * tex[:, 0] + T[5] * tex[:, 1] + T[8]
+    got = np.stack([(T[0] * tex[:, 0] + T[3] * tex[:, 1] + T[6]) / wt, (T[1] * tex[:, 0] + T[4] * tex[:, 1] + T[7]) / wt], 1)
+    To = V.texture_transform(1, 45.0, (10.0, 5.0), (90.0, 90.0), 80, 100, ortho)
+    Ta = V.texture_map(1, 45.0, (10.0, 5.0), (90.0, 90.0), 80, 100, ortho)
+    check("12. texture_transform: a plane's texture lands where its points project through the perspective "
+          "homography (corners and inside); orthographic it is texture_map's affine map",
+          np.allclose(got, want) and np.allclose([To[0], To[1], To[3], To[4], To[6], To[7]], Ta)
+          and np.allclose([To[2], To[5], To[8]], [0, 0, 1]), f"{np.abs(got - want).max()}")
+    # the outlines: the image of the tangent cone, an ellipse the projected surface reaches all round, never past
+    q, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+    shapes = [(np.array([[30.0, 60.0, 40.0]]), V.ellipsoid_matrices([[20.0, 12.0, 6.0]], [q.T])),
+              (np.array([[80.0, 15.0, 85.0]]), V.sphere_matrices([9.0]))]
+    ball = rng.normal(size=(20000, 3))
+    ball /= np.linalg.norm(ball, axis=1)[:, None]
+    reach = []
+    for c, M in shapes:
+        x0, u, v = V.outline_ellipses(cam, c, M)
+        loc = (cam.project(c + ball @ M[0].T)[0] - x0[0]) @ np.linalg.inv(np.stack([u[0], v[0]], 1)).T
+        rho, ang = np.linalg.norm(loc, axis=1), np.arctan2(loc[:, 1], loc[:, 0])
+        reach.append((rho.max(), min(rho[(ang >= a) & (ang < a + np.pi / 18)].max()
+                                     for a in np.linspace(-np.pi, np.pi, 36, endpoint=False))))
+    ox, ou, ov = V.outline_ellipses(ortho, shapes[0][0], shapes[0][1])
+    au, av = V.outline_axes(ortho, shapes[0][1])
+    around = V.outline_ellipses(cam, cam.eye()[None, :], V.sphere_matrices([5.0]))
+    check("12. outline_ellipses in perspective: the projected ellipsoid (and sphere) reaches its outline all round "
+          "and never past it; orthographic it is the projected centre with outline_axes; a shape around the eye "
+          "has none", all(abs(a_ - 1) < 1e-3 and b_ > 0.99 for a_, b_ in reach)
+          and np.allclose(ox, ortho.project(shapes[0][0])[0]) and np.allclose(ou, au) and np.allclose(ov, av)
+          and np.all(np.isnan(around[1])), f"{reach}")
+    near, far = V.section_points(cam, shapes[0][0][0], shapes[0][1][0][:, 0], shapes[0][1][0][:, 1], n=64)
+    e = cam.eye()
+    A, B, c0 = shapes[0][1][0][:, 0], shapes[0][1][0][:, 1], shapes[0][0][0]
+    t = np.linspace(0, 2 * np.pi, 4000)
+    curve = c0 + np.cos(t)[:, None] * A + np.sin(t)[:, None] * B
+    cxy, _ = cam.project(curve)
+    side = (curve - c0) @ (e - c0)
+    on = lambda pts_: np.hypot(*(cxy[None, :, :] - pts_[:, None, :]).transpose(2, 0, 1)).min(axis=1)   # noqa: E731
+    near_i = np.argmin(np.hypot(*(cxy[None, :, :] - near[1:-1, None, :]).transpose(2, 0, 1)), axis=1)
+    far_i = np.argmin(np.hypot(*(cxy[None, :, :] - far[1:-1, None, :]).transpose(2, 0, 1)), axis=1)
+    check("12. section_points: both halves lie on the projected section, the near one on the eye's side",
+          on(near).max() < 0.3 and on(far).max() < 0.3 and np.all(side[near_i] > 0) and np.all(side[far_i] < 0))
+    # a planar curve's image is an ellipse: the voids' cuts through a plane's homography, their central sections
+    T = V.texture_transform(1, 45.0, (10.0, 5.0), (90.0, 90.0), 160, 170, cam)
+    H = V.texture_matrix(T)
+    tt = np.linspace(0, 2 * np.pi, 400)
+    cut_err, cut_ok = 0.0, True
+    for x0_, y0_, L_ in ((50.0, 60.0, np.array([[12.0, 3.0], [-2.0, 7.0]])), (130.0, 20.0, np.diag([30.0, 9.0]))):
+        (img,) = V.cut_images(T, [(x0_, y0_, L_, 0)])
+        cut_ok &= img is not None
+        hp = np.stack([x0_ + L_[0, 0] * np.cos(tt) + L_[0, 1] * np.sin(tt), y0_ + L_[1, 0] * np.cos(tt)
+                       + L_[1, 1] * np.sin(tt), np.ones_like(tt)], 1) @ H.T
+        loc = (hp[:, :2] / hp[:, 2:] - img[0]) @ np.linalg.inv(np.stack([img[1], img[2]], 1)).T
+        cut_err = max(cut_err, float(np.abs(np.linalg.norm(loc, axis=1) - 1).max()))
+    cs = rng.uniform(15, 85, (6, 3))
+    As, Bs = rng.normal(size=(6, 3)) * 9, rng.normal(size=(6, 3)) * 6
+    sec_err, near_ok = 0.0, True
+    for c_ in (cam, ortho):
+        xy_, u_, v_, st_, sp_ = V.section_arcs(c_, cs, As, Bs)
+        for k in range(6):
+            curve = cs[k] + np.cos(tt)[:, None] * As[k] + np.sin(tt)[:, None] * Bs[k]
+            pts_, _ = c_.project(curve)
+            loc = (pts_ - xy_[k]) @ np.linalg.inv(np.stack([u_[k], v_[k]], 1)).T
+            sec_err = max(sec_err, float(np.abs(np.linalg.norm(loc, axis=1) - 1).max()))
+            wv = (c_.eye() - cs[k]) if c_.perspective else c_.toward()
+            ang = np.arctan2(loc[:, 1], loc[:, 0])
+            inside_arc = np.mod(ang - st_[k] if sp_[k] > 0 else st_[k] - ang, 2 * np.pi) < abs(sp_[k])
+            front = (curve - cs[k]) @ wv > 1e-6 * np.linalg.norm(wv)
+            near_ok &= bool(np.mean(inside_arc[front]) > 0.98 and np.mean(inside_arc[~front]) < 0.02)
+    check("12. the image of a planar curve in perspective is an ellipse: a void's cut through its plane's homography "
+          "and a central section land on the ellipses drawn (to 1e-9), the near arc holding exactly the section's "
+          "half on the viewer's side (either camera)", cut_ok and cut_err < 1e-9 and sec_err < 1e-9 and near_ok,
+          f"{cut_err} {sec_err} {near_ok}")
+    # a plane's origin corner behind the eye: the map keeps w > 0 for the points in front
+    c4 = cam.copy()
+    c4.bounds = (np.full(3, 40.0), np.full(3, 60.0))
+    c4.fit(*c4.bounds)
+    c4.zoom(4.0)
+    e4 = c4.eye()
+    T4 = V.texture_transform(1, 50.0, (0.0, 0.0), (100.0, 100.0), 100, 100, c4)
+    H4 = V.texture_matrix(T4)
+    w_origin = (c4.matrix() @ np.array([0.0, 50.0, 100.0, 1.0]))[2]
+    w_in = (H4 @ np.array([50.0, 50.0, 1.0]))[2]                      # the plane's middle, inside the window
+    check("12. plane_transform divides by |w|: with the texture's origin corner behind the eye (a whole-box plane "
+          "drawn against a close-up) the points in front keep w > 0 (Qt draws them)", w_origin < 0 < w_in,
+          f"{w_origin} {w_in} {e4}")
+    # the slicing axis in perspective: never one whose slab holds the eye while another does not
+    bad_axis = 0
+    for _ in range(300):
+        c5 = V.Camera(width=900, height=700, yaw=rng.uniform(-180, 180), pitch=rng.uniform(-85, 85), perspective=True)
+        c5.bounds = (lo, hi)
+        c5.fit(lo, hi)
+        c5.zoom(rng.uniform(0.8, 3.0))
+        c5.pan(*rng.uniform(-300, 300, 2))
+        e5 = c5.eye()
+        a5, _ray = VOL.slice_axis(c5, lo, hi)
+        outside = (e5 < lo) | (e5 > hi)
+        bad_axis += bool(outside.any() and not outside[a5])
+    check("12. the slicing axis in perspective is the least oblique for every ray to the window: never an axis whose "
+          "slab holds the eye (slices seen edge on) while another axis's does not (300 turns, zooms, pans)",
+          bad_axis == 0, f"{bad_axis}")
+    # the edges behind the box: hidden exactly when the line of sight to them crosses the box
+    bad, tried = 0, 0
+    for _ in range(40):
+        c2 = V.Camera(width=600, height=600, yaw=rng.uniform(-180, 180), pitch=rng.uniform(-80, 80), perspective=True)
+        c2.bounds = (lo, hi)
+        c2.fit(lo, hi)
+        c2.zoom(rng.uniform(0.6, 3.0))
+        c2.pan(*rng.uniform(-150, 150, 2))
+        e2, hid = c2.eye(), V.hidden_edges(c2, lo, hi)
+        for i, (a_, b_) in enumerate(V.BOX_EDGES):
+            pt = 0.5 * (corners[a_] + corners[b_])
+            f = np.linspace(0.0, 0.995, 400)[:, None]
+            ray = e2 + f * (pt - e2)
+            through = np.any(np.all((ray > lo + 1e-6) & (ray < hi - 1e-6), axis=1))
+            bad += (i in hid) != through
+            tried += 1
+    check("12. hidden_edges in perspective: an edge is dashed exactly when the line of sight to it crosses the box "
+          "(any turn, zoom and pan)", bad == 0 and tried == 480, f"{bad} of {tried}")
+    # the planes' order from the eye: along every ray from it the nearest quad is painted last
+    wrong = overlaps = 0
+    for _ in range(40):
+        pos, shown = rng.uniform(5, 95, 3), rng.random(3) < 0.85
+        c3 = V.Camera(width=600, height=600, yaw=rng.uniform(-180, 180), pitch=rng.uniform(-85, 85), perspective=True)
+        c3.bounds = (lo, hi)
+        c3.fit(lo, hi)
+        quads = V.plane_quads(lo, hi, pos, shown)
+        rank = {i: n for n, (_k, i) in enumerate(V.paint_order(quads, np.zeros((0, 3)), c3, pos, lo, hi))}
+        e3 = c3.eye()
+        for x, y in rng.uniform(0, 600, (150, 2)):
+            dvec = c3.unproject(x, y) - e3
+            hits = []
+            for i, qd in enumerate(quads):
+                a_ = qd["axis"]
+                if abs(dvec[a_]) < 1e-12:
+                    continue
+                s_ = (pos[a_] - e3[a_]) / dvec[a_]
+                pt = e3 + s_ * dvec
+                r0, r1 = V.rest_axes(a_)
+                if s_ > 0 and qd["u"][0] <= pt[r0] <= qd["u"][1] and qd["v"][0] <= pt[r1] <= qd["v"][1]:
+                    hits.append((s_, i))
+            if len(hits) > 1:
+                overlaps += 1
+                wrong += max(hits, key=lambda h: rank[h[1]])[1] != min(hits)[1]
+    check("12. the planes' quads from the eye: along every ray from it the nearest quad is painted last",
+          overlaps > 300 and wrong == 0, f"{wrong} wrong of {overlaps}")
+
+
+def volume_pure():
+    """11. the volume's averaging, levels, transfer function and slice geometry, no Qt."""
+    import view3d as V
+    import volume3d as VOL
+    print("3D volume (pure)")
+    e = VOL.block_edges(20, 7)
+    sizes = np.diff(e)
+    check("11. block_edges: every cell in exactly one block, the blocks as equal as whole cells allow, never more "
+          "blocks than cells", e[0] == 0 and e[-1] == 20 and len(e) == 8 and sizes.min() >= 1
+          and sizes.max() - sizes.min() <= 1 and len(VOL.block_edges(5, 9)) == 6, f"{e}")
+    n = 20
+    o, rho, vel = _vol_set(TMP / "vol", n)
+    VOL.drop_volumes()
+    prog = {}
+    avg = VOL.average_window(o, "density", "value", o.lo, o.lo + o.length, 7, prog)
+    ed = [VOL.block_edges(n, 7)] * 3
+    ref = _block_mean_ref(rho.astype(np.float64), ed)
+    weight = np.einsum("i,j,k->ijk", *[np.diff(x).astype(np.float64) for x in ed])
+    check("11. the whole box averaged to 7 cells a side (20 is no multiple of 7): each cell its block's mean, the "
+          "integral kept (a density's mass); the progress counted every block",
+          avg["values"].shape == (7, 7, 7) and np.allclose(avg["values"], ref, rtol=1e-6)
+          and np.isclose((avg["values"] * weight).sum(), rho.astype(np.float64).sum(), rtol=1e-6)
+          and prog == {"done": 7, "total": 7} and np.allclose(avg["lo"], 0.0) and np.allclose(avg["hi"], n)
+          and avg["cells"] == (n, n, n), f"{prog} {np.abs(avg['values'] - ref).max()}")
+    check("11. ... kept: the same request again reads nothing", VOL.average_window(o, "density", "value", o.lo,
+                                                                                   o.lo + o.length, 7) is avg)
+    lo, hi = np.array([-3.2, 15.5, 4.0]), np.array([6.1, 24.9, 12.0])
+    idx, wlo, _whi = V.cell_window(lo, hi, o.lo, o.length / n, n)
+    win = rho[np.ix_(*idx)].astype(np.float64)
+    avg2 = VOL.average_window(o, "density", "value", lo, hi, 4)
+    check("11. a window across the box's faces (a close-up near one): its cells read periodically, then averaged",
+          int(idx[0][0]) == 16 and int(idx[1][-1]) == 4 and np.allclose(avg2["lo"], wlo)
+          and np.allclose(avg2["values"], _block_mean_ref(win, [VOL.block_edges(len(i), 4) for i in idx]), rtol=1e-6))
+    nrm = np.sqrt((vel.astype(np.float64) ** 2).sum(-1)) * o._velocity_factor("velocity")
+    comps = G.components("velocity", 3)
+    avg3 = VOL.average_window(o, "velocity", "norm", o.lo, o.lo + o.length, 7)
+    avg4 = VOL.average_window(o, "velocity", comps[2], o.lo, o.lo + o.length, 7)
+    check("11. a vector field: the component the map shows (the norm, one by name: slice()'s rule), then averaged",
+          np.allclose(avg3["values"], _block_mean_ref(nrm, ed), rtol=1e-6)
+          and np.allclose(o.slice("velocity", 0, 3, "norm"), nrm[3])
+          and np.allclose(avg4["values"], _block_mean_ref(vel[..., 1].astype(np.float64), ed), rtol=1e-5, atol=1e-6)
+          and np.allclose(o.slice("velocity", 0, 3, comps[2]), vel[3, :, :, 1]), f"{comps}")
+    # a cube the map has cached already is used, never a new one read into the cache
+    seen, real = [], VOL.read_rows
+
+    def spy(path, dtype, shape, rows, cube=None):
+        seen.append(cube is not None)
+        return real(path, dtype, shape, rows, cube)
+    VOL.read_rows = spy
+    try:
+        VOL.drop_volumes()
+        G.drop_cubes()
+        VOL.average_window(o, "density", "value", o.lo, o.lo + o.length, 7)
+        cold = list(seen)
+        G._cached_cube(o.files["density"].path, o.dtype, (n, n, n))
+        VOL.drop_volumes()
+        seen.clear()
+        warm = VOL.average_window(o, "density", "value", o.lo, o.lo + o.length, 7)
+    finally:
+        VOL.read_rows = real
+        G.drop_cubes()
+    check("11. the grid read by plain reads (no memmap) and none of it put in the cube cache; a cube the map cached "
+          "is used instead, the same numbers", cold and not any(cold) and seen and all(seen)
+          and np.array_equal(warm["values"], avg["values"]), f"{cold} {seen}")
+    time.sleep(0.01)
+    (2.0 * rho).tofile(str(o.files["density"].path))            # the grid written again by a re-run
+    again = VOL.average_window(o, "density", "value", o.lo, o.lo + o.length, 7)
+    rho.tofile(str(o.files["density"].path))
+    stop = {"cancel": True}
+    try:
+        VOL.drop_volumes()
+        VOL.average_window(o, "density", "value", o.lo, o.lo + o.length, 7, stop)
+        cancelled = False
+    except VOL.Cancelled:
+        cancelled = True
+    check("11. a grid written again is read again (its mtime and size in the key); 'cancel' stops an averaging",
+          np.allclose(again["values"], 2.0 * ref, rtol=1e-6) and cancelled)
+    # levels
+    s = VOL.scaled(avg["values"], True)
+    q, qr = VOL.quantize(s)
+    lv = VOL.level_values(qr)
+    step = (qr[1] - qr[0]) / (VOL.LEVELS - 2)
+    check("11. levels: 1..255 over the values' range (log10 of a density), each value within half a level of its "
+          "own; 0 for no value (NaN)", int(q.min()) == 1 and int(q.max()) == 255
+          and np.all(np.abs(lv[q] - s) <= 0.5 * step + 1e-6)
+          and VOL.quantize(np.array([np.nan, 0.0, 1.0], np.float32))[0][0] == 0)
+    prep = VOL.prepare(avg, True)
+    fine = prep["fine"]
+    oriented_ok = all(np.array_equal(VOL.slice_images(fine, a)[i], np.moveaxis(q, a, 0)[i])
+                      for a in range(3) for i in range(7)) and np.array_equal(fine["qT"], np.moveaxis(q, 2, 0)) \
+        and fine["qT"].flags.c_contiguous and np.array_equal(fine["q"], q) and prep["coarse"] is None
+    lo_d, hi_d = VOL.default_range(prep, "density")
+    frac = VOL.visible_fraction(prep, lo_d)
+    check("11. prepare (in chunks on the pool): the same levels as quantising the whole cube; a slice's image has "
+          "its rows along the first remaining axis, its columns along the second, on every axis (z from the "
+          "contiguous transposed copy); no coarse copy under 32 cells; kept; a density opens from rho/rho_bar = 1 to "
+          "its 99.9th percentile, the cells above 1 counted",
+          oriented_ok and VOL.prepare(avg, True) is prep and lo_d == 0.0
+          and abs(hi_d - np.percentile(s, 99.9, method="inverted_cdf")) <= step
+          and abs(frac - float((avg["values"] >= 1.0).mean())) < 0.02,
+          f"{oriented_ok} {lo_d} {hi_d} {np.percentile(s, 99.9, method='inverted_cdf')} {frac}")
+    big = np.exp(np.random.default_rng(2).normal(size=(70, 66, 40))).astype(np.float32)
+    big[3, 4, 5] = np.nan
+    pb = VOL.prepare({"values": big, "lo": np.zeros(3), "hi": np.array([70.0, 66.0, 40.0]), "cells": big.shape,
+                      "key": None}, True)
+    ce = [VOL.block_edges(m_, (m_ + 1) // 2) for m_ in big.shape]
+    with np.errstate(invalid="ignore"):
+        coarse_ref = _block_mean_ref(big.astype(np.float64), ce)
+    qc_ref = VOL.quantize(VOL.scaled(coarse_ref, True, float(np.nanmin(big[big > 0]))), pb["qrange"])[0]
+    check("11. ... the coarse copy drawn while turning: block means to at most 256 cells a side and at least halved, "
+          "on the same levels; a NaN cell is level 0 (transparent) in both",
+          pb["coarse"]["shape"] == (35, 33, 20) and np.array_equal(pb["coarse"]["stacks"][0], qc_ref)
+          and pb["fine"]["q"][3, 4, 5] == 0 and pb["coarse"]["stacks"][0][1, 2, 2] == 0
+          and int(pb["counts"].sum()) == big.size, f"{pb['coarse']['shape']}")
+    stop = {"cancel": True}
+    try:
+        VOL.prepare(dict(avg, key=("a key of its own",)), True, stop)
+        coloured = True
+    except VOL.Cancelled:
+        coloured = False
+    now = VOL.prepare(VOL.average_window(o, "density", "value", o.lo, o.lo + o.length, 7), True)
+    kept = VOL.prepared_hit(o, "density", "value", o.lo, o.lo + o.length, 7, True)
+    check("11. a cancel stops the colouring too (between its chunks), nothing of it kept; a prepared cube is found "
+          "again by its window, field and detail without averaging (prepared_hit), not another detail's",
+          not coloured and ("a key of its own",) not in {k[0] for k in VOL._PREPARED} and kept is now
+          and VOL.prepared_hit(o, "density", "value", o.lo, o.lo + o.length, 5, True) is None, f"{coloured}")
+    # the transfer function
+    colours = G.lut("inferno")
+    lv = VOL.level_values((-2.0, 3.0))
+    px = VOL.transfer(lv, 0.0, 2.0, 0.4, 1.0, colours).view(np.uint16).reshape(-1, 4) / 65535.0
+    a1 = px[:, 3]
+    check("11. transfer: transparent below the low end and for no value, the opacity rising (never falling) to the "
+          "one asked at the high end and staying there; premultiplied (no channel above the opacity)",
+          np.all(a1[lv < 0.0] == 0.0) and a1[0] == 0.0 and np.all(np.diff(a1[1:]) >= -1e-12) and a1[lv > 0.0].min() > 0
+          and np.allclose(a1[lv >= 2.0], 0.4, atol=1e-4) and np.all(px[:, :3] <= a1[:, None] + 1e-9))
+    a2 = VOL.transfer(lv, 0.0, 2.0, 0.4, 2.5, colours).view(np.uint16).reshape(-1, 4)[:, 3] / 65535.0
+    sym = VOL.transfer(np.array([-np.inf, -3.0, -1.0, 0.0, 1.0, 3.0]), 0.5, 2.0, 0.4, 1.0, G.lut("RdBu_r"),
+                       symmetric=True).view(np.uint16).reshape(-1, 4)
+    check("11. ... a slice's opacity corrected for the path through it: 1 - (1 - alpha)^(path / reference); a "
+          "diverging field by |value|: both tails alike, the middle transparent, the colours apart",
+          np.allclose(a2, 1.0 - (1.0 - a1) ** 2.5, atol=1e-4) and sym[0, 3] == 0 and sym[3, 3] == 0
+          and sym[1, 3] == sym[5, 3] > 0 and sym[2, 3] == sym[4, 3] > 0 and not np.array_equal(sym[1, :3], sym[5, :3]))
+    # the slices on the screen, either projection
+    rng = np.random.default_rng(5)
+    lo3, hi3, shape = np.zeros(3), np.array([12.0, 16.0, 10.0]), (6, 8, 5)
+    d = (hi3 - lo3) / np.array(shape)
+    plans_ok, axes_ok, order_ok, rays = True, True, True, 0
+    for persp in (False, True):
+        for yaw, pitch in [(-50.0, 33.0)] + [tuple(rng.uniform(-89, 89, 2)) for _ in range(12)]:
+            cam = V.Camera(target=(6, 8, 5), scale=9.0, yaw=yaw, pitch=pitch, width=640, height=480,
+                           perspective=persp)
+            cam.bounds = (lo3, hi3)
+            cam.fit(lo3, hi3)
+            plan = VOL.slice_plan(cam, lo3, hi3, shape)
+            a, t = plan["axis"], cam.toward()
+            r0, r1 = V.rest_axes(a)
+            w, h = plan["size"]
+            for i in (0, shape[a] // 2, shape[a] - 1):
+                T = plan["transforms"][i]
+                for x, y in ((0, 0), (w, 0), (0, h), (w, h), (0.3 * w, 0.7 * h)):
+                    P = np.zeros(3)
+                    P[a] = lo3[a] + (i + 0.5) * d[a]
+                    P[r1] = lo3[r1] + x * d[r1]             # columns along the second remaining axis
+                    P[r0] = lo3[r0] + y * d[r0]             # rows along the first
+                    xy, _ = cam.project(P)
+                    wt = T[2] * x + T[5] * y + T[8]
+                    got = ((T[0] * x + T[3] * y + T[6]) / wt, (T[1] * x + T[4] * y + T[7]) / wt)
+                    plans_ok &= bool(np.allclose(got, xy[0]))
+            ax, ray = VOL.slice_axis(cam, lo3, hi3)
+            axes_ok &= a == ax and (w, h) == (shape[r1], shape[r0]) \
+                and (persp or a == int(np.argmax(np.abs(t)))) \
+                and np.isclose(plan["exponent"], d[a] / abs(ray[a]) / (16.0 / VOL.REF_CELLS))
+            # front first: every ray (from the eye, or along the view) meets the slices it crosses in plan order
+            rank = {int(i): n for n, i in enumerate(plan["order"])}
+            src = cam.eye() if persp else None
+            for X in rng.uniform(lo3, hi3, (25, 3)):
+                o_ = src if persp else X + 1e3 * t
+                dvec = X - o_
+                if abs(dvec[a]) < 1e-9:
+                    continue
+                pos = lo3[a] + (np.arange(shape[a]) + 0.5) * d[a]
+                s_ = (pos - o_[a]) / dvec[a]
+                hit = [int(i) for i in np.argsort(s_) if s_[i] > 0]
+                order_ok &= all(rank[i] < rank[j] for i, j in zip(hit, hit[1:]))
+                rays += 1
+    check("11. slice_plan, orthographic and perspective: the axis facing the viewer most (perspective: the least oblique for every ray to the window); a slice's image (rows along "
+          "the first remaining axis) lands where its 3D points project, corners and inside (homographies); every ray "
+          "meets the slices front first; the path through a slice its spacing over |cos|, over the reference",
+          plans_ok and axes_ok and order_ok and rays > 500, f"{plans_ok} {axes_ok} {order_ok} {rays}")
+    check("11. the reference compositing ('under', front first): an opaque front hides the back; translucent "
+          "layers add as c_front + (1 - a_front) c_back",
+          np.allclose(VOL.composite([[1, 0, 0, 1], [0, 0, 1, 1]]), [1, 0, 0, 1])
+          and np.allclose(VOL.composite([[0.2, 0, 0, 0.5], [0, 0, 0.4, 0.4]]), [0.2, 0, 0.2, 0.7]))
+
+
+def volume_render():
+    """11. the slice stack composited by QPainter, 16 bits a channel, against the reference compositing."""
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        print(f"SKIP (3D volume rendering): PySide6 is not importable ({e})")
+        return
+    import explore_3d as X3
+    import view3d as V
+    import volume3d as VOL
+    print("3D volume (rendering)")
+    QApplication.instance() or QApplication([])
+    m, L, W = 16, 16.0, 400
+    # values changing along y only: every ray of a view along y crosses the same samples
+    prof = np.linspace(-1.0, 2.0, m)
+    vals = np.ascontiguousarray(np.broadcast_to(prof[None, :, None], (m, m, m))).astype(np.float32)
+    q, qr = VOL.quantize(VOL.scaled(vals, False))
+    stacks, levels = VOL.oriented(q), VOL.level_values(qr)
+    cam = V.Camera(target=(8, 8, 8), scale=20.0, yaw=0.0, pitch=0.0, width=W, height=W)       # looking along +y
+    plan = VOL.slice_plan(cam, np.zeros(3), np.full(3, L), q.shape)
+    lut = VOL.transfer(levels, 0.0, 2.0, 0.5, plan["exponent"], G.lut("viridis"))
+    pix = _rgba64(X3.render_slices(lut[stacks[plan["axis"]]], plan, W, W))
+    ref = VOL.composite(lut.view(np.uint16).reshape(-1, 4)[q[0, :, 0]].astype(np.float64) / 65535.0)
+    check("11. render_slices: a pixel over the cube is the reference compositing of its ray's samples front first "
+          "(16-bit channels: within 0.002), a pixel off it transparent",
+          plan["axis"] == 1 and np.allclose(pix[200, 200], ref, atol=2e-3) and np.allclose(pix[120, 290], ref, atol=2e-3)
+          and pix[5, 5, 3] == 0.0 and ref[3] > 0.3, f"{pix[200, 200]} {ref}")
+    # an opaque red half in front of an opaque blue one: the turn decides which is seen
+    two = np.where(np.arange(m)[None, :, None] < m // 2, 1.0, 2.0) * np.ones((m, m, m))
+    q2, qr2 = VOL.quantize(VOL.scaled(two.astype(np.float32), False))
+    rb = np.zeros((256, 3), np.uint8)
+    rb[:128] = (255, 0, 0)
+    rb[128:] = (0, 0, 255)
+    seen = []
+    for yaw in (0.0, 180.0):
+        cam.yaw = yaw
+        plan = VOL.slice_plan(cam, np.zeros(3), np.full(3, L), q2.shape)
+        lut = VOL.transfer(VOL.level_values(qr2), 0.5, 2.0, 1.0, plan["exponent"], rb, gamma=1e-9)
+        seen.append(_rgba64(X3.render_slices(lut[VOL.oriented(q2)[plan["axis"]]], plan, W, W))[200, 200])
+    check("11. ... the front is what is seen: from -y the red half (low y), turned half round the blue one",
+          np.allclose(seen[0], [1, 0, 0, 1], atol=2e-3) and np.allclose(seen[1], [0, 0, 1, 1], atol=2e-3), f"{seen}")
+    # a dense ball in an empty box: opaque through its middle, transparent where a ray misses it
+    m, L = 32, 32.0
+    ii = np.indices((m, m, m)) + 0.5
+    ball = np.where(((ii - 16.0) ** 2).sum(0) < 8.0 ** 2, 100.0, 0.01).astype(np.float32)
+    prep = VOL.prepare({"values": ball, "lo": np.zeros(3), "hi": np.full(3, L), "cells": (m,) * 3, "key": None}, True)
+    v3 = X3.View3D()
+    v3.resize(W, W)
+    v3.set_volume(prep, np.zeros(3), np.full(3, L))
+    v3.set_transfer(0.0, 2.0, 1.0, "inferno")
+    v3.fit()
+    pix = _rgba64(v3.volume_picture())
+    cx, cy = (int(c) for c in v3.cam.project([16.0, 16.0, 16.0])[0][0])
+    t = v3.cam.toward()
+    misses = []
+    for c in V.box_corners(np.full(3, 2.5), np.full(3, L - 2.5)):
+        r = c - 16.0
+        if np.linalg.norm(r - (r @ t) * t) > 11.0:     # its ray passes the ball 3 cells wide of it
+            misses.append(tuple(int(k) for k in v3.cam.project(c)[0][0]))
+    v3._fast = True
+    small = v3.volume_picture()
+    v3._fast = False
+    check("11. a dense ball in an empty box: opaque through its middle, a ray missing it transparent (the empty "
+          "cells below the range), off the box nothing; while turning a half-size picture of the coarse cube",
+          pix[cy, cx, 3] > 0.99 and len(misses) >= 2 and all(pix[y, x, 3] == 0.0 for x, y in misses)
+          and pix[2, 2, 3] == 0.0 and prep["coarse"]["shape"] == (16, 16, 16) and "quick" in v3._stacks
+          and (small.width(), small.height()) == (round(W * X3.FAST_SCALE), round(W * X3.FAST_SCALE)),
+          f"{pix[cy, cx]} {misses} {[pix[y, x, 3] for x, y in misses]}")
+    # the same through a perspective camera: rays from the eye
+    v3.set_perspective(True)
+    v3._sharp = None
+    pix = _rgba64(v3.volume_picture())
+    cx, cy = (int(c) for c in v3.cam.project([16.0, 16.0, 16.0])[0][0])
+    e = v3.cam.eye()
+    misses = []
+    for c in V.box_corners(np.full(3, 2.5), np.full(3, L - 2.5)):
+        r, dvec = 16.0 - e, (c - e) / np.linalg.norm(c - e)
+        if np.linalg.norm(r - (r @ dvec) * dvec) > 11.0:
+            misses.append(tuple(int(k) for k in v3.cam.project(c)[0][0]))
+    check("11. ... through a perspective camera: opaque through the ball's middle, a ray from the eye missing it "
+          "transparent", pix[cy, cx, 3] > 0.99 and len(misses) >= 2 and all(pix[y, x, 3] == 0.0 for x, y in misses),
+          f"{pix[cy, cx]} {misses}")
+    # the front half seen in perspective too
+    cam = V.Camera(target=(8, 8, 8), scale=20.0, yaw=0.0, pitch=0.0, width=W, height=W, perspective=True)
+    cam.bounds = (np.zeros(3), np.full(3, 16.0))
+    seen = []
+    for yaw in (0.0, 180.0):
+        cam.yaw = yaw
+        plan = VOL.slice_plan(cam, np.zeros(3), np.full(3, 16.0), q2.shape)
+        lut = VOL.transfer(VOL.level_values(qr2), 0.5, 2.0, 1.0, plan["exponent"], rb, gamma=1e-9)
+        seen.append(_rgba64(X3.render_slices(lut[VOL.oriented(q2)[plan["axis"]]], plan, W, W))[200, 200])
+    check("11. ... and the front half is what is seen in perspective as well (red from -y, blue from +y)",
+          np.allclose(seen[0], [1, 0, 0, 1], atol=2e-3) and np.allclose(seen[1], [0, 0, 1, 1], atol=2e-3), f"{seen}")
+    # the sharp picture drawn a few slices at a time is the one drawn at once, at the screen's own resolution
+    v3._sharp, v3._job = None, None
+    whole = _rgba64(v3.volume_picture())
+    job = v3._start_job()
+    names, real_gather = set(), job._gather
+
+    def spy_gather(i):
+        names.add(threading.current_thread().name)
+        return real_gather(i)
+    job._gather = spy_gather
+    ticks = 0
+    while not job.pump(0.0005):
+        ticks += 1
+    check("11. the settled picture drawn in ticks (the window answering between them) equals the one drawn at once; "
+          "its colours gathered on the GUI's own volume threads (never queued behind a cube being prepared)",
+          ticks >= 1 and np.array_equal(_rgba64(job.img), whole) and names
+          and all(n.startswith("volume3d-gui") for n in names), f"{ticks} {names}")
+    v3._stop_job()
+    # a high-density screen (device ratio 2): the sharp picture has twice the pixels and lands where the box does
+    v3.set_perspective(False)
+    real_cap = X3.SHARP_CELL_PX
+    X3.SHARP_CELL_PX = 1e9                              # no cap: the screen's own ratio
+    v3._ratio = lambda: 2.0
+    v3._sharp = None
+    try:
+        sharp = v3.volume_picture()
+        ratio = v3._sharp_ratio()
+    finally:
+        del v3._ratio
+        X3.SHARP_CELL_PX = real_cap
+    ys, xs = np.nonzero(_rgba64(sharp)[..., 3] > 0.5)
+    got = np.array([xs.min(), xs.max() + 1, ys.min(), ys.max() + 1]) / 2.0
+    rim = v3.cam.project(16.0 + 8.0 * np.array([[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]))[0]
+    want = np.array([rim[:, 0].min(), rim[:, 0].max(), rim[:, 1].min(), rim[:, 1].max()])
+    cell = v3.cam.scale * 1.0                            # a cell's size on the screen (the ball's rim is in cells)
+    check("11. on a screen of device ratio 2 the sharp picture is drawn at 2x and lands where the projected ball "
+          "does, centred on it and within two cells (opaque cells' bilinear edges add up over the slices; drawn "
+          "twice its size it would be off by half the ball)", ratio == 2.0 and (sharp.width(), sharp.height()) == (2 * W, 2 * W)
+          and np.all(np.abs(got - want) < 2 * cell + 1.0) and np.allclose(got.reshape(2, 2).mean(1), [W / 2, W / 2],
+                                                                          atol=2.0), f"{got} {want} cell {cell:.1f}")
+
+
+def view3d_volume_gui():
+    """11. the volume in the window, on gui()'s synthetic snapshot (its catalogue is cached by then)."""
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        print(f"SKIP (3D volume): PySide6 is not importable ({e})")
+        return
+    import explore as E
+    import explore_3d as X3
+    import runspec as rs
+    import view3d as V
+    import volume3d as VOL
+    print("3D volume")
+    qa = QApplication.instance() or QApplication([])
+    data = TMP / "data"
+    if not (data / SIM).is_dir():
+        make_snapdir(data, 50, 0.0, 7)
+    E.VOID_CACHE_DIR = TMP / "void cache"
+    view = E.ExploreView()
+    x = E.ExploreControls(view, lambda: str(data), lambda: [])
+    view.resize(900, 760)
+    view.show()
+    real_procs = rs.dtfe_processes
+    rs.dtfe_processes = lambda max_age=2.0: {"runs": [], "servers": []}
+    try:
+        x.refresh_outputs()
+        wait_for(qa, lambda: not x._busy and x._plane is not None, 30)
+        x.voids.setChecked(True)
+        wait_for(qa, lambda: x._void_proc is None and bool(x._void_cache), 180)
+        res = x._void_cache.get(x._void_cache_key(x.current), {})
+        if "error" in res or not res:
+            check("11. the catalogue for the 3D volume", False, str(res.get("error", ""))[:200])
+            return
+        o, v3 = x.current, view.view3d
+        x.view3d_style.setCurrentIndex(x.view3d_style.findData("volume"))
+        VOL.drop_volumes()
+        x.view3d_toggle.setChecked(True)
+        ok = wait_for(qa, lambda: (x._3d_res or {}).get("volume") is not None and not x._3d_busy, 60)
+        qa.processEvents()
+        v3.repaint()
+        prep = x._3d_res["volume"]
+        cube = np.fromfile(o.files["density"].path, dtype=o.dtype).reshape((o.n,) * 3)
+        avg = VOL.average_window(o, "density", "value", o.lo, o.lo + o.length, VOL.DEFAULT_DETAIL)
+        cached = G._cached_cube(o.files["density"].path, o.dtype, (o.n,) * 3, read=False)
+        check("11. Show in 3D: a volume of the whole box at the grid's own 64³ cells (the detail is more), the stored "
+              "values (the map's cached cube itself, no copy); the title and the state line say so; the range's "
+              "controls shown, the planes' hidden",
+              ok and prep["shape"] == (64, 64, 64) and np.array_equal(avg["values"], cube)
+              and (cached is None or avg["values"] is cached) and "a volume of 64³ cells" in view.title.text()
+              and "the grid's own cells" in x.view3d_state.text() and x.volume3d_box.isVisibleTo(x)
+              and not x.planes3d_box.isVisibleTo(x) and v3.style == "volume" and v3.volume is prep,
+              f"{prep['shape']} {view.title.text()} {x.view3d_state.text()}")
+        tf = x._3d_tf
+        check("11. ... a density opens from rho/rho_bar = 1 to its 99.9th percentile, in the map's colours; the colour "
+              "bar shows that range, the sliders' texts its ends", tf["lo"] == 0.0 and tf["hi"] > 0.0
+              and x.vol3d_lo_text.text() == "1" and view.colorbar.vrange == (tf["lo"], tf["hi"]) and view.colorbar.log
+              and v3.transfer[:2] == (tf["lo"], tf["hi"]) and v3.transfer[3] == x.cmap.currentText(), f"{tf}")
+        # the voids see-through: looking along y, the ray through the biggest void against the densest column
+        rows = sorted(int(k) for k in np.nonzero(res["_shown"] & np.isfinite(res["_r_v"]))[0])
+        k0 = max(rows, key=lambda k: res["_r_v"][k])
+        a, b = x._3d_span()
+        x.vol3d_lo.setValue(int(round((np.log10(0.7) - a) / (b - a) * x.vol3d_lo.maximum())))
+        x.vol3d_opacity.setValue(x._3d_opacity_position(0.01))
+        x.view3d_persp.setChecked(False)                    # parallel rays: one grid column a pixel
+        v3.cam.yaw, v3.cam.pitch = 0.0, 0.0
+        v3.fit()
+        wait_for(qa, lambda: not v3._fast, 10)              # settled: the full cube on the full picture
+        pic = _rgba64(v3.volume_picture())
+        tfv = v3.transfer
+        plan = VOL.slice_plan(v3.cam, v3.lo, v3.hi, prep["shape"])
+        lut = VOL.transfer(prep["levels"], tfv[0], tfv[1], tfv[2], round(plan["exponent"], 2), G.lut(tfv[3]))
+        rgba = lut.view(np.uint16).reshape(-1, 4).astype(np.float64) / 65535.0
+        qcube = prep["fine"]["q"]                           # the levels, (x, y, z)
+        visible = (cube >= 0.7).sum(axis=1)                 # per (x, z) column
+        c = res["_centres"][k0]
+        void_col = (int(c[0]) % o.n, int(c[2]) % o.n)
+        bg_col = np.unravel_index(int(np.argmax(visible)), visible.shape)
+
+        def ray(col):
+            xy = v3.cam.project([col[0] + 0.5, 32.0, col[1] + 0.5])[0][0]
+            return pic[int(xy[1]), int(xy[0]), 3], VOL.composite(rgba[qcube[col[0], :, col[1]]])[3]
+        (a_void, r_void), (a_bg, r_bg) = ray(void_col), ray(bg_col)
+        check("11. the voids see-through: looking along y, the ray through the biggest void's centre is clearer than "
+              "the densest column (its cells below the range transparent), each as the reference compositing says",
+              visible[void_col] + 8 < visible[bg_col] and a_void < a_bg - 0.05 and abs(a_void - r_void) < 0.06
+              and abs(a_bg - r_bg) < 0.06,
+              f"void {void_col} {visible[void_col]} cells: {a_void:.3f} (ref {r_void:.3f}); "
+              f"column {bg_col} {visible[bg_col]}: {a_bg:.3f} (ref {r_bg:.3f})")
+        x.view3d_persp.setChecked(True)
+        # the sharp picture after a turn: drawn in ticks once the view rests, at the screen's resolution
+        v3.last_volume_ms = 0.0
+        v3.cam.yaw += 7.0
+        v3._interacting()
+        v3.repaint()
+        quick_first = v3._picture is not None and v3._picture[0][0] == "quick" \
+            and (v3._sharp is None or v3._sharp[0] != v3._sharp_key())
+        ok = wait_for(qa, lambda: not v3._fast and v3._job is None and v3._sharp is not None
+                      and v3._sharp[0] == v3._sharp_key(), 30)
+        check("11. after a turn the quick picture first, then the sharp one drawn in ticks once the view rests (at the "
+              "sharp ratio: the screen's, no finer than 3 device pixels a cell); perspective back on",
+              ok and quick_first and v3._sharp[1].width() == int(round(v3.width() * round(v3._sharp_ratio(), 2)))
+              and v3.cam.perspective and v3.last_volume_ms > 0, f"{quick_first} {v3.last_volume_ms}")
+        # the opacity slider moves the opacity only: a range between the sliders' steps stays exactly as it is
+        x._3d_tf.update(lo=0.0123456, hi=0.0234567)
+        x._3d_apply_tf()
+        x.vol3d_opacity.setValue(x.vol3d_opacity.value() - 3)
+        check("11. the opacity slider leaves the shown range exactly as it is (only a range slider moves its end)",
+              x._3d_tf["lo"] == 0.0123456 and x._3d_tf["hi"] == 0.0234567 and v3.transfer[:2] == (0.0123456, 0.0234567))
+        x._3d_tf_default()
+        # the requests: a cancelled one in flight is no longer counted as coming; a moot result is not shown
+        shown = x._3d_res
+        x._3d_request()                                    # nothing new: the shown volume stays, nothing read
+        same = x._3d_res is shown and not x._3d_busy
+        vkey = shown["vkey"]
+        x._3d_busy, x._3d_inflight, x._3d_pending = True, {"vkey": ("another",), "progress": {}, "style": "volume"}, None
+        x._3d_res = None                                   # as if nothing were shown yet
+        x._3d_inflight = {"vkey": vkey, "progress": {"cancel": True}, "style": "volume"}
+        x._3d_request()
+        queued = x._3d_pending is not None and x._3d_pending["vkey"] == vkey
+        x._3d_busy, x._3d_inflight, x._3d_pending, x._3d_res = False, None, None, shown
+        moot = dict(shown, request=dict(shown["request"], progress={"cancel": True}), volume={"moot": True})
+        x._3d_rendered(moot)
+        check("11. requests: the volume shown is not read again; asked again while its cancelled reading still runs, it "
+              "is queued (a cancelled one never arrives); a result made moot while coloured is not shown",
+              same and queued and x._3d_res is shown and v3.volume is shown["volume"])
+        # the colouring stage says so even with nothing averaged
+        x._3d_busy, x._3d_inflight = True, {"vkey": ("x",), "progress": {"stage": "colouring"}, "style": "volume",
+                                            "output": o}
+        x._3d_progress()
+        colouring = x.view3d_state.text().startswith("colouring the volume")
+        x._3d_busy, x._3d_inflight = False, None
+        x._3d_state()
+        check("11. the state line says 'colouring the volume' while a cube is coloured (also when nothing was "
+              "averaged: a cached or prepared cube)", colouring)
+        # the sliders: the low end never past the high one; Default range back
+        x.vol3d_lo.setValue(x.vol3d_hi.value() + 10)
+        pushed = x.vol3d_hi.value() == x.vol3d_lo.value() + 1 and x._3d_tf["lo"] < x._3d_tf["hi"] \
+            and v3.transfer[:2] == (x._3d_tf["lo"], x._3d_tf["hi"])
+        x.vol3d_default.click()
+        check("11. the range's low end pushed past the high end moves it along; Default range restores the range and "
+              "the opacity", pushed and x._3d_tf["lo"] == 0.0 and abs(v3.transfer[2] - VOL.DEFAULT_OPACITY) < 0.02)
+        # another colour map recolours, reads nothing
+        shown = x._3d_res
+        x.cmap.setCurrentText("viridis")
+        wait_for(qa, lambda: not x._busy and not x._3d_busy, 30)
+        check("11. another colour map recolours the volume without reading it again",
+              x._3d_res is shown and v3.transfer[3] == "viridis" and view.colorbar.cmap == "viridis")
+        # hover still names the voids, drawn over the volume
+        wait_for(qa, lambda: not v3._fast, 10)
+        v3.repaint()
+        circ = {cc[4]: (cc[0], cc[1], float(np.hypot(*cc[2]))) for cc in v3._outlines}
+        cx, cy, r = circ[k0]
+        spot = next(((cx + f * r * np.cos(t), cy + f * r * np.sin(t)) for f in (0.0, 0.5, 0.8)
+                     for t in np.linspace(0, 2 * np.pi, 12) if v3.sphere_at(cx + f * r * np.cos(t),
+                                                                               cy + f * r * np.sin(t)) == k0), None)
+        if spot is not None:
+            x._3d_hover(*spot)
+        check("11. the voids drawn over the volume (every distinct one); hover over one names it",
+              sorted(circ) == rows and spot is not None and f"void {k0}: R_v" in view.readout.text()
+              and v3.hover_row == k0, view.readout.text())
+        # close-up: the cube around the void, read again at the grid's resolution
+        x.close_up_3d(k0)
+        ok = wait_for(qa, lambda: not x._3d_busy and x._3d_close is not None and (x._3d_res or {}).get("volume")
+                      is not None and np.allclose(x._3d_res["request"]["lo"], x._3d_close["lo"]), 60)
+        idx, wlo, _whi = V.cell_window(x._3d_close["lo"], x._3d_close["hi"], o.lo, o.length / o.n, o.n)
+        crop = cube[np.ix_(*idx)]
+        cu = VOL.average_window(o, "density", "value", x._3d_close["lo"], x._3d_close["hi"], VOL.DEFAULT_DETAIL)
+        check("11. Close up: the volume of the void's cube, read periodically at the grid's own cells; its title",
+              ok and x._3d_res["volume"]["shape"] == crop.shape and np.array_equal(cu["values"], crop)
+              and np.allclose(v3.lo, wlo) and f"close-up on void {k0}" in view.title.text(),
+              f"{x._3d_res['volume']['shape']} {crop.shape}")
+        x.whole_box_3d()
+        ok = wait_for(qa, lambda: not x._3d_busy and x._3d_close is None
+                      and (x._3d_res or {}).get("volume") is not None and x._3d_res["volume"]["shape"] == (64,) * 3, 30)
+        check("11. Whole box: the whole box's volume again from memory (nothing averaged again)",
+              ok and x._3d_res["request"]["progress"] == {}, f"{x._3d_res['request']['progress']}")
+        # back to what is shown while another volume is averaged and a third is queued: both moot
+        other = {"vkey": ("another window",), "progress": {}, "style": "volume"}
+        x._3d_busy, x._3d_inflight, x._3d_pending = True, other, {"vkey": ("a third",), "style": "volume"}
+        x._3d_request()
+        moot = x._3d_pending is None and other["progress"].get("cancel") is True
+        x._3d_busy, x._3d_inflight = False, None
+        check("11. a request back to the volume shown drops the one queued and cancels the averaging under way", moot)
+        png = TMP / "volume3d.png"
+        v3.cam.yaw += 3.0                                  # a new view: its sharp picture not drawn yet
+        v3.update()
+        qa.processEvents()
+        x.save_3d_png(png)
+        saved_sharp = v3._sharp is not None and v3._sharp[0] == v3._sharp_key()
+        from PySide6.QtGui import QImage
+        im = QImage(str(png))
+        x._3d_failed("Cancelled: ")                         # a cancelled averaging: no error, the volume stays
+        arr = np.frombuffer(im.convertToFormat(QImage.Format_RGB888).constBits(), np.uint8,
+                            count=im.height() * im.convertToFormat(QImage.Format_RGB888).bytesPerLine())
+        check("11. Save image in 3D writes the volume as on screen, its sharp picture finished first (not the quick "
+              "one), not a blank view; a cancelled averaging is no error",
+              png.is_file() and im.width() >= v3.width() and v3.volume is not None and saved_sharp
+              and arr.std() > 5 and "Could not" not in v3.message)
+        # the planes back, then the map: the volume's slices freed
+        x.view3d_style.setCurrentIndex(x.view3d_style.findData("planes"))
+        ok = wait_for(qa, lambda: not x._3d_busy and x._3d_res is not None and x._3d_res.get("volume") is None
+                      and any(p is not None for p in x._3d_res["planes"]), 30)
+        check("11. the planes again: their controls back, the planes read", ok and v3.style == "planes"
+              and x.planes3d_box.isVisibleTo(x) and not x.volume3d_box.isVisibleTo(x))
+        qa.processEvents()
+        v3.repaint()
+        ok_pt = bool(v3._drawn)
+        if ok_pt:
+            _a, T, rect = v3._drawn[0]
+            mid = T.map(rect.center())
+            pt = v3.point_at(mid.x(), mid.y())
+            ok_pt = pt is not None and T.isAffine() is False
+            if ok_pt:
+                a_, xyz, value = pt
+                ijk = [int(np.floor((xyz[b_] - o.lo[b_]) / (o.length[b_] / o.n))) % o.n for b_ in range(3)]
+                ok_pt = abs(value - float(cube[tuple(ijk)])) < 1e-6 and ijk[a_] == x._3d_index[a_]
+        check("11. the planes in perspective (each through a homography): a point under the mouse is still the stored "
+              "value of that cell", ok_pt)
+        x.view3d_style.setCurrentIndex(x.view3d_style.findData("volume"))
+        stale_gone = v3.planes is None
+        wait_for(qa, lambda: not x._3d_busy and (x._3d_res or {}).get("volume") is not None, 30)
+        check("11. back to the volume the planes are let go (never drawn against another window later)", stale_gone)
+        details = [x.view3d_detail.itemData(j) for j in range(x.view3d_detail.count())]
+        x.view3d_detail.setCurrentIndex(x.view3d_detail.findData(1024))
+        ok = wait_for(qa, lambda: not x._3d_busy and (x._3d_res or {}).get("volume") is not None
+                      and x._3d_res["request"]["detail"] == 1024, 30)
+        real_bpc, real_free = VOL.BYTES_PER_CELL, G.available_gb
+        VOL.BYTES_PER_CELL, G.available_gb = 1e4, (lambda: 2.5)    # as if a 64³ cube needed 2.6 GB with 2.5 free
+        shown_res, x._3d_res = x._3d_res, None                       # a fresh choice (none shown for it yet)
+        try:
+            fits = x._3d_detail(o, o.lo, o.lo + o.length)
+        finally:
+            VOL.BYTES_PER_CELL, G.available_gb = real_bpc, real_free
+            x._3d_res = shown_res
+        check("11. the detail menu offers 128³ to 1024³; 1024³ of a 64³ grid is its own cells; a cube that would not "
+              "fit in the free memory (less 2 GB) falls back to a smaller detail, and says why",
+              details == [128, 256, 512, 1024] and ok and x._3d_res["volume"]["shape"] == (64,) * 3
+              and "the grid's own cells" in x.view3d_state.text() and fits[0] == 128 and "would need" in fits[1],
+              f"{details} {fits} {x.view3d_state.text()}")
+        # the shown choice is kept: a recolour never checks the memory again (it would count the shown cube as used)
+        x._3d_res["request"].update(want=1024, detail=128, note="1024³ would need 9 GB with 3 GB free: 128³ instead")
+        VOL.BYTES_PER_CELL, G.available_gb = 1e4, (lambda: 2.5)
+        try:
+            kept = x._3d_detail(o, x._3d_res["request"]["lo"], x._3d_res["request"]["hi"])
+        finally:
+            VOL.BYTES_PER_CELL, G.available_gb = real_bpc, real_free
+        x._3d_res["request"].update(want=1024, detail=1024, note="")
+        # a DTFE run going: more than 1 GB is asked about first, a 'no' falls back below 1 GB
+        asked = []
+        x.confirm_heavy = lambda title, text: asked.append(title) or False
+        rs.dtfe_processes = lambda max_age=2.0: {"runs": [(4242, "PS-DTFE", 20.0)], "servers": []}
+        VOL.BYTES_PER_CELL, G.available_gb = 1e4, (lambda: 5.0)    # 2.6 GB: fits, but not beside the run's 4 GB margin
+        shown_res, x._3d_res = x._3d_res, None
+        try:
+            guarded = x._3d_detail(o, o.lo, o.lo + o.length)
+        finally:
+            VOL.BYTES_PER_CELL, G.available_gb = real_bpc, real_free
+            x._3d_res = shown_res
+            rs.dtfe_processes = lambda max_age=2.0: {"runs": [], "servers": []}
+            x.confirm_heavy = None
+        check("11. the choice shown is kept (a recolour never re-reads it at another detail); during a DTFE run a "
+              "cube over 1 GB is asked about first, a 'no' falling back (said)",
+              kept == (128, "1024³ would need 9 GB with 3 GB free: 128³ instead") and asked == ["3D volume"]
+              and guarded[0] == 128 and "a DTFE run is going" in guarded[1], f"{kept} {asked} {guarded}")
+        x._3d_request()
+        wait_for(qa, lambda: not x._3d_busy and (x._3d_res or {}).get("volume") is not None, 30)
+        x.view3d_detail.setCurrentIndex(x.view3d_detail.findData(VOL.DEFAULT_DETAIL))
+        wait_for(qa, lambda: not x._3d_busy, 30)
+        x.view3d_toggle.setChecked(False)
+        wait_for(qa, lambda: not x._busy, 30)
+        check("11. back to the map: the volume's coloured slices freed", v3.volume is None and not v3._stacks
+              and view.canvas.isVisible())
+        # the grid written again by a re-run: the volume is read again (the files' mtime and size in its key)
+        shown, vkey = x._3d_res, (x._3d_res or {}).get("vkey")      # (last: the void catalogue goes stale too)
+        path = o.files["density"].path
+        time.sleep(0.01)
+        path.write_bytes(path.read_bytes())
+        x.view3d_toggle.setChecked(True)
+        x._3d_request()
+        ok = wait_for(qa, lambda: not x._3d_busy and x._3d_res is not shown and (x._3d_res or {}).get("volume")
+                      is not None, 30)
+        check("11. a grid written again (a re-run) is read again by the 3D view, as the map does", ok
+              and x._3d_res["vkey"] != vkey)
+        x._3d_busy, x._3d_inflight = True, {"vkey": ("x",), "progress": {}, "style": "volume", "output": o}
+        flag = x._3d_inflight["progress"]
+        x.shutdown()
+        check("11. closing the window cancels a volume being read (the slice thread comes back at once)",
+              flag.get("cancel") is True)
+        check("11. the volume's texts carry no '--'", all("--" not in t for t in (
+            X3.VIEW3D_TIP, X3.STYLE_TIP, X3.DETAIL_TIP, X3.RANGE_TIP, X3.OPACITY_TIP, x.vol3d_default.toolTip())))
     finally:
         rs.dtfe_processes = real_procs
         x.shutdown()
@@ -2028,9 +2904,13 @@ def main():
     try:
         pure()
         view3d_pure()
+        volume_pure()
+        perspective_pure()
         mean_field_pure()
+        volume_render()
         gui()
         view3d_gui()
+        view3d_volume_gui()
         fold_map()
         keep_slice()
         mean_field_gui()

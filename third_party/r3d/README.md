@@ -14,10 +14,13 @@ statement of authorship in the source headers are reproduced on all copies (see 
 text at the top of `r3d.c` / `r3d.h`).
 
 `r3d-config.h` is not upstream: it stands in for the CMake-generated header and only
-defines `R3D_MAX_VERTS` (upstream default 512).
+defines `R3D_MAX_VERTS` (128 here; upstream default 512: see the header).
 
-Used by:
+Used by the CPU paths (the GPU paths integrate the same intersections by their own z-sweep,
+metal/exact_clip.metal.inc and its CUDA twin src/CGAL_triangulation/gpu_exact_clip.cuh):
 - `PS-DTFE --ps-exact-deposit` — exact tetrahedron-cell intersection volumes/moments in the
   phase-space grid deposit (src/CGAL_triangulation/ps_interpolation.cc);
 - `DTFE --exact-average` — exact volume-averaged '_a' fields for the standard estimator
   (src/CGAL_triangulation/averaged_interpolation_*.cc).
+Both walk each tetrahedron's cells through src/CGAL_triangulation/exact_sweep.h (clipped once per slab and
+column; the same r3d_clip calls as six planes per cell, so bit-identical).

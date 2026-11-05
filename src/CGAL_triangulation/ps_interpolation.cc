@@ -202,6 +202,7 @@ inline void psFxToReal(std::vector<int64_t> &w, float const scale, std::vector<E
 // --ps-exact-deposit: analytic tetrahedron-cell intersection moments (Powell & Abel 2015).
 // Vendored C library; r3d.h carries its own extern "C" guard. 3D only.
 #include "../../third_party/r3d/r3d.h"
+#include "exact_sweep.h"    // the per-slab/column clipping of the exact deposit
 #endif
 
 namespace {
@@ -2683,6 +2684,24 @@ void interpolateGrid_phaseSpace(DT &dt,
         // a ~5x underutilization on real data with watchdog-safe short chunks. Cost-ordering makes
         // every chunk's threads uniformly sized, so all GPU cores stay busy, and the adaptive
         // chunk-size controller tracks a smooth monotone cost curve instead of a noisy mix.
+        // a tet's grid-footprint cost: the cells of its window (extent + [1, 2) cells per axis, no sample margin)
+        auto windowCells = [&](size_t const t) -> float
+        {
+            float const* rec = &tetVerts[t*PS_TET_STRIDE];   // edges at [6..14]
+            float cells = 1.f;
+            for (int d = 0; d < 3; ++d)
+            {
+                float lo = 0.f, hi = 0.f;
+                for (int e = 0; e < 3; ++e)
+                {
+                    float const cc = rec[6 + e*3 + d];
+                    if (cc < lo) lo = cc;
+                    if (cc > hi) hi = cc;
+                }
+                cells *= (hi-lo) / float(dx[d]) + 1.f;
+            }
+            return cells;
+        };
         {
             size_t const nT = tetMasses.size();
             // Counting sort on the log2 cost, quantized to 2048 steps per doubling (0.03%): linear
@@ -2691,20 +2710,7 @@ void interpolateGrid_phaseSpace(DT &dt,
             std::vector<uint16_t> costKey(nT);
             for (size_t t = 0; t < nT; ++t)
             {
-                float const* rec = &tetVerts[t*PS_TET_STRIDE];   // edges at [6..14]
-                float cells = 1.f;
-                for (int d = 0; d < 3; ++d)
-                {
-                    float lo = 0.f, hi = 0.f;
-                    for (int e = 0; e < 3; ++e)
-                    {
-                        float const cc = rec[6 + e*3 + d];
-                        if (cc < lo) lo = cc;
-                        if (cc > hi) hi = cc;
-                    }
-                    // the window spans extent + [1, 2) cells (no sample margin)
-                    cells *= (hi-lo) / float(dx[d]) + 1.f;
-                }
+                float const cells = windowCells( t );
                 // cells >= 1 (every factor is), so the key is >= 0; 30 doublings fill 61440 < 65536
                 costKey[t] = uint16_t( std::min( 65535.f, std::log2(cells) * 2048.f ) );
             }
@@ -2761,9 +2767,49 @@ void interpolateGrid_phaseSpace(DT &dt,
             }
         }
 
+        // PS_GPU_CPU_SHARE=f (0 < f < 1, a prototype): the CPU's share of the deposit, so its cores work while the GPU
+        // does -- across partitions: this pass deposits its share after its own GPU call, while others hold the GPU. The
+        // tets of a share f of the pass's estimated work (a tet's window cells + 1) are cut from one end of the
+        // cost-sorted arrays (PS_GPU_CPU_SHARE_END: 'head', the cheapest, the default; 'tail', the most expensive)
+        // and never reach the GPU: they join its deferred tets, which the CPU deposits below into the GPU's own
+        // fixed-point words (the units cover them: the moment bounds were taken over every filtered tet, and their
+        // mass goes to the GPU's mass unit with the released tets'). A pure function of the cost-sorted tets, so the
+        // grids stay the same bytes run to run with the sequential insert (their own bytes: a CPU share is double r3d,
+        // not the float z-sweep). Measured on TNG100-3-Dark 512^3 exact: at best 4.5% faster than the CPU alone.
+        std::vector<uint32_t> cpuShareOrd;
+        double cpuShareMass = 0.;
+        {
+            double const share = Env::real( "PS_GPU_CPU_SHARE", 0. );
+            size_t const nT = tetMasses.size();
+            if ( share > 0. && share < 1. && nT > 0 )
+            {
+                bool const tail = Env::lower( Env::text( "PS_GPU_CPU_SHARE_END", "head" ).c_str() ) == "tail";
+                double total = 0.;
+                for (size_t t = 0; t < nT; ++t) total += double( windowCells( t ) ) + 1.;
+                double const want = share * total;
+                size_t a = 0, b = 0;   // the CPU's tets: [a, b) of the sorted arrays
+                double acc = 0.;
+                if ( tail ) { b = nT; a = nT; while ( a > 0 && acc < want ) acc += double( windowCells( --a ) ) + 1.; }
+                else        { a = 0;  b = 0;  while ( b < nT && acc < want ) acc += double( windowCells( b++ ) ) + 1.; }
+                cpuShareOrd.assign( tetOrd.begin() + a, tetOrd.begin() + b );
+                for (size_t t = a; t < b; ++t)
+                    if ( std::isfinite( tetMasses[t] ) ) cpuShareMass += double( tetMasses[t] );   // (as psGpuPlan sums)
+                auto cut = [a, b](auto &v, size_t const per)
+                {
+                    if ( !v.empty() ) v.erase( v.begin() + a*per, v.begin() + b*per );
+                };
+                cut( tetVerts, PS_TET_STRIDE );
+                cut( tetVels, 12 );
+                cut( tetDens, 4 );
+                cut( tetScal, 4 );
+                cut( tetMasses, 1 );
+                cut( tetOrd, 1 );
+                std::sort( cpuShareOrd.begin(), cpuShareOrd.end() );
+            }
+        }
         double bl[3]  = { double(boxCoordinates[0]), double(boxCoordinates[2]), double(boxCoordinates[4]) };
         double dxv[3] = { double(dx[0]), double(dx[1]), double(dx[2]) };
-        size_t const nTetsDeposited = tetMasses.size();   // psGpuDepositFields consumes (frees) the arrays
+        size_t const nTetsDeposited = tetMasses.size() + cpuShareOrd.size();   // psGpuDepositFields consumes (frees) the arrays
         if ( massAudit )
         {
             audit.gpuHanded = 0.;
@@ -2775,6 +2821,7 @@ void interpolateGrid_phaseSpace(DT &dt,
         // the released tets' mass: the host adds it into the GPU's fixed-point grid below, so the unit covers it
         double releasedMass = 0.;
         for (ReleasedTet const &rt : releasedTets) releasedMass += double(rt.mass);
+        double const hostMass = releasedMass + cpuShareMass;   // the mass the host adds into the GPU's words
         // the moment grids' units (fxg): one per grid the kernel deposits, from the bounds above, so the
         // host's later integer adds (the deferred and released tets) stay within them too; dispw's unit only says
         // "the mass grid is it" (the host then skips it when its mass grid is fixed). PS_GPU_FLOAT_MOMENTS=1: none.
@@ -2798,7 +2845,7 @@ void interpolateGrid_phaseSpace(DT &dt,
         bool gpuOk = psGpuDepositFields(tetVerts, tetVels, tetMasses, tetDens, tetScal, bl, dxv,
                                   nGrid, subOrigin, subDims, nSub,
                                   userOptions.periodic, fVel, fDisp, fGrad, psLinear,
-                                  psVolWeighted, psCaustics, psExact, fScal, fSGrad, windowMode, releasedMass, fxUnits,
+                                  psVolWeighted, psCaustics, psExact, fScal, fSGrad, windowMode, hostMass, fxUnits,
                                   gpuOut, deferredTets, metalErr);
         // A host that chose the fixed-point unit hands back the words and leaves its float grid empty, so words
         // of another size would send the decode below into that empty grid: a failed deposit instead (the CPU
@@ -2820,15 +2867,24 @@ void interpolateGrid_phaseSpace(DT &dt,
         {
             fxLogUnits( "GPU", gpuOut.massScale, gpuOut.fxScale );   // (--verbose 3)
             // the deferred tets' cells, ascending: the CPU loop below deposits exactly these
-            deferredOrd.reserve( deferredTets.size() );
+            deferredOrd.reserve( deferredTets.size() + cpuShareOrd.size() );
             for (uint32_t const t : deferredTets) deferredOrd.push_back( tetOrd[t] );
+            size_t const nGpuDeferred = deferredOrd.size();
+            deferredOrd.insert( deferredOrd.end(), cpuShareOrd.begin(), cpuShareOrd.end() );   // (PS_GPU_CPU_SHARE)
             std::sort( deferredOrd.begin(), deferredOrd.end() );
             if ( not userOptions.psSuppressGridStats )
                 message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " " << gpuBackendName() << " GPU deposit ("
                         << MESSAGE::cMagenta() << gpuDeviceName() << MESSAGE::cReset() << "), "
                         << MESSAGE::cMagenta() << nTetsDeposited << MESSAGE::cReset() << " tetrahedra ("
-                        << MESSAGE::cMagenta() << deferredOrd.size() << MESSAGE::cReset()
-                        << " with a sample on a face, deposited by the CPU's exact test).\n" << MESSAGE::Flush;
+                        << MESSAGE::cMagenta() << nGpuDeferred << MESSAGE::cReset()
+                        << ( userOptions.psExactDeposit
+                             ? " deposited by the CPU in double: degenerate in float, or a dispersion float32 cannot resolve)"
+                             : " with a sample on a face, deposited by the CPU's exact test)" );
+            if ( not userOptions.psSuppressGridStats && !cpuShareOrd.empty() )
+                message << ", and " << MESSAGE::cMagenta() << cpuShareOrd.size() << MESSAGE::cReset()
+                        << " more as the CPU's share (PS_GPU_CPU_SHARE)";
+            if ( not userOptions.psSuppressGridStats )
+                message << ".\n" << MESSAGE::Flush;
             // The mass grid (see massFx): the GPU's fixed-point words become this pass's mass grid as
             // they are -- the released and deferred tets are added into them below, and they are converted to the
             // float density after the CPU loop. Otherwise (the double build, or the float A/B grid) the density
@@ -3607,16 +3663,48 @@ void interpolateGrid_phaseSpace(DT &dt,
                 exMom.clear();
                 exW.clear();
                 double sumW = 0.;            // per-tet weight normalizer (uniform: volume)
-    #if NO_DIM==3
-                for (int gi = cLo[0]; gi < cHi[0]; ++gi)
-                for (int gj = cLo[1]; gj < cHi[1]; ++gj)
-                for (int gk = cLo[2]; gk < cHi[2]; ++gk)
+                // a hit cell's moments and its mass weight: the exact volume, or the exact integral of the linear
+                // density profile under --ps-linear-deposit (clamped like the sampled path)
+                auto addPiece = [&](size_t const flatIdx, double const *mom)
                 {
-                    int const wgi = periodicL ? ((gi % (int)nGridL[0] + (int)nGridL[0]) % (int)nGridL[0]) : gi;
-                    int const wgj = periodicL ? ((gj % (int)nGridL[1] + (int)nGridL[1]) % (int)nGridL[1]) : gj;
-                    int const wgk = periodicL ? ((gk % (int)nGridL[2] + (int)nGridL[2]) % (int)nGridL[2]) : gk;
-                    int const gridIdx[3] = {wgi, wgj, wgk};
-                    int const rawIdx[3]  = {gi, gj, gk};
+                    insideFlat.push_back(flatIdx);
+                    for (int m = 0; m < NMOM; ++m) exMom.push_back(mom[m]);
+                    double w = mom[0];
+                    if ( psLinearL && linearProfile )
+                    {
+                        w = double(denBase) * mom[0];
+                        for (int d = 0; d < NO_DIM; ++d)
+                            w += double(denGrad[d]) * mom[1+d];
+                        if ( w < 0. ) w = 0.;
+                    }
+                    exW.push_back(w);
+                    sumW += w;
+                };
+    #if NO_DIM==3
+                // the window's cells, each clipped by its 6 planes (exact_sweep.h: once per slab and column).
+                // The planes are in the vertex-0 frame at the RAW indices (the periodic image the wrapped tet
+                // actually intersects). A cell outside the sub-box is not clipped: a partition's box holds every
+                // cell its tets touch, and a window's hull may hold cells outside the window.
+                exactSweep::sweep( tetPoly, cLo, cHi,
+                    [&](int const d, int const raw, double &lo, double &hi)
+                    {
+                        lo = double(boxL[2*d]) + raw * double(dxL[d]) - double(eulerPos[0][d]);
+                        hi = lo + double(dxL[d]);
+                    },
+                    [&](int const d, int const raw) -> long
+                    {
+                        int const wg = periodicL ? ((raw % (int)nGridL[d] + (int)nGridL[d]) % (int)nGridL[d]) : raw;
+                        long loc = (long)wg - (long)subOriginL[d];
+                        if (loc < 0) loc += (long)nGridL[d];        // sub-box may wrap a periodic axis
+                        return (loc < 0 || loc >= (long)subDimsL[d]) ? -1 : loc;
+                    },
+                    [&](int const *, long const *loc, r3d_poly &piece)
+                    {
+                        r3d_real mom[10];
+                        exactSweep::reduce<2>( piece, mom );
+                        if ( !(mom[0] > 0.) ) return;
+                        addPiece( (size_t(loc[0]) * subDimsL[1] + size_t(loc[1])) * subDimsL[2] + size_t(loc[2]), mom );
+                    } );
     #else
                 for (int gi = cLo[0]; gi < cHi[0]; ++gi)
                 for (int gj = cLo[1]; gj < cHi[1]; ++gj)
@@ -3625,7 +3713,6 @@ void interpolateGrid_phaseSpace(DT &dt,
                     int const wgj = periodicL ? ((gj % (int)nGridL[1] + (int)nGridL[1]) % (int)nGridL[1]) : gj;
                     int const gridIdx[2] = {wgi, wgj};
                     int const rawIdx[2]  = {gi, gj};
-    #endif
                     size_t flatIdx = 0;
                     bool inSub = true;
                     for (int d = 0; d < NO_DIM; ++d)
@@ -3640,27 +3727,7 @@ void interpolateGrid_phaseSpace(DT &dt,
                     if (!inSub) continue;
 
                     // cell bounds in the vertex-0 frame (RAW indices: the periodic image the
-                    // wrapped tet actually intersects), then 6 clip planes n.x + d >= 0
-    #if NO_DIM==3
-                    r3d_plane planes[6];
-                    for (int d = 0; d < NO_DIM; ++d)
-                    {
-                        double const lo = double(boxL[2*d]) + rawIdx[d] * double(dxL[d]) - double(eulerPos[0][d]);
-                        double const hi = lo + double(dxL[d]);
-                        for (int q = 0; q < 2; ++q)
-                        {
-                            planes[2*d+q].n.xyz[0] = 0.; planes[2*d+q].n.xyz[1] = 0.; planes[2*d+q].n.xyz[2] = 0.;
-                        }
-                        planes[2*d].n.xyz[d]   =  1.; planes[2*d].d   = -lo;
-                        planes[2*d+1].n.xyz[d] = -1.; planes[2*d+1].d =  hi;
-                    }
-                    r3d_poly piece = tetPoly;
-                    r3d_clip(&piece, planes, 6);
-                    if ( piece.nverts == 0 ) continue;
-                    r3d_real mom[10];
-                    r3d_reduce(&piece, mom, 2);
-                    if ( !(mom[0] > 0.) ) continue;
-    #else
+                    // wrapped tet actually intersects)
                     double lo2[NO_DIM], hi2[NO_DIM];
                     for (int d = 0; d < NO_DIM; ++d)
                     {
@@ -3669,23 +3736,9 @@ void interpolateGrid_phaseSpace(DT &dt,
                     }
                     double mom[psClip2d::MOMENTS];
                     if ( not psClip2d::clipTriangleToCell( tri2, lo2, hi2, mom ) ) continue;
-    #endif
-
-                    insideFlat.push_back(flatIdx);
-                    for (int m = 0; m < NMOM; ++m) exMom.push_back(double(mom[m]));
-                    // per-cell mass weight: exact volume, or the exact integral of the linear
-                    // density profile under --ps-linear-deposit (clamped like the sampled path)
-                    double w = mom[0];
-                    if ( psLinearL && linearProfile )
-                    {
-                        w = double(denBase) * mom[0];
-                        for (int d = 0; d < NO_DIM; ++d)
-                            w += double(denGrad[d]) * mom[1+d];
-                        if ( w < 0. ) w = 0.;
-                    }
-                    exW.push_back(w);
-                    sumW += w;
+                    addPiece( flatIdx, mom );
                 }
+    #endif
 
                 // PASS 2 (exact): renormalize the shares to tetMass, exact per tet. A tet that leaves a
                 // non-periodic grid is normalized by its WHOLE weight instead (the analytic volume, or the

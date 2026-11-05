@@ -212,7 +212,7 @@ static void cpuDeposit(const std::vector<float>& verts, const std::vector<float>
 // ------------------------------------------------------------------ GPU runner
 struct Gpu {
     MTL::Device* dev=nullptr; MTL::CommandQueue* q=nullptr;
-    MTL::ComputePipelineState *psoFld=nullptr, *psoItems=nullptr;
+    MTL::ComputePipelineState *psoFld=nullptr, *psoItems=nullptr, *psoItems1=nullptr;   // items: phase 0, phase 1 (kItemsPhase)
     size_t lastDeferred=0;   // tets the kernel deferred in the last run() (deposited by the CPU reference)
     // itemCells > 0: fExact runs go through depositExactItems with that many cells per item, as the
     // production host does (ps_metal_host.cc), leftovers (per-tet weight total 0) through
@@ -229,7 +229,7 @@ struct Gpu {
         { std::ifstream mf("metal/ps_deposit.metallib");
           if (mf.good()) lib=dev->newLibrary(NS::URL::fileURLWithPath(NS::String::string("metal/ps_deposit.metallib",NS::UTF8StringEncoding)),&err); }
         if(!lib){
-            // the shared r3d clip helpers come first, as the Makefile prepends them when it embeds the source
+            // the shared exact clip helpers come first, as the Makefile prepends them when it embeds the source
             std::ifstream inc("metal/exact_clip.metal.inc"); std::ifstream f(srcPath); std::stringstream ss; ss<<inc.rdbuf()<<"\n"<<f.rdbuf(); std::string src=ss.str();
             if(src.empty()) return false;
             lib=dev->newLibrary(NS::String::string(src.c_str(),NS::UTF8StringEncoding),(MTL::CompileOptions*)nullptr,&err);
@@ -237,8 +237,13 @@ struct Gpu {
         if(!lib){ printf("kernel lib load fail: %s\n", err?err->localizedDescription()->utf8String():"?"); return false; }
         MTL::Function* ff=lib->newFunction(NS::String::string("depositFields",NS::UTF8StringEncoding));
         if(ff) psoFld=dev->newComputePipelineState(ff,&err);
-        MTL::Function* fi=lib->newFunction(NS::String::string("depositExactItems",NS::UTF8StringEncoding));
-        if(fi) psoItems=dev->newComputePipelineState(fi,&err);
+        for(uint32_t ph=0; ph<2; ++ph){
+            MTL::FunctionConstantValues* fcv=MTL::FunctionConstantValues::alloc()->init();
+            fcv->setConstantValue(&ph,MTL::DataTypeUInt,NS::UInteger(0));
+            MTL::Function* fi=lib->newFunction(NS::String::string("depositExactItems",NS::UTF8StringEncoding),fcv,&err);
+            fcv->release();
+            if(fi) (ph==0 ? psoItems : psoItems1)=dev->newComputePipelineState(fi,&err);
+        }
         return psoFld!=nullptr;
     }
 
@@ -352,7 +357,7 @@ struct Gpu {
             }
         };
         lastItems=lastLeftovers=0; lastFailed=false;
-        if(itemCells && Pk.fExact && psoItems){
+        if(itemCells && Pk.fExact && psoItems && psoItems1){
             std::vector<uint32_t> items;
             for(uint32_t t=0;t<P.nTet;++t){
                 uint64_t nw=1;
@@ -367,7 +372,7 @@ struct Gpu {
             MTL::Buffer* bI=dev->newBuffer(items.data(),items.size()*sizeof(uint32_t),MTL::ResourceStorageModeShared);
             MTL::Buffer* bSW=zbuf(size_t(P.nTet)*4+4);
             dispatch(psoItems,bM,lastItems,bI,bSW,0);
-            dispatch(psoItems,bM,lastItems,bI,bSW,1);
+            dispatch(psoItems1,bM,lastItems,bI,bSW,1);
             // leftovers (weight total 0): depositFields, every other tet masked to mass 0 (skipped)
             float* mb=(float*)bM->contents(); const float* sw=(const float*)bSW->contents();
             std::vector<float> lm(P.nTet,0.f);
@@ -981,7 +986,7 @@ static void t12_causticBits(Gpu& g){
     verdict("T12 fCaustic orientation OR",ok,detail);
 }
 
-// T13: --ps-exact-deposit kernel path (fExact, the float32 r3d port). A cube split into the
+// T13: --ps-exact-deposit kernel path (fExact, the z-sweep of exact_clip.metal.inc). A cube split into the
 // 6-tet Freudenthal tessellation with density 1 (mass = tet volume) has a FULLY analytic
 // exact deposit: the cube [2,4]^3 covers 8 grid cells of dx=1 exactly, so each receives
 // mass 1.000..., the multiplicity sum(V_int)/V_cell is exactly 1 in each (the tessellation

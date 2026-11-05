@@ -70,6 +70,7 @@ int dtfeGpuFallbacksTaken(bool reset)
 // loop -- rejected at parsing). r3d.h carries its own extern "C" guard.
 #if NO_DIM==3 && !defined(MY_SCALAR)
 #include "../../third_party/r3d/r3d.h"
+#include "exact_sweep.h"    // the per-slab/column clipping of the exact average
 #elif NO_DIM==2 && !defined(MY_SCALAR)
 #include "ps_clip2d.h"
 #endif
@@ -359,7 +360,7 @@ static inline void avg1Announce(MESSAGE::Message &message, size_t *nGrid, Box &b
         message << "\nComputing interpolation of the fields volume averaged over the sampling cell on a regular "
                 << MESSAGE::printElements( nGrid, NO_DIM, "*" ) << " grid in the region "
                 << boxCoordinates.print()
-                << ". The volume average integrates the linear interpolant EXACTLY over every grid-cell/tetrahedron intersection (--exact-average, r3d; '--samples' is ignored).\n"
+                << ". The volume average integrates the linear interpolant EXACTLY over every grid-cell/tetrahedron intersection (--exact-average: r3d on the CPU, a z-sweep on the GPU; '--samples' is ignored).\n"
                 << "\t Done: " << MESSAGE::Flush;
     else
         message << "\nComputing interpolation of the fields volume averaged over the sampling cell on a regular "
@@ -1098,31 +1099,22 @@ void interpolateGrid_averaged_1(DT &dt,
                 if (iHi[d] > int(nGrid[d])) iHi[d] = int(nGrid[d]);
             }
 
-            for (int gi = iLo[0]; gi < iHi[0]; ++gi)
-            for (int gj = iLo[1]; gj < iHi[1]; ++gj)
-            for (int gk = iLo[2]; gk < iHi[2]; ++gk)
-            {
-                if ( nT > 1 and not owns( th, gi ) ) continue;   // another thread's x plane
-                int const gijk[3] = {gi, gj, gk};
-                r3d_plane planes[6];   // the 6 half-spaces of this cell, n.x + d >= 0 kept
-                for (int d = 0; d < NO_DIM; ++d)
+            // the window's cells, each clipped by its 6 half-spaces (exact_sweep.h: once per slab and
+            // column); another thread's x planes are not clipped
+            exactSweep::sweep( tetPoly, iLo, iHi,
+                [&](int const d, int const g, double &lo, double &hi)
                 {
-                    double const lo = gijk[d] * double(dx[d]) - double(basePosition[d]);
-                    double const hi = lo + double(dx[d]);
-                    for (int q = 0; q < 2; ++q)
-                        for (int dd = 0; dd < NO_DIM; ++dd)
-                            planes[2*d+q].n.xyz[dd] = 0.;
-                    planes[2*d].n.xyz[d]   =  1.; planes[2*d].d   = -lo;
-                    planes[2*d+1].n.xyz[d] = -1.; planes[2*d+1].d =  hi;
-                }
-                r3d_poly piece = tetPoly;
-                r3d_clip(&piece, planes, 6);
-                if ( piece.nverts == 0 ) continue;
+                    lo = g * double(dx[d]) - double(basePosition[d]);
+                    hi = lo + double(dx[d]);
+                },
+                [&](int const d, int const g) -> long { return ( d == 0 and nT > 1 and not owns( th, g ) ) ? -1 : g; },
+                [&](int const *g, long const *, r3d_poly &piece)
+            {
                 r3d_real mom[4];
-                r3d_reduce(&piece, mom, 1);
-                if ( !(mom[0] > 0.) ) continue;
+                exactSweep::reduce<1>( piece, mom );
+                if ( !(mom[0] > 0.) ) return;
 
-                index = ( size_t(gi)*nGrid[1] + size_t(gj) )*nGrid[2] + size_t(gk);
+                index = ( size_t(g[0])*nGrid[1] + size_t(g[1]) )*nGrid[2] + size_t(g[2]);
                 Real const dV = Real(mom[0]);
                 Point centroid( mom[1]/mom[0], mom[2]/mom[0], mom[3]/mom[0] );
                 if (field.density) (*density)[index] += densityValue(densGrad, base, centroid) * dV;
@@ -1138,7 +1130,7 @@ void interpolateGrid_averaged_1(DT &dt,
                 if ( dummyNeighbors ) updateDummyGridCells( index, &incompleteCells_d );
                 if ( dummyVertices ) updateDummyGridCells( index, &incompleteCells );
 #endif
-            }
+            } );
             continue;
         }
 #elif NO_DIM==2 && !defined(MY_SCALAR)

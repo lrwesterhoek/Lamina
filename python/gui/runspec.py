@@ -175,8 +175,9 @@ class RunSpec:
     def __post_init__(self):
         if not self.deposit:            # a standard-DTFE job starts at the exact cell average
             self.deposit = production_deposit(self.estimator)
-        if self.gpu is None:            # a fresh job's GPU tick is the build's (a saved one is kept)
-            self.gpu = gpu_build_default(self.estimator, self.precision)
+        if self.gpu is None:            # a fresh job's GPU tick is the build's (a saved one is kept), but
+            self.gpu = (gpu_build_default(self.estimator, self.precision)   # PS-DTFE's exact deposit: the CPU
+                        and not (self.estimator == "ps" and self.deposit == "exact"))
 
     # ------------------------------------------------------------------ data
     def sim_path(self) -> Path:
@@ -1236,16 +1237,19 @@ def tbb_built(precision: str = "single", dim: int = 3) -> bool:
 
 
 # Where the GPU deposit pays, measured on this machine (256^3 sampled grids): 0.26M
-# particles CPU 18 s vs GPU 24 s, 2.1M 51 vs 20 s, 7.1M 115 vs 40 s; the exact deposit: 0.26M CPU
-# 57 s vs GPU 29 s (the GPU's lead grows with size);
+# particles CPU 18 s vs GPU 24 s, 2.1M 51 vs 20 s, 7.1M 115 vs 40 s; the exact deposit (whole runs): 0.26M
+# CPU 8.9 s vs GPU 10.8 s, 2.1M 23 vs 18 s, TNG100-3-Dark z=0 (94M) at 512^3 14.5 vs 17.7 min -- so exact
+# runs start on the CPU, and a ticked GPU warns from PS_EXACT_CPU_FROM (a round number between the
+# 2.1M and 94M measurements, nothing measured in between);
 # a run that writes no grid (a slice alone) deposits nothing.
 # Standard DTFE (the work-item kernel with the threadgroup cell table):
 # 7.1M particles at 512^3 CPU 39.1 s vs GPU 17.3 s (with the velocity gradient 48.2 vs 32.0 s), 2.1M at
 # 512^3 24.6 vs 10.6 s, 0.26M at 256^3 3.8 vs 2.0 s; 7.1M at 256^3 ties (14.2 vs 14.4 s: reading,
 # triangulation and writing are the floor there). So the GUI starts standard-DTFE jobs on the GPU when
 # it is built and says so when a fine-grid run has it unticked. Its exact cell average (--exact-average):
-# 0.26M particles at 256^3 CPU 26.9 s vs GPU 4.1 s (interpolation step).
+# 0.26M particles at 256^3 CPU 3.3 s vs GPU 2.0 s (whole runs).
 GPU_PAYS_FROM = 1_000_000
+PS_EXACT_CPU_FROM = 10_000_000
 DTFE_GPU_PAYS_FROM_GRID = 512
 
 
@@ -1257,7 +1261,7 @@ def gpu_advice(gpu: bool, deposit: str, fields, n_particles, estimator: str,
         return []
     if estimator == "dtfe":
         if deposit == "exact" and not gpu and gpu_built("dtfe", precision):
-            return [("warning", "the exact cell average is ~6.6x faster on the GPU (4.1 s against 26.9 s at 256³ "
+            return [("warning", "the exact cell average is ~1.6x faster on the GPU (2.0 s against 3.3 s at 256³ "
                                 "with 0.26M particles); tick the GPU")]
         if not gpu and grid >= DTFE_GPU_PAYS_FROM_GRID and gpu_built("dtfe", precision):
             return [("warning", f"standard DTFE on a {grid}³ grid: the GPU interpolation is 1.5-2.3x faster than "
@@ -1266,10 +1270,11 @@ def gpu_advice(gpu: bool, deposit: str, fields, n_particles, estimator: str,
     if estimator != "ps" or not fields:
         return []
     if deposit == "exact":
-        if gpu or not gpu_built("ps", precision):
-            return []
-        return [("warning", "the exact deposit is 2x faster on the GPU at 0.26M particles (29 s against 57 s on the "
-                            "CPU) and the gap grows with the particle count; tick the GPU")]
+        if gpu and n_particles is not None and n_particles >= PS_EXACT_CPU_FROM:
+            return [("warning", f"{n_particles/1e6:.3g}M particles: the exact deposit is faster on the CPU on "
+                                "production runs (14.5 min against 17.7 min on the GPU for TNG100-3-Dark at 512³); "
+                                "untick the GPU")]
+        return []
     if n_particles is None:
         return []
     if gpu and n_particles < GPU_PAYS_FROM:
@@ -1284,7 +1289,8 @@ def gpu_advice(gpu: bool, deposit: str, fields, n_particles, estimator: str,
 def recommended_gpu(deposit: str, fields, n_particles, estimator: str = "ps", precision: str = "single",
                     dim: int = 3) -> bool:
     """The GPU setting a fresh job should start with (the GPU built; see gpu_advice). Standard DTFE:
-    the GPU (1.5-2.3x faster on fine grids, a tie on coarse ones). A double build hands the GPU float
+    the GPU (1.5-2.3x faster on fine grids, a tie on coarse ones). PS-DTFE's exact deposit: the CPU
+    (faster on production runs, run_ps_dtfe.sh's default too). A double build hands the GPU float
     copies of its tetrahedra: the deposit's sums are single precision, everything else double.
     A 2D job: never (the 2D programs are CPU-only)."""
     if not gpu_built(estimator, precision, dim):
@@ -1292,7 +1298,7 @@ def recommended_gpu(deposit: str, fields, n_particles, estimator: str = "ps", pr
     if estimator != "ps":
         return True
     if deposit == "exact":
-        return True
+        return False
     return bool(fields) and (n_particles is None or n_particles >= GPU_PAYS_FROM)
 
 

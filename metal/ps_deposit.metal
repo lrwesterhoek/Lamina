@@ -62,7 +62,7 @@ struct DepositParams {
     // idempotent, so the result is chunk-, thread- and partition-order invariant.
     int   fCaustic;
     // --ps-exact-deposit: replace the nSub^3 sub-sampled deposit by analytic tet-cell clipping
-    // (float32 port of the vendored r3d, see the exact_* functions below). Ignores nSub; a tet
+    // (sweep_moments in exact_clip.metal.inc, see exact_cell_clip below). Ignores nSub; a tet
     // whose whole clip window comes up empty (sliver below float resolution) falls through to
     // the sampled path, whose empty window then drives the centroid fallback -- the same
     // fall-through the CPU exact deposit uses.
@@ -208,9 +208,9 @@ static inline int classifySample(thread const float C[3][3], thread const float 
     return sure ? 1 : 0;
 }
 
-// The r3d clip helpers (ExPoly, tet_planes, box_outside_tet, exact_init_tet, exact_clip_plane,
-// exact_reduce2, exact_reduce1) live in metal/exact_clip.metal.inc, which the Makefile prepends to
-// this source when it embeds it (dtfe_deposit.metal shares them).
+// The exact clip helpers (tet_planes, box_outside_tet, sweep_moments) live in
+// metal/exact_clip.metal.inc, which the Makefile prepends to this source when it embeds it
+// (dtfe_deposit.metal shares them).
 
 // ------------------------------------------------------------------------------------------------
 // depositFields: the deposit. Each interior sample receives the mass share and, per the field
@@ -431,6 +431,8 @@ struct ExactTet {
     int    ic0[3];
     float  f0[3];
     float  u0[3], vG[3][3];  // the linear velocity (zero when no velocity grid is requested)
+    float  vc[3], vh[3];     // the centre and half the range of each velocity component over the 4 vertices: every
+                             // piece's mean velocity and velocity covariance must lie within them (exact_cell_deposit)
     float  s0, sG[3];        // the linear scalar (fScal / fSGrad; else zero)
     float  d0, dG[3];        // the linear density (fLinear)
     uint   obits;
@@ -444,6 +446,54 @@ struct ExactTet {
     // pieces' weights -- which is that total to float rounding -- stays far below 2^63
     float  wScale;
 };
+
+// The exact dispersion's float32 limit. Each piece adds the variance of the tet's linear velocity over it,
+// G^T Cov G, with Cov from the piece's second position moments; those carry an absolute float error of ~eps ell^2
+// (ell the piece's extent, at most the cell's diagonal: the sweep works about origins inside the piece's overlap
+// box), and a thin tet with a steep velocity gradient multiplies it by |G|^2 ~ (dv / thickness)^2. On TNG100-3-Dark
+// z = 0 at 512^3 that put spurious dispersions of up to 6e10 (km/s)^2 into ~1% of the cells (the CPU, in double: at
+// most 1.75e6). Per velocity component j, kappa_j^2 = |G_.j|^2 ell^2 / range_j^2 (range_j over the 4 vertices) sets
+// the relative error of S_jj, ~eps kappa_j^2; above EX_DISP_KAPPA2 for any component the tet goes to the CPU's
+// double-precision exact deposit (deferred, as a float-degenerate tet is). The tet's own extent L enters only through
+// the edge interpolation (an error ~eps L / thickness, linear): EX_DISP_KAPPA2_L guards that on |G_.j|^2 L^2. Below
+// both, the clamp in exact_cell_deposit bounds the magnitude of what is left.
+#ifndef EX_DISP_KAPPA2
+#define EX_DISP_KAPPA2 1.0e4f     // relative error ~6e-4
+#endif
+#ifndef EX_DISP_KAPPA2_L
+#define EX_DISP_KAPPA2_L 1.0e10f  // relative error ~eps * 1e5 = 6e-3 from the edge interpolation
+#endif
+// the range of the tet's linear velocity over its 4 vertices, per component: its centre vc and half-width vh
+static inline void exact_vel_range(thread const float Ax[3][3], thread const float vG[3][3], thread const float u0[3],
+                                   thread float vc[3], thread float vh[3])
+{
+    for (int j=0; j<3; ++j) {
+        float lo = 0.0f, hi = 0.0f;   // vertex 0's offset is 0
+        for (int e=0; e<3; ++e) {
+            float const dv = Ax[e][0]*vG[0][j] + Ax[e][1]*vG[1][j] + Ax[e][2]*vG[2][j];
+            lo = min(lo, dv); hi = max(hi, dv);
+        }
+        vc[j] = u0[j] + 0.5f*(lo + hi);
+        vh[j] = 0.5f*(hi - lo);
+    }
+}
+static inline bool exact_disp_illcond(thread const float Ax[3][3], thread const float vG[3][3], thread const float vh[3],
+                                      float3 dx)
+{
+    float L = 0.0f;
+    for (int d=0; d<3; ++d) {
+        float lo = 0.0f, hi = 0.0f;
+        for (int e=0; e<3; ++e) { lo = min(lo, Ax[e][d]); hi = max(hi, Ax[e][d]); }
+        L = max(L, hi - lo);
+    }
+    float const ell = min(L, length(dx));
+    for (int j=0; j<3; ++j) {   // (a component with no range has no gradient either: 0 > 0 is false)
+        float const g2 = vG[0][j]*vG[0][j] + vG[1][j]*vG[1][j] + vG[2][j]*vG[2][j];
+        float const r2 = 4.0f*vh[j]*vh[j];
+        if (g2*ell*ell > EX_DISP_KAPPA2 * r2 || g2*L*L > EX_DISP_KAPPA2_L * r2) return true;
+    }
+    return false;
+}
 
 // The tet's whole deposit weight: its volume, or under fLinear the integral of the linear density
 // d0 + dG.x over it = V (d0 + dG.centroid), the centroid (t1+t2+t3)/4 in the vertex-0 frame.
@@ -475,15 +525,9 @@ static inline bool exact_cell_clip(thread const ExactTet& E, thread const int ra
     float3 const tlo = min(min(float3(0.0f), E.t1), min(E.t2, E.t3));
     float3 const thi = max(max(float3(0.0f), E.t1), max(E.t2, E.t3));
     float3 const org = 0.5f * (max(clo, tlo) + min(chi, thi));
-    ExPoly piece;
-    exact_init_tet4(piece, -org, E.t1 - org, E.t2 - org, E.t3 - org);
-    for (int dd=0; dd<3; ++dd) {
-        exact_clip_plane(piece, dd,  1.0f, org[dd] - clo[dd]);   //  x_d >= clo - org
-        exact_clip_plane(piece, dd, -1.0f, chi[dd] - org[dd]);   //  x_d <= chi - org
-    }
-    if (piece.nv == 0) return false;
-    if (full) exact_reduce2(piece, mo);
-    else      exact_reduce1(piece, mo);
+    // order 1 in pass 0: the same arithmetic for V and the first moments as order 2, so the
+    // passes' volumes agree to the bit
+    sweep_moments(-org, E.t1 - org, E.t2 - org, E.t3 - org, clo - org, chi - org, full, mo);
     if (!(mo[0] > 0.0f)) return false;
 
     cc = org;
@@ -516,6 +560,9 @@ static inline void exact_cell_deposit(thread const FieldGrids& G, uint flat, thr
         for (int j=0; j<3; ++j) {
             vb[j] = E.u0[j];
             for (int i=0; i<3; ++i) vb[j] += E.vG[i][j]*cen[i];
+            // the mean of a linear field over a part of the tet lies within its range over the vertices: a centroid
+            // off by float rounding cannot move it outside (a steep gradient G turns eps into a huge velocity)
+            vb[j] = clamp(vb[j], E.vc[j] - E.vh[j], E.vc[j] + E.vh[j]);
             if (fVel)
                 addMoment(G.mom, G.momX, G, FX_MOM, base*3ul+ulong(j), vb[j]*wmEx);
         }
@@ -530,15 +577,27 @@ static inline void exact_cell_deposit(thread const FieldGrids& G, uint flat, thr
             cov[1][1] = mo[7]*invV - loc[1]*loc[1];
             cov[1][2] = cov[2][1] = mo[8]*invV - loc[1]*loc[2];
             cov[2][2] = mo[9]*invV - loc[2]*loc[2];
-            ulong c2 = 0;
+            // the velocity covariance over the piece, S = G^T Cov G, clamped to what a linear field on a part of the
+            // tet can have: a component spanning a range r = 2 vh has a variance of at most r^2/4 = vh^2, so
+            // |S_ab| <= sqrt(S_aa S_bb) <= vh_a vh_b. A correct value always satisfies both (the bound is not taken
+            // from the float diagonals, which may be clamped themselves); float noise beyond them is cut.
+            float S[3][3];
             for (int a=0; a<3; ++a)
                 for (int b=a; b<3; ++b) {
                     float gcg = 0.0f;
                     for (int i=0; i<3; ++i)
                         for (int k=0; k<3; ++k)
                             gcg += E.vG[i][a]*cov[i][k]*E.vG[k][b];
-                    addMoment(G.m2, G.m2X, G, FX_M2, base*6ul + c2++, massShare*(vb[a]*vb[b] + gcg));
+                    S[a][b] = gcg;
                 }
+            for (int a=0; a<3; ++a) {
+                S[a][a] = clamp(S[a][a], 0.0f, E.vh[a]*E.vh[a]);
+                for (int b=a+1; b<3; ++b) S[a][b] = clamp(S[a][b], -E.vh[a]*E.vh[b], E.vh[a]*E.vh[b]);
+            }
+            ulong c2 = 0;
+            for (int a=0; a<3; ++a)
+                for (int b=a; b<3; ++b)
+                    addMoment(G.m2, G.m2X, G, FX_M2, base*6ul + c2++, massShare*(vb[a]*vb[b] + S[a][b]));
             if (fVolW) {
                 for (int j=0;j<3;++j)
                     addMoment(G.dispvel, G.dvX, G, FX_DV, base*3ul+ulong(j), vb[j]*massShare);
@@ -945,8 +1004,8 @@ kernel void depositFields(
     // resolution) falls through to the sampled two-pass below, whose empty window then drives
     // the centroid fallback -- exactly the CPU fall-through.
     if (fExact) {
-        // r3d wants positive orientation: a folded (det<0) tet is handed over with
-        // vertices 1,2 swapped; vertex 0 stays the frame origin (same as the CPU path)
+        // positively oriented, as the CPU hands it to r3d: a folded (det<0) tet has vertices 1,2
+        // swapped; vertex 0 stays the frame origin (the sweep and tet_planes take either orientation)
         ExactTet E;
         E.t1 = float3(Ax[0][0], Ax[0][1], Ax[0][2]);
         E.t2 = float3(Ax[1][0], Ax[1][1], Ax[1][2]);
@@ -958,6 +1017,8 @@ kernel void depositFields(
             E.ic0[i] = ic0[i];  E.f0[i] = f0[i];  E.u0[i] = u0[i];  E.dG[i] = dG[i];  E.sG[i] = sG[i];
             for (int j=0; j<3; ++j) E.vG[i][j] = vG[i][j];
         }
+        for (int j=0; j<3; ++j) { E.vc[j] = 0.0f; E.vh[j] = 0.0f; }
+        if (fVel || fDisp) exact_vel_range(Ax, vG, u0, E.vc, E.vh);
         E.d0 = d0;  E.s0 = s0;  E.obits = obits;  E.invCellVol = invCellVol;
         E.straddle = straddle;
         E.wFull = exact_full_weight(tetVol, fLinear, d0, dG, E.t1, E.t2, E.t3);
@@ -968,6 +1029,8 @@ kernel void depositFields(
         if (P.windowMode != 0)
             for (int dd=0; dd<3; ++dd)
                 if (!window_hull(iMinC[dd], iMaxC[dd], P.nGrid[dd], P.periodic != 0, P.subOrigin[dd], P.subDims[dd])) return;
+        // a dispersion float32 cannot resolve: the CPU's double deposit takes the tet (EX_DISP_KAPPA2)
+        if (fDisp && exact_disp_illcond(Ax, vG, E.vh, float3(P.dx[0], P.dx[1], P.dx[2]))) { masses[tid] = -m; return; }
         float sumW = 0.0f;
         float shareFac = 0.0f;
         bool  deposited = false;
@@ -1212,11 +1275,19 @@ kernel void depositFields(
 // past the per-tet totals -- every one of the 31 buffer slots is taken here, so they ride in that buffer's tail
 struct ExactItemParams { uint nItems; uint phase; uint blockCells; uint badAt; };
 
+// The pass a depositExactItems pipeline runs (== ExactItemParams.phase): the host builds one pipeline per value,
+// so the summing pass carries none of the deposit's registers (an M1 Max then fits 512 threads per threadgroup
+// instead of 384: phase 0 ran 12-23% faster, the deposit up to 8%).
+constant uint kItemsPhase [[function_constant(0)]];
+
 // The per-tet numbers depositFields derives in its preamble, for the exact path (keep in sync).
 // False when the float recheck calls the tet degenerate.
+// decide: also defer an ill-conditioned dispersion (EX_DISP_KAPPA2) by returning false -- phase 0 only. Phase 1 must not
+// decide again: its pipeline is compiled apart (kItemsPhase), and a borderline tet it called ill-conditioned after
+// phase 0 summed its weights would be lost (sumW > 0: no leftover). A tet phase 0 left out has sumW 0 there anyway.
 static inline bool exact_tet_setup(uint tet, device const float* verts, device const float* vels,
                                    device const float* dens, device const float* scal, constant DepositParams& P,
-                                   thread ExactTet& E, thread int iMin[3], thread int iMax[3])
+                                   thread ExactTet& E, thread int iMin[3], thread int iMax[3], bool decide)
 {
     device const float* R = verts + ulong(tet) * ulong(TET_STRIDE);
     float Ax[3][3];
@@ -1246,6 +1317,10 @@ static inline bool exact_tet_setup(uint tet, device const float* verts, device c
                 E.vG[i][j]=s;
             }
     }
+    for (int j=0; j<3; ++j) { E.vc[j] = 0.0f; E.vh[j] = 0.0f; }
+    if (P.fVel != 0 || P.fDisp != 0) exact_vel_range(Ax, E.vG, E.u0, E.vc, E.vh);
+    // ill-conditioned: left to depositFields, which defers it to the CPU (EX_DISP_KAPPA2)
+    if (P.fDisp != 0 && decide && exact_disp_illcond(Ax, E.vG, E.vh, float3(P.dx[0], P.dx[1], P.dx[2]))) return false;
     E.s0 = 0.0f;
     for (int i=0; i<3; ++i) E.sG[i] = 0.0f;
     if (P.fScal != 0 || P.fSGrad != 0) {
@@ -1348,9 +1423,9 @@ kernel void depositExactItems(
     device atomic_uint* const bad = sumWX + ulong(IP.badAt);   // the guard's counters (ExactItemParams.badAt)
     uint2 const it = items[iid];
     uint  const tet = it.x;
+    bool const deposit = kItemsPhase == 1u;
     float const m = masses[tet];
     if (m <= 0.0f) return;           // deferred by an earlier, retried attempt
-    bool const deposit = IP.phase == 1u;
     bool const sumWFixed = (P.fxMask & FX_SUMW_BIT) != 0u;
     float s = 0.0f;
     if (deposit && !sumWFixed) {
@@ -1360,7 +1435,7 @@ kernel void depositExactItems(
 
     ExactTet E;
     int iMin[3], iMax[3];
-    if (!exact_tet_setup(tet, verts, vels, dens, scal, P, E, iMin, iMax)) return;
+    if (!exact_tet_setup(tet, verts, vels, dens, scal, P, E, iMin, iMax, !deposit)) return;
     if (deposit && sumWFixed) {      // the exact total, converted to float: the same float whatever the order
         // (from the two words separately: a 64-bit integer built from two atomic loads crashed the Metal compiler
         // service when it built this pipeline -- XPC_ERROR_CONNECTION_INTERRUPTED, macOS 27 -- as the

@@ -17,6 +17,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <tuple>
 #include <new>
 #include <string>
 #include <vector>
@@ -40,7 +41,8 @@ struct Ctx
     MTL::Device*               dev  = nullptr;
     MTL::CommandQueue*         q    = nullptr;
     MTL::ComputePipelineState* pso  = nullptr;   // depositFields: one thread per tet
-    MTL::ComputePipelineState* psoItems = nullptr;   // depositExactItems: one per (tet, cell block)
+    MTL::ComputePipelineState* psoItems[2] = { nullptr, nullptr };   // depositExactItems: one per (tet, cell block),
+                                                                     // a pipeline per pass (its kItemsPhase)
     std::string                err;
     bool                       ready = false;
 };
@@ -68,10 +70,20 @@ Ctx& ctx()
               + (nsErr ? nsErr->localizedDescription()->utf8String() : "unknown");
         return c;
     }
-    for (auto [name, dst] : { std::pair<const char*, MTL::ComputePipelineState**>{"depositFields", &c.pso},
-                              std::pair<const char*, MTL::ComputePipelineState**>{"depositExactItems", &c.psoItems} })
+    for (auto [name, dst, phase] : { std::tuple<const char*, MTL::ComputePipelineState**, int>{"depositFields", &c.pso, -1},
+                                     std::tuple<const char*, MTL::ComputePipelineState**, int>{"depositExactItems", &c.psoItems[0], 0},
+                                     std::tuple<const char*, MTL::ComputePipelineState**, int>{"depositExactItems", &c.psoItems[1], 1} })
     {
-        MTL::Function* fn = lib->newFunction(NS::String::string(name, NS::UTF8StringEncoding));
+        MTL::Function* fn = nullptr;
+        if (phase < 0) fn = lib->newFunction(NS::String::string(name, NS::UTF8StringEncoding));
+        else
+        {
+            MTL::FunctionConstantValues* fcv = MTL::FunctionConstantValues::alloc()->init();
+            uint32_t const ph = uint32_t(phase);
+            fcv->setConstantValue(&ph, MTL::DataTypeUInt, NS::UInteger(0));   // kItemsPhase
+            fn = lib->newFunction(NS::String::string(name, NS::UTF8StringEncoding), fcv, &nsErr);
+            fcv->release();
+        }
         if (!fn) { c.err = std::string("kernel '") + name + "' not found"; return c; }
         *dst = c.dev->newComputePipelineState(fn, &nsErr);
         if (!*dst)
@@ -612,7 +624,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
         }
         if (timing)
             fprintf(stderr, "PS-DTFE Metal: %-17s %10zu threads  %6zu buffers  %8.3f s busy  %8.3f s wall\n",
-                    pso == c.psoItems ? "depositExactItems" : "depositFields", nThreads, nBuf, busy,
+                    pso == c.pso ? "depositFields" : "depositExactItems", nThreads, nBuf, busy,
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - tRun).count());
         return true;
     };
@@ -688,7 +700,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
         // Phase 0 writes only sumW (the grids are still zero), phase 1 only the grids (sumW is read)
         std::vector<MTL::Buffer*> extras;
         if (phase == 0) extras.push_back(bSumW);
-        return runChunked(c.psoItems, nItems, 8192, 1024, extras, true, phase == 0,
+        return runChunked(c.psoItems[phase], nItems, 8192, 1024, extras, true, phase == 0,
                           static_cast<uint32_t*>(bSumW->contents()) + badAt,
                           [&](MTL::ComputeCommandEncoder* enc, size_t start, uint32_t n)
         {

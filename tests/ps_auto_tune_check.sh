@@ -56,6 +56,9 @@
 #  S) ONE DOMAIN: '--partition 1 1 1' deposits into the run's own grids, so the prediction counts them
 #     once -- the 768^3 crossed-waves report sits between the measured peak and 15% above it --
 #     and a real one-domain run's peak stays under its prediction.
+#  W) --ps-window: every partition's sub-grid is the WHOLE window (not the crop of a full-grid partition), its GPU
+#     deposit's grids are held once: a window+exact run's prediction covers its measured peak, and on macOS stays
+#     within 1.5x of it. GPU builds only.
 #
 # The 2^32 GPU sub-grid guard (ps_interpolation.cc) is NOT exercised here: it needs a real
 # >4.29e9-cell partition sub-grid, i.e. >32 GB of buffers. It mirrors the validated guard in
@@ -596,6 +599,40 @@ PYEOF
 check "S2 a real one-domain 256^3 run stays under its prediction (predicted / measured GB: ${ms2})" \
       "$(echo "${ms2}" | awk '$1 != "none" && $1 >= $2 {ok=1} END{print ok ? 1 : 0}')"
 rm -f "${SNAP_W}" "${TMP}"/at_s1* "${TMP}"/at_s2.*[a-z]
+
+# ---------- (W) --ps-window: the window's grids ----------
+# Under --ps-window every partition deposits into the whole window, whatever the split (ps_interpolation.cc
+# psSubgridBox), and the GPU deposit holding its grids runs one at a time. The model used to book the crop of a
+# full-grid partition instead -- 1064^2 of these 2048^2 cells at 2^3 -- and predicted 0.37 GB for this run, which
+# measures 0.60 GB (the TNG z=0 zooms on a 4096^2 slice: 11.1 GB for 19.75 measured, the rest being the input's
+# freed read buffers, which a window's small grids never take over: auto_tune.h autoTuneReadKeptBytes). Window+exact
+# over the 64^3 pancake on a one-cell 2048^2 slice, one partition in flight (none parks): the prediction covers the
+# measured peak and, on macOS (whose allocator the model follows), stays within 1.5x of it (0.74 GB). The CPU
+# window deposit is not modelled this closely: GPU builds only.
+echo ">> W: --ps-window books the whole window, its deposit's grids once"
+run_w() {  # $1 = log; the rest = extra flags
+    local log="$1"; shift
+    "${BIN}" "${SNAP}" "${TMP}/at_w" --grid 2048 --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a \
+        --ps-gpu --ps-vertex-mass --ps-volume-weighted --ps-exact-deposit --partition 2 2 2 --max-concurrent 1 \
+        --ps-window 0 "${BOX}" 0 "${BOX}" "$(awk -v b="${BOX}" 'BEGIN{print b/2}')" "$(awk -v b="${BOX}" 'BEGIN{print b/2 + 1e-4}')" \
+        "$@" > "${log}" 2>&1 || true
+}
+run_w "${TMP}/at_w0.log" --auto-tune-report
+if grep -q "GPU (--ps-gpu)" "${TMP}/at_w0.log"; then
+    run_w "${TMP}/at_w.log"
+    mw=$("${PY}" - "${TMP}/at_w.log" <<'PYEOF'
+import re, sys
+m = re.search(r"memory model\s*:\s*([\d.]+) GB predicted \(auto-tune\) vs ([\d.]+) GB measured", open(sys.argv[1]).read())
+print(f"{m.group(1)} {m.group(2)}" if m else "none none")
+PYEOF
+)
+    hi=$([ "$(uname)" = Darwin ] && echo 1.5 || echo 1000)
+    check "W a window+exact run's prediction covers its peak (predicted / measured GB: ${mw}; at most ${hi}x on macOS)" \
+          "$(echo "${mw}" | awk -v h="${hi}" '$1 != "none" && $1 >= $2 && $1 <= h*$2 {ok=1} END{print ok ? 1 : 0}')"
+else
+    echo "   SKIP  W (this build has no GPU backend)"
+fi
+rm -f "${TMP}"/at_w*
 
 echo "------------------------------------------------------------"
 if [ "${FAILS}" -gt 0 ]; then

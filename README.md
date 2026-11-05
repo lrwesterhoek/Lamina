@@ -420,15 +420,22 @@ A cell's value is either the field at the cell centre (`density`, ...) or its av
   points per cell; the only standard-DTFE path that computes `velocityStd_a`, which every other method and
   `--exact-average` reject with an error), `--randomSample` and `--poisson`.
 * **Exact average** (`--exact-average`, standard DTFE) integrates the linear interpolant over every cell/tetrahedron
-  intersection (the vendored [r3d](third_party/r3d/README.md) library, Powell & Abel 2015): no sampling noise, box mean
-  1 to 3e-8 on TNG100-3-Dark. With `--gpu` the clipping runs on the GPU (6.6x the CPU on 0.26M particles at 256^3).
-  It costs 1.14-1.65x the sampled wall time on a 512^3 TNG run, and is the production setting (`run_dtfe.sh` passes it
-  unless `DTFE_EXACT_AVERAGE=0`).
+  intersection: no sampling noise, box mean 1 to 3e-8 on TNG100-3-Dark. The CPU clips with the vendored
+  [r3d](third_party/r3d/README.md) library (Powell & Abel 2015), each tetrahedron once per slab and column of its cells;
+  with `--gpu` the GPU integrates the same intersections by a z-sweep with exact Gauss-Legendre quadrature
+  ([metal/README.md](metal/README.md)), equal to float rounding. 0.26M particles at 256^3: CPU 3.3 s, GPU 2.0 s, the
+  Monte-Carlo average 3.5 s. It cost 1.14-1.65x the sampled wall time on a 512^3 TNG run before both got faster, and is
+  the production setting (`run_dtfe.sh` passes it unless `DTFE_EXACT_AVERAGE=0`).
 * **Sampled deposit** (PS-DTFE, the default): each stream's mass is spread over the sub-samples inside it.
   `--ps-linear-deposit` weights the sub-samples by the linear density profile instead (still mass-conserving; not
   with `--ps-volume-weighted`).
-* **Exact deposit** (`--ps-exact-deposit`, PS-DTFE): each stream is clipped analytically against the grid; use the GPU
-  (on TNG300-3-Dark z = 0 it took 2.7x the sampled wall time). PS production stays sampled.
+* **Exact deposit** (`--ps-exact-deposit`, PS-DTFE): each stream is integrated analytically over every grid cell (CPU:
+  r3d clipping; GPU: the z-sweep). Both now beat the CPU's sampled deposit at 256^3: 0.26M particles CPU 8.9 s, GPU
+  10.8 s, sampled 13 s; 2.1M particles GPU 18 s, CPU 23 s, sampled 30 s. On TNG100-3-Dark z = 0 at 512^3 the CPU
+  takes 14m27s, as long as the production sampled deposit on the GPU (14m34s), the GPU 17m39s; so `run_ps_dtfe.sh -e`
+  and the launcher run it on the CPU (`-m` / `PS_METAL=1` for the GPU). The GPU hands the tetrahedra whose
+  dispersion float32 cannot resolve to the CPU's double deposit (20.6M of them on that run). PS production stays
+  sampled by default.
 * **Window** (`--ps-window x0 x1 y0 y1 z0 z1`, PS-DTFE, Mpc): only the cells of the full `--grid` inside that box are
   deposited and written, equal to the full run's cells (counts and masks bit for bit, sums to the last fixed-point
   unit). The cost follows the window, not the grid: the launcher's exact zoom is a window of a fine virtual grid. With

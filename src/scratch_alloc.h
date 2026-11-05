@@ -41,6 +41,46 @@ namespace ScratchAlloc
     // diagnostics for banners/tests: bytes currently mmap'ed, and mappings served in total
     long scratchLiveBytes();
     long scratchTotalAllocs();
+
+    // ZERO FILLS. std::vector zero-fills what it allocates, and on a scratch mapping those zeros are WRITES: every
+    // page of a fresh, all-zero file turns dirty and goes back to the disk (a 1536^3 run's 290 GB of accumulators
+    // stalled for half an hour on a USB disk, the machine swapping, before any work). Open a ZeroFillScope around
+    // a fill of ZEROS into a block nothing else writes to before the scope ends -- assign(n, 0), or resize(n, 0) of
+    // an EMPTY vector -- and a scratch mapping made in this thread meanwhile is handed out as anonymous memory
+    // (zero pages cost next to nothing there) and moved onto its never-written scratch file when the scope ends:
+    // the same zeros, nothing written. Thread-local; a no-op where scratch is not armed, and in libDTFE (stub).
+    class ZeroFillScope
+    {
+    public:
+        explicit ZeroFillScope(bool on = true);
+        ~ZeroFillScope();
+        ZeroFillScope(ZeroFillScope const &) = delete;
+        ZeroFillScope &operator=(ZeroFillScope const &) = delete;
+    private:
+        bool on_;
+    };
+    long scratchZeroFillMoves();   // diagnostics: mappings moved onto their file at a scope's end
+
+    template <class T> inline bool allZeroBytes(T const &x)
+    {
+        unsigned char const *b = reinterpret_cast<unsigned char const *>(&x);
+        for (std::size_t i = 0; i < sizeof(T); ++i)
+            if ( b[i] != 0 ) return false;
+        return true;
+    }
+    // v.assign(n, zero) through a ZeroFillScope (assign drops the old contents: the new block is all zero)
+    template <class V, class T> inline void zeroAssign(V &v, std::size_t n, T const &zero)
+    {
+        ZeroFillScope s( allZeroBytes( zero ) );
+        v.assign( n, zero );
+    }
+    // v.resize(n, zero) through a ZeroFillScope -- only for an EMPTY v: growing a filled vector copies its data
+    // into the new block, which must reach the file as written
+    template <class V, class T> inline void zeroResize(V &v, std::size_t n, T const &zero)
+    {
+        ZeroFillScope s( v.empty() && allZeroBytes( zero ) );
+        v.resize( n, zero );
+    }
 }
 
 #endif

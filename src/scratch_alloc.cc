@@ -54,6 +54,17 @@ namespace
     pthread_mutex_t g_mtx = PTHREAD_MUTEX_INITIALIZER;
     std::atomic<std::uint64_t> g_counter{0};
     std::atomic<bool> g_warnedFallback{false};
+    std::atomic<long> g_zeroFillMoves{0};
+    std::atomic<bool> g_warnedMove{false};
+
+    // ZeroFillScope (scratch_alloc.h): the mappings made in this thread while a scope is open, handed out as
+    // anonymous memory and moved onto their scratch file (still open here, already unlinked) when it closes.
+    // Plain thread-local data: no constructor, nothing to destroy.
+    struct Pending { void *p; std::size_t sz; int fd; };
+    constexpr int kPending = 8;
+    thread_local int     t_scopeDepth = 0;
+    thread_local int     t_nPending = 0;
+    thread_local Pending t_pending[kPending];
 
     struct MutexGuard
     {
@@ -104,13 +115,23 @@ namespace
             ::close(fd); ::unlink(path);
             return nullptr;
         }
-        void *p = ::mmap( nullptr, mapSz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+        // inside a ZeroFillScope: anonymous memory now, the file mapped over it when the scope closes (the fd
+        // stays open until then); else the file mapping right away
+        bool const zeroFill = t_scopeDepth > 0 and t_nPending < kPending;
+        void *p = zeroFill ? ::mmap( nullptr, mapSz, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0 )
+                           : ::mmap( nullptr, mapSz, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
         // the name is dropped IMMEDIATELY: the mapping keeps the storage alive, and the kernel
         // reclaims it when the process exits -- normally or by crash. No stale files possible.
         ::unlink(path);
-        ::close(fd);
         if ( p == MAP_FAILED )
+        {
+            ::close(fd);
             return nullptr;
+        }
+        if ( zeroFill )
+            t_pending[t_nPending++] = Pending{ p, mapSz, fd };
+        else
+            ::close(fd);
 
         {
             MutexGuard lock(g_mtx);
@@ -132,7 +153,40 @@ namespace
                 }
         }
         ::munmap(p, mapSz);   // table full: extremely unlikely, but stay correct
+        if ( zeroFill )
+            ::close( t_pending[--t_nPending].fd );
         return nullptr;
+    }
+
+    // a pending mapping of this thread released before its scope closed: forget it (and its file)
+    void dropPending(void *p)
+    {
+        for (int i = 0; i < t_nPending; ++i)
+            if ( t_pending[i].p == p )
+            {
+                ::close( t_pending[i].fd );
+                t_pending[i].p = nullptr;
+            }
+    }
+
+    // the outermost scope closed: map each pending block's file over it. The block holds zeros only (the scope's
+    // contract) and the fresh file reads as zeros, so the contents do not change. Should the remap fail, the block
+    // simply stays anonymous memory: correct, only not disk-backed.
+    void settlePending()
+    {
+        for (int i = 0; i < t_nPending; ++i)
+        {
+            Pending const &q = t_pending[i];
+            if ( q.p == nullptr ) continue;
+            void *r = ::mmap( q.p, q.sz, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, q.fd, 0 );
+            if ( r == q.p )
+                g_zeroFillMoves += 1;
+            else if ( not g_warnedMove.exchange(true) )
+                std::fprintf( stderr, "SCRATCH: could not move a zero-filled %.1f GB grid onto its scratch file "
+                                      "(errno %d); it stays in memory.\n", q.sz/1.e9, errno );
+            ::close( q.fd );
+        }
+        t_nPending = 0;
     }
 
     // true (+ unmap) when p was one of ours; false = ordinary heap pointer
@@ -150,6 +204,7 @@ namespace
             ours = ( g_slots[i].p.load(std::memory_order_acquire) == p );
         if ( not ours )
             return false;
+        if ( t_nPending > 0 ) dropPending(p);
         MutexGuard lock(g_mtx);
         for (int i = 0; i < kSlots; ++i)
             if ( g_slots[i].p.load(std::memory_order_relaxed) == p )
@@ -201,6 +256,17 @@ namespace ScratchAlloc
     }
     long scratchLiveBytes()   { return g_liveBytes.load(); }
     long scratchTotalAllocs() { return g_totalAllocs.load(); }
+    long scratchZeroFillMoves() { return g_zeroFillMoves.load(); }
+
+    ZeroFillScope::ZeroFillScope(bool on) : on_( on and g_enabled.load(std::memory_order_acquire) )
+    {
+        if ( on_ ) ++t_scopeDepth;
+    }
+    ZeroFillScope::~ZeroFillScope()
+    {
+        if ( on_ and --t_scopeDepth == 0 and t_nPending > 0 )
+            settlePending();
+    }
 }
 
 // ------------------------- replaced global allocation functions -------------------------

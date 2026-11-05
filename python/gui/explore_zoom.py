@@ -408,6 +408,9 @@ class ZoomMixin:
             if (not periodic and float(side.get("alpha_shape", 3.0)) != 3.0
                     and "--ps-alpha-shape" not in cmd):
                 cmd += ["--ps-alpha-shape", f"{float(side['alpha_shape']):g}"]
+            # the GPU, unlike a full grid's exact run (rs.recommended_gpu: the CPU): a zoom puts large tetrahedra
+            # into one thin slice of fine cells, where the GPU's exact items lead (a 512² slice of a 4096³ grid
+            # over 2.1M particles: deposit 1.2 s against 3.0 s on the CPU; 0.26M particles: a tie)
             if rs.gpu_built("ps", precision, o.dim):
                 cmd.append("--ps-gpu")
             # the query server's tessellations on disk: the same cache folder and split, so a cached

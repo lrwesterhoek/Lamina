@@ -16,7 +16,7 @@
 #     -e   every '_a' cell the EXACT average of the linear interpolant over the cell (--exact-average). The
 #          DEFAULT (DTFE_EXACT_AVERAGE=1, the production standard: no sampling noise, the mass exact to ~3e-8);
 #          -e overrides an exported DTFE_EXACT_AVERAGE=0. DTFE_EXACT_AVERAGE=0 gives the Monte-Carlo sample mean (1.1-1.7x
-#          faster at 512^3 on the GPU; the GPU is what makes the exact average affordable: ~6.6x the CPU's speed)
+#          faster at 512^3 on the GPU before the exact clipping got faster; the CPU and the GPU now clip at the same speed)
 #   Production defaults: GRID_SIZE 512 (config.sh), padding 15, the GPU when built, the exact cell
 #   average, FIELDS = density, velocity, its gradient / divergence / shear / vorticity, the T-web and the V-web,
 #   LAMBDA_TH 0.3.

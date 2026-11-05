@@ -344,6 +344,7 @@ class TabsMixin:
         self.gpu_check = QCheckBox(P.label("gpu"))
         self.gpu_check.setToolTip(P.tooltip("gpu"))
         self.gpu_check.toggled.connect(self._changed)
+        self.gpu_check.toggled.connect(lambda _c: self._gpu_set_by_hand(self.gpu_check))
         f.addRow("", self.gpu_check)
         col.addWidget(g)
 
@@ -391,15 +392,42 @@ class TabsMixin:
         return w
 
     def _deposit_changed(self, combo: QComboBox, gpu: QCheckBox, estimator: str = "ps", dim: int = 3):
-        """Picking the exact deposit ticks the GPU (PS-DTFE: 2x faster than the threaded CPU deposit at
-        0.26M particles, 29 s against 57 s on a 256³ grid, and more at larger sizes; standard DTFE's exact
-        cell average: 6.6x, 4.1 s against 26.9 s); the box stays editable. A 2D run has no GPU."""
-        if not self._loading and combo.currentData() == "exact" and rs.gpu_built(estimator, dim=dim) and not gpu.isChecked():   # (either pair has the GPU when the single one has)
-            gpu.setChecked(True)            # (its toggled signal runs _changed)
-            self.status_message("exact deposit: the GPU is ticked (2x faster than the CPU at 0.26M particles, "
-                                "more at larger sizes)" if estimator == "ps" else
-                                "exact cell averages: the GPU is ticked (6.6x faster than the CPU at 0.26M particles)")
+        """Picking the exact deposit sets the GPU box to that deposit's faster side (rs.recommended_gpu):
+        PS-DTFE the CPU (14.5 min against 17.7 min on the GPU for TNG100-3-Dark at 512³), standard DTFE's
+        exact cell average the GPU (1.6x, 2.0 s against 3.3 s at 0.26M); the box stays editable. A tick this
+        removed comes back when the choice leaves the exact deposit (the sampled deposit's start), unless the
+        box was set otherwise meanwhile. A 2D run has no GPU."""
+        if not self._loading:
+            want = estimator != "ps"
+            if combo.currentData() == "exact":
+                if rs.gpu_built(estimator, dim=dim) and gpu.isChecked() != want:   # (either pair has the GPU when the single one has)
+                    self._gpu_auto_set(gpu, want)
+                    if not want:
+                        self._gpu_unticked_by_exact.add(gpu)
+                    self.status_message("exact deposit: the GPU is unticked (the CPU is faster on production runs)"
+                                        if estimator == "ps" else
+                                        "exact cell averages: the GPU is ticked (1.6x faster than the CPU at 0.26M "
+                                        "particles)")
+            elif gpu in self._gpu_unticked_by_exact:
+                self._gpu_unticked_by_exact.discard(gpu)
+                if not gpu.isChecked():
+                    self._gpu_auto_set(gpu, True)
+                    self.status_message("the GPU is ticked again, as before the exact deposit")
         self._changed()
+
+    def _gpu_auto_set(self, gpu: QCheckBox, on: bool):
+        """a GPU tick set by a rule, not by hand (_gpu_set_by_hand leaves the exact deposit's memory alone)"""
+        self._gpu_auto_setting = True
+        try:
+            gpu.setChecked(on)              # (its toggled signal runs _changed)
+        finally:
+            self._gpu_auto_setting = False
+
+    def _gpu_set_by_hand(self, gpu: QCheckBox):
+        """the box changed otherwise than by the exact deposit's rule (by hand, a loaded spec, a preset): the
+        tick that rule removed is no longer one to bring back"""
+        if not self._gpu_auto_setting:
+            self._gpu_unticked_by_exact.discard(gpu)
 
     def _estimator_switched(self, combo: QComboBox, ps_now: bool):
         """An estimator switch by the user moves the deposit choice to the new estimator's production setting
@@ -416,14 +444,18 @@ class TabsMixin:
         if combo.currentData():
             kept[old] = combo.currentData()          # the estimator left: its choice, for the way back
         want = kept.get(new) or rs.production_deposit(new)
-        if combo.currentData() != want:
-            gpu = self.gpu_check if combo is self.deposit_combo else self.o_gpu
+        gpu = self.gpu_check if combo is self.deposit_combo else self.o_gpu
+        if combo.currentData() == want == "exact":
+            # the choice stays, the estimator's GPU rule does not (PS-DTFE's exact deposit on the CPU, standard
+            # DTFE's exact average on the GPU): applied as a pick of the choice would
+            self._deposit_changed(combo, gpu, new, 3 if combo is self.deposit_combo else self.custom.dim)
+        elif combo.currentData() != want:
             was = gpu.isChecked()
             combo.setCurrentIndex(max(combo.findData(want), 0))      # its signal: the GPU tick, _changed
-            on_gpu = ", on the GPU (6.6x faster than the CPU)" if gpu.isChecked() and not was else ""
+            on_gpu = ", on the GPU (1.6x faster than the CPU)" if gpu.isChecked() and not was else ""
             if want != rs.production_deposit(new) and ps_now:            # the user's own choice back
                 self.status_message("PS-DTFE: the exact deposit again, as chosen for it before"
-                                    + (", on the GPU (2x faster than the CPU)" if gpu.isChecked() and not was else ""))
+                                    + (", on the CPU (faster than the GPU)" if was and not gpu.isChecked() else ""))
             elif want != rs.production_deposit(new):
                 self.status_message("standard DTFE: the Monte-Carlo average again, as chosen for it before; the "
                                     "exact cell average stays selectable")
@@ -653,6 +685,7 @@ class TabsMixin:
         f.addRow("Deposit", self.o_deposit)
         self.o_gpu = QCheckBox(P.label("gpu"))
         self.o_gpu.setToolTip(P.tooltip("gpu"))
+        self.o_gpu.toggled.connect(lambda _c: self._gpu_set_by_hand(self.o_gpu))
         self.o_vm = QCheckBox(P.label("vertex_mass"))
         self.o_vm.setToolTip(P.tooltip("vertex_mass"))
         self.o_vw = QCheckBox(P.label("volume_weighted"))
@@ -889,6 +922,7 @@ class TabsMixin:
         self.p_gpu = QCheckBox(P.label("gpu"))
         self.p_gpu.setToolTip(P.tooltip("gpu"))
         self.p_gpu.toggled.connect(self._changed)
+        self.p_gpu.toggled.connect(lambda _c: self._gpu_set_by_hand(self.p_gpu))
         g.layout().addWidget(self.p_gpu, 5, 0, 1, 3)
         g.setToolTip("run_ps_pipeline.sh hands these to run_ps_dtfe.sh exactly as a Grids job does; left alone, "
                      "the scripts' own defaults are the production settings (GPU, vertex masses, volume-weighted "

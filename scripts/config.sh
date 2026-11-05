@@ -368,14 +368,21 @@ driver_binary() {
     fi
 }
 
-# gpu_auto_resolve <knob> <binary>: a GPU knob (DTFE_METAL, PS_METAL) left at 'auto' becomes gpu_build_default's
-# answer for <binary> (1 on a GPU build), and gpu_auto the note the start banner adds; a knob set to 0 or 1 is kept
-# and gpu_auto is empty.
+# gpu_auto_resolve <knob> <binary> [cpu_first]: a GPU knob (DTFE_METAL, PS_METAL) left at 'auto' becomes
+# gpu_build_default's answer for <binary> (1 on a GPU build), and gpu_auto the note the start banner adds; a knob set
+# to 0 or 1 is kept and gpu_auto is empty. cpu_first=1 makes 'auto' the CPU on every build: run_ps_dtfe.sh passes
+# PS_EXACT, as PS-DTFE's exact deposit is faster on the CPU on production runs (TNG100-3-Dark z=0 at 512^3:
+# 14.5 min against 17.7 min on the GPU).
 gpu_auto_resolve() {
-    local knob="$1" bin="$2" v
+    local knob="$1" bin="$2" cpu_first="${3:-0}" v
     gpu_auto=""
     [ "${!knob}" = "auto" ] || return 0
     v="$(gpu_build_default "${REPO_ROOT}" "${bin}")"
+    if [ "${cpu_first}" = "1" ] && [ "${v}" = "1" ]; then
+        printf -v "${knob}" '%s' 0
+        gpu_auto=" (${knob} unset: the exact deposit is faster on the CPU; ${knob}=1 runs it on the GPU)"
+        return 0
+    fi
     printf -v "${knob}" '%s' "${v}"
     gpu_auto=" (${knob} unset: ${bin#./} is $([ "${v}" = "1" ] && echo "a GPU" || echo "a CPU-only") build; ${knob}=0 or 1 chooses)"
 }

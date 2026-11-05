@@ -84,8 +84,8 @@ class PipelineSpec:
     plan_key: str = ""              # memory_key() the plan was checked for (settings changed -> stale)
 
     def __post_init__(self):
-        if self.gpu is None:            # a fresh pipeline's GPU tick is the PS build's (a saved one is kept)
-            self.gpu = _rs.gpu_build_default("ps", self.precision)
+        if self.gpu is None:            # a fresh pipeline's GPU tick is the PS build's (a saved one is kept),
+            self.gpu = _rs.gpu_build_default("ps", self.precision) and self.deposit != "exact"   # exact: the CPU
 
     def plane_json(self, sim: str, nu: int | None = None) -> Path:
         return _rs.sim_dir(sim, self.data_root) / f"hires_plane_{self.axis}{nu or self.nu}.json"

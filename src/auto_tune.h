@@ -413,6 +413,42 @@ inline std::vector<double> autoTuneFxGrids(Field &f, AutoTunePS const &ps)
     return g;
 }
 
+// What the input reader frees and macOS's allocator keeps, in bytes: the reader's flat arrays (gadget_reader_HDF5.cc:
+// the positions, masses and velocities 'readParticleData' asks for, the scalars, the Lagrangian positions and the
+// IDs), freed one by one as Read_data::transferData builds the particles, and with '--lagrangianInput' the IC file's
+// coordinates and IDs and the by-ID table (input_output.cc; a sort index of 8 B instead of the table's 12 when the
+// IDs are not contiguous). libmalloc keeps a freed block under 4 GiB in the footprint and serves only a request of
+// about half its size or more from it, so these stay until something that large is allocated. A run with full-size
+// grids allocates them right away; a --ps-window run does not -- its window grids, the partitions' particle copies,
+// the tessellations (TBB's own pools) and the GPU's buffers are all far smaller or elsewhere -- so the whole residue
+// is still there when the first wave of partitions tessellates: TNG100-3-Dark z=0 (94M particles, positions from a
+// '--lagrangianInput' file) reads to 13.1 GB, 57 B/particle live and 80 kept, and peaks with the first six
+// tessellations on top (19.6 GB measured at '--partition 6 6 6 --max-concurrent 6'). Later partitions' large
+// allocations take the blocks over, so the residue is gone a few partitions in.
+inline double autoTuneReadKeptBytes(User_options const &u, double const N)
+{
+    double const B4 = 4294967296.;   // a freed block of this size or more goes back to the system
+    double const R = double(sizeof(Real));
+    auto kept = [&](double const perParticle) { return perParticle*N < B4 ? perParticle*N : 0.; };
+    auto reads = [&](size_t const i) { return u.readParticleData.size() > i and u.readParticleData[i] != 0; };
+    double b = 0.;
+    if ( reads(0) ) b += kept( NO_DIM*R );                    // positions
+    if ( reads(1) ) b += kept( R );                           // masses
+#ifdef VELOCITY
+    if ( reads(2) ) b += kept( noVelComp*R );                 // velocities
+#endif
+#ifdef SCALAR
+    for (size_t i = 3; i < u.readParticleData.size(); ++i)
+        if ( reads(i) ) { b += kept( R ); break; }            // the scalar
+#endif
+#ifdef PHASE_SPACE
+    b += kept( NO_DIM*R ) + kept( 8. );                       // the Lagrangian positions, the IDs
+    if ( not u.lagrangianInputFilename.empty() )
+        b += kept( NO_DIM*4. ) + kept( 8. ) + kept( NO_DIM*4. );   // the IC file's coordinates and IDs, the by-ID table
+#endif
+    return b;
+}
+
 // One Quantities' PS COUNT, FLAG and MASK grids in bytes per sub-grid cell (part of autoTuneBytesPerCell): none of
 // them is a private copy of the deposit's copy mode -- the deposit's own int stream count, its two byte flags and
 // its caustic mask are shared by the threads (ps_interpolation.cc psAddCount), and the others are
@@ -529,7 +565,8 @@ struct AutoTuneReport
     double predicted = 0., fixed = 0., budget = 0., pts = 0.;   // bytes
     double perPartition = 0.;   // bytes ONE partition in flight adds (the run's memory gate waits for this much)
     double lookAhead = 0.;      // bytes the partition look-ahead adds to 'predicted' (0: none runs)
-    double gpuSnapshot = 0.;    // bytes of the GPU deposit's host snapshot, held by ONE partition at a time (in 'predicted')
+    double gpuSnapshot = 0.;    // bytes of the GPU deposit's host snapshot (with --ps-window: and of the deposit's window
+                                // grids), held by ONE partition at a time (in 'predicted')
     double streamsEstimate = -1., streamsBudgeted = 0.;
     std::string line() const
     {
@@ -1489,6 +1526,7 @@ struct AutoTunePSPlanner
     char (&ptsStreamsWhy)[200];
     double const &ptsBytes;
     double const &particleBytes;
+    double const &readKept;
     double const &fixed;
     bool const &psVel;
     bool const &psDisp;
@@ -1563,28 +1601,16 @@ struct AutoTunePSPlanner
         // down with a finer split -- roughly this partition's share of the total records.
         if ( nPts > 0 )
             m += double(std::thread::hardware_concurrency()) * double(16 << 20);   // one HitSink block per thread
-        // Eulerian sub-grid this partition allocates (psUseSubgrid). A Lagrangian sub-box maps to
-        // a DISPLACED, distorted Eulerian region, so the crop is the touched span + slop -- valid
-        // on both periodic and non-periodic runs since ps_interpolation.cc crops a periodic
-        // axis to its WRAPPED span instead of keeping the whole axis.
-        double subCells = 1.;
-        for (int d=0; d<NO_DIM; ++d)
-            subCells *= std::min( double(outGrid[d]),
-                                  double(u.gridSize[d])/double(n) + 40. );   // crop + slop, never above the axis (nor the window)
+        // Eulerian sub-grid this partition allocates (subGridCells below)
+        double const subCells = subGridCells( n );
         if ( metalActive )
         {
             // flat tet arrays (the 16-float record 64 + masses 4 + the finite-cell ordinal 4 B/tet,
             // + vels 48 when velocity-derived grids are requested; the cost-sort permutes IN PLACE,
             // so no gather copy) + the PSGpuGrids host and device copies of the selected grids
+            // (gpuCellBytes; under --ps-window held once, snapshotBytes)
             double const perTet = (72. + (psVel or psDisp or psGrad ? 48. : 0.)) * 1.3;   // + allocator slack
-            // gridB (above): every buffer in PSGpuGrids, mirrored host+device (the x2 below)
-            // + 4 B/cell: the device's mass grid is a 64-bit fixed-point sum (ps_metal_host.cc)
-            // + 4 B/cell more on the host, which receives those 8 B words instead of a 4 B float
-            //   grid (PSGpuGrids::massFx) -- unless a density is selected: the caller then allocates its density
-            //   sub-grid (4 B; 8 in the double build) only after the call, from the words, so the peak (the
-            //   copy-back) is no higher than a float grid's
-            double const hostFx = ( ps.phaseSpace and not psDensity ) ? 4. : 0.;
-            m += perTet*6.77*nOwn + 2.*gridB*subCells + (4. + hostFx)*subCells;
+            m += perTet*6.77*nOwn + ( u.psWindowOn ? 0. : gpuCellBytes()*subCells );
             // --ps-exact-deposit runs depositExactItems (ps_metal_host.cc): a per-tet weight total
             // (4 B) + the item list, 8 B per 16 cells of a tet's bbox window -- ~20x the tet's
             // volume in cells on the crossed-waves benchmark, at least one item -- capped at 32M items
@@ -1635,14 +1661,30 @@ struct AutoTunePSPlanner
     // partition at 1024^3 split 2^3 (volume-weighted velocity), past the gate's 4 GB headroom. Not in
     // partitionBytes(): the deposits run one at a time (ctxMutex), so whatever the concurrency there is ONE such
     // copy, added once to every plan below. (The CUDA port keeps none yet: there it is slack; the model errs high.)
+    // --ps-window: every partition's sub-grid is the whole window (subGridCells), and the grids of the deposit
+    // running are held once in the same way -- the device and host copies (gpuCellBytes) and, beside them, the
+    // partition's own sub-grids (bCellDeposit: its density, counts and flags; fxCell + fxMom: the fixed-point words
+    // while they are converted), all freed and kept by the allocator for the next partition's deposit. In flight
+    // and waiting, a partition holds only its tessellation (with the window's cells counted per partition, three
+    // in flight would book them three times: +20% at 3^3 over 2.1M particles on a 4096^2 window, measured).
     double snapshotBytes(int n) const
     {
         if ( not metalActive ) return 0.;
-        double subCells = 1.;   // the same crop + slop as partitionBytes()
-        for (int d=0; d<NO_DIM; ++d)
-            subCells *= std::min( double(outGrid[d]), double(u.gridSize[d])/double(n) + 40. );
+        double const subCells = subGridCells( n );   // the same sub-grid as partitionBytes()
         double const nTet = 6.77 * N / double(n)/double(n)/double(n);
-        return (gridB + 4.)*subCells + (psExact ? (momFx ? 12. : 8.) : 4.)*nTet;
+        double const window = u.psWindowOn ? ( gpuCellBytes() + bCellDeposit + fxCell + fxMom )*subCells : 0.;
+        return (gridB + 4.)*subCells + (psExact ? (momFx ? 12. : 8.) : 4.)*nTet + window;
+    }
+
+    // the GPU deposit's grids per sub-grid cell: gridB (above) -- every buffer in PSGpuGrids -- mirrored host and
+    // device (the x2), + 4 B/cell: the device's mass grid is a 64-bit fixed-point sum (ps_metal_host.cc), + 4 B/cell
+    // more on the host, which receives those 8 B words instead of a 4 B float grid (PSGpuGrids::massFx) -- unless a
+    // density is selected: the caller then allocates its density sub-grid (4 B; 8 in the double build) only after
+    // the call, from the words, so the peak (the copy-back) is no higher than a float grid's
+    double gpuCellBytes() const
+    {
+        double const hostFx = ( ps.phaseSpace and not psDensity ) ? 4. : 0.;
+        return 2.*gridB + 4. + hostFx;
     }
 
     // The partition look-ahead (DTFE.cpp): at one partition in flight with the GPU deposit, the NEXT
@@ -1689,7 +1731,10 @@ struct AutoTunePSPlanner
         return report;
     }
 
-    // the cells of a partition's sub-grid in an n^3 split (the crop + slop of partitionBytes())
+    // the cells of a partition's sub-grid in an n^3 split (psUseSubgrid): a Lagrangian sub-box maps to a DISPLACED,
+    // distorted Eulerian region, so the crop is the touched span + slop, never above the axis -- valid on both
+    // periodic and non-periodic runs since ps_interpolation.cc crops a periodic axis to its WRAPPED span instead of
+    // keeping the whole axis
     double gpuSubCells(int n) const
     {
         double c = 1.;
@@ -1697,6 +1742,11 @@ struct AutoTunePSPlanner
             c *= std::min( double(outGrid[d]), double(u.gridSize[d])/double(n) + 40. );
         return c;
     }
+
+    // ... the cells it allocates: under --ps-window the WHOLE window, whatever the split (psSubgridBox,
+    // ps_interpolation.cc: every partition's sub-grid is the window, merged window-local, DTFE.cpp) -- the crop
+    // above is per axis, so a window spanning x and y of a 4096^2 slice would book 723^2 cells at 6^3, not 4096^2
+    double subGridCells(int n) const { return u.psWindowOn ? gridTotal : gpuSubCells( n ); }
 
     AutoTuneReport choose();
     std::optional<AutoTuneReport> irreducibleCase(int const userC, int const userN, int const nGpuMin,
@@ -1756,6 +1806,8 @@ inline std::optional<AutoTuneReport> AutoTunePSPlanner::irreducibleCase(int cons
         else
             warning << "With the grids on scratch disk, ";
         warning << (partBytes*N)/1.e9 << " GB of particles";
+        if ( readKept > 0. )
+            warning << ", " << readKept/1.e9 << " GB of read buffers the allocator keeps (--ps-window)";
         if ( nPts > 0 )
             warning << " and " << ptsBytes/1.e9 << " GB for the " << double(nPts) << " --sample-points ("
                     << ptsStreamsWhy << "; DTFE_AUTO_PTS_STREAMS overrides)";
@@ -2117,7 +2169,10 @@ inline AutoTuneReport autoTunePartitioning(User_options &u,
     // cached partitions are loaded, so their memory goes to more partitions at once. (A late read, when
     // a needed partition turns out uncached, adds them back: at most the particles' bytes over budget.)
     double const particleBytes = u.psParticlesDeferred ? 0. : partBytes*N;
-    double const fixed = particleBytes + (scratchOn ? 0. : gridTotal*bCell) + ptsBytes;
+    // ... and a --ps-window run keeps what reading them freed (autoTuneReadKeptBytes: nothing it allocates is large
+    // enough to take those blocks over before the first partitions peak)
+    double const readKept = ( u.psWindowOn and not u.psParticlesDeferred ) ? autoTuneReadKeptBytes( u, N ) : 0.;
+    double const fixed = particleBytes + readKept + (scratchOn ? 0. : gridTotal*bCell) + ptsBytes;
     report.fixed = fixed;
     report.budget = budget;
     report.pts = ptsBytes;
@@ -2194,7 +2249,7 @@ inline AutoTuneReport autoTunePartitioning(User_options &u,
     AutoTunePSPlanner planner{ u, metalActive, autoPart, userPartitionOn, autoConc, report, minN, N, ramBytes,
                                budgetWhy, budget, cores, outGrid, gridTotal, ps, bCellDeposit, bCell, fxNote, padFrac,
                                message, buf, kDT, partBytes, kParInsert, scratchOn, nPts, ptsStreamsWhy, ptsBytes,
-                               particleBytes, fixed, psVel, psDisp, psGrad, psExact, momFx, gridB, psDensity, fxCell,
+                               particleBytes, readKept, fixed, psVel, psDisp, psGrad, psExact, momFx, gridB, psDensity, fxCell,
                                fxMom, copyCell, threadScratch };
     return planner.choose();
 

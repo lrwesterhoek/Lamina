@@ -45,12 +45,12 @@ passing; the Metal path and real-hardware runs are local. **First thing to run o
 |---|---|
 | `metal/ps_deposit.metal` | PS-DTFE kernels: `depositFields` (one thread per tetrahedron: mass, velocity moment, dispersion second moment, gradient moment, stream count, scalar; the sampled path, the centroid fallback and the deferrals) and `depositExactItems` (the exact deposit, one thread per block of a tetrahedron's window cells) |
 | `metal/dtfe_deposit.metal` | standard-DTFE kernels: `depositAveraged1` (per tetrahedron, A/B), `depositAveraged1Items2/4/8` (the item kernels), `depositExactAverage` (`--exact-average`) |
-| `metal/exact_clip.metal.inc` | the float32 r3d port (tetrahedron-cell clipping and moments), prepended to both kernel sources |
+| `metal/exact_clip.metal.inc` | the exact tetrahedron-cell intersection moments (`sweep_moments`, a register-resident z-sweep) and the face-plane cell skip, prepended to both kernel sources |
 | `metal/validate_deposit.cpp`, `metal/build_prototype.sh` | the kernel harness and its build (offline-compiles `ps_deposit.metallib` when Xcode's Metal toolchain is installed, which only the harness loads; git-ignored) |
 | `src/CGAL_triangulation/gpu_host.h` | the backend-neutral host interface (deposit calls, `PSGpuGrids`, the shared-grid API `dtfeGpuShared*`, `psWindowHull`) |
 | `src/CGAL_triangulation/ps_metal_host.cc`, `dtfe_metal_host.cc` | the Metal hosts: device and pipelines, the chunked dispatch controller, retries |
 | `src/CGAL_triangulation/ps_gpu_cuda.cu`, `dtfe_gpu_cuda.cu` | the CUDA/HIP ports of kernels and hosts |
-| `src/CGAL_triangulation/gpu_cuda_compat.h`, `gpu_cuda_emu.h`, `gpu_exact_clip.cuh` | the CUDA/HIP macro shim and warp collectives, the CPU emulation (`-DGPU_EMU`), the r3d port's CUDA twin |
+| `src/CGAL_triangulation/gpu_cuda_compat.h`, `gpu_cuda_emu.h`, `gpu_exact_clip.cuh` | the CUDA/HIP macro shim and warp collectives, the CPU emulation (`-DGPU_EMU`), the exact clipping's CUDA twin |
 | `src/CGAL_triangulation/gpu_metal_retry.h`, `gpu_cuda_retry.cuh` | the shared retry policy: snapshots, causes, pace, fault injection |
 | `src/CGAL_triangulation/ps_deposit_params.h`, `dtfe_gpu_fixed.h` | the per-tet record (`psFillTetRecord`) and the fixed-point units (`psMassFixedScale`, `psMomentFixedScale`, `PSFixedBounds`; the standard grids' units) |
 | `src/CGAL_triangulation/ps_exact_inside.h` | the CPU's exact sample-inside test the kernels' certified float test reproduces |
@@ -81,12 +81,29 @@ cost spans five orders of magnitude once cells are smaller than tetrahedra, and 
 per-tet total `sumW`, phase 1 deposits each piece with the share m/sumW, so every tetrahedron deposits exactly its
 mass; a tetrahedron whose total stays 0 goes through `depositFields` (sampled path, centroid fallback or deferral). The
 host bounds every window from its own copy (the kernel re-derives it in float; surplus items idle) and caps the list at
-32M items. `PS_EXACT_ITEMS=0` keeps the one-thread path for A/B.
+32M items. `PS_EXACT_ITEMS=0` keeps the one-thread path for A/B. With the dispersion requested, a tetrahedron whose
+velocity covariance float32 cannot resolve (`exact_disp_illcond`: a thin tetrahedron with a steep velocity gradient,
+`EX_DISP_KAPPA2`) is left out of phase 0 (only phase 0 decides, so phase 1 never drops a tet whose weights were
+summed) and deferred by `depositFields` to the CPU's double deposit; every other piece's mean velocity and covariance
+are clamped to bounds a correct value always meets.
 
-**The clip's frame.** r3d's moments come from origin-apex simplices, so a piece far from the origin loses its volume
-to cancellation. Every GPU exact path clips with the origin at the centre of the overlap of the tetrahedron's bounding
-box with the cell and shifts the centroid back; it agrees with the CPU (double r3d, vertex-0 frame) to about 1e-6 at
-every resolution (`ps_window_check.sh`'s fine grid, `dtfe_metal_check.sh`'s fine region).
+**The clipping** (`sweep_moments` in `exact_clip.metal.inc`, shared by `depositExactItems` and `depositExactAverage`)
+is not an r3d port: it sweeps the tetrahedron in z. Between breakpoints (the middle vertices' z, the z where a
+tetrahedron edge crosses a side plane of the cell, the z where a vertical cell edge enters or leaves the tetrahedron)
+the cross-section clipped to the cell's rectangle changes only linearly, so its moments are polynomials of degree <= 4
+in z and 3-point Gauss-Legendre integrates them exactly; each cross-section's 2D moments come from a closed Green chain
+(the polygon's edges clipped to the rectangle plus the rectangle's chords). Everything stays in registers: Apple GPUs
+cannot index registers at run time, and the earlier float32 r3d port (a vertex graph clipped plane by plane) spilled
+832 B/thread and was latency-bound. Two rules keep it exact in float: the Green cross term is written so that a
+collapsed segment gives exactly 0 under FMA contraction, and close breakpoints are never merged (merging integrated
+across kinks and broke thin slivers). Order 1 (pass 0) and order 2 (pass 1) give bit-identical volumes. The whole
+`--ps-exact-deposit` on an M1 Max (one partition): 18.1 -> 8.7 s for 0.26M particles on 256^3, 10.8 -> 6.2 s for
+2.1M on 128^3, 35.7 -> 18.1 s for 2.1M on 256^3. The file's header comment has the details.
+
+**The clip's frame.** A piece's moments taken about a far origin cancel (r3d's origin-apex simplices lost the volume
+itself). Every GPU exact path clips with the origin at the centre of the overlap of the tetrahedron's bounding box with
+the cell and shifts the centroid back; it agrees with the CPU (double r3d, vertex-0 frame) to float rounding at every
+resolution (`ps_window_check.sh`'s fine grid, `dtfe_metal_check.sh`'s fine region).
 
 **`--ps-window`.** The sampled kernel visits every cell of a straddling tetrahedron's bounding box and counts the
 samples outside the window for its normalization, depositing only those inside. The exact items are built from the
@@ -116,7 +133,8 @@ precomputes volumes, sample counts and single-cell indices with its own helpers,
   (`depositAveraged1`, `DTFE_GPU_ITEMS=0`), whose 10 000-sample threads trip the watchdog.
 - **`--exact-average`** (`depositExactAverage`): the exact deposit's item split (16 cells, `DTFE_GPU_EXACT_CELLS`), each
   piece depositing the interpolant's centroid value and the gradients times its volume, one dispatch. Agrees with the
-  CPU to float rounding (density 5e-7, velocity 4e-6, gradient 8e-6 of the peak on the 96^3 test box).
+  CPU to float rounding (density 4e-7, velocity 7e-7, gradient 2e-6 of the peak on the 96^3 test box of
+  `dtfe_metal_check.sh`).
 - **Sub-domains.** Each OpenMP sub-domain deposits its own sub-grid, serialized on the one queue. The alternative, one
   full grid on the device for the whole call (`DTFE_GPU_SHARED=1`, `DTFE_GPU_SHARED_GB` cap), is tested but off: its
   atomics' footprint on the full grid cost more than the zeroing and read-back it saves (2.1M at 512^3: 12.9 s against
@@ -224,6 +242,8 @@ that has a Metal spelling also answers to it: the alias is read when the `*_GPU_
 | `DTFE_GPU_CHUNK` (`DTFE_METAL_CHUNK`) | standard DTFE: the opening chunk (the item kernels round it up to a multiple of 256) | 65536 items; per-tet kernel 25088 tetrahedra, exact 8192 items |
 | `PS_GPU_CHUNK` (`PS_METAL_CHUNK`) | PS-DTFE: the per-tet kernel's opening chunk in tetrahedra | 25000; exact deposit 500 |
 | `PS_EXACT_ITEMS` | `0` keeps the one-thread-per-tetrahedron exact deposit (A/B) | on |
+| `PS_GPU_CPU_SHARE` | PS-DTFE (prototype): the share of each pass's estimated deposit work (window cells + 1 per tetrahedron) the CPU takes beside the GPU, cut from the cost-sorted tetrahedra and deposited with the deferred ones into the GPU's fixed-point words after the pass's GPU call (the overlap is across partitions); run to run the same bytes with the sequential insert, its own bytes for each share. TNG100-3-Dark 512³ exact: 0.35 with `OMP_NUM_THREADS=12 --max-concurrent 12` 13m47s against 14m27s on the CPU alone, so off by default | 0 (all on the GPU) |
+| `PS_GPU_CPU_SHARE_END` | which end of the cost order that share comes from: `head`, the cheapest (the CPU is relatively fastest on small tetrahedra), or `tail` | head |
 | `PS_EXACT_ITEM_CELLS=n` | cells per exact-deposit item | 16 |
 | `DTFE_GPU_TIMING` (`DTFE_METAL_TIMING`) | one line per batch, and the Morton order's cell sharing | off |
 | `PS_GPU_TIMING` (`PS_METAL_TIMING`) | one line per kernel run, the exact items and the checkpoints, and per partition how long its deposit waited for the GPU and held it | off |

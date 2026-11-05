@@ -863,7 +863,7 @@ DTFE_ITEM_KERNEL(depositAveraged1Items8, 8)
 // P.itemSamples consecutive cells of its bounding-box window, in gi-gj-gk order), the phase-space
 // depositExactItems' split: each piece of the tetrahedron inside a cell deposits the LINEAR
 // interpolant's integral over the piece -- its centroid value times the piece volume (order-1
-// moments, Powell & Abel 2015; the r3d port of metal/exact_clip.metal.inc) -- and the gradients
+// moments, sweep_moments of metal/exact_clip.metal.inc) -- and the gradients
 // times the piece volume, exactly as the CPU loop of averaged_interpolation_1.cc. There is no
 // per-tetrahedron normalization (the volume average has none), so a single dispatch. A single-cell
 // tetrahedron (cnts == 0) has one item, which deposits its centroid value times its volume: the
@@ -983,8 +983,8 @@ kernel void depositExactAverage(
     int a1 = int(rem / n2);
     int a2 = int(rem - ulong(a1) * n2);
 
-    // the tetrahedron in its vertex-0 frame, positively oriented for r3d (a negative one has
-    // vertices 1 and 2 swapped, as the CPU does)
+    // the tetrahedron in its vertex-0 frame, positively oriented as the CPU hands it to r3d (a
+    // negative one has vertices 1 and 2 swapped; the sweep and tet_planes take either orientation)
     float3 t1 = float3(Ax[0][0], Ax[0][1], Ax[0][2]);
     float3 t2 = float3(Ax[1][0], Ax[1][1], Ax[1][2]);
     float3 t3 = float3(Ax[2][0], Ax[2][1], Ax[2][2]);
@@ -1006,15 +1006,8 @@ kernel void depositExactAverage(
         // overlap with the cell, where the piece lies -- no frame far from the piece cancels)
         float3 const clo = ccen - hcell, chi = ccen + hcell;
         float3 const org = 0.5f * (max(clo, tlo) + min(chi, thi));
-        ExPoly piece;
-        exact_init_tet4(piece, -org, t1 - org, t2 - org, t3 - org);
-        for (int d=0; d<3; ++d) {
-            exact_clip_plane(piece, d,  1.0f, org[d] - clo[d]);   // x_d >= clo - org
-            exact_clip_plane(piece, d, -1.0f, chi[d] - org[d]);   // x_d <= chi - org
-        }
-        if (piece.nv == 0) continue;
-        float mo[4];
-        exact_reduce1(piece, mo);
+        float mo[10];   // sweep_moments clears all 10; order 1 fills mo[0..3]
+        sweep_moments(-org, t1 - org, t2 - org, t3 - org, clo - org, chi - org, false, mo);
         if (!(mo[0] > 0.0f)) continue;
         float const dV = mo[0];
         float const cen[3] = { org.x + mo[1]/mo[0], org.y + mo[2]/mo[0], org.z + mo[3]/mo[0] };   // the piece's centroid, vertex-0 frame

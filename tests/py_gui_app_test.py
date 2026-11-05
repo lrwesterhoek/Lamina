@@ -53,23 +53,44 @@ SIM = "GUITEST-1-Dark"
 DL_SIM = "GUIDL-1-Dark"
 SECRET = "gui-test-secret-key-0123"
 
-# Stands in for wget: copies the fixture chunks of the requested snapshot into -P <dir> and
-# prints wget -nv's one line per file. Never touches the network.
+# Stands in for wget, as scripts/download_snapshots.sh calls it (never touches the network):
+#  - '-O - <listing>?format=json' prints the product's JSON listing, one link per fixture chunk of the
+#    snapshot, over plain http:// as the real API links them (2026-11); no fixture = exit 8 (a failed listing);
+#  - '-i -' reads the chunk links from stdin, REFUSES a plain-http one (exit 9: the script must upgrade them),
+#    copies each fixture chunk into -P <dir> and prints wget -nv's one line per file.
 FAKE_WGET = r"""#!/usr/bin/env bash
-dest=""; url=""
+dest=""; url=""; out=""; list=""
 while [ $# -gt 0 ]; do
-    case "$1" in -P) dest="$2"; shift ;; http*) url="$1" ;; esac
+    case "$1" in -P) dest="$2"; shift ;; -O) out="$2"; shift ;; -i) list="$2"; shift ;; http*) url="$1" ;; esac
     shift
 done
-ep=$(echo "$url" | sed -n 's|.*/files/\([^/]*\)/.*|\1|p')
-[ -d "@FIXTURES@/$ep" ] || { echo "fake wget: no fixture for $url" >&2; exit 8; }
-for f in "@FIXTURES@/$ep"/*.hdf5; do
-    cp "$f" "$dest/"
-    b=$(wc -c < "$f" | tr -d ' ')
-    echo "2026-09-29 12:00:00 URL:$url$(basename "$f") [$b/$b] -> \"$dest/$(basename "$f")\" [1]"
+refuse() { case "$1" in https://*) ;; *) echo "fake wget: refusing non-https $1" >&2; exit 9 ;; esac; }
+if [ "$out" = "-" ]; then
+    refuse "$url"
+    ep=$(echo "$url" | sed -n 's|.*/files/\([^/]*\)/.*|\1|p')
+    [ -d "@FIXTURES@/$ep" ] || { echo "fake wget: no fixture for $url" >&2; exit 8; }
+    base=$(echo "${url%%\?*}" | sed 's|^https://|http://|; s|/$||')
+    printf '{"files": ['; sep=""
+    for f in "@FIXTURES@/$ep"/*.hdf5; do
+        [ -e "$f" ] || continue
+        k=$(basename "$f" .hdf5); k="${k##*.}"
+        printf '%s"%s.%s.hdf5"' "$sep" "$base" "$k"; sep=", "
+    done
+    printf ']}\n'
+    exit 0
+fi
+[ "$list" = "-" ] || { echo "fake wget: expected '-i -' (the listing's links on stdin), got $url" >&2; exit 2; }
+while read -r u; do
+    refuse "$u"
+    f="${u##*/}"; ep="${f%%.*}"; k="${f#*.}"; k="${k%.hdf5}"
+    src=""
+    for c in "@FIXTURES@/$ep"/*."$k".hdf5; do [ -e "$c" ] && src="$c" && break; done
+    [ -n "$src" ] || { echo "fake wget: 404 for $u" >&2; exit 8; }
+    cp "$src" "$dest/"
+    b=$(wc -c < "$src" | tr -d ' ')
+    echo "2026-09-29 12:00:00 URL:$u [$b/$b] -> \"$dest/$(basename "$src")\" [1]"
 done
 """
-
 
 def make_raw_chunks(folder: Path, n: int, chunks: int, per_chunk: int = 2048, h: float = 0.6774):
     """TNG-like raw snapshot chunks (h-units, float64 coordinates) for merge_HDF5.py."""
@@ -356,10 +377,11 @@ def _pipeline_options(qa, w, tmp, sim, seen, tick):
     w.p_ca.setChecked(True)
     qa.processEvents()
     check("... and ticking it again brings the cusps back", w.pipe.caustic_cusps and w.p_cu.isEnabled())
+    w.p_gpu.setChecked(rs.gpu_built("ps"))
     w.p_deposit.setCurrentIndex(w.p_deposit.findData("exact"))
     qa.processEvents()
-    check("the exact deposit ticks the GPU (as on the Grids tab) and greys the sub-samples",
-          w.pipe.deposit == "exact" and (w.p_gpu.isChecked() or not rs.gpu_built("ps"))
+    check("the exact deposit unticks the GPU (the CPU is faster, as on the Grids tab) and greys the sub-samples",
+          w.pipe.deposit == "exact" and not w.p_gpu.isChecked() and not w.pipe.gpu
           and not w.p_nsub.isEnabled() and w.pipe.command()[1]["PS_EXACT"] == "1")
     for cb in (w.p_ca, w.p_cu, w.p_rfixed):
         cb.setChecked(False)
@@ -806,6 +828,25 @@ def _queue(qa, w, tmp, data, repo_figs, sim):
           moved == (True,) * 6 and not wq.spec.ordered_merge and wq.pipe.ordered_merge and wq.custom.ordered_merge,
           f"{moved} {wq.spec.ordered_merge} {wq.pipe.ordered_merge} {wq.custom.ordered_merge}")
     wq.close()
+    # PS-DTFE's exact deposit runs on the CPU; an older launcher ticked the GPU whenever it was picked: a saved PS
+    # exact job opens with the GPU unticked, once (Grids, Pipeline, Custom); standard DTFE's exact average keeps
+    # its tick, and a GPU ticked again afterwards survives the next restart
+    mig3 = QSettings(str(tmp / "gui_mig3.ini"), QSettings.IniFormat)
+    mig3.setValue("spec", _json.dumps(rs.RunSpec(data_root=str(data), deposit="exact", gpu=True).to_dict()))
+    mig3.setValue("pipeline", _json.dumps(rs.PipelineSpec(deposit="exact", gpu=True).to_dict()))
+    mig3.setValue("custom", _json.dumps(rs.CustomSpec(estimator="dtfe", deposit="exact", gpu=True).to_dict()))
+    mig3.sync()
+    we = A.MainWindow(remember=True, settings=QSettings(str(tmp / "gui_mig3.ini"), QSettings.IniFormat))
+    moved = (we.spec.gpu, we.pipe.gpu, we.custom.gpu, we.gpu_check.isChecked(), we.p_gpu.isChecked())
+    we.gpu_check.setChecked(True)
+    qa.processEvents()
+    we.close()
+    wr = A.MainWindow(remember=True, settings=QSettings(str(tmp / "gui_mig3.ini"), QSettings.IniFormat))
+    check("a saved PS-DTFE exact job with the old forced GPU tick opens on the CPU (Grids and Pipeline tabs), once; "
+          "a standard-DTFE exact job keeps its GPU, and a tick made afterwards survives the next restart",
+          moved == (False, False, True, False, False) and wr.spec.gpu and not wr.pipe.gpu and wr.custom.gpu,
+          f"{moved} {wr.spec.gpu} {wr.pipe.gpu} {wr.custom.gpu}")
+    wr.close()
 
 
 def _stop(qa, w):
@@ -1018,11 +1059,21 @@ def _presets(qa, w, P):
     qa.processEvents()
     check("... back to single: the knob is gone", w.spec.precision == "single"
           and "DTFE_PRECISION" not in w.cmd_view.toPlainText())
+    w.gpu_check.setChecked(rs.gpu_built("ps"))
     w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("exact"))
     qa.processEvents()
-    check("picking the exact deposit ticks the GPU (when built): the only practical way to run it",
-          w.gpu_check.isChecked() == rs.gpu_built("ps") and w.spec.deposit == "exact")
+    check("picking the exact deposit unticks the GPU: faster on the CPU on production runs",
+          not w.gpu_check.isChecked() and not w.spec.gpu and w.spec.deposit == "exact")
     w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("sampled"))
+    qa.processEvents()
+    check("... and back to the sampled deposit the tick comes back (when built)",
+          w.gpu_check.isChecked() == rs.gpu_built("ps") and w.spec.gpu == rs.gpu_built("ps"))
+    w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("exact"))
+    w.gpu_check.setChecked(True)
+    w.gpu_check.setChecked(False)                                   # by hand, in the exact deposit: the CPU
+    w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("sampled"))
+    qa.processEvents()
+    check("... unless the box was set by hand meanwhile", not w.gpu_check.isChecked() and not w.spec.gpu)
     w.gpu_check.setChecked(False)
     qa.processEvents()
     # standard DTFE: the same choice is its cell average (run_dtfe.sh -e = the exact one), in its own words. Switching
@@ -1061,6 +1112,8 @@ def _presets(qa, w, P):
     w.dtfe_radio.setChecked(True)
     qa.processEvents()
     on_dtfe = w.spec.deposit                                    # the exact average: the same either way
+    check("... the choice staying 'exact' across the switch, standard DTFE's GPU rule applies (ticked, when built)",
+          w.deposit_combo.currentData() == "exact" and w.gpu_check.isChecked() == rs.gpu_built("dtfe"))
     w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("sampled"))     # the Monte-Carlo average, by hand
     w.ps_radio.setChecked(True)
     qa.processEvents()
@@ -1071,8 +1124,8 @@ def _presets(qa, w, P):
     w.ps_radio.setChecked(True)
     qa.processEvents()
     check("the deposit choice per estimator: PS-DTFE's exact deposit comes back after a switch to standard DTFE and "
-          "back (the GPU ticked, when built), standard DTFE's Monte-Carlo average too",
-          on_dtfe == "exact" and back_ps == ("exact", "exact", rs.gpu_built("ps"))
+          "back (on the CPU), standard DTFE's Monte-Carlo average too",
+          on_dtfe == "exact" and back_ps == ("exact", "exact", False)
           and back_dtfe == ("sampled", True) and w.spec.deposit == "exact", f"{on_dtfe} {back_ps} {back_dtfe}")
     w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("sampled"))
     qa.processEvents()
@@ -1170,8 +1223,8 @@ def _custom_snapshot(qa, w, tmp, P):
     combo.setCurrentIndex(combo.findData("Exact deposit"))
     w._apply_preset("custom")
     qa.processEvents()
-    check("... unless it names the GPU (exact deposit)", w.custom.deposit == "exact" and w.custom.gpu
-          and w.o_gpu.isChecked())
+    check("... and the exact-deposit preset leaves it to the rule too: PS-DTFE's exact deposit on the CPU",
+          w.custom.deposit == "exact" and not w.custom.gpu and not w.o_gpu.isChecked())
     w.custom = rs.demo_spec(tmp / "demo", gpu=False)
     w._load_into_widgets()
     w._changed()

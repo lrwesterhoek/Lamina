@@ -267,7 +267,7 @@ GRID_SIZE=512 PTS_VEL_GRAD=1 ./scripts/run_ps_pipeline.sh
                                                    #   bit8 is NOT a subset of bit7. ~1.8x the
                                                    #   caustic pass, so off by default.
 ./PS-DTFE snap.hdf5 out ... --ps-halo-release 300  # halo-interior tets -> centroid deposit
-./PS-DTFE snap.hdf5 out ... --ps-exact-deposit --ps-gpu   # exact r3d deposit (use the GPU!)
+./PS-DTFE snap.hdf5 out ... --ps-exact-deposit          # exact deposit (r3d on the CPU; --ps-gpu: a z-sweep)
 ./PS-DTFE snap.hdf5 out ... --scratch-dir /tmp/dtfe       # out-of-core full-grid accumulators
 ./PS-DTFE snap.hdf5 out ... --auto-tune-report            # the auto-tuner's plan as one line, nothing run
 ./PS-DTFE snap.hdf5 out ... --partition 4 4 4 --resume    # continue a killed partitioned run (both binaries)

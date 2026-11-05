@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QFrame, QHBoxLayout, QLa
 import runspec as rs
 import results as R
 import grids as G
+import volume3d as VOL
 from app_widgets import _mono, _note, FigureBrowser
 
 
@@ -278,6 +279,7 @@ class RunMixin:
         self._close_tee()                   # a handle left by a step that never finished must not take this job's output
         self._tee_path = ""                 # ... nor its log be renamed at this job's first step end: it stays .partial
         G.drop_cubes()                      # Explore's cubes are this process's memory: the auto-tuner budgets from what is free
+        VOL.drop_volumes()                  # ... and the 3D view's averaged and prepared cubes
         G.cap_cubes(True)                   # ... and they stay small while the job runs (lifted in _finish_job)
         if tab in (_app.GRIDS, _app.OWN, _app.PIPELINE):    # a void-catalogue search costs ~80 B per cell: a heavy job gets the memory
             self.explore.stop_void_search()  # (the next tick or output change asks again)

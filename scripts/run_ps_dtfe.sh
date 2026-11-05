@@ -9,8 +9,9 @@
 #   ./run_ps_dtfe.sh [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n AVG_SUBSAMPLES] [-m] [-e] [snapshot ...]
 #     -m   run the deposit on the GPU (same as PS_METAL=1). The default (PS_METAL unset, 'auto') is the GPU when
 #          the binary was built with one (the Makefile's o_ps/.gpu_mode_metal|cuda|hip stamp; o_ps_d for
-#          DTFE_PRECISION=double), else the CPU; PS_METAL=0 runs the CPU deposit on a GPU build.
-#     -e   exact conservative deposit (same as PS_EXACT=1; --ps-exact-deposit, GPU-capable, slower)
+#          DTFE_PRECISION=double), else the CPU -- but the CPU for the exact deposit (-e), faster there on
+#          production runs; PS_METAL=0 runs the CPU deposit on a GPU build.
+#     -e   exact conservative deposit (same as PS_EXACT=1; --ps-exact-deposit, on the CPU unless -m)
 #   Production defaults: GRID_SIZE 512 (config.sh), the GPU when built, vertex masses, volume-weighted
 #   velocity moments, the caustic classes, FIELDS = the nine production fields (density, velocity, its gradient /
 #   divergence / shear / vorticity, the dispersion, the T-web and the V-web), LAMBDA_TH 0.3.
@@ -76,7 +77,7 @@ PTS_CONVENTIONS="${PTS_CONVENTIONS:-grid}"  # with SAMPLE_POINTS: the points' co
                            # 'legacy' is passed, so a 'grid' run's command line carries no --pts-conventions.
 PS_METAL="${PS_METAL:-auto}"  # 1 = the deposit on the GPU (--ps-gpu), 0 = the CPU; 'auto' (default: it
                            # follows the build) = 1 when the binary is a GPU build (config.sh gpu_build_default),
-                           # resolved below once DTFE_PRECISION has chosen the binary
+                           # resolved below once DTFE_PRECISION has chosen the binary; 0 with PS_EXACT=1
 ORDERED_MERGE="${ORDERED_MERGE:-1}"  # 1 (default) = --ordered-merge: the partitions' grids are
                            # added in partition index order, so two identical runs write bit-identical grids (and a
                            # killed run resumes to exactly the grids of an uninterrupted one). The binary's own
@@ -139,13 +140,13 @@ TESS_CACHE="${TESS_CACHE:-}"  # directory for the reusable on-disk tessellation
                            # vertex-density pass (measured 10.9 s -> 4.6 s at 884736 particles).
                            # Must be a LOCAL, non-synced dir; costs ~0.15 KB per tessellation
                            # vertex (the file is deflated: 225 MB per 1.5e6 vertices).
-PS_EXACT="${PS_EXACT:-0}"  # 1 = exact conservative deposit (--ps-exact-deposit): analytic r3d tet-cell
+PS_EXACT="${PS_EXACT:-0}"  # 1 = exact conservative deposit (--ps-exact-deposit): analytic tet-cell
                            # clipping instead of the nSub^3 sub-sampled deposit -- no sampling noise, mass
-                           # conservation to the arithmetic's precision. Runs on the CPU (double, the
-                           # reference) and on the GPU with -m (float32 r3d port) -- USE -m HERE, the
-                           # clipping is the most expensive deposit by far. Still slower than the sampled
-                           # deposit: an accuracy option. AVG_SUBSAMPLES is ignored (the exact deposit is
-                           # the nSub->infinity limit, so '.den' == '.a_den'). Override: -e
+                           # conservation to the arithmetic's precision. Runs on the CPU by default (r3d in
+                           # double, the reference; TNG100-3-Dark z=0 at 512^3 in 14.5 min, the sampled GPU
+                           # deposit's time) and on the GPU with -m (a float32 z-sweep, 17.7 min there; faster
+                           # only around a few million particles). AVG_SUBSAMPLES is ignored (the exact
+                           # deposit is the nSub->infinity limit, so '.den' == '.a_den'). Override: -e
 
 DATA_DIR=""                # default: sim_dir $SIMULATION (config.sh); override with -d
 PS_LINEAR_DEPOSIT="${PS_LINEAR_DEPOSIT:-0}"  # 1 = --ps-linear-deposit: each tetrahedron's mass spread by the linear
@@ -263,7 +264,8 @@ cd "$REPO_ROOT" || exit 1
 # twice the memory. Default single (./PS-DTFE). Nothing falls back silently: a missing binary stops.
 DTFE_PRECISION="${DTFE_PRECISION:-single}"
 driver_binary PS_BIN PS-DTFE "${DTFE_PRECISION}"      # ./PS-DTFE or ./PS-DTFE-double (config.sh)
-gpu_auto_resolve PS_METAL "${PS_BIN}"                 # PS_METAL=auto: the GPU when this binary was built with one
+gpu_auto_resolve PS_METAL "${PS_BIN}" "${PS_EXACT}"   # PS_METAL=auto: the GPU when this binary was built with one,
+                                                      # the CPU for the exact deposit
 
 n_ok=0; n_skipped=0; n_failed=0; n_planned=0   # summarised at the end; see the exit-status note there
 

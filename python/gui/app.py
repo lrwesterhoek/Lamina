@@ -161,6 +161,14 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
                 if given is None and not sp.ordered_merge:
                     sp.ordered_merge = True
             self.settings.setValue("ordered_merge_start", json.dumps(True))
+        # PS-DTFE's exact deposit runs on the CPU (faster on production runs, rs.recommended_gpu). An older launcher
+        # ticked the GPU whenever the exact deposit was picked (never really chosen: it was forced), so a saved
+        # Grids, Pipeline or Custom job with the exact deposit has its GPU unticked ONCE; ticking it later is kept
+        if self.remember and not self._restore_json("ps_exact_cpu_start", False):
+            for sp, given in ((self.spec, spec), (self.pipe, pipeline), (self.custom, custom)):
+                if given is None and getattr(sp, "estimator", "ps") == "ps" and sp.deposit == "exact" and sp.gpu:
+                    sp.gpu = False
+            self.settings.setValue("ps_exact_cpu_start", json.dumps(True))
         # where custom-snapshot jobs wrote outputs (the Runs browser and Explore look there too)
         self.custom_dirs: list[str] = [d for d in self._restore_json("custom_dirs", []) if isinstance(d, str)]
         self.user_presets: dict = self._restore_json("presets", {})
@@ -178,6 +186,10 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         # the deposit choice per estimator, per tab ('grids', 'own'): {estimator: 'sampled' | 'exact'}, what an
         # estimator switch brings back (_estimator_switched; this session only)
         self._deposit_kept: dict[str, dict[str, str]] = {}
+        # the GPU boxes the exact deposit unticked (PS-DTFE: faster on the CPU), ticked again when the choice leaves
+        # the exact deposit unless the box was set otherwise meanwhile (_deposit_changed, _gpu_set_by_hand)
+        self._gpu_unticked_by_exact: set = set()
+        self._gpu_auto_setting = False
         self._steps: list[rs.Step] = []
         self._step_i, self._results = -1, []
         self._job_tab, self._job_start = GRIDS, None

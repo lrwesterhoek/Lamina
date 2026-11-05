@@ -51,7 +51,8 @@
 #                 only that part of the plane (default: the whole box).
 #   PS_GPU        1 = the deposit on the GPU (run_ps_dtfe.sh -m), 0 = the CPU; unset (auto) = the GPU when the
 #                 PS binary was built with one, as run_ps_dtfe.sh decides
-#                 (config.sh gpu_build_default: PS-DTFE, or PS-DTFE-double with DTFE_PRECISION=double)
+#                 (config.sh gpu_build_default: PS-DTFE, or PS-DTFE-double with DTFE_PRECISION=double),
+#                 and the CPU for the exact deposit (PS_EXACT=1)
 #   PS_VOLUME_WEIGHTED  1 (default) = volume-weighted velocity moments, the production convention
 # The other run options reach run_ps_dtfe.sh through the environment exactly as from a terminal:
 # PS_EXACT, AVG_SUBSAMPLES, PS_VERTEX_MASS, PS_CAUSTICS, PS_CAUSTIC_CUSPS, PS_PARALLEL_TRI,
@@ -113,7 +114,10 @@ fi
 # drivers' rule (config.sh gpu_build_default; DTFE_PRECISION picks the binary there too), so a CPU-only build is
 # not asked for the GPU (and a fallback warning) on every snapshot.
 gpu_auto=""
-if [ "${PS_GPU}" = "auto" ]; then
+if [ "${PS_GPU}" = "auto" ] && [ "${PS_EXACT:-0}" = "1" ]; then     # the exact deposit: faster on the CPU
+    PS_GPU=0
+    gpu_auto=" (PS_GPU unset: the exact deposit is faster on the CPU)"
+elif [ "${PS_GPU}" = "auto" ]; then
     case "${DTFE_PRECISION:-single}" in double) ps_bin="PS-DTFE-double" ;; *) ps_bin="PS-DTFE" ;; esac
     PS_GPU="$(gpu_build_default "${REPO_ROOT}" "${ps_bin}")"
     gpu_auto=" (PS_GPU unset: ${ps_bin} is $([ "${PS_GPU}" = "1" ] && echo "a GPU" || echo "a CPU-only") build)"

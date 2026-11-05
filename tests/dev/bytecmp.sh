@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Byte-for-byte comparison of the outputs of two sets of binaries: a reference set against this checkout's own
 # (./DTFE, ./PS-DTFE, their -double and -2d builds). The gate for a change that must not move any output (a
-# refactor, a cleanup): 10 runs on two synthetic crossed-wave snapshots -- standard DTFE and PS-DTFE, single, double
-# and 2D, CPU and GPU, one domain and '--partition 2 2 2', every derived and web field -- and every output file
-# compared with cmp. Logs are kept but not compared (they carry times and memory).
+# refactor, a cleanup): 17 runs on two synthetic crossed-wave snapshots -- standard DTFE and PS-DTFE, single, double
+# and 2D, CPU and GPU, one domain and '--partition 2 2 2', every derived and web field, and the CPU exact deposits
+# ('--exact-average', '--ps-exact-deposit': the GPU's exact clipping is float32 and compiled with fast math, so it
+# is compared with a tolerance elsewhere) -- and every output file compared with cmp. Logs are kept but not
+# compared (they carry times and memory).
 #
 # The reference set is any folder holding the six binaries, e.g. a copy taken before the change:
 #     mkdir -p /tmp/ref && cp DTFE DTFE-double DTFE-2d PS-DTFE PS-DTFE-double PS-DTFE-2d /tmp/ref/
@@ -37,6 +39,13 @@ runs=(
   "psd:PS-DTFE-double:w48:--grid 64 ${F3[*]}"
   "dt2:DTFE-2d:w2d:--grid 128 ${F2[*]}"
   "ps2:PS-DTFE-2d:w2d:--grid 128 ${F2[*]}"
+  "dtx:DTFE:w48:--grid 64 ${F3[*]} --exact-average"
+  "dtxd:DTFE-double:w48:--grid 64 ${F3[*]} --exact-average"
+  "psx:PS-DTFE:w48:--grid 64 ${F3[*]} dispersion_a --ps-exact-deposit --ps-caustics --ps-vertex-mass --ps-volume-weighted"
+  "psxp:PS-DTFE:w48:--grid 64 --partition 2 2 2 ${F3[*]} dispersion_a --ps-exact-deposit"
+  "psxd:PS-DTFE-double:w48:--grid 64 ${F3[*]} dispersion_a --ps-exact-deposit"
+  "dtx2:DTFE-2d:w2d:--grid 128 ${F2[*]} --exact-average"
+  "psx2:PS-DTFE-2d:w2d:--grid 128 ${F2[*]} --ps-exact-deposit"
 )
 n=0; d=0
 for r in "${runs[@]}"; do

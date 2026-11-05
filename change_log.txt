@@ -1,4 +1,43 @@
 UNRELEASED (since 1.0.0)
+- The CPU exact deposits ('--ps-exact-deposit', '--exact-average') are 4-8x faster with byte-identical outputs. Each
+  cell used to clip the whole tetrahedron by its six planes; r3d applies them one at a time, so the tetrahedron is
+  now clipped once per slab (x planes), each slab once per column (y planes) and each column per cell (z planes) --
+  the same r3d_clip calls on the same vertices -- and the slabs, columns and cells beyond the parent piece's extent
+  are skipped by r3d's own test (src/CGAL_triangulation/exact_sweep.h). The moments come from r3d's recursion
+  written out for orders 1 and 2 (the same operations in the same order: bit-identical under clang; GCC builds keep
+  r3d_reduce), and R3D_MAX_VERTS is 128 (a clipped tetrahedron holds at most ~40 vertices). 256^3 grid, M1 Max:
+  PS-DTFE 90.2 -> 22.9 s with 2.1M particles (the sampled CPU deposit: 29.9 s) and 50.8 -> 7.9 s with 0.26M;
+  standard DTFE 42.9 -> 8.1 s and 24.1 -> 3.1 s. tests/dev/bytecmp.sh now also runs the CPU exact deposits (17 runs).
+- The GPU exact deposits (Metal and CUDA/HIP) no longer clip with a float32 port of r3d: they integrate each
+  tetrahedron-cell intersection by a z-sweep (metal/exact_clip.metal.inc, its twin gpu_exact_clip.cuh). Between
+  breakpoints in z the cross-section's moments are polynomials of degree <= 4, so 3-point Gauss-Legendre per interval
+  is exact; each cross-section is the tetrahedron's quad clipped to the cell by a closed 2D Green chain. All state
+  stays in registers (the r3d vertex graph spilled 832 B per thread and was latency-bound, ALUs ~1% busy). Two
+  numerical rules made it robust under fast math: the Green cross term is written so a collapsed segment gives exactly
+  0 even when fused into an FMA, and close breakpoints are never merged. Order-1 and order-2 volumes are bit-identical
+  (the pass that sums a tet's weights and the deposit agree exactly). One partition, M1 Max, exact deposit: 0.26M
+  particles at 256^3 18.1 -> 8.7 s, 2.1M at 128^3 10.8 -> 6.2 s, 2.1M at 256^3 35.7 -> 18.1 s (52 s before today's
+  GPU changes); standard DTFE 0.26M at 256^3 3.7-4.9 -> 1.8-2.2 s. Against the double CPU reference it is as close as the
+  port or closer (w64 at 256^3: density 1.2e-3 of rms, velDisp 2.5e-3 against 3.0e-2; tet touches and caustic classes
+  nearer the CPU's). On exactly lattice-aligned tetrahedra it leaves pieces of <= 1e-7 cell in cells they only touch at
+  a face (counted as tet touches; mass effect ~1e-7). The two passes of the exact items also run as separate pipelines
+  (a function constant / template parameter), so the summing pass carries none of the deposit's registers.
+- PS-DTFE's GPU exact deposit wrote spurious velocity dispersions (a float32 limit older than this release): each
+  piece adds G^T Cov G, the variance of the tet's linear velocity over it, and on thin tets with steep velocity
+  gradients that cancels far beyond float precision. TNG100-3-Dark z = 0 at 512^3: dispersions up to 5.9e10 (km/s)^2
+  in ~1% of the cells, a box mean of 5415 against the CPU's 1716 (the CPU, in double: at most 1.75e6). Now a tet whose
+  dispersion float32 cannot resolve to ~6e-4 (per velocity component |G|^2 ell^2 / range^2 above EX_DISP_KAPPA2) goes to
+  the CPU's double exact deposit, as float-degenerate tets already did, and the rest is clamped to bounds a correct
+  value always meets (each piece's mean velocity within the vertices' range, its variance at most range^2/4, the
+  covariances at most the product of the half-ranges). That run: 20.6M of the tets deferred, mean and maximum equal to the CPU's (1715.8,
+  1.752e6), the worst cell 2.3e-2 of the rms off (was 3.9e6), wall 17m08s -> 17m39s. Metal and CUDA/HIP.
+- The drivers and the launcher run PS-DTFE's exact deposit on the CPU by default: TNG100-3-Dark z = 0 at 512^3
+  takes 14m27s there against 17m39s on the GPU (and 14m34s for the production sampled GPU deposit), the GPU being
+  faster only around a few million particles (2.1M at 256^3: 18 s against 23 s). run_ps_dtfe.sh -e and
+  run_ps_pipeline.sh with PS_EXACT=1 resolve an unset PS_METAL / PS_GPU to the CPU (-m, PS_METAL=1 or PS_GPU=1 still
+  choose the GPU); the launcher unticks the GPU when the exact deposit is picked, its 'Exact deposit' preset runs on
+  the CPU, and a ticked GPU on an exact run of 10M particles or more gets a warning. Standard DTFE's exact cell
+  average stays on the GPU (2.0 s against 3.3 s at 0.26M particles).
 - PS-DTFE: the partitions start in index order again. With LLVM's OpenMP runtime the loop's schedule(dynamic, 1) ran
   as a static steal (each thread worked through its own contiguous block), so almost every partition finished
   before its turn in the ordered merge and parked or spilled: TNG100-3-Dark z = 1 at 5^3 spilled 100 of 125
@@ -24,6 +63,16 @@ UNRELEASED (since 1.0.0)
   the 3D view's ellipsoids; the count beside it says how many of the distinct voids it keeps. On TNG100-3-Dark z = 0
   11 of the 83 distinct voids have an R_v above 25 Mpc (up to 50.9) while no R_eff exceeds 18.5 Mpc: an upper bound
   hides them.
+- Launcher, Explore: the 3D view draws the map's field as a translucent volume by default (the three planes are
+  one choice away): the field averaged down to 128^3 .. 1024^3 cells (python/gui/volume3d.py; a 1024^3 grid at its
+  own cells), transparent below the low end of a range on the map's scale (a density from rho/rho_bar = 1) and
+  opaque toward its high end, in the map's colours; direct volume rendering by texture slicing, composited front to
+  back in 16 bits a channel (8 bits lost most of a faint wall). A perspective camera (on by default; off, every void
+  is a circle of its true size again), a settled picture at the screen's own resolution drawn a few slices at a time
+  (a coarse copy while turning: 18-24 ms a frame), the slices' colours gathered on threads. TNG100-3-Dark z = 0 from
+  ps_exact1024: 512^3 in 1.9 s, 1024^3 in 4.7 s (about 10 GB at its peak; less free memory: a smaller detail, said).
+  The grid is read in slabs by plain reads, never memmapped. Averaged to 256^3, the 1024^3 and 512^3 exact-deposit
+  grids agree to 2.4e-7: the exact deposit is consistent between resolutions.
 
 VERSION 1.0.0 (Lamina, 2026-10-23)
 The project is now called Lamina (Linear Adaptive Multi-stream Interpolation for N-body Analysis): the standard

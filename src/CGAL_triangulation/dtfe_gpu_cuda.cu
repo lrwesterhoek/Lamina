@@ -48,7 +48,7 @@ extern std::atomic<int> dtfeGpuRetriesByCause[4];  // ... by cause: innocent, ti
 
 namespace {
 
-#include "gpu_exact_clip.cuh"   // V3, det3/inverse3, the r3d clip helpers (shared with ps_gpu_cuda.cu)
+#include "gpu_exact_clip.cuh"   // V3, det3/inverse3, the exact tet-cell sweep (shared with ps_gpu_cuda.cu)
 
 // must match the Metal DepositParams (dtfe_deposit.metal) field for field
 struct DepositParams
@@ -719,7 +719,7 @@ depositItemsKernel(const float* __restrict__ verts, const float* __restrict__ de
 // depositExactAverage: --exact-average on the GPU (the port of metal/dtfe_deposit.metal's kernel of
 // that name): one thread per item = (tetrahedron, block of P.itemSamples cells of its window);
 // each piece inside a cell deposits the linear interpolant's centroid value times the piece
-// volume (order-1 r3d moments), the gradients times the piece volume. A single-cell tetrahedron
+// volume (order-1 sweep moments), the gradients times the piece volume. A single-cell tetrahedron
 // (cnts == 0) has one item: the centroid fast path. No per-tet normalization, one dispatch.
 // ---------------------------------------------------------------------------------------
 __global__ void __launch_bounds__(256)
@@ -828,20 +828,13 @@ depositExactAverage(const float* __restrict__ verts, const float* __restrict__ d
                            (float(pos[1]) + 0.5f) * P.dx[1] - base[1],
                            (float(pos[2]) + 0.5f) * P.dx[2] - base[2]);
         if (box_outside_tet(faces, ccen, hcell)) continue;
-        // clipped in the OVERLAP frame (gpu_exact_clip.cuh: origin at the centre of the tet bbox's
-        // overlap with the cell, where the piece lies -- no frame far from the piece cancels)
+        // the order-1 moments of tet ∩ cell in the OVERLAP frame (gpu_exact_clip.cuh: origin at the
+        // centre of the tet bbox's overlap with the cell, where the piece lies -- no frame far from the
+        // piece cancels), by the z-sweep; sweep_moments zeroes all 10 slots
+        V3 const clo = sub3(ccen, hcell), chi = add3(ccen, hcell);
         V3 const org = overlap_origin(ccen, hcell, t1, t2, t3);
-        float const cc3[3] = { ccen.x, ccen.y, ccen.z }, hc[3] = { hcell.x, hcell.y, hcell.z };
-        float const og[3] = { org.x, org.y, org.z };
-        ExPoly piece;
-        exact_init_tet4(piece, neg3(org), sub3(t1, org), sub3(t2, org), sub3(t3, org));
-        for (int d=0; d<3; ++d) {
-            exact_clip_plane(piece, d,  1.0f, og[d] - (cc3[d] - hc[d]));
-            exact_clip_plane(piece, d, -1.0f, (cc3[d] + hc[d]) - og[d]);
-        }
-        if (piece.nv == 0) continue;
-        float mo[4];
-        exact_reduce1(piece, mo);
+        float mo[10];
+        sweep_moments(neg3(org), sub3(t1, org), sub3(t2, org), sub3(t3, org), sub3(clo, org), sub3(chi, org), false, mo);
         if (!(mo[0] > 0.0f)) continue;
         float const dV = mo[0];
         float const cen[3] = { org.x + mo[1]/mo[0], org.y + mo[2]/mo[0], org.z + mo[3]/mo[0] };

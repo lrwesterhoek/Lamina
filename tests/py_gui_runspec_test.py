@@ -655,22 +655,28 @@ def _gpu_advice_checks(tmp: Path, snap: Path):
           and len(adv(False, "sampled", ["density_a"], 2_100_000, "ps")) == (1 if ps_gpu else 0)
           and adv(False, "sampled", ["density_a"], 260_000, "ps") == []
           and adv(True, "sampled", ["density_a"], 7_100_000, "ps") == [])
-    check("gpu advice: the exact deposit without the GPU warns whatever the particle count (none known too)",
-          len(adv(False, "exact", ["density_a"], None, "ps")) == (1 if ps_gpu else 0)
+    check("gpu advice: the exact deposit warns only with the GPU ticked on a production-size run (the CPU is faster)",
+          len(adv(True, "exact", ["density_a"], 94_000_000, "ps")) == 1
+          and adv(True, "exact", ["density_a"], 2_100_000, "ps") == []
           and adv(True, "exact", ["density_a"], None, "ps") == []
+          and adv(False, "exact", ["density_a"], None, "ps") == []
+          and adv(False, "exact", ["density_a"], 94_000_000, "ps") == []
           and adv(True, "sampled", ["density_a"], None, "ps") == [])
     check("gpu advice: standard DTFE with the GPU unticked on a fine grid is told the GPU is 1.5-2.3x faster; not at 256³",
           adv(True, "sampled", rs.DTFE_FIELDS, 7_100_000, "dtfe", grid=512) == []
           and adv(False, "sampled", rs.DTFE_FIELDS, 7_100_000, "dtfe", grid=256) == []
           and len(adv(False, "sampled", rs.DTFE_FIELDS, 7_100_000, "dtfe", grid=1024)) == (1 if dt_gpu else 0))
     rec = rs.recommended_gpu
-    check("recommended GPU: exact always (when built), sampled from ~1M particles, standard DTFE when built",
-          rec("exact", ["density_a"], 1000) == ps_gpu and rec("sampled", ["density_a"], 32 ** 3) is False
+    check("recommended GPU: exact never (the CPU), sampled from ~1M particles, standard DTFE when built",
+          rec("exact", ["density_a"], 1000) is False and rec("exact", ["density_a"], 10 ** 8) is False
+          and rec("sampled", ["density_a"], 32 ** 3) is False
           and rec("sampled", ["density_a"], 19_000_000) == ps_gpu and rec("sampled", ["density_a"], None) == ps_gpu
           and rec("sampled", ["density_a"], 1e9, "dtfe") == dt_gpu)
-    ex = rs.RunSpec(sim="TNG50-4", snapshots=[99], deposit="exact", gpu=False, data_root=str(tmp))
+    ex = rs.RunSpec(sim="TNG50-4", snapshots=[99], deposit="exact", gpu=True, data_root=str(tmp))
     msgs = [m for level, m in ex.problems() if level == "warning" and "exact" in m]
-    check("a Grids exact run without the GPU gets ONE warning (the duplicate is gone)", len(msgs) == (1 if ps_gpu else 0), str(msgs))
+    ex.gpu = False
+    check("a Grids exact run of 20M particles with the GPU gets ONE warning (the duplicate is gone), none without it",
+          len(msgs) == 1 and not [m for level, m in ex.problems() if level == "warning" and "exact" in m], str(msgs))
     dtg = rs.RunSpec(sim="TNG50-4", snapshots=[99], estimator="dtfe", gpu=True, grid=512, data_root=str(tmp))
     cm = rs.CustomSpec(input_file=str(snap), estimator="dtfe", gpu=True, grid=512)
     check("a standard-DTFE 512³ run with the GPU gets no GPU warning (Grids and custom)",
@@ -684,10 +690,10 @@ def _gpu_advice_checks(tmp: Path, snap: Path):
                      data_root=str(tmp))
     cex = rs.CustomSpec(input_file=str(snap), estimator="dtfe", deposit="exact", gpu=False, grid=256)
     check("standard DTFE exact: the custom command passes --exact-average (not the PS flag), and without the GPU "
-          "both specs say the GPU is ~6.6x faster (when built)",
+          "both specs say the GPU is ~1.6x faster (when built)",
           "--exact-average" in cex.command() and "--ps-exact-deposit" not in cex.command()
           and "--exact-average" not in rs.CustomSpec(input_file=str(snap), estimator="dtfe", deposit="sampled").command()
-          and (any("6.6x" in m for _, m in dex.problems()) and any("6.6x" in m for _, m in cex.problems())) == dt_gpu,
+          and (any("1.6x" in m for _, m in dex.problems()) and any("1.6x" in m for _, m in cex.problems())) == dt_gpu,
           str(cex.problems()))
     # the Custom tab's standard run starts at the exact cell average and pads
     # with 15 mean spacings (dtfelib.estimator.STANDARD_PADDING, run_dtfe.sh's and the standard server's value) instead

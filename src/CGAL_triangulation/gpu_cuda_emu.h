@@ -344,6 +344,7 @@ inline unsigned atomicCAS(unsigned* p, unsigned cmp, unsigned val)
 inline int      __float_as_int(float f)   { int i;      std::memcpy(&i, &f, 4); return i; }
 inline unsigned __float_as_uint(float f)  { unsigned u; std::memcpy(&u, &f, 4); return u; }
 inline float    __int_as_float(int i)     { float f;    std::memcpy(&f, &i, 4); return f; }
+inline int      __popcll(unsigned long long x) { return __builtin_popcountll(x); }
 inline int      min(int a, int b) { return a < b ? a : b; }
 inline int      max(int a, int b) { return a > b ? a : b; }
 inline unsigned min(unsigned a, unsigned b) { return a < b ? a : b; }

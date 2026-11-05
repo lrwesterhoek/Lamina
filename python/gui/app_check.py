@@ -13,6 +13,7 @@ from PySide6.QtCore import QProcess, QProcessEnvironment
 
 import runspec as rs
 import grids as G
+import volume3d as VOL
 
 
 class CheckMixin:
@@ -59,6 +60,7 @@ class CheckMixin:
                         "first": {sim: list(snaps) for sim, _, snaps in passes}}
         self.mem_results.setdefault(key, {})
         G.drop_cubes()                          # the report measures free memory: not Explore's cached cubes
+        VOL.drop_volumes()                      # ... nor the 3D view's averaged and prepared cubes
         self._next_check()
         self.refresh()
 

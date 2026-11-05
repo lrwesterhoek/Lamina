@@ -114,11 +114,31 @@ kept_error() {              # <what>
     errors=$((errors + 1))
 }
 
-# A recursive fetch that exits 0 but left no chunk (the listing linked nothing https, or nothing at all)
+# A fetch that exits 0 but left no chunk (the listing named no .hdf5 file)
 fetched_none() {            # <dir> <glob>
     local f
     for f in "$1"/$2; do [ -e "$f" ] && return 1; done
     return 0
+}
+
+# Fetch every chunk a product's listing names. The API's listing links its chunks over plain http://
+# (seen 2026-11-05, every simulation), which a recursive '--https-only' crawl skips -- it fetched nothing.
+# So read the JSON listing, upgrade each link to https (the key header never travels over plain http;
+# the API redirects each chunk to a tokenized https data host), and fetch exactly those links.
+fetch_listing() {           # <listing URL, no query> <dest dir>  -> 1 when the listing or a chunk failed
+    local listing urls
+    listing="$(wget -q -O - --https-only --header="API-Key: ${API_KEY}" "$1?format=json")" || return 1
+    urls="$(printf '%s\n' "${listing}" | grep -o '"https\{0,1\}://[^"]*\.hdf5"' | tr -d '"' | sed 's|^http://|https://|')"
+    [ -n "${urls}" ] || return 0            # nothing listed: fetched_none names it
+    # The data host now and then answers one chunk with a 403 that a rerun does not get (2026-11-05):
+    # try the list up to three times; -nc skips the chunks already here.
+    local try
+    for try in 1 2 3; do
+        printf '%s\n' "${urls}" | wget -nc -nv --https-only --content-disposition \
+            --header="API-Key: ${API_KEY}" -P "$2" -i - && return 0
+        [ "${try}" -lt 3 ] && echo "  a chunk failed; trying the listing again (attempt $((try + 1)) of 3)"
+    done
+    return 1
 }
 
 usage() {
@@ -204,13 +224,9 @@ if [ "${MODE}" = "tree" ]; then
     echo "Downloading sublink trees -> ${dest_dir} ..."
     mkdir -p "${dest_dir}"
     prune_incomplete "${dest_dir}" "tree_extended.*.hdf5" || kept_error "sublink trees"
-    if wget -nd -nc -nv -e robots=off -l 1 -r -A hdf5 --https-only \
-            --content-disposition \
-            --header="API-Key: ${API_KEY}" \
-            -P "${dest_dir}" \
-            "https://www.tng-project.org/api/${SIMULATION}/files/sublink/?format=api"; then
+    if fetch_listing "https://www.tng-project.org/api/${SIMULATION}/files/sublink/" "${dest_dir}"; then
         if fetched_none "${dest_dir}" "tree_extended.*.hdf5"; then
-            echo "  Error downloading sublink trees: no chunk was fetched (the listing offered nothing over https?)"
+            echo "  Error downloading sublink trees: no chunk was fetched (the listing named no .hdf5 file)"
             errors=$((errors + 1))
         else
             echo "  sublink trees downloaded successfully"
@@ -255,13 +271,9 @@ for i in "${SNAPSHOTS[@]}"; do
     fi
     prune_incomplete "${dest_dir}" "${chunk_glob}" || kept_error "${endpoint}"
 
-    if wget -nd -nc -nv -e robots=off -l 1 -r -A hdf5 --https-only \
-            --content-disposition \
-            --header="API-Key: ${API_KEY}" \
-            -P "${dest_dir}" \
-            "https://www.tng-project.org/api/${SIMULATION}/files/${endpoint}/?format=api"; then
+    if fetch_listing "https://www.tng-project.org/api/${SIMULATION}/files/${endpoint}/" "${dest_dir}"; then
         if fetched_none "${dest_dir}" "${chunk_glob}"; then
-            echo "  Error downloading ${endpoint}: no chunk was fetched (the listing offered nothing over https?)"
+            echo "  Error downloading ${endpoint}: no chunk was fetched (the listing named no .hdf5 file)"
             errors=$((errors + 1))
         else
             echo "  ${endpoint} downloaded successfully"

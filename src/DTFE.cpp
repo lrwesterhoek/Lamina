@@ -1219,27 +1219,35 @@ static void psReserveGrids(DTFE_State &state, Quantities *uQuantities, Quantitie
     for (int d=0; d<NO_DIM; ++d) totalGrid *= mainGrid[d];
     if ( state.options.uField.selected() )
     {
-        uQuantities->stream_count.assign(totalGrid, Real(0.));
-        uQuantities->hidden_streams.assign(totalGrid, Real(0.));
+        ScratchAlloc::zeroAssign(uQuantities->stream_count, totalGrid, Real(0.));
+        ScratchAlloc::zeroAssign(uQuantities->hidden_streams, totalGrid, Real(0.));
     }
     if ( state.options.aField.selected() )
     {
-        aQuantities->stream_count.assign(totalGrid, Real(0.));
-        aQuantities->hidden_streams.assign(totalGrid, Real(0.));
+        ScratchAlloc::zeroAssign(aQuantities->stream_count, totalGrid, Real(0.));
+        ScratchAlloc::zeroAssign(aQuantities->hidden_streams, totalGrid, Real(0.));
     }
     if ( state.options.psCaustics )
     {
         if ( state.options.uField.selected() )
-            uQuantities->caustic_bits.assign(totalGrid, Real(0.));
+            ScratchAlloc::zeroAssign(uQuantities->caustic_bits, totalGrid, Real(0.));
         if ( state.options.aField.selected() )
-            aQuantities->caustic_bits.assign(totalGrid, Real(0.));
+            ScratchAlloc::zeroAssign(aQuantities->caustic_bits, totalGrid, Real(0.));
     }
     if ( state.options.psExactDeposit )
     {
         if ( state.options.uField.selected() )
-            uQuantities->tet_touch.assign(totalGrid, Real(0.));
+            ScratchAlloc::zeroAssign(uQuantities->tet_touch, totalGrid, Real(0.));
         if ( state.options.aField.selected() )
-            aQuantities->tet_touch.assign(totalGrid, Real(0.));
+            ScratchAlloc::zeroAssign(aQuantities->tet_touch, totalGrid, Real(0.));
+    }
+    if ( not state.options.scratchDir.empty() )
+    {
+        MESSAGE::Message message( state.options.verboseLevel );
+        message << "SCRATCH: " << ScratchAlloc::scratchTotalAllocs() << " grid(s), "
+                << ScratchAlloc::scratchLiveBytes() / 1.e9 << " GB, on scratch files; "
+                << ScratchAlloc::scratchZeroFillMoves() << " zero-filled in memory and moved onto their file unwritten.\n"
+                << MESSAGE::Flush;
     }
 }
 
