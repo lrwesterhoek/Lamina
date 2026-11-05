@@ -226,7 +226,7 @@ that has a Metal spelling also answers to it: the alias is read when the `*_GPU_
 | `PS_EXACT_ITEMS` | `0` keeps the one-thread-per-tetrahedron exact deposit (A/B) | on |
 | `PS_EXACT_ITEM_CELLS=n` | cells per exact-deposit item | 16 |
 | `DTFE_GPU_TIMING` (`DTFE_METAL_TIMING`) | one line per batch, and the Morton order's cell sharing | off |
-| `PS_GPU_TIMING` (`PS_METAL_TIMING`) | one line per kernel run, the exact items and the checkpoints | off |
+| `PS_GPU_TIMING` (`PS_METAL_TIMING`) | one line per kernel run, the exact items and the checkpoints, and per partition how long its deposit waited for the GPU and held it | off |
 | `PS_GPU_FLOAT_MASS` (`PS_METAL_FLOAT_MASS`) | the float mass grid on GPU and CPU, for A/B (see Exact sums) | off |
 | `PS_GPU_FLOAT_MOMENTS` (`PS_METAL_FLOAT_MOMENTS`) | the float moment sums on GPU and CPU, for A/B | off |
 | `DTFE_GPU_FLOAT_GRIDS` (`DTFE_METAL_FLOAT_GRIDS`) | standard DTFE: float atomics for the `_a` grids, for A/B | off |

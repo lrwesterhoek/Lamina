@@ -17,7 +17,9 @@ Prints ONE line of JSON on stdout (the pipeline's own messages go to stderr): th
 the map's frame), R_v and R_eff in Mpc (null where there is none), 'resolved' (the ellipsoid cuts), 'distinct'
 (catalog.distinct_mask: the resolved voids with an R_v whose centre lies inside the sphere of min(R_v, R_eff) of no
 deeper resolved void, one without R_v claiming its R_eff; the sample of the profiles and the abundance), the
-central delta, and the frame and smoothing they were found at. Exit 1 with the reason on stderr when there is no
+central delta, each resolved void's fitted ellipsoid ('semi_axes_mpc' a >= b >= c, 'ellipsoid_axes' their unit
+directions in that order; null where not resolved), and the frame and smoothing they were found at. Exit 1 with the
+reason on stderr when there is no
 catalogue (no grids, no snapshot header).
 
 --sigma-mpc S finds the voids at a smoothing of S Mpc instead of the production one (the same physical scale in
@@ -180,6 +182,12 @@ def outlines(sim, snap, prefix=None, data_root=None, method="auto", sigma_mpc=No
     defs = r_v_definitions(cat)
     distinct = catalog.distinct_mask(cat, resolved & np.isfinite(r_v), n)
     centres = (np.asarray(cat["coords"], dtype=np.float64) + 0.5) * cell
+    # the fitted ellipsoid of each resolved void (R_eff = (a b c)^(1/3) of it): its semi-axes a >= b >= c in Mpc and
+    # their unit directions in the same order (rows: the catalogue's orientation columns), null where not resolved
+    semi = np.asarray(cat["semi_axes"], dtype=np.float64).reshape(-1, 3)
+    dirs = np.swapaxes(np.asarray(cat["orientations"], dtype=np.float64).reshape(-1, 3, 3), 1, 2)
+    semi_out = [s.round(6).tolist() if ok else None for s, ok in zip(semi, resolved)]
+    dirs_out = [d.round(6).tolist() if ok else None for d, ok in zip(dirs, resolved)]
     return {"sim": sim, "snap": int(snap), "prefix": prefix or "", "method": method, "box_mpc": box, "cell_mpc": cell,
             "n_grid": n, "sigma_mpc": pipeline.smoothing_length_mpc(), "footprint": int(pipeline.config.FOOTPRINT_SIZE),
             "namespace": pipeline._param_hash(), "centres_mpc": centres.round(6).tolist(),
@@ -187,7 +195,8 @@ def outlines(sim, snap, prefix=None, data_root=None, method="auto", sigma_mpc=No
             "resolved": resolved.tolist(), "distinct": distinct.tolist(),
             "delta": _finite_or_none(np.asarray(cat["delta_values"], dtype=np.float64)),
             "sigma_asked_mpc": float(sigma_mpc) if sigma_mpc else 0.0,
-            "r_v_defs": {d: _finite_or_none(v) for d, v in defs.items()}}
+            "r_v_defs": {d: _finite_or_none(v) for d, v in defs.items()},
+            "semi_axes_mpc": semi_out, "ellipsoid_axes": dirs_out}
 
 
 def main(argv=None):

@@ -34,7 +34,8 @@ import grids as G  # noqa: E402
 import runspec as rs  # noqa: E402
 # its parts, one module each (ExploreControls' mixins; the classes and functions re-exported, explore.<name> as
 # before): explore_canvas the map widgets, explore_grid the figure grid, explore_save Save image, explore_server the
-# point-query server, explore_voids the void outlines, explore_zoom the zoom
+# point-query server, explore_voids the void outlines, explore_zoom the zoom, explore_3d the 3D view
+from explore_3d import View3D, View3DMixin, planes3d  # noqa: E402
 from explore_canvas import ColorBar, ImageCanvas  # noqa: E402,F401  (re-exported)
 from explore_grid import (GridMixin, grid_differences, grid_dpi, grid_figure, grid_full_pixels,  # noqa: E402,F401
                           grid_items, grid_suptitle, grid_tile_circles, grid_tiles, grid_unit, panel_label, panel_names,
@@ -70,6 +71,10 @@ PS_GRADIENT_TIP = ("How a phase-space output's velocity divergence, shear, vorti
                    "panel of a phase-space output says which it shows.")
 VOID_REFF_TIP = ("Also draw each void's R_eff = (a b c)^⅓ of its fitted ellipsoid, dashed, around the same centre: "
                  "R_eff is about 1.6 R_v, the open question of which radius describes the void")
+VOID_RANGE_TIP = ("Draw only the voids of this size ('any' = no bound): by R_v on the map, the figure grid, the saved "
+                  "images and their CSV and the 3D view's spheres; by R_eff when the 3D view draws the fitted "
+                  "ellipsoids. A few voids have an R_v far larger than their ellipsoid (it never returns to the mean "
+                  "nearby): an upper bound hides them")
 VOID_SIGMA_TIP = ("The smoothing the voids are found at. 'production' = the analysis scripts' own (10 cells: a "
                   "different physical scale in every box) and their cached catalogue; a value in Mpc smooths every "
                   "box at that scale (the cross-box comparison), with its own cached catalogue, built once per "
@@ -189,6 +194,15 @@ class SliceWorker(QObject):
     failed = Signal(str)
     grid_done = Signal(object)  # dict: request, rgb (the tiled composite), labels, bar, shown
     grid_failed = Signal(str)
+    done3d = Signal(object)     # explore_3d.planes3d's dict: the 3D view's planes
+    failed3d = Signal(str)
+
+    @Slot(object)
+    def render3d(self, req: dict):
+        try:
+            self.done3d.emit(planes3d(req))
+        except Exception as e:                  # a partial file, a vanished disk
+            self.failed3d.emit(f"{type(e).__name__}: {e}")
 
     @Slot(object)
     def render_grid(self, req: dict):
@@ -308,6 +322,9 @@ class ExploreView(QWidget):
         v.addLayout(head)
         self.canvas = ImageCanvas()
         v.addWidget(self.canvas, 1)
+        self.view3d = View3D()                  # in the canvas's place while 'Show in 3D' is on
+        self.view3d.setVisible(False)
+        v.addWidget(self.view3d, 1)
         self.colorbar = ColorBar()
         v.addWidget(self.colorbar)
         self.readout = QLabel(" ")
@@ -326,13 +343,14 @@ class ExploreView(QWidget):
         v.addWidget(self.streams)
 
 
-class ExploreControls(VoidsMixin, SaveMixin, GridMixin, ServerMixin, ZoomMixin, QWidget):
+class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin, ZoomMixin, QWidget):
     """Left pane. Owns the workers; talks to an ExploreView."""
     status = Signal(str)
     changed = Signal()          # a map shown or gone, or the server's phase: the menu bar follows
     # queued into the worker threads
     _to_render = Signal(object)
     _to_render_grid = Signal(object)
+    _to_render3d = Signal(object)
     _to_start = Signal(object)
     _to_query = Signal(object)
     _to_zoom = Signal(object)
@@ -480,6 +498,27 @@ class ExploreControls(VoidsMixin, SaveMixin, GridMixin, ServerMixin, ZoomMixin, 
         vrow.addWidget(self.void_goto)
         vrow.addStretch(1)
         f.addRow("Voids", vrow)
+        # the voids drawn, by size: R from .. to .. (0 = no bound), and how many that leaves
+        srow = QHBoxLayout()
+        srow.addWidget(QLabel("R from"))
+        self.void_rmin, self.void_rmax = (QDoubleSpinBox(), QDoubleSpinBox())
+        for w in (self.void_rmin, self.void_rmax):
+            w.setRange(0.0, 1000.0)
+            w.setDecimals(1)
+            w.setSingleStep(1.0)
+            w.setSuffix(" Mpc")
+            w.setSpecialValueText("any")
+            w.setToolTip(VOID_RANGE_TIP)
+            w.setKeyboardTracking(False)            # one redraw per value typed, not per keystroke
+            w.valueChanged.connect(self._void_range_changed)
+        srow.addWidget(self.void_rmin)
+        srow.addWidget(QLabel("to"))
+        srow.addWidget(self.void_rmax)
+        self.void_count = QLabel("")
+        self.void_count.setStyleSheet("color: gray")
+        srow.addWidget(self.void_count)
+        srow.addStretch(1)
+        f.addRow("Sizes", srow)
         self.void_info = QLabel("")
         self.void_info.setWordWrap(True)
         self.void_info.setTextFormat(Qt.RichText)
@@ -568,6 +607,8 @@ class ExploreControls(VoidsMixin, SaveMixin, GridMixin, ServerMixin, ZoomMixin, 
         f.setRowVisible(self.pts_combo, False)
         self._pts_side = None
         col.addWidget(g)
+
+        self._build_3d(col)                     # the 3D view's group (explore_3d)
 
         g = QGroupBox("Compare: a figure grid")
         v = QVBoxLayout(g)
@@ -761,6 +802,9 @@ class ExploreControls(VoidsMixin, SaveMixin, GridMixin, ServerMixin, ZoomMixin, 
         self._to_render_grid.connect(self._slice_worker.render_grid)
         self._slice_worker.grid_done.connect(self._grid_rendered)
         self._slice_worker.grid_failed.connect(self._grid_failed)
+        self._to_render3d.connect(self._slice_worker.render3d)
+        self._slice_worker.done3d.connect(self._3d_rendered)
+        self._slice_worker.failed3d.connect(self._3d_failed)
         self._server = ServerWorker()
         self._exact_worker = ExactZoomWorker()
         self._exact_thread = None
@@ -1145,6 +1189,7 @@ class ExploreControls(VoidsMixin, SaveMixin, GridMixin, ServerMixin, ZoomMixin, 
             m.update(axis=self.axis.currentIndex(), frac=(index + 0.5) / o.n)
         self._pts_fill()                    # BEFORE the field's render: it reads the menu (this output's planes)
         self._voids_sync()                  # BEFORE the render too: the outlines are drawn with the map
+        self._3d_sync()                     # a 2D output leaves the 3D view
         self._field_changed()
         self._refresh_server_button()
         if not self._same(prev, o):
@@ -1246,6 +1291,8 @@ class ExploreControls(VoidsMixin, SaveMixin, GridMixin, ServerMixin, ZoomMixin, 
         req = self.request()
         if req is None or self._shut:
             return
+        if self._3d_shown:                      # the 3D view follows (the map behind it too: shown again on leaving)
+            self._3d_follow(req)
         if self._grid_shown:
             prev = self._req or {}
             same_view = (bool(prev) and self._same(prev.get("output"), req["output"])
@@ -1342,7 +1389,9 @@ class ExploreControls(VoidsMixin, SaveMixin, GridMixin, ServerMixin, ZoomMixin, 
                 "fixed": self.fixed.isChecked(), "vmin": self.vmin_edit.text(), "vmax": self.vmax_edit.text(),
                 "snapshots": dict(self._snapshots), "resident": self.resident.value(),
                 "voids": self.voids.isChecked(), "void_reff": self.void_reff.isChecked(),
-                "void_sigma": self.void_sigma.value(), "ps_gradient": self.ps_gradient.currentData()}
+                "void_sigma": self.void_sigma.value(), "ps_gradient": self.ps_gradient.currentData(),
+                "void_rmin": self.void_rmin.value(), "void_rmax": self.void_rmax.value(),
+                "void_shape": self.void3d_shape.currentData()}
 
     def restore_state(self, d: dict) -> bool:
         """Back to a remembered state when its output is still listed (selected first by refresh_outputs)."""
@@ -1352,6 +1401,9 @@ class ExploreControls(VoidsMixin, SaveMixin, GridMixin, ServerMixin, ZoomMixin, 
             j = self.ps_gradient.findData(d.get("ps_gradient"))       # for every output too
             if j >= 0 and j != self.ps_gradient.currentIndex():
                 self.ps_gradient.setCurrentIndex(j)
+            j = self.void3d_shape.findData(d.get("void_shape"))       # the 3D view's voids: spheres or ellipsoids
+            if j >= 0:
+                self.void3d_shape.setCurrentIndex(j)
             self._refresh_server_button()       # refresh_outputs ran first: it judged the server with no snapshots
         if not d or self.current is None or str(self.current.root) != d.get("root"):
             return False
@@ -1371,6 +1423,8 @@ class ExploreControls(VoidsMixin, SaveMixin, GridMixin, ServerMixin, ZoomMixin, 
         # the void outlines and their options; the smoothing and the
         # R_eff tick first, so ticking 'voids' asks for the catalogue once, at the remembered smoothing
         for w, v in ((self.void_sigma, float(d.get("void_sigma", 0.0) or 0.0)),
+                     (self.void_rmin, float(d.get("void_rmin", 0.0) or 0.0)),
+                     (self.void_rmax, float(d.get("void_rmax", 0.0) or 0.0)),
                      (self.void_reff, bool(d.get("void_reff"))), (self.voids, bool(d.get("voids")))):
             w.blockSignals(w is not self.voids)
             if isinstance(w, QDoubleSpinBox):
@@ -1562,7 +1616,7 @@ class ExploreControls(VoidsMixin, SaveMixin, GridMixin, ServerMixin, ZoomMixin, 
         self._plane = res["plane"]
         self._req = req
         self._arrows = res.get("arrows")
-        if self._grid_shown:                    # a slice in flight when the grid was shown: keep the picture
+        if self._grid_shown or self._3d_shown:  # a slice in flight when the grid or 3D was shown: keep the picture
             return
         self._planes = res.get("planes")
         self._pts_side = res.get("pts_side")
@@ -1621,7 +1675,7 @@ class ExploreControls(VoidsMixin, SaveMixin, GridMixin, ServerMixin, ZoomMixin, 
         self.changed.emit()
 
     def can_save(self) -> bool:
-        return self._plane is not None or self._grid_shown
+        return self._plane is not None or self._grid_shown or self._3d_shown
 
     def is_zoomed(self) -> bool:
         return self._zoom is not None and self._zoom_fields is not None

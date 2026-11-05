@@ -38,8 +38,22 @@
      from the plane cache. In the window: the map, its title, colour bar and saved figure say the family, the choice
      reaches Compare with (A's and B's families) and the figure grid (a stored PS panel never shares a colour bar
      with a mean-field one), it is remembered, a zoom says the stream average (and its zoom line is text).
+ 10. the 3D view (view3d.py, explore_3d.py): the camera's rotation is orthonormal and right-handed, a sphere of radius
+     R is a circle of R x scale at any turn and an ellipsoid's outline is its projection's, the planes' quads are
+     painted in an exact back-to-front order (checked ray by ray), the principal sections' arcs and the textures'
+     affine maps land where the 3D points project, an ellipsoid's cut on a plane agrees with the inside test (spheres':
+     the map's circles), picking takes the smallest outline, the close-up window and the periodic cell window. In the window: Show in 3D shows the map's slice and the middle of
+     the other axes as stored (the same values), the distinct voids as spheres of R_v x scale; the slider moves its
+     plane; hover names a void and reads a plane's value; a click inspects the void (the inspector, the menu), a
+     double-click closes up on it (the planes through its centre, cut to the window periodically, the neighbours at
+     their nearest image); Whole box restores the planes; the fitted ellipsoids reach the launcher ((a b c)^(1/3) =
+     R_eff) and 'fitted ellipsoids' draws each as its own, a close-up then sized by R_eff and holding the whole
+     ellipsoid, its neighbours dim, the menu by R_eff; the figure grid and the 3D
+     view replace each other; the PNG is written; the map comes back. The Sizes range keeps the same voids on the
+     map, the grid's panels and the 3D view (by R_v; the ellipsoids by R_eff), says how many, keeps a close-up's void
+     and is remembered.
 
-The pure parts (grids.void_at, void_circles_mpc, void_info, void_outlines.write_csv) run without Qt; the rest needs
+The pure parts (grids.void_at, void_circles_mpc, void_info, void_outlines.write_csv, view3d) run without Qt; the rest needs
 PySide6 and reports SKIP (exit 0) without it. Usage: ~/.venvs/dtfe-gui/bin/python tests/py_gui_explore_test.py
 """
 
@@ -1033,6 +1047,354 @@ def gui():
         x.shutdown() if hasattr(x, "shutdown") else None
 
 
+def view3d_pure():
+    """10. view3d's geometry, no Qt."""
+    import view3d as V
+    print("3D view (pure)")
+    rng = np.random.default_rng(3)
+    R0 = V.rotation(0.0, 0.0)
+    rots = [V.rotation(*rng.uniform(-180, 180, 2)) for _ in range(20)]
+    check("10. rotation: orthonormal and right-handed at any turn; (0, 0) looks along +y with x right and z up",
+          all(np.allclose(R @ R.T, np.eye(3)) and np.isclose(np.linalg.det(R), 1.0) for R in rots)
+          and np.allclose(R0, [[1, 0, 0], [0, 0, 1], [0, -1, 0]]))
+    cam = V.Camera(target=(30, 30, 30), scale=7.5, yaw=-50, pitch=33, width=640, height=480)
+    c, R = np.array([[12.0, 40.0, 25.0]]), 6.0
+    q, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+    sphere, ellipsoid = V.sphere_matrices([R]), V.ellipsoid_matrices([[9.0, 6.0, 3.5]], [q.T])
+    ball = rng.normal(size=(6000, 3))
+    ball /= np.linalg.norm(ball, axis=1)[:, None]
+    cxy, cd = cam.project(c)
+
+    def reach(M):                       # how far the projected surface reaches in the outline's own unit (1 = on it)
+        u, w = V.outline_axes(cam, M)
+        xy, _ = cam.project(c + ball @ M[0].T)
+        return u[0], w[0], np.linalg.norm((xy - cxy) @ np.linalg.inv(np.stack([u[0], w[0]], 1)).T, axis=1).max()
+    su, sw, s_reach = reach(sphere)
+    _u, _w, e_reach = reach(ellipsoid)
+    check("10. a sphere of radius R is a circle of R x scale on the screen at any turn (the voids at their true size "
+          "against the box); an ellipsoid's outline is the projection's own (its surface reaches it, never past)",
+          np.allclose([np.hypot(*su), np.hypot(*sw)], R * 7.5) and abs(su @ sw) < 1e-9
+          and abs(s_reach - 1) < 1e-3 and abs(e_reach - 1) < 1e-3, f"{s_reach} {e_reach}")
+    check("10. ellipsoid_matrices: column i is direction i (the catalogue's row) times semi-axis i",
+          np.allclose(ellipsoid[0], q * [9.0, 6.0, 3.5]) and np.allclose(sphere[0], R * np.eye(3)))
+    sec_ok = True
+    t = np.linspace(0.05, np.pi - 0.05, 9)
+    a = np.linspace(0, 2 * np.pi, 2000, endpoint=False)
+    for M in (sphere, ellipsoid):
+        for i, j in V.SECTIONS:
+            su, sw = V.section_axes(cam, M[:, :, i], M[:, :, j])
+            curve = c + np.cos(a)[:, None] * M[0][:, i] + np.sin(a)[:, None] * M[0][:, j]
+            rxy, rdepth = cam.project(curve)
+            pts = cxy + np.cos(t)[:, None] * su[0] + np.sin(t)[:, None] * sw[0]
+            near = np.argmin(np.hypot(*(rxy[None, :, :] - pts[:, None, :]).transpose(2, 0, 1)), axis=1)
+            sec_ok &= bool(np.hypot(*(rxy[near] - pts).T).max() < 0.2 and np.all(rdepth[near] < cd[0]))
+    check("10. the principal sections (a sphere's great circles, an ellipsoid's): centre + cos t u + sin t v is the "
+          "projected section, its near half (0 < t < pi) in front of the centre", sec_ok)
+    # the cuts on a plane: an ellipsoid's agrees with the inside test point by point; spheres' = the map's circles
+    cut = V.plane_cuts(c, ellipsoid, 64.0, 1, 38.0, (0.0, 0.0), (60.0, 60.0), 300, 300)
+    uv = rng.uniform(0, 60, (20000, 2))
+    p3 = np.stack([uv[:, 0], np.full(len(uv), 38.0), uv[:, 1]], 1)
+    S_inv = np.linalg.inv(ellipsoid[0] @ ellipsoid[0].T)
+    inside = np.einsum("ni,ij,nj->n", p3 - c, S_inv, p3 - c) <= 1
+    tex = np.stack([uv[:, 0] * 5.0, (60.0 - uv[:, 1]) * 5.0], 1)
+    in_cut = (np.linalg.norm((tex - cut[0][:2]) @ np.linalg.inv(cut[0][2]).T, axis=1) <= 1) if len(cut) == 1 else None
+    cs, rs = rng.uniform(0, 64, (40, 3)), rng.uniform(2, 9, 40)
+    ours = V.plane_cuts(cs, V.sphere_matrices(rs), 64.0, 2, 30.5, (0, 0), (64, 64), 128, 128)
+    theirs = G.void_circles(cs, rs, 64.0, 2, 30.5, [0, 1], (0, 0), (64, 64), 128, 128)
+    check("10. where a shape cuts a plane: an ellipsoid's cut agrees with the inside test at every point; spheres' cuts "
+          "are the map's circles (grids.void_circles: the same places, radii and periodic images)",
+          in_cut is not None and inside.sum() > 100 and not np.any(inside != in_cut) and len(ours) == len(theirs) > 3
+          and all(np.allclose(a_[:2], b_[:2]) and a_[3] == b_[4] and np.allclose(sorted(np.linalg.svd(a_[2])[1]),
+                                                                                 sorted(b_[2:4]))
+                  for a_, b_ in zip(ours, theirs)), f"{len(cut)} {len(ours)} {len(theirs)}")
+    big, small = (100.0, 100.0, np.array([40.0, 0.0]), np.array([0.0, 20.0]), 3), \
+        (110.0, 100.0, np.array([6.0, 2.0]), np.array([-1.0, 5.0]), 8)
+    check("10. picking an outline: the smallest one containing the point (a small void over a big one stays "
+          "reachable), none outside", V.outline_at([big, small], 111.0, 101.0) == 8
+          and V.outline_at([big, small], 100.0, 118.0) == 3 and V.outline_at([big, small], 100.0, 125.0) is None)
+    # the quads' order: along random rays, the nearest quad is the one painted last
+    lo, hi = np.zeros(3), np.full(3, 60.0)
+    wrong = overlaps = 0
+    for _ in range(60):
+        pos, shown = rng.uniform(5, 55, 3), rng.random(3) < 0.85
+        cam = V.Camera(scale=8, yaw=rng.uniform(-180, 180), pitch=rng.uniform(-85, 85), width=600, height=600)
+        cam.fit(lo, hi)
+        quads = V.plane_quads(lo, hi, pos, shown)
+        rank = {i: n for n, (_kind, i) in enumerate(V.paint_order(quads, np.zeros((0, 3)), cam, pos, lo, hi))}
+        d = -cam.R[2]
+        for x, y in rng.uniform(0, 600, (150, 2)):
+            p0, hits = cam.unproject(x, y), []
+            for i, q in enumerate(quads):
+                a = q["axis"]
+                if abs(d[a]) < 1e-12:
+                    continue
+                s = (pos[a] - p0[a]) / d[a]
+                pt = p0 + s * d
+                r0, r1 = V.rest_axes(a)
+                if q["u"][0] <= pt[r0] <= q["u"][1] and q["v"][0] <= pt[r1] <= q["v"][1]:
+                    hits.append((s, i))
+            if len(hits) > 1:
+                overlaps += 1
+                wrong += max(hits, key=lambda h: rank[h[1]])[1] != min(hits)[1]
+    check("10. the planes cut into quads (12 for three planes inside the window) and painted back to front exactly: "
+          "along every ray the nearest quad is painted last", len(V.plane_quads(lo, hi, [30, 30, 30])) == 12
+          and overlaps > 1000 and wrong == 0, f"{wrong} wrong of {overlaps}")
+    cam = V.Camera(target=(5, 6, 7), scale=3.0, yaw=20, pitch=-40, width=300, height=200)
+    m11, m12, m21, m22, dx, dy = V.texture_map(1, 4.5, (1.0, 2.0), (9.0, 12.0), 80, 100, cam)
+    tex = np.array([[0, 0], [80, 0], [0, 100], [80, 100]], dtype=float)
+    on_screen = np.stack([tex[:, 0] * m11 + tex[:, 1] * m21 + dx, tex[:, 0] * m12 + tex[:, 1] * m22 + dy], 1)
+    want, _ = cam.project([[1.0, 4.5, 12.0], [9.0, 4.5, 12.0], [1.0, 4.5, 2.0], [9.0, 4.5, 2.0]])
+    check("10. a plane's texture is mapped onto the screen where its corners project (the top row at the high end)",
+          np.allclose(on_screen, want))
+    # the rule's size is the close-up's choice (view3d.close_up_window): the test holds it to its properties
+    centre = np.array([3.0, 50.0, 10.0])
+    wins = [V.close_up_window(centre, r, 0.5, 64.0) for r in (0.2, 2.0, 5.0, 12.0, 40.0)]
+    half = [0.5 * (hi - lo) for lo, hi in wins]
+    lo_r, hi_r = V.close_up_window(centre, 2.0, 0.5, 64.0, reach=9.0)
+    check("10. the close-up window: a cube centred on the void, holding its sphere, growing with the radius, a few "
+          "cells at least and never more than the box; it holds the whole drawn shape (an ellipsoid's a)",
+          np.all(0.5 * (hi_r - lo_r) >= 9.0) and
+          all(np.allclose(0.5 * (lo + hi), centre) and np.allclose(h, h[0]) for (lo, hi), h in zip(wins, half))
+          and all(h[0] >= r for h, r in zip(half[:4], (0.2, 2.0, 5.0, 12.0)))
+          and all(a[0] <= b[0] for a, b in zip(half, half[1:])) and half[0][0] >= 2 * 0.5 and half[-1][0] <= 32.0,
+          f"{[float(h[0]) for h in half]}")
+    idx, wlo, whi = V.cell_window([-3.2, 10.0, 60.0], [4.1, 20.0, 70.0], np.zeros(3), np.full(3, 1.0), 64)
+    pos = V.plane_position(62, 0.0, 1.0, -4.0, 5.0, 64.0)
+    check("10. the cell window: whole cells covering it, read periodically across the faces (-4..5 -> cells 60..63, "
+          "0..4); a plane's position is its image inside the window",
+          list(idx[0]) == [60, 61, 62, 63, 0, 1, 2, 3, 4] and np.allclose(wlo, [-4, 10, 60]) and np.allclose(whi, [5, 20, 70])
+          and list(idx[2]) == [60, 61, 62, 63, 0, 1, 2, 3, 4, 5] and pos == -1.5
+          and V.plane_position(62, 0.0, 1.0, 0.0, 64.0, 64.0) == 62.5, f"{list(idx[0])} {wlo} {whi} {pos}")
+    imgs = V.nearest_images([[62.0, 1.0, 30.0], [10.0, 33.0, 30.0]], [2.0, 63.0, 30.0], 64.0)
+    check("10. a close-up near a face shows the voids across it at their nearest image",
+          np.allclose(imgs, [[-2.0, 65.0, 30.0], [10.0, 33.0, 30.0]]), str(imgs))
+
+
+def view3d_gui():
+    """10. the 3D view in the window, on gui()'s synthetic snapshot (its catalogue is cached by then)."""
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        print(f"SKIP (3D view): PySide6 is not importable ({e})")
+        return
+    import explore as E
+    import explore_3d as X3
+    import runspec as rs
+    import view3d as V
+    print("3D view")
+    qa = QApplication.instance() or QApplication([])
+    data = TMP / "data"
+    if not (data / SIM).is_dir():
+        make_snapdir(data, 50, 0.0, 7)
+    E.VOID_CACHE_DIR = TMP / "void cache"
+    view = E.ExploreView()
+    x = E.ExploreControls(view, lambda: str(data), lambda: [])
+    view.resize(900, 760)
+    view.show()
+    real_procs = rs.dtfe_processes
+    rs.dtfe_processes = lambda max_age=2.0: {"runs": [], "servers": []}
+    try:
+        x.refresh_outputs()
+        wait_for(qa, lambda: not x._busy and x._plane is not None, 30)
+        x.voids.setChecked(True)
+        ok = wait_for(qa, lambda: x._void_proc is None and bool(x._void_cache), 180)
+        res = x._void_cache.get(x._void_cache_key(x.current), {})
+        check("10. the catalogue for the 3D view", ok and "error" not in res, str(res.get("error", ""))[:200])
+        if "error" in res or not res:
+            return
+        o = x.current
+        axis, index = x.axis.currentIndex(), x.index.value()
+        x.view3d_toggle.setChecked(True)
+        ok = wait_for(qa, lambda: x._3d_res is not None and not x._3d_busy, 30)
+        qa.processEvents()
+        v3, pl = view.view3d, (x._3d_res or {}).get("planes") or [None] * 3
+        want_index = [o.n // 2] * 3
+        want_index[axis] = index
+        same = all(p is not None and np.array_equal(p["values"], o.slice("density", a, want_index[a]))
+                   for a, p in enumerate(pl))
+        check("10. Show in 3D: the 3D view in the map's place, the streams table hidden; three planes, the map's slice "
+              "and the middle of the other axes, the stored values (the whole box, no stride at 64^3)",
+              ok and v3.isVisible() and not view.canvas.isVisible() and not view.streams.isVisible() and same
+              and x._3d_index == want_index and "3D, the whole box" in view.title.text(), f"{x._3d_index} {want_index}")
+        rows = sorted(int(k) for k in np.nonzero(res["_shown"] & np.isfinite(res["_r_v"]))[0])
+        circles = {c[4]: (c[0], c[1], float(np.hypot(*c[2]))) for c in v3._outlines}     # (x, y, radius)
+        check("10. the distinct voids with an R_v as spheres, each a circle of R_v x scale; the void menu lists them, "
+              "the largest first", sorted(circles) == rows and len(rows) > 0
+              and all(abs(circles[k][2] - res["_r_v"][k] * v3.cam.scale) < 1e-6 for k in rows)
+              and [x.void3d.itemData(j) for j in range(1, x.void3d.count())]
+              == sorted(rows, key=lambda k: -res["_r_v"][k]), f"{sorted(circles)} {rows}")
+        # the map's slider moves its plane
+        x.index.setValue((index + 7) % o.n)
+        ok = wait_for(qa, lambda: not x._3d_busy and x._3d_res["request"]["index"][axis] == (index + 7) % o.n, 30)
+        moved = x._3d_res["planes"][axis]["pos"]
+        check("10. the map's slider moves the 3D view's plane along its axis",
+              ok and abs(moved - (o.lo[axis] + ((index + 7) % o.n + 0.5) * o.length[axis] / o.n)) < 1e-9, f"{moved}")
+        # hover and click a void: the one whose circle holds a point no other circle does
+        k0 = max(rows, key=lambda k: res["_r_v"][k])
+        cx, cy, r = circles[k0][:3]
+        spot = next(((cx + f * r * np.cos(t), cy + f * r * np.sin(t)) for f in (0.0, 0.5, 0.8)
+                     for t in np.linspace(0, 2 * np.pi, 12) if v3.sphere_at(cx + f * r * np.cos(t),
+                                                                               cy + f * r * np.sin(t)) == k0), None)
+        check("10. the void's outline can be pointed at", spot is not None)
+        if spot is None:
+            return
+        x._3d_hover(*spot)
+        check("10. hover: the readout names the void (R_v, R_eff, delta) and the view highlights it",
+              f"void {k0}: R_v" in view.readout.text() and v3.hover_row == k0, view.readout.text())
+        x._3d_click(*spot)
+        check("10. click: the void inspector shows its entry (Go to its centre enabled), the menu selects it, the view "
+              "draws it as the one inspected", x._void_picked == (x._void_cache_key(o), k0)
+              and f"void {k0}" in x.void_info.text() and x.void_goto.isEnabled()
+              and x.void3d.currentData() == k0 and v3.selected == k0 and x.void3d_close.isEnabled())
+        # a plane's value under the mouse: the middle of the front-most quad
+        _a, T, rect = v3._drawn[0]
+        mid = T.map(rect.center())
+        pt = v3.point_at(mid.x(), mid.y())
+        ok_pt = pt is not None
+        if ok_pt:
+            a, xyz, value = pt
+            ijk = [int(np.floor((xyz[b] - o.lo[b]) / (o.length[b] / o.n))) % o.n for b in range(3)]
+            cube = np.fromfile(o.files["density"].path, dtype=o.dtype).reshape((o.n,) * 3)
+            ok_pt = abs(value - float(cube[tuple(ijk)])) < 1e-6 and ijk[a] == x._3d_index[a]
+        check("10. a plane point under the mouse: its position and the stored value of that cell", ok_pt, f"{pt}")
+        # close-up
+        scale0 = v3.cam.scale
+        x._3d_double(*spot)
+        ok = wait_for(qa, lambda: not x._3d_busy and x._3d_close is not None
+                      and x._3d_res["request"]["lo"][0] == x._3d_close["lo"][0], 30)
+        c = res["_centres"][k0]
+        cell = o.length / o.n
+        lo, hi = V.close_up_window(c, res["_r_v"][k0], float(cell.min()), float(res["box_mpc"]))
+        through = [int(np.floor((c[b] - o.lo[b]) / cell[b])) % o.n for b in range(3)]
+        idx, wlo, _whi = V.cell_window(lo, hi, o.lo, cell, o.n)
+        crop_ok = True
+        for a, p in enumerate(x._3d_res["planes"]):
+            r0, r1 = V.rest_axes(a)
+            crop_ok &= p is not None and np.array_equal(p["values"], o.slice("density", a, through[a])[np.ix_(idx[r0], idx[r1])])
+        near = V.nearest_images(res["_centres"][rows], c, float(res["box_mpc"]))
+        inside = [k for k, keep in zip(rows, V.in_window(near, res["_r_v"][rows], x._3d_res["lo"], x._3d_res["hi"])) if keep]
+        check("10. double-click: a close-up on the void, the planes through its centre's cell, cut to its window "
+              "read periodically across the faces, the voids reaching into it at their nearest image",
+              ok and x._3d_close["row"] == k0 and x._3d_index == through and crop_ok
+              and np.allclose(x._3d_res["lo"], wlo) and sorted(int(r) for r in v3.voids["rows"]) == sorted(inside)
+              and f"close-up on void {k0}" in view.title.text() and x.void3d_back.isEnabled(),
+              f"{x._3d_index} {through} {crop_ok} {list(v3.voids['rows'])} {inside}")
+        spin(qa, 400)                                       # the flight
+        seen = next(((cc[0], cc[1], float(np.hypot(*cc[2]))) for cc in v3._outlines if cc[4] == k0), None)
+        check("10. ... the camera flown to the void's window: the void in the middle of the view, still a circle of "
+              "R_v x the new scale", np.allclose(v3.cam.target, 0.5 * (lo + hi)) and seen is not None
+              and abs(seen[0] - v3.width() / 2) < 1 and abs(seen[1] - v3.height() / 2) < 1
+              and abs(seen[2] - res["_r_v"][k0] * v3.cam.scale) < 1e-6 and v3.cam.scale > scale0, f"{seen}")
+        png = TMP / "view3d.png"
+        written = x.save_3d_png(png)
+        from PySide6.QtGui import QImage
+        im = QImage(written)
+        check("10. Save image in 3D: a PNG of the view as on screen", png.is_file() and im.width() >= v3.width(),
+              f"{im.width()} {v3.width()}")
+        x.whole_box_3d()
+        ok = wait_for(qa, lambda: not x._3d_busy and x._3d_close is None and x._3d_res["request"]["lo"][0] == o.lo[0], 30)
+        check("10. Whole box: the box's planes where they were", ok and x._3d_index[axis] == (index + 7) % o.n
+              and np.allclose(x._3d_res["lo"], o.lo) and not x.void3d_back.isEnabled(), f"{x._3d_index}")
+        # the fitted ellipsoids: the helper's JSON carries them (R_eff = (a b c)^(1/3) of them), the view draws them
+        semi, dirs = res["_semi"][rows], res["_dirs"][rows]
+        check("10. the catalogue's fitted ellipsoids reach the launcher: a >= b >= c in Mpc with (a b c)^(1/3) = R_eff, "
+              "their directions orthonormal; the inspector says a, b, c",
+              np.all(np.isfinite(semi)) and np.all(np.diff(semi, axis=1) <= 1e-9)
+              and np.allclose(np.prod(semi, axis=1) ** (1 / 3), res["_r_eff"][rows], rtol=1e-4)
+              and all(np.allclose(d @ d.T, np.eye(3), atol=1e-4) for d in dirs) and "a, b, c = " in x.void_info.text(),
+              f"{semi[:2]} {res['_r_eff'][rows][:2]}")
+        x.void3d_shape.setCurrentIndex(x.void3d_shape.findData("ellipsoid"))
+        qa.processEvents()
+        v3.repaint()
+        M = V.ellipsoid_matrices(semi, dirs)
+        u, w = V.outline_axes(v3.cam, M)
+        drawn = {o[4]: o for o in v3._outlines}
+        check("10. 'fitted ellipsoids': every void drawn as its own ellipsoid (the outline its projection's), labelled "
+              "with its semi-axes; remembered", sorted(drawn) == rows
+              and all(np.allclose(drawn[k][2], u[j]) and np.allclose(drawn[k][3], w[j]) for j, k in enumerate(rows))
+              and v3.voids["labels"][0].startswith(f"void {rows[0]} · a, b, c = ")
+              and x.state().get("void_shape") == "ellipsoid", f"{sorted(drawn)} {rows}")
+        x.close_up_3d(k0)
+        ok = wait_for(qa, lambda: not x._3d_busy and x._3d_close is not None
+                      and x._3d_res["request"]["lo"][0] == x._3d_close["lo"][0], 30)
+        j0 = rows.index(k0)
+        lo_e, hi_e = V.close_up_window(c, res["_r_eff"][k0], float(cell.min()), float(res["box_mpc"]), semi[j0].max())
+        check("10. ... a close-up sized by R_eff, holding the whole ellipsoid; its neighbours drawn dim; the menu "
+              "sorted by R_eff", ok and np.allclose(x._3d_close["lo"], lo_e) and np.allclose(x._3d_close["hi"], hi_e)
+              and v3.focus and v3.selected == k0
+              and [x.void3d.itemData(j) for j in range(1, x.void3d.count())]
+              == sorted(rows, key=lambda k: -res["_r_eff"][k]) and "R_eff" in x.void3d.itemText(1))
+        x.whole_box_3d()
+        x.void3d_shape.setCurrentIndex(x.void3d_shape.findData("sphere"))
+        wait_for(qa, lambda: not x._3d_busy and x._3d_close is None, 30)
+        x.grid_set_layout(1, 2)
+        x.grid_fill("redshifts")
+        x.show_grid(True)
+        wait_for(qa, lambda: not x._grid_busy, 60)
+        g_ok = x._grid_shown and not x._3d_shown and not v3.isVisible() and not x.view3d_toggle.isChecked()
+        x.view3d_toggle.setChecked(True)
+        wait_for(qa, lambda: not x._3d_busy and not x._busy, 30)
+        check("10. the figure grid and the 3D view replace each other", g_ok and x._3d_shown and not x._grid_shown
+              and v3.isVisible())
+        x.view3d_toggle.setChecked(False)
+        ok = wait_for(qa, lambda: not x._busy and x._plane is not None, 30)
+        qa.processEvents()
+        check("10. back to the map: the canvas, the streams table and the map's title", ok and view.canvas.isVisible()
+              and view.streams.isVisible() and not v3.isVisible() and "3D" not in view.title.text()
+              and x.view3d_toggle.text() == "Show in 3D")
+        # ---- the Sizes range: the same voids on the map, the grid's panels, the saves and the 3D view
+        r_v, r_eff = res["_r_v"], res["_r_eff"]
+        x.void_rmax.setValue(float(np.mean(sorted(r_v[rows])[:2])))     # between the two smallest R_v
+        qa.processEvents()
+        hi_r = x.void_rmax.value()
+        keep_v = [k for k in rows if r_v[k] <= hi_r]
+        circ_rows = {k for *_a, k in (x._void_circles() or [])}
+        check("10. Sizes: an upper bound keeps the voids of R_v up to it on the map (outlines, the figure grid's panels), "
+              "the count says how many", list(x.void_rows(res)) == keep_v and 0 < len(keep_v) < len(rows)
+              and circ_rows <= set(keep_v) and list(x._panel_voids(o)["rows"]) == keep_v
+              and x.void_count.text() == f"{len(keep_v)} of {len(rows)} voids", f"{keep_v} {circ_rows} {x.void_count.text()}")
+        x.view3d_toggle.setChecked(True)
+        wait_for(qa, lambda: not x._3d_busy and x._3d_res is not None, 30)
+        qa.processEvents()
+        menu = [x.void3d.itemData(j) for j in range(1, x.void3d.count())]
+        check("10. ... and in the 3D view: the spheres and the menu", sorted(int(k) for k in v3.voids["rows"]) == keep_v
+              and sorted(menu) == keep_v, f"{list(v3.voids['rows'])} {menu}")
+        x.void3d_shape.setCurrentIndex(x.void3d_shape.findData("ellipsoid"))
+        qa.processEvents()
+        keep_e = [k for k in rows if r_eff[k] <= hi_r]
+        check("10. ... the ellipsoids by their R_eff (the size drawn), said in the count",
+              sorted(int(k) for k in v3.voids["rows"]) == keep_e and "(by R_eff)" in x.void_count.text(),
+              f"{list(v3.voids['rows'])} {keep_e} {x.void_count.text()}")
+        x.void3d_shape.setCurrentIndex(x.void3d_shape.findData("sphere"))
+        x.void_rmax.setValue(0.0)
+        x.void_rmin.setValue(1000.0)
+        qa.processEvents()
+        v3.repaint()
+        check("10. ... a range no void is in: none drawn, the menu says so, the view still paints",
+              len(v3.voids["rows"]) == 0 and x.void3d.itemText(0) == "no void in the Sizes range" and v3._outlines == []
+              and x.void_count.text() == f"0 of {len(rows)} voids")
+        x.close_up_3d(k0)
+        wait_for(qa, lambda: not x._3d_busy and x._3d_close is not None, 30)
+        qa.processEvents()
+        st = x.state()
+        check("10. ... a close-up keeps the void it looks at whatever the range; the range is remembered",
+              list(v3.voids["rows"]) == [k0] and st.get("void_rmin") == 1000.0 and st.get("void_rmax") == 0.0)
+        x.whole_box_3d()
+        x.void_rmin.setValue(0.0)
+        wait_for(qa, lambda: not x._3d_busy and x._3d_close is None, 30)
+        x.view3d_toggle.setChecked(False)
+        wait_for(qa, lambda: not x._busy, 30)
+        check("10. ... no range: every distinct void again", list(x.void_rows(res)) == rows
+              and x.void_count.text() == f"all {len(rows)} voids")
+        check("10. the 3D texts carry no '--'; a 2D grid is refused with the reason",
+              all("--" not in t for t in (X3.VIEW3D_TIP, X3.CLOSE_TIP))
+              and X3.View3DMixin.view3d_applicable(type("Flat", (), {"dim": 2})()) == "only for 3D grids"
+              and X3.View3DMixin.view3d_applicable(o) == "")
+    finally:
+        rs.dtfe_processes = real_procs
+        x.shutdown()
+
+
 def fold_map():
     """Explore's 'caustic (fold) cells' map of a periodic PS run is the exact fold
     flag, dtfelib.io.caustic_is_fold(class mask, streams=, hidden=) -- the stored '.caustic' of older grids
@@ -1665,8 +2027,10 @@ def keep_slice():
 def main():
     try:
         pure()
+        view3d_pure()
         mean_field_pure()
         gui()
+        view3d_gui()
         fold_map()
         keep_slice()
         mean_field_gui()

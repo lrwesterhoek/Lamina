@@ -1745,8 +1745,12 @@ static void psRunPartitionLoop(PSLoopCtx &c, PartitionMemoryGate &memoryGate, Pr
     }
     else
     {
+    // MONOTONIC: the partitions start in index order, which the ordered merge and the memory gate rely on. A plain
+    // schedule(dynamic, 1) is nonmonotonic since OpenMP 5.0, and LLVM's libomp runs it as a static steal: thread t
+    // works through the t-th contiguous block, so on TNG100 z=1 (5^3, 8 threads) partitions 16..124 finished while
+    // thread 0 was still on 0..15 -- 107 of 125 parked, 100 of them spilled (38.8 GB written)
 #ifdef OPEN_MP
-    #pragma omp parallel for schedule(dynamic, 1) num_threads(psConcurrency)
+    #pragma omp parallel for schedule(monotonic: dynamic, 1) num_threads(psConcurrency)
 #endif
     for (int pi=0; pi<totalPartitions; ++pi)
     {

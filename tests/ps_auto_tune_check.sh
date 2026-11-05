@@ -17,7 +17,8 @@
 #     partitioned 256^3 run (volume-weighted, dispersion -- fields whose extra grids the model
 #     must count), predicted peak >= measured peak RSS.
 #  D) EXPLICIT FLAGS WIN. --partition/--max-concurrent given by the user are never overridden --
-#     including '--partition 1 1 1', which asks for a single triangulation.
+#     including '--partition 1 1 1', which asks for a single triangulation. Both given, the plan is still
+#     predicted (the memory gate and the parking room come from it): the AUTO-TUNE line states the user's plan.
 #  E) THE MEMORY BUDGET. 60% of RAM by default (80% lets a 64 GB Mac swap 19 GB with a desktop
 #     open next to the run); DTFE_MEM_FRACTION and DTFE_MEM_BUDGET_GB override it; a simulated
 #     machine (DTFE_RAM_GB) skips the live "what do other programs leave free" term, and the live
@@ -185,10 +186,11 @@ if grep -q "partition grid of {2, 2, 2}" "${LOG_D}" || grep -Eq "2,2,2|2 2 2" "$
 else
     check "D user partition survives" 0
 fi
-if grep -Eq "AUTO-TUNE: .* -> --partition" "${LOG_D}"; then
-    check "D auto-tune stays silent when both flags are given" 0
+if grep -Eq "AUTO-TUNE: .* -> --partition 2 2 2 --max-concurrent 2 \(predicted peak ~[0-9.]+ GB.*Both are given" "${LOG_D}" \
+   && grep -q "building up to 2 partition triangulation(s) concurrently" "${LOG_D}"; then
+    check "D both flags given: the plan is predicted as given (--partition 2 2 2 --max-concurrent 2) and run so" 1
 else
-    check "D auto-tune stays silent when both flags are given" 1
+    check "D both flags given: the plan is predicted as given (--partition 2 2 2 --max-concurrent 2) and run so" 0
 fi
 # '--partition 1 1 1' asks for ONE triangulation. It leaves partitionOn false (nothing is split),
 # which the auto-tuner must not read as "not given" (and then split the data anyway). Same

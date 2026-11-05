@@ -98,6 +98,15 @@ class SaveMixin:
         if self._grid_shown:
             self._save_grid_dialog()
             return
+        if self._3d_shown:                      # the 3D view as on screen: a PNG of its pixels
+            f, _chosen = QFileDialog.getSaveFileName(self, "Save the 3D view", str(Path.home() / "explore_3d.png"),
+                                                     "PNG image (*.png)")
+            if f:
+                try:
+                    self.status.emit(f"saved {self.save_3d_png(f if f.lower().endswith('.png') else f + '.png')}")
+                except OSError as e:
+                    self.status.emit(f"could not save {f}: {e}")
+            return
         if self._plane is None:
             return
         void_filter = "CSV table of the voids outlined (*.csv)"
@@ -235,7 +244,7 @@ class SaveMixin:
         if opts["voids"] and res is not None and self.view.canvas.circles is not None:
             axis = self._geometry()[0]
             pos = self._slice_position()
-            sel = np.nonzero(res["_shown"])[0]
+            sel = self.void_rows(res)                   # the Sizes range, as on screen
             box = float(res["box_mpc"])
             conv = lambda cs: [(um.x(u), um.y(v), r * um.k[0], int(sel[k])) for u, v, r, k in cs]   # noqa: E731
             circ = conv(G.void_circles_mpc(res["_centres"][sel], res["_r_v"][sel], box, axis, pos, rest, glo, ghi))

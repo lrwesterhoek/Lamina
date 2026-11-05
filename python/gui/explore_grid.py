@@ -806,6 +806,8 @@ class GridMixin:
         map's slice), or the map back. Shown already, a new request replaces the tiles when it arrives."""
         if getattr(self, "_grid_shown_hold", False):
             return
+        if on and self._3d_shown:
+            self.show_3d(False)                 # one picture in the right pane: the 3D view gives way
         if not on:
             if self._grid_shown:
                 self._leave_grid()

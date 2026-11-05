@@ -731,6 +731,14 @@ inline void autoTuneServe(User_options &u, size_t const nParticles)
     message << buf << MESSAGE::Flush;
 }
 
+// the end of the AUTO-TUNE line: how to override the choice, or (both knobs given) what the line is for
+inline char const *autoTuneOverrideNote(bool const autoPart, bool const autoConc)
+{
+    return ( autoPart or autoConc ) ? ". Pass --partition/--max-concurrent to override."
+                                    : ". Both are given: this is the memory model's prediction for them (the run's "
+                                      "memory limits come from it).";
+}
+
 #ifndef PHASE_SPACE
 /* ---- Standard DTFE: what one partition's thread sub-triangulations hold, from the data --------------------------
    The standard '--exact-average' run peaks 25-30% above the sampled one in footprint (TNG100-3-Dark z=1, 3^3,
@@ -1296,7 +1304,7 @@ inline AutoTuneReport AutoTuneStdPlanner::reportSplit(int const bestP, int const
               MESSAGE::printElements( splitShown, " " ).c_str(),
               bestT, predicted/1.e9, metalActive ? ", GPU interpolation" : "", vertNote );
     message << "\n" << MESSAGE::cBold() << "AUTO-TUNE:" << MESSAGE::cReset() << " " << buf
-            << ". Pass --partition/--max-concurrent to override.\n           memory budget: "
+            << autoTuneOverrideNote( autoPart, autoConc ) << "\n           memory budget: "
             << budgetWhy << "\n" << MESSAGE::Flush;
     if ( nothingFits )
     {
@@ -1984,7 +1992,7 @@ inline AutoTuneReport AutoTunePSPlanner::memorySplit(int const userC, int const 
               MESSAGE::printElements( u.partition, " " ).c_str(), u.maxConcurrent,     // NO_DIM numbers
               predicted/1.e9, metalActive ? ", GPU deposit" : "", scratchNote, ptsNote );
     message << "\n" << MESSAGE::cBold() << "AUTO-TUNE:" << MESSAGE::cReset() << " " << buf << fxNote
-            << ". Pass --partition/--max-concurrent to override.\n           memory budget: "
+            << autoTuneOverrideNote( autoPart, autoConc ) << "\n           memory budget: "
             << budgetWhy << "\n" << MESSAGE::Flush;
     return decided;
 }
@@ -2009,9 +2017,11 @@ inline AutoTuneReport autoTunePartitioning(User_options &u,
     bool const userPartitionOn = u.partitionOn;
     bool const autoConc = not u.maxConcurrentOn;
     AutoTuneReport report;
-    if ( (not autoPart and not autoConc and not u.autoTuneReport) or u.partNo>=0 or u.redshiftConeOn
-         or userSampling or u.psServe )
-        return report;  // nothing left to decide, or a mode where partitioning is unavailable
+    // a plan given in full still gets its prediction: the run's memory gate, RAM parking room and look-ahead room
+    // come from this report (without it a pinned TNG100 z=1 '--partition 5 5 5 --max-concurrent 10' parked 43 GB in
+    // RAM on a 64 GB machine); the planners change only the knobs left to them
+    if ( u.partNo>=0 or u.redshiftConeOn or userSampling or u.psServe )
+        return report;  // a mode where partitioning is unavailable
                         // (--serve keeps its single triangulation alive for every request)
 
     double minN = 2.e6;

@@ -397,7 +397,9 @@ bool psGpuDepositFields(std::vector<float>& verts,
                           double massExtra, PSFixedUnits const& fxUnits,
                           PSGpuGrids& out, std::vector<uint32_t>& deferred, std::string& err)
 {
+    auto const tAsk = std::chrono::steady_clock::now();   // PS_GPU_TIMING: the wait for the queue, and its hold
     std::lock_guard<std::mutex> lock(ctxMutex());   // serialize dispatches (single queue)
+    auto const tGot = std::chrono::steady_clock::now();
     Ctx& c = ctx();
     if (!c.ready) { err = c.err; return false; }
 
@@ -803,5 +805,9 @@ bool psGpuDepositFields(std::vector<float>& verts,
 
     for (MTL::Buffer* b : {bV,bU,bM,bD,bSc,bP,bMass,bMassFx,bMom,bM2,bGrad,bStr,bMomW,bCaust,bSV,bDV,bDW,bScal,bSG,bBad}) b->release();
     pool->release();
+    if (timing)   // the hold covers the uploads, the passes and the copy-back: the GPU idles for the rest of it
+        fprintf(stderr, "PS-DTFE Metal: partition %d waited %.3f s for the GPU and held it %.3f s\n",
+                PSMassAudit::partition, std::chrono::duration<double>(tGot - tAsk).count(),
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - tGot).count());
     return true;
 }

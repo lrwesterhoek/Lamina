@@ -927,6 +927,12 @@ def void_at(circles, x: float, y: float):
     return None if best is None else best[1]
 
 
+def _semi_axes_text(res: dict, k: int) -> str:
+    """'; a, b, c = 9.10, 7.32, 5.04 Mpc' for a void whose fitted ellipsoid the result carries, else ''."""
+    semi = (res.get("semi_axes_mpc") or [None] * (k + 1))[k]
+    return "" if semi is None else "; a, b, c = " + ", ".join(f"{float(v):.2f}" for v in semi) + " Mpc"
+
+
 def void_info(res: dict, k: int, short: bool = False) -> str:
     """What the inspector says about catalogue row k of a void_outlines.py result: R_v (every definition the
     catalogue has), R_eff, the central delta, the resolved / distinct flags and the centre. 'short' = one line
@@ -946,7 +952,7 @@ def void_info(res: dict, k: int, short: bool = False) -> str:
     radii = [f"R_v {mpc(r_v)} (back to the mean)"] + [f"{mpc(v)} ({labels.get(d, d)})" for d, v in others.items()]
     lines = [f"<b>void {k}</b> · {flags} · centre ({', '.join(f'{float(v):.2f}' for v in c)}) Mpc",
              " · ".join(radii),
-             f"R_eff {mpc(res['r_eff_mpc'][k])} (ellipsoid (a b c)^⅓) · central δ {d_text}"]
+             f"R_eff {mpc(res['r_eff_mpc'][k])} (ellipsoid (a b c)^⅓{_semi_axes_text(res, k)}) · central δ {d_text}"]
     return "<br>".join(lines)
 
 

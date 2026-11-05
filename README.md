@@ -483,11 +483,13 @@ in memory. Answers equal `--sample-points` with the same split bit for bit in PS
 **Auto-tuning.** Without `--partition` / `--max-concurrent` the binary chooses both from the particle count, the
 grid, the fields and the machine, and prints the split and the predicted peak. The budget is 60% of the RAM
 (`DTFE_MEM_FRACTION`), never more than the other programs leave free less 4 GB; `DTFE_MEM_BUDGET_GB` sets it outright
-(still capped by the free memory). Explicit options always win; `--partition 1` keeps one tessellation. Below 2e6
+(still capped by the free memory). Explicit options always win; `--partition 1` keeps one tessellation. A plan given
+in full (both options) is still predicted: the line states it, and the memory gate and the RAM a finished PS-DTFE
+partition may park in come from it, as for a tuned plan. Below 2e6
 particles (`DTFE_AUTO_MINN`) a run stays in one domain unless a split into 8 or 27 partitions is predicted to be
 clearly faster; such a split merges in a fixed order (reproducible), but differs from one domain at float rounding.
 `--auto-tune-report` prints the decision and the prediction as one line and stops (the drivers' `AUTO_TUNE_REPORT=1`,
-the launcher's Check memory). An auto-tuned run ends its SUMMARY with the predicted against the measured peak.
+the launcher's Check memory). A run with a prediction ends its SUMMARY with the predicted against the measured peak.
 - In PS-DTFE `--max-concurrent` is the number of partitions in flight, each writing into the whole grid; while
   several run, a partition waits until the free memory would hold it.
 - In standard DTFE the partitions run one after another and `--max-concurrent` is the number of threads in each, every
@@ -506,7 +508,9 @@ the launcher pass 15, complete at z = 0 on TNG50/100/300-3-Dark (10 is not). An 
 up to 4% at padding 5). PS-DTFE partitions are padded in Lagrangian space by `--ps-lag-padding` (default 8).
 
 **Partition merge (PS-DTFE).** By default the partitions' grids are added in partition index order whatever order they
-finish in (`--ordered-merge`, the staged merge), so two identical runs give bit-identical grids. A partition that
+finish in (`--ordered-merge`, the staged merge), so two identical runs give bit-identical grids. The partitions also
+start in index order, so only the few in flight beside a slower one finish before their turn (TNG100-3-Dark z = 1 at
+5^3: at most 5 at once, nothing spilled). A partition that
 finishes early parks its sub-grids in memory, or, when the memory is short, spills them to a file in `--scratch-dir`
 (else `$TMPDIR`) with identical results (`DTFE_MERGE_SPILL=0|1`, `DTFE_MERGE_STAGE_GB`, `DTFE_SPILL_MIN_GB`). The run
 log's `ordered merge:` line reports it. `--completion-order-merge` adds them as they finish (not bit-reproducible).
@@ -707,9 +711,12 @@ hands to every job as `DTFE_DATA_ROOT`; it starts without one), building the pro
 - **Explore**: maps of any run's grids (a slice read from disk), field, component, axis, scale and smoothing; a query
   server on the snapshot behind the map (a click lists every stream there; dragging a rectangle zooms by point
   evaluation); an **exact** zoom (a real run on the region: `--regionMpc` for standard DTFE, `--ps-window` for
-  PS-DTFE); void outlines from the analysis catalogue; *Compare with*, the figure grid across outputs and redshifts,
+  PS-DTFE); void outlines from the analysis catalogue (*Sizes* keeps a range of radii); *Compare with*, the figure grid across outputs and redshifts,
   and *Save image* with publication presets. PS velocity derivatives are shown as the mean field ∇⟨v⟩ by default
-  (*PS derivatives* switches to the stored ⟨∇v⟩).
+  (*PS derivatives* switches to the stored ⟨∇v⟩). **Show in 3D** puts the map's field on three planes through the box
+  with the voids at their true size, as spheres of radius R_v or as the catalogue's fitted ellipsoids: drag to turn
+  it, right-drag to move it, scroll to zoom; click a void to inspect it, double-click it to close up (the planes
+  through its centre at full resolution).
 - Beside the log: **Queue** (jobs run one after another, kept across sessions), **Figures**, **Runs** (every run log on
   disk: settings, time, peak memory; outputs made by a build before a fix that changed them, legacy planes and
   resumable runs are marked; load the settings back, open in Explore, move to the Trash, build the void catalogue) and
@@ -721,7 +728,8 @@ ticks the GPU only when the binary was built with one.
 
 The code lives in `python/gui`: `app.py` (the window) with the mixins `app_tabs.py`, `app_specs.py`, `app_run.py`,
 `app_menus.py`, `app_check.py` and `app_widgets.py`; `explore.py` with `explore_canvas.py`, `explore_grid.py`,
-`explore_save.py`, `explore_server.py`, `explore_voids.py` and `explore_zoom.py`; `runspec.py` (the job specifications
+`explore_save.py`, `explore_server.py`, `explore_voids.py`, `explore_zoom.py` and `explore_3d.py` (its geometry in
+`view3d.py`, no Qt); `runspec.py` (the job specifications
 and their commands, no Qt) with `runspec_pipeline.py`, `runspec_plot.py`, `runspec_data.py` and `runspec_custom.py`;
 and `grids.py`, `presets.py`, `results.py`, `runs_view.py`, `setup_wizard.py`, `void_cache.py`, `figsave.py`,
 `make_icon.py` (the app icon).

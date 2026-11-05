@@ -40,6 +40,26 @@ class VoidsMixin:
             stamp = None
         return str(o.root), o.n, stamp, round(self.void_sigma.value() if sigma is None else float(sigma), 6)
 
+    def void_rows(self, res: dict, radius: str = "_r_v") -> np.ndarray:
+        """The catalogue rows drawn: the distinct, well-resolved voids whose radius 'radius' (R_v; R_eff for the 3D
+        view's ellipsoids) lies in the Sizes range (a bound of 0 is none; a radius that is not defined passes only
+        when there is no bound)."""
+        keep = np.asarray(res["_shown"], dtype=bool).copy()
+        r = np.asarray(res[radius], dtype=np.float64)
+        lo, hi = self.void_rmin.value(), self.void_rmax.value()
+        with np.errstate(invalid="ignore"):
+            if lo > 0:
+                keep &= r >= lo
+            if hi > 0:
+                keep &= r <= hi
+        return np.nonzero(keep)[0]
+
+    def _void_range_changed(self, *_):
+        """Another Sizes range: the outlines, the 3D view and the figure grid's panels follow."""
+        self._voids_redraw()
+        if self._grid_shown and self.voids.isChecked():
+            self.show_grid(True)
+
     def _void_reff_toggled(self, *_):
         self._voids_redraw()
         if self._grid_shown and self.voids.isChecked():
@@ -141,6 +161,11 @@ class VoidsMixin:
             res["_r_v"] = np.array([np.nan if v is None else v for v in res["r_v_mpc"]], dtype=np.float64)
             res["_shown"] = np.asarray(res["distinct"], dtype=bool)
             res["_r_eff"] = np.array([np.nan if v is None else v for v in res["r_eff_mpc"]], dtype=np.float64)
+            n = len(res["_centres"])                # the fitted ellipsoids: semi-axes (NaN where none), directions (rows)
+            res["_semi"] = np.array([[np.nan] * 3 if v is None else v for v in res.get("semi_axes_mpc") or [None] * n],
+                                    dtype=np.float64).reshape(n, 3)
+            res["_dirs"] = np.array([np.eye(3) if v is None else v for v in res.get("ellipsoid_axes") or [None] * n],
+                                    dtype=np.float64).reshape(n, 3, 3)
             self._void_cache[key] = res
             self.status.emit(f"voids: {int(res['_shown'].sum())} distinct, well-resolved voids (outlines: R_v; "
                              f"sigma {res['sigma_mpc']:.3g} Mpc)")
@@ -210,18 +235,34 @@ class VoidsMixin:
         if res is None or g is None or (radius == "_r_eff" and not self.void_reff.isChecked()):
             return None
         axis, _index, rest, lo, hi, n0, n1 = g
-        sel = np.nonzero(res["_shown"])[0]
+        sel = self.void_rows(res)                   # by R_v: the dashed R_eff outlines are of the same voids
         circles = G.void_circles(res["_centres"][sel], res[radius][sel], float(res["box_mpc"]), axis,
                                  self._slice_position(), rest, lo, hi, n0, n1)
         return [(x, y, rx, ry, int(sel[k])) for x, y, rx, ry, k in circles]
 
     def _voids_redraw(self):
+        if self._3d_shown:
+            self._3d_voids()                        # the spheres of the 3D view (explore_3d)
+        self._void_count_note()
         c = self.view.canvas
         if c._img is None or self._grid_shown:
             return
         c.circles = self._void_circles()
         c.dashed = self._void_circles("_r_eff")
         c._redraw()
+
+    def _void_count_note(self):
+        """Beside Sizes: how many of the output's distinct voids the range keeps (by the radius drawn now)."""
+        o = self.current
+        res = None if o is None or not self.voids.isChecked() or self.voids_applicable(o) else \
+            self._void_cache.get(self._void_cache_key(o))
+        if not res or "error" in res:
+            self.void_count.setText("")
+            return
+        radius = "_r_eff" if self._3d_shown and self._3d_ellipsoids() else "_r_v"
+        n, kept = int(np.count_nonzero(res["_shown"])), len(self.void_rows(res, radius))
+        self.void_count.setText(f"all {n} voids" if kept == n else f"{kept} of {n} voids"
+                                + (" (by R_eff)" if radius == "_r_eff" else ""))
 
     def voids_shown(self) -> list[int]:
         """The catalogue rows outlined on the map now (R_v or R_eff), in row order: the saved CSV's voids."""
@@ -258,6 +299,6 @@ class VoidsMixin:
             return None
         if "error" in res:
             return None
-        sel = np.nonzero(res["_shown"])[0]
+        sel = self.void_rows(res)
         return {"rows": sel, "centres": res["_centres"][sel], "r_v": res["_r_v"][sel], "box": float(res["box_mpc"]),
                 "r_eff": res["_r_eff"][sel] if self.void_reff.isChecked() else None}

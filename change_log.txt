@@ -1,3 +1,30 @@
+UNRELEASED (since 1.0.0)
+- PS-DTFE: the partitions start in index order again. With LLVM's OpenMP runtime the loop's schedule(dynamic, 1) ran
+  as a static steal (each thread worked through its own contiguous block), so almost every partition finished
+  before its turn in the ordered merge and parked or spilled: TNG100-3-Dark z = 1 at 5^3 spilled 100 of 125
+  partitions (38.8 GB written). Now at most 5 park at once and none spill, with byte-identical outputs (that run:
+  8m42s -> 8m00s, peak footprint 32.9 -> 28.9 GB).
+- A run given both '--partition' and '--max-concurrent' is predicted like a tuned one: the memory gate and the RAM a
+  finished partition may park in now apply to it (a pinned TNG100 z = 1 run parked 43 GB in RAM on a 64 GB
+  machine), and its SUMMARY prints the predicted against the measured peak.
+- PS_GPU_TIMING also prints, per partition, how long its deposit waited for the GPU and held it.
+- Launcher, Explore: a 3D view ('Show in 3D'). The map's field on three orthogonal planes through the box (the map's
+  slice and the middle of the other two axes, one colour range), the voids as spheres of radius R_v at their true
+  size against the box (R_eff dashed when ticked), the box's edges, an axis triad and a scale bar. Drag to turn it,
+  right-drag to move it, scroll to zoom. Hovering names a void and reads the planes' values; a click fills the void
+  inspector; a double-click (or Close up) flies to the void with the planes through its centre at the grid's full
+  resolution, cut to a cube of two radii (R_v, or an ellipsoid's R_eff; always holding the whole shape) read
+  periodically across the box's faces, with the neighbouring voids drawn dim.
+  'Voids as' draws them as their fitted ellipsoids instead (the catalogue's semi-axes a >= b >= c along their own
+  directions, whose (a b c)^(1/3) is R_eff), each plane showing where every ellipsoid cuts it; the helper
+  tools/void_outlines.py now prints the ellipsoids ('semi_axes_mpc', 'ellipsoid_axes') and the void inspector says
+  a, b, c. Drawn with QPainter (no OpenGL), so it also renders offscreen.
+- Launcher, Explore: 'Sizes' draws only the voids with a radius in a chosen range (R from .. to .., 'any' = no
+  bound): by R_v on the map, the figure grid, the saved images and their CSV and the 3D view's spheres, by R_eff for
+  the 3D view's ellipsoids; the count beside it says how many of the distinct voids it keeps. On TNG100-3-Dark z = 0
+  11 of the 83 distinct voids have an R_v above 25 Mpc (up to 50.9) while no R_eff exceeds 18.5 Mpc: an upper bound
+  hides them.
+
 VERSION 1.0.0 (Lamina, 2026-10-23)
 The project is now called Lamina (Linear Adaptive Multi-stream Interpolation for N-body Analysis): the standard
 DTFE program './DTFE', the phase-space DTFE './PS-DTFE' (after Feldbrugge 2024), the Python package dtfelib and a
