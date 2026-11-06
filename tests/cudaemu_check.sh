@@ -144,6 +144,11 @@ for W in $WARPS; do
         dt=$(( $(date +%s) - t0 ))
         # the lines a reader wants: the suite's PASS/FAIL/SKIP/RESULT lines and its parity figures
         grep -E "PASS|FAIL|SKIP|RESULT|OK|parity|peak|rel" "$T/stdout.txt" | grep -v "^>> " | tail -40 | sed "s/^/   /"
+        # a suite that failed without saying which check (a traceback, a crash) would leave no trace in this log
+        if [ "$rc" -ne 0 ] && ! grep -q "FAIL" "$T/stdout.txt"; then
+            echo "   (exit $rc without a FAIL line; the suite's last lines:)"
+            tail -15 "$T/stdout.txt" | sed "s/^/   | /"
+        fi
         ngpu=$(grep -rlI "CPU emulation of the CUDA backend, ${W}-lane warps" "$T" 2>/dev/null | wc -l | tr -d ' ')
         status=PASS
         if [ "$rc" -ne 0 ]; then status=FAIL

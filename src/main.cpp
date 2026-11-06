@@ -65,6 +65,13 @@ static char const *const BINARY_NAME = DTFE_BINARY_BASE DTFE_BINARY_DIM DTFE_BIN
 // Reads options/input, runs the interpolation (with optional interlacing), writes output, prints a run summary.
 int main( int argc, char *argv[] )
 {
+    // stderr line-buffered: each diagnostic line leaves in ONE write. Unbuffered, glibc (2.37 and later) stages an
+    // fprintf in 128-byte pieces, so a long line from one partition thread (the PS mass audit, GPU timing and retry
+    // lines that tests parse) could be cut by another thread's output in a log that holds both streams. Every
+    // stderr message ends in a newline, so none is held back; macOS writes a line whole either way.
+    static char stderrBuffer[1 << 16];
+    std::setvbuf( stderr, stderrBuffer, _IOLBF, sizeof stderrBuffer );
+
     // '--version': the build stamp only (checked before option parsing, which needs an input file)
     for (int i = 1; i < argc; ++i)
         if ( std::strcmp( argv[i], "--version" ) == 0 )

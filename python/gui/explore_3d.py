@@ -5,11 +5,13 @@ the slice worker, planes3d), follows the map's field, colours and slice, and ins
 click fills the void inspector, a double-click (or Close up) flies to it, the volume or the planes then read from the
 grid at its full resolution around it.
 
-Drawn by QPainter, no OpenGL (Qt's offscreen platform has none: the tests could not draw it): an orthographic camera
-(view3d.py) maps each plane, and each slice of the volume, to the screen by one affine transform and each sphere to a
-circle. The volume is direct volume rendering by texture slicing (volume3d.py): the averaged cube's slices along the
-axis facing the viewer, coloured and made translucent by a transfer function on the map's scale, composited front to
-back in 16 bits a channel. It renders the same offscreen (the tests) as on screen."""
+Drawn by QPainter: an orthographic camera (view3d.py) maps each plane, and each slice of the volume, to the screen by
+one affine transform and each sphere to a circle. The volume is direct volume rendering by texture slicing
+(volume3d.py): the averaged cube's slices along the axis facing the viewer, coloured and made translucent by a
+transfer function on the map's scale, composited front to back in 16 bits a channel. On screen, where OpenGL is
+there, the volume's picture comes from the GPU instead (volume_gl.py: the same slices, samples and compositing, in
+real time at 1024^3); offscreen (the tests, which have no OpenGL), for Save image and without OpenGL from QPainter
+(volume_picture), the overlays always from QPainter."""
 
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLa
 import grids as G
 import view3d as V
 import volume3d as VOL
+import volume_gl as VGL
 
 VIEW3D_TIP = ("Show the map's field in 3D: the whole box as a translucent volume, the field averaged down to the "
               "detail chosen, its low values see-through and its high values opaque in the map's colours (or three "
@@ -39,10 +42,12 @@ STYLE_TIP = ("Volume: the field of the whole box (or a close-up's cube) averaged
              "Planes: the map's slice and the middle of the other two axes at the grid's own resolution.")
 DETAIL_TIP = ("The volume's cells a side, at most: the grid is averaged over blocks of its cells (a 1024³ grid in "
               "blocks of 4³ at 256³, of 2³ at 512³, its own cells at 1024³; a smaller grid or close-up: its own "
-              "cells at most). A close-up's cube is read from the grid again at this detail: finer. While the view "
-              "turns a coarse copy (160³ at most) is drawn; at rest the full cube at the screen's resolution, a "
-              "second or two for 1024³, which also needs some 10 GB of memory while it is read (less free: a smaller "
-              "detail, said under the controls).")
+              "cells at most). A close-up's cube is read from the grid again at this detail: finer. Drawn on the GPU "
+              "(where OpenGL is: said under the controls): at rest every slice at the screen's resolution, about "
+              "0.1 s for 1024³, while the view turns the cube's half (2³ cells averaged) or every few slices, kept "
+              "over 30 frames a second. Without it a coarse copy (160³ at most) while turning, and at rest a second "
+              "or two for 1024³. 1024³ also needs some 10 GB of memory while it is read and 1.1 GB on the GPU (less "
+              "free: a smaller detail, said under the controls).")
 PERSPECTIVE_TIP = ("Perspective: the box seen from an eye at a finite distance, its near side drawn larger, as the eye "
                    "expects (without it a box reads as widening toward the back). The voids' outlines are then true "
                    "in shape but their size depends on their depth, and the scale bar holds at the window's centre. "
@@ -54,6 +59,16 @@ OPACITY_TIP = ("How opaque the densest cells are: the opacity of a cell at the h
                "window's side thick. The same look at every detail, close-up and turn.")
 FAST_SCALE = 0.5                # while the view turns: the coarse cube on a half-size picture
 SHARP_CELL_PX = 3.0             # the settled picture: no finer than this many device pixels a cell
+PREVIEW_SCALE = 0.5             # a large cube settles in two steps: first at half the settled picture's pixels a side
+PREVIEW_CELLS = 384             # (a cube of at least this many cells along an axis: 512^3 and 1024^3), then whole --
+                                # at 1024^3 on a Retina screen the first in 1.25 s instead of the whole one's 2.1
+TURN_BUDGET_MS = 20.0           # the GPU: a frame's drawing while the view turns, at most (the read-back, the overlays
+                                # and the window's flush add some 5-8 ms: over 30 frames a second)
+TURN_STEPS = ((0, 1), (0, 2), (1, 1), (1, 2), (1, 4), (1, 8))
+                                # ... the turning frames' steps, finer (dearer) first: (cube, stride) = every stride-th
+                                # slice (the opacity corrected for the longer path: the same look) of the volume (0)
+                                # or of its half, 2^3 cells averaged (1: no knot hit or missed); without the half,
+                                # (0, 2 x stride)
 CLOSE_TIP = ("Look at the chosen void from near: the camera flies to it and the three planes pass through its centre, "
              "cut to a cube around it at the grid's full resolution, read periodically across the box's faces, with "
              "the neighbouring voids that reach into it")
@@ -184,8 +199,8 @@ class SharpPicture:
     def _gather(self, i: int) -> np.ndarray:
         w, h = self.plan["size"]
         out = np.empty((h, w), dtype=np.uint64)
-        np.take(self.lut, self.images[i], out=out)
-        return out
+        np.take(self.lut, self.images[i], out=out, mode="clip")    # levels < 256 = len(lut): clip never acts,
+        return out                                                  # and it skips 'raise''s bounds pass
 
     def done(self) -> bool:
         return self.next >= len(self.order)
@@ -217,6 +232,30 @@ class SharpPicture:
         for f in self.futures.values():
             f.cancel()
         self.futures = {}
+
+
+def next_turn_step(step: int, costs: dict, budget_ms: float = TURN_BUDGET_MS) -> int:
+    """The step (an index into TURN_STEPS) of the next GPU frame while the view turns, from the frames drawn so far in
+    this turn: 'costs' maps each step tried to its drawing time (ms, the median of its last three frames; a step tried
+    fewer times is not in it). Settled, the picture is always every slice of the volume itself."""
+    # TODO(human) (optional: this default works): how the turning frames trade detail for speed. The default moves
+    # one step at a time: coarser while the current step is over budget, finer when the finer one is known to fit,
+    # or, not tried yet in this turn, when the current one costs under 0.4 of the budget (a step roughly halves the
+    # cost, never quite: the cache helps). A step known too dear is never tried again in the same turn, so it cannot
+    # flicker between two. Measured on TNG100-3-Dark 1024^3, 2000 x 1600 on a busy M1 Max: (0, 1) 96 ms, (0, 2) 69,
+    # (1, 1) 17, (1, 2) 11, (1, 4) ~10. Other choices: jump straight to the finest step known to fit, aim at the
+    # mouse's own event rate instead of a fixed budget, or keep the last turn's costs (they hold while the cube, the
+    # screen and the range stay).
+    cur = costs.get(step)
+    if cur is None:
+        return step
+    if cur > budget_ms:
+        return min(step + 1, len(TURN_STEPS) - 1)
+    if step > 0:
+        finer = costs.get(step - 1)
+        if finer <= budget_ms if finer is not None else cur < 0.4 * budget_ms:
+            return step - 1
+    return step
 
 
 def _pen(colour, width: float, style=Qt.SolidLine) -> QPen:
@@ -266,16 +305,31 @@ class View3D(QWidget):
         self._stacks: dict = {}             # the coarse cube's slices coloured: (key, stack), while turning
         self._picture = None                # (key, QImage): the quick picture (while turning, or until the sharp one)
         self._sharp = None                  # (key, QImage): the settled picture at the screen's full resolution
-        self._job: SharpPicture | None = None   # ... being drawn, a few slices a tick
+        self._preview = None                # (key, QImage): a large cube's first, half-resolution settled picture
+        self._job: SharpPicture | None = None   # either being drawn, a few slices a tick
         self._pump = QTimer(self, interval=0)
         self._pump.timeout.connect(self._pump_tick)
         self.last_volume_ms = 0.0           # the last sharp picture's cost, from start to finish
+        self.last_preview_ms = 0.0          # ... and the last preview's
+        # the GPU's picture (volume_gl), where OpenGL is: the cube goes up in ticks, the picture kept while only the
+        # overlays change; QPainter's for Save image (painter_only) and wherever OpenGL is not
+        self.painter_only = False
+        self.gl_note = ""                   # why the GPU does not draw it ('' when it does, or was never asked)
+        self._gl_pic = None                 # (key, QImage)
+        self._gl_step: int | None = None    # the turning frames' step (TURN_STEPS), adapted frame by frame ...
+        self._gl_costs: dict = {}           # ... from this turn's frames: {step: [ms, ...]}
+        self._gl_turning = False            # the last GPU frame was a turning one
+        self.last_turn_ms = 0.0             # the last turning frame's GPU time
+        self._gl_upload = QTimer(self, interval=10)
+        self._gl_upload.timeout.connect(self._gl_upload_tick)
 
     # ---------------------------------------------------------------- the scene
     def set_volume(self, prep: dict | None, lo=None, hi=None):
         """The volume to draw (volume3d.prepare's dict, None: none) and its window lo..hi (Mpc)."""
+        if prep is not self.volume:             # the GPU's copy is of the old one (keyed by its id: freed now)
+            self._gl_forget()
         self.volume = prep
-        self._stacks, self._picture, self._sharp = {}, None, None
+        self._stacks, self._picture, self._sharp, self._preview = {}, None, None, None
         self._stop_job()
         if lo is not None:
             self.lo, self.hi = np.asarray(lo, dtype=np.float64), np.asarray(hi, dtype=np.float64)
@@ -291,7 +345,7 @@ class View3D(QWidget):
         """The volume's transfer function: transparent below 'lo' (the map's scale: log10 of a density), the opacity
         rising to 'opacity' at 'hi', coloured with 'cmap' over lo..hi (volume3d.transfer)."""
         self.transfer = (float(lo), float(hi), float(opacity), str(cmap), bool(symmetric), float(gamma))
-        self.update()
+        self._gl_moving()
 
     def set_scene(self, planes, lo, hi):
         self.planes = planes
@@ -446,11 +500,12 @@ class View3D(QWidget):
         return (id(self.volume), self.transfer, c.yaw, c.pitch, c.scale, tuple(c.target), c.width, c.height,
                 c.perspective)
 
-    def _lut(self, plan: dict) -> np.ndarray:
-        """The transfer function's table for this plan (its opacity corrected for the path through a slice, to 1 %)."""
+    def _lut(self, plan: dict, stride: int = 1) -> np.ndarray:
+        """The transfer function's table for this plan (its opacity corrected for the path through a slice, to 1 %;
+        every stride-th slice drawn: through stride of them)."""
         lo, hi, opacity, cmap, symmetric, gamma = self.transfer
-        return VOL.transfer(self.volume["levels"], lo, hi, opacity, float(np.round(plan["exponent"], 2)), G.lut(cmap),
-                            symmetric, gamma)
+        return VOL.transfer(self.volume["levels"], lo, hi, opacity, float(np.round(plan["exponent"], 2)) * stride,
+                            G.lut(cmap), symmetric, gamma)
 
     def quick_picture(self) -> QImage | None:
         """The volume's quick picture as the view now stands: the coarse cube (volume3d.COARSE_MAX cells a side at
@@ -494,13 +549,29 @@ class View3D(QWidget):
     def _sharp_key(self) -> tuple:
         return ("sharp", round(self._sharp_ratio(), 2)) + self._view_key()
 
-    def _start_job(self) -> SharpPicture:
-        """The sharp picture of the full cube at the screen's own resolution, begun (pump draws it)."""
+    def _preview_key(self) -> tuple | None:
+        """A large cube's first settled picture (PREVIEW_SCALE of the sharp one's pixels a side); None for a cube
+        small enough to settle in one step (fewer than PREVIEW_CELLS cells along every axis)."""
+        if self.volume is None or max(self.volume["fine"]["shape"]) < PREVIEW_CELLS:
+            return None
+        return ("preview", round(self._sharp_ratio() * PREVIEW_SCALE, 2)) + self._view_key()
+
+    def _next_key(self) -> tuple:
+        """The settled picture to draw next: the preview until it is ready for this view, then the sharp one."""
+        pkey = self._preview_key()
+        if pkey is not None and (self._preview is None or self._preview[0] != pkey):
+            return pkey
+        return self._sharp_key()
+
+    def _start_job(self, key: tuple | None = None) -> SharpPicture:
+        """The settled picture of the full cube begun (pump draws it): 'key' a _sharp_key (the default: the screen's
+        own resolution) or a _preview_key (PREVIEW_SCALE of it); the key's second item is the picture's ratio."""
         self._stop_job()
+        key = self._sharp_key() if key is None else key
         src = self.volume["fine"]
         plan = VOL.slice_plan(self.cam, self.lo, self.hi, src["shape"])
-        self._job = SharpPicture(self._sharp_key(), VOL.slice_images(src, plan["axis"]), self._lut(plan), plan,
-                                 self.cam.width, self.cam.height, round(self._sharp_ratio(), 2))
+        self._job = SharpPicture(key, VOL.slice_images(src, plan["axis"]), self._lut(plan), plan,
+                                 self.cam.width, self.cam.height, key[1])
         return self._job
 
     def _stop_job(self):
@@ -510,21 +581,27 @@ class View3D(QWidget):
         self._pump.stop()
 
     def _pump_tick(self):
-        """A few more slices of the sharp picture (about 25 ms); shown when complete."""
+        """A few more slices of the settled picture being drawn (about 25 ms); shown when complete. A large cube's
+        preview, once complete, is shown and the sharp picture begun at once."""
         job = self._job
-        if job is None or job.key != self._sharp_key() or self._fast:
+        if job is None or self._fast or job.key not in (self._sharp_key(), self._preview_key()):
             self._stop_job()
             return
         if job.pump(0.025):
-            self._sharp = (job.key, job.img)
-            self.last_volume_ms = job.ms
             self._job = None
-            self._pump.stop()
+            if job.key[0] == "preview":
+                self._preview, self.last_preview_ms = (job.key, job.img), job.ms
+                self._start_job()
+                self._pump.start()
+            else:
+                self._sharp, self._preview, self.last_volume_ms = (job.key, job.img), None, job.ms
+                self._pump.stop()
             self.update()
 
     def volume_picture(self) -> QImage | None:
         """The volume's picture as the view now stands, at once (the tests, Save image): while turning the quick
-        one, else the sharp one at the screen's resolution, its drawing finished here if it was under way."""
+        one, else the sharp one at the screen's resolution (never the preview), its drawing finished here if it was
+        under way."""
         vol = self.volume
         if vol is None or self.transfer is None or self.lo is None:
             return None
@@ -535,24 +612,32 @@ class View3D(QWidget):
         if self._sharp is None or self._sharp[0] != key:
             job = self._job if self._job is not None and self._job.key == key else self._start_job()
             job.pump()
-            self._sharp, self.last_volume_ms = (key, job.img), job.ms
+            self._sharp, self._preview, self.last_volume_ms = (key, job.img), None, job.ms
             self._job = None
             self._pump.stop()
         return self._sharp[1]
 
     def _draw_volume(self, p: QPainter):
-        """The volume: the sharp picture when it is ready for this view; else the quick one, the sharp one begun
-        (not while turning) and drawn in ticks, shown when complete."""
+        """The volume: the sharp picture when it is ready for this view; else a large cube's preview when that is
+        ready, else the quick one -- and the next settled picture begun (not while turning) and drawn in ticks: the
+        preview, then the sharp one, each shown when complete."""
         if self.volume is None or self.transfer is None:
+            return
+        if self._draw_gl(p):                    # the GPU drew it (volume_gl), where OpenGL is
             return
         img = None
         if not self._fast:
             key = self._sharp_key()
             if self._sharp is not None and self._sharp[0] == key:
                 img = self._sharp[1]
-            elif self._job is None or self._job.key != key:
-                self._start_job()
-                self._pump.start()
+            else:
+                pkey = self._preview_key()
+                if pkey is not None and self._preview is not None and self._preview[0] == pkey:
+                    img = self._preview[1]
+                want = self._next_key()
+                if self._job is None or self._job.key != want:
+                    self._start_job(want)
+                    self._pump.start()
         if img is None:
             img = self.quick_picture()
         if img is None:
@@ -864,6 +949,152 @@ class View3D(QWidget):
         self.update()
 
 
+    # ---------------------------------------------------------------- the GPU's picture
+    def _draw_gl(self, p: QPainter) -> bool:
+        """The volume drawn from the GPU's picture (the quick one while its cube goes up): True; False when QPainter
+        draws it (no OpenGL, Save image, a volume too large, an error)."""
+        img = self._gl_frame()
+        if img is None:
+            return False
+        if img is False:                        # the GPU is getting the cube: the quick picture meanwhile
+            img = self.quick_picture()
+            if img is None:
+                return False
+        p.save()
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        p.drawImage(QRectF(0.0, 0.0, float(self.cam.width), float(self.cam.height)), img)
+        p.restore()
+        return True
+
+    def _gl_renderer(self):
+        """The GPU renderer when it can draw the volume shown (OpenGL here, a cube it holds), else None (QPainter)."""
+        if self.painter_only or self.volume is None:
+            return None
+        r = VGL.renderer()
+        if r is None:
+            self.gl_note = VGL.unavailable_reason()
+            return None
+        if not r.fits(self.volume["fine"]["shape"]):
+            self.gl_note = f"the volume is larger than the GPU's {r.max3d}³ textures"
+            return None
+        self.gl_note = ""
+        return r
+
+    def _gl_frame(self):
+        """The GPU's picture as the view now stands (a QImage), False while its cube goes up, None when QPainter draws
+        the volume. Turning: a step of TURN_STEPS (next_turn_step, from this turn's frames); settled: every slice of
+        the volume at the screen's own pixels. Kept while only the overlays change."""
+        r = self._gl_renderer()
+        if r is None:
+            return None
+        key, vol = id(self.volume), self.volume
+        try:
+            if not r.ready(key):
+                if r.cube_key != key:
+                    self._stop_job()                # no QPainter sharp picture: the GPU's comes
+                    r.begin_upload(key, vol["fine"]["q"], vol["levels"], vol["qrange"], vol["log"])
+                self._gl_upload.start()
+                return False
+            self._sized()
+            scale = self._ratio()
+            level, stride, step = 0, 1, None
+            if self._fast:
+                if not self._gl_turning:            # a new turn: its costs learnt afresh, from the last turn's step
+                    self._gl_turning, self._gl_costs = True, {}
+                if self._gl_step is None:
+                    self._gl_step = TURN_STEPS.index((1, 1))
+                step = self._gl_step
+                level, stride = TURN_STEPS[step]
+                if level == 1 and not r.ready(key, 1):  # the half not there (yet, or a cube too small for one)
+                    level, stride = 0, 2 * stride
+            else:
+                self._gl_turning = False
+            vkey = ("gl", level, stride, round(scale, 3)) + self._view_key()
+            if self._gl_pic is not None and self._gl_pic[0] == vkey:
+                return self._gl_pic[1]
+            plan = VOL.slice_plan(self.cam, self.lo, self.hi, r.shape(level))
+            w, h = max(1, round(self.cam.width * scale)), max(1, round(self.cam.height * scale))
+            t = time.perf_counter()
+            px = r.render(self.cam, self.lo, self.hi, plan, self._lut(plan, stride), w, h, stride=stride, level=level)
+            ms = 1e3 * (time.perf_counter() - t)
+            if step is not None:
+                self.last_turn_ms = ms
+                seen = self._gl_costs.setdefault(step, [])
+                seen.append(ms)
+                del seen[:-3]
+                self._gl_step = next_turn_step(step, {k: float(np.median(v)) for k, v in self._gl_costs.items()
+                                                      if len(v) >= 3})
+            else:
+                self.last_volume_ms = ms
+            self._gl_pic = (vkey, VGL.to_qimage(px))
+            return self._gl_pic[1]
+        except Exception as e:                      # noqa: BLE001 -- any GL failure: QPainter from now on
+            self._gl_failed(e)
+            return None
+
+    def _gl_upload_tick(self):
+        """A few more layers of the cube to the GPU (about 30 ms); the picture redrawn when it is all there."""
+        r = VGL.renderer()
+        if r is None or self.volume is None or r.cube_key != id(self.volume):
+            self._gl_upload.stop()
+            return
+        try:
+            before = (r.ready(r.cube_key), r.ready(r.cube_key, 1))
+            if r.upload_step(0.03):
+                self._gl_upload.stop()
+            if (r.ready(r.cube_key), r.ready(r.cube_key, 1)) != before:
+                self._gl_pic, self._gl_costs = None, {}     # the cube drawn now (or its half for the turning frames)
+                self.update()
+        except Exception as e:                      # noqa: BLE001
+            self._gl_failed(e)
+
+    def _gl_failed(self, e: Exception):
+        import sys
+        import traceback
+        why = f"{type(e).__name__}: {e}" if not isinstance(e, VGL.GLUnavailable) else str(e)
+        print(f"3D view: the GPU stopped drawing the volume ({why}); QPainter draws it", file=sys.stderr)
+        if not isinstance(e, VGL.GLUnavailable):
+            traceback.print_exc()
+        VGL.give_up(why)
+        self.gl_note = why
+        self._gl_upload.stop()
+        self._gl_pic = None
+        self.update()
+
+    def _gl_forget(self):
+        """The GPU's copy of the cube freed (another volume, or none)."""
+        self._gl_upload.stop()
+        self._gl_pic = None
+        r = VGL._STATE.get("renderer")
+        if r is not None:
+            try:
+                r.forget_cube()
+            except Exception as e:                  # noqa: BLE001
+                self._gl_failed(e)
+
+    def gl_bytes(self) -> int:
+        """The memory the GPU's copy of the shown volume holds (the cube and its half, a byte a cell: 1.1 GB at
+        1024³), 0 without."""
+        r = VGL._STATE.get("renderer")
+        return 0 if r is None else r.held_bytes()
+
+    def _gl_moving(self):
+        """A change that may come in a stream (a range or opacity slider dragged, the window resized): with the GPU
+        drawing, the turning frames until it rests (each settled 1024³ frame is 0.1-0.2 s on the GUI thread); else
+        as before (QPainter draws its quick picture meanwhile by itself)."""
+        if not hasattr(self, "_gl_upload"):         # a resize while it is being built
+            return
+        r = self._gl_renderer() if self.style == "volume" and self.volume is not None else None
+        if r is not None and r.ready(id(self.volume)):
+            self._interacting()
+        else:
+            self.update()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if e.oldSize().isValid() and e.oldSize() != e.size():     # dragged larger or smaller (not a first layout,
+            self._gl_moving()                                       # nor a hidden widget grabbed: (-1, -1) each time)
+
 # ==================================================================== the Explore pane's part
 class View3DMixin:
     def _build_3d(self, col):
@@ -1170,7 +1401,8 @@ class View3DMixin:
         if shown.get("style") == "volume" and shown.get("want") == want and self._same(shown.get("output"), o) \
                 and np.allclose(shown["lo"], lo) and np.allclose(shown["hi"], hi):
             return int(shown["detail"]), shown.get("note") or ""
-        need = VOL.need_bytes(VOL.window_shape(o, lo, hi, want))
+        # the GPU's copy of the volume shown stays until the new one replaces it
+        need = VOL.need_bytes(VOL.window_shape(o, lo, hi, want)) + self.view.view3d.gl_bytes()
         if need <= 1e9:
             return want, ""
         smaller = sorted((d for d in VOL.DETAILS if d < want), reverse=True)
@@ -1453,8 +1685,12 @@ class View3DMixin:
                                     else "×".join(f"{b:.2g}" for b in block)) + " grid cells")
         frac = VOL.visible_fraction(prep, self._3d_tf["lo"], req["symmetric"]) if self._3d_tf else 0.0
         note = req.get("note") or ""
+        r = VGL.renderer() if not VGL.disabled_reason() else None
+        gpu = " · drawn on the GPU" if r is not None and r.fits(m) else ""
+        if not VGL.disabled_reason() and not gpu:   # OpenGL was tried here and is not drawing it: say why
+            gpu = f" · drawn by QPainter ({self.view.view3d.gl_note or VGL.unavailable_reason() or 'no OpenGL'})"
         self.view3d_state.setText(f"volume {cells}, {each} · {100.0 * frac:.3g} % of them above the low end"
-                                  + (f" · {note}" if note else ""))
+                                  + gpu + (f" · {note}" if note else ""))
 
     # ---------------------------------------------------------------- the voids
     def _void_result_3d(self):
@@ -1647,9 +1883,13 @@ class View3DMixin:
         """The 3D view as it is on screen (its pixels at the screen's resolution) to a PNG: the volume's settled
         picture finished first (not the quick one still shown while it is drawn)."""
         v3 = self.view.view3d
-        if v3.style == "volume" and v3.volume is not None:
-            v3._fast = False
-            v3.volume_picture()
-        if not v3.grab().save(str(path)):
-            raise OSError(f"could not write {path}")
+        v3.painter_only = True                  # QPainter's picture, as the tests hold it (not the GPU's)
+        try:
+            if v3.style == "volume" and v3.volume is not None:
+                v3._fast = False
+                v3.volume_picture()
+            if not v3.grab().save(str(path)):
+                raise OSError(f"could not write {path}")
+        finally:
+            v3.painter_only = False
         return str(path)

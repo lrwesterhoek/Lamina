@@ -208,21 +208,29 @@ for t in (4, 10):
     check("X7", not bad and same_b, f"{t} vs 1 thread: byte-identical {' '.join(same_b) or 'nothing'}"
           + (f"; to 1e-12 {' '.join(close)}" if close else "") + (f"; DIFFER {' '.join(bad)}" if bad else ""))
 
-# X4: the audit lines, when the binary has them
-num = r"([-+0-9.eE]+|nan|inf)"
-rows = []
+# X4: the audit lines, when the binary has them. A line that does not parse (cut by another thread's output, or a
+# number Python cannot read) fails X4 on its own instead of ending the suite before its RESULT line; glibc spells
+# a NaN or an infinity '-nan' / '-inf'.
+num = r"([-+]?(?:nan|inf|[0-9.]+(?:[eE][-+]?[0-9]+)?))"
+rows, cut = [], []
 for f in sorted(tmp.glob("*.log")):
     if f.stem == "lat_cpu_float": continue
-    rows += [(f.stem, l) for l in f.read_text().splitlines() if l.startswith("PS mass audit: partition")]
+    for l in f.read_text().splitlines():
+        if not l.startswith("PS mass audit: partition"): continue
+        g, v = re.search(r"gained/shares-1 " + num, l), re.search(r"grid/tets-1 " + num, l)
+        if g and v: rows.append((f.stem, float(g.group(1)), float(v.group(1))))
+        else: cut.append(f.stem)
+if cut:
+    check("X4", False, f"every PS_MASS_AUDIT line parses: {len(cut)} of {len(rows) + len(cut)} do not "
+          f"({' '.join(sorted(set(cut)))}: cut by another thread's output?)")
 if rows:
-    gs = [(t, float(re.search(r"gained/shares-1 " + num, l).group(1))) for t, l in rows]
-    gt = [(t, float(re.search(r"grid/tets-1 " + num, l).group(1))) for t, l in rows]
+    gs = [(t, g) for t, g, _ in rows]; gt = [(t, v) for t, _, v in rows]
     wg = max(gs, key=lambda p: abs(p[1])); wt = max(gt, key=lambda p: abs(p[1]))
     check("X4", (abs(wg[1]) < 1e-9) if double else all(v == 0. for _, v in gs),
           f"PS_MASS_AUDIT: gained/shares-1 over {len(rows)} passes: worst {wg[1]:.1e} ({wg[0]}; "
           f"{'< 1e-9' if double else 'must be exactly 0'})")
     check("X4", abs(wt[1]) < 1e-7, f"PS_MASS_AUDIT: grid/tets-1 worst {wt[1]:+.1e} ({wt[0]}; |.| < 1e-7)")
-else:
+elif not cut:
     print("  SKIP X4: this binary prints no PS_MASS_AUDIT lines")
 if not double:
     a, b = (tmp / "lat_cpu_float.a_den").read_bytes(), (tmp / "lat_cpu_p1.a_den").read_bytes()

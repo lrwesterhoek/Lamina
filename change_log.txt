@@ -73,6 +73,57 @@ UNRELEASED (since 1.0.0)
   ps_exact1024: 512^3 in 1.9 s, 1024^3 in 4.7 s (about 10 GB at its peak; less free memory: a smaller detail, said).
   The grid is read in slabs by plain reads, never memmapped. Averaged to 256^3, the 1024^3 and 512^3 exact-deposit
   grids agree to 2.4e-7: the exact deposit is consistent between resolutions.
+- The auto-tuner's memory prediction for '--ps-window' runs counted too little (TNG100-3-Dark: 11.1 GB predicted,
+  19.7 GB measured). Two terms were missing. First, the input reader's freed arrays (positions, masses, velocities,
+  IDs; with --lagrangianInput also the initial conditions), which the allocator keeps while the first partitions
+  are built (autoTuneReadKeptBytes). Second, every partition's sub-grid is the whole window, not a crop of it. The
+  GPU deposit's window grids are now counted once, not once per partition in flight. Window runs are now predicted
+  2-10% high (TNG100-3-Dark 20.2 GB); predictions for runs without a window are unchanged.
+- '--scratch-dir' no longer writes the full-grid accumulators' zeros through the scratch files: zero-filling a
+  vector mapped onto a file dirtied every page of it (a 1536^3 run stalled writing ~290 GB to an external disk).
+  The zeros are now filled in anonymous memory, and the scratch file is mapped over them unwritten when the grid's
+  scope closes (ScratchAlloc::ZeroFillScope, src/scratch_alloc.h; outputs byte-identical). The SCRATCH line says
+  how many grids took this route ("N zero-filled in memory and moved onto their file unwritten").
+- scripts/download_snapshots.sh fetched no chunk at all: the TNG API's listings name every chunk with an http://
+  link, which the recursive '--https-only' crawl skipped. The script now reads each product's JSON listing, upgrades
+  its links to https and fetches exactly those, and tries the list up to three times (the data host now and then
+  refuses one chunk with a 403 that a second try does not get).
+- The binaries line-buffer stderr. Unbuffered, glibc 2.37 and later writes an fprintf in 128-byte pieces, so a long
+  diagnostic line from one partition thread could be cut by another thread's output in a log holding both streams.
+  On CI, one PS mass audit line came out cut that way, and tests/ps_mass_exact_check.sh failed under the warp-32
+  CUDA emulation. Every stderr message ends in a newline, so nothing is held back, and macOS already wrote each line
+  whole. The suite now reports an audit line it cannot parse as an X4 failure instead of stopping before its
+  RESULT line. tests/cudaemu_check.sh prints the last lines of a suite that fails without a FAIL line.
+- Launcher, Explore: the 3D volume is read and prepared about twice as fast, the cubes and pictures byte-identical
+  (checked against the previous code on float32 and float64 grids under numpy 1.26 and 2.4, heavy cancellation and
+  signed zeros included). A scalar field at the window's own cells is read straight into the cube (a 1024^3 grid
+  the map has not cached: 3.5 -> 0.4 s); blocks of 2 to 4 cells are summed by strided adds in np.add.reduceat's own
+  order, a0 + (0 + a1 + ...) (1024^3 -> 512^3: 1.1 -> 0.45 s); the levels are quantised in place in cache-sized
+  chunks, counted two cells at a time and transposed a layer at a time (preparing 1024^3: 4.1 -> 1.8 s, 512^3:
+  0.58 -> 0.34 s; synthetic grids, M1 Max). The settled picture (0.67 s at 512^3, 2.1 s at 1024^3 for a 2000x1600
+  Retina picture) is at QPainter's floor: compositing is bound by memory bandwidth, PySide6 holds the GIL in
+  drawImage, and painting in worker processes gained at most 1.7x. So a cube of 384 cells or more along an axis
+  (512^3, 1024^3) now settles in two steps: a picture of half the pixels a side first (0.33 s at 512^3, 1.25 s at
+  1024^3), replaced by the sharp one when it is done (that much later than before); Save image is always the sharp
+  one.
+- Launcher, Explore: the 3D volume is drawn on the GPU where OpenGL is (python/gui/volume_gl.py, OpenGL 4.1 core, Qt's
+  own GL bindings: no new dependency). Not a new look: a fragment shader walks each pixel's ray through the very
+  slices QPainter draws and takes QPainter's sample on each (the four nearest cells coloured by the same transfer
+  table, then mixed bilinearly), composited front to back in 32-bit floats; it equals the QPainter picture within
+  1.5/255 wherever a pixel is not within 1/32 px of a slice's edge (Qt rasterises polygons to 1/64 px), on screen
+  within 1/255 at the 99.9th percentile. While the view turns, a frame steps down a ladder (every slice, every 2nd,
+  then the cube's half at every 1st..8th slice; the opacity corrected for the longer path, the same look) by the last
+  frames' times, at the screen's own pixels, skipping blocks of 4^3 cells whose levels are all transparent (exact: not
+  a pixel changes). TNG100-3-Dark z = 0 from ps_exact1024 at 1024^3, 2000 x 1600 Retina picture, M1 Max with 8 cores
+  busy elsewhere: turning at 50 frames a second (every slice of the cube's half, 2^3 cells averaged in value space:
+  skipping slices of the cube itself aliases; QPainter drew a 160^3 copy at half size), a range or opacity slider
+  dragged at 17 ms a move, settled 93-228 ms (QPainter 4.6-8.2 s, 2.1-5.5 s on a quiet machine); the cube goes to the
+  GPU in 1.5-1.7 s of 30 ms ticks (the quick picture meanwhile), its half a few seconds later, +1.1 GB of memory
+  (counted by the detail's memory check). The window stays a raster widget: the picture is drawn offscreen and read
+  back (4 ms), so the overlays and the rest of the launcher are untouched. QPainter still draws offscreen (the tests),
+  for Save image, and wherever no OpenGL 4.1 context can be made (or DTFE_GUI_NO_GL=1); any GL error falls back to it
+  for the session. tests/py_gui_explore_test.py checks the GPU against QPainter in a child process on the default
+  platform (12 cases, both projections, smooth and spiky fields; SKIP without a display or OpenGL).
 
 VERSION 1.0.0 (Lamina, 2026-10-23)
 The project is now called Lamina (Linear Adaptive Multi-stream Interpolation for N-body Analysis): the standard

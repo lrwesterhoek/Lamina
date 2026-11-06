@@ -259,6 +259,30 @@ def average_window(o, name: str, component: str, lo, hi, detail: int = DEFAULT_D
     out = np.empty(shape, dtype=np.float32)
     if progress is not None:
         progress.update(done=0, total=shape[0])
+    # a scalar field shown as stored (no component, no velocity factor, no fold flag) is the grid's own values: no
+    # float64 copy of each block (summed in float64 straight from the file's floats: the same sums), and a window at
+    # its own cells (the detail at least its cells) not summed at all, each averaged cell being one grid cell
+    plain = srcs == [name] and o.files[name].ncomp == 1 and name != "vorticity" and o._velocity_factor(name) == 1.0
+    unit = shape == tuple(len(i) for i in idx)
+    # blocks of one size f <= 4 along y and z (1024 -> 512 or 256): each block summed by f strided adds in reduceat's
+    # own order -- its first term plus the sum of the rest, that sum taken from 0 one term after another (numpy's
+    # pairwise sum below 8 terms): a0 + (((0 + a1) + a2) + a3), the same sums bit for bit -- without reduceat's cost
+    # a block (1024 -> 512 in 0.45 s against 1.1; from blocks of 8 on, reduceat is the faster)
+    f1, f2 = len(idx[1]) // shape[1], len(idx[2]) // shape[2]
+    even = all(len(idx[a]) % shape[a] == 0 for a in (1, 2)) and max(f1, f2) <= 4
+
+    def strided_sum(a: np.ndarray, f: int, axis: int) -> np.ndarray:
+        take = [slice(None)] * a.ndim
+        take[axis] = slice(0, None, f)
+        first = a[tuple(take)].astype(np.float64)
+        if f == 1:
+            return first
+        rest = np.zeros(first.shape, dtype=np.float64)
+        for k in range(1, f):
+            take[axis] = slice(k, None, f)
+            rest += a[tuple(take)]
+        first += rest
+        return first
 
     def one(j):
         rows = idx[0][edges[0][j]:edges[0][j + 1]]
@@ -270,13 +294,24 @@ def average_window(o, name: str, component: str, lo, hi, detail: int = DEFAULT_D
             if not full[2]:
                 a = np.take(a, idx[2], axis=2)
             blocks[s] = a
-        if name == "caustic" and o.fold_exact():
-            vals = np.asarray(G.caustic_is_fold(blocks.get("caustic_class"), streams=blocks.get("streams"),
-                                                hidden=blocks.get("hidden_streams")), dtype=np.float64)
+        if plain and unit:
+            out[j] = blocks[name][0]
+            out[j] += np.float32(0.0)       # as the summing path's final sum from 0 did: a -0.0 becomes +0.0
+            return
+        if plain and even:
+            vals = strided_sum(strided_sum(blocks.pop(name), f2, 2), f1, 1).sum(axis=0)
+            out[j] = vals / (len(rows) * sizes1[:, None] * sizes2[None, :])
+            return
+        if plain:
+            vals = np.add.reduceat(blocks.pop(name), edges[2][:-1], axis=2, dtype=np.float64)
         else:
-            vals = field_values(o, name, blocks[name], component)
+            if name == "caustic" and o.fold_exact():
+                vals = np.asarray(G.caustic_is_fold(blocks.get("caustic_class"), streams=blocks.get("streams"),
+                                                    hidden=blocks.get("hidden_streams")), dtype=np.float64)
+            else:
+                vals = field_values(o, name, blocks[name], component)
+            vals = np.add.reduceat(vals, edges[2][:-1], axis=2)
         del blocks
-        vals = np.add.reduceat(vals, edges[2][:-1], axis=2)
         vals = np.add.reduceat(vals, edges[1][:-1], axis=1).sum(axis=0)
         out[j] = vals / (len(rows) * sizes1[:, None] * sizes2[None, :])
 
@@ -327,8 +362,7 @@ def shrink(values: np.ndarray, most: int = COARSE_MAX, progress: dict | None = N
     out = np.empty(tuple(len(e) - 1 for e in edges), dtype=np.float32)
 
     def one(j):
-        blk = np.asarray(values[edges[0][j]:edges[0][j + 1]], dtype=np.float64)
-        blk = np.add.reduceat(blk, edges[2][:-1], axis=2)
+        blk = np.add.reduceat(values[edges[0][j]:edges[0][j + 1]], edges[2][:-1], axis=2, dtype=np.float64)
         blk = np.add.reduceat(blk, edges[1][:-1], axis=1).sum(axis=0)
         out[j] = blk / ((edges[0][j + 1] - edges[0][j]) * sizes1[:, None] * sizes2[None, :])
     _run(one, range(out.shape[0]), progress=progress)
@@ -340,28 +374,44 @@ def _chunks(m: int, step: int = 8):
     return [(i, min(i + step, m)) for i in range(0, m, step)]
 
 
+CHUNK_CELLS = 1 << 20           # the cells a pass over the cube takes at a time: 4 MB of float32, in the core's cache
+                                # (whole 8-row chunks of a 1024^3 cube, 32 MB, went to memory and back at every op)
+
+
+def _cell_chunks(shape) -> list[tuple[int, int]]:
+    """Spans of whole first-axis rows of about CHUNK_CELLS cells each."""
+    per = max(1, int(np.prod(shape[1:])))
+    return _chunks(int(shape[0]), max(1, CHUNK_CELLS // per))
+
+
 def scaled(values: np.ndarray, log: bool, floor: float | None = None) -> np.ndarray:
     """The values on the map's scale, float32: log10 of the positive ones (the rest at 'floor', default the smallest
-    positive one: grids._scaled's rule), NaN kept."""
+    positive one: grids._scaled's rule), NaN kept. Always a fresh array (levels_of works in it in place)."""
     v = np.asarray(values, dtype=np.float32)
     if not log:
         return v.copy()
     if floor is None:
         pos = v > 0
         floor = float(v[pos].min()) if pos.any() else 1.0
+    out = np.maximum(v, np.float32(floor))                     # maximum keeps NaN
     with np.errstate(invalid="ignore", divide="ignore"):
-        return np.log10(np.maximum(v, np.float32(floor)))     # maximum keeps NaN
+        return np.log10(out, out=out)
 
 
 def value_range(values: np.ndarray, log: bool, progress: dict | None = None) -> tuple[tuple[float, float], float]:
     """The scaled values' range and the log floor (the smallest positive value; 1 when none), in chunks on the pool:
     no copy of the cube."""
-    m = values.shape[0]
-    parts = [None] * len(_chunks(m))
+    spans = _chunks(values.shape[0])        # 8 rows a chunk, as before: which zero (+0 or -0) is the minimum
+    parts = [None] * len(spans)             # depends on how the cells are grouped
 
     def one(k):
-        i0, i1 = _chunks(m)[k]
+        i0, i1 = spans[k]
         v = np.asarray(values[i0:i1], dtype=np.float32)
+        lo_, hi_ = v.min(), v.max()                 # NaN or an infinity in the chunk: one of these is not finite
+        if np.isfinite(lo_) and np.isfinite(hi_):
+            parts[k] = (float(lo_), float(hi_), float(lo_) if lo_ > 0 else
+                        float(v[v > 0].min()) if hi_ > 0 else np.inf)
+            return
         ok = np.isfinite(v)
         pos = ok & (v > 0)
         parts[k] = (float(v[ok].min()) if ok.any() else np.inf, float(v[ok].max()) if ok.any() else -np.inf,
@@ -393,29 +443,72 @@ def quantize(s: np.ndarray, qrange: tuple | None = None) -> tuple[np.ndarray, tu
     return q, (qlo, qhi)
 
 
+def _quantize_into(s: np.ndarray, qrange: tuple, out: np.ndarray) -> None:
+    """quantize(s, qrange)'s levels written into 'out' (uint8, s's shape), computed in place in s (float32, consumed)
+    with quantize's own float32 operations in its order -- the same levels, without its compacted copies of the
+    finite values."""
+    qlo, qhi = (float(v) for v in qrange)
+    if not qhi > qlo:
+        qhi = qlo + 1.0
+    bad = ~np.isfinite(s)
+    with np.errstate(invalid="ignore", over="ignore"):
+        np.subtract(s, qlo, out=s)
+        np.divide(s, qhi - qlo, out=s)
+        np.multiply(s, LEVELS - 2, out=s)
+        np.rint(s, out=s)
+        np.maximum(s, np.float32(0), out=s)         # np.clip's values (NaN kept), at a quarter of its cost
+        np.minimum(s, np.float32(LEVELS - 2), out=s)
+        np.add(s, 1.0, out=s)
+    if bad.any():
+        s[bad] = 0.0
+    out[...] = s
+
+
+def level_counts(q: np.ndarray) -> np.ndarray:
+    """How many cells of q (uint8 levels, contiguous) hold each level: np.bincount's counts, taken over pairs of
+    cells (one uint16 each: bincount widens what it counts to 8 bytes a value, so half the values is half the cost),
+    a pair's two levels its low and high byte."""
+    flat = q.reshape(-1)
+    even = flat[:flat.size - flat.size % 2]
+    pairs = np.bincount(even.view(np.uint16), minlength=65536).reshape(256, 256)    # [high byte, low byte]
+    counts = pairs.sum(axis=0) + pairs.sum(axis=1)
+    if flat.size % 2:
+        counts[flat[-1]] += 1
+    return counts
+
+
 def levels_of(values: np.ndarray, log: bool, qrange: tuple, floor: float, progress: dict | None = None
               ) -> tuple[np.ndarray, np.ndarray]:
     """The cube's levels (quantize of its scaled values over qrange) and their counts, in chunks on the pool."""
     q = np.empty(values.shape, dtype=np.uint8)
-    spans = _chunks(values.shape[0])
+    spans = _cell_chunks(values.shape)
     counts = np.zeros((len(spans), LEVELS), dtype=np.int64)
+
+    # a range float32 cannot hold: numpy 1.26 (value-based casting) did quantize's arithmetic in float64 then
+    big = np.finfo(np.float32).max
+    plain = max(abs(float(qrange[0])), abs(float(qrange[1]) - float(qrange[0]))) <= big
 
     def one(k):
         i0, i1 = spans[k]
-        q[i0:i1] = quantize(scaled(values[i0:i1], log, floor), qrange)[0]
-        counts[k] = np.bincount(q[i0:i1].ravel(), minlength=LEVELS)
+        s = scaled(values[i0:i1], log, floor)                                  # scaled: a fresh array
+        if plain:
+            _quantize_into(s, qrange, q[i0:i1])
+        else:
+            q[i0:i1] = quantize(s, qrange)[0]
+        counts[k] = level_counts(q[i0:i1])
     _run(one, range(len(spans)), progress=progress)
     return q, counts.sum(axis=0)
 
 
 def transposed(q: np.ndarray, progress: dict | None = None) -> np.ndarray:
-    """q's slices along its last axis made contiguous: out[k] = q[:, :, k] (in chunks on the pool)."""
+    """q's slices along its last axis made contiguous: out[k] = q[:, :, k] (in chunks on the pool), one x-layer's
+    2D transpose at a time: 5x faster than the 3D one at 1024^3 (0.6 s against 3.0)."""
     out = np.empty((q.shape[2], q.shape[0], q.shape[1]), dtype=q.dtype)
 
     def one(span):
-        i0, i1 = span
-        out[:, i0:i1, :] = np.moveaxis(q[i0:i1], 2, 0)
-    _run(one, _chunks(q.shape[0], 32), progress=progress)
+        for i in range(*span):
+            out[:, i, :] = q[i].T
+    _run(one, _chunks(q.shape[0], 8), progress=progress)
     return out
 
 
@@ -450,7 +543,7 @@ def gather(lut: np.ndarray, images: np.ndarray, out: np.ndarray | None = None) -
 
     def one(span):
         i0, i1 = span
-        np.take(lut, images[i0:i1], out=out[i0:i1])
+        np.take(lut, images[i0:i1], out=out[i0:i1], mode="clip")   # levels < 256 = len(lut): clip never acts
     _run(one, _chunks(images.shape[0], 8), gui_pool())
     return out
 

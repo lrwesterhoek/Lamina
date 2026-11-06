@@ -105,3 +105,4 @@ metal/validate_deposit
 #  Generated analysis-figure directories (tracked PNGs at figures/ top level stay)
 figures/*/
 HANDOFF.md
+cleanup-plan.md

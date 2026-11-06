@@ -63,14 +63,22 @@
      density from rho/rho_bar = 1 in the map's colours with the bar on that range; the ray through a void is
      clearer than the densest column, as the reference says; the range sliders keep their order, Default range
      restores; a colour map recolours without a read; the voids are drawn over it; a close-up reads the void's cube
-     at the grid's cells, Whole box comes from memory; Save image; the planes back; leaving frees the slices.
+     at the grid's cells, Whole box comes from memory; Save image; the planes back; leaving frees the slices. The
+     GPU's picture (volume_gl): offscreen there is no OpenGL and QPainter draws (the state line, the turning policy's
+     contract); in a process of its own on the default platform, where an OpenGL context can be made, the GPU's
+     picture equals QPainter's within 1.5/255 at every pixel not within 1/32 px of a slice's projected edge (Qt
+     rasterises polygons to 1/64 px: a pixel there may take one slice more or less), smooth and spiky fields, both
+     projections, three turns; skipping empty blocks changes no pixel; the window's own picture against
+     volume_picture() (else SKIP: no display, no OpenGL).
 
 The pure parts (grids.void_at, void_circles_mpc, void_info, void_outlines.write_csv, view3d, volume3d) run without Qt; the rest needs
 PySide6 and reports SKIP (exit 0) without it. Usage: ~/.venvs/dtfe-gui/bin/python tests/py_gui_explore_test.py
 """
 
+import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -82,7 +90,8 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python" / "gui"))
 sys.path.insert(0, str(ROOT / "python" / "tools"))
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+if "--gl-child" not in sys.argv[1:]:            # the GPU parity child keeps the default platform (OpenGL)
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("MPLBACKEND", "Agg")
 os.environ["DTFE_GUI_NO_NOTIFY"] = "1"
 TMP = Path(tempfile.mkdtemp(prefix="gui_explore_"))
@@ -1672,6 +1681,34 @@ def volume_pure():
           and avg["cells"] == (n, n, n), f"{prog} {np.abs(avg['values'] - ref).max()}")
     check("11. ... kept: the same request again reads nothing", VOL.average_window(o, "density", "value", o.lo,
                                                                                    o.lo + o.length, 7) is avg)
+    # the fast paths (blocks of one size, the window at its own cells) are the summing path's own sums, bit for bit:
+    # reduceat adds a block as a0 + (0 + a1 + a2 + ...), which rounds apart from left to right under cancellation
+    m = 12                                          # 12^3: no plane of a square side (12^3 is no square)
+    g = np.ones((m, m, m), dtype=np.float32)
+    g[0, 0, 0:4] = [16777216.0, 1.0, 2.0 ** -29, 2.0 ** -29]
+    g[1, 0:3, 2] = [1.0, 1e20, -1e20]
+    g[2, 3, 3] = -0.0
+    d = TMP / "vol_exact"
+    d.mkdir(exist_ok=True)
+    g.tofile(str(d / "ex.a_den"))
+    oe = G.OutputSet(d / "ex", box=((0.0,) * 3, (float(m),) * 3), redshift=0.0)
+
+    def summed(arr, k):                             # the general path: float64, reduceat along z then y, sum over x
+        e = VOL.block_edges(m, k)
+        a = np.add.reduceat(np.add.reduceat(arr.astype(np.float64), e[:-1], axis=2), e[:-1], axis=1)
+        s = np.diff(e).astype(np.float64)
+        return np.stack([a[e[j]:e[j + 1]].sum(axis=0) / ((e[j + 1] - e[j]) * s[:, None] * s[None, :])
+                         for j in range(k)]).astype(np.float32)
+    exact = []
+    for k in (6, 4, 3, m):                          # blocks of 2, 3, 4, and the window at its own cells
+        VOL.drop_volumes()
+        exact.append(VOL.average_window(oe, "density", "value", oe.lo, oe.lo + oe.length, k)["values"].tobytes()
+                     == summed(g, k).tobytes())
+    VOL.drop_volumes()
+    own = VOL.average_window(oe, "density", "value", oe.lo, oe.lo + oe.length, 256)["values"]
+    check("11. blocks of one size (2, 3, 4 cells) summed as reduceat sums them, bit for bit, under heavy cancellation; "
+          "the window at its own cells the grid's values, a -0.0 cell +0.0 as the sums made it",
+          all(exact) and not np.signbit(own[2, 3, 3]) and own[0, 0, 0] == np.float32(16777216.0), f"{exact}")
     lo, hi = np.array([-3.2, 15.5, 4.0]), np.array([6.1, 24.9, 12.0])
     idx, wlo, _whi = V.cell_window(lo, hi, o.lo, o.length / n, n)
     win = rho[np.ix_(*idx)].astype(np.float64)
@@ -1974,6 +2011,339 @@ def volume_render():
           "twice its size it would be off by half the ball)", ratio == 2.0 and (sharp.width(), sharp.height()) == (2 * W, 2 * W)
           and np.all(np.abs(got - want) < 2 * cell + 1.0) and np.allclose(got.reshape(2, 2).mean(1), [W / 2, W / 2],
                                                                           atol=2.0), f"{got} {want} cell {cell:.1f}")
+    # a large cube (PREVIEW_CELLS along an axis) settles in two steps: half the pixels a side first, then whole
+    from PySide6.QtGui import QImage, QPainter
+    nb = X3.PREVIEW_CELLS
+    rod = np.ones((nb, 32, 32), np.float32)
+    rod[:, 8:24, 8:24] = 50.0
+    hib = np.array([float(nb), 32.0, 32.0])
+    prepb = VOL.prepare({"values": rod, "lo": np.zeros(3), "hi": hib, "cells": rod.shape, "key": None}, True)
+    pv = X3.View3D()
+    pv.resize(W, W)
+    pv._ratio = lambda: 2.0
+    pv.set_volume(prepb, np.zeros(3), hib)
+    pv.set_transfer(0.0, 2.0, 1.0, "inferno")
+    pv.fit()
+    screen = QImage(W, W, QImage.Format_RGB32)
+
+    def paint():                                        # what paintEvent does for the volume
+        pv._sized()
+        p = QPainter(screen)
+        pv._draw_volume(p)
+        p.end()
+    paint()
+    first = None if pv._job is None else pv._job.key[0]
+    while pv._job is not None and pv._job.key[0] == "preview":
+        pv._pump_tick()
+    preview, then = pv._preview, pv._job
+    paint()                                             # the preview on the screen, the sharp one going on
+    kept = pv._job is then and then is not None and then.key[0] == "sharp"
+    while pv._job is not None:
+        pv._pump_tick()
+    full = pv._sharp
+    a_prev = _rgba64(preview[1])[..., 3].mean() if preview is not None else -1.0
+    a_full = _rgba64(full[1])[..., 3].mean() if full is not None else -2.0
+    pv._sharp, pv._preview = None, preview
+    saved = pv.volume_picture()
+    check("11. a large cube settles in two steps: a picture of half the pixels a side first (shown while the sharp "
+          "one is drawn on, which painting does not restart), then the sharp one, the preview then let go; the same "
+          "picture at both sizes; a small cube in one step; Save image never the preview",
+          first == "preview" and preview is not None and preview[1].width() == W and kept and full is not None
+          and full[1].width() == 2 * W and abs(a_prev - a_full) < 0.01 and pv.last_preview_ms > 0
+          and saved.width() == 2 * W and pv._preview is None and v3._preview_key() is None,
+          f"{first} {None if preview is None else preview[1].width()} {kept} "
+          f"{None if full is None else full[1].width()} alpha {a_prev:.4f} {a_full:.4f}")
+
+
+def _slice_edge_px(cam, lo, hi, shape, plan, W, H) -> np.ndarray:
+    """Each pixel centre's distance (px) to the nearest projected edge of a slice of the stack (slice_plan's quads,
+    exactly: a projective map takes the quad's edges to segments): where QPainter's 1/64-pixel polygon rasterisation
+    and the GPU's exact inside test may disagree on one slice."""
+    import view3d as V
+    a = plan["axis"]
+    r0, r1 = V.rest_axes(a)
+    d = (hi - lo) / np.asarray(shape, dtype=np.float64)
+    yy, xx = np.mgrid[0:H, 0:W] + 0.5
+    P = np.stack([xx.ravel(), yy.ravel()], 1)
+    best = np.full(len(P), np.inf)
+    for k in range(int(shape[a])):
+        c = np.zeros((4, 3))
+        c[:, a] = lo[a] + (k + 0.5) * d[a]
+        c[:, r0] = [lo[r0], hi[r0], hi[r0], lo[r0]]
+        c[:, r1] = [lo[r1], lo[r1], hi[r1], hi[r1]]
+        xy, _ = cam.project(c)
+        for i in range(4):
+            p0, e = xy[i], xy[(i + 1) % 4] - xy[i]
+            t = np.clip(((P - p0) @ e) / max(float(e @ e), 1e-12), 0.0, 1.0)
+            best = np.minimum(best, np.hypot(*(P - (p0 + t[:, None] * e)).T))
+    return best.reshape(H, W)
+
+
+def _gl_field(m, spiky, seed=3) -> np.ndarray:
+    """A lognormal field: smooth (a Gaussian spectrum) or spiky (a power law to the cell scale)."""
+    rng = np.random.default_rng(seed)
+    k = np.fft.fftfreq(m)
+    kk = np.sqrt(k[:, None, None] ** 2 + k[None, :, None] ** 2 + k[None, None, :] ** 2)
+    amp = (kk + 1e-3) ** -1.0 if spiky else np.exp(-(kk * m / 6.0) ** 2)
+    g = np.real(np.fft.ifftn(np.fft.fftn(rng.normal(size=(m, m, m))) * amp))
+    return np.exp(1.5 * (g - g.mean()) / g.std()).astype(np.float32)
+
+
+def gl_child():
+    """Run by volume_gl_parity in a process of its own on the default Qt platform (the suite's offscreen one has no
+    OpenGL): the GPU's volume picture against QPainter's. Prints GL-APP once Qt started, GL-SKIP: <why> without an
+    OpenGL context, a GL-PARITY {json} line per case and GL-DONE at its end."""
+    from PySide6.QtWidgets import QApplication
+    app = QApplication([])                      # noqa: F841 -- kept alive
+    print("GL-APP", flush=True)
+    import explore_3d as X3
+    import view3d as V
+    import volume3d as VOL
+    import volume_gl as VGL
+    r = VGL.renderer()
+    if r is None:
+        print(f"GL-SKIP: {VGL.unavailable_reason()}", flush=True)
+        return
+    W, H = 320, 280
+    for spiky in (False, True):
+        shape = (32, 36, 26)                    # no two sides alike: the axes' order is tested too
+        vals = np.ascontiguousarray(_gl_field(40, spiky)[:shape[0], :shape[1], :shape[2]])
+        lo, hi = np.zeros(3), np.array([32.0, 36.0, 26.0])
+        prep = VOL.prepare({"values": vals, "lo": lo, "hi": hi, "cells": shape, "key": None}, True)
+        q = prep["fine"]["q"]
+        r.begin_upload(("parity", spiky), q)
+        r.upload_step(float("inf"))
+        for persp in (False, True):
+            for yaw, pitch in ((-35.0, 25.0), (60.0, -40.0), (170.0, 10.0)):
+                cam = V.Camera(yaw=yaw, pitch=pitch, width=W, height=H, perspective=persp)
+                cam.bounds = (lo, hi)
+                cam.fit(lo, hi)
+                plan = VOL.slice_plan(cam, lo, hi, q.shape)
+                lut = VOL.transfer(prep["levels"], 0.0, 0.8 * float(prep["levels"][-1]), 0.6,
+                                   float(np.round(plan["exponent"], 2)), G.lut("inferno"))
+                stack = np.ascontiguousarray(lut[VOL.slice_images(prep["fine"], plan["axis"])])
+                ref = _rgba64(X3.render_slices(stack, plan, W, H, 1.0))
+                gl = r.render(cam, lo, hi, plan, lut, W, H, deep=True).astype(np.float64) / 65535.0
+                d = np.abs(gl - ref).max(axis=2) * 255.0
+                tie = _slice_edge_px(cam, lo, hi, q.shape, plan, W, H) < 1.0 / 32
+                # the same at stride 4 with and without skipping the empty blocks: not a pixel apart
+                lut4 = VOL.transfer(prep["levels"], 0.0, 0.8 * float(prep["levels"][-1]), 0.6,
+                                    float(np.round(plan["exponent"], 2)) * 4, G.lut("inferno"))
+                a4 = r.render(cam, lo, hi, plan, lut4, W, H, stride=4, deep=True)
+                keep, VGL.SKIP_FROM_STRIDE = VGL.SKIP_FROM_STRIDE, 10 ** 6
+                try:
+                    b4 = r.render(cam, lo, hi, plan, lut4, W, H, stride=4, deep=True)
+                finally:
+                    VGL.SKIP_FROM_STRIDE = keep
+                print("GL-PARITY " + json.dumps({
+                    "case": f"{'spiky' if spiky else 'smooth'} {'perspective' if persp else 'orthographic'} "
+                            f"yaw {yaw:g} pitch {pitch:g} (axis {plan['axis']})",
+                    "max_off_ties": float(d[~tie].max()), "p99": float(np.percentile(d, 99)), "mean": float(d.mean()),
+                    "ties": float(tie.mean()), "covered": float((ref[..., 3] > 0).mean()),
+                    "skip_same": bool(np.array_equal(a4, b4)), "skipped_any": bool((a4[..., 3] > 0).any())}),
+                    flush=True)
+    # the half cube (level 1, the turning frames'): the GPU's picture of it equals QPainter's of the same half cube
+    m = 72                                      # MIP_FROM or more a side: the half is made
+    vals = np.ascontiguousarray(_gl_field(m, True))
+    lo, hi = np.zeros(3), np.full(3, float(m))
+    prep2 = VOL.prepare({"values": vals, "lo": lo, "hi": hi, "cells": (m,) * 3, "key": None}, True)
+    r.begin_upload("half", prep2["fine"]["q"], prep2["levels"], prep2["qrange"], prep2["log"])
+    r.upload_step(float("inf"))
+    half = VGL.mip_levels(prep2["fine"]["q"], prep2["levels"], prep2["qrange"], True)
+    cam = V.Camera(yaw=-35.0, pitch=25.0, width=W, height=H, perspective=True)
+    cam.bounds = (lo, hi)
+    cam.fit(lo, hi)
+    plan = VOL.slice_plan(cam, lo, hi, half.shape)
+    lut = VOL.transfer(prep2["levels"], 0.0, 0.8 * float(prep2["levels"][-1]), 0.6,
+                       float(np.round(plan["exponent"], 2)) * 2, G.lut("inferno"))
+    gl = r.render(cam, lo, hi, plan, lut, W, H, stride=2, deep=True, level=1).astype(np.float64) / 65535.0
+    order = [int(i) for i in plan["order"] if int(i) % 2 == 0]     # QPainter's every 2nd slice (the shader's phase 0)
+    stack = np.ascontiguousarray(lut[VOL.oriented(half)[plan["axis"]]])
+    img, S = X3._canvas(W, H, 1.0)
+    X3._composite(img, S, plan, ((i, stack[i]) for i in order))
+    ref_s2 = _rgba64(img)
+    d = np.abs(gl - ref_s2).max(axis=2) * 255.0
+    tie = _slice_edge_px(cam, lo, hi, half.shape, plan, W, H) < 1.0 / 32
+    print("GL-HALF " + json.dumps({"same_levels": bool(r.ready("half", 1) and r.shape(1) == half.shape),
+                                   "max_off_ties": float(d[~tie].max()), "mean": float(d.mean()),
+                                   "covered": float((ref_s2[..., 3] > 0).mean())}), flush=True)
+    r.forget_cube()
+    # the window's own picture: View3D's GPU frame against its volume_picture() (8 bits a channel on screen)
+    v3 = X3.View3D()
+    v3.resize(W, H)
+    v3._ratio = lambda: 1.0
+    keep_cap, X3.SHARP_CELL_PX = X3.SHARP_CELL_PX, 1e9
+    try:
+        v3.set_volume(prep, lo, hi)
+        v3.set_transfer(0.0, 0.8 * float(prep["levels"][-1]), 0.6, "viridis")
+        v3.set_perspective(True)
+        tries = 0
+        while v3._gl_frame() is False and tries < 1000:
+            VGL.renderer().upload_step(float("inf"))
+            tries += 1
+        img = v3._gl_frame()
+        px = VGL.to_qimage(np.ascontiguousarray(img.px)).convertToFormat(X3.QImage.Format_RGBA64_Premultiplied)
+        gl8 = _rgba64(px)
+        ref = _rgba64(v3.volume_picture())
+        plan = VOL.slice_plan(v3.cam, lo, hi, prep["fine"]["shape"])
+        tie = _slice_edge_px(v3.cam, lo, hi, prep["fine"]["shape"], plan, W, H) < 1.0 / 32
+        d = np.abs(gl8 - ref).max(axis=2) * 255.0
+        # a range or opacity slider dragged: the turning frames until it rests (a settled frame each move is slow)
+        v3._fast = False
+        v3.set_transfer(0.1, 0.8 * float(prep["levels"][-1]), 0.5, "viridis")
+        slider = v3._fast and v3._settle.isActive() and v3._gl_frame() is not None and v3._gl_step is not None
+        print("GL-WINDOW " + json.dumps({"size": [img.width(), img.height()], "max_off_ties": float(d[~tie].max()),
+                                         "mean": float(d.mean()), "note": v3.gl_note, "slider_turns": bool(slider)}),
+              flush=True)
+    finally:
+        X3.SHARP_CELL_PX = keep_cap
+        v3.set_volume(None)
+    print("GL-DONE", flush=True)
+
+
+def volume_gl_parity():
+    """11. the GPU's picture (volume_gl) against QPainter's, in a child process on the default platform (gl_child);
+    SKIP where Qt does not start there (no display) or no OpenGL context can be made."""
+    env = dict(os.environ)
+    env.pop("QT_QPA_PLATFORM", None)
+    env.pop("DTFE_GUI_NO_GL", None)
+    env["QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM"] = "1"   # no Dock icon for the child on macOS
+    try:
+        p = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--gl-child"], env=env,
+                           capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        check("11. GPU parity: the child process ends", False, "timed out after 600 s")
+        return
+    out = p.stdout
+    if "GL-APP" not in out:
+        print(f"SKIP (GPU volume parity): Qt's default platform did not start here (no display?): "
+              f"{(p.stderr.strip().splitlines() or [''])[-1][:160]}")
+        return
+    skip = next((ln for ln in out.splitlines() if ln.startswith("GL-SKIP")), None)
+    if skip is not None:
+        print(f"SKIP (GPU volume parity): {skip[len('GL-SKIP: '):]}")
+        return
+    print("3D volume on the GPU (a child process on the default platform)")
+    cases = [json.loads(ln[len("GL-PARITY "):]) for ln in out.splitlines() if ln.startswith("GL-PARITY ")]
+    win = next((json.loads(ln[len("GL-WINDOW "):]) for ln in out.splitlines() if ln.startswith("GL-WINDOW ")), None)
+    done = "GL-DONE" in out and p.returncode == 0
+    check("11. GPU parity: the child ran every case to its end", done and len(cases) == 12 and win is not None
+          and "GL-HALF " in out,
+          f"exit {p.returncode}, {len(cases)} cases; {p.stderr.strip()[-600:]}")
+    if not cases:
+        return
+    worst = max(cases, key=lambda c: c["max_off_ties"])
+    check("11. the GPU's picture equals QPainter's within 1.5/255 at every pixel not within 1/32 px of a slice's "
+          "projected edge (12 cases: smooth and spiky fields, orthographic and perspective, three turns); over all "
+          "pixels p99 <= 1/255 and the mean <= 0.1/255",
+          all(c["max_off_ties"] <= 1.5 and c["p99"] <= 1.0 and c["mean"] <= 0.1 and c["covered"] > 0.2
+              and c["ties"] < 0.1 for c in cases),
+          f"worst {worst}; " + "; ".join(f"{c['case']}: {c['max_off_ties']:.2f}" for c in cases))
+    check("11. ... skipping the empty blocks (stride 4) changes not a pixel",
+          all(c["skip_same"] and c["skipped_any"] for c in cases),
+          str([c["case"] for c in cases if not c["skip_same"]]))
+    half = next((json.loads(ln[len("GL-HALF "):]) for ln in out.splitlines() if ln.startswith("GL-HALF ")), None)
+    check("11. ... the cube's half (drawn while turning, every 2nd slice of it) is the GPU's too: QPainter's picture "
+          "of the same half cube and slices within 1.5/255 off the slices' edges",
+          half is not None and half["same_levels"] and half["max_off_ties"] <= 1.5 and half["covered"] > 0.2,
+          str(half))
+    if win is not None:
+        check("11. ... and in the window: View3D's GPU frame (8 bits) is its volume_picture() within 1.5/255 off the "
+              "slices' edges", win["max_off_ties"] <= 1.5 and win["mean"] <= 0.2 and win["note"] == ""
+              and win["size"] == [320, 280], str(win))
+        check("11. ... a slider moved while the GPU draws: its turning frames until the view rests, not a settled "
+              "frame per move", win.get("slider_turns") is True, str(win))
+
+
+def volume_gl_offscreen():
+    """11. offscreen (this suite's platform) there is no OpenGL: QPainter draws the volume, the state line does not
+    claim the GPU, and the turning policy keeps its contract."""
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        print(f"SKIP (3D volume, GPU fallback): PySide6 is not importable ({e})")
+        return
+    import explore_3d as X3
+    import volume3d as VOL
+    import volume_gl as VGL
+    print("3D volume: the GPU's fallback")
+    QApplication.instance() or QApplication([])
+    m = 16
+    vals = np.exp(np.random.default_rng(5).normal(size=(m, m, m))).astype(np.float32)
+    prep = VOL.prepare({"values": vals, "lo": np.zeros(3), "hi": np.full(3, 16.0), "cells": (m,) * 3, "key": None},
+                       True)
+    v3 = X3.View3D()
+    v3.resize(200, 200)
+    v3.set_volume(prep, np.zeros(3), np.full(3, 16.0))
+    v3.set_transfer(0.0, 1.0, 0.5, "viridis")
+    v3.fit()
+    frame = v3._gl_frame()
+    pic = v3.volume_picture()
+    check("11. offscreen: no OpenGL (the renderer is None, the reason names the platform), View3D's GPU frame None "
+          "and QPainter's picture drawn instead",
+          VGL.renderer() is None and "offscreen" in VGL.unavailable_reason() and frame is None
+          and "offscreen" in v3.gl_note and pic is not None and v3.gl_bytes() == 0,
+          f"{VGL.unavailable_reason()!r} {frame} {v3.gl_note!r}")
+    os.environ["DTFE_GUI_NO_GL"] = "1"
+    try:
+        check("11. DTFE_GUI_NO_GL set: OpenGL is not even tried", "DTFE_GUI_NO_GL" in VGL.disabled_reason())
+    finally:
+        del os.environ["DTFE_GUI_NO_GL"]
+    # any failure setting OpenGL up (not only a refused context: a missing binding, a driver's error) leaves QPainter
+
+    class Broken:
+        def __init__(self):
+            raise RuntimeError("a driver's error")
+    keep = (VGL.disabled_reason, VGL.Renderer, dict(VGL._STATE))
+    VGL.disabled_reason, VGL.Renderer = (lambda: ""), Broken
+    VGL._STATE.clear()
+    try:
+        frame = v3._gl_frame()
+        check("11. an error while OpenGL is set up (not only a refused context) leaves QPainter drawing, the reason "
+              "said", VGL.renderer() is None and frame is None and "RuntimeError" in v3.gl_note
+              and v3.volume_picture() is not None, f"{frame} {v3.gl_note!r}")
+    finally:
+        VGL.disabled_reason, VGL.Renderer = keep[0], keep[1]
+        VGL._STATE.clear()
+        VGL._STATE.update(keep[2])
+    v3.set_volume(None)
+    # the turning policy's contract (whatever its rule): a step of TURN_STEPS; a slow frame never makes it finer, a
+    # fast one never coarser; a finer step known too dear is not tried again; nothing known, nothing changes
+    n, NT = len(X3.TURN_STEPS), X3.next_turn_step
+    ok, seen = True, []
+    for step in range(n):
+        slow, fast = NT(step, {step: 999.0}), NT(step, {step: 0.01})
+        ok &= 0 <= slow < n and 0 <= fast < n and slow >= step and fast <= step and NT(step, {}) == step
+        if step > 0:
+            ok &= NT(step, {step: 0.01, step - 1: 999.0}) >= step
+        seen.append((step, slow, fast))
+    check("11. the turning policy (next_turn_step): a step of TURN_STEPS, finer first; slow frames never make it "
+          "finer, fast ones never coarser, a finer step known too dear is not tried again; coarser from the finest "
+          "when slow, finer from the coarsest when fast; the ladder's depth between samples grows",
+          ok and NT(0, {0: 999.0}) > 0 and NT(n - 1, {n - 1: 0.01}) < n - 1
+          and all((2 if a else 1) * b < (2 if c else 1) * d or (a, b) == (0, 2) for (a, b), (c, d)
+                  in zip(X3.TURN_STEPS, X3.TURN_STEPS[1:])), str(seen))
+    # the cube's half (the turning frames' cube): 2^3 cells averaged in value space, quantised on the same range
+    rng = np.random.default_rng(2)
+    good = True
+    for log in (True, False):
+        vals = np.exp(2.0 * rng.normal(size=(9, 12, 7))).astype(np.float32) - (0.0 if log else 1.0)
+        vals[3, 4, 5] = np.nan
+        prep = VOL.prepare({"values": vals.astype(np.float32), "lo": np.zeros(3), "hi": np.ones(3),
+                            "cells": vals.shape, "key": None}, log)
+        q, lv, qr = prep["fine"]["q"], prep["levels"], prep["qrange"]
+        got = VGL.mip_levels(q, lv, qr, log)
+        vt = VGL.value_table(lv, log)
+        e = [VOL.block_edges(mm, (mm + 1) // 2) for mm in q.shape]
+        ref = np.zeros(VGL.mip_shape(q.shape))
+        for i, j, k in np.ndindex(ref.shape):
+            ref[i, j, k] = vt[q[e[0][i]:e[0][i + 1], e[1][j]:e[1][j + 1], e[2][k]:e[2][k + 1]]].mean()
+        with np.errstate(divide="ignore", invalid="ignore"):
+            want = VOL.quantize(np.log10(ref) if log else ref, qr)[0]
+        good &= got.shape == (5, 6, 4) and np.array_equal(got, want) and int((got == 0).sum()) == 1
+    check("11. the cube's half drawn while turning: each 2^3 block's mean value (a log scale's 10^level: a dense "
+          "cell keeps its mass), quantised on the cube's own range; a block with a cell without value has none",
+          good)
 
 
 def view3d_volume_gui():
@@ -2908,6 +3278,8 @@ def main():
         perspective_pure()
         mean_field_pure()
         volume_render()
+        volume_gl_offscreen()
+        volume_gl_parity()
         gui()
         view3d_gui()
         view3d_volume_gui()
@@ -2922,4 +3294,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--gl-child" in sys.argv[1:]:
+        try:
+            gl_child()
+        finally:
+            shutil.rmtree(TMP, ignore_errors=True)
+    else:
+        main()
