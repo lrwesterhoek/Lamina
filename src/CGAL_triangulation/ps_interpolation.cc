@@ -2767,49 +2767,9 @@ void interpolateGrid_phaseSpace(DT &dt,
             }
         }
 
-        // PS_GPU_CPU_SHARE=f (0 < f < 1, a prototype): the CPU's share of the deposit, so its cores work while the GPU
-        // does -- across partitions: this pass deposits its share after its own GPU call, while others hold the GPU. The
-        // tets of a share f of the pass's estimated work (a tet's window cells + 1) are cut from one end of the
-        // cost-sorted arrays (PS_GPU_CPU_SHARE_END: 'head', the cheapest, the default; 'tail', the most expensive)
-        // and never reach the GPU: they join its deferred tets, which the CPU deposits below into the GPU's own
-        // fixed-point words (the units cover them: the moment bounds were taken over every filtered tet, and their
-        // mass goes to the GPU's mass unit with the released tets'). A pure function of the cost-sorted tets, so the
-        // grids stay the same bytes run to run with the sequential insert (their own bytes: a CPU share is double r3d,
-        // not the float z-sweep). Measured on TNG100-3-Dark 512^3 exact: at best 4.5% faster than the CPU alone.
-        std::vector<uint32_t> cpuShareOrd;
-        double cpuShareMass = 0.;
-        {
-            double const share = Env::real( "PS_GPU_CPU_SHARE", 0. );
-            size_t const nT = tetMasses.size();
-            if ( share > 0. && share < 1. && nT > 0 )
-            {
-                bool const tail = Env::lower( Env::text( "PS_GPU_CPU_SHARE_END", "head" ).c_str() ) == "tail";
-                double total = 0.;
-                for (size_t t = 0; t < nT; ++t) total += double( windowCells( t ) ) + 1.;
-                double const want = share * total;
-                size_t a = 0, b = 0;   // the CPU's tets: [a, b) of the sorted arrays
-                double acc = 0.;
-                if ( tail ) { b = nT; a = nT; while ( a > 0 && acc < want ) acc += double( windowCells( --a ) ) + 1.; }
-                else        { a = 0;  b = 0;  while ( b < nT && acc < want ) acc += double( windowCells( b++ ) ) + 1.; }
-                cpuShareOrd.assign( tetOrd.begin() + a, tetOrd.begin() + b );
-                for (size_t t = a; t < b; ++t)
-                    if ( std::isfinite( tetMasses[t] ) ) cpuShareMass += double( tetMasses[t] );   // (as psGpuPlan sums)
-                auto cut = [a, b](auto &v, size_t const per)
-                {
-                    if ( !v.empty() ) v.erase( v.begin() + a*per, v.begin() + b*per );
-                };
-                cut( tetVerts, PS_TET_STRIDE );
-                cut( tetVels, 12 );
-                cut( tetDens, 4 );
-                cut( tetScal, 4 );
-                cut( tetMasses, 1 );
-                cut( tetOrd, 1 );
-                std::sort( cpuShareOrd.begin(), cpuShareOrd.end() );
-            }
-        }
         double bl[3]  = { double(boxCoordinates[0]), double(boxCoordinates[2]), double(boxCoordinates[4]) };
         double dxv[3] = { double(dx[0]), double(dx[1]), double(dx[2]) };
-        size_t const nTetsDeposited = tetMasses.size() + cpuShareOrd.size();   // psGpuDepositFields consumes (frees) the arrays
+        size_t const nTetsDeposited = tetMasses.size();   // psGpuDepositFields consumes (frees) the arrays
         if ( massAudit )
         {
             audit.gpuHanded = 0.;
@@ -2821,7 +2781,7 @@ void interpolateGrid_phaseSpace(DT &dt,
         // the released tets' mass: the host adds it into the GPU's fixed-point grid below, so the unit covers it
         double releasedMass = 0.;
         for (ReleasedTet const &rt : releasedTets) releasedMass += double(rt.mass);
-        double const hostMass = releasedMass + cpuShareMass;   // the mass the host adds into the GPU's words
+        double const hostMass = releasedMass;   // the mass the host adds into the GPU's words
         // the moment grids' units (fxg): one per grid the kernel deposits, from the bounds above, so the
         // host's later integer adds (the deferred and released tets) stay within them too; dispw's unit only says
         // "the mass grid is it" (the host then skips it when its mass grid is fixed). PS_GPU_FLOAT_MOMENTS=1: none.
@@ -2867,10 +2827,9 @@ void interpolateGrid_phaseSpace(DT &dt,
         {
             fxLogUnits( "GPU", gpuOut.massScale, gpuOut.fxScale );   // (--verbose 3)
             // the deferred tets' cells, ascending: the CPU loop below deposits exactly these
-            deferredOrd.reserve( deferredTets.size() + cpuShareOrd.size() );
+            deferredOrd.reserve( deferredTets.size() );
             for (uint32_t const t : deferredTets) deferredOrd.push_back( tetOrd[t] );
             size_t const nGpuDeferred = deferredOrd.size();
-            deferredOrd.insert( deferredOrd.end(), cpuShareOrd.begin(), cpuShareOrd.end() );   // (PS_GPU_CPU_SHARE)
             std::sort( deferredOrd.begin(), deferredOrd.end() );
             if ( not userOptions.psSuppressGridStats )
                 message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " " << gpuBackendName() << " GPU deposit ("
@@ -2880,9 +2839,6 @@ void interpolateGrid_phaseSpace(DT &dt,
                         << ( userOptions.psExactDeposit
                              ? " deposited by the CPU in double: degenerate in float, or a dispersion float32 cannot resolve)"
                              : " with a sample on a face, deposited by the CPU's exact test)" );
-            if ( not userOptions.psSuppressGridStats && !cpuShareOrd.empty() )
-                message << ", and " << MESSAGE::cMagenta() << cpuShareOrd.size() << MESSAGE::cReset()
-                        << " more as the CPU's share (PS_GPU_CPU_SHARE)";
             if ( not userOptions.psSuppressGridStats )
                 message << ".\n" << MESSAGE::Flush;
             // The mass grid (see massFx): the GPU's fixed-point words become this pass's mass grid as

@@ -10,7 +10,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 rm -f metal/ps_deposit.air metal/ps_deposit.metallib
 if xcrun -sdk macosx metal -v >/dev/null 2>&1; then
     echo ">> compiling Metal kernels (offline)"
-    xcrun -sdk macosx metal    -c metal/ps_deposit.metal -o metal/ps_deposit.air
+    # the exact clip helpers come first, as the Makefile prepends them to the binaries' kernel source
+    xcrun -sdk macosx metal    -c -include metal/exact_clip.metal.inc metal/ps_deposit.metal -o metal/ps_deposit.air
     xcrun -sdk macosx metallib metal/ps_deposit.air      -o metal/ps_deposit.metallib
 else
     echo ">> no offline Metal compiler (xcodebuild -downloadComponent MetalToolchain); the harness compiles the kernel at run time"

@@ -242,8 +242,6 @@ that has a Metal spelling also answers to it: the alias is read when the `*_GPU_
 | `DTFE_GPU_CHUNK` (`DTFE_METAL_CHUNK`) | standard DTFE: the opening chunk (the item kernels round it up to a multiple of 256) | 65536 items; per-tet kernel 25088 tetrahedra, exact 8192 items |
 | `PS_GPU_CHUNK` (`PS_METAL_CHUNK`) | PS-DTFE: the per-tet kernel's opening chunk in tetrahedra | 25000; exact deposit 500 |
 | `PS_EXACT_ITEMS` | `0` keeps the one-thread-per-tetrahedron exact deposit (A/B) | on |
-| `PS_GPU_CPU_SHARE` | PS-DTFE (prototype): the share of each pass's estimated deposit work (window cells + 1 per tetrahedron) the CPU takes beside the GPU, cut from the cost-sorted tetrahedra and deposited with the deferred ones into the GPU's fixed-point words after the pass's GPU call (the overlap is across partitions); run to run the same bytes with the sequential insert, its own bytes for each share. TNG100-3-Dark 512³ exact: 0.35 with `OMP_NUM_THREADS=12 --max-concurrent 12` 13m47s against 14m27s on the CPU alone, so off by default | 0 (all on the GPU) |
-| `PS_GPU_CPU_SHARE_END` | which end of the cost order that share comes from: `head`, the cheapest (the CPU is relatively fastest on small tetrahedra), or `tail` | head |
 | `PS_EXACT_ITEM_CELLS=n` | cells per exact-deposit item | 16 |
 | `DTFE_GPU_TIMING` (`DTFE_METAL_TIMING`) | one line per batch, and the Morton order's cell sharing | off |
 | `PS_GPU_TIMING` (`PS_METAL_TIMING`) | one line per kernel run, the exact items and the checkpoints, and per partition how long its deposit waited for the GPU and held it | off |

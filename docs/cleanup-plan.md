@@ -1,25 +1,54 @@
 # Lamina: cleanup and polish plan
 
-Status: **plan only**. Nothing in it has been changed yet. It covers the C++ binaries (DTFE, PS-DTFE and their
-double and 2D builds), the Metal and CUDA/HIP GPU code, the driver scripts, `python/dtfelib`, the plot scripts and
-tools, and the PySide6 launcher in `python/gui`.
+Status: **plan only** for P1–P9. P0.1 and P0.2 landed in `60a072a`; P0.3's CI fixes and P0.4 landed in `70e153e`
+and `38eb4be`. Open in P0: CI green on `38eb4be`, then `ref0` frozen (P0.3), and one change_log sentence (P0.4). The
+plan covers the C++
+binaries (DTFE, PS-DTFE and their double and 2D builds), the Metal and CUDA/HIP GPU code, the driver scripts,
+`python/dtfelib`, the plot scripts and tools, and the PySide6 launcher in `python/gui`.
 
-**Base.** The survey read commit `5ac1ce1` with three pending pieces of work applied on top (Phase 0 lands them):
+**Surveyed base: master `60a072a`** (the cleanup itself starts from `70e153e`, below). The survey read commit `5ac1ce1` with the work that `60a072a` then committed already
+applied:
 
 - the faster exact deposits: the CPU r3d sweep `exact_sweep.h`, the GPU register z-sweep, the GPU exact-dispersion
   fix, and PS exact on the CPU by default;
 - the `--ps-window` auto-tune fix (the read residue and window sub-grids);
-- the `download_snapshots.sh` https fix.
+- an earlier version of the `download_snapshots.sh` https fix.
 
-Line numbers are from that patched state and will drift. Items therefore name `file:function` first and give line
-numbers in brackets.
+`60a072a` also brought three changes the survey did not see. The plan was re-checked against all three:
+
+- the `--scratch-dir` zero-fill fix (`ScratchAlloc::ZeroFillScope`);
+- the Explore 3D view as a translucent volume (`python/gui/volume3d.py` new; `explore_3d.py`, `view3d.py` rewritten);
+- a reworked download fix (`download_snapshots.sh:fetch_listing`), which replaces the surveyed version.
+
+Every other file is byte-identical to the surveyed tree.
+
+**Re-checked against master `70e153e`.** It changes 9 files of `60a072a`:
+
+- the CI fix: `src/main.cpp` line-buffers stderr, `tests/ps_mass_exact_check.sh` (X4) and `tests/cudaemu_check.sh`;
+- the 3D volume's speed-ups and two-step settle (`python/gui/volume3d.py`, `explore_3d.py`);
+- the OpenGL renderer for the 3D volume (`python/gui/volume_gl.py` new; `explore_3d.py`; GPU-vs-QPainter tests in
+  `tests/py_gui_explore_test.py`);
+- `change_log.txt` and `.gitignore`.
+
+Every item that names one of these files was re-checked and its line numbers updated; every other item still holds
+as written, since its files are unchanged. Line numbers are from `70e153e` for those files and from `60a072a`
+elsewhere, and will drift. Items therefore name `file:function` first and give line numbers in brackets.
 
 **Scope rules carried over from the earlier cleanup rounds:**
 
 - The binaries keep the names DTFE / PS-DTFE and the Python package stays `dtfelib`. The project is called Lamina.
 - No default simulation and no default data root anywhere.
 - The launcher's QSettings key stays `("DTFE", "launcher")`.
-- The launcher's 3D view (`python/gui/explore_3d.py`, `view3d.py`) is being redesigned separately and is out of scope.
+- The launcher's 3D view (`python/gui/explore_3d.py`, `view3d.py`, `volume3d.py`, `volume_gl.py`) is in scope
+  (P7.8–P7.12).
+  - Two renderers. QPainter is the reference: it draws offscreen (the tests), for Save image, and wherever no OpenGL
+    4.1 context can be made (or `DTFE_GUI_NO_GL=1`). On screen `volume_gl.py` draws the volume on the GPU. Any GL
+    error falls back to QPainter for the session.
+  - A 3D item must not change the rendered pixels. Part 11 of `tests/py_gui_explore_test.py` compares QPainter's
+    16-bit compositing with `volume3d.composite`, and parts 10–11 must keep passing unchanged.
+  - The GPU must stay within its tolerance of QPainter: `volume_gl_parity` in the same suite, run in a child process
+    on the default Qt platform. It SKIPs without a display or OpenGL, so CI never runs it: run it on the Mac for
+    any item that touches the volume's drawing.
 - **Hot-loop rule:** the PS deposit-loop lambda and the GPU extraction walk stay inline unless the split is proven
   output-identical and timing-neutral.
 - Upstream code from Cautun's DTFE (2011 headers) is touched only where this plan says so: `averaged_interpolation_2.cc`,
@@ -48,13 +77,13 @@ Estimated gains are marked *(est.)*. Only numbers labelled *measured* come from 
 
 | Gate | What it runs | Pass |
 |---|---|---|
-| **G-build** | all six build modes: plain, `METAL=1`, `METAL=1 DOUBLE=1`, `DIM=2`, `make library`, `CUDAEMU=1` | 0 warnings, 0 errors |
+| **G-build** | all six build modes: plain, `METAL=1`, `METAL=1 DOUBLE=1`, `DIM=2`, `make library`, `CUDAEMU=1` | 0 warnings, 0 errors (until P1.16 lands, read `CUDAEMU=1` off a second build: the first after a mode switch prints stray link errors) |
 | **G-byte** | `tests/dev/bytecmp.sh <ref0> <out>` against the reference binaries taken in P0.3 | every file identical (184 output files after P0) |
 | **G-gpu** | the GPU-exact same-binary comparison added in P1.12, plus `metal/validate_deposit` | identical bytes before and after a host-only change; 31/31 |
-| **G-emu** | `CUDAEMU=1` build + `tests/cudaemu_check.sh` at warps 32 and 64 | PASS |
+| **G-emu** | `CUDAEMU=1` build + `tests/cudaemu_check.sh` at warps 32 and 64 | PASS (warp 32 failed on `60a072a`; fixed in `70e153e`: P0.3) |
 | **G-battery** | `tests/dev/battery.sh` | 31/31, tree unchanged during the run |
-| **G-linux** | CI's Linux stages in a local Ubuntu 24.04 container: `tests/ci_suite.sh build`, `core`, `double`, `2d`, `variants`, and `CUDAEMU` + cudaemu_check | PASS; required before every push |
-| **G-gui** | the four GUI suites (`tests/py_gui_app_test.py`, `py_gui_app2_test.py`, `py_gui_runspec_test.py`, `py_gui_explore_test.py`), an offscreen render of every tab at two window sizes, and one look in a real macOS window | suites pass; no clipping or overlap in the renders |
+| **G-linux** | CI's Linux stages in a local Ubuntu 24.04 container: `tests/ci_suite.sh build`, `core`, `double`, `2d`, `variants`, and `CUDAEMU` + cudaemu_check | PASS; required before every push. glibc differs from macOS where the tests can see it: it writes a long unbuffered stderr line in 128-byte pieces (P0.3) |
+| **G-gui** | the four GUI suites (`tests/py_gui_app_test.py`, `py_gui_app2_test.py`, `py_gui_runspec_test.py`, `py_gui_explore_test.py`), an offscreen render of every tab at two window sizes, and one look in a real macOS window | suites pass, with `volume_gl_parity` run (not SKIPped) on the Mac; no clipping or overlap in the renders |
 | **G-docs** | `tests/docs_drift_check.py` | PASS |
 | **G-tuner** | `tests/ps_auto_tune_check.sh` and `tests/dtfe_auto_tune_check.sh`. A fixed list of `--auto-tune-report` configurations must give the same lines, except the configurations the item targets | PASS; only the targeted lines change |
 | **G-real** | reruns of the real simulations from P2.3 | predicted vs measured peak footprint within the item's band; wall time recorded |
@@ -69,14 +98,14 @@ are acted on. Each phase updates `change_log.txt` and the README section it touc
 
 | Phase | Theme | Changes output bytes? | Main gates | Depends on | Effort |
 |---|---|---|---|---|---|
-| **P0** | Land the pending work, freeze reference binaries | as measured in its own sessions | G-battery, G-byte vs the pre-patch build, G-linux, CI | — | M (mostly machine time) |
+| **P0** | Close the baseline: the work landed in `60a072a`; its red CI job fixed in `70e153e`; freeze reference binaries | no | CI green, G-battery, G-byte vs a `5ac1ce1` build | — | S–M (mostly machine time) |
 | **P1** | Quick fixes and dead code (incl. two GUI layout bugs) | no | G-build, G-byte, G-gpu, G-gui | P0 | M |
 | **P2** | Measure first: timers, a debug knob, real reruns | no (instrumentation only) | G-byte; the reruns are the product | P0 | M + machine hours |
 | **P3** | C++ structure: shared helpers, splits, tuner to `.cc` | no | G-byte, G-move, G-tuner, G-battery | P1 | L |
 | **P4** | GPU structure: shared host code, one params header, twin check | no | G-byte, G-gpu, G-emu, retry suites | P1 | L |
 | **P5** | Python, plots, tools, bash drivers | no (same figures and data) | py suites, `run_scripts_check.sh`, G-docs, G-move | P0 | L |
 | **P6** | One flag scheme with a deprecation path | no (names only) | resume suites, `run_scripts_check.sh`, runspec suite, G-docs, G-byte | P3 (P3.3) | M–L |
-| **P7** | Launcher polish | no | G-gui | P1, P6 | M–L |
+| **P7** | Launcher polish, including the 3D view | no | G-gui | P1, P6 | L |
 | **P8** | Auto-tuner calibration and a time objective | plans change; outputs do not (checked with the plan pinned) | G-tuner, G-real | P2, P3.8 | L |
 | **P9** | CPU and GPU optimisations | no (each item is byte-identical by design) | G-byte, G-gpu, G-emu, G-real timing | P2, P4.1 | L |
 
@@ -89,49 +118,82 @@ Some files are shared between phases and must land in one order:
 | `ps_metal_host.cc` / `ps_gpu_cuda.cu` | P4.1 → P9.5–P9.7 |
 | `auto_tune.h` | P3.8 → P8 |
 | `partition_checkpoint.h` | P3.3 → P6.2 |
-| `python/gui/explore*.py` | P7 coordinates with the 3D-view branch |
+| `quantities.cc` / `DTFE.cpp:psReserveGrids` | P3.3 → P9.1 |
 
 ---
 
-## P0. Land the pending work and freeze a baseline
+## P0. Close the baseline
 
-**P0.1 Regenerate the exact-deposit patch before landing it.**
-- What and where: the saved exact-deposit patch is **incomplete**. It does not contain the `--scratch-dir` zero-fill
-  fix (`ScratchAlloc::ZeroFillScope`), which exists only in the local worktree where the work was done:
-  - `src/scratch_alloc.h`
-  - `src/scratch_alloc.cc`
-  - `src/scratch_alloc_stub.cc`
-  - `src/quantities.cc`
-  - possibly more of its 22 call sites.
+**P0.1 The exact-deposit work and the zero-fill fix — done in `60a072a`.**
+- Landed:
+  - `exact_sweep.h`;
+  - the GPU z-sweep;
+  - the CPU default for PS exact;
+  - the `--scratch-dir` zero-fill fix: `ScratchAlloc::ZeroFillScope`, `zeroAssign` and `zeroResize` in
+    `scratch_alloc.h`, with the mechanism in `scratch_alloc.cc` (`scratchTryMap` [82], `settlePending` [175], the
+    scope's constructor and destructor [261–269]).
+- The fix has 26 call sites:
+  - 8 `zeroAssign` in `DTFE.cpp:psReserveGrids` [1222–1242];
+  - 18 `zeroResize` in `quantities.cc`: `addField`, `orField`, `addFieldSubgrid`, `orFieldSubgrid` and
+    `reserveMemory`.
+- Find the sites with `grep -n 'zeroAssign\|zeroResize'`. `ZeroFillScope` itself appears only inside those two helpers.
+- Still to run on the landed tree: G-byte against a `5ac1ce1` build (only GPU-exact files may differ), G-gpu
+  (`validate_deposit` 31/31).
 
-  That worktree is based on `066c7ac`, not on `5ac1ce1`. Regenerate the patch from it against `5ac1ce1`, then check
-  two things: that nothing `5ac1ce1` added is reverted (the Explore and 3D-view files, `auto_tune.h`,
-  `ps_runtime_check.sh`), and that `grep ZeroFillScope` finds every call site.
-- Why: applying the old patch would silently drop the fix that let 1536³ runs on an external scratch disk proceed.
-- Risk: medium (a three-way merge). Effort: S.
-- Verify:
-  - `ps_scratch_check`;
-  - G-byte against a `5ac1ce1` build (only GPU-exact files may differ; the CPU exact files stay identical);
-  - G-battery;
-  - G-gpu: `validate_deposit` 31/31;
-  - G-emu.
+**P0.2 The window auto-tune fix and the download fix — done in `60a072a`.**
+- Window fix: `auto_tune.h:autoTuneReadKeptBytes` [428], used at [2172–2174], tested by section W of
+  `ps_auto_tune_check.sh`.
+- The download fix that landed differs from the one surveyed:
+  - `download_snapshots.sh:fetch_listing` [128–142] reads the product's JSON listing (`?format=json`), upgrades its
+    http:// chunk links to https, and fetches exactly those links with `wget -i -`, trying the list up to three times.
+  - It replaces both recursive crawls.
+  - The fake `wget` in `run_scripts_check.sh` and the one in `py_gui_app_test.py` follow the new protocol.
+- CI on `60a072a`: the Linux `build-and-test` job passed. Its core stage runs `ps_auto_tune_check`,
+  `ps_window_check`, `ps_scratch_check` and `run_scripts_check`.
 
-**P0.2 Land the window-autotune fix and the download fix.**
-- What and where: `src/auto_tune.h`, `tests/ps_auto_tune_check.sh` (window section W),
-  `scripts/download_snapshots.sh` and `tests/run_scripts_check.sh`.
-- Risk: low. Effort: S.
-- Verify: `ps_auto_tune_check`, `ps_window_check`, `run_scripts_check`.
-- Depends: may land together with P0.1, since the two patches touch no common file.
+**P0.3 Make CI green and freeze the baseline.**
+- CI on `60a072a`: six of seven jobs passed; `cudaemu (32)` failed in `ps_mass_exact_check`.
+- Step 1 is **done in `70e153e`**. The failure was not a warp-32 bug:
+  - glibc 2.37 and later writes an `fprintf` to an unbuffered stderr in 128-byte pieces, each its own `write()`;
+  - so one partition thread's `PS mass audit` line was cut at byte 128 by another thread's progress line;
+  - the suite's Python then crashed on that line before its RESULT line;
+  - a timing race (1 line in 24): warp 64 and the earlier runs were lucky; macOS writes the whole line.
+  - The fix: `main()` line-buffers stderr first thing. X4 reports a line it cannot parse as a FAIL instead of
+    crashing, and `cudaemu_check.sh` shows the last lines of a suite that fails without a FAIL line.
+  - Every output file is byte-identical to `60a072a`'s (184 of 184).
+- CI on `70e153e`: the five other jobs passed. Both `cudaemu` jobs crashed with SIGILL (exit 132, even on
+  `--full_help`) before testing anything. **Fixed in `38eb4be`** (`.github/workflows/ci.yml` only):
+  - Cause: the job built with the Makefile's default `-march=native` through ccache. Its cache, restored by key
+    prefix, held objects compiled on another runner's CPU. ccache matches `-march=native` by its spelling, not by
+    the instructions it picks.
+  - Fix: a job-level `ARCH_FLAGS: -mtune=generic`, as `tests/ci_suite.sh` builds. It is job-level because the
+    Makefile's flags stamp hashes `ARCH_FLAGS` and `dtfe_metal_check.sh` runs its own `make`. Also a new cache key
+    prefix, and a 10-minute timeout on the job's package install (a stuck mirror had held both jobs for an hour).
+  - Results are unchanged: GCC builds use `-ffp-contract=off`, so FMA availability does not matter. Checked in a
+    Linux container: six emulator suites pass at warps 32 and 64.
+- Step 2: the six binaries of `70e153e` (byte-identical source to `38eb4be`, which changes only the workflow) are
+  kept as `ref0`, with checksums, in a folder outside the repository. Every byte-identical phase compares against
+  it. It is frozen once CI on `38eb4be` is green.
+- Step 3 is **done**: a fixed list of 91 `--auto-tune-report` configurations, kept with `ref0`, with the script that
+  makes it.
+  - It covers both binaries and their double builds: RAM × grid × fields × sampled/exact × CPU/GPU, plus a
+    hand-set split, `--ps-window`, sample points and a larger N.
+  - What could vary is pinned: seeded synthetic snapshots, a simulated RAM size (`DTFE_RAM_GB`: no live
+    free-memory term), `OMP_NUM_THREADS` and `DTFE_AUTO_MINN`. Two runs were byte-identical.
+  - Standard DTFE's `--exact-average` does not change its lines, by design: the exact average allocates nothing
+    extra.
+  - Move the script into `tests/dev/` with P1.12.
+- Step 4: save the GUI renders (P1.12 adds the script that makes them; until then this step waits).
+- Gate: CI green on all seven jobs (the run on `38eb4be`), G-battery.
+- **D1** (keep or delete `PS_GPU_CPU_SHARE`) is decided: delete (P1.11).
 
-**P0.3 Freeze the baseline.**
-- What:
-  - Copy the six binaries of the landed tree into a reference folder (`ref0`). Every byte-identical phase compares
-    against it.
-  - Save one `--auto-tune-report` line set (P3.8 uses it).
-  - Save the GUI renders (P1.12 adds the script that makes them).
-- Gate for the whole phase: G-linux. Nobody has compiled the GCC branch of the unrolled r3d reduce yet, because that
-  branch exists for GCC only. Then push and run CI.
-- Decision before landing: **D1** (keep or delete `PS_GPU_CPU_SHARE`).
+**P0.4 Release notes for what `60a072a` left out — done in `70e153e`; the last sentence fixed with P1.11.**
+- `70e153e` added the three missing entries (the `--ps-window` auto-tune fix, the `--scratch-dir` zero-fill fix,
+  the download fix) and one for the stderr fix.
+- Left: the 3D speed-up entry says a cube of 384 cells or more "now settles in two steps". Since the OpenGL renderer
+  landed with it, that holds only where QPainter draws the volume. Qualify the sentence: "So where QPainter draws
+  the volume (without OpenGL: see the next entry) a cube of 384 cells or more ...".
+- Effort: S. Verify: G-docs.
 
 ---
 
@@ -208,7 +270,8 @@ else), so `#if NO_DIM==3 || NO_DIM==2` is always true.
 - `plot/plot_PDF_CDF.py`: `get_critical_point_densities`.
 
 Some helpers are used only by tests: `catalog.read_hdf5`, `io.velocity_scale`, `theory.bbks_ep_pdf`,
-`trees.descendant_branch`. Keep them as public API.
+`trees.descendant_branch`. Keep them as public API. Keep also `view3d.texture_map`, `view3d.section_points` and
+`volume3d.composite`: they are the 3D tests' reference oracles.
 - Verify: ruff F, the py suites. Effort: S.
 
 **P1.10 Unused environment knobs in the tests.** Seven test suites (`gpu_retry_check`, `ps_fixed_moments_check`,
@@ -218,7 +281,10 @@ set the `*_METAL_*` spellings of GPU knobs.
 - Dropping the aliases themselves is D3.
 - Effort: S.
 
-**P1.11 `PS_GPU_CPU_SHARE`, if D1 says delete.**
+**P1.11 Delete `PS_GPU_CPU_SHARE`** (D1, decided 2026-11-06: delete) — *done 2026-11-06.* The block and its two
+`metal/README.md` rows are gone. Verified: G-build 0 warnings in all six modes; G-byte 184/0 against `ref0`; the
+GPU-exact outputs of `ref0`'s `PS-DTFE` and the new one byte-identical (16 files, one domain and 2×2×2, the
+P1.12(a) check done by hand); `validate_deposit` 31/31 (after P1.17); the GPU walk's suites pass.
 - Where: `ps_interpolation.cc`, about 120 lines inside the GPU walk (about lines 2770–2890).
 - Context: opt-in, the best measured gain was 4.5% on the 94M-particle run, and no test or doc covers it.
 - Verify: G-byte, G-gpu (the default path, share 0, is byte-identical by construction). Effort: S.
@@ -228,8 +294,73 @@ set the `*_METAL_*` spellings of GPU knobs.
   `--exact-average --gpu`. It compares two binaries built from the same kernel source. Today `bytecmp` leaves GPU
   exact out, because fast math makes it differ from the CPU. A host-only refactor must still leave it unchanged.
 - (b) Add a `tests/dev/gui_shots.py` that renders every tab offscreen at 1500 and 1100 px, using `remember=False` so
-  that saved settings are never written.
+  that saved settings are never written. Also render the Explore tab with "Show in 3D" on (volume, then planes), on
+  the synthetic output that `py_gui_explore_test`'s `_vol_set` builds.
 - Effort: S each.
+
+**P1.13 Turn the three `TODO(human)` markers into design notes.**
+- Where: `volume3d.py:opacity_curve` [626], `view3d.py:close_up_window` [584] and, since `70e153e`,
+  `explore_3d.py:next_turn_step` [241] (the GPU's turning-frame policy). All three mark working, tested defaults as
+  "optional".
+- Change: rewrite each as a plain design note and keep the measured numbers.
+- Verify: `grep -rn 'TODO' python/gui` is empty. Effort: S.
+
+**P1.14 Make `ps_scratch_check` prove the zero-fill route is taken.**
+- Where: section A of `tests/ps_scratch_check.sh`. It should parse the "N zero-filled in memory" count from the
+  partitioned run's log (`DTFE.cpp` prints it after `psReserveGrids`) and require N > 0. With
+  `DTFE_SCRATCH_MIN_GB=0.0001` every grid there is a scratch mapping.
+- The unpartitioned run prints no count, because its grids come from `reserveMemory`. Either print the same line there
+  or leave that run out.
+- Add a comment next to the message saying that a test parses it.
+- Why: today a silently disabled scope would pass every check, and the zero write-back stall would come back.
+- Risk: low. Effort: S.
+- Verify: the check passes; with the scope forced off it fails.
+
+**P1.15 Check `ZeroFillScope` on Linux.**
+- How it works: inside a scope, `scratchTryMap` hands out anonymous memory, `std::vector` writes its zeros into it,
+  and `settlePending` maps the scratch file over it when the scope closes. Each scope covers one grid.
+- The risk: under the macOS memory compressor those zero pages cost almost nothing. On Linux every written zero page
+  is resident until the remap, so the largest single grid may be held in RAM for a moment. That is the case
+  `--scratch-dir` exists for. *(UNVERIFIED: the fix was measured on macOS only, and CI's tiny grids pass either way.)*
+- Test: measure the peak RSS around `psReserveGrids` in the G-linux container, with one grid larger than the
+  container's memory limit and a small `DTFE_SCRATCH_MIN_GB`.
+- If RSS grows by the grid's size, make the scope a no-op off macOS (one `#if defined(__APPLE__)` in its
+  constructor) and say so in the header comment.
+- Risk: low; Linux would return to the previous path. Effort: S.
+- Verify: G-linux, `ps_scratch_check` on Linux. Depends: P0.3.
+
+**P1.16 Stray links after a build-mode switch.** *(found 2026-11-06, building the six modes at `70e153e`)*
+- What: the first `make DTFE PS-DTFE CUDAEMU=1 -j10` after a build in another mode also runs make's built-in
+  `%: %.o` rule on some objects (`clang++ o/r3d.o -o o/r3d`, `o_ps/ps_point_eval.o -o o_ps/ps_point_eval`, ...). Each
+  fails with `ld: library 'c++' not found` and is ignored. The count varies between runs (4 and 44 seen), so it is a
+  race in the `-j` build. Make still exits 0 and the real binaries are right. A second CUDAEMU build is clean, and
+  so are the other five modes.
+- Where to look: what makes make want a target named like the object without its suffix just after the mode
+  check (`Makefile` [350–362]) wipes the objects. Suspects are the `-include $(wildcard $(OBJ_DIR)/*.d)` lines
+  [642–643], read while the wipe runs, or a prerequisite written without `$(OBJ_EXT)`. Compare the "Makefile
+  metal-stamp race" fixed earlier.
+- Also: a CUDAEMU rebuild with nothing changed still recompiles 2 files.
+- Why: G-build's "0 warnings, 0 errors" cannot be read off a first build after a switch: the stray lines add about
+  one warning and one error each. On macOS 27, Homebrew LLVM 23 adds a missing-`MacOSX27.sdk` warning to each, since
+  those lines lack the Makefile's `$(MACOS_ISYSROOT)`.
+- Risk: low (build only). Effort: S–M. Verify: G-build from a mode switch, three times, 0 stray lines; G-byte.
+
+**P1.17 The Metal harness did not build** — *found and fixed with P1.11, 2026-11-06.*
+- `60a072a` moved the exact clip helpers (`tet_planes`, ...) into `metal/exact_clip.metal.inc`, which the Makefile
+  prepends to the binaries' kernel source and the harness prepends when it compiles at run time.
+- `metal/build_prototype.sh` still compiled `ps_deposit.metal` alone for the offline `.metallib`, so it stopped
+  ("use of undeclared identifier 'tet_planes'") before building `validate_deposit`: G-gpu's 31/31 could not run.
+- Fix: the offline compile takes `-include metal/exact_clip.metal.inc`. Verified: the harness builds and passes
+  31/31.
+
+**P1.18 CI installs only the Boost it uses** — *done 2026-11-06.*
+- On `38eb4be`'s run, `cudaemu (32)` hit the new 10-minute install timeout: the runner's mirror took minutes per
+  package. The three jobs installed `libboost-all-dev`, which also pulls Boost.MPI, OpenMPI and the ROCm/HIP
+  libraries.
+- The build links only `boost_thread`, `boost_filesystem` and `boost_program_options` (the Makefile and
+  `demo/examples`); every header is in `libboost-dev`.
+- Change: those four packages instead. On a clean Ubuntu 24.04: 226 packages instead of 363; the binaries,
+  `make library` and `demo/examples` build with 0 warnings and run.
 
 ---
 
@@ -276,8 +407,12 @@ time before P9.8 is built. Effort: S.
   lattice planes, which is likely to force CGAL's exact-predicate fallback.
 - Feeds D5. Effort: S.
 
-**P2.5 Merge share.** From the P2.3 logs, take the time spent in the serial ordered merge (`DTFE.cpp:mergeOne` →
-`quantities.cc:addFieldSubgrid` / `orFieldSubgrid`). This decides P9.1. Effort: S.
+**P2.5 Merge share.**
+- From the P2.3 logs, take the time spent in the serial ordered merge. The path is `DTFE.cpp:psMergeInTurn` [1444],
+  lambda `mergeOne` [1485–1500] → `quantities.cc:Quantities::addFromSubgrid` [343] → `addFieldSubgrid` [300] /
+  `orFieldSubgrid` [323]. Under `--fixed-point-merge` it goes through `fxMerge.add` instead.
+- `PartitionCheckpoint::afterMerge` runs under the same lock; time it separately.
+- This decides P9.1. Effort: S.
 
 ---
 
@@ -286,11 +421,13 @@ time before P9.8 is built. Effort: S.
 Gate for each item: G-byte, G-build, G-battery for the phase, and G-move wherever a hot function is touched.
 
 **P3.1 One thread-count helper.**
-- Four copies of the same function:
-  - `ps_interpolation.cc:psDepositThreads` (line 282) and `averaged_interpolation_1.cc:exactAverageThreads`
-    (line 332), which are line-identical;
-  - probably also `ps_point_eval.cc:pointEvalThreads` (line 461) and `DTFE.cpp:dtfeParallelThreads` (line 751).
-- Change: one `coresPerTeam()` in a small header next to `env_knobs.h`.
+- Three copies of the same function: `ps_interpolation.cc:psDepositThreads` (line 282),
+  `averaged_interpolation_1.cc:exactAverageThreads` (line 332) and `ps_point_eval.cc:pointEvalThreads` (line 461).
+  - They differ only in the environment variable that overrides them: `DTFE_DEPOSIT_THREADS` twice,
+    `DTFE_PTS_THREADS` once.
+  - `DTFE.cpp:dtfeParallelThreads` (line 751) is a different rule (the OpenMP maximum capped by `--max-concurrent`,
+    with no override) and stays out of the helper.
+- Change: one `coresPerTeam(char const *envOverride)` in a small header next to `env_knobs.h`.
 - Why: P9.2 changes this rule, and it should change in one place.
 - Risk: low. Effort: S.
 
@@ -306,22 +443,32 @@ Gate for each item: G-byte, G-build, G-battery for the phase, and G-move whereve
   - `partition_checkpoint.h:forEachAccumulator`;
   - `ps_fixed_merge.h:forEachSummed`, whose comment says "if you add one there, add it here";
   - `input_output.cc`, twice;
-  - `web_fields.cc`, twice.
-- Change: one `Quantities::forEachField(f)` with a tag for summed, OR-merged and derived fields.
-- Why: today a new field must be added in about 12 places, and forgetting one is silent.
+  - `web_fields.cc`, twice;
+  - `DTFE.cpp:psReserveGrids` [1209–1250]. It sizes the PS-only grids that `reserveMemory` leaves out
+    (`stream_count`, `hidden_streams`, `caustic_bits`, `tet_touch`), with 8 `zeroAssign` lines.
+- Change: one `Quantities::forEachField(f)` with a tag for summed, OR-merged and derived fields. `reserveMemory` and
+  `psReserveGrids` then become one sizing pass over it, so the zero-fill form (`zeroResize` / `zeroAssign`) is written
+  once.
+- Also fix the stale comment in `psReserveGrids` [1216–1217]. It says the pre-sizing stops `addFromSubgrid` writing
+  past an unsized vector, but the merge now grows an unsized grid itself (`quantities.cc` [307, 329]). The real reason
+  for pre-sizing is that the grids are then allocated before the partition loop, where the memory gate sees them.
+- Why: today a new field must be added in about 13 places, and forgetting one is silent.
 - Risk: low to medium. Effort: M.
-- Verify: G-byte, the resume and fixed-merge suites (`ps_resume_check`, `dtfe_resume_check`, `ps_fixed_merge_check`).
+- Verify:
+  - G-byte;
+  - the resume and fixed-merge suites (`ps_resume_check`, `dtfe_resume_check`, `ps_fixed_merge_check`);
+  - `ps_scratch_check`.
 
 **P3.4 One look-ahead pipeline, one progress line.**
-- Two copies of the look-ahead pipeline: `DTFE.cpp:psRunPartitionLoop` (lines 1685–1744) and
-  `dtfePartitionedRun` (lines 2488–2560). Both have:
+- Two copies of the look-ahead pipeline: in `DTFE.cpp:psRunPartitionLoop` (lines 1693–1750) and in
+  `dtfePartitionedRun` (lines 2505–2564). Both have:
   - the same `std::thread` with `exception_ptr`;
   - the same room test, `autoTuneSystemFree() - 4e9 >= need`;
   - the same "look-ahead paused" and "prepared in" messages;
   - the same join and rethrow.
 - Change: a `runLookAhead(order, needBytes, prepare, deposit, canPrefetch, label)` template. Also one
-  `partitionProgress()` for the `[partitions k/N] elapsed ETA` line (lines 1617 and 2412).
-- Then: make the merge-staging state in `psPartitionedRun` (about lines 2050–2160) a `struct PSMergeStaging`, with
+  `partitionProgress()` for the `[partitions k/N] elapsed ETA` line (lines 1625 and 2420).
+- Then: make the merge-staging state in `psPartitionedRun` (about lines 2087–2160) a `struct PSMergeStaging`, with
   `parkWhere` and `subgridBytes` as methods. `PSLoopCtx` (40 reference members) then shrinks to a handful.
 - Risk: low; ordering is unchanged. Effort: M.
 - Verify: `ps_runtime_check` (its parking and look-ahead checks), `dtfe_resume_check`, G-byte.
@@ -391,6 +538,17 @@ dependency lists.
   with a fixed `--seed`, which is worth doing on its own. The dedupe (an `evalAtPoint` helper plus a sample-source
   functor) is D10.
 - Risk: medium. Effort: L.
+
+**P3.10 The fixed-point merge's integer grids through `zeroAssign`.**
+- The problem: `PSFixedMerge::Merge::setup` frees each pre-sized grid and fills its int64 and int8 twins with a plain
+  `assign` (`ps_fixed_merge.h` [238–239]), and the first merge of an unsized slot does the same [340–341]. Under
+  `--scratch-dir` these are scratch mappings of 9 B per component, so `--fixed-point-merge` brings back the zero
+  write-back stall: only the float accumulators got the fix.
+- Change: wrap those four lines in `ScratchAlloc::zeroAssign`. The restore paths [267, 271] are followed by real data
+  and gain nothing.
+- Report the count after setup or at the end of the run: the existing line prints before setup.
+- Risk: low; the bytes are the same. Effort: S.
+- Verify: `ps_fixed_merge_check` (its scratch section), `ps_scratch_check`, G-byte. Depends: P1.14.
 
 ---
 
@@ -563,6 +721,15 @@ the `.npz` / `.csv` products and the `--help` text of every script touched. P5 i
 - Risk: medium. A missed unset variable would abort a batch.
 - Verify: `run_scripts_check.sh`, `DRY_RUN=1` of every driver. Effort: M.
 
+**P5.10 Test the download retry.**
+- `download_snapshots.sh:fetch_listing` retries the chunk list up to three times, but no check reaches that loop: the
+  fake `wget` in `run_scripts_check.sh` fails its test snapshot already at the listing.
+- Change: give the fake a per-run counter that fails the first `wget -i -` call and passes the second. Assert:
+  - exit 0, "attempt 2 of 3" in the log and the chunk in place;
+  - a chunk that keeps failing still exits non-zero.
+- Keep the grep-based listing parser: the script must run without Python.
+- Risk: low. Effort: S. Verify: `run_scripts_check`.
+
 ---
 
 ## P6. One flag scheme, with a deprecation path
@@ -617,7 +784,7 @@ Renaming those costs more than it gains.
 - Verify:
   - `dtfe_resume_check`, `ps_resume_check`;
   - a new check that both spellings give the same key and the same outputs (G-byte);
-  - the help assertions in `run_scripts_check.sh` (about lines 690–695, which assert that the standard `--help` lacks
+  - the help assertions in `run_scripts_check.sh` (about lines 714–720, which assert that the standard `--help` lacks
     `--ps-gpu`; update them);
   - a config file that uses an old name.
 - Depends: P6.1, P3.3.
@@ -626,10 +793,15 @@ Renaming those costs more than it gains.
 - The drivers emit the canonical flags: `run_dtfe.sh`, `run_ps_dtfe.sh`, `run_ps_pipeline.sh`.
 - The environment knobs become `DTFE_GPU` / `PS_GPU` and `DTFE_EXACT` / `PS_EXACT`. The old names are read after them:
   `${PS_GPU:-${PS_METAL:-auto}}`, `DTFE_METAL`, `DTFE_EXACT_AVERAGE`.
+- The renamed knobs keep the exact-deposit rule: an unset or `auto` `PS_GPU` resolves to the CPU when `PS_EXACT=1`.
+  - Today that is `config.sh:gpu_auto_resolve` with its `cpu_first` argument, which `run_ps_dtfe.sh` passes [267].
+  - The old `PS_METAL` spelling must resolve the same way.
+  - Add a `run_scripts_check` assertion for both spellings.
 - Banner strings change in the same commit as the tests that grep them:
-  - `GPU (--ps-gpu)` in `ps_auto_tune_check.sh`;
-  - `GPU (--gpu)` in `run_scripts_check.sh`;
+  - `GPU (--ps-gpu)` in `ps_auto_tune_check.sh` (lines 332, 430, 458, 621);
   - the `(--ps-exact-deposit; …)` message.
+- The standard binary's `GPU (--gpu)` banner (`user_options.cc` [745], `run_dtfe.sh` [178]) already uses the
+  canonical name and stays.
 - Also fix a trap: the drivers' `-m` means GPU and `-s` means simulation, while the binaries' `-m` means method and
   `-s` means samples. Document it in the drivers' `--help` at least.
 - Risk: medium. Effort: S–M. Verify: `run_scripts_check`, `ps_auto_tune_check`, G-docs.
@@ -664,9 +836,12 @@ for little gain. Revisit once the aliases have shipped.
 
 ---
 
-## P7. Launcher polish (excluding the 3D view)
+## P7. Launcher polish
 
-The two layout bugs are P1.1 and P1.2. Gate for every item: G-gui.
+The two layout bugs are P1.1 and P1.2.
+- P7.1–P7.7 cover the launcher's tabs and Explore. P7.8–P7.12 cover the 3D view.
+- Gate for every item: G-gui. The 3D items also run parts 10–11 of `py_gui_explore_test`, and `volume_gl_parity`
+  on the Mac.
 
 **P7.1 Style helpers in `app_widgets.py`.**
 - Spacing constants: `GAP`, `GROUP_MARGIN`, `FORM_V_SPACING`, `COL_GAP`. They replace about nine scattered
@@ -677,6 +852,7 @@ The two layout bugs are P1.1 and P1.2. Gate for every item: G-gui.
 - `field_grid(names, columns=3)`.
 - `grid_row()`: the "Grid ³ cells / sub-samples per axis" row, of which three copies exist today.
 - `run_buttons()`.
+- Apply the helpers to the 3D view's group (`explore_3d.py:_build_3d`) as well.
 - Effort: M.
 
 **P7.2 Less on screen by default.**
@@ -708,7 +884,10 @@ The two layout bugs are P1.1 and P1.2. Gate for every item: G-gui.
   - quick-selection buttons: "Not yet run" / "Not merged" / "With grids".
 - Sentence case, nouns for groups, verbs for buttons, "…" only when a dialog opens.
 - Tooltips at most two lines; the long explanations go to Help. The `gpu`, `lam` and Pipeline-fields tooltips are
-  essays today.
+  essays today, and so are the 3D view's (`explore_3d.py`, lines 31–87; `DETAIL_TIP` grew with the GPU's timings).
+- One `colourbar_label(label, req)` helper for the "log₁₀ " prefix and the component suffix. It replaces the copies at
+  `explore.py` [1643], `explore_zoom.py` [743] and `explore_3d.py` [1487, 1664]. The existing title and
+  colour-bar checks of `py_gui_explore_test` must pass unchanged.
 - Risk: low (some tests match label text). Effort: S–M.
 
 **P7.5 One estimator group builder.**
@@ -723,11 +902,14 @@ The two layout bugs are P1.1 and P1.2. Gate for every item: G-gui.
 - `figsave.py:_dialog_class`, 344, with a 210-line nested `__init__`;
 - `app.py:__init__`, 196;
 - `setup_wizard.py:__init__`, 147;
+- `explore_3d.py:_build_3d`, 151 (lines 1100–1251);
 - `app_menus.py:_build_menus`, 125.
+
+The 3D group is already a mixin in its own file (`View3DMixin`). Split `explore.py:__init__` the same way: one
+`_build_*` per left-pane group, keeping the existing call `self._build_3d(col)` (explore.py:611).
 
 Move the logic out of the UI modules: `explore_zoom.py:exact_zoom_plan` and `explore_grid.py:grid_figure` become
 plain functions.
-- Coordinate `explore*.py` with the 3D-view branch.
 - Risk: low. Effort: M.
 
 **P7.7 Explore details.**
@@ -736,6 +918,70 @@ plain functions.
 - The save buttons sit in the right pane, away from the controls.
 - The log strip's "!" button has no tooltip.
 - Effort: S.
+
+**P7.8 One rule for the values a map shows.**
+- The duplication: `volume3d.py:field_values` [151–177] repeats the second half of `grids.py:OutputSet.slice` (from
+  line 552): the vorticity-to-curl factors, the norm / trace / named component, and the velocity factor.
+- Change: extract `OutputSet.component_values(name, arr, component)` in `grids.py` and call it from both. Keep the
+  float64 order of the norm so that `slice()` stays byte-identical.
+- Also give `grids.py` and `volume3d.py` public names for what the other modules reach by underscore:
+  - in `volume3d.py`: `G._cube_key`, `G._cached_cube`, `G._CAPPED`, `o._velocity_factor`;
+  - in `explore_3d.py`: `G._cube_key`, `VOL._file_shape`, `VOL._sources`, `VOL._prepared_bytes`, and since
+    `70e153e` `VGL._STATE.get("renderer")` (in `View3D._gl_forget` and `gl_bytes`: the renderer if one was made,
+    without making one). Give `volume_gl.py` a `current_renderer()` for it.
+- Why: two copies of a physical rule diverge silently.
+- Risk: medium; the map's path feeds saved figures. Effort: M.
+- Verify:
+  - G-gui;
+  - part 11 compares the two paths for a vector component (add vorticity and a trace if absent);
+  - saved map PNGs byte-identical before and after.
+
+**P7.9 Move `_smoothed` out of `explore.py`.**
+- `explore.py:_smoothed` [178–186] is Gaussian smoothing in cells, with periodic wrap; it is a no-op without scipy.
+- Move it to `grids.py`, import it at the top of `explore.py` and `explore_3d.py`, and delete the function-local import
+  at `explore_3d.py:112`, which works around an import cycle.
+- Risk: low. Effort: S. Verify: G-gui; `explore_3d.planes3d` runs with `explore` not imported.
+
+**P7.10 Remember the 3D view's choices across restarts.**
+- `explore.py:ExploreControls.state()` and `restore_state()` keep only `void_shape` of the 3D controls.
+- Add:
+  - the style (`view3d_style`);
+  - perspective (`view3d_persp`);
+  - the planes' opacity (`view3d_opacity`);
+  - the detail (`view3d_detail`);
+  - the volume's opacity slider (`vol3d_opacity`).
+- Restore them with signals blocked, as `void_shape` is, and use `d.get` with today's defaults for older saved
+  states.
+- Do not restore "Show in 3D" itself, nor a shown range: the range belongs to one volume.
+- Risk: low. Effort: S.
+- Verify: in `py_gui_explore_test`, set the widgets, take `state()`, restore it into a fresh `ExploreControls`, and
+  compare. An old-format dict must leave the defaults.
+
+**P7.11 One release for the launcher's cached cubes.**
+- The job start (`app_run.py` [281–282]) and the memory report (`app_check.py` [62–63]) each call `G.drop_cubes()`
+  and then `VOL.drop_volumes()`.
+- Change: give `grids.py` a list of drop callbacks that `drop_cubes()` calls and sums. `volume3d`, which already
+  imports `grids`, registers `drop_volumes` at import. The two sites then call `G.drop_cubes()` only, and a future
+  cache cannot be missed.
+- Decide, and write down, whether the volume on screen (`View3D.volume`: two bytes a cell, about 2.1 GB at 1024³) is
+  released at a job start too. Since `70e153e` the same question covers the GPU's copy of it (`View3D.gl_bytes()`:
+  1.1 GB at 1024³, freed by `_gl_forget`), which the memory check already counts.
+- Test: add a check next to the `drop_cubes` checks in `py_gui_runspec_test`. Fill the 3D caches with a small volume,
+  take the job-start path, and assert that `VOL.drop_volumes()` then returns 0.
+- Risk: low. Effort: S. Verify: G-gui.
+
+**P7.12 `volume3d.average_window` reuses `_run`.**
+- Its submit / drain / cancel loop [318–330] repeats `volume3d._run` [83–106], with only a per-block "done" counter
+  added. Give `_run` that counter (`progress['done']`) and call it. (`70e153e` rewrote the block sums inside it, not
+  the loop.)
+- Leave `volume_gl.py`'s two pool uses alone (the cube's half [467–493], the transparent-block rows [630–667]): they
+  submit everything and are polled from the GL upload ticks, so they do not fit `_run`'s blocking shape.
+- Store the worker count in a module constant instead of reading `ThreadPoolExecutor`'s private `_max_workers`
+  [80, 94].
+- Risk: low. Keep the "done" meaning and the cancel latency, both of which the user sees. Effort: S.
+- Verify:
+  - part 11's cancel and progress checks pass unchanged;
+  - the averaged cube is byte-identical for a 20³ and a 64³ synthetic grid (`_block_mean_ref`).
 
 ---
 
@@ -759,7 +1005,7 @@ Points read from the code (`auto_tune.h`, patched state):
 
 - **The GPU sampled class is mostly history.** Those builds handed partitions out as a static steal, so nearly every
   partition parked behind the first thread's block. `schedule(monotonic: dynamic, 1)` (in `DTFE.cpp`
-  `psRunPartitionLoop`) and the spill budget fixed that. The −45…−69% must be re-measured (P2.3) before the model
+  `psRunPartitionLoop`, line 1761) and the spill budget fixed that. The −45…−69% must be re-measured (P2.3) before the model
   changes.
 - **The CPU exact deposit has no term of its own.** In `AutoTunePSPlanner::partitionBytes`, the exact deposit's
   per-tet weights and item list are booked only in the `metalActive` branch. The CPU branch books the sampled
@@ -843,8 +1089,9 @@ synthetic 2.1M-particle box at 256³ and on TNG100-3-Dark z = 0 at 512³; GPU wi
 
 **P9.1 A parallel, row-wise sub-grid merge.**
 - Where:
-  - `quantities.cc:addFieldSubgrid` and `orFieldSubgrid`. They run about 17 fields under `mergeMutex`, and for every
-    cell they do NO_DIM 64-bit divisions/modulos plus a `subgridTarget` call.
+  - `quantities.cc:addFieldSubgrid` [300] and `orFieldSubgrid` [323]. They merge 17 summed fields and 2 OR-merged
+    mask fields, in each of the u and a grids, under `mergeMutex`. For every cell they do NO_DIM 64-bit
+    divisions/modulos plus a `subgridTarget` call.
   - `normalizePhaseSpace`.
   - The density-scale and stream-statistics loops in `ps_interpolation.cc`.
 
@@ -852,9 +1099,12 @@ synthetic 2.1M-particle box at 256³ and on TNG100-3-Dark z = 0 at 512³; GPU wi
 - Change: copy row by row, with the destination row start computed once and a split only at a periodic wrap, then add
   `#pragma omp parallel for` over rows.
 - Byte-identical: every element is still added once, in the same order per element.
+- Keep the grow-to-zeros line (`if ( dst->size() < dstTotal ) ScratchAlloc::zeroResize(...)`, `quantities.cc`
+  [307, 329]) on the merging thread, before the parallel loop. The block must be fully grown, and its zero-fill scope
+  closed, before any thread writes into it.
 - Gain: large on the merge itself *(est. ≥10×)*; on the wall, whatever P2.5 measures the merge share to be.
-- Risk: low. Effort: S.
-- Verify: G-byte, `ps_periodic_seam_check`, `ps_partition_padding_check`, `ps_window_check`.
+- Risk: low. Effort: S. Depends: P3.3.
+- Verify: G-byte, `ps_periodic_seam_check`, `ps_partition_padding_check`, `ps_window_check`, `ps_scratch_check`.
 
 **P9.2 Deposit threads that follow the free cores.**
 - Today `psDepositThreads()` is fixed when a deposit starts, and the block-to-thread assignment is static
@@ -940,7 +1190,7 @@ Each decision has a recommended default, so the plan can proceed if no answer co
 
 | ID | Decision | Recommended default | Alternative |
 |---|---|---|---|
-| D1 | `PS_GPU_CPU_SHARE` prototype | **delete** (P1.11): 4.5% at best, untested, 120 lines in the GPU walk | keep it opt-in and add a test plus a README line |
+| D1 | `PS_GPU_CPU_SHARE` prototype | **delete** (P1.11): 4.5% at best, untested, 120 lines in the GPU walk. **Decided 2026-11-06: delete.** | keep it opt-in and add a test plus a README line |
 | D2 | canonical name for the exact deposit in both binaries | **`--exact-average`**: no change for standard DTFE's production command | `--exact` in both, with both old names as aliases |
 | D3 | legacy switches | keep `DTFE_MC_LEGACY` and `DTFE_TESS_CACHE_LEGACY` while grids made the old way exist; **drop the `*_METAL_*` knob aliases** after P1.10 | keep all |
 | D4 | always-on macros `VELOCITY`, `SCALAR`, `TEST_PADDING` and the `*_OPTIONS` help macros (**upstream**) | **leave them**; their off-states are not built anywhere, so do not advertise them | delete the off arms, or add a CI compile of each off-state |
@@ -962,5 +1212,6 @@ Each decision has a recommended default, so the plan can proceed if no answer co
 | Shorter GPU pacing gaps | About 3% of kernel time, traded against the display watchdog. |
 | `--deposit` enum, camelCase flag renames | See P6. |
 | A shared helper for the heredoc Python blocks in the shell tests | Boilerplate only: about 150 lines saved for 38 suites to re-prove. |
+| Painting the 3D view's settled QPainter picture in threads, worker processes or tiles | Measured with `70e153e`'s speed-ups: threads 1.0–1.2× (PySide6 holds the GIL in `drawImage`), processes at most ~1.7× (memory bandwidth), and a tile clip starting at x > 0 changes Qt's pixels. The GPU renderer covers the on-screen case. |
 | `logging` instead of `print` in `dtfelib` and the plot scripts | The launcher parses their stdout. |
 | `-MMD` dependencies for the `.cu` rules | Cannot be tested without nvcc/hipcc. Keep the hand-listed headers. |

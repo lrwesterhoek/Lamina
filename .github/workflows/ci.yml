@@ -42,7 +42,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential libgsl-dev libboost-all-dev libcgal-dev libtbb-dev \
+            build-essential libgsl-dev libcgal-dev libtbb-dev \
+            libboost-dev libboost-thread-dev libboost-filesystem-dev libboost-program-options-dev \
             libmpfr-dev libhdf5-dev libgmp-dev libfftw3-dev libdeflate-dev \
             python3 python3-numpy python3-h5py python3-scipy python3-matplotlib ccache
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
@@ -121,7 +122,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential libgsl-dev libboost-all-dev libcgal-dev \
+            build-essential libgsl-dev libcgal-dev \
+            libboost-dev libboost-thread-dev libboost-filesystem-dev libboost-program-options-dev \
             libmpfr-dev libhdf5-dev libgmp-dev libfftw3-dev ccache
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"   # what the cache step saves (~ is not expanded in env:)
@@ -157,7 +159,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential libgsl-dev libboost-all-dev libcgal-dev libtbb-dev \
+            build-essential libgsl-dev libcgal-dev libtbb-dev \
+            libboost-dev libboost-thread-dev libboost-filesystem-dev libboost-program-options-dev \
             libmpfr-dev libhdf5-dev libgmp-dev libfftw3-dev libdeflate-dev \
             python3 python3-numpy python3-h5py python3-scipy python3-matplotlib ccache
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
@@ -166,7 +169,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-cudaemu-generic-${{ hashFiles('Makefile', 'src/**') }}   # 'generic': never the -march=native cache
+          # 'generic': never the -march=native cache
+          key: ccache-cudaemu-generic-${{ hashFiles('Makefile', 'src/**') }}
           restore-keys: ccache-cudaemu-generic-
       # the CUDA/HIP sources compiled as plain C++ against the CPU emulation of the device (no GPU needed)
       - name: Build DTFE and PS-DTFE with CUDAEMU=1
