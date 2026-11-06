@@ -146,9 +146,14 @@ jobs:
         warp: [32, 64]
     env:
       CCACHE_MAXSIZE: 500M
+      # portable code, as tests/ci_suite.sh builds it (and for every make in the job: the Makefile's ARCH_FLAGS ?=
+      # takes it, so dtfe_metal_check's own make does not rebuild with -march=native). The runners' CPUs differ, and
+      # ccache keys '-march=native' by its spelling: objects cached on one CPU crashed (SIGILL) on another.
+      ARCH_FLAGS: -mtune=generic
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
+        timeout-minutes: 10          # a stuck package mirror fails fast instead of using up the job
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -161,8 +166,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-cudaemu-${{ hashFiles('Makefile', 'src/**') }}
-          restore-keys: ccache-cudaemu-
+          key: ccache-cudaemu-generic-${{ hashFiles('Makefile', 'src/**') }}   # 'generic': never the -march=native cache
+          restore-keys: ccache-cudaemu-generic-
       # the CUDA/HIP sources compiled as plain C++ against the CPU emulation of the device (no GPU needed)
       - name: Build DTFE and PS-DTFE with CUDAEMU=1
         run: make DTFE PS-DTFE CUDAEMU=1 -j"$(nproc)"
