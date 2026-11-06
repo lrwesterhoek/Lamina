@@ -14,7 +14,6 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from scipy.ndimage import (gaussian_filter, gaussian_filter1d, maximum_filter, maximum_filter1d, minimum_filter,
                            minimum_filter1d)
-from pathlib import Path
 
 # The separable filters below run slab-threaded: scipy's ndimage filters are single-threaded, and a
 # 512^3 smoothing at sigma 10 takes ~11 s on one core (the 'environment' step: ~100 of its 140 s per box). Each 1-D
@@ -203,10 +202,6 @@ def get_cosmology_params(z, H0=67.74, Omega_m0=0.3089, Omega_Lambda0=0.6911):
         'f_growth': f_growth,
         'slope_theory': slope_theory
     }
-
-
-def ensure_output_dir(path):
-    Path(path).mkdir(parents=True, exist_ok=True)
 
 
 # ---------------------------------------------------------------- mean-field velocity derivatives

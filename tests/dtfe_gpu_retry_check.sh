@@ -7,11 +7,11 @@
 # this suite and its fault hook is the same: DTFE_GPU_FAULT_AT=<k>[:innocent|timeout|oom|persist] lets the k-th command
 # buffer of the process (a CUDA/HIP kernel) run to completion -- its atomics ARE in the grids -- and then reports it as
 # failed, so only a correct restore keeps the grids exact. Asserted on a synthetic snapshot with pinned opening chunks
-# (DTFE_METAL_CHUNK / DTFE_GPU_CHUNK 4096) and a checkpoint every 2 buffers:
+# (DTFE_GPU_CHUNK 4096) and a checkpoint every 2 buffers:
 #   E1  exact sums: two fault-free runs with different opening chunks (4096 and 65536 work items) write
 #       byte-identical '.a_den', '.a_vel', '.a_velGrad' -- the item kernel over 9 sub-domains whose batches race
 #       for the device, the per-tetrahedron kernel (DTFE_GPU_ITEMS=0), and --exact-average
-#   E2  DTFE_METAL_FLOAT_GRIDS=1 (DTFE_GPU_FLOAT_GRIDS=1; the float atomics, kept for A/B) runs the float sums
+#   E2  DTFE_GPU_FLOAT_GRIDS=1 (the float atomics, kept for A/B) runs the float sums
 #       and agrees with the default to 1e-5 of the peak; the default agrees with the CPU's box mean to 1e-5 of
 #       the peak (tests/dtfe_metal_check.sh is the full CPU parity suite)
 #   R1  the item kernel in one batch (--max-concurrent 1), an 'innocent victim' fault at buffer 3: the batch
@@ -66,19 +66,19 @@ run() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL: $(basenam
 # pinned opening chunks (the controller rescales by elapsed time from there; every chunk starts at a multiple of
 # 256 items, which the exact sums need) and a checkpoint every 2 buffers: the fault at buffer 3 then lands after
 # the checkpoint at buffer 2
-export DTFE_METAL_CHUNK=4096 DTFE_GPU_CHUNK=4096 DTFE_GPU_CHECKPOINT_CHUNKS=2
+export DTFE_GPU_CHUNK=4096 DTFE_GPU_CHECKPOINT_CHUNKS=2
 unset DTFE_GPU_FAULT_AT DTFE_GPU_SHARED DTFE_METAL_FLOAT_GRIDS DTFE_GPU_FLOAT_GRIDS DTFE_GPU_ITEMS
 C=(--grid 32 --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a gradient_a --partition 1 1 1)
 ONE=(--max-concurrent 1)                 # one sub-domain: one batch, so 'buffer k' is a buffer of that batch
 echo ">> E1: two fault-free runs with different opening chunks (item kernel over 9 sub-domains, per-tet kernel, exact)"
-run "$TMP/a1" env DTFE_METAL_TIMING=1 DTFE_GPU_TIMING=1 "${DTFE_BIN}" "$SNAP" "$TMP/a1" "${C[@]}" --gpu
-run "$TMP/a2" env DTFE_METAL_CHUNK=65536 DTFE_GPU_CHUNK=65536 "${DTFE_BIN}" "$SNAP" "$TMP/a2" "${C[@]}" --gpu
+run "$TMP/a1" env DTFE_GPU_TIMING=1 "${DTFE_BIN}" "$SNAP" "$TMP/a1" "${C[@]}" --gpu
+run "$TMP/a2" env DTFE_GPU_CHUNK=65536 "${DTFE_BIN}" "$SNAP" "$TMP/a2" "${C[@]}" --gpu
 run "$TMP/k1" env DTFE_GPU_ITEMS=0 "${DTFE_BIN}" "$SNAP" "$TMP/k1" "${C[@]}" --gpu
-run "$TMP/k2" env DTFE_GPU_ITEMS=0 DTFE_METAL_CHUNK=25088 DTFE_GPU_CHUNK=25088 "${DTFE_BIN}" "$SNAP" "$TMP/k2" "${C[@]}" --gpu
+run "$TMP/k2" env DTFE_GPU_ITEMS=0 DTFE_GPU_CHUNK=25088 "${DTFE_BIN}" "$SNAP" "$TMP/k2" "${C[@]}" --gpu
 run "$TMP/x1" "${DTFE_BIN}" "$SNAP" "$TMP/x1" "${C[@]}" --gpu --exact-average
-run "$TMP/x2" env DTFE_METAL_CHUNK=1024 DTFE_GPU_CHUNK=1024 "${DTFE_BIN}" "$SNAP" "$TMP/x2" "${C[@]}" --gpu --exact-average
+run "$TMP/x2" env DTFE_GPU_CHUNK=1024 "${DTFE_BIN}" "$SNAP" "$TMP/x2" "${C[@]}" --gpu --exact-average
 echo ">> E2: the float sums (A/B) and the CPU"
-run "$TMP/f1" env DTFE_METAL_FLOAT_GRIDS=1 DTFE_GPU_FLOAT_GRIDS=1 DTFE_METAL_TIMING=1 DTFE_GPU_TIMING=1 \
+run "$TMP/f1" env DTFE_GPU_FLOAT_GRIDS=1 DTFE_GPU_TIMING=1 \
     "${DTFE_BIN}" "$SNAP" "$TMP/f1" "${C[@]}" --gpu
 "${DTFE_BIN}" "$SNAP" "$TMP/c1" "${C[@]}" > "$TMP/c1.log" 2>&1 || { echo "FAIL: the CPU run (see $TMP/c1.log)"; exit 1; }
 echo ">> R1: one batch, without and with an innocent-victim fault at buffer 3"
@@ -151,7 +151,7 @@ check("E1", "fixed-point sums" in L and "float sums" not in L,
       "the default runs the exact sums (every batch's timing line says 'fixed-point sums')")
 L = log("f1")
 check("E2", "float sums" in L and "fixed-point sums" not in L,
-      "DTFE_METAL_FLOAT_GRIDS=1 / DTFE_GPU_FLOAT_GRIDS=1 runs the float atomics (the timing lines say 'float sums')")
+      "DTFE_GPU_FLOAT_GRIDS=1 runs the float atomics (the timing lines say 'float sums')")
 for ext in GRIDS:
     p = peak("a1", "f1", ext)
     check("E2", p < 1e-5, f"float sums against the exact ones: '.{ext}' peak-rel {p:.1e} (< 1e-5)")

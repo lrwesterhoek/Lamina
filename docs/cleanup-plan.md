@@ -78,8 +78,8 @@ Estimated gains are marked *(est.)*. Only numbers labelled *measured* come from 
 | Gate | What it runs | Pass |
 |---|---|---|
 | **G-build** | all six build modes: plain, `METAL=1`, `METAL=1 DOUBLE=1`, `DIM=2`, `make library`, `CUDAEMU=1` | 0 warnings, 0 errors (until P1.16 lands, read `CUDAEMU=1` off a second build: the first after a mode switch prints stray link errors) |
-| **G-byte** | `tests/dev/bytecmp.sh <ref0> <out>` against the reference binaries taken in P0.3 | every file identical (184 output files after P0) |
-| **G-gpu** | the GPU-exact same-binary comparison added in P1.12, plus `metal/validate_deposit` | identical bytes before and after a host-only change; 31/31 |
+| **G-byte** | `tests/dev/bytecmp.sh <ref0> <out>` against the reference binaries taken in P0.3 | every file identical (184 output files after P0; 261 with `--gpu-exact`) |
+| **G-gpu** | `tests/dev/bytecmp.sh --gpu-exact` (P1.12), plus `metal/validate_deposit` | identical bytes before and after a host-only change; 31/31 |
 | **G-emu** | `CUDAEMU=1` build + `tests/cudaemu_check.sh` at warps 32 and 64 | PASS (warp 32 failed on `60a072a`; fixed in `70e153e`: P0.3) |
 | **G-battery** | `tests/dev/battery.sh` | 31/31, tree unchanged during the run |
 | **G-linux** | CI's Linux stages in a local Ubuntu 24.04 container: `tests/ci_suite.sh build`, `core`, `double`, `2d`, `variants`, and `CUDAEMU` + cudaemu_check | PASS; required before every push. glibc differs from macOS where the tests can see it: it writes a long unbuffered stderr line in 128-byte pieces (P0.3) |
@@ -182,7 +182,7 @@ Some files are shared between phases and must land in one order:
     free-memory term), `OMP_NUM_THREADS` and `DTFE_AUTO_MINN`. Two runs were byte-identical.
   - Standard DTFE's `--exact-average` does not change its lines, by design: the exact average allocates nothing
     extra.
-  - Move the script into `tests/dev/` with P1.12.
+  - The script is now `tests/dev/tune_report_set.sh` (P1.12).
 - Step 4: save the GUI renders (P1.12 adds the script that makes them; until then this step waits).
 - Gate: CI green on all seven jobs (the run on `38eb4be`), G-battery.
 - **D1** (keep or delete `PS_GPU_CPU_SHARE`) is decided: delete (P1.11).
@@ -200,6 +200,9 @@ Some files are shared between phases and must land in one order:
 ## P1. Quick fixes and dead code (byte-identical)
 
 Every item here is small and mechanical. Land them as one or two commits.
+
+**Status 2026-11-06.** Done: P1.3–P1.11, P1.12(a), P1.13, P1.17, P1.18. Left: P1.1, P1.2 and P1.12(b) (the GUI),
+P1.14, P1.15 (the scratch zero-fill), P1.16 (the build race).
 Gate: G-build, G-byte, G-gpu for the GPU items, and G-gui for P1.1 and P1.2.
 
 **P1.1 Pipeline tab: the grid row is drawn on top of the λ_th row** *(bug, seen in the offscreen render)*.
@@ -225,7 +228,7 @@ Gate: G-build, G-byte, G-gpu for the GPU items, and G-gui for P1.1 and P1.2.
 - The offscreen render used Qt's generic style, not the macOS one, so confirm the widths in a real window.
 - Risk: low. Effort: S. Keeps the 690 px minimum left pane width.
 
-**P1.3 Tautological dimension guards.** `NO_DIM` can only be 2 or 3 (the Makefile and `define.h` reject anything
+**P1.3 Tautological dimension guards** — *done 2026-11-06.* `NO_DIM` can only be 2 or 3 (the Makefile and `define.h` reject anything
 else), so `#if NO_DIM==3 || NO_DIM==2` is always true.
 - Where:
   - `ps_point_eval.cc` (line 76), together with its never-compiled `#else` stubs (about lines 3207–3256) and an empty
@@ -234,9 +237,11 @@ else), so `#if NO_DIM==3 || NO_DIM==2` is always true.
   - `ps_interpolation.cc` (a 294-line block, about lines 3608–3902; only the guard lines go).
 - Risk: none. Effort: S.
 
-**P1.4 Functions with no caller** (checked by `grep -w` over src, metal, tests, python and scripts):
+**P1.4 Functions with no caller** (checked by `grep -w` over src, metal, tests, python and scripts) — *done 2026-11-06.* Our two are
+gone; the upstream ones stay (D10).
 - `particle_data_traits.h`: `compareParticles`, `sameParticle`.
-- `triangulation_miscellaneous.h`: `vertexPositionMatrix`.
+- Not dead: `triangulation_miscellaneous.h:vertexPositionMatrix` has a caller in `demo/examples/main_particle_density.cpp`
+  (the first grep left `demo/` out). It stays.
 - **upstream**:
   - `Box::isParticleLagrangianInBox`;
   - the `Particle_data` setters `setDelta`, `setLagrangianPosition`, `setScalar`, `setVelocity`, `setWeight`,
@@ -246,25 +251,28 @@ else), so `#if NO_DIM==3 || NO_DIM==2` is always true.
 - The upstream ones are optional, see D10.
 - Risk: none. Effort: S. Verify: G-build, which must include the CUDA/HIP compile jobs on CI.
 
-**P1.5 Declare `printElapsedTime` once.** `subpartition.h` defines it, and `SPH_interpolation.cc`,
-`NGP_interpolation.cc` and `grid_deposit_engine.h` each declare it again. Effort: S.
+**P1.5 Declare `printElapsedTime` once** — *done 2026-11-06.* `subpartition.h` defines it, and `SPH_interpolation.cc`,
+`NGP_interpolation.cc` and `grid_deposit_engine.h` each declared it again. Now all four include `src/elapsed_time.h`.
+Effort: S.
 
-**P1.6 Delete the `PS_COLUMNS` prototype** in `metal/ps_deposit.metal`: the doc comment and define (lines 20–29) and the
+**P1.6 Delete the `PS_COLUMNS` prototype** — *done 2026-11-06.* In `metal/ps_deposit.metal`: the doc comment and define (lines 20–29) and the
 `#if PS_COLUMNS … #endif` block (about lines 1080–1184).
 - Nothing defines `PS_COLUMNS` (no Makefile rule, no test), and the CUDA twin has no counterpart.
 - Keep the `BeyondColumn` / `column_*` helpers: `count_beyond_grid` uses them.
 - Risk: low. Kernel text that is never compiled changes nothing. Verify: G-gpu. Effort: S.
 
-**P1.7 Stale comments after the GPU z-sweep replaced the GPU r3d port.**
+**P1.7 Stale comments after the GPU z-sweep replaced the GPU r3d port** — *done 2026-11-06.* The Makefile's GPU comment now
+says the CUDA/HIP ports run under the CPU emulation on Linux and have not run on NVIDIA/AMD hardware.
 - `gpu_host.h` (about lines 97, 160, 163) and `ps_deposit_params.h` (line 241) still say "float32 r3d port".
 - `tests/ps_linear_deposit_check.sh` (lines 261–262) names kernel functions that no longer exist (`exact_init_tet`,
   `exact_clip_plane`, `exact_reduce2`).
 - Check that the Makefile's GPU comment ("not yet validated on hardware") is still accurate.
 - Effort: S.
 
-**P1.8 Unused include:** `#include <deque>` in `ps_metal_host.cc`. Effort: S.
+**P1.8 Unused include:** `#include <deque>` in `ps_metal_host.cc` — *done 2026-11-06.* Effort: S.
 
-**P1.9 Dead Python names** (each appears only at its definition):
+**P1.9 Dead Python names** (each appears only at its definition) — *done 2026-11-06.* `fields.py`'s `Path` import went with
+`ensure_output_dir`; ruff F passes.
 - `config.py`: `cosmic_time_gyr`, `CORRELATION_N_BINS`, `VIS_SMOOTHING_SIGMA`;
 - `fields.py`: `ensure_output_dir`;
 - `plot/plot_PDF_CDF.py`: `get_critical_point_densities`.
@@ -274,23 +282,28 @@ Some helpers are used only by tests: `catalog.read_hdf5`, `io.velocity_scale`, `
 `volume3d.composite`: they are the 3D tests' reference oracles.
 - Verify: ruff F, the py suites. Effort: S.
 
-**P1.10 Unused environment knobs in the tests.** Seven test suites (`gpu_retry_check`, `ps_fixed_moments_check`,
+**P1.10 Unused environment knobs in the tests** — *done 2026-11-06.* Seven test suites (`gpu_retry_check`, `ps_fixed_moments_check`,
 `ps_mass_exact_check`, `gpu_mass_check`, `dtfe_gpu_retry_check`, `dtfe_metal_check`, `dtfe_auto_tune_check`) still
 set the `*_METAL_*` spellings of GPU knobs.
-- Move them to the canonical `*_GPU_*` names.
+- Move them to the canonical `*_GPU_*` names. Done: where a run set both spellings, only the GPU one is left. The
+  `unset` lines and the two Python readers of the environment keep both, since a user's environment may still hold
+  the alias.
 - Dropping the aliases themselves is D3.
 - Effort: S.
 
-**P1.11 Delete `PS_GPU_CPU_SHARE`** (D1, decided 2026-11-06: delete) — *done 2026-11-06.* The block and its two
+**P1.11 Delete `PS_GPU_CPU_SHARE`** (D1, decided 2026-11-06: delete) — *done 2026-11-06.* The block (about 45 lines,
+not the 120 estimated) and its two
 `metal/README.md` rows are gone. Verified: G-build 0 warnings in all six modes; G-byte 184/0 against `ref0`; the
 GPU-exact outputs of `ref0`'s `PS-DTFE` and the new one byte-identical (16 files, one domain and 2×2×2, the
 P1.12(a) check done by hand); `validate_deposit` 31/31 (after P1.17); the GPU walk's suites pass.
-- Where: `ps_interpolation.cc`, about 120 lines inside the GPU walk (about lines 2770–2890).
+- Where: `ps_interpolation.cc`, inside the GPU walk.
 - Context: opt-in, the best measured gain was 4.5% on the 94M-particle run, and no test or doc covers it.
 - Verify: G-byte, G-gpu (the default path, share 0, is byte-identical by construction). Effort: S.
 
-**P1.12 Two verification tools the later phases need.**
-- (a) Extend `tests/dev/bytecmp.sh` with an opt-in GPU-exact section: `--ps-exact-deposit --ps-gpu` and
+**P1.12 Two verification tools the later phases need.** (a) *done 2026-11-06*; (b) open.
+- (a) Done as `bytecmp.sh --gpu-exact` (6 runs: DTFE and PS-DTFE, single and double, one domain and 2×2×2). With it,
+  the auto-tune report script moved to `tests/dev/tune_report_set.sh`. The plan was: extend `tests/dev/bytecmp.sh` with
+  an opt-in GPU-exact section: `--ps-exact-deposit --ps-gpu` and
   `--exact-average --gpu`. It compares two binaries built from the same kernel source. Today `bytecmp` leaves GPU
   exact out, because fast math makes it differ from the CPU. A host-only refactor must still leave it unchanged.
 - (b) Add a `tests/dev/gui_shots.py` that renders every tab offscreen at 1500 and 1100 px, using `remember=False` so
@@ -298,7 +311,7 @@ P1.12(a) check done by hand); `validate_deposit` 31/31 (after P1.17); the GPU wa
   the synthetic output that `py_gui_explore_test`'s `_vol_set` builds.
 - Effort: S each.
 
-**P1.13 Turn the three `TODO(human)` markers into design notes.**
+**P1.13 Turn the three `TODO(human)` markers into design notes** — *done 2026-11-06.*
 - Where: `volume3d.py:opacity_curve` [626], `view3d.py:close_up_window` [584] and, since `70e153e`,
   `explore_3d.py:next_turn_step` [241] (the GPU's turning-frame policy). All three mark working, tested defaults as
   "optional".
@@ -340,6 +353,7 @@ P1.12(a) check done by hand); `validate_deposit` 31/31 (after P1.17); the GPU wa
   [642–643], read while the wipe runs, or a prerequisite written without `$(OBJ_EXT)`. Compare the "Makefile
   metal-stamp race" fixed earlier.
 - Also: a CUDAEMU rebuild with nothing changed still recompiles 2 files.
+- Not every switch shows it: the P1 batch's G-build (2026-11-06, `make library` then `CUDAEMU=1`) had 0 stray lines.
 - Why: G-build's "0 warnings, 0 errors" cannot be read off a first build after a switch: the stray lines add about
   one warning and one error each. On macOS 27, Homebrew LLVM 23 adds a missing-`MacOSX27.sdk` warning to each, since
   those lines lack the Makefile's `$(MACOS_ISYSROOT)`.
@@ -1190,7 +1204,7 @@ Each decision has a recommended default, so the plan can proceed if no answer co
 
 | ID | Decision | Recommended default | Alternative |
 |---|---|---|---|
-| D1 | `PS_GPU_CPU_SHARE` prototype | **delete** (P1.11): 4.5% at best, untested, 120 lines in the GPU walk. **Decided 2026-11-06: delete.** | keep it opt-in and add a test plus a README line |
+| D1 | `PS_GPU_CPU_SHARE` prototype | **delete** (P1.11): 4.5% at best, untested, about 45 lines in the GPU walk. **Decided 2026-11-06: delete.** | keep it opt-in and add a test plus a README line |
 | D2 | canonical name for the exact deposit in both binaries | **`--exact-average`**: no change for standard DTFE's production command | `--exact` in both, with both old names as aliases |
 | D3 | legacy switches | keep `DTFE_MC_LEGACY` and `DTFE_TESS_CACHE_LEGACY` while grids made the old way exist; **drop the `*_METAL_*` knob aliases** after P1.10 | keep all |
 | D4 | always-on macros `VELOCITY`, `SCALAR`, `TEST_PADDING` and the `*_OPTIONS` help macros (**upstream**) | **leave them**; their off-states are not built anywhere, so do not advertise them | delete the off arms, or add a CI compile of each off-state |

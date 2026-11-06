@@ -26,7 +26,7 @@
 #       'gained/shares-1' = 0 (the CPU's shares all reached the grid; the double build's sums of 1.8e6 shares
 #       round: < 1e-9 there) and 'grid/tets-1' below 1e-7 (one float rounding per cell, <= 6e-8). A binary
 #       without the audit skips this check (the others still fail it).
-#   X5  PS_METAL_FLOAT_MASS=1 (single build) selects the float grid, on the CPU too, for A/B comparisons:
+#   X5  PS_GPU_FLOAT_MASS=1 (single build) selects the float grid, on the CPU too, for A/B comparisons:
 #       X1's CPU run then writes a different '.a_den' (its mean is reported).
 #   X6  the audit only observes: every run above sets PS_MASS_AUDIT=1, so X1's 4-thread GPU run and X2's copy-mode
 #       run are repeated with PS_MASS_AUDIT=0 (the production path) and must write the same '.a_den'.
@@ -112,8 +112,8 @@ for t in 1 4 10; do
         --grid 64 --avg-subsamples 2 --ps-caustics --partition 1 1 1
 done
 if ! precision_double; then
-    echo ">> X5 PS_METAL_FLOAT_MASS=1 (the float grid, for A/B)"
-    run lat_cpu_float "$LAT" PS_METAL_FLOAT_MASS=1 -- "${L[@]}" --partition 1 1 1
+    echo ">> X5 PS_GPU_FLOAT_MASS=1 (the float grid, for A/B)"
+    run lat_cpu_float "$LAT" PS_GPU_FLOAT_MASS=1 -- "${L[@]}" --partition 1 1 1
 fi
 
 "$PY" - "$TMP" "$GPU" "${DTFE_TEST_PRECISION}" <<'PYEOF'
@@ -234,7 +234,7 @@ elif not cut:
     print("  SKIP X4: this binary prints no PS_MASS_AUDIT lines")
 if not double:
     a, b = (tmp / "lat_cpu_float.a_den").read_bytes(), (tmp / "lat_cpu_p1.a_den").read_bytes()
-    check("X5", len(a) == len(b) and a != b, f"PS_METAL_FLOAT_MASS=1 writes the float grid (box mean - 1 = "
+    check("X5", len(a) == len(b) and a != b, f"PS_GPU_FLOAT_MASS=1 writes the float grid (box mean - 1 = "
           f"{den('lat_cpu_float').mean() - 1.0:+.2e}, the fixed-point grid {den('lat_cpu_p1').mean() - 1.0:+.2e})")
 print("RESULT:", "PASS  (the mass grid is exact and thread-independent on the CPU, and after a GPU deposit)"
       if not fails else f"FAIL ({fails} check(s))")

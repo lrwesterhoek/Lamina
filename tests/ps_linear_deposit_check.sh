@@ -98,9 +98,9 @@ if [ "${HAVE_EXACT}" -eq 1 ]; then
     run "${TMP}/pld_pan_ns1" "${SNAP_PAN}" --periodic --avg-subsamples 1
     run "${TMP}/pld_pan_ns5" "${SNAP_PAN}" --periodic --avg-subsamples 5
     if [ "${GPU_BUILT}" -eq 1 ]; then
-        echo ">> runs 12-13: exact deposit + dispersion, CPU vs --ps-gpu (float32 r3d port parity)"
+        echo ">> runs 12-13: exact deposit + dispersion, CPU vs --ps-gpu (float32 exact-clip parity)"
         # dedicated pair (with the dispersion field run() does not request): the GPU exact
-        # deposit is a hand-written float32 r3d port, and this pair is its parity coverage in the suite
+        # deposit is a hand-written float32 z-sweep (not r3d), and this pair is its parity coverage in the suite
         for tag in exd exg; do
             GPUFLAG=""; [ "${tag}" = "exg" ] && GPUFLAG="--ps-gpu"
             rm -f "${TMP}/pld_pan_${tag}".*
@@ -258,8 +258,8 @@ if have_exact:
     corr_ex = np.corrcoef(np.log(ex[mm]), np.log(exl[mm]))[0, 1]
     check("D exact+linear differs smoothly from exact", corr_ex > 0.98,
           f"log-density correlation = {corr_ex:.5f}")
-    # float32 r3d port parity: the GPU exact deposit (exact_init_tet/exact_clip_plane/
-    # exact_reduce2 in metal/ps_deposit.metal) vs the CPU double r3d
+    # float32 exact-clip parity: the GPU exact deposit (depositExactItems in metal/ps_deposit.metal, clipping
+    # with sweep_moments from metal/exact_clip.metal.inc) vs the CPU double r3d
     if gpu:
         for ext, nc, tol in ((".den", 1, 1e-4), (".vel", 3, 1e-4), (".velDisp", 1, 1e-4)):
             c = load(f"{tmp}/pld_pan_exd", ext, nc)

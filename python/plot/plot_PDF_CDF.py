@@ -23,25 +23,6 @@ SNAPSHOT_TO_REDSHIFT = config.SNAPSHOT_TO_REDSHIFT
 
 DPI = config.DPI
 
-def get_critical_point_densities(density_field, minima_mask, maxima_mask, saddle1_mask, saddle2_mask):
-    mean_density = np.mean(density_field)
-    std_density = np.std(density_field)
-    
-    def normalize_density(density):
-        return (density - mean_density) / std_density
-    
-    nu_minima = normalize_density(density_field[minima_mask])
-    nu_maxima = normalize_density(density_field[maxima_mask])
-    nu_1saddle = normalize_density(density_field[saddle1_mask])
-    nu_2saddle = normalize_density(density_field[saddle2_mask])
-    
-    return {
-        'minima': nu_minima,
-        'maxima': nu_maxima,
-        '1saddle': nu_1saddle,
-        '2saddle': nu_2saddle
-    }
-
 def compute_pdf(values, bins):
     if len(values) == 0:
         bin_centers = 0.5 * (bins[:-1] + bins[1:])

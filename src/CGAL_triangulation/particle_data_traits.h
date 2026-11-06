@@ -94,34 +94,4 @@ struct Particle_data_sort_traits
 
 #undef SORT_POS
 
-// Total ordering of particles by Eulerian position (x, then y, then z); used to detect duplicates.
-template <typename T>
-bool compareParticles(T p1, T p2)
-{
-#if NO_DIM==2
-    if ( p1.pos[0]!=p2.pos[0] )
-        return p1.pos[0]<p2.pos[0];
-    else
-        return p1.pos[1]<p2.pos[1];
-#elif NO_DIM==3
-    if ( p1.pos[0]!=p2.pos[0] )
-        return p1.pos[0]<p2.pos[0];
-    else if ( p1.pos[1]!=p2.pos[1] )
-        return p1.pos[1]<p2.pos[1];
-    else
-        return p1.pos[2]<p2.pos[2];
-#endif
-}
-
-// Returns true if two particles share the exact same Eulerian position (coincident points).
-template <typename T>
-bool sameParticle(T p1, T p2)
-{
-#if NO_DIM==2
-    return p1.pos[0]==p2.pos[0] and p1.pos[1]==p2.pos[1];
-#elif NO_DIM==3
-    return p1.pos[0]==p2.pos[0] and p1.pos[1]==p2.pos[1] and p1.pos[2]==p2.pos[2];
-#endif
-}
-
 #endif

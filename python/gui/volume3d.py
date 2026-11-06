@@ -623,11 +623,11 @@ def _prepare(avg: dict, log: bool, progress: dict | None = None) -> dict:
 def opacity_curve(t: np.ndarray, gamma: float = DEFAULT_GAMMA) -> np.ndarray:
     """The opacity along the shown range, 0 at its low end to 1 at its high end (t in 0..1, the scaled value's place
     in the range: log10 of the density from the low threshold to the high one)."""
-    # TODO(human) (optional: this default works): the shape of the opacity ramp. A power t^gamma with gamma ~ 1.6
-    # keeps the walls just above the threshold faint and makes filaments and haloes solid; gamma 1 is a plain linear
-    # ramp (walls and filaments alike, a foggier box), a larger gamma shows only the densest knots. A smoothstep
-    # (3t^2 - 2t^3) is another choice: soft at both ends. The function must be 0 at t = 0, rise to 1 at t = 1 and
-    # never fall (tests: transparent below the threshold, monotone).
+    # Design: the ramp is a power t^gamma. gamma ~ 1.6 keeps the walls just above the threshold faint and makes
+    # filaments and haloes solid; gamma 1 (a linear ramp) draws walls and filaments alike, a foggier box, and a larger
+    # gamma shows only the densest knots. A smoothstep (3t^2 - 2t^3), soft at both ends, was the other candidate.
+    # Whatever the shape, it must be 0 at t = 0, rise to 1 at t = 1 and never fall (the tests check that it is
+    # transparent below the threshold and monotone).
     return np.power(np.clip(t, 0.0, 1.0), gamma)
 
 

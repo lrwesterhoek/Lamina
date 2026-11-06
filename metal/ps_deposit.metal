@@ -18,16 +18,6 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// PS_COLUMNS=1: the sampled deposit enumerates the sample columns inside the tet instead of walking its
-// whole bbox window (depositFields). A MEASURED prototype, OFF: an estimated 15-30x fewer sample tests on
-// real z=0 tets, but the kernel time A/B (the Metal busy seconds, --grid 256, nSub 3, 2 x 2 x 2 partitions)
-// spans 1.44x slower (128^3 crossed waves) to 1.34x faster (one partition of strongly stretched 64^3
-// crossed waves, A k = 8): the per-column searches cost about what the skipped tests save, and the inside
-// samples' atomics remain. Turn it on here (and rebuild) to retry it on a real snapshot.
-#ifndef PS_COLUMNS
-#define PS_COLUMNS 0
-#endif
-
 struct DepositParams {
     float boxLo[3];
     float dx[3];
@@ -1077,111 +1067,6 @@ kernel void depositFields(
             if (N==0u) break;      // nothing in the grid: centroid fallback (or nothing) below
             share = m / float(N + Nout);
         }
-#if PS_COLUMNS
-        // COLUMN enumeration of the in-grid samples (prototype, off: see PS_COLUMNS at the
-        // top): instead of every sample of the bbox window, only the sample columns (along z) inside
-        // the tet's xy projection, and along each column only the run whose four face values are not
-        // certainly negative (the count_beyond_grid machinery: affine along the column, certified at
-        // 2B). The samples in the certain-inside run are the ones classifySample calls inside, the
-        // rest of the run goes through classifySample itself, and a sample outside the footprint is
-        // geometrically outside. So the samples kept are the cell loop's (the '.streams' grid was
-        // byte-identical in every A/B). The deferrals can only drop: a sample just outside the
-        // footprint that classifySample could not decide deferred its tet in the cell loop (12466 ->
-        // 12458 tets on 48^3 crossed waves), and those few tets then land in the fixed-point mass grid
-        // instead of the CPU's float sum (the mass moves at 1e-6 in their cells). Under fLinear the
-        // pass-0 weight sum is a float sum in the cell loop's order, so that deposit keeps the loop.
-        if (!fLinear) {
-            int const Sz0 = iMinC[2] * nSub, Sz1 = iMaxC[2] * nSub;
-            int const Sy0 = iMinC[1] * nSub, Sy1 = iMaxC[1] * nSub;
-            float const Tin[4]  = { 2.0f*B[0], 2.0f*B[1], 2.0f*B[2], 2.0f*B[3] };
-            float const Tpos[4] = { -2.0f*B[0], -2.0f*B[1], -2.0f*B[2], -2.0f*B[3] };
-            BeyondColumn col;
-            col.ic0z = ic0[2]; col.f0z = f0[2]; col.dxz = P.dx[2]; col.nSub = nSub; col.invNSub = invNSub;
-            float const Vx[4] = { 0.0f, Ax[0][0], Ax[1][0], Ax[2][0] };
-            float const Vy[4] = { 0.0f, Ax[0][1], Ax[1][1], Ax[2][1] };
-            // a sample's x offset and a vertex's are each within rho of the exact ones (rho also covers
-            // the edges' own float rounding, u T dx), so the projected footprint is widened by 2 rho
-            float const xPad = 1.0e-4f * P.dx[0] + 2.0f * rho[0];
-            bool const countAll = P.windowMode != 0 && pass == 0;   // a window counts samples outside its sub-box too
-            for (int sx = iMinC[0] * nSub; sx < iMaxC[0] * nSub; ++sx) {
-                int const kx = (sx >= 0) ? sx / nSub : -((-sx + nSub - 1) / nSub);
-                int const wg0 = P.periodic ? wrapIdx(kx, P.nGrid[0]) : kx;
-                int l0 = wg0 - P.subOrigin[0];
-                if (l0 < 0) l0 += P.nGrid[0];
-                bool const in0 = l0 >= 0 && l0 < P.subDims[0];
-                if (!in0 && !countAll) continue;
-                float const tx = sample_tc(sx, nSub, invNSub, ic0[0], f0[0]);
-                float const rx = tx * P.dx[0];
-                // the tet's y extent at this x: over the six projected edges that cross it (the hull's
-                // boundary is among them), each widened by its slope times the x uncertainty
-                float yMin = INFINITY, yMax = -INFINITY;
-                for (int i = 0; i < 3; ++i)
-                    for (int j = i + 1; j < 4; ++j) {
-                        float const xi = Vx[i], xj = Vx[j];
-                        if (rx < min(xi, xj) - xPad || rx > max(xi, xj) + xPad) continue;
-                        float y0 = min(Vy[i], Vy[j]), y1 = max(Vy[i], Vy[j]);
-                        float const ddx = fabs(xj - xi);
-                        if (ddx > 4.0f * xPad) {
-                            float const t = clamp((rx - xi) / (xj - xi), 0.0f, 1.0f);
-                            float const y = Vy[i] + t * (Vy[j] - Vy[i]);
-                            float const pad = fabs(Vy[j] - Vy[i]) * (2.0f * xPad / ddx);
-                            y0 = max(y0, y - pad); y1 = min(y1, y + pad);
-                        }
-                        yMin = min(yMin, y0);
-                        yMax = max(yMax, y1);
-                    }
-                if (!(yMin <= yMax)) continue;       // this sample row misses the tet
-                yMin -= 4.0f * rho[1]; yMax += 4.0f * rho[1];
-                int const pLo = max(Sy0, int(floor((yMin / P.dx[1] + float(ic0[1]) + f0[1]) * float(nSub) - 0.5f)) - 2);
-                int const pHi = min(Sy1, int(ceil((yMax / P.dx[1] + float(ic0[1]) + f0[1]) * float(nSub) - 0.5f)) + 3);
-                for (int sy = pLo; sy < pHi; ++sy) {
-                    int const ky = (sy >= 0) ? sy / nSub : -((-sy + nSub - 1) / nSub);
-                    int const wg1 = P.periodic ? wrapIdx(ky, P.nGrid[1]) : ky;
-                    int l1 = wg1 - P.subOrigin[1];
-                    if (l1 < 0) l1 += P.nGrid[1];
-                    bool const in1 = in0 && l1 >= 0 && l1 < P.subDims[1];
-                    if (!in1 && !countAll) continue;
-                    float const ty = sample_tc(sy, nSub, invNSub, ic0[1], f0[1]);
-                    float const ry = ty * P.dx[1];
-                    // the column's certain-inside run [aIn, bIn) and the run [aPos, bPos) not certainly
-                    // outside (short columns: all of it, classified one by one)
-                    int aIn = 0, bIn = 0, aPos = Sz0, bPos = Sz1;
-                    if (Sz1 - Sz0 > 16) {
-                        for (int a = 0; a < 3; ++a) {
-                            col.P[a] = sg * (C[a][0]*rx + C[a][1]*ry);
-                            col.Q[a] = sg * C[a][2];
-                        }
-                        col.P[3] = sg * (detC - (C[0][0]*rx + C[0][1]*ry + C[1][0]*rx + C[1][1]*ry + C[2][0]*rx + C[2][1]*ry));
-                        col.Q[3] = -sg * (C[0][2] + C[1][2] + C[2][2]);
-                        column_run(col, Sz0, Sz1, Tpos, aPos, bPos);
-                        if (aPos >= bPos) continue;          // the whole column is outside
-                        column_run(col, aPos, bPos, Tin, aIn, bIn);
-                        if (aIn >= bIn) { aIn = 0; bIn = 0; }
-                    }
-                    for (int sz = aPos; sz < bPos; ++sz) {
-                        int const kz = (sz >= 0) ? sz / nSub : -((-sz + nSub - 1) / nSub);
-                        int const wg2 = P.periodic ? wrapIdx(kz, P.nGrid[2]) : kz;
-                        int l2 = wg2 - P.subOrigin[2];
-                        if (l2 < 0) l2 += P.nGrid[2];
-                        bool const inSub = in1 && l2 >= 0 && l2 < P.subDims[2];
-                        if (!inSub && !countAll) continue;
-                        float const tz = sample_tc(sz, nSub, invNSub, ic0[2], f0[2]);
-                        float const tc[3] = { tx, ty, tz };
-                        float rel[3] = { rx, ry, tz * P.dx[2] };
-                        int const cls = (sz >= aIn && sz < bIn) ? 1 : classifySample(C, M, detC, sg, B, Bdet, rel, tc, P);
-                        if (cls == 0 && pass == 0) { masses[tid] = -m; return; }   // nothing deposited yet
-                        if (cls <= 0) continue;
-                        if (pass == 0) { N++; continue; }
-                        uint const flat = (uint(l0)*uint(P.subDims[1]) + uint(l1))*uint(P.subDims[2]) + uint(l2);
-                        float const wm = fVolW ? mw / float(N + Nout) : share;
-                        float const sv = fExact ? (tetVol*invCellVol)/float(N + Nout) : 0.0f;
-                        depositSample(G, flat, rel, share, wm, obits, u0, vG, s0, sG, fVel, fDisp, fGrad, fVolW, fCaustic, fExact, sv, true, false, fScal, fSGrad);
-                    }
-                }
-            }
-            continue;   // next pass
-        }
-#endif
         // the in-grid cells only (the clamped window): the samples beyond the grid are counted by
         // count_beyond_grid, and walking a large straddling tet's whole window here cost up to ~10^6
         // empty iterations per thread. The bounds B stay those of the unclamped window.

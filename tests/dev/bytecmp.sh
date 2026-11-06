@@ -11,9 +11,16 @@
 #     mkdir -p /tmp/ref && cp DTFE DTFE-double DTFE-2d PS-DTFE PS-DTFE-double PS-DTFE-2d /tmp/ref/
 # (build all three pairs first: make DTFE PS-DTFE METAL=1; ... METAL=1 DOUBLE=1; ... DIM=2). The GPU runs need a
 # METAL=1 (or CUDA/HIP) build on both sides; a run that fell back to the CPU is listed at the end.
-# Usage: tests/dev/bytecmp.sh <reference binaries dir> <output dir>      (exit 0 = every file identical)
+#
+# --gpu-exact adds 6 runs of the GPU's exact deposits ('--ps-exact-deposit --ps-gpu', '--exact-average --gpu'; single
+# and double, one domain and '--partition 2 2 2'). Those outputs are float32 and fast math, so they are comparable
+# only between two builds of the SAME kernel source: use it for a host-only change (the GPU sums every grid in
+# fixed point, so a run repeats to the byte). A kernel change is checked by metal/validate_deposit and the GPU
+# suites' tolerances instead.
+# Usage: tests/dev/bytecmp.sh [--gpu-exact] <reference binaries dir> <output dir>   (exit 0 = every file identical)
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+GPU_EXACT=0; [ "${1:-}" = "--gpu-exact" ] && { GPU_EXACT=1; shift; }
 [ $# -eq 2 ] || { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "${BASH_SOURCE[0]}"; exit 2; }
 REF="$(cd "$1" && pwd)" || { echo "no reference folder $1"; exit 2; }
 OUT="$2"; mkdir -p "$OUT" && OUT="$(cd "$OUT" && pwd)"
@@ -46,6 +53,15 @@ runs=(
   "psxd:PS-DTFE-double:w48:--grid 64 ${F3[*]} dispersion_a --ps-exact-deposit"
   "dtx2:DTFE-2d:w2d:--grid 128 ${F2[*]} --exact-average"
   "psx2:PS-DTFE-2d:w2d:--grid 128 ${F2[*]} --ps-exact-deposit"
+)
+# the GPU exact deposits (--gpu-exact); each tag ends in 'g', so the fallback check below sees its log
+[ "$GPU_EXACT" = 1 ] && runs+=(
+  "dtxg:DTFE:w48:--grid 64 ${F3[*]} --exact-average --gpu"
+  "dtxpg:DTFE:w48:--grid 64 --partition 2 2 2 ${F3[*]} --exact-average --gpu"
+  "dtxdg:DTFE-double:w48:--grid 64 ${F3[*]} --exact-average --gpu"
+  "psxg:PS-DTFE:w48:--grid 64 ${F3[*]} dispersion_a --ps-exact-deposit --ps-caustics --ps-gpu"
+  "psxpg:PS-DTFE:w48:--grid 64 --partition 2 2 2 ${F3[*]} dispersion_a --ps-exact-deposit --ps-gpu"
+  "psxdg:PS-DTFE-double:w48:--grid 64 ${F3[*]} dispersion_a --ps-exact-deposit --ps-gpu"
 )
 n=0; d=0
 for r in "${runs[@]}"; do

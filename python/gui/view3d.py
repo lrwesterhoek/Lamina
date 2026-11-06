@@ -581,12 +581,11 @@ def close_up_window(centre, radius: float, cell: float, box: float, reach: float
     (lo, hi) in Mpc, the box's frame (it may reach past a face: the planes are read periodically). 'reach' is how far
     the drawn shape reaches (a sphere's R_v, an ellipsoid's a), 'cell' the grid's cell, 'box' the periodic box's
     side."""
-    # TODO(human) (optional: this default works): how much of the void's surroundings a close-up shows. Two radii
-    # take in the compensation ridge just outside R_v and some of the neighbouring walls; a smaller factor
-    # fills the view with the void's interior, a larger one shows its neighbours. The cube must stay under the
-    # box (it must not meet its own periodic image) and keep enough cells to show structure.
-    # (measured on TNG100-3-Dark z = 0: two of an ellipsoid's a made a median void's cube 72 Mpc of the 111; two
-    # R_eff, 49 Mpc, near a sphere's two R_v, 42)
+    # Design: a close-up shows two radii (CLOSE_UP_RADII) around the void. That takes in the compensation ridge just
+    # outside R_v and some of the neighbouring walls; a smaller factor fills the view with the void's interior, a
+    # larger one shows its neighbours. The cube stays under the box (it must not meet its own periodic image) and
+    # keeps CLOSE_UP_MIN_CELLS cells to show structure. Measured on TNG100-3-Dark z = 0: two of an ellipsoid's a made
+    # a median void's cube 72 Mpc of the 111; two R_eff, 49 Mpc, near a sphere's two R_v, 42.
     half = max(CLOSE_UP_RADII * float(radius), CLOSE_UP_MIN_CELLS * float(cell), CLOSE_UP_FIT * float(reach))
     if box > 0:
         half = min(half, 0.5 * float(box))

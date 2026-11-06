@@ -73,8 +73,6 @@
 #include "../ps_point_eval.h"
 #include "../output_staging.h"   // the .pts_* files are staged with the grids (crash-safe outputs)
 
-#if NO_DIM==3 || NO_DIM==2
-
 #include "triangulation_common.h"
 #include "ps_caustic_class.h"   // --ps-caustics: per-tetrahedron caustic stratification bits
 #include "ps_exact_inside.h"    // exact, tie-consistent containment (shared with the grid deposit)
@@ -3202,59 +3200,6 @@ void psWriteOccupancyIfMissing(DT &dt, User_options &partOpts)
     (void)dt; (void)partOpts;
 #endif
 }
-
-
-#else // NO_DIM != 3
-
-// Point evaluation and '--serve' exist in 2D and 3D builds (the server's handshake carries the
-// dimension). These stubs only keep any other NO_DIM linking.
-#include "triangulation_common.h"
-#ifdef PHASE_SPACE
-void interpolatePoints_phaseSpace(DT &, User_options &) {}
-#else
-void interpolatePoints_standard(DT &, User_options &) {}
-#endif
-bool psPointEvalActive() { return false; }
-void psPointEvalInit(User_options &)
-{
-    throwError( "'--sample-points' (point evaluation) is implemented for 2D and 3D builds only." );
-}
-void psPointEvalFinalize(User_options const &) {}
-void psPointEvalWriteOutputs(User_options const &) {}
-void psPointEvalSetPartition(int) {}
-double psPointEvalUnsavedBytes(std::vector<char> const &, std::vector<char> const &) { return 0.; }
-bool psPointEvalSavePartitions(std::string const &, std::string const &, std::vector<char> const &,
-                               std::vector<char> &, std::string &) { return true; }
-bool psPointEvalLoadPartitions(std::string const &, std::string const &, std::vector<char> const &,
-                               std::string &) { return true; }
-void psPointEvalRemoveUnsaved(std::string const &, std::vector<char> const &) {}
-void psServeRedirectStdout() {}
-[[noreturn]] void psServe(DT &, User_options &)
-{
-    throwError( "'--serve' (interactive point evaluation) is implemented for 2D and 3D builds only." );
-    std::exit( 1 );
-}
-void psServeCompositeBegin(User_options const &, int)
-{
-    throwError( "'--serve' (interactive point evaluation) is implemented for 2D and 3D builds only." );
-}
-void psServeCompositeAddPartition(int, User_options &, std::function<void(std::vector<Particle_data>&)> const &,
-                                  double const *, double const *) {}
-[[noreturn]] void psServeCompositeRun(User_options &)
-{
-    throwError( "'--serve' (interactive point evaluation) is implemented for 2D and 3D builds only." );
-    std::exit( 1 );
-}
-int psOccupancyTouchesWindow(User_options const &, User_options const &) { return -1; }
-bool psTessellationCached(User_options const &) { return false; }
-void psWriteOccupancyIfMissing(DT &, User_options &) {}
-void psPointEvalOwnBox(double const lo[], double const hi[], bool const *, bool const *, double ownLo[], double ownHi[])
-{
-    for (int d = 0; d < NO_DIM; ++d) { ownLo[d] = lo[d]; ownHi[d] = hi[d]; }
-}
-void psPointEvalSetOwnership(double const *, double const *) {}
-
-#endif // NO_DIM
 
 
 // ======================================================================================

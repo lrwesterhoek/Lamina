@@ -238,14 +238,13 @@ def next_turn_step(step: int, costs: dict, budget_ms: float = TURN_BUDGET_MS) ->
     """The step (an index into TURN_STEPS) of the next GPU frame while the view turns, from the frames drawn so far in
     this turn: 'costs' maps each step tried to its drawing time (ms, the median of its last three frames; a step tried
     fewer times is not in it). Settled, the picture is always every slice of the volume itself."""
-    # TODO(human) (optional: this default works): how the turning frames trade detail for speed. The default moves
-    # one step at a time: coarser while the current step is over budget, finer when the finer one is known to fit,
-    # or, not tried yet in this turn, when the current one costs under 0.4 of the budget (a step roughly halves the
-    # cost, never quite: the cache helps). A step known too dear is never tried again in the same turn, so it cannot
-    # flicker between two. Measured on TNG100-3-Dark 1024^3, 2000 x 1600 on a busy M1 Max: (0, 1) 96 ms, (0, 2) 69,
-    # (1, 1) 17, (1, 2) 11, (1, 4) ~10. Other choices: jump straight to the finest step known to fit, aim at the
-    # mouse's own event rate instead of a fixed budget, or keep the last turn's costs (they hold while the cube, the
-    # screen and the range stay).
+    # Design: the step moves one at a time. Coarser while the current step is over budget; finer when the finer one
+    # is known to fit or, not tried yet in this turn, when the current one costs under 0.4 of the budget (a step
+    # roughly halves the cost, never quite: the cache helps). A step known too dear is never tried again in the same
+    # turn, so it cannot flicker between two. Measured on TNG100-3-Dark 1024^3, 2000 x 1600 on a busy M1 Max: (0, 1)
+    # 96 ms, (0, 2) 69, (1, 1) 17, (1, 2) 11, (1, 4) ~10. Not chosen: jumping straight to the finest step known to
+    # fit, aiming at the mouse's own event rate instead of a fixed budget, keeping the last turn's costs (they hold
+    # only while the cube, the screen and the range stay).
     cur = costs.get(step)
     if cur is None:
         return step

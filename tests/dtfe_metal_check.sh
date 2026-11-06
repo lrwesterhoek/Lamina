@@ -76,7 +76,7 @@ assert_gpu "--gpu per-tet kernel" "$TMP/s_gpu0.log"
 echo ">> coarse 32^3 grid: the single-cell fast path through the shared grid"
 COARSE=(--grid 32 --periodic --input 105 --MpcUnit 1 --field $FIELDS)
 "${DTFE_BIN}" "$SNAP" "$TMP/c_cpu" "${COARSE[@]}" > "$TMP/c_cpu.log" 2>&1 || { echo "FAIL run coarse cpu"; exit 1; }
-DTFE_GPU_SHARED=1 DTFE_METAL_TIMING=1 "${DTFE_BIN}" "$SNAP" "$TMP/c_gpu" "${COARSE[@]}" --gpu > "$TMP/c_gpu.log" 2>&1 || { echo "FAIL run coarse gpu"; exit 1; }
+DTFE_GPU_SHARED=1 DTFE_GPU_TIMING=1 "${DTFE_BIN}" "$SNAP" "$TMP/c_gpu" "${COARSE[@]}" --gpu > "$TMP/c_gpu.log" 2>&1 || { echo "FAIL run coarse gpu"; exit 1; }
 assert_gpu "coarse --gpu shared" "$TMP/c_gpu.log"
 "${DTFE_BIN}" "$SNAP" "$TMP/c_gpu1" "${COARSE[@]}" --gpu > "$TMP/c_gpu1.log" 2>&1 || { echo "FAIL run coarse gpu per-call"; exit 1; }
 assert_gpu "coarse --gpu per-call" "$TMP/c_gpu1.log"

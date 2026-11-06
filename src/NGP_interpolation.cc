@@ -36,10 +36,7 @@
 #include "box.h"
 #include "user_options.h"
 #include "message.h"
-#include <boost/timer.hpp>
-
-void printElapsedTime(boost::timer *t, User_options *userOptions,
-                      std::string computationQuantityName);
+#include "elapsed_time.h"   // printElapsedTime
 
 using namespace std;
 typedef vector<Particle_data>::iterator     vectorIterator;

@@ -136,6 +136,20 @@ UNRELEASED (since 1.0.0)
 - metal/build_prototype.sh builds the kernel harness again: its offline compile now includes
   metal/exact_clip.metal.inc first, as the binaries' kernel source does (it stopped at 'tet_planes' since the exact
   clip helpers moved there).
+- Cleanup, no output changes (every file byte-identical, the GPU exact deposits included):
+  * dead code out: the always-true 'NO_DIM==3 || NO_DIM==2' guards and the never-compiled stubs behind one of them
+    (ps_point_eval.cc, ps_exact_inside.h, ps_interpolation.cc), compareParticles and sameParticle
+    (particle_data_traits.h), the PS_COLUMNS kernel prototype in metal/ps_deposit.metal (off since it was measured:
+    1.44x slower to 1.34x faster), an unused include, five unused Python names (config.cosmic_time_gyr,
+    CORRELATION_N_BINS, VIS_SMOOTHING_SIGMA, fields.ensure_output_dir, plot_PDF_CDF.get_critical_point_densities);
+  * printElapsedTime is declared once (src/elapsed_time.h) instead of in three files;
+  * the GPU test suites set the GPU knobs by their backend-neutral names (PS_GPU_*, DTFE_GPU_*); the Metal
+    spellings still work as aliases;
+  * comments that still called the GPU exact deposit a float32 r3d port name the z-sweep (sweep_moments) that
+    replaced it; the three 3D-view defaults marked as open choices are now plain design notes;
+  * tests/dev/bytecmp.sh --gpu-exact also compares the GPU exact deposits (6 runs; only between builds of the same
+    kernel source), and tests/dev/tune_report_set.sh writes the auto-tuner's plans for a fixed list of 91
+    configurations, to diff two builds.
 
 VERSION 1.0.0 (Lamina, 2026-10-23)
 The project is now called Lamina (Linear Adaptive Multi-stream Interpolation for N-body Analysis): the standard

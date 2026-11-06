@@ -29,7 +29,7 @@
 #  I) the plan's further terms, each a field of the report line: I1 a '--sample-points' plane's records
 #     (pts_gb: 326 B per point with --pts-vel-grad, one record per point, in fixed_gb too; DTFE_AUTO_PTS_N sizes a plane
 #     that is not on disk); on GPU builds I2 the GPU deposit's host snapshot of its grids (snapshot_gb: 8-B words, half
-#     under DTFE_METAL_FLOAT_GRIDS=1, none on the CPU), I3 the partition loop's look-ahead (lookahead_gb, in
+#     under DTFE_GPU_FLOAT_GRIDS=1, none on the CPU), I3 the partition loop's look-ahead (lookahead_gb, in
 #     predicted_gb; none with --no-overlap or on one domain) and I4 a budget that holds the plan but not its
 #     look-ahead: the look-ahead is switched off for the run (said, lookahead_gb=0, over_budget=0).
 #
@@ -242,7 +242,7 @@ check "I2/I3 a CPU run counts no GPU snapshot and no look-ahead (${s0:-?}, ${l0:
       "$([ "${s0}" = "0.000" ] && [ "${l0}" = "0.000" ] && echo 1 || echo 0)"
 if [ "${GPU}" = 1 ]; then
     env DTFE_RAM_GB=64 "${BIN}" "${IR[@]}" --max-concurrent 2 --gpu > "${TMP}/da_i2.txt" 2>&1 || true
-    env DTFE_RAM_GB=64 DTFE_METAL_FLOAT_GRIDS=1 DTFE_GPU_FLOAT_GRIDS=1 "${BIN}" "${IR[@]}" --max-concurrent 2 --gpu \
+    env DTFE_RAM_GB=64 DTFE_GPU_FLOAT_GRIDS=1 "${BIN}" "${IR[@]}" --max-concurrent 2 --gpu \
         > "${TMP}/da_i3.txt" 2>&1 || true
     env DTFE_RAM_GB=64 "${BIN}" "${IR[@]}" --max-concurrent 2 --gpu --no-overlap > "${TMP}/da_i4.txt" 2>&1 || true
     s2="$(field snapshot_gb "${TMP}/da_i2.txt")"; s3="$(field snapshot_gb "${TMP}/da_i3.txt")"

@@ -3561,7 +3561,6 @@ void interpolateGrid_phaseSpace(DT &dt,
             }
     #endif
 
-    #if NO_DIM==3 || NO_DIM==2
             // ===================== exact conservative deposit (--ps-exact-deposit) =====================
             // r3d (Powell & Abel 2015): clip the Eulerian tetrahedron against every grid cell in
             // its bbox window and integrate the moments analytically. All geometry lives in
@@ -3855,7 +3854,6 @@ void interpolateGrid_phaseSpace(DT &dt,
                 }
                 if ( windowModeL ) continue;   // no volume in the window: nothing to deposit (see above)
             }
-    #endif  // NO_DIM==3 || NO_DIM==2 (exact deposit)
 
             // ===================== Mass-conserving deposit of this tetrahedron =====================
             // PASS 1: gather every sub-sample point (nSubL^NO_DIM per grid cell in the Eulerian bbox) that

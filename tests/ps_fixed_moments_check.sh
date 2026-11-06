@@ -7,15 +7,15 @@
 # (thread-private copies summed in thread order). Each is a set of int64 words in a power-of-two unit
 # from a bound of everything the pass deposits (ps_deposit_params.h PSFxGrid), converted to float once. Asserted on
 # 32^3 crossed waves (folds everywhere: deferred tets, multi-stream cells, large gradients):
-#   F1  two --ps-gpu runs with different opening chunk sizes (PS_METAL_CHUNK / PS_GPU_CHUNK 2000 and 25000: other
+#   F1  two --ps-gpu runs with different opening chunk sizes (PS_GPU_CHUNK 2000 and 25000: other
 #       atomics share a command buffer, other orders) write byte-identical grids -- every '.a_*' output -- for the
 #       sampled deposit, --ps-volume-weighted, --ps-exact-deposit (its items' per-tet weight totals are exact too)
 #       and --ps-halo-release (the host's released tets). GPU builds only.
 #   F2  the CPU deposit on 1 thread, 6 threads in the copy mode (DTFE_DEPOSIT_SLABS=0: one set of words, atomic
 #       adds) and 6 in the slab mode writes byte-identical grids, for the same four variants. Single build only:
 #       the double build keeps its double CPU sums (agreeing to ~1e-15, not bit for bit), as for the mass.
-#   F3  the float sums (PS_METAL_FLOAT_MOMENTS=1, the A/B switch; PS_GPU_FLOAT_MOMENTS=1 is the CUDA/HIP
-#       spelling, either works on either backend) agree with the exact ones to float rounding: peak-relative
+#   F3  the float sums (PS_GPU_FLOAT_MOMENTS=1, the A/B switch on either backend; PS_METAL_FLOAT_MOMENTS is its
+#       older alias) agree with the exact ones to float rounding: peak-relative
 #       difference below 1e-5 per grid, GPU and CPU (a sum of the same float shares, in another order)
 #   F4  --partition 2 2 2 --max-concurrent 1 (partitions merge in index order): two GPU runs byte-identical, and
 #       1 vs 6 CPU threads byte-identical (single build) -- the whole run, not only one partition's sub-grid
@@ -63,12 +63,12 @@ for v in $VARIANTS; do
     O=($(opts "$v"))
     echo ">> $v: ${O[*]+${O[*]}} ($v)"
     if [ "$GPU" = 1 ]; then
-        GPUOK=1 run "$TMP/g1_$v" env PS_METAL_CHUNK=2000 PS_GPU_CHUNK=2000 "${PS_BIN}" "$SNAP" "$TMP/g1_$v" "${C[@]}" ${O[@]+"${O[@]}"} --ps-gpu
-        GPUOK=1 run "$TMP/g2_$v" env PS_METAL_CHUNK=25000 PS_GPU_CHUNK=25000 "${PS_BIN}" "$SNAP" "$TMP/g2_$v" "${C[@]}" ${O[@]+"${O[@]}"} --ps-gpu
-        GPUOK=1 run "$TMP/gf_$v" env PS_METAL_FLOAT_MOMENTS=1 "${PS_BIN}" "$SNAP" "$TMP/gf_$v" "${C[@]}" ${O[@]+"${O[@]}"} --ps-gpu
+        GPUOK=1 run "$TMP/g1_$v" env PS_GPU_CHUNK=2000 "${PS_BIN}" "$SNAP" "$TMP/g1_$v" "${C[@]}" ${O[@]+"${O[@]}"} --ps-gpu
+        GPUOK=1 run "$TMP/g2_$v" env PS_GPU_CHUNK=25000 "${PS_BIN}" "$SNAP" "$TMP/g2_$v" "${C[@]}" ${O[@]+"${O[@]}"} --ps-gpu
+        GPUOK=1 run "$TMP/gf_$v" env PS_GPU_FLOAT_MOMENTS=1 "${PS_BIN}" "$SNAP" "$TMP/gf_$v" "${C[@]}" ${O[@]+"${O[@]}"} --ps-gpu
     fi
     run "$TMP/c1_$v" env DTFE_DEPOSIT_THREADS=1 "${PS_BIN}" "$SNAP" "$TMP/c1_$v" "${C[@]}" ${O[@]+"${O[@]}"}
-    run "$TMP/cf_$v" env DTFE_DEPOSIT_THREADS=1 PS_METAL_FLOAT_MOMENTS=1 "${PS_BIN}" "$SNAP" "$TMP/cf_$v" "${C[@]}" ${O[@]+"${O[@]}"}
+    run "$TMP/cf_$v" env DTFE_DEPOSIT_THREADS=1 PS_GPU_FLOAT_MOMENTS=1 "${PS_BIN}" "$SNAP" "$TMP/cf_$v" "${C[@]}" ${O[@]+"${O[@]}"}
     if ! precision_double; then
         run "$TMP/c6_$v" env DTFE_DEPOSIT_THREADS=6 DTFE_DEPOSIT_SLABS=0 "${PS_BIN}" "$SNAP" "$TMP/c6_$v" "${C[@]}" ${O[@]+"${O[@]}"}
         run "$TMP/s6_$v" env DTFE_DEPOSIT_THREADS=6 DTFE_DEPOSIT_SLABS=1 "${PS_BIN}" "$SNAP" "$TMP/s6_$v" "${C[@]}" ${O[@]+"${O[@]}"}
@@ -77,7 +77,7 @@ done
 P=(--partition 2 2 2 --max-concurrent 1)
 echo ">> F4: --partition 2 2 2 --max-concurrent 1, --ps-volume-weighted"
 if [ "$GPU" = 1 ]; then
-    GPUOK=1 run "$TMP/pg1" env PS_METAL_CHUNK=2000 PS_GPU_CHUNK=2000 "${PS_BIN}" "$SNAP" "$TMP/pg1" "${C[@]}" "${P[@]}" --ps-volume-weighted --ps-gpu
+    GPUOK=1 run "$TMP/pg1" env PS_GPU_CHUNK=2000 "${PS_BIN}" "$SNAP" "$TMP/pg1" "${C[@]}" "${P[@]}" --ps-volume-weighted --ps-gpu
     GPUOK=1 run "$TMP/pg2" "${PS_BIN}" "$SNAP" "$TMP/pg2" "${C[@]}" "${P[@]}" --ps-volume-weighted --ps-gpu
 fi
 if ! precision_double; then
@@ -140,11 +140,11 @@ def close(a, b, what, tag, tol=1e-5):
 for v in os.environ["VARIANTS"].split():
     if gpu:
         same(f"g1_{v}", f"g2_{v}", f"{v}: two GPU runs (chunks 2000 / 25000)", "F1")
-        close(f"g1_{v}", f"gf_{v}", f"{v}: GPU exact vs the float sums (PS_METAL_FLOAT_MOMENTS=1)", "F3")
+        close(f"g1_{v}", f"gf_{v}", f"{v}: GPU exact vs the float sums (PS_GPU_FLOAT_MOMENTS=1)", "F3")
     if not double:
         same(f"c1_{v}", f"c6_{v}", f"{v}: CPU 1 thread vs 6 (copy mode)", "F2")
         same(f"c1_{v}", f"s6_{v}", f"{v}: CPU 1 thread vs 6 (slab mode)", "F2")
-    close(f"c1_{v}", f"cf_{v}", f"{v}: CPU exact vs the float sums (PS_METAL_FLOAT_MOMENTS=1)", "F3")
+    close(f"c1_{v}", f"cf_{v}", f"{v}: CPU exact vs the float sums (PS_GPU_FLOAT_MOMENTS=1)", "F3")
 if gpu:
     same("pg1", "pg2", "--partition 2 2 2, volume-weighted: two GPU runs", "F4")
 if not double:

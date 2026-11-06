@@ -212,7 +212,7 @@ first python3 that imports numpy and h5py (`scripts/h5py_python.sh`). The standa
 (`tests/run_tests.py`) compares a periodic 1000-particle run with `tests/reference/regression_periodic.txt` to 3e-4
 relative; after an intended change of the estimator regenerate it with `python3 tests/run_tests.py --update-ref`.
 
-Two development tools in `tests/dev/` (not run by CI; macOS):
+The development tools in `tests/dev/` (not run by CI; macOS):
 
 * `tests/dev/battery.sh <scratch dir>` runs everything above that a Mac can run, in 31 stages (about 1.5-2 h): the three
   builds, the `core`, `double`, `2d` and `gui` stages, the GPU suites in single and double precision, and the Python
@@ -220,9 +220,14 @@ Two development tools in `tests/dev/` (not run by CI; macOS):
   3.11, numpy 1.26.4, scipy 1.11.4, matplotlib 3.6.3; by default in `~/.venvs/dtfe-ci`). `--list` names the stages,
   `--only` picks some, and `<scratch dir>/battery/SUMMARY.txt` records the commit and whether the tree changed
   during the run.
-* `tests/dev/bytecmp.sh <reference binaries> <output dir>` checks that a change moves no output: ten runs of both
-  programs (single, double, 2D, CPU and GPU, one domain and partitioned) compared byte for byte with a copy of the six
-  binaries taken before the change.
+* `tests/dev/bytecmp.sh <reference binaries> <output dir>` checks that a change moves no output: 17 runs of both
+  programs (single, double, 2D, CPU and GPU, one domain and partitioned, the CPU exact deposits) compared byte for byte
+  with a copy of the six binaries taken before the change. `--gpu-exact` adds the GPU's exact deposits (6 runs),
+  for a change that leaves the GPU kernels' source alone: they are float32 with fast math, so only two builds of the
+  same kernel source give the same bytes.
+* `tests/dev/tune_report_set.sh <binaries> <out file>` writes the auto-tuner's plan for a fixed list of 91
+  configurations (`--auto-tune-report`, with the machine's RAM simulated), one line each. Diff the sets of two
+  builds: only the configurations a change targets may differ.
 
 
 ## Running the binaries

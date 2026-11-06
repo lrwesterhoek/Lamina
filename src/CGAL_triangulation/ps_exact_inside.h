@@ -28,8 +28,6 @@
 #ifndef PS_EXACT_INSIDE_HEADER
 #define PS_EXACT_INSIDE_HEADER
 
-#if NO_DIM==3 || NO_DIM==2
-
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -451,7 +449,5 @@ inline bool canonicalInside(Frame const &F, Real const rawPos[NO_DIM+1][NO_DIM],
 }
 
 }  // namespace psExactInside
-
-#endif  // NO_DIM==3 || NO_DIM==2
 
 #endif  // PS_EXACT_INSIDE_HEADER

@@ -225,7 +225,8 @@ OPTIONS_PS = $(OPTIONS_COMMON) -DPHASE_SPACE
 # flags fall back to the CPU with a warning. Metal embeds + runtime-compiles the kernels in
 # metal/*.metal; CUDA/HIP compile the single-source ports src/CGAL_triangulation/{ps,dtfe}_gpu_cuda.cu
 # ahead of time (the Metal kernels are the reference: the .cu files are line-by-line ports, compiled
-# and CPU-fallback-tested on Linux, not yet validated on NVIDIA/AMD hardware -- metal/README.md).
+# and tested on Linux by the CPU fallback and the CPU emulation (CUDAEMU=1, below), not yet run on NVIDIA/AMD
+# hardware -- metal/README.md).
 GPU_MODE = off
 ifeq ($(METAL),1)
 GPU_MODE = metal

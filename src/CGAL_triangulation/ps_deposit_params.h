@@ -238,7 +238,7 @@ struct PSDepositParams
     int32_t  fLinear;   // --ps-linear-deposit: density-weighted (renormalized) sample shares
     int32_t  fVolW;     // --ps-volume-weighted: moment weight = V_eul shares (mass grid unchanged); momw normalizer grid deposited
     int32_t  fCaustic;  // --ps-caustics: atomic-OR the per-tet orientation bits (1 = det>0, 2 = det<0) into the caustic grid
-    int32_t  fExact;    // --ps-exact-deposit: analytic tet-cell clipping (float32 r3d port in the kernel) instead of nSub^3 sampling; nSub ignored
+    int32_t  fExact;    // --ps-exact-deposit: analytic tet-cell clipping (the kernel's float32 z-sweep, sweep_moments) instead of nSub^3 sampling; nSub ignored
     uint32_t nTet;
     int32_t  fScal;     // scalar field (one component): vertex scalars in buffer 18, the moment grid in 19
     int32_t  fSGrad;    // scalar gradient (3 components): its moment grid in buffer 20

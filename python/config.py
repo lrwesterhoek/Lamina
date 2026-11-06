@@ -82,7 +82,6 @@ COSMOLOGY = {
 SMOOTHING_SIGMA_CELLS = 10.0
 
 RAW_MAPS_SIGMA = 0.0
-VIS_SMOOTHING_SIGMA = RAW_MAPS_SIGMA
 
 SMOOTHING_COMPARISON_SIGMAS = [5.0, 10.0, 20.0]
 
@@ -145,7 +144,6 @@ if VOID_GATE not in ('ellipsoid', 'none'):
     raise ValueError(f"DTFE_VOID_GATE must be 'ellipsoid' or 'none', got {os.environ.get('DTFE_VOID_GATE')!r}")
 
 CORRELATION_MAX_SEP = None
-CORRELATION_N_BINS = 50
 CORRELATION_YLIM = 0.75
 
 CORRELATION_N_EVAL = 60
@@ -341,21 +339,6 @@ def snapshot_items():
 
 def get_redshift(snapshot_id):
     return SNAPSHOT_TO_REDSHIFT.get(snapshot_id)
-
-
-def cosmic_time_gyr(z, n_steps=20000):
-    import math
-    Om, Ol = COSMOLOGY['Omega_m'], COSMOLOGY['Omega_Lambda']
-    H0_inv_gyr = 977.79222 / COSMOLOGY['H0']
-    lo, hi = math.log(1.0 + z), math.log(3001.0)
-    dx = (hi - lo) / n_steps
-    s = 0.0
-    for i in range(n_steps + 1):
-        zp = math.exp(lo + i * dx) - 1.0
-        f = 1.0 / math.sqrt(Om * (1.0 + zp) ** 3 + Ol)
-        w = 1 if i in (0, n_steps) else (4 if i % 2 else 2)
-        s += w * f
-    return s * dx / 3.0 * H0_inv_gyr
 
 
 def verify_snapshot_redshifts(base_dir=None, tolerance=0.02):

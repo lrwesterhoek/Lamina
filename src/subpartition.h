@@ -43,6 +43,7 @@
 #include "define.h"
 #include "particle_data.h"
 #include "user_options.h"
+#include "elapsed_time.h"   // printElapsedTime (defined below)
 #include "quantities.h"
 #include "box.h"
 #include "miscellaneous.h"
@@ -214,7 +215,7 @@ inline size_t psCountInexactCopies(std::vector<Particle_data> const &p, int cons
 
 
 
-// Prints the elapsed wall-clock time for a step and adds it to userOptions->totalTime.
+// declared in elapsed_time.h, for the interpolation files
 void printElapsedTime(boost::timer *t, User_options *userOptions,
                       std::string computationQuantityName)
 {

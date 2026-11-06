@@ -50,10 +50,7 @@
 #include "box.h"
 #include "user_options.h"
 #include "message.h"
-#include <boost/timer.hpp>
-
-void printElapsedTime(boost::timer *t, User_options *userOptions,
-                      std::string computationQuantityName);
+#include "elapsed_time.h"   // printElapsedTime
 
 
 // A boundary particle's stencil clipped to the grid: the cells tempInt-1 .. tempInt+S-2 that lie in

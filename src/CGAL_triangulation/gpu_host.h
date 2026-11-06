@@ -94,8 +94,9 @@ struct PSGpuGrids
 // 2 = det<0) into out.caustic at every deposited sample -- OR is order-invariant, so the
 // result matches the CPU deposit's bits (float-vs-double det sign only differs below the
 // degeneracy cut, where cells are dropped).
-// fExact (--ps-exact-deposit) replaces the nSub^3 sampling by the kernel's float32 r3d port
-// (analytic tet-cell clipping + order-2 moments); nSub is then ignored. The CPU path stays
+// fExact (--ps-exact-deposit) replaces the nSub^3 sampling by the kernels' float32 exact clipping
+// (sweep_moments in metal/exact_clip.metal.inc: a sweep in z, analytic tet-cell volume + order-2 moments); nSub is then
+// ignored. The CPU path stays
 // the DOUBLE-precision reference -- the GPU exact deposit agrees to float rounding, like
 // every other GPU/CPU field pair.
 // fScal / fSGrad: the scalar field (ONE component, NO_SCALARS=1 builds; the caller declines the GPU
@@ -157,7 +158,7 @@ struct DTFEGpuGrids
 // deposit it like the density (linear over the tet) and its constant gradient like the velocity
 // gradient.
 // exact (--exact-average): the analytic volume average instead of the samples -- every tetrahedron
-// is clipped against each grid cell of its bounding box (the kernels' float32 r3d port) and
+// is clipped against each grid cell of its bounding box (the kernels' float32 z-sweep, sweep_moments) and
 // deposits the linear interpolant's integral over each piece; 'cnts' then only marks the
 // single-cell tetrahedra (0), which take the centroid fast path as on the CPU. Matches the CPU's
 // double-precision r3d to float rounding.
