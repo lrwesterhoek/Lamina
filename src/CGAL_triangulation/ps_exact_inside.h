@@ -74,45 +74,14 @@ struct Frame
 };
 
 
-#if NO_DIM==3
-// 3x3 double inverse via the adjugate -- the double-precision twin of matrixInverse()
-// (math_functions.h), same relative singularity test so the kept-cell set is identical.
-inline bool inverse3x3d(double const m[NO_DIM][NO_DIM], double inv[NO_DIM][NO_DIM])
-{
-    double const c00 = m[1][1]*m[2][2] - m[1][2]*m[2][1];
-    double const c01 = m[1][2]*m[2][0] - m[1][0]*m[2][2];
-    double const c02 = m[1][0]*m[2][1] - m[1][1]*m[2][0];
-    double const det = m[0][0]*c00 + m[0][1]*c01 + m[0][2]*c02;
-    if ( isRelativelySingular(det, m) )
-        return false;
-    double const invDet = 1.0 / det;
-    inv[0][0] = c00 * invDet;
-    inv[1][0] = c01 * invDet;
-    inv[2][0] = c02 * invDet;
-    inv[0][1] = (m[0][2]*m[2][1] - m[0][1]*m[2][2]) * invDet;
-    inv[1][1] = (m[0][0]*m[2][2] - m[0][2]*m[2][0]) * invDet;
-    inv[2][1] = (m[0][1]*m[2][0] - m[0][0]*m[2][1]) * invDet;
-    inv[0][2] = (m[0][1]*m[1][2] - m[0][2]*m[1][1]) * invDet;
-    inv[1][2] = (m[0][2]*m[1][0] - m[0][0]*m[1][2]) * invDet;
-    inv[2][2] = (m[0][0]*m[1][1] - m[0][1]*m[1][0]) * invDet;
-    return true;
-}
-inline bool inverseNd(double const m[NO_DIM][NO_DIM], double inv[NO_DIM][NO_DIM]) { return inverse3x3d( m, inv ); }
-#else
-// 2x2 double inverse, the same relative singularity test as matrixInverse()
+// 2x2 / 3x3 double inverse -- the double-precision twin of matrixInverse() (math_functions.h): the same adjugate
+// (adjugateInverse) and the same relative singularity test, so the kept-cell set is identical. False when
+// singular (inv untouched).
 inline bool inverseNd(double const m[NO_DIM][NO_DIM], double inv[NO_DIM][NO_DIM])
 {
-    double const det = m[0][0]*m[1][1] - m[0][1]*m[1][0];
-    if ( isRelativelySingular(det, m) )
-        return false;
-    double const invDet = 1.0 / det;
-    inv[0][0] =  m[1][1] * invDet;
-    inv[0][1] = -m[0][1] * invDet;
-    inv[1][0] = -m[1][0] * invDet;
-    inv[1][1] =  m[0][0] * invDet;
-    return true;
+    double det;
+    return adjugateInverse( m, inv, det, [m](double const d) { return isRelativelySingular( d, m ); } );
 }
-#endif
 
 
 // Canonical image of a stored Eulerian coordinate. Periodic copies are made by ONE Real

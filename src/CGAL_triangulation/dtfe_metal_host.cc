@@ -40,6 +40,7 @@
 
 #include "gpu_host.h"
 #include "dtfe_gpu_fixed.h"     // batchFixedScales + psMassFixedMass: the exact sums' units (shared with dtfe_gpu_cuda.cu)
+#include "dtfe_deposit_params.h" // DTFEDepositParams: the kernels' parameter block
 #include "dtfe_deposit_msl.h"   // generated: static const char DTFE_DEPOSIT_MSL[]
 #define ITEM_BLOCK_SHIFT 5      // == the kernel's: log2 of the items per entry of the block table
 #include "../message.h"         // ANSI colour helpers only (retry warning below)
@@ -48,28 +49,8 @@ extern std::atomic<int> dtfeGpuRetriesByCause[4];  // ... by cause: innocent, ti
 
 namespace {
 
-// must match the MSL DepositParams byte-for-byte
-struct DepositParams
-{
-    float    dx[3];
-    int32_t  nGrid[3];      // the batch's sub-grid
-    uint32_t nTet;          // threads in this dispatch (tetrahedra or work items)
-    int32_t  fDen;
-    int32_t  fVel;
-    int32_t  fGrad;
-    uint32_t itemSamples;   // item kernel: samples per work item
-    uint32_t nTetTotal;     // item kernel: tetrahedra in the batch
-    int32_t  subOff[3];     // the sub-grid's origin in the accumulated grid
-    uint32_t itemBase;      // item kernel: first item of this dispatch
-    int32_t  fullGrid[3];   // the accumulated grid
-    uint32_t debugNoAtomic; // DTFE_GPU_DEBUG_NOATOMIC: compute everything, skip the atomics (item kernel)
-    float    invDx[3];
-    uint32_t tableEntries;  // item kernel: threadgroup cell-table entries (power of two; 0 = none)
-    int32_t  fScal;         // the scalar field (per-tet kernel; the item pipelines are specialized on it)
-    int32_t  fSGrad;        // its gradient
-    uint32_t fixedSum;      // the grids as exact 64-bit fixed-point sums (batchFixedScales)
-    float    fxScale[5];    // their units 2^k: density, velocity, velocity gradient, scalar, scalar gradient
-};
+// the parameter block: dtfe_deposit_params.h, the one definition the kernels share (prepended to their source)
+using DepositParams = DTFEDepositParams;
 
 // The checkpoints and the cause-aware retry policy of the GPU deposit (shared with ps_metal_host.cc, see
 // gpu_metal_retry.h): GpuFault, gpuRetryCause, the process-wide GpuPace, the DTFE_GPU_FAULT_AT test hook and
@@ -111,8 +92,8 @@ struct Ctx
 int kSlot(int cacheK) { return cacheK == 2 ? 0 : cacheK == 8 ? 2 : 1; }
 
 std::mutex& ctxMutex() { static std::mutex m; return m; }
-// DTFE_GPU_TIMING=1 (alias DTFE_METAL_TIMING): one line per batch
-bool timingOn() { static bool t = Env::flag({"DTFE_GPU_TIMING", "DTFE_METAL_TIMING"}); return t; }
+// DTFE_GPU_TIMING=1: one line per batch
+bool timingOn() { static bool t = Env::flag({"DTFE_GPU_TIMING"}); return t; }
 
 Ctx& ctx()
 {
@@ -392,8 +373,8 @@ bool runBatch(Ctx& c, Batch& b, Grids& g, ChunkState& cs, Stats& st, bool shared
     size_t const MIN_CHUNK = exact ? 1024 : useItems ? 4096 : 2048;
     size_t const MAX_CHUNK = exact ? 499968 : useItems ? 4000000 : 499968;   // (multiples of CHUNK_ALIGN)
     size_t firstChunk = exact ? 8192 : useItems ? 65536 : 25088;
-    // DTFE_GPU_CHUNK (alias DTFE_METAL_CHUNK): the opening chunk
-    if (long const v = Env::integer({"DTFE_GPU_CHUNK", "DTFE_METAL_CHUNK"}, 0); v > 0) firstChunk = size_t(v);
+    // DTFE_GPU_CHUNK: the opening chunk
+    if (long const v = Env::integer({"DTFE_GPU_CHUNK"}, 0); v > 0) firstChunk = size_t(v);
     GpuPace& pace = gpuPace();        // targetSec 0.25 s, gapUs 8 ms (~3% overhead) until escalated
     // an escalated pace (an earlier batch's failures) opens with a proportionally smaller chunk
     if (pace.targetSec < GPU_PACE_TARGET0)
@@ -571,9 +552,7 @@ bool runBatch(Ctx& c, Batch& b, Grids& g, ChunkState& cs, Stats& st, bool shared
             }
             if (cause != GpuFault::Victim)
             {   // escalate (for the rest of the process): 4x shorter buffers, wider gaps, smaller chunk
-                pace.targetSec = std::max(pace.targetSec / 4.0, 0.02);
-                pace.gapUs     = std::min(pace.gapUs * 3, useconds_t(50000));
-                pace.cleanSec  = 0.;
+                pace.onFault();
                 chunk = alignChunkUp(std::max(chunk / 4, MIN_CHUNK));
             }
             drainQueue();
@@ -605,19 +584,11 @@ bool runBatch(Ctx& c, Batch& b, Grids& g, ChunkState& cs, Stats& st, bool shared
             if (scale > 4.0) scale = 4.0;
             chunk = alignChunkUp(std::min(std::max(size_t(double(chunk) * scale), MIN_CHUNK), MAX_CHUNK));
         }
-        if (pace.targetSec < GPU_PACE_TARGET0 || pace.gapUs > GPU_PACE_GAP0)
-        {   // an escalated pace steps back after a clean stretch of GPU work (GpuPace)
-            pace.cleanSec += el + pace.gapUs / 1e6;
-            if (pace.cleanSec >= paceRecoverSec)
-            {
-                pace.targetSec = std::min(pace.targetSec * 4.0, GPU_PACE_TARGET0);
-                pace.gapUs     = std::max(pace.gapUs / 3, GPU_PACE_GAP0);
-                fprintf(stderr, "DTFE Metal: %.0f s of GPU work without a fault -- pace eased to %.0f ms "
-                                "buffers, %.0f ms gaps%s\n", pace.cleanSec, pace.targetSec * 1e3, pace.gapUs / 1e3,
-                        pace.targetSec >= GPU_PACE_TARGET0 && pace.gapUs <= GPU_PACE_GAP0 ? " (the default)" : "");
-                pace.cleanSec = 0.;
-            }
-        }
+        double clean = 0.;
+        if (pace.onClean(el, paceRecoverSec, clean))   // an escalated pace stepped back after a clean stretch (GpuPace)
+            fprintf(stderr, "DTFE Metal: %.0f s of GPU work without a fault -- pace eased to %.0f ms "
+                            "buffers, %.0f ms gaps%s\n", clean, pace.targetSec * 1e3, pace.gapUs / 1e3,
+                    pace.targetSec >= GPU_PACE_TARGET0 && pace.gapUs <= GPU_PACE_GAP0 ? " (the default)" : "");
         long const every = ckChunks >= 0 ? ckChunks : std::max(1L, long(std::lround(10.0 / pace.targetSec)));
         if (!sharedBox && ckOn && every > 0 && long(sinceCk) >= every && start < nThreads)
         {   // the queue is drained (waitUntilCompleted above): the buffers hold exactly [0, start)

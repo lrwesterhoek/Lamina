@@ -3,12 +3,12 @@
 # DTFE_TEST_REQUIRED=1 (ci_suite.sh's double and 2d stages, after building what they test) makes that a FAILURE;
 # a binary that is broken is never a skip; and a check with nothing to compare against says so. Copies of the
 # suites run in scratch trees beside stand-in binaries, so every case is deterministic and needs no build. The
-# stand-in ./DTFE hands everything but --full_help to the real ./DTFE: the other tests of run_tests.py still
+# stand-in ./DTFE hands everything but --full-help to the real ./DTFE: the other tests of run_tests.py still
 # pass, so an exit 1 can only come from the case under test.
-#   R1  run_tests.py, a ./DTFE whose --full_help exits 3: both exact-average tests FAIL ('--full_help exited
+#   R1  run_tests.py, a ./DTFE whose --full-help exits 3: both exact-average tests FAIL ('--full-help exited
 #       with 3', not a skip: a crash is not a missing flag) and the run exits 1, with or without
 #       DTFE_TEST_REQUIRED=1
-#   R2  run_tests.py, a ./DTFE whose --full_help lacks --exact-average: both tests SKIP and the run exits 0;
+#   R2  run_tests.py, a ./DTFE whose --full-help lacks --exact-average: both tests SKIP and the run exits 0;
 #       under DTFE_TEST_REQUIRED=1 both FAIL ('DTFE_TEST_REQUIRED=1, but ...') and it exits 1
 #   R3  run_tests.py, a fresh DTFE_TEST_REFERENCE_DIR: the regression is a SKIP (', 1 skipped' in the Results
 #       line) and the run exits 0 EVEN under DTFE_TEST_REQUIRED=1 (no build can supply a reference; ci_suite.sh
@@ -42,12 +42,12 @@ count() { grep -acE -e "$2" "$1" || true; }
 cp tests/run_tests.py "$TMP/rt/tests/"
 cat > "$TMP/rt/DTFE" <<'EOF'
 #!/usr/bin/env bash
-# stand-in ./DTFE: STUB_HELP=fail -> --full_help exits 3; STUB_HELP=noflag -> the real --full_help without the
+# stand-in ./DTFE: STUB_HELP=fail -> --full-help exits 3; STUB_HELP=noflag -> the real --full-help without the
 # --exact-average lines; everything else is the real binary (REAL_DTFE)
-if [ "${1:-}" = "--full_help" ]; then
+if [ "${1:-}" = "--full-help" ]; then
     case "${STUB_HELP:-}" in
-        fail)   echo "stand-in: --full_help is broken" >&2; exit 3 ;;
-        noflag) help="$("${REAL_DTFE}" --full_help)" || exit $?
+        fail)   echo "stand-in: --full-help is broken" >&2; exit 3 ;;
+        noflag) help="$("${REAL_DTFE}" --full-help)" || exit $?
                 printf '%s\n' "$help" | grep -v -e '--exact-average'; exit 0 ;;
     esac
 fi
@@ -65,14 +65,14 @@ rt() {
 }
 fresh() { mktemp -d "$TMP/ref.XXXXXX"; }
 
-echo ">> R1: --full_help exits 3"
+echo ">> R1: --full-help exits 3"
 for req in 0 1; do
     rc=$(rt "$TMP/r1_$req.log" "$(fresh)" STUB_HELP=fail DTFE_TEST_REQUIRED=$req)
-    check "$([ "$rc" = "1" ] && [ "$(count "$TMP/r1_$req.log" '^  FAIL  exact_average_(lattice|convergence) -- DTFE --full_help exited with 3$')" = "2" ] \
+    check "$([ "$rc" = "1" ] && [ "$(count "$TMP/r1_$req.log" '^  FAIL  exact_average_(lattice|convergence) -- DTFE --full-help exited with 3$')" = "2" ] \
              && [ "$(count "$TMP/r1_$req.log" '^  FAIL ')" = "2" ] && echo 0 || echo 1)" \
-          "DTFE_TEST_REQUIRED=$req: both exact-average tests FAIL (--full_help exited with 3), nothing else does, exit 1 ($rc)"
+          "DTFE_TEST_REQUIRED=$req: both exact-average tests FAIL (--full-help exited with 3), nothing else does, exit 1 ($rc)"
 done
-echo ">> R2: --full_help without --exact-average"
+echo ">> R2: --full-help without --exact-average"
 rc=$(rt "$TMP/r2_0.log" "$(fresh)" STUB_HELP=noflag)
 check "$([ "$rc" = "0" ] && [ "$(count "$TMP/r2_0.log" '^  SKIP  exact_average_(lattice|convergence) -- DTFE has no --exact-average$')" = "2" ] \
          && [ "$(count "$TMP/r2_0.log" '^  FAIL ')" = "0" ] && echo 0 || echo 1)" \

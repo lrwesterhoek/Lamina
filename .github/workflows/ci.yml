@@ -10,7 +10,8 @@
 # old-python -- every .py parses under Python 3.10, the oldest pyproject supports (ci_suite's own check
 # skips on the runner, which has no 3.10, so without this job a PEP 701 f-string could pass CI).
 # cudaemu -- the CUDA/HIP port RUN (not only compiled) through its CPU emulation (CUDAEMU=1, gpu_cuda_emu.h): the
-# GPU parity suites via tests/cudaemu_check.sh at warp 32 (CUDA) and 64 (HIP wavefront). Validates the
+# GPU parity suites via tests/cudaemu_check.sh at warp 32 (CUDA) and 64 (HIP wavefront), and once the exact clip's
+# CUDA twin function by function against the CPU's double r3d (tests/gpu_twin_check.sh). Validates the
 # transliteration and the host logic, not real hardware.
 # compile-variants -- what users build beyond the pairs: no TBB and no libdeflate (neither installed),
 # 'make library' and the demo/examples program linked against it (tests/ci_suite.sh variants).
@@ -124,7 +125,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential libgsl-dev libcgal-dev \
             libboost-dev libboost-thread-dev libboost-filesystem-dev libboost-program-options-dev \
-            libmpfr-dev libhdf5-dev libgmp-dev libfftw3-dev ccache
+            libmpfr-dev libhdf5-dev libgmp-dev libfftw3-dev ccache \
+            python3 python3-numpy python3-h5py   # the user-sampling part of tests/dtfe_sampling_check.sh
           echo "/usr/lib/ccache" >> "$GITHUB_PATH"
           echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"   # what the cache step saves (~ is not expanded in env:)
       - name: Compiler cache
@@ -179,6 +181,14 @@ jobs:
         env:
           DTFE_TEST_TMP: ${{ runner.temp }}/dtfe-tests   # the suites' grids, outside the checkout
         run: CUDAEMU_WARPS=${{ matrix.warp }} tests/cudaemu_check.sh
+      # the exact clip's CUDA twin (gpu_exact_clip.cuh, compiled as plain C++ through the emulation) against the CPU's
+      # double r3d on validate_deposit's T7/T13/T14 tetrahedra and cells; it builds its own small program and needs no
+      # warp width, so it runs once. After the suites, so a red twin check does not hide their results.
+      - name: Exact-clip twin check (emulated CUDA clip against double r3d)
+        if: ${{ !cancelled() && matrix.warp == 32 }}
+        env:
+          DTFE_TEST_TMP: ${{ runner.temp }}/dtfe-tests
+        run: tests/gpu_twin_check.sh
       - name: Keep the suites' output on failure
         if: failure()
         uses: actions/upload-artifact@v4

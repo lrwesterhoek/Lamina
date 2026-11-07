@@ -51,7 +51,7 @@ class CustomSpec:
     partition: int = 0
     max_concurrent: int = 0
     scratch_dir: str = ""
-    lambda_th: float = LAMBDA_TH_DEFAULT   # --lambda_th with a web field (the binary's own default is 0.0)
+    lambda_th: float = LAMBDA_TH_DEFAULT   # --lambda-th with a web field (the binary's own default is 0.0)
     mem_budget_gb: float = 0.0      # DTFE_MEM_BUDGET_GB in the binary's environment, see RunSpec
     tess_cache: str = ""            # --tessellation-cache <folder>; "" = none
     linear_deposit: bool = False    # --ps-linear-deposit (PS only; not with the volume-weighted velocities)
@@ -114,19 +114,19 @@ class CustomSpec:
             fields.append("scalar_a")
         a += ["--field", *fields]
         if any(f in _rs.WEB_FIELDS for f in fields):      # the scripts' threshold, not the binary's 0.0
-            a += ["--lambda_th", f"{self.lambda_th:g}"]
+            a += ["--lambda-th", f"{self.lambda_th:g}"]
         if self.scalar_dataset:
             a += ["--scalar-dataset", self.scalar_dataset]
         if self.tess_cache:
             a += ["--tessellation-cache", str(Path(self.tess_cache).expanduser())]
         if ps:
             if self.deposit == "exact":
-                a.append("--ps-exact-deposit")
+                a.append("--exact-average")         # the exact deposit (the binaries share the name)
             else:
                 a += ["--avg-subsamples", str(self.nsub)]
             if self.lagrangian == "separate" and self.lagrangian_file:
                 a += ["--lagrangianInput", str(Path(self.lagrangian_file).expanduser())]
-            for on, flag in ((self.gpu and three, "--ps-gpu"), (self.vertex_mass, "--ps-vertex-mass"),
+            for on, flag in ((self.gpu and three, "--gpu"), (self.vertex_mass, "--ps-vertex-mass"),
                              (self.volume_weighted, "--ps-volume-weighted"), (self.caustics, "--ps-caustics"),
                              (self.caustic_cusps, "--ps-caustic-cusps"),
                              (self.parallel_triangulation and three, "--parallel-triangulation")):
@@ -349,8 +349,11 @@ class CustomSpec:
             except ValueError as e:
                 out.append(("error", f"the extra options do not parse ({e}): close the quotes"))
             else:
-                twice = sorted({t for t in extra if t.startswith("--")}
-                               & {t for t in self._own_command() if t.startswith("--")})
+                import results as R     # canonical_flag: the binaries' older option names (as runspec.py imports it)
+
+                def names(tokens):      # the option names, canonical, no '=value': '--lambda_th=0.4' -> '--lambda-th'
+                    return {R.canonical_flag(t.split("=", 1)[0]) for t in tokens if t.startswith("--")}
+                twice = sorted(names(extra) & names(self._own_command()))
                 if twice:
                     out.append(("error", f"the extra options repeat {', '.join(twice)}, which the tab sets already "
                                          "(the program takes each option once): change it on the tab"))

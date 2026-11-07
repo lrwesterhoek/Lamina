@@ -287,6 +287,12 @@ def renderer() -> "Renderer | None":
     return None
 
 
+def current_renderer() -> "Renderer | None":
+    """The GL renderer if one was made, without making one (renderer() makes it on first use): what holds the GPU's
+    copy of a volume, for freeing it or counting its bytes."""
+    return _STATE.get("renderer")
+
+
 def _at_quit() -> None:
     """The application is closing: the GPU's textures freed while their context is still there (Qt warns of every
     one destroyed later, at the interpreter's exit, without it)."""

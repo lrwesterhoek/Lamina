@@ -168,6 +168,21 @@ def assert_frame(cat, cell_mpc: float) -> None:
                          f"which re-derives its fits in this frame")
 
 
+# the file-name tag of the grids a void statistic was made from (plot_void_population, plot_void_environment): an
+# estimator's OWN grids are named by the estimator, any other prefix by itself
+DEFAULT_PREFIX = {"ps": "ps_output.", "dtfe": "output."}         # io's: an estimator's own grids
+
+
+def output_tag(used, keep_overlaps: bool = False) -> str:
+    """The tag a void-population figure or table carries: '' for PS-DTFE's default grids, else '_<grids>' with
+    <grids> every (method, prefix) pair of 'used' named -- the method when the prefix is that estimator's own
+    (DEFAULT_PREFIX), else the prefix without its trailing dot -- sorted and joined by '+' ('_dtfe', '_ps_mw',
+    '_dtfe+ps'); then '_overlaps' for a run that keeps the overlapping minima. It names caches and figures, so a
+    run on other grids never overwrites (or orphans) the default ones."""
+    grids = "+".join(sorted({m if p == DEFAULT_PREFIX.get(m) else p.rstrip(".") for m, p in used}))
+    return ("" if grids == "ps" else f"_{grids}") + ("_overlaps" if keep_overlaps else "")
+
+
 # The measured void radii, all from ONE shell loop (pipeline.void_radii_cells) on the smoothed delta:
 #   'crossing' the first up-crossing of the mean (0) of the shell-averaged delta: THE R_v
 #   'delta08'  where the ENCLOSED contrast Delta(<R) first reaches pipeline.R_V_DELTA08 (-0.8, the nonlinear

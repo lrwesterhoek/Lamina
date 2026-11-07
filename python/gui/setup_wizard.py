@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import runspec as rs  # noqa: E402
 import config  # noqa: E402  (python/ is on the path: runspec puts it there)
+from app_widgets import SECTION_GAP  # noqa: E402
 
 TNG_REGISTER = "https://www.tng-project.org/users/register/"
 
@@ -140,7 +141,14 @@ class SetupDialog(QDialog):
         nav.addWidget(self.next)
         v.addLayout(nav)
 
-        # ---- 1 data folder
+        for page in (self._build_root_page(data_root), self._build_programs_page(), self._build_key_page(),
+                     self._build_demo_page()):
+            self.pages.addWidget(page)
+        self._root_note()
+        self._go(0)
+
+    def _build_root_page(self, data_root: str) -> QWidget:
+        """Step 1: the data folder (and, in iCloud Drive, moving the analysis caches out)."""
         p = QWidget()
         pv = QVBoxLayout(p)
         pv.addWidget(self._title("Where should simulations and results live?"))
@@ -169,7 +177,7 @@ class SetupDialog(QDialog):
         self.cache_offer = config.icloud_cache_offer()
         self.cache_box = QWidget()
         cv = QVBoxLayout(self.cache_box)
-        cv.setContentsMargins(0, 12, 0, 0)
+        cv.setContentsMargins(0, SECTION_GAP, 0, 0)
         cv.addWidget(self._text(
             "This repository is in iCloud Drive, which uploads every file in it. The analysis caches (void "
             f"catalogues, slices; now in {config.CACHE_DIR}) are rewritten whenever a catalogue is rebuilt: "
@@ -190,9 +198,10 @@ class SetupDialog(QDialog):
         pv.addWidget(self.cache_box)
         self.cache_box.setVisible(self.cache_offer is not None)
         pv.addStretch(1)
-        self.pages.addWidget(p)
+        return p
 
-        # ---- 2 programs
+    def _build_programs_page(self) -> QWidget:
+        """Step 2: the programs: what is built, and Build (the double pair and the 2D programs too when ticked)."""
         p = QWidget()
         pv = QVBoxLayout(p)
         pv.addWidget(self._title("The programs"))
@@ -219,9 +228,10 @@ class SetupDialog(QDialog):
         self.build_log = QPlainTextEdit(readOnly=True)
         self.build_log.setMaximumBlockCount(4000)
         pv.addWidget(self.build_log, 1)
-        self.pages.addWidget(p)
+        return p
 
-        # ---- 3 API key
+    def _build_key_page(self) -> QWidget:
+        """Step 3: the TNG API key (optional)."""
         p = QWidget()
         pv = QVBoxLayout(p)
         pv.addWidget(self._title("IllustrisTNG downloads (optional)"))
@@ -241,9 +251,10 @@ class SetupDialog(QDialog):
         row.addWidget(self.key_btn)
         pv.addLayout(row)
         pv.addStretch(1)
-        self.pages.addWidget(p)
+        return p
 
-        # ---- 4 demo
+    def _build_demo_page(self) -> QWidget:
+        """Step 4: the demo."""
         p = QWidget()
         pv = QVBoxLayout(p)
         pv.addWidget(self._title("Try it"))
@@ -256,10 +267,7 @@ class SetupDialog(QDialog):
         self.demo.setChecked(True)
         pv.addWidget(self.demo)
         pv.addStretch(1)
-        self.pages.addWidget(p)
-
-        self._root_note()
-        self._go(0)
+        return p
 
     @staticmethod
     def _title(text):

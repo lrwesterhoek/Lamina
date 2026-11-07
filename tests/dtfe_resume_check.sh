@@ -6,14 +6,17 @@
 # density velocity density_a velocity_a gradient_a tweb_a vweb_a: the T-web and the V-web are made AFTER the loop
 # from the full density / gradient grids, so they test that the checkpoint holds what the post-processing needs.
 #   D1  '--resume' is in both helps; an uninterrupted run (the reference) says where its checkpoints go, writes
-#       some, and removes '<output>.runlog.checkpoint' once its outputs are in place
+#       some, and removes '<output>.runlog.checkpoint' once its outputs are in place; its 'merge time:' line counts
+#       the 27 partitions copied into the full grids, with the seconds of the copies and checkpoints (>= 0)
 #   D2  a run killed after 10 partitions (DTFE_TEST_EXIT_AFTER_PARTITIONS=10: a SIGKILL right after a checkpoint)
 #       exits 137, writes no output, and leaves a checkpoint listing exactly 10 of 27 (the loop is serial)
 #   D3  '--resume' with a changed setting ('--grid') refuses, names the differing line and DTFE_RESUME=0 (the
 #       launcher's results.py RESUME_REFUSED keys on "'--resume' refused"), keeps the checkpoint
 #   D4  '--resume' continues and is killed again after 3 more partitions: its progress sidecar counts the restored
 #       ones as done (done 12 of 27 -- the 3rd computed one died in its checkpoint write, before its progress line);
-#       a second '--resume' (with '--tessellation-cache', which the key leaves out) computes the last 14 only, every
+#       a second '--resume' (with '--tessellation-cache', which the key leaves out, and '--lambda-th' where the killed
+#       runs had the deprecated '--lambda_th': one settings key) computes the last 14 only (its 'merge time:' line
+#       counts 14), every
 #       output -- the T-web and V-web included -- byte-identical to the reference, the checkpoint removed, a dead
 #       writer's temp file cleaned up
 #   D5  '--resume' with nothing to resume refuses; on a run of one triangulation ('--partition 1') it refuses too
@@ -34,7 +37,7 @@
 #       file, do not
 #   D12 GPU builds only (a GPU stamp in o/ or o_d/; SKIP otherwise): a killed '--gpu --exact-average' run (the
 #       production standard) resumes; '.den' (CPU) byte-identical, and the '_a' grids too (the GPU's exact fixed-point
-#       sums; within 1e-5 of their peak when DTFE_METAL_FLOAT_GRIDS / DTFE_GPU_FLOAT_GRIDS=1)
+#       sums; within 1e-5 of their peak when DTFE_GPU_FLOAT_GRIDS=1)
 #   D13 a '--sample-points --pts-vel-grad' plane (64^2 points across the box, the shape of the
 #       dtfe27planes runs) with the same split: the uninterrupted run checkpoints its point answers too and removes the
 #       checkpoint; killed after 10 partitions it leaves exactly one 'points.<i>' file per merged partition; a resume
@@ -88,7 +91,7 @@ MC=(--max-concurrent 2)
 
 echo ">> D1: the uninterrupted reference (27 partitions)"
 # (into files first: under pipefail a 'grep -q' that stops reading early fails the pipe with the binary's SIGPIPE)
-"$BIN" --help > "$TMP/help.txt" 2>&1; "$BIN" --full_help > "$TMP/full_help.txt" 2>&1
+"$BIN" --help > "$TMP/help.txt" 2>&1; "$BIN" --full-help > "$TMP/full_help.txt" 2>&1
 grep -q -- "--resume" "$TMP/help.txt" && grep -q "standard DTFE, partitioned runs" "$TMP/full_help.txt"
 check "D1 '--resume' is in the help and in the full help" $?
 "${RUN[@]}" "$TMP/ref" "${C[@]}" "${MC[@]}" > "$TMP/ref.log" 2>&1 || { echo "FAIL: ref (see $TMP/ref.log)"; exit 1; }
@@ -97,6 +100,11 @@ grep -q "DTFE: checkpoints of the merged grids go to '$TMP/ref.runlog.checkpoint
     && [ -s "$TMP/ref.a_tweb" ] && [ -s "$TMP/ref.a_velVweb" ]
 check "D1 the run checkpointed and removed '<output>.runlog.checkpoint' after writing its outputs" $?
 grep -a "checkpoints: " "$TMP/ref.log" | sed 's/^/   /'
+# the 'merge time:' line: the partitions this run copied into the full grids, the seconds of the copies and checkpoints
+mtime() { sed -n 's/.*merge time: \([0-9]*\) partition(s) copied into the full grids in \([0-9.]*\) s, their checkpoints \([0-9.]*\) s.*/\1 \2 \3/p' "$1"; }
+read -r mtn mta mtc <<< "$(mtime "$TMP/ref.log")"
+[ "${mtn:-0}" = 27 ] && awk -v a="${mta:--1}" -v c="${mtc:--1}" 'BEGIN { exit !(a >= 0 && c >= 0) }'
+check "D1 the 'merge time:' line: ${mtn:-?} of 27 partitions copied in ${mta:-?} s (checkpoints ${mtc:-?} s)" $?
 
 echo ">> D2: killed after 10 partitions"
 DTFE_TEST_EXIT_AFTER_PARTITIONS=10 "${RUN[@]}" "$TMP/k" "${C[@]}" "${MC[@]}" > "$TMP/k1.log" 2>&1; rc=$?
@@ -132,11 +140,14 @@ check "D4 the progress sidecar of the resumed run counts the restored partitions
 sleep 0 & DEAD=$!; wait "$DEAD"   # a pid that no longer runs
 echo torn > "$CK/checkpoint.tmp.$DEAD"
 mkdir -p "$TMP/tc"
-"${RUN[@]}" "$TMP/k" "${C[@]}" "${MC[@]}" --resume --tessellation-cache "$TMP/tc" > "$TMP/k4b.log" 2>&1; rc=$?
+"${RUN[@]}" "$TMP/k" "${C[@]/#--lambda_th/--lambda-th}" "${MC[@]}" --resume --tessellation-cache "$TMP/tc" > "$TMP/k4b.log" 2>&1; rc=$?
 [ "$rc" = 0 ] && grep -q -- "--resume: 13 of 27 partitions are already in the checkpoint" "$TMP/k4b.log" \
+    && grep -q "^warning: --lambda_th is deprecated, use --lambda-th$" "$TMP/k4a.log" && ! grep -q "deprecated" "$TMP/k4b.log" \
     && [ "$(grep -c '<<< Interpolating the fields for partition' "$TMP/k4b.log")" = 14 ] \
     && grep -q "partitions 27/27" "$TMP/k4b.log"
-check "D4 the second resume computed only the 14 partitions the checkpoint lacked (exit $rc)" $?
+check "D4 the second resume ('--lambda-th' for the killed runs' '--lambda_th') computed only the 14 partitions the checkpoint lacked (exit $rc)" $?
+mtr="$(mtime "$TMP/k4b.log" | awk '{print $1}')"
+[ "${mtr:-0}" = 14 ]; check "D4 ... and its 'merge time:' line counts those ${mtr:-?} (14)" $?
 same "$TMP/ref" "$TMP/k"; check "D4 every output (T-web and V-web included) byte-identical to the uninterrupted run" $?
 [ ! -e "$CK" ]; check "D4 the checkpoint (and the dead writer's temp file) removed on success" $?
 
@@ -298,7 +309,7 @@ PYEOF
     check "D12 the '_a' grids within 1e-5 of their peak" $?
     # the exact GPU sums: a resumed GPU run is byte-identical as a CPU one is, unless the float atomics
     # are asked back
-    if [ "${DTFE_METAL_FLOAT_GRIDS:-0}" = 1 ] || [ "${DTFE_GPU_FLOAT_GRIDS:-0}" = 1 ]; then
+    if [ "${DTFE_GPU_FLOAT_GRIDS:-0}" = 1 ]; then
         echo "  SKIP D12 byte identity: the float atomics were asked for"
     else
         cmp -s "$TMP/gref.a_den" "$TMP/g.a_den" && cmp -s "$TMP/gref.a_vel" "$TMP/g.a_vel" \
@@ -382,7 +393,7 @@ if [ "$GPU" = 1 ]; then
     grep -q "look-ahead on: .* on the GPU" "$TMP/gref.log" && ! grep -q "look-ahead on" "$TMP/gn.log" \
         && ! grep -q "using the CPU interpolation" "$TMP/gref.log" "$TMP/gn.log"
     check "D14 --gpu: the look-ahead is on by default (D12's reference) and off with --no-overlap" $?
-    if [ "${DTFE_METAL_FLOAT_GRIDS:-0}" = 1 ] || [ "${DTFE_GPU_FLOAT_GRIDS:-0}" = 1 ]; then
+    if [ "${DTFE_GPU_FLOAT_GRIDS:-0}" = 1 ]; then
         echo "  SKIP D14 GPU byte identity: the float atomics were asked for"
     else
         same "$TMP/gref" "$TMP/gn"; check "D14 --gpu --exact-average with and without the look-ahead: every output byte-identical" $?

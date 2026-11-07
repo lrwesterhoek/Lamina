@@ -54,7 +54,7 @@ GPU_BUILT=0
 # capture FIRST -- piping the binary straight into grep -q would SIGPIPE it under pipefail
 # a help that fails is a broken binary, not a missing feature; a missing feature fails under DTFE_TEST_REQUIRED=1
 # (skip_or_fail, tests/precision.sh)
-FULL_HELP="$("${BIN}" --full_help 2>/dev/null)" || { echo "FAIL: ${BIN} --full_help exited non-zero"; exit 1; }
+FULL_HELP="$("${BIN}" --full-help 2>/dev/null)" || { echo "FAIL: ${BIN} --full-help exited non-zero"; exit 1; }
 if ! grep -q -- '--ps-halo-release' <<<"${FULL_HELP}"; then
     skip_or_fail "this PS-DTFE has no --ps-halo-release support."
 fi
@@ -92,8 +92,8 @@ run 1 "${TMP}/phr_pan_p1" "${SNAP_PAN}" --periodic --ps-halo-release "${D}" --pa
 echo ">> run 6: pancake, released, --partition 2 2 2, ${NPROC} threads"
 run "${NPROC}" "${TMP}/phr_pan_pN" "${SNAP_PAN}" --periodic --ps-halo-release "${D}" --partition 2 2 2
 if [ "${GPU_BUILT}" -eq 1 ]; then
-    echo ">> run 7: pancake, released, --ps-gpu (GPU parity)"
-    run 1 "${TMP}/phr_pan_gpu" "${SNAP_PAN}" --periodic --ps-halo-release "${D}" --ps-gpu
+    echo ">> run 7: pancake, released, --gpu (GPU parity)"
+    run 1 "${TMP}/phr_pan_gpu" "${SNAP_PAN}" --periodic --ps-halo-release "${D}" --gpu
 else
     echo ">> run 7 skipped (CPU-only build: no GPU parity to check)"
 fi

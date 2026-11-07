@@ -17,6 +17,7 @@ import config
 from dtfelib import figures as style
 from dtfelib import pipeline
 from dtfelib import make_parser
+from dtfelib import snapshot_series, run_series, report_series
 
 style.apply()
 
@@ -26,9 +27,7 @@ AXIS_UNITS = config.AXIS_UNITS
 
 SLICE_PLANES_TO_PLOT = [0, 1, 2]
 
-SNAPSHOT_TO_REDSHIFT = config.SNAPSHOT_TO_REDSHIFT
 
-DPI = config.DPI
 
 SLICE_PLANES = config.SLICE_PLANES
 
@@ -61,7 +60,7 @@ def visualize_eigenvalue_slice(eigenvalue_slice, field_name, slice_dim, box_size
     plt.tight_layout()
 
     if save_path:
-        save_figure(fig, save_path, dpi=DPI, bbox_inches='tight')
+        save_figure(fig, save_path, bbox_inches='tight')
         plt.close(fig)
     else:
         plt.show()
@@ -167,7 +166,7 @@ def create_evolution_summary(rows):
     plt.tight_layout()
     save_figure(
         fig, Path(OUTPUT_DIR) / 'eigenvalue_amplitude_evolution.png',
-        dpi=DPI, bbox_inches='tight')
+        bbox_inches='tight')
     plt.close(fig)
 
     header = (f"{'z':>7} {'snap':>5} {'|l1|p99.5':>12} {'|l2|p99.5':>12} "
@@ -185,29 +184,24 @@ def create_evolution_summary(rows):
 
 def main():
 
-    parser = make_parser("Hessian eigenvalue slice maps, statistics and evolution summary.")
     # For this series script --snap restricts the run to ONE snapshot; the default
     # (no --snap) keeps the original behavior of processing the whole redshift series.
-    snap_action = parser._option_string_actions['--snap']
-    snap_action.default = None
-    snap_action.help = "process only this snapshot (default: full snapshot series)"
+    parser = make_parser("Hessian eigenvalue slice maps, statistics and evolution summary.", snap_default=None,
+                         snap_help="process only this snapshot (default: full snapshot series)")
     args = parser.parse_args()
 
-    if args.snap is not None:
-        snap_id = f"{args.snap:03d}"
-        z = config.get_redshift(snap_id)
-        if z is None:
-            try:
-                z = pipeline.products(snap_id, sim=args.sim, method=args.method, prefix=args.prefix,
-                                      data_root=args.data_root).redshift
-            except FileNotFoundError:
-                z = None
+    snapshot_items = snapshot_series(args)
+    if args.snap is not None and snapshot_items[0][1] is None:   # not on config's ladder: the snapshot's own z
+        snap_id = snapshot_items[0][0]
+        try:
+            z = pipeline.products(snap_id, sim=args.sim, method=args.method, prefix=args.prefix,
+                                  data_root=args.data_root).redshift
+        except FileNotFoundError:
+            z = None
         if z is None:
             print(f"skipping snapshot {snap_id} (no {args.method} fields)")
             return
         snapshot_items = [(snap_id, z)]
-    else:
-        snapshot_items = list(SNAPSHOT_TO_REDSHIFT.items())
 
     print("Starting eigenvalue analysis")
     print(f"Simulation: {args.sim} | method: {args.method}")
@@ -216,17 +210,11 @@ def main():
 
     Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
 
-    processed_snapshots = 0
-    failed_snapshots = []
-    rows = []
-
-    for snapshot, redshift in snapshot_items:
-        row = process_snapshot(snapshot, redshift, args.sim, args.method, args.prefix, args.data_root)
-        if row is not None:
-            rows.append(row)
-            processed_snapshots += 1
-        else:
-            failed_snapshots.append((snapshot, redshift))
+    outcomes, failed_snapshots = run_series(
+        snapshot_items, lambda snapshot, redshift: process_snapshot(snapshot, redshift, args.sim, args.method,
+                                                                    args.prefix, args.data_root))
+    rows = [row for row in outcomes if row is not None]
+    processed_snapshots = len(rows)
 
     if processed_snapshots > 1:
         try:
@@ -234,10 +222,7 @@ def main():
         except Exception as e:
             print(f"\nError creating evolution summary: {e}")
 
-    print(f"\nCompleted: {processed_snapshots}/{len(snapshot_items)} snapshots processed")
-
-    if failed_snapshots:
-        print(f"Failed snapshots: {', '.join(f'{s} (z={z:.2f})' for s, z in failed_snapshots)}")
+    report_series(processed_snapshots, len(snapshot_items), failed_snapshots)
 
     print(f"Output saved to: {OUTPUT_DIR}/")
 

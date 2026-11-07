@@ -7,7 +7,7 @@
 #       handful of co-spherical tetrahedra resolve differently in double); stream counts and caustic flags identical
 #   D3  phase-space point evaluation (slice): double vs single densities in the same class, streams identical
 #   D4  standard-DTFE cell averages, CPU: double vs single in the same class
-#   D5  GPU deposits of the DOUBLE binaries (--ps-gpu / --gpu): the GPU kernels are single precision and the
+#   D5  GPU deposits of the DOUBLE binaries (--gpu, both binaries): the GPU kernels are single precision and the
 #       double build hands them float copies of its tetrahedra, so each must match ITS OWN CPU run the way the
 #       single build's GPU matches its CPU (means to 1e-5, per-cell to 5e-2 outside a 1e-3 fraction) and must
 #       conserve mass; skipped when the double pair was built without METAL=1. Its stream counts are IDENTICAL to
@@ -62,8 +62,8 @@ DOUBLE_GPU=0
 if [ -d o_ps_d ] && [ ! -f o_ps_d/.gpu_mode_off ] && [ -d o_d ] && [ ! -f o_d/.gpu_mode_off ]; then   # any GPU backend stamp
     DOUBLE_GPU=1
     echo ">> GPU deposits of the double pair"
-    run "$TMP/ps_dg" ./PS-DTFE-double "$SNAP" "$TMP/ps_dg" --grid $G --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a --avg-subsamples 2 --ps-caustics --ps-gpu
-    gpu_ok "$TMP/ps_dg.log" || { echo "FAIL: PS-DTFE-double --ps-gpu did not run on the GPU"; exit 1; }
+    run "$TMP/ps_dg" ./PS-DTFE-double "$SNAP" "$TMP/ps_dg" --grid $G --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a --avg-subsamples 2 --ps-caustics --gpu
+    gpu_ok "$TMP/ps_dg.log" || { echo "FAIL: PS-DTFE-double --gpu did not run on the GPU"; exit 1; }
     run "$TMP/dt_dg" ./DTFE-double "$SNAP" "$TMP/dt_dg" --grid $G --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a --gpu
     gpu_ok "$TMP/dt_dg.log" || { echo "FAIL: DTFE-double --gpu did not run on the GPU"; exit 1; }
 else

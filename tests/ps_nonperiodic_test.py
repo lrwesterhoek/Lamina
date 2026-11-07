@@ -128,7 +128,7 @@ def region_faces(binary):
     run([sys.executable, os.path.join(HERE, "generate_ps_test_data.py"),
          "--out", snap, "--n", str(REGION_N), "--box", str(BOX), "--margin-frac", str(MARGIN),
          "--crossed-waves", "--amplitude-factor", "1.8", "--jitter-frac", str(JITTER), "--seed", str(SEED)])
-    h = subprocess.run([binary, "--full_help"], capture_output=True, text=True)
+    h = subprocess.run([binary, "--full-help"], capture_output=True, text=True)
     helptext = h.stdout + h.stderr
     try:
         mode = open(os.path.join(ROOT, "o_ps", ".build_mode")).read()
@@ -136,10 +136,10 @@ def region_faces(binary):
     except OSError:
         gpu = False
     variants = [("sampled", []), ("linear", ["--ps-linear-deposit"])]
-    if "--ps-exact-deposit" in helptext:
-        variants.append(("exact", ["--ps-exact-deposit"]))
+    if "--exact-average" in helptext:          # the exact deposit (run below under its deprecated name)
+        variants.append(("exact", ["--exact-average"]))
     if gpu:
-        variants += [(name + " GPU", extra + ["--ps-gpu"]) for name, extra in list(variants)]
+        variants += [(name + " GPU", extra + ["--gpu"]) for name, extra in list(variants)]
     # one triangulation: a partitioned non-periodic run differs from a single one at the Lagrangian
     # partition seams (a separate, known issue), and this part tests the region faces only
     common = ["--input", "105", "--MpcUnit", "1", "--verbose", "0", "--avg-subsamples", "3",
@@ -191,7 +191,7 @@ def partition_split(binary):
     run([sys.executable, os.path.join(HERE, "generate_ps_test_data.py"),
          "--out", snap, "--n", str(REGION_N), "--box", str(BOX), "--margin-frac", str(MARGIN),
          "--crossed-waves", "--amplitude-factor", "1.8", "--jitter-frac", str(JITTER), "--seed", str(SEED)])
-    h = subprocess.run([binary, "--full_help"], capture_output=True, text=True)
+    h = subprocess.run([binary, "--full-help"], capture_output=True, text=True)
     if "--ps-alpha-shape" not in h.stdout + h.stderr:
         os.remove(snap)
         return [f"'{binary}' has no --ps-alpha-shape (an older build?): non-periodic splits differ at the hull"]

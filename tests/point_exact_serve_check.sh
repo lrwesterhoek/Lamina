@@ -24,7 +24,7 @@
 #           by both tetrahedra.)
 #       D2  --partition 2 2 2 gives a byte-identical '.streams'. (A tolerance trips
 #           differently on each run's periodic copies: 2 of 2.1M cells differ.)
-#       D3  (GPU builds) the --ps-gpu deposit reaches the SAME decisions: '.streams' and
+#       D3  (GPU builds) the --gpu deposit reaches the SAME decisions: '.streams' and
 #           '.hidden_streams' byte-identical to the CPU's. The kernel classifies in float with a
 #           rigorous error bound and defers the undecidable tets to the CPU's exact test.
 #       D4  (GPU builds) the same with --partition 2 2 2 -- whose periodic sub-grids WRAP the
@@ -150,8 +150,8 @@ GPU_BUILT=0
 OBJ_PS=o_ps; precision_double && OBJ_PS=o_ps_d
 [ -f ${OBJ_PS}/.gpu_mode_off ] || GPU_BUILT=1
 if [ "${GPU_BUILT}" -eq 1 ]; then
-    RUN_GRID="${GRID}" run "${PS_BIN}" "${TMP}/pxs_dep_gpu"    --partition 1 1 1 --ps-gpu
-    RUN_GRID="${GRID}" run "${PS_BIN}" "${TMP}/pxs_dep_gpu_P2" --partition 2 2 2 --ps-gpu
+    RUN_GRID="${GRID}" run "${PS_BIN}" "${TMP}/pxs_dep_gpu"    --partition 1 1 1 --gpu
+    RUN_GRID="${GRID}" run "${PS_BIN}" "${TMP}/pxs_dep_gpu_P2" --partition 2 2 2 --gpu
 fi
 # reference outputs for the --serve round trip: every optional point output switched on
 run "${PS_BIN}" "${TMP}/pxs_ps_full" --sample-points "${PARTS}" --per-stream --per-stream-ids --partition 1 1 1 \
@@ -222,12 +222,12 @@ if gpu_built:
             # within float rounding of a face may land differently than in the CPU's double geometry
             # (ps_double_check D5); a mapping bug (D4's guard: 91% of cells) is still far outside this
             check(tag, nd <= 1e-4 * g1.size,
-                  f"--ps-gpu{' --partition 2 2 2' if tag == 'D4' else ''} vs CPU (double build): '.streams' "
+                  f"--gpu{' --partition 2 2 2' if tag == 'D4' else ''} vs CPU (double build): '.streams' "
                   f"{int((gs != g1).sum())} and '.hidden_streams' {int((gu != u1).sum())} cells differ "
                   f"(at most {1e-4 * g1.size:.0f}: float kernel geometry)")
         else:
             check(tag, nd == 0,
-                  f"--ps-gpu{' --partition 2 2 2' if tag == 'D4' else ''} vs CPU: '.streams' "
+                  f"--gpu{' --partition 2 2 2' if tag == 'D4' else ''} vs CPU: '.streams' "
                   f"{int((gs != g1).sum())} and '.hidden_streams' {int((gu != u1).sum())} cells differ (must be 0)")
 else:
     print("   SKIP D3/D4 (CPU-only build)")

@@ -438,7 +438,7 @@ def t_binary_standard():
         _zeldovich_snapshot(d / "combined_050.hdf5")
         _run_bin([dtfe_bin, d / "combined_050.hdf5", d / "output", "--grid", grid, "--periodic", "--input", 105,
                   "--padding", 15, "--exact-average", "--field", "density_a", "velocity_a", "gradient_a", "divergence_a",
-                  "shear_a", "vorticity_a", "vweb_a", "--lambda_th", 0.3, "--verbose", 1], d / "output.runlog")
+                  "shear_a", "vorticity_a", "vweb_a", "--lambda-th", 0.3, "--verbose", 1], d / "output.runlog")
         fs = FieldSet(d, method="dtfe")
         assert fs.lambda_th == 0.3 and fs._dtype_of("velocity") == real, (fs.lambda_th, fs._dtype_of("velocity"))
         mf = fs.mean_field(fields.MEAN_FIELD_NAMES)
@@ -475,7 +475,7 @@ def t_binary_ps():
     shutil.rmtree(d.parent, ignore_errors=True)
     d.mkdir(parents=True)
     _zeldovich_snapshot(d / "combined_050.hdf5", amp=1.2, rot=0.0)           # shell-crossed: ~4% multi-stream cells
-    common = ["--grid", 64, "--periodic", "--input", 105, "--padding", 15, "--lambda_th", 0.3, "--verbose", 1]
+    common = ["--grid", 64, "--periodic", "--input", 105, "--padding", 15, "--lambda-th", 0.3, "--verbose", 1]
     _run_bin([ps_bin, d / "combined_050.hdf5", d / "ps_output", *common, "--avg-subsamples", 3, "--ps-volume-weighted",
               "--field", "density_a", "velocity_a", "divergence_a", "vweb_a"], d / "ps_output.runlog")
     _run_bin([dtfe_bin, d / "combined_050.hdf5", d / "output", *common, "--exact-average",

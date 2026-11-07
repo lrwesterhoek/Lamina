@@ -5,6 +5,8 @@ Import as `from dtfelib import figures as style` (the scripts' alias). Reads con
 only at call time, so a test harness can patch config before running a script.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 
 import matplotlib as mpl
@@ -31,7 +33,9 @@ FIGSIZE = {
 }
 
 
-def apply():
+def apply() -> None:
+    """The house style into matplotlib's rcParams: serif text with Computer Modern maths, the font sizes, config.DPI
+    and tight bounding boxes for savefig, thin axes and faint grids."""
     mpl.rcParams.update({
         'font.family': 'serif',
         'mathtext.fontset': 'cm',
@@ -50,7 +54,8 @@ def apply():
     })
 
 
-def set_title(ax, *args, **kwargs):
+def set_title(ax, *args, **kwargs) -> None:
+    """ax.set_title(...) only under config.SHOW_TITLES (fontsize / fontweight dropped: the house style sets them)."""
     if not config.SHOW_TITLES:
         return
     kwargs.pop('fontsize', None)
@@ -58,7 +63,8 @@ def set_title(ax, *args, **kwargs):
     ax.set_title(*args, **kwargs)
 
 
-def set_suptitle(fig, *args, **kwargs):
+def set_suptitle(fig, *args, **kwargs) -> None:
+    """fig.suptitle(...) only under config.SHOW_TITLES (fontsize / fontweight dropped: the house style sets them)."""
     if not config.SHOW_TITLES:
         return
     kwargs.pop('fontsize', None)
@@ -66,8 +72,25 @@ def set_suptitle(fig, *args, **kwargs):
     fig.suptitle(*args, **kwargs)
 
 
+def z_title(text: str, redshift: float | None) -> str:
+    """'text (z=0.50)', or the text alone without a redshift: the map titles of plot_DTFE, plot_PS_DTFE and
+    plot_cosmic_web (drawn only under config.SHOW_TITLES)."""
+    return f"{text} (z={redshift:.2f})" if redshift is not None else text
+
+
 import numpy as _np
 from matplotlib import colors as _mcolors
+
+
+def plot_finite(ax, x, y, *fmt, **kw):
+    """Line+marker plot connected through FINITE samples only.
+
+    Sparse quantities (shape/orientation/environment exist only at snapshots with data on
+    disk) are NaN elsewhere; a plain plot() breaks the line at every NaN, leaving isolated
+    unreadable markers. Connecting the finite points keeps the time evolution legible."""
+    x, y = _np.asarray(x, dtype=float), _np.asarray(y, dtype=float)
+    ok = _np.isfinite(x) & _np.isfinite(y)
+    return ax.plot(x[ok], y[ok], *fmt, **kw)
 
 
 def _finite(data):
@@ -75,7 +98,10 @@ def _finite(data):
     return a[_np.isfinite(a)]
 
 
-def norm_signed_log(data=None, field=None, vmax=None):
+def norm_signed_log(data=None, field: str | None = None, vmax: float | None = None) -> _mcolors.SymLogNorm:
+    """A symmetric log norm (-vmax .. vmax) for a signed field: vmax from config.FIELD_LIMITS[field], else the
+    config.PERCENTILE_CLIP[1] percentile of |data|; the linear threshold config.SYMLOG_LINTHRESH_OVERRIDES[field]
+    (at most vmax / 2), else config.SYMLOG_LINTHRESH_FRAC x vmax."""
     if vmax is None:
         fixed = config.FIELD_LIMITS.get(field) if field else None
         if fixed is not None:
@@ -93,7 +119,10 @@ def norm_signed_log(data=None, field=None, vmax=None):
     return _mcolors.SymLogNorm(linthresh=linthresh, vmin=-vmax, vmax=vmax, base=10)
 
 
-def norm_positive_log(data=None, field=None, vmin=None, vmax=None):
+def norm_positive_log(data=None, field: str | None = None, vmin: float | None = None,
+                      vmax: float | None = None) -> _mcolors.LogNorm:
+    """A log norm for a positive field: (vmin, vmax) from config.FIELD_LIMITS[field], else the config.PERCENTILE_CLIP
+    percentiles of the positive values of 'data' (1e-6 .. 1 without any); vmin > 0 and vmax > vmin always."""
     if vmin is None or vmax is None:
         fixed = config.FIELD_LIMITS.get(field) if field else None
         if fixed is not None:
@@ -114,7 +143,8 @@ def norm_positive_log(data=None, field=None, vmin=None, vmax=None):
     return _mcolors.LogNorm(vmin=vmin, vmax=vmax)
 
 
-def norm_bounded(lo=0.0, hi=1.0, field=None):
+def norm_bounded(lo: float = 0.0, hi: float = 1.0, field: str | None = None) -> _mcolors.Normalize:
+    """A linear norm lo .. hi (config.FIELD_LIMITS[field] when set): a bounded quantity, a probability."""
     fixed = config.FIELD_LIMITS.get(field) if field else None
     if fixed is not None:
         lo, hi = fixed
@@ -151,7 +181,10 @@ class SignedTwoSlopeLogNorm(_mcolors.Normalize):
         return self._tinv(t)
 
 
-def norm_signed_centered(data=None, field=None, vmin=None, vmax=None):
+def norm_signed_centered(data=None, field: str | None = None, vmin: float | None = None,
+                         vmax: float | None = None) -> SignedTwoSlopeLogNorm:
+    """A two-slope log norm centred on 0 for a skewed signed field (delta): each side spans its own range (from
+    config.FIELD_LIMITS[field], else the config.PERCENTILE_CLIP percentiles), log-like beyond the linear threshold."""
     override = config.SYMLOG_LINTHRESH_OVERRIDES.get(field)
     if vmin is None or vmax is None:
         fixed = config.FIELD_LIMITS.get(field) if field else None
@@ -169,7 +202,9 @@ def norm_signed_centered(data=None, field=None, vmin=None, vmax=None):
     return SignedTwoSlopeLogNorm(vmin=vmin, vmax=vmax, linthresh=linthresh)
 
 
-def norm_signed_linear(data=None, field=None, vmax=None):
+def norm_signed_linear(data=None, field: str | None = None, vmax: float | None = None) -> _mcolors.Normalize:
+    """A linear norm -vmax .. vmax: vmax from config.FIELD_LIMITS[field] (a scalar), else robust_vmax(data) (1 for
+    an empty slice)."""
     if vmax is None:
         fixed = config.FIELD_LIMITS.get(field) if field else None
         if fixed is not None and not isinstance(fixed, (list, tuple)):
@@ -179,7 +214,8 @@ def norm_signed_linear(data=None, field=None, vmax=None):
     return _mcolors.Normalize(vmin=-vmax, vmax=vmax)
 
 
-def norm_ticks(norm):
+def norm_ticks(norm) -> list[float] | None:
+    """Colour-bar ticks for a SignedTwoSlopeLogNorm: its ends, 0 and the decades in between; None for any other norm."""
     if not isinstance(norm, SignedTwoSlopeLogNorm):
         return None
 
@@ -199,7 +235,9 @@ def norm_ticks(norm):
     return sorted(set(ticks))
 
 
-def field_norm(field, data=None):
+def field_norm(field: str, data=None) -> _mcolors.Normalize:
+    """The norm of a field by its kind in config.FIELD_KINDS (signed, signed_centered, signed_linear, positive,
+    bounded); KeyError for a field config does not list."""
     kind = config.FIELD_KINDS.get(field)
     if kind == 'signed':
         return norm_signed_log(data=data, field=field)
@@ -214,12 +252,14 @@ def field_norm(field, data=None):
     raise KeyError(f"Unknown field type {field!r}; add it to config.FIELD_KINDS")
 
 
-def robust_vmax(data):
+def robust_vmax(data) -> float:
+    """The config.PERCENTILE_CLIP[1] percentile of the finite |data| (0 for none): a colour amplitude that ignores
+    the few extreme cells."""
     a = _finite(data)
     return float(_np.percentile(_np.abs(a), config.PERCENTILE_CLIP[1])) if a.size else 0.0
 
 
-def symmetric_limits(data, pct=None):
+def symmetric_limits(data, pct: float | None = None) -> tuple[float, float]:
     """(-m, m) for a diverging map centred on 0 (a divergence, an eigenvalue): m = the 'pct' (default
     config.PERCENTILE_CLIP[1]) percentile of the finite |values|; (-1, 1) when the slice is empty or all
     zero, so imshow never gets vmin == vmax. A percentile pair (1, 99) of the signed values would put 0 off
@@ -233,7 +273,7 @@ def symmetric_limits(data, pct=None):
     return -m, m
 
 
-def log_limits(data, floor=1e-6):
+def log_limits(data, floor: float = 1e-6) -> tuple[float, float] | None:
     """(vmin, vmax) for a log colour scale: the smallest and largest finite POSITIVE values, vmin at least
     'floor'; None when there is none (an empty slice -- the caller skips the map instead of crashing on
     the min of an empty array, as the shear map did). vmax > vmin always."""
@@ -247,7 +287,9 @@ def log_limits(data, floor=1e-6):
     return vmin, vmax
 
 
-def delta_contour_levels(field_slice, norm, num_contours=20):
+def delta_contour_levels(field_slice: _np.ndarray, norm, num_contours: int = 20) -> _np.ndarray:
+    """Contour levels of a density-contrast slice: evenly spaced between its extremes, or under a
+    SignedTwoSlopeLogNorm evenly spaced in the norm's own scale, three quarters of them in the voids, with 0."""
     vmin = float(_np.min(field_slice))
     vmax = float(_np.max(field_slice))
     if not isinstance(norm, SignedTwoSlopeLogNorm):
@@ -264,11 +306,12 @@ def delta_contour_levels(field_slice, norm, num_contours=20):
     return _np.unique(_np.asarray(levels))
 
 
-def save_figure(fig, path, dpi=300, **kwargs):
-    """Save a figure to 'path' (its folder made first); dpi and every other keyword go to fig.savefig."""
+def save_figure(fig, path: str | Path, dpi: float | None = None, **kwargs) -> None:
+    """Save a figure to 'path' (its folder made first) at 'dpi' -- None: config.DPI, read at call time -- with every
+    other keyword passed on to fig.savefig. Every figure script saves through here."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=dpi, **kwargs)
+    fig.savefig(path, dpi=config.DPI if dpi is None else dpi, **kwargs)
 
 
 # ---------------------------------------------------------------- slice maps in the house style
@@ -300,17 +343,17 @@ WEB_COLORS = ['#1a1a2e', '#e0c97f', '#d4563e', '#f5f5dc']       # void, wall, fi
 RESIDUAL_COLORS = ['#08306b', '#2171b5', '#6baed6', '#f0f0f0', '#fb6a4a', '#cb181d', '#67000d']   # T-web - V-web, -3..3
 
 
-def web_cmap_norm():
+def web_cmap_norm() -> tuple[_mcolors.ListedColormap, _mcolors.BoundaryNorm]:
     """The categorical colour map and norm of a web classification (0 void .. 3 node)."""
     return _mcolors.ListedColormap(WEB_COLORS), _mcolors.BoundaryNorm([-0.5, 0.5, 1.5, 2.5, 3.5], 4)
 
 
-def residual_cmap_norm():
+def residual_cmap_norm() -> tuple[_mcolors.ListedColormap, _mcolors.BoundaryNorm]:
     """The colour map and norm of a class difference (-3 .. 3)."""
     return _mcolors.ListedColormap(RESIDUAL_COLORS), _mcolors.BoundaryNorm(_np.arange(-3.5, 4.5, 1.0), 7)
 
 
-def cmap_floored(name):
+def cmap_floored(name: str) -> _mcolors.Colormap:
     """A copy of the named colour map whose 'bad' (NaN) and 'under' colours are its lowest colour: an empty
     or sub-range cell on a log map shows as the darkest, not white."""
     import matplotlib.pyplot as _plt
@@ -320,7 +363,7 @@ def cmap_floored(name):
     return cmap
 
 
-def norm_log_range(data, fixed=None, floor=1e-6):
+def norm_log_range(data, fixed: tuple | None = None, floor: float = 1e-6) -> _mcolors.LogNorm | None:
     """A LogNorm for a positive field: 'fixed' = (vmin, vmax) with a None end taken from the slice's own
     log_limits; None only when an end must come from a slice with no positive value (a caller with a fixed
     range checks for an empty slice itself: plot_DTFE / plot_PS_DTFE.plot_density). The explicit range
@@ -336,13 +379,13 @@ def norm_log_range(data, fixed=None, floor=1e-6):
     return _mcolors.LogNorm(vmin=vmin, vmax=vmax)
 
 
-def norm_symmetric(data, pct=None):
+def norm_symmetric(data, pct: float | None = None) -> _mcolors.Normalize:
     """A linear norm centred on 0 (symmetric_limits): a divergence, a residual."""
     lo, hi = symmetric_limits(data, pct)
     return _mcolors.Normalize(vmin=lo, vmax=hi)
 
 
-def norm_streams(data):
+def norm_streams(data) -> tuple[str, _mcolors.Normalize] | None:
     """The stream-count map's rule: (cmap name, norm) -- a slice with no multi-stream cell (max <= 1 + tol)
     on a linear 0..1 viridis, else inferno on a log scale from 0.5 to max(max, 2); None for a slice
     without streams (max < tol). '.streams' is a float (STREAM_TOL), never compared as an integer."""
@@ -355,7 +398,7 @@ def norm_streams(data):
     return MAP_CMAPS['streams'], _mcolors.LogNorm(vmin=0.5, vmax=max(smax, 2.0))
 
 
-def slice_axes(ax, plane, box_mpc, ylabel=True):
+def slice_axes(ax, plane: int, box_mpc: float, ylabel: bool = True) -> None:
     """Axis labels from config.SLICE_PLANES[plane] in config.AXIS_UNITS, equal aspect, the box as limits."""
     labels = config.SLICE_PLANES[plane]['axis_labels']
     ax.set_xlabel(f"{labels[0]} [{config.AXIS_UNITS}]")
@@ -391,13 +434,14 @@ def _draw_panel(fig, ax, panel, box_mpc, plane, ylabel=True):
 def _save(fig, path):
     import matplotlib.pyplot as _plt
     if path is not None:
-        save_figure(fig, path, dpi=config.DPI, bbox_inches='tight')
+        save_figure(fig, path, bbox_inches='tight')
     _plt.close(fig)
 
 
-def slice_map(data, box_mpc, plane, cmap, norm=None, label='', title='', path=None, vmin=None, vmax=None,
-              interpolation=None, text=None, footnote=None, cbar_ticks=None, cbar_ticklabels=None, floor=False,
-              figsize=(8, 7)):
+def slice_map(data, box_mpc: float, plane: int, cmap, norm=None, label: str = '', title: str = '',
+              path: str | Path | None = None, vmin: float | None = None, vmax: float | None = None,
+              interpolation: str | None = None, text: str | None = None, footnote: str | None = None,
+              cbar_ticks=None, cbar_ticklabels=None, floor: bool = False, figsize=(8, 7)) -> dict:
     """One slice map in the house style, saved to 'path' (config.DPI, tight) and closed. 'data' is passed as
     imshow wants it (rows vertical: the scripts keep their .T); 'text' = a boxed note in the corner, 'footnote' = a line under the axes. Returns
     {'path', 'vmin', 'vmax'} -- the range drawn, for tests and logs."""
@@ -414,7 +458,8 @@ def slice_map(data, box_mpc, plane, cmap, norm=None, label='', title='', path=No
     return {'path': None if path is None else Path(path), 'vmin': lo, 'vmax': hi}
 
 
-def slice_row(panels, box_mpc, plane, path=None, suptitle='', footnote=None, figsize=None):
+def slice_row(panels: list[dict], box_mpc: float, plane: int, path: str | Path | None = None, suptitle: str = '',
+              footnote: str | None = None, figsize=None) -> dict:
     """A row of maps of one plane (a triptych of eigenvalues, the density next to the streams, the two webs
     and their residual): 'panels' = the dicts _draw_panel takes; only the first carries the y label.
     'footnote' goes under the row. Returns {'path', 'ranges': [(vmin, vmax), ...]}."""

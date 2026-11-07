@@ -33,10 +33,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from dtfelib import make_parser, pipeline, profiles
+from dtfelib import make_parser, pipeline, profiles, add_snaps_arg, add_out_arg
 from dtfelib import figures as style
 
-OUTPUT_DIR = Path(config.LOCAL_FIGURES_ROOT) / "void_profiles"
+OUTPUT_DIR = Path(config.figures_path("void_profiles"))
 
 
 def plot_stack(st, prof, title, path, z, linear=True, fits=None):
@@ -98,7 +98,7 @@ def edges_tag(edges, default_edges) -> str:
 
 def main():
     parser = make_parser("Void-centred stacked profiles in r / R_v (r / R_eff with --radius r_eff): density, v_r, single-stream fraction.")
-    parser.add_argument("--snaps", type=int, nargs="*", default=None, help="snapshots (default: --snap)")
+    add_snaps_arg(parser)
     parser.add_argument("--sample", choices=("resolved", "deep"), default="resolved",
                         help="well-resolved voids, or those also deeper than config.DEEP_VOID_THRESHOLD")
     parser.add_argument("--radius", choices=profiles.RADII, default="r_v",
@@ -114,7 +114,7 @@ def main():
     parser.add_argument("--points", type=int, default=profiles.DEFAULT_M, help="points per shell")
     parser.add_argument("--n-boot", type=int, default=200, help="bootstrap resamples for the bands")
     parser.add_argument("--no-linear", action="store_true", help="no linear-theory v_r overlay")
-    parser.add_argument("--out", default=None, help=f"output folder (default {OUTPUT_DIR}/<sim>)")
+    add_out_arg(parser, f"{OUTPUT_DIR}/<sim>")
     pipeline.add_smoothing_mpc_arg(parser)
     args = parser.parse_args()
     style.apply()

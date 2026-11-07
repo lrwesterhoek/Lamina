@@ -241,7 +241,8 @@ def render_fields(fs, out_dir, fields=None, label=None, force=True, quiet=False,
         # (the axes is only part of the 8-inch figure, hence measuring it after layout)
         ax_w_in = ax.get_position().width * fig.get_size_inches()[0]
         dpi = max(MIN_DPI, int(np.ceil(pp.nu / max(ax_w_in, 1e-6))))
-        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        from .figures import save_figure        # here: figures imports config, which 'import dtfelib' must not
+        save_figure(fig, save_path, dpi=dpi, bbox_inches="tight")
         plt.close(fig)
 
     written, up_to_date = [], 0

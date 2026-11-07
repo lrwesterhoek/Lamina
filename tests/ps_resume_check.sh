@@ -25,8 +25,12 @@
 #   C12 a run killed before any checkpoint could be written leaves no (empty) checkpoint folder for the driver to resume
 #   C13 a checkpoint of another binary ('binary=' key line: the revision AND link time) is refused, naming PS_RESUME=0
 #   C14 a commit whose renames failed (exit 3, the outputs left as '.part.<pid>') keeps the checkpoint
-#   C8  GPU builds only: a killed '--ps-gpu' run resumes to the exactly summed grids of an uninterrupted one
-#       byte for byte in EVERY grid, the velocity and dispersion included (exact fixed-point sums); SKIP otherwise
+#   C15 the deprecated spellings share the canonical names' settings key: a run killed with '--ps-exact-deposit
+#       --lambda_th 0.3' resumes under '--exact-average --lambda-th 0.3', every output byte-identical to an
+#       uninterrupted run with the canonical names
+#   C8  GPU builds only: a killed '--ps-gpu' run (the deprecated spelling) resumes under '--gpu' to the exactly summed
+#       grids of an uninterrupted '--gpu' run byte for byte in EVERY grid, the velocity and dispersion included (exact
+#       fixed-point sums); SKIP otherwise
 # Usage: tests/ps_resume_check.sh [--no-build]   (--no-build is accepted and ignored: the binaries are used as built)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -213,18 +217,31 @@ OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/cm" "${C[@]}" --verbose 2 --max-concurren
 check "C14 exit $rc (renames failed): the checkpoint stays for a resume" $?
 rm -rf "$TMP/cm.den" "$TMP/cm.runlog.checkpoint" "$TMP"/cm.*.part.*
 
-echo ">> C8: a killed --ps-gpu run"
+echo ">> C15: the deprecated spellings resume under the canonical names (one settings key)"
+X_OLD=("${C[@]}" --verbose 2 --max-concurrent 4 --ordered-merge --ps-exact-deposit --lambda_th 0.3)
+X_NEW=("${C[@]}" --verbose 2 --max-concurrent 4 --ordered-merge --exact-average --lambda-th 0.3)
+OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/xref" "${X_NEW[@]}" > "$TMP/xref.log" 2>&1 || { echo "FAIL: xref (see $TMP/xref.log)"; exit 1; }
+OMP_NUM_THREADS=4 DTFE_TEST_EXIT_AFTER_PARTITIONS=20 "$BIN" "$SNAP" "$TMP/x" "${X_OLD[@]}" > "$TMP/x1.log" 2>&1; rc1=$?
+nx="$(merged_count "$TMP/x.runlog.checkpoint" 2>/dev/null || echo 0)"
+OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/x" "${X_NEW[@]}" --resume > "$TMP/x2.log" 2>&1; rc2=$?
+[ "$rc1" = 137 ] && [ "$rc2" = 0 ] && grep -q -- "--resume: $nx of 64 partitions are already in the checkpoint" "$TMP/x2.log" \
+    && grep -q "^warning: --ps-exact-deposit is deprecated, use --exact-average$" "$TMP/x1.log" \
+    && grep -q "^warning: --lambda_th is deprecated, use --lambda-th$" "$TMP/x1.log" && ! grep -q "deprecated" "$TMP/x2.log"
+check "C15 killed with the old spellings after $nx partitions (each warned), resumed with the canonical ones (exit $rc1, $rc2)" $?
+same "$TMP/xref" "$TMP/x"; check "C15 every output byte-identical to the uninterrupted run with the canonical names" $?
+
+echo ">> C8: a killed --ps-gpu run, resumed under --gpu"
 OBJ=o_ps; precision_double && OBJ=o_ps_d
 if [ ! -d "$OBJ" ] || [ -f "$OBJ/.gpu_mode_off" ] || [ ! -f "$OBJ/.gpu_mode_metal" ]; then
     echo "  SKIP C8: $OBJ is not a Metal GPU build"
 else
-    G=("${C[@]}" --verbose 2 --max-concurrent 1 --ordered-merge --ps-gpu)
+    G=("${C[@]}" --verbose 2 --max-concurrent 1 --ordered-merge --gpu)
     "$BIN" "$SNAP" "$TMP/gref" "${G[@]}" > "$TMP/gref.log" 2>&1 || { echo "FAIL: gref (see $TMP/gref.log)"; exit 1; }
-    DTFE_TEST_EXIT_AFTER_PARTITIONS=12 "$BIN" "$SNAP" "$TMP/g" "${G[@]}" > "$TMP/g1.log" 2>&1; rc1=$?
+    DTFE_TEST_EXIT_AFTER_PARTITIONS=12 "$BIN" "$SNAP" "$TMP/g" "${G[@]/#--gpu/--ps-gpu}" > "$TMP/g1.log" 2>&1; rc1=$?
     "$BIN" "$SNAP" "$TMP/g" "${G[@]}" --resume > "$TMP/g2.log" 2>&1; rc2=$?
     [ "$rc1" = 137 ] && [ "$rc2" = 0 ] && grep -q -- "--resume: 12 of 64" "$TMP/g2.log" \
         && ! grep -q "ran on the CPU instead" "$TMP/gref.log" "$TMP/g1.log" "$TMP/g2.log"
-    check "C8 killed after 12 GPU partitions, resumed the other 52 (no CPU fallback)" $?
+    check "C8 killed after 12 GPU partitions (--ps-gpu), resumed the other 52 under --gpu (no CPU fallback)" $?
     ok=0
     # every grid, the velocity included: every PS grid of a GPU deposit is an exact fixed-point sum
     # (the moments too, ps_deposit_params.h PSFxGrid) and the partitions merge in index order, so the resumed run

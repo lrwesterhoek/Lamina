@@ -200,8 +200,9 @@ def outlines(sim, snap, prefix=None, data_root=None, method="auto", sigma_mpc=No
 
 
 def main(argv=None):
+    from dtfelib.cli import add_sim_arg
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("--sim", required=True)
+    add_sim_arg(p)                                  # required unless DTFE_SIM names it (config reads that one)
     p.add_argument("--snap", type=int, required=True)
     p.add_argument("--method", choices=("auto", "ps", "dtfe"), default="auto", help="the estimator of the grids")
     p.add_argument("--prefix", default=None, help="the grid set's output prefix (default the method's)")

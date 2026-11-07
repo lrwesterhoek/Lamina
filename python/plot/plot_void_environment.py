@@ -53,8 +53,8 @@ import matplotlib.pyplot as plt
 
 import config
 from dtfelib import pipeline, catalog, classify
-from dtfelib import make_parser, use_data_root
-from dtfelib import environment as env
+from dtfelib.catalog import output_tag
+from dtfelib import make_parser, use_data_root, snapshot_ladder, add_snaps_arg, add_rv_definition_arg
 from dtfelib import groupcat as gc
 from dtfelib import voids as V
 from dtfelib import figures as style
@@ -126,10 +126,7 @@ def name_tag(method_used, prefix_used, keep_overlaps, factor, definition="crossi
     """plot_void_population's rule (untagged for PS-DTFE's default grids), plus '_x<factor>' off the default,
     '_rv<definition>' for an R_v other than the crossing one and '_<criterion>' for every criterion but
     UNTAGGED_CRITERION (density_raw), the default velocity included."""
-    default_prefix = {"ps": "ps_output.", "dtfe": "output."}
-    grids = "+".join(sorted({m if prefix_used[s] == default_prefix.get(m) else prefix_used[s].rstrip(".")
-                             for s, m in method_used.items()}))
-    return (("" if grids == "ps" else f"_{grids}") + ("_overlaps" if keep_overlaps else "")
+    return (output_tag(((m, prefix_used[s]) for s, m in method_used.items()), keep_overlaps)
             + ("" if float(factor) == classify.ENV_FACTOR else f"_x{float(factor):g}")
             + ("" if definition == "crossing" else f"_rv{definition}")
             + ("" if criterion == UNTAGGED_CRITERION else f"_{criterion}"))
@@ -254,7 +251,7 @@ def plot_snapshot(envd, summ, z, sim, factor, path, criterion=classify.DEFAULT_C
 def default_tracking_dir(sim):
     """plot_void_tracking's folder for 'sim' at this smoothing, under the figure root (--tracking-dir names
     another one)."""
-    return Path(config.LOCAL_FIGURES_ROOT) / "void_tracking" / sim / pipeline.smoothing_tag()
+    return Path(config.figures_path("void_tracking")) / sim / pipeline.smoothing_tag()
 
 
 def tracking_files(tdir, tag=""):
@@ -369,12 +366,12 @@ def main(argv=None):
     parser.add_argument("--factor", type=float, default=classify.ENV_FACTOR,
                         help=f"the raw density criterion's radius: its enclosed contrast is taken within this many "
                              f"R_v (default {classify.ENV_FACTOR:g}, Ceccarelli et al. 2013)")
-    parser.add_argument("--r-v-definition", choices=catalog.R_V_DEFINITIONS, default="crossing",
-                        help="which R_v: crossing (the mean, default), delta08 (enclosed contrast -0.8) or ridge (the "
-                             "compensation ridge); a catalogue without it is rebuilt by the pipeline or gives no void")
+    add_rv_definition_arg(parser, catalog.R_V_DEFINITIONS,
+                          "which R_v: crossing (the mean, default), delta08 (enclosed contrast -0.8) or ridge (the "
+                          "compensation ridge); a catalogue without it is rebuilt by the pipeline or gives no void")
     parser.add_argument("--keep-overlaps", action="store_true",
                         help="every resolved void with a radius, not only the distinct ones")
-    parser.add_argument("--snaps", type=int, nargs="*", default=None, help="snapshots (default: every one with grids)")
+    add_snaps_arg(parser, help="snapshots (default: every one with grids)")
     parser.add_argument("--tracking-dir", default=None,
                         help="folder of plot_void_tracking's void<K>_track.npz files (default: void_tracking/<sim> "
                              "under the figure root)")
@@ -385,7 +382,7 @@ def main(argv=None):
     pipeline.apply_smoothing_args(args, "void-environment")
     use_data_root(args.data_root)
     ztab = gc.redshift_table(args.sim)
-    ladder = sorted({int(d.name.split("_")[1]) for d in env.sim_dir(args.sim).glob("snapdir_*")})
+    ladder = snapshot_ladder(args.sim)
     if args.snaps:
         ladder = [s for s in ladder if s in set(args.snaps)]
 

@@ -147,7 +147,7 @@ FIELDS=(density_a velocity_a gradient_a divergence_a shear_a vorticity_a tweb_a 
 run_e() {  # $1 = tag, rest = extra args
     local tag="$1"; shift
     env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 "${BIN}" "${SNAP}" "${TMP}/da_${tag}" --grid 128 "${COMMON[@]}" --field "${FIELDS[@]}" \
-        --lambda_th 0.3 --partition 2 2 2 "$@" > "${TMP}/da_${tag}.txt" 2>&1 || true
+        --lambda-th 0.3 --partition 2 2 2 "$@" > "${TMP}/da_${tag}.txt" 2>&1 || true
     "${PY}" - "${TMP}/da_${tag}.txt" <<'PYEOF'
 import re, sys
 m = re.search(r"memory model\s*: ([0-9.]+) GB predicted \(auto-tune\) vs ([0-9.]+) GB measured", open(sys.argv[1], errors="replace").read())

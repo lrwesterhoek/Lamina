@@ -271,8 +271,8 @@ class PipelineSpec:
                # login shell must not leak into a run
                "PS_EXACT": "1" if self.deposit == "exact" else "0",
                "AVG_SUBSAMPLES": str(self.nsub),
-               "PS_GPU": "1" if self.gpu else "0",
-               "PS_METAL": "1" if self.gpu else "0",      # -m only switches the GPU ON; pin the env knob too
+               "PS_GPU": "1" if self.gpu else "0",        # -m only switches the GPU ON; pin the env knob too
+               "PS_METAL": "1" if self.gpu else "0",      # PS_GPU's older name, for one release
                "PS_VERTEX_MASS": "1" if self.vertex_mass else "0",
                "PS_VOLUME_WEIGHTED": "1" if self.volume_weighted else "0",
                "PS_CAUSTICS": "1" if self.caustics else "0",

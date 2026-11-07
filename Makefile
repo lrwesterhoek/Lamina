@@ -16,7 +16,8 @@
 #
 # Linux:
 #   Uses standard system paths (/usr). Install development packages:
-#   sudo apt-get install libgsl-dev libboost-all-dev libcgal-dev libmpfr-dev libhdf5-dev libgmp-dev libtbb-dev
+#   sudo apt-get install libgsl-dev libboost-dev libboost-thread-dev libboost-filesystem-dev \
+#       libboost-program-options-dev libcgal-dev libmpfr-dev libhdf5-dev libgmp-dev libtbb-dev
 #   or equivalent for your distribution, then run 'make DTFE'
 #
 # CUSTOMIZATION:
@@ -627,16 +628,23 @@ IO_CC_SOURCES = input_output.cc $(IO_SOURCES) user_options.h define.h quantities
 DTFE_SOURCES = DTFE.cpp define.h particle_data.h user_options.h box.h quantities.h subpartition.h interpolations.h kdtree/kdtree2.hpp Pvector.h message.h miscellaneous.h auto_tune.h ps_point_eval.h web_fields.h
 # the derived velocity fields and the V-web / T-web (moved out of DTFE.cpp)
 WEB_FIELDS_SOURCES = web_fields.cc web_fields.h define.h user_options.h quantities.h message.h fftw_plans64.h
-DTFE_CC_SOURCES = user_options.cc quantities.cc NGP_interpolation.cc CIC_interpolation.cc TSC_interpolation.cc PCS_interpolation.cc SPH_interpolation.cc interlacing.cc random.cc web_fields.cc
-TRIANG_HEADERS = $(addprefix CGAL_triangulation/, triangulation_common.h triangulation_miscellaneous.h field_computation.h padding_test.h my_function.h CGAL_include_2D.h CGAL_include_3D.h vertexData.h particle_data_traits.h) define.h particle_data.h user_options.h box.h quantities.h Pvector.h message.h math_functions.h miscellaneous.h ps_point_eval.h
+DTFE_CC_SOURCES = user_options.cc quantities.cc NGP_interpolation.cc CIC_interpolation.cc TSC_interpolation.cc PCS_interpolation.cc SPH_interpolation.cc interlacing.cc random.cc web_fields.cc auto_tune.cc
+TRIANG_HEADERS = $(addprefix CGAL_triangulation/, triangulation_common.h triangulation_miscellaneous.h field_computation.h padding_test.h my_function.h CGAL_include_2D.h CGAL_include_3D.h vertexData.h particle_data_traits.h) define.h particle_data.h user_options.h box.h quantities.h Pvector.h message.h math_functions.h miscellaneous.h ps_point_eval.h thread_count.h
 TRIANG_SOURCES = $(addprefix CGAL_triangulation/, triangulation.cpp) $(TRIANG_HEADERS)
-TRIANG_CC_SOURCES = $(addprefix CGAL_triangulation/, unaveraged_interpolation.cc averaged_interpolation_1.cc averaged_interpolation_2.cc ps_interpolation.cc ps_point_eval.cc)
+TRIANG_CC_SOURCES = $(addprefix CGAL_triangulation/, unaveraged_interpolation.cc averaged_interpolation_1.cc averaged_interpolation_2.cc ps_interpolation.cc ps_point_eval.cc ps_serve.cc ps_mean_streams.cc)
 
 ALL_FILES = $(DTFE_SOURCES) $(DTFE_CC_SOURCES) $(TRIANG_SOURCES) $(MAIN_SOURCES) kdtree/kdtree2.hpp kdtree/kdtree2.cpp
 LIB_FILES = $(DTFE_SOURCES) $(DTFE_CC_SOURCES) $(TRIANG_SOURCES)
 
 HEADERS_1 = DTFE.h define.h user_options.h particle_data.h quantities.h Pvector.h math_functions.h  message.h box.h miscellaneous.h interpolations.h
 HEADERS_2 = $(addprefix CGAL_triangulation/, CGAL_include_2D.h CGAL_include_3D.h vertexData.h particle_data_traits.h)
+
+# Make's built-in rules are off: every object and binary here has a rule of its own, and make must never fall back on
+# one of its own. After a build-mode switch it once ran its built-in link rule ('%: %.o') on a few objects while it
+# re-read the .d files below ('clang++ o/r3d.o -o o/r3d', failing, the error ignored as for any -include'd file).
+# That was never reproduced since; without the rule it cannot happen.
+.SUFFIXES:
+%: %.o
 
 # compiler-generated header dependencies (see -MMD -MP at COMPILE_FLAGS); wildcard expands to
 # nothing on a fresh checkout / after clean, so missing .d files never break the build
@@ -650,9 +658,9 @@ HEADERS_2 = $(addprefix CGAL_triangulation/, CGAL_include_2D.h CGAL_include_3D.h
 ############################# Standard DTFE build (no PHASE_SPACE) ##################################
 # Produces DTFE binary that uses Eulerian-space triangulation (standard DTFE)
 
-DTFE_CC_OBJS = $(OBJ_DIR)/user_options$(OBJ_EXT) $(OBJ_DIR)/quantities$(OBJ_EXT) $(OBJ_DIR)/NGP_interpolation$(OBJ_EXT) $(OBJ_DIR)/CIC_interpolation$(OBJ_EXT) $(OBJ_DIR)/TSC_interpolation$(OBJ_EXT) $(OBJ_DIR)/PCS_interpolation$(OBJ_EXT) $(OBJ_DIR)/SPH_interpolation$(OBJ_EXT) $(OBJ_DIR)/interlacing$(OBJ_EXT) $(OBJ_DIR)/random$(OBJ_EXT) $(OBJ_DIR)/web_fields$(OBJ_EXT) $(OBJ_DIR)/scratch_alloc$(OBJ_EXT)
+DTFE_CC_OBJS = $(OBJ_DIR)/user_options$(OBJ_EXT) $(OBJ_DIR)/quantities$(OBJ_EXT) $(OBJ_DIR)/NGP_interpolation$(OBJ_EXT) $(OBJ_DIR)/CIC_interpolation$(OBJ_EXT) $(OBJ_DIR)/TSC_interpolation$(OBJ_EXT) $(OBJ_DIR)/PCS_interpolation$(OBJ_EXT) $(OBJ_DIR)/SPH_interpolation$(OBJ_EXT) $(OBJ_DIR)/interlacing$(OBJ_EXT) $(OBJ_DIR)/random$(OBJ_EXT) $(OBJ_DIR)/web_fields$(OBJ_EXT) $(OBJ_DIR)/scratch_alloc$(OBJ_EXT) $(OBJ_DIR)/auto_tune$(OBJ_EXT)
 IO_CC_OBJS = $(OBJ_DIR)/input_output$(OBJ_EXT)
-TRIANG_CC_OBJS = $(OBJ_DIR)/unaveraged_interpolation$(OBJ_EXT) $(OBJ_DIR)/averaged_interpolation_1$(OBJ_EXT) $(OBJ_DIR)/averaged_interpolation_2$(OBJ_EXT) $(OBJ_DIR)/ps_interpolation$(OBJ_EXT) $(OBJ_DIR)/ps_point_eval$(OBJ_EXT)
+TRIANG_CC_OBJS = $(OBJ_DIR)/unaveraged_interpolation$(OBJ_EXT) $(OBJ_DIR)/averaged_interpolation_1$(OBJ_EXT) $(OBJ_DIR)/averaged_interpolation_2$(OBJ_EXT) $(OBJ_DIR)/ps_interpolation$(OBJ_EXT) $(OBJ_DIR)/ps_point_eval$(OBJ_EXT) $(OBJ_DIR)/ps_serve$(OBJ_EXT) $(OBJ_DIR)/ps_mean_streams$(OBJ_EXT)
 
 # The mode check must FINISH before any object/header rule starts: under -j its wipe runs
 # concurrently with sibling prerequisites and can delete files mid-recipe (observed: the
@@ -705,6 +713,10 @@ $(OBJ_DIR)/random$(OBJ_EXT): $(SRC)/random.cc $(SRC)/define.h $(SRC)/user_option
 $(OBJ_DIR)/web_fields$(OBJ_EXT): $(addprefix $(SRC)/, $(WEB_FIELDS_SOURCES)) Makefile
 	$(CC) $(COMPILE_FLAGS) $(DTFE_INC) -o $@ -c $(SRC)/web_fields.cc
 
+# the auto-tuner's model (auto_tune.h is its interface: an edit of the model rebuilds this object only)
+$(OBJ_DIR)/auto_tune$(OBJ_EXT): $(SRC)/auto_tune.cc $(SRC)/auto_tune.h $(SRC)/user_options.h $(SRC)/define.h Makefile
+	$(CC) $(COMPILE_FLAGS) $(DTFE_INC) -o $@ -c $(SRC)/auto_tune.cc
+
 # --scratch-dir out-of-core backing: replaces the global operator new/delete, so it goes into
 # the BINARIES only -- the library links scratch_alloc_stub.cc instead (see library-build).
 $(OBJ_DIR)/scratch_alloc$(OBJ_EXT): $(SRC)/scratch_alloc.cc $(SRC)/scratch_alloc.h Makefile
@@ -741,17 +753,23 @@ $(OBJ_DIR)/averaged_interpolation_2$(OBJ_EXT): $(SRC)/CGAL_triangulation/average
 $(OBJ_DIR)/ps_interpolation$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_interpolation.cc $(addprefix $(SRC)/, $(TRIANG_HEADERS)) Makefile
 	$(CC) $(COMPILE_FLAGS) $(DTFE_INC) -o $@ -c $(SRC)/CGAL_triangulation/ps_interpolation.cc
 
-$(OBJ_DIR)/ps_point_eval$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_point_eval.cc $(addprefix $(SRC)/, $(TRIANG_HEADERS)) Makefile
+$(OBJ_DIR)/ps_point_eval$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_point_eval.cc $(SRC)/CGAL_triangulation/ps_point_eval_detail.h $(addprefix $(SRC)/, $(TRIANG_HEADERS)) Makefile
 	$(CC) $(COMPILE_FLAGS) $(DTFE_INC) -o $@ -c $(SRC)/CGAL_triangulation/ps_point_eval.cc
+
+$(OBJ_DIR)/ps_serve$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_serve.cc $(SRC)/CGAL_triangulation/ps_point_eval_detail.h $(addprefix $(SRC)/, $(TRIANG_HEADERS)) Makefile
+	$(CC) $(COMPILE_FLAGS) $(DTFE_INC) -o $@ -c $(SRC)/CGAL_triangulation/ps_serve.cc
+
+$(OBJ_DIR)/ps_mean_streams$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_mean_streams.cc $(addprefix $(SRC)/, $(TRIANG_HEADERS)) Makefile
+	$(CC) $(COMPILE_FLAGS) $(DTFE_INC) -o $@ -c $(SRC)/CGAL_triangulation/ps_mean_streams.cc
 
 
 ############################# PS-DTFE build (with PHASE_SPACE) ##################################
 # Produces PS-DTFE binary that uses Lagrangian-space triangulation (phase-space DTFE)
 # Object files are placed in $(OBJ_DIR_PS) to avoid conflicts with the standard DTFE build
 
-PS_DTFE_CC_OBJS = $(OBJ_DIR_PS)/user_options$(OBJ_EXT) $(OBJ_DIR_PS)/quantities$(OBJ_EXT) $(OBJ_DIR_PS)/NGP_interpolation$(OBJ_EXT) $(OBJ_DIR_PS)/CIC_interpolation$(OBJ_EXT) $(OBJ_DIR_PS)/TSC_interpolation$(OBJ_EXT) $(OBJ_DIR_PS)/PCS_interpolation$(OBJ_EXT) $(OBJ_DIR_PS)/SPH_interpolation$(OBJ_EXT) $(OBJ_DIR_PS)/interlacing$(OBJ_EXT) $(OBJ_DIR_PS)/random$(OBJ_EXT) $(OBJ_DIR_PS)/web_fields$(OBJ_EXT) $(OBJ_DIR_PS)/scratch_alloc$(OBJ_EXT)
+PS_DTFE_CC_OBJS = $(OBJ_DIR_PS)/user_options$(OBJ_EXT) $(OBJ_DIR_PS)/quantities$(OBJ_EXT) $(OBJ_DIR_PS)/NGP_interpolation$(OBJ_EXT) $(OBJ_DIR_PS)/CIC_interpolation$(OBJ_EXT) $(OBJ_DIR_PS)/TSC_interpolation$(OBJ_EXT) $(OBJ_DIR_PS)/PCS_interpolation$(OBJ_EXT) $(OBJ_DIR_PS)/SPH_interpolation$(OBJ_EXT) $(OBJ_DIR_PS)/interlacing$(OBJ_EXT) $(OBJ_DIR_PS)/random$(OBJ_EXT) $(OBJ_DIR_PS)/web_fields$(OBJ_EXT) $(OBJ_DIR_PS)/scratch_alloc$(OBJ_EXT) $(OBJ_DIR_PS)/auto_tune$(OBJ_EXT)
 PS_DTFE_IO_OBJS = $(OBJ_DIR_PS)/input_output$(OBJ_EXT)
-PS_DTFE_TRIANG_OBJS = $(OBJ_DIR_PS)/unaveraged_interpolation$(OBJ_EXT) $(OBJ_DIR_PS)/averaged_interpolation_1$(OBJ_EXT) $(OBJ_DIR_PS)/averaged_interpolation_2$(OBJ_EXT) $(OBJ_DIR_PS)/ps_interpolation$(OBJ_EXT) $(OBJ_DIR_PS)/ps_point_eval$(OBJ_EXT)
+PS_DTFE_TRIANG_OBJS = $(OBJ_DIR_PS)/unaveraged_interpolation$(OBJ_EXT) $(OBJ_DIR_PS)/averaged_interpolation_1$(OBJ_EXT) $(OBJ_DIR_PS)/averaged_interpolation_2$(OBJ_EXT) $(OBJ_DIR_PS)/ps_interpolation$(OBJ_EXT) $(OBJ_DIR_PS)/ps_point_eval$(OBJ_EXT) $(OBJ_DIR_PS)/ps_serve$(OBJ_EXT) $(OBJ_DIR_PS)/ps_mean_streams$(OBJ_EXT)
 
 # Same wipe-vs-build serialization as the DTFE target above.
 PS-DTFE: ps_gpu_mode_check
@@ -803,6 +821,9 @@ $(OBJ_DIR_PS)/random$(OBJ_EXT): $(SRC)/random.cc $(SRC)/define.h $(SRC)/user_opt
 $(OBJ_DIR_PS)/web_fields$(OBJ_EXT): $(addprefix $(SRC)/, $(WEB_FIELDS_SOURCES)) Makefile
 	$(CC) $(COMPILE_FLAGS_PS) $(DTFE_INC) -o $@ -c $(SRC)/web_fields.cc
 
+$(OBJ_DIR_PS)/auto_tune$(OBJ_EXT): $(SRC)/auto_tune.cc $(SRC)/auto_tune.h $(SRC)/user_options.h $(SRC)/define.h Makefile
+	$(CC) $(COMPILE_FLAGS_PS) $(DTFE_INC) -o $@ -c $(SRC)/auto_tune.cc
+
 $(OBJ_DIR_PS)/scratch_alloc$(OBJ_EXT): $(SRC)/scratch_alloc.cc $(SRC)/scratch_alloc.h Makefile
 	$(CC) $(COMPILE_FLAGS_PS) $(DTFE_INC) -o $@ -c $(SRC)/scratch_alloc.cc
 
@@ -824,48 +845,56 @@ $(OBJ_DIR_PS)/averaged_interpolation_2$(OBJ_EXT): $(SRC)/CGAL_triangulation/aver
 $(OBJ_DIR_PS)/ps_interpolation$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_interpolation.cc $(SRC)/CGAL_triangulation/gpu_host.h $(addprefix $(SRC)/, $(TRIANG_HEADERS)) Makefile
 	$(CC) $(COMPILE_FLAGS_PS) $(DTFE_INC) -o $@ -c $(SRC)/CGAL_triangulation/ps_interpolation.cc
 
-$(OBJ_DIR_PS)/ps_point_eval$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_point_eval.cc $(addprefix $(SRC)/, $(TRIANG_HEADERS)) Makefile
+$(OBJ_DIR_PS)/ps_point_eval$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_point_eval.cc $(SRC)/CGAL_triangulation/ps_point_eval_detail.h $(addprefix $(SRC)/, $(TRIANG_HEADERS)) Makefile
 	$(CC) $(COMPILE_FLAGS_PS) $(DTFE_INC) -o $@ -c $(SRC)/CGAL_triangulation/ps_point_eval.cc
+
+$(OBJ_DIR_PS)/ps_serve$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_serve.cc $(SRC)/CGAL_triangulation/ps_point_eval_detail.h $(addprefix $(SRC)/, $(TRIANG_HEADERS)) Makefile
+	$(CC) $(COMPILE_FLAGS_PS) $(DTFE_INC) -o $@ -c $(SRC)/CGAL_triangulation/ps_serve.cc
+
+$(OBJ_DIR_PS)/ps_mean_streams$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_mean_streams.cc $(addprefix $(SRC)/, $(TRIANG_HEADERS)) Makefile
+	$(CC) $(COMPILE_FLAGS_PS) $(DTFE_INC) -o $@ -c $(SRC)/CGAL_triangulation/ps_mean_streams.cc
 
 # Metal GPU deposit host (METAL=1 only). The kernel source is embedded via a generated header so
 # the binary needs no runtime file lookup; Metal compiles it once per process.
-$(OBJ_DIR_PS)/ps_deposit_msl.h: metal/ps_deposit.metal metal/exact_clip.metal.inc Makefile
+# The kernels' parameter blocks are the hosts' own header (ps_kernel_params.h / dtfe_deposit_params.h, plain C++
+# that is valid MSL), prepended after the exact clip helpers.
+$(OBJ_DIR_PS)/ps_deposit_msl.h: metal/ps_deposit.metal metal/exact_clip.metal.inc $(SRC)/CGAL_triangulation/ps_kernel_params.h Makefile
 	@$(MKDIR_P) $(OBJ_DIR_PS)
-	{ printf 'static const char PS_DEPOSIT_MSL[] = R"MSL(\n'; cat metal/exact_clip.metal.inc metal/ps_deposit.metal; printf '\n)MSL";\n'; } > $@.tmp
+	{ printf 'static const char PS_DEPOSIT_MSL[] = R"MSL(\n'; cat metal/exact_clip.metal.inc $(SRC)/CGAL_triangulation/ps_kernel_params.h metal/ps_deposit.metal; printf '\n)MSL";\n'; } > $@.tmp
 	mv $@.tmp $@
 
-$(OBJ_DIR_PS)/ps_metal_host$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_metal_host.cc $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_metal_retry.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(OBJ_DIR_PS)/ps_deposit_msl.h Makefile
+$(OBJ_DIR_PS)/ps_metal_host$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_metal_host.cc $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_metal_retry.h $(SRC)/CGAL_triangulation/gpu_retry_common.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(SRC)/CGAL_triangulation/ps_kernel_params.h $(OBJ_DIR_PS)/ps_deposit_msl.h Makefile
 	$(CC) $(COMPILE_FLAGS_PS) -isystem third_party/metal-cpp -I $(OBJ_DIR_PS) -o $@ -c $(SRC)/CGAL_triangulation/ps_metal_host.cc
 
 # Standard-DTFE Metal deposit host (METAL=1 only), same embedding scheme in $(OBJ_DIR).
-$(OBJ_DIR)/dtfe_deposit_msl.h: metal/dtfe_deposit.metal metal/exact_clip.metal.inc Makefile
+$(OBJ_DIR)/dtfe_deposit_msl.h: metal/dtfe_deposit.metal metal/exact_clip.metal.inc $(SRC)/CGAL_triangulation/dtfe_deposit_params.h Makefile
 	@$(MKDIR_P) $(OBJ_DIR)
-	{ printf 'static const char DTFE_DEPOSIT_MSL[] = R"MSL(\n'; cat metal/exact_clip.metal.inc metal/dtfe_deposit.metal; printf '\n)MSL";\n'; } > $@.tmp
+	{ printf 'static const char DTFE_DEPOSIT_MSL[] = R"MSL(\n'; cat metal/exact_clip.metal.inc $(SRC)/CGAL_triangulation/dtfe_deposit_params.h metal/dtfe_deposit.metal; printf '\n)MSL";\n'; } > $@.tmp
 	mv $@.tmp $@
 
-$(OBJ_DIR)/dtfe_metal_host$(OBJ_EXT): $(SRC)/CGAL_triangulation/dtfe_metal_host.cc $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_metal_retry.h $(SRC)/CGAL_triangulation/dtfe_gpu_fixed.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(OBJ_DIR)/dtfe_deposit_msl.h Makefile
+$(OBJ_DIR)/dtfe_metal_host$(OBJ_EXT): $(SRC)/CGAL_triangulation/dtfe_metal_host.cc $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_metal_retry.h $(SRC)/CGAL_triangulation/gpu_retry_common.h $(SRC)/CGAL_triangulation/dtfe_gpu_fixed.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(SRC)/CGAL_triangulation/dtfe_deposit_params.h $(OBJ_DIR)/dtfe_deposit_msl.h Makefile
 	$(CC) $(COMPILE_FLAGS) -isystem third_party/metal-cpp -I $(OBJ_DIR) -o $@ -c $(SRC)/CGAL_triangulation/dtfe_metal_host.cc
 
-$(OBJ_DIR)/dtfe_metal_host_l$(OBJ_EXT): $(SRC)/CGAL_triangulation/dtfe_metal_host.cc $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_metal_retry.h $(SRC)/CGAL_triangulation/dtfe_gpu_fixed.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(OBJ_DIR)/dtfe_deposit_msl.h Makefile
+$(OBJ_DIR)/dtfe_metal_host_l$(OBJ_EXT): $(SRC)/CGAL_triangulation/dtfe_metal_host.cc $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_metal_retry.h $(SRC)/CGAL_triangulation/gpu_retry_common.h $(SRC)/CGAL_triangulation/dtfe_gpu_fixed.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(SRC)/CGAL_triangulation/dtfe_deposit_params.h $(OBJ_DIR)/dtfe_deposit_msl.h Makefile
 	$(CC) $(COMPILE_FLAGS) -fPIC -isystem third_party/metal-cpp -I $(OBJ_DIR) -o $@ -c $(SRC)/CGAL_triangulation/dtfe_metal_host.cc
 
 # CUDA/HIP GPU deposit hosts (CUDA=1 via nvcc, HIP=1 via hipcc): single-source .cu files, kernels
 # compiled ahead of time (no vendored SDK -- the CUDA toolkit / ROCm provide the headers). Ports of
 # the Metal kernels; keep them in step with metal/*.metal.
-$(OBJ_DIR_PS)/ps_gpu_cuda$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_gpu_cuda.cu $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_cuda_compat.h $(SRC)/CGAL_triangulation/gpu_cuda_emu.h $(SRC)/CGAL_triangulation/gpu_exact_clip.cuh $(SRC)/CGAL_triangulation/gpu_cuda_retry.cuh $(SRC)/CGAL_triangulation/ps_deposit_params.h $(SRC)/CGAL_triangulation/ps_mass_audit.h $(SRC)/message.h $(SRC)/env_knobs.h Makefile
+$(OBJ_DIR_PS)/ps_gpu_cuda$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_gpu_cuda.cu $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_cuda_compat.h $(SRC)/CGAL_triangulation/gpu_cuda_emu.h $(SRC)/CGAL_triangulation/gpu_exact_clip.cuh $(SRC)/CGAL_triangulation/gpu_cuda_retry.cuh $(SRC)/CGAL_triangulation/gpu_retry_common.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(SRC)/CGAL_triangulation/ps_kernel_params.h $(SRC)/CGAL_triangulation/ps_mass_audit.h $(SRC)/message.h $(SRC)/env_knobs.h Makefile
 	@$(MKDIR_P) $(OBJ_DIR_PS)
 	$(GPUXX) $(GPUXX_FLAGS) -o $@ -c $(SRC)/CGAL_triangulation/ps_gpu_cuda.cu
 
-$(OBJ_DIR)/dtfe_gpu_cuda$(OBJ_EXT): $(SRC)/CGAL_triangulation/dtfe_gpu_cuda.cu $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_cuda_compat.h $(SRC)/CGAL_triangulation/gpu_cuda_emu.h $(SRC)/CGAL_triangulation/gpu_exact_clip.cuh $(SRC)/CGAL_triangulation/gpu_cuda_retry.cuh $(SRC)/CGAL_triangulation/dtfe_gpu_fixed.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(SRC)/message.h $(SRC)/env_knobs.h Makefile
+$(OBJ_DIR)/dtfe_gpu_cuda$(OBJ_EXT): $(SRC)/CGAL_triangulation/dtfe_gpu_cuda.cu $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_cuda_compat.h $(SRC)/CGAL_triangulation/gpu_cuda_emu.h $(SRC)/CGAL_triangulation/gpu_exact_clip.cuh $(SRC)/CGAL_triangulation/gpu_cuda_retry.cuh $(SRC)/CGAL_triangulation/gpu_retry_common.h $(SRC)/CGAL_triangulation/dtfe_gpu_fixed.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(SRC)/CGAL_triangulation/ps_kernel_params.h $(SRC)/CGAL_triangulation/dtfe_deposit_params.h $(SRC)/message.h $(SRC)/env_knobs.h Makefile
 	@$(MKDIR_P) $(OBJ_DIR)
 	$(GPUXX) $(GPUXX_FLAGS) -o $@ -c $(SRC)/CGAL_triangulation/dtfe_gpu_cuda.cu
 
 
 ############################# Shared library build ##################################
 
-DTFE_CC_LIB_OBJS = $(OBJ_DIR)/user_options_l$(OBJ_EXT) $(OBJ_DIR)/quantities_l$(OBJ_EXT) $(OBJ_DIR)/NGP_interpolation_l$(OBJ_EXT) $(OBJ_DIR)/CIC_interpolation_l$(OBJ_EXT) $(OBJ_DIR)/TSC_interpolation_l$(OBJ_EXT) $(OBJ_DIR)/PCS_interpolation_l$(OBJ_EXT) $(OBJ_DIR)/SPH_interpolation_l$(OBJ_EXT) $(OBJ_DIR)/interlacing_l$(OBJ_EXT) $(OBJ_DIR)/random_l$(OBJ_EXT) $(OBJ_DIR)/web_fields_l$(OBJ_EXT)
+DTFE_CC_LIB_OBJS = $(OBJ_DIR)/user_options_l$(OBJ_EXT) $(OBJ_DIR)/quantities_l$(OBJ_EXT) $(OBJ_DIR)/NGP_interpolation_l$(OBJ_EXT) $(OBJ_DIR)/CIC_interpolation_l$(OBJ_EXT) $(OBJ_DIR)/TSC_interpolation_l$(OBJ_EXT) $(OBJ_DIR)/PCS_interpolation_l$(OBJ_EXT) $(OBJ_DIR)/SPH_interpolation_l$(OBJ_EXT) $(OBJ_DIR)/interlacing_l$(OBJ_EXT) $(OBJ_DIR)/random_l$(OBJ_EXT) $(OBJ_DIR)/web_fields_l$(OBJ_EXT) $(OBJ_DIR)/auto_tune_l$(OBJ_EXT)
 IO_CC_LIB_OBJS = $(OBJ_DIR)/input_output_l$(OBJ_EXT)
-TRIANG_CC_LIB_OBJS = $(OBJ_DIR)/unaveraged_interpolation_l$(OBJ_EXT) $(OBJ_DIR)/averaged_interpolation_1_l$(OBJ_EXT) $(OBJ_DIR)/averaged_interpolation_2_l$(OBJ_EXT) $(OBJ_DIR)/ps_interpolation_l$(OBJ_EXT) $(OBJ_DIR)/ps_point_eval_l$(OBJ_EXT)
+TRIANG_CC_LIB_OBJS = $(OBJ_DIR)/unaveraged_interpolation_l$(OBJ_EXT) $(OBJ_DIR)/averaged_interpolation_1_l$(OBJ_EXT) $(OBJ_DIR)/averaged_interpolation_2_l$(OBJ_EXT) $(OBJ_DIR)/ps_interpolation_l$(OBJ_EXT) $(OBJ_DIR)/ps_point_eval_l$(OBJ_EXT) $(OBJ_DIR)/ps_serve_l$(OBJ_EXT) $(OBJ_DIR)/ps_mean_streams_l$(OBJ_EXT)
 
 # Same wipe-vs-build serialization as the DTFE target (the library shares $(OBJ_DIR)).
 library: dtfe_gpu_mode_check
@@ -880,6 +909,8 @@ library-build: set_directories set_directories_2 $(addprefix $(SRC)/, $(LIB_FILE
 	$(CC) $(COMPILE_FLAGS) -fPIC $(DTFE_INC) -o $(OBJ_DIR)/averaged_interpolation_2_l$(OBJ_EXT) -c $(SRC)/CGAL_triangulation/averaged_interpolation_2.cc
 	$(CC) $(COMPILE_FLAGS) -fPIC $(DTFE_INC) -o $(OBJ_DIR)/ps_interpolation_l$(OBJ_EXT) -c $(SRC)/CGAL_triangulation/ps_interpolation.cc
 	$(CC) $(COMPILE_FLAGS) -fPIC $(DTFE_INC) -o $(OBJ_DIR)/ps_point_eval_l$(OBJ_EXT) -c $(SRC)/CGAL_triangulation/ps_point_eval.cc
+	$(CC) $(COMPILE_FLAGS) -fPIC $(DTFE_INC) -o $(OBJ_DIR)/ps_serve_l$(OBJ_EXT) -c $(SRC)/CGAL_triangulation/ps_serve.cc
+	$(CC) $(COMPILE_FLAGS) -fPIC $(DTFE_INC) -o $(OBJ_DIR)/ps_mean_streams_l$(OBJ_EXT) -c $(SRC)/CGAL_triangulation/ps_mean_streams.cc
 	$(CC) $(COMPILE_FLAGS) -fPIC $(DTFE_INC) -o $(OBJ_DIR)/input_output_l$(OBJ_EXT) -c $(SRC)/input_output.cc
 	$(CC) $(COMPILE_FLAGS) -fPIC $(DTFE_INC) -o $(OBJ_DIR)/user_options_l$(OBJ_EXT) -c $(SRC)/user_options.cc
 	$(CC) $(COMPILE_FLAGS) -fPIC $(DTFE_INC) -o $(OBJ_DIR)/quantities_l$(OBJ_EXT) -c $(SRC)/quantities.cc
@@ -891,6 +922,7 @@ library-build: set_directories set_directories_2 $(addprefix $(SRC)/, $(LIB_FILE
 	$(CC) $(COMPILE_FLAGS) -fPIC $(DTFE_INC) -o $(OBJ_DIR)/interlacing_l$(OBJ_EXT) -c $(SRC)/interlacing.cc
 	$(CC) $(COMPILE_FLAGS) -fPIC $(DTFE_INC) -o $(OBJ_DIR)/random_l$(OBJ_EXT) -c $(SRC)/random.cc
 	$(CC) $(COMPILE_FLAGS) -fPIC $(DTFE_INC) -o $(OBJ_DIR)/web_fields_l$(OBJ_EXT) -c $(SRC)/web_fields.cc
+	$(CC) $(COMPILE_FLAGS) -fPIC $(DTFE_INC) -o $(OBJ_DIR)/auto_tune_l$(OBJ_EXT) -c $(SRC)/auto_tune.cc
 	$(CC) $(COMPILE_FLAGS) -fPIC $(DTFE_INC) -o $(OBJ_DIR)/scratch_alloc_stub_l$(OBJ_EXT) -c $(SRC)/scratch_alloc_stub.cc
 	$(CC) $(COMPILE_FLAGS) -shared $(OBJ_DIR)/DTFE_l$(OBJ_EXT) $(OBJ_DIR)/triangulation_l$(OBJ_EXT) $(OBJ_DIR)/kdtree2_l$(OBJ_EXT) $(OBJ_DIR)/r3d$(OBJ_EXT) $(OBJ_DIR)/scratch_alloc_stub_l$(OBJ_EXT) $(DTFE_CC_LIB_OBJS) $(IO_CC_LIB_OBJS) $(TRIANG_CC_LIB_OBJS) $(DTFE_GPU_L_OBJS) $(DTFE_LIB) $(DTFE_GPU_LIBS) -o $(LIB_DIR)/libDTFE$(SHARED_EXT)
 

@@ -1,6 +1,6 @@
 //  The GPU exact tetrahedron-cell intersection: the volume and the first and second moments of one
 //  tetrahedron intersected with one axis-aligned grid cell, in float32. Shared by the phase-space
-//  deposit (ps_deposit.metal: --ps-exact-deposit) and the standard-DTFE exact volume average
+//  deposit (ps_deposit.metal: --exact-average) and the standard-DTFE exact volume average
 //  (dtfe_deposit.metal: --exact-average); the Makefile PREPENDS this file to both kernel sources
 //  when it embeds them (and metal/validate_deposit.cpp does the same when it loads the source).
 //  Keep it self-contained: it is compiled before everything else in each kernel source.
@@ -89,8 +89,11 @@ static inline bool box_outside_tet(thread const TetPlanes& F, float3 c, float3 h
 //    each node sees the one polygon valid on the open interval.
 //
 // The order-1 path (order2=false) does the same arithmetic for V and the first moments as the
-// order-2 one and skips the rest, so the two agree to the bit: the exact deposit's pass 0
-// (weights) and pass 1 (deposit) see identical volumes.
+// order-2 one and skips the rest, so the exact deposit's pass 0 (weights) and pass 1 (deposit)
+// see identical volumes. Only the volumes: compiled as two pipelines, Metal's fast math may contract
+// the first moments differently (tests/gpu_twin_check.sh measured ~17% of pairs off, by at most
+// 3.7e-8 of the cell; the CUDA twin agrees bitwise), which reaches a deposit only through
+// --ps-linear-deposit's weight (about 1e-8 of a tet's mass).
 //
 // The frame. The exact deposits clip in a frame whose origin is the centre of the OVERLAP of the
 // tet's bounding box with the cell, so the clipped piece -- which lies in that overlap -- has
@@ -108,7 +111,7 @@ static inline bool box_outside_tet(thread const TetPlanes& F, float3 c, float3 h
 // causticClass is identical. One known residual: a tet face lying exactly in a cell plane (a
 // perfect lattice) leaves a slab <= 1e-7 cell thick in the cell it only touches, which then
 // counts as a tet touch; its mass is ~1e-7 of the tet's. Speed (M1 Max, one partition, the whole
-// --ps-exact-deposit): 18.1 -> 8.7 s for 0.26M particles on 256^3, 10.8 -> 6.2 s for 2.1M on
+// --exact-average): 18.1 -> 8.7 s for 0.26M particles on 256^3, 10.8 -> 6.2 s for 2.1M on
 // 128^3, 35.7 -> 18.1 s for 2.1M on 256^3, against the r3d port.
 // ================================================================================================
 #define SW_NCAND 34

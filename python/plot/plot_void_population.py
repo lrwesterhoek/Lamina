@@ -85,12 +85,11 @@ from matplotlib.ticker import FormatStrFormatter
 
 import config
 from dtfelib import pipeline, catalog, theory, raw_radius
-from dtfelib import make_parser, use_data_root
+from dtfelib import make_parser, use_data_root, snapshot_ladder
 from dtfelib import figures as style
-from dtfelib import environment as env
 from dtfelib import groupcat as gc
 
-FIGURE_ROOT = Path(config.LOCAL_FIGURES_ROOT) / "void_population"
+FIGURE_ROOT = Path(config.figures_path("void_population"))
 PCT = (16, 50, 84)   # band percentiles
 SIZE_FUNCTION_RV = "delta08"     # the R_v definition of the size function (catalog.R_V_DEFINITIONS, contract C3): the
                                  # theory's radius is where the enclosed contrast reaches DELTA_V_NONLINEAR = -0.8
@@ -397,7 +396,7 @@ def size_function_figure(stats, panel, ztab, box, args, methods, path) -> dict:
                             f"against {SIZE_FUNCTION_MODEL.upper()} (delta_v = {theory.DELTA_V_LINEAR}, "
                             f"delta_c = {theory.DELTA_C})")
     fig.tight_layout(rect=(0, 0.07 if caveat else 0, 1, 1))
-    style.save_figure(fig, path, dpi=config.DPI)
+    style.save_figure(fig, path)
     plt.close(fig)
     return out
 
@@ -871,7 +870,7 @@ def fixed_r_figure(fstats, snaps, sim, methods, path, model=SIZE_FUNCTION_MODEL,
                             f"{' about re-centred centres' if recentre else ''}, ungated ({'/'.join(methods)}) "
                             f"against {model.upper()}")
     fig.tight_layout(rect=(0, 0.035 * (len(verdicts) + 2) / max(len(rows), 1), 1, 1))
-    style.save_figure(fig, path, dpi=config.DPI)
+    style.save_figure(fig, path)
     plt.close(fig)
     out["fixed_r_verdicts"] = np.array(verdicts)
     return out
@@ -906,9 +905,7 @@ def fixed_r_main(args, ztab) -> Path:
         raise SystemExit(f"no {args.method} field grids for {args.sim} at snapshots {snaps} -- nothing to analyse")
     fstats = fixed_r_statistics(entries, box, ztab, snaps, args.fixed_r_range)
     methods = sorted({m for m, _p in used.values()})
-    default_prefix = {"ps": "ps_output.", "dtfe": "output."}
-    grids = "+".join(sorted({m if p == default_prefix.get(m) else p.rstrip(".") for m, p in used.values()}))
-    name_tag = "" if grids == "ps" else f"_{grids}"
+    name_tag = catalog.output_tag(used.values())
     with smoothing_cells(cells=config.PRODUCTION_SMOOTHING[0]):
         outdir = FIGURE_ROOT / args.sim / pipeline.smoothing_tag()        # 'gatenone': the ungated products' folder
     outdir.mkdir(parents=True, exist_ok=True)
@@ -944,7 +941,8 @@ def fixed_r_main(args, ztab) -> Path:
     return path
 
 
-def main():
+def build_parser():
+    """The script's parser: make_parser's flags and the population, size-function and fixed-R options."""
     parser = make_parser("Population-level void statistics across all snapshots "
                          "(same catalogs and sample cuts as the correlation analyses).")
     parser.add_argument("--panel-snaps", type=int, nargs="+", default=None,
@@ -994,17 +992,13 @@ def main():
                         help="fixed R: the radius range in Mpc instead of the common complete one (one range for a "
                              "cross-box comparison)")
     pipeline.add_smoothing_mpc_arg(parser)
-    args = parser.parse_args()
-    style.apply()
-    pipeline.apply_smoothing_args(args, "void-population")
+    return parser
 
-    use_data_root(args.data_root)      # --data-root for the trees, group catalogues and ladder too
-    ztab = gc.redshift_table(args.sim)
-    if args.size_fixed_r:              # only that figure: its own smoothings, snapshots and gate
-        fixed_r_main(args, ztab)
-        return
-    ladder = sorted({int(d.name.split("_")[1]) for d in env.sim_dir(args.sim).glob("snapdir_*")})
 
+def population_statistics(args, ladder):
+    """snapshot_stats of every snapshot of the ladder with grids (the other estimator's at the panel snapshots with
+    --other-estimator), each snapshot's method, prefix and box, and the refused ones; an unreadable snapshot is left
+    out with a note. Returns (stats, method_used, prefix_used, box, other, refused)."""
     stats, method_used, prefix_used, box, other, refused = {}, {}, {}, {}, {}, []
     panel_want = [int(s) for s in (args.panel_snaps or config.PANEL_SNAPSHOTS)]
     for s in ladder:
@@ -1037,31 +1031,11 @@ def main():
                 pass
             finally:
                 oth.release()
+    return stats, method_used, prefix_used, box, other, refused
 
-    if not stats:
-        raise SystemExit(f"no {args.method} field grids for {args.sim} -- nothing to analyse"
-                         + (f" ({len(refused)} snapshot(s) refused, see above)" if refused else ""))
-    snaps = sorted(stats)
-    z = np.array([ztab.get(s, np.nan) for s in snaps])
-    methods = sorted(set(method_used.values()))
-    print(f"{args.sim} ({'/'.join(methods)}): population statistics at {len(snaps)} snapshots, "
-          f"z = {np.nanmax(z):.2f} .. {np.nanmin(z):.2f}")
-    for s in snaps:
-        st = stats[s]
-        print(f"  snap {s:3d} (z={ztab.get(s, float('nan')):6.2f}): total={st['n_total']:5d} "
-              f"bbks={st['n_bbks']:5d} resolved={st['n_resolved']:4d} deep={st['n_deep']:4d}  "
-              f"R_eff={st['r_eff_pct'][1]:5.2f} Mpc  e={st['e_pct'][1]:.3f}  "
-              f"p={st['p_pct'][1]:+.3f}  delta={st['delta_pct'][1]:+.3f}")
 
-    outdir = FIGURE_ROOT / args.sim / pipeline.smoothing_tag()     # a non-default sigma: its own folder
-    outdir.mkdir(parents=True, exist_ok=True)
-    # the names say what they hold: untagged for PS-DTFE's default grids; another
-    # estimator, a --prefix or --keep-overlaps is tagged so it never overwrites those (as the pk / profile files are)
-    default_prefix = {"ps": "ps_output.", "dtfe": "output."}         # io's: an estimator's own grids
-    grids = "+".join(sorted({m if prefix_used[s] == default_prefix.get(m) else prefix_used[s].rstrip(".")
-                             for s, m in method_used.items()}))
-    name_tag = ("" if grids == "ps" else f"_{grids}") + ("_overlaps" if args.keep_overlaps else "")
-
+def evolution_figure(args, stats, snaps, z, methods, outdir, name_tag):
+    """population_evolution<tag>.png: the void counts, the radii, the shapes and the central delta against z."""
     # ---- evolution figure ---------------------------------------------------------------
     fig, axes = plt.subplots(4, 1, figsize=(8, 15), sharex=True)
     ax = axes[0]
@@ -1110,9 +1084,13 @@ def main():
         ax.grid(alpha=0.3)
     axes[-1].invert_xaxis()
     fig.tight_layout()
-    style.save_figure(fig, outdir / f"population_evolution{name_tag}.png", dpi=config.DPI)
+    style.save_figure(fig, outdir / f"population_evolution{name_tag}.png")
     plt.close(fig)
 
+
+def distribution_figure(args, stats, ztab, methods, outdir, name_tag):
+    """population_distributions<tag>.png: the R_eff, e, p and central-delta histograms at the panel snapshots.
+    Returns the panel snapshots (those with statistics)."""
     # ---- distribution figure ------------------------------------------------------------
     panel = args.panel_snaps or [int(s) for s in config.PANEL_SNAPSHOTS]
     panel = [s for s in panel if s in stats]
@@ -1130,9 +1108,14 @@ def main():
         ax.set_xlabel(lab); ax.set_ylabel("pdf"); ax.legend(fontsize=8); ax.grid(alpha=0.3)
     style.set_suptitle(fig, f"{args.sim}: void population distributions ({'/'.join(methods)})")
     fig.tight_layout()
-    style.save_figure(fig, outdir / f"population_distributions{name_tag}.png", dpi=config.DPI)
+    style.save_figure(fig, outdir / f"population_distributions{name_tag}.png")
     plt.close(fig)
+    return panel
 
+
+def abundance_figure(args, stats, other, box, panel, snaps, ztab, methods, outdir, name_tag):
+    """population_abundance<tag>.png: n(>R_v), dn/dlnR_v (the other estimator's dashed) and R_v against the
+    central delta at the latest panel snapshot. Returns (radii, edges, abund) for the table."""
     # ---- abundance figure: n(> R_eff), dn/dlnR per Mpc^3, R_eff against the central delta
     # the abundance in the MEASURED radius R_v of the distinct voids (R_eff, ~1.75 R_v, is a curvature
     # length); radii in smoothing lengths, 0.3-30 sigma: fixed Mpc radii saturate n(>R) in TNG300
@@ -1173,9 +1156,15 @@ def main():
     style.set_suptitle(fig, f"{args.sim}: void abundance in R_v ({'/'.join(methods)}, "
                             f"{'' if args.keep_overlaps else 'distinct '}well-resolved voids, box {box[snaps[-1]]:.0f} Mpc)")
     fig.tight_layout()
-    style.save_figure(fig, outdir / f"population_abundance{name_tag}.png", dpi=config.DPI)
+    style.save_figure(fig, outdir / f"population_abundance{name_tag}.png")
     plt.close(fig)
+    return radii, edges, abund
 
+
+def size_function_and_table(args, stats, panel, ztab, box, snaps, z, methods, method_used, prefix_used, radii,
+                            edges, abund, outdir, name_tag):
+    """The size function figure (on its own catalogue under --size-smooth) and population_stats<tag>.npz with every
+    figure's numbers."""
     sf_tag = "" if args.size_rv == SIZE_FUNCTION_RV else f"_{args.size_rv}"     # a non-default R_v: its own npz
     # the png is untagged only for 'delta08', whatever the default: an untagged size-function png has
     # always meant the smoothed-field delta08 radius, and a name must not change meaning
@@ -1216,6 +1205,48 @@ def main():
     print(f"-> {outdir}/population_evolution{name_tag}.png, population_distributions{name_tag}.png, "
           f"population_abundance{name_tag}.png, {sf_path.name}, "
           f"population_stats{name_tag}{sf_tag}.npz")
+
+
+def main():
+    args = build_parser().parse_args()
+    style.apply()
+    pipeline.apply_smoothing_args(args, "void-population")
+
+    use_data_root(args.data_root)      # --data-root for the trees, group catalogues and ladder too
+    ztab = gc.redshift_table(args.sim)
+    if args.size_fixed_r:              # only that figure: its own smoothings, snapshots and gate
+        fixed_r_main(args, ztab)
+        return
+    ladder = snapshot_ladder(args.sim)
+
+    stats, method_used, prefix_used, box, other, refused = population_statistics(args, ladder)
+
+    if not stats:
+        raise SystemExit(f"no {args.method} field grids for {args.sim} -- nothing to analyse"
+                         + (f" ({len(refused)} snapshot(s) refused, see above)" if refused else ""))
+    snaps = sorted(stats)
+    z = np.array([ztab.get(s, np.nan) for s in snaps])
+    methods = sorted(set(method_used.values()))
+    print(f"{args.sim} ({'/'.join(methods)}): population statistics at {len(snaps)} snapshots, "
+          f"z = {np.nanmax(z):.2f} .. {np.nanmin(z):.2f}")
+    for s in snaps:
+        st = stats[s]
+        print(f"  snap {s:3d} (z={ztab.get(s, float('nan')):6.2f}): total={st['n_total']:5d} "
+              f"bbks={st['n_bbks']:5d} resolved={st['n_resolved']:4d} deep={st['n_deep']:4d}  "
+              f"R_eff={st['r_eff_pct'][1]:5.2f} Mpc  e={st['e_pct'][1]:.3f}  "
+              f"p={st['p_pct'][1]:+.3f}  delta={st['delta_pct'][1]:+.3f}")
+
+    outdir = FIGURE_ROOT / args.sim / pipeline.smoothing_tag()     # a non-default sigma: its own folder
+    outdir.mkdir(parents=True, exist_ok=True)
+    # the names say what they hold: untagged for PS-DTFE's default grids; another
+    # estimator, a --prefix or --keep-overlaps is tagged so it never overwrites those (as the pk / profile files are)
+    name_tag = catalog.output_tag(((m, prefix_used[s]) for s, m in method_used.items()), args.keep_overlaps)
+
+    evolution_figure(args, stats, snaps, z, methods, outdir, name_tag)
+    panel = distribution_figure(args, stats, ztab, methods, outdir, name_tag)
+    radii, edges, abund = abundance_figure(args, stats, other, box, panel, snaps, ztab, methods, outdir, name_tag)
+    size_function_and_table(args, stats, panel, ztab, box, snaps, z, methods, method_used, prefix_used, radii, edges,
+                            abund, outdir, name_tag)
 
 
 if __name__ == "__main__":

@@ -258,8 +258,14 @@ namespace ScratchAlloc
     long scratchTotalAllocs() { return g_totalAllocs.load(); }
     long scratchZeroFillMoves() { return g_zeroFillMoves.load(); }
 
+    // macOS only (scratch_alloc.h): on Linux the anonymous zeros would all be resident until the remap
+#if defined(__APPLE__)
     ZeroFillScope::ZeroFillScope(bool on) : on_( on and g_enabled.load(std::memory_order_acquire) )
+#else
+    ZeroFillScope::ZeroFillScope(bool on) : on_( false )
+#endif
     {
+        (void)on;
         if ( on_ ) ++t_scopeDepth;
     }
     ZeroFillScope::~ZeroFillScope()

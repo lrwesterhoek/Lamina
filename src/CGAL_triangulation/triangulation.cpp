@@ -31,6 +31,7 @@
 #if defined(PARALLEL_TRIANGULATION) && NO_DIM==3
 #include <tbb/task_arena.h>
 #include <cstdlib>
+#include "../thread_count.h"   // CorePool::Hold: the parallel insertion's cores counted in the core pool
 #ifdef __APPLE__
 #include <sys/sysctl.h>
 #endif
@@ -63,8 +64,8 @@ void interpolatePoints_phaseSpace(DT &dt, User_options &userOptions);   // ps_po
 #else
 void interpolatePoints_standard(DT &dt, User_options &userOptions);    // ps_point_eval.cc
 #endif
-[[noreturn]] void psServe(DT &dt, User_options &userOptions);          // ps_point_eval.cc (--serve)
-void psWriteOccupancyIfMissing(DT &dt, User_options &partOpts);       // ps_point_eval.cc (partition maps)
+[[noreturn]] void psServe(DT &dt, User_options &userOptions);          // ps_serve.cc (--serve)
+void psWriteOccupancyIfMissing(DT &dt, User_options &partOpts);       // ps_serve.cc (partition maps)
 
 
 void delaunayTriangulation(DT *dt,
@@ -80,7 +81,7 @@ void vertexDensity(DT & dt,
 // The tessellation and its per-vertex payload: loaded from '--tessellation-cache' when a file for
 // exactly these inputs exists, otherwise triangulated, given its vertex densities and (with the
 // flag) saved. Frees the particles either way. Shared by DTFE_interpolation and the composite
-// '--serve' builder (ps_point_eval.cc); returns true on a cache hit.
+// '--serve' builder (ps_serve.cc); returns true on a cache hit.
 bool buildTessellation(vector<Particle_data> *p,
                        User_options &userOptions,
                        DT &dt)
@@ -178,7 +179,7 @@ void DTFE_interpolation(vector<Particle_data> *p,
     buildTessellation( p, userOptions, dt );
 #ifdef PHASE_SPACE
     // a partition of a batch run with '--tessellation-cache': leave its occupancy map beside the
-    // cached tessellation (once), so a later --ps-window run can skip it (ps_point_eval.cc)
+    // cached tessellation (once), so a later --ps-window run can skip it (ps_serve.cc)
     if ( userOptions.psUseSubgrid and not userOptions.tessellationCacheDir.empty() and not userOptions.psServe )
     {
         t.start();
@@ -554,7 +555,10 @@ void delaunayTriangulation(DT *dt,
         DT::Lock_data_structure lock( lockBox, 50 );
         dt->set_lock_data_structure( &lock );
         tbb::task_arena arena( threads );
-        arena.execute( [&]{ dt->insert( pts.begin(), pts.end() ); } );
+        {   // (the arena's other threads hold cores the pool's users must not take: thread_count.h)
+            CorePool::Hold const hold( threads - 1 );
+            arena.execute( [&]{ dt->insert( pts.begin(), pts.end() ); } );
+        }
         dt->set_lock_data_structure( nullptr );   // lock grid is only needed during concurrent insertion
         message << "Done.\n"
             << "The triangulation has " << dt->number_of_vertices() << " points.\n" << MESSAGE::Flush;

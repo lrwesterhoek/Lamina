@@ -10,6 +10,7 @@ from scipy.ndimage import gaussian_filter1d
 
 from dtfelib.figures import save_figure
 from dtfelib import make_parser
+from dtfelib import snapshot_series
 import config
 from dtfelib import figures as style
 from dtfelib import pipeline
@@ -19,7 +20,6 @@ style.apply()
 OUTPUT_DIR = config.figures_path('correlation')
 
 BOX_SIZE = config.BOX_SIZE
-DPI = config.DPI
 
 N_EVAL = config.CORRELATION_N_EVAL
 MIN_PAIRS = config.CORRELATION_MIN_PAIRS
@@ -178,8 +178,7 @@ def plot_panel(r, curve, lo, hi, color, label, ylabel, null_level, ylim,
     ax.set_ylim(*ylim)
 
     plt.tight_layout()
-    save_figure(fig, output_path, dpi=DPI,
-                bbox_inches='tight', facecolor='white')
+    save_figure(fig, output_path, bbox_inches='tight', facecolor='white')
     plt.close(fig)
 
 
@@ -294,19 +293,12 @@ def process_snapshot(snapshot, redshift, args):
 
 def main():
     parser = make_parser(
-        "Marked correlation analysis (BBKS marks, permutation null bands).")
-    for action in parser._actions:
-        if action.dest == 'snap':
-            action.default = None
-            action.help = ("process only this snapshot "
-                           "(default: all snapshots in the config table)")
+        "Marked correlation analysis (BBKS marks, permutation null bands).", snap_default=None,
+        snap_help=("process only this snapshot "
+                   "(default: all snapshots in the config table)"))
     args = parser.parse_args()
 
-    if args.snap is not None:
-        snap_id = f"{args.snap:03d}"
-        items = [(snap_id, config.get_redshift(snap_id))]
-    else:
-        items = config.snapshot_items()
+    items = snapshot_series(args) if args.snap is not None else config.snapshot_items()
 
     print("Marked correlation analysis (BBKS marks, permutation null bands)")
     print(f"Output directory: {OUTPUT_DIR}")

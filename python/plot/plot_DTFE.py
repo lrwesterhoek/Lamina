@@ -22,13 +22,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter
 
-from dtfelib import make_parser, FieldSet, sim_dir, add_ps_gradient_arg, mean_field_wanted
+from dtfelib import make_parser, FieldSet, sim_dir, snapdir_path, add_ps_gradient_arg, mean_field_wanted
 from dtfelib import figures as style
 from dtfelib.fields import extract_2d_slice as extract_slice, extract_velocity_slice
 
 style.apply()                                   # the house style (serif, SHOW_TITLES, DPI)
 
-OUTPUT_DIR = Path(config.LOCAL_FIGURES_ROOT) / "dtfe"
+OUTPUT_DIR = Path(config.LOCAL_FIGURES_ROOT) / "dtfe"   # not figures_path("dtfe"): ANALYSIS_DIRS maps that key to the legacy dtfe_analysis/
 
 # historical TNG50 output series; snapshots without fields on disk are skipped
 SNAPSHOTS = [99]
@@ -44,8 +44,7 @@ VELOCITY_QUIVER_STEP = 8
 SLICE_PLANES = config.SLICE_PLANES              # (the maps' axis labels, DPI and units are config's: one copy)
 
 
-def _title(text, redshift):
-    return f"{text} (z={redshift:.2f})" if redshift is not None else text
+_title = style.z_title                          # 'text (z=..)': the map titles (SHOW_TITLES)
 
 def plot_density(density_field, slice_dim, box_size, redshift=None, save_path=None):
     dens_slice = extract_slice(density_field, slice_dim).T
@@ -86,8 +85,7 @@ def plot_velocity(velocity_field, slice_dim, box_size, quiver_step,
     cbar.set_label(f"velocity [{config.VELOCITY_UNITS}]")
     fig.tight_layout()
     if save_path:
-        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(save_path, dpi=config.DPI, bbox_inches='tight')
+        style.save_figure(fig, save_path, bbox_inches='tight')
     plt.close(fig)
 
 def plot_divergence(div_field, slice_dim, box_size, redshift=None, save_path=None):
@@ -118,7 +116,7 @@ def plot_shear(shear_field, slice_dim, box_size, redshift=None, save_path=None):
                     label=style.MAP_LABELS['shear'], title=_title("DTFE Velocity Shear", redshift), path=save_path)
 
 def process_snapshot(args, snap):
-    snap_dir = sim_dir(args.sim, args.data_root) / f"snapdir_{snap:03d}"   # flat or per-family layout
+    snap_dir = snapdir_path(args.sim, snap, args.data_root)   # flat or per-family layout
 
     try:
         fs = FieldSet(snap_dir, method=args.method, averaged=not args.raw, prefix=args.prefix)

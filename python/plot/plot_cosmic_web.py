@@ -26,8 +26,7 @@ from dtfelib import figures as style
 
 style.apply()                                   # the house style (serif, SHOW_TITLES, DPI)
 
-FIGURE_ROOT = Path(config.LOCAL_FIGURES_ROOT)
-OUTPUT_DIR = FIGURE_ROOT / "cosmic_web"
+OUTPUT_DIR = Path(config.figures_path("cosmic_web"))
 
 SLICE_PLANES_TO_PLOT = [0, 1, 2]
 
@@ -38,8 +37,7 @@ SLICE_PLANES = config.SLICE_PLANES              # (the maps' axis labels, DPI an
 WEB_LABELS = dict(enumerate(style.WEB_NAMES))
 
 
-def _title(text, redshift):
-    return f"{text} (z={redshift:.2f})" if redshift is not None else text
+_title = style.z_title                          # 'text (z=..)': the map titles (SHOW_TITLES)
 
 
 def extract_slice(field, slice_dim=2):
@@ -89,8 +87,7 @@ def plot_eigenvalue_histogram(eig_field, web_type, redshift=None, save_path=None
     style.set_suptitle(fig, _title(f"{web_type} Eigenvalue Distributions", redshift), y=1.02)
     fig.tight_layout()
     if save_path:
-        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(save_path, dpi=config.DPI, bbox_inches='tight')
+        style.save_figure(fig, save_path, bbox_inches='tight')
     plt.close(fig)
 
 

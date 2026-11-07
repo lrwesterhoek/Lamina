@@ -26,6 +26,7 @@ run with MpcUnit 1000; the synthetic test inputs use --mpc-unit 1).
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -93,7 +94,7 @@ def main() -> None:
     p.add_argument("--u1", type=float, default=None, help="horizontal extent end (default box)")
     p.add_argument("--v0", type=float, default=None, help="vertical extent start (default 0)")
     p.add_argument("--v1", type=float, default=None, help="vertical extent end (default box)")
-    p.add_argument("-o", "--output", help="output stem: writes <stem>.bin + <stem>.json")
+    p.add_argument("-o", "--output", "--out", help="output stem: writes <stem>.bin + <stem>.json")
     p.add_argument("--same-as", type=Path, metavar="SIDECAR.json",
                    help="write nothing: compare the requested geometry (--center/--planes/--thickness/"
                         "--supersample/--u0..--v1; the centre only when given) with an existing plane's "
@@ -123,15 +124,17 @@ def main() -> None:
         print("same" if same else "differs")
         sys.exit(0 if same else SAME_AS_DIFFERS)
     if not (args.sim or args.combined):
-        p.error("one of --sim / --combined is required")
+        args.sim = os.environ.get("DTFE_SIM") or None   # dtfelib.cli.require_sim's rule: DTFE_SIM names the simulation
+        if not args.sim:
+            p.error("one of --sim / --combined is required")
     if args.output is None:
         p.error("-o/--output is required")
 
     if args.sim:
         if args.snap is None:
             p.error("--sim needs --snap")
-        from dtfelib.cli import sim_dir
-        combined = sim_dir(args.sim) / f"snapdir_{args.snap:03d}" / f"combined_{args.snap:03d}.hdf5"
+        from dtfelib.cli import snapdir_path
+        combined = snapdir_path(args.sim, args.snap) / f"combined_{args.snap:03d}.hdf5"
     else:
         combined = args.combined
     if not combined.is_file():

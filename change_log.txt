@@ -83,7 +83,11 @@ UNRELEASED (since 1.0.0)
   vector mapped onto a file dirtied every page of it (a 1536^3 run stalled writing ~290 GB to an external disk).
   The zeros are now filled in anonymous memory, and the scratch file is mapped over them unwritten when the grid's
   scope closes (ScratchAlloc::ZeroFillScope, src/scratch_alloc.h; outputs byte-identical). The SCRATCH line says
-  how many grids took this route ("N zero-filled in memory and moved onto their file unwritten").
+  how many grids took this route ("N zero-filled in memory and moved onto their file unwritten"). macOS only: its
+  memory compressor stores those zero pages for almost nothing, while Linux keeps each one resident until the file
+  is mapped over it, so the largest grid would have to fit in RAM at once (measured in a 2 GB Ubuntu container: a
+  3.1 GB grid was killed for memory inside the scope and ran without it). On Linux the zeros go through the file's
+  page cache as before, which the kernel writes back and frees.
 - scripts/download_snapshots.sh fetched no chunk at all: the TNG API's listings name every chunk with an http://
   link, which the recursive '--https-only' crawl skipped. The script now reads each product's JSON listing, upgrades
   its links to https and fetches exactly those, and tries the list up to three times (the data host now and then
@@ -143,13 +147,155 @@ UNRELEASED (since 1.0.0)
     1.44x slower to 1.34x faster), an unused include, five unused Python names (config.cosmic_time_gyr,
     CORRELATION_N_BINS, VIS_SMOOTHING_SIGMA, fields.ensure_output_dir, plot_PDF_CDF.get_critical_point_densities);
   * printElapsedTime is declared once (src/elapsed_time.h) instead of in three files;
-  * the GPU test suites set the GPU knobs by their backend-neutral names (PS_GPU_*, DTFE_GPU_*); the Metal
-    spellings still work as aliases;
+  * the GPU test suites set the GPU knobs by their backend-neutral names (PS_GPU_*, DTFE_GPU_*);
   * comments that still called the GPU exact deposit a float32 r3d port name the z-sweep (sweep_moments) that
     replaced it; the three 3D-view defaults marked as open choices are now plain design notes;
   * tests/dev/bytecmp.sh --gpu-exact also compares the GPU exact deposits (6 runs; only between builds of the same
     kernel source), and tests/dev/tune_report_set.sh writes the auto-tuner's plans for a fixed list of 91
     configurations, to diff two builds.
+- Launcher layout:
+  * the Grids, Custom snapshot, Pipeline and Plots tabs were wider than their pane, so the right edge was cut off
+    (the preset row's Delete button, the Deposit, File and Format fields). The forms scroll only vertically: a long
+    combo box item, a long check box text beside the form's label column, and two long Plots labels made them 50-120
+    px too wide. A wide combo box may now shrink to 24 characters (its list still shows the items whole), the Plots
+    pages' check boxes take the whole row, and three labels are shorter (their full text is in the tool tip);
+  * the Pipeline tab drew its Grid row on top of the T-web / V-web threshold row: the grid, deposit and GPU now have
+    a group of their own ("Grid and deposit"), as on the Grids tab;
+  * tests/py_gui_app_test.py checks that every tab's form fits its pane and that those two rows do not overlap;
+  * tests/dev/gui_shots.py renders every tab at two window sizes, and the Explore tab's 3D view (volume, then
+    planes), on a synthetic data root; '--native' draws in a real window, with the system style.
+- tests/ps_scratch_check.sh now also proves that the '--scratch-dir' zero-fill route is taken (the count on the
+  SCRATCH line): with it switched off every other check still passed, the outputs being the same.
+- C++ structure, no output changes (byte-identical outputs, auto-tune plans and messages):
+  * every grid of a Quantities is listed once (Quantities::forEachField, with how a partitioned run merges it, which
+    option sizes it and its fixed-point scale); copying, sizing and merging, the checkpoint's field list and the
+    fixed-point merge walk it, and psReserveGrids is one sizing pass. A new grid needs one list entry plus its output
+    line and derivation;
+  * the standard and PS-DTFE partition loops share one look-ahead routine and one progress line; the PS loop's
+    merge-staging state is one struct (its context went from 40 reference members to 13);
+  * one thread-count rule for the CPU deposit, the exact average and the point evaluation (src/thread_count.h), one
+    2x2/3x3 inverse (math_functions.h, same operation order);
+  * the point-evaluation source is split into point evaluation, the '--serve' servers (ps_serve.cc) and the
+    stream-count estimate (ps_mean_streams.cc); standard DTFE's method-1 CPU loop into three helpers, each thread
+    reusing one sample buffer;
+  * the auto-tuner is an interface (auto_tune.h) and a model (src/auto_tune.cc, its own object: editing it no longer
+    rebuilds DTFE.cpp); its constants have names and sources, and both planners take one struct of inputs;
+  * under '--scratch-dir', '--fixed-point-merge' zero-fills its integer grids in memory too (macOS), and prints a
+    SCRATCH line counting them.
+- GPU:
+  * the kernels' parameter blocks are defined once per estimator (ps_kernel_params.h, dtfe_deposit_params.h) and
+    prepended to the Metal source, with size checks in both compilers; the Metal and CUDA hosts share their helpers
+    and the retry policy's fault classes (gpu_host.h, gpu_retry_common.h);
+  * tests/gpu_twin_check.sh compares the CUDA/HIP exact clip with the CPU's double r3d and, on a Mac, with its Metal
+    twin, function by function (CI's cudaemu job runs it); metal/README.md lists the Metal/CUDA lockstep pairs.
+- Python, no change to figures or data: shared snapshot-ladder and snapdir helpers, one output-tag rule (pinned by a
+  test to the rules it replaces), every figure saved through save_figure (dpi config.DPI, tracking figures
+  config.TRACK_DPI), shared small helpers, argument helpers ('--out' also answers to '--output' and '-o'; both R_v
+  spellings), a shared series driver, analyze.py's cache code in dtfelib/cache.py, the critical points and the void
+  radius in their own modules (still reachable through dtfelib.pipeline). A snapdir_* folder whose name is not a
+  number is now skipped instead of stopping a script.
+- Scripts: run_ps_dtfe.sh and run_ps_pipeline.sh run under 'set -uo pipefail' like the other drivers (the audit found
+  one real abort: an empty Lagrangian-input array under bash 3.2); config.sh holds the drivers' shared -d/-s/-h
+  options and says why they leave out -e. The download's retry of a refused chunk list is now tested.
+- Launcher:
+  * the tab bar sits above the data panel and no longer jumps between tabs; Setup… is in the data-root row;
+  * 'Resources and output' starts folded to a one-line summary, and a folded 'Advanced' group holds the expert options
+    (each remembers whether you left it open); the void figure sets share one 'Void options' row;
+  * tooltips are at most two lines (the first sentence of the program's own help); the whole text is under Help >
+    What's This?. One wording table for group titles, buttons and field names;
+  * Explore: one 'Voids' tick (the label of its options row), the stream table's 'ρ/ρ̄' header no longer cut off,
+    the Save buttons next to the map's controls; the 3D view remembers its style, perspective, opacities and detail;
+  * one call releases all cached grid data at a job start (the 3D view's cubes included); the map, its saved figures
+    and the 3D volume take their values from one function. Every slice, volume, saved map, title and colour-bar label
+    is byte-identical.
+- One flag scheme. Both binaries spell a shared option the same way: '--gpu' (PS-DTFE: the grid deposit on the
+  GPU; standard DTFE: the '_a' interpolation), '--exact-average' (PS-DTFE: the exact deposit; standard DTFE: the
+  exact cell average), '--no-overlap', '--full-help' and '--lambda-th'. The old spellings ('--ps-gpu',
+  '--ps-exact-deposit', '--ps-no-overlap', '--full_help', '--lambda_th') still work for one release, on the command
+  line and in a '--config' file: they are hidden from the help, print one 'warning: --old is deprecated, use --new'
+  line on stderr and give byte-identical outputs. Both spellings of the threshold with different values from one
+  source (the command line, or the file) are refused; between the command line and the file the command line wins,
+  whichever spelling each uses ('--lambda-th 0.5' over a file's 'lambda_th = 0.3' runs at 0.5, with the file's
+  deprecation warning). The checkpoint key reads the canonical names, so a run killed under an old spelling resumes
+  under the new one. The run scripts and the launcher emit the canonical names, and every reader of a command line
+  maps the old ones first, so the run logs on disk read as before (the Runs browser, Load settings, dtfelib's V-web
+  threshold, run_ps_pipeline.sh's freshness test: no snapshot is recomputed because of a spelling). The driver knobs
+  are DTFE_GPU / PS_GPU and DTFE_EXACT (PS_EXACT unchanged); DTFE_METAL, PS_METAL and DTFE_EXACT_AVERAGE are still
+  read when the new name is unset. The drivers' --help notes that their -m (GPU) and -s (simulation) are not the
+  binaries' -m (--method) and -s (--samples). The test suites use the canonical names, except where an old spelling
+  is what they test (the alias, resume and run-log reader checks; tests/dev/bytecmp.sh and tune_report_set.sh, which
+  also drive binaries from before the rename). The launcher's Custom tab sees a repeated option in its extra-options
+  line in an old spelling or as '--name=value' too, so it refuses the job before the binary would.
+- Behaviour change: the *_METAL_* aliases of the GPU knobs (PS_METAL_CHUNK, DTFE_METAL_TIMING, PS_METAL_FLOAT_MASS,
+  PS_METAL_FLOAT_MOMENTS, DTFE_METAL_FLOAT_GRIDS, ...) are no longer read; use the *_GPU_* names.
+- PS-DTFE's CPU deposit (the default single-precision build) claims its blocks of 256 cells from one shared counter,
+  and its team grows as cores come free: a partition that finishes hands its core to the deposits still running
+  (CorePool in src/thread_count.h). The pool also counts the CPU teams that do not ask it, for as long as they run
+  (the copy- and slab-mode deposit, a pinned DTFE_DEPOSIT_THREADS team, the slab binning, the merge of private
+  copies, the fixed-point bound walk, the parallel insertion's TBB arena), so another partition's pooled work does
+  not take their cores. The grids are byte-identical to a one-thread deposit. The double build and the float-sum
+  modes keep a fixed team per partition; DTFE_DEPOSIT_THREADS still pins the count.
+- The merge of a partition's sub-grid into the full grid copies row by row, with no per-cell index arithmetic, over
+  the free cores (a 4M-cell sub-grid: about 3x faster on one thread, up to 9x with helpers); the final normalization
+  and the per-pass conversions, scaling and stream statistics also run over the free cores. Outputs unchanged.
+  With the deposit team above (2.1M particles at 256^3, M1 Max, 10 threads, density and velocity; a quiet machine,
+  the old and new builds alternated, three rounds within 2%): 2x2x2 partitions 31.2 -> 24.2 s, 3x3x3 partitions
+  27.9 -> 24.7 s; a one-thread deposit is unchanged (155 s).
+- Standard DTFE's Monte-Carlo cell average (the '_a' fields without '--exact-average') uses every core when one
+  triangulation is processed (a single-domain run, a '--sample-points' run, a GPU run's fallback) and the cores left
+  per sub-domain in a partitioned run, as the exact average does. The x planes are dealt out in slabs and each sample
+  is deposited by the thread that owns its plane, so the grids are byte-identical at any thread count;
+  DTFE_DEPOSIT_THREADS sets the count. A '--sample-points' run (2.1M particles at 256^3, 2x2x2 partitions, 10
+  threads, a quiet machine): the '_a' interpolation 20.6 -> 10.6 s, the run 36.8 -> 26.9 s. A run whose threads
+  already split the box into sub-domains of their own (the usual case) keeps one thread per sub-domain: unchanged.
+- PS-DTFE's GPU deposit (Metal and CUDA/HIP), byte-identical outputs:
+  * it prepares its work before it takes the GPU (the plan, the parameter block, the exact deposit's work items), so
+    a partition waiting for the GPU does that host work while another's kernels run, and holds no output grids while
+    it waits; it still copies its grids back and frees its buffers before it lets the GPU go, so one partition's GPU
+    buffers exist at a time (on CUDA/HIP a second set beside the first could overflow the card's memory and send the
+    partition to the CPU; the copy-back takes 4-60 ms a partition);
+  * the exact deposit's work items are an implicit map, as in standard DTFE's: 4 bytes per tetrahedron plus 4 per 32
+    items instead of 8 per item (14.7M tetrahedra: 64 MB instead of 298 MB), the same items in the same order;
+  * the sampled deposit adds the shares that every sample of a tetrahedron in a cell has in common -- the exact mass,
+    velocity-gradient, scalar-gradient, moment-weight and multiplicity sums, the stream count, the caustic bits --
+    with one atomic per cell instead of one per sample (integer sums, so exact);
+  * PS_GPU_TIMING=1 prints, per partition, where its call went: before its hold on the GPU (device setup, plan, the
+    exact items' bounds and map) and in it (uploads, kernels, pacing gaps, snapshots, leftovers, copy-back,
+    releases); PS_GPU_DEBUG_NOATOMIC=1 (timing only: the grids come out empty) measures the atomics'
+    share of the sampled kernel, as DTFE_GPU_DEBUG_NOATOMIC does for standard DTFE;
+  * one partition, 2.1M particles at 256^3, M1 Max, a quiet machine, kernel busy time: the sampled deposit of the
+    density 6.3 -> 3.9 s, of density, velocity and gradient 22.5 -> 6.7 s, of density, velocity and dispersion
+    17.6 -> 11.3 s; the exact deposit (density, velocity, dispersion) 16.2 -> 12.8 s, and its 2x2x2 run 26.2 -> 22.3 s
+    end to end.
+- The phase-space interpolation's fixed-point bookkeeping, folded-tetrahedron marking, window and centroid tests,
+  bound walk and GPU extraction-and-deposit block are separate functions (interpolateGrid_phaseSpace: 2533 -> 1686
+  lines); the deposit loop itself compiles to the same instructions.
+- tests/dtfe_sampling_check.sh covers the sampling variants no suite ran before: method 2 (random points per cell),
+  method 3 (equidistant points), the redshift cone and the grid's point values, against closed forms of a linear
+  velocity field and other code paths; user sampling points through the library API; stored golden values for the
+  seeded cone and user points (CI's core, double and variants stages). tests/ps_parallel_check.sh checks the CPU
+  deposit's team rule (the default, DTFE_DEPOSIT_THREADS=1 and =4 byte-identical; the single build runs the dynamic
+  team, the double build the static rule).
+- Both partition loops print a 'merge time:' line after the run. PS-DTFE's says how long adding the
+  partitions into the full grids took (one at a time, under the merge lock), how long their checkpoints took, how long
+  spilled sub-grids took to read back, and how long the partitions waited for their turn (parked, or holding a
+  thread); in completion order and under '--fixed-point-merge' it gives the wait for the merge lock instead.
+  Standard DTFE's gives its serial copy into the full grids and its checkpoints. The count is the partitions this run
+  merged, so a resumed run counts only the ones it computed. 2.1M particles at 256^3 in 27 partitions: the adds take
+  0.24 s and the checkpoints 0.12 s of a 38 s partition loop. Only the log changes.
+- The auto-tuner's header includes only what its interface uses (the model includes the rest), and an unused term of
+  the PS model is gone; every '--auto-tune-report' line is unchanged.
+- Launcher:
+  * the run tabs no longer grow wider than their pane when the programs were built without TBB or GPU support and the
+    Resources or Advanced group is open (the build note made the parallel-triangulation tick 572 px wide). Such a
+    tick now shows the option's name with the note ('Parallel triangulation (this build has no TBB: ignored)'); its
+    explanation stays in the tooltip and What's This. tests/py_gui_app_test.py checks every form's width with every
+    folded group open and the build notes shown, and tests/dev/gui_shots.py prints both widths (its '--open' takes
+    the screenshots with the groups open);
+  * the Explore and 3D-view tooltips take at most two lines, as the job tabs' do (the whole text under Help >
+    What's This?; several got a short lead sentence); tests/py_gui_explore_test.py checks it;
+  * the 3D-view group and the run panel's buttons are built by small private methods with the shared style helpers,
+    with the same widgets, names, creation order, Tab order and geometry.
 
 VERSION 1.0.0 (Lamina, 2026-10-23)
 The project is now called Lamina (Linear Adaptive Multi-stream Interpolation for N-body Analysis): the standard

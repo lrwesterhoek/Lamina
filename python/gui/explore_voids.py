@@ -13,6 +13,7 @@ from PySide6.QtCore import QProcess, QProcessEnvironment
 import explore as _ex
 import grids as G
 import runspec as rs
+from app_widgets import tip_auto
 
 
 class VoidsMixin:
@@ -80,7 +81,7 @@ class VoidsMixin:
         """The checkbox follows the output: enabled where the outlines apply, else greyed out saying why."""
         why = self.voids_applicable(self.current)
         self.voids.setEnabled(not why)
-        self.voids.setToolTip(_ex.VOID_TIP if not why else f"Void outlines: {why}.")
+        tip_auto(self.voids, _ex.VOID_TIP if not why else f"Void outlines: {why}.")
         if self._void_picked is not None and (why or self._void_picked[0] != self._void_cache_key(self.current)):
             self._void_picked = None                # another output: the inspector's void is not on it
             self.void_info.setText("")

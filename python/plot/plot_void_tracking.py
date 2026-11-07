@@ -50,26 +50,17 @@ import matplotlib.pyplot as plt
 import config
 from dtfelib import pipeline
 from dtfelib import catalog as C
-from dtfelib import make_parser, use_data_root
+from dtfelib import make_parser, use_data_root, snapshot_ladder
 from dtfelib.cli import DEFAULT_SNAP
 from dtfelib.trees import TreeSet
 from dtfelib import environment as env
 from dtfelib import voids as V
 from dtfelib import groupcat as gc
 from dtfelib import lagrangian as L
+from dtfelib.fields import unit_cos
+from dtfelib.figures import plot_finite, save_figure   # plot_finite: a line through the finite samples only
 
-FIGURE_ROOT = Path(config.LOCAL_FIGURES_ROOT) / "void_tracking"
-
-
-def plot_finite(ax, x, y, *fmt, **kw):
-    x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
-    ok = np.isfinite(x) & np.isfinite(y)
-    return ax.plot(x[ok], y[ok], *fmt, **kw)
-
-
-def unit_cos(v, w):
-    n = np.linalg.norm(v) * np.linalg.norm(w)
-    return np.abs(float(np.dot(v, w) / n)) if n > 0 else np.nan
+FIGURE_ROOT = Path(config.figures_path("void_tracking"))
 
 
 def catalog_at(snap, args):
@@ -285,7 +276,7 @@ def main(argv=None):
         raise SystemExit(f"no {args.method} field grids at snapshot {args.snap} of {args.sim}")
     use_data_root(args.data_root)      # --data-root for the trees, group catalogues and ladder too
     ztab = gc.redshift_table(args.sim)
-    ladder = sorted({int(d.name.split("_")[1]) for d in env.sim_dir(args.sim).glob("snapdir_*")})
+    ladder = snapshot_ladder(args.sim)
     outdir = FIGURE_ROOT / args.sim / pipeline.smoothing_tag()     # a non-default sigma: its own folder
     outdir.mkdir(parents=True, exist_ok=True)
     args.tag = _set_tag(args, grids0)
@@ -473,7 +464,8 @@ def plot_void(t, k, args, outdir, r_eff0):
         ax.grid(alpha=0.3)
     _finish_x(ax3, xlabel)
     fig.tight_layout()
-    fig.savefig(outdir / f"void{k}_evolution{args.tag}{_radius_suffix(args)}.png", dpi=200, bbox_inches="tight")
+    save_figure(fig, outdir / f"void{k}_evolution{args.tag}{_radius_suffix(args)}.png", dpi=config.TRACK_DPI,
+                bbox_inches="tight")
     plt.close(fig)
 
 
@@ -529,7 +521,8 @@ def plot_summary(summary, args, outdir):
         ax.grid(alpha=0.3)
     _finish_x(ax2, xlabel)
     fig.tight_layout()
-    fig.savefig(outdir / f"voids_summary{args.tag}{_radius_suffix(args)}.png", dpi=200, bbox_inches="tight")
+    save_figure(fig, outdir / f"voids_summary{args.tag}{_radius_suffix(args)}.png", dpi=config.TRACK_DPI,
+                bbox_inches="tight")
     plt.close(fig)
 
 

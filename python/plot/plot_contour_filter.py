@@ -11,20 +11,17 @@ import config
 from dtfelib import figures as style
 from dtfelib import pipeline
 from dtfelib import make_parser, sim_dir
+from dtfelib import run_series, report_series
 
 style.apply()
 
 OUTPUT_DIR = config.figures_path('void_analysis')
 
-FOOTPRINT_SIZE = config.FOOTPRINT_SIZE
-SMOOTHING_SIGMA = config.SMOOTHING_SIGMA_CELLS
 
-SNAPSHOT_TO_REDSHIFT = config.SNAPSHOT_TO_REDSHIFT
 
-DPI = config.DPI
 
 def get_redshift(snapshot_id):
-    return SNAPSHOT_TO_REDSHIFT.get(snapshot_id)
+    return config.SNAPSHOT_TO_REDSHIFT.get(snapshot_id)
 
 def get_distinct_colors(n_colors):
     if n_colors <= 10:
@@ -127,8 +124,8 @@ def process_snapshot(snapshot, redshift, sim, method, prefix=None, data_root=Non
             f.write(f"{'='*50}\n\n")
             f.write("Parameters:\n")
             f.write(f"  Grid resolution: {p.fs.grid_n}³\n")
-            f.write(f"  Footprint size: {FOOTPRINT_SIZE}\n")
-            f.write(f"  Smoothing sigma: {SMOOTHING_SIGMA} cells ({config.SMOOTHING_SIGMA_MPC:.2f} Mpc)\n")
+            f.write(f"  Footprint size: {config.FOOTPRINT_SIZE}\n")
+            f.write(f"  Smoothing sigma: {config.SMOOTHING_SIGMA_CELLS} cells ({config.SMOOTHING_SIGMA_MPC:.2f} Mpc)\n")
             f.write(f"  Eigenvalue criterion: {config.VOID_EIGENVALUE_CRITERION}\n")
             f.write("  Method: FFT-based Hessian\n\n")
             f.write("Results:\n")
@@ -271,7 +268,7 @@ def plot_contour_axis_ratios(snapshots_data, snapshot_ids, output_path=None):
     plt.tight_layout()
     
     if output_path:
-        save_figure(plt.gcf(), output_path, dpi=DPI, bbox_inches='tight')
+        save_figure(plt.gcf(), output_path, bbox_inches='tight')
         plt.close()
     else:
         plt.show()
@@ -409,7 +406,7 @@ def plot_contour_bbks(snapshots_data, snapshot_ids, output_path=None):
     plt.tight_layout()
     
     if output_path:
-        save_figure(plt.gcf(), output_path, dpi=DPI, bbox_inches='tight')
+        save_figure(plt.gcf(), output_path, bbox_inches='tight')
         plt.close()
     else:
         plt.show()
@@ -485,7 +482,7 @@ def plot_distribution_evolution(snapshots_data, snapshot_ids, column, xlabel, ou
     plt.legend(title='Redshift', ncol=2)
     plt.grid(alpha=0.3)
     plt.tight_layout()
-    save_figure(plt.gcf(), output_path, dpi=DPI, bbox_inches='tight')
+    save_figure(plt.gcf(), output_path, bbox_inches='tight')
     plt.close()
 
 
@@ -511,7 +508,7 @@ def _evolution_panel(zp1, series, ylabel, output_path):
     ax.set_xscale('log')
     ax.invert_xaxis()
     plt.tight_layout()
-    save_figure(fig, output_path, dpi=DPI, bbox_inches='tight')
+    save_figure(fig, output_path, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -596,38 +593,26 @@ def main():
     print("Starting void shape evolution analysis")
     print(f"Data directory: {sim_dir(args.sim, args.data_root)}")
     print(f"Output directory: {OUTPUT_DIR}")
-    print(f"Processing {len(SNAPSHOT_TO_REDSHIFT)} snapshots")
+    print(f"Processing {len(config.SNAPSHOT_TO_REDSHIFT)} snapshots")
     print("Method: FFT-based Hessian computation")
 
     Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
 
-    processed_snapshots = 0
-    failed_snapshots = []
-    snapshots_data = []
-    snapshot_ids = []
+    items = list(config.SNAPSHOT_TO_REDSHIFT.items())
+    snapshots_data, failed_snapshots = run_series(            # None in snapshots_data where a snapshot failed
+        items, lambda snapshot, redshift: process_snapshot(snapshot, redshift, args.sim, args.method, args.prefix,
+                                                           args.data_root))
+    snapshot_ids = [snapshot for snapshot, _ in items]
+    processed_snapshots = sum(r is not None for r in snapshots_data)
 
-    for snapshot, redshift in SNAPSHOT_TO_REDSHIFT.items():
-        result = process_snapshot(snapshot, redshift, args.sim, args.method, args.prefix, args.data_root)
-        if result is not None:
-            snapshots_data.append(result)
-            snapshot_ids.append(snapshot)
-            processed_snapshots += 1
-        else:
-            snapshots_data.append(None)
-            snapshot_ids.append(snapshot)
-            failed_snapshots.append((snapshot, redshift))
-    
     if processed_snapshots > 1:
         try:
             create_evolution_summary(snapshots_data, snapshot_ids)
         except Exception as e:
             print(f"\nError creating evolution summary: {e}")
     
-    print(f"\nCompleted: {processed_snapshots}/{len(SNAPSHOT_TO_REDSHIFT)} snapshots processed")
-    
-    if failed_snapshots:
-        print(f"Failed snapshots: {', '.join(f'{s} (z={z:.2f})' for s, z in failed_snapshots)}")
-    
+    report_series(processed_snapshots, len(config.SNAPSHOT_TO_REDSHIFT), failed_snapshots)
+
     print(f"Output saved to: {OUTPUT_DIR}/")
 
 if __name__ == "__main__":

@@ -39,18 +39,7 @@ constexpr gpuError_t kGpuErrOom     = cudaErrorMemoryAllocation;
 //             failure; detected by the probe after the failure), so no restore can run: straight to the CPU.
 //             On real CUDA a watchdog kill is sticky, so it ends on the CPU; the checkpoints pay off for
 //             the non-sticky ones.
-enum class GpuFault { Victim, Watchdog, Resource, Fatal };
-
-char const* gpuFaultName(GpuFault f)
-{
-    switch (f)
-    {
-        case GpuFault::Victim:   return "innocent victim";
-        case GpuFault::Watchdog: return "watchdog";
-        case GpuFault::Resource: return "resource";
-        default:                 return "fatal";
-    }
-}
+#include "gpu_retry_common.h"   // GpuFault, gpuFaultName and the fault hook's settings (gpuFaultHook)
 
 // The run's retry counters (run_progress.h: the sidecar's gpu_retries and
 // gpu_retries_by_cause, DTFE.cpp's closing 'GPU deposit retries:' line): 0 innocent victim, 1 timeout,
@@ -70,11 +59,38 @@ int gpuRetryCause(GpuFault f, gpuError_t code)
 // (default 90) seconds of GPU work (kernels + gaps) without a fault of ours; counted in GPU work, not wall
 // time, so the triangulations between deposits are no evidence the display is quiet. A watchdog or resource
 // fault resets the count; an injected innocent victim neither escalates nor resets it. Guarded by the host's
-// ctxMutex (psGpuDepositFields, or dtfe_gpu_cuda.cu's runBatch, whose callers hold it).
-struct GpuPace { double targetSec = 0.25; useconds_t gapUs = 0; double cleanSec = 0.; };
+// ctxMutex (psGpuDepositFields, or dtfe_gpu_cuda.cu's runBatch, whose callers hold it). The four pass loops step
+// it with onFault / onClean (the Metal twin's, gpu_metal_retry.h, but for the gaps).
 double const GPU_PACE_TARGET0 = 0.25;   // the default pace the recovery returns to
 useconds_t const GPU_PACE_GAP0 = 0;
 useconds_t const GPU_PACE_GAP_MIN = 8000;   // the escalated gap's floor: an eased gap below it drops to none
+struct GpuPace
+{
+    double targetSec = 0.25; useconds_t gapUs = 0; double cleanSec = 0.;
+    // a failure of our own (a watchdog kill, a resource error; not an innocent victim): escalate for the rest of the
+    // process -- 4x shorter kernels (at least 20 ms), gaps 3x wider within 8-50 ms -- and count the clean work afresh
+    void onFault()
+    {
+        targetSec = std::max(targetSec / 4.0, 0.02);
+        gapUs     = std::min(std::max(gapUs * 3, GPU_PACE_GAP_MIN), useconds_t(50000));
+        cleanSec  = 0.;
+    }
+    // a kernel that succeeded after el seconds: an escalated pace counts the clean GPU work (the kernel and its gap)
+    // and, once that reaches recoverSec, steps back one notch, the inverse of onFault (a gap below 8 ms drops to
+    // none). True when it stepped back, with 'clean' = the clean seconds that earned it (the count then starts
+    // afresh), for the caller's message.
+    bool onClean(double const el, double const recoverSec, double& clean)
+    {
+        if (!(targetSec < GPU_PACE_TARGET0 || gapUs > GPU_PACE_GAP0)) return false;
+        cleanSec += el + gapUs / 1e6;
+        if (!(cleanSec >= recoverSec)) return false;
+        targetSec = std::min(targetSec * 4.0, GPU_PACE_TARGET0);
+        gapUs     = gapUs / 3 < GPU_PACE_GAP_MIN ? GPU_PACE_GAP0 : gapUs / 3;
+        clean     = cleanSec;
+        cleanSec  = 0.;
+        return true;
+    }
+};
 GpuPace& gpuPace() { static GpuPace p; return p; }
 
 // The test hook DTFE_GPU_FAULT_AT=<k>[:<kind>], as ps_metal_host.cc's: the k-th chunk kernel of the PROCESS
@@ -83,20 +99,6 @@ GpuPace& gpuPace() { static GpuPace p; return p; }
 // a correct restore keeps the grids exact. Kinds: 'innocent' (default), 'timeout' (the launch-timeout code,
 // but NOT sticky: the restore runs, which a real CUDA timeout would not allow), 'oom', and 'persist' (every
 // kernel from the k-th on fails as an innocent victim: the policy must give the partition to the CPU).
-struct GpuFaultHook { long at = 0; std::string kind = "innocent"; long count = 0; bool fired = false; };
-GpuFaultHook& gpuFaultHook()
-{
-    static GpuFaultHook h = [] {
-        GpuFaultHook r;
-        if (const char* env = Env::value("DTFE_GPU_FAULT_AT"))
-        {
-            r.at = atol(env);
-            if (const char* colon = strchr(env, ':')) r.kind = colon + 1;
-        }
-        return r;
-    }();
-    return h;
-}
 
 // true (and the injected error's description, class and code) when this kernel is to fail
 bool gpuFaultInjected(std::string& desc, GpuFault& cause, gpuError_t& code)

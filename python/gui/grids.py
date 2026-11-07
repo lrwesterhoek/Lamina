@@ -252,11 +252,18 @@ def cap_cubes(on: bool) -> None:
             _MF_PLANES.pop(next(iter(_MF_PLANES)))
 
 
+def cubes_capped() -> bool:
+    """True while the launcher runs a job (cap_cubes): the caches built beside the cube cache (the 3D view's) keep
+    nothing then either."""
+    return _CAPPED
+
+
 def _cube_budget() -> int:
     return min(CUBE_CACHE_BYTES, RUN_CUBE_BYTES) if _CAPPED else CUBE_CACHE_BYTES
 
 
-def _cube_key(path: Path, dtype, shape) -> tuple | None:
+def cube_key(path: Path, dtype, shape) -> tuple | None:
+    """A grid file's identity in the caches: its resolved path, mtime, size, dtype and shape (None: unreadable)."""
     try:
         st = path.stat()
     except OSError:
@@ -264,7 +271,7 @@ def _cube_key(path: Path, dtype, shape) -> tuple | None:
     return (path.resolve(), st.st_mtime_ns, st.st_size, np.dtype(dtype).str, tuple(int(v) for v in shape))
 
 
-def _cached_cube(path: Path, dtype, shape, axis: int | None = None, read: bool = True) -> np.ndarray | None:
+def cached_cube(path: Path, dtype, shape, axis: int | None = None, read: bool = True) -> np.ndarray | None:
     """The whole array of a grid file, cached, or None when the caller should memmap it instead: it is
     larger than the cache, or larger than CUBE_EAGER_BYTES and not cached yet while 'axis' (the plane
     axis the caller slices next, 0 or 1 of a 3D grid) is one a memmap reads cheaply. axis None = the
@@ -274,7 +281,7 @@ def _cached_cube(path: Path, dtype, shape, axis: int | None = None, read: bool =
     budget = _cube_budget()
     if nbytes > budget:
         return None
-    key = _cube_key(path, dtype, shape)
+    key = cube_key(path, dtype, shape)
     if key is None:
         return None
     with _CUBES_LOCK:
@@ -300,6 +307,9 @@ def _cached_cube(path: Path, dtype, shape, axis: int | None = None, read: bool =
             _CUBES.pop(next(iter(_CUBES)))
         _CUBES[key] = cube
     return cube
+
+
+_cached_cube = cached_cube              # the name the tests reach
 
 
 def _read_plane(path: Path, dtype, n: int, ncomp: int, axis: int, index: int) -> np.ndarray:
@@ -334,18 +344,33 @@ def _read_plane(path: Path, dtype, n: int, ncomp: int, axis: int, index: int) ->
         return out
 
 
+# The other caches of grid data in this process (the 3D view's averaged and prepared cubes: volume3d registers its
+# drop_volumes at import): drop_cubes() empties them too, so a job start or a memory check cannot miss one.
+_DROP_CALLBACKS: list = []
+
+
+def on_drop_cubes(fn) -> None:
+    """Register fn() -> bytes freed, called by every drop_cubes() (once per function, however often registered)."""
+    if fn not in _DROP_CALLBACKS:
+        _DROP_CALLBACKS.append(fn)
+
+
 def drop_cubes() -> int:
-    """Forget every cached cube and mean-field plane (the bytes they held). The launcher calls it when a job or a
-    memory check starts: the cache is anonymous memory of the GUI process, and the binary's auto-tuner budgets from
-    the memory that is free at that moment."""
+    """Forget every cached cube and mean-field plane, and every cache registered with on_drop_cubes (the bytes they
+    held). The launcher calls it when a job or a memory check starts: the caches are anonymous memory of the GUI
+    process, and the binary's auto-tuner budgets from the memory that is free at that moment. What is on screen stays:
+    the map's plane, and the 3D view's volume and its GPU copy (View3D holds them, not the caches: volume3d's
+    drop_volumes says why; the 3D view's own memory check, its detail choice, counts them)."""
     with _CUBES_LOCK:
         n = sum(a.nbytes for a in _CUBES.values()) + sum(a.nbytes for a in _MF_PLANES.values())
         _CUBES.clear()
         _MF_PLANES.clear()
+    for fn in list(_DROP_CALLBACKS):    # outside the lock: each cache takes its own
+        n += int(fn() or 0)
     return n
 
 
-# The mean-field velocity gradient of the planes shown lately: (velocity file's _cube_key, axis, index,
+# The mean-field velocity gradient of the planes shown lately: (velocity file's cube_key, axis, index,
 # box) -> float64 (N, N, 3, 3), least recently used first, under _CUBES_LOCK. A plane costs one pass over the velocity
 # grid (0.3-0.6 s at 512^3 from the cube cache, a read of its 1.6 GB file otherwise); every derivative of it (the
 # divergence, shear, vorticity, gradient, V-web) and every colour or range change then comes from here. At most a
@@ -447,14 +472,14 @@ class OutputSet:
         return out
 
     def _memmap(self, name: str, axis: int | None = None, index: int = 0, cache: bool = True) -> np.ndarray:
-        """The field's array -- the cached cube when _cached_cube() keeps one -- or, for a 3D grid, just the
+        """The field's array -- the cached cube when cached_cube() keeps one -- or, for a 3D grid, just the
         plane 'index' along 'axis', read from the file. NEVER a memmap: a mapped page of a drive unplugged
         meanwhile (an external disk) kills the whole launcher with SIGBUS, which Python cannot catch; a read fails with
         an OSError the slice worker reports. A 2D grid is read whole. cache False: a cube cached
         already, else the plane; no new cube read."""
         ff = self.files[name]
         shape = (self.n,) * self.dim + ((ff.ncomp,) if ff.ncomp > 1 else ())
-        cube = _cached_cube(ff.path, self.dtype, shape, axis if self.dim == 3 else None, read=cache)
+        cube = cached_cube(ff.path, self.dtype, shape, axis if self.dim == 3 else None, read=cache)
         if cube is not None:
             return cube
         if self.dim == 2 or axis is None:
@@ -465,11 +490,15 @@ class OutputSet:
         """The bytes of a field's whole grid file."""
         return self.n ** self.dim * self.files[name].ncomp * self.dtype.itemsize
 
-    def _velocity_factor(self, name: str) -> float:
+    def velocity_factor(self, name: str) -> float:
+        """The factor from a field's stored units to the map's: u-units -> peculiar km/s (FieldSet) for the
+        velocity and its derivatives at a known redshift, else 1."""
         exp = _VELOCITY_SCALE_EXP.get(name)
         if exp is None or self.redshift is None:
             return 1.0
         return (1.0 / (1.0 + self.redshift)) ** exp       # u-units -> peculiar km/s (FieldSet)
+
+    _velocity_factor = velocity_factor          # the name the tests reach
 
     def _raw_plane(self, name: str, axis: int, index: int, cache: bool = True) -> np.ndarray:
         """One plane of a field as stored (the file's precision, components last); a 2D grid: the whole grid.
@@ -568,28 +597,41 @@ class OutputSet:
             plane = self._mean_field_plane(name, int(axis), index)
         else:
             plane = self._raw_plane(name, int(axis), index)
+        return self.component_values(name, plane, component)
+
+    def component_values(self, name: str, arr: np.ndarray, component: str, fresh: bool = True) -> np.ndarray:
+        """The values a map of 'name' shows, from its grid's values 'arr' as stored (a plane, or the 3D view's block
+        of rows: components last): its component in float64 -- 'norm' = |v|, 'trace ...' = the trace, else one by
+        name (components()); an unknown one the first -- the vorticity turned into the curl (slice()), a velocity
+        and its derivatives in km/s (velocity_factor). One rule for the map, its saved figures and the 3D volume.
+        'fresh' True: always a new array (a factor of 1 multiplied too, as slice() always did); False: a factor of 1
+        not applied, so a float64 scalar block comes back as it is (the volume's temporaries: no copy)."""
         ff = self.files[name]
         f64 = lambda a: np.asarray(a, dtype=np.float64)        # noqa: E731
         if name == "vorticity":         # [W_xy, W_xz, W_yz] = [-w_z, w_y, -w_x] / 2 -> the curl w
-            plane = -2.0 * f64(plane) if ff.ncomp == 1 else \
-                2.0 * np.stack([-f64(plane[..., 2]), f64(plane[..., 1]), -f64(plane[..., 0])], -1)
+            arr = -2.0 * f64(arr) if ff.ncomp == 1 else \
+                2.0 * np.stack([-f64(arr[..., 2]), f64(arr[..., 1]), -f64(arr[..., 0])], -1)
         if ff.ncomp > 1:
             comps = components(name, ff.ncomp, self.dim)
             if component not in comps:
                 component = comps[0]
-            if component == "norm":     # component by component in float64: never the whole plane at once
-                acc = np.zeros(plane.shape[:-1])
-                for i in range(plane.shape[-1]):
-                    c = f64(plane[..., i])
+            if component == "norm":     # component by component in float64: never the whole array at once
+                acc = np.zeros(arr.shape[:-1])
+                for i in range(arr.shape[-1]):
+                    c = f64(arr[..., i])
                     acc += c * c
-                plane = np.sqrt(acc)
+                arr = np.sqrt(acc)
             elif component.startswith("trace"):
                 d = int(round(ff.ncomp ** 0.5))
-                plane = sum(f64(plane[..., i * d + i]) for i in range(d))
+                arr = sum(f64(arr[..., i * d + i]) for i in range(d))
             else:
                 idx = comps.index(component) - (1 if comps[0] == "norm" or comps[0].startswith("trace") else 0)
-                plane = f64(plane[..., idx])
-        return f64(plane) * self._velocity_factor(name)
+                arr = f64(arr[..., idx])
+        factor = self.velocity_factor(name)
+        if fresh:
+            return f64(arr) * factor
+        arr = f64(arr)
+        return arr * factor if factor != 1.0 else arr
 
     def arrow_field(self, name: str, axis: int = 2, index: int | None = None, per_side: int = 32,
                     smooth: float = 0.0, gradient: str = "stored") -> dict | None:
@@ -659,7 +701,7 @@ def _mf_gradient_plane(o: OutputSet, axis: int, index: int) -> np.ndarray:
     from dtfelib import fields as F
     ff = o.files["velocity"]
     shape = (o.n, o.n, o.n, 3)
-    key = _cube_key(ff.path, o.dtype, shape)
+    key = cube_key(ff.path, o.dtype, shape)
     if key is None:
         raise OSError(f"{ff.path} cannot be read")
     k = ("mean-field",) + key + (int(axis), int(index), float(o.length[0]))
@@ -668,7 +710,7 @@ def _mf_gradient_plane(o: OutputSet, axis: int, index: int) -> np.ndarray:
         if g is not None:
             _MF_PLANES[k] = _MF_PLANES.pop(k)               # most recently used last
             return g
-    vel = _cached_cube(ff.path, o.dtype, shape, axis=0)     # axis 0: a cube above CUBE_EAGER_BYTES is not read whole
+    vel = cached_cube(ff.path, o.dtype, shape, axis=0)      # axis 0: a cube above CUBE_EAGER_BYTES is not read whole
     g = F.mean_field_gradient_plane(vel if vel is not None else _SlabFile(ff.path, o.dtype, shape),
                                     float(o.length[0]), int(axis), int(index))
     del vel
@@ -722,6 +764,28 @@ def field_label(o, name: str, family: str = "", qualify: bool | None = None) -> 
     if qualify is None:
         qualify = estimator_label(o) == "PS-DTFE"
     return f"{base} ({GRADIENT_QUALIFIER[family]})" if qualify else base
+
+
+def component_suffix(component: str) -> str:
+    """A map's component as its title and colour bar append it: ' [x]'; nothing for a scalar's 'value'."""
+    return "" if component in ("value", "") else f" [{component}]"
+
+
+def colourbar_label(label: str, req: dict) -> str:
+    """The colour bar's text of a map request (the slice, a zoom, the 3D view): 'log₁₀ ' on a log map, the field's
+    label (field_label), its component (component_suffix)."""
+    return ("log₁₀ " if req["log"] else "") + label + component_suffix(req["component"])
+
+
+def smoothed(plane, sigma: float):
+    """Gaussian smoothing in cells (periodic: wrapped at the edges); unchanged for sigma 0 or without scipy."""
+    if sigma > 0:
+        try:
+            from scipy.ndimage import gaussian_filter
+            return gaussian_filter(plane, sigma, mode="wrap")
+        except ImportError:
+            pass
+    return plane
 
 
 # ---------------------------------------------------------------------- colour

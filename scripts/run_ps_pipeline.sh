@@ -16,7 +16,7 @@
 #
 # RESUMABLE: a snapshot is skipped when its <prefix>.pts_den exists and is newer than both
 # its combined_*.hdf5 and the plane file (and, with PTS_VEL_GRAD=1, its .pts_velGrad exists),
-# AND the settings in its <prefix>.runlog match this run's (grid, sub-samples, padding, lambda_th,
+# AND the settings in its <prefix>.runlog match this run's (grid, sub-samples, padding, lambda-th,
 # precision, the deposit options, and every requested field among its fields; not the GPU/CPU
 # choice, the split or the build).
 # A snapshot without a run log is judged by the file times alone (said per snapshot).
@@ -49,7 +49,8 @@
 #                 plot_pointeval.py --project slab) across a slab of THICKNESS Mpc (default 2), KxK sub-samples per pixel
 #                 averaged into pixel-area means (default 1), and "u0 u1 v0 v1" in Mpc to image
 #                 only that part of the plane (default: the whole box).
-#   PS_GPU        1 = the deposit on the GPU (run_ps_dtfe.sh -m), 0 = the CPU; unset (auto) = the GPU when the
+#   PS_GPU        1 = the deposit on the GPU (run_ps_dtfe.sh -m), 0 = the CPU (PS_METAL, the older name, is read
+#                 when PS_GPU is unset); unset (auto) = the GPU when the
 #                 PS binary was built with one, as run_ps_dtfe.sh decides
 #                 (config.sh gpu_build_default: PS-DTFE, or PS-DTFE-double with DTFE_PRECISION=double),
 #                 and the CPU for the exact deposit (PS_EXACT=1)
@@ -68,7 +69,7 @@
 # DISK: the per-point files are KEPT (~9 GB per snapshot at NU=8192) -- they are the input
 # to every figure. Delete <snapdir>/<prefix>.pts_vel* by hand once the figures are final.
 
-set -u
+set -uo pipefail   # no -e: a failed simulation is said and the batch goes on (config.sh, 'Strictness')
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"   # python/ and the binaries live one level up
 # -h / --help print this header and run nothing; --version the revision; anything else is an error (rather than
@@ -94,7 +95,7 @@ PLANES="${PLANES:-1}"
 THICKNESS="${THICKNESS:-2}"
 SUPERSAMPLE="${SUPERSAMPLE:-1}"
 WINDOW="${WINDOW:-}"
-PS_GPU="${PS_GPU:-auto}"   # auto: resolved below, as run_ps_dtfe.sh resolves its PS_METAL
+PS_GPU="${PS_GPU:-${PS_METAL:-auto}}"   # auto: resolved below, as run_ps_dtfe.sh resolves its PS_GPU (PS_METAL: the older name)
 PS_VOLUME_WEIGHTED="${PS_VOLUME_WEIGHTED:-1}"
 FORCE="${FORCE:-0}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -143,22 +144,30 @@ run() { echo "+ $*"; [ "${DRY_RUN}" = "1" ] || "$@"; }
 
 # run_settings <command line>: the options of a run_ps_dtfe.sh command that change its grids, one per line,
 # sorted -- from the RUNNING: line a run log starts with, or from a DRY_RUN=1 'would run' line (its %q
-# quoting only touches the paths, which are not compared). The binary's name carries the precision.
+# quoting only touches the paths, which are not compared). The binary's name carries the precision. Each option
+# is read in its canonical spelling first (the binaries' deprecated names, src/user_options.cc deprecatedOptions:
+# a log written with '--ps-exact-deposit --lambda_th 0.3' has the settings of '--exact-average --lambda-th 0.3'),
+# so a driver that emits the new names does not find every older snapshot stale.
 run_settings() {
     printf '%s\n' "$1" | awk '
-        BEGIN { split("--grid --padding --avg-subsamples --field --lambda_th", v); for (i in v) val[v[i]] = 1
-                split("--periodic --ps-vertex-mass --ps-volume-weighted --ps-exact-deposit --ps-linear-deposit " \
+        BEGIN { split("--grid --padding --avg-subsamples --field --lambda-th", v); for (i in v) val[v[i]] = 1
+                split("--periodic --ps-vertex-mass --ps-volume-weighted --exact-average --ps-linear-deposit " \
                       "--ps-caustics --ps-caustic-cusps --pts-vel-grad", b); for (i in b) flag[b[i]] = 1
-                split("--pts-conventions", c); for (i in c) val[c[i]] = 1 }
+                split("--pts-conventions", c); for (i in c) val[c[i]] = 1
+                old["--ps-gpu"] = "--gpu"; old["--ps-exact-deposit"] = "--exact-average"
+                old["--ps-no-overlap"] = "--no-overlap"; old["--full_help"] = "--full-help"
+                old["--lambda_th"] = "--lambda-th" }
         { i = 1; if ($1 == "RUNNING:") i = 2
           bin = $i; sub(/.*\//, "", bin); print "binary " bin
           cur = ""; line = ""
           for (i = i + 1; i <= NF; i++) {
-              if ($i ~ /^--/) {
+              t = $i
+              if (t ~ /^--/) {
+                  if (t in old) t = old[t]
                   if (line != "") print line
                   line = ""; cur = ""
-                  if ($i in val) { cur = $i; line = $i } else if ($i in flag) print $i
-              } else if (cur != "") line = line " " $i
+                  if (t in val) { cur = t; line = t } else if (t in flag) print t
+              } else if (cur != "") line = line " " t
           }
           if (line != "") print line }' | sort
 }
@@ -250,9 +259,10 @@ print(int(s.get("planes", 1)) * int(s["nv"]) * int(s["nu"]) * int(s.get("supersa
     fi
 
     # ---- grids + point evaluation, one triangulation per snapshot ------------------------
-    # PS_METAL follows PS_GPU too: -m only switches the GPU ON, an exported PS_METAL=1 would otherwise leak in
+    # run_ps_dtfe.sh's PS_GPU follows this one: -m only switches the GPU ON, an exported PS_GPU=1 (or the older
+    # PS_METAL=1, which run_ps_dtfe.sh reads when PS_GPU is unset) would otherwise leak in
     env_args=(SAMPLE_POINTS="${plane}.bin" PS_VOLUME_WEIGHTED="${PS_VOLUME_WEIGHTED}" PTS_VEL_GRAD="${PTS_VEL_GRAD}"
-              PTS_CONVENTIONS="${PTS_CONVENTIONS}" PS_METAL="${PS_GPU}")
+              PTS_CONVENTIONS="${PTS_CONVENTIONS}" PS_GPU="${PS_GPU}")
     [ -n "${FIELDS:-}" ] && env_args+=(FIELDS="${FIELDS}")
     # The settings this batch would run each snapshot with, asked from run_ps_dtfe.sh itself (DRY_RUN=1: reads,
     # runs and writes nothing), so the comparison below cannot drift from what it runs (file times alone would

@@ -8,8 +8,9 @@
 #  A) BIT-IDENTICAL OUTPUTS vs a normal in-RAM run, on the partitioned (--max-concurrent 1,
 #     the deterministic merge order -- mc>1 float merges are order-nondeterministic even
 #     WITHOUT scratch) and the unpartitioned deposit paths. It is the same memory semantics,
-#     so anything but equality is a bug.
-#  B) GPU parity path (GPU builds): scratch + --ps-gpu also bit-identical to plain --ps-gpu (exact
+#     so anything but equality is a bug. And on macOS the partitioned run's grids took the
+#     zero-fill route (its log's "N zero-filled in memory", N > 0; elsewhere it is off: N = 0).
+#  B) GPU parity path (GPU builds): scratch + --gpu also bit-identical to plain --gpu (exact
 #     fixed-point GPU sums).
 #  C) NO LEFTOVER FILES: scratch files are unlinked at creation, so the directory must be
 #     empty after every run -- even though GBs flowed through it.
@@ -86,16 +87,30 @@ DTFE_SCRATCH_MIN_GB=0.0001 "${BIN}" "${SNAP}" "${TMP}/scr_u_mm" "${BASEARGS[@]}"
     --scratch-dir "${SC}" > "${TMP}/scr_u_mm.log" 2>&1
 compare_outputs "${TMP}/scr_u_ref" "${TMP}/scr_u_mm" "A unpartitioned"
 if grep -q "SCRATCH:" "${TMP}/scr_p_mm.log"; then check "A arming banner printed" 1; else check "A arming banner printed" 0; fi
+# the zero-fill route (ScratchAlloc::ZeroFillScope, scratch_alloc.h): on macOS psReserveGrids zero-fills every grid
+# in anonymous memory and moves it onto its scratch file unwritten. A silently disabled scope would leave the outputs
+# identical (the plain route writes the same zeros through the file: a write-back stall, not a wrong value), so the
+# count it prints is the only proof. Every grid here is a scratch mapping (the tiny threshold), so N > 0. Elsewhere
+# the scope is a no-op by design (Linux would keep the zeros resident: the header says why): N = 0 there. The
+# unpartitioned run reserves its grids elsewhere (reserveMemory) and prints no count.
+NZF="$(sed -n 's/^SCRATCH: .*; \([0-9][0-9]*\) zero-filled in memory.*/\1/p' "${TMP}/scr_p_mm.log" | head -1)"
+if [ "$(uname -s)" = Darwin ]; then
+    check "A ${NZF:-no} grid(s) zero-filled in memory and moved onto their scratch file (the zero-fill route)" \
+        $([ "${NZF:-0}" -gt 0 ] && echo 1 || echo 0)
+else
+    check "A the zero-fill route is off here (macOS only): ${NZF:-no} grid(s) moved, the count printed" \
+        $([ "${NZF:-x}" = 0 ] && echo 1 || echo 0)
+fi
 
 # ---------- (B) GPU parity path ----------
 # Every grid of a GPU deposit is an exact 64-bit fixed-point sum (the mass and the moments; ps_deposit_params.h
 # PSFxGrid), and --max-concurrent 1 merges the partitions in index order, so the scratch run equals the plain
-# --ps-gpu run byte for byte, as the CPU runs of A do.
+# --gpu run byte for byte, as the CPU runs of A do.
 if [ "${GPU_BUILT}" -eq 1 ]; then
     echo ">> B: GPU deposit path (exact fixed-point sums: bit-identity)"
-    "${BIN}" "${SNAP}" "${TMP}/scr_g_ref" "${BASEARGS[@]}" --ps-gpu --partition 2 2 2 \
+    "${BIN}" "${SNAP}" "${TMP}/scr_g_ref" "${BASEARGS[@]}" --gpu --partition 2 2 2 \
         --max-concurrent 1 > "${TMP}/scr_g_ref.log" 2>&1
-    DTFE_SCRATCH_MIN_GB=0.0001 "${BIN}" "${SNAP}" "${TMP}/scr_g_mm" "${BASEARGS[@]}" --ps-gpu \
+    DTFE_SCRATCH_MIN_GB=0.0001 "${BIN}" "${SNAP}" "${TMP}/scr_g_mm" "${BASEARGS[@]}" --gpu \
         --partition 2 2 2 --max-concurrent 1 --scratch-dir "${SC}" > "${TMP}/scr_g_mm.log" 2>&1
     # a CPU fallback in one run of the pair (GPU contention) breaks the identity for another reason: say so
     if grep -q "using the CPU deposit\|deposit unavailable\|ran on the CPU instead" "${TMP}/scr_g_ref.log" "${TMP}/scr_g_mm.log"; then

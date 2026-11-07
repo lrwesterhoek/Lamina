@@ -1,7 +1,22 @@
+"""The derived-product pipeline of the void and correlation analyses: the smoothed density contrast and its FFT
+derivatives (hessian_from_field, gradient_magnitude_from_field, potential_from_delta), the void catalogue
+(build_void_catalog: minima, ellipsoid fits, the measured radii), the smoothing a process runs at (set_smoothing,
+smoothing_tag), the void gate and the catalogue frame, and the per-snapshot products cache (SnapshotProducts /
+products(), python/cache/<param hash>/) with the cross-epoch colour limits.
 
+The critical points (dtfelib.critical) and the void-radius measurement (dtfelib.void_radius) have modules of their
+own; their names are re-exported here, and setting one of the R_V_* knobs on this module (pipeline.R_V_MAX_SIGMA =
+...) sets it in dtfelib.void_radius, where the measurement reads it.
+"""
+
+from __future__ import annotations
+
+import argparse
 import contextlib
 import json
 import os
+import sys
+import types
 import zipfile
 import zlib
 import numpy as np
@@ -12,17 +27,29 @@ from .io import FieldSet
 from .cli import require_sim, sim_dir
 from . import fields as dtfe
 
-try:
-    from scipy import fft as _sfft
-    def _rfftn(a):
-        return _sfft.rfftn(a, workers=-1)
-    def _irfftn(a, shape):
-        return _sfft.irfftn(a, s=shape, workers=-1)
-except ImportError:
-    def _rfftn(a):
-        return np.fft.rfftn(a)
-    def _irfftn(a, shape):
-        return np.fft.irfftn(a, s=shape)
+from ._fft import rfftn as _rfftn, irfftn as _irfftn      # scipy.fft on every core, else numpy.fft
+# critical points and the void radius live in their own modules (dtfelib.critical, dtfelib.void_radius); every
+# name stays reachable here, as pipeline.<name>
+from . import void_radius
+from .critical import eigh_at_coords, find_critical_points
+from .void_radius import (R_V_STEP_SIGMA, R_V_MAX_SIGMA, R_V_DIRS, R_V_DELTA08, R_V_ALGORITHM,  # noqa: F401
+                          r_v_settings, r_v_reach_cells, r_v_record, catalog_r_v_ok, r_v_stale_reason,
+                          _enclosed_contrast, void_radii_cells, void_radius_cells, distinct_voids)
+
+_VOID_RADIUS_KNOBS = ("R_V_STEP_SIGMA", "R_V_MAX_SIGMA", "R_V_DIRS", "R_V_DELTA08", "R_V_ALGORITHM")
+
+
+class _PipelineModule(types.ModuleType):
+    """This module's type: an R_v knob set here is set in dtfelib.void_radius as well (the measurement reads it
+    there), so 'pipeline.R_V_MAX_SIGMA = 10' keeps meaning what it meant before the split."""
+
+    def __setattr__(self, name, value):
+        if name in _VOID_RADIUS_KNOBS:
+            setattr(void_radius, name, value)
+        super().__setattr__(name, value)
+
+
+sys.modules[__name__].__class__ = _PipelineModule
 
 
 def _k_vectors(shape):
@@ -33,7 +60,9 @@ def _k_vectors(shape):
     return kx, ky, kz
 
 
-def hessian_from_field(field):
+def hessian_from_field(field: np.ndarray) -> dict[str, np.ndarray]:
+    """The Hessian of a periodic 3D field by FFT, in units of the cell: {'hxx', 'hxy', 'hxz', 'hyy', 'hyz', 'hzz'},
+    float32 grids of the field's shape."""
     shape = field.shape
     fk = _rfftn(field.astype(np.float32, copy=False))
     kx, ky, kz = _k_vectors(shape)
@@ -44,7 +73,8 @@ def hessian_from_field(field):
     return out
 
 
-def gradient_magnitude_from_field(field):
+def gradient_magnitude_from_field(field: np.ndarray) -> np.ndarray:
+    """|grad field| of a periodic 3D field by FFT, per cell (float32)."""
     shape = field.shape
     fk = _rfftn(field.astype(np.float32, copy=False))
     kx, ky, kz = _k_vectors(shape)
@@ -55,7 +85,9 @@ def gradient_magnitude_from_field(field):
     return np.sqrt(g2).astype(np.float32)
 
 
-def potential_from_delta(delta, box_size, rho_bar, G=1.0):
+def potential_from_delta(delta: np.ndarray, box_size: float, rho_bar: float, G: float = 1.0) -> np.ndarray:
+    """The potential phi of the density contrast 'delta' on a periodic box of side 'box_size': nabla^2 phi =
+    4 pi G rho_bar delta solved by FFT (the k = 0 mode set to zero); float32."""
     shape = delta.shape
     n = shape[0]
     dk = _rfftn(delta.astype(np.float32, copy=False))
@@ -69,23 +101,9 @@ def potential_from_delta(delta, box_size, rho_bar, G=1.0):
     return phi.astype(np.float32)
 
 
-def eigh_at_coords(hessian, coords):
-    coords = np.asarray(coords, dtype=int)
-    if coords.size == 0:
-        return np.zeros((0, 3)), np.zeros((0, 3, 3))
-    i, j, k = coords[:, 0], coords[:, 1], coords[:, 2]
-    H = np.empty((len(coords), 3, 3), dtype=np.float64)
-    H[:, 0, 0] = hessian['hxx'][i, j, k]
-    H[:, 0, 1] = H[:, 1, 0] = hessian['hxy'][i, j, k]
-    H[:, 0, 2] = H[:, 2, 0] = hessian['hxz'][i, j, k]
-    H[:, 1, 1] = hessian['hyy'][i, j, k]
-    H[:, 1, 2] = H[:, 2, 1] = hessian['hyz'][i, j, k]
-    H[:, 2, 2] = hessian['hzz'][i, j, k]
-    evals, evecs = np.linalg.eigh(H)
-    return evals, evecs
-
-
-def hessian_slice(hessian, slice_dim, index=None):
+def hessian_slice(hessian: dict, slice_dim: int, index: int | None = None) -> dict[str, np.ndarray]:
+    """The Hessian's eigenvalues on one 2D slice (normal to axis 'slice_dim', at 'index', default the middle):
+    {'lambda1', 'lambda2', 'lambda3' (ascending), 'trace', 'det'}, float32 maps."""
     comp = {}
     for name, arr in hessian.items():
         comp[name] = dtfe.extract_2d_slice(arr, slice_dim, index)
@@ -107,254 +125,11 @@ def hessian_slice(hessian, slice_dim, index=None):
     }
 
 
-def find_critical_points(delta_s, hessian, grad_mag):
-    # the three box filters run slab-threaded (dtfe.box_filter, bit-identical to scipy's serial minimum_filter /
-    # maximum_filter): at 512^3 serial filters are ~3 passes of several seconds each
-    fp = config.FOOTPRINT_SIZE
-    minima_mask = (delta_s == dtfe.box_filter(delta_s, fp, mode='wrap'))
-    maxima_mask = (delta_s == dtfe.box_filter(delta_s, fp, mode='wrap', maximum=True))
-
-    gmax = float(np.max(grad_mag))
-    gnorm = grad_mag / gmax if gmax > 0 else grad_mag
-    cand = gnorm < config.GRADIENT_THRESHOLD
-    inv = gmax - grad_mag
-    cand &= (inv == dtfe.box_filter(inv, fp, mode='wrap', maximum=True))
-    cand &= ~minima_mask
-    cand &= ~maxima_mask
-
-    out = {}
-    for name, mask in (('minima', minima_mask), ('maxima', maxima_mask)):
-        coords = np.argwhere(mask)
-        evals, _ = eigh_at_coords(hessian, coords)
-        out[name] = {'coords': coords, 'values': delta_s[mask], 'eigenvalues': evals}
-
-    coords = np.argwhere(cand)
-    evals, _ = eigh_at_coords(hessian, coords)
-    nneg = (evals < 0).sum(axis=1)
-    vals = delta_s[cand]
-    for name, n in (('saddle1', 1), ('saddle2', 2)):
-        sel = nneg == n
-        out[name] = {'coords': coords[sel], 'values': vals[sel], 'eigenvalues': evals[sel]}
-
-    out['field_mean'] = float(np.mean(delta_s))
-    out['field_std'] = float(np.std(delta_s))
-    return out
-
-
-R_V_STEP_SIGMA = 0.2      # radial step of the R_v search, in smoothing lengths (the crossing is interpolated)
-R_V_MAX_SIGMA = 24.0      # how far out it looks (capped at half the box)
-# Why 24 (15 = 32.4 Mpc on TNG100): at 15 sigma 17-25% of the underdense minima of TNG100-3-Dark and
-# TNG50-3-Dark (z = 0, 1, 3, 5; 10-cell smoothing) have NO crossing within reach (NaN, 88-104 per catalogue) or cross
-# in its last sigma, 8-17% of the well-resolved ones -- the R_v tail is cut, not measured. Same count at 20 / 24 / 25
-# sigma / L/2: 5-8% / 1.1-2.6% / 0.6-1.8% / 0.4-1.2% (well-resolved 4-8% / 0-2.9% / 0-2% / 0-2%). Half the 512^3 box is
-# 25.6 sigma at 10 cells; 24 is the largest whole cap a sigma short of it (shells beyond L/2 meet the centre's periodic
-# images; within the last sigma the smoothed field already feels them). The distinct-void median crossing R_v
-# (Mpc, 15 -> 24 sigma) at z = 0 / 1 / 3 / 5: TNG100 6.94 -> 7.42 / 7.59 -> 7.85 / 6.82 -> 7.64 / 6.27 -> 6.79,
-# TNG50 2.82 -> 2.88 / 3.41 -> 3.98 / 3.68 -> 3.97 / 3.13 -> 3.73, and 6-13% more distinct voids (TNG100 z = 0: 77 ->
-# 83) as fewer deep voids lack a radius. It is in r_v_settings, so a catalogue measured otherwise is re-measured once
-# (~15 s and 2.4 GB per 512^3 snapshot: reading and smoothing the grid; the shells themselves 1-2 s). The half-box
-# clause has a sigma's margin of its own (r_v_reach_cells: min(cap sigma, L/2 - sigma); min(cap sigma, L/2) would let
-# a large-sigma search run right up to the centre's periodic images: TNG50 at 2.1625 Mpc = 21.4 cells would reach
-# exactly 256 cells, not 234.6). The margin changes nothing while cap sigma <= L/2 - sigma, i.e. sigma <=
-# 10.24 cells at 512^3 (the production 10 included), so the catalogue records the reach it searched (r_v_settings'
-# sixth element) instead of a new algorithm number: a cache without one is served when the current reach equals the
-# margin-free rule's and re-measured only where the margin binds (catalog_r_v_ok).
-R_V_DIRS = 128            # Fibonacci directions per shell
-R_V_DELTA08 = -0.8        # the enclosed contrast of the 'delta08' radius: shell crossing of the spherical model
-                          # (nonlinear -0.8 <-> linear -2.71; Sheth & van de Weygaert 2004)
-# The R_v ALGORITHM, bumped by hand when the measurement changes (a cache records it, r_v_settings, and is re-measured
-# when it differs): 1 = the first up-crossing alone, the loop stopping at it; 2 = the
-# full shell matrix out to the search range, giving the crossing (bit-identical to 1), delta08 and ridge.
-R_V_ALGORITHM = 2
-
-
-def r_v_settings():
-    """What a catalogue's radii were measured with, as it records them ('r_v_settings'): [step in sigma, reach in
-    sigma, directions, algorithm, delta08 threshold]. Read at call time, so a changed module constant counts. A
-    catalogue's record carries a sixth element, the reach in cells it searched
-    (r_v_record); these five are the settings every other reader keys on (exports, the fate links)."""
-    return np.array([R_V_STEP_SIGMA, R_V_MAX_SIGMA, R_V_DIRS, R_V_ALGORITHM, R_V_DELTA08], dtype=np.float64)
-
-
-def r_v_reach_cells(sigma_cells, n, half_box_margin=True):
-    """How far out the R_v search looks, in cells: min(R_V_MAX_SIGMA sigma, L/2 - sigma) on an n^3 grid (sigma
-    floored at a cell, as the step is), never below 0. half_box_margin=False is the margin-free rule,
-    min(R_V_MAX_SIGMA sigma, L/2): what a record without a reach was searched with (catalog_r_v_ok)."""
-    s = max(float(sigma_cells), 1.0)
-    return max(min(R_V_MAX_SIGMA * s, 0.5 * float(n) - (s if half_box_margin else 0.0)), 0.0)
-
-
-def r_v_record(sigma_cells, n):
-    """The record a newly measured catalogue carries: r_v_settings() plus the reach in cells it searched
-    (r_v_reach_cells for its smoothing and grid)."""
-    return np.append(r_v_settings(), r_v_reach_cells(sigma_cells, n))
-
-
-def catalog_r_v_ok(cat, sigma_cells=None, n=None):
-    """Whether a catalogue's radii were measured with the current settings (r_v_settings) out to the current reach
-    (r_v_reach_cells for sigma_cells / n: config's smoothing and grid by default, the namespace the catalogue lives
-    in) and it holds all three (catalog.R_V_DEFINITIONS). A cache without a record: not ok,
-    re-measured once (else a changed R_V_MAX_SIGMA or algorithm would leave every cache with stale
-    radii and NaNs). A record of the five settings alone (no reach) is ok
-    when the margin-free half-box rule reaches as far as the current one does -- every sigma <= 10.24 cells at 512^3,
-    the production
-    smoothing included -- so the margin re-measures only the catalogues it changes."""
-    if 'r_v_settings' not in cat or any(k not in cat for k in ('r_v_cells', 'r_v_delta08_cells', 'r_v_ridge_cells')):
-        return False
-    have = np.asarray(cat['r_v_settings'], dtype=np.float64).reshape(-1)
-    want = r_v_settings()
-    if have.shape[0] not in (want.shape[0], want.shape[0] + 1) or not np.array_equal(have[:want.shape[0]], want):
-        return False
-    sigma_cells = config.SMOOTHING_SIGMA_CELLS if sigma_cells is None else sigma_cells
-    n = config.FIELD_RESOLUTION if n is None else n
-    reach = r_v_reach_cells(sigma_cells, n)
-    if have.shape[0] == want.shape[0]:
-        return r_v_reach_cells(sigma_cells, n, half_box_margin=False) == reach
-    return float(have[-1]) == reach
-
-
-def r_v_stale_reason(cat, sigma_cells=None, n=None):
-    """Why catalog_r_v_ok says no, in a few words for the log (None when it says yes)."""
-    if catalog_r_v_ok(cat, sigma_cells, n):
-        return None
-    if 'r_v_settings' not in cat:
-        return "has no record of its R_v settings"
-    have = np.asarray(cat['r_v_settings'], dtype=np.float64).reshape(-1)
-    want = r_v_settings()
-    if have.shape[0] in (want.shape[0], want.shape[0] + 1) and np.array_equal(have[:want.shape[0]], want) \
-            and all(k in cat for k in ('r_v_cells', 'r_v_delta08_cells', 'r_v_ridge_cells')):
-        sigma_cells = config.SMOOTHING_SIGMA_CELLS if sigma_cells is None else sigma_cells
-        n = config.FIELD_RESOLUTION if n is None else n
-        old = float(have[-1]) if have.shape[0] > want.shape[0] else r_v_reach_cells(sigma_cells, n, False)
-        return (f"was searched out to {old:.4g} cells, today's reach is {r_v_reach_cells(sigma_cells, n):.4g} "
-                f"(L/2 less a sigma)")
-    if have.shape[0] in (want.shape[0], want.shape[0] + 1) and np.array_equal(have[:want.shape[0]], want):
-        return "lacks one of the three radii"
-    return f"was measured with R_v settings {have[:want.shape[0]].tolist()}, not today's {want.tolist()}"
-
-
-def _enclosed_contrast(radii, shells):
-    """Delta(<r) at every radius of 'radii' (r_0 = 0 first) from the shell means 'shells' (rows = voids, column 0 =
-    the value at r = 0): delta taken piecewise LINEAR in r between the shells and r^2 dr integrated exactly over each
-    piece, so a constant profile gives Delta = that constant (a trapezoid on r^2 delta gives 1.5x it at the first
-    shell). Column 0 is the central value itself."""
-    a, b = radii[:-1], radii[1:]
-    va, vb = shells[:, :-1], shells[:, 1:]
-    d3 = (b ** 3 - a ** 3) / 3.0
-    slope = (vb - va) / (b - a)
-    piece = va * d3 + slope * ((b ** 4 - a ** 4) / 4.0 - a * d3)          # integral of delta(r) r^2 over [a, b]
-    out = np.empty_like(shells)
-    out[:, 0] = shells[:, 0]
-    out[:, 1:] = 3.0 * np.cumsum(piece, axis=1) / radii[1:] ** 3
-    return out
-
-
-def void_radii_cells(delta_s, coords, sigma_cells):
-    """The three measured radii per minimum, in cells, from ONE matrix of shell means of the SMOOTHED delta
-    (trilinear, R_V_DIRS directions about the minimum's cell centre, every R_V_STEP_SIGMA sigma out to R_V_MAX_SIGMA
-    sigma or half the box less a sigma, r_v_reach_cells; column 0 the minimum itself at r = 0)
-    (catalog.R_V_DEFINITIONS):
-      'r_v_cells'          the first up-crossing of 0 (the mean), linearly interpolated from the last negative shell
-                           -- void_radius_cells, bit for bit;
-      'r_v_delta08_cells'  where the enclosed contrast Delta(<R) (_enclosed_contrast) first reaches R_V_DELTA08 going
-                           outward, interpolated likewise; NaN when the minimum itself is not below it (no sphere
-                           about it is that empty: on a field smoothed at sigma this is the common case for shallow
-                           minima) or it is not reached within reach;
-      'r_v_ridge_cells'    the radius of the MAXIMUM of the shell mean over the search range (the compensation ridge),
-                           refined by a parabola through it and its neighbours; NaN when the maximum is the outermost
-                           shell (the profile still rising: the range truncated it, no ridge was seen).
-    All three NaN for a minimum that is not underdense (delta_s >= 0). The question behind delta08 and the ridge:
-    is the z < 3 shrinkage of the crossing R_v a property of the voids or the first-crossing rule latching onto an
-    inner wall? A void whose crossing R_v falls while delta08 and the ridge hold is the latter."""
-    from .profiles import fibonacci_sphere, shell_means          # here: profiles imports catalog, which imports this module
-    coords = np.asarray(coords, dtype=np.int64).reshape(-1, 3)
-    out = {k: np.full(len(coords), np.nan) for k in ('r_v_cells', 'r_v_delta08_cells', 'r_v_ridge_cells')}
-    if not len(coords):
-        return out
-    n = delta_s.shape[0]
-    step = R_V_STEP_SIGMA * max(float(sigma_cells), 1.0)
-    radii = np.arange(1, int(r_v_reach_cells(sigma_cells, n) / step) + 1) * step   # L/2 less a sigma
-    v0 = np.asarray(delta_s[coords[:, 0], coords[:, 1], coords[:, 2]], dtype=np.float64)
-    todo = np.nonzero(v0 < 0)[0]                                # an overdense 'minimum' has no underdense region
-    if not todo.size or not radii.size:
-        return out
-    dirs = fibonacci_sphere(R_V_DIRS)
-    k = radii.size
-    centers = np.repeat((coords[todo] + 0.5) / n, k, axis=0)   # (void, shell) pairs, void-major
-    shells = np.empty((todo.size, k + 1))
-    shells[:, 0] = v0[todo]
-    shells[:, 1:] = shell_means(delta_s, centers, np.tile(radii, todo.size), dirs).reshape(todo.size, k)
-    r_all = np.concatenate([[0.0], radii])
-
-    def first_up(prof, level):
-        # the first column >= level after column 0 (which is below it), interpolated from the column before
-        hit = prof[:, 1:] >= level
-        rows = np.nonzero(hit.any(axis=1) & (prof[:, 0] < level))[0]
-        j = np.argmax(hit[rows], axis=1) + 1
-        pr, pv, v = r_all[j - 1], prof[rows, j - 1], prof[rows, j]
-        res = np.full(len(prof), np.nan)
-        res[rows] = pr + (r_all[j] - pr) * (level - pv) / (v - pv)
-        return res
-
-    out['r_v_cells'][todo] = first_up(shells, 0.0)
-    out['r_v_delta08_cells'][todo] = first_up(_enclosed_contrast(r_all, shells), R_V_DELTA08)
-    j = np.argmax(shells[:, 1:], axis=1) + 1                    # the ridge: a shell, never the minimum itself
-    inner = j < k                                               # the outermost shell is no ridge (truncated)
-    jj, rows = j[inner], np.nonzero(inner)[0]
-    f0, f1, f2 = shells[rows, jj - 1], shells[rows, jj], shells[rows, jj + 1]
-    curv = f0 - 2.0 * f1 + f2
-    off = np.where(curv < 0, 0.5 * (f0 - f2) / np.where(curv < 0, curv, -1.0), 0.0)
-    ridge = np.full(todo.size, np.nan)
-    ridge[rows] = r_all[jj] + np.clip(off, -0.5, 0.5) * step
-    out['r_v_ridge_cells'][todo] = ridge
-    return out
-
-
-def void_radius_cells(delta_s, coords, sigma_cells):
-    """R_v per minimum, in cells (NaN when there is none): the radius at which the spherically averaged SMOOTHED
-    density contrast around the minimum first rises to 0 -- the underdense region the void is, MEASURED. The
-    ellipsoid's 2 / sqrt|lambda| is where a QUADRATIC rises by a fixed 2 whatever the void's depth, ~1.6x the radius
-    where the stacked density reaches the mean, v_r turns to infall and the single-stream fraction bottoms out
-    (TNG100 z = 0). Shell means of delta_s (trilinear, R_V_DIRS directions, centred on the minimum's
-    cell centre) every R_V_STEP_SIGMA sigma out to R_V_MAX_SIGMA sigma or half the box; the crossing linearly
-    interpolated from the last negative shell (from r = 0: the minimum itself). Defined at every redshift (delta_s
-    < 0 at a void's minimum); NaN for a minimum that is not underdense or never reaches 0 within reach. The
-    'crossing' of void_radii_cells (one shell matrix gives all three definitions)."""
-    return void_radii_cells(delta_s, coords, sigma_cells)['r_v_cells']
-
-
-def distinct_voids(coords, delta_values, r_v_cells, n_grid, r_eff_cells=None):
-    """Which of the given voids are DISTINCT: deepest first, a void whose centre lies inside the region a deeper void
-    already kept claims is a sub-minimum of the same underdense region (periodic distances, cells). With r_eff_cells
-    (catalog.distinct_mask always passes it) each void CLAIMS the sphere of min(R_v, R_eff) (a missing one ignored),
-    so a void without R_v still takes part with its R_eff, and the tail of the deepest voids, whose R_v reaches 1.2-3
-    R_eff (84th percentile R_v/R_eff 1.2-1.5), does not swallow 20-27% of the sample (R_v spheres alone, TNG300 z=0:
-    11 voids with R_v > 10 sigma drop 99 of 365). Without it the claim is the R_v sphere alone, and a void without
-    R_v is not distinct and claims no region. Meant for the WELL-RESOLVED voids (catalog.distinct_mask runs it over
-    all of them, then narrows the result to the caller's sample):
-    the smoothed field's minima within an 11-cell footprint often share one void -- 63% of the TNG100 z=0
-    resolved voids have another centre within R_eff -- while over ALL minima a few deep ones that fail the cut,
-    with R_v up to 14 sigma, would swallow three quarters of the resolved sample (24 of 103 left)."""
-    coords = np.asarray(coords, dtype=np.float64).reshape(-1, 3)
-    r_v = np.asarray(r_v_cells, dtype=np.float64).reshape(-1)
-    if r_eff_cells is not None:
-        r_v = np.fmin(r_v, np.asarray(r_eff_cells, dtype=np.float64).reshape(-1))   # fmin: a NaN side is ignored
-    keep = np.zeros(len(coords), dtype=bool)
-    kept_c, kept_r = np.zeros((0, 3)), np.zeros(0)
-    for i in np.argsort(np.asarray(delta_values, dtype=np.float64), kind="stable"):
-        if not np.isfinite(r_v[i]):
-            continue
-        if kept_r.size:
-            d = coords[i] - kept_c
-            d -= n_grid * np.rint(d / n_grid)
-            if (np.sqrt((d * d).sum(axis=1)) < kept_r).any():
-                continue
-        keep[i] = True
-        kept_c, kept_r = np.vstack([kept_c, coords[i]]), np.append(kept_r, r_v[i])
-    return keep
-
-
-def build_void_catalog(delta_s, hessian):
+def build_void_catalog(delta_s: np.ndarray, hessian: dict) -> dict:
+    """The void catalogue of one smoothed density contrast: its local minima (config.FOOTPRINT_SIZE) kept by
+    config.VOID_EIGENVALUE_CRITERION on the Hessian there, with their shapes, the ellipsoid fits and the
+    well_resolved / deep flags, the three measured radii (void_radius.void_radii_cells) and the records a cache is
+    checked against (r_v_settings, cell_mpc, cuts_mpc, deep_threshold)."""
     fp = config.FOOTPRINT_SIZE
     _, coords = dtfe.find_local_minima(delta_s, footprint_size=fp)
     evals, evecs = eigh_at_coords(hessian, coords)
@@ -390,7 +165,7 @@ def build_void_catalog(delta_s, hessian):
     return cat
 
 
-def set_smoothing(cells=None, mpc=None):
+def set_smoothing(cells: float | None = None, mpc: float | None = None) -> float:
     """Set the smoothing length for this process: in cells (a script's --smooth: the footprint stays as it is, the
     smoothing comparison's r512_s5_f11 / s20_f11 caches rely on that) or in Mpc (--smooth-mpc: the same physical
     scale in every box, the footprint following it -- config.footprint_for). Keeps config.SMOOTHING_SIGMA_MPC in step. In cells the
@@ -409,14 +184,14 @@ def set_smoothing(cells=None, mpc=None):
     return config.SMOOTHING_SIGMA_CELLS
 
 
-def add_smoothing_mpc_arg(parser):
+def add_smoothing_mpc_arg(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """The void scripts' --smooth-mpc (beside make_parser's --smooth in cells)."""
     parser.add_argument("--smooth-mpc", type=float, default=0.0, metavar="MPC",
                         help="the void catalogue's smoothing length in Mpc, the same physical scale in every box (the "
                              "minima footprint follows); instead of --smooth in cells (also: DTFE_SIGMA_MPC)")
 
 
-def apply_smoothing_args(args, tag="pipeline"):
+def apply_smoothing_args(args: argparse.Namespace, tag: str = "pipeline") -> float:
     """A void script's --smooth (cells) or --smooth-mpc into set_smoothing, said when it changes anything."""
     cells, mpc = getattr(args, "smooth", 0.0) or 0.0, getattr(args, "smooth_mpc", 0.0) or 0.0
     if cells > 0 and mpc > 0:
@@ -444,14 +219,14 @@ def smoothing_tag() -> str:
     return "_".join(parts)
 
 
-def smoothing_length_mpc():
+def smoothing_length_mpc() -> float:
     """The smoothing length sigma in Mpc as set NOW (config.SMOOTHING_SIGMA_CELLS x CELL_SIZE; a script's --smooth
     changes it after import) -- the unit of the void cut, the profile bins, the abundance radii and the skeleton's
     cut-out. sigma = 0 (no smoothing: an r512_s0 cache exists) counts as ONE cell, so none of them collapses to 0."""
     return max(float(config.SMOOTHING_SIGMA_CELLS), 1.0) * float(config.CELL_SIZE)
 
 
-def ellipsoid_cuts_mpc():
+def ellipsoid_cuts_mpc() -> dict[str, float]:
     """config.ELLIPSOID_CUT_RULES in Mpc for the current simulation and smoothing, read at CALL time (the plot
     scripts' --smooth sets config.SMOOTHING_SIGMA_CELLS after import, so an import-time value would hold the
     gate at 100 cells): min_axis_mpc = rule x cell, max_axis_mpc = min(rule x sigma, rule x box), the ratio."""
@@ -465,7 +240,7 @@ def ellipsoid_cuts_mpc():
 VOID_GATES = ('ellipsoid', 'none')
 
 
-def void_gate():
+def void_gate() -> str:
     """The void sample gate for this process (config.VOID_GATE, DTFE_VOID_GATE): 'ellipsoid' (default:
     well_resolved is the ellipsoid cut) or 'none' (the max-axis clause dropped, gate_view). Read at call time."""
     g = str(getattr(config, 'VOID_GATE', 'ellipsoid') or 'ellipsoid').strip().lower()
@@ -474,7 +249,7 @@ def void_gate():
     return g
 
 
-def gate_cuts_mpc():
+def gate_cuts_mpc() -> dict[str, float]:
     """The cuts the returned catalogue's well_resolved is taken with under void_gate(): ellipsoid_cuts_mpc(), with
     max_axis_mpc = inf under 'none'."""
     cuts = ellipsoid_cuts_mpc()
@@ -483,7 +258,7 @@ def gate_cuts_mpc():
     return cuts
 
 
-def gate_view(cat):
+def gate_view(cat: dict) -> dict:
     """The catalogue as the samples see it under void_gate(). 'ellipsoid': 'cat' itself. 'none' (under the gate
     the R_v abundance and profiles inherit the 10-sigma max-axis cut, which drops a void because its CURVATURE
     length is large, not because its R_v is unresolved -- about 77-79% of the z = 0 minima): a copy whose ellipsoid
@@ -507,7 +282,7 @@ def _cuts_array():
     return np.array([c['min_axis_mpc'], c['max_axis_mpc'], c['max_axis_ratio']], dtype=np.float64)
 
 
-def catalog_cuts_ok(cat):
+def catalog_cuts_ok(cat: dict) -> bool:
     """Whether a catalogue's well_resolved and deep flags were taken with the current cuts (ellipsoid_cuts_mpc) and
     DEEP_VOID_THRESHOLD (a cache without the records: not ok, so it is re-derived once and
     then carries them)."""
@@ -515,7 +290,7 @@ def catalog_cuts_ok(cat):
             and 'deep_threshold' in cat and float(cat['deep_threshold']) == float(config.DEEP_VOID_THRESHOLD))
 
 
-def snapshot_frame(products):
+def snapshot_frame(products: SnapshotProducts) -> tuple[float, float, int, str]:
     """(cell_mpc, box_mpc, grid_n, source) of a snapshot: its header's box over its grid -- THE truth about
     the frame -- which must be config.CELL_SIZE (the DTFE_SIM box over FIELD_RESOLUTION), the frame every
     catalogue is built, cut and exported in; else ValueError, BEFORE any cache is read or written
@@ -543,7 +318,7 @@ def snapshot_frame(products):
     return cell, box, n, "header"
 
 
-def adopt_snapshot_grid(products):
+def adopt_snapshot_grid(products: SnapshotProducts) -> tuple[float, float, int]:
     """Make config's frame THIS snapshot's (its header's box over its grid n) for a tool that shows one snapshot --
     the launcher's void outlines -- keeping the smoothing length in Mpc (the footprint follows, set_smoothing): a
     256^3 or 1024^3 run, or a simulation config does not pin, gets its catalogue at the same physical sigma, cached
@@ -558,7 +333,7 @@ def adopt_snapshot_grid(products):
     return float(config.CELL_SIZE), box, n
 
 
-def refit_catalog(cat):
+def refit_catalog(cat: dict) -> dict:
     """The ellipsoid fits of a cached catalogue re-derived in THIS frame with THESE cuts: positions_mpc,
     the semi-axes, orientations, ellipticity, prolateness and well_resolved all follow from the cached
     minima (coords) and Hessian eigen-decomposition (in cell units: frame-free), so a catalogue built
@@ -574,7 +349,7 @@ def refit_catalog(cat):
     return out
 
 
-def catalog_cell_mpc(cat):
+def catalog_cell_mpc(cat: dict) -> float | None:
     """The cell size a cached catalogue was built with: its 'cell_mpc' entry, else recovered EXACTLY from
     positions_mpc = coords x cell (the first void with a non-zero index); None for an empty catalogue."""
     if 'cell_mpc' in cat:
@@ -588,14 +363,14 @@ def catalog_cell_mpc(cat):
     return float(pos[i, k] / coords[i, k])
 
 
-def catalog_frame_ok(cat, cell_mpc=None, rtol=1e-5):
+def catalog_frame_ok(cat: dict, cell_mpc: float | None = None, rtol: float = 1e-5) -> bool:
     """Whether a catalogue's frame is 'cell_mpc' (default config.CELL_SIZE); True for an empty one."""
     c = catalog_cell_mpc(cat)
     want = float(config.CELL_SIZE if cell_mpc is None else cell_mpc)
     return c is None or abs(c - want) <= rtol * max(want, c)
 
 
-def ellipsoid_fit_one(evals, evecs, cell):
+def ellipsoid_fit_one(evals: np.ndarray, evecs: np.ndarray, cell: float) -> dict | None:
     """Cut-free ellipsoid fit of ONE void from its Hessian eigen-decomposition.
 
     The single source of the fit formulas: semi-axes 2*cell/sqrt(|lambda|) ordered a>=b>=c,
@@ -669,7 +444,9 @@ def _param_hash():
             f"_g{config.GRADIENT_THRESHOLD:g}_v2")
 
 
-def cache_dir():
+def cache_dir() -> Path:
+    """This process's cache namespace, config.CACHE_DIR / _param_hash() (resolution, smoothing, footprint, criterion,
+    gradient threshold, format version), made when it is not there yet."""
     d = Path(config.CACHE_DIR) / _param_hash()
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -958,7 +735,8 @@ class SnapshotProducts:
         return self
 
 
-def products(snapshot, redshift=None, sim=None, method=None, prefix=None, data_root=None):
+def products(snapshot: int | str, redshift: float | None = None, sim: str | None = None, method: str | None = None,
+             prefix: str | None = None, data_root: str | Path | None = None) -> SnapshotProducts:
     """The derived products of one snapshot. data_root: a script's --data-root (default: require_data_root(),
     so DTFE_DATA_ROOT); the caches stay keyed by (sim, prefix, method, snapshot), as they are for a root
     set through the environment."""
@@ -972,7 +750,9 @@ def _limits_path(sim=None):
     return cache_dir() / f'global_limits_{require_sim(sim)}.json'
 
 
-def save_global_limits(limits, sim=None):
+def save_global_limits(limits: dict, sim: str | None = None) -> None:
+    """Write the cross-epoch colour limits {field: amplitude} of 'sim' (default DTFE_SIM) into its
+    global_limits_<sim>.json in the cache namespace (record_limits writes them; series_vmax reads them)."""
     with open(_limits_path(sim), 'w') as f:
         json.dump(limits, f, indent=2)
 
@@ -981,7 +761,7 @@ def _snapshot_limits_path(sim=None):
     return cache_dir() / f'snapshot_limits_{require_sim(sim)}.json'
 
 
-def load_snapshot_limits(sim=None):
+def load_snapshot_limits(sim: str | None = None) -> dict:
     """{snapshot id ('099'): {field: amplitude}} -- what analyze.py compute measured per snapshot of
     'sim' (default: the DTFE_SIM simulation)."""
     p = _snapshot_limits_path(sim)
@@ -991,13 +771,13 @@ def load_snapshot_limits(sim=None):
         return json.load(f)
 
 
-def canonical_snapshot_id(snap):
+def canonical_snapshot_id(snap: int | str) -> str:
     """'99', 99, '099' -> '099' (config.SNAPSHOT_TO_REDSHIFT's keys); other text unchanged."""
     s = str(snap)
     return f"{int(s):03d}" if s.isdigit() else s
 
 
-def record_limits(updates, canonical=None, sim=None):
+def record_limits(updates: dict | None, canonical=None, sim: str | None = None) -> tuple:
     """analyze.py compute's bookkeeping. 'updates' = {snapshot: {field: amplitude}} for the snapshots
     just computed of simulation 'sim' (default DTFE_SIM). They go into the per-snapshot store
     (snapshot_limits_<sim>.json, beside global_limits_<sim>.json under the same parameter-hashed cache
@@ -1028,7 +808,8 @@ def record_limits(updates, canonical=None, sim=None):
     return limits, covered, missing
 
 
-def load_global_limits(sim=None):
+def load_global_limits(sim: str | None = None) -> dict:
+    """The cross-epoch colour limits {field: amplitude} recorded for 'sim' (default DTFE_SIM); {} before any compute."""
     p = _limits_path(sim)
     if not p.exists():
         return {}
@@ -1036,7 +817,7 @@ def load_global_limits(sim=None):
         return json.load(f)
 
 
-def series_vmax(field, fallback_data=None, sim=None):
+def series_vmax(field: str, fallback_data=None, sim: str | None = None) -> float | None:
     """The cross-epoch colour amplitude of 'field' for simulation 'sim' (default DTFE_SIM): a fixed
     config.FIELD_LIMITS entry, else what analyze.py compute recorded for that simulation, else the
     robust maximum of 'fallback_data' (None without it)."""

@@ -86,7 +86,7 @@ FIELDS = {
     "hidden_streams":    ("hidden_streams", 1, True),  # bitmask: bit 1 = multi-stream volume the stream count does not show (a folded tetrahedron overlaps the cell while '.streams' reads 1 -- a fold thinner than the sampling; exact in a periodic box), bit 2 = the cell holds mass from a tetrahedron none of whose sub-samples lies in it (a quadrature note, usually the SAME stream). Single-stream mask = streams==1 and not (hidden_streams & 1): velocity_single_stream does it. An output with '.unresolved' instead holds a 0/1 mass flag there (read as bit 1: conservative; see LEGACY_SUFFIX); an output with neither counts those tets in '.streams'
     "caustic":         ("caustic",       1, True),   # 0/1 fold-caustic cell flag (--ps-caustics): tetrahedra of BOTH orientations overlap the cell. Geometric (the det<0 half is the separating-axis overlap test, the raw '.hidden_streams' bit 1); older grids set it only where a folded tetrahedron deposited a sample and miss every fold thinner than the sampling (TNG100-3-Dark z=1: 21.0% of the cells against the exact 33.6%; ~2x low at z>=3). Read the fold with FieldSet.fold_mask() (= caustic_is_fold(mask, streams=, hidden=)), exact for either kind of grid
     "caustic_class":     ("causticClass",  1, True),   # --ps-caustics (CPU or GPU): caustic stratification bitmask. bit0/1 = a det(J)>0 / det(J)<0 tetrahedron overlaps the cell (both = fold, i.e. '.caustic'; bit1 is the geometric overlap, per sample in older grids -- see 'caustic'), bits 2-5 = a tetrahedron with 0/1/2/3 collapsed axes deposited a sample here (1 = wall, 2 = filament, 3 = node; PER SAMPLE, so they depend on nSub and a fold thinner than the sampling shows only the k of the streams around it, typically k = 0 -- bit 0 and bits 6-8 are per sample too), bit6 = two eigenvalues coincide AT ZERO (umbilic/D4 INDICATOR, not a D4 identification; both halves matter -- merely coincident eigenvalues occur throughout caustic-free volume), bit7 = the A3 CUSP indicator and bit8 = the A4 SWALLOWTAIL indicator, both present only under '--ps-caustic-cusps'. See src/CGAL_triangulation/ps_caustic_class.h; decode with caustic_collapse_max() / caustic_is_fold() / caustic_is_cusp() / caustic_is_swallowtail()
-    "tet_touch":         ("tetTouch",      1, True),   # --ps-exact-deposit: raw count of tetrahedra touching the cell (geometric multiplicity, runs to hundreds -- NOT a stream count; use 'streams' for that)
+    "tet_touch":         ("tetTouch",      1, True),   # --exact-average (the exact deposit): raw count of tetrahedra touching the cell (geometric multiplicity, runs to hundreds -- NOT a stream count; use 'streams' for that)
     "dispersion":        ("velDisp",       1, True),
     "dispersion_tensor": ("velDispTensor", 6, True),   # xx,xy,xz,yy,yz,zz
     "divergence":        ("velDiv",        1, False),   # PS: the stream average <grad v> of each stream's own gradient, not grad<v> (note above FIELDS)
@@ -103,7 +103,7 @@ _PREFIX = {"ps": "ps_output.", "dtfe": "output."}
 
 # The velocity-gradient family load(..., mean_field=True) serves (fields.MEAN_FIELD_NAMES, kept here too so that
 # importing io never needs scipy), and the V-web threshold of a run whose log does not say it: the run scripts'
-# LAMBDA_TH default (run_dtfe.sh / run_ps_dtfe.sh pass --lambda_th 0.3; the binary's own default is 0).
+# LAMBDA_TH default (run_dtfe.sh / run_ps_dtfe.sh pass --lambda-th 0.3; the binary's own default is 0).
 MEAN_FIELD_NAMES = ("gradient", "divergence", "shear", "vorticity", "vweb", "vweb_eigenvalues")
 DEFAULT_LAMBDA_TH = 0.3
 
@@ -269,7 +269,7 @@ _VELOCITY_SCALE_EXP = {
 # Tolerance for comparing 'streams' against an integer multiplicity. '.streams' is a float32
 # under every deposit -- the sampled one carries a sub-sample mean, the exact one the analytic
 # volume-weighted multiplicity -- so an exact '== 1' test is never correct (it would mask the whole
-# grid under --ps-exact-deposit, where single-stream cells land on 1.0 +/- float32 eps).
+# grid under --exact-average (the exact deposit), where single-stream cells land on 1.0 +/- float32 eps).
 STREAM_TOL = 1e-3
 
 
@@ -333,15 +333,16 @@ def _load_budget_bytes() -> int:
 
 def run_lambda_th(runlog) -> float:
     """The web threshold of the run whose log is 'runlog' (FieldSet.lambda_th; the launcher's Explore reads its
-    outputs' logs with it): the last '--lambda_th X' in it (the binary's command line on the 'RUNNING:'
-    line run_dtfe.sh / run_ps_dtfe.sh write), else the binary's own T-web report '(lambda_th = X)', else
-    DEFAULT_LAMBDA_TH (0.3, the run scripts' default; also for a log that cannot be read)."""
+    outputs' logs with it): the last '--lambda-th X' in it (the binary's command line on the 'RUNNING:'
+    line run_dtfe.sh / run_ps_dtfe.sh write; '--lambda_th', its deprecated spelling, in older logs), else the binary's
+    own T-web report '(lambda_th = X)', else DEFAULT_LAMBDA_TH (0.3, the run scripts' default; also for a log that
+    cannot be read)."""
     import re
     try:
         text = Path(runlog).read_text(errors="replace")
     except OSError:
         return DEFAULT_LAMBDA_TH
-    found = re.findall(r"--lambda_th[ =]+([-+0-9.eE]+)", text) or re.findall(r"lambda_th = ([-+0-9.eE]+)", text)
+    found = re.findall(r"--lambda[-_]th[ =]+([-+0-9.eE]+)", text) or re.findall(r"lambda_th = ([-+0-9.eE]+)", text)
     try:
         return float(found[-1]) if found else DEFAULT_LAMBDA_TH
     except ValueError:
@@ -589,7 +590,7 @@ class FieldSet:
 
     @property
     def lambda_th(self) -> float:
-        """The web threshold this output was classified with: the '--lambda_th X' of its run log '<prefix>runlog'
+        """The web threshold this output was classified with: the '--lambda-th X' of its run log '<prefix>runlog'
         (the binary's command line, which run_dtfe.sh / run_ps_dtfe.sh write on its 'RUNNING:' line), else the
         binary's own T-web report '(lambda_th = X)' in that log, else DEFAULT_LAMBDA_TH (0.3, the run scripts'
         default). mean_field() classifies its V-web with it, so a PS mean-field V-web uses its own run's threshold."""
@@ -748,7 +749,7 @@ class FieldSet:
         single-valued flow (void interiors) from multi-stream walls and caustics.
 
         The mask is a TOLERANCE (|streams - 1| > 1e-3), never an exact float equality: only
-        the sampled deposit's raw grid holds integers. Under '--ps-exact-deposit' '.streams'
+        the sampled deposit's raw grid holds integers. Under '--exact-average' (the exact deposit) '.streams'
         is the analytic volume-weighted multiplicity (1/V_cell) sum V_int -- a float32 that
         sits at 1.0 +/- eps in single-stream cells, so an '!= 1' test masked the whole grid.
         The plateau is sharp either way (the pancake check finds every single-stream cell

@@ -90,8 +90,8 @@ PRESET_TIPS = {
                 "outlines as on screen, PNG at 200 dpi, cropped tight",
     "publication": "Everything on, as a vector PDF (the text stays text, editable); a PNG or TIFF chosen in the file "
                    "dialog gets 300 dpi",
-    "bare": "Only the map: no frame, axes, title or colour bar, no arrows or outlines, one data pixel per image pixel "
-            "(a 4096 by 4096 point plane gives a 4096 by 4096 image), the colours and range as on screen",
+    "bare": "Only the map: no frame, axes, title, colour bar, arrows or outlines; one data pixel per image pixel (a "
+            "4096² plane gives a 4096² image), the colours and range as on screen",
     "slide": "Everything on with fonts 1.8 times larger, for a projector",
     "last": "The options you used last (remembered between sessions)",
     "custom": "Your changes to a preset",
@@ -545,6 +545,41 @@ def _dialog_class():
             self.save_now = False
             self._filling = False
             v = q["QVBoxLayout"](self)
+            v.addLayout(self._build_preset_row())
+            cols = q["QHBoxLayout"]()
+            v.addLayout(cols)
+            left, right = q["QVBoxLayout"](), q["QVBoxLayout"]()
+            cols.addLayout(left, 1)
+            cols.addLayout(right, 1)
+            # (the groups join the dialog in this order, which is also the Tab key's order)
+            left.addWidget(self._build_picture())
+            ov = self._build_overlays()
+            left.addStretch(1)
+            right.addWidget(self._build_title())
+            right.addWidget(self._build_axes())
+            right.addWidget(ov)
+            right.addStretch(1)
+            self.note = q["QLabel"]("")
+            self.note.setWordWrap(True)
+            self.note.setStyleSheet("color: gray")
+            v.addWidget(self.note)
+            v.addLayout(self._build_buttons(can_save))
+            self._fill(self.opened)
+            self._select_preset()
+            self.preset.currentIndexChanged.connect(self._preset_picked)
+            for wdg in (self.kind_figure, self.kind_full, self.match, self.transparent, self.colorbar,
+                        self.colorbar_label, self.arrows, self.voids, self.title, self.panel_titles, self.frame,
+                        self.ticks, self.tick_labels, self.axis_names, self.units):
+                wdg.toggled.connect(self._edited)
+            for wdg in (self.format, self.width_unit, self.margins, self.unit):
+                wdg.currentIndexChanged.connect(self._edited)
+            for wdg in (self.dpi, self.width, self.pad, self.font_scale):
+                wdg.valueChanged.connect(self._edited)
+            self._sync()
+
+        # -------------------------------------------------------- the groups
+        def _build_preset_row(self):
+            """'Preset:' and its combo: fill in every option at once."""
             top = q["QHBoxLayout"]()
             top.addWidget(q["QLabel"]("Preset:"))
             self.preset = q["QComboBox"]()
@@ -553,13 +588,10 @@ def _dialog_class():
                 self.preset.setItemData(self.preset.count() - 1, PRESET_TIPS[key], Qt.ToolTipRole)
             self.preset.setToolTip("Fill in every option at once; your choices are remembered between sessions")
             top.addWidget(self.preset, 1)
-            v.addLayout(top)
-            cols = q["QHBoxLayout"]()
-            v.addLayout(cols)
-            left, right = q["QVBoxLayout"](), q["QVBoxLayout"]()
-            cols.addLayout(left, 1)
-            cols.addLayout(right, 1)
-            # ---- the picture
+            return top
+
+        def _build_picture(self):
+            """The 'Picture' group: figure or full resolution, format, resolution, width, margins, font size."""
             pic = q["QGroupBox"]("Picture")
             pv = q["QVBoxLayout"](pic)
             self.kind_figure = q["QRadioButton"]("Figure: with title, axes and colour bar")
@@ -568,8 +600,9 @@ def _dialog_class():
             what = "the panels" if self.ctx.get("grid") else "the map"
             self.kind_full = q["QRadioButton"](f"Full resolution: {what} alone" + size)
             self.kind_full.setToolTip("One data pixel is one image pixel: no interpolation, the colours and range as "
-                                      "on screen, the arrows and void outlines when ticked below. A hi-res slice "
-                                      "larger than 4096 points a side is written as shown, block-averaged to 4096.")
+                                      "on screen,\nthe arrows and void outlines when ticked below.")
+            self.kind_full.setWhatsThis(self.kind_full.toolTip() + "\n\nA hi-res slice larger than 4096 points a "
+                                        "side is written as shown, block-averaged to 4096.")
             self.kind_figure.setToolTip("The figure as matplotlib draws it, at the resolution below")
             grp = q["QButtonGroup"](self)
             grp.addButton(self.kind_figure)
@@ -592,10 +625,11 @@ def _dialog_class():
                                 f"({DPI_MIN} to {DPI_MAX})")
             drow.addWidget(self.dpi)
             self.match = q["QCheckBox"]("match the data")
-            self.match.setToolTip("The dpi at which the map's axes hold one image pixel per data pixel (at most "
-                                  f"{DPI_MAX} dpi; a map too small for {DPI_MIN} dpi gets a smaller figure at "
-                                  f"{DPI_MIN} dpi instead): the full resolution with the axes and colour bar around "
-                                  "it. With no margins: the map's own pixels, unresampled")
+            self.match.setToolTip(f"The dpi at which the map's axes hold one image pixel per data pixel (at most "
+                                  f"{DPI_MAX} dpi):\nthe full resolution with the axes and colour bar around it.")
+            self.match.setWhatsThis(self.match.toolTip() + f"\n\nA map too small for {DPI_MIN} dpi gets a smaller "
+                                    f"figure at {DPI_MIN} dpi instead. With no margins: the map's own pixels, "
+                                    "unresampled.")
             drow.addWidget(self.match)
             drow.addStretch(1)
             form.addRow("Resolution", drow)
@@ -635,8 +669,10 @@ def _dialog_class():
             self.transparent = q["QCheckBox"]("Transparent background")
             self.transparent.setToolTip("No white behind the axes and text (PNG, TIFF, PDF, SVG)")
             pv.addWidget(self.transparent)
-            left.addWidget(pic)
-            # ---- overlays
+            return pic
+
+        def _build_overlays(self):
+            """The 'Colour bar and overlays' group."""
             ov = q["QGroupBox"]("Colour bar and overlays")
             ol = q["QVBoxLayout"](ov)
             self.colorbar = q["QCheckBox"]("Colour bar")
@@ -651,8 +687,10 @@ def _dialog_class():
             self.voids.setToolTip("With the outlines drawn, a CSV of those voids is written beside a saved map")
             ol.addWidget(self.arrows)
             ol.addWidget(self.voids)
-            left.addStretch(1)
-            # ---- title
+            return ov
+
+        def _build_title(self):
+            """The 'Title' group: the title (or a typed one) and the figure grid's panel titles."""
             tg = q["QGroupBox"]("Title")
             tl = q["QVBoxLayout"](tg)
             self.title = q["QCheckBox"]("Title")
@@ -668,8 +706,10 @@ def _dialog_class():
             self.panel_titles = q["QCheckBox"]("Panel titles (the figure grid)")
             self.panel_titles.setToolTip("Each panel's title, or its small label inside when the axes are merged")
             tl.addWidget(self.panel_titles)
-            right.addWidget(tg)
-            # ---- axes
+            return tg
+
+        def _build_axes(self):
+            """The 'Axes' group: frame, ticks, tick labels, axis names and their unit."""
             ag = q["QGroupBox"]("Axes")
             al = q["QVBoxLayout"](ag)
             arow = q["QHBoxLayout"]()
@@ -707,14 +747,10 @@ def _dialog_class():
             self.unit.setToolTip("The unit of the tick values and of the axis names")
             urow.addWidget(self.unit, 1)
             al.addLayout(urow)
-            right.addWidget(ag)
-            right.addWidget(ov)
-            right.addStretch(1)
-            # ---- buttons
-            self.note = q["QLabel"]("")
-            self.note.setWordWrap(True)
-            self.note.setStyleSheet("color: gray")
-            v.addWidget(self.note)
+            return ag
+
+        def _build_buttons(self, can_save: bool):
+            """Reset to Standard, then Cancel, OK and Save…."""
             brow = q["QHBoxLayout"]()
             self.defaults_btn = q["QPushButton"]("Reset to Standard")
             self.defaults_btn.setToolTip("Back to what was always saved (the Standard preset)")
@@ -734,19 +770,7 @@ def _dialog_class():
             self.save_btn.setEnabled(bool(can_save))
             self.save_btn.clicked.connect(self._save)
             brow.addWidget(self.save_btn)
-            v.addLayout(brow)
-            self._fill(self.opened)
-            self._select_preset()
-            self.preset.currentIndexChanged.connect(self._preset_picked)
-            for wdg in (self.kind_figure, self.kind_full, self.match, self.transparent, self.colorbar,
-                        self.colorbar_label, self.arrows, self.voids, self.title, self.panel_titles, self.frame,
-                        self.ticks, self.tick_labels, self.axis_names, self.units):
-                wdg.toggled.connect(self._edited)
-            for wdg in (self.format, self.width_unit, self.margins, self.unit):
-                wdg.currentIndexChanged.connect(self._edited)
-            for wdg in (self.dpi, self.width, self.pad, self.font_scale):
-                wdg.valueChanged.connect(self._edited)
-            self._sync()
+            return brow
 
         # -------------------------------------------------------- widgets <-> options
         def _fill(self, o: dict):

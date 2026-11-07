@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import figsave as FS  # noqa: E402  (the Save options: presets, units, full resolution)
 import grids as G  # noqa: E402
 import runspec as rs  # noqa: E402
+from app_widgets import tip_auto  # noqa: E402  (a long tooltip: its first sentence, the whole text the What's This)
 # its parts, one module each (ExploreControls' mixins; the classes and functions re-exported, explore.<name> as
 # before): explore_canvas the map widgets, explore_grid the figure grid, explore_save Save image, explore_server the
 # point-query server, explore_voids the void outlines, explore_zoom the zoom, explore_3d the 3D view
@@ -49,11 +50,11 @@ from explore_zoom import (ExactZoomWorker, ZoomMixin, _fields_bytes, _fmt_durati
 VOID_TOOL = rs.REPO_ROOT / "python" / "tools" / "void_outlines.py"     # the voids of one snapshot, as JSON
 VOID_CACHE_DIR = None        # the helper's catalogue cache: None = the pipeline's own (config.CACHE_DIR); tests pin a temp one
 VOID_TIP = ("Outline the voids on the map: a circle where each distinct, well-resolved void's sphere of radius R_v "
-            "(where the smoothed density around its centre rises back to the mean) cuts this slice. The analysis "
-            "pipeline's own catalogue at its production smoothing, found once per snapshot (about a minute) and cached; "
-            "a catalogue that is not cached and would not fit in the free memory is not built, and it says so. "
-            "Point at an outline for its R_v, R_eff and central δ; click it for the whole entry. Saved images and the "
-            "figure grid carry the outlines, and a saved PNG gets a CSV table of the voids beside it.")
+            "cuts this slice. R_v is where the smoothed density around its centre rises back to the mean. The "
+            "analysis pipeline's own catalogue at its production smoothing, found once per snapshot (about a minute) "
+            "and cached; a catalogue that is not cached and would not fit in the free memory is not built, and it "
+            "says so. Point at an outline for its R_v, R_eff and central δ; click it for the whole entry. Saved "
+            "images and the figure grid carry the outlines, and a saved PNG gets a CSV table of the voids beside it.")
 # a heavy action beside a running DTFE job starts without a question only when it fits in the free memory less
 # this (void_outlines.HEADROOM_BYTES, the catalogue build's own margin)
 HEAVY_HEADROOM_GB = 4.0
@@ -71,14 +72,14 @@ PS_GRADIENT_TIP = ("How a phase-space output's velocity divergence, shear, vorti
                    "panel of a phase-space output says which it shows.")
 VOID_REFF_TIP = ("Also draw each void's R_eff = (a b c)^⅓ of its fitted ellipsoid, dashed, around the same centre: "
                  "R_eff is about 1.6 R_v, the open question of which radius describes the void")
-VOID_RANGE_TIP = ("Draw only the voids of this size ('any' = no bound): by R_v on the map, the figure grid, the saved "
-                  "images and their CSV and the 3D view's spheres; by R_eff when the 3D view draws the fitted "
-                  "ellipsoids. A few voids have an R_v far larger than their ellipsoid (it never returns to the mean "
-                  "nearby): an upper bound hides them")
-VOID_SIGMA_TIP = ("The smoothing the voids are found at. 'production' = the analysis scripts' own (10 cells: a "
-                  "different physical scale in every box) and their cached catalogue; a value in Mpc smooths every "
-                  "box at that scale (the cross-box comparison), with its own cached catalogue, built once per "
-                  "snapshot and smoothing")
+VOID_RANGE_TIP = ("Draw only the voids of this size ('any' = no bound): by R_v, or by R_eff where the 3D view draws "
+                  "the fitted ellipsoids. R_v holds on the map, the figure grid, the saved images and their CSV and "
+                  "the 3D view's spheres. A few voids have an R_v far larger than their ellipsoid (it never returns "
+                  "to the mean nearby): an upper bound hides them")
+VOID_SIGMA_TIP = ("The smoothing the voids are found at: the analysis scripts' own ('production') or one scale in Mpc "
+                  "for every box. Production: the scripts' own 10 cells (a different physical scale in every box) and "
+                  "their cached catalogue; a value in Mpc smooths every box at that scale (the cross-box comparison), "
+                  "with its own cached catalogue, built once per snapshot and smoothing")
 
 CMAPS = ["viridis", "magma", "inferno", "cividis", "plasma", "RdBu_r", "coolwarm", "gray", "tab10"]
 AXES = ["x", "y", "z"]
@@ -88,10 +89,10 @@ GRID_LAYOUTS = [(1, 2), (2, 1), (2, 2), (1, 3), (3, 1), (2, 3), (3, 2), (3, 3)]
 GRID_NONE = ""
 GRID_COLS = ("Simulation", "Redshift", "Type", "Field", "Component")      # the composer's table
 _C_SIM, _C_SNAP, _C_TYPE, _C_FLD, _C_CMP = range(5)              # the output combo's first entry: an empty panel
-GRID_MERGE_TIP = ("The panels touch (no gaps, shared axes, tick labels on the outer edges only), each carries a small "
-                  "label with what differs between them, and the colour bars sit in one column at the right: one bar "
-                  "when every panel shows the same field, one per field otherwise. Possible only when every panel "
-                  "comes from a box of the same size; 'one colour range per field' is implied.")
+GRID_MERGE_TIP = ("The panels touch, with shared axes and their colour bars in one column at the right. No gaps, tick "
+                  "labels on the outer edges only, each panel carries a small label with what differs between them; "
+                  "one bar when every panel shows the same field, one per field otherwise. Possible only when every "
+                  "panel comes from a box of the same size; 'one colour range per field' is implied.")
 # the Output menus' first step is a simulation, or one of these two groups (no simulation has a space
 # in its name): the custom-snapshot runs, and the grid files opened by hand with the … button
 GROUP_CUSTOM = "custom snapshots"
@@ -175,17 +176,6 @@ def pts_plane(o, side, field: str, component: str):
     return np.ascontiguousarray(arr.T), pp.side, f       # [u, v]: the slice map's plane[row = first in-plane axis]
 
 
-def _smoothed(plane, sigma: float):
-    """Gaussian smoothing in cells (periodic); unchanged without scipy."""
-    if sigma > 0:
-        try:
-            from scipy.ndimage import gaussian_filter
-            return gaussian_filter(plane, sigma, mode="wrap")
-        except ImportError:
-            pass
-    return plane
-
-
 # ==================================================================== workers
 class SliceWorker(QObject):
     """Reads and colours one slice off the GUI thread; only the latest request is served. The figure
@@ -224,16 +214,16 @@ class SliceWorker(QObject):
             pts_side = pts_factor = None
             if req.get("pts"):                      # the point-evaluated hi-res slice in place of the grid's
                 plane, pts_side, pts_factor = pts_plane(out, req["pts"], req["field"], req["component"])
-                plane = _smoothed(plane, req.get("smooth", 0))
+                plane = G.smoothed(plane, req.get("smooth", 0))
             else:                                   # (a phase-space output's velocity derivatives: the family
                 grad = req.get("ps_gradient", "stored")     # asked for, grids.OutputSet.slice)
-                plane = _smoothed(out.slice(req["field"], req["axis"], req["index"], req["component"], grad),
-                                  req.get("smooth", 0))
+                plane = G.smoothed(out.slice(req["field"], req["axis"], req["index"], req["component"], grad),
+                                   req.get("smooth", 0))
             planes = None
             if req.get("compare") is not None:      # B read and smoothed the same way; the map is A - B or log10 A/B
-                b = _smoothed(req["compare"].slice(req["field"], req["axis"], req["index"], req["component"],
-                                                   req.get("ps_gradient", "stored")),
-                              req.get("smooth", 0))
+                b = G.smoothed(req["compare"].slice(req["field"], req["axis"], req["index"], req["component"],
+                                                    req.get("ps_gradient", "stored")),
+                               req.get("smooth", 0))
                 planes = (plane, b)
                 plane = compare_planes(plane, b, req["compare_mode"])
             # image: horizontal = the first remaining axis, vertical = the second, increasing upward
@@ -306,20 +296,17 @@ class ExploreView(QWidget):
     def __init__(self):
         super().__init__()
         v = QVBoxLayout(self)
-        head = QHBoxLayout()
         self.title = QLabel("<b>Explore</b>")
-        head.addWidget(self.title, 1)
+        v.addWidget(self.title)
         # one dialog for every save: presets, title, axes, units, colour bar, overlays, margins, full resolution,
-        # format; remembered between sessions
+        # format; remembered between sessions. The buttons are the view's; ExploreControls places them in the
+        # left pane's Map group, beside the controls they save the result of
         self.save_opts_btn = QPushButton("Save options…")
-        self.save_opts_btn.setToolTip("How Save image and Save figure write the picture: a preset (Standard, "
-                                      "Publication, Bare image, Slide, your last choice) or each option: title, "
-                                      "frame, ticks, axis names and unit, colour bar, arrows and void outlines, "
-                                      "margins, dpi, width, full resolution, PNG, PDF, SVG or TIFF")
-        head.addWidget(self.save_opts_btn)
+        tip_auto(self.save_opts_btn, "How Save image and Save figure write the picture: a preset or each option. "
+                                     "The presets: Standard, Publication, Bare image, Slide, your last choice; the "
+                                     "options: title, frame, ticks, axis names and unit, colour bar, arrows and void "
+                                     "outlines, margins, dpi, width, full resolution, PNG, PDF, SVG or TIFF")
         self.save_btn = QPushButton("Save image…")
-        head.addWidget(self.save_btn)
-        v.addLayout(head)
         self.canvas = ImageCanvas()
         v.addWidget(self.canvas, 1)
         self.view3d = View3D()                  # in the canvas's place while 'Show in 3D' is on
@@ -337,8 +324,12 @@ class ExploreView(QWidget):
         self.streams.setHorizontalHeaderLabels(["stream", "ρ/ρ̄", "v (km/s)", "|v|", "came from q (Mpc)", "value"])
         self.streams.verticalHeader().setVisible(False)
         self.streams.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.streams.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.streams.horizontalHeader().setStretchLastSection(True)
+        hdr = self.streams.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.Stretch)        # 'came from q': three coordinates
+        # ResizeToContents measures 'ρ/ρ̄' without its combining bar: a few characters more keep the header whole
+        fm = hdr.fontMetrics()
+        hdr.setMinimumSectionSize(fm.horizontalAdvance("ρ/ρ̄") + 3 * fm.averageCharWidth())
         self.streams.setMaximumHeight(170)
         v.addWidget(self.streams)
 
@@ -399,6 +390,20 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self._keep: dict | None = None
 
         col = QVBoxLayout(self)
+        # the left pane, one group at a time (each _build_* adds its group to 'col'; the attribute names are
+        # the ones the tests and the mixins use)
+        self._build_output(col)
+        self._build_map(col)
+        self._build_3d(col)                     # the 3D view's group (explore_3d)
+        self._build_grid(col)
+        self._build_streams(col)
+        self._build_zoom(col)
+        col.addStretch(1)
+        self._build_workers()
+        self._wire_view(view)
+
+    def _build_output(self, col):
+        """The 'Output' group: the simulation, its snapshot by redshift and (several on one) the output."""
         g = QGroupBox("Output")
         f = QFormLayout(g)
         self._out_form = f
@@ -441,6 +446,9 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         f.addRow("", self.info)
         col.addWidget(g)
 
+    def _build_map(self, col):
+        """The 'Map' group: field, component, the void outlines and their options, the slice, colours, range, smoothing,
+        the comparison and the hi-res slice."""
         g = QGroupBox("Map")
         f = QFormLayout(g)
         self._out_form_map = f
@@ -455,17 +463,13 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self.vectors.setToolTip("Draw the in-plane components as arrows over the map")
         self.vectors.toggled.connect(self.render)
         crow.addWidget(self.vectors)
-        self.voids = QCheckBox("voids")
-        self.voids.setToolTip(VOID_TIP)
-        self.voids.toggled.connect(self._voids_toggled)
-        crow.addWidget(self.voids)
         f.addRow("Component", crow)
         # a phase-space output's velocity derivatives: the mean field (computed) or the stored stream average
         self.ps_gradient = QComboBox()
         for text, mode in PS_GRADIENT_ITEMS:
             self.ps_gradient.addItem(text, mode)
         self.ps_gradient.setCurrentIndex(self.ps_gradient.findData(G.PS_GRADIENT_DEFAULT))
-        self.ps_gradient.setToolTip(PS_GRADIENT_TIP)
+        tip_auto(self.ps_gradient, PS_GRADIENT_TIP)
         self.ps_gradient.currentIndexChanged.connect(self._ps_gradient_changed)
         f.addRow("PS derivatives", self.ps_gradient)
         self.ps_gradient_note = QLabel("")
@@ -473,11 +477,14 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self.ps_gradient_note.setStyleSheet("color: gray")
         f.addRow("", self.ps_gradient_note)
         f.setRowVisible(self.ps_gradient_note, False)
-        # the void inspector and its options: R_eff outlines too (dashed), the smoothing the voids are
-        # found at, the void last clicked and a jump to the slice through its centre
+        # the void outlines (the tick is the row's label) and their options: R_eff outlines too (dashed), the
+        # smoothing the voids are found at, the void last clicked and a jump to the slice through its centre
+        self.voids = QCheckBox("Voids")
+        tip_auto(self.voids, VOID_TIP)
+        self.voids.toggled.connect(self._voids_toggled)
         vrow = QHBoxLayout()
         self.void_reff = QCheckBox("R_eff too (dashed)")
-        self.void_reff.setToolTip(VOID_REFF_TIP)
+        tip_auto(self.void_reff, VOID_REFF_TIP)
         self.void_reff.toggled.connect(self._void_reff_toggled)
         vrow.addWidget(self.void_reff)
         vrow.addWidget(QLabel("σ"))
@@ -487,7 +494,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self.void_sigma.setSingleStep(0.1)
         self.void_sigma.setSuffix(" Mpc")
         self.void_sigma.setSpecialValueText("production")
-        self.void_sigma.setToolTip(VOID_SIGMA_TIP)
+        tip_auto(self.void_sigma, VOID_SIGMA_TIP)
         self.void_sigma.setKeyboardTracking(False)          # one search per value typed, not per keystroke
         self.void_sigma.valueChanged.connect(self._void_sigma_changed)
         vrow.addWidget(self.void_sigma)
@@ -497,7 +504,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self.void_goto.clicked.connect(self._void_goto)
         vrow.addWidget(self.void_goto)
         vrow.addStretch(1)
-        f.addRow("Voids", vrow)
+        f.addRow(self.voids, vrow)
         # the voids drawn, by size: R from .. to .. (0 = no bound), and how many that leaves
         srow = QHBoxLayout()
         srow.addWidget(QLabel("R from"))
@@ -508,7 +515,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
             w.setSingleStep(1.0)
             w.setSuffix(" Mpc")
             w.setSpecialValueText("any")
-            w.setToolTip(VOID_RANGE_TIP)
+            tip_auto(w, VOID_RANGE_TIP)
             w.setKeyboardTracking(False)            # one redraw per value typed, not per keystroke
             w.valueChanged.connect(self._void_range_changed)
         srow.addWidget(self.void_rmin)
@@ -584,9 +591,9 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self.compare = QComboBox()
         self.compare.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.compare.setMinimumContentsLength(12)
-        self.compare.setToolTip("Show this map minus another output of the same grid (the same cells: another "
-                                "estimator, prefix, precision or deposit of this snapshot, or another snapshot), "
-                                "on a diverging scale centred on 0. Slice maps only: a zoom shows A alone")
+        tip_auto(self.compare, "Show this map minus another output of the same grid, on a diverging scale centred "
+                               "on 0. The same grid: the same cells, from another estimator, prefix, precision or "
+                               "deposit of this snapshot, or another snapshot. Slice maps only: a zoom shows A alone")
         self.compare.currentIndexChanged.connect(self._compare_changed)
         cmp_row.addWidget(self.compare, 1)
         self.compare_mode = QComboBox()
@@ -599,17 +606,22 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self.pts_combo = QComboBox()
         self.pts_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.pts_combo.setMinimumContentsLength(12)
-        self.pts_combo.setToolTip("Show the point-evaluated hi-res slice of this output ('.pts_*', the Pipeline's "
+        tip_auto(self.pts_combo, "Show the point-evaluated hi-res slice of this output ('.pts_*', the Pipeline's "
                                   "image plane: the field at each pixel centre, no grid) in place of the grid slice. "
                                   "Planes of one size are listed with their axis: the files do not say which they are")
         self.pts_combo.currentIndexChanged.connect(self._pts_changed)
         f.addRow("Hi-res slice", self.pts_combo)
         f.setRowVisible(self.pts_combo, False)
         self._pts_side = None
+        save_row = QHBoxLayout()                # the view's save buttons, here beside the controls
+        save_row.addWidget(self.view.save_btn)
+        save_row.addWidget(self.view.save_opts_btn)
+        save_row.addStretch(1)
+        f.addRow("Save", save_row)
         col.addWidget(g)
 
-        self._build_3d(col)                     # the 3D view's group (explore_3d)
-
+    def _build_grid(self, col):
+        """The 'Compare: a figure grid' group: the layout, the panels' table, the fill buttons, show and save."""
         g = QGroupBox("Compare: a figure grid")
         v = QVBoxLayout(g)
         v.addWidget(self._note("Several maps as one figure: a field at several redshifts, or several fields of one "
@@ -634,7 +646,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self.grid_table.horizontalHeader().setSectionResizeMode(_C_CMP, QHeaderView.ResizeToContents)
         self.grid_table.setSelectionMode(QAbstractItemView.NoSelection)
         self.grid_table.setMaximumHeight(9 * 26 + 30)
-        self.grid_table.setToolTip("One row per panel, in reading order: the simulation, its snapshot by redshift, "
+        tip_auto(self.grid_table, "One row per panel, in reading order: the simulation, its snapshot by redshift, "
                                    "which of that snapshot's outputs (DTFE, PS-DTFE, another prefix), the field and "
                                    "the component. A row without a simulation leaves that panel blank. A row keeps "
                                    "its output type across redshifts when the snapshot has it.")
@@ -681,7 +693,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self.grid_shared.toggled.connect(lambda _on: self.show_grid(True) if self._grid_shown else None)
         orow.addWidget(self.grid_shared)
         self.grid_merge = QCheckBox("merge the axes: one colour bar")
-        self.grid_merge.setToolTip(GRID_MERGE_TIP)
+        tip_auto(self.grid_merge, GRID_MERGE_TIP)
         self.grid_merge.toggled.connect(self._grid_merge_toggled)
         orow.addWidget(self.grid_merge)
         orow.addStretch(1)
@@ -693,10 +705,12 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         col.addWidget(g)
         self._grid_sync_rows()
 
+    def _build_streams(self, col):
+        """The 'Streams at a point' group: the query server, its cache folder and residency."""
         g = QGroupBox("Streams at a point")
         v = QVBoxLayout(g)
         v.addWidget(self._note("With the server running, click the map."))
-        g.setToolTip("A query server on this output's snapshot: a click lists every stream at that point, with "
+        tip_auto(g, "A query server on this output's snapshot: a click lists every stream at that point, with "
                      "its density, velocity and the Lagrangian position its matter came from. A big "
                      "snapshot is served as partitions kept on disk in the cache folder.")
         cf = QFormLayout()
@@ -712,7 +726,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         v.addLayout(cf)
         self.resident = QSpinBox(minimum=0, maximum=512)
         self.resident.setSpecialValueText("auto (the memory budget)")
-        self.resident.setToolTip("A partitioned server keeps this many partition tessellations in memory (the rest "
+        tip_auto(self.resident, "A partitioned server keeps this many partition tessellations in memory (the rest "
                                  "stay in the cache folder and are reloaded when a click or zoom needs them). More "
                                  "keeps repeated zooms fast at the cost of memory; auto fits them to free memory")
         cf.addRow("Partitions in memory", self.resident)
@@ -732,6 +746,8 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         v.addLayout(brow)
         col.addWidget(g)
 
+    def _build_zoom(self, col):
+        """The 'Zoom' group: the resolution, exact, cancel, back and out, the progress and the state line."""
         g = QGroupBox("Zoom")
         v = QVBoxLayout(g)
         v.addWidget(self._note("With the server running, drag a rectangle on the map: the region is evaluated "
@@ -747,9 +763,9 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
                                  "a second or two on a small box)")
         zrow.addWidget(self.zoom_res)
         self.zoom_exact = QCheckBox("exact")
-        self.zoom_exact.setToolTip("Run DTFE / PS-DTFE on the dragged region with the exact deposit: the region "
-                                   "as a grid of that many cells across, one slice cell thick, every cell the exact "
-                                   "volume average (mass is conserved). A whole run, seconds to minutes; the GPU is "
+        tip_auto(self.zoom_exact, "Run DTFE / PS-DTFE on the dragged region with the exact deposit, one slice cell "
+                                  "thick: every cell the exact volume average (mass is conserved). The region is a "
+                                  "grid of that many cells across. A whole run, seconds to minutes; the GPU is "
                                    "used when the program has it. A phase-space run tessellates the whole box as "
                                    "the original run did (periodic or not) and deposits only into the region, so "
                                    "the zoom shows exactly what a full run at that resolution would show there. It "
@@ -791,8 +807,9 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         v.addWidget(self.zoom_state)
         col.addWidget(g)
 
-        col.addStretch(1)
-
+    def _build_workers(self):
+        """The slice worker, the query server and the exact zoom's worker, wired (their threads start on first use:
+        _threads), and the zoom's timing and memory."""
         # workers: their threads start on first use (a window that never opens Explore owns none)
         self._slice_thread = self._server_thread = None
         self._slice_worker = SliceWorker()
@@ -850,6 +867,8 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self._build_timer = QTimer(self, interval=1000)
         self._build_timer.timeout.connect(self._poll_build)
 
+    def _wire_view(self, view):
+        """The right pane's signals: the map's hover, click and drag, and the save buttons."""
         view.canvas.hovered.connect(self._hover)
         view.canvas.clicked.connect(self._click)
         view.canvas.dragged.connect(self._dragged)
@@ -1391,7 +1410,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
                 "voids": self.voids.isChecked(), "void_reff": self.void_reff.isChecked(),
                 "void_sigma": self.void_sigma.value(), "ps_gradient": self.ps_gradient.currentData(),
                 "void_rmin": self.void_rmin.value(), "void_rmax": self.void_rmax.value(),
-                "void_shape": self.void3d_shape.currentData()}
+                "void_shape": self.void3d_shape.currentData(), **self.state_3d()}
 
     def restore_state(self, d: dict) -> bool:
         """Back to a remembered state when its output is still listed (selected first by refresh_outputs)."""
@@ -1404,6 +1423,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
             j = self.void3d_shape.findData(d.get("void_shape"))       # the 3D view's voids: spheres or ellipsoids
             if j >= 0:
                 self.void3d_shape.setCurrentIndex(j)
+            self.restore_state_3d(d)                                    # its style, perspective, opacity, detail
             self._refresh_server_button()       # refresh_outputs ran first: it judged the server with no snapshots
         if not d or self.current is None or str(self.current.root) != d.get("root"):
             return False
@@ -1629,7 +1649,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self.view.canvas.axes = self._canvas_axes()      # BEFORE the image: its first drawing has the margins
         self.view.canvas.set_rgb(res["rgb"])
         label = self._gradient_label(req)       # the velocity derivatives' family said
-        comp = "" if req["component"] in ("value", "") else f" [{req['component']}]"
+        comp = G.component_suffix(req["component"])
         o = req["output"]
         # the title as a function of the positions' unit (a figure saved in Mpc/h or cells says so)
         if req.get("compare") is not None:
@@ -1640,7 +1660,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
             def where(units=None):
                 return self._position_text(req, units)
         else:
-            self.view.colorbar.set(req["cmap"], res["vrange"], ("log₁₀ " if req["log"] else "") + label + comp, req["log"])
+            self.view.colorbar.set(req["cmap"], res["vrange"], G.colourbar_label(label, req), req["log"])
             head = f"<b>{label}{comp}</b> — {o.title} — "
             sd, fct = self._pts_side, res.get("pts_factor") or 1
 

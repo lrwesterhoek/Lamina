@@ -16,6 +16,7 @@ from PySide6.QtWidgets import QApplication, QComboBox
 import explore as _ex
 import figsave as FS
 import grids as G
+from app_widgets import tip_auto
 
 
 # ==================================================================== the figure grid (pure parts)
@@ -650,8 +651,8 @@ class GridMixin:
         """'merge the axes' is offered only for panels from boxes of one size; merged, the shared range is implied."""
         ok = self._grid_merge_applicable()
         self.grid_merge.setEnabled(ok)
-        self.grid_merge.setToolTip(_ex.GRID_MERGE_TIP if ok else
-                                   _ex.GRID_MERGE_TIP + "\n(greyed out: the panels come from boxes of different sizes)")
+        tip_auto(self.grid_merge, _ex.GRID_MERGE_TIP if ok else
+                 "Greyed out: the panels come from boxes of different sizes. " + _ex.GRID_MERGE_TIP)
         merged = ok and self.grid_merge.isChecked()
         self.grid_shared.setEnabled(not merged)
         user = getattr(self, "_grid_shared_user", None)

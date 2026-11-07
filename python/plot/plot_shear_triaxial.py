@@ -21,30 +21,21 @@ from dtfelib import fields as dtfe
 from dtfelib.figures import save_figure
 import config
 from dtfelib import figures as style
-from dtfelib import make_parser, sim_dir, add_ps_gradient_arg, mean_field_wanted
+from dtfelib import make_parser, snapdir_path, add_ps_gradient_arg, mean_field_wanted
+from dtfelib import snapshot_series
 from dtfelib.io import FieldSet
 
 style.apply()
 
 OUTPUT_DIR = config.figures_path('shear')
 
-SMOOTHING_SIGMA = config.SMOOTHING_SIGMA_CELLS
-MAPS_SIGMA = config.SHEAR_MAPS_SIGMA
 
-DPI = config.DPI
 
-SNAPSHOT_TO_REDSHIFT = config.SNAPSHOT_TO_REDSHIFT
 
 SLICE_PLANES = config.SLICE_PLANES
 
 
-def smooth_components(field, sigma):
-    if sigma <= 0:
-        return field
-    out = np.empty_like(field)
-    for c in range(field.shape[-1]):
-        out[..., c] = dtfe.smooth_field(field[..., c], sigma=sigma)
-    return out
+smooth_components = dtfe.smooth_components     # per component, dtfe.smooth_field (periodic); sigma <= 0: as is
 
 
 def shear_tensor_slice_from_5comp(velShear_field, slice_dim, index=None):
@@ -101,7 +92,7 @@ def visualize_shear_magnitude(shear_slice, slice_dim, redshift, box_size, save_p
     cbar.set_label('Shear Magnitude [km/s/Mpc]')
     ax.set_aspect('equal', adjustable='box')
     plt.tight_layout()
-    save_figure(fig, save_path, dpi=DPI, bbox_inches='tight')
+    save_figure(fig, save_path, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -119,7 +110,7 @@ def visualize_triaxiality(T_slice, slice_dim, redshift, box_size, save_path):
     cbar.set_label('Triaxiality')
     ax.set_aspect('equal', adjustable='box')
     plt.tight_layout()
-    save_figure(fig, save_path, dpi=DPI, bbox_inches='tight')
+    save_figure(fig, save_path, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -167,31 +158,26 @@ def compute_snapshot_slices(fs, mean_field=True):
     out = {'source': source}
 
     print(f"  Smoothing components for statistics "
-          f"(sigma = {SMOOTHING_SIGMA} cells)")
-    out['stats_planes'] = plane_products(smooth_components(field, SMOOTHING_SIGMA))
+          f"(sigma = {config.SMOOTHING_SIGMA_CELLS} cells)")
+    out['stats_planes'] = plane_products(smooth_components(field, config.SMOOTHING_SIGMA_CELLS))
 
-    if MAPS_SIGMA == SMOOTHING_SIGMA:
+    if config.SHEAR_MAPS_SIGMA == config.SMOOTHING_SIGMA_CELLS:
         out['map_planes'] = out['stats_planes']
     else:
-        print(f"  Smoothing components for maps (sigma = {MAPS_SIGMA} cells)")
-        out['map_planes'] = plane_products(smooth_components(field, MAPS_SIGMA))
+        print(f"  Smoothing components for maps (sigma = {config.SHEAR_MAPS_SIGMA} cells)")
+        out['map_planes'] = plane_products(smooth_components(field, config.SHEAR_MAPS_SIGMA))
     return out
 
 
 def main():
-    parser = make_parser("Shear magnitude and triaxiality slice maps + statistics.")
     # For this series script --snap restricts the run to ONE snapshot; the default
     # (no --snap) keeps the original behavior of processing the whole redshift series.
-    snap_action = parser._option_string_actions['--snap']
-    snap_action.default = None
-    snap_action.help = "process only this snapshot (default: full snapshot series)"
+    parser = make_parser("Shear magnitude and triaxiality slice maps + statistics.", snap_default=None,
+                         snap_help="process only this snapshot (default: full snapshot series)")
     add_ps_gradient_arg(parser)
     args = parser.parse_args()
 
-    if args.snap is not None:
-        snapshots = [f"{args.snap:03d}"]
-    else:
-        snapshots = list(SNAPSHOT_TO_REDSHIFT)
+    snapshots = [snapshot for snapshot, _ in snapshot_series(args)]
 
     print("Starting shear analysis")
     print(f"Simulation: {args.sim} | method: {args.method}")
@@ -199,11 +185,11 @@ def main():
 
     results = {}
     for snapshot in snapshots:
-        z_cfg = SNAPSHOT_TO_REDSHIFT.get(snapshot)
+        z_cfg = config.SNAPSHOT_TO_REDSHIFT.get(snapshot)
         z_txt = f" (z={z_cfg:.2f})" if z_cfg is not None else ""
         print(f"\nProcessing snapshot {snapshot}{z_txt}")
         try:
-            fs = FieldSet(sim_dir(args.sim, args.data_root) / f"snapdir_{snapshot}",   # flat or per-family
+            fs = FieldSet(snapdir_path(args.sim, snapshot, args.data_root),   # flat or per-family
                           method=args.method, averaged=not args.raw, prefix=args.prefix)
             r = compute_snapshot_slices(fs, mean_field=mean_field_wanted(args))
         except FileNotFoundError:
@@ -219,7 +205,7 @@ def main():
         if r is not None:
             r['redshift'] = z_cfg if z_cfg is not None else fs.meta.redshift
             r['box_mpc'] = fs.meta.box_mpc
-            r['smoothing_mpc'] = SMOOTHING_SIGMA * fs.cell_mpc
+            r['smoothing_mpc'] = config.SMOOTHING_SIGMA_CELLS * fs.cell_mpc
             results[snapshot] = r
 
     if not results:
@@ -229,7 +215,7 @@ def main():
     all_mag = np.concatenate([r['map_planes'][d]['magnitude'].ravel()
                               for r in results.values() for d in (0, 1, 2)])
     norm = style.norm_positive_log(data=all_mag, field='shear')
-    print(f"\nShared shear map scale (sigma = {MAPS_SIGMA} cells): "
+    print(f"\nShared shear map scale (sigma = {config.SHEAR_MAPS_SIGMA} cells): "
           f"[{norm.vmin:.3g}, {norm.vmax:.3g}] km/s/Mpc")
 
     stats_lines = [
@@ -271,9 +257,9 @@ def main():
             f.write(f"Snapshot: {snapshot}, Redshift: {redshift:.2f}\n")
             f.write(f"{'=' * 50}\n\n")
             f.write(f"Data source: {r['source']}\n")
-            f.write(f"Statistics smoothing: {SMOOTHING_SIGMA} cells "
+            f.write(f"Statistics smoothing: {config.SMOOTHING_SIGMA_CELLS} cells "
                     f"({r['smoothing_mpc']:.2f} Mpc); "
-                    f"maps drawn at {MAPS_SIGMA} cells (visualization)\n\n")
+                    f"maps drawn at {config.SHEAR_MAPS_SIGMA} cells (visualization)\n\n")
             f.write("Shear magnitude [km/s/Mpc]:\n")
             f.write(f"  Mean: {np.mean(mag):.3f}\n")
             f.write(f"  Std: {np.std(mag):.3f}\n")

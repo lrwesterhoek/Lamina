@@ -140,6 +140,101 @@ struct ConcurrentTriangulationGuard
     ~ConcurrentTriangulationGuard() { --dtfeTriangulationsRemaining; }
 };
 
+/* THE LOOK-AHEAD of both partition loops (psRunPartitionLoop, dtfePartitionedRun; their comments say why). The
+   partitions in 'order' are deposited in that order on this thread (deposit(i, P)), each prepared before
+   (prepare(i, build, P)): the first in turn, every next one with its tessellation built (build = true) on a thread of
+   its own while the current one deposits -- when the free memory less 4 GB of headroom holds the needBytes(next) it
+   takes and canPrefetch(next) -- else in turn after the deposit (build = false). The preparation alone overlaps, so the
+   outputs are those of the loop without it. An exception of either stage is rethrown once the thread has joined.
+   Scope: constructed at each iteration's start and destroyed at its end, after the next partition is prepared (the PS
+   loop counts its triangulations off with it). The 'prepared in' line names the next partition by its index plus
+   label.shownBase and ends 'during <label.during>'; it is not said for a partition P.emptyPartition marks. */
+struct LookAheadLabel
+{
+    int shownBase;          // added to a partition's index on the 'prepared in' line (PS-DTFE 0, standard DTFE 1)
+    char const *during;     // what the preparation overlapped ("this deposit", "this one")
+};
+struct NoLookAheadScope {};
+template <class Scope, class Prepared, class NeedBytes, class Prepare, class Deposit, class CanPrefetch>
+static void runLookAhead(std::vector<int> const &order, NeedBytes &&needBytes, Prepare &prepare, Deposit &&deposit,
+                         CanPrefetch &&canPrefetch, LookAheadLabel const &label, int const verboseLevel)
+{
+    Prepared cur;
+    prepare( order[0], false, cur );
+    bool saidNoRoom = false;
+    for (size_t k=0; k<order.size(); ++k)
+    {
+        Scope scope;
+        (void)scope;
+        int const i = order[k];
+        Prepared next;
+        std::thread ahead;
+        std::exception_ptr aheadError;
+        bool aheadRan = false;
+        if ( k + 1 < order.size() )
+        {
+            int const nextI = order[k+1];
+            double const need = needBytes( nextI );
+            double const freeNow = autoTuneSystemFree();
+            bool const room = freeNow < 0. or freeNow - 4.e9 >= need;
+            if ( room and canPrefetch( nextI ) )
+            {
+                aheadRan = true;
+                ahead = std::thread( [&, nextI]()
+                {
+                    try { prepare( nextI, true, next ); }
+                    catch ( ... ) { aheadError = std::current_exception(); }
+                } );
+            }
+            else if ( not room and not saidNoRoom )
+            {
+                saidNoRoom = true;
+                MESSAGE::Message m( verboseLevel );
+                m << MESSAGE::cDim() << "  look-ahead paused: " << freeNow/1.e9 << " GB free, minus 4 GB headroom, "
+                  << "is below the ~" << need/1.e9 << " GB it holds; partitions are prepared in turn "
+                  << "until memory frees up\n" << MESSAGE::cReset() << MESSAGE::Flush;
+            }
+        }
+        try
+        {
+            deposit( i, cur );
+        }
+        catch ( ... )
+        {
+            if ( ahead.joinable() ) ahead.join();
+            throw;
+        }
+        if ( ahead.joinable() ) ahead.join();
+        if ( aheadError ) std::rethrow_exception( aheadError );
+        if ( aheadRan and verboseLevel > 0 and not next.emptyPartition )
+        {
+            MESSAGE::Message m( verboseLevel );
+            m << MESSAGE::cDim() << "  look-ahead: partition " << order[k+1] + label.shownBase << " prepared in "
+              << MESSAGE::formatDuration( next.seconds ) << " during " << label.during << "\n" << MESSAGE::cReset()
+              << MESSAGE::Flush;
+        }
+        if ( k + 1 < order.size() )
+        {
+            if ( not aheadRan ) prepare( order[k+1], false, next );
+            cur = std::move( next );
+        }
+    }
+}
+
+// The '[partitions k/N | p%]  elapsed ..., ETA ~...' line of both partition loops. The caller rounds the percentage:
+// the two loops form it in different orders (100*(k/N) and (100*k)/N), which round apart at exact halves (23 of 40),
+// and each keeps its own.
+static void partitionProgress(int const verboseLevel, int const done, int const total, int const percent,
+                              double const elapsed, double const eta)
+{
+    MESSAGE::Message prog( verboseLevel );
+    prog << MESSAGE::cGreen() << "  [partitions " << done << "/" << total
+         << " | " << percent << "%]" << MESSAGE::cReset()
+         << MESSAGE::cDim() << "  elapsed " << MESSAGE::formatDuration(elapsed)
+         << ( done<total ? ", ETA ~" + MESSAGE::formatDuration(eta) : ", done" )
+         << MESSAGE::cReset() << "\n" << MESSAGE::Flush;
+}
+
 // Particle data plus the resolved per-run options produced by the common DTFE setup.
 struct DTFE_State {
     vector<Particle_data> particles;
@@ -1205,44 +1300,20 @@ static void psServeComposite(DTFE_State &state, User_options &userOptions, PSPar
     psServeCompositeRun( state.options );   // answers requests until stdin closes; never returns
 }
 
-// Sizes the main grids and the accumulators reserveMemory leaves out (streams, caustic bits, exact touches).
+// Sizes the main grids: the selected fields and the PS accumulators the options ask for (streams, hidden streams,
+// caustic bits, exact touches), one pass over the field list per side (Quantities::reserveMemory).
 static void psReserveGrids(DTFE_State &state, Quantities *uQuantities, Quantities *aQuantities)
 {
     size_t mainGrid[NO_DIM];                       // the main grid: the --ps-window cells, else the full grid
     state.options.outputGridSize( mainGrid );
-    uQuantities->reserveMemory( mainGrid, state.options.uField );
-    aQuantities->reserveMemory( mainGrid, state.options.aField );
-
-    // pre-size the stream_count accumulators (reserveMemory does not cover them) so
-    // addFromSubgrid does not write past an unsized vector
-    size_t totalGrid = 1;
-    for (int d=0; d<NO_DIM; ++d) totalGrid *= mainGrid[d];
-    if ( state.options.uField.selected() )
-    {
-        ScratchAlloc::zeroAssign(uQuantities->stream_count, totalGrid, Real(0.));
-        ScratchAlloc::zeroAssign(uQuantities->hidden_streams, totalGrid, Real(0.));
-    }
-    if ( state.options.aField.selected() )
-    {
-        ScratchAlloc::zeroAssign(aQuantities->stream_count, totalGrid, Real(0.));
-        ScratchAlloc::zeroAssign(aQuantities->hidden_streams, totalGrid, Real(0.));
-    }
-    if ( state.options.psCaustics )
-    {
-        if ( state.options.uField.selected() )
-            ScratchAlloc::zeroAssign(uQuantities->caustic_bits, totalGrid, Real(0.));
-        if ( state.options.aField.selected() )
-            ScratchAlloc::zeroAssign(aQuantities->caustic_bits, totalGrid, Real(0.));
-    }
-    if ( state.options.psExactDeposit )
-    {
-        if ( state.options.uField.selected() )
-            ScratchAlloc::zeroAssign(uQuantities->tet_touch, totalGrid, Real(0.));
-        if ( state.options.aField.selected() )
-            ScratchAlloc::zeroAssign(aQuantities->tet_touch, totalGrid, Real(0.));
-    }
+    // pre-sized NOW, before the partition loop, so they are allocated when its memory gate reads the free memory
+    // (and with '--scratch-dir' counted on the line below). Not for the merge's sake: it grows a grid it finds
+    // unsized at the first values it adds (quantities.cc addFromSubgrid), which is how the moment weights come
+    uQuantities->reserveMemory( mainGrid, state.options.uField, &state.options );
+    aQuantities->reserveMemory( mainGrid, state.options.aField, &state.options );
     if ( not state.options.scratchDir.empty() )
     {
+        // tests/ps_scratch_check.sh (section A) parses "<N> zero-filled in memory" from this line: keep the wording
         MESSAGE::Message message( state.options.verboseLevel );
         message << "SCRATCH: " << ScratchAlloc::scratchTotalAllocs() << " grid(s), "
                 << ScratchAlloc::scratchLiveBytes() / 1.e9 << " GB, on scratch files; "
@@ -1325,6 +1396,7 @@ struct StagedPartition
     bool emptyPartition = true, skipped = false;
     double bytes = 0.;          // the RAM it holds (0 when spilled)
     PSMergeSpill::File spill;   // spilled: u and a are in this file, their vectors empty
+    std::chrono::steady_clock::time_point parkedAt;   // when it parked (the 'merge time:' line's parked seconds)
 };
 // where a finished partition parks (psPartitionedRun's parkWhere)
 enum { PARK_WAIT = 0, PARK_RAM = 1, PARK_DISK = 2 };
@@ -1340,7 +1412,107 @@ struct PSPrepared
 // Leaves the memory gate when a gated partition's iteration ends (psRunPartitionLoop).
 struct GateRelease { PartitionMemoryGate *g; int pi; ~GateRelease() { if ( g ) g->leave( pi ); } };
 
-// The partition loop's shared state, references to psPartitionedRun's locals: progress, merge, spill, concurrency.
+// The staged ordered merge (psPartitionedRun's comment): its settings, fixed before the loop, and its state -- the
+// turn, the parked partitions, the spill and their counts -- shared by the partition threads under mergeMutex.
+struct PSMergeStaging
+{
+    User_options const &options;   // the run's: the scratch folder, the memory gate's partition bytes, the park room
+    bool orderedMerge = false;
+    std::mutex mergeMutex;
+    std::condition_variable mergeCv;
+    int nextMerge = 0;
+    std::map<int, StagedPartition> staged;      // finished partitions waiting for their turn (under mergeMutex)
+    double stagedBytes = 0., stagedPeakBytes = 0.;
+    size_t stagedPeakCount = 0, stagedRamCount = 0;   // parked in RAM: at most / now
+    int nStaged = 0, nWaitedTurn = 0;                  // parked (RAM or disk); waited for their turn instead
+    double stageCapBytes = -1.;                 // DTFE_MERGE_STAGE_GB: a fixed cap; < 0 = the free-memory rule
+    bool staging = false;
+    bool gateGuards = false;                    // the memory gate guards every start (parkWhere)
+    int spillMode = 0;                          // DTFE_MERGE_SPILL: -1 off, 1 every parked partition, 0 the rule
+    std::string spillWhy;
+    std::string spillDir;
+    bool spillUsable = false;
+    int nSpilled = 0, nSpillTurn = 0;
+    size_t spilledCount = 0, spilledPeakCount = 0;
+    double spilledBytes = 0., spilledPeakBytes = 0., spillWritten = 0.;
+    // the spills being written now (outside the lock): their bytes are not on the disk yet, so the room each new
+    // one is checked against must leave them out (k writers would pass one reading together)
+    double spillPendingBytes = 0.;
+    std::string parkRoomText;   // the RAM parking's budget room (psParkRoom), when one is known
+    // what the merge took over the run (psReportLoopEnd's 'merge time:' line), summed under mergeMutex: the adds into
+    // the full grids, their checkpoints (afterMerge) and the spilled sub-grids read back -- the serial work under the
+    // lock -- and the waits before it: a parked partition's from its park to its merge (its thread went on), and a
+    // thread's blocked on the lock or for its turn
+    int nMergedHere = 0;        // partitions this process merged (not the skipped ones: restored or outside the window)
+    double addSec = 0., checkpointSec = 0., spillReadSec = 0., parkedSec = 0., blockedSec = 0.;
+
+    PSMergeStaging(User_options const &o, bool const fixedMerge, int const psConcurrency) : options( o )
+    {
+        orderedMerge = o.psOrderedMerge and not fixedMerge;
+        if ( Env::isSet( "DTFE_MERGE_STAGE_GB" ) )
+            stageCapBytes = std::max( 0., Env::real( "DTFE_MERGE_STAGE_GB", 0. ) ) * 1.e9;
+        staging = orderedMerge and psConcurrency > 1 and stageCapBytes != 0.;
+        // may a partition of 'bytes' be staged now? (under mergeMutex) The gate guards every start when it has an
+        // estimate and the partitions are gated (the omp loop: not the speed split, unless asked for)
+        gateGuards = psConcurrency > 1 and o.psPartitionBytes > 0.
+                     and ( not o.psSpeedSplit or o.psOrderedMergeFlag );
+        // the spill (psPartitionedRun's comment): DTFE_MERGE_SPILL=0 off, =1 every parked partition, unset the rule
+        int const spillEnv = Env::tristate( "DTFE_MERGE_SPILL" );
+        spillMode = spillEnv == 0 ? -1 : spillEnv == 1 ? 1 : 0;
+        spillDir = PSMergeSpill::folder( o.scratchDir, spillWhy );
+        spillUsable = staging and spillMode >= 0 and spillWhy.empty();
+        if ( spillMode < 0 ) spillWhy = "DTFE_MERGE_SPILL=0";
+    }
+
+    // the bytes a partition's sub-grids hold (every accumulator, as the checkpoint counts them)
+    static double subgridBytes(Quantities &q)
+    {
+        double b = 0.;
+        PartitionCheckpoint::forEachAccumulator( q, [&](char const *, auto &v) { b += double( v.capacity() ) * double( sizeof( v[0] ) ); } );
+        return b;
+    }
+
+    // where a partition of 'bytes' parks now (under mergeMutex): 1 RAM, 2 disk, 0 nowhere (it waits its turn)
+    int parkWhere(double const bytes) const
+    {
+        if ( not staging ) return PARK_WAIT;
+        // spoken-for room on the spill disk: the writes in progress, and with '--scratch-dir' (the spill folder
+        // then) every scratch mapping in full -- a sparse file whose unwritten pages statvfs reports free
+        // (over-counting the pages already written only spills less: the fallback is the park or the wait)
+        double const reserved = spillPendingBytes
+                                + ( options.scratchDir.empty() ? 0. : double( ScratchAlloc::scratchLiveBytes() ) );
+        bool const disk = spillUsable and bytes > 0. and PSMergeSpill::room( spillDir, bytes, reserved,
+                                                                                PSMergeSpill::margin( options.scratchDir ) );
+        if ( spillMode > 0 and disk ) return PARK_DISK;   // the test hook
+        bool ram;
+        if ( stageCapBytes > 0. ) ram = stagedBytes + bytes <= stageCapBytes;
+        else
+        {
+            double const freeNow = autoTuneSystemFree();
+            if ( freeNow < 0. ) ram = stagedBytes + bytes <= 2.e9;   // free memory unknown: a small fixed room
+            else ram = freeNow - 4.e9 - ( gateGuards ? options.psPartitionBytes : 0. ) >= bytes;
+            // and within what the memory budget leaves beside the plan's predicted peak (psParkRoom says
+            // why: the free memory alone could let TNG100 z=0 park 74 GB). stagedBytes counts RAM-parked ones only
+            if ( ram and std::isfinite( options.psParkRoom ) )
+                ram = stagedBytes + bytes <= std::max( 0., options.psParkRoom );
+        }
+        if ( ram ) return PARK_RAM;
+        if ( disk ) return PARK_DISK;
+        return ( gateGuards and stageCapBytes < 0. ) ? PARK_RAM : PARK_WAIT;
+    }
+};
+
+// The partition loop's progress + ETA (psPartitionedRun's comment), updated under the merge lock.
+struct PSProgress
+{
+    int toProcess = 1;                                  // the partitions this process computes
+    std::chrono::steady_clock::time_point loopStart;
+    int done = 0;
+    std::vector<double> partCost;                       // each partition's predicted cost (psPartitionCosts)
+    double costTotal = 0., costDone = 0.;
+};
+
+// The partition loop's shared state, references to psPartitionedRun's: the run, the partitions, the merge, progress.
 struct PSLoopCtx
 {
     DTFE_State &state;
@@ -1352,41 +1524,10 @@ struct PSLoopCtx
     PSPartitionPlan &plan;
     int &psConcurrency;
     std::vector<char> &skipPartition;
-    bool const &fixedMerge;
+    bool const fixedMerge;
     PSFixedMerge::Merge &fxMerge;
-    int const &toProcess;
-    std::chrono::steady_clock::time_point const &psLoopStart;
-    int &psDone;
-    std::vector<double> const &partCost;
-    double &costTotal;
-    double &costDone;
-    bool const &orderedMerge;
-    std::mutex &mergeMutex;
-    std::condition_variable &mergeCv;
-    int &nextMerge;
-    std::map<int, StagedPartition> &staged;
-    double &stagedBytes;
-    double &stagedPeakBytes;
-    size_t &stagedPeakCount;
-    size_t &stagedRamCount;
-    int &nStaged;
-    int &nWaitedTurn;
-    double &stageCapBytes;
-    bool const &staging;
-    bool const &gateGuards;
-    int &spillMode;
-    std::string &spillWhy;
-    std::string const &spillDir;
-    bool &spillUsable;
-    int &nSpilled;
-    int &nSpillTurn;
-    size_t &spilledCount;
-    size_t &spilledPeakCount;
-    double &spilledBytes;
-    double &spilledPeakBytes;
-    double &spillWritten;
-    double &spillPendingBytes;
-    std::string &parkRoomText;
+    PSProgress &progress;
+    PSMergeStaging &merge;
 };
 
 // Says how the partitions merge: in index order with their parking and spill, or into the fixed-point grids.
@@ -1397,15 +1538,15 @@ static void psReportMergeMode(PSLoopCtx &c)
     auto &psConcurrency = c.psConcurrency;
     auto &fixedMerge = c.fixedMerge;
     auto &fxMerge = c.fxMerge;
-    auto &orderedMerge = c.orderedMerge;
-    auto &stageCapBytes = c.stageCapBytes;
-    auto &staging = c.staging;
-    auto &gateGuards = c.gateGuards;
-    auto &spillMode = c.spillMode;
-    auto &spillWhy = c.spillWhy;
-    auto &spillDir = c.spillDir;
-    auto &spillUsable = c.spillUsable;
-    auto &parkRoomText = c.parkRoomText;
+    auto &orderedMerge = c.merge.orderedMerge;
+    auto &stageCapBytes = c.merge.stageCapBytes;
+    auto &staging = c.merge.staging;
+    auto &gateGuards = c.merge.gateGuards;
+    auto &spillMode = c.merge.spillMode;
+    auto &spillWhy = c.merge.spillWhy;
+    auto &spillDir = c.merge.spillDir;
+    auto &spillUsable = c.merge.spillUsable;
+    auto &parkRoomText = c.merge.parkRoomText;
     if ( std::isfinite( state.options.psParkRoom ) )
     {
         char rb[96];
@@ -1440,9 +1581,8 @@ static void psReportMergeMode(PSLoopCtx &c)
 }
 
 // A finished partition, under the merge lock: merged in its turn (then the parked ones due), else parked or waits.
-template <class SubgridBytes, class ParkWhere>
-static inline void psMergeInTurn(PSLoopCtx &c, SubgridBytes &subgridBytes, ParkWhere &parkWhere, int const pi,
-                                 PSPrepared &P, Quantities &temp_uQuantities, Quantities &temp_aQuantities)
+static void psMergeInTurn(PSLoopCtx &c, int const pi, PSPrepared &P, Quantities &temp_uQuantities,
+                          Quantities &temp_aQuantities)
 {
     auto &state = c.state;
     auto &userOptions = c.userOptions;
@@ -1450,40 +1590,42 @@ static inline void psMergeInTurn(PSLoopCtx &c, SubgridBytes &subgridBytes, ParkW
     auto &aQuantities = c.aQuantities;
     auto &fixedMerge = c.fixedMerge;
     auto &fxMerge = c.fxMerge;
-    auto &toProcess = c.toProcess;
-    auto &psLoopStart = c.psLoopStart;
-    auto &psDone = c.psDone;
-    auto &partCost = c.partCost;
-    auto &costTotal = c.costTotal;
-    auto &costDone = c.costDone;
-    auto &orderedMerge = c.orderedMerge;
-    auto &mergeMutex = c.mergeMutex;
-    auto &mergeCv = c.mergeCv;
-    auto &nextMerge = c.nextMerge;
-    auto &staged = c.staged;
-    auto &stagedBytes = c.stagedBytes;
-    auto &stagedPeakBytes = c.stagedPeakBytes;
-    auto &stagedPeakCount = c.stagedPeakCount;
-    auto &stagedRamCount = c.stagedRamCount;
-    auto &nStaged = c.nStaged;
-    auto &nWaitedTurn = c.nWaitedTurn;
-    auto &spillWhy = c.spillWhy;
-    auto &spillDir = c.spillDir;
-    auto &spillUsable = c.spillUsable;
-    auto &nSpilled = c.nSpilled;
-    auto &nSpillTurn = c.nSpillTurn;
-    auto &spilledCount = c.spilledCount;
-    auto &spilledPeakCount = c.spilledPeakCount;
-    auto &spilledBytes = c.spilledBytes;
-    auto &spilledPeakBytes = c.spilledPeakBytes;
-    auto &spillWritten = c.spillWritten;
-    auto &spillPendingBytes = c.spillPendingBytes;
+    PSMergeStaging &m = c.merge;
+    PSProgress &progress = c.progress;
+    auto &orderedMerge = m.orderedMerge;
+    auto &mergeMutex = m.mergeMutex;
+    auto &mergeCv = m.mergeCv;
+    auto &nextMerge = m.nextMerge;
+    auto &staged = m.staged;
+    auto &stagedBytes = m.stagedBytes;
+    auto &stagedPeakBytes = m.stagedPeakBytes;
+    auto &stagedPeakCount = m.stagedPeakCount;
+    auto &stagedRamCount = m.stagedRamCount;
+    auto &nStaged = m.nStaged;
+    auto &nWaitedTurn = m.nWaitedTurn;
+    auto &spillWhy = m.spillWhy;
+    auto &spillDir = m.spillDir;
+    auto &spillUsable = m.spillUsable;
+    auto &nSpilled = m.nSpilled;
+    auto &nSpillTurn = m.nSpillTurn;
+    auto &spilledCount = m.spilledCount;
+    auto &spilledPeakCount = m.spilledPeakCount;
+    auto &spilledBytes = m.spilledBytes;
+    auto &spilledPeakBytes = m.spilledPeakBytes;
+    auto &spillWritten = m.spillWritten;
+    auto &spillPendingBytes = m.spillPendingBytes;
+    // the merge's times (PSMergeStaging, the 'merge time:' line)
+    using Clock = std::chrono::steady_clock;
+    auto const since = [](Clock::time_point const t) { return std::chrono::duration<double>( Clock::now() - t ).count(); };
+    auto const tArrive = Clock::now();
     std::unique_lock<std::mutex> lock( mergeMutex );
+    m.blockedSec += since( tArrive );
     // one partition's grids into the full ones, then its checkpoint (partition_checkpoint.h), while the grids
     // hold still under the merge lock: after this merge unless the last write took more than 5% of the time
     // since it
     auto mergeOne = [&](int const pj, bool const emptyPartition, bool const skipped, Quantities &tu, Quantities &ta)
     {
+        auto const tAdd = Clock::now();
         if ( not emptyPartition )
         {   // with --ps-window every partition's sub-grid IS the window: the merge is window-local
             size_t const *wo = state.options.psWindowOn ? state.options.psWindowLo   : nullptr;
@@ -1496,15 +1638,20 @@ static inline void psMergeInTurn(PSLoopCtx &c, SubgridBytes &subgridBytes, ParkW
                 aQuantities->addFromSubgrid( ta, &(state.options.gridSize[0]), wo, wd );
             }
         }
+        m.addSec += since( tAdd );
+        if ( not skipped ) ++m.nMergedHere;
+        auto const tCheckpoint = Clock::now();
         PartitionCheckpoint::afterMerge( pj, skipped, *uQuantities, *aQuantities, userOptions.verboseLevel );
+        m.checkpointSec += since( tCheckpoint );
     };
     bool stagedHere = false;
     if ( orderedMerge and nextMerge != pi )
     {
         // not its turn: park its sub-grids -- in RAM, or spilled to disk -- and free the thread,
         // else wait (parkWhere above)
-        double const bytes = P.emptyPartition ? 0. : subgridBytes( temp_uQuantities ) + subgridBytes( temp_aQuantities );
-        int where = parkWhere( bytes );
+        double const bytes = P.emptyPartition ? 0. : PSMergeStaging::subgridBytes( temp_uQuantities )
+                                                     + PSMergeStaging::subgridBytes( temp_aQuantities );
+        int where = m.parkWhere( bytes );
         if ( where == PARK_DISK )
         {
             // the write runs outside the merge lock (the merges of the others go on); the sub-grids stay in
@@ -1514,7 +1661,9 @@ static inline void psMergeInTurn(PSLoopCtx &c, SubgridBytes &subgridBytes, ParkW
             spillPendingBytes += bytes;   // counted against the room of the spills that start meanwhile
             lock.unlock();
             bool const wrote = PSMergeSpill::write( temp_uQuantities, temp_aQuantities, spillDir, file, why );
+            auto const tRelock = Clock::now();
             lock.lock();
+            m.blockedSec += since( tRelock );
             spillPendingBytes -= bytes;
             if ( nextMerge == pi )
             {   // its turn came during the write: the drain before it found nothing parked here and stopped,
@@ -1540,6 +1689,7 @@ static inline void psMergeInTurn(PSLoopCtx &c, SubgridBytes &subgridBytes, ParkW
                 spilledPeakCount = std::max( spilledPeakCount, spilledCount );
                 spilledPeakBytes = std::max( spilledPeakBytes, spilledBytes );
                 S.spill = std::move( file );
+                S.parkedAt = Clock::now();
                 stagedHere = true;
             }
             else
@@ -1554,7 +1704,7 @@ static inline void psMergeInTurn(PSLoopCtx &c, SubgridBytes &subgridBytes, ParkW
                     spillUsable = false;
                     spillWhy = why;
                 }
-                where = parkWhere( bytes );
+                where = m.parkWhere( bytes );
             }
         }
         if ( where == PARK_RAM )
@@ -1570,12 +1720,15 @@ static inline void psMergeInTurn(PSLoopCtx &c, SubgridBytes &subgridBytes, ParkW
             ++stagedRamCount;
             stagedPeakBytes = std::max( stagedPeakBytes, stagedBytes );
             stagedPeakCount = std::max( stagedPeakCount, stagedRamCount );
+            S.parkedAt = Clock::now();
             stagedHere = true;
         }
         else if ( where == PARK_WAIT )
         {
             if ( not P.skipped ) ++nWaitedTurn;
+            auto const tWait = Clock::now();
             mergeCv.wait( lock, [&]{ return nextMerge == pi; } );
+            m.blockedSec += since( tWait );
         }
     }
     if ( not stagedHere )
@@ -1590,14 +1743,17 @@ static inline void psMergeInTurn(PSLoopCtx &c, SubgridBytes &subgridBytes, ParkW
             {
                 StagedPartition S = std::move( it->second );
                 staged.erase( it );
+                m.parkedSec += since( S.parkedAt );
                 if ( S.spill.fd >= 0 )
                 {
                     spilledBytes -= S.spill.bytes;
                     --spilledCount;
                     std::string why;
+                    auto const tRead = Clock::now();
                     if ( not PSMergeSpill::read( S.spill, S.u, S.a, why ) )
                         throwError( "the staged ordered merge: partition ", nextMerge, " was spilled to '" + spillDir
                                     + "' and cannot be merged: " + why );
+                    m.spillReadSec += since( tRead );
                 }
                 else
                 {
@@ -1615,19 +1771,17 @@ static inline void psMergeInTurn(PSLoopCtx &c, SubgridBytes &subgridBytes, ParkW
     // done: its work is finished, only its add waits
     if ( not P.skipped )
     {
-    ++psDone;
-    costDone += partCost[size_t(pi)];
-    double const elapsed = std::chrono::duration<double>( std::chrono::steady_clock::now() - psLoopStart ).count();
-    double const frac    = double(psDone) / double(toProcess);
-    // the time per unit of predicted cost so far, times the predicted cost still to come
-    double const eta     = ( costDone > 0. ) ? elapsed * std::max( 0., costTotal - costDone ) / costDone : 0.;
-    MESSAGE::Message prog( userOptions.verboseLevel );
-    prog << MESSAGE::cGreen() << "  [partitions " << psDone << "/" << toProcess
-         << " | " << int(100.*frac + 0.5) << "%]" << MESSAGE::cReset()
-         << MESSAGE::cDim() << "  elapsed " << MESSAGE::formatDuration(elapsed)
-         << ( psDone<toProcess ? ", ETA ~" + MESSAGE::formatDuration(eta) : ", done" )
-         << MESSAGE::cReset() << "\n" << MESSAGE::Flush;
-    runProgressPhase( "partitions", psDone, toProcess, psDone < toProcess ? eta : 0. );
+        int &psDone = progress.done;
+        int const toProcess = progress.toProcess;
+        ++psDone;
+        progress.costDone += progress.partCost[size_t(pi)];
+        double const costDone = progress.costDone;
+        double const elapsed = std::chrono::duration<double>( std::chrono::steady_clock::now() - progress.loopStart ).count();
+        double const frac    = double(psDone) / double(toProcess);
+        // the time per unit of predicted cost so far, times the predicted cost still to come
+        double const eta     = ( costDone > 0. ) ? elapsed * std::max( 0., progress.costTotal - costDone ) / costDone : 0.;
+        partitionProgress( userOptions.verboseLevel, psDone, toProcess, int(100.*frac + 0.5), elapsed, eta );
+        runProgressPhase( "partitions", psDone, toProcess, psDone < toProcess ? eta : 0. );
     }
 }
 
@@ -1642,15 +1796,16 @@ static void psRunPartitionLoop(PSLoopCtx &c, PartitionMemoryGate &memoryGate, Pr
     auto &plan = c.plan;
     auto &psConcurrency = c.psConcurrency;
     auto &skipPartition = c.skipPartition;
-    auto &toProcess = c.toProcess;
+    int const toProcess = c.progress.toProcess;
     // The LOOK-AHEAD. At --max-concurrent 1 with the GPU deposit the cores would idle while the
     // GPU works (the deposit is 82% of a TNG50 z=0 run), and each next partition's selection +
-    // triangulation + vertex densities (~35 s) would wait behind it. So partition k+1
-    // as without the look-ahead (same particles, same sequential insert) and the merge stays in index
+    // triangulation + vertex densities (~35 s) would wait behind it. So partition k+1 is prepared on a CPU thread
+    // while partition k deposits (runLookAhead, above), as without the look-ahead (same particles, same sequential
+    // insert), and the merge stays in index
     // order, so the outputs are byte-identical (tests/ps_runtime_check.sh). It holds one more partition's
     // particles + tessellation; before each look-ahead the free memory is checked against that (the
     // auto-tuner's prediction counts it too) and the partition is prepared in turn when it does not fit.
-    // '--ps-no-overlap' switches it off; DTFE_PS_OVERLAP=1 forces it on a CPU deposit too (the test suite's
+    // '--no-overlap' switches it off; DTFE_PS_OVERLAP=1 forces it on a CPU deposit too (the test suite's
     // byte-identity check on a build without a GPU), DTFE_PS_OVERLAP=0 switches it off.
     bool gpuDeposit = false;
 #if defined(PS_GPU) && NO_DIM==3
@@ -1693,63 +1848,18 @@ static void psRunPartitionLoop(PSLoopCtx &c, PartitionMemoryGate &memoryGate, Pr
         message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " look-ahead on: partition k+1 is "
                 << "tessellated on a CPU thread while partition k deposits"
                 << ( gpuDeposit ? " on the GPU" : " (DTFE_PS_OVERLAP=1)" ) << " (~" << std::round( aheadBytes/1.e7 )/100.
-                << " GB more in memory; '--ps-no-overlap' switches it off).\n" << MESSAGE::Flush;
+                << " GB more in memory; '--no-overlap' switches it off).\n" << MESSAGE::Flush;
 
-        PSPrepared cur;
-        prepare( 0, false, cur );
-        bool saidNoRoom = false;
-        for (int pi=0; pi<totalPartitions; ++pi)
-        {
-            ConcurrentTriangulationGuard concurrentTriangulation;
-            PSPrepared next;
-            std::thread ahead;
-            std::exception_ptr aheadError;
-            bool aheadRan = false;
-            if ( pi + 1 < totalPartitions )
-            {
-                double const freeNow = autoTuneSystemFree();
-                bool const room = freeNow < 0. or freeNow - 4.e9 >= aheadBytes;
-                if ( room and not skipPartition[size_t(pi+1)] )
-                {
-                    aheadRan = true;
-                    ahead = std::thread( [&, pi]()
-                    {
-                        try { prepare( pi + 1, true, next ); }
-                        catch ( ... ) { aheadError = std::current_exception(); }
-                    } );
-                }
-                else if ( not room and not saidNoRoom )
-                {
-                    saidNoRoom = true;
-                    MESSAGE::Message m( userOptions.verboseLevel );
-                    m << MESSAGE::cDim() << "  look-ahead paused: " << freeNow/1.e9 << " GB free, minus 4 GB headroom, "
-                      << "is below the ~" << aheadBytes/1.e9 << " GB it holds; partitions are prepared in turn "
-                      << "until memory frees up\n" << MESSAGE::cReset() << MESSAGE::Flush;
-                }
-            }
-            try
-            {
-                deposit( pi, cur, userOptions.verboseLevel );
-            }
-            catch ( ... )
-            {
-                if ( ahead.joinable() ) ahead.join();
-                throw;
-            }
-            if ( ahead.joinable() ) ahead.join();
-            if ( aheadError ) std::rethrow_exception( aheadError );
-            if ( aheadRan and userOptions.verboseLevel > 0 and not next.emptyPartition )
-            {
-                MESSAGE::Message m( userOptions.verboseLevel );
-                m << MESSAGE::cDim() << "  look-ahead: partition " << pi + 1 << " prepared in "
-                  << MESSAGE::formatDuration( next.seconds ) << " during this deposit\n" << MESSAGE::cReset() << MESSAGE::Flush;
-            }
-            if ( pi + 1 < totalPartitions )
-            {
-                if ( not aheadRan ) prepare( pi + 1, false, next );
-                cur = std::move( next );
-            }
-        }
+        // every partition in index order (a skipped one too: it takes its turn in the ordered merge), the next one
+        // prepared ahead unless it is skipped; each iteration counts its triangulation off (the guard). The line
+        // names the next partition by its 0-based index ('during this deposit')
+        std::vector<int> order( static_cast<size_t>( totalPartitions ) );
+        for (int pi=0; pi<totalPartitions; ++pi) order[size_t(pi)] = pi;
+        runLookAhead<ConcurrentTriangulationGuard, PSPrepared>( order,
+            [&](int) { return aheadBytes; }, prepare,
+            [&](int const pi, PSPrepared &P) { deposit( pi, P, userOptions.verboseLevel ); },
+            [&](int const next) { return not skipPartition[size_t(next)]; },
+            LookAheadLabel{ 0, "this deposit" }, userOptions.verboseLevel );
     }
     else
     {
@@ -1794,20 +1904,20 @@ static void psReportLoopEnd(PSLoopCtx &c)
     auto &psConcurrency = c.psConcurrency;
     auto &fixedMerge = c.fixedMerge;
     auto &fxMerge = c.fxMerge;
-    auto &psLoopStart = c.psLoopStart;
-    auto &orderedMerge = c.orderedMerge;
-    auto &staged = c.staged;
-    auto &stagedPeakBytes = c.stagedPeakBytes;
-    auto &stagedPeakCount = c.stagedPeakCount;
-    auto &nStaged = c.nStaged;
-    auto &nWaitedTurn = c.nWaitedTurn;
-    auto &staging = c.staging;
-    auto &spillWhy = c.spillWhy;
-    auto &spillUsable = c.spillUsable;
-    auto &nSpilled = c.nSpilled;
-    auto &nSpillTurn = c.nSpillTurn;
-    auto &spilledPeakCount = c.spilledPeakCount;
-    auto &spillWritten = c.spillWritten;
+    auto &psLoopStart = c.progress.loopStart;
+    auto &orderedMerge = c.merge.orderedMerge;
+    auto &staged = c.merge.staged;
+    auto &stagedPeakBytes = c.merge.stagedPeakBytes;
+    auto &stagedPeakCount = c.merge.stagedPeakCount;
+    auto &nStaged = c.merge.nStaged;
+    auto &nWaitedTurn = c.merge.nWaitedTurn;
+    auto &staging = c.merge.staging;
+    auto &spillWhy = c.merge.spillWhy;
+    auto &spillUsable = c.merge.spillUsable;
+    auto &nSpilled = c.merge.nSpilled;
+    auto &nSpillTurn = c.merge.nSpillTurn;
+    auto &spilledPeakCount = c.merge.spilledPeakCount;
+    auto &spillWritten = c.merge.spillWritten;
     // A GPU deposit that fell back to the CPU warns from the master thread only (the others run at
     // verbose 0), so with partitions in flight on several threads most fallbacks would be silent: say how
     // many there were
@@ -1826,6 +1936,11 @@ static void psReportLoopEnd(PSLoopCtx &c)
     if ( fixedMerge )
     {
         PartitionCheckpoint::state().blobs.clear();   // they point into fxMerge, and nothing is checkpointed now
+        if ( not state.options.scratchDir.empty() )
+        {   // its integer grids' zero fills (ps_fixed_merge.h scratchText): the psReserveGrids line came before them
+            MESSAGE::Message scratch( state.options.verboseLevel );
+            scratch << fxMerge.scratchText() << "\n" << MESSAGE::Flush;
+        }
         fxMerge.finish( *uQuantities, *aQuantities );
         message << MESSAGE::cDim() << "  " << fxMerge.reportText() << "\n" << MESSAGE::cReset() << MESSAGE::Flush;
     }
@@ -1848,6 +1963,29 @@ static void psReportLoopEnd(PSLoopCtx &c)
                 << "; " << nWaitedTurn << " waited for their turn "
                 << "holding their thread" << ( staging and nWaitedTurn > 0 ? " (no room to stage)" : "" ) << "\n"
                 << MESSAGE::cReset() << MESSAGE::Flush;
+    }
+    // what the merge took (PSMergeStaging's times): the serial work under the merge lock -- the adds into the full
+    // grids, their checkpoints, the spilled sub-grids read back -- and the waits before it. In index order a
+    // partition waits for its turn parked (its thread goes on) or holding its thread (the lock, or no room to
+    // park); in completion order and under '--fixed-point-merge' only for the lock
+    {
+        PSMergeStaging const &m = c.merge;
+        char t[160];
+        std::snprintf( t, sizeof(t), " partition(s) added to the full grids in %.2f s, their checkpoints %.2f s",
+                       m.addSec, m.checkpointSec );
+        std::string text = "  merge time: " + std::to_string( m.nMergedHere ) + t;
+        if ( m.nSpilled > 0 )
+        {
+            std::snprintf( t, sizeof(t), ", the spilled ones read back in %.2f s", m.spillReadSec );
+            text += t;
+        }
+        text += " (one at a time, under the merge lock); ";
+        if ( orderedMerge )
+            std::snprintf( t, sizeof(t), "waiting for their turn: %.2f s parked, %.2f s holding a thread",
+                           m.parkedSec, m.blockedSec );
+        else
+            std::snprintf( t, sizeof(t), "waiting for the merge lock: %.2f s", m.blockedSec );
+        message << MESSAGE::cDim() << text << t << "\n" << MESSAGE::cReset() << MESSAGE::Flush;
     }
 }
 
@@ -2037,19 +2175,17 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     if ( checkpoint.resumed )
         for (int pi=0; pi<totalPartitions; ++pi)
             if ( checkpoint.merged[size_t(pi)] and not skipPartition[size_t(pi)] ) { skipPartition[size_t(pi)] = 1; ++nSkipped; }
-    int const toProcess = std::max( 1, totalPartitions - nSkipped );
-
     // progress + ETA; updated only under mergeMutex below so it is race-free. The ETA weights each partition
     // by a predicted cost instead of counting partitions: the deposit time per partition is
     // heavy-tailed (TNG50 z=0: 40 s to 2049 s, median 73 s) and the costly cluster partitions sit together in
     // index order, so elapsed x remaining/done can be off by 2x.
-    auto const psLoopStart = std::chrono::steady_clock::now();
-    int psDone = 0;
-    std::vector<double> const partCost = psPartitionCosts( state.particles, plan, state.options );
-    double costTotal = 0., costDone = 0.;
+    PSProgress progress;
+    progress.toProcess = std::max( 1, totalPartitions - nSkipped );
+    progress.loopStart = std::chrono::steady_clock::now();
+    progress.partCost = psPartitionCosts( state.particles, plan, state.options );
     for (int pi=0; pi<totalPartitions; ++pi)
-        if ( not skipPartition[size_t(pi)] ) costTotal += partCost[size_t(pi)];
-    runProgressPhase( "partitions", 0, toProcess );
+        if ( not skipPartition[size_t(pi)] ) progress.costTotal += progress.partCost[size_t(pi)];
+    runProgressPhase( "partitions", 0, progress.toProcess );
     // THE ORDERED MERGE (the default of every split; the auto-tuner's speed split always): the full grids receive
     // partition 0, then 1, 2 ..., exactly the adds of a '--max-concurrent 1' run, so the merged grids are
     // byte-identical to those. '--completion-order-merge' adds partitions as they finish instead, so the last bits
@@ -2083,83 +2219,16 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     // partition with sub-grids (the tests' hook); DTFE_MERGE_STAGE_GB=0 parks nothing, RAM or disk. The 'ordered
     // merge:' line counts the spills (number, most at once, GB written). A spilled partition has left the gate
     // like a parked one; the tuner's model does not count parked sub-grids (the gate keeps them honest).
-    bool const orderedMerge = state.options.psOrderedMerge and not fixedMerge;
-    std::mutex mergeMutex;
-    std::condition_variable mergeCv;
-    int nextMerge = 0;
-    std::map<int, StagedPartition> staged;      // finished partitions waiting for their turn (under mergeMutex)
-    double stagedBytes = 0., stagedPeakBytes = 0.;
-    size_t stagedPeakCount = 0, stagedRamCount = 0;   // parked in RAM: at most / now
-    int nStaged = 0, nWaitedTurn = 0;                  // parked (RAM or disk); waited for their turn instead
-    double stageCapBytes = -1.;                 // DTFE_MERGE_STAGE_GB: a fixed cap; < 0 = the free-memory rule
-    if ( Env::isSet( "DTFE_MERGE_STAGE_GB" ) )
-        stageCapBytes = std::max( 0., Env::real( "DTFE_MERGE_STAGE_GB", 0. ) ) * 1.e9;
-    bool const staging = orderedMerge and psConcurrency > 1 and stageCapBytes != 0.;
-    // the bytes a partition's sub-grids hold (every accumulator, as the checkpoint counts them)
-    auto subgridBytes = [](Quantities &q)
-    {
-        double b = 0.;
-        PartitionCheckpoint::forEachAccumulator( q, [&](char const *, auto &v) { b += double( v.capacity() ) * double( sizeof( v[0] ) ); } );
-        return b;
-    };
-    // may a partition of 'bytes' be staged now? (under mergeMutex) The gate guards every start when it has an
-    // estimate and the partitions are gated (the omp loop below: not the speed split, unless asked for)
-    bool const gateGuards = psConcurrency > 1 and state.options.psPartitionBytes > 0.
-                            and ( not state.options.psSpeedSplit or state.options.psOrderedMergeFlag );
-    // the spill (the comment above): DTFE_MERGE_SPILL=0 off, =1 every parked partition, unset the rule
-    int const spillEnv = Env::tristate( "DTFE_MERGE_SPILL" );
-    int spillMode = spillEnv == 0 ? -1 : spillEnv == 1 ? 1 : 0;
-    std::string spillWhy;
-    std::string const spillDir = PSMergeSpill::folder( state.options.scratchDir, spillWhy );
-    bool spillUsable = staging and spillMode >= 0 and spillWhy.empty();
-    if ( spillMode < 0 ) spillWhy = "DTFE_MERGE_SPILL=0";
-    int nSpilled = 0, nSpillTurn = 0;
-    size_t spilledCount = 0, spilledPeakCount = 0;
-    double spilledBytes = 0., spilledPeakBytes = 0., spillWritten = 0.;
-    // the spills being written now (outside the lock): their bytes are not on the disk yet, so the room each new
-    // one is checked against must leave them out (k writers would pass one reading together)
-    double spillPendingBytes = 0.;
-    // where a partition of 'bytes' parks now (under mergeMutex): 1 RAM, 2 disk, 0 nowhere (it waits its turn)
-    auto parkWhere = [&](double const bytes) -> int
-    {
-        if ( not staging ) return PARK_WAIT;
-        // spoken-for room on the spill disk: the writes in progress, and with '--scratch-dir' (the spill folder
-        // then) every scratch mapping in full -- a sparse file whose unwritten pages statvfs reports free
-        // (over-counting the pages already written only spills less: the fallback is the park or the wait)
-        double const reserved = spillPendingBytes
-                                + ( state.options.scratchDir.empty() ? 0. : double( ScratchAlloc::scratchLiveBytes() ) );
-        bool const disk = spillUsable and bytes > 0. and PSMergeSpill::room( spillDir, bytes, reserved,
-                                                                                PSMergeSpill::margin( state.options.scratchDir ) );
-        if ( spillMode > 0 and disk ) return PARK_DISK;   // the test hook
-        bool ram;
-        if ( stageCapBytes > 0. ) ram = stagedBytes + bytes <= stageCapBytes;
-        else
-        {
-            double const freeNow = autoTuneSystemFree();
-            if ( freeNow < 0. ) ram = stagedBytes + bytes <= 2.e9;   // free memory unknown: a small fixed room
-            else ram = freeNow - 4.e9 - ( gateGuards ? state.options.psPartitionBytes : 0. ) >= bytes;
-            // and within what the memory budget leaves beside the plan's predicted peak (psParkRoom says
-            // why: the free memory alone could let TNG100 z=0 park 74 GB). stagedBytes counts RAM-parked ones only
-            if ( ram and std::isfinite( state.options.psParkRoom ) )
-                ram = stagedBytes + bytes <= std::max( 0., state.options.psParkRoom );
-        }
-        if ( ram ) return PARK_RAM;
-        if ( disk ) return PARK_DISK;
-        return ( gateGuards and stageCapBytes < 0. ) ? PARK_RAM : PARK_WAIT;
-    };
+    // (the state of all this: PSMergeStaging, above, with parkWhere)
+    PSMergeStaging merge( state.options, fixedMerge, psConcurrency );
     // test hook: DTFE_TEST_DELAY_PARTITION=i:s holds partition i for s seconds before its merge, so the partitions
     // after it finish first and the staging is certain to happen (tests/ps_runtime_check.sh R7)
     int delayPartition = -1;
     double delaySeconds = 0.;
     if ( char const *hook = Env::value( "DTFE_TEST_DELAY_PARTITION" ) )
         if ( std::sscanf( hook, "%d:%lf", &delayPartition, &delaySeconds ) != 2 ) delayPartition = -1;
-    std::string parkRoomText;   // the RAM parking's budget room (psParkRoom), when one is known
     PSLoopCtx loop{ state, userOptions, uQuantities, aQuantities, message, totalPartitions, plan, psConcurrency,
-                    skipPartition, fixedMerge, fxMerge, toProcess, psLoopStart, psDone, partCost, costTotal, costDone,
-                    orderedMerge, mergeMutex, mergeCv, nextMerge, staged, stagedBytes, stagedPeakBytes,
-                    stagedPeakCount, stagedRamCount, nStaged, nWaitedTurn, stageCapBytes, staging, gateGuards,
-                    spillMode, spillWhy, spillDir, spillUsable, nSpilled, nSpillTurn, spilledCount, spilledPeakCount,
-                    spilledBytes, spilledPeakBytes, spillWritten, spillPendingBytes, parkRoomText };
+                    skipPartition, fixedMerge, fxMerge, progress, merge };
     psReportMergeMode( loop );
 
     ConcurrentTriangulationPlan triangulationPlan( psConcurrency, totalPartitions );
@@ -2169,7 +2238,7 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     // (under '--fixed-point-merge' orderedMerge is false -- no partition waits for its turn, so the gate
     // needs no ordered mode: it waits while any partition is in flight, which the dynamic schedule makes the same
     // set, every one in flight being lower-numbered)
-    PartitionMemoryGate memoryGate( psConcurrency > 1 ? state.options.psPartitionBytes : 0., orderedMerge );
+    PartitionMemoryGate memoryGate( psConcurrency > 1 ? state.options.psPartitionBytes : 0., merge.orderedMerge );
 
     // One partition's work, in two stages: PREPARE (select its particles; with 'build', also its
     // tessellation and vertex densities) and DEPOSIT (the grid passes, then the merge). The look-ahead
@@ -2226,7 +2295,7 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
             std::this_thread::sleep_for( std::chrono::duration<double>( delaySeconds ) );
         // accumulate into the shared grids: in partition order (the staged ordered merge above, the default),
         // or as they finish under '--completion-order-merge'
-        psMergeInTurn( loop, subgridBytes, parkWhere, pi, P, temp_uQuantities, temp_aQuantities );
+        psMergeInTurn( loop, pi, P, temp_uQuantities, temp_aQuantities );
     };
 
     psRunPartitionLoop( loop, memoryGate, prepare, deposit );
@@ -2343,6 +2412,9 @@ static void dtfePartitionedRun(DTFE_State &state, vector<Sample_point> &samples,
                 << "tetrahedra whose centroid lies in its sub-box.\n" << MESSAGE::Flush;
 
     auto const partLoopStart = std::chrono::steady_clock::now();
+    // what the copies into the full grids and their checkpoints took (the 'merge time:' line after the loop; the
+    // deposit stage below runs on this thread only)
+    double copySec = 0., copyCheckpointSec = 0.;
 
     // One partition's work in two stages (as the PS loop's): PREPARE selects its particles (its padded
     // box, periodic images included) and, for the look-ahead, splits it into DTFE_parallel's thread sub-domains and
@@ -2356,6 +2428,7 @@ static void dtfePartitionedRun(DTFE_State &state, vector<Sample_point> &samples,
         bool built = false;            // the look-ahead built its sub-domains (sub)
         DTFEPrepared sub;
         double seconds = 0.;           // the look-ahead's time for it
+        bool emptyPartition = false;   // (runLookAhead's: never set here, every 'prepared in' line is said)
     };
     int const parallelThreads = dtfeParallelThreads( state.options );   // DTFE_parallel's, read on THIS thread
     auto prepare = [&](int const i, bool const build, StdPrepared &P)
@@ -2404,10 +2477,14 @@ static void dtfePartitionedRun(DTFE_State &state, vector<Sample_point> &samples,
         psPointEvalSetPartition( -1 );
 
         // map this partition's sub-grid results back into the full output grids
+        auto const tCopy = std::chrono::steady_clock::now();
         copySubgridResultsToMain( temp_uQuantities, state.options.gridSize, tempOpt.uField, tempOpt, subgridList, uQuantities );
         copySubgridResultsToMain( temp_aQuantities, state.options.gridSize, tempOpt.aField, tempOpt, subgridList, aQuantities );
+        auto const tCheckpoint = std::chrono::steady_clock::now();
         // the checkpoint (partition_checkpoint.h): the full grids now hold this partition too
         PartitionCheckpoint::afterMerge( i, false, *uQuantities, *aQuantities, userOptions.verboseLevel );
+        copySec += std::chrono::duration<double>( tCheckpoint - tCopy ).count();
+        copyCheckpointSec += std::chrono::duration<double>( std::chrono::steady_clock::now() - tCheckpoint ).count();
 
         // progress + ETA over the serial partition loop
         double const elapsed = std::chrono::duration<double>( std::chrono::steady_clock::now() - partLoopStart ).count();
@@ -2417,11 +2494,8 @@ static void dtfePartitionedRun(DTFE_State &state, vector<Sample_point> &samples,
         // is this process's own, the restored partitions cost it nothing)
         double const eta     = elapsed * ( double(totalPartitions - done) / double(nComputed) );
         runProgressPhase( "partitions", done, totalPartitions, eta );
-        message << MESSAGE::cGreen() << "  [partitions " << done << "/" << totalPartitions
-                << " | " << int(100.*done/double(totalPartitions) + 0.5) << "%]" << MESSAGE::cReset()
-                << MESSAGE::cDim() << "  elapsed " << MESSAGE::formatDuration(elapsed)
-                << ( done<totalPartitions ? ", ETA ~" + MESSAGE::formatDuration(eta) : ", done" )
-                << MESSAGE::cReset() << "\n" << MESSAGE::Flush;
+        partitionProgress( userOptions.verboseLevel, done, totalPartitions, int(100.*done/double(totalPartitions) + 0.5),
+                           elapsed, eta );
     };
 
     // the partitions this process computes, in index order (a resumed run's restored ones are in the grids already)
@@ -2507,63 +2581,11 @@ static void dtfePartitionedRun(DTFE_State &state, vector<Sample_point> &samples,
                 << ( gpuDeposit ? " on the GPU" : " (DTFE_OVERLAP=1)" ) << " (~" << std::round( aheadBytesMax/1.e7 )/100.
                 << " GB more in memory; '--no-overlap' switches it off).\n" << MESSAGE::Flush;
 
-        StdPrepared cur;
-        prepare( toCompute[0], false, cur );
-        bool saidNoRoom = false;
-        for (size_t k=0; k<toCompute.size(); ++k)
-        {
-            int const i = toCompute[k];
-            StdPrepared next;
-            std::thread ahead;
-            std::exception_ptr aheadError;
-            bool aheadRan = false;
-            if ( k + 1 < toCompute.size() )
-            {
-                int const nextI = toCompute[k+1];
-                double const need = aheadBytes( nextI );
-                double const freeNow = autoTuneSystemFree();
-                bool const room = freeNow < 0. or freeNow - 4.e9 >= need;
-                if ( room )
-                {
-                    aheadRan = true;
-                    ahead = std::thread( [&, nextI]()
-                    {
-                        try { prepare( nextI, true, next ); }
-                        catch ( ... ) { aheadError = std::current_exception(); }
-                    } );
-                }
-                else if ( not saidNoRoom )
-                {
-                    saidNoRoom = true;
-                    MESSAGE::Message m( userOptions.verboseLevel );
-                    m << MESSAGE::cDim() << "  look-ahead paused: " << freeNow/1.e9 << " GB free, minus 4 GB headroom, "
-                      << "is below the ~" << need/1.e9 << " GB it holds; partitions are prepared in turn "
-                      << "until memory frees up\n" << MESSAGE::cReset() << MESSAGE::Flush;
-                }
-            }
-            try
-            {
-                deposit( i, cur );
-            }
-            catch ( ... )
-            {
-                if ( ahead.joinable() ) ahead.join();
-                throw;
-            }
-            if ( ahead.joinable() ) ahead.join();
-            if ( aheadError ) std::rethrow_exception( aheadError );
-            if ( aheadRan and userOptions.verboseLevel > 0 )
-            {
-                MESSAGE::Message m( userOptions.verboseLevel );
-                m << MESSAGE::cDim() << "  look-ahead: partition " << toCompute[k+1] + 1 << " prepared in "
-                  << MESSAGE::formatDuration( next.seconds ) << " during this one\n" << MESSAGE::cReset() << MESSAGE::Flush;
-            }
-            if ( k + 1 < toCompute.size() )
-            {
-                if ( not aheadRan ) prepare( toCompute[k+1], false, next );
-                cur = std::move( next );
-            }
-        }
+        // the partitions this process computes, each next one prepared ahead when the memory holds its own count;
+        // the line names it by its 1-based number ('during this one')
+        runLookAhead<NoLookAheadScope, StdPrepared>( toCompute, aheadBytes, prepare, deposit,
+                                                    [](int) { return true; }, LookAheadLabel{ 1, "this one" },
+                                                    userOptions.verboseLevel );
     }
     else
         for (int i : toCompute)
@@ -2574,6 +2596,12 @@ static void dtfePartitionedRun(DTFE_State &state, vector<Sample_point> &samples,
         }
     PartitionCheckpoint::reportWrites( std::chrono::duration<double>( std::chrono::steady_clock::now() - partLoopStart ).count(),
                                        userOptions.verboseLevel );
+    {   // the serial merge: each partition assigns its own sub-grid, in index order (the PS loop's line has its waits)
+        char t[160];
+        std::snprintf( t, sizeof(t), " partition(s) copied into the full grids in %.2f s, their checkpoints %.2f s "
+                       "(one at a time, in index order)", copySec, copyCheckpointSec );
+        message << MESSAGE::cDim() << "  merge time: " << nComputed << t << "\n" << MESSAGE::cReset() << MESSAGE::Flush;
+    }
 
     // each partition copied its own particles; the global array is dead weight from here on
     std::vector<Particle_data>().swap( state.particles );

@@ -44,30 +44,16 @@ from dtfelib import make_parser, use_data_root, add_ps_gradient_arg, mean_field_
 from dtfelib.trees import TreeSet
 from dtfelib import groupcat as gc
 from dtfelib import environment as env
+from dtfelib.fields import unit_cos
+from dtfelib.figures import plot_finite, save_figure   # plot_finite: a line through the finite samples only
 
-FIGURE_ROOT = Path(config.LOCAL_FIGURES_ROOT) / "halo_tracking"
+FIGURE_ROOT = Path(config.figures_path("halo_tracking"))
 
 BRANCH_FIELDS = ["SubhaloMass", "SubhaloPos", "SubhaloHalfmassRad", "SubhaloSpin",
                  "Group_R_Crit200", "SubhaloID", "FirstSubhaloInFOFGroupID", "SubhaloGrNr"]
 
 ENV_FIELDS = ("density", "tweb", "vweb")
 WEB_NAMES = {0: "void", 1: "wall", 2: "filament", 3: "node"}
-
-
-def unit_cos(v, w):
-    n = np.linalg.norm(v) * np.linalg.norm(w)
-    return np.abs(float(np.dot(v, w) / n)) if n > 0 else np.nan
-
-
-def plot_finite(ax, x, y, *fmt, **kw):
-    """Line+marker plot connected through FINITE samples only.
-
-    Sparse quantities (shape/orientation/environment exist only at snapshots with data on
-    disk) are NaN elsewhere; a plain plot() breaks the line at every NaN, leaving isolated
-    unreadable markers. Connecting the finite points keeps the time evolution legible."""
-    x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
-    ok = np.isfinite(x) & np.isfinite(y)
-    return ax.plot(x[ok], y[ok], *fmt, **kw)
 
 
 def track_one(ts: TreeSet, sim: str, snap0: int, subfind0: int, hubble: float,
@@ -247,7 +233,7 @@ def plot_one(t: dict, sim: str, subfind0: int, snap0: int, outdir: Path, tag: st
 
     outdir.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
-    fig.savefig(outdir / f"subhalo{subfind0}_evolution{tag}.png", dpi=200, bbox_inches="tight")
+    save_figure(fig, outdir / f"subhalo{subfind0}_evolution{tag}.png", dpi=config.TRACK_DPI, bbox_inches="tight")
     plt.close(fig)
     np.savez_compressed(outdir / f"subhalo{subfind0}_branch{tag}.npz",
                         **{k: v for k, v in t.items() if isinstance(v, np.ndarray)})

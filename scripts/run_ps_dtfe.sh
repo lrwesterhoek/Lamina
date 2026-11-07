@@ -7,11 +7,13 @@
 #
 # Usage:
 #   ./run_ps_dtfe.sh [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n AVG_SUBSAMPLES] [-m] [-e] [snapshot ...]
-#     -m   run the deposit on the GPU (same as PS_METAL=1). The default (PS_METAL unset, 'auto') is the GPU when
+#     -m   run the deposit on the GPU (--gpu; same as PS_GPU=1). The default (PS_GPU unset, 'auto') is the GPU when
 #          the binary was built with one (the Makefile's o_ps/.gpu_mode_metal|cuda|hip stamp; o_ps_d for
 #          DTFE_PRECISION=double), else the CPU -- but the CPU for the exact deposit (-e), faster there on
-#          production runs; PS_METAL=0 runs the CPU deposit on a GPU build.
-#     -e   exact conservative deposit (same as PS_EXACT=1; --ps-exact-deposit, on the CPU unless -m)
+#          production runs; PS_GPU=0 runs the CPU deposit on a GPU build.
+#     -e   exact conservative deposit (same as PS_EXACT=1; --exact-average, on the CPU unless -m)
+#     The drivers' letters are their own: -m is the GPU and -s the simulation here, while the binaries' -m is the
+#     averaging --method and -s the --samples count. PS_METAL, PS_GPU's older name, is still read when PS_GPU is unset.
 #   Production defaults: GRID_SIZE 512 (config.sh), the GPU when built, vertex masses, volume-weighted
 #   velocity moments, the caustic classes, FIELDS = the nine production fields (density, velocity, its gradient /
 #   divergence / shear / vorticity, the dispersion, the T-web and the V-web), LAMBDA_TH 0.3.
@@ -24,7 +26,7 @@
 #   Run logs, beside the outputs: <prefix>.runlog belongs to the grids on disk, <prefix>.runlog.failed
 #   to the last failed or stopped attempt, <prefix>.runlog.partial to a run still going (or killed outright).
 #   Knobs (environment; each is explained where the script sets it): PARTITION MAX_CONCURRENT AVG_SUBSAMPLES THREADS
-#   SCRATCH_DIR SAMPLE_POINTS PTS_VEL_GRAD PTS_CONVENTIONS PS_METAL PS_EXACT PS_VERTEX_MASS PS_VOLUME_WEIGHTED PS_LINEAR_DEPOSIT
+#   SCRATCH_DIR SAMPLE_POINTS PTS_VEL_GRAD PTS_CONVENTIONS PS_GPU PS_EXACT PS_VERTEX_MASS PS_VOLUME_WEIGHTED PS_LINEAR_DEPOSIT
 #   PS_CAUSTICS PS_CAUSTIC_CUSPS PS_PARALLEL_TRI PS_LAG_PADDING TESS_CACHE OUTPUT_PREFIX FIELDS LAMBDA_TH LAGRANGIAN_INPUT
 #   DTFE_PRECISION AUTO_TUNE_REPORT (1 = only the auto-tuner's memory report per snapshot, nothing computed)
 #   ORDERED_MERGE FIXED_POINT_MERGE PS_RESUME. A partitioned run killed part-way resumes: when the snapshot's checkpoint
@@ -33,6 +35,8 @@
 #   it; a lock left by a killed driver is removed with a note. Before anything runs: the data disk must be
 #   there (exit 2 otherwise) and the output folder writable with room for the grids (DTFE_SPACE_CHECK=0 skips
 #   the space half).
+
+set -uo pipefail   # no -e: a batch goes on after a failed snapshot (config.sh, 'Strictness')
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"   # the binaries and Makefile live one level up
@@ -75,9 +79,10 @@ PTS_CONVENTIONS="${PTS_CONVENTIONS:-grid}"  # with SAMPLE_POINTS: the points' co
                            # weighted stream means), which reproduce a plane made with them -- about 0.82 of the grid's
                            # density contrast at z = 20 (the launcher's Runs tab warns about such planes). Only
                            # 'legacy' is passed, so a 'grid' run's command line carries no --pts-conventions.
-PS_METAL="${PS_METAL:-auto}"  # 1 = the deposit on the GPU (--ps-gpu), 0 = the CPU; 'auto' (default: it
+PS_GPU="${PS_GPU:-${PS_METAL:-auto}}"  # 1 = the deposit on the GPU (--gpu), 0 = the CPU; 'auto' (default: it
                            # follows the build) = 1 when the binary is a GPU build (config.sh gpu_build_default),
-                           # resolved below once DTFE_PRECISION has chosen the binary; 0 with PS_EXACT=1
+                           # resolved below once DTFE_PRECISION has chosen the binary; 0 with PS_EXACT=1 (either
+                           # spelling: PS_METAL, the older name, is read when PS_GPU is unset)
 ORDERED_MERGE="${ORDERED_MERGE:-1}"  # 1 (default) = --ordered-merge: the partitions' grids are
                            # added in partition index order, so two identical runs write bit-identical grids (and a
                            # killed run resumes to exactly the grids of an uninterrupted one). The binary's own
@@ -140,7 +145,7 @@ TESS_CACHE="${TESS_CACHE:-}"  # directory for the reusable on-disk tessellation
                            # vertex-density pass (measured 10.9 s -> 4.6 s at 884736 particles).
                            # Must be a LOCAL, non-synced dir; costs ~0.15 KB per tessellation
                            # vertex (the file is deflated: 225 MB per 1.5e6 vertices).
-PS_EXACT="${PS_EXACT:-0}"  # 1 = exact conservative deposit (--ps-exact-deposit): analytic tet-cell
+PS_EXACT="${PS_EXACT:-0}"  # 1 = exact conservative deposit (--exact-average): analytic tet-cell
                            # clipping instead of the nSub^3 sub-sampled deposit -- no sampling noise, mass
                            # conservation to the arithmetic's precision. Runs on the CPU by default (r3d in
                            # double, the reference; TNG100-3-Dark z=0 at 512^3 in 14.5 min, the sampled GPU
@@ -177,21 +182,16 @@ usage() { echo "Usage: $0 [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n AVG_S
 driver_help_version "${BASH_SOURCE[0]}" "${1:-}"   # -h / --help print the header and run nothing; --version the revision
 
 DRY_RUN="${DRY_RUN:-0}"          # 1 = print the commands and paths, run nothing
-while getopts "d:s:g:n:meh" opt; do
-    case "$opt" in
-        d) DATA_DIR="$OPTARG" ;;
-        s) SIMULATION="$OPTARG" ;;
-        g) GRID_SIZE="$OPTARG" ;;
-        n) AVG_SUBSAMPLES="$OPTARG" ;;
-        m) PS_METAL=1 ;;
+own_option() {   # <letter>: this driver's own options; -d, -s, -h and the data checks are config.sh driver_options'
+    case "$1" in
+        g) GRID_SIZE="${OPTARG}" ;;
+        n) AVG_SUBSAMPLES="${OPTARG}" ;;
+        m) PS_GPU=1 ;;
         e) PS_EXACT=1 ;;
-        h) usage; exit 0 ;;
-        *) usage; exit 1 ;;
     esac
-done
+}
+driver_options "g:n:me" own_option "$@"   # then the data root (unless -d) and the simulation are required
 shift $((OPTIND - 1))
-[ -n "${DATA_DIR}" ] || require_data_root   # -d names the simulation's folder itself
-require_simulation
 
 snapshot_args "$@"              # positional arguments override the default snapshot list (config.sh)
 case "${PTS_CONVENTIONS}" in
@@ -264,7 +264,7 @@ cd "$REPO_ROOT" || exit 1
 # twice the memory. Default single (./PS-DTFE). Nothing falls back silently: a missing binary stops.
 DTFE_PRECISION="${DTFE_PRECISION:-single}"
 driver_binary PS_BIN PS-DTFE "${DTFE_PRECISION}"      # ./PS-DTFE or ./PS-DTFE-double (config.sh)
-gpu_auto_resolve PS_METAL "${PS_BIN}" "${PS_EXACT}"   # PS_METAL=auto: the GPU when this binary was built with one,
+gpu_auto_resolve PS_GPU "${PS_BIN}" "${PS_EXACT}"     # PS_GPU=auto: the GPU when this binary was built with one,
                                                       # the CPU for the exact deposit
 
 n_ok=0; n_skipped=0; n_failed=0; n_planned=0   # summarised at the end; see the exit-status note there
@@ -280,7 +280,7 @@ runlog_contract_start
 echo "Starting PS-DTFE processing..."
 echo "Data directory: ${DATA_DIR}"
 echo "Grid size: ${GRID_SIZE}   Partition: [${PARTITION:-auto}]   Fields: ${FIELDS}"
-echo "Deposit: $([ "${PS_METAL}" = "1" ] && echo "GPU (--ps-gpu)" || echo "CPU")${gpu_auto}   volume-weighted: ${PS_VOLUME_WEIGHTED}   caustics: ${PS_CAUSTICS}   prefix: ${OUTPUT_PREFIX}"
+echo "Deposit: $([ "${PS_GPU}" = "1" ] && echo "GPU (--gpu)" || echo "CPU")${gpu_auto}   volume-weighted: ${PS_VOLUME_WEIGHTED}   caustics: ${PS_CAUSTICS}   prefix: ${OUTPUT_PREFIX}"
 echo ""
 
 for i in "${SNAPSHOTS[@]}"; do
@@ -289,9 +289,9 @@ for i in "${SNAPSHOTS[@]}"; do
         continue
     fi
 
-    # GPU deposit toggle (PS_METAL=1 ./run_ps_dtfe.sh); ignored with a warning on non-METAL builds.
+    # GPU deposit toggle (PS_GPU=1 ./run_ps_dtfe.sh); ignored with a warning on non-GPU builds.
     metal_args=()
-    [ "${PS_METAL}" = "1" ] && metal_args=(--ps-gpu)
+    [ "${PS_GPU}" = "1" ] && metal_args=(--gpu)
 
     # Caustic flagging (PS_CAUSTICS=1) and the opt-in A3 cusp indicator (PS_CAUSTIC_CUSPS=1).
     caustic_args=()
@@ -308,7 +308,7 @@ for i in "${SNAPSHOTS[@]}"; do
 
     # Exact conservative deposit toggle (-e / PS_EXACT=1); CPU and GPU deposits.
     exact_args=()
-    [ "${PS_EXACT}" = "1" ] && exact_args=(--ps-exact-deposit)
+    [ "${PS_EXACT}" = "1" ] && exact_args=(--exact-average)
 
     # Chart-independent tet masses (PS_VERTEX_MASS=1, default -- see the comment at the top).
     vmass_args=()
@@ -367,7 +367,7 @@ for i in "${SNAPSHOTS[@]}"; do
     echo "  Running PS-DTFE on ${input_file}..."
     run_log="${input_dir}/${OUTPUT_PREFIX}.runlog"
     # a report writes nothing next to the data: not even over the snapshot's real run log
-    [ "${AUTO_TUNE_REPORT}" = "1" ] && run_log="$(mktemp -t dtfe-auto-tune-report.XXXXXX)"
+    [ "${AUTO_TUNE_REPORT}" = "1" ] && [ "${DRY_RUN}" != "1" ] && run_log="$(mktemp -t dtfe-auto-tune-report.XXXXXX)"
     SECONDS=0
     # pass --partition/--max-concurrent only when set; otherwise the binary auto-tunes them
     part_args=()
@@ -392,7 +392,7 @@ for i in "${SNAPSHOTS[@]}"; do
         --input 105
         --MpcUnit ${MPC_UNIT}
         --field ${FIELDS}
-        --lambda_th ${LAMBDA_TH}
+        --lambda-th ${LAMBDA_TH}
         ${metal_args[@]+"${metal_args[@]}"}
         ${exact_args[@]+"${exact_args[@]}"}
         ${vmass_args[@]+"${vmass_args[@]}"}
@@ -403,7 +403,7 @@ for i in "${SNAPSHOTS[@]}"; do
         ${tess_args[@]+"${tess_args[@]}"}
         ${report_args[@]+"${report_args[@]}"}
         ${resume_args[@]+"${resume_args[@]}"}
-        "${lag_args[@]}")
+        ${lag_args[@]+"${lag_args[@]}"})
     if [ "${DRY_RUN}" = "1" ]; then                 # DRY_RUN=1: the expanded command and the paths, nothing run
         dry_run_print "${input_file}" "${output_root}" "${run_log}" "${cmd[@]}"
         n_planned=$((n_planned + 1))

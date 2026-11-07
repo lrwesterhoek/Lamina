@@ -63,13 +63,13 @@ def class_masks(caustic_class, fold=None) -> dict:
     cc = np.rint(np.asarray(caustic_class)).astype(np.int64)
     kmax = caustic_collapse_max(cc)
     # every deposited SAMPLE sets a parity bit TOGETHER with one collapse bit; a cell with the det>0 parity bit and
-    # no collapse bit comes from a parity-only grid (--ps-caustics with --ps-linear-deposit --ps-gpu writes the fold
+    # no collapse bit comes from a parity-only grid (--ps-caustics with --ps-linear-deposit --gpu writes the fold
     # flag alone), which would read as 99.96% 'none'. Bit 0 only: the det<0 bit is
     # the geometric overlap, legitimately alone in a cell a folded tetrahedron overlaps but no sample
     # reached (a coverage hole); a parity-only grid carries bit 0 in every deposited cell, so it is still refused.
     if np.any(((cc & CAUSTIC_PARITY_POS) != 0) & (kmax == -1)):
         raise ValueError("parity-only caustic_class grid (fold bits without collapse bits: a --ps-caustics "
-                         "--ps-linear-deposit --ps-gpu run); the stratification needs the CPU or the GPU's full deposit")
+                         "--ps-linear-deposit --gpu run); the stratification needs the CPU or the GPU's full deposit")
     if fold is None:
         fold = caustic_is_fold(cc)
     else:

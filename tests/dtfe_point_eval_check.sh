@@ -63,7 +63,7 @@ build_target "${1:-}" DTFE o
 # capture FIRST -- piping the binary straight into grep -q would SIGPIPE it under pipefail
 # a help that fails is a broken binary, not a missing feature; a missing feature fails under DTFE_TEST_REQUIRED=1
 # (skip_or_fail, tests/precision.sh)
-FULL_HELP="$("${BIN}" --full_help 2>/dev/null)" || { echo "FAIL: ${BIN} --full_help exited non-zero"; exit 1; }
+FULL_HELP="$("${BIN}" --full-help 2>/dev/null)" || { echo "FAIL: ${BIN} --full-help exited non-zero"; exit 1; }
 if ! grep -q -- '--sample-points' <<<"${FULL_HELP}"; then
     skip_or_fail "this DTFE has no --sample-points support."
 fi

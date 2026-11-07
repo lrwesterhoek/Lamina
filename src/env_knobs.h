@@ -5,8 +5,9 @@
      switch that is on by default, which only those values turn off);
    - a tristate (a switch with an automatic default) is -1 while unset or set to auto, else the flag;
    - a number is the value read by std::atol / std::atof; the caller checks its range and keeps its default otherwise;
-   - a Name may carry an ALIAS, read only when the name itself is unset: each GPU knob's Metal spelling is an alias
-     of its backend-neutral name (Name{ "PS_GPU_CHUNK", "PS_METAL_CHUNK" }).
+   - a Name may carry an ALIAS, read only when the name itself is unset (Name{ "NEW_NAME", "OLD_NAME" }: a renamed
+     knob kept for a release). None is in use: the GPU knobs' Metal spellings (PS_METAL_CHUNK for PS_GPU_CHUNK, ...)
+     were dropped once the backend-neutral names had shipped.
    Plain C++17 with no other header of the project: the CUDA/HIP sources (nvcc, hipcc, the CPU emulation) include it
    too. */
 #ifndef DTFE_ENV_KNOBS_H

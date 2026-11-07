@@ -120,16 +120,18 @@ def _run_command(tmp, sim):
           dte.command()[0] == [str(rs.DTFE_SCRIPT), "-s", "TNG100-3-Dark", "-g", "512", "-e", "4"]
           and rs.job_summary("grids", dte).endswith(", exact"), str(dte.command()[0]))
     # run_dtfe.sh's default is the exact average, and -e only switches it on: the job pins the knob
-    check("... the cell average is pinned both ways (DTFE_EXACT_AVERAGE=0 for 'sampled', 1 for 'exact')",
-          dt.command()[1].get("DTFE_EXACT_AVERAGE") == "0" and dte.command()[1].get("DTFE_EXACT_AVERAGE") == "1",
+    check("... the cell average is pinned both ways (DTFE_EXACT=0 for 'sampled', 1 for 'exact'; the older name "
+          "DTFE_EXACT_AVERAGE the same, for one release)",
+          dt.command()[1].get("DTFE_EXACT") == "0" and dte.command()[1].get("DTFE_EXACT") == "1"
+          and dt.command()[1].get("DTFE_EXACT_AVERAGE") == "0" and dte.command()[1].get("DTFE_EXACT_AVERAGE") == "1",
           f"{dt.command()[1]} {dte.command()[1]}")
     # a standard-DTFE job STARTS at the exact cell average, run_dtfe.sh's and the
     # production setting; a PS-DTFE job at the sampled deposit; a choice saved in a settings dict is kept
     dflt = rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[4], estimator="dtfe", gpu=False)
-    check("a standard-DTFE job starts at the exact cell average (-e, DTFE_EXACT_AVERAGE=1), a PS-DTFE one at the "
+    check("a standard-DTFE job starts at the exact cell average (-e, DTFE_EXACT=1), a PS-DTFE one at the "
           "sampled deposit, Grids and Custom alike; a saved choice is kept, a settings dict without one gets the "
           "estimator's own",
-          dflt.deposit == "exact" and "-e" in dflt.command()[0] and dflt.command()[1]["DTFE_EXACT_AVERAGE"] == "1"
+          dflt.deposit == "exact" and "-e" in dflt.command()[0] and dflt.command()[1]["DTFE_EXACT"] == "1"
           and rs.RunSpec().deposit == "sampled" and rs.CustomSpec().deposit == "sampled"
           and rs.CustomSpec(estimator="dtfe").deposit == "exact"
           and rs.production_deposit("dtfe") == "exact" and rs.production_deposit("ps") == "sampled"
@@ -300,6 +302,7 @@ def _plots(tmp, sim, spec):
     run_options(tmp)
     audit_claims()
     cube_cap()
+    cube_release()
     point_window_linear(tmp)
     plane_reads()
     plot_options(tmp)
@@ -875,7 +878,35 @@ def _custom_snapshot(tmp, np, P):
           and Path(ds[2].argv[0]).name == "PS-DTFE" and "error" not in levels(d)[0], levels(d)[1])
     check("custom: to_dict/from_dict round trip", rs.CustomSpec.from_dict(c.to_dict()) == c)
 
-    # ---- every binary flag the GUI can emit exists in the built binary's own --full_help, and
+    # ---- one flag scheme: the deprecated spellings the readers map are the binaries' own (user_options.cc
+    # deprecatedOptions), the same table in run_ps_pipeline.sh and docs_drift_check.py; the GUI emits none of them
+    import re as _re
+    import results as R
+    src = (ROOT / "src" / "user_options.cc").read_text()
+    table = src[src.index("deprecatedOptions[] = {"):]
+    cpp = dict(_re.findall(r'\{ "([\w-]+)", +"([\w-]+)" \}', table[:table.index("};")]))
+    cpp = {"--" + k: "--" + v for k, v in cpp.items()}
+    awk = dict(_re.findall(r'old\["(--[\w-]+)"\] = "(--[\w-]+)"', (ROOT / "scripts" / "run_ps_pipeline.sh").read_text()))
+    sys.path.insert(0, str(ROOT / "tests"))
+    import docs_drift_check as DD
+    check("the deprecated spellings: one table in the binaries, the launcher's readers, the pipeline and the docs check",
+          len(cpp) == 5 and cpp == R.DEPRECATED_FLAGS == awk == DD.DEPRECATED, f"{cpp} {awk}")
+    cx = rs.CustomSpec(input_file=str(snap), estimator="ps", deposit="exact", gpu=True, fields=["density_a", "tweb_a"])
+    cxa = cx.command()
+    check("the Custom tab emits the canonical names (--exact-average, --gpu, --lambda-th), none of the old ones",
+          "--exact-average" in cxa and "--gpu" in cxa and cxa[cxa.index("--lambda-th") + 1] == "0.3"
+          and not set(cxa) & set(R.DEPRECATED_FLAGS), str(cxa))
+    old = R.RunRecord(path=Path("o.runlog"), binary="PS-DTFE", command="./PS-DTFE in o --grid 64 --avg-subsamples 2 "
+                      "--lambda_th 0.3 --ps-gpu --ps-exact-deposit --ps-caustics")
+    new = R.RunRecord(path=Path("n.runlog"), binary="PS-DTFE", command="./PS-DTFE in n --grid 64 --avg-subsamples 2 "
+                      "--lambda-th 0.3 --gpu --exact-average --ps-caustics")
+    check("a run log with the deprecated spellings reads as one with the canonical names (settings, options, GPU)",
+          old.settings() == new.settings() and old.options_text() == new.options_text() == "exact, caustics, GPU"
+          and old.has("--exact-average") and new.has("--ps-exact-deposit") and old.gpu and old.nsub == 2
+          and R.canonical_command("--lambda_th=0.3 /a/--ps-gpu") == "--lambda-th=0.3 /a/--ps-gpu",
+          f"{old.settings()} {old.options_text()}")
+
+    # ---- every binary flag the GUI can emit exists in the built binary's own --full-help, and
     # every script knob it sets is one the script reads: a renamed option can never ship silently
     import re as _re
     ps_help, dt_help = P.flag_help("PS-DTFE"), P.flag_help("DTFE")
@@ -894,6 +925,8 @@ def _custom_snapshot(tmp, np, P):
               not unknown, str(unknown))
         script = (ROOT / "scripts" / "run_ps_dtfe.sh").read_text()
         knobs = set(_re.findall(r'^([A-Z_]+)="\$\{\1:-', script, _re.M))
+        # a knob's older name, read when it is unset: PS_GPU="${PS_GPU:-${PS_METAL:-auto}}"
+        knobs |= set(_re.findall(r'^[A-Z_]+="\$\{[A-Z_]+:-\$\{([A-Z_]+):-', script, _re.M))
         used = set(rs.RunSpec(sim="TNG50-4", snapshots=[99], slice_plane=str(snap), scratch_dir=str(work),
                               partition=2, max_concurrent=2, parallel_triangulation=True).command()[1]) - {"DTFE_DATA_ROOT"}
         check("every environment knob the Grids job sets is one run_ps_dtfe.sh reads",
@@ -968,6 +1001,17 @@ def _custom_snapshot(tmp, np, P):
     check("... an unclosed quote is an error and adds nothing; an option the tab sets already is an error",
           bad.command() == bad._own_command() and any("do not parse" in m for m in errors(bad))
           and any("repeat --grid" in m for m in errors(twice)), str(errors(bad) + errors(twice)))
+    # a deprecated spelling or an '=value' is still the option the tab sets (the binary takes it once: a saved
+    # '--lambda_th 0.4' next to the tab's '--lambda-th 0.3' would abort the run)
+    web = dict(input_file=str(snap), grid=64, output_dir=str(work), fields=["density_a", "tweb_a"])
+    old_sp, old_eq, grid_eq, other = (rs.CustomSpec(**web, extra_args=e) for e in
+                                      ("--lambda_th 0.4", "--lambda_th=0.4", "--grid=128", "--seed 7"))
+    check("... a repeat in a deprecated spelling or as '--name=value' is the same error, under the canonical name",
+          "--lambda-th" in old_sp._own_command()
+          and all(any("repeat --lambda-th," in m for m in errors(s)) for s in (old_sp, old_eq))
+          and any("repeat --grid," in m for m in errors(grid_eq))
+          and not [m for m in errors(other) if "extra options" in m],
+          str(errors(old_sp) + errors(old_eq) + errors(grid_eq) + errors(other)))
     q = rs.QueuedJob.of("custom", c)
     check("custom: a queued custom-snapshot job rebuilds and has a summary",
           q.build() == c and q.title.startswith("Custom snapshot · cloud.hdf5 · PS-DTFE 64³"), q.title)
@@ -2011,6 +2055,41 @@ def cube_cap():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def cube_release():
+    """One release for the launcher's cached cubes: the 3D view's averaged and prepared cubes are registered with
+    grids.drop_cubes (volume3d at import), which a job start and a memory check call alone; while the job runs the
+    3D view keeps none."""
+    import numpy as np
+    import grids as G
+    import volume3d as VOL
+    d = Path(tempfile.mkdtemp(prefix="gui_release_"))
+    try:
+        n = 16
+        np.random.default_rng(3).random((n, n, n)).astype(np.float32).tofile(d / "r.a_den")
+        o = G.OutputSet(d / "r", box=((0.0,) * 3, (float(n),) * 3), redshift=0.0)
+        G.drop_cubes()
+        o.slice("density", 2, 3)                                    # the map's cube, cached
+        avg = VOL.average_window(o, "density", "value", o.lo, o.lo + o.length, 8)
+        prep = VOL.prepare(avg, True)                               # the 3D caches filled
+        held = n ** 3 * 4 + avg["values"].nbytes + VOL.prepared_bytes(prep)
+        freed = G.drop_cubes()                                      # the job-start path: drop_cubes() alone ...
+        G.cap_cubes(True)                                           # ... then the cap (app_run._begin)
+        left = VOL.drop_volumes()
+        VOL.prepare(VOL.average_window(o, "density", "value", o.lo, o.lo + o.length, 8), True)
+        kept = VOL.drop_volumes()
+        check("a job start's drop_cubes() also frees the 3D view's averaged and prepared cubes (registered at import): "
+              "the bytes of all three counted, drop_volumes() then 0, and while the job runs the 3D view keeps none",
+              VOL.drop_volumes in G._DROP_CALLBACKS and freed == held and left == 0 and kept == 0,
+              f"{freed} {held} {left} {kept}")
+        src = {f: (ROOT / "python" / "gui" / f).read_text() for f in ("app_run.py", "app_check.py")}
+        check("... the job start (app_run) and the memory check (app_check) call grids.drop_cubes() alone",
+              all(t.count("G.drop_cubes()") == 1 and "drop_volumes" not in t for t in src.values()))
+    finally:
+        G.cap_cubes(False)
+        G.drop_cubes()
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def audit_claims():
     """An output name with a dot is listed; time estimates compare runs of one precision."""
     import numpy as np
@@ -2167,12 +2246,15 @@ def pipeline_options(tmp: Path, sim: Path):
           env["WINDOW"] == "12.3456789 50 0 50" and env["THICKNESS"] == "0.123456789"
           and fine.plane_matches("TNG100-3-Dark") is True, f"{env['WINDOW']} {env['THICKNESS']}")
     side.write_text(good)
-    check("the GPU knob is pinned in the environment too (PS_METAL / DTFE_METAL), not only by -m",
-          rs.PipelineSpec(**base, gpu=True).command()[1]["PS_METAL"] == "1"
-          and rs.PipelineSpec(**base, gpu=False).command()[1]["PS_METAL"] == "0"
-          and rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99], gpu=False).command()[1]["PS_METAL"] == "0"
-          and rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99], estimator="dtfe",
-                         gpu=False).command()[1]["DTFE_METAL"] == "0")
+    envs = [rs.PipelineSpec(**base, gpu=True).command()[1], rs.PipelineSpec(**base, gpu=False).command()[1],
+            rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99], gpu=True).command()[1],
+            rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99], gpu=False).command()[1],
+            rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99], estimator="dtfe",
+                       gpu=False).command()[1]]
+    check("the GPU knob is pinned in the environment too (PS_GPU / DTFE_GPU, and their older names PS_METAL / "
+          "DTFE_METAL for one release), not only by -m",
+          [(e.get("PS_GPU"), e.get("PS_METAL")) for e in envs[:4]] == [("1", "1"), ("0", "0"), ("1", "1"), ("0", "0")]
+          and (envs[4].get("DTFE_GPU"), envs[4].get("DTFE_METAL")) == ("0", "0"), str(envs))
 
     r = rs.PipelineSpec(**base, render_fields="density, velDiv", render_smooth=2.0, render_smooth_derivatives=0.0,
                         render_fixed_range=True, render_force=True, planes=16, render_project="slab")
@@ -2253,7 +2335,7 @@ def cube_cache_and_paths(tmp: Path, sim: Path):
     cs0 = rs.CustomSpec(input_file=str(sim / "snapdir_099" / "combined_099.hdf5"), fields=["density_a"])
     a, a0 = cs.command(), cs0.command()
     check("a Custom run with a web field passes the scripts' lambda_th (0.3), one without passes none",
-          a[a.index("--lambda_th") + 1] == "0.3" and "--lambda_th" not in a0, str(a))
+          a[a.index("--lambda-th") + 1] == "0.3" and "--lambda-th" not in a0, str(a))
     check("the Grids/Pipeline specs pass LAMBDA_TH only when it differs from the scripts' default",
           "LAMBDA_TH" not in rs.RunSpec(sim="TNG100-3-Dark", snapshots=[99], data_root=str(tmp)).command()[1]
           and rs.RunSpec(sim="TNG100-3-Dark", snapshots=[99], data_root=str(tmp), lambda_th=0.2).command()[1]["LAMBDA_TH"] == "0.2"

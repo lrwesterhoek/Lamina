@@ -8,7 +8,7 @@ outlined), the component size distributions, and -- with --voids, from the pipel
 the fold fraction of each distinct void's shells (--shells, default 0.8-1.2 R_v: around the wall, R_v being the
 measured void radius; --radius r_eff for the ellipsoid's, ~1.75 R_v, with 1.0-1.3) and its distance to the nearest
 sheet in units of that radius (searched within --cutout cells, default 10 smoothing lengths). The cusp and swallowtail rows are '--' unless the grid carries bit 7/8 (only --ps-caustic-cusps on
-the CPU deposit sets them); a parity-only grid (--ps-linear-deposit --ps-gpu: the fold flag without the
+the CPU deposit sets them); a parity-only grid (--ps-linear-deposit --gpu: the fold flag without the
 collapse bits) is refused. THE FOLD is FieldSet.fold_mask() -- streams > 1 or '.hidden_streams' bit 1,
 the geometric 'a folded tetrahedron overlaps the cell' -- for the fractions, the void shells, the null and the
 outline alike: older caustic_class grids set their fold bits per deposited sample and miss
@@ -47,10 +47,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 
-from dtfelib import make_parser, FieldSet, sim_dir, skeleton as sk, catalog, pipeline
+from dtfelib import make_parser, FieldSet, snapdir_path, snapshot_ladder, skeleton as sk, catalog, pipeline
+from dtfelib import add_snaps_arg, add_out_arg
 from dtfelib import figures as style
 
-OUTPUT_DIR = Path(config.LOCAL_FIGURES_ROOT) / "caustic_skeleton"
+OUTPUT_DIR = Path(config.figures_path("caustic_skeleton"))
 CLASS_COLORS = ["#f2f2f2", "#d9e6f2", "#f2b134", "#e4572e", "#7b1e3b"]   # none, k=0, k=1, k=2, k=3
 
 
@@ -197,14 +198,12 @@ def plot_skeleton(cc, summ, fold, voids, title, path):
 
 def caustic_snapshots(sim, data_root, method, prefix):
     """The snapshots of 'sim' whose snapdir holds a caustic_class grid under 'prefix' (--all-caustic)."""
-    out = []
-    for d in sorted(sim_dir(sim, data_root).glob("snapdir_*")):
+    def has_caustics(d):
         try:
-            if FieldSet(d, method=method, prefix=prefix).has("caustic_class"):
-                out.append(int(d.name.split("_")[1]))
+            return FieldSet(d, method=method, prefix=prefix).has("caustic_class")
         except (FileNotFoundError, ValueError, OSError):
-            continue
-    return out
+            return False
+    return snapshot_ladder(sim, data_root, require=has_caustics)
 
 
 def skeleton_tag(args, prefix, default_shells):
@@ -231,7 +230,7 @@ def skeleton_tag(args, prefix, default_shells):
 
 def main():
     parser = make_parser("The caustic skeleton (walls, filaments, nodes) from the caustic_class grid of a --ps-caustics run.")
-    parser.add_argument("--snaps", type=int, nargs="*", default=None, help="snapshots (default: --snap)")
+    add_snaps_arg(parser)
     parser.add_argument("--connectivity", type=int, choices=(6, 18, 26), default=26)
     parser.add_argument("--voids", action="store_true", help="per void: the shell's fold fraction and the nearest sheet (pipeline catalogue)")
     parser.add_argument("--cutout", type=int, default=None,
@@ -263,7 +262,7 @@ def main():
                         help="every snapshot of the simulation that has a caustic_class grid under this prefix "
                              "(instead of --snap / --snaps)")
     pipeline.add_smoothing_mpc_arg(parser)
-    parser.add_argument("--out", default=None, help=f"output folder (default {OUTPUT_DIR}/<sim>)")
+    add_out_arg(parser, f"{OUTPUT_DIR}/<sim>")
     args = parser.parse_args()
     style.apply()
     pipeline.apply_smoothing_args(args, "caustic-skeleton")    # --smooth / --smooth-mpc: the --voids catalogue's
@@ -281,7 +280,7 @@ def main():
                   "snapshots (050 and 033, z = 1 and 2; 25-40 min each for TNG100-3-Dark at 512^3) would add that epoch")
     failed, written = [], []
     for snap in snaps:
-        snapdir = sim_dir(args.sim, args.data_root) / f"snapdir_{snap:03d}"
+        snapdir = snapdir_path(args.sim, snap, args.data_root)
         try:
             fs = FieldSet(snapdir, method=method, prefix=args.prefix)
             if not fs.has("caustic_class"):

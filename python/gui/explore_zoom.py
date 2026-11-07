@@ -1,8 +1,9 @@
 """The Explore tab's zoom: a rectangle dragged on the map evaluated again, point by point through the query server,
 or by an exact run of the program itself on the region (ExactZoomWorker on its own thread, load_exact_planes for
-the grid it writes; explore.py re-exports them); ZoomMixin, the part of ExploreControls that plans, estimates and
-starts a zoom, carries its window to other outputs and redshifts, draws it, and keeps the earlier levels and recent
-zooms in memory."""
+the grid it writes; explore.py re-exports them); exact_zoom_plan, the run behind an exact zoom (a plain function of
+the output and the pane's choices); ZoomMixin, the part of ExploreControls that plans, estimates and starts a zoom,
+carries its window to other outputs and redshifts, draws it, and keeps the earlier levels and recent zooms in
+memory."""
 
 from __future__ import annotations
 
@@ -180,6 +181,169 @@ def load_exact_planes(root, grid, redshift=None):
     return f
 
 
+def exact_partition(o, kw: dict, side: dict, cache: Path, server_partitions: int = 0) -> tuple[tuple | None, dict]:
+    """The split an exact zoom of a phase-space run uses, and this snapshot's cached partition sets:
+    the running query server's (its cache is then complete; 'server_partitions' = its partition count when it
+    serves this output, else 0), else the most complete set in the cache, else the run's own split, else none (the
+    binary's auto-tuner)."""
+    d = o.dim
+    sets = {t: v for t, v in G.cached_partition_sets(cache, kw["snapshot"], kw.get("lagrangian_input"),
+                                                     bool(kw.get("periodic", True))).items() if len(t) == d}
+    if server_partitions > 1:
+        n = round(server_partitions ** (1.0 / d))
+        if n ** d == server_partitions:
+            return (n,) * d, sets
+    if sets:
+        best = max(sets, key=lambda t: (len(sets[t]) / float(np.prod(t)), len(sets[t])))
+        return best, sets
+    if int(side.get("partition") or 0) > 0:
+        n = int(side["partition"])
+        return (n,) * d, sets
+    return None, sets
+
+
+def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: str | None = None,
+                    cache_dir: str = "", server_partitions: int = 0) -> dict:
+    """Everything about the run behind an exact zoom of output 'o': the command ('cmd', None with a
+    'note' when it cannot be built), its output 'root' and 'grid' dims, the region as the run will
+    grid it ('edges' (a0, a1) and 'window' (3, 2) in Mpc), and for a phase-space run the tessellation
+    'cache_dir', the 'partition' split and the cached partition 'sets' (for the estimate). The region
+    = the dragged rectangle, one slice cell thick; its grid res x res x 1 (in the axis' place).
+    Standard DTFE cuts the region from the box (regionMpc, periodic or not) and integrates the
+    interpolant exactly. PS-DTFE tessellates the whole box as the original run did (periodic or not)
+    and deposits only into a WINDOW of a virtual full grid whose cell is the rectangle's / res
+    (--ps-window): the window's cells equal the full grid's, so the zoom is what a run at that
+    resolution would show there. It reuses the tessellations the query server keeps on disk (the same
+    cache folder and split), and the binary skips the partitions whose occupancy maps never reach
+    the window. The window is snapped to that grid's cell edges, so the returned edges can differ
+    from the drag by up to half a zoom cell. A 2D output: the same on its plane, with no slice axis
+    (a res x res grid, a window and a region of two axes). 'snapshot': the snapshot file chosen by hand for this
+    output (None: found beside it); 'cache_dir': the query server's cache folder as typed ('': the default near
+    the output); 'server_partitions': exact_partition's."""
+    import tempfile
+    plan = {"cmd": None, "note": "", "root": None, "grid": None, "edges": None, "window": None,
+            "ps": False, "cache_dir": None, "partition": None, "sets": {}, "snapshot": None,
+            "lagrangian": None}
+    kw = G.server_settings(o, snapshot)
+    if kw is None:
+        plan["note"] = "no snapshot known for this output (its input file is not beside it)"
+        return plan
+    if o.box is None:
+        plan["note"] = "this output's box is unknown, so the region cannot be placed"
+        return plan
+    ps = bool(kw.get("phase_space", True))
+    periodic = bool(kw.get("periodic", True))
+    side = G.sidecar(o.root) or {}
+    est = "ps" if ps else "dtfe"
+    precision = side.get("precision", "single") if side.get("precision") in ("single", "double") else "single"
+    flat = o.dim == 2               # a 2D run: only the plane's two axes (the slice axis is z)
+    binary = rs.REPO_ROOT / rs.binary_name(est, precision, o.dim)
+    if not binary.is_file():
+        plan["note"] = f"{binary.name} is not built"
+        return plan
+    mpc = float(kw["mpc_unit"]) if kw.get("mpc_unit") is not None else None   # None: the binary's default, as the server
+    region = [[0.0, 0.0] for _ in range(3)]
+    region[axis] = [o.lo[axis] + index * o.length[axis] / o.n, o.lo[axis] + (index + 1) * o.length[axis] / o.n]
+    region[rest[0]] = [float(a0[0]), float(a0[1])]
+    region[rest[1]] = [float(a1[0]), float(a1[1])]
+    grid = [res, res, res]
+    grid[axis] = 1
+    if flat:
+        grid = [res, res]
+    out_dir = Path(tempfile.mkdtemp(prefix=rs.ZOOM_DIR_PREFIX))     # runspec._kind tells it from a Custom run by this
+    root = out_dir / "zoom"
+    cmd = [str(binary), str(kw["snapshot"]), str(root), "--input", str(int(kw.get("input_type", 105)))]
+    if mpc is not None:
+        cmd += ["--MpcUnit", f"{mpc:.10g}"]
+    a0n, a1n = (float(a0[0]), float(a0[1])), (float(a1[0]), float(a1[1]))
+    window_mpc = [list(r) for r in region]
+    if ps:
+        # the virtual full grid: the run's own cells along the slice axis (the window is one of
+        # them), and along the two plane axes cells of the rectangle's size / res, rounded to
+        # tile the box; the window = res x res of them starting at the rectangle's corner
+        n = [int(o.n)] * 3
+        window = [[0.0, 0.0] for _ in range(3)]
+        aligned = {}
+        for a in rest:
+            lo_a, hi_a = region[a]
+            length = float(o.length[a])
+            dx = (hi_a - lo_a) / res
+            if not (dx > 0.0 and length > 0.0):
+                plan["note"] = "the dragged region has no extent"
+                shutil.rmtree(out_dir, ignore_errors=True)
+                return plan
+            n_a = max(res, min(_ex.WINDOW_GRID_MAX, int(round(length / dx))))
+            dxp = length / n_a
+            c0 = max(0, min(n_a - res, int(round((lo_a - float(o.lo[a])) / dxp))))
+            n[a] = n_a
+            # the edges half a cell INSIDE the window: the program snaps them outward to the cell
+            # edges, so the window is exactly cells [c0, c0+res) whatever float rounding does
+            window[a] = [float(o.lo[a]) + (c0 + 0.5) * dxp, float(o.lo[a]) + (c0 + res - 0.5) * dxp]
+            aligned[a] = (float(o.lo[a]) + c0 * dxp, float(o.lo[a]) + (c0 + res) * dxp)
+            window_mpc[a] = list(aligned[a])
+        window[axis] = [o.lo[axis] + (index + 0.25) * o.length[axis] / o.n,
+                        o.lo[axis] + (index + 0.75) * o.length[axis] / o.n]
+        a0n, a1n = aligned[rest[0]], aligned[rest[1]]
+        if flat:
+            n, window, window_mpc = n[:2], window[:2], window_mpc[:2]
+        cmd += ["--grid", *[str(v) for v in n]]
+        if periodic:
+            cmd.append("--periodic")
+        cmd += list(kw.get("options", []))                          # the custom snapshot's own --box (and alpha)
+        corners = [f"{float(v):.10g}" for pair in window for v in pair]   # Mpc, as --ps-window takes
+        cmd += ["--ps-window", *corners, "--field", "density_a", "velocity_a", "dispersion_a", "gradient_a",
+                "--exact-average", "--ps-caustics"]                 # (the exact deposit)
+        if side.get("volume_weighted", True):
+            cmd.append("--ps-volume-weighted")
+        # chart-independent tet masses: as the custom run recorded it, or, for a TNG output (no
+        # sidecar: the batch script's default, on, when the converted ICs are the Lagrangian input)
+        if (bool(side.get("vertex_mass")) if side else bool(kw.get("lagrangian_input"))):
+            cmd.append("--ps-vertex-mass")
+        if kw.get("lagrangian_input"):
+            cmd += ["--lagrangianInput", str(kw["lagrangian_input"])]
+        if (not periodic and float(side.get("alpha_shape", 3.0)) != 3.0
+                and "--ps-alpha-shape" not in cmd):
+            cmd += ["--ps-alpha-shape", f"{float(side['alpha_shape']):g}"]
+        # the GPU, unlike a full grid's exact run (rs.recommended_gpu: the CPU): a zoom puts large tetrahedra
+        # into one thin slice of fine cells, where the GPU's exact items lead (a 512² slice of a 4096³ grid
+        # over 2.1M particles: deposit 1.2 s against 3.0 s on the CPU; 0.26M particles: a tie)
+        if rs.gpu_built("ps", precision, o.dim):
+            cmd.append("--gpu")
+        # the query server's tessellations on disk: the same cache folder and split, so a cached
+        # partition is loaded instead of rebuilt and one that never reaches the window is skipped;
+        # the concurrency is the binary's (its auto-tuner sizes it by the window and the free memory)
+        cache = Path(cache_dir.strip() or _ex.default_cache_dir(str(o.dir))).expanduser()
+        part, sets = exact_partition(o, kw, side, cache, server_partitions)
+        cmd += ["--tessellation-cache", str(cache)]
+        if part is not None:
+            cmd += ["--partition", *[str(int(v)) for v in part]]
+        cmd += ["--verbose", "2"]                                  # the progress lines the worker follows
+        plan.update(ps=True, cache_dir=str(cache), partition=part, sets=sets,
+                    snapshot=str(kw["snapshot"]), lagrangian=kw.get("lagrangian_input"))
+    else:
+        if flat:
+            region, window_mpc = region[:2], window_mpc[:2]
+        cmd += ["--grid", *[str(v) for v in grid]]
+        corners = [f"{float(v):.10g}" for pair in region for v in pair]     # Mpc, as --regionMpc takes
+        if periodic:
+            cmd.append("--periodic")
+        cmd += list(kw.get("options", []))                          # the custom snapshot's own --box
+        # the padding around the region: the binary's own '--padding 5' leaves wrong values in the
+        # cells near the region's faces (as near a box face: the Delaunay tetrahedra there reach the padded
+        # set's hull); the query server's 15 (dtfelib.estimator.STANDARD_PADDING, run_dtfe.sh's default) unless
+        # the snapshot's own options carry one. Placed before '--regionMpc': its corners are followed by '--field'
+        if not any(str(v) in ("--padding", "--paddingMpc") for v in kw.get("options", [])):
+            cmd += ["--padding", f"{STANDARD_PADDING:g}"]
+        cmd += ["--regionMpc", *corners, "--field", "density_a", "velocity_a", "gradient_a", "--exact-average"]
+        if side.get("scalar_dataset"):
+            cmd += ["scalar_a", "scalarGradient_a", "--scalar-dataset", str(side["scalar_dataset"])]
+        if rs.gpu_built("dtfe", precision, o.dim):
+            cmd.append("--gpu")
+        plan["snapshot"] = str(kw["snapshot"])
+    plan.update(cmd=cmd, root=str(root), grid=grid, edges=(a0n, a1n), window=window_mpc)
+    return plan
+
+
 class ZoomMixin:
     # ---------------------------------------------------------------- zoom
     def _dragged(self, r0: int, c0: int, r1: int, c1: int):
@@ -290,162 +454,21 @@ class ZoomMixin:
             return None, p["note"], None, None
         return p["cmd"], p["root"], p["grid"], p["edges"]
 
+    def _server_partitions(self, o) -> int:
+        """The running query server's partition count when it serves output 'o', else 0 (exact_partition)."""
+        if self._server_running and self._same(self._server_output, o):
+            return int(self._server.n_partitions)
+        return 0
+
     def _exact_partition(self, o, kw: dict, side: dict, cache: Path) -> tuple[tuple | None, dict]:
-        """The split an exact zoom of a phase-space run uses, and this snapshot's cached partition sets:
-        the running query server's (its cache is then complete), else the most complete set in the
-        cache, else the run's own split, else none (the binary's auto-tuner)."""
-        d = o.dim
-        sets = {t: v for t, v in G.cached_partition_sets(cache, kw["snapshot"], kw.get("lagrangian_input"),
-                                                         bool(kw.get("periodic", True))).items() if len(t) == d}
-        if self._server_running and self._same(self._server_output, o) and self._server.n_partitions > 1:
-            n = round(self._server.n_partitions ** (1.0 / d))
-            if n ** d == self._server.n_partitions:
-                return (n,) * d, sets
-        if sets:
-            best = max(sets, key=lambda t: (len(sets[t]) / float(np.prod(t)), len(sets[t])))
-            return best, sets
-        if int(side.get("partition") or 0) > 0:
-            n = int(side["partition"])
-            return (n,) * d, sets
-        return None, sets
+        """exact_partition for output 'o' with the query server running now."""
+        return exact_partition(o, kw, side, cache, self._server_partitions(o))
 
     def exact_zoom_plan(self, o, axis: int, index: int, rest, a0, a1, res: int) -> dict:
-        """Everything about the run behind an exact zoom of output 'o': the command ('cmd', None with a
-        'note' when it cannot be built), its output 'root' and 'grid' dims, the region as the run will
-        grid it ('edges' (a0, a1) and 'window' (3, 2) in Mpc), and for a phase-space run the tessellation
-        'cache_dir', the 'partition' split and the cached partition 'sets' (for the estimate). The region
-        = the dragged rectangle, one slice cell thick; its grid res x res x 1 (in the axis' place).
-        Standard DTFE cuts the region from the box (regionMpc, periodic or not) and integrates the
-        interpolant exactly. PS-DTFE tessellates the whole box as the original run did (periodic or not)
-        and deposits only into a WINDOW of a virtual full grid whose cell is the rectangle's / res
-        (--ps-window): the window's cells equal the full grid's, so the zoom is what a run at that
-        resolution would show there. It reuses the tessellations the query server keeps on disk (the same
-        cache folder and split), and the binary skips the partitions whose occupancy maps never reach
-        the window. The window is snapped to that grid's cell edges, so the returned edges can differ
-        from the drag by up to half a zoom cell. A 2D output: the same on its plane, with no slice axis
-        (a res x res grid, a window and a region of two axes)."""
-        import tempfile
-        plan = {"cmd": None, "note": "", "root": None, "grid": None, "edges": None, "window": None,
-                "ps": False, "cache_dir": None, "partition": None, "sets": {}, "snapshot": None,
-                "lagrangian": None}
-        kw = G.server_settings(o, self._snapshots.get(str(o.root)))
-        if kw is None:
-            plan["note"] = "no snapshot known for this output (its input file is not beside it)"
-            return plan
-        if o.box is None:
-            plan["note"] = "this output's box is unknown, so the region cannot be placed"
-            return plan
-        ps = bool(kw.get("phase_space", True))
-        periodic = bool(kw.get("periodic", True))
-        side = G.sidecar(o.root) or {}
-        est = "ps" if ps else "dtfe"
-        precision = side.get("precision", "single") if side.get("precision") in ("single", "double") else "single"
-        flat = o.dim == 2               # a 2D run: only the plane's two axes (the slice axis is z)
-        binary = rs.REPO_ROOT / rs.binary_name(est, precision, o.dim)
-        if not binary.is_file():
-            plan["note"] = f"{binary.name} is not built"
-            return plan
-        mpc = float(kw["mpc_unit"]) if kw.get("mpc_unit") is not None else None   # None: the binary's default, as the server
-        region = [[0.0, 0.0] for _ in range(3)]
-        region[axis] = [o.lo[axis] + index * o.length[axis] / o.n, o.lo[axis] + (index + 1) * o.length[axis] / o.n]
-        region[rest[0]] = [float(a0[0]), float(a0[1])]
-        region[rest[1]] = [float(a1[0]), float(a1[1])]
-        grid = [res, res, res]
-        grid[axis] = 1
-        if flat:
-            grid = [res, res]
-        out_dir = Path(tempfile.mkdtemp(prefix=rs.ZOOM_DIR_PREFIX))     # runspec._kind tells it from a Custom run by this
-        root = out_dir / "zoom"
-        cmd = [str(binary), str(kw["snapshot"]), str(root), "--input", str(int(kw.get("input_type", 105)))]
-        if mpc is not None:
-            cmd += ["--MpcUnit", f"{mpc:.10g}"]
-        a0n, a1n = (float(a0[0]), float(a0[1])), (float(a1[0]), float(a1[1]))
-        window_mpc = [list(r) for r in region]
-        if ps:
-            # the virtual full grid: the run's own cells along the slice axis (the window is one of
-            # them), and along the two plane axes cells of the rectangle's size / res, rounded to
-            # tile the box; the window = res x res of them starting at the rectangle's corner
-            n = [int(o.n)] * 3
-            window = [[0.0, 0.0] for _ in range(3)]
-            aligned = {}
-            for a in rest:
-                lo_a, hi_a = region[a]
-                length = float(o.length[a])
-                dx = (hi_a - lo_a) / res
-                if not (dx > 0.0 and length > 0.0):
-                    plan["note"] = "the dragged region has no extent"
-                    shutil.rmtree(out_dir, ignore_errors=True)
-                    return plan
-                n_a = max(res, min(_ex.WINDOW_GRID_MAX, int(round(length / dx))))
-                dxp = length / n_a
-                c0 = max(0, min(n_a - res, int(round((lo_a - float(o.lo[a])) / dxp))))
-                n[a] = n_a
-                # the edges half a cell INSIDE the window: the program snaps them outward to the cell
-                # edges, so the window is exactly cells [c0, c0+res) whatever float rounding does
-                window[a] = [float(o.lo[a]) + (c0 + 0.5) * dxp, float(o.lo[a]) + (c0 + res - 0.5) * dxp]
-                aligned[a] = (float(o.lo[a]) + c0 * dxp, float(o.lo[a]) + (c0 + res) * dxp)
-                window_mpc[a] = list(aligned[a])
-            window[axis] = [o.lo[axis] + (index + 0.25) * o.length[axis] / o.n,
-                            o.lo[axis] + (index + 0.75) * o.length[axis] / o.n]
-            a0n, a1n = aligned[rest[0]], aligned[rest[1]]
-            if flat:
-                n, window, window_mpc = n[:2], window[:2], window_mpc[:2]
-            cmd += ["--grid", *[str(v) for v in n]]
-            if periodic:
-                cmd.append("--periodic")
-            cmd += list(kw.get("options", []))                          # the custom snapshot's own --box (and alpha)
-            corners = [f"{float(v):.10g}" for pair in window for v in pair]   # Mpc, as --ps-window takes
-            cmd += ["--ps-window", *corners, "--field", "density_a", "velocity_a", "dispersion_a", "gradient_a",
-                    "--ps-exact-deposit", "--ps-caustics"]
-            if side.get("volume_weighted", True):
-                cmd.append("--ps-volume-weighted")
-            # chart-independent tet masses: as the custom run recorded it, or, for a TNG output (no
-            # sidecar: the batch script's default, on, when the converted ICs are the Lagrangian input)
-            if (bool(side.get("vertex_mass")) if side else bool(kw.get("lagrangian_input"))):
-                cmd.append("--ps-vertex-mass")
-            if kw.get("lagrangian_input"):
-                cmd += ["--lagrangianInput", str(kw["lagrangian_input"])]
-            if (not periodic and float(side.get("alpha_shape", 3.0)) != 3.0
-                    and "--ps-alpha-shape" not in cmd):
-                cmd += ["--ps-alpha-shape", f"{float(side['alpha_shape']):g}"]
-            # the GPU, unlike a full grid's exact run (rs.recommended_gpu: the CPU): a zoom puts large tetrahedra
-            # into one thin slice of fine cells, where the GPU's exact items lead (a 512² slice of a 4096³ grid
-            # over 2.1M particles: deposit 1.2 s against 3.0 s on the CPU; 0.26M particles: a tie)
-            if rs.gpu_built("ps", precision, o.dim):
-                cmd.append("--ps-gpu")
-            # the query server's tessellations on disk: the same cache folder and split, so a cached
-            # partition is loaded instead of rebuilt and one that never reaches the window is skipped;
-            # the concurrency is the binary's (its auto-tuner sizes it by the window and the free memory)
-            cache = Path(self.cache_edit.text().strip() or _ex.default_cache_dir(str(o.dir))).expanduser()
-            part, sets = self._exact_partition(o, kw, side, cache)
-            cmd += ["--tessellation-cache", str(cache)]
-            if part is not None:
-                cmd += ["--partition", *[str(int(v)) for v in part]]
-            cmd += ["--verbose", "2"]                                  # the progress lines the worker follows
-            plan.update(ps=True, cache_dir=str(cache), partition=part, sets=sets,
-                        snapshot=str(kw["snapshot"]), lagrangian=kw.get("lagrangian_input"))
-        else:
-            if flat:
-                region, window_mpc = region[:2], window_mpc[:2]
-            cmd += ["--grid", *[str(v) for v in grid]]
-            corners = [f"{float(v):.10g}" for pair in region for v in pair]     # Mpc, as --regionMpc takes
-            if periodic:
-                cmd.append("--periodic")
-            cmd += list(kw.get("options", []))                          # the custom snapshot's own --box
-            # the padding around the region: the binary's own '--padding 5' leaves wrong values in the
-            # cells near the region's faces (as near a box face: the Delaunay tetrahedra there reach the padded
-            # set's hull); the query server's 15 (dtfelib.estimator.STANDARD_PADDING, run_dtfe.sh's default) unless
-            # the snapshot's own options carry one. Placed before '--regionMpc': its corners are followed by '--field'
-            if not any(str(v) in ("--padding", "--paddingMpc") for v in kw.get("options", [])):
-                cmd += ["--padding", f"{STANDARD_PADDING:g}"]
-            cmd += ["--regionMpc", *corners, "--field", "density_a", "velocity_a", "gradient_a", "--exact-average"]
-            if side.get("scalar_dataset"):
-                cmd += ["scalar_a", "scalarGradient_a", "--scalar-dataset", str(side["scalar_dataset"])]
-            if rs.gpu_built("dtfe", precision, o.dim):
-                cmd.append("--gpu")
-            plan["snapshot"] = str(kw["snapshot"])
-        plan.update(cmd=cmd, root=str(root), grid=grid, edges=(a0n, a1n), window=window_mpc)
-        return plan
+        """exact_zoom_plan (the module's) for output 'o' with this pane's choices: the snapshot chosen by hand, the
+        cache folder, the query server running now."""
+        return exact_zoom_plan(o, axis, index, rest, a0, a1, res, self._snapshots.get(str(o.root)),
+                               self.cache_edit.text(), self._server_partitions(o))
 
     def exact_zoom_estimate(self, plan: dict) -> dict | None:
         """How long the exact zoom of a phase-space run will take (None for standard DTFE, which
@@ -739,8 +762,8 @@ class ZoomMixin:
         self._out_form_map.setRowVisible(self.ps_gradient_note, False)
         if fam == "stream" and req.get("ps_gradient") == "mean-field":
             note += " · its velocity derivatives are the stream average (a point evaluation has no mean field)"
-        comp = "" if req["component"] in ("value", "") else f" [{req['component']}]"
-        self.view.colorbar.set(req["cmap"], vrange, ("log₁₀ " if req["log"] else "") + label + comp, req["log"])
+        comp = G.component_suffix(req["component"])
+        self.view.colorbar.set(req["cmap"], vrange, G.colourbar_label(label, req), req["log"])
         rest = z["rest"]
         kind = "exact zoom" if z.get("exact") else "zoom"
 

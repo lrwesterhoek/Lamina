@@ -43,6 +43,7 @@ extern std::atomic<int> dtfeGpuRetriesByCause[4];  // ... by cause: innocent, ti
 #include "../message.h"         // ANSI colour helpers only (the retry warnings)
 #include "gpu_cuda_compat.h"
 #include "dtfe_gpu_fixed.h"     // batchFixedScales + psMassFixedMass: the exact sums' units (shared with the Metal host)
+#include "dtfe_deposit_params.h" // DTFEDepositParams: the kernels' parameter block (shared with the Metal kernels)
 
 #define ITEM_BLOCK_SHIFT 5      // log2 of the items per entry of the block table (kernel + host)
 
@@ -50,30 +51,12 @@ namespace {
 
 #include "gpu_exact_clip.cuh"   // V3, det3/inverse3, the exact tet-cell sweep (shared with ps_gpu_cuda.cu)
 
-// must match the Metal DepositParams (dtfe_deposit.metal) field for field
-struct DepositParams
+// the parameter block: dtfe_deposit_params.h, the Metal kernels' own struct (prepended to their source), plus the
+// one field the Metal block has not: the non-finite guard's counters (one word per grid; fxq), which Metal binds as
+// a buffer of its own (21). Here they travel in the by-value parameters, which every device function that converts
+// a share already takes.
+struct DepositParams : DTFEDepositParams
 {
-    float    dx[3];
-    int32_t  nGrid[3];      // the batch's sub-grid
-    uint32_t nTet;          // threads in this dispatch (tetrahedra or work items)
-    int32_t  fDen;
-    int32_t  fVel;
-    int32_t  fGrad;
-    uint32_t itemSamples;   // item kernel: samples per work item
-    uint32_t nTetTotal;     // item kernel: tetrahedra in the batch
-    int32_t  subOff[3];     // the sub-grid's origin in the accumulated grid
-    uint32_t itemBase;      // item kernel: first item of this dispatch
-    int32_t  fullGrid[3];   // the accumulated grid
-    uint32_t debugNoAtomic; // DTFE_GPU_DEBUG_NOATOMIC: compute everything, skip the atomics (item kernel)
-    float    invDx[3];
-    uint32_t tableEntries;  // item kernel: shared-memory cell-table entries (power of two; 0 = none)
-    int32_t  fScal;         // the scalar field (ONE component): runtime flags in both kernels here (Metal
-    int32_t  fSGrad;        // specializes the item pipelines on them; 96 instantiations would be too many)
-    uint32_t fixedSum;      // the grids as exact 64-bit fixed-point sums (batchFixedScales)
-    float    fxScale[5];    // their units 2^k: density, velocity, velocity gradient, scalar, scalar gradient
-    // the one field the Metal struct has not: the non-finite guard's counters (one word per grid; fxq),
-    // which Metal binds as a buffer of its own (21). Here they travel in the by-value parameters, which every
-    // device function that converts a share already takes.
     unsigned* bad;
 };
 
@@ -877,8 +860,8 @@ struct Ctx
 
 
 std::mutex& ctxMutex() { static std::mutex m; return m; }
-// DTFE_GPU_TIMING=1 (alias DTFE_METAL_TIMING): one line per batch
-bool timingOn() { static bool t = Env::flag({"DTFE_GPU_TIMING", "DTFE_METAL_TIMING"}); return t; }
+// DTFE_GPU_TIMING=1: one line per batch
+bool timingOn() { static bool t = Env::flag({"DTFE_GPU_TIMING"}); return t; }
 
 Ctx& ctx()
 {
@@ -1134,8 +1117,8 @@ bool runBatch(Batch& b, Grids& g, ChunkState& cs, Stats& st, bool sharedBox, std
     size_t const MIN_CHUNK = exact ? 1024 : useItems ? 4096 : 2048;
     size_t const MAX_CHUNK = exact ? 499968 : useItems ? 4000000 : 499968;   // (multiples of CHUNK_ALIGN)
     size_t firstChunk = exact ? 8192 : useItems ? 65536 : 25088;
-    // DTFE_GPU_CHUNK (alias DTFE_METAL_CHUNK): the opening chunk
-    if (long const v = Env::integer({"DTFE_GPU_CHUNK", "DTFE_METAL_CHUNK"}, 0); v > 0) firstChunk = size_t(v);
+    // DTFE_GPU_CHUNK: the opening chunk
+    if (long const v = Env::integer({"DTFE_GPU_CHUNK"}, 0); v > 0) firstChunk = size_t(v);
     GpuPace& pace = gpuPace();        // targetSec 0.25 s, no gap until escalated
     // an escalated pace (an earlier batch's failures) opens with a proportionally smaller chunk
     if (pace.targetSec < GPU_PACE_TARGET0)
@@ -1275,9 +1258,7 @@ bool runBatch(Batch& b, Grids& g, ChunkState& cs, Stats& st, bool sharedBox, std
             }
             if (cause != GpuFault::Victim)
             {   // escalate (process-wide; GpuPace eases it back): 4x shorter kernels, gaps of 8-50 ms, smaller chunk
-                pace.targetSec = std::max(pace.targetSec / 4.0, 0.02);
-                pace.gapUs     = std::min(std::max(pace.gapUs * 3, GPU_PACE_GAP_MIN), useconds_t(50000));
-                pace.cleanSec  = 0.;
+                pace.onFault();
                 chunk = alignChunkUp(std::max(chunk / 4, MIN_CHUNK));
             }
             std::string const why = lastErr;
@@ -1321,20 +1302,12 @@ bool runBatch(Batch& b, Grids& g, ChunkState& cs, Stats& st, bool sharedBox, std
             if (scale > 4.0) scale = 4.0;
             chunk = alignChunkUp(std::min(std::max(size_t(double(chunk) * scale), MIN_CHUNK), MAX_CHUNK));
         }
-        if (pace.targetSec < GPU_PACE_TARGET0 || pace.gapUs > GPU_PACE_GAP0)
-        {   // an escalated pace steps back after a clean stretch of GPU work (GpuPace)
-            pace.cleanSec += el + pace.gapUs / 1e6;
-            if (pace.cleanSec >= paceRecoverSec)
-            {
-                pace.targetSec = std::min(pace.targetSec * 4.0, GPU_PACE_TARGET0);
-                pace.gapUs     = pace.gapUs / 3 < GPU_PACE_GAP_MIN ? GPU_PACE_GAP0 : pace.gapUs / 3;
-                fprintf(stderr, "DTFE %s: %.0f s of GPU work without a fault -- pace eased to %.0f ms "
-                                "kernels, %.0f ms gaps%s\n", GPU_BACKEND_STRING, pace.cleanSec, pace.targetSec * 1e3,
-                        pace.gapUs / 1e3,
-                        pace.targetSec >= GPU_PACE_TARGET0 && pace.gapUs <= GPU_PACE_GAP0 ? " (the default)" : "");
-                pace.cleanSec = 0.;
-            }
-        }
+        double clean = 0.;
+        if (pace.onClean(el, paceRecoverSec, clean))   // an escalated pace stepped back after a clean stretch (GpuPace)
+            fprintf(stderr, "DTFE %s: %.0f s of GPU work without a fault -- pace eased to %.0f ms "
+                            "kernels, %.0f ms gaps%s\n", GPU_BACKEND_STRING, clean, pace.targetSec * 1e3,
+                    pace.gapUs / 1e3,
+                    pace.targetSec >= GPU_PACE_TARGET0 && pace.gapUs <= GPU_PACE_GAP0 ? " (the default)" : "");
         long const every = ckChunks >= 0 ? ckChunks : std::max(1L, long(std::lround(10.0 / pace.targetSec)));
         if (!sharedBox && ckOn && every > 0 && long(sinceCk) >= every && start < nThreads)
         {   // synchronized above: the buffers hold exactly [0, start)

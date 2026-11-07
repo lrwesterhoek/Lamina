@@ -152,21 +152,16 @@ usage() {
 }
 
 # ---- Parse arguments ------------------------------------------------------
-while getopts "k:d:s:ctih" opt; do
-    case "$opt" in
-        k) API_KEY="$OPTARG" ;;
-        d) DATA_DIR="$OPTARG" ;;
-        s) SIMULATION="$OPTARG" ;;
+own_option() {   # <letter>: this script's own options; -d, -s, -h and the data checks are config.sh driver_options'
+    case "$1" in
+        k) API_KEY="${OPTARG}" ;;
         c) MODE="groupcat" ;;
         t) MODE="tree" ;;
         i) MODE="ics" ;;
-        h) usage; exit 0 ;;
-        *) usage; exit 1 ;;
     esac
-done
+}
+driver_options "k:cti" own_option "$@"   # then the data root (unless -d) and the simulation are required
 shift $((OPTIND - 1))
-[ -n "${DATA_DIR}" ] || require_data_root   # -d names the simulation's folder itself
-require_simulation
 
 snapshot_args "$@"              # positional arguments override the default snapshot list (config.sh)
 

@@ -18,77 +18,11 @@
 #include <metal_stdlib>
 using namespace metal;
 
-struct DepositParams {
-    float boxLo[3];
-    float dx[3];
-    int   nGrid[3];
-    int   nSub;
-    int   periodic;     // 0 / 1
-    // Partition sub-grid (production PS-DTFE stores only the Eulerian bbox each Lagrangian
-    // partition touches): output arrays are subDims-sized; a wrapped cell w maps to
-    // loc = (w - subOrigin + nGrid) % nGrid -- the box may wrap a periodic axis -- and cells
-    // outside [0,subDims) are skipped BEFORE sample counting, exactly like the inSub guard in
-    // ps_interpolation.cc. Full grid: subOrigin=0, subDims=nGrid.
-    int   subOrigin[3];
-    int   subDims[3];
-    // Field flags: which moment grids this run actually needs. When a flag is 0 the host binds
-    // a 4-byte dummy buffer for that grid and the kernel never touches it (mass and streams are
-    // always deposited). fVel = velocity or dispersion selected (mom), fDisp = dispersion (m2,
-    // 24 B per cell), fGrad = velocity gradient (grad, 36 B per cell).
-    int   fVel;
-    int   fDisp;
-    int   fGrad;
-    // --ps-linear-deposit: weight the interior samples by the DTFE-interpolated linear density
-    // (from the per-tet vertex densities in buffer 9), renormalized per tet so the deposited
-    // total still equals the tet mass exactly. 0 = uniform equal shares (buffer 9 is a dummy).
-    int   fLinear;
-    // --ps-volume-weighted: the velocity/dispersion/gradient moments carry equal EULERIAN-VOLUME
-    // shares |det(Ax)|/6 / N instead of the mass shares (the mass grid always keeps mass), and
-    // their normalizer is deposited into the momw grid (buffer 10; dummy when 0). Mutually
-    // exclusive with fLinear (rejected at option parsing).
-    int   fVolW;
-    // --ps-caustics: atomic-OR the tet's orientation bits (1 = det(Ax)>0, 2 = det<0) into the
-    // caustic grid (buffer 11; dummy when 0) at every deposited sample. OR is commutative and
-    // idempotent, so the result is chunk-, thread- and partition-order invariant.
-    int   fCaustic;
-    // --ps-exact-deposit: replace the nSub^3 sub-sampled deposit by analytic tet-cell clipping
-    // (sweep_moments in exact_clip.metal.inc, see exact_cell_clip below). Ignores nSub; a tet
-    // whose whole clip window comes up empty (sliver below float resolution) falls through to
-    // the sampled path, whose empty window then drives the centroid fallback -- the same
-    // fall-through the CPU exact deposit uses.
-    int   fExact;
-    uint  nTet;
-    // The scalar field (builds with ONE scalar component, NO_SCALARS=1; the callers decline the GPU
-    // otherwise): the per-tet vertex scalars arrive in buffer 18 (nTet*4; a dummy when both flags are
-    // 0) and are deposited exactly like the velocity moment -- the linear profile's value at the
-    // sample (or at the piece centroid) times the moment weight -- into buffer 19 (nCell), and the
-    // tet's constant scalar gradient times the moment weight into buffer 20 (nCell*3, [flat*3+i] =
-    // ds/dx_i, the CPU's scalar_gradient layout for one component).
-    int   fScal;
-    int   fSGrad;
-    // --ps-window: the sub-box (subOrigin/subDims) is a WINDOW of the full grid, not a partition's own
-    // box: a tet straddling its edge counts every in-grid sample (pass 0 / phase 0 sumW) exactly as in
-    // the full run and deposits only the samples / pieces inside, so the window equals the full run.
-    int   windowMode;
-    // The mass grid's accumulator. massFixed = 1: every mass share is added as the 64-bit
-    // integer rint(share * massScale) to massFx (buffer 21: two uint words per cell, low then high, the
-    // carry done by hand) -- exact, and independent of the order the atomics land in. Float atomics into
-    // 'mass' (buffer 3) drop every share below half an ulp of a busy cell's running sum, always
-    // downward: 0.06% of the box mass at TNG50-3-Dark z=0, percents in halo-core cells with 1e7 deposits.
-    // massFixed = 0 keeps that float grid (PS_GPU_FLOAT_MASS=1, for comparison); the unused one is a
-    // 4-byte dummy. (The moment grids: fxMask below.)
-    int   massFixed;
-    float massScale;    // 2^k (ps_deposit_params.h psMassFixedScale), so the product is exact
-    // The MOMENT grids (ps_deposit_params.h PSFxGrid) as exact 64-bit fixed-point sums: rint(value * fxScale[g]) adds
-    // to the same words in any atomic order, as the mass does. fxMask bit g = grid g is fixed-point: its words (two
-    // uint per component, low then high) sit in the buffer of its float index (8 B per component, as in
-    // metal/dtfe_deposit.metal), in units of 1/fxScale[g], a power of two the host bounds so no cell overflows.
-    // Bit FX_DW = dispw is not deposited (it equals the mass grid's shares; the host reads the mass words).
-    // FX_SUMW_BIT = the exact items' per-tet weight totals are fixed-point too (depositExactItems).
-    // 0 = every moment grid a float sum (PS_GPU_FLOAT_MOMENTS=1 on the host).
-    uint  fxMask;
-    float fxScale[9];   // [g], g = FX_MOM ... FX_SG (FX_DW unused)
-};
+// The parameter block (buffer 8): PSDepositParams in src/CGAL_triangulation/ps_kernel_params.h, the hosts' own
+// struct, which the Makefile prepends to this source after exact_clip.metal.inc (metal/validate_deposit.cpp and
+// metal/build_prototype.sh do the same) -- one definition, so the kernels and the hosts cannot drift apart. Its
+// fields are documented there.
+typedef PSDepositParams DepositParams;
 
 // the moment grids' indices (ps_deposit_params.h PSFxGrid -- keep in step) and the buffer slots of their words
 constant uint FX_MOM = 0, FX_M2 = 1, FX_GRAD = 2, FX_MOMW = 3, FX_SV = 4, FX_DV = 5, FX_DW = 6, FX_SCAL = 7, FX_SG = 8;
@@ -296,9 +230,31 @@ static inline void depositMass(thread const FieldGrids& G, uint flat, float w)
     else atomic_fetch_add_explicit(&G.bad[FX_DROP_MASS], 1u, memory_order_relaxed);   // (the non-finite guard)
 }
 
+// n equal shares v of moment grid g at component 'at', as ONE add of n * q (q = the integer addMoment adds for v):
+// the fixed-point grids only (fxMask bit set). Integer adds are exact and the words add modulo 2^64 whatever the
+// interleaving, so the words end where n adds of q leave them; a share the non-finite guard drops counts n times.
+static inline void addMomentN(device atomic_uint* x, thread const FieldGrids& G, uint g, ulong at, float v, uint n)
+{
+    float const p = v * G.fxScale[g];
+    if (fixedShareOk(p)) addFixedQ(x, at, as_type<ulong>(long(rint(p))) * ulong(n));
+    else atomic_fetch_add_explicit(&G.bad[g], n, memory_order_relaxed);   // (the guard above)
+}
+
+// n equal mass shares w as one add of n * q (the fixed-point mass grid only: massFixed), as addMomentN
+static inline void depositMassN(thread const FieldGrids& G, uint flat, float w, uint n)
+{
+    float const p = w * G.massScale;
+    if (fixedShareOk(p)) addFixedQ(G.massFx, ulong(flat), as_type<ulong>(long(rint(p))) * ulong(n));
+    else atomic_fetch_add_explicit(&G.bad[FX_DROP_MASS], n, memory_order_relaxed);   // (the non-finite guard)
+}
+
 // w = mass share (mass grid), wm = moment weight (== w by default; the V_eul share under
 // fVolW), obits = the tet's orientation bits for the caustic OR (fCaustic), svShare = this
 // sample's exact-multiplicity share (fExact fall-through path only).
+// batched: the sampled deposit of a tet without --ps-linear-deposit, whose shares w, wm and svShare are the same for
+// every sample: the parts that do not depend on the sample's position and go into an exact integer grid -- the
+// fixed-point mass, gradient, scalar-gradient, moment-weight and multiplicity shares, the stream count and the
+// caustic OR -- are left to depositSampleBatch, once per (tet, cell) for the cell's n samples.
 // unresolved: this is a centroid-fallback deposit (sets bit 31, see the end).
 // countStream: whether this deposit adds to the sample-count multiplicity '.streams'. True for
 // every interior SAMPLE; false for the centroid fallback of a tet that contains no sample, which
@@ -311,14 +267,14 @@ static inline void depositSample(thread const FieldGrids& G, uint flat,
                                  float s0, thread const float sG[3],
                                  bool fVel, bool fDisp, bool fGrad, bool fVolW, bool fCaustic,
                                  bool fExact, float svShare, bool countStream, bool unresolved,
-                                 bool fScal, bool fSGrad)
+                                 bool fScal, bool fSGrad, bool batched)
 {
     // Moment-grid offsets are 64-bit BECAUSE flat*9 WOULD overflow a 32-bit uint above ~782^3
     // and silently scatter atomics to low addresses.
     // The surviving 32-bit quantity is 'flat' ITSELF (built by the callers), which caps a
     // sub-grid at 2^32 cells (~1625^3); ps_interpolation.cc guards that with a CPU fallback.
     ulong base = ulong(flat);
-    depositMass(G, flat, w);
+    if (!(batched && G.massFixed)) depositMass(G, flat, w);
     if (fVel || fDisp) {
         float vv[3];
         for (int j=0; j<3; ++j) {
@@ -342,7 +298,7 @@ static inline void depositSample(thread const FieldGrids& G, uint flat,
             }
         }
     }
-    if (fGrad)
+    if (fGrad && !(batched && ((G.fxMask >> FX_GRAD) & 1u)))
         for (int j=0;j<3;++j)
             for (int i=0;i<3;++i)
                 addMoment(G.grad, G.gradX, G, FX_GRAD, base*9ul + ulong(j*3+i), vG[i][j]*wm);
@@ -351,16 +307,16 @@ static inline void depositSample(thread const FieldGrids& G, uint flat,
         for (int i=0;i<3;++i) sv += sG[i]*rel[i];
         addMoment(G.scal, G.scalX, G, FX_SCAL, base, sv*wm);
     }
-    if (fSGrad)
+    if (fSGrad && !(batched && ((G.fxMask >> FX_SG) & 1u)))
         for (int i=0;i<3;++i)
             addMoment(G.sgrad, G.sgX, G, FX_SG, base*3ul + ulong(i), sG[i]*wm);
-    if (fVolW)
+    if (fVolW && !(batched && ((G.fxMask >> FX_MOMW) & 1u)))
         addMoment(G.momw, G.momwX, G, FX_MOMW, base, wm);
-    if (fCaustic)
+    if (fCaustic && !batched)
         atomic_fetch_or_explicit(&G.caustic[flat], obits, memory_order_relaxed);
-    if (fExact)
+    if (fExact && !(batched && ((G.fxMask >> FX_SV) & 1u)))
         addMoment(G.sv, G.svX, G, FX_SV, base, svShare);
-    if (countStream)
+    if (countStream && !batched)
         atomic_fetch_add_explicit(&G.streams[flat], 1u, memory_order_relaxed);
     // '.hidden_streams' bit 2: mass from a tet none of whose samples lies in this cell (the centroid
     // fallback). Bit 31 of the same counter -- the sample count never reaches 2^31 -- so no
@@ -369,8 +325,34 @@ static inline void depositSample(thread const FieldGrids& G, uint flat,
         atomic_fetch_or_explicit(&G.streams[flat], 0x80000000u, memory_order_relaxed);
 }
 
+// The parts of n batched samples' depositSample that do not depend on the sample's position (see there), for the n
+// interior samples one tet has in cell 'flat': one add of n * q into each exact integer grid (addMomentN), n
+// stream counts and one caustic OR (OR is idempotent). The fixed-point words, the counts and the bits end exactly
+// where n per-sample atomics leave them: a fewer-atomics form of the same deposit, byte for byte.
+static inline void depositSampleBatch(thread const FieldGrids& G, uint flat, uint n, float w, float wm, uint obits,
+                                      thread const float vG[3][3], thread const float sG[3],
+                                      bool fGrad, bool fVolW, bool fCaustic, bool fExact, float svShare, bool fSGrad)
+{
+    ulong base = ulong(flat);
+    if (G.massFixed) depositMassN(G, flat, w, n);
+    if (fGrad && ((G.fxMask >> FX_GRAD) & 1u))
+        for (int j=0;j<3;++j)
+            for (int i=0;i<3;++i)
+                addMomentN(G.gradX, G, FX_GRAD, base*9ul + ulong(j*3+i), vG[i][j]*wm, n);
+    if (fSGrad && ((G.fxMask >> FX_SG) & 1u))
+        for (int i=0;i<3;++i)
+            addMomentN(G.sgX, G, FX_SG, base*3ul + ulong(i), sG[i]*wm, n);
+    if (fVolW && ((G.fxMask >> FX_MOMW) & 1u))
+        addMomentN(G.momwX, G, FX_MOMW, base, wm, n);
+    if (fCaustic)
+        atomic_fetch_or_explicit(&G.caustic[flat], obits, memory_order_relaxed);
+    if (fExact && ((G.fxMask >> FX_SV) & 1u))
+        addMomentN(G.svX, G, FX_SV, base, svShare, n);
+    atomic_fetch_add_explicit(&G.streams[flat], n, memory_order_relaxed);
+}
+
 // ------------------------------------------------------------------------------------------------
-// Exact deposit (--ps-exact-deposit), one window cell at a time. Shared by depositExactItems (the
+// Exact deposit (--exact-average), one window cell at a time. Shared by depositExactItems (the
 // production path: many threads per large tet, below) and depositFields (one thread per tet: the
 // few tets the items pass leaves over).
 // ------------------------------------------------------------------------------------------------
@@ -987,7 +969,7 @@ kernel void depositFields(
     float const sg = detC > 0.0f ? 1.0f : -1.0f;
     float const invNSub = 1.0f / float(nSub);
 
-    // ===================== exact conservative deposit (--ps-exact-deposit) =====================
+    // ===================== exact conservative deposit (--exact-average) =====================
     // Mirrors the CPU exact path: PASS 0 sums the per-cell weights (V_int, or the exact linear-
     // profile integral under fLinear), PASS 1 renormalizes the shares to the tet mass and
     // deposits the exact moments. A tet whose whole window clips empty (sliver below float
@@ -1054,6 +1036,10 @@ kernel void depositFields(
     // linear weights) with the same certified test, so each sample carries m / (N + Nout) and the faces of a --box
     // region get no pile-up of the outside share.
     if (!orientSure) { masses[tid] = -m; return; }
+    // Without --ps-linear-deposit every sample of the tet carries the same shares, so the position-independent
+    // ones of a cell's samples go into the integer grids as one atomic each (depositSampleBatch); under fLinear the
+    // mass and moment weights vary per sample and every sample deposits alone
+    bool const batched = !fLinear;
     uint N = 0, Nout = 0;
     float sumW = 0.0f;
     float share = 0.0f;
@@ -1099,6 +1085,7 @@ kernel void depositFields(
             float const cb[3] = { float(raw[0] - ic0[0]) - f0[0],
                                   float(raw[1] - ic0[1]) - f0[1],
                                   float(raw[2] - ic0[2]) - f0[2] };
+            uint nIn = 0u;   // pass 1: the cell's interior samples, whose position-independent shares go in at once below
             for (int k2=0; k2<nSub; ++k2)
             for (int k1=0; k1<nSub; ++k1)
             for (int k0=0; k0<nSub; ++k0) {
@@ -1120,11 +1107,19 @@ kernel void depositFields(
                         // moment weight: equal V_eul share under fVolW (fLinear is rejected
                         // with fVolW at option parsing), else the mass share w
                         float wm = fVolW ? mw / float(N + Nout) : w;
-                        // --ps-exact-deposit fall-through: share the tet volume over its samples
+                        // --exact-average fall-through: share the tet volume over its samples
                         float sv = fExact ? (tetVol*invCellVol)/float(N + Nout) : 0.0f;
-                        depositSample(G, flat, rel, w, wm, obits, u0, vG, s0, sG, fVel, fDisp, fGrad, fVolW, fCaustic, fExact, sv, true, false, fScal, fSGrad);
+                        if (P.debugNoAtomic == 0u)
+                            depositSample(G, flat, rel, w, wm, obits, u0, vG, s0, sG, fVel, fDisp, fGrad, fVolW, fCaustic, fExact, sv, true, false, fScal, fSGrad, batched);
+                        ++nIn;
                     }
                 }
+            }
+            if (batched && nIn > 0u && P.debugNoAtomic == 0u) {
+                // the shares of every sample above (w = share and wm, sv as computed there: fLinear is off)
+                float const wm = fVolW ? mw / float(N + Nout) : share;
+                float const sv = fExact ? (tetVol*invCellVol)/float(N + Nout) : 0.0f;
+                depositSampleBatch(G, flat, nIn, share, wm, obits, vG, sG, fGrad, fVolW, fCaustic, fExact, sv, fSGrad);
             }
         }
     }
@@ -1136,7 +1131,8 @@ kernel void depositFields(
         if (centroidFlat == 0xFFFFFFFFu) return;   // centroid outside this partition's box: drop
         float crel[3];
         for (int i=0; i<3; ++i) crel[i] = (Ax[0][i] + Ax[1][i] + Ax[2][i]) * 0.25f;
-        depositSample(G, centroidFlat, crel, m, mw, obits, u0, vG, s0, sG, fVel, fDisp, fGrad, fVolW, fCaustic, fExact, tetVol*invCellVol, fExact, true, fScal, fSGrad);
+        if (P.debugNoAtomic == 0u)
+            depositSample(G, centroidFlat, crel, m, mw, obits, u0, vG, s0, sG, fVel, fDisp, fGrad, fVolW, fCaustic, fExact, tetVol*invCellVol, fExact, true, fScal, fSGrad, false);
     }
 }
 
@@ -1156,9 +1152,26 @@ kernel void depositFields(
 // Under --ps-window the items cover only the window's cells and the share is m / wFull (the whole
 // weight): a tet with no volume in the window stays at sumW 0 and depositFields drops it.
 // ------------------------------------------------------------------------------------------------
+// The per-dispatch parameters (buffer 17): PSExactItemParams in ps_kernel_params.h (prepended, as DepositParams).
 // badAt: the word of the sumW buffer (bound at 16 and 30) where the non-finite guard's counters start,
 // past the per-tet totals -- every one of the 31 buffer slots is taken here, so they ride in that buffer's tail
-struct ExactItemParams { uint nItems; uint phase; uint blockCells; uint badAt; };
+typedef PSExactItemParams ExactItemParams;
+
+// An item's (tet, block) from the items' map (gpu_host.h psBuildExactItemMap: itemStart[nTet+1], then blockTet), the
+// standard-DTFE kernel's itemOf: the item's tet is the last t in [blockTet[blk], blockTet[blk+1]] with
+// itemStart[t] <= iid -- a binary search over at most one block's worth of tets (2^PS_ITEM_BLOCK_SHIFT + 1 entries,
+// more only across tets with no items, which the "last t" skips) -- and its block is iid - itemStart[t].
+// (ps_gpu_cuda.cu psItemOf is its twin.)
+static inline uint2 psItemOf(device const uint* itemStart, device const uint* blockTet, uint nTet, uint iid) {
+    uint const blk = iid >> PS_ITEM_BLOCK_SHIFT;
+    uint lo = blockTet[blk];
+    uint hi = min(blockTet[blk + 1u], nTet - 1u);
+    while (hi > lo) {
+        uint const mid = (lo + hi + 1u) >> 1;
+        if (itemStart[mid] <= iid) lo = mid; else hi = mid - 1u;
+    }
+    return uint2(lo, iid - itemStart[lo]);
+}
 
 // The pass a depositExactItems pipeline runs (== ExactItemParams.phase): the host builds one pipeline per value,
 // so the summing pass carries none of the deposit's registers (an M1 Max then fits 512 threads per threadgroup
@@ -1283,7 +1296,7 @@ kernel void depositExactItems(
     device atomic_float*       svGrid   [[buffer(12)]],
     device atomic_float*       dvGrid   [[buffer(13)]],
     device atomic_float*       dwGrid   [[buffer(14)]],
-    device const uint2*        items    [[buffer(15)]], // (tet, block), tets indexing buffers 0-2 and 9 unoffset
+    device const uint*         itemMap  [[buffer(15)]], // the items' map (psItemOf), tets indexing buffers 0-2 and 9 unoffset
     device atomic_float*       sumW     [[buffer(16)]], // nTet: per-tet weight total (phase 0 writes, 1 reads)
     constant ExactItemParams&  IP       [[buffer(17)]],
     device const float*        scal     [[buffer(18)]],
@@ -1302,11 +1315,11 @@ kernel void depositExactItems(
     // weight as an integer in the tet's own unit (ExactTet.wScale), so the total does not depend on the order the
     // items land in (a float atomic's would, and every share m / sumW with it: the mass grid too)
     device atomic_uint*        sumWX    [[buffer(30)]],
-    uint iid [[thread_position_in_grid]])
+    uint lid [[thread_position_in_grid]])
 {
-    if (iid >= IP.nItems) return;
+    if (lid >= IP.nItems) return;
     device atomic_uint* const bad = sumWX + ulong(IP.badAt);   // the guard's counters (ExactItemParams.badAt)
-    uint2 const it = items[iid];
+    uint2 const it = psItemOf(itemMap, itemMap + (ulong(IP.nTet) + 1ul), IP.nTet, IP.itemBase + lid);   // (tet, block)
     uint  const tet = it.x;
     bool const deposit = kItemsPhase == 1u;
     float const m = masses[tet];

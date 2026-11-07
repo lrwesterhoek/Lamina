@@ -25,6 +25,7 @@
    Delaunay cell, proportional to cell volume). */
 #include "triangulation_common.h"
 #include "../env_knobs.h"
+#include "../thread_count.h"   // coresPerTeam: the exact average's CPU threads
 #include <typeinfo>
 #include <stdio.h>
 #include <atomic>
@@ -271,6 +272,16 @@ inline bool isGridCellIndex(int *gridCell,
     *cellIndex = gridCellIndex( gridCell, totalGridSize );
     return true;
 }
+// The grid-cell coordinate along axis i of a sample point (relative to the base vertex at 'basePosition'): ONE
+// expression, used by isGridCellIndex and by the threaded Monte-Carlo average's slab test (avg1McTet), so the two
+// can never put a sample in different x planes.
+inline int sampleGridCoord(Real const *dx,
+                           Point const &samplePoint,
+                           Real const *basePosition,
+                           int const i)
+{
+    return int(floor( (basePosition[i] + samplePoint[i])/dx[i] ));
+}
 // Locates the grid cell containing a sample point; returns true and writes 'cellIndex' if in range.
 inline bool isGridCellIndex(size_t *totalGridSize,
                             Real *dx,
@@ -281,7 +292,7 @@ inline bool isGridCellIndex(size_t *totalGridSize,
     int pos[NO_DIM];
     for (int i=0; i<NO_DIM; ++i)
     {
-        pos[i] = int(floor( (basePosition[i] + samplePoint[i])/dx[i] ));
+        pos[i] = sampleGridCoord( dx, samplePoint, basePosition, i );
         if ( pos[i]<0 or pos[i]>=int(totalGridSize[i]) )
             return false;
     }
@@ -324,22 +335,14 @@ inline Pvector<Real,noScalarComp> averageScalar(Cell &cell)
 
 
 
-// The threads of the CPU exact average (the CPU loop of interpolateGrid_averaged_1 says how they split
-// the work): every core when this triangulation is the only one being processed -- a single-domain run, or each
+// The threads of the CPU average, exact and Monte-Carlo alike (the CPU loop of interpolateGrid_averaged_1 says how
+// they split the work): every core when this triangulation is the only one being processed -- a single-domain run, or each
 // partition of a '--sample-points' run (DTFE_parallel's single-triangulation branch) -- and, inside DTFE_parallel's
 // OpenMP team of sub-domains, the cores left per sub-domain, so the two levels never oversubscribe (PS-DTFE's
-// psDepositThreads rule). DTFE_DEPOSIT_THREADS pins it, as for the PS deposit.
+// psDepositThreads rule, thread_count.h). DTFE_DEPOSIT_THREADS pins it, as for the PS deposit.
 static int exactAverageThreads()
 {
-    if ( long const v = Env::integer( "DTFE_DEPOSIT_THREADS", 0 ); v > 0 )
-        return int( v );
-    int cores = int( std::thread::hardware_concurrency() );
-#ifdef OPEN_MP
-    cores = omp_get_max_threads();
-    if ( omp_in_parallel() )
-        return std::max( 1, cores / std::max( 1, omp_get_num_threads() ) );
-#endif
-    return std::max( 1, cores );
+    return coresPerTeam( "DTFE_DEPOSIT_THREADS" );
 }
 
 // The output grids of the '_a' fields (pointers into Quantities), for the phases that zero, fill and normalize them.
@@ -452,7 +455,7 @@ static inline void avg1MortonOrder(Avg1GpuCtx &c)
         order[t] = std::make_pair( tetKeys[t], uint32_t(t) );
     std::vector<uint32_t>().swap( tetKeys );
     std::sort( order.begin(), order.end() );
-    if ( Env::flag( { "DTFE_GPU_TIMING", "DTFE_METAL_TIMING" } ) )
+    if ( Env::flag( { "DTFE_GPU_TIMING" } ) )
     {   // how many distinct base cells the 32 consecutive work items of a SIMD group touch
         // (16-sample items; a lower bound on the cell sharing a SIMD-group reduction could use)
         size_t lane = 0, distinct = 0, groups = 0, sumDistinct = 0; uint32_t last = ~0u;
@@ -653,6 +656,364 @@ static inline void avg1Normalize(Field &field, Avg1Grids const &grids, Real cons
         for (vector< Pvector<Real,noScalarGradComp> >::iterator it=scalar_gradient->begin(); it!=scalar_gradient->end(); ++it)
             *it /= gridCellVolume;
 #endif
+}
+
+// The CPU loop's run-wide inputs (interpolateGrid_averaged_1 sets them once; its threads share them): the fields and
+// their grids, the grid geometry, the Monte-Carlo average's Sobol table, and the threads' x-plane slabs. The
+// helpers below bind its members by REFERENCE ('* const &'), so their loops read them from memory as the lambda's
+// captures did: copies kept in registers made the Monte-Carlo sample loop ~4% slower (register spills).
+struct Avg1CpuCtx
+{
+    Field const      &field;
+    Avg1Grids const  &grids;
+    size_t           *nGrid;
+    Real             *dx;
+    Real            (*quasiRandomNumbers)[NO_DIM];
+    bool              centreMC;       // the Monte-Carlo samples are centred (see mcLegacy)
+    int               nT, slabW;      // threads, and the width of the x-plane slabs they deal out
+    // does thread th deposit into x plane gi? (the slabs of slabW planes go to the threads in turn)
+    bool owns(int const th, int const gi) const { return nT == 1 or ( gi / slabW ) % nT == th; }
+};
+
+// TEST_PADDING: one cell's dummy flags and the calling thread's lists of the grid cells they flag (empty without it)
+struct Avg1Dummy
+{
+#ifdef TEST_PADDING
+    bool dummyNeighbors, dummyVertices;
+    std::vector<size_t> *incompleteCells_d, *incompleteCells;
+#endif
+};
+
+#ifndef MY_SCALAR
+// A cell inside ONE grid cell (index): its centroid value times its volume, which is exact for the linear interpolant
+// (shared by the sampled and the exact average).
+static inline void avg1SingleCell(Avg1CpuCtx const &C, McCell &mc, Real posMatrixInverse[][NO_DIM], Real const cellVolume,
+                                  size_t const index, Avg1Dummy const &dummy)
+{
+    Field const &field = C.field;
+    std::vector<Real>                             * const &density = C.grids.density;
+    if (field.density) (*density)[index] += averageDensity(mc) * cellVolume;
+#ifdef VELOCITY
+    std::vector< Pvector<Real,noVelComp> >        * const &velocity = C.grids.velocity;
+    std::vector< Pvector<Real,noGradComp> >       * const &velocity_gradient = C.grids.velocity_gradient;
+    if (field.velocity) (*velocity)[index] += averageVelocity(mc) * cellVolume;
+    if (field.velocity_gradient)
+    {
+        Real velGrad[NO_DIM][noVelComp];
+        velocityGrad( mc, posMatrixInverse, velGrad );
+        (*velocity_gradient)[index] += velocityGradient(velGrad) * cellVolume;
+    }
+#endif
+#ifdef SCALAR
+    std::vector< Pvector<Real,noScalarComp> >     * const &scalar = C.grids.scalar;
+    std::vector< Pvector<Real,noScalarGradComp> > * const &scalar_gradient = C.grids.scalar_gradient;
+    if (field.scalar) (*scalar)[index] += averageScalar(mc) * cellVolume;
+    if (field.scalar_gradient)
+    {
+        Real sGrad[NO_DIM][noScalarComp];
+        scalarGrad( mc, posMatrixInverse, sGrad );
+        (*scalar_gradient)[index] += scalarGradient(sGrad) * cellVolume;
+    }
+#endif
+#ifdef TEST_PADDING
+    if ( dummy.dummyNeighbors ) updateDummyGridCells( index, dummy.incompleteCells_d );
+    if ( dummy.dummyVertices ) updateDummyGridCells( index, dummy.incompleteCells );
+#endif
+}
+#endif
+
+
+#if NO_DIM==3 && !defined(MY_SCALAR)
+// ----- exact volume average (--exact-average): analytic cell∩tet integration -----
+// The interpolant is LINEAR inside the tet, so its integral over each intersection
+// piece is the centroid value times the piece volume -- order-1 r3d moments suffice
+// (Powell & Abel 2015). Same vertex-0-relative frame as the sampled path (densGrad,
+// velGrad and the field evaluators all take base-relative coordinates); out-of-region
+// window cells are skipped exactly like out-of-region samples. The single-grid-cell
+// fast path (avg1SingleCell, already exact for linear fields) is shared with the sampled mode.
+// Thread th clips only the cells of its own x planes.
+static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, Finite_cells_iterator &itC, double vertexMatrix[][NO_DIM],
+                                Real basePosition[NO_DIM], Real posMatrixInverse[][NO_DIM], Avg1Dummy const &dummy)
+{
+    Field const &field = C.field;
+    size_t * const &nGrid = C.nGrid;
+    Real * const &dx = C.dx;
+    int const nT = C.nT;
+    std::vector<Real>                             * const &density = C.grids.density;
+#ifdef VELOCITY
+    std::vector< Pvector<Real,noVelComp> >        * const &velocity = C.grids.velocity;
+    std::vector< Pvector<Real,noGradComp> >       * const &velocity_gradient = C.grids.velocity_gradient;
+#endif
+#ifdef SCALAR
+    std::vector< Pvector<Real,noScalarComp> >     * const &scalar = C.grids.scalar;
+    std::vector< Pvector<Real,noScalarGradComp> > * const &scalar_gradient = C.grids.scalar_gradient;
+#endif
+    size_t index;
+
+    Vertex_handle base = itC->vertex(0);
+    Real densGrad[NO_DIM];
+    densityGrad( itC, posMatrixInverse, densGrad );
+#ifdef VELOCITY
+    Real velGrad[NO_DIM][noVelComp];
+    velocityGrad( itC, posMatrixInverse, velGrad );
+#endif
+#ifdef SCALAR
+    Real sGrad[NO_DIM][noScalarComp];
+    scalarGrad( itC, posMatrixInverse, sGrad );
+#endif
+
+    r3d_rvec3 tv[NO_DIM+1];
+    for (int d = 0; d < NO_DIM; ++d) tv[0].xyz[d] = 0.;
+    for (int v = 1; v <= NO_DIM; ++v)
+        for (int d = 0; d < NO_DIM; ++d)
+            tv[v].xyz[d] = vertexMatrix[v-1][d];
+    if ( determinant(vertexMatrix) < 0. )   // r3d wants positive orientation
+    { r3d_rvec3 const tmp = tv[1]; tv[1] = tv[2]; tv[2] = tmp; }
+    r3d_poly tetPoly;
+    r3d_init_tet(&tetPoly, tv);
+
+    // window of grid cells overlapped by the tet bbox (region-frame indices, clamped)
+    int iLo[NO_DIM], iHi[NO_DIM];
+    for (int d = 0; d < NO_DIM; ++d)
+    {
+        double lo = 0., hi = 0.;
+        for (int v = 0; v < NO_DIM; ++v)
+        {
+            if (vertexMatrix[v][d] < lo) lo = vertexMatrix[v][d];
+            if (vertexMatrix[v][d] > hi) hi = vertexMatrix[v][d];
+        }
+        iLo[d] = int( std::floor( (double(basePosition[d]) + lo) / double(dx[d]) ) );
+        iHi[d] = int( std::floor( (double(basePosition[d]) + hi) / double(dx[d]) ) ) + 1;
+        if (iLo[d] < 0) iLo[d] = 0;
+        if (iHi[d] > int(nGrid[d])) iHi[d] = int(nGrid[d]);
+    }
+
+    // the window's cells, each clipped by its 6 half-spaces (exact_sweep.h: once per slab and
+    // column); another thread's x planes are not clipped
+    exactSweep::sweep( tetPoly, iLo, iHi,
+        [&](int const d, int const g, double &lo, double &hi)
+        {
+            lo = g * double(dx[d]) - double(basePosition[d]);
+            hi = lo + double(dx[d]);
+        },
+        [&](int const d, int const g) -> long { return ( d == 0 and nT > 1 and not C.owns( th, g ) ) ? -1 : g; },
+        [&](int const *g, long const *, r3d_poly &piece)
+    {
+        r3d_real mom[4];
+        exactSweep::reduce<1>( piece, mom );
+        if ( !(mom[0] > 0.) ) return;
+
+        index = ( size_t(g[0])*nGrid[1] + size_t(g[1]) )*nGrid[2] + size_t(g[2]);
+        Real const dV = Real(mom[0]);
+        Point centroid( mom[1]/mom[0], mom[2]/mom[0], mom[3]/mom[0] );
+        if (field.density) (*density)[index] += densityValue(densGrad, base, centroid) * dV;
+#ifdef VELOCITY
+        if (field.velocity) (*velocity)[index] += velocityValue(velGrad, base, centroid) * dV;
+        if (field.velocity_gradient) (*velocity_gradient)[index] += velocityGradient(velGrad) * dV;
+#endif
+#ifdef SCALAR
+        if (field.scalar) (*scalar)[index] += scalarValue(sGrad, base, centroid) * dV;
+        if (field.scalar_gradient) (*scalar_gradient)[index] += scalarGradient(sGrad) * dV;
+#endif
+#ifdef TEST_PADDING
+        if ( dummy.dummyNeighbors ) updateDummyGridCells( index, dummy.incompleteCells_d );
+        if ( dummy.dummyVertices ) updateDummyGridCells( index, dummy.incompleteCells );
+#endif
+    } );
+}
+#elif NO_DIM==2 && !defined(MY_SCALAR)
+// ----- exact area average (--exact-average), 2D: the same integral with the triangle clipped
+// against each cell by ps_clip2d.h (area and first moments: the centroid of each piece) -----
+// Thread th clips only the cells of its own x planes.
+static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, Finite_cells_iterator &itC, double vertexMatrix[][NO_DIM],
+                                Real basePosition[NO_DIM], Real posMatrixInverse[][NO_DIM], Avg1Dummy const &dummy)
+{
+    Field const &field = C.field;
+    size_t * const &nGrid = C.nGrid;
+    Real * const &dx = C.dx;
+    int const nT = C.nT;
+    std::vector<Real>                             * const &density = C.grids.density;
+#ifdef VELOCITY
+    std::vector< Pvector<Real,noVelComp> >        * const &velocity = C.grids.velocity;
+    std::vector< Pvector<Real,noGradComp> >       * const &velocity_gradient = C.grids.velocity_gradient;
+#endif
+#ifdef SCALAR
+    std::vector< Pvector<Real,noScalarComp> >     * const &scalar = C.grids.scalar;
+    std::vector< Pvector<Real,noScalarGradComp> > * const &scalar_gradient = C.grids.scalar_gradient;
+#endif
+    size_t index;
+
+    Vertex_handle base = itC->vertex(0);
+    Real densGrad[NO_DIM];
+    densityGrad( itC, posMatrixInverse, densGrad );
+#ifdef VELOCITY
+    Real velGrad[NO_DIM][noVelComp];
+    velocityGrad( itC, posMatrixInverse, velGrad );
+#endif
+#ifdef SCALAR
+    Real sGrad[NO_DIM][noScalarComp];
+    scalarGrad( itC, posMatrixInverse, sGrad );
+#endif
+    double tri[3][2] = { {0., 0.},
+                         {vertexMatrix[0][0], vertexMatrix[0][1]},
+                         {vertexMatrix[1][0], vertexMatrix[1][1]} };
+    if ( determinant(vertexMatrix) < 0. )   // the clipper wants a counter-clockwise triangle
+        for (int d = 0; d < 2; ++d) std::swap( tri[1][d], tri[2][d] );
+
+    int iLo[NO_DIM], iHi[NO_DIM];
+    for (int d = 0; d < NO_DIM; ++d)
+    {
+        double lo = 0., hi = 0.;
+        for (int v = 0; v < NO_DIM; ++v)
+        {
+            if (vertexMatrix[v][d] < lo) lo = vertexMatrix[v][d];
+            if (vertexMatrix[v][d] > hi) hi = vertexMatrix[v][d];
+        }
+        iLo[d] = int( std::floor( (double(basePosition[d]) + lo) / double(dx[d]) ) );
+        iHi[d] = int( std::floor( (double(basePosition[d]) + hi) / double(dx[d]) ) ) + 1;
+        if (iLo[d] < 0) iLo[d] = 0;
+        if (iHi[d] > int(nGrid[d])) iHi[d] = int(nGrid[d]);
+    }
+
+    for (int gi = iLo[0]; gi < iHi[0]; ++gi)
+    for (int gj = iLo[1]; gj < iHi[1]; ++gj)
+    {
+        if ( nT > 1 and not C.owns( th, gi ) ) continue;   // another thread's x plane
+        int const gij[2] = {gi, gj};
+        double lo[2], hi[2], mom[psClip2d::MOMENTS];
+        for (int d = 0; d < 2; ++d)
+        {
+            lo[d] = gij[d] * double(dx[d]) - double(basePosition[d]);
+            hi[d] = lo[d] + double(dx[d]);
+        }
+        if ( not psClip2d::clipTriangleToCell( tri, lo, hi, mom ) ) continue;
+
+        index = size_t(gi)*nGrid[1] + size_t(gj);
+        Real const dV = Real(mom[0]);
+        Point centroid( mom[1]/mom[0], mom[2]/mom[0] );
+        if (field.density) (*density)[index] += densityValue(densGrad, base, centroid) * dV;
+#ifdef VELOCITY
+        if (field.velocity) (*velocity)[index] += velocityValue(velGrad, base, centroid) * dV;
+        if (field.velocity_gradient) (*velocity_gradient)[index] += velocityGradient(velGrad) * dV;
+#endif
+#ifdef SCALAR
+        if (field.scalar) (*scalar)[index] += scalarValue(sGrad, base, centroid) * dV;
+        if (field.scalar_gradient) (*scalar_gradient)[index] += scalarGradient(sGrad) * dV;
+#endif
+#ifdef TEST_PADDING
+        if ( dummy.dummyNeighbors ) updateDummyGridCells( index, dummy.incompleteCells_d );
+        if ( dummy.dummyVertices ) updateDummyGridCells( index, dummy.incompleteCells );
+#endif
+    }
+}
+#endif  // exact average (3D r3d / 2D ps_clip2d)
+
+
+// A cell over several grid cells, Monte-Carlo sampled: its first noRandomPoints Sobol samples, each deposited in its
+// own grid cell with an equal share of the cell's volume. A sample at p (relative to the base) is EVALUATED at
+// p + delta (the centring, see mcLegacy in interpolateGrid_averaged_1; zero without it). randomPoints is the calling
+// thread's sample buffer, grown to the largest count so far and reused: no heap block per cell.
+// Slabs (the threaded CPU loop, C.nT > 1): thread th deposits only the samples whose x plane is one of its slabs. It
+// finds them first, from the samples' positions alone (own: its per-sample flags, reused like randomPoints), and only
+// for a cell with one does it invert the vertex matrix into posMatrixInverse and evaluate the gradients and the
+// samples; a cell without one returns at once. Each sample is so deposited by exactly one thread, and every grid cell
+// gets its contributions in the single-threaded order (tetrahedron order, then sample order): bit-identical at any
+// thread count. Without Slabs the caller has inverted the matrix, and th and own are not used.
+template <bool Slabs>
+static inline void avg1McTet(Avg1CpuCtx const &C, McCell &mc, double vertexMatrix[][NO_DIM], Real basePosition[NO_DIM],
+                             Real posMatrixInverse[][NO_DIM], Real const cellVolume, size_t const noRandomPoints,
+                             Real const delta[NO_DIM], std::vector<Point> &randomPoints, Avg1Dummy const &dummy,
+                             int const th, std::vector<unsigned char> &own)
+{
+    Field const &field = C.field;
+    size_t * const &nGrid = C.nGrid;
+    Real * const &dx = C.dx;
+    std::vector<Real>                             * const &density = C.grids.density;
+#ifdef VELOCITY
+    std::vector< Pvector<Real,noVelComp> >        * const &velocity = C.grids.velocity;
+    std::vector< Pvector<Real,noGradComp> >       * const &velocity_gradient = C.grids.velocity_gradient;
+#endif
+#ifdef SCALAR
+    std::vector< Pvector<Real,noScalarComp> >     * const &scalar = C.grids.scalar;
+#ifndef MY_SCALAR
+    std::vector< Pvector<Real,noScalarGradComp> > * const &scalar_gradient = C.grids.scalar_gradient;
+#endif
+#endif
+    size_t index;
+
+    if ( randomPoints.size() < noRandomPoints )
+        randomPoints.resize( noRandomPoints );
+    quasiRandomPointsInCell( vertexMatrix, noRandomPoints, C.quasiRandomNumbers, randomPoints.data() );
+    if constexpr ( Slabs )
+    {
+        // this thread's samples: x plane in the grid and in one of its slabs (isGridCellIndex's own x coordinate)
+        if ( own.size() < noRandomPoints )
+            own.resize( noRandomPoints );
+        int const nx = int( nGrid[0] );
+        bool any = false;
+        for (size_t i=0; i<noRandomPoints; ++i)
+        {
+            int const gi = sampleGridCoord( dx, randomPoints[i], basePosition, 0 );
+            own[i] = gi >= 0 and gi < nx and C.owns( th, gi );
+            any = any or own[i];
+        }
+        if ( not any )
+            return;   // every sample is another thread's (or outside the grid)
+        matrixInverse( vertexMatrix, posMatrixInverse );
+    }
+    else
+    {
+        (void)th; (void)own;
+    }
+    Real factor = cellVolume / noRandomPoints;  // volume per sample point
+    Vertex_handle base = mc.v[0];
+
+    Real densGrad[NO_DIM];
+    densityGrad( mc, posMatrixInverse, densGrad );
+#ifdef VELOCITY
+    Real velGrad[NO_DIM][noVelComp];
+    velocityGrad( mc, posMatrixInverse, velGrad );
+#endif
+#ifdef SCALAR
+    Real sGrad[NO_DIM][noScalarComp];
+    scalarGrad( mc, posMatrixInverse, sGrad );
+#endif
+    for (size_t i=0; i<noRandomPoints; ++i) // scatter each sample point's field value into its grid cell
+    {
+        if constexpr ( Slabs )
+            if ( not own[i] )
+                continue;   // another thread's x plane
+        if ( not isGridCellIndex( nGrid, dx, randomPoints[i], basePosition, &index ) )
+            continue;   // sample outside the region of interest
+        Point evalPoint = randomPoints[i];   // where the (linear) fields are evaluated
+        if ( C.centreMC )
+        {
+#if NO_DIM==2
+            evalPoint = Point( randomPoints[i][0]+delta[0], randomPoints[i][1]+delta[1] );
+#else
+            evalPoint = Point( randomPoints[i][0]+delta[0], randomPoints[i][1]+delta[1], randomPoints[i][2]+delta[2] );
+#endif
+        }
+
+        if (field.density) (*density)[index] += densityValue(densGrad,base,evalPoint) * factor;
+#ifdef VELOCITY
+        if (field.velocity) (*velocity)[index] += velocityValue(velGrad,base,evalPoint) * factor;
+        if (field.velocity_gradient) (*velocity_gradient)[index] += velocityGradient(velGrad) * factor;
+#endif
+#ifdef SCALAR
+#ifdef MY_SCALAR
+        // the user's function (any C++, not linear) sees the sample itself; only linear fields are centred
+        (*scalar)[index] +=  customScalar(mc, posMatrixInverse, base, randomPoints[i]) * factor;
+#else
+        if (field.scalar) (*scalar)[index] += scalarValue(sGrad,base,evalPoint) * factor;
+        if (field.scalar_gradient) (*scalar_gradient)[index] += scalarGradient(sGrad) * factor;
+#endif
+#endif
+#ifdef TEST_PADDING
+        if ( dummy.dummyNeighbors ) updateDummyGridCells( index, dummy.incompleteCells_d );
+        if ( dummy.dummyVertices ) updateDummyGridCells( index, dummy.incompleteCells );
+#endif
+    }
 }
 
 // Volume-averaged grid interpolation (method 1): quasi-Monte-Carlo sampling inside each Delaunay cell,
@@ -942,22 +1303,32 @@ void interpolateGrid_averaged_1(DT &dt,
 
     if ( not metalDeposited )
     {
-    // --exact-average runs the CPU loop on nT = exactAverageThreads() threads, also where this function sees a whole
-    // triangulation (a single-domain run; every partition of a '--sample-points' run, DTFE_parallel's
-    // single-triangulation branch, including a GPU run's fallback). The x planes are dealt out in interleaved slabs of
-    // slabW planes; EVERY thread walks every Delaunay cell in order but deposits only into its own slabs, so each grid
-    // cell gets its contributions in the single-threaded order: bit-identical at any thread count (as PS-DTFE's slab
-    // deposit). A thread skips a cell outside its slabs before the inverse and the r3d / ps_clip2d clipping (the cost).
-    // The Monte-Carlo average stays single-threaded: its samples are the work, and a slab test would repeat them.
-    int const nT = exactAvg ? exactAverageThreads() : 1;
+    // The CPU loop runs on nT = exactAverageThreads() threads, for the exact and the Monte-Carlo average alike, also
+    // where this function sees a whole triangulation (a single-domain run; every partition of a '--sample-points' run,
+    // DTFE_parallel's single-triangulation branch, including a GPU run's fallback). The x planes are dealt out in
+    // interleaved slabs of slabW planes; EVERY thread walks every Delaunay cell in order but deposits only into its own
+    // slabs, so each grid cell gets its contributions in the single-threaded order: bit-identical at any thread count
+    // (as PS-DTFE's slab deposit). A thread skips a cell outside its slabs before the inverse and the r3d / ps_clip2d
+    // clipping or the sampling (the cost). A Monte-Carlo cell's samples are dealt out one by one: each thread maps the
+    // cell's samples and deposits those in its own x planes, evaluating nothing for a cell with none (avg1McTet).
+    // MY_SCALAR keeps one thread: the user's scalar function is arbitrary C++, not assumed to be thread-safe.
+#ifdef MY_SCALAR
+    bool constexpr userScalar = true;
+#else
+    bool constexpr userScalar = false;
+#endif
+    int const nT = userScalar ? 1 : exactAverageThreads();
     int const slabW = std::max( 1, int( nGrid[0] / size_t( 8 * nT ) ) );   // ~8 slabs per thread: the load balances
-    auto owns = [&](int const th, int const gi) { return nT == 1 or ( gi / slabW ) % nT == th; };
     if ( nT > 1 )
-        message << "(exact average on " << nT << " CPU threads, slabs of " << slabW << " x planes) " << MESSAGE::Flush;
+        message << ( exactAvg ? "(exact average on " : "(Monte-Carlo average on " ) << nT << " CPU threads, slabs of "
+                << slabW << " x planes) " << MESSAGE::Flush;
     std::vector< std::vector<size_t> > incD( static_cast<size_t>( nT ) ), incF( static_cast<size_t>( nT ) );   // TEST_PADDING's flagged cells, per thread
+    Avg1CpuCtx const cpu{ field, grids, nGrid, dx, quasiRandomNumbers, centreMC, nT, slabW };
     auto cpuLoop = [&](int const th, std::vector<size_t> &incompleteCells_d, std::vector<size_t> &incompleteCells)
     {
     (void)incompleteCells_d; (void)incompleteCells;
+    std::vector<Point> randomPoints;   // this thread's Monte-Carlo samples of one cell (avg1McTet), reused
+    std::vector<unsigned char> ownSamples;   // which of them are this thread's (nT > 1: avg1McTet<true>), reused
     size_t prev = 0, amount100 = 0, count = 0;
 #if NO_DIM==2
     size_t noTotalCells = dt.number_of_faces();
@@ -975,10 +1346,33 @@ void interpolateGrid_averaged_1(DT &dt,
         if ( cellOutsideRegion( dt, itC, fullBox) )
             continue;
 
+        // threads (above), the Monte-Carlo average: a first test on the cell's own vertices, before the vertex order
+        // (a hash) and the classification. A cell none of whose x planes -- one more on each side, for the float
+        // rounding of the base-relative frame below (2^-24 of the position: a few 1e-4 of a plane at 4096 cells per
+        // axis) -- is this thread's is another thread's.
+        if ( nT > 1 and not exactAvg )
+        {
+            double xlo = double( itC->vertex(0)->point()[0] ), xhi = xlo;
+            for (int v = 1; v < NO_DIM+1; ++v)
+            {
+                double const x = double( itC->vertex(v)->point()[0] );
+                if ( x < xlo ) xlo = x;
+                if ( x > xhi ) xhi = x;
+            }
+            int a = int( std::floor( ( xlo - double(boxCoordinates[0]) ) / double(dx[0]) ) ) - 1;
+            int b = int( std::floor( ( xhi - double(boxCoordinates[0]) ) / double(dx[0]) ) ) + 2;
+            if (a < 0) a = 0;
+            if (b > int(nGrid[0])) b = int(nGrid[0]);
+            bool mine = false;
+            for (int gi = a; gi < b and not mine; ++gi) mine = cpu.owns( th, gi );
+            if ( not mine ) continue;
+        }
+
 
 #ifdef TEST_PADDING
-        bool dummyNeighbors = hasDummyNeighbor( itC );
-        bool dummyVertices = hasDummyVertex( itC );
+        Avg1Dummy const dummy{ hasDummyNeighbor( itC ), hasDummyVertex( itC ), &incompleteCells_d, &incompleteCells };
+#else
+        Avg1Dummy const dummy{};
 #endif
 
 
@@ -990,12 +1384,16 @@ void interpolateGrid_averaged_1(DT &dt,
         size_t index;
 
         // threads (above): a cell none of whose x planes this thread owns -- the single grid cell it falls in, or
-        // the x range of its clip window (the exact path's own expression, below) -- is another thread's
+        // the x range of its clip window (the exact path's own expression, avg1ExactTet) -- is another thread's.
+        // A Monte-Carlo cell's samples are convex combinations of the vertex differences (Sobol weights >= 0 whose
+        // sum the float table may round above 1 by 2^-23), so a sample's x lies in [lo, hi] up to 1.3e-7 of hi - lo;
+        // the window is widened by 1e-6 of it. avg1McTet's per-sample test is the one that decides.
+        bool mcSlabs = false;   // a Monte-Carlo cell of the threaded loop (avg1McTet<true>)
         if ( nT > 1 )
         {
             if ( cellPosition==SINGLE_GRID_CELL and isGridCellIndex( baseGridCell, nGrid, &index ) )
             {
-                if ( not owns( th, baseGridCell[0] ) ) continue;
+                if ( not cpu.owns( th, baseGridCell[0] ) ) continue;
             }
             else
             {
@@ -1005,212 +1403,47 @@ void interpolateGrid_averaged_1(DT &dt,
                     if (vertexMatrix[v][0] < lo) lo = vertexMatrix[v][0];
                     if (vertexMatrix[v][0] > hi) hi = vertexMatrix[v][0];
                 }
+                mcSlabs = not exactAvg;
+                if ( mcSlabs )
+                {
+                    double const eps = 1e-6 * ( hi - lo );
+                    lo -= eps;
+                    hi += eps;
+                }
                 int a = int( std::floor( (double(basePosition[0]) + lo) / double(dx[0]) ) );
                 int b = int( std::floor( (double(basePosition[0]) + hi) / double(dx[0]) ) ) + 1;
                 if (a < 0) a = 0;
                 if (b > int(nGrid[0])) b = int(nGrid[0]);
                 bool mine = false;
-                for (int gi = a; gi < b and not mine; ++gi) mine = owns( th, gi );
+                for (int gi = a; gi < b and not mine; ++gi) mine = cpu.owns( th, gi );
                 if ( not mine ) continue;
             }
         }
 
         Real cellVolume = volume( dt, itC );
         Real posMatrixInverse[NO_DIM][NO_DIM];  // inverse vertex position-difference matrix
-        matrixInverse( vertexMatrix, posMatrixInverse );
+        if ( not mcSlabs )   // (avg1McTet<true> inverts it for a cell with a sample of this thread's only)
+            matrixInverse( vertexMatrix, posMatrixInverse );
 
         // cell fits in one grid cell -> add its centroid value times volume, no MC sampling needed
 #ifndef MY_SCALAR
         if ( cellPosition==SINGLE_GRID_CELL and isGridCellIndex( baseGridCell, nGrid, &index ) )
         {
-            if (field.density) (*density)[index] += averageDensity(mc) * cellVolume;
-#ifdef VELOCITY
-            if (field.velocity) (*velocity)[index] += averageVelocity(mc) * cellVolume;
-            if (field.velocity_gradient)
-            {
-                Real velGrad[NO_DIM][noVelComp];
-                velocityGrad( mc, posMatrixInverse, velGrad );
-                (*velocity_gradient)[index] += velocityGradient(velGrad) * cellVolume;
-            }
-#endif
-#ifdef SCALAR
-            if (field.scalar) (*scalar)[index] += averageScalar(mc) * cellVolume;
-            if (field.scalar_gradient)
-            {
-                Real sGrad[NO_DIM][noScalarComp];
-                scalarGrad( mc, posMatrixInverse, sGrad );
-                (*scalar_gradient)[index] += scalarGradient(sGrad) * cellVolume;
-            }
-#endif
-#ifdef TEST_PADDING
-            if ( dummyNeighbors ) updateDummyGridCells( index, &incompleteCells_d );
-            if ( dummyVertices ) updateDummyGridCells( index, &incompleteCells );
-#endif
+            avg1SingleCell( cpu, mc, posMatrixInverse, cellVolume, index, dummy );
             continue;
         }
-#endif
 
-
-#if NO_DIM==3 && !defined(MY_SCALAR)
-        // ----- exact volume average (--exact-average): analytic cell∩tet integration -----
-        // The interpolant is LINEAR inside the tet, so its integral over each intersection
-        // piece is the centroid value times the piece volume -- order-1 r3d moments suffice
-        // (Powell & Abel 2015). Same vertex-0-relative frame as the sampled path (densGrad,
-        // velGrad and the field evaluators all take base-relative coordinates); out-of-region
-        // window cells are skipped exactly like out-of-region samples. The single-grid-cell
-        // fast path above (already exact for linear fields) is shared with the sampled mode.
+        // --exact-average: analytic cell∩tet (3D r3d) / cell∩triangle (2D ps_clip2d) integration
         if ( exactAvg )
         {
-            Vertex_handle base = itC->vertex(0);
-            Real densGrad[NO_DIM];
-            densityGrad( itC, posMatrixInverse, densGrad );
-#ifdef VELOCITY
-            Real velGrad[NO_DIM][noVelComp];
-            velocityGrad( itC, posMatrixInverse, velGrad );
-#endif
-#ifdef SCALAR
-            Real sGrad[NO_DIM][noScalarComp];
-            scalarGrad( itC, posMatrixInverse, sGrad );
-#endif
-
-            r3d_rvec3 tv[NO_DIM+1];
-            for (int d = 0; d < NO_DIM; ++d) tv[0].xyz[d] = 0.;
-            for (int v = 1; v <= NO_DIM; ++v)
-                for (int d = 0; d < NO_DIM; ++d)
-                    tv[v].xyz[d] = vertexMatrix[v-1][d];
-            if ( determinant(vertexMatrix) < 0. )   // r3d wants positive orientation
-            { r3d_rvec3 const tmp = tv[1]; tv[1] = tv[2]; tv[2] = tmp; }
-            r3d_poly tetPoly;
-            r3d_init_tet(&tetPoly, tv);
-
-            // window of grid cells overlapped by the tet bbox (region-frame indices, clamped)
-            int iLo[NO_DIM], iHi[NO_DIM];
-            for (int d = 0; d < NO_DIM; ++d)
-            {
-                double lo = 0., hi = 0.;
-                for (int v = 0; v < NO_DIM; ++v)
-                {
-                    if (vertexMatrix[v][d] < lo) lo = vertexMatrix[v][d];
-                    if (vertexMatrix[v][d] > hi) hi = vertexMatrix[v][d];
-                }
-                iLo[d] = int( std::floor( (double(basePosition[d]) + lo) / double(dx[d]) ) );
-                iHi[d] = int( std::floor( (double(basePosition[d]) + hi) / double(dx[d]) ) ) + 1;
-                if (iLo[d] < 0) iLo[d] = 0;
-                if (iHi[d] > int(nGrid[d])) iHi[d] = int(nGrid[d]);
-            }
-
-            // the window's cells, each clipped by its 6 half-spaces (exact_sweep.h: once per slab and
-            // column); another thread's x planes are not clipped
-            exactSweep::sweep( tetPoly, iLo, iHi,
-                [&](int const d, int const g, double &lo, double &hi)
-                {
-                    lo = g * double(dx[d]) - double(basePosition[d]);
-                    hi = lo + double(dx[d]);
-                },
-                [&](int const d, int const g) -> long { return ( d == 0 and nT > 1 and not owns( th, g ) ) ? -1 : g; },
-                [&](int const *g, long const *, r3d_poly &piece)
-            {
-                r3d_real mom[4];
-                exactSweep::reduce<1>( piece, mom );
-                if ( !(mom[0] > 0.) ) return;
-
-                index = ( size_t(g[0])*nGrid[1] + size_t(g[1]) )*nGrid[2] + size_t(g[2]);
-                Real const dV = Real(mom[0]);
-                Point centroid( mom[1]/mom[0], mom[2]/mom[0], mom[3]/mom[0] );
-                if (field.density) (*density)[index] += densityValue(densGrad, base, centroid) * dV;
-#ifdef VELOCITY
-                if (field.velocity) (*velocity)[index] += velocityValue(velGrad, base, centroid) * dV;
-                if (field.velocity_gradient) (*velocity_gradient)[index] += velocityGradient(velGrad) * dV;
-#endif
-#ifdef SCALAR
-                if (field.scalar) (*scalar)[index] += scalarValue(sGrad, base, centroid) * dV;
-                if (field.scalar_gradient) (*scalar_gradient)[index] += scalarGradient(sGrad) * dV;
-#endif
-#ifdef TEST_PADDING
-                if ( dummyNeighbors ) updateDummyGridCells( index, &incompleteCells_d );
-                if ( dummyVertices ) updateDummyGridCells( index, &incompleteCells );
-#endif
-            } );
+            avg1ExactTet( cpu, th, itC, vertexMatrix, basePosition, posMatrixInverse, dummy );
             continue;
         }
-#elif NO_DIM==2 && !defined(MY_SCALAR)
-        // ----- exact area average (--exact-average), 2D: the same integral with the triangle clipped
-        // against each cell by ps_clip2d.h (area and first moments: the centroid of each piece) -----
-        if ( exactAvg )
-        {
-            Vertex_handle base = itC->vertex(0);
-            Real densGrad[NO_DIM];
-            densityGrad( itC, posMatrixInverse, densGrad );
-#ifdef VELOCITY
-            Real velGrad[NO_DIM][noVelComp];
-            velocityGrad( itC, posMatrixInverse, velGrad );
 #endif
-#ifdef SCALAR
-            Real sGrad[NO_DIM][noScalarComp];
-            scalarGrad( itC, posMatrixInverse, sGrad );
-#endif
-            double tri[3][2] = { {0., 0.},
-                                 {vertexMatrix[0][0], vertexMatrix[0][1]},
-                                 {vertexMatrix[1][0], vertexMatrix[1][1]} };
-            if ( determinant(vertexMatrix) < 0. )   // the clipper wants a counter-clockwise triangle
-                for (int d = 0; d < 2; ++d) std::swap( tri[1][d], tri[2][d] );
-
-            int iLo[NO_DIM], iHi[NO_DIM];
-            for (int d = 0; d < NO_DIM; ++d)
-            {
-                double lo = 0., hi = 0.;
-                for (int v = 0; v < NO_DIM; ++v)
-                {
-                    if (vertexMatrix[v][d] < lo) lo = vertexMatrix[v][d];
-                    if (vertexMatrix[v][d] > hi) hi = vertexMatrix[v][d];
-                }
-                iLo[d] = int( std::floor( (double(basePosition[d]) + lo) / double(dx[d]) ) );
-                iHi[d] = int( std::floor( (double(basePosition[d]) + hi) / double(dx[d]) ) ) + 1;
-                if (iLo[d] < 0) iLo[d] = 0;
-                if (iHi[d] > int(nGrid[d])) iHi[d] = int(nGrid[d]);
-            }
-
-            for (int gi = iLo[0]; gi < iHi[0]; ++gi)
-            for (int gj = iLo[1]; gj < iHi[1]; ++gj)
-            {
-                if ( nT > 1 and not owns( th, gi ) ) continue;   // another thread's x plane
-                int const gij[2] = {gi, gj};
-                double lo[2], hi[2], mom[psClip2d::MOMENTS];
-                for (int d = 0; d < 2; ++d)
-                {
-                    lo[d] = gij[d] * double(dx[d]) - double(basePosition[d]);
-                    hi[d] = lo[d] + double(dx[d]);
-                }
-                if ( not psClip2d::clipTriangleToCell( tri, lo, hi, mom ) ) continue;
-
-                index = size_t(gi)*nGrid[1] + size_t(gj);
-                Real const dV = Real(mom[0]);
-                Point centroid( mom[1]/mom[0], mom[2]/mom[0] );
-                if (field.density) (*density)[index] += densityValue(densGrad, base, centroid) * dV;
-#ifdef VELOCITY
-                if (field.velocity) (*velocity)[index] += velocityValue(velGrad, base, centroid) * dV;
-                if (field.velocity_gradient) (*velocity_gradient)[index] += velocityGradient(velGrad) * dV;
-#endif
-#ifdef SCALAR
-                if (field.scalar) (*scalar)[index] += scalarValue(sGrad, base, centroid) * dV;
-                if (field.scalar_gradient) (*scalar_gradient)[index] += scalarGradient(sGrad) * dV;
-#endif
-#ifdef TEST_PADDING
-                if ( dummyNeighbors ) updateDummyGridCells( index, &incompleteCells_d );
-                if ( dummyVertices ) updateDummyGridCells( index, &incompleteCells );
-#endif
-            }
-            continue;
-        }
-#endif  // exact average (3D r3d / 2D ps_clip2d)
 
 
         // cell spans multiple grid cells -> MC-sample inside it
         size_t const noRandomPoints = sampleCount( cellVolume );
-        std::vector<Point> randomPoints(noRandomPoints);
-        quasiRandomPointsInCell( vertexMatrix, noRandomPoints, quasiRandomNumbers, randomPoints.data() );
-        Real factor = cellVolume / noRandomPoints;  // volume per sample point
-        Vertex_handle base = mc.v[0];
         // centring (see mcLegacy above): a sample at p (relative to the base) is DEPOSITED in p's grid cell
         // but EVALUATED at p + delta, delta = sum_j c_j (v_j - v_0) = centroid - mean of the n samples, so
         // the n values of a linear field sum to n f(centroid)
@@ -1226,50 +1459,12 @@ void interpolateGrid_averaged_1(DT &dt,
                 delta[d] = Real(t);
             }
         }
-
-        Real densGrad[NO_DIM];
-        densityGrad( mc, posMatrixInverse, densGrad );
-#ifdef VELOCITY
-        Real velGrad[NO_DIM][noVelComp];
-        velocityGrad( mc, posMatrixInverse, velGrad );
-#endif
-#ifdef SCALAR
-        Real sGrad[NO_DIM][noScalarComp];
-        scalarGrad( mc, posMatrixInverse, sGrad );
-#endif
-        for (size_t i=0; i<noRandomPoints; ++i) // scatter each sample point's field value into its grid cell
-        {
-            if ( not isGridCellIndex( nGrid, dx, randomPoints[i], basePosition, &index ) )
-                continue;   // sample outside the region of interest
-            Point evalPoint = randomPoints[i];   // where the (linear) fields are evaluated
-            if ( centreMC )
-            {
-#if NO_DIM==2
-                evalPoint = Point( randomPoints[i][0]+delta[0], randomPoints[i][1]+delta[1] );
-#else
-                evalPoint = Point( randomPoints[i][0]+delta[0], randomPoints[i][1]+delta[1], randomPoints[i][2]+delta[2] );
-#endif
-            }
-            
-            if (field.density) (*density)[index] += densityValue(densGrad,base,evalPoint) * factor;
-#ifdef VELOCITY
-            if (field.velocity) (*velocity)[index] += velocityValue(velGrad,base,evalPoint) * factor;
-            if (field.velocity_gradient) (*velocity_gradient)[index] += velocityGradient(velGrad) * factor;
-#endif
-#ifdef SCALAR
-#ifdef MY_SCALAR
-            // the user's function (any C++, not linear) sees the sample itself; only linear fields are centred
-            (*scalar)[index] +=  customScalar(mc, posMatrixInverse, base, randomPoints[i]) * factor;
-#else
-            if (field.scalar) (*scalar)[index] += scalarValue(sGrad,base,evalPoint) * factor;
-            if (field.scalar_gradient) (*scalar_gradient)[index] += scalarGradient(sGrad) * factor;
-#endif
-#endif
-#ifdef TEST_PADDING
-            if ( dummyNeighbors ) updateDummyGridCells( index, &incompleteCells_d );
-            if ( dummyVertices ) updateDummyGridCells( index, &incompleteCells );
-#endif
-        }
+        if ( mcSlabs )
+            avg1McTet<true>( cpu, mc, vertexMatrix, basePosition, posMatrixInverse, cellVolume, noRandomPoints, delta,
+                             randomPoints, dummy, th, ownSamples );
+        else
+            avg1McTet<false>( cpu, mc, vertexMatrix, basePosition, posMatrixInverse, cellVolume, noRandomPoints, delta,
+                              randomPoints, dummy, th, ownSamples );
     }
     };   // cpuLoop
     if ( nT == 1 )

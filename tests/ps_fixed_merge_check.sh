@@ -10,7 +10,7 @@
 #       relative to the grid's peak; every one below 2e-6 (expected ~1e-7: each partition value is rounded to its unit,
 #       the float sums round at every add)
 #   X3  '--scratch-dir' with a tiny threshold (DTFE_SCRATCH_MIN_GB): the integer grids are scratch-backed, the outputs
-#       byte-identical to X1's
+#       byte-identical to X1's; on macOS they take the zero-fill route (the count after the loop is > 0)
 #   X4  overflow, FATAL and order-free: DTFE_TEST_FXMERGE_SHIFT=24 (units 2^24 finer: densities above 8 do not fit
 #       2^63 units) stops the run at --max-concurrent 1 and at 4 with partition 0 held back, naming the accumulator,
 #       with no output written; DTFE_TEST_FXMERGE_SUM_LIMIT=40 (the sum bound's limit lowered) stops it with the sum
@@ -20,7 +20,7 @@
 #       holds the integer words in its checkpoint; '--resume' at --max-concurrent 2 writes X1's outputs byte for byte;
 #       a default '--resume' of that checkpoint is refused by name, and so is a '--fixed-point-merge --resume' of a
 #       default run's checkpoint, and a resume with other units (DTFE_TEST_FXMERGE_SHIFT=1)
-#   X7  GPU builds only (SKIP otherwise): the --ps-gpu deposit at --max-concurrent 1, 2 and 4 with partition 0 held
+#   X7  GPU builds only (SKIP otherwise): the --gpu deposit at --max-concurrent 1, 2 and 4 with partition 0 held
 #       back -- byte-identical (none falling back to the CPU); against the GPU default merge, the X2 table
 # Usage: tests/ps_fixed_merge_check.sh [--no-build]   (--no-build is accepted and ignored: the binaries are used as built)
 set -uo pipefail
@@ -69,7 +69,7 @@ PYEOF
 }
 C=(--grid 48 --periodic --input 105 --MpcUnit 1 --verbose 2 --partition 3 3 3)
 F1=(--field density velocity gradient dispersion scalar scalarGradient density_a velocity_a --scalar-dataset Potential)
-F2=(--field density velocity dispersion --ps-volume-weighted --ps-exact-deposit --ps-caustics)
+F2=(--field density velocity dispersion --ps-volume-weighted --exact-average --ps-caustics)
 FX=--fixed-point-merge
 
 if precision_double; then
@@ -87,7 +87,7 @@ echo ">> X1: the CPU deposit at --max-concurrent 1, 2, 4 and 4 with partition 0 
 grep -q -- "--fixed-point-merge" "$TMP/help.txt"; check "X1 '--fixed-point-merge' is in the help" $?
 for s in 1 2; do
     eval "F=(\"\${F$s[@]}\")"
-    OMP_NUM_THREADS=1 "$BIN" "$SNAP" "$TMP/s${s}m1" "${C[@]}" "${F[@]}" $FX --max-concurrent 1 --ps-no-overlap > "$TMP/s${s}m1.log" 2>&1 \
+    OMP_NUM_THREADS=1 "$BIN" "$SNAP" "$TMP/s${s}m1" "${C[@]}" "${F[@]}" $FX --max-concurrent 1 --no-overlap > "$TMP/s${s}m1.log" 2>&1 \
         || { echo "FAIL: s${s}m1 (see $TMP/s${s}m1.log)"; exit 1; }
     OMP_NUM_THREADS=2 "$BIN" "$SNAP" "$TMP/s${s}m2" "${C[@]}" "${F[@]}" $FX --max-concurrent 2 > "$TMP/s${s}m2.log" 2>&1 \
         || { echo "FAIL: s${s}m2 (see $TMP/s${s}m2.log)"; exit 1; }
@@ -120,6 +120,17 @@ OMP_NUM_THREADS=4 DTFE_SCRATCH_MIN_GB=0.0001 "$BIN" "$SNAP" "$TMP/sc" "${C[@]}" 
     --scratch-dir "$SC" > "$TMP/sc.log" 2>&1 || { echo "FAIL: sc (see $TMP/sc.log)"; exit 1; }
 grep -q "SCRATCH:" "$TMP/sc.log" && same "$TMP/s1m1" "$TMP/sc" && [ -z "$(ls -A "$SC")" ]
 check "X3 scratch-backed integer grids (a tiny threshold): byte-identical, the scratch folder left empty" $?
+# the zero-fill route for the integer grids too (ScratchAlloc::zeroAssign, ps_fixed_merge.h): the line after the loop
+# counts the grids moved onto their scratch file unwritten since the merge's setup -- on macOS every integer grid of
+# the setup (all scratch mappings here), so N > 0; elsewhere the route is off by design (scratch_alloc.h), N = 0
+NFX="$(sed -n "s/^SCRATCH: .*, \([0-9][0-9]*\) of them since the fixed-point merge's setup.*/\1/p" "$TMP/sc.log" | head -1)"
+if [ "$(uname -s)" = Darwin ]; then
+    [ "${NFX:-0}" -gt 0 ]
+    check "X3 ${NFX:-no} integer grid(s) zero-filled in memory and moved onto their scratch file (the zero-fill route)" $?
+else
+    [ "${NFX:-x}" = 0 ]
+    check "X3 the zero-fill route is off here (macOS only): ${NFX:-no} integer grid(s) moved, the count printed" $?
+fi
 
 echo ">> X4: overflow stops the run, whatever the order"
 for r in "o1:1:" "o4:4:0:2"; do
@@ -177,7 +188,7 @@ OBJ=o_ps
 if [ ! -d "$OBJ" ] || [ -f "$OBJ/.gpu_mode_off" ] || [ ! -f "$OBJ/.gpu_mode_metal" ]; then
     echo "  SKIP X7: $OBJ is not a Metal GPU build"
 else
-    G=("${C[@]}" --field density velocity gradient dispersion density_a --ps-volume-weighted --ps-gpu)
+    G=("${C[@]}" --field density velocity gradient dispersion density_a --ps-volume-weighted --gpu)
     OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/g1" "${G[@]}" $FX --max-concurrent 1 > "$TMP/g1.log" 2>&1 || { echo "FAIL: g1 (see $TMP/g1.log)"; exit 1; }
     OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/g2" "${G[@]}" $FX --max-concurrent 2 > "$TMP/g2.log" 2>&1 || { echo "FAIL: g2 (see $TMP/g2.log)"; exit 1; }
     OMP_NUM_THREADS=4 DTFE_TEST_DELAY_PARTITION=0:2 "$BIN" "$SNAP" "$TMP/g4" "${G[@]}" $FX --max-concurrent 4 > "$TMP/g4.log" 2>&1 \
@@ -185,7 +196,7 @@ else
     ! grep -q "using the CPU deposit\|deposit unavailable\|ran on the CPU instead\|gave up" "$TMP/g1.log" "$TMP/g2.log" "$TMP/g4.log"
     check "X7 no GPU pass fell back to the CPU" $?
     same "$TMP/g1" "$TMP/g2" && same "$TMP/g1" "$TMP/g4"
-    check "X7 --ps-gpu at --max-concurrent 1, 2 and 4 (partition 0 held back): every output byte-identical" $?
+    check "X7 --gpu at --max-concurrent 1, 2 and 4 (partition 0 held back): every output byte-identical" $?
     OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/gdef" "${G[@]}" --max-concurrent 4 > "$TMP/gdef.log" 2>&1 || { echo "FAIL: gdef (see $TMP/gdef.log)"; exit 1; }
     table "$TMP/gdef" "$TMP/g4" 2e-6
     check "X7 against the GPU run's default merge: < 2e-6 of each grid's peak" $?

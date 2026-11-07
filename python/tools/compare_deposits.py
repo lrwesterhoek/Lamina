@@ -1,4 +1,4 @@
-"""A/B a sampled-deposit grid set against an exact-deposit (--ps-exact-deposit) one.
+"""A/B a sampled-deposit grid set against an exact-deposit (--exact-average) one.
 
 Answers the practical question "is the exact deposit worth its ~2.7x wall time?" with
 numbers instead of impressions, focused on the regimes that matter for void work:
@@ -55,9 +55,10 @@ def summarize(name, a, b, mask=None, unit=""):
 
 
 def main() -> int:
+    from dtfelib.cli import add_sim_arg
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--sim", required=True)
+    add_sim_arg(p)                                  # required unless DTFE_SIM names it
     p.add_argument("--snap", type=int, required=True)
     p.add_argument("--a", default="ps_sampled", help="reference prefix (default ps_sampled)")
     p.add_argument("--b", default="ps_output", help="candidate prefix (default ps_output)")
@@ -66,8 +67,8 @@ def main() -> int:
     args = p.parse_args()
 
     from dtfelib.io import FieldSet
-    from dtfelib.cli import sim_dir
-    snapdir = sim_dir(args.sim) / f"snapdir_{args.snap:03d}"
+    from dtfelib.cli import snapdir_path
+    snapdir = snapdir_path(args.sim, args.snap)
     fa = FieldSet(snapdir, prefix=args.a)
     fb = FieldSet(snapdir, prefix=args.b)
     print(f"A (reference): {fa!r}")

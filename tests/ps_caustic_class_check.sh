@@ -188,13 +188,13 @@ done
 # and one default run: the opt-in flag must be the ONLY way bit 7 appears
 "${BIN}" "${TMP}/pcc_w1.8.hdf5" "${TMP}/pcc_nocusp" --grid 48 --periodic --field density \
          --MpcUnit 1 --max-concurrent 1 --ps-caustics >/dev/null
-# --ps-gpu with the cusp indicator: the deposit runs on the CPU (the stencil needs the triangulation's neighbours),
+# --gpu with the cusp indicator: the deposit runs on the CPU (the stencil needs the triangulation's neighbours),
 # so bits 7 and 8 are the CPU run's, byte for byte -- a GPU deposit left them unset in nearly every cell
 GPUG=0
 [ -d o_ps ] && [ ! -f o_ps/.gpu_mode_off ] && grep -q "METAL=1\|CUDA=1\|HIP=1" o_ps/.build_mode 2>/dev/null && GPUG=1
 if [ "${GPUG}" = 1 ]; then
     "${BIN}" "${TMP}/pcc_w1.0.hdf5" "${TMP}/pcc_c1.0_gpu" --grid 48 --periodic --field density \
-             --MpcUnit 1 --max-concurrent 1 --ps-caustics --ps-caustic-cusps --ps-gpu > "${TMP}/pcc_c1.0_gpu.log" 2>&1
+             --MpcUnit 1 --max-concurrent 1 --ps-caustics --ps-caustic-cusps --gpu > "${TMP}/pcc_c1.0_gpu.log" 2>&1
 fi
 "${PY}" - "${TMP}" "${GPUG}" <<'PYEOF' || py_rc=1
 import sys
@@ -235,10 +235,10 @@ if len(sys.argv) > 2 and sys.argv[2] == "1":
     gt = mask("pcc_c1.0_gpu")
     check(filecmp.cmp(f"{tmp}/pcc_c1.0.causticClass", f"{tmp}/pcc_c1.0_gpu.causticClass", shallow=False)
           and "needs the CPU deposit" in log,
-          f"--ps-gpu with --ps-caustic-cusps deposits on the CPU: '.causticClass' byte-identical to the CPU run "
+          f"--gpu with --ps-caustic-cusps deposits on the CPU: '.causticClass' byte-identical to the CPU run "
           f"({int((((gt >> 7) & 1) != 0).sum())} cusp cells)")
 else:
-    print("   SKIP  --ps-gpu with --ps-caustic-cusps (CPU-only build)")
+    print("   SKIP  --gpu with --ps-caustic-cusps (CPU-only build)")
 
 sys.exit(1 if fails else 0)
 PYEOF
@@ -367,11 +367,11 @@ for geo in pan crw; do
     rm -f "${TMP}/pcj_${geo}"_*.*
     "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_s"   "${JO[@]}" --max-concurrent 1 --field density density_a --avg-subsamples 3 >/dev/null
     "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_a3"  "${JO[@]}" --max-concurrent 1 --field density_a --avg-subsamples 3 >/dev/null
-    "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_ex"  "${JO[@]}" --max-concurrent 1 --field density --ps-exact-deposit >/dev/null
+    "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_ex"  "${JO[@]}" --max-concurrent 1 --field density --exact-average >/dev/null
     "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_par" "${JO[@]}" --field density density_a --avg-subsamples 3 --partition 2 2 2 >/dev/null
     if [ "${GPUJ}" = 1 ]; then
         "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_gpu" "${JO[@]}" --max-concurrent 1 --field density density_a \
-                 --avg-subsamples 3 --ps-gpu >/dev/null
+                 --avg-subsamples 3 --gpu >/dev/null
     fi
 done
 "${PY}" - "${TMP}" "${ROOT}/python" "${GPUJ}" <<'PYEOF' || py_rc=1
@@ -460,7 +460,7 @@ EOF2
 }
 if [ -d o_ps ] && [ ! -f o_ps/.gpu_mode_off ]; then   # any GPU backend stamp (metal / cuda / hip)
     msg="$("${BIN}" "${SNAP}" "${OUT}_gpu" --grid "${GRID}" --periodic --field density --MpcUnit 1 \
-            --max-concurrent 1 --ps-caustics --ps-gpu 2>&1 || true)"
+            --max-concurrent 1 --ps-caustics --gpu 2>&1 || true)"
     if gpu_matches caustic; then
         echo "   PASS  GPU '.caustic' matches the CPU (byte for byte; the double build to 1e-4 of the cells)"
     else
@@ -476,9 +476,9 @@ if [ -d o_ps ] && [ ! -f o_ps/.gpu_mode_off ]; then   # any GPU backend stamp (m
     # --ps-linear-deposit needs 'dens' for real densities, so the mask cannot ride along: that
     # combination must fall back to the parity-only fold flag AND say so.
     lin="$("${BIN}" "${SNAP}" "${OUT}_gpulin" --grid "${GRID}" --periodic --field density --MpcUnit 1 \
-            --max-concurrent 1 --ps-caustics --ps-linear-deposit --ps-gpu 2>&1 || true)"
+            --max-concurrent 1 --ps-caustics --ps-linear-deposit --gpu 2>&1 || true)"
     if grep -q "ps-linear-deposit" <<< "${lin}"; then
-        echo "   PASS  --ps-caustics --ps-linear-deposit --ps-gpu warns that the stratification is CPU-only"
+        echo "   PASS  --ps-caustics --ps-linear-deposit --gpu warns that the stratification is CPU-only"
     else
         echo "   FAIL  the --ps-linear-deposit GPU combination did not warn"
         py_rc=1

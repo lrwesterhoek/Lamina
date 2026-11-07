@@ -32,6 +32,7 @@
 #ifndef QUANTITIES_HEADER
 #define QUANTITIES_HEADER
 
+#include <type_traits>
 #include <vector>
 
 #include "define.h"
@@ -49,7 +50,7 @@
 Real const PS_STREAM_TOL = Real(1.e-3);
 
 // A partition sub-grid cell (local coords c; sub-grid dims m, global origin o) -> its index in the full grid 'full'
-// (used by quantities.cc addFieldSubgrid/orFieldSubgrid and the fixed-point merge, src/ps_fixed_merge.h). Each cell
+// (used by quantities.cc SubgridRowMap/mergeSubgridCells and the fixed-point merge, src/ps_fixed_merge.h). Each cell
 // maps to its global row-major index; o, m, full are in grid cells.
 // The destination may itself be a WINDOW of the full grid (--ps-window: mainOrigin/mainDims given):
 // a source cell is then mapped to its window-local index and skipped when it lies outside.
@@ -95,8 +96,8 @@ struct Quantities
     std::vector<Real>                         velocity_vweb;        // V-web classification label (0=void, 1=wall, 2=filament, 3=node)
     std::vector< Pvector<Real,NO_DIM> >       velocity_vweb_eigenvalues; // V-web eigenvalues (sorted descending)
 #ifdef PHASE_SPACE
-    std::vector<Real>                         stream_count;       // stream multiplicity at each grid point: the sampled deposit's sample-mean, or --ps-exact-deposit's analytic volume-weighted (1/V_cell)sum(V_int). A FLOAT under both -- compare against integers with PS_STREAM_TOL, never with ==/> 1 exactly (see below)
-    std::vector<Real>                         tet_touch;          // --ps-exact-deposit only: raw INTEGER count of tetrahedra with a nonzero intersection with the cell (incl. corner grazes), written as '.tetTouch'. A geometric multiplicity, NOT a stream count -- 'stream_count' carries the volume-weighted (physical) multiplicity under every deposit.
+    std::vector<Real>                         stream_count;       // stream multiplicity at each grid point: the sampled deposit's sample-mean, or --exact-average's analytic volume-weighted (1/V_cell)sum(V_int). A FLOAT under both -- compare against integers with PS_STREAM_TOL, never with ==/> 1 exactly (see below)
+    std::vector<Real>                         tet_touch;          // --exact-average only: raw INTEGER count of tetrahedra with a nonzero intersection with the cell (incl. corner grazes), written as '.tetTouch'. A geometric multiplicity, NOT a stream count -- 'stream_count' carries the volume-weighted (physical) multiplicity under every deposit.
     std::vector<Real>                         mass_weight;        // per-cell summed moment weight (mass shares, or the EULERIAN-VOLUME shares under --ps-volume-weighted); normalizes velocity/gradient/scalar. Internal to normalizePhaseSpace, never written out
     // --ps-volume-weighted + dispersion only: the dispersion stays MASS-weighted (sigma_ij is a
     // moment of the phase-space distribution f, so it is f- i.e. mass-weighted by definition),
@@ -112,14 +113,87 @@ struct Quantities
     size_t ps_subDims[NO_DIM]   = {0};   // [0]==0 means "not a sub-grid" (vectors span the full grid)
 #endif
 
-    // if you add members, update the functions below so the 'partition' option keeps working
+    /* THE FIELD LIST. forEachField(f) calls f(info, merge, member) for every grid above, in this order, which is also
+       the checkpoint's field order (partition_checkpoint.h forEachAccumulator), the merge spill's
+       (ps_merge_spill.h) and the fixed-point merge's slots (ps_fixed_merge.h forEachSummed). Everything that walks
+       the grids goes through it: size, copyFromSubgrid, addFrom, addFromSubgrid and reserveMemory (quantities.cc),
+       and those two lists. A new grid is added HERE, with its tags; besides, only what is particular to it: its
+       output file (input_output.cc writeOutputData) and, when it is made from other grids, its derivation
+       (web_fields.cc).
+         info.name            the stable name (the checkpoint's)
+         info.flag            the Field flag that asks for it (nullptr: a PS-DTFE accumulator the options size)
+         info.sizing          which grids reserveMemory sizes before a partition loop (FieldSizing)
+         info.scale           a summed grid's natural per-cell scale (FieldScale: the fixed-point merge's unit)
+         info.madeAfterMerge  summed, but no PS-DTFE partition fills it: made after the merge from the others
+         merge                MergeTag<FIELD_SUM> ('+=' across partitions), <FIELD_OR> (a bit mask: OR) or
+                              <FIELD_DERIVED> (never merged: the web labels, made after the merge) -- a type, so a
+                              merge can pick its code with 'if constexpr'
+         member               &Quantities::<grid>, so one walk can visit the same grid of two Quantities */
+    enum FieldMerge { FIELD_SUM, FIELD_OR, FIELD_DERIVED };
+    template <int M> using MergeTag = std::integral_constant<int, M>;
+    enum FieldSizing
+    {
+        SIZE_FIELD,         // when its Field flag is set
+        SIZE_VELOCITY,      // the velocity: its flag, or the dispersion's (which needs <v> too)
+        SIZE_PS_ANY,        // PS-DTFE: whenever any field of that side is selected
+        SIZE_PS_CAUSTICS,   // PS-DTFE: '--ps-caustics', when any field of that side is selected
+        SIZE_PS_EXACT,      // PS-DTFE: '--exact-average', when any field of that side is selected
+        SIZE_AT_MERGE       // never pre-sized: the merge grows it at a partition's first values (the moment weights)
+    };
+    enum FieldScale { SCALE_ONE = 0, SCALE_WEIGHT, SCALE_MASS, SCALE_VEL_W, SCALE_VEL_M, SCALE_VEL2_M, SCALE_GRAD_W,
+                      SCALE_SCAL_W, SCALE_SGRAD_W };   // the table in ps_fixed_merge.h's header comment
+    struct FieldInfo
+    {
+        char const *name;
+        bool Field::*flag;
+        int sizing;
+        int scale;
+        bool madeAfterMerge;
+    };
+    template <class F>
+    static void forEachField(F &&f)
+    {
+        using Q = Quantities;
+        MergeTag<FIELD_SUM> const sum{};
+        MergeTag<FIELD_OR> const orMask{};
+        MergeTag<FIELD_DERIVED> const derived{};
+        f( FieldInfo{ "density", &Field::density, SIZE_FIELD, SCALE_ONE, false }, sum, &Q::density );
+        f( FieldInfo{ "velocity", &Field::velocity, SIZE_VELOCITY, SCALE_VEL_W, false }, sum, &Q::velocity );
+        f( FieldInfo{ "velocity_gradient", &Field::velocity_gradient, SIZE_FIELD, SCALE_GRAD_W, false }, sum, &Q::velocity_gradient );
+        f( FieldInfo{ "velocity_divergence", &Field::velocity_divergence, SIZE_FIELD, SCALE_GRAD_W, true }, sum, &Q::velocity_divergence );
+        f( FieldInfo{ "velocity_shear", &Field::velocity_shear, SIZE_FIELD, SCALE_GRAD_W, true }, sum, &Q::velocity_shear );
+        f( FieldInfo{ "velocity_vorticity", &Field::velocity_vorticity, SIZE_FIELD, SCALE_GRAD_W, true }, sum, &Q::velocity_vorticity );
+        f( FieldInfo{ "velocity_std", &Field::velocity_std, SIZE_FIELD, SCALE_VEL_W, true }, sum, &Q::velocity_std );
+        f( FieldInfo{ "velocity_dispersion", &Field::velocity_dispersion, SIZE_FIELD, SCALE_VEL2_M, false }, sum, &Q::velocity_dispersion );
+        f( FieldInfo{ "scalar", &Field::scalar, SIZE_FIELD, SCALE_SCAL_W, false }, sum, &Q::scalar );
+        f( FieldInfo{ "scalar_gradient", &Field::scalar_gradient, SIZE_FIELD, SCALE_SGRAD_W, false }, sum, &Q::scalar_gradient );
+        f( FieldInfo{ "velocity_tweb", &Field::velocity_tweb, SIZE_FIELD, SCALE_ONE, false }, derived, &Q::velocity_tweb );
+        f( FieldInfo{ "velocity_tweb_eigenvalues", &Field::velocity_tweb, SIZE_FIELD, SCALE_ONE, true }, sum, &Q::velocity_tweb_eigenvalues );
+        f( FieldInfo{ "velocity_vweb", &Field::velocity_vweb, SIZE_FIELD, SCALE_ONE, false }, derived, &Q::velocity_vweb );
+        f( FieldInfo{ "velocity_vweb_eigenvalues", &Field::velocity_vweb, SIZE_FIELD, SCALE_GRAD_W, true }, sum, &Q::velocity_vweb_eigenvalues );
+#ifdef PHASE_SPACE
+        f( FieldInfo{ "stream_count", nullptr, SIZE_PS_ANY, SCALE_ONE, false }, sum, &Q::stream_count );
+        f( FieldInfo{ "tet_touch", nullptr, SIZE_PS_EXACT, SCALE_ONE, false }, sum, &Q::tet_touch );
+        f( FieldInfo{ "mass_weight", nullptr, SIZE_AT_MERGE, SCALE_WEIGHT, false }, sum, &Q::mass_weight );
+        f( FieldInfo{ "disp_weight", nullptr, SIZE_AT_MERGE, SCALE_MASS, false }, sum, &Q::disp_weight );
+        f( FieldInfo{ "disp_velocity", nullptr, SIZE_AT_MERGE, SCALE_VEL_M, false }, sum, &Q::disp_velocity );
+        f( FieldInfo{ "caustic_bits", nullptr, SIZE_PS_CAUSTICS, SCALE_ONE, false }, orMask, &Q::caustic_bits );
+        f( FieldInfo{ "hidden_streams", nullptr, SIZE_PS_ANY, SCALE_ONE, false }, orMask, &Q::hidden_streams );
+#else
+        (void)orMask;
+#endif
+    }
+
     void copyFromSubgrid(Quantities const &subgridResults,
                         Field const &field,
                         std::vector<size_t> const &mainGrid,
                         std::vector<size_t> const &subgrid,
                         std::vector<size_t> const &subgridOffset); // copy subgrid ('partition') results into the full grid
     size_t size() const;	// size of any non-empty member vector
-    void reserveMemory(size_t *gridSize, Field &field); // reserve main-grid memory for the 'partition' option
+    // sizes and zero-fills the main grids of a partition loop ('partition' option) that 'field' asks for (sizing
+    // SIZE_FIELD / SIZE_VELOCITY); with psRun (the PS-DTFE loop's options) also the PS accumulators those options
+    // ask for (SIZE_PS_*), so the memory gate sees them before the loop starts
+    void reserveMemory(size_t *gridSize, Field &field, User_options const *psRun = nullptr);
     void addFrom(Quantities const &other); // element-wise accumulate from another Quantities (PS-DTFE partitioning)
 #ifdef PHASE_SPACE
     // Turn summed density-weighted moments into mass-weighted means (call once, after all

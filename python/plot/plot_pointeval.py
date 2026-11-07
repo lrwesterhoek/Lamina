@@ -30,7 +30,7 @@ matplotlib.use("Agg")
 
 import config
 from dtfelib import pointeval
-from dtfelib.cli import NoDataRoot, find_sims, require_data_root, sim_dir
+from dtfelib.cli import NoDataRoot, find_sims, require_data_root, sim_dir, snapdir_path, snapshot_ladder
 from dtfelib.io import FieldSet
 
 
@@ -38,14 +38,9 @@ def discover_sims(data_root: Path):
     return find_sims(data_root, "snapdir_*/combined_*.hdf5")   # flat or per-family layout
 
 
-def discover_snaps(simdir: Path):
-    out = []
-    for f in sorted(simdir.glob("snapdir_*/combined_*.hdf5")):
-        try:
-            out.append(int(f.stem.split("_")[-1]))
-        except ValueError:
-            continue
-    return sorted(set(out))
+def discover_snaps(sim: str, data_root=None):
+    """The snapshots of 'sim' whose snapdir holds a merged combined_*.hdf5, ascending."""
+    return snapshot_ladder(sim, data_root, require="combined_*.hdf5")
 
 
 def main() -> int:
@@ -110,13 +105,13 @@ def main() -> int:
             print(f"!! {sim}: not found under {args.data_root}")
             failed += 1
             continue
-        snaps = [n for n in discover_snaps(simdir) if want is None or n in want]
+        snaps = [n for n in discover_snaps(sim, args.data_root) if want is None or n in want]
         if not snaps:
             print(f"-- {sim}: no matching snapshots")
             continue
         print(f"\n== {sim}: snapshots {' '.join(map(str, snaps))}")
         for n in snaps:
-            snapdir = simdir / f"snapdir_{n:03d}"
+            snapdir = snapdir_path(sim, n, args.data_root)
             # 'auto' follows the SLICE on disk, PS-DTFE first: FieldSet's own auto-detection follows
             # the grids, so it would never find a standard-DTFE slice beside PS-DTFE grids
             method = args.method

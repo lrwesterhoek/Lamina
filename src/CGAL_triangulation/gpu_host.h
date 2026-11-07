@@ -10,20 +10,24 @@
    tests/dtfe_metal_check.sh and metal/validate_deposit.cpp (Metal; the CUDA/HIP port is
    compiled and fallback-tested on Linux, not yet validated on hardware).
 
-   This header is self-contained (no DTFE/CGAL/backend includes; ps_deposit_params.h is plain C++). */
+   This header is self-contained (no DTFE/CGAL/backend includes; ps_deposit_params.h is plain C++, and
+   ../message.h gives the shared host steps at the end their colours). */
 
 #ifndef GPU_HOST_HEADER
 #define GPU_HOST_HEADER
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
 
 #include "ps_deposit_params.h"   // PSFxGrid / PSFixedUnits: the moment grids' fixed-point words
+#include "../message.h"          // ANSI colour helpers only (psHostReportPasses)
 
 // Name of the backend compiled into this binary ("Metal", "CUDA" or "HIP").
 std::string gpuBackendName();
@@ -76,7 +80,8 @@ struct PSGpuGrids
 // Runs the mass-conserving tetrahedral deposit on the default GPU device. 'verts' holds one
 // PS_TET_STRIDE-float record per tet (ps_deposit_params.h psFillTetRecord: vertex 0 as cell
 // index + fraction and the edges, in the canonical frame of the exact inside test).
-// Thread-safe (serialized on one device queue/stream).
+// Thread-safe: the calls prepare their work and copy their grids back concurrently, and serialize their device
+// work (uploads and passes) on one device queue/stream.
 // The kernel decides which samples each tet contains exactly as the CPU deposit does
 // (ps_exact_inside.h): in float, with a rigorous error bound. A tet with a sample inside that
 // bound is NOT deposited; its index (into the arrays as passed) is returned in 'deferred', and
@@ -94,7 +99,7 @@ struct PSGpuGrids
 // 2 = det<0) into out.caustic at every deposited sample -- OR is order-invariant, so the
 // result matches the CPU deposit's bits (float-vs-double det sign only differs below the
 // degeneracy cut, where cells are dropped).
-// fExact (--ps-exact-deposit) replaces the nSub^3 sampling by the kernels' float32 exact clipping
+// fExact (--exact-average) replaces the nSub^3 sampling by the kernels' float32 exact clipping
 // (sweep_moments in metal/exact_clip.metal.inc: a sweep in z, analytic tet-cell volume + order-2 moments); nSub is then
 // ignored. The CPU path stays
 // the DOUBLE-precision reference -- the GPU exact deposit agrees to float rounding, like
@@ -112,8 +117,9 @@ struct PSGpuGrids
 // fxUnits: the units of the moment grids, chosen by the caller from bounds that cover its own adds
 // too (the deferred and released tets): a grid with scale > 0 is deposited as an exact fixed-point sum and
 // handed back as words (out.fx), the rest as float atomics; sumW makes the exact items' weight totals exact.
-// Returns false with 'err' set if there is no device / setup fails; outputs untouched in
-// that case, zeroed otherwise.
+// Returns false with 'err' set if there is no device, setup fails or the GPU gives up on the deposit; 'out' is then
+// untouched (its grids are shaped and filled only after a deposit the GPU kept; a CUDA/HIP copy-back that fails
+// returns false with them partly filled -- the caller reads 'out' only after true).
 // CONSUMES verts/vels/masses/dens/scal (several GB per partition at scale): the backend frees each one
 // right after copying it to the device, so they may be empty when the call returns --
 // the CPU fallback deposits from the triangulation, not from these arrays.
@@ -379,17 +385,21 @@ inline PSDepositParams psGpuParams(PSGpuPlan const& p, PSFixedUnits const& fxUni
     P.massScale = p.massScale;
     P.fxMask = p.fxMask;               // the moment grids' fixed-point sums (the caller's units)
     for (int g = 0; g < PS_FX_N; ++g) P.fxScale[g] = p.fxOn[g] ? fxUnits.scale[g] : 0.f;
+    // PS_GPU_DEBUG_NOATOMIC=1: a timing experiment (the atomics' share of the sampled kernel, the counterpart of
+    // DTFE_GPU_DEBUG_NOATOMIC) -- the sampled path does all its work but deposits nothing, so the grids come out empty
+    P.debugNoAtomic = Env::flag("PS_GPU_DEBUG_NOATOMIC") ? 1u : 0u;
     return P;
 }
 
-// --ps-exact-deposit's work items: an item is (tet, block of blockCells cells of its bbox window); the host only
+// --exact-average's work items: an item is (tet, block of blockCells cells of its bbox window); the host only
 // needs an UPPER bound of each window -- the kernel re-derives it in float and idles surplus blocks. The float and
 // double floors can differ only when the value is within rounding of an integer, so only such a bound is widened
 // (by eps, far above the float error): padding every axis by a cell instead would inflate a 2-3 cell window up to
 // 8x, and each idle item still pays the setup. Under windowMode the kernel's items cover the window's hull only
 // (window_hull), so the bound does too. recs = the nTet records (PS_TET_STRIDE floats each); bound[t] = tet t's
 // window cells, 0 for a window wholly outside the grid (no item: a leftover); blockCells grows so that at most
-// ~32M items (256 MB) result (16-32 cells run within 10%); nItems = the item count. Returns the summed bound.
+// ~32M items result (16-32 cells run within 10%; the cap keeps the item counts, and so the sums, of the
+// list of (tet, block) pairs this map replaced); nItems = the item count. Returns the summed bound.
 inline double psExactItemBounds(float const* recs, size_t nTet, PSDepositParams const& P, const size_t nGrid[3],
                                 bool periodic, bool windowMode, std::vector<uint64_t>& bound, uint32_t& blockCells,
                                 size_t& nItems)
@@ -430,6 +440,143 @@ inline double psExactItemBounds(float const* recs, size_t nTet, PSDepositParams 
     for (size_t t = 0; t < nTet; ++t)
         nItems += (bound[t] + blockCells - 1) / blockCells;
     return total;
+}
+
+// The exact items as a compact map from psExactItemBounds' per-tet bounds, the standard-DTFE kernel's form
+// (dtfe_gpu_fixed.h dtfeItemMap): tet t's items are its blocks k = 0 .. ceil(bound[t] / blockCells) - 1, item
+// numbers itemStart[t] + k, in tet order -- the same (tet, block) pairs in the same order as a list of pairs, at
+// 4 B per tet plus 4 B per 2^PS_ITEM_BLOCK_SHIFT items instead of 8 B per item. The kernels decode an item with a
+// short binary search (psItemOf in metal/ps_deposit.metal and ps_gpu_cuda.cu). 'map' holds psExactItemMapWords
+// words: itemStart[0 .. nTet] (itemStart[nTet] = nItems), then blockTet[b] = the tet holding item b << SHIFT, for
+// b = 0 .. (nItems >> SHIFT) + 1 (the last ones past the items hold nTet - 1). A tet with no items (bound 0: a
+// leftover) has itemStart[t] == itemStart[t + 1] and no block points at it. The Metal host fills its GPU buffer
+// in place, the CUDA host a host vector it then uploads. Item numbers are 32-bit: psExactItemMapFits first.
+inline bool psExactItemMapFits(size_t nTet, size_t nItems) { return nTet < 0xFFFFFFFFu && nItems < 0xFFFFFFFFu; }
+inline size_t psExactItemMapWords(size_t nTet, size_t nItems) { return (nTet + 1) + (nItems >> PS_ITEM_BLOCK_SHIFT) + 2; }
+inline void psBuildExactItemMap(std::vector<uint64_t> const& bound, uint32_t const blockCells, size_t const nItems,
+                                uint32_t* map)
+{
+    size_t const nTet = bound.size();
+    uint32_t* const itemStart = map;
+    uint32_t* const blockTet = map + nTet + 1;
+    size_t n = 0;
+    for (size_t t = 0; t < nTet; ++t)
+    {
+        itemStart[t] = uint32_t(n);
+        n += (bound[t] + blockCells - 1) / blockCells;
+    }
+    itemStart[nTet] = uint32_t(n);
+    size_t const nBlocks = (nItems >> PS_ITEM_BLOCK_SHIFT) + 2;
+    std::fill(blockTet, blockTet + nBlocks, uint32_t(nTet ? nTet - 1 : 0));
+    for (size_t t = 0, blk = 0; t < nTet && blk < nBlocks; ++t)
+        while (blk < nBlocks && (blk << PS_ITEM_BLOCK_SHIFT) < size_t(itemStart[t + 1])) blockTet[blk++] = uint32_t(t);
+}
+
+// The per-tet kernel's opening chunk: by deposit kind or PS_GPU_CHUNK, scaled down under an
+// escalated pace (paceTargetSec: the backend's GpuPace::targetSec).
+inline size_t psHostFirstChunk(bool const fExact, double const paceTargetSec, size_t const MIN_CHUNK)
+{
+    // --exact-average costs ~1-2 orders of magnitude more per tet (analytic clipping of
+    // every cell in the window vs a barycentric test per sample), so start far smaller: the
+    // adaptive controller only retargets AFTER the first chunk, and one oversized opening
+    // buffer is exactly what the watchdog kills.
+    size_t baseChunk = fExact ? 500 : 25000;
+    if (long const v = Env::integer({"PS_GPU_CHUNK"}, 0); v > 0) baseChunk = size_t(v);
+    // an escalated pace (an earlier partition's failures) opens with a proportionally smaller chunk
+    if (paceTargetSec < 0.25)
+        baseChunk = std::max(size_t(double(baseChunk) * paceTargetSec / 0.25), MIN_CHUNK);
+    return baseChunk;
+}
+
+// The chunk checkpoints' settings (DTFE_GPU_CHECKPOINT_CHUNKS, DTFE_GPU_PACE_RECOVER_SEC).
+struct PSHostCkEnv
+{
+    long   ckChunks;
+    double paceRecoverSec;
+};
+
+// Reads how often a pass checkpoints and after how much clean GPU work an escalated pace steps back.
+inline PSHostCkEnv psHostCheckpointEnv()
+{
+    // DTFE_GPU_CHECKPOINT_CHUNKS=<n>: a checkpoint every n command buffers / kernels (0 = only the pass-start
+    // snapshot). Unset: every ~10 s of GPU work (n = 10 s / the current buffer target, so an escalated pace of
+    // 0.02 s buffers does not checkpoint 12x as often). A checkpoint copies the accumulator grids (~24 B per cell
+    // for density + velocity: ~0.4 GB at 256^3, ~0.1 s; the CUDA/HIP host device-to-host) into ONE spare host
+    // copy, allocated at the first checkpoint and held until the partition's deposit returns.
+    long ckChunks = -1;
+    if (Env::isSet("DTFE_GPU_CHECKPOINT_CHUNKS")) ckChunks = std::max(0L, Env::integer("DTFE_GPU_CHECKPOINT_CHUNKS", 0));
+    // DTFE_GPU_PACE_RECOVER_SEC=<s>: the clean GPU work after which an escalated pace steps back (GpuPace)
+    double paceRecoverSec = 90.;
+    if (double const v = Env::real("DTFE_GPU_PACE_RECOVER_SEC", -1.); v >= 0.) paceRecoverSec = v;
+    return PSHostCkEnv{ ckChunks, paceRecoverSec };
+}
+
+// Reports the passes' failed command buffers / kernels and the checkpoints (after any failure, else under
+// PS_GPU_TIMING). backend: "Metal", "CUDA" or "HIP"; unit: what failed, "buffer" (Metal) or "kernel" (CUDA/HIP);
+// snap: the backend's GpuSnapshot (gpu_metal_retry.h / gpu_cuda_retry.cuh).
+template <class Snapshot>
+inline void psHostReportPasses(char const* backend, char const* unit, bool const success, int const nFailed,
+                               int const nResumedCk, Snapshot const& snap, bool const timing)
+{
+    if (nFailed > 0)
+        fprintf(stderr, "%sPS-DTFE %s: deposit %s after %d failed %s(s) (%d resumed from a periodic checkpoint); "
+                        "%d checkpoint(s), %.0f MB held, %.3f s copying%s\n",
+                success ? MESSAGE::cYellow() : MESSAGE::cRed(), backend, success ? "recovered on the GPU" : "gave up",
+                nFailed, unit, nResumedCk, snap.taken, snap.bytes / 1.e6, snap.sec, MESSAGE::cReset());
+    else if (timing)
+        fprintf(stderr, "PS-DTFE %s: checkpoints: %d, %.0f MB held, %.3f s copying\n", backend, snap.taken,
+                snap.bytes / 1.e6, snap.sec);
+}
+
+// PS_GPU_TIMING=1: where a psGpuDepositFields call spends its time, phase by phase, in seconds (both hosts). The
+// hold of the GPU runs from taking the host's ctxMutex to the release of the call's buffers: the GPU idles in all
+// of it but 'kernels'. The call prepares its work before it takes the lock, so the partitions that queue for the
+// GPU do that work while another one holds it; it copies its grids back and frees its buffers before it lets go,
+// so one deposit's buffers exist at a time: the auto-tuner books them once (Metal: unified memory), and on CUDA/HIP,
+// with no free-memory gate, a second set beside the first could overflow the device (an allocation failure: the
+// CPU fallback).
+//   before the hold:
+//   device     the device and its kernels' first use (ctx(): the runtime compile of the Metal source, once)
+//   plan       the plan and the parameter block (psGpuPlan, psGpuParams)
+//   bounds     the exact items' window bounds (psExactItemBounds)
+//   fill       the exact items' map (psBuildExactItemMap; Metal: into its GPU buffer)
+//   in the hold:
+//   uploads    the per-tet records to the device, the zeroed grids and the exact items' per-tet totals
+//              (psHostUploadBuffers; CUDA: and the items' map)
+//   kernels    the passes' command buffers / kernels that succeeded (their 'busy' seconds)
+//   gaps       the idle gaps between them (the pace) and the settling sleeps after a failure
+//   leftovers  the exact items' leftovers around their own kernels: the scan, the gathers, the write-back
+//   copyBack   the output grids' shapes (psGpuInitGrids), the deferred tets' scan and the grids back to the host
+//              (psHostCopyBack)
+//   releases   the device buffers' release
+// The checkpoints' copies are GpuSnapshot::sec; what is left of the hold (encoding, the guard counters' reads, the
+// failed buffers' own time) is reported as 'other'.
+struct PSGpuPhaseTimes
+{
+    double device = 0., plan = 0., uploads = 0., bounds = 0., fill = 0., kernels = 0., gaps = 0., leftovers = 0.,
+           copyBack = 0., releases = 0.;
+    // the seconds since t, and t restarted: consecutive phases chain on one clock
+    static double lap(std::chrono::steady_clock::time_point& t)
+    {
+        auto const now = std::chrono::steady_clock::now();
+        double const s = std::chrono::duration<double>(now - t).count();
+        t = now;
+        return s;
+    }
+};
+
+// One line per partition (PS_GPU_TIMING): the phases before and in a hold of 'held' seconds, with snapSec = the
+// checkpoints' copies (in the hold).
+inline void psGpuReportPhases(char const* backend, int const partition, PSGpuPhaseTimes const& t, double const snapSec,
+                              double const held)
+{
+    double const other = std::max(0., held - (t.uploads + t.kernels + t.gaps + snapSec + t.leftovers + t.copyBack
+                                              + t.releases));   // (disjoint spans)
+    fprintf(stderr, "PS-DTFE %s: partition %d before the hold: device %.3f s, plan %.3f s, item bounds %.3f s, "
+                    "item fill %.3f s; hold by phase: uploads %.3f s, kernels %.3f s, pacing gaps %.3f s, "
+                    "snapshots %.3f s, leftovers %.3f s, copy-back %.3f s, releases %.3f s, other %.3f s\n",
+            backend, partition, t.device, t.plan, t.bounds, t.fill, t.uploads, t.kernels, t.gaps, snapSec, t.leftovers,
+            t.copyBack, t.releases, other);
 }
 
 #endif

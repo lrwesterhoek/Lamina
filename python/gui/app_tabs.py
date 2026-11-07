@@ -1,9 +1,10 @@
 """MainWindow's job tabs (TabsMixin, moved from app.py): the shared data panel, and the Data, Grids, Custom
 snapshot, Pipeline and Plots tabs with their option groups (presets, fields, resources, a figure set's
 options) and the reactions that stay inside a tab (the Data tab's snapshot table, the deposit choice that
-follows the estimator, a new custom snapshot file). The names app.py defines are read through _app at call
-time; that import comes last because app.py also runs as a script: importing it again under its own name
-then needs this module's class to exist already."""
+follows the estimator, a new custom snapshot file). The three run tabs (Grids, Custom snapshot, Pipeline) build
+the groups they share from one table, SHARED_WIDGETS, which also keeps each tab's attribute names for them. The
+names app.py defines are read through _app at call time; that import comes last because app.py also runs as a
+script: importing it again under its own name then needs this module's class to exist already."""
 
 from __future__ import annotations
 
@@ -12,25 +13,78 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QIntValidator
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-                               QGridLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
+                               QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMessageBox, QPushButton, QRadioButton, QAbstractItemView, QHeaderView,
                                QSpinBox, QStackedWidget, QTableWidget, QTableWidgetItem, QToolButton, QVBoxLayout,
                                QWidget)
 
 import runspec as rs
 import presets as P
-from app_widgets import _mono, _note, _checkable, _dir_row, _exclusive, _grid_combo, _state_text
+import grids as G
+from app_widgets import (_mono, _note, _checkable, _dir_row, _exclusive, _state_text, Collapsible, GROUP_MARGIN,
+                         INDENT, advanced_group, button_row, field_grid, flush, grid_row, group, labelled_row,
+                         option_tip, tip, tip_auto)
+
+L = P.LABELS
+RUN_TABS = ("grids", "custom", "pipeline")
+# the widgets the three run tabs share, built by _estimator_group, _ps_options_group, _fields_group,
+# _resources_group and _advanced_group, under each tab's own attribute names (the other mixins, app_specs.py and the
+# tests reach them by these names); None: the tab has no such widget
+SHARED_WIDGETS = {
+    #  role                      Grids            Custom snapshot   Pipeline
+    "deposit":                 ("deposit_combo", "o_deposit",      "p_deposit"),
+    "grid":                    ("grid_combo",    "o_grid",         "p_grid"),
+    "grid_cells":              ("grid_cells",    "o_grid_cells",   "p_grid_cells"),
+    "nsub":                    ("nsub_spin",     "o_nsub",         "p_nsub"),
+    "gpu":                     ("gpu_check",     "o_gpu",          "p_gpu"),
+    "vertex_mass":             ("vm_check",      "o_vm",           "p_vm"),
+    "volume_weighted":         ("vw_check",      "o_vw",           "p_vw"),
+    "caustics":                ("ca_check",      "o_ca",           "p_ca"),
+    "caustic_cusps":           ("cu_check",      "o_cu",           "p_cu"),
+    "linear_deposit":          ("ld_check",      "o_ld",           "p_ld"),
+    "ps_group":                ("ps_group",      "o_ps_group",     "p_ps_group"),
+    "fields":                  ("field_checks",  "o_fields",       "p_fields"),
+    "fields_box":              ("fields_box",    "o_fields_box",   "p_fields_box"),
+    "partition":               ("part_spin",     "o_part",         "p_part"),
+    "concurrent":              ("conc_spin",     "o_conc",         "p_conc"),
+    "scratch":                 ("scratch_edit",  "o_scratch",      "p_scratch"),
+    "parallel_triangulation":  ("pt_check",      "o_pt",           "p_pt"),
+    "ordered_merge":           ("om_check",      "o_om",           "p_om"),
+    "start_over":              ("so_check",      None,             "p_so"),
+    "precision":               ("prec_combo",    "o_prec",         "p_prec"),
+    "prefix":                  ("prefix_edit",   None,             "p_prefix"),
+    "budget":                  ("budget_spin",   "o_budget",       "p_budget"),
+    "tess":                    ("tess_edit",     "o_tess",         "p_tess"),
+    "resources":               ("res_group",     "o_res_group",    "p_res_group"),
+    "advanced":                ("adv_group",     "o_adv_group",    "p_adv_group"),
+}
+# the phase-space options of the 'Phase-space options' group, then the expert ones of the Advanced group (P.label keys)
+PS_OPTIONS = ("vertex_mass", "volume_weighted", "caustics")
+EXPERT_OPTIONS = ("caustic_cusps", "linear_deposit")
+
+
+def field_label(name: str, label: str) -> str:
+    """A field's name in the run tabs: the Explore tab's (grids.FIELD_LABELS: 'density ρ/ρ̄', 'T-web class'),
+    else runspec's."""
+    return G.FIELD_LABELS.get(name[:-2] if name.endswith("_a") else name, label)
 
 
 class TabsMixin:
     # ================================================================ shared data panel
     def _build_data(self) -> QWidget:
-        g = QGroupBox("Data")
+        """The data panel every tab shares: the data root (with Setup…), and for the Grids and Plots tabs the
+        simulation and its snapshots. No title: the tab bar above it says what it serves."""
+        g = QGroupBox()
         f = QFormLayout(g)
         self._data_form = f
         self.root_edit = QLineEdit()
         self.root_edit.editingFinished.connect(self._root_changed)
-        f.addRow("Data root", _dir_row(self.root_edit, self._browse_root))
+        root = _dir_row(self.root_edit, self._browse_root)
+        self.setup_btn = QPushButton(L["setup"])
+        self.setup_btn.setToolTip("Data folder, building the programs, the TNG API key, and the demo")
+        self.setup_btn.clicked.connect(lambda: self.run_setup())
+        root.addWidget(self.setup_btn)
+        f.addRow("Data root", root)
         self.sim_combo = QComboBox()
         self.sim_combo.currentTextChanged.connect(self._sim_changed)
         f.addRow("Simulation", self.sim_combo)
@@ -40,16 +94,13 @@ class TabsMixin:
         self.snap_list.setMaximumHeight(190)
         self.snap_list.itemChanged.connect(self._changed)
         f.addRow("Snapshots", self.snap_list)
-        sel = QHBoxLayout()
-        self.all_btn, self.none_btn, self.mark_btn = QPushButton("All"), QPushButton("None"), QPushButton()
+        self.all_btn, self.none_btn, self.mark_btn = QPushButton(L["select_all"]), QPushButton(L["select_none"]), \
+            QPushButton()
         self.all_btn.clicked.connect(lambda: self._select_snaps("all"))
         self.none_btn.clicked.connect(lambda: self._select_snaps("none"))
         self.mark_btn.clicked.connect(lambda: self._select_snaps("mark"))
-        for b in (self.all_btn, self.none_btn, self.mark_btn):
-            sel.addWidget(b)
-        sel.addStretch(1)
-        self._snap_buttons = sel
-        f.addRow("", sel)
+        self._snap_buttons = button_row(self.all_btn, self.none_btn, self.mark_btn)
+        f.addRow("", self._snap_buttons)
         return g
 
     # ================================================================ Data tab
@@ -82,15 +133,14 @@ class TabsMixin:
         self.d_table.setMinimumHeight(230)
         self.d_table.itemChanged.connect(self._changed)
         v.addWidget(self.d_table, 1)        # grows with the window (else ten rows above empty space)
-        sel = QHBoxLayout()
-        for label, mode in (("All", "all"), ("None", "none"), ("Not merged", "missing")):
-            b = QPushButton(label)
+        buttons = []
+        for key, mode in (("select_all", "all"), ("select_none", "none"), ("select_not_merged", "missing")):
+            b = QPushButton(L[key])
             b.clicked.connect(lambda _=False, m=mode: self._select_data(m))
-            sel.addWidget(b)
+            buttons.append(b)
         self.d_other = QLineEdit(placeholderText="add snapshots, e.g. 59 72")
         self.d_other.editingFinished.connect(self._add_data_snapshots)
-        sel.addWidget(self.d_other, 1)
-        v.addLayout(sel)
+        v.addLayout(button_row(*buttons, field=self.d_other))
         self.d_whole = _note()
         v.addWidget(self.d_whole)
         col.addWidget(g, 1)
@@ -101,11 +151,11 @@ class TabsMixin:
         self.d_dl_gc = QCheckBox("Group catalogues")
         self.d_dl_tree = QCheckBox("Merger trees (whole simulation)")
         self.d_dl_ics = QCheckBox("Initial conditions (whole simulation)")
-        for cb, tip in ((self.d_dl_snap, "For the ticked snapshots"),
+        for cb, text in ((self.d_dl_snap, "For the ticked snapshots"),
                         (self.d_dl_gc, "For the ticked snapshots"),
                         (self.d_dl_tree, "One set for the whole simulation"),
                         (self.d_dl_ics, "One set for the whole simulation")):
-            cb.setToolTip(tip)
+            cb.setToolTip(text)
             cb.toggled.connect(self._changed)
             v.addWidget(cb)
         col.addWidget(g)
@@ -117,13 +167,13 @@ class TabsMixin:
         self.d_mg_tree = QCheckBox("Merger trees")
         self.d_mg_ics = QCheckBox("Initial conditions")
         self.d_delete = QCheckBox("Delete the raw chunks after a verified merge")
-        for cb, tip in ((self.d_mg_snap, "Writes combined_NNN.hdf5 (h-free units)"),
+        for cb, text in ((self.d_mg_snap, "Writes combined_NNN.hdf5 (h-free units)"),
                         (self.d_mg_gc, "Writes combined_fof_subhalo_tab_NNN.hdf5"),
                         (self.d_mg_tree, "Writes combined_tree_extended.hdf5"),
                         (self.d_mg_ics, "Writes combined_ics.hdf5"),
                         (self.d_delete, "The chunks are the only copy of the fields the merge drops "
                                         "(potential, Subfind densities)")):
-            cb.setToolTip(tip)
+            cb.setToolTip(text)
             cb.toggled.connect(self._changed)
             v.addWidget(cb)
         col.addWidget(g)
@@ -212,13 +262,13 @@ class TabsMixin:
     # ================================================================ presets
     def _preset_group(self, target: str) -> QGroupBox:
         """'Start from': the built-in and saved presets for the Grids ('grids') or Custom snapshot ('custom') job."""
-        g = QGroupBox("Start from a preset")
+        g = QGroupBox(L["preset"])
         v = QVBoxLayout(g)
         row = QHBoxLayout()
         combo = QComboBox()
         combo.setToolTip("Sets the grid, fields and options below; everything stays editable")
-        save = QPushButton("Save as preset…")
-        delete = QPushButton("Delete")
+        save = QPushButton(L["save_preset"])
+        delete = QPushButton(L["delete_preset"])
         row.addWidget(combo, 1)
         row.addWidget(save)
         row.addWidget(delete)
@@ -238,7 +288,7 @@ class TabsMixin:
         keep = combo.currentData()
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem("choose…", "")
+        combo.addItem(L["choose_preset"], "")
         for name in P.preset_names(self.user_presets):
             combo.addItem(name, name)
         combo.setCurrentIndex(max(combo.findData(keep), 0))
@@ -302,90 +352,135 @@ class TabsMixin:
             for t in ("grids", "custom"):
                 self._fill_presets(t)
 
+    # ================================================================ the run tabs' shared groups
+    def _shared(self, tab: str, role: str):
+        """A run tab's widget of a shared role (SHARED_WIDGETS), by the tab's own attribute name."""
+        name = SHARED_WIDGETS[role][RUN_TABS.index(tab)]
+        return getattr(self, name) if name else None
+
+    def _set_shared(self, tab: str, role: str, widget):
+        name = SHARED_WIDGETS[role][RUN_TABS.index(tab)]
+        if name:
+            setattr(self, name, widget)
+
+    def _tab_estimator(self, tab: str) -> str:
+        """The estimator a run tab's choices apply to now: from its radio, not its spec (an estimator switch changes
+        the deposit combo before _read_widgets); the Pipeline runs PS-DTFE."""
+        if tab == "grids":
+            return "ps" if self.ps_radio.isChecked() else "dtfe"
+        if tab == "custom":
+            return "ps" if self.o_ps.isChecked() else "dtfe"
+        return "ps"
+
+    def _estimator_group(self, tab: str, title: str, *first_rows) -> QGroupBox:
+        """The deposit, the grid row and the GPU tick of a run tab, after its own first rows (the Grids tab's
+        estimator choice)."""
+        g = group(title, *first_rows)
+        deposit = QComboBox()
+        for key in ("sampled", "exact"):
+            deposit.addItem(P.label(key), key)
+        self._deposit_texts(deposit, True, force=True)
+        row, combo, cells, nsub = grid_row(self, self._changed)
+        gpu = QCheckBox(P.label("gpu"))
+        option_tip(gpu, "gpu")
+        gpu.toggled.connect(self._changed)
+        gpu.toggled.connect(lambda _c: self._gpu_set_by_hand(gpu))
+        # (a 2D custom run has no GPU: _deposit_changed asks for the dimensions)
+        deposit.currentIndexChanged.connect(
+            lambda _i: self._deposit_changed(deposit, gpu, self._tab_estimator(tab),
+                                             self.custom.dim if tab == "custom" else 3))
+        g.form.addRow("Deposit", deposit)
+        g.form.addRow("Grid", row)
+        g.form.addRow("", gpu)
+        for role, w in (("deposit", deposit), ("grid", combo), ("grid_cells", cells), ("nsub", nsub), ("gpu", gpu)):
+            self._set_shared(tab, role, w)
+        return g
+
+    def _ps_options_group(self, tab: str) -> QGroupBox:
+        """The phase-space options of a run tab (its expert ones are in the Advanced group)."""
+        g = QGroupBox(L["ps_options"])
+        v = QVBoxLayout(g)
+        for key in PS_OPTIONS:
+            cb = QCheckBox(P.label(key))
+            option_tip(cb, key)
+            cb.toggled.connect(self._changed)
+            v.addWidget(cb)
+            self._set_shared(tab, key, cb)
+        self._set_shared(tab, "ps_group", g)
+        return g
+
+    def _advanced_group(self, tab: str, *extra) -> Collapsible:
+        """The expert options of a run tab, folded (P.LABELS 'advanced'): the cusps and the linear density, then the
+        tab's own 'extra' (key, tick box) pairs. The summary names the ticked ones."""
+        boxes = []
+        for key in EXPERT_OPTIONS:
+            cb = QCheckBox(P.label(key))
+            option_tip(cb, key)
+            cb.toggled.connect(self._changed)
+            self._set_shared(tab, key, cb)
+            boxes.append((key, cb))
+        _exclusive(self._shared(tab, "linear_deposit"), self._shared(tab, "volume_weighted"))
+        boxes += list(extra)
+
+        def summary():
+            on = [P.ADVANCED_SHORT[k] for k, cb in boxes if cb.isChecked()]
+            return ("on: " + ", ".join(on)) if on else L["all_off"]
+        g = advanced_group(L["advanced"], f"{tab}.advanced", self._section_settings(), summary,
+                           *[("", cb) for _key, cb in boxes])
+        self._set_shared(tab, "advanced", g)
+        return g
+
+    def _section_settings(self):
+        """Where the folded groups keep whether they are open: the launcher's settings, when it remembers."""
+        return self.settings if self.remember else None
+
+    def _update_summaries(self):
+        for tab in RUN_TABS:
+            for role in ("resources", "advanced"):
+                g = self._shared(tab, role)
+                if g is not None:
+                    g.update_summary()
+
     # ================================================================ Grids tab
     def _build_grids_tab(self) -> QWidget:
         col = QVBoxLayout()
         col.addWidget(self._preset_group("grids"))
-        g = QGroupBox("Estimator and grid")
-        f = QFormLayout(g)
         est = QHBoxLayout()
         self.ps_radio = QRadioButton("PS-DTFE (phase space)")
         self.dtfe_radio = QRadioButton("DTFE (standard)")
         grp = QButtonGroup(self)
         grp.addButton(self.ps_radio)
         grp.addButton(self.dtfe_radio)
-        # before _changed (slots run in connection order): the deposit choice follows the estimator
-        self.ps_radio.toggled.connect(lambda on: self._estimator_switched(self.deposit_combo, on))
-        self.ps_radio.toggled.connect(self._changed)
         est.addWidget(self.ps_radio)
         est.addWidget(self.dtfe_radio)
         est.addStretch(1)
-        f.addRow("Estimator", est)
-        self.deposit_combo = QComboBox()
-        self.deposit_combo.addItem(P.label("sampled"), "sampled")
-        self.deposit_combo.addItem(P.label("exact"), "exact")
-        self.deposit_combo.setItemData(0, P.tooltip("sampled"), Qt.ToolTipRole)
-        self.deposit_combo.setItemData(1, P.tooltip("exact"), Qt.ToolTipRole)
-        # the estimator from the radio, not the spec: an estimator switch changes the combo before _read_widgets
-        self.deposit_combo.currentIndexChanged.connect(
-            lambda _i: self._deposit_changed(self.deposit_combo, self.gpu_check,
-                                             "ps" if self.ps_radio.isChecked() else "dtfe"))
-        f.addRow("Deposit", self.deposit_combo)
-        gr = QHBoxLayout()
-        self.grid_combo = _grid_combo(self)
-        self.grid_combo.currentTextChanged.connect(self._changed)
-        gr.addWidget(self.grid_combo)
-        gr.addWidget(QLabel("³ cells    sub-samples per axis"))
-        self.nsub_spin = QSpinBox(minimum=1, maximum=6)
-        self.nsub_spin.valueChanged.connect(self._changed)
-        gr.addWidget(self.nsub_spin)
-        gr.addStretch(1)
-        f.addRow("Grid", gr)
-        self.gpu_check = QCheckBox(P.label("gpu"))
-        self.gpu_check.setToolTip(P.tooltip("gpu"))
-        self.gpu_check.toggled.connect(self._changed)
-        self.gpu_check.toggled.connect(lambda _c: self._gpu_set_by_hand(self.gpu_check))
-        f.addRow("", self.gpu_check)
-        col.addWidget(g)
+        col.addWidget(self._estimator_group("grids", L["estimator_grid"], ("Estimator", est)))
+        # after the group (slots run in connection order): the deposit choice follows the estimator, then _changed
+        self.ps_radio.toggled.connect(lambda on: self._estimator_switched(self.deposit_combo, on))
+        self.ps_radio.toggled.connect(self._changed)
 
         g, self.field_checks = self._fields_group()
         self.fields_box = g
         self.fields_note = _note()
         g.layout().addWidget(self.fields_note, g.layout().rowCount(), 0, 1, 3)      # below the threshold row
         col.addWidget(g)
+        col.addWidget(self._ps_options_group("grids"))
 
-        self.ps_group = QGroupBox("Phase-space options")
-        v = QVBoxLayout(self.ps_group)
-        self.vm_check = QCheckBox(P.label("vertex_mass"))
-        self.vw_check = QCheckBox(P.label("volume_weighted"))
-        self.ca_check = QCheckBox(P.label("caustics"))
-        self.cu_check = QCheckBox(P.label("caustic_cusps"))
-        self.ld_check = QCheckBox(P.label("linear_deposit"))
-        for cb, key in ((self.vm_check, "vertex_mass"), (self.vw_check, "volume_weighted"),
-                        (self.ca_check, "caustics"), (self.cu_check, "caustic_cusps"), (self.ld_check, "linear_deposit")):
-            cb.setToolTip(P.tooltip(key))
-            cb.toggled.connect(self._changed)
-            v.addWidget(cb)
-        _exclusive(self.ld_check, self.vw_check)
-        col.addWidget(self.ps_group)
-
-        self.slice_group = QGroupBox("Hi-res slice (point evaluation)")
+        self.slice_group = QGroupBox(L["slice"])
         f = QFormLayout(self.slice_group)
         self.plane_combo = QComboBox()
         self.plane_combo.currentIndexChanged.connect(self._changed)
         f.addRow("Sample points", self.plane_combo)
         self.vg_check = QCheckBox(P.label("slice_vel_grad"))
-        self.vg_check.setToolTip(P.tooltip("slice_vel_grad"))
+        option_tip(self.vg_check, "slice_vel_grad")
         self.vg_check.toggled.connect(self._changed)
         f.addRow("", self.vg_check)
         self.pc_combo = _app._pts_conventions_combo(self._changed)       # PS-DTFE: the plane's conventions
         f.addRow(P.label("pts_conventions"), self.pc_combo)
         col.addWidget(self.slice_group)
 
-        g, (self.part_spin, self.conc_spin, self.scratch_edit, self.prefix_edit,
-            self.pt_check, self.prec_combo, self.budget_spin, self.tess_edit, self.om_check,
-            self.so_check) = self._resources_group()
-        col.addWidget(g)
+        col.addWidget(self._resources_group("grids"))
+        col.addWidget(self._advanced_group("grids"))
         col.addStretch(1)
         w = QWidget()
         w.setLayout(col)
@@ -465,30 +560,27 @@ class TabsMixin:
                                     "PS-DTFE: the sampled deposit, its production setting")
 
     @staticmethod
-    def _deposit_texts(combo: QComboBox, ps: bool):
-        """the deposit choice in the words of the estimator it applies to (the same two settings)"""
-        for i, key in enumerate(("sampled", "exact")):
-            k = key if ps else key + "_dtfe"
-            if combo.itemText(i) != P.label(k):
-                combo.setItemText(i, P.label(k))
-                combo.setItemData(i, P.tooltip(k) if ps else P.tooltip(k, "DTFE"), Qt.ToolTipRole)
+    def _deposit_texts(combo: QComboBox, ps: bool, force: bool = False):
+        """the deposit choice in the words of the estimator it applies to (the same two settings): each item's
+        tooltip the short one, the combo's What's This both whole descriptions"""
+        binary = "PS-DTFE" if ps else "DTFE"
+        keys = [key if ps else key + "_dtfe" for key in ("sampled", "exact")]
+        if not force and all(combo.itemText(i) == P.label(k) for i, k in enumerate(keys)):
+            return
+        for i, k in enumerate(keys):
+            combo.setItemText(i, P.label(k))
+            combo.setItemData(i, P.short_tooltip(k, binary), Qt.ToolTipRole)
+        combo.setWhatsThis("\n\n".join(f"{P.label(k)}\n{P.tooltip(k, binary)}" for k in keys))
 
-    def _fields_group(self, title: str = "Fields") -> tuple[QGroupBox, dict[str, QCheckBox]]:
+    def _fields_group(self, title: str = L["fields"]) -> tuple[QGroupBox, dict[str, QCheckBox]]:
         g = QGroupBox(title)
-        grid = QGridLayout(g)
-        checks: dict[str, QCheckBox] = {}
-        for i, (name, label) in enumerate(rs.PS_FIELDS):
-            cb = QCheckBox(label)
-            cb.toggled.connect(self._changed)
-            checks[name] = cb
-            grid.addWidget(cb, i // 3, i % 3)
-        for c in range(3):                  # equal columns: the last one must not be starved of width
-            grid.setColumnStretch(c, 1)
+        grid, checks = field_grid([(name, field_label(name, label)) for name, label in rs.PS_FIELDS], 3, self._changed)
+        g.setLayout(grid)
         row = QHBoxLayout()                 # the T-web / V-web eigenvalue threshold: only with a web class ticked
         lam = QDoubleSpinBox(minimum=0.0, maximum=10.0, decimals=2, singleStep=0.05, value=rs.LAMBDA_TH_DEFAULT)
-        lam.setToolTip("λ_th of the T-web / V-web classes: an eigenvalue above it counts as collapsing (a void "
-                       "has none, a wall one, a filament two, a node three). 0.3 is the scripts' default; the "
-                       "binary alone would use 0.")
+        tip(lam, "λ_th of the T-web / V-web classes: an eigenvalue above it counts as collapsing.\n"
+                 "0.3 is the scripts' default; the binary alone would use 0.",
+            "A void has no eigenvalue above λ_th, a wall one, a filament two, a node three.")
         lam.valueChanged.connect(self._changed)
         row.addWidget(QLabel("T-web / V-web threshold λ_th"))
         row.addWidget(lam)
@@ -504,9 +596,13 @@ class TabsMixin:
         web_on()
         return g, checks
 
-    def _resources_group(self):
-        g = QGroupBox("Resources and output")
-        f = QFormLayout(g)
+    def _resources_group(self, tab: str) -> Collapsible:
+        """A run tab's partitioning, memory, precision and output options, folded to a one-line summary
+        (_resources_summary). The Custom snapshot tab has no output prefix (its output is named in its Output group)
+        and no start-over tick (a Custom run never resumes)."""
+        g = Collapsible(L["resources"], f"{tab}.resources", self._section_settings(),
+                        lambda: self._resources_summary(tab))
+        f = g.form
         part = QSpinBox(minimum=0, maximum=8)
         part.setSpecialValueText("auto")
         part.setSuffix("³ partitions")
@@ -521,55 +617,92 @@ class TabsMixin:
         scratch.editingFinished.connect(self._changed)
         f.addRow("Scratch directory", _dir_row(scratch, lambda: self._browse_scratch(scratch)))
         ptri = QCheckBox(P.label("parallel_triangulation"))
-        ptri.setToolTip(P.tooltip("parallel_triangulation"))
+        option_tip(ptri, "parallel_triangulation")
         ptri.toggled.connect(self._changed)
         f.addRow("", ptri)
         # K1: the partitions merged in index order, so two identical runs give bit-identical grids
         ordered = QCheckBox(P.label("ordered_merge"))
-        ordered.setToolTip(P.tooltip("ordered_merge"))
+        option_tip(ordered, "ordered_merge")
         ordered.toggled.connect(self._changed)
         f.addRow("", ordered)
-        # a killed partitioned run's checkpoint is resumed by the next run of the same job; this starts
-        # it over instead (the only way out when the resume is refused: other settings, an incomplete checkpoint).
-        # The Custom tab hides it: a Custom run never resumes.
-        start_over = QCheckBox("Start over: do not resume a killed run's checkpoint")
-        start_over.setToolTip("A partitioned run that was killed keeps a checkpoint of its finished partitions, and the "
-                              "next run of the same job continues from it. Ticked, the run starts from the beginning "
-                              "and replaces the checkpoint (PS_RESUME=0; standard DTFE: DTFE_RESUME=0): needed when "
-                              "the settings changed since, as the program then refuses to resume.")
-        start_over.toggled.connect(self._changed)
-        f.addRow("", start_over)
+        widgets = {"partition": part, "concurrent": conc, "scratch": scratch, "parallel_triangulation": ptri,
+                   "ordered_merge": ordered}
+        if SHARED_WIDGETS["start_over"][RUN_TABS.index(tab)]:
+            # a killed partitioned run's checkpoint is resumed by the next run of the same job; this starts it over
+            # instead (the only way out when the resume is refused: other settings, an incomplete checkpoint)
+            start_over = QCheckBox("Start over: do not resume a killed run's checkpoint")
+            tip(start_over, "Ticked, the run starts from the beginning and replaces the checkpoint of a killed run\n"
+                            "(PS_RESUME=0; standard DTFE: DTFE_RESUME=0).",
+                "A partitioned run that was killed keeps a checkpoint of its finished partitions, and the next run of "
+                "the same job continues from it. Starting over is needed when the settings changed since, as the "
+                "program then refuses to resume.")
+            start_over.toggled.connect(self._changed)
+            f.addRow("", start_over)
+            widgets["start_over"] = start_over
         prec = QComboBox()
         prec.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)   # its long double-precision text
         prec.setMinimumContentsLength(24)       # else the tab gets wider than the pane: the '…' buttons get cut off
         for key in rs.PRECISIONS:
             prec.addItem(rs.PRECISION_TEXT[key], key)
-        prec.setToolTip("Which pair of programs runs: the single-precision one (the default), or the "
-                        "double-precision pair, which keeps every position, density and field in float64 from "
-                        "the input read onward (TNG stores its coordinates in double) and writes float64 grids, "
-                        "at about twice the memory. Setup builds the pair.")
+        tip(prec, "Which pair of programs runs: single precision (the default), or the double-precision pair\n"
+                  "(float64 from the input read onward, about twice the memory). Setup builds the pair.",
+            "The double-precision pair keeps every position, density and field in float64 from the input read "
+            "onward (TNG stores its coordinates in double) and writes float64 grids.")
         prec.currentIndexChanged.connect(self._changed)
         f.addRow("Precision", prec)
-        prefix = QLineEdit()
-        prefix.editingFinished.connect(self._changed)
-        f.addRow("Output prefix", prefix)
+        widgets["precision"] = prec
+        if SHARED_WIDGETS["prefix"][RUN_TABS.index(tab)]:
+            prefix = QLineEdit()
+            prefix.editingFinished.connect(self._changed)
+            f.addRow("Output prefix", prefix)
+            widgets["prefix"] = prefix
         budget = QDoubleSpinBox(minimum=0.0, maximum=4096.0, decimals=0, singleStep=4.0)
         budget.setSpecialValueText("auto (free memory)")
-        budget.setSuffix(" GB")
-        budget.setToolTip("The memory the auto-tuner plans the partitions and concurrency for "
-                          "(DTFE_MEM_BUDGET_GB). Auto: what is free when the run starts. Set it lower to leave room "
-                          "for other work, higher when you know the memory will be free (it may swap).")
+        tip(budget, "The memory the auto-tuner plans the partitions and concurrency for (DTFE_MEM_BUDGET_GB).\n"
+                    "Auto: what is free when the run starts.",
+            "Set it lower to leave room for other work, higher when you know the memory will be free (it may "
+            "swap).")
         budget.valueChanged.connect(self._changed)
-        f.addRow("Memory budget", budget)
+        f.addRow(*labelled_row("Memory budget", budget, " GB"))
         tess = QLineEdit()
         tess.setPlaceholderText("none: triangulate every run")
-        tess.setToolTip("Reuse the Delaunay tessellation of an identical earlier run (the binary's tessellation "
-                        "cache): the "
-                        "dominant fixed cost of a rerun with other fields, grids or sample points (measured "
-                        "10.9 s -> 4.6 s). A LOCAL folder (iCloud is refused); about 0.15 KB per vertex of disk.")
+        tip(tess, "Reuse the Delaunay tessellation of an identical earlier run (the tessellation cache):\n"
+                  "a LOCAL folder (iCloud is refused); about 0.15 KB per vertex of disk.",
+            "The tessellation is the dominant fixed cost of a rerun with other fields, grids or sample points "
+            "(measured 10.9 s -> 4.6 s).")
         tess.editingFinished.connect(self._changed)
         f.addRow("Tessellation cache", _dir_row(tess, lambda: self._browse_dir(tess, "Tessellation cache folder")))
-        return g, (part, conc, scratch, prefix, ptri, prec, budget, tess, ordered, start_over)
+        widgets.update(budget=budget, tess=tess)
+        for sb in (part, conc, budget):     # macOS draws a spin box's 'auto' text against its left edge: some room
+            sb.setMinimumWidth(sb.sizeHint().width() + 8)
+        for role, w in widgets.items():
+            self._set_shared(tab, role, w)
+        self._set_shared(tab, "resources", g)
+        return g
+
+    def _resources_summary(self, tab: str) -> str:
+        """The folded Resources group's one line: 'auto plan · 4 partitions in flight · 40 GB budget …'."""
+        w = lambda role: self._shared(tab, role)            # noqa: E731
+        part, conc = w("partition"), w("concurrent")
+        parts = [L["auto_plan"] if not part.value() else f"{part.value()}{part.suffix()}",
+                 L["auto_concurrency"] if not conc.value() else
+                 f"{conc.value()} partition{'s' if conc.value() != 1 else ''} in flight"]
+        if w("budget").value():
+            parts.append(f"{w('budget').value():g} GB budget")
+        parts.append("double precision" if w("precision").currentData() == "double" else "single precision")
+        if w("scratch").text().strip():
+            parts.append("grids on scratch disk")
+        if w("prefix") is not None and w("prefix").text().strip():
+            parts.append(f"prefix {w('prefix').text().strip()}")
+        if w("tess").text().strip():
+            parts.append("tessellation cache")
+        if w("parallel_triangulation").isChecked():
+            parts.append("parallel triangulation")
+        if not w("ordered_merge").isChecked():
+            parts.append("merge in finishing order")
+        if w("start_over") is not None and w("start_over").isChecked():
+            parts.append("start over")
+        return " · ".join(parts)
 
     # ================================================================ Custom snapshot tab
     def _build_own_tab(self) -> QWidget:
@@ -587,10 +720,10 @@ class TabsMixin:
         self.o_dim = QComboBox()
         for d in rs.DIMS:
             self.o_dim.addItem(rs.DIM_TEXT[d], d)
-        self.o_dim.setToolTip("3D, or 2D for a snapshot in a plane (its coordinates have two columns): the 2D "
-                              "programs DTFE-2d and PS-DTFE-2d run it, on the CPU, with every field (the 2D "
-                              "T-web classes: 0 void, 1 filament, 2 node). Set from the file when you choose one "
-                              "(HDF5 and text files say which).")
+        tip(self.o_dim, "3D, or 2D for a snapshot in a plane (its coordinates have two columns).\n"
+                        "Set from the file when you choose one (HDF5 and text files say which).",
+            "The 2D programs DTFE-2d and PS-DTFE-2d run a 2D snapshot, on the CPU, with every field (the 2D T-web "
+            "classes: 0 void, 1 filament, 2 node).")
         self.o_dim.currentIndexChanged.connect(self._changed)
         f.addRow("Dimensions", self.o_dim)
         un = QHBoxLayout()
@@ -609,13 +742,13 @@ class TabsMixin:
         un.addStretch(1)
         f.addRow("Length unit", un)
         self.o_periodic = QCheckBox(P.label("periodic"))
-        self.o_periodic.setToolTip(P.tooltip("periodic", "DTFE"))
+        option_tip(self.o_periodic, "periodic", "DTFE")
         self.o_periodic.toggled.connect(self._changed)
         f.addRow("", self.o_periodic)
         self.o_alpha = QDoubleSpinBox(minimum=0.0, maximum=50.0, decimals=1, singleStep=0.5, value=3.0)
         self.o_alpha.setSuffix(" mean particle spacings")
         self.o_alpha.setSpecialValueText("whole convex hull")
-        self.o_alpha.setToolTip(P.tooltip("alpha_shape"))
+        option_tip(self.o_alpha, "alpha_shape")
         self.o_alpha.valueChanged.connect(self._changed)
         f.addRow("Alpha shape", self.o_alpha)
         self.o_snap_form = f
@@ -655,86 +788,41 @@ class TabsMixin:
         self.o_lag_box.setLayout(lg)
         f.addRow("Lagrangian", self.o_lag_box)
         self.o_scalar = QLineEdit(placeholderText="none (e.g. Potential)")
-        self.o_scalar.setToolTip(P.tooltip("scalar"))
+        option_tip(self.o_scalar, "scalar")
         self.o_scalar.editingFinished.connect(self._changed)
         f.addRow("Per-particle value", self.o_scalar)
         col.addWidget(g)
 
         col.addWidget(self._preset_group("custom"))
-        g = QGroupBox("Grid and fields")
-        f = QFormLayout(g)
-        gr = QHBoxLayout()
-        self.o_grid = _grid_combo(self)
-        self.o_grid.currentTextChanged.connect(self._changed)
-        gr.addWidget(self.o_grid)
-        self.o_grid_cells = QLabel("³ cells    sub-samples per axis")
-        gr.addWidget(self.o_grid_cells)
-        self.o_nsub = QSpinBox(minimum=1, maximum=6)
-        self.o_nsub.valueChanged.connect(self._changed)
-        gr.addWidget(self.o_nsub)
-        gr.addStretch(1)
-        f.addRow("Grid", gr)
-        self.o_deposit = QComboBox()
-        self.o_deposit.addItem(P.label("sampled"), "sampled")
-        self.o_deposit.addItem(P.label("exact"), "exact")
-        self.o_deposit.setItemData(0, P.tooltip("sampled"), Qt.ToolTipRole)
-        self.o_deposit.setItemData(1, P.tooltip("exact"), Qt.ToolTipRole)
-        self.o_deposit.currentIndexChanged.connect(lambda _i: self._deposit_changed(self.o_deposit, self.o_gpu,
-                                                                                    "ps" if self.o_ps.isChecked()
-                                                                                    else "dtfe", self.custom.dim))
-        f.addRow("Deposit", self.o_deposit)
-        self.o_gpu = QCheckBox(P.label("gpu"))
-        self.o_gpu.setToolTip(P.tooltip("gpu"))
-        self.o_gpu.toggled.connect(lambda _c: self._gpu_set_by_hand(self.o_gpu))
-        self.o_vm = QCheckBox(P.label("vertex_mass"))
-        self.o_vm.setToolTip(P.tooltip("vertex_mass"))
-        self.o_vw = QCheckBox(P.label("volume_weighted"))
-        self.o_vw.setToolTip(P.tooltip("volume_weighted"))
-        self.o_ca = QCheckBox(P.label("caustics"))
-        self.o_ca.setToolTip(P.tooltip("caustics"))
-        self.o_cu = QCheckBox(P.label("caustic_cusps"))
-        self.o_cu.setToolTip(P.tooltip("caustic_cusps"))
-        self.o_ld = QCheckBox(P.label("linear_deposit"))
-        self.o_ld.setToolTip(P.tooltip("linear_deposit"))
-        for cb in (self.o_gpu, self.o_vm, self.o_vw, self.o_ca, self.o_cu, self.o_ld):
-            cb.toggled.connect(self._changed)
-            f.addRow("", cb)
-        _exclusive(self.o_ld, self.o_vw)
-        col.addWidget(g)
+        col.addWidget(self._estimator_group("custom", L["grid_deposit"]))
+        col.addWidget(self._ps_options_group("custom"))
         g = QGroupBox("Points and window")
         f = QFormLayout(g)
         self.o_points = QLineEdit(placeholderText="none: the grid only")
-        self.o_points.setToolTip(P.tooltip("sample_points"))
+        option_tip(self.o_points, "sample_points")
         self.o_points.editingFinished.connect(self._changed)
         f.addRow("Sample points", _dir_row(self.o_points, lambda: (self._browse_file(self.o_points, "Sample points file"),
                                                                     self._changed())))
         self.o_pvg = QCheckBox(P.label("slice_vel_grad"))
-        self.o_pvg.setToolTip(P.tooltip("slice_vel_grad"))
+        option_tip(self.o_pvg, "slice_vel_grad")
         self.o_pvg.toggled.connect(self._changed)
         f.addRow("", self.o_pvg)
         self.o_pc = _app._pts_conventions_combo(self._changed)           # PS-DTFE: the points' conventions
         f.addRow(P.label("pts_conventions"), self.o_pc)
         self.o_window = QLineEdit(placeholderText="none: the whole grid")
-        self.o_window.setToolTip(P.tooltip("window") + "\n\nGive x0 x1 y0 y1 z0 z1 in Mpc (2D: four numbers).")
+        option_tip(self.o_window, "window", more="\n\nGive x0 x1 y0 y1 z0 z1 in Mpc (2D: four numbers).")
         self.o_window.editingFinished.connect(self._changed)
         f.addRow("Window (Mpc)", self.o_window)
         self.o_sdens = QComboBox()
         self.o_sdens.addItem("DTFE interpolation of the vertex densities (default)", "dtfe")
         self.o_sdens.addItem("geometric: the tetrahedron's mass over its volume", "geometric")
-        self.o_sdens.setToolTip(P.tooltip("stream_density"))
+        option_tip(self.o_sdens, "stream_density")
         self.o_sdens.currentIndexChanged.connect(self._changed)
         f.addRow("Stream density", self.o_sdens)
-        self.o_pstream = QCheckBox(P.label("per_stream"))
-        self.o_pstream.setToolTip(P.tooltip("per_stream"))
-        self.o_pids = QCheckBox(P.label("per_stream_ids"))
-        self.o_pids.setToolTip(P.tooltip("per_stream_ids"))
-        for cb in (self.o_pstream, self.o_pids):
-            cb.toggled.connect(self._changed)
-            f.addRow("", cb)
         hr = QHBoxLayout()
         self.o_halo = QDoubleSpinBox(minimum=0.0, maximum=1e7, decimals=0, singleStep=100.0)
         self.o_halo.setSpecialValueText("off")
-        self.o_halo.setToolTip(P.tooltip("halo_release"))
+        option_tip(self.o_halo, "halo_release")
         self.o_halo.valueChanged.connect(self._changed)
         hr.addWidget(self.o_halo)
         hr.addStretch(1)
@@ -748,9 +836,9 @@ class TabsMixin:
         g = QGroupBox("More options")
         f = QFormLayout(g)
         self.o_extra = QLineEdit(placeholderText="options the tab has no control for, as on a command line")
-        self.o_extra.setToolTip("Any of the program's options the tab has no control for, typed as on a command "
-                                "line (see the program's help): they go after the tab's own, and an option the "
-                                "tab sets already is reported, not passed twice.")
+        tip(self.o_extra, "Any of the program's options the tab has no control for, typed as on a command line\n"
+                          "(see the program's help): they go after the tab's own.",
+            "An option the tab sets already is reported, not passed twice.")
         self.o_extra.editingFinished.connect(self._changed)
         f.addRow("Extra options", self.o_extra)
         col.addWidget(g)
@@ -764,14 +852,16 @@ class TabsMixin:
         self.o_name.editingFinished.connect(self._changed)
         f.addRow("Name", self.o_name)
         col.addWidget(g)
-        g, (self.o_part, self.o_conc, self.o_scratch, _prefix, self.o_pt, self.o_prec,
-            self.o_budget, self.o_tess, self.o_om, _start_over) = self._resources_group()
-        for wid in (_prefix, _start_over):
-            wid.hide()
-            lab = g.layout().labelForField(wid)     # an addRow("", ...) row may have none
-            if lab is not None:
-                lab.hide()
-        col.addWidget(g)
+        col.addWidget(self._resources_group("custom"))
+        # the sample points' expert outputs (the points' group enables them with the points)
+        self.o_pstream = QCheckBox(P.label("per_stream"))
+        option_tip(self.o_pstream, "per_stream")
+        self.o_pids = QCheckBox(P.label("per_stream_ids"))
+        option_tip(self.o_pids, "per_stream_ids")
+        for cb in (self.o_pstream, self.o_pids):
+            cb.toggled.connect(self._changed)
+        col.addWidget(self._advanced_group("custom", ("per_stream", self.o_pstream),
+                                           ("per_stream_ids", self.o_pids)))
         col.addStretch(1)
         w = QWidget()
         w.setLayout(col)
@@ -860,10 +950,10 @@ class TabsMixin:
         f.addRow(P.label("pts_conventions"), self.p_pc)
         slab = QHBoxLayout()
         self.p_planes = QSpinBox(minimum=1, maximum=256)
-        self.p_planes.setToolTip("Sampling planes spread across a slab, which the figures' 'slab' projection averages "
-                                 "(the planes option of make_image_plane.py). 1 = one crisp zero-thickness cross-section. "
-                                 "A handful of planes ghosts every inclined structure (one displaced copy per plane): "
-                                 f"use 1, or at least {rs.PLANE_GHOSTING_MIN} for a smooth projection.")
+        tip(self.p_planes, "Sampling planes spread across a slab, which the figures' 'slab' projection averages.\n"
+                           f"1 = one crisp cross-section; else at least {rs.PLANE_GHOSTING_MIN} for a smooth projection.",
+            "The planes option of make_image_plane.py. One plane is a zero-thickness cross-section. A handful of "
+            "planes ghosts every inclined structure (one displaced copy per plane).")
         self.p_planes.valueChanged.connect(self._changed)
         self.p_thick = QDoubleSpinBox(minimum=0.01, maximum=1000.0, decimals=2, singleStep=0.5)
         self.p_thick.setSuffix(" Mpc")
@@ -877,10 +967,10 @@ class TabsMixin:
         f.addRow("Slab", slab)
         sub = QHBoxLayout()
         self.p_super = QSpinBox(minimum=1, maximum=8)
-        self.p_super.setToolTip("K: evaluate K×K sample points per pixel and average them (the supersample option of "
-                                "make_image_plane.py). The map then estimates the pixel-AREA mean, what the deposit grid "
-                                "reports, instead of a point sample: no aliasing where structure is finer than a pixel "
-                                "(halo cores, thin caustics). Costs K² points.")
+        tip(self.p_super, "K: evaluate K×K sample points per pixel and average them (costs K² points):\n"
+                          "the pixel's mean, as the deposit grid reports it, without aliasing.",
+            "The supersample option of make_image_plane.py. The map then estimates the pixel-AREA mean instead of a "
+            "point sample: no aliasing where structure is finer than a pixel (halo cores, thin caustics).")
         self.p_super.valueChanged.connect(self._changed)
         self.p_super_note = QLabel()
         sub.addWidget(self.p_super)
@@ -888,65 +978,29 @@ class TabsMixin:
         sub.addStretch(1)
         f.addRow("Sub-samples per pixel axis", sub)
         self.p_window = QLineEdit(placeholderText="whole box: u0 u1 v0 v1")
-        self.p_window.setToolTip("Image only this part of the plane: horizontal u0..u1 and vertical v0..v1 in Mpc "
-                                 "(the u0, u1, v0, v1 options of make_image_plane.py); blank = the whole box. Pixels "
-                                 "stay square, so the vertical pixel count follows the window's aspect.")
+        tip(self.p_window, "Image only this part of the plane: horizontal u0..u1 and vertical v0..v1 in Mpc;\n"
+                           "blank = the whole box.",
+            "The u0, u1, v0, v1 options of make_image_plane.py. Pixels stay square, so the vertical pixel count follows "
+            "the window's aspect.")
         self.p_window.editingFinished.connect(self._changed)
         f.addRow("Window (Mpc)", self.p_window)
         col.addWidget(g)
 
-        g, self.p_fields = self._fields_group("Grids")
+        # the grid, deposit and GPU in a group of their own (as the Grids tab's 'Estimator and grid'): added to the
+        # fields' grid layout they shared a row with its T-web threshold row
+        tip_short = "run_ps_pipeline.sh hands these to run_ps_dtfe.sh exactly as a Grids job does."
+        tip_more = ("Left alone, the scripts' own defaults are the production settings (GPU, vertex masses, "
+                    "volume-weighted velocities).")
+        g = self._estimator_group("pipeline", L["grid_deposit"])
+        tip(g, tip_short, tip_more)
+        col.addWidget(g)
+
+        g, self.p_fields = self._fields_group()
         self.p_fields_box = g
-        gr = QHBoxLayout()
-        self.p_grid = _grid_combo(self)
-        self.p_grid.currentTextChanged.connect(self._changed)
-        gr.addWidget(QLabel("Grid"))
-        gr.addWidget(self.p_grid)
-        gr.addWidget(QLabel("³ cells    sub-samples per axis"))
-        self.p_nsub = QSpinBox(minimum=1, maximum=6)
-        self.p_nsub.setToolTip("nSub³ sample points per cell for the sampled deposit")
-        self.p_nsub.valueChanged.connect(self._changed)
-        gr.addWidget(self.p_nsub)
-        gr.addStretch(1)
-        g.layout().addLayout(gr, 3, 0, 1, 3)
-        dep = QHBoxLayout()
-        self.p_deposit = QComboBox()
-        self.p_deposit.addItem(P.label("sampled"), "sampled")
-        self.p_deposit.addItem(P.label("exact"), "exact")
-        self.p_deposit.setItemData(0, P.tooltip("sampled"), Qt.ToolTipRole)
-        self.p_deposit.setItemData(1, P.tooltip("exact"), Qt.ToolTipRole)
-        self.p_deposit.currentIndexChanged.connect(lambda _i: self._deposit_changed(self.p_deposit, self.p_gpu))
-        dep.addWidget(QLabel("Deposit"))
-        dep.addWidget(self.p_deposit, 1)
-        g.layout().addLayout(dep, 4, 0, 1, 3)
-        self.p_gpu = QCheckBox(P.label("gpu"))
-        self.p_gpu.setToolTip(P.tooltip("gpu"))
-        self.p_gpu.toggled.connect(self._changed)
-        self.p_gpu.toggled.connect(lambda _c: self._gpu_set_by_hand(self.p_gpu))
-        g.layout().addWidget(self.p_gpu, 5, 0, 1, 3)
-        g.setToolTip("run_ps_pipeline.sh hands these to run_ps_dtfe.sh exactly as a Grids job does; left alone, "
-                     "the scripts' own defaults are the production settings (GPU, vertex masses, volume-weighted "
-                     "velocities)")
+        tip(g, tip_short, tip_more)
         col.addWidget(g)
-
-        g = QGroupBox("Phase-space options")
-        v = QVBoxLayout(g)
-        self.p_vm = QCheckBox(P.label("vertex_mass"))
-        self.p_vw = QCheckBox(P.label("volume_weighted"))
-        self.p_ca = QCheckBox(P.label("caustics"))
-        self.p_cu = QCheckBox(P.label("caustic_cusps"))
-        self.p_ld = QCheckBox(P.label("linear_deposit"))
-        for cb, key in ((self.p_vm, "vertex_mass"), (self.p_vw, "volume_weighted"),
-                        (self.p_ca, "caustics"), (self.p_cu, "caustic_cusps"), (self.p_ld, "linear_deposit")):
-            cb.setToolTip(P.tooltip(key))
-            cb.toggled.connect(self._changed)
-            v.addWidget(cb)
-        _exclusive(self.p_ld, self.p_vw)
-        col.addWidget(g)
-
-        g, (self.p_part, self.p_conc, self.p_scratch, self.p_prefix, self.p_pt, self.p_prec,
-            self.p_budget, self.p_tess, self.p_om, self.p_so) = self._resources_group()
-        col.addWidget(g)
+        col.addWidget(self._ps_options_group("pipeline"))
+        col.addWidget(self._resources_group("pipeline"))
 
         g = QGroupBox("Run")
         v = QVBoxLayout(g)
@@ -962,7 +1016,7 @@ class TabsMixin:
             v.addWidget(cb)
         self.p_render_box = QWidget()
         rf = QFormLayout(self.p_render_box)
-        rf.setContentsMargins(24, 0, 0, 0)
+        rf.setContentsMargins(INDENT, 0, 0, 0)
         self.p_rfields = QLineEdit(placeholderText="all the run wrote: " + ", ".join(rs.POINTEVAL_FIELDS))
         self.p_rfields.setToolTip("A comma-separated subset of the point-evaluated fields (the fields option of "
                                   "plot_pointeval.py); blank = every field the run wrote")
@@ -981,29 +1035,30 @@ class TabsMixin:
         self.p_rproject.currentIndexChanged.connect(self._changed)
         rf.addRow("Projection", self.p_rproject)
         self.p_rsmooth = QDoubleSpinBox(minimum=0.0, maximum=1000.0, decimals=1, singleStep=0.5)
-        self.p_rsmooth.setSuffix(" px")
-        self.p_rsmooth.setToolTip("Gaussian smoothing of every map, in output pixels (the smooth option of "
-                                  "plot_pointeval.py); 0 = none. Also suppresses the smoothed gradient companions below.")
         self.p_rsmooth.valueChanged.connect(self._changed)
-        rf.addRow("Smoothing", self.p_rsmooth)
+        rf.addRow(*labelled_row("Smoothing", self.p_rsmooth, " px",
+                                "Gaussian smoothing of every map in output pixels (plot_pointeval.py's smooth); 0 = none.\n"
+                                "It also suppresses the smoothed gradient companions below."))
         self.p_rsmoothd = QDoubleSpinBox(minimum=0.0, maximum=1000.0, decimals=1, singleStep=1.0)
         self.p_rsmoothd.setSuffix(" px")
-        self.p_rsmoothd.setToolTip("The gradient maps (divergence, shear, vorticity, density gradient) are piecewise "
-                                   "constant per tetrahedron and look faceted; each also gets a Gaussian-smoothed "
-                                   "companion figure at this width (the smooth-derivatives option of plot_pointeval.py); "
-                                   "0 = none")
+        tip(self.p_rsmoothd, "Each gradient map also gets a Gaussian-smoothed companion figure at this width;\n"
+                             "0 = none.",
+            "The gradient maps (divergence, shear, vorticity, density gradient) are piecewise constant per tetrahedron "
+            "and look faceted. The smooth-derivatives option of plot_pointeval.py.")
         self.p_rsmoothd.valueChanged.connect(self._changed)
         rf.addRow("Gradient maps also smoothed at", self.p_rsmoothd)
+        v.addWidget(self.p_render_box)
+        col.addWidget(g)
+        # the render step's expert options (enabled with the render step)
         self.p_rfixed = QCheckBox("Fixed density range of the grid maps (0.1 .. 1e4)")
-        self.p_rfixed.setToolTip("The fixed-range option of plot_pointeval.py: side-by-side comparison with the grid "
-                                 "slice maps; clips ~26% of a z=0 image to the darkest colour")
+        tip(self.p_rfixed, "The fixed-range option of plot_pointeval.py: comparable side by side with the grid maps;\n"
+                           "clips ~26% of a z=0 image to the darkest colour")
         self.p_rforce = QCheckBox("Re-render figures newer than their data")
         self.p_rforce.setToolTip("The force option of plot_pointeval.py")
         for cb in (self.p_rfixed, self.p_rforce):
             cb.toggled.connect(self._changed)
-            rf.addRow("", cb)
-        v.addWidget(self.p_render_box)
-        col.addWidget(g)
+        col.addWidget(self._advanced_group("pipeline", ("render_fixed_range", self.p_rfixed),
+                                           ("render_force", self.p_rforce)))
         col.addStretch(1)
         w = QWidget()
         w.setLayout(col)
@@ -1043,11 +1098,10 @@ class TabsMixin:
         self.pl_prefix.editingFinished.connect(self._changed)
         f.addRow("Grid prefix", self.pl_prefix)
         self.pl_smooth = QDoubleSpinBox(minimum=0.0, maximum=50.0, decimals=1, singleStep=0.5)
-        self.pl_smooth.setSuffix(" cells")
         self.pl_smooth.valueChanged.connect(self._changed)
-        f.addRow("Smoothing", self.pl_smooth)
+        f.addRow(*labelled_row("Smoothing", self.pl_smooth, " cells"))
         self.pl_froot = QLineEdit(placeholderText=f"default: {rs.FIGURES_ROOT}")
-        self.pl_froot.setToolTip(f"Where the point-evaluated maps go (the other figure sets write under {rs.FIGURES_ROOT})")
+        self.pl_froot.setToolTip(f"Where the point-evaluated maps go (the other figure sets write under\n{rs.FIGURES_ROOT})")
         self.pl_froot.editingFinished.connect(self._changed)
         f.addRow("Figures folder", _dir_row(self.pl_froot, lambda: (self._browse_dir(self.pl_froot, "Figures folder"),
                                                                      self._changed())))
@@ -1060,10 +1114,10 @@ class TabsMixin:
     def _figure_page(self, fs: rs.FigureSet) -> QWidget:
         page = QWidget()
         f = QFormLayout(page)
-        f.setContentsMargins(4, 4, 4, 4)
+        f.setContentsMargins(GROUP_MARGIN, GROUP_MARGIN, GROUP_MARGIN, GROUP_MARGIN)
         about = QLabel(fs.about)
         about.setWordWrap(True)
-        about.setToolTip(f"python/{fs.script}, {_app.PER_TEXT[fs.per]}  →  {rs.FIGURES_ROOT / fs.output}")
+        about.setToolTip(f"python/{fs.script}, {_app.PER_TEXT[fs.per]}\n→  {rs.FIGURES_ROOT / fs.output}")
         f.addRow(about)
         rows: dict[str, QHBoxLayout] = {}
         for o in fs.opts:
@@ -1099,22 +1153,24 @@ class TabsMixin:
                 w = QLineEdit(placeholderText=o.help)
                 w.editingFinished.connect(self._changed)
             if o.help:
-                w.setToolTip(o.help)
+                tip_auto(w, o.help)
             self.opt_widgets[(fs.key, o.key)] = (o, w)
             if not o.row:
-                f.addRow("" if o.kind == "bool" else o.label, w)
+                if o.kind == "bool":
+                    f.addRow(w)        # the whole row: next to the label column a long text widened the tab
+                else:
+                    f.addRow(o.label, w)
                 continue
             # options sharing a row title sit side by side under it, each with its short label
             if o.row not in rows:
-                line = QHBoxLayout()
-                line.setContentsMargins(0, 0, 0, 0)
+                line = flush(QHBoxLayout())
                 rows[o.row] = line
                 title = QLabel(o.row)
                 f.addRow(title, line)
             line = rows[o.row]
             if o.kind != "bool":
                 lab = QLabel(o.label)
-                lab.setToolTip(o.help)
+                tip_auto(lab, o.help)
                 line.addWidget(lab)
             if o.kind == "text":
                 w.setPlaceholderText("")

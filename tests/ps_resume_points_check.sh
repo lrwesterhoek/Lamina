@@ -21,7 +21,7 @@
 #       while k deposits) tags the records with the right partition: killed and resumed, byte-identical
 #   R10 '--scratch-dir': the 'points.<i>' files go to the scratch folder with the checkpoint (config.sh
 #       ps_checkpoint_dir's name), and the resume from there is byte-identical
-#   R9  GPU builds only: a killed '--ps-gpu' run resumes to the same points (the point evaluation is CPU work)
+#   R9  GPU builds only: a killed '--gpu' run resumes to the same points (the point evaluation is CPU work)
 # Usage: tests/ps_resume_points_check.sh [--no-build]   (--no-build is accepted and ignored: the binaries are used as built)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -153,12 +153,12 @@ OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/s" "${C[@]}" --max-concurrent 4 --scratch
 [ "$ok1" = 0 ] && [ "$rc2" = 0 ] && [ ! -e "$SCK" ] && same "$TMP/ref" "$TMP/s"
 check "R10 the points.<i> files beside the checkpoint in the scratch folder ($(basename "$SCK")); resumed byte-identical" $?
 
-echo ">> R9: a killed --ps-gpu run"
+echo ">> R9: a killed --gpu run"
 OBJ=o_ps; precision_double && OBJ=o_ps_d
 if [ ! -d "$OBJ" ] || [ -f "$OBJ/.gpu_mode_off" ] || [ ! -f "$OBJ/.gpu_mode_metal" ]; then
     echo "  SKIP R9: $OBJ is not a Metal GPU build"
 else
-    G=("${C[@]}" --max-concurrent 1 --ordered-merge --ps-gpu)
+    G=("${C[@]}" --max-concurrent 1 --ordered-merge --gpu)
     "$BIN" "$SNAP" "$TMP/gref" "${G[@]}" > "$TMP/gref.log" 2>&1 || { echo "FAIL: gref (see $TMP/gref.log)"; exit 1; }
     DTFE_TEST_EXIT_AFTER_PARTITIONS=12 "$BIN" "$SNAP" "$TMP/g" "${G[@]}" > "$TMP/g1.log" 2>&1; rc1=$?
     "$BIN" "$SNAP" "$TMP/g" "${G[@]}" --resume > "$TMP/g2.log" 2>&1; rc2=$?

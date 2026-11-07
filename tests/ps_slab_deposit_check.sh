@@ -79,7 +79,7 @@ echo ">> serial vs slab runs ..."
 case_ sampled_nsub1   "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --avg-subsamples 1
 case_ sampled_nsub3   "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --avg-subsamples 3
 case_ linear          "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --ps-linear-deposit
-case_ exact           "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --ps-exact-deposit
+case_ exact           "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --exact-average
 case_ vertex_mass     "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --ps-vertex-mass
 case_ volume_weighted "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --ps-volume-weighted
 case_ caustics        "${BIN}" "${SNAP}"    --periodic --field density --ps-caustics
@@ -89,14 +89,14 @@ case_ window          "${BIN}" "${SNAP}"    --periodic --field density velocity 
                                             --ps-window 10 47.5 20 80 0 100
 # (a partition reports its slab mode at verbose 3 only)
 VERBOSE=3 case_ partition "${BIN}" "${SNAP}" --periodic "${FIELDS[@]}" --partition 2 2 2 --max-concurrent 1
-NSLABS=3 case_ three_slabs "${BIN}" "${SNAP}" --periodic "${FIELDS[@]}" --ps-exact-deposit
+NSLABS=3 case_ three_slabs "${BIN}" "${SNAP}" --periodic "${FIELDS[@]}" --exact-average
 
 # the 2D build (single precision only: the 2D set has no double pair in the battery)
 BIN2D="${PS_BIN}-2d"
 if ! precision_double && [ -x "${BIN2D}" ]; then
     "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP_2D}" --n 48 --box "${BOX}" --dim 2 \
         --crossed-waves >/dev/null
-    GRID=96 case_ two_d "${BIN2D}" "${SNAP_2D}" --periodic --field density velocity --ps-exact-deposit
+    GRID=96 case_ two_d "${BIN2D}" "${SNAP_2D}" --periodic --field density velocity --exact-average
 else
     if precision_double; then echo "   SKIP  2D (double mode: the 2D set has no double pair in the battery)"
     else echo "   SKIP  2D (no ${BIN2D}: make DTFE PS-DTFE DIM=2)"; fi

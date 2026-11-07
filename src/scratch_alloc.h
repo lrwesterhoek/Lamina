@@ -49,6 +49,10 @@ namespace ScratchAlloc
     // an EMPTY vector -- and a scratch mapping made in this thread meanwhile is handed out as anonymous memory
     // (zero pages cost next to nothing there) and moved onto its never-written scratch file when the scope ends:
     // the same zeros, nothing written. Thread-local; a no-op where scratch is not armed, and in libDTFE (stub).
+    // macOS only: elsewhere a no-op too. The macOS memory compressor keeps those zero pages for next to nothing;
+    // Linux keeps every one resident until the remap, the largest grid at once -- the memory --scratch-dir is there
+    // to save (measured, Ubuntu 24.04 in a 2 GB container: a 3.1 GB grid was OOM-killed inside the scope; without
+    // it, its zeros go through the file's page cache, which the kernel writes back and frees).
     class ZeroFillScope
     {
     public:

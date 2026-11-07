@@ -23,7 +23,8 @@ import matplotlib.colors as colors
 from scipy.stats import pearsonr
 from dtfelib import fields as dtfe
 from dtfelib.figures import save_figure
-from dtfelib import FieldSet, make_parser, sim_dir, add_ps_gradient_arg, mean_field_wanted
+from dtfelib import FieldSet, make_parser, snapdir_path, add_ps_gradient_arg, mean_field_wanted
+from dtfelib import snapshot_series, run_series, report_series
 import config
 from dtfelib import figures as style
 
@@ -34,7 +35,6 @@ OUTPUT_DIR = config.figures_path('veldiv')
 AXIS_UNITS = config.AXIS_UNITS
 VELOCITY_UNITS = config.VELOCITY_UNITS
 LINEAR_REGIME_RANGE = (-0.5, 1.0)
-SMOOTHING_SIGMA = config.RAW_MAPS_SIGMA
 
 H0 = config.COSMOLOGY['H0']
 OMEGA_M0 = config.COSMOLOGY['Omega_m']
@@ -46,9 +46,7 @@ RNG = np.random.default_rng(config.CORRELATION_SEED)
 
 SLICE_PLANES_TO_PLOT = [0, 1, 2]
 
-DPI = config.DPI
 
-SNAPSHOT_TO_REDSHIFT = config.SNAPSHOT_TO_REDSHIFT
 
 SLICE_PLANES = config.SLICE_PLANES
 
@@ -122,7 +120,7 @@ def create_density_plot(delta_slice, slice_dim, box_size, delta_norm, redshift, 
 
     plane_name = plane_info['name']
     filepath = output_path / f"density_contrast_{plane_name}_z{redshift:.2f}.png"
-    save_figure(fig, filepath, dpi=DPI, bbox_inches='tight', facecolor='white')
+    save_figure(fig, filepath, bbox_inches='tight', facecolor='white')
     plt.close(fig)
 
 def create_velocity_divergence_plot(velDiv_slice, slice_dim, box_size, velDiv_norm, redshift, output_path):
@@ -148,7 +146,7 @@ def create_velocity_divergence_plot(velDiv_slice, slice_dim, box_size, velDiv_no
 
     plane_name = plane_info['name']
     filepath = output_path / f"velocity_divergence_{plane_name}_z{redshift:.2f}.png"
-    save_figure(fig, filepath, dpi=DPI, bbox_inches='tight', facecolor='white')
+    save_figure(fig, filepath, bbox_inches='tight', facecolor='white')
     plt.close(fig)
 
 def create_linear_fit_plot(delta_sample, velDiv_sample, slope_reg, slope_theory, 
@@ -184,7 +182,7 @@ def create_linear_fit_plot(delta_sample, velDiv_sample, slope_reg, slope_theory,
     
     plt.tight_layout()
     filepath = output_path / f"linear_fit_z{redshift:.2f}.png"
-    save_figure(fig, filepath, dpi=DPI, bbox_inches='tight', facecolor='white')
+    save_figure(fig, filepath, bbox_inches='tight', facecolor='white')
     plt.close(fig)
 
 def create_residual_plot(residual_slice, slice_dim, box_size, residual_norm, redshift, output_path):
@@ -209,7 +207,7 @@ def create_residual_plot(residual_slice, slice_dim, box_size, residual_norm, red
 
     plane_name = plane_info['name']
     filepath = output_path / f"residual_field_{plane_name}_z{redshift:.2f}.png"
-    save_figure(fig, filepath, dpi=DPI, bbox_inches='tight', facecolor='white')
+    save_figure(fig, filepath, bbox_inches='tight', facecolor='white')
     plt.close(fig)
 
 def _ps_divergence_source(args):
@@ -222,7 +220,7 @@ def _ps_divergence_source(args):
 def process_snapshot(snapshot, redshift, args):
     print(f"\nProcessing snapshot {snapshot} (z={redshift:.2f})")
 
-    snapdir = sim_dir(args.sim, args.data_root) / f'snapdir_{snapshot}'   # flat or per-family layout
+    snapdir = snapdir_path(args.sim, snapshot, args.data_root)   # flat or per-family layout
 
     try:
         try:
@@ -395,7 +393,7 @@ def create_evolution_summary(results):
         ax1.grid(True, alpha=0.3)
         plt.tight_layout()
         save_figure(fig, output_path / 'slope_evolution.png',
-                    dpi=DPI, bbox_inches='tight')
+                    bbox_inches='tight')
         plt.close(fig)
 
         fig, ax2 = plt.subplots(figsize=style.FIGSIZE['single'])
@@ -407,7 +405,7 @@ def create_evolution_summary(results):
         ax2.grid(True, alpha=0.3)
         plt.tight_layout()
         save_figure(fig, output_path / 'slope_deviation_evolution.png',
-                    dpi=DPI, bbox_inches='tight')
+                    bbox_inches='tight')
         plt.close(fig)
 
         evolution_data_file = output_path / 'evolution_data.txt'
@@ -431,32 +429,21 @@ def main():
     parser = make_parser("Velocity divergence vs density contrast analysis across snapshots.")
     # this script iterates ALL snapshots by default; --snap restricts to one.
     # --smooth defaults to the configured raw-maps sigma (behavior-preserving).
-    parser.set_defaults(snap=None, smooth=SMOOTHING_SIGMA)
+    parser.set_defaults(snap=None, smooth=config.RAW_MAPS_SIGMA)
     add_ps_gradient_arg(parser)
     args = parser.parse_args()
 
-    snapshot_items = list(SNAPSHOT_TO_REDSHIFT.items())
-    if args.snap is not None:
-        key = f"{args.snap:03d}"
-        if key not in SNAPSHOT_TO_REDSHIFT:
-            parser.error(f"snapshot {key} not in config.SNAPSHOT_TO_REDSHIFT")
-        snapshot_items = [(key, SNAPSHOT_TO_REDSHIFT[key])]
+    snapshot_items = snapshot_series(args)
+    if args.snap is not None and snapshot_items[0][0] not in config.SNAPSHOT_TO_REDSHIFT:
+        parser.error(f"snapshot {snapshot_items[0][0]} not in config.SNAPSHOT_TO_REDSHIFT")
 
     print("Starting velocity divergence-density analysis")
     print(f"Processing {len(snapshot_items)} snapshots")
 
-    results = []
-    failed_snapshots = []
-
-    for snapshot, redshift in snapshot_items:
-        try:
-            r = process_snapshot(snapshot, redshift, args)
-        except Exception as e:
-            print(f"Failed to process snapshot {snapshot} (z={redshift:.2f}): {str(e)}")
-            failed_snapshots.append((snapshot, redshift))
-            continue
-        if r is not None:                       # a skipped snapshot (no grids) or a failed one is not processed
-            results.append(r)
+    outcomes, failed_snapshots = run_series(snapshot_items,
+                                            lambda snapshot, redshift: process_snapshot(snapshot, redshift, args),
+                                            catch=True)
+    results = [r for r in outcomes if r is not None]   # a skipped snapshot (no grids) or a failed one is not processed
     processed_count = len(results)
 
     if processed_count > 1:
@@ -465,14 +452,8 @@ def main():
         except Exception as e:
             print(f"Failed to create evolution summary: {str(e)}")
 
-    print("\nAnalysis complete")
-    print(f"Successfully processed: {processed_count}/{len(snapshot_items)} snapshots")
-    
-    if failed_snapshots:
-        print(f"Failed snapshots: {len(failed_snapshots)}")
-        for snapshot, redshift in failed_snapshots:
-            print(f"  Snapshot {snapshot} (z={redshift:.2f})")
-    
+    report_series(processed_count, len(snapshot_items), failed_snapshots, listed=True)
+
     print(f"\nOutput saved to: {OUTPUT_DIR}/")
 
 if __name__ == "__main__":

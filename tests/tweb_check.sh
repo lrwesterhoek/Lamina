@@ -8,10 +8,10 @@
 #  B) a field that depends on x ALONE has T_xx = delta and every other component zero, so each cell's
 #     eigenvalues are {delta, 0, 0}. The phase-space density of a 1D pancake on an UNJITTERED lattice is
 #     such a field: every tetrahedron in a slab between two lattice planes has the same density, and
-#     the slab's faces map to planes x = const. The EXACT deposit (--ps-exact-deposit) integrates that
+#     the slab's faces map to planes x = const. The EXACT deposit (--exact-average) integrates that
 #     field over the cells, so each x-plane of the grid is uniform too (the sampled deposit spreads a
 #     tetrahedron's mass over the samples it happens to hold, which is not); the check verifies it.
-#  C) the classification is the number of eigenvalues above --lambda_th (cells within rounding of the
+#  C) the classification is the number of eigenvalues above --lambda-th (cells within rounding of the
 #     threshold are left out).
 # The 2D builds compute it too (two eigenvalues, {delta, 0} for the 1D field): the same
 # three checks run on a 2D pancake with PS-DTFE-2d and DTFE-2d when they are built (single precision), and
@@ -35,7 +35,7 @@ N="${N:-24}"; GRID="${GRID:-48}"; BOX="${BOX:-100.0}"; TH="${TH:-0.3}"
 N2="${N2:-48}"; GRID2="${GRID2:-96}"     # the 2D pancake: particles and cells per side
 STD="${STD:-1}"                          # 0: skip the standard-DTFE trace check
 STRICT="${STRICT:-1}"                    # 0: the 1D premise and (B) are reported, not required
-PS_ARGS="${PS_ARGS:---ps-exact-deposit}" # the PS-DTFE run's deposit
+PS_ARGS="${PS_ARGS:---exact-average}" # the PS-DTFE run's deposit
 EXTRA="${EXTRA:-}"                       # extra flags for both runs (e.g. --scratch-dir <dir>)
 precision_require "${PS_BIN}" "${DTFE_BIN}"
 TMP="${TWEB_TMP:-${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}}"; mkdir -p "${TMP}"
@@ -65,7 +65,7 @@ run() {  # $1 = binary, $2 = output root, rest = this binary's own flags (RUN_SN
     set +e
     # shellcheck disable=SC2086
     "${bin}" "${RUN_SNAP:-${SNAP}}" "${out}" --grid "${RUN_GRID:-${GRID}}" --periodic --input 105 --MpcUnit 1 \
-        --field density tweb --lambda_th "${TH}" --verbose 1 "$@" ${EXTRA} > "${out}.log" 2>&1
+        --field density tweb --lambda-th "${TH}" --verbose 1 "$@" ${EXTRA} > "${out}.log" 2>&1
     local rc=$?
     set -e
     if [ "$rc" -ne 0 ]; then
@@ -97,7 +97,7 @@ if ! precision_double && [ -x "${PS_BIN}-2d" ] && [ -x "${DTFE_BIN}-2d" ]; then
     fi
     "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${TMP}/tweb_crossed_2d.hdf5" --n "${N2}" --box "${BOX}" \
         --amplitude-factor 0.8 --crossed-waves --dim 2 >/dev/null
-    RUN_SNAP="${TMP}/tweb_crossed_2d.hdf5" RUN_GRID=64 run "${PS_BIN}-2d" "${TMP}/tweb2_cw" --ps-exact-deposit
+    RUN_SNAP="${TMP}/tweb_crossed_2d.hdf5" RUN_GRID=64 run "${PS_BIN}-2d" "${TMP}/tweb2_cw" --exact-average
 else
     if precision_double; then echo "   SKIP  2D (double mode: the 2D set has no double pair in the battery)"
     else echo "   SKIP  2D (no ${PS_BIN}-2d / ${DTFE_BIN}-2d: make DTFE PS-DTFE DIM=2)"; fi

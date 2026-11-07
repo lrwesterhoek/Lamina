@@ -29,7 +29,8 @@
    binaries. PS-DTFE evaluates the multi-stream phase-space fields (one stream per folded
    tetrahedron containing the point); the standard binary evaluates the Eulerian DTFE
    interpolant (exactly one containing tetrahedron, stream count = 0/1 coverage). The
-   implementation lives in CGAL_triangulation/ps_point_eval.cc; the per-triangulation
+   implementation lives in CGAL_triangulation/ps_point_eval.cc (the servers, '--serve', and the
+   occupancy maps in ps_serve.cc, psEstimateMeanStreams in ps_mean_streams.cc); the per-triangulation
    worker -- interpolatePoints_phaseSpace(DT&, User_options&) under PHASE_SPACE,
    interpolatePoints_standard(DT&, User_options&) otherwise -- is declared where the CGAL
    types exist (triangulation.cpp). Everything is a no-op unless --sample-points is given. */
@@ -89,7 +90,7 @@ void   psPointEvalRemoveUnsaved(std::string const &dir, std::vector<char> const 
 // line). The request loop itself, psServe(DT&, User_options&), is declared with the workers.
 void psServeRedirectStdout();
 
-// --serve with --partition: a COMPOSITE server of partition tessellations (ps_point_eval.cc).
+// --serve with --partition: a COMPOSITE server of partition tessellations (ps_serve.cc).
 // DTFE() calls Begin once, AddPartition once per partition (from concurrent OpenMP threads is
 // fine: each writes its own slot), then Run, which answers requests until stdin closes.
 //   partOptions      the partition's own options, exactly as the batch partition loop sets them
@@ -133,7 +134,7 @@ int psOccupancyTouchesWindow(User_options const &partOpts, User_options const &m
 // descriptor)? The batch partition loop then skips the particle selection.
 bool psTessellationCached(User_options const &opts);
 
-// The deposit passes since the last reset that asked for the GPU (--ps-gpu) and ran on the CPU instead
+// The deposit passes since the last reset that asked for the GPU (--gpu) and ran on the CPU instead
 // (ps_interpolation.cc); reset = true also zeroes the count. Each pass warns itself, but the partition
 // loop runs its non-master threads at verbose 0, so DTFE() reports the count after the loop.
 int psGpuFallbacksTaken(bool reset = false);

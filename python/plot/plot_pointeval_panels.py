@@ -60,7 +60,8 @@ def main() -> None:
     p.add_argument("--prefix", required=True, type=Path,
                    help="output root passed to the binary (reads <prefix>.pts_den/.pts_streams)")
     p.add_argument("--plane", required=True, type=Path, help="sidecar JSON from tools/make_image_plane.py")
-    p.add_argument("-o", "--output", type=Path, default=None, help="image path (default <prefix>_pointeval_panels.png)")
+    p.add_argument("-o", "--output", "--out", type=Path, default=None,
+                   help="image path (default <prefix>_pointeval_panels.png)")
     p.add_argument("--panels", default=",".join(PANELS),
                    help=f"comma list from {{{','.join(PANELS)}}} (default all three)")
     p.add_argument("--project", choices=("plane", "mean"), default="plane",

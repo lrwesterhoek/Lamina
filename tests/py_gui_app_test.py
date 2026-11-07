@@ -47,6 +47,7 @@ import grids as G  # noqa: E402
 from PySide6.QtCore import QPointF  # noqa: E402
 from PySide6.QtGui import QAction  # noqa: E402
 from PySide6.QtWidgets import QFormLayout  # noqa: E402
+from app_widgets import tip_lines  # noqa: E402
 import runspec as rs  # noqa: E402
 
 SIM = "GUITEST-1-Dark"
@@ -169,6 +170,7 @@ def main():
         qa.processEvents()
 
         _window(qa, w, spec)
+        _form_widths(qa, w)
         seen, tick = _grids_run(w, sim)
         _plots_run(qa, w)
         _pipeline_run(qa, w, sim)
@@ -213,6 +215,70 @@ def _window(qa, w, spec):
     w._select_snaps("all")
     qa.processEvents()
     check("'All' re-ticks them and re-enables Run", w.spec.snapshots == [50, 99] and w.run_btn.isEnabled())
+
+
+def _form_widths(qa, w):
+    """Every tab's form fits its pane (the forms scroll only vertically: a wider one was cut off at the right edge,
+    the preset row's Delete button with it): folded, and with every group open on a build without the GPU or TBB
+    (whose notes in the ticks' texts once made the Resources group, and so the Grids, Custom snapshot and Pipeline
+    tabs, wider than the pane: 'Grids 746 > 666' where the build stamps were missing), the Custom tab in 2D too.
+    And the Pipeline tab's grid row has a row of its own."""
+    print("form widths:")
+    from PySide6.QtCore import QPoint, QRect
+    from PySide6.QtWidgets import QScrollArea
+    from app_widgets import Collapsible
+    size, tab = w.size(), w.tabs.currentIndex()
+    w.resize(1100, 750)
+    qa.processEvents()
+
+    def too_wide(tabs, tag=""):
+        out = []
+        for i in tabs:
+            w.tabs.setCurrentIndex(i)
+            qa.processEvents()
+            s = w.tabs.widget(i)
+            if isinstance(s, QScrollArea) and s.widget().minimumSizeHint().width() > s.viewport().width():
+                out.append(f"{tag}{w.tabs.tabText(i)} {s.widget().minimumSizeHint().width()} > {s.viewport().width()}")
+        return out
+    wide = too_wide(range(w.tabs.count()))
+    check("every tab's form fits its pane at 1100 px (no right edge cut off)", not wide, "; ".join(wide))
+    groups = w.findChildren(Collapsible)
+    was_open, built = [g.is_open() for g in groups], (rs.tbb_built, rs.gpu_built)
+    rs.tbb_built = rs.gpu_built = lambda *a, **k: False
+    try:
+        for g in groups:
+            g.set_open(True)
+        w.refresh()
+        noted = A.NO_TBB in w.pt_check.text() and A.NO_GPU in w.gpu_check.text() and A.NO_TBB in w.p_pt.text()
+        wide = too_wide(range(w.tabs.count()), "open, no GPU or TBB: ")
+        w.tabs.setCurrentIndex(A.OWN)
+        w.o_dim.setCurrentIndex(w.o_dim.findData(2))
+        qa.processEvents()
+        flat = w.custom.dim == 2 and "3D only" in w.o_pt.text() and "CPU" in w.o_gpu.text()
+        wide += too_wide([A.OWN], "open, 2D: ")
+        w.o_dim.setCurrentIndex(w.o_dim.findData(3))
+    finally:
+        rs.tbb_built, rs.gpu_built = built
+        for g, on in zip(groups, was_open):
+            g.set_open(on)
+        w.refresh()
+        qa.processEvents()
+    check("... and with every group open on a build without the GPU or TBB (the ticks' notes shown), the Custom tab "
+          "in 2D too", groups and noted and flat and not wide and w.custom.dim == 3,
+          "; ".join(wide) or f"{len(groups)} groups, notes {noted}, 2D {flat}")
+    w.tabs.setCurrentIndex(A.TAB_NAMES.index("pipeline"))
+    qa.processEvents()
+
+    def rect(x):
+        return QRect(x.mapTo(w, QPoint(0, 0)), x.size())
+    lam = w.p_fields_box.lambda_spin
+    check("Pipeline: the grid, deposit and GPU have their own group; the grid row and the T-web threshold row "
+          "do not overlap", not w.p_fields_box.isAncestorOf(w.p_grid) and not w.p_fields_box.isAncestorOf(w.p_gpu)
+          and not rect(w.p_grid).intersects(rect(lam)) and not rect(w.p_nsub).intersects(rect(lam)),
+          f"{rect(w.p_grid)} {rect(lam)}")
+    w.resize(size)
+    w.tabs.setCurrentIndex(tab)
+    qa.processEvents()
 
 
 def _grids_run(w, sim):
@@ -961,6 +1027,7 @@ def _layout(qa, w):
             if wd in exempt:
                 continue
             out.append(("tooltip", wd.toolTip()))
+            out.append(("what's this", wd.whatsThis()))
             if isinstance(wd, (QLabel, QAbstractButton)):
                 out.append(("text", wd.text()))
             if isinstance(wd, QGroupBox):
@@ -988,7 +1055,7 @@ def _layout(qa, w):
     bad += visible_texts()
     w.ps_radio.setChecked(True)
     qa.processEvents()
-    check("no '--' in any label, title, tooltip, placeholder, list, table or check message",
+    check("no '--' in any label, title, tooltip, What's This, placeholder, list, table or check message",
           not bad, str(bad[:5]))
 
     w.tabs.setCurrentIndex(A.DATA)
@@ -1020,9 +1087,109 @@ def _layout(qa, w):
     qa.processEvents()
     check("'Hide' hides them again and unticks the menu item",
           w.cmd_box.isHidden() and not w.show_cmds_action.isChecked() and not w.show_commands)
-    check("the options' tooltips are the binary's own --full_help text, in plain prose",
-          w.vm_check.toolTip().startswith("PS-DTFE only") and len(w.vm_check.toolTip()) > 200
-          and "--" not in w.vm_check.toolTip())
+    check("the options' tooltips are the first sentence of the binary's own --full-help text (at most two lines), "
+          "its whole text their What's This, in plain prose",
+          w.vm_check.toolTip().startswith("PS-DTFE only") and tip_lines(w.vm_check.toolTip()) <= 2
+          and w.vm_check.whatsThis().startswith("PS-DTFE only") and len(w.vm_check.whatsThis()) > 200
+          and "--" not in w.vm_check.toolTip() + w.vm_check.whatsThis(), w.vm_check.toolTip())
+    _polish(qa, w)
+
+
+def _polish(qa, w):
+    """The launcher's polish: the tab bar above the data panel, the folded Resources and Advanced groups (their
+    one-line summaries, their state kept by a window that remembers), short tooltips, the shared run-tab groups."""
+    print("polish:")
+    import atexit
+    import json as _json
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QComboBox, QWidget
+    import app_tabs as T
+    from app_widgets import OPEN_KEY, tip_lines
+
+    def y_of(wd):
+        return wd.mapTo(w, QPoint(0, 0)).y()
+    tab0, tops = w.tabs.currentIndex(), []
+    for i in range(w.tabs.count()):
+        w.tabs.setCurrentIndex(i)
+        qa.processEvents()
+        tops.append((w.tab_bar.currentIndex(), y_of(w.tab_bar)))
+    w.tab_bar.setCurrentIndex(A.PLOTS)
+    qa.processEvents()
+    followed = w.tabs.currentIndex() == A.PLOTS
+    w.tabs.setCurrentIndex(A.GRIDS)
+    qa.processEvents()
+    check("the tab bar sits above the data panel, at the same height on every tab, and follows the tabs both ways "
+          "(the tab widget's own bar hidden)",
+          [t for t, _ in tops] == list(range(w.tabs.count())) and len({y for _, y in tops}) == 1 and followed
+          and w.tab_bar.currentIndex() == A.GRIDS and w.tabs.tabBar().isHidden() and y_of(w.tab_bar) < y_of(w.root_edit)
+          and [w.tab_bar.tabText(i) for i in range(w.tab_bar.count())]
+          == [w.tabs.tabText(i) for i in range(w.tabs.count())]
+          and w.tab_bar.tabToolTip(A.OWN) == w.tabs.tabToolTip(A.OWN), str(tops))
+    check("Setup… sits in the data root's row", abs((y_of(w.setup_btn) + w.setup_btn.height() / 2)
+                                                  - (y_of(w.root_edit) + w.root_edit.height() / 2)) < 6
+          and w.setup_btn.text() == "Setup…")
+    groups = [w._shared(t, r) for t in T.RUN_TABS for r in ("resources", "advanced")]
+    check("the three run tabs' Resources and output and Advanced groups start folded; folded, their fields stay in "
+          "the form, not hidden themselves",
+          all(g is not None and not g.is_open() and g.body.isHidden() and not g.summary.isHidden() for g in groups)
+          and not any(x.isHidden() for x in (w.part_spin, w.cu_check, w.ld_check, w.p_pt, w.p_rfixed, w.o_pids)))
+    part, conc = w.part_spin.value(), w.conc_spin.value()
+    w.part_spin.setValue(2)
+    w.conc_spin.setValue(3)
+    qa.processEvents()
+    summ = w.res_group.summary_text()
+    w.part_spin.setValue(part)
+    w.conc_spin.setValue(conc)
+    w.p_rforce.setChecked(True)
+    qa.processEvents()
+    adv = w.p_adv_group.summary_text()
+    w.p_rforce.setChecked(False)
+    qa.processEvents()
+    check("... each with a one-line summary of what it holds",
+          summ.startswith("2³ partitions · 3 partitions in flight") and "--" not in summ
+          and adv == "on: re-render" and w.p_adv_group.summary_text() == "all off"
+          and w.res_group.summary.toolTip() == w.res_group.summary_text(), f"{summ!r} {adv!r}")
+    w.res_group.set_open(True)
+    qa.processEvents()
+    check("... and opens on a click: the fields show", w.res_group.is_open() and w.part_spin.isVisible()
+          and not w.res_group.body.isHidden())
+    w.res_group.set_open(False)
+    folder = tempfile.mkdtemp(prefix="gui_sections_")
+    atexit.register(shutil.rmtree, folder, True)
+    ini = str(Path(folder) / "sections.ini")
+    w1 = A.MainWindow(remember=True, settings=QSettings(ini, QSettings.IniFormat))
+    w1.p_res_group.set_open(True)
+    w1.close()
+    saved = _json.loads(QSettings(ini, QSettings.IniFormat).value(OPEN_KEY, "{}"))
+    w2 = A.MainWindow(remember=True, settings=QSettings(ini, QSettings.IniFormat))
+    w3 = A.MainWindow(remember=False, settings=QSettings(ini, QSettings.IniFormat))
+    check("an opened group is open again at the next start (one settings key); a window that does not remember "
+          "starts folded", saved == {"pipeline.resources": True} and w2.p_res_group.is_open()
+          and not w2.res_group.is_open() and not w3.p_res_group.is_open(), str(saved))
+    w2.close()
+    w3.close()
+    # the shared groups are one table: each role a widget of the right kind on every tab that has it
+    kinds = {r: type(w._shared("grids", r)) for r in T.SHARED_WIDGETS}
+    check("the run tabs' shared widgets come from one table, under each tab's own names",
+          all(w._shared(t, r) is None or type(w._shared(t, r)) is kinds[r] for t in T.RUN_TABS for r in T.SHARED_WIDGETS)
+          and w.o_deposit is w._shared("custom", "deposit") and w.p_fields is w._shared("pipeline", "fields")
+          and w._shared("custom", "start_over") is None and w._shared("custom", "prefix") is None
+          and not w.fields_box.isAncestorOf(w.cu_check) and w.adv_group.isAncestorOf(w.cu_check)
+          and w.adv_group.isAncestorOf(w.ld_check) and w.p_adv_group.isAncestorOf(w.p_rfixed)
+          and w.o_adv_group.isAncestorOf(w.o_pstream))
+    long_tips = []
+    for i in range(A.EXPLORE):
+        page = w.tabs.widget(i).widget()
+        for wd in [page] + page.findChildren(QWidget):
+            texts = [wd.toolTip()] + ([str(wd.itemData(k, 3) or "") for k in range(wd.count())]
+                                      if isinstance(wd, QComboBox) else [])
+            # (a folder shown whole -- the figures root, the data root's simulation folder -- is a location, not prose)
+            long_tips += [t for t in texts if tip_lines(t) > 2 and str(rs.FIGURES_ROOT) not in t
+                          and not (w.root_edit.text() and w.root_edit.text() in t)]
+    check("every tooltip of the job tabs takes at most two lines (the long explanations are What's This)",
+          not long_tips, str(long_tips[:2]))
+    w.tabs.setCurrentIndex(tab0)
+    qa.processEvents()
 
 
 def _presets(qa, w, P):
@@ -1084,16 +1251,16 @@ def _presets(qa, w, P):
     w.dtfe_radio.setChecked(True)
     qa.processEvents()
     check("standard DTFE: switching to it moves the choice to the exact cell average (its production setting), "
-          "ticks the GPU (when built) and puts -e and DTFE_EXACT_AVERAGE=1 on the run_dtfe.sh line",
+          "ticks the GPU (when built) and puts -e and DTFE_EXACT=1 on the run_dtfe.sh line",
           w.deposit_combo.isEnabled() and w.deposit_combo.currentData() == "exact"
           and w.deposit_combo.itemText(w.deposit_combo.findData("exact")) == P.label("exact_dtfe")
           and w.spec.estimator == "dtfe" and w.spec.deposit == "exact" and w.gpu_check.isChecked() == rs.gpu_built("dtfe")
-          and dtfe_e(w.cmd_view.toPlainText()) and "DTFE_EXACT_AVERAGE=1" in w.cmd_view.toPlainText()
+          and dtfe_e(w.cmd_view.toPlainText()) and "DTFE_EXACT=1" in w.cmd_view.toPlainText()
           and not w.nsub_spin.isEnabled(), w.cmd_view.toPlainText())
     w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("sampled"))
     qa.processEvents()
-    check("... the Monte-Carlo average stays selectable: DTFE_EXACT_AVERAGE=0 and no -e",
-          w.spec.deposit == "sampled" and "DTFE_EXACT_AVERAGE=0" in w.cmd_view.toPlainText()
+    check("... the Monte-Carlo average stays selectable: DTFE_EXACT=0 and no -e",
+          w.spec.deposit == "sampled" and "DTFE_EXACT=0" in w.cmd_view.toPlainText()
           and not dtfe_e(w.cmd_view.toPlainText()), w.cmd_view.toPlainText())
     w.gpu_check.setChecked(False)
     w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("exact"))
@@ -1120,7 +1287,7 @@ def _presets(qa, w, P):
     back_ps = (w.spec.deposit, w.deposit_combo.currentData(), w.gpu_check.isChecked())
     w.dtfe_radio.setChecked(True)
     qa.processEvents()
-    back_dtfe = (w.spec.deposit, "DTFE_EXACT_AVERAGE=0" in w.cmd_view.toPlainText())
+    back_dtfe = (w.spec.deposit, "DTFE_EXACT=0" in w.cmd_view.toPlainText())
     w.ps_radio.setChecked(True)
     qa.processEvents()
     check("the deposit choice per estimator: PS-DTFE's exact deposit comes back after a switch to standard DTFE and "
@@ -1190,7 +1357,7 @@ def _custom_snapshot(qa, w, tmp, P):
     w.o_ps.setChecked(True)
     qa.processEvents()
     check("Custom tab: PS-DTFE's exact deposit comes back after a switch to standard DTFE and back",
-          w.custom.estimator == "ps" and w.custom.deposit == "exact" and "--ps-exact-deposit" in w.cmd_view.toPlainText(),
+          w.custom.estimator == "ps" and w.custom.deposit == "exact" and "--exact-average" in w.cmd_view.toPlainText(),
           w.cmd_view.toPlainText())
     w.o_deposit.setCurrentIndex(w.o_deposit.findData("sampled"))
     qa.processEvents()
@@ -2413,7 +2580,7 @@ def _exact_zoom(w, tmp, x, img):
     check("the exact zoom's command for a PERIODIC phase-space run: PS-DTFE on the whole periodic box, deposited "
           "into a window of a virtual grid (the run's cells along the slice axis), the exact deposit, no region cut",
           cmd is not None and cmd[0].endswith("PS-DTFE") and "--periodic" in cmd and "--ps-window" in cmd
-          and "--ps-exact-deposit" in cmd and "--box" not in cmd and "--regionMpc" not in cmd and gi >= 0
+          and "--exact-average" in cmd and "--box" not in cmd and "--regionMpc" not in cmd and gi >= 0
           and cmd[gi + 1 + geo[0]] == str(x.current.n) and all(int(cmd[gi + 1 + a]) >= 64 for a in geo[2])
           and grid_[geo[0]] == 1 and edges is not None, str(cmd))
     check("... which reuses the query server's tessellation cache folder and asks for the progress lines",
@@ -2641,7 +2808,7 @@ def _exact_zoom_partitioned(qa, w, tmp, demo, root, cmd, x, sq):
     geo = x._geometry()
     cmd, _r, _g, _e = x.exact_zoom_command(x.current, geo[0], geo[1], geo[2], (geo[3][0], geo[4][0]), (geo[3][1], geo[4][1]), 64)
     check("the exact zoom's command for a non-periodic phase-space run: PS-DTFE on the whole cloud, a window, the exact deposit",
-          ok and cmd is not None and cmd[0].endswith("PS-DTFE") and "--ps-window" in cmd and "--ps-exact-deposit" in cmd
+          ok and cmd is not None and cmd[0].endswith("PS-DTFE") and "--ps-window" in cmd and "--exact-average" in cmd
           and "--periodic" not in cmd and "--box" not in cmd and "--ps-volume-weighted" in cmd, str(cmd))
     img = w.explore_view.canvas._img
     x.zoom_res.setValue(64)
@@ -2985,7 +3152,7 @@ def two_d_gui(qa, w, tmp):
           and w.o_part.suffix().startswith("²") and "zlo" not in w.o_box.toolTip())
     text = w.cmd_view.toPlainText()
     check("... and the command runs PS-DTFE-2d with the T-web, without the GPU",
-          "PS-DTFE-2d" in text and "--ps-gpu" not in text and "tweb_a" in text and w.run_btn.isEnabled(), text)
+          "PS-DTFE-2d" in text and "--gpu" not in text and "tweb_a" in text and w.run_btn.isEnabled(), text)
     w.run_btn.click()
     dt = wait_idle(w, 300)
     root = w.custom.output_root()
@@ -3057,7 +3224,7 @@ def two_d_gui(qa, w, tmp):
     gi = cmd.index("--grid") if cmd and "--grid" in cmd else -1
     check("the 2D exact zoom's command: PS-DTFE-2d, a 4-number window of a 2-number virtual grid, no GPU",
           cmd is not None and Path(cmd[0]).name == "PS-DTFE-2d" and wi > 0 and cmd[wi + 5] == "--field"
-          and gi > 0 and cmd[gi + 3].startswith("--") and "--ps-gpu" not in cmd and grid_ == [64, 64], str(cmd))
+          and gi > 0 and cmd[gi + 3].startswith("--") and "--gpu" not in cmd and grid_ == [64, 64], str(cmd))
     sq = (img.height() // 4, img.width() // 4, img.height() // 2 - 1, img.width() // 2 - 1)
     ref = region_mean(x, *sq)
     x._dragged(*sq)

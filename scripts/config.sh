@@ -194,10 +194,10 @@ run_lock_release() {
 }
 
 # gpu_build_default <repo root> <binary>: 1 when the Makefile built <binary> (./DTFE, ./DTFE-double, ./PS-DTFE,
-# ./PS-DTFE-double) with a GPU backend, else 0 -- the drivers' default for DTFE_METAL / PS_METAL ('auto': every
+# ./PS-DTFE-double) with a GPU backend, else 0 -- the drivers' default for DTFE_GPU / PS_GPU ('auto': every
 # production grid runs on the GPU, so a driver run without -m does too). The answer is the stamp the
 # Makefile's mode check leaves in the pair's object folder (o, o_d, o_ps, o_ps_d): '.gpu_mode_metal', '_cuda' or
-# '_hip'. The binary itself cannot be asked: '--help' lists --gpu / --ps-gpu in every build and '--version' names no
+# '_hip'. The binary itself cannot be asked: '--help' lists --gpu in every build and '--version' names no
 # backend. NOT the launcher's rule (python/gui/runspec.py gpu_built: any stamp but '.gpu_mode_off'), on purpose: the
 # CI's 'cudaemu' build emulates the CUDA kernels on the CPU, far slower than the CPU path, so it is no GPU here (-m
 # still switches it on). No object folder (binaries copied without their build) = 0. A stale stamp (a binary put
@@ -318,6 +318,40 @@ ps_checkpoint_dir() {
 # They read and set the drivers' own variables where a comment says so: n_str (the snapshot being run, '099'),
 # DATA_DIR, OUTPUT_PREFIX, GRID_SIZE, FIELDS, SCRATCH_DIR, AUTO_TUNE_REPORT, REPO_ROOT and the run-log state of
 # runlog_contract_start.
+#
+# Strictness: the batch drivers (run_dtfe.sh, run_ps_dtfe.sh, run_ps_pipeline.sh, download_snapshots.sh) run under
+# 'set -uo pipefail' -- an unset variable is an error, and a pipeline fails when any part of it fails -- but NOT -e,
+# on purpose: a batch goes on after a failed snapshot (a binary that exits non-zero, a missing input, a refused lock,
+# a failed fetch), counts it and moves to the next, and its exit status says so at the end. Under -e the first failing
+# command would end the whole batch, and so would a '[ ... ] && ...' line whose test is false when it ends a
+# function. So each command whose failure matters is checked where it runs. Everything here must hold under
+# 'set -u' (a value that may be unset is read as "${VAR:-}", an array that may be empty as ${ARR[@]+"${ARR[@]}"}:
+# bash 3.2, macOS's /bin/bash, calls even an empty array unset) and run on bash 3.2: no associative arrays, no ';&'
+# or ';;&', no ${var,,} / ${var^^}, no mapfile / readarray.
+
+# driver_options <own option letters> <handler> "$@": the option loop of run_dtfe.sh, run_ps_dtfe.sh and
+# download_snapshots.sh. The options they share are handled here: -d DATA_DIR (the simulation's own folder),
+# -s SIMULATION and -h (the caller's 'usage', exit 0); an unknown option, or one missing its value, prints getopts'
+# message and the usage and exits 1. Each of the caller's own letters (getopts' spelling: 'g:' takes a value) goes to
+# '<handler> <letter>', with its value in OPTARG. Then the two checks every driver makes after its options (so that -h
+# works without them): the data root (require_data_root) unless -d named the simulation's folder, and the
+# simulation (require_simulation). The caller drops the options afterwards: shift $((OPTIND - 1)).
+driver_options() {
+    local own="$1" handler="$2" opt
+    shift 2
+    OPTIND=1
+    while getopts "d:s:${own}h" opt; do
+        case "${opt}" in
+            d) DATA_DIR="${OPTARG}" ;;
+            s) SIMULATION="${OPTARG}" ;;
+            h) usage; exit 0 ;;
+            "?") usage; exit 1 ;;
+            *) "${handler}" "${opt}" ;;
+        esac
+    done
+    [ -n "${DATA_DIR:-}" ] || require_data_root   # -d names the simulation's folder itself
+    require_simulation
+}
 
 # driver_help_version <script> [its first argument]: '-h' / '--help' prints the script's header (line 2 up to the
 # first blank line, '# ' stripped) and the caller's usage line (its 'usage' function); '--version' prints the
@@ -368,7 +402,7 @@ driver_binary() {
     fi
 }
 
-# gpu_auto_resolve <knob> <binary> [cpu_first]: a GPU knob (DTFE_METAL, PS_METAL) left at 'auto' becomes
+# gpu_auto_resolve <knob> <binary> [cpu_first]: a GPU knob (DTFE_GPU, PS_GPU) left at 'auto' becomes
 # gpu_build_default's answer for <binary> (1 on a GPU build), and gpu_auto the note the start banner adds; a knob set
 # to 0 or 1 is kept and gpu_auto is empty. cpu_first=1 makes 'auto' the CPU on every build: run_ps_dtfe.sh passes
 # PS_EXACT, as PS-DTFE's exact deposit is faster on the CPU on production runs (TNG100-3-Dark z=0 at 512^3:

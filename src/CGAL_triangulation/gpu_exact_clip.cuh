@@ -1,6 +1,6 @@
 /* The exact tetrahedron-cell overlap of the CUDA/HIP backend: the moments of one tetrahedron
    intersected with one axis-aligned grid cell (sweep_moments, order 1 and order 2), plus the small V3
-   vector type and the 3x3 helpers both deposits use. Shared by ps_gpu_cuda.cu (--ps-exact-deposit)
+   vector type and the 3x3 helpers both deposits use. Shared by ps_gpu_cuda.cu (--exact-average)
    and dtfe_gpu_cuda.cu (--exact-average). Device code only; included inside the backends' anonymous
    namespace.
 

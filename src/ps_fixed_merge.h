@@ -88,28 +88,27 @@
 #include "quantities.h"
 #include "user_options.h"
 #include "partition_checkpoint.h"   // the checkpoint's blob list (Checkpointer::blobs)
+#include "scratch_alloc.h"   // zeroAssign: the integer grids' zero fills under '--scratch-dir'
 
 namespace PSFixedMerge
 {
 
-// the scale kinds (the table in the header comment)
-enum Kind { K_ONE = 0, K_WEIGHT, K_MASS, K_VEL_W, K_VEL_M, K_VEL2_M, K_GRAD_W, K_SCAL_W, K_SGRAD_W, K_N };
+// the scale kinds (the table in the header comment): each summed grid's tag in the field list (quantities.h)
+enum Kind { K_ONE = Quantities::SCALE_ONE, K_WEIGHT = Quantities::SCALE_WEIGHT, K_MASS = Quantities::SCALE_MASS,
+            K_VEL_W = Quantities::SCALE_VEL_W, K_VEL_M = Quantities::SCALE_VEL_M, K_VEL2_M = Quantities::SCALE_VEL2_M,
+            K_GRAD_W = Quantities::SCALE_GRAD_W, K_SCAL_W = Quantities::SCALE_SCAL_W, K_SGRAD_W = Quantities::SCALE_SGRAD_W };
 
-// every accumulator addFromSubgrid SUMS ('+='), with its scale kind -- quantities.cc's list, in its order. The names
-// are PartitionCheckpoint::forEachAccumulator's. If you add a summed accumulator there, add it here.
+// every accumulator addFromSubgrid SUMS ('+='), f(info, grid): the field list's FIELD_SUM grids (quantities.h
+// Quantities::forEachField), in its order, with their names, scale kinds (info.scale) and whether a partition fills
+// them (info.madeAfterMerge) -- the one list, so a new summed grid is merged here too
 template<class F>
 inline void forEachSummed(Quantities &q, F &&f)
 {
-    f( "density", K_ONE, q.density );                         f( "velocity", K_VEL_W, q.velocity );
-    f( "velocity_gradient", K_GRAD_W, q.velocity_gradient );  f( "velocity_divergence", K_GRAD_W, q.velocity_divergence );
-    f( "velocity_shear", K_GRAD_W, q.velocity_shear );        f( "velocity_vorticity", K_GRAD_W, q.velocity_vorticity );
-    f( "velocity_std", K_VEL_W, q.velocity_std );             f( "velocity_dispersion", K_VEL2_M, q.velocity_dispersion );
-    f( "scalar", K_SCAL_W, q.scalar );                        f( "scalar_gradient", K_SGRAD_W, q.scalar_gradient );
-    f( "velocity_tweb_eigenvalues", K_ONE, q.velocity_tweb_eigenvalues );
-    f( "velocity_vweb_eigenvalues", K_GRAD_W, q.velocity_vweb_eigenvalues );
-    f( "stream_count", K_ONE, q.stream_count );               f( "tet_touch", K_ONE, q.tet_touch );
-    f( "mass_weight", K_WEIGHT, q.mass_weight );              f( "disp_weight", K_MASS, q.disp_weight );
-    f( "disp_velocity", K_VEL_M, q.disp_velocity );
+    Quantities::forEachField( [&](Quantities::FieldInfo const &fi, auto merge, auto member)
+    {
+        if constexpr ( decltype( merge )::value == Quantities::FIELD_SUM )
+            f( fi, q.*member );
+    } );
 }
 
 // the sum bound (b): an int8 carry over a signed int64 word holds [-2^71 - 2^63, 2^71 - 2^63)
@@ -150,6 +149,7 @@ struct Merge
     unsigned __int128 sumLimit = SUM_LIMIT;   // (b); DTFE_TEST_FXMERGE_SUM_LIMIT=n lowers it to 2^n (the test of (b))
     int sumLimitLog2 = -1;                    // n, or -1
     double peakBytes = 0., liveBytes = 0.;
+    long zeroFillMoves0 = 0;              // ScratchAlloc::scratchZeroFillMoves() when setup began (scratchText)
     std::vector<SavedSlot> loadedState;   // filled by the checkpoint load (restore() checks it)
 
     // the slot of the i-th summed accumulator of side 0 (u) / 1 (a)
@@ -212,16 +212,17 @@ struct Merge
             }
         };
         slots.clear();
+        zeroFillMoves0 = ScratchAlloc::scratchZeroFillMoves();
         for (int side = 0; side < 2; ++side)
-            forEachSummed( side ? a : u, [&](char const *name, int const kind, auto &v)
+            forEachSummed( side ? a : u, [&](Quantities::FieldInfo const &fi, auto &v)
             {
                 using V = typename std::decay<decltype( v )>::type;
                 using T = typename V::value_type;
                 Slot s;
-                s.name = std::string( side ? "a." : "u." ) + name;
-                s.kind = kind;
+                s.name = std::string( side ? "a." : "u." ) + fi.name;
+                s.kind = fi.scale;
                 s.comps = sizeof( T ) / sizeof( Real );
-                s.S = scaleOf( kind );
+                s.S = scaleOf( fi.scale );
                 int e = 0;
                 std::frexp( s.S, &e );   // S in [2^(e-1), 2^e)
                 s.K = 37 - e + shift;    // S * 2^K in [2^36, 2^37)
@@ -231,26 +232,19 @@ struct Merge
                 // memory gate would admit the first partitions with a free-memory reading that does not hold the
                 // 9 B grids yet (the default's Real grids are pre-sized before the loop, so its gate sees them) --
                 // a hand-set --max-concurrent could then overcommit. Not for the grids no partition
-                // fills (derived after the merge); those not pre-sized (the moment weights) still come with their
-                // first values, as the default's do.
-                if ( s.presized > 0 and not derivedAfterMerge( name ) )
+                // fills (derived after the merge: info.madeAfterMerge); those not pre-sized (the moment weights)
+                // still come with their first values, as the default's do. Zero fills through
+                // ScratchAlloc::zeroAssign: under '--scratch-dir' these are scratch mappings, 9 B per component, and
+                // their zeros would otherwise be written back to the disk before any work (scratch_alloc.h)
+                if ( s.presized > 0 and not fi.madeAfterMerge )
                 {
-                    s.w.assign( s.presized * s.comps, 0 );
-                    s.c.assign( s.presized * s.comps, 0 );
+                    ScratchAlloc::zeroAssign( s.w, s.presized * s.comps, int64_t( 0 ) );
+                    ScratchAlloc::zeroAssign( s.c, s.presized * s.comps, int8_t( 0 ) );
                     s.cells = s.presized;
                 }
                 slots.push_back( std::move( s ) );
             } );
         account();
-    }
-
-    // the summed accumulators no partition fills: made after the merge from the summed ones (DTFE.cpp)
-    static bool derivedAfterMerge(char const *name)
-    {
-        for (char const *d : { "velocity_divergence", "velocity_shear", "velocity_vorticity", "velocity_std",
-                               "velocity_tweb_eigenvalues", "velocity_vweb_eigenvalues" })
-            if ( std::strcmp( name, d ) == 0 ) return true;
-        return false;
     }
 
     // the checkpoint's blobs: every slot's words and carries, and the state (registered before beginLoop: a resume
@@ -336,9 +330,9 @@ struct Merge
         bool const isSub = sub.ps_subDims[0] != 0;   // else 'sub' spans the main grid, cell for cell (addFrom)
         if ( not isSub ) dstTotal = std::max( dstTotal, src.size() );
         if ( s.cells == 0 )
-        {
-            s.w.assign( dstTotal * s.comps, 0 );
-            s.c.assign( dstTotal * s.comps, 0 );
+        {   // (zeroAssign: as at setup)
+            ScratchAlloc::zeroAssign( s.w, dstTotal * s.comps, int64_t( 0 ) );
+            ScratchAlloc::zeroAssign( s.c, dstTotal * s.comps, int8_t( 0 ) );
             s.cells = dstTotal;
             account();
         }
@@ -416,7 +410,7 @@ struct Merge
         {
             Quantities &t = side ? ta : tu;
             size_t i = side * perSide();
-            forEachSummed( t, [&](char const *, int, auto &v)
+            forEachSummed( t, [&](Quantities::FieldInfo const &, auto &v)
             {
                 using V = typename std::decay<decltype( v )>::type;
                 addOne( slots[i++], v, t, fullGrid, mainOrigin, mainDims, partition );
@@ -433,7 +427,7 @@ struct Merge
         for (int side = 0; side < 2; ++side)
         {
             size_t i = side * perSide();
-            forEachSummed( side ? a : u, [&](char const *, int, auto &v)
+            forEachSummed( side ? a : u, [&](Quantities::FieldInfo const &, auto &v)
             {
                 using V = typename std::decay<decltype( v )>::type;
                 using T = typename V::value_type;
@@ -467,6 +461,20 @@ struct Merge
         char b[200];
         std::snprintf( b, sizeof b, "cell mass %.4g, cell volume %.4g, max |velocity component| %.4g%s",
                        cellMass, cellVol, vmax, shift ? ( ", DTFE_TEST_FXMERGE_SHIFT=" + std::to_string( shift ) ).c_str() : "" );
+        return b;
+    }
+
+    // '--scratch-dir', after the loop: the scratch mappings so far, and how many grids were zero-filled in memory and
+    // moved onto their file unwritten -- in all, and since this merge's setup (its integer grids: the psReserveGrids
+    // line, DTFE.cpp, prints before the setup; tests/ps_fixed_merge_check.sh X3 reads both counts)
+    std::string scratchText() const
+    {
+        char b[300];
+        long const moves = ScratchAlloc::scratchZeroFillMoves();
+        std::snprintf( b, sizeof b, "SCRATCH: %ld grid(s) on scratch files in all, %.4g GB now; %ld zero-filled in memory "
+                       "and moved onto their file unwritten, %ld of them since the fixed-point merge's setup (its integer "
+                       "grids).", ScratchAlloc::scratchTotalAllocs(), double( ScratchAlloc::scratchLiveBytes() ) / 1.e9,
+                       moves, moves - zeroFillMoves0 );
         return b;
     }
 

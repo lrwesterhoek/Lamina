@@ -47,6 +47,8 @@ VOLUME_CACHE_BYTES = int(6e8)   # averaged cubes kept (float32: 67 MB at 256^3, 
 PREPARED_BYTES = int(2.5e9)     # prepared cubes kept (2 bytes a cell: 2.1 GB at 1024^3); always the last one
 BYTES_PER_CELL = 10.0           # a volume's peak memory a cell: float32 average, levels, transposed levels and the
                                 # chunks' temporaries (measured: 9.5 GB at 1024^3, 1.7 GB at 512^3)
+WORKERS = max(2, min(8, (os.cpu_count() or 4) - 2))     # the threads of each pool (pool(), gui_pool()), and the
+                                # tasks _run keeps queued on one
 
 
 class Cancelled(Exception):
@@ -60,8 +62,7 @@ _POOL_LOCK = threading.Lock()
 def _executor(name: str) -> ThreadPoolExecutor:
     with _POOL_LOCK:
         if name not in _POOLS:
-            _POOLS[name] = ThreadPoolExecutor(max_workers=max(2, min(8, (os.cpu_count() or 4) - 2)),
-                                              thread_name_prefix=name)
+            _POOLS[name] = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix=name)
         return _POOLS[name]
 
 
@@ -76,25 +77,28 @@ def gui_pool() -> ThreadPoolExecutor:
     return _executor("volume3d-gui")
 
 
-def workers() -> int:
-    return pool()._max_workers
-
-
-def _run(fn, items, executor: ThreadPoolExecutor | None = None, progress: dict | None = None) -> None:
-    """fn over items on 'executor' (pool()), at most its thread count queued at a time (another caller's task waits
-    behind a few chunks, never a whole pass); the first failure raised once the running ones are done. 'progress'
-    with 'cancel' set stops it (Cancelled)."""
+def _run(fn, items, executor: ThreadPoolExecutor | None = None, progress: dict | None = None,
+         count: bool = False) -> None:
+    """fn over items on 'executor' (pool()), at most its thread count (WORKERS) queued at a time (another caller's
+    task waits behind a few chunks, never a whole pass); the first failure raised once the running ones are done.
+    'progress' with 'cancel' set stops it (Cancelled), checked before each item is queued; with 'count',
+    progress['done'] goes up by one as each item finishes, in order (average_window's blocks: the GUI shows it)."""
     ex = executor or pool()
     flying: deque = deque()
+
+    def finish_one():
+        flying.popleft().result()
+        if count and progress is not None:
+            progress["done"] = progress.get("done", 0) + 1
     try:
         for item in items:
             if progress is not None and progress.get("cancel"):
                 raise Cancelled()
             flying.append(ex.submit(fn, item))
-            while len(flying) >= ex._max_workers:
-                flying.popleft().result()
+            while len(flying) >= WORKERS:
+                finish_one()
         while flying:
-            flying.popleft().result()
+            finish_one()
     except BaseException:
         for f in flying:
             f.cancel()
@@ -148,36 +152,7 @@ def read_rows(path, dtype, shape, rows, cube=None) -> np.ndarray:
     return out
 
 
-def field_values(o, name: str, arr: np.ndarray, component: str) -> np.ndarray:
-    """The values the map shows of 'name' (OutputSet.slice's rule, on a block of rows instead of a plane): its
-    component (norm, trace, or one by name; the vorticity as the curl) in float64, a velocity in km/s."""
-    ff = o.files[name]
-    f64 = lambda a: np.asarray(a, dtype=np.float64)        # noqa: E731
-    if name == "vorticity":         # [W_xy, W_xz, W_yz] = [-w_z, w_y, -w_x] / 2 -> the curl w
-        arr = -2.0 * f64(arr) if ff.ncomp == 1 else \
-            2.0 * np.stack([-f64(arr[..., 2]), f64(arr[..., 1]), -f64(arr[..., 0])], -1)
-    if ff.ncomp > 1:
-        comps = G.components(name, ff.ncomp, o.dim)
-        if component not in comps:
-            component = comps[0]
-        if component == "norm":
-            acc = np.zeros(arr.shape[:-1])
-            for i in range(arr.shape[-1]):
-                c = f64(arr[..., i])
-                acc += c * c
-            arr = np.sqrt(acc)
-        elif component.startswith("trace"):
-            d = int(round(ff.ncomp ** 0.5))
-            arr = sum(f64(arr[..., i * d + i]) for i in range(d))
-        else:
-            idx = comps.index(component) - (1 if comps[0] == "norm" or comps[0].startswith("trace") else 0)
-            arr = f64(arr[..., idx])
-    factor = o._velocity_factor(name)
-    arr = f64(arr)
-    return arr * factor if factor != 1.0 else arr
-
-
-def _sources(o, name: str) -> list[str]:
+def sources(o, name: str) -> list[str]:
     """The grid files a volume of 'name' reads: the exact fold flag of a periodic PS run (OutputSet.fold_exact) is
     computed from up to three, any other field is its own file."""
     if name == "caustic" and o.fold_exact():
@@ -185,7 +160,8 @@ def _sources(o, name: str) -> list[str]:
     return [name]
 
 
-def _file_shape(o, name: str) -> tuple:
+def file_shape(o, name: str) -> tuple:
+    """The shape of a field's grid file: (n, n, n) and its components."""
     ff = o.files[name]
     return (int(o.n),) * 3 + ((ff.ncomp,) if ff.ncomp > 1 else ())
 
@@ -199,8 +175,8 @@ def volume_key(o, name: str, component: str, idx, detail: int) -> tuple | None:
     """What an averaged cube depends on: its files' identity (path, mtime, size: a grid written again is read
     again), the field and component, the window's cells and the detail."""
     keys = []
-    for src in _sources(o, name):
-        k = G._cube_key(o.files[src].path, o.dtype, _file_shape(o, src))
+    for src in sources(o, name):
+        k = G.cube_key(o.files[src].path, o.dtype, file_shape(o, src))
         if k is None:
             return None
         keys.append(k)
@@ -209,12 +185,19 @@ def volume_key(o, name: str, component: str, idx, detail: int) -> tuple | None:
 
 
 def drop_volumes() -> int:
-    """Forget the averaged and prepared cubes (the bytes they held)."""
+    """Forget the averaged and prepared cubes (the bytes they held). grids.drop_cubes() calls it (registered below):
+    a job start and a memory check release these with the map's cubes. The volume on screen and its GPU copy stay:
+    View3D holds them (its prepared cube, two bytes a cell, and the GPU's byte a cell) until another volume replaces
+    them or the 3D view closes -- the user is looking at it, and reading it again would cost more memory than it
+    frees (the averaging's peak, BYTES_PER_CELL); the 3D view's own memory check (its detail choice) counts both."""
     with _LOCK:
-        n = sum(v["values"].nbytes for v in _VOLUMES.values()) + sum(_prepared_bytes(p) for p in _PREPARED.values())
+        n = sum(v["values"].nbytes for v in _VOLUMES.values()) + sum(prepared_bytes(p) for p in _PREPARED.values())
         _VOLUMES.clear()
         _PREPARED.clear()
     return n
+
+
+G.on_drop_cubes(drop_volumes)
 
 
 def window_shape(o, lo, hi, detail: int) -> tuple[int, int, int]:
@@ -248,12 +231,12 @@ def average_window(o, name: str, component: str, lo, hi, detail: int = DEFAULT_D
     edges = [block_edges(len(idx[a]), detail) for a in range(3)]
     shape = tuple(len(e) - 1 for e in edges)
     full = [len(idx[a]) == n and int(idx[a][0]) == 0 for a in range(3)]   # the whole axis in order: no take
-    srcs = _sources(o, name)
-    cubes = {s: G._cached_cube(o.files[s].path, o.dtype, _file_shape(o, s), read=False) for s in srcs}
+    srcs = sources(o, name)
+    cubes = {s: G.cached_cube(o.files[s].path, o.dtype, file_shape(o, s), read=False) for s in srcs}
     base = {"lo": np.asarray(wlo, dtype=np.float64), "hi": np.asarray(whi, dtype=np.float64),
             "cells": tuple(len(i) for i in idx), "key": key}
     if all(full) and shape == (n, n, n) and srcs == [name] and o.files[name].ncomp == 1 and name != "vorticity" \
-            and o._velocity_factor(name) == 1.0 and cubes[name] is not None:
+            and o.velocity_factor(name) == 1.0 and cubes[name] is not None:
         return dict(base, values=cubes[name])           # the cached grid itself (the cube cache keeps it): no averaging
     sizes1, sizes2 = np.diff(edges[1]).astype(np.float64), np.diff(edges[2]).astype(np.float64)
     out = np.empty(shape, dtype=np.float32)
@@ -262,7 +245,7 @@ def average_window(o, name: str, component: str, lo, hi, detail: int = DEFAULT_D
     # a scalar field shown as stored (no component, no velocity factor, no fold flag) is the grid's own values: no
     # float64 copy of each block (summed in float64 straight from the file's floats: the same sums), and a window at
     # its own cells (the detail at least its cells) not summed at all, each averaged cell being one grid cell
-    plain = srcs == [name] and o.files[name].ncomp == 1 and name != "vorticity" and o._velocity_factor(name) == 1.0
+    plain = srcs == [name] and o.files[name].ncomp == 1 and name != "vorticity" and o.velocity_factor(name) == 1.0
     unit = shape == tuple(len(i) for i in idx)
     # blocks of one size f <= 4 along y and z (1024 -> 512 or 256): each block summed by f strided adds in reduceat's
     # own order -- its first term plus the sum of the rest, that sum taken from 0 one term after another (numpy's
@@ -288,7 +271,7 @@ def average_window(o, name: str, component: str, lo, hi, detail: int = DEFAULT_D
         rows = idx[0][edges[0][j]:edges[0][j + 1]]
         blocks = {}
         for s in srcs:
-            a = read_rows(o.files[s].path, o.dtype, _file_shape(o, s), rows, cubes[s])
+            a = read_rows(o.files[s].path, o.dtype, file_shape(o, s), rows, cubes[s])
             if not full[1]:
                 a = np.take(a, idx[1], axis=1)
             if not full[2]:
@@ -309,40 +292,18 @@ def average_window(o, name: str, component: str, lo, hi, detail: int = DEFAULT_D
                 vals = np.asarray(G.caustic_is_fold(blocks.get("caustic_class"), streams=blocks.get("streams"),
                                                     hidden=blocks.get("hidden_streams")), dtype=np.float64)
             else:
-                vals = field_values(o, name, blocks[name], component)
+                vals = o.component_values(name, blocks[name], component, fresh=False)
             vals = np.add.reduceat(vals, edges[2][:-1], axis=2)
         del blocks
         vals = np.add.reduceat(vals, edges[1][:-1], axis=1).sum(axis=0)
         out[j] = vals / (len(rows) * sizes1[:, None] * sizes2[None, :])
 
-    flying: deque = deque()
-    try:
-        for j in range(shape[0]):
-            if progress is not None and progress.get("cancel"):
-                raise Cancelled()
-            flying.append(pool().submit(one, j))
-            while len(flying) >= workers():           # a few blocks in memory at a time
-                flying.popleft().result()
-                if progress is not None:
-                    progress["done"] = progress.get("done", 0) + 1
-        while flying:
-            flying.popleft().result()
-            if progress is not None:
-                progress["done"] = progress.get("done", 0) + 1
-    except BaseException:
-        for f in flying:
-            f.cancel()
-        for f in flying:                                # the running ones end before the error goes up
-            try:
-                f.result()
-            except BaseException:
-                pass
-        raise
+    _run(one, range(shape[0]), progress=progress, count=True)        # a few blocks in memory at a time
     res = dict(base, values=out)
     if key is not None:
         # while the launcher runs a job (grids.cap_cubes) none is kept: the binary's auto-tuner budgets from the
         # memory free at its start; a cube larger than the cache is never kept
-        budget = VOLUME_CACHE_BYTES if not G._CAPPED else 0
+        budget = VOLUME_CACHE_BYTES if not G.cubes_capped() else 0
         with _LOCK:
             if out.nbytes <= budget:
                 _VOLUMES[key] = res
@@ -557,7 +518,7 @@ def percentile_level(counts: np.ndarray, levels: np.ndarray, pct: float) -> floa
     return float(levels[1 + min(k, LEVELS - 2)])
 
 
-def _prepared_bytes(p: dict) -> int:
+def prepared_bytes(p: dict) -> int:
     n = p["fine"]["q"].nbytes + p["fine"]["qT"].nbytes
     if p.get("coarse") is not None:
         n += sum(s.nbytes for s in p["coarse"]["stacks"])
@@ -580,10 +541,10 @@ def prepare(avg: dict, log: bool, progress: dict | None = None) -> dict:
     if progress is not None:
         progress["stage"] = "colouring"
     prep = _prepare(avg, log, progress)
-    if key is not None and not G._CAPPED and not (progress or {}).get("cancel"):
+    if key is not None and not G.cubes_capped() and not (progress or {}).get("cancel"):
         with _LOCK:
             _PREPARED[key] = prep
-            while len(_PREPARED) > 1 and sum(_prepared_bytes(p) for p in _PREPARED.values()) > PREPARED_BYTES:
+            while len(_PREPARED) > 1 and sum(prepared_bytes(p) for p in _PREPARED.values()) > PREPARED_BYTES:
                 _PREPARED.popitem(last=False)
     return prep
 

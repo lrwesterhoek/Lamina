@@ -48,8 +48,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 import config
-from dtfelib import make_parser, use_data_root, require_data_root, pipeline, profiles, catalog
-from dtfelib import environment as env
+from dtfelib import make_parser, use_data_root, require_data_root, pipeline, profiles, catalog, snapshot_ladder
+from dtfelib import add_snaps_arg, add_out_arg, add_rv_definition_arg
 from dtfelib import figures as style
 from dtfelib import fields as dtfe
 
@@ -252,7 +252,7 @@ def plot_evolution(ev: dict, title: str, path: Path, rv_label: str, min_count: i
     cb.set_ticklabels([f"{z:.2g}" if z >= 0.005 else "0" for z in sorted(set(zs))])   # z = 0 is 2e-16 in the header
     cb.set_label("z")
     style.set_suptitle(fig, title)
-    style.save_figure(fig, path, dpi=config.DPI, bbox_inches="tight")
+    style.save_figure(fig, path, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -289,7 +289,7 @@ def plot_fits(rows: list, edges: list, sigma_mpc: float, title: str, path: Path)
                         transform=axes[1, 1].transAxes, fontsize=7, color="0.3")
     style.set_suptitle(fig, title)
     fig.tight_layout()
-    style.save_figure(fig, path, dpi=config.DPI)
+    style.save_figure(fig, path)
     plt.close(fig)
 
 
@@ -358,15 +358,15 @@ def _floats(text: str, what: str) -> list:
 def main(argv=None):
     parser = make_parser("Void profiles across cosmic time on one figure (density, v_r against linear theory, "
                          "interior single-stream fraction) and Hamaus-Sutter-Wandelt fits per R_v bin and redshift.")
-    parser.add_argument("--snaps", type=int, nargs="*", default=None, help="snapshots (default: every snapdir on disk)")
+    add_snaps_arg(parser, help="snapshots (default: every snapdir on disk)")
     parser.add_argument("--sample", choices=("resolved", "deep"), default="resolved",
                         help="well-resolved voids, or those also deeper than config.DEEP_VOID_THRESHOLD")
     parser.add_argument("--keep-overlaps", action="store_true",
                         help="every resolved void, not only the distinct ones")
-    parser.add_argument("--rv-definition", choices=DEFINITIONS, default="crossing",
-                        help="the void radius: crossing (first up-crossing of the mean, default), delta08 (enclosed "
-                             "contrast reaches -0.8) or ridge (the compensation ridge); one the catalogue lacks falls "
-                             "back to crossing")
+    add_rv_definition_arg(parser, DEFINITIONS,
+                          "the void radius: crossing (first up-crossing of the mean, default), delta08 (enclosed "
+                          "contrast reaches -0.8) or ridge (the compensation ridge); one the catalogue lacks falls "
+                          "back to crossing", spelling="--rv-definition")
     parser.add_argument("--rv-range", default=",".join(f"{v:g}" for v in DEFAULT_RV_RANGE),
                         help="the overlay's R_v bin in smoothing lengths, lo,hi (default 2.5,5)")
     parser.add_argument("--edges", default=None,
@@ -376,7 +376,7 @@ def main(argv=None):
     parser.add_argument("--min-count", type=int, default=5, help="fewest voids a stack or a fit needs")
     parser.add_argument("--replot", action="store_true",
                         help="redraw from the per-snapshot caches of an earlier run, no grid read")
-    parser.add_argument("--out", default=None, help=f"output folder (default {OUTPUT_DIR}/<sim>)")
+    add_out_arg(parser, f"{OUTPUT_DIR}/<sim>")
     pipeline.add_smoothing_mpc_arg(parser)
     args = parser.parse_args(argv)
     style.apply()
@@ -393,8 +393,7 @@ def main(argv=None):
 
     failed = []
     if not args.replot:
-        ladder = sorted({int(d.name.split("_")[1]) for d in env.sim_dir(args.sim).glob("snapdir_*")
-                         if d.name.split("_")[1].isdigit()})
+        ladder = snapshot_ladder(args.sim)
         snaps = args.snaps if args.snaps else ladder
         if not snaps:
             raise SystemExit(f"no snapdir_* of {args.sim} under {require_data_root(args.data_root)}")

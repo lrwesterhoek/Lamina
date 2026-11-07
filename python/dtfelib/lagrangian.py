@@ -74,7 +74,7 @@ import h5py
 import numpy as np
 from scipy.spatial import cKDTree
 
-from .cli import sim_dir
+from .cli import snapdir_path
 
 SURVIVE_FRAC = 0.5      # shared fraction that makes a descendant THE descendant (survive / merge)
 SPLIT_FRAC = 0.25       # shared fraction each of >= 2 descendants needs for a split
@@ -157,7 +157,7 @@ def fate_workers(exclusive: bool = False, chunk: int = None) -> int:
 
 def combined_path(sim: str, snap: int, root=None) -> Path:
     """The merged snapshot (python/tools/merge_HDF5.py) of 'sim' at 'snap'; FileNotFoundError when absent."""
-    p = sim_dir(sim, root) / f"snapdir_{int(snap):03d}" / f"combined_{int(snap):03d}.hdf5"
+    p = snapdir_path(sim, int(snap), root) / f"combined_{int(snap):03d}.hdf5"
     if not p.is_file():
         raise FileNotFoundError(f"no combined snapshot {p}")
     return p

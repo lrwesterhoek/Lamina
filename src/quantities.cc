@@ -27,6 +27,9 @@
 #include "quantities.h"
 #include "scratch_alloc.h"
 #include "message.h"
+#ifdef PHASE_SPACE
+#include "thread_count.h"   // poolRanges: the parallel merge and normalization
+#endif
 
 
 
@@ -84,20 +87,12 @@ void Quantities::copyFromSubgrid(Quantities const &subgridResults,
                                  std::vector<size_t> const &subgrid,
                                  std::vector<size_t> const &subgridOffset)
 {
-    copyField( subgridResults.density, &(this->density), field.density,  mainGrid, subgrid, subgridOffset );
-    copyField( subgridResults.velocity, &(this->velocity), field.velocity,  mainGrid, subgrid, subgridOffset );
-    copyField( subgridResults.velocity_gradient, &(this->velocity_gradient), field.velocity_gradient,  mainGrid, subgrid, subgridOffset );
-    copyField( subgridResults.velocity_divergence, &(this->velocity_divergence), field.velocity_divergence,  mainGrid, subgrid, subgridOffset );
-    copyField( subgridResults.velocity_shear, &(this->velocity_shear), field.velocity_shear,  mainGrid, subgrid, subgridOffset );
-    copyField( subgridResults.velocity_vorticity, &(this->velocity_vorticity), field.velocity_vorticity,  mainGrid, subgrid, subgridOffset );
-    copyField( subgridResults.velocity_std, &(this->velocity_std), field.velocity_std,  mainGrid, subgrid, subgridOffset );
-    copyField( subgridResults.velocity_dispersion, &(this->velocity_dispersion), field.velocity_dispersion,  mainGrid, subgrid, subgridOffset );
-    copyField( subgridResults.scalar, &(this->scalar), field.scalar,  mainGrid, subgrid, subgridOffset );
-    copyField( subgridResults.scalar_gradient, &(this->scalar_gradient), field.scalar_gradient,  mainGrid, subgrid, subgridOffset );
-    copyField( subgridResults.velocity_tweb, &(this->velocity_tweb), field.velocity_tweb,  mainGrid, subgrid, subgridOffset );
-    copyField( subgridResults.velocity_tweb_eigenvalues, &(this->velocity_tweb_eigenvalues), field.velocity_tweb,  mainGrid, subgrid, subgridOffset );
-    copyField( subgridResults.velocity_vweb, &(this->velocity_vweb), field.velocity_vweb,  mainGrid, subgrid, subgridOffset );
-    copyField( subgridResults.velocity_vweb_eigenvalues, &(this->velocity_vweb_eigenvalues), field.velocity_vweb,  mainGrid, subgrid, subgridOffset );
+    // every grid a Field flag asks for (the PS-DTFE accumulators have none: a standard partition holds none of them)
+    forEachField( [&](FieldInfo const &fi, auto, auto member)
+    {
+        if ( fi.flag )
+            copyField( subgridResults.*member, &(this->*member), field.*(fi.flag), mainGrid, subgrid, subgridOffset );
+    } );
 }
 
 
@@ -120,29 +115,7 @@ void fieldSize(T const & object,
 size_t Quantities::size() const
 {
     size_t temp = 0;
-    fieldSize( this->density, &temp );
-    fieldSize( this->velocity, &temp );
-    fieldSize( this->velocity_gradient, &temp );
-    fieldSize( this->velocity_divergence, &temp );
-    fieldSize( this->velocity_shear, &temp );
-    fieldSize( this->velocity_vorticity, &temp );
-    fieldSize( this->velocity_std, &temp );
-    fieldSize( this->velocity_dispersion, &temp );
-    fieldSize( this->scalar, &temp );
-    fieldSize( this->scalar_gradient, &temp );
-    fieldSize( this->velocity_tweb, &temp );
-    fieldSize( this->velocity_tweb_eigenvalues, &temp );
-    fieldSize( this->velocity_vweb, &temp );
-    fieldSize( this->velocity_vweb_eigenvalues, &temp );
-#ifdef PHASE_SPACE
-    fieldSize( this->stream_count, &temp );
-    fieldSize( this->tet_touch, &temp );
-    fieldSize( this->mass_weight, &temp );
-    fieldSize( this->disp_weight, &temp );
-    fieldSize( this->disp_velocity, &temp );
-    fieldSize( this->caustic_bits, &temp );
-    fieldSize( this->hidden_streams, &temp );
-#endif
+    forEachField( [&](FieldInfo const &, auto, auto member) { fieldSize( this->*member, &temp ); } );
     return temp;
 }
 
@@ -159,7 +132,6 @@ void addField(std::vector<T> const &src, std::vector<T> *dst)
         (*dst)[i] += src[i];
 }
 
-#ifdef PHASE_SPACE
 // Bitwise-OR accumulate for bit-mask fields stored as Real (small exact integers, e.g. the
 // caustic orientation bits). OR is commutative AND idempotent, so -- unlike '+=' -- the merge
 // is invariant under the partitions' completion order and under a stream being seen by the
@@ -172,33 +144,18 @@ void orField(std::vector<Real> const &src, std::vector<Real> *dst)
     for (size_t i = 0; i < src.size(); ++i)
         (*dst)[i] = Real( int((*dst)[i]) | int(src[i]) );
 }
-#endif
 
-// Accumulates every field of 'other' into this object (PS-DTFE: one partition's results summed into the whole).
+// Accumulates every field of 'other' into this object (PS-DTFE: one partition's results summed into the whole): the
+// summed grids '+=', the bit masks OR (never '+='); the web labels are made after the merge, only their eigenvalues sum.
 void Quantities::addFrom(Quantities const &other)
 {
-    addField(other.density, &this->density);
-    addField(other.velocity, &this->velocity);
-    addField(other.velocity_gradient, &this->velocity_gradient);
-    addField(other.velocity_divergence, &this->velocity_divergence);
-    addField(other.velocity_shear, &this->velocity_shear);
-    addField(other.velocity_vorticity, &this->velocity_vorticity);
-    addField(other.velocity_std, &this->velocity_std);
-    addField(other.velocity_dispersion, &this->velocity_dispersion);
-    addField(other.scalar, &this->scalar);
-    addField(other.scalar_gradient, &this->scalar_gradient);
-    // T-web/V-web labels are computed post-interpolation; only eigenvalues accumulate
-    addField(other.velocity_tweb_eigenvalues, &this->velocity_tweb_eigenvalues);
-    addField(other.velocity_vweb_eigenvalues, &this->velocity_vweb_eigenvalues);
-#ifdef PHASE_SPACE
-    addField(other.stream_count, &this->stream_count);
-    addField(other.tet_touch, &this->tet_touch);   // integer tet-touch counts sum linearly across partitions
-    addField(other.mass_weight, &this->mass_weight);
-    addField(other.disp_weight, &this->disp_weight);
-    addField(other.disp_velocity, &this->disp_velocity);
-    orField(other.caustic_bits, &this->caustic_bits);   // orientation bits: OR, never '+='
-    orField(other.hidden_streams, &this->hidden_streams);       // bitmask: OR
-#endif
+    forEachField( [&](FieldInfo const &, auto merge, auto member)
+    {
+        if constexpr ( decltype( merge )::value == FIELD_SUM )
+            addField( other.*member, &(this->*member) );
+        else if constexpr ( decltype( merge )::value == FIELD_OR )
+            orField( other.*member, &(this->*member) );
+    } );
 }
 
 #ifdef PHASE_SPACE
@@ -238,7 +195,10 @@ void Quantities::normalizePhaseSpace(Field const &field, Real const weightFromDe
                          || (field.velocity_dispersion and this->disp_weight.empty());
     if ( haveVel and this->velocity.empty() )
         return;   // no weighted moments were accumulated (e.g. density-only field selection)
-    for (size_t i = 0; i < n; ++i)
+    // every cell on its own (the same arithmetic per cell): split over the free cores (thread_count.h poolRanges)
+    poolRanges( n, size_t(1) << 16, CorePool::total(), [&](size_t const lo, size_t const hi)
+    {
+    for (size_t i = lo; i < hi; ++i)
     {
         Real const w = fromDensity ? this->density[i] * weightFromDensityScale : this->mass_weight[i];
         if ( w <= Real(0.) ) continue;
@@ -263,6 +223,7 @@ void Quantities::normalizePhaseSpace(Field const &field, Real const weightFromDe
                 }
         }
     }
+    } );
 
     // --ps-volume-weighted + dispersion: the dispersion carries MASS-weighted moments while
     // 'velocity' above was normalized by the VOLUME weight, so it must be closed out with its
@@ -270,7 +231,9 @@ void Quantities::normalizePhaseSpace(Field const &field, Real const weightFromDe
     if ( field.velocity_dispersion and not this->disp_weight.empty() )
     {
         size_t const nd = this->disp_weight.size();
-        for (size_t i = 0; i < nd; ++i)
+        poolRanges( nd, size_t(1) << 16, CorePool::total(), [&](size_t const lo, size_t const hi)
+        {
+        for (size_t i = lo; i < hi; ++i)
         {
             Real const wm = this->disp_weight[i];
             if ( wm <= Real(0.) ) continue;
@@ -286,6 +249,7 @@ void Quantities::normalizePhaseSpace(Field const &field, Real const weightFromDe
                     ++c;
                 }
         }
+        } );
     }
 
     // these three are internal to this normalization and never written out -- release for real
@@ -295,16 +259,101 @@ void Quantities::normalizePhaseSpace(Field const &field, Real const weightFromDe
 }
 
 
-// Like addField, but 'src' is a sub-grid (dims m, global origin o) of the full grid 'full'; each cell is mapped by
-// subgridTarget (quantities.h; the fixed-point merge, src/ps_fixed_merge.h, maps cells by it too).
-template <typename T>
-void addFieldSubgrid(std::vector<T> const &src, std::vector<T> *dst,
-                     size_t const *o, size_t const *m, size_t const *full,
-                     size_t const *mainOrigin = nullptr, size_t const *mainDims = nullptr)
+// The cell map of a sub-grid merge (addFromSubgrid): 'src' is a sub-grid (dims m, global origin o) of the full grid
+// 'full', or -- mainOrigin/mainDims given -- of this grid's own window of it (--ps-window). Each local cell goes where
+// subgridTarget (quantities.h; the fixed-point merge, src/ps_fixed_merge.h, maps cells by it too) sends it, axis by
+// axis, so the map is one table per axis: the destination coordinate of every local index, or -1 outside the window.
+// The merge then runs ROW by row (the last axis: contiguous in both grids), each row's destination start computed
+// once and the row cut into runs only where the periodic wrap (or the window) breaks it -- no per-cell divisions and
+// modulos -- and, since every destination cell receives at most one source cell, the rows split over threads: each
+// element still gets the one '+=' (or OR) it got, so the sums are the same bit for bit.
+struct SubgridRowMap
 {
-    if (src.empty()) return;
-    size_t dstTotal = 1; for (int d = 0; d < NO_DIM; ++d) dstTotal *= mainOrigin ? mainDims[d] : full[d];
-    if (dst->size() < dstTotal) ScratchAlloc::zeroResize(*dst, dstTotal, T());   // (scratch: an empty dst's zeros write nothing)
+    std::vector<long> axis[NO_DIM];
+    size_t m[NO_DIM], dims[NO_DIM];   // the source's dims, the destination's (full or window)
+    size_t nRows = 1, rowLen = 1, dstTotal = 1;
+    bool oneToOne = true;             // no two source cells share a destination cell (every sub-grid axis <= full)
+    struct Run { size_t c0, len; long g0; };   // local [c0, c0+len) of a row -> destination [g0, g0+len) of its row
+    std::vector<Run> runs;
+
+    SubgridRowMap(size_t const *o, size_t const *mm, size_t const *full, size_t const *mainOrigin, size_t const *mainDims)
+    {
+        for (int d = 0; d < NO_DIM; ++d)
+        {
+            m[d] = mm[d];
+            dims[d] = mainOrigin ? mainDims[d] : full[d];
+            dstTotal *= dims[d];
+            oneToOne = oneToOne && m[d] <= full[d];
+            axis[d].resize( m[d] );
+            for (size_t c = 0; c < m[d]; ++c)
+            {
+                size_t const gl = (c + o[d]) % full[d];   // the global index, as subgridTarget wraps it
+                long g = long(gl);
+                if ( mainOrigin )
+                {
+                    long ml = long(gl) - long(mainOrigin[d]);
+                    if ( ml < 0 ) ml += long(full[d]);
+                    g = ( ml < 0 || ml >= long(mainDims[d]) ) ? -1 : ml;
+                }
+                axis[d][c] = g;
+            }
+        }
+        for (int d = 0; d < NO_DIM - 1; ++d) nRows *= m[d];
+        rowLen = m[NO_DIM-1];
+        std::vector<long> const &a = axis[NO_DIM-1];
+        for (size_t c = 0; c < rowLen; )
+        {
+            if ( a[c] < 0 ) { ++c; continue; }
+            size_t e = c + 1;
+            while ( e < rowLen && a[e] == a[e-1] + 1 ) ++e;
+            runs.push_back( Run{ c, e - c, a[c] } );
+            c = e;
+        }
+    }
+
+    // row r's first destination index (the flat index of its row with last coordinate 0); false outside the window
+    bool rowStart(size_t const r, size_t &g) const
+    {
+        size_t c[NO_DIM], rem = r;
+        for (int d = NO_DIM - 2; d >= 0; --d) { c[d] = rem % m[d]; rem /= m[d]; }
+        g = 0;
+        for (int d = 0; d < NO_DIM - 1; ++d)
+        {
+            long const x = axis[d][c[d]];
+            if ( x < 0 ) return false;
+            g = g * dims[d] + size_t(x);
+        }
+        g *= dims[NO_DIM-1];
+        return true;
+    }
+};
+
+// rows [r0, r1) of 'src' into 'dst' with op(dst element, src element): '+=' for the summed grids, OR for the masks
+template <typename T, class Op>
+void mergeSubgridRows(std::vector<T> const &src, std::vector<T> &dst, SubgridRowMap const &map,
+                      size_t const r0, size_t const r1, Op const &op)
+{
+    for (size_t r = r0; r < r1; ++r)
+    {
+        size_t g;
+        if ( !map.rowStart( r, g ) ) continue;
+        T const *s = src.data() + r * map.rowLen;
+        T *dRow = dst.data() + g;
+        for (SubgridRowMap::Run const &run : map.runs)
+        {
+            T const *sp = s + run.c0;
+            T *dp = dRow + run.g0;
+            for (size_t k = 0; k < run.len; ++k) op( dp[k], sp[k] );
+        }
+    }
+}
+
+// the same, cell by cell in local order (the merge's former loop): a sub-grid wider than the full grid on some axis
+// sends two of its cells to one destination cell, whose adds must then keep their order
+template <typename T, class Op>
+void mergeSubgridCells(std::vector<T> const &src, std::vector<T> &dst, size_t const *o, size_t const *m,
+                       size_t const *full, size_t const *mainOrigin, size_t const *mainDims, Op const &op)
+{
     size_t subTotal = 1; for (int d = 0; d < NO_DIM; ++d) subTotal *= m[d];
     for (size_t l = 0; l < subTotal; ++l)
     {
@@ -312,29 +361,7 @@ void addFieldSubgrid(std::vector<T> const &src, std::vector<T> *dst,
         for (int d = NO_DIM - 1; d >= 0; --d) { c[d] = rem % m[d]; rem /= m[d]; }   // local coords
         size_t g;
         if (!subgridTarget(c, o, full, mainOrigin, mainDims, g)) continue;
-        (*dst)[g] += src[l];
-    }
-}
-
-// The bitwise-OR twin of addFieldSubgrid, for the mask fields (caustic_bits, hidden_streams): same
-// sub-grid -> global mapping -- INCLUDING the '% full[d]' wrap of a sub-box that straddles a
-// periodic seam; a hand-rolled copy of this loop without it indexes past the end --
-// but OR instead of '+='.
-void orFieldSubgrid(std::vector<Real> const &src, std::vector<Real> *dst,
-                    size_t const *o, size_t const *m, size_t const *full,
-                    size_t const *mainOrigin = nullptr, size_t const *mainDims = nullptr)
-{
-    if (src.empty()) return;
-    size_t dstTotal = 1; for (int d = 0; d < NO_DIM; ++d) dstTotal *= mainOrigin ? mainDims[d] : full[d];
-    if (dst->size() < dstTotal) ScratchAlloc::zeroResize(*dst, dstTotal, Real(0.));
-    size_t subTotal = 1; for (int d = 0; d < NO_DIM; ++d) subTotal *= m[d];
-    for (size_t l = 0; l < subTotal; ++l)
-    {
-        size_t rem = l, c[NO_DIM];
-        for (int d = NO_DIM - 1; d >= 0; --d) { c[d] = rem % m[d]; rem /= m[d]; }
-        size_t g;
-        if (!subgridTarget(c, o, full, mainOrigin, mainDims, g)) continue;
-        (*dst)[g] = Real( int((*dst)[g]) | int(src[l]) );
+        op( dst[g], src[l] );
     }
 }
 
@@ -345,79 +372,90 @@ void Quantities::addFromSubgrid(Quantities const &other, size_t const *fullGrid,
     if (other.ps_subDims[0] == 0) { this->addFrom(other); return; }   // 'other' spans the full grid
     size_t const *o = other.ps_subOrigin;
     size_t const *m = other.ps_subDims;
-    if (mainOrigin && mainDims)
-    {   // the main grid is a window: every field goes through the window-aware mapping
-        #define ADD_W(F) addFieldSubgrid(other.F, &this->F, o, m, fullGrid, mainOrigin, mainDims)
-        ADD_W(density); ADD_W(velocity); ADD_W(velocity_gradient); ADD_W(velocity_divergence);
-        ADD_W(velocity_shear); ADD_W(velocity_vorticity); ADD_W(velocity_std); ADD_W(velocity_dispersion);
-        ADD_W(scalar); ADD_W(scalar_gradient); ADD_W(velocity_tweb_eigenvalues); ADD_W(velocity_vweb_eigenvalues);
-        ADD_W(stream_count); ADD_W(tet_touch); ADD_W(mass_weight); ADD_W(disp_weight); ADD_W(disp_velocity);
-        #undef ADD_W
-        orFieldSubgrid(other.caustic_bits, &this->caustic_bits, o, m, fullGrid, mainOrigin, mainDims);
-        orFieldSubgrid(other.hidden_streams, &this->hidden_streams, o, m, fullGrid, mainOrigin, mainDims);
+    // the main grid is a window only when both are given: every field then goes through the window-aware mapping
+    bool const window = mainOrigin && mainDims;
+    size_t const *wo = window ? mainOrigin : nullptr;
+    size_t const *wd = window ? mainDims : nullptr;
+    SubgridRowMap const map( o, m, fullGrid, wo, wd );
+    // Grow every unsized destination (zero-filled, so accumulation starts from zero) HERE, on the merging thread and
+    // before any row is merged: each block is fully grown, its zero-fill scope (ScratchAlloc) closed, before a thread
+    // writes into it. (scratch: an empty dst's zeros write nothing)
+    forEachField( [&](FieldInfo const &, auto merge, auto member)
+    {
+        if constexpr ( decltype( merge )::value == FIELD_SUM || decltype( merge )::value == FIELD_OR )
+        {
+            auto &dst = this->*member;
+            using T = typename std::decay<decltype( dst )>::type::value_type;
+            if ( !( other.*member ).empty() && dst.size() < map.dstTotal ) ScratchAlloc::zeroResize( dst, map.dstTotal, T() );
+        }
+    } );
+    // the summed grids '+=', the masks OR (bit masks stored as Real: small exact integers, see orField)
+    auto add = [](auto &d, auto const &v) { d += v; };
+    auto bitOr = [](Real &d, Real const v) { d = Real( int(d) | int(v) ); };
+    auto mergeAll = [&](size_t const r0, size_t const r1)
+    {
+        forEachField( [&](FieldInfo const &, auto merge, auto member)
+        {
+            auto const &src = other.*member;
+            if ( src.empty() ) return;
+            if constexpr ( decltype( merge )::value == FIELD_SUM )
+                mergeSubgridRows( src, this->*member, map, r0, r1, add );
+            else if constexpr ( decltype( merge )::value == FIELD_OR )
+                mergeSubgridRows( src, this->*member, map, r0, r1, bitOr );
+        } );
+    };
+    if ( !map.oneToOne )
+    {   // (not a sub-box of the full grid: the former cell-by-cell order, on this thread)
+        forEachField( [&](FieldInfo const &, auto merge, auto member)
+        {
+            auto const &src = other.*member;
+            if ( src.empty() ) return;
+            if constexpr ( decltype( merge )::value == FIELD_SUM )
+                mergeSubgridCells( src, this->*member, o, m, fullGrid, wo, wd, add );
+            else if constexpr ( decltype( merge )::value == FIELD_OR )
+                mergeSubgridCells( src, this->*member, o, m, fullGrid, wo, wd, bitOr );
+        } );
         return;
     }
-    addFieldSubgrid(other.density, &this->density, o, m, fullGrid);
-    addFieldSubgrid(other.velocity, &this->velocity, o, m, fullGrid);
-    addFieldSubgrid(other.velocity_gradient, &this->velocity_gradient, o, m, fullGrid);
-    addFieldSubgrid(other.velocity_divergence, &this->velocity_divergence, o, m, fullGrid);
-    addFieldSubgrid(other.velocity_shear, &this->velocity_shear, o, m, fullGrid);
-    addFieldSubgrid(other.velocity_vorticity, &this->velocity_vorticity, o, m, fullGrid);
-    addFieldSubgrid(other.velocity_std, &this->velocity_std, o, m, fullGrid);
-    addFieldSubgrid(other.velocity_dispersion, &this->velocity_dispersion, o, m, fullGrid);
-    addFieldSubgrid(other.scalar, &this->scalar, o, m, fullGrid);
-    addFieldSubgrid(other.scalar_gradient, &this->scalar_gradient, o, m, fullGrid);
-    addFieldSubgrid(other.velocity_tweb_eigenvalues, &this->velocity_tweb_eigenvalues, o, m, fullGrid);
-    addFieldSubgrid(other.velocity_vweb_eigenvalues, &this->velocity_vweb_eigenvalues, o, m, fullGrid);
-    addFieldSubgrid(other.stream_count, &this->stream_count, o, m, fullGrid);
-    addFieldSubgrid(other.tet_touch, &this->tet_touch, o, m, fullGrid);
-    addFieldSubgrid(other.mass_weight, &this->mass_weight, o, m, fullGrid);
-    addFieldSubgrid(other.disp_weight, &this->disp_weight, o, m, fullGrid);
-    addFieldSubgrid(other.disp_velocity, &this->disp_velocity, o, m, fullGrid);
-    // the mask fields: same sub-grid -> global mapping, but OR instead of '+='
-    orFieldSubgrid(other.caustic_bits, &this->caustic_bits, o, m, fullGrid);
-    orFieldSubgrid(other.hidden_streams, &this->hidden_streams, o, m, fullGrid);
+    // the rows over this thread and the free cores (at most 8: the merge is bound by memory bandwidth), a few
+    // thousand cells per thread at least
+    poolRanges( map.nRows, std::max<size_t>( 1, ( size_t(1) << 15 ) / std::max<size_t>( 1, map.rowLen ) ), 8, mergeAll );
 }
 #endif
 
 
-// Reserves and zero-fills main-grid memory for each requested quantity ('--partition' option).
-void Quantities::reserveMemory(size_t *gridSize, Field &field)
+// Reserves and zero-fills main-grid memory for each requested quantity ('--partition' option): one pass over the
+// field list by each grid's sizing tag (quantities.h), one zero fill.
+void Quantities::reserveMemory(size_t *gridSize, Field &field, User_options const *psRun)
 {
     size_t totalSize = 1;
     for (size_t i=0; i<NO_DIM; ++i)
         totalSize *= gridSize[i];
-    
-    if ( field.density )
-        ScratchAlloc::zeroResize( this->density, totalSize, Real(0.) );
-    if ( field.velocity || field.velocity_dispersion )   // dispersion needs <v> too, so allocate velocity even if only dispersion is requested
-        ScratchAlloc::zeroResize( this->velocity, totalSize, Pvector<Real,noVelComp>::zero() );
-    if ( field.velocity_gradient )
-        ScratchAlloc::zeroResize( this->velocity_gradient, totalSize, Pvector<Real,noGradComp>::zero() );
-    if ( field.velocity_divergence )
-        ScratchAlloc::zeroResize( this->velocity_divergence, totalSize, Real(0.) );
-    if ( field.velocity_shear )
-        ScratchAlloc::zeroResize( this->velocity_shear, totalSize, Pvector<Real,noShearComp>::zero() );
-    if ( field.velocity_vorticity )
-        ScratchAlloc::zeroResize( this->velocity_vorticity, totalSize, Pvector<Real,noVortComp>::zero() );
-    if ( field.velocity_std )
-        ScratchAlloc::zeroResize( this->velocity_std, totalSize, Real(0.) );
-    if ( field.velocity_dispersion )
-        ScratchAlloc::zeroResize( this->velocity_dispersion, totalSize, Pvector<Real,noDispComp>::zero() );
-    if ( field.scalar )
-        ScratchAlloc::zeroResize( this->scalar, totalSize, Pvector<Real,noScalarComp>::zero() );
-    if ( field.scalar_gradient )
-        ScratchAlloc::zeroResize( this->scalar_gradient, totalSize, Pvector<Real,noScalarGradComp>::zero() );
-    if ( field.velocity_tweb )
+    bool const anyField = field.selected();
+    (void)psRun;
+    (void)anyField;
+
+    forEachField( [&](FieldInfo const &fi, auto, auto member)
     {
-        ScratchAlloc::zeroResize( this->velocity_tweb, totalSize, Real(0.) );
-        ScratchAlloc::zeroResize( this->velocity_tweb_eigenvalues, totalSize, Pvector<Real,NO_DIM>::zero() );
-    }
-    if ( field.velocity_vweb )
-    {
-        ScratchAlloc::zeroResize( this->velocity_vweb, totalSize, Real(0.) );
-        ScratchAlloc::zeroResize( this->velocity_vweb_eigenvalues, totalSize, Pvector<Real,NO_DIM>::zero() );
-    }
+        bool want = false;
+        switch ( fi.sizing )
+        {
+        case SIZE_FIELD:       want = field.*(fi.flag); break;
+        case SIZE_VELOCITY:    want = field.*(fi.flag) || field.velocity_dispersion; break;   // dispersion needs <v> too
+#ifdef PHASE_SPACE
+        case SIZE_PS_ANY:      want = psRun and anyField; break;
+        case SIZE_PS_CAUSTICS: want = psRun and psRun->psCaustics and anyField; break;
+        case SIZE_PS_EXACT:    want = psRun and psRun->psExactDeposit and anyField; break;
+#endif
+        default:               break;   // SIZE_AT_MERGE: the merge grows it
+        }
+        if ( want )
+        {
+            auto &v = this->*member;
+            using T = typename std::decay<decltype( v )>::type::value_type;
+            ScratchAlloc::zeroResize( v, totalSize, T() );   // (scratch: an empty vector's zeros write nothing)
+        }
+    } );
 }
 
 

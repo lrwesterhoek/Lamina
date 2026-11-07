@@ -8,6 +8,7 @@ from scipy.stats import norm
 import warnings
 from dtfelib.figures import save_figure
 from dtfelib import make_parser, sim_dir
+from dtfelib import run_series, report_series
 import config
 from dtfelib import figures as style
 from dtfelib import pipeline
@@ -17,11 +18,8 @@ warnings.filterwarnings('ignore')
 
 OUTPUT_DIR = config.figures_path('critical_points')
 
-SMOOTHING_SIGMA = config.SMOOTHING_SIGMA_CELLS
 
-SNAPSHOT_TO_REDSHIFT = config.SNAPSHOT_TO_REDSHIFT
 
-DPI = config.DPI
 
 def compute_pdf(values, bins):
     if len(values) == 0:
@@ -128,7 +126,7 @@ def plot_pdfs(nu_values, redshift=None, output_path=None):
     plt.tight_layout()
     
     if output_path:
-        save_figure(plt.gcf(), output_path, dpi=DPI, bbox_inches='tight')
+        save_figure(plt.gcf(), output_path, bbox_inches='tight')
         plt.close()
     else:
         plt.show()
@@ -179,7 +177,7 @@ def plot_cdfs(nu_values, redshift=None, output_path=None):
     plt.tight_layout()
     
     if output_path:
-        save_figure(plt.gcf(), output_path, dpi=DPI, bbox_inches='tight')
+        save_figure(plt.gcf(), output_path, bbox_inches='tight')
         plt.close()
     else:
         plt.show()
@@ -233,7 +231,7 @@ def plot_number_density_vs_threshold(nu_values, box_size_mpc, redshift=None, out
     plt.tight_layout()
     
     if output_path:
-        save_figure(plt.gcf(), output_path, dpi=DPI, bbox_inches='tight')
+        save_figure(plt.gcf(), output_path, bbox_inches='tight')
         plt.close()
     else:
         plt.show()
@@ -298,7 +296,7 @@ def process_snapshot(snapshot, redshift, args):
             f.write("Parameters:\n")
             f.write(f"  Box size: {box_size:g} Mpc\n")
             f.write(f"  Grid resolution: {grid_n}³\n")
-            f.write(f"  Smoothing sigma: {SMOOTHING_SIGMA}\n")
+            f.write(f"  Smoothing sigma: {config.SMOOTHING_SIGMA_CELLS}\n")
             f.write(f"  Gradient threshold (saddles): {config.GRADIENT_THRESHOLD}\n")
             f.write(f"  Footprint / dedup distance: {config.FOOTPRINT_SIZE}\n")
             f.write("  Detection: unified pipeline catalog (extrema via footprint filters,\n")
@@ -382,7 +380,7 @@ def create_evolution_summary(results):
         plt.tight_layout()
         save_figure(
             fig, Path(OUTPUT_DIR) / 'critical_point_density_evolution.png',
-            dpi=DPI, bbox_inches='tight')
+            bbox_inches='tight')
         plt.close(fig)
 
         fig, ax2 = plt.subplots(figsize=style.FIGSIZE['single'])
@@ -398,7 +396,7 @@ def create_evolution_summary(results):
         plt.tight_layout()
         save_figure(
             fig, Path(OUTPUT_DIR) / 'critical_point_fractions_evolution.png',
-            dpi=DPI, bbox_inches='tight')
+            bbox_inches='tight')
         plt.close(fig)
 
 def main():
@@ -409,19 +407,13 @@ def main():
     print("Starting critical point PDF/CDF analysis")
     print(f"Data directory: {sim_dir(args.sim, args.data_root)}")
     print(f"Output directory: {OUTPUT_DIR}")
-    print(f"Processing {len(SNAPSHOT_TO_REDSHIFT)} snapshots")
+    print(f"Processing {len(config.SNAPSHOT_TO_REDSHIFT)} snapshots")
 
     Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
 
-    results = []
-    failed_snapshots = []
-
-    for snapshot, redshift in SNAPSHOT_TO_REDSHIFT.items():
-        r = process_snapshot(snapshot, redshift, args)
-        if r is not None:
-            results.append(r)
-        else:
-            failed_snapshots.append((snapshot, redshift))
+    outcomes, failed_snapshots = run_series(list(config.SNAPSHOT_TO_REDSHIFT.items()),
+                                            lambda snapshot, redshift: process_snapshot(snapshot, redshift, args))
+    results = [r for r in outcomes if r is not None]
     processed_snapshots = len(results)
 
     if processed_snapshots > 1:
@@ -430,11 +422,8 @@ def main():
         except Exception as e:
             print(f"\nError creating evolution summary: {e}")
     
-    print(f"\nCompleted: {processed_snapshots}/{len(SNAPSHOT_TO_REDSHIFT)} snapshots processed")
-    
-    if failed_snapshots:
-        print(f"Failed snapshots: {', '.join(f'{s} (z={z:.2f})' for s, z in failed_snapshots)}")
-    
+    report_series(processed_snapshots, len(config.SNAPSHOT_TO_REDSHIFT), failed_snapshots)
+
     print(f"Output saved to: {OUTPUT_DIR}/")
 
 if __name__ == "__main__":

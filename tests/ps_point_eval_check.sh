@@ -131,7 +131,7 @@ echo "   OK"
 # --per-stream-ids section, gated so the script still runs against binaries predating the flag
 # (capture first: 'grep -q' would SIGPIPE the binary and trip pipefail)
 HAVE_IDS=0
-FULL_HELP="$("${BIN}" --full_help 2>/dev/null)" || { echo "FAIL: ${BIN} --full_help exited non-zero"; exit 1; }
+FULL_HELP="$("${BIN}" --full-help 2>/dev/null)" || { echo "FAIL: ${BIN} --full-help exited non-zero"; exit 1; }
 if grep -q -- '--per-stream-ids' <<<"${FULL_HELP}"; then
     HAVE_IDS=1
     echo ">> run 7: pancake, serial, 'geometric', --per-stream-ids (implies --per-stream)"

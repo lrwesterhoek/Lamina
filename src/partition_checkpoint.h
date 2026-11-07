@@ -23,8 +23,9 @@
     every partition.
 
     SAFE: the manifest carries the run's SETTINGS KEY: the build configuration and the binary (its revision and
-    link time: a rebuilt binary does not resume), the command line minus the
-    options that cannot change a grid value (--resume, --ordered-merge, --completion-order-merge, --ps-no-overlap, --no-overlap, --verbose,
+    link time: a rebuilt binary does not resume), the command line (every deprecated option name in its canonical
+    spelling, User_options::commandTokens: '--ps-gpu' and '--gpu' give one key) minus the
+    options that cannot change a grid value (--resume, --ordered-merge, --completion-order-merge, --no-overlap, --verbose,
     --max-concurrent, --scratch-dir, --tessellation-cache), the input files' size+mtime, the resolved
     partition split and the grid. '--resume' refuses, naming the lines that differ, when the key differs.
     It over-refuses rather than under-refuses (a reordered command line is a different key).
@@ -144,23 +145,12 @@ static char const *const OFF_ENV = "DTFE_CHECKPOINT";
 static char const *const START_OVER = "run_dtfe.sh: DTFE_RESUME=0";
 #endif
 
-// every accumulator vector of a Quantities, by a stable name (the file's field list)
+// every accumulator vector of a Quantities, by a stable name (the file's field list): the field list itself,
+// Quantities::forEachField (quantities.h), in its order
 template<class F>
 inline void forEachAccumulator(Quantities &q, F &&f)
 {
-    f( "density", q.density );                     f( "velocity", q.velocity );
-    f( "velocity_gradient", q.velocity_gradient ); f( "velocity_divergence", q.velocity_divergence );
-    f( "velocity_shear", q.velocity_shear );       f( "velocity_vorticity", q.velocity_vorticity );
-    f( "velocity_std", q.velocity_std );           f( "velocity_dispersion", q.velocity_dispersion );
-    f( "scalar", q.scalar );                       f( "scalar_gradient", q.scalar_gradient );
-    f( "velocity_tweb", q.velocity_tweb );         f( "velocity_tweb_eigenvalues", q.velocity_tweb_eigenvalues );
-    f( "velocity_vweb", q.velocity_vweb );         f( "velocity_vweb_eigenvalues", q.velocity_vweb_eigenvalues );
-#ifdef PHASE_SPACE   // the phase-space accumulators (quantities.h has them in the PS build only)
-    f( "stream_count", q.stream_count );           f( "tet_touch", q.tet_touch );
-    f( "mass_weight", q.mass_weight );             f( "disp_weight", q.disp_weight );
-    f( "disp_velocity", q.disp_velocity );         f( "caustic_bits", q.caustic_bits );
-    f( "hidden_streams", q.hidden_streams );
-#endif
+    Quantities::forEachField( [&](Quantities::FieldInfo const &fi, auto, auto member) { f( fi.name, q.*member ); } );
 }
 
 // the output path made absolute with the current directory (not resolved: the output need not exist yet)
@@ -198,14 +188,16 @@ inline std::string directoryFor(User_options const &u)
 }
 
 // the command line as option groups ('--grid 64 64 64' is one line), minus the options that cannot change a
-// grid value; positional arguments (the input and output names) keep their own lines
+// grid value; positional arguments (the input and output names) keep their own lines. The tokens come canonical
+// (User_options::commandTokens: a deprecated spelling already in its canonical name), so each drop list holds the
+// canonical names; '--ps-no-overlap' stays in it for a caller that hands raw tokens.
 inline std::string commandKeyLines(std::vector<std::string> const &tokens)
 {
     // '--completion-order-merge' like '--ordered-merge': the merge order moves the grids at float rounding
     // only, and a run killed under one order must resume under the other (--resume merges in index order)
     // '--fixed-point-merge' is dropped here because the key's own 'merge=fixed-point' line carries it
     static char const *const dropFlag[]  = { "--resume", "--ordered-merge", "--completion-order-merge", "--ps-no-overlap",
-                                             "--no-overlap",   // (the standard look-ahead switch)
+                                             "--no-overlap",   // (the look-ahead switch of both binaries)
                                              "--fixed-point-merge" };
     static char const *const dropValue[] = { "--verbose", "-v", "--max-concurrent", "--scratch-dir", "--tessellation-cache" };
     auto isOption = [](std::string const &t)

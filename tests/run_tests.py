@@ -456,14 +456,14 @@ def test_output_size_matches_grid(tmpdir):
 
 
 def _has_flag(name, flag):
-    """True when the built binary's --full_help mentions the given option (feature gate for
+    """True when the built binary's --full-help mentions the given option (feature gate for
     tests of flags newer than the binary; captured, never piped -- see the .sh scripts). Else
     test NAME is a SKIP (a failure under DTFE_TEST_REQUIRED=1); a binary that exits non-zero on
-    --full_help FAILS it: a broken binary is not one without the flag."""
-    result = subprocess.run([DTFE_BIN, "--full_help"], capture_output=True, text=True)
+    --full-help FAILS it: a broken binary is not one without the flag."""
+    result = subprocess.run([DTFE_BIN, "--full-help"], capture_output=True, text=True)
     binary = os.path.basename(DTFE_BIN)
     if result.returncode != 0:
-        report(name, False, f"{binary} --full_help exited with {result.returncode}")
+        report(name, False, f"{binary} --full-help exited with {result.returncode}")
         return False
     if flag not in result.stdout:
         skip(name, f"{binary} has no {flag}")

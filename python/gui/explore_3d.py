@@ -27,22 +27,25 @@ import grids as G
 import view3d as V
 import volume3d as VOL
 import volume_gl as VGL
+from app_widgets import button_row, flush, tip, tip_auto
 
-VIEW3D_TIP = ("Show the map's field in 3D: the whole box as a translucent volume, the field averaged down to the "
-              "detail chosen, its low values see-through and its high values opaque in the map's colours (or three "
-              "planes through the box: the map's own slice and the middle of the other two), with the voids as "
-              "spheres of radius R_v (R_eff dashed when ticked above) at their true size against the box. A void "
-              "near a face is drawn once, at its catalogue centre, and may reach past the box. Any change to the "
-              "map's field or colours follows (the planes: its slice too); the voids need 'voids' ticked.")
+VIEW3D_TIP = ("Show the map's field in 3D: the whole box as a translucent volume (or on three planes), with the "
+              "voids as spheres of their true size. The volume: the field averaged down to the detail chosen, its "
+              "low values see-through and its high values opaque in the map's colours; the planes: the map's own "
+              "slice and the middle of the other two. The voids: spheres of radius R_v (R_eff dashed when ticked "
+              "above) at their true size against the box. A void near a face is drawn once, at its catalogue "
+              "centre, and may reach past the box. Any change to the map's field or colours follows (the planes: "
+              "its slice too); the voids need 'Voids' ticked.")
 STYLE_ITEMS = (("volume", "volume"), ("planes", "planes"))
-STYLE_TIP = ("Volume: the field of the whole box (or a close-up's cube) averaged down to the detail chosen and drawn "
-             "as a translucent cloud: cells below the low end of the shown range are transparent, the opacity rises "
-             "to the high end on the map's scale (log for a density), coloured with the map's colours over the same "
-             "range; its range is its own (the sliders below), the map's smoothing and range clip are the planes'. "
-             "Planes: the map's slice and the middle of the other two axes at the grid's own resolution.")
-DETAIL_TIP = ("The volume's cells a side, at most: the grid is averaged over blocks of its cells (a 1024³ grid in "
+STYLE_TIP = ("Volume: the field as a translucent cloud; planes: the map's slice and the middle of the other two "
+             "axes. The volume is the field of the whole box (or a close-up's cube) averaged down to the detail "
+             "chosen: cells below the low end of the shown range are transparent, the opacity rises to the high "
+             "end on the map's scale (log for a density), coloured with the map's colours over the same range; its "
+             "range is its own (the sliders below), the map's smoothing and range clip are the planes'. "
+             "The planes are drawn at the grid's own resolution.")
+DETAIL_TIP = ("The volume's cells a side, at most: the grid is averaged over blocks of its cells. (A 1024³ grid in "
               "blocks of 4³ at 256³, of 2³ at 512³, its own cells at 1024³; a smaller grid or close-up: its own "
-              "cells at most). A close-up's cube is read from the grid again at this detail: finer. Drawn on the GPU "
+              "cells at most.) A close-up's cube is read from the grid again at this detail: finer. Drawn on the GPU "
               "(where OpenGL is: said under the controls): at rest every slice at the screen's resolution, about "
               "0.1 s for 1024³, while the view turns the cube's half (2³ cells averaged) or every few slices, kept "
               "over 30 frames a second. Without it a coarse copy (160³ at most) while turning, and at rest a second "
@@ -52,9 +55,10 @@ PERSPECTIVE_TIP = ("Perspective: the box seen from an eye at a finite distance, 
                    "expects (without it a box reads as widening toward the back). The voids' outlines are then true "
                    "in shape but their size depends on their depth, and the scale bar holds at the window's centre. "
                    "Off: a parallel projection, every void a circle of its true size against the box.")
-RANGE_TIP = ("The shown range on the map's scale: below its low end a cell is transparent (the voids and the "
-             "underdense walls of a density from ρ/ρ̄ = 1), from there the opacity rises to its high end; the colour "
-             "spans the same range. A diverging field (velocity divergence, eigenvalues) is shown by |value|.")
+RANGE_TIP = ("The shown range on the map's scale: below its low end a cell is transparent, from there the opacity "
+             "rises to its high end; the colour spans the same range. A density's range opens at ρ/ρ̄ = 1: its "
+             "voids and underdense walls are see-through. A diverging field (velocity divergence, eigenvalues) is "
+             "shown by |value|.")
 OPACITY_TIP = ("How opaque the densest cells are: the opacity of a cell at the high end of the range, 1/128 of the "
                "window's side thick. The same look at every detail, close-up and turn.")
 FAST_SCALE = 0.5                # while the view turns: the coarse cube on a half-size picture
@@ -69,18 +73,19 @@ TURN_STEPS = ((0, 1), (0, 2), (1, 1), (1, 2), (1, 4), (1, 8))
                                 # slice (the opacity corrected for the longer path: the same look) of the volume (0)
                                 # or of its half, 2^3 cells averaged (1: no knot hit or missed); without the half,
                                 # (0, 2 x stride)
-CLOSE_TIP = ("Look at the chosen void from near: the camera flies to it and the three planes pass through its centre, "
-             "cut to a cube around it at the grid's full resolution, read periodically across the box's faces, with "
-             "the neighbouring voids that reach into it")
+CLOSE_TIP = ("Look at the chosen void from near: the camera flies to it and the three planes pass through its centre. "
+             "They are cut to a cube around it at the grid's full resolution, read periodically across the box's "
+             "faces, with the neighbouring voids that reach into it")
 BG = QColor(26, 27, 31)                     # the 3D view's background: white outlines read on it
 SELECTED = QColor(255, 196, 64)
 HOVERED = QColor(120, 220, 255)
 SHAPE_ITEMS = (("spheres of R_v", "sphere"), ("fitted ellipsoids", "ellipsoid"))
-SHAPE_TIP = ("How the voids are drawn. Spheres of R_v: where the smoothed density around the centre rises back to "
-             "the mean. Fitted ellipsoids: the catalogue's fit to the density minimum's curvature (its Hessian), "
-             "semi-axes a >= b >= c along their own directions, whose (a b c)^⅓ is R_eff; their widest section is "
-             "drawn, all three on the void inspected, and the planes show where each ellipsoid cuts them. A close-up "
-             "sizes its cube by R_v, or R_eff, and always holds the whole shape.")
+SHAPE_TIP = ("How the voids are drawn: spheres of R_v, or the catalogue's fitted ellipsoids. Spheres of R_v: where "
+             "the smoothed density around the centre rises back to the mean. Fitted ellipsoids: the catalogue's fit "
+             "to the density minimum's curvature (its Hessian), semi-axes a >= b >= c along their own directions, "
+             "whose (a b c)^⅓ is R_eff; their widest section is drawn, all three on the void inspected, and the "
+             "planes show where each ellipsoid cuts them. A close-up sizes its cube by R_v, or R_eff, and always "
+             "holds the whole shape.")
 EDGE = QColor(12, 12, 14)                   # the dark edge under an outline: it reads over a bright plane
 DIM = QColor(120, 122, 128)                 # a close-up's neighbours: opaque grey (a translucent line is slow)
 QUIET = QColor(165, 190, 205)               # the voids over the volume: a thin, cool line apart from its warm colours
@@ -109,7 +114,6 @@ def planes3d(req: dict) -> dict:
     volume request (req['style'] 'volume') goes to volume_scene."""
     if req.get("style") == "volume":
         return volume_scene(req)
-    from explore import _smoothed                   # here: explore imports this module
     o: G.OutputSet = req["output"]
     n = int(o.n)
     cell = o.length / n
@@ -118,8 +122,8 @@ def planes3d(req: dict) -> dict:
     for a in range(3):
         if not req["shown"][a]:
             continue
-        plane = _smoothed(o.slice(req["field"], a, req["index"][a], req["component"], req["ps_gradient"]),
-                              req["smooth"])
+        plane = G.smoothed(o.slice(req["field"], a, req["index"][a], req["component"], req["ps_gradient"]),
+                           req["smooth"])
         r0, r1 = V.rest_axes(a)
         vals = plane[np.ix_(idx[r0], idx[r1])]
         s = V.stride_for(*vals.shape)
@@ -1064,7 +1068,7 @@ class View3D(QWidget):
         """The GPU's copy of the cube freed (another volume, or none)."""
         self._gl_upload.stop()
         self._gl_pic = None
-        r = VGL._STATE.get("renderer")
+        r = VGL.current_renderer()
         if r is not None:
             try:
                 r.forget_cube()
@@ -1074,7 +1078,7 @@ class View3D(QWidget):
     def gl_bytes(self) -> int:
         """The memory the GPU's copy of the shown volume holds (the cube and its half, a byte a cell: 1.1 GB at
         1024³), 0 without."""
-        r = VGL._STATE.get("renderer")
+        r = VGL.current_renderer()
         return 0 if r is None else r.held_bytes()
 
     def _gl_moving(self):
@@ -1097,63 +1101,72 @@ class View3D(QWidget):
 # ==================================================================== the Explore pane's part
 class View3DMixin:
     def _build_3d(self, col):
-        """The '3D view' group of the left pane."""
+        """The '3D view' group of the left pane: the view's row (with the planes' controls), the volume's
+        transfer function, the voids, the view's state line; then the 3D state and the view's signals."""
         g = QGroupBox("3D view")
         v = QVBoxLayout(g)
         v.addWidget(self._note("The map's field as a translucent volume (or on three planes) with the voids as "
                                "spheres of their true size. Drag to turn it, right-drag (or shift-drag) to move it, "
                                "scroll to zoom. Click a void to inspect it; double-click it (or Close up) to look at "
                                "it from near."))
-        row = QHBoxLayout()
+        self._build_3d_view_row(v)
+        self._build_3d_volume(v)
+        self._build_3d_voids(v)
+        self.view3d_state = self._note("")
+        v.addWidget(self.view3d_state)
+        col.addWidget(g)
+        self._init_3d_state()
+        self._wire_3d()
+
+    def _build_3d_view_row(self, v):
+        """The view's row: Show in 3D, Reset view, the style, perspective, the planes' controls, the detail. The
+        long tooltips are their first sentence, the whole text the What's This (tip_auto)."""
         self.view3d_toggle = QPushButton("Show in 3D")
         self.view3d_toggle.setCheckable(True)
-        self.view3d_toggle.setToolTip(VIEW3D_TIP)
+        tip_auto(self.view3d_toggle, VIEW3D_TIP)
         self.view3d_toggle.toggled.connect(self.show_3d)
-        row.addWidget(self.view3d_toggle)
-        self.view3d_reset = QPushButton("Reset view")
-        self.view3d_reset.setToolTip("The first oblique look, the whole window in view")
+        self.view3d_reset = tip(QPushButton("Reset view"), "The first oblique look, the whole window in view")
         self.view3d_reset.clicked.connect(lambda: self.view.view3d.reset_view())
-        row.addWidget(self.view3d_reset)
         self.view3d_style = QComboBox()
         for text, style in STYLE_ITEMS:
             self.view3d_style.addItem(text, style)
-        self.view3d_style.setToolTip(STYLE_TIP)
+        tip_auto(self.view3d_style, STYLE_TIP)
         self.view3d_style.currentIndexChanged.connect(self._3d_style_changed)
-        row.addWidget(self.view3d_style)
         self.view3d_persp = QCheckBox("perspective")
         self.view3d_persp.setChecked(True)
-        self.view3d_persp.setToolTip(PERSPECTIVE_TIP)
+        tip_auto(self.view3d_persp, PERSPECTIVE_TIP)
         self.view3d_persp.toggled.connect(self._3d_perspective)
-        row.addWidget(self.view3d_persp)
-        self.planes3d_box = QWidget()                   # the planes' own controls, shown with the planes
-        pr = QHBoxLayout(self.planes3d_box)
-        pr.setContentsMargins(0, 0, 0, 0)
+        self._build_3d_planes()
+        self.view3d_detail = QComboBox()
+        for d in VOL.DETAILS:
+            self.view3d_detail.addItem(f"{d}³ cells", d)
+        self.view3d_detail.setCurrentIndex(self.view3d_detail.findData(VOL.DEFAULT_DETAIL))
+        tip_auto(self.view3d_detail, DETAIL_TIP)
+        self.view3d_detail.currentIndexChanged.connect(lambda _i: self._3d_request())
+        v.addLayout(button_row(self.view3d_toggle, self.view3d_reset, self.view3d_style, self.view3d_persp,
+                               self.planes3d_box, self.view3d_detail))
+
+    def _build_3d_planes(self):
+        """The planes' own controls for the view's row (shown with the planes): an axis tick each, the opacity."""
+        self.planes3d_box = QWidget()
+        pr = flush(QHBoxLayout(self.planes3d_box))
         self.view3d_axes = []
         for a in range(3):
-            cb = QCheckBox(V.AXES[a])
+            cb = tip(QCheckBox(V.AXES[a]), f"The plane normal to {V.AXES[a]}")
             cb.setChecked(True)
-            cb.setToolTip(f"The plane normal to {V.AXES[a]}")
             cb.toggled.connect(lambda _on: self._3d_request())
             pr.addWidget(cb)
             self.view3d_axes.append(cb)
         self.view3d_opacity = QSpinBox(minimum=10, maximum=100, value=90, singleStep=10)
         self.view3d_opacity.setSuffix(" % opaque")
-        self.view3d_opacity.setToolTip("The planes' opacity: below 100 % a sphere behind a plane shows through it")
+        tip(self.view3d_opacity, "The planes' opacity: below 100 % a sphere behind a plane shows through it")
         self.view3d_opacity.valueChanged.connect(self._3d_opacity)
         pr.addWidget(self.view3d_opacity)
-        row.addWidget(self.planes3d_box)
-        self.view3d_detail = QComboBox()
-        for d in VOL.DETAILS:
-            self.view3d_detail.addItem(f"{d}³ cells", d)
-        self.view3d_detail.setCurrentIndex(self.view3d_detail.findData(VOL.DEFAULT_DETAIL))
-        self.view3d_detail.setToolTip(DETAIL_TIP)
-        self.view3d_detail.currentIndexChanged.connect(lambda _i: self._3d_request())
-        row.addWidget(self.view3d_detail)
-        row.addStretch(1)
-        v.addLayout(row)
-        self.volume3d_box = QWidget()                   # the volume's transfer function, shown with the volume
-        vb = QVBoxLayout(self.volume3d_box)
-        vb.setContentsMargins(0, 0, 0, 0)
+
+    def _build_3d_volume(self, v):
+        """The volume's transfer function (shown with the volume): the shown range, the opacity, Default range."""
+        self.volume3d_box = QWidget()
+        vb = flush(QVBoxLayout(self.volume3d_box))
         row = QHBoxLayout()
         row.addWidget(QLabel("Shown from"))
         self.vol3d_lo = QSlider(Qt.Horizontal, minimum=0, maximum=1000)
@@ -1161,7 +1174,7 @@ class View3DMixin:
         self.vol3d_hi = QSlider(Qt.Horizontal, minimum=0, maximum=1000, value=1000)
         self.vol3d_hi_text = QLabel("")
         for w_ in (self.vol3d_lo, self.vol3d_hi):
-            w_.setToolTip(RANGE_TIP)
+            tip_auto(w_, RANGE_TIP)
             w_.valueChanged.connect(self._3d_tf_moved)
         for lab in (self.vol3d_lo_text, self.vol3d_hi_text):
             lab.setMinimumWidth(QFontMetrics(lab.font()).horizontalAdvance("0.000e+00") + 4)
@@ -1175,53 +1188,49 @@ class View3DMixin:
         row.addWidget(QLabel("Opacity"))
         self.vol3d_opacity = QSlider(Qt.Horizontal, minimum=0, maximum=100)
         self.vol3d_opacity.setValue(self._3d_opacity_position(VOL.DEFAULT_OPACITY))
-        self.vol3d_opacity.setToolTip(OPACITY_TIP)
+        tip_auto(self.vol3d_opacity, OPACITY_TIP)
         self.vol3d_opacity.valueChanged.connect(self._3d_opacity_moved)
         self.vol3d_opacity_text = QLabel("")
         self.vol3d_opacity_text.setMinimumWidth(QFontMetrics(self.vol3d_opacity_text.font()).horizontalAdvance("100 %")
                                                 + 4)
         row.addWidget(self.vol3d_opacity, 1)
         row.addWidget(self.vol3d_opacity_text)
-        self.vol3d_default = QPushButton("Default range")
-        self.vol3d_default.setToolTip("Back to the range the volume opened with (a density: from ρ/ρ̄ = 1 to its "
-                                      "99.9th percentile) and the default opacity")
+        self.vol3d_default = tip(QPushButton("Default range"), "Back to the range the volume opened with (a density: "
+                                 "from ρ/ρ̄ = 1 to its 99.9th percentile) and the default opacity")
         self.vol3d_default.clicked.connect(self._3d_tf_default)
         row.addWidget(self.vol3d_default)
         vb.addLayout(row)
         v.addWidget(self.volume3d_box)
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Voids as"))
+
+    def _build_3d_voids(self, v):
+        """The voids' rows: how they are drawn, then the void menu with Close up and Whole box."""
+        shape_label = QLabel("Voids as")
         self.void3d_shape = QComboBox()
         for text, shape in SHAPE_ITEMS:
             self.void3d_shape.addItem(text, shape)
-        self.void3d_shape.setToolTip(SHAPE_TIP)
+        tip_auto(self.void3d_shape, SHAPE_TIP)
         self.void3d_shape.currentIndexChanged.connect(self._3d_shape_changed)
-        row.addWidget(self.void3d_shape)
-        row.addStretch(1)
-        v.addLayout(row)
+        v.addLayout(button_row(shape_label, self.void3d_shape))
         row = QHBoxLayout()
         row.addWidget(QLabel("Void"))
         self.void3d = QComboBox()
         self.void3d.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.void3d.setMinimumContentsLength(18)
-        self.void3d.setToolTip("The distinct, well-resolved voids, the largest first (by R_v, or by R_eff when they "
-                               "are drawn as ellipsoids): choose one to inspect it")
+        tip(self.void3d, "The distinct, well-resolved voids, the largest first (by R_v, or by R_eff when they are "
+                         "drawn as ellipsoids): choose one to inspect it")
         self.void3d.activated.connect(self._void3d_chosen)
         row.addWidget(self.void3d, 1)
-        self.void3d_close = QPushButton("Close up")
-        self.void3d_close.setToolTip(CLOSE_TIP)
+        self.void3d_close = tip_auto(QPushButton("Close up"), CLOSE_TIP)
         self.void3d_close.clicked.connect(lambda: self.close_up_3d(self._3d_selected()))
         row.addWidget(self.void3d_close)
-        self.void3d_back = QPushButton("Whole box")
-        self.void3d_back.setToolTip("Back from the close-up to the whole box (its planes where they were)")
+        self.void3d_back = tip(QPushButton("Whole box"), "Back from the close-up to the whole box (its planes where "
+                               "they were)")
         self.void3d_back.clicked.connect(self.whole_box_3d)
         row.addWidget(self.void3d_back)
         v.addLayout(row)
-        self.view3d_state = QLabel("")
-        self.view3d_state.setWordWrap(True)
-        self.view3d_state.setStyleSheet("color: gray")
-        v.addWidget(self.view3d_state)
-        col.addWidget(g)
+
+    def _init_3d_state(self):
+        """The 3D view's state: nothing shown yet, no planes, no close-up, no request in flight."""
         self._3d_shown = False
         self._3d_busy = False
         self._3d_pending = None
@@ -1238,6 +1247,9 @@ class View3DMixin:
         self._3d_tf = None
         self._3d_ticker = QTimer(self, interval=200)   # the averaging's progress, while it runs
         self._3d_ticker.timeout.connect(self._3d_progress)
+
+    def _wire_3d(self):
+        """The view's signals, its camera's perspective and the controls' first state."""
         v3 = self.view.view3d
         v3.hovered.connect(self._3d_hover)
         v3.clicked.connect(self._3d_click)
@@ -1246,6 +1258,43 @@ class View3DMixin:
         self._3d_style_changed()
         self._3d_apply_tf()                     # the opacity's text
         self._3d_buttons()
+
+    def state_3d(self) -> dict:
+        """The 3D view's choices a restart keeps (ExploreControls.state): the style, perspective, the planes'
+        opacity, the volume's detail and its opacity slider. Not 'Show in 3D' itself, nor a shown range (it belongs
+        to one volume)."""
+        return {"view3d_style": self.view3d_style.currentData(), "view3d_persp": self.view3d_persp.isChecked(),
+                "view3d_opacity": self.view3d_opacity.value(), "view3d_detail": self.view3d_detail.currentData(),
+                "vol3d_opacity": self.vol3d_opacity.value()}
+
+    def restore_state_3d(self, d: dict):
+        """Back to state_3d()'s choices. A key missing (a state saved before it) or a value not offered leaves
+        the control as it is (a fresh window: today's default). Set with signals blocked, then applied once: the
+        style's controls, the camera, the planes' opacity, the opacity's text; no read while the view is closed."""
+        def number(key):
+            try:
+                return int(d[key])
+            except (KeyError, TypeError, ValueError):
+                return None
+        style = self.view3d_style.findData(d["view3d_style"]) if isinstance(d.get("view3d_style"), str) else -1
+        detail = self.view3d_detail.findData(number("view3d_detail")) if number("view3d_detail") is not None else -1
+        persp, opacity, vol_opacity = d.get("view3d_persp"), number("view3d_opacity"), number("vol3d_opacity")
+        before = self.view3d_style.currentIndex()
+        for w, ok, set_ in ((self.view3d_style, style >= 0, lambda w: w.setCurrentIndex(style)),
+                            (self.view3d_persp, isinstance(persp, bool), lambda w: w.setChecked(persp)),
+                            (self.view3d_opacity, opacity is not None, lambda w: w.setValue(opacity)),
+                            (self.view3d_detail, detail >= 0, lambda w: w.setCurrentIndex(detail)),
+                            (self.vol3d_opacity, vol_opacity is not None, lambda w: w.setValue(vol_opacity))):
+            if ok:
+                w.blockSignals(True)
+                set_(w)
+                w.blockSignals(False)
+        if self.view.view3d.cam.perspective != self.view3d_persp.isChecked():
+            self._3d_perspective(self.view3d_persp.isChecked())
+        self._3d_opacity(self.view3d_opacity.value())
+        if self.view3d_style.currentIndex() != before:
+            self._3d_style_changed()            # the style's controls shown (a fresh read when the view is open)
+        self._3d_apply_tf()                     # the opacity's text (and the volume's, when one is shown)
 
     @staticmethod
     def view3d_applicable(o) -> str:
@@ -1259,7 +1308,7 @@ class View3DMixin:
     def _3d_buttons(self):
         why = self.view3d_applicable(self.current)
         self.view3d_toggle.setEnabled(not why or self._3d_shown)
-        self.view3d_toggle.setToolTip(VIEW3D_TIP if not why else f"The 3D view: {why}.")
+        tip_auto(self.view3d_toggle, VIEW3D_TIP if not why else f"The 3D view: {why}.")
         has = self._3d_shown and self._3d_selected() is not None
         self.void3d_close.setEnabled(has)
         self.void3d_back.setEnabled(self._3d_shown and self._3d_close is not None)
@@ -1363,7 +1412,7 @@ class View3DMixin:
             req["detail"], req["note"] = self._3d_detail(o, req["lo"], req["hi"])
             req["progress"] = {}
             # the files' identity (mtime, size) too: a grid written again by a re-run is read again
-            files = tuple(G._cube_key(o.files[s].path, o.dtype, VOL._file_shape(o, s)) for s in VOL._sources(o, name))
+            files = tuple(G.cube_key(o.files[s].path, o.dtype, VOL.file_shape(o, s)) for s in VOL.sources(o, name))
             req["vkey"] = (str(o.root), files, name, req["component"], bool(log), tuple(np.round(req["lo"], 9)),
                            tuple(np.round(req["hi"], 9)), req["detail"])
             shown = self._3d_res is not None and self._3d_res.get("vkey") == req["vkey"] \
@@ -1411,7 +1460,7 @@ class View3DMixin:
                         min(VOL.DETAILS))
         free = G.available_gb()
         prep = (self._3d_res or {}).get("volume")
-        held = VOL._prepared_bytes(prep) if prep is not None else 0
+        held = VOL.prepared_bytes(prep) if prep is not None else 0
         if free is not None and need > (free - 2.0) * 1e9 + held:
             d = fitting((free - 2.0) * 1e9 + held)
             return d, f"{want}³ would need {need / 1e9:.1f} GB with {free:.1f} GB free: {d}³ instead"
@@ -1482,8 +1531,8 @@ class View3DMixin:
             v3.fit()
         o = req["output"]
         label = self._gradient_label(req)
-        comp = "" if req["component"] in ("value", "") else f" [{req['component']}]"
-        self.view.colorbar.set(req["cmap"], res["vrange"], ("log₁₀ " if req["log"] else "") + label + comp, req["log"])
+        comp = G.component_suffix(req["component"])
+        self.view.colorbar.set(req["cmap"], res["vrange"], G.colourbar_label(label, req), req["log"])
         unit = "Mpc" if o.box is not None else "cells"
         planes = ", ".join(f"{V.AXES[a]} = {pl['pos']:.2f}" for a, pl in enumerate(res["planes"]) if pl is not None)
         where = f"close-up on void {self._3d_close['row']}" if self._3d_close is not None else "the whole box"
@@ -1658,9 +1707,8 @@ class View3DMixin:
         self.vol3d_lo_text.setText(self._3d_value_text(tf["lo"]))
         self.vol3d_hi_text.setText(self._3d_value_text(tf["hi"]))
         label = self._gradient_label(dict(req, ps_gradient="stored"))      # the volume is of the stored grid
-        comp = "" if req["component"] in ("value", "") else f" [{req['component']}]"
         vr = (-tf["hi"], tf["hi"]) if req["symmetric"] else (tf["lo"], tf["hi"])
-        self.view.colorbar.set(cmap, vr, ("log₁₀ " if req["log"] else "") + label + comp
+        self.view.colorbar.set(cmap, vr, G.colourbar_label(label, req)
                                + (" (|value| shown)" if req["symmetric"] else ""), req["log"])
         self._3d_state()
 
@@ -1673,7 +1721,7 @@ class View3DMixin:
             return
         req, o = res["request"], res["request"]["output"]
         label = self._gradient_label(dict(req, ps_gradient="stored"))
-        comp = "" if req["component"] in ("value", "") else f" [{req['component']}]"
+        comp = G.component_suffix(req["component"])
         where = f"close-up on void {self._3d_close['row']}" if self._3d_close is not None else "the whole box"
         m = prep["shape"]
         cells = "×".join(str(int(k)) for k in m) if len(set(m)) > 1 else f"{int(m[0])}³"
@@ -1766,7 +1814,7 @@ class View3DMixin:
         self.void3d.blockSignals(True)
         self.void3d.clear()
         if res is None:
-            self.void3d.addItem("tick 'voids' above" if not self.voids.isChecked() else "no voids (yet)", None)
+            self.void3d.addItem("tick 'Voids' above" if not self.voids.isChecked() else "no voids (yet)", None)
         else:
             name, key_r = ("R_eff", "_r_eff") if self._3d_ellipsoids() else ("R_v", "_r_v")
             rows = self.void_rows(res, key_r)

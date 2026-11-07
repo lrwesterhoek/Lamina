@@ -14,7 +14,6 @@ style.apply()
 
 OUTPUT_DIR = config.figures_path('tidal')
 
-DPI = config.DPI
 N_PERM = config.CORRELATION_N_PERMUTATIONS
 BAND_LO, BAND_HI = config.CORRELATION_BAND_PERCENTILES
 
@@ -83,7 +82,7 @@ def plot_alignment_histogram(cos, combo, redshift, snapshot, lo, hi,
     save_figure(
         fig, output_dir / f'alignment_{combo}_snap{snapshot}'
                           f'_z{redshift:.2f}.png',
-        dpi=DPI, bbox_inches='tight', facecolor='white')
+        bbox_inches='tight', facecolor='white')
     plt.close(fig)
 
 
@@ -113,7 +112,7 @@ def plot_alignment_evolution(rows, combo):
     plt.tight_layout()
     save_figure(
         fig, Path(OUTPUT_DIR) / f'tidal_alignment_evolution_{combo}.png',
-        dpi=DPI, bbox_inches='tight', facecolor='white')
+        bbox_inches='tight', facecolor='white')
     plt.close(fig)
 
 

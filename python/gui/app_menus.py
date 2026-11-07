@@ -13,7 +13,7 @@ from pathlib import Path
 
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QLineEdit,
-                               QSpinBox, QWidget)
+                               QSpinBox, QWhatsThis, QWidget)
 
 import runspec as rs
 import results as R
@@ -23,11 +23,17 @@ from app_widgets import _note, _grow_fields
 class MenusMixin:
     def _build_menus(self):
         """The menu bar: Setup, running (Run, Add to Queue, Stop, the memory check), the Explore
-        tab's, the queue's, the figure browser's and the Runs browser's actions, and the commands
-        behind a run (shown, copied, exported). Each also has its button in the window; the
-        _sync_*_actions methods keep the Run, Explore, Queue, Figures and Runs menus in step with
-        those buttons."""
+        tab's, the queue's, the figure browser's and the Runs browser's actions, the commands
+        behind a run (shown, copied, exported), and Help. Each also has its button in the window
+        (Help aside); the _sync_*_actions methods keep the Run, Explore, Queue, Figures and Runs
+        menus in step with those buttons."""
         bar = self.menuBar()
+        for build in (self._build_file_menu, self._build_edit_menu, self._build_view_menu, self._build_run_menu,
+                      self._build_explore_menu, self._build_queue_menu, self._build_figures_menu,
+                      self._build_runs_menu, self._build_help_menu):
+            build(bar)
+
+    def _build_file_menu(self, bar):
         file_menu = bar.addMenu("File")
         self.setup_action = QAction("Setup…", self)
         self.setup_action.setShortcut(QKeySequence("Ctrl+,"))
@@ -39,9 +45,11 @@ class MenusMixin:
         self.export_action.setShortcut(QKeySequence("Ctrl+E"))
         self.export_action.triggered.connect(self.export_job)
         file_menu.addAction(self.export_action)
+
+    def _build_edit_menu(self, bar):
+        edit_menu = bar.addMenu("Edit")
         self.copy_action = QAction("Copy Commands", self)
         self.copy_action.triggered.connect(self.copy_commands)
-        edit_menu = bar.addMenu("Edit")
         edit_menu.addAction(self.copy_action)
         edit_menu.addSeparator()
         self.find_log_action = QAction("Find in Log", self)
@@ -56,11 +64,15 @@ class MenusMixin:
         self.open_log_action.triggered.connect(self.open_run_log)
         self.open_log_action.setEnabled(False)
         edit_menu.addAction(self.open_log_action)
+
+    def _build_view_menu(self, bar):
         self.show_cmds_action = QAction("Show Commands", self, checkable=True)
         self.show_cmds_action.setShortcut(QKeySequence("Ctrl+Shift+C"))
         self.show_cmds_action.setChecked(self.show_commands)
         self.show_cmds_action.toggled.connect(self._toggle_commands)
         bar.addMenu("View").addAction(self.show_cmds_action)
+
+    def _build_run_menu(self, bar):
         run_menu = bar.addMenu("Run")
         for attr, text, keys, slot in (("run_action", "Run", "Ctrl+R", self.start_run),
                                        ("queue_action", "Add to Queue", "Ctrl+Shift+R", self.enqueue),
@@ -73,6 +85,8 @@ class MenusMixin:
             action.triggered.connect(lambda _=False, slot=slot: slot())
             run_menu.addAction(action)
             setattr(self, attr, action)
+
+    def _build_explore_menu(self, bar):
         explore_menu = bar.addMenu("Explore")
         for attr, text, keys, what in (("open_output_action", "Open Output…", "Ctrl+O", "open"),
                                        ("find_outputs_action", "Look for Outputs Again", "", "find"),
@@ -89,6 +103,8 @@ class MenusMixin:
             action.triggered.connect(lambda _=False, what=what: self._explore_menu(what))
             explore_menu.addAction(action)
             setattr(self, attr, action)
+
+    def _build_queue_menu(self, bar):
         queue_menu = bar.addMenu("Queue")
         for item in (("q_start_action", "Start Queue", "start"), None,
                      ("q_up_action", "Move Job Up", "up"),
@@ -110,6 +126,8 @@ class MenusMixin:
             action = QAction(text, self, checkable=True)
             queue_menu.addAction(action)
             setattr(self, attr, action)
+
+    def _build_figures_menu(self, bar):
         figures_menu = bar.addMenu("Figures")
         reveal = "Show in Finder" if sys.platform == "darwin" else "Show Folder"
         for item in (("fig_refresh_action", "Refresh Figures", "refresh"), None,
@@ -131,6 +149,8 @@ class MenusMixin:
             action.triggered.connect(lambda _=False, i=i: self._figures_menu("mode", i))
             figures_menu.addAction(action)
             self.fig_mode_actions.append(action)
+
+    def _build_runs_menu(self, bar):
         runs_menu = bar.addMenu("Runs")
         reveal = "Show in Finder" if sys.platform == "darwin" else "Show Folder"
         for item in (("runs_refresh_action", "Refresh Runs", "refresh"), None,
@@ -147,6 +167,14 @@ class MenusMixin:
             action.triggered.connect(lambda _=False, what=what: self._runs_menu(what))
             runs_menu.addAction(action)
             setattr(self, attr, action)
+
+    def _build_help_menu(self, bar):
+        """Help: What's This? -- then a click on a control shows its whole explanation (a tooltip says what a
+        control does in at most two lines; the longer texts are the controls' What's This)."""
+        help_menu = bar.addMenu("Help")
+        self.whats_this_action = QWhatsThis.createAction(self)
+        self.whats_this_action.setText("What's This?")
+        help_menu.addAction(self.whats_this_action)
 
     def _bring_up(self, widget: QWidget):
         """Show one of the results tabs (Queue, Runs), leaving Explore for the last tab with the

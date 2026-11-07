@@ -40,7 +40,7 @@ WA=(--ps-window 12.5 37.5 62.5 81.25 46.875 48.4375)
 WB=(--ps-window 87.5 112.5 62.5 81.25 46.875 48.4375)
 run() { local out="$1"; shift; local t0=$SECONDS; "$@" > "$out.log" 2>&1 || { echo "FAIL: $* (see $out.log)"; exit 1; }; echo "   $(basename "$out"): $((SECONDS - t0)) s"; }
 for mode in sampled exact; do
-    EXTRA=(--avg-subsamples 2); [ $mode = exact ] && EXTRA=(--ps-exact-deposit)
+    EXTRA=(--avg-subsamples 2); [ $mode = exact ] && EXTRA=(--exact-average)
     echo ">> $mode deposit: full run, window, seam window, --partition 2 2 2 (full and window), vertex mass + volume weighted"
     run "$TMP/${mode}_full"     "$PS_BIN" "$SNAP" "$TMP/${mode}_full"     --grid $G "${BASE[@]}" "${EXTRA[@]}"
     run "$TMP/${mode}_win"      "$PS_BIN" "$SNAP" "$TMP/${mode}_win"      --grid $G "${BASE[@]}" "${EXTRA[@]}" "${WA[@]}"
@@ -57,14 +57,14 @@ for mode in sampled exact; do
     [ "$nrel" -gt 0 ] && echo "  PASS $mode: the halo-release window run released $nrel tetrahedra" \
         || { echo "  FAIL $mode: the halo-release window run released none (the pair is not exercised)"; exit 1; }
     if [ $GPU = 1 ]; then
-        run "$TMP/${mode}_wingpu" "$PS_BIN" "$SNAP" "$TMP/${mode}_wingpu" --grid $G "${BASE[@]}" "${EXTRA[@]}" "${WA[@]}" --ps-gpu
+        run "$TMP/${mode}_wingpu" "$PS_BIN" "$SNAP" "$TMP/${mode}_wingpu" --grid $G "${BASE[@]}" "${EXTRA[@]}" "${WA[@]}" --gpu
         grep -q "using the CPU deposit\|deposit unavailable" "$TMP/${mode}_wingpu.log" && { echo "FAIL: the GPU window run fell back to the CPU"; exit 1; }
-        run "$TMP/${mode}_seamgpu" "$PS_BIN" "$SNAP" "$TMP/${mode}_seamgpu" --grid $G "${BASE[@]}" "${EXTRA[@]}" "${WB[@]}" --ps-gpu
-        run "$TMP/${mode}_winhrgpu" "$PS_BIN" "$SNAP" "$TMP/${mode}_winhrgpu" --grid $G "${BASE[@]}" "${EXTRA[@]}" --ps-halo-release 2 "${WA[@]}" --ps-gpu
+        run "$TMP/${mode}_seamgpu" "$PS_BIN" "$SNAP" "$TMP/${mode}_seamgpu" --grid $G "${BASE[@]}" "${EXTRA[@]}" "${WB[@]}" --gpu
+        run "$TMP/${mode}_winhrgpu" "$PS_BIN" "$SNAP" "$TMP/${mode}_winhrgpu" --grid $G "${BASE[@]}" "${EXTRA[@]}" --ps-halo-release 2 "${WA[@]}" --gpu
         # --ps-vertex-mass on the GPU computes the vertex degrees lazily for the window's tetrahedra:
         # the self-check compares every one with the full pass
         PS_DEBUG_DEGREES=1 "$PS_BIN" "$SNAP" "$TMP/${mode}_degchk" --grid $G "${BASE[@]}" "${EXTRA[@]}" "${WA[@]}" \
-            --ps-gpu --ps-vertex-mass --ps-volume-weighted > "$TMP/${mode}_degchk.log" 2>&1 \
+            --gpu --ps-vertex-mass --ps-volume-weighted > "$TMP/${mode}_degchk.log" 2>&1 \
             || { echo "FAIL: the lazy-degree self-check failed (see $TMP/${mode}_degchk.log)"; exit 1; }
         nchk=$(grep -c "differ" "$TMP/${mode}_degchk.log"); nbad=$(grep "differ" "$TMP/${mode}_degchk.log" | grep -vc ", 0 differ")
         [ "$nchk" -ge 1 ] && [ "$nbad" = 0 ] && echo "  PASS $mode: the GPU window's lazy vertex degrees equal the full pass ($nchk checks)" \
@@ -72,19 +72,19 @@ for mode in sampled exact; do
     fi
 done
 echo ">> the launcher's zoom shape: grid 256x256x16, exact deposit, window = cells [64,192)x[64,192)x[8,9) (one coarse slice)"
-run "$TMP/zoom_full" "$PS_BIN" "$SNAP" "$TMP/zoom_full" --grid 256 256 16 "${BASE[@]}" --ps-exact-deposit
-run "$TMP/zoom_win"  "$PS_BIN" "$SNAP" "$TMP/zoom_win"  --grid 256 256 16 "${BASE[@]}" --ps-exact-deposit --ps-window 25 75 25 75 50 56.25
+run "$TMP/zoom_full" "$PS_BIN" "$SNAP" "$TMP/zoom_full" --grid 256 256 16 "${BASE[@]}" --exact-average
+run "$TMP/zoom_win"  "$PS_BIN" "$SNAP" "$TMP/zoom_win"  --grid 256 256 16 "${BASE[@]}" --exact-average --ps-window 25 75 25 75 50 56.25
 if [ $GPU = 1 ]; then
-    run "$TMP/zoom_wingpu" "$PS_BIN" "$SNAP" "$TMP/zoom_wingpu" --grid 256 256 16 "${BASE[@]}" --ps-exact-deposit --ps-window 25 75 25 75 50 56.25 --ps-gpu
+    run "$TMP/zoom_wingpu" "$PS_BIN" "$SNAP" "$TMP/zoom_wingpu" --grid 256 256 16 "${BASE[@]}" --exact-average --ps-window 25 75 25 75 50 56.25 --gpu
     # the units of a GPU and a CPU window pass: both must bound the same tets (the window's), else the two take
     # different units (and different last bits). Single build only: the double build's CPU deposit keeps double
     # sums (no units to compare)
     precision_double && echo ">> GPU vs CPU window units: SKIP (the double build's CPU sums are doubles)"
     precision_double || echo ">> GPU vs CPU window: the same fixed-point units per pass (--partition 2 2 2, --verbose 3)"
-    precision_double || for v in "sampled:--avg-subsamples 2" "exact:--ps-exact-deposit --ps-vertex-mass --ps-volume-weighted" "hr:--ps-halo-release 2"; do
+    precision_double || for v in "sampled:--avg-subsamples 2" "exact:--exact-average --ps-vertex-mass --ps-volume-weighted" "hr:--ps-halo-release 2"; do
         tag="${v%%:*}"; read -r -a O <<< "${v#*:}"
         for dev in cpu gpu; do
-            D=(); [ $dev = gpu ] && D=(--ps-gpu)
+            D=(); [ $dev = gpu ] && D=(--gpu)
             run "$TMP/units_${tag}_$dev" "$PS_BIN" "$SNAP" "$TMP/units_${tag}_$dev" --grid $G "${BASE[@]}" "${O[@]}" \
                 --partition 2 2 2 --verbose 3 "${WA[@]}" ${D[@]+"${D[@]}"}
             sed -n 's/^PS-DTFE fixed-point units ([CG]PU): //p' "$TMP/units_${tag}_$dev.log" > "$TMP/units_${tag}_$dev.txt"
@@ -115,7 +115,7 @@ ng=$(ls "$CACHE"/globals_*.txt 2>/dev/null | wc -l | tr -d ' ')
 PART=(--partition 2 2 2)
 skipped() { sed -n 's/.*--ps-window: \([0-9]*\) of \([0-9]*\) partitions never reach.*/\1/p' "$1" | head -1; }
 for mode in sampled exact; do
-    EXTRA=(--avg-subsamples 2); [ $mode = exact ] && EXTRA=(--ps-exact-deposit)
+    EXTRA=(--avg-subsamples 2); [ $mode = exact ] && EXTRA=(--exact-average)
     for w in A B; do
         WIN=("${WA[@]}"); [ $w = B ] && WIN=("${WB[@]}")
         run "$TMP/${mode}_${w}_nocache" "$PS_BIN" "$SNAP" "$TMP/${mode}_${w}_nocache" --grid $G "${BASE[@]}" "${EXTRA[@]}" "${PART[@]}" "${WIN[@]}"
@@ -148,7 +148,7 @@ done
 echo "  PASS ... with identical grids"
 # the launcher's own flags: vertex masses (per partition, from its padded tessellation) and volume weights --
 # skipping a partition must not touch them either
-VM=(--ps-exact-deposit --ps-vertex-mass --ps-volume-weighted "${PART[@]}" "${WA[@]}")
+VM=(--exact-average --ps-vertex-mass --ps-volume-weighted "${PART[@]}" "${WA[@]}")
 run "$TMP/vm_nocache" "$PS_BIN" "$SNAP" "$TMP/vm_nocache" --grid $G "${BASE[@]}" "${VM[@]}"
 run "$TMP/vm_cached"  "$PS_BIN" "$SNAP" "$TMP/vm_cached"  --grid $G "${BASE[@]}" "${VM[@]}" --tessellation-cache "$CACHE"
 for f in den vel velDisp streams hidden_streams caustic; do
@@ -186,7 +186,7 @@ run "$TMP/wide" "$PS_BIN" "$SNAP" "$TMP/wide" --grid $G "${BASE[@]}" --avg-subsa
     --ps-window 0 100 0 100 33.0 67.0
 [ "$(skipped "$TMP/wide.log")" = 0 ] && echo "  PASS a window across the box skips no partition" || { echo "  FAIL the wide window skipped $(skipped "$TMP/wide.log")"; exit 1; }
 echo ">> the auto-tuner sizes a window run by its window: a 65536x65536x64 virtual grid, one 128^2 window"
-run "$TMP/huge" "$PS_BIN" "$SNAP" "$TMP/huge" --grid 65536 65536 64 "${BASE[@]}" --ps-exact-deposit "${PART[@]}" \
+run "$TMP/huge" "$PS_BIN" "$SNAP" "$TMP/huge" --grid 65536 65536 64 "${BASE[@]}" --exact-average "${PART[@]}" \
     --ps-window 50 50.1953125 50 50.1953125 50 51.5625
 if grep -q "does not fit in memory" "$TMP/huge.log"; then echo "  FAIL the auto-tuner judged the virtual grid, not the window"; exit 1; fi
 [ "$(wc -c < "$TMP/huge.den" | tr -d ' ')" = $((128*128*REAL_BYTES)) ] && echo "  PASS ran within budget and wrote the 128^2 window" \
@@ -196,9 +196,9 @@ if [ $GPU = 1 ]; then
     echo ">> the GPU exact deposit on a fine virtual grid (32768^2 x 64: 3 kpc cells) agrees with the CPU"
     # the GPU clips each piece in a frame near the piece (exact_clip.metal.inc); in the tetrahedron's
     # vertex-0 frame a 3 kpc piece Mpc away would lose its volume to float cancellation (20% per cell here)
-    FW=(--grid 32768 32768 64 "${BASE[@]}" --ps-exact-deposit "${PART[@]}" --ps-window 40 40.390625 40 40.390625 50 51.5625)
+    FW=(--grid 32768 32768 64 "${BASE[@]}" --exact-average "${PART[@]}" --ps-window 40 40.390625 40 40.390625 50 51.5625)
     run "$TMP/fine_cpu" "$PS_BIN" "$SNAP" "$TMP/fine_cpu" "${FW[@]}"
-    run "$TMP/fine_gpu" "$PS_BIN" "$SNAP" "$TMP/fine_gpu" "${FW[@]}" --ps-gpu
+    run "$TMP/fine_gpu" "$PS_BIN" "$SNAP" "$TMP/fine_gpu" "${FW[@]}" --gpu
     "$PY" - "$TMP" <<'PYEOF2' || exit 1
 import numpy as np, sys
 import os as _os; REAL = np.dtype(_os.environ.get("DTFE_TEST_REAL", "float32"))   # tests/precision.sh
@@ -212,7 +212,7 @@ PYEOF2
 fi
 
 echo ">> --ps-window with --ps-linear-deposit is refused"
-if "$PS_BIN" "$SNAP" "$TMP/lin" --grid $G "${BASE[@]}" --ps-exact-deposit --ps-linear-deposit "${WA[@]}" > "$TMP/lin.log" 2>&1; then
+if "$PS_BIN" "$SNAP" "$TMP/lin" --grid $G "${BASE[@]}" --exact-average --ps-linear-deposit "${WA[@]}" > "$TMP/lin.log" 2>&1; then
     echo "  FAIL: --ps-window + --ps-linear-deposit ran"; exit 1
 else
     grep -q "ps-linear-deposit" "$TMP/lin.log" && echo "  PASS refused with the reason" || { echo "  FAIL: refused without naming --ps-linear-deposit"; exit 1; }

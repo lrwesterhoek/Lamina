@@ -34,9 +34,8 @@ from pathlib import Path
 from PySide6.QtCore import QLocale, QProcess, QSettings, Qt, QTimer
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidgetItem, QMainWindow,
-    QMessageBox, QPushButton, QAbstractItemView, QAbstractSpinBox, QSplitter, QStackedWidget, QTabWidget, QVBoxLayout,
-    QWidget,
+    QApplication, QComboBox, QFileDialog, QLabel, QLineEdit, QListWidgetItem, QMainWindow, QMessageBox,
+    QAbstractItemView, QAbstractSpinBox, QSplitter, QStackedWidget, QStyle, QTabBar, QTabWidget, QVBoxLayout, QWidget,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -44,7 +43,7 @@ import runspec as rs  # noqa: E402
 import presets as P  # noqa: E402
 import results as R  # noqa: E402
 import grids as G  # noqa: E402
-from app_widgets import _checkable, _grow_fields, _scroll  # noqa: E402
+from app_widgets import _checkable, _grow_fields, _scroll, option_tip  # noqa: E402
 from app_widgets import CheckDelegate, FigureBrowser  # noqa: E402,F401  (re-exported)
 from app_tabs import TabsMixin  # noqa: E402
 from app_specs import SpecsMixin  # noqa: E402
@@ -95,6 +94,8 @@ QUEUE_COLOR = {"waiting": QColor("gray"), "running": QColor("#1565c0"), "done": 
 MERGED_COLOR, CHUNKS_COLOR = QColor("#2e7d32"), QColor("#b26a00")
 PER_TEXT = {"snapshot": "one call per selected snapshot", "series": "one call for all selected snapshots",
             "sim": "one call per simulation"}
+# the notes a tick shows when this build lacks what it asks for (P.noted_label)
+NO_GPU, NO_TBB = "this build has no GPU support", "this build has no TBB: ignored"
 
 
 # what the plane conventions' menu adds to the binary's own help: the Runs tab's warning about older planes
@@ -110,7 +111,7 @@ def _pts_conventions_combo(changed) -> QComboBox:
     c = QComboBox()
     for key in rs.PTS_CONVENTIONS:
         c.addItem(rs.PTS_CONVENTIONS_TEXT[key], key)
-    c.setToolTip(P.tooltip("pts_conventions") + PTS_CONVENTIONS_TIP)
+    option_tip(c, "pts_conventions", more=PTS_CONVENTIONS_TIP)
     c.currentIndexChanged.connect(changed)
     return c
 
@@ -135,6 +136,26 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         self.setWindowTitle("Lamina")
         self.remember = remember
         self.settings = settings or QSettings("DTFE", "launcher")   # the settings' key: saved choices stay where they are
+        self._restore_specs(spec, pipeline, plots, data, custom)
+        self._init_state()
+        self._build_menus()             # first: refresh() enables its actions
+        left = self._build_left_pane()
+        self._build_right_pane()
+        splitter = QSplitter()
+        splitter.addWidget(left)
+        splitter.addWidget(self.right)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        self.setCentralWidget(splitter)
+        self.splitter = splitter
+        self._restore_geometry()
+        self.setAcceptDrops(True)           # a grid file, a snapshot or a folder dropped on the window
+        self._start_tabs()
+        self._start_polls()
+
+    def _restore_specs(self, spec, pipeline, plots, data, custom):
+        """The five jobs: as given, else as the last session left them (remembered), else fresh; then the one-time
+        moves of an older launcher's saved starts."""
         self.spec = spec or self._restore("spec", rs.RunSpec)
         self.pipe = pipeline or self._restore("pipeline", rs.PipelineSpec)
         self.plots = plots or self._restore("plots", rs.PlotSpec)
@@ -169,11 +190,14 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
                 if given is None and getattr(sp, "estimator", "ps") == "ps" and sp.deposit == "exact" and sp.gpu:
                     sp.gpu = False
             self.settings.setValue("ps_exact_cpu_start", json.dumps(True))
+
+    def _init_state(self):
+        """The window's state outside its widgets: the remembered lists, the job and queue in progress, the checks."""
         # where custom-snapshot jobs wrote outputs (the Runs browser and Explore look there too)
         self.custom_dirs: list[str] = [d for d in self._restore_json("custom_dirs", []) if isinstance(d, str)]
         self.user_presets: dict = self._restore_json("presets", {})
         self.show_commands = str(self._restore_json("show_commands", False)).lower() == "true"
-        self._explore_saved: dict = self._restore_json("explore", {}) if remember else {}   # restored on first show
+        self._explore_saved: dict = self._restore_json("explore", {}) if self.remember else {}   # restored on first show
         self.runs_cache: list[R.RunRecord] = []            # for the time estimates
         self._runs_scanned = 0.0
         self._job_text = ""                                  # this job's output, for the failure advice
@@ -214,28 +238,52 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         self._mcheck: dict | None = None    # the check in progress
         self.opt_widgets: dict[tuple[str, str], tuple[rs.Opt, QWidget]] = {}
 
-        self._build_menus()             # first: refresh() enables its actions
+    def _build_left_pane(self) -> QWidget:
+        """The tab bar on top, the data panel every tab shares under it, then the active tab's form. The tab bar
+        sits above the panel, whose height changes with the tab (the Grids and Plots tabs show the simulation and
+        its snapshots), so it never moves: it is the tab widget's own bar's stand-in (self.tabs keeps every page,
+        its texts and its current index; tab_bar follows it both ways)."""
         left = QWidget()
         lv = QVBoxLayout(left)
         lv.setContentsMargins(0, 0, 0, 0)
-        top = QHBoxLayout()
-        top.addWidget(self._build_data(), 1)
-        self.setup_btn = QPushButton("Setup…")
-        self.setup_btn.setToolTip("Data folder, building the programs, the TNG API key, and the demo")
-        self.setup_btn.clicked.connect(lambda: self.run_setup())
-        top.addWidget(self.setup_btn, 0, Qt.AlignTop)
-        lv.addLayout(top)
+        self.tab_bar = QTabBar()
+        self.tab_bar.setDrawBase(False)
+        align = self.style().styleHint(QStyle.StyleHint.SH_TabBar_Alignment, None, self.tab_bar)
+        lv.addWidget(self.tab_bar, 0, Qt.AlignmentFlag(align) | Qt.AlignTop)    # (centred on macOS, as its own)
+        lv.addWidget(self._build_data())
+        self._build_explore()
+        self.tabs = QTabWidget()
+        self.tabs.addTab(_scroll(self._build_data_tab()), "Data")
+        self.tabs.addTab(_scroll(self._build_grids_tab()), "Grids")
+        self.tabs.addTab(_scroll(self._build_own_tab()), "Custom snapshot")
+        self.tabs.addTab(_scroll(self._build_pipeline_tab()), "Pipeline")
+        self.tabs.addTab(_scroll(self._build_plots_tab()), "Plots")
+        self.tabs.addTab(_scroll(self.explore), "Explore")
+        self.tabs.setTabToolTip(OWN, "Run DTFE / PS-DTFE on a snapshot file of your own (not IllustrisTNG)")
+        self.tabs.setTabToolTip(EXPLORE, "Look at any run's grids, and click to list the streams at a point")
+        self.tabs.tabBar().hide()
+        self.tabs.setDocumentMode(True)     # (no frame of its own: the pages are scroll areas)
+        for i in range(self.tabs.count()):
+            self.tab_bar.addTab(self.tabs.tabText(i))
+            self.tab_bar.setTabToolTip(i, self.tabs.tabToolTip(i))
+        self.tab_bar.currentChanged.connect(self.tabs.setCurrentIndex)
+        self.tabs.currentChanged.connect(self.tab_bar.setCurrentIndex)
+        lv.addWidget(self.tabs, 1)
+        left.setMinimumWidth(690)           # three columns of field boxes ('velocity dispersion' ...) need it:
+                                            # at 590 the third column reads 've', 'vo', 'V-'
+        return left
+
+    def _build_explore(self):
+        """The Explore tab's controls and its map (the right pane on that tab), and its arrow keys: left / right step
+        through the slices (shift: 10 at a time) and up / down through the fields, wherever the focus is, except in a
+        text or number field (those keep the keys for their cursor and their value) or a table (its rows)."""
         import explore as X
-        import runs_view as RV
         self.explore_view = X.ExploreView()
         # the Save options live in the launcher's settings when it remembers them
         self.explore = X.ExploreControls(self.explore_view, lambda: self.root_edit.text().strip(),
                                          self._custom_output_dirs, settings=self.settings if self.remember else None)
         self.explore.status.connect(self.status_message)
         self.explore.changed.connect(lambda: self._sync_explore_actions())
-        # on the Explore tab, left / right step through the slices (shift: 10 at a time) and up / down
-        # through the fields, wherever the focus is, except in a text or number field (those keep
-        # the keys for their cursor and their value) or a table (its rows)
         self._slice_keys, self._field_keys = [], []
         for keys, delta in (("Left", -1), ("Right", 1), ("Shift+Left", -10), ("Shift+Right", 10)):
             sc = QShortcut(QKeySequence(keys), self, enabled=False)
@@ -246,19 +294,10 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
             sc.activated.connect(lambda d=delta: self.explore.step_field(d))
             self._field_keys.append(sc)
         QApplication.instance().focusChanged.connect(self._explore_keys)
-        self.tabs = QTabWidget()
-        self.tabs.addTab(_scroll(self._build_data_tab()), "Data")
-        self.tabs.addTab(_scroll(self._build_grids_tab()), "Grids")
-        self.tabs.addTab(_scroll(self._build_own_tab()), "Custom snapshot")
-        self.tabs.addTab(_scroll(self._build_pipeline_tab()), "Pipeline")
-        self.tabs.addTab(_scroll(self._build_plots_tab()), "Plots")
-        self.tabs.addTab(_scroll(self.explore), "Explore")
-        self.tabs.setTabToolTip(OWN, "Run DTFE / PS-DTFE on a snapshot file of your own (not IllustrisTNG)")
-        self.tabs.setTabToolTip(EXPLORE, "Look at any run's grids, and click to list the streams at a point")
-        lv.addWidget(self.tabs, 1)
-        left.setMinimumWidth(690)           # three columns of field boxes ('velocity dispersion' ...) need it:
-                                            # at 590 the third column reads 've', 'vo', 'V-'
 
+    def _build_right_pane(self):
+        """The run panel (checks, buttons, log and the results tabs), or on the Explore tab its map."""
+        import runs_view as RV
         self.runs = RV.RunsBrowser(lambda: self.root_edit.text().strip(), self._custom_output_dirs, rs.PYTHON)
         self.runs.build_voids.connect(self.queue_void_build)
         self.running_now = RV.RunningNow()
@@ -270,27 +309,23 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         self.right = QStackedWidget()
         self.right.addWidget(self._build_run_panel())
         self.right.addWidget(self.explore_view)
-        splitter = QSplitter()
-        splitter.addWidget(left)
-        splitter.addWidget(self.right)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        self.setCentralWidget(splitter)
-        self.splitter = splitter
+
+    def _restore_geometry(self):
         self.resize(1400, 900)
-        if remember:                        # the size, place and pane split of the last session;
+        if self.remember:                   # the size, place and pane split of the last session;
             geo, split = self.settings.value("geometry"), self.settings.value("splitter")   # restoreGeometry fits
             if geo is not None:             # a window from a screen no longer attached onto the current one
                 self.restoreGeometry(geo)
             if split is not None:
-                splitter.restoreState(split)
-        self.setAcceptDrops(True)           # a grid file, a snapshot or a folder dropped on the window
+                self.splitter.restoreState(split)
 
+    def _start_tabs(self):
+        """The jobs into the widgets, the tab of last time, and a first refresh."""
         self._load_into_widgets()
         self._read_widgets()            # the shared data (root, simulation, snapshots) into every job
         # a fresh window opens on Grids; a remembered one where it was left (by name: tab indices
         # move when tabs are added)
-        name = str(self.settings.value("tab_name", "grids")) if remember else "grids"
+        name = str(self.settings.value("tab_name", "grids")) if self.remember else "grids"
         self.tabs.setCurrentIndex(TAB_NAMES.index(name) if name in TAB_NAMES else GRIDS)
         if self.tabs.currentIndex() != EXPLORE:
             self._panel_tab = self.tabs.currentIndex()
@@ -302,18 +337,20 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         self._fill_snaps()
         self._refresh_queue()
         self.refresh()
-        # re-check every few seconds while idle: jobs started or finished in a terminal, an external
-        # disk plugged in or out
+
+    def _start_polls(self):
+        """The idle re-check every few seconds (jobs started or finished in a terminal, an external disk plugged in
+        or out), and the memory strip and 'Running now' panel: vm_stat, sysctl, pgrep, ps and a glob of the data
+        root's progress files, in a worker thread every 5 s (never two at once), the answer relayed back."""
         self._poll = QTimer(self, interval=4000)
         self._poll.timeout.connect(lambda: self.proc is None and self.refresh())
         self._poll.start()
-        # the memory strip and the 'Running now' panel: vm_stat, sysctl, pgrep, ps and a glob of the
-        # data root's progress files, in a worker thread every 5 s (never two at once), the answer relayed back
         self.mem_strip = QLabel("")
         self.mem_strip.setStyleSheet("color: gray")
         self.mem_strip.setToolTip("Free memory (what the other programs leave), swap in use, and the DTFE / PS-DTFE "
                                   "programs running on this machine with their resident memory")
         self.statusBar().addPermanentWidget(self.mem_strip)
+        import runs_view as RV
         self._machine_relay = RV._Relay()
         self._machine_relay.done.connect(self._machine_known)
         self._machine_busy = False
@@ -389,13 +426,13 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
             return (lambda sd: False), "", "—"
         if tab == PIPELINE:
             prefix = self.pipe.output_prefix or "ps_output"
-            return (lambda sd: (sd / f"{prefix}.pts_den").is_file()), "sliced", "Sliced"
+            return (lambda sd: (sd / f"{prefix}.pts_den").is_file()), "sliced", P.LABELS["select_sliced"]
         if tab == PLOTS:
             pl = self.plots
-            return (lambda sd: rs.has_grids(sd, pl.method, pl.prefix)), "grids", "With grids"
+            return (lambda sd: rs.has_grids(sd, pl.method, pl.prefix)), "grids", P.LABELS["select_with_grids"]
         s = self.spec
         prefix = s.output_prefix or "ps_output"
-        return (lambda sd: rs.has_outputs(sd, prefix, s.estimator)), "done", "Not yet run"
+        return (lambda sd: rs.has_outputs(sd, prefix, s.estimator)), "done", P.LABELS["select_not_run"]
 
     def _fill_snaps(self):
         was = self._loading
@@ -510,10 +547,11 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
     def refresh(self):
         """Enable what the active job supports, then show its commands, checks and estimate."""
         tab = self.tabs.currentIndex()
+        self._update_summaries()            # the folded groups' one-line summaries
         # ---- Grids tab
         s = self.spec
         ps = s.estimator == "ps"
-        for w in (self.nsub_spin, self.ps_group, self.prefix_edit):
+        for w in (self.nsub_spin, self.ps_group, self.ld_check, self.prefix_edit):
             w.setEnabled(ps)                # the hi-res slice works with both estimators
         self._deposit_texts(self.deposit_combo, ps)       # both estimators: standard DTFE's exact cell average
         for name, cb in self.field_checks.items():
@@ -526,10 +564,10 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         self.pc_combo.setEnabled(ps and bool(s.slice_plane))       # a phase-space option (standard DTFE has one way)
         self.nsub_spin.setEnabled(ps and s.deposit == "sampled")
         gpu_ok = rs.gpu_built(s.estimator, s.precision)
-        self.gpu_check.setText(P.label("gpu" if ps else "gpu_dtfe") + ("" if gpu_ok else " (this build has no GPU support)"))
-        self.gpu_check.setToolTip(P.tooltip("gpu") if ps else P.tooltip("gpu_dtfe", "DTFE"))
-        tbb_note = "" if rs.tbb_built(s.precision) else " (this build has no TBB: ignored)"
-        self.pt_check.setText(P.label("parallel_triangulation") + tbb_note)
+        # a build note replaces the label's own explanation (P.noted_label): the tick never widens its form
+        self.gpu_check.setText(P.noted_label("gpu" if ps else "gpu_dtfe", "" if gpu_ok else NO_GPU))
+        option_tip(self.gpu_check, *(("gpu",) if ps else ("gpu_dtfe", "DTFE")))
+        self.pt_check.setText(P.noted_label("parallel_triangulation", "" if rs.tbb_built(s.precision) else NO_TBB))
         self.pt_check.setEnabled(ps)
         self.om_check.setEnabled(ps)                # a PS-DTFE option (standard DTFE has no partition merge order)
         self.so_check.setEnabled(True)              # both drivers checkpoint and resume
@@ -558,28 +596,28 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         self.o_lag_path.setEnabled(cps and c.lagrangian == "separate")
         self.o_nsub.setEnabled(cps and c.deposit == "sampled")
         self.o_scalar.setEnabled(c.input_type == 105)
-        self.o_pt.setText(P.label("parallel_triangulation") + (" (3D only)" if flat else "" if rs.tbb_built(c.precision)
-                                                               else " (this build has no TBB: ignored)"))
+        self.o_pt.setText(P.noted_label("parallel_triangulation", "3D only" if flat else "" if rs.tbb_built(c.precision)
+                                        else NO_TBB))
         self.o_pt.setEnabled(cps and not flat)
         self.o_om.setEnabled(cps)                   # 2D runs are partitioned too
         self.o_snap_form.setRowVisible(self.o_alpha, cps and not c.periodic)
         self.o_gpu.setEnabled(not flat)
-        self.o_gpu.setText(P.label("gpu" if cps else "gpu_dtfe") + (" (the 2D programs run on the CPU)" if flat else
-                                                                     "" if rs.gpu_built(c.estimator, c.precision)
-                                                                     else " (this build has no GPU support)"))
-        self.o_gpu.setToolTip(P.tooltip("gpu") if cps else P.tooltip("gpu_dtfe", "DTFE"))
+        self.o_gpu.setText(P.noted_label("gpu" if cps else "gpu_dtfe", "the 2D programs run on the CPU" if flat else
+                                         "" if rs.gpu_built(c.estimator, c.precision) else NO_GPU))
+        option_tip(self.o_gpu, *(("gpu",) if cps else ("gpu_dtfe", "DTFE")))
         # ---- Pipeline tab
         p = self.pipe
         self.p_render.setEnabled(not p.plan_only)
         self.p_render_box.setEnabled(p.render and not p.plan_only)
+        for w in (self.p_rfixed, self.p_rforce):            # the render step's options in the Advanced group
+            w.setEnabled(p.render and not p.plan_only)
         self.p_rproject.setEnabled(p.planes > 1)              # one plane: the plane itself
         self.p_thick.setEnabled(p.planes > 1)
         self.p_super_note.setText(f"= {p.supersample ** 2} sample point{'s' if p.supersample > 1 else ''} per pixel")
         self.p_nsub.setEnabled(p.deposit == "sampled")
         self.p_cu.setEnabled(p.caustics)
-        self.p_gpu.setText(P.label("gpu") + ("" if rs.gpu_built("ps", p.precision) else " (this build has no GPU support)"))
-        self.p_pt.setText(P.label("parallel_triangulation")
-                          + ("" if rs.tbb_built(p.precision) else " (this build has no TBB: ignored)"))
+        self.p_gpu.setText(P.noted_label("gpu", "" if rs.gpu_built("ps", p.precision) else NO_GPU))
+        self.p_pt.setText(P.noted_label("parallel_triangulation", "" if rs.tbb_built(p.precision) else NO_TBB))
         # ---- shared data panel
         for w in (self.snap_list, self.all_btn, self.none_btn, self.mark_btn):
             w.setEnabled(tab not in (PIPELINE, DATA, OWN, EXPLORE))

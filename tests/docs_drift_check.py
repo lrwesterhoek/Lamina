@@ -3,7 +3,9 @@
 and the knobs the drivers read must be documented somewhere a user looks.
 
   A) every '--flag' in README.md / demo/COMMANDS.md is an option of the binaries (src/user_options.cc's
-     program_options names), of a script (scripts/*.sh) or of a python tool or test (argparse);
+     program_options names), of a script (scripts/*.sh) or of a python tool or test (argparse); and none is a
+     DEPRECATED spelling (user_options.cc deprecatedOptions: hidden, accepted for one release), except on a line
+     that says 'deprecated' (a note naming the old spelling);
   B) every DTFE_* name in them is read somewhere in the code;
   C) the README knob table: each knob it names is a knob of scripts/config.sh / run_ps_dtfe.sh / run_dtfe.sh (or
      an environment variable the code reads), and where the table gives a plain value as the default it equals
@@ -31,6 +33,10 @@ SKIP_PARTS = {"tmp", "cache", "__pycache__", "figures", "reference"}
 # everywhere, so the letter after the dashes is what tells a flag from punctuation.
 FLAG_RE = re.compile(r"(?<![\w-])--[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]")
 DTFE_RE = re.compile(r"\bDTFE_[A-Z0-9_]*[A-Z0-9]\b")
+# the binaries' deprecated spellings and their canonical names (src/user_options.cc deprecatedOptions;
+# python/gui/results.py DEPRECATED_FLAGS and scripts/run_ps_pipeline.sh run_settings carry the same table)
+DEPRECATED = {"--ps-gpu": "--gpu", "--ps-exact-deposit": "--exact-average", "--ps-no-overlap": "--no-overlap",
+              "--full_help": "--full-help", "--lambda_th": "--lambda-th"}
 
 passed = failed = 0
 
@@ -71,6 +77,17 @@ def code_flags(texts):
         if name.endswith(("user_options.cc", "user_options.h")):
             flags.update("--" + m for m in re.findall(r'\(\s*"([A-Za-z][\w-]*)(?:,\w)?"\s*,', text))
     return flags
+
+
+def deprecated_uses(text):
+    """[(old, canonical, line number)] of every deprecated spelling in a document, outside a line that says
+    'deprecated' (where naming the old spelling is the point)."""
+    out = []
+    for i, ln in enumerate(text.splitlines(), 1):
+        if "deprecated" in ln.lower():
+            continue
+        out += [(f, DEPRECATED[f], i) for f in FLAG_RE.findall(ln) if f in DEPRECATED]
+    return out
 
 
 def script_defaults(text):
@@ -156,6 +173,8 @@ def main():
         miss = sorted(f for f in set(FLAG_RE.findall(text)) if f not in flags)
         check(not miss and text, f"{d}: {len(set(FLAG_RE.findall(text)))} flags, none unknown"
               + (f" -- unknown: {' '.join(miss)}" if miss else ""))
+        old = deprecated_uses(text)
+        check(not old, f"{d}: no deprecated spelling" + "".join(f" -- line {i}: {o} (use {c})" for o, c, i in old))
 
     print("(B) every DTFE_* name in the docs is read by the code")
     for d, text in docs.items():
@@ -209,6 +228,13 @@ def main():
           "the flag pattern takes '--grid' and '(--ps-gpu)', not the ' -- ' dash or 'x--y'")
     check(code_flags([("src/user_options.cc", '("config,c", po::value)\n("NGP", "nearest")')]) >= {"--config", "--NGP"},
           "program_options names count as the binaries' flags")
+    got = deprecated_uses("run it with --ps-gpu --grid 64\n--lambda_th 0.3 (deprecated: --lambda-th)\n`--full_help`\n")
+    check(got == [("--ps-gpu", "--gpu", 1), ("--full_help", "--full-help", 3)],
+          f"a deprecated spelling is caught, except on a line that says so ({got})")
+    src = read("src/user_options.cc")
+    table = src[src.find("deprecatedOptions[] = {"):]
+    cpp = {"--" + a: "--" + b for a, b in re.findall(r'\{ "([\w-]+)", +"([\w-]+)" \}', table[:table.find("};")])}
+    check(cpp == DEPRECATED, f"the deprecated table is the binaries' own (user_options.cc deprecatedOptions: {cpp})")
 
     print()
     print(f"RESULT: {passed} passed, {failed} failed")

@@ -370,6 +370,43 @@ def t_tng100_size_smooth():
               f"{np.median(rv):.3g} Mpc, measured/Vdn {ratio:.3f} +- {err:.3f}")
 
 
+def t_output_tag():
+    """catalog.output_tag == the three rules it replaces, copied here verbatim (plot_void_population's main and
+    fixed-R tags, plot_void_environment.name_tag's head), over PS-DTFE / standard DTFE, their own and other prefixes,
+    mixed snapshots and --keep-overlaps: the tag names the figures and caches, a wrong one orphans them."""
+    import itertools
+    from dtfelib import catalog
+    pairs = [("ps", "ps_output."), ("dtfe", "output."), ("ps", "ps_mw."), ("ps", "ps_caustic."), ("dtfe", "dtfe_hr."),
+             ("ps", "output."), ("dtfe", "ps_output.")]
+
+    def old_main(method_used, prefix_used, keep_overlaps):            # plot_void_population.main / name_tag (env)
+        default_prefix = {"ps": "ps_output.", "dtfe": "output."}
+        grids = "+".join(sorted({m if prefix_used[s] == default_prefix.get(m) else prefix_used[s].rstrip(".")
+                                 for s, m in method_used.items()}))
+        return ("" if grids == "ps" else f"_{grids}") + ("_overlaps" if keep_overlaps else "")
+
+    def old_fixed_r(used):                                             # plot_void_population.fixed_r_main
+        default_prefix = {"ps": "ps_output.", "dtfe": "output."}
+        grids = "+".join(sorted({m if p == default_prefix.get(m) else p.rstrip(".") for m, p in used.values()}))
+        return "" if grids == "ps" else f"_{grids}"
+
+    seen = set()
+    for k in (1, 2, 3):
+        for combo in itertools.product(pairs, repeat=k):
+            snaps = (99, 50, 17)[:k]
+            method_used = {s: m for s, (m, _p) in zip(snaps, combo)}
+            prefix_used = {s: p for s, (_m, p) in zip(snaps, combo)}
+            used = dict(zip(snaps, combo))
+            for keep in (False, True):
+                new = catalog.output_tag(((m, prefix_used[s]) for s, m in method_used.items()), keep)
+                assert new == old_main(method_used, prefix_used, keep), (combo, keep, new)
+                seen.add(new)
+            new = catalog.output_tag(used.values())
+            assert new == old_fixed_r(used), (combo, new)
+    assert {"", "_overlaps", "_dtfe", "_ps_mw", "_dtfe+ps", "_dtfe+ps_mw_overlaps"} <= seen, sorted(seen)
+    assert catalog.output_tag([("ps", "ps_output.")]) == "" and catalog.output_tag([("dtfe", "output.")], True) == "_dtfe_overlaps"
+
+
 def main():
     print("=" * 60)
     print(" void population: theory, size function, cross-box shapes, analyze.py")
@@ -386,6 +423,8 @@ def main():
     check("population: --size-smooth window restores the smoothing, names tagged, fraction defined, in --help",
           t_size_smooth)
     check("crossbox: median_ci, grf_shapes, the shape row and table columns, an old .npz still drawn", t_crossbox_shapes)
+    check("catalog.output_tag == the population / fixed-R / environment tag rules it replaces, over estimators, "
+          "prefixes, mixed snapshots and --keep-overlaps", t_output_tag)
     check("analyze.py: VOID_SCRIPTS registered, a missing script skipped with a note", t_analyze_void_scripts)
     check("analyze.py: DTFE_VOID_GATE=none refuses 'plot' for the gate, not the smoothing", t_analyze_gate_refusal)
     print("data-backed:")

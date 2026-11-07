@@ -17,6 +17,9 @@
 # only between two builds of the SAME kernel source: use it for a host-only change (the GPU sums every grid in
 # fixed point, so a run repeats to the byte). A kernel change is checked by metal/validate_deposit and the GPU
 # suites' tolerances instead.
+# The runs spell PS-DTFE's options the old way ('--ps-gpu', '--ps-exact-deposit'): both sides run the same command,
+# and a reference set from before the one flag scheme knows only those; the current binaries take them as deprecated
+# aliases (a 'warning: ... is deprecated' line in the log, the same outputs).
 # Usage: tests/dev/bytecmp.sh [--gpu-exact] <reference binaries dir> <output dir>   (exit 0 = every file identical)
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

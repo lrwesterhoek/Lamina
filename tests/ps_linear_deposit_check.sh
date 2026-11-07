@@ -11,7 +11,7 @@
 #     (identical .streams, high correlation, bounded max ratio -- no new caustic spikes).
 #  C) GPU parity (GPU builds only): the GPU linear deposit matches the CPU linear deposit
 #     within the usual float32 atomic tolerances.
-#  D) [gated on --ps-exact-deposit support] the r3d exact conservative deposit: mass
+#  D) [gated on --exact-average support] the r3d exact conservative deposit: mass
 #     conservation at (or below) the sampled deposit's float floor, '.den' == '.a_den'
 #     bit-exact (the exact deposit is nSub-independent), the raw integer '.tetTouch'
 #     count bit-exact between same-split partitioned runs at 1 and N threads, '.streams'
@@ -46,9 +46,9 @@ build_target "${1:-}" PS-DTFE o_ps
 GPU_BUILT=0
 [ -f o_ps/.gpu_mode_off ] || GPU_BUILT=1
 # capture FIRST -- piping the binary straight into grep -q would SIGPIPE it under pipefail
-FULL_HELP="$("${BIN}" --full_help 2>/dev/null)" || { echo "FAIL: ${BIN} --full_help exited non-zero"; exit 1; }
+FULL_HELP="$("${BIN}" --full-help 2>/dev/null)" || { echo "FAIL: ${BIN} --full-help exited non-zero"; exit 1; }
 HAVE_EXACT=0
-grep -q -- '--ps-exact-deposit' <<<"${FULL_HELP}" && HAVE_EXACT=1
+grep -q -- '--exact-average' <<<"${FULL_HELP}" && HAVE_EXACT=1   # the exact deposit (the runs keep its old name)
 
 echo ">> generating test snapshots ..."
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP_UNI}" --n "${N}" --box "${BOX}" \
@@ -79,35 +79,35 @@ run "${TMP}/pld_pan_u" "${SNAP_PAN}" --periodic
 echo ">> run 4: pancake, --ps-linear-deposit"
 run "${TMP}/pld_pan_l" "${SNAP_PAN}" --periodic --ps-linear-deposit
 if [ "${GPU_BUILT}" -eq 1 ]; then
-    echo ">> run 5: pancake, --ps-linear-deposit --ps-gpu (GPU parity)"
-    run "${TMP}/pld_pan_lg" "${SNAP_PAN}" --periodic --ps-linear-deposit --ps-gpu
+    echo ">> run 5: pancake, --ps-linear-deposit --gpu (GPU parity)"
+    run "${TMP}/pld_pan_lg" "${SNAP_PAN}" --periodic --ps-linear-deposit --gpu
 else
     echo ">> run 5 skipped (CPU-only build: no GPU parity to check)"
 fi
 
 if [ "${HAVE_EXACT}" -eq 1 ]; then
-    echo ">> run 6: pancake, --ps-exact-deposit"
-    run "${TMP}/pld_pan_ex" "${SNAP_PAN}" --periodic --ps-exact-deposit
-    echo ">> run 7: pancake, --ps-exact-deposit, --partition 2 2 2, 1 thread"
-    OMP_NUM_THREADS=1 run "${TMP}/pld_pan_ex_p1" "${SNAP_PAN}" --periodic --ps-exact-deposit --partition 2 2 2
-    echo ">> run 8: pancake, --ps-exact-deposit, --partition 2 2 2, all threads"
-    run "${TMP}/pld_pan_ex_pN" "${SNAP_PAN}" --periodic --ps-exact-deposit --partition 2 2 2
-    echo ">> run 9: pancake, --ps-exact-deposit --ps-linear-deposit (composition)"
-    run "${TMP}/pld_pan_ex_l" "${SNAP_PAN}" --periodic --ps-exact-deposit --ps-linear-deposit
+    echo ">> run 6: pancake, --exact-average"
+    run "${TMP}/pld_pan_ex" "${SNAP_PAN}" --periodic --exact-average
+    echo ">> run 7: pancake, --exact-average, --partition 2 2 2, 1 thread"
+    OMP_NUM_THREADS=1 run "${TMP}/pld_pan_ex_p1" "${SNAP_PAN}" --periodic --exact-average --partition 2 2 2
+    echo ">> run 8: pancake, --exact-average, --partition 2 2 2, all threads"
+    run "${TMP}/pld_pan_ex_pN" "${SNAP_PAN}" --periodic --exact-average --partition 2 2 2
+    echo ">> run 9: pancake, --exact-average --ps-linear-deposit (composition)"
+    run "${TMP}/pld_pan_ex_l" "${SNAP_PAN}" --periodic --exact-average --ps-linear-deposit
     echo ">> runs 10-11: pancake, sampled '.a_den' at nSub 1/5 (3 is run 3) for the convergence ladder"
     run "${TMP}/pld_pan_ns1" "${SNAP_PAN}" --periodic --avg-subsamples 1
     run "${TMP}/pld_pan_ns5" "${SNAP_PAN}" --periodic --avg-subsamples 5
     if [ "${GPU_BUILT}" -eq 1 ]; then
-        echo ">> runs 12-13: exact deposit + dispersion, CPU vs --ps-gpu (float32 exact-clip parity)"
+        echo ">> runs 12-13: exact deposit + dispersion, CPU vs --gpu (float32 exact-clip parity)"
         # dedicated pair (with the dispersion field run() does not request): the GPU exact
         # deposit is a hand-written float32 z-sweep (not r3d), and this pair is its parity coverage in the suite
         for tag in exd exg; do
-            GPUFLAG=""; [ "${tag}" = "exg" ] && GPUFLAG="--ps-gpu"
+            GPUFLAG=""; [ "${tag}" = "exg" ] && GPUFLAG="--gpu"
             rm -f "${TMP}/pld_pan_${tag}".*
             set +e
             "${BIN}" "${SNAP_PAN}" "${TMP}/pld_pan_${tag}" --grid "${GRID}" \
                 --field density velocity dispersion --input 105 --MpcUnit 1 --verbose 1 \
-                --periodic --ps-exact-deposit ${GPUFLAG} > "${TMP}/pld_pan_${tag}.log" 2>&1
+                --periodic --exact-average ${GPUFLAG} > "${TMP}/pld_pan_${tag}.log" 2>&1
             rc=$?
             set -e
             if [ "${rc}" -ne 0 ]; then
@@ -120,8 +120,8 @@ if [ "${HAVE_EXACT}" -eq 1 ]; then
         echo ">> runs 12-13 skipped (CPU-only build: no exact-deposit GPU parity to check)"
     fi
 else
-    [ "${DTFE_TEST_REQUIRED:-0}" = "1" ] && { echo "FAIL (required): this PS-DTFE has no --ps-exact-deposit" >&2; exit 1; }
-    echo ">> runs 6-13 skipped (binary lacks --ps-exact-deposit)"
+    [ "${DTFE_TEST_REQUIRED:-0}" = "1" ] && { echo "FAIL (required): this PS-DTFE has no --exact-average" >&2; exit 1; }
+    echo ">> runs 6-13 skipped (binary lacks --exact-average)"
 fi
 
 echo ">> checking the numbers ..."
@@ -184,7 +184,7 @@ if gpu:
 else:
     print("   SKIP C GPU parity (CPU-only build)")
 
-# ---------- (D) exact conservative deposit (--ps-exact-deposit, r3d) ----------
+# ---------- (D) exact conservative deposit (--exact-average, r3d) ----------
 if have_exact:
     ex = load(f"{tmp}/pld_pan_ex", ".den")
     exa = load(f"{tmp}/pld_pan_ex", ".a_den")
@@ -274,7 +274,7 @@ if have_exact:
     else:
         print("   SKIP D exact GPU parity (CPU-only build)")
 else:
-    print("   SKIP D exact deposit (binary lacks --ps-exact-deposit)")
+    print("   SKIP D exact deposit (binary lacks --exact-average)")
 
 print("-" * 60)
 if fails:

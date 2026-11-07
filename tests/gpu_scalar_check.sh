@@ -4,7 +4,7 @@
 # snapshot) must agree between the CPU and the GPU deposit the way the velocity and its gradient do.
 # Builds with ONE scalar component (the default, NO_SCALARS=1): the GPU declines other builds.
 #   DTFE    sampled '_a' interpolation: the item kernel (default), the per-tet kernel (DTFE_GPU_ITEMS=0)
-#   PS-DTFE the sampled deposit (nSub 2) and the exact deposit (--ps-exact-deposit)
+#   PS-DTFE the sampled deposit (nSub 2) and the exact deposit (--exact-average)
 # Tolerance = the parity class of the velocity fields on the same box: values (scalar, density,
 # velocity) mean 1e-3 and per-cell 5e-2 beyond a 1e-3 fraction; GRADIENTS at caustics are a
 # float-sensitive quantity (the inverse edge matrix of a tetrahedron near a fold amplifies the
@@ -51,9 +51,9 @@ run "$TMP/d_gpu"  "${DTFE_BIN}" "$SNAP" "$TMP/d_gpu" "${COMMON[@]}" --gpu
 run "$TMP/d_tet"  env DTFE_GPU_ITEMS=0 "${DTFE_BIN}" "$SNAP" "$TMP/d_tet" "${COMMON[@]}" --gpu
 echo ">> PS-DTFE: CPU and GPU, sampled (nSub 2) and exact"
 "${PS_BIN}" "$SNAP" "$TMP/p_cpu" "${COMMON[@]}" --avg-subsamples 2 > "$TMP/p_cpu.log" 2>&1 || { echo "FAIL: PS-DTFE cpu"; exit 1; }
-run "$TMP/p_gpu" "${PS_BIN}" "$SNAP" "$TMP/p_gpu" "${COMMON[@]}" --avg-subsamples 2 --ps-gpu
-"${PS_BIN}" "$SNAP" "$TMP/e_cpu" "${COMMON[@]}" --ps-exact-deposit > "$TMP/e_cpu.log" 2>&1 || { echo "FAIL: PS-DTFE exact cpu"; exit 1; }
-run "$TMP/e_gpu" "${PS_BIN}" "$SNAP" "$TMP/e_gpu" "${COMMON[@]}" --ps-exact-deposit --ps-gpu
+run "$TMP/p_gpu" "${PS_BIN}" "$SNAP" "$TMP/p_gpu" "${COMMON[@]}" --avg-subsamples 2 --gpu
+"${PS_BIN}" "$SNAP" "$TMP/e_cpu" "${COMMON[@]}" --exact-average > "$TMP/e_cpu.log" 2>&1 || { echo "FAIL: PS-DTFE exact cpu"; exit 1; }
+run "$TMP/e_gpu" "${PS_BIN}" "$SNAP" "$TMP/e_gpu" "${COMMON[@]}" --exact-average --gpu
 "$PY" - "$TMP" <<'PYEOF'
 import numpy as np, sys
 import os as _os; REAL = np.dtype(_os.environ.get("DTFE_TEST_REAL", "float32"))   # tests/precision.sh

@@ -14,18 +14,15 @@ import config
 from dtfelib import figures as style
 from dtfelib import pipeline
 from dtfelib import make_parser
+from dtfelib import snapshot_series, run_series, report_series
 
 style.apply()
 
 OUTPUT_DIR = config.figures_path('void_shapes')
 
-SMOOTHING_SIGMA = config.SMOOTHING_SIGMA_CELLS
-FOOTPRINT_SIZE = config.FOOTPRINT_SIZE
 
 
-DPI = config.DPI
 
-SNAPSHOT_TO_REDSHIFT = config.SNAPSHOT_TO_REDSHIFT
 
 
 def plot_axis_ratios(axis_ratios, density_values=None, redshift=None, save_path=None, sim=None):
@@ -63,7 +60,7 @@ def plot_axis_ratios(axis_ratios, density_values=None, redshift=None, save_path=
     plt.tight_layout()
     
     if save_path:
-        save_figure(plt.gcf(), save_path, dpi=DPI, bbox_inches='tight')
+        save_figure(plt.gcf(), save_path, bbox_inches='tight')
         plt.close()
     else:
         plt.show()
@@ -103,7 +100,7 @@ def plot_bbks_parameters(bbks_params, density_values=None, redshift=None, save_p
     plt.tight_layout()
     
     if save_path:
-        save_figure(plt.gcf(), save_path, dpi=DPI, bbox_inches='tight')
+        save_figure(plt.gcf(), save_path, bbox_inches='tight')
         plt.close()
     else:
         plt.show()
@@ -128,7 +125,7 @@ def _plot_histogram(values, xlabel, color, bins, save_path, redshift=None,
     style.set_title(ax, title)
 
     plt.tight_layout()
-    save_figure(fig, save_path, dpi=DPI, bbox_inches='tight')
+    save_figure(fig, save_path, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -206,8 +203,8 @@ def process_snapshot(snapshot, redshift, sim=None, method=None, prefix=None, dat
             f.write(f"{'='*50}\n\n")
             f.write("Parameters:\n")
             f.write(f"  Grid resolution: {grid_n}³\n")
-            f.write(f"  Footprint size: {FOOTPRINT_SIZE}\n")
-            f.write(f"  Smoothing sigma: {SMOOTHING_SIGMA}\n\n")
+            f.write(f"  Footprint size: {config.FOOTPRINT_SIZE}\n")
+            f.write(f"  Smoothing sigma: {config.SMOOTHING_SIGMA_CELLS}\n\n")
             f.write("Results:\n")
             f.write(f"  Total minima found: {len(minima_indices)}\n")
             f.write(f"  Valid BBKS params (e/p population): {len(bbks_v)}\n")
@@ -243,46 +240,24 @@ def process_snapshot(snapshot, redshift, sim=None, method=None, prefix=None, dat
 def main():
     parser = make_parser("Void ellipsoid shape analysis (axis ratios, BBKS e/p) per snapshot. "
                          "By default iterates ALL snapshots in config.SNAPSHOT_TO_REDSHIFT; "
-                         "pass --snap to restrict to one.")
-    parser.set_defaults(snap=None)   # series script: default = all snapshots, not just 099
-    for _a in parser._actions:
-        if _a.dest == "snap":
-            _a.help = "process only this snapshot (default: all snapshots in config)"
+                         "pass --snap to restrict to one.",
+                         snap_default=None,      # series script: default = all snapshots, not just 099
+                         snap_help="process only this snapshot (default: all snapshots in config)")
     args = parser.parse_args()
 
-    if args.snap is not None:
-        snap_id = f"{int(args.snap):03d}"
-        redshift = config.get_redshift(snap_id)
-        if redshift is None:
-            print(f"Unknown snapshot {snap_id} (not in config.SNAPSHOT_TO_REDSHIFT)")
-            return
-        items = [(snap_id, redshift)]
-    else:
-        items = list(SNAPSHOT_TO_REDSHIFT.items())
+    items = snapshot_series(args)
+    if args.snap is not None and items[0][1] is None:
+        print(f"Unknown snapshot {items[0][0]} (not in config.SNAPSHOT_TO_REDSHIFT)")
+        return
 
     print("Starting void shape analysis")
     print(f"Processing {len(items)} snapshots")
 
-    processed_count = 0
-    failed_snapshots = []
+    _, failed_snapshots = run_series(
+        items, lambda snapshot, redshift: process_snapshot(snapshot, redshift, sim=args.sim, method=args.method,
+                                                           prefix=args.prefix, data_root=args.data_root), catch=True)
+    report_series(len(items) - len(failed_snapshots), len(items), failed_snapshots, listed=True)
 
-    for snapshot, redshift in items:
-        try:
-            process_snapshot(snapshot, redshift, sim=args.sim, method=args.method, prefix=args.prefix,
-                             data_root=args.data_root)
-            processed_count += 1
-        except Exception as e:
-            print(f"Failed to process snapshot {snapshot} (z={redshift:.2f}): {str(e)}")
-            failed_snapshots.append((snapshot, redshift))
-
-    print("\nAnalysis complete")
-    print(f"Successfully processed: {processed_count}/{len(items)} snapshots")
-    
-    if failed_snapshots:
-        print(f"Failed snapshots: {len(failed_snapshots)}")
-        for snapshot, redshift in failed_snapshots:
-            print(f"  Snapshot {snapshot} (z={redshift:.2f})")
-    
     print(f"\nOutput saved to: {OUTPUT_DIR}/")
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ extra options (pass extra=... to register script-specific flags on the same pars
 from __future__ import annotations
 
 import argparse
+import numbers
 import os
 from pathlib import Path
 
@@ -88,6 +89,29 @@ def sim_dir(sim: str, root=None) -> Path:
     return flat
 
 
+def snapdir_path(sim: str, snap, root=None) -> Path:
+    """The folder of snapshot 'snap' of simulation 'sim': sim_dir(sim, root) / 'snapdir_NNN'. An integer is
+    zero-padded to three digits (99 -> snapdir_099); a string is used as given (config's ladder keys are already
+    '099'). 'root' as sim_dir: None = require_data_root()."""
+    name = f"snapdir_{snap:03d}" if isinstance(snap, numbers.Integral) else f"snapdir_{snap}"
+    return sim_dir(sim, root) / name
+
+
+def snapshot_ladder(sim: str, root=None, require=None) -> list[int]:
+    """The snapshot numbers of 'sim' on disk, ascending: every snapdir_NNN under sim_dir(sim, root) (an entry
+    whose part after 'snapdir_' is not a number is no snapshot and is left out). 'require' narrows it: a glob
+    pattern the snapdir must hold a match of (e.g. 'combined_*.hdf5'), or a callable(snapdir) -> bool."""
+    out = set()
+    for d in sim_dir(sim, root).glob("snapdir_*"):
+        part = d.name.split("_")[1]
+        if not part.isdigit():
+            continue
+        if require is not None and not (require(d) if callable(require) else any(d.glob(require))):
+            continue
+        out.add(int(part))
+    return sorted(out)
+
+
 def use_data_root(root) -> Path | None:
     """Make `root` this process's data root: what a script's --data-root means for every dtfelib helper that is
     not handed a root explicitly (groupcat, trees, environment, pipeline.products without data_root=...).
@@ -114,15 +138,24 @@ def find_sims(root=None, pattern: str = "snapdir_*") -> list[str]:
     return sorted(names)
 
 
-def make_parser(description: str = "") -> argparse.ArgumentParser:
+def add_sim_arg(parser: argparse.ArgumentParser, help: str | None = None) -> argparse.Action:
+    """Register '--sim NAME' the way every script takes it: required unless DTFE_SIM is set, which is then its
+    default (require_sim's rule: there is no default simulation). Returns the action."""
+    env_sim = os.environ.get("DTFE_SIM")
+    return parser.add_argument("--sim", default=env_sim, required=not env_sim, help=help)
+
+
+def make_parser(description: str = "", snap_default: int | None = DEFAULT_SNAP,
+                snap_help: str | None = None) -> argparse.ArgumentParser:
+    """The parser every figure script starts from: --data-root, --sim (add_sim_arg), --snap, --method, --prefix,
+    --raw and --smooth. snap_default / snap_help: a series script's --snap (default None = the whole series) and
+    its help; by default snapshot DEFAULT_SNAP."""
     p = argparse.ArgumentParser(description=description)
     p.add_argument("--data-root", type=Path, default=None,
                    help="the folder that holds the simulations (default: DTFE_DATA_ROOT; one of the two is needed)")
-    env_sim = os.environ.get("DTFE_SIM")
-    p.add_argument("--sim", default=env_sim, required=not env_sim,
-                   help="simulation name (required unless DTFE_SIM is set; there is no default)")
-    p.add_argument("--snap", type=int, default=DEFAULT_SNAP,
-                   help=f"snapshot number (default {DEFAULT_SNAP})")
+    add_sim_arg(p, help="simulation name (required unless DTFE_SIM is set; there is no default)")
+    p.add_argument("--snap", type=int, default=snap_default,
+                   help=snap_help if snap_help is not None else f"snapshot number (default {snap_default})")
     p.add_argument("--method", choices=("auto", "ps", "dtfe"), default="auto",
                    help="field estimator to load: PS-DTFE, standard DTFE, or auto-detect")
     p.add_argument("--prefix", default=None,
@@ -154,13 +187,93 @@ def add_ps_gradient_arg(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
     return parser
 
 
+def add_snaps_arg(parser: argparse.ArgumentParser, help: str = "snapshots (default: --snap)",
+                  nargs: str = "*") -> argparse.Action:
+    """Register '--snaps N [N ...]' (integers; default None = the script's own choice, by default --snap)."""
+    return parser.add_argument("--snaps", type=int, nargs=nargs, default=None, help=help)
+
+
+def add_out_arg(parser: argparse.ArgumentParser, default_text: str | None = None,
+                help: str | None = None) -> argparse.Action:
+    """Register '--out DIR' (a Path; '--output' and '-o' are the same option): the folder a script writes into
+    instead of its default. help: the text, by default 'output folder (default <default_text>)'."""
+    return parser.add_argument("--out", "--output", "-o", type=Path, default=None,
+                               help=help if help is not None else f"output folder (default {default_text})")
+
+
+def add_rv_definition_arg(parser: argparse.ArgumentParser, choices, help: str,
+                          spelling: str = "--r-v-definition") -> argparse.Action:
+    """Register the R_v definition option (default 'crossing') under both spellings, '--r-v-definition' and
+    '--rv-definition'; 'spelling' comes first and names args' attribute (r_v_definition / rv_definition), so a
+    script keeps the one it reads."""
+    other = "--rv-definition" if spelling == "--r-v-definition" else "--r-v-definition"
+    return parser.add_argument(spelling, other, choices=choices, default="crossing", help=help)
+
+
 def mean_field_wanted(args) -> bool:
     """True unless the script was run with '--ps-gradient stored' (a parser without the flag: True)."""
     return getattr(args, "ps_gradient", "mean-field") != "stored"
 
 
+# ---------------------------------------------------------------- series scripts
+# The core figure scripts (plot_PDF_CDF, plot_eigenvalues, plot_contour_filter, plot_ellipses_contour_3D,
+# plot_shape_filter, plot_velDiv_den, plot_shear_triaxial, plot_marked_correlation_BBKS) run one snapshot after the
+# other: snapshot_series names them, run_series runs them, report_series prints the closing lines. The lines are the
+# scripts' own (tests read 'Completed: n/m' and 'Successfully processed: n/m'); the launcher goes by the exit code.
+
+def snapshot_series(args) -> list:
+    """The (snapshot id, redshift) pairs a series script runs over: config's whole ladder in its order
+    (config.SNAPSHOT_TO_REDSHIFT, read at call time), or only --snap when one is given (zero-padded, its redshift
+    from the ladder; None for an id the ladder lacks, which the script handles)."""
+    import config
+    if getattr(args, "snap", None) is None:
+        return list(config.SNAPSHOT_TO_REDSHIFT.items())
+    snap_id = f"{int(args.snap):03d}"
+    return [(snap_id, config.get_redshift(snap_id))]
+
+
+def run_series(items, fn, catch: bool = False) -> tuple:
+    """Run fn(snapshot, redshift) for every (snapshot, redshift) pair of 'items', in order. Returns (outcomes,
+    failed): outcomes[i] what the call for items[i] returned, failed the pairs whose call failed. Without 'catch' a
+    call fails by returning None or False; with it a call fails only by raising an Exception, reported as
+    'Failed to process snapshot S (z=Z): why' (its outcome None), and the series goes on."""
+    outcomes, failed = [], []
+    for snapshot, redshift in items:
+        if catch:
+            try:
+                out = fn(snapshot, redshift)
+            except Exception as e:
+                print(f"Failed to process snapshot {snapshot} (z={redshift:.2f}): {str(e)}")
+                outcomes.append(None)
+                failed.append((snapshot, redshift))
+                continue
+        else:
+            out = fn(snapshot, redshift)
+            if out is None or out is False:
+                failed.append((snapshot, redshift))
+        outcomes.append(out)
+    return outcomes, failed
+
+
+def report_series(n_done: int, n_total: int, failed, label: str = "snapshots", listed: bool = False) -> None:
+    """A series' closing lines: 'Completed: n/m <label> processed' and the failed ones on one line, or with 'listed'
+    'Analysis complete', 'Successfully processed: n/m <label>', the failed count and one line per failure."""
+    if not listed:
+        print(f"\nCompleted: {n_done}/{n_total} {label} processed")
+        if failed:
+            print(f"Failed {label}: {', '.join(f'{s} (z={z:.2f})' for s, z in failed)}")
+        return
+    print("\nAnalysis complete")
+    print(f"Successfully processed: {n_done}/{n_total} {label}")
+    if failed:
+        print(f"Failed {label}: {len(failed)}")
+        for snapshot, redshift in failed:
+            print(f"  Snapshot {snapshot} (z={redshift:.2f})")
+
+
 def snapdir(args) -> Path:
-    return sim_dir(args.sim, args.data_root) / f"snapdir_{args.snap:03d}"
+    """The snapdir a parsed make_parser() run names: --sim, --snap and --data-root (snapdir_path)."""
+    return snapdir_path(args.sim, args.snap, args.data_root)
 
 
 def make_fieldset(description: str = "", extra=None, argv=None):

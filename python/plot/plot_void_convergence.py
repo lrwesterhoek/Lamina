@@ -44,13 +44,12 @@ import matplotlib.pyplot as plt
 
 import config
 from dtfelib import pipeline, catalog, profiles, convergence as cv
-from dtfelib import make_parser, use_data_root
+from dtfelib import make_parser, use_data_root, snapshot_ladder, add_out_arg
 from dtfelib import figures as style
-from dtfelib import environment as env
 from dtfelib import groupcat as gc
 
-FIGURE_ROOT = Path(config.LOCAL_FIGURES_ROOT) / "void_convergence"
-CROSSBOX_ROOT = Path(config.LOCAL_FIGURES_ROOT) / "void_crossbox"
+FIGURE_ROOT = Path(config.figures_path("void_convergence"))
+CROSSBOX_ROOT = Path(config.figures_path("void_crossbox"))
 DEFAULT_Z = (0.0, 1.0)
 DEFAULT_RV_RANGE = (2.5, 5.0)        # the stacks' R_v range in smoothing lengths (plot_void_crossbox's)
 CROSSBOX_SIGMA_MPC = config.CROSSBOX_SMOOTHING_MPC          # plot_void_crossbox.DEFAULT_SIGMA_MPC
@@ -326,7 +325,7 @@ def draw(z, grid, est, cross, args, sigma, path):
                 ax.legend(fontsize=7)
     style.set_suptitle(fig, f"{args.sim}: void statistics against grid, particle mass and estimator, z = {z:g}")
     fig.tight_layout()
-    style.save_figure(fig, path, dpi=config.DPI)
+    style.save_figure(fig, path)
     plt.close(fig)
 
 
@@ -398,7 +397,7 @@ def main(argv=None):
                    help=f"where plot_void_crossbox.py's per-box .npz files are (default {CROSSBOX_ROOT})")
     p.add_argument("--crossbox-smooth-mpc", type=float, default=CROSSBOX_SIGMA_MPC,
                    help=f"their common sigma in Mpc (default {CROSSBOX_SIGMA_MPC})")
-    p.add_argument("--out", type=Path, default=None, help=f"output folder (default {FIGURE_ROOT}/<sim>)")
+    add_out_arg(p, f"{FIGURE_ROOT}/<sim>")
     pipeline.add_smoothing_mpc_arg(p)
     args = p.parse_args(argv)
     style.apply()
@@ -409,7 +408,7 @@ def main(argv=None):
     tag = "" if name == method else f"_{name}"
     use_data_root(args.data_root)
     ztab = gc.redshift_table(args.sim)
-    ladder = sorted({int(d.name.split("_")[1]) for d in env.sim_dir(args.sim, args.data_root).glob("snapdir_*")})
+    ladder = snapshot_ladder(args.sim, args.data_root)
     sigma = pipeline.smoothing_length_mpc()
     out_dir = (args.out or FIGURE_ROOT / args.sim / pipeline.smoothing_tag()).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)

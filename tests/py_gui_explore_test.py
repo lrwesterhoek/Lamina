@@ -70,6 +70,8 @@
      rasterises polygons to 1/64 px: a pixel there may take one slice more or less), smooth and spiky fields, both
      projections, three turns; skipping empty blocks changes no pixel; the window's own picture against
      volume_picture() (else SKIP: no display, no OpenGL).
+ 12. the Explore and 3D-view tooltips take at most two lines (the map, the voids, the 3D view in both styles, the
+     Save options dialog); a long text is its first sentence, the whole text the control's What's This.
 
 The pure parts (grids.void_at, void_circles_mpc, void_info, void_outlines.write_csv, view3d, volume3d) run without Qt; the rest needs
 PySide6 and reports SKIP (exit 0) without it. Usage: ~/.venvs/dtfe-gui/bin/python tests/py_gui_explore_test.py
@@ -3270,11 +3272,279 @@ def keep_slice():
         x.shutdown()
 
 
+def volume_rule_pure():
+    """11. one rule for the values a map shows (grids.OutputSet.component_values): the 3D volume's cube at one grid
+    cell a block is the map's slices themselves, bit for bit -- a vector's norm and components, the vorticity's curl,
+    a tensor's trace and one of its components, a scalar; with the velocity factor and without (z = 0). The averaging's
+    'done' counted only where asked (volume3d._run's 'count'), one worker count for both pools."""
+    import volume3d as VOL
+    print("3D volume: the map's values")
+    n = 12
+    d = TMP / "vol_rule"
+    d.mkdir(exist_ok=True)
+    rng = np.random.default_rng(4)
+    raw = {}
+    for sfx, nc in (("vel", 3), ("velVort", 3), ("velGrad", 9), ("den", 1)):
+        raw[sfx] = rng.normal(size=(n, n, n, nc) if nc > 1 else (n, n, n)).astype(np.float32)
+        raw[sfx].tofile(str(d / f"r.a_{sfx}"))
+    same, curl = [], []
+    for z in (0.0, 0.5):
+        o = G.OutputSet(d / "r", box=((0.0,) * 3, (float(n),) * 3), redshift=z)
+        for name, comps in (("velocity", ["norm", "x", "z"]), ("vorticity", ["norm", "x", "y", "z"]),
+                            ("gradient", ["trace (divergence)", "xy", "zz"]), ("density", ["value"])):
+            for comp in comps:
+                VOL.drop_volumes()
+                cube = VOL.average_window(o, name, comp, o.lo, o.lo + o.length, n)["values"]
+                ref = np.stack([o.slice(name, 0, i, comp) for i in range(n)]).astype(np.float32)
+                same.append(cube.tobytes() == ref.tobytes())
+        f = o.velocity_factor("vorticity")
+        w = raw["velVort"].astype(np.float64)               # [W_xy, W_xz, W_yz] -> the curl 2 (-W_yz, W_xz, -W_xy)
+        curl.append(np.array_equal(o.slice("vorticity", 0, 5, "x"), -2.0 * w[5, ..., 2] * f)
+                    and np.array_equal(o.slice("vorticity", 0, 5, "z"), -2.0 * w[5, ..., 0] * f)
+                    and (f == 1.0) == (z == 0.0))
+    check("11. one rule for the map and the volume (OutputSet.component_values): the volume at one cell a block is the "
+          "map's slices bit for bit -- velocity norm and components, the vorticity as the curl, the gradient's trace "
+          "and a component, the density -- with the velocity factor (z = 0.5) and without (z = 0)",
+          all(same) and len(same) == 22 and all(curl) and not hasattr(VOL, "field_values"), f"{same} {curl}")
+    prog = {}
+    VOL.drop_volumes()
+    avg = VOL.average_window(o, "velocity", "norm", o.lo, o.lo + o.length, 5, prog)
+    averaged = dict(prog)
+    VOL.prepare(dict(avg, key=None), False, prog)
+    check("11. the averaging counts its blocks done ('done' of 'total', volume3d._run with 'count'); the colouring that "
+          "follows on the same progress leaves 'done' alone; both pools have WORKERS threads",
+          averaged == {"done": 5, "total": 5} and prog.get("done") == 5
+          and VOL.pool()._max_workers == VOL.gui_pool()._max_workers == VOL.WORKERS, f"{averaged} {prog}")
+
+
+def planes3d_alone():
+    """10. explore_3d.planes3d without explore imported (grids.smoothed: no import cycle), in a process of its own."""
+    print("3D planes without explore")
+    d = TMP / "vol_rule"
+    code = "\n".join([
+        "import os, sys",
+        "os.environ['QT_QPA_PLATFORM'] = 'offscreen'",
+        f"sys.path.insert(0, {str(ROOT / 'python' / 'gui')!r})",
+        "import numpy as np",
+        "import grids as G",
+        "import explore_3d as X3",
+        f"o = G.OutputSet({str(d / 'r')!r}, box=((0.0,) * 3, (12.0,) * 3), redshift=0.0)",
+        "req = dict(output=o, field='density', component='value', cmap='magma', log=False, clip=1.0, smooth=1.5,",
+        "           symmetric=False, ps_gradient='stored', index=[3, 4, 5], shown=[True, True, True],",
+        "           lo=o.lo, hi=o.lo + o.length)",
+        "res = X3.planes3d(req)",
+        "z = res['planes'][2]['values']",
+        "ok = np.allclose(z, G.smoothed(o.slice('density', 2, 5, 'value'), 1.5))",
+        "print('PLANES', 'explore' in sys.modules, sum(p is not None for p in res['planes']), ok,",
+        "      not np.allclose(z, o.slice('density', 2, 5, 'value')))",
+    ])
+    p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    line = next((ln for ln in p.stdout.splitlines() if ln.startswith("PLANES")), "")
+    check("10. explore_3d.planes3d runs with explore not imported: three planes, smoothed by grids.smoothed (the map's "
+          "Gaussian, periodic)", p.returncode == 0 and line == "PLANES False 3 True True",
+          f"{line!r} {p.stderr.strip()[-400:]}")
+
+
+def view3d_remembered():
+    """10. the 3D view's choices across a restart (ExploreControls.state / restore_state): set in one window, restored
+    into a fresh one; a state saved before them leaves the defaults."""
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        print(f"SKIP (3D view remembered): PySide6 is not importable ({e})")
+        return
+    import explore as E
+    print("3D view remembered")
+    QApplication.instance() or QApplication([])
+    data = TMP / "data"
+    if not (data / SIM).is_dir():
+        make_snapdir(data, 50, 0.0, 7)
+    made = []
+
+    def fresh():
+        view = E.ExploreView()
+        x = E.ExploreControls(view, lambda: str(data), lambda: [])
+        made.append(x)
+        return x, view
+    keys = ("view3d_style", "view3d_persp", "view3d_opacity", "view3d_detail", "vol3d_opacity")
+    try:
+        a, _va = fresh()
+        defaults = {k: a.state()[k] for k in keys}
+        a.view3d_style.setCurrentIndex(a.view3d_style.findData("planes"))
+        a.view3d_persp.setChecked(False)
+        a.view3d_opacity.setValue(60)
+        a.view3d_detail.setCurrentIndex(a.view3d_detail.findData(512))
+        a.vol3d_opacity.setValue(70)
+        st = json.loads(json.dumps(a.state()))          # as the launcher keeps it: JSON in its QSettings
+        b, vb = fresh()
+        b.restore_state(st)
+        got = b.state()
+        check("10. the 3D view's choices are remembered across a restart: the style, perspective, the planes' opacity, "
+              "the volume's detail and its opacity, restored into a fresh window with what follows from them (the "
+              "planes' controls shown, the camera, the planes' opacity, the opacity's text); 'Show in 3D' is not",
+              all(got[k] == st[k] for k in keys) and st["view3d_style"] == "planes" and st["view3d_persp"] is False
+              and st["view3d_opacity"] == 60 and st["view3d_detail"] == 512 and st["vol3d_opacity"] == 70
+              and defaults != {k: st[k] for k in keys} and not vb.view3d.cam.perspective and vb.view3d.opacity == 0.6
+              and vb.view3d.style == "planes" and b.planes3d_box.isVisibleTo(b) and not b.volume3d_box.isVisibleTo(b)
+              and b.vol3d_opacity_text.text() == a.vol3d_opacity_text.text() != "" and not b.view3d_toggle.isChecked()
+              and not any("toggle" in k or "range" in k for k in st), f"{st} {got}")
+        c, vc = fresh()
+        old = {k: v for k, v in st.items() if k not in keys}
+        c.restore_state(old)
+        c.restore_state({**old, "view3d_style": "cubes", "view3d_detail": 333, "view3d_persp": "yes",
+                         "view3d_opacity": None, "vol3d_opacity": "x"})
+        check("10. ... a state saved before them (or holding values not offered) leaves today's defaults",
+              {k: c.state()[k] for k in keys} == defaults and vc.view3d.cam.perspective
+              and c.volume3d_box.isVisibleTo(c) and not c.planes3d_box.isVisibleTo(c), str(c.state()))
+    finally:
+        for x in made:
+            x.shutdown()
+
+
+def short_tooltips():
+    """The Explore and 3D-view tooltips take at most two lines, as the job tabs' do: a long text's first sentence, the
+    whole text the control's What's This (app_widgets.tip_auto). Checked over the map, the voids, the 3D view in both
+    styles and the Save options dialog; a tooltip naming an output's files (its root + '.*') is a location, not prose."""
+    try:
+        from PySide6.QtWidgets import QApplication, QComboBox, QWidget
+    except ImportError as e:
+        print(f"SKIP (short tooltips): PySide6 is not importable ({e})")
+        return
+    import explore as E
+    import explore_3d as X3
+    import figsave as FS
+    import runspec as rs
+    from app_widgets import tip_lines
+    print("Explore tooltips")
+    qa = QApplication.instance() or QApplication([])
+    data = TMP / "data"
+    if not (data / SIM).is_dir():
+        make_snapdir(data, 50, 0.0, 7)
+    E.VOID_CACHE_DIR = TMP / "void cache"
+    view = E.ExploreView()
+    x = E.ExploreControls(view, lambda: str(data), lambda: [])
+    view.resize(900, 760)
+    view.show()
+    x.show()
+    real_procs = rs.dtfe_processes
+    rs.dtfe_processes = lambda max_age=2.0: {"runs": [], "servers": []}
+    long_tips, states = {}, []
+
+    def collect(state, roots):
+        states.append(state)
+        for r in roots:
+            for wd in [r] + r.findChildren(QWidget):
+                texts = [wd.toolTip()] + ([str(wd.itemData(k, 3) or "") for k in range(wd.count())]
+                                          if isinstance(wd, QComboBox) else [])
+                for t in texts:
+                    if tip_lines(t) > 2 and not (x.current is not None and str(x.current.root) in t):
+                        long_tips.setdefault(t[:60], state)
+    try:
+        x.refresh_outputs()
+        wait_for(qa, lambda: not x._busy and x._plane is not None, 30)
+        collect("map", (x, view))
+        x.voids.setChecked(True)
+        wait_for(qa, lambda: x._void_proc is None and bool(x._void_cache), 180)
+        collect("voids", (x, view))
+        for style in ("volume", "planes"):
+            x.view3d_toggle.setChecked(False)
+            x.view3d_style.setCurrentIndex(x.view3d_style.findData(style))
+            x.view3d_toggle.setChecked(True)
+            if wait_for(qa, lambda: (x._3d_res or {}).get(style) is not None and not x._3d_busy, 60):
+                collect(f"3D {style}", (x, view))
+        x.view3d_toggle.setChecked(False)
+        wait_for(qa, lambda: not x._busy, 30)
+        dlg = FS.make_dialog(x, x.save_options, x.save_context())
+        collect("Save options", (dlg,))
+        dlg.deleteLater()
+        whole = {x.view3d_toggle: X3.VIEW3D_TIP, x.view3d_style: X3.STYLE_TIP, x.view3d_detail: X3.DETAIL_TIP,
+                 x.void3d_shape: X3.SHAPE_TIP, x.voids: E.VOID_TIP, x.ps_gradient: E.PS_GRADIENT_TIP,
+                 x.grid_merge: E.GRID_MERGE_TIP, x.zoom_exact: x.zoom_exact.whatsThis()}
+        check("every Explore and 3D-view tooltip takes at most two lines (the map, the voids, the 3D view's volume and "
+              "planes, the Save options dialog)", not long_tips and len(states) == 5, f"{states} {long_tips}")
+        # (the merge tick, greyed out for panels of different boxes, says so first)
+        bad = [(w.toolTip(), w.whatsThis()[:60]) for w, t in whole.items()
+               if not (w.whatsThis().endswith(t) and w.whatsThis().startswith(w.toolTip().replace("\n", " "))
+                       and tip_lines(t) > 2 and tip_lines(w.toolTip()) <= 2)]
+        check("... a long text's first sentence, the whole text its What's This (Help > What's This?)", not bad,
+              str(bad[:2]))
+    finally:
+        rs.dtfe_processes = real_procs
+        x.shutdown()
+
+
+def explore_details():
+    """The Explore pane's details: one 'Voids' control (its tick the row's label), the stream table's columns (the
+    origin takes the room, the density's header whole), the Save buttons in the left pane beside the controls; the
+    exact zoom's plan a plain function (the pane's method passes its choices)."""
+    try:
+        from PySide6.QtWidgets import QApplication, QCheckBox, QFormLayout, QHeaderView, QLabel
+    except ImportError as e:
+        print(f"SKIP (Explore details): PySide6 is not importable ({e})")
+        return
+    import explore as E
+    import explore_zoom as XZ
+    import runspec as rs
+    print("Explore details")
+    qa = QApplication.instance() or QApplication([])
+    data = TMP / "data"
+    if not (data / SIM).is_dir():
+        make_snapdir(data, 50, 0.0, 7)
+    view = E.ExploreView()
+    x = E.ExploreControls(view, lambda: str(data), lambda: [])
+    view.resize(900, 760)
+    view.show()
+    x.show()
+    real_procs = rs.dtfe_processes
+    rs.dtfe_processes = lambda max_age=2.0: {"runs": [], "servers": []}
+    try:
+        x.refresh_outputs()
+        wait_for(qa, lambda: not x._busy and x._plane is not None, 30)
+        form = x._out_form_map
+        row, role = form.getWidgetPosition(x.voids)
+        field = form.itemAt(row, QFormLayout.FieldRole)
+        check("one 'Voids' control: its tick is the label of the row of its options (R_eff, sigma, Go to its centre); "
+              "no other control or label is called voids",
+              role == QFormLayout.LabelRole and field is not None and field.layout() is not None
+              and field.layout().indexOf(x.void_reff) >= 0 and field.layout().indexOf(x.void_goto) >= 0
+              and [w for w in x.findChildren(QCheckBox) if w.text().lower() == "voids"] == [x.voids]
+              and not [w for w in x.findChildren(QLabel) if w.text().lower() == "voids"], f"{row} {role}")
+        hdr = view.streams.horizontalHeader()
+        fm = hdr.fontMetrics()
+        check("the stream table: 'came from q' takes the room, the value column its contents, the 'ρ/ρ̄' header "
+              "wider than its text", hdr.sectionResizeMode(4) == QHeaderView.Stretch and not hdr.stretchLastSection()
+              and hdr.sectionResizeMode(5) == QHeaderView.ResizeToContents
+              and hdr.sectionSize(1) >= fm.horizontalAdvance("ρ/ρ̄") + 2 * fm.averageCharWidth(),
+              f"{hdr.sectionSize(1)} {fm.horizontalAdvance('ρ/ρ̄')}")
+        check("the Save buttons (still the view's save_btn and save_opts_btn) sit in the left pane's Map group",
+              x.isAncestorOf(view.save_btn) and x.isAncestorOf(view.save_opts_btn)
+              and not view.isAncestorOf(view.save_btn) and view.save_btn.isVisibleTo(x) and view.save_btn.isEnabled())
+        o = x.current
+        args = (o, 2, 32, [0, 1], (10.0, 20.0), (30.0, 40.0), 64)
+        m = x.exact_zoom_plan(*args)
+        f = XZ.exact_zoom_plan(*args, None, x.cache_edit.text(), 0)
+        roots = [Path(p["root"]).parent for p in (m, f) if p.get("root")]
+        for r in roots:
+            shutil.rmtree(r, ignore_errors=True)
+
+        def plain(p):
+            return {k: repr(v).replace(str(p["root"]), "ROOT") if p.get("root") else repr(v)
+                    for k, v in p.items() if k != "root"}
+        check("the exact zoom's plan is a plain function (explore_zoom.exact_zoom_plan); the pane's method gives it the "
+              "snapshot chosen, the cache folder and the running server's split: the same plan",
+              plain(m) == plain(f) and (m["cmd"] is not None or m["note"]), f"{m['note']!r} {f['note']!r}")
+    finally:
+        rs.dtfe_processes = real_procs
+        x.shutdown()
+
+
 def main():
     try:
         pure()
         view3d_pure()
         volume_pure()
+        volume_rule_pure()
+        planes3d_alone()
         perspective_pure()
         mean_field_pure()
         volume_render()
@@ -3283,6 +3553,9 @@ def main():
         gui()
         view3d_gui()
         view3d_volume_gui()
+        view3d_remembered()
+        short_tooltips()
+        explore_details()
         fold_map()
         keep_slice()
         mean_field_gui()

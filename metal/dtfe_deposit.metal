@@ -76,33 +76,11 @@ constant bool FC_SGRAD [[function_constant(4)]];
 // velocity), and the host builds the pipeline matching the batch's P.fixedSum anyway
 constant bool FC_FIXED [[function_constant(5)]];
 
-// A batch = one sub-domain's tetrahedra. Positions are relative to the SUB-DOMAIN's lower corner
-// and nGrid is its sub-grid (so the cell classification is the CPU loop's, bit for bit); a sample
-// inside the sub-grid is owned by this batch and lands at full-grid cell pos + subOff. With
-// subOff = 0 and fullGrid = nGrid this is the plain single-grid deposit.
-struct DepositParams {
-    float dx[3];
-    int   nGrid[3];      // the batch's sub-grid: samples outside [0, nGrid) are not this batch's
-    uint  nTet;          // threads in this dispatch: tetrahedra (per-tet kernel) or items (item kernel)
-    int   fDen;          // deposit density
-    int   fVel;          // deposit velocity
-    int   fGrad;         // deposit velocity gradient
-    uint  itemSamples;   // item kernel: samples per work item (every tetrahedron is split so)
-    uint  nTetTotal;     // item kernel: tetrahedra in the batch (bounds the block search, see itemOf)
-    int   subOff[3];     // the sub-grid's origin in the accumulated grid
-    uint  itemBase;      // item kernel: the first item of this dispatch (items are numbered per batch)
-    int   fullGrid[3];   // the accumulated grid's dimensions (flat index = full-grid index)
-    uint  debugNoAtomic; // timing experiment: compute everything, issue no atomics (grids stay zero)
-    float invDx[3];      // 1/dx: the cell of a sample is floor((base + p) * invDx) in both kernels
-    uint  tableEntries;  // item kernel: entries of the threadgroup cell table (a power of two; 0 = none)
-    int   fScal;         // deposit the scalar (per-tet kernel; the item kernels use FC_SCAL)
-    int   fSGrad;        // deposit the scalar gradient (per-tet kernel; the item kernels use FC_SGRAD)
-    // the grids as exact 64-bit fixed-point sums (see the header). fixedSum = 1: every grid's
-    // shares go to its two-word integer buffer (16..20) in units of 1/fxScale[g]; 0: the float atomics into
-    // buffers 7/8/9/14/15. The host binds ONE buffer per grid at both indices (sized for the mode in use).
-    uint  fixedSum;
-    float fxScale[5];    // 2^k per grid: [0] density, [1] velocity, [2] velocity gradient, [3] scalar, [4] its gradient
-};
+// The parameter block (buffer 10), one batch = one sub-domain's tetrahedra: DTFEDepositParams in
+// src/CGAL_triangulation/dtfe_deposit_params.h, the hosts' own struct, which the Makefile prepends to this source after
+// exact_clip.metal.inc -- one definition, so the kernels and the hosts cannot drift apart. Its fields are documented
+// there.
+typedef DTFEDepositParams DepositParams;
 
 // The accumulated grids of one dispatch, float and fixed-point views of the same buffers (one of the two
 // is used, by P.fixedSum). Component c of flat cell f is at [f*comps + c]; a fixed-point component holds

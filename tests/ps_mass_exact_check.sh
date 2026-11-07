@@ -69,7 +69,7 @@ echo "============================================================"
 echo " PS-DTFE exact mass grid (${PS_BIN}; GPU halves: $([ $GPU = 1 ] && echo yes || echo 'no GPU build: SKIP'))"
 echo "============================================================"
 t0=$SECONDS
-# run <tag> <snapshot> [env assignments...] -- <PS-DTFE args...>: a non-zero exit fails the suite; a --ps-gpu run
+# run <tag> <snapshot> [env assignments...] -- <PS-DTFE args...>: a non-zero exit fails the suite; a --gpu run
 # must have run the GPU deposit (no CPU fallback)
 run() {
     local tag="$1" snap="$2"; shift 2
@@ -80,7 +80,7 @@ run() {
     env PS_MASS_AUDIT=1 ${envs[@]+"${envs[@]}"} "${PS_BIN}" "$snap" "$TMP/$tag" --periodic --input 105 --MpcUnit 1 --verbose 2 \
         --field density_a velocity_a "$@" > "$TMP/$tag.log" 2>&1 || { echo "FAIL: $tag exited non-zero (see $TMP/$tag.log)"; exit 1; }
     case " $* " in
-        *" --ps-gpu "*)
+        *" --gpu "*)
             grep -q "using the CPU deposit\|deposit unavailable\|ran on the CPU instead" "$TMP/$tag.log" \
                 && { echo "FAIL: $tag fell back to the CPU (see $TMP/$tag.log)"; exit 1; }
             grep -q " GPU deposit (\|run total over .*GPU deposit" "$TMP/$tag.log" \
@@ -95,11 +95,11 @@ run lat_cpu_p1 "$LAT" -- "${L[@]}" --partition 1 1 1
 run lat_cpu_p2 "$LAT" -- "${L[@]}" --partition 2 2 2
 if [ "$GPU" = 1 ]; then
     echo ">> X1 lattice, GPU (and its deferred tets on 1 and 4 CPU threads: X3)"
-    run lat_gpu_p1 "$LAT" DTFE_DEPOSIT_THREADS=4 -- "${L[@]}" --partition 1 1 1 --ps-gpu
-    run lat_gpu_p1_t1 "$LAT" DTFE_DEPOSIT_THREADS=1 -- "${L[@]}" --partition 1 1 1 --ps-gpu
-    run lat_gpu_p2 "$LAT" -- "${L[@]}" --partition 2 2 2 --ps-gpu
-    run lat_gpu_rel "$LAT" -- "${L[@]}" --partition 1 1 1 --ps-gpu --ps-halo-release 1.2
-    run lat_gpu_p1_na "$LAT" DTFE_DEPOSIT_THREADS=4 PS_MASS_AUDIT=0 -- "${L[@]}" --partition 1 1 1 --ps-gpu
+    run lat_gpu_p1 "$LAT" DTFE_DEPOSIT_THREADS=4 -- "${L[@]}" --partition 1 1 1 --gpu
+    run lat_gpu_p1_t1 "$LAT" DTFE_DEPOSIT_THREADS=1 -- "${L[@]}" --partition 1 1 1 --gpu
+    run lat_gpu_p2 "$LAT" -- "${L[@]}" --partition 2 2 2 --gpu
+    run lat_gpu_rel "$LAT" -- "${L[@]}" --partition 1 1 1 --gpu --ps-halo-release 1.2
+    run lat_gpu_p1_na "$LAT" DTFE_DEPOSIT_THREADS=4 PS_MASS_AUDIT=0 -- "${L[@]}" --partition 1 1 1 --gpu
 fi
 echo ">> X2/X3 pancake (heavy accumulation), CPU on 1 thread, 4 (copy mode) and 4 (slab mode)"
 run pan_t1 "$PAN" DTFE_DEPOSIT_THREADS=1 -- "${P[@]}"

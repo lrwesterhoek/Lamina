@@ -7,15 +7,15 @@
 # (thread-private copies summed in thread order). Each is a set of int64 words in a power-of-two unit
 # from a bound of everything the pass deposits (ps_deposit_params.h PSFxGrid), converted to float once. Asserted on
 # 32^3 crossed waves (folds everywhere: deferred tets, multi-stream cells, large gradients):
-#   F1  two --ps-gpu runs with different opening chunk sizes (PS_GPU_CHUNK 2000 and 25000: other
+#   F1  two --gpu runs with different opening chunk sizes (PS_GPU_CHUNK 2000 and 25000: other
 #       atomics share a command buffer, other orders) write byte-identical grids -- every '.a_*' output -- for the
-#       sampled deposit, --ps-volume-weighted, --ps-exact-deposit (its items' per-tet weight totals are exact too)
+#       sampled deposit, --ps-volume-weighted, --exact-average (its items' per-tet weight totals are exact too)
 #       and --ps-halo-release (the host's released tets). GPU builds only.
 #   F2  the CPU deposit on 1 thread, 6 threads in the copy mode (DTFE_DEPOSIT_SLABS=0: one set of words, atomic
 #       adds) and 6 in the slab mode writes byte-identical grids, for the same four variants. Single build only:
 #       the double build keeps its double CPU sums (agreeing to ~1e-15, not bit for bit), as for the mass.
-#   F3  the float sums (PS_GPU_FLOAT_MOMENTS=1, the A/B switch on either backend; PS_METAL_FLOAT_MOMENTS is its
-#       older alias) agree with the exact ones to float rounding: peak-relative
+#   F3  the float sums (PS_GPU_FLOAT_MOMENTS=1, the A/B switch on either backend) agree with the exact ones to
+#       float rounding: peak-relative
 #       difference below 1e-5 per grid, GPU and CPU (a sum of the same float shares, in another order)
 #   F4  --partition 2 2 2 --max-concurrent 1 (partitions merge in index order): two GPU runs byte-identical, and
 #       1 vs 6 CPU threads byte-identical (single build) -- the whole run, not only one partition's sub-grid
@@ -50,22 +50,22 @@ run() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL: $(basenam
 C=(--grid 32 --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a dispersion_a gradient_a
    --avg-subsamples 2)
 VARIANTS="samp vw ex hr"
-opts() { case "$1" in samp) ;; vw) echo --ps-volume-weighted ;; ex) echo --ps-exact-deposit ;;
+opts() { case "$1" in samp) ;; vw) echo --ps-volume-weighted ;; ex) echo --exact-average ;;
          hr) echo --ps-halo-release 50 ;; esac; }
 
 echo "============================================================"
 echo " PS-DTFE exact moment grids (${PS_BIN}; GPU: $([ $GPU = 1 ] && echo yes || echo 'no GPU build: F1 SKIP'))"
 echo "============================================================"
 t0=$SECONDS
-unset PS_METAL_FLOAT_MOMENTS PS_GPU_FLOAT_MOMENTS PS_METAL_CHUNK PS_GPU_CHUNK
+unset PS_GPU_FLOAT_MOMENTS PS_GPU_CHUNK
 for v in $VARIANTS; do
     # shellcheck disable=SC2046
     O=($(opts "$v"))
     echo ">> $v: ${O[*]+${O[*]}} ($v)"
     if [ "$GPU" = 1 ]; then
-        GPUOK=1 run "$TMP/g1_$v" env PS_GPU_CHUNK=2000 "${PS_BIN}" "$SNAP" "$TMP/g1_$v" "${C[@]}" ${O[@]+"${O[@]}"} --ps-gpu
-        GPUOK=1 run "$TMP/g2_$v" env PS_GPU_CHUNK=25000 "${PS_BIN}" "$SNAP" "$TMP/g2_$v" "${C[@]}" ${O[@]+"${O[@]}"} --ps-gpu
-        GPUOK=1 run "$TMP/gf_$v" env PS_GPU_FLOAT_MOMENTS=1 "${PS_BIN}" "$SNAP" "$TMP/gf_$v" "${C[@]}" ${O[@]+"${O[@]}"} --ps-gpu
+        GPUOK=1 run "$TMP/g1_$v" env PS_GPU_CHUNK=2000 "${PS_BIN}" "$SNAP" "$TMP/g1_$v" "${C[@]}" ${O[@]+"${O[@]}"} --gpu
+        GPUOK=1 run "$TMP/g2_$v" env PS_GPU_CHUNK=25000 "${PS_BIN}" "$SNAP" "$TMP/g2_$v" "${C[@]}" ${O[@]+"${O[@]}"} --gpu
+        GPUOK=1 run "$TMP/gf_$v" env PS_GPU_FLOAT_MOMENTS=1 "${PS_BIN}" "$SNAP" "$TMP/gf_$v" "${C[@]}" ${O[@]+"${O[@]}"} --gpu
     fi
     run "$TMP/c1_$v" env DTFE_DEPOSIT_THREADS=1 "${PS_BIN}" "$SNAP" "$TMP/c1_$v" "${C[@]}" ${O[@]+"${O[@]}"}
     run "$TMP/cf_$v" env DTFE_DEPOSIT_THREADS=1 PS_GPU_FLOAT_MOMENTS=1 "${PS_BIN}" "$SNAP" "$TMP/cf_$v" "${C[@]}" ${O[@]+"${O[@]}"}
@@ -77,8 +77,8 @@ done
 P=(--partition 2 2 2 --max-concurrent 1)
 echo ">> F4: --partition 2 2 2 --max-concurrent 1, --ps-volume-weighted"
 if [ "$GPU" = 1 ]; then
-    GPUOK=1 run "$TMP/pg1" env PS_GPU_CHUNK=2000 "${PS_BIN}" "$SNAP" "$TMP/pg1" "${C[@]}" "${P[@]}" --ps-volume-weighted --ps-gpu
-    GPUOK=1 run "$TMP/pg2" "${PS_BIN}" "$SNAP" "$TMP/pg2" "${C[@]}" "${P[@]}" --ps-volume-weighted --ps-gpu
+    GPUOK=1 run "$TMP/pg1" env PS_GPU_CHUNK=2000 "${PS_BIN}" "$SNAP" "$TMP/pg1" "${C[@]}" "${P[@]}" --ps-volume-weighted --gpu
+    GPUOK=1 run "$TMP/pg2" "${PS_BIN}" "$SNAP" "$TMP/pg2" "${C[@]}" "${P[@]}" --ps-volume-weighted --gpu
 fi
 if ! precision_double; then
     run "$TMP/pc1" env DTFE_DEPOSIT_THREADS=1 "${PS_BIN}" "$SNAP" "$TMP/pc1" "${C[@]}" "${P[@]}" --ps-volume-weighted
@@ -90,7 +90,7 @@ if ! precision_double; then
     echo ">> F5: the non-finite guard (DTFE_TEST_NAN_SHARE=50: about one tetrahedron in 50 with a NaN mass)"
     run "$TMP/n_cpu" env DTFE_TEST_NAN_SHARE=50 "${PS_BIN}" "$SNAP" "$TMP/n_cpu" "${C[@]}"
     if [ "$GPU" = 1 ]; then
-        GPUOK=1 run "$TMP/n_gpu" env DTFE_TEST_NAN_SHARE=50 "${PS_BIN}" "$SNAP" "$TMP/n_gpu" "${C[@]}" --ps-gpu
+        GPUOK=1 run "$TMP/n_gpu" env DTFE_TEST_NAN_SHARE=50 "${PS_BIN}" "$SNAP" "$TMP/n_gpu" "${C[@]}" --gpu
     fi
 fi
 D2=0

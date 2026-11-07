@@ -31,7 +31,6 @@ FIELD_RESOLUTION = config.FIELD_RESOLUTION
 BOX_SIZE = config.BOX_SIZE
 CELL_SIZE = config.CELL_SIZE
 AXIS_UNITS = config.AXIS_UNITS
-DPI = config.DPI
 
 
 def _set_geometry(fs):
@@ -154,8 +153,7 @@ def plot_profile(radii, profile, lo, hi, redshift, output_path):
     ax.grid(alpha=0.25, linestyle=':', linewidth=1.0)
     ax.legend(framealpha=0.9)
     plt.tight_layout()
-    save_figure(fig, output_path, dpi=DPI,
-                bbox_inches='tight', facecolor='white')
+    save_figure(fig, output_path, bbox_inches='tight', facecolor='white')
     plt.close(fig)
 
 
@@ -233,13 +231,12 @@ def plot_max_slices(delta, phi, phi_coords, phi_values, void_coords,
         plt.tight_layout()
 
         stem = f'phi_max_slice_snap{snapshot}_z{redshift:.2f}_m{i:02d}.png'
-        save_figure(fig, output_dir / stem, dpi=DPI,
-                    bbox_inches='tight', facecolor='white')
+        save_figure(fig, output_dir / stem, bbox_inches='tight', facecolor='white')
         if i == top:
             save_figure(
                 fig, output_dir / f'phi_top_hill_snap{snapshot}'
                                   f'_z{redshift:.2f}.png',
-                dpi=DPI, bbox_inches='tight', facecolor='white')
+                bbox_inches='tight', facecolor='white')
         plt.close(fig)
 
 
@@ -266,8 +263,7 @@ def plot_trend(zs, values, null_lo, null_hi, ylabel, fname, ref_line=None):
     ax.grid(alpha=0.25, linestyle=':', linewidth=1.0)
     ax.legend(framealpha=0.9)
     plt.tight_layout()
-    save_figure(fig, Path(OUTPUT_DIR) / fname, dpi=DPI,
-                bbox_inches='tight', facecolor='white')
+    save_figure(fig, Path(OUTPUT_DIR) / fname, bbox_inches='tight', facecolor='white')
     plt.close(fig)
 
 
@@ -292,7 +288,7 @@ def plot_profile_evolution(profile_rows):
     plt.tight_layout()
     save_figure(
         fig, Path(OUTPUT_DIR) / 'phi_delta_profile_evolution.png',
-        dpi=DPI, bbox_inches='tight', facecolor='white')
+        bbox_inches='tight', facecolor='white')
     plt.close(fig)
 
 

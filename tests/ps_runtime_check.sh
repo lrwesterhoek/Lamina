@@ -2,11 +2,12 @@
 # The partition loop's run-time features, on small synthetic snapshots:
 #   R1  '--ordered-merge': two runs at --max-concurrent 4 merge in index order and write byte-identical grids; the
 #       partitions start in index order (at most 13 of the 27 parked at once, 3 measured; 21 under a static-steal
-#       schedule -- the margin is for a loaded CI runner)
+#       schedule -- the margin is for a loaded CI runner); the 'merge time:' line counts the 27 merged partitions and
+#       gives the seconds of their adds and checkpoints (>= 0)
 #   R2  the partition look-ahead (forced on the CPU deposit with DTFE_PS_OVERLAP=1): every output byte-identical
-#       to '--ps-no-overlap', and the log says it ran
-#   R3  GPU builds only: the look-ahead of a '--ps-gpu' run at --max-concurrent 1 (on by default) against
-#       '--ps-no-overlap': every grid byte-identical (.den, .a_den, .streams, ... and the velocity, an exact
+#       to '--no-overlap', and the log says it ran
+#   R3  GPU builds only: the look-ahead of a '--gpu' run at --max-concurrent 1 (on by default) against
+#       '--no-overlap': every grid byte-identical (.den, .a_den, .streams, ... and the velocity, an exact
 #       fixed-point sum like the rest); SKIP on a CPU build
 #   R4  crash-safe outputs: a finished run leaves no '<file>.part.<pid>' and no progress sidecar; a stale
 #       '.part.<pid>' of a dead pid is removed at the start, one of a live pid is kept, and one whose final file
@@ -35,7 +36,9 @@
 #       none waited -- and DTFE_MERGE_SPILL=1 spills every parked one (the system temp folder, with DTFE_SPILL_MIN_GB=2:
 #       a CI runner has less than its 16 GB margin free; and under the memory gate): every output byte-identical to a
 #       '--max-concurrent 1' run and to R1; a spilling run killed after 10 merges checkpointed partitions 0-9 and
-#       resumes byte-identical; DTFE_MERGE_SPILL=0 brings back the wait
+#       resumes byte-identical; DTFE_MERGE_SPILL=0 brings back the wait. The 'merge time:' line: partitions parked
+#       behind the held-back partition 0 (> 0 s parked), none parked but threads waiting with DTFE_MERGE_STAGE_GB=0
+#       (> 0 s holding a thread), the resumed run's count (the 17 it merged), the completion-order run's lock wait
 # Usage: tests/ps_runtime_check.sh [--no-build]   (--no-build is accepted and ignored: the binaries are used as built)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -65,6 +68,11 @@ grep -q "partition merge order  : partition index" "$TMP/o1.log"; check "R1 the 
 amax="$(sed -n 's/.*ordered merge: .*(at most \([0-9]*\) at once.*/\1/p' "$TMP/o1.log")"
 [ -n "$amax" ] && [ "$amax" -le 13 ]; check "R1 the partitions start in index order: at most ${amax:-?} parked at once (<= 13)" $?
 same "$TMP/o1" "$TMP/o2"; check "R1 two --ordered-merge runs at --max-concurrent 4: byte-identical grids" $?
+# the 'merge time:' line: the partitions this run merged, the seconds of their adds and of their checkpoints
+mtime() { sed -n 's/.*merge time: \([0-9]*\) partition(s) added to the full grids in \([0-9.]*\) s, their checkpoints \([0-9.]*\) s.*/\1 \2 \3/p' "$1"; }
+read -r mtn mta mtc <<< "$(mtime "$TMP/o1.log")"
+[ "${mtn:-0}" = 27 ] && awk -v a="${mta:--1}" -v c="${mtc:--1}" 'BEGIN { exit !(a >= 0 && c >= 0) }'
+check "R1 the 'merge time:' line: ${mtn:-?} of 27 partitions added in ${mta:-?} s (checkpoints ${mtc:-?} s)" $?
 
 echo ">> R7: the staged ordered merge (the default), partition 0 held back 2 s"
 grep -q -- "--completion-order-merge" <<< "$("${BIN}" --help 2>&1)"; check "R7 '--completion-order-merge' is in the help" $?
@@ -87,10 +95,15 @@ grep -q "ordered merge: 0 partition(s) finished before their turn" "$TMP/st0.log
     && grep -q "running one partition at a time" "$TMP/stg.log" \
     && same "$TMP/o1" "$TMP/st0" && same "$TMP/o1" "$TMP/stf" && same "$TMP/o1" "$TMP/stg"
 check "R7 DTFE_MERGE_STAGE_GB=0, a stage cap nothing fits under, no free memory (DTFE_MERGE_SPILL=0): wait their turn / one at a time, byte-identical" $?
+# ... the 'merge time:' line's waits behind the held-back partition 0: parked (st), or holding a thread (st0: nothing parks)
+mwait() { sed -n 's/.*merge time: .*waiting for their turn: \([0-9.]*\) s parked, \([0-9.]*\) s holding a thread.*/\1 \2/p' "$1"; }
+read -r stp _ <<< "$(mwait "$TMP/st.log")"; read -r s0p s0h <<< "$(mwait "$TMP/st0.log")"
+awk -v a="${stp:-0}" -v b="${s0p:--1}" -v h="${s0h:-0}" 'BEGIN { exit !(a > 0 && b == 0 && h > 0) }'
+check "R7 the 'merge time:' line: ${stp:-?} s parked behind partition 0; DTFE_MERGE_STAGE_GB=0: ${s0p:-?} s parked, ${s0h:-?} s holding a thread" $?
 # THE SPILL: the reference is the same split at --max-concurrent 1 (no parking at all), on ONE thread:
 # four partitions on four threads deposit each on one, and the double build's CPU sums are equal between thread
 # counts only to rounding (README: run-to-run identical grids)
-OMP_NUM_THREADS=1 "$BIN" "$SNAP" "$TMP/m1" "${C[@]}" --partition 3 3 3 --max-concurrent 1 --ps-no-overlap > "$TMP/m1.log" 2>&1 \
+OMP_NUM_THREADS=1 "$BIN" "$SNAP" "$TMP/m1" "${C[@]}" --partition 3 3 3 --max-concurrent 1 --no-overlap > "$TMP/m1.log" 2>&1 \
     || { echo "FAIL: m1 (see $TMP/m1.log)"; exit 1; }
 nspill() { sed -n 's/.*ordered merge: .* \([0-9]*\) spilled to disk.*/\1/p' "$1"; }
 SPD="$TMP/spill"; mkdir -p "$SPD"
@@ -128,6 +141,9 @@ bits="$(grep -a -m1 '^merged ' "$TMP/sk.runlog.checkpoint/checkpoint" 2>/dev/nul
 OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/sk" "${C[@]}" "${P3[@]}" --resume > "$TMP/sk2.log" 2>&1; rc2=$?
 [ "$rc1" = 137 ] && [ "$bits" = "111111111100000000000000000" ] && [ "$rc2" = 0 ] && same "$TMP/o1" "$TMP/sk"
 check "R7 killed after 10 merges with partitions staged (exit $rc1): partitions 0-9 checkpointed (${bits:-none}), resumed byte-identical (exit $rc2)" $?
+mtr="$(mtime "$TMP/sk2.log" | awk '{print $1}')"
+[ "${mtr:-0}" = 17 ] && grep -q "merge time: 27 partition(s) .*; waiting for the merge lock: [0-9.]* s" "$TMP/co.log"
+check "R7 'merge time:' counts the ${mtr:-?} partitions the resumed run merged (17), and gives the completion-order run's lock wait" $?
 # the gate-guarded case: '--partition 3 3 3' with the concurrency left to the tuner (psPartitionBytes > 0)
 GA=(env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 OMP_NUM_THREADS=4 DTFE_TEST_DELAY_PARTITION=0:2 "$BIN" "$SNAP")
 "${GA[@]}" "$TMP/sg" "${C[@]}" --partition 3 3 3 > "$TMP/sg.log" 2>&1 || { echo "FAIL: sg (see $TMP/sg.log)"; exit 1; }
@@ -148,19 +164,19 @@ grep -q "the memory budget leaves beside the plan" "$TMP/sgr.log" && [ "${nsgr:-
     && same "$TMP/sg0" "$TMP/sgr"
 check "R7 ... and no room in the memory budget (DTFE_TEST_PARK_ROOM_GB=0): all ${nsgr:-?} parked partition(s) spilled, byte-identical" $?
 
-echo ">> R2: the look-ahead on the CPU deposit (DTFE_PS_OVERLAP=1) against --ps-no-overlap"
-"$BIN" "$SNAP" "$TMP/n1" "${C[@]}" --partition 3 3 3 --max-concurrent 1 --ps-no-overlap > "$TMP/n1.log" 2>&1 \
+echo ">> R2: the look-ahead on the CPU deposit (DTFE_PS_OVERLAP=1) against --no-overlap"
+"$BIN" "$SNAP" "$TMP/n1" "${C[@]}" --partition 3 3 3 --max-concurrent 1 --no-overlap > "$TMP/n1.log" 2>&1 \
     || { echo "FAIL: n1 (see $TMP/n1.log)"; exit 1; }
 DTFE_PS_OVERLAP=1 "$BIN" "$SNAP" "$TMP/l1" "${C[@]}" --partition 3 3 3 --max-concurrent 1 > "$TMP/l1.log" 2>&1 \
     || { echo "FAIL: l1 (see $TMP/l1.log)"; exit 1; }
-grep -q "look-ahead on" "$TMP/l1.log" && ! grep -q "look-ahead on" "$TMP/n1.log"; check "R2 the look-ahead ran (and not with --ps-no-overlap)" $?
-same "$TMP/n1" "$TMP/l1"; check "R2 look-ahead vs --ps-no-overlap: every output byte-identical" $?
+grep -q "look-ahead on" "$TMP/l1.log" && ! grep -q "look-ahead on" "$TMP/n1.log"; check "R2 the look-ahead ran (and not with --no-overlap)" $?
+same "$TMP/n1" "$TMP/l1"; check "R2 look-ahead vs --no-overlap: every output byte-identical" $?
 # the production shape: point evaluation and the tessellation cache (built and saved by the look-ahead thread,
 # then a second run whose look-ahead only loads)
 "$PY" -c "import numpy as np; np.random.default_rng(3).uniform(0, 100, (2000, 3)).astype(np.float64).tofile('$TMP/pts.bin')"
 mkdir -p "$TMP/cache_n" "$TMP/cache_l"
 S2=(--sample-points "$TMP/pts.bin" --pts-vel-grad --partition 3 3 3 --max-concurrent 1)
-"$BIN" "$SNAP" "$TMP/n2" "${C[@]}" "${S2[@]}" --tessellation-cache "$TMP/cache_n" --ps-no-overlap > "$TMP/n2.log" 2>&1 \
+"$BIN" "$SNAP" "$TMP/n2" "${C[@]}" "${S2[@]}" --tessellation-cache "$TMP/cache_n" --no-overlap > "$TMP/n2.log" 2>&1 \
     || { echo "FAIL: n2 (see $TMP/n2.log)"; exit 1; }
 for r in l2 l3; do DTFE_PS_OVERLAP=1 "$BIN" "$SNAP" "$TMP/$r" "${C[@]}" "${S2[@]}" --tessellation-cache "$TMP/cache_l" \
     > "$TMP/$r.log" 2>&1 || { echo "FAIL: $r (see $TMP/$r.log)"; exit 1; }; done
@@ -169,23 +185,23 @@ check "R2 with --sample-points and --tessellation-cache: the look-ahead ran, the
 same "$TMP/n2" "$TMP/l2" && same "$TMP/n2" "$TMP/l3"
 check "R2 ... grids and '.pts_*' byte-identical (look-ahead building, look-ahead loading, no look-ahead)" $?
 
-echo ">> R3: the look-ahead of a --ps-gpu run"
+echo ">> R3: the look-ahead of a --gpu run"
 OBJ=o_ps; precision_double && OBJ=o_ps_d
 if [ ! -d "$OBJ" ] || [ -f "$OBJ/.gpu_mode_off" ] || [ ! -f "$OBJ/.gpu_mode_metal" ]; then
     echo "  SKIP R3: $OBJ is not a Metal GPU build"
 else
-    G=("${C[@]}" --partition 3 3 3 --max-concurrent 1 --ps-gpu)
-    "$BIN" "$SNAP" "$TMP/gn" "${G[@]}" --ps-no-overlap > "$TMP/gn.log" 2>&1 || { echo "FAIL: gn (see $TMP/gn.log)"; exit 1; }
+    G=("${C[@]}" --partition 3 3 3 --max-concurrent 1 --gpu)
+    "$BIN" "$SNAP" "$TMP/gn" "${G[@]}" --no-overlap > "$TMP/gn.log" 2>&1 || { echo "FAIL: gn (see $TMP/gn.log)"; exit 1; }
     "$BIN" "$SNAP" "$TMP/gl" "${G[@]}" > "$TMP/gl.log" 2>&1 || { echo "FAIL: gl (see $TMP/gl.log)"; exit 1; }
     grep -q "look-ahead on: .* on the GPU" "$TMP/gl.log" \
         && ! grep -q "using the CPU deposit\|deposit unavailable\|ran on the CPU instead" "$TMP/gl.log" "$TMP/gn.log"
-    check "R3 a --ps-gpu run at --max-concurrent 1 looks ahead by default (and neither run fell back to the CPU)" $?
+    check "R3 a --gpu run at --max-concurrent 1 looks ahead by default (and neither run fell back to the CPU)" $?
     ok=0
     # the velocity too: every PS grid of a GPU deposit is an exact fixed-point sum
     for e in den a_den streams a_streams hidden_streams a_hidden_streams vel; do
         cmp -s "$TMP/gn.$e" "$TMP/gl.$e" || { echo "    differs: .$e"; ok=1; }
     done
-    check "R3 GPU look-ahead vs --ps-no-overlap: every grid (the velocity included) byte-identical" $ok
+    check "R3 GPU look-ahead vs --no-overlap: every grid (the velocity included) byte-identical" $ok
 fi
 
 echo ">> R4: crash-safe outputs"

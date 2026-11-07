@@ -48,6 +48,12 @@ _GRID = re.compile(r"--grid (\d+)")
 _PARTITION = re.compile(r"--partition (\d+) (\d+)(?: (\d+))?")    # a 2D run's split has two numbers
 _CONC = re.compile(r"--max-concurrent (\d+)")
 _NSUB = re.compile(r"--avg-subsamples (\d+)")
+# the binaries' deprecated spellings (src/user_options.cc deprecatedOptions; accepted for one release) and their
+# canonical names. Every reader of a command line maps them first, so a run log written with either reads the same
+# (RunRecord.has, and every regex below runs on canonical_command's text).
+DEPRECATED_FLAGS = {"--ps-gpu": "--gpu", "--ps-exact-deposit": "--exact-average", "--ps-no-overlap": "--no-overlap",
+                    "--full_help": "--full-help", "--lambda_th": "--lambda-th"}
+_FLAG_TOKEN = re.compile(r"(?<!\S)--[A-Za-z][\w-]*")     # an option name at a token's start ('--x' or '--x=v')
 _FIELDS = re.compile(r"--field ((?:(?!--)\S+\s*)+)")
 # the GPU deposit restarted after a watchdog kill: DTFE says 'the deposit', PS-DTFE 'the partition deposit'
 _GPU_RETRY = re.compile(r"retrying the (?:partition )?deposit from scratch")
@@ -202,6 +208,17 @@ def log_prefix(name: str) -> str:
     return name
 
 
+def canonical_flag(flag: str) -> str:
+    """The canonical spelling of one option name ('--ps-gpu' -> '--gpu'); any other name unchanged."""
+    return DEPRECATED_FLAGS.get(flag, flag)
+
+
+def canonical_command(command: str) -> str:
+    """A command line with every deprecated option name in its canonical spelling (DEPRECATED_FLAGS), the rest
+    untouched: '--lambda_th=0.3' -> '--lambda-th=0.3'; a name inside a path or a value is not an option's."""
+    return _FLAG_TOKEN.sub(lambda m: DEPRECATED_FLAGS.get(m.group(0), m.group(0)), command)
+
+
 def parse_duration(text: str) -> float | None:
     """'1h 2m 3s' / '58m 11s' / '12.3s' -> seconds."""
     total, found = 0.0, False
@@ -253,9 +270,14 @@ class RunRecord:
     attempt_rewrote: int = 0        # outputs modified after this log was: the attempt rewrote them
     progress: dict | None = None    # the binary's progress sidecar of a run going (C1, read_progress)
 
-    # -- the settings the RUNNING line shows
+    # -- the settings the RUNNING line shows (in canonical spellings: an old log's '--ps-gpu' is '--gpu' here)
+    @property
+    def canonical(self) -> str:
+        return canonical_command(self.command)
+
     def has(self, flag: str) -> bool:
-        return re.search(rf"(^|\s){re.escape(flag)}(\s|$)", self.command) is not None
+        """The command carries the option 'flag' (either spelling of a renamed one)."""
+        return re.search(rf"(^|\s){re.escape(canonical_flag(flag))}(\s|$)", self.canonical) is not None
 
     @property
     def estimator(self) -> str:
@@ -273,32 +295,32 @@ class RunRecord:
 
     @property
     def grid(self) -> int | None:
-        m = _GRID.search(self.command)
+        m = _GRID.search(self.canonical)
         return int(m.group(1)) if m else None
 
     @property
     def partitions(self) -> int:
-        m = _PARTITION.search(self.command)
+        m = _PARTITION.search(self.canonical)
         return math.prod(int(g) for g in m.groups() if g) if m else 1
 
     @property
     def partition(self) -> int:
-        m = _PARTITION.search(self.command)
+        m = _PARTITION.search(self.canonical)
         return int(m.group(1)) if m else 0
 
     @property
     def max_concurrent(self) -> int:
-        m = _CONC.search(self.command)
+        m = _CONC.search(self.canonical)
         return int(m.group(1)) if m else 0
 
     @property
     def nsub(self) -> int | None:
-        m = _NSUB.search(self.command)
+        m = _NSUB.search(self.canonical)
         return int(m.group(1)) if m else None
 
     @property
     def gpu(self) -> bool:
-        return self.has("--ps-gpu") or self.has("--gpu")
+        return self.has("--gpu")                # PS-DTFE's older '--ps-gpu' too (canonical_flag)
 
     @property
     def sliced(self) -> bool:
@@ -306,7 +328,7 @@ class RunRecord:
 
     @property
     def fields(self) -> list[str]:
-        m = _FIELDS.search(self.command)
+        m = _FIELDS.search(self.canonical)
         return m.group(1).split() if m else []
 
     @property
@@ -338,7 +360,7 @@ class RunRecord:
     def options_text(self) -> str:
         bits = []
         if self.estimator == "ps":
-            if self.has("--ps-exact-deposit"):
+            if self.has("--exact-average"):        # the exact deposit ('--ps-exact-deposit' in older logs)
                 bits.append("exact")
             elif self.nsub:
                 bits.append(f"nSub {self.nsub}")
@@ -371,7 +393,7 @@ class RunRecord:
     @property
     def legacy_points(self) -> bool:
         """A phase-space plane asked for in the legacy conventions ('--pts-conventions legacy')."""
-        return re.search(r"(^|\s)--pts-conventions\s+legacy(\s|$)", self.command) is not None
+        return re.search(r"(^|\s)--pts-conventions\s+legacy(\s|$)", self.canonical) is not None
 
     def settings(self) -> dict:
         """The Grids-tab (RunSpec) settings this run used, as far as its command shows them."""
@@ -379,7 +401,7 @@ class RunRecord:
         if self.grid:
             d["grid"] = self.grid
         if self.estimator == "ps":
-            d.update(deposit="exact" if self.has("--ps-exact-deposit") else "sampled",
+            d.update(deposit="exact" if self.has("--exact-average") else "sampled",
                      # always set: 'Load settings' must also turn the box OFF for a standard-deposit run
                      linear_deposit=self.has("--ps-linear-deposit"),
                      vertex_mass=self.has("--ps-vertex-mass"),
@@ -391,7 +413,7 @@ class RunRecord:
                      # flag merged in completion order, but loading its settings starts the current default
                      ordered_merge=not self.has("--completion-order-merge"),
                      output_prefix=self.prefix or "ps_output")
-            m = re.search(r"(?:^|\s)--ps-alpha-shape\s+([0-9.]+)", self.command)
+            m = re.search(r"(?:^|\s)--ps-alpha-shape\s+([0-9.]+)", self.canonical)
             if m:
                 d["alpha_shape"] = float(m.group(1))
             if self.sliced:                 # the plane's conventions: 'legacy' only when the log says it

@@ -123,7 +123,7 @@ struct DTFEGpuKnobs
     uint32_t itemSamples = 48;
     int      cacheK      = 2;
     bool     noWrite     = false;   // DTFE_GPU_DEBUG_NOWRITE: timing experiment, all the work, no atomics
-    bool     floatGrids  = false;   // DTFE_GPU_FLOAT_GRIDS=1 (alias DTFE_METAL_FLOAT_GRIDS): float atomics (A/B)
+    bool     floatGrids  = false;   // DTFE_GPU_FLOAT_GRIDS=1: float atomics (A/B)
 };
 
 // The knobs from the environment; itemsOk: the host can run the item kernels at all.
@@ -135,7 +135,7 @@ inline DTFEGpuKnobs dtfeGpuKnobs(bool itemsOk)
     if (long const v = Env::integer("DTFE_GPU_ITEM_SAMPLES", 0); v >= 4 && v <= 100000) k.itemSamples = uint32_t(v);
     if (long const v = Env::integer("DTFE_GPU_CACHE_K", 2); v == 4 || v == 8) k.cacheK = int(v);
     k.noWrite = Env::flag("DTFE_GPU_DEBUG_NOWRITE");
-    k.floatGrids = Env::flag({"DTFE_GPU_FLOAT_GRIDS", "DTFE_METAL_FLOAT_GRIDS"});
+    k.floatGrids = Env::flag({"DTFE_GPU_FLOAT_GRIDS"});
     return k;
 }
 

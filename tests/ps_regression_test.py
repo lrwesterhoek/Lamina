@@ -142,7 +142,7 @@ def check_caustics(binary, snap, grid=GRID, box=BOX, amp=AMP):
     1<->3 transitions to +-1 cell; (d) '--partition 2 2 2' gives a byte-identical
     '.caustic' (the orientation bits merge with an order-independent bitwise OR).
     """
-    full_help = subprocess.run([binary, "--full_help"], capture_output=True,
+    full_help = subprocess.run([binary, "--full-help"], capture_output=True,
                                text=True).stdout
     if "--ps-caustics" not in full_help:
         print("  caustics : SKIP (binary lacks --ps-caustics)")

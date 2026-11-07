@@ -23,8 +23,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QFrame, QHBoxLayout, QLa
 import runspec as rs
 import results as R
 import grids as G
-import volume3d as VOL
-from app_widgets import _mono, _note, FigureBrowser
+from app_widgets import _mono, _note, FigureBrowser, GAP, button_row, flush, tip
 
 
 class RunMixin:
@@ -33,8 +32,7 @@ class RunMixin:
         v = QVBoxLayout()
         # the exact commands a run executes: hidden unless asked for (View > Show Commands)
         self.cmd_box = QWidget()
-        cb = QVBoxLayout(self.cmd_box)
-        cb.setContentsMargins(0, 0, 0, 0)
+        cb = flush(QVBoxLayout(self.cmd_box))
         head = QHBoxLayout()
         self.cmd_title = QLabel("")
         self.cmd_title.setStyleSheet("font-weight: bold")
@@ -66,27 +64,7 @@ class RunMixin:
         self.estimate = _note()
         v.addWidget(self.estimate)
 
-        run = QHBoxLayout()
-        self.run_btn = QPushButton("Run")
-        self.run_btn.setDefault(True)
-        self.run_btn.clicked.connect(self.start_run)
-        self.queue_btn = QPushButton("Add to queue")
-        self.queue_btn.clicked.connect(self.enqueue)
-        self.stop_btn = QPushButton("Stop")
-        self.stop_btn.setEnabled(False)
-        self.stop_btn.clicked.connect(self.stop_run)
-        self.status = QLabel("Idle")
-        run.addWidget(self.run_btn)
-        run.addWidget(self.queue_btn)
-        self.mem_btn = QPushButton("Check memory")
-        self.mem_btn.setToolTip("Ask the binary's auto-tuner what this run needs per snapshot (and how it "
-                                "would split the work), against this machine's memory budget: it reads each "
-                                "snapshot and computes nothing")
-        self.mem_btn.clicked.connect(self.check_memory)
-        run.addWidget(self.mem_btn)
-        run.addWidget(self.stop_btn)
-        run.addWidget(self.status, 1)
-        v.addLayout(run)
+        v.addLayout(self._build_run_buttons())
         prog = QHBoxLayout()
         self.snap_label = QLabel("")
         self.bar = QProgressBar()
@@ -143,6 +121,24 @@ class RunMixin:
         w.setLayout(v)
         return w
 
+    def _build_run_buttons(self) -> QHBoxLayout:
+        """The run buttons: Run, Add to queue, Check memory and Stop, then the run's state taking the rest."""
+        self.run_btn = QPushButton("Run")
+        self.run_btn.setDefault(True)
+        self.run_btn.clicked.connect(self.start_run)
+        self.queue_btn = QPushButton("Add to queue")
+        self.queue_btn.clicked.connect(self.enqueue)
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self.stop_run)
+        self.status = QLabel("Idle")
+        self.mem_btn = tip(QPushButton("Check memory"),
+                           "Ask the binary's auto-tuner what this run needs per snapshot, against this machine's\n"
+                           "memory budget: it reads each snapshot and computes nothing.",
+                           "It also says how it would split the work (the partitions and how many run at once).")
+        self.mem_btn.clicked.connect(self.check_memory)
+        return button_row(self.run_btn, self.queue_btn, self.mem_btn, self.stop_btn, field=self.status)
+
     def _focus_log_find(self):
         if self.right.currentIndex() != 0:          # Explore shows its own pane: back to the run panel
             self.tabs.setCurrentIndex(self._panel_tab)
@@ -156,18 +152,18 @@ class RunMixin:
         w = QWidget()
         h = QHBoxLayout(w)
         h.setContentsMargins(0, 0, 4, 0)
-        h.setSpacing(2)
+        h.setSpacing(GAP)
         self.log_find = QLineEdit(placeholderText="Find in the log")
         self.log_find.setClearButtonEnabled(True)
         self.log_find.setMaximumWidth(220)
         self.log_find.returnPressed.connect(lambda: self.find_in_log(self.log_find.text()))
         self.log_find.textChanged.connect(lambda _t: self.log_find_count.setText(""))
         h.addWidget(self.log_find)
-        for text, tip, fn in (("▲", "Previous match", lambda: self.find_in_log(self.log_find.text(), back=True)),
-                              ("▼", "Next match (Enter)", lambda: self.find_in_log(self.log_find.text())),
-                              ("!", "Next error, warning or failure", lambda: self.find_in_log(_app.PROBLEM_LINES, regex=True))):
-            b = QToolButton(text=text)
-            b.setToolTip(tip)
+        for text, tip_text, fn in (("▲", "Previous match", lambda: self.find_in_log(self.log_find.text(), back=True)),
+                                   ("▼", "Next match (Enter)", lambda: self.find_in_log(self.log_find.text())),
+                                   ("!", "Next error, warning or failure",
+                                    lambda: self.find_in_log(_app.PROBLEM_LINES, regex=True))):
+            b = tip(QToolButton(text=text), tip_text)
             b.clicked.connect(fn)
             h.addWidget(b)
         self.log_find_count = QLabel("")
@@ -226,7 +222,6 @@ class RunMixin:
         self.q_list = QListWidget()
         self.q_list.currentRowChanged.connect(self._show_queued)
         v.addWidget(self.q_list, 2)
-        btns = QHBoxLayout()
         self.q_start = QPushButton("Start queue")
         self.q_start.clicked.connect(self.start_queue)
         self.q_up, self.q_down = QPushButton("Up"), QPushButton("Down")
@@ -235,10 +230,7 @@ class RunMixin:
         self.q_remove, self.q_clear = QPushButton("Remove"), QPushButton("Clear finished")
         self.q_remove.clicked.connect(self._remove_queued)
         self.q_clear.clicked.connect(self._clear_finished)
-        for b in (self.q_start, self.q_up, self.q_down, self.q_remove, self.q_clear):
-            btns.addWidget(b)
-        btns.addStretch(1)
-        v.addLayout(btns)
+        v.addLayout(button_row(self.q_start, self.q_up, self.q_down, self.q_remove, self.q_clear))
         opts = self._restore_json("queue_options", {})
         self.q_stop_on_fail = QCheckBox("Stop the queue when a job fails (later jobs usually need its output)")
         self.q_stop_on_fail.setChecked(opts.get("stop_on_fail", True))
@@ -278,8 +270,8 @@ class RunMixin:
         self._job_text = ""
         self._close_tee()                   # a handle left by a step that never finished must not take this job's output
         self._tee_path = ""                 # ... nor its log be renamed at this job's first step end: it stays .partial
-        G.drop_cubes()                      # Explore's cubes are this process's memory: the auto-tuner budgets from what is free
-        VOL.drop_volumes()                  # ... and the 3D view's averaged and prepared cubes
+        G.drop_cubes()                      # Explore's cubes (the 3D view's too: grids.on_drop_cubes) are this
+                                            # process's memory: the auto-tuner budgets from what is free
         G.cap_cubes(True)                   # ... and they stay small while the job runs (lifted in _finish_job)
         if tab in (_app.GRIDS, _app.OWN, _app.PIPELINE):    # a void-catalogue search costs ~80 B per cell: a heavy job gets the memory
             self.explore.stop_void_search()  # (the next tick or output change asks again)

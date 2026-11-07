@@ -47,6 +47,9 @@ stage_build() {
 run_program_suites() {
     step "standard DTFE regression (stored reference)"; env -u DTFE_TEST_REFERENCE_DIR "$PY" tests/run_tests.py
     step "standard DTFE Monte-Carlo average (unbiased, split-invariant)"; tests/dtfe_mc_average_check.sh --no-build
+    # methods 2 and 3, the redshift cone and the grid's point values: closed forms, other code paths and stored
+    # golden values (the user-sampling part needs libDTFE: a SKIP line here, run by the variants stage)
+    step "standard DTFE sampling variants (methods 2, 3, redshift cone; golden)"; tests/dtfe_sampling_check.sh --no-build
     step "PS-DTFE smoke test";                  tests/ps_smoke_test.sh --no-build
     step "PS-DTFE regression (analytic pancake)"; "$PY" tests/ps_regression_test.py --no-build
     step "3D crossed waves";                    "$PY" tests/ps_3d_test.py --no-build
@@ -166,6 +169,13 @@ stage_variants() {
     step "build: demo/examples against libDTFE (the library's documented use)"
     make -C demo/examples ARCH_FLAGS="$ARCH"     # a command-line variable reaches its "make library" too (same stamp)
     ls -la demo/examples/DTFE_particle_density
+    # user sampling points reach DTFE only through the library: its suite part needs libDTFE (and numpy + h5py)
+    step "user sampling points through libDTFE (tests/dtfe_sampling_check.sh)"
+    if "$PY" -c 'import numpy, h5py' 2>/dev/null; then
+        tests/dtfe_sampling_check.sh --no-build --require-library
+    else
+        echo "  SKIP: no python with numpy and h5py here ($PY); the core stage runs the rest of the suite"
+    fi
 }
 
 # after stage_build the pairs EXIST: a suite that would skip for a missing binary or feature is a failure here

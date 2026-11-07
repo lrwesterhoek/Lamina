@@ -18,6 +18,7 @@ import config
 from dtfelib import figures as style
 from dtfelib import pipeline
 from dtfelib import make_parser, sim_dir
+from dtfelib import run_series, report_series
 
 style.apply()
 
@@ -25,14 +26,10 @@ OUTPUT_DIR = config.figures_path('ellipses')
 
 SLICE_DIM = 0
 
-SMOOTHING_SIGMA = config.SMOOTHING_SIGMA_CELLS
-FOOTPRINT_SIZE = config.FOOTPRINT_SIZE
 SCALE_FACTOR = 0.5
 USE_NMS = False
 
-SNAPSHOT_TO_REDSHIFT = config.SNAPSHOT_TO_REDSHIFT
 
-DPI = config.DPI
 
 
 def project_3d_minima_to_slice(minima_3d, slice_dim, slice_index, tolerance=5):
@@ -309,7 +306,7 @@ def process_single_snapshot(snapshot, redshift, args):
 
     print(f"\nProcessing snapshot {snapshot} (z={redshift:.2f})")
 
-    output_dir = Path(OUTPUT_DIR) / f"void_shapes_sigma{SMOOTHING_SIGMA}"
+    output_dir = Path(OUTPUT_DIR) / f"void_shapes_sigma{config.SMOOTHING_SIGMA_CELLS}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -378,8 +375,8 @@ def process_single_snapshot(snapshot, redshift, args):
             output_path_1 = plane_output_dir / f"void_analysis_z{redshift:.2f}_snap{snapshot}_basic.png"
             output_path_2 = plane_output_dir / f"void_analysis_z{redshift:.2f}_snap{snapshot}_ellipses.png"
 
-            save_figure(fig1, output_path_1, dpi=DPI, bbox_inches='tight', facecolor='white')
-            save_figure(fig2, output_path_2, dpi=DPI, bbox_inches='tight', facecolor='white')
+            save_figure(fig1, output_path_1, bbox_inches='tight', facecolor='white')
+            save_figure(fig2, output_path_2, bbox_inches='tight', facecolor='white')
 
             plt.close(fig1)
             plt.close(fig2)
@@ -395,21 +392,19 @@ def process_single_snapshot(snapshot, redshift, args):
 
 def main():
 
-    parser = make_parser("3D void shapes: deep-void minima and Hessian ellipses on delta contour slices.")
-    for action in parser._actions:   # series script: default is the WHOLE snapshot series
-        if action.dest == "snap":
-            action.default = None
-            action.help = "process only this snapshot (default: all snapshots in the series)"
+    parser = make_parser("3D void shapes: deep-void minima and Hessian ellipses on delta contour slices.",
+                         snap_default=None,      # series script: default is the WHOLE snapshot series
+                         snap_help="process only this snapshot (default: all snapshots in the series)")
     args = parser.parse_args()
 
     print("Starting 3D void shape analysis")
     print(f"Data directory: {sim_dir(args.sim, args.data_root)} (method: {args.method})")
-    print(f"Output directory: {OUTPUT_DIR}/void_shapes_sigma{SMOOTHING_SIGMA}")
-    print(f"Smoothing sigma: {SMOOTHING_SIGMA}")
-    print(f"Footprint size: {FOOTPRINT_SIZE}")
+    print(f"Output directory: {OUTPUT_DIR}/void_shapes_sigma{config.SMOOTHING_SIGMA_CELLS}")
+    print(f"Smoothing sigma: {config.SMOOTHING_SIGMA_CELLS}")
+    print(f"Footprint size: {config.FOOTPRINT_SIZE}")
 
     if args.snap is None:
-        sorted_snapshots = sorted(SNAPSHOT_TO_REDSHIFT.items(),
+        sorted_snapshots = sorted(config.SNAPSHOT_TO_REDSHIFT.items(),
                                  key=lambda x: x[1], reverse=True)
     else:
         key = f"{args.snap:03d}"
@@ -420,22 +415,13 @@ def main():
 
     Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
 
-    successful_count = 0
-    failed_snapshots = []
+    _, failed_snapshots = run_series(sorted_snapshots, lambda snapshot, redshift:
+                                     bool(process_single_snapshot(snapshot, redshift, args)))
+    successful_count = len(sorted_snapshots) - len(failed_snapshots)
+    report_series(successful_count, len(sorted_snapshots), failed_snapshots)
 
-    for snapshot, redshift in sorted_snapshots:
-        if process_single_snapshot(snapshot, redshift, args):
-            successful_count += 1
-        else:
-            failed_snapshots.append((snapshot, redshift))
-
-    print(f"\nCompleted: {successful_count}/{len(sorted_snapshots)} snapshots processed")
-    
-    if failed_snapshots:
-        print(f"Failed snapshots: {', '.join(f'{s} (z={z:.2f})' for s, z in failed_snapshots)}")
-    
     print(f"Total plots generated: {successful_count * 2}")
-    print(f"Output saved to: {OUTPUT_DIR}/void_shapes_sigma{SMOOTHING_SIGMA}/")
+    print(f"Output saved to: {OUTPUT_DIR}/void_shapes_sigma{config.SMOOTHING_SIGMA_CELLS}/")
 
 if __name__ == "__main__":
     main()

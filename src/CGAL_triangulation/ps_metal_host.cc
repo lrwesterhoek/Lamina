@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <tuple>
@@ -46,17 +47,14 @@ struct Ctx
     bool                       ready = false;
 };
 
+// serializes the dispatches (one queue): a psGpuDepositFields call holds it from its uploads to the end of its passes
 std::mutex& ctxMutex() { static std::mutex m; return m; }
 
-Ctx& ctx()
+// The device, its queue and the pipelines (the runtime compile of the kernel source): ctx() runs this once.
+void ctxInit(Ctx& c)
 {
-    static Ctx c;
-    static bool tried = false;
-    if (tried) return c;
-    tried = true;
-
     c.dev = MTL::CreateSystemDefaultDevice();
-    if (!c.dev) { c.err = "no Metal device"; return c; }
+    if (!c.dev) { c.err = "no Metal device"; return; }
     c.q = c.dev->newCommandQueue();
 
     NS::Error* nsErr = nullptr;
@@ -67,7 +65,7 @@ Ctx& ctx()
     {
         c.err = std::string("kernel compile failed: ")
               + (nsErr ? nsErr->localizedDescription()->utf8String() : "unknown");
-        return c;
+        return;
     }
     for (auto [name, dst, phase] : { std::tuple<const char*, MTL::ComputePipelineState**, int>{"depositFields", &c.pso, -1},
                                      std::tuple<const char*, MTL::ComputePipelineState**, int>{"depositExactItems", &c.psoItems[0], 0},
@@ -83,16 +81,25 @@ Ctx& ctx()
             fn = lib->newFunction(NS::String::string(name, NS::UTF8StringEncoding), fcv, &nsErr);
             fcv->release();
         }
-        if (!fn) { c.err = std::string("kernel '") + name + "' not found"; return c; }
+        if (!fn) { c.err = std::string("kernel '") + name + "' not found"; return; }
         *dst = c.dev->newComputePipelineState(fn, &nsErr);
         if (!*dst)
         {
             c.err = std::string("pipeline state failed: ")
                   + (nsErr ? nsErr->localizedDescription()->utf8String() : "unknown");
-            return c;
+            return;
         }
     }
     c.ready = true;
+}
+
+// The process's device context, built by the first caller (std::call_once: the partitions prepare their deposits
+// before they take ctxMutex, so several may ask at once; the others wait for the first to finish)
+Ctx& ctx()
+{
+    static Ctx c;
+    static std::once_flag once;
+    std::call_once(once, ctxInit, std::ref(c));
     return c;
 }
 
@@ -103,8 +110,7 @@ std::string gpuBackendName() { return "Metal"; }
 
 std::string gpuDeviceName()
 {
-    std::lock_guard<std::mutex> lock(ctxMutex());
-    Ctx& c = ctx();
+    Ctx& c = ctx();   // (thread-safe: std::call_once)
     return c.dev ? std::string(c.dev->name()->utf8String()) : std::string();
 }
 
@@ -209,119 +215,42 @@ PSHostBuffers psHostUploadBuffers(PSHostUploadArgs const& u, ZeroBuf& zeroBuf)
                           bDW, bScal, bSG, bBad, haveVels, haveDens, haveScal };
 }
 
-// Picks the per-tet kernel's opening chunk: by deposit kind or PS_GPU_CHUNK (alias PS_METAL_CHUNK), scaled down
-// under an escalated pace.
-size_t psHostFirstChunk(bool const fExact, GpuPace const& pace, size_t const MIN_CHUNK)
-{
-    // --ps-exact-deposit costs ~1-2 orders of magnitude more per tet (analytic clipping of
-    // every cell in the window vs a barycentric test per sample), so start far smaller: the
-    // adaptive controller only retargets AFTER the first chunk, and one oversized opening
-    // buffer is exactly what the watchdog kills.
-    size_t baseChunk = fExact ? 500 : 25000;
-    if (long const v = Env::integer({"PS_GPU_CHUNK", "PS_METAL_CHUNK"}, 0); v > 0) baseChunk = size_t(v);
-    // an escalated pace (an earlier partition's failures) opens with a proportionally smaller chunk
-    if (pace.targetSec < 0.25)
-        baseChunk = std::max(size_t(double(baseChunk) * pace.targetSec / 0.25), MIN_CHUNK);
-    return baseChunk;
-}
-
-// The chunk checkpoints' settings (DTFE_GPU_CHECKPOINT_CHUNKS, DTFE_GPU_PACE_RECOVER_SEC).
-struct PSHostCkEnv
-{
-    long   ckChunks;
-    double paceRecoverSec;
-};
-
-// Reads how often a pass checkpoints and after how much clean GPU work an escalated pace steps back.
-PSHostCkEnv psHostCheckpointEnv()
-{
-    // DTFE_GPU_CHECKPOINT_CHUNKS=<n>: a checkpoint every n command buffers (0 = only the pass-start
-    // snapshot). Unset: every ~10 s of GPU work (n = 10 s / the current buffer target, so an escalated
-    // pace of 0.02 s buffers does not checkpoint 12x as often). A checkpoint memcpy's the accumulator
-    // grids (~24 B per cell for density + velocity: ~0.4 GB at 256^3, ~0.1 s) into ONE spare host copy,
-    // allocated at the first checkpoint and held until the partition's deposit returns.
-    long ckChunks = -1;
-    if (Env::isSet("DTFE_GPU_CHECKPOINT_CHUNKS")) ckChunks = std::max(0L, Env::integer("DTFE_GPU_CHECKPOINT_CHUNKS", 0));
-    // DTFE_GPU_PACE_RECOVER_SEC=<s>: the clean GPU work after which an escalated pace steps back (GpuPace above)
-    double paceRecoverSec = 90.;
-    if (double const v = Env::real("DTFE_GPU_PACE_RECOVER_SEC", -1.); v >= 0.) paceRecoverSec = v;
-    return PSHostCkEnv{ ckChunks, paceRecoverSec };
-}
-
-// The arguments of psHostExactItems: psGpuDepositFields' locals (by reference those it sets).
+// The arguments of psHostExactItemMap: psGpuDepositFields' locals (by reference those it sets).
 struct PSHostItemsArgs
 {
-    Ctx&                 c;
-    MTL::Buffer*         bV;
-    DepositParams const& P;
-    PSGpuPlan const&     pl;
-    const size_t*        nGrid;
-    size_t               nTetTotal;
-    bool                 periodic, windowMode, timing;
-    bool&                useItems;
-    uint32_t&            blockCells;
-    MTL::Buffer         *&bItems, *&bSumW;
-    size_t&              nItems;
+    Ctx&                      c;
+    std::vector<float> const& verts;
+    DepositParams const&      P;
+    const size_t*             nGrid;
+    size_t                    nTetTotal;
+    bool                      periodic, windowMode, timing;
+    bool&                     useItems;
+    uint32_t&                 blockCells;
+    MTL::Buffer*&             bItems;
+    size_t&                   nItems;
+    PSGpuPhaseTimes&          ph;
 };
 
-// Bounds the tets' windows and fills the exact items' (tet, block) list; the items are off if their buffers fail.
-void psHostExactItems(PSHostItemsArgs const& x)
+// Before the hold: bounds the tets' windows from the host records and fills the exact items' map
+// (psBuildExactItemMap) into its GPU buffer; the items are off if the buffer fails.
+void psHostExactItemMap(PSHostItemsArgs const& x)
 {
-    Ctx& c = x.c;
-    MTL::Buffer* bV = x.bV;
-    DepositParams const& P = x.P;
-    PSGpuPlan const& pl = x.pl;
-    const size_t* nGrid = x.nGrid;
-    size_t const nTetTotal = x.nTetTotal;
-    bool const periodic = x.periodic, windowMode = x.windowMode, timing = x.timing;
-    bool& useItems = x.useItems;
-    uint32_t& blockCells = x.blockCells;
-    MTL::Buffer *&bItems = x.bItems, *&bSumW = x.bSumW;
-    size_t& nItems = x.nItems;
-    if (useItems)
-    {
-        std::vector<uint64_t> bound;
-        double const total = psExactItemBounds(static_cast<float const*>(bV->contents()), nTetTotal, P, nGrid,
-                                               periodic, windowMode, bound, blockCells, nItems);
-        if (timing)
-            fprintf(stderr, "PS-DTFE Metal: exact items: %zu tets, %zu items of %u cells, window bound %.3g cells\n",
-                    nTetTotal, nItems, blockCells, total);
-        bItems = c.dev->newBuffer(std::max<size_t>(nItems, 1) * 2 * sizeof(uint32_t), MTL::ResourceStorageModeShared);
-        // the per-tet weight totals: a float each, or (sumWFixed) two uint words in the tet's own unit
-        // (+ the non-finite guard's counter words of the items kernel, at ExactItemParams.badAt)
-        bSumW  = c.dev->newBuffer(std::max<size_t>(nTetTotal, 1) * (pl.sumWFixed ? 8 : sizeof(float)) + FX_DROP_SLOTS * 4,
-                                  MTL::ResourceStorageModeShared);
-        if (!bItems || !bSumW)
-        {
-            // too big for GPU-visible memory: the one-thread-per-tet kernel still works
-            if (bItems) bItems->release();
-            if (bSumW)  bSumW->release();
-            bItems = bSumW = nullptr;
-            useItems = false;
-        }
-        else
-        {
-            uint32_t* it = static_cast<uint32_t*>(bItems->contents());
-            for (size_t t = 0; t < nTetTotal; ++t)
-            {
-                uint64_t const nb = (bound[t] + blockCells - 1) / blockCells;
-                for (uint64_t k = 0; k < nb; ++k) { *it++ = uint32_t(t); *it++ = uint32_t(std::min<uint64_t>(k, 0xFFFFFFFFu)); }
-            }
-        }
-    }
-}
-
-// Reports the passes' failed buffers and checkpoints (after any failure, else under PS_GPU_TIMING).
-void psHostReportPasses(bool const success, int const nFailed, int const nResumedCk, GpuSnapshot const& snap,
-                        bool const timing)
-{
-    if (nFailed > 0)
-        fprintf(stderr, "%sPS-DTFE Metal: deposit %s after %d failed buffer(s) (%d resumed from a periodic checkpoint); "
-                        "%d checkpoint(s), %.0f MB held, %.3f s copying%s\n",
-                success ? MESSAGE::cYellow() : MESSAGE::cRed(), success ? "recovered on the GPU" : "gave up",
-                nFailed, nResumedCk, snap.taken, snap.bytes / 1.e6, snap.sec, MESSAGE::cReset());
-    else if (timing)
-        fprintf(stderr, "PS-DTFE Metal: checkpoints: %d, %.0f MB held, %.3f s copying\n", snap.taken, snap.bytes / 1.e6, snap.sec);
+    if (!x.useItems) return;
+    auto tPh = std::chrono::steady_clock::now();
+    std::vector<uint64_t> bound;
+    double const total = psExactItemBounds(x.verts.data(), x.nTetTotal, x.P, x.nGrid, x.periodic, x.windowMode, bound,
+                                           x.blockCells, x.nItems);
+    if (x.timing)
+        fprintf(stderr, "PS-DTFE Metal: exact items: %zu tets, %zu items of %u cells, window bound %.3g cells\n",
+                x.nTetTotal, x.nItems, x.blockCells, total);
+    x.ph.bounds += PSGpuPhaseTimes::lap(tPh);
+    x.bItems = psExactItemMapFits(x.nTetTotal, x.nItems)
+             ? x.c.dev->newBuffer(psExactItemMapWords(x.nTetTotal, x.nItems) * sizeof(uint32_t),
+                                  MTL::ResourceStorageModeShared)
+             : nullptr;
+    if (!x.bItems) x.useItems = false;   // too big (GPU-visible memory, 32-bit item numbers): the one-thread-per-tet kernel still works
+    else psBuildExactItemMap(bound, x.blockCells, x.nItems, static_cast<uint32_t*>(x.bItems->contents()));
+    x.ph.fill += PSGpuPhaseTimes::lap(tPh);
 }
 
 // The arguments of psHostCopyBack: psGpuDepositFields' locals (by reference the call's outputs).
@@ -408,22 +337,28 @@ bool psGpuDepositFields(std::vector<float>& verts,
                           double massExtra, PSFixedUnits const& fxUnits,
                           PSGpuGrids& out, std::vector<uint32_t>& deferred, std::string& err)
 {
-    auto const tAsk = std::chrono::steady_clock::now();   // PS_GPU_TIMING: the wait for the queue, and its hold
-    std::lock_guard<std::mutex> lock(ctxMutex());   // serialize dispatches (single queue)
-    auto const tGot = std::chrono::steady_clock::now();
+    // PS_GPU_TIMING=1: one line per kernel run (threads, buffers, GPU-busy and wall seconds),
+    // and per partition where its call went, before and in its hold of the GPU (PSGpuPhaseTimes: timed always,
+    // printed only then)
+    bool const timing = Env::flag({"PS_GPU_TIMING"});
+    PSGpuPhaseTimes ph;
+    auto tPh = std::chrono::steady_clock::now();
     Ctx& c = ctx();
     if (!c.ready) { err = c.err; return false; }
+    ph.device += PSGpuPhaseTimes::lap(tPh);
 
-    // the plan (the selected grids, their fixed-point form and device sizes; gpu_host.h, shared with ps_gpu_cuda.cu).
-    // PS_GPU_FLOAT_MASS=1 (alias PS_METAL_FLOAT_MASS) keeps float mass atomics, for comparison.
-    bool const floatMass = Env::flag({"PS_GPU_FLOAT_MASS", "PS_METAL_FLOAT_MASS"});
+    // Before the hold (ctxMutex below): the plan, the parameter block and the exact items' map, from the host
+    // records -- work that needs no queue, done while another partition's passes hold the GPU.
+    // The plan (the selected grids, their fixed-point form and device sizes; gpu_host.h, shared with ps_gpu_cuda.cu).
+    // PS_GPU_FLOAT_MASS=1 keeps float mass atomics, for comparison.
+    bool const floatMass = Env::flag({"PS_GPU_FLOAT_MASS"});
     PSGpuPlan const pl = psGpuPlan(subDims, fVel, fDisp, fGrad, fVolW, fCaustic, fExact, fScal, fSGrad, masses,
                                    massExtra, fxUnits, floatMass);
     size_t const nCell = pl.nCell;
-    psGpuInitGrids(out, pl, fxUnits);
     deferred.clear();
     if (masses.empty())                 // nothing to deposit (empty partition; the caller may still add released tets)
     {
+        psGpuInitGrids(out, pl, fxUnits);
         psGpuZeroWords(out, pl);
         return true;
     }
@@ -435,14 +370,34 @@ bool psGpuDepositFields(std::vector<float>& verts,
 
     DepositParams P = psGpuParams(pl, fxUnits, boxLo, dx, nGrid, subOrigin, subDims, nSub, periodic, fLinear,
                                   windowMode, not dens.empty(), not scal.empty(), masses.size());
+    size_t const nTetTotal = masses.size();
+    ph.plan += PSGpuPhaseTimes::lap(tPh);
 
     NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
+
+    // --exact-average: split the work below the tet (depositExactItems in ps_deposit.metal), items of
+    // blockCells cells of a tet's window (psExactItemBounds in gpu_host.h, shared with ps_gpu_cuda.cu), as the
+    // compact map psBuildExactItemMap. The items follow the caller's cost order, keeping a SIMD group's threads on
+    // similar work. PS_EXACT_ITEMS=0 keeps the one-thread-per-tet kernel (A/B), PS_EXACT_ITEM_CELLS sets the block.
+    bool useItems = fExact;
+    useItems = useItems && Env::flag("PS_EXACT_ITEMS", true);
+    MTL::Buffer* bItems = nullptr;
+    MTL::Buffer* bSumW  = nullptr;
+    size_t nItems = 0;
+    uint32_t blockCells = 16;
+    if (long const v = Env::integer("PS_EXACT_ITEM_CELLS", 0); v > 0) blockCells = uint32_t(v);
+    psHostExactItemMap(PSHostItemsArgs{ c, verts, P, nGrid, nTetTotal, periodic, windowMode, timing, useItems,
+                                        blockCells, bItems, nItems, ph });
+
+    auto const tAsk = std::chrono::steady_clock::now();   // PS_GPU_TIMING: the wait for the queue, and its hold
+    std::unique_lock<std::mutex> lock(ctxMutex());   // serialize dispatches (single queue); let go after the releases
+    auto const tGot = std::chrono::steady_clock::now();
+    tPh = tGot;
 
     // newBuffer(ptr,...) copies the host array into the MTL buffer; free each host array
     // IMMEDIATELY so at most one array is double-held at a time (instead of all three, a
     // multi-GB difference per partition at production scale). On failure the CPU fallback
     // re-deposits from the triangulation, never from these arrays.
-    size_t const nTetTotal = masses.size();
     auto zeroBuf = [&](size_t bytes) {
         MTL::Buffer* b = c.dev->newBuffer(bytes, MTL::ResourceStorageModeShared);
         if (b) std::memset(b->contents(), 0, bytes);
@@ -454,10 +409,24 @@ bool psGpuDepositFields(std::vector<float>& verts,
                 *bCaust = B.bCaust, *bSV = B.bSV, *bDV = B.bDV, *bDW = B.bDW, *bScal = B.bScal, *bSG = B.bSG,
                 *bBad = B.bBad;
     bool const haveVels = B.haveVels, haveDens = B.haveDens, haveScal = B.haveScal;
+    if (useItems)
+    {   // the exact items' per-tet weight totals: a float each, or (sumWFixed) two uint words in the tet's own unit
+        // (+ the non-finite guard's counter words of the items kernel, at ExactItemParams.badAt), zeroed
+        size_t const sumWBytes = nTetTotal * (pl.sumWFixed ? 8 : sizeof(float));
+        bSumW = c.dev->newBuffer(std::max<size_t>(sumWBytes, 4) + FX_DROP_SLOTS * 4, MTL::ResourceStorageModeShared);
+        if (bSumW) std::memset(bSumW->contents(), 0, sumWBytes);
+        else
+        {   // too big for GPU-visible memory: the one-thread-per-tet kernel still works
+            bItems->release();
+            bItems = nullptr;
+            useItems = false;
+        }
+    }
+    ph.uploads += PSGpuPhaseTimes::lap(tPh);
     if (!bV || !bU || !bM || !bD || !bSc || !bP || !bMass || !bMassFx || !bMom || !bM2 || !bGrad || !bStr || !bMomW || !bCaust || !bSV || !bDV || !bDW || !bScal || !bSG || !bBad)
     {
         err = "Metal buffer allocation failed (out of GPU-visible memory?)";
-        for (MTL::Buffer* b : {bV,bU,bM,bD,bSc,bP,bMass,bMassFx,bMom,bM2,bGrad,bStr,bMomW,bCaust,bSV,bDV,bDW,bScal,bSG,bBad}) if (b) b->release();
+        for (MTL::Buffer* b : {bV,bU,bM,bD,bSc,bP,bMass,bMassFx,bMom,bM2,bGrad,bStr,bMomW,bCaust,bSV,bDV,bDW,bScal,bSG,bBad,bItems,bSumW}) if (b) b->release();
         pool->release();
         return false;
     }
@@ -468,15 +437,13 @@ bool psGpuDepositFields(std::vector<float>& verts,
     // WindowServer in. The chunk size adapts toward pace.targetSec. A killed buffer may have deposited part of
     // its atomics, so a failure resumes from the pass's last snapshot (runChunked below); the caller deposits
     // the partition on the CPU only after a fatal error, 3 failures of one chunk or 16 in the deposit, or
-    // when no snapshot can be held. PS_GPU_CHUNK=<n> (alias PS_METAL_CHUNK) sets the per-tet kernel's starting
+    // when no snapshot can be held. PS_GPU_CHUNK=<n> sets the per-tet kernel's starting
     // chunk size.
     size_t const MIN_CHUNK = fExact ? 50 : 2000;
     size_t const MAX_CHUNK = 500000;
     GpuPace& pace = gpuPace();        // targetSec 0.25 s, gapUs 8 ms (~3% overhead) until escalated
-    size_t baseChunk = psHostFirstChunk(fExact, pace, MIN_CHUNK);
+    size_t baseChunk = psHostFirstChunk(fExact, pace.targetSec, MIN_CHUNK);
     std::string lastErr;
-    // PS_GPU_TIMING=1 (alias PS_METAL_TIMING): one line per kernel run (threads, buffers, GPU-busy and wall seconds)
-    bool const timing = Env::flag({"PS_GPU_TIMING", "PS_METAL_TIMING"});
 
     PSHostCkEnv const ck = psHostCheckpointEnv();
     long ckChunks = ck.ckChunks;
@@ -565,9 +532,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
                 }
                 if (cause != GpuFault::Victim)
                 {   // escalate (for the rest of the process): 4x shorter buffers, wider gaps, smaller chunk
-                    pace.targetSec = std::max(pace.targetSec / 4.0, 0.02);
-                    pace.gapUs     = std::min(pace.gapUs * 3, useconds_t(50000));
-                    pace.cleanSec  = 0.;
+                    pace.onFault();
                     chunk = std::max(chunk / 4, minChunk);
                     baseChunk = std::max(baseChunk / 2, MIN_CHUNK);
                 }
@@ -582,8 +547,10 @@ bool psGpuDepositFields(std::vector<float>& verts,
                 start = snap.start;
                 sinceCk = 0;
                 // an innocent victim retries at once; our own buffers' failures let the system settle first
+                auto tGap = std::chrono::steady_clock::now();
                 if (cause == GpuFault::Resource) sleep(2);
                 else if (cause == GpuFault::Watchdog) sleep(1);
+                ph.gaps += PSGpuPhaseTimes::lap(tGap);
                 continue;
             }
 
@@ -599,19 +566,11 @@ bool psGpuDepositFields(std::vector<float>& verts,
                 if (scale > 4.0) scale = 4.0;
                 chunk = std::min(std::max(size_t(double(chunk) * scale), minChunk), MAX_CHUNK);
             }
-            if (pace.targetSec < GPU_PACE_TARGET0 || pace.gapUs > GPU_PACE_GAP0)
-            {   // an escalated pace steps back after a clean stretch of GPU work (GpuPace above)
-                pace.cleanSec += el + pace.gapUs / 1e6;
-                if (pace.cleanSec >= paceRecoverSec)
-                {
-                    pace.targetSec = std::min(pace.targetSec * 4.0, GPU_PACE_TARGET0);
-                    pace.gapUs     = std::max(pace.gapUs / 3, GPU_PACE_GAP0);
-                    fprintf(stderr, "PS-DTFE Metal: %.0f s of GPU work without a fault -- pace eased to %.0f ms "
-                                    "buffers, %.0f ms gaps%s\n", pace.cleanSec, pace.targetSec * 1e3, pace.gapUs / 1e3,
-                            pace.targetSec >= GPU_PACE_TARGET0 && pace.gapUs <= GPU_PACE_GAP0 ? " (the default)" : "");
-                    pace.cleanSec = 0.;
-                }
-            }
+            double clean = 0.;
+            if (pace.onClean(el, paceRecoverSec, clean))   // an escalated pace stepped back after a clean stretch (GpuPace)
+                fprintf(stderr, "PS-DTFE Metal: %.0f s of GPU work without a fault -- pace eased to %.0f ms "
+                                "buffers, %.0f ms gaps%s\n", clean, pace.targetSec * 1e3, pace.gapUs / 1e3,
+                        pace.targetSec >= GPU_PACE_TARGET0 && pace.gapUs <= GPU_PACE_GAP0 ? " (the default)" : "");
             long const every = ckChunks >= 0 ? ckChunks : std::max(1L, long(std::lround(10.0 / pace.targetSec)));
             if (ckOn && every > 0 && long(sinceCk) >= every && start < nThreads)
             {   // the queue is drained (waitUntilCompleted above): the buffers hold exactly [0, start)
@@ -619,8 +578,11 @@ bool psGpuDepositFields(std::vector<float>& verts,
                 { ++snap.taken; ckPeriodic = true; sinceCk = 0; std::memcpy(badCk, badRun, sizeof badCk); }
                 // else: no host memory for the spare copy; the last snapshot stays valid
             }
+            auto tGap = std::chrono::steady_clock::now();
             usleep(pace.gapUs);   // deliberate idle gap: lets WindowServer take the GPU
+            ph.gaps += PSGpuPhaseTimes::lap(tGap);
         }
+        ph.kernels += busy;
         if (timing)
             fprintf(stderr, "PS-DTFE Metal: %-17s %10zu threads  %6zu buffers  %8.3f s busy  %8.3f s wall\n",
                     pso == c.pso ? "depositFields" : "depositExactItems", nThreads, nBuf, busy,
@@ -678,20 +640,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
         });
     };
 
-    // --ps-exact-deposit: split the work below the tet (depositExactItems in ps_deposit.metal), items of
-    // blockCells cells of a tet's window (psExactItemBounds in gpu_host.h, shared with ps_gpu_cuda.cu).
-    // The items follow the caller's cost order, keeping a SIMD group's threads on similar work.
-    // PS_EXACT_ITEMS=0 keeps the one-thread-per-tet kernel (A/B), PS_EXACT_ITEM_CELLS sets the block.
-    bool useItems = fExact;
-    useItems = useItems && Env::flag("PS_EXACT_ITEMS", true);
-    MTL::Buffer* bItems = nullptr;
-    MTL::Buffer* bSumW  = nullptr;
-    size_t nItems = 0;
-    uint32_t blockCells = 16;
-    if (long const v = Env::integer("PS_EXACT_ITEM_CELLS", 0); v > 0) blockCells = uint32_t(v);
-    psHostExactItems(PSHostItemsArgs{ c, bV, P, pl, nGrid, nTetTotal, periodic, windowMode, timing, useItems,
-                                      blockCells, bItems, bSumW, nItems });
-    struct ExactItemParams { uint32_t nItems, phase, blockCells, badAt; };   // == the MSL struct
+    using ExactItemParams = PSExactItemParams;   // (ps_kernel_params.h: the kernel's own struct)
     uint32_t const badAt = uint32_t(std::max<size_t>(nTetTotal, 1) * (pl.sumWFixed ? 2 : 1));   // past the per-tet totals
     auto runItems = [&](uint32_t phase) -> bool
     {
@@ -703,7 +652,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
                           static_cast<uint32_t*>(bSumW->contents()) + badAt,
                           [&](MTL::ComputeCommandEncoder* enc, size_t start, uint32_t n)
         {
-            ExactItemParams const IP{ n, phase, blockCells, badAt };
+            ExactItemParams const IP{ n, phase, blockCells, badAt, uint32_t(start), uint32_t(nTetTotal) };
             enc->setBuffer(bV,    0, 0);
             enc->setBuffer(bU,    0, 1);
             enc->setBuffer(bM,    0, 2);
@@ -719,7 +668,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
             enc->setBuffer(bSV,   0, 12);
             enc->setBuffer(bDV,   0, 13);
             enc->setBuffer(bDW,   0, 14);
-            enc->setBuffer(bItems, start * 2 * sizeof(uint32_t), 15);
+            enc->setBuffer(bItems, 0, 15);   // (the whole map: the chunk starts at IP.itemBase)
             enc->setBuffer(bSumW, 0, 16);
             enc->setBytes(&IP, sizeof IP, 17);
             enc->setBuffer(bSc,   0, 18);
@@ -740,13 +689,14 @@ bool psGpuDepositFields(std::vector<float>& verts,
     // the kernel), 4 B per tet instead of a ~130 B copy each.
     auto runLeftovers = [&]() -> bool
     {
+        auto tL = std::chrono::steady_clock::now();   // (PS_GPU_TIMING: this lambda's own host work, not its kernels)
         float* mb = static_cast<float*>(bM->contents());
         float const* sw = static_cast<float const*>(bSumW->contents());
         int64_t const* swx = static_cast<int64_t const*>(bSumW->contents());   // (sumWFixed: the words, little-endian)
         std::vector<uint32_t> left;
         for (size_t t = 0; t < nTetTotal; ++t)
             if (mb[t] > 0.f && !(pl.sumWFixed ? swx[t] > 0 : sw[t] > 0.f)) left.push_back(uint32_t(t));
-        if (left.empty()) return true;
+        if (left.empty()) { ph.leftovers += PSGpuPhaseTimes::lap(tL); return true; }
         size_t const nL = left.size();
         bool const compact = nL <= nTetTotal / 16;
         auto gather = [&](MTL::Buffer* src, size_t stride) {
@@ -774,7 +724,9 @@ bool psGpuDepositFields(std::vector<float>& verts,
         }
         bool ok = lV && lU && lM && lD && lS;
         if (!ok) lastErr = "Metal buffer allocation failed (exact-deposit leftovers)";
-        else ok = runPerTet(lV, lU, lM, lD, lS, compact ? nL : nTetTotal, false);
+        ph.leftovers += PSGpuPhaseTimes::lap(tL);
+        if (ok) ok = runPerTet(lV, lU, lM, lD, lS, compact ? nL : nTetTotal, false);
+        tL = std::chrono::steady_clock::now();
         if (ok)
         {
             float const* lm = static_cast<float const*>(lM->contents());
@@ -786,21 +738,21 @@ bool psGpuDepositFields(std::vector<float>& verts,
         }
         if (lM) lM->release();
         if (compact) for (MTL::Buffer* b : {lV, lU, lD, lS}) if (b) b->release();
+        ph.leftovers += PSGpuPhaseTimes::lap(tL);
         return ok;
     };
 
     // one pass sequence; each pass heals its own failed buffers from its snapshots (runChunked), so a
     // false here means the GPU gave up on this partition and the caller deposits it on the CPU
-    bool success;
-    if (useItems)
-    {
-        std::memset(bSumW->contents(), 0, nTetTotal * (pl.sumWFixed ? 8 : sizeof(float)));
-        success = runItems(0) && runItems(1) && runLeftovers();
-    }
-    else
-        success = runPerTet(bV, bU, bM, bD, bSc, nTetTotal, true);
-    psHostReportPasses(success, nFailed, nResumedCk, snap, timing);
+    bool const success = useItems ? runItems(0) && runItems(1) && runLeftovers()
+                                  : runPerTet(bV, bU, bM, bD, bSc, nTetTotal, true);
+    psHostReportPasses("Metal", "buffer", success, nFailed, nResumedCk, snap, timing);
+    // the hold ends with the releases (as ps_gpu_cuda.cu): the next partition allocates its whole buffer set as soon
+    // as it takes the queue, and the auto-tuner books ONE deposit's buffers (ctxMutex serializes them), so this
+    // call's buffers -- and the pool, whose completed command buffers still retain them -- go before the unlock
+    tPh = std::chrono::steady_clock::now();
     for (MTL::Buffer* b : {bItems, bSumW}) if (b) b->release();
+    ph.releases += PSGpuPhaseTimes::lap(tPh);
     if (!success)
     {
         err = lastErr;
@@ -808,17 +760,27 @@ bool psGpuDepositFields(std::vector<float>& verts,
         pool->release();
         return false;
     }
-    // the deposit is kept: its dropped shares join the run's counts (reported once at the end, DTFE.cpp)
-    for (int k = 0; k < FX_DROP_SLOTS; ++k)
-        if (badRun[k]) fixedShareDropped(k, badRun[k]);
 
+    tPh = std::chrono::steady_clock::now();
+    psGpuInitGrids(out, pl, fxUnits);   // (the output grids, allocated only now: a partition waiting for the GPU holds none)
     psHostCopyBack(PSHostCopyArgs{ B, pl, nCell, nTetTotal, fCaustic, out, deferred });
+    ph.copyBack += PSGpuPhaseTimes::lap(tPh);
 
     for (MTL::Buffer* b : {bV,bU,bM,bD,bSc,bP,bMass,bMassFx,bMom,bM2,bGrad,bStr,bMomW,bCaust,bSV,bDV,bDW,bScal,bSG,bBad}) b->release();
     pool->release();
-    if (timing)   // the hold covers the uploads, the passes and the copy-back: the GPU idles for the rest of it
+    ph.releases += PSGpuPhaseTimes::lap(tPh);
+    auto const tFree = tPh;
+    lock.unlock();
+    // the deposit is kept (its grids are back; a unified-memory copy-back cannot fail): its dropped shares join the
+    // run's counts (reported once at the end, DTFE.cpp)
+    for (int k = 0; k < FX_DROP_SLOTS; ++k)
+        if (badRun[k]) fixedShareDropped(k, badRun[k]);
+    if (timing)   // the hold: uploads, passes, copy-back and releases (the GPU idles in all of it but the kernels)
+    {
+        double const held = std::chrono::duration<double>(tFree - tGot).count();
+        psGpuReportPhases("Metal", PSMassAudit::partition, ph, snap.sec, held);
         fprintf(stderr, "PS-DTFE Metal: partition %d waited %.3f s for the GPU and held it %.3f s\n",
-                PSMassAudit::partition, std::chrono::duration<double>(tGot - tAsk).count(),
-                std::chrono::duration<double>(std::chrono::steady_clock::now() - tGot).count());
+                PSMassAudit::partition, std::chrono::duration<double>(tGot - tAsk).count(), held);
+    }
     return true;
 }

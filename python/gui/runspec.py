@@ -264,10 +264,12 @@ class RunSpec:
             if self.slice_plane:                            # the hi-res slice: the standard interpolant at the points
                 env["SAMPLE_POINTS"] = str(self.slice_plane)
                 env["PTS_VEL_GRAD"] = "1" if self.slice_vel_grad else "0"
-            env["DTFE_METAL"] = "1" if self.gpu else "0"     # -m only switches the GPU ON; pin the env knob too
+            env["DTFE_GPU"] = "1" if self.gpu else "0"       # -m only switches the GPU ON; pin the env knob too
             # and the cell average, both ways: run_dtfe.sh's default is the exact one, so a
             # 'sampled' job without this would run exact (-e, like -m, only switches it on)
-            env["DTFE_EXACT_AVERAGE"] = "1" if self.deposit == "exact" else "0"
+            env["DTFE_EXACT"] = "1" if self.deposit == "exact" else "0"
+            # the knobs' older names too, for one release (run_dtfe.sh reads them when the new ones are unset)
+            env["DTFE_METAL"], env["DTFE_EXACT_AVERAGE"] = env["DTFE_GPU"], env["DTFE_EXACT"]
             # the start-over tick reaches run_dtfe.sh too (it resumes a killed partitioned run by itself,
             # DTFE_RESUME as run_ps_dtfe.sh's PS_RESUME), spelled out both ways: a stray export cannot leak in
             env["DTFE_RESUME"] = "0" if self.start_over else "1"
@@ -283,7 +285,8 @@ class RunSpec:
             argv.append("-e")
         env.update({
             "FIELDS": " ".join(self.fields),
-            "PS_METAL": "1" if self.gpu else "0",
+            "PS_GPU": "1" if self.gpu else "0",
+            "PS_METAL": "1" if self.gpu else "0",      # PS_GPU's older name, for one release
             "PS_VERTEX_MASS": "1" if self.vertex_mass else "0",
             "PS_VOLUME_WEIGHTED": "1" if self.volume_weighted else "0",
             "PS_CAUSTICS": "1" if self.caustics else "0",
@@ -543,8 +546,9 @@ PLANE_GHOSTING_MIN = 16              # make_image_plane.py: fewer planes across 
 PIPELINE_RENDER_KEYS = ("render", "render_fields", "render_project", "render_smooth", "render_smooth_derivatives",
                         "render_fixed_range", "render_force")
 # what run_ps_pipeline.sh reads itself; everything else in command()'s environment is for run_ps_dtfe.sh
+# (PS_GPU is run_ps_dtfe.sh's knob too: the pipeline's memory check hands it on)
 PIPELINE_ONLY_KEYS = ("SIMS", "SNAPS", "NU", "AXIS", "CENTER", "PLANES", "THICKNESS", "SUPERSAMPLE", "WINDOW",
-                      "GRID_SIZE", "PS_GPU", "FORCE", "DRY_RUN", "PY")
+                      "GRID_SIZE", "FORCE", "DRY_RUN", "PY")
 
 
 # The phase-space image plane's conventions (PS-DTFE --pts-conventions; run_ps_dtfe.sh / run_ps_pipeline.sh
@@ -710,15 +714,17 @@ _PLANE = Opt("plane", "Image plane", "plane", "",
 # the common cross-box smoothing (contract G2): python/config.py's, one number for every Python user;
 # 2.1625 (10.0002 TNG100-3-Dark cells) while a config predates the constant
 CROSSBOX_SMOOTH_MPC = float(getattr(config, "CROSSBOX_SMOOTHING_MPC", 2.1625))
+# the void figure sets' common options share one 'Void options' row on each set's page (radius, smoothing, overlaps)
+VOID_ROW = "Void options"
 # the void scripts' smoothing in Mpc: the same physical scale in every box, the minima window following
-_SMOOTH_MPC = Opt("smooth_mpc", "Void smoothing in Mpc (0 = the default 10 cells)", "float", 0.0,
-                  help=f"e.g. {CROSSBOX_SMOOTH_MPC:g}, TNG100's 10 cells: TNG50, TNG100 and TNG300 then find the same voids; "
-                       "the outputs get their own names", limits=(0.0, 100.0, 4))
-_RADIUS = Opt("radius", "Void radius", "choice", "r_v", ("r_v", "r_eff"),
+_SMOOTH_MPC = Opt("smooth_mpc", "smoothing (Mpc)", "float", 0.0,
+                  help=f"0 = the default, 10 cells. E.g. {CROSSBOX_SMOOTH_MPC:g}, TNG100's 10 cells: TNG50, TNG100 and TNG300 then find the same voids; "
+                       "the outputs get their own names", limits=(0.0, 100.0, 4), row=VOID_ROW)
+_RADIUS = Opt("radius", "radius", "choice", "r_v", ("r_v", "r_eff"),
               help="r_v: the measured radius, where the smoothed density around the void rises back to the mean; "
-                   "r_eff: the ellipsoid fit's curvature length, about 1.75 r_v")
-_OVERLAPS = Opt("keep_overlaps", "Keep overlapping voids", "bool", False,
-                help="also the voids whose centre lies inside the region of a deeper void")
+                   "r_eff: the ellipsoid fit's curvature length, about 1.75 r_v", row=VOID_ROW)
+_OVERLAPS = Opt("keep_overlaps", "keep overlapping voids", "bool", False,
+                help="also the voids whose centre lies inside the region of a deeper void", row=VOID_ROW)
 
 CROSSBOX_SIMS = "TNG50-3-Dark TNG100-3-Dark TNG300-3-Dark"     # the boxes the launcher's cross-box figure compares
 
@@ -863,7 +869,7 @@ FIGURE_SETS: tuple[FigureSet, ...] = (
                         limits=DENSITY_LIMITS),
                     Opt("vmax", "Density scale maximum (0 = auto)", "float", 0.0, help="rho/rho_bar; auto = the 99.99th percentile",
                         limits=DENSITY_LIMITS),
-                    Opt("dpi", "Output dpi (0 = native: one image pixel per sample)", "int", 0),
+                    Opt("dpi", "Output dpi (0 = native)", "int", 0, help="0 = native: one image pixel per sample"),
                     Opt("image", "Pixel-exact PNGs, one per panel (no axes; for zooming and posters)", "bool", False))),
     FigureSet("voidpop", "Void population", "plot/plot_void_population.py", "sim",
               "Counts, sizes, shapes and depths of all voids at every snapshot with grids.",
@@ -1209,7 +1215,7 @@ def gpu_build_default(estimator: str = "ps", precision: str = "single", dim: int
     """The GPU tick a fresh job starts with (not simply on: every fresh job of a CPU-only build would then warn
     that the deposit runs on the CPU): on when the pair was built with a GPU backend -- scripts/config.sh
     gpu_build_default's
-    rule, the drivers' default for DTFE_METAL / PS_METAL: the Makefile's '.gpu_mode_metal', '_cuda' or '_hip' stamp
+    rule, the drivers' default for DTFE_GPU / PS_GPU: the Makefile's '.gpu_mode_metal', '_cuda' or '_hip' stamp
     in the pair's object folder (gpu_backend). Not gpu_built's 'any stamp but off': the CI's 'cudaemu' build
     emulates the kernels on the CPU, far slower than the CPU path.
     The binary itself cannot say ('--help' lists --gpu in every build, '--version' names no backend). A job, preset

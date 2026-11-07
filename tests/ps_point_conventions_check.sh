@@ -8,7 +8,7 @@
 #  A) IDENTITY: without --ps-vertex-mass / --ps-volume-weighted 'grid' and 'legacy' give byte-identical '.pts_*'
 #     files, and with both options the GRIDS of the two runs are byte-identical (the conventions are the points').
 #  B) THE IC BIAS: single-stream crossed waves whose InitialCoordinates are displaced towards the final positions
-#     by alpha = 0.1645 (TNG's D(z=127)/D(z=20)), --ps-vertex-mass --ps-volume-weighted --ps-exact-deposit, a slab
+#     by alpha = 0.1645 (TNG's D(z=127)/D(z=20)), --ps-vertex-mass --ps-volume-weighted --exact-average, a slab
 #     of four sub-planes through one cell layer: the plane's cell blocks against the grid's cells (and against the
 #     analytic cell averages) have slope ~1 with 'grid', ~1-alpha with 'legacy' -- for 'dtfe' and 'geometric';
 #     the perturbed-IC plane equals the true-IC plane to ~1%. The exact deposit isolates the conventions: the
@@ -42,7 +42,7 @@ echo "============================================================"
 
 build_target "${1:-}" PS-DTFE o_ps
 [ -x "${BIN}" ] || { echo "FAIL: ${BIN} not built"; exit 1; }
-FULL_HELP="$("${BIN}" --full_help 2>/dev/null)" || { echo "FAIL: ${BIN} --full_help exited non-zero"; exit 1; }
+FULL_HELP="$("${BIN}" --full-help 2>/dev/null)" || { echo "FAIL: ${BIN} --full-help exited non-zero"; exit 1; }
 grep -q -- '--pts-conventions' <<<"${FULL_HELP}" || skip_or_fail "this PS-DTFE has no --pts-conventions."
 
 echo ">> test data ..."
@@ -106,10 +106,10 @@ run "${TMP}/a_on_legacy"  "${TMP}/in_crw.hdf5" "${AF[@]}" "${VMW[@]}" --pts-conv
 echo ">> B: perturbed-IC slab (exact deposit), both estimators and conventions; the sampled deposit for comparison"
 for est in dtfe geometric; do
     for conv in grid legacy; do
-        run "${TMP}/b_${est}_${conv}" "${TMP}/in_pic.hdf5" --field density_a "${VMW[@]}" --ps-exact-deposit \
+        run "${TMP}/b_${est}_${conv}" "${TMP}/in_pic.hdf5" --field density_a "${VMW[@]}" --exact-average \
             --sample-points "${TMP}/in_slab.bin" --ps-stream-density "${est}" --pts-conventions "${conv}"
     done
-    run "${TMP}/b_${est}_true" "${TMP}/in_lin.hdf5" --field density_a --ps-exact-deposit \
+    run "${TMP}/b_${est}_true" "${TMP}/in_lin.hdf5" --field density_a --exact-average \
         --sample-points "${TMP}/in_slab.bin" --ps-stream-density "${est}"
 done
 run "${TMP}/b_sampled_grid"   "${TMP}/in_pic.hdf5" --field density_a "${VMW[@]}" --sample-points "${TMP}/in_slab.bin"
@@ -117,7 +117,7 @@ run "${TMP}/b_sampled_legacy" "${TMP}/in_pic.hdf5" --field density_a "${VMW[@]}"
     --pts-conventions legacy
 echo ">> C: uniform near-lattice box"
 for est in dtfe geometric; do
-    run "${TMP}/c_${est}_full" "${TMP}/in_uni.hdf5" --field density_a "${VMW[@]}" --ps-exact-deposit \
+    run "${TMP}/c_${est}_full" "${TMP}/in_uni.hdf5" --field density_a "${VMW[@]}" --exact-average \
         --sample-points "${TMP}/in_full.bin" --ps-stream-density "${est}"
     run "${TMP}/c_${est}_rand" "${TMP}/in_uni.hdf5" --field density_a "${VMW[@]}" \
         --sample-points "${TMP}/in_rand.bin" --ps-stream-density "${est}"

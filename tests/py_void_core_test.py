@@ -339,7 +339,8 @@ def t_real_tng100_z0():
 
 def t_crossbox_constant():
     """config.CROSSBOX_SMOOTHING_MPC = 2.1625 is the ONE cross-box smoothing: plot_void_crossbox's
-    default and analyze.py's cache inventory import it (an assignment that names it, not an equal literal)."""
+    default and analyze.py's cache inventory (dtfelib/cache.py, re-exported by analyze) import it (an assignment that
+    names it, not an equal literal)."""
     import re
     import config
     assert config.CROSSBOX_SMOOTHING_MPC == 2.1625, config.CROSSBOX_SMOOTHING_MPC
@@ -351,7 +352,7 @@ def t_crossbox_constant():
         sys.path.remove(str(_PY / "plot"))
     assert plot_void_crossbox.DEFAULT_SIGMA_MPC == config.CROSSBOX_SMOOTHING_MPC, plot_void_crossbox.DEFAULT_SIGMA_MPC
     assert analyze.CACHE_SMOOTHING_MPC == (config.CROSSBOX_SMOOTHING_MPC,), analyze.CACHE_SMOOTHING_MPC
-    for f, name in (("plot/plot_void_crossbox.py", "DEFAULT_SIGMA_MPC"), ("analyze.py", "CACHE_SMOOTHING_MPC")):
+    for f, name in (("plot/plot_void_crossbox.py", "DEFAULT_SIGMA_MPC"), ("dtfelib/cache.py", "CACHE_SMOOTHING_MPC")):
         src = (_PY / f).read_text()
         assert re.search(rf"^{name} = .*config\.CROSSBOX_SMOOTHING_MPC", src, re.M), f"{f}: {name} not from config"
 
@@ -495,23 +496,24 @@ def t_cache_move():
         # and the download it forces lands on the source's disk: its bytes count in the room needed there
         dataless = src / "r512_s10_f11_trace_g0.1_v2" / "099_voids.npz"
         assert dataless.is_file()
-        flags, disk_usage = analyze._st_flags, shutil.disk_usage
-        total = sum(analyze._dir_size(p)[0] if p.is_dir() else p.stat().st_size for p in src.iterdir())
-        analyze._st_flags = lambda q: 0x40000000 if q == dataless else 0
+        from dtfelib import cache as dcache                           # move_cache's test hooks live beside it
+        flags, disk_usage = dcache._st_flags, shutil.disk_usage
+        total = sum(dcache._dir_size(p)[0] if p.is_dir() else p.stat().st_size for p in src.iterdir())
+        dcache._st_flags = lambda q: 0x40000000 if q == dataless else 0
         shutil.disk_usage = lambda p: types.SimpleNamespace(free=int(total * 1.05 + 100e6) + 1)
         try:
             code, said = run(yes=True, users=[])
         finally:
-            analyze._st_flags, shutil.disk_usage = flags, disk_usage
+            dcache._st_flags, shutil.disk_usage = flags, disk_usage
         assert code == 1 and "evicted to iCloud (099_voids.npz" in said and not list(dest.iterdir()), said
         assert "downloaded onto the same disk first" in said, said
         assert untouched()
-        same = analyze._same_tree
-        analyze._same_tree = lambda a, b: False                       # a copy that does not verify
+        same = dcache._same_tree
+        dcache._same_tree = lambda a, b: False                        # a copy that does not verify
         try:
             code, said = run(yes=True, users=[])
         finally:
-            analyze._same_tree = same
+            dcache._same_tree = same
         assert code == 1 and "copy failed" in said and untouched() and list(dest.iterdir()) == [], said
         code, said = run(yes=True, users=[])
         assert code == 0 and "Moved" in said, said

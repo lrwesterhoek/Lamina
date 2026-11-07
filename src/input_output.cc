@@ -510,7 +510,7 @@ void writeOutputData(Quantities &uQuantities,
     if ( not aQuantities.hidden_streams.empty() )
         output.write( aQuantities.hidden_streams, userOptions.outputFilename + ".a_hidden_streams", "averaged-grid hidden-stream flags", userOptions );
 
-    // --ps-exact-deposit: raw tetrahedron-touch count (geometric multiplicity, NOT a stream
+    // --exact-average: raw tetrahedron-touch count (geometric multiplicity, NOT a stream
     // count -- see '.streams' for the physical one). One file, same preference order as '.caustic'.
     if ( not uQuantities.tet_touch.empty() )
         output.write( uQuantities.tet_touch, userOptions.outputFilename + ".tetTouch", "tetrahedron-touch count", userOptions );

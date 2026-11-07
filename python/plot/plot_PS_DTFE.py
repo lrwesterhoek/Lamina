@@ -19,7 +19,7 @@ from scipy.ndimage import gaussian_filter
 from dtfelib import STREAM_TOL, make_fieldset
 from dtfelib import pointeval
 from dtfelib import figures as style
-from dtfelib.fields import extract_2d_slice as extract_slice
+from dtfelib.fields import extract_2d_slice as extract_slice, smooth_components as _smooth_each
 
 # which field families to plot (PS-only ones are skipped automatically under --method dtfe)
 PROCESS_DENSITY = True
@@ -37,8 +37,7 @@ FIGURE_ROOT = Path(config.LOCAL_FIGURES_ROOT)
 _SMOOTH = 0.0   # set from --smooth in main()
 
 
-def _title(text, redshift):
-    return f"{text} (z={redshift:.2f})" if redshift is not None else text
+_title = style.z_title                          # 'text (z=..)': the map titles (SHOW_TITLES)
 
 def smooth(field):
     """Plot-time Gaussian smoothing (--smooth, grid cells); identity when 0."""
@@ -48,12 +47,7 @@ def smooth(field):
 
 def smooth_components(field):
     """Per-component smoothing for (N,N,N,c) fields (before norms/magnitudes)."""
-    if _SMOOTH <= 0:
-        return field
-    out = np.empty_like(field)
-    for c in range(field.shape[-1]):
-        out[..., c] = gaussian_filter(field[..., c], sigma=_SMOOTH, mode='wrap')
-    return out
+    return _smooth_each(field, _SMOOTH, lambda f, s: gaussian_filter(f, sigma=s, mode='wrap'))
 
 def plot_density(density_field, slice_dim, box_size, redshift=None, save_path=None, label="PS-DTFE"):
     dens_slice = extract_slice(density_field, slice_dim).T

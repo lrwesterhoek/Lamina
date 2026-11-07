@@ -10,13 +10,16 @@
 #
 # Usage:
 #   ./run_dtfe.sh [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-m] [-e] [snapshot ...]
-#     -m   run the '_a' interpolation on the GPU (same as DTFE_METAL=1). The default (DTFE_METAL unset, 'auto')
+#     -m   run the '_a' interpolation on the GPU (--gpu; same as DTFE_GPU=1). The default (DTFE_GPU unset, 'auto')
 #          is the GPU when the binary was built with one (the Makefile's o/.gpu_mode_metal|cuda|hip stamp;
-#          o_d for DTFE_PRECISION=double), else the CPU; DTFE_METAL=0 runs the CPU on a GPU build.
+#          o_d for DTFE_PRECISION=double), else the CPU; DTFE_GPU=0 runs the CPU on a GPU build.
 #     -e   every '_a' cell the EXACT average of the linear interpolant over the cell (--exact-average). The
-#          DEFAULT (DTFE_EXACT_AVERAGE=1, the production standard: no sampling noise, the mass exact to ~3e-8);
-#          -e overrides an exported DTFE_EXACT_AVERAGE=0. DTFE_EXACT_AVERAGE=0 gives the Monte-Carlo sample mean (1.1-1.7x
+#          DEFAULT (DTFE_EXACT=1, the production standard: no sampling noise, the mass exact to ~3e-8);
+#          -e overrides an exported DTFE_EXACT=0. DTFE_EXACT=0 gives the Monte-Carlo sample mean (1.1-1.7x
 #          faster at 512^3 on the GPU before the exact clipping got faster; the CPU and the GPU now clip at the same speed)
+#     The drivers' letters are their own: -m is the GPU and -s the simulation here, while the binaries' -m is the
+#     averaging --method and -s the --samples count. DTFE_METAL and DTFE_EXACT_AVERAGE, the knobs' older names, are
+#     still read when DTFE_GPU / DTFE_EXACT are unset.
 #   Production defaults: GRID_SIZE 512 (config.sh), padding 15, the GPU when built, the exact cell
 #   average, FIELDS = density, velocity, its gradient / divergence / shear / vorticity, the T-web and the V-web,
 #   LAMBDA_TH 0.3.
@@ -42,8 +45,8 @@
 #   snapshot's checkpoint (<prefix>.runlog.checkpoint, or in SCRATCH_DIR) exists, the next run passes --resume and
 #   computes only the partitions it lacks; DTFE_RESUME=0 starts over (the new run replaces the checkpoint). A run with
 #   SAMPLE_POINTS too (the binary saves each finished partition's point answers beside the grids).
-#
-set -uo pipefail
+
+set -uo pipefail   # no -e: a batch goes on after a failed snapshot (config.sh, 'Strictness')
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"   # the binaries and Makefile live one level up
@@ -63,12 +66,13 @@ PARTITION="${PARTITION:-}"       # EMPTY (default) = the binary AUTO-TUNES the s
                                  # it prints). Set to override, e.g. PARTITION="2 2 2".
 MAX_CONCURRENT="${MAX_CONCURRENT:-}"  # cap on concurrent triangulations to bound peak RAM (0 = all cores).
                                  # EMPTY (default) = auto-tuned together with the partition split.
-DTFE_METAL="${DTFE_METAL:-auto}"  # 1 = the '_a' interpolation on the GPU (--gpu), 0 = the CPU; 'auto' (default,
-                                 # the drivers' rule) = 1 when the binary is a GPU build (config.sh
-                                 # gpu_build_default), resolved below once DTFE_PRECISION has chosen the binary
-DTFE_EXACT_AVERAGE="${DTFE_EXACT_AVERAGE:-1}"  # 1 (default, the production standard) = exact cell
+DTFE_GPU="${DTFE_GPU:-${DTFE_METAL:-auto}}"  # 1 = the '_a' interpolation on the GPU (--gpu), 0 = the CPU; 'auto'
+                                 # (default, the drivers' rule) = 1 when the binary is a GPU build (config.sh
+                                 # gpu_build_default), resolved below once DTFE_PRECISION has chosen the binary.
+                                 # DTFE_METAL, its older name, is read when DTFE_GPU is unset
+DTFE_EXACT="${DTFE_EXACT:-${DTFE_EXACT_AVERAGE:-1}}"  # 1 (default, the production standard) = exact cell
                                  # averages (--exact-average: no sampling noise, mass exact to ~3e-8); 0 = the
-                                 # Monte-Carlo sample mean
+                                 # Monte-Carlo sample mean. DTFE_EXACT_AVERAGE, its older name, is read when unset
 DRY_RUN="${DRY_RUN:-0}"          # 1 = print the commands and paths, run nothing
 AUTO_TUNE_REPORT="${AUTO_TUNE_REPORT:-0}"  # 1 = only ASK the binary's auto-tuner what this run would need
                                  # (--auto-tune-report): per snapshot one line
@@ -92,7 +96,7 @@ TESS_CACHE="${TESS_CACHE:-}"     # a LOCAL folder: reuse the Delaunay tessellati
                                  # (--tessellation-cache; created if missing; a partitioned run caches one file per
                                  # thread sub-box of each partition, one per partition with SAMPLE_POINTS) -- the
                                  # same knob as run_ps_dtfe.sh
-LAMBDA_TH="${LAMBDA_TH:-0.3}"    # eigenvalue threshold of the T-web / V-web classes (--lambda_th), the SAME default as
+LAMBDA_TH="${LAMBDA_TH:-0.3}"    # eigenvalue threshold of the T-web / V-web classes (--lambda-th), the SAME default as
                                  # run_ps_dtfe.sh (the binary's own default is 0.0: a run without this flag classifies
                                  # differently from a scripted one)
 DTFE_RESUME="${DTFE_RESUME:-1}"  # 1 (default) = resume a killed partitioned run, as run_ps_dtfe.sh's PS_RESUME:
@@ -105,7 +109,7 @@ DTFE_RESUME="${DTFE_RESUME:-1}"  # 1 (default) = resume a killed partitioned run
 DATA_DIR=""                # default: sim_dir $SIMULATION (config.sh); override with -d
 OUTPUT_PREFIX="${OUTPUT_PREFIX:-output}"   # -> <snapdir>/<prefix>.* (default 'output'). Another
                                  # prefix keeps a variant beside the default set, e.g. OUTPUT_PREFIX=output_mc with
-                                 # DTFE_EXACT_AVERAGE=0; dtfelib reads 'output.' for standard DTFE. 'ps_*' is refused
+                                 # DTFE_EXACT=0; dtfelib reads 'output.' for standard DTFE. 'ps_*' is refused
                                  # below: PS-DTFE's naming, so an export meant for run_ps_dtfe.sh cannot overwrite
                                  # the phase-space grids with standard ones
 
@@ -137,20 +141,15 @@ case "${OUTPUT_PREFIX}" in
 esac
 
 # ---- Parse arguments ------------------------------------------------------
-while getopts "d:s:g:meh" opt; do
-    case "$opt" in
-        d) DATA_DIR="$OPTARG" ;;
-        s) SIMULATION="$OPTARG" ;;
-        g) GRID_SIZE="$OPTARG" ;;
-        m) DTFE_METAL=1 ;;
-        e) DTFE_EXACT_AVERAGE=1 ;;
-        h) usage; exit 0 ;;
-        *) usage; exit 1 ;;
+own_option() {   # <letter>: this driver's own options; -d, -s, -h and the data checks are config.sh driver_options'
+    case "$1" in
+        g) GRID_SIZE="${OPTARG}" ;;
+        m) DTFE_GPU=1 ;;
+        e) DTFE_EXACT=1 ;;
     esac
-done
+}
+driver_options "g:me" own_option "$@"   # then the data root (unless -d) and the simulation are required
 shift $((OPTIND - 1))
-[ -n "${DATA_DIR}" ] || require_data_root   # -d names the simulation's folder itself
-require_simulation
 
 snapshot_args "$@"              # positional arguments override the default snapshot list (config.sh)
 
@@ -160,7 +159,7 @@ data_root_problem "${DATA_DIR}" || exit 2     # preflight: the data disk unmount
 cd "$REPO_ROOT" || exit 1
 
 driver_binary DTFE_BIN DTFE "${DTFE_PRECISION}"      # ./DTFE or ./DTFE-double (config.sh)
-gpu_auto_resolve DTFE_METAL "${DTFE_BIN}"             # DTFE_METAL=auto: the GPU when this binary was built with one
+gpu_auto_resolve DTFE_GPU "${DTFE_BIN}"               # DTFE_GPU=auto: the GPU when this binary was built with one
 time_wrap_resolve                                     # TIME_WRAP: the optional peak-memory wrapper
 keep_awake "${DRY_RUN}"
 # the run-log contract (config.sh): 'output.runlog.partial' while the binary runs, then 'output.runlog' on exit 0
@@ -170,12 +169,12 @@ runlog_contract_start
 echo "Starting DTFE processing..."
 echo "Data directory: ${DATA_DIR}"
 echo "Grid size: ${GRID_SIZE}   Fields: ${FIELDS}   Output prefix: ${OUTPUT_PREFIX}"
-if [ "${DTFE_EXACT_AVERAGE}" = "1" ]; then
+if [ "${DTFE_EXACT}" = "1" ]; then
     echo "Cell averages: exact (--exact-average)"
 else
-    echo "Cell averages: Monte-Carlo sample means (DTFE_EXACT_AVERAGE=${DTFE_EXACT_AVERAGE})"
+    echo "Cell averages: Monte-Carlo sample means (DTFE_EXACT=${DTFE_EXACT})"
 fi
-echo "'_a' interpolation: $([ "${DTFE_METAL}" = "1" ] && echo "GPU (--gpu)" || echo "CPU")${gpu_auto}"
+echo "'_a' interpolation: $([ "${DTFE_GPU}" = "1" ] && echo "GPU (--gpu)" || echo "CPU")${gpu_auto}"
 [ -n "${SCRATCH_DIR}" ] && echo "Scratch directory: ${SCRATCH_DIR} (grids out of core)"
 echo ""
 
@@ -188,11 +187,11 @@ for i in "${SNAPSHOTS[@]}"; do
         continue
     fi
 
-    # GPU interpolation toggle (-m / DTFE_METAL=1); ignored with a warning on non-METAL builds.
+    # GPU interpolation toggle (-m / DTFE_GPU=1); ignored with a warning on non-GPU builds.
     metal_args=()
-    [ "${DTFE_METAL}" = "1" ] && metal_args=(--gpu)
+    [ "${DTFE_GPU}" = "1" ] && metal_args=(--gpu)
     exact_args=()
-    [ "${DTFE_EXACT_AVERAGE}" = "1" ] && exact_args=(--exact-average)
+    [ "${DTFE_EXACT}" = "1" ] && exact_args=(--exact-average)
 
     # pass --partition/--max-concurrent only when set; otherwise the binary auto-tunes them
     part_args=()
@@ -229,7 +228,7 @@ for i in "${SNAPSHOTS[@]}"; do
         --periodic
         ${part_args[@]+"${part_args[@]}"}
         --field ${FIELDS}
-        --lambda_th ${LAMBDA_TH}
+        --lambda-th ${LAMBDA_TH}
         ${scratch_args[@]+"${scratch_args[@]}"}
         ${tess_args[@]+"${tess_args[@]}"}
         ${sp_args[@]+"${sp_args[@]}"}

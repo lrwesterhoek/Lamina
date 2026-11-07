@@ -41,7 +41,7 @@ build_target "${1:-}" PS-DTFE o_ps
 GPU_BUILT=0
 [ -f o_ps/.gpu_mode_off ] || GPU_BUILT=1
 # capture FIRST -- piping the binary straight into grep -q would SIGPIPE it under pipefail
-FULL_HELP="$("${BIN}" --full_help 2>/dev/null || true)"
+FULL_HELP="$("${BIN}" --full-help 2>/dev/null || true)"
 if ! grep -q -- '--ps-volume-weighted' <<<"${FULL_HELP}"; then
     skip_or_fail "this PS-DTFE has no --ps-volume-weighted support."
 fi
@@ -68,8 +68,8 @@ run "${TMP}/pvw_mw"
 echo ">> run 2: --ps-volume-weighted"
 run "${TMP}/pvw_vw" --ps-volume-weighted
 if [ "${GPU_BUILT}" -eq 1 ]; then
-    echo ">> run 3: --ps-volume-weighted --ps-gpu (GPU parity)"
-    run "${TMP}/pvw_vwg" --ps-volume-weighted --ps-gpu
+    echo ">> run 3: --ps-volume-weighted --gpu (GPU parity)"
+    run "${TMP}/pvw_vwg" --ps-volume-weighted --gpu
 else
     echo ">> run 3 skipped (CPU-only build: no GPU parity to check)"
 fi

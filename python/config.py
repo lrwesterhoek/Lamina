@@ -318,7 +318,8 @@ FIELD_LIMITS = {
 
 AXIS_UNITS = "Mpc"
 VELOCITY_UNITS = "km/s"
-DPI = 300
+DPI = 300                   # every figure (dtfelib.figures.save_figure's default)
+TRACK_DPI = 200             # the halo / void tracking figures (plot_halo_tracking, plot_void_tracking): on purpose
 
 SHOW_TITLES = False
 

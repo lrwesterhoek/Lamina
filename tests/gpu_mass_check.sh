@@ -2,7 +2,7 @@
 # The Metal GPU deposit's MASS grid: an exact 64-bit fixed-point sum (two atomic words per cell,
 # metal/ps_deposit.metal depositMass), not a float atomic add, which loses small shares downward and
 # depends on the atomic order (TNG50-3-Dark z=0: box mean 0.99941). Asserted on synthetic snapshots:
-#   M1  two identical --ps-gpu runs write byte-identical '.a_den', on one domain and with --partition 2 2 2
+#   M1  two identical --gpu runs write byte-identical '.a_den', on one domain and with --partition 2 2 2
 #       --max-concurrent 1 (the float grid differs run to run), and byte-identical '.a_vel'
 #       too: the moment grids are exact fixed-point sums as well (tests/ps_fixed_moments_check.sh covers every
 #       grid; PS_GPU_FLOAT_MOMENTS=1 selects their float sums, and this check then skips '.a_vel').
@@ -48,9 +48,9 @@ SNAP="$TMP/waves.hdf5"; PAN="$TMP/pancake128.hdf5"; DEF="$TMP/waves_deferred.hdf
 run() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL: $(basename "$out") (see $out.log)"; exit 1; }
         grep -q "using the CPU deposit\|deposit unavailable\|ran on the CPU instead" "$out.log" \
             && { echo "FAIL: $(basename "$out") fell back to the CPU (see $out.log)"; exit 1; }; return 0; }
-C=(--grid 32 --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a --avg-subsamples 2 --ps-gpu)
+C=(--grid 32 --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a --avg-subsamples 2 --gpu)
 P=(--partition 2 2 2 --max-concurrent 1)
-echo ">> M1/M2: --ps-gpu twice (one domain, 2 x 2 x 2 partitions), and once with PS_GPU_FLOAT_MASS=1"
+echo ">> M1/M2: --gpu twice (one domain, 2 x 2 x 2 partitions), and once with PS_GPU_FLOAT_MASS=1"
 run "$TMP/s1" "${PS_BIN}" "$SNAP" "$TMP/s1" "${C[@]}"
 grep -q " GPU deposit (" "$TMP/s1.log" || { echo "FAIL: s1 did not run the GPU deposit (see $TMP/s1.log)"; exit 1; }
 run "$TMP/s2" "${PS_BIN}" "$SNAP" "$TMP/s2" "${C[@]}"
@@ -60,10 +60,10 @@ run "$TMP/f1" env PS_GPU_FLOAT_MASS=1 "${PS_BIN}" "$SNAP" "$TMP/f1" "${C[@]}"
 echo ">> M3: heavy accumulation, 128^3 pancake on a 2^3 grid, CPU and GPU"
 H=(--grid 2 --periodic --MpcUnit 1 --verbose 2 --field density_a --avg-subsamples 1 --partition 1 1 1)
 run "$TMP/h_cpu" "${PS_BIN}" "$PAN" "$TMP/h_cpu" "${H[@]}"
-run "$TMP/h_gpu" "${PS_BIN}" "$PAN" "$TMP/h_gpu" "${H[@]}" --ps-gpu
+run "$TMP/h_gpu" "${PS_BIN}" "$PAN" "$TMP/h_gpu" "${H[@]}" --gpu
 grep -q " GPU deposit (" "$TMP/h_gpu.log" || { echo "FAIL: h_gpu did not run the GPU deposit (see $TMP/h_gpu.log)"; exit 1; }
 echo ">> M5: the GPU-deferred tetrahedra on 4 CPU threads (slab mode) and on one"
-D=(--grid 96 --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a --avg-subsamples 3 --ps-gpu
+D=(--grid 96 --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a --avg-subsamples 3 --gpu
    --partition 1 1 1)
 run "$TMP/d1" env DTFE_DEPOSIT_THREADS=4 "${PS_BIN}" "$DEF" "$TMP/d1" "${D[@]}"
 run "$TMP/d2" env DTFE_DEPOSIT_THREADS=4 DTFE_DEPOSIT_SLABS=0 "${PS_BIN}" "$DEF" "$TMP/d2" "${D[@]}"
@@ -78,11 +78,11 @@ def check(tag, ok, msg):
     print(f"  {'PASS' if ok else 'FAIL'} {tag} {msg}")
 def rd(name):
     return np.fromfile(tmp / f"{name}.a_den", dtype=REAL).astype(np.float64)
-floatMoments = any(_os.environ.get(k, "0") not in ("", "0") for k in ("PS_METAL_FLOAT_MOMENTS", "PS_GPU_FLOAT_MOMENTS"))
+floatMoments = any(_os.environ.get(k, "0") not in ("", "0") for k in ("PS_GPU_FLOAT_MOMENTS",))
 for a, b, what in (("s1", "s2", "one domain"), ("p1", "p2", "--partition 2 2 2 --max-concurrent 1")):
     for ext in ("a_den",) + (() if floatMoments else ("a_vel",)):
         x, y = (tmp / f"{a}.{ext}").read_bytes(), (tmp / f"{b}.{ext}").read_bytes()
-        check("M1", len(x) > 0 and x == y, f"two --ps-gpu runs ({what}): '.{ext}' byte-identical ({len(x)} bytes)")
+        check("M1", len(x) > 0 and x == y, f"two --gpu runs ({what}): '.{ext}' byte-identical ({len(x)} bytes)")
 s, f = rd("s1"), rd("f1")
 peak = float(np.abs(s - f).max() / np.abs(s).max())
 check("M2", s.size == f.size and peak < 1e-5, f"PS_GPU_FLOAT_MASS=1 against the fixed-point grid: peak-rel {peak:.1e} (< 1e-5)")

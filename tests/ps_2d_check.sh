@@ -22,7 +22,7 @@
 #      but in the few caustic cells where a copy's float rounding flips a flat triangle's drop);
 #      --ps-vertex-mass, --ps-volume-weighted, --ps-halo-release, --ps-linear-deposit conserve mass;
 #      a non-periodic clump conserves mass and covers its interior; the tessellation cache hits and
-#      reproduces the run bit for bit; --ps-gpu on the 2D build (no GPU backend in DIM=2) runs every
+#      reproduces the run bit for bit; --gpu on the 2D build (no GPU backend in DIM=2) runs every
 #      partition on the CPU, exits 0 and says how many passes fell back
 #   D  the standard 2D build runs on the same file: its mean density is the particle density
 #   PE point evaluation (--sample-points): at the cell centres the point stream
@@ -74,7 +74,7 @@ GEN --out "$TMP/pan.hdf5" --n 96 --box 100 --amplitude-factor 1.8 --jitter-frac 
 RUN "$TMP/pan_s"   ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_s"   "${COMMON[@]}" --field density density_a velocity_a --avg-subsamples 3
 RUN "$TMP/pan_s6"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_s6"  "${COMMON[@]}" --field density_a velocity_a dispersion_a --avg-subsamples 6
 RUN "$TMP/pan_s12" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_s12" "${COMMON[@]}" --field density_a --avg-subsamples 12
-RUN "$TMP/pan_x"   ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_x"   "${COMMON[@]}" --field density_a velocity_a dispersion_a --ps-exact-deposit --ps-caustics
+RUN "$TMP/pan_x"   ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_x"   "${COMMON[@]}" --field density_a velocity_a dispersion_a --exact-average --ps-caustics
 RUN "$TMP/pan_p1"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_p1"  "${COMMON[@]}" --field density_a --avg-subsamples 2 --partition 1 1 --max-concurrent 1
 RUN "$TMP/pan_p2"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_p2"  "${COMMON[@]}" --field density_a --avg-subsamples 2 --partition 2 2 --max-concurrent 1
 RUN "$TMP/pan_vm"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_vm"  "${COMMON[@]}" --field density_a velocity_a --ps-vertex-mass --ps-volume-weighted
@@ -82,9 +82,9 @@ RUN "$TMP/pan_hr"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_hr"  "${COMMON[@]}" --
 RUN "$TMP/pan_lin" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_lin" "${COMMON[@]}" --field density_a --ps-linear-deposit
 RUN "$TMP/pan_c1"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_c1"  "${COMMON[@]}" --field density_a --tessellation-cache "$CACHE"
 RUN "$TMP/pan_c2"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_c2"  "${COMMON[@]}" --field density_a --tessellation-cache "$CACHE"
-# --ps-gpu where no GPU can run: the deposit falls back pass by pass, on any thread -- the run counts every
+# --gpu where no GPU can run: the deposit falls back pass by pass, on any thread -- the run counts every
 # pass and says it once
-RUN "$TMP/pan_gfb" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_gfb" --grid 32 --periodic --MpcUnit 1 --verbose 2 --field density --partition 2 2 --max-concurrent 2 --ps-gpu
+RUN "$TMP/pan_gfb" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_gfb" --grid 32 --periodic --MpcUnit 1 --verbose 2 --field density --partition 2 2 --max-concurrent 2 --gpu
 echo ">> convergence series (single-stream density, nSub 3, grid 96)"
 for n in 16 24 32 48; do
     GEN --out "$TMP/conv_$n.hdf5" --n $n --box 100 --amplitude-factor 1.8 --jitter-frac 0.02 --seed 42
@@ -116,8 +116,8 @@ echo ">> --ps-window (sampled and exact) and --ps-caustic-cusps (a modulated pan
 WIN=(--ps-window 20 47.5 30 90)
 RUN "$TMP/w_full"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/w_full"  "${COMMON[@]}" --field density velocity --avg-subsamples 2
 RUN "$TMP/w_win"   ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/w_win"   "${COMMON[@]}" --field density velocity --avg-subsamples 2 "${WIN[@]}"
-RUN "$TMP/w_xfull" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/w_xfull" "${COMMON[@]}" --field density --ps-exact-deposit
-RUN "$TMP/w_xwin"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/w_xwin"  "${COMMON[@]}" --field density --ps-exact-deposit "${WIN[@]}"
+RUN "$TMP/w_xfull" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/w_xfull" "${COMMON[@]}" --field density --exact-average
+RUN "$TMP/w_xwin"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/w_xwin"  "${COMMON[@]}" --field density --exact-average "${WIN[@]}"
 # a partitioned window over a tessellation cache: the first run writes the partitions and their occupancy
 # maps, the second skips the partitions whose streams never reach the window
 WCACHE="$TMP/w_cache"; rm -rf "$WCACHE"; mkdir -p "$WCACHE"
@@ -281,8 +281,8 @@ log2 = (tmp / "pan_c2.log").read_text()
 same = all((tmp / f"pan_c1.{e}").read_bytes() == (tmp / f"pan_c2.{e}").read_bytes() for e in ("a_den", "a_streams"))
 check("S tessellation cache", "Reused the cached tessellation" in log2 and same, "the second run hits and its grids are identical")
 gfb = (tmp / "pan_gfb.log").read_text(errors="replace")
-check("S --ps-gpu fallback counted", "4 partition deposit pass(es) asked for the GPU and ran on the CPU instead" in gfb,
-      "a --ps-gpu run with --partition 2 2 on the CPU-only 2D build says '4 partition deposit pass(es) ... ran on the CPU'")
+check("S --gpu fallback counted", "4 partition deposit pass(es) asked for the GPU and ran on the CPU instead" in gfb,
+      "a --gpu run with --partition 2 2 on the CPU-only 2D build says '4 partition deposit pass(es) ... ran on the CPU'")
 
 # PE: point evaluation
 pst = np.fromfile(tmp / "pts.pts_streams", np.int32)

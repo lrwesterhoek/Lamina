@@ -101,44 +101,61 @@ inline double determinant(double matrix[][NO_DIM])
 }
 
 
-// Matrix inverse: closed-form for 2x2/3x3, Gauss-Jordan otherwise; zero result if (near-)singular.
+#if NO_DIM==2 || NO_DIM==3
+// The closed-form 2x2 / 3x3 inverse by the adjugate: the ONE copy of its arithmetic. det comes from the first row's
+// cofactors, then inv = adj(m) * (1/det), each entry written once, in this order. Every inverse of the code base keeps
+// exactly these operations -- matrixInverse below (the grid deposits), psExactInside::inverseNd (its double twin, which
+// must keep the same cells) and the point evaluation's unguarded inverse -- and dtfe_gpu_fixed.h mirrors them, so do
+// not reorder them. Only the singularity GUARD differs between the callers, so it is theirs: 'singular(det)' is tested
+// between the determinant and the inverse. When it holds, inv is left as it was and the result is false; otherwise
+// inv is written (T(...) narrows each entry to the caller's type) and the result is true. det = the determinant.
+template <typename T, typename Singular>
+inline bool adjugateInverse(double const m[][NO_DIM], T inv[][NO_DIM], double &det, Singular const &singular)
+{
+#if NO_DIM==2
+    det = m[0][0]*m[1][1] - m[0][1]*m[1][0];
+    if ( singular(det) )
+        return false;
+    double const invDet = 1.0 / det;
+    inv[0][0] = T( m[1][1] * invDet);
+    inv[0][1] = T(-m[0][1] * invDet);
+    inv[1][0] = T(-m[1][0] * invDet);
+    inv[1][1] = T( m[0][0] * invDet);
+#else
+    double const c00 = m[1][1]*m[2][2] - m[1][2]*m[2][1];
+    double const c01 = m[1][2]*m[2][0] - m[1][0]*m[2][2];
+    double const c02 = m[1][0]*m[2][1] - m[1][1]*m[2][0];
+    det = m[0][0]*c00 + m[0][1]*c01 + m[0][2]*c02;
+    if ( singular(det) )
+        return false;
+    double const invDet = 1.0 / det;
+    inv[0][0] = T(c00 * invDet);
+    inv[1][0] = T(c01 * invDet);
+    inv[2][0] = T(c02 * invDet);
+    inv[0][1] = T((m[0][2]*m[2][1] - m[0][1]*m[2][2]) * invDet);
+    inv[1][1] = T((m[0][0]*m[2][2] - m[0][2]*m[2][0]) * invDet);
+    inv[2][1] = T((m[0][1]*m[2][0] - m[0][0]*m[2][1]) * invDet);
+    inv[0][2] = T((m[0][1]*m[1][2] - m[0][2]*m[1][1]) * invDet);
+    inv[1][2] = T((m[0][2]*m[1][0] - m[0][0]*m[1][2]) * invDet);
+    inv[2][2] = T((m[0][0]*m[1][1] - m[0][1]*m[1][0]) * invDet);
+#endif
+    return true;
+}
+#endif
+
+
+// Matrix inverse: closed-form for 2x2/3x3 (adjugateInverse), Gauss-Jordan otherwise; zero result if
+// (near-)singular (isRelativelySingular).
 inline void matrixInverse(double matrix[][NO_DIM],
                           Real result[][NO_DIM])
 {
-#if NO_DIM==2
-    double det = matrix[0][0]*matrix[1][1] - matrix[0][1]*matrix[1][0];
-    if ( isRelativelySingular(det, matrix) )
-    {
-        result[0][0] = result[0][1] = result[1][0] = result[1][1] = Real(0.);
-        return;
-    }
-    double invDet = 1.0 / det;
-    result[0][0] = Real( matrix[1][1] * invDet);
-    result[0][1] = Real(-matrix[0][1] * invDet);
-    result[1][0] = Real(-matrix[1][0] * invDet);
-    result[1][1] = Real( matrix[0][0] * invDet);
-#elif NO_DIM==3
-    double c00 = matrix[1][1]*matrix[2][2] - matrix[1][2]*matrix[2][1];
-    double c01 = matrix[1][2]*matrix[2][0] - matrix[1][0]*matrix[2][2];
-    double c02 = matrix[1][0]*matrix[2][1] - matrix[1][1]*matrix[2][0];
-    double det = matrix[0][0]*c00 + matrix[0][1]*c01 + matrix[0][2]*c02;
-    if ( isRelativelySingular(det, matrix) )
-    {
-        for (int r=0; r<3; ++r)
-            for (int c=0; c<3; ++c)
+#if NO_DIM==2 || NO_DIM==3
+    double det;
+    if ( not adjugateInverse( matrix, result, det,
+                              [matrix](double const d) { return isRelativelySingular( d, matrix ); } ) )
+        for (int r=0; r<NO_DIM; ++r)
+            for (int c=0; c<NO_DIM; ++c)
                 result[r][c] = Real(0.);
-        return;
-    }
-    double invDet = 1.0 / det;
-    result[0][0] = Real(c00 * invDet);
-    result[1][0] = Real(c01 * invDet);
-    result[2][0] = Real(c02 * invDet);
-    result[0][1] = Real((matrix[0][2]*matrix[2][1] - matrix[0][1]*matrix[2][2]) * invDet);
-    result[1][1] = Real((matrix[0][0]*matrix[2][2] - matrix[0][2]*matrix[2][0]) * invDet);
-    result[2][1] = Real((matrix[0][1]*matrix[2][0] - matrix[0][0]*matrix[2][1]) * invDet);
-    result[0][2] = Real((matrix[0][1]*matrix[1][2] - matrix[0][2]*matrix[1][1]) * invDet);
-    result[1][2] = Real((matrix[0][2]*matrix[1][0] - matrix[0][0]*matrix[1][2]) * invDet);
-    result[2][2] = Real((matrix[0][0]*matrix[1][1] - matrix[0][1]*matrix[1][0]) * invDet);
 #else
     // general case: Gauss-Jordan elimination with partial pivoting
     double aug[NO_DIM][2*NO_DIM];

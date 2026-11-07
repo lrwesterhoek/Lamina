@@ -18,7 +18,7 @@ from dtfelib.figures import save_figure
 import config
 from dtfelib import figures as style
 from dtfelib import pipeline
-from dtfelib import FieldSet, make_parser, sim_dir
+from dtfelib import FieldSet, make_parser, snapdir_path
 
 style.apply()
 
@@ -27,7 +27,6 @@ OUTPUT_DIR = config.figures_path('smoothing_comparison')
 SIGMAS = list(config.SMOOTHING_COMPARISON_SIGMAS)
 PANEL_SNAPSHOTS = list(config.PANEL_SNAPSHOTS)
 
-DPI = config.DPI
 
 
 def catalog_statistics(cat):
@@ -59,7 +58,7 @@ def catalog_for(snapshot, sigma, args):
                                  data_root=args.data_root)
         return prod.voids(), prod.fs
 
-    fs = FieldSet(sim_dir(args.sim, args.data_root) / f"snapdir_{snapshot}",   # flat or per-family layout
+    fs = FieldSet(snapdir_path(args.sim, snapshot, args.data_root),   # flat or per-family layout
                   method=args.method, prefix=args.prefix)
     density = fs.density(units='mean')
     delta_s = dtfe.smooth_field(dtfe.calculate_density_contrast(density),
@@ -91,17 +90,15 @@ def plot_statistic(rows, redshifts, snapshots, cell_mpc, key, ylabel, fname):
     ax.legend()
     plt.tight_layout()
     save_figure(fig, Path(OUTPUT_DIR) / fname,
-                dpi=DPI, bbox_inches='tight')
+                bbox_inches='tight')
     plt.close(fig)
 
 
 def main():
-    parser = make_parser("Void-catalog robustness against the Gaussian smoothing scale.")
     # For this series script --snap restricts the run to ONE snapshot; the default
     # (no --snap) keeps the original behavior of processing the panel snapshots.
-    snap_action = parser._option_string_actions['--snap']
-    snap_action.default = None
-    snap_action.help = "process only this snapshot (default: panel snapshot series)"
+    parser = make_parser("Void-catalog robustness against the Gaussian smoothing scale.", snap_default=None,
+                         snap_help="process only this snapshot (default: panel snapshot series)")
     args = parser.parse_args()
 
     snapshots = [f"{args.snap:03d}"] if args.snap is not None else PANEL_SNAPSHOTS

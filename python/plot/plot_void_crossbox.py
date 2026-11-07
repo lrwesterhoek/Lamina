@@ -54,6 +54,7 @@ import matplotlib.pyplot as plt
 
 import config
 from dtfelib import figures as style
+from dtfelib.cli import add_out_arg
 
 DEFAULT_SIGMA_MPC = config.CROSSBOX_SMOOTHING_MPC   # 2.1625 = 10.0002 cells of TNG100-3-Dark (110.7 Mpc / 512;
                                       # production 10 cells = 2.16245 Mpc): the first comparison's, kept so its
@@ -61,7 +62,7 @@ DEFAULT_SIGMA_MPC = config.CROSSBOX_SMOOTHING_MPC   # 2.1625 = 10.0002 cells of 
 DEFAULT_Z = (0.0, 0.5, 1.0)
 DEFAULT_RV_RANGE = (2.5, 5.0)         # the common R_v range of the stacks, in smoothing lengths (profiles' upper bins)
 Z_TOLERANCE = 0.05                    # a box's snapshot counts as 'at z' within this
-FIGURE_ROOT = Path(config.LOCAL_FIGURES_ROOT) / "void_crossbox"
+FIGURE_ROOT = Path(config.figures_path("void_crossbox"))
 PER_VOLUME = 1.0e6                    # densities per (100 Mpc)^3
 SHAPE_CI = (16, 84)                   # the bootstrap interval of the e, p medians (68%)
 
@@ -112,8 +113,7 @@ def measure(sim, method="ps", prefix=None, data_root=None, zs=DEFAULT_Z, rv_rang
     resolved voids); at the snapshots nearest 'zs' (within Z_TOLERANCE) the profiles of the distinct resolved voids
     in r/R_v, stacked over rv_range_sigma x sigma. Uses the smoothing as set NOW (pipeline.set_smoothing) and
     config's frame, which must be this sim's. Returns flat arrays for an .npz."""
-    from dtfelib import pipeline, catalog, profiles, use_data_root, require_data_root
-    from dtfelib import environment as env
+    from dtfelib import pipeline, catalog, profiles, use_data_root, require_data_root, snapshot_ladder
     from dtfelib import groupcat as gc
     import plot_void_population as pop
 
@@ -121,7 +121,7 @@ def measure(sim, method="ps", prefix=None, data_root=None, zs=DEFAULT_Z, rv_rang
     data_root = require_data_root(data_root)
     sigma = pipeline.smoothing_length_mpc()
     ztab = gc.redshift_table(sim)
-    ladder = sorted({int(d.name.split("_")[1]) for d in env.sim_dir(sim, data_root).glob("snapdir_*")})
+    ladder = snapshot_ladder(sim, data_root)
     rows, refused = [], []
     for s in ladder:
         prod = pipeline.products(s, sim=sim, method=method, prefix=prefix, data_root=data_root)
@@ -392,7 +392,7 @@ def draw(results, z_target, args, out_dir) -> Path:
                             f"footprint follows sigma in each box)")
     fig.tight_layout()
     path = out_dir / f"crossbox_{args.method}_{sigma_tag(sigma)}_z{z_target:.2f}.png"
-    style.save_figure(fig, path, dpi=config.DPI)
+    style.save_figure(fig, path)
     plt.close(fig)
     return path
 
@@ -464,7 +464,7 @@ def main(argv=None):
                    help="the stacks' common R_v range in smoothing lengths (default 2.5 5)")
     p.add_argument("--points", type=int, default=None, help="points per profile shell (default profiles.DEFAULT_M)")
     p.add_argument("--n-boot", type=int, default=200, help="bootstrap resamples for the profile bands")
-    p.add_argument("--out", type=Path, default=None, help=f"output folder (default {FIGURE_ROOT})")
+    add_out_arg(p, f"{FIGURE_ROOT}")
     p.add_argument("--replot", action="store_true", help="only redraw from the boxes' saved .npz files")
     args = p.parse_args(argv)
     style.apply()

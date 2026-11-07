@@ -4,7 +4,9 @@ Every script in the repo with its useful flag combinations. All paths are relati
 repository root; quote paths that contain spaces. Scripts that need h5py should be
 run with a python whose h5py works (the shell scripts and tests pick one: `PYTHON`, else the first of `python3`,
 Homebrew's and `/usr/local`'s that imports numpy and h5py).
-The binaries' `--full_help` and each script's `--help` are the reference for every option and default.
+The binaries' `--full-help` and each script's `--help` are the reference for every option and default.
+Both binaries share one name per shared option (`--gpu`, `--exact-average`, `--no-overlap`, `--full-help`, `--lambda-th`);
+the older spellings are deprecated and still accepted for one release, with a warning.
 
 ---
 
@@ -135,8 +137,8 @@ DRY_RUN=1 ./scripts/run_ps_dtfe.sh 99                     # print the expanded c
 AUTO_TUNE_REPORT=1 ./scripts/run_ps_dtfe.sh 99            # only the auto-tuner's split + predicted peak
 
 ./scripts/run_dtfe.sh -s TNG50-3-Dark -g 512 99           # standard DTFE (exact cell average, padding 15)
-DTFE_METAL=0 ./scripts/run_dtfe.sh 99                     # the CPU on a GPU build (the GPU is the default there)
-DTFE_EXACT_AVERAGE=0 ./scripts/run_dtfe.sh 99             # Monte-Carlo cell means instead of the exact average
+DTFE_GPU=0 ./scripts/run_dtfe.sh 99                       # the CPU on a GPU build (the GPU is the default there)
+DTFE_EXACT=0 ./scripts/run_dtfe.sh 99                     # Monte-Carlo cell means instead of the exact average
 OUTPUT_PREFIX=output_mc ./scripts/run_dtfe.sh 99          # a variant beside output.* (a ps_* prefix is refused)
 ```
 
@@ -147,10 +149,10 @@ PS_VERTEX_MASS=1        # [--ps-vertex-mass]     DEFAULT 1: chart-independent te
                         #                        Set 0 only for true-lattice Lagrangian input.
 PS_VOLUME_WEIGHTED=0    # [--ps-volume-weighted] DEFAULT 1: Eulerian-volume-weighted velocity moments
                         #                        (the dispersion stays mass-weighted)
-PS_EXACT=1              # [--ps-exact-deposit]   exact r3d deposit; combine with -m (GPU)
+PS_EXACT=1              # [--exact-average]      exact r3d deposit; combine with -m (GPU)
 PS_LINEAR_DEPOSIT=1     # [--ps-linear-deposit]  linear-profile, mass-conserving sampled deposit
                         #                        (the moments then mass-weighted: PS_VOLUME_WEIGHTED=0)
-PS_METAL=0              # [--ps-gpu]             default auto: the GPU deposit on a GPU build (1 = -m); 0 = the CPU
+PS_GPU=0                # [--gpu]                default auto: the GPU deposit on a GPU build (1 = -m); 0 = the CPU
 AVG_SUBSAMPLES=2        # [--avg-subsamples]     nSub for the '_a' pass (cost ~ nSub^3)
 SAMPLE_POINTS=plane.bin # [--sample-points]      also point-evaluate this point set
 PTS_VEL_GRAD=1          # [--pts-vel-grad]       + per-point velocity gradient (.pts_velGrad),
@@ -166,7 +168,7 @@ PS_PARALLEL_TRI=1       # [--parallel-triangulation]  parallel Delaunay insert (
 PS_LAG_PADDING=0        # [--ps-lag-padding]     the Eulerian padding rule (default: the binary's 8 spacings)
 TESS_CACHE=/tmp/dtfe-t  # [--tessellation-cache] reuse the tessellation across runs (created if
                         #                        missing; LOCAL dir, ~0.15 KB/vertex -- deflated)
-LAMBDA_TH=0.3           # [--lambda_th]          T-web/V-web eigenvalue threshold
+LAMBDA_TH=0.3           # [--lambda-th]          T-web/V-web eigenvalue threshold
                         #                        (script default 0.3; the BINARY default is 0.0)
 LAGRANGIAN_INPUT=ics.h5 # [--lagrangianInput]    override the auto-detected combined_ics.hdf5
 OUTPUT_PREFIX=ps_mw     # writes <prefix>.* so an A/B grid set can sit beside the production one
@@ -208,14 +210,14 @@ GRID_SIZE=512 PTS_VEL_GRAD=1 ./scripts/run_ps_pipeline.sh
 ./DTFE demo/z0_64.gadget out --grid 64 --field density --periodic --padding 12
 
 # standard DTFE, all main fields, GPU '_a' pass (run_dtfe.sh adds --exact-average --padding 15
-# and the T-web / V-web at --lambda_th 0.3)
+# and the T-web / V-web at --lambda-th 0.3)
 ./DTFE combined_099.hdf5 out --grid 512 --periodic --input 105 --MpcUnit 1000 \
     --field density_a velocity_a gradient_a --gpu
 
 # PS-DTFE with separate Lagrangian input and explicit partitioning
 ./PS-DTFE combined_099.hdf5 ps_out --grid 512 --periodic --input 105 --MpcUnit 1000 \
     --field density velocity dispersion density_a --lagrangianInput combined_ics.hdf5 \
-    --partition 4 4 4 --max-concurrent 3 --ps-gpu
+    --partition 4 4 4 --max-concurrent 3 --gpu
 
 # the PRODUCTION physics configuration (what run_ps_dtfe.sh does by default)
 ./PS-DTFE combined_099.hdf5 ps_out --grid 512 --periodic --input 105 --MpcUnit 1000 \
@@ -223,7 +225,7 @@ GRID_SIZE=512 PTS_VEL_GRAD=1 ./scripts/run_ps_pipeline.sh
     --ps-vertex-mass          `# chart-independent tet masses (removes the 1-D(z_ic)/D(z) bias)` \
     --ps-volume-weighted      `# volume-weighted velocity moments; dispersion stays mass-weighted` \
     --ps-caustics             `# the caustic classes (.caustic, .causticClass)` \
-    --ps-gpu
+    --gpu
 
 # point evaluation at arbitrary positions (text 'x y z' per line, or raw float64 Nx3);
 # the STANDARD binary supports the same flags/formats (streams = 0/1 coverage; no
@@ -267,7 +269,7 @@ GRID_SIZE=512 PTS_VEL_GRAD=1 ./scripts/run_ps_pipeline.sh
                                                    #   bit8 is NOT a subset of bit7. ~1.8x the
                                                    #   caustic pass, so off by default.
 ./PS-DTFE snap.hdf5 out ... --ps-halo-release 300  # halo-interior tets -> centroid deposit
-./PS-DTFE snap.hdf5 out ... --ps-exact-deposit          # exact deposit (r3d on the CPU; --ps-gpu: a z-sweep)
+./PS-DTFE snap.hdf5 out ... --exact-average             # exact deposit (r3d on the CPU; --gpu: a z-sweep)
 ./PS-DTFE snap.hdf5 out ... --scratch-dir /tmp/dtfe       # out-of-core full-grid accumulators
 ./PS-DTFE snap.hdf5 out ... --auto-tune-report            # the auto-tuner's plan as one line, nothing run
 ./PS-DTFE snap.hdf5 out ... --partition 4 4 4 --resume    # continue a killed partitioned run (both binaries)
@@ -284,16 +286,16 @@ mkdir -p /private/tmp/dtfe-tess
 ./PS-DTFE snap.hdf5 out2 --grid 256 --periodic --field density --MpcUnit 1 \
     --sample-points b.bin --tessellation-cache /private/tmp/dtfe-tess     # reuses it
 ./PS-DTFE snap.hdf5 out ... --tessellation-cache DIR --verbose 3          # says why a lookup missed
-./PS-DTFE snap.hdf5 out ... --field vweb --lambda_th 0.3 --scale-factor 0.25 --hubble 0.6774
+./PS-DTFE snap.hdf5 out ... --field vweb --lambda-th 0.3 --scale-factor 0.25 --hubble 0.6774
 ./DTFE   snap.hdf5 out ... --exact-average         # exact r3d '_a' averaging (on the GPU with --gpu)
-./PS-DTFE snap.hdf5 out --grid 4096 --periodic --MpcUnit 1 --ps-exact-deposit \
+./PS-DTFE snap.hdf5 out --grid 4096 --periodic --MpcUnit 1 --exact-average \
     --ps-window 20 30 20 30 50 50.1               # only the window's cells of the 4096^3 grid: the
                                                   # full run's cells there, in seconds (the launcher's exact zoom)
-./PS-DTFE snap.hdf5 out --grid 4096 --periodic --MpcUnit 1 --ps-exact-deposit --ps-window 20 30 20 30 50 50.1 \
+./PS-DTFE snap.hdf5 out --grid 4096 --periodic --MpcUnit 1 --exact-average --ps-window 20 30 20 30 50 50.1 \
     --partition 4 4 4 --tessellation-cache /private/tmp/dtfe-tess   # the query server's split and cache:
                                                   # cached partitions are loaded, those whose occupancy maps
                                                   # never reach the window are skipped
-./PS-DTFE --full_help                              # every option with full descriptions
+./PS-DTFE --full-help                              # every option with full descriptions
 ```
 
 Common to both: `--grid N [NY NZ]`, `--periodic`, `--input 101|105|106|111|112|121|122`,
@@ -303,7 +305,7 @@ Common to both: `--grid N [NY NZ]`, `--periodic`, `--input 101|105|106|111|112|1
 
 **Which flags reach the GPU** (`METAL=1`, `CUDA=1` or `HIP=1` build): the grid deposit, and
 `--ps-linear-deposit`, `--ps-volume-weighted`, `--ps-vertex-mass`, `--ps-caustics`,
-`--ps-exact-deposit` and `--ps-window` all compose with `--ps-gpu`; the standard binary's
+the exact deposit (`--exact-average`) and `--ps-window` all compose with `--gpu`; the standard binary's
 `--exact-average` and the scalar fields (`NO_SCALARS=1` builds) with `--gpu`. CPU-only: point
 evaluation (`--sample-points`/`--serve`: multi-threaded over the tessellation, exact point location).
 
@@ -331,7 +333,7 @@ The answers are bit-identical to a `--sample-points` run on the same points; a s
 ~20 us from Python (a cell index built at start-up). Velocities come back in peculiar km/s
 (`peculiar=False` for raw Gadget units). The binary side, for other clients:
 `./PS-DTFE snap.hdf5 unused --serve --MpcUnit 1 ...` -- logs on stderr, a binary protocol on
-stdin/stdout (protocol version 2, documented above psServe in `src/CGAL_triangulation/ps_point_eval.cc`).
+stdin/stdout (protocol version 2, documented at the top of `src/CGAL_triangulation/ps_serve.cc`).
 With `--partition` (or when one tessellation would not fit and `--tessellation-cache` is given) the server
 is a COMPOSITE of partition tessellations, each with a 64^3 occupancy map ('<cache file>.occ'): a request
 visits only the partitions that can hold its points, at most `--serve-resident N` stay in memory (LRU, ~666

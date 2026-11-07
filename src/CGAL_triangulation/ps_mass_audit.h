@@ -33,7 +33,7 @@ namespace PSMassAudit
 {
     // read once: the switch is per run. 2 adds the per-particle closure (ps_interpolation.cc), on ONE domain
     // only (partition < 0): the auto-tuner splits even small runs into partitions, so pass --partition 1 1 1
-    // or --ps-gpu to get one
+    // or --gpu to get one
     inline int level()
     {
         static int const v = int( Env::integer( "PS_MASS_AUDIT", 0 ) );

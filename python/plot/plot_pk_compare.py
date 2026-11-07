@@ -38,10 +38,10 @@ import matplotlib.pyplot as plt
 
 from scipy.stats import chi2
 
-from dtfelib import make_parser, FieldSet, sim_dir, spectra
+from dtfelib import make_parser, FieldSet, snapdir_path, spectra, add_snaps_arg, add_out_arg
 from dtfelib import figures as style
 
-OUTPUT_DIR = Path(config.LOCAL_FIGURES_ROOT) / "power_spectrum"
+OUTPUT_DIR = Path(config.figures_path("power_spectrum"))
 LABEL = {"dtfe": "DTFE", "ps": "PS-DTFE"}
 
 
@@ -182,14 +182,14 @@ def option_tag(args) -> str:
 
 def main():
     parser = make_parser("Density power spectrum: DTFE and PS-DTFE grids against linear theory.")
-    parser.add_argument("--snaps", type=int, nargs="*", default=None, help="snapshots (default: --snap)")
+    add_snaps_arg(parser)
     parser.add_argument("--nbins", type=int, default=DEFAULT_NBINS,
                         help=f"logarithmic k bins from k_f to k_Ny (default {DEFAULT_NBINS}; 0 = k_f-wide linear bins); "
                              "another value tags the files '_nb<N>'")
     parser.add_argument("--ref-snap", type=int, default=DEFAULT_REF_SNAP,
                         help=f"the early snapshot whose growth-scaled P(k) is the same-realisation reference panel "
                              f"(default {DEFAULT_REF_SNAP}; -1 = no panel); another value tags the files '_ref<S>' / '_noref'")
-    parser.add_argument("--out", default=None, help=f"output folder (default {OUTPUT_DIR}/<sim>)")
+    add_out_arg(parser, f"{OUTPUT_DIR}/<sim>")
     args = parser.parse_args()
     style.apply()
     out_dir = Path(args.out).expanduser() if args.out else OUTPUT_DIR / args.sim
@@ -202,14 +202,14 @@ def main():
     ref = None
     if args.ref_snap >= 0:
         print(f"  reference snapshot {args.ref_snap:03d}:")
-        rps, rz, _ = spectra_of(sim_dir(args.sim, args.data_root) / f"snapdir_{args.ref_snap:03d}", methods, args.prefix,
+        rps, rz, _ = spectra_of(snapdir_path(args.sim, args.ref_snap, args.data_root), methods, args.prefix,
                                 args.nbins)
         ref = (rps, rz) if rps else None
         if ref is None:
             print("    no grid: no same-realisation panel")
     for snap in snaps:
         print(f"  snapshot {snap:03d}:")
-        ps, z, box = spectra_of(sim_dir(args.sim, args.data_root) / f"snapdir_{snap:03d}", methods, args.prefix, args.nbins)
+        ps, z, box = spectra_of(snapdir_path(args.sim, snap, args.data_root), methods, args.prefix, args.nbins)
         if not ps:
             print(f"  snapshot {snap:03d}: no density grid of any estimator; skipped")
             failed.append(snap)

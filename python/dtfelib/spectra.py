@@ -34,14 +34,7 @@ import numpy as np
 
 import config
 
-try:
-    import scipy.fft as _sfft
-
-    def _rfftn(a):
-        return _sfft.rfftn(a, workers=-1)
-except ImportError:                                     # pragma: no cover
-    def _rfftn(a):
-        return np.fft.rfftn(a)
+from ._fft import rfftn as _rfftn                         # scipy.fft on every core, else numpy.fft
 
 _COSMO = dict(config.COSMOLOGY)
 _trapz = getattr(np, "trapezoid", None) or np.trapz          # NumPy 1.26 (Ubuntu's python3-numpy) has only trapz

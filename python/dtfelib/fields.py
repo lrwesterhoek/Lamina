@@ -132,6 +132,25 @@ def smooth_field(field, sigma, mode='wrap'):
     return gaussian_filter(field, sigma=sigma, mode=mode)
 
 
+def smooth_components(field, sigma, smoother=None):
+    """Per-component smoothing of an (..., c) field (before norms and magnitudes): every component through
+    smoother(component, sigma), by default smooth_field (periodic); the field itself when sigma <= 0."""
+    if sigma <= 0:
+        return field
+    smoother = smooth_field if smoother is None else smoother
+    out = np.empty_like(field)
+    for c in range(field.shape[-1]):
+        out[..., c] = smoother(field[..., c], sigma)
+    return out
+
+
+def unit_cos(v, w):
+    """|cos| of the angle between vectors v and w; NaN when either has zero length (the tracking plots' alignment
+    of an axis or spin with the latest snapshot's)."""
+    n = np.linalg.norm(v) * np.linalg.norm(w)
+    return np.abs(float(np.dot(v, w) / n)) if n > 0 else np.nan
+
+
 def calculate_shape_parameters(eigenvalues):
     # Vectorized over voids; keeps the original per-void semantics bit-for-bit (native
     # eigenvalue dtype throughout, float64 output rows, NaN for trace <= 1e-12 /

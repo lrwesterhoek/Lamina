@@ -138,7 +138,7 @@ if [ "$FORCE_CPU" -eq 0 ]; then
             fi
             if [ -f third_party/metal-cpp/Metal/Metal.hpp ]; then
                 GPU_ARG="METAL=1"
-                BACKEND="Metal GPU (--gpu / --ps-gpu at runtime, automatic CPU fallback)"
+                BACKEND="Metal GPU (--gpu at runtime, automatic CPU fallback)"
             fi
         fi
     elif [ "$UNAME_S" = "Linux" ]; then
@@ -148,10 +148,10 @@ if [ "$FORCE_CPU" -eq 0 ]; then
         # PS parity suites on the first GPU machine (metal/README.md, "CUDA / HIP").
         if command -v nvcc >/dev/null 2>&1 || [ -x /usr/local/cuda/bin/nvcc ]; then
             GPU_ARG="CUDA=1"
-            BACKEND="CUDA GPU (--gpu / --ps-gpu at runtime, automatic CPU fallback; unvalidated port, see metal/README.md)"
+            BACKEND="CUDA GPU (--gpu at runtime, automatic CPU fallback; unvalidated port, see metal/README.md)"
         elif command -v hipcc >/dev/null 2>&1 || [ -x /opt/rocm/bin/hipcc ]; then
             GPU_ARG="HIP=1"
-            BACKEND="HIP GPU (--gpu / --ps-gpu at runtime, automatic CPU fallback; unvalidated port, see metal/README.md -- set GPU_ARCH for your card)"
+            BACKEND="HIP GPU (--gpu at runtime, automatic CPU fallback; unvalidated port, see metal/README.md -- set GPU_ARCH for your card)"
         fi
     fi
 fi

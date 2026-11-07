@@ -67,7 +67,7 @@ run() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL: $(basenam
 # 256 items, which the exact sums need) and a checkpoint every 2 buffers: the fault at buffer 3 then lands after
 # the checkpoint at buffer 2
 export DTFE_GPU_CHUNK=4096 DTFE_GPU_CHECKPOINT_CHUNKS=2
-unset DTFE_GPU_FAULT_AT DTFE_GPU_SHARED DTFE_METAL_FLOAT_GRIDS DTFE_GPU_FLOAT_GRIDS DTFE_GPU_ITEMS
+unset DTFE_GPU_FAULT_AT DTFE_GPU_SHARED DTFE_GPU_FLOAT_GRIDS DTFE_GPU_ITEMS
 C=(--grid 32 --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a gradient_a --partition 1 1 1)
 ONE=(--max-concurrent 1)                 # one sub-domain: one batch, so 'buffer k' is a buffer of that batch
 echo ">> E1: two fault-free runs with different opening chunks (item kernel over 9 sub-domains, per-tet kernel, exact)"

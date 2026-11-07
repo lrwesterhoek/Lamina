@@ -366,7 +366,7 @@ def t_velocity_single_stream():
 
 
 def t_velocity_single_stream_float_mask():
-    """velocity_single_stream must survive a FLOAT '.streams' grid (--ps-exact-deposit).
+    """velocity_single_stream must survive a FLOAT '.streams' grid (--exact-average).
 
     The exact deposit writes the analytic volume-weighted multiplicity, so single-stream
     cells land on 1.0 +/- float32 eps rather than exactly 1. A 'streams != 1' mask would
@@ -388,7 +388,7 @@ def t_velocity_single_stream_float_mask():
         # is exactly 1.0 (drawing uniform noise instead would round part of the grid back
         # onto 1.0 and let a '!= 1' mask pass). Plus a genuine multi-stream slab at the
         # analytic pancake value 3 and caustic-straddling cells at a fractional
-        # multiplicity -- the shapes --ps-exact-deposit actually produces.
+        # multiplicity -- the shapes --exact-average actually produces.
         one, ulp = np.float32(1.0), np.spacing(np.float32(1.0))
         st = (one + rng.choice(np.float32([-1.0, 1.0]), (n, n, n))
                   * rng.integers(1, 4, (n, n, n)).astype(np.float32) * ulp).astype(np.float32)
@@ -475,6 +475,76 @@ def t_sim_dir_layouts():
         assert found == ["FLAT-1-Dark", "TNG100-3-Dark"], found
     finally:
         shutil.rmtree(root.parent)
+
+
+def t_snapshot_helpers():
+    """dtfelib.cli.snapdir_path / snapshot_ladder against the expressions the scripts pasted before them: the path
+    is sim_dir(...) / 'snapdir_NNN' for an int (numpy's too) and for config's '099' keys, under both layouts; the
+    ladder is the sorted set of int(name.split('_')[1]) over the snapdirs, a name that is no number left out, and
+    'require' narrows it by a glob or a callable."""
+    import shutil
+    import tempfile
+
+    from dtfelib.cli import sim_dir, snapdir_path, snapshot_ladder
+    root = Path(tempfile.mkdtemp(prefix="dtfelib_ladder_")) / "data root"
+    try:
+        for sim, base in (("TNG100-3-Dark", root / "TNG100" / "TNG100-3-Dark"), ("FLAT-1-Dark", root / "FLAT-1-Dark")):
+            for n in (99, 4, 50):
+                (base / f"snapdir_{n:03d}").mkdir(parents=True)
+            (base / "snapdir_050" / "combined_050.hdf5").touch()
+            (base / "snapdir_old").mkdir()                       # no number: not a snapshot
+            for snap in (99, np.int64(99), "099", 4, "004"):
+                old = sim_dir(sim, root) / (f"snapdir_{snap:03d}" if not isinstance(snap, str) else f"snapdir_{snap}")
+                assert snapdir_path(sim, snap, root) == old == base / ("snapdir_099" if "9" in str(snap) else "snapdir_004")
+            old = sorted({int(d.name.split("_")[1]) for d in sim_dir(sim, root).glob("snapdir_*")
+                          if d.name.split("_")[1].isdigit()})
+            assert snapshot_ladder(sim, root) == old == [4, 50, 99], snapshot_ladder(sim, root)
+            assert snapshot_ladder(sim, root, require="combined_*.hdf5") == [50]
+            assert snapshot_ladder(sim, root, require=lambda d: d.name != "snapdir_004") == [50, 99]
+        assert snapshot_ladder("NONE-1-Dark", root) == []
+    finally:
+        shutil.rmtree(root.parent)
+
+
+def t_series_driver():
+    """dtfelib.cli's series driver against the loops it replaced: run_series' outcomes and failures (a None or False
+    return; with catch an exception, its line printed, and the series goes on), report_series' closing lines in both
+    forms, written out here as the scripts printed them, and snapshot_series' ladder or one --snap."""
+    import io as _io
+    from argparse import Namespace
+    from contextlib import redirect_stdout
+    import config
+    from dtfelib.cli import report_series, run_series, snapshot_series
+    items = [("000", 20.05), ("050", 1.0), ("099", 0.0)]
+    out, failed = run_series(items, lambda s, z: None if s == "050" else {"s": s})
+    assert out == [{"s": "000"}, None, {"s": "099"}] and failed == [("050", 1.0)], (out, failed)
+    out, failed = run_series(items, lambda s, z: s != "000")
+    assert out == [False, True, True] and failed == [("000", 20.05)], (out, failed)
+
+    def boom(s, z):
+        if s == "099":
+            raise RuntimeError("no grids")
+        return None if s == "050" else 1          # with catch a None is a skip, not a failure
+    buf = _io.StringIO()
+    with redirect_stdout(buf):
+        out, failed = run_series(items, boom, catch=True)
+    assert out == [1, None, None] and failed == [("099", 0.0)], (out, failed)
+    assert buf.getvalue() == "Failed to process snapshot 099 (z=0.00): no grids\n", buf.getvalue()
+    for listed, want in (
+            (False, "\nCompleted: 1/3 snapshots processed\nFailed snapshots: 050 (z=1.00), 099 (z=0.00)\n"),
+            (True, "\nAnalysis complete\nSuccessfully processed: 1/3 snapshots\nFailed snapshots: 2\n"
+                   "  Snapshot 050 (z=1.00)\n  Snapshot 099 (z=0.00)\n")):
+        buf = _io.StringIO()
+        with redirect_stdout(buf):
+            report_series(1, 3, [("050", 1.0), ("099", 0.0)], listed=listed)
+        assert buf.getvalue() == want, (listed, buf.getvalue())
+    buf = _io.StringIO()
+    with redirect_stdout(buf):
+        report_series(3, 3, [])
+    assert buf.getvalue() == "\nCompleted: 3/3 snapshots processed\n", buf.getvalue()
+    assert snapshot_series(Namespace(snap=None)) == list(config.SNAPSHOT_TO_REDSHIFT.items())
+    assert snapshot_series(Namespace(snap=99)) == [("099", config.get_redshift("099"))]
+    assert snapshot_series(Namespace(snap=98)) == [("098", None)]
 
 
 def t_velocity_scale():
@@ -2272,7 +2342,7 @@ def t_caustic_skeleton():
     fr = sk.fractions(cc, den)
     assert abs(sum(v["volume"] for v in fr["exclusive"].values()) - 1.0) < 1e-12 and abs(sum(v["mass"] for v in fr["exclusive"].values()) - 1.0) < 1e-12
     assert abs(fr["exclusive"]["none"]["volume"] - 1 / n ** 3) < 1e-15 and fr["cumulative"]["sheet"]["mass"] > fr["cumulative"]["sheet"]["volume"]
-    # a parity-only grid (--ps-caustics --ps-linear-deposit --ps-gpu: the fold flag without collapse bits) is refused, alone
+    # a parity-only grid (--ps-caustics --ps-linear-deposit --gpu: the fold flag without collapse bits) is refused, alone
     # or as one det>0-parity cell in a full deposit; a parity bit WITH a collapse bit is an ordinary deposit.
     # A lone det<0 bit is legitimate (the geometric overlap, in a cell a folded tetrahedron overlaps but
     # no sample reached): read, as class 'none' and not a fold
@@ -2564,7 +2634,7 @@ def t_caustic_crossed_waves():
         else:
             print("    (no pcc_nocusp run: its 'not computed' check skipped)")
         lin = find("pcc_out_gpulin", (".causticClass",))
-        if lin is not None:                 # --ps-caustics --ps-linear-deposit --ps-gpu writes the fold flag alone
+        if lin is not None:                 # --ps-caustics --ps-linear-deposit --gpu writes the fold flag alone
             try:
                 sk.class_masks(np.rint(grid(lin, ".causticClass")).astype(np.int32))
             except ValueError as e:
@@ -4238,6 +4308,10 @@ def main():
     check("velocity_single_stream float-streams + hidden-streams mask (synthetic)", t_velocity_single_stream_float_mask)
     check("FieldSet velocity_scale u-units conversion (synthetic)", t_velocity_scale)
     check("sim_dir / find_sims: per-family and flat data layouts (synthetic)", t_sim_dir_layouts)
+    check("snapdir_path / snapshot_ladder == the pasted expressions, both layouts, int and '099' ids (synthetic)",
+          t_snapshot_helpers)
+    check("series driver: run_series / report_series / snapshot_series == the loops and lines they replaced (synthetic)",
+          t_series_driver)
     check("FieldSet out-of-core loading: auto/memmap/slice/slabs (synthetic)", t_outofcore_loading)
     check("FieldSet alternate OUTPUT_PREFIX set (synthetic)", t_alternate_prefix)
     global DATA_BACKED

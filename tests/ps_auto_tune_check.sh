@@ -291,7 +291,7 @@ check "H2 the single-domain report predicts a sane peak: ${ph:-none} GB < 12" \
       "$(awk -v p="${ph:-99}" 'BEGIN{print (p > 0 && p < 12) ? 1 : 0}')"
 # H3 (GPU builds): the GPU deposit serialises on one queue -> a split cannot speed it up
 if [ "${GPU_H}" = 1 ]; then
-    env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_h3" --grid 256 --field density_a velocity_a --periodic --ps-gpu \
+    env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_h3" --grid 256 --field density_a velocity_a --periodic --gpu \
         "${COMMON_H[@]}" > "${TMP}/at_h3.log" 2>&1
     agrep "H3 a GPU grid keeps one domain" "^AUTO-TUNE-REPORT partition=1 " "${TMP}/at_h3.log"
 else
@@ -328,12 +328,12 @@ pi=$(sed -n 's/^AUTO-TUNE-REPORT partition=\([0-9]*\) .*/\1/p' "${TMP}/at_i_cpu.
 ob=$(sed -n 's/^AUTO-TUNE-REPORT .*over_budget=\([01]\).*/\1/p' "${TMP}/at_i_cpu.log" | head -1)
 check "I1 CPU: a small set on a 1700^3 grid splits for memory (partition ${pi:-none}, over_budget ${ob:-none})" \
       "$([ -n "${pi}" ] && [ "${pi}" -ge 2 ] && [ "${ob}" = "0" ] && echo 1 || echo 0)"
-env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_i_gpu" "${COMMON_I[@]}" --ps-gpu > "${TMP}/at_i_gpu.log" 2>&1
-if grep -q "GPU (--ps-gpu)" "${TMP}/at_i_gpu.log"; then
+env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_i_gpu" "${COMMON_I[@]}" --gpu > "${TMP}/at_i_gpu.log" 2>&1
+if grep -q "GPU (--gpu)" "${TMP}/at_i_gpu.log"; then
     pg=$(sed -n 's/^AUTO-TUNE-REPORT partition=\([0-9]*\) .*/\1/p' "${TMP}/at_i_gpu.log" | head -1)
     check "I2 GPU: the tuner splits a 1700^3 grid so each sub-grid stays under 2^32 cells (partition ${pg:-none})" \
           "$([ -n "${pg}" ] && [ "${pg}" -ge 2 ] && grep -q "under the 2^32 cells the GPU kernels number" "${TMP}/at_i_gpu.log" && echo 1 || echo 0)"
-    env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_i_user" "${COMMON_I[@]}" --ps-gpu --partition 1 1 1 > "${TMP}/at_i_user.log" 2>&1
+    env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_i_user" "${COMMON_I[@]}" --gpu --partition 1 1 1 > "${TMP}/at_i_user.log" 2>&1
     agrep "I3 GPU: a user's unsplit 1700^3 grid is told which split keeps the GPU" "above the 2\^32 the GPU kernels number" "${TMP}/at_i_user.log"
 else
     echo "   SKIP  I2/I3 (this build has no GPU backend)"
@@ -423,11 +423,11 @@ rm -f "${TMP}"/at_k.*
 echo ">> L: the look-ahead is counted against the budget"
 run_l() {  # $1 = budget in GB, $2 = log
     env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 DTFE_AUTO_MINN=1000 DTFE_MEM_BUDGET_GB="$1" "${BIN}" "${SNAP}" "${TMP}/at_l" \
-        --grid 64 --field density_a --input 105 --MpcUnit 1 --verbose 2 --periodic --ps-gpu \
+        --grid 64 --field density_a --input 105 --MpcUnit 1 --verbose 2 --periodic --gpu \
         --partition 2 2 2 --max-concurrent 1 --auto-tune-report > "$2" 2>&1 || true
 }
 run_l 50 "${TMP}/at_l1.log"
-if grep -q "GPU (--ps-gpu)" "${TMP}/at_l1.log"; then
+if grep -q "GPU (--gpu)" "${TMP}/at_l1.log"; then
     p1=$(sed -n 's/^AUTO-TUNE-REPORT .*predicted_gb=\([0-9.]*\) .*/\1/p' "${TMP}/at_l1.log" | head -1)
     # just under 'one partition + the look-ahead' (~0.1 GB at 2^3 of 64^3 particles), above one partition
     bl=$(awk -v p="${p1:-0}" 'BEGIN{printf "%.4f", p - 0.03}')
@@ -451,19 +451,19 @@ rm -f "${TMP}"/at_l*
 echo ">> M: the GPU deposit's snapshot is counted once"
 run_m() {  # $1 = --max-concurrent, $2 = log
     env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 "${BIN}" "${SNAP}" "${TMP}/at_m" --grid 256 \
-        --field density_a velocity_a --ps-volume-weighted --input 105 --MpcUnit 1 --verbose 2 --periodic --ps-gpu \
+        --field density_a velocity_a --ps-volume-weighted --input 105 --MpcUnit 1 --verbose 2 --periodic --gpu \
         --partition 2 2 2 --max-concurrent "$1" --auto-tune-report > "$2" 2>&1 || true
 }
 run_m 2 "${TMP}/at_m2.log"
-if grep -q "GPU (--ps-gpu)" "${TMP}/at_m2.log"; then
+if grep -q "GPU (--gpu)" "${TMP}/at_m2.log"; then
     run_m 3 "${TMP}/at_m3.log"
     gb() { sed -n "s/^AUTO-TUNE-REPORT .*$1=\([0-9.]*\) .*/\1/p" "$2" | head -1; }
     p2=$(gb predicted_gb "${TMP}/at_m2.log"); p3=$(gb predicted_gb "${TMP}/at_m3.log"); f2=$(gb fixed_gb "${TMP}/at_m2.log")
     # expected: (24 B of selected grids + 4 B of the 64-bit mass) x the (256/2 + 40)^3 sub-grid cells = 0.133 GB
     # (+ the per-tet masses; measured 0.114 GB) -- with the velocity moment and its weight (16 B) as
-    # 64-bit words, 16 B more: 0.209 GB (measured 0.190 GB). PS_METAL_FLOAT_MOMENTS=1 keeps the floats.
+    # 64-bit words, 16 B more: 0.209 GB (measured 0.190 GB). PS_GPU_FLOAT_MOMENTS=1 keeps the floats.
     sm=$(awk -v a="${p2:-0}" -v b="${p3:-0}" -v f="${f2:-0}" 'BEGIN{printf "%.3f", a - f - 2*(b - a)}')
-    if [ "${PS_METAL_FLOAT_MOMENTS:-0}" != "0" ] || [ "${PS_GPU_FLOAT_MOMENTS:-0}" != "0" ]; then lo=0.10; hi=0.17; ex=0.13
+    if [ "${PS_GPU_FLOAT_MOMENTS:-0}" != "0" ]; then lo=0.10; hi=0.17; ex=0.13
     else lo=0.16; hi=0.25; ex=0.21; fi
     check "M the GPU snapshot is counted once: ${sm} GB beyond 2 partitions (expected ~${ex} GB; predicted ${p2:-none} / ${p3:-none} GB at 2 / 3 in flight)" \
           "$(awk -v s="${sm}" -v lo="${lo}" -v hi="${hi}" 'BEGIN{exit !(s >= lo && s <= hi)}' && echo 1 || echo 0)"
@@ -613,12 +613,12 @@ echo ">> W: --ps-window books the whole window, its deposit's grids once"
 run_w() {  # $1 = log; the rest = extra flags
     local log="$1"; shift
     "${BIN}" "${SNAP}" "${TMP}/at_w" --grid 2048 --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a \
-        --ps-gpu --ps-vertex-mass --ps-volume-weighted --ps-exact-deposit --partition 2 2 2 --max-concurrent 1 \
+        --gpu --ps-vertex-mass --ps-volume-weighted --exact-average --partition 2 2 2 --max-concurrent 1 \
         --ps-window 0 "${BOX}" 0 "${BOX}" "$(awk -v b="${BOX}" 'BEGIN{print b/2}')" "$(awk -v b="${BOX}" 'BEGIN{print b/2 + 1e-4}')" \
         "$@" > "${log}" 2>&1 || true
 }
 run_w "${TMP}/at_w0.log" --auto-tune-report
-if grep -q "GPU (--ps-gpu)" "${TMP}/at_w0.log"; then
+if grep -q "GPU (--gpu)" "${TMP}/at_w0.log"; then
     run_w "${TMP}/at_w.log"
     mw=$("${PY}" - "${TMP}/at_w.log" <<'PYEOF'
 import re, sys

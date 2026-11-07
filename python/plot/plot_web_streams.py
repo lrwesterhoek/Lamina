@@ -34,11 +34,12 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from dtfelib import make_parser, FieldSet, sim_dir, add_ps_gradient_arg, mean_field_wanted
+from dtfelib import make_parser, FieldSet, snapdir_path, snapshot_ladder, add_ps_gradient_arg, mean_field_wanted
+from dtfelib import add_snaps_arg, add_out_arg
 from dtfelib import figures as style
 from dtfelib import webstreams as ws
 
-OUTPUT_DIR = Path(config.LOCAL_FIGURES_ROOT) / "web_streams"
+OUTPUT_DIR = Path(config.figures_path("web_streams"))
 WEBS = {"tweb": ("T-web", "tweb"), "vweb": ("V-web", "vweb")}
 BIN_COLORS = ["#bbbbbb", "#1f5fa8", "#7fb2e5", "#f2b134", "#e4572e", "#7b1e3b"]
 
@@ -153,9 +154,9 @@ def process(fs, sim, snap, webs, series, problems, out_dir, mean_field=True):
 
 def main():
     parser = make_parser("Stream multiplicity and caustic class by T-web / V-web environment (PS-DTFE grids).")
-    parser.add_argument("--snaps", type=int, nargs="*", default=None, help="snapshots (default: --snap)")
+    add_snaps_arg(parser)
     parser.add_argument("--web", choices=("both", "tweb", "vweb"), default="both")
-    parser.add_argument("--out", default=None, help=f"output folder (default {OUTPUT_DIR}/<sim>)")
+    add_out_arg(parser, f"{OUTPUT_DIR}/<sim>")
     add_ps_gradient_arg(parser)
     args = parser.parse_args()
     style.apply()
@@ -168,7 +169,7 @@ def main():
     tag = None                                  # the grids' name tag, from the first FieldSet (one --prefix / --raw per run)
     for snap in snaps:
         try:
-            fs = FieldSet(sim_dir(args.sim, args.data_root) / f"snapdir_{snap:03d}", method=method,
+            fs = FieldSet(snapdir_path(args.sim, snap, args.data_root), method=method,
                           averaged=not args.raw, prefix=args.prefix)
             tag = grid_tag(fs) if tag is None else tag
             n_done = process(fs, args.sim, snap, webs, series, problems, out_dir, mean_field=mean_field_wanted(args))
@@ -180,8 +181,7 @@ def main():
             failed.append(snap)
     # the series' default name holds the whole ladder on disk; a subset of it gets its own name, so a
     # '--snaps 99 67 50 40' run never replaces the full series (a snapshot that failed still counts as asked)
-    ladder = sorted({int(d.name.split("_")[1]) for d in sim_dir(args.sim, args.data_root).glob("snapdir_*")
-                     if d.name.split("_")[1].isdigit()})
+    ladder = snapshot_ladder(args.sim, args.data_root)
     asked = sorted(set(snaps))
     subset = "" if asked == ladder else "_snaps" + "-".join(str(s) for s in asked)
     for k, rows in series.items():

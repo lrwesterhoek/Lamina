@@ -22,7 +22,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from .cli import sim_dir
+from .cli import sim_dir, snapdir_path
 
 DM = 1   # PartType1 (the only species in the -Dark runs)
 
@@ -114,7 +114,7 @@ def read_subhalo_coordinates(sim: str, snap: int, subfind_id: int,
     if length == 0:
         return np.empty((0, 3), dtype=np.float32)
 
-    snapdir = sim_dir(sim) / f"snapdir_{snap:03d}"
+    snapdir = snapdir_path(sim, snap)
     # raw chunks when available; else the merged combined_NNN.hdf5 (its particles keep the
     # chunk concatenation order, so the global offsets are identical). NOTE: the combined
     # file is h-FREE (ckpc) while this function's contract is raw ckpc/h -- rescale by h.

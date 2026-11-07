@@ -52,8 +52,7 @@ import matplotlib.pyplot as plt
 import config
 from dtfelib import pipeline
 from dtfelib import lagrangian as L
-from dtfelib import make_parser, use_data_root
-from dtfelib import environment as env
+from dtfelib import make_parser, use_data_root, snapshot_ladder, add_snaps_arg, add_out_arg
 from dtfelib import groupcat as gc
 from dtfelib import figures as style
 
@@ -258,23 +257,21 @@ def chained_survival(intervals):
 def main(argv=None):
     parser = make_parser("Fate census of the voids: link every snapshot's distinct resolved voids to every void of "
                          "the next snapshot by their member particles (survive, merge, unresolved, split, vanish).")
-    parser.add_argument("--snaps", type=int, nargs="+", default=None,
-                        help="snapshots to link, in time order (default: every snapshot of the ladder with a "
-                             "combined snapshot file and field grids)")
+    add_snaps_arg(parser, nargs="+", help="snapshots to link, in time order (default: every snapshot of the ladder with "
+                                          "a combined snapshot file and field grids)")
     parser.add_argument("--ref-snap", type=int, default=REF_SNAP,
                         help=f"also link this snapshot directly to the last one (default {REF_SNAP}, z = 2)")
     parser.add_argument("--exclusive", action="store_true",
                         help="give a particle inside several voids' spheres to the one whose centre is nearest in "
                              "units of its R_v (a partition of the matter: overlapping high-z voids then cannot both "
                              "pass half their matter to one descendant); files tagged '_exclusive'")
-    parser.add_argument("--out", type=Path, default=None,
-                        help="write the figure, table and npz into this folder instead")
+    add_out_arg(parser, help="write the figure, table and npz into this folder instead")
     pipeline.add_smoothing_mpc_arg(parser)
     args = parser.parse_args(argv)
     pipeline.apply_smoothing_args(args, "void-fate")
     use_data_root(args.data_root)
     ztab = gc.redshift_table(args.sim)
-    ladder = args.snaps or sorted({int(d.name.split("_")[1]) for d in env.sim_dir(args.sim).glob("snapdir_*")})
+    ladder = args.snaps or snapshot_ladder(args.sim)
 
     snaps = []
     for s in sorted(ladder):

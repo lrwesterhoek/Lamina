@@ -2,6 +2,13 @@
 # PS-DTFE parallel-vs-serial correctness check: runs serial and all-cores, asserts
 # outputs agree (a race shows up as a mismatch). .streams must match exactly (integer
 # counts are order-independent), float fields only within tolerance.
+# Then the CPU deposit's dynamic team (ps_interpolation.cc PSBlockClaim): on all cores, the default run and
+# DTFE_DEPOSIT_THREADS=1 (one thread per partition, the serial loop) and =4 (a pinned team of 4) must write
+# BYTE-IDENTICAL grids, and the verbose-3 log must say which rule ran: the dynamic team in the single build
+# (every accumulator a shared integer word), the static copy mode in the double build (its sums depend on the
+# block assignment, so it must keep the static rule). So must a slab team of 4 (DTFE_DEPOSIT_SLABS=1
+# DTFE_DEPOSIT_THREADS=4): a static team, counted in the core pool (thread_count.h CorePool::Hold), beside the
+# other partitions' pooled loops.
 #
 # Usage:
 #   tests/ps_parallel_check.sh                 # build, run x2, compare
@@ -108,6 +115,50 @@ if fails:
 print("RESULT: PASS  (parallel == serial: integer stream counts identical, "
       "averaged/float fields agree within rounding)")
 PY
+
+echo ">> the CPU deposit's team: default vs DTFE_DEPOSIT_THREADS=1 and =4 and a slab team of 4 (--verbose 3, all cores), byte for byte"
+run_team() {  # $1 = DTFE_DEPOSIT_THREADS ('' = unset), $2 = output root, $3 = one more VAR=value (optional)
+    rm -f "$2".*
+    set +e
+    env ${1:+DTFE_DEPOSIT_THREADS=$1} ${3:-} OMP_NUM_THREADS="${NPROC}" "${BIN}" "${SNAP}" "$2" \
+        --grid "${GRID}" --periodic --partition ${PARTITION} --field density velocity density_a velocity_a \
+        --input 105 --MpcUnit 1 --verbose 3 > "$2.log" 2>&1
+    local rc=$?
+    set -e
+    die_on_failed_run "$rc" "$2.log" "PS-DTFE (DTFE_DEPOSIT_THREADS=${1:-unset})"
+}
+run_team "" "${TMP}/ps_team_def"
+run_team 1 "${TMP}/ps_team_t1"
+run_team 4 "${TMP}/ps_team_t4"
+run_team 4 "${TMP}/ps_team_slab" DTFE_DEPOSIT_SLABS=1
+team_fail=0
+# (the double build's copy mode sums its private copies in thread order: only its integer stream counts must agree;
+# slab mode adds into every cell in the one-thread loop's order, so its grids must agree in both builds)
+for f in "${TMP}"/ps_team_t1.*; do
+    case "$f" in *.log|*.runlog*) continue ;; esac
+    ext="${f#"${TMP}/ps_team_t1"}"
+    for other in def t4 slab; do
+        if precision_double && [ "${other}" != slab ] && [ "${ext}" != ".streams" ]; then continue; fi
+        g="${TMP}/ps_team_${other}${ext}"
+        if cmp -s "$f" "$g"; then :; else echo "   FAIL: ${ext} differs (DTFE_DEPOSIT_THREADS=1 vs ${other})"; team_fail=1; fi
+    done
+done
+n_dyn_def=$(grep -c "a dynamic team" "${TMP}/ps_team_def.log" || true)
+n_dyn_t4=$(grep -c "a dynamic team: blocks of 256 cells claimed from one counter by the 4 pinned threads" "${TMP}/ps_team_t4.log" || true)
+n_static=$(grep -cE "CPU deposit on [0-9]+ threads? \(copy mode: [0-9.e+-]+ MB of private accumulators per extra thread, budget [0-9.e+-]+ GB; the fixed-point grids, counts and flags are shared\)\.$" "${TMP}/ps_team_def.log" || true)
+n_slab=$(grep -c "CPU deposit in SLAB mode: 4 threads" "${TMP}/ps_team_slab.log" || true)
+echo "   logs: ${n_dyn_def} partition deposit(s) in a dynamic team (default), ${n_dyn_t4} in a pinned team of 4, ${n_static} on the static rule, ${n_slab} in a slab team of 4"
+[ "${n_slab}" -gt 0 ] || { echo "   FAIL: DTFE_DEPOSIT_SLABS=1 DTFE_DEPOSIT_THREADS=4 should run a slab team of 4"; team_fail=1; }
+if precision_double; then
+    # the double build sums private copies in thread order: the static rule, never the dynamic team
+    [ "${n_dyn_def}" = 0 ] && [ "${n_dyn_t4}" = 0 ] && [ "${n_static}" -gt 0 ] \
+        || { echo "   FAIL: the double build must keep the static rule"; team_fail=1; }
+else
+    [ "${n_dyn_def}" -gt 0 ] && [ "${n_dyn_t4}" -gt 0 ] \
+        || { echo "   FAIL: the single build's CPU deposit should run as a dynamic team"; team_fail=1; }
+fi
+[ "${team_fail}" = 0 ] || { echo "RESULT: FAIL (the deposit's team)"; exit 1; }
+echo "   PASS: the grids agree across the four team rules ($(precision_double && echo "double build: .streams, the slab team every grid" || echo "every grid byte for byte"))"
 
 echo "============================================================"
 echo " parallel check PASSED"

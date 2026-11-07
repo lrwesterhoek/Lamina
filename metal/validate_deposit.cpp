@@ -21,7 +21,7 @@
 //        the analytic volume-weighted mean in mom/momw and mass-weighted mean in dispvel/dispw
 //    T12 --ps-caustics path (fCaustic): a tet and its orientation-flip stamp distinct bits;
 //        together every covered cell reads exactly 3 (the fold-caustic flag)
-//    T13 --ps-exact-deposit path (fExact): the 6-tet Freudenthal cube at density 1 deposits
+//    T13 --exact-average path (fExact): the 6-tet Freudenthal cube at density 1 deposits
 //        exactly mass 1 and multiplicity 1 into each of the 8 cells it tiles, nothing outside
 //    T14 the production exact path, depositExactItems (a tet's window split over many threads,
 //        two phases through a per-tet weight total): T13's analytic cube with one cell per item,
@@ -55,6 +55,7 @@
 #include <algorithm>
 
 #include "../src/CGAL_triangulation/ps_deposit_params.h"
+#include "../src/CGAL_triangulation/gpu_host.h"   // psBuildExactItemMap: the exact items' map, as the hosts build it
 using DepositParams = PSDepositParams;   // shared host struct; the harness sets all field flags to 1
 
 static int  g_pass = 0, g_fail = 0;
@@ -219,6 +220,10 @@ struct Gpu {
     // depositFields; the window bound here is deliberately LOOSE (+2 cells a side), so surplus
     // items that must idle are exercised too
     uint32_t itemCells=0;
+    // itemSkip > 0: every itemSkip-th tet gets NO items (a tet the hosts' bound puts outside the grid or window: a
+    // leftover of the map, which the kernels' binary search must step over); itemChunk > 0: the items run in chunks
+    // of that many (the hosts' command buffers, each starting at its ExactItemParams.itemBase)
+    uint32_t itemSkip=0, itemChunk=0;
     size_t lastItems=0, lastLeftovers=0;
     bool lastFailed=false;   // a command buffer of the last run() errored (e.g. the GPU watchdog)
 
@@ -229,8 +234,10 @@ struct Gpu {
         { std::ifstream mf("metal/ps_deposit.metallib");
           if (mf.good()) lib=dev->newLibrary(NS::URL::fileURLWithPath(NS::String::string("metal/ps_deposit.metallib",NS::UTF8StringEncoding)),&err); }
         if(!lib){
-            // the shared exact clip helpers come first, as the Makefile prepends them when it embeds the source
-            std::ifstream inc("metal/exact_clip.metal.inc"); std::ifstream f(srcPath); std::stringstream ss; ss<<inc.rdbuf()<<"\n"<<f.rdbuf(); std::string src=ss.str();
+            // the shared exact clip helpers and the parameter blocks come first, as the Makefile prepends them when it
+            // embeds the source
+            std::ifstream inc("metal/exact_clip.metal.inc"); std::ifstream prm("src/CGAL_triangulation/ps_kernel_params.h");
+            std::ifstream f(srcPath); std::stringstream ss; ss<<inc.rdbuf()<<"\n"<<prm.rdbuf()<<"\n"<<f.rdbuf(); std::string src=ss.str();
             if(src.empty()) return false;
             lib=dev->newLibrary(NS::String::string(src.c_str(),NS::UTF8StringEncoding),(MTL::CompileOptions*)nullptr,&err);
         }
@@ -329,7 +336,7 @@ struct Gpu {
         MTL::Buffer* bDW=zbuf((P.fVolW&&P.fDisp)    ? nCell*4  : 4);     // dispw
         MTL::Buffer* bSc=zbuf(4), *bScal=zbuf(4), *bSG=zbuf(4);           // scalar in / moment / gradient (fScal=fSGrad=0)
         auto dispatch=[&](MTL::ComputePipelineState* pso, MTL::Buffer* massB, size_t nThreads,
-                          MTL::Buffer* bI, MTL::Buffer* bSW, uint32_t phase){
+                          MTL::Buffer* bI, MTL::Buffer* bSW, uint32_t phase, size_t itemBase){
             MTL::CommandBuffer* cb=q->commandBuffer();
             MTL::ComputeCommandEncoder* e=cb->computeCommandEncoder();
             e->setComputePipelineState(pso);
@@ -344,8 +351,8 @@ struct Gpu {
             e->setBuffer(bMom,0,22); e->setBuffer(bM2,0,23); e->setBuffer(bG,0,24); e->setBuffer(bW,0,25);
             e->setBuffer(bSV,0,26); e->setBuffer(bDV,0,27); e->setBuffer(bScal,0,28); e->setBuffer(bSG,0,29);
             if(bI){
-                uint32_t const IP[4]={uint32_t(nThreads),phase,itemCells,0u};
-                e->setBuffer(bI,0,15); e->setBuffer(bSW,0,16); e->setBytes(IP,sizeof IP,17);
+                PSExactItemParams const IP{uint32_t(nThreads),phase,itemCells,0u,uint32_t(itemBase),P.nTet};
+                e->setBuffer(bI,0,15); e->setBuffer(bSW,0,16); e->setBytes(&IP,sizeof IP,17);
                 e->setBuffer(bSW,0,30);
             }
             NS::UInteger tg=pso->maxTotalThreadsPerThreadgroup(); if(tg>256)tg=256;
@@ -358,7 +365,8 @@ struct Gpu {
         };
         lastItems=lastLeftovers=0; lastFailed=false;
         if(itemCells && Pk.fExact && psoItems && psoItems1){
-            std::vector<uint32_t> items;
+            std::vector<uint64_t> bound(P.nTet);
+            lastItems=0;
             for(uint32_t t=0;t<P.nTet;++t){
                 uint64_t nw=1;
                 for(int dd=0;dd<3;++dd){
@@ -366,24 +374,30 @@ struct Gpu {
                     for(int k=1;k<4;++k){ float const c=verts[size_t(t)*12+k*3+dd]; lo=std::min(lo,c); hi=std::max(hi,c); }
                     nw*=uint64_t(int(std::floor((hi-P.boxLo[dd])/P.dx[dd]))-int(std::floor((lo-P.boxLo[dd])/P.dx[dd]))+5);
                 }
-                for(uint64_t k=0;k<(nw+itemCells-1)/itemCells;++k){ items.push_back(t); items.push_back(uint32_t(k)); }
+                if(itemSkip && t%itemSkip==itemSkip-1) nw=0;
+                bound[t]=nw;
+                lastItems+=(nw+itemCells-1)/itemCells;
             }
-            lastItems=items.size()/2;
-            MTL::Buffer* bI=dev->newBuffer(items.data(),items.size()*sizeof(uint32_t),MTL::ResourceStorageModeShared);
+            // the items' map, built as the production hosts build it (gpu_host.h)
+            std::vector<uint32_t> map(psExactItemMapWords(P.nTet,lastItems));
+            psBuildExactItemMap(bound,itemCells,lastItems,map.data());
+            MTL::Buffer* bI=dev->newBuffer(map.data(),map.size()*sizeof(uint32_t),MTL::ResourceStorageModeShared);
             MTL::Buffer* bSW=zbuf(size_t(P.nTet)*4+4);
-            dispatch(psoItems,bM,lastItems,bI,bSW,0);
-            dispatch(psoItems1,bM,lastItems,bI,bSW,1);
+            size_t const chunk=itemChunk? itemChunk : std::max<size_t>(lastItems,1);
+            for(uint32_t phase=0; phase<2; ++phase)
+                for(size_t s0=0; s0<lastItems; s0+=chunk)
+                    dispatch(phase? psoItems1 : psoItems,bM,std::min(chunk,lastItems-s0),bI,bSW,phase,s0);
             // leftovers (weight total 0): depositFields, every other tet masked to mass 0 (skipped)
             float* mb=(float*)bM->contents(); const float* sw=(const float*)bSW->contents();
             std::vector<float> lm(P.nTet,0.f);
             for(uint32_t t=0;t<P.nTet;++t) if(mb[t]>0.f && !(sw[t]>0.f)){ lm[t]=mb[t]; ++lastLeftovers; }
             MTL::Buffer* bL=dev->newBuffer(lm.data(),lm.size()*sizeof(float),MTL::ResourceStorageModeShared);
-            dispatch(psoFld,bL,P.nTet,nullptr,nullptr,0);
+            dispatch(psoFld,bL,P.nTet,nullptr,nullptr,0,0);
             const float* lb=(const float*)bL->contents();
             for(uint32_t t=0;t<P.nTet;++t) if(lb[t]<0.f) mb[t]=lb[t];   // its deferrals
             bI->release(); bSW->release(); bL->release();
         } else
-            dispatch(psoFld,bM,P.nTet,nullptr,nullptr,0);
+            dispatch(psoFld,bM,P.nTet,nullptr,nullptr,0,0);
 
         if(Pk.massFixed){
             const uint32_t* fx=(const uint32_t*)bMassFx->contents();
@@ -454,6 +468,7 @@ static void makeParams(DepositParams& P,int n,float box,int nSub,int periodic){
     // the moment grids as float sums (the kernel's fixed-point moment path, fxMask, is exercised by the
     // binary's suites -- tests/ps_fixed_moments_check.sh; this harness compares the float grids with its CPU reference)
     P.fxMask=0; for(int g=0;g<PS_FX_N;++g) P.fxScale[g]=0.f;
+    P.debugNoAtomic=0;      // every atomic issued (PS_GPU_DEBUG_NOATOMIC is the binaries' timing experiment)
 }
 static std::vector<float> linVel(const std::vector<float>& verts){
     // simple linear velocity field v = (2x - y, 0.5z, -x + y) at each vertex
@@ -986,7 +1001,7 @@ static void t12_causticBits(Gpu& g){
     verdict("T12 fCaustic orientation OR",ok,detail);
 }
 
-// T13: --ps-exact-deposit kernel path (fExact, the z-sweep of exact_clip.metal.inc). A cube split into the
+// T13: --exact-average kernel path (fExact, the z-sweep of exact_clip.metal.inc). A cube split into the
 // 6-tet Freudenthal tessellation with density 1 (mass = tet volume) has a FULLY analytic
 // exact deposit: the cube [2,4]^3 covers 8 grid cells of dx=1 exactly, so each receives
 // mass 1.000..., the multiplicity sum(V_int)/V_cell is exactly 1 in each (the tessellation
@@ -1075,10 +1090,13 @@ static void t14_exactItems(Gpu& g){
         for(int i=0;i<3;++i){ P.subOrigin[i]=cs.subOrigin; P.subDims[i]=cs.subDims; }   // 40+40 > 64: the crop wraps
         CpuOut one, it, oneW, itW;
         g.itemCells=0; g.run(vF,uF,mF,P,one); size_t const def1=g.lastDeferred; bool failed=g.lastFailed;
+        // the items with every 5th tet given none (leftovers inside the map) and dispatched in chunks of 4093 items
+        // (not a multiple of the map's 32-item blocks), as the hosts' command buffers run them
+        g.itemSkip=5; g.itemChunk=4093;
         g.itemCells=7; g.run(vF,uF,mF,P,it);  size_t const defI=g.lastDeferred, nItems=g.lastItems, nLeft=g.lastLeftovers; failed|=g.lastFailed;
         g.itemCells=0; g.run(vW,uW,mW,P,oneW); failed|=g.lastFailed;
         g.itemCells=7; g.run(vW,uW,mW,P,itW);  failed|=g.lastFailed;
-        g.itemCells=0;
+        g.itemCells=0; g.itemSkip=0; g.itemChunk=0;
         size_t smis=0; for(size_t i=0;i<one.streams.size();++i) if(one.streams[i]!=it.streams[i]||one.unresolved[i]!=it.unresolved[i]) ++smis;
         double const dM=rel(it.mass,one.mass), dSV=rel(it.sv,one.sv);
         double const dV=rel(itW.mom,oneW.mom), dD=rel(itW.m2,oneW.m2), dG=rel(itW.grad,oneW.grad), dMW=rel(itW.mass,oneW.mass);

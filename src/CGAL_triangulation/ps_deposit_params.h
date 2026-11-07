@@ -217,41 +217,11 @@ inline int64_t psFixedShare(double share, float scale, int slot)
     return q;
 }
 
-// Host-side parameter block of the PS-DTFE GPU deposit, shared by the Metal host
-// (ps_metal_host.cc) and metal/validate_deposit.cpp. MUST match the MSL
-// 'DepositParams' struct in metal/ps_deposit.metal byte-for-byte -- that copy is the one
-// intentional duplicate (MSL cannot include this header).
-struct PSDepositParams
-{
-    float    boxLo[3];
-    float    dx[3];
-    int32_t  nGrid[3];
-    int32_t  nSub;
-    int32_t  periodic;
-    int32_t  subOrigin[3];   // partition sub-grid box (full grid: origin 0, dims = nGrid)
-    int32_t  subDims[3];
-    // field flags: when 0 the corresponding moment grid is a 4-byte dummy the kernel never
-    // touches (mass and streams are always deposited)
-    int32_t  fVel;      // velocity moments (velocity or dispersion selected)
-    int32_t  fDisp;     // second moments (24 B per cell)
-    int32_t  fGrad;     // velocity-gradient moments (36 B per cell)
-    int32_t  fLinear;   // --ps-linear-deposit: density-weighted (renormalized) sample shares
-    int32_t  fVolW;     // --ps-volume-weighted: moment weight = V_eul shares (mass grid unchanged); momw normalizer grid deposited
-    int32_t  fCaustic;  // --ps-caustics: atomic-OR the per-tet orientation bits (1 = det>0, 2 = det<0) into the caustic grid
-    int32_t  fExact;    // --ps-exact-deposit: analytic tet-cell clipping (the kernel's float32 z-sweep, sweep_moments) instead of nSub^3 sampling; nSub ignored
-    uint32_t nTet;
-    int32_t  fScal;     // scalar field (one component): vertex scalars in buffer 18, the moment grid in 19
-    int32_t  fSGrad;    // scalar gradient (3 components): its moment grid in buffer 20
-    int32_t  windowMode; // --ps-window: the sub-box is a WINDOW of the full grid -- count every sample / clipped
-                         // piece of a tet (the full run's normalization), deposit only those inside the sub-box
-    int32_t  massFixed;  // the mass grid as an exact 64-bit fixed-point sum (buffer 21) instead of float atomics (buffer 3)
-    float    massScale;  // its unit, 1/massScale mass: a power of two (psMassFixedScale)
-    // the moment grids as exact 64-bit fixed-point sums (PSFxGrid above). fxMask bit g = grid g is one
-    // (its words at buffer 22 + its slot, see metal/ps_deposit.metal), in units of 1/fxScale[g]; PS_FX_SUMW_BIT =
-    // the exact items' weight totals too. 0 = every moment grid a float sum (the harness's default).
-    uint32_t fxMask;
-    float    fxScale[PS_FX_N];
-};
+// The parameter block of the PS-DTFE GPU deposit, PSDepositParams (and the exact items' PSExactItemParams): ONE
+// definition in ps_kernel_params.h, shared by the hosts (ps_metal_host.cc, ps_gpu_cuda.cu, metal/validate_deposit.cpp)
+// and the Metal kernels, to whose source the Makefile prepends it. Its fxScale holds one unit per PSFxGrid.
+#include "ps_kernel_params.h"
+static_assert( int(PS_FX_N) == 9, "PSDepositParams.fxScale[9] holds one unit per PSFxGrid (ps_kernel_params.h)" );
 
 // The unit of the mass grid's fixed-point sum (the kernel's DepositParams.massFixed says why):
 // scale = 2^k with the mass handed to the deposit (a partition's tets) at 2^61..2^62 units -- the finest unit

@@ -28,7 +28,7 @@ from __future__ import annotations
 import h5py
 import numpy as np
 
-from .cli import sim_dir
+from .cli import sim_dir, snapdir_path
 from .io import FieldSet, MEAN_FIELD_NAMES
 
 # fields whose values are categorical labels: sample NGP, never interpolate
@@ -42,7 +42,7 @@ def box_ckpc_h(sim: str, snap: int) -> float:
     merged combined_*.hdf5, which is h-free ckpc by the current convention (BoxSize * h).
     """
     root = sim_dir(sim)
-    snapdir = root / f"snapdir_{snap:03d}"
+    snapdir = snapdir_path(sim, snap)
     for pat in (f"snap_{snap:03d}.*.hdf5",):
         files = sorted(snapdir.glob(pat))
         if files:
@@ -104,7 +104,7 @@ def sample_fields_at(sim: str, snap: int, pos_ckpc_h: np.ndarray,
     prefix reads an alternate OUTPUT_PREFIX grid set (e.g. 'ps_mw'), see FieldSet.
     mean_field: the velocity-gradient family as the mean field for both estimators (module docstring).
     """
-    fs = FieldSet(sim_dir(sim) / f"snapdir_{snap:03d}", method=method, averaged=averaged,
+    fs = FieldSet(snapdir_path(sim, snap), method=method, averaged=averaged,
                   prefix=prefix)
     frac = np.asarray(pos_ckpc_h, dtype=np.float64) / box_ckpc_h(sim, snap)
     out = {"_method": fs.method, "_grid_n": fs.grid_n}

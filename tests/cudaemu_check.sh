@@ -21,7 +21,7 @@
 #   ps_fixed_moments_check (every moment grid of the port is an exact fixed-point sum too --
 #   addMoment in ps_gpu_cuda.cu -- two runs with other chunk sizes byte-identical in every grid)
 # and its own check of the port's fixed-point mass grid (depositMass in ps_gpu_cuda.cu, as in the Metal kernel):
-#   E1  two --ps-gpu runs write byte-identical '.a_den' (one domain, and --partition 2 2 2
+#   E1  two --gpu runs write byte-identical '.a_den' (one domain, and --partition 2 2 2
 #       --max-concurrent 1); float atomics would differ run to run
 #   E2  PS_GPU_FLOAT_MASS=1 (the float grid, kept for A/B) agrees with the default to 1e-5 of the peak
 #   E3  heavy accumulation (a 128^3 pancake on a 2^3 grid, nSub 1: 1.47e7 tetrahedra, ~1.8e6 deposits per
@@ -36,7 +36,7 @@
 #
 # The time-aware auto-tuner splits small runs into 2^3 partitions when it predicts a speed gain, and its
 # prediction depends on the core count: on a 4- or 8-core Linux machine the CPU REFERENCE runs of
-# gpu_scalar_check would be split while the --ps-gpu runs are not, and a split sampled deposit differs from one
+# gpu_scalar_check would be split while the --gpu runs are not, and a split sampled deposit differs from one
 # domain at 4e-3 of the peak -- a red suite that has nothing to do with the port. DTFE_AUTO_T_VERTEX (the
 # tuner's per-vertex triangulation cost) is therefore set negligible here, so no speed split ever wins and
 # every machine runs the same single domain the Mac does (export your own value to override).
@@ -86,7 +86,7 @@ mass_check() {
     run() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL: $(basename "$out") (see $out.log)"; return 1; }
             if grep -q "using the CPU deposit\|deposit unavailable\|ran on the CPU instead" "$out.log"; then
                 echo "FAIL: $(basename "$out") fell back to the CPU (see $out.log)"; return 1; fi; return 0; }
-    local C=(--grid 32 --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a --avg-subsamples 2 --ps-gpu)
+    local C=(--grid 32 --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a --avg-subsamples 2 --gpu)
     local P=(--partition 2 2 2 --max-concurrent 1)
     local H=(--grid 2 --periodic --MpcUnit 1 --verbose 2 --field density_a --avg-subsamples 1 --partition 1 1 1)
     run "$T/s1" ./PS-DTFE "$SNAP" "$T/s1" "${C[@]}" || return 1
@@ -95,7 +95,7 @@ mass_check() {
     run "$T/p2" ./PS-DTFE "$SNAP" "$T/p2" "${C[@]}" "${P[@]}" || return 1
     run "$T/f1" env PS_GPU_FLOAT_MASS=1 ./PS-DTFE "$SNAP" "$T/f1" "${C[@]}" || return 1
     run "$T/h_cpu" ./PS-DTFE "$PAN" "$T/h_cpu" "${H[@]}" || return 1
-    run "$T/h_gpu" ./PS-DTFE "$PAN" "$T/h_gpu" "${H[@]}" --ps-gpu || return 1
+    run "$T/h_gpu" ./PS-DTFE "$PAN" "$T/h_gpu" "${H[@]}" --gpu || return 1
     "$PY" - "$T" "$W" <<'PYEOF'
 import sys
 from pathlib import Path
@@ -109,7 +109,7 @@ def rd(name):
     return np.fromfile(tmp / f"{name}.a_den", dtype=np.float32).astype(np.float64)
 for a, b, what in (("s1", "s2", "one domain"), ("p1", "p2", "--partition 2 2 2 --max-concurrent 1")):
     x, y = (tmp / f"{a}.a_den").read_bytes(), (tmp / f"{b}.a_den").read_bytes()
-    check("E1", len(x) > 0 and x == y, f"warp {warp}: two --ps-gpu runs ({what}): '.a_den' byte-identical ({len(x)} bytes)")
+    check("E1", len(x) > 0 and x == y, f"warp {warp}: two --gpu runs ({what}): '.a_den' byte-identical ({len(x)} bytes)")
 s, f = rd("s1"), rd("f1")
 peak = float(np.abs(s - f).max() / np.abs(s).max())
 check("E2", s.size == f.size and peak < 1e-5, f"warp {warp}: PS_GPU_FLOAT_MASS=1 against the fixed-point grid: peak-rel {peak:.1e} (< 1e-5)")

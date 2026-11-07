@@ -50,7 +50,7 @@ GPU_BUILT=0
 # capture FIRST -- piping the binary straight into grep -q would SIGPIPE it under pipefail
 # a help that fails is a broken binary, not a missing feature; a missing feature fails under DTFE_TEST_REQUIRED=1
 # (skip_or_fail, tests/precision.sh)
-FULL_HELP="$("${BIN}" --full_help 2>/dev/null)" || { echo "FAIL: ${BIN} --full_help exited non-zero"; exit 1; }
+FULL_HELP="$("${BIN}" --full-help 2>/dev/null)" || { echo "FAIL: ${BIN} --full-help exited non-zero"; exit 1; }
 if ! grep -q -- '--ps-vertex-mass' <<<"${FULL_HELP}"; then
     skip_or_fail "this PS-DTFE has no --ps-vertex-mass support."
 fi
@@ -109,8 +109,8 @@ run "${TMP}/pvm_lin_pic" "${SNAP_PIC}"
 echo ">> run 5: single-stream pancake, perturbed ICs, --ps-vertex-mass (the fix)"
 run "${TMP}/pvm_lin_picvm" "${SNAP_PIC}" --ps-vertex-mass
 if [ "${GPU_BUILT}" -eq 1 ]; then
-    echo ">> run 6: pancake, --ps-vertex-mass --ps-gpu (GPU parity)"
-    run "${TMP}/pvm_pan_vmg" "${SNAP_PAN}" --ps-vertex-mass --ps-gpu
+    echo ">> run 6: pancake, --ps-vertex-mass --gpu (GPU parity)"
+    run "${TMP}/pvm_pan_vmg" "${SNAP_PAN}" --ps-vertex-mass --gpu
 else
     echo ">> run 6 skipped (CPU-only build: no GPU parity to check)"
 fi
