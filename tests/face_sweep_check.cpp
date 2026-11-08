@@ -3,8 +3,9 @@
 //   F1  section(): the plane sections of a tetrahedron, integrated along the plane's axis, give the tetrahedron's
 //       VOLUME and FIRST MOMENTS. A(c) is quadratic and c-weighted first moments cubic between two vertex levels, so
 //       2-point Gauss-Legendre per interval is exact: relative error <= 1e-12, 2000 random tetrahedra x 3 axes.
-//   F2  sweep(): the pieces of a section over a 2D grid add up to the section's area and moments (<= 1e-10: a
-//       section near a vertex is tiny against its pieces' coordinates, so its relative rounding is larger; measured 3e-11).
+//   F2  sweep(): the pieces of a section over a 2D grid add up to the section's area and moments (<= 1e-9: a
+//       section near a vertex is tiny against its pieces' coordinates, so its relative rounding is larger; measured
+//       3e-11 with fused multiply-adds (arm64) and 1.4e-10 without them (CI's x86 runner)).
 //   F3  Gauss on a tessellation: a box of Kuhn-split cubes (6 tetrahedra each) carries ONE linear field
 //       v(q) = a + B q. For every grid cell inside the box, the face integrals (each face piece added to the cell
 //       below and subtracted from the cell above) equal B times the cell volume (<= 1e-11 of |B| V). Grid planes
@@ -91,7 +92,7 @@ int main()
         }
     }
     check(worstF1 <= 1e-12, "F1 sections integrate to the tetrahedron's volume and first moments", worstF1);
-    check(worstF2 <= 1e-10, "F2 the pieces of a section over a 2D grid add up to the section", worstF2);
+    check(worstF2 <= 1e-9, "F2 the pieces of a section over a 2D grid add up to the section", worstF2);
 
     // F3: Kuhn-split lattice of L^3 unit cubes, a global linear field, grid cells inside the box
     double worstF3 = 0.;

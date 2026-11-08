@@ -7,7 +7,9 @@ joins the plan, and **every code item is finished and checked on small data befo
 once, as one campaign (phase R, after P10). P0.1 and P0.2 landed in `60a072a`; P0.3's CI fixes and P0.4 landed in `70e153e` and `38eb4be`; P0 closed on
 2026-11-08: CI green on `38eb4be` (all seven jobs, once the job that had timed out on a package mirror was rerun), `ref0`
 frozen, the P0.4 sentence in change_log. Since 2026-11-08 CI runs three jobs (the CUDA/HIP jobs were removed on the
-owner's instruction; D11). The plan covers the C++
+owner's instruction; D11). The first CI run of the face method (master fast-forwarded to `1377342`, 2026-11-08) failed
+`face_sweep_check` F2 on the x86 runner by rounding alone (1.43e-10 against a 1e-10 bound; 3e-11 on arm64): the bound
+is 1e-9 since the commit after it. The plan covers the C++
 binaries (DTFE, PS-DTFE and their double and 2D builds), the Metal and CUDA/HIP GPU code, the driver scripts,
 `python/dtfelib`, the plot scripts and tools, and the PySide6 launcher in `python/gui`.
 

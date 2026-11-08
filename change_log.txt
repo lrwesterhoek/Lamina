@@ -39,7 +39,9 @@ UNRELEASED (since 1.0.0)
   its integrated outflow, caustic cells included, converging with the time step). Fixed-point face sums (order-free: byte-identical at any thread count
   and in slab mode), merged and checkpointed with the other accumulators; a one-cell --grid-window equals the full run's
   slice bit for bit. dtfelib's FieldSet.face_gradient / load(..., mean_field=True) read them. Tests:
-  tests/face_sweep_check.sh, tests/dtfe_face_gradient_check.sh, tests/ps_face_gradient_check.sh.
+  tests/face_sweep_check.sh, tests/dtfe_face_gradient_check.sh, tests/ps_face_gradient_check.sh (face_sweep_check's F2
+  bound is 1e-9: the rounding of a tiny section's pieces reaches 1.4e-10 without fused multiply-adds, on CI's x86
+  runner, against 3e-11 on arm64).
 - Both drivers and the launcher default to the same four fields: density, velocity, divergence and shear
   (run_dtfe.sh and run_ps_dtfe.sh FIELDS, the launcher's Grids / Pipeline ticks and its 'Standard' and 'Publication'
   presets). The gradient, vorticity, dispersion, T-web and V-web stay available through FIELDS or a tick. The
