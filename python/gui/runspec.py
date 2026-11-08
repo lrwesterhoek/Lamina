@@ -715,7 +715,7 @@ def _precision_problems(estimator: str, precision: str, dim: int = 3) -> list[tu
     if precision not in PRECISIONS:
         return [("error", f"unknown precision '{precision}' (single or double)")]
     if precision == "double" and not binary_built(estimator, "double", dim):
-        gpu = "" if dim == 2 else ", with METAL=1 on Apple Silicon, CUDA=1 or HIP=1 on Linux"
+        gpu = "" if dim == 2 else ", with METAL=1 on Apple Silicon"
         return [("error", f"the double-precision program {binary_name(estimator, 'double', dim)} is not built: "
                           + ("Setup builds the pair (or " if dim == 3 else "build it with ")
                           + f"'{build_hint('double', dim)}'{gpu}" + (")" if dim == 3 else ""))]
@@ -1260,12 +1260,12 @@ def gpu_built(estimator: str, precision: str = "single", dim: int = 3) -> bool:
 
 
 # the make argument that gives this machine a GPU build, for messages
-GPU_BUILD_HINT = "METAL=1 on a Mac, CUDA=1 or HIP=1 on Linux"
-GPU_BACKENDS = {"metal": "Metal", "cuda": "CUDA", "hip": "HIP"}
+GPU_BUILD_HINT = "METAL=1 on a Mac"
+GPU_BACKENDS = {"metal": "Metal"}
 
 
 def gpu_backend(estimator: str, precision: str = "single", dim: int = 3) -> str:
-    """The GPU backend a pair was built with ('Metal', 'CUDA', 'HIP'), from the Makefile's
+    """The GPU backend a pair was built with ('Metal'), from the Makefile's
     .gpu_mode_<mode> stamp; '' for a CPU-only build (every 2D one) or an unbuilt pair."""
     if dim == 2:
         return ""
@@ -1279,26 +1279,16 @@ def gpu_backend(estimator: str, precision: str = "single", dim: int = 3) -> str:
 def gpu_build_default(estimator: str = "ps", precision: str = "single", dim: int = 3) -> bool:
     """The GPU tick a fresh job starts with (not simply on: every fresh job of a CPU-only build would then warn
     that the deposit runs on the CPU): on when the pair was built with a GPU backend -- scripts/config.sh
-    gpu_build_default's
-    rule, the drivers' default for DTFE_GPU: the Makefile's '.gpu_mode_metal', '_cuda' or '_hip' stamp
-    in the pair's object folder (gpu_backend). Not gpu_built's 'any stamp but off': the CI's 'cudaemu' build
-    emulates the kernels on the CPU, far slower than the CPU path.
-    The binary itself cannot say ('--help' lists --gpu in every build, '--version' names no backend). A job, preset
+    gpu_build_default's rule, the drivers' default for DTFE_GPU: the Makefile's '.gpu_mode_metal' stamp in the
+    pair's object folder (gpu_backend). The binary itself cannot say ('--help' lists --gpu in every build, '--version' names no backend). A job, preset
     or saved setting that carries a tick keeps it."""
     return bool(gpu_backend(estimator, precision, dim))
 
 
 def gpu_compiler() -> str:
-    """The GPU compiler this machine offers for a build: 'METAL=1' on a Mac (the Metal host needs
-    only the system SDK), 'CUDA=1' when nvcc is on the PATH or under /usr/local/cuda, 'HIP=1' when
-    hipcc is (or under /opt/rocm); '' when there is none -- the build is then CPU-only."""
-    if sys.platform == "darwin":
-        return "METAL=1"
-    if shutil.which("nvcc") or Path("/usr/local/cuda/bin/nvcc").is_file():
-        return "CUDA=1"
-    if shutil.which("hipcc") or Path("/opt/rocm/bin/hipcc").is_file():
-        return "HIP=1"
-    return ""
+    """The GPU build this machine offers: 'METAL=1' on a Mac (the Metal host needs only the system SDK);
+    '' elsewhere -- the GPU code is Metal-only, so the build is then CPU-only."""
+    return "METAL=1" if sys.platform == "darwin" else ""
 
 
 def tbb_built(precision: str = "single", dim: int = 3) -> bool:

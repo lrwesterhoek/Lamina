@@ -22,9 +22,7 @@
 #   M5  many GPU-deferred tetrahedra (48^3 crossed waves, A k = 3, on 96^3 at nSub 3: ~12000 of them) are
 #       deposited on several CPU threads in slab mode (one thread would outlast the GPU deposit on such
 #       data), and the grids are byte-identical to the one-thread loop (DTFE_DEPOSIT_SLABS=0)
-# GPU builds only: Metal, and the CUDA/HIP port, which has the fixed-point grid too (CUDAEMU=1 runs it
-# on the CPU emulation): skipped (exit 0) otherwise,
-# like tests/gpu_scalar_check.sh, and a local GPU suite (not in tests/ci_suite.sh). M3 takes ~40 s.
+# GPU builds only (METAL=1): skipped (exit 0) otherwise, like tests/gpu_scalar_check.sh, and a local GPU suite (not in tests/ci_suite.sh). M3 takes ~40 s.
 # Usage: tests/gpu_mass_check.sh [--no-build]   (--no-build is accepted and ignored)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,7 +32,7 @@ source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double
 precision_require "${PS_BIN}"
 [ -x "${PS_BIN}" ] || { echo "FAIL: ${PS_BIN} is not built"; exit 1; }
 OBJ=o_ps; precision_double && OBJ=o_ps_d
-require_gpu_backend "$OBJ"                                # sets gpu_stamp (tests/lib.sh)
+require_gpu_backend "$OBJ"                                # SKIP without a Metal build (tests/lib.sh)
 TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}/gpu_mass_check"
 mkdir -p "$TMP"
 SNAP="$TMP/waves.hdf5"; PAN="$TMP/pancake128.hdf5"; DEF="$TMP/waves_deferred.hdf5"

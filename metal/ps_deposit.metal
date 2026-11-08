@@ -908,7 +908,7 @@ kernel void depositFields(
         // straddle is decided on the tet's own bbox (a tet whose bbox stays inside the grid has no
         // sample beyond it)
         if (!P.periodic && (iMin[dd] < 0 || iMax[dd] > P.nGrid[dd])) straddle = true;
-        // No one-cell sample margin around this window (all three backends): a
+        // No one-cell sample margin around this window (CPU and Metal alike): a
         // sub-sample sits at (k + 0.5)/nSub of its cell, >= 1/(2 nSub) inside it, so every sample in
         // the bbox lies in a cell of [floor(lo), floor(hi)] -- exactly this window. The ring's
         // samples would all be outside (each classified, 2 passes x nSub^3 per cell: 1.8-2.7x the
@@ -1161,7 +1161,6 @@ typedef PSExactItemParams ExactItemParams;
 // standard-DTFE kernel's itemOf: the item's tet is the last t in [blockTet[blk], blockTet[blk+1]] with
 // itemStart[t] <= iid -- a binary search over at most one block's worth of tets (2^PS_ITEM_BLOCK_SHIFT + 1 entries,
 // more only across tets with no items, which the "last t" skips) -- and its block is iid - itemStart[t].
-// (ps_gpu_cuda.cu psItemOf is its twin.)
 static inline uint2 psItemOf(device const uint* itemStart, device const uint* blockTet, uint nTet, uint iid) {
     uint const blk = iid >> PS_ITEM_BLOCK_SHIFT;
     uint lo = blockTet[blk];

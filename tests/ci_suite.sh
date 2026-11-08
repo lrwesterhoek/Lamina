@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # The Linux CI suite, ONE list shared by .github/workflows/ci.yml and the Dockerfile so the two cannot
 # drift. CPU-only: the GPU suites (dtfe_metal_check, gpu_scalar_check, gpu_mass_check, gpu_retry_check, and the
-# standard binary's dtfe_gpu_retry_check) need a GPU build and stay local (the CUDA/HIP port runs them through its
-# CPU emulation, locally too: tests/cudaemu_check.sh on a CUDAEMU=1 build). ps_auto_tune_check and ps_scratch_check run
-# here (portable: the peak RSS from getrusage, not '/usr/bin/time -l'; a temp folder, not /private/tmp; their GPU
-# parts SKIP).
+# standard binary's dtfe_gpu_retry_check) need a Metal build and stay local (the GPU code is Metal-only).
+# ps_auto_tune_check and ps_scratch_check run here (portable: the peak RSS from getrusage, not '/usr/bin/time -l';
+# a temp folder, not /private/tmp; their GPU parts SKIP).
 #
 #   tests/ci_suite.sh build     the single pair, the double pair (DOUBLE=1) and the 2D pair (DIM=2)
 #   tests/ci_suite.sh core      every CPU suite against ./DTFE and ./PS-DTFE

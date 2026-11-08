@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Chunk-level checkpoints inside the GPU deposit and its cause-aware retry policy
-# (src/CGAL_triangulation/ps_metal_host.cc, and the CUDA/HIP host ps_gpu_cuda.cu, where a 'buffer' below is
-# one chunk kernel and the snapshot a device-to-host copy). A failed command buffer does not redo the whole partition
+# (src/CGAL_triangulation/ps_metal_host.cc). A failed command buffer does not redo the whole partition
 # deposit: the pass restores its last snapshot (its start, or a checkpoint every DTFE_GPU_CHECKPOINT_CHUNKS
 # buffers) and continues from there. The test hook DTFE_GPU_FAULT_AT=<k>[:<kind>] lets the k-th command
 # buffer of the process run to completion -- its atomics ARE in the grids -- and then reports it as failed,
@@ -30,11 +29,9 @@
 #       250 ms buffers / 8 ms gaps at the next clean buffer, and the grids stay exact; R3 itself (the default
 #       90 s, a ~1 s run) keeps the escalation for the rest of its deposits. The pace is process-wide, so the
 #       later partitions start from the eased pace -- inferred from the log line, not observed with a second
-#       injected fault. The CUDA/HIP host has the same rule (ps_gpu_cuda.cu), from its own
-#       pace: 250 ms kernels with no gap, escalated to 62 ms / 8 ms, eased back to 250 ms / 0 ms
-# GPU builds only: Metal, and the CUDA/HIP port (CUDAEMU=1 runs it on the CPU emulation, tests/cudaemu_check.sh):
-# skipped (exit 0) otherwise, a local GPU suite like tests/gpu_mass_check.sh (not in tests/ci_suite.sh). ~20 s
-# on Metal (M1 Max), ~18 s under the emulation.
+#       injected fault.
+# GPU builds only (METAL=1): skipped (exit 0) otherwise, a local GPU suite like tests/gpu_mass_check.sh (not in
+# tests/ci_suite.sh). ~20 s on Metal (M1 Max).
 # Usage: tests/gpu_retry_check.sh [--no-build]   (--no-build is accepted and ignored)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,7 +41,7 @@ source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double
 precision_require "${PS_BIN}"
 [ -x "${PS_BIN}" ] || { echo "FAIL: ${PS_BIN} is not built"; exit 1; }
 OBJ=o_ps; precision_double && OBJ=o_ps_d
-require_gpu_backend "$OBJ"                                # sets gpu_stamp (tests/lib.sh)
+require_gpu_backend "$OBJ"                                # SKIP without a Metal build (tests/lib.sh)
 TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}/gpu_retry_check"
 mkdir -p "$TMP"
 SNAP="$TMP/waves.hdf5"
@@ -75,7 +72,7 @@ echo ">> R7: the same watchdog fault, then the pace recovers after a clean stret
 run "$TMP/p2" env DTFE_GPU_FAULT_AT=9:timeout DTFE_GPU_PACE_RECOVER_SEC=0 "${PS_BIN}" "$SNAP" "$TMP/p2" "${C[@]}" "${P[@]}"
 echo ">> R4: a persistent fault from buffer 3 on: the partition goes to the CPU"
 ALLOW_CPU=1 run "$TMP/x1" env DTFE_GPU_FAULT_AT=3:persist "${PS_BIN}" "$SNAP" "$TMP/x1" "${C[@]}"
-GPU_STAMP="$gpu_stamp" "$PY" - "$TMP" <<'PYEOF'
+"$PY" - "$TMP" <<'PYEOF'
 import numpy as np, re, sys
 import os as _os; REAL = np.dtype(_os.environ.get("DTFE_TEST_REAL", "float32"))   # tests/precision.sh
 from pathlib import Path
@@ -88,8 +85,8 @@ def log(name):
     return (tmp / f"{name}.log").read_text(errors="replace")
 def rd(name, ext):
     return np.fromfile(tmp / f"{name}.{ext}", dtype=REAL).astype(np.float64)
-def failed_buffers(text):   # Metal: buffers, CUDA/HIP: kernels
-    m = re.findall(r"after (\d+) failed (?:buffer|kernel)\(s\)", text)
+def failed_buffers(text):
+    m = re.findall(r"after (\d+) failed buffer\(s\)", text)
     return sum(int(x) for x in m)
 for tag, ref, run, what, cause, pace in (
         ("R1", "t0", "t1", "per-tet deposit", "innocent victim", "250 ms"),
@@ -101,7 +98,7 @@ for tag, ref, run, what, cause, pace in (
           f"{what}: the fault is classified as '{cause}' and the pass resumes on the GPU"
           + (f" (from the {resumed.group(1)})" if resumed else ""))
     if pace:
-        check(tag, re.search(f"target {pace} (buffers|kernels)", L) is not None,
+        check(tag, re.search(f"target {pace} buffers", L) is not None,
               f"{what}: the retry runs at {pace} ({'same pace' if cause == 'innocent victim' else 'escalated'})")
     x, y = (tmp / f"{ref}.a_den").read_bytes(), (tmp / f"{run}.a_den").read_bytes()
     check(tag, len(x) > 0 and x == y, f"{what}: '.a_den' byte-identical to the run without the fault ({len(x)} bytes)")
@@ -134,12 +131,11 @@ for name, want in (("t0", None), ("t1", (1, 1, 0, 0, 0)), ("e1", (1, 0, 0, 1, 0)
                    ("p1", (1, 0, 1, 0, 0)), ("x1", (3, 3, 0, 0, 0))):
     got = by_cause(name)
     check("R6", got == want, f"{name}: retries by cause {got} (expected {want})")
-# each host from its own default pace: Metal 250 ms buffers / 8 ms gaps, CUDA/HIP 250 ms kernels / no gap
-metal = _os.environ.get("GPU_STAMP") == "metal"
-esc_gap, def_gap = ("24", "8") if metal else ("8", "0")
+# from the default pace, 250 ms buffers / 8 ms gaps
+esc_gap, def_gap = "24", "8"
 L3, L7 = log("p1"), log("p2")
-eased = re.findall(r"pace eased to (\d+) ms (?:buffers|kernels), (\d+) ms gaps", L7)
-check("R7", re.search(r"\[watchdog\].*target 62 ms (?:buffers|kernels), " + esc_gap + r" ms gaps", L7) is not None
+eased = re.findall(r"pace eased to (\d+) ms buffers, (\d+) ms gaps", L7)
+check("R7", re.search(r"\[watchdog\].*target 62 ms buffers, " + esc_gap + r" ms gaps", L7) is not None
       and eased[-1:] == [("250", def_gap)] and "(the default)" in L7,
       f"a watchdog fault escalates to 62 ms / {esc_gap} ms and a clean stretch eases it back to {eased[-1:]} "
       f"(expected 250 ms / {def_gap} ms)")

@@ -61,7 +61,7 @@ if [ "${1:-}" != "--no-build" ] && ! precision_double; then
     make DTFE $(cat o/.build_mode 2>/dev/null || true) >/dev/null
 fi
 [ -x "${BIN}" ] || { echo "FAIL: ${BIN} not built"; exit 1; }
-GPU=0; grep -q -- "--gpu" <<< "$("${BIN}" --help 2>&1)" && grep -Eq "METAL=1|CUDA=1|HIP=1" "o$(precision_double && echo _d)/.build_mode" 2>/dev/null && GPU=1
+GPU=0; grep -q -- "--gpu" <<< "$("${BIN}" --help 2>&1)" && grep -q "METAL=1" "o$(precision_double && echo _d)/.build_mode" 2>/dev/null && GPU=1
 
 echo ">> generating the clustered test snapshot ..."
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP}" --n "${N}" --box "${BOX}" --crossed-waves \

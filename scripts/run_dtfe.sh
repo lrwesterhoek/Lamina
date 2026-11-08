@@ -12,7 +12,7 @@
 #   ./run_dtfe.sh [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n SUBSAMPLES] [-m] [-e] [snapshot ...]
 #     long forms: --sim-dir, --sim, --grid, --subsamples, --gpu, --exact-average (the same as the letters)
 #     -m   run the '_a' interpolation on the GPU (--gpu; same as DTFE_GPU=1). The default (DTFE_GPU unset, 'auto')
-#          is the GPU when the binary was built with one (the Makefile's o/.gpu_mode_metal|cuda|hip stamp;
+#          is the GPU when the binary was built with one (the Makefile's o/.gpu_mode_metal stamp;
 #          o_d for DTFE_PRECISION=double), else the CPU; DTFE_GPU=0 runs the CPU on a GPU build.
 #     -e   every '_a' cell the EXACT average of the linear interpolant over the cell (--exact-average). The
 #          DEFAULT (DTFE_EXACT_AVERAGE=1, the production standard: no sampling noise, the mass exact to ~3e-8);

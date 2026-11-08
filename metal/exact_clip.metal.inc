@@ -91,8 +91,8 @@ static inline bool box_outside_tet(thread const TetPlanes& F, float3 c, float3 h
 // The order-1 path (order2=false) does the same arithmetic for V and the first moments as the
 // order-2 one and skips the rest, so the exact deposit's pass 0 (weights) and pass 1 (deposit)
 // see identical volumes. Only the volumes: compiled as two pipelines, Metal's fast math may contract
-// the first moments differently (tests/gpu_twin_check.sh measured ~17% of pairs off, by at most
-// 3.7e-8 of the cell; the CUDA twin agrees bitwise), which reaches a deposit only through
+// the first moments differently (measured: ~17% of pairs off, by at most 3.7e-8 of the cell),
+// which reaches a deposit only through
 // --ps-linear-deposit's weight (about 1e-8 of a tet's mass).
 //
 // The frame. The exact deposits clip in a frame whose origin is the centre of the OVERLAP of the

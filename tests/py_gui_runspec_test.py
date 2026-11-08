@@ -648,13 +648,6 @@ def gpu_branches(tmp: Path, snap: Path):
                   and rs.RunSpec(gpu=True).gpu is True,
                   f"{rs.RunSpec().gpu} {rs.PipelineSpec().gpu}")
             _gpu_advice_checks(tmp, snap)
-        for d in (rs._objdir(e, p) for e in ("ps", "dtfe") for p in ("single", "double")):
-            (d / ".gpu_mode_off").unlink(missing_ok=True)
-            (d / ".gpu_mode_cudaemu").touch()
-        check("the CI's emulated CUDA build (its kernels on the CPU): built for gpu_built, but a fresh job starts "
-              "without the GPU, as scripts/config.sh gpu_build_default says",
-              rs.gpu_built("ps") and not rs.gpu_build_default("ps") and rs.RunSpec().gpu is False
-              and rs.PipelineSpec().gpu is False)
     finally:
         rs._objdir = real
         shutil.rmtree(fake, ignore_errors=True)

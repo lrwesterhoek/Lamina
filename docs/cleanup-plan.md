@@ -9,8 +9,9 @@ once, as one campaign (phase R, after P10). P0.1 and P0.2 landed in `60a072a`; P
 frozen, the P0.4 sentence in change_log. Since 2026-11-08 CI runs three jobs (the CUDA/HIP jobs were removed on the
 owner's instruction; D11). The first CI run of the face method (master fast-forwarded to `1377342`, 2026-11-08) failed
 `face_sweep_check` F2 on the x86 runner by rounding alone (1.43e-10 against a 1e-10 bound; 3e-11 on arm64): the bound
-is 1e-9 since the commit after it. The plan covers the C++
-binaries (DTFE, PS-DTFE and their double and 2D builds), the Metal and CUDA/HIP GPU code, the driver scripts,
+is 1e-9 since the commit after it. D11 was decided the same evening: the CUDA/HIP port is removed, the tree is
+Metal-only, and the port's last state is the branch `archive/cuda-hip-2026-11-08`. The plan covers the C++
+binaries (DTFE, PS-DTFE and their double and 2D builds), the Metal GPU code (and, until D11, the CUDA/HIP port), the driver scripts,
 `python/dtfelib`, the plot scripts and tools, and the PySide6 launcher in `python/gui`.
 
 **Surveyed base: master `60a072a`** (the cleanup itself starts from `70e153e`, below). The survey read commit `5ac1ce1` with the work that `60a072a` then committed already
@@ -84,12 +85,12 @@ Estimated gains are marked *(est.)*. Only numbers labelled *measured* come from 
 
 | Gate | What it runs | Pass |
 |---|---|---|
-| **G-build** | all six build modes: plain, `METAL=1`, `METAL=1 DOUBLE=1`, `DIM=2`, `make library`, `CUDAEMU=1` | 0 warnings, 0 errors |
+| **G-build** | all five build modes: plain, `METAL=1`, `METAL=1 DOUBLE=1`, `DIM=2`, `make library` (and `CUDAEMU=1` until D11, 2026-11-08) | 0 warnings, 0 errors |
 | **G-byte** | `tests/dev/bytecmp.sh <ref0> <out>` against the reference binaries taken in P0.3 | every file identical (184 output files after P0; 261 with `--gpu-exact`) |
 | **G-gpu** | `tests/dev/bytecmp.sh --gpu-exact` (P1.12), plus `metal/validate_deposit` | identical bytes before and after a host-only change; 31/31 |
-| **G-emu** | `CUDAEMU=1` build + `tests/cudaemu_check.sh` at warps 32 and 64; local only since 2026-11-08 (CI no longer builds the port: D11) | PASS (warp 32 failed on `60a072a`; fixed in `70e153e`: P0.3) |
+| **G-emu** | `CUDAEMU=1` build + `tests/cudaemu_check.sh` at warps 32 and 64; local only since 2026-11-08 (CI no longer builds the port: D11). **Retired 2026-11-08** with the port (D11: removed; the emulator and the suite are on `archive/cuda-hip-2026-11-08`) | PASS (warp 32 failed on `60a072a`; fixed in `70e153e`: P0.3) |
 | **G-battery** | `tests/dev/battery.sh` | 31/31, tree unchanged during the run |
-| **G-linux** | CI's Linux stages in a local Ubuntu 24.04 container: `tests/ci_suite.sh build`, `core`, `double`, `2d`, `variants`, the old-python stage (python 3.10) and ruff (CI's three jobs since 2026-11-08); `CUDAEMU=1` + cudaemu_check as an opt-in local stage | PASS; required before every push. glibc differs from macOS where the tests can see it: it writes a long unbuffered stderr line in 128-byte pieces (P0.3) |
+| **G-linux** | CI's Linux stages in a local Ubuntu 24.04 container: `tests/ci_suite.sh build`, `core`, `double`, `2d`, `variants`, the old-python stage (python 3.10) and ruff (CI's three jobs since 2026-11-08); `CUDAEMU=1` + cudaemu_check was an opt-in local stage until D11 | PASS; required before every push. glibc differs from macOS where the tests can see it: it writes a long unbuffered stderr line in 128-byte pieces (P0.3) |
 | **G-gui** | the four GUI suites (`tests/py_gui_app_test.py`, `py_gui_app2_test.py`, `py_gui_runspec_test.py`, `py_gui_explore_test.py`), an offscreen render of every tab at two window sizes, and one look in a real macOS window | suites pass, with `volume_gl_parity` run (not SKIPped) on the Mac; no clipping or overlap in the renders |
 | **G-docs** | `tests/docs_drift_check.py` | PASS |
 | **G-tuner** | `tests/ps_auto_tune_check.sh` and `tests/dtfe_auto_tune_check.sh`. A fixed list of `--auto-tune-report` configurations must give the same lines, except the configurations the item targets | PASS; only the targeted lines change |
@@ -109,12 +110,12 @@ are acted on. Each phase updates `change_log.txt` and the README section it touc
 | **P1** | Quick fixes and dead code (incl. two GUI layout bugs) | no | G-build, G-byte, G-gpu, G-gui | P0 | M |
 | **P2** | Measure first: timers, a debug knob, real reruns | no (instrumentation only) | G-byte; the reruns are the product | P0 | M + machine hours |
 | **P3** | C++ structure: shared helpers, splits, tuner to `.cc` | no | G-byte, G-move, G-tuner, G-battery | P1 | L |
-| **P4** | GPU structure: shared host code, one params header, twin check | no | G-byte, G-gpu, G-emu, retry suites | P1 | L |
+| **P4** | GPU structure: shared host code, one params header, twin check | no | G-byte, G-gpu, retry suites (G-emu until D11) | P1 | L |
 | **P5** | Python, plots, tools, bash drivers | no (same figures and data) | py suites, `run_scripts_check.sh`, G-docs, G-move | P0 | L |
 | **P6** | One flag scheme with a deprecation path | no (names only) | resume suites, `run_scripts_check.sh`, runspec suite, G-docs, G-byte | P3 (P3.3) | M–L |
 | **P7** | Launcher polish, including the 3D view | no | G-gui | P1, P6 | L |
 | **P8** | Auto-tuner calibration and a time objective | plans change; outputs do not (checked with the plan pinned) | G-tuner, G-real | P2, P3.8 | L |
-| **P9** | CPU and GPU optimisations | no (each item is byte-identical by design) | G-byte, G-gpu, G-emu, G-real timing | P2, P4.1 | L |
+| **P9** | CPU and GPU optimisations | no (each item is byte-identical by design) | G-byte, G-gpu, G-real timing (G-emu until D11) | P2, P4.1 | L |
 | **P10** | Shared exact velocity derivatives (the face method) for both estimators, PS mean-flow gradient and mass flux | standard: no (same gradient); PS: new and changed velocity-derivative grids | G-build, G-byte (standard), the P10 tests, G-battery, G-linux | P3, P9.2 | L |
 | **R** | The rerun campaign, once, after every code item: P2.3's reruns, P8.1/P8.2's calibration, the PS exact reruns with the P10 grids, the science comparisons | the products | G-real | all code items | machine nights |
 
@@ -202,8 +203,8 @@ Some files are shared between phases and must land in one order:
   once on its 10-minute package-install timeout (a stuck mirror; nothing ran) and passed when rerun. Later that night the
   `cudaemu (32)`, `cudaemu (64)`, `cuda-compile` and `hip-compile` jobs were removed from `.github/workflows/ci.yml` on
   the owner's instruction (the port is not in use and those jobs kept stalling on the runners' mirrors); CI now runs
-  `build-and-test`, `old-python` and `compile-variants`. The CUDA/HIP code stays until D11 is decided; its checks are
-  local (G-emu, `tests/gpu_twin_check.sh`).
+  `build-and-test`, `old-python` and `compile-variants`. The CUDA/HIP code stayed until D11 was decided, the same
+  evening: removed (see D11).
 - **D1** (keep or delete `PS_GPU_CPU_SHARE`) is decided: delete (P1.11).
 
 **P0.4 Release notes for what `60a072a` left out — done in `70e153e`; the last sentence fixed with P1.11.**
@@ -274,7 +275,7 @@ gone; the upstream ones stay (D10).
   - in `miscellaneous.h`: `upperBoundCheck` and both `superfluous_options`;
   - in `src/kdtree`: `n_nearest_brute_force`, `r_count`, `r_count_around_point`, `r_nearest_around_point`.
 - The upstream ones are optional, see D10.
-- Risk: none. Effort: S. Verify: G-build, which must include the CUDA/HIP compile jobs on CI.
+- Risk: none. Effort: S. Verify: G-build, which must include the CUDA/HIP compile jobs on CI (until D11).
 
 **P1.5 Declare `printElapsedTime` once** — *done 2026-11-06.* `subpartition.h` defines it, and `SPH_interpolation.cc`,
 `NGP_interpolation.cc` and `grid_deposit_engine.h` each declared it again. Now all four include `src/elapsed_time.h`.
@@ -526,7 +527,8 @@ time before P9.8 is built. Effort: S.
 
 ## P3. C++ structure (byte-identical)
 
-**Status 2026-11-07.** All done except P3.9's dedupe (D10).
+**Status 2026-11-07.** All done except P3.9's dedupe (D10). **2026-11-08:** P3.9's dedupe and its three bugs done; P3 is
+closed.
 - P3.5: `interpolateGrid_phaseSpace` 2533 → 1686 lines (`PSFxState`, `psMarkFlipped`, `psCentroidCell`,
   `psWindowTouched`, `psFxBoundWalk`, `psGpuExtractAndDeposit`). `depositLoop` stays inline (D7) and compiles to the
   same 7370 instructions (-O3, METAL object); only the three calls into the lifted functions differ.
@@ -536,12 +538,20 @@ time before P9.8 is built. Effort: S.
   `auto_tune.h <name>` now means the pair. Its follow-ups are done too: the header includes only what the
   interface uses (every includer's object byte-identical), and the PS branch's unused `countCell` is gone.
 - P3.9, first step: `tests/dtfe_sampling_check.sh` (methods 2 and 3, the redshift cone, the grid's point values,
-  user points through libDTFE, stored goldens for the cone and the user points). Upstream bugs it found, not fixed
-  (D10): (a) `averaged_interpolation_2.cc` builds method 2's sample as `Point(uni()*dx+x, uni()*dy+y, uni()*dz+z)`,
+  user points through libDTFE, stored goldens for the cone and the user points). Upstream bugs it found (fixed with
+  the dedupe on 2026-11-08, see P3.9): (a) `averaged_interpolation_2.cc` builds method 2's sample as `Point(uni()*dx+x, uni()*dy+y, uni()*dz+z)`,
   unsequenced, so GCC and Clang draw different realizations from one `--seed`; (b) `interpolateRedshiftCone`'s
   infinite-cell `continue` skips `psi += dx[2]`, shifting the rest of the row; (c)
   `interpolateUserSampling_averaged_2` skips a sample outside the region without pushing a value, so the output is
   shorter than the sample list.
+- P3.9, second step (2026-11-08): the seven functions share `sample_eval.h` (`unaveraged_interpolation.cc` 497 → 164
+  lines, `averaged_interpolation_2.cc` 922 → 310); byte-identical on every production path (451 of 483 A/B files over
+  periodic and non-periodic grids, methods 1/2/3 and the exact average, `--region`, `--padding`, `--partition`, 2D,
+  single and double, 1 and 4 threads; the 32 others are the fixed cells, all exactly 0 before). The reader found (b) in
+  `interpolateGrid` too and (c) in `interpolateUserSampling` too, plus a `Real` padding index (d): all fixed, with
+  S7 grid goldens, S8 and S9 in `tests/dtfe_sampling_check.sh`, which fail on the old binary. Timing: grid point values
+  0.99, methods 2 and 3 0.98 of the old time (single thread, a loaded machine; `always_inline` on the helpers was needed:
+  the first build was 5–10% slower with them out of line).
 
 Gate for each item: G-byte, G-build, G-battery for the phase, and G-move wherever a hot function is touched.
 
@@ -653,7 +663,7 @@ dependency lists.
 - Risk: low. Effort: M.
 - Verify: G-tuner with **every** report line identical (the P0.3 line set), G-byte.
 
-**P3.9 (optional, upstream) The sampling variants.** — *partly done: the golden tests (D10) 2026-11-07.*
+**P3.9 (optional, upstream) The sampling variants.** — *done: the golden tests (D10) 2026-11-07; the dedupe and the three fixes 2026-11-08 (see the P3 status).*
 - Seven functions repeat the per-point "locate, cached inverse, accumulate the fields" loop, about 40–55% identical
   lines:
   - `interpolateGrid_averaged_2`, `interpolateRedshiftCone_averaged_2`, `interpolateUserSampling_averaged_2`,
@@ -692,7 +702,20 @@ dependency lists.
   m·(Σw₁/Σw₀) instead of exactly m (about 1e-8 relative). A candidate item: take both passes' linear weights from
   one compiled order.
 
-Gate for each item: G-byte, G-gpu, G-emu. The retry items add `tests/gpu_retry_check.sh`,
+**Status 2026-11-08.** All done or closed. D11 (remove) took the CUDA/HIP port, its emulator and the twin check out of
+the tree, so P4's "four loops" are two, both Metal:
+- P4.3: step 2 done as `gpuRunPass` in `gpu_metal_retry.h` (the fault policy, the snapshot checkpoints, the 3-per-chunk
+  and 16-per-deposit limits, the chunk rescale and the log lines; each host supplies its encode, restore and escalate
+  steps: `ps_metal_host.cc:runChunked` per pass, `dtfe_metal_host.cc:runBatch` per batch, which keeps its `drainQueue`
+  and shared-box path inside its restore). Step 3 closed by construction: `gpu_retry_common.h` is folded into
+  `gpu_metal_retry.h`, its only includer once the CUDA twin was gone. Gates: `bytecmp --gpu-exact` 261 files / 0 differ,
+  the retry suites PASS with the same log shapes, and an A/B against `f9f6e2f` under 16 fault-injection scenarios
+  (innocent, timeout, oom, persist; checkpoint cadences 0/1/2; partitions; the shared box) 61 files / 0 differ.
+- P4.4: the twin check went with the port. Its finding (the first moments under two function-constant pipelines, above)
+  stays as the candidate item.
+- P4.5: moot, one kernel text is left.
+
+Gate for each item: G-byte, G-gpu (G-emu until D11). The retry items add `tests/gpu_retry_check.sh`,
 `tests/dtfe_gpu_retry_check.sh` and `DTFE_GPU_FAULT_AT` runs.
 
 **P4.1 Move the remaining identical host helpers into `gpu_host.h`.** — *done 2026-11-07.*
@@ -713,7 +736,7 @@ Gate for each item: G-byte, G-gpu, G-emu. The retry items add `tests/gpu_retry_c
   mapped to `int`.
 - Risk: low. Effort: M.
 
-**P4.3 One chunk-and-retry loop.** — *partly done: step 1 and half of step 3 2026-11-07.*
+**P4.3 One chunk-and-retry loop.** — *done 2026-11-08 (step 1 and half of step 3 2026-11-07; D11 left two loops, now one `gpuRunPass`).*
 - The loop (fault cause, pace escalate/ease, the 3-fail and 16-fail limits, checkpoint cadence, chunk rescale) exists
   four times:
   - `ps_metal_host.cc:runChunked`;
@@ -731,7 +754,7 @@ Gate for each item: G-byte, G-gpu, G-emu. The retry items add `tests/gpu_retry_c
 - Risk: medium. The retry paths are exercised only by the fault-injection suites.
 - Effort: L.
 
-**P4.4 A Metal↔CUDA twin check, before any kernel text changes.** — *done 2026-11-07.*
+**P4.4 A Metal↔CUDA twin check, before any kernel text changes.** — *done 2026-11-07; deleted with the port 2026-11-08 (D11).*
 - Nothing compares the twin kernels function by function today: `validate_deposit` loads only the Metal source, and
   `cudaemu_check` compares whole binaries.
 - Change: compile `gpu_exact_clip.cuh` (through `gpu_cuda_compat.h` in emulation) as plain C++, feed it the same
@@ -740,7 +763,7 @@ Gate for each item: G-byte, G-gpu, G-emu. The retry items add `tests/gpu_retry_c
 - Also add a "lockstep pairs" table (function, Metal location, CUDA location) to `metal/README.md`.
 - Risk: none. Effort: M.
 
-**P4.5 (optional, after P4.4) Shared scalar GPU math.**
+**P4.5 (optional, after P4.4) Shared scalar GPU math.** — *closed 2026-11-08: moot after D11 (one kernel text).*
 - About 350–400 lines are near-identical between `metal/ps_deposit.metal` and `ps_gpu_cuda.cu`:
   - `classifySample`;
   - `window_hull` and `window_flat`;
@@ -2056,7 +2079,7 @@ Each decision has a recommended default, so the plan can proceed if no answer co
 | D8 | launcher Advanced sections | **collapse** Resources and the expert PS options, with the state remembered | only shorten labels and tooltips |
 | D9 | when to remove the flag aliases | **the release after** the one that introduces them | keep them indefinitely, hidden |
 | D10 | **upstream** dedupe and deletions (P1.4's upstream half, P3.9) | **golden tests yes**; the dedupe and deletions **no**, since the repository is still a fork of upstream. **Changed 2026-11-07:** the owner no longer tracks upstream ("focus on this fork only"), so upstream-marked code is ordinary code now (D4 and P3.9 may proceed) | do both |
-| D11 | the GPU backends | **Metal-only**: CUDA/HIP has never run on NVIDIA or AMD hardware, costs 4.5k lines; keep it on an archive branch (the analysis is in the 2026-11-07 session notes). **Half decided 2026-11-08:** its four CI jobs (`cudaemu` 32/64, `cuda-compile`, `hip-compile`) were removed on the owner's instruction; the code stays until the owner decides | CPU-only after a same-tree A/B; or keep all three |
+| D11 | the GPU backends | **Metal-only**: CUDA/HIP has never run on NVIDIA or AMD hardware, costs 4.5k lines; keep it on an archive branch (the analysis is in the 2026-11-07 session notes). **Half decided 2026-11-08:** its four CI jobs (`cudaemu` 32/64, `cuda-compile`, `hip-compile`) were removed on the owner's instruction. **Decided 2026-11-08 (evening): remove.** The port (six source files, 4.6k lines), its CPU emulation (`CUDAEMU=1`, `tests/cudaemu_check.sh`), the twin check (`tests/gpu_twin_check.sh`), `GPU_ARCH` and the `DTFE_GPU_EMU_WARP` knob are gone; `make CUDA=1`, `HIP=1` or `CUDAEMU=1` stops with one error line naming `archive/cuda-hip-2026-11-08` (= `f9f6e2f`, the last commit with the port; the branch must be on origin, since five pointers in the tree name it). Linux stays CPU-only. P4.3 step 2 followed (one `gpuRunPass`). | CPU-only after a same-tree A/B; or keep all three |
 | D12 | PS velocity derivatives | **write both** the mean-flow gradient (with the caustic sheets) and the regular part ⟨∇v⟩ | only one of them |
 | D13 | standard DTFE's gradient | keep the per-tet deposit until P10.2's check holds on the battery and one full-size run, then let the face path replace it | keep both paths |
 | D14 | default field set | **density, velocity, divergence, shear in both drivers (done 2026-11-07)**; the rest on request | — |

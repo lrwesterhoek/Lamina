@@ -14,7 +14,7 @@ the older spellings are deprecated and still accepted for one release, with a wa
 
 ```bash
 ./scripts/install.sh              # one-command clean rebuild, best backend auto-detected
-                                  #   (Apple Silicon -> METAL=1; Linux with nvcc / hipcc -> CUDA=1 / HIP=1; else CPU-only);
+                                  #   (Apple Silicon -> METAL=1; else CPU-only: the GPU code is Metal-only);
                                   #   a double or 2D pair already built is rebuilt too ('make clean' deletes every set)
 ./scripts/install.sh --cpu        # force CPU-only binaries
 ./scripts/install.sh --no-deps    # skip dependency installation, just clean + rebuild
@@ -28,12 +28,8 @@ python3 -m pip install -e python  # dtfelib alone (editable: finds ./DTFE, ./PS-
 
 make DTFE METAL=1 -j10            # standard DTFE, Apple-GPU '_a' interpolation backend
 make PS-DTFE METAL=1 -j10         # phase-space DTFE, Apple-GPU deposit backend
-make DTFE PS-DTFE CUDA=1 -j10     # Linux/NVIDIA: the same kernels ported to CUDA (nvcc; validated through the
-                                  #   CPU emulation below, not yet on a GPU)
-make DTFE PS-DTFE HIP=1 GPU_ARCH=gfx90a   # Linux/AMD ROCm (hipcc; one backend per build)
-make DTFE PS-DTFE CUDAEMU=1       # the CUDA/HIP sources as plain C++ on a CPU emulation of the device API:
-                                  #   a validation build for machines without a GPU; tests/cudaemu_check.sh runs
-                                  #   the GPU suites on it (DTFE_GPU_EMU_WARP=64 at run time: the HIP wavefront width)
+                                  # (CUDA=1 / HIP=1 / CUDAEMU=1 stop the build: the retired CUDA/HIP port is on
+                                  #   the branch archive/cuda-hip-2026-11-08)
 make DTFE PS-DTFE DOUBLE=1 METAL=1 -j10   # the double-precision pair as well (./DTFE-double, ./PS-DTFE-double,
                                           # objects in o_d / o_ps_d; float64 end to end, ~2x memory; the GPU
                                           # deposits float copies of the tetrahedra). Run scripts:
@@ -310,7 +306,7 @@ Common to both: `--grid N [NY NZ]`, `--periodic`, `--input-format 101|105|106|11
 `--padding` (`--region` / `--region-mpc` only in the standard binary: PS-DTFE refuses them, use `--box`). Input 101 = binary Gadget, 105 = Gadget HDF5 (default), 106 = its HI data, 111 = text
 `x y z w`, 112 = text positions-only, 121 / 122 = raw binary (count, box, pos, weights, vels / structured).
 
-**Which flags reach the GPU** (`METAL=1`, `CUDA=1` or `HIP=1` build): the grid deposit, and
+**Which flags reach the GPU** (`METAL=1` build): the grid deposit, and
 `--ps-linear-deposit`, `--ps-volume-weighted`, `--ps-vertex-mass`, `--ps-caustics`,
 the exact deposit (`--exact-average`) and `--grid-window` all compose with `--gpu`; the standard binary's
 `--exact-average` and the scalar fields (`NO_SCALARS=1` builds) with `--gpu`. CPU-only: point
@@ -523,8 +519,8 @@ python3 tests/docs_drift_check.py             # README / COMMANDS.md flags and k
 python3 python/selftest.py                    # sandboxed pipeline+plots selftest (~2 min)
 tests/ps_scaling_benchmark.sh                 # strong-scaling table (MIN_EFFICIENCY=0.4); not in CI
 
-# GPU builds only (by hand; or through the CUDA/HIP port's CPU emulation, tests/cudaemu_check.sh):
-tests/dtfe_metal_check.sh                     # CPU vs GPU parity, standard DTFE (GPU_BUILD=CUDA=1 for CUDA)
+# GPU (METAL=1) builds only, by hand:
+tests/dtfe_metal_check.sh                     # CPU vs GPU parity, standard DTFE
 tests/gpu_scalar_check.sh; tests/gpu_mass_check.sh; tests/gpu_retry_check.sh; tests/dtfe_gpu_retry_check.sh
 
 # synthetic snapshot generator used by the tests (Gadget HDF5, input type 105):
@@ -537,5 +533,5 @@ python3 tests/generate_ps_test_data.py --out snap.hdf5 --n 32 --box 100 \
 
 CI (`.github/workflows/ci.yml`) runs three jobs: build-and-test (`ci_suite.sh build core gui double 2d`,
 the standard-DTFE regression against its stored reference and the auto-tune and `--scratch-dir` suites
-included), old-python and compile-variants. The Metal GPU path and the GPU suites on real hardware are
-local-only, and so is the CUDA/HIP port's CPU emulation (`make CUDAEMU=1` + `tests/cudaemu_check.sh`).
+included), old-python and compile-variants. The Metal GPU path and the GPU suites are
+local-only.

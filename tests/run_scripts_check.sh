@@ -64,7 +64,7 @@
 #     switch reads 0/false/no/off as off and any other value as on, as the binaries do; the drivers' long options
 #     (--sim --sim-dir --grid --gpu --exact-average --subsamples) are their letters.
 #  S) the production defaults and the rerun hygiene, against the stand-in binaries:
-#     the GPU when the Makefile's stamp says the binary has one (metal/cuda/hip; not off or cudaemu; DTFE_GPU=0 or 1
+#     the GPU when the Makefile's stamp says the binary has one (metal; not off; DTFE_GPU=0 or 1
 #     wins, and so do its older names DTFE_METAL / PS_GPU / PS_METAL when it is unset), the drivers'
 #     production flags by default (run_ps_dtfe.sh: volume weighting, caustics, the four analysis
 #     fields; run_dtfe.sh: the exact average and the same fields; PS_LINEAR_DEPOSIT=1 drops the volume weighting;
@@ -1369,13 +1369,12 @@ gpu_of() {   # <driver> <stamp or none> [VAR=value ...]: 'gpu' / 'cpu' as the pl
     sline "${TMP}/s_gpu.log" | grep -qE -e ' --(ps-)?gpu( |$)' && echo gpu || echo cpu
 }
 g=""
-for c in "run_dtfe.sh o/.gpu_mode_metal" "run_dtfe.sh o/.gpu_mode_cuda" "run_dtfe.sh o/.gpu_mode_off" \
-         "run_dtfe.sh o/.gpu_mode_cudaemu" "run_dtfe.sh none" "run_ps_dtfe.sh o_ps/.gpu_mode_metal" \
-         "run_ps_dtfe.sh o_ps/.gpu_mode_hip" "run_ps_dtfe.sh o_ps/.gpu_mode_off" "run_ps_dtfe.sh o/.gpu_mode_metal"; do
+for c in "run_dtfe.sh o/.gpu_mode_metal" "run_dtfe.sh o/.gpu_mode_off" "run_dtfe.sh none" \
+         "run_ps_dtfe.sh o_ps/.gpu_mode_metal" "run_ps_dtfe.sh o_ps/.gpu_mode_off" "run_ps_dtfe.sh o/.gpu_mode_metal"; do
     g="${g} $(gpu_of ${c})"
 done
-check "$([ "${g}" = " gpu gpu cpu cpu cpu gpu gpu cpu cpu" ] && echo 0 || echo 1)" \
-      "the GPU by default exactly when the pair's object folder says metal / cuda / hip (not off, the CPU-emulated cudaemu, none, or the other pair's) (${g# })"
+check "$([ "${g}" = " gpu cpu cpu gpu cpu cpu" ] && echo 0 || echo 1)" \
+      "the GPU by default exactly when the pair's object folder says metal (not off, none, or the other pair's) (${g# })"
 g="$(gpu_of run_dtfe.sh o/.gpu_mode_metal DTFE_GPU=0) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_GPU=0)"
 g="${g} $(gpu_of run_dtfe.sh o/.gpu_mode_off DTFE_GPU=1) $(gpu_of run_dtfe.sh o/.gpu_mode_metal DTFE_PRECISION=double)"
 g="${g} $(gpu_of run_dtfe.sh o_d/.gpu_mode_metal DTFE_PRECISION=double)"
@@ -1477,12 +1476,11 @@ pgpu_of() {   # <stamp or none> [VAR=value ...]: 'gpu' / 'cpu' as the pipeline's
     else echo mixed; fi
 }
 g=""
-for c in "o_ps/.gpu_mode_metal" "o_ps/.gpu_mode_cuda" "o_ps/.gpu_mode_off" "o_ps/.gpu_mode_cudaemu" "none" \
-         "o/.gpu_mode_metal"; do
+for c in "o_ps/.gpu_mode_metal" "o_ps/.gpu_mode_off" "none" "o/.gpu_mode_metal"; do
     g="${g} $(pgpu_of ${c})"
 done
-check "$([ "${g}" = " gpu gpu cpu cpu cpu cpu" ] && echo 0 || echo 1)" \
-      "run_ps_pipeline.sh, DTFE_GPU unset: the GPU (-m, DTFE_GPU=1 for run_ps_dtfe.sh) exactly when the PS binary's object folder says metal / cuda (not off, cudaemu, none, or the standard pair's) (${g# })"
+check "$([ "${g}" = " gpu cpu cpu cpu" ] && echo 0 || echo 1)" \
+      "run_ps_pipeline.sh, DTFE_GPU unset: the GPU (-m, DTFE_GPU=1 for run_ps_dtfe.sh) exactly when the PS binary's object folder says metal (not off, none, or the standard pair's) (${g# })"
 g="$(pgpu_of o_ps/.gpu_mode_metal DTFE_GPU=0) $(pgpu_of o_ps/.gpu_mode_off DTFE_GPU=1)"
 g="${g} $(pgpu_of o_ps/.gpu_mode_metal DTFE_PRECISION=double) $(pgpu_of o_ps_d/.gpu_mode_metal DTFE_PRECISION=double)"
 check "$([ "${g}" = "cpu gpu cpu gpu" ] && echo 0 || echo 1)" "... DTFE_GPU = 0 or 1 wins over the stamp; the double pair reads o_ps_d (${g})"

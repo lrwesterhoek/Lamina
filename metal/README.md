@@ -1,28 +1,29 @@
-# GPU acceleration — the deposit kernels (Metal; CUDA / HIP port)
+# GPU acceleration — the Metal deposit kernels
 
-For whoever builds or maintains the GPU backends. Two things run on the GPU: the PS-DTFE grid **deposit**
+For whoever builds or maintains the GPU backend. Two things run on the GPU: the PS-DTFE grid **deposit**
 and the standard-DTFE volume-averaged `_a` **interpolation**, both with `--gpu`. Both are data-parallel over
 the ~10M tetrahedra of a partition and dominate the run time; the Delaunay triangulation (CGAL) and point evaluation
 stay on the CPU. Any failure (no device, compile, allocation, a deposit the retries give up on) falls back to the CPU
 with a warning, as do scalar fields of more than one component.
 
+The tree is Metal-only (Apple Silicon); elsewhere both programs run on the CPU. The earlier CUDA/HIP port of these
+kernels, with its CPU emulation (`CUDAEMU=1`) and its twin checks, was never run on NVIDIA or AMD hardware and is kept
+on the branch `archive/cuda-hip-2026-11-08`; `make CUDA=1`, `HIP=1` or `CUDAEMU=1` now stops with a message naming it.
+
 ## Build and test
 
 ```bash
 make DTFE PS-DTFE METAL=1          # Apple Silicon (Metal 3, M-series)
-make DTFE PS-DTFE CUDA=1           # NVIDIA (nvcc; CUDA_PATH, GPU_ARCH=sm_86)
-make DTFE PS-DTFE HIP=1 GPU_ARCH=gfx90a   # AMD ROCm (hipcc has no portable intermediate code: set GPU_ARCH)
-make DTFE PS-DTFE CUDAEMU=1        # the CUDA/HIP sources on a CPU emulation of the device (no GPU needed)
 make DTFE PS-DTFE DOUBLE=1 METAL=1 # the double pair: float copies of the tetrahedra go to the same kernels
 ```
-One backend per build (`-DPS_GPU` / `-DDTFE_GPU`). The mode (metal, cuda, hip, cudaemu or off) is stamped in `o/` and
+A METAL=1 build defines `-DPS_GPU` / `-DDTFE_GPU`. The mode (metal or off) is stamped in `o/` and
 `o_ps/` (`.gpu_mode_*`, `.build_mode` holds its make argument); a switch wipes the objects, so a binary never mixes GPU
 and plain objects. `make DTFE $(cat o/.build_mode)` rebuilds in the current mode. The Metal kernels are embedded at build
 time (`o/dtfe_deposit_msl.h`, `o_ps/ps_deposit_msl.h`, each with `exact_clip.metal.inc` prepended) and compiled once per
 process. Dependency: the header-only **metal-cpp**, vendored at `third_party/metal-cpp`.
 
-Tests (GPU builds; the PS suites use the GPU when the `o_ps/` stamp names one):
-- `tests/dtfe_metal_check.sh` (builds in the `o/.build_mode` mode; `GPU_BUILD=CUDA=1` overrides): standard DTFE
+Tests (GPU builds; the PS suites use the GPU when the `o_ps/` stamp says metal):
+- `tests/dtfe_metal_check.sh` (builds in the `o/.build_mode` mode, METAL=1 when that is empty): standard DTFE
   CPU/GPU parity, a repeated GPU run, the per-tet A/B kernel, the shared grid, the exact average.
 - `tests/gpu_scalar_check.sh` (the scalar fields, both binaries), `tests/gpu_mass_check.sh` (the exact mass grid),
   `tests/gpu_retry_check.sh` and `tests/dtfe_gpu_retry_check.sh` (checkpoints, retries by cause, pace recovery).
@@ -30,20 +31,10 @@ Tests (GPU builds; the PS suites use the GPU when the `o_ps/` stamp names one):
   `ps_volume_weighted_check.sh`, `ps_halo_release_check.sh`, `ps_hidden_streams_check.sh`, `ps_caustic_class_check.sh`,
   `ps_window_check.sh`, `ps_mass_exact_check.sh`, `ps_fixed_moments_check.sh`, `point_exact_serve_check.sh`,
   `python3 tests/ps_nonperiodic_test.py`, and `ps_double_check.sh` for the double pair.
-- `tests/cudaemu_check.sh` runs these (all but `ps_double_check.sh`, plus `ps_smoke_test.sh`) on a `CUDAEMU=1`
-  build at warp width 32 and 64 (it builds nothing).
-- `tests/gpu_twin_check.sh` (any machine; builds its own small program): the exact clip's CUDA twin
-  (`gpu_exact_clip.cuh`, compiled as plain C++ through the emulation) per tetrahedron-cell pair on the harness's
-  T7, T13 and T14 sets, against the CPU's double r3d and, on a Mac, against the Metal clip
-  (Lockstep pairs below).
 - The kernel harness (Metal only): `bash metal/build_prototype.sh && ./metal/validate_deposit` (T1-T15 below;
   `BENCH=1` adds a 1M-tet timing, `DUMP_PROFILES=1` per-bin profiles, `VALIDATE_FLOAT_MASS=1` the float mass grid).
 
-CI no longer builds or runs the port (its `cudaemu`, `cuda-compile` and `hip-compile` jobs were removed on 2026-11-08:
-the port is not in use, and the emulation jobs kept stalling on the runners' package mirrors). The checks are local:
-`make DTFE PS-DTFE CUDAEMU=1` + `tests/cudaemu_check.sh` (`CUDAEMU_WARPS=32` or `64`) and `tests/gpu_twin_check.sh`,
-as are the Metal path and real-hardware runs. **First thing to run on an NVIDIA or AMD machine:**
-`GPU_BUILD=CUDA=1 tests/dtfe_metal_check.sh`, then the PS suites above.
+CI builds no GPU backend (its runners are Linux): all of these are local.
 
 ## Files
 
@@ -53,11 +44,9 @@ as are the Metal path and real-hardware runs. **First thing to run on an NVIDIA 
 | `metal/dtfe_deposit.metal` | standard-DTFE kernels: `depositAveraged1` (per tetrahedron, A/B), `depositAveraged1Items2/4/8` (the item kernels), `depositExactAverage` (`--exact-average`) |
 | `metal/exact_clip.metal.inc` | the exact tetrahedron-cell intersection moments (`sweep_moments`, a register-resident z-sweep) and the face-plane cell skip, prepended to both kernel sources |
 | `metal/validate_deposit.cpp`, `metal/build_prototype.sh` | the kernel harness and its build (offline-compiles `ps_deposit.metallib` when Xcode's Metal toolchain is installed, which only the harness loads; git-ignored) |
-| `src/CGAL_triangulation/gpu_host.h` | the backend-neutral host interface (deposit calls, `PSGpuGrids`, the shared-grid API `dtfeGpuShared*`, `psWindowHull`) |
+| `src/CGAL_triangulation/gpu_host.h` | the host interface the callers see (deposit calls, `PSGpuGrids`, the shared-grid API `dtfeGpuShared*`, `psWindowHull`) and the PS host's plain-C++ steps |
 | `src/CGAL_triangulation/ps_metal_host.cc`, `dtfe_metal_host.cc` | the Metal hosts: device and pipelines, the chunked dispatch controller, retries |
-| `src/CGAL_triangulation/ps_gpu_cuda.cu`, `dtfe_gpu_cuda.cu` | the CUDA/HIP ports of kernels and hosts |
-| `src/CGAL_triangulation/gpu_cuda_compat.h`, `gpu_cuda_emu.h`, `gpu_exact_clip.cuh` | the CUDA/HIP macro shim and warp collectives, the CPU emulation (`-DGPU_EMU`), the exact clipping's CUDA twin |
-| `src/CGAL_triangulation/gpu_metal_retry.h`, `gpu_cuda_retry.cuh` | the shared retry policy: snapshots, causes, pace, fault injection |
+| `src/CGAL_triangulation/gpu_metal_retry.h` | the two hosts' retry policy (snapshots, causes, pace, fault injection) and its pass loop `gpuRunPass` |
 | `src/CGAL_triangulation/ps_deposit_params.h`, `dtfe_gpu_fixed.h` | the per-tet record (`psFillTetRecord`) and the fixed-point units (`psMassFixedScale`, `psMomentFixedScale`, `PSFixedBounds`; the standard grids' units) |
 | `src/CGAL_triangulation/ps_exact_inside.h` | the CPU's exact sample-inside test the kernels' certified float test reproduces |
 
@@ -179,76 +168,17 @@ w·v_i·v_j is a float32 product before the sum, as on the CPU path.
 macOS kills command buffers when sustained GPU load starves the display
 (`kIOGPUCommandBufferCallbackErrorImpactingInteractivity`); a pipelined submission was killed even with ~0.1 s
 buffers, serialized submission with small gaps survives. So the hosts submit serialized chunks that adapt toward ~0.25 s each (PS start 25 000 tetrahedra, 500 for the exact deposit;
-`PS_GPU_CHUNK`, `DTFE_GPU_CHUNK`) with an ~8 ms gap (zero on CUDA/HIP until a
-failure). A killed buffer may have deposited part of its atomics, so a chunk is never retried alone: each pass keeps a
+`PS_GPU_CHUNK`, `DTFE_GPU_CHUNK`) with an ~8 ms gap. A killed buffer may have deposited part of its atomics, so a chunk is never retried alone: each pass keeps a
 host snapshot of its grids at its start and every ~10 s of GPU work (`DTFE_GPU_CHECKPOINT_CHUNKS=n`: every n buffers,
-0 = the pass start only), and a failure drains the queue, restores the last snapshot and continues. An "innocent
+0 = the pass start only), and a failure restores the last snapshot and continues (the standard-DTFE host first
+drains its queue with an empty buffer, as a killed buffer's atomics can land late; the PS host restores at once). An "innocent
 victim" error (another process hung the GPU) retries at once; a watchdog or memory error makes the process-wide pace
 4x shorter buffers with 3x wider gaps, easing back one notch after 90 s of clean GPU work
 (`DTFE_GPU_PACE_RECOVER_SEC`). Three failures of one chunk, sixteen in one deposit or a lost device hand the partition
-(standard DTFE: the sub-domain) to the CPU. A CUDA launch timeout is sticky and loses the context, so there the CPU
-takes over. `DTFE_GPU_FAULT_AT=<k>[:innocent|timeout|oom|persist]` makes the k-th buffer fail after it ran (the retry
-suites). Running with the display idle avoids the watchdog.
-
-## The CUDA / HIP port
-
-`ps_gpu_cuda.cu` and `dtfe_gpu_cuda.cu` are line-by-line ports of the two `.metal` files (every helper, the same float32
-arithmetic, the same deferral rule) with hosts mirroring the Metal ones; one source compiles under `nvcc` and `hipcc`
-through `gpu_cuda_compat.h`. What differs by design:
-- **Warp width.** `__shfl_xor_sync` / `__any_sync` over 32 lanes (CUDA), `__shfl_xor` / `__any` over `warpSize` (64 on
-  CDNA/GCN, 32 on RDNA) under HIP; only the order of the float additions changes.
-- **Every lane reaches the collectives.** A thread beyond the chunk's last item runs the body with `valid = false`
-  instead of returning, and no `return` precedes the item kernel's `__syncthreads()`.
-- **Templates for function constants**: `depositItemsKernel<K, FD, FV, FG, FX>`, all 48 instantiations compiled ahead
-  of time; the cell table is dynamic shared memory sized by the host (32 KB).
-- **Memory.** Device memory and explicit copies instead of unified buffers; the masses keep a 4-byte-per-tet host
-  mirror for the leftovers and deferrals, which a small kernel gathers on the device.
-- **Compiler flags**: `-O3` only; `--use_fast_math` would make `sqrt` and division approximate and break the
-  degeneracy sentinel and the exact clipping.
-- The knobs are the same on every backend; the ones with a Metal spelling answer to both (Knobs below).
-
-**Status: compiled, fallback-tested and validated by CPU emulation, not run on hardware.** The objects compile with
-CUDA 12.6 and ROCm, a GPU run in a container without a device falls back to the CPU, and the unchanged kernels and
-hosts pass every suite above through the emulation at warp 32 and 64 with the Metal backend's parity figures.
-
-**The CPU emulation** (`gpu_cuda_emu.h`, `-DGPU_EMU`, a C++20 translation unit): a launch runs the grid one block at a
-time, a block's warps are OS threads and each warp's lanes are coroutines (a register-only stack switch; verified on
-arm64, on x86-64 only under Rosetta) run in lockstep at the collectives. Non-uniform control flow at a collective aborts
-with a message instead of hanging; `DTFE_GPU_EMU_WARP=64` runs the reductions over 64 lanes. Atomics are real atomics and
-device memory is host memory, so it checks the port's transliteration and host logic, not the memory model, scheduling
-or numerics of a real device.
-
-## Lockstep pairs
-
-Every kernel helper exists twice, once per backend. A change to one must go to its twin in the same commit, with the
-same float operations in the same order. `tests/gpu_twin_check.sh` compares the exact clip's pairs (the first two
-rows) function by function; the other pairs are checked only through whole runs (the suites above, and
-`tests/cudaemu_check.sh` for the port). Unless a row says otherwise, the Metal side is in `metal/` and the CUDA/HIP side
-in `src/CGAL_triangulation/`.
-
-| function | Metal | CUDA/HIP |
-|---|---|---|
-| `tet_planes`, `box_outside_tet`, `sweep_moments` and its helpers `sw_green`, `sw_poly_rect`, `sw_cx`, `sw_edge_cand` | `exact_clip.metal.inc` | `gpu_exact_clip.cuh` |
-| the overlap frame's origin | inline in `exact_cell_clip` (`ps_deposit.metal`) and `depositExactAverage` (`dtfe_deposit.metal`) | `overlap_origin` (`gpu_exact_clip.cuh`) |
-| `det3`, `rowNormProduct3`, `inverse3`, `wrapIdx`, `linearWeight` | `ps_deposit.metal` (`det3` also in `dtfe_deposit.metal`) | `gpu_exact_clip.cuh`, shared by both `.cu` files |
-| `classifySample`, `fixedShareOk`, `addFixedQ`, `addMoment`, `addMomentN`, `depositMass`, `depositMassN`, `depositSample`, `depositSampleBatch` | `ps_deposit.metal` | `ps_gpu_cuda.cu` |
-| `window_flat`, `window_hull` (the host's twin of `window_hull`: `psWindowHull`, `gpu_host.h`) | `ps_deposit.metal` | `ps_gpu_cuda.cu` |
-| `exact_vel_range`, `exact_disp_illcond`, `exact_full_weight`, `exact_cell_clip`, `exact_cell_deposit`, `exact_tet_setup` | `ps_deposit.metal` | `ps_gpu_cuda.cu` |
-| `sample_tc`, `column_value`, `column_transition`, `column_run`, `count_beyond_grid` | `ps_deposit.metal` | `ps_gpu_cuda.cu` |
-| `psItemOf` (the exact items' map; the hosts build it with `psBuildExactItemMap`, `gpu_host.h`) | `ps_deposit.metal` | `ps_gpu_cuda.cu` |
-| kernels `depositFields`, `depositExactItems` | `ps_deposit.metal` (the item phase: function constant `kItemsPhase`) | `ps_gpu_cuda.cu` (template parameter `PHASE`) |
-| `fxq`, `addWordsLH`, `addWords`; the per-field adds `addDen`, `addVel`, `addGrad`, `addScal`, `addSG` | `dtfe_deposit.metal` | `dtfe_gpu_cuda.cu` (the five adds are one `gridAdd`) |
-| `fullFlat`, `inverse3zero`, `depositCell`, `flushSlot`, `itemOf`, `tableOffScal`/`tableOffGrad`/`tableOffSGrad`/`tableStride`, `tableAdd`, `depositItem`, `flushWords`, `tableFlush` | `dtfe_deposit.metal` | `dtfe_gpu_cuda.cu` (the table offsets are templates on `FG`; `flushWords` is a lambda in `tableFlush`) |
-| kernels `depositAveraged1`, `depositExactAverage` | `dtfe_deposit.metal` | `dtfe_gpu_cuda.cu` |
-| item kernels | `depositAveraged1Items2/4/8` (`dtfe_deposit.metal`; function constants `FC_DEN`/`FC_VEL`/`FC_GRAD`) | `depositItemsKernel<K, FD, FV, FG, FX>` (`dtfe_gpu_cuda.cu`) |
-| SIMD-group / warp collectives | the built-ins `simd_any`, `simd_min`, `simd_sum` | `gpuWarpAny`, `gpuWarpMinU`, `gpuWarpSumF` (`gpu_cuda_compat.h`) |
-
-Without a twin: in the `.cu` files `setFixed` (the Metal kernels fill the same fields where they build their
-`FieldGrids`), `gatherRecords` (compacts the exact deposit's leftover records on the device; the Metal host copies them
-from its shared buffers) and `zeroBoxKernel` (the Metal host clears a box with `memset`); in `dtfe_deposit.metal`
-`addWordsTg`, the threadgroup table's word add (CUDA's `addWords` serves device and shared memory alike). The hosts
-mirror each other as well (the chunk-and-retry loops, the retry headers `gpu_metal_retry.h` and `gpu_cuda_retry.cuh`);
-the retry suites check them.
+(standard DTFE: the sub-domain) to the CPU. `DTFE_GPU_FAULT_AT=<k>[:innocent|timeout|oom|persist]` makes the k-th buffer fail after it ran (the retry
+suites). Running with the display idle avoids the watchdog. Both hosts run their command buffers through ONE loop,
+`gpuRunPass` in `gpu_metal_retry.h` (`ps_metal_host.cc` `runChunked` per pass, `dtfe_metal_host.cc` `runBatch` per
+batch); the retry suites check it through both.
 
 ## Harness tests (`metal/validate_deposit.cpp`)
 
@@ -266,15 +196,15 @@ decommensurates the periods, offsets the phases and adds an affine shear while k
 
 ## Knobs
 
-Environment variables, read by both backends with the rule of the README's *Environment variables of the binaries*
+Environment variables, read by the Metal hosts with the rule of the README's *Environment variables of the binaries*
 (an empty value is unset; a switch is off when set to `0`, `false`, `no` or `off`, on otherwise). One name per
 concept in both binaries; the Metal spellings of earlier releases (`*_METAL_*`) are no longer read. Two PS-DTFE knobs
 keep names of their own because standard DTFE's twins mean something else: `PS_GPU_CHUNK` (tetrahedra; standard
 `DTFE_GPU_CHUNK` counts work items) and `PS_GPU_DEBUG_NOATOMIC` (a switch; standard's is a level 1-3).
 The older names of the renamed ones are deprecated, read for one release (one warning line at start-up) while the
-new name is unset: `PS_EXACT_ITEMS` and `PS_EXACT_ITEM_CELLS` (deprecated: `DTFE_GPU_ITEMS`, `DTFE_GPU_EXACT_CELLS`),
-`PS_GPU_TIMING`, `PS_GPU_FLOAT_MASS`, `PS_GPU_FLOAT_MOMENTS` (deprecated: `DTFE_GPU_TIMING`, `DTFE_GPU_FLOAT_MASS`,
-`DTFE_GPU_FLOAT_MOMENTS`) and `GPU_EMU_WARP` (deprecated: `DTFE_GPU_EMU_WARP`).
+new name is unset: `PS_EXACT_ITEMS` and `PS_EXACT_ITEM_CELLS` (deprecated: `DTFE_GPU_ITEMS`, `DTFE_GPU_EXACT_CELLS`)
+and `PS_GPU_TIMING`, `PS_GPU_FLOAT_MASS`, `PS_GPU_FLOAT_MOMENTS` (deprecated: `DTFE_GPU_TIMING`, `DTFE_GPU_FLOAT_MASS`,
+`DTFE_GPU_FLOAT_MOMENTS`).
 
 | variable | effect | default |
 |---|---|---|
@@ -284,14 +214,14 @@ new name is unset: `PS_EXACT_ITEMS` and `PS_EXACT_ITEM_CELLS` (deprecated: `DTFE
 | `DTFE_GPU_TABLE` | `0` turns the threadgroup cell table off (evictions go to device atomics) | on |
 | `DTFE_GPU_EXACT_CELLS=n` | cells per `--exact-average` item (both binaries) | 16 |
 | `DTFE_GPU_SHARED` | one shared full grid on the device for the whole call (sampled, float sums) | off |
-| `DTFE_GPU_SHARED_GB` | the shared grid's cap in GB | Metal: 25% of RAM; CUDA/HIP: half the free device memory |
+| `DTFE_GPU_SHARED_GB` | the shared grid's cap in GB | 25% of RAM |
 | `DTFE_GPU_CHUNK` | standard DTFE: the opening chunk (the item kernels round it up to a multiple of 256) | 65536 items; per-tet kernel 25088 tetrahedra, exact 8192 items |
 | `PS_GPU_CHUNK` | PS-DTFE: the per-tet kernel's opening chunk in tetrahedra | 25000; exact deposit 500 |
 | `DTFE_GPU_TIMING` | standard DTFE: one line per batch, and the Morton order's cell sharing; PS-DTFE: one line per kernel run, the exact items and the checkpoints, and per partition how long its deposit waited for the GPU and held it, and where its time went: before the hold (device setup, plan, the exact items' bounds and map) and in it (uploads, kernels, pacing gaps, snapshots, leftovers, copy-back, releases) | off |
 | `DTFE_GPU_FLOAT_MASS` | PS-DTFE: the float mass grid on GPU and CPU, for A/B (see Exact sums) | off |
 | `DTFE_GPU_FLOAT_MOMENTS` | PS-DTFE: the float moment sums on GPU and CPU, for A/B | off |
 | `DTFE_GPU_FLOAT_GRIDS` | standard DTFE: float atomics for the `_a` grids, for A/B | off |
-| `DTFE_GPU_CHECKPOINT_CHUNKS=n` | a grid snapshot every n buffers (kernels); 0 = at the pass start only | every ~10 s of GPU work |
+| `DTFE_GPU_CHECKPOINT_CHUNKS=n` | a grid snapshot every n buffers; 0 = at the pass start only | every ~10 s of GPU work |
 | `DTFE_GPU_PACE_RECOVER_SEC=s` | clean GPU work after which an escalated pace eases back one notch | 90 |
 
 For testing and debugging only: `DTFE_GPU_DEBUG_NOWRITE` (a timing experiment: every kernel does all its work but
@@ -300,6 +230,5 @@ gradient's reduction loop, 3 also the gradient's eviction atomics; the grids com
 `PS_GPU_DEBUG_NOATOMIC=1` (timing, the atomics' share of the sampled kernel: every sample is classified and counted
 but none is deposited; the grids come out empty),
 `DTFE_GPU_FAULT_AT=k[:innocent|timeout|oom|persist]` (the k-th buffer fails after it ran, for the retry suites),
-`DTFE_TEST_NAN_SHARE=k` (every k-th share becomes NaN, for the exact sums' guard), `DTFE_GPU_EMU_WARP=64` (the CPU
-emulation's warp width, default 32), and the harness's `BENCH`, `DUMP_PROFILES`, `VALIDATE_FLOAT_MASS` (Build and
+`DTFE_TEST_NAN_SHARE=k` (every k-th share becomes NaN, for the exact sums' guard), and the harness's `BENCH`, `DUMP_PROFILES`, `VALIDATE_FLOAT_MASS` (Build and
 test).

@@ -5,8 +5,7 @@
 #                             BOTH binaries with the best backend for this machine (plus every
 #                             double or 2D pair already built, which 'make clean' deletes too):
 #                               macOS (Apple Silicon)      -> METAL=1  (GPU deposit)
-#                               Linux with nvcc / hipcc    -> CUDA=1 / HIP=1 (GPU deposit, unvalidated port)
-#                               anything else              -> CPU-only
+#                               anything else              -> CPU-only (the GPU code is Metal-only)
 #   ./install.sh --cpu        force a CPU-only build (skip the GPU backend detection)
 #   ./install.sh --no-deps    skip the dependency-installation step (just clean + rebuild)
 #   ./install.sh --docker     build the containerized LINUX image instead (docker build .).
@@ -141,18 +140,6 @@ if [ "$FORCE_CPU" -eq 0 ]; then
                 BACKEND="Metal GPU (--gpu at runtime, automatic CPU fallback)"
             fi
         fi
-    elif [ "$UNAME_S" = "Linux" ]; then
-        # NVIDIA: the CUDA toolkit's nvcc (PATH or /usr/local/cuda); AMD: ROCm's hipcc (PATH or
-        # /opt/rocm). The kernels are ports of the Metal ones: compiled and CPU-fallback-tested on
-        # Linux, not validated on NVIDIA/AMD hardware -- run tests/dtfe_metal_check.sh and the
-        # PS parity suites on the first GPU machine (metal/README.md, "CUDA / HIP").
-        if command -v nvcc >/dev/null 2>&1 || [ -x /usr/local/cuda/bin/nvcc ]; then
-            GPU_ARG="CUDA=1"
-            BACKEND="CUDA GPU (--gpu at runtime, automatic CPU fallback; unvalidated port, see metal/README.md)"
-        elif command -v hipcc >/dev/null 2>&1 || [ -x /opt/rocm/bin/hipcc ]; then
-            GPU_ARG="HIP=1"
-            BACKEND="HIP GPU (--gpu at runtime, automatic CPU fallback; unvalidated port, see metal/README.md -- set GPU_ARCH for your card)"
-        fi
     fi
 fi
 [ -n "$PREC_ARG" ] && BACKEND="${BACKEND}; plus the double-precision pair"
@@ -194,7 +181,7 @@ on_build_error() {
 }
 trap on_build_error ERR
 make clean >/dev/null
-# shellcheck disable=SC2086  # GPU_ARG is deliberately word-split ("" or METAL=1 etc.)
+# shellcheck disable=SC2086  # GPU_ARG is deliberately word-split ("" or METAL=1)
 make DTFE    $GPU_ARG -j"$JOBS" 2>&1 | tee -a "$BUILD_LOG"
 make PS-DTFE $GPU_ARG -j"$JOBS" 2>&1 | tee -a "$BUILD_LOG"
 # the double and 2D sets noted above: their own object directories and binary names; inside the trap, so a

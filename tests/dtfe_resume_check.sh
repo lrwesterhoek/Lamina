@@ -288,7 +288,7 @@ echo ">> D12: a killed --gpu --exact-average run"
 GPU=0
 [ -n "$(gpu_backend_of "$OBJ")" ] && GPU=1
 if [ "$GPU" != 1 ]; then
-    echo "  SKIP D12: $OBJ carries no GPU stamp (a METAL=1 / CUDA=1 / HIP=1 / CUDAEMU=1 build runs it)"
+    echo "  SKIP D12: $OBJ carries no GPU stamp (a METAL=1 build runs it)"
 else
     G=("${C[@]}" "${MC[@]}" --gpu --exact-average)
     "${RUN[@]}" "$TMP/gref" "${G[@]}" > "$TMP/gref.log" 2>&1 || { echo "FAIL: gref (see $TMP/gref.log)"; exit 1; }

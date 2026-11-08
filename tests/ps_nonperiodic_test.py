@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 import argparse
+import functools
 import os
+import re
 import subprocess
 import sys
 
@@ -44,8 +46,15 @@ CPU_TOL, GPU_TOL = 1e-5, 1e-4   # max |region - full| / peak (CPU: equal but for
 SPLIT_TOL = 1e-5
 
 
-def run(cmd):
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+from ps_test_helpers import run as _run
+
+run = functools.partial(_run, echo=None, quiet=True)   # the generators' stdout stays out of the log
+
+
+def log_of(root, label):
+    """One log per run: the output roots are reused across the variants, and the clean-ups below remove every
+    '<root>.*' file, so the variant goes after an underscore."""
+    return root + "_" + re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_") + ".log"
 
 
 def main():
@@ -79,7 +88,7 @@ def main():
     fails = []
     for grid in GRIDS:
         run([binary, snap, out, "--grid", str(grid), "--field", "density",
-             "--input-format", "105", "--mpc-unit", "1", "--verbose", "0"])
+             "--input-format", "105", "--mpc-unit", "1", "--verbose", "0"], log=log_of(out, f"grid{grid}"))
         d = np.fromfile(out + ".den", dtype=REAL).astype(np.float64).reshape(grid, grid, grid)
         # '.den' is rho/rho_bar with rho_bar = N*m / V_lagBox for a non-periodic cloud
         # (Lagrangian bounding-box normalization); recovered/expected mass is then
@@ -132,11 +141,11 @@ def region_faces(binary):
     helptext = h.stdout + h.stderr
     try:
         mode = open(os.path.join(ROOT, "o_ps", ".build_mode")).read()
-        gpu = any(m in mode for m in ("METAL=1", "CUDA=1", "HIP=1", "CUDAEMU=1"))   # the emulated port too
+        gpu = "METAL=1" in mode
     except OSError:
         gpu = False
     variants = [("sampled", []), ("linear", ["--ps-linear-deposit"])]
-    if "--exact-average" in helptext:          # the exact deposit (run below under its deprecated name)
+    if "--exact-average" in helptext:          # the exact deposit
         variants.append(("exact", ["--exact-average"]))
     if gpu:
         variants += [(name + " GPU", extra + ["--gpu"]) for name, extra in list(variants)]
@@ -154,8 +163,10 @@ def region_faces(binary):
     for name, extra in variants:
         tol = GPU_TOL if "GPU" in name else CPU_TOL
         full, reg = os.path.join(TMP, "ps_np_full"), os.path.join(TMP, "ps_np_region")
-        run([binary, snap, full, "--grid", str(FULL_GRID), "--box"] + [str(x) for x in FULL_BOX * 3] + common + extra)
-        run([binary, snap, reg, "--grid", str(n), "--box"] + [str(x) for x in REGION_BOX * 3] + common + extra)
+        run([binary, snap, full, "--grid", str(FULL_GRID), "--box"] + [str(x) for x in FULL_BOX * 3] + common + extra,
+            log=log_of(full, name))
+        run([binary, snap, reg, "--grid", str(n), "--box"] + [str(x) for x in REGION_BOX * 3] + common + extra,
+            log=log_of(reg, name))
         worst = []
         for ext, comps in (("den", 1), ("a_den", 1), ("vel", 3), ("a_vel", 3), ("streams", 1), ("a_streams", 1)):
             f = np.fromfile(f"{full}.{ext}", dtype=REAL).astype(np.float64)
@@ -203,8 +214,8 @@ def partition_split(binary):
     worst_hull = 0.0
     for name, extra in (("alpha shape", []), ("alpha shape, --ps-vertex-mass", ["--ps-vertex-mass"]),
                         ("whole hull (--ps-alpha-shape 0)", ["--ps-alpha-shape", "0"])):
-        run([binary, snap, base + "1"] + common + extra + ["--partition", "1", "1", "1"])
-        run([binary, snap, base + "8"] + common + extra + ["--partition", "2", "2", "2"])
+        run([binary, snap, base + "1"] + common + extra + ["--partition", "1", "1", "1"], log=log_of(base + "1", name))
+        run([binary, snap, base + "8"] + common + extra + ["--partition", "2", "2", "2"], log=log_of(base + "8", name))
         worst = (0.0, "-")
         for ext in ("den", "a_den", "vel", "a_vel", "streams", "a_streams"):
             a = np.fromfile(f"{base}8.{ext}", dtype=REAL).astype(np.float64)

@@ -47,7 +47,7 @@
 #include <omp.h>
 #endif
 
-// gpu_host.h declares the GPU deposit API (METAL=1 / CUDA=1 / HIP=1 builds; the CPU deposit remains the
+// gpu_host.h declares the GPU deposit API (METAL=1 builds; the CPU deposit remains the
 // fallback) AND defines psWindowHull, the --grid-window hull of the exact deposit, which the CPU loop uses
 // in every build -- so it is included unconditionally (declarations only; nothing links against them
 // unless PS_GPU is set)
@@ -63,7 +63,7 @@ int psGpuFallbacksTaken(bool reset)
 }
 
 // Failed GPU deposit attempts of this run (run_progress.h: the progress sidecar's gpu_retries), counted by
-// the GPU hosts (ps_metal_host.cc, ps_gpu_cuda.cu).
+// the GPU host (ps_metal_host.cc).
 std::atomic<int> psGpuRetries{ 0 };
 // ... and the same attempts by cause (the sidecar's gpu_retries_by_cause and the run's closing
 // 'GPU deposit retries:' line): [0] innocent victim, [1] timeout (a watchdog kill), [2] out of memory, [3] any
@@ -3543,7 +3543,7 @@ void interpolateGrid_phaseSpace(DT &dt,
         {
             warned = true;
             MESSAGE::Warning warning( userOptions.verboseLevel );
-            warning << "--gpu requested but this binary was built without GPU support (rebuild with METAL=1 on a Mac, CUDA=1 or HIP=1 on Linux; or NO_DIM!=3); using the CPU deposit.\n" << MESSAGE::EndWarning;
+            warning << "--gpu requested but this binary was built without GPU support (rebuild with METAL=1 on a Mac; or NO_DIM!=3); using the CPU deposit.\n" << MESSAGE::EndWarning;
         }
     }
 #endif // PS_GPU

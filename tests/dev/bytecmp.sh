@@ -10,7 +10,7 @@
 # The reference set is any folder holding the six binaries, e.g. a copy taken before the change:
 #     mkdir -p /tmp/ref && cp DTFE DTFE-double DTFE-2d PS-DTFE PS-DTFE-double PS-DTFE-2d /tmp/ref/
 # (build all three pairs first: make DTFE PS-DTFE METAL=1; ... METAL=1 DOUBLE=1; ... DIM=2). The GPU runs need a
-# METAL=1 (or CUDA/HIP) build on both sides; a run that fell back to the CPU is listed at the end.
+# METAL=1 build on both sides; a run that fell back to the CPU is listed at the end.
 #
 # --gpu-exact adds 6 runs of the GPU's exact deposits ('--ps-exact-deposit --ps-gpu', '--exact-average --gpu'; single
 # and double, one domain and '--partition 2 2 2'). Those outputs are float32 and fast math, so they are comparable

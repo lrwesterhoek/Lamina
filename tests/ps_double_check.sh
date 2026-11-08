@@ -67,7 +67,7 @@ if [ -d o_ps_d ] && [ ! -f o_ps_d/.gpu_mode_off ] && [ -d o_d ] && [ ! -f o_d/.g
     run "$TMP/dt_dg" ./DTFE-double "$SNAP" "$TMP/dt_dg" --grid $G --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a --gpu
     gpu_ok "$TMP/dt_dg.log" || { echo "FAIL: DTFE-double --gpu did not run on the GPU"; exit 1; }
 else
-    echo ">> the double pair has no GPU (built without METAL=1 / CUDA=1 / HIP=1): D5 skipped"
+    echo ">> the double pair has no GPU (built without METAL=1): D5 skipped"
 fi
 "$PY" - "$TMP" "$G" "$DOUBLE_GPU" "$ROOT" <<'PYEOF'
 import sys, numpy as np

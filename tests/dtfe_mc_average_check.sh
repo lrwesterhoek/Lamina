@@ -74,7 +74,7 @@ if [ "$GPU" = "1" ]; then
     grep -q " GPU (" "$TMP/g.log" || { echo "FAIL: the --gpu run did not attempt the GPU (see $TMP/g.log)"; exit 1; }
     grep -q "using the CPU interpolation" "$TMP/g.log" && { echo "FAIL: the --gpu run fell back to the CPU (see $TMP/g.log)"; exit 1; }
 else
-    echo ">> A5 SKIP: $OBJ carries no GPU stamp (a METAL=1 / CUDA=1 / HIP=1 / CUDAEMU=1 build runs it)"
+    echo ">> A5 SKIP: $OBJ carries no GPU stamp (a METAL=1 build runs it)"
 fi
 echo ">> A6: 'velocityStd_a' with methods 1 and 3, --exact-average and --cic (rejected), and with --average-method 2"
 V=(--grid 16 --periodic --padding 12 --field density_a velocityStd_a)

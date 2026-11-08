@@ -11,9 +11,7 @@
 # (ci_core and then ci_double; the *_d and *_np126 stages after the stages that ran the same suites), and a rerun
 # clears its suite's folder or rewrites its logs by name: the files read are each suite's last run of the battery,
 # with any file of an earlier run that the last one did not write again.
-# Not read: the battery's own stage logs. Five python suites (ps_3d_test, ps_standard_cross_check,
-# ps_convergence_test, ps_nonperiodic_test, ps_regression_test) run the binaries without capturing their stderr, so
-# a deprecation line of theirs lands in the stage log, not here.
+# Not read: the battery's own stage logs.
 #
 # Usage: tests/dev/deprecation_gate.sh <suites' temp folder> [<marker file>]
 #   <suites' temp folder>   the DTFE_TEST_TMP the suites ran with: one folder per suite (a path's first component

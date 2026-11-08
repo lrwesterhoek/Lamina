@@ -163,7 +163,7 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         self.custom = custom or self._restore("custom", rs.CustomSpec)
         if custom is None and not self._restore_json("custom", None):
             # a fresh custom-snapshot job uses the GPU when built with one (the Grids and Pipeline tabs' rule,
-            # rs.gpu_build_default: not an emulated one)
+            # rs.gpu_build_default)
             self.custom.gpu = rs.gpu_build_default("ps")
         # standard DTFE's production cell average is the exact one (rs.production_deposit). A state saved by an
         # older launcher holds its start, 'sampled', for a standard-DTFE Grids or Custom job (the Monte-Carlo

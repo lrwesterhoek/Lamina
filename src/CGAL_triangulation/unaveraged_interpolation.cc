@@ -26,6 +26,7 @@
    the linear DTFE estimate of the Delaunay cell containing each point. */
 
 #include "triangulation_common.h"
+#include "sample_eval.h"
 
 
 
@@ -42,13 +43,7 @@ void interpolateGrid(DT &dt,
     for (size_t i=0; i<NO_DIM; ++i)
         boxLength.push_back( boxCoordinates[2*i+1]-boxCoordinates[2*i] );
 
-    // output field vectors
-    Field field = userOptions.uField;
-    std::vector<Real>                         *density = &(quantities->density);
-    std::vector< Pvector<Real,noVelComp> >    *velocity = &(quantities->velocity);
-    std::vector< Pvector<Real,noGradComp> >   *velocity_gradient = &(quantities->velocity_gradient);
-    std::vector< Pvector<Real,noScalarComp> > *scalar = &(quantities->scalar);
-    std::vector< Pvector<Real,noScalarGradComp> > *scalar_gradient = &(quantities->scalar_gradient);
+    SampleOutputs out( userOptions.uField, quantities );   // output field vectors
 
 
     MESSAGE::Message message( userOptions.verboseLevel );
@@ -58,135 +53,29 @@ void interpolateGrid(DT &dt,
             << "\t Done:   " << MESSAGE::Flush;
 
 
-    // reserve output fields (reserveMemory zero-fills if the triangulation is undefined)
+    // reserve output fields (zero-filled if the triangulation is undefined)
     size_t reserveSize = 1;
     for (size_t i=0; i<NO_DIM; ++i)
         reserveSize *= nGrid[i];
-    reserveMemory( density, reserveSize, field.density, dt, "density" );
-    reserveMemory( velocity, reserveSize, field.velocity, dt, "velocity" );
-    reserveMemory( velocity_gradient, reserveSize, field.velocity_gradient, dt, "velocity gradient" );
-    reserveMemory( scalar, reserveSize, field.scalar, dt, "scalar" );
-    reserveMemory( scalar_gradient, reserveSize, field.scalar_gradient, dt, "scalar gradient" );
-    if ( dt.number_of_vertices()<NO_DIM+1 ) return;     // no interpolation possible without cells
+    if ( not out.reserve( reserveSize, dt ) ) return;     // no interpolation possible without cells
 
 
-
-    Point samplePoint;
     Real dx[NO_DIM];        // grid spacing along each axis
     for (size_t i=0; i<NO_DIM; ++i)
         dx[i] = boxLength[i] / nGrid[i];
 
-#ifdef TEST_PADDING
-    vector<size_t> incompleteCells_d;// grid cells with a dummy-point error in the density field
-    vector<size_t> incompleteCells;  // grid cells with a dummy-point error in the other fields
-#endif
-    int prev = 0, amount100 = 0;
-
-
-    // triangulation point-location state
-    Locate_type lt;
-    int li, lj;
-    Cell_handle current;
-
-
-
-    Real x = boxCoordinates[0] + dx[0]/2.;
-    for (size_t i=0; i<nGrid[0]; ++i)
+    PaddingReport padding;
+    Cell_handle current;    // the previous point's cell: the walk to the next point starts there
+    forEachGridCell( boxCoordinates, dx, nGrid, message, [&](Real const *c, size_t i, size_t j, size_t k)
     {
-        amount100 = (100 * i)/ nGrid[0];
-        if (prev < amount100)
-            message.updateProgress( ++prev );
-        
-        Real y = boxCoordinates[2] + dx[1]/2.;
-        for (size_t j=0; j<nGrid[1]; ++j)
-        {
 #if NO_DIM==2
-            samplePoint = Point( x, y );
-            current = dt.locate( samplePoint, lt, li, current );
+        Point samplePoint( c[0], c[1] );
 #elif NO_DIM==3
-            Real z = boxCoordinates[4] + dx[2]/2.;
-            for (size_t k=0; k<nGrid[2]; ++k)
-            {
-                samplePoint = Point( x, y, z );
-                current = dt.locate( samplePoint, lt, li, lj, current );
+        Point samplePoint( c[0], c[1], c[2] );
 #endif
-                
-                // infinite cell (outside the convex hull) -> zero field
-                if ( dt.is_infinite(current) )
-                {
-                    if (field.density) density->push_back( Real(0.) );
-#ifdef VELOCITY
-                    if (field.velocity) velocity->push_back( Pvector<Real,noVelComp>::zero() );
-                    if (field.velocity_gradient) velocity_gradient->push_back( Pvector<Real,noGradComp>::zero() );
-#endif
-#ifdef SCALAR
-                    if (field.scalar) scalar->push_back( Pvector<Real,noScalarComp>::zero() );
-                    if (field.scalar_gradient) scalar_gradient->push_back( Pvector<Real,noScalarGradComp>::zero() );
-#endif
-                    continue;
-                }
-                
-                Real posMatrixInverse[NO_DIM][NO_DIM];  // inverse vertex position-difference matrix
-                positionMatrix( current, posMatrixInverse );
-                Vertex_handle base = current->vertex(0);
-                samplePoint = relativeSamplePoint( base, samplePoint ); // relative to base vertex
-
-#ifdef TEST_PADDING
-#if NO_DIM==2
-                size_t k = 0;
-#endif
-                Real index = gridCellIndex( i,j,k, nGrid );
-                if ( hasDummyNeighbor( current ) ) updateDummyGridCells( index, &incompleteCells_d ); // dummy neighbor -> flag for density
-                if ( hasDummyVertex( current ) ) updateDummyGridCells( index, &incompleteCells );     // dummy vertex -> flag for other fields
-#endif
-                
-                // now compute the field values at the sample points
-                if (field.density)
-                {
-                    Real densGrad[NO_DIM];
-                    densityGrad(current, posMatrixInverse, densGrad);
-                    density->push_back( densityValue(densGrad,base,samplePoint) );
-                }
-#ifdef VELOCITY
-                if (field.velocity or field.velocity_gradient)
-                {
-                    Real velGrad[NO_DIM][noVelComp];
-                    velocityGrad( current, posMatrixInverse, velGrad );
-                    if (field.velocity) velocity->push_back( velocityValue(velGrad,base,samplePoint) );
-                    if (field.velocity_gradient) velocity_gradient->push_back( velocityGradient(velGrad) );
-                }
-#endif
-#ifdef SCALAR
-                if (field.scalar or field.scalar_gradient)
-                {
-#ifdef MY_SCALAR
-                    scalar->push_back( customScalar(current, posMatrixInverse, base, samplePoint) );
-#else
-                    Real sGrad[NO_DIM][noScalarComp];
-                    scalarGrad( current, posMatrixInverse, sGrad );
-                    if (field.scalar) scalar->push_back( scalarValue(sGrad,base,samplePoint) );
-                    if (field.scalar_gradient) scalar_gradient->push_back( scalarGradient(sGrad) );
-#endif
-                }
-#endif
-                
-#if NO_DIM==3     // end additional z-loop
-                z += dx[2];
-            }
-#endif
-            y += dx[1];
-        }
-        x += dx[0];
-    }
-    message << "100%\n" << MESSAGE::Flush;
-    
-    
-#ifdef TEST_PADDING
-    if (field.density)
-        showCellsContainingDummyPoints( &incompleteCells_d, userOptions, userOptions.outputFilename+"_density", "density" ); // report cells whose density may be wrong (incomplete tessellation)
-    if ( field.velocity or field.velocity_gradient or field.scalar or field.scalar_gradient )
-        showCellsContainingDummyPoints( &incompleteCells, userOptions, userOptions.outputFilename+"_fields", "fields" ); // report cells whose other fields may be wrong (incomplete tessellation)
-#endif
+        pushPointAt( dt, out, padding, current, samplePoint, gridCellIndex( i,j,k, nGrid ) );
+    } );
+    padding.write( out.field, userOptions );  // report cells whose values may be wrong (incomplete tessellation)
 }
 
 
@@ -205,13 +94,7 @@ void interpolateRedshiftCone(DT &dt,
     for (size_t i=0; i<NO_DIM; ++i)
         boxLength.push_back( boxCoordinates[2*i+1]-boxCoordinates[2*i] );
 
-    // output field vectors
-    Field field = userOptions.uField;
-    std::vector<Real>                         *density = &(quantities->density);
-    std::vector< Pvector<Real,noVelComp> >    *velocity = &(quantities->velocity);
-    std::vector< Pvector<Real,noGradComp> >   *velocity_gradient = &(quantities->velocity_gradient);
-    std::vector< Pvector<Real,noScalarComp> > *scalar = &(quantities->scalar);
-    std::vector< Pvector<Real,noScalarGradComp> > *scalar_gradient = &(quantities->scalar_gradient);
+    SampleOutputs out( userOptions.uField, quantities );   // output field vectors
 
 
     MESSAGE::Message message( userOptions.verboseLevel );
@@ -220,140 +103,25 @@ void interpolateRedshiftCone(DT &dt,
             << "\t Done:   " << MESSAGE::Flush;
 
 
-    // reserve output fields (reserveMemory zero-fills if the triangulation is undefined)
+    // reserve output fields (zero-filled if the triangulation is undefined)
     size_t reserveSize = 1;
     for (size_t i=0; i<NO_DIM; ++i)
         reserveSize *= nGrid[i];
-    reserveMemory( density, reserveSize, field.density, dt, "density" );
-    reserveMemory( velocity, reserveSize, field.velocity, dt, "velocity" );
-    reserveMemory( velocity_gradient, reserveSize, field.velocity_gradient, dt, "velocity gradient" );
-    reserveMemory( scalar, reserveSize, field.scalar, dt, "scalar" );
-    reserveMemory( scalar_gradient, reserveSize, field.scalar_gradient, dt, "scalar gradient" );
-    if ( dt.number_of_vertices()<NO_DIM+1 ) return;     // no interpolation possible without cells
+    if ( not out.reserve( reserveSize, dt ) ) return;     // no interpolation possible without cells
 
 
-
-    Point samplePoint;
     Real dx[NO_DIM];        // grid spacing along each axis
     for (size_t i=0; i<NO_DIM; ++i)
         dx[i] = boxLength[i] / nGrid[i];
 
-#ifdef TEST_PADDING
-    vector<size_t> incompleteCells_d;// grid cells with a dummy-point error in the density field
-    vector<size_t> incompleteCells;  // grid cells with a dummy-point error in the other fields
-#endif
-    int prev = 0, amount100 = 0;
-
-
-    // triangulation point-location state
-    Locate_type lt;
-    int li, lj;
-    Cell_handle current;
-
-
-
-    Real r = boxCoordinates[0] + dx[0]/2.;
-    for (size_t i=0; i<nGrid[0]; ++i)
+    PaddingReport padding;
+    Cell_handle current;    // the previous point's cell: the walk to the next point starts there
+    forEachGridCell( boxCoordinates, dx, nGrid, message, [&](Real const *c, size_t i, size_t j, size_t k)
     {
-        amount100 = (100 * i)/ nGrid[0];
-        if (prev < amount100)
-            message.updateProgress( ++prev );
-        
-        Real theta = boxCoordinates[2] + dx[1]/2.;
-        for (size_t j=0; j<nGrid[1]; ++j)
-        {
-#if NO_DIM==2
-            Real tempX = origin[0] + r*cos(theta);
-            Real tempY = origin[1] + r*sin(theta);
-            samplePoint = Point(tempX,tempY);
-            current = dt.locate( samplePoint, lt, li, current );
-#elif NO_DIM==3
-            Real psi = boxCoordinates[4] + dx[2]/2.;
-            for (size_t k=0; k<nGrid[2]; ++k)
-            {
-                Real tempX = origin[0] + r*sin(theta)*cos(psi);
-                Real tempY = origin[1] + r*sin(theta)*sin(psi);
-                Real tempZ = origin[2] + r*cos(theta);
-                samplePoint = Point(tempX,tempY,tempZ);
-                current = dt.locate( samplePoint, lt, li, lj, current );
-#endif
-                
-                // infinite cell (outside the convex hull) -> zero field
-                if ( dt.is_infinite(current) )
-                {
-                    if (field.density) density->push_back( Real(0.) );
-#ifdef VELOCITY
-                    if (field.velocity) velocity->push_back( Pvector<Real,noVelComp>::zero() );
-                    if (field.velocity_gradient) velocity_gradient->push_back( Pvector<Real,noGradComp>::zero() );
-#endif
-#ifdef SCALAR
-                    if (field.scalar) scalar->push_back( Pvector<Real,noScalarComp>::zero() );
-                    if (field.scalar_gradient) scalar_gradient->push_back( Pvector<Real,noScalarGradComp>::zero() );
-#endif
-                    continue;
-                }
-                
-                Real posMatrixInverse[NO_DIM][NO_DIM];  // inverse vertex position-difference matrix
-                positionMatrix( current, posMatrixInverse );
-                Vertex_handle base = current->vertex(0);
-                samplePoint = relativeSamplePoint( base, samplePoint ); // relative to base vertex
-
-#ifdef TEST_PADDING
-#if NO_DIM==2
-                size_t k = 0;
-#endif
-                Real index = gridCellIndex( i,j,k, nGrid );
-                if ( hasDummyNeighbor( current ) ) updateDummyGridCells( index, &incompleteCells_d ); // dummy neighbor -> flag for density
-                if ( hasDummyVertex( current ) ) updateDummyGridCells( index, &incompleteCells );     // dummy vertex -> flag for other fields
-#endif
-                
-                // now compute the field values at the sample points
-                if (field.density)
-                {
-                    Real densGrad[NO_DIM];
-                    densityGrad(current, posMatrixInverse, densGrad);
-                    density->push_back( densityValue(densGrad,base,samplePoint) );
-                }
-#ifdef VELOCITY
-                if (field.velocity or field.velocity_gradient)
-                {
-                    Real velGrad[NO_DIM][noVelComp];
-                    velocityGrad( current, posMatrixInverse, velGrad );
-                    if (field.velocity) velocity->push_back( velocityValue(velGrad,base,samplePoint) );
-                    if (field.velocity_gradient) velocity_gradient->push_back( velocityGradient(velGrad) );
-                }
-#endif
-#ifdef SCALAR
-                if (field.scalar or field.scalar_gradient)
-                {
-#ifdef MY_SCALAR
-                    scalar->push_back( customScalar(current, posMatrixInverse, base, samplePoint) );
-#else
-                    Real sGrad[NO_DIM][noScalarComp];
-                    scalarGrad( current, posMatrixInverse, sGrad );
-                    if (field.scalar) scalar->push_back( scalarValue(sGrad,base,samplePoint) );
-                    if (field.scalar_gradient) scalar_gradient->push_back( scalarGradient(sGrad) );
-#endif
-                }
-#endif
-                
-#if NO_DIM==3     // end additional z-loop
-                psi += dx[2];
-            }
-#endif
-            theta += dx[1];
-        }
-        r += dx[0];
-    }
-    message << "100%\n" << MESSAGE::Flush;
-    
-    
-#ifdef TEST_PADDING
-    if (field.density)
-        showCellsContainingDummyPoints( &incompleteCells_d, userOptions, userOptions.outputFilename+"_density", "density" ); // report cells whose density may be wrong (incomplete tessellation)
-    if ( field.velocity or field.velocity_gradient or field.scalar or field.scalar_gradient )
-        showCellsContainingDummyPoints( &incompleteCells, userOptions, userOptions.outputFilename+"_fields", "fields" ); // report cells whose other fields may be wrong (incomplete tessellation)
-#endif
+        Point samplePoint = conePoint( origin, c );    // c = (r, theta, psi)
+        pushPointAt( dt, out, padding, current, samplePoint, gridCellIndex( i,j,k, nGrid ) );
+    } );
+    padding.write( out.field, userOptions );  // report cells whose values may be wrong (incomplete tessellation)
 }
 
 
@@ -366,13 +134,7 @@ void interpolateUserSampling(DT &dt,
                              User_options &userOptions,
                              Quantities *quantities)
 {
-    // output field vectors
-    Field field = userOptions.uField;
-    std::vector<Real>                         *density = &(quantities->density);
-    std::vector< Pvector<Real,noVelComp> >    *velocity = &(quantities->velocity);
-    std::vector< Pvector<Real,noGradComp> >   *velocity_gradient = &(quantities->velocity_gradient);
-    std::vector< Pvector<Real,noScalarComp> > *scalar = &(quantities->scalar);
-    std::vector< Pvector<Real,noScalarGradComp> > *scalar_gradient = &(quantities->scalar_gradient);
+    SampleOutputs out( userOptions.uField, quantities );   // output field vectors
 
 
     MESSAGE::Message message( userOptions.verboseLevel );
@@ -380,118 +142,23 @@ void interpolateUserSampling(DT &dt,
             << "\t Done:   " << MESSAGE::Flush;
 
 
-    // reserve output fields (reserveMemory zero-fills if the triangulation is undefined)
-    size_t reserveSize = samples.size();
-    reserveMemory( density, reserveSize, field.density, dt, "density" );
-    reserveMemory( velocity, reserveSize, field.velocity, dt, "velocity" );
-    reserveMemory( velocity_gradient, reserveSize, field.velocity_gradient, dt, "velocity gradient" );
-    reserveMemory( scalar, reserveSize, field.scalar, dt, "scalar" );
-    reserveMemory( scalar_gradient, reserveSize, field.scalar_gradient, dt, "scalar gradient" );
-    if ( dt.number_of_vertices()<NO_DIM+1 ) return;     // no interpolation possible without cells
+    // reserve output fields (zero-filled if the triangulation is undefined)
+    if ( not out.reserve( samples.size(), dt ) ) return;     // no interpolation possible without cells
 
 
-
-    Point samplePoint;
-
-#ifdef TEST_PADDING
-    vector<size_t> incompleteCells_d;// grid cells with a dummy-point error in the density field
-    vector<size_t> incompleteCells;  // grid cells with a dummy-point error in the other fields
-#endif
-    int prev = 0, amount100 = 0;
-
-
-    // triangulation point-location state
-    Locate_type lt;
-    int li, lj;
-    Cell_handle current;
-
-
-
-    size_t const noElements = samples.size();
-    for (size_t i=0; i<noElements; ++i)
+    PaddingReport padding;
+    Cell_handle current;    // the previous point's cell: the walk to the next point starts there
+    forEachSample( samples.size(), message, [&](size_t i)
     {
-        amount100 = (100 * i)/ noElements;
-        if (prev < amount100)
-            message.updateProgress( ++prev );
-        
-        // check if the sample point is inside the region of interest, otherwise continue to next sample point
+        // a sample outside the region of interest gets the zero record of a point outside the hull, so the
+        // outputs keep one entry per sample (no locate: the next sample's hint is the one it had before)
         if ( not userOptions.region.isPointInBox(samples[i].position()) )
-            continue;
-        
-        // locate the Delaunay cell that contains the center of the grid point
-#if NO_DIM==2
-        samplePoint = Point( samples[i].position(0), samples[i].position(1) );
-        current = dt.locate( samplePoint, lt, li, current );
-#elif NO_DIM==3
-        samplePoint = Point( samples[i].position(0), samples[i].position(1), samples[i].position(2) );
-        current = dt.locate( samplePoint, lt, li, lj, current );
-#endif
-        
-        // infinite cell (outside the convex hull) -> zero field
-        if ( dt.is_infinite(current) )
         {
-            if (field.density) density->push_back( Real(0.) );
-#ifdef VELOCITY
-            if (field.velocity) velocity->push_back( Pvector<Real,noVelComp>::zero() );
-            if (field.velocity_gradient) velocity_gradient->push_back( Pvector<Real,noGradComp>::zero() );
-#endif
-#ifdef SCALAR
-            if (field.scalar) scalar->push_back( Pvector<Real,noScalarComp>::zero() );
-            if (field.scalar_gradient) scalar_gradient->push_back( Pvector<Real,noScalarGradComp>::zero() );
-#endif
-            continue;
+            out.pushZero();
+            return;
         }
-        
-        Real posMatrixInverse[NO_DIM][NO_DIM];  // inverse vertex position-difference matrix
-        positionMatrix( current, posMatrixInverse );
-        Vertex_handle base = current->vertex(0);
-        samplePoint = relativeSamplePoint( base, samplePoint ); // relative to base vertex
-
-
-#ifdef TEST_PADDING
-        if ( hasDummyNeighbor( current ) ) updateDummyGridCells( i, &incompleteCells_d ); // dummy neighbor -> flag for density
-        if ( hasDummyVertex( current ) ) updateDummyGridCells( i, &incompleteCells );     // dummy vertex -> flag for other fields
-#endif
-        
-        // now compute the field values at the sample points
-        if (field.density)
-        {
-            Real densGrad[NO_DIM];
-            densityGrad(current, posMatrixInverse, densGrad);
-            density->push_back( densityValue(densGrad,base,samplePoint) );
-        }
-#ifdef VELOCITY
-        if (field.velocity or field.velocity_gradient)
-        {
-            Real velGrad[NO_DIM][noVelComp];
-            velocityGrad( current, posMatrixInverse, velGrad );
-            if (field.velocity) velocity->push_back( velocityValue(velGrad,base,samplePoint) );
-            if (field.velocity_gradient) velocity_gradient->push_back( velocityGradient(velGrad) );
-        }
-#endif
-#ifdef SCALAR
-        if (field.scalar or field.scalar_gradient)
-        {
-            Real sGrad[NO_DIM][noScalarComp];
-            scalarGrad( current, posMatrixInverse, sGrad );
-            if (field.scalar) scalar->push_back( scalarValue(sGrad,base,samplePoint) );
-            if (field.scalar_gradient) scalar_gradient->push_back( scalarGradient(sGrad) );
-        }
-#endif
-    }
-    message << "100%\n" << MESSAGE::Flush;
-    
-    
-#ifdef TEST_PADDING
-    if (field.density)
-        showCellsContainingDummyPoints( &incompleteCells_d, userOptions, userOptions.outputFilename+"_density", "density" ); // report cells whose density may be wrong (incomplete tessellation)
-    if ( field.velocity or field.velocity_gradient or field.scalar or field.scalar_gradient )
-        showCellsContainingDummyPoints( &incompleteCells, userOptions, userOptions.outputFilename+"_fields", "fields" ); // report cells whose other fields may be wrong (incomplete tessellation)
-#endif
+        Point samplePoint = userSamplePoint( samples[i] );
+        pushPointAt( dt, out, padding, current, samplePoint, i );
+    } );
+    padding.write( out.field, userOptions );  // report samples whose values may be wrong (incomplete tessellation)
 }
-
-
-
-
-
-

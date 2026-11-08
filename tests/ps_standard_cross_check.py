@@ -2,7 +2,6 @@
 
 import argparse
 import os
-import subprocess
 import sys
 
 import numpy as np
@@ -27,9 +26,7 @@ DEN_PROFILE_TOL = 0.15
 from ps_test_helpers import load, binary as test_binary, require, DOUBLE, PRECISION
 
 
-def run(cmd):
-    print("   $ " + " ".join(cmd[:3]) + " ...")
-    subprocess.run(cmd, check=True)
+from ps_test_helpers import run
 
 
 def main():
@@ -69,8 +66,8 @@ def main():
 
     common = ["--grid", str(GRID), "--periodic", "--field", "density", "velocity",
               "--input-format", "105", "--mpc-unit", "1", "--verbose", "0"]
-    run([dtfe, snap, std_root] + common)
-    run([psdtfe, snap, ps_root] + common)
+    run([dtfe, snap, std_root] + common, log=std_root + ".log")
+    run([psdtfe, snap, ps_root] + common, log=ps_root + ".log")
 
     sd = load(std_root + ".den", GRID)
     pd = load(ps_root + ".den", GRID)

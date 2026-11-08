@@ -1,6 +1,5 @@
 /* The standard-DTFE GPU kernels' parameter block: ONE definition for the hosts and the Metal kernels.
-   dtfe_metal_host.cc uses it as is and dtfe_gpu_cuda.cu derives its own DepositParams from it (one more field,
-   the guard counters' pointer, which Metal binds as a buffer of its own); the Makefile PREPENDS this file to
+   dtfe_metal_host.cc uses it as is (the guard counters are a buffer of their own); the Makefile PREPENDS this file to
    metal/dtfe_deposit.metal, after exact_clip.metal.inc, when it embeds the kernel source, and the kernels name the
    block DepositParams. So the struct the kernels read cannot drift from the one the hosts fill
    (dtfe_gpu_fixed.h dtfeBatchParams). The file is plain C++ that is also valid MSL: fixed-width scalar types (MSL
@@ -36,7 +35,7 @@ struct DTFEDepositParams
     float    invDx[3];       // 1/dx: the cell of a sample is floor((base + p) * invDx) in both kernels
     uint32_t tableEntries;   // item kernel: entries of the threadgroup cell table (a power of two; 0 = none)
     int32_t  fScal;          // deposit the scalar, ONE component (per-tet kernel; Metal specializes the item
-    int32_t  fSGrad;         // pipelines on FC_SCAL / FC_SGRAD instead, CUDA/HIP reads these in both kernels)
+    int32_t  fSGrad;         // pipelines on FC_SCAL / FC_SGRAD instead)
     // the grids as exact 64-bit fixed-point sums (metal/dtfe_deposit.metal's header). fixedSum = 1: every grid's
     // shares go to its two-word integer buffer (16..20) in units of 1/fxScale[g]; 0: the float atomics into
     // buffers 7/8/9/14/15. The host binds ONE buffer per grid at both indices (sized for the mode in use).

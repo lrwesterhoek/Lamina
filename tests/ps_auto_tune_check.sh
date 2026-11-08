@@ -285,7 +285,7 @@ check "G the estimate stays physical: 0 < ${sg:-none} < 20 streams/point" \
 
 # ---------- (H) the time-aware split of a small set ----------
 echo ">> H: time-aware split for small sets (speed, not memory)"
-GPU_H=0; grep -Eq "METAL=1|CUDA=1|HIP=1" o_ps/.build_mode 2>/dev/null && GPU_H=1   # (-E: GNU and BSD grep alike)
+GPU_H=0; grep -q "METAL=1" o_ps/.build_mode 2>/dev/null && GPU_H=1
 COMMON_H=(--input-format 105 --mpc-unit 1 --verbose 2 --auto-tune-report)
 # H1: a slice of the 64^3 box (4.2M points, 16^3 grid) is triangulation-bound -> 2^3 partitions. The split pays
 # only with enough threads (on 4 it rightly stays one domain), so the thread

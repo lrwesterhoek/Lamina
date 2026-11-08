@@ -69,9 +69,9 @@ DEPRECATED = {"--ps-gpu": "--gpu", "--ps-exact-deposit": "--exact-average", "--p
               "--Voronoi": "--voronoi", "--extensive": "--scalars-extensive", "--randomSample": "--particle-fraction",
               "--options": "--reader-options"}
 
-# flags of other programs the docs quote (nvcc's), and the one binary option kept in camelCase on purpose: its
+# flags of other programs the docs quote (none at present), and the one binary option kept in camelCase on purpose: its
 # 'redshiftSpace=' line is in every tessellation cache and globals record (docs/cleanup-plan.md P6.7)
-FOREIGN = {"--use_fast_math"}
+FOREIGN: set[str] = set()
 KEPT_CAMEL = {"redshiftSpace"}
 # a doc line allowed to name an old spelling (a deprecation note): it says so
 OLD_LINE = re.compile(r"deprecated|\bold(?:er)? names?\b", re.I)
@@ -101,7 +101,7 @@ def read(rel):
 
 
 def code_files():
-    pats = ["src/**/*.cc", "src/**/*.cpp", "src/**/*.h", "src/**/*.hpp", "src/**/*.cu", "src/**/*.metal",
+    pats = ["src/**/*.cc", "src/**/*.cpp", "src/**/*.h", "src/**/*.hpp", "src/**/*.metal",
             "scripts/*.sh", "python/**/*.py", "tests/**/*.py", "tests/**/*.sh", "Makefile", "metal/**/*.cpp"]
     seen = set()
     for pat in pats:

@@ -1,14 +1,12 @@
-/* Backend-neutral host interface to the GPU deposit kernels, implemented by the Metal
-   backend (ps_metal_host.cc / dtfe_metal_host.cc, 'make <target> METAL=1' on macOS/Apple
-   Silicon) and by the CUDA/HIP backend (ps_gpu_cuda.cu / dtfe_gpu_cuda.cu, 'CUDA=1' or
-   'HIP=1' on Linux; single-source ports of the Metal kernels). The callers never see which.
+/* Host interface to the GPU deposit kernels, implemented by the Metal backend
+   (ps_metal_host.cc / dtfe_metal_host.cc, 'make <target> METAL=1' on macOS/Apple Silicon). The
+   callers see only these declarations and the guards below, never a Metal type.
 
    A GPU build defines PS_GPU (PS-DTFE) / DTFE_GPU (standard); the callers in
    ps_interpolation.cc and averaged_interpolation_1.cc guard every use on those and fall
    back to the CPU path on any failure. The GPU results match the CPU path to float
    rounding (atomic summation order) -- the parity contract is validated by
-   tests/dtfe_metal_check.sh and metal/validate_deposit.cpp (Metal; the CUDA/HIP port is
-   compiled and fallback-tested on Linux, not yet validated on hardware).
+   tests/dtfe_metal_check.sh and metal/validate_deposit.cpp.
 
    This header is self-contained (no DTFE/CGAL/backend includes; ps_deposit_params.h is plain C++, and
    ../message.h gives the shared host steps at the end their colours). */
@@ -29,7 +27,7 @@
 #include "ps_deposit_params.h"   // PSFxGrid / PSFixedUnits: the moment grids' fixed-point words
 #include "../message.h"          // ANSI colour helpers only (psHostReportPasses)
 
-// Name of the backend compiled into this binary ("Metal", "CUDA" or "HIP").
+// Name of the backend compiled into this binary ("Metal").
 std::string gpuBackendName();
 
 // Name of the GPU device (empty if unavailable); initializes the device on first call.
@@ -118,8 +116,8 @@ struct PSGpuGrids
 // too (the deferred and released tets): a grid with scale > 0 is deposited as an exact fixed-point sum and
 // handed back as words (out.fx), the rest as float atomics; sumW makes the exact items' weight totals exact.
 // Returns false with 'err' set if there is no device, setup fails or the GPU gives up on the deposit; 'out' is then
-// untouched (its grids are shaped and filled only after a deposit the GPU kept; a CUDA/HIP copy-back that fails
-// returns false with them partly filled -- the caller reads 'out' only after true).
+// untouched (its grids are shaped and filled only after a deposit the GPU kept; the caller reads 'out' only
+// after true).
 // CONSUMES verts/vels/masses/dens/scal (several GB per partition at scale): the backend frees each one
 // right after copying it to the device, so they may be empty when the call returns --
 // the CPU fallback deposits from the triangulation, not from these arrays.
@@ -172,8 +170,8 @@ struct DTFEGpuGrids
 // sets the units from a bound of the batch's shares; metal/dtfe_deposit.metal's header says how the kernels keep
 // the sum independent of the order their threads add in) and the host converts each cell to these floats once,
 // so two runs give byte-identical grids (DTFE_GPU_FLOAT_GRIDS=1 keeps the float atomics
-// for A/B). A failed command buffer / kernel resumes from the batch's last checkpoint, the PS deposit's policy
-// (gpu_metal_retry.h / gpu_cuda_retry.cuh); a false return after the upload means that policy gave up.
+// for A/B). A failed command buffer resumes from the batch's last checkpoint, the PS deposit's policy
+// (gpu_metal_retry.h); a false return after the upload means that policy gave up.
 bool dtfeGpuDepositAveraged1(std::vector<float>& verts,      // nTet*12: 4 vertices, region-relative
                              std::vector<float>& dens,       // nTet*4:  vertex densities
                              std::vector<float>& vels,       // nTet*12: 4 vertex velocities (empty if unused)
@@ -212,7 +210,7 @@ bool dtfeGpuSharedDeposit(std::vector<float>& verts, std::vector<float>& dens, s
 bool dtfeGpuSharedResult(const float** den, const float** vel, const float** grad, const float** scal, const float** sgrad);
 void dtfeGpuSharedEnd();
 
-// --grid-window, the exact deposit (CPU loop and both GPU hosts' item bounds; the kernels carry a twin):
+// --grid-window, the exact deposit (CPU loop and the PS GPU host's item bounds; the kernel carries a twin):
 // the contiguous hull, in RAW (unwrapped) cell indices, of the part of a tetrahedron's span [lo, hi)
 // that lies in the window [o, o+m) or one of its periodic images (o+m may exceed n: a window wrapping
 // the seam). False when the span misses the window. A tetrahedron is shorter than the box, so at
@@ -244,9 +242,9 @@ inline bool psWindowHull(long lo, long hi, long n, bool periodic, long o, long m
 
 
 // ---------------------------------------------------------------- the PS-DTFE GPU hosts' common steps
-// ps_metal_host.cc and ps_gpu_cuda.cu prepare a psGpuDepositFields call the same way: the plan (which grids, which
-// of them as fixed-point words, their device sizes, the mass unit), the output grids' initial shapes, the kernels'
-// parameter block and the exact items' window bounds.
+// The steps of ps_metal_host.cc's psGpuDepositFields that are plain C++: the plan (which grids, which of them as
+// fixed-point words, their device sizes, the mass unit), the output grids' initial shapes, the kernels' parameter
+// block and the exact items' window bounds.
 
 // components per cell of the moment grids, by PSFxGrid index
 inline constexpr size_t PS_FX_COMPS[PS_FX_N] = { 3, 6, 9, 1, 1, 3, 1, 1, 3 };
@@ -446,11 +444,11 @@ inline double psExactItemBounds(float const* recs, size_t nTet, PSDepositParams 
 // (dtfe_gpu_fixed.h dtfeItemMap): tet t's items are its blocks k = 0 .. ceil(bound[t] / blockCells) - 1, item
 // numbers itemStart[t] + k, in tet order -- the same (tet, block) pairs in the same order as a list of pairs, at
 // 4 B per tet plus 4 B per 2^PS_ITEM_BLOCK_SHIFT items instead of 8 B per item. The kernels decode an item with a
-// short binary search (psItemOf in metal/ps_deposit.metal and ps_gpu_cuda.cu). 'map' holds psExactItemMapWords
+// short binary search (psItemOf in metal/ps_deposit.metal). 'map' holds psExactItemMapWords
 // words: itemStart[0 .. nTet] (itemStart[nTet] = nItems), then blockTet[b] = the tet holding item b << SHIFT, for
 // b = 0 .. (nItems >> SHIFT) + 1 (the last ones past the items hold nTet - 1). A tet with no items (bound 0: a
 // leftover) has itemStart[t] == itemStart[t + 1] and no block points at it. The Metal host fills its GPU buffer
-// in place, the CUDA host a host vector it then uploads. Item numbers are 32-bit: psExactItemMapFits first.
+// in place. Item numbers are 32-bit: psExactItemMapFits first.
 inline bool psExactItemMapFits(size_t nTet, size_t nItems) { return nTet < 0xFFFFFFFFu && nItems < 0xFFFFFFFFu; }
 inline size_t psExactItemMapWords(size_t nTet, size_t nItems) { return (nTet + 1) + (nItems >> PS_ITEM_BLOCK_SHIFT) + 2; }
 inline void psBuildExactItemMap(std::vector<uint64_t> const& bound, uint32_t const blockCells, size_t const nItems,
@@ -498,10 +496,10 @@ struct PSHostCkEnv
 // Reads how often a pass checkpoints and after how much clean GPU work an escalated pace steps back.
 inline PSHostCkEnv psHostCheckpointEnv()
 {
-    // DTFE_GPU_CHECKPOINT_CHUNKS=<n>: a checkpoint every n command buffers / kernels (0 = only the pass-start
+    // DTFE_GPU_CHECKPOINT_CHUNKS=<n>: a checkpoint every n command buffers (0 = only the pass-start
     // snapshot). Unset: every ~10 s of GPU work (n = 10 s / the current buffer target, so an escalated pace of
     // 0.02 s buffers does not checkpoint 12x as often). A checkpoint copies the accumulator grids (~24 B per cell
-    // for density + velocity: ~0.4 GB at 256^3, ~0.1 s; the CUDA/HIP host device-to-host) into ONE spare host
+    // for density + velocity: ~0.4 GB at 256^3, ~0.1 s) into ONE spare host
     // copy, allocated at the first checkpoint and held until the partition's deposit returns.
     long ckChunks = -1;
     if (Env::isSet("DTFE_GPU_CHECKPOINT_CHUNKS")) ckChunks = std::max(0L, Env::integer("DTFE_GPU_CHECKPOINT_CHUNKS", 0));
@@ -511,9 +509,8 @@ inline PSHostCkEnv psHostCheckpointEnv()
     return PSHostCkEnv{ ckChunks, paceRecoverSec };
 }
 
-// Reports the passes' failed command buffers / kernels and the checkpoints (after any failure, else under
-// DTFE_GPU_TIMING). backend: "Metal", "CUDA" or "HIP"; unit: what failed, "buffer" (Metal) or "kernel" (CUDA/HIP);
-// snap: the backend's GpuSnapshot (gpu_metal_retry.h / gpu_cuda_retry.cuh).
+// Reports the passes' failed command buffers and the checkpoints (after any failure, else under
+// DTFE_GPU_TIMING). backend: "Metal"; unit: what failed, "buffer"; snap: the host's GpuSnapshot (gpu_metal_retry.h).
 template <class Snapshot>
 inline void psHostReportPasses(char const* backend, char const* unit, bool const success, int const nFailed,
                                int const nResumedCk, Snapshot const& snap, bool const timing)
@@ -532,18 +529,16 @@ inline void psHostReportPasses(char const* backend, char const* unit, bool const
 // hold of the GPU runs from taking the host's ctxMutex to the release of the call's buffers: the GPU idles in all
 // of it but 'kernels'. The call prepares its work before it takes the lock, so the partitions that queue for the
 // GPU do that work while another one holds it; it copies its grids back and frees its buffers before it lets go,
-// so one deposit's buffers exist at a time: the auto-tuner books them once (Metal: unified memory), and on CUDA/HIP,
-// with no free-memory gate, a second set beside the first could overflow the device (an allocation failure: the
-// CPU fallback).
+// so one deposit's buffers exist at a time: the auto-tuner books them once (unified memory).
 //   before the hold:
 //   device     the device and its kernels' first use (ctx(): the runtime compile of the Metal source, once)
 //   plan       the plan and the parameter block (psGpuPlan, psGpuParams)
 //   bounds     the exact items' window bounds (psExactItemBounds)
-//   fill       the exact items' map (psBuildExactItemMap; Metal: into its GPU buffer)
+//   fill       the exact items' map (psBuildExactItemMap, into its GPU buffer)
 //   in the hold:
 //   uploads    the per-tet records to the device, the zeroed grids and the exact items' per-tet totals
-//              (psHostUploadBuffers; CUDA: and the items' map)
-//   kernels    the passes' command buffers / kernels that succeeded (their 'busy' seconds)
+//              (psHostUploadBuffers)
+//   kernels    the passes' command buffers that succeeded (their 'busy' seconds)
 //   gaps       the idle gaps between them (the pace) and the settling sleeps after a failure
 //   leftovers  the exact items' leftovers around their own kernels: the scan, the gathers, the write-back
 //   copyBack   the output grids' shapes (psGpuInitGrids), the deferred tets' scan and the grids back to the host

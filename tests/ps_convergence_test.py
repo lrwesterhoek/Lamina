@@ -16,8 +16,8 @@ Test-design notes:
 """
 
 import argparse
+import functools
 import os
-import subprocess
 import sys
 
 import numpy as np
@@ -41,8 +41,9 @@ FINEST_TOL = 0.008
 from ps_test_helpers import make_cmd, binary as test_binary, require, REAL, PRECISION
 
 
-def run(cmd):
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+from ps_test_helpers import run as _run
+
+run = functools.partial(_run, echo=None, quiet=True)   # the generators' stdout stays out of the log
 
 
 def analytic_single_stream_profile(x, amp):
@@ -90,7 +91,7 @@ def main():
              "--jitter-frac", str(JITTER), "--seed", str(SEED)])
         run([binary, snap, out, "--grid", str(GRID), "--periodic",
              "--subsamples", str(NSUB), "--field", "density_a",
-             "--input-format", "105", "--mpc-unit", "1", "--verbose", "0"])
+             "--input-format", "105", "--mpc-unit", "1", "--verbose", "0"], log=out + ".log")
         err = single_stream_error(out + ".a_den", GRID, AMP)
         errors.append(err)
         print(f"  N={n:>3}^3 ({n**3:>8} particles):  single-stream density_a L1 error = {err:.4f}")

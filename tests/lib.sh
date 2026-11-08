@@ -18,20 +18,17 @@ build_target() {
     fi
 }
 
-# gpu_backend_of <object folder>: the GPU backend stamp the Makefile's mode check left there (metal, cudaemu, cuda or
-# hip: the last of these present), empty when there is none.
+# gpu_backend_of <object folder>: the GPU backend stamp the Makefile's mode check left there ('metal', the only
+# backend), empty when there is none.
 gpu_backend_of() {
-    local m s=""
-    for m in metal cudaemu cuda hip; do [ -f "$1/.gpu_mode_$m" ] && s="$m"; done
-    echo "$s"
+    if [ -f "$1/.gpu_mode_metal" ]; then echo metal; else echo ""; fi
 }
 
 # require_gpu_backend <object folder>: exits 0 with a SKIP line unless the folder exists without '.gpu_mode_off' and
-# carries a backend stamp (any one will do); sets gpu_stamp to it.
+# carries the Metal stamp.
 require_gpu_backend() {
     if [ ! -d "$1" ] || [ -f "$1/.gpu_mode_off" ]; then echo "SKIP: $1 carries no GPU stamp (build with METAL=1)"; exit 0; fi
-    gpu_stamp="$(gpu_backend_of "$1")"
-    if [ -z "$gpu_stamp" ]; then echo "SKIP: $1 is neither a Metal nor a CUDA/HIP (or CUDAEMU) build"; exit 0; fi
+    if [ -z "$(gpu_backend_of "$1")" ]; then echo "SKIP: $1 is not a Metal build"; exit 0; fi
 }
 
 # die_on_failed_run <exit status> <log> [<program>]: for a run that exited non-zero, the program (default PS-DTFE),

@@ -14,8 +14,7 @@
      were dropped once the backend-neutral names had shipped. PS_GPU_CHUNK and PS_GPU_DEBUG_NOATOMIC keep their own
      names: standard DTFE's DTFE_GPU_CHUNK counts work items, not tetrahedra, and its DTFE_GPU_DEBUG_NOATOMIC is a
      level 1-3, not a switch.
-   Plain C++17 with no other header of the project: the CUDA/HIP sources (nvcc, hipcc, the CPU emulation) include it
-   too. */
+   Plain C++17 with no other header of the project, so any translation unit can include it. */
 #ifndef DTFE_ENV_KNOBS_H
 #define DTFE_ENV_KNOBS_H
 
@@ -44,7 +43,6 @@ static constexpr Renamed renamed[] = {
     { "DTFE_GPU_FLOAT_MOMENTS",             "PS_GPU_FLOAT_MOMENTS",     false },
     { "DTFE_MASS_AUDIT",                    "PS_MASS_AUDIT",            false },
     { "DTFE_DEBUG_DEGREES",                 "PS_DEBUG_DEGREES",         false },
-    { "DTFE_GPU_EMU_WARP",                  "GPU_EMU_WARP",             false },
     { "DTFE_GPU_EXACT_CELLS",               "PS_EXACT_ITEM_CELLS",      false },
     { "DTFE_GPU_ITEMS",                     "PS_EXACT_ITEMS",           false },
     { "DTFE_TRIANGULATION_THREADS",         "DTFE_TBB_THREADS",         false },

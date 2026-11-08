@@ -1,6 +1,7 @@
 """Shared helpers for the PS-DTFE test scripts (import with tests/ as the script dir)."""
 
 import os
+import subprocess
 import sys
 
 import numpy as np
@@ -70,3 +71,26 @@ def load(path, grid, ncomp=1):
     else:
         sys.exit(f"FAIL: {path} has {raw.size} bytes, expected {n*4} or {n*8}")
     return d.reshape((grid, grid, grid) + ((ncomp,) if ncomp > 1 else ()))
+
+
+def run(cmd, log=None, echo="head", quiet=False, **kw):
+    """Run a command the way the suites run the binaries. With 'log', stdout and stderr go to that file, where
+    tests/dev/deprecation_gate.sh reads them (the battery's stage log is not read), and a failed run prints the
+    file's last 40 lines before it raises. Without a log, 'quiet' sends stdout to /dev/null (the data generators).
+    'echo' prints the command first: 'head' its first three words, 'full' the whole line when it is short, None
+    nothing. Other keywords go to subprocess.run (cwd=...)."""
+    if echo == "head":
+        print("   $ " + " ".join(cmd[:3]) + " ...")
+    elif echo == "full":
+        print("   $ " + " ".join(cmd if len(" ".join(cmd)) < 200 else cmd[:3] + ["..."]))
+    if log is None:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL if quiet else None, **kw)
+        return
+    with open(log, "wb") as fh:
+        rc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT, **kw).returncode
+    if rc != 0:
+        with open(log, "rb") as fh:
+            tail = fh.read().decode(errors="replace").splitlines()[-40:]
+        print(f"   {os.path.basename(cmd[0])} exit {rc}, the last {len(tail)} lines of {log}:")
+        print("\n".join("      | " + line for line in tail), flush=True)
+        raise subprocess.CalledProcessError(rc, cmd)

@@ -10,6 +10,7 @@ Requires numpy, h5py, the PS-DTFE build toolchain.
 import argparse
 import json
 import math
+import functools
 import os
 import subprocess
 import sys
@@ -124,9 +125,9 @@ def check_dispersion(disp, vel, streams, grid=GRID, box=BOX, amp=AMP):
     return failures, round(ratio, 3)
 
 
-def run(cmd, **kw):
-    print("   $ " + " ".join(cmd if len(" ".join(cmd)) < 200 else cmd[:3] + ["..."]))
-    subprocess.run(cmd, check=True, **kw)
+from ps_test_helpers import run as _run
+
+run = functools.partial(_run, echo="full")   # the whole command line, as this suite always printed it
 
 
 def check_caustics(binary, snap, grid=GRID, box=BOX, amp=AMP):
@@ -159,7 +160,7 @@ def check_caustics(binary, snap, grid=GRID, box=BOX, amp=AMP):
                 pass
         run([binary, snap, root, "--grid", str(grid), "--periodic",
              "--field", "density", "--ps-caustics",
-             "--input-format", "105", "--mpc-unit", "1", "--verbose", "0"] + extra)
+             "--input-format", "105", "--mpc-unit", "1", "--verbose", "0"] + extra, log=root + ".log")
         roots[tag] = root
 
     with open(roots["serial"] + ".caustic", "rb") as fa, \
@@ -386,7 +387,7 @@ def main():
     run([binary, snap, out_root, "--grid", str(GRID), "--periodic",
          "--field", "density", "velocity", "density_a", "dispersion",
          "--sample-points", pts_file,
-         "--input-format", "105", "--mpc-unit", "1", "--verbose", "1"])
+         "--input-format", "105", "--mpc-unit", "1", "--verbose", "1"], log=out_root + ".log")
 
     den = load_field(out_root + ".den", GRID)
     streams = load_field(out_root + ".streams", GRID)

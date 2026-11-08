@@ -1,9 +1,9 @@
-/* The standard-DTFE GPU deposit's exact sums: the units of its 64-bit fixed-point grids, shared by
-   the two GPU hosts of the standard binary (dtfe_metal_host.cc, dtfe_gpu_cuda.cu). Host-side only, plain C++ (no
+/* The standard-DTFE GPU deposit's exact sums: the units of its 64-bit fixed-point grids, for
+   the GPU host of the standard binary (dtfe_metal_host.cc). Host-side only, plain C++ (no
    backend includes); the fixed-point rule itself is the phase-space mass grid's (ps_deposit_params.h:
    psMassFixedScale picks the unit, psMassFixedMass converts a cell back). Why the grids are integer sums, and how
    the kernels keep them independent of the order their atomics land in: metal/dtfe_deposit.metal's header.
-   Below batchFixedScales: the other host-side steps the two hosts share (the knobs, a batch's parameter block
+   Below batchFixedScales: the other host-side steps that need no Metal type (the knobs, a batch's parameter block
    and item map, the timing line, the shared grid's checks). */
 #ifndef DTFE_GPU_FIXED_H
 #define DTFE_GPU_FIXED_H

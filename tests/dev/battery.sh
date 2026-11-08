@@ -8,8 +8,6 @@
 # of the suites that test the old spellings (the allow-list in tests/dev/deprecation_gate.sh). A suite that several
 # stages run (ci_core and then ci_double into the same DTFE_TEST_TMP) clears its folder or rewrites its logs on each
 # run, so the gate sees each suite's last run of the battery; '--only deprecation_gate' alone reads the whole folder.
-# Five python suites (ps_3d_test, ps_standard_cross_check, ps_convergence_test, ps_nonperiodic_test,
-# ps_regression_test) let the binaries' stderr through to the stage log, which the gate does not read.
 #
 # Usage: tests/dev/battery.sh <scratch dir> [--ci-python PATH] [--gui-python PATH] [--only NAME,NAME...] [--list]
 #   <scratch dir>   logs (<scratch>/battery/<stage>.log and SUMMARY.txt), the suites' temporary files and the

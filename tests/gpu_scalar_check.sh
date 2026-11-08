@@ -22,7 +22,7 @@ precision_require "${DTFE_BIN}" "${PS_BIN}"
 for b in DTFE PS-DTFE; do [ -x "./$b" ] || { echo "FAIL: ./$b is not built"; exit 1; }; done
 OBJS="o o_ps"; precision_double && OBJS="o_d o_ps_d"
 for d in ${OBJS}; do
-    if [ ! -d "$d" ] || [ -f "$d/.gpu_mode_off" ]; then echo "SKIP: $d carries no GPU stamp (build with METAL=1 / CUDA=1 / HIP=1)"; exit 0; fi
+    if [ ! -d "$d" ] || [ -f "$d/.gpu_mode_off" ]; then echo "SKIP: $d carries no GPU stamp (build with METAL=1)"; exit 0; fi
 done
 TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}/gpu_scalar_check"
 mkdir -p "$TMP"

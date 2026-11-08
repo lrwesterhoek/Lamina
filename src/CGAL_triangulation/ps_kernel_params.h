@@ -1,12 +1,12 @@
 /* The PS-DTFE GPU kernels' parameter blocks: ONE definition for the hosts and the Metal kernels.
-   The hosts (ps_metal_host.cc, ps_gpu_cuda.cu, metal/validate_deposit.cpp) include it through ps_deposit_params.h
+   The hosts (ps_metal_host.cc, metal/validate_deposit.cpp) include it through ps_deposit_params.h
    (PSDepositParams); the Makefile PREPENDS this file to metal/ps_deposit.metal, after exact_clip.metal.inc, when it
    embeds the kernel source (metal/validate_deposit.cpp and metal/build_prototype.sh do the same), and the kernels
    name the blocks DepositParams and ExactItemParams. So the struct the kernels read cannot drift from the one the
    hosts fill. The file is plain C++ that is also valid MSL: fixed-width scalar types (MSL has int32_t and
    uint32_t), arrays and no vector types (a float3 would be padded to 16 bytes), no includes under MSL. Its
    static_asserts run in both compilers and pin the layout the field offsets below imply.
-   Each field's buffer numbers are those of metal/ps_deposit.metal; the CUDA/HIP port passes the block by value. */
+   Each field's buffer numbers are those of metal/ps_deposit.metal. */
 #ifndef PS_KERNEL_PARAMS_H
 #define PS_KERNEL_PARAMS_H
 
@@ -95,7 +95,7 @@ static_assert(sizeof(PSDepositParams) == 41 * 4, "PSDepositParams: 41 four-byte 
 // depositExactItems' per-dispatch parameters (Metal buffer 17, set per command buffer): the items of this chunk,
 // the pass (== the pipeline's kItemsPhase), the cells per item, and badAt = the word of the sumW buffer where the
 // non-finite guard's counters start, past the per-tet totals (Metal: every one of the 31 buffer slots is taken, so
-// they ride in that buffer's tail; the CUDA/HIP port passes its own counter buffer and leaves badAt 0).
+// they ride in that buffer's tail).
 // itemBase = the chunk's first item and nTet = the tets of the items' map (gpu_host.h psBuildExactItemMap): the
 // chunk's thread k runs item itemBase + k, which the kernel decodes from the map (psItemOf)
 struct PSExactItemParams

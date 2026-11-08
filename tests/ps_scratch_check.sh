@@ -48,10 +48,10 @@ if [ "${1:-}" != "--no-build" ]; then
     make PS-DTFE ${BUILD_MODE:+"$BUILD_MODE"} >/dev/null
 fi
 [ -x "${BIN}" ] || { echo "FAIL: ${BIN} not built"; exit 1; }
-# GPU deposit compiled in: the build mode names a backend (o_ps/.gpu_mode_off alone would also call the CUDA
-# emulator and a never-stamped tree "GPU")
+# GPU deposit compiled in: the build mode names METAL=1 (the mere absence of o_ps/.gpu_mode_off would also call a
+# never-stamped tree "GPU")
 GPU_BUILT=0
-grep -Eq "METAL=1|CUDA=1|HIP=1|CUDAEMU=1" o_ps/.build_mode 2>/dev/null && GPU_BUILT=1
+grep -q "METAL=1" o_ps/.build_mode 2>/dev/null && GPU_BUILT=1
 
 echo ">> generating test snapshot ..."
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP}" --n "${N}" --box "${BOX}" \

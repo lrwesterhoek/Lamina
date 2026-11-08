@@ -112,8 +112,8 @@ FRAC_TOL  = 1e-3    # at most this fraction of cells may exceed 1e-3 relative
 MEAN_TOL  = 1e-5    # field means must agree this closely (relative to max|field|)
 REPEAT_TOL = 1e-4   # two GPU runs: atomic summation order only (a stray deposit would be ~1e-2)
 # the velocity GRADIENT is constant per tetrahedron and jumps across its faces, so one borderline sample that the
-# float GPU puts in the neighbouring tetrahedron moves a cell by a whole jump (7.7e-2 in 3.4e-5 of the values on
-# CI's x86-64 under CUDAEMU). Only that case is let past the peak ceiling: a SAMPLED pair ('s', 'p';
+# float GPU puts in the neighbouring tetrahedron moves a cell by a whole jump (7.7e-2 in 3.4e-5 of the values, as
+# once measured). Only that case is let past the peak ceiling: a SAMPLED pair ('s', 'p';
 # the exact average 'e' samples nothing, so nothing can flip there), a differing fraction 10x below FRAC_TOL and a
 # peak still bounded: a misplaced deposit in a few hundred cells exceeds that fraction. A gradient's signed mean is ~0
 # on a periodic box, blind to a corrupted or scaled gradient, so it is also held to its mean |value|

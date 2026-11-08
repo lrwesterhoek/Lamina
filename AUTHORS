@@ -24,6 +24,6 @@ Author of the phase-space DTFE (PS-DTFE, after Feldbrugge 2024) and the later wo
         The Netherlands
 
         The phase-space DTFE, the exact / point evaluation methods, automatic memory
-        management, the GPU backends (Metal, and its CUDA/HIP port) and the analysis pipeline.
+        management, the Metal GPU backend and the analysis pipeline.
 
 

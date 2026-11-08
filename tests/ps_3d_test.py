@@ -16,7 +16,6 @@ Test-design notes (why these parameters and criteria):
 import argparse
 import math
 import os
-import subprocess
 import sys
 
 import numpy as np
@@ -38,9 +37,7 @@ JITTER = 0.02
 from ps_test_helpers import make_cmd, load, binary as test_binary, require, PRECISION
 
 
-def run(cmd):
-    print("   $ " + " ".join(cmd[:3]) + " ...")
-    subprocess.run(cmd, check=True)
+from ps_test_helpers import run
 
 
 def main():
@@ -65,7 +62,7 @@ def main():
          "--out", snap, "--n", str(N), "--box", str(BOX), "--amplitude-factor", str(AMP),
          "--crossed-waves", "--jitter-frac", str(JITTER), "--seed", str(SEED)])
     run([binary, snap, out, "--grid", str(GRID), "--periodic", "--partition", "2", "2", "2",
-         "--field", "density", "--input-format", "105", "--mpc-unit", "1", "--verbose", "0"])
+         "--field", "density", "--input-format", "105", "--mpc-unit", "1", "--verbose", "0"], log=out + ".log")
 
     den = load(out + ".den", GRID)
     streams = np.rint(load(out + ".streams", GRID)).astype(int)

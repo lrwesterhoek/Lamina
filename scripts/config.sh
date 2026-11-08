@@ -304,15 +304,13 @@ run_lock_release() {
 # gpu_build_default <repo root> <binary>: 1 when the Makefile built <binary> (./DTFE, ./DTFE-double, ./PS-DTFE,
 # ./PS-DTFE-double) with a GPU backend, else 0 -- the drivers' default for DTFE_GPU ('auto': every
 # production grid runs on the GPU, so a driver run without -m does too). The answer is the stamp the
-# Makefile's mode check leaves in the pair's object folder (o, o_d, o_ps, o_ps_d): '.gpu_mode_metal', '_cuda' or
-# '_hip'. The binary itself cannot be asked: '--help' lists --gpu in every build and '--version' names no
-# backend. NOT the launcher's rule (python/gui/runspec.py gpu_built: any stamp but '.gpu_mode_off'), on purpose: the
-# a CUDAEMU=1 build emulates the CUDA kernels on the CPU, far slower than the CPU path, so it is no GPU here (-m
-# still switches it on). No object folder (binaries copied without their build) = 0. A stale stamp (a binary put
+# Makefile's mode check leaves in the pair's object folder (o, o_d, o_ps, o_ps_d): '.gpu_mode_metal' (a CPU-only
+# build leaves '.gpu_mode_off'). The binary itself cannot be asked: '--help' lists --gpu in every build and
+# '--version' names no backend. No object folder (binaries copied without their build) = 0. A stale stamp (a binary put
 # back by install_lib.sh after a failed rebuild in another mode) costs nothing: '--gpu' on a CPU build falls back to
 # the CPU with a warning, and the CPU on a GPU build is slower, not different.
 gpu_build_default() {
-    local root="$1" obj m
+    local root="$1" obj
     case "${2##*/}" in
         DTFE) obj=o ;;
         DTFE-double) obj=o_d ;;
@@ -320,9 +318,7 @@ gpu_build_default() {
         PS-DTFE-double) obj=o_ps_d ;;
         *) echo 0; return 0 ;;
     esac
-    for m in metal cuda hip; do
-        [ -e "${root}/${obj}/.gpu_mode_${m}" ] && { echo 1; return 0; }
-    done
+    [ -e "${root}/${obj}/.gpu_mode_metal" ] && { echo 1; return 0; }
     echo 0
 }
 

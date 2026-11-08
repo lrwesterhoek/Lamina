@@ -55,7 +55,7 @@ echo "============================================================"
 build_target "${1:-}" PS-DTFE o_ps
 [ -x "${BIN}" ] || { echo "FAIL: ${BIN} not built"; exit 1; }
 GPU=0
-grep -q "METAL=1\|CUDA=1\|HIP=1" o_ps/.build_mode 2>/dev/null && GPU=1
+grep -q "METAL=1" o_ps/.build_mode 2>/dev/null && GPU=1
 
 echo ">> generating the pancake, the crossed waves and ${K}^3 points per cell ..."
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP_PAN}" --n "${N}" --box "${BOX}" \

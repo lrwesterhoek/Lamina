@@ -656,7 +656,7 @@ namespace {
    9 threads: 37.4 vs 30.0 GB), yet what the code allocates has no exact-average term:
      - CPU (averaged_interpolation_1.cc): the exact loop clips each tetrahedron against its cell window with r3d on the
        stack -- no per-tetrahedron or per-cell storage that the Monte-Carlo loop does not have;
-     - GPU (dtfe_metal_host.cc / dtfe_gpu_cuda.cu): BOTH averages extract the same flat arrays of the tetrahedra that
+     - GPU (dtfe_metal_host.cc): BOTH averages extract the same flat arrays of the tetrahedra that
        touch the thread's region (vertices 48 B, densities 16, velocities 48, volume, count, flat index, Morton key
        4 each), sort them in place, upload them into buffers of the same size, and deposit into the same per-call
        sub-grid (device + host copy). The exact kernel's only extra is its work-item table (4 B per tetrahedron and
@@ -1782,7 +1782,7 @@ struct AutoTunePSPlanner : AutoTunePSInputs
     // totals (4 B/tet) -- taken at each pass's start and every ~10 s of GPU work. It is ~4.7 GB per
     // partition at 1024^3 split 2^3 (volume-weighted velocity), past the gate's 4 GB headroom. Not in
     // partitionBytes(): the deposits run one at a time (ctxMutex), so whatever the concurrency there is ONE such
-    // copy, added once to every plan below. (The CUDA port keeps none yet: there it is slack; the model errs high.)
+    // copy, added once to every plan below.
     // --grid-window: every partition's sub-grid is the whole window (subGridCells), and the grids of the deposit
     // running are held once in the same way -- the device and host copies (gpuCellBytes) and, beside them, the
     // partition's own sub-grids (bCellDeposit: its density, counts and flags; fxCell + fxMom: the fixed-point words
@@ -2518,7 +2518,7 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     // for the dummy points the padding test adds (stdBytesPerPaddedVertex, shared with the partition loop's look-ahead)
     double const perVertex = stdBytesPerPaddedVertex( u );
 
-    /* The GPU deposit of the '_a' pass (averaged_interpolation_1.cc -> dtfe_metal_host.cc / dtfe_gpu_cuda.cu), the
+    /* The GPU deposit of the '_a' pass (averaged_interpolation_1.cc -> dtfe_metal_host.cc), the
        same for the sampled and the exact average (see StdTuneDensity's comment): per tetrahedron of a thread's own box
        the flat arrays (vertices 48, densities 16, velocities 48 when a velocity-derived '_a' grid is asked, the scalar
        16, volume, sample count, flat index and Morton key 4 each), the Morton order pairs (8), one array's sort copy

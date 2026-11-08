@@ -37,7 +37,7 @@
 #       10 threads (copy mode' (single build: '0 MB of private accumulators'), and EVERY output file is byte-identical
 #       to the 1-thread run's. Double build: the counts, flags and masks (.a_streams .a_hidden_streams .caustic
 #       .causticClass) byte-identical, the double sums (.a_den .a_vel, still copies summed in thread order) to 1e-12.
-# The GPU halves (X1 GPU, X3 GPU) need a GPU build (Metal, or CUDA/HIP incl. the CUDAEMU=1 emulation); they print
+# The GPU halves (X1 GPU, X3 GPU) need a GPU build (METAL=1); they print
 # SKIP otherwise and the CPU halves still run, so the suite runs in tests/ci_suite.sh (core and double). 12 s
 # without the GPU halves, 23 s with them (M-series Mac, 10 cores; X7 adds ~8 s: 31 s).
 # Usage: tests/ps_mass_exact_check.sh [--no-build]

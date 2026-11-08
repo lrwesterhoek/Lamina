@@ -218,40 +218,18 @@ OPTIONS = $(OPTIONS_COMMON)
 # PS-DTFE build: includes PHASE_SPACE flag (triangulates in Lagrangian space, multi-stream regions)
 OPTIONS_PS = $(OPTIONS_COMMON) -DPHASE_SPACE
 
-# ---- GPU backend (optional, choose at most one): METAL=1 on macOS/Apple Silicon, CUDA=1 on
-# Linux with an NVIDIA GPU (needs nvcc), HIP=1 on Linux with an AMD GPU (ROCm, needs hipcc).
-# Any backend defines DTFE_GPU / PS_GPU (the backend-neutral guards used by the callers) plus
-# GPU_BACKEND_NAME, links its host object and libraries, and the binary is run with '--gpu'
-# (standard DTFE) / '--ps-gpu' (PS-DTFE). Without a backend the build is CPU-only and those
-# flags fall back to the CPU with a warning. Metal embeds + runtime-compiles the kernels in
-# metal/*.metal; CUDA/HIP compile the single-source ports src/CGAL_triangulation/{ps,dtfe}_gpu_cuda.cu
-# ahead of time (the Metal kernels are the reference: the .cu files are line-by-line ports, compiled
-# and tested on Linux by the CPU fallback and the CPU emulation (CUDAEMU=1, below), not yet run on NVIDIA/AMD
-# hardware -- metal/README.md).
+# ---- GPU backend (optional): METAL=1 on macOS/Apple Silicon, the only one. It defines DTFE_GPU / PS_GPU (the
+# guards used by the callers) plus GPU_BACKEND_NAME, links the Metal host object and frameworks, and the binary is
+# run with '--gpu' (standard DTFE) / '--ps-gpu' (PS-DTFE). Without it the build is CPU-only and those flags fall
+# back to the CPU with a warning. Metal embeds + runtime-compiles the kernels in metal/*.metal. The CUDA/HIP port
+# and its CPU emulation (CUDA=1, HIP=1, CUDAEMU=1) are kept on the branch archive/cuda-hip-2026-11-08, not here:
+# an old command line naming them stops at once rather than building a CPU-only binary under that name.
+ifneq ($(filter 1,$(CUDA) $(HIP) $(CUDAEMU)),)
+$(error CUDA=1, HIP=1 and CUDAEMU=1 are gone: this tree is Metal-only (METAL=1); the CUDA/HIP port is on the branch archive/cuda-hip-2026-11-08)
+endif
 GPU_MODE = off
 ifeq ($(METAL),1)
 GPU_MODE = metal
-endif
-ifeq ($(CUDA),1)
-ifneq ($(GPU_MODE),off)
-$(error choose exactly one GPU backend: METAL=1, CUDA=1 or HIP=1)
-endif
-GPU_MODE = cuda
-endif
-ifeq ($(HIP),1)
-ifneq ($(GPU_MODE),off)
-$(error choose exactly one GPU backend: METAL=1, CUDA=1 or HIP=1)
-endif
-GPU_MODE = hip
-endif
-# CUDAEMU=1: the CUDA/HIP backend compiled as plain C++ against the CPU emulation of the device
-# API in gpu_cuda_compat.h / gpu_cuda_emu.h -- a validation build for machines without an NVIDIA
-# or AMD GPU (the kernels run on OS threads, one block at a time). Not a production backend.
-ifeq ($(CUDAEMU),1)
-ifneq ($(GPU_MODE),off)
-$(error choose exactly one GPU backend: METAL=1, CUDA=1, HIP=1 or CUDAEMU=1)
-endif
-GPU_MODE = cudaemu
 endif
 
 DTFE_GPU_OBJS =
@@ -280,69 +258,9 @@ PS_GPU_LIBS = -framework Metal -framework Foundation
 GPU_BUILD_ARG = METAL=1
 endif
 
-# GPU_ARCH: optional target architecture. CUDA: nvcc's default (PTX) is forward-portable, set
-# e.g. GPU_ARCH=sm_86 only to skip the first-launch JIT. HIP: STRONGLY recommended when building
-# on a machine that cannot see the target GPU (login nodes, containers) -- HIP has no portable IR,
-# hipcc compiles for the build machine's arch (or clang's default), and an arch-mismatched binary
-# skips the GPU or aborts at startup. Find the arch with 'rocminfo | grep gfx' (e.g.
-# GPU_ARCH=gfx90a; several: "gfx90a gfx942"). The .cu objects are built -fPIC once per object
-# directory and link into the binary AND libDTFE (no _l twin).
-GPU_ARCH ?=
-
-ifeq ($(GPU_MODE),cuda)
-CUDA_PATH ?= /usr/local/cuda
-NVCC ?= $(if $(shell command -v nvcc 2>/dev/null),nvcc,$(CUDA_PATH)/bin/nvcc)
-GPUXX = $(NVCC)
-GPUXX_FLAGS = -O3 -std=c++17 -Xcompiler -fPIC $(if $(GPU_ARCH),-arch=$(GPU_ARCH))
-OPTIONS    += -DDTFE_GPU -DGPU_BACKEND_NAME=\"CUDA\"
-OPTIONS_PS += -DPS_GPU -DGPU_BACKEND_NAME=\"CUDA\"
-DTFE_GPU_OBJS = $(OBJ_DIR)/dtfe_gpu_cuda$(OBJ_EXT)
-DTFE_GPU_L_OBJS = $(DTFE_GPU_OBJS)
-DTFE_GPU_LIBS = -L$(CUDA_PATH)/lib64 -lcudart
-PS_GPU_OBJS = $(OBJ_DIR_PS)/ps_gpu_cuda$(OBJ_EXT)
-PS_GPU_LIBS = -L$(CUDA_PATH)/lib64 -lcudart
-GPU_BUILD_ARG = CUDA=1
-endif
-
-ifeq ($(GPU_MODE),cudaemu)
-GPUXX = $(CC)
-GPUXX_FLAGS = -x c++ -std=c++20 -O2 -fPIC -DGPU_EMU -Wno-unused-function -Wno-deprecated-declarations $(MACOS_ISYSROOT)
-# x86-64: the emulation's lanes switch stacks by hand (gpu_cuda_emu.h gpuemu_switch), which a
-# CET shadow stack would kill at the first 'ret' into another lane. Ubuntu's GCC marks every object
-# shadow-stack compatible by default (-fcf-protection); leaving this one unmarked keeps the linked binary
-# unmarked, so the loader never turns the shadow stack on. arm64 has no such flag.
-ifeq ($(shell uname -m),x86_64)
-GPUXX_FLAGS += -fcf-protection=none
-endif
-OPTIONS    += -DDTFE_GPU -DGPU_BACKEND_NAME=\"CUDA-emulated\"
-OPTIONS_PS += -DPS_GPU -DGPU_BACKEND_NAME=\"CUDA-emulated\"
-DTFE_GPU_OBJS = $(OBJ_DIR)/dtfe_gpu_cuda$(OBJ_EXT)
-DTFE_GPU_L_OBJS = $(DTFE_GPU_OBJS)
-DTFE_GPU_LIBS = -lpthread
-PS_GPU_OBJS = $(OBJ_DIR_PS)/ps_gpu_cuda$(OBJ_EXT)
-PS_GPU_LIBS = -lpthread
-GPU_BUILD_ARG = CUDAEMU=1
-endif
-
-ifeq ($(GPU_MODE),hip)
-ROCM_PATH ?= /opt/rocm
-HIPCC ?= $(if $(shell command -v hipcc 2>/dev/null),hipcc,$(ROCM_PATH)/bin/hipcc)
-GPUXX = $(HIPCC)
-GPUXX_FLAGS = -O3 -std=c++17 -fPIC -x hip $(foreach a,$(GPU_ARCH),--offload-arch=$(a))
-OPTIONS    += -DDTFE_GPU -DGPU_BACKEND_NAME=\"HIP\"
-OPTIONS_PS += -DPS_GPU -DGPU_BACKEND_NAME=\"HIP\"
-DTFE_GPU_OBJS = $(OBJ_DIR)/dtfe_gpu_cuda$(OBJ_EXT)
-DTFE_GPU_L_OBJS = $(DTFE_GPU_OBJS)
-DTFE_GPU_LIBS = -L$(ROCM_PATH)/lib -lamdhip64
-PS_GPU_OBJS = $(OBJ_DIR_PS)/ps_gpu_cuda$(OBJ_EXT)
-PS_GPU_LIBS = -L$(ROCM_PATH)/lib -lamdhip64
-GPU_BUILD_ARG = HIP=1
-endif
-
 # A build must never mix GPU-mode and plain objects (an incremental 'make PS-DTFE' after a
-# METAL=1/CUDA=1/HIP=1 build -- or any backend switch -- would silently produce a binary whose
-# components disagree about PS_GPU). The mode is stamped in the object dir; when it changes,
-# all its objects are wiped first. '.build_mode' records the make argument ("METAL=1",
+# METAL=1 build would silently produce a binary whose components disagree about PS_GPU).
+# The mode is stamped in the object dir; when it changes, all its objects are wiped first. '.build_mode' records the make argument ("METAL=1",
 # empty for CPU-only) so tests can rebuild in the same mode: make PS-DTFE $$(cat o_ps/.build_mode)
 .PHONY: ps_gpu_mode_check
 ps_gpu_mode_check:
@@ -630,7 +548,7 @@ DTFE_SOURCES = DTFE.cpp define.h particle_data.h user_options.h box.h quantities
 # the derived velocity fields and the V-web / T-web (moved out of DTFE.cpp)
 WEB_FIELDS_SOURCES = web_fields.cc web_fields.h define.h user_options.h quantities.h message.h fftw_plans64.h
 DTFE_CC_SOURCES = user_options.cc quantities.cc NGP_interpolation.cc CIC_interpolation.cc TSC_interpolation.cc PCS_interpolation.cc SPH_interpolation.cc interlacing.cc random.cc web_fields.cc auto_tune.cc
-TRIANG_HEADERS = $(addprefix CGAL_triangulation/, triangulation_common.h triangulation_miscellaneous.h field_computation.h padding_test.h my_function.h CGAL_include_2D.h CGAL_include_3D.h vertexData.h particle_data_traits.h) define.h particle_data.h user_options.h box.h quantities.h Pvector.h message.h math_functions.h miscellaneous.h ps_point_eval.h thread_count.h
+TRIANG_HEADERS = $(addprefix CGAL_triangulation/, triangulation_common.h triangulation_miscellaneous.h field_computation.h sample_eval.h padding_test.h my_function.h CGAL_include_2D.h CGAL_include_3D.h vertexData.h particle_data_traits.h) define.h particle_data.h user_options.h box.h quantities.h Pvector.h message.h math_functions.h miscellaneous.h ps_point_eval.h thread_count.h
 TRIANG_SOURCES = $(addprefix CGAL_triangulation/, triangulation.cpp) $(TRIANG_HEADERS)
 TRIANG_CC_SOURCES = $(addprefix CGAL_triangulation/, unaveraged_interpolation.cc averaged_interpolation_1.cc averaged_interpolation_2.cc ps_interpolation.cc ps_point_eval.cc ps_serve.cc ps_mean_streams.cc)
 
@@ -864,7 +782,7 @@ $(OBJ_DIR_PS)/ps_deposit_msl.h: metal/ps_deposit.metal metal/exact_clip.metal.in
 	{ printf 'static const char PS_DEPOSIT_MSL[] = R"MSL(\n'; cat metal/exact_clip.metal.inc $(SRC)/CGAL_triangulation/ps_kernel_params.h metal/ps_deposit.metal; printf '\n)MSL";\n'; } > $@.tmp
 	mv $@.tmp $@
 
-$(OBJ_DIR_PS)/ps_metal_host$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_metal_host.cc $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_metal_retry.h $(SRC)/CGAL_triangulation/gpu_retry_common.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(SRC)/CGAL_triangulation/ps_kernel_params.h $(OBJ_DIR_PS)/ps_deposit_msl.h Makefile
+$(OBJ_DIR_PS)/ps_metal_host$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_metal_host.cc $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_metal_retry.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(SRC)/CGAL_triangulation/ps_kernel_params.h $(OBJ_DIR_PS)/ps_deposit_msl.h Makefile
 	$(CC) $(COMPILE_FLAGS_PS) -isystem third_party/metal-cpp -I $(OBJ_DIR_PS) -o $@ -c $(SRC)/CGAL_triangulation/ps_metal_host.cc
 
 # Standard-DTFE Metal deposit host (METAL=1 only), same embedding scheme in $(OBJ_DIR).
@@ -873,23 +791,11 @@ $(OBJ_DIR)/dtfe_deposit_msl.h: metal/dtfe_deposit.metal metal/exact_clip.metal.i
 	{ printf 'static const char DTFE_DEPOSIT_MSL[] = R"MSL(\n'; cat metal/exact_clip.metal.inc $(SRC)/CGAL_triangulation/dtfe_deposit_params.h metal/dtfe_deposit.metal; printf '\n)MSL";\n'; } > $@.tmp
 	mv $@.tmp $@
 
-$(OBJ_DIR)/dtfe_metal_host$(OBJ_EXT): $(SRC)/CGAL_triangulation/dtfe_metal_host.cc $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_metal_retry.h $(SRC)/CGAL_triangulation/gpu_retry_common.h $(SRC)/CGAL_triangulation/dtfe_gpu_fixed.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(SRC)/CGAL_triangulation/dtfe_deposit_params.h $(OBJ_DIR)/dtfe_deposit_msl.h Makefile
+$(OBJ_DIR)/dtfe_metal_host$(OBJ_EXT): $(SRC)/CGAL_triangulation/dtfe_metal_host.cc $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_metal_retry.h $(SRC)/CGAL_triangulation/dtfe_gpu_fixed.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(SRC)/CGAL_triangulation/dtfe_deposit_params.h $(OBJ_DIR)/dtfe_deposit_msl.h Makefile
 	$(CC) $(COMPILE_FLAGS) -isystem third_party/metal-cpp -I $(OBJ_DIR) -o $@ -c $(SRC)/CGAL_triangulation/dtfe_metal_host.cc
 
-$(OBJ_DIR)/dtfe_metal_host_l$(OBJ_EXT): $(SRC)/CGAL_triangulation/dtfe_metal_host.cc $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_metal_retry.h $(SRC)/CGAL_triangulation/gpu_retry_common.h $(SRC)/CGAL_triangulation/dtfe_gpu_fixed.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(SRC)/CGAL_triangulation/dtfe_deposit_params.h $(OBJ_DIR)/dtfe_deposit_msl.h Makefile
+$(OBJ_DIR)/dtfe_metal_host_l$(OBJ_EXT): $(SRC)/CGAL_triangulation/dtfe_metal_host.cc $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_metal_retry.h $(SRC)/CGAL_triangulation/dtfe_gpu_fixed.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(SRC)/CGAL_triangulation/dtfe_deposit_params.h $(OBJ_DIR)/dtfe_deposit_msl.h Makefile
 	$(CC) $(COMPILE_FLAGS) -fPIC -isystem third_party/metal-cpp -I $(OBJ_DIR) -o $@ -c $(SRC)/CGAL_triangulation/dtfe_metal_host.cc
-
-# CUDA/HIP GPU deposit hosts (CUDA=1 via nvcc, HIP=1 via hipcc): single-source .cu files, kernels
-# compiled ahead of time (no vendored SDK -- the CUDA toolkit / ROCm provide the headers). Ports of
-# the Metal kernels; keep them in step with metal/*.metal.
-$(OBJ_DIR_PS)/ps_gpu_cuda$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_gpu_cuda.cu $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_cuda_compat.h $(SRC)/CGAL_triangulation/gpu_cuda_emu.h $(SRC)/CGAL_triangulation/gpu_exact_clip.cuh $(SRC)/CGAL_triangulation/gpu_cuda_retry.cuh $(SRC)/CGAL_triangulation/gpu_retry_common.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(SRC)/CGAL_triangulation/ps_kernel_params.h $(SRC)/CGAL_triangulation/ps_mass_audit.h $(SRC)/message.h $(SRC)/env_knobs.h Makefile
-	@$(MKDIR_P) $(OBJ_DIR_PS)
-	$(GPUXX) $(GPUXX_FLAGS) -o $@ -c $(SRC)/CGAL_triangulation/ps_gpu_cuda.cu
-
-$(OBJ_DIR)/dtfe_gpu_cuda$(OBJ_EXT): $(SRC)/CGAL_triangulation/dtfe_gpu_cuda.cu $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_cuda_compat.h $(SRC)/CGAL_triangulation/gpu_cuda_emu.h $(SRC)/CGAL_triangulation/gpu_exact_clip.cuh $(SRC)/CGAL_triangulation/gpu_cuda_retry.cuh $(SRC)/CGAL_triangulation/gpu_retry_common.h $(SRC)/CGAL_triangulation/dtfe_gpu_fixed.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(SRC)/CGAL_triangulation/ps_kernel_params.h $(SRC)/CGAL_triangulation/dtfe_deposit_params.h $(SRC)/message.h $(SRC)/env_knobs.h Makefile
-	@$(MKDIR_P) $(OBJ_DIR)
-	$(GPUXX) $(GPUXX_FLAGS) -o $@ -c $(SRC)/CGAL_triangulation/dtfe_gpu_cuda.cu
-
 
 ############################# Shared library build ##################################
 

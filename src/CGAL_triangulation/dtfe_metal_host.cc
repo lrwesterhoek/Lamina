@@ -39,7 +39,7 @@
 #include <sys/sysctl.h>
 
 #include "gpu_host.h"
-#include "dtfe_gpu_fixed.h"     // batchFixedScales + psMassFixedMass: the exact sums' units (shared with dtfe_gpu_cuda.cu)
+#include "dtfe_gpu_fixed.h"     // batchFixedScales + psMassFixedMass: the exact sums' units
 #include "dtfe_deposit_params.h" // DTFEDepositParams: the kernels' parameter block
 #include "dtfe_deposit_msl.h"   // generated: static const char DTFE_DEPOSIT_MSL[]
 #define ITEM_BLOCK_SHIFT 5      // == the kernel's: log2 of the items per entry of the block table
@@ -54,7 +54,7 @@ using DepositParams = DTFEDepositParams;
 
 // The checkpoints and the cause-aware retry policy of the GPU deposit (shared with ps_metal_host.cc, see
 // gpu_metal_retry.h): GpuFault, gpuRetryCause, the process-wide GpuPace, the DTFE_GPU_FAULT_AT test hook and
-// GpuSnapshot. The pass loop is runBatch below.
+// GpuSnapshot, and the pass loop gpuRunPass that runBatch below runs a batch through.
 #include "gpu_metal_retry.h"
 
 // the run's retry counters (the progress sidecar's gpu_retries / gpu_retries_by_cause and DTFE.cpp's closing
@@ -287,8 +287,7 @@ bool uploadBatch(Ctx& c, std::vector<float>& verts, std::vector<float>& dens, st
 {
     b.k = dtfeGpuKnobs(c.itemsOk);
     b.exact = exact;
-    // the parameter block, with the exact sums' units from this batch's values (dtfe_gpu_fixed.h, shared with
-    // dtfe_gpu_cuda.cu)
+    // the parameter block, with the exact sums' units from this batch's values (dtfe_gpu_fixed.h)
     DepositParams& P = b.P;
     uint32_t const exactCells = dtfeBatchParams(P, b.k, verts, dens, vels, scal, vols, dx, nGrid, subOff, fullGrid,
                                                 fDen, fVel, fGrad, fScal, fSGrad, exact, allowFixed);
@@ -349,7 +348,7 @@ struct Stats { int chunks = 0, retries = 0; };
 
 // Runs one batch into the grids (CALLER HOLDS ctxMutex). Chunked, serialized dispatch with host-side gaps --
 // the watchdog-safe discipline validated for the PS deposit (see ps_metal_host.cc for the full rationale) --
-// and that host's retry policy (its runChunked, here for one pass): a killed command buffer
+// and that host's retry policy, through the same pass loop (gpu_metal_retry.h gpuRunPass): a killed command buffer
 // may have deposited part or all of its atomics, so it is never retried alone; the batch restores its last
 // snapshot and continues from there.
 //   - the snapshot: the per-call grids (all zero at the start: no copy) and a checkpoint every ~10 s of GPU work
@@ -392,8 +391,6 @@ bool runBatch(Ctx& c, Batch& b, Grids& g, ChunkState& cs, Stats& st, bool shared
     }
     size_t const nThreads = useItems ? b.nItems : b.nTet;
     if (nThreads == 0) return true;
-    NS::UInteger tg = pso->maxTotalThreadsPerThreadgroup();
-    if (tg > 256) tg = 256;
     // the threadgroup cell table: as many power-of-two entries as fit the 32 KB threadgroup memory
     // (keys 4 B + 4 or 13 values per entry, floats or -- the exact sums -- two-word integers, next to the other
     // mode's 16-byte dummy); DTFE_GPU_TABLE=0 turns it off (evictions go straight to the device)
@@ -422,12 +419,12 @@ bool runBatch(Ctx& c, Batch& b, Grids& g, ChunkState& cs, Stats& st, bool shared
     if (!bP) { err = "Metal buffer allocation failed (params)"; return false; }
     // The non-finite guard's counters (metal/dtfe_deposit.metal fxq), one word per grid at buffer 21:
     // zeroed before each command buffer and added into badRun after one that succeeded; a restore rolls badRun
-    // back to the held snapshot's (badCk), so a failed buffer and the redone ones count once. Handed to the run's
+    // back to the held snapshot's (gpuRunPass), so a failed buffer and the redone ones count once. Handed to the run's
     // counters (ps_deposit_params.h fixedShareDrops) only when the batch succeeds.
     MTL::Buffer* bBad = c.dev->newBuffer(FX_DROP_SLOTS * 4, MTL::ResourceStorageModeShared);
     if (!bBad) { bP->release(); err = "Metal buffer allocation failed (guard counters)"; return false; }
     uint32_t* const badW = static_cast<uint32_t*>(bBad->contents());
-    unsigned long long badRun[FX_DROP_SLOTS] = {}, badCk[FX_DROP_SLOTS] = {};
+    unsigned long long badRun[FX_DROP_SLOTS] = {};
 
     // DTFE_GPU_CHECKPOINT_CHUNKS=<n>: a checkpoint every n command buffers (0 = only the batch-start snapshot).
     // Unset: every ~10 s of GPU work (n = 10 s / the current buffer target), as the PS deposit's.
@@ -441,13 +438,7 @@ bool runBatch(Ctx& c, Batch& b, Grids& g, ChunkState& cs, Stats& st, bool shared
     // the batch's start: its grids are zero (per call: freshly zeroed; shared: its owner box, never written by
     // another batch), recorded as such without a copy
     bool const ckOn = sharedBox || snap.take(gridBufs, std::vector<bool>(gridBufs.size(), true), 0);
-    bool ckPeriodic = false;           // the held snapshot is a periodic checkpoint (not the batch's start)
     int nFailed = 0, nResumedCk = 0;   // failed buffers of this batch, and how many resumed from a periodic checkpoint
-    int const MAX_FAILS_SAME_CHUNK = 3, MAX_FAILS_TOTAL = 16;
-    // failures of the 'same chunk': a failure that comes before the redo got past the previous failed buffer's
-    // end (chunk boundaries move with the timing controller, so a start offset is no identity)
-    int  failsHere = 0;
-    size_t failEnd = 0;
     // an empty command buffer completes only after everything queued before it: drained before a restore, as the
     // atomics of a killed buffer can land after it otherwise (per-tet runs at 512^3: whole samples in void
     // cells, 2e-2 of max|v|)
@@ -457,22 +448,29 @@ bool runBatch(Ctx& c, Batch& b, Grids& g, ChunkState& cs, Stats& st, bool shared
         drain->waitUntilCompleted();
     };
 
-    bool success = true;
     std::string lastErr;
+    GpuRetryRun run{ snap, nFailed, nResumedCk, lastErr, badRun };
+    GpuPassSpec pass;
+    pass.tag = "DTFE Metal";
+    pass.scope = "batch";
+    pass.q = c.q;
+    pass.pso = pso;
+    pass.nThreads = nThreads;
+    pass.minChunk = MIN_CHUNK;
+    pass.maxChunk = MAX_CHUNK;
+    pass.align = alignChunkUp;
+    pass.ckOn = ckOn;
+    pass.periodic = !sharedBox;
+    pass.ckBufs = &gridBufs;
+    pass.ckChunks = ckChunks;
+    pass.paceRecoverSec = paceRecoverSec;
+    pass.badW = badW;
     size_t chunk = alignChunkUp(std::min(std::max(cs.chunk, MIN_CHUNK), MAX_CHUNK));
-    size_t start = 0, sinceCk = 0;
-    while (start < nThreads)
+    bool const success = gpuRunPass(pass, run, chunk, [&](MTL::ComputeCommandEncoder* enc, size_t start, uint32_t n)
     {
-        uint32_t const n = uint32_t(std::min(chunk, nThreads - start));
         b.P.nTet = n;
         b.P.itemBase = uint32_t(start);
         std::memcpy(bP->contents(), &b.P, sizeof(DepositParams));   // safe: previous chunk completed
-
-        std::memset(badW, 0, FX_DROP_SLOTS * 4);                     // (likewise)
-        auto t0 = std::chrono::steady_clock::now();
-        MTL::CommandBuffer* cb = c.q->commandBuffer();
-        MTL::ComputeCommandEncoder* enc = cb->computeCommandEncoder();
-        enc->setComputePipelineState(pso);
         if (useItems)
         {   // items index the tetrahedron arrays globally; the chunk is [itemBase, itemBase+n)
             enc->setBuffer(b.bV,   0, 0);
@@ -514,90 +512,15 @@ bool runBatch(Ctx& c, Batch& b, Grids& g, ChunkState& cs, Stats& st, bool shared
             enc->setThreadgroupMemoryLength(valBytes, 1);
             enc->setThreadgroupMemoryLength(valXBytes, 2);
         }
-        enc->dispatchThreads(MTL::Size(n, 1, 1), MTL::Size(tg, 1, 1));
-        enc->endEncoding();
-        cb->commit();
-        cb->waitUntilCompleted();
-        ++st.chunks;
-        double const el = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-
-        std::string desc;
-        long code = 0;
-        bool failed = false;
-        if (cb->status() == MTL::CommandBufferStatusError)
-        {
-            NS::Error* e = cb->error();
-            desc = e ? e->localizedDescription()->utf8String() : "unknown";
-            code = e ? long(e->code()) : 0;
-            failed = true;
-        }
-        else failed = gpuFaultInjected(desc, code);   // the test hook (the buffer DID deposit)
-
-        if (failed)
-        {
-            ++nFailed;
-            ++st.retries;
-            GpuFault const cause = classifyGpuFault(code, desc);
-            countGpuRetry(cause, code, desc);   // the run's counters count every failed buffer (run_progress.h)
-            lastErr = std::string("Metal command buffer failed: ") + desc + " [" + gpuFaultName(cause) + "]";
-            failsHere = (failsHere > 0 && start < failEnd) ? failsHere + 1 : 1;
-            failEnd = std::max(failEnd, start + n);
-            if (cause == GpuFault::Fatal || !ckOn || failsHere >= MAX_FAILS_SAME_CHUNK || nFailed >= MAX_FAILS_TOTAL)
-            {
-                if (!ckOn) lastErr += " (no checkpoint held)";
-                else if (failsHere >= MAX_FAILS_SAME_CHUNK) lastErr += " (" + std::to_string(failsHere) + " failures of the same chunk)";
-                else if (nFailed >= MAX_FAILS_TOTAL) lastErr += " (" + std::to_string(nFailed) + " failed buffers in this batch)";
-                success = false;
-                break;
-            }
-            if (cause != GpuFault::Victim)
-            {   // escalate (for the rest of the process): 4x shorter buffers, wider gaps, smaller chunk
-                pace.onFault();
-                chunk = alignChunkUp(std::max(chunk / 4, MIN_CHUNK));
-            }
-            drainQueue();
-            size_t resumeAt = 0;
-            if (sharedBox) g.zeroBox(b.P.subOff, b.P.nGrid);
-            else { snap.restore(); resumeAt = snap.start; }
-            std::memcpy(badRun, badCk, sizeof badRun);   // (sharedBox: the batch's start, all zero)
-            if (ckPeriodic) ++nResumedCk;
-            fprintf(stderr, "%sDTFE Metal: %s -- resuming from the %s at thread %zu of %zu "
-                            "(redoing %zu; failure %d of this chunk, target %.0f ms buffers, %.0f ms gaps)%s\n",
-                    MESSAGE::cYellow(), lastErr.c_str(), ckPeriodic ? "checkpoint" : "pass start",
-                    resumeAt, nThreads, start + n - resumeAt, failsHere,
-                    pace.targetSec * 1e3, pace.gapUs / 1e3, MESSAGE::cReset());
-            start = resumeAt;
-            sinceCk = 0;
-            // an innocent victim retries at once; our own buffers' failures let the system settle first
-            if (cause == GpuFault::Resource) sleep(2);
-            else if (cause == GpuFault::Watchdog) sleep(1);
-            continue;
-        }
-
-        start += n;
-        ++sinceCk;
-        for (int k = 0; k < FX_DROP_SLOTS; ++k) badRun[k] += badW[k];
-        if (el > 1e-4)   // retarget the next chunk toward targetSec (bounded rescale)
-        {
-            double scale = pace.targetSec / el;
-            if (scale < 0.5) scale = 0.5;
-            if (scale > 4.0) scale = 4.0;
-            chunk = alignChunkUp(std::min(std::max(size_t(double(chunk) * scale), MIN_CHUNK), MAX_CHUNK));
-        }
-        double clean = 0.;
-        if (pace.onClean(el, paceRecoverSec, clean))   // an escalated pace stepped back after a clean stretch (GpuPace)
-            fprintf(stderr, "DTFE Metal: %.0f s of GPU work without a fault -- pace eased to %.0f ms "
-                            "buffers, %.0f ms gaps%s\n", clean, pace.targetSec * 1e3, pace.gapUs / 1e3,
-                    pace.targetSec >= GPU_PACE_TARGET0 && pace.gapUs <= GPU_PACE_GAP0 ? " (the default)" : "");
-        long const every = ckChunks >= 0 ? ckChunks : std::max(1L, long(std::lround(10.0 / pace.targetSec)));
-        if (!sharedBox && ckOn && every > 0 && long(sinceCk) >= every && start < nThreads)
-        {   // the queue is drained (waitUntilCompleted above): the buffers hold exactly [0, start)
-            if (snap.take(gridBufs, std::vector<bool>(), start))
-            { ++snap.taken; ckPeriodic = true; sinceCk = 0; std::memcpy(badCk, badRun, sizeof badCk); }
-            // else: no host memory for the spare copy; the last snapshot stays valid
-        }
-        usleep(pace.gapUs);   // deliberate idle gap: lets WindowServer take the GPU
-    }
+    }, [&]() -> size_t
+    {
+        drainQueue();
+        if (sharedBox) { g.zeroBox(b.P.subOff, b.P.nGrid); return 0; }   // (badRun rolls back to the batch's start, all zero)
+        snap.restore();
+        return snap.start;
+    }, [] {});
+    st.chunks += int(pass.submitted);
+    st.retries += nFailed;
     cs.chunk = chunk;
     if (nFailed > 0)
         fprintf(stderr, "%sDTFE Metal: deposit %s after %d failed buffer(s) (%d resumed from a periodic checkpoint); "

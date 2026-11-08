@@ -7,10 +7,8 @@
 # skips on the runner, which has no 3.10, so without this job a PEP 701 f-string could pass CI).
 # compile-variants -- what users build beyond the pairs: no TBB and no libdeflate (neither installed),
 # 'make library' and the demo/examples program linked against it (tests/ci_suite.sh variants).
-# The CUDA/HIP port (src/CGAL_triangulation/*_gpu_cuda.cu) is no longer built or run by CI: the cudaemu
-# (CPU emulation at warp 32 and 64), cuda-compile and hip-compile jobs were removed on 2026-11-08, since the
-# port is not in use and the emulation jobs kept stalling on the runners' package mirrors. It can still be
-# checked locally: make CUDAEMU=1 + tests/cudaemu_check.sh, and tests/gpu_twin_check.sh (metal/README.md).
+# The GPU code is Metal-only, so no job here builds a GPU backend (the retired CUDA/HIP port lives on the branch
+# archive/cuda-hip-2026-11-08).
 # The C++ jobs share their compiler output through ccache (Debian's /usr/lib/ccache masquerade: the
 # Makefile's 'which g++' finds it first on PATH, so nothing in the Makefile changes).
 

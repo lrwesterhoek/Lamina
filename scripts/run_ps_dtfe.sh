@@ -11,7 +11,7 @@
 #     -n   SUBSAMPLES: k sub-points per axis (k^3 per cell) of the sampled deposit's '_a' fields (--subsamples k;
 #          default 3)
 #     -m   run the deposit on the GPU (--gpu; same as DTFE_GPU=1). The default (DTFE_GPU unset, 'auto') is the GPU
-#          when the binary was built with one (the Makefile's o_ps/.gpu_mode_metal|cuda|hip stamp; o_ps_d for
+#          when the binary was built with one (the Makefile's o_ps/.gpu_mode_metal stamp; o_ps_d for
 #          DTFE_PRECISION=double), else the CPU -- but the CPU for the exact deposit (-e), faster there on
 #          production runs; DTFE_GPU=0 runs the CPU deposit on a GPU build.
 #     -e   exact conservative deposit (same as DTFE_EXACT_AVERAGE=1; --exact-average, on the CPU unless -m)

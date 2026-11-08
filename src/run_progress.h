@@ -14,8 +14,8 @@
     the sidecar writes the sum of the four counters it prints (psGpuRetries -- dtfeGpuRetries in the standard binary,
     which counts its GPU retries the same way --, the hosts' own total, is for the
     closing log line, written after the partitions with no failure in flight): an innocent
-    victim (another process hung the GPU; retried at once), a timeout (a watchdog kill: CUDA's
-    cudaErrorLaunchTimeout, Metal's Impacting Interactivity), out of memory, anything else. Written atomically ('.tmp.<pid>' then rename), so a reader never sees half a
+    victim (another process hung the GPU; retried at once), a timeout (a watchdog kill: Metal's
+    Impacting Interactivity), out of memory, anything else. Written atomically ('.tmp.<pid>' then rename), so a reader never sees half a
     file; removed when the run finishes successfully (main.cpp) and when it stops on an error: throwError
     ends in exit(), which runs the atexit handler below but not main()'s destructors, so the removal cannot be
     a guard object in main. A sidecar that remains therefore belongs to a run that is still going, one that
@@ -45,13 +45,13 @@
 #include "env_knobs.h"
 
 #ifdef PHASE_SPACE
-// failed GPU buffers / kernels (each one resumes the pass from its last checkpoint; 3 failures of one chunk send
+// failed GPU command buffers (each one resumes the pass from its last checkpoint; 3 failures of one chunk send
 // the partition to the CPU);
-// counted by the GPU hosts (ps_metal_host.cc, ps_gpu_cuda.cu), defined in ps_interpolation.cc
+// counted by the GPU host (ps_metal_host.cc), defined in ps_interpolation.cc
 extern std::atomic<int> psGpuRetries;
 extern std::atomic<int> psGpuRetriesByCause[4];   // innocent, timeout, oom, other
 #else
-// the standard binary's: the same policy in its GPU hosts (dtfe_metal_host.cc, dtfe_gpu_cuda.cu: a
+// the standard binary's: the same policy in its GPU host (dtfe_metal_host.cc: a
 // failed buffer resumes the sub-domain's batch from its last checkpoint; 3 failures of one chunk send the
 // sub-domain to the CPU), defined in averaged_interpolation_1.cc -- zero in a CPU-only build
 extern std::atomic<int> dtfeGpuRetries;

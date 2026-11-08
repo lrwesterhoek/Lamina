@@ -328,14 +328,28 @@ for which in single part; do
 done
 if [ -x "${DTFE_BIN}" ]; then
     SCACHE="${CACHE}-std"; rm -rf "${SCACHE}"; mkdir -p "${SCACHE}"
+    # The plan is pinned to one partition: the three runs must see the same split, and the auto-tuner reads the
+    # live free memory, so a loaded machine could give the writer and a reader different plans (the thread
+    # sub-domains within the partition are the same at any load).
     "${DTFE_BIN}" "${SNAP}" "${TMP}/ptc_std_rd0" --grid "${GRID}" --periodic --field density --mpc-unit 1 \
-           --tessellation-cache "${SCACHE}" >/dev/null 2>&1 || true
-    fp_cgal="$(DTFE_TESSELLATION_CACHE_CGAL_IO=1 "${DTFE_BIN}" "${SNAP}" "${TMP}/ptc_std_rd1" --grid "${GRID}" --periodic \
-               --field density --mpc-unit 1 --tessellation-cache "${SCACHE}" 2>&1 | grep "^TESS_FINGERPRINT" | sort || true)"
-    fp_block="$("${DTFE_BIN}" "${SNAP}" "${TMP}/ptc_std_rd2" --grid "${GRID}" --periodic \
-               --field density --mpc-unit 1 --tessellation-cache "${SCACHE}" 2>&1 | grep "^TESS_FINGERPRINT" | sort || true)"
-    check "$([ -n "${fp_block}" ] && [ "${fp_cgal}" = "${fp_block}" ] && echo 1 || echo 0)" \
-          "standard binary: identical structure fingerprints ($(echo "${fp_block}" | grep -c . || true) sub-domains)"
+           --partition 1 1 1 --tessellation-cache "${SCACHE}" >/dev/null 2>&1 || true
+    # Each reader's whole output stays beside its grids: a mismatch that a rerun does not repeat (a loaded machine)
+    # can still be read afterwards, and the failure shows where the two lists part and how each run used the cache.
+    DTFE_TESSELLATION_CACHE_CGAL_IO=1 "${DTFE_BIN}" "${SNAP}" "${TMP}/ptc_std_rd1" --grid "${GRID}" --periodic \
+           --field density --mpc-unit 1 --partition 1 1 1 --tessellation-cache "${SCACHE}" > "${TMP}/ptc_std_rd1.log" 2>&1 || true
+    "${DTFE_BIN}" "${SNAP}" "${TMP}/ptc_std_rd2" --grid "${GRID}" --periodic \
+           --field density --mpc-unit 1 --partition 1 1 1 --tessellation-cache "${SCACHE}" > "${TMP}/ptc_std_rd2.log" 2>&1 || true
+    fp_cgal="$(grep "^TESS_FINGERPRINT" "${TMP}/ptc_std_rd1.log" | sort || true)"
+    fp_block="$(grep "^TESS_FINGERPRINT" "${TMP}/ptc_std_rd2.log" | sort || true)"
+    same_fp=$([ -n "${fp_block}" ] && [ "${fp_cgal}" = "${fp_block}" ] && echo 1 || echo 0)
+    check "${same_fp}" "standard binary: identical structure fingerprints ($(echo "${fp_block}" | grep -c . || true) sub-domains)"
+    if [ "${same_fp}" = 0 ]; then
+        echo "      CGAL's reader (<, ${TMP}/ptc_std_rd1.log) vs the block reader (>, ${TMP}/ptc_std_rd2.log):"
+        diff <(printf '%s\n' "${fp_cgal}") <(printf '%s\n' "${fp_block}") | grep '^[<>]' | head -n 20 | sed 's/^/      | /' || true
+        for n in 1 2; do   # the RUNNING line names the cache folder too: the command, not how the run used it
+            grep -iE 'cache|hit' "${TMP}/ptc_std_rd${n}.log" | grep -v '^RUNNING:' | sed "s/^/      rd${n} | /" || true
+        done
+    fi
     cmp -s "${TMP}/ptc_std_rd1.den" "${TMP}/ptc_std_rd2.den" && check 1 "standard binary: bit-identical '.den'" \
                                                             || check 0 "standard binary: bit-identical '.den'"
     SCACHE2="${CACHE}-std2"; rm -rf "${SCACHE2}"; mkdir -p "${SCACHE2}"

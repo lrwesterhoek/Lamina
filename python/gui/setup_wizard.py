@@ -4,7 +4,7 @@
                       exists -- an external disk that is unplugged is said so -- else ~/DTFE-data); and, when
                       the repository sits in iCloud Drive with the analysis caches still inside it, an offer
                       to keep those caches outside it (analyze.py cache --move, the same move)
-  2  Programs         are DTFE / PS-DTFE built, with which GPU backend (Metal, CUDA, HIP) and (PS-DTFE) the TBB parallel
+  2  Programs         are DTFE / PS-DTFE built, with which GPU backend (Metal) and (PS-DTFE) the TBB parallel
                       triangulation, are the optional double-precision pair and the 2D programs there,
                       and does the Python that runs the figure scripts have its packages? 'Build' runs
                       make (the commands are shown; ticks add the double pair and the 2D programs)
@@ -73,8 +73,8 @@ def python_status() -> tuple[bool, str]:
 
 
 def build_command(double: bool = False, dim: int = 3) -> list[str]:
-    """make for both binaries -- with the GPU backend this machine can build (Metal on a Mac, CUDA or
-    HIP on Linux when nvcc / hipcc is found), as scripts/install.sh does; double=True builds the
+    """make for both binaries -- with the GPU backend this machine can build (Metal on a Mac; elsewhere
+    CPU-only), as scripts/install.sh does; double=True builds the
     double-precision pair (DTFE-double, PS-DTFE-double) instead, same backend; dim=2 the 2D programs
     (DTFE-2d, PS-DTFE-2d: CPU only, the GPU kernels are 3D)."""
     cmd = ["make", "DTFE", "PS-DTFE", f"-j{os.cpu_count() or 4}"]

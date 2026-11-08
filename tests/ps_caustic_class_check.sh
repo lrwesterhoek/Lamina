@@ -191,7 +191,7 @@ done
 # --gpu with the cusp indicator: the deposit runs on the CPU (the stencil needs the triangulation's neighbours),
 # so bits 7 and 8 are the CPU run's, byte for byte -- a GPU deposit left them unset in nearly every cell
 GPUG=0
-[ -d o_ps ] && [ ! -f o_ps/.gpu_mode_off ] && grep -q "METAL=1\|CUDA=1\|HIP=1" o_ps/.build_mode 2>/dev/null && GPUG=1
+[ -d o_ps ] && [ ! -f o_ps/.gpu_mode_off ] && grep -q "METAL=1" o_ps/.build_mode 2>/dev/null && GPUG=1
 if [ "${GPUG}" = 1 ]; then
     "${BIN}" "${TMP}/pcc_w1.0.hdf5" "${TMP}/pcc_c1.0_gpu" --grid 48 --periodic --field density \
              --mpc-unit 1 --max-concurrent 1 --ps-caustics --ps-caustic-cusps --gpu > "${TMP}/pcc_c1.0_gpu.log" 2>&1
@@ -357,7 +357,7 @@ echo "       cells the exact deposit gives more than one stream (r3d volumes: sh
 echo "    J4 bit 0 (per sample) is present in every fold cell, so '(bits & 3) == 3' loses none;"
 echo "    J5 '--partition 2 2 2' and the GPU deposit give byte-identical '.caustic'."
 GPUJ=0
-[ -d o_ps ] && [ ! -f o_ps/.gpu_mode_off ] && grep -q "METAL=1\|CUDA=1\|HIP=1" o_ps/.build_mode 2>/dev/null && GPUJ=1
+[ -d o_ps ] && [ ! -f o_ps/.gpu_mode_off ] && grep -q "METAL=1" o_ps/.build_mode 2>/dev/null && GPUJ=1
 for geo in pan crw; do
     if [ "${geo}" = pan ]; then gen=(--amplitude-factor 1.05); else gen=(--amplitude-factor 1.3 --crossed-waves); fi
     "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${TMP}/pcj_input_${geo}.hdf5" --n 27 --box "${BOX}" \
@@ -458,7 +458,7 @@ print(f"         (double build: {fr:.1e} of the cells differ -- the GPU's float 
 sys.exit(0 if fr <= 1e-4 else 1)
 EOF2
 }
-if [ -d o_ps ] && [ ! -f o_ps/.gpu_mode_off ]; then   # any GPU backend stamp (metal / cuda / hip)
+if [ -d o_ps ] && [ ! -f o_ps/.gpu_mode_off ]; then   # a GPU build (the Metal stamp)
     msg="$("${BIN}" "${SNAP}" "${OUT}_gpu" --grid "${GRID}" --periodic --field density --mpc-unit 1 \
             --max-concurrent 1 --ps-caustics --gpu 2>&1 || true)"
     if gpu_matches caustic; then

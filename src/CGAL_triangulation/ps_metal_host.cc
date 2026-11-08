@@ -120,9 +120,9 @@ std::string gpuDeviceName()
 // the per-tet masses the kernel negates when it defers a tet), taken at the pass's start and every
 // DTFE_GPU_CHECKPOINT_CHUNKS chunks; a failed buffer (which may have deposited part or all of its atomics)
 // restores the last snapshot and continues from its chunk, instead of redoing the WHOLE partition deposit (up
-// to ~2000 s per TNG50 partition). The policy's pieces (GpuFault, the pace, the fault hook, GpuSnapshot) live
-// in gpu_metal_retry.h, shared with the standard-DTFE host (dtfe_metal_host.cc); the pass loop is
-// psGpuDepositFields' runChunked below.
+// to ~2000 s per TNG50 partition). The policy (GpuFault, the pace, the fault hook, GpuSnapshot) and its pass
+// loop, gpuRunPass, live in gpu_metal_retry.h, shared with the standard-DTFE host (dtfe_metal_host.cc);
+// psGpuDepositFields' runChunked below runs each pass through it.
 namespace {
 
 #include "gpu_metal_retry.h"
@@ -349,7 +349,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
 
     // Before the hold (ctxMutex below): the plan, the parameter block and the exact items' map, from the host
     // records -- work that needs no queue, done while another partition's passes hold the GPU.
-    // The plan (the selected grids, their fixed-point form and device sizes; gpu_host.h, shared with ps_gpu_cuda.cu).
+    // The plan (the selected grids, their fixed-point form and device sizes; gpu_host.h).
     // DTFE_GPU_FLOAT_MASS=1 keeps float mass atomics, for comparison.
     bool const floatMass = Env::flag({"DTFE_GPU_FLOAT_MASS"});
     PSGpuPlan const pl = psGpuPlan(subDims, fVel, fDisp, fGrad, fVolW, fCaustic, fExact, fScal, fSGrad, masses,
@@ -376,7 +376,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
     NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
 
     // --exact-average: split the work below the tet (depositExactItems in ps_deposit.metal), items of
-    // blockCells cells of a tet's window (psExactItemBounds in gpu_host.h, shared with ps_gpu_cuda.cu), as the
+    // blockCells cells of a tet's window (psExactItemBounds in gpu_host.h), as the
     // compact map psBuildExactItemMap. The items follow the caller's cost order, keeping a SIMD group's threads on
     // similar work. DTFE_GPU_ITEMS=0 keeps the one-thread-per-tet kernel (A/B), DTFE_GPU_EXACT_CELLS sets the block.
     bool useItems = fExact;
@@ -457,135 +457,47 @@ bool psGpuDepositFields(std::vector<float>& verts,
     // counted part or all of its shares) and the redone ones count once. Handed to the run's counters only when
     // the deposit is kept (a CPU fallback deposits, and counts, the partition itself).
     unsigned long long badRun[FX_DROP_SLOTS] = {};
-    int const MAX_FAILS_SAME_CHUNK = 3, MAX_FAILS_TOTAL = 16;
+    GpuRetryRun run{ snap, nFailed, nResumedCk, lastErr, badRun };
 
-    // One paced, chunked run of 'pso' over nThreads threads; bind(enc, start, n) binds the buffers
-    // for the chunk [start, start+n). 'extras' are the non-grid buffers the kernel WRITES (sumW, the
-    // per-tet masses it negates); gridsZero: the grids are all zero at the pass's start (snapshotted
-    // as such, without a copy); gridsKeepZero: the pass never writes them (the exact items' phase 0),
-    // so its periodic checkpoints skip them too. False (lastErr set) when the pass gave up (the caller
-    // falls back).
+    // One paced, chunked run of 'pso' over nThreads threads (gpu_metal_retry.h gpuRunPass); bind(enc, start, n)
+    // binds the buffers for the chunk [start, start+n). 'extras' are the non-grid buffers the kernel WRITES (sumW,
+    // the per-tet masses it negates); gridsZero: the grids are all zero at the pass's start (snapshotted as such,
+    // without a copy); gridsKeepZero: the pass never writes them (the exact items' phase 0), so its periodic
+    // checkpoints skip them too. False (lastErr set) when the pass gave up (the caller falls back).
     // badW: this pass's counter words of the non-finite guard (badRun above).
     auto runChunked = [&](MTL::ComputePipelineState* pso, size_t nThreads, size_t firstChunk,
                           size_t minChunk, std::vector<MTL::Buffer*> const& extras, bool gridsZero,
                           bool gridsKeepZero, uint32_t* badW, auto&& bind) -> bool
     {
-        NS::UInteger tg = pso->maxTotalThreadsPerThreadgroup();
-        if (tg > 256) tg = 256;
-        size_t chunk = std::max(firstChunk, minChunk);
-        size_t start = 0, nBuf = 0, sinceCk = 0;
-        double busy = 0.;
         auto const tRun = std::chrono::steady_clock::now();
         std::vector<MTL::Buffer*> ckBufs = gridBufs;
         ckBufs.insert(ckBufs.end(), extras.begin(), extras.end());
         std::vector<bool> zeroMask(ckBufs.size(), false);
         if (gridsZero) std::fill(zeroMask.begin(), zeroMask.begin() + gridBufs.size(), true);
-        bool ckOn = snap.take(ckBufs, zeroMask, 0);
-        bool ckPeriodic = false;           // the held snapshot is a periodic checkpoint (not the pass start)
-        unsigned long long badCk[FX_DROP_SLOTS];   // badRun at the held snapshot
-        std::memcpy(badCk, badRun, sizeof badCk);
-        // failures of the 'same chunk': a failure that comes before the redo got past the previous failed
-        // buffer's end (chunk boundaries move with the timing controller, so a start offset is no identity)
-        int  failsHere = 0;
-        size_t failEnd = 0;
-        while (start < nThreads)
-        {
-            uint32_t const n = uint32_t(std::min(chunk, nThreads - start));
-            auto t0 = std::chrono::steady_clock::now();
-            MTL::CommandBuffer* cb = c.q->commandBuffer();
-            MTL::ComputeCommandEncoder* enc = cb->computeCommandEncoder();
-            enc->setComputePipelineState(pso);
-            std::memset(badW, 0, FX_DROP_SLOTS * 4);   // (the previous buffer completed: waitUntilCompleted below)
-            bind(enc, start, n);
-            enc->dispatchThreads(MTL::Size(n, 1, 1), MTL::Size(tg, 1, 1));
-            enc->endEncoding();
-            cb->commit();
-            cb->waitUntilCompleted();
-            double const el = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-
-            std::string desc;
-            long code = 0;
-            bool failed = false;
-            if (cb->status() == MTL::CommandBufferStatusError)
-            {
-                NS::Error* e = cb->error();
-                desc = e ? e->localizedDescription()->utf8String() : "unknown";
-                code = e ? long(e->code()) : 0;
-                failed = true;
-            }
-            else failed = gpuFaultInjected(desc, code);   // the test hook (the buffer DID deposit)
-
-            if (failed)
-            {
-                ++nFailed;
-                GpuFault const cause = classifyGpuFault(code, desc);
-                countGpuRetry(cause, code, desc);   // the run's counters count every failed buffer (run_progress.h)
-                lastErr = std::string("Metal command buffer failed: ") + desc + " [" + gpuFaultName(cause) + "]";
-                failsHere = (failsHere > 0 && start < failEnd) ? failsHere + 1 : 1;
-                failEnd = std::max(failEnd, start + n);
-                if (cause == GpuFault::Fatal || !ckOn || failsHere >= MAX_FAILS_SAME_CHUNK || nFailed >= MAX_FAILS_TOTAL)
-                {
-                    if (!ckOn) lastErr += " (no checkpoint held)";
-                    else if (failsHere >= MAX_FAILS_SAME_CHUNK) lastErr += " (" + std::to_string(failsHere) + " failures of the same chunk)";
-                    else if (nFailed >= MAX_FAILS_TOTAL) lastErr += " (" + std::to_string(nFailed) + " failed buffers in this deposit)";
-                    return false;
-                }
-                if (cause != GpuFault::Victim)
-                {   // escalate (for the rest of the process): 4x shorter buffers, wider gaps, smaller chunk
-                    pace.onFault();
-                    chunk = std::max(chunk / 4, minChunk);
-                    baseChunk = std::max(baseChunk / 2, MIN_CHUNK);
-                }
-                snap.restore();
-                std::memcpy(badRun, badCk, sizeof badCk);
-                if (ckPeriodic) ++nResumedCk;
-                fprintf(stderr, "%sPS-DTFE Metal: %s -- resuming from the %s at thread %zu of %zu "
-                                "(redoing %zu; failure %d of this chunk, target %.0f ms buffers, %.0f ms gaps)%s\n",
-                        MESSAGE::cYellow(), lastErr.c_str(), ckPeriodic ? "checkpoint" : "pass start",
-                        snap.start, nThreads, start + n - snap.start, failsHere,
-                        pace.targetSec * 1e3, pace.gapUs / 1e3, MESSAGE::cReset());
-                start = snap.start;
-                sinceCk = 0;
-                // an innocent victim retries at once; our own buffers' failures let the system settle first
-                auto tGap = std::chrono::steady_clock::now();
-                if (cause == GpuFault::Resource) sleep(2);
-                else if (cause == GpuFault::Watchdog) sleep(1);
-                ph.gaps += PSGpuPhaseTimes::lap(tGap);
-                continue;
-            }
-
-            start += n;
-            ++nBuf;
-            ++sinceCk;
-            busy += el;
-            for (int k = 0; k < FX_DROP_SLOTS; ++k) badRun[k] += badW[k];
-            if (el > 1e-4)   // retarget the next chunk toward targetSec (bounded rescale)
-            {
-                double scale = pace.targetSec / el;
-                if (scale < 0.5) scale = 0.5;
-                if (scale > 4.0) scale = 4.0;
-                chunk = std::min(std::max(size_t(double(chunk) * scale), minChunk), MAX_CHUNK);
-            }
-            double clean = 0.;
-            if (pace.onClean(el, paceRecoverSec, clean))   // an escalated pace stepped back after a clean stretch (GpuPace)
-                fprintf(stderr, "PS-DTFE Metal: %.0f s of GPU work without a fault -- pace eased to %.0f ms "
-                                "buffers, %.0f ms gaps%s\n", clean, pace.targetSec * 1e3, pace.gapUs / 1e3,
-                        pace.targetSec >= GPU_PACE_TARGET0 && pace.gapUs <= GPU_PACE_GAP0 ? " (the default)" : "");
-            long const every = ckChunks >= 0 ? ckChunks : std::max(1L, long(std::lround(10.0 / pace.targetSec)));
-            if (ckOn && every > 0 && long(sinceCk) >= every && start < nThreads)
-            {   // the queue is drained (waitUntilCompleted above): the buffers hold exactly [0, start)
-                if (snap.take(ckBufs, gridsKeepZero ? zeroMask : std::vector<bool>(), start))
-                { ++snap.taken; ckPeriodic = true; sinceCk = 0; std::memcpy(badCk, badRun, sizeof badCk); }
-                // else: no host memory for the spare copy; the last snapshot stays valid
-            }
-            auto tGap = std::chrono::steady_clock::now();
-            usleep(pace.gapUs);   // deliberate idle gap: lets WindowServer take the GPU
-            ph.gaps += PSGpuPhaseTimes::lap(tGap);
-        }
-        ph.kernels += busy;
+        GpuPassSpec pass;
+        pass.tag = "PS-DTFE Metal";
+        pass.scope = "deposit";
+        pass.q = c.q;
+        pass.pso = pso;
+        pass.nThreads = nThreads;
+        pass.minChunk = minChunk;
+        pass.maxChunk = MAX_CHUNK;
+        pass.ckOn = snap.take(ckBufs, zeroMask, 0);
+        pass.ckBufs = &ckBufs;
+        if (gridsKeepZero) pass.ckMask = zeroMask;
+        pass.ckChunks = ckChunks;
+        pass.paceRecoverSec = paceRecoverSec;
+        pass.badW = badW;
+        size_t chunk = std::max(firstChunk, minChunk);
+        bool const ok = gpuRunPass(pass, run, chunk, bind,
+                                   [&] { snap.restore(); return snap.start; },
+                                   [&] { baseChunk = std::max(baseChunk / 2, MIN_CHUNK); });   // the next pass's too
+        ph.gaps += pass.gaps;
+        if (!ok) return false;
+        ph.kernels += pass.busy;
         if (timing)
             fprintf(stderr, "PS-DTFE Metal: %-17s %10zu threads  %6zu buffers  %8.3f s busy  %8.3f s wall\n",
-                    pso == c.pso ? "depositFields" : "depositExactItems", nThreads, nBuf, busy,
+                    pso == c.pso ? "depositFields" : "depositExactItems", nThreads, pass.buffers, pass.busy,
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - tRun).count());
         return true;
     };
@@ -747,7 +659,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
     bool const success = useItems ? runItems(0) && runItems(1) && runLeftovers()
                                   : runPerTet(bV, bU, bM, bD, bSc, nTetTotal, true);
     psHostReportPasses("Metal", "buffer", success, nFailed, nResumedCk, snap, timing);
-    // the hold ends with the releases (as ps_gpu_cuda.cu): the next partition allocates its whole buffer set as soon
+    // the hold ends with the releases: the next partition allocates its whole buffer set as soon
     // as it takes the queue, and the auto-tuner books ONE deposit's buffers (ctxMutex serializes them), so this
     // call's buffers -- and the pool, whose completed command buffers still retain them -- go before the unlock
     tPh = std::chrono::steady_clock::now();

@@ -6,7 +6,7 @@ message: >-
 title: "Lamina: Linear Adaptive Multi-stream Interpolation for N-body Analysis"
 abstract: >-
   Two Delaunay tessellation field estimators for cosmological simulations: DTFE and the phase-space DTFE (PS-DTFE),
-  which resolves the streams where the dark-matter sheet has folded. With GPU deposits (Metal, CUDA, HIP), exact cell
+  which resolves the streams where the dark-matter sheet has folded. With GPU deposits (Metal), exact cell
   averages and point evaluation, a Python package (dtfelib) and a graphical launcher.
 type: software
 authors:

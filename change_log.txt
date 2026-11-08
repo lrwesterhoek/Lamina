@@ -1,4 +1,34 @@
 UNRELEASED (since 1.0.0)
+- The CUDA/HIP GPU port is removed (docs/cleanup-plan.md D11, decided 2026-11-08): the tree is Metal-only. Gone are
+  src/CGAL_triangulation/{dtfe_gpu_cuda.cu, ps_gpu_cuda.cu, gpu_cuda_compat.h, gpu_cuda_emu.h, gpu_cuda_retry.cuh,
+  gpu_exact_clip.cuh} (the port had only ever run under its CPU emulation), the CUDAEMU=1 build and
+  tests/cudaemu_check.sh, the Metal/CUDA exact-clip twin check tests/gpu_twin_check.sh, the GPU_ARCH, CUDA_PATH and
+  ROCM_PATH make variables and the DTFE_GPU_EMU_WARP knob. 'make ... CUDA=1', 'HIP=1' or 'CUDAEMU=1' now stops with
+  one error line that names the branch archive/cuda-hip-2026-11-08 (= f9f6e2f, the last commit with the port). With
+  one backend left, the two Metal hosts' chunk-and-retry loops are one function, gpuRunPass in gpu_metal_retry.h
+  (the fault policy, the snapshot checkpoints, the 3-per-chunk and 16-per-deposit limits and the chunk rescale; each
+  host supplies its encode, restore and escalate steps; gpu_retry_common.h is folded in), with the same log lines and
+  byte-identical grids (tests/dev/bytecmp.sh --gpu-exact: 261 files, 0 differ; an A/B against f9f6e2f under 16
+  fault-injection scenarios: 61 files, 0 differ). Docs, scripts/install.sh (Linux stays CPU-only), scripts/config.sh,
+  the launcher's GPU hints and the suites' build-mode checks follow: a GPU stamp is '.gpu_mode_metal' or
+  '.gpu_mode_off'.
+- The standard binary's seven sampling variants (the regular grid's point values, the redshift cone and user-given
+  points, each unaveraged and as the volume averages of '--average-method 2' and '3'; docs/cleanup-plan.md P3.9)
+  share one per-sample code, src/CGAL_triangulation/sample_eval.h; unaveraged_interpolation.cc and
+  averaged_interpolation_2.cc are wrappers that name the sample source (497 and 922 lines down to 164 and 310).
+  Byte-identical on every production path (periodic grids, method 1, the exact average, every averaged '_a' field,
+  single and double, 2D, partitions, any thread count). Three bugs went with it, each with a check in
+  tests/dtfe_sampling_check.sh that fails on the old binary: (a) method 2 draws its sample's x, y and z in three
+  statements, so GCC and Clang take the same realization from one --seed (Clang already drew in that order, so the
+  Mac grids are byte-identical; the new grid_density_a and grid_velocity_a golden sections pin it); (b) an unaveraged
+  grid row or cone row that leaves the convex hull no longer freezes: the first infinite cell's 'continue' skipped
+  the innermost coordinate's step, so the rest of the row was located at that same point and came out zero -- a
+  NON-PERIODIC unaveraged grid run with --no-padding-test whose cells reach past the hull now gets real values there
+  (the 64^3 demo: 1.3% of its cells, all 0 before) and a longer .badGridPoints list, as does a redshift cone past the
+  hull; periodic runs and runs with the padding test are unchanged; (c) a user sample outside --region gets a zero
+  record, so the library API's outputs have one entry per sample (they were shorter, shifting the entries after it);
+  and the padding report's cell index is a size_t (a float lost precision past 2^24 cells). PS-DTFE never calls
+  these functions.
 - Small items after the one flag scheme (docs/cleanup-plan.md: the list left open after P6.7, and P5.5's rest). A run
   that fails with a message after its start (a missing input, a refused --resume, a writer that cannot open its file)
   no longer leaves '<output>.runlog.progress' behind: an exit handler removes the sidecar; a killed run still leaves
@@ -23,7 +53,8 @@ UNRELEASED (since 1.0.0)
 - CI runs three jobs (build-and-test, old-python, compile-variants). The CUDA/HIP port's jobs -- cudaemu (the CPU
   emulation at warp 32 and 64, with the exact-clip twin check), cuda-compile and hip-compile -- are gone: the port is
   not in use, and the emulation jobs kept stalling on the runners' package mirrors (the 10-minute install timeout on
-  38eb4be's run). The checks stay available locally: make CUDAEMU=1 + tests/cudaemu_check.sh, tests/gpu_twin_check.sh.
+  38eb4be's run). The checks stayed available locally (make CUDAEMU=1 + tests/cudaemu_check.sh,
+  tests/gpu_twin_check.sh) until the port itself was removed the same day (the entry above).
 - '--face-gradient' (both binaries, 3D; docs/cleanup-plan.md P10): the velocity gradient and the fields built on it
   from exact FACE integrals of the interpolant (Gauss), by one shared geometry (src/CGAL_triangulation/face_sweep.h:
   each grid plane's section through each tetrahedron, clipped to the face squares; a half-open rule on region-frame

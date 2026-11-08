@@ -16,7 +16,7 @@ three dimensions:
 A *lamina* is a thin sheet: the dark-matter sheet in phase space that PS-DTFE tessellates, and the walls of the cosmic
 web that both estimators resolve without smoothing them away.
 
-Around the two programs: GPU deposits (Metal on Apple Silicon, CUDA and HIP on NVIDIA and AMD), exact cell averages and
+Around the two programs: GPU deposits (Metal on Apple Silicon), exact cell averages and
 evaluation at any point, a domain decomposition chosen from the machine's memory, resumable runs, a Python package
 (`dtfelib`), batch drivers for IllustrisTNG snapshots and a graphical launcher. The programs run in parallel on
 shared-memory machines (OpenMP). Although they were written for cosmological simulations and galaxy surveys, they
@@ -64,7 +64,7 @@ For detailed information about the DTFE method see [Schaap and van de Weygaert (
 * An interactive mode: the tessellation is built once and queried from Python (`dtfelib.Estimator`) at any points; boxes too large for one tessellation are served as a composite of partitions kept on disk.
 * Automatic choice of the domain decomposition from the data and the machine's memory, crash-safe outputs and resumable runs, and an out-of-core mode for grids larger than the memory.
 * A tessellation cache on disk that later runs on the same data reuse.
-* Optional GPU deposit on Apple Silicon (Metal) and, as a port of the same kernels, on NVIDIA (CUDA) or AMD (HIP) GPUs; an optional double-precision build.
+* Optional GPU deposit on Apple Silicon (Metal); an optional double-precision build.
 * For comparison: nearest grid point (NGP), cloud in cell (CIC), triangular shape cloud (TSC), piecewise cubic spline (PCS), SPH and Voronoi interpolation.
 * Returns the Delaunay tessellation of the given point set, and can be used as an external library.
 * Batch drivers for IllustrisTNG snapshots, a Python analysis stack (`python/dtfelib`, `python/plot`) and a graphical launcher.
@@ -123,7 +123,7 @@ the Makefile uses them when it finds them.
 ### Quick start
 
 `./scripts/install.sh` installs any missing dependencies, builds both binaries with the best backend for the machine
-(Metal on Apple Silicon, CUDA/HIP when `nvcc`/`hipcc` is found, else the CPU), rebuilds any double or 2D pair already
+(Metal on Apple Silicon, else the CPU), rebuilds any double or 2D pair already
 built, installs the Python package and sets up the graphical launcher. Flags: `--cpu`, `--no-deps`, `--jobs N`,
 `--double` (also the double-precision pair), `--no-python`, `--no-gui` (e.g. on a cluster), `--no-app`, `--docker`
 (the Linux container image instead; never Metal); `./scripts/install.sh --help` explains each. A failed compile
@@ -147,9 +147,6 @@ Build variables (combine them on one `make` line):
 | variable | effect |
 |---|---|
 | `METAL=1` | Apple Silicon: the standard binary's `_a` interpolation and the PS-DTFE deposit on the GPU (`--gpu` in both), with a CPU fallback |
-| `CUDA=1` | Linux/NVIDIA: the same kernels ported to CUDA (`nvcc`; `CUDA_PATH`, `GPU_ARCH=sm_86`) |
-| `HIP=1` | Linux/AMD ROCm (`hipcc`; set `GPU_ARCH`, e.g. `gfx90a`) |
-| `CUDAEMU=1` | the CUDA/HIP sources compiled as C++ against a CPU emulation of the device, for validating the port without a GPU (`tests/cudaemu_check.sh`) |
 | `DOUBLE=1` | the double-precision pair `DTFE-double` / `PS-DTFE-double` (see Precision) |
 | `DIM=2` | the 2D pair `DTFE-2d` / `PS-DTFE-2d` (`-2d-double` with `DOUBLE=1`); CPU only |
 | `TBB=auto` / `1` / `0` | the parallel Delaunay insert of PS-DTFE (`--parallel-triangulation`): when found / required / left out |
@@ -157,12 +154,12 @@ Build variables (combine them on one `make` line):
 | `BUILD_MODE=debug` | debug symbols, no optimization, sanitizers |
 | `EXTRA_FLAGS`, `CC_OVERRIDE`, `<LIB>_PATH_OVERRIDE` | extra compiler flags, another compiler, a library elsewhere (see the Makefile's header) |
 
-One GPU backend per build. The CUDA/HIP port compiles in CI and passes every GPU parity suite through the CPU
-emulation, but has not been run on NVIDIA or AMD hardware: its first run on a GPU machine should be the parity checks in
-[metal/README.md](metal/README.md). Each binary set has its own object directories (`o/`, `o_ps/`; `o_d/`, `o_ps_d/`;
-`o_2d/`, `o_ps_2d/`), so the sets coexist. The build mode is stamped there (`o/.build_mode`); a mode switch wipes the
-objects, and `make DTFE $(cat o/.build_mode)` rebuilds without changing the mode. The run scripts find the GPU mode
-from the `.gpu_mode_metal` / `_cuda` / `_hip` stamp.
+The GPU code is Metal-only: on Linux and Intel Macs the programs run on the CPU. (An earlier CUDA/HIP port of the
+kernels, never run on NVIDIA or AMD hardware, is kept on the branch `archive/cuda-hip-2026-11-08`; `CUDA=1`, `HIP=1` and
+`CUDAEMU=1` now stop the build with a message saying so.) Each binary set has its own object directories (`o/`,
+`o_ps/`; `o_d/`, `o_ps_d/`; `o_2d/`, `o_ps_2d/`), so the sets coexist. The build mode is stamped there
+(`o/.build_mode`); a mode switch wipes the objects, and `make DTFE $(cat o/.build_mode)` rebuilds without changing the
+mode. The run scripts find the GPU mode from the `.gpu_mode_metal` stamp.
 
 **Compile-time options.** The Makefile's `OPTIONS_COMMON` block sets the compiled-in features and defaults:
 `-DVELOCITY`, `-DSCALAR` with `-DNO_SCALARS=1` (one scalar component; the GPU deposits only that case),
@@ -205,8 +202,7 @@ the binary is refused with the name of the binary to use.
 CI runs three jobs: build-and-test (build, core, gui, double, 2d), old-python (every .py parses under Python 3.10, and
 ruff's pyflakes rules pass) and compile-variants. The GPU suites need a GPU build and run
 by hand: `tests/dtfe_metal_check.sh`, `tests/gpu_scalar_check.sh`, `tests/gpu_mass_check.sh`,
-`tests/gpu_retry_check.sh`, `tests/dtfe_gpu_retry_check.sh` (and `tests/cudaemu_check.sh` on a `CUDAEMU=1` build:
-the CUDA/HIP port is no longer built or run by CI).
+`tests/gpu_retry_check.sh`, `tests/dtfe_gpu_retry_check.sh`.
 `DTFE_TEST_PRECISION=double tests/<suite>` runs a suite against the double pair. The suites run `PYTHON` when set, else the
 first python3 that imports numpy and h5py (`scripts/h5py_python.sh`). The standard-DTFE regression
 (`tests/run_tests.py`) compares a periodic 1000-particle run with `tests/reference/regression_periodic.txt` to 3e-4
@@ -303,7 +299,7 @@ one release when the new one is unset, with one `warning: OLD is deprecated, use
 | `DTFE_AUTO_PTS_VELGRAD`, `DTFE_TBB_THREADS` (deprecated) | `DTFE_AUTO_PTS_VEL_GRAD`, `DTFE_TRIANGULATION_THREADS` |
 | `DTFE_TESS_CACHE_THREADS`, `_ZLIB`, `_CGAL_IO`, `_FINGERPRINT`, `_LEGACY` (deprecated) | `DTFE_TESSELLATION_CACHE_THREADS`, ... |
 | `PS_MASS_AUDIT`, `PS_DEBUG_DEGREES` (deprecated) | `DTFE_MASS_AUDIT`, `DTFE_DEBUG_DEGREES` |
-| `PS_GPU_TIMING`, `PS_GPU_FLOAT_MASS`, `PS_GPU_FLOAT_MOMENTS`, `GPU_EMU_WARP` (deprecated) | `DTFE_GPU_TIMING`, `DTFE_GPU_FLOAT_MASS`, `DTFE_GPU_FLOAT_MOMENTS`, `DTFE_GPU_EMU_WARP` (metal/README.md) |
+| `PS_GPU_TIMING`, `PS_GPU_FLOAT_MASS`, `PS_GPU_FLOAT_MOMENTS` (deprecated) | `DTFE_GPU_TIMING`, `DTFE_GPU_FLOAT_MASS`, `DTFE_GPU_FLOAT_MOMENTS` (metal/README.md) |
 | `PS_EXACT_ITEM_CELLS`, `PS_EXACT_ITEMS` (deprecated) | `DTFE_GPU_EXACT_CELLS`, `DTFE_GPU_ITEMS` (metal/README.md) |
 
 
@@ -373,7 +369,7 @@ the number of streams is a field of its own. It follows the phase-space tessella
 It needs **two positions per particle**, the Eulerian and the Lagrangian one, from a Gadget-HDF5 file: an
 `InitialCoordinates` dataset in the same file, or a separate initial-conditions snapshot (`--ps-lagrangian-input`):
 ```bash
-make PS-DTFE METAL=1     # METAL=1 on Apple Silicon (CUDA=1 / HIP=1 on Linux) for --gpu
+make PS-DTFE METAL=1     # METAL=1 on Apple Silicon for --gpu
 ./PS-DTFE snapshot.hdf5 output_root --grid 256 --periodic --field density_a --ps-lagrangian-input ics.hdf5
 ```
 
@@ -595,7 +591,7 @@ the default: give it the same way both times. The old spellings of an option res
 one (`--no-overlap` switches it off); PS-DTFE does the same at `--max-concurrent 1` only (`--no-overlap` too). The
 outputs are byte-identical either way.
 
-**GPU failures.** The GPU deposit runs as short paced command buffers (kernels on CUDA/HIP) with a snapshot of the
+**GPU failures.** The GPU deposit runs as short paced command buffers with a snapshot of the
 grids every ~10 s of GPU work (`DTFE_GPU_CHECKPOINT_CHUNKS`). A killed buffer (the display watchdog, another program's
 GPU hang, out of memory) restores the last snapshot and retries by cause; a watchdog or memory error slows the pace,
 which eases back after a clean stretch (`DTFE_GPU_PACE_RECOVER_SEC`). Three failures of one chunk, sixteen in a deposit
@@ -842,7 +838,7 @@ machine-readable form (GitHub's *Cite this repository*).
 ## Contributors
 * **Marius Cautun (Kapteyn Astronomical Institute, Durham University, Leiden University)** - *code and documentation.*
 * **Rien van de Weygaert (Kapteyn Astronomical Institute)** - *various discussions about the method and implementation.*
-* **Luuk Westerhoek (Kapteyn Astronomical Institute, University of Groningen)** - *phase-space DTFE, the exact / point evaluation methods, automatic memory management, the GPU backends (Metal, and its CUDA/HIP port) and the analysis pipeline.*
+* **Luuk Westerhoek (Kapteyn Astronomical Institute, University of Groningen)** - *phase-space DTFE, the exact / point evaluation methods, automatic memory management, the Metal GPU backend and the analysis pipeline.*
 
 
 ## License

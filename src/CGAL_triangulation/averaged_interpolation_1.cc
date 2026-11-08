@@ -42,9 +42,9 @@
 
 #ifndef PHASE_SPACE
 // The standard binary's GPU deposit counters (the PS binary's are psGpuRetries & co. in
-// ps_interpolation.cc): the failed GPU command buffers / kernels of the run by cause -- [0] innocent victim,
+// ps_interpolation.cc): the failed GPU command buffers of the run by cause -- [0] innocent victim,
 // [1] timeout (a watchdog kill), [2] out of memory, [3] any other; they sum to dtfeGpuRetries -- counted by the
-// GPU host (dtfe_metal_host.cc, dtfe_gpu_cuda.cu), read by run_progress.h for the progress sidecar's gpu_retries /
+// GPU host (dtfe_metal_host.cc), read by run_progress.h for the progress sidecar's gpu_retries /
 // gpu_retries_by_cause and DTFE.cpp's closing 'GPU deposit retries:' line; and the sub-domain deposits that asked
 // for the GPU and ran on the CPU instead (DTFE.cpp's closing warning: the threads other than the master print
 // their reason only as a warning line of their own). Defined in every standard build, GPU or not.
@@ -57,7 +57,7 @@ int dtfeGpuFallbacksTaken(bool reset)
 }
 #endif
 
-// GPU deposit (METAL=1 / CUDA=1 / HIP=1 build, 3D only); the CPU loop below remains the fallback. MY_SCALAR
+// GPU deposit (METAL=1 build, 3D only); the CPU loop below remains the fallback. MY_SCALAR
 // evaluates arbitrary user C++ per sample, which cannot run on the GPU.
 #if defined(DTFE_GPU) && NO_DIM==3 && !defined(MY_SCALAR)
 #define DTFE_GPU_ACTIVE
@@ -624,7 +624,7 @@ static inline void avg1NoGpuWarning(User_options &userOptions)
         {
             warned = true;
             MESSAGE::Warning warning( userOptions.verboseLevel );
-            warning << "--gpu requested but this binary was built without GPU support (rebuild with METAL=1 on a Mac, CUDA=1 or HIP=1 on Linux; or NO_DIM!=3 / MY_SCALAR); using the CPU interpolation.\n" << MESSAGE::EndWarning;
+            warning << "--gpu requested but this binary was built without GPU support (rebuild with METAL=1 on a Mac; or NO_DIM!=3 / MY_SCALAR); using the CPU interpolation.\n" << MESSAGE::EndWarning;
         }
     }
 }

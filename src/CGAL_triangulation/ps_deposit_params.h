@@ -159,7 +159,7 @@ struct PSFixedUnits
 // NaN, an infinity or a product beyond the signed 64-bit range (C++ llrint / the GPU's float->long conversion:
 // arm64 gives 0 for a NaN and saturates the rest, x86-64 gives 0x8000000000000000 for all of them), so one such
 // share would silently corrupt an exact sum, where a float sum would show a NaN. The policy, the same
-// on the CPU, in Metal and in CUDA/HIP (and its emulation): a share whose product is not below 2^63 in magnitude
+// on the CPU and in Metal: a share whose product is not below 2^63 in magnitude
 // -- NaN, +-inf and an overflow alike -- adds NOTHING and is COUNTED, per grid slot (below); the host reports the
 // run's counts once (fixedShareDropsReact, DTFE.cpp). Hot path: one compare. The kernels test the float product's
 // bits, (bits & 0x7fffffff) < 0x5f000000 (= 2^63), as fast math cannot fold an integer compare away; the CPU
@@ -229,7 +229,7 @@ inline int64_t psFixedShare(double share, float scale, int slot)
 }
 
 // The parameter block of the PS-DTFE GPU deposit, PSDepositParams (and the exact items' PSExactItemParams): ONE
-// definition in ps_kernel_params.h, shared by the hosts (ps_metal_host.cc, ps_gpu_cuda.cu, metal/validate_deposit.cpp)
+// definition in ps_kernel_params.h, shared by the hosts (ps_metal_host.cc, metal/validate_deposit.cpp)
 // and the Metal kernels, to whose source the Makefile prepends it. Its fxScale holds one unit per PSFxGrid.
 #include "ps_kernel_params.h"
 static_assert( int(PS_FX_N) == 9, "PSDepositParams.fxScale[9] holds one unit per PSFxGrid (ps_kernel_params.h)" );
@@ -270,7 +270,7 @@ inline double psMassFixedValue(uint32_t lo, uint32_t hi, float scale)
 }
 
 // One mass share in fixed-point units: the integer the kernels add, rint(w * massScale) in metal/
-// ps_deposit.metal depositMass (ps_gpu_cuda.cu the same). The scale is 2^k, so the float product there and the
+// ps_deposit.metal depositMass. The scale is 2^k, so the float product there and the
 // double product here are both exact, and rint (round to nearest even) gives the same integer: a share adds the
 // same units whichever side deposits it. The CPU deposit (ps_interpolation.cc) adds these into the partition's
 // fixed-point grid -- the GPU's own words when the GPU deposited the partition -- so the mass grid is ONE exact
@@ -283,8 +283,7 @@ inline int64_t psMassFixedShare(double share, float scale)
 }
 
 // The GPU hosts hand the kernels' (low, high) uint32 word pairs over as int64_t by copying the bytes
-// (ps_metal_host.cc, ps_gpu_cuda.cu): that IS the integer on a little-endian host, which every Metal (Apple
-// Silicon) and CUDA/HIP (x86-64, aarch64) host is.
+// (ps_metal_host.cc): that IS the integer on a little-endian host, which every Metal (Apple Silicon) host is.
 #if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
 #error "the GPU hosts copy the fixed-point mass words as little-endian int64_t (ps_deposit_params.h)"
 #endif
