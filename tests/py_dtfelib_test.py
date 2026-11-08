@@ -3847,8 +3847,9 @@ def t_cache_atomic():
     normal save leaves one file; a save interrupted midway (KeyboardInterrupt from an array) the previous file
     byte-identical and no temp sibling. A cut, empty or non-zip cache (a killed non-atomic write) is 'unreadable' to
     _cached and rebuilt by voids() with ONE write, not a raise on every later load; tools/void_outlines.py turns
-    a damaged cache member into its clean 'no void catalogue' exit."""
-    import io as _io, os as _os, shutil, sys as _sys, tempfile, types, zipfile
+    a damaged cache member into its clean 'no void catalogue' exit (in a config imported for its --sim; one
+    imported for another simulation, or for none, is refused first)."""
+    import io as _io, shutil, sys as _sys, tempfile, types, zipfile
     from contextlib import redirect_stdout
     import config
     from dtfelib import pipeline
@@ -3856,7 +3857,7 @@ def t_cache_atomic():
     tmp = Path(tempfile.mkdtemp(prefix="dtfe_atomic_"))
     old_cache, old_save = config.CACHE_DIR, pipeline._save_npz
     vo = old_outlines = None
-    old_sim = _os.environ.get("DTFE_SIM")
+    old_sim = config.SIMULATION
     try:
         config.CACHE_DIR = tmp / "cache"
         d = tmp / "npz"
@@ -3942,21 +3943,96 @@ def t_cache_atomic():
         def damaged(*a, **k):
             raise zipfile.BadZipFile("Bad CRC-32 for file 'coords.npy'")
         vo.outlines = damaged
-        _os.environ["DTFE_SIM"] = "SYN"
+        # config is imported already here, for another simulation: its box is that one's, so --sim is refused
+        config.SIMULATION = "TNG50-4-Dark"
+        try:
+            vo.main(["--sim", "SYN", "--snap", "99"])
+            raise AssertionError("void_outlines.main ran in a config imported for another simulation")
+        except SystemExit as e:
+            assert str(e.code).startswith("run with DTFE_SIM=SYN: ") and "imported for TNG50-4-Dark" in str(e.code), e.code
+        # ... and one imported with no simulation at all has no box either: refused, said so
+        config.SIMULATION = None
+        try:
+            vo.main(["--sim", "SYN", "--snap", "99"])
+            raise AssertionError("void_outlines.main ran in a config imported with no simulation")
+        except SystemExit as e:
+            assert str(e.code).startswith("run with DTFE_SIM=SYN: ") and "imported with no DTFE_SIM" in str(e.code) \
+                and "None" not in str(e.code), e.code
+        config.SIMULATION = "SYN"
         try:
             vo.main(["--sim", "SYN", "--snap", "99"])
             raise AssertionError("void_outlines.main returned on a damaged cache")
         except SystemExit as e:
             assert str(e.code).startswith("no void catalogue for SYN snapshot 99: Bad CRC-32"), e.code
     finally:
-        config.CACHE_DIR, pipeline._save_npz = old_cache, old_save
+        config.CACHE_DIR, pipeline._save_npz, config.SIMULATION = old_cache, old_save, old_sim
         if vo is not None and old_outlines is not None:
             vo.outlines = old_outlines
-        if old_sim is None:
-            _os.environ.pop("DTFE_SIM", None)
-        else:
-            _os.environ["DTFE_SIM"] = old_sim
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+# a fresh interpreter running tools/void_outlines.py's main(), its catalogue step replaced by a probe that reports
+# the simulation and box config was imported with ('first' = import config for $FIRST_SIM before main(): a caller
+# that has config already)
+_VOID_OUTLINES_SIM_DRIVER = r'''
+import os, sys
+py = sys.argv[1]
+sys.path[:0] = [py, os.path.join(py, "tools")]
+if os.environ.get("FIRST_SIM"):
+    os.environ["DTFE_SIM"] = os.environ["FIRST_SIM"]
+    import config
+import void_outlines as vo
+def probe(*a, **k):
+    import config
+    raise OSError(f"probe {config.SIMULATION} {config.BOX_SIZE:.4f}")
+vo.outlines = probe
+vo.main(sys.argv[2:])
+'''
+
+
+def t_void_outlines_sim():
+    """tools/void_outlines.py: --sim names the simulation config reads the box for, with DTFE_SIM unset or naming
+    another one (the tool sets it before config is imported; the run then fails on the missing grids, not on the
+    environment); a process that imported config for another simulation first is refused, naming DTFE_SIM; a --sim
+    config has no box for is the one-line exit too. gui/void_cache.py build follows the same rule."""
+    import subprocess, sys as _sys
+    py = Path(__file__).resolve().parent.parent / "python"
+    root = Path(tempfile.mkdtemp(prefix="dtfe_vo_sim_"))
+    try:
+        base = {k: v for k, v in os.environ.items() if k not in ("DTFE_SIM", "FIRST_SIM")}
+        base["DTFE_DATA_ROOT"] = str(root)
+        argv = ["--sim", "TNG100-3-Dark", "--snap", "99"]
+
+        def run(cmd, **env):
+            r = subprocess.run(cmd, capture_output=True, text=True, env=dict(base, **env), timeout=300)
+            return r.returncode, r.stderr
+
+        box = f"{110.71744906997343:.4f}"
+        for env in ({}, {"DTFE_SIM": "TNG50-4-Dark"}):
+            code, err = run([_sys.executable, "-c", _VOID_OUTLINES_SIM_DRIVER, str(py)] + argv, **env)
+            assert code == 1 and f"no void catalogue for TNG100-3-Dark snapshot 99: probe TNG100-3-Dark {box}" in err \
+                and "run with DTFE_SIM" not in err, (env, code, err[-600:])
+        code, err = run([_sys.executable, "-c", _VOID_OUTLINES_SIM_DRIVER, str(py)] + argv, FIRST_SIM="TNG50-4-Dark")
+        assert code == 1 and "run with DTFE_SIM=TNG100-3-Dark: " in err and "imported for TNG50-4-Dark" in err \
+            and "probe" not in err, (code, err[-600:])
+        # the script itself, as the launcher runs it but without DTFE_SIM: the grids are missing, said cleanly
+        code, err = run([_sys.executable, str(py / "tools" / "void_outlines.py")] + argv)
+        assert code == 1 and err.strip().startswith("no void catalogue for TNG100-3-Dark snapshot 99: ") \
+            and str(root / "TNG100-3-Dark") in err and "Traceback" not in err, (code, err[-600:])
+        # a simulation config has no box for (not in its table, no snapshot header): importing config raises, and that
+        # is the same one-line exit, not a traceback
+        code, err = run([_sys.executable, str(py / "tools" / "void_outlines.py"), "--sim", "TYPO", "--snap", "99"])
+        assert code == 1 and len(err.strip().splitlines()) == 1 \
+            and err.startswith("no void catalogue for TYPO snapshot 99: ") and "unknown simulation 'TYPO'" in err, \
+            (code, err[-600:])
+        # gui/void_cache.py build, the launcher's catalogue job: --sim names the simulation the same way
+        for env in ({}, {"DTFE_SIM": "TNG50-4-Dark"}):
+            code, err = run([_sys.executable, str(py / "gui" / "void_cache.py"), "build"] + argv, **env)
+            assert code == 1 and err.strip().startswith("no void catalogue for TNG100-3-Dark snapshot 99: ") \
+                and str(root / "TNG100-3-Dark") in err and "run with DTFE_SIM" not in err \
+                and "Traceback" not in err, (env, code, err[-600:])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def t_void_tracking_script():
@@ -4288,6 +4364,7 @@ def main():
     check("distinct_mask's claims from every resolved void (a no-R_v void blocks, an unresolved one never), snapshot_stats' counts add up, void_profiles 'deep' = the de-duplication within it (synthetic)", t_distinct_claims)
     check("save_figure under a root without 'figures' in its path; the cuts are 10 sigma / L/2 / 1 cell at CALL time; a cache older than its grid is rebuilt; profile bins in sigma (synthetic)", t_science_fixes)
     check("_save_npz whole or not at all (an interrupted save leaves the old file, no temp); a cut / empty / non-zip cache is rebuilt with one write; void_outlines' clean exit on a damaged member (synthetic)", t_cache_atomic)
+    check("tools/void_outlines.py and gui/void_cache.py build: --sim names config's simulation (DTFE_SIM unset or another), a config imported for another one refused, an unknown one a one-line exit (fresh interpreters)", t_void_outlines_sim)
     check("cross-epoch limits store: a subset run keeps the series' maxima (synthetic)", t_limits_store)
     check("map ranges: symmetric about 0, log range of an empty slice (synthetic)", t_map_limits)
     check("webstreams: stream bins + caustic class by web class, chunked == whole (synthetic)", t_webstreams)

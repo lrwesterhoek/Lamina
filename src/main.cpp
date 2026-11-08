@@ -271,7 +271,10 @@ int main( int argc, char *argv[] )
     if ( exitStatus == 0 )
         runProgressFinish();
     else
+    {
         runProgressPhase( "rescued" );
+        runProgressDisarm();   // returning from main runs the exit handler too, which would take this sidecar
+    }
 
 
     // report peak RSS (to tune --max-concurrent / --partition to fit RAM) and total wall time

@@ -493,6 +493,18 @@ def t_qt(tmp: Path):
                   for e in (w.spec.command()[1], w.pipe.command()[1]))
               and "--ps-merge" not in w.custom.command(),
               (w.spec.ordered_merge, w.pipe.ordered_merge, w.custom.ordered_merge))
+        # a standard Grids job pins run_dtfe.sh's Monte-Carlo count and thread cap empty (the tab holds neither for it):
+        # a SUBSAMPLES / THREADS exported in the login shell cannot leak in
+        w.dtfe_radio.setChecked(True)
+        w._read_widgets()
+        std_env = w.spec.command()[1]
+        w.ps_radio.setChecked(True)
+        w._read_widgets()
+        check("a standard-DTFE Grids job pins SUBSAMPLES and THREADS empty (run_dtfe.sh's own defaults); the PS job "
+              "takes its count from -n",
+              std_env.get("SUBSAMPLES") == "" and std_env.get("THREADS") == "" and w.spec.estimator == "ps"
+              and "SUBSAMPLES" not in w.spec.command()[1] and "-n" in w.spec.command()[0],
+              ({k: std_env.get(k) for k in ("SUBSAMPLES", "THREADS")}, w.spec.estimator))
         w.om_check.setChecked(False)
         (d / "om.runlog").write_text(LOG_OK.format(root=d / "om").replace("--periodic", "--periodic --ordered-merge"))
         w._load_run_settings(R.parse_runlog(d / "om.runlog", "TNGQ-1-Dark", 99))

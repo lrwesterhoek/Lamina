@@ -39,6 +39,11 @@
 #       resumes byte-identical; DTFE_MERGE_SPILL=0 brings back the wait. The 'merge time:' line: partitions parked
 #       behind the held-back partition 0 (> 0 s parked), none parked but threads waiting with DTFE_MERGE_STAGE_GB=0
 #       (> 0 s holding a thread), the resumed run's count (the 17 it merged), the completion-order run's lock wait
+#   R8  the progress sidecar of a run that does not finish: one that stops on an error (a missing input, found by the
+#       reader after the sidecar is armed; also the standard binary when it is built) exits 1 and leaves none, as the
+#       launcher then reads a failed attempt from its run log instead of a death; one killed after 2 partitions
+#       (DTFE_TEST_EXIT_AFTER_PARTITIONS=2, exit 137) keeps it; one whose outputs could not be put in place (a folder
+#       where the '.den' goes, exit 3) keeps it with phase 'rescued'
 # Usage: tests/ps_runtime_check.sh [--no-build]   (--no-build is accepted and ignored: the binaries are used as built)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -294,6 +299,32 @@ for path in sys.argv[1:]:
 sys.exit(0 if ok else 1)
 PYEOF
 check "R6 an auto-tuned run and one whose plan is given in full print their predicted and measured peak" $?
+
+echo ">> R8: the progress sidecar of a run that stops on an error, is killed, or cannot put its outputs in place"
+# an error ends in exit(), whose handler takes the sidecar; the missing input is found by the reader, AFTER the
+# sidecar is armed (an option error would stop the run before it and pass this check without testing anything)
+E8=("$BIN")
+[ -x "${DTFE_BIN}" ] && E8+=("$(cd "$(dirname "${DTFE_BIN}")" && pwd)/$(basename "${DTFE_BIN}")")
+for b in "${E8[@]}"; do
+    n="$(basename "$b")"
+    "$b" "$TMP/absent.hdf5" "$TMP/e8_$n" "${C[@]}" > "$TMP/e8_$n.log" 2>&1; rc=$?
+    [ "$rc" = 1 ] && grep -q "READING INPUT" "$TMP/e8_$n.log" && grep -q "could not open the input" "$TMP/e8_$n.log" \
+        && grep -q "ended unsucessfully" "$TMP/e8_$n.log" && [ ! -e "$TMP/e8_$n.runlog.progress" ] \
+        && ! ls "$TMP/e8_$n.runlog.progress.tmp."* >/dev/null 2>&1
+    check "R8 $n: a missing input stops the run in the reader (exit $rc) and leaves no progress sidecar" $?
+done
+# a kill runs no exit handler: the sidecar stays, its pid gone (the launcher's 'died')
+DTFE_TEST_EXIT_AFTER_PARTITIONS=2 "$BIN" "$SNAP" "$TMP/k8" "${C[@]}" --partition 2 2 2 --max-concurrent 1 \
+    > "$TMP/k8.log" 2>&1; rc=$?
+[ "$rc" = 137 ] && [ -s "$TMP/k8.runlog.progress" ]
+check "R8 a run killed after 2 partitions (exit $rc, 137 = SIGKILL) keeps its progress sidecar" $?
+# exit 3 in a writable folder (a missing one, as in R4, never gets a sidecar): the 'rescued' sidecar is kept
+mkdir -p "$TMP/c8.den"; : > "$TMP/c8.den/blocker"   # a folder where the '.den' output goes: its rename fails
+"$BIN" "$SNAP" "$TMP/c8" "${C[@]}" --partition 2 2 2 --max-concurrent 1 > "$TMP/c8.log" 2>&1; rc=$?
+phase="$("$PY" -c 'import json, sys; print(json.load(open(sys.argv[1]))["phase"])' "$TMP/c8.runlog.progress" 2>/dev/null)"
+[ "$rc" = 3 ] && grep -q "could not be put in place" "$TMP/c8.log" && [ "$phase" = rescued ]
+check "R8 outputs that could not be put in place (exit $rc) keep the progress sidecar, phase '${phase:-none}'" $?
+rm -rf "$TMP/c8.den" "$TMP"/c8.*.part.* "$TMP/c8.runlog.checkpoint" "$TMP/k8.runlog.checkpoint"
 
 echo "RESULT: $PASS passed, $FAILS failed"
 [ "$FAILS" = 0 ] || exit 1

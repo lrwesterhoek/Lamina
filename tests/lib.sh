@@ -58,3 +58,14 @@ same() {
 }
 # merged_count <checkpoint folder>: how many partitions its 'checkpoint' file says are merged
 merged_count() { grep -a -m1 '^merged_count' "$1/checkpoint" | awk '{print $2}'; }
+# no_checkpoint_why <child log> [folder]: for a kill case that found no checkpoint, the binary's own reason (its
+# 'could not be written' warning carries the room rule's 'only N GB free' text) and the volume's free space, so a
+# FAIL on a nearly full disk says why. Prints only: the caller's check keeps its own pass/fail.
+no_checkpoint_why() {
+    local log="$1" dir="${2:-$(dirname "$1")}" w
+    w="$(grep -a -m1 'partition checkpoint could not be written' "$log" 2>/dev/null | cut -c1-1000)"
+    if [ -n "$w" ]; then echo "    NOTE  no checkpoint was left; the binary said: $w"
+    else echo "    NOTE  no checkpoint was left and ${log##*/} has no 'could not be written' warning (killed before the first write?)"; fi
+    echo "    NOTE  free space in $dir: $(df -k "$dir" 2>/dev/null | tail -1)"
+    return 0
+}

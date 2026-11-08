@@ -9,14 +9,15 @@
 #       some, and removes '<output>.runlog.checkpoint' once its outputs are in place; its 'merge time:' line counts
 #       the 27 partitions copied into the full grids, with the seconds of the copies and checkpoints (>= 0)
 #   D2  a run killed after 10 partitions (DTFE_TEST_EXIT_AFTER_PARTITIONS=10: a SIGKILL right after a checkpoint)
-#       exits 137, writes no output, and leaves a checkpoint listing exactly 10 of 27 (the loop is serial)
+#       exits 137, writes no output, and leaves a checkpoint listing exactly 10 of 27 (the loop is serial); it spells
+#       the deprecated '--lambda_th', and its log carries the warning
 #   D3  '--resume' with a changed setting ('--grid') refuses, names the differing line and DTFE_RESUME=0 (the
 #       launcher's results.py RESUME_REFUSED keys on "'--resume' refused"), keeps the checkpoint
 #   D4  '--resume' continues and is killed again after 3 more partitions: its progress sidecar counts the restored
 #       ones as done (done 12 of 27 -- the 3rd computed one died in its checkpoint write, before its progress line);
-#       a second '--resume' (with '--tessellation-cache', which the key leaves out, and '--lambda-th' where the killed
-#       runs had the deprecated '--lambda_th': one settings key) computes the last 14 only (its 'merge time:' line
-#       counts 14), every
+#       a second '--resume' (with '--tessellation-cache', which the key leaves out, and the canonical '--lambda-th'
+#       where the killed runs (D2, D4a) had the deprecated '--lambda_th': one settings key) computes the last 14 only
+#       (its 'merge time:' line counts 14), every
 #       output -- the T-web and V-web included -- byte-identical to the reference, the checkpoint removed, a dead
 #       writer's temp file cleaned up
 #   D5  '--resume' with nothing to resume refuses; on a run of one triangulation ('--partition 1') it refuses too
@@ -85,9 +86,12 @@ same() {
 }
 # merged_count <checkpoint folder>: tests/lib.sh
 C=(--grid 40 --periodic --padding 5 --field density velocity density_a velocity_a gradient_a tweb_a vweb_a
-   --lambda_th 0.3 --verbose 2 --partition 3 3 3)
+   --lambda-th 0.3 --verbose 2 --partition 3 3 3)
 RUN=(env OMP_NUM_THREADS=2 "$BIN" "$SNAP")
 MC=(--max-concurrent 2)
+# D2 and D4a only: the killed runs spell the threshold the deprecated way, so the checkpoint is written under the old
+# spelling and the final resume (the canonical one) must find the same settings key
+C_OLD=("${C[@]/#--lambda-th/--lambda_th}")
 
 echo ">> D1: the uninterrupted reference (27 partitions)"
 # (into files first: under pipefail a 'grep -q' that stops reading early fails the pipe with the binary's SIGPIPE)
@@ -107,12 +111,13 @@ read -r mtn mta mtc <<< "$(mtime "$TMP/ref.log")"
 check "D1 the 'merge time:' line: ${mtn:-?} of 27 partitions copied in ${mta:-?} s (checkpoints ${mtc:-?} s)" $?
 
 echo ">> D2: killed after 10 partitions"
-DTFE_TEST_EXIT_AFTER_PARTITIONS=10 "${RUN[@]}" "$TMP/k" "${C[@]}" "${MC[@]}" > "$TMP/k1.log" 2>&1; rc=$?
+DTFE_TEST_EXIT_AFTER_PARTITIONS=10 "${RUN[@]}" "$TMP/k" "${C_OLD[@]}" "${MC[@]}" > "$TMP/k1.log" 2>&1; rc=$?
 CK="$TMP/k.runlog.checkpoint"
 n="$(merged_count "$CK" 2>/dev/null || echo 0)"
 [ "$rc" = 137 ] && [ ! -e "$TMP/k.den" ] && [ ! -e "$TMP/k.a_den" ] && [ -s "$CK/checkpoint" ] && [ "${n:-0}" = 10 ] \
-    && [ "$(head -1 "$CK/checkpoint")" = "DTFE-CHECKPOINT 1" ]
-check "D2 exit $rc (137 = SIGKILL), no outputs, a standard checkpoint of ${n:-?} of 27 partitions (10 expected)" $?
+    && [ "$(head -1 "$CK/checkpoint")" = "DTFE-CHECKPOINT 1" ] \
+    && grep -q "^warning: --lambda_th is deprecated, use --lambda-th$" "$TMP/k1.log"
+check "D2 exit $rc (137 = SIGKILL), no outputs, a standard checkpoint of ${n:-?} of 27 partitions (10 expected), the '--lambda_th' warning" $?
 
 echo ">> D3: --resume with another --grid refuses"
 "${RUN[@]}" "$TMP/k" "${C[@]/40/32}" "${MC[@]}" --resume > "$TMP/k3.log" 2>&1; rc=$?
@@ -121,7 +126,7 @@ echo ">> D3: --resume with another --grid refuses"
 check "D3 refused, naming the differing line and DTFE_RESUME=0; the checkpoint is kept" $?
 
 echo ">> D4: --resume, killed again after 3 more, then resumed to the end"
-DTFE_TEST_EXIT_AFTER_PARTITIONS=3 "${RUN[@]}" "$TMP/k" "${C[@]}" "${MC[@]}" --resume > "$TMP/k4a.log" 2>&1; rc=$?
+DTFE_TEST_EXIT_AFTER_PARTITIONS=3 "${RUN[@]}" "$TMP/k" "${C_OLD[@]}" "${MC[@]}" --resume > "$TMP/k4a.log" 2>&1; rc=$?
 n2="$(merged_count "$CK" 2>/dev/null || echo 0)"
 side="$(cat "$TMP/k.runlog.progress" 2>/dev/null)"
 [ "$rc" = 137 ] && grep -q -- "DTFE: --resume: 10 of 27 partitions are already in the checkpoint" "$TMP/k4a.log" \
@@ -140,7 +145,7 @@ check "D4 the progress sidecar of the resumed run counts the restored partitions
 sleep 0 & DEAD=$!; wait "$DEAD"   # a pid that no longer runs
 echo torn > "$CK/checkpoint.tmp.$DEAD"
 mkdir -p "$TMP/tc"
-"${RUN[@]}" "$TMP/k" "${C[@]/#--lambda_th/--lambda-th}" "${MC[@]}" --resume --tessellation-cache "$TMP/tc" > "$TMP/k4b.log" 2>&1; rc=$?
+"${RUN[@]}" "$TMP/k" "${C[@]}" "${MC[@]}" --resume --tessellation-cache "$TMP/tc" > "$TMP/k4b.log" 2>&1; rc=$?
 [ "$rc" = 0 ] && grep -q -- "--resume: 13 of 27 partitions are already in the checkpoint" "$TMP/k4b.log" \
     && grep -q "^warning: --lambda_th is deprecated, use --lambda-th$" "$TMP/k4a.log" && ! grep -q "deprecated" "$TMP/k4b.log" \
     && [ "$(grep -c '<<< Interpolating the fields for partition' "$TMP/k4b.log")" = 14 ] \

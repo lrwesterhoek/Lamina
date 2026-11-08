@@ -1,4 +1,25 @@
 UNRELEASED (since 1.0.0)
+- Small items after the one flag scheme (docs/cleanup-plan.md: the list left open after P6.7, and P5.5's rest). A run
+  that fails with a message after its start (a missing input, a refused --resume, a writer that cannot open its file)
+  no longer leaves '<output>.runlog.progress' behind: an exit handler removes the sidecar; a killed run still leaves
+  it (the launcher's evidence that the run died) and an exit-3 'rescued' run keeps it on purpose. The launcher pins
+  SUBSAMPLES and THREADS empty for a standard Grids job, as it pins the exact and GPU knobs, so a login export of
+  either no longer reaches a standard run. tools/void_outlines.py and the launcher's void_cache.py build take the
+  simulation from --sim (the process's DTFE_SIM is set before config is imported; they refuse only when config was
+  already imported for another simulation), and tools/make_image_plane.py's DTFE_SIM fallback goes through
+  dtfelib.cli.require_sim (the same message as the other tools). Tests: tests/dev/battery.sh has a 32nd stage,
+  tests/dev/deprecation_gate.sh, which fails on a 'warning: ... is deprecated' line in the suites' temporary files
+  outside an allow-list of the suites that test the old spellings (the files by name, read as text, under the
+  battery's start marker; the summary says how many files it read); dtfe_resume_check spells --lambda-th except in
+  the killed runs whose resume under the new spelling it tests; ps_resume_check's kill cases say why when no
+  checkpoint was left (the binary's 'checkpoint could not be written' warning and the free space); ps_runtime_check
+  R8 covers the sidecar after an error exit, a kill and an exit 3; ps_auto_tune_check Y5's band is 2..6 (the live
+  memory gate's timing moves the count by one); py_gui_app_test's Stop check polls for the binary (up to 10 s) instead
+  of a fixed 3 s wait, which sampled the tree after the exact 256^3 run had ended. P5.5's remaining pieces are closed
+  without code: the three tools stay
+  on add_sim_arg / require_sim (make_parser's field flags are not theirs), the plot scripts' void options are not
+  shared (they differ in mechanism and help), and one tools bootstrap would need the launcher's two path loaders
+  changed for no gain.
 - CI runs three jobs (build-and-test, old-python, compile-variants). The CUDA/HIP port's jobs -- cudaemu (the CPU
   emulation at warp 32 and 64, with the exact-clip twin check), cuda-compile and hip-compile -- are gone: the port is
   not in use, and the emulation jobs kept stalling on the runners' package mirrors (the 10-minute install timeout on

@@ -2375,6 +2375,21 @@ def pipeline_options(tmp: Path, sim: Path):
     check("... the command shown (and exported) names each knob once, by its new name",
           not older and all(" PS_MERGE=" in ln for ln in lines[:3]) and " PLANE_WINDOW=" in lines[0]
           and " PYTHON=" in lines[0], f"{older} {lines}")
+    # run_dtfe.sh's Monte-Carlo count and thread cap: the Grids tab holds neither for a standard run, so the job pins
+    # both EMPTY (the script's own defaults). A login export is overwritten only where the key is spelled out: in the
+    # step's env (the job runner inserts each of its keys over the system environment) and in its line (the command
+    # shown and the exported script put the assignments in front of run_dtfe.sh)
+    pinned = ("SUBSAMPLES", "THREADS")
+    st_dt = rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99], estimator="dtfe").steps()
+    exported = [ln for ln in rs.export_script(st_dt, "t").splitlines() if "run_dtfe.sh" in ln and not ln.startswith("#")]
+    ps_argv = rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99], nsub=2).command()[0]
+    check("a standard Grids job pins SUBSAMPLES and THREADS empty (run_dtfe.sh: the binary's count, all cores): both "
+          "keys in the env its step runs with and in the line shown and exported; a PS one leaves them to -n and the shell",
+          len(st_dt) == 1 and len(exported) == 1
+          and all(k in e and e[k] == "" for e in (st_dt[0].env, g_dt) for k in pinned) and "AVG_SUBSAMPLES" not in g_dt
+          and all(f" {k}='' " in f" {ln} " for ln in (lines[3], st_dt[0].line(), exported[0]) for k in pinned)
+          and "SUBSAMPLES" not in g_ps and "THREADS" not in g_ps and ps_argv[ps_argv.index("-n") + 1] == "2",
+          f"{st_dt[0].env if st_dt else None} | {g_dt} | {lines[3]} | {exported} | {ps_argv}")
     check("... the merge tick is the explicit index order (PS_MERGE=index-order: the memory gate stays on under the "
           "speed split), unticked the completion order; ORDERED_MERGE the same until P6.6",
           (env["PS_MERGE"], env["ORDERED_MERGE"]) == ("index-order", "1")
@@ -2434,6 +2449,26 @@ def pipeline_options(tmp: Path, sim: Path):
           and {f.name: (f.stat().st_mtime_ns, f.stat().st_size) for f in sim.iterdir()} == before,
           f"{same.returncode} {same.stdout!r} {same.stderr[-200:]} | {diff.returncode} {diff.stdout!r} | "
           f"{bad.returncode} {bad.stderr[-120:]!r} | {gone.returncode}")
+    # the simulation it reads (require_sim's rule): --sim or --combined, else DTFE_SIM; an explicit --combined wins
+    # over an exported DTFE_SIM (the pipeline exports it); with none of the three a usage error naming both ways
+    bare = {k: v for k, v in os.environ.items() if k != "DTFE_SIM"}
+    bare["DTFE_DATA_ROOT"] = str(tmp)
+
+    def plane(*args, **env):
+        return subprocess.run([sys.executable, tool, *args, "-o", str(tmp / "plane_none")], capture_output=True,
+                              text=True, env=dict(bare, **env))
+    none_, by_env = plane(), plane("--snap", "99", DTFE_SIM="NoSuchSim")
+    explicit = plane("--combined", str(tmp / "no_such.hdf5"), DTFE_SIM="NoSuchSim")
+    usage = [ln for ln in none_.stderr.splitlines() if ": error: " in ln]
+    check("make_image_plane.py: neither --sim nor --combined nor DTFE_SIM is exit 2 naming both ways (no nested "
+          "parentheses); DTFE_SIM alone names the simulation; an explicit --combined is read, not DTFE_SIM's snapshot",
+          none_.returncode == 2 and len(usage) == 1 and "one of --sim / --combined is required; no simulation given: "
+          "pass --sim NAME or set DTFE_SIM=NAME" in usage[0] and "required (" not in usage[0] and "))" not in usage[0]
+          and by_env.returncode == 1 and str(Path("NoSuchSim") / "snapdir_099" / "combined_099.hdf5") in by_env.stderr
+          and explicit.returncode == 1 and f"snapshot not found: {tmp / 'no_such.hdf5'}" in explicit.stderr
+          and "NoSuchSim" not in explicit.stderr and not (tmp / "plane_none.bin").exists(),
+          f"{none_.returncode} {none_.stderr[-200:]!r} | {by_env.returncode} {by_env.stderr[-200:]!r} | "
+          f"{explicit.returncode} {explicit.stderr[-200:]!r}")
     # the launcher's reading of a broken or missing sidecar agrees with the script's (regenerate = all stale)
     good = side.read_text()
     side.write_text("{ not json")

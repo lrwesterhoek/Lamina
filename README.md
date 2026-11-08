@@ -214,9 +214,10 @@ relative; after an intended change of the estimator regenerate it with `python3 
 
 The development tools in `tests/dev/` (not run by CI; macOS):
 
-* `tests/dev/battery.sh <scratch dir>` runs everything above that a Mac can run, in 31 stages (about 1.5-2 h): the three
-  builds, the `core`, `double`, `2d` and `gui` stages, the GPU suites in single and double precision, and the Python
-  suites under CI's package versions with no simulation data. `tests/dev/make_ci_venv.sh` makes that Python (python
+* `tests/dev/battery.sh <scratch dir>` runs everything above that a Mac can run, in 32 stages (about 1.5-2 h): the three
+  builds, the `core`, `double`, `2d` and `gui` stages, the GPU suites in single and double precision, the Python
+  suites under CI's package versions with no simulation data, and `deprecation_gate` (no unexpected 'is deprecated'
+  line in the suites' temporary files). `tests/dev/make_ci_venv.sh` makes that Python (python
   3.11, numpy 1.26.4, scipy 1.11.4, matplotlib 3.6.3; by default in `~/.venvs/dtfe-ci`). `--list` names the stages,
   `--only` picks some, and `<scratch dir>/battery/SUMMARY.txt` records the commit and whether the tree changed
   during the run.

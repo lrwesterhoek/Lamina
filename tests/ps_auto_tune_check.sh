@@ -68,7 +68,7 @@
 #     of one partition at a time), a run whose free memory holds more starts more (up to the cores) and writes the
 #     '--max-concurrent 1' run's grids byte for byte (the ordered merge); one whose free memory holds no second
 #     partition keeps the plan's 1, as do DTFE_DYNAMIC_CONCURRENCY=0 and a user's '--max-concurrent'; room for about
-#     four admits 2-4, not every waiting thread at once (the gate counts what it admitted); the double build keeps the
+#     five admits 2-6, not every waiting thread at once (the gate counts what it admitted); the double build keeps the
 #     plan's (its sums follow the thread order); a dynamic run killed after 3 partitions and resumed writes the same grids.
 #
 # The 2^32 GPU sub-grid guard (ps_interpolation.cc) is NOT exercised here: it needs a real
@@ -690,12 +690,14 @@ run_y user DTFE_FREE_GB=1000 -- --max-concurrent 1
 check "Y3 DTFE_DYNAMIC_CONCURRENCY=0 and a user's --max-concurrent keep their one partition at a time" \
       "$(grep -q "building up to 1 partition" "${TMP}/at_y_off.log" && grep -q "building up to 1 partition" "${TMP}/at_y_user.log" \
          && y_same off && echo 1 || echo 0)"
-# a binding limit: 4.2 GB free less the 4 GB headroom holds about four of this plan's ~0.05 GB partitions; all
-# threads reach the gate at once, and it admits only as far as that room goes (counting the ones admitted)
+# a binding limit: 4.2 GB free less the 4 GB headroom holds about five of this plan's partitions; all threads reach
+# the gate at once, and it admits only as far as that room goes (counting the ones admitted). Where it stops moves by
+# one with the gate's timing (4, now and then 5, alone; 4 or 5 under load), so the band is 2..6: more than the plan's
+# one and fewer than every thread at once (Y1 reaches one per core, 10 on a 10-core Mac), with no flake at its edge
 run_y room DTFE_TEST_PLAN_MC=1 DTFE_FREE_GB=4.2 --
 m=$(y_most room)
-check "Y5 room for about four partitions: ${m:-?} in flight at most (not every thread at once), the same grids" \
-      "$([ -n "${m}" ] && [ "${m}" -ge 2 ] && [ "${m}" -le 4 ] && y_same room && echo 1 || echo 0)"
+check "Y5 room for about five partitions: ${m:-?} in flight at most (2..6, not every thread at once), the same grids" \
+      "$([ -n "${m}" ] && [ "${m}" -ge 2 ] && [ "${m}" -le 6 ] && y_same room && echo 1 || echo 0)"
 # the double build sums per-thread copies in thread order: its grids would follow the count, so it keeps the plan's
 if [ -x "${PS_BIN_DOUBLE:-./PS-DTFE-double}" ]; then
     env DTFE_RAM_GB=64 DTFE_TEST_PLAN_MC=1 DTFE_FREE_GB=1000 "${PS_BIN_DOUBLE:-./PS-DTFE-double}" "${SNAP_Y}" "${TMP}/at_y_dbl" \

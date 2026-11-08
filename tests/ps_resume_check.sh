@@ -48,7 +48,7 @@ SNAP="$TMP/waves.hdf5"
     --jitter-frac 0.02 --seed 7 --crossed-waves >/dev/null || { echo "FAIL data gen"; exit 1; }
 PASS=0; FAILS=0
 check() { if [ "$2" = 0 ]; then PASS=$((PASS+1)); echo "  PASS $1"; else FAILS=$((FAILS+1)); echo "  FAIL $1"; fi; }
-# same <a> <b>, merged_count <checkpoint folder>: tests/lib.sh
+# same <a> <b>, merged_count <checkpoint folder>, no_checkpoint_why <child log> [folder]: tests/lib.sh
 C=(--grid 48 --periodic --input-format 105 --mpc-unit 1 --field density velocity density_a velocity_a dispersion_a
    --partition 4 4 4)
 
@@ -66,6 +66,7 @@ OMP_NUM_THREADS=4 DTFE_TEST_EXIT_AFTER_PARTITIONS=20 "$BIN" "$SNAP" "$TMP/k" "${
     > "$TMP/k.log" 2>&1; rc=$?
 CK="$TMP/k.runlog.checkpoint"
 n="$(merged_count "$CK" 2>/dev/null || echo 0)"
+[ -s "$CK/checkpoint" ] || no_checkpoint_why "$TMP/k.log" "$TMP"
 [ "$rc" = 137 ] && [ ! -e "$TMP/k.den" ] && [ -s "$CK/checkpoint" ] && [ "${n:-0}" -ge 20 ] && [ "${n:-0}" -lt 64 ]
 check "C2 exit 137 (SIGKILL), no outputs, a checkpoint of ${n:-?} of 64 merged partitions" $?
 
@@ -224,6 +225,7 @@ X_NEW=("${C[@]}" --verbose 2 --max-concurrent 4 --ps-merge index-order --exact-a
 OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/xref" "${X_NEW[@]}" > "$TMP/xref.log" 2>&1 || { echo "FAIL: xref (see $TMP/xref.log)"; exit 1; }
 OMP_NUM_THREADS=4 DTFE_TEST_EXIT_AFTER_PARTITIONS=20 "$BIN" "$SNAP" "$TMP/x" "${X_OLD[@]}" > "$TMP/x1.log" 2>&1; rc1=$?
 nx="$(merged_count "$TMP/x.runlog.checkpoint" 2>/dev/null || echo 0)"
+[ "${nx:-0}" -gt 0 ] || no_checkpoint_why "$TMP/x1.log" "$TMP"
 OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/x" "${X_NEW[@]}" --resume > "$TMP/x2.log" 2>&1; rc2=$?
 [ "$rc1" = 137 ] && [ "$rc2" = 0 ] && grep -q -- "--resume: $nx of 64 partitions are already in the checkpoint" "$TMP/x2.log" \
     && grep -q "^warning: --ps-exact-deposit is deprecated, use --exact-average$" "$TMP/x1.log" \

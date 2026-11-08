@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # The local battery (macOS, Apple Silicon): CI's stages plus what CI cannot run -- the Metal GPU suites, single and
 # double precision -- and the Python suites under CI's numpy 1.26 / matplotlib 3.6 (Ubuntu 24.04's versions), with
-# no simulation data (DTFE_DATA_ROOT points at an empty folder, as on CI). 31 stages, about 1.5-2 h on 10 cores.
+# no simulation data (DTFE_DATA_ROOT points at an empty folder, as on CI). 32 stages, about 1.5-2 h on 10 cores.
 # It builds the three binary pairs first (METAL=1, METAL=1 DOUBLE=1, DIM=2) and runs on this checkout; do not edit
-# the tree while it runs (the summary says if it changed).
+# the tree while it runs (the summary says if it changed). The last stage, 'deprecation_gate', fails on a
+# 'warning: ... is deprecated' line in the suites' temporary files written since this battery started, except those
+# of the suites that test the old spellings (the allow-list in tests/dev/deprecation_gate.sh). A suite that several
+# stages run (ci_core and then ci_double into the same DTFE_TEST_TMP) clears its folder or rewrites its logs on each
+# run, so the gate sees each suite's last run of the battery; '--only deprecation_gate' alone reads the whole folder.
+# Five python suites (ps_3d_test, ps_standard_cross_check, ps_convergence_test, ps_nonperiodic_test,
+# ps_regression_test) let the binaries' stderr through to the stage log, which the gate does not read.
 #
 # Usage: tests/dev/battery.sh <scratch dir> [--ci-python PATH] [--gui-python PATH] [--only NAME,NAME...] [--list]
 #   <scratch dir>   logs (<scratch>/battery/<stage>.log and SUMMARY.txt), the suites' temporary files and the
@@ -43,6 +49,7 @@ if [ "$LIST" = 1 ]; then
     for s in build build_d build_2d ci_core ci_double ci_2d ci_gui dtfe_metal gpu_scalar gpu_mass gpu_retry dtfe_gpu_retry \
              auto_tune scratch padding_d gpu_mass_d auto_tune_d gpu_retry_d; do echo "$s"; done
     for t in $PY_SUITES; do echo "${t%%:*}_np126"; done
+    echo deprecation_gate
     exit 0
 fi
 [ -n "$SCRATCH" ] || usage
@@ -61,6 +68,12 @@ if selected ci_gui && ! "$GUI_PY" -c "import PySide6" 2>/dev/null; then
 fi
 
 L="$SCRATCH/battery"; mkdir -p "$L"
+# the deprecation gate reads only the files written after this marker (a reused scratch folder keeps an earlier
+# battery's); with no other stage selected nothing is written after it, so the gate then reads the whole folder
+gate_mark=(); others="${ONLY//deprecation_gate/}"
+if [ -z "$ONLY" ] || [ -n "${others//,/}" ]; then
+    touch "$L/.started"; gate_mark=("$L/.started")
+fi
 export DTFE_TEST_TMP="$SCRATCH/battery-tmp"; mkdir -p "$DTFE_TEST_TMP"
 export MPLBACKEND=Agg
 ER="$SCRATCH/emptyroot"; mkdir -p "$ER"
@@ -104,6 +117,7 @@ run gpu_retry_d env DTFE_TEST_PRECISION=double tests/gpu_retry_check.sh --no-bui
 for t in $PY_SUITES; do
     run "${t%%:*}_np126" env DTFE_DATA_ROOT="$ER" "$CI_PY" "tests/${t#*:}.py"
 done
+run deprecation_gate tests/dev/deprecation_gate.sh "$DTFE_TEST_TMP" ${gate_mark[@]+"${gate_mark[@]}"}
 
 tree_ok=1; [ "$(fingerprint)" = "$tree0" ] || tree_ok=0
 {

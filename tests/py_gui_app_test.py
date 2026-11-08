@@ -928,7 +928,7 @@ def _stop(qa, w):
     print("stop:")
     w.tabs.setCurrentIndex(A.GRIDS)
     qa.processEvents()
-    w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("exact"))  # slow: exact CPU deposit
+    w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("exact"))  # the exact CPU deposit at 256^3: a few seconds
     w.grid_combo.setCurrentText("256")
     w.prefix_edit.setText("ps_gui_stop")
     w.prefix_edit.editingFinished.emit()
@@ -939,12 +939,17 @@ def _stop(qa, w):
     check("... and starts the run: now Stop is offered and Run is not",
           w.proc is not None and w.stop_action.isEnabled() and not w.run_action.isEnabled())
     pid = int(w.proc.processId())
-    loop = QEventLoop()
-    QTimer.singleShot(3000, loop.quit)
-    loop.exec()
-    tree = A._descendants(pid)
-    names = subprocess.run(["ps", "-o", "comm=", "-p", ",".join(map(str, tree))],
-                           capture_output=True, text=True).stdout.split()
+    # poll for the binary rather than wait a fixed time: the run lasts only a few seconds (2.9 s for this exact
+    # 256^3 deposit), and a fixed 3 s wait sampled the tree after it had exited (bash and the keep-awake
+    # caffeinate were all that was left)
+    names = []
+    for _ in range(100):                          # up to 10 s
+        spin(100)
+        tree = A._descendants(pid)
+        names = subprocess.run(["ps", "-o", "comm=", "-p", ",".join(map(str, tree))],
+                               capture_output=True, text=True).stdout.split()
+        if any(n.endswith("PS-DTFE") for n in names):
+            break
     check("the run's process tree reaches the PS-DTFE binary",
           any(n.endswith("PS-DTFE") for n in names), str(names))
     w.stop_action.trigger()                       # Run > Stop

@@ -26,7 +26,6 @@ run with MpcUnit 1000; the synthetic test inputs use --mpc-unit 1).
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -62,7 +61,7 @@ def read_header(combined: Path, mpc_unit: float) -> dict:
 
 
 def main() -> None:
-    from dtfelib.cli import new_parser, add_out_arg, deprecated_option
+    from dtfelib.cli import new_parser, add_out_arg, deprecated_option, require_sim, NoSimulation
     p = new_parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     src = p.add_mutually_exclusive_group()          # required, except with --same-as
     src.add_argument("--sim", help="simulation name (under DTFE_DATA_ROOT); needs --snap")
@@ -129,10 +128,13 @@ def main() -> None:
                                       supersample=args.supersample, window=window)
         print("same" if same else "differs")
         sys.exit(0 if same else SAME_AS_DIFFERS)
+    # not add_sim_arg: its DTFE_SIM default would shadow an explicit --combined (the pipeline exports DTFE_SIM), so
+    # DTFE_SIM names the simulation only when neither option is given
     if not (args.sim or args.combined):
-        args.sim = os.environ.get("DTFE_SIM") or None   # dtfelib.cli.require_sim's rule: DTFE_SIM names the simulation
-        if not args.sim:
-            p.error("one of --sim / --combined is required")
+        try:
+            args.sim = require_sim(None)
+        except NoSimulation as e:
+            p.error(f"one of --sim / --combined is required; {e}")
     if args.out is None:
         p.error("-o/--out is required")
 

@@ -3,10 +3,10 @@
 Runs the analysis pipeline's own catalogue (pipeline.SnapshotProducts.voids(): the smoothing, minima, Hessian,
 ellipsoid cuts and R_v of the void scripts; cached, so only the first call per snapshot costs a minute) in config's
 frame ADOPTED from the grid itself (pipeline.adopt_snapshot_grid: its header's box over its n, the smoothing kept
-in Mpc), so any full-box grid set of a simulation works, at any resolution. Run it with DTFE_SIM set to the
-simulation (config reads the box for it) and DTFE_DATA_ROOT to its data root:
+in Mpc), so any full-box grid set of a simulation works, at any resolution. Run it with DTFE_DATA_ROOT set to the
+data root; --sim names the simulation (config reads the box for it; DTFE_SIM is its default):
 
-    DTFE_SIM=TNG100-3-Dark python3 tools/void_outlines.py --sim TNG100-3-Dark --snap 99 --estimator ps
+    python3 tools/void_outlines.py --sim TNG100-3-Dark --snap 99 --estimator ps
 
 With the production grids (no --prefix) the catalogue is the analysis scripts' own cache file. A BUILD costs
 about 80 bytes per cell (10 GB at 512^3, 80 GB at 1024^3): when the catalogue is not cached and that would not fit
@@ -155,6 +155,18 @@ def write_csv(res: dict, path, rows=None) -> str:
     return str(path)
 
 
+def name_simulation(sim: str) -> None:
+    """Make 'sim' the simulation config reads the box for. config reads DTFE_SIM once, when it is first imported
+    (config.SIMULATION), so DTFE_SIM is set to 'sim' for this process before that; a process that imported config
+    already must have it for this simulation, else SystemExit naming DTFE_SIM (void_cache.py build: the same rule)."""
+    cfg = sys.modules.get("config")
+    if cfg is None:
+        os.environ["DTFE_SIM"] = sim
+    elif cfg.SIMULATION != sim:
+        how = f"imported for {cfg.SIMULATION}" if cfg.SIMULATION else "imported with no DTFE_SIM"
+        raise SystemExit(f"run with DTFE_SIM={sim}: config reads the box for the simulation it names (it was {how})")
+
+
 def outlines(sim, snap, prefix=None, data_root=None, method="auto", sigma_mpc=None) -> dict:
     """The voids of one snapshot's grids (the module docstring); sigma_mpc > 0 = that smoothing in Mpc (set BEFORE
     the frame is adopted, which keeps it in Mpc), None or 0 = the production one."""
@@ -201,7 +213,7 @@ def outlines(sim, snap, prefix=None, data_root=None, method="auto", sigma_mpc=No
 def main(argv=None):
     from dtfelib.cli import add_sim_arg, new_parser, add_estimator_arg, deprecated_alias
     p = new_parser(description=__doc__.split("\n\n")[0])
-    add_sim_arg(p)                                  # required unless DTFE_SIM names it (config reads that one)
+    add_sim_arg(p)                                  # required unless DTFE_SIM names it
     p.add_argument("--snap", type=int, required=True)
     add_estimator_arg(p, help="the estimator of the grids")
     p.add_argument("--prefix", default=None, help="the grid set's output prefix (default the method's)")
@@ -212,13 +224,14 @@ def main(argv=None):
     deprecated_alias(p, "--sigma-mpc", "--smooth-mpc")
     p.add_argument("--csv", type=Path, default=None, help="also write the table of all voids (write_csv) here")
     a = p.parse_args(argv)
-    if os.environ.get("DTFE_SIM") != a.sim:
-        raise SystemExit(f"run with DTFE_SIM={a.sim}: config reads the box for the simulation it names")
-    import config
-    if a.cache_dir is not None:
-        config.CACHE_DIR = a.cache_dir
+    name_simulation(a.sim)
     import zipfile
     try:
+        # importing config reads the box of --sim's simulation: an unknown one (KeyError) or no data root to look
+        # it up under (NoDataRoot) is the same one-line exit as the missing grids
+        import config
+        if a.cache_dir is not None:
+            config.CACHE_DIR = a.cache_dir
         with contextlib.redirect_stdout(sys.stderr):          # the pipeline's progress lines: not on the JSON line
             res = outlines(a.sim, a.snap, a.prefix, a.data_root, a.method, a.smooth_mpc)
     # a damaged cache member (pipeline._cached reads only the stamp) is a reason, not a traceback

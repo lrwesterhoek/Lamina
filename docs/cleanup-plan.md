@@ -760,12 +760,21 @@ Gate for each item: G-byte, G-gpu, G-emu. The retry items add `tests/gpu_retry_c
 
 ## P5. Python, plot scripts, tools and bash drivers (same figures, same data)
 
-**Status 2026-11-07.** All done except part of P5.5.
+**Status 2026-11-08.** All done.
 - P5.5: `make_parser(snap_default=, snap_help=)` replaces the private argparse edits in six scripts; `add_sim_arg`,
-  `add_snaps_arg`, `add_out_arg` (`--output` and `-o` too) and `add_rv_definition_arg`. Left, each for a reason:
-  `add_void_args` (every script's void options have their own help), routing the three tools through `make_parser`
-  (six new flags in their `--help`), one `tools/_bootstrap` (the launcher loads `void_outlines.py` in-process, where
-  `tools/` is not on `sys.path`). `-o` is now a short option of `analyze.py` and nine plot scripts.
+  `add_snaps_arg`, `add_out_arg` (`--output` and `-o` too) and `add_rv_definition_arg`. `-o` is now a short option of
+  `analyze.py` and nine plot scripts. The rest closed 2026-11-08 (the batch after d7626b6), mostly without code:
+  `make_image_plane.py`'s hand-written `DTFE_SIM` fallback goes through `require_sim` (not `add_sim_arg`: its
+  `DTFE_SIM` default would hide an explicit `--combined`, and the pipeline calls the tool with `--same-as` or
+  `--combined` alone); `void_outlines.py` (and the launcher's `void_cache.py build`) take the simulation from `--sim`
+  by setting the process's `DTFE_SIM` before `config` is imported, refusing only a `config` already imported for
+  another simulation (`name_simulation`); the three tools stay on `add_sim_arg` / `require_sim` (`make_parser`'s six
+  field flags are not theirs, and `--snap` is required in two of them); no `add_void_args` (only `--rv-definition` is
+  shared, and it has its helper; `--rv-range`, `--radius`, `--keep-overlaps` differ in mechanism or help; the rest have
+  one caller each); no tools bootstrap (the launcher's two path loaders, `explore.py:_void_tool` and
+  `grids.available_gb`, would need `python/tools` on `sys.path` around `exec_module`; three `sys.path.insert` lines
+  stay). `--out` / `--output` / `-o` and `--rv-definition` / `--r-v-definition` were already uniform; three plot scripts
+  (`plot_void_environment`, `plot_void_population`, `plot_void_tracking`) write under `FIGURE_ROOT` with no `--out`.
 - P5.9's two driver quirks are fixed too: `run_dtfe.sh --help` no longer prints its `set` line, and
   `run_ps_dtfe.sh` with `DRY_RUN=1 AUTO_TUNE_REPORT=1` no longer leaves an empty temp file.
 
@@ -813,7 +822,7 @@ the `.npz` / `.csv` products and the `--help` text of every script touched. P5 i
 - the `scipy.fft` shim in `pipeline.py` and `spectra.py`, which becomes `dtfelib/_fft.py`.
 - Risk: none. Effort: S.
 
-**P5.5 Argument helpers.** — *partly done 2026-11-07.*
+**P5.5 Argument helpers.** — *done 2026-11-08 (the rest closed without code; see the status).*
 - `plot_eigenvalues.py`, `plot_shear_triaxial.py` and `plot_smoothing_comparison.py` reach into argparse's private
   `_option_string_actions`. Replace that with `make_parser(..., snap_default=...)`.
 - Add `add_void_args`, `add_snaps_arg`, `add_out_arg` (a `Path`) and `add_rv_definition_arg`. Accept both spellings,
@@ -1102,19 +1111,38 @@ Like every code item, before phase R.
   `command_dim` ignores a whole log's RUNNING line (no caller reads `-s` from a whole log); `gpu_mass_check`'s
   float-moments read takes either name (it then only skips one byte check). After the fixes: `py_gui_runspec_test`
   410/410, `py_gui_app_test` 388/388, `docs_drift_check` 36/36; ruff (CI's static check, run locally at 0.17.1) clean.
-- **Left open after P6.7 (small, a later batch):** (1) R7, above: decided 2026-11-08, a plain `run_ps_dtfe.sh` run
-  passes `--ps-merge index-order` again (done). (2) A binary run that fails before its first partition leaves
-  `<output>.runlog.progress` behind (seen with `./DTFE -c src/config.cfg` and a missing input; predates P6.7).
-  (3) `ps_auto_tune_check` Y5 ("room for about four partitions", bound 4) saw 5 in flight once inside a long sequential
-  run and passed alone: the live memory gate's timing; widen the bound or pin the timing if it recurs. (4) The launcher
-  pins neither `SUBSAMPLES` nor `THREADS` for standard Grids jobs, so a login export of either still reaches a standard
-  run (it pins the exact and GPU knobs since P6.7e). (5) `dtfe_resume_check.sh` runs every case through its shared
-  array with `--lambda_th` (34 deprecation lines in its child logs); only D4's killed runs need the old spelling.
-  (6) The "no deprecation line" gate must scan the suites' temp folders, not the stage logs (the battery could do it).
-  (7) The launcher does not export `DTFE_AUTO_PTS_VELGRAD` beside `DTFE_AUTO_PTS_VEL_GRAD` (the Pipeline memory check):
-  exporting both would make the binary warn; moot after P6.6. (8) `ps_resume_check`'s kill cases do not show the
-  binary's "checkpoint could not be written" warning when the kill leaves no checkpoint: on a nearly full disk the room
-  rule refuses the write and the case fails without saying why (seen in Colima at 94% disk).
+- **Left open after P6.7, all closed 2026-11-08 (the batch after d7626b6):** (1) R7, above: a plain
+  `run_ps_dtfe.sh` run passes `--ps-merge index-order` again. (2) A run that fails with a message after its start no
+  longer leaves `<output>.runlog.progress`: `run_progress.h` registers an exit handler that removes the sidecar while
+  the run is still armed (`throwError` ends in `exit()`, which runs it); a killed run keeps its sidecar (no handler
+  runs), an exit-3 'rescued' run disarms it first (`main.cpp`); `ps_runtime_check` R8 (a missing input in both
+  binaries, the kill, the exit 3). Side effect worth knowing: a refused `--resume` removes the sidecar the killed run
+  left under the same output name (the launcher then shows a failed attempt, not a death). (3) `ps_auto_tune_check`
+  Y5's band is 2..6: the room holds about five partitions and the live gate's timing moves the count by one (4, now
+  and then 5). (4) The launcher pins `SUBSAMPLES` and `THREADS` empty for standard Grids jobs (`runspec.py`;
+  `py_gui_runspec_test`, `py_gui_app2_test`). (5) `dtfe_resume_check`'s shared array spells `--lambda-th`; only D2's
+  and D4a's killed runs keep `--lambda_th` (`C_OLD`), and D2 asserts its warning. (6) `tests/dev/deprecation_gate.sh`,
+  the battery's 32nd stage: the suites' temporary files (by name: `*.log`, `*.err`, `*.out`, `*.txt`, `*runlog*`, read
+  as text, newer than the battery's start marker) hold no `warning: ... is deprecated` line outside an allow-list of
+  the suites that test the old spellings; `--only deprecation_gate` alone reads the whole folder; the summary counts
+  the files read. Known gap: five python suites (ps_3d_test, ps_standard_cross_check, ps_convergence_test,
+  ps_nonperiodic_test, ps_regression_test) let the binaries' stderr through to the battery's stage logs, which the
+  gate does not read. (7) Decided: the launcher exports `DTFE_AUTO_PTS_VEL_GRAD` only; the older spelling beside it
+  would make the binary warn, and the alias goes with P6.6. (8) `ps_resume_check`'s kill cases print the binary's
+  "checkpoint could not be written" warning and the free space when no checkpoint was left (`tests/lib.sh
+  no_checkpoint_why`, C2 and C15). Review of the batch (one opus skeptic per group, one re-check of the gate): four
+  real findings, three fixed (the gate's marker under `--only`, `grep -I` skipping NUL-bearing server logs, a
+  symlinked temp folder read as empty) and one recorded as the known gap above; nits fixed (`void_outlines` exits in
+  one line on an unknown simulation, a tautological launcher test, nested parentheses in `make_image_plane`'s usage
+  error, `void_cache.py build` aligned, the Y5 comment, D2's assertion in D2's check). Battery after the batch
+  (2026-11-08 14:16-14:44): 30 of 32 stages at first. `ci_core` failed `ps_tessellation_cache_check`'s standard-binary
+  fingerprint check while a Colima image prune ran beside the battery; alone it passes, and that check keeps neither
+  reader's output, so the cause is not known (an external-load flake, seen once). `ci_gui` failed `py_gui_app_test`'s
+  Stop check, which sampled the process tree at a fixed 3 s after the exact 256^3 run had already ended (2.9 s now);
+  it polls for the binary (up to 10 s) and the GUI stage passes (412/388/251/59). The `deprecation_gate` stage PASSED
+  on the real battery folder (allow-listed: flag_spelling_check, ps_resume_check C8 and C15, ps_runtime_check R7).
+  Left for a later batch: that fingerprint check discards both runs' output, so a repeat of the flake could not be
+  diagnosed; keep the two logs in the suite's temp folder.
 
 **The P6.7 rename table** (spec decisions applied; every old name accepted with one warning for the release that
 carries P6 and P6.7, the readers' rows for good). Binaries (both unless "PS" / "std"):

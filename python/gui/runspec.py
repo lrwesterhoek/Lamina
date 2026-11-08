@@ -279,6 +279,11 @@ class RunSpec:
             # the start-over tick reaches run_dtfe.sh too (it resumes a killed partitioned run by itself,
             # DTFE_RESUME, the knob both drivers read), spelled out both ways: a stray export cannot leak in
             env["DTFE_RESUME"] = "0" if self.start_over else "1"
+            # the Monte-Carlo count and the thread cap, pinned EMPTY (run_dtfe.sh's own defaults: the binary's count,
+            # all cores): the Grids tab sets neither for a standard run, so a SUBSAMPLES or THREADS exported in the
+            # login shell cannot leak in. An OMP_NUM_THREADS export still reaches the binary (run_dtfe.sh sets it
+            # only for a non-empty THREADS)
+            env["SUBSAMPLES"] = env["THREADS"] = ""
             if self.gpu:
                 argv.append("-m")
             if self.deposit == "exact":

@@ -16,8 +16,13 @@
     closing log line, written after the partitions with no failure in flight): an innocent
     victim (another process hung the GPU; retried at once), a timeout (a watchdog kill: CUDA's
     cudaErrorLaunchTimeout, Metal's Impacting Interactivity), out of memory, anything else. Written atomically ('.tmp.<pid>' then rename), so a reader never sees half a
-    file; removed when the run finishes successfully (main.cpp), so a sidecar that remains belongs to a run
-    that is still going or one that died (its pid then no longer exists). Off for '--serve' and
+    file; removed when the run finishes successfully (main.cpp) and when it stops on an error: throwError
+    ends in exit(), which runs the atexit handler below but not main()'s destructors, so the removal cannot be
+    a guard object in main. A sidecar that remains therefore belongs to a run that is still going, one that
+    died (a SIGKILL or out-of-memory kill, another fatal signal, an abort: none runs an atexit handler; its pid
+    then no longer exists), or one whose outputs went to the rescue folder or could not be put in place (exit 3,
+    phase 'rescued': kept on purpose, the evidence that the outputs are not where the launcher looks). A run
+    that failed with a message leaves only its run log, which says so. Off for '--serve' and
     '--auto-tune-report', which compute no grid, and with DTFE_PROGRESS=0. Header-only: the state is
     one function-local static shared by DTFE.cpp and main.cpp. */
 #ifndef RUN_PROGRESS_H
@@ -200,15 +205,37 @@ inline void runProgressWriteLocked(RunProgress &p)
         std::remove( tmp.c_str() );
 }
 
+// exit() of a run still armed (an error: throwError, a writer that could not open its file): the sidecar goes, so
+// the launcher reads the failure from the run log instead of showing a death. The lock is only tried: a worker's
+// throwError may call exit() while another thread is mid-write, and then the file goes all the same (the path is
+// fixed after runProgressInit, and 'on' only ever turns off). Threads keep running during exit(), so a write in
+// flight can still put the file back in that window; that is accepted. No logging here: exit() may have cut a
+// message in half.
+inline void runProgressAtExit()
+{
+    RunProgress &p = runProgressState();
+    std::unique_lock<std::mutex> lock( p.m, std::try_to_lock );
+    if ( not p.on or p.path.empty() ) return;
+    std::remove( p.path.c_str() );
+    std::remove( ( p.path + ".tmp." + std::to_string( long( ::getpid() ) ) ).c_str() );
+    if ( lock.owns_lock() ) p.on = false;   // no later write by a running thread
+}
+
 // arms the sidecar for this run (main.cpp, right after the options are read)
 inline void runProgressInit(User_options const &u)
 {
-    RunProgress &p = runProgressState();
+    RunProgress &p = runProgressState();   // constructed BEFORE the handler is registered, so destroyed after it runs
     std::lock_guard<std::mutex> lock( p.m );
     p.on = not u.outputFilename.empty() and not u.psServe and not u.autoTuneReport
            and Env::flag( "DTFE_PROGRESS", true );   // DTFE_PROGRESS=0 (the old DTFE_NO_PROGRESS=1) writes none
     p.path = u.outputFilename + ".runlog.progress";
     p.start = std::chrono::steady_clock::now();
+    static bool registered = false;
+    if ( p.on and not registered )
+    {
+        registered = true;
+        std::atexit( runProgressAtExit );
+    }
     runProgressWriteLocked( p );
 }
 
@@ -231,6 +258,15 @@ inline void runProgressFinish()
     RunProgress &p = runProgressState();
     std::lock_guard<std::mutex> lock( p.m );
     if ( p.on ) std::remove( p.path.c_str() );
+    p.on = false;
+}
+
+// the outputs are in the rescue folder or could not be put in place (exit 3): the 'rescued' sidecar stays, so the
+// exit handler must not take it and nothing writes over it
+inline void runProgressDisarm()
+{
+    RunProgress &p = runProgressState();
+    std::lock_guard<std::mutex> lock( p.m );
     p.on = false;
 }
 

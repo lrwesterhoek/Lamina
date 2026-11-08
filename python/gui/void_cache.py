@@ -4,10 +4,11 @@
 The catalogue is the analysis pipeline's own (pipeline.SnapshotProducts.voids(), cached under python/cache or
 DTFE_CACHE_DIR), in the frame ADOPTED from the grid (pipeline.adopt_snapshot_grid), exactly as the Explore tab's
 void outlines (tools/void_outlines.py) read it: for the production grids that is the analysis scripts' cache
-file. Run with DTFE_SIM set to the simulation (config reads the box for it) and DTFE_DATA_ROOT to its data root:
+file. Run with DTFE_DATA_ROOT set to the data root; config reads the box for the simulation, which 'status' takes
+from DTFE_SIM (the one simulation of its list) and 'build' from --sim (void_outlines.name_simulation's rule):
 
     DTFE_SIM=TNG100-3-Dark python3 python/gui/void_cache.py status < runs.json
-    DTFE_SIM=TNG100-3-Dark python3 python/gui/void_cache.py build --sim TNG100-3-Dark --snap 99 --estimator ps
+    python3 python/gui/void_cache.py build --sim TNG100-3-Dark --snap 99 --estimator ps
 
 status  reads a JSON list of {sim, snap, method, prefix} on stdin and prints ONE JSON line: a list of
         {'state', 'why'} in the same order, state one of
@@ -106,8 +107,8 @@ def main(argv=None) -> int:
         return 0
     if a.sim is None or a.snap is None:
         raise SystemExit("build needs --sim and --snap")
-    if os.environ.get("DTFE_SIM") != a.sim:
-        raise SystemExit(f"run with DTFE_SIM={a.sim}: config reads the box for the simulation it names")
+    import void_outlines as VO
+    VO.name_simulation(a.sim)                       # before build() first imports config (through the pipeline)
     import zipfile
     try:
         print(build(a.sim, a.snap, a.method, a.prefix, a.data_root), flush=True)
