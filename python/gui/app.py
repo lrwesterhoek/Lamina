@@ -106,7 +106,7 @@ PTS_CONVENTIONS_TIP = ("\n\nThe Runs tab warns about a phase-space plane made be
 
 
 def _pts_conventions_combo(changed) -> QComboBox:
-    """The phase-space image plane's conventions (PS-DTFE '--pts-conventions', the scripts' PTS_CONVENTIONS;
+    """The phase-space image plane's conventions (PS-DTFE '--ps-point-conventions', the scripts' PS_POINT_CONVENTIONS;
     runspec.PTS_CONVENTIONS): the grids' (the default) or legacy."""
     c = QComboBox()
     for key in rs.PTS_CONVENTIONS:
@@ -174,7 +174,7 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
                 if given is None and sp.estimator == "dtfe" and sp.deposit == "sampled":
                     sp.deposit = "exact"
             self.settings.setValue("dtfe_exact_start", json.dumps(True))
-        # the partitions merge in index order by default (the staged merge; run_ps_dtfe.sh ORDERED_MERGE=1, the
+        # the partitions merge in index order by default (the staged merge; run_ps_dtfe.sh PS_MERGE=index-order, the
         # binary's default). A state saved by an older launcher holds its start, off, on the Grids, Pipeline and
         # Custom tabs (never really chosen: it was the start): moved to on ONCE; unticking it later is kept
         if self.remember and not self._restore_json("ordered_merge_start", False):

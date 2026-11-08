@@ -155,7 +155,7 @@ class SetupDialog(QDialog):
         pv.addWidget(self._text(
             "The launcher keeps every simulation in its own folder under one data folder "
             "(e.g. <data>/TNG100/TNG100-3-Dark/snapdir_099/…), with the grids next to their snapshots. "
-            "Grids are large (a 512³ run with all fields is ~25 GB): pick a disk with room; an external "
+            "Grids are large (a 512³ run is ~5-8 GB with the default fields, ~25 GB with all of them): pick a disk with room; an external "
             "disk is fine. Your own snapshot files can live anywhere."))
         row = QHBoxLayout()
         self.root = QLineEdit(data_root if data_root and Path(data_root).is_dir() else str(Path.home() / "DTFE-data"))

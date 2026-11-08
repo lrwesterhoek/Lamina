@@ -24,7 +24,11 @@
      DTFE_FREE_GB       test hook: the memory the other programs leave free, in GB (default: queried); the
                         partition memory gate and the budget cap read it instead of the OS
      DTFE_AUTO_MINN     minimum particle count before auto-partitioning engages (default 2e6;
-                        below it a single domain always fits and partition seams are not worth it) */
+                        below it a single domain always fits and partition seams are not worth it)
+     DTFE_AUTO_SPAN     0 = PS-DTFE books a partition's sub-grid as G/n + 40 cells per axis (the model before
+                        2026-11-07) instead of each partition's Eulerian span measured on the particles (default 1)
+     DTFE_DYNAMIC_CONCURRENCY  0 = PS-DTFE's partition loop runs the plan's number of partitions at once; by default,
+                        over a concurrency the tuner chose, more while the live memory holds them (PartitionMemoryGate) */
 
 /* This header is the tuner's interface: the machine queries (RAM, free memory, the budget, the cores), the report,
    the partition memory gate and the entry points. The model itself -- the bytes per cell and per vertex, the
@@ -45,6 +49,7 @@
 #include <condition_variable>
 #include <chrono>
 #include <set>
+#include <atomic>      // the memory gate's live partition count (dynamic concurrency)
 
 #ifdef __APPLE__
 #include <sys/types.h>
@@ -90,7 +95,7 @@ inline double autoTunePhysicalRAM()
 // thread count to fit (a 256^3 grid with density, velocity and dispersion is ~1 GB per float copy);
 // the partition model below budgets the same amount. With the fixed-point grids and the shared counts
 // and flags the single build copies nothing by default: the budget binds only the float sums (double
-// build, PS_GPU_FLOAT_*).
+// build, DTFE_GPU_FLOAT_*).
 inline double psDepositThreadBytes()
 {
     if ( double const v = Env::real( "DTFE_DEPOSIT_MEM_GB", -1. ); v >= 0. )
@@ -150,6 +155,27 @@ inline double autoTuneSystemFree(double *ownBytes = nullptr)
 #endif
 }
 
+// This process's own memory now, as the budget counts it: the physical footprint on macOS (the ledger the SUMMARY
+// and autoTuneSystemFree read), the resident set on Linux; < 0 when unknown. The dynamic memory gate's ledger.
+inline double autoTuneOwnFootprint()
+{
+#ifdef __APPLE__
+    task_vm_info_data_t ti;
+    mach_msg_type_number_t c = TASK_VM_INFO_COUNT;
+    return task_info( mach_task_self(), TASK_VM_INFO, (task_info_t)&ti, &c ) == KERN_SUCCESS ? double(ti.phys_footprint) : -1.;
+#else
+    double kb = -1., value;
+    if ( FILE *f = std::fopen( "/proc/self/status", "r" ) )
+    {
+        char line[256];
+        while ( std::fgets( line, sizeof(line), f ) )
+            if ( std::sscanf( line, "VmRSS: %lf kB", &value ) == 1 ) { kb = value; break; }
+        std::fclose( f );
+    }
+    return kb < 0. ? -1. : kb * 1024.;
+#endif
+}
+
 // Bytes the OTHER programs leave free right now, plus what this process already holds (its
 // particles etc., which the run's model counts itself); < 0 when the OS cannot tell.
 inline double autoTuneFreeForRun()
@@ -159,7 +185,21 @@ inline double autoTuneFreeForRun()
     return free < 0. ? -1. : free + own;
 }
 
-// The memory budget the tuner plans against, and a one-line account of how it was set.
+// The live free-memory figure behind a budget it did not cut (plan P8.7): '' on a simulated machine (DTFE_RAM_GB,
+// the tests: their lines stay fixed), else what the other programs leave free and the headroom, or that the OS
+// did not say. A budget the free memory cuts says so itself.
+inline std::string autoTuneFreeNote(bool simulated, double freeForRun, double headroom)
+{
+    if ( simulated ) return "";
+    if ( freeForRun < 0. ) return " (the free memory is unknown: the OS did not say)";
+    char buf[160];
+    snprintf( buf, sizeof(buf), " (the other programs leave %.3g GB free: %.3g GB after the %.3g GB headroom)",
+              freeForRun/1.e9, (freeForRun - headroom)/1.e9, headroom/1.e9 );
+    return buf;
+}
+
+// The memory budget the tuner plans against, and a one-line account of how it was set: the knob or the RAM share,
+// and the live free memory the run started with.
 inline double autoTuneBudget(double ramBytes, std::string &why)
 {
     char buf[256];
@@ -183,14 +223,17 @@ inline double autoTuneBudget(double ramBytes, std::string &why)
                 why = buf;
                 return capped;
             }
+            why += autoTuneFreeNote( simulated, freeForRun, headroom );
             return v * 1.e9;
         }
     }
     double frac = 0.60;
+    bool fracSet = false;
     if ( double const v = Env::real( "DTFE_MEM_FRACTION", frac ); v >= 0.1 and v <= 0.95 )
-        frac = v;
+        { fracSet = v != frac; frac = v; }
     double budget = frac * ramBytes;
-    snprintf( buf, sizeof(buf), "%.3g GB = %.0f%% of %.3g GB RAM", budget/1.e9, 100.*frac, ramBytes/1.e9 );
+    snprintf( buf, sizeof(buf), "%.3g GB = %.0f%% of %.3g GB RAM%s", budget/1.e9, 100.*frac, ramBytes/1.e9,
+              fracSet ? " (DTFE_MEM_FRACTION)" : "" );
     why = buf;
     double const freeForRun = simulated ? -1. : autoTuneFreeForRun();
     if ( freeForRun > 0. and freeForRun - headroom < budget )
@@ -201,6 +244,8 @@ inline double autoTuneBudget(double ramBytes, std::string &why)
                   100.*frac, frac*ramBytes/1.e9 );
         why = buf;
     }
+    else
+        why += autoTuneFreeNote( simulated, freeForRun, headroom );
     return budget;
 }
 
@@ -220,11 +265,18 @@ struct AutoTuneReport
     bool   valid = false;
     int    partition = 1, maxConcurrent = 1;
     double predicted = 0., fixed = 0., budget = 0., pts = 0.;   // bytes
+    double fixedLoop = 0.;      // standard DTFE: 'fixed' while the partition loop runs (its grids only; 0: as fixed)
     double perPartition = 0.;   // bytes ONE partition in flight adds (the run's memory gate waits for this much)
     double lookAhead = 0.;      // bytes the partition look-ahead adds to 'predicted' (0: none runs)
-    double gpuSnapshot = 0.;    // bytes of the GPU deposit's host snapshot (with --ps-window: and of the deposit's window
+    double gpuSnapshot = 0.;    // bytes of the GPU deposit's host snapshot (with --grid-window: and of the deposit's window
                                 // grids), held by ONE partition at a time (in 'predicted')
     double streamsEstimate = -1., streamsBudgeted = 0.;
+    // PS-DTFE, for the partition loop's dynamic concurrency (plan P8.10): whether the tuner chose the concurrency (a
+    // user's --max-concurrent is kept as given), and what the run still allocates once its partitions are in flight --
+    // after the loop (the derived grids, the finalized point outputs) and as the partitions merge (the point stream
+    // records, budgeted: their unmerged share is still to come)
+    bool   concChosen = false;
+    double reserveEnd = 0., reserveFirstMerge = 0., reserveRecords = 0.;
     std::string line() const
     {
         if ( not valid ) return "AUTO-TUNE-REPORT unsupported";
@@ -294,6 +346,39 @@ struct PartitionMemoryGate
     std::mutex m;
     std::condition_variable cv;
     int inFlight = 0, held = 0;
+    /* DYNAMIC CONCURRENCY (plan P8.10; DTFE.cpp starts more loop threads than the plan's mc, single build only). Up to
+       'floor' (the plan's mc) partitions pass by the rule above. One more only while the LEDGER holds it: the free
+       memory read when the loop started (startFree), less the headroom, the reserve (what the run has still to allocate:
+       reserveEnd, the grids the first merge sizes until it has run, the unmerged share of the budgeted point records)
+       and the run's own growth beside its partitions in flight (its footprint since the start less 'need' per partition
+       in flight: parked sub-grids, written records), holds 'need' for every partition in flight plus this one -- so a
+       burst of waiting threads gets in only as far as that room goes, whatever the live readings have not seen yet --
+       and the same total stays within the budget; and the live free memory still holds one 'need' (other programs).
+       'live' (when given) is the partitions in flight, for the deposit teams' core pool (thread_count.h). */
+    bool dynamic = false;
+    int floor = 1, total = 1, finished = 0, maxInFlight = 0;
+    double reserveEnd = 0., reserveFirstMerge = 0., reserveRecords = 0., budget = 0.;
+    double startFree = -1., startOwn = -1.;
+    double (*footprint)() = nullptr;
+    std::atomic<int> *live = nullptr;
+    double reserve() const
+    {
+        double const left = total > 0 ? double( std::max( 0, total - finished ) ) / double(total) : 0.;
+        return reserveEnd + ( finished == 0 ? reserveFirstMerge : 0. ) + reserveRecords * left;
+    }
+    bool roomForOneMore(double const free) const
+    {
+        if ( not ( free >= 0. ) or free - headroom < need ) return false;       // the machine now (other programs)
+        double const own = footprint != nullptr ? footprint() : -1.;
+        if ( startFree < 0. or startOwn < 0. or own < 0. ) return false;
+        double const booked = double(inFlight) * need;
+        double const other = std::max( 0., ( own - startOwn ) - booked );     // the run's growth beside its partitions
+        double const all = double( inFlight + 1 ) * need;
+        if ( startFree - headroom - reserve() - other < all ) return false;
+        if ( budget > 0. and startOwn + other + all + reserve() > budget ) return false;
+        return true;
+    }
+    std::multiset<int> waiting;  // the partitions waiting in enter(): admitted strictly in index order
     std::multiset<int> flying;   // the in-flight partition indices (the ordered mode's blockers)
     bool saidAlone = false;
     explicit PartitionMemoryGate(double needBytes, bool orderedMerge = false) : need(needBytes), ordered(orderedMerge) {}
@@ -312,12 +397,22 @@ struct PartitionMemoryGate
         {
             bool waited = false;
             double free = autoTuneSystemFree();
-            while ( free >= 0. and free - headroom < need and blockers( partition ) > 0 )
+            waiting.insert( partition );
+            // the rule a partition waits by: behind a lower-numbered one waiting here (strict index order, so every
+            // partition in flight is lower-numbered and blockers() counts them all); then the floor's (above), or
+            // beyond the floor the dynamic ledger
+            auto mustWait = [&]() {
+                if ( *waiting.begin() < partition ) return true;
+                if ( blockers( partition ) == 0 ) return false;
+                if ( dynamic and inFlight >= floor ) return not roomForOneMore( free );
+                return free >= 0. and free - headroom < need;
+            };
+            while ( mustWait() )
             {
-                if ( not waited )
+                if ( not waited and *waiting.begin() == partition )
                 {
                     ++held;
-                    if ( verbose > 0 )
+                    if ( verbose > 0 and not ( dynamic and inFlight >= floor ) )
                         std::fprintf( stderr, "PS-DTFE memory gate: partition %d waits (%.1f GB free, minus %.0f GB "
                                       "headroom, < the %.1f GB it adds; %d in flight)\n", partition, free/1.e9,
                                       headroom/1.e9, need/1.e9, inFlight );
@@ -326,6 +421,7 @@ struct PartitionMemoryGate
                 cv.wait_for( lock, std::chrono::seconds(2) );
                 free = autoTuneSystemFree();
             }
+            waiting.erase( waiting.find( partition ) );
             if ( free >= 0. and free - headroom < need and blockers( partition ) == 0 and not saidAlone )
             {
                 saidAlone = true;
@@ -336,13 +432,22 @@ struct PartitionMemoryGate
             }
         }
         ++inFlight;
+        maxInFlight = std::max( maxInFlight, inFlight );
+        if ( dynamic and live != nullptr ) live->store( std::max( 1, inFlight ), std::memory_order_relaxed );
         flying.insert( partition );
+        if ( not waiting.empty() )
+        {
+            lock.unlock();
+            cv.notify_all();   // the next one in index order may check now
+        }
     }
     void leave(int partition)
     {
         {
             std::lock_guard<std::mutex> lock( m );
             --inFlight;
+            ++finished;
+            if ( dynamic and live != nullptr ) live->store( std::max( 1, inFlight ), std::memory_order_relaxed );
             auto const it = flying.find( partition );
             if ( it != flying.end() ) flying.erase( it );
         }

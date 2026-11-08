@@ -21,7 +21,7 @@ Outputs (figures/void_population/<sim>/):
                               voids at the panel snapshots against the Vdn model at each z (dtfelib.theory: Sheth &
                               van de Weygaert 2004 in the volume-conserving form of Jennings, Li & Hu 2013, delta_v
                               -2.71 linear / -0.8 nonlinear, delta_c 1.686, EH98 sigma(R) at TNG's Planck 2015
-                              sigma_8, D(z) of flat LambdaCDM), and their ratio. R_v is --size-rv's definition
+                              sigma_8, D(z) of flat LambdaCDM), and their ratio. R_v is --size-rv-definition's
                               ('delta08' by default: where the ENCLOSED Delta(<R) reaches -0.8, the model's own
                               radius; 'crossing', said, while the catalogue lacks it). Measured on its OWN
                               catalogue, smoothed less (--size-smooth, default 5 cells): at the production
@@ -29,7 +29,7 @@ Outputs (figures/void_population/<sim>/):
                               voids. That png is named population_size_function_ss<cells>.png
                               (untagged only with --size-smooth 0: the figures' own catalogue); a non-default
                               --size-smooth also tags population_stats '_ss<cells>'.
-                              --size-rv delta08raw: the same -0.8 rule on the RAW density about the
+                              --size-rv-definition delta08raw: the same -0.8 rule on the RAW density about the
                               same centres (dtfelib.raw_radius, cached beside the catalogue), png and npz tagged
                               '_delta08raw'. Defined for 73-100% of the distinct voids (vs 1-45%), TNG100 and TNG300
                               agree at 2.1625 Mpc, measured/Vdn 0.04-0.17 at the median; but the sample's median
@@ -66,12 +66,12 @@ The counts of resolved and distinct voids against z are set by the
 ellipsoid gate (the 10 sigma max-axis cut turns on as the voids grow): the evolution figure draws the minima with an
 R_v (no gate) beside them and says so.
 Those names are PS-DTFE's default grids (ps_output.); another estimator or --prefix adds '_<method>' / '_<prefix>',
---keep-overlaps '_overlaps', to every name (else a --method dtfe run would replace the PS-DTFE files), and a
+--keep-overlaps '_overlaps', to every name (else an --estimator dtfe run would replace the PS-DTFE files), and a
 non-default smoothing writes into its own folder.
 
 Examples:
-  python3 plot/plot_void_population.py --sim TNG50-3-Dark --method dtfe
-  python3 plot/plot_void_population.py --sim TNG50-4-Dark --method ps
+  python3 plot/plot_void_population.py --sim TNG50-3-Dark --estimator dtfe
+  python3 plot/plot_void_population.py --sim TNG50-4-Dark --estimator ps
 """
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
@@ -85,7 +85,7 @@ from matplotlib.ticker import FormatStrFormatter
 
 import config
 from dtfelib import pipeline, catalog, theory, raw_radius
-from dtfelib import make_parser, use_data_root, snapshot_ladder
+from dtfelib import make_parser, use_data_root, snapshot_ladder, deprecated_alias
 from dtfelib import figures as style
 from dtfelib import groupcat as gc
 
@@ -954,11 +954,12 @@ def build_parser():
     parser.add_argument("--keep-overlaps", action="store_true",
                         help="abundance: count every resolved void with a radius, not only the distinct ones (none "
                              "whose centre lies inside a deeper void's min(R_v, R_eff))")
-    parser.add_argument("--size-rv", choices=SIZE_RV_CHOICES, default=SIZE_FUNCTION_RV,
+    parser.add_argument("--size-rv-definition", dest="size_rv", choices=SIZE_RV_CHOICES, default=SIZE_FUNCTION_RV,
                         help="the R_v definition of the size function figure (default delta08: where the enclosed "
                              "contrast of the smoothed field reaches -0.8, the theory's radius; crossing while a "
                              "catalogue lacks it; delta08raw: the same on the raw density about the same centres, "
                              "measured and cached on first use)")
+    deprecated_alias(parser, "--size-rv", "--size-rv-definition")
     parser.add_argument("--size-smooth", type=float, default=SIZE_SMOOTH_CELLS, metavar="CELLS",
                         help=f"the size function's own catalogue smoothing in cells (default {SIZE_SMOOTH_CELLS:g}: at "
                              "the production 10 cells the delta08 radius is below sigma and mostly undefined); 0 = "

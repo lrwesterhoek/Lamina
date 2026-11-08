@@ -1,6 +1,6 @@
 /* '--serve' (both binaries): the point-evaluation server over stdin/stdout -- one tessellation, or a COMPOSITE
    of partition tessellations (--serve + --partition, or when one tessellation would not fit) -- and the partitions'
-   occupancy maps, which a batch '--ps-window' run reads too. Every request is answered by the '--sample-points'
+   occupancy maps, which a batch '--grid-window' run reads too. Every request is answered by the '--sample-points'
    machinery of ps_point_eval.cc (ps_point_eval_detail.h), so an answer is bit-identical to a batch run's. The
    protocol is documented below. */
 
@@ -25,10 +25,10 @@ bool buildTessellation(std::vector<Particle_data> *p, User_options &userOptions,
 
    server -> client, once, when the tessellation is ready:
        char[8]  "DTFESRV2"
-       uint32   flags: bit0 PS-DTFE build, bit1 --per-stream, bit2 --per-stream-ids,
+       uint32   flags: bit0 PS-DTFE build, bit1 --ps-per-stream, bit2 --ps-per-stream-ids,
                        bit3 --pts-den-grad, bit4 --pts-vel-grad, bit5 --ps-caustics,
                        bit6 --ps-stream-density geometric, bit7 periodic,
-                       bit8 --pts-scalar, bit9 --pts-lagrangian, bit10 composite (partitioned)
+                       bit8 --pts-scalar, bit9 --ps-per-stream-lagrangian, bit10 composite (partitioned)
        uint32   S           scalar components per value (--pts-scalar; 0 otherwise)
        uint64   tessellation vertex count (a composite: summed over its partitions)
        double   region[6]   xlo xhi ylo yhi zlo zhi (the box the points are wrapped into)
@@ -38,14 +38,14 @@ bool buildTessellation(std::vector<Particle_data> *p, User_options &userOptions,
        uint64   n           number of points; 0 (or closing stdin) ends the session
        double   xyz[3n]
    server -> client, per request -- the '.pts_*' arrays of a --sample-points run, in order:
-       char[8]  "DTFEPTS1",  uint64 n,  uint64 R (per-stream records; 0 without --per-stream)
+       char[8]  "DTFEPTS1",  uint64 n,  uint64 R (per-stream records; 0 without --ps-per-stream)
        double den[n], vel[3n], velDisp[6n];  int32 streams[n]
        int32  caustic[n]        (--ps-caustics)       double denGrad[3n]  (--pts-den-grad)
-       double velGrad[9n]       (--pts-vel-grad)      uint64 offsets[n+1] (--per-stream)
-       double records[4R]       (--per-stream)        uint64 ids[4R]      (--per-stream-ids)
-       double recGrad[3R]       (--per-stream + --pts-den-grad)
-       double scalar[S n]       (--pts-scalar)        double recScalar[S R] (--pts-scalar + --per-stream)
-       double recLag[3R]        (--pts-lagrangian)
+       double velGrad[9n]       (--pts-vel-grad)      uint64 offsets[n+1] (--ps-per-stream)
+       double records[4R]       (--ps-per-stream)        uint64 ids[4R]      (--ps-per-stream-ids)
+       double recGrad[3R]       (--ps-per-stream + --pts-den-grad)
+       double scalar[S n]       (--pts-scalar)        double recScalar[S R] (--pts-scalar + --ps-per-stream)
+       double recLag[3R]        (--ps-per-stream-lagrangian)
    a request the server rejects (non-finite coordinates, too many points, a partition whose
    cached tessellation vanished) is answered with
        char[8]  "DTFEERR1",  uint64 length,  char message[length]
@@ -565,7 +565,7 @@ inline int occBucket(double x, int d)
 
 // The bucket frame of an occupancy map: the box it covers (the run's region), its periodicity and
 // the canonical-frame slack. The server takes it from its point-evaluation context; a batch
-// partition run (its map writer, and the --ps-window partition skip) builds the same from the
+// partition run (its map writer, and the --grid-window partition skip) builds the same from the
 // partition's options -- the region is the box in both, from the moment the header is read.
 struct OccFrame
 {
@@ -677,7 +677,7 @@ static void writeOccupancy(ServePart const &P)
     f.write( reinterpret_cast<char const*>(&words), sizeof words );
     f.write( reinterpret_cast<char const*>(P.occ.data()), std::streamsize( words * sizeof(uint64_t) ) );
     // trailer: the one cell filter the descriptor does not pin -- the non-periodic alpha shape's
-    // radius (0 = the whole hull). A --ps-window run trusts a map for skipping only when it kept at
+    // radius (0 = the whole hull). A --grid-window run trusts a map for skipping only when it kept at
     // least the tetrahedra the run keeps. Readers that stop after the words (the server) ignore it.
 #ifdef PHASE_SPACE
     double const alpha = double( P.opts.psLagAlphaRadius );
@@ -1188,7 +1188,7 @@ static void compositeRequestReport(User_options const &userOptions, size_t const
 // Batch partition runs and the occupancy maps (DTFE.cpp's Lagrangian partition loop).
 // --------------------------------------------------------------------------------------
 
-// --ps-window: can partition 'partOpts' deposit into the window of 'mainOpts'? 1 = its occupancy
+// --grid-window: can partition 'partOpts' deposit into the window of 'mainOpts'? 1 = its occupancy
 // map has a bucket inside the window, 0 = none (the partition's streams never reach the window, so
 // it is skipped: no particle selection, no tessellation load or build), -1 = no usable map (process
 // it). The map is the one a composite server or an earlier batch run wrote beside the partition's
@@ -1284,7 +1284,7 @@ bool psTessellationCached(User_options const &opts)
 }
 
 // A batch partition run with '--tessellation-cache' leaves the partition's occupancy map beside its
-// cached tessellation when none is there yet (the server writes its own): a later --ps-window run
+// cached tessellation when none is there yet (the server writes its own): a later --grid-window run
 // (the launcher's exact zoom) then skips the partitions that never reach its window, and a
 // composite server registers the partition without loading it. One pass of the cell filter over
 // the tessellation, seconds per partition, paid once.

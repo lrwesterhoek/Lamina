@@ -4,7 +4,7 @@
 # A partitioned run must deposit the same tetrahedra as one single triangulation, whatever the padding:
 # ownership tiles them, and a tetrahedron's keep/drop decision must be a function of the tetrahedron.
 # A degeneracy cut that scales |det| by the edges at CGAL's vertex 0 is not: which vertex is 0 follows the
-# insertion history -- different for every --partition / --padding / --ps-lag-padding variant. Folded
+# insertion history -- different for every --partition / --padding / --ps-lagrangian-padding variant. Folded
 # tetrahedra on a caustic sit right at such a cut, so ~20 of them are kept by one run and dropped by another:
 # '.a_den' moves by up to 0.8 relative in ~40 cells (2,000 with --ps-vertex-mass, whose degrees then change
 # too), hidden-stream flags flip, and the vertex-mass total is off by ~5e-6. With psFilterCell's cut a
@@ -12,7 +12,7 @@
 #
 # 32^3 crossed waves (two fold planes per axis), --grid 64, --ps-vertex-mass (the run_ps_dtfe.sh default),
 # CPU deposit; runs: single, --partition 2 2 2 at the default padding, at --padding 50, and at
-# --ps-lag-padding 8. Checks against the single run:
+# --ps-lagrangian-padding 8. Checks against the single run:
 #   P1 '.a_hidden_streams' identical (integer flags)
 #   P2 '.a_den' per cell within rounding (float 1e-4, double 1e-10, relative, cells above 1e-6 of the peak)
 #   P3 '.a_streams' within rounding (absolute 1e-3: one moved sub-sample is 1/64)
@@ -50,7 +50,7 @@ run() {  # $1 = output name, rest = extra options
     local out="${TMP}/run_${name}"
     rm -f "${out}".a_den "${out}".a_streams "${out}".a_hidden_streams
     if ! "${BIN}" "${SNAP}" "${out}" --grid "${GRID}" --periodic --field density_a --ps-vertex-mass \
-            --input 105 --MpcUnit 1 --verbose 1 "$@" > "${out}.log" 2>&1; then
+            --input-format 105 --mpc-unit 1 --verbose 1 "$@" > "${out}.log" 2>&1; then
         echo "FAIL: run ${name} exited non-zero -- last lines of ${out}.log:"
         tail -n 15 "${out}.log" | sed 's/^/   | /'
         exit 1
@@ -60,7 +60,7 @@ run() {  # $1 = output name, rest = extra options
 run single
 run p2       --partition 2 2 2
 run p2pad50  --partition 2 2 2 --padding 50
-run p2lag8   --partition 2 2 2 --ps-lag-padding 8
+run p2lag8   --partition 2 2 2 --ps-lagrangian-padding 8
 
 "${PY}" - "${TMP}" "${GRID}" "${DTFE_TEST_REAL}" <<'PY'
 import sys

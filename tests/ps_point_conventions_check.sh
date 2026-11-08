@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# PS-DTFE point evaluation in the grids' conventions ('--pts-conventions grid', the default).
+# PS-DTFE point evaluation in the grids' conventions ('--ps-point-conventions grid', the default).
 #
 # The points follow the run's two grid options, --ps-vertex-mass and --ps-volume-weighted (ps_point_eval.cc, 'The
 # grid deposit's conventions at the points'). With rho_bar*V_lag tetrahedron masses and density-weighted stream means
-# instead ('--pts-conventions legacy' keeps those estimators), evolved (z = 127) initial positions as the Lagrangian
+# instead ('--ps-point-conventions legacy' keeps those estimators), evolved (z = 127) initial positions as the Lagrangian
 # input put a plane's density contrast at ~0.8 of the grid's at z = 20. Verified here, on synthetic boxes:
 #  A) IDENTITY: without --ps-vertex-mass / --ps-volume-weighted 'grid' and 'legacy' give byte-identical '.pts_*'
 #     files, and with both options the GRIDS of the two runs are byte-identical (the conventions are the points').
 #  B) THE IC BIAS: single-stream crossed waves whose InitialCoordinates are displaced towards the final positions
 #     by alpha = 0.1645 (TNG's D(z=127)/D(z=20)), --ps-vertex-mass --ps-volume-weighted --exact-average, a slab
 #     of four sub-planes through one cell layer: the plane's cell blocks against the grid's cells (and against the
-#     analytic cell averages) have slope ~1 with 'grid', ~1-alpha with 'legacy' -- for 'dtfe' and 'geometric';
+#     analytic cell averages) have slope ~1 with 'grid', ~1-alpha with 'legacy' -- for 'linear' and 'geometric';
 #     the perturbed-IC plane equals the true-IC plane to ~1%. The exact deposit isolates the conventions: the
 #     sampled nSub=3 deposit of this one-particle-per-cell box is itself noisy at the cell scale (printed).
 #  C) MASS AND NOISE on a uniform near-lattice box (jitter 0.01, TNG-like initial conditions): random points
 #     average to rho_bar, and the point noise stays below the vertex-share grid's own (the per-tetrahedron
 #     m_tet/V_eul -- the grid's density -- puts a normal mass into near-flat slivers no point hits: a mean of 0.89).
-#  D) VOLUME WEIGHTING on a pancake and crossed waves (--per-stream): '.pts_vel' is the plain mean of the stream
+#  D) VOLUME WEIGHTING on a pancake and crossed waves (--ps-per-stream): '.pts_vel' is the plain mean of the stream
 #     velocities under 'grid' and their density-weighted mean under 'legacy'; '.pts_velDisp', '.pts_den' and
 #     '.pts_streams' do not depend on --ps-volume-weighted; single-stream points agree between the two.
 #  E) PARTITIONS: --partition 2 2 2 equals the single run to float rounding with --ps-vertex-mass (the vertex
@@ -43,7 +43,7 @@ echo "============================================================"
 build_target "${1:-}" PS-DTFE o_ps
 [ -x "${BIN}" ] || { echo "FAIL: ${BIN} not built"; exit 1; }
 FULL_HELP="$("${BIN}" --full-help 2>/dev/null)" || { echo "FAIL: ${BIN} --full-help exited non-zero"; exit 1; }
-grep -q -- '--pts-conventions' <<<"${FULL_HELP}" || skip_or_fail "this PS-DTFE has no --pts-conventions."
+grep -q -- '--ps-point-conventions' <<<"${FULL_HELP}" || skip_or_fail "this PS-DTFE has no --ps-point-conventions."
 
 echo ">> test data ..."
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${TMP}/in_lin.hdf5" --n "${N}" --box "${BOX}" \
@@ -87,45 +87,45 @@ PY
 run() {  # $1 = output root, $2 = snapshot, rest = flags
     local out="$1" snap="$2"; shift 2
     rm -f "${out}".*
-    if ! OMP_NUM_THREADS=2 "${BIN}" "${snap}" "${out}" --grid "${GRID}" --periodic --input 105 --MpcUnit 1 \
+    if ! OMP_NUM_THREADS=2 "${BIN}" "${snap}" "${out}" --grid "${GRID}" --periodic --input-format 105 --mpc-unit 1 \
             --verbose 1 "$@" > "${out}.log" 2>&1; then
         echo "   ERROR: PS-DTFE failed -- last 20 lines of ${out}.log:"; tail -n 20 "${out}.log" | sed 's/^/      | /'
         exit 1
     fi
 }
 VMW=(--ps-vertex-mass --ps-volume-weighted)
-PE=(--per-stream --pts-vel-grad --pts-den-grad)
+PE=(--ps-per-stream --pts-vel-grad --pts-den-grad)
 
 echo ">> A: identity runs (multi-stream crossed waves, --partition 2 2 2)"
 AF=(--field density_a velocity_a dispersion_a --sample-points "${TMP}/in_plane.bin" "${PE[@]}"
-    --partition 2 2 2 --max-concurrent 2 --ordered-merge)
+    --partition 2 2 2 --max-concurrent 2 --ps-merge index-order)
 run "${TMP}/a_off_grid"   "${TMP}/in_crw.hdf5" "${AF[@]}"
-run "${TMP}/a_off_legacy" "${TMP}/in_crw.hdf5" "${AF[@]}" --pts-conventions legacy
+run "${TMP}/a_off_legacy" "${TMP}/in_crw.hdf5" "${AF[@]}" --ps-point-conventions legacy
 run "${TMP}/a_on_grid"    "${TMP}/in_crw.hdf5" "${AF[@]}" "${VMW[@]}"
-run "${TMP}/a_on_legacy"  "${TMP}/in_crw.hdf5" "${AF[@]}" "${VMW[@]}" --pts-conventions legacy
+run "${TMP}/a_on_legacy"  "${TMP}/in_crw.hdf5" "${AF[@]}" "${VMW[@]}" --ps-point-conventions legacy
 echo ">> B: perturbed-IC slab (exact deposit), both estimators and conventions; the sampled deposit for comparison"
-for est in dtfe geometric; do
+for est in linear geometric; do
     for conv in grid legacy; do
         run "${TMP}/b_${est}_${conv}" "${TMP}/in_pic.hdf5" --field density_a "${VMW[@]}" --exact-average \
-            --sample-points "${TMP}/in_slab.bin" --ps-stream-density "${est}" --pts-conventions "${conv}"
+            --sample-points "${TMP}/in_slab.bin" --ps-stream-density "${est}" --ps-point-conventions "${conv}"
     done
     run "${TMP}/b_${est}_true" "${TMP}/in_lin.hdf5" --field density_a --exact-average \
         --sample-points "${TMP}/in_slab.bin" --ps-stream-density "${est}"
 done
 run "${TMP}/b_sampled_grid"   "${TMP}/in_pic.hdf5" --field density_a "${VMW[@]}" --sample-points "${TMP}/in_slab.bin"
 run "${TMP}/b_sampled_legacy" "${TMP}/in_pic.hdf5" --field density_a "${VMW[@]}" --sample-points "${TMP}/in_slab.bin" \
-    --pts-conventions legacy
+    --ps-point-conventions legacy
 echo ">> C: uniform near-lattice box"
-for est in dtfe geometric; do
+for est in linear geometric; do
     run "${TMP}/c_${est}_full" "${TMP}/in_uni.hdf5" --field density_a "${VMW[@]}" --exact-average \
         --sample-points "${TMP}/in_full.bin" --ps-stream-density "${est}"
     run "${TMP}/c_${est}_rand" "${TMP}/in_uni.hdf5" --field density_a "${VMW[@]}" \
         --sample-points "${TMP}/in_rand.bin" --ps-stream-density "${est}"
 done
-echo ">> D: volume weighting (a pancake: single- and three-stream points, --per-stream)"
+echo ">> D: volume weighting (a pancake: single- and three-stream points, --ps-per-stream)"
 DF=(--field density_a --sample-points "${TMP}/in_plane.bin" "${PE[@]}")
 run "${TMP}/d_vw_grid"   "${TMP}/in_pan.hdf5" "${DF[@]}" --ps-volume-weighted
-run "${TMP}/d_vw_legacy" "${TMP}/in_pan.hdf5" "${DF[@]}" --ps-volume-weighted --pts-conventions legacy
+run "${TMP}/d_vw_legacy" "${TMP}/in_pan.hdf5" "${DF[@]}" --ps-volume-weighted --ps-point-conventions legacy
 run "${TMP}/d_both_grid" "${TMP}/in_crw.hdf5" "${DF[@]}" "${VMW[@]}"
 echo ">> E: --partition 2 2 2 vs one triangulation (--ps-vertex-mass)"
 run "${TMP}/e_single" "${TMP}/in_crw.hdf5" "${DF[@]}" "${VMW[@]}"
@@ -189,7 +189,7 @@ def q_of(x):
 qe = np.array([q_of(x) for x in np.arange(g + 1) * box / g])
 f1 = np.diff(qe) / (box / g)
 ana = np.einsum("i,j->ij", f1, f1) * f1[g // 2] - 1.0
-for est in ("dtfe", "geometric"):
+for est in ("linear", "geometric"):
     grid = grid_layer(f"b_{est}_grid")
     sg, sl = slope(slab_blocks(f"b_{est}_grid"), grid), slope(slab_blocks(f"b_{est}_legacy"), grid)
     ag, al = slope(slab_blocks(f"b_{est}_grid"), ana), slope(slab_blocks(f"b_{est}_legacy"), ana)
@@ -206,10 +206,10 @@ gs = grid_layer("b_sampled_grid")
 print(f"   (the production nSub=3 sampled deposit of this box: plane-vs-grid slope 'grid' "
       f"{slope(slab_blocks('b_sampled_grid'), gs):.3f}, 'legacy' {slope(slab_blocks('b_sampled_legacy'), gs):.3f}; "
       f"that grid against the analytic cells {slope(gs, ana):.3f}, residual rms {np.std(gs - ana):.3f} -- "
-      f"the exact deposit's {np.std(grid_layer('b_dtfe_grid') - ana):.3f})")
+      f"the exact deposit's {np.std(grid_layer('b_linear_grid') - ana):.3f})")
 
 # ---- C
-for est in ("dtfe", "geometric"):
+for est in ("linear", "geometric"):
     full = pts(f"c_{est}_full", "den")
     rnd = pts(f"c_{est}_rand", "den")
     cells = np.fromfile(f"{tmp}/c_{est}_full.a_den", dtype=REAL).astype(np.float64)

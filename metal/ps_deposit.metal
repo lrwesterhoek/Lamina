@@ -376,7 +376,7 @@ static inline int window_flat(thread const int raw[3], constant DepositParams& P
     return 2;
 }
 
-// --ps-window, exact deposit: restrict a tet's raw span [lo, hi) along one axis to the hull of the
+// --grid-window, exact deposit: restrict a tet's raw span [lo, hi) along one axis to the hull of the
 // window's periodic images it meets (gpu_host.h psWindowHull, which the host's item bound uses --
 // keep in sync). False when the span misses the window.
 static inline bool window_hull(thread int& lo, thread int& hi, int n, bool periodic, int o, int m) {
@@ -995,7 +995,7 @@ kernel void depositFields(
         E.straddle = straddle;
         E.wFull = exact_full_weight(tetVol, fLinear, d0, dG, E.t1, E.t2, E.t3);
 
-        // --ps-window: only the window's cells are clipped and the tet is normalized by its whole
+        // --grid-window: only the window's cells are clipped and the tet is normalized by its whole
         // weight (as a straddling tet is); an empty window then means "no volume inside the
         // window", not a degenerate tet -- nothing to deposit, no sampled fallback
         if (P.windowMode != 0)
@@ -1149,7 +1149,7 @@ kernel void depositFields(
 // A tet whose sumW stays 0 -- float-degenerate, or a window that clips empty -- deposits nothing
 // here; the host runs depositFields on those few, which falls through to the sampled path and the
 // centroid fallback, or defers to the CPU, exactly as in the one-thread path. Nothing here writes 'masses'.
-// Under --ps-window the items cover only the window's cells and the share is m / wFull (the whole
+// Under --grid-window the items cover only the window's cells and the share is m / wFull (the whole
 // weight): a tet with no volume in the window stays at sumW 0 and depositFields drops it.
 // ------------------------------------------------------------------------------------------------
 // The per-dispatch parameters (buffer 17): PSExactItemParams in ps_kernel_params.h (prepended, as DepositParams).
@@ -1251,7 +1251,7 @@ static inline bool exact_tet_setup(uint tet, device const float* verts, device c
         }
     }
 
-    // --ps-window: only the window's cells (the hull of its images along each axis) are items;
+    // --grid-window: only the window's cells (the hull of its images along each axis) are items;
     // a tet missing the window gets an empty span (no items idle on it: the host bound has the
     // same hull)
     if (P.windowMode != 0)
@@ -1344,7 +1344,7 @@ kernel void depositExactItems(
         s = (float(hi) * 4294967296.0f + float(lo)) / E.wScale;
     }
     // a tet cut by the grid face keeps only its inside share: normalized by its whole weight --
-    // as is every tet of a --ps-window run (only its window pieces are clipped)
+    // as is every tet of a --grid-window run (only its window pieces are clipped)
     float const shareFac = deposit ? m / ((E.straddle || P.windowMode != 0) ? max(s, E.wFull) : s) : 0.0f;
     ulong const n1 = ulong(max(iMax[1] - iMin[1], 0));
     ulong const n2 = ulong(max(iMax[2] - iMin[2], 0));

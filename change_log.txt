@@ -1,5 +1,33 @@
 UNRELEASED (since 1.0.0)
-- The CPU exact deposits ('--ps-exact-deposit', '--exact-average') are 4-8x faster with byte-identical outputs. Each
+- CI runs three jobs (build-and-test, old-python, compile-variants). The CUDA/HIP port's jobs -- cudaemu (the CPU
+  emulation at warp 32 and 64, with the exact-clip twin check), cuda-compile and hip-compile -- are gone: the port is
+  not in use, and the emulation jobs kept stalling on the runners' package mirrors (the 10-minute install timeout on
+  38eb4be's run). The checks stay available locally: make CUDAEMU=1 + tests/cudaemu_check.sh, tests/gpu_twin_check.sh.
+- '--face-gradient' (both binaries, 3D; docs/cleanup-plan.md P10): the velocity gradient and the fields built on it
+  from exact FACE integrals of the interpolant (Gauss), by one shared geometry (src/CGAL_triangulation/face_sweep.h:
+  each grid plane's section through each tetrahedron, clipped to the face squares; a half-open rule on region-frame
+  coordinates so tetrahedra sharing a face in a grid plane decide it alike). Standard DTFE: the per-tetrahedron
+  gradient's exact cell average by a second route (64^3 demo: 1.1e-5 of the rms at most; byte-identical at any thread
+  count and after the Monte-Carlo, exact or GPU deposit; DTFE_FACE_CHECK=1 compares). PS-DTFE (the exact CPU deposit,
+  --ps-volume-weighted): each cell's lower and upper face sums of the streams' velocities and count give the gradient
+  of the face-averaged MEAN velocity, (S_up/N_up - S_lo/N_lo)/dx -- the quantity standard DTFE stores, conservative
+  (a periodic pancake's mean divergence 5e-11 of its rms against +0.98 for the stream average), the stream average
+  itself where no caustic touches the cell, and the folds' convergence as exact face differences; the stream average's
+  divergence is written as '.a_velDivStreams', and the face momentum sums give the mass flux divergence
+  div(sum_s rho_s v_s) as '.a_massFluxDiv' (by continuity -a d(1+delta)/dt; a drifted pancake's mass change equals
+  its integrated outflow, caustic cells included, converging with the time step). Fixed-point face sums (order-free: byte-identical at any thread count
+  and in slab mode), merged and checkpointed with the other accumulators; a one-cell --grid-window equals the full run's
+  slice bit for bit. dtfelib's FieldSet.face_gradient / load(..., mean_field=True) read them. Tests:
+  tests/face_sweep_check.sh, tests/dtfe_face_gradient_check.sh, tests/ps_face_gradient_check.sh.
+- Both drivers and the launcher default to the same four fields: density, velocity, divergence and shear
+  (run_dtfe.sh and run_ps_dtfe.sh FIELDS, the launcher's Grids / Pipeline ticks and its 'Standard' and 'Publication'
+  presets). The gradient, vorticity, dispersion, T-web and V-web stay available through FIELDS or a tick. The
+  binaries still deposit the velocity gradient for divergence and shear and derive both after the loop, without
+  writing it. Standard DTFE at 512^3 (TNG100-3-Dark z = 0, plan only): fixed memory 25.9 -> 13.6 GB, so the planner
+  picks 3^3 x 10 threads instead of 6^3 x 8 (a hand-set 3^3 run took 562 s, the auto-planned 6^3 1022 s). The
+  launcher's memory estimate books the gradient once for all the fields derived from it, and analyze.py's
+  completeness check asks for the four fields (no gradient grid; plot_shear_triaxial reads the shear then).
+- The CPU exact deposits (both binaries' '--exact-average') are 4-8x faster with byte-identical outputs. Each
   cell used to clip the whole tetrahedron by its six planes; r3d applies them one at a time, so the tetrahedron is
   now clipped once per slab (x planes), each slab once per column (y planes) and each column per cell (z planes) --
   the same r3d_clip calls on the same vertices -- and the slabs, columns and cells beyond the parent piece's extent
@@ -34,7 +62,7 @@ UNRELEASED (since 1.0.0)
 - The drivers and the launcher run PS-DTFE's exact deposit on the CPU by default: TNG100-3-Dark z = 0 at 512^3
   takes 14m27s there against 17m39s on the GPU (and 14m34s for the production sampled GPU deposit), the GPU being
   faster only around a few million particles (2.1M at 256^3: 18 s against 23 s). run_ps_dtfe.sh -e and
-  run_ps_pipeline.sh with PS_EXACT=1 resolve an unset PS_METAL / PS_GPU to the CPU (-m, PS_METAL=1 or PS_GPU=1 still
+  run_ps_pipeline.sh with DTFE_EXACT_AVERAGE=1 resolve an unset DTFE_GPU to the CPU (-m or DTFE_GPU=1 still
   choose the GPU); the launcher unticks the GPU when the exact deposit is picked, its 'Exact deposit' preset runs on
   the CPU, and a ticked GPU on an exact run of 10M particles or more gets a warning. Standard DTFE's exact cell
   average stays on the GPU (2.0 s against 3.3 s at 0.26M particles).
@@ -46,7 +74,37 @@ UNRELEASED (since 1.0.0)
 - A run given both '--partition' and '--max-concurrent' is predicted like a tuned one: the memory gate and the RAM a
   finished partition may park in now apply to it (a pinned TNG100 z = 1 run parked 43 GB in RAM on a 64 GB
   machine), and its SUMMARY prints the predicted against the measured peak.
-- PS_GPU_TIMING also prints, per partition, how long its deposit waited for the GPU and held it.
+- DTFE_GPU_TIMING (PS-DTFE) also prints, per partition, how long its deposit waited for the GPU and held it.
+- The auto-tuner (docs/cleanup-plan.md P8). The plans change (66 of the 110 report lines of tests/dev/tune_report_set.sh,
+  every PS line with a split, and 5 standard lines); the outputs of a given plan do not (tests/dev/bytecmp.sh pins
+  every run's plan):
+  * PS-DTFE books each partition's sub-grid as measured on the particles (psPartitionSpans: the split's largest
+    sub-grid from a Lagrangian binning, one pass over the particles, 0.01-0.5 s) instead of G/n + 40 cells per axis,
+    for splits up to 6 per axis (window runs and finer splits keep the rule). The old rule booked 0.05-4.3x the real
+    span (20x low on crossed waves at 384^3); the measured one 1.00-2.09x, never below. DTFE_AUTO_SPAN=0 restores the
+    rule; DTFE_AUTO_TUNE_DEBUG=1 prints each pass's real 'sub-grid: a b c'. A split that is not cubic
+    ('--partition 2 3 4') is costed with its own counts, padding and span.
+  * The budget's reason line also names the live free memory when it does not cut the budget ("the other programs
+    leave 57.1 GB free: 53.1 GB after the 4 GB headroom"), and DTFE_MEM_FRACTION when it is set.
+  * Standard DTFE's predicted peak is the larger of the loop and the post-processing, not their sum: the loop holds
+    its own grids and the busiest partition; the post-processing every grid plus the share of the busiest partition
+    the allocator keeps (all of it up to 1 GB, 0.35 of a larger one). Never above the old figure (256^3 with the
+    production fields: 2.99 -> 2.59 GB; dtfe_auto_tune_check E now 1.08x the measured peak, from 1.57x). The SUMMARY
+    prints 'before post-proc', the peak when the post-processing began, so a real run shows which phase set its peak.
+  * PS-DTFE's partition loop admits partitions beyond the plan's '--max-concurrent' while memory allows (the single
+    build; the double build and the float sums keep the plan's count, since their grids would follow the in-flight
+    count). The plan's count is the floor. A ledger -- the free memory when the loop started, less the headroom,
+    what the run still has to allocate (the derived grids, the point outputs, the first merge's grids, the unmerged
+    share of the point records) and the run's own growth -- must hold one partition's need for every partition in
+    flight plus the new one, and the live free memory one more. Partitions enter strictly in index order, so the gate
+    delays and never deadlocks. The log says "dynamic: at least the plan's m ..." (or why it did not start) and, after
+    the loop, "at most k partitions in flight"; the SUMMARY restates the prediction with the partitions beyond the
+    plan's. Outputs unchanged: the index-order merge sums in index order (TNG100-3-Dark z = 0 at 8 in flight
+    byte-identical to the logged run at 10). The case: the TNG50-3-Dark z = 0 rerun ran one partition at a time
+    (163 s each, against 40 s at six) because the plan booked all point stream records from the first partition.
+  Tests: ps_auto_tune_check.sh X (the span against the binary's own sub-grids), J2c/J2d (the reason line), Y1-Y6
+  (ten at once from a plan of one, byte for byte the '--max-concurrent 1' grids; no room keeps one; a user's count is
+  kept; killed after three and resumed gives the same grids); dtfe_auto_tune_check.sh E.
 - Launcher, Explore: a 3D view ('Show in 3D'). The map's field on three orthogonal planes through the box (the map's
   slice and the middle of the other two axes, one colour range), the voids as spheres of radius R_v at their true
   size against the box (R_eff dashed when ticked), the box's edges, an axis triad and a scale bar. Drag to turn it,
@@ -73,9 +131,9 @@ UNRELEASED (since 1.0.0)
   ps_exact1024: 512^3 in 1.9 s, 1024^3 in 4.7 s (about 10 GB at its peak; less free memory: a smaller detail, said).
   The grid is read in slabs by plain reads, never memmapped. Averaged to 256^3, the 1024^3 and 512^3 exact-deposit
   grids agree to 2.4e-7: the exact deposit is consistent between resolutions.
-- The auto-tuner's memory prediction for '--ps-window' runs counted too little (TNG100-3-Dark: 11.1 GB predicted,
+- The auto-tuner's memory prediction for '--grid-window' runs counted too little (TNG100-3-Dark: 11.1 GB predicted,
   19.7 GB measured). Two terms were missing. First, the input reader's freed arrays (positions, masses, velocities,
-  IDs; with --lagrangianInput also the initial conditions), which the allocator keeps while the first partitions
+  IDs; with --ps-lagrangian-input also the initial conditions), which the allocator keeps while the first partitions
   are built (autoTuneReadKeptBytes). Second, every partition's sub-grid is the whole window, not a crop of it. The
   GPU deposit's window grids are now counted once, not once per partition in flight. Window runs are now predicted
   2-10% high (TNG100-3-Dark 20.2 GB); predictions for runs without a window are unchanged.
@@ -180,7 +238,7 @@ UNRELEASED (since 1.0.0)
     reusing one sample buffer;
   * the auto-tuner is an interface (auto_tune.h) and a model (src/auto_tune.cc, its own object: editing it no longer
     rebuilds DTFE.cpp); its constants have names and sources, and both planners take one struct of inputs;
-  * under '--scratch-dir', '--fixed-point-merge' zero-fills its integer grids in memory too (macOS), and prints a
+  * under '--scratch-dir', '--ps-merge fixed-point' zero-fills its integer grids in memory too (macOS), and prints a
     SCRATCH line counting them.
 - GPU:
   * the kernels' parameter blocks are defined once per estimator (ps_kernel_params.h, dtfe_deposit_params.h) and
@@ -190,8 +248,8 @@ UNRELEASED (since 1.0.0)
     twin, function by function (CI's cudaemu job runs it); metal/README.md lists the Metal/CUDA lockstep pairs.
 - Python, no change to figures or data: shared snapshot-ladder and snapdir helpers, one output-tag rule (pinned by a
   test to the rules it replaces), every figure saved through save_figure (dpi config.DPI, tracking figures
-  config.TRACK_DPI), shared small helpers, argument helpers ('--out' also answers to '--output' and '-o'; both R_v
-  spellings), a shared series driver, analyze.py's cache code in dtfelib/cache.py, the critical points and the void
+  config.TRACK_DPI), shared small helpers, argument helpers (one '-o/--out'; one R_v
+  spelling), a shared series driver, analyze.py's cache code in dtfelib/cache.py, the critical points and the void
   radius in their own modules (still reachable through dtfelib.pipeline). A snapdir_* folder whose name is not a
   number is now skipped instead of stopping a script.
 - Scripts: run_ps_dtfe.sh and run_ps_pipeline.sh run under 'set -uo pipefail' like the other drivers (the audit found
@@ -208,24 +266,100 @@ UNRELEASED (since 1.0.0)
   * one call releases all cached grid data at a job start (the 3D view's cubes included); the map, its saved figures
     and the 3D volume take their values from one function. Every slice, volume, saved map, title and colour-bar label
     is byte-identical.
-- One flag scheme. Both binaries spell a shared option the same way: '--gpu' (PS-DTFE: the grid deposit on the
-  GPU; standard DTFE: the '_a' interpolation), '--exact-average' (PS-DTFE: the exact deposit; standard DTFE: the
-  exact cell average), '--no-overlap', '--full-help' and '--lambda-th'. The old spellings ('--ps-gpu',
-  '--ps-exact-deposit', '--ps-no-overlap', '--full_help', '--lambda_th') still work for one release, on the command
-  line and in a '--config' file: they are hidden from the help, print one 'warning: --old is deprecated, use --new'
-  line on stderr and give byte-identical outputs. Both spellings of the threshold with different values from one
-  source (the command line, or the file) are refused; between the command line and the file the command line wins,
-  whichever spelling each uses ('--lambda-th 0.5' over a file's 'lambda_th = 0.3' runs at 0.5, with the file's
-  deprecation warning). The checkpoint key reads the canonical names, so a run killed under an old spelling resumes
-  under the new one. The run scripts and the launcher emit the canonical names, and every reader of a command line
-  maps the old ones first, so the run logs on disk read as before (the Runs browser, Load settings, dtfelib's V-web
-  threshold, run_ps_pipeline.sh's freshness test: no snapshot is recomputed because of a spelling). The driver knobs
-  are DTFE_GPU / PS_GPU and DTFE_EXACT (PS_EXACT unchanged); DTFE_METAL, PS_METAL and DTFE_EXACT_AVERAGE are still
-  read when the new name is unset. The drivers' --help notes that their -m (GPU) and -s (simulation) are not the
-  binaries' -m (--method) and -s (--samples). The test suites use the canonical names, except where an old spelling
-  is what they test (the alias, resume and run-log reader checks; tests/dev/bytecmp.sh and tune_report_set.sh, which
-  also drive binaries from before the rename). The launcher's Custom tab sees a repeated option in its extra-options
-  line in an old spelling or as '--name=value' too, so it refuses the job before the binary would.
+- One flag scheme (docs/cleanup-plan.md P6 and P6.7): every option and knob of both binaries, both drivers, the
+  launcher and the python scripts follows one set of rules -- lower-case kebab-case whole words; 'ps-' exactly for
+  what needs phase-space streams, the Lagrangian tessellation or caustics; one name for a concept both estimators
+  have; 'pts-' = writes a '.pts_<x>' file; a driver knob is its flag in UPPER_SNAKE (the knobs both drivers share
+  keep 'DTFE_'); the binaries' knobs one 'DTFE_' name per concept; lists space-separated. Formats never move: the
+  output suffixes, the tessellation-cache and globals-record labels (MpcUnit=, partNo=, lagPadding=, density0=,
+  randomSample=, redshiftSpace=, ...), the AUTO-TUNE-REPORT keys, the QSettings and RunSpec keys, the numeric codes
+  of --input-format / --output-format / --average-method. Every old name below still works for one release: on the
+  command line, in a '--config' file and in the environment it prints one 'warning: OLD is deprecated, use NEW' line
+  on stderr (an environment knob once, at start-up) and gives byte-identical outputs; P6.6 removes them. Between the
+  command line and a '--config' file the command line wins, whichever spelling each uses ('--lambda-th 0.5' over a
+  file's 'lambda_th = 0.3', '--subsamples 3' over a file's 'samples = 8'); two spellings with different values from
+  one source are refused. The checkpoint key reads the canonical names, so a run killed under an old spelling resumes
+  under the new one. The run-log readers (the Runs browser, Load settings, dtfelib's V-web threshold and weighting
+  reads, run_ps_pipeline.sh's freshness test; python/dtfelib/runlog.py) map the old spellings for good, so no grid
+  on disk reads differently and no snapshot is recomputed because of a spelling. The launcher migrates the saved
+  Custom extra options (QSettings, queued jobs, 'Load settings' sidecars), the stream-density value and the plot
+  settings' criterion and panels values. tests/flag_spelling_check.sh runs each old spelling against its new one
+  (outputs and checkpoint keys); tests/py_cli_alias_test.py does the same for the python CLIs; tests/dev/bytecmp.sh
+  and tune_report_set.sh keep the old spellings (they also drive binaries from before the rename).
+  Renamed, old names accepted for one release -- the binaries (both unless PS / std):
+    --MpcUnit -> --mpc-unit; --paddingMpc -> --padding-mpc; --regionMpc -> --region-mpc; --partNo -> --partition-index
+    --redshiftCone -> --redshift-cone; --origin -> --cone-origin
+    --NGP --CIC --TSC --PCS --SPH --Voronoi -> --ngp --cic --tsc --pcs --sph --voronoi
+    -i/--input -> -i/--input-format; -o/--output -> -o/--output-format (type codes; the letters stay)
+    inputFile, outputFile (config-file keys) -> input-file, output-file
+    std -m/--method -> --average-method (the letter goes: it is the drivers' GPU letter)
+    PS --avg-subsamples k -> --subsamples k (k per axis, k^3 points per cell, now in both binaries)
+    std -s/--samples N (a total per cell) -> --subsamples k (= k^3; a total that is no cube is still read as one)
+    PS --ordered-merge / --completion-order-merge / --fixed-point-merge -> --ps-merge index-order | completion-order
+      | fixed-point (an explicit index order keeps the memory gate on under the auto-tuner's speed split)
+    PS --lagrangianInput -> --ps-lagrangian-input; --ps-lag-padding -> --ps-lagrangian-padding
+    --per-stream, --per-stream-ids -> --ps-per-stream, --ps-per-stream-ids (PS only); PS --pts-lagrangian ->
+      --ps-per-stream-lagrangian; PS --pts-conventions -> --ps-point-conventions
+    PS --ps-window -> --grid-window; PS --ps-stream-density dtfe -> --ps-stream-density linear
+    --noTest -> --no-padding-test; --density0 -> --mean-density; --randomSample -> --particle-fraction
+    std --approxPSD -> --approx-phase-space-density; --extensive -> --scalars-extensive; --options -> --reader-options
+    --ps-gpu -> --gpu; --ps-exact-deposit -> --exact-average; --ps-no-overlap -> --no-overlap; --full_help ->
+      --full-help; --lambda_th -> --lambda-th
+    PS-DTFE's -m/--method and -s/--samples had no effect there: they warn and are dropped. --redshiftSpace stays.
+  Renamed, old names accepted for one release -- the binaries' environment variables:
+    DTFE_PS_OVERLAP -> DTFE_OVERLAP; DTFE_PS_CHECKPOINT -> DTFE_CHECKPOINT; DTFE_NO_PROGRESS=1 -> DTFE_PROGRESS=0
+    PS_GPU_TIMING, PS_GPU_FLOAT_MASS, PS_GPU_FLOAT_MOMENTS -> DTFE_GPU_TIMING, DTFE_GPU_FLOAT_MASS,
+      DTFE_GPU_FLOAT_MOMENTS
+    PS_EXACT_ITEM_CELLS -> DTFE_GPU_EXACT_CELLS; PS_EXACT_ITEMS -> DTFE_GPU_ITEMS; GPU_EMU_WARP -> DTFE_GPU_EMU_WARP
+    PS_MASS_AUDIT -> DTFE_MASS_AUDIT; PS_DEBUG_DEGREES -> DTFE_DEBUG_DEGREES
+    DTFE_TBB_THREADS -> DTFE_TRIANGULATION_THREADS; DTFE_AUTO_PTS_VELGRAD -> DTFE_AUTO_PTS_VEL_GRAD
+    DTFE_TESS_CACHE_THREADS / _ZLIB / _CGAL_IO / _FINGERPRINT / _LEGACY -> DTFE_TESSELLATION_CACHE_*
+    (PS_GPU_CHUNK and PS_GPU_DEBUG_NOATOMIC keep their names: standard DTFE's twins count work items / take a level.)
+  Renamed, old names accepted for one release -- the drivers' knobs and options (run_dtfe.sh, run_ps_dtfe.sh,
+  run_ps_pipeline.sh, config.sh, download_snapshots.sh; the new name wins when both are set, said in the warning):
+    PS_GPU, PS_METAL, DTFE_METAL -> DTFE_GPU; PS_EXACT, DTFE_EXACT -> DTFE_EXACT_AVERAGE (the 1.0.0 name; each
+      driver keeps its default, standard 1, PS 0); PS_RESUME -> DTFE_RESUME; AVG_SUBSAMPLES -> SUBSAMPLES
+    ORDERED_MERGE=1 / 0, FIXED_POINT_MERGE=1 -> PS_MERGE=index-order / completion-order / fixed-point
+    PS_PARALLEL_TRI -> PARALLEL_TRIANGULATION; PS_LAG_PADDING -> PS_LAGRANGIAN_PADDING; LAGRANGIAN_INPUT ->
+      PS_LAGRANGIAN_INPUT (an empty value still means InitialCoordinates); PTS_CONVENTIONS -> PS_POINT_CONVENTIONS;
+      TESS_CACHE -> TESSELLATION_CACHE
+    DTFE_GRID_SIZE, DTFE_PADDING, DTFE_SPACE_CHECK -> GRID_SIZE, PADDING, SPACE_CHECK
+    the pipeline's WINDOW, PY -> PLANE_WINDOW (make_image_plane.py --plane-window), PYTHON
+    new long options: --sim, --sim-dir, --grid, --gpu, --exact-average, --subsamples (both drivers;
+      download_snapshots.sh --sim, --sim-dir, --groupcats, --trees, --ics, --api-key); -m and -e stay
+  Renamed, old names accepted for one release -- the python CLIs (allow_abbrev off everywhere):
+    --method {auto,ps,dtfe} -> --estimator; --sigma-mpc, DTFE_SIGMA_MPC -> --smooth-mpc, DTFE_SMOOTH_MPC
+    --r-v-definition -> --rv-definition; --size-rv -> --size-rv-definition; the tracking scripts' --snap -> --start-snap
+    --top -> --n-halos; --subhalo -> --subhalos; --nbins -> --n-bins; --z -> --redshifts;
+      --a/--b -> --prefix-a/--prefix-b
+    plot_pointeval --fields / --smooth / --smooth-derivatives -> --maps / --smooth-px / --smooth-derivatives-px
+    plot_pointeval_panels --prefix -> --root, --project mean -> slab; plot_caustic_skeleton --voids -> --per-void
+    -o/--output/--out -> -o/--out; merge_HDF5.py --data-dir -> --sim-dir, positional snapshots -> --snaps;
+      analyze.py positional snapshots -> --snaps (it also takes --sim and --data-root); make_image_plane.py
+      --u0 --u1 --v0 --v1 -> --plane-window U0 U1 V0 V1
+    --criterion density_smoothed | density_raw -> density-smoothed | density-raw; comma-joined lists (--sims, --snaps,
+      --rv-range, --edges, --panels) -> space-separated values (a comma value is still split, with a warning)
+  Renamed -- the launcher's labels: 'Standard DTFE' / 'PS-DTFE', 'Cell average: Sampled / Exact', 'Grid window (Mpc)'
+  (Custom) beside 'Plane window (Mpc)' (Pipeline), 'Concurrent triangulations'.
+  Behaviour changes that come with it (deliberate):
+  * (unchanged, for the record) the driver's merge default: a plain run_ps_dtfe.sh run (and so the pipeline) passes
+    '--ps-merge index-order' (PS_MERGE's default, where the older default passed '--ordered-merge'), so a small run
+    under the auto-tuner's speed split (N < 2e6) keeps the memory gate on as before, where a bare binary run drops it
+    (the grids are byte-identical either way). The launcher's merge tick passes the same on the Grids and Pipeline
+    tabs; the Custom tab at the default passes none (a binary command);
+  * DTFE_EXACT_AVERAGE now wins over DTFE_EXACT; the drivers read true/yes/on (and false/no/off) for every switch,
+    not only 1; run_dtfe.sh reads THREADS and SUBSAMPLES; the pipeline hands PYTHON to run_ps_dtfe.sh and resolves the
+    driver's older knob names once, so a batch warns once per name, not per simulation;
+  * until P6.6 the launcher sets every knob under its new and its older name (the same value, so an older name
+    inherited from the login shell cannot stand beside the new one): a PS job's log carries about six deprecation
+    lines, a standard one two or three;
+  * the standard binary no longer lists '--parallel-triangulation' and the per-stream options (PS-DTFE only); the
+    '-m' / '-s' warnings name both spellings ('-m/--method', '-s/--samples');
+  * resume: the key holds an option as given, so a PS run with an explicit '--ps-stream-density linear' (or 'dtfe')
+    does not resume under a command that leaves it out; and (as before) a standard '--average-method 2' or
+    '--particle-fraction' run without '--seed' is seeded from the clock, which the key does not hold, so its resume
+    cannot match one uninterrupted run byte for byte;
+  * src/config.cfg (the sample configuration) uses the new keys and no longer stops on 'sampling' (never an option).
 - Behaviour change: the *_METAL_* aliases of the GPU knobs (PS_METAL_CHUNK, DTFE_METAL_TIMING, PS_METAL_FLOAT_MASS,
   PS_METAL_FLOAT_MOMENTS, DTFE_METAL_FLOAT_GRIDS, ...) are no longer read; use the *_GPU_* names.
 - PS-DTFE's CPU deposit (the default single-precision build) claims its blocks of 256 cells from one shared counter,
@@ -259,7 +393,7 @@ UNRELEASED (since 1.0.0)
   * the sampled deposit adds the shares that every sample of a tetrahedron in a cell has in common -- the exact mass,
     velocity-gradient, scalar-gradient, moment-weight and multiplicity sums, the stream count, the caustic bits --
     with one atomic per cell instead of one per sample (integer sums, so exact);
-  * PS_GPU_TIMING=1 prints, per partition, where its call went: before its hold on the GPU (device setup, plan, the
+  * DTFE_GPU_TIMING=1 prints, per partition, where its call went: before its hold on the GPU (device setup, plan, the
     exact items' bounds and map) and in it (uploads, kernels, pacing gaps, snapshots, leftovers, copy-back,
     releases); PS_GPU_DEBUG_NOATOMIC=1 (timing only: the grids come out empty) measures the atomics'
     share of the sampled kernel, as DTFE_GPU_DEBUG_NOATOMIC does for standard DTFE;
@@ -279,7 +413,7 @@ UNRELEASED (since 1.0.0)
 - Both partition loops print a 'merge time:' line after the run. PS-DTFE's says how long adding the
   partitions into the full grids took (one at a time, under the merge lock), how long their checkpoints took, how long
   spilled sub-grids took to read back, and how long the partitions waited for their turn (parked, or holding a
-  thread); in completion order and under '--fixed-point-merge' it gives the wait for the merge lock instead.
+  thread); in completion order and under '--ps-merge fixed-point' it gives the wait for the merge lock instead.
   Standard DTFE's gives its serial copy into the full grids and its checkpoints. The count is the partitions this run
   merged, so a resumed run counts only the ones it computed. 2.1M particles at 256^3 in 27 partitions: the adds take
   0.24 s and the checkpoints 0.12 s of a 38 s partition loop. Only the log changes.

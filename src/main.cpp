@@ -34,6 +34,7 @@
 #include "ps_point_eval.h"
 #include "ps_globals_record.h"
 #include "run_progress.h"     // '<output>.runlog.progress'
+#include "env_knobs.h"       // Env::warnRenamed
 #include "output_staging.h"   // '<file>.part.<pid>' + rename, rescue folder
 
 using namespace std;
@@ -80,6 +81,10 @@ int main( int argc, char *argv[] )
             return 0;
         }
 
+    // the environment variables renamed for one flag scheme (env_knobs.h 'renamed'): one line per old name that is
+    // set, here, before any thread starts (a read deep in the run, on a worker thread, must not print mid-log)
+    Env::warnRenamed();
+
     // --serve speaks a binary protocol on stdout: divert all logging to stderr before the
     // first line is printed (option parsing already prints)
     for (int i = 1; i < argc; ++i)
@@ -121,7 +126,7 @@ int main( int argc, char *argv[] )
     runProgressPhase( "reading" );
     vector<Particle_data> particles;
     vector<Sample_point> samplingCoordinates; // sampling coords for non-regular-grid interpolation
-    // --ps-window with a tessellation cache (the launcher's exact zoom): when the snapshot's particle-
+    // --grid-window with a tessellation cache (the launcher's exact zoom): when the snapshot's particle-
     // derived globals are recorded beside the cached partitions, start without reading the particles --
     // DTFE() reads them late only if a partition the window needs is not cached (ps_globals_record.h)
     bool particlesDeferred = false;
@@ -167,7 +172,7 @@ int main( int argc, char *argv[] )
         // without '--periodic' the second pass grids the region moved by half a cell (below): without a region
         // that leaves the data box, so refuse before the first pass rather than after it
         if ( !userOptions.periodic and !userOptions.regionOn )
-            throwError( "'--interlace' without '--periodic' needs a '--region' or '--regionMpc' at least half a cell "
+            throwError( "'--interlace' without '--periodic' needs a '--region' or '--region-mpc' at least half a cell "
                         "inside the data box: the second pass grids that region moved by half a cell." );
         if ( !userOptions.periodic )
         {
@@ -306,6 +311,11 @@ int main( int argc, char *argv[] )
                            maxRss/1.e9, (measured - predicted)/1.e9, 100.*(measured - predicted)/predicted );
             std::cout << MESSAGE::cYellowD() << "   memory model      : " << MESSAGE::cReset() << line << "\n" << std::flush;
         }
+        // ... and the peak when the post-processing began: equal to the run's peak when the partition loop set it
+        if ( double const loopPeak = runProgressLoopPeak(); loopPeak > 0. and measured > 0. )
+            std::cout << MESSAGE::cYellowD() << "   before post-proc  : " << MESSAGE::cReset() << std::fixed
+                      << std::setprecision(2) << loopPeak/1.e9 << " GB peak (" << ( loopPeak >= measured ? "the loop set "
+                      "the run's peak" : "the post-processing raised it" ) << ")\n" << std::defaultfloat << std::flush;
         std::cout << MESSAGE::cYellowD() << "   total wall time   : " << MESSAGE::cReset()
                   << MESSAGE::cGreen() << MESSAGE::formatDuration(wallSec) << MESSAGE::cReset() << "\n"
                   << MESSAGE::cCyan() << MESSAGE::hrule() << MESSAGE::cReset() << "\n" << std::flush;

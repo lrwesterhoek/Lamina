@@ -12,7 +12,7 @@
      a lane exited before one) aborts with a message instead of hanging silently;
    - the warp collectives of gpu_cuda_compat.h (warp-any, warp-min, warp-sum) are computed at
      the COLLECTIVE level over the lanes' values -- the kernels' uniform control flow around them
-     is exercised exactly, the shuffle loops themselves are not; GPU_EMU_WARP=64 runs the
+     is exercised exactly, the shuffle loops themselves are not; DTFE_GPU_EMU_WARP=64 runs the
      reductions over 64 lanes, the HIP wavefront width;
    - atomics are real atomics (the lanes are real threads); device memory is host memory;
      cudaMemcpy is memcpy; every runtime call succeeds; the "device" reports one CPU.
@@ -65,7 +65,7 @@ inline unsigned gGridDim  = 1;
 inline unsigned warpWidth()
 {
     static unsigned w = [] {
-        return unsigned(Env::integer("GPU_EMU_WARP", 32) == 64 ? 64 : 32);
+        return unsigned(Env::integer("DTFE_GPU_EMU_WARP", 32) == 64 ? 64 : 32);
     }();
     return w;
 }

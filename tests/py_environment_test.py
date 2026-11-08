@@ -161,7 +161,7 @@ def t_environment_script():
         buf = _io.StringIO()
         with redirect_stdout(buf):
             pev.main(["--sim", "SYN", "--data-root", str(root / "data"), "--tracking-dir", str(tdir),
-                      "--criterion", "density_raw"])
+                      "--criterion", "density-raw"])
         text = buf.getvalue()
         out = Path(config.figures_path("void_environment")) / "SYN"
         names = sorted(q.name for q in out.iterdir())
@@ -179,7 +179,7 @@ def t_environment_script():
         (out / "environment_tracking_x1.5.png").write_bytes(b"old")
         with redirect_stdout(_io.StringIO()):
             pev.main(["--sim", "SYN", "--data-root", str(root / "data"), "--tracking-dir", str(root / "none"),
-                      "--factor", "1.5", "--criterion", "density_raw"])
+                      "--factor", "1.5", "--criterion", "density-raw"])
         names = sorted(q.name for q in out.iterdir() if "_x1.5" in q.name)
         assert names == ["environment_evolution_x1.5.png", "environment_stats_x1.5.npz",
                          "environment_z0.00_x1.5.png", "environment_z1.00_x1.5.png"], names

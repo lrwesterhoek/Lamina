@@ -116,7 +116,7 @@ def run_one(target, tmp):
 # ---------------------------------------------------------------- parent: orchestrate
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(allow_abbrev=False)
     ap.add_argument('--run-one', metavar='TARGET', help=argparse.SUPPRESS)
     ap.add_argument('--tmp', metavar='DIR', help=argparse.SUPPRESS)
     args = ap.parse_args()

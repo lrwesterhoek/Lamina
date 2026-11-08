@@ -79,7 +79,7 @@ def main():
     fails = []
     for grid in GRIDS:
         run([binary, snap, out, "--grid", str(grid), "--field", "density",
-             "--input", "105", "--MpcUnit", "1", "--verbose", "0"])
+             "--input-format", "105", "--mpc-unit", "1", "--verbose", "0"])
         d = np.fromfile(out + ".den", dtype=REAL).astype(np.float64).reshape(grid, grid, grid)
         # '.den' is rho/rho_bar with rho_bar = N*m / V_lagBox for a non-periodic cloud
         # (Lagrangian bounding-box normalization); recovered/expected mass is then
@@ -142,7 +142,7 @@ def region_faces(binary):
         variants += [(name + " GPU", extra + ["--gpu"]) for name, extra in list(variants)]
     # one triangulation: a partitioned non-periodic run differs from a single one at the Lagrangian
     # partition seams (a separate, known issue), and this part tests the region faces only
-    common = ["--input", "105", "--MpcUnit", "1", "--verbose", "0", "--avg-subsamples", "3",
+    common = ["--input-format", "105", "--mpc-unit", "1", "--verbose", "0", "--subsamples", "3",
               "--partition", "1", "1", "1",
               "--field", "density", "velocity", "density_a", "velocity_a"]
     n, o = REGION_GRID, REGION_OFF
@@ -195,7 +195,7 @@ def partition_split(binary):
     if "--ps-alpha-shape" not in h.stdout + h.stderr:
         os.remove(snap)
         return [f"'{binary}' has no --ps-alpha-shape (an older build?): non-periodic splits differ at the hull"]
-    common = ["--input", "105", "--MpcUnit", "1", "--verbose", "0", "--avg-subsamples", "3",
+    common = ["--input-format", "105", "--mpc-unit", "1", "--verbose", "0", "--subsamples", "3",
               "--grid", str(FULL_GRID), "--box"] + [str(x) for x in FULL_BOX * 3] + \
              ["--field", "density", "velocity", "density_a", "velocity_a"]
     base = os.path.join(TMP, "ps_np_split")

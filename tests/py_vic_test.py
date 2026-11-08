@@ -287,7 +287,7 @@ def t_environment_script():
         # fraction, D (3 R_v beyond the wrap rule) now kept
         titles.clear()
         with redirect_stdout(_io.StringIO()):
-            pev.main(args + ["--criterion", "density_raw"])
+            pev.main(args + ["--criterion", "density-raw"])
         names = sorted(q.name for q in out.iterdir() if "_velocity" not in q.name)
         assert names == ["environment_evolution_overlaps.png", "environment_stats_overlaps.npz",
                          "environment_tracking_overlaps.png", "environment_z0.00_overlaps.png",

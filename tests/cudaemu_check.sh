@@ -2,7 +2,7 @@
 # The CUDA/HIP GPU backend through its CPU emulation: the parity suites the Metal backend
 # passes, run against binaries built with 'make DTFE PS-DTFE CUDAEMU=1' (src/CGAL_triangulation/
 # gpu_cuda_emu.h; metal/README.md "Validation without hardware"), at warp width 32 (CUDA) and 64 (the HIP
-# wavefront, GPU_EMU_WARP=64). No NVIDIA or AMD GPU is needed, so this runs on a plain Linux CI runner and
+# wavefront, DTFE_GPU_EMU_WARP=64). No NVIDIA or AMD GPU is needed, so this runs on a plain Linux CI runner and
 # keeps the port's kernels and host logic honest between hardware runs (it does NOT check the memory
 # model, scheduling or numerics of a real device).
 #
@@ -23,7 +23,7 @@
 # and its own check of the port's fixed-point mass grid (depositMass in ps_gpu_cuda.cu, as in the Metal kernel):
 #   E1  two --gpu runs write byte-identical '.a_den' (one domain, and --partition 2 2 2
 #       --max-concurrent 1); float atomics would differ run to run
-#   E2  PS_GPU_FLOAT_MASS=1 (the float grid, kept for A/B) agrees with the default to 1e-5 of the peak
+#   E2  DTFE_GPU_FLOAT_MASS=1 (the float grid, kept for A/B) agrees with the default to 1e-5 of the peak
 #   E3  heavy accumulation (a 128^3 pancake on a 2^3 grid, nSub 1: 1.47e7 tetrahedra, ~1.8e6 deposits per
 #       cell): the GPU box mean equals the CPU's to 3e-6 (the float grid gives 7.8e-6 here on Metal;
 #       a 64^3 pancake does not tell the two apart: float 1.2e-6, fixed 1.2e-7 under the emulation)
@@ -86,14 +86,14 @@ mass_check() {
     run() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL: $(basename "$out") (see $out.log)"; return 1; }
             if grep -q "using the CPU deposit\|deposit unavailable\|ran on the CPU instead" "$out.log"; then
                 echo "FAIL: $(basename "$out") fell back to the CPU (see $out.log)"; return 1; fi; return 0; }
-    local C=(--grid 32 --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a --avg-subsamples 2 --gpu)
+    local C=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a --subsamples 2 --gpu)
     local P=(--partition 2 2 2 --max-concurrent 1)
-    local H=(--grid 2 --periodic --MpcUnit 1 --verbose 2 --field density_a --avg-subsamples 1 --partition 1 1 1)
+    local H=(--grid 2 --periodic --mpc-unit 1 --verbose 2 --field density_a --subsamples 1 --partition 1 1 1)
     run "$T/s1" ./PS-DTFE "$SNAP" "$T/s1" "${C[@]}" || return 1
     run "$T/s2" ./PS-DTFE "$SNAP" "$T/s2" "${C[@]}" || return 1
     run "$T/p1" ./PS-DTFE "$SNAP" "$T/p1" "${C[@]}" "${P[@]}" || return 1
     run "$T/p2" ./PS-DTFE "$SNAP" "$T/p2" "${C[@]}" "${P[@]}" || return 1
-    run "$T/f1" env PS_GPU_FLOAT_MASS=1 ./PS-DTFE "$SNAP" "$T/f1" "${C[@]}" || return 1
+    run "$T/f1" env DTFE_GPU_FLOAT_MASS=1 ./PS-DTFE "$SNAP" "$T/f1" "${C[@]}" || return 1
     run "$T/h_cpu" ./PS-DTFE "$PAN" "$T/h_cpu" "${H[@]}" || return 1
     run "$T/h_gpu" ./PS-DTFE "$PAN" "$T/h_gpu" "${H[@]}" --gpu || return 1
     "$PY" - "$T" "$W" <<'PYEOF'
@@ -112,7 +112,7 @@ for a, b, what in (("s1", "s2", "one domain"), ("p1", "p2", "--partition 2 2 2 -
     check("E1", len(x) > 0 and x == y, f"warp {warp}: two --gpu runs ({what}): '.a_den' byte-identical ({len(x)} bytes)")
 s, f = rd("s1"), rd("f1")
 peak = float(np.abs(s - f).max() / np.abs(s).max())
-check("E2", s.size == f.size and peak < 1e-5, f"warp {warp}: PS_GPU_FLOAT_MASS=1 against the fixed-point grid: peak-rel {peak:.1e} (< 1e-5)")
+check("E2", s.size == f.size and peak < 1e-5, f"warp {warp}: DTFE_GPU_FLOAT_MASS=1 against the fixed-point grid: peak-rel {peak:.1e} (< 1e-5)")
 c, g = rd("h_cpu"), rd("h_gpu")
 rel = abs(float(g.mean()) / float(c.mean()) - 1)
 check("E3", c.size == 8 and rel < 3e-6, f"warp {warp}: heavy accumulation: GPU box mean {g.mean():.9f}, CPU {c.mean():.9f}, |ratio - 1| {rel:.1e} (< 3e-6)")
@@ -123,7 +123,7 @@ PYEOF
 run_suite() {   # run_suite <name> <tmpdir>: the suite's own command line, output to <tmpdir>/stdout.txt
     local s="$1" T="$2"
     case "$s" in
-        mass)                mass_check "$T" "$GPU_EMU_WARP" ;;
+        mass)                mass_check "$T" "$DTFE_GPU_EMU_WARP" ;;
         ps_nonperiodic_test) "$PY" tests/ps_nonperiodic_test.py --no-build ;;
         dtfe_metal_check)    bash tests/dtfe_metal_check.sh ;;
         *)                   bash "tests/$s.sh" --no-build ;;
@@ -133,7 +133,7 @@ run_suite() {   # run_suite <name> <tmpdir>: the suite's own command line, outpu
 declare -a SUMMARY
 nfail=0
 for W in $WARPS; do
-    export GPU_EMU_WARP="$W"
+    export DTFE_GPU_EMU_WARP="$W"
     for s in $SUITES; do
         T="$BASE/w$W/$s"
         rm -rf "$T"; mkdir -p "$T"

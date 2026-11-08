@@ -122,7 +122,7 @@ bool buildTessellation(vector<Particle_data> *p,
     t.start();
     delaunayTriangulation( &dt, p, userOptions.verboseLevel,
 #ifdef PHASE_SPACE
-                           userOptions.psParallelTriangulation || Env::isSet( "DTFE_TBB_THREADS" )
+                           userOptions.psParallelTriangulation || Env::isSet( "DTFE_TRIANGULATION_THREADS" )
 #else
                            false
 #endif
@@ -179,7 +179,7 @@ void DTFE_interpolation(vector<Particle_data> *p,
     buildTessellation( p, userOptions, dt );
 #ifdef PHASE_SPACE
     // a partition of a batch run with '--tessellation-cache': leave its occupancy map beside the
-    // cached tessellation (once), so a later --ps-window run can skip it (ps_serve.cc)
+    // cached tessellation (once), so a later --grid-window run can skip it (ps_serve.cc)
     if ( userOptions.psUseSubgrid and not userOptions.tessellationCacheDir.empty() and not userOptions.psServe )
     {
         t.start();
@@ -324,7 +324,7 @@ void DTFE_interpolation(vector<Particle_data> *p,
     {
         t.start();
 #ifdef PHASE_SPACE
-        // PS-DTFE averaged fields: sub-sample each grid cell nSub^NO_DIM times (--avg-subsamples, default 3)
+        // PS-DTFE averaged fields: sub-sample each grid cell nSub^NO_DIM times (--subsamples, default 3)
         if ( not userOptions.redshiftConeOn and not userOptions.userDefinedSampling )
             interpolateGrid_phaseSpace( dt, userOptions, aQuantities, userOptions.aField, userOptions.psAvgSubsamples,
                                         userOptions.psMayClearDT );
@@ -436,16 +436,17 @@ void dtfeInterpolatePrebuilt(std::shared_ptr<void> &tessellation, vector<Sample_
 // sequential inserts (measured: the TNG region's 27-partition run slows from 137 to 158 s).
 std::atomic<int> dtfeTriangulationConcurrency{0};
 std::atomic<int> dtfeTriangulationsRemaining{0};
+std::atomic<int> dtfePartitionsInFlight{0};   // (thread_count.h: the dynamic PS loop's)
 
 #if defined(PARALLEL_TRIANGULATION) && NO_DIM==3
 // The cores the parallel insertion may use: the PERFORMANCE cores only, at most six. CGAL's
 // parallel insert is lock-coupled, so a thread on an efficiency core stalls the others, and more
 // threads mostly add lock contention. Measured on a 0.26M-particle box (8 performance + 2
 // efficiency cores; sequential insert 1.41 s): 10 threads 1.0-3.0 s and once 6.5 s, 8 threads
-// 0.45-0.85 s, 6 threads 0.51-0.63 s, 4 threads 0.52-0.53 s. DTFE_TBB_THREADS overrides the cap.
+// 0.45-0.85 s, 6 threads 0.51-0.63 s, 4 threads 0.52-0.53 s. DTFE_TRIANGULATION_THREADS overrides the cap.
 static int parallelInsertCores()
 {
-    if ( long const v = Env::integer( "DTFE_TBB_THREADS", 0 ); v > 0 )
+    if ( long const v = Env::integer( "DTFE_TRIANGULATION_THREADS", 0 ); v > 0 )
         return int( v );
     int cores = int( std::thread::hardware_concurrency() );
 #ifdef __APPLE__
@@ -499,7 +500,7 @@ static void insertSequential(DT *dt, vector<Particle_data> *p, MESSAGE::Message 
 
 // Inserts every particle into the Delaunay triangulation. PS-DTFE builds (TBB=auto/1, the
 // PARALLEL_TRIANGULATION data structure) insert in parallel with CGAL's lock grid when the run
-// asks for it ('--parallel-triangulation' or DTFE_TBB_THREADS) and more than one core is free for
+// asks for it ('--parallel-triangulation' or DTFE_TRIANGULATION_THREADS) and more than one core is free for
 // this tessellation: the cores are shared among the tessellations being built at the same time
 // (the partition loops), and capped by OMP_NUM_THREADS. OFF by default: the parallel insert's
 // vertex and cell order differ from run to run, so float outputs differ at rounding between two
@@ -701,7 +702,7 @@ void vertexDensity(DT & dt,
 
 #if defined(VELOCITY) && defined(SCALAR) && !defined(PHASE_SPACE)
 // Estimates each particle's velocity-space density g_i via a Delaunay tessellation in velocity
-// coordinates, storing it in scalar(0). Used by --approxPSD to form f_i = rho_i * g_i.
+// coordinates, storing it in scalar(0). Used by --approx-phase-space-density to form f_i = rho_i * g_i.
 void computeVelocitySpaceDensity(vector<Particle_data> &particles,
                                   User_options &userOptions)
 {

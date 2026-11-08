@@ -216,7 +216,7 @@ def t_script_synthetic():
         assert code == 1 and "no per-snapshot profiles" in text, (code, text[-300:])
         _snapdir(data, 50, 1.0, 1)
         _snapdir(data, 99, 0.0, 2)
-        common = ["--rv-range", "0,20", "--edges", "0,4,30", "--min-count", "2", "--n-boot", "30", "--points", "100"]
+        common = ["--rv-range", "0", "20", "--edges", "0", "4", "30", "--min-count", "2", "--n-boot", "30", "--points", "100"]
         code, text = run(common)
         assert code == 0, (code, text[-800:])
         names = sorted(q.name for q in out.iterdir())
@@ -265,7 +265,7 @@ def t_script_synthetic():
         try:
             for extra in ([], ["--radius", "r_eff"]):
                 sys.argv = ["plot_void_profiles.py", "--sim", "SYN", "--data-root", str(data), "--out", str(root / "pvp"),
-                            "--snaps", "99", "--edges", "0,4,30", "--n-boot", "20", "--points", "100"] + extra
+                            "--snaps", "99", "--edges", "0", "4", "30", "--n-boot", "20", "--points", "100"] + extra
                 with redirect_stdout(_io.StringIO()):
                     try:
                         pvp.main()

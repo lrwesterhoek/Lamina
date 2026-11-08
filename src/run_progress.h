@@ -18,7 +18,7 @@
     cudaErrorLaunchTimeout, Metal's Impacting Interactivity), out of memory, anything else. Written atomically ('.tmp.<pid>' then rename), so a reader never sees half a
     file; removed when the run finishes successfully (main.cpp), so a sidecar that remains belongs to a run
     that is still going or one that died (its pid then no longer exists). Off for '--serve' and
-    '--auto-tune-report', which compute no grid, and with DTFE_NO_PROGRESS=1. Header-only: the state is
+    '--auto-tune-report', which compute no grid, and with DTFE_PROGRESS=0. Header-only: the state is
     one function-local static shared by DTFE.cpp and main.cpp. */
 #ifndef RUN_PROGRESS_H
 #define RUN_PROGRESS_H
@@ -64,6 +64,7 @@ struct RunProgress
     long done = 0, total = 0;
     double eta = -1.;
     double predicted = -1.;   // the auto-tuner's predicted peak, bytes (-1: none)
+    double loopPeak = -1.;    // the peak when the post-processing began (the partition loop's), bytes (-1: none)
     std::mutex m;
 };
 
@@ -133,6 +134,23 @@ inline double runProgressPredicted()
     return p.predicted;
 }
 
+// the peak so far when the post-processing begins (DTFE.cpp): the SUMMARY prints it beside the run's peak, so a
+// log says which phase set the peak (the auto-tuner books both: plan P8.9). Read once, at that moment.
+inline void runProgressNoteLoopPeak()
+{
+    double const peak = runProgressPeak();
+    RunProgress &p = runProgressState();
+    std::lock_guard<std::mutex> lock( p.m );
+    p.loopPeak = peak;
+}
+
+inline double runProgressLoopPeak()
+{
+    RunProgress &p = runProgressState();
+    std::lock_guard<std::mutex> lock( p.m );
+    return p.loopPeak;
+}
+
 inline int runProgressGpuRetries()
 {
 #ifdef PHASE_SPACE
@@ -188,7 +206,7 @@ inline void runProgressInit(User_options const &u)
     RunProgress &p = runProgressState();
     std::lock_guard<std::mutex> lock( p.m );
     p.on = not u.outputFilename.empty() and not u.psServe and not u.autoTuneReport
-           and not Env::flag( "DTFE_NO_PROGRESS" );
+           and Env::flag( "DTFE_PROGRESS", true );   // DTFE_PROGRESS=0 (the old DTFE_NO_PROGRESS=1) writes none
     p.path = u.outputFilename + ".runlog.progress";
     p.start = std::chrono::steady_clock::now();
     runProgressWriteLocked( p );

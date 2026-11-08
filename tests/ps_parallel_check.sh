@@ -52,7 +52,7 @@ run() {  # $1 = thread count, $2 = output root
     set +e
     OMP_NUM_THREADS="$1" "${BIN}" "${SNAP}" "$2" \
         --grid "${GRID}" --periodic --partition ${PARTITION} --field density velocity density_a \
-        --input 105 --MpcUnit 1 --verbose 1 > "$log" 2>&1
+        --input-format 105 --mpc-unit 1 --verbose 1 > "$log" 2>&1
     local rc=$?
     set -e
     echo "   [threads=$1] wall time: $(( SECONDS - t0 )) s"
@@ -122,7 +122,7 @@ run_team() {  # $1 = DTFE_DEPOSIT_THREADS ('' = unset), $2 = output root, $3 = o
     set +e
     env ${1:+DTFE_DEPOSIT_THREADS=$1} ${3:-} OMP_NUM_THREADS="${NPROC}" "${BIN}" "${SNAP}" "$2" \
         --grid "${GRID}" --periodic --partition ${PARTITION} --field density velocity density_a velocity_a \
-        --input 105 --MpcUnit 1 --verbose 3 > "$2.log" 2>&1
+        --input-format 105 --mpc-unit 1 --verbose 3 > "$2.log" 2>&1
     local rc=$?
     set -e
     die_on_failed_run "$rc" "$2.log" "PS-DTFE (DTFE_DEPOSIT_THREADS=${1:-unset})"

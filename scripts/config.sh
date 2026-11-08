@@ -1,13 +1,111 @@
 # Shared configuration for run_dtfe.sh, run_ps_dtfe.sh, run_ps_pipeline.sh and download_snapshots.sh.
 # Sourced, not executed. Every value can be overridden per run:
 #   - environment: DTFE_DATA_ROOT=/path/to/IllustrisTNG DTFE_SIM=TNG50-3-Dark ./run_ps_dtfe.sh
-#                  GRID_SIZE=256 ./run_ps_dtfe.sh -s TNG50-3-Dark   (or DTFE_GRID_SIZE / DTFE_PADDING)
+#                  GRID_SIZE=256 PADDING=40 ./run_ps_dtfe.sh -s TNG50-3-Dark
 #   - script flags: ./run_ps_dtfe.sh -s TNG50-3-Dark -d /path/to/sim -g 256 99
+#                   (long forms: --sim, --sim-dir, --grid, --gpu, --exact-average, --subsamples)
 # The data root and the simulation have NO default: every run sets DTFE_DATA_ROOT (require_data_root; a driver's -d,
 # the simulation's own folder, stands in for it) and names the simulation with -s or DTFE_SIM (require_simulation).
 # The Python side (python/dtfelib/cli.py) honours the same DTFE_DATA_ROOT / DTFE_SIM variables.
 
 source "$(dirname "${BASH_SOURCE[0]}")/h5py_python.sh"   # h5py_python: the python with numpy and h5py
+
+# ---- the knobs' names and values (docs/cleanup-plan.md P6.7) -------------------------------------------------
+# One name per knob in both drivers; a renamed knob's older names are still read for one release (P6.6 drops them).
+# An EMPTY value is the same as an unset one, and a switch is off for 0, false, no or off (any case) and on for
+# anything else -- the binaries' own rule (src/env_knobs.h), so PS_CAUSTICS=true is on, as DTFE_PROGRESS=true is.
+#
+# knob [-e] NEW OLD...: NEW keeps its value when it is set; otherwise the first OLD that is set is copied onto NEW
+# (exported when the OLD was). Every OLD that is set earns one stderr line 'warning: OLD is deprecated, use NEW'
+# (saying that NEW wins when both are set to different values: no refusal during the window, a stray export must
+# not stop a run), and is unset afterwards, so a driver started from here (run_ps_pipeline.sh -> run_ps_dtfe.sh)
+# sees the new name only and does not warn again. -e: an EMPTY value counts as set (PS_LAGRANGIAN_INPUT, whose
+# empty value means "the snapshot's own InitialCoordinates"). Call it BEFORE the knob's 'VAR="${VAR:-default}"'
+# line, which stays the one place a default is given (tests/docs_drift_check.py and py_gui_runspec_test.py read
+# those lines, and the knob lines for the older names).
+knob() {
+    local keep_empty=0 new old v
+    if [ "$1" = "-e" ]; then keep_empty=1; shift; fi
+    new="$1"; shift
+    for old in "$@"; do
+        if [ "${keep_empty}" = "1" ]; then
+            [ -n "${!old+x}" ] || continue
+        elif [ -z "${!old:-}" ]; then
+            unset "${old}"; continue
+        fi
+        v="${!old}"
+        if { [ "${keep_empty}" = "1" ] && [ -n "${!new+x}" ]; } || { [ "${keep_empty}" = "0" ] && [ -n "${!new:-}" ]; }; then
+            if [ "${!new}" = "${v}" ]; then
+                echo "warning: ${old} is deprecated, use ${new}" >&2
+            else
+                echo "warning: ${old} is deprecated, use ${new} (${old}=${v} is not read: ${new}=${!new} wins)" >&2
+            fi
+        else
+            printf -v "${new}" '%s' "${v}"
+            case "$(declare -p "${old}" 2>/dev/null)" in "declare -x"*) export "${new}" ;; esac
+            echo "warning: ${old} is deprecated, use ${new}" >&2
+        fi
+        unset "${old}"
+    done
+}
+
+# knob_merge PS_MERGE ORDERED_MERGE FIXED_POINT_MERGE: run_ps_dtfe.sh's merge mode (PS_MERGE = index-order |
+# completion-order | fixed-point; empty = not given, the driver's default index-order) from the older pair of switches,
+# converted as the binary converts its old flags: FIXED_POINT_MERGE on is fixed-point (whatever ORDERED_MERGE says, as
+# before), else ORDERED_MERGE on is index-order and off completion-order; FIXED_POINT_MERGE=0 alone gives nothing. A
+# warning per old name set, PS_MERGE winning when it is set too, and the old names unset, as knob does.
+knob_merge() {
+    local new="$1" ordered="$2" fixed="$3" v="" m old exp=0
+    if [ -n "${!fixed:-}" ] && knob_on "${fixed}"; then v=fixed-point
+    elif [ -n "${!ordered:-}" ]; then
+        if knob_on "${ordered}"; then v=index-order; else v=completion-order; fi
+    fi
+    for old in "${ordered}" "${fixed}"; do
+        [ -n "${!old:-}" ] || { unset "${old}"; continue; }
+        case "$(declare -p "${old}" 2>/dev/null)" in "declare -x"*) exp=1 ;; esac
+        m=""                                         # what this name alone says
+        if [ "${old}" = "${fixed}" ]; then knob_on "${old}" && m=fixed-point
+        elif knob_on "${old}"; then m=index-order; else m=completion-order; fi
+        if [ -n "${!new:-}" ] && [ -n "${m}" ] && [ "${!new}" != "${m}" ]; then
+            echo "warning: ${old} is deprecated, use ${new}${m:+=${m}} (${old}=${!old} is not read: ${new}=${!new} wins)" >&2
+        elif [ -z "${!new:-}" ] && [ -n "${m}" ] && [ "${m}" != "${v}" ]; then
+            echo "warning: ${old} is deprecated, use ${new}=${m} (${old}=${!old} is not read: ${fixed}=${!fixed} wins)" >&2
+        else
+            echo "warning: ${old} is deprecated, use ${new}${m:+=${m}}" >&2
+        fi
+        unset "${old}"
+    done
+    if [ -z "${!new:-}" ] && [ -n "${v}" ]; then
+        printf -v "${new}" '%s' "${v}"
+        [ "${exp}" = "1" ] && export "${new}"
+    fi
+    return 0
+}
+
+# knob_on NAME: status 0 when the switch NAME is on (set, not empty, and not 0/false/no/off).
+knob_on() {
+    case "${!1:-}" in
+        ""|0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]|[Oo][Ff][Ff]) return 1 ;;
+    esac
+    return 0
+}
+
+# knob_bool NAME...: each switch normalised in place to 1 or 0 (knob_on's rule; an empty one is left empty), so the
+# driver's own tests, banners and the knobs it hands on read one spelling. knob_gpu NAME: the same for a switch that
+# also takes 'auto' (any case; empty is auto too).
+knob_bool() {
+    local k
+    for k in "$@"; do
+        [ -n "${!k:-}" ] || continue
+        if knob_on "${k}"; then printf -v "${k}" '%s' 1; else printf -v "${k}" '%s' 0; fi
+    done
+}
+knob_gpu() {
+    case "${!1:-}" in
+        ""|[Aa][Uu][Tt][Oo]) printf -v "$1" '%s' auto ;;
+        *) knob_bool "$1" ;;
+    esac
+}
 
 # Root of the simulation data, the folder that holds the simulations. Two layouts are recognised (see sim_dir):
 #   per family  $DATA_ROOT/<family>/<sim>/snapdir_NNN/   e.g. TNG100/TNG100-3-Dark, TNG300/TNG300-3-Dark, ...
@@ -59,9 +157,19 @@ SNAPSHOTS=(99)
 # scripts' default; run_dtfe.sh has its own, 15 (complete at z = 0 on TNG50/100/300; see there).
 # GRID_SIZE 512: the production grids of both estimators (run_ps_pipeline.sh's and the launcher's default too)
 # are 512^3; 1024 would make a bare driver run a grid 8x the production one (~14 GB per field set, a scratch dir
-# needed) that nothing downstream reads.
-GRID_SIZE="${GRID_SIZE:-${DTFE_GRID_SIZE:-512}}"
-PADDING="${PADDING:-${DTFE_PADDING:-50}}"
+# needed) that nothing downstream reads. DTFE_GRID_SIZE and DTFE_PADDING, their older second names, are read for one
+# release. CALLER_GRID_SIZE / CALLER_PADDING: what the caller set (empty: nothing), for a script with a default of its
+# own (run_dtfe.sh's padding 15).
+knob GRID_SIZE DTFE_GRID_SIZE
+knob PADDING DTFE_PADDING
+CALLER_GRID_SIZE="${GRID_SIZE:-}"
+CALLER_PADDING="${PADDING:-}"
+GRID_SIZE="${GRID_SIZE:-512}"
+PADDING="${PADDING:-50}"
+# SPACE_CHECK=0 skips the free-space half of the preflight (output_space_problem); DTFE_SPACE_CHECK, its older name
+knob SPACE_CHECK DTFE_SPACE_CHECK
+SPACE_CHECK="${SPACE_CHECK:-1}"
+knob_bool SPACE_CHECK
 
 # Subdirectory prefix of the snapshot chunks inside the simulation directory.
 INPUT_SUBDIR="snapdir"
@@ -106,7 +214,7 @@ expected_output_bytes() {
 
 # output_space_problem <output dir> <bytes needed>: 1 (with the reason) when the folder the grids go to
 # is not writable or has less free space than the grids need. The grids are written beside the old ones
-# and renamed at the end (<file>.part.<pid>), so the old set does not count as free. DTFE_SPACE_CHECK=0
+# and renamed at the end (<file>.part.<pid>), so the old set does not count as free. SPACE_CHECK=0
 # skips the space half (the estimate is approximate).
 output_space_problem() {
     local dir="$1" need="$2" avail_kb
@@ -114,11 +222,11 @@ output_space_problem() {
         echo "  Error: the output folder '${dir}' is not writable" >&2
         return 1
     fi
-    [ "${DTFE_SPACE_CHECK:-1}" = "0" ] && return 0
+    [ "${SPACE_CHECK:-1}" = "0" ] && return 0
     avail_kb="$(df -Pk "${dir}" 2>/dev/null | awk 'NR==2 {print $4}')"
     [[ "${avail_kb}" =~ ^[0-9]+$ ]] || return 0           # no df answer: do not guess
     if [ $((avail_kb * 1024)) -lt "${need}" ]; then
-        echo "  Error: '${dir}' has $(awk -v k="${avail_kb}" 'BEGIN{printf "%.1f", k/1048576}') GB free; this run's grids need about $(awk -v b="${need}" 'BEGIN{printf "%.1f", b/1073741824}') GB (DTFE_SPACE_CHECK=0 skips this check)" >&2
+        echo "  Error: '${dir}' has $(awk -v k="${avail_kb}" 'BEGIN{printf "%.1f", k/1048576}') GB free; this run's grids need about $(awk -v b="${need}" 'BEGIN{printf "%.1f", b/1073741824}') GB (SPACE_CHECK=0 skips this check)" >&2
         return 1
     fi
     return 0
@@ -194,12 +302,12 @@ run_lock_release() {
 }
 
 # gpu_build_default <repo root> <binary>: 1 when the Makefile built <binary> (./DTFE, ./DTFE-double, ./PS-DTFE,
-# ./PS-DTFE-double) with a GPU backend, else 0 -- the drivers' default for DTFE_GPU / PS_GPU ('auto': every
+# ./PS-DTFE-double) with a GPU backend, else 0 -- the drivers' default for DTFE_GPU ('auto': every
 # production grid runs on the GPU, so a driver run without -m does too). The answer is the stamp the
 # Makefile's mode check leaves in the pair's object folder (o, o_d, o_ps, o_ps_d): '.gpu_mode_metal', '_cuda' or
 # '_hip'. The binary itself cannot be asked: '--help' lists --gpu in every build and '--version' names no
 # backend. NOT the launcher's rule (python/gui/runspec.py gpu_built: any stamp but '.gpu_mode_off'), on purpose: the
-# CI's 'cudaemu' build emulates the CUDA kernels on the CPU, far slower than the CPU path, so it is no GPU here (-m
+# a CUDAEMU=1 build emulates the CUDA kernels on the CPU, far slower than the CPU path, so it is no GPU here (-m
 # still switches it on). No object folder (binaries copied without their build) = 0. A stale stamp (a binary put
 # back by install_lib.sh after a failed rebuild in another mode) costs nothing: '--gpu' on a CPU build falls back to
 # the CPU with a warning, and the CPU on a GPU build is slower, not different.
@@ -336,9 +444,12 @@ ps_checkpoint_dir() {
 # '<handler> <letter>', with its value in OPTARG. Then the two checks every driver makes after its options (so that -h
 # works without them): the data root (require_data_root) unless -d named the simulation's folder, and the
 # simulation (require_simulation). The caller drops the options afterwards: shift $((OPTIND - 1)).
+# The long forms (driver_long_options) are read as their letters, where the caller has the letter.
 driver_options() {
     local own="$1" handler="$2" opt
     shift 2
+    driver_long_options "d:s:${own}h" "$@"
+    set -- ${_drv_args[@]+"${_drv_args[@]}"}
     OPTIND=1
     while getopts "d:s:${own}h" opt; do
         case "${opt}" in
@@ -351,6 +462,58 @@ driver_options() {
     done
     [ -n "${DATA_DIR:-}" ] || require_data_root   # -d names the simulation's folder itself
     require_simulation
+}
+
+# driver_long_options <getopts spec> "$@": _drv_args = the arguments with each long option the drivers share spelled
+# as its letter, token for token (so the caller's 'shift $((OPTIND - 1))' on its own arguments stays right):
+#   --sim S -> -s S, --sim-dir D -> -d D, --grid N -> -g N, --gpu -> -m, --exact-average -> -e, --subsamples K -> -n K,
+#   --help -> -h; download_snapshots.sh's --groupcats -> -c, --trees -> -t, --ics -> -i, --api-key K -> -k K
+#   (merge_HDF5.py's names for the same products); '--grid=N' -> '-gN'.
+# Only up to the first argument that is not an option (or '--'), as getopts reads them, and a letter's value is never
+# translated (-s --gpu names a simulation '--gpu'). A long option whose letter the script lacks, or an unknown one,
+# prints the usage and exits 1, as an unknown letter does.
+driver_long_options() {
+    local spec="$1" t name val letter i c want=0 stop=0
+    shift
+    _drv_args=()
+    for t in "$@"; do
+        if [ "${stop}" = "1" ] || [ "${want}" = "1" ]; then _drv_args+=("${t}"); want=0; continue; fi
+        case "${t}" in
+            --)  _drv_args+=("${t}"); stop=1 ;;
+            --*)
+                name="${t%%=*}"; val=""
+                case "${t}" in *=*) val="${t#*=}" ;; esac
+                case "${name}" in
+                    --sim) letter=s ;; --sim-dir) letter=d ;; --grid) letter=g ;; --gpu) letter=m ;;
+                    --exact-average) letter=e ;; --subsamples) letter=n ;; --help) letter=h ;;
+                    --groupcats) letter=c ;; --trees) letter=t ;; --ics) letter=i ;; --api-key) letter=k ;;
+                    *) letter="" ;;
+                esac
+                case "${spec}" in *"${letter}"*) ;; *) letter="" ;; esac
+                if [ -z "${letter}" ]; then
+                    echo "Error: unknown option '${name}'." >&2; usage; exit 1
+                fi
+                case "${spec}" in
+                    *"${letter}:"*)
+                        if [ "${t}" = "${name}" ]; then _drv_args+=("-${letter}"); want=1
+                        elif [ -n "${val}" ]; then _drv_args+=("-${letter}${val}")
+                        else echo "Error: option '${name}' needs a value." >&2; usage; exit 1
+                        fi ;;
+                    *)
+                        if [ "${t}" != "${name}" ]; then
+                            echo "Error: option '${name}' takes no value." >&2; usage; exit 1
+                        fi
+                        _drv_args+=("-${letter}") ;;
+                esac ;;
+            -?*)
+                _drv_args+=("${t}")
+                for (( i = 1; i < ${#t}; i++ )); do       # a letter that takes a value ends the cluster
+                    c="${t:i:1}"
+                    case "${spec}" in *"${c}:"*) [ "${i}" = "$(( ${#t} - 1 ))" ] && want=1; break ;; esac
+                done ;;
+            *)   _drv_args+=("${t}"); stop=1 ;;
+        esac
+    done
 }
 
 # driver_help_version <script> [its first argument]: '-h' / '--help' prints the script's header (line 2 up to the
@@ -402,17 +565,18 @@ driver_binary() {
     fi
 }
 
-# gpu_auto_resolve <knob> <binary> [cpu_first]: a GPU knob (DTFE_GPU, PS_GPU) left at 'auto' becomes
+# gpu_auto_resolve <knob> <binary> [cpu_first knob]: the GPU knob (DTFE_GPU) left at 'auto' (or empty) becomes
 # gpu_build_default's answer for <binary> (1 on a GPU build), and gpu_auto the note the start banner adds; a knob set
-# to 0 or 1 is kept and gpu_auto is empty. cpu_first=1 makes 'auto' the CPU on every build: run_ps_dtfe.sh passes
-# PS_EXACT, as PS-DTFE's exact deposit is faster on the CPU on production runs (TNG100-3-Dark z=0 at 512^3:
-# 14.5 min against 17.7 min on the GPU).
+# to an on or off value is kept as 1 or 0 (knob_gpu) and gpu_auto is empty. When the switch named by cpu_first is on
+# (knob_on), 'auto' is the CPU on every build: run_ps_dtfe.sh names DTFE_EXACT_AVERAGE, as PS-DTFE's exact deposit is
+# faster on the CPU on production runs (TNG100-3-Dark z=0 at 512^3: 14.5 min against 17.7 min on the GPU).
 gpu_auto_resolve() {
-    local knob="$1" bin="$2" cpu_first="${3:-0}" v
+    local knob="$1" bin="$2" cpu_first="${3:-}" v
     gpu_auto=""
+    knob_gpu "${knob}"
     [ "${!knob}" = "auto" ] || return 0
     v="$(gpu_build_default "${REPO_ROOT}" "${bin}")"
-    if [ "${cpu_first}" = "1" ] && [ "${v}" = "1" ]; then
+    if [ -n "${cpu_first}" ] && knob_on "${cpu_first}" && [ "${v}" = "1" ]; then
         printf -v "${knob}" '%s' 0
         gpu_auto=" (${knob} unset: the exact deposit is faster on the CPU; ${knob}=1 runs it on the GPU)"
         return 0
@@ -511,7 +675,7 @@ snapshot_start() {
 
 # resume_args_for <output root> <resume knob> <its value>: resume_args=(--resume) when a killed partitioned run left
 # its checkpoint (the binary removes it once the outputs are in place; ps_checkpoint_dir, under SCRATCH_DIR when one
-# is set) and the knob (DTFE_RESUME, PS_RESUME) is not 0; either way it says so. Empty for a report
+# is set) and the knob (DTFE_RESUME) is not 0; either way it says so. Empty for a report
 # (AUTO_TUNE_REPORT=1 computes nothing, so there is nothing to resume). The FILE, not the folder: a folder with no
 # 'checkpoint' in it (a kill during the first write) holds nothing to resume, the binary refuses '--resume' there,
 # and every rerun of the snapshot would fail the same way.

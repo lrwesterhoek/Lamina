@@ -62,7 +62,7 @@ for T in "${CORES[@]}"; do
     set +e
     OMP_NUM_THREADS="${T}" "${BIN}" "${SNAP}" "${out}" \
         --grid "${GRID}" --periodic --partition ${PARTITION} --field ${FIELDS} \
-        --input 105 --MpcUnit 1 --verbose 0 > "${out}.log" 2>&1
+        --input-format 105 --mpc-unit 1 --verbose 0 > "${out}.log" 2>&1
     rc=$?
     set -e
     t1="$(now)"

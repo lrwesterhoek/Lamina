@@ -25,13 +25,13 @@ Outputs (figures/void_convergence/<sim>/[<smoothing tag>/]):
   convergence_<set>.npz                  the same as arrays
   estimator_voids_<snap>[_<set>].txt     (c)'s void-by-void table when both grids exist
 <set> is the method for its default grids, else the --prefix (set_name); with --prefix, row (c)'s side of
---method reads that set too. The coarse velocity is block-averaged as the run deposited it (volume or mass weighted:
+--estimator reads that set too. The coarse velocity is block-averaged as the run deposited it (volume or mass weighted:
 convergence.velocity_weighting, from the run log; named in the txt and npz).
 The coarse catalogues are cached under their own frame's namespace (python/cache/r256_s5_f5_.../..._voids_block2.npz).
 
 Examples:
   DTFE_SIM=TNG100-3-Dark python3 plot/plot_void_convergence.py --sim TNG100-3-Dark
-  DTFE_SIM=TNG100-3-Dark python3 plot/plot_void_convergence.py --sim TNG100-3-Dark --z 0 --factors 2 4 8
+  DTFE_SIM=TNG100-3-Dark python3 plot/plot_void_convergence.py --sim TNG100-3-Dark --redshifts 0 --factors 2 4 8
 """
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
@@ -44,7 +44,7 @@ import matplotlib.pyplot as plt
 
 import config
 from dtfelib import pipeline, catalog, profiles, convergence as cv
-from dtfelib import make_parser, use_data_root, snapshot_ladder, add_out_arg
+from dtfelib import make_parser, use_data_root, snapshot_ladder, add_out_arg, deprecated_alias
 from dtfelib import figures as style
 from dtfelib import groupcat as gc
 
@@ -118,7 +118,7 @@ def grid_rows(prod, args, factors, log=print) -> dict:
 
 def estimator_rows(s, args, log=print):
     """(c) at one snapshot: PS-DTFE (reference) against DTFE, matched; None (said) without both grids. The side of
-    the run's --method reads the run's --prefix set (else a
+    the run's --estimator reads the run's --prefix set (else a
     --prefix run's row (a) and row (c) would come from different sets); 'sets' names the two."""
     method, prefix = getattr(args, "method", "ps"), getattr(args, "prefix", None)
     pfx = {m: (prefix if m == method else None) for m in ("ps", "dtfe")}
@@ -381,7 +381,9 @@ def summary_lines(z, snap, grid, est, cross, sigma):
 
 def main(argv=None):
     p = make_parser("Resolution (grid, particle mass) and estimator convergence of the void statistics.")
-    p.add_argument("--z", type=float, nargs="+", default=list(DEFAULT_Z), help="the redshifts (default 0 1)")
+    p.add_argument("--redshifts", dest="z", type=float, nargs="+", default=list(DEFAULT_Z), metavar="Z",
+                   help="the redshifts (default 0 1)")
+    deprecated_alias(p, "--z", "--redshifts")
     p.add_argument("--factors", type=int, nargs="+", default=list(cv.DEFAULT_FACTORS),
                    help="block-averaging factors of the grid (default 2 4: 512 -> 256, 128 cells)")
     p.add_argument("--match-sigma", type=float, default=cv.DEFAULT_MATCH_SIGMA,

@@ -20,7 +20,7 @@ class PlotSpec:
     sim: str = ""
     snapshots: list[int] = field(default_factory=list)
     sets: list[str] = field(default_factory=lambda: ["fields"])
-    method: str = "auto"            # auto | ps | dtfe  (dtfelib --method)
+    method: str = "auto"            # auto | ps | dtfe  (dtfelib --estimator; the key stays 'method')
     prefix: str = ""                # "" = the scripts' default grid prefix
     smooth: float = 0.0             # Gaussian smoothing in grid cells (dtfelib --smooth)
     options: dict = field(default_factory=dict)      # {set key: {option key: value}}
@@ -36,7 +36,7 @@ class PlotSpec:
     def _common(self) -> list[str]:
         a = []
         if self.method != "auto":
-            a += ["--method", self.method]
+            a += ["--estimator", self.method]
         if self.prefix:
             a += ["--prefix", self.prefix]
         if self.smooth > 0:
@@ -101,7 +101,7 @@ class PlotSpec:
                 a.extend([flag, f"{v:g}"])
         if key == "voidpop":
             if self.opt(key, "size_rv") != _rs.SIZE_FUNCTION_RV:
-                a += ["--size-rv", str(self.opt(key, "size_rv"))]
+                a += ["--size-rv-definition", str(self.opt(key, "size_rv"))]
             num("size_smooth", "--size-smooth", _rs.SIZE_SMOOTH_CELLS)
         elif key in ("voidtrack", "voidfate"):
             if key == "voidtrack" and self.opt(key, "link") != "trees":
@@ -120,10 +120,12 @@ class PlotSpec:
                 a += ["--rv-range", *(f"{v:g}" for v in r)]
         elif key == "voidenv":
             if self.opt(key, "criterion") != _rs.ENV_CRITERIA[0]:
-                a += ["--criterion", str(self.opt(key, "criterion"))]
+                # the script spells it density-raw (classify's internal name density_raw: an older saved value,
+                # which from_dict migrates; the map goes in P6.6)
+                a += ["--criterion", str(self.opt(key, "criterion")).replace("_", "-")]
             num("factor", "--factor", _rs.ENV_FACTOR)
             if self.opt(key, "r_v_definition") != "crossing":
-                a += ["--r-v-definition", str(self.opt(key, "r_v_definition"))]
+                a += ["--rv-definition", str(self.opt(key, "r_v_definition"))]
         elif key == "voidevol":
             if self.opt(key, "rv_definition") != "crossing":
                 a += ["--rv-definition", str(self.opt(key, "rv_definition"))]
@@ -152,7 +154,7 @@ class PlotSpec:
         cells, mpc = self._fixed_r_smoothings()
         a = base + ["--sim", self.sim]
         if self.method != "auto":
-            a += ["--method", self.method]
+            a += ["--estimator", self.method]
         if self.prefix:
             a += ["--prefix", self.prefix]
         a.append("--size-fixed-r")
@@ -183,21 +185,22 @@ class PlotSpec:
                 out.append(_rs.Step(f"{name} {len(snaps)} snapshots",
                                     base + ["--sim", self.sim, "--snaps", *map(str, snaps)] + self._common(), env))
             elif key == "pointeval":
-                a = base + ["--sims", self.sim, "--snaps", ",".join(map(str, snaps))]
+                a = base + ["--sims", self.sim, "--snaps", *map(str, snaps)]
                 if self.opt(key, "plane"):
                     a += ["--plane", str(self.opt(key, "plane"))]
                 if self.method != "auto":           # a standard-DTFE slice beside PS-DTFE grids
-                    a += ["--method", self.method]
+                    a += ["--estimator", self.method]
                 if self.prefix:
                     a += ["--prefix", self.prefix]
-                if str(self.opt(key, "fields")).strip():
-                    a += ["--fields", str(self.opt(key, "fields")).replace(" ", "")]
+                maps = _rs.words(self.opt(key, "fields"))      # typed with commas or spaces: the script takes spaces
+                if maps:
+                    a += ["--maps", *maps]
                 if self.opt(key, "project") != "plane":
                     a += ["--project", str(self.opt(key, "project"))]
                 if float(self.opt(key, "smooth_px")) > 0:
-                    a += ["--smooth", f"{float(self.opt(key, 'smooth_px')):g}"]
+                    a += ["--smooth-px", f"{float(self.opt(key, 'smooth_px')):g}"]
                 if float(self.opt(key, "smooth_deriv")) != _rs.POINTEVAL_DERIV_SMOOTH:
-                    a += ["--smooth-derivatives", f"{float(self.opt(key, 'smooth_deriv')):g}"]
+                    a += ["--smooth-derivatives-px", f"{float(self.opt(key, 'smooth_deriv')):g}"]
                 if self.opt(key, "fixed_range"):
                     a.append("--fixed-range")
                 if self.opt(key, "force"):
@@ -211,12 +214,13 @@ class PlotSpec:
                     sd = self.sim_path() / f"snapdir_{n:03d}"
                     png = Path(self.figures_root) / "pointeval_panels" / self.sim / \
                         f"snap{n:03d}_{Path(plane).stem or 'plane'}.png"
-                    a = base + ["--prefix", str(sd / self._pts_prefix(n)), "--plane", plane,
+                    a = base + ["--root", str(sd / self._pts_prefix(n)), "--plane", plane,
                                 "-o", str(png)]
-                    if self.opt(key, "panels") != "density,sheet,streams":
-                        a += ["--panels", str(self.opt(key, "panels")).replace(" ", "")]
-                    if self.opt(key, "project") != "plane":
-                        a += ["--project", str(self.opt(key, "project"))]
+                    panels = _rs.words(self.opt(key, "panels"))
+                    if panels and panels != ["density", "sheet", "streams"]:
+                        a += ["--panels", *panels]
+                    if self.opt(key, "project") != "plane":         # 'mean', slab's older name (from_dict migrates it)
+                        a += ["--project", "slab" if self.opt(key, "project") == "mean" else str(self.opt(key, "project"))]
                     for opt_key, flag in (("vmin", "--vmin"), ("vmax", "--vmax")):
                         if float(self.opt(key, opt_key)) > 0:
                             a += [flag, f"{float(self.opt(key, opt_key)):g}"]
@@ -242,28 +246,28 @@ class PlotSpec:
                     a += ["--web", str(self.opt(key, "web"))]
                 if key == "pk":
                     if int(self.opt(key, "nbins")) != 40:
-                        a += ["--nbins", str(int(self.opt(key, "nbins")))]
+                        a += ["--n-bins", str(int(self.opt(key, "nbins")))]
                     if not self.opt(key, "ref"):
                         a += ["--ref-snap", "-1"]
                 if key == "skeleton" and self.opt(key, "voids"):
-                    a.append("--voids")
+                    a.append("--per-void")
                 out.append(_rs.Step(name + (" every caustic snapshot" if every else f" {len(snaps)} snapshots"),
                                     a + self._void_args(key) + self._script_args(key), env))
             elif key == "voidtrack":
-                out.append(_rs.Step(name, base + ["--sim", self.sim, "--snap", str(self.opt(key, "ref"))]
+                out.append(_rs.Step(name, base + ["--sim", self.sim, "--start-snap", str(self.opt(key, "ref"))]
                                     + self._common() + ["--n-voids", str(self.opt(key, "n_voids"))]
                                     + self._void_args(key) + self._script_args(key), env))
             elif key == "crossbox":
                 a = base + ["--sims", *str(self.opt(key, "sims")).replace(",", " ").split(),
                             "--data-root", str(self.data_root)]
                 if self.method != "auto":
-                    a += ["--method", self.method]
+                    a += ["--estimator", self.method]
                 if self.prefix:
                     a += ["--prefix", self.prefix]
                 if float(self.opt(key, "smooth_mpc")) != _rs.CROSSBOX_SMOOTH_MPC:
                     a += ["--smooth-mpc", f"{float(self.opt(key, 'smooth_mpc')):g}"]
                 if str(self.opt(key, "z")).split() != ["0", "0.5", "1"]:
-                    a += ["--z", *str(self.opt(key, "z")).replace(",", " ").split()]
+                    a += ["--redshifts", *_rs.words(self.opt(key, "z"))]
                 if int(self.opt(key, "n_boot")) > 0:
                     a += ["--n-boot", str(int(self.opt(key, "n_boot")))]
                 if self.opt(key, "replot"):
@@ -275,14 +279,14 @@ class PlotSpec:
                 out.append(_rs.Step(name, base + ["--sim", self.sim] + self._common() + self._script_args(key), env))
             elif key == "voidcat":
                 for n in snaps:
-                    a = base + ["build", "--sim", self.sim, "--snap", str(n), "--method", self._snap_estimator(n)]
+                    a = base + ["build", "--sim", self.sim, "--snap", str(n), "--estimator", self._snap_estimator(n)]
                     if self.prefix:
                         a += ["--prefix", self.prefix]
                     out.append(_rs.Step(f"void catalogue snap {n:03d}", a, env))
             elif key == "halotrack":
-                a = base + ["--sim", self.sim, "--snap", str(self.opt(key, "ref"))] + self._common()
-                ids = str(self.opt(key, "subhalos")).replace(",", " ").split()
-                a += (["--subhalo", *ids] if ids else ["--top", str(self.opt(key, "top"))])
+                a = base + ["--sim", self.sim, "--start-snap", str(self.opt(key, "ref"))] + self._common()
+                ids = _rs.words(self.opt(key, "subhalos"))
+                a += (["--subhalos", *ids] if ids else ["--n-halos", str(self.opt(key, "top"))])
                 if not self.opt(key, "environment"):
                     a.append("--no-environment")
                 if float(self.opt(key, "min_ratio")) != 0.1:
@@ -291,8 +295,8 @@ class PlotSpec:
             elif key == "core":
                 mode = str(self.opt(key, "mode"))
                 a = base + [mode]
-                if mode in ("all", "compute", "export"):
-                    a += [f"{n:03d}" for n in snaps]
+                if mode in ("all", "compute", "export") and snaps:
+                    a += ["--snaps", *(f"{n:03d}" for n in snaps)]
                 only = [s.strip() for s in str(self.opt(key, "only")).split(",") if s.strip()]
                 if only and mode in ("all", "plot"):
                     a += ["--only", *only]
@@ -406,4 +410,19 @@ class PlotSpec:
     def from_dict(cls, d: dict) -> "PlotSpec":
         known = {k: v for k, v in _rs._current_figures_root(d).items() if k in cls.__dataclass_fields__}
         known["sets"] = [k for k in known.get("sets", []) if k in _rs.FIGURE_SET]
+        if isinstance(known.get("options"), dict):
+            known["options"] = migrate_options(known["options"])
         return cls(**known)
+
+
+def migrate_options(options: dict) -> dict:
+    """Saved figure-set options with the scripts' P6.7 value spellings (idempotent): the environment criterion
+    'density_raw' -> 'density-raw' (and density_smoothed), the panels' projection 'mean' -> 'slab'."""
+    out = {k: (dict(v) if isinstance(v, dict) else v) for k, v in options.items()}
+    env = out.get("voidenv")
+    if isinstance(env, dict) and isinstance(env.get("criterion"), str):
+        env["criterion"] = env["criterion"].replace("_", "-")
+    panels = out.get("panels")
+    if isinstance(panels, dict) and panels.get("project") == "mean":
+        panels["project"] = "slab"
+    return out

@@ -17,6 +17,9 @@
 # only between two builds of the SAME kernel source: use it for a host-only change (the GPU sums every grid in
 # fixed point, so a run repeats to the byte). A kernel change is checked by metal/validate_deposit and the GPU
 # suites' tolerances instead.
+# Every run pins its plan ('--partition 1' or '--partition 2 2 2 --max-concurrent 2'): an auto-tuner change (plan
+# P8) moves a plan by design, and a different split moves the grids at rounding, so an auto-planned run would show
+# differences the change under test did not make. The tuner's plans have their own gate (tests/dev/tune_report_set.sh).
 # The runs spell PS-DTFE's options the old way ('--ps-gpu', '--ps-exact-deposit'): both sides run the same command,
 # and a reference set from before the one flag scheme knows only those; the current binaries take them as deprecated
 # aliases (a 'warning: ... is deprecated' line in the log, the same outputs).
@@ -39,32 +42,32 @@ C=(--periodic --input 105 --MpcUnit 1 --verbose 1)
 F3=(--field density_a velocity_a gradient_a divergence_a shear_a vorticity_a tweb_a vweb_a)
 F2=(--field density_a velocity_a gradient_a divergence_a vorticity_a)
 runs=(
-  "dt:DTFE:w48:--grid 64 ${F3[*]}"
-  "dtp:DTFE:w48:--grid 64 --partition 2 2 2 ${F3[*]}"
-  "dtg:DTFE:w48:--grid 64 --gpu ${F3[*]}"
-  "dtd:DTFE-double:w48:--grid 64 ${F3[*]}"
-  "ps:PS-DTFE:w48:--grid 64 ${F3[*]} --ps-caustics"
-  "psp:PS-DTFE:w48:--grid 64 --partition 2 2 2 ${F3[*]}"
-  "psg:PS-DTFE:w48:--grid 64 --ps-gpu ${F3[*]} --ps-caustics"
-  "psd:PS-DTFE-double:w48:--grid 64 ${F3[*]}"
-  "dt2:DTFE-2d:w2d:--grid 128 ${F2[*]}"
-  "ps2:PS-DTFE-2d:w2d:--grid 128 ${F2[*]}"
-  "dtx:DTFE:w48:--grid 64 ${F3[*]} --exact-average"
-  "dtxd:DTFE-double:w48:--grid 64 ${F3[*]} --exact-average"
-  "psx:PS-DTFE:w48:--grid 64 ${F3[*]} dispersion_a --ps-exact-deposit --ps-caustics --ps-vertex-mass --ps-volume-weighted"
-  "psxp:PS-DTFE:w48:--grid 64 --partition 2 2 2 ${F3[*]} dispersion_a --ps-exact-deposit"
-  "psxd:PS-DTFE-double:w48:--grid 64 ${F3[*]} dispersion_a --ps-exact-deposit"
-  "dtx2:DTFE-2d:w2d:--grid 128 ${F2[*]} --exact-average"
-  "psx2:PS-DTFE-2d:w2d:--grid 128 ${F2[*]} --ps-exact-deposit"
+  "dt:DTFE:w48:--grid 64 --partition 1 ${F3[*]}"
+  "dtp:DTFE:w48:--grid 64 --partition 2 2 2 --max-concurrent 2 ${F3[*]}"
+  "dtg:DTFE:w48:--grid 64 --partition 1 --gpu ${F3[*]}"
+  "dtd:DTFE-double:w48:--grid 64 --partition 1 ${F3[*]}"
+  "ps:PS-DTFE:w48:--grid 64 --partition 1 ${F3[*]} --ps-caustics"
+  "psp:PS-DTFE:w48:--grid 64 --partition 2 2 2 --max-concurrent 2 ${F3[*]}"
+  "psg:PS-DTFE:w48:--grid 64 --partition 1 --ps-gpu ${F3[*]} --ps-caustics"
+  "psd:PS-DTFE-double:w48:--grid 64 --partition 1 ${F3[*]}"
+  "dt2:DTFE-2d:w2d:--grid 128 --partition 1 ${F2[*]}"
+  "ps2:PS-DTFE-2d:w2d:--grid 128 --partition 1 ${F2[*]}"
+  "dtx:DTFE:w48:--grid 64 --partition 1 ${F3[*]} --exact-average"
+  "dtxd:DTFE-double:w48:--grid 64 --partition 1 ${F3[*]} --exact-average"
+  "psx:PS-DTFE:w48:--grid 64 --partition 1 ${F3[*]} dispersion_a --ps-exact-deposit --ps-caustics --ps-vertex-mass --ps-volume-weighted"
+  "psxp:PS-DTFE:w48:--grid 64 --partition 2 2 2 --max-concurrent 2 ${F3[*]} dispersion_a --ps-exact-deposit"
+  "psxd:PS-DTFE-double:w48:--grid 64 --partition 1 ${F3[*]} dispersion_a --ps-exact-deposit"
+  "dtx2:DTFE-2d:w2d:--grid 128 --partition 1 ${F2[*]} --exact-average"
+  "psx2:PS-DTFE-2d:w2d:--grid 128 --partition 1 ${F2[*]} --ps-exact-deposit"
 )
 # the GPU exact deposits (--gpu-exact); each tag ends in 'g', so the fallback check below sees its log
 [ "$GPU_EXACT" = 1 ] && runs+=(
-  "dtxg:DTFE:w48:--grid 64 ${F3[*]} --exact-average --gpu"
-  "dtxpg:DTFE:w48:--grid 64 --partition 2 2 2 ${F3[*]} --exact-average --gpu"
-  "dtxdg:DTFE-double:w48:--grid 64 ${F3[*]} --exact-average --gpu"
-  "psxg:PS-DTFE:w48:--grid 64 ${F3[*]} dispersion_a --ps-exact-deposit --ps-caustics --ps-gpu"
-  "psxpg:PS-DTFE:w48:--grid 64 --partition 2 2 2 ${F3[*]} dispersion_a --ps-exact-deposit --ps-gpu"
-  "psxdg:PS-DTFE-double:w48:--grid 64 ${F3[*]} dispersion_a --ps-exact-deposit --ps-gpu"
+  "dtxg:DTFE:w48:--grid 64 --partition 1 ${F3[*]} --exact-average --gpu"
+  "dtxpg:DTFE:w48:--grid 64 --partition 2 2 2 --max-concurrent 2 ${F3[*]} --exact-average --gpu"
+  "dtxdg:DTFE-double:w48:--grid 64 --partition 1 ${F3[*]} --exact-average --gpu"
+  "psxg:PS-DTFE:w48:--grid 64 --partition 1 ${F3[*]} dispersion_a --ps-exact-deposit --ps-caustics --ps-gpu"
+  "psxpg:PS-DTFE:w48:--grid 64 --partition 2 2 2 --max-concurrent 2 ${F3[*]} dispersion_a --ps-exact-deposit --ps-gpu"
+  "psxdg:PS-DTFE-double:w48:--grid 64 --partition 1 ${F3[*]} dispersion_a --ps-exact-deposit --ps-gpu"
 )
 n=0; d=0
 for r in "${runs[@]}"; do

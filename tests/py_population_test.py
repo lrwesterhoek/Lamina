@@ -294,9 +294,9 @@ def t_analyze_void_scripts():
 
 def t_analyze_gate_refusal():
     """'analyze.py plot' under DTFE_VOID_GATE=none at the production smoothing is refused for the GATE, by name
-    (smoothing_tag() carries 'gatenone'; DTFE_SIGMA_MPC, which is not set, is not blamed)."""
+    (smoothing_tag() carries 'gatenone'; DTFE_SMOOTH_MPC, which is not set, is not blamed)."""
     import subprocess
-    env = {k: v for k, v in os.environ.items() if k != "DTFE_SIGMA_MPC"}
+    env = {k: v for k, v in os.environ.items() if k not in ("DTFE_SMOOTH_MPC", "DTFE_SIGMA_MPC")}
     env.update(DTFE_SIM="TNG50-3-Dark", DTFE_VOID_GATE="none", DTFE_CACHE_DIR=tempfile.mkdtemp(prefix="analyze_gate_cache_"))
     try:
         pr = subprocess.run([sys.executable, str(REPO / "python" / "analyze.py"), "plot"], env=env,
@@ -304,7 +304,8 @@ def t_analyze_gate_refusal():
     finally:
         shutil.rmtree(env["DTFE_CACHE_DIR"], ignore_errors=True)
     assert pr.returncode != 0, (pr.returncode, pr.stdout[-400:])
-    assert "refused: DTFE_VOID_GATE='none'" in pr.stderr and "DTFE_SIGMA_MPC" not in pr.stderr, pr.stderr[-400:]
+    assert "refused: DTFE_VOID_GATE='none'" in pr.stderr and "DTFE_SMOOTH_MPC" not in pr.stderr \
+        and "DTFE_SIGMA_MPC" not in pr.stderr, pr.stderr[-400:]
 
 
 # ---------------------------------------------------------------- data-backed

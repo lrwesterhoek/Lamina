@@ -44,21 +44,32 @@
 #     z=0 z2048 plane the box mean 17.98 budgets 34.95 streams/point (19.3 GB) while its points average 5.38.
 #  O) '--parallel-triangulation' (TBB builds) is costed: its insert copies (+203 B per vertex in flight,
 #     measured) raise the predicted peak. SKIP without TBB.
-#  P) the tessellation model pads a partition by the binary's DEFAULT Lagrangian padding ('--ps-lag-padding
+#  P) the tessellation model pads a partition by the binary's DEFAULT Lagrangian padding ('--ps-lagrangian-padding
 #     8' spacings, not the Eulerian '--padding' fraction floored at 0.3 of a partition): the default predicts what
-#     an explicit '--ps-lag-padding 8' does, and '--ps-lag-padding 0' (the Eulerian rule) predicts something else.
+#     an explicit '--ps-lagrangian-padding 8' does, and '--ps-lagrangian-padding 0' (the Eulerian rule) predicts something else.
 #  K) partitions in flight never outnumber the threads: neither a hand-set split with the
 #     concurrency left to the tuner nor '--max-concurrent 0' ("all threads") starts every
 #     partition at once (64 threads for '--partition 4 4 4').
-#  R) STANDARD DTFE '--region' / '--regionMpc': the tuner plans the region's particles, not the whole
+#  R) STANDARD DTFE '--region' / '--region-mpc': the tuner plans the region's particles, not the whole
 #     snapshot's (planning the snapshot splits the launcher's exact zoom of a 20^3-cell TNG50 region 3x3x3 with
 #     10 threads: ~21 min instead of ~1). Uses the standard binary (built here too); SKIP when it is not built.
 #  S) ONE DOMAIN: '--partition 1 1 1' deposits into the run's own grids, so the prediction counts them
 #     once -- the 768^3 crossed-waves report sits between the measured peak and 15% above it --
 #     and a real one-domain run's peak stays under its prediction.
-#  W) --ps-window: every partition's sub-grid is the WHOLE window (not the crop of a full-grid partition), its GPU
+#  W) --grid-window: every partition's sub-grid is the WHOLE window (not the crop of a full-grid partition), its GPU
 #     deposit's grids are held once: a window+exact run's prediction covers its measured peak, and on macOS stays
 #     within 1.5x of it. GPU builds only.
+#  X) the partition sub-grid the plan books (plan P8.2: measured on the particles, psPartitionSpans) is never
+#     below the largest one the run allocates (DTFE_AUTO_TUNE_DEBUG=1: the planner's 'booked sub-grid' line against
+#     every pass's 'sub-grid' line), on the cases a review found wrong: one domain of a non-periodic clump (the whole
+#     grid, never the particles' span), crossed waves with '--ps-lagrangian-padding 0' (the Eulerian padding moves the
+#     periodic seam), splits that are not cubic (1 2 2, 2 3 4, 4 1 1), and the default 2^3 on crossed waves.
+#  Y) DYNAMIC CONCURRENCY (plan P8.10): over a concurrency the tuner chose (DTFE_TEST_PLAN_MC=1 stands for a plan
+#     of one partition at a time), a run whose free memory holds more starts more (up to the cores) and writes the
+#     '--max-concurrent 1' run's grids byte for byte (the ordered merge); one whose free memory holds no second
+#     partition keeps the plan's 1, as do DTFE_DYNAMIC_CONCURRENCY=0 and a user's '--max-concurrent'; room for about
+#     four admits 2-4, not every waiting thread at once (the gate counts what it admitted); the double build keeps the
+#     plan's (its sums follow the thread order); a dynamic run killed after 3 partitions and resumed writes the same grids.
 #
 # The 2^32 GPU sub-grid guard (ps_interpolation.cc) is NOT exercised here: it needs a real
 # >4.29e9-cell partition sub-grid, i.e. >32 GB of buffers. It mirrors the validated guard in
@@ -109,7 +120,7 @@ echo ">> A: simulated over-budget run (DTFE_RAM_GB=0.05, production field set)"
 LOG_A="${TMP}/at_a.log"
 DTFE_RAM_GB=0.05 "${BIN}" "${SNAP}" "${TMP}/at_a" --grid 64 \
     --field density_a velocity_a gradient_a divergence_a shear_a vorticity_a dispersion_a \
-    --input 105 --MpcUnit 1 --verbose 2 --periodic --avg-subsamples 1 --ps-volume-weighted \
+    --input-format 105 --mpc-unit 1 --verbose 2 --periodic --subsamples 1 --ps-volume-weighted \
     > "${LOG_A}" 2>&1 || true
 agrep() {  # set-e-safe grep assertion (ERE): $1 = check name, $2 = pattern, $3 = file
     if grep -Eq -- "$2" "$3"; then check "$1" 1; else check "$1" 0; fi
@@ -118,7 +129,7 @@ agrep "A refusal names the real cause"          "does not fit in memory, and --p
 agrep "A quantifies the irreducible grid term"  "full-resolution output grids need"                     "${LOG_A}"
 agrep "A suggests --scratch-dir as the way out" "--scratch-dir <local dir>"                             "${LOG_A}"
 agrep "A suggests the max feasible in-RAM grid" "largest that fits at these fields is about"            "${LOG_A}"
-agrep "A warns off the broken escape hatches"   "--partNo'/'--region' are NOT a way out"                "${LOG_A}"
+agrep "A warns off the broken escape hatches"   "--partition-index'/'--region' are NOT a way out"                "${LOG_A}"
 # the misleading blame-the-split message must not appear
 if grep -q "even a single .*-split partition is predicted to exceed the memory budget" "${LOG_A}"; then
     check "A no blame-the-split warning" 0
@@ -132,7 +143,7 @@ fi
 LOG_A2="${TMP}/at_a2.log"
 DTFE_RAM_GB=0.05 DTFE_AUTO_MINN=1000 "${BIN}" "${SNAP}" "${TMP}/at_a2" --grid 64 \
     --field density_a velocity_a gradient_a divergence_a shear_a vorticity_a dispersion_a \
-    --input 105 --MpcUnit 1 --verbose 2 --periodic --avg-subsamples 1 --ps-volume-weighted \
+    --input-format 105 --mpc-unit 1 --verbose 2 --periodic --subsamples 1 --ps-volume-weighted \
     > "${LOG_A2}" 2>&1 || true
 agrep "A over budget + large N: a real split at --max-concurrent 1" \
       "OVER BUDGET: --partition [2-6] [2-6] [2-6] --max-concurrent 1" "${LOG_A2}"
@@ -141,8 +152,8 @@ agrep "A over budget + large N: a real split at --max-concurrent 1" \
 echo ">> B: normal tuning (DTFE_RAM_GB=64, DTFE_AUTO_MINN=1000)"
 LOG_B="${TMP}/at_b.log"
 DTFE_RAM_GB=64 DTFE_AUTO_MINN=1000 "${BIN}" "${SNAP}" "${TMP}/at_b" --grid 128 \
-    --field density_a velocity_a --input 105 --MpcUnit 1 --verbose 2 --periodic \
-    --avg-subsamples 1 > "${LOG_B}" 2>&1
+    --field density_a velocity_a --input-format 105 --mpc-unit 1 --verbose 2 --periodic \
+    --subsamples 1 > "${LOG_B}" 2>&1
 agrep "B picks a partition and concurrency" "AUTO-TUNE: .* -> --partition [0-9]+ [0-9]+ [0-9]+ --max-concurrent [0-9]+" "${LOG_B}"
 agrep "B prints a predicted peak" "predicted peak ~[0-9.]+ GB" "${LOG_B}"
 
@@ -163,8 +174,8 @@ sys.exit(rc)
 PYEOF
 }
 peak_rss_run "${LOG_C}" env DTFE_AUTO_MINN=1000 "${BIN}" "${SNAP}" "${TMP}/at_c" --grid 256 \
-    --field density_a velocity_a dispersion_a --input 105 --MpcUnit 1 --verbose 2 --periodic \
-    --avg-subsamples 1 --ps-volume-weighted
+    --field density_a velocity_a dispersion_a --input-format 105 --mpc-unit 1 --verbose 2 --periodic \
+    --subsamples 1 --ps-volume-weighted
 if "${PY}" - "${LOG_C}" <<'PYEOF'
 import re, sys
 log = open(sys.argv[1]).read()
@@ -182,7 +193,7 @@ else check "C model errs HIGH (predicted >= measured peak RSS)" 0; fi
 echo ">> D: explicit --partition/--max-concurrent are respected"
 LOG_D="${TMP}/at_d.log"
 DTFE_RAM_GB=64 DTFE_AUTO_MINN=1000 "${BIN}" "${SNAP}" "${TMP}/at_d" --grid 128 \
-    --field density_a --input 105 --MpcUnit 1 --verbose 2 --periodic --avg-subsamples 1 \
+    --field density_a --input-format 105 --mpc-unit 1 --verbose 2 --periodic --subsamples 1 \
     --partition 2 2 2 --max-concurrent 2 > "${LOG_D}" 2>&1
 if grep -q "partition grid of {2, 2, 2}" "${LOG_D}" || grep -Eq "2,2,2|2 2 2" "${LOG_D}"; then
     check "D user partition survives" 1
@@ -200,7 +211,7 @@ fi
 # settings as B, where the tuner does pick a split.
 LOG_D1="${TMP}/at_d1.log"
 DTFE_RAM_GB=64 DTFE_AUTO_MINN=1000 "${BIN}" "${SNAP}" "${TMP}/at_d1" --grid 128 \
-    --field density_a --input 105 --MpcUnit 1 --verbose 2 --periodic --avg-subsamples 1 \
+    --field density_a --input-format 105 --mpc-unit 1 --verbose 2 --periodic --subsamples 1 \
     --partition 1 1 1 > "${LOG_D1}" 2>&1
 if grep -Eq "AUTO-TUNE: .* -> --partition ([2-9]|[1-9][0-9])" "${LOG_D1}"; then
     check "D '--partition 1 1 1' keeps one triangulation (no auto split)" 0
@@ -213,7 +224,7 @@ echo ">> E: memory budget rules"
 LOG_E="${TMP}/at_e.log"
 run_e() {
     env "$@" DTFE_AUTO_MINN=1000 "${BIN}" "${SNAP}" "${TMP}/at_e" --grid 128 --field density_a velocity_a \
-        --input 105 --MpcUnit 1 --verbose 2 --periodic --avg-subsamples 1 > "${LOG_E}" 2>&1
+        --input-format 105 --mpc-unit 1 --verbose 2 --periodic --subsamples 1 > "${LOG_E}" 2>&1
 }
 run_e DTFE_RAM_GB=64
 agrep "E default budget = 60% of RAM (simulated 64 GB: no live term)" \
@@ -231,7 +242,7 @@ echo ">> F: --auto-tune-report"
 LOG_F="${TMP}/at_f.log"
 run_f() {
     env "$@" DTFE_RAM_GB=64 DTFE_AUTO_MINN=1000 "${BIN}" "${SNAP}" "${TMP}/at_f" --grid 64 \
-        --field density_a velocity_a --input 105 --MpcUnit 1 --verbose 2 --periodic --avg-subsamples 1 \
+        --field density_a velocity_a --input-format 105 --mpc-unit 1 --verbose 2 --periodic --subsamples 1 \
         --auto-tune-report ${F_ARGS[@]+"${F_ARGS[@]}"} > "${LOG_F}" 2>&1
 }
 F_ARGS=()
@@ -249,7 +260,7 @@ agrep "F a hand-set split and concurrency are reported as given" "^AUTO-TUNE-REP
 F_ARGS=()
 run_f PATH="${PATH}"
 p0=$(sed -n 's/.* pts_gb=\([0-9.]*\) .*/\1/p' "${LOG_F}")
-run_f DTFE_AUTO_PTS_N=4000000 DTFE_AUTO_PTS_VELGRAD=1
+run_f DTFE_AUTO_PTS_N=4000000 DTFE_AUTO_PTS_VEL_GRAD=1
 p1=$(sed -n 's/.* pts_gb=\([0-9.]*\) .*/\1/p' "${LOG_F}")
 check "F DTFE_AUTO_PTS_N sizes a plane that is not on disk (pts ${p0} -> ${p1} GB)" \
       "$(awk -v a="${p0:-x}" -v b="${p1:-0}" 'BEGIN{print (a == 0 && b > 0.5) ? 1 : 0}')"
@@ -265,7 +276,7 @@ SNAP_G="${TMP}/at_input_clump.hdf5"
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP_G}" --n 48 --box "${BOX}" \
     --amplitude-factor 1.0 --margin-frac 0.2 >/dev/null
 env DTFE_RAM_GB=64 DTFE_AUTO_PTS_N=1000000 "${BIN}" "${SNAP_G}" "${TMP}/at_g" --grid 16 --field density \
-    --input 105 --MpcUnit 1 --verbose 2 --box 40 60 40 60 40 60 --auto-tune-report > "${TMP}/at_g.log" 2>&1
+    --input-format 105 --mpc-unit 1 --verbose 2 --box 40 60 40 60 40 60 --auto-tune-report > "${TMP}/at_g.log" 2>&1
 sg=$(sed -n 's/.* streams_est=\([0-9.]*\) .*/\1/p' "${TMP}/at_g.log")
 # (below 1 is fine: for a non-periodic cloud the Eulerian/Lagrangian volume ratio is its mean
 # compression -- this clump's is ~0.5 -- and the budget clamps the estimate at 1 stream per point)
@@ -275,7 +286,7 @@ check "G the estimate stays physical: 0 < ${sg:-none} < 20 streams/point" \
 # ---------- (H) the time-aware split of a small set ----------
 echo ">> H: time-aware split for small sets (speed, not memory)"
 GPU_H=0; grep -Eq "METAL=1|CUDA=1|HIP=1" o_ps/.build_mode 2>/dev/null && GPU_H=1   # (-E: GNU and BSD grep alike)
-COMMON_H=(--input 105 --MpcUnit 1 --verbose 2 --auto-tune-report)
+COMMON_H=(--input-format 105 --mpc-unit 1 --verbose 2 --auto-tune-report)
 # H1: a slice of the 64^3 box (4.2M points, 16^3 grid) is triangulation-bound -> 2^3 partitions. The split pays
 # only with enough threads (on 4 it rightly stays one domain), so the thread
 # count is pinned to a 10-core machine's: the report path only plans, it runs nothing
@@ -304,7 +315,7 @@ env DTFE_RAM_GB=64 DTFE_AUTO_PTS_N=4194304 "${BIN}" "${SNAP_G}" "${TMP}/at_h4" -
 agrep "H4 a non-periodic small cloud is costed without periodic copies (one domain)" "^AUTO-TUNE-REPORT partition=1 " "${TMP}/at_h4.log"
 # H5: two auto-split runs (a 16^3 grid of the 64^3 box: triangulation-bound -> 2^3) give bit-identical grids
 for r in a b; do
-    "${BIN}" "${SNAP}" "${TMP}/at_h5$r" --grid 16 --field density --input 105 --MpcUnit 1 --periodic --verbose 0 > "${TMP}/at_h5$r.log" 2>&1
+    "${BIN}" "${SNAP}" "${TMP}/at_h5$r" --grid 16 --field density --input-format 105 --mpc-unit 1 --periodic --verbose 0 > "${TMP}/at_h5$r.log" 2>&1
 done
 env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_h5r" --grid 16 --field density --periodic "${COMMON_H[@]}" > "${TMP}/at_h5r.log" 2>&1
 agrep "H5 the 16^3 grid run is a speed split" "^AUTO-TUNE-REPORT partition=[23] " "${TMP}/at_h5r.log"
@@ -317,12 +328,14 @@ rm -f "${TMP}"/at_h*.den "${TMP}"/at_h*.streams "${TMP}"/at_h*.hidden_streams
 
 # ---------- (I) very fine grids: the GPU's 2^32-cell sub-grid cap, and a small set's memory ----------
 # The GPU kernels number a partition's sub-grid cells with 32 bits: above 2^32 the deposit falls back to
-# the CPU. The tuner splits to keep every GPU sub-grid under the cap (a 1700^3 grid: 2^3) and warns
-# about a user split that does not. And a small particle set on such a grid does not stay in one
+# the CPU. The tuner splits to keep every GPU sub-grid under the cap (a 1700^3 grid: 2^3 at least; since the
+# sub-grids are measured on the particles (P8.2), the pancake's 2^3 sub-grid is ~1.1e9 cells -- 760 x 428 x 428 at
+# 850^3, measured -- not the 7.05e8 of the old G/n + 40 rule, and the memory budget takes the split further, to 5^3)
+# and warns about a user split that does not. And a small particle set on such a grid does not stay in one
 # domain when that domain's deposit buffers do not fit (83 GB unsplit): it splits for memory.
 echo ">> I: very fine grids (1700^3, grids on scratch)"
 ISCR="${TMPDIR:-/tmp}/dtfe-at-scratch"; mkdir -p "${ISCR}"
-COMMON_I=(--grid 1700 --periodic --field density_a --input 105 --MpcUnit 1 --verbose 2 --scratch-dir "${ISCR}" --auto-tune-report)
+COMMON_I=(--grid 1700 --periodic --field density_a --input-format 105 --mpc-unit 1 --verbose 2 --scratch-dir "${ISCR}" --auto-tune-report)
 env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_i_cpu" "${COMMON_I[@]}" > "${TMP}/at_i_cpu.log" 2>&1
 pi=$(sed -n 's/^AUTO-TUNE-REPORT partition=\([0-9]*\) .*/\1/p' "${TMP}/at_i_cpu.log" | head -1)
 ob=$(sed -n 's/^AUTO-TUNE-REPORT .*over_budget=\([01]\).*/\1/p' "${TMP}/at_i_cpu.log" | head -1)
@@ -331,8 +344,13 @@ check "I1 CPU: a small set on a 1700^3 grid splits for memory (partition ${pi:-n
 env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_i_gpu" "${COMMON_I[@]}" --gpu > "${TMP}/at_i_gpu.log" 2>&1
 if grep -q "GPU (--gpu)" "${TMP}/at_i_gpu.log"; then
     pg=$(sed -n 's/^AUTO-TUNE-REPORT partition=\([0-9]*\) .*/\1/p' "${TMP}/at_i_gpu.log" | head -1)
-    check "I2 GPU: the tuner splits a 1700^3 grid so each sub-grid stays under 2^32 cells (partition ${pg:-none})" \
-          "$([ -n "${pg}" ] && [ "${pg}" -ge 2 ] && grep -q "under the 2^32 cells the GPU kernels number" "${TMP}/at_i_gpu.log" && echo 1 || echo 0)"
+    # the split keeps the GPU deposit (the 'GPU deposit' plan, or the cap's own line when the cap decides it) and its
+    # booked sub-grid under the 2^32 cells (DTFE_AUTO_TUNE_DEBUG's 'booked sub-grid')
+    env DTFE_RAM_GB=64 DTFE_AUTO_TUNE_DEBUG=1 "${BIN}" "${SNAP}" "${TMP}/at_i_gpu" "${COMMON_I[@]}" --gpu > "${TMP}/at_i_gpu_dbg.log" 2>&1
+    sg=$(sed -n 's/^AUTO-TUNE-DEBUG PS booked sub-grid: \([0-9]*\) cells.*/\1/p' "${TMP}/at_i_gpu_dbg.log" | tail -1)
+    check "I2 GPU: the tuner splits a 1700^3 grid so each sub-grid stays under 2^32 cells (partition ${pg:-none}, ${sg:-?} cells)" \
+          "$([ -n "${pg}" ] && [ "${pg}" -ge 2 ] && [ -n "${sg}" ] && [ "${sg}" -lt 4294967296 ] \
+              && grep -Eq "GPU deposit|under the 2\^32 cells the GPU kernels number" "${TMP}/at_i_gpu.log" && echo 1 || echo 0)"
     env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_i_user" "${COMMON_I[@]}" --gpu --partition 1 1 1 > "${TMP}/at_i_user.log" 2>&1
     agrep "I3 GPU: a user's unsplit 1700^3 grid is told which split keeps the GPU" "above the 2\^32 the GPU kernels number" "${TMP}/at_i_user.log"
 else
@@ -353,6 +371,11 @@ agrep "J2 a budget the free memory holds stays as set" "memory budget: 5 GB set 
 run_e DTFE_FREE_GB=44.2 DTFE_MEM_BUDGET_GB=40.5
 agrep "J2b ... and so does one the free memory would trim by under 0.5 GB (44.2 - 4 vs 40.5): no 'but' line" \
       "memory budget: 40.5 GB set by DTFE_MEM_BUDGET_GB" "${LOG_E}"
+agrep "J2c ... naming the free memory it was set against (P8.7)" \
+      "memory budget: 40.5 GB set by DTFE_MEM_BUDGET_GB \(the other programs leave 44.2 GB free: 40.2 GB after the 4 GB headroom\)$" "${LOG_E}"
+run_e DTFE_FREE_GB=60
+agrep "J2d the RAM-share budget names the free memory too when it does not cut it" \
+      "memory budget: [0-9.]+ GB = 60% of [0-9.]+ GB RAM \(the other programs leave 60 GB free: 56 GB after the 4 GB headroom\)$" "${LOG_E}"
 run_e DTFE_RAM_GB=64 DTFE_FREE_GB=10 DTFE_MEM_BUDGET_GB=40
 agrep "J3 a simulated machine (DTFE_RAM_GB) skips the live cap: tests stay deterministic" \
       "memory budget: 40 GB set by DTFE_MEM_BUDGET_GB" "${LOG_E}"
@@ -360,7 +383,7 @@ agrep "J3 a simulated machine (DTFE_RAM_GB) skips the live cap: tests stay deter
 # same run with ~no free memory: every partition beyond the first waits, the run completes, the grids agree
 run_j() {
     env "$@" DTFE_RAM_GB=64 DTFE_AUTO_MINN=1000 "${BIN}" "${SNAP}" "${TMP}/at_j" --grid 64 --field density_a \
-        --input 105 --MpcUnit 1 --verbose 2 --periodic --avg-subsamples 1 --partition 2 2 2 > "${TMP}/at_j.log" 2>&1
+        --input-format 105 --mpc-unit 1 --verbose 2 --periodic --subsamples 1 --partition 2 2 2 > "${TMP}/at_j.log" 2>&1
 }
 run_j DTFE_FREE_GB=1000                      # ample by decree: the live reading would make J5b depend on the machine
 for f in a_den a_streams; do cp "${TMP}/at_j.${f}" "${TMP}/at_j_free.${f}" 2>/dev/null || true; done
@@ -402,7 +425,7 @@ fi
 echo ">> K: partitions in flight are capped at the threads"
 run_k() {
     env "$@" OMP_NUM_THREADS=2 DTFE_RAM_GB=64 DTFE_FREE_GB=1000 "${BIN}" "${SNAP}" "${TMP}/at_k" --grid 16 --field density \
-        --input 105 --MpcUnit 1 --verbose 2 --periodic --partition 4 4 4 ${K_ARGS[@]+"${K_ARGS[@]}"} > "${TMP}/at_k.log" 2>&1
+        --input-format 105 --mpc-unit 1 --verbose 2 --periodic --partition 4 4 4 ${K_ARGS[@]+"${K_ARGS[@]}"} > "${TMP}/at_k.log" 2>&1
 }
 for k in K1 K2; do
     if [ "${k}" = K1 ]; then K_ARGS=(); what="a hand-set split, the concurrency left to the tuner"
@@ -423,7 +446,7 @@ rm -f "${TMP}"/at_k.*
 echo ">> L: the look-ahead is counted against the budget"
 run_l() {  # $1 = budget in GB, $2 = log
     env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 DTFE_AUTO_MINN=1000 DTFE_MEM_BUDGET_GB="$1" "${BIN}" "${SNAP}" "${TMP}/at_l" \
-        --grid 64 --field density_a --input 105 --MpcUnit 1 --verbose 2 --periodic --gpu \
+        --grid 64 --field density_a --input-format 105 --mpc-unit 1 --verbose 2 --periodic --gpu \
         --partition 2 2 2 --max-concurrent 1 --auto-tune-report > "$2" 2>&1 || true
 }
 run_l 50 "${TMP}/at_l1.log"
@@ -451,7 +474,7 @@ rm -f "${TMP}"/at_l*
 echo ">> M: the GPU deposit's snapshot is counted once"
 run_m() {  # $1 = --max-concurrent, $2 = log
     env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 "${BIN}" "${SNAP}" "${TMP}/at_m" --grid 256 \
-        --field density_a velocity_a --ps-volume-weighted --input 105 --MpcUnit 1 --verbose 2 --periodic --gpu \
+        --field density_a velocity_a --ps-volume-weighted --input-format 105 --mpc-unit 1 --verbose 2 --periodic --gpu \
         --partition 2 2 2 --max-concurrent "$1" --auto-tune-report > "$2" 2>&1 || true
 }
 run_m 2 "${TMP}/at_m2.log"
@@ -461,9 +484,10 @@ if grep -q "GPU (--gpu)" "${TMP}/at_m2.log"; then
     p2=$(gb predicted_gb "${TMP}/at_m2.log"); p3=$(gb predicted_gb "${TMP}/at_m3.log"); f2=$(gb fixed_gb "${TMP}/at_m2.log")
     # expected: (24 B of selected grids + 4 B of the 64-bit mass) x the (256/2 + 40)^3 sub-grid cells = 0.133 GB
     # (+ the per-tet masses; measured 0.114 GB) -- with the velocity moment and its weight (16 B) as
-    # 64-bit words, 16 B more: 0.209 GB (measured 0.190 GB). PS_GPU_FLOAT_MOMENTS=1 keeps the floats.
+    # 64-bit words, 16 B more: 0.209 GB (measured 0.190 GB). DTFE_GPU_FLOAT_MOMENTS=1 keeps the floats.
     sm=$(awk -v a="${p2:-0}" -v b="${p3:-0}" -v f="${f2:-0}" 'BEGIN{printf "%.3f", a - f - 2*(b - a)}')
-    if [ "${PS_GPU_FLOAT_MOMENTS:-0}" != "0" ]; then lo=0.10; hi=0.17; ex=0.13
+    if [ "${DTFE_GPU_FLOAT_MOMENTS:-${PS_GPU_FLOAT_MOMENTS:-0}}" != "0" ]; then   # (the old name: deprecated, still read)
+        lo=0.10; hi=0.17; ex=0.13
     else lo=0.16; hi=0.25; ex=0.21; fi
     check "M the GPU snapshot is counted once: ${sm} GB beyond 2 partitions (expected ~${ex} GB; predicted ${p2:-none} / ${p3:-none} GB at 2 / 3 in flight)" \
           "$(awk -v s="${sm}" -v lo="${lo}" -v hi="${hi}" 'BEGIN{exit !(s >= lo && s <= hi)}' && echo 1 || echo 0)"
@@ -486,8 +510,8 @@ for name, x in (("far", 0.1 * box), ("fold", 0.5 * box)):    # outside / through
     np.stack([np.full(Y.size, x), Y.ravel(), Z.ravel()], 1).astype(np.float64).tofile(f"{tmp}/at_n_{name}.bin")
 PYEOF
 est_n() {  # $1 = plane, $2 = DTFE_AUTO_PTS_BOXMEAN
-    env DTFE_RAM_GB=64 DTFE_AUTO_PTS_BOXMEAN="$2" "${BIN}" "${SNAP_N}" "${TMP}/at_n" --grid 32 --periodic --input 105 \
-        --MpcUnit 1 --field density_a --sample-points "${TMP}/at_n_$1.bin" --auto-tune-report 2>/dev/null \
+    env DTFE_RAM_GB=64 DTFE_AUTO_PTS_BOXMEAN="$2" "${BIN}" "${SNAP_N}" "${TMP}/at_n" --grid 32 --periodic --input-format 105 \
+        --mpc-unit 1 --field density_a --sample-points "${TMP}/at_n_$1.bin" --auto-tune-report 2>/dev/null \
         | sed -n 's/^AUTO-TUNE-REPORT .* streams_est=\([0-9.]*\) .*/\1/p'
 }
 nf=$(est_n far 0); nd=$(est_n fold 0); nb=$(est_n far 1)
@@ -503,7 +527,7 @@ rm -f "${TMP}"/at_n*
 echo ">> O: --parallel-triangulation is in the predicted peak"
 if grep -q -- "--parallel-triangulation" <<< "$("${BIN}" --help 2>&1)"; then
     pred_o() {
-        env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_o" --grid 32 --periodic --input 105 --MpcUnit 1 --field density \
+        env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_o" --grid 32 --periodic --input-format 105 --mpc-unit 1 --field density \
             --partition 2 2 2 --max-concurrent 2 --auto-tune-report "$@" 2>/dev/null \
             | sed -n 's/^AUTO-TUNE-REPORT .*predicted_gb=\([0-9.]*\) .*/\1/p'
     }
@@ -517,18 +541,18 @@ fi
 # ---------- (P) the default Lagrangian padding is what the tuner models ----------
 # A hand-set 4^3 split of the 64^3 set (report path, runs nothing): k = 8 spacings pad each side by 0.5 of a
 # partition, the Eulerian rule by max(0.3, padding fraction x 4) ~ 0.31, so the two predictions differ.
-echo ">> P: the tuner models the default '--ps-lag-padding 8'"
+echo ">> P: the tuner models the default '--ps-lagrangian-padding 8'"
 pred_p() {
-    env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_p" --grid 32 --periodic --input 105 --MpcUnit 1 --field density \
+    env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_p" --grid 32 --periodic --input-format 105 --mpc-unit 1 --field density \
         --partition 4 4 4 --max-concurrent 4 --auto-tune-report "$@" 2>/dev/null \
         | sed -n 's/^AUTO-TUNE-REPORT .*predicted_gb=\([0-9.]*\) .*/\1/p'
 }
-pd=$(pred_p); p8=$(pred_p --ps-lag-padding 8); p0=$(pred_p --ps-lag-padding 0)
-check "P the default predicts like '--ps-lag-padding 8' (${pd:-none} = ${p8:-none} GB), not like 0 (${p0:-none} GB)" \
+pd=$(pred_p); p8=$(pred_p --ps-lagrangian-padding 8); p0=$(pred_p --ps-lagrangian-padding 0)
+check "P the default predicts like '--ps-lagrangian-padding 8' (${pd:-none} = ${p8:-none} GB), not like 0 (${p0:-none} GB)" \
       "$(awk -v d="${pd:-x}" -v e="${p8:-y}" -v z="${p0:-x}" 'BEGIN{print (d != "x" && d == e && d != z) ? 1 : 0}')"
 
 # ---------- (R) standard DTFE --region: the tuner plans the region, not the snapshot ----------
-# A '--region'/'--regionMpc' run triangulates only the region plus its padding, so the standard binary's tuner
+# A '--region'/'--region-mpc' run triangulates only the region plus its padding, so the standard binary's tuner
 # plans the region's particle count and box; planning the whole snapshot's turns the launcher's exact zoom of a
 # 20^3-cell TNG50 region into '--partition 3 3 3, 10 thread(s)' -- 27 x 10 sub-triangulations, each padded again
 # around its tiny sub-box. On a simulated 0.2 GB machine (the standard tuner has no small-N gate): the whole 64^3 box
@@ -540,11 +564,11 @@ echo ">> R: standard DTFE --region plans the region's particles (${DTFE_BIN})"
 if [ -x "${DTFE_BIN}" ]; then
     std_r() {  # $1 = log, rest = extra args (report mode: nothing is written)
         local log="$1"; shift
-        env DTFE_RAM_GB=0.2 "${DTFE_BIN}" "${SNAP}" "${TMP}/at_r" --grid 16 16 1 --periodic --input 105 --MpcUnit 1 \
+        env DTFE_RAM_GB=0.2 "${DTFE_BIN}" "${SNAP}" "${TMP}/at_r" --grid 16 16 1 --periodic --input-format 105 --mpc-unit 1 \
             --field density_a --auto-tune-report "$@" > "${log}" 2>&1 || true
     }
     std_r "${TMP}/at_r_box.log"
-    std_r "${TMP}/at_r_reg.log" --regionMpc 40 50 40 50 49 51
+    std_r "${TMP}/at_r_reg.log" --region-mpc 40 50 40 50 49 51
     std_r "${TMP}/at_r_all.log" --region 0 1 0 1 0 1
     agrep "R control: the whole box needs a split on this simulated machine" \
           "AUTO-TUNE: .* -> --partition [2-6] [2-6] [2-6]" "${TMP}/at_r_box.log"
@@ -557,8 +581,8 @@ if [ -x "${DTFE_BIN}" ]; then
           "$([ -n "${r_box}" ] && [ "${r_box}" = "${r_all}" ] && echo 1 || echo 0)"
     run_r() {  # $1 = output root, rest = extra args: a real (CPU) region run on the same simulated machine
         local out="$1"; shift
-        env DTFE_RAM_GB=0.2 "${DTFE_BIN}" "${SNAP}" "${out}" --grid 32 32 4 --periodic --input 105 --MpcUnit 1 \
-            --field density_a velocity_a --regionMpc 30 60 30 60 45 50 "$@" > "${out}.log" 2>&1 || true
+        env DTFE_RAM_GB=0.2 "${DTFE_BIN}" "${SNAP}" "${out}" --grid 32 32 4 --periodic --input-format 105 --mpc-unit 1 \
+            --field density_a velocity_a --region-mpc 30 60 30 60 45 50 "$@" > "${out}.log" 2>&1 || true
     }
     run_r "${TMP}/at_r_auto"
     run_r "${TMP}/at_r_p1" --partition 1 1 1
@@ -582,14 +606,14 @@ fi
 echo ">> S: one domain (the 768^3 report; a real 256^3 run)"
 SNAP_W="${TMP}/at_input_waves.hdf5"
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP_W}" --n 64 --crossed-waves >/dev/null
-env OMP_NUM_THREADS=10 DTFE_RAM_GB=64 "${BIN}" "${SNAP_W}" "${TMP}/at_s1" --grid 768 --periodic --input 105 --MpcUnit 1 \
-    --avg-subsamples 1 --field density_a velocity_a --partition 1 1 1 --auto-tune-report > "${TMP}/at_s1.log" 2>&1
+env OMP_NUM_THREADS=10 DTFE_RAM_GB=64 "${BIN}" "${SNAP_W}" "${TMP}/at_s1" --grid 768 --periodic --input-format 105 --mpc-unit 1 \
+    --subsamples 1 --field density_a velocity_a --partition 1 1 1 --auto-tune-report > "${TMP}/at_s1.log" 2>&1
 ps1=$(sed -n 's/^AUTO-TUNE-REPORT .*predicted_gb=\([0-9.]*\) .*/\1/p' "${TMP}/at_s1.log" | head -1)
 if precision_double; then ms1=24.87; else ms1=22.9; fi
 check "S1 one domain at 768^3 predicts ${ps1:-none} GB: at least the measured ${ms1} GB, at most 15% above it" \
       "$(awk -v p="${ps1:-0}" -v m="${ms1}" 'BEGIN{print (p >= m && p <= 1.15*m) ? 1 : 0}')"
-"${BIN}" "${SNAP_W}" "${TMP}/at_s2" --grid 256 --periodic --input 105 --MpcUnit 1 --verbose 1 \
-    --avg-subsamples 1 --field density_a velocity_a --partition 1 1 1 > "${TMP}/at_s2.log" 2>&1 || true
+"${BIN}" "${SNAP_W}" "${TMP}/at_s2" --grid 256 --periodic --input-format 105 --mpc-unit 1 --verbose 1 \
+    --subsamples 1 --field density_a velocity_a --partition 1 1 1 > "${TMP}/at_s2.log" 2>&1 || true
 ms2=$("${PY}" - "${TMP}/at_s2.log" <<'PYEOF'
 import re, sys
 m = re.search(r"memory model\s*:\s*([\d.]+) GB predicted \(auto-tune\) vs ([\d.]+) GB measured", open(sys.argv[1]).read())
@@ -600,8 +624,8 @@ check "S2 a real one-domain 256^3 run stays under its prediction (predicted / me
       "$(echo "${ms2}" | awk '$1 != "none" && $1 >= $2 {ok=1} END{print ok ? 1 : 0}')"
 rm -f "${SNAP_W}" "${TMP}"/at_s1* "${TMP}"/at_s2.*[a-z]
 
-# ---------- (W) --ps-window: the window's grids ----------
-# Under --ps-window every partition deposits into the whole window, whatever the split (ps_interpolation.cc
+# ---------- (W) --grid-window: the window's grids ----------
+# Under --grid-window every partition deposits into the whole window, whatever the split (ps_interpolation.cc
 # psSubgridBox), and the GPU deposit holding its grids runs one at a time. The model used to book the crop of a
 # full-grid partition instead -- 1064^2 of these 2048^2 cells at 2^3 -- and predicted 0.37 GB for this run, which
 # measures 0.60 GB (the TNG z=0 zooms on a 4096^2 slice: 11.1 GB for 19.75 measured, the rest being the input's
@@ -609,12 +633,12 @@ rm -f "${SNAP_W}" "${TMP}"/at_s1* "${TMP}"/at_s2.*[a-z]
 # over the 64^3 pancake on a one-cell 2048^2 slice, one partition in flight (none parks): the prediction covers the
 # measured peak and, on macOS (whose allocator the model follows), stays within 1.5x of it (0.74 GB). The CPU
 # window deposit is not modelled this closely: GPU builds only.
-echo ">> W: --ps-window books the whole window, its deposit's grids once"
+echo ">> W: --grid-window books the whole window, its deposit's grids once"
 run_w() {  # $1 = log; the rest = extra flags
     local log="$1"; shift
-    "${BIN}" "${SNAP}" "${TMP}/at_w" --grid 2048 --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a \
+    "${BIN}" "${SNAP}" "${TMP}/at_w" --grid 2048 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a \
         --gpu --ps-vertex-mass --ps-volume-weighted --exact-average --partition 2 2 2 --max-concurrent 1 \
-        --ps-window 0 "${BOX}" 0 "${BOX}" "$(awk -v b="${BOX}" 'BEGIN{print b/2}')" "$(awk -v b="${BOX}" 'BEGIN{print b/2 + 1e-4}')" \
+        --grid-window 0 "${BOX}" 0 "${BOX}" "$(awk -v b="${BOX}" 'BEGIN{print b/2}')" "$(awk -v b="${BOX}" 'BEGIN{print b/2 + 1e-4}')" \
         "$@" > "${log}" 2>&1 || true
 }
 run_w "${TMP}/at_w0.log" --auto-tune-report
@@ -633,6 +657,95 @@ else
     echo "   SKIP  W (this build has no GPU backend)"
 fi
 rm -f "${TMP}"/at_w*
+
+# ---------- (Y) dynamic concurrency: more partitions in flight when the memory holds them, same grids ----------
+echo ">> Y: dynamic concurrency (DTFE_TEST_PLAN_MC=1: a plan of one partition at a time)"
+if precision_double; then
+    echo "   SKIP  Y (the double build keeps the plan's concurrency: the single pass's Y6 checks it)"
+else
+SNAP_Y="${TMP}/at_y.hdf5"
+"${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP_Y}" --n 48 --box 100 --amplitude-factor 1.8 >/dev/null
+Y_ARGS=(--input-format 105 --mpc-unit 1 --periodic --grid 96 --field density_a velocity_a divergence_a --partition 3 3 3 --verbose 2)
+run_y() {  # $1 = tag, then 'VAR=value' assignments, then '--' and extra options
+    local tag="$1"; shift
+    local envs=()
+    while [ $# -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
+    [ $# -gt 0 ] && shift
+    env DTFE_RAM_GB=64 ${envs[@]+"${envs[@]}"} "${BIN}" "${SNAP_Y}" "${TMP}/at_y_${tag}" "${Y_ARGS[@]}" "$@" \
+        > "${TMP}/at_y_${tag}.log" 2>&1 || true
+}
+y_same() { cmp -s "${TMP}/at_y_ref.a_den" "${TMP}/at_y_$1.a_den" && cmp -s "${TMP}/at_y_ref.a_vel" "${TMP}/at_y_$1.a_vel" \
+           && cmp -s "${TMP}/at_y_ref.a_velDiv" "${TMP}/at_y_$1.a_velDiv"; }
+y_most() { sed -n 's/.*dynamic concurrency: at most \([0-9]*\) partitions in flight.*/\1/p' "${TMP}/at_y_$1.log" | tail -1; }
+run_y ref -- --max-concurrent 1
+run_y dyn DTFE_TEST_PLAN_MC=1 DTFE_FREE_GB=1000 --
+m=$(y_most dyn)
+check "Y1 a plan of one partition at a time with the memory for more: up to ${m:-?} in flight, the grids of '--max-concurrent 1'" \
+      "$([ -n "${m}" ] && [ "${m}" -gt 1 ] && y_same dyn && echo 1 || echo 0)"
+run_y low DTFE_TEST_PLAN_MC=1 DTFE_FREE_GB=4.02 --
+check "Y2 free memory for no second partition (4.02 GB less the 4 GB headroom): the plan's 1, same grids" \
+      "$(grep -q "building up to 1 partition" "${TMP}/at_y_low.log" && [ -z "$(y_most low)" ] && y_same low && echo 1 || echo 0)"
+run_y off DTFE_TEST_PLAN_MC=1 DTFE_FREE_GB=1000 DTFE_DYNAMIC_CONCURRENCY=0 --
+run_y user DTFE_FREE_GB=1000 -- --max-concurrent 1
+check "Y3 DTFE_DYNAMIC_CONCURRENCY=0 and a user's --max-concurrent keep their one partition at a time" \
+      "$(grep -q "building up to 1 partition" "${TMP}/at_y_off.log" && grep -q "building up to 1 partition" "${TMP}/at_y_user.log" \
+         && y_same off && echo 1 || echo 0)"
+# a binding limit: 4.2 GB free less the 4 GB headroom holds about four of this plan's ~0.05 GB partitions; all
+# threads reach the gate at once, and it admits only as far as that room goes (counting the ones admitted)
+run_y room DTFE_TEST_PLAN_MC=1 DTFE_FREE_GB=4.2 --
+m=$(y_most room)
+check "Y5 room for about four partitions: ${m:-?} in flight at most (not every thread at once), the same grids" \
+      "$([ -n "${m}" ] && [ "${m}" -ge 2 ] && [ "${m}" -le 4 ] && y_same room && echo 1 || echo 0)"
+# the double build sums per-thread copies in thread order: its grids would follow the count, so it keeps the plan's
+if [ -x "${PS_BIN_DOUBLE:-./PS-DTFE-double}" ]; then
+    env DTFE_RAM_GB=64 DTFE_TEST_PLAN_MC=1 DTFE_FREE_GB=1000 "${PS_BIN_DOUBLE:-./PS-DTFE-double}" "${SNAP_Y}" "${TMP}/at_y_dbl" \
+        "${Y_ARGS[@]}" > "${TMP}/at_y_dbl.log" 2>&1 || true
+    agrep "Y6 the double build keeps the plan's one partition at a time (its sums follow the thread order)" \
+          "building up to 1 partition.*dynamic concurrency not started: the double build" "${TMP}/at_y_dbl.log"
+else
+    echo "   SKIP  Y6 (no double build)"
+fi
+run_y kill DTFE_TEST_PLAN_MC=1 DTFE_FREE_GB=1000 DTFE_TEST_EXIT_AFTER_PARTITIONS=3 --
+run_y kill DTFE_TEST_PLAN_MC=1 DTFE_FREE_GB=1000 -- --resume
+check "Y4 a dynamic run killed after 3 partitions and resumed: the same grids" \
+      "$(grep -q -- "--resume: 3 of 27 partitions" "${TMP}/at_y_kill.log" && y_same kill && echo 1 || echo 0)"
+rm -rf "${SNAP_Y}" "${TMP}"/at_y_*
+fi
+
+# ---------- (X) the partition sub-grid the plan books >= the largest the run allocates ----------
+echo ">> X: the booked partition sub-grid against the run's own (DTFE_AUTO_TUNE_DEBUG)"
+SNAP_XC="${TMP}/at_x_clump.hdf5"; SNAP_XW="${TMP}/at_x_waves.hdf5"; SNAP_XP="${TMP}/at_x_pancake.hdf5"
+"${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP_XC}" --n 32 --box 100 --margin-frac 0.3 >/dev/null
+"${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP_XW}" --n 32 --box 100 --amplitude-factor 2.5 --crossed-waves >/dev/null
+"${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP_XP}" --n 48 --box 100 --amplitude-factor 1.8 >/dev/null
+run_x() {  # $1 = label, $2 = snapshot, rest = options: the booked sub-grid covers the largest real one
+    local label="$1" snap="$2"; shift 2
+    DTFE_AUTO_TUNE_DEBUG=1 "${BIN}" "${snap}" "${TMP}/at_x" --input-format 105 --mpc-unit 1 --field density_a --grid 64 "$@" \
+        > "${TMP}/at_x.log" 2>&1 || true
+    local r
+    r="$("${PY}" - "${TMP}/at_x.log" <<'PYEOF'
+import re, sys
+t = open(sys.argv[1], errors="replace").read()
+b = re.findall(r"booked sub-grid: (\d+) cells", t)
+a = [int(x) for x in re.findall(r"AUTO-TUNE-DEBUG sub-grid:.*= (\d+) cells", t)]
+print(f"{int(b[-1])} {max(a)}" if b and a else "none none")
+PYEOF
+)"
+    local booked="${r% *}" real="${r#* }"
+    echo "   .... ${label}: booked ${booked}, largest real ${real}"
+    check "X ${label}: the booked sub-grid covers the largest real one" \
+          "$([ "${booked}" != none ] && [ "${booked}" -ge "${real}" ] && echo 1 || echo 0)"
+    rm -f "${TMP}"/at_x.a_* "${TMP}"/at_x.den* "${TMP}"/at_x.*streams*
+}
+run_x "one domain, non-periodic clump" "${SNAP_XC}" --partition 1 1 1
+run_x "2^3, non-periodic clump" "${SNAP_XC}" --partition 2 2 2
+run_x "2^3, crossed waves, --ps-lagrangian-padding 0" "${SNAP_XW}" --periodic --ps-lagrangian-padding 0 --partition 2 2 2
+run_x "3^3, crossed waves, --ps-lagrangian-padding 0" "${SNAP_XW}" --periodic --ps-lagrangian-padding 0 --partition 3 3 3
+run_x "2^3, crossed waves" "${SNAP_XW}" --periodic --partition 2 2 2
+run_x "1 2 2, pancake" "${SNAP_XP}" --periodic --partition 1 2 2
+run_x "2 3 4, pancake" "${SNAP_XP}" --periodic --partition 2 3 4
+run_x "4 1 1, pancake" "${SNAP_XP}" --periodic --partition 4 1 1
+rm -f "${SNAP_XC}" "${SNAP_XW}" "${SNAP_XP}" "${TMP}"/at_x*
 
 echo "------------------------------------------------------------"
 if [ "${FAILS}" -gt 0 ]; then

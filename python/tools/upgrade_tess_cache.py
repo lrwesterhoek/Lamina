@@ -131,7 +131,7 @@ def convert(path: Path) -> str:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0], allow_abbrev=False)
     ap.add_argument("cache", help="a '--tessellation-cache' folder (or one .tess file)")
     ap.add_argument("-j", "--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 2),
                     help="files converted at once (default: half the cores)")

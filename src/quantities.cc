@@ -195,6 +195,9 @@ void Quantities::normalizePhaseSpace(Field const &field, Real const weightFromDe
                          || (field.velocity_dispersion and this->disp_weight.empty());
     if ( haveVel and this->velocity.empty() )
         return;   // no weighted moments were accumulated (e.g. density-only field selection)
+    // --face-gradient: the gradient of the mean flow from the face sums (psFaceGradientCell), with the volume weights
+    bool const face = not this->face_velocity.empty() and field.velocity_gradient;
+    if ( face ) psFaceGradientBegin( n );
     // every cell on its own (the same arithmetic per cell): split over the free cores (thread_count.h poolRanges)
     poolRanges( n, size_t(1) << 16, CorePool::total(), [&](size_t const lo, size_t const hi)
     {
@@ -205,6 +208,7 @@ void Quantities::normalizePhaseSpace(Field const &field, Real const weightFromDe
         Real const inv = Real(1.) / w;
         if ( haveVel )                 this->velocity[i]          *= inv;   // <v> = sum(rho v)/sum(rho)
         if ( field.velocity_gradient ) this->velocity_gradient[i] *= inv;
+        if ( face )                    psFaceGradientCell( i );
         if ( field.scalar )            this->scalar[i]            *= inv;
         if ( field.scalar_gradient )   this->scalar_gradient[i]   *= inv;
         if ( field.velocity_dispersion and this->disp_weight.empty() )
@@ -252,6 +256,7 @@ void Quantities::normalizePhaseSpace(Field const &field, Real const weightFromDe
         } );
     }
 
+    if ( face ) psFaceGradientEnd();
     // these three are internal to this normalization and never written out -- release for real
     std::vector<Real>().swap( this->mass_weight );
     std::vector<Real>().swap( this->disp_weight );
@@ -260,7 +265,7 @@ void Quantities::normalizePhaseSpace(Field const &field, Real const weightFromDe
 
 
 // The cell map of a sub-grid merge (addFromSubgrid): 'src' is a sub-grid (dims m, global origin o) of the full grid
-// 'full', or -- mainOrigin/mainDims given -- of this grid's own window of it (--ps-window). Each local cell goes where
+// 'full', or -- mainOrigin/mainDims given -- of this grid's own window of it (--grid-window). Each local cell goes where
 // subgridTarget (quantities.h; the fixed-point merge, src/ps_fixed_merge.h, maps cells by it too) sends it, axis by
 // axis, so the map is one table per axis: the destination coordinate of every local index, or -1 outside the window.
 // The merge then runs ROW by row (the last axis: contiguous in both grids), each row's destination start computed
@@ -366,7 +371,7 @@ void mergeSubgridCells(std::vector<T> const &src, std::vector<T> &dst, size_t co
 }
 
 // Accumulates 'other' (which holds only its Eulerian sub-box) into the full grid, mapping each cell by
-// global index -- or into THIS grid's own window of it (mainOrigin/mainDims, --ps-window).
+// global index -- or into THIS grid's own window of it (mainOrigin/mainDims, --grid-window).
 void Quantities::addFromSubgrid(Quantities const &other, size_t const *fullGrid, size_t const *mainOrigin, size_t const *mainDims)
 {
     if (other.ps_subDims[0] == 0) { this->addFrom(other); return; }   // 'other' spans the full grid

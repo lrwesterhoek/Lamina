@@ -13,9 +13,9 @@ numbers instead of impressions, focused on the regimes that matter for void work
 Both sets must come from the SAME snapshot and grid; pass the two on-disk prefixes:
 
     python3 tools/compare_deposits.py --sim TNG300-3-Dark --snap 99 \
-        --a ps_sampled --b ps_output
+        --prefix-a ps_sampled --prefix-b ps_output
 
-'--a' is the reference (sampled), '--b' the candidate (exact).
+'--prefix-a' is the reference (sampled), '--prefix-b' the candidate (exact).
 """
 
 import argparse
@@ -55,13 +55,14 @@ def summarize(name, a, b, mask=None, unit=""):
 
 
 def main() -> int:
-    from dtfelib.cli import add_sim_arg
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    from dtfelib.cli import add_sim_arg, new_parser, deprecated_alias
+    p = new_parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_sim_arg(p)                                  # required unless DTFE_SIM names it
     p.add_argument("--snap", type=int, required=True)
-    p.add_argument("--a", default="ps_sampled", help="reference prefix (default ps_sampled)")
-    p.add_argument("--b", default="ps_output", help="candidate prefix (default ps_output)")
+    p.add_argument("--prefix-a", default="ps_sampled", help="reference prefix (default ps_sampled)")
+    p.add_argument("--prefix-b", default="ps_output", help="candidate prefix (default ps_output)")
+    deprecated_alias(p, "--a", "--prefix-a")
+    deprecated_alias(p, "--b", "--prefix-b")
     p.add_argument("--void-cut", type=float, default=0.2,
                    help="rho/rho_bar below this counts as void interior (default 0.2)")
     args = p.parse_args()
@@ -69,8 +70,8 @@ def main() -> int:
     from dtfelib.io import FieldSet
     from dtfelib.cli import snapdir_path
     snapdir = snapdir_path(args.sim, args.snap)
-    fa = FieldSet(snapdir, prefix=args.a)
-    fb = FieldSet(snapdir, prefix=args.b)
+    fa = FieldSet(snapdir, prefix=args.prefix_a)
+    fb = FieldSet(snapdir, prefix=args.prefix_b)
     print(f"A (reference): {fa!r}")
     print(f"B (candidate): {fb!r}\n")
 

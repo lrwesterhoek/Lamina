@@ -63,7 +63,7 @@ EXPECTED_MEAN="$(printf '%s\n' "${GEN_OUT}" | awk -F': ' '/expected mean density
 echo ">> [3/4] Running PS-DTFE ..."
 rm -f "${OUT_ROOT}.den" "${OUT_ROOT}.streams"
 "${BIN}" "${INPUT_H5}" "${OUT_ROOT}" \
-    --grid "${GRID}" --periodic --field density --input 105 --MpcUnit 1 --verbose 2
+    --grid "${GRID}" --periodic --field density --input-format 105 --mpc-unit 1 --verbose 2
 
 echo ">> [4/4] Checking outputs ..."
 "${PY}" - "${OUT_ROOT}.den" "${OUT_ROOT}.streams" "${GRID}" "${EXPECTED_MEAN}" <<'PY'

@@ -390,7 +390,7 @@ void HDF5_readGadgetData(std::string filename,
         message << MESSAGE::cGreen() << "Done" << MESSAGE::cReset() << "\n";
     }
 
-    // InitialCoordinates may be absent if Lagrangian positions come from a separate --lagrangianInput file
+    // InitialCoordinates may be absent if Lagrangian positions come from a separate --ps-lagrangian-input file
     if ( readData->_lagrangianPosition._assigned )
     {
         Real *lagPositions = readData->lagrangianPosition();
@@ -406,7 +406,7 @@ void HDF5_readGadgetData(std::string filename,
             if ( H5Lexists(group->getId(), "InitialCoordinates", H5P_DEFAULT) <= 0 )
             {
                 delete group;
-                message << "\t No 'InitialCoordinates' dataset found (will use --lagrangianInput).\n" << MESSAGE::Flush;
+                message << "\t No 'InitialCoordinates' dataset found (will use --ps-lagrangian-input).\n" << MESSAGE::Flush;
                 success = false;
                 break;
             }
@@ -700,7 +700,7 @@ void HDF5_readGadgetFile_HI(std::string filename,
     if ( otherSpecies )
         throwError( "You asked for the function that reads in the HI data yet you also asked for reading other particle species. This does not make sense." );
     if ( userOptions->additionalOptions.empty() )
-        throwError( "You need to give the name of the HDF5 files giving the Urchin HI fraction if you want to compute the HI mass distribution. This is inserted using the '--options' program option." );
+        throwError( "You need to give the name of the HDF5 files giving the Urchin HI fraction if you want to compute the HI mass distribution. This is inserted using the '--reader-options' program option." );
 
 
     size_t numberParticlesRead = 0;

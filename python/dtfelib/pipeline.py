@@ -169,7 +169,7 @@ def set_smoothing(cells: float | None = None, mpc: float | None = None) -> float
     """Set the smoothing length for this process: in cells (a script's --smooth: the footprint stays as it is, the
     smoothing comparison's r512_s5_f11 / s20_f11 caches rely on that) or in Mpc (--smooth-mpc: the same physical
     scale in every box, the footprint following it -- config.footprint_for). Keeps config.SMOOTHING_SIGMA_MPC in step. In cells the
-    footprint is the PRODUCTION one even after an Mpc setting or under DTFE_SIGMA_MPC (else '--smooth 10' would give
+    footprint is the PRODUCTION one even after an Mpc setting or under DTFE_SMOOTH_MPC (else '--smooth 10' would give
     r512_s10_f5, neither the production s10_f11 nor the Mpc run). Returns sigma
     in cells. Neither given (or <= 0): nothing changes."""
     if cells and mpc:
@@ -188,7 +188,7 @@ def add_smoothing_mpc_arg(parser: argparse.ArgumentParser) -> argparse.ArgumentP
     """The void scripts' --smooth-mpc (beside make_parser's --smooth in cells)."""
     parser.add_argument("--smooth-mpc", type=float, default=0.0, metavar="MPC",
                         help="the void catalogue's smoothing length in Mpc, the same physical scale in every box (the "
-                             "minima footprint follows); instead of --smooth in cells (also: DTFE_SIGMA_MPC)")
+                             "minima footprint follows); instead of --smooth in cells (also: DTFE_SMOOTH_MPC)")
 
 
 def apply_smoothing_args(args: argparse.Namespace, tag: str = "pipeline") -> float:

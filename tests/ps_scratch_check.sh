@@ -60,8 +60,8 @@ echo ">> generating test snapshot ..."
 FAILS=0
 check() { if [ "$2" -eq 1 ]; then echo "   OK   $1"; else echo "   FAIL $1"; FAILS=$((FAILS+1)); fi; }
 
-BASEARGS=(--grid 128 --field density_a velocity_a dispersion_a --input 105 --MpcUnit 1
-          --verbose 2 --periodic --avg-subsamples 1 --ps-volume-weighted)
+BASEARGS=(--grid 128 --field density_a velocity_a dispersion_a --input-format 105 --mpc-unit 1
+          --verbose 2 --periodic --subsamples 1 --ps-volume-weighted)
 
 compare_outputs() {  # $1 = ref root, $2 = scratch root, $3 = label
     local allsame=1

@@ -11,16 +11,16 @@
 #  C) A run with a DIFFERENT GRID still HITS: the grid does not enter the tessellation, and this
 #     is the whole point of the flag (re-query one snapshot cheaply).
 #  D) Staleness is detected: touching the input file (its mtime is part of the cache identity)
-#     forces a MISS, as does changing '--density0' (which rescales the cached vertex densities).
+#     forces a MISS, as does changing '--mean-density' (which rescales the cached vertex densities).
 #  E) A MULTI-PARTITION run caches every partition SEPARATELY: one file each, all restored on the
 #     next run, and demonstrably different tessellations. 'partNo' stays -1 for all of them, so the
 #     descriptor separates them by their unpadded Lagrangian region -- without that, partitions
 #     2..N would silently load the first partition's tessellation.
-#  E2) The partition padding is part of a partition's identity. The partitions are padded by '--ps-lag-padding 8'
+#  E2) The partition padding is part of a partition's identity. The partitions are padded by '--ps-lagrangian-padding 8'
 #     mean spacings BY DEFAULT (not the Eulerian '--padding' fraction, floored at 0.3 of a partition, which
 #     selects other particles): a default partition records 'lagPadding=8', a default run MISSES the caches of the
-#     Eulerian padding (what '--ps-lag-padding 0' writes, and every older partition cache), and
-#     '--ps-lag-padding 0' hits them.
+#     Eulerian padding (what '--ps-lagrangian-padding 0' writes, and every older partition cache), and
+#     '--ps-lagrangian-padding 0' hits them.
 #  F) A partitioned cache hit also reproduces the uncached run bit-for-bit.
 #  G) The standard binary caches its thread sub-domains too.
 #  G2) ... and a PARTITIONED standard run every partition's: one file per thread sub-box of each
@@ -82,7 +82,7 @@ L = float(sys.argv[2])
 rng.uniform(0.05*L, 0.95*L, size=(20000, 3)).astype(np.float64).tofile(sys.argv[1])
 EOF
 
-COMMON=(--periodic --field density velocity --MpcUnit 1 --max-concurrent 1 --sample-points "${POINTS}")
+COMMON=(--periodic --field density velocity --mpc-unit 1 --max-concurrent 1 --sample-points "${POINTS}")
 
 fails=0
 note() { echo "   $1"; }
@@ -150,8 +150,8 @@ check "$([ "$(hits)" -ge "1" ] && echo 1 || echo 0)" "different --grid still HIT
 
 echo ""
 echo "(D) staleness is detected"
-run "${TMP}/ptc_out_dens" "${GRID}" --tessellation-cache "${CACHE}" --density0 2.5
-check "$([ "$(hits)" = "0" ] && echo 1 || echo 0)" "changed --density0 MISSES"
+run "${TMP}/ptc_out_dens" "${GRID}" --tessellation-cache "${CACHE}" --mean-density 2.5
+check "$([ "$(hits)" = "0" ] && echo 1 || echo 0)" "changed --mean-density MISSES"
 touch "${SNAP}"
 run "${TMP}/ptc_out_touched" "${GRID}" --tessellation-cache "${CACHE}"
 check "$([ "$(hits)" = "0" ] && echo 1 || echo 0)" "touched input file MISSES"
@@ -172,18 +172,18 @@ check "$([ "$(hits)" = "8" ] && echo 1 || echo 0)" "warm partitioned run hits al
 ndistinct=$(echo "${RUN_OUT}" | grep -oE "Reused the cached tessellation \([0-9]+" | grep -oE "[0-9]+$" | sort -u | wc -l | tr -d ' ')
 check "$([ "${ndistinct}" -ge "2" ] && echo 1 || echo 0)" "partitions restored DIFFERENT tessellations (${ndistinct} distinct vertex counts)"
 # E2: the default padding is k = 8 spacings and its descriptor says so; an Eulerian-padded cache
-# (no 'lagPadding' line: what '--ps-lag-padding 0' writes, and every older partition cache)
-# must MISS in a default run, and '--ps-lag-padding 0' must still find it
+# (no 'lagPadding' line: what '--ps-lagrangian-padding 0' writes, and every older partition cache)
+# must MISS in a default run, and '--ps-lagrangian-padding 0' must still find it
 ndesc=$( { grep -l -a "lagPadding=8" "${PCACHE}"/*.tess 2>/dev/null || true; } | wc -l | tr -d ' ')
 check "$([ "${ndesc}" = "8" ] && echo 1 || echo 0)" "E2 every default partition records 'lagPadding=8' in its descriptor (got ${ndesc} of 8)"
 LCACHE2="${CACHE}-lagpad"; rm -rf "${LCACHE2}"; mkdir -p "${LCACHE2}"
-run "${TMP}/ptc_lagpad0_cold" "${GRID}" --tessellation-cache "${LCACHE2}" --partition 2 2 2 --ps-lag-padding 0
+run "${TMP}/ptc_lagpad0_cold" "${GRID}" --tessellation-cache "${LCACHE2}" --partition 2 2 2 --ps-lagrangian-padding 0
 nold=$( { grep -L -a "lagPadding=" "${LCACHE2}"/*.tess 2>/dev/null || true; } | wc -l | tr -d ' ')   # grep -L exits 1 (pipefail)
-check "$([ "$(hits)" = "0" ] && [ "${nold}" = "8" ] && echo 1 || echo 0)" "E2 '--ps-lag-padding 0' writes 8 Eulerian-padded partitions with no 'lagPadding' line (got ${nold})"
+check "$([ "$(hits)" = "0" ] && [ "${nold}" = "8" ] && echo 1 || echo 0)" "E2 '--ps-lagrangian-padding 0' writes 8 Eulerian-padded partitions with no 'lagPadding' line (got ${nold})"
 run "${TMP}/ptc_lagpad_dflt" "${GRID}" --tessellation-cache "${LCACHE2}" --partition 2 2 2
 check "$([ "$(hits)" = "0" ] && echo 1 || echo 0)" "E2 a default run misses the caches of the Eulerian padding (they rebuild once)"
-run "${TMP}/ptc_lagpad0_warm" "${GRID}" --tessellation-cache "${LCACHE2}" --partition 2 2 2 --ps-lag-padding 0
-check "$([ "$(hits)" = "8" ] && echo 1 || echo 0)" "E2 '--ps-lag-padding 0' (the way back) hits its 8 Eulerian partitions"
+run "${TMP}/ptc_lagpad0_warm" "${GRID}" --tessellation-cache "${LCACHE2}" --partition 2 2 2 --ps-lagrangian-padding 0
+check "$([ "$(hits)" = "8" ] && echo 1 || echo 0)" "E2 '--ps-lagrangian-padding 0' (the way back) hits its 8 Eulerian partitions"
 rm -rf "${LCACHE2}"
 
 echo ""
@@ -205,11 +205,11 @@ echo "(G) the STANDARD binary caches its processor-split sub-domains too"
 SCACHE="${CACHE}-std"; rm -rf "${SCACHE}"; mkdir -p "${SCACHE}"
 if [ -x "${DTFE_BIN}" ]; then
     "${DTFE_BIN}" "${SNAP}" "${TMP}/ptc_std_cold" --grid "${GRID}" --periodic --field density \
-           --MpcUnit 1 --tessellation-cache "${SCACHE}" >/dev/null 2>&1 || true
+           --mpc-unit 1 --tessellation-cache "${SCACHE}" >/dev/null 2>&1 || true
     n_cold=$(ls -1 "${SCACHE}"/*.tess 2>/dev/null | wc -l | tr -d ' ')
     check "$([ "${n_cold}" -ge "2" ] && echo 1 || echo 0)" "standard binary wrote one file per sub-domain (${n_cold})"
     "${DTFE_BIN}" "${SNAP}" "${TMP}/ptc_std_warm" --grid "${GRID}" --periodic --field density \
-           --MpcUnit 1 --tessellation-cache "${SCACHE}" >/dev/null 2>&1 || true
+           --mpc-unit 1 --tessellation-cache "${SCACHE}" >/dev/null 2>&1 || true
     n_warm=$(ls -1 "${SCACHE}"/*.tess 2>/dev/null | wc -l | tr -d ' ')
     check "$([ "${n_warm}" = "${n_cold}" ] && echo 1 || echo 0)" "warm run added no files (${n_warm} == ${n_cold}) => every sub-domain hit"
     # '.den' is the deterministic unaveraged deposit. ('.a_den' would NOT do here: its Monte-Carlo
@@ -233,7 +233,7 @@ echo "(G2) a PARTITIONED standard run caches every partition's sub-domains"
 # of the same split shares them).
 PSCACHE="${CACHE}-stdpart"; rm -rf "${PSCACHE}"; mkdir -p "${PSCACHE}"
 if [ -x "${DTFE_BIN}" ]; then
-    SP=(--grid "${GRID}" --periodic --MpcUnit 1 --padding 5 --field density density_a velocity_a --seed 5 --partition 2 2 2
+    SP=(--grid "${GRID}" --periodic --mpc-unit 1 --padding 5 --field density density_a velocity_a --seed 5 --partition 2 2 2
         --max-concurrent 2)
     srun() { env OMP_NUM_THREADS=2 "${DTFE_BIN}" "${SNAP}" "$@" >/dev/null 2>&1 || true; }
     sameout() {  # every output of $1 byte-identical in $2 (the padding test's per-thread files are not outputs)
@@ -283,9 +283,9 @@ sys.stdout.write('1' if f.read(8) == b'DTFECHK1' else '0')
 " "${tessfile}")
 check "${chunked}" "a new cache file carries the chunked body (marker after the descriptor)"
 LCACHE="${CACHE}-legacy"; rm -rf "${LCACHE}"; mkdir -p "${LCACHE}"
-export DTFE_TESS_CACHE_LEGACY=1
+export DTFE_TESSELLATION_CACHE_LEGACY=1
 run "${TMP}/ptc_legacy_write" "${GRID}" --tessellation-cache "${LCACHE}"
-unset DTFE_TESS_CACHE_LEGACY
+unset DTFE_TESSELLATION_CACHE_LEGACY
 run "${TMP}/ptc_legacy_hit" "${GRID}" --tessellation-cache "${LCACHE}"
 check "$([ "$(hits)" -ge 1 ] && echo 1 || echo 0)" "a single-stream (older) cache file still loads"
 cmp -s "${TMP}/ptc_out_nocache.den" "${TMP}/ptc_legacy_hit.den" && check 1 "... bit-identically" || check 0 "... bit-identically"
@@ -299,18 +299,18 @@ rm -rf "${LCACHE}"
 echo ""
 echo "(I) the block-wise reader and writer: exactly CGAL's triangulation, exactly CGAL's bytes"
 # tessellation_cache.h reads the triangulation in blocks (readTriangulationBlocks) instead of through
-# CGAL's operator>> (3.4x faster loads). DTFE_TESS_CACHE_CGAL_IO=1 restores CGAL's reader, and
-# DTFE_TESS_CACHE_FINGERPRINT=1 prints a hash of the loaded STRUCTURE (points, every vertex's stored
+# CGAL's operator>> (3.4x faster loads). DTFE_TESSELLATION_CACHE_CGAL_IO=1 restores CGAL's reader, and
+# DTFE_TESSELLATION_CACHE_FINGERPRINT=1 prints a hash of the loaded STRUCTURE (points, every vertex's stored
 # cell, every cell's vertices and neighbours, in iteration order). Same files, both readers: the same
 # hashes and bit-identical outputs, for one tessellation, for 8 partitions, and for the standard
 # binary's sub-domains (its hierarchy triangulation shares the format).
 fprints() { echo "${RUN_OUT}" | grep "^TESS_FINGERPRINT" | sort || true; }
-export DTFE_TESS_CACHE_FINGERPRINT=1
+export DTFE_TESSELLATION_CACHE_FINGERPRINT=1
 for which in single part; do
     if [ "${which}" = "single" ]; then dir="${CACHE}"; extra=(); else dir="${PCACHE}"; extra=(--partition 2 2 2); fi
-    export DTFE_TESS_CACHE_CGAL_IO=1
+    export DTFE_TESSELLATION_CACHE_CGAL_IO=1
     run "${TMP}/ptc_rd_cgal_${which}" "${GRID}" --tessellation-cache "${dir}" ${extra[@]+"${extra[@]}"}
-    unset DTFE_TESS_CACHE_CGAL_IO
+    unset DTFE_TESSELLATION_CACHE_CGAL_IO
     fp_cgal="$(fprints)"; h_cgal=$(hits)
     run "${TMP}/ptc_rd_block_${which}" "${GRID}" --tessellation-cache "${dir}" ${extra[@]+"${extra[@]}"}
     fp_block="$(fprints)"; h_block=$(hits)
@@ -328,33 +328,33 @@ for which in single part; do
 done
 if [ -x "${DTFE_BIN}" ]; then
     SCACHE="${CACHE}-std"; rm -rf "${SCACHE}"; mkdir -p "${SCACHE}"
-    "${DTFE_BIN}" "${SNAP}" "${TMP}/ptc_std_rd0" --grid "${GRID}" --periodic --field density --MpcUnit 1 \
+    "${DTFE_BIN}" "${SNAP}" "${TMP}/ptc_std_rd0" --grid "${GRID}" --periodic --field density --mpc-unit 1 \
            --tessellation-cache "${SCACHE}" >/dev/null 2>&1 || true
-    fp_cgal="$(DTFE_TESS_CACHE_CGAL_IO=1 "${DTFE_BIN}" "${SNAP}" "${TMP}/ptc_std_rd1" --grid "${GRID}" --periodic \
-               --field density --MpcUnit 1 --tessellation-cache "${SCACHE}" 2>&1 | grep "^TESS_FINGERPRINT" | sort || true)"
+    fp_cgal="$(DTFE_TESSELLATION_CACHE_CGAL_IO=1 "${DTFE_BIN}" "${SNAP}" "${TMP}/ptc_std_rd1" --grid "${GRID}" --periodic \
+               --field density --mpc-unit 1 --tessellation-cache "${SCACHE}" 2>&1 | grep "^TESS_FINGERPRINT" | sort || true)"
     fp_block="$("${DTFE_BIN}" "${SNAP}" "${TMP}/ptc_std_rd2" --grid "${GRID}" --periodic \
-               --field density --MpcUnit 1 --tessellation-cache "${SCACHE}" 2>&1 | grep "^TESS_FINGERPRINT" | sort || true)"
+               --field density --mpc-unit 1 --tessellation-cache "${SCACHE}" 2>&1 | grep "^TESS_FINGERPRINT" | sort || true)"
     check "$([ -n "${fp_block}" ] && [ "${fp_cgal}" = "${fp_block}" ] && echo 1 || echo 0)" \
           "standard binary: identical structure fingerprints ($(echo "${fp_block}" | grep -c . || true) sub-domains)"
     cmp -s "${TMP}/ptc_std_rd1.den" "${TMP}/ptc_std_rd2.den" && check 1 "standard binary: bit-identical '.den'" \
                                                             || check 0 "standard binary: bit-identical '.den'"
     SCACHE2="${CACHE}-std2"; rm -rf "${SCACHE2}"; mkdir -p "${SCACHE2}"
-    DTFE_TESS_CACHE_CGAL_IO=1 "${DTFE_BIN}" "${SNAP}" "${TMP}/ptc_std_wr" --grid "${GRID}" --periodic --field density \
-           --MpcUnit 1 --tessellation-cache "${SCACHE2}" >/dev/null 2>&1 || true
+    DTFE_TESSELLATION_CACHE_CGAL_IO=1 "${DTFE_BIN}" "${SNAP}" "${TMP}/ptc_std_wr" --grid "${GRID}" --periodic --field density \
+           --mpc-unit 1 --tessellation-cache "${SCACHE2}" >/dev/null 2>&1 || true
     same=1; nw=0
     for f in "${SCACHE2}"/*.tess; do nw=$((nw+1)); cmp -s "${f}" "${SCACHE}/$(basename "${f}")" || same=0; done
     check "$([ "${nw}" -ge 2 ] && [ "${same}" = 1 ] && echo 1 || echo 0)" "standard binary: the block writer's ${nw} sub-domain files are byte-identical to CGAL's"
     rm -rf "${SCACHE}" "${SCACHE2}"
 fi
-unset DTFE_TESS_CACHE_FINGERPRINT
+unset DTFE_TESSELLATION_CACHE_FINGERPRINT
 # ... and the block-wise WRITER writes CGAL's bytes: the same run cached by each writer gives
 # byte-identical files (the chunks deflate independently, so equal content means equal files)
 for which in single part; do
     if [ "${which}" = "single" ]; then extra=(); else extra=(--partition 2 2 2); fi
     WA="${CACHE}-wcgal"; WB="${CACHE}-wblock"; rm -rf "${WA}" "${WB}"; mkdir -p "${WA}" "${WB}"
-    export DTFE_TESS_CACHE_CGAL_IO=1
+    export DTFE_TESSELLATION_CACHE_CGAL_IO=1
     run "${TMP}/ptc_wr_cgal" "${GRID}" --tessellation-cache "${WA}" ${extra[@]+"${extra[@]}"}
-    unset DTFE_TESS_CACHE_CGAL_IO
+    unset DTFE_TESSELLATION_CACHE_CGAL_IO
     run "${TMP}/ptc_wr_block" "${GRID}" --tessellation-cache "${WB}" ${extra[@]+"${extra[@]}"}
     same=1; nw=0
     for f in "${WA}"/*.tess; do
@@ -394,13 +394,13 @@ run "${TMP}/ptc_codec_probe" "${GRID}" --tessellation-cache "${CACHE}"
 if grep -q "read with libdeflate" <<< "${RUN_OUT}"; then
     for w in zlib libdeflate; do
         KC="${CACHE}-codec-${w}"; rm -rf "${KC}"; mkdir -p "${KC}"
-        if [ "${w}" = zlib ]; then export DTFE_TESS_CACHE_ZLIB=1; fi
+        if [ "${w}" = zlib ]; then export DTFE_TESSELLATION_CACHE_ZLIB=1; fi
         run "${TMP}/ptc_codec_w_${w}" "${GRID}" --tessellation-cache "${KC}"
-        unset DTFE_TESS_CACHE_ZLIB
-        if [ "${w}" = libdeflate ]; then export DTFE_TESS_CACHE_ZLIB=1; fi
+        unset DTFE_TESSELLATION_CACHE_ZLIB
+        if [ "${w}" = libdeflate ]; then export DTFE_TESSELLATION_CACHE_ZLIB=1; fi
         run "${TMP}/ptc_codec_r_${w}" "${GRID}" --tessellation-cache "${KC}"
         reader=$(echo "${RUN_OUT}" | grep -o "read with [a-z]*" | head -1 | cut -d' ' -f3)
-        unset DTFE_TESS_CACHE_ZLIB
+        unset DTFE_TESSELLATION_CACHE_ZLIB
         same=1
         for f in "${TMP}"/ptc_out_nocache.*; do
             ext="${f##*ptc_out_nocache}"; cmp -s "${f}" "${TMP}/ptc_codec_r_${w}${ext}" || same=0

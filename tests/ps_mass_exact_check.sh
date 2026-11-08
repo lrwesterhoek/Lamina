@@ -22,18 +22,18 @@
 #       deferred tets deposited on 1 thread and on more than 1 in slab mode (that path never keeps float copies, so the bytes
 #       alone would also match on a binary that silently ran the 4-thread run on one). (DTFE_TEST_PRECISION=double:
 #       the double build keeps its double sums, which agree to 1e-12 instead of bit for bit.)
-#   X4  PS_MASS_AUDIT=1, when the binary carries the audit (ps_mass_audit.h): every pass of every run above has
+#   X4  DTFE_MASS_AUDIT=1, when the binary carries the audit (ps_mass_audit.h): every pass of every run above has
 #       'gained/shares-1' = 0 (the CPU's shares all reached the grid; the double build's sums of 1.8e6 shares
 #       round: < 1e-9 there) and 'grid/tets-1' below 1e-7 (one float rounding per cell, <= 6e-8). A binary
 #       without the audit skips this check (the others still fail it).
-#   X5  PS_GPU_FLOAT_MASS=1 (single build) selects the float grid, on the CPU too, for A/B comparisons:
+#   X5  DTFE_GPU_FLOAT_MASS=1 (single build) selects the float grid, on the CPU too, for A/B comparisons:
 #       X1's CPU run then writes a different '.a_den' (its mean is reported).
-#   X6  the audit only observes: every run above sets PS_MASS_AUDIT=1, so X1's 4-thread GPU run and X2's copy-mode
-#       run are repeated with PS_MASS_AUDIT=0 (the production path) and must write the same '.a_den'.
+#   X6  the audit only observes: every run above sets DTFE_MASS_AUDIT=1, so X1's 4-thread GPU run and X2's copy-mode
+#       run are repeated with DTFE_MASS_AUDIT=0 (the production path) and must write the same '.a_den'.
 #   X7  the copy mode shares its counts and flags: the int stream count, the two hidden-stream flags and the
 #       caustic mask are written by every thread into the real arrays (relaxed atomics), as the fixed-point words are,
 #       so the single build keeps NO private copy. 32^3 crossed waves (multi-stream) on 64^3 at nSub 2, --ps-caustics,
-#       PS_MASS_AUDIT=0, copy mode (DTFE_DEPOSIT_SLABS=0) on 1, 4 and 10 threads: the logs must say 'CPU deposit on 4 /
+#       DTFE_MASS_AUDIT=0, copy mode (DTFE_DEPOSIT_SLABS=0) on 1, 4 and 10 threads: the logs must say 'CPU deposit on 4 /
 #       10 threads (copy mode' (single build: '0 MB of private accumulators'), and EVERY output file is byte-identical
 #       to the 1-thread run's. Double build: the counts, flags and masks (.a_streams .a_hidden_streams .caustic
 #       .causticClass) byte-identical, the double sums (.a_den .a_vel, still copies summed in thread order) to 1e-12.
@@ -77,7 +77,7 @@ run() {
     while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
     shift
     rm -f "$TMP/$tag".*
-    env PS_MASS_AUDIT=1 ${envs[@]+"${envs[@]}"} "${PS_BIN}" "$snap" "$TMP/$tag" --periodic --input 105 --MpcUnit 1 --verbose 2 \
+    env DTFE_MASS_AUDIT=1 ${envs[@]+"${envs[@]}"} "${PS_BIN}" "$snap" "$TMP/$tag" --periodic --input-format 105 --mpc-unit 1 --verbose 2 \
         --field density_a velocity_a "$@" > "$TMP/$tag.log" 2>&1 || { echo "FAIL: $tag exited non-zero (see $TMP/$tag.log)"; exit 1; }
     case " $* " in
         *" --gpu "*)
@@ -88,8 +88,8 @@ run() {
     esac
     return 0
 }
-L=(--grid 2 --avg-subsamples 16)
-P=(--grid 4 --avg-subsamples 4 --ps-vertex-mass --partition 1 1 1)
+L=(--grid 2 --subsamples 16)
+P=(--grid 4 --subsamples 4 --ps-vertex-mass --partition 1 1 1)
 echo ">> X1 lattice (deferral-heavy), CPU"
 run lat_cpu_p1 "$LAT" -- "${L[@]}" --partition 1 1 1
 run lat_cpu_p2 "$LAT" -- "${L[@]}" --partition 2 2 2
@@ -99,21 +99,21 @@ if [ "$GPU" = 1 ]; then
     run lat_gpu_p1_t1 "$LAT" DTFE_DEPOSIT_THREADS=1 -- "${L[@]}" --partition 1 1 1 --gpu
     run lat_gpu_p2 "$LAT" -- "${L[@]}" --partition 2 2 2 --gpu
     run lat_gpu_rel "$LAT" -- "${L[@]}" --partition 1 1 1 --gpu --ps-halo-release 1.2
-    run lat_gpu_p1_na "$LAT" DTFE_DEPOSIT_THREADS=4 PS_MASS_AUDIT=0 -- "${L[@]}" --partition 1 1 1 --gpu
+    run lat_gpu_p1_na "$LAT" DTFE_DEPOSIT_THREADS=4 DTFE_MASS_AUDIT=0 -- "${L[@]}" --partition 1 1 1 --gpu
 fi
 echo ">> X2/X3 pancake (heavy accumulation), CPU on 1 thread, 4 (copy mode) and 4 (slab mode)"
 run pan_t1 "$PAN" DTFE_DEPOSIT_THREADS=1 -- "${P[@]}"
 run pan_t4c "$PAN" DTFE_DEPOSIT_THREADS=4 DTFE_DEPOSIT_SLABS=0 -- "${P[@]}"
 run pan_t4s "$PAN" DTFE_DEPOSIT_THREADS=4 DTFE_DEPOSIT_SLABS=1 -- "${P[@]}"
-run pan_t4c_na "$PAN" DTFE_DEPOSIT_THREADS=4 DTFE_DEPOSIT_SLABS=0 PS_MASS_AUDIT=0 -- "${P[@]}"
+run pan_t4c_na "$PAN" DTFE_DEPOSIT_THREADS=4 DTFE_DEPOSIT_SLABS=0 DTFE_MASS_AUDIT=0 -- "${P[@]}"
 echo ">> X7 crossed waves with caustics, copy mode on 1, 4 and 10 threads (shared counts and flags)"
 for t in 1 4 10; do
-    run "cw_t$t" "$CW" DTFE_DEPOSIT_THREADS=$t DTFE_DEPOSIT_SLABS=0 PS_MASS_AUDIT=0 -- \
-        --grid 64 --avg-subsamples 2 --ps-caustics --partition 1 1 1
+    run "cw_t$t" "$CW" DTFE_DEPOSIT_THREADS=$t DTFE_DEPOSIT_SLABS=0 DTFE_MASS_AUDIT=0 -- \
+        --grid 64 --subsamples 2 --ps-caustics --partition 1 1 1
 done
 if ! precision_double; then
-    echo ">> X5 PS_GPU_FLOAT_MASS=1 (the float grid, for A/B)"
-    run lat_cpu_float "$LAT" PS_GPU_FLOAT_MASS=1 -- "${L[@]}" --partition 1 1 1
+    echo ">> X5 DTFE_GPU_FLOAT_MASS=1 (the float grid, for A/B)"
+    run lat_cpu_float "$LAT" DTFE_GPU_FLOAT_MASS=1 -- "${L[@]}" --partition 1 1 1
 fi
 
 "$PY" - "$TMP" "$GPU" "${DTFE_TEST_PRECISION}" <<'PYEOF'
@@ -171,7 +171,7 @@ if gpu:
     slab4 = s4 is not None and t4 is not None and int(s4.group(1)) == t4
     check("X3", t1 == 1 and t4 is not None and t4 > 1 and slab4, f"the deferred tets ran on {t1} thread(s) and on {t4} "
           f"({'slab mode' if slab4 else 'NOT slab mode'}); want 1, and more than 1 in slab mode")
-    same("lat_gpu_p1_na", "lat_gpu_p1", "lattice, GPU, PS_MASS_AUDIT=0 vs 1", "X6")
+    same("lat_gpu_p1_na", "lat_gpu_p1", "lattice, GPU, DTFE_MASS_AUDIT=0 vs 1", "X6")
 else:
     print("  SKIP X1/X3 GPU halves: no GPU build")
 mean_ok("pan_t1", "pancake, CPU, 1 thread")
@@ -179,7 +179,7 @@ slab = re.search(r"CPU deposit in SLAB mode: (\d+) threads", (tmp / "pan_t4s.log
 check("X3", slab is not None and int(slab.group(1)) > 1, f"the slab run used slab mode ({slab.group(1) if slab else 'NOT'} threads)")
 same("pan_t1", "pan_t4c", "pancake, CPU, 1 thread vs 4 (copy mode)")
 same("pan_t1", "pan_t4s", "pancake, CPU, 1 thread vs 4 (slab mode)")
-same("pan_t4c_na", "pan_t4c", "pancake, CPU, 4 threads (copy mode), PS_MASS_AUDIT=0 vs 1", "X6")
+same("pan_t4c_na", "pan_t4c", "pancake, CPU, 4 threads (copy mode), DTFE_MASS_AUDIT=0 vs 1", "X6")
 
 # X7: the copy mode on 1/4/10 threads, its counts and flags shared -- the thread count from the log, every file cmp'ed
 SHARED = {".a_streams", ".a_hidden_streams", ".caustic", ".causticClass"}   # integer counts, flags, masks
@@ -221,20 +221,20 @@ for f in sorted(tmp.glob("*.log")):
         if g and v: rows.append((f.stem, float(g.group(1)), float(v.group(1))))
         else: cut.append(f.stem)
 if cut:
-    check("X4", False, f"every PS_MASS_AUDIT line parses: {len(cut)} of {len(rows) + len(cut)} do not "
+    check("X4", False, f"every DTFE_MASS_AUDIT line parses: {len(cut)} of {len(rows) + len(cut)} do not "
           f"({' '.join(sorted(set(cut)))}: cut by another thread's output?)")
 if rows:
     gs = [(t, g) for t, g, _ in rows]; gt = [(t, v) for t, _, v in rows]
     wg = max(gs, key=lambda p: abs(p[1])); wt = max(gt, key=lambda p: abs(p[1]))
     check("X4", (abs(wg[1]) < 1e-9) if double else all(v == 0. for _, v in gs),
-          f"PS_MASS_AUDIT: gained/shares-1 over {len(rows)} passes: worst {wg[1]:.1e} ({wg[0]}; "
+          f"DTFE_MASS_AUDIT: gained/shares-1 over {len(rows)} passes: worst {wg[1]:.1e} ({wg[0]}; "
           f"{'< 1e-9' if double else 'must be exactly 0'})")
-    check("X4", abs(wt[1]) < 1e-7, f"PS_MASS_AUDIT: grid/tets-1 worst {wt[1]:+.1e} ({wt[0]}; |.| < 1e-7)")
+    check("X4", abs(wt[1]) < 1e-7, f"DTFE_MASS_AUDIT: grid/tets-1 worst {wt[1]:+.1e} ({wt[0]}; |.| < 1e-7)")
 elif not cut:
-    print("  SKIP X4: this binary prints no PS_MASS_AUDIT lines")
+    print("  SKIP X4: this binary prints no DTFE_MASS_AUDIT lines")
 if not double:
     a, b = (tmp / "lat_cpu_float.a_den").read_bytes(), (tmp / "lat_cpu_p1.a_den").read_bytes()
-    check("X5", len(a) == len(b) and a != b, f"PS_GPU_FLOAT_MASS=1 writes the float grid (box mean - 1 = "
+    check("X5", len(a) == len(b) and a != b, f"DTFE_GPU_FLOAT_MASS=1 writes the float grid (box mean - 1 = "
           f"{den('lat_cpu_float').mean() - 1.0:+.2e}, the fixed-point grid {den('lat_cpu_p1').mean() - 1.0:+.2e})")
 print("RESULT:", "PASS  (the mass grid is exact and thread-independent on the CPU, and after a GPU deposit)"
       if not fails else f"FAIL ({fails} check(s))")

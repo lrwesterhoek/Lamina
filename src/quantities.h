@@ -52,7 +52,7 @@ Real const PS_STREAM_TOL = Real(1.e-3);
 // A partition sub-grid cell (local coords c; sub-grid dims m, global origin o) -> its index in the full grid 'full'
 // (used by quantities.cc SubgridRowMap/mergeSubgridCells and the fixed-point merge, src/ps_fixed_merge.h). Each cell
 // maps to its global row-major index; o, m, full are in grid cells.
-// The destination may itself be a WINDOW of the full grid (--ps-window: mainOrigin/mainDims given):
+// The destination may itself be a WINDOW of the full grid (--grid-window: mainOrigin/mainDims given):
 // a source cell is then mapped to its window-local index and skipped when it lies outside.
 inline bool subgridTarget(size_t const *c, size_t const *o, size_t const *full,
                           size_t const *mainOrigin, size_t const *mainDims, size_t &g)
@@ -107,6 +107,64 @@ struct Quantities
     std::vector<Real>                         disp_weight;        // sum(m_s)
     std::vector< Pvector<Real,noVelComp> >    disp_velocity;      // sum(m_s v_s)
     std::vector<Real>                         caustic_bits;       // --ps-caustics: per-cell caustic mask, small exact ints in float (bit0 = a det(Ax)>0 stream overlaps the cell, bit1 = det<0, higher bits = the stratification of CGAL_triangulation/ps_caustic_class.h). OR-merged across partitions (addFrom/addFromSubgrid) and kept FULL right through post-processing: writeOutputData emits '.causticClass' from it and only then binarizes it in place to the 0/1 fold flag for '.caustic'. There is deliberately no second grid -- see the note there
+    // --face-gradient (docs/cleanup-plan.md P10.3): each cell's FACE sums of the streams, its lower and its upper face
+    // per axis (side 0 / 1): face_velocity[(side*NO_DIM + a)*3 + j] = the integral over that face of S_j, S = the sum of
+    // the streams' velocities; face_coverage[side*NO_DIM + a] = the integral of N, their count (the covered area). A
+    // face's two cells hold the same sums. normalizePhaseSpace makes the gradient of the face-averaged MEAN velocity
+    // from them, (S_up/N_up - S_lo/N_lo) / dx: conservative (it telescopes: a periodic box's mean divergence is 0), the
+    // stream average itself where the stream count is constant through the cell, exact for a planar flow. Never written.
+    std::vector< Pvector<Real,2*NO_DIM*noVelComp> > face_velocity;
+    std::vector< Pvector<Real,2*NO_DIM> >          face_coverage;
+    // ... and the momentum through each face (P10.4): face_momentum[side*NO_DIM + a] = the integral of sum_s rho_s v_s,a
+    // (rho/rho_bar times velocity, times area); its cell difference over the volume is the mass flux divergence
+    std::vector< Pvector<Real,2*NO_DIM> >          face_momentum;
+    Real psFaceDx[NO_DIM] = {};   // the grid spacing the gradient divides by (set before the normalization)
+    // --face-gradient: div(sum_s rho_s v_s) per cell, rho/rho_bar times velocity per length: by continuity -a d(1+delta)/dt
+    // (the rate a region gains or loses mass), written as '.a_massFluxDiv'
+    std::vector<Real>                         mass_flux_divergence;
+    // --face-gradient: the divergence of the stream average of each stream's own gradient (the deposit's regular part,
+    // what 'velocity_gradient' held before the mean flow's replaced it), written as '.a_velDivStreams'
+    std::vector<Real>                         velocity_divergence_streams;
+    // --face-gradient, cell i once its velocity_gradient is normalized: keep the regular part's divergence, then make
+    // the gradient the face-averaged mean flow's along every axis both of whose faces are covered. A no-op without the
+    // face sums.
+    inline void psFaceGradientCell(size_t const i)
+    {
+        if ( face_velocity.empty() ) return;
+        if ( not face_momentum.empty() )
+        {   // the mass flux: (the momentum out through the upper faces - in through the lower) / the cell volume
+            Real vol = Real(1.), flux = Real(0.);
+            for (int a = 0; a < NO_DIM; ++a)
+            {
+                vol *= psFaceDx[a];
+                flux += face_momentum[i][NO_DIM + a] - face_momentum[i][a];
+            }
+            mass_flux_divergence[i] = vol > Real(0.) ? flux / vol : Real(0.);
+        }
+        Pvector<Real,noGradComp> &g = velocity_gradient[i];
+        velocity_divergence_streams[i] = g[0] + g[NO_DIM+1] + g[2*NO_DIM+2];   // [j*NO_DIM+i]: the trace
+        for (int a = 0; a < NO_DIM; ++a)
+        {
+            Real const nLo = face_coverage[i][a], nUp = face_coverage[i][NO_DIM + a];
+            if ( !( nLo > Real(0.) && nUp > Real(0.) ) || !( psFaceDx[a] > Real(0.) ) ) continue;
+            for (size_t j = 0; j < noVelComp; ++j)
+                g[j*NO_DIM + size_t(a)] = ( face_velocity[i][size_t(NO_DIM + a)*noVelComp + j] / nUp
+                                            - face_velocity[i][size_t(a)*noVelComp + j] / nLo ) / psFaceDx[a];
+        }
+    }
+    // before / after the cells: the regular part's divergence grid sized, the face sums released
+    inline void psFaceGradientBegin(size_t const n)
+    {
+        if ( face_velocity.empty() ) return;
+        velocity_divergence_streams.assign( n, Real(0.) );
+        if ( not face_momentum.empty() ) mass_flux_divergence.assign( n, Real(0.) );
+    }
+    inline void psFaceGradientEnd()
+    {
+        std::vector< Pvector<Real,2*NO_DIM*noVelComp> >().swap( face_velocity );
+        std::vector< Pvector<Real,2*NO_DIM> >().swap( face_coverage );
+        std::vector< Pvector<Real,2*NO_DIM> >().swap( face_momentum );
+    }
     std::vector<Real>                         hidden_streams;     // PS-DTFE: a small bitmask in Real, written as '.hidden_streams'. BIT 1 (value 1) = the cell holds multi-stream volume its '.streams' does not show: a negatively oriented (folded) tetrahedron overlaps it with positive volume while '.streams' reads single-stream -- a fold thinner than the sub-sample spacing. Exact in a periodic box (degree-1 map: a point is multi-stream iff a flipped tet covers it), so the single-stream mask is '.streams == 1 (to PS_STREAM_TOL) and not (hidden_streams & 1)': every point of such a cell lies on one stream. BIT 2 (value 2) = the cell received MASS from a tetrahedron none of whose sub-samples lies in it (the centroid fallback, or a --ps-halo-release tet): the cell mean includes a sub-resolution piece, possibly of the SAME stream -- a quadrature note, not a stream count (non-periodic runs also set bit 1 there, conservatively). Legacy '.unresolved' files hold only 0/1 (the mass flag), which reads as bit 1 and so stays conservative. OR-merged like caustic_bits; finalizeHiddenStreams() clears bit 1 where '.streams' already reads multi-stream
     // PS-DTFE partition sub-grid in global grid-cell units, so addFromSubgrid() can map cells back.
     size_t ps_subOrigin[NO_DIM] = {0};
@@ -177,6 +235,11 @@ struct Quantities
         f( FieldInfo{ "mass_weight", nullptr, SIZE_AT_MERGE, SCALE_WEIGHT, false }, sum, &Q::mass_weight );
         f( FieldInfo{ "disp_weight", nullptr, SIZE_AT_MERGE, SCALE_MASS, false }, sum, &Q::disp_weight );
         f( FieldInfo{ "disp_velocity", nullptr, SIZE_AT_MERGE, SCALE_VEL_M, false }, sum, &Q::disp_velocity );
+        // (the face sums: S's scale is the gradient's -- vmax * dx^2 under '--ps-volume-weighted', which --face-gradient
+        //  requires -- N's the weight's, a cell volume: a covered face area over dx is a few of them)
+        f( FieldInfo{ "face_velocity", nullptr, SIZE_AT_MERGE, SCALE_GRAD_W, false }, sum, &Q::face_velocity );
+        f( FieldInfo{ "face_coverage", nullptr, SIZE_AT_MERGE, SCALE_WEIGHT, false }, sum, &Q::face_coverage );
+        f( FieldInfo{ "face_momentum", nullptr, SIZE_AT_MERGE, SCALE_GRAD_W, false }, sum, &Q::face_momentum );
         f( FieldInfo{ "caustic_bits", nullptr, SIZE_PS_CAUSTICS, SCALE_ONE, false }, orMask, &Q::caustic_bits );
         f( FieldInfo{ "hidden_streams", nullptr, SIZE_PS_ANY, SCALE_ONE, false }, orMask, &Q::hidden_streams );
 #else
@@ -202,7 +265,7 @@ struct Quantities
     // cellVolume * averageDensity so the per-cell mass is reconstructed from the summed
     // (rho/rho_bar) density; 0 normalizes by the mass_weight grid only.
     void normalizePhaseSpace(Field const &field, Real const weightFromDensityScale = Real(0.));
-    void addFromSubgrid(Quantities const &other, size_t const *fullGrid, size_t const *mainOrigin = nullptr, size_t const *mainDims = nullptr);   // mainOrigin/mainDims: this grid is itself a window of the full grid (--ps-window) // like addFrom but 'other' stores only its Eulerian box; maps each cell into the full grid (dims fullGrid)
+    void addFromSubgrid(Quantities const &other, size_t const *fullGrid, size_t const *mainOrigin = nullptr, size_t const *mainDims = nullptr);   // mainOrigin/mainDims: this grid is itself a window of the full grid (--grid-window) // like addFrom but 'other' stores only its Eulerian box; maps each cell into the full grid (dims fullGrid)
     void finalizeHiddenStreams();   // after the merge: clear '.hidden_streams' bit 1 where '.streams' reads multi-stream (idempotent)
 #endif
 };

@@ -68,7 +68,7 @@ def main():
          "--amplitude-factor", str(AMP), "--jitter-frac", str(JITTER), "--seed", str(SEED)])
 
     common = ["--grid", str(GRID), "--periodic", "--field", "density", "velocity",
-              "--input", "105", "--MpcUnit", "1", "--verbose", "0"]
+              "--input-format", "105", "--mpc-unit", "1", "--verbose", "0"]
     run([dtfe, snap, std_root] + common)
     run([psdtfe, snap, ps_root] + common)
 

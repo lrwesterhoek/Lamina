@@ -389,7 +389,7 @@ class TabsMixin:
         deposit.currentIndexChanged.connect(
             lambda _i: self._deposit_changed(deposit, gpu, self._tab_estimator(tab),
                                              self.custom.dim if tab == "custom" else 3))
-        g.form.addRow("Deposit", deposit)
+        g.form.addRow("Cell average", deposit)        # both estimators: sampled or exact (the flag is --exact-average)
         g.form.addRow("Grid", row)
         g.form.addRow("", gpu)
         for role, w in (("deposit", deposit), ("grid", combo), ("grid_cells", cells), ("nsub", nsub), ("gpu", gpu)):
@@ -447,7 +447,7 @@ class TabsMixin:
         col.addWidget(self._preset_group("grids"))
         est = QHBoxLayout()
         self.ps_radio = QRadioButton("PS-DTFE (phase space)")
-        self.dtfe_radio = QRadioButton("DTFE (standard)")
+        self.dtfe_radio = QRadioButton("Standard DTFE")
         grp = QButtonGroup(self)
         grp.addButton(self.ps_radio)
         grp.addButton(self.dtfe_radio)
@@ -611,7 +611,7 @@ class TabsMixin:
         conc = QSpinBox(minimum=0, maximum=16)
         conc.setSpecialValueText("auto")
         conc.valueChanged.connect(self._changed)
-        f.addRow("Concurrent partitions", conc)
+        f.addRow("Concurrent triangulations", conc)   # --max-concurrent: the triangulations built at once, either binary
         scratch = QLineEdit()
         scratch.setPlaceholderText("none: grids in RAM")
         scratch.editingFinished.connect(self._changed)
@@ -632,7 +632,7 @@ class TabsMixin:
             # instead (the only way out when the resume is refused: other settings, an incomplete checkpoint)
             start_over = QCheckBox("Start over: do not resume a killed run's checkpoint")
             tip(start_over, "Ticked, the run starts from the beginning and replaces the checkpoint of a killed run\n"
-                            "(PS_RESUME=0; standard DTFE: DTFE_RESUME=0).",
+                            "(DTFE_RESUME=0, both run scripts).",
                 "A partitioned run that was killed keeps a checkpoint of its finished partitions, and the next run of "
                 "the same job continues from it. Starting over is needed when the settings changed since, as the "
                 "program then refuses to resume.")
@@ -681,12 +681,12 @@ class TabsMixin:
         return g
 
     def _resources_summary(self, tab: str) -> str:
-        """The folded Resources group's one line: 'auto plan · 4 partitions in flight · 40 GB budget …'."""
+        """The folded Resources group's one line: 'auto plan · 4 triangulations at once · 40 GB budget …'."""
         w = lambda role: self._shared(tab, role)            # noqa: E731
         part, conc = w("partition"), w("concurrent")
         parts = [L["auto_plan"] if not part.value() else f"{part.value()}{part.suffix()}",
                  L["auto_concurrency"] if not conc.value() else
-                 f"{conc.value()} partition{'s' if conc.value() != 1 else ''} in flight"]
+                 f"{conc.value()} triangulation{'s' if conc.value() != 1 else ''} at once"]
         if w("budget").value():
             parts.append(f"{w('budget').value():g} GB budget")
         parts.append("double precision" if w("precision").currentData() == "double" else "single precision")
@@ -762,7 +762,7 @@ class TabsMixin:
         f = QFormLayout(g)
         est = QHBoxLayout()
         self.o_ps = QRadioButton("PS-DTFE (phase space: streams, caustics)")
-        self.o_dtfe = QRadioButton("DTFE (standard)")
+        self.o_dtfe = QRadioButton("Standard DTFE")
         grp = QButtonGroup(self)
         grp.addButton(self.o_ps)
         grp.addButton(self.o_dtfe)
@@ -812,9 +812,9 @@ class TabsMixin:
         self.o_window = QLineEdit(placeholderText="none: the whole grid")
         option_tip(self.o_window, "window", more="\n\nGive x0 x1 y0 y1 z0 z1 in Mpc (2D: four numbers).")
         self.o_window.editingFinished.connect(self._changed)
-        f.addRow("Window (Mpc)", self.o_window)
+        f.addRow("Grid window (Mpc)", self.o_window)     # --grid-window (not the Pipeline's plane window)
         self.o_sdens = QComboBox()
-        self.o_sdens.addItem("DTFE interpolation of the vertex densities (default)", "dtfe")
+        self.o_sdens.addItem("linear: the DTFE interpolation of the vertex densities (default)", "linear")
         self.o_sdens.addItem("geometric: the tetrahedron's mass over its volume", "geometric")
         option_tip(self.o_sdens, "stream_density")
         self.o_sdens.currentIndexChanged.connect(self._changed)
@@ -980,10 +980,10 @@ class TabsMixin:
         self.p_window = QLineEdit(placeholderText="whole box: u0 u1 v0 v1")
         tip(self.p_window, "Image only this part of the plane: horizontal u0..u1 and vertical v0..v1 in Mpc;\n"
                            "blank = the whole box.",
-            "The u0, u1, v0, v1 options of make_image_plane.py. Pixels stay square, so the vertical pixel count follows "
-            "the window's aspect.")
+            "The plane window of make_image_plane.py (PLANE_WINDOW). Pixels stay square, so the vertical pixel count "
+            "follows the window's aspect.")
         self.p_window.editingFinished.connect(self._changed)
-        f.addRow("Window (Mpc)", self.p_window)
+        f.addRow("Plane window (Mpc)", self.p_window)
         col.addWidget(g)
 
         # the grid, deposit and GPU in a group of their own (as the Grids tab's 'Estimator and grid'): added to the
@@ -1018,7 +1018,7 @@ class TabsMixin:
         rf = QFormLayout(self.p_render_box)
         rf.setContentsMargins(INDENT, 0, 0, 0)
         self.p_rfields = QLineEdit(placeholderText="all the run wrote: " + ", ".join(rs.POINTEVAL_FIELDS))
-        self.p_rfields.setToolTip("A comma-separated subset of the point-evaluated fields (the fields option of "
+        self.p_rfields.setToolTip("A subset of the point-evaluated fields, separated by spaces (the maps option of "
                                   "plot_pointeval.py); blank = every field the run wrote")
         self.p_rfields.editingFinished.connect(self._changed)
         rf.addRow("Fields", self.p_rfields)

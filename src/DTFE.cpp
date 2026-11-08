@@ -58,11 +58,11 @@
 #include "partition_checkpoint.h"   // checkpoint + '--resume' of a partitioned run (both binaries)
 #include "web_fields.h"   // postProcessWebFields: the derived velocity fields and the V-web / T-web (web_fields.cc)
 #ifdef PHASE_SPACE
-#include "CGAL_triangulation/ps_mass_audit.h"   // PS_MASS_AUDIT=1: the run's mass closure after the merge
+#include "CGAL_triangulation/ps_mass_audit.h"   // DTFE_MASS_AUDIT=1: the run's mass closure after the merge
 #include "ps_merge_spill.h"   // the staged ordered merge's spill of parked sub-grids to disk
-#include "ps_fixed_merge.h"   // '--fixed-point-merge': the order-free merge into exact integer grids
+#include "ps_fixed_merge.h"   // '--ps-merge fixed-point': the order-free merge into exact integer grids
 #endif
-#include "io/io.h"         // readInputData: the late read of a --ps-window run that started without its particles
+#include "io/io.h"         // readInputData: the late read of a --grid-window run that started without its particles
 #include "CGAL_triangulation/ps_deposit_params.h"   // fixedShareDrops: the non-finite guard's counts
 
 
@@ -117,7 +117,7 @@ static void DTFE_parallelImpl(vector<Particle_data> *allParticles, vector<Sample
                               User_options &userOptions, Quantities *uQuantities, Quantities *aQuantities,
                               DTFEPrepared *prepared);
 
-// Builds the velocity-space DTFE density g_i used by the approximate phase-space density (--approxPSD).
+// Builds the velocity-space DTFE density g_i used by the approximate phase-space density (--approx-phase-space-density).
 #if defined(VELOCITY) && defined(SCALAR) && !defined(PHASE_SPACE)
 extern void computeVelocitySpaceDensity(vector<Particle_data> &particles,
                                          User_options &userOptions);
@@ -129,6 +129,7 @@ extern void computeVelocitySpaceDensity(vector<Particle_data> &particles,
 // each partition counts itself off when it is done with its build and deposit.
 extern std::atomic<int> dtfeTriangulationConcurrency;
 extern std::atomic<int> dtfeTriangulationsRemaining;
+extern std::atomic<int> dtfePartitionsInFlight;   // (thread_count.h: the dynamic PS loop's partitions in flight)
 struct ConcurrentTriangulationPlan
 {
     ConcurrentTriangulationPlan(int const concurrency, int const total)
@@ -334,7 +335,7 @@ struct PSPartitionPlan
         for (int d=0; d<NO_DIM; ++d)
             eulerLen[d] = state.options.boxCoordinates[2*d+1] - state.options.boxCoordinates[2*d];
 
-        // --ps-lag-padding <k> (default 8): k mean particle spacings, (V/N)^(1/NO_DIM) of
+        // --ps-lagrangian-padding <k> (default 8): k mean particle spacings, (V/N)^(1/NO_DIM) of
         // the Lagrangian domain (the period when periodic, the cloud's bounding box otherwise); N from the recorded
         // globals when the particles are not read yet (ps_globals_record.h)
         double lagSpacing = 0.;
@@ -345,8 +346,8 @@ struct PSPartitionPlan
             for (int d=0; d<NO_DIM; ++d) vol *= double( periodicCopies ? eulerLen[d] : lagLen[d] );
             if ( nPart > 0. and vol > 0. ) lagSpacing = std::pow( vol / nPart, 1. / double(NO_DIM) );
         }
-        // Lagrangian padding per axis: k spacings with no floor (--ps-lag-padding, the default) -- or, with
-        // '--ps-lag-padding 0' (or no particle count to take a spacing from), the Eulerian fraction floored at 0.30
+        // Lagrangian padding per axis: k spacings with no floor (--ps-lagrangian-padding, the default) -- or, with
+        // '--ps-lagrangian-padding 0' (or no particle count to take a spacing from), the Eulerian fraction floored at 0.30
         // of a partition cell
         for (int d=0; d<NO_DIM; ++d)
         {
@@ -377,13 +378,13 @@ struct PSPartitionPlan
                 << MESSAGE::cReset();
         // name the rule in the log: a default of 8 with no particle count to take a spacing from falls back to the
         // Eulerian rule, and the log must not look like k spacings then
-        if ( lagSpacing > 0. ) message << " (--ps-lag-padding " << state.options.psLagPadding << " mean spacings of " << lagSpacing << ")";
-        else message << " (the Eulerian --padding rule" << ( state.options.psLagPadding > Real(0.) ? ": no particle count for a spacing)" : ", --ps-lag-padding 0)" );
+        if ( lagSpacing > 0. ) message << " (--ps-lagrangian-padding " << state.options.psLagPadding << " mean spacings of " << lagSpacing << ")";
+        else message << " (the Eulerian --padding rule" << ( state.options.psLagPadding > Real(0.) ? ": no particle count for a spacing)" : ", --ps-lagrangian-padding 0)" );
         message << "\n" << MESSAGE::Flush;
 
         // periodic: the period the partitions tile, per axis -- [seam - L, seam) with every periodic copy an
         // exact shift where the padding allows it (subpartition.h psPeriodicSeam). A function of
-        // the bounding box, the period and the padding only, so the composite server and a --ps-window run
+        // the bounding box, the period and the padding only, so the composite server and a --grid-window run
         // started from the recorded globals tile the same way as the batch run whose caches they reuse
         for (int d=0; d<NO_DIM; ++d)
         {
@@ -588,7 +589,7 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
         }
     }
 
-    // --ps-window: the auto-tuner sizes the grids by the cells actually allocated -- the window's --
+    // --grid-window: the auto-tuner sizes the grids by the cells actually allocated -- the window's --
     // so its cell range must be known first (the header's box is final here; DTFE() computes it again,
     // identically). Without this it would see the whole virtual grid of a zoom (2759x3197x512 = 524 GB),
     // call the run impossible and fall back to one partition at a time.
@@ -618,7 +619,7 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
                 << MESSAGE::printElements( m.partition, "," ) << "] is the checkpoint's.\n" << MESSAGE::Flush;
     }
 
-    /* '--region' / '--regionMpc' (standard DTFE; PS-DTFE rejects them at option parsing): the run triangulates only
+    /* '--region' / '--region-mpc' (standard DTFE; PS-DTFE rejects them at option parsing): the run triangulates only
        the region plus its padding, so the auto-tuner must plan THAT, not the whole snapshot: planned from the
        snapshot's particle count and box, a launcher exact zoom of a 20^3-cell TNG50-3-Dark region would be split
        3x3x3 with 10 threads each -- 27 x 9 sub-triangulations, each padded again around its tiny sub-box -- about
@@ -678,7 +679,8 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
 #ifndef PHASE_SPACE
         // what the budget leaves for the partition loop's look-ahead beside the busiest partition (as PS's)
         if ( report.valid )
-            userOptions.stdLookAheadRoom = report.budget - report.fixed - report.gpuSnapshot - report.perPartition;
+            userOptions.stdLookAheadRoom = report.budget - ( report.fixedLoop > 0. ? report.fixedLoop : report.fixed )
+                                         - report.gpuSnapshot - report.perPartition;   // the loop's room (stdPeak)
 #endif
 #ifdef PHASE_SPACE
         if ( report.valid )
@@ -695,6 +697,15 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
             // compressor and swap keep 'free' above the spill threshold: TNG100 z=0 could park 74 GB in RAM on a
             // 64 GB machine). DTFE_TEST_PARK_ROOM_GB sets it (tests).
             userOptions.psParkRoom = report.budget - report.predicted;
+            // the partition loop's dynamic concurrency (plan P8.10): only over a concurrency the tuner chose
+            userOptions.psDynamicConcurrency = report.concChosen and Env::flag( "DTFE_DYNAMIC_CONCURRENCY", true );
+            userOptions.psReserveEnd = report.reserveEnd;
+            userOptions.psReserveRecords = report.reserveRecords;
+            userOptions.psReserveFirstMerge = report.reserveFirstMerge;
+            userOptions.psBudgetBytes = report.budget;
+            // test hook: DTFE_TEST_PLAN_MC=k stands for a plan that chose k partitions at once (the dynamic loop's floor)
+            if ( report.concChosen and Env::integer( "DTFE_TEST_PLAN_MC", 0 ) > 0 )
+                userOptions.maxConcurrent = int( Env::integer( "DTFE_TEST_PLAN_MC", 0 ) );
         }
         if ( Env::isSet( "DTFE_TEST_PARK_ROOM_GB" ) )
             userOptions.psParkRoom = std::max( 0., Env::real( "DTFE_TEST_PARK_ROOM_GB", 0. ) ) * 1.e9;
@@ -726,6 +737,11 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
         state.options.aField.deselectVelocityDerivatives();
     }
 
+#ifdef PHASE_SPACE
+    // --face-gradient: the mean-flow gradient (S-flux - <v> N-flux) / sum V_s needs the cell mean velocity <v>, which is
+    // then deposited whether or not 'velocity_a' is written (the writer goes by the user's own fields)
+    if ( userOptions.faceGradient and state.options.aField.velocity_gradient ) state.options.aField.velocity = true;
+#endif
     // the T-web is computed from the density grid (tidal tensor): make sure density is interpolated.
     // Drop the tweb flag itself from the internal copy -- the interpolation never fills the T-web
     // grids, so keeping it only makes reserveMemory pre-allocate them (16 B/cell) during the
@@ -754,7 +770,7 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
         particlePointer = &state.particles;
     }
 
-    // single-partition mode (--partNo): keep only this partition's particles and grid sub-box
+    // single-partition mode (--partition-index): keep only this partition's particles and grid sub-box
     if ( userOptions.partitionOn and userOptions.partNo>=0 )
     {
         MESSAGE::Message message( userOptions.verboseLevel );
@@ -982,7 +998,8 @@ static void fixedShareDropsReact(User_options const &userOptions)
     static char const *const names[FX_DROP_SLOTS] = {
         "velocity moment", "dispersion second moment", "velocity-gradient moment", "moment weight",
         "exact multiplicity", "dispersion mean", "dispersion weight", "scalar moment", "scalar-gradient moment",
-        "released multiplicity", "mass (density)", "exact-deposit weight totals", "", "", "", "" };
+        "released multiplicity", "mass (density)", "exact-deposit weight totals", "face velocity flux (--face-gradient)",
+        "face stream flux (--face-gradient)", "face mass flux (--face-gradient)", "" };
 #else
     // the standard GPU deposit's grids (dtfe_gpu_fixed.h batchFixedScales)
     static char const *const names[FX_DROP_SLOTS] = {
@@ -1091,7 +1108,7 @@ static void psLagrangianPeriodicSetup(DTFE_State &state, User_options &userOptio
         // otherwise boundary particles get displacements near L and huge spurious simplices
         psUnwrapEulerian( state.particles, state.options );
 
-        // the globals a later --ps-window run can start from without reading the particles
+        // the globals a later --grid-window run can start from without reading the particles
         // (ps_globals_record.h): written by every partitioned run with a tessellation cache whose
         // particles were read as they are, the mean density computed from them
         if ( not state.options.tessellationCacheDir.empty() and userOptions.partitionOn and userOptions.partNo < 0
@@ -1234,10 +1251,10 @@ static void psLagrangianPeriodicSetup(DTFE_State &state, User_options &userOptio
     }
 }
 
-// --ps-window: computes the window's cell range from the final box and grid, for both copies of the options.
+// --grid-window: computes the window's cell range from the final box and grid, for both copies of the options.
 static void psResolveWindow(DTFE_State &state, User_options &userOptions)
 {
-    // --ps-window: its cell range needs the final box and grid (the header's box is known only now).
+    // --grid-window: its cell range needs the final box and grid (the header's box is known only now).
     // Both the partition path (state.options) and the single triangulation (state.options via
     // DTFE_parallel) read it from state.options; the writers read the caller's copy, so both get it
     if ( state.options.psWindowOn )
@@ -1256,7 +1273,7 @@ static void psResolveWindow(DTFE_State &state, User_options &userOptions)
             lo   += ( d ? ", " : "" ) + std::to_string( state.options.psWindowLo[d] );
         }
         MESSAGE::Message message( userOptions.verboseLevel );
-        message << "--ps-window: the output grid is the window of " << dims << " cells at (" << lo
+        message << "--grid-window: the output grid is the window of " << dims << " cells at (" << lo
                 << ") of the " << MESSAGE::printElements( state.options.gridSize, "x" ) << " grid.\n" << MESSAGE::Flush;
     }
 }
@@ -1304,7 +1321,7 @@ static void psServeComposite(DTFE_State &state, User_options &userOptions, PSPar
 // caustic bits, exact touches), one pass over the field list per side (Quantities::reserveMemory).
 static void psReserveGrids(DTFE_State &state, Quantities *uQuantities, Quantities *aQuantities)
 {
-    size_t mainGrid[NO_DIM];                       // the main grid: the --ps-window cells, else the full grid
+    size_t mainGrid[NO_DIM];                       // the main grid: the --grid-window cells, else the full grid
     state.options.outputGridSize( mainGrid );
     // pre-sized NOW, before the partition loop, so they are allocated when its memory gate reads the free memory
     // (and with '--scratch-dir' counted on the line below). Not for the merge's sake: it grows a grid it finds
@@ -1322,7 +1339,7 @@ static void psReserveGrids(DTFE_State &state, Quantities *uQuantities, Quantitie
     }
 }
 
-// --ps-window with a tessellation cache: skips the partitions whose occupancy maps never reach the window.
+// --grid-window with a tessellation cache: skips the partitions whose occupancy maps never reach the window.
 template <class PartitionOptions>
 static void psWindowSkips(DTFE_State &state, PSPartitionPlan &plan, PartitionOptions &partitionOptions,
                           int &totalPartitions, MESSAGE::Message &message, std::vector<char> &skipPartition,
@@ -1339,7 +1356,7 @@ static void psWindowSkips(DTFE_State &state, PSPartitionPlan &plan, PartitionOpt
             if ( t == 0 ) { skipPartition[size_t(pi)] = 1; ++nSkipped; }
             if ( t < 0 ) ++nUnknown;
         }
-        message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " --ps-window: "
+        message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " --grid-window: "
                 << MESSAGE::cMagenta() << nSkipped << MESSAGE::cReset() << " of " << totalPartitions
                 << " partitions never reach the window (their occupancy maps in the tessellation cache) and are skipped; "
                 << (totalPartitions - nSkipped) << " to process"
@@ -1571,10 +1588,10 @@ static void psReportMergeMode(PSLoopCtx &c)
                                                                 : "; when the memory cannot hold it, spilled to disk" )
                                      + " in '" + spillDir + "'" + ( spillMode > 0 ? " (DTFE_MERGE_SPILL=1)" : "" )
                      : "; no spill to disk (" + spillWhy + ")" )
-                << ( state.options.psCompletionOrderMergeFlag ? "; --resume overrides --completion-order-merge" : "" )
+                << ( state.options.psCompletionOrderMergeFlag ? "; --resume overrides --ps-merge completion-order" : "" )
                 << ".\n" << MESSAGE::Flush;
     if ( fixedMerge )
-        message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " --fixed-point-merge: each partition is "
+        message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " --ps-merge fixed-point: each partition is "
                 << "added as it finishes into exact integer grids (9 B per summed component and cell; the same bytes "
                 << "at any concurrency and completion order; nothing parks or spills). Units from the "
                 << fxMerge.unitsText() << ".\n" << MESSAGE::Flush;
@@ -1627,7 +1644,7 @@ static void psMergeInTurn(PSLoopCtx &c, int const pi, PSPrepared &P, Quantities 
     {
         auto const tAdd = Clock::now();
         if ( not emptyPartition )
-        {   // with --ps-window every partition's sub-grid IS the window: the merge is window-local
+        {   // with --grid-window every partition's sub-grid IS the window: the merge is window-local
             size_t const *wo = state.options.psWindowOn ? state.options.psWindowLo   : nullptr;
             size_t const *wd = state.options.psWindowOn ? state.options.psWindowDims : nullptr;
             if ( fixedMerge )   // the integer grids; the masks still OR into the Real ones
@@ -1805,13 +1822,13 @@ static void psRunPartitionLoop(PSLoopCtx &c, PartitionMemoryGate &memoryGate, Pr
     // order, so the outputs are byte-identical (tests/ps_runtime_check.sh). It holds one more partition's
     // particles + tessellation; before each look-ahead the free memory is checked against that (the
     // auto-tuner's prediction counts it too) and the partition is prepared in turn when it does not fit.
-    // '--no-overlap' switches it off; DTFE_PS_OVERLAP=1 forces it on a CPU deposit too (the test suite's
-    // byte-identity check on a build without a GPU), DTFE_PS_OVERLAP=0 switches it off.
+    // '--no-overlap' switches it off; DTFE_OVERLAP=1 forces it on a CPU deposit too (the test suite's
+    // byte-identity check on a build without a GPU), DTFE_OVERLAP=0 switches it off.
     bool gpuDeposit = false;
 #if defined(PS_GPU) && NO_DIM==3
     gpuDeposit = state.options.psUseMetal;
 #endif
-    int const overlapEnv = Env::tristate( "DTFE_PS_OVERLAP" );   // 1 forces the look-ahead, 0 bans it
+    int const overlapEnv = Env::tristate( "DTFE_OVERLAP" );   // 1 forces the look-ahead, 0 bans it
     bool const overlapForced = overlapEnv == 1;
     bool const overlapBanned = overlapEnv == 0;
     bool overlap = psConcurrency == 1 and toProcess > 1 and not state.options.psNoOverlap
@@ -1847,7 +1864,7 @@ static void psRunPartitionLoop(PSLoopCtx &c, PartitionMemoryGate &memoryGate, Pr
     {
         message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " look-ahead on: partition k+1 is "
                 << "tessellated on a CPU thread while partition k deposits"
-                << ( gpuDeposit ? " on the GPU" : " (DTFE_PS_OVERLAP=1)" ) << " (~" << std::round( aheadBytes/1.e7 )/100.
+                << ( gpuDeposit ? " on the GPU" : " (DTFE_OVERLAP=1)" ) << " (~" << std::round( aheadBytes/1.e7 )/100.
                 << " GB more in memory; '--no-overlap' switches it off).\n" << MESSAGE::Flush;
 
         // every partition in index order (a skipped one too: it takes its turn in the ordered merge), the next one
@@ -1931,7 +1948,7 @@ static void psReportLoopEnd(PSLoopCtx &c)
 
     PartitionCheckpoint::reportWrites( std::chrono::duration<double>( std::chrono::steady_clock::now() - psLoopStart ).count(),
                                        userOptions.verboseLevel );
-    // '--fixed-point-merge': every integer grid to its Real grid, once (ps_fixed_merge.h), before anything reads
+    // '--ps-merge fixed-point': every integer grid to its Real grid, once (ps_fixed_merge.h), before anything reads
     // them; then what it held and how much room its units left
     if ( fixedMerge )
     {
@@ -1967,7 +1984,7 @@ static void psReportLoopEnd(PSLoopCtx &c)
     // what the merge took (PSMergeStaging's times): the serial work under the merge lock -- the adds into the full
     // grids, their checkpoints, the spilled sub-grids read back -- and the waits before it. In index order a
     // partition waits for its turn parked (its thread goes on) or holding its thread (the lock, or no room to
-    // park); in completion order and under '--fixed-point-merge' only for the lock
+    // park); in completion order and under '--ps-merge fixed-point' only for the lock
     {
         PSMergeStaging const &m = c.merge;
         char t[160];
@@ -1989,7 +2006,7 @@ static void psReportLoopEnd(PSLoopCtx &c)
     }
 }
 
-// Normalizes the summed moments once, over all partitions; PS_MASS_AUDIT=1 reports the run's mass closure.
+// Normalizes the summed moments once, over all partitions; DTFE_MASS_AUDIT=1 reports the run's mass closure.
 static void psNormalizeMoments(DTFE_State &state, Quantities *uQuantities, Quantities *aQuantities,
                                double &auditInputMass)
 {
@@ -2001,10 +2018,14 @@ static void psNormalizeMoments(DTFE_State &state, Quantities *uQuantities, Quant
     for (int d = 0; d < NO_DIM; ++d)
         cellVolume *= (state.options.region[2*d+1] - state.options.region[2*d]) / Real(state.options.gridSize[d]);
     Real const weightScale = cellVolume * state.options.averageDensity;
+    // --face-gradient: the spacing the merged face sums' gradient divides by
+    for (int d = 0; d < NO_DIM; ++d)
+        aQuantities->psFaceDx[d] = uQuantities->psFaceDx[d] =
+            (state.options.region[2*d+1] - state.options.region[2*d]) / Real(state.options.gridSize[d]);
     uQuantities->normalizePhaseSpace( state.options.uField, weightScale );
     aQuantities->normalizePhaseSpace( state.options.aField, weightScale );
 
-    // PS_MASS_AUDIT=1, (h): the merged grid against the passes' sums and the input mass, per pass kind
+    // DTFE_MASS_AUDIT=1, (h): the merged grid against the passes' sums and the input mass, per pass kind
     if ( PSMassAudit::on() )
         for (int k = 0; k < 2; ++k)
         {
@@ -2081,7 +2102,7 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     PSPartitionPlan plan;
     plan.init( state, lagBoxGlobal, hasLagrangianPeriodicCopies, message );
 
-    // PS_MASS_AUDIT=1: the input mass (the global array holds the originals only here; it is freed
+    // DTFE_MASS_AUDIT=1: the input mass (the global array holds the originals only here; it is freed
     // before the merge is normalized) and fresh run totals (ps_mass_audit.h)
     double auditInputMass = 0.;
     if ( PSMassAudit::on() )
@@ -2101,7 +2122,7 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     }
 
     // a partition's options: its ownership region and the partition-path switches. They are part of
-    // its tessellation-cache identity, so the composite server, the --ps-window skip and the batch
+    // its tessellation-cache identity, so the composite server, the --grid-window skip and the batch
     // loop must form them identically -- hence one definition
     auto partitionOptions = [&](Box const &lagRegion) -> User_options
     {
@@ -2135,11 +2156,57 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     psConcurrency = std::min( psConcurrency, omp_get_max_threads() );
 #endif
     if ( psConcurrency < 1 ) psConcurrency = 1;
+    /* DYNAMIC CONCURRENCY (plan P8.10). The plan fixes the split and what one partition adds, but its concurrency is
+       a prediction: a TNG50-3-Dark z=0 rerun planned at mc 1 (all of its budgeted point records booked from the first
+       partition) peaked at 26.5 GB of a 38.4 GB budget, 163 s a partition against 40 s at mc 6. When the tuner chose
+       the concurrency, the loop starts up to one thread per core instead, and the memory gate (auto_tune.h) admits a
+       partition beyond the plan's mc only while the live free memory, less the headroom and what the run has still to
+       allocate, holds what it adds, and the run's own footprint plus that stays within the budget. The ordered merge
+       sums in index order, so the outputs do not depend on it -- in the single build, whose deposit sums are integer
+       words whatever the team size; the double build and the float sums (DTFE_GPU_FLOAT_MOMENTS / _MASS, DTFE_MASS_AUDIT)
+       sum per-thread copies in thread order, so their grids would follow the in-flight count: they keep the plan's.
+       Not for a user's --max-concurrent, the speed split (no gate), or a start whose free memory (records aside: the
+       gate books their unmerged share as it goes) holds no partition beyond the plan's (that run keeps its look-ahead). */
+    int const psFloor = psConcurrency;   // the plan's mc
+    bool dynamicConc = false;
+    char const *dynamicWhyNot = nullptr;
+    double dynStartFree = -1., dynStartOwn = -1.;
+#ifdef OPEN_MP
+    if ( userOptions.psDynamicConcurrency and state.options.psPartitionBytes > 0. and not state.options.psSpeedSplit )
+    {
+        bool const orderFree = std::is_same<Real, float>::value and not Env::flag( "DTFE_GPU_FLOAT_MOMENTS" )
+                               and not Env::flag( "DTFE_GPU_FLOAT_MASS" ) and not Env::flag( "DTFE_MASS_AUDIT" );
+        int const most = std::min( totalPartitions, omp_get_max_threads() );
+        double const need = state.options.psPartitionBytes;
+        double const reserve = state.options.psReserveEnd + state.options.psReserveFirstMerge;
+        dynStartFree = autoTuneSystemFree();
+        dynStartOwn = autoTuneOwnFootprint();
+        bool const room = dynStartFree >= 0. and dynStartOwn >= 0.
+                          and dynStartFree - kAutoTuneHeadroom - reserve >= double( psFloor + 1 ) * need
+                          and ( state.options.psBudgetBytes <= 0.
+                                or dynStartOwn + double( psFloor + 1 ) * need + reserve <= state.options.psBudgetBytes );
+        if ( not orderFree ) dynamicWhyNot = "the double build's or the float sums' grids would follow the count";
+        else if ( most <= psFloor ) dynamicWhyNot = "the plan already runs one partition per core or partition";
+        else if ( not room ) dynamicWhyNot = "the free memory or the budget at the start holds no partition beyond it";
+        else
+        {
+            dynamicConc = true;
+            psConcurrency = most;
+        }
+    }
+#endif
     message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " building up to "
-            << MESSAGE::cMagenta() << psConcurrency << MESSAGE::cReset() << " partition triangulation(s) concurrently"
-            << ( userOptions.maxConcurrent > 0 ? " (--max-concurrent)" : "" ) << ".\n" << MESSAGE::Flush;
+            << MESSAGE::cMagenta() << psConcurrency << MESSAGE::cReset() << " partition triangulation(s) concurrently";
+    if ( dynamicConc )
+        message << " (dynamic: at least the plan's " << psFloor << ", more while the free memory and the budget hold "
+                << "them; DTFE_DYNAMIC_CONCURRENCY=0 keeps the plan's)";
+    else if ( dynamicWhyNot != nullptr )
+        message << " (the plan's; dynamic concurrency not started: " << dynamicWhyNot << ")";
+    else if ( userOptions.maxConcurrent > 0 and not userOptions.psDynamicConcurrency )
+        message << " (--max-concurrent)";
+    message << ".\n" << MESSAGE::Flush;
 
-    // --ps-window: a partition whose occupancy map (beside its cached tessellation: written by a
+    // --grid-window: a partition whose occupancy map (beside its cached tessellation: written by a
     // composite server or an earlier batch run) has no bucket in the window deposits nothing
     // there -- skip it whole: no particle selection, no tessellation load or build. A partition
     // without a usable map is processed (and leaves its map for the next run).
@@ -2150,8 +2217,8 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
 
     // The checkpoint of the merged grids and '--resume' (partition_checkpoint.h beginLoop / afterMerge /
     // reportWrites, which the standard loop below runs too). On resume the checkpoint's grids are loaded into the
-    // pre-sized accumulators and its merged partitions are skipped like a --ps-window skip (no particles, no
-    // tessellation, still a turn in the ordered merge). '--fixed-point-merge' (opt-in; ps_fixed_merge.h): the
+    // pre-sized accumulators and its merged partitions are skipped like a --grid-window skip (no particles, no
+    // tessellation, still a turn in the ordered merge). '--ps-merge fixed-point' (opt-in; ps_fixed_merge.h): the
     // summed accumulators become exact integer grids, allocated now so the memory gate sees them (the moment
     // weights come with a partition's first values, as in the default), in units fixed now from global quantities
     // (one pass over the particles for their largest velocity). A finished partition is then added at once (no
@@ -2162,8 +2229,8 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     PartitionCheckpoint::state().blobs.clear();
     if ( fixedMerge )
     {
-        if ( state.options.psParticlesDeferred )   // --ps-window is refused with the flag (user_options.cc)
-            throwError( "internal: '--fixed-point-merge' needs the particles for its units, and they were not read." );
+        if ( state.options.psParticlesDeferred )   // --grid-window is refused with the flag (user_options.cc)
+            throwError( "internal: '--ps-merge fixed-point' needs the particles for its units, and they were not read." );
         fxMerge.setup( *uQuantities, *aQuantities, state.options, state.particles );
         PartitionCheckpoint::state().blobs = fxMerge.blobs();
     }
@@ -2188,9 +2255,9 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     runProgressPhase( "partitions", 0, progress.toProcess );
     // THE ORDERED MERGE (the default of every split; the auto-tuner's speed split always): the full grids receive
     // partition 0, then 1, 2 ..., exactly the adds of a '--max-concurrent 1' run, so the merged grids are
-    // byte-identical to those. '--completion-order-merge' adds partitions as they finish instead, so the last bits
+    // byte-identical to those. '--ps-merge completion-order' adds partitions as they finish instead, so the last bits
     // vary run to run (in the double build and for the GPU mass grid too; tests/gpu_mass_check.sh pins
-    // --max-concurrent 1). Under '--fixed-point-merge' (integer adds need no order) orderedMerge is false, also
+    // --max-concurrent 1). Under '--ps-merge fixed-point' (integer adds need no order) orderedMerge is false, also
     // with --resume, and none of this runs.
     // STAGING: a partition that finishes before its turn moves its two sub-grid Quantities into 'staged' (no copy;
     // its particle copy is freed) and its thread takes the next one (idling behind a slow partition can cost a GPU
@@ -2231,14 +2298,31 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
                     skipPartition, fixedMerge, fxMerge, progress, merge };
     psReportMergeMode( loop );
 
+    // (dynamic concurrency: the core pool and the teams count the partitions in flight, dtfePartitionsInFlight, which
+    // the gate keeps; this plan stays the loop's threads, the parallel insert's share)
     ConcurrentTriangulationPlan triangulationPlan( psConcurrency, totalPartitions );
     psGpuFallbacksTaken( true );   // counted from here; reported once after the loop
     // a partition starts only when the machine has the memory for it (or nothing else is in flight);
     // under the ordered merge it waits only behind lower-numbered partitions (auto_tune.h)
-    // (under '--fixed-point-merge' orderedMerge is false -- no partition waits for its turn, so the gate
+    // (under '--ps-merge fixed-point' orderedMerge is false -- no partition waits for its turn, so the gate
     // needs no ordered mode: it waits while any partition is in flight, which the dynamic schedule makes the same
     // set, every one in flight being lower-numbered)
     PartitionMemoryGate memoryGate( psConcurrency > 1 ? state.options.psPartitionBytes : 0., merge.orderedMerge );
+    if ( dynamicConc )
+    {
+        memoryGate.dynamic = true;
+        memoryGate.floor = psFloor;
+        memoryGate.total = std::max( 1, progress.toProcess );
+        memoryGate.reserveEnd = state.options.psReserveEnd;
+        memoryGate.reserveRecords = state.options.psReserveRecords;
+        memoryGate.reserveFirstMerge = state.options.psReserveFirstMerge;
+        memoryGate.budget = state.options.psBudgetBytes;
+        memoryGate.startFree = dynStartFree;
+        memoryGate.startOwn = dynStartOwn;
+        memoryGate.footprint = &autoTuneOwnFootprint;
+        memoryGate.live = &dtfePartitionsInFlight;
+        dtfePartitionsInFlight.store( 1, std::memory_order_relaxed );
+    }
 
     // One partition's work, in two stages: PREPARE (select its particles; with 'build', also its
     // tessellation and vertex densities) and DEPOSIT (the grid passes, then the merge). The look-ahead
@@ -2252,7 +2336,7 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
 
         // select particles by Lagrangian position; when periodic, this partition's images
         // are generated on the fly so the global array stays originals-only
-        P.skipped = skipPartition[size_t(pi)] != 0;   // --ps-window: never reaches the window
+        P.skipped = skipPartition[size_t(pi)] != 0;   // --grid-window: never reaches the window
         // a partition whose cached tessellation matches its descriptor is loaded, not built: its
         // particles are never needed, so their selection (a scan of every particle, ~3 s for TNG100-3's
         // 94M, plus a copy of the padded share) is skipped -- the load must then succeed (psCacheOnly)
@@ -2294,11 +2378,26 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
         if ( pi == delayPartition and delaySeconds > 0. )   // the test hook above
             std::this_thread::sleep_for( std::chrono::duration<double>( delaySeconds ) );
         // accumulate into the shared grids: in partition order (the staged ordered merge above, the default),
-        // or as they finish under '--completion-order-merge'
+        // or as they finish under '--ps-merge completion-order'
         psMergeInTurn( loop, pi, P, temp_uQuantities, temp_aQuantities );
     };
 
     psRunPartitionLoop( loop, memoryGate, prepare, deposit );
+    if ( dynamicConc )
+    {
+        dtfePartitionsInFlight.store( 0, std::memory_order_relaxed );
+        int most = 0;
+        {
+            std::lock_guard<std::mutex> lock( memoryGate.m );
+            most = memoryGate.maxInFlight;
+        }
+        message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " dynamic concurrency: at most "
+                << MESSAGE::cMagenta() << most << MESSAGE::cReset() << " partitions in flight at once "
+                << "(the plan's " << psFloor << ").\n" << MESSAGE::Flush;
+        // the SUMMARY's predicted-vs-measured line: the plan's prediction with the partitions that ran beyond it
+        if ( most > psFloor and runProgressPredicted() > 0. )
+            runProgressSetPredicted( runProgressPredicted() + double( most - psFloor ) * state.options.psPartitionBytes );
+    }
     psReportLoopEnd( loop );
 
     // every partition copied its own particles (tempPart); the global array is not needed by
@@ -2634,6 +2733,7 @@ static void dtfeFinishFields(DTFE_State &state, User_options &userOptions, Quant
 #endif
 
     // post-processing: derive velocity divergence/shear/vorticity and cosmic-web labels from the gradient
+    runProgressNoteLoopPeak();   // the SUMMARY's 'before post-proc' figure: which phase set the peak
     runProgressPhase( "post-processing" );
     postProcessWebFields( userOptions, uQuantities, aQuantities );
 
@@ -2999,7 +3099,7 @@ void DTFE(vector<Particle_data> *allParticles,
 
     if ( userOptions.partitionOn and userOptions.partNo<0 )
     {
-        throwError( "There is no implementation of the option '--partition' in the absence of option '--partNo' when requering that the 'DTFE' function returns the Delaunay triangulation." );
+        throwError( "There is no implementation of the option '--partition' in the absence of option '--partition-index' when requering that the 'DTFE' function returns the Delaunay triangulation." );
     }
     else
     {

@@ -63,7 +63,7 @@ def run_dtfe(input_file, output_file, grid_size, input_type=111,
         "-o", str(output_type),
         "-g", str(grid_size),
         "-f", field,
-        "--MpcUnit", "1",
+        "--mpc-unit", "1",
     ]
     if extra_args:
         cmd.extend(extra_args)
@@ -507,7 +507,8 @@ def test_exact_average_lattice(tmpdir):
 
 def test_exact_average_convergence(tmpdir):
     """Method-1 sampled '_a' density approaches the --exact-average grid MONOTONICALLY as
-    --samples grows (Sobol quasi-random sampling: deterministic, no seed involved). Gated
+    --subsamples grows (5, 10, 22: 125, 1000, 10648 points per cell; Sobol quasi-random sampling:
+    deterministic, no seed involved). Gated
     on the binary supporting the flag."""
     name = "exact_average_convergence"
     if not _has_flag(name, "--exact-average"):
@@ -526,16 +527,16 @@ def test_exact_average_convergence(tmpdir):
     exact = _read_float32(out_exact + ".a_den")
 
     l1 = []
-    for samples in (100, 1000, 10000):
-        out_s = os.path.join(tmpdir, f"{name}_s{samples}")
+    for k in (5, 10, 22):
+        out_s = os.path.join(tmpdir, f"{name}_s{k}")
         ok, _ = run_dtfe(infile, out_s, grid_size=grid, input_type=111, output_type=101,
-                         field="density_a", extra_args=["--samples", str(samples)])
+                         field="density_a", extra_args=["--subsamples", str(k)])
         if not ok:
-            report(name, False, f"sampled run (--samples {samples}) failed")
+            report(name, False, f"sampled run (--subsamples {k}) failed")
             return
         vals = _read_float32(out_s + ".a_den")
         l1.append(sum(abs(a - b) for a, b in zip(vals, exact)) / len(exact))
-    log(f"L1 to exact: {l1[0]:.5e} (100) / {l1[1]:.5e} (1000) / {l1[2]:.5e} (10000)")
+    log(f"L1 to exact: {l1[0]:.5e} (125) / {l1[1]:.5e} (1000) / {l1[2]:.5e} (10648)")
     try:
         if not (l1[0] > l1[1] > l1[2]):
             raise AssertionError(f"L1 distances not monotone: {l1[0]:.4e}, {l1[1]:.4e}, {l1[2]:.4e}")
@@ -552,13 +553,13 @@ def test_exact_average_convergence(tmpdir):
 # sampled density_a depends on insertion order -- 25% per cell when the input is shuffled), written as binary
 # floats (the text output keeps 6 digits).
 REGRESSION_REF = "regression_periodic.txt"
-REGRESSION_ARGS = ["-i", "111", "-o", "101", "-g", "12", "-f", "density", "density_a", "--MpcUnit", "1",
+REGRESSION_ARGS = ["-i", "111", "-o", "101", "-g", "12", "-f", "density", "density_a", "--mpc-unit", "1",
                    "--periodic", "--exact-average"]
 # Per value |new - ref| <= RTOL * |ref| (every density here is >= 0.35, so no absolute floor is needed). Measured on
 # the Mac, against this reference (max rel over the 2 x 1728 values, two seeds):
 #   the double build (no float rounding at all)       2.7e-5      one thread (another reduction order)   2.5e-5
 #   coordinates perturbed by 1e-7 relative            7.2e-6      the input order shuffled               6.0e-7
-#   --seed / --noTest                                 0 (bit-identical)
+#   --seed / --no-padding-test                        0 (bit-identical)
 # against REAL changes of the input or the estimator:
 #   one of the 1000 particles moved 0.05% of the box  1.2e-3      one particle's weight +1%              3.2e-3
 #   one particle moved 0.5% of the box                5.3e-2
@@ -672,7 +673,7 @@ def test_raw_binary_reader(tmpdir):
         for _ in particles:
             f.write(struct.pack("<3f", 10.0, 20.0, 30.0))
     ok, output = _run_raw(["-i", "121", "-o", "101", "-g", "8", "-f", "density", "velocity",
-                           "--MpcUnit", "1", "--periodic"], input_file, output_file)
+                           "--mpc-unit", "1", "--periodic"], input_file, output_file)
     try:
         if not ok:
             raise AssertionError("DTFE failed on the type-121 raw binary input")
@@ -698,7 +699,7 @@ def test_text_reader_zero_velocity(tmpdir):
     output_file = os.path.join(tmpdir, "out111")
     write_text_input(input_file, particles, (0, box, 0, box, 0, box))
     ok, output = _run_raw(["-i", "111", "-o", "101", "-g", "6", "-f", "density", "velocity",
-                           "--MpcUnit", "1", "--periodic"], input_file, output_file)
+                           "--mpc-unit", "1", "--periodic"], input_file, output_file)
     try:
         if not ok:
             raise AssertionError("DTFE failed on the text input")
@@ -713,7 +714,7 @@ def test_text_reader_zero_velocity(tmpdir):
 
 def test_gadget_mass_block_skip(tmpdir):
     """Binary Gadget reader: a per-particle mass block must be seeked past when masses are
-    not requested ('--input 101 5'), else it trips a false 'snapshot file is corrupt'."""
+    not requested ('--input-format 101 5'), else it trips a false 'snapshot file is corrupt'."""
     name = "gadget_mass_block_skip"
     import struct
     box = 10.0
@@ -742,7 +743,7 @@ def test_gadget_mass_block_skip(tmpdir):
                            (["-i", "101", "5"], "masses unrequested (mass block skipped)")):
             output_file = os.path.join(tmpdir, "outmb")
             ok, output = _run_raw(tail + ["-o", "101", "-g", "8", "-f", "density",
-                                          "--MpcUnit", "1", "--periodic"],
+                                          "--mpc-unit", "1", "--periodic"],
                                   input_file, output_file)
             if not ok:
                 raise AssertionError(f"DTFE failed with {what}")
@@ -754,7 +755,7 @@ def test_gadget_mass_block_skip(tmpdir):
 
 
 def test_thin_region_threads(tmpdir):
-    """A multi-threaded run on a THIN --regionMpc (the launcher's exact-zoom shape, here 1 x 1 x
+    """A multi-threaded run on a THIN --region-mpc (the launcher's exact-zoom shape, here 1 x 1 x
     2e-5 Mpc) must run and match the one-thread run. Each thread's particle search must not
     reserve p.size() * padded-box/region volume = a multi-PB vector: std::bad_alloc on Linux
     already at 2 kpc thickness (macOS overcommits that, so it needs this thinner slab), while
@@ -767,8 +768,8 @@ def test_thin_region_threads(tmpdir):
         for threads in (1, 2, 4):
             outfile = os.path.join(tmpdir, f"{name}_t{threads}")
             cmd = [DTFE_BIN, infile, outfile, "-i", "111", "-o", "101", "-g", "16", "16", "1",
-                   "-f", "density", "--MpcUnit", "1", "--periodic",
-                   "--regionMpc", "40", "41", "40", "41", "50", "50.00002"]
+                   "-f", "density", "--mpc-unit", "1", "--periodic",
+                   "--region-mpc", "40", "41", "40", "41", "50", "50.00002"]
             env = dict(os.environ, OMP_NUM_THREADS=str(threads))
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
             if result.returncode != 0:
@@ -813,7 +814,7 @@ def test_mass_assignment_periodic_faces(tmpdir):
         for method in ("CIC", "TSC", "PCS"):
             outfile = os.path.join(tmpdir, f"{name}_{method}")
             ok, output = _run_raw(["-i", "111", "-o", "101", "-g", "16", "16", "16", "-f", "density",
-                                   "--MpcUnit", "1", "--periodic", f"--{method}"], infile, outfile)
+                                   "--mpc-unit", "1", "--periodic", f"--{method}"], infile, outfile)
             if not ok:
                 raise AssertionError(f"DTFE --{method} failed")
             den = _read_float32(outfile + ".a_den")
@@ -841,7 +842,7 @@ def test_mass_assignment_thin_partitions(tmpdir):
         for method in ("CIC", "TSC", "PCS"):
             outfile = os.path.join(tmpdir, f"{name}_{method}")
             cmd = [DTFE_BIN, infile, outfile, "-i", "111", "-o", "101", "-g", "8", "-f", "density",
-                   "--MpcUnit", "1", "--periodic", f"--{method}", "--partition", "1", "4", "4"]
+                   "--mpc-unit", "1", "--periodic", f"--{method}", "--partition", "1", "4", "4"]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
             if result.returncode != 0:
                 raise AssertionError(f"--{method} on one-cell-thick partitions: exit {result.returncode}")
@@ -876,7 +877,7 @@ def test_partition_split_never_empty(tmpdir):
                     tag = "single" if part is None else "_".join(part)
                     outfile = os.path.join(tmpdir, f"{name}_{label[:5]}_{method}_{tag}")
                     cmd = [DTFE_BIN, infile, outfile, "-i", "111", "-o", "101", "-g", "8", "-f", "density",
-                           "--MpcUnit", "1", "--periodic", f"--{method}"] + ([] if part is None else ["--partition"] + part)
+                           "--mpc-unit", "1", "--periodic", f"--{method}"] + ([] if part is None else ["--partition"] + part)
                     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
                     if result.returncode != 0:
                         raise AssertionError(f"{label}, --{method} --partition {' '.join(part or [])}: exit {result.returncode}")
@@ -913,7 +914,7 @@ def test_mass_assignment_centroid(tmpdir):
     try:
         for method in ("CIC", "TSC", "PCS"):
             outfile = os.path.join(tmpdir, f"{name}_{method}")
-            ok, output = _run_raw(["-i", "111", "-o", "101", "-g", str(n), "-f", "density", "--MpcUnit", "1",
+            ok, output = _run_raw(["-i", "111", "-o", "101", "-g", str(n), "-f", "density", "--mpc-unit", "1",
                                    "--periodic", f"--{method}"], infile, outfile)
             if not ok:
                 raise AssertionError(f"DTFE --{method} failed")
@@ -938,8 +939,8 @@ def test_mass_assignment_centroid(tmpdir):
 
 
 def test_fractional_region_noncubic(tmpdir):
-    """On a non-cubic box, '--region' (box fractions) is the same region as '--regionMpc' in Mpc, and
-    '--padding' (box fractions) the same padding as '--paddingMpc': byte-identical grids. The
+    """On a non-cubic box, '--region' (box fractions) is the same region as '--region-mpc' in Mpc, and
+    '--padding' (box fractions) the same padding as '--padding-mpc': byte-identical grids. The
     conversion reads the box per axis [i/2]; per entry [i%2] z would take the x length:
     '--region 0 1 0 1 0.5 1' on a 0-200 z axis would grid z = 50-100 instead of 100-200."""
     name = "fractional_region_noncubic"
@@ -947,15 +948,15 @@ def test_fractional_region_noncubic(tmpdir):
     infile = os.path.join(tmpdir, f"{name}.txt")
     parts = [(x, y, 2.0 * z, w) for (x, y, z, w) in make_seeded_random_particles(20000, lx, seed=7)]
     write_text_input(infile, parts, (0, lx, 0, lx, 0, lz))
-    common = ["-i", "111", "-o", "101", "-g", "16", "-f", "density", "--MpcUnit", "1", "--TSC"]
+    common = ["-i", "111", "-o", "101", "-g", "16", "-f", "density", "--mpc-unit", "1", "--tsc"]
     pairs = (("region", ["--region", "0", "1", "0", "1", "0.5", "1"],
-              ["--regionMpc", "0", "100", "0", "100", "100", "200"]),
+              ["--region-mpc", "0", "100", "0", "100", "100", "200"]),
              # the region in Mpc here, so only the padding conversion is under test: 5 Mpc in z (not 10) falls
              # inside the 6.25 Mpc TSC reach and drops particles
-             ("padding", ["--regionMpc", "25", "75", "25", "75", "50", "150",
+             ("padding", ["--region-mpc", "25", "75", "25", "75", "50", "150",
                           "--padding", "0.05", "0.05", "0.05", "0.05", "0.05", "0.05"],
-              ["--regionMpc", "25", "75", "25", "75", "50", "150",
-               "--paddingMpc", "5", "5", "5", "5", "10", "10"]))
+              ["--region-mpc", "25", "75", "25", "75", "50", "150",
+               "--padding-mpc", "5", "5", "5", "5", "10", "10"]))
     try:
         for what, frac_args, mpc_args in pairs:
             grids = []
@@ -974,7 +975,7 @@ def test_fractional_region_noncubic(tmpdir):
 
 
 def test_hi_reader_species_guard(tmpdir):
-    """'--input 106' (HI mass from an HDF5 snapshot) is defined for gas only: gas plus stars must be refused.
+    """'--input-format 106' (HI mass from an HDF5 snapshot) is defined for gas only: gas plus stars must be refused.
     A guard testing readParticleSpecies[1] five times would pass gas + stars (species 0 and 4) and take
     the stars in with their raw masses."""
     name = "hi_reader_species_guard"
@@ -1000,8 +1001,8 @@ def test_hi_reader_species_guard(tmpdir):
             f.create_group(f"PartType{t}").create_dataset("Coordinates", data=np.full((n, 3), 5.0, np.float32))
     output_file = os.path.join(tmpdir, "outhi")
     # blocks 3 = positions + masses; species 17 = gas (bit 0) + stars (bit 4)
-    ok, output = _run_raw(["-i", "106", "3", "17", "-g", "4", "-f", "density", "--MpcUnit", "1",
-                           "--options", os.path.join(tmpdir, "no_such_hi_file.hdf5")], infile, output_file)
+    ok, output = _run_raw(["-i", "106", "3", "17", "-g", "4", "-f", "density", "--mpc-unit", "1",
+                           "--reader-options", os.path.join(tmpdir, "no_such_hi_file.hdf5")], infile, output_file)
     try:
         if ok:
             raise AssertionError("gas + stars through the HI reader exited 0")

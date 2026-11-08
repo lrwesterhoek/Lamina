@@ -73,7 +73,7 @@ run() {  # $1 = threads, $2 = output root, $3 = input snapshot, rest = extra fla
     local log="${out}.log"
     set +e
     OMP_NUM_THREADS="${threads}" "${BIN}" "${snap}" "${out}" --grid "${GRID}" \
-        --field density velocity density_a --input 105 --MpcUnit 1 --verbose 2 "$@" > "$log" 2>&1
+        --field density velocity density_a --input-format 105 --mpc-unit 1 --verbose 2 "$@" > "$log" 2>&1
     local rc=$?
     set -e
     die_on_failed_run "$rc" "$log"

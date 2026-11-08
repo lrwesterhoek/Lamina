@@ -6,7 +6,7 @@ frame ADOPTED from the grid itself (pipeline.adopt_snapshot_grid: its header's b
 in Mpc), so any full-box grid set of a simulation works, at any resolution. Run it with DTFE_SIM set to the
 simulation (config reads the box for it) and DTFE_DATA_ROOT to its data root:
 
-    DTFE_SIM=TNG100-3-Dark python3 tools/void_outlines.py --sim TNG100-3-Dark --snap 99 --method ps
+    DTFE_SIM=TNG100-3-Dark python3 tools/void_outlines.py --sim TNG100-3-Dark --snap 99 --estimator ps
 
 With the production grids (no --prefix) the catalogue is the analysis scripts' own cache file. A BUILD costs
 about 80 bytes per cell (10 GB at 512^3, 80 GB at 1024^3): when the catalogue is not cached and that would not fit
@@ -22,14 +22,13 @@ directions in that order; null where not resolved), and the frame and smoothing 
 reason on stderr when there is no
 catalogue (no grids, no snapshot header).
 
---sigma-mpc S finds the voids at a smoothing of S Mpc instead of the production one (the same physical scale in
+--smooth-mpc S finds the voids at a smoothing of S Mpc instead of the production one (the same physical scale in
 every box: the cross-box comparison), cached under that smoothing's own namespace; 'r_v_defs' carries every R_v
 definition the catalogue has (catalog.R_V_DEFINITIONS once it exists: 'crossing', 'delta08', 'ridge'). --csv PATH
 also writes the table of the voids (write_csv: centre, the R_v's, R_eff, delta, the flags), as the launcher's
 Explore map does for the voids it shows.
 """
 
-import argparse
 import contextlib
 import json
 import os
@@ -200,16 +199,17 @@ def outlines(sim, snap, prefix=None, data_root=None, method="auto", sigma_mpc=No
 
 
 def main(argv=None):
-    from dtfelib.cli import add_sim_arg
-    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    from dtfelib.cli import add_sim_arg, new_parser, add_estimator_arg, deprecated_alias
+    p = new_parser(description=__doc__.split("\n\n")[0])
     add_sim_arg(p)                                  # required unless DTFE_SIM names it (config reads that one)
     p.add_argument("--snap", type=int, required=True)
-    p.add_argument("--method", choices=("auto", "ps", "dtfe"), default="auto", help="the estimator of the grids")
+    add_estimator_arg(p, help="the estimator of the grids")
     p.add_argument("--prefix", default=None, help="the grid set's output prefix (default the method's)")
     p.add_argument("--data-root", type=Path, default=None, help="the data root (default DTFE_DATA_ROOT's)")
     p.add_argument("--cache-dir", type=Path, default=None, help="the catalogue cache (default config.CACHE_DIR)")
-    p.add_argument("--sigma-mpc", type=float, default=0.0,
+    p.add_argument("--smooth-mpc", type=float, default=0.0, metavar="MPC",
                    help="the smoothing in Mpc (default 0: the production smoothing and its catalogue)")
+    deprecated_alias(p, "--sigma-mpc", "--smooth-mpc")
     p.add_argument("--csv", type=Path, default=None, help="also write the table of all voids (write_csv) here")
     a = p.parse_args(argv)
     if os.environ.get("DTFE_SIM") != a.sim:
@@ -220,7 +220,7 @@ def main(argv=None):
     import zipfile
     try:
         with contextlib.redirect_stdout(sys.stderr):          # the pipeline's progress lines: not on the JSON line
-            res = outlines(a.sim, a.snap, a.prefix, a.data_root, a.method, a.sigma_mpc)
+            res = outlines(a.sim, a.snap, a.prefix, a.data_root, a.method, a.smooth_mpc)
     # a damaged cache member (pipeline._cached reads only the stamp) is a reason, not a traceback
     except (OSError, ValueError, KeyError, MemoryError, EOFError, zipfile.BadZipFile) as e:
         raise SystemExit(f"no void catalogue for {a.sim} snapshot {a.snap}: {e}")

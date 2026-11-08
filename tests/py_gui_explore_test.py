@@ -6,7 +6,7 @@
      moves the slice there, 'R_eff too' adds dashed outlines;
   2. the outlines carried into the saved PNG (matplotlib circles) with a CSV of the voids shown beside it
      (tools/void_outlines.write_csv), and into the figure grid (each panel's own catalogue, its tiles clipped);
-  3. the void smoothing: 'production' or a sigma in Mpc, passed to the helper as --sigma-mpc, its own cache key and
+  3. the void smoothing: 'production' or a sigma in Mpc, passed to the helper as --smooth-mpc, its own cache key and
      cache namespace;
   4. the memory guard: no question while no DTFE run is going; with one, a question (free memory said), and a
      'no' starts nothing (server, exact zoom, catalogue); a need that fits in the free memory less 4 GB starts

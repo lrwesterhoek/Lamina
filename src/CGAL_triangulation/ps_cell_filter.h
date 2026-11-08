@@ -50,7 +50,7 @@ struct PSNoEarlyReject { bool operator()(Real const (&)[NO_DIM+1][NO_DIM]) const
 
 // 'earlyReject(eulerPos)' -- given the wrapped Eulerian positions, before the edge matrix,
 // determinant and inverse -- lets a caller drop a cell it will discard anyway on its positions
-// alone (--ps-window's GPU extraction: a tetrahedron that misses the window), at a fraction of the
+// alone (--grid-window's GPU extraction: a tetrahedron that misses the window), at a fraction of the
 // filter's cost. The default rejects nothing.
 template <class EarlyReject = PSNoEarlyReject>
 inline bool psFilterCell(Cell_handle &cell,
@@ -187,7 +187,7 @@ inline bool psFilterCell(Cell_handle &cell,
     // Drop only degenerate cells (near-zero Eulerian volume -> divergent 1/volume density): |det| < tol * edge^3,
     // resolution-independent. The edge scale is the LARGEST over the vertices of the mean squared length of the edges
     // meeting there: a function of the tetrahedron, not of CGAL's labelling. (Vertex 0 follows the insertion history,
-    // which differs with --partition / --padding / --ps-lag-padding / parallel insert, and folded caustic tets sit
+    // which differs with --partition / --padding / --ps-lagrangian-padding / parallel insert, and folded caustic tets sit
     // right at the cut, so a vertex-0 scale would keep a tet's mass in one run and drop it in another.) The maximum
     // bounds the vertex-0 scale of EVERY labelling, so a kept tet also passes matrixInverse()'s relative test (product
     // of the vertex-0 rows <= their mean^3, AM-GM) and the GPU kernels' float re-check (vertex-0 mean) in any order.

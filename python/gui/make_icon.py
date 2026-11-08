@@ -98,7 +98,7 @@ def draw(size: int = 1024) -> QImage:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0], allow_abbrev=False)
     ap.add_argument("png", type=Path)
     ap.add_argument("--iconset", type=Path, default=None)
     args = ap.parse_args()

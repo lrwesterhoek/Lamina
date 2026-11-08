@@ -24,6 +24,7 @@
 /* Volume-averaged grid interpolation, method 1 (= sample points chosen inside the
    Delaunay cell, proportional to cell volume). */
 #include "triangulation_common.h"
+#include "face_sweep.h"          // --face-gradient: exact face integrals (avg1FacePass)
 #include "../env_knobs.h"
 #include "../thread_count.h"   // coresPerTeam: the exact average's CPU threads
 #include <typeinfo>
@@ -363,7 +364,7 @@ static inline void avg1Announce(MESSAGE::Message &message, size_t *nGrid, Box &b
         message << "\nComputing interpolation of the fields volume averaged over the sampling cell on a regular "
                 << MESSAGE::printElements( nGrid, NO_DIM, "*" ) << " grid in the region "
                 << boxCoordinates.print()
-                << ". The volume average integrates the linear interpolant EXACTLY over every grid-cell/tetrahedron intersection (--exact-average: r3d on the CPU, a z-sweep on the GPU; '--samples' is ignored).\n"
+                << ". The volume average integrates the linear interpolant EXACTLY over every grid-cell/tetrahedron intersection (--exact-average: r3d on the CPU, a z-sweep on the GPU; '--subsamples' is ignored).\n"
                 << "\t Done: " << MESSAGE::Flush;
     else
         message << "\nComputing interpolation of the fields volume averaged over the sampling cell on a regular "
@@ -390,7 +391,7 @@ static inline void avg1ZeroGrids(User_options &userOptions, Field &field, size_t
     if ( field.velocity_std )
     {
         MESSAGE::Warning warning(userOptions.verboseLevel);
-        warning << "You cannot use the averaging method 1 (Monte Carlo sampling inside the Delaunay cell) to compute the velocity standard deviation inside the grid cell. Please use the averaging method 2 '--method 2' (Monte Carlo sampling inside the grid cell) to compute the velocity standard deviation.\n" << MESSAGE::EndWarning;
+        warning << "You cannot use the averaging method 1 (Monte Carlo sampling inside the Delaunay cell) to compute the velocity standard deviation inside the grid cell. Please use the averaging method 2 '--average-method 2' (Monte Carlo sampling inside the grid cell) to compute the velocity standard deviation.\n" << MESSAGE::EndWarning;
     }
 }
 
@@ -1016,6 +1017,162 @@ static inline void avg1McTet(Avg1CpuCtx const &C, McCell &mc, double vertexMatri
     }
 }
 
+#if NO_DIM==3 && defined(VELOCITY) && !defined(MY_SCALAR)
+/* '--face-gradient' (docs/cleanup-plan.md P10.2): the cell average of the velocity gradient from the FACES. By Gauss,
+   (1/V) times the integral of v n over a grid cell's six faces is the cell average of grad v; the DTFE interpolant is
+   linear in every tetrahedron and continuous across them, so that is the per-tetrahedron gradient's cell average the
+   deposit adds up -- reached here by a second, independent route (face_sweep.h: every grid plane's section through
+   every tetrahedron, clipped to the face squares; a face piece's integral is its centroid value times its area, added
+   to the cell below the plane and subtracted from the cell above). It is exact whatever the '_a' deposit was (the
+   exact average, Monte Carlo, the GPU), and the same machinery gives PS-DTFE its mean-flow gradient (P10.3).
+   acc: gridSize x 9 doubles, the integral of grad v over each cell in velocityGradient()'s layout ([j*3+i] =
+   dv_j/dx_i). The x planes are dealt out as in the deposit (thread th adds only to the cells of its own slabs, every
+   thread walking every tetrahedron in order), so the sums are bit-identical at any thread count. degenerate (when
+   not null) collects the cells a tetrahedron with a zeroed inverse can reach: its velocity is constant there, so its
+   faces carry jumps that the per-tetrahedron gradient (0) does not see -- the DTFE_FACE_CHECK comparison skips them. */
+static void avg1FacePass( DT &dt, Box &boxCoordinates, Bbox &fullBox, size_t *nGrid, Real *dx, int const nT,
+                          int const slabW, std::vector<double> &acc, std::vector<unsigned char> *degenerate )
+{
+    size_t const gridSize = nGrid[0]*nGrid[1]*nGrid[2];
+    acc.assign( gridSize * noGradComp, 0. );
+    if ( degenerate ) degenerate->assign( gridSize, 0 );
+    auto owns = [&](int const th, int const gi) { return nT == 1 or ( gi / slabW ) % nT == th; };
+    auto flat = [&](int const i, int const j, int const k) {
+        return ( size_t(i)*nGrid[1] + size_t(j) )*nGrid[2] + size_t(k); };
+    auto pass = [&](int const th)
+    {
+        for (Finite_cells_iterator itC = dt.finite_cells_begin(); itC != dt.finite_cells_end(); ++itC)
+        {
+            if ( cellOutsideRegion( dt, itC, fullBox ) )
+                continue;
+            McCell mc = mcVertexOrder( itC, true );          // CGAL's order (base = vertex 0), as the exact average
+            double vertexMatrix[NO_DIM][NO_DIM];
+            int baseGridCell[NO_DIM];
+            Real basePosition[NO_DIM];
+            checkCellPosition( mc, boxCoordinates, dx, vertexMatrix, baseGridCell, basePosition );
+            // the vertices in the region frame, as every tetrahedron sharing one computes it (a float position minus
+            // the float corner is exact in double): the planes' sides are decided on these, so two tetrahedra never
+            // decide a shared face lying in a grid plane differently (face_sweep.h). p: the base-relative frame,
+            // X[v] - X[0] exactly.
+            double X[4][3], p[4][3];
+            for (int v = 0; v < 4; ++v)
+                for (int d = 0; d < 3; ++d)
+                {
+                    X[v][d] = double( mc.v[v]->point()[d] ) - double( boxCoordinates[2*d] );
+                    p[v][d] = v == 0 ? 0. : vertexMatrix[v-1][d];
+                }
+            // the grid planes the tetrahedron may own a section of (min <= plane < max, region frame), and its window
+            // of grid cells
+            int pFirst[3], pLast[3], iLo[3], iHi[3];
+            bool crosses = false;
+            for (int d = 0; d < 3; ++d)
+            {
+                double mn = X[0][d], mx = X[0][d];
+                for (int v = 1; v < 4; ++v) { mn = std::min( mn, X[v][d] ); mx = std::max( mx, X[v][d] ); }
+                double const h = double( dx[d] );
+                pFirst[d] = int( std::floor( mn / h ) );
+                if ( pFirst[d] * h < mn ) ++pFirst[d];
+                pLast[d] = int( std::floor( mx / h ) );
+                if ( pLast[d] * h >= mx ) --pLast[d];
+                pFirst[d] = std::max( 0, pFirst[d] );
+                pLast[d] = std::min( int(nGrid[d]), pLast[d] );
+                crosses = crosses or pFirst[d] <= pLast[d];
+                iLo[d] = int( std::floor( mn / h ) );
+                iHi[d] = int( std::floor( mx / h ) ) + 1;
+            }
+            // a tetrahedron owning no section adds nothing to any face (its cell's faces lie outside it)
+            if ( not crosses ) continue;
+            // this thread's? (an x range of cells -- one more on each side, the x planes' two cells -- of its own)
+            if ( nT > 1 )
+            {
+                int const a = std::max( 0, iLo[0] - 1 ), b = std::min( int(nGrid[0]), iHi[0] + 1 );
+                bool mine = false;
+                for (int gi = a; gi < b and not mine; ++gi) mine = owns( th, gi );
+                if ( not mine ) continue;
+            }
+            Real posMatrixInverse[NO_DIM][NO_DIM];
+            matrixInverse( vertexMatrix, posMatrixInverse );
+            Real velGrad[NO_DIM][noVelComp];
+            velocityGrad( mc, posMatrixInverse, velGrad );
+            double vb[noVelComp];
+            for (size_t j = 0; j < noVelComp; ++j) vb[j] = double( mc.v[0]->info().velocity(j) );
+            if ( degenerate )
+            {
+                bool zero = true;
+                for (int i = 0; i < 3 and zero; ++i)
+                    for (int j = 0; j < 3 and zero; ++j) zero = posMatrixInverse[i][j] == Real(0);
+                if ( zero )
+                    for (int i = std::max( 0, iLo[0] - 1 ); i < std::min( int(nGrid[0]), iHi[0] + 1 ); ++i)
+                        if ( owns( th, i ) )
+                            for (int j = std::max( 0, iLo[1] - 1 ); j < std::min( int(nGrid[1]), iHi[1] + 1 ); ++j)
+                                for (int k = std::max( 0, iLo[2] - 1 ); k < std::min( int(nGrid[2]), iHi[2] + 1 ); ++k)
+                                    (*degenerate)[flat( i, j, k )] = 1;
+            }
+            for (int a = 0; a < 3; ++a)
+            {
+                int u, w;
+                faceSweep::planeAxes( a, u, w );
+                int win0[2] = { std::max( 0, iLo[u] ), std::max( 0, iLo[w] ) };
+                int win1[2] = { std::min( int(nGrid[u]), iHi[u] ), std::min( int(nGrid[w]), iHi[w] ) };
+                for (int pl = pFirst[a]; pl <= pLast[a]; ++pl)
+                {
+                    // an x plane: its two cells' slabs; a y or z plane: its strips' (in-plane u = x, below)
+                    if ( a == 0 and nT > 1 and not ( ( pl > 0 and owns( th, pl - 1 ) ) or ( pl < int(nGrid[0]) and owns( th, pl ) ) ) )
+                        continue;
+                    double const P = pl * double(dx[a]);
+                    double dist[4];
+                    for (int v = 0; v < 4; ++v) dist[v] = X[v][a] - P;
+                    faceSweep::Polygon sec;
+                    if ( not faceSweep::section( p, a, dist, sec ) ) continue;
+                    double const c = P - X[0][a];                    // the plane in the base-relative frame
+                    faceSweep::sweep( sec, win0, win1,
+                        [&](int const k, int const g, double &blo, double &bhi)
+                        {
+                            int const ax = k == 0 ? u : w;
+                            blo = g * double(dx[ax]) - X[0][ax];
+                            bhi = blo + double(dx[ax]);
+                        },
+                        [&](int const k, int const g) -> long
+                        { return ( k == 0 and u == 0 and nT > 1 and not owns( th, g ) ) ? -1 : g; },
+                        [&](int const *g, long const *, double const m[3])
+                        {
+                            double q[3];
+                            q[a] = c; q[u] = m[1] / m[0]; q[w] = m[2] / m[0];
+                            double F[noVelComp];
+                            for (size_t j = 0; j < noVelComp; ++j)
+                            {
+                                double vj = vb[j];
+                                for (int i = 0; i < 3; ++i) vj += double( velGrad[i][j] ) * q[i];
+                                F[j] = vj * m[0];
+                            }
+                            int cell[3];
+                            cell[u] = g[0]; cell[w] = g[1];
+                            for (int side = 0; side < 2; ++side)   // the cell below the plane (+), the cell above (-)
+                            {
+                                cell[a] = side == 0 ? pl - 1 : pl;
+                                if ( cell[a] < 0 or cell[a] >= int(nGrid[a]) ) continue;
+                                if ( nT > 1 and not owns( th, cell[0] ) ) continue;
+                                double *out = &acc[flat( cell[0], cell[1], cell[2] ) * noGradComp];
+                                for (size_t j = 0; j < noVelComp; ++j)
+                                    out[j*NO_DIM + size_t(a)] += side == 0 ? F[j] : -F[j];
+                            }
+                        } );
+                }
+            }
+        }
+    };
+    if ( nT == 1 )
+        pass( 0 );
+    else
+    {
+        std::vector<std::thread> pool;
+        for (int th = 1; th < nT; ++th) pool.emplace_back( pass, th );
+        pass( 0 );
+        for (std::thread &x : pool) x.join();
+    }
+}
+#endif
+
 // Volume-averaged grid interpolation (method 1): quasi-Monte-Carlo sampling inside each Delaunay cell,
 // with the sample count proportional to cell volume; scatters each sample's field value into its grid cell.
 // --exact-average replaces the MC inner loop by analytic cell∩tet integration (r3d; NO_DIM==3 only).
@@ -1486,6 +1643,48 @@ void interpolateGrid_averaged_1(DT &dt,
     }   // end of the CPU interpolation (skipped when the Metal deposit succeeded)
 
 
+#if NO_DIM==3 && defined(VELOCITY) && !defined(MY_SCALAR)
+    // --face-gradient: the velocity gradient's cell integrals from the faces (avg1FacePass) replace the deposit's;
+    // DTFE_FACE_CHECK=1 first compares them (one 'FACE-CHECK' line on stderr per call, i.e. per sub-domain)
+    if ( userOptions.faceGradient and field.velocity_gradient )
+    {
+        int const nTf = exactAverageThreads();
+        int const slabWf = std::max( 1, int( nGrid[0] / size_t( 8 * nTf ) ) );
+        bool const check = Env::flag( "DTFE_FACE_CHECK" );
+        std::vector<double> acc;
+        std::vector<unsigned char> degen;
+        avg1FacePass( dt, boxCoordinates, fullBox, nGrid, dx, nTf, slabWf, acc, check ? &degen : nullptr );
+        if ( check )
+        {
+            // relative to the rms of the deposit's integrals over all cells and components
+            double ss = 0.;
+            for (size_t c = 0; c < gridSize; ++c)
+                for (size_t q = 0; q < noGradComp; ++q) ss += double( (*velocity_gradient)[c][q] ) * double( (*velocity_gradient)[c][q] );
+            double const scale = std::sqrt( ss / double( gridSize * noGradComp ) );
+            double worst = 0., sum2 = 0.;
+            size_t n = 0, above = 0, nDegen = 0;
+            for (size_t c = 0; c < gridSize; ++c)
+            {
+                if ( degen[c] ) { ++nDegen; continue; }
+                double cw = 0.;
+                for (size_t q = 0; q < noGradComp; ++q)
+                {
+                    double const e = std::fabs( acc[c*noGradComp + q] - double( (*velocity_gradient)[c][q] ) ) / ( scale > 0. ? scale : 1. );
+                    cw = std::max( cw, e );
+                    sum2 += e * e;
+                }
+                worst = std::max( worst, cw );
+                if ( cw > 1e-4 ) ++above;
+                ++n;
+            }
+            std::fprintf( stderr, "FACE-CHECK cells %zu compared %zu degenerate %zu max_rel %.3g rms_rel %.3g above_1e-4 %zu "
+                          "scale %.6g\n", gridSize, n, nDegen, worst, n ? std::sqrt( sum2 / double( n * noGradComp ) ) : 0.,
+                          above, scale );
+        }
+        for (size_t c = 0; c < gridSize; ++c)
+            for (size_t q = 0; q < noGradComp; ++q) (*velocity_gradient)[c][q] = Real( acc[c*noGradComp + q] );
+    }
+#endif
 
     avg1Normalize( field, grids, gridCellVolume );
     

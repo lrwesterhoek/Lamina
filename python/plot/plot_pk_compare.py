@@ -18,13 +18,13 @@ z = 0), and a
 third panel divides by the
 SAME realisation's early spectrum grown linearly (--ref-snap, default snapshot 0, z = 20): its phases and
 amplitudes cancel, so what is left is growth (1 where linear) -- the dip disappears there. The default
-binning stays 40 log bins (single |n| shells at low k); --nbins 0 gives k_f-wide linear bins.
+binning stays 40 log bins (single |n| shells at low k); --n-bins 0 gives k_f-wide linear bins.
 
-Files: pk_<dtfe+ps | method | prefix>_z<z>.npz/.png; a non-default --nbins adds '_nb<N>' and a non-default --ref-snap
+Files: pk_<dtfe+ps | method | prefix>_z<z>.npz/.png; a non-default --n-bins adds '_nb<N>' and a non-default --ref-snap
 '_ref<S>' ('_noref' for -1) before the redshift, so a rerun with other bins never replaces the default.
 
     python3 plot/plot_pk_compare.py --sim TNG100-3-Dark --snaps 99 50
-    python3 plot/plot_pk_compare.py --sim TNG50-4-Dark --snap 99 --method dtfe --nbins 30
+    python3 plot/plot_pk_compare.py --sim TNG50-4-Dark --snap 99 --estimator dtfe --n-bins 30
 """
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
@@ -38,7 +38,7 @@ import matplotlib.pyplot as plt
 
 from scipy.stats import chi2
 
-from dtfelib import make_parser, FieldSet, snapdir_path, spectra, add_snaps_arg, add_out_arg
+from dtfelib import make_parser, FieldSet, snapdir_path, spectra, add_snaps_arg, add_out_arg, deprecated_alias
 from dtfelib import figures as style
 
 OUTPUT_DIR = Path(config.figures_path("power_spectrum"))
@@ -64,7 +64,7 @@ def spectra_of(snapdir, methods, prefix, nbins):
 
 
 def same_edges(a, b) -> bool:
-    """Whether two spectra share their k bins (a shape test first: --nbins 0 gives N-dependent bin counts)."""
+    """Whether two spectra share their k bins (a shape test first: --n-bins 0 gives N-dependent bin counts)."""
     a, b = np.asarray(a), np.asarray(b)
     return a.shape == b.shape and np.allclose(a, b)
 
@@ -171,7 +171,7 @@ DEFAULT_NBINS, DEFAULT_REF_SNAP = 40, 0
 
 
 def option_tag(args) -> str:
-    """'' at the default binning and reference, else '_nb<N>' (--nbins; '_nb0' = k_f-wide linear bins) and '_ref<S>'
+    """'' at the default binning and reference, else '_nb<N>' (--n-bins; '_nb0' = k_f-wide linear bins) and '_ref<S>'
     / '_noref' (--ref-snap), so a rerun with another binning or reference
     never overwrites the default figure and npz (other k bins, another third panel) under the same name."""
     t = "" if int(args.nbins) == DEFAULT_NBINS else f"_nb{int(args.nbins)}"
@@ -183,13 +183,14 @@ def option_tag(args) -> str:
 def main():
     parser = make_parser("Density power spectrum: DTFE and PS-DTFE grids against linear theory.")
     add_snaps_arg(parser)
-    parser.add_argument("--nbins", type=int, default=DEFAULT_NBINS,
+    parser.add_argument("--n-bins", dest="nbins", type=int, default=DEFAULT_NBINS, metavar="N",
                         help=f"logarithmic k bins from k_f to k_Ny (default {DEFAULT_NBINS}; 0 = k_f-wide linear bins); "
                              "another value tags the files '_nb<N>'")
     parser.add_argument("--ref-snap", type=int, default=DEFAULT_REF_SNAP,
                         help=f"the early snapshot whose growth-scaled P(k) is the same-realisation reference panel "
                              f"(default {DEFAULT_REF_SNAP}; -1 = no panel); another value tags the files '_ref<S>' / '_noref'")
     add_out_arg(parser, f"{OUTPUT_DIR}/<sim>")
+    deprecated_alias(parser, "--nbins", "--n-bins")
     args = parser.parse_args()
     style.apply()
     out_dir = Path(args.out).expanduser() if args.out else OUTPUT_DIR / args.sim
@@ -219,7 +220,7 @@ def main():
             other = next(m for m in methods if m not in ps)
             print(f"    only {LABEL[next(iter(ps))]} grids here: that estimator against linear theory alone")
             note = f"no {LABEL[other]} grid for this snapshot"
-        tag = args.prefix or "+".join(ps)               # the file names what it holds: a --method or --prefix rerun
+        tag = args.prefix or "+".join(ps)               # the file names what it holds: an --estimator or --prefix rerun
         base = out_dir / f"pk_{tag}{option_tag(args)}_z{z:.2f}"     # would overwrite the default file (suffixes APPENDED)
         base.parent.mkdir(parents=True, exist_ok=True)
         arrays = {"redshift": z, "box_mpc": box, "k_linear": np.geomspace(1e-3, 10.0, 400),

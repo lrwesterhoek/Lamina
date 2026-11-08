@@ -92,7 +92,7 @@ run() {  # $1 = output root, $2 = input snapshot, rest = extra flags
     local log="${out}.log"
     set +e
     "${BIN}" "${snap}" "${out}" --grid "${GRID}" --field density velocity density_a \
-        --input 105 --MpcUnit 1 --verbose 1 --avg-subsamples 1 --periodic "$@" > "$log" 2>&1
+        --input-format 105 --mpc-unit 1 --verbose 1 --subsamples 1 --periodic "$@" > "$log" 2>&1
     local rc=$?
     set -e
     die_on_failed_run "$rc" "$log"

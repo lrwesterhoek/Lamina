@@ -30,7 +30,7 @@
 // Readers for text input files.
 
 // Example reader. Line 1 = particle count; line 2 = box; line 3+ = "posX posY posZ weight" per
-// particle (matches demo/example_input_data_from_text_file.txt and the '--input 111' help).
+// particle (matches demo/example_input_data_from_text_file.txt and the '--input-format 111' help).
 // Sized Read_data accessors allocate AND mark the array as assigned -- transferData then copies
 // it into every particle -- so only arrays this reader actually fills may be requested.
 void readTextFile(std::string filename,
@@ -168,7 +168,7 @@ void writeTextFile_gridIndex(std::vector<Real> &dataToWrite,
     openOutputTextFile( outputFile, filename );
 
 
-    size_t gridArr[NO_DIM];            // the grid the files hold: the --ps-window cells, else the full grid
+    size_t gridArr[NO_DIM];            // the grid the files hold: the --grid-window cells, else the full grid
     userOptions.outputGridSize( gridArr );
     size_t const *grid = gridArr;
     size_t totalGrid = 1;
@@ -203,7 +203,7 @@ void writeTextFile_gridIndex(std::vector< Pvector<T,N> > &dataToWrite,
     openOutputTextFile( outputFile, filename );
 
 
-    size_t gridArr[NO_DIM];            // the grid the files hold: the --ps-window cells, else the full grid
+    size_t gridArr[NO_DIM];            // the grid the files hold: the --grid-window cells, else the full grid
     userOptions.outputGridSize( gridArr );
     size_t const *grid = gridArr;
     size_t totalGrid = 1;
@@ -243,7 +243,7 @@ void writeTextFile_samplingPosition(std::vector<Real> &dataToWrite,
     openOutputTextFile( outputFile, filename );
 
 
-    size_t gridArr[NO_DIM];            // the grid the files hold: the --ps-window cells, else the full grid
+    size_t gridArr[NO_DIM];            // the grid the files hold: the --grid-window cells, else the full grid
     userOptions.outputGridSize( gridArr );
     size_t const *grid = gridArr;
     Box boxCoordinates = userOptions.region;    // boundaries of the box the fields were interpolated on
@@ -283,7 +283,7 @@ void writeTextFile_samplingPosition(std::vector< Pvector<T,N> > &dataToWrite,
     openOutputTextFile( outputFile, filename );
 
 
-    size_t gridArr[NO_DIM];            // the grid the files hold: the --ps-window cells, else the full grid
+    size_t gridArr[NO_DIM];            // the grid the files hold: the --grid-window cells, else the full grid
     userOptions.outputGridSize( gridArr );
     size_t const *grid = gridArr;
     Box boxCoordinates = userOptions.region;    // boundaries of the box the fields were interpolated on
@@ -330,7 +330,7 @@ void writeTextFile_redshiftConePosition(std::vector<Real> &dataToWrite,
     openOutputTextFile( outputFile, filename );
 
 
-    size_t gridArr[NO_DIM];            // the grid the files hold: the --ps-window cells, else the full grid
+    size_t gridArr[NO_DIM];            // the grid the files hold: the --grid-window cells, else the full grid
     userOptions.outputGridSize( gridArr );
     size_t const *grid = gridArr;
     Box coneCoordinates = userOptions.redshiftCone;    // redshift cone coordinates
@@ -397,7 +397,7 @@ void writeTextFile_redshiftConePosition(std::vector< Pvector<T,N> > &dataToWrite
     openOutputTextFile( outputFile, filename );
 
 
-    size_t gridArr[NO_DIM];            // the grid the files hold: the --ps-window cells, else the full grid
+    size_t gridArr[NO_DIM];            // the grid the files hold: the --grid-window cells, else the full grid
     userOptions.outputGridSize( gridArr );
     size_t const *grid = gridArr;
     Box coneCoordinates = userOptions.redshiftCone;    // redshift cone coordinates

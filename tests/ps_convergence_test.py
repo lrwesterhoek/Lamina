@@ -2,7 +2,7 @@
 """PS-DTFE convergence test: single-stream density profile vs the analytic Zel'dovich solution.
 
 Test-design notes:
-  * Uses the volume-AVERAGED field (density_a, --avg-subsamples 3): since the deposit is
+  * Uses the volume-AVERAGED field (density_a, --subsamples 3): since the deposit is
     mass-conserving, the plain (nSub=1) field carries per-tetrahedron quantization noise that
     GROWS as tets shrink toward the cell size -- the '_a' fields are the science-quality
     estimator (see run_ps_dtfe.sh) and the ones whose convergence is meaningful.
@@ -89,8 +89,8 @@ def main():
              "--out", snap, "--n", str(n), "--box", str(BOX), "--amplitude-factor", str(AMP),
              "--jitter-frac", str(JITTER), "--seed", str(SEED)])
         run([binary, snap, out, "--grid", str(GRID), "--periodic",
-             "--avg-subsamples", str(NSUB), "--field", "density_a",
-             "--input", "105", "--MpcUnit", "1", "--verbose", "0"])
+             "--subsamples", str(NSUB), "--field", "density_a",
+             "--input-format", "105", "--mpc-unit", "1", "--verbose", "0"])
         err = single_stream_error(out + ".a_den", GRID, AMP)
         errors.append(err)
         print(f"  N={n:>3}^3 ({n**3:>8} particles):  single-stream density_a L1 error = {err:.4f}")

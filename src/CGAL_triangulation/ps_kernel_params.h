@@ -64,7 +64,7 @@ struct PSDepositParams
     // ds/dx_i, the CPU's scalar_gradient layout for one component).
     int32_t  fScal;
     int32_t  fSGrad;
-    // --ps-window: the sub-box (subOrigin/subDims) is a WINDOW of the full grid, not a partition's own
+    // --grid-window: the sub-box (subOrigin/subDims) is a WINDOW of the full grid, not a partition's own
     // box: a tet straddling its edge counts every in-grid sample (pass 0 / phase 0 sumW) exactly as in
     // the full run and deposits only the samples / pieces inside, so the window equals the full run.
     int32_t  windowMode;
@@ -73,7 +73,7 @@ struct PSDepositParams
     // carry done by hand) -- exact, and independent of the order the atomics land in. Float atomics into
     // 'mass' (buffer 3) drop every share below half an ulp of a busy cell's running sum, always
     // downward: 0.06% of the box mass at TNG50-3-Dark z=0, percents in halo-core cells with 1e7 deposits.
-    // massFixed = 0 keeps that float grid (PS_GPU_FLOAT_MASS=1, for comparison); the unused one is a
+    // massFixed = 0 keeps that float grid (DTFE_GPU_FLOAT_MASS=1, for comparison); the unused one is a
     // 4-byte dummy. (The moment grids: fxMask below.)
     int32_t  massFixed;
     float    massScale;    // 2^k (ps_deposit_params.h psMassFixedScale), so the product is exact
@@ -83,7 +83,7 @@ struct PSDepositParams
     // metal/dtfe_deposit.metal), in units of 1/fxScale[g], a power of two the host bounds so no cell overflows.
     // Bit FX_DW = dispw is not deposited (it equals the mass grid's shares; the host reads the mass words).
     // FX_SUMW_BIT = the exact items' per-tet weight totals are fixed-point too (depositExactItems).
-    // 0 = every moment grid a float sum (PS_GPU_FLOAT_MOMENTS=1 on the host).
+    // 0 = every moment grid a float sum (DTFE_GPU_FLOAT_MOMENTS=1 on the host).
     uint32_t fxMask;
     float    fxScale[9];   // [g], g = PS_FX_MOM ... PS_FX_SG: the PS_FX_N grids (PS_FX_DW unused)
     // PS_GPU_DEBUG_NOATOMIC (a timing experiment, the atomics' share of the sampled kernel): 1 = the sampled path

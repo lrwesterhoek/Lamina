@@ -87,9 +87,9 @@ class DataSpec:
     def steps(self) -> list[_rs.Step]:
         todo = self._todo()
         snaps, gcs = [str(n) for n in todo["snaps"]], [str(n) for n in todo["gcs"]]
-        # PY: the download script checks the chunks already on disk with h5py (an incomplete one is fetched
-        # again) -- the same python the merge step runs with
-        env = {"DTFE_DATA_ROOT": str(self.data_root), "PY": _rs.PYTHON}
+        # PYTHON: the download script checks the chunks already on disk with h5py (an incomplete one is fetched
+        # again) -- the same python the merge step runs with (PY, its older name, too until P6.6)
+        env = {"DTFE_DATA_ROOT": str(self.data_root), "PYTHON": _rs.PYTHON, "PY": _rs.PYTHON}
         dl = [str(_rs.DOWNLOAD_SCRIPT)]
         out = []
         if self.download_snapshots and snaps:
@@ -106,9 +106,10 @@ class DataSpec:
         # missing particles (merge_HDF5.py refuses what it can detect; a missing TREE chunk it cannot)
         have = {st.label.split(" ")[1]: st.label for st in out}        # 'snapshots', 'group', 'merger', 'initial'
         if self.merge_snapshots and snaps:
-            out.append(_rs.Step(f"merge snapshots {' '.join(snaps)}", merge + snaps + tail, {}, after=have.get("snapshots", "")))
+            out.append(_rs.Step(f"merge snapshots {' '.join(snaps)}", merge + ["--snaps", *snaps] + tail, {},
+                                after=have.get("snapshots", "")))
         if self.merge_groupcats and gcs:
-            out.append(_rs.Step(f"merge group catalogues {' '.join(gcs)}", merge + ["--groupcats", *gcs] + tail, {},
+            out.append(_rs.Step(f"merge group catalogues {' '.join(gcs)}", merge + ["--groupcats", "--snaps", *gcs] + tail, {},
                                 after=have.get("group", "")))
         if self.merge_trees and todo["trees"]:
             out.append(_rs.Step("merge merger trees", merge + ["--trees"] + tail, {}, after=have.get("merger", "")))

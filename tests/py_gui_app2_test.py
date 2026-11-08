@@ -273,18 +273,19 @@ def t_plot_sets(tmp: Path):
                    "plot_void_convergence.py"))
           and plain["plot_void_convergence.py"].env.get("DTFE_SIM") == "TNGX-1-Dark"
           and [st.argv[2:] for st in rs.PlotSpec(sets=["voidcat"], **base).steps()]
-          == [["build", "--sim", "TNGX-1-Dark", "--snap", str(n), "--method", "ps"] for n in (33, 99)],
+          == [["build", "--sim", "TNGX-1-Dark", "--snap", str(n), "--estimator", "ps"] for n in (33, 99)],
           {k: v.argv[2:] for k, v in plain.items()})
     opts = {"crossbox": {"sims": "TNG50-3-Dark TNG100-3-Dark", "smooth_mpc": 3.0, "z": "0 2", "n_boot": 50, "replot": True},
             "voidtrack": {"radius": "r_eff", "smooth_mpc": 2.1625}}
     got = {st.argv[1].split("/")[-1]: st.argv for st in rs.PlotSpec(sets=["crossbox", "voidtrack"], options=opts,
                                                                        method="dtfe", prefix="ps_mw", **base).steps()}
     c, t = got["plot_void_crossbox.py"], got["plot_void_tracking.py"]
-    check("... the options reach their flags (boxes, method, prefix, smoothing, redshifts, bootstrap, replot; the "
+    check("... the options reach their flags (boxes, estimator, prefix, smoothing, redshifts, bootstrap, replot; the "
           "tracking's radius and smoothing in Mpc)",
           c[c.index("--sims") + 1:c.index("--data-root")] == ["TNG50-3-Dark", "TNG100-3-Dark"]
-          and c[c.index("--method") + 1] == "dtfe" and c[c.index("--prefix") + 1] == "ps_mw"
-          and c[c.index("--smooth-mpc") + 1] == "3" and c[c.index("--z") + 1:c.index("--z") + 3] == ["0", "2"]
+          and c[c.index("--estimator") + 1] == "dtfe" and c[c.index("--prefix") + 1] == "ps_mw"
+          and c[c.index("--smooth-mpc") + 1] == "3"
+          and c[c.index("--redshifts") + 1:c.index("--redshifts") + 3] == ["0", "2"]
           and c[c.index("--n-boot") + 1] == "50" and "--replot" in c
           and t[t.index("--radius") + 1] == "r_eff" and t[t.index("--smooth-mpc") + 1] == "2.1625", (c, t))
     # every flag the launcher passes is one the script's own parser knows (a script not on disk is judged only
@@ -463,7 +464,7 @@ def t_qt(tmp: Path):
         check("'Build void catalogue' queues a Plots job: void_cache.py build for the run's snapshot and method",
               job is not None and job.kind == "plots" and len(steps) == 1
               and steps[0].argv[1].endswith("void_cache.py") and steps[0].argv[2:] ==
-              ["build", "--sim", "TNGQ-1-Dark", "--snap", "99", "--method", "ps"]
+              ["build", "--sim", "TNGQ-1-Dark", "--snap", "99", "--estimator", "ps"]
               and steps[0].env.get("DTFE_SIM") == "TNGQ-1-Dark", steps and steps[0].argv)
         del w.queue[n0:]
         # a failed memory-check pass: its output goes into the log the status line points to
@@ -486,9 +487,11 @@ def t_qt(tmp: Path):
         for cb in (w.om_check, w.p_om, w.o_om):
             cb.setChecked(True)
         w._read_widgets()
-        check("the ordered-merge tick reaches the Grids, Pipeline and Custom jobs (ORDERED_MERGE=1 / --ordered-merge)",
-              w.spec.command()[1].get("ORDERED_MERGE") == "1" and w.pipe.command()[1].get("ORDERED_MERGE") == "1"
-              and "--ordered-merge" in w.custom.command(),
+        check("the ordered-merge tick reaches the Grids, Pipeline and Custom jobs (PS_MERGE=index-order, the older "
+              "ORDERED_MERGE=1 beside it until P6.6; the Custom tab: the binary's default index order, no '--ps-merge')",
+              all(e.get("PS_MERGE") == "index-order" and e.get("ORDERED_MERGE") == "1"
+                  for e in (w.spec.command()[1], w.pipe.command()[1]))
+              and "--ps-merge" not in w.custom.command(),
               (w.spec.ordered_merge, w.pipe.ordered_merge, w.custom.ordered_merge))
         w.om_check.setChecked(False)
         (d / "om.runlog").write_text(LOG_OK.format(root=d / "om").replace("--periodic", "--periodic --ordered-merge"))
@@ -503,7 +506,7 @@ def t_qt(tmp: Path):
         check("'Load settings' carries the ordered merge: on for a run made with it (and for one without a flag, "
               "the default), off for a --completion-order-merge run",
               on and off and w.om_check.isChecked(), (on, off))
-        # the start-over tick (Grids, Pipeline) reaches run_ps_dtfe.sh as PS_RESUME=0; the banner of a
+        # the start-over tick (Grids, Pipeline) reaches run_ps_dtfe.sh as DTFE_RESUME=0 (and PS_RESUME); the banner of a
         # refused resume ticks it; its text has no '--'; 'Load settings' leaves it alone (a one-off choice)
         so, pso = getattr(w, "so_check", None), getattr(w, "p_so", None)
         ok = so is not None and pso is not None
@@ -511,17 +514,18 @@ def t_qt(tmp: Path):
             so.setChecked(True)
             pso.setChecked(True)
             w._read_widgets()
-            ticked = (w.spec.command()[1].get("PS_RESUME"), w.pipe.command()[1].get("PS_RESUME"))
+            ticked = (w.spec.command()[1].get("DTFE_RESUME"), w.pipe.command()[1].get("DTFE_RESUME"),
+                      w.spec.command()[1].get("PS_RESUME"), w.pipe.command()[1].get("PS_RESUME"))
             so.setChecked(False)
             w._read_widgets()
-            off = w.spec.command()[1].get("PS_RESUME")
+            off = w.spec.command()[1].get("DTFE_RESUME")
             w._job_tab = A.GRIDS
             w._banner_action("start_over")
             banner = so.isChecked()
             w._load_run_settings(R.parse_runlog(d / "ps_output.runlog", "TNGQ-1-Dark", 99))
-            ok = (ticked == ("0", "0") and off == "1" and banner and so.isChecked()
-                  and "--" not in so.text() + so.toolTip() and "PS_RESUME=0" in so.toolTip())
-        check("the start-over tick reaches the Grids and Pipeline jobs (PS_RESUME=0, else 1), the refused-resume banner "
+            ok = (ticked == ("0",) * 4 and off == "1" and banner and so.isChecked()
+                  and "--" not in so.text() + so.toolTip() and "DTFE_RESUME=0" in so.toolTip())
+        check("the start-over tick reaches the Grids and Pipeline jobs (DTFE_RESUME=0, else 1), the refused-resume banner "
               "ticks it, no '--' in its text, 'Load settings' leaves it", ok,
               (getattr(w.spec, "start_over", None), getattr(w.pipe, "start_over", None)))
         t_qt_void_options(w)
@@ -580,10 +584,10 @@ def t_qt_pts_conventions(w, tmp: Path):
         custom_dtfe_off = not w.o_pc.isEnabled()
         check("the plane conventions' menu: the grids' conventions at first on the Grids, Custom and Pipeline tabs; the "
               "Grids one greyed without a slice, the Custom one live with points for PS-DTFE (greyed for standard "
-              "DTFE); legacy reaches the binary ('--pts-conventions legacy') and the pipeline (PTS_CONVENTIONS) and "
+              "DTFE); legacy reaches the binary ('--ps-point-conventions legacy') and the pipeline (PTS_CONVENTIONS) and "
               "loads back; no '--' in its texts",
               start == ("grid", "grid", "grid") and grids_off and custom_on and custom_dtfe_off
-              and "--pts-conventions" in cmd and cmd[cmd.index("--pts-conventions") + 1] == "legacy"
+              and "--ps-point-conventions" in cmd and cmd[cmd.index("--ps-point-conventions") + 1] == "legacy"
               and env.get("PTS_CONVENTIONS") == "legacy" and w.o_pc.currentData() == "legacy"
               and not any("--" in w.p_pc.itemText(i) for i in range(w.p_pc.count())),
               (start, grids_off, custom_on, custom_dtfe_off, env.get("PTS_CONVENTIONS")))

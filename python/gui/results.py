@@ -38,6 +38,11 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+_PYTHON = Path(__file__).resolve().parent.parent           # python/: dtfelib (stdlib-only runlog)
+if str(_PYTHON) not in sys.path:
+    sys.path.insert(0, str(_PYTHON))
+from dtfelib import runlog as _runlog  # noqa: E402  (the run-log readers' permanent old-to-new table)
+
 # ---------------------------------------------------------------------- run records
 _BUILD = re.compile(r"^Build: (\S+) (\S+) \(built ([0-9T:\-]+Z?)\)", re.M)
 _RUNNING = re.compile(r"^RUNNING: (.*)$", re.M)
@@ -47,13 +52,15 @@ _FOOTPRINT = re.compile(r"^\s*(\d+)\s+peak memory footprint", re.M)
 _GRID = re.compile(r"--grid (\d+)")
 _PARTITION = re.compile(r"--partition (\d+) (\d+)(?: (\d+))?")    # a 2D run's split has two numbers
 _CONC = re.compile(r"--max-concurrent (\d+)")
-_NSUB = re.compile(r"--avg-subsamples (\d+)")
-# the binaries' deprecated spellings (src/user_options.cc deprecatedOptions; accepted for one release) and their
-# canonical names. Every reader of a command line maps them first, so a run log written with either reads the same
-# (RunRecord.has, and every regex below runs on canonical_command's text).
-DEPRECATED_FLAGS = {"--ps-gpu": "--gpu", "--ps-exact-deposit": "--exact-average", "--ps-no-overlap": "--no-overlap",
-                    "--full_help": "--full-help", "--lambda_th": "--lambda-th"}
-_FLAG_TOKEN = re.compile(r"(?<!\S)--[A-Za-z][\w-]*")     # an option name at a token's start ('--x' or '--x=v')
+_NSUB = re.compile(r"--subsamples (\d+)")             # (canonical: an older log's '--avg-subsamples' reads so)
+_MERGE = re.compile(r"(?:^|\s)--ps-merge (\S+)")
+# the binaries' older spellings and their canonical names: dtfelib/runlog.py's permanent table (the binaries accept
+# a subset for one release, src/user_options.cc deprecatedOptions). Every reader of a command line maps them first,
+# so a run log written with either reads the same (RunRecord.has, and every regex below runs on canonical_command's
+# text). Re-exported here for the launcher (presets.flag_help, the Custom tab's repeat check).
+DEPRECATED_FLAGS = _runlog.RENAMES
+canonical_flag = _runlog.canonical_flag
+canonical_command = _runlog.canonical_command
 _FIELDS = re.compile(r"--field ((?:(?!--)\S+\s*)+)")
 # the GPU deposit restarted after a watchdog kill: DTFE says 'the deposit', PS-DTFE 'the partition deposit'
 _GPU_RETRY = re.compile(r"retrying the (?:partition )?deposit from scratch")
@@ -208,17 +215,6 @@ def log_prefix(name: str) -> str:
     return name
 
 
-def canonical_flag(flag: str) -> str:
-    """The canonical spelling of one option name ('--ps-gpu' -> '--gpu'); any other name unchanged."""
-    return DEPRECATED_FLAGS.get(flag, flag)
-
-
-def canonical_command(command: str) -> str:
-    """A command line with every deprecated option name in its canonical spelling (DEPRECATED_FLAGS), the rest
-    untouched: '--lambda_th=0.3' -> '--lambda-th=0.3'; a name inside a path or a value is not an option's."""
-    return _FLAG_TOKEN.sub(lambda m: DEPRECATED_FLAGS.get(m.group(0), m.group(0)), command)
-
-
 def parse_duration(text: str) -> float | None:
     """'1h 2m 3s' / '58m 11s' / '12.3s' -> seconds."""
     total, found = 0.0, False
@@ -273,10 +269,13 @@ class RunRecord:
     # -- the settings the RUNNING line shows (in canonical spellings: an old log's '--ps-gpu' is '--gpu' here)
     @property
     def canonical(self) -> str:
-        return canonical_command(self.command)
+        # the dimension from the Build line's binary name (the '--samples N' -> '--subsamples k' transform needs it),
+        # else from the command's own first word
+        return canonical_command(self.command, self.dim if self.binary else None)
 
     def has(self, flag: str) -> bool:
-        """The command carries the option 'flag' (either spelling of a renamed one)."""
+        """The command carries the option 'flag' (either spelling of a renamed one; an old merge switch is the
+        '--ps-merge' mode it stands for: has('--ordered-merge') == has('--ps-merge index-order'))."""
         return re.search(rf"(^|\s){re.escape(canonical_flag(flag))}(\s|$)", self.canonical) is not None
 
     @property
@@ -372,9 +371,9 @@ class RunRecord:
                 bits.append("volume-weighted")
             if self.has("--ps-caustics"):
                 bits.append("caustics")
-            if self.has("--ordered-merge"):
+            if self.merge == "index-order":           # '--ordered-merge' in older logs
                 bits.append("ordered merge")
-            elif self.has("--completion-order-merge"):   # opt-in (the default is the ordered merge)
+            elif self.merge == "completion-order":    # opt-in (the default is the ordered merge)
                 bits.append("completion-order merge")
         elif self.has("--exact-average"):       # standard DTFE: the exact cell average tells the production grids
             bits.append("exact average")        # from the Monte-Carlo ones
@@ -391,9 +390,17 @@ class RunRecord:
         return ", ".join(bits)
 
     @property
+    def merge(self) -> str:
+        """The PS-DTFE merge mode the command GAVE ('--ps-merge MODE'; an older log's '--ordered-merge',
+        '--completion-order-merge' or '--fixed-point-merge'), '' when it gave none (the default, index order)."""
+        m = _MERGE.search(self.canonical)
+        return m.group(1) if m else ""
+
+    @property
     def legacy_points(self) -> bool:
-        """A phase-space plane asked for in the legacy conventions ('--pts-conventions legacy')."""
-        return re.search(r"(^|\s)--pts-conventions\s+legacy(\s|$)", self.canonical) is not None
+        """A phase-space plane asked for in the legacy conventions ('--ps-point-conventions legacy';
+        '--pts-conventions' in older logs)."""
+        return re.search(r"(^|\s)--ps-point-conventions\s+legacy(\s|$)", self.canonical) is not None
 
     def settings(self) -> dict:
         """The Grids-tab (RunSpec) settings this run used, as far as its command shows them."""
@@ -409,9 +416,10 @@ class RunRecord:
                      caustics=self.has("--ps-caustics"), caustic_cusps=self.has("--ps-caustic-cusps"),
                      parallel_triangulation=self.has("--parallel-triangulation"),
                      # K1; the default is ON (the staged merge in index order), so only
-                     # a run made with '--completion-order-merge' turns it off -- an older binary's run without either
-                     # flag merged in completion order, but loading its settings starts the current default
-                     ordered_merge=not self.has("--completion-order-merge"),
+                     # a run made with '--ps-merge completion-order' ('--completion-order-merge') turns it off -- an
+                     # older binary's run without either flag merged in completion order, but loading its settings
+                     # starts the current default
+                     ordered_merge=self.merge != "completion-order",
                      output_prefix=self.prefix or "ps_output")
             m = re.search(r"(?:^|\s)--ps-alpha-shape\s+([0-9.]+)", self.canonical)
             if m:
@@ -454,7 +462,9 @@ def run_inputs(rec: RunRecord) -> set[Path]:
         words = rec.command.split()
     # the log prints the command UNQUOTED: a path with a space (anything under iCloud's 'Mobile Documents') splits
     # above, so the file options' values are also read up to the next ' --', and the sidecar names the rest
-    for m in re.finditer(r"--(?:sample-points|lagrangianInput|scalar-file)\s+(.+?)(?=\s--|$)", rec.command):
+    # (the raw command: every spelling of the file options, '--lagrangianInput' in older logs)
+    for m in re.finditer(r"--(?:sample-points|ps-lagrangian-input|lagrangianInput|scalar-file)\s+(.+?)(?=\s--|$)",
+                         rec.command):
         words.append(m.group(1).strip())
     side = Path(str(rec.path.parent / rec.prefix) + ".gui.json")
     try:
@@ -796,15 +806,15 @@ KNOWN_FIXES: tuple[Fix, ...] = (
     Fix("interlace-pass2", "2026-10-11T23:00", "error",
         "an interlaced grid without a region: the second pass gridded the same cells, so the output was the "
         "first pass low-passed and moved half a cell, not de-aliased (fixed 2026-10-11): regenerate",
-        lambda r: r.has("--interlace") and not (r.has("--region") or r.has("--regionMpc"))),
+        lambda r: r.has("--interlace") and not (r.has("--region") or r.has("--region-mpc"))),
     Fix("pcs-deposit", "2026-10-11T23:00", "error",
         "a PCS grid: no padding (mass lost at the box faces and partition seams) and the deposit moved half a "
         "cell (fixed 2026-10-11): regenerate",
-        lambda r: r.has("--PCS")),
+        lambda r: r.has("--pcs")),
     Fix("cic-faces", "2026-10-11T23:00", "warning",
         "a CIC grid: the cells at the box faces and partition seams extrapolated their weights (up to 28% off "
         "at 32^3; fixed 2026-10-11): regenerate",
-        lambda r: r.has("--CIC")),
+        lambda r: r.has("--cic")),
     Fix("region-axes", "2026-10-11T23:00", "error",
         "a fractional region on a box whose axes differ in length or origin: each region entry took the box "
         "of the wrong axis (the x and y lengths for y and z), so the grid covers another region than asked "
@@ -829,7 +839,7 @@ KNOWN_FIXES: tuple[Fix, ...] = (
 
 
 # the launcher's start-over control, as the notes name it (no '--': launcher text)
-START_OVER_HINT = "'Start over' on the Grids or Pipeline tab (PS_RESUME=0; standard DTFE: DTFE_RESUME=0)"
+START_OVER_HINT = "'Start over' on the Grids or Pipeline tab (DTFE_RESUME=0, both run scripts)"
 
 
 def attempt_note(rec: RunRecord) -> tuple[str, str] | None:
@@ -964,7 +974,7 @@ def diagnose(log: str, exit_codes=()) -> list[Diagnosis]:
         out.append(Diagnosis("Resume refused",
                              "A killed run's checkpoint is there, but it cannot be continued (written with other "
                              "settings, or incomplete). Tick 'Start over' on the Grids or Pipeline tab "
-                             "(PS_RESUME=0; standard DTFE: DTFE_RESUME=0) to run the job from the beginning; it "
+                             "(DTFE_RESUME=0, both run scripts) to run the job from the beginning; it "
                              "replaces the checkpoint.",
                              "start_over"))
     if re.search(r"OVER BUDGET|over the memory budget|exceed the memory budget", tail) and not out:

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The G-tuner baseline of docs/cleanup-plan.md (P0.3 step 3): a FIXED list of 91 '--auto-tune-report'
-# configurations, one line each, "<label><TAB><the AUTO-TUNE-REPORT line>". Run it with the reference binaries once
+# The G-tuner baseline of docs/cleanup-plan.md (P0.3 step 3): a FIXED list of '--auto-tune-report' configurations
+# (91 until 2026-11-07, 110 since: the P8/P10 lines appended at the end), one line each, "<label><TAB><the AUTO-TUNE-REPORT line>". Run it with the reference binaries once
 # and keep the set with them; rerun it with the binaries of a change and diff the two: only the configurations the
 # change targets may differ.
 #
@@ -79,6 +79,35 @@ one "dtfe hand-set 2x2x2 mc=3" 64 DTFE "$CW64" "${DT_COMMON[@]}" --grid 256 --fi
 for g in 256 1024; do
     one "dtfe-double ram=64 grid=$g exact" 64 DTFE-double "$CW64" "${DT_COMMON[@]}" --grid "$g" --field density_a --exact-average
 done
+
+# ---- added 2026-11-07 (plan P8, P10): the lines the tuner items change. The standard lines above ask density and
+# velocity only, where the loop and the post-processing hold the same grids, so a phase-aware standard prediction
+# (P8.9) could not show there; the PS CPU exact deposit (P8.2) with points (P8.5) and in a window (P8.6); the face
+# sums (P10.5). Appended, so the first 91 lines keep their order.
+DT_PROD=(--field density_a velocity_a divergence_a shear_a)
+for ram in 8 64; do for g in 256 1024; do for dep in plain exact; do
+    a=(--grid "$g" "${DT_PROD[@]}")
+    [ "$dep" = exact ] && a+=(--exact-average)
+    one "dtfe prod ram=$ram grid=$g $dep" "$ram" DTFE "$CW64" "${DT_COMMON[@]}" "${a[@]}"
+done; done; done
+one "dtfe all fields ram=64 grid=1024 exact" 64 DTFE "$CW64" "${DT_COMMON[@]}" --grid 1024 \
+    --field density_a velocity_a gradient_a divergence_a shear_a vorticity_a tweb_a vweb_a --exact-average
+one "dtfe prod ram=64 grid=1024 exact gpu" 64 DTFE "$CW64" "${DT_COMMON[@]}" --grid 1024 "${DT_PROD[@]}" --exact-average --gpu
+one "dtfe prod face ram=64 grid=256 exact" 64 DTFE "$CW64" "${DT_COMMON[@]}" --grid 256 "${DT_PROD[@]}" --exact-average \
+    --face-gradient
+for ram in 8 64; do for g in 256 1024; do
+    one "ps N=128 ram=$ram grid=$g prod exact cpu" "$ram" PS-DTFE "$PAN128" "${PS_COMMON[@]}" --grid "$g" "${PROD[@]}" \
+        --ps-exact-deposit
+done; done
+EXTRA_ENV="DTFE_AUTO_PTS_N=4000000 DTFE_AUTO_PTS_VELGRAD=1" \
+    one "ps sample-points 4M velgrad exact cpu" 64 PS-DTFE "$PAN64" "${PS_COMMON[@]}" --grid 256 --field density_a velocity_a \
+    --ps-exact-deposit
+one "ps window exact cpu grid=1024 prod" 64 PS-DTFE "$PAN64" "${PS_COMMON[@]}" --grid 1024 "${PROD[@]}" \
+    --ps-exact-deposit --ps-window 25 75 25 75 50 56.25
+one "ps face exact cpu ram=64 grid=256 prod" 64 PS-DTFE "$PAN64" "${PS_COMMON[@]}" --grid 256 "${PROD[@]}" \
+    --ps-exact-deposit --face-gradient
+one "ps face exact cpu N=128 ram=8 grid=1024 prod" 8 PS-DTFE "$PAN128" "${PS_COMMON[@]}" --grid 1024 "${PROD[@]}" \
+    --ps-exact-deposit --face-gradient
 
 echo "$n configurations -> $OUT ($(grep -c $'\tAUTO-TUNE-REPORT ' "$OUT") with a report line)"
 rm -rf "$T"

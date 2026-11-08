@@ -36,12 +36,11 @@ Outputs (figures/void_crossbox/):
 
 Examples:
   python3 plot/plot_void_crossbox.py                                  # the three -3-Dark boxes, sigma 2.1625 Mpc
-  python3 plot/plot_void_crossbox.py --sims TNG100-3-Dark TNG300-3-Dark --smooth-mpc 3 --z 0 1
+  python3 plot/plot_void_crossbox.py --sims TNG100-3-Dark TNG300-3-Dark --smooth-mpc 3 --redshifts 0 1
   python3 plot/plot_void_crossbox.py --replot                         # redraw from the saved .npz files
 """
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
-import argparse
 import os
 import subprocess
 import sys
@@ -54,7 +53,7 @@ import matplotlib.pyplot as plt
 
 import config
 from dtfelib import figures as style
-from dtfelib.cli import add_out_arg
+from dtfelib.cli import add_out_arg, new_parser, add_estimator_arg, deprecated_alias, SMOOTH_MPC_ENV_NAMES
 
 DEFAULT_SIGMA_MPC = config.CROSSBOX_SMOOTHING_MPC   # 2.1625 = 10.0002 cells of TNG100-3-Dark (110.7 Mpc / 512;
                                       # production 10 cells = 2.16245 Mpc): the first comparison's, kept so its
@@ -216,14 +215,15 @@ def measure(sim, method="ps", prefix=None, data_root=None, zs=DEFAULT_Z, rv_rang
 
 
 def worker_main(argv):
-    p = argparse.ArgumentParser(description="plot_void_crossbox.py's per-box worker (run by the script itself)")
+    p = new_parser(description="plot_void_crossbox.py's per-box worker (run by the script itself)")
     p.add_argument("--worker", type=Path, required=True, help="the .npz to write")
     p.add_argument("--sim", required=True)
-    p.add_argument("--method", default="ps")
+    add_estimator_arg(p, choices=("ps", "dtfe"), default="ps")
     p.add_argument("--prefix", default=None)
     p.add_argument("--data-root", type=Path, default=None)
     p.add_argument("--smooth-mpc", type=float, required=True)
-    p.add_argument("--z", type=float, nargs="+", default=list(DEFAULT_Z))
+    p.add_argument("--redshifts", dest="z", type=float, nargs="+", default=list(DEFAULT_Z))
+    deprecated_alias(p, "--z", "--redshifts")
     p.add_argument("--rv-range", type=float, nargs=2, default=list(DEFAULT_RV_RANGE))
     p.add_argument("--points", type=int, default=None)
     p.add_argument("--n-boot", type=int, default=200)
@@ -241,14 +241,15 @@ def worker_main(argv):
 
 def run_worker(sim, args, path) -> int:
     """One box in its own process (DTFE_SIM=sim), its log passed through; the exit code."""
-    cmd = [sys.executable, str(Path(__file__).resolve()), "--worker", str(path), "--sim", sim, "--method", args.method,
-           "--smooth-mpc", repr(float(args.smooth_mpc)), "--z", *[repr(float(z)) for z in args.z],
+    cmd = [sys.executable, str(Path(__file__).resolve()), "--worker", str(path), "--sim", sim, "--estimator", args.method,
+           "--smooth-mpc", repr(float(args.smooth_mpc)), "--redshifts", *[repr(float(z)) for z in args.z],
            "--rv-range", *[repr(float(r)) for r in args.rv_range], "--n-boot", str(args.n_boot)]
     for flag, val in (("--prefix", args.prefix), ("--data-root", args.data_root), ("--points", args.points)):
         if val is not None:
             cmd += [flag, str(val)]
     env = dict(os.environ, DTFE_SIM=sim)
-    env.pop("DTFE_SIGMA_MPC", None)               # the sigma is --smooth-mpc's, whatever the shell exports
+    for name in SMOOTH_MPC_ENV_NAMES:             # the sigma is --smooth-mpc's, whatever the shell exports
+        env.pop(name, None)
     print(f"\n=== {sim}")
     return subprocess.call(cmd, env=env)
 
@@ -447,19 +448,20 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
     if "--worker" in argv:
         return worker_main(argv)
-    p = argparse.ArgumentParser(description="Void statistics of several boxes side by side at one smoothing length "
-                                            "in Mpc (resolved fraction, distinct-void density, R_v, stacked profiles).")
+    p = new_parser(description="Void statistics of several boxes side by side at one smoothing length "
+                               "in Mpc (resolved fraction, distinct-void density, R_v, stacked profiles).")
     p.add_argument("--sims", nargs="+", required=True,
                    help="the boxes to compare, e.g. --sims TNG50-3-Dark TNG100-3-Dark TNG300-3-Dark (required)")
-    p.add_argument("--method", choices=("ps", "dtfe"), default="ps", help="the field estimator (default ps)")
+    add_estimator_arg(p, choices=("ps", "dtfe"), default="ps", help="the field estimator (default ps)")
     p.add_argument("--prefix", default=None, help="a grid set's output prefix (default the method's)")
     p.add_argument("--data-root", type=Path, default=None,
                    help="the folder that holds the simulations (default: DTFE_DATA_ROOT)")
     p.add_argument("--smooth-mpc", type=float, default=DEFAULT_SIGMA_MPC, metavar="MPC",
                    help=f"the common smoothing length in Mpc (default {DEFAULT_SIGMA_MPC}: 10.0002 TNG100-3-Dark cells, "
                         "just above its production 10 cells = 2.16245 Mpc)")
-    p.add_argument("--z", type=float, nargs="+", default=list(DEFAULT_Z),
+    p.add_argument("--redshifts", dest="z", type=float, nargs="+", default=list(DEFAULT_Z), metavar="Z",
                    help="the redshifts of the bottom row, one figure each (default 0 0.5 1)")
+    deprecated_alias(p, "--z", "--redshifts")
     p.add_argument("--rv-range", type=float, nargs=2, default=list(DEFAULT_RV_RANGE), metavar=("LO", "HI"),
                    help="the stacks' common R_v range in smoothing lengths (default 2.5 5)")
     p.add_argument("--points", type=int, default=None, help="points per profile shell (default profiles.DEFAULT_M)")

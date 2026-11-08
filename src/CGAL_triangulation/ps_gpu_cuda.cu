@@ -40,7 +40,7 @@ extern std::atomic<int> psGpuRetriesByCause[4];   // ... by cause: innocent, tim
 #include "../message.h"       // ANSI colour helpers only (the retry warnings)
 #include "gpu_cuda_compat.h"
 #include "ps_deposit_params.h"
-#include "ps_mass_audit.h"      // PS_MASS_AUDIT=1: the fixed-point grid's exact total (as ps_metal_host.cc)
+#include "ps_mass_audit.h"      // DTFE_MASS_AUDIT=1: the fixed-point grid's exact total (as ps_metal_host.cc)
 
 namespace {
 
@@ -295,7 +295,7 @@ __device__ __forceinline__ int window_flat(const int raw[3], const DepositParams
     return 2;
 }
 
-// --ps-window, exact deposit: restrict a tet's raw span [lo, hi) along one axis to the hull of the
+// --grid-window, exact deposit: restrict a tet's raw span [lo, hi) along one axis to the hull of the
 // window's periodic images it meets (gpu_host.h psWindowHull, which the host's item bound uses --
 // keep in sync). False when the span misses the window.
 __device__ __forceinline__ bool window_hull(int& lo, int& hi, int n, bool periodic, int o, int m) {
@@ -786,7 +786,7 @@ depositFields(const float* __restrict__ verts, const float* __restrict__ vels, f
         E.straddle = straddle;
         E.wFull = exact_full_weight(tetVol, fLinear, d0, dG, E.t1, E.t2, E.t3);
 
-        // --ps-window: only the window's cells are clipped and the tet is normalized by its whole
+        // --grid-window: only the window's cells are clipped and the tet is normalized by its whole
         // weight (as a straddling tet is); an empty window then means "no volume inside the
         // window", not a degenerate tet -- nothing to deposit, no sampled fallback
         if (P.windowMode != 0)
@@ -979,7 +979,7 @@ __device__ bool exact_tet_setup(unsigned tet, const float* verts, const float* v
         }
     }
 
-    // --ps-window: only the window's cells (the hull of its images along each axis) are items
+    // --grid-window: only the window's cells (the hull of its images along each axis) are items
     if (P.windowMode != 0)
         for (int dd=0; dd<3; ++dd)
             if (!window_hull(iMin[dd], iMax[dd], P.nGrid[dd], P.periodic != 0, P.subOrigin[dd], P.subDims[dd])) { iMax[dd] = iMin[dd]; }
@@ -1358,7 +1358,7 @@ bool psHostCopyBack(PSHostCopyArgs const& k)
     // deferred tets: the kernel negated their masses (per-tet path: on the device; leftovers:
     // written back into both copies)
     bool ok = gpuCheck(gpuMemcpy(hostMass.data(), dM, nTetTotal * sizeof(float), gpuMemcpyDeviceToHost), "read masses back", err);
-    bool const massAudit = PSMassAudit::on();   // PS_MASS_AUDIT=1: the deferred mass and the fixed-point total, as the Metal host
+    bool const massAudit = PSMassAudit::on();   // DTFE_MASS_AUDIT=1: the deferred mass and the fixed-point total, as the Metal host
     double deferredMass = 0.;
     for (size_t t = 0; ok && t < nTetTotal; ++t)
         if (hostMass[t] < 0.f) { deferred.push_back(uint32_t(t)); deferredMass -= double(hostMass[t]); }
@@ -1418,9 +1418,9 @@ bool psGpuDepositFields(std::vector<float>& verts,
                         double massExtra, PSFixedUnits const& fxUnits,
                         PSGpuGrids& out, std::vector<uint32_t>& deferred, std::string& err)
 {
-    // PS_GPU_TIMING=1: one line per kernel run, and per partition where its call went,
+    // DTFE_GPU_TIMING=1: one line per kernel run, and per partition where its call went,
     // before and in its hold of the device (PSGpuPhaseTimes: timed always, printed only then)
-    bool const timing = Env::flag({"PS_GPU_TIMING"});
+    bool const timing = Env::flag({"DTFE_GPU_TIMING"});
     PSGpuPhaseTimes ph;
     auto tPh = std::chrono::steady_clock::now();
     Ctx& c = ctx();
@@ -1430,8 +1430,8 @@ bool psGpuDepositFields(std::vector<float>& verts,
     // Before the hold (ctxMutex below): the plan, the parameter block and the exact items' map, from the host
     // records -- work that needs no device, done while another partition's passes hold it (as ps_metal_host.cc).
     // The plan (the selected grids, their fixed-point form and device sizes; gpu_host.h, shared with the Metal
-    // host). PS_GPU_FLOAT_MASS=1 keeps float mass atomics, for comparison.
-    bool const floatMass = Env::flag({"PS_GPU_FLOAT_MASS"});
+    // host). DTFE_GPU_FLOAT_MASS=1 keeps float mass atomics, for comparison.
+    bool const floatMass = Env::flag({"DTFE_GPU_FLOAT_MASS"});
     PSGpuPlan const pl = psGpuPlan(subDims, fVel, fDisp, fGrad, fVolW, fCaustic, fExact, fScal, fSGrad, masses,
                                    massExtra, fxUnits, floatMass);
     size_t const nCell = pl.nCell;
@@ -1457,15 +1457,15 @@ bool psGpuDepositFields(std::vector<float>& verts,
     // --exact-average items (psExactItemBounds in gpu_host.h, as the Metal host): the per-tet window bound comes
     // from the records, read here from the HOST copy before it is uploaded and freed
     bool useItems = fExact;
-    useItems = useItems && Env::flag("PS_EXACT_ITEMS", true);
+    useItems = useItems && Env::flag("DTFE_GPU_ITEMS", true);
     uint32_t blockCells = 16;
-    if (long const v = Env::integer("PS_EXACT_ITEM_CELLS", 0); v > 0) blockCells = uint32_t(v);
+    if (long const v = Env::integer("DTFE_GPU_EXACT_CELLS", 0); v > 0) blockCells = uint32_t(v);
     std::vector<uint32_t> items;      // the items' map (psBuildExactItemMap)
     size_t nItems = 0;
     psHostExactItems(PSHostItemsArgs{ verts, P, nGrid, nTetTotal, periodic, windowMode, timing, useItems, blockCells,
                                       items, nItems, ph });
 
-    auto const tAsk = std::chrono::steady_clock::now();   // PS_GPU_TIMING: the wait for the device, and its hold
+    auto const tAsk = std::chrono::steady_clock::now();   // DTFE_GPU_TIMING: the wait for the device, and its hold
     std::unique_lock<std::mutex> lock(ctxMutex());   // serialize dispatches (one device); let go after the frees
     auto const tGot = std::chrono::steady_clock::now();
 
@@ -1716,7 +1716,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
     // deferrals are written back into the masses (host mirror AND device copy).
     auto runLeftovers = [&]() -> bool
     {
-        auto tL = std::chrono::steady_clock::now();   // (PS_GPU_TIMING: this lambda's own host work, not its kernels)
+        auto tL = std::chrono::steady_clock::now();   // (DTFE_GPU_TIMING: this lambda's own host work, not its kernels)
         // the per-tet totals: floats, or (sumWFixed) the int64 words -- 8 B each, read through a double-sized float
         // vector so the one buffer serves both
         std::vector<float> sw(nTetTotal * (pl.sumWFixed ? 2 : 1));

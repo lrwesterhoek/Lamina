@@ -3,7 +3,7 @@
 Every script gains the same flags so the whole pipeline is method- and snapshot-agnostic:
 
     python3 plot/plot_PS_DTFE.py --sim TNG50-3-Dark                # snap 99, method auto
-    python3 plot/plot_PS_DTFE.py --sim TNG50-3-Dark --method dtfe
+    python3 plot/plot_PS_DTFE.py --sim TNG50-3-Dark --estimator dtfe
     DTFE_SIM=TNG100-3-Dark python3 plot/plot_PS_DTFE.py --snap 50 --smooth 1.5
 
 There is no default simulation: every run names it, with --sim or DTFE_SIM (require_sim).
@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import numbers
 import os
+import sys
 from pathlib import Path
 
 from .io import FieldSet
@@ -138,6 +139,166 @@ def find_sims(root=None, pattern: str = "snapdir_*") -> list[str]:
     return sorted(names)
 
 
+# ---------------------------------------------------------------- old spellings (P6.7)
+# The python CLIs' renamed options keep their old spelling for one release, as the binaries' and the drivers' do: a
+# hidden option that warns once per process on STDERR, in the binaries' words ('warning: --old is deprecated, use
+# --new'), and then does what the new one does. Never on stdout: void_outlines.py and void_cache.py print one JSON
+# line there. P6.6 removes the deprecated_alias / deprecated_option calls (the readers' tables stay).
+_WARNED: set = set()
+
+
+def warn_deprecated(old: str, use: str, note: str = "") -> None:
+    """'warning: <old> is deprecated, use <use>[ (<note>)]' on stderr, once per process for each 'old'."""
+    if old in _WARNED:
+        return
+    _WARNED.add(old)
+    print(f"warning: {old} is deprecated, use {use}" + (f" ({note})" if note else ""), file=sys.stderr, flush=True)
+
+
+def new_parser(**kw) -> argparse.ArgumentParser:
+    """The ArgumentParser every python CLI starts from (make_parser too): allow_abbrev=False, so no option name is
+    ever guessed from a prefix. After a rename the old name is often a prefix of a new one (--size-rv /
+    --size-rv-definition, --smooth / --smooth-px, --subhalo / --subhalos): a guess would make it a silent spelling
+    for good, and an option added later could change what an abbreviation meant."""
+    kw.setdefault("allow_abbrev", False)
+    return argparse.ArgumentParser(**kw)
+
+
+class _DeprecatedOption(argparse.Action):
+    """An old spelling: warns once, then hands the value to the canonical option's own action (target) -- so a
+    store_true, a list or a typed value behave exactly as the new spelling does -- or, without a target, stores it
+    under dest. convert, when given, maps the parsed value first."""
+
+    def __init__(self, option_strings, dest, use: str = "", target=None, convert=None, note: str = "", **kw):
+        super().__init__(option_strings, dest, **kw)
+        self.use, self.target, self.convert, self.note = use, target, convert, note
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        warn_deprecated(option_string or self.option_strings[0], self.use, self.note)
+        if self.convert is not None:
+            values = self.convert(values)
+            if self.target is not None and self.target.choices is not None and values not in self.target.choices:
+                raise argparse.ArgumentError(self, f"invalid choice: {values!r}")
+        if self.target is not None:
+            self.target(parser, namespace, values, option_string)
+        else:
+            setattr(namespace, self.dest, values)
+
+
+def _option_action(parser: argparse.ArgumentParser, option: str) -> argparse.Action:
+    for a in parser._actions:
+        if option in a.option_strings:
+            return a
+    raise ValueError(f"no option {option} on this parser")
+
+
+def deprecated_alias(parser: argparse.ArgumentParser, old, new: str, convert=None, use: str | None = None,
+                     note: str = "") -> argparse.Action:
+    """Register 'old' (one option string, or a tuple of them) as a hidden, deprecated spelling of the option 'new'
+    already on the parser: the same dest, nargs, type and choices, its value handed to the new option's own action;
+    using it warns once on stderr ('use <new>', or 'use <use>'). 'convert' maps the parsed value first. A required
+    new option becomes a required pair (argparse checks 'required' per spelling, so the old one alone would fail
+    it): one of the two must be given, not both. Returns the alias's action."""
+    target = _option_action(parser, new)
+    names = (old,) if isinstance(old, str) else tuple(old)
+    kw = dict(action=_DeprecatedOption, use=use or new, target=target, convert=convert, note=note,
+              dest=target.dest, nargs=target.nargs, default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+    if target.nargs != 0:                   # an action with arguments: parse them as the new spelling does
+        kw.update(type=target.type, choices=None if convert else target.choices, metavar=target.metavar)
+    if target.required:
+        target.required = False
+        group = parser.add_mutually_exclusive_group(required=True)
+        group._group_actions.append(target)
+        return group.add_argument(*names, **kw)
+    return parser.add_argument(*names, **kw)
+
+
+def deprecated_option(parser, *names: str, use: str, note: str = "", **kw) -> argparse.Action:
+    """Register a hidden, deprecated option that has no single new spelling to forward to (e.g. make_image_plane's
+    --u0, now one of --plane-window's four values): it stores under its own dest ('kw' as for add_argument) and
+    warns once on stderr, 'use <use>'."""
+    kw.setdefault("default", None)
+    return parser.add_argument(*names, action=_DeprecatedOption, use=use, note=note, help=argparse.SUPPRESS, **kw)
+
+
+class _ListAction(argparse.Action):
+    """A space-separated list option (R7): every value converted to 'kind'. A value with a comma in it, the
+    comma-joined spelling of before, is split there, with one warning (for one release)."""
+
+    def __init__(self, option_strings, dest, kind=str, count=None, **kw):
+        super().__init__(option_strings, dest, **kw)
+        self.kind, self.count = kind, count
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        out, comma = [], False
+        for v in (values if isinstance(values, list) else [values]):
+            comma = comma or "," in v
+            for w in v.split(","):
+                w = w.strip()
+                if not w:
+                    continue
+                try:
+                    out.append(self.kind(w))
+                except (TypeError, ValueError):
+                    raise argparse.ArgumentError(self, f"invalid {getattr(self.kind, '__name__', 'list')} value: {w!r}")
+        if self.count is not None and len(out) != self.count:
+            raise argparse.ArgumentError(self, f"expected {self.count} values, got {len(out)}")
+        if comma:
+            warn_deprecated(f"a comma-separated {option_string}",
+                            f"spaces ({option_string} {' '.join(f'{x:g}' if isinstance(x, float) else str(x) for x in out)})")
+        setattr(namespace, self.dest, out)
+
+
+def add_list_arg(parser, *names: str, kind=str, nargs: str | int = "+", count: int | None = None,
+                 **kw) -> argparse.Action:
+    """Register a space-separated list option ('--snaps 0 4 17'; nargs '+' by default) whose values are converted to
+    'kind'; a comma-joined value ('0,4,17', the old spelling) is still split, with one warning. 'count': exactly that
+    many values once split (taken as nargs '+', so the one comma-joined token of before still parses)."""
+    return parser.add_argument(*names, action=_ListAction, kind=kind, nargs="+" if count else nargs, count=count, **kw)
+
+
+def choice_type(flag: str, choices, old: dict | None = None, internal: dict | None = None):
+    """An argparse 'type' for an option whose values were renamed: 'choices' are the canonical spellings; an 'old'
+    one ({old: canonical}) warns once and counts as its canonical value; 'internal' maps a canonical value to the
+    name the script uses inside (npz keys, figure tags: --criterion density-raw is 'density_raw' there), by default
+    the value itself. Give the parser metavar='{a,b,c}' (argparse's own choices list would hold the internal names)."""
+    old, internal = dict(old or {}), dict(internal or {})
+
+    def convert(text: str):
+        if text in old:
+            warn_deprecated(f"{flag} {text}", f"{flag} {old[text]}")
+            text = old[text]
+        if text not in choices:
+            raise argparse.ArgumentTypeError(f"invalid choice: {text!r} (choose from {', '.join(choices)})")
+        return internal.get(text, text)
+    convert.__name__ = flag.lstrip("-")
+    return convert
+
+
+# The void scripts' smoothing length fixed in Mpc, from the environment (R11: the flag is --smooth-mpc): its older
+# name DTFE_SIGMA_MPC is read for one release with one warning. One reader -- config.py at import, the cache
+# inventory, analyze.py's refusal --, and one list of names for whoever strips them from a child's environment (the
+# Explore void outlines, plot_void_crossbox's workers: their smoothing is the command line's, never the shell's).
+SMOOTH_MPC_ENV = "DTFE_SMOOTH_MPC"
+SMOOTH_MPC_ENV_NAMES = (SMOOTH_MPC_ENV, "DTFE_SIGMA_MPC")
+
+
+def smooth_mpc_env(environ=None) -> str:
+    """The smoothing in Mpc the environment fixes, as text: DTFE_SMOOTH_MPC, else DTFE_SIGMA_MPC (one warning:
+    deprecated); '' when neither is set (an empty value is unset). Beside a different DTFE_SMOOTH_MPC the old name
+    is said not to be read."""
+    env = os.environ if environ is None else environ
+    new, old_name = SMOOTH_MPC_ENV, SMOOTH_MPC_ENV_NAMES[1]
+    v_new, v_old = env.get(new, ""), env.get(old_name, "")
+    if v_new:
+        if v_old and v_old != v_new:
+            warn_deprecated(old_name, new, f"{old_name}={v_old} is not read: {new}={v_new} wins")
+        return v_new
+    if v_old:
+        warn_deprecated(old_name, new)
+    return v_old
+
+
 def add_sim_arg(parser: argparse.ArgumentParser, help: str | None = None) -> argparse.Action:
     """Register '--sim NAME' the way every script takes it: required unless DTFE_SIM is set, which is then its
     default (require_sim's rule: there is no default simulation). Returns the action."""
@@ -145,22 +306,38 @@ def add_sim_arg(parser: argparse.ArgumentParser, help: str | None = None) -> arg
     return parser.add_argument("--sim", default=env_sim, required=not env_sim, help=help)
 
 
+ESTIMATORS = ("auto", "ps", "dtfe")
+
+
+def add_estimator_arg(parser: argparse.ArgumentParser, choices=ESTIMATORS, default: str = "auto",
+                      help: str = "field estimator to load: PS-DTFE, standard DTFE, or auto-detect") -> argparse.Action:
+    """Register '--estimator {auto,ps,dtfe}' (args.method: FieldSet's keyword, the name every script reads) and its
+    old spelling '--method' (deprecated; the binaries' --method was the cell-average scheme, now --average-method).
+    The values match the drivers (run_ps_dtfe.sh / run_dtfe.sh) and the binaries (PS-DTFE / DTFE)."""
+    act = parser.add_argument("--estimator", dest="method", choices=choices, default=default, help=help)
+    deprecated_alias(parser, "--method", "--estimator")
+    return act
+
+
 def make_parser(description: str = "", snap_default: int | None = DEFAULT_SNAP,
-                snap_help: str | None = None) -> argparse.ArgumentParser:
-    """The parser every figure script starts from: --data-root, --sim (add_sim_arg), --snap, --method, --prefix,
+                snap_help: str | None = None, snap_option: str = "--snap") -> argparse.ArgumentParser:
+    """The parser every figure script starts from: --data-root, --sim (add_sim_arg), --snap, --estimator, --prefix,
     --raw and --smooth. snap_default / snap_help: a series script's --snap (default None = the whole series) and
-    its help; by default snapshot DEFAULT_SNAP."""
-    p = argparse.ArgumentParser(description=description)
+    its help; by default snapshot DEFAULT_SNAP. snap_option: the option's name where the snapshot means something
+    more particular -- the tracking scripts' '--start-snap', the snapshot they follow back from -- always args.snap;
+    there '--snap' is its old spelling (deprecated). No abbreviation is guessed (new_parser)."""
+    p = new_parser(description=description)
     p.add_argument("--data-root", type=Path, default=None,
                    help="the folder that holds the simulations (default: DTFE_DATA_ROOT; one of the two is needed)")
     add_sim_arg(p, help="simulation name (required unless DTFE_SIM is set; there is no default)")
-    p.add_argument("--snap", type=int, default=snap_default,
+    p.add_argument(snap_option, dest="snap", type=int, default=snap_default,
                    help=snap_help if snap_help is not None else f"snapshot number (default {snap_default})")
-    p.add_argument("--method", choices=("auto", "ps", "dtfe"), default="auto",
-                   help="field estimator to load: PS-DTFE, standard DTFE, or auto-detect")
+    if snap_option != "--snap":
+        deprecated_alias(p, "--snap", snap_option, note="in this script it is the snapshot the tracking starts from")
+    add_estimator_arg(p)
     p.add_argument("--prefix", default=None,
                    help="alternate on-disk grid prefix (run_ps_dtfe.sh OUTPUT_PREFIX, e.g. "
-                        "'ps_mw'); implies --method ps unless one is given explicitly")
+                        "'ps_mw'); implies --estimator ps unless one is given explicitly")
     p.add_argument("--raw", action="store_true",
                    help="use the unaveraged fields instead of the volume-averaged '_a' ones")
     p.add_argument("--smooth", type=float, default=0.0,
@@ -189,25 +366,30 @@ def add_ps_gradient_arg(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
 
 def add_snaps_arg(parser: argparse.ArgumentParser, help: str = "snapshots (default: --snap)",
                   nargs: str = "*") -> argparse.Action:
-    """Register '--snaps N [N ...]' (integers; default None = the script's own choice, by default --snap)."""
-    return parser.add_argument("--snaps", type=int, nargs=nargs, default=None, help=help)
+    """Register '--snaps N [N ...]' (integers, space-separated; default None = the script's own choice, by default
+    --snap). A comma-joined list is split with one warning (add_list_arg)."""
+    return add_list_arg(parser, "--snaps", kind=int, nargs=nargs, default=None, metavar="N", help=help)
 
 
 def add_out_arg(parser: argparse.ArgumentParser, default_text: str | None = None,
-                help: str | None = None) -> argparse.Action:
-    """Register '--out DIR' (a Path; '--output' and '-o' are the same option): the folder a script writes into
-    instead of its default. help: the text, by default 'output folder (default <default_text>)'."""
-    return parser.add_argument("--out", "--output", "-o", type=Path, default=None,
-                               help=help if help is not None else f"output folder (default {default_text})")
+                help: str | None = None, type=Path, required: bool = False, metavar: str | None = None
+                ) -> argparse.Action:
+    """Register '-o/--out PATH' (by default a Path: the folder a script writes into instead of its default; 'type',
+    'metavar' and 'help' for a script whose -o is a file or a stem). Its older spelling '--output' is deprecated.
+    help: the text, by default 'output folder (default <default_text>)'."""
+    act = parser.add_argument("-o", "--out", type=type, default=None, required=required, metavar=metavar,
+                              help=help if help is not None else f"output folder (default {default_text})")
+    deprecated_alias(parser, "--output", "--out")
+    return act
 
 
 def add_rv_definition_arg(parser: argparse.ArgumentParser, choices, help: str,
-                          spelling: str = "--r-v-definition") -> argparse.Action:
-    """Register the R_v definition option (default 'crossing') under both spellings, '--r-v-definition' and
-    '--rv-definition'; 'spelling' comes first and names args' attribute (r_v_definition / rv_definition), so a
-    script keeps the one it reads."""
-    other = "--rv-definition" if spelling == "--r-v-definition" else "--r-v-definition"
-    return parser.add_argument(spelling, other, choices=choices, default="crossing", help=help)
+                          dest: str = "rv_definition") -> argparse.Action:
+    """Register '--rv-definition' (default 'crossing'; dest names args' attribute, so a script keeps the one it
+    reads) and its old second name '--r-v-definition' (deprecated)."""
+    act = parser.add_argument("--rv-definition", dest=dest, choices=choices, default="crossing", help=help)
+    deprecated_alias(parser, "--r-v-definition", "--rv-definition")
+    return act
 
 
 def mean_field_wanted(args) -> bool:

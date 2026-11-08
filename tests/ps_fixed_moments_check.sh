@@ -14,7 +14,7 @@
 #   F2  the CPU deposit on 1 thread, 6 threads in the copy mode (DTFE_DEPOSIT_SLABS=0: one set of words, atomic
 #       adds) and 6 in the slab mode writes byte-identical grids, for the same four variants. Single build only:
 #       the double build keeps its double CPU sums (agreeing to ~1e-15, not bit for bit), as for the mass.
-#   F3  the float sums (PS_GPU_FLOAT_MOMENTS=1, the A/B switch on either backend) agree with the exact ones to
+#   F3  the float sums (DTFE_GPU_FLOAT_MOMENTS=1, the A/B switch on either backend) agree with the exact ones to
 #       float rounding: peak-relative
 #       difference below 1e-5 per grid, GPU and CPU (a sum of the same float shares, in another order)
 #   F4  --partition 2 2 2 --max-concurrent 1 (partitions merge in index order): two GPU runs byte-identical, and
@@ -47,8 +47,8 @@ SNAP="$TMP/waves32.hdf5"
 run() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL: $(basename "$out") (see $out.log)"; exit 1; }
         if [ "${GPUOK:-0}" = "1" ] && grep -q "using the CPU deposit\|deposit unavailable\|ran on the CPU instead" "$out.log"; then
             echo "FAIL: $(basename "$out") fell back to the CPU (see $out.log)"; exit 1; fi; return 0; }
-C=(--grid 32 --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a dispersion_a gradient_a
-   --avg-subsamples 2)
+C=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a dispersion_a gradient_a
+   --subsamples 2)
 VARIANTS="samp vw ex hr"
 opts() { case "$1" in samp) ;; vw) echo --ps-volume-weighted ;; ex) echo --exact-average ;;
          hr) echo --ps-halo-release 50 ;; esac; }
@@ -57,7 +57,7 @@ echo "============================================================"
 echo " PS-DTFE exact moment grids (${PS_BIN}; GPU: $([ $GPU = 1 ] && echo yes || echo 'no GPU build: F1 SKIP'))"
 echo "============================================================"
 t0=$SECONDS
-unset PS_GPU_FLOAT_MOMENTS PS_GPU_CHUNK
+unset DTFE_GPU_FLOAT_MOMENTS PS_GPU_FLOAT_MOMENTS PS_GPU_CHUNK   # (PS_GPU_FLOAT_MOMENTS: the deprecated name, still read)
 for v in $VARIANTS; do
     # shellcheck disable=SC2046
     O=($(opts "$v"))
@@ -65,10 +65,10 @@ for v in $VARIANTS; do
     if [ "$GPU" = 1 ]; then
         GPUOK=1 run "$TMP/g1_$v" env PS_GPU_CHUNK=2000 "${PS_BIN}" "$SNAP" "$TMP/g1_$v" "${C[@]}" ${O[@]+"${O[@]}"} --gpu
         GPUOK=1 run "$TMP/g2_$v" env PS_GPU_CHUNK=25000 "${PS_BIN}" "$SNAP" "$TMP/g2_$v" "${C[@]}" ${O[@]+"${O[@]}"} --gpu
-        GPUOK=1 run "$TMP/gf_$v" env PS_GPU_FLOAT_MOMENTS=1 "${PS_BIN}" "$SNAP" "$TMP/gf_$v" "${C[@]}" ${O[@]+"${O[@]}"} --gpu
+        GPUOK=1 run "$TMP/gf_$v" env DTFE_GPU_FLOAT_MOMENTS=1 "${PS_BIN}" "$SNAP" "$TMP/gf_$v" "${C[@]}" ${O[@]+"${O[@]}"} --gpu
     fi
     run "$TMP/c1_$v" env DTFE_DEPOSIT_THREADS=1 "${PS_BIN}" "$SNAP" "$TMP/c1_$v" "${C[@]}" ${O[@]+"${O[@]}"}
-    run "$TMP/cf_$v" env DTFE_DEPOSIT_THREADS=1 PS_GPU_FLOAT_MOMENTS=1 "${PS_BIN}" "$SNAP" "$TMP/cf_$v" "${C[@]}" ${O[@]+"${O[@]}"}
+    run "$TMP/cf_$v" env DTFE_DEPOSIT_THREADS=1 DTFE_GPU_FLOAT_MOMENTS=1 "${PS_BIN}" "$SNAP" "$TMP/cf_$v" "${C[@]}" ${O[@]+"${O[@]}"}
     if ! precision_double; then
         run "$TMP/c6_$v" env DTFE_DEPOSIT_THREADS=6 DTFE_DEPOSIT_SLABS=0 "${PS_BIN}" "$SNAP" "$TMP/c6_$v" "${C[@]}" ${O[@]+"${O[@]}"}
         run "$TMP/s6_$v" env DTFE_DEPOSIT_THREADS=6 DTFE_DEPOSIT_SLABS=1 "${PS_BIN}" "$SNAP" "$TMP/s6_$v" "${C[@]}" ${O[@]+"${O[@]}"}
@@ -101,7 +101,7 @@ if ! precision_double && [ -x ./PS-DTFE-2d ]; then
         || { echo "  (no 2D data generator option: the 2D check is skipped)"; D2=0; }
     if [ "$D2" = 1 ]; then
         echo ">> 2D: 1 vs 6 CPU threads"
-        C2=(--grid 32 --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a dispersion_a gradient_a --avg-subsamples 2)
+        C2=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a dispersion_a gradient_a --subsamples 2)
         run "$TMP/d2_1" env DTFE_DEPOSIT_THREADS=1 ./PS-DTFE-2d "$SNAP2" "$TMP/d2_1" "${C2[@]}"
         run "$TMP/d2_6" env DTFE_DEPOSIT_THREADS=6 DTFE_DEPOSIT_SLABS=0 ./PS-DTFE-2d "$SNAP2" "$TMP/d2_6" "${C2[@]}"
     fi
@@ -140,11 +140,11 @@ def close(a, b, what, tag, tol=1e-5):
 for v in os.environ["VARIANTS"].split():
     if gpu:
         same(f"g1_{v}", f"g2_{v}", f"{v}: two GPU runs (chunks 2000 / 25000)", "F1")
-        close(f"g1_{v}", f"gf_{v}", f"{v}: GPU exact vs the float sums (PS_GPU_FLOAT_MOMENTS=1)", "F3")
+        close(f"g1_{v}", f"gf_{v}", f"{v}: GPU exact vs the float sums (DTFE_GPU_FLOAT_MOMENTS=1)", "F3")
     if not double:
         same(f"c1_{v}", f"c6_{v}", f"{v}: CPU 1 thread vs 6 (copy mode)", "F2")
         same(f"c1_{v}", f"s6_{v}", f"{v}: CPU 1 thread vs 6 (slab mode)", "F2")
-    close(f"c1_{v}", f"cf_{v}", f"{v}: CPU exact vs the float sums (PS_GPU_FLOAT_MOMENTS=1)", "F3")
+    close(f"c1_{v}", f"cf_{v}", f"{v}: CPU exact vs the float sums (DTFE_GPU_FLOAT_MOMENTS=1)", "F3")
 if gpu:
     same("pg1", "pg2", "--partition 2 2 2, volume-weighted: two GPU runs", "F4")
 if not double:

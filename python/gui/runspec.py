@@ -82,13 +82,12 @@ def sim_dir(sim: str, data_root) -> Path:
     return _cli_sim_dir(sim, Path(data_root).expanduser() if str(data_root).strip() else _NO_ROOT)
 
 
-# the interpreter for the figure scripts (numpy/scipy/matplotlib/h5py): $PY as in the
-# pipeline script, else the python3 on PATH -- NOT the GUI's own venv interpreter
-PYTHON = os.environ.get("PY") or shutil.which("python3") or sys.executable
+# the interpreter for the figure scripts (numpy/scipy/matplotlib/h5py): $PYTHON as in the
+# pipeline script ($PY, its older name, for one release), else the python3 on PATH -- NOT the GUI's own venv interpreter
+PYTHON = os.environ.get("PYTHON") or os.environ.get("PY") or shutil.which("python3") or sys.executable
 
-# (name passed to --field, label). run_ps_dtfe.sh takes any subset via FIELDS; its default is all nine
-# (the T-web and V-web are in the production set). run_dtfe.sh takes the subset it computes (no dispersion), its
-# default DTFE_FIELDS.
+# (name passed to --field, label). run_ps_dtfe.sh takes any subset via FIELDS; run_dtfe.sh the subset it computes
+# (DTFE_ALLOWED_FIELDS: no dispersion). Both drivers default to the same analysis set, DEFAULT_FIELDS.
 PS_FIELDS = [
     ("density_a", "density"),
     ("velocity_a", "velocity"),
@@ -100,15 +99,18 @@ PS_FIELDS = [
     ("tweb_a", "T-web"),
     ("vweb_a", "V-web"),
 ]
-# run_ps_dtfe.sh's FIELDS default (all nine, the T-web and V-web included; a Grids or
-# Pipeline job passes FIELDS only when its ticks differ, so this must stay the script's default)
-PS_DEFAULT_FIELDS = [n for n, _ in PS_FIELDS]
+# both drivers' FIELDS default: density, velocity, its divergence and shear (the binaries derive these two from the
+# per-tet velocity gradient without writing it). A Grids or Pipeline job passes FIELDS only when its ticks differ,
+# so this must stay the scripts' default (tests/py_gui_runspec_test.py checks it against both).
+DEFAULT_FIELDS = ["density_a", "velocity_a", "divergence_a", "shear_a"]
+PS_DEFAULT_FIELDS = list(DEFAULT_FIELDS)
 WEB_FIELDS = ("tweb_a", "vweb_a")        # the cosmic-web classes: the only consumers of lambda_th
 LAMBDA_TH_DEFAULT = 0.3                  # run_ps_dtfe.sh / run_dtfe.sh LAMBDA_TH (the binary alone: 0.0, so a Custom
                                          # run without it would classify differently from a scripted one)
-# run_dtfe.sh's FIELDS default (with the T-web and V-web, as its production grids), likewise kept equal
-DTFE_FIELDS = ["density_a", "velocity_a", "gradient_a", "divergence_a", "shear_a", "vorticity_a"] + list(WEB_FIELDS)
-DTFE_ALLOWED_FIELDS = list(DTFE_FIELDS)  # what the standard binary computes (no dispersion: PS only)
+# run_dtfe.sh's FIELDS default: the same set (it has no PS-only field, so dtfe_fields() keeps it whole)
+DTFE_DEFAULT_FIELDS = list(DEFAULT_FIELDS)
+# what the standard binary computes (no dispersion: PS only)
+DTFE_ALLOWED_FIELDS = ["density_a", "velocity_a", "gradient_a", "divergence_a", "shear_a", "vorticity_a"] + list(WEB_FIELDS)
 
 
 def dtfe_fields(fields) -> list[str]:
@@ -116,9 +118,12 @@ def dtfe_fields(fields) -> list[str]:
     phase-space field: left out)."""
     return [f for f in DTFE_ALLOWED_FIELDS if f in fields]
 
-# full-resolution accumulator bytes per grid cell, roughly (auto_tune.h has the exact model)
-_FIELD_BYTES = {"density_a": 4, "velocity_a": 12, "gradient_a": 36, "divergence_a": 36,
-                "shear_a": 36, "vorticity_a": 36, "dispersion_a": 24, "tweb_a": 72, "vweb_a": 52}
+# full-resolution grid bytes per cell, roughly (src/auto_tune.cc has the exact model): each field's own grid, and
+# the 9-component velocity gradient ONCE for any field derived from it (the binaries deposit it for all of them)
+_FIELD_BYTES = {"density_a": 4, "velocity_a": 12, "gradient_a": 0, "divergence_a": 4,
+                "shear_a": 20, "vorticity_a": 12, "dispersion_a": 24, "tweb_a": 72, "vweb_a": 16}
+_GRADIENT_BYTES = 36
+_FROM_GRADIENT = ("gradient_a", "divergence_a", "shear_a", "vorticity_a", "vweb_a")
 
 
 def production_deposit(estimator: str) -> str:
@@ -151,7 +156,7 @@ class RunSpec:
     precision: str = "single"        # "single" (./PS-DTFE, ./DTFE) | "double" (the -double pair: float64 end to end, ~2x memory)
     slice_plane: str = ""            # a --sample-points file (hi-res slice); "" = none
     slice_vel_grad: bool = True
-    pts_conventions: str = "grid"    # PTS_CONVENTIONS (PS-DTFE with a slice): the plane's estimators, the
+    pts_conventions: str = "grid"    # PS_POINT_CONVENTIONS (PS-DTFE with a slice): the plane's estimators, the
                                      # grids' ('grid', the binary's default) or the earlier ones
                                      # ('legacy': reproduces an older plane; PTS_CONVENTIONS_TEXT)
     partition: int = 0               # 0 = auto-tuned
@@ -160,17 +165,17 @@ class RunSpec:
     output_prefix: str = "ps_output"
     lambda_th: float = LAMBDA_TH_DEFAULT   # T-web / V-web eigenvalue threshold (LAMBDA_TH; the scripts' default)
     mem_budget_gb: float = 0.0       # DTFE_MEM_BUDGET_GB: the auto-tuner's memory budget; 0 = its own (free RAM)
-    tess_cache: str = ""             # TESS_CACHE: reuse the tessellation across runs (a local folder); "" = none
+    tess_cache: str = ""             # TESSELLATION_CACHE: reuse the tessellation across runs (a local folder); "" = none
     linear_deposit: bool = False     # PS_LINEAR_DEPOSIT: --ps-linear-deposit (density-weighted inside each tet)
-    ordered_merge: bool = True       # ORDERED_MERGE: --ordered-merge (partitions merged in index order: bit-identical
-                                     # repeats). ON by default, as in run_ps_dtfe.sh and the binary
+    ordered_merge: bool = True       # PS_MERGE=index-order: --ps-merge index-order, given (partitions merged in index
+                                     # order: bit-identical repeats; given, it keeps the memory gate on under the
+                                     # auto-tuner's speed split). ON by default, the binary's default order
                                      # (the staged merge: a partition finished early waits in memory, or
                                      # spilled to disk when memory is short, and its thread goes on);
-                                     # off = ORDERED_MERGE=0, --completion-order-merge
-    start_over: bool = False         # PS_RESUME=0: a killed run's checkpoint is NOT resumed, the run starts from the
-                                     # beginning and replaces it (the way out of a refused resume -- other
-                                     # settings, an incomplete checkpoint -- which fails every time;
-                                     # standard jobs too: run_dtfe.sh's DTFE_RESUME=0)
+                                     # off = PS_MERGE=completion-order (ps_run_env)
+    start_over: bool = False         # DTFE_RESUME=0 (both drivers): a killed run's checkpoint is NOT resumed, the run
+                                     # starts from the beginning and replaces it (the way out of a refused resume --
+                                     # other settings, an incomplete checkpoint -- which fails every time)
 
     def __post_init__(self):
         if not self.deposit:            # a standard-DTFE job starts at the exact cell average
@@ -219,7 +224,7 @@ class RunSpec:
                 out.append(("error", f"slice file not found: {self.slice_plane}"))
             # (a hi-res slice with an explicit Partition is allowed: the standard binary answers the slice's points
             # per partition, each from the tetrahedra it owns)
-            out += gpu_advice(self.gpu, self.deposit, dtfe_fields(self.fields) or DTFE_FIELDS, dm_particles(self.sim),
+            out += gpu_advice(self.gpu, self.deposit, dtfe_fields(self.fields) or DTFE_DEFAULT_FIELDS, dm_particles(self.sim),
                               "dtfe", grid=self.grid, precision=self.precision)
 
         out += _busy_problems()
@@ -259,7 +264,7 @@ class RunSpec:
         snaps = [str(n) for n in sorted(self.snapshots)]
         if self.estimator == "dtfe":
             argv = [str(DTFE_SCRIPT), "-s", self.sim, "-g", str(self.grid)]
-            if dtfe_fields(self.fields) != DTFE_FIELDS:     # the ticks (T-web / V-web, a lighter set); else the script's
+            if dtfe_fields(self.fields) != DTFE_DEFAULT_FIELDS:   # the ticks (T-web / V-web, a lighter set); else the script's
                 env["FIELDS"] = " ".join(dtfe_fields(self.fields))
             if self.slice_plane:                            # the hi-res slice: the standard interpolant at the points
                 env["SAMPLE_POINTS"] = str(self.slice_plane)
@@ -267,11 +272,12 @@ class RunSpec:
             env["DTFE_GPU"] = "1" if self.gpu else "0"       # -m only switches the GPU ON; pin the env knob too
             # and the cell average, both ways: run_dtfe.sh's default is the exact one, so a
             # 'sampled' job without this would run exact (-e, like -m, only switches it on)
-            env["DTFE_EXACT"] = "1" if self.deposit == "exact" else "0"
-            # the knobs' older names too, for one release (run_dtfe.sh reads them when the new ones are unset)
-            env["DTFE_METAL"], env["DTFE_EXACT_AVERAGE"] = env["DTFE_GPU"], env["DTFE_EXACT"]
+            env["DTFE_EXACT_AVERAGE"] = "1" if self.deposit == "exact" else "0"
+            # the knobs' older names too, until P6.6 (run_dtfe.sh reads them with a warning; the new names win): a
+            # stray older export in the login shell is overwritten, not left beside the new one
+            env["DTFE_METAL"], env["DTFE_EXACT"] = env["DTFE_GPU"], env["DTFE_EXACT_AVERAGE"]
             # the start-over tick reaches run_dtfe.sh too (it resumes a killed partitioned run by itself,
-            # DTFE_RESUME as run_ps_dtfe.sh's PS_RESUME), spelled out both ways: a stray export cannot leak in
+            # DTFE_RESUME, the knob both drivers read), spelled out both ways: a stray export cannot leak in
             env["DTFE_RESUME"] = "0" if self.start_over else "1"
             if self.gpu:
                 argv.append("-m")
@@ -285,22 +291,19 @@ class RunSpec:
             argv.append("-e")
         env.update({
             "FIELDS": " ".join(self.fields),
-            "PS_GPU": "1" if self.gpu else "0",
-            "PS_METAL": "1" if self.gpu else "0",      # PS_GPU's older name, for one release
             "PS_VERTEX_MASS": "1" if self.vertex_mass else "0",
             "PS_VOLUME_WEIGHTED": "1" if self.volume_weighted else "0",
             "PS_CAUSTICS": "1" if self.caustics else "0",
             "PS_CAUSTIC_CUSPS": "1" if self.caustic_cusps else "0",
-            "PS_PARALLEL_TRI": "1" if self.parallel_triangulation else "0",
             "PS_LINEAR_DEPOSIT": "1" if self.linear_deposit else "0",
-            "ORDERED_MERGE": "1" if self.ordered_merge else "0",      # K1
-            "PS_RESUME": "0" if self.start_over else "1",             # spelled out: a stray export cannot leak in
             "OUTPUT_PREFIX": self.output_prefix,
         })
+        env.update(ps_run_env(self))
+        env.update(ps_exact_env(self.deposit == "exact"))     # -e only switches it on: pinned both ways
         if self.slice_plane:
             env["SAMPLE_POINTS"] = str(self.slice_plane)
             env["PTS_VEL_GRAD"] = "1" if self.slice_vel_grad else "0"
-            env["PTS_CONVENTIONS"] = self.pts_conventions     # spelled out: a stray export cannot leak in
+            env.update(ps_conventions_env(self.pts_conventions))   # spelled out: a stray export cannot leak in
         return argv + snaps, env
 
     def shell_line(self) -> str:
@@ -363,7 +366,11 @@ def _display_path(a: str) -> str:
 
 
 def shell(argv: list[str], env: dict[str, str]) -> str:
-    """The terminal command for argv + added environment, runnable from the repository root."""
+    """The terminal command for argv + added environment, runnable from the repository root. A knob's older name
+    (OLDER_KNOB_NAMES) beside its new one with the same value is left out: the jobs export both until P6.6 (to
+    overwrite a stray older export the launcher inherits), the command shown and exported names each knob once."""
+    env = {k: v for k, v in env.items() if not (k in OLDER_KNOB_NAMES and env.get(OLDER_KNOB_NAMES[k]) == v)
+           and not (k == "ORDERED_MERGE" and env.get("PS_MERGE") == {"1": "index-order", "0": "completion-order"}.get(v))}
     return " ".join([f"{k}={_q(v)}" for k, v in env.items()]
                     + [_q(_display_path(argv[0]))] + [_q(_display_path(a)) for a in argv[1:]])
 
@@ -457,13 +464,52 @@ def _run_option_problems(spec) -> list[tuple[str, str]]:
 
 def _run_option_env(spec) -> dict[str, str]:
     """DTFE_MEM_BUDGET_GB (the auto-tuner's budget; read by the binary itself, through any script) and
-    TESS_CACHE (the run scripts' --tessellation-cache hook), only when set."""
+    TESSELLATION_CACHE (the run scripts' --tessellation-cache hook; TESS_CACHE, its older name, too until P6.6), only
+    when set."""
     env = {}
     if getattr(spec, "mem_budget_gb", 0.0) > 0:
         env["DTFE_MEM_BUDGET_GB"] = f"{spec.mem_budget_gb:g}"
     if getattr(spec, "tess_cache", ""):
-        env["TESS_CACHE"] = str(Path(spec.tess_cache).expanduser())
+        env["TESSELLATION_CACHE"] = env["TESS_CACHE"] = str(Path(spec.tess_cache).expanduser())
     return env
+
+
+# the run scripts' knobs under their older names (P6.7, config.sh 'knob'): the launcher exports BOTH spellings until
+# P6.6, the same value, so a stray older export in the login shell (install_gui_app.sh imports every DTFE_*) is
+# overwritten instead of standing beside the new one; the drivers read the new name and warn once per older one
+TESS_CACHE_KEYS = ("TESSELLATION_CACHE", "TESS_CACHE")
+# older name -> new name of every knob the launcher exports both ways (the drivers' config.sh 'knob' / 'knob_merge'
+# lines); ORDERED_MERGE's new name is PS_MERGE, with a value of its own (1 = index-order, 0 = completion-order)
+OLDER_KNOB_NAMES = {"PS_GPU": "DTFE_GPU", "PS_METAL": "DTFE_GPU", "DTFE_METAL": "DTFE_GPU",
+                    "PS_EXACT": "DTFE_EXACT_AVERAGE", "DTFE_EXACT": "DTFE_EXACT_AVERAGE", "PS_RESUME": "DTFE_RESUME",
+                    "AVG_SUBSAMPLES": "SUBSAMPLES", "PS_PARALLEL_TRI": "PARALLEL_TRIANGULATION",
+                    "PTS_CONVENTIONS": "PS_POINT_CONVENTIONS", "TESS_CACHE": "TESSELLATION_CACHE",
+                    "WINDOW": "PLANE_WINDOW", "PY": "PYTHON"}
+
+
+def ps_run_env(spec) -> dict[str, str]:
+    """run_ps_dtfe.sh's run switches as a Grids or Pipeline job pins them (spelled out both ways: a stray export
+    cannot leak in), each under its new name and its older one: the GPU (-m only switches it on), the parallel
+    triangulation, the start-over tick and the merge order. The merge tick is the explicit index order
+    (PS_MERGE=index-order, which keeps the memory gate on under the auto-tuner's speed split, as the launcher's
+    ORDERED_MERGE=1 always did), unticked the merge as partitions finish (completion-order)."""
+    on = lambda b: "1" if b else "0"
+    return {"DTFE_GPU": on(spec.gpu), "PS_GPU": on(spec.gpu), "PS_METAL": on(spec.gpu),
+            "PARALLEL_TRIANGULATION": on(spec.parallel_triangulation), "PS_PARALLEL_TRI": on(spec.parallel_triangulation),
+            "PS_MERGE": "index-order" if spec.ordered_merge else "completion-order",
+            "ORDERED_MERGE": on(spec.ordered_merge),       # K1
+            "DTFE_RESUME": on(not spec.start_over), "PS_RESUME": on(not spec.start_over)}
+
+
+def ps_exact_env(exact: bool) -> dict[str, str]:
+    """run_ps_dtfe.sh's deposit knob, spelled out both ways: DTFE_EXACT_AVERAGE (the knob both drivers read; a login
+    DTFE_EXACT_AVERAGE=1, the shipped standard-DTFE knob, must not turn a sampled PS job exact) and PS_EXACT."""
+    return {"DTFE_EXACT_AVERAGE": "1" if exact else "0", "PS_EXACT": "1" if exact else "0"}
+
+
+def ps_conventions_env(conv: str) -> dict[str, str]:
+    """The plane conventions for run_ps_dtfe.sh / run_ps_pipeline.sh: PS_POINT_CONVENTIONS and PTS_CONVENTIONS."""
+    return {"PS_POINT_CONVENTIONS": conv, "PTS_CONVENTIONS": conv}
 
 
 def _root_problems(data_root: str) -> list[tuple[str, str]]:
@@ -546,13 +592,14 @@ PLANE_GHOSTING_MIN = 16              # make_image_plane.py: fewer planes across 
 PIPELINE_RENDER_KEYS = ("render", "render_fields", "render_project", "render_smooth", "render_smooth_derivatives",
                         "render_fixed_range", "render_force")
 # what run_ps_pipeline.sh reads itself; everything else in command()'s environment is for run_ps_dtfe.sh
-# (PS_GPU is run_ps_dtfe.sh's knob too: the pipeline's memory check hands it on)
-PIPELINE_ONLY_KEYS = ("SIMS", "SNAPS", "NU", "AXIS", "CENTER", "PLANES", "THICKNESS", "SUPERSAMPLE", "WINDOW",
-                      "GRID_SIZE", "FORCE", "DRY_RUN", "PY")
+# (DTFE_GPU is run_ps_dtfe.sh's knob too: the pipeline's memory check hands it on). PLANE_WINDOW and PYTHON with
+# their older names WINDOW and PY (both exported until P6.6)
+PIPELINE_ONLY_KEYS = ("SIMS", "SNAPS", "NU", "AXIS", "CENTER", "PLANES", "THICKNESS", "SUPERSAMPLE", "PLANE_WINDOW",
+                      "WINDOW", "GRID_SIZE", "FORCE", "DRY_RUN", "PYTHON", "PY")
 
 
-# The phase-space image plane's conventions (PS-DTFE --pts-conventions; run_ps_dtfe.sh / run_ps_pipeline.sh
-# PTS_CONVENTIONS): 'grid', the binary's default, puts the grids' vertex masses and volume weighting at the points
+# The phase-space image plane's conventions (PS-DTFE --ps-point-conventions; run_ps_dtfe.sh / run_ps_pipeline.sh
+# PS_POINT_CONVENTIONS): 'grid', the binary's default, puts the grids' vertex masses and volume weighting at the points
 # too; 'legacy' keeps the earlier estimators and so reproduces an older plane -- the planes the Runs tab marks with
 # a warning (results.KNOWN_FIXES 'pts-grid-conventions'), whose density reaches about 0.82 of the grid's contrast at
 # z = 20. The launcher's choice, its menu texts.
@@ -617,8 +664,16 @@ def _num(v: float) -> str:
     return str(int(v)) if v == int(v) else repr(v)
 
 
+def words(text) -> list[str]:
+    """A free-text list option as typed ('2, 4 8', 'density,velDiv'): its words, commas and spaces alike. The
+    scripts take space-separated lists (R7), so each word goes into the command as its own argument."""
+    return str(text).replace(",", " ").split()
+
+
 def grids_gb(grid: int, fields: list[str], precision: str = "single", dim: int = 3) -> float:
     b = 8 + sum(_FIELD_BYTES.get(f, 12) for f in fields)   # + stream counts/weights
+    if any(f in _FROM_GRADIENT for f in fields):
+        b += _GRADIENT_BYTES
     if precision == "double":
         b *= 2                                              # Real = double: every grid twice the bytes
     return grid ** dim * b / 1e9
@@ -702,7 +757,7 @@ class FigureSet:
     per: str                # "snapshot" (one call each) | "series" (one call, all) | "sim"
     about: str
     output: str             # where under FIGURES_ROOT the figures land
-    common: bool = True     # takes dtfelib's --method/--prefix/--smooth
+    common: bool = True     # takes dtfelib's --estimator/--prefix/--smooth
     opts: tuple = ()
 
 
@@ -739,7 +794,10 @@ CONV_FACTORS = "2 4"            # dtfelib.convergence.DEFAULT_FACTORS
 CONV_MATCH_SIGMA = 1.0          # dtfelib.convergence.DEFAULT_MATCH_SIGMA
 CONV_RV_RANGE = "2.5 5"         # plot_void_convergence.DEFAULT_RV_RANGE
 ENV_FACTOR = 2.0                # dtfelib.classify.ENV_FACTOR
-ENV_CRITERIA = ("velocity", "density_smoothed", "density_raw")   # dtfelib.classify.CRITERIA, the first the default
+# plot_void_environment.py --criterion: dtfelib.classify.CRITERIA as the script spells them (density_raw inside, in
+# the npz keys and figure tags; density-raw on the command line, P6.7), the first the default. A saved value with '_'
+# reads as the '-' one (PlotSpec.from_dict)
+ENV_CRITERIA = ("velocity", "density-smoothed", "density-raw")
 SKELETON_NULL_DRAWS = 50        # plot_caustic_skeleton.NULL_DRAWS
 _RV_HELP = ("crossing: where the smoothed density first rises back to the mean; delta08: where the enclosed contrast "
             "reaches -0.8; ridge: the compensation ridge")
@@ -799,10 +857,10 @@ _CONV_OPTS = (
 _ENV_OPTS = (
     Opt("criterion", "criterion", "choice", ENV_CRITERIA[0], ENV_CRITERIA,
         help="what makes a void void-in-cloud: velocity (default): net infall of the shell between 2 and 3 R_v; "
-             "density_smoothed: the smoothed density enclosed within 3 R_v above the mean; density_raw: the raw "
+             "density-smoothed: the smoothed density enclosed within 3 R_v above the mean; density-raw: the raw "
              "density enclosed within the factor below (2026-10-11)", row="Void type"),
     Opt("factor", "within (R_v)", "float", ENV_FACTOR,
-        help=f"density_raw only: its raw density contrast is taken within this many R_v (default {ENV_FACTOR:g}, "
+        help=f"density-raw only: its raw density contrast is taken within this many R_v (default {ENV_FACTOR:g}, "
              f"Ceccarelli et al. 2013); the default criterion is the infall of the shell between 2 and 3 R_v, "
              f"which this does not change", limits=(0.0, 100.0, 2), row="Void type"),
     Opt("r_v_definition", "R_v", "choice", "crossing", RV_DEFINITIONS,
@@ -849,7 +907,7 @@ FIGURE_SETS: tuple[FigureSet, ...] = (
               "zero-thickness cross-section. Skips figures newer than their data.",
               "fields/<sim>/snapNNN/<plane>", common=False,
               opts=(_PLANE,
-                    Opt("fields", "Fields", "text", "", help="comma-separated subset; blank = all available"),
+                    Opt("fields", "Fields", "text", "", help="the maps to draw, separated by spaces or commas; blank = all available"),
                     Opt("project", "Projection", "choice", "plane", ("plane", "slab"),
                         help="'slab' averages every plane in the file"),
                     Opt("smooth_px", "Smoothing (output pixels)", "float", 0.0),
@@ -863,7 +921,9 @@ FIGURE_SETS: tuple[FigureSet, ...] = (
               "pointeval_panels/<sim>", common=False,
               opts=(_PLANE,
                     Opt("panels", "Panels", "text", "density,sheet,streams"),
-                    Opt("project", "Projection", "choice", "plane", ("plane", "mean")),
+                    Opt("project", "Projection", "choice", "plane", ("plane", "slab"),
+                        help="'slab' averages every plane in the file (a saved 'mean', its older name, reads as "
+                             "'slab')"),
                     Opt("vmin", "Density scale minimum (0 = auto)", "float", 0.0,
                         help="rho/rho_bar; auto = the 0.1th percentile, which adapts to each snapshot's contrast",
                         limits=DENSITY_LIMITS),
@@ -1215,7 +1275,7 @@ def gpu_build_default(estimator: str = "ps", precision: str = "single", dim: int
     """The GPU tick a fresh job starts with (not simply on: every fresh job of a CPU-only build would then warn
     that the deposit runs on the CPU): on when the pair was built with a GPU backend -- scripts/config.sh
     gpu_build_default's
-    rule, the drivers' default for DTFE_GPU / PS_GPU: the Makefile's '.gpu_mode_metal', '_cuda' or '_hip' stamp
+    rule, the drivers' default for DTFE_GPU: the Makefile's '.gpu_mode_metal', '_cuda' or '_hip' stamp
     in the pair's object folder (gpu_backend). Not gpu_built's 'any stamp but off': the CI's 'cudaemu' build
     emulates the kernels on the CPU, far slower than the CPU path.
     The binary itself cannot say ('--help' lists --gpu in every build, '--version' names no backend). A job, preset
@@ -1594,7 +1654,7 @@ PROBLEM = re.compile(r"MISMATCH|Problem: Can't find|Error downloading|Error: |FA
 PROGRESS = re.compile(r"\s*\[partitions \d+/\d+ \| \d+%\][^\n\[]*")   # the fragment to hide in logs
 _SNAP = re.compile(r"Processing snapshot (\d+)")
 # run_ps_pipeline.sh echoes the run_ps_dtfe.sh call with the snapshots it will compute
-_PLAN = re.compile(r"^\+ .*run_ps_dtfe\.sh -s (\S+) -g \d+(?: -m)?((?: \d+)+)\s*$")   # -m only with PS_GPU=1
+_PLAN = re.compile(r"^\+ .*run_ps_dtfe\.sh -s (\S+) -g \d+(?: -m)?((?: \d+)+)\s*$")   # -m only with DTFE_GPU=1
 _SIM = re.compile(r"^== (\S+): snapshots")
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 

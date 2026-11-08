@@ -14,7 +14,7 @@
 #  D) --pts-den-grad: adding the flag leaves the other outputs byte-identical; on a
 #     jitter-free pancake the transverse gradient vanishes and grad_x matches a central
 #     finite difference of '.pts_den' at x +- eps probe points.
-#  E) clear rejections: --per-stream / --per-stream-ids (PS-only) and --partNo (one partition
+#  E) clear rejections: --ps-per-stream (PS-only: not an option of this binary) and --partition-index (one partition
 #     would answer only its own share of the points). '--partition' is accepted:
 #  F) --partition: each partition triangulates its padded sub-box and answers the points inside
 #     the tetrahedra whose Eulerian centroid lies in its sub-box (the composite server's ownership),
@@ -94,7 +94,7 @@ run() {  # $1 = binary, $2 = output root, $3 = input snapshot, rest = extra flag
     local log="${out}.log"
     set +e
     "${bin}" "${snap}" "${out}" --grid "${GRID}" --field density velocity \
-        --input 105 --MpcUnit 1 --verbose 1 "$@" > "$log" 2>&1
+        --input-format 105 --mpc-unit 1 --verbose 1 "$@" > "$log" 2>&1
     local rc=$?
     set -e
     die_on_failed_run "$rc" "$log" "$(basename "${bin}")"
@@ -105,7 +105,7 @@ runp() {  # like run, at --verbose 2 (the partition and GPU lines) and with the 
     rm -f "${out}".*
     local log="${out}.log"
     set +e
-    "${bin}" "${snap}" "${out}" --grid "${GRID}" --input 105 --MpcUnit 1 --verbose 2 "$@" > "$log" 2>&1
+    "${bin}" "${snap}" "${out}" --grid "${GRID}" --input-format 105 --mpc-unit 1 --verbose 2 "$@" > "$log" 2>&1
     local rc=$?
     set -e
     die_on_failed_run "$rc" "$log" "$(basename "${bin}")"
@@ -165,17 +165,17 @@ run "${BIN}" "${TMP}/dpe_fd" "${SNAP_PAN0}" --periodic --sample-points "${PTS_FD
 
 echo ">> (E) PS-only / unsupported combinations are rejected"
 set +e
-"${BIN}" "${SNAP_PAN}" "${TMP}/dpe_rej" --grid "${GRID}" --field density --input 105 \
-    --MpcUnit 1 --sample-points "${PTS_BIN}" --per-stream > "${TMP}/dpe_rej1.log" 2>&1
+"${BIN}" "${SNAP_PAN}" "${TMP}/dpe_rej" --grid "${GRID}" --field density --input-format 105 \
+    --mpc-unit 1 --sample-points "${PTS_BIN}" --ps-per-stream > "${TMP}/dpe_rej1.log" 2>&1
 RC_PS=$?
-"${BIN}" "${SNAP_PAN}" "${TMP}/dpe_rej" --grid "${GRID}" --field density --input 105 \
-    --MpcUnit 1 --sample-points "${PTS_BIN}" --partition 2 2 2 --partNo 1 > "${TMP}/dpe_rej2.log" 2>&1
+"${BIN}" "${SNAP_PAN}" "${TMP}/dpe_rej" --grid "${GRID}" --field density --input-format 105 \
+    --mpc-unit 1 --sample-points "${PTS_BIN}" --partition 2 2 2 --partition-index 1 > "${TMP}/dpe_rej2.log" 2>&1
 RC_PART=$?
 set -e
-[ "${RC_PS}" -ne 0 ]   && grep -q "PS-DTFE only" "${TMP}/dpe_rej1.log" \
-    || { echo "FAIL: --per-stream was not rejected by the standard binary"; exit 1; }
-[ "${RC_PART}" -ne 0 ] && grep -q "cannot be combined with '--partNo'" "${TMP}/dpe_rej2.log" \
-    || { echo "FAIL: --partNo + --sample-points was not rejected"; exit 1; }
+[ "${RC_PS}" -ne 0 ]   && grep -q "unrecognised option '--ps-per-stream'" "${TMP}/dpe_rej1.log" \
+    || { echo "FAIL: --ps-per-stream was not rejected by the standard binary"; exit 1; }
+[ "${RC_PART}" -ne 0 ] && grep -q "cannot be combined with '--partition-index'" "${TMP}/dpe_rej2.log" \
+    || { echo "FAIL: --partition-index + --sample-points was not rejected"; exit 1; }
 echo "   OK"
 
 # ---------------------------------------------------------------------------------------------

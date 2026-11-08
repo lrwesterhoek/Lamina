@@ -45,16 +45,16 @@ pts = np.stack(np.meshgrid(np.linspace(0.5, 99.5, n), np.linspace(0.5, 99.5, n),
 pts.astype(np.float64).tofile(tmp / "slice.bin")
 PYEOF
 G=48
-COMMON=(--grid $G --periodic --input 105 --MpcUnit 1 --verbose 1)
+COMMON=(--grid $G --periodic --input-format 105 --mpc-unit 1 --verbose 1)
 run() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL run $(basename "$out") (see $out.log)"; exit 1; }; }
 # the banners: DTFE prints "Metal GPU (...)" and PS-DTFE "Metal GPU deposit (...)", both at verbose 2;
 # every fallback path prints a warning naming the CPU
 gpu_ok() { grep -q " GPU (\| GPU deposit (" "$1" && ! grep -q "using the CPU deposit\|using the CPU interpolation\|deposit unavailable" "$1"; }
 echo ">> phase-space grids and slices, both pairs, CPU"
-run "$TMP/ps_f"  ./PS-DTFE        "$SNAP" "$TMP/ps_f"  "${COMMON[@]}" --field density_a velocity_a --avg-subsamples 2 --ps-caustics
-run "$TMP/ps_d"  ./PS-DTFE-double "$SNAP" "$TMP/ps_d"  "${COMMON[@]}" --field density_a velocity_a --avg-subsamples 2 --ps-caustics
-run "$TMP/pts_f" ./PS-DTFE        "$SNAP" "$TMP/pts_f" --grid 16 --periodic --input 105 --MpcUnit 1 --verbose 1 --field density --sample-points "$TMP/slice.bin"
-run "$TMP/pts_d" ./PS-DTFE-double "$SNAP" "$TMP/pts_d" --grid 16 --periodic --input 105 --MpcUnit 1 --verbose 1 --field density --sample-points "$TMP/slice.bin"
+run "$TMP/ps_f"  ./PS-DTFE        "$SNAP" "$TMP/ps_f"  "${COMMON[@]}" --field density_a velocity_a --subsamples 2 --ps-caustics
+run "$TMP/ps_d"  ./PS-DTFE-double "$SNAP" "$TMP/ps_d"  "${COMMON[@]}" --field density_a velocity_a --subsamples 2 --ps-caustics
+run "$TMP/pts_f" ./PS-DTFE        "$SNAP" "$TMP/pts_f" --grid 16 --periodic --input-format 105 --mpc-unit 1 --verbose 1 --field density --sample-points "$TMP/slice.bin"
+run "$TMP/pts_d" ./PS-DTFE-double "$SNAP" "$TMP/pts_d" --grid 16 --periodic --input-format 105 --mpc-unit 1 --verbose 1 --field density --sample-points "$TMP/slice.bin"
 echo ">> standard DTFE cell averages, both pairs, CPU"
 run "$TMP/dt_f"  ./DTFE        "$SNAP" "$TMP/dt_f" "${COMMON[@]}" --field density_a velocity_a
 run "$TMP/dt_d"  ./DTFE-double "$SNAP" "$TMP/dt_d" "${COMMON[@]}" --field density_a velocity_a
@@ -62,9 +62,9 @@ DOUBLE_GPU=0
 if [ -d o_ps_d ] && [ ! -f o_ps_d/.gpu_mode_off ] && [ -d o_d ] && [ ! -f o_d/.gpu_mode_off ]; then   # any GPU backend stamp
     DOUBLE_GPU=1
     echo ">> GPU deposits of the double pair"
-    run "$TMP/ps_dg" ./PS-DTFE-double "$SNAP" "$TMP/ps_dg" --grid $G --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a --avg-subsamples 2 --ps-caustics --gpu
+    run "$TMP/ps_dg" ./PS-DTFE-double "$SNAP" "$TMP/ps_dg" --grid $G --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a --subsamples 2 --ps-caustics --gpu
     gpu_ok "$TMP/ps_dg.log" || { echo "FAIL: PS-DTFE-double --gpu did not run on the GPU"; exit 1; }
-    run "$TMP/dt_dg" ./DTFE-double "$SNAP" "$TMP/dt_dg" --grid $G --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a --gpu
+    run "$TMP/dt_dg" ./DTFE-double "$SNAP" "$TMP/dt_dg" --grid $G --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a --gpu
     gpu_ok "$TMP/dt_dg.log" || { echo "FAIL: DTFE-double --gpu did not run on the GPU"; exit 1; }
 else
     echo ">> the double pair has no GPU (built without METAL=1 / CUDA=1 / HIP=1): D5 skipped"

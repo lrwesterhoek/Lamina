@@ -1,8 +1,13 @@
 # Lamina: cleanup and polish plan
 
-Status (2026-11-07): P1 and P7 done; most of P2–P6 and P9 done (each phase's status line says what is open); P8 not
-started. P0.1 and P0.2 landed in `60a072a`; P0.3's CI fixes and P0.4 landed in `70e153e` and `38eb4be`. Open in P0:
-CI green on `38eb4be`, then `ref0` frozen (P0.3), and one change_log sentence (P0.4). The plan covers the C++
+Status (2026-11-08): P0, P1, P6 (P6.6, the alias removal, is for the next release), P7 and P10 done; most of P2–P5 and P9
+done (each phase's status line says what is open); P8
+started (P8.2 as the partition span, P8.7, P8.9 step 1 and P8.10 in code; the rest open, see the P8 status). **Added 2026-11-07 (afternoon), owner's order:** P10 (shared exact velocity derivatives, the face method)
+joins the plan, and **every code item is finished and checked on small data before any rerun**; the reruns then run
+once, as one campaign (phase R, after P10). P0.1 and P0.2 landed in `60a072a`; P0.3's CI fixes and P0.4 landed in `70e153e` and `38eb4be`; P0 closed on
+2026-11-08: CI green on `38eb4be` (all seven jobs, once the job that had timed out on a package mirror was rerun), `ref0`
+frozen, the P0.4 sentence in change_log. Since 2026-11-08 CI runs three jobs (the CUDA/HIP jobs were removed on the
+owner's instruction; D11). The plan covers the C++
 binaries (DTFE, PS-DTFE and their double and 2D builds), the Metal and CUDA/HIP GPU code, the driver scripts,
 `python/dtfelib`, the plot scripts and tools, and the PySide6 launcher in `python/gui`.
 
@@ -80,9 +85,9 @@ Estimated gains are marked *(est.)*. Only numbers labelled *measured* come from 
 | **G-build** | all six build modes: plain, `METAL=1`, `METAL=1 DOUBLE=1`, `DIM=2`, `make library`, `CUDAEMU=1` | 0 warnings, 0 errors |
 | **G-byte** | `tests/dev/bytecmp.sh <ref0> <out>` against the reference binaries taken in P0.3 | every file identical (184 output files after P0; 261 with `--gpu-exact`) |
 | **G-gpu** | `tests/dev/bytecmp.sh --gpu-exact` (P1.12), plus `metal/validate_deposit` | identical bytes before and after a host-only change; 31/31 |
-| **G-emu** | `CUDAEMU=1` build + `tests/cudaemu_check.sh` at warps 32 and 64 | PASS (warp 32 failed on `60a072a`; fixed in `70e153e`: P0.3) |
+| **G-emu** | `CUDAEMU=1` build + `tests/cudaemu_check.sh` at warps 32 and 64; local only since 2026-11-08 (CI no longer builds the port: D11) | PASS (warp 32 failed on `60a072a`; fixed in `70e153e`: P0.3) |
 | **G-battery** | `tests/dev/battery.sh` | 31/31, tree unchanged during the run |
-| **G-linux** | CI's Linux stages in a local Ubuntu 24.04 container: `tests/ci_suite.sh build`, `core`, `double`, `2d`, `variants`, and `CUDAEMU` + cudaemu_check | PASS; required before every push. glibc differs from macOS where the tests can see it: it writes a long unbuffered stderr line in 128-byte pieces (P0.3) |
+| **G-linux** | CI's Linux stages in a local Ubuntu 24.04 container: `tests/ci_suite.sh build`, `core`, `double`, `2d`, `variants`, the old-python stage (python 3.10) and ruff (CI's three jobs since 2026-11-08); `CUDAEMU=1` + cudaemu_check as an opt-in local stage | PASS; required before every push. glibc differs from macOS where the tests can see it: it writes a long unbuffered stderr line in 128-byte pieces (P0.3) |
 | **G-gui** | the four GUI suites (`tests/py_gui_app_test.py`, `py_gui_app2_test.py`, `py_gui_runspec_test.py`, `py_gui_explore_test.py`), an offscreen render of every tab at two window sizes, and one look in a real macOS window | suites pass, with `volume_gl_parity` run (not SKIPped) on the Mac; no clipping or overlap in the renders |
 | **G-docs** | `tests/docs_drift_check.py` | PASS |
 | **G-tuner** | `tests/ps_auto_tune_check.sh` and `tests/dtfe_auto_tune_check.sh`. A fixed list of `--auto-tune-report` configurations must give the same lines, except the configurations the item targets | PASS; only the targeted lines change |
@@ -108,6 +113,13 @@ are acted on. Each phase updates `change_log.txt` and the README section it touc
 | **P7** | Launcher polish, including the 3D view | no | G-gui | P1, P6 | L |
 | **P8** | Auto-tuner calibration and a time objective | plans change; outputs do not (checked with the plan pinned) | G-tuner, G-real | P2, P3.8 | L |
 | **P9** | CPU and GPU optimisations | no (each item is byte-identical by design) | G-byte, G-gpu, G-emu, G-real timing | P2, P4.1 | L |
+| **P10** | Shared exact velocity derivatives (the face method) for both estimators, PS mean-flow gradient and mass flux | standard: no (same gradient); PS: new and changed velocity-derivative grids | G-build, G-byte (standard), the P10 tests, G-battery, G-linux | P3, P9.2 | L |
+| **R** | The rerun campaign, once, after every code item: P2.3's reruns, P8.1/P8.2's calibration, the PS exact reruns with the P10 grids, the science comparisons | the products | G-real | all code items | machine nights |
+
+**Order (owner, 2026-11-07).** All code first: the open code items of P3–P9 and all of P10, each checked on small
+data (the synthetic and 64³–256³ test sets, `--auto-tune-report` plans). Then phase R runs the real simulations once.
+Constants that only real runs can fit (P8.2's CPU exact term, P8.1's band check) are written in code with their
+current best values and refitted in R; a refit is a constants-only change.
 
 **Parallel work.** P3, P4 and P5 touch disjoint files, so they can run as separate sessions in separate worktrees.
 Some files are shared between phases and must land in one order:
@@ -151,7 +163,7 @@ Some files are shared between phases and must land in one order:
 - CI on `60a072a`: the Linux `build-and-test` job passed. Its core stage runs `ps_auto_tune_check`,
   `ps_window_check`, `ps_scratch_check` and `run_scripts_check`.
 
-**P0.3 Make CI green and freeze the baseline.**
+**P0.3 Make CI green and freeze the baseline — done 2026-11-08.**
 - CI on `60a072a`: six of seven jobs passed; `cudaemu (32)` failed in `ps_mass_exact_check`.
 - Step 1 is **done in `70e153e`**. The failure was not a warp-32 bug:
   - glibc 2.37 and later writes an `fprintf` to an unbuffered stderr in 128-byte pieces, each its own `write()`;
@@ -171,9 +183,9 @@ Some files are shared between phases and must land in one order:
     prefix, and a 10-minute timeout on the job's package install (a stuck mirror had held both jobs for an hour).
   - Results are unchanged: GCC builds use `-ffp-contract=off`, so FMA availability does not matter. Checked in a
     Linux container: six emulator suites pass at warps 32 and 64.
-- Step 2: the six binaries of `70e153e` (byte-identical source to `38eb4be`, which changes only the workflow) are
-  kept as `ref0`, with checksums, in a folder outside the repository. Every byte-identical phase compares against
-  it. It is frozen once CI on `38eb4be` is green.
+- Step 2 is **done 2026-11-08**: the six binaries of `70e153e` (byte-identical source to `38eb4be`, which changes only
+  the workflow) are kept as `ref0`, with checksums, in a folder outside the repository. Every byte-identical phase
+  compares against it. Frozen at 01:55, after CI on `38eb4be` went green (checksums 6 of 6; the folder's README says so).
 - Step 3 is **done**: a fixed list of 91 `--auto-tune-report` configurations, kept with `ref0`, with the script that
   makes it.
   - It covers both binaries and their double builds: RAM × grid × fields × sampled/exact × CPU/GPU, plus a
@@ -184,7 +196,12 @@ Some files are shared between phases and must land in one order:
     extra.
   - The script is now `tests/dev/tune_report_set.sh` (P1.12).
 - Step 4: save the GUI renders (P1.12 adds the script that makes them; until then this step waits).
-- Gate: CI green on all seven jobs (the run on `38eb4be`), G-battery.
+- Gate: CI green on all seven jobs (the run on `38eb4be`), G-battery. **Met 2026-11-08 01:49**: `cudaemu (32)` had failed
+  once on its 10-minute package-install timeout (a stuck mirror; nothing ran) and passed when rerun. Later that night the
+  `cudaemu (32)`, `cudaemu (64)`, `cuda-compile` and `hip-compile` jobs were removed from `.github/workflows/ci.yml` on
+  the owner's instruction (the port is not in use and those jobs kept stalling on the runners' mirrors); CI now runs
+  `build-and-test`, `old-python` and `compile-variants`. The CUDA/HIP code stays until D11 is decided; its checks are
+  local (G-emu, `tests/gpu_twin_check.sh`).
 - **D1** (keep or delete `PS_GPU_CPU_SHARE`) is decided: delete (P1.11).
 
 **P0.4 Release notes for what `60a072a` left out — done in `70e153e`; the last sentence fixed with P1.11.**
@@ -446,8 +463,14 @@ files a no-change rebuild recompiles are `build_info.o` (both binaries), by desi
     changed split (6³ vs 5³ and 3³): mean differences ~1e-5 of the mean, the same mass; the PS dispersion moves by
     more than 1% in 0.02% of the cells (most likely the tetrahedra at the partition seams; not checked), up to 30× in
     a few. Only the same-split run checks tonight's code against the logged one (the others also differ in build).
-- Open: P2.3's TNG50-3-Dark z = 0 rerun (GPU sampled + points, ~2.4 h logged), the 1024³ CPU exact run and the CPU
-  `--ps-window` runs.
+- Open: P2.3's TNG50-3-Dark z = 0 rerun (GPU sampled + points, ~2.4 h logged), the 1024³ CPU exact run (53 min
+  logged) and the CPU `--ps-window` runs. **Moved to phase R** (after all code items, owner 2026-11-07).
+  - A first TNG50 attempt (2026-11-07, auto budget 38.7 GB = 42.7 GB free − 4 GB) planned 6³ **mc 1**: the 25.7 GB
+    of point records left room for one partition (~2.7 GB, *est.* from the two plans). It was stopped at 69 of 216
+    partitions (3 h 7 min; 26.5 GB peak footprint against 38.4 GB predicted) to run overnight. Input for P8.5 and
+    P8.10.
+  - The rerun uses the logged run's own `DTFE_MEM_BUDGET_GB=52`, so its plan matches the logged one (6³ mc 6). The
+    binary caps the knob at the free memory − 4 GB, so it needs ≥ 56 GB free at the start.
 
 The tuner and the optimisation phases need numbers that the existing run logs do not have. Everything here is
 instrumentation or reruns.
@@ -856,8 +879,8 @@ the `.npz` / `.csv` products and the `--help` text of every script touched. P5 i
 
 ## P6. One flag scheme, with a deprecation path
 
-**Status 2026-11-07.** P6.1–P6.5 done, with D2, D3 (the `*_METAL_*` knob aliases are no longer read) and D9;
-P6.6 is for the next release. Choices made where the plan left room: the deprecation line goes to stderr in lower
+**Status 2026-11-08.** P6.1–P6.5 done, with D2, D3 (the `*_METAL_*` knob aliases are no longer read) and D9, and the
+second pass P6.7 (a-f, below; uncommitted; every gate green on 2026-11-08: the battery twice, bytecmp 261/0, the tuner set 110/110); P6.6 (its removal list is below) is for the next release. Choices made where the plan left room: the deprecation line goes to stderr in lower
 case (`warning: --old is deprecated, use --new`), so stdout and upper-case `WARNING` greps are unaffected; the
 standard binary gets no `--ps-gpu` alias (it never had one); README and `demo/COMMANDS.md` may name an old spelling
 only on a line that says "deprecated"; the help never names them; the launcher still exports `DTFE_METAL`,
@@ -872,6 +895,311 @@ spellings), and the Custom tab's repeat check missed an old spelling. The tests 
 where an old spelling is the point (alias, resume and run-log reader checks; bytecmp and the tuner set, which also
 run the reference binaries).
 
+**P6.7 (owner, 2026-11-07 evening): a second, complete flag pass.** "Clean up the flags as well. It is a big mess
+right now; regular and PS DTFE use different flag names and the same things are called different across methods."
+So the names P6 kept (the camelCase upstream flags, the PS-only names without a prefix, the drivers' PS_*/DTFE_* pairs,
+the python CLIs' spellings) are in scope after all: one name per concept across both binaries, both drivers, the
+launcher and the python scripts, one style, the old names as deprecated aliases for one release (P6's mechanism).
+Like every code item, before phase R.
+- Audit (2026-11-07, a workflow: three inventories of every name -- 96 binary options and field values, the drivers'
+  and binaries' knobs, the python CLIs and launcher --, a design, a critique of the design against the code with 37
+  corrections). Rules: kebab-case whole words; `ps-` exactly for stream / Lagrangian / caustic concepts; one name
+  per concept across both binaries, both drivers, the launcher and python; `pts-` = writes `.pts_<x>`; a driver
+  knob is its flag in UPPER_SNAKE; formats never move (output suffixes, cache-key labels, AUTO-TUNE-REPORT keys,
+  QSettings and RunSpec keys).
+- Owner's decisions: `--subsamples k` per axis in BOTH binaries (k^D points per cell; PS `--avg-subsamples` and
+  standard `-s/--samples N` become aliases, the latter keeping its exact total); `--ps-merge index-order |
+  completion-order | fixed-point` for the three merge switches; the knobs both drivers share keep the `DTFE_` prefix
+  (`DTFE_GPU`, `DTFE_EXACT_AVERAGE`, `DTFE_RESUME`; `PS_GPU`, `PS_EXACT`, `PS_RESUME`, `DTFE_EXACT`, the `*_METAL`
+  names become aliases); `--ps-window` becomes `--grid-window`; the drivers keep `-m`/`-e`.
+- Main renames: `--MpcUnit --paddingMpc --regionMpc --partNo --redshiftCone --lagrangianInput --NGP --CIC --TSC --PCS
+  --SPH --Voronoi --noTest --density0 --randomSample --approxPSD --origin --extensive --options` to kebab-case or
+  clearer names; `-i/--input` and `-o/--output` (type codes) to `--input-format` / `--output-format`; the binaries'
+  `-m/--method` to `--average-method` (drops the letter the drivers use for the GPU); `--per-stream*`,
+  `--pts-lagrangian`, `--pts-conventions` to `--ps-*` (PS only); `--ps-lag-padding` to `--ps-lagrangian-padding`;
+  the binaries' env knobs to one `DTFE_` name per concept (`DTFE_OVERLAP`, `DTFE_CHECKPOINT`, the GPU ones where the
+  meanings match); python: `--method {ps,dtfe}` to `--estimator`, one smoothing name `--smooth-mpc` /
+  `DTFE_SMOOTH_MPC`, lists as space-separated `nargs`, `-d/--sim-dir` vs `--data-root`.
+- Old names stay as deprecated aliases with one warning line for the release that carries P6 and P6.7 (P6's
+  mechanism, extended: `vm` keys rewritten in `foldDeprecatedAliases`; env aliases warned once at start-up); the
+  run-log readers keep their old-to-new table for good (a new `dtfelib/runlog.py`); `--redshiftSpace` stays (its
+  line is in every cache key).
+- Steps, each gated on its own: P6.7a readers; P6.7b binaries with their emitters; P6.7c drivers; P6.7d python CLIs;
+  P6.7e launcher; P6.7f docs and tests. Full design, critique and spec: the session notes of 2026-11-07
+  (`p67-flag-design.md`, `p67-flag-critique.md`, `p67-spec.md`); the full rename table follows (copied in P6.7a).
+- **P6.7a done 2026-11-07 (readers).** `python/dtfelib/runlog.py` holds the permanent table (`RENAMES`, `SWITCHES`,
+  `VALUE_RENAMES`) and `canonical_command` with the value transforms; `gui/results.py` re-exports it
+  (`DEPRECATED_FLAGS`, `canonical_flag`, `canonical_command`) and reads `--subsamples`, `--ps-merge`,
+  `--ps-point-conventions`, `--ps-lagrangian-input`; `dtfelib/io.py`'s threshold and weighting reads go through it
+  (`gui/grids.py` and `gui/runs_view.py` read command lines only through those two). `run_settings` carries the same
+  rows as `old[]` / `sw[]`, compares the canonical names, and now also `--face-gradient`, `--ps-lagrangian-padding`,
+  `--ps-alpha-shape`, `--ps-halo-release`; `docs_drift_check.py` (E) keeps runlog.py, results.py and `run_settings`
+  equal and the binaries' alias rows inside it. `presets.flag_help` keeps each entry under the binary's own name and
+  the canonical one. Nothing emits a new name yet.
+- **P6.7b done 2026-11-07 (binaries and their emitters).** `user_options.cc` registers every binary rename of the
+  table as the canonical option, with the old name a hidden alias bound to the same member and no default;
+  `foldDeprecatedAliases` now runs at the end of `parseOptions` (after the command line and the `--config` file are
+  stored, before the one `po::notify`) and moves each alias's `vm` entry onto its canonical key (a defaulted
+  canonical replaced, both spellings with different values refused, a defaulted bool_switch alias dropped), so
+  every `vm.count` / `vm[...]`, `conflicting_options` and `option_dependency` reads the canonical key only; the P6
+  shadow members are gone. Kinds beside the plain renames: PS's merge switches stay `bool_switch`es on their own
+  members (`deprecatedSwitches`) and `--ps-merge MODE` sets the same members, so "given vs defaulted", fixed-point
+  beside index-order and `--resume` over completion-order keep their meaning; standard `-s/--samples N` keeps its
+  total (`--subsamples k` sets k^D; both given must agree), `-m/--method` is a rename of `--average-method`;
+  PS's `-m`/`-s` warn "no effect" and are dropped; `--ps-stream-density dtfe` warns and reads as the new default
+  `linear`. `--ps-per-stream*` and `--parallel-triangulation` are PS-only in both help tables (the standard binary
+  no longer registers the per-stream options). `canonicalCommandTokens` gives the checkpoint key the readers'
+  spellings (and the long name of every short letter); `commandKeyLines` drops `--ps-merge` (the merge switches left
+  its flag list). The binaries' env knobs: one `Env::renamed` table in `env_knobs.h` (a `Name` built from a new name
+  finds its old one; `DTFE_NO_PROGRESS` an inverting alias of `DTFE_PROGRESS`), `Env::warnRenamed()` in `main`
+  names each old one set, once, before any thread starts. `PS_GPU_CHUNK` and `PS_GPU_DEBUG_NOATOMIC` stay apart
+  (standard's twins count work items and take a level). The emitters (`runspec_custom.py`, `explore_zoom.py`,
+  `dtfelib/estimator.py`, `presets.OPTION_TEXT`; `skeleton.py` emits no binary flag) moved in the same step; the
+  Custom tab passes `--ps-merge completion-order` only off the default, and `CustomSpec.stream_density`'s saved
+  `'dtfe'` is emitted as nothing (the default `linear`). Driver-knob names in the help and the refusal texts
+  (`ORDERED_MERGE`, `DTFE_EXACT`, `PS_RESUME`) wait for P6.7c; README / COMMANDS.md still name the old flags, so
+  `docs_drift_check` part A is red until P6.7f.
+- **P6.7c done 2026-11-08 (drivers).** `config.sh` holds the resolver: `knob [-e] NEW OLD...` (new wins; an old
+  name that is set is copied with one `warning: OLD is deprecated, use NEW` line or, beside a different new value,
+  said not read; no refusal during the window; the old name is unset afterwards and the new one exported when the
+  old was, so the pipeline's driver neither warns twice nor misses it; `-e` counts an empty value as set, for
+  `PS_LAGRANGIAN_INPUT`), `knob_merge` (`ORDERED_MERGE` / `FIXED_POINT_MERGE` -> `PS_MERGE`, fixed-point winning),
+  and `knob_on` / `knob_bool` / `knob_gpu` (env_knobs.h's rule: 0/false/no/off off, anything else on, empty = unset;
+  every driver switch normalised to 1/0, `gpu_auto_resolve` and the pipeline's exact test included). Each `knob`
+  line sits before the knob's `VAR="${VAR:-default}"` line, which stays; `py_gui_runspec_test.py` reads the `knob*`
+  lines for the older names. Each driver aliases only the names it read before (run_dtfe.sh: `DTFE_METAL`,
+  `DTFE_EXACT`, `TESS_CACHE`; run_ps_dtfe.sh: `PS_GPU`, `PS_METAL`, `PS_EXACT`, `PS_RESUME`, `AVG_SUBSAMPLES`, the
+  merge pair, `PS_PARALLEL_TRI`, `PS_LAG_PADDING`, `LAGRANGIAN_INPUT`, `PTS_CONVENTIONS`, `TESS_CACHE`; the
+  pipeline: `PS_GPU`, `PS_METAL`, `PS_EXACT`, `PTS_CONVENTIONS`, `WINDOW`, `PY`; config.sh: `DTFE_GRID_SIZE`,
+  `DTFE_PADDING`, `DTFE_SPACE_CHECK`; download_snapshots.sh: `PY`). `DTFE_EXACT_AVERAGE` now wins over `DTFE_EXACT`
+  (the precedence flipped). `run_dtfe.sh` gains `-n` / `SUBSAMPLES` (passed only when set) and `THREADS`; both
+  drivers take `--sim --sim-dir --grid --gpu --exact-average --subsamples` (a token-for-token pre-pass in
+  `driver_options`, so download_snapshots.sh takes `--sim` / `--sim-dir` too). run_ps_dtfe.sh emits the canonical
+  binary flags (`--input-format --mpc-unit --subsamples --ps-lagrangian-input --ps-lagrangian-padding
+  --ps-point-conventions`) and `--ps-merge MODE` only when `PS_MERGE` is given (a given index-order too). So a plain
+  driver run no longer passes `--ordered-merge`, and a small run under the tuner's speed split no longer keeps the
+  memory gate unless `PS_MERGE=index-order` is given. The launcher still exports `ORDERED_MERGE=1`, so its runs keep
+  the gate. The pipeline resolves `GRID_SIZE` through config.sh (critique 12), keeps the letters in its
+  run_ps_dtfe.sh call and hands on `DTFE_GPU` / `PS_POINT_CONVENTIONS`. The binaries' refusal and help texts name
+  `DTFE_RESUME=0` (both drivers), `PS_MERGE=...` and `DTFE_EXACT_AVERAGE=0`. `run_scripts_check` (T) asserts the
+  alias matrix.
+- **P6.7d done 2026-11-08 (python CLIs and their launcher emitters).** `dtfelib/cli.py` holds the machinery:
+  `new_parser` (`allow_abbrev=False`; every python CLI, `make_parser` included), `deprecated_alias(parser, old, new)`
+  (a hidden option with the new one's dest, nargs, type and choices that hands its value to the new option's own
+  action and warns once on stderr, `warning: --old is deprecated, use --new`; a required new option becomes a
+  required pair, so the old spelling alone still satisfies it), `deprecated_option` (an old option with no single new
+  one: make_image_plane's `--u0..--v1`), `add_list_arg` (space-separated lists; a comma-joined value still split with
+  one warning), `choice_type` (renamed values: `--criterion density_raw` -> `density-raw`, kept `density_raw` inside
+  for the npz keys and figure tags; panels' `--project mean` -> `slab`), `smooth_mpc_env` and `SMOOTH_MPC_ENV_NAMES`
+  (`DTFE_SMOOTH_MPC`, `DTFE_SIGMA_MPC` read with a warning; config.py, the cache inventory, analyze.py's refusal, the
+  Explore void helper's and crossbox workers' environment strip both). The dests stay what the scripts read
+  (`--estimator` is `args.method`, `--n-halos` `args.top`, `--per-void` `args.voids`, `--maps` `args.fields`, ...).
+  Renamed: `--method` -> `--estimator` (make_parser, plot_pointeval, plot_void_crossbox and its worker and re-exec,
+  void_outlines, gui/void_cache), `--sigma-mpc` -> `--smooth-mpc`, `--r-v-definition` -> `--rv-definition`,
+  `--size-rv` -> `--size-rv-definition`, the tracking scripts' `--snap` -> `--start-snap` (confirmed: `--ref-snap`
+  means two other things; make_parser's `snap_option`), `--top` -> `--n-halos` (`--n-voids` stays), `--subhalo` ->
+  `--subhalos`, `--nbins` -> `--n-bins`, `--z` -> `--redshifts`, `--a/--b` -> `--prefix-a/--prefix-b`,
+  `--voids` -> `--per-void`, plot_pointeval `--fields/--smooth/--smooth-derivatives` -> `--maps/--smooth-px/
+  --smooth-derivatives-px`, plot_pointeval_panels `--prefix` -> `--root`, `-o/--output/--out` -> `-o/--out`
+  (`add_out_arg`), merge_HDF5 `--data-dir` -> `--sim-dir` and its positional snapshots -> `--snaps`, analyze.py gains
+  `--sim`, `--data-root` (set before config is imported) and `--snaps` (positionals warned), make_image_plane
+  `--plane-window U0 U1 V0 V1` (the pipeline passes it), download_snapshots.sh `--groupcats/--trees/--ics/--api-key`
+  (config.sh `driver_long_options`). The emitters (runspec_plot, runspec_pipeline's render step, runspec_data's merge
+  steps, explore_voids) pass only the new spellings; `py_gui_runspec_test` checks every python flag the launcher
+  emits against its script's `--help` as a whole word (a substring test passed `--size-rv` inside
+  `--size-rv-definition`), and `tests/py_cli_alias_test.py` (CI) parses each old spelling against the new one. The
+  launcher's knob exports (`PY`, `WINDOW`, `PS_*`) and its saved values (`project` 'mean', `criterion` with `_`) are
+  P6.7e's (the emitters map them meanwhile); README / COMMANDS.md python spellings are P6.7f's.
+- **P6.7e done 2026-11-08 (launcher remainder).** The jobs export every run-script knob under its new name AND its
+  older one, the same value, until P6.6 (critique 7: a stray older export the launcher inherits, install_gui_app.sh
+  importing every `DTFE_*`, is overwritten instead of standing beside the new one): `DTFE_GPU`, `DTFE_EXACT_AVERAGE`
+  (Grids PS jobs now pin it too, so a login `DTFE_EXACT_AVERAGE=1` no longer turns a sampled PS job exact),
+  `DTFE_RESUME`, `PARALLEL_TRIANGULATION`, `PS_POINT_CONVENTIONS`, `SUBSAMPLES`, `TESSELLATION_CACHE`,
+  `PLANE_WINDOW`, `PYTHON` (`runspec.ps_run_env` / `ps_exact_env` / `ps_conventions_env`); the launcher reads `PYTHON`
+  before `PY`; `PIPELINE_ONLY_KEYS` holds both spellings. The merge tick is `PS_MERGE=index-order` (explicit: the
+  memory gate stays on under the tuner's speed split, as `ORDERED_MERGE=1` did), unticked `completion-order`. The
+  drivers print one `warning: OLD is deprecated` line per older name (about six per PS job, two per standard one);
+  the command shown and exported (`runspec.shell`, `OLDER_KNOB_NAMES`) names each knob once, by its new name.
+  Saved state: `CustomSpec.from_dict` (QSettings, queued jobs, "Load settings" sidecars) runs `migrate_saved`: the
+  extra options through `runlog.canonical_command` (standard DTFE: with `-s`/`-m`; PS-DTFE keeps those, they have no
+  effect there: `averaging=False`) and `stream_density` `dtfe` -> `linear`; `PlotSpec.from_dict` migrates the
+  criterion (`density_raw` -> `density-raw`) and the panels' `mean` -> `slab`, which the option choices now offer
+  (idempotent, so no one-time flag; user presets hold no flag text). Labels: "Standard DTFE", "Cell average", "Grid
+  and cell average", "Grid window (Mpc)" (Custom) vs "Plane window (Mpc)" (Pipeline), "Concurrent triangulations"
+  (summary "N triangulations at once"); texts name `DTFE_RESUME=0`.
+- **P6.7f done 2026-11-08 (docs and tests).** README.md, demo/COMMANDS.md and metal/README.md name only the new
+  flags and knobs; each old name stands on a line that says so (the README's two "older name (deprecated) | new name"
+  tables, the binaries' and the drivers', and metal/README.md's knob note); the README knob table names the new knobs
+  only (`DTFE_EXACT_AVERAGE`'s per-driver default as prose: `script_defaults` merges the drivers). The resume notes say
+  that a standard `--average-method 2` / `--particle-fraction` run without `--seed` is clock-seeded (not in the key:
+  its resume matches no single run byte for byte; predates P6.7) and that an explicit `--ps-stream-density` and an
+  omitted one have different keys (refused, by design). `src/config.cfg` uses `input-file`, `output-file`,
+  `average-method`, `subsamples = 3`, `region-mpc` (the never-registered `sampling` is gone: `./DTFE -c src/config.cfg`
+  parses again). change_log.txt: one entry for P6 and P6.7 with a "Renamed, old names accepted for one release" table
+  per surface (binaries, their environment, the drivers, python, the labels) and the behaviour changes. The review
+  items of a-c (critique addendum R1-R10): R1 the standard `samples` / `subsamples` pair across the command line and a
+  `--config` file (`dropConfigAliasesOfCommandLine`: the command line's spelling wins, warned); R2
+  `runlog.canonical_command(averaging=None)` reads the rule from the binary (`command_is_ps`: a PS-DTFE log keeps its
+  no-effect `-s` / `-m`); R3 `--samples=27` keys as `--subsamples=3`, and `--samples 27 --subsamples 3` keys (and
+  reads) as one `--subsamples 3`; R5 the stale comments (`auto_tune.h`, `config.sh`, the drivers' `-m` / `-s` lines,
+  the hidden help's `--input-file`, `run_scripts_check`'s canonical-help regex); R6 the pipeline resolves
+  run_ps_dtfe.sh's older knobs once (one warning per name per batch; `run_scripts_check` asserts it); R8 the
+  `--ps-merge` runs in `ps_runtime_check` / `ps_resume_check` / `ps_resume_points_check` / `ps_fixed_merge_check`, an
+  invalid-value line, `flag_spelling_check` F12 (`--output --extensive --SPH`, `--lagrangianInput`) and F13 (the config
+  pair), F8's keys; R9 `docs_drift_check` (E) compares `deprecatedSwitches` with `runlog.SWITCHES`; R10 a dry run creates
+  no cache folder. The binaries' `-m` / `-s` warnings say `-m/--method`, `-s/--samples` (`vm` cannot tell which was
+  typed). **R7, decided 2026-11-08 (flipped back):** P6.7c first let a plain run_ps_dtfe.sh run (and the pipeline) pass
+  no merge flag, so a small run under the tuner's speed split (N < 2e6) ran the index-order merge WITHOUT the memory
+  gate, like a bare binary run. The owner chose the older behaviour: `PS_MERGE="${PS_MERGE:-index-order}"`, the flag
+  always passed; with it the driver's comment and pass site, `config.sh`'s `knob_merge` note, the README knob table
+  (rule C now compares the value), COMMANDS.md, the binary's `--ps-merge` help sentence and `run_scripts_check` R
+  (the plain run asserts `--ps-merge index-order`; `FIXED_POINT_MERGE=0` alone leaves the default). Gates after it:
+  `run_scripts_check` PASS, `docs_drift_check` 36/36, `flag_spelling_check` 56/56; `DTFE` and `PS-DTFE` rebuilt for the
+  help text (grids untouched; the four real-binary suites that call the driver, `ps_partition_padding_check`,
+  `ps_vertex_mass_check`, `ps_convergence_test` and `py_dtfelib_test`, PASS after it). The Custom tab's command still passes no `--ps-merge` at its default (a binary command:
+  a log without the flag reads as the index order), so under the speed split only that path runs without the gate.
+  `docs_drift_check.py` new rules: (A) also the merge switches, standard `--samples` and the python CLIs' old names
+  (the `deprecated_alias` calls whose old name no parser registers any more; a per-script one such as `--prefix`,
+  `--snap`, `--smooth` is not checked); (F) every `Env::renamed` old name, every driver `knob` / `knob_merge` old name
+  and `DTFE_SIGMA_MPC` appears in the three docs only on a "deprecated" / "old(er) name" line, never in the README knob
+  table; (G) from the built binaries' help (a SKIP line when they are not built): no visible name with a capital or `_`
+  (`--redshiftSpace` exempt: its cache line), no `ps-` name in standard DTFE's help (so every `ps-` name is PS-only and
+  every shared name lacks it), every `-h` name in the same binary's `--full-help`. Tests: every suite that is not about
+  an old spelling runs the canonical flags and knob names (about 50 scripts); kept old on purpose: `tests/dev/bytecmp.sh` and
+  `tests/dev/tune_report_set.sh` (they also run ref0; `cudaemu_check.sh` and `gpu_mass_check.sh` run only the checkout's
+  binaries and were moved to the new names in the gate step, below), `flag_spelling_check`, `run_scripts_check`'s deprecation and run-log cases, `ps_resume_check` C8 (`--ps-gpu`) and
+  C15, `dtfe_resume_check` D4 (`--lambda_th`), the run-log reader cases of the python suites, and one deliberate
+  deprecated total, `--samples 20`, in `dtfe_sampling_check` (S3/S7 golden values) and `dtfe_mc_average_check` (A1):
+  20 points per cell is no k^3, so P6.6 must either keep `--samples N` or move those two to a cube (and regenerate
+  S7's golden file). A test that reads an environment variable of the binaries itself reads the old name as a fallback.
+  Measured in this step (Mac): the three builds and `make library METAL=1`, 0 warnings, the build stamps unchanged;
+  `docs_drift_check` 36/36 (A-G and the synthetic half); `flag_spelling_check` 56/56; the 54 suites the step touched
+  (the py and GUI suites, run_tests.py, run_scripts_check, the resume, merge, window, 2D, auto-tune, cache, point,
+  GPU and retry suites) all pass, `ps_auto_tune_check` Y5 on the second run (the first saw 5 partitions in flight
+  against its bound of 4: the live gate's timing, no flag involved). Gates run after the step (2026-11-08 02:50–04:29): the full battery twice,
+  31/31 with the tree unchanged (the second run after the gate step's own test edits); `bytecmp.sh --gpu-exact` against
+  `ref0-70e153e` 261 files, 0 differ, no GPU fallback on either side; `tune_report_set.sh` 110 of 110 lines equal to the
+  P8.10 baseline; no `warning: ... is deprecated` line in the suites' child logs (the stage logs never show the binaries'
+  stderr, so the gate scanned the suites' temp folders) except in the suites whose point is an old spelling. The gate
+  step's edits: `gpu_mass_check.sh` and `cudaemu_check.sh` to `--input-format` / `--mpc-unit` / `--subsamples`,
+  `DTFE_GPU_FLOAT_MASS` and `DTFE_GPU_EMU_WARP` (their env reads keep the old name as a fallback); `ps_resume_check.sh`
+  C10's array; `ps_point_conventions_check.sh` runs `--ps-stream-density linear` (labels `b_linear_*`).
+  `cudaemu_check.sh`'s edit is checked by G-linux's cudaemu stage (CI no longer runs it). G-linux (Colima, Ubuntu
+  24.04, 2026-11-08 04:35–05:35; the stages of CI's three jobs plus the warp-32 emulation): build, core, 2d, variants,
+  old-python (python 3.10) and cudaemu 32 PASS; ruff found four dead imports and variables left by d and f
+  (`plot_void_crossbox.py`'s `argparse`; two `subprocess as _sp` imports and a `repo` in `py_gui_runspec_test.py`:
+  removed, ruff clean); the double stage's `ps_resume_check` C15 failed once with no checkpoint written at the kill:
+  the VM's disk stood at 94%, and the checkpoint room rule (the grids' bytes + 1 GB free) refused the write, which the
+  test does not report. On a fresh container: build and double PASS (22/22, C15 at 20 partitions as on the Mac).
+- **Review of d–f (2026-11-08 04:40; 4 readers, an opus skeptic per finding, read-only):** 8 findings, 1 confirmed
+  and fixed: the Custom tab's live repeat check mapped a merge switch in the extra options to the pair
+  `--ps-merge MODE`, so it never matched the tab's own `--ps-merge` (merge tick off), while the migrated run copy (the
+  memory check, the queue) did and the binary refused the doubled option; `names()` now takes the option word
+  (`py_gui_runspec_test` covers the live spec and the copy, tick on and off). Fixed on the way, older than the change:
+  README and COMMANDS.md still called `dtfe` the `--ps-stream-density` default (it is `linear`); `ps_point_eval_check`'s
+  labels; `py_gui_app_test`'s `--maps` assertion compared a two-word prefix. Refuted as pre-existing or harmless:
+  `command_is_ps` reads the command's first word (a binary path with a space reads as standard DTFE, as before);
+  `command_dim` ignores a whole log's RUNNING line (no caller reads `-s` from a whole log); `gpu_mass_check`'s
+  float-moments read takes either name (it then only skips one byte check). After the fixes: `py_gui_runspec_test`
+  410/410, `py_gui_app_test` 388/388, `docs_drift_check` 36/36; ruff (CI's static check, run locally at 0.17.1) clean.
+- **Left open after P6.7 (small, a later batch):** (1) R7, above: decided 2026-11-08, a plain `run_ps_dtfe.sh` run
+  passes `--ps-merge index-order` again (done). (2) A binary run that fails before its first partition leaves
+  `<output>.runlog.progress` behind (seen with `./DTFE -c src/config.cfg` and a missing input; predates P6.7).
+  (3) `ps_auto_tune_check` Y5 ("room for about four partitions", bound 4) saw 5 in flight once inside a long sequential
+  run and passed alone: the live memory gate's timing; widen the bound or pin the timing if it recurs. (4) The launcher
+  pins neither `SUBSAMPLES` nor `THREADS` for standard Grids jobs, so a login export of either still reaches a standard
+  run (it pins the exact and GPU knobs since P6.7e). (5) `dtfe_resume_check.sh` runs every case through its shared
+  array with `--lambda_th` (34 deprecation lines in its child logs); only D4's killed runs need the old spelling.
+  (6) The "no deprecation line" gate must scan the suites' temp folders, not the stage logs (the battery could do it).
+  (7) The launcher does not export `DTFE_AUTO_PTS_VELGRAD` beside `DTFE_AUTO_PTS_VEL_GRAD` (the Pipeline memory check):
+  exporting both would make the binary warn; moot after P6.6. (8) `ps_resume_check`'s kill cases do not show the
+  binary's "checkpoint could not be written" warning when the kill leaves no checkpoint: on a nearly full disk the room
+  rule refuses the write and the case fails without saying why (seen in Colima at 94% disk).
+
+**The P6.7 rename table** (spec decisions applied; every old name accepted with one warning for the release that
+carries P6 and P6.7, the readers' rows for good). Binaries (both unless "PS" / "std"):
+
+| Old | New | Kind / note |
+|---|---|---|
+| `--MpcUnit` | `--mpc-unit` | rename; cache label `MpcUnit=` stays |
+| `--paddingMpc`, `--regionMpc` | `--padding-mpc`, `--region-mpc` | rename |
+| `--partNo` | `--partition-index` | rename; cache label `partNo=` stays |
+| `--redshiftCone`, `--origin` | `--redshift-cone`, `--cone-origin` | rename (the dependency follows) |
+| `--NGP --CIC --TSC --PCS --SPH --Voronoi` | `--ngp --cic --tsc --pcs --sph --voronoi` | rename |
+| hidden `inputFile`, `outputFile` | `input-file`, `output-file` | rename (config files too) |
+| `-i/--input`, `-o/--output` (type codes) | `-i/--input-format`, `-o/--output-format` | rename; the letters stay |
+| std `-m/--method 1\|2\|3` | `--average-method` | rename; `-m` goes (the drivers' GPU letter); PS's ignored `-m` warns |
+| PS `--avg-subsamples k` | `--subsamples k` | rename: k per axis, k^D points per cell |
+| std `-s/--samples N` (a total) | `--subsamples k` (both binaries) | alias that keeps its exact total N; `--subsamples k` = k^D (method 3: k per axis, method 2: k^D random points); neither = today's defaults (20 / 27). Readers: `--subsamples k` when N = k^D, else `--samples N` |
+| PS `--ordered-merge`, `--completion-order-merge`, `--fixed-point-merge` | `--ps-merge index-order\|completion-order\|fixed-point` | switch to value; given vs defaulted kept (an explicit index order keeps the memory gate on); `--resume` overrides completion order only; fixed-point beside ordered still accepted (fixed-point wins) |
+| PS `--lagrangianInput`, `--ps-lag-padding` | `--ps-lagrangian-input`, `--ps-lagrangian-padding` | rename; cache label `lagPadding=` stays |
+| `--per-stream`, `--per-stream-ids` | `--ps-per-stream`, `--ps-per-stream-ids` | rename, registered in PS only |
+| PS `--pts-lagrangian` | `--ps-per-stream-lagrangian` | rename (writes `.pts_stream_lagpos`) |
+| PS `--pts-conventions grid\|legacy` | `--ps-point-conventions` | rename |
+| PS `--ps-window` | `--grid-window` | rename (it crops `--grid`; the pipeline's is `--plane-window`) |
+| PS `--ps-stream-density dtfe` | `--ps-stream-density linear` | value (saved `CustomSpec.stream_density` / sidecars map it) |
+| `--noTest`, `--density0`, `--randomSample` | `--no-padding-test`, `--mean-density`, `--particle-fraction` | rename; cache labels `density0=`, `randomSample=` stay |
+| std `--approxPSD` | `--approx-phase-space-density` | rename; its help says it is unrelated to PS-DTFE |
+| `--extensive` | `--scalars-extensive` | rename to a name the old one does not abbreviate |
+| `--options` | `--reader-options` | rename |
+| `--ps-gpu`, `--ps-exact-deposit`, `--ps-no-overlap`, `--full_help`, `--lambda_th` | `--gpu`, `--exact-average`, `--no-overlap`, `--full-help`, `--lambda-th` | P6, unchanged |
+| `--redshiftSpace` | stays | its `redshiftSpace=` line is in every cache key and globals record |
+
+Driver knobs and options (`config.sh`, `run_dtfe.sh`, `run_ps_dtfe.sh`, `run_ps_pipeline.sh`; new wins with a warning
+during the window, no conflict exit; the `VAR="${VAR:-...}"` line shape kept for the knob-discovery checks):
+
+| Old | New | Note |
+|---|---|---|
+| `PS_GPU`, `PS_METAL`, `DTFE_METAL` | `DTFE_GPU` (auto\|0\|1) | both drivers; PS auto under exact resolves to the CPU |
+| `DTFE_EXACT` (P6.3, never shipped), `PS_EXACT` | `DTFE_EXACT_AVERAGE` (the shipped 1.0.0 name) | each driver keeps its default (std 1, PS 0) |
+| `PS_RESUME` | `DTFE_RESUME` | also the refusal texts (`START_OVER`) |
+| `AVG_SUBSAMPLES`, `-n k` | `SUBSAMPLES`, `-n k` / `--subsamples k` | per axis in both; the standard driver passes it only when set |
+| `ORDERED_MERGE` + `FIXED_POINT_MERGE` | `PS_MERGE` | converted |
+| `PS_PARALLEL_TRI`, `PS_LAG_PADDING`, `PTS_CONVENTIONS`, `TESS_CACHE` | `PARALLEL_TRIANGULATION`, `PS_LAGRANGIAN_PADDING`, `PS_POINT_CONVENTIONS`, `TESSELLATION_CACHE` | R9 |
+| `LAGRANGIAN_INPUT` | `PS_LAGRANGIAN_INPUT` | `${OLD+x}`: an explicit empty value still means InitialCoordinates |
+| `DTFE_GRID_SIZE`, `DTFE_PADDING`, `DTFE_SPACE_CHECK` | `GRID_SIZE`, `PADDING`, `SPACE_CHECK` | the pipeline's early `GRID_SIZE` capture goes through the resolver too |
+| `WINDOW`, `PY` | `PLANE_WINDOW` (`make_image_plane.py --plane-window`), `PYTHON` | also `runspec.py` `PIPELINE_ONLY_KEYS`, `install_gui_app.sh` |
+| (none) | `THREADS` in `run_dtfe.sh` too | `MPC_UNIT` stays a constant |
+| `= "1"` tests | `knob_on` (1/0/true/false/yes/no/on/off) | everywhere at once, incl. `run_ps_pipeline.sh`'s exact test and `gpu_auto_resolve` |
+| long options | `--sim`, `--sim-dir`, `--grid`, `--gpu`, `--exact-average`, `--subsamples` | `-m` / `-e` stay; the pipeline keeps the letters in its `run_ps_dtfe.sh` call (`runspec.py` `_PLAN`) |
+
+Environment knobs of the binaries (`env_knobs.h` `Name{new, old}`; an alias warned once at start-up in `main`):
+
+| Old | New | Note |
+|---|---|---|
+| `DTFE_PS_OVERLAP`, `DTFE_PS_CHECKPOINT` | `DTFE_OVERLAP`, `DTFE_CHECKPOINT` | one name in both binaries |
+| `PS_GPU_TIMING`, `PS_GPU_FLOAT_MASS`, `PS_GPU_FLOAT_MOMENTS`, `PS_MASS_AUDIT`, `PS_DEBUG_DEGREES`, `GPU_EMU_WARP` | `DTFE_GPU_TIMING`, `DTFE_GPU_FLOAT_MASS`, `DTFE_GPU_FLOAT_MOMENTS`, `DTFE_MASS_AUDIT`, `DTFE_DEBUG_DEGREES`, `DTFE_GPU_EMU_WARP` | R10 |
+| `PS_EXACT_ITEM_CELLS`, `PS_EXACT_ITEMS` | `DTFE_GPU_EXACT_CELLS`, `DTFE_GPU_ITEMS` (its standard twin, on/off) | |
+| `PS_GPU_CHUNK`, `PS_GPU_DEBUG_NOATOMIC` | kept apart (P6.7b): standard's `DTFE_GPU_CHUNK` counts work items, its `DTFE_GPU_DEBUG_NOATOMIC` is a level 1-3 | PS counts tetrahedra, a switch |
+| `DTFE_TBB_THREADS`, `DTFE_AUTO_PTS_VELGRAD`, `DTFE_TESS_CACHE_*` | `DTFE_TRIANGULATION_THREADS`, `DTFE_AUTO_PTS_VEL_GRAD`, `DTFE_TESSELLATION_CACHE_*` | |
+| `DTFE_NO_PROGRESS=1` | `DTFE_PROGRESS=0` | an inverting alias |
+
+Python CLIs and the launcher (`allow_abbrev=False`; one `deprecated_alias` helper in `dtfelib/cli.py`):
+
+| Old | New | Note |
+|---|---|---|
+| `--method {auto,ps,dtfe}` | `--estimator` | `cli.make_parser`, `plot_pointeval`, `plot_void_crossbox` (its worker parser and re-exec too), `void_outlines`, `gui/void_cache.py` |
+| `--sigma-mpc`, `DTFE_SIGMA_MPC` | `--smooth-mpc`, `DTFE_SMOOTH_MPC` | one helper; `explore_voids.py` strips both |
+| `--r-v-definition`, `--size-rv` | `--rv-definition`, `--size-rv-definition` | |
+| tracking scripts' `--snap` (the reference snapshot) | `--start-snap` | not `--ref-snap`, which means two other things (critique 23); confirmed in P6.7d |
+| `--top`, `--a`/`--b`, `--nbins`, `--z`, `--subhalo` | `--n-halos`, `--prefix-a`/`--prefix-b`, `--n-bins`, `--redshifts`, `--subhalos` | |
+| `merge_HDF5.py -d/--data-dir`, the drivers' `-d` | `-d/--sim-dir` | vs `--data-root` (the folder of simulations) |
+| `plot_pointeval --smooth`, `--smooth-derivatives`, `--fields` | `--smooth-px`, `--smooth-derivatives-px`, `--maps` | |
+| `plot_pointeval_panels --project mean`, `--prefix PATH` | `slab`, `--root PATH` | saved settings migrate |
+| comma lists (`--sims`, `--snaps`, `--rv-range`, `--edges`, `--panels`) | space-separated `nargs` | commas still split with a warning for one release |
+| `--criterion density_smoothed\|density_raw` | `density-smoothed\|density-raw` | converted at argparse only: npz keys and figure tags keep the internal names |
+| `-o/--output/--out` | `-o/--out` | one helper (`dtfelib/cli.py`) |
+| `plot_caustic_skeleton --voids` | `--per-void` | |
+| `download_snapshots.sh -c/-t/-i`; `analyze.py`, `merge_HDF5.py` positionals | `--groupcats/--trees/--ics/--sim/--sim-dir/--api-key`; `--sim`, `--data-root`, `--snaps` | merge_HDF5.py: `--snaps` only (its `-d/--sim-dir` names the simulation's folder) |
+| GUI labels | "Standard DTFE" / "PS-DTFE", "Cell average: Sampled / Exact", "Grid window (Mpc)" vs "Plane window (Mpc)", "Concurrent triangulations" | QSettings / RunSpec keys never change; `extra_args`, presets and "Load settings" sidecars migrate once |
+
+Not moved: `-f/--field` and its values, output suffixes, the cache-key labels (`MpcUnit=`, `partNo=`, `lagPadding=`,
+`scalarDataset=`, `region=`, `padding=`, `randomSample=`, `sampleSeed=`, `poisson=`, `density0=`, `redshiftSpace=`,
+`type=`, `lagrange=`), AUTO-TUNE-REPORT keys, the numeric codes, `--max-concurrent`, `velocityStd_a` vs
+`dispersion`, `Estimator(...)` keywords; `tests/generate_ps_test_data.py` is out of scope (a test tool); the
+reference runs (`bytecmp.sh`, `tune_report_set.sh`, `cudaemu_check.sh`, `gpu_mass_check.sh`) keep the old flag and
+env spellings for the whole window.
+
 **The scheme.**
 - `ps-` marks only what is meaningful with phase-space streams, Lagrangian space or caustics.
 - Every concept the two estimators share gets one name in both binaries.
@@ -885,14 +1213,18 @@ run the reference binaries).
 | no look-ahead during a GPU deposit | `--no-overlap` | `--ps-no-overlap` | `--no-overlap` |
 | spelling | `--full_help`, `--lambda_th` | same | `--full-help`, `--lambda-th` |
 
-**Kept as they are:**
-- the true PS concepts: `--ps-caustics`, `--ps-caustic-cusps`, `--ps-vertex-mass`, `--ps-volume-weighted`,
-  `--ps-linear-deposit`, `--ps-halo-release`, `--ps-alpha-shape`, `--ps-lag-padding`, `--ps-stream-density`,
-  `--ps-window`;
-- the camelCase upstream flags (`--MpcUnit`, `--paddingMpc`, `--partNo`, `--regionMpc`, …);
-- the PS-only flags without a prefix: `--avg-subsamples`, the merge flags, `--pts-*`, `--per-stream*`.
-
-Renaming those costs more than it gains.
+**Kept as they are** (after P6.7; P6 alone had also kept the camelCase upstream flags and the unprefixed PS-only
+ones, which P6.7 renamed after all):
+- the true PS concepts, `ps-` and PS-only: `--ps-caustics`, `--ps-caustic-cusps`, `--ps-vertex-mass`,
+  `--ps-volume-weighted`, `--ps-linear-deposit`, `--ps-halo-release`, `--ps-alpha-shape`, `--ps-stream-density`, and
+  P6.7's `--ps-merge`, `--ps-lagrangian-input`, `--ps-lagrangian-padding`, `--ps-per-stream*`, `--ps-point-conventions`;
+- unprefixed although PS-only, being no stream concept: `--grid-window`, `--parallel-triangulation`;
+- `--redshiftSpace` (camelCase; its `redshiftSpace=` line is in every cache key and globals record);
+- `-f/--field` and its values (`density_a`, `velocityStd_a`, `scalarGradient`, ...), the output suffixes, the
+  cache-key labels, the AUTO-TUNE-REPORT keys, the numeric codes, `--max-concurrent`, `velocityStd_a` vs
+  `dispersion`, the `Estimator(...)` keywords, the QSettings and `RunSpec.to_dict()` keys;
+- the drivers' `-m` / `-e` / `-n` / `-s` / `-d` / `-g` letters; the env knobs `PS_GPU_CHUNK` and
+  `PS_GPU_DEBUG_NOATOMIC` (standard DTFE's twins mean something else).
 
 **Order: the deprecation path.** Each step lands on its own, in this order.
 
@@ -967,6 +1299,35 @@ Renaming those costs more than it gains.
 - Effort: M.
 
 **P6.6 One release later: remove the aliases.** The precedent is the removal of `--metal` / `--ps-metal`. Effort: S.
+The final alias tables (P6 and P6.7), all removed together:
+- the binaries: `deprecatedOptions` (36 rows: the PS block, the standard `method` / `approxPSD` rows, the shared rest)
+  with their hidden options, and `deprecatedSwitches` (PS-DTFE's 3 merge switches: `ordered-merge`,
+  `completion-order-merge`, `fixed-point-merge`, their members `psOrderedMergeFlag` / `psCompletionOrderMergeFlag`
+  then set by `--ps-merge` alone); the hidden `-m/--method` and `-s/--samples` of both binaries (standard: the total
+  `noPoints` path in `readAveragingOptions` and `foldDeprecatedAliases`; decide first whether a total that is no k^3
+  stays expressible: `dtfe_sampling_check` and `dtfe_mc_average_check` use `--samples 20`); the `--ps-stream-density
+  dtfe` value; `spelled()`, the eq-form and de-duplication branches of `canonicalCommandTokens` (keep the
+  canonicalisation only if old checkpoints matter) and the `samples` / merge arms of `dropConfigAliasesOfCommandLine`;
+  the `--full_help` fallbacks in `checkFileNameOptions` and `presets.flag_help`;
+- the binaries' environment: `Env::renamed` in `src/env_knobs.h` (18 rows, `DTFE_NO_PROGRESS` the inverting one) and
+  `Env::warnRenamed`;
+- the drivers: every `knob NEW OLD...` / `knob -e` / `knob_merge` line's old names (29 lines in `config.sh`,
+  `run_dtfe.sh`, `run_ps_dtfe.sh`, `run_ps_pipeline.sh`, `download_snapshots.sh`; `knob_merge` itself), the headers'
+  "Older names" paragraphs and the README / COMMANDS.md / metal/README.md "older name (deprecated)" tables;
+- python: the 20 `deprecated_alias` and the `deprecated_option` calls, the `old_snaps` / `old_snapshots` positionals
+  (analyze.py, merge_HDF5.py), the comma splitting in `_ListAction`, the `old=` maps of the `choice_type` calls,
+  `DTFE_SIGMA_MPC` in `SMOOTH_MPC_ENV_NAMES`, the command builders' `mean`->`slab` and `_`->`-` value maps;
+- the launcher: the older-name exports (`ps_run_env`, `ps_exact_env`, `ps_conventions_env`, `_run_option_env`'s
+  `TESS_CACHE`, `runspec_pipeline.command`'s `AVG_SUBSAMPLES` / `WINDOW` / `PY`, `runspec_data`'s `PY`, the standard
+  branch's `DTFE_METAL` / `DTFE_EXACT`), the old names in `PIPELINE_ONLY_KEYS`, then `OLDER_KNOB_NAMES` and the
+  `shell()` filter, `runspec_custom`'s acceptance of `dtfe` beside `linear`; keep `migrate_saved` / `migrate_options`
+  (old `.gui.json` sidecars stay on disk);
+- the tests that exercise the aliases (`flag_spelling_check`, `py_cli_alias_test`'s old half, `run_scripts_check`'s (T)
+  matrix and deprecation cases, `ps_resume_check` C8/C15, `dtfe_resume_check` D4) turn into "the old name is refused"
+  checks; `docs_drift_check`'s `DEPRECATED` goes, its (F) old-name list then catches any doc still naming one.
+Kept for good: the run-log readers' tables (`python/dtfelib/runlog.py` RENAMES / SWITCHES / VALUE_RENAMES,
+`run_settings`' `old[]` / `sw[]`), and `tests/dev/bytecmp.sh` / `tune_report_set.sh` need ref0 re-frozen from a
+post-rename build (or a per-binary spelling map) before the old spellings can go from them.
 
 **Not adopted:** a `--deposit exact|sampled|linear` enum. It merges three switches that have different exclusion rules
 (`user_options.cc`, the exact/linear checks), and it changes run-log text, the checkpoint key and the launcher mapping
@@ -1141,12 +1502,67 @@ plain functions.
 
 ## P8. Auto-tuner
 
-**Status 2026-11-07.** Not started. P2.3's first three reruns (the P2 status) give P8.1 two classes: the standard
+**Status 2026-11-07 (evening).** P8.2 (as the partition span), P8.7, P8.9 step 1 and P8.10 done in code (below); the rest open. Gate changes first:
+`tests/dev/bytecmp.sh` pins every run's plan (`--partition 1`, or `2 2 2 --max-concurrent 2`), so a tuner change
+cannot move its grids; `tests/dev/tune_report_set.sh` appends 19 lines (110 in all) the P8 items move: standard
+runs with the production fields (the old standard lines ask density and velocity only, where the loop and the
+post-processing hold the same grids), PS CPU exact with points and in a window, and the face sums. With `ref0` the
+first 91 lines are still the frozen set.
+- P8.7: the budget's reason line now also names the live free memory when it does not cut the budget ("(the other
+  programs leave 57.1 GB free: 53.1 GB after the 4 GB headroom)"), and `DTFE_MEM_FRACTION` when set; a simulated
+  machine (`DTFE_RAM_GB`) prints as before. `ps_auto_tune_check.sh` J2c/J2d.
+- P8.9 step 1: `AutoTuneStdPlanner::stdPeak` = max(loop, post-processing): the loop holds its own grids
+  (`fixedLoop`, 52 B/cell) + the busiest partition; the post-processing all grids (`fixed`) + the share of the busiest
+  partition the allocator keeps: all of it up to `kStdPostKeepFloor` = 1 GB, `kStdPostKeep` = 0.35 of a larger one.
+  Never above the old sum; equal to it with `--scratch-dir`, without derived fields, or with partitions under 1 GB.
+  The floor came from `dtfe_auto_tune_check.sh` E (128³, production fields): with 0.35 alone it predicted 0.53 GB
+  against 0.84 GB measured (1.57×; the test's bound is 1.35×); the new SUMMARY line `before post-proc` (the
+  peak when the post-processing began, `runProgressNoteLoopPeak`) showed 0.63 GB, so the whole 0.42 GB partition
+  stayed and the derived grids came on top; std100_099 kept 0.5 GB of 11.8. Now 1.08× (GPU case 0.81×). Tuner set:
+  5 standard production lines lower (256³: 2.99 → 2.59 GB), every other line identical. Phase R refits both
+  constants from `before post-proc` on the real runs.
+- Measured in passing (P10.5's booking): on the 64³-particle pancake at 256³ (production fields, CPU exact) the PS
+  model over-predicts with and without the face sums alike (one domain +49% / +48%, 2³ × 8 +108% / +119%): the
+  face booking adds no error of its own; the base model over-books small grid-dominated runs (P8.2's span, below).
+- P8.2, rescoped by its own analysis (the session notes' P8.2 report): the CPU exact deposit's own working set is
+  ~96 B per hit cell per deposit thread (`insideFlat`, `exMom`, `exW`; reused) and r3d's ~15 KB per thread, both
+  negligible; the large error is the partition **sub-grid span**. The model booked `min(G, G/n + 40)` cells per
+  axis whatever the snapshot, while the logged 5³ runs park ~4× the bytes per modelled cell at z = 0 as at z = 127,
+  and the 1024³ exact run was −43%. Done: `psPartitionSpans` (`auto_tune.cc`) measures each split's largest
+  sub-grid on the particles. They are binned on a Lagrangian grid (B = min(60, N^(1/3)/√3) per axis; periodic runs
+  over the ownership period `[seam − L, seam)`, as `DTFE.cpp` tiles it); each bin's Eulerian extent per axis (minimal
+  image of the bin's first particle, as the deposit wraps a tetrahedron); a partition's touched planes = its bins'
+  extents widened by one particle spacing at the bin's own stretch and a cell; then `psSubgridBox`'s rule (the
+  `[lo, hi]`, or the complement of the largest untouched run on a periodic axis). It replaces `G/n + 40` in
+  `gpuSubCells` for n ≤ 6 (window runs and n > 6 keep the rule; `DTFE_AUTO_SPAN=0` restores it). Checked against
+  the binary's own sub-grids (`DTFE_AUTO_TUNE_DEBUG=1` now prints each pass's `sub-grid: a b c`): pancakes and
+  crossed waves, 32³–128³ particles, 128³ and 384³ grids, 2³ and 4³ splits: 1.00–2.09× the largest sub-grid
+  (geometric mean 1.24×), never below; the old rule was 0.05–4.3× (20× low on the crossed waves at 384³). Cost
+  0.01–0.5 s (one pass over the particles). Two wrong turns on the way, kept out: bins over the particles'
+  Lagrangian box instead of the ownership period (the seam is `lagLo − padding`: a 12% shift on a 64³ set) read
+  2× low; hulls with the 26 neighbour bins over-read by a bin width on fine grids. Tuner set: 66 of 110 lines
+  change, every PS line with a split; standard lines identical. Phase R checks it on the real runs (the debug line
+  gives the real sub-grids).
+- Review of the evening's code (4 readers, a skeptic per finding; all 8 findings confirmed, all fixed):
+  - P8.2: one domain never crops (`psUseSubgrid` is the partition path's), so `gpuSubCells(1)` books the whole grid
+    again (the measured span under-booked a non-periodic clump 14×); the seam and the partition padding are replayed
+    per split (`--ps-lag-padding 0`'s Eulerian rule depends on the split and moved the seam: 0.46× before); a split
+    that is not cubic (`--partition 2 3 4`) is costed with its own counts, padding and measured span
+    (`partsOf` / `padFactorOf`; the planner named it by `partition[0]` alone, `N/n³`, which also undercounted every
+    2D split by n). `ps_auto_tune_check.sh` X: the booked sub-grid ≥ the largest real one on those cases (1.00–1.88×).
+    I2 now checks the property (a split, sub-grids under 2³², the GPU kept): with the pancake's real 2³ sub-grid
+    (~1.1e9 cells at 1700³, measured 760 × 428 × 428 at 850³) the budget takes the split to 5³.
+  - P8.9: `velocityStd_a` is a loop grid (booked in both phases); the look-ahead gate uses `stdPeak`, and the loop's
+    room `budget − fixedLoop − …` reaches the run (`AutoTuneReport::fixedLoop`); standard `--face-gradient`'s 9
+    doubles per cell are per sub-domain (`faceCell` in `planOf`), not a full grid.
+  - P10.4: the drift test covers crossed waves too (the y and z momentum words: 0.028 max / 7.1e-4 rms, ×4.0), and
+    the thread, slab-mode and resume checks compare `.a_massFluxDiv`.
+Earlier (2026-11-07): P2.3's first three reruns (the P2 status) give P8.1 two classes: the standard
 GPU exact average +43% and the PS GPU sampled with points +27% and +41%, all over-predicting now that the parking is
 bounded; the TNG50, 1024³ exact and window reruns are still to do. The standard planner's margin costs time: it chose
 6³ where 3³ fit, and the run took 1.8× the hand-set one. Since P9.2, the single-precision build's CPU deposit follows
 the core pool (`CorePool` in `src/thread_count.h`: holders = min(planned concurrency, partitions left)), which P8's
-`cores_eff` should use.
+`cores_eff` should use. P8.10 (dynamic concurrency) proposed 2026-11-07, from the stopped TNG50 rerun. Order (owner, 2026-11-07): the code items come first, with constants from the existing logs; P8.1's re-baseline and P8.2's refit run in phase R.
 
 ### What the real runs say
 
@@ -1212,6 +1628,14 @@ with / without points, one domain / partitioned / window.
   their window buffers are per partition and the allocator keeps the freed window blocks.
 - Effort: S–M.
 
+- Measured 2026-11-07 on synthetic sets (64³ particles; a one-cell z window across 2048² and 4096²; production
+  fields; CPU, auto-planned 2³): predicted vs measured peak footprint, pancake 13.3 / 11.6, 14.2 / 12.9 (exact),
+  33.1 / 28.8, 35.3 / 34.7 GB; crossed waves 13.3 / 12.0, 14.2 / 13.7, **39.2 / 46.1** (4096² sampled: 18% under;
+  its footprint 46 GB against 36 GB resident -- compressor pressure on the 64 GB machine), 35.3 / 34.7 GB. So the
+  window model mostly holds on these sets; the under-prediction is the one case and the real 2048²/4096² planes
+  (0.33 / 0.98 against 0.44 / 1.43 GB: small runs, retained window blocks). Left to phase R: the real planes give the
+  constant; P8.10's dynamic gate does not help a window run (its gate books the same per-partition bytes).
+
 **P8.7 Log why the budget is what it is.** Print the free-memory figure that set it, and its source: the live free
 memory or the `DTFE_MEM_*` knobs. Effort: S.
 
@@ -1237,6 +1661,77 @@ memory or the `DTFE_MEM_*` knobs. Effort: S.
   1. Check the standard planner's prediction on the P2.3 run.
   2. Give it the P8.8 objective, with the standard's serial partitions and threads per partition.
 - Effort: L.
+
+**P8.10 Dynamic concurrency in the PS partition loop.** — *done in code 2026-11-07 (the owner: "continue with … the remaining plan items"); the TNG50 rerun in phase R measures it.*
+- Today the plan fixes `--max-concurrent` before the loop starts (`psConcurrency`, the loop's `num_threads`).
+  `PartitionMemoryGate` reads the live free memory before each partition, but it can only hold a partition back below
+  that number, never admit one more.
+- The case (*measured*, the stopped TNG50-3-Dark z = 0 rerun, see the P2 status):
+  - 6³ at a 38.7 GB auto budget got mc 1. The plan books all 25.7 GB of point stream records from the first
+    partition (5.79 streams per point estimated, budgeted as 10.59).
+  - The records grow as partitions merge: at 69 of 216 partitions the peak footprint was 26.5 GB against 38.4 GB
+    predicted.
+  - 163 s a partition, against 40 s for the logged mc 6 run. At mc 1 the deposit is serial: the GPU, then the
+    GPU-deferred tetrahedra on the CPU, with only the next partition's triangulation (~10 s) beside it.
+- Change:
+  - The plan still chooses the split (it fixes the partitions' geometry) and the bytes one partition adds.
+  - The loop starts `min(cores, partitions)` threads. The gate admits a partition while
+    `free − headroom − reserve ≥ need`. `reserve` is what the run has still to allocate: the point stream records
+    not yet written (their budgeted bytes × the share of partitions not merged), the finalized point outputs, the
+    grids allocated after the loop.
+  - The live readings exist: `autoTuneSystemFree` and the run's own footprint (`runProgressPeak`).
+    `CorePool::holders()` already follows the live partitions.
+  - The AUTO-TUNE line keeps the plan's mc as the floor; the SUMMARY prints the most partitions in flight.
+- Outputs: unchanged. The ordered merge sums in index order (the TNG100-3-Dark z = 0 rerun at mc 8 was
+  byte-identical to the logged mc 10 run).
+- Does not fix:
+  - the split: the standard planner's 6³ instead of 3³ is a split problem (P8.9);
+  - the bytes one partition adds, still a prediction;
+  - GPU memory, which the GPU hold serialises.
+- Risk: a reserve that is too small squeezes the end of the run; the gate then runs one partition at a time (it
+  delays, never deadlocks). macOS keeps freed blocks in the footprint, so the readings err on the safe side.
+- Against P8.5: P8.5 fixes the same case at plan time and is smaller. This one also absorbs model error in
+  everything already allocated, and other programs opening or closing during a run.
+- The standard loop (serial partitions) could choose each partition's threads the same way. Not proposed before the
+  P8.9 prediction is right.
+- Verify: G-tuner (the plan lines do not change); bytecmp of a forced mc 1 run against a dynamic one; the
+  TNG50-3-Dark z = 0 rerun at the auto budget: time per partition, the in-flight high-water mark, 0 swaps.
+- Effort: M.
+- Done (second version, after a review of the first: 4 opus readers and a skeptic per finding; 16 findings confirmed):
+  - The gate (`auto_tune.h PartitionMemoryGate`): partitions enter strictly in index order (a waiting partition waits
+    behind any lower-numbered one waiting), so every partition in flight is lower-numbered and the ordered mode's
+    `blockers()` counts them all (the first version let a later waiter in with no memory check). Up to the plan's
+    mc by the old rule; beyond it by a LEDGER: the free memory read when the loop started, less the headroom, the
+    reserve and the run's own growth beside its partitions in flight (its footprint since the start less `need` per
+    partition in flight: parked sub-grids, written records) must hold `need` for every partition in flight plus the
+    new one, and that total stays within the budget; the live free memory must still hold one `need`. The first
+    version checked the live readings for one partition only, which the partitions just admitted had not lowered
+    yet: every waiting thread got in at once (10 against room for 2).
+  - The reserve: `reserveEnd` (the derived grids, the point finalize's outputs, offsets and per-record locators),
+    `reserveFirstMerge` (the grids the first merge sizes: the moment weights and face sums,
+    `autoTuneMergeGrownBytes`) until a partition has finished, and the unmerged share of the budgeted point records.
+    The start check leaves the records out (the gate books them as it goes; else the case P8.10 is for never starts).
+  - Single build only: the double build and the float sums (`PS_GPU_FLOAT_MOMENTS/_MASS`, `PS_MASS_AUDIT`) sum
+    per-thread copies in thread order, so their grids would follow the in-flight count; they keep the plan's mc and
+    say why.
+  - The teams: a separate counter `dtfePartitionsInFlight` (the gate's in-flight count) sizes the core pool's holders
+    and `coresPerTeam` inside the loop, so the threads waiting in the gate do not cut every deposit team to one core;
+    the parallel insert's share keeps the loop's thread count. The footprint is the physical footprint
+    (`autoTuneOwnFootprint`, the budget's own measure), not the resident set.
+  - Logs: "dynamic: at least the plan's m …", or "the plan's; dynamic concurrency not started: <why>"; after the loop
+    "at most k partitions in flight"; the SUMMARY's prediction is restated with the partitions beyond the plan's.
+  - Tests (`ps_auto_tune_check.sh` Y): a plan of 1 with memory for more runs 10 at once, the `--max-concurrent 1`
+    grids byte for byte (Y1); no room for a second keeps 1 (Y2); the knob and a user's mc keep theirs (Y3); room for
+    about four admits 2–4, not every thread (Y5: the first version's burst; measured 4); the double build keeps the
+    plan's (Y6); killed after 3 and resumed: the same grids (Y4). The tuner's report lines do not change.
+  - The strict order changed one test's premise: `ps_runtime_check.sh` R7 triggered the spill with no free memory,
+    which worked only because the old gate let later partitions past a waiting one (several at once, unchecked) --
+    against its own "running one partition at a time" line. R7 now takes no RAM parking room
+    (`DTFE_TEST_PARK_ROOM_GB=0`) with free memory to spare: 25 partitions spilled to `--scratch-dir`, byte-identical.
+  - Gates: three builds 0 warnings; tuner set identical; `ps_auto_tune_check` (single and double),
+    `dtfe_auto_tune_check`, `ps_runtime_check`, `ps_fixed_merge_check`, `ps_scratch_check`, `dtfe_resume_check`,
+    `ps_parallel_check`, `ps_slab_deposit_check`, `ps_partition_padding_check`, `dtfe_mc_average_check`, both face
+    suites; bytecmp `--gpu-exact` 261 / 0.
 
 ---
 
@@ -1383,6 +1878,138 @@ about 15 min, near the CPU's 14m27s, so the CPU default for PS exact stays unles
 
 ---
 
+## P10. Shared exact velocity derivatives (the face method)
+
+**Status 2026-11-07.** P10.1–P10.7 done (CPU), with the drivers' `FACE_GRADIENT` knob; a launcher tick is optional (the reruns use the drivers).
+- P10.1: `src/CGAL_triangulation/face_sweep.h` (sections with caller-given signed distances, so tetrahedra sharing a
+  face lying in a grid plane decide it alike; the strip/cell clip). `tests/face_sweep_check.sh`: sections integrate
+  to the tetrahedron's volume and first moments (3e-13), pieces add up to their section (3e-11), and Gauss on a Kuhn
+  tessellation with a linear field, grid planes on and off the vertex levels (1e-12).
+- P10.2: `--face-gradient` in the standard binary (`averaged_interpolation_1.cc:avg1FacePass`, after the deposit,
+  replacing the gradient's cell integrals; `DTFE_FACE_CHECK=1` compares first). `tests/dtfe_face_gradient_check.sh`
+  on the 64³ demo: equal to the per-tetrahedron gradient in every cell to 1.1e-5 of its rms (rms 1.2e-7); final
+  divergence 4.4e-6, shear 9.0e-6; byte-identical at 1/3/10 deposit threads and after the Monte-Carlo, exact or
+  GPU deposit; a 2³ partition split 1.8e-6 from one domain; periodic box mean 8e-10 of the rms. Cost: ~1 s on a
+  6 s run (one thread). Both suites are in `ci_suite.sh`'s program stage.
+- P10.3, changed from the first design: the per-cell FLUX sums gave the quotient form (dS − ⟨v⟩dN)/ΣV, which is not
+  conservative in caustic cells (a periodic pancake's mean divergence +0.21 of its rms). Each cell now keeps its LOWER
+  and UPPER face sums per axis (S and N: 24 values; int64 fixed point in the deposit, 192 B/cell of a sub-grid; 96 B/cell
+  merged), and the gradient is (S_up/N_up − S_lo/N_lo)/dx: it telescopes (mean 5e-11 of the rms), equals the stream
+  average where no caustic touches the cell (1.5e-6), and a one-cell `--ps-window` equals the full run bit for bit (the
+  window cells hold their own upper faces). Fixed-point words outside `PSFxGrid` (the GPU's grids and FX_DROP slots
+  10/11 untouched; the face sums use slots 12/13); bounds from the existing walk (now once per pass: `bounds()`); the
+  grids `face_velocity` / `face_coverage` in `Quantities::forEachField`, so the merge, the checkpoint and the spill carry
+  them. Refused without `--exact-average` or `--ps-volume-weighted`, with `--gpu`, with `--ps-halo-release`, in 2D.
+  `tests/ps_face_gradient_check.sh` (12 checks, 9 s).
+- P10.5: `auto_tune.cc` books the face sums: PS 30 Real per cell (S, N and, since P10.4, the momentum) in the merged grids (+ the velocity face mode forces)
+  and their int64 words (autoTuneFxMomentBytes / autoTuneFxGrids, after the moment grids); standard DTFE the face pass's
+  9 doubles per cell. Measured at 256³ (pancake / 64³ demo): PS one domain +31%, PS 2³ +87%, standard +43% (all on the
+  safe side; P8 calibrates in phase R). Before the words were in the one-domain model PS was −18%. The 91-configuration
+  tuner report is identical (no configuration uses the flag); bytecmp `--gpu-exact` vs `ref0-70e153e`: 261 files, 0 differ.
+- P10.4: the mass flux divergence div(Σ ρ_s v_s) from per-face momentum sums (6 more int64 words per cell, FX_DROP
+  slot 14; booked by the tuner with the other face sums), written as `.a_massFluxDiv` (dtfelib `mass_flux_divergence`).
+  Checked by continuity on a drifted 3-stream pancake (double build, positions x + v t for t in [−T, T]): the cell mass
+  change equals minus the time-integrated outflow, max 0.022 / rms 7e-4 of the rms with Simpson on 8 intervals,
+  rms × 3.8 from 4 intervals (16: 0.005 / 1.6e-4), caustic cells included; cells three away from a fractional stream
+  count agree by central differences to 3e-4 (O(δt²)). The time-derivative check converges slowly only where a caustic
+  sheet crosses a face during the step. Periodic box mean telescopes to 0.
+- P10.6: `FieldSet.face_gradient` (marker: `.a_velDivStreams`), `has/load(name, mean_field=True)` read the stored grids
+  (both new grids take the velocity's √a scaling). `plot_DTFE.py`'s arrows are block means of quiver_step² cells at
+  the block centres (`fields.block_mean_slice`; density-weighted for a mass-weighted PS grid, from the run log:
+  `FieldSet.velocity_weighting`, the rule `convergence.velocity_weighting` already used, now one copy in `io.py`);
+  `tests/py_convergence_test.py` checks it against `convergence.block_average(_velocity)`.
+- Drivers: `FACE_GRADIENT=1` passes `--face-gradient` (both). `run_ps_dtfe.sh` refuses it, exit 2 before any
+  snapshot, without `-e`, without `PS_VOLUME_WEIGHTED=1` or with the GPU deposit; `run_scripts_check.sh` (S) checks
+  all five cases. README knob table, `demo/COMMANDS.md`. Default 0: phase R decides the production setting.
+Background, measurements and the design review are in the session notes of
+2026-11-07 (the velocity-method synthesis): standard DTFE's stored divergence/shear are the exact cell average of the
+per-tetrahedron gradient; PS-DTFE's stored ones are the stream average ⟨∇v⟩ (the regular part of the gradient of the
+volume-weighted mean velocity); dtfelib's FFT "mean field" adds the caustic sheets but smears them and rings
+(TNG100-3-Dark z = 0 slice: correlation with standard 1.000 / 0.015 / 0.495 for standard stored / PS stored / PS FFT).
+
+**Goal.** One implementation for both estimators of the velocity gradient of the cell-averaged velocity field, exact
+to the interpolant, with no spectral ringing:
+- By Gauss, the cell average of ∇v is (1/V) times the surface integral of v n over the cell's faces. The binaries
+  deposit **exact face integrals** (the same clipping idea as the exact cell average, on face planes) and take
+  `g_ij = (F_i(+j face) − F_i(−j face)) / (A Δx_j)` after the merge.
+- **Standard DTFE:** the interpolant is continuous, so this equals today's exact gradient (the check, below).
+- **PS-DTFE:** with S = Σ_streams v_s and n = the stream count, the face sums S_F and A_F (covered area) give the
+  gradient of the volume-weighted mean velocity in the quotient form `(ΔS_F − a_vel ΔA_F) / Σ_s V_s`, exact where n is
+  constant through the cell and exact when integrated over a region elsewhere (the caustic sheets enter as flux
+  differences, at grid resolution, with no ringing). The stored regular part ⟨∇v⟩ stays available, so the difference
+  is the caustic contribution.
+- **Mass flux (PS):** p = Σ_s ρ_s v_s gives `div p` exactly (ratio-free): the continuity equation's quantity, e.g. the
+  rate at which a void loses mass. The mass-weighted (Favre) mean velocity = p / ρ comes with it.
+
+**P10.1 The face sweep (shared geometry).** — new `src/CGAL_triangulation/face_sweep.h`
+- The section of a tetrahedron by an axis-aligned plane (a triangle or a quadrilateral), clipped to the face squares
+  of the grid on that plane (convex-polygon clip, generalising `ps_clip2d.h`'s `clipTriangleToCell`), with order-0 and
+  order-1 moments of the linear field on each piece (order 2 for ρ v with a linear ρ, if P10.4 needs it).
+- One tie rule for vertices and edges lying exactly on a grid plane, so each face piece is counted once.
+- Verify: a unit test against brute-force sampling and the analytic section of a random tetrahedron; the pieces of a
+  section sum to its area to rounding.
+
+**P10.2 Standard DTFE: the face gradient.**
+- Behind `--face-gradient` at first; the gradient and its derived fields (divergence, shear, vorticity, V-web) come
+  from the face sums. Each sub-grid holds N+1 face layers per axis; a face on a partition or thread seam is owned once
+  (the merge adds face layers like cells).
+- Verify: on the battery's standard runs (CPU exact average), the face gradient equals the stored one within the split
+  tolerance (~3e-6), except cells touching a zero-inverse (degenerate) tetrahedron, which are listed; the periodic box
+  mean of the divergence is 0 to rounding; thread and partition splits agree.
+- If the check holds everywhere it should, the face path can replace the per-tet gradient deposit later (D13).
+
+**P10.3 PS-DTFE: face sums, mean-flow gradient, regular part.** — the exact deposit branch only (`--exact-average`)
+- Accumulate S_F (3 components) and A_F per face orientation in the fixed-point grids (`fxAddL`, new `PSFixedBounds`
+  entries); normalise and difference after the ordered merge.
+- Outputs: the mean-flow gradient's divergence/shear/vorticity under the standard names (the quantity standard DTFE
+  stores), the regular part under new names, both from one run. Refused with the sampled deposit and with
+  `--ps-halo-release`.
+- `--ps-window`: N+1 face layers for the window only.
+
+**P10.4 PS-DTFE: mass flux.** P_F = Σ ∫ ρ_s v·n dA and M_F = Σ ∫ ρ_s dA per face; `div p` as a new grid, and the
+cell momentum Σ ρ_s v_s (so p / ρ gives the mass-weighted mean velocity without a second run). ρ_s per tetrahedron:
+its mass over its Eulerian volume (uniform), as the deposit already uses.
+
+**P10.5 Memory model and tuner.** Face accumulators: standard 3 × 3 floats per cell (as the 9-component gradient); PS
+3 × (3 + 1) [+ 3 × (3 + 1) for P10.4] int64 words per cell, about 96–192 B/cell: whole box at 512³ or a window. Book
+them in `autoTuneBytesPerCell` and the GPU-free PS plan.
+
+**P10.6 Python.** `FieldSet` reads the face-based grids; `load(name, mean_field=True)` returns them when present and
+falls back to the FFT for older outputs; `plot_DTFE.py`'s quiver block-averages (8×8 cells) instead of taking every
+8th cell; comparisons of the two estimators mask multi-stream cells.
+
+**P10.7 Tests.**
+- Standard: face gradient == stored gradient (P10.2).
+- PS: in cells whose stream count is an integer throughout (streams within 1e-5 of an integer and all six face
+  coverages n·Δx²) the face gradient equals the stored regular part; the periodic box mean of the mean-flow divergence
+  is 0 to rounding.
+- A 1D pancake (Zel'dovich, `generate_ps_test_data.py`) across a fold: the face ∂ū_x/∂x against the analytic mean flow
+  of the lattice's piecewise-linear map, to rounding; a modulated variant where the stream count varies on a face.
+- Mass flux: drift the particles by ±v δt, rerun, and check (M₊ − M₋)/(2δt) = −V div p to O(δt²).
+- `--ps-window` face grids equal the full run's to float rounding.
+
+Effort: L. GPU ports (Metal `sw_poly_rect` already intersects z-sections with rectangles) only after the CPU path is
+settled; the CPU exact PS deposit is the faster one at production sizes.
+
+---
+
+## R. The rerun campaign (once, after every code item)
+
+The owner's rule: no production reruns until every code item of P3–P10 is in and checked on small data.
+Then, on a quiet machine, overnight, outputs into separate folders (production grids are never overwritten):
+- **P2.3:** TNG50-3-Dark z = 0 (GPU sampled + 4096² points, with the logged run's `DTFE_MEM_BUDGET_GB=52`; needs
+  ≥ 56 GB free at the start), the 1024³ CPU exact run, the CPU `--ps-window` runs at 2048² and 4096². The P2 status
+  table and the P8.1 error table are filled from their logs.
+- **P8.2:** the CPU exact term's constants refitted from the 1024³ run; **P8.1** re-baselined per class.
+- **P10:** `ps100_099_face512` (decided 2026-11-08; in the rerun script after the 1024³ run): PS-DTFE on TNG100-3-Dark
+  z = 0 at 512³, the exact CPU deposit, `--ps-volume-weighted --face-gradient`, the same nine fields as the sampled GPU
+  `ps100_099` it is compared with (no sample points); then the exact deposit with the face outputs on the other
+  snapshots the analysis uses; standard DTFE with `--face-gradient` on one snapshot as the full-size equality check.
+- **Science:** standard vs PS velocity divergence and shear, per cell, masked by stream count (how far standard DTFE's
+  derivatives are off in multi-stream cells); void boundaries from the single-stream region; void mass flux from div p.
+
+---
+
 ## Decisions for the owner
 
 Each decision has a recommended default, so the plan can proceed if no answer comes.
@@ -1398,7 +2025,11 @@ Each decision has a recommended default, so the plan can proceed if no answer co
 | D7 | split `depositLoop` (1010 lines, hot) | **no**, unless P9.2 needs the restructuring; the proof would be bytes plus disassembly plus a ±1% timing check | split into a `DepositCtx` plus `psDepositExactTet` |
 | D8 | launcher Advanced sections | **collapse** Resources and the expert PS options, with the state remembered | only shorten labels and tooltips |
 | D9 | when to remove the flag aliases | **the release after** the one that introduces them | keep them indefinitely, hidden |
-| D10 | **upstream** dedupe and deletions (P1.4's upstream half, P3.9) | **golden tests yes**; the dedupe and deletions **no**, since the repository is still a fork of upstream | do both |
+| D10 | **upstream** dedupe and deletions (P1.4's upstream half, P3.9) | **golden tests yes**; the dedupe and deletions **no**, since the repository is still a fork of upstream. **Changed 2026-11-07:** the owner no longer tracks upstream ("focus on this fork only"), so upstream-marked code is ordinary code now (D4 and P3.9 may proceed) | do both |
+| D11 | the GPU backends | **Metal-only**: CUDA/HIP has never run on NVIDIA or AMD hardware, costs 4.5k lines; keep it on an archive branch (the analysis is in the 2026-11-07 session notes). **Half decided 2026-11-08:** its four CI jobs (`cudaemu` 32/64, `cuda-compile`, `hip-compile`) were removed on the owner's instruction; the code stays until the owner decides | CPU-only after a same-tree A/B; or keep all three |
+| D12 | PS velocity derivatives | **write both** the mean-flow gradient (with the caustic sheets) and the regular part ⟨∇v⟩ | only one of them |
+| D13 | standard DTFE's gradient | keep the per-tet deposit until P10.2's check holds on the battery and one full-size run, then let the face path replace it | keep both paths |
+| D14 | default field set | **density, velocity, divergence, shear in both drivers (done 2026-11-07)**; the rest on request | — |
 
 ## Not proposed, and why
 

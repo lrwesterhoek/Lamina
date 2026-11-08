@@ -6,7 +6,7 @@ bins of R with 16-84% bootstrap bands, as a two- or three-panel figure plus an n
 measured void radius R_v (where the smoothed density contrast around the minimum rises to 0) by default -- so the
 stacked density reaching the mean near 1.0 R_v is R_v's own definition, a check of the smoothing against
 the raw density, not a finding; the infall radius, the ridge and the single-stream fraction are -- the
-ellipsoid's R_eff with --radius r_eff (with --keep-overlaps --edges 0,2,4,8,16: the earlier figures);
+ellipsoid's R_eff with --radius r_eff (with --keep-overlaps --edges 0 2 4 8 16: the earlier figures);
 --keep-overlaps stacks every resolved void,
 neighbouring minima of one void included; --smooth-mpc smooths at the same physical scale in every box. The dashed lines on the v_r panel are linear theory from the stacked density itself
 (profiles.linear_v_r): what the voids would do if they expanded linearly. With --radius r_v (the default) every
@@ -21,7 +21,7 @@ Files: void_profiles_<method|prefix>_<sample>[_reff][_overlaps][_edges<e0>-<e1>-
     python3 plot/plot_void_profiles.py --sim TNG100-3-Dark --snaps 99 50
     python3 plot/plot_void_profiles.py --sim TNG100-3-Dark --snaps 99 --out ~/profiles
     python3 plot/plot_void_profiles.py --sim TNG300-3-Dark --snaps 99 --smooth-mpc 2.1625 --radius r_eff
-    python3 plot/plot_void_profiles.py --sim TNG50-4-Dark --snap 99 --method dtfe --sample deep --edges 0,3,6,12
+    python3 plot/plot_void_profiles.py --sim TNG50-4-Dark --snap 99 --estimator dtfe --sample deep --edges 0 3 6 12
 """
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
@@ -33,7 +33,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from dtfelib import make_parser, pipeline, profiles, add_snaps_arg, add_out_arg
+from dtfelib import make_parser, pipeline, profiles, add_snaps_arg, add_out_arg, add_list_arg
 from dtfelib import figures as style
 
 OUTPUT_DIR = Path(config.figures_path("void_profiles"))
@@ -107,8 +107,8 @@ def main():
     parser.add_argument("--keep-overlaps", action="store_true",
                         help="stack every resolved void, not only the distinct ones (none whose centre lies inside a "
                              "deeper void's min(R_v, R_eff))")
-    parser.add_argument("--edges", default=None,
-                        help="radius bin edges in Mpc, comma-separated (default in smoothing lengths: R_v 0, 2.5, 3.5, 5; "
+    add_list_arg(parser, "--edges", kind=float, default=None, metavar="MPC",
+                 help="radius bin edges in Mpc, space-separated (default in smoothing lengths: R_v 0, 2.5, 3.5, 5; "
                              "R_eff 0, 5, 6, 7; and the wrap cap L/6 -- profiles.default_edges_mpc); other edges tag "
                              "the files '_edges<e0>-<e1>-...'")
     parser.add_argument("--points", type=int, default=profiles.DEFAULT_M, help="points per shell")
@@ -120,16 +120,10 @@ def main():
     style.apply()
     pipeline.apply_smoothing_args(args, "void-profiles")  # the catalogue's cache namespace follows, as in the other scripts
     default_edges = list(profiles.default_edges_mpc(pipeline.smoothing_length_mpc(), config.BOX_SIZE, args.radius))
-    if args.edges is None:                               # in smoothing lengths: the same bins mean the same in every box
-        edges = default_edges
-        args.edges = ",".join(f"{e:.4g}" for e in edges)
-    else:
-        try:
-            edges = [float(e) for e in args.edges.split(",") if e.strip()]
-        except ValueError:
-            raise SystemExit(f"--edges must be numbers, comma-separated, got {args.edges!r}")
+    # in smoothing lengths by default: the same bins mean the same in every box
+    edges = default_edges if args.edges is None else list(args.edges)
     if len(edges) < 2 or any(b <= a for a, b in zip(edges, edges[1:])):
-        raise SystemExit(f"--edges must be at least two increasing numbers, got {args.edges!r}")
+        raise SystemExit(f"--edges must be at least two increasing numbers, got {' '.join(f'{e:g}' for e in edges)}")
     etag = edges_tag(edges, default_edges)
     snaps = args.snaps if args.snaps else [args.snap]
     failed, written = [], []

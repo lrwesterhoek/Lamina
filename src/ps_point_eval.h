@@ -124,7 +124,7 @@ void psPointEvalOwnBox(double const lo[], double const hi[], bool const outerLo[
 // which owns by the Lagrangian centroid (the partition's lagrangianRegion).
 void psPointEvalSetOwnership(double const *ownLo, double const *ownHi);
 
-// --ps-window in a batch partition run: 1 when partition 'partOpts' can reach the window of
+// --grid-window in a batch partition run: 1 when partition 'partOpts' can reach the window of
 // 'mainOpts' by its occupancy map (beside its cached tessellation), 0 when it cannot (skip it),
 // -1 when no usable map exists (process it). The map writer, which needs the tessellation type,
 // psWriteOccupancyIfMissing(DT&, User_options&), is declared with the workers (triangulation.cpp).

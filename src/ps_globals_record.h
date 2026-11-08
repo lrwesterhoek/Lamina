@@ -9,7 +9,7 @@
    size:mtime stamps, the file type, the length unit, the periodicity, the species, a user box, the
    sub-sampling options.
 
-   A later '--ps-window' run (the launcher's exact zoom) whose inputs match then starts WITHOUT reading
+   A later '--grid-window' run (the launcher's exact zoom) whose inputs match then starts WITHOUT reading
    the particles -- 16 s of a TNG100-3 exact zoom -- taking these globals from the record. The particles
    are read only if a partition the window needs turns out not to be cached (DTFE.cpp, at the skip
    set): the run is then the ordinary one from that point on. The record can only shorten a run, never
@@ -180,7 +180,7 @@ inline bool read(User_options const &u, Record &r)
     return got == 127 and r.n > 0 and r.averageDensity > 0.;
 }
 
-// A run that may start without its particles: a phase-space '--ps-window' run over a periodic box
+// A run that may start without its particles: a phase-space '--grid-window' run over a periodic box
 // with a tessellation cache and an explicit partition split, reading a Gadget snapshot, with nothing
 // that selects or generates particles differently (a region, sub-sampling, Poisson particles, a
 // redshift-space shift, sample points, interlacing) and the mean density taken from the particles.

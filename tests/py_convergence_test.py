@@ -124,6 +124,33 @@ def t_velocity_weighting():
         == "volume"
 
 
+def t_quiver_block_mean():
+    """plot_DTFE's arrows (fields.block_mean_slice): every cell of a step x step block counts, the edge blocks hold
+    the remainder at their own centres, a weight gives sum w a / sum w (the plain mean where the weights sum to 0),
+    and on a 3D grid the slice's volume-weighted block mean is convergence.block_average's in that plane."""
+    from dtfelib.fields import block_mean_slice
+    from dtfelib import convergence as cv
+    a = np.arange(20 * 18, dtype=np.float64).reshape(20, 18)
+    m, c0, c1 = block_mean_slice(a, 8)
+    assert m.shape == (3, 3) and np.allclose(c0, [4, 12, 18]) and np.allclose(c1, [4, 12, 17]), (c0, c1)
+    assert np.isclose(m[0, 0], a[:8, :8].mean()) and np.isclose(m[2, 2], a[16:, 16:].mean())
+    w = np.ones_like(a); w[:4] = 0
+    assert np.isclose(block_mean_slice(a, 8, w)[0][0, 0], a[4:8, :8].mean())
+    assert np.allclose(block_mean_slice(a, 8, np.zeros_like(a))[0], m)
+    rng = np.random.default_rng(5)
+    rho = (0.1 + rng.random((8, 8, 8)) ** 4 * 20).astype(np.float32)
+    vel = rng.normal(0.0, 100.0, (8, 8, 8, 3)).astype(np.float32)
+    sl = vel[:, :, 4:6].reshape(8, 8, 2, 3)                    # a 2-cell slab: block_mean_slice per z plane, averaged
+    vol = cv.block_average(vel, 2)[:, :, 2, 0]
+    ours = 0.5 * (block_mean_slice(sl[:, :, 0, 0], 2)[0] + block_mean_slice(sl[:, :, 1, 0], 2)[0])
+    assert np.allclose(ours, vol, atol=1e-4), float(np.abs(ours - vol).max())
+    rs = rho[:, :, 4:6]
+    num = sum(block_mean_slice(sl[:, :, k, 0] * rs[:, :, k], 2)[0] for k in range(2))
+    den = sum(block_mean_slice(rs[:, :, k], 2)[0] for k in range(2))
+    mass = cv.block_average_velocity(vel, rho, 2, "mass")[:, :, 2, 0]
+    assert np.allclose(num / den, mass, rtol=1e-4, atol=1e-3), float(np.abs(num / den - mass).max())
+
+
 def t_coarse_catalog_matches():
     """The four analytic voids are found on the 64^3 grid and on its 2x block mean at the same sigma in Mpc, with
     the coarse grid's frame recorded; matched one to one (mutual), R_v within 2%, centres within one coarse cell;
@@ -278,7 +305,7 @@ def t_crossbox_and_missing():
 
 def t_prefix_set():
     """A --prefix run's outputs carry its grid set (the default names unchanged), and row (c)'s side of
-    --method reads that set (said when it is not there), its table header naming both sets."""
+    --estimator reads that set (said when it is not there), its table header naming both sets."""
     import plot_void_convergence as pc
     assert pc.set_name("ps", None) == "ps" and pc.set_name("ps", "ps_output") == "ps"
     assert pc.set_name("dtfe", "output.") == "dtfe" and pc.set_name("ps", "ps_mw.") == "ps_mw"
@@ -304,7 +331,7 @@ def t_cli():
     pr = subprocess.run([sys.executable, str(REPO / "python" / "plot" / "plot_void_convergence.py"), "--help"],
                         capture_output=True, text=True, timeout=120)
     assert pr.returncode == 0, pr.stderr[-400:]
-    for flag in ("--sim", "--z", "--factors", "--match-sigma", "--crossbox-dir", "--no-velocity", "--smooth-mpc"):
+    for flag in ("--sim", "--redshifts", "--factors", "--match-sigma", "--crossbox-dir", "--no-velocity", "--smooth-mpc"):
         assert flag in pr.stdout, flag
 
 
@@ -346,6 +373,8 @@ def main():
           t_frame_and_blocks)
     check("convergence: the coarse velocity follows the run's weighting (volume = plain block mean; from the run log)",
           t_velocity_weighting)
+    check("plot_DTFE: quiver arrows are block means (every cell; remainder blocks; mass-weighted on request)",
+          t_quiver_block_mean)
     check("convergence: analytic voids on 64^3 and its 32^3 block mean matched one to one, R_v within 2%",
           t_coarse_catalog_matches)
     check("convergence: match counts, periodic neighbour, radius, unmatched both ways, mutual", t_match_counts)

@@ -76,15 +76,15 @@ struct StreamRec
     double vel[noVelComp];      // velocity linearly interpolated at the point
     double grad[NO_DIM];        // constant 'dtfe' density-profile gradient of the tet (--pts-den-grad; 0 otherwise)
     double vgrad[NO_DIM*NO_DIM];// constant velocity gradient of the tet, [d*3+j] = dv_j/dx_d (--pts-vel-grad; 0 otherwise)
-    uint64_t ids[NO_DIM+1];     // sorted Lagrangian-vertex ParticleIDs (--per-stream-ids; all 0 otherwise)
+    uint64_t ids[NO_DIM+1];     // sorted Lagrangian-vertex ParticleIDs (--ps-per-stream-ids; all 0 otherwise)
     PSCausticClass::CausticMask caustic;   // --ps-caustics: this tetrahedron's fold parity + stratification bits (ps_caustic_class.h; 0 otherwise). Point evaluation runs the derivative-free classifyTet only, so bits 7..8 (the A3/A4 indicators, which need the vertex-incident stencil) are never set here -- the type matches the grid deposit's so that adding them later cannot silently truncate
     double scal[noScalarComp];  // --pts-scalar: the stream's linear interpolant of its vertices' scalar values (0 otherwise)
-    double lag[NO_DIM];         // --pts-lagrangian (PS-DTFE): the stream's Lagrangian coordinate q(x), wrapped into the box when periodic (0 otherwise)
+    double lag[NO_DIM];         // --ps-per-stream-lagrangian (PS-DTFE): the stream's Lagrangian coordinate q(x), wrapped into the box when periodic (0 otherwise)
 };
 
 // The STORED form of a StreamRec: only the members this run's options fill. The core (both
 // densities, the velocity, the caustic mask) always; the density gradient, velocity gradient and
-// vertex IDs only with --pts-den-grad / --pts-vel-grad / --per-stream-ids. The records ARE the
+// vertex IDs only with --pts-den-grad / --pts-vel-grad / --ps-per-stream-ids. The records ARE the
 // memory of a large --sample-points run (an 8192^2 plane x ~4 streams at z=0 held ~48 GB of
 // 176-B StreamRecs), and packed they take 42 B without those options, 114 B with --pts-vel-grad.
 // unpack() zeroes the members that were not stored -- exactly what the record builders put there
@@ -158,9 +158,9 @@ struct Context
     bool   ptsVelGrad = false;
     bool   psCaustics = false;      // --ps-caustics: also emit the per-point caustic mask
     bool   ptsScalar = false;       // --pts-scalar: also interpolate the vertex scalars per stream
-    bool   ptsLagrangian = false;   // --pts-lagrangian (PS): also record each stream's Lagrangian coordinate
+    bool   ptsLagrangian = false;   // --ps-per-stream-lagrangian (PS): also record each stream's Lagrangian coordinate
     bool   useGeometric = false;    // variant used for totals, weights and per-stream output
-    // the grid deposit's conventions, followed by the points ('--pts-conventions grid', the
+    // the grid deposit's conventions, followed by the points ('--ps-point-conventions grid', the
     // default; 'legacy' clears both): see the notes at interpolatePoints_phaseSpace and psPointEvalFinalize
     bool   vertexMass = false;      // --ps-vertex-mass: the grid's tetrahedron masses in both per-stream densities
     bool   volumeWeighted = false;  // --ps-volume-weighted: equal-volume stream means (velocity, its gradient, scalars)
@@ -209,16 +209,16 @@ struct Context
     std::vector<double>   outVel;        // 3N
     std::vector<double>   outDisp;       // 6N, upper triangle row-major: xx xy xz yy yz zz
     std::vector<int32_t>  outStreams;    // N
-    std::vector<uint64_t> outOffsets;    // N+1 (only with --per-stream)
+    std::vector<uint64_t> outOffsets;    // N+1 (only with --ps-per-stream)
     std::vector<double>   outRecords;    // 4 per stream: density, vx, vy, vz
-    std::vector<uint64_t> outIds;        // NO_DIM+1 per stream (only with --per-stream-ids)
+    std::vector<uint64_t> outIds;        // NO_DIM+1 per stream (only with --ps-per-stream-ids)
     std::vector<double>   outDenGrad;    // 3N (only with --pts-den-grad)
     std::vector<double>   outVelGrad;    // 9N (only with --pts-vel-grad)
-    std::vector<double>   outRecGrad;    // 3 per stream (only with --pts-den-grad + --per-stream)
+    std::vector<double>   outRecGrad;    // 3 per stream (only with --pts-den-grad + --ps-per-stream)
     std::vector<int32_t>  outCaustic;    // N (only with --ps-caustics): OR of the containing tetrahedra's masks
     std::vector<double>   outScalar;     // noScalarComp per point (only with --pts-scalar): density-weighted mean over the streams
-    std::vector<double>   outRecScalar;  // noScalarComp per stream (--pts-scalar + --per-stream)
-    std::vector<double>   outRecLag;     // 3 per stream (only with --pts-lagrangian)
+    std::vector<double>   outRecScalar;  // noScalarComp per stream (--pts-scalar + --ps-per-stream)
+    std::vector<double>   outRecLag;     // 3 per stream (only with --ps-per-stream-lagrangian)
 };
 
 // The state the point evaluation and the servers share, ONE instance (g_pe, defined in ps_point_eval.cc). The partition
@@ -270,7 +270,7 @@ inline void forEachBucketIn(int const lo[NO_DIM], int const hi[NO_DIM], int cons
 
 namespace psPointEvalDetail {
 
-/* The grid deposit's conventions at the points ('--pts-conventions grid', the default).
+/* The grid deposit's conventions at the points ('--ps-point-conventions grid', the default).
 
    Without them the planes and grids of the same run measure different things: the grids use --ps-vertex-mass
    (tetrahedron masses from the particles, m_tet = sum_v m_v/deg_v) and --ps-volume-weighted (volume-weighted
@@ -301,7 +301,7 @@ namespace psPointEvalDetail {
    24^3 lattice, jitter 0.01: vertex std 0.19 against 0.08). The non-periodic hull cells keep their constant density,
    corrected the same way; the density gradient (--pts-den-grad) belongs to the corrected 'dtfe' profile. Under
    --ps-volume-weighted the per-point velocity, its gradient and the scalar are equal-weight stream means
-   (psPointEvalFinalize). '--pts-conventions legacy' keeps the plain estimators; without the two grid options both
+   (psPointEvalFinalize). '--ps-point-conventions legacy' keeps the plain estimators; without the two grid options both
    choices run the same code, byte for byte.
 
    c_v is computed by prepareVertexMass over the whole tessellation (the batch worker per partition, before the

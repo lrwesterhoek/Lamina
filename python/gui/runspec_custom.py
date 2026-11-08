@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import runspec as _rs
+from dtfelib import runlog as _runlog
 from dtfelib.estimator import STANDARD_PADDING
 from runspec import CUSTOM_OUT_DEFAULT, LAMBDA_TH_DEFAULT   # the dataclass defaults
 
@@ -55,16 +56,18 @@ class CustomSpec:
     mem_budget_gb: float = 0.0      # DTFE_MEM_BUDGET_GB in the binary's environment, see RunSpec
     tess_cache: str = ""            # --tessellation-cache <folder>; "" = none
     linear_deposit: bool = False    # --ps-linear-deposit (PS only; not with the volume-weighted velocities)
-    ordered_merge: bool = True      # --ordered-merge (PS only; off: --completion-order-merge), see RunSpec
+    ordered_merge: bool = True      # --ps-merge index-order, the default (PS only; off: --ps-merge completion-order), see RunSpec
     sample_points: str = ""         # --sample-points <file>: the fields at these points too ('.pts_*'); "" = none
     pts_vel_grad: bool = True       # ... with the velocity gradient at each point (--pts-vel-grad)
-    pts_conventions: str = "grid"   # ... PS-DTFE: their estimators, '--pts-conventions legacy' when not the grids'
+    pts_conventions: str = "grid"   # ... PS-DTFE: their estimators, '--ps-point-conventions legacy' when not the grids'
                                     # (the binary's default), see RunSpec
-    window: list[float] = field(default_factory=list)   # --ps-window x0 x1 y0 y1 [z0 z1] in Mpc: only these cells
+    window: list[float] = field(default_factory=list)   # --grid-window x0 x1 y0 y1 [z0 z1] in Mpc: only these cells
     halo_release: float = 0.0       # --ps-halo-release D: tetrahedra denser than D x rho_bar deposited at their centroid
-    stream_density: str = "dtfe"    # --ps-stream-density for the sample points: 'dtfe' (interpolated) | 'geometric'
-    per_stream: bool = False        # --per-stream: the sample points' values stream by stream (ragged '.pts_*')
-    per_stream_ids: bool = False    # --per-stream-ids: ... with each stream's tetrahedron particle IDs
+    stream_density: str = "linear"  # --ps-stream-density for the sample points: 'linear' (the DTFE interpolation; the
+                                    # binary's default, which the command leaves out) | 'geometric'; a saved 'dtfe'
+                                    # (its older name) reads as 'linear' (from_dict)
+    per_stream: bool = False        # --ps-per-stream: the sample points' values stream by stream (ragged '.pts_*')
+    per_stream_ids: bool = False    # --ps-per-stream-ids: ... with each stream's tetrahedron particle IDs
     extra_args: str = ""            # more program options as on a command line, appended after the tab's own
     demo_n: int = 0                 # > 0: first generate the synthetic demo snapshot (crossed waves, n^3) ...
     demo_file: str = ""             # ... but only at THIS path (demo_spec sets it): the setting is persisted, and
@@ -104,7 +107,7 @@ class CustomSpec:
         three = self.dim != 2           # a 2D run: no GPU, no parallel insertion (both 3D only)
         out = self.output_root()
         a = [str(self.binary()), str(Path(self.input_file).expanduser()), str(out),
-             "--grid", str(self.grid), "--input", str(self.input_type), "--MpcUnit", f"{self.mpc_unit:g}"]
+             "--grid", str(self.grid), "--input-format", str(self.input_type), "--mpc-unit", f"{self.mpc_unit:g}"]
         if self.periodic:
             a.append("--periodic")
         if len(self.box) == 2 * self.dim:
@@ -123,9 +126,9 @@ class CustomSpec:
             if self.deposit == "exact":
                 a.append("--exact-average")         # the exact deposit (the binaries share the name)
             else:
-                a += ["--avg-subsamples", str(self.nsub)]
+                a += ["--subsamples", str(self.nsub)]
             if self.lagrangian == "separate" and self.lagrangian_file:
-                a += ["--lagrangianInput", str(Path(self.lagrangian_file).expanduser())]
+                a += ["--ps-lagrangian-input", str(Path(self.lagrangian_file).expanduser())]
             for on, flag in ((self.gpu and three, "--gpu"), (self.vertex_mass, "--ps-vertex-mass"),
                              (self.volume_weighted, "--ps-volume-weighted"), (self.caustics, "--ps-caustics"),
                              (self.caustic_cusps, "--ps-caustic-cusps"),
@@ -136,13 +139,14 @@ class CustomSpec:
                 a += ["--ps-alpha-shape", f"{self.alpha_shape:g}"]
             if self.linear_deposit:
                 a.append("--ps-linear-deposit")
-            # the merge order said either way (index order is the binary's default; the flag keeps it in
-            # the run log, which 'Load settings' reads back)
-            a.append("--ordered-merge" if self.ordered_merge else "--completion-order-merge")
+            # the merge order only when it is not the binary's default (the index order): a log without '--ps-merge'
+            # reads back as the index order ('Load settings'), and the extra options may then name a merge themselves
+            if not self.ordered_merge:
+                a += ["--ps-merge", "completion-order"]
             if self.halo_release > 0:
                 a += ["--ps-halo-release", _rs._num(self.halo_release)]
             if len(self.window) == 2 * self.dim:
-                a += ["--ps-window"] + [_rs._num(v) for v in self.window]
+                a += ["--grid-window"] + [_rs._num(v) for v in self.window]
         else:
             if self.gpu and three:
                 a.append("--gpu")
@@ -162,14 +166,14 @@ class CustomSpec:
             a += ["--sample-points", str(Path(self.sample_points).expanduser())]
             if self.pts_vel_grad:
                 a.append("--pts-vel-grad")
-            if ps and self.stream_density != "dtfe":
+            if ps and self.stream_density not in ("linear", "dtfe"):     # the binary's default ('dtfe' its older name)
                 a += ["--ps-stream-density", self.stream_density]
             if ps and self.per_stream:
-                a.append("--per-stream")
+                a.append("--ps-per-stream")
             if ps and self.per_stream_ids:
-                a.append("--per-stream-ids")
+                a.append("--ps-per-stream-ids")
             if ps and self.pts_conventions == "legacy":     # 'grid' is the binary's default: no flag for it
-                a += ["--pts-conventions", "legacy"]
+                a += ["--ps-point-conventions", "legacy"]
         return a
 
     def memory_key(self) -> str:
@@ -189,8 +193,8 @@ class CustomSpec:
                         self.run_env())
 
     def run_env(self) -> dict[str, str]:
-        """The binary's environment: the memory budget (the cache is an argument here, not TESS_CACHE)."""
-        return {k: v for k, v in _rs._run_option_env(self).items() if k != "TESS_CACHE"}
+        """The binary's environment: the memory budget (the cache is an argument here, not TESSELLATION_CACHE)."""
+        return {k: v for k, v in _rs._run_option_env(self).items() if k not in _rs.TESS_CACHE_KEYS}
 
     def steps(self) -> list[_rs.Step]:
         out = []
@@ -269,7 +273,7 @@ class CustomSpec:
             out.append(("warning", "parallel triangulation: faster on small sets, but two identical runs then differ "
                                    "at float rounding (the stream counts do not)"))
         n = hdf5_particle_count(f) if (f.is_file() and self.input_type == 105) else None
-        out += _rs.gpu_advice(self.gpu, self.deposit, self.fields if ps else (_rs.dtfe_fields(self.fields) or _rs.DTFE_FIELDS), n,
+        out += _rs.gpu_advice(self.gpu, self.deposit, self.fields if ps else (_rs.dtfe_fields(self.fields) or _rs.DTFE_DEFAULT_FIELDS), n,
                               self.estimator,
                               grid=self.grid, precision=self.precision, dim=d)
         if self.box:
@@ -332,7 +336,8 @@ class CustomSpec:
                 out.append(("error", "the window cannot be combined with the linear deposit (the binary refuses it)"))
         if ps:
             out += _rs._pts_conventions_problems(self, bool(self.sample_points))
-        if (self.per_stream or self.per_stream_ids or self.stream_density != "dtfe") and not self.sample_points:
+        if (self.per_stream or self.per_stream_ids or self.stream_density not in ("linear", "dtfe")) \
+                and not self.sample_points:
             out.append(("warning", "the per-stream outputs and the stream density apply to sample points: choose a "
                                    "points file (or they do nothing)"))
         if not ps and (self.per_stream or self.per_stream_ids or self.halo_release > 0):
@@ -351,8 +356,10 @@ class CustomSpec:
             else:
                 import results as R     # canonical_flag: the binaries' older option names (as runspec.py imports it)
 
-                def names(tokens):      # the option names, canonical, no '=value': '--lambda_th=0.4' -> '--lambda-th'
-                    return {R.canonical_flag(t.split("=", 1)[0]) for t in tokens if t.startswith("--")}
+                def names(tokens):      # the option names, canonical, no '=value': '--lambda_th=0.4' -> '--lambda-th';
+                    # a merge switch is '--ps-merge' (canonical_flag gives its 'option value' pair; the run copy migrates
+                    # the switch to that pair, so beside the tab's own '--ps-merge' the binary would get it twice)
+                    return {R.canonical_flag(t.split("=", 1)[0]).split()[0] for t in tokens if t.startswith("--")}
                 twice = sorted(names(extra) & names(self._own_command()))
                 if twice:
                     out.append(("error", f"the extra options repeat {', '.join(twice)}, which the tab sets already "
@@ -365,7 +372,36 @@ class CustomSpec:
 
     @classmethod
     def from_dict(cls, d: dict) -> "CustomSpec":
-        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+        """A saved job (the launcher's settings, a queued job, a run's '.gui.json' sidecar for 'Load settings'), its
+        flag spellings brought up to date (migrate_saved): every load path goes through here."""
+        return cls(**migrate_saved({k: v for k, v in d.items() if k in cls.__dataclass_fields__}))
+
+
+def migrate_extra_args(text: str, estimator: str = "ps", dim: int = 3) -> str:
+    """The extra-options line with the binaries' older option names in their canonical spelling (P6.7, the run-log
+    readers' table: '--MpcUnit 1 --ps-window 0 5 0 5 0 5' -> '--mpc-unit 1 --grid-window 0 5 0 5 0 5', the merge
+    switches -> '--ps-merge MODE', '--ps-stream-density dtfe' -> 'linear'); the rest, quoting included, untouched.
+    Standard DTFE: '-s N' / '--samples N' -> '--subsamples k' when N = k^dim, '-m'/'--method' -> '--average-method';
+    PS-DTFE keeps those spellings (they have no effect there, and '--subsamples' would change the run).
+    Idempotent: a canonical line comes back as it is."""
+    if not text or not text.strip():
+        return text
+    return _runlog.canonical_command(text, dim, averaging=estimator == "dtfe")
+
+
+def migrate_saved(d: dict) -> dict:
+    """A saved CustomSpec dict with the P6.7 renames applied (idempotent, so no one-time flag is needed): the
+    extra options' flag names (migrate_extra_args) and the stream density's older value 'dtfe' -> 'linear'."""
+    d = dict(d)
+    if isinstance(d.get("extra_args"), str):
+        try:
+            dim = int(d.get("dim", 3))
+        except (TypeError, ValueError):
+            dim = 3
+        d["extra_args"] = migrate_extra_args(d["extra_args"], str(d.get("estimator", "ps")), dim)
+    if d.get("stream_density") == "dtfe":
+        d["stream_density"] = "linear"
+    return d
 
 
 def _extra_options(text: str) -> list[str]:

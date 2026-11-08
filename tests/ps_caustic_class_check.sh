@@ -46,7 +46,7 @@ echo ">> generating the crossed-wave snapshot ..."
         --crossed-waves >/dev/null
 
 echo ">> CPU deposit with --ps-caustics ..."
-"${BIN}" "${SNAP}" "${OUT}" --grid "${GRID}" --periodic --field density --MpcUnit 1 \
+"${BIN}" "${SNAP}" "${OUT}" --grid "${GRID}" --periodic --field density --mpc-unit 1 \
          --max-concurrent 1 --ps-caustics >/dev/null
 
 [ -f "${OUT}.causticClass" ] || { echo "   FAIL  no .causticClass written"; exit 1; }
@@ -120,7 +120,7 @@ rng = np.random.default_rng(11)
 L = float(sys.argv[2])
 rng.uniform(0.02*L, 0.98*L, size=(60000, 3)).astype(np.float64).tofile(sys.argv[1])
 EOF
-"${BIN}" "${SNAP}" "${OUT}_pts" --grid 16 --periodic --field density --MpcUnit 1 \
+"${BIN}" "${SNAP}" "${OUT}_pts" --grid 16 --periodic --field density --mpc-unit 1 \
          --max-concurrent 1 --ps-caustics --sample-points "${POINTS}" >/dev/null
 if [ ! -f "${OUT}_pts.pts_caustic" ]; then
     echo "   FAIL  no .pts_caustic written"
@@ -183,18 +183,18 @@ for A in 1.8 1.0; do
     "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${TMP}/pcc_w${A}.hdf5" --n 32 \
             --box "${BOX}" --amplitude-factor "${A}" >/dev/null
     "${BIN}" "${TMP}/pcc_w${A}.hdf5" "${TMP}/pcc_c${A}" --grid 48 --periodic --field density \
-             --MpcUnit 1 --max-concurrent 1 --ps-caustics --ps-caustic-cusps >/dev/null
+             --mpc-unit 1 --max-concurrent 1 --ps-caustics --ps-caustic-cusps >/dev/null
 done
 # and one default run: the opt-in flag must be the ONLY way bit 7 appears
 "${BIN}" "${TMP}/pcc_w1.8.hdf5" "${TMP}/pcc_nocusp" --grid 48 --periodic --field density \
-         --MpcUnit 1 --max-concurrent 1 --ps-caustics >/dev/null
+         --mpc-unit 1 --max-concurrent 1 --ps-caustics >/dev/null
 # --gpu with the cusp indicator: the deposit runs on the CPU (the stencil needs the triangulation's neighbours),
 # so bits 7 and 8 are the CPU run's, byte for byte -- a GPU deposit left them unset in nearly every cell
 GPUG=0
 [ -d o_ps ] && [ ! -f o_ps/.gpu_mode_off ] && grep -q "METAL=1\|CUDA=1\|HIP=1" o_ps/.build_mode 2>/dev/null && GPUG=1
 if [ "${GPUG}" = 1 ]; then
     "${BIN}" "${TMP}/pcc_w1.0.hdf5" "${TMP}/pcc_c1.0_gpu" --grid 48 --periodic --field density \
-             --MpcUnit 1 --max-concurrent 1 --ps-caustics --ps-caustic-cusps --gpu > "${TMP}/pcc_c1.0_gpu.log" 2>&1
+             --mpc-unit 1 --max-concurrent 1 --ps-caustics --ps-caustic-cusps --gpu > "${TMP}/pcc_c1.0_gpu.log" 2>&1
 fi
 "${PY}" - "${TMP}" "${GPUG}" <<'PYEOF' || py_rc=1
 import sys
@@ -252,7 +252,7 @@ echo "    D1 = D2 = 0 with D3 != 0 -- an exact A4 at q = L/3 and 2L/3."
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${TMP}/pcc_a4.hdf5" --n 32 \
         --box "${BOX}" --swallowtail >/dev/null
 "${BIN}" "${TMP}/pcc_a4.hdf5" "${TMP}/pcc_a4" --grid 48 --periodic --field density \
-         --MpcUnit 1 --max-concurrent 1 --ps-caustics --ps-caustic-cusps >/dev/null
+         --mpc-unit 1 --max-concurrent 1 --ps-caustics --ps-caustic-cusps >/dev/null
 "${PY}" - "${TMP}" <<'PYEOF' || py_rc=1
 import sys
 import numpy as np
@@ -320,7 +320,7 @@ echo "    of it. An umbilic needs the coincident pair to sit AT ZERO, not merely
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${TMP}/pcc_weak.hdf5" --n 32 \
         --box "${BOX}" --amplitude-factor 0.15 >/dev/null
 "${BIN}" "${TMP}/pcc_weak.hdf5" "${TMP}/pcc_weak" --grid 48 --periodic --field density \
-         --MpcUnit 1 --max-concurrent 1 --ps-caustics >/dev/null
+         --mpc-unit 1 --max-concurrent 1 --ps-caustics >/dev/null
 "${PY}" - "${TMP}" <<'PYEOF' || py_rc=1
 import sys
 import numpy as np
@@ -363,15 +363,15 @@ for geo in pan crw; do
     "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${TMP}/pcj_input_${geo}.hdf5" --n 27 --box "${BOX}" \
             "${gen[@]}" >/dev/null
     J=( "${TMP}/pcj_input_${geo}.hdf5" )
-    JO=( --grid 48 --periodic --MpcUnit 1 --ps-caustics )
+    JO=( --grid 48 --periodic --mpc-unit 1 --ps-caustics )
     rm -f "${TMP}/pcj_${geo}"_*.*
-    "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_s"   "${JO[@]}" --max-concurrent 1 --field density density_a --avg-subsamples 3 >/dev/null
-    "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_a3"  "${JO[@]}" --max-concurrent 1 --field density_a --avg-subsamples 3 >/dev/null
+    "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_s"   "${JO[@]}" --max-concurrent 1 --field density density_a --subsamples 3 >/dev/null
+    "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_a3"  "${JO[@]}" --max-concurrent 1 --field density_a --subsamples 3 >/dev/null
     "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_ex"  "${JO[@]}" --max-concurrent 1 --field density --exact-average >/dev/null
-    "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_par" "${JO[@]}" --field density density_a --avg-subsamples 3 --partition 2 2 2 >/dev/null
+    "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_par" "${JO[@]}" --field density density_a --subsamples 3 --partition 2 2 2 >/dev/null
     if [ "${GPUJ}" = 1 ]; then
         "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_gpu" "${JO[@]}" --max-concurrent 1 --field density density_a \
-                 --avg-subsamples 3 --gpu >/dev/null
+                 --subsamples 3 --gpu >/dev/null
     fi
 done
 "${PY}" - "${TMP}" "${ROOT}/python" "${GPUJ}" <<'PYEOF' || py_rc=1
@@ -459,7 +459,7 @@ sys.exit(0 if fr <= 1e-4 else 1)
 EOF2
 }
 if [ -d o_ps ] && [ ! -f o_ps/.gpu_mode_off ]; then   # any GPU backend stamp (metal / cuda / hip)
-    msg="$("${BIN}" "${SNAP}" "${OUT}_gpu" --grid "${GRID}" --periodic --field density --MpcUnit 1 \
+    msg="$("${BIN}" "${SNAP}" "${OUT}_gpu" --grid "${GRID}" --periodic --field density --mpc-unit 1 \
             --max-concurrent 1 --ps-caustics --gpu 2>&1 || true)"
     if gpu_matches caustic; then
         echo "   PASS  GPU '.caustic' matches the CPU (byte for byte; the double build to 1e-4 of the cells)"
@@ -475,7 +475,7 @@ if [ -d o_ps ] && [ ! -f o_ps/.gpu_mode_off ]; then   # any GPU backend stamp (m
     fi
     # --ps-linear-deposit needs 'dens' for real densities, so the mask cannot ride along: that
     # combination must fall back to the parity-only fold flag AND say so.
-    lin="$("${BIN}" "${SNAP}" "${OUT}_gpulin" --grid "${GRID}" --periodic --field density --MpcUnit 1 \
+    lin="$("${BIN}" "${SNAP}" "${OUT}_gpulin" --grid "${GRID}" --periodic --field density --mpc-unit 1 \
             --max-concurrent 1 --ps-caustics --ps-linear-deposit --gpu 2>&1 || true)"
     if grep -q "ps-linear-deposit" <<< "${lin}"; then
         echo "   PASS  --ps-caustics --ps-linear-deposit --gpu warns that the stratification is CPU-only"

@@ -20,8 +20,8 @@ from results import canonical_flag as _canonical_flag   # a binary's older optio
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-_SEVEN = ["density_a", "velocity_a", "gradient_a", "divergence_a", "shear_a", "vorticity_a",
-          "dispersion_a"]
+# the production fields: the drivers' default (runspec.DEFAULT_FIELDS; tests/py_gui_runspec_test.py checks it)
+_PRODUCTION = ["density_a", "velocity_a", "divergence_a", "shear_a"]
 
 # name -> (one-line description, settings). The settings are RunSpec / CustomSpec fields; a
 # preset leaves every field it does not name as it was. 'slice_plane': "largest" = the largest
@@ -33,13 +33,14 @@ BUILTIN_PRESETS: dict[str, tuple[str, dict]] = {
                    {"grid": 128, "nsub": 1, "deposit": "sampled", "fields": ["density_a", "velocity_a"],
                     "vertex_mass": True, "volume_weighted": True, "caustics": False,
                     "caustic_cusps": False, "slice_plane": ""}),
-    "Standard": ("512³ grid, the seven production fields with the literature-standard weighting",
-                 {"grid": 512, "nsub": 3, "deposit": "sampled", "deposit_dtfe": "exact", "fields": list(_SEVEN),
+    "Standard": ("512³ grid, the production fields (density, velocity, divergence, shear) with the "
+                 "literature-standard weighting",
+                 {"grid": 512, "nsub": 3, "deposit": "sampled", "deposit_dtfe": "exact", "fields": list(_PRODUCTION),
                   "vertex_mass": True, "volume_weighted": True, "caustics": False,
                   "caustic_cusps": False, "slice_plane": ""}),
     "Publication": ("Standard + caustic stratification + a hi-res point-evaluated slice (the "
                     "largest image plane of the simulation) for figures",
-                    {"grid": 512, "nsub": 3, "deposit": "sampled", "deposit_dtfe": "exact", "fields": list(_SEVEN),
+                    {"grid": 512, "nsub": 3, "deposit": "sampled", "deposit_dtfe": "exact", "fields": list(_PRODUCTION),
                      "vertex_mass": True, "volume_weighted": True, "caustics": True,
                      "caustic_cusps": False, "slice_plane": "largest", "slice_vel_grad": True}),
     "Exact deposit": ("256³ grid with the exact tetrahedron-cell clipping instead of sampling: "
@@ -104,23 +105,23 @@ OPTION_TEXT = {
     "linear_deposit":  ("Linear density inside each tetrahedron (excludes volume weighting)",
                         "--ps-linear-deposit"),
     "sample_points":   ("Also evaluate the fields at these points", "--sample-points"),
-    "window":          ("Deposit only this window of the grid", "--ps-window"),
+    "window":          ("Deposit only this window of the grid", "--grid-window"),
     "halo_release":    ("Release halo interiors above this density (rho/rho_bar; off = never)", "--ps-halo-release"),
     "stream_density":  ("Each stream's density at a point", "--ps-stream-density"),
-    "per_stream":      ("The point values stream by stream (ragged files)", "--per-stream"),
-    "per_stream_ids":  ("... with each stream's tetrahedron particle IDs", "--per-stream-ids"),
+    "per_stream":      ("The point values stream by stream (ragged files)", "--ps-per-stream"),
+    "per_stream_ids":  ("... with each stream's tetrahedron particle IDs", "--ps-per-stream-ids"),
     "slice_vel_grad":  ("Velocity gradient at each slice point (divergence, shear, vorticity maps)",
                         "--pts-vel-grad"),
-    "pts_conventions": ("Plane conventions", "--pts-conventions"),     # the image plane's estimators
+    "pts_conventions": ("Plane conventions", "--ps-point-conventions"),     # the image plane's estimators
     "exact":           ("Exact: analytic tetrahedron-cell clipping (noise-free; best on the CPU)", "--exact-average"),
     "parallel_triangulation": ("Parallel triangulation (faster; repeats differ at float rounding)",
                                "--parallel-triangulation"),
     "ordered_merge":   ("Merge the partitions in index order (bit-identical repeats; the default)",
-                        "--ordered-merge"),
+                        "--ps-merge"),
     "alpha_shape":     ("Alpha shape: drop Lagrangian tetrahedra wider than this many mean particle spacings "
                         "(0 keeps the whole convex hull)", "--ps-alpha-shape"),
-    "sampled":         ("Sampled: nSub³ points per cell (fast, the default)", "--avg-subsamples"),
-    "sampled_dtfe":    ("Sampled: the Monte-Carlo mean over points in each cell (faster)", "--samples"),
+    "sampled":         ("Sampled: nSub³ points per cell (fast, the default)", "--subsamples"),
+    "sampled_dtfe":    ("Sampled: the Monte-Carlo mean over points in each cell (faster)", "--subsamples"),
     "exact_dtfe":      ("Exact: each cell the exact average of the interpolated field (noise-free; the default, "
                         "best on the GPU)", "--exact-average"),
     "periodic":        ("The box is periodic (a cosmological simulation)", "--periodic"),
@@ -149,7 +150,7 @@ LABELS = {
     "preset": "Start from a preset",
     "estimator": "Estimator",
     "estimator_grid": "Estimator and grid",     # Grids: the estimator choice, then the grid and its deposit
-    "grid_deposit": "Grid and deposit",         # Custom snapshot and Pipeline (their estimator is chosen elsewhere)
+    "grid_deposit": "Grid and cell average",    # Custom snapshot and Pipeline (their estimator is chosen elsewhere)
     "fields": "Fields",
     "ps_options": "Phase-space options",
     "slice": "Hi-res slice (point evaluation)",
@@ -219,7 +220,7 @@ def flag_help(binary: str = "PS-DTFE") -> dict[str, str]:
     """The binary's '--full-help', parsed (cached per binary and modification time); {} when the
     binary is not built. A binary built before the option names were unified knows only '--full_help' (and lists
     '--ps-gpu', '--ps-exact-deposit' and '--ps-no-overlap' as its own): asked that way when '--full-help' prints
-    nothing, its old names read as the canonical ones (results.canonical_flag)."""
+    nothing, its old names read as the canonical ones too (results.canonical_flag)."""
     exe = REPO_ROOT / binary
     try:
         key = f"{exe}:{exe.stat().st_mtime_ns}"
@@ -235,7 +236,11 @@ def flag_help(binary: str = "PS-DTFE") -> dict[str, str]:
                     break
         except (OSError, subprocess.TimeoutExpired):
             parsed = {}
-        _HELP_CACHE[key] = {_canonical_flag(k): v for k, v in parsed.items()}
+        # each entry under the binary's own name AND its canonical one (results.canonical_flag, the readers' permanent
+        # table): a launcher that emits an older name still finds it, and so does a reader of the new one
+        _HELP_CACHE[key] = dict(parsed)
+        for k, v in parsed.items():
+            _HELP_CACHE[key].setdefault(_canonical_flag(k), v)
     return _HELP_CACHE[key]
 
 

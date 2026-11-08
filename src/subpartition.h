@@ -130,7 +130,7 @@ void findParticlesInBoxLagrangianPeriodic(std::vector<Particle_data> &p,
    near-degenerate in every cube, and that offset flips some of its choices: the tetrahedra above the seam
    are not the translates of those below it, so the tiles of the two frames overlap or leave gaps -- whole
    tetrahedra deposited twice or never, and under --ps-vertex-mass a particle whose copies have different
-   degrees deposits more or less than its weight (measured on synthetic periodic boxes by PS_MASS_AUDIT=2,
+   degrees deposits more or less than its weight (measured on synthetic periodic boxes by DTFE_MASS_AUDIT=2,
    tests/ps_periodic_seam_check.sh). No ownership rule alone removes that (the min-particle-ID vertex instead
    of the centroid leaves holes and doubles too): the tessellations differ, not just the test.
 
@@ -143,7 +143,7 @@ void findParticlesInBoxLagrangianPeriodic(std::vector<Particle_data> &p,
    periodic one, and the centroid ownership tiles it exactly (psFilterCell's relative centroid test). The seam
    decides only WHICH copy of a seam tetrahedron deposits it (not its geometry or its keep/drop decision) and
    the partition boundaries, which tile [s - L, s). When no such s exists (a padding above ~L/4 -- tiny test
-   boxes, '--ps-lag-padding 0' on one partition -- or a box whose coordinates do not allow exact shifts), the
+   boxes, '--ps-lagrangian-padding 0' on one partition -- or a box whose coordinates do not allow exact shifts), the
    axis keeps the seam s = lagBox_hi. */
 
 // The granularity of a Real: the ulp of the binade of x (x > 0), as a double.
@@ -384,7 +384,7 @@ void findParticlesInBox(std::vector<Particle_data> &p,
     message << "Finding the particles that reside in the padded box " << box.print() << " ... " << MESSAGE::Flush;
     // reserve ~130% of the average number of particles in the given volume -- a hint only, so CAPPED at
     // p.size(): DTFE_parallel's threads call this after updateFullBox(region), so 'fullBox' is the user
-    // region there, not the data box, and a thin --regionMpc (1 x 1 x 0.002 Mpc, the exact-zoom shape)
+    // region there, not the data box, and a thin --region-mpc (1 x 1 x 0.002 Mpc, the exact-zoom shape)
     // makes the padded/region volume ratio ~5e6 = a multi-TB reserve. macOS overcommits it (untouched
     // pages), Linux refuses it with std::bad_alloc. '!(est < cap)' also catches a NaN/inf
     // from a zero-volume region, and the double is clamped BEFORE the size_t conversion (UB if too big).

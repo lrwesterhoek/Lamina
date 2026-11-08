@@ -34,7 +34,7 @@ Standard DTFE or a --prefix adds '_dtfe' / '_<prefix>' to every name, --sample d
 '_overlaps', an R_v definition other than 'crossing' '_rv<definition>'.
 
     DTFE_SIM=TNG100-3-Dark python3 plot/plot_void_profile_evolution.py --sim TNG100-3-Dark
-    DTFE_SIM=TNG100-3-Dark python3 plot/plot_void_profile_evolution.py --sim TNG100-3-Dark --replot --rv-range 2,4
+    DTFE_SIM=TNG100-3-Dark python3 plot/plot_void_profile_evolution.py --sim TNG100-3-Dark --replot --rv-range 2 4
 """
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
@@ -49,7 +49,7 @@ import matplotlib.pyplot as plt
 
 import config
 from dtfelib import make_parser, use_data_root, require_data_root, pipeline, profiles, catalog, snapshot_ladder
-from dtfelib import add_snaps_arg, add_out_arg, add_rv_definition_arg
+from dtfelib import add_snaps_arg, add_out_arg, add_rv_definition_arg, add_list_arg
 from dtfelib import figures as style
 from dtfelib import fields as dtfe
 
@@ -345,13 +345,11 @@ def write_tables(base: Path, meta: dict, rows: list, ev: dict) -> None:
     base.with_suffix(".txt").write_text("\n".join(lines) + "\n")
 
 
-def _floats(text: str, what: str) -> list:
-    try:
-        vals = [float(v) for v in text.split(",") if v.strip()]
-    except ValueError:
-        raise SystemExit(f"{what} must be comma-separated numbers, got {text!r}")
+def _floats(vals, what: str) -> list:
+    """The numbers of a list option (add_list_arg made them floats), refused unless at least two, increasing."""
+    vals = [float(v) for v in vals]
     if len(vals) < 2 or any(b <= a for a, b in zip(vals, vals[1:])):
-        raise SystemExit(f"{what} must be at least two increasing numbers, got {text!r}")
+        raise SystemExit(f"{what} must be at least two increasing numbers, got {' '.join(f'{v:g}' for v in vals)}")
     return vals
 
 
@@ -366,11 +364,11 @@ def main(argv=None):
     add_rv_definition_arg(parser, DEFINITIONS,
                           "the void radius: crossing (first up-crossing of the mean, default), delta08 (enclosed "
                           "contrast reaches -0.8) or ridge (the compensation ridge); one the catalogue lacks falls "
-                          "back to crossing", spelling="--rv-definition")
-    parser.add_argument("--rv-range", default=",".join(f"{v:g}" for v in DEFAULT_RV_RANGE),
-                        help="the overlay's R_v bin in smoothing lengths, lo,hi (default 2.5,5)")
-    parser.add_argument("--edges", default=None,
-                        help="R_v bin edges of the fits in Mpc, comma-separated (default 0, 2.5, 3.5, 5 sigma and L/6)")
+                          "back to crossing")
+    add_list_arg(parser, "--rv-range", kind=float, default=list(DEFAULT_RV_RANGE), metavar=("LO", "HI"), count=2,
+                 help="the overlay's R_v bin in smoothing lengths, lo hi (default 2.5 5)")
+    add_list_arg(parser, "--edges", kind=float, default=None, metavar="MPC",
+                 help="R_v bin edges of the fits in Mpc, space-separated (default 0, 2.5, 3.5, 5 sigma and L/6)")
     parser.add_argument("--points", type=int, default=profiles.DEFAULT_M, help="points per shell")
     parser.add_argument("--n-boot", type=int, default=200, help="bootstrap resamples for the bands")
     parser.add_argument("--min-count", type=int, default=5, help="fewest voids a stack or a fit needs")

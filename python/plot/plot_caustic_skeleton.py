@@ -4,7 +4,7 @@ For every snapshot with a caustic_class grid: dtfelib.skeleton's summary (the ex
 volume and mass fractions, the fold / cusp / swallowtail / umbilic indicator fractions, and per cumulative
 class -- sheet k >= 1, line k >= 2, node k = 3 -- the periodic components: count, the largest one's share,
 the top sizes) as JSON + text, and a figure: the class map of the middle slice (k = 0 .. 3 with the fold
-outlined), the component size distributions, and -- with --voids, from the pipeline's void catalogue --
+outlined), the component size distributions, and -- with --per-void, from the pipeline's void catalogue --
 the fold fraction of each distinct void's shells (--shells, default 0.8-1.2 R_v: around the wall, R_v being the
 measured void radius; --radius r_eff for the ellipsoid's, ~1.75 R_v, with 1.0-1.3) and its distance to the nearest
 sheet in units of that radius (searched within --cutout cells, default 10 smoothing lengths). The cusp and swallowtail rows are '--' unless the grid carries bit 7/8 (only --ps-caustic-cusps on
@@ -18,10 +18,10 @@ every fold thinner than the sampling (TNG100-3-Dark z=1: 21.0% of the cells agai
 
 Names: caustic_skeleton_z<z>.* for the defaults; a non-default option adds its tag, so a rerun with
 another one never overwrites them: '_<prefix>' (not ps_output), '_c6' / '_c18' (--connectivity), and with
---voids '_reff' (--radius r_eff), '_shells<a>-<b>-...' (not the radius's default shells), '_overlaps'
-(--keep-overlaps), '_cut<N>' (--cutout) and the smoothing tag. A run without --voids removes the set's _voids.npz.
+--per-void '_reff' (--radius r_eff), '_shells<a>-<b>-...' (not the radius's default shells), '_overlaps'
+(--keep-overlaps), '_cut<N>' (--cutout) and the smoothing tag. A run without --per-void removes the set's _voids.npz.
 
-The control: with --voids the same metrics are measured in --null-draws (default 50) realisations of
+The control: with --per-void the same metrics are measured in --null-draws (default 50) realisations of
 random spheres, one per void at a random cell with that void's radius, and the voids' median fold / sheet shell
 fraction and wall distance are reported against the null's mean +- std with a z-score (JSON 'null', the text, and the
 grey / orange bands of the void panel); --min-component N / --min-component-mass F keep only the sheet components of
@@ -31,9 +31,9 @@ percolates through the voids themselves). Their non-default values tag the set: 
 '_minm<F>', '_dens<RHO>'. --all-caustic runs every snapshot
 that has a caustic_class grid under the prefix.
 
-    python3 plot/plot_caustic_skeleton.py --sim TNG100-3-Dark --snap 99 --voids
+    python3 plot/plot_caustic_skeleton.py --sim TNG100-3-Dark --snap 99 --per-void
     python3 plot/plot_caustic_skeleton.py --sim TNG50-4-Dark --snaps 99 50 --connectivity 6
-    python3 plot/plot_caustic_skeleton.py --sim TNG100-3-Dark --prefix ps_caustic --all-caustic --voids --min-component 1000
+    python3 plot/plot_caustic_skeleton.py --sim TNG100-3-Dark --prefix ps_caustic --all-caustic --per-void --min-component 1000
 """
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
@@ -48,7 +48,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 
 from dtfelib import make_parser, FieldSet, snapdir_path, snapshot_ladder, skeleton as sk, catalog, pipeline
-from dtfelib import add_snaps_arg, add_out_arg
+from dtfelib import add_snaps_arg, add_out_arg, deprecated_alias
 from dtfelib import figures as style
 
 OUTPUT_DIR = Path(config.figures_path("caustic_skeleton"))
@@ -117,7 +117,7 @@ def _median_or_none(a):
 
 def void_block(cc, cat, cell_c, n_grid, cutout, shells=(1.0, 1.1, 1.2, 1.3), radius="r_eff", distinct=False,
                masks=None):
-    """--voids: per well-resolved void of the catalogue with that radius ('r_eff', or 'r_v' the measured one; only
+    """--per-void: per well-resolved void of the catalogue with that radius ('r_eff', or 'r_v' the measured one; only
     the distinct ones with distinct=True), the fold / sheet fractions of its shells (x the radius) and the distance
     to the nearest sheet (cells, and in units of the radius; NaN + bounded beyond the cut-out, which is at most half
     the grid). The keys keep their names ('dist_reff', 'r_eff_cells') whatever the radius: 'radius' says which.
@@ -209,7 +209,7 @@ def caustic_snapshots(sim, data_root, method, prefix):
 def skeleton_tag(args, prefix, default_shells):
     """The file-name tag of the non-default options, so that another --connectivity, --prefix, --radius, --shells,
     --keep-overlaps or --cutout never overwrites the default set. The void options count
-    only with --voids."""
+    only with --per-void."""
     tag = "" if prefix.rstrip(".") == "ps_output" else f"_{prefix.rstrip('.')}"
     tag += "" if args.connectivity == 26 else f"_c{args.connectivity}"
     if args.voids:
@@ -232,7 +232,9 @@ def main():
     parser = make_parser("The caustic skeleton (walls, filaments, nodes) from the caustic_class grid of a --ps-caustics run.")
     add_snaps_arg(parser)
     parser.add_argument("--connectivity", type=int, choices=(6, 18, 26), default=26)
-    parser.add_argument("--voids", action="store_true", help="per void: the shell's fold fraction and the nearest sheet (pipeline catalogue)")
+    parser.add_argument("--per-void", dest="voids", action="store_true",
+                        help="per void: the shell's fold fraction and the nearest sheet (pipeline catalogue)")
+    deprecated_alias(parser, "--voids", "--per-void")
     parser.add_argument("--cutout", type=int, default=None,
                         help="half-width in cells of the cut-out for the wall distance (default 10 smoothing lengths: "
                              "R_eff is 5-7 sigma, so the old 32 cells left almost every void 'beyond the cut-out')")
@@ -243,20 +245,20 @@ def main():
                         help="the shells' radii in units of --radius for the fold / sheet fractions, comma-separated "
                              "(default 0.8-1.2 R_v around the wall, or 1.0-1.3 R_eff)")
     parser.add_argument("--keep-overlaps", action="store_true",
-                        help="--voids: every resolved void, not only the distinct ones (none whose centre lies inside "
+                        help="--per-void: every resolved void, not only the distinct ones (none whose centre lies inside "
                              "a deeper void's min(R_v, R_eff))")
     parser.add_argument("--null-draws", type=int, default=NULL_DRAWS,
-                        help=f"--voids: realisations of the random-sphere null (one sphere per void, at a random cell, "
+                        help=f"--per-void: realisations of the random-sphere null (one sphere per void, at a random cell, "
                              f"with that void's radius); the voids' medians against it as z-scores (default {NULL_DRAWS}; "
                              "0: no null)")
     parser.add_argument("--null-seed", type=int, default=0, help="the null's random seed (default 0)")
     parser.add_argument("--min-component", type=int, default=0, metavar="CELLS",
-                        help="--voids: take the shells and the wall distance on sheet components of at least this many "
+                        help="--per-void: take the shells and the wall distance on sheet components of at least this many "
                              "cells only (default 0: every sheet cell)")
     parser.add_argument("--min-component-mass", type=float, default=0.0, metavar="FRACTION",
-                        help="--voids: and of at least this fraction of the box's mass (default 0)")
+                        help="--per-void: and of at least this fraction of the box's mass (default 0)")
     parser.add_argument("--sheet-min-density", type=float, default=0.0, metavar="RHO",
-                        help="--voids: count only the sheet cells denser than RHO times the mean (default 0: every one); "
+                        help="--per-void: count only the sheet cells denser than RHO times the mean (default 0: every one); "
                              "the k >= 1 sheet percolates through the voids, its dense part is the walls")
     parser.add_argument("--all-caustic", action="store_true",
                         help="every snapshot of the simulation that has a caustic_class grid under this prefix "
@@ -265,7 +267,7 @@ def main():
     add_out_arg(parser, f"{OUTPUT_DIR}/<sim>")
     args = parser.parse_args()
     style.apply()
-    pipeline.apply_smoothing_args(args, "caustic-skeleton")    # --smooth / --smooth-mpc: the --voids catalogue's
+    pipeline.apply_smoothing_args(args, "caustic-skeleton")    # --smooth / --smooth-mpc: the --per-void catalogue's
     default_shells = "0.8,0.9,1.0,1.1,1.2" if args.radius == "r_v" else "1.0,1.1,1.2,1.3"
     if args.shells is None:
         args.shells = default_shells
@@ -342,7 +344,7 @@ def main():
         Path(f"{base}.txt").write_text(summary_text(summ, title))
         if voids is not None:
             np.savez_compressed(f"{base}_voids.npz", **voids)
-        else:                                       # no --voids, or they failed: an earlier run's file is not this set's
+        else:                                       # no --per-void, or they failed: an earlier run's file is not this set's
             Path(f"{base}_voids.npz").unlink(missing_ok=True)
         plot_skeleton(cc, summ, fold, voids, title, Path(f"{base}.png"))
         print(summary_text(summ, title))

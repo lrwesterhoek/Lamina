@@ -21,7 +21,7 @@ Units mirror FieldSet.load / PointPlane: density is rho/rho_bar; velocities (and
 gradients) are converted to peculiar km/s with sqrt(a), the dispersion (a velocity variance)
 with a, where a is the snapshot's header 'Time' (no-op at z=0; pass peculiar=False for the
 raw Gadget units). Point coordinates are in the box coordinate system the binary uses, i.e.
-Mpc after the '--MpcUnit' conversion (the binary's default is 1000, for ckpc/h snapshots).
+Mpc after the '--mpc-unit' conversion (the binary's default is 1000, for ckpc/h snapshots).
 
 Session cost: the build (the same as one batch run's triangulation + vertex densities) is
 paid once; each call then costs roughly the cheap per-tetrahedron occupancy test over the
@@ -52,7 +52,7 @@ __all__ = ["Estimator", "PointFields", "find_binary", "STANDARD_PADDING"]
 # tests/point_exact_serve_check.sh P2). 15 is scripts/run_dtfe.sh's default, complete (no
 # '*.badGridPoints*' file) on the z = 0 grids of TNG50/100/300-3-Dark, where 10 is not. The
 # phase-space server pads in Lagrangian space by its own rules and keeps the binary's default. The launcher's
-# standard exact zoom (gui/explore.py) passes the same value to its '--regionMpc' run.
+# standard exact zoom (gui/explore.py) passes the same value to its '--region-mpc' run.
 STANDARD_PADDING = 15.0
 
 _HELLO = b"DTFESRV2"
@@ -154,19 +154,20 @@ class Estimator:
     phase_space        True: PS-DTFE (multi-stream fields; needs Lagrangian positions, from the
                        snapshot's 'InitialCoordinates' or lagrangian_input). False: standard DTFE.
     periodic           periodic box (default True).
-    mpc_unit           '--MpcUnit' (length of 1 Mpc in input units); None keeps the binary's
+    mpc_unit           '--mpc-unit' (length of 1 Mpc in input units); None keeps the binary's
                        default (1000, for ckpc/h snapshots).
     per_stream, per_stream_ids, density_gradient, velocity_gradient, caustics
-                       the matching '--sample-points' outputs (--per-stream, --per-stream-ids,
+                       the matching '--sample-points' outputs (--ps-per-stream, --ps-per-stream-ids,
                        --pts-den-grad, --pts-vel-grad, --ps-caustics).
-    stream_density     'dtfe' (default) or 'geometric' ('--ps-stream-density').
+    stream_density     'dtfe' (default; the binary's '--ps-stream-density linear', also accepted here) or
+                       'geometric' ('--ps-stream-density').
     scalars            interpolate the particles' scalar value too ('--pts-scalar'); needs a
                        scalar source, normally scalar_dataset.
     scalar_dataset     per-particle HDF5 dataset read as that scalar ('--scalar-dataset', e.g.
                        'Potential'); implies scalars=True.
     lagrangian_positions
                        PS-DTFE: also return each stream's Lagrangian coordinate q(x)
-                       ('--pts-lagrangian'; implies per_stream).
+                       ('--ps-per-stream-lagrangian'; implies per_stream).
     tessellation_cache directory for '--tessellation-cache' (a LOCAL, non-synced path): the
                        first session writes the tessellation, later ones load it instantly.
     partition          int or (nx, ny, nz): serve a COMPOSITE of partition tessellations
@@ -180,7 +181,7 @@ class Estimator:
                        (FieldSet convention); False returns the binary's raw units.
     padding            '--padding' in mean particle spacings. None (default): STANDARD_PADDING (15) for the
                        standard estimator -- the binary's own 5 gives wrong values near the box faces --
-                       and the binary's default for PS-DTFE. A '--padding'/'--paddingMpc' in 'options' wins.
+                       and the binary's default for PS-DTFE. A '--padding'/'--padding-mpc' in 'options' wins.
     options            extra command-line arguments, passed through verbatim.
     binary             explicit path to the executable (default: find_binary()).
     dim                2 for a 2D snapshot and build (PS-DTFE-2d / DTFE-2d): points are (N, 2), every
@@ -222,24 +223,24 @@ class Estimator:
             raise FileNotFoundError(f"snapshot not found: {self.snapshot}")
         self.phase_space = bool(phase_space)
         self.binary = Path(binary) if binary else find_binary(self.phase_space, precision, self.dim)
-        if stream_density not in ("dtfe", "geometric"):
-            raise ValueError("stream_density must be 'dtfe' or 'geometric'")
+        if stream_density not in ("dtfe", "linear", "geometric"):
+            raise ValueError("stream_density must be 'dtfe' (= 'linear') or 'geometric'")
         if lagrangian_positions and not self.phase_space:
             raise ValueError("lagrangian_positions needs the phase-space estimator (phase_space=True)")
 
         self._workdir = Path(tempfile.mkdtemp(prefix="dtfe-serve-"))
         cmd = [str(self.binary), str(self.snapshot), str(self._workdir / "serve"),
-               "--serve", "--input", str(int(input_type)), "--verbose", str(int(verbose))]
+               "--serve", "--input-format", str(int(input_type)), "--verbose", str(int(verbose))]
         if periodic:
             cmd.append("--periodic")
         if mpc_unit is not None:
-            cmd += ["--MpcUnit", repr(float(mpc_unit))]
+            cmd += ["--mpc-unit", repr(float(mpc_unit))]
         if lagrangian_input is not None:
-            cmd += ["--lagrangianInput", str(lagrangian_input)]
+            cmd += ["--ps-lagrangian-input", str(lagrangian_input)]
         if per_stream:
-            cmd.append("--per-stream")
+            cmd.append("--ps-per-stream")
         if per_stream_ids:
-            cmd.append("--per-stream-ids")
+            cmd.append("--ps-per-stream-ids")
         if density_gradient:
             cmd.append("--pts-den-grad")
         if velocity_gradient:
@@ -247,14 +248,14 @@ class Estimator:
         if caustics:
             cmd.append("--ps-caustics")
         if self.phase_space:
-            cmd += ["--ps-stream-density", stream_density]
+            cmd += ["--ps-stream-density", "linear" if stream_density == "dtfe" else stream_density]
         if scalar_dataset:
             cmd += ["--scalar-dataset", str(scalar_dataset)]
             scalars = True
         if scalars:
             cmd.append("--pts-scalar")
         if lagrangian_positions:
-            cmd.append("--pts-lagrangian")
+            cmd.append("--ps-per-stream-lagrangian")
         if tessellation_cache is not None:
             cmd += ["--tessellation-cache", str(tessellation_cache)]
         if partition is not None:
@@ -272,7 +273,7 @@ class Estimator:
         options = [str(o) for o in options]
         if padding is None and not self.phase_space:
             padding = STANDARD_PADDING
-        if padding is not None and not any(o in ("--padding", "--paddingMpc") for o in options):
+        if padding is not None and not any(o in ("--padding", "--padding-mpc", "--paddingMpc") for o in options):
             cmd += ["--padding", f"{float(padding):g}"]
         cmd += options
         self.command = cmd

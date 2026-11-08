@@ -13,6 +13,7 @@ from PySide6.QtCore import QProcess, QProcessEnvironment
 import explore as _ex
 import grids as G
 import runspec as rs
+from dtfelib.cli import SMOOTH_MPC_ENV_NAMES
 from app_widgets import tip_auto
 
 
@@ -131,18 +132,20 @@ class VoidsMixin:
         env = QProcessEnvironment.systemEnvironment()
         env.insert("DTFE_SIM", o.sim)
         env.insert("DTFE_DATA_ROOT", str(root))
-        env.remove("DTFE_SIGMA_MPC")                # the smoothing is the --sigma-mpc below, never the shell's
+        for name in SMOOTH_MPC_ENV_NAMES:           # the smoothing is the --smooth-mpc below, never the shell's
+            env.remove(name)
         env.remove("CLICOLOR_FORCE")
         proc.setProcessEnvironment(env)
         proc.finished.connect(lambda code, _status, k=key, pr=proc: self._voids_done(k, pr, code))
         proc.errorOccurred.connect(lambda err, k=key, pr=proc: self._voids_start_failed(k, pr, err))
         self._void_proc, self._void_key, self._void_out = proc, key, o
         method = "ps" if G.estimator_label(o) == "PS-DTFE" else "dtfe"
-        args = [str(_ex.VOID_TOOL), "--sim", o.sim, "--snap", str(int(o.snap)), "--method", method, "--data-root", str(root)]
+        args = [str(_ex.VOID_TOOL), "--sim", o.sim, "--snap", str(int(o.snap)), "--estimator", method,
+                "--data-root", str(root)]
         if o.prefix != ("ps_output" if method == "ps" else "output"):
             args += ["--prefix", o.prefix]          # the production set: no prefix, so the analysis scripts' cache is shared
         if key[-1] > 0:
-            args += ["--sigma-mpc", repr(key[-1])]  # a common physical sigma: its own cache namespace
+            args += ["--smooth-mpc", repr(key[-1])]  # a common physical sigma: its own cache namespace
         proc.start(rs.PYTHON, args + (["--cache-dir", str(_ex.VOID_CACHE_DIR)] if _ex.VOID_CACHE_DIR else []))
         self.status.emit(f"finding the voids of {o.title} (the first time per snapshot: about a minute)")
 

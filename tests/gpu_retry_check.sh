@@ -10,7 +10,7 @@
 #   R1  one-thread-per-tet deposit, an 'innocent victim' fault at buffer 3: the run stays on the GPU, logs
 #       the resume from the checkpoint at the same pace, its '.a_den' (the exact fixed-point mass grid) is
 #       byte-identical to a run without the fault, '.a_streams' identical, and so is '.a_vel': the moment
-#       grids are exact fixed-point sums too. PS_GPU_FLOAT_MOMENTS=1 in the environment selects the float sums
+#       grids are exact fixed-point sums too. DTFE_GPU_FLOAT_MOMENTS=1 in the environment selects the float sums
 #       (4e-7 apart run to run) and a tolerance of 1e-6 of the peak
 #   R2  --exact-average (the items passes + leftovers), an 'oom' fault: same assertions, and the pace
 #       escalates (shorter buffers) as a resource error should; its '.a_streams' (the exact multiplicity) is a
@@ -59,7 +59,7 @@ run() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL: $(basenam
 # interval are fixed; the fault at buffer 3 then lands after the checkpoint at buffer 2
 export PS_GPU_CHUNK=2000 DTFE_GPU_CHECKPOINT_CHUNKS=2
 unset DTFE_GPU_FAULT_AT
-C=(--grid 32 --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a --avg-subsamples 2 --gpu)
+C=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a --subsamples 2 --gpu)
 P=(--partition 2 2 2 --max-concurrent 1)
 echo ">> R1: one-thread-per-tet deposit, without and with an innocent-victim fault at buffer 3"
 run "$TMP/t0" "${PS_BIN}" "$SNAP" "$TMP/t0" "${C[@]}"
@@ -106,9 +106,9 @@ for tag, ref, run, what, cause, pace in (
     x, y = (tmp / f"{ref}.a_den").read_bytes(), (tmp / f"{run}.a_den").read_bytes()
     check(tag, len(x) > 0 and x == y, f"{what}: '.a_den' byte-identical to the run without the fault ({len(x)} bytes)")
     # the stream count is an integer atomic, and the velocity moment and the exact deposit's
-    # multiplicity are exact fixed-point sums: all identical (the float sums of PS_GPU_FLOAT_MOMENTS=1
+    # multiplicity are exact fixed-point sums: all identical (the float sums of DTFE_GPU_FLOAT_MOMENTS=1
     # only to 1e-6 of the peak -- they differ run to run by ~3e-7)
-    floatMoments = any(_os.environ.get(k, "0") not in ("", "0") for k in ("PS_GPU_FLOAT_MOMENTS",))
+    floatMoments = any(_os.environ.get(k, "0") not in ("", "0") for k in ("DTFE_GPU_FLOAT_MOMENTS", "PS_GPU_FLOAT_MOMENTS"))   # (the old name: deprecated, still read)
     for ext, exact in (("a_streams", not (floatMoments and tag == "R2")), ("a_vel", not floatMoments)):
         a, b = rd(ref, ext), rd(run, ext)
         if exact:

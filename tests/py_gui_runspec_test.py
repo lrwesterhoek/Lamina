@@ -120,18 +120,18 @@ def _run_command(tmp, sim):
           dte.command()[0] == [str(rs.DTFE_SCRIPT), "-s", "TNG100-3-Dark", "-g", "512", "-e", "4"]
           and rs.job_summary("grids", dte).endswith(", exact"), str(dte.command()[0]))
     # run_dtfe.sh's default is the exact average, and -e only switches it on: the job pins the knob
-    check("... the cell average is pinned both ways (DTFE_EXACT=0 for 'sampled', 1 for 'exact'; the older name "
-          "DTFE_EXACT_AVERAGE the same, for one release)",
+    check("... the cell average is pinned both ways (DTFE_EXACT_AVERAGE=0 for 'sampled', 1 for 'exact'; the older "
+          "name DTFE_EXACT the same, until P6.6)",
           dt.command()[1].get("DTFE_EXACT") == "0" and dte.command()[1].get("DTFE_EXACT") == "1"
           and dt.command()[1].get("DTFE_EXACT_AVERAGE") == "0" and dte.command()[1].get("DTFE_EXACT_AVERAGE") == "1",
           f"{dt.command()[1]} {dte.command()[1]}")
     # a standard-DTFE job STARTS at the exact cell average, run_dtfe.sh's and the
     # production setting; a PS-DTFE job at the sampled deposit; a choice saved in a settings dict is kept
     dflt = rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[4], estimator="dtfe", gpu=False)
-    check("a standard-DTFE job starts at the exact cell average (-e, DTFE_EXACT=1), a PS-DTFE one at the "
+    check("a standard-DTFE job starts at the exact cell average (-e, DTFE_EXACT_AVERAGE=1), a PS-DTFE one at the "
           "sampled deposit, Grids and Custom alike; a saved choice is kept, a settings dict without one gets the "
           "estimator's own",
-          dflt.deposit == "exact" and "-e" in dflt.command()[0] and dflt.command()[1]["DTFE_EXACT"] == "1"
+          dflt.deposit == "exact" and "-e" in dflt.command()[0] and dflt.command()[1]["DTFE_EXACT_AVERAGE"] == "1"
           and rs.RunSpec().deposit == "sampled" and rs.CustomSpec().deposit == "sampled"
           and rs.CustomSpec(estimator="dtfe").deposit == "exact"
           and rs.production_deposit("dtfe") == "exact" and rs.production_deposit("ps") == "sampled"
@@ -139,13 +139,19 @@ def _run_command(tmp, sim):
           and rs.RunSpec.from_dict({"estimator": "dtfe"}).deposit == "exact"
           and rs.CustomSpec.from_dict(rs.CustomSpec(estimator="dtfe", deposit="sampled").to_dict()).deposit
           == "sampled", f"{dflt.deposit} {dflt.command()}")
+    def _presets():                      # (imported here: the module's own tests import it later)
+        import presets
+        return presets
+
     def _script_default(script, var):    # the driver's own default, read from its 'VAR="${VAR:-...}"' line
         out = subprocess.run(["bash", "-c", f'eval "$(grep -E "^{var}=" "$1" | head -1)"; printf %s "${{{var}}}"', "_",
                        str(script)], capture_output=True, text=True, env={"PATH": os.environ.get("PATH", "")})
         return out.stdout
     check("the launcher's defaults are the drivers': the field lists, the caustics, the volume weighting",
           _script_default(rs.PS_SCRIPT, "FIELDS").split() == rs.PS_DEFAULT_FIELDS
-          and _script_default(rs.DTFE_SCRIPT, "FIELDS").split() == rs.DTFE_FIELDS
+          and _script_default(rs.DTFE_SCRIPT, "FIELDS").split() == rs.DTFE_DEFAULT_FIELDS
+          and rs.PS_DEFAULT_FIELDS == rs.DTFE_DEFAULT_FIELDS == rs.dtfe_fields(rs.PS_DEFAULT_FIELDS)
+          and _presets().BUILTIN_PRESETS["Standard"][1]["fields"] == rs.DEFAULT_FIELDS
           and _script_default(rs.PS_SCRIPT, "PS_CAUSTICS") == "1" and rs.RunSpec().caustics and rs.PipelineSpec().caustics
           and _script_default(rs.PS_SCRIPT, "PS_VOLUME_WEIGHTED") == "1" and rs.RunSpec().volume_weighted
           and rs.PipelineSpec().volume_weighted and rs.RunSpec().grid == rs.PipelineSpec().grid == 512,
@@ -275,27 +281,29 @@ def _plots(tmp, sim, spec):
     for stp in every.steps():
         by.setdefault(Path(stp.argv[1]).name, []).append(stp.argv[2:])
     check("per-snapshot sets: one call per snapshot, sorted, with the common flags",
-          by["plot_PS_DTFE.py"] == [["--sim", "TNG100-3-Dark", "--snap", n, "--method", "ps", "--smooth", "1.5"]
+          by["plot_PS_DTFE.py"] == [["--sim", "TNG100-3-Dark", "--snap", n, "--estimator", "ps", "--smooth", "1.5"]
                                     for n in ("4", "99")] and len(by["plot_cosmic_web.py"]) == 2,
           str(by.get("plot_PS_DTFE.py")))
     check("the series is one call with every snapshot",
-          by["plot_DTFE.py"] == [["--sim", "TNG100-3-Dark", "--snaps", "4", "99", "--method", "ps",
+          by["plot_DTFE.py"] == [["--sim", "TNG100-3-Dark", "--snaps", "4", "99", "--estimator", "ps",
                                   "--smooth", "1.5"]], str(by["plot_DTFE.py"]))
-    check("point-eval maps: comma lists, fields de-spaced, --force, NO grid smoothing, the estimator",
-          by["plot_pointeval.py"] == [["--sims", "TNG100-3-Dark", "--snaps", "4,99", "--method", "ps", "--fields",
-                                       "density,velDiv", "--force"]], str(by["plot_pointeval.py"]))
+    check("point-eval maps: space-separated lists (the maps typed with commas too), --force, NO grid smoothing, "
+          "the estimator",
+          by["plot_pointeval.py"] == [["--sims", "TNG100-3-Dark", "--snaps", "4", "99", "--estimator", "ps", "--maps",
+                                       "density", "velDiv", "--force"]], str(by["plot_pointeval.py"]))
     pan = by["plot_pointeval_panels.py"]
-    check("panels: per snapshot, its own grid prefix, the plane, an -o under python/figures",
-          len(pan) == 2 and pan[0][:2] == ["--prefix", str(sim / "snapdir_004" / "ps_output")]
+    check("panels: per snapshot, its own output root, the plane, an -o under python/figures",
+          len(pan) == 2 and pan[0][:2] == ["--root", str(sim / "snapdir_004" / "ps_output")]
           and pan[0][pan[0].index("-o") + 1].startswith(str(rs.FIGURES_ROOT / "pointeval_panels")), str(pan))
-    check("halo tracking: explicit IDs replace --top",
-          by["plot_halo_tracking.py"][0][-3:] == ["--subhalo", "0", "17"], str(by["plot_halo_tracking.py"]))
-    check("core set: analyze.py all, zero-padded snapshots, --only",
-          by["analyze.py"] == [["all", "004", "099", "--only", "plot_DTFE.py"]], str(by["analyze.py"]))
+    check("halo tracking: from the reference snapshot (--start-snap), explicit IDs replace --n-halos",
+          by["plot_halo_tracking.py"][0][-3:] == ["--subhalos", "0", "17"]
+          and by["plot_halo_tracking.py"][0][2] == "--start-snap", str(by["plot_halo_tracking.py"]))
+    check("core set: analyze.py all, zero-padded --snaps, --only",
+          by["analyze.py"] == [["all", "--snaps", "004", "099", "--only", "plot_DTFE.py"]], str(by["analyze.py"]))
     spec_e = rs.PlotSpec.from_dict(dict(spec.to_dict(), sets=["core"], options={"core": {"mode": "export", "only": "plot_DTFE.py"}}))
     argv_e = [st.argv for st in spec_e.steps()]
     check("core set, mode 'export': analyze.py export with the snapshots and no --only",
-          [a[a.index("export"):] for a in argv_e if "export" in a] == [["export", "004", "099"]], str(argv_e))
+          [a[a.index("export"):] for a in argv_e if "export" in a] == [["export", "--snaps", "004", "099"]], str(argv_e))
     core_grids_warning()
     tick_helpers()
     run_outputs_not_inputs()
@@ -306,6 +314,8 @@ def _plots(tmp, sim, spec):
     point_window_linear(tmp)
     plane_reads()
     plot_options(tmp)
+    launcher_python_flags(tmp)
+    saved_flag_migration(tmp)
     plot_void_sets(tmp)
     plot_void_script_options(tmp)
     fixed_r_size_function(tmp)
@@ -357,7 +367,7 @@ def _download_merge(tmp):
                                           "merge snapshots 50 99", "merge group catalogues 50 99",
                                           "merge merger trees", "convert initial conditions"]
               and got[0][1] == ["-s", "TNG50-4-Dark", "50", "99"] and got[1][1][:1] == ["-c"]
-              and got[4][1] == ["-d", str(dsim), "50", "99", "--delete-chunks"]
+              and got[4][1] == ["-d", str(dsim), "--snaps", "50", "99", "--delete-chunks"]
               and all(a[-1] == "--delete-chunks" for _, a in got[4:]), str(got))
         check("no -k on any command line (the key stays in its file / env)",
               all("-k" not in st.argv for st in d.steps()))
@@ -497,7 +507,7 @@ def _memory_check(tmp):
           and have.env["PS_VOLUME_WEIGHTED"] == "1" and have.env["SCRATCH_DIR"] == str(tmp.parent), str(have.env))
     check("... and only its point count when it does not exist yet",
           need.env.get("DTFE_AUTO_PTS_N") == str(32 * 32) and "SAMPLE_POINTS" not in need.env
-          and need.env.get("DTFE_AUTO_PTS_VELGRAD") == "1", str(need.env))
+          and need.env.get("DTFE_AUTO_PTS_VEL_GRAD") == "1", str(need.env))
     check("adaptive sizes halve down to the minimum",
           rs.PipelineSpec(nu=8192).adaptive_sizes() == [8192, 4096, 2048, 1024])
     pm.adaptive = True
@@ -564,7 +574,7 @@ def estimator_per_snapshot(tmp: Path):
 
     def methods(**kw):
         spec = rs.PlotSpec(data_root=str(root), sim="BOX-1-Dark", snapshots=[99, 4], sets=["voidcat"], **kw)
-        return [st.argv[st.argv.index("--method") + 1] for st in spec.steps()]
+        return [st.argv[st.argv.index("--estimator") + 1] for st in spec.steps()]
     auto = rs.PlotSpec(data_root=str(root), sim="BOX-1-Dark", snapshots=[4, 99], sets=["voidcat"])
     lv, msg = levels(auto)
     check("void catalogue build, estimator auto: standard DTFE where only output.* grids are, PS-DTFE where "
@@ -584,9 +594,9 @@ def estimator_per_snapshot(tmp: Path):
                            options={"panels": {"plane": str(side)}}, **kw)
         st = {Path(x.argv[1]).name: x.argv for x in spec.steps()}
         pe, pa = st["plot_pointeval.py"], st["plot_pointeval_panels.py"]
-        return (pe[pe.index("--method") + 1] if "--method" in pe else "auto", pa[pa.index("--prefix") + 1],
+        return (pe[pe.index("--estimator") + 1] if "--estimator" in pe else "auto", pa[pa.index("--root") + 1],
                 any("no point-evaluated slice" in m for _, m in spec.problems()))
-    check("point-evaluated sets, estimator DTFE: plot_pointeval gets --method dtfe, the panels read output.pts_*, "
+    check("point-evaluated sets, estimator DTFE: plot_pointeval gets --estimator dtfe, the panels read output.pts_*, "
           "and the check finds the slice",
           pts(method="dtfe") == ("dtfe", str(sd / "output"), False), str(pts(method="dtfe")))
     check("... auto: the slice that is there (output.pts_* here, though PS-DTFE grids are beside it); PS-DTFE: "
@@ -666,9 +676,9 @@ def _gpu_advice_checks(tmp: Path, snap: Path):
           and adv(False, "exact", ["density_a"], 94_000_000, "ps") == []
           and adv(True, "sampled", ["density_a"], None, "ps") == [])
     check("gpu advice: standard DTFE with the GPU unticked on a fine grid is told the GPU is 1.5-2.3x faster; not at 256³",
-          adv(True, "sampled", rs.DTFE_FIELDS, 7_100_000, "dtfe", grid=512) == []
-          and adv(False, "sampled", rs.DTFE_FIELDS, 7_100_000, "dtfe", grid=256) == []
-          and len(adv(False, "sampled", rs.DTFE_FIELDS, 7_100_000, "dtfe", grid=1024)) == (1 if dt_gpu else 0))
+          adv(True, "sampled", rs.DTFE_DEFAULT_FIELDS, 7_100_000, "dtfe", grid=512) == []
+          and adv(False, "sampled", rs.DTFE_DEFAULT_FIELDS, 7_100_000, "dtfe", grid=256) == []
+          and len(adv(False, "sampled", rs.DTFE_DEFAULT_FIELDS, 7_100_000, "dtfe", grid=1024)) == (1 if dt_gpu else 0))
     rec = rs.recommended_gpu
     check("recommended GPU: exact never (the CPU), sampled from ~1M particles, standard DTFE when built",
           rec("exact", ["density_a"], 1000) is False and rec("exact", ["density_a"], 10 ** 8) is False
@@ -844,7 +854,7 @@ def _custom_snapshot(tmp, np, P):
     a = steps[-1].argv
     check("custom: the binary itself, units, periodic, fields, scalar, output root",
           Path(a[0]).name == "PS-DTFE" and a[1] == str(snap) and a[2] == str(work / "out" / "run1")
-          and a[a.index("--MpcUnit") + 1] == "1000" and "--periodic" in a
+          and a[a.index("--mpc-unit") + 1] == "1000" and "--periodic" in a
           and a[a.index("--field") + 1:a.index("--field") + 3] == ["density_a", "scalar_a"]
           and a[a.index("--scalar-dataset") + 1] == "Potential", str(a))
     check("custom: a missing output folder gets its mkdir step first",
@@ -860,7 +870,7 @@ def _custom_snapshot(tmp, np, P):
     c2 = rs.CustomSpec.from_dict({**c.to_dict(), "estimator": "dtfe", "scalar_dataset": ""})
     lv, msg = levels(c2)
     check("custom: ... but fine for standard DTFE (with the fixed field set)",
-          "error" not in lv and rs.DTFE_FIELDS[0] in c2.command(), msg)
+          "error" not in lv and rs.DTFE_DEFAULT_FIELDS[0] in c2.command(), msg)
     for bad, word in (({"input_type": 111}, "Gadget HDF5"), ({"box": [-1, 1, 0, 1, 0, 1]}, ">= 0"),
                       ({"box": [0, 1, 0]}, "6 numbers"), ({"input_file": str(work / 'nope.hdf5')}, "not found"),
                       ({"lagrangian": "separate", "lagrangian_file": ""}, "initial-conditions")):
@@ -878,24 +888,31 @@ def _custom_snapshot(tmp, np, P):
           and Path(ds[2].argv[0]).name == "PS-DTFE" and "error" not in levels(d)[0], levels(d)[1])
     check("custom: to_dict/from_dict round trip", rs.CustomSpec.from_dict(c.to_dict()) == c)
 
-    # ---- one flag scheme: the deprecated spellings the readers map are the binaries' own (user_options.cc
-    # deprecatedOptions), the same table in run_ps_pipeline.sh and docs_drift_check.py; the GUI emits none of them
+    # ---- one flag scheme: the readers' permanent old-to-new table (dtfelib/runlog.py) holds every row the binaries
+    # accept as a deprecated alias (user_options.cc deprecatedOptions, a subset during P6.7), the same table is
+    # run_ps_pipeline.sh's old[] / sw[] maps and the docs check's; the GUI emits none of the binaries' deprecated names
     import re as _re
     import results as R
+    from dtfelib import runlog as RL
     src = (ROOT / "src" / "user_options.cc").read_text()
     table = src[src.index("deprecatedOptions[] = {"):]
     cpp = dict(_re.findall(r'\{ "([\w-]+)", +"([\w-]+)" \}', table[:table.index("};")]))
     cpp = {"--" + k: "--" + v for k, v in cpp.items()}
-    awk = dict(_re.findall(r'old\["(--[\w-]+)"\] = "(--[\w-]+)"', (ROOT / "scripts" / "run_ps_pipeline.sh").read_text()))
+    pipe = (ROOT / "scripts" / "run_ps_pipeline.sh").read_text()
+    awk = dict(_re.findall(r'old\["(--[\w-]+)"\] = "(--[\w-]+)"', pipe))
+    awk_sw = {k: tuple(v.split()) for k, v in _re.findall(r'sw\["(--[\w-]+)"\] = "(--[\w-]+ [\w-]+)"', pipe)}
     sys.path.insert(0, str(ROOT / "tests"))
     import docs_drift_check as DD
-    check("the deprecated spellings: one table in the binaries, the launcher's readers, the pipeline and the docs check",
-          len(cpp) == 5 and cpp == R.DEPRECATED_FLAGS == awk == DD.DEPRECATED, f"{cpp} {awk}")
+    check("the deprecated spellings: the binaries' rows are the readers' (runlog), whose table is the launcher's, "
+          "the pipeline's and the docs check's",
+          len(cpp) >= 5 and all(RL.RENAMES.get(k) == v for k, v in cpp.items()) and cpp == DD.DEPRECATED
+          and R.DEPRECATED_FLAGS is RL.RENAMES and RL.RENAMES == awk and RL.SWITCHES == awk_sw,
+          f"{cpp} {set(RL.RENAMES.items()) ^ set(awk.items())} {awk_sw}")
     cx = rs.CustomSpec(input_file=str(snap), estimator="ps", deposit="exact", gpu=True, fields=["density_a", "tweb_a"])
     cxa = cx.command()
-    check("the Custom tab emits the canonical names (--exact-average, --gpu, --lambda-th), none of the old ones",
+    check("the Custom tab emits the canonical names (--exact-average, --gpu, --lambda-th), none the binaries deprecate",
           "--exact-average" in cxa and "--gpu" in cxa and cxa[cxa.index("--lambda-th") + 1] == "0.3"
-          and not set(cxa) & set(R.DEPRECATED_FLAGS), str(cxa))
+          and not set(cxa) & set(cpp), str(cxa))
     old = R.RunRecord(path=Path("o.runlog"), binary="PS-DTFE", command="./PS-DTFE in o --grid 64 --avg-subsamples 2 "
                       "--lambda_th 0.3 --ps-gpu --ps-exact-deposit --ps-caustics")
     new = R.RunRecord(path=Path("n.runlog"), binary="PS-DTFE", command="./PS-DTFE in n --grid 64 --avg-subsamples 2 "
@@ -905,6 +922,44 @@ def _custom_snapshot(tmp, np, P):
           and old.has("--exact-average") and new.has("--ps-exact-deposit") and old.gpu and old.nsub == 2
           and R.canonical_command("--lambda_th=0.3 /a/--ps-gpu") == "--lambda-th=0.3 /a/--ps-gpu",
           f"{old.settings()} {old.options_text()}")
+    # P6.7: every rename of the second pass, with its value transforms
+    o7 = R.RunRecord(path=Path("o7.runlog"), binary="PS-DTFE", command=(
+        "./PS-DTFE /a b/in.hdf5 o7 --input 105 --MpcUnit 1000 --grid 64 --avg-subsamples 3 --periodic "
+        "--lagrangianInput /ics x.hdf5 --ps-lag-padding 8 --ps-window 0 10 0 10 0 10 --sample-points /p.txt "
+        "--pts-conventions legacy --per-stream --pts-lagrangian --ps-stream-density dtfe --completion-order-merge "
+        "--partition 2 --partNo 3"))
+    n7 = R.RunRecord(path=Path("n7.runlog"), binary="PS-DTFE", command=(
+        "./PS-DTFE /a b/in.hdf5 n7 --input-format 105 --mpc-unit 1000 --grid 64 --subsamples 3 --periodic "
+        "--ps-lagrangian-input /ics x.hdf5 --ps-lagrangian-padding 8 --grid-window 0 10 0 10 0 10 --sample-points "
+        "/p.txt --ps-point-conventions legacy --ps-per-stream --ps-per-stream-lagrangian --ps-stream-density linear "
+        "--ps-merge completion-order --partition 2 --partition-index 3"))
+    check("P6.7: an old-spelling log reads as its new-spelling twin (settings, options, merge, legacy plane, nSub)",
+          o7.settings() == n7.settings() and o7.options_text() == n7.options_text() and o7.merge == "completion-order"
+          and o7.nsub == 3 and o7.legacy_points and not o7.settings()["ordered_merge"]
+          and o7.has("--completion-order-merge") and n7.has("--completion-order-merge") and o7.has("--grid-window")
+          and o7.canonical.replace(" o7 ", " n7 ") == n7.canonical,
+          f"{o7.canonical} | {n7.canonical}")
+    cc = RL.canonical_command
+    check("P6.7 value transforms: standard --samples N = k^D -> --subsamples k (else kept), -m -> --average-method, "
+          "the merge switches -> one --ps-merge (fixed-point wins), --ps-stream-density dtfe -> linear",
+          cc("./DTFE in o -m 2 -s 27") == "./DTFE in o --average-method 2 --subsamples 3"
+          and cc("./DTFE in o --method 3 --samples 20") == "./DTFE in o --average-method 3 --samples 20"
+          and cc("./DTFE-2d in o -m2 -s9") == "./DTFE-2d in o --average-method 2 --subsamples 3"
+          and cc("./DTFE in o --samples=8", dim=3) == "./DTFE in o --subsamples 2"
+          and cc("x --ordered-merge --fixed-point-merge --grid 8") == "x --ps-merge fixed-point --grid 8"
+          and cc("x --resume --completion-order-merge --ordered-merge") == "x --resume --ps-merge index-order"
+          and cc("x --ps-stream-density=dtfe") == "x --ps-stream-density=linear"
+          and cc("x --ps-stream-density geometric") == "x --ps-stream-density geometric"
+          and RL.canonical_flag("--fixed-point-merge") == "--ps-merge fixed-point"
+          and R.RunRecord(path=Path("m.runlog"), binary="PS-DTFE", command="./PS-DTFE i o --grid 8").merge == ""
+          and R.RunRecord(path=Path("m.runlog"), binary="DTFE-2d", command="./DTFE-2d i o -s 16").canonical
+          == "./DTFE-2d i o --subsamples 4",
+          cc("./DTFE in o -m 2 -s 27"))
+    rec = R.RunRecord(path=work / "ri.runlog", prefix="ri",
+                      command=f"./PS-DTFE {work}/x.hdf5 {work}/ri --ps-lagrangian-input {work}/my ics.hdf5 --grid 8")
+    (work / "my ics.hdf5").write_text("x")
+    check("run_inputs: the Lagrangian input by its new name too (a path with a space)",
+          (work / "my ics.hdf5").resolve() in R.run_inputs(rec), str(R.run_inputs(rec)))
 
     # ---- every binary flag the GUI can emit exists in the built binary's own --full-help, and
     # every script knob it sets is one the script reads: a renamed option can never ship silently
@@ -925,12 +980,35 @@ def _custom_snapshot(tmp, np, P):
               not unknown, str(unknown))
         script = (ROOT / "scripts" / "run_ps_dtfe.sh").read_text()
         knobs = set(_re.findall(r'^([A-Z_]+)="\$\{\1:-', script, _re.M))
-        # a knob's older name, read when it is unset: PS_GPU="${PS_GPU:-${PS_METAL:-auto}}"
-        knobs |= set(_re.findall(r'^[A-Z_]+="\$\{[A-Z_]+:-\$\{([A-Z_]+):-', script, _re.M))
+        # a knob's older names, read for one release through config.sh's resolver (P6.7):
+        # 'knob DTFE_GPU PS_GPU PS_METAL', 'knob -e ...', 'knob_merge PS_MERGE ORDERED_MERGE FIXED_POINT_MERGE'
+        for names in _re.findall(r'^knob\w*\s+(?:-\S+\s+)*([A-Z_]+(?:[ \t]+[A-Z_]+)*)', script, _re.M):
+            knobs |= set(names.split())
         used = set(rs.RunSpec(sim="TNG50-4", snapshots=[99], slice_plane=str(snap), scratch_dir=str(work),
                               partition=2, max_concurrent=2, parallel_triangulation=True).command()[1]) - {"DTFE_DATA_ROOT"}
         check("every environment knob the Grids job sets is one run_ps_dtfe.sh reads",
               used <= knobs, str(sorted(used - knobs)))
+        def script_knobs(*names):
+            out = set()
+            for name in names:
+                text = (ROOT / "scripts" / name).read_text()
+                out |= set(_re.findall(r'^\s*([A-Z_]+)="\$\{\1:?-', text, _re.M))
+                for found in _re.findall(r'^\s*knob\w*\s+(?:-\S+\s+)*([A-Z_]+(?:[ \t]+[A-Z_]+)*)', text, _re.M):
+                    out |= set(found.split())
+            return out
+        std_used = set(rs.RunSpec(sim="TNG50-4", snapshots=[99], estimator="dtfe", slice_plane=str(snap),
+                                  scratch_dir=str(work), partition=2, max_concurrent=2, tess_cache=str(work),
+                                  fields=["density_a", "tweb_a"]).command()[1]) - {"DTFE_DATA_ROOT"}
+        std_knobs = script_knobs("run_dtfe.sh", "config.sh") | {"DTFE_PRECISION", "DTFE_MEM_BUDGET_GB"}
+        check("... and every one a standard Grids job sets is one run_dtfe.sh reads (the precision and the budget: "
+              "config.sh / the binary)", std_used <= std_knobs, str(sorted(std_used - std_knobs)))
+        pipe_used = set(rs.PipelineSpec(sims=["TNG50-4"], window="0 10 0 10", planes=4, center="5",
+                                        tess_cache=str(work), partition=2, max_concurrent=2, scratch_dir=str(work),
+                                        force=True, plan_only=True).command()[1]) - {"DTFE_DATA_ROOT"}
+        pipe_knobs = script_knobs("run_ps_pipeline.sh", "run_ps_dtfe.sh", "config.sh") | {
+            "DTFE_PRECISION", "DTFE_MEM_BUDGET_GB", "SIMS"}            # (SIMS: required, read with no default)
+        check("... and every one a Pipeline job sets is one run_ps_pipeline.sh or its run_ps_dtfe.sh reads",
+              pipe_used <= pipe_knobs, str(sorted(pipe_used - pipe_knobs)))
     else:
         check("flags-exist check skipped: a binary is not built", True)
 
@@ -947,6 +1025,12 @@ def _custom_snapshot(tmp, np, P):
           rs.binary_name("ps", "double") == "PS-DTFE-double" and rs.binary_name("dtfe") == "DTFE"
           and abs(rs.grids_gb(256, ["density_a"], "double") / rs.grids_gb(256, ["density_a"]) - 2) < 1e-9
           and rs.RunSpec(grid=256, precision="double").grid_gb() == 2 * rs.RunSpec(grid=256).grid_gb())
+    one = lambda f: rs.grids_gb(100, f) * 1e9 / 100 ** 3     # bytes per cell
+    check("the memory estimate books the velocity gradient once for every field derived from it",
+          abs(one(["divergence_a"]) - (8 + 4 + 36)) < 1e-9 and abs(one(["divergence_a", "shear_a"]) - (8 + 24 + 36)) < 1e-9
+          and abs(one(["divergence_a", "shear_a", "vorticity_a"]) - one(["divergence_a", "shear_a"]) - 12) < 1e-9
+          and abs(one(["density_a", "velocity_a"]) - (8 + 16)) < 1e-9,
+          f"{one(['divergence_a'])} {one(['divergence_a', 'shear_a'])} {one(['density_a', 'velocity_a'])}")
     cd = rs.CustomSpec(input_file=str(snap), estimator="dtfe", precision="double")
     check("precision: a double custom job runs the -double binary; missing pair = a clear error naming Setup",
           cd.binary().name == "DTFE-double"
@@ -1012,6 +1096,18 @@ def _custom_snapshot(tmp, np, P):
           and any("repeat --grid," in m for m in errors(grid_eq))
           and not [m for m in errors(other) if "extra options" in m],
           str(errors(old_sp) + errors(old_eq) + errors(grid_eq) + errors(other)))
+    # a merge switch in the extra options repeats the tab's own '--ps-merge' when the tick is off (the migrated run
+    # copy would hand the binary '--ps-merge' twice); with the tick on the tab passes no merge, so the switch stands
+    m_off, m_on = (rs.CustomSpec(input_file=str(snap), grid=64, output_dir=str(work), ordered_merge=om,
+                                 extra_args="--ordered-merge") for om in (False, True))
+    m_off_copy, m_on_copy = (rs.CustomSpec.from_dict(s.to_dict()) for s in (m_off, m_on))
+    check("... a merge switch beside the tab's own '--ps-merge' is the same error (live spec and migrated copy alike), "
+          "and no error when the tab passes no merge",
+          "--ps-merge" in m_off._own_command() and "--ps-merge" not in m_on._own_command()
+          and all(any("repeat --ps-merge," in m for m in errors(s)) for s in (m_off, m_off_copy))
+          and not [m for s in (m_on, m_on_copy) for m in errors(s) if "extra options" in m]
+          and m_on_copy.command()[-2:] == ["--ps-merge", "index-order"],
+          str(errors(m_off) + errors(m_off_copy) + errors(m_on) + errors(m_on_copy) + m_on_copy.command()[-3:]))
     q = rs.QueuedJob.of("custom", c)
     check("custom: a queued custom-snapshot job rebuilds and has a summary",
           q.build() == c and q.title.startswith("Custom snapshot · cloud.hdf5 · PS-DTFE 64³"), q.title)
@@ -1213,7 +1309,7 @@ def _presets_help(sim, P, R):
     if real:
         check("the binary's own --full_help: every production flag has a description",
               all(real.get(f) for f in ("--ps-vertex-mass", "--ps-volume-weighted", "--ps-caustics", "--grid",
-                                        "--serve", "--pts-lagrangian", "--pts-scalar")), str({k: bool(v) for k, v in real.items()}))
+                                        "--serve", "--ps-per-stream-lagrangian", "--pts-scalar")), str({k: bool(v) for k, v in real.items()}))
     else:
         print("   SKIP  flag_help (PS-DTFE not built)")
 
@@ -1524,7 +1620,7 @@ def two_d(tmp: Path):
                 v[:, 2] = 0.3 * (pos[:, 0] - 50)                   # dv_z/dx: curl_y = -0.3
             write_snapshot(str(work / f"rot{dim}.hdf5"), pos, pos, v, 100.0, 1.0)
             subprocess.run([str(b), str(work / f"rot{dim}.hdf5"), str(work / f"rot{dim}"), "--grid", "8",
-                            "--input", "105", "--MpcUnit", "1", "--box", *(["0", "100"] * dim),
+                            "--input-format", "105", "--mpc-unit", "1", "--box", *(["0", "100"] * dim),
                             "--field", "vorticity", "gradient", "--verbose", "1"], check=True, capture_output=True)
             ro = G.OutputSet(work / f"rot{dim}", dim=dim)
             got[dim] = ([ro.slice("vorticity")[4, 4]] if dim == 2 else
@@ -1546,7 +1642,7 @@ def two_d(tmp: Path):
                             "--n", str(n_), "--box", "100", "--amplitude-factor", "1.2", "--crossed-waves",
                             "--dim", str(dim)], check=True, capture_output=True)
             subprocess.run([str(rs.REPO_ROOT / b), str(snap_), str(work / f"tie{dim}"), "--grid", str(grid),
-                            "--periodic", "--input", "105", "--MpcUnit", "1", "--field", "density", "--verbose", "1"],
+                            "--periodic", "--input-format", "105", "--mpc-unit", "1", "--field", "density", "--verbose", "1"],
                            check=True, capture_output=True)
             t = G.OutputSet(work / f"tie{dim}")
             dims[dim] = (t.dim, t.n)
@@ -1616,7 +1712,7 @@ def point_window_linear(tmp: Path):
     a = c.command()
     check("a Custom run: --sample-points (+ the velocity gradient), the PS window, the linear deposit",
           a[a.index("--sample-points") + 1] == str(pts) and "--pts-vel-grad" in a and "--ps-linear-deposit" in a
-          and a[a.index("--ps-window") + 1:a.index("--ps-window") + 7] == ["0", "10", "0", "10", "0", "1"], str(a))
+          and a[a.index("--grid-window") + 1:a.index("--grid-window") + 7] == ["0", "10", "0", "10", "0", "1"], str(a))
     errs = lambda spec: [m for lv, m in spec.problems() if lv == "error"]            # noqa: E731
     dt = rs.CustomSpec(input_file=str(snap), estimator="dtfe", sample_points=str(pts), partition=2, window=[0, 1, 0, 1, 0, 1])
     webw = rs.CustomSpec(input_file=str(snap), fields=["density_a", "tweb_a"], window=[0, 1, 0, 1, 0, 1])
@@ -1649,6 +1745,93 @@ def point_window_linear(tmp: Path):
           f"{sp.problems()} {sp.command()[1]}")
 
 
+_HELP_OPTIONS: dict = {}
+
+
+def help_options(script: Path) -> set:
+    """The option names a python script's --help lists, as whole words: '--smooth' in the text of '--smooth-px' or
+    '--size-rv' in '--size-rv-definition' is no match (a substring test would pass a renamed flag's old spelling,
+    which --help hides). Cached per script."""
+    import re
+    import subprocess as _sp
+    if script not in _HELP_OPTIONS:
+        out = _sp.run([rs.PYTHON, str(script), "--help"], capture_output=True, text=True,
+                      cwd=Path(__file__).resolve().parents[1] / "python",
+                      env=dict(os.environ, MPLBACKEND="Agg", DTFE_SIM=os.environ.get("DTFE_SIM", "TNG100-3-Dark")))
+        _HELP_OPTIONS[script] = set(re.findall(r"(?<![\w-])(--?[A-Za-z][\w-]*)", out.stdout))
+    return _HELP_OPTIONS[script]
+
+
+def saved_flag_migration(tmp: Path):
+    """P6.7: the launcher's saved state written with the older flag names and values loads with the new ones, on every
+    load path (CustomSpec / PlotSpec.from_dict: the settings, a queued job, a run's '.gui.json' sidecar); idempotent."""
+    import runspec_custom as RC
+    old = {"input_file": str(tmp / "x.hdf5"), "estimator": "ps", "stream_density": "dtfe",
+           "extra_args": "--MpcUnit 1 --ps-window 0 5 0 5 0 5 --ordered-merge -s 27 --lambda_th=0.4"}
+    c = rs.CustomSpec.from_dict(old)
+    check("a saved Custom job's extra options load with the new names ('--MpcUnit 1 --ps-window ...' as "
+          "'--mpc-unit 1 --grid-window ...', the merge switch as '--ps-merge'); PS-DTFE keeps '-s' (no effect there)",
+          c.extra_args == "--mpc-unit 1 --grid-window 0 5 0 5 0 5 --ps-merge index-order -s 27 --lambda-th=0.4"
+          and c.stream_density == "linear" and "--ps-stream-density" not in c.command(), c.extra_args)
+    std = rs.CustomSpec.from_dict(dict(old, estimator="dtfe", extra_args="--NGP --regionMpc 0 1 0 1 0 1 -s 27 -m 3"))
+    flat = rs.CustomSpec.from_dict(dict(old, estimator="dtfe", dim=2, extra_args="--samples 16 --paddingMpc 2"))
+    check("... standard DTFE's too ('-s 27' -> '--subsamples 3', k^dim; '-m' -> '--average-method')",
+          std.extra_args == "--ngp --region-mpc 0 1 0 1 0 1 --subsamples 3 --average-method 3"
+          and flat.extra_args == "--subsamples 4 --padding-mpc 2", f"{std.extra_args!r} {flat.extra_args!r}")
+    again = rs.CustomSpec.from_dict(c.to_dict())
+    q = rs.QueuedJob.from_dict({"kind": "custom", "spec": old, "title": "x"})
+    check("... idempotent, and a queued job's saved spec migrates the same way",
+          again.to_dict() == c.to_dict() and RC.migrate_extra_args("") == ""
+          and q.build().extra_args == c.extra_args, "")
+    pl = rs.PlotSpec.from_dict({"options": {"voidenv": {"criterion": "density_raw"}, "panels": {"project": "mean"}}})
+    check("saved plot options load with the scripts' values (criterion density_raw -> density-raw, panels' 'mean' -> "
+          "'slab'), which the option choices offer",
+          pl.opt("voidenv", "criterion") == "density-raw" and pl.opt("panels", "project") == "slab"
+          and "density-raw" in rs.ENV_CRITERIA and "density_raw" not in rs.ENV_CRITERIA
+          and next(o.choices for o in rs.FIGURE_SET["panels"].opts if o.key == "project") == ("plane", "slab"),
+          str(pl.options))
+
+
+def launcher_python_flags(tmp: Path):
+    """Every python command the launcher builds (each Plots set with non-default options, the pipeline's render step,
+    the Data tab's merge steps) passes only options its script's --help lists, matched as whole words: no old
+    spelling (P6.7d's renames are hidden from --help) and no flag the script does not have."""
+    base = dict(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[50, 99])
+    opts = {"pointeval": {"fields": "density, velDiv", "project": "slab", "smooth_px": 2.0, "smooth_deriv": 4.0,
+                          "fixed_range": True, "force": True},
+            "panels": {"plane": str(tmp / "p.json"), "panels": "density sheet", "project": "slab", "vmin": 0.1},
+            "voidpop": {"size_rv": "ridge", "size_smooth": 3.0, "smooth_mpc": 2.0, "keep_overlaps": True,
+                        "size_fixed_r": True, "fixed_r_smooth_mpc": "2.1625"},
+            "voidtrack": {"link": "particles", "exclusive": True, "radius": "r_eff"},
+            "voidfate": {"ref_snap": 50, "exclusive": True}, "voidconv": {"rv_range": "2 6", "factors": "2 4 8"},
+            "voidenv": {"criterion": "density-raw", "factor": 3.0, "r_v_definition": "delta08"},
+            "voidevol": {"rv_definition": "ridge"}, "pk": {"nbins": 0, "ref": False},
+            "skeleton": {"voids": True, "null_draws": 0, "all_caustic": True},
+            "crossbox": {"smooth_mpc": 3.0, "z": "0 2", "n_boot": 10, "replot": True},
+            "halotrack": {"subhalos": "0, 17", "environment": False, "min_ratio": 0.2},
+            "core": {"mode": "export"}}
+    spec = rs.PlotSpec(sets=[fs.key for fs in rs.FIGURE_SETS], method="ps", prefix="ps_x", options=opts,
+                       figures_root=str(tmp / "figs"), **base)
+    steps = spec.steps() + [rs.PlotSpec(sets=["halotrack"], **base).steps()[0]]
+    steps += [st for st in rs.PipelineSpec(data_root=str(tmp), sims=["TNG100-3-Dark"], render_fields="density velDiv",
+                                           render_smooth=1.0, render_smooth_derivatives=0.0, planes=4,
+                                           render_project="slab", output_prefix="ps_y").steps()[1:]]
+    steps += rs.DataSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99], merge_snapshots=True,
+                         merge_groupcats=True).steps()
+    bad, seen = [], set()
+    for st in steps:
+        if len(st.argv) < 2 or not st.argv[1].endswith(".py"):
+            continue
+        script = Path(st.argv[1])
+        seen.add(script.name)
+        known = help_options(script)
+        bad += [f"{script.name} {f}" for f in st.argv[2:] if f.startswith("-") and not f.lstrip("-")[:1].isdigit()
+                and f not in known]
+    check("every python flag the launcher emits is one its script's --help lists (whole words; no old spelling)",
+          not bad and {"plot_pointeval.py", "plot_pointeval_panels.py", "plot_void_crossbox.py", "void_cache.py",
+                       "analyze.py", "plot_halo_tracking.py", "merge_HDF5.py"} <= seen, f"{bad} {sorted(seen)}")
+
+
 def plot_options(tmp: Path):
     """The Plots tab: the core scripts as a checklist (= analyze.py's PLOT_SCRIPTS),
     the point-eval gradient smoothing, the publication panels' range, dpi and pixel-exact images."""
@@ -1673,14 +1856,14 @@ def plot_options(tmp: Path):
     a_pe = next(st.argv for st in spec.steps() if "plot_pointeval.py" in " ".join(st.argv))
     a_pa = next(st.argv for st in spec.steps() if "plot_pointeval_panels.py" in " ".join(st.argv))
     check("... the ticked core scripts reach --only; the gradient smoothing reaches "
-          "--smooth-derivatives; the panels get --vmin/--vmax/--dpi/--image",
+          "--smooth-derivatives-px; the panels get --vmin/--vmax/--dpi/--image",
           a_th[a_th.index("--only") + 1:] == ["plot_DTFE.py", "plot_phi_delta.py"]
-          and a_pe[a_pe.index("--smooth-derivatives") + 1] == "4" and a_pa[a_pa.index("--vmin") + 1] == "0.05"
+          and a_pe[a_pe.index("--smooth-derivatives-px") + 1] == "4" and a_pa[a_pa.index("--vmin") + 1] == "0.05"
           and a_pa[a_pa.index("--vmax") + 1] == "300" and a_pa[a_pa.index("--dpi") + 1] == "150" and "--image" in a_pa,
           f"{a_th} | {a_pe} | {a_pa}")
     plain = rs.PlotSpec(sets=["pointeval", "panels"], **base, options={"panels": {"plane": plane}})
     flat = " ".join(" ".join(st.argv) for st in plain.steps())
-    check("... and the defaults add none of those flags", not any(f in flat for f in ("--smooth-derivatives", "--vmin",
+    check("... and the defaults add none of those flags", not any(f in flat for f in ("--smooth-derivatives-px", "--vmin",
                                                                                      "--dpi", "--image")), flat)
 
 
@@ -1688,7 +1871,6 @@ def plot_void_sets(tmp: Path):
     """The Plots tab's void and phase-space sets: void profiles, streams by web environment, P(k) and the
     caustic skeleton, with the void radius, overlapping voids and the smoothing in Mpc; every flag one the script's own
     parser knows; the core set stays last (the app test picks it as the list's last item)."""
-    import subprocess as _sp
     repo = Path(__file__).resolve().parents[1]
     base = dict(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[50, 99])
     sets = ["voidpop", "voidprof", "webstreams", "pk", "skeleton"]
@@ -1698,9 +1880,9 @@ def plot_void_sets(tmp: Path):
           "its per-void statistics); the core set still last",
           len(plain) == 5 and all(a[a.index("--snaps") + 1:a.index("--snaps") + 3] == ["50", "99"]
                                   for k, a in plain.items() if k != "plot_void_population.py")
-          and not any(f in flat for f in ("--radius", "--keep-overlaps", "--smooth-mpc", "--web", "--nbins", "--ref-snap",
+          and not any(f in flat for f in ("--radius", "--keep-overlaps", "--smooth-mpc", "--web", "--n-bins", "--ref-snap",
                                           "--sample"))
-          and "--voids" in plain["plot_caustic_skeleton.py"] and rs.FIGURE_SETS[-1].key == "core", flat)
+          and "--per-void" in plain["plot_caustic_skeleton.py"] and rs.FIGURE_SETS[-1].key == "core", flat)
     opts = {"voidpop": {"keep_overlaps": True, "smooth_mpc": 2.1625},
             "voidprof": {"radius": "r_eff", "sample": "deep", "keep_overlaps": True, "smooth_mpc": 2.1625},
             "webstreams": {"web": "tweb"}, "pk": {"nbins": 0, "ref": False},
@@ -1715,13 +1897,10 @@ def plot_void_sets(tmp: Path):
           pv[pv.index("--radius") + 1] == "r_eff" and pv[pv.index("--sample") + 1] == "deep" and "--keep-overlaps" in pv
           and pv[pv.index("--smooth-mpc") + 1] == "2.1625" and "--keep-overlaps" in pp and "--smooth-mpc" in pp
           and has("plot_web_streams.py", "--web", "tweb") and got["plot_pk_compare.py"][-2:] in (["--ref-snap", "-1"],)
-          and "--nbins" in got["plot_pk_compare.py"] and "--voids" not in got["plot_caustic_skeleton.py"]
+          and "--n-bins" in got["plot_pk_compare.py"] and "--per-void" not in got["plot_caustic_skeleton.py"]
           and "--radius" in got["plot_caustic_skeleton.py"], str(got))
-    unknown = []
-    for name, a in got.items():
-        helptext = _sp.run([rs.PYTHON, str(repo / "python" / "plot" / name), "--help"], capture_output=True, text=True,
-                           cwd=repo / "python").stdout
-        unknown += [f"{name} {f}" for f in a if f.startswith("--") and f not in helptext]
+    unknown = [f"{name} {f}" for name, a in got.items() for f in a
+               if f.startswith("--") and f not in help_options(repo / "python" / "plot" / name)]
     check("... and every flag is one the script's own parser knows (--help)", not unknown, str(unknown))
     both = rs.PlotSpec(sets=["voidprof"], smooth=5.0, options={"voidprof": {"smooth_mpc": 2.0}}, **base)
     sk = rs.PlotSpec(sets=["skeleton"], **base)
@@ -1762,8 +1941,8 @@ def plot_void_script_options(tmp: Path):
                               if o.key in new[k]), str(missing))
     if missing:
         return
-    flags = ("--size-smooth", "--size-rv", "--link", "--exclusive", "--ref-snap", "--factors", "--match-sigma",
-             "--rv-range", "--factor", "--r-v-definition", "--rv-definition", "--null-draws", "--min-component",
+    flags = ("--size-smooth", "--size-rv-definition", "--link", "--exclusive", "--ref-snap", "--factors", "--match-sigma",
+             "--rv-range", "--factor", "--rv-definition", "--null-draws", "--min-component",
              "--min-component-mass", "--sheet-min-density", "--all-caustic")
     plain = " ".join(" ".join(st.argv) for st in rs.PlotSpec(sets=sets, **base).steps())
     check("... the defaults add none of their flags", not any(f" {f} " in plain + " " for f in flags), plain)
@@ -1807,25 +1986,22 @@ def plot_void_script_options(tmp: Path):
     sk = got.get("plot_caustic_skeleton.py", [])
     check("... the set values reach their flags (size smoothing 0 is a value, not the default)",
           after("plot_void_population.py", "--size-smooth") == ["0"]
-          and after("plot_void_population.py", "--size-rv") == ["ridge"]
+          and after("plot_void_population.py", "--size-rv-definition") == ["ridge"]
           and after("plot_void_tracking.py", "--link") == ["particles"] and "--exclusive" in got["plot_void_tracking.py"]
           and after("plot_void_fate.py", "--ref-snap") == ["50"] and "--exclusive" in got["plot_void_fate.py"]
           and after("plot_void_convergence.py", "--factors", 3) == ["2", "4", "8"]
           and after("plot_void_convergence.py", "--match-sigma") == ["1.5"]
           and after("plot_void_convergence.py", "--rv-range", 2) == ["2", "6"]
           and after("plot_void_environment.py", "--factor") == ["3"]
-          and after("plot_void_environment.py", "--r-v-definition") == ["delta08"]
+          and after("plot_void_environment.py", "--rv-definition") == ["delta08"]
           and after("plot_void_profile_evolution.py", "--rv-definition") == ["ridge"]
           and after("plot_caustic_skeleton.py", "--null-draws") == ["0"]
           and after("plot_caustic_skeleton.py", "--min-component") == ["100"]
           and after("plot_caustic_skeleton.py", "--min-component-mass") == ["0.001"]
           and after("plot_caustic_skeleton.py", "--sheet-min-density") == ["2.5"]
           and "--all-caustic" in sk and "--snaps" not in sk, str(got))
-    unknown = []
-    for name, a in got.items():
-        helptext = _sp.run([rs.PYTHON, str(repo / "python" / "plot" / name), "--help"], capture_output=True, text=True,
-                           cwd=repo / "python", env=dict(os.environ, MPLBACKEND="Agg")).stdout
-        unknown += [f"{name} {f}" for f in a if f.startswith("--") and f not in helptext]
+    unknown = [f"{name} {f}" for name, a in got.items() for f in a
+               if f.startswith("--") and f not in help_options(repo / "python" / "plot" / name)]
     check("... every flag one the script's own parser knows (--help)", not unknown, str(unknown))
     bad = rs.PlotSpec(sets=["voidconv"], options={"voidconv": {"factors": "2 x", "rv_range": "3"}}, **base)
     allc = rs.PlotSpec(sets=["skeleton"], options={"skeleton": {"all_caustic": True}},
@@ -1843,7 +2019,6 @@ def fixed_r_size_function(tmp: Path):
     """The Void population set's 'size function at fixed R' tick: a step of its own with the script's
     fixed-R flag and its smoothings, run with DTFE_VOID_GATE=none in ITS environment (the script refuses it gated)
     and shown in the exported command; the population step and the job's other steps keep the caller's gate."""
-    import subprocess as _sp
     repo = Path(__file__).resolve().parents[1]
     base = dict(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[50, 99])
     opts_ = {o.key: o for o in rs.FIGURE_SET["voidpop"].opts}
@@ -1867,7 +2042,7 @@ def fixed_r_size_function(tmp: Path):
     check("... ticked: a step of its own after the population one, the estimator and prefix, the script's default "
           "smoothings (no flag), no population smoothing or snapshots",
           len(fr) == 1 and len(st) == 3 and st[1] is fr[0] and "plot_void_population.py" in a[1]
-          and a[2:] == ["--sim", "TNG100-3-Dark", "--method", "ps", "--prefix", "ps_x", "--size-fixed-r"]
+          and a[2:] == ["--sim", "TNG100-3-Dark", "--estimator", "ps", "--prefix", "ps_x", "--size-fixed-r"]
           and "--smooth-mpc" in st[0].argv, str(a))
     script = rs.export_script(st, "fixed R")
     check("... run ungated: DTFE_VOID_GATE=none in that step's environment and in its exported command; the population "
@@ -1892,11 +2067,10 @@ def fixed_r_size_function(tmp: Path):
     check("... a word that is no number, no smoothing at all, or one of 0 is an error before the job runs",
           any("positive numbers" in m for m in bad[1]) and any("needs a smoothing" in m for m in empty[1])
           and any("positive numbers" in m for m in neg[1]), f"{bad[1]} {empty[1]} {neg[1]}")
-    helptext = _sp.run([rs.PYTHON, str(repo / "python" / "plot" / "plot_void_population.py"), "--help"],
-                       capture_output=True, text=True, cwd=repo / "python", env=dict(os.environ, MPLBACKEND="Agg")).stdout
+    known = help_options(repo / "python" / "plot" / "plot_void_population.py")
     flags = {f for f in a + tng300[0] if f.startswith("--")}
-    check("... every flag one the script's own parser knows (--help)", flags and all(f in helptext for f in flags),
-          str(sorted(f for f in flags if f not in helptext)))
+    check("... every flag one the script's own parser knows (--help)", flags and all(f in known for f in flags),
+          str(sorted(f for f in flags if f not in known)))
 
 
 def crossbox_smoothing_constant():
@@ -1988,13 +2162,13 @@ def explore_extras(tmp: Path):
                       per_stream_ids=True, halo_release=500)
     a = c.command()
     check("the Custom tab's research options: --ps-halo-release, and for the sample points --ps-stream-density, "
-          "--per-stream, --per-stream-ids", a[a.index("--ps-halo-release") + 1] == "500"
-          and a[a.index("--ps-stream-density") + 1] == "geometric" and "--per-stream" in a and "--per-stream-ids" in a,
+          "--ps-per-stream, --ps-per-stream-ids", a[a.index("--ps-halo-release") + 1] == "500"
+          and a[a.index("--ps-stream-density") + 1] == "geometric" and "--ps-per-stream" in a and "--ps-per-stream-ids" in a,
           str(a))
     nopts = [m for lv, m in rs.CustomSpec(input_file=str(inp), per_stream=True).problems() if lv == "warning"]
     dt = rs.CustomSpec(input_file=str(inp), estimator="dtfe", sample_points=str(pts), per_stream=True, halo_release=500)
     check("... per-stream without sample points warns; a standard-DTFE run leaves the PS-only ones out",
-          any("apply to sample points" in m for m in nopts) and "--per-stream" not in dt.command()
+          any("apply to sample points" in m for m in nopts) and "--ps-per-stream" not in dt.command()
           and "--ps-halo-release" not in dt.command(), f"{nopts} {dt.command()}")
 
 
@@ -2171,6 +2345,41 @@ def pipeline_options(tmp: Path, sim: Path):
     check("every option switched: the environment follows",
           [env[k] for k in run_keys + ("THICKNESS", "WINDOW", "DTFE_PRECISION")]
           == ["1", "1", "0", "0", "0", "1", "1", "1", "16", "2", "3.5", "10 60 0 25", "double"], str(env))
+    # P6.7: each run-script knob under its new name AND its older one (the same value) until P6.6, so a stray older
+    # export in the login shell is overwritten; the new names are the ones the drivers read first
+    pairs = (("DTFE_EXACT_AVERAGE", "PS_EXACT"), ("SUBSAMPLES", "AVG_SUBSAMPLES"), ("DTFE_GPU", "PS_GPU"),
+             ("DTFE_GPU", "PS_METAL"), ("PARALLEL_TRIANGULATION", "PS_PARALLEL_TRI"), ("DTFE_RESUME", "PS_RESUME"),
+             ("PS_POINT_CONVENTIONS", "PTS_CONVENTIONS"), ("PLANE_WINDOW", "WINDOW"), ("PYTHON", "PY"),
+             ("TESSELLATION_CACHE", "TESS_CACHE"))
+    std_pairs = (("DTFE_EXACT_AVERAGE", "DTFE_EXACT"), ("DTFE_GPU", "DTFE_METAL"), ("TESSELLATION_CACHE", "TESS_CACHE"))
+    both = lambda e, pp=pairs: [(n, o) for n, o in pp if (n in e or o in e) and e.get(n) != e.get(o)]   # noqa: E731
+    tq = rs.PipelineSpec(**base, tess_cache="/private/tmp/t", window="10 60 0 25").command()[1]
+    g_ps = rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99], deposit="exact", gpu=True,
+                      slice_plane="/x.bin", tess_cache="/private/tmp/t", start_over=True).command()[1]
+    g_dt = rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99], estimator="dtfe", deposit="sampled",
+                      gpu=True, tess_cache="/private/tmp/t").command()[1]
+    check("the knobs under their new names and their older ones alike (Pipeline, PS and standard Grids jobs; P6.7)",
+          not both(env) and not both(tq) and not both(g_ps) and not both(g_dt, std_pairs)
+          and env["SUBSAMPLES"] == "1" and env["DTFE_EXACT_AVERAGE"] == "1" and env["PLANE_WINDOW"] == "10 60 0 25"
+          and env["PYTHON"] == rs.PYTHON and tq["TESSELLATION_CACHE"] == "/private/tmp/t"
+          and g_ps["DTFE_EXACT_AVERAGE"] == "1" and g_ps["DTFE_GPU"] == "1" and g_ps["DTFE_RESUME"] == "0"
+          and g_ps["PS_POINT_CONVENTIONS"] == "grid" and g_ps["PS_MERGE"] == "index-order"
+          and (g_dt["DTFE_EXACT_AVERAGE"], g_dt["DTFE_EXACT"], g_dt["DTFE_GPU"], g_dt["DTFE_METAL"]) == ("0", "0", "1", "1")
+          and "PS_MERGE" not in g_dt and "PS_EXACT" not in g_dt,
+          f"{both(env)} {both(tq)} {both(g_ps)} {both(g_dt, std_pairs)}")
+    lines = [rs.shell(*job.command()) for job in (rs.PipelineSpec(**base, window="10 60 0 25", tess_cache="/t"),
+                                                    rs.PipelineSpec(**base, ordered_merge=False))] \
+        + [rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99], estimator=e, slice_plane="/x.bin",
+                      tess_cache="/t").shell_line() for e in ("ps", "dtfe")]
+    older = [k for line in lines for k in list(rs.OLDER_KNOB_NAMES) + ["ORDERED_MERGE"] if f" {k}=" in f" {line}"]
+    check("... the command shown (and exported) names each knob once, by its new name",
+          not older and all(" PS_MERGE=" in ln for ln in lines[:3]) and " PLANE_WINDOW=" in lines[0]
+          and " PYTHON=" in lines[0], f"{older} {lines}")
+    check("... the merge tick is the explicit index order (PS_MERGE=index-order: the memory gate stays on under the "
+          "speed split), unticked the completion order; ORDERED_MERGE the same until P6.6",
+          (env["PS_MERGE"], env["ORDERED_MERGE"]) == ("index-order", "1")
+          and [rs.PipelineSpec(**base, ordered_merge=False).command()[1][k] for k in ("PS_MERGE", "ORDERED_MERGE")]
+          == ["completion-order", "0"], str(env))
     st = q.check_step("TNG100-3-Dark", [99], 32)
     check("the memory check carries the run options and the precision, and no -m without the GPU",
           st.argv[1:] == ["-s", "TNG100-3-Dark", "-g", "128", "99"] and st.env["DTFE_PRECISION"] == "double"
@@ -2213,7 +2422,8 @@ def pipeline_options(tmp: Path, sim: Path):
     same = subprocess.run([sys.executable, tool, "--same-as", str(side), "--nu", "64"], capture_output=True, text=True)
     diff = subprocess.run([sys.executable, tool, "--same-as", str(side), "--nu", "64", "--planes", "4"],
                           capture_output=True, text=True)
-    bad = subprocess.run([sys.executable, tool, "--same-as", str(side), "--nu", "64", "--u0", "50", "--u1", "10"],
+    bad = subprocess.run([sys.executable, tool, "--same-as", str(side), "--nu", "64", "--plane-window", "50", "10", "0",
+                          "10"],
                          capture_output=True, text=True)
     gone = subprocess.run([sys.executable, tool, "--same-as", str(sim / "no_such_plane.json"), "--nu", "64"],
                           capture_output=True, text=True)
@@ -2259,13 +2469,14 @@ def pipeline_options(tmp: Path, sim: Path):
     r = rs.PipelineSpec(**base, render_fields="density, velDiv", render_smooth=2.0, render_smooth_derivatives=0.0,
                         render_fixed_range=True, render_force=True, planes=16, render_project="slab")
     a = r.steps()[1].argv
-    check("the render step passes the figure options to plot_pointeval.py",
-          a[a.index("--fields") + 1] == "density,velDiv" and a[a.index("--project") + 1] == "slab"
-          and a[a.index("--smooth") + 1] == "2" and a[a.index("--smooth-derivatives") + 1] == "0"
+    check("the render step passes the figure options to plot_pointeval.py (the maps space-separated)",
+          a[a.index("--maps") + 1:a.index("--maps") + 3] == ["density", "velDiv"]
+          and a[a.index("--project") + 1] == "slab"
+          and a[a.index("--smooth-px") + 1] == "2" and a[a.index("--smooth-derivatives-px") + 1] == "0"
           and "--fixed-range" in a and "--force" in a, str(a))
     a0 = rs.PipelineSpec(**base, render_project="slab").steps()[1].argv
     check("... the defaults add nothing, and 'slab' of a single plane is the plane itself",
-          not any(f in a0 for f in ("--fields", "--project", "--smooth", "--smooth-derivatives", "--fixed-range",
+          not any(f in a0 for f in ("--maps", "--project", "--smooth-px", "--smooth-derivatives-px", "--fixed-range",
                                     "--force")), str(a0))
     lv, msg = levels(rs.PipelineSpec(**base, caustic_cusps=True, caustics=False))
     check("cusps without caustics is an error (the Grids tab's rule, shared)", "error" in lv and "cusps" in msg, msg)
@@ -2766,22 +2977,21 @@ def ordered_merge_settings():
         off = rs.RunSpec(sim="TNG50-4", snapshots=[99], ordered_merge=False).command()[1]
         pon = rs.PipelineSpec(sims=["TNG50-4"], ordered_merge=True)
         # ON by default (the staged merge in index order: run_ps_dtfe.sh's and the binary's default); off
-        # is the merge as partitions finish (ORDERED_MERGE=0 / --completion-order-merge)
+        # is the merge as partitions finish (ORDERED_MERGE=0 / --ps-merge completion-order)
         check("ordered merge: Grids and Pipeline jobs set ORDERED_MERGE for run_ps_dtfe.sh (spelled out when off, so a "
-              "stray export cannot leak in), the Pipeline's memory check too; the Custom tab passes the flag (PS only); "
-              "on by default, off = --completion-order-merge",
+              "stray export cannot leak in), the Pipeline's memory check too; the Custom tab passes '--ps-merge' only off "
+              "the default (PS only): off = --ps-merge completion-order",
               on.get("ORDERED_MERGE") == "1" and off.get("ORDERED_MERGE") == "0"
               and rs.RunSpec(sim="TNG50-4", snapshots=[99]).command()[1].get("ORDERED_MERGE") == "1"
               and pon.command()[1].get("ORDERED_MERGE") == "1"
               and pon.check_step("TNG50-4", [99], 1024).env.get("ORDERED_MERGE") == "1"
               and rs.PipelineSpec(sims=["TNG50-4"]).command()[1].get("ORDERED_MERGE") == "1"
               and rs.PipelineSpec(sims=["TNG50-4"], ordered_merge=False).command()[1].get("ORDERED_MERGE") == "0"
-              and "--ordered-merge" in rs.CustomSpec(input_file=str(snap), ordered_merge=True).command()
-              and "--ordered-merge" in rs.CustomSpec(input_file=str(snap)).command()
-              and "--completion-order-merge" in rs.CustomSpec(input_file=str(snap), ordered_merge=False).command()
-              and "--ordered-merge" not in rs.CustomSpec(input_file=str(snap), ordered_merge=False).command()
-              and not {"--ordered-merge", "--completion-order-merge"} & set(
-                  rs.CustomSpec(input_file=str(snap), estimator="dtfe", ordered_merge=True).command()), str(on))
+              and "--ps-merge" not in rs.CustomSpec(input_file=str(snap), ordered_merge=True).command()
+              and "--ps-merge" not in rs.CustomSpec(input_file=str(snap)).command()
+              and rs.CustomSpec(input_file=str(snap), ordered_merge=False).command()[-2:] == ["--ps-merge", "completion-order"]
+              and not {"--ordered-merge", "--completion-order-merge", "--ps-merge"} & set(
+                  rs.CustomSpec(input_file=str(snap), estimator="dtfe", ordered_merge=False).command()), str(on))
         d = base / "runs"
         d.mkdir()
         _write_log(d / "om.runlog", "RUNNING: /x/PS-DTFE in.hdf5 om --grid 64 --partition 2 2 2 --ordered-merge\n"
@@ -2802,7 +3012,7 @@ def ordered_merge_settings():
               and all(hasattr(rs.RunSpec(), k) for k in om.settings()), f"{om.settings()} {om.options_text()!r}")
         import presets as P
         check("ordered merge: the tick's label has no '--', and names the option it stands for",
-              "--" not in P.label("ordered_merge") and P.OPTION_TEXT["ordered_merge"][1] == "--ordered-merge")
+              "--" not in P.label("ordered_merge") and P.OPTION_TEXT["ordered_merge"][1] == "--ps-merge")
 
         # a killed partitioned run leaves '<prefix>.runlog.checkpoint/' (a directory); it is a run file, never an
         # output or a log, and with no live process the run is 'resumable' -- when run_ps_dtfe.sh ran it (a Grids or
@@ -2864,7 +3074,7 @@ def ordered_merge_settings():
             n1, n2 = R.attempt_note(ck), R.attempt_note(ck2)
             check("... and its note says the same job resumes it, and names the start-over tick",
                   n1 is not None and "resum" in n1[1] and n2 is not None and "resum" in n2[1]
-                  and all("Start over" in m and "PS_RESUME=0" in m for _, m in (n1, n2))
+                  and all("Start over" in m and "DTFE_RESUME=0" in m and "PS_RESUME" not in m for _, m in (n1, n2))
                   and not [m for _, m in (n1, n2) if "--" in m], f"{n1} {n2}")
         else:
             check("without ps a '.runlog.partial' stays 'partial' (its process cannot be ruled out), checkpoint or not",
@@ -2872,11 +3082,11 @@ def ordered_merge_settings():
         # a refused resume is never 'resumable' (rerunning fails again), nor is a Custom run's checkpoint
         nr, nr0 = (R.attempt_note(r) if r is not None else None for r in (rf, rf0))
         check("a resume the binary refused (other settings; nothing to resume) stays 'failed', its note and cause name "
-              "'Start over' (PS_RESUME=0, no '--'); a Custom run's checkpoint is never 'resumable'",
+              "'Start over' (DTFE_RESUME=0, no '--'); a Custom run's checkpoint is never 'resumable'",
               rf is not None and rf.attempt == "failed" and getattr(rf, "attempt_resume_refused", False) and rf.ok
               and rf0 is not None and rf0.attempt == "failed" and getattr(rf0, "attempt_resume_refused", False)
               and "Resume refused" in rf.attempt_cause
-              and all(n is not None and n[0] == "warning" and "Start over" in n[1] and "PS_RESUME=0" in n[1]
+              and all(n is not None and n[0] == "warning" and "Start over" in n[1] and "DTFE_RESUME=0" in n[1]
                       and "--" not in n[1] for n in (nr, nr0))
               and cu is not None and cu.attempt == "failed" and not getattr(cu, "attempt_resume_refused", False),
               str({k: (v.attempt, getattr(v, "attempt_resume_refused", None), v.attempt_cause) for k, v in got.items()}) + f" {nr} {nr0}")
@@ -2886,13 +3096,15 @@ def ordered_merge_settings():
               and hasattr(R, "RESUME_REFUSED") and not R.RESUME_REFUSED.search("this run starts over and replaces it ('--resume' continues it).")
               and not R.RESUME_REFUSED.search("removed when the outputs are written; '--resume' continues a killed "
                                               "run from it)"), str(dg))
-        # the start-over tick: PS_RESUME=0 for run_ps_dtfe.sh, spelled out as 1 otherwise (a stray export cannot leak in)
-        check("start over: Grids and Pipeline jobs set PS_RESUME=0 (standard Grids jobs DTFE_RESUME=0) when ticked, 1 "
+        # the start-over tick: DTFE_RESUME=0 for both drivers (PS_RESUME, run_ps_dtfe.sh's older name, the same until
+        # P6.6), spelled out as 1 otherwise (a stray export cannot leak in)
+        ps_resume = lambda e: (e.get("DTFE_RESUME"), e.get("PS_RESUME"))     # noqa: E731
+        check("start over: Grids and Pipeline jobs set DTFE_RESUME=0 (and PS_RESUME=0 for PS-DTFE) when ticked, 1 "
               "otherwise; the memory check ignores it",
-              rs.RunSpec(sim="TNG50-4", snapshots=[99], start_over=True).command()[1].get("PS_RESUME") == "0"
-              and off.get("PS_RESUME") == "1"
-              and rs.PipelineSpec(sims=["TNG50-4"], start_over=True).command()[1].get("PS_RESUME") == "0"
-              and rs.PipelineSpec(sims=["TNG50-4"]).command()[1].get("PS_RESUME") == "1"
+              ps_resume(rs.RunSpec(sim="TNG50-4", snapshots=[99], start_over=True).command()[1]) == ("0", "0")
+              and ps_resume(off) == ("1", "1")
+              and ps_resume(rs.PipelineSpec(sims=["TNG50-4"], start_over=True).command()[1]) == ("0", "0")
+              and ps_resume(rs.PipelineSpec(sims=["TNG50-4"]).command()[1]) == ("1", "1")
               and rs.RunSpec(estimator="dtfe", sim="TNG50-4", snapshots=[99], start_over=True).command()[1].get("DTFE_RESUME") == "0"
               and rs.RunSpec(estimator="dtfe", sim="TNG50-4", snapshots=[99]).command()[1].get("DTFE_RESUME") == "1"
               and rs.RunSpec(start_over=True).memory_key() == rs.RunSpec().memory_key()
@@ -3009,12 +3221,12 @@ def pts_conventions_choice():
               and rs.PipelineSpec(sims=["TNG50-4"], pts_conventions="legacy").check_step("TNG50-4", [99], 1024).env.get(
                   "PTS_CONVENTIONS") == "legacy")
         leg = c(sample_points=str(plane), pts_conventions="legacy")
-        check("Custom: '--pts-conventions legacy' with points for legacy only (grid = the binary's default, nothing "
+        check("Custom: '--ps-point-conventions legacy' with points for legacy only (grid = the binary's default, nothing "
               "added); not without points nor for standard DTFE",
-              "--pts-conventions" in leg and leg[leg.index("--pts-conventions") + 1] == "legacy"
-              and "--pts-conventions" not in c(sample_points=str(plane))
-              and "--pts-conventions" not in c(pts_conventions="legacy")
-              and "--pts-conventions" not in c(sample_points=str(plane), pts_conventions="legacy", estimator="dtfe"))
+              "--ps-point-conventions" in leg and leg[leg.index("--ps-point-conventions") + 1] == "legacy"
+              and "--ps-point-conventions" not in c(sample_points=str(plane))
+              and "--ps-point-conventions" not in c(pts_conventions="legacy")
+              and "--ps-point-conventions" not in c(sample_points=str(plane), pts_conventions="legacy", estimator="dtfe"))
         msgs = lambda spec: [(lv, m) for lv, m in spec.problems() if "conventions" in m]     # noqa: E731
         rl = msgs(rs.RunSpec(sim="TNG50-4", snapshots=[99], slice_plane=str(plane), pts_conventions="legacy"))
         pl = msgs(rs.PipelineSpec(sims=["TNG50-4"], pts_conventions="legacy"))
@@ -3050,7 +3262,7 @@ def pts_conventions_choice():
               and "--" not in recs["legacy"].options_text(), f"{st} {recs['legacy'].options_text()}")
         import presets as P
         check("the menu's label and texts (the binary's own help behind the tooltip): no '--'",
-              P.label("pts_conventions") and P.OPTION_TEXT["pts_conventions"][1] == "--pts-conventions"
+              P.label("pts_conventions") and P.OPTION_TEXT["pts_conventions"][1] == "--ps-point-conventions"
               and set(rs.PTS_CONVENTIONS_TEXT) == set(rs.PTS_CONVENTIONS) == {"grid", "legacy"}
               and not any("--" in t for t in list(rs.PTS_CONVENTIONS_TEXT.values()) + [P.label("pts_conventions")]))
     finally:

@@ -52,7 +52,7 @@ void DTFE(std::vector<Particle_data> *allParticles,
 #endif
 #include "math_functions.h"
 
-// As above but single-triangulation only (no --partition without --partNo); also returns delaunay_triangulation.
+// As above but single-triangulation only (no --partition without --partition-index); also returns delaunay_triangulation.
 void DTFE(std::vector<Particle_data> *allParticles,
           std::vector<Sample_point> &samples,
           User_options &userOptions,

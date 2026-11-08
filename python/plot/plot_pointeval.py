@@ -15,9 +15,12 @@ for runs with PTS_VEL_GRAD=1 -- velDiv, velShear, velVort (plus denGradMag with
 
     python3 plot/plot_pointeval.py --sims all               # every sim, every snapshot
     python3 plot/plot_pointeval.py --sims TNG300-3-Dark      # one simulation
-    python3 plot/plot_pointeval.py --sims TNG300-3-Dark --snaps 0,4,17,33   # selected snapshots
-    python3 plot/plot_pointeval.py --sims all --fields density,velDiv --force
-    python3 plot/plot_pointeval.py --sims all --method dtfe  # the standard-DTFE slice (output.pts_*)
+    python3 plot/plot_pointeval.py --sims TNG300-3-Dark --snaps 0 4 17 33   # selected snapshots
+    python3 plot/plot_pointeval.py --sims all --maps density velDiv --force
+    python3 plot/plot_pointeval.py --sims all --estimator dtfe   # the standard-DTFE slice (output.pts_*)
+
+The lists are space-separated (a comma-joined one is still split, with a warning, for one release); the old
+spellings --method, --fields, --smooth and --smooth-derivatives are read with a warning too.
 """
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
@@ -31,6 +34,7 @@ matplotlib.use("Agg")
 import config
 from dtfelib import pointeval
 from dtfelib.cli import NoDataRoot, find_sims, require_data_root, sim_dir, snapdir_path, snapshot_ladder
+from dtfelib.cli import new_parser, add_list_arg, add_estimator_arg, deprecated_alias
 from dtfelib.io import FieldSet
 
 
@@ -44,19 +48,18 @@ def discover_snaps(sim: str, data_root=None):
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = new_parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--data-root", type=Path, default=None,
                    help="the folder that holds the simulations (default: DTFE_DATA_ROOT; one of the two is needed)")
-    p.add_argument("--sims", required=True,
-                   help="comma-separated simulations, or 'all' for every one with snapshots on disk (required)")
-    p.add_argument("--snaps", default=None,
-                   help="comma-separated snapshot numbers (default: all present)")
-    p.add_argument("--fields", default=None,
-                   help=f"comma-separated subset of {','.join(pointeval.STYLES)} (default: all available)")
-    p.add_argument("--method", choices=("auto", "ps", "dtfe"), default="auto",
-                   help="whose slice to render: PS-DTFE (ps_output.pts_*), standard DTFE (output.pts_*, a "
-                        "run_dtfe.sh SAMPLE_POINTS run), or auto = the slice on disk, PS-DTFE first")
+    add_list_arg(p, "--sims", required=True, metavar="SIM",
+                 help="the simulations, space-separated, or 'all' for every one with snapshots on disk (required)")
+    add_list_arg(p, "--snaps", kind=int, default=None, metavar="N",
+                 help="snapshot numbers, space-separated (default: all present)")
+    add_list_arg(p, "--maps", dest="fields", default=None, metavar="MAP",
+                 help=f"the maps to draw, space-separated, from {' '.join(pointeval.STYLES)} (default: all available)")
+    deprecated_alias(p, "--fields", "--maps")
+    add_estimator_arg(p, help="whose slice to render: PS-DTFE (ps_output.pts_*), standard DTFE (output.pts_*, a "
+                              "run_dtfe.sh SAMPLE_POINTS run), or auto = the slice on disk, PS-DTFE first")
     p.add_argument("--prefix", default=None,
                    help="alternate on-disk grid prefix (run_ps_dtfe.sh OUTPUT_PREFIX, e.g. 'ps_mw')")
     p.add_argument("--plane", type=Path, default=None,
@@ -71,12 +74,12 @@ def main() -> int:
                    help="'plane' (default) = the central sampling plane, a zero-thickness "
                         "cross-section; 'slab' = average every plane in the file, the "
                         "finite-thickness analogue of a grid cell")
-    p.add_argument("--smooth", type=float, default=0.0, metavar="SIGMA",
+    p.add_argument("--smooth-px", dest="smooth", type=float, default=0.0, metavar="SIGMA",
                    help="Gaussian smoothing in output pixels applied to EVERY field's primary "
                         "output (default 0); also suppresses the auto smoothed-derivative "
                         "companions below")
-    p.add_argument("--smooth-derivatives", type=float, default=pointeval.DERIVATIVE_SMOOTH,
-                   metavar="SIGMA",
+    p.add_argument("--smooth-derivatives-px", dest="smooth_derivatives", type=float,
+                   default=pointeval.DERIVATIVE_SMOOTH, metavar="SIGMA",
                    help="the gradient fields (velDiv/velShear/velVort/denGradMag) are "
                         "piecewise-constant per tetrahedron and look faceted; each also gets a "
                         f"Gaussian-smoothed companion '<field>..._smooth<sigma>.png' at this "
@@ -85,18 +88,20 @@ def main() -> int:
                    help="use the grid maps' fixed 1e-1..1e4 density range for side-by-side "
                         "comparison with them. Default is a percentile stretch: the fixed "
                         "range clips ~26%% of a z=0 point-eval image to the darkest colour")
+    deprecated_alias(p, "--smooth", "--smooth-px")
+    deprecated_alias(p, "--smooth-derivatives", "--smooth-derivatives-px")
     args = p.parse_args()
     try:
         args.data_root = require_data_root(args.data_root)
     except NoDataRoot as e:
         p.error(str(e))
 
-    bad = set((args.fields or "").split(",")) - set(pointeval.STYLES) - {""}
+    bad = set(args.fields or ()) - set(pointeval.STYLES)
     if bad:
-        sys.exit(f"unknown field(s) {sorted(bad)}; choose from {', '.join(pointeval.STYLES)}")
-    fields = [f for f in (args.fields or "").split(",") if f] or None
-    sims = discover_sims(args.data_root) if args.sims == "all" else [s for s in args.sims.split(",") if s]
-    want = {int(n) for n in (args.snaps or "").replace(" ", "").split(",") if n} or None
+        sys.exit(f"unknown map(s) {sorted(bad)}; choose from {', '.join(pointeval.STYLES)}")
+    fields = list(args.fields or ()) or None
+    sims = discover_sims(args.data_root) if args.sims == ["all"] else list(args.sims)
+    want = set(args.snaps or ()) or None
 
     total, failed, skipped = 0, 0, 0
     for sim in sims:

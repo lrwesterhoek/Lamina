@@ -27,7 +27,6 @@ so it never poses as a real 256^3 run's, with the native density grid's stamp (r
 from __future__ import annotations
 
 import contextlib
-import re
 from pathlib import Path
 
 import numpy as np
@@ -76,28 +75,15 @@ def block_average(grid, factor: int) -> np.ndarray:
 
 
 VELOCITY_WEIGHTINGS = ("volume", "mass")
-_VOLUME_FLAG = re.compile(r"(^|\s)--ps-volume-weighted(\s|$)", re.M)
 
 
 def velocity_weighting(products) -> tuple[str, str]:
     """How the velocity grid of 'products' (a SnapshotProducts) was deposited, and how that is known: ('volume' |
-    'mass', why). The coarse velocity must be the mean a coarser run of the SAME deposit gives -- the
-    plain block mean for a volume-weighted grid, sum rho v / sum rho for a mass-weighted one -- and the production
-    PS-DTFE grids are volume-weighted (runspec's default, the TNG runlogs), so mass-weighting them all would compare
-    the native v_r stack with coarse ones built another way. Standard DTFE's cell-averaged velocity is the volume
-    average. A PS-DTFE run says it in its run log ('<prefix>runlog', the binary's command line: the header does
-    not record it); without the log the production convention (volume) is assumed, and said."""
+    'mass', why) -- io.run_velocity_weighting of its run log, as FieldSet.velocity_weighting. The coarse velocity
+    must be the mean a coarser run of the SAME deposit gives (block_average_velocity)."""
+    from .io import run_velocity_weighting
     fs = products.fs
-    if fs.method != "ps":
-        return "volume", "standard DTFE: the volume average"
-    log = Path(fs.snapdir) / f"{fs.prefix}runlog"
-    try:
-        text = log.read_text(errors="replace")
-    except OSError:
-        return "volume", f"no {log.name}: the production convention (--ps-volume-weighted) assumed"
-    if _VOLUME_FLAG.search(text):
-        return "volume", f"{log.name}: --ps-volume-weighted"
-    return "mass", f"{log.name}: no --ps-volume-weighted (the binary's mass-weighted default)"
+    return run_velocity_weighting(fs.method, Path(fs.snapdir) / f"{fs.prefix}runlog")
 
 
 def block_average_velocity(velocity, density, factor: int, weighting: str = "volume") -> np.ndarray:

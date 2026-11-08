@@ -25,13 +25,13 @@
     SAFE: the manifest carries the run's SETTINGS KEY: the build configuration and the binary (its revision and
     link time: a rebuilt binary does not resume), the command line (every deprecated option name in its canonical
     spelling, User_options::commandTokens: '--ps-gpu' and '--gpu' give one key) minus the
-    options that cannot change a grid value (--resume, --ordered-merge, --completion-order-merge, --no-overlap, --verbose,
+    options that cannot change a grid value (--resume, --ps-merge, --no-overlap, --verbose,
     --max-concurrent, --scratch-dir, --tessellation-cache), the input files' size+mtime, the resolved
     partition split and the grid. '--resume' refuses, naming the lines that differ, when the key differs.
     It over-refuses rather than under-refuses (a reordered command line is a different key).
 
     MERGE ORDER: the manifest lists the merged partitions as a SET, so a run merging in completion order
-    ('--completion-order-merge') can be resumed too. '--resume'
+    ('--ps-merge completion-order') can be resumed too. '--resume'
     merges in index order for the rest of the run; when the killed run merged in index order too (the default,
     or '--max-concurrent 1'), the resumed grids are byte-identical to an
     uninterrupted ordered run (tests/ps_resume_check.sh) -- at the
@@ -53,7 +53,7 @@
     The settings key then also names the sample-point file (size + mtime).
 
     NOT CHECKPOINTED: '--interlace' runs (two passes, the second on a half-cell-shifted grid, would share one
-    folder and key), and with DTFE_PS_CHECKPOINT=0. The scratch-backed grids are written to the
+    folder and key), and with DTFE_CHECKPOINT=0. The scratch-backed grids are written to the
     checkpoint file like any other: their mmap files are unlinked at creation (scratch_alloc.cc) and are modified in place by the next merge,
     so they cannot serve as an atomic checkpoint themselves.
 
@@ -75,7 +75,7 @@
     a '--gpu' run's too, since its sums are exact (64-bit fixed point; with DTFE_GPU_FLOAT_GRIDS=1 within the
     float atomics' run-to-run rounding). The same file layout, key, room rule,
     5% throttle, refusals and test hooks; what differs is named per build below (BUILD): the file's first line,
-    the off switch (DTFE_CHECKPOINT=0 for standard), the driver knob a refusal names (run_dtfe.sh DTFE_RESUME=0)
+    the off switch (DTFE_CHECKPOINT=0 for standard), the driver a refusal names (the knob, DTFE_RESUME=0, is the same in both drivers)
     and the messages' 'DTFE:' label; standard implies no ordered merge (its loop is serial anyway). The progress
     sidecar of a resumed standard run counts the restored partitions as done (DTFE.cpp). '--interlace' runs write no
     checkpoint, as for PS. A standard '--sample-points' run (with '--partition') is checkpointed
@@ -136,8 +136,8 @@ namespace PartitionCheckpoint
 #ifdef PHASE_SPACE
 static char const *const MAGIC = "DTFE-PS-CHECKPOINT 1";
 static char const *const NAME  = "PS-DTFE";
-static char const *const OFF_ENV = "DTFE_PS_CHECKPOINT";
-static char const *const START_OVER = "run_ps_dtfe.sh: PS_RESUME=0";
+static char const *const OFF_ENV = "DTFE_CHECKPOINT";
+static char const *const START_OVER = "run_ps_dtfe.sh: DTFE_RESUME=0";
 #else
 static char const *const MAGIC = "DTFE-CHECKPOINT 1";
 static char const *const NAME  = "DTFE";
@@ -190,16 +190,17 @@ inline std::string directoryFor(User_options const &u)
 // the command line as option groups ('--grid 64 64 64' is one line), minus the options that cannot change a
 // grid value; positional arguments (the input and output names) keep their own lines. The tokens come canonical
 // (User_options::commandTokens: a deprecated spelling already in its canonical name), so each drop list holds the
-// canonical names; '--ps-no-overlap' stays in it for a caller that hands raw tokens.
+// canonical names (the old merge switches arrive as '--ps-merge MODE'); '--ps-no-overlap' stays in it for a caller
+// that hands raw tokens.
 inline std::string commandKeyLines(std::vector<std::string> const &tokens)
 {
-    // '--completion-order-merge' like '--ordered-merge': the merge order moves the grids at float rounding
-    // only, and a run killed under one order must resume under the other (--resume merges in index order)
-    // '--fixed-point-merge' is dropped here because the key's own 'merge=fixed-point' line carries it
-    static char const *const dropFlag[]  = { "--resume", "--ordered-merge", "--completion-order-merge", "--ps-no-overlap",
-                                             "--no-overlap",   // (the look-ahead switch of both binaries)
-                                             "--fixed-point-merge" };
-    static char const *const dropValue[] = { "--verbose", "-v", "--max-concurrent", "--scratch-dir", "--tessellation-cache" };
+    // '--ps-merge': the index and the completion order move the grids at float rounding only, and a run killed
+    // under one order must resume under the other (--resume merges in index order); fixed-point is dropped here
+    // because the key's own 'merge=fixed-point' line carries it
+    static char const *const dropFlag[]  = { "--resume", "--ps-no-overlap",
+                                             "--no-overlap" };  // (the look-ahead switch of both binaries)
+    static char const *const dropValue[] = { "--verbose", "-v", "--max-concurrent", "--scratch-dir", "--tessellation-cache",
+                                             "--ps-merge" };
     auto isOption = [](std::string const &t)
     {   // '--name' or '-x'; a negative number ('-0.1') is a value
         return t.size() >= 2 and t[0] == '-' and ( t[1] == '-' or std::isalpha( (unsigned char)t[1] ) );
@@ -233,7 +234,7 @@ inline std::string settingsKey(User_options const &u)
     // the BINARY too: a resume after a rebuild would combine partitions deposited by the old code with the
     // new code's, while the run log names only the new 'Build:' -- which the launcher's fix registry reads to tell a
     // grid made before an output-changing fix. The link time as well: every uncommitted rebuild has the same
-    // '<hash>-dirty' revision. Over-refusal is the design; the refusal names PS_RESUME=0.
+    // '<hash>-dirty' revision. Over-refusal is the design; the refusal names DTFE_RESUME=0.
     k << "binary=" << dtfeBuildRevision() << " (built " << dtfeBuildTime() << ")\n";
     k << "output=" << absoluteOutput( u.outputFilename ) << '\n';
     k << commandKeyLines( u.commandTokens );
@@ -249,7 +250,7 @@ inline std::string settingsKey(User_options const &u)
     if ( not u.psSamplePointsFile.empty() )
         k << cacheFileLine( "sample-points", u.psSamplePointsFile ) << '\n';
 #ifdef PHASE_SPACE
-    // the merge mode: a '--fixed-point-merge' checkpoint holds integer words instead of the summed Real
+    // the merge mode: a '--ps-merge fixed-point' checkpoint holds integer words instead of the summed Real
     // grids, so neither mode can resume the other's (beginLoop refuses it by name)
     if ( u.psFixedPointMerge )
         k << "merge=fixed-point\n";
@@ -403,7 +404,7 @@ struct Checkpointer
     bool points = false;              // this run evaluates points: save their records with every checkpoint
     std::vector<char> pointsSaved;    // per partition: its 'points.<i>' is this run's (written, or read on resume)
     bool pointsCleaned = false;       // an earlier run's unlisted 'points.<i>' files removed (after the first write)
-    std::vector<Blob> blobs;          // '--fixed-point-merge': its integer grids, beside the Real ones
+    std::vector<Blob> blobs;          // '--ps-merge fixed-point': its integer grids, beside the Real ones
 };
 
 inline Checkpointer &state()
@@ -631,7 +632,7 @@ inline bool load(std::string const &dir, Manifest const &m, Quantities &u, Quant
    '--resume' refuses unless the checkpoint is this run's (manifest readable, key equal, same partition count,
    every field the right size), then LOADS its grids into u/a (PS-DTFE '--sample-points': and the merged partitions'
    point records) and marks its partitions in state().merged -- the
-   caller skips those (PS: like a --ps-window skip, still a turn in the ordered merge; standard: not computed at
+   caller skips those (PS: like a --grid-window skip, still a turn in the ordered merge; standard: not computed at
    all). Says where checkpoints go, or why there are none. Returns the number of partitions restored. */
 inline int beginLoop(User_options const &options, int const totalPartitions, Quantities &u, Quantities &a,
                      bool const pointEval, int const verboseLevel)
@@ -675,9 +676,9 @@ inline int beginLoop(User_options const &options, int const totalPartitions, Qua
         bool const savedFx = m.key.find( "\nmerge=fixed-point\n" ) != std::string::npos;
         if ( savedFx != options.psFixedPointMerge )
             throwError( "'--resume' refused: the checkpoint '", dir, std::string( "' was written by a run " )
-                        + ( savedFx ? "with '--fixed-point-merge' (its grids are integer words); this run merges into "
+                        + ( savedFx ? "with '--ps-merge fixed-point' (its grids are integer words); this run merges into "
                                       "the float grids (the default merge)"
-                                    : "with the default merge (its grids are float sums); this run has '--fixed-point-merge'" )
+                                    : "with the default merge (its grids are float sums); this run has '--ps-merge fixed-point'" )
                         + ". Resume with the killed run's merge mode, or run without '--resume' to start over (" + START_OVER
                         + ").", "" );
 #endif
@@ -703,7 +704,7 @@ inline int beginLoop(User_options const &options, int const totalPartitions, Qua
                 << nDone << " of " << totalPartitions << MESSAGE::cReset() << " partitions are already in the "
                 << "checkpoint '" << dir << "'; computing the other " << ( totalPartitions - nDone )
 #ifdef PHASE_SPACE
-                << ( options.psFixedPointMerge ? " (each added as it finishes: --fixed-point-merge).\n"
+                << ( options.psFixedPointMerge ? " (each added as it finishes: --ps-merge fixed-point).\n"
                                                : " (merged in partition order: --resume always merges in index order).\n" )
                 << MESSAGE::Flush;
 #else
@@ -742,7 +743,7 @@ inline int beginLoop(User_options const &options, int const totalPartitions, Qua
 
 /* afterMerge: partition pi's grids are now in u/a and hold still (the PS loop: under its merge lock; the standard
    loop is serial). Marks it merged and writes the checkpoint unless the last write took more than 5% of the time
-   since it (always the first time, and at the test hook). A 'skipped' partition (PS --ps-window, or restored)
+   since it (always the first time, and at the test hook). A 'skipped' partition (PS --grid-window, or restored)
    counts for the manifest but not for the hook. The test hook dies right after its write, as a SIGKILL would. */
 inline void afterMerge(int const pi, bool const skipped, Quantities &u, Quantities &a, int const verboseLevel)
 {

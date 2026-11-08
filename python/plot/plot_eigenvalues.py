@@ -3,7 +3,7 @@
 Method-, snapshot- and simulation-agnostic via the shared pipeline/FieldSet layer:
 
     python3 plot/plot_eigenvalues.py                     # TNG50-4-Dark, full series, auto method
-    python3 plot/plot_eigenvalues.py --method dtfe
+    python3 plot/plot_eigenvalues.py --estimator dtfe
     python3 plot/plot_eigenvalues.py --snap 99           # single snapshot only
 """
 

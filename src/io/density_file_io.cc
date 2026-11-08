@@ -155,7 +155,7 @@ struct Density_header
             userOptions.regionMpcOn = true;
         }
         
-        size_t outGrid[NO_DIM];             // the grid the files hold: the --ps-window cells, else the full grid
+        size_t outGrid[NO_DIM];             // the grid the files hold: the --grid-window cells, else the full grid
         userOptions.outputGridSize( outGrid );
         for (int i=0; i<NO_DIM; ++i)        // update the grid dimensions
             this->gridSize[i] = outGrid[i];

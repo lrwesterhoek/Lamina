@@ -39,8 +39,10 @@ Tests (GPU builds; the PS suites use the GPU when the `o_ps/` stamp names one):
 - The kernel harness (Metal only): `bash metal/build_prototype.sh && ./metal/validate_deposit` (T1-T15 below;
   `BENCH=1` adds a 1M-tet timing, `DUMP_PROFILES=1` per-bin profiles, `VALIDATE_FLOAT_MASS=1` the float mass grid).
 
-CI: the `cudaemu` job (warp 32 and 64, and the twin check once), `cuda-compile` (CUDA 12.6 image) and `hip-compile`
-keep the port building and passing; the Metal path and real-hardware runs are local. **First thing to run on an NVIDIA or AMD machine:**
+CI no longer builds or runs the port (its `cudaemu`, `cuda-compile` and `hip-compile` jobs were removed on 2026-11-08:
+the port is not in use, and the emulation jobs kept stalling on the runners' package mirrors). The checks are local:
+`make DTFE PS-DTFE CUDAEMU=1` + `tests/cudaemu_check.sh` (`CUDAEMU_WARPS=32` or `64`) and `tests/gpu_twin_check.sh`,
+as are the Metal path and real-hardware runs. **First thing to run on an NVIDIA or AMD machine:**
 `GPU_BUILD=CUDA=1 tests/dtfe_metal_check.sh`, then the PS suites above.
 
 ## Files
@@ -79,7 +81,7 @@ with the CPU's exact test. So stream counts and `.hidden_streams` are byte-ident
 (single build). A tetrahedron the kernel's float degeneracy check would reject but the host kept is deferred, not lost.
 
 **The exact deposit** (`depositExactItems`) splits the work below the tetrahedron: one thread per item = (tetrahedron,
-block of 16 cells of its bounding-box window; `PS_EXACT_ITEM_CELLS`). With one thread per tetrahedron the per-thread
+block of 16 cells of its bounding-box window; `DTFE_GPU_EXACT_CELLS`). With one thread per tetrahedron the per-thread
 cost spans five orders of magnitude once cells are smaller than tetrahedra, and each buffer waits on its few giants
 (0.26M particles on 256^3: 30 s with items, more than 17 min without). Phase 0 adds each item's clipped weights into a
 per-tet total `sumW`, phase 1 deposits each piece with the share m/sumW, so every tetrahedron deposits exactly its
@@ -87,7 +89,7 @@ mass; a tetrahedron whose total stays 0 goes through `depositFields` (sampled pa
 host bounds every window from its own copy (the kernel re-derives it in float; surplus items idle) and caps the items
 at 32M. They are implicit, as the standard deposit's: a prefix sum over the tetrahedra and a block table (4 B per
 tetrahedron plus 4 B per 32 items; `psItemOf` finds an item's tetrahedron by a short binary search), built before the
-deposit takes the GPU. `PS_EXACT_ITEMS=0` keeps the one-thread path for A/B. With the dispersion requested, a tetrahedron whose
+deposit takes the GPU. `DTFE_GPU_ITEMS=0` keeps the one-thread path for A/B. With the dispersion requested, a tetrahedron whose
 velocity covariance float32 cannot resolve (`exact_disp_illcond`: a thin tetrahedron with a steep velocity gradient,
 `EX_DISP_KAPPA2`) is left out of phase 0 (only phase 0 decides, so phase 1 never drops a tet whose weights were
 summed) and deferred by `depositFields` to the CPU's double deposit; every other piece's mean velocity and covariance
@@ -111,7 +113,7 @@ itself). Every GPU exact path clips with the origin at the centre of the overlap
 the cell and shifts the centroid back; it agrees with the CPU (double r3d, vertex-0 frame) to float rounding at every
 resolution (`ps_window_check.sh`'s fine grid, `dtfe_metal_check.sh`'s fine region).
 
-**`--ps-window`.** The sampled kernel visits every cell of a straddling tetrahedron's bounding box and counts the
+**`--grid-window`.** The sampled kernel visits every cell of a straddling tetrahedron's bounding box and counts the
 samples outside the window for its normalization, depositing only those inside. The exact items are built from the
 hull of each bounding box intersected with the window's periodic images (`window_hull` in the kernel and `psWindowHull`
 on the host: keep them in sync), and the tetrahedron is normalized by its whole weight `wFull`; an empty window piece
@@ -167,8 +169,8 @@ The hosts hand the words over unconverted (`PSGpuGrids::massFx`); the CPU adds t
 run whatever the order of the atomics (`gpu_mass_check.sh`, `ps_fixed_moments_check.sh`, `dtfe_gpu_retry_check.sh`);
 the remaining differences against the CPU are its float arithmetic (~1e-6 of the peak). A share without an integer
 value (NaN, infinity, beyond 2^63 units) is left out and counted, and the run warns per grid (`DTFE_TEST_NAN_SHARE`).
-A double build converts the words to double once. The float modes stay for A/B: `PS_GPU_FLOAT_MASS=1`,
-`PS_GPU_FLOAT_MOMENTS=1`, `DTFE_GPU_FLOAT_GRIDS=1` (and `DTFE_GPU_SHARED=1`),
+A double build converts the words to double once. The float modes stay for A/B: `DTFE_GPU_FLOAT_MASS=1`,
+`DTFE_GPU_FLOAT_MOMENTS=1`, `DTFE_GPU_FLOAT_GRIDS=1` (and `DTFE_GPU_SHARED=1`),
 all run-to-run variable at the ulp level. Each dispersion share
 w·v_i·v_j is a float32 product before the sum, as on the CPU path.
 
@@ -212,7 +214,7 @@ hosts pass every suite above through the emulation at warp 32 and 64 with the Me
 **The CPU emulation** (`gpu_cuda_emu.h`, `-DGPU_EMU`, a C++20 translation unit): a launch runs the grid one block at a
 time, a block's warps are OS threads and each warp's lanes are coroutines (a register-only stack switch; verified on
 arm64, on x86-64 only under Rosetta) run in lockstep at the collectives. Non-uniform control flow at a collective aborts
-with a message instead of hanging; `GPU_EMU_WARP=64` runs the reductions over 64 lanes. Atomics are real atomics and
+with a message instead of hanging; `DTFE_GPU_EMU_WARP=64` runs the reductions over 64 lanes. Atomics are real atomics and
 device memory is host memory, so it checks the port's transliteration and host logic, not the memory model, scheduling
 or numerics of a real device.
 
@@ -265,26 +267,29 @@ decommensurates the periods, offsets the phases and adds an affine shear while k
 ## Knobs
 
 Environment variables, read by both backends with the rule of the README's *Environment variables of the binaries*
-(an empty value is unset; a switch is off when set to `0`, `false`, `no` or `off`, on otherwise). Each `*_GPU_*` knob
-that has a Metal spelling also answers to it: the alias is read when the `*_GPU_*` name is unset.
+(an empty value is unset; a switch is off when set to `0`, `false`, `no` or `off`, on otherwise). One name per
+concept in both binaries; the Metal spellings of earlier releases (`*_METAL_*`) are no longer read. Two PS-DTFE knobs
+keep names of their own because standard DTFE's twins mean something else: `PS_GPU_CHUNK` (tetrahedra; standard
+`DTFE_GPU_CHUNK` counts work items) and `PS_GPU_DEBUG_NOATOMIC` (a switch; standard's is a level 1-3).
+The older names of the renamed ones are deprecated, read for one release (one warning line at start-up) while the
+new name is unset: `PS_EXACT_ITEMS` and `PS_EXACT_ITEM_CELLS` (deprecated: `DTFE_GPU_ITEMS`, `DTFE_GPU_EXACT_CELLS`),
+`PS_GPU_TIMING`, `PS_GPU_FLOAT_MASS`, `PS_GPU_FLOAT_MOMENTS` (deprecated: `DTFE_GPU_TIMING`, `DTFE_GPU_FLOAT_MASS`,
+`DTFE_GPU_FLOAT_MOMENTS`) and `GPU_EMU_WARP` (deprecated: `DTFE_GPU_EMU_WARP`).
 
-| variable (alias) | effect | default |
+| variable | effect | default |
 |---|---|---|
-| `DTFE_GPU_ITEMS` | standard DTFE: `0` runs the per-tet kernel instead of the item kernels | on |
+| `DTFE_GPU_ITEMS` | `0`: standard DTFE runs the per-tet kernel instead of the item kernels, PS-DTFE the one-thread-per-tetrahedron exact deposit (A/B) | on |
 | `DTFE_GPU_ITEM_SAMPLES=n` | samples per work item of the item kernels (4-100000) | 48 |
 | `DTFE_GPU_CACHE_K=2\|4\|8` | slots of the item kernels' per-thread cell cache | 2 |
 | `DTFE_GPU_TABLE` | `0` turns the threadgroup cell table off (evictions go to device atomics) | on |
-| `DTFE_GPU_EXACT_CELLS=n` | cells per `--exact-average` item | 16 |
+| `DTFE_GPU_EXACT_CELLS=n` | cells per `--exact-average` item (both binaries) | 16 |
 | `DTFE_GPU_SHARED` | one shared full grid on the device for the whole call (sampled, float sums) | off |
 | `DTFE_GPU_SHARED_GB` | the shared grid's cap in GB | Metal: 25% of RAM; CUDA/HIP: half the free device memory |
 | `DTFE_GPU_CHUNK` | standard DTFE: the opening chunk (the item kernels round it up to a multiple of 256) | 65536 items; per-tet kernel 25088 tetrahedra, exact 8192 items |
 | `PS_GPU_CHUNK` | PS-DTFE: the per-tet kernel's opening chunk in tetrahedra | 25000; exact deposit 500 |
-| `PS_EXACT_ITEMS` | `0` keeps the one-thread-per-tetrahedron exact deposit (A/B) | on |
-| `PS_EXACT_ITEM_CELLS=n` | cells per exact-deposit item | 16 |
-| `DTFE_GPU_TIMING` | one line per batch, and the Morton order's cell sharing | off |
-| `PS_GPU_TIMING` | one line per kernel run, the exact items and the checkpoints, and per partition how long its deposit waited for the GPU and held it, and where its time went: before the hold (device setup, plan, the exact items' bounds and map) and in it (uploads, kernels, pacing gaps, snapshots, leftovers, copy-back, releases) | off |
-| `PS_GPU_FLOAT_MASS` | the float mass grid on GPU and CPU, for A/B (see Exact sums) | off |
-| `PS_GPU_FLOAT_MOMENTS` | the float moment sums on GPU and CPU, for A/B | off |
+| `DTFE_GPU_TIMING` | standard DTFE: one line per batch, and the Morton order's cell sharing; PS-DTFE: one line per kernel run, the exact items and the checkpoints, and per partition how long its deposit waited for the GPU and held it, and where its time went: before the hold (device setup, plan, the exact items' bounds and map) and in it (uploads, kernels, pacing gaps, snapshots, leftovers, copy-back, releases) | off |
+| `DTFE_GPU_FLOAT_MASS` | PS-DTFE: the float mass grid on GPU and CPU, for A/B (see Exact sums) | off |
+| `DTFE_GPU_FLOAT_MOMENTS` | PS-DTFE: the float moment sums on GPU and CPU, for A/B | off |
 | `DTFE_GPU_FLOAT_GRIDS` | standard DTFE: float atomics for the `_a` grids, for A/B | off |
 | `DTFE_GPU_CHECKPOINT_CHUNKS=n` | a grid snapshot every n buffers (kernels); 0 = at the pass start only | every ~10 s of GPU work |
 | `DTFE_GPU_PACE_RECOVER_SEC=s` | clean GPU work after which an escalated pace eases back one notch | 90 |
@@ -295,6 +300,6 @@ gradient's reduction loop, 3 also the gradient's eviction atomics; the grids com
 `PS_GPU_DEBUG_NOATOMIC=1` (timing, the atomics' share of the sampled kernel: every sample is classified and counted
 but none is deposited; the grids come out empty),
 `DTFE_GPU_FAULT_AT=k[:innocent|timeout|oom|persist]` (the k-th buffer fails after it ran, for the retry suites),
-`DTFE_TEST_NAN_SHARE=k` (every k-th share becomes NaN, for the exact sums' guard), `GPU_EMU_WARP=64` (the CPU
+`DTFE_TEST_NAN_SHARE=k` (every k-th share becomes NaN, for the exact sums' guard), `DTFE_GPU_EMU_WARP=64` (the CPU
 emulation's warp width, default 32), and the harness's `BENCH`, `DUMP_PROFILES`, `VALIDATE_FLOAT_MASS` (Build and
 test).

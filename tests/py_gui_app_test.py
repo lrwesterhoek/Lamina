@@ -328,7 +328,7 @@ def _plots_run(qa, w):
     check("... the 'ps_gui' prefix marks both snapshots as having grids", marks() == [True, True])
     steps = w.plots.steps()
     check("one plot_PS_DTFE.py call per snapshot, with estimator and prefix",
-          [st.argv[2:] for st in steps] == [["--sim", SIM, "--snap", str(n), "--method", "ps", "--prefix",
+          [st.argv[2:] for st in steps] == [["--sim", SIM, "--snap", str(n), "--estimator", "ps", "--prefix",
                                              "ps_gui"] for n in (50, 99)]
           and all(st.env["MPLBACKEND"] == "Agg" and st.env["DTFE_SIM"] == SIM for st in steps),
           str([st.argv[2:] for st in steps]))
@@ -422,11 +422,19 @@ def _pipeline_options(qa, w, tmp, sim, seen, tick):
     qa.processEvents()
     env = w.pipe.command()[1]
     st = w.pipe.steps()
+
+    def _maps(argv):        # the words after '--maps' up to the next option: the whole list, not a prefix of it
+        out = []
+        for t in argv[argv.index("--maps") + 1:]:
+            if t.startswith("--"):
+                break
+            out.append(t)
+        return out
     check("the options reach the pipeline's environment, the render step and the estimate",
           w.p_cu.isEnabled() and w.p_thick.isEnabled() and w.p_rproject.isEnabled()
           and [env[k] for k in ("PS_CAUSTICS", "PS_CAUSTIC_CUSPS", "PS_GPU", "AVG_SUBSAMPLES", "PLANES", "THICKNESS",
                                 "SUPERSAMPLE")] == ["1", "1", "0", "2", "16", "3", "2"]
-          and st[1].argv[st[1].argv.index("--fields") + 1] == "density,streams"
+          and _maps(st[1].argv) == ["density", "streams"]
           and st[1].argv[st[1].argv.index("--project") + 1] == "slab" and "--fixed-range" in st[1].argv
           and "× 16 planes" in w.estimate.text() and f"{16 * 64 * 64 * 4 / 1e6:.1f}M points" in w.estimate.text(),
           f"{env} | {st[1].argv} | {w.estimate.text()}")
@@ -1146,7 +1154,7 @@ def _polish(qa, w):
     w.p_rforce.setChecked(False)
     qa.processEvents()
     check("... each with a one-line summary of what it holds",
-          summ.startswith("2³ partitions · 3 partitions in flight") and "--" not in summ
+          summ.startswith("2³ partitions · 3 triangulations at once") and "--" not in summ
           and adv == "on: re-render" and w.p_adv_group.summary_text() == "all off"
           and w.res_group.summary.toolTip() == w.res_group.summary_text(), f"{summ!r} {adv!r}")
     w.res_group.set_open(True)
@@ -1208,11 +1216,11 @@ def _presets(qa, w, P):
     qa.processEvents()
     tbb_note_ok = ("TBB" not in w.pt_check.text()) if rs.tbb_built() else ("TBB" in w.pt_check.text())
     check("the parallel-triangulation box sets the script's knob in the command, and names a build without TBB",
-          w.spec.parallel_triangulation and "PS_PARALLEL_TRI=1" in w.cmd_view.toPlainText()
+          w.spec.parallel_triangulation and "PARALLEL_TRIANGULATION=1" in w.cmd_view.toPlainText()
           and w.pt_check.isEnabled() and tbb_note_ok, w.pt_check.text())
     w.pt_check.setChecked(False)
     qa.processEvents()
-    check("... and unticked it is off", "PS_PARALLEL_TRI=0" in w.cmd_view.toPlainText())
+    check("... and unticked it is off", "PARALLEL_TRIANGULATION=0" in w.cmd_view.toPlainText())
     w.prec_combo.setCurrentIndex(w.prec_combo.findData("double"))
     qa.processEvents()
     both_double = rs.binary_built("ps", "double") and rs.binary_built("dtfe", "double")
@@ -1251,16 +1259,16 @@ def _presets(qa, w, P):
     w.dtfe_radio.setChecked(True)
     qa.processEvents()
     check("standard DTFE: switching to it moves the choice to the exact cell average (its production setting), "
-          "ticks the GPU (when built) and puts -e and DTFE_EXACT=1 on the run_dtfe.sh line",
+          "ticks the GPU (when built) and puts -e and DTFE_EXACT_AVERAGE=1 on the run_dtfe.sh line",
           w.deposit_combo.isEnabled() and w.deposit_combo.currentData() == "exact"
           and w.deposit_combo.itemText(w.deposit_combo.findData("exact")) == P.label("exact_dtfe")
           and w.spec.estimator == "dtfe" and w.spec.deposit == "exact" and w.gpu_check.isChecked() == rs.gpu_built("dtfe")
-          and dtfe_e(w.cmd_view.toPlainText()) and "DTFE_EXACT=1" in w.cmd_view.toPlainText()
+          and dtfe_e(w.cmd_view.toPlainText()) and "DTFE_EXACT_AVERAGE=1" in w.cmd_view.toPlainText()
           and not w.nsub_spin.isEnabled(), w.cmd_view.toPlainText())
     w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("sampled"))
     qa.processEvents()
-    check("... the Monte-Carlo average stays selectable: DTFE_EXACT=0 and no -e",
-          w.spec.deposit == "sampled" and "DTFE_EXACT=0" in w.cmd_view.toPlainText()
+    check("... the Monte-Carlo average stays selectable: DTFE_EXACT_AVERAGE=0 and no -e",
+          w.spec.deposit == "sampled" and "DTFE_EXACT_AVERAGE=0" in w.cmd_view.toPlainText()
           and not dtfe_e(w.cmd_view.toPlainText()), w.cmd_view.toPlainText())
     w.gpu_check.setChecked(False)
     w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("exact"))
@@ -1287,7 +1295,7 @@ def _presets(qa, w, P):
     back_ps = (w.spec.deposit, w.deposit_combo.currentData(), w.gpu_check.isChecked())
     w.dtfe_radio.setChecked(True)
     qa.processEvents()
-    back_dtfe = (w.spec.deposit, "DTFE_EXACT=0" in w.cmd_view.toPlainText())
+    back_dtfe = (w.spec.deposit, "DTFE_EXACT_AVERAGE=0" in w.cmd_view.toPlainText())
     w.ps_radio.setChecked(True)
     qa.processEvents()
     check("the deposit choice per estimator: PS-DTFE's exact deposit comes back after a switch to standard DTFE and "
@@ -1351,7 +1359,7 @@ def _custom_snapshot(qa, w, tmp, P):
     qa.processEvents()
     check("... back on PS-DTFE: the sampled deposit again, no '--padding'",
           w.custom.estimator == "ps" and w.custom.deposit == "sampled" and "--padding" not in w.cmd_view.toPlainText()
-          and "--avg-subsamples" in w.cmd_view.toPlainText(), w.cmd_view.toPlainText())
+          and "--subsamples" in w.cmd_view.toPlainText(), w.cmd_view.toPlainText())
     w.o_deposit.setCurrentIndex(w.o_deposit.findData("exact"))      # the choice per estimator, here too
     w.o_dtfe.setChecked(True)
     w.o_ps.setChecked(True)
@@ -2579,8 +2587,8 @@ def _exact_zoom(w, tmp, x, img):
     gi = cmd.index("--grid") if cmd and "--grid" in cmd else -1
     check("the exact zoom's command for a PERIODIC phase-space run: PS-DTFE on the whole periodic box, deposited "
           "into a window of a virtual grid (the run's cells along the slice axis), the exact deposit, no region cut",
-          cmd is not None and cmd[0].endswith("PS-DTFE") and "--periodic" in cmd and "--ps-window" in cmd
-          and "--exact-average" in cmd and "--box" not in cmd and "--regionMpc" not in cmd and gi >= 0
+          cmd is not None and cmd[0].endswith("PS-DTFE") and "--periodic" in cmd and "--grid-window" in cmd
+          and "--exact-average" in cmd and "--box" not in cmd and "--region-mpc" not in cmd and gi >= 0
           and cmd[gi + 1 + geo[0]] == str(x.current.n) and all(int(cmd[gi + 1 + a]) >= 64 for a in geo[2])
           and grid_[geo[0]] == 1 and edges is not None, str(cmd))
     check("... which reuses the query server's tessellation cache folder and asks for the progress lines",
@@ -2633,11 +2641,11 @@ def _exact_zoom_partitioned(qa, w, tmp, demo, root, cmd, x, sq):
     print("exact zoom over a partitioned tessellation cache:")
     pcache = tmp / "tess_parts"
     pcache.mkdir()
-    scmd = [cmd[0], cmd[1], str(tmp / "pserve"), "--serve", "--input", cmd[cmd.index("--input") + 1]]
-    for flag in ("--MpcUnit", "--lagrangianInput"):
+    scmd = [cmd[0], cmd[1], str(tmp / "pserve"), "--serve", "--input-format", cmd[cmd.index("--input-format") + 1]]
+    for flag in ("--mpc-unit", "--ps-lagrangian-input"):
         if flag in cmd:
             scmd += [flag, cmd[cmd.index(flag) + 1]]
-    scmd += ["--periodic", "--partition", "2", "2", "2", "--tessellation-cache", str(pcache), "--per-stream"]
+    scmd += ["--periodic", "--partition", "2", "2", "2", "--tessellation-cache", str(pcache), "--ps-per-stream"]
     r = subprocess.run(scmd, stdin=subprocess.DEVNULL, capture_output=True)   # stdout = the binary protocol
     check("a composite server with a 2x2x2 split caches its 8 partitions and their occupancy maps",
           r.returncode == 0 and len(list(pcache.glob("*.tess"))) == 8 and len(list(pcache.glob("*.tess.occ"))) == 8,
@@ -2767,7 +2775,7 @@ def _exact_zoom_partitioned(qa, w, tmp, demo, root, cmd, x, sq):
     cmd, root_, grid_, _e = x.exact_zoom_command(x.current, geo[0], geo[1], geo[2], (geo[3][0], geo[4][0]), (geo[3][1], geo[4][1]), 48)
     check("the exact zoom's command: the standard binary on the region, one slice cell thick, the exact average, "
           "padded by the query server's 15 spacings (the binary's own 5 is too thin at the region's faces)",
-          cmd is not None and cmd[0].endswith("DTFE") and "--regionMpc" in cmd and "--exact-average" in cmd
+          cmd is not None and cmd[0].endswith("DTFE") and "--region-mpc" in cmd and "--exact-average" in cmd
           and cmd[cmd.index("--grid") + 1:cmd.index("--grid") + 4].count("1") == 1
           and "--padding" in cmd and cmd[cmd.index("--padding") + 1] == "15"
           and "--" not in w.explore_view.title.text(), str(cmd))
@@ -2808,7 +2816,7 @@ def _exact_zoom_partitioned(qa, w, tmp, demo, root, cmd, x, sq):
     geo = x._geometry()
     cmd, _r, _g, _e = x.exact_zoom_command(x.current, geo[0], geo[1], geo[2], (geo[3][0], geo[4][0]), (geo[3][1], geo[4][1]), 64)
     check("the exact zoom's command for a non-periodic phase-space run: PS-DTFE on the whole cloud, a window, the exact deposit",
-          ok and cmd is not None and cmd[0].endswith("PS-DTFE") and "--ps-window" in cmd and "--exact-average" in cmd
+          ok and cmd is not None and cmd[0].endswith("PS-DTFE") and "--grid-window" in cmd and "--exact-average" in cmd
           and "--periodic" not in cmd and "--box" not in cmd and "--ps-volume-weighted" in cmd, str(cmd))
     img = w.explore_view.canvas._img
     x.zoom_res.setValue(64)
@@ -3220,7 +3228,7 @@ def two_d_gui(qa, w, tmp):
     geo = x._geometry()
     cmd, _r, grid_, _e = x.exact_zoom_command(o, geo[0], geo[1], geo[2], (geo[3][0], geo[4][0]),
                                              (geo[3][1], geo[4][1]), 64)
-    wi = cmd.index("--ps-window") if cmd and "--ps-window" in cmd else -1
+    wi = cmd.index("--grid-window") if cmd and "--grid-window" in cmd else -1
     gi = cmd.index("--grid") if cmd and "--grid" in cmd else -1
     check("the 2D exact zoom's command: PS-DTFE-2d, a 4-number window of a 2-number virtual grid, no GPU",
           cmd is not None and Path(cmd[0]).name == "PS-DTFE-2d" and wi > 0 and cmd[wi + 5] == "--field"
@@ -3254,7 +3262,7 @@ def two_d_gui(qa, w, tmp):
     geo = x._geometry()
     cmd, _r, grid_, _e = x.exact_zoom_command(x.current, geo[0], geo[1], geo[2], (geo[3][0], geo[4][0]),
                                              (geo[3][1], geo[4][1]), 64)
-    ri = cmd.index("--regionMpc") if cmd and "--regionMpc" in cmd else -1
+    ri = cmd.index("--region-mpc") if cmd and "--region-mpc" in cmd else -1
     check("... its exact zoom: DTFE-2d on a 4-number region, a 64 x 64 grid, the exact average",
           cmd is not None and Path(cmd[0]).name == "DTFE-2d" and ri > 0 and cmd[ri + 5] == "--field"
           and cmd[cmd.index("--grid") + 1:cmd.index("--grid") + 3] == ["64", "64"] and "--exact-average" in cmd

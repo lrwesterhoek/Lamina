@@ -128,18 +128,28 @@ struct PSFixedBounds
         B[PS_FX_SG]   += wm * sgMax;
         B[PS_FX_RM]   += V / cellVol;
     }
-    void add(PSFixedBounds const &o) { for (int g = 0; g < PS_FX_CPU_N; ++g) B[g] += o.B[g]; }
+    // --face-gradient (CPU only; not a PSFxGrid, so the GPU's grids and counters are untouched): the face sums of the
+    // streams' velocity and of their covered area. S = an upper bound on the tet's section area summed over the grid
+    // planes it crosses; every face share of it is at most vMax times a piece of that area.
+    double faceS = 0., faceN = 0., faceP = 0.;
+    // rho = the tet's uniform density in rho/rho_bar (its mass over its Eulerian volume): the normal momentum's bound
+    void addFace(double vMax, double S, double rho) { faceS += vMax * S; faceN += S; faceP += rho * vMax * S; }
+    void add(PSFixedBounds const &o)
+    {
+        for (int g = 0; g < PS_FX_CPU_N; ++g) B[g] += o.B[g];
+        faceS += o.faceS; faceN += o.faceN; faceP += o.faceP;
+    }
 };
 
 // The units a pass's caller hands the GPU host: scale[g] > 0 = grid g as a fixed-point sum in units
 // of 1/scale[g] (the host still deposits only the grids its flags select), 0 = float atomics
-// (PS_GPU_FLOAT_MOMENTS=1, or a bound without a unit); sumW = the exact items' per-tet
+// (DTFE_GPU_FLOAT_MOMENTS=1, or a bound without a unit); sumW = the exact items' per-tet
 // weight totals as fixed-point sums as well.
 struct PSFixedUnits
 {
     float scale[PS_FX_N] = {};
     bool  sumW = false;
-    // the total the mass grid's unit is taken from (psMassFixedScale) when > 0 (a --ps-window pass, so
+    // the total the mass grid's unit is taken from (psMassFixedScale) when > 0 (a --grid-window pass, so
     // that the GPU and the CPU window deposits take the same unit -- ps_interpolation.cc fxBoundWalk); 0 = the host's
     // own sum of the masses it is handed plus massExtra
     double massTotal = 0.;
@@ -157,7 +167,8 @@ struct PSFixedUnits
 // the same integer as without the guard, so normal data is unaffected bit for bit.
 // The count slots: PS-DTFE g = PSFxGrid (0 .. PS_FX_CPU_N-1), the mass grid, the exact items' per-tet weight totals;
 // standard DTFE 0..4 = its grids (dtfe_gpu_fixed.h: density, velocity, velocity gradient, scalar, its gradient).
-enum FixedShareSlot { FX_DROP_MASS = 10, FX_DROP_SUMW = 11, FX_DROP_SLOTS = 16 };
+enum FixedShareSlot { FX_DROP_MASS = 10, FX_DROP_SUMW = 11, FX_DROP_FACE_S = 12, FX_DROP_FACE_N = 13, FX_DROP_FACE_P = 14,
+                      FX_DROP_SLOTS = 16 };
 static_assert( int(PS_FX_CPU_N) <= int(FX_DROP_MASS), "a moment grid's slot would be the mass grid's" );
 // The run's dropped shares by slot: every pass (CPU, or a GPU host after a deposit it kept) adds its counts here
 inline std::atomic<unsigned long long> fixedShareDrops[FX_DROP_SLOTS] = {};
@@ -226,7 +237,7 @@ static_assert( int(PS_FX_N) == 9, "PSDepositParams.fxScale[9] holds one unit per
 // The unit of the mass grid's fixed-point sum (the kernel's DepositParams.massFixed says why):
 // scale = 2^k with the mass handed to the deposit (a partition's tets) at 2^61..2^62 units -- the finest unit
 // at which no cell overflows the signed 64-bit sum, even holding all of it plus every share's rounding. The
-// unit must be fine: with the mean TET mass at 2^32 units, the 3 kpc cells of a --ps-window zoom
+// unit must be fine: with the mean TET mass at 2^32 units, the 3 kpc cells of a --grid-window zoom
 // (pieces of ~1e-8 of a tet) would come out 5e-4 off. Here a cell holding 2^-40 of the partition's
 // mass still has 2^21 units. False when the mass gives no usable power of two (the caller keeps the float grid).
 inline bool psMassFixedScale(double totalMass, float &scale)

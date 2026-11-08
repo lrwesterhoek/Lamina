@@ -5,8 +5,8 @@
    every Delaunay cell maps to a (possibly folded) Eulerian tetrahedron, and a query point
    receives one stream per tetrahedron that contains it. Per point we report the total
    density, the density-weighted mean velocity, the velocity dispersion tensor and the
-   stream count; --per-stream additionally records every stream's own density and velocity,
-   and --per-stream-ids each stream's identity (the sorted Lagrangian-vertex ParticleIDs).
+   stream count; --ps-per-stream additionally records every stream's own density and velocity,
+   and --ps-per-stream-ids each stream's identity (the sorted Lagrangian-vertex ParticleIDs).
    --pts-den-grad adds the density gradient: per stream the constant gradient of the linear
    'dtfe' profile (regardless of --ps-stream-density -- the geometric density is piecewise
    constant, so the dtfe-profile gradient is the only well-defined one), per point the sum
@@ -17,7 +17,7 @@
    count is the 0/1 coverage flag, the density is the plain linear DTFE interpolant and the
    dispersion is identically 0. The context, bucket index, reduction and writers below are
    shared verbatim; only the per-triangulation worker differs (interpolatePoints_standard).
-   --per-stream/--per-stream-ids and --ps-stream-density are PS-only (rejected at option
+   --ps-per-stream/--ps-per-stream-ids and --ps-stream-density are PS-only (rejected at option
    parsing); the Sample_point mechanism is a separate path.
 
    Per-stream density comes in two variants (--ps-stream-density):
@@ -28,11 +28,11 @@
      'geometric' the constant per-tetrahedron density m_tet / V_eul (= rho_bar V_lag/V_eul)
                  -- the density whose cell-averaged, quantized rendering the mass-conserving
                  grid deposit produces. Discontinuous across tetrahedra, conserves mass.
-   Both follow the run's grid conventions ('--pts-conventions grid', the default):
+   Both follow the run's grid conventions ('--ps-point-conventions grid', the default):
    under --ps-vertex-mass they carry the grid's tetrahedron masses through a per-vertex mass-model
    ratio, under --ps-volume-weighted the per-point velocity, its gradient and the scalar are
    equal-volume stream means (see 'The grid deposit's conventions at the points' below);
-   '--pts-conventions legacy' keeps rho_bar V_lag and density weighting. A partitioned run's stream
+   '--ps-point-conventions legacy' keeps rho_bar V_lag and density weighting. A partitioned run's stream
    records are checkpointed per partition for '--resume' ('--resume with --sample-points' below).
 
    The candidate search buckets the (static, read-only) QUERY POINTS on a uniform grid and
@@ -385,7 +385,7 @@ void psPointEvalInit(User_options &userOptions)
     g_pe.ctx.useGeometric = userOptions.psStreamDensityGeometric;
     g_pe.ctx.periodic     = userOptions.periodic;
 #ifdef PHASE_SPACE
-    // the grid deposit's mass model and velocity weighting, unless '--pts-conventions legacy'
+    // the grid deposit's mass model and velocity weighting, unless '--ps-point-conventions legacy'
     g_pe.ctx.vertexMass     = userOptions.psVertexMass and not userOptions.psPtsLegacyConventions;
     g_pe.ctx.volumeWeighted = userOptions.psVolumeWeighted and not userOptions.psPtsLegacyConventions;
     g_pe.ctx.rhoBar       = double( userOptions.averageDensity );   // PS vertex densities are physical
@@ -716,7 +716,7 @@ void interpolatePoints_phaseSpace(DT &dt, User_options &userOptions)
         if ( vertexMass )
             for (int v = 0; v <= NO_DIM; ++v)
                 rho[v] *= cell->vertex(v)->info().volumeAccumulator();
-        // --pts-scalar: the vertices' scalar values; --pts-lagrangian: their Lagrangian positions
+        // --pts-scalar: the vertices' scalar values; --ps-per-stream-lagrangian: their Lagrangian positions
         // (the triangulation's own points). A tetrahedron is compact in Lagrangian space, so the
         // differences need no wrap; only the interpolated q is wrapped into the box.
         double scal[NO_DIM+1][noScalarComp], lagV[NO_DIM+1][NO_DIM];
@@ -901,9 +901,9 @@ void interpolatePoints_standardOwn(DT &dt, User_options &userOptions, OwnBox con
         StreamRec rec;
         rec.caustic = 0;                    // --ps-caustics is PS-only (no fold parity to report here)
         for (int v = 0; v <= NO_DIM; ++v)
-            rec.ids[v] = 0;                 // --per-stream-ids is PS-only (rejected at parsing)
+            rec.ids[v] = 0;                 // --ps-per-stream-ids is PS-only (rejected at parsing)
         for (int d = 0; d < NO_DIM; ++d)
-            rec.lag[d] = 0.;                // --pts-lagrangian is PS-only
+            rec.lag[d] = 0.;                // --ps-per-stream-lagrangian is PS-only
         for (size_t j = 0; j < noScalarComp; ++j)
             rec.scal[j] = 0.;
         double scal[NO_DIM+1][noScalarComp];
@@ -1035,12 +1035,12 @@ static void finalizeLoadPoint(size_t const i, std::vector<uint64_t> const &first
             if (a.grad[i] != b.grad[i]) return a.grad[i] < b.grad[i];
         for (int q = 0; q < NO_DIM*NO_DIM; ++q) // all 0 unless --pts-vel-grad
             if (a.vgrad[q] != b.vgrad[q]) return a.vgrad[q] < b.vgrad[q];
-        for (int v = 0; v <= NO_DIM; ++v)       // all 0 unless --per-stream-ids; only breaks exact
+        for (int v = 0; v <= NO_DIM; ++v)       // all 0 unless --ps-per-stream-ids; only breaks exact
             if (a.ids[v] != b.ids[v]) return a.ids[v] < b.ids[v];   // den+vel ties, so the ids file
                                                                     // is partition-invariant too
         for (size_t j = 0; j < noScalarComp; ++j)   // all 0 unless --pts-scalar
             if (a.scal[j] != b.scal[j]) return a.scal[j] < b.scal[j];
-        for (int d = 0; d < NO_DIM; ++d)             // all 0 unless --pts-lagrangian
+        for (int d = 0; d < NO_DIM; ++d)             // all 0 unless --ps-per-stream-lagrangian
             if (a.lag[d] != b.lag[d]) return a.lag[d] < b.lag[d];
         return false;
     };

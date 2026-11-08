@@ -5,7 +5,7 @@ CONSISTENCY: the per-snapshot void properties come from pipeline.SnapshotProduct
 criterion, BBKS shapes and ellipsoid fits) that feed the correlation analyses. This script
 adds only the TIME LINKING:
 
-  1. Reference voids at --snap = the deepest well-resolved entries of the pipeline catalog.
+  1. Reference voids at --start-snap = the deepest well-resolved entries of the pipeline catalog.
   2. IDENTITY across time from the MERGER TREES: subhalos within --sel-factor x (max
      semi-axis) of the centre are walked back along their SubLink main branches; the centre
      moves with the median periodic displacement of the surviving tracers. Before the
@@ -20,13 +20,13 @@ adds only the TIME LINKING:
      orientation are read from that catalog entry. R_v is the size drawn (--radius r_eff for the
      ellipsoid's, 1.5-1.9x larger); like the fit, it is read whether or not the void passes the cut.
 
-Works identically for --method dtfe and ps.  Examples:
-  python3 plot/plot_void_tracking.py --sim TNG50-3-Dark --method dtfe
+Works identically for --estimator dtfe and ps.  Examples:
+  python3 plot/plot_void_tracking.py --sim TNG50-3-Dark --estimator dtfe
   python3 plot/plot_void_tracking.py --sim TNG50-3-Dark --n-voids 10
 Outputs: figures/void_tracking/<sim>/void<K>_evolution.png, voids_summary.png and one .npz
 per void with every tracked quantity. Those names are PS-DTFE's default grids (ps_output.) from snapshot 99; another
-estimator or --prefix adds '_<method>' / '_<prefix>', another --snap '_snap<N>', --radius r_eff '_reff' to the
-figures (else a --method dtfe or --snap run would replace the default files), and the void<K> files of this set
+estimator or --prefix adds '_<method>' / '_<prefix>', another --start-snap '_snap<N>', --radius r_eff '_reff' to the
+figures (else an --estimator dtfe or --start-snap run would replace the default files), and the void<K> files of this set
 beyond the voids written now are removed (a smaller --n-voids, or a void skipped, would leave an earlier run's beside
 them).
 --link particles adds '_particles', --exclusive (partitioned members) '_exclusive' after it.
@@ -110,7 +110,9 @@ def parse_args(argv=None):
                             "z >= 1 the R_v spheres overlap, and a large progenitor sphere otherwise claims the matter "
                             "of its neighbours")
     parser = make_parser("Track void size / BBKS shape (e,p) / orientation along merger-tree tracers (or by their "
-                         "member particles), using the pipeline's own void catalogs at every snapshot.")
+                         "member particles), using the pipeline's own void catalogs at every snapshot.",
+                         snap_option="--start-snap",
+                         snap_help="the snapshot whose voids are tracked, followed back from there (default 99)")
     extra(parser)
     pipeline.add_smoothing_mpc_arg(parser)
     args = parser.parse_args(argv)

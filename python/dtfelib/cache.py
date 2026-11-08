@@ -18,7 +18,7 @@ import config
 # The physical smoothings (Mpc) the current code asks for by default: the cross-box comparison's sigma,
 # config.CROSSBOX_SMOOTHING_MPC (the one number plot_void_crossbox, the launcher and this read). A
 # namespace made with another Mpc value (2.16: r512_s21.4043_f23 next to 2.1625's
-# r512_s21.4291_f23) is reached only by typing that value again; 'cache --keep-mpc' and DTFE_SIGMA_MPC add values.
+# r512_s21.4291_f23) is reached only by typing that value again; 'cache --keep-mpc' and DTFE_SMOOTH_MPC add values.
 CACHE_SMOOTHING_MPC = (config.CROSSBOX_SMOOTHING_MPC,)
 NAMESPACE_RE = r"^r(?P<res>\d+)_s(?P<sig>[^_]+)_f(?P<fp>\d+)_(?P<crit>.+)_g(?P<g>[^_]+)_v(?P<ver>\d+)$"
 
@@ -63,7 +63,7 @@ def cache_inventory(root=None, keep_mpc=(), keep_cells=()):
       * no smoothing the current code asks for produces its sigma/footprint: the production one
         (config.PRODUCTION_SMOOTHING),
         a --smooth in cells with the production footprint for config.SMOOTHING_COMPARISON_SIGMAS (+ keep_cells), or a
-        smoothing in Mpc -- CACHE_SMOOTHING_MPC, DTFE_SIGMA_MPC and keep_mpc -- for a simulation whose files it holds
+        smoothing in Mpc -- CACHE_SMOOTHING_MPC, DTFE_SMOOTH_MPC and keep_mpc -- for a simulation whose files it holds
         (round(mpc / cell, 9) cells, config.footprint_for), the way config / pipeline.set_smoothing spell it.
     Another resolution, criterion or gradient threshold is a config change away: kept. Inside a kept namespace a FILE
     is pruned when it is an interrupted save's temp file ('<name>.npz.<pid>.tmp.npz', pipeline._save_npz) whose
@@ -80,8 +80,10 @@ def cache_inventory(root=None, keep_mpc=(), keep_cells=()):
     # box like TNG300 is run at: FIXED_R_CELLS) and its --size-smooth 5 are live too
     cells_ok = {f"{float(c):g}" for c in (sig0, *config.SMOOTHING_COMPARISON_SIGMAS, *FIXED_R_CELLS, *keep_cells)}
     mpcs = list(CACHE_SMOOTHING_MPC) + [float(m) for m in keep_mpc]
-    if os.environ.get('DTFE_SIGMA_MPC'):
-        mpcs.append(float(os.environ['DTFE_SIGMA_MPC']))
+    from dtfelib.cli import smooth_mpc_env
+    env_mpc = smooth_mpc_env()                      # DTFE_SMOOTH_MPC (DTFE_SIGMA_MPC: its older name)
+    if env_mpc:
+        mpcs.append(float(env_mpc))
     try:
         from dtfelib.lagrangian import LINK_VERSION
     except ImportError:                             # h5py / scipy missing: the link check is left out, not guessed

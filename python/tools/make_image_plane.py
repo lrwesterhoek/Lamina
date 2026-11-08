@@ -62,13 +62,14 @@ def read_header(combined: Path, mpc_unit: float) -> dict:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    from dtfelib.cli import new_parser, add_out_arg, deprecated_option
+    p = new_parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     src = p.add_mutually_exclusive_group()          # required, except with --same-as
     src.add_argument("--sim", help="simulation name (under DTFE_DATA_ROOT); needs --snap")
     src.add_argument("--combined", type=Path, help="explicit combined_*.hdf5 snapshot path")
     p.add_argument("--snap", type=int, help="snapshot number (with --sim)")
     p.add_argument("--mpc-unit", type=float, default=1000.0,
-                   help="input length units per box unit, the binary's --MpcUnit (default 1000)")
+                   help="input length units per box unit, the binary's --mpc-unit (default 1000)")
     p.add_argument("--axis", choices=AXES, default="z", help="projection axis (default z: image is x-y)")
     p.add_argument("--axes", default=None,
                    help="generate ONE plane file per axis, e.g. 'xyz' or 'x,y,z' -> "
@@ -81,7 +82,7 @@ def main() -> None:
     p.add_argument("--planes", type=int, default=1,
                    help="sampling planes across the slab (default 1 = a single crisp "
                         "cross-section). For a smooth projected look use >= 16 with the plot's "
-                        "--project mean; a HANDFUL of planes ghosts every inclined structure "
+                        "--project slab; a HANDFUL of planes ghosts every inclined structure "
                         "(one displaced copy per plane)")
     p.add_argument("--nu", type=int, default=4096, help="pixels along the horizontal image axis (default 4096)")
     p.add_argument("--supersample", type=int, default=1, metavar="K",
@@ -90,17 +91,22 @@ def main() -> None:
                         "sample into an estimate of the pixel-AREA average, which is what the "
                         "deposit grid reports: it removes aliasing where structure is finer "
                         "than a pixel (halo cores, thin caustics). Costs K^2 sample points")
-    p.add_argument("--u0", type=float, default=None, help="horizontal extent start (default 0)")
-    p.add_argument("--u1", type=float, default=None, help="horizontal extent end (default box)")
-    p.add_argument("--v0", type=float, default=None, help="vertical extent start (default 0)")
-    p.add_argument("--v1", type=float, default=None, help="vertical extent end (default box)")
-    p.add_argument("-o", "--output", "--out", help="output stem: writes <stem>.bin + <stem>.json")
+    p.add_argument("--plane-window", type=float, nargs=4, default=None, metavar=("U0", "U1", "V0", "V1"),
+                   help="the image's extent in box units: horizontal U0..U1, vertical V0..V1 (default the whole box, "
+                        "0..box on both axes); the pipeline's PLANE_WINDOW")
+    for name, what in (("--u0", "U0"), ("--u1", "U1"), ("--v0", "V0"), ("--v1", "V1")):     # its four values, before
+        deprecated_option(p, name, type=float, use=f"--plane-window U0 U1 V0 V1 (here {what})")
+    add_out_arg(p, type=str, metavar="STEM", help="output stem: writes <stem>.bin + <stem>.json")
     p.add_argument("--same-as", type=Path, metavar="SIDECAR.json",
                    help="write nothing: compare the requested geometry (--center/--planes/--thickness/"
-                        "--supersample/--u0..--v1; the centre only when given) with an existing plane's "
+                        "--supersample/--plane-window; the centre only when given) with an existing plane's "
                         "sidecar and exit 0 when it is the same, 3 when it differs or cannot be read "
                         "(other statuses: the tool failed, e.g. invalid input)")
     args = p.parse_args()
+    if args.plane_window is not None:
+        if any(getattr(args, k) is not None for k in ("u0", "u1", "v0", "v1")):
+            p.error("give the extent once: --plane-window U0 U1 V0 V1, not beside --u0/--u1/--v0/--v1")
+        args.u0, args.u1, args.v0, args.v1 = args.plane_window
 
     if args.supersample < 1:
         sys.exit("--supersample must be >= 1")
@@ -127,8 +133,8 @@ def main() -> None:
         args.sim = os.environ.get("DTFE_SIM") or None   # dtfelib.cli.require_sim's rule: DTFE_SIM names the simulation
         if not args.sim:
             p.error("one of --sim / --combined is required")
-    if args.output is None:
-        p.error("-o/--output is required")
+    if args.out is None:
+        p.error("-o/--out is required")
 
     if args.sim:
         if args.snap is None:
@@ -154,7 +160,7 @@ def main() -> None:
     for axis in axes:
         # per-axis stem: <stem>_x when several axes, plain <stem> for a single one (keeps
         # the existing single-plane filenames unchanged)
-        stem = Path(args.output if len(axes) == 1 else f"{args.output}_{axis}")
+        stem = Path(args.out if len(axes) == 1 else f"{args.out}_{axis}")
         write_plane(combined, meta, box, axis, args, stem)
 
 

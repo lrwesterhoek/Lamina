@@ -35,7 +35,7 @@
 #  V) --serve through dtfelib.Estimator, both binaries: answers are BIT-IDENTICAL to a
 #     --sample-points run on the same points (same code, same reduction) -- for a request
 #     answered through the server's cell index (few points) and for one that walks the whole
-#     tessellation (many points); every optional output (--per-stream, --per-stream-ids,
+#     tessellation (many points); every optional output (--ps-per-stream, --ps-per-stream-ids,
 #     --pts-den-grad, --pts-vel-grad) round-trips unchanged; a request with a NaN is
 #     rejected and the session keeps serving; grid() returns the tensor-product shape.
 #  C) COMPOSITE SERVER (--serve --partition, CosmoDTFE's CompositeEstimator, out of core):
@@ -54,7 +54,7 @@
 #           tessellations nothing reloads, and a cell index is built only when it fits too (else
 #           the request walks); with room for 3 a request needing 8 evicts and reloads; answers
 #           bit-identical throughout.
-#  L) PER-STREAM LAGRANGIAN POSITIONS AND SCALARS (--pts-lagrangian, --pts-scalar):
+#  L) PER-STREAM LAGRANGIAN POSITIONS AND SCALARS (--ps-per-stream-lagrangian, --pts-scalar):
 #       L1  every stream satisfies x - q(x) = v/100 (Zel'dovich: v = 100 s, and x, q, v are
 #           interpolated with the same barycentric weights) to float rounding.
 #       L2  a periodic per-particle scalar f(q) (--scalar-dataset) comes back within the linear-
@@ -127,7 +127,7 @@ run() {  # $1 = binary, $2 = output root, rest = extra args
     rm -f "${out}".*
     local log="${out}.log"
     set +e
-    "${bin}" "${SNAP}" "${out}" --grid "${RUN_GRID:-16}" --periodic --field density --input 105 --MpcUnit 1 \
+    "${bin}" "${SNAP}" "${out}" --grid "${RUN_GRID:-16}" --periodic --field density --input-format 105 --mpc-unit 1 \
         --verbose 1 "$@" > "$log" 2>&1
     local rc=$?
     set -e
@@ -154,16 +154,16 @@ if [ "${GPU_BUILT}" -eq 1 ]; then
     RUN_GRID="${GRID}" run "${PS_BIN}" "${TMP}/pxs_dep_gpu_P2" --partition 2 2 2 --gpu
 fi
 # reference outputs for the --serve round trip: every optional point output switched on
-run "${PS_BIN}" "${TMP}/pxs_ps_full" --sample-points "${PARTS}" --per-stream --per-stream-ids --partition 1 1 1 \
+run "${PS_BIN}" "${TMP}/pxs_ps_full" --sample-points "${PARTS}" --ps-per-stream --ps-per-stream-ids --partition 1 1 1 \
     --pts-den-grad --pts-vel-grad
 # references for the composite server (C) and the per-stream Lagrangian/scalar outputs (L)
-run "${PS_BIN}" "${TMP}/pxs_ps_comp_ref" --sample-points "${PARTS}" --per-stream --per-stream-ids \
-    --pts-lagrangian --pts-scalar --scalar-dataset Potential --partition 2 2 2
+run "${PS_BIN}" "${TMP}/pxs_ps_comp_ref" --sample-points "${PARTS}" --ps-per-stream --ps-per-stream-ids \
+    --ps-per-stream-lagrangian --pts-scalar --scalar-dataset Potential --partition 2 2 2
 # (T) cache identity: a periodic run writes the cache, a non-periodic one must not load it
 TESS_T="${TESS_BASE}/T"; mkdir -p "${TESS_T}"
 run "${DTFE_BIN}" "${TMP}/pxs_T_per" --tessellation-cache "${TESS_T}"
 set +e
-"${DTFE_BIN}" "${SNAP}" "${TMP}/pxs_T_np" --grid 16 --field density --input 105 --MpcUnit 1 \
+"${DTFE_BIN}" "${SNAP}" "${TMP}/pxs_T_np" --grid 16 --field density --input-format 105 --mpc-unit 1 \
     --tessellation-cache "${TESS_T}" --verbose 1 > "${TMP}/pxs_T_np.log" 2>&1
 set -e
 
@@ -302,7 +302,7 @@ with Estimator(snap, mpc_unit=1, phase_space=False) as est:
 # ---------------- P: the standard server's padding
 from dtfelib.estimator import STANDARD_PADDING
 def paddings(cmd):
-    return [cmd[i + 1] for i, a in enumerate(cmd) if a in ("--padding", "--paddingMpc")]
+    return [cmd[i + 1] for i, a in enumerate(cmd) if a in ("--padding", "--padding-mpc")]
 with Estimator(snap, mpc_unit=1, phase_space=False, options=["--padding", "20"]) as est:
     own = paddings(est.command)
 with Estimator(snap, mpc_unit=1) as est:
@@ -321,7 +321,7 @@ if _os.path.isfile(demo):
     ref = {}
     for pad in (5, 15, 30):
         r = subprocess.run([STBIN, demo, f"{tmp}/pxs_face_p{pad}", "--grid", "8", "--periodic", "--field", "density",
-                            "--input", "101", "--sample-points", f"{tmp}/pxs_faces.bin", "--padding", str(pad)],
+                            "--input-format", "101", "--sample-points", f"{tmp}/pxs_faces.bin", "--padding", str(pad)],
                            capture_output=True, text=True)
         ref[pad] = pts(f"pxs_face_p{pad}", "den") if r.returncode == 0 else None
     with Estimator(demo, phase_space=False, input_type=101) as est:
@@ -393,7 +393,7 @@ finally:
     del os.environ["DTFE_MEM_BUDGET_GB"]
 side = round(nparts ** (1 / 3))
 ref = subprocess.run([PSBIN, snap, f"{tmp}/pxs_auto_ref", "--grid", "16", "--periodic", "--field", "density",
-                      "--input", "105", "--MpcUnit", "1", "--sample-points", parts, "--partition",
+                      "--input-format", "105", "--mpc-unit", "1", "--sample-points", parts, "--partition",
                       str(side), str(side), str(side)], capture_output=True, text=True)
 same = ref.returncode == 0 and np.array_equal(auto.density, pts("pxs_auto_ref", "den")) \
     and np.array_equal(auto.streams, pts("pxs_auto_ref", "streams", np.int32))

@@ -1,12 +1,15 @@
 """One driver for the python analysis stack.
 
-    python3 analyze.py check                 # data availability + config consistency
-    python3 analyze.py compute [snap ...]    # phase 1: shared products -> cache (once)
-    python3 analyze.py plot [--only ...]     # phase 2: all figures from the cache
-    python3 analyze.py all                   # compute (own subprocess) followed by plot
-    python3 analyze.py export [snap ...]     # the void catalogues as CSV + HDF5 (figures/void_catalog/<sim>/)
-    python3 analyze.py voids [--only ...]    # the void-population scripts (VOID_SCRIPTS) for config's simulation
-    python3 analyze.py cache [--prune [--yes]]   # the cache namespaces, sizes, and which no current setting reaches
+    python3 analyze.py check --sim SIM                # data availability + config consistency
+    python3 analyze.py compute --sim SIM [--snaps N ...]   # phase 1: shared products -> cache (once)
+    python3 analyze.py plot --sim SIM [--only ...]    # phase 2: all figures from the cache
+    python3 analyze.py all --sim SIM                  # compute (own subprocess) followed by plot
+    python3 analyze.py export --sim SIM [--snaps N ...]    # the void catalogues as CSV + HDF5 (figures/void_catalog/<sim>/)
+    python3 analyze.py voids --sim SIM [--only ...]   # the void-population scripts (VOID_SCRIPTS) for the simulation
+    python3 analyze.py cache [--prune [--yes]]        # the cache namespaces, sizes, and which no current setting reaches
+
+The simulation is --sim NAME or DTFE_SIM (there is no default), the data root --data-root or DTFE_DATA_ROOT; the
+snapshots are --snaps (the positional snapshot ids of before are still read, with a warning, for one release).
 
 Phase 1 does the expensive 512^3 work once per snapshot into python/cache/<param-hash>/;
 phase 2 reads the cache. Changing sigma/footprint/criterion in config.py changes the hash
@@ -15,7 +18,7 @@ working set is returned to the OS before the plot scripts start. Without snapsho
 compute and export take config's ladder where the snapdir exists.
 
 'voids' runs VOID_SCRIPTS with --sim config.SIMULATION (DTFE_SIM): each writes per-simulation folders and tags a
-non-default smoothing itself, so DTFE_SIGMA_MPC is allowed there. A script named there (or in --only) that is not in
+non-default smoothing itself, so DTFE_SMOOTH_MPC is allowed there. A script named there (or in --only) that is not in
 python/plot yet is skipped with a note, not failed.
 
 'cache' lists python/cache's namespaces with their sizes and whether the current code can still reach
@@ -35,7 +38,37 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import config
+
+
+def _early_env(argv) -> None:
+    """--sim NAME / --data-root DIR into DTFE_SIM / DTFE_DATA_ROOT BEFORE config is imported: config reads the
+    simulation's box at import, and every step this driver starts (the compute subprocess, the plot scripts) takes
+    them from the environment. The parser below registers both, so they show in --help and are checked there."""
+    for flag, var in (("--sim", "DTFE_SIM"), ("--data-root", "DTFE_DATA_ROOT")):
+        for i, tok in enumerate(argv):
+            if tok == "--":
+                break
+            if tok == flag and i + 1 < len(argv):
+                os.environ[var] = argv[i + 1]
+            elif tok.startswith(flag + "="):
+                os.environ[var] = tok.split("=", 1)[1]
+
+
+if __name__ == "__main__":
+    _early_env(sys.argv[1:])
+import config                                                       # noqa: E402
+from dtfelib.cli import (SMOOTH_MPC_ENV, SMOOTH_MPC_ENV_NAMES, new_parser, add_out_arg,  # noqa: E402
+                         add_list_arg, warn_deprecated)
+
+
+def _smooth_env_name() -> str:
+    """The smoothing variable the environment set (DTFE_SMOOTH_MPC, else its older name), for the refusal text."""
+    return next((n for n in SMOOTH_MPC_ENV_NAMES if os.environ.get(n)), SMOOTH_MPC_ENV)
+
+
+def _smooth_env_text() -> str:
+    name = _smooth_env_name()
+    return f"{name}={os.environ.get(name, '')!r}"
 
 # Core figure set only: the tracking scripts (plot_PS_DTFE, plot_cosmic_web,
 # plot_halo_tracking, plot_void_tracking, plot_void_population)
@@ -70,7 +103,8 @@ VOID_SCRIPTS = [
 ]
 
 # the grids the core scripts read, after the estimator's prefix (ESTIMATOR_PREFIX)
-FIELD_FILES = ['a_den', 'a_vel', 'a_velDiv', 'a_velShear', 'a_velGrad']
+FIELD_FILES = ['a_den', 'a_vel', 'a_velDiv', 'a_velShear']     # the drivers' default fields (no gradient grid:
+                                                                  # plot_shear_triaxial reads the shear instead)
 ESTIMATOR_PREFIX = {'dtfe': 'output.', 'ps': 'ps_output.'}
 ESTIMATOR_NAME = {'dtfe': 'standard DTFE', 'ps': 'PS-DTFE'}
 
@@ -226,7 +260,7 @@ def export(snaps, out_dir=None, formats=("csv", "hdf5")):
     if absent:
         print(f"Not on disk, left out: {', '.join(absent)}")
     out = Path(out_dir).expanduser() if out_dir else \
-        Path(config.figures_path("void_catalog")) / config.SIMULATION / pipeline.smoothing_tag()   # DTFE_SIGMA_MPC: own folder
+        Path(config.figures_path("void_catalog")) / config.SIMULATION / pipeline.smoothing_tag()   # DTFE_SMOOTH_MPC: own folder
     print(f"Export: void catalogues of {len(snaps)} snapshot(s) of {config.SIMULATION} -> {out}")
     print(f"  sigma = {config.SMOOTHING_SIGMA_CELLS} cells, footprint = {config.FOOTPRINT_SIZE}, "
           f"criterion = {config.VOID_EIGENVALUE_CRITERION}; cache: {pipeline.cache_dir()}")
@@ -302,16 +336,20 @@ def run_scripts(scripts, script_dir, results, env=None, extra=()):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = new_parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('mode', nargs='?', default='all',
                         choices=['check', 'compute', 'plot', 'all', 'export', 'voids', 'cache'])
-    parser.add_argument('snaps', nargs='*',
-                        help="snapshots for 'compute' and 'export' (default: config's ladder where the snapdir exists)")
+    parser.add_argument('old_snaps', nargs='*', metavar='snap', help=argparse.SUPPRESS)   # P6.7: now --snaps
+    parser.add_argument('--sim', default=None,
+                        help="the simulation (default DTFE_SIM; one of the two is needed, except for 'cache')")
+    parser.add_argument('--data-root', default=None,
+                        help="the folder that holds the simulations (default DTFE_DATA_ROOT)")
+    add_list_arg(parser, '--snaps', default=[], metavar='SNAP',
+                 help="snapshots for 'compute' and 'export', e.g. --snaps 099 050 (default: config's ladder where the "
+                      "snapdir exists)")
     parser.add_argument('--only', nargs='*', default=None,
                         help="run only the named plot scripts (in 'voids' mode: these instead of VOID_SCRIPTS)")
-    parser.add_argument('--out', '--output', '-o', default=None,
-                        help="'export': the output folder (default figures/void_catalog/<sim>)")
+    add_out_arg(parser, help="'export': the output folder (default figures/void_catalog/<sim>)", type=str)
     parser.add_argument('--format', default='both', choices=['csv', 'hdf5', 'both'], help="'export': which files")
     parser.add_argument('--prune', action='store_true',
                         help="'cache': list only what is unreachable, as a DRY RUN (nothing is deleted without --yes)")
@@ -322,13 +360,16 @@ def main():
                              "cache folder for every later run; a DRY RUN without --yes")
     parser.add_argument('--keep-mpc', type=float, nargs='*', default=[], metavar='MPC',
                         help=f"'cache': more smoothings in Mpc to count as current (besides {list(CACHE_SMOOTHING_MPC)} "
-                             "and DTFE_SIGMA_MPC)")
+                             "and DTFE_SMOOTH_MPC)")
     parser.add_argument('--keep-cells', type=float, nargs='*', default=[], metavar='CELLS',
                         help="'cache': more smoothings in cells (footprint 11) to count as current")
     args = parser.parse_args()
+    if args.old_snaps:                  # the positional snapshots of before: --snaps (one release)
+        warn_deprecated("a positional snapshot", f"--snaps {' '.join(args.old_snaps)}")
+        args.snaps = list(args.snaps) + list(args.old_snaps)
     if args.mode != 'cache' and not config.SIMULATION:      # the cache modes span every simulation
-        parser.error("no simulation given: set DTFE_SIM=NAME (e.g. DTFE_SIM=TNG100-3-Dark python3 analyze.py "
-                     f"{args.mode}); there is no default simulation")
+        parser.error("no simulation given: pass --sim NAME or set DTFE_SIM=NAME (e.g. python3 analyze.py "
+                     f"{args.mode} --sim TNG100-3-Dark); there is no default simulation")
     if args.yes and not (args.mode == 'cache' and (args.prune or args.move)):
         parser.error("--yes goes with 'cache --prune' or 'cache --move' only")
     if args.mode != 'cache' and (args.prune or args.keep_mpc or args.keep_cells or args.move):
@@ -375,7 +416,7 @@ def main():
         sys.exit(f"refused: {e}")
     if gate != 'ellipsoid' and args.mode in ('plot', 'all'):
         # checked apart from the smoothing: smoothing_tag() carries 'gatenone' too, and the smoothing
-        # refusal below would blame DTFE_SIGMA_MPC at the production smoothing. 'compute' stays allowed: its caches (the
+        # refusal below would blame DTFE_SMOOTH_MPC at the production smoothing. 'compute' stays allowed: its caches (the
         # void catalogue keeps the production gate, gate_view is never saved; slices, limits) do not depend on it
         sys.exit(f"refused: DTFE_VOID_GATE={os.environ.get('DTFE_VOID_GATE', '')!r} (void gate '{gate}', not the "
                  f"production 'ellipsoid'): '{args.mode}' writes the core figures under their production names. "
@@ -383,19 +424,19 @@ def main():
     sig0, fp0 = config.PRODUCTION_SMOOTHING
     if (float(config.SMOOTHING_SIGMA_CELLS), int(config.FOOTPRINT_SIZE)) != (float(sig0), int(fp0)):
         # the core scripts save under the PRODUCTION names: a left-over
-        # DTFE_SIGMA_MPC would overwrite them with another smoothing's figures and void_shape_table.txt (the same
+        # DTFE_SMOOTH_MPC would overwrite them with another smoothing's figures and void_shape_table.txt (the same
         # test as smoothing_tag()'s smoothing part)
         sys.exit(f"refused: the smoothing is {config.SMOOTHING_SIGMA_CELLS:g} cells / footprint {config.FOOTPRINT_SIZE} "
-                 f"(DTFE_SIGMA_MPC={os.environ.get('DTFE_SIGMA_MPC', '')!r}), not the production "
+                 f"({_smooth_env_text()}), not the production "
                  f"{config.PRODUCTION_SMOOTHING}: '{args.mode}' writes the core figures under their production names. "
-                 f"Unset DTFE_SIGMA_MPC; it is for the void scripts and 'export' (both tag their outputs).")
+                 f"Unset {_smooth_env_name()}; it is for the void scripts and 'export' (both tag their outputs).")
     if args.mode == 'compute':
         compute(args.snaps)
         return
 
     if args.mode == 'all':
         # compute in its own subprocess so its working set is released before plotting
-        code, dt = run_step([sys.executable, __file__, 'compute'] + args.snaps,
+        code, dt = run_step([sys.executable, __file__, 'compute'] + (['--snaps', *args.snaps] if args.snaps else []),
                             'analyze.py compute')
         results['compute'] = (code, dt)
         if code != 0:

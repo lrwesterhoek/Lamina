@@ -42,7 +42,7 @@ G=32
 FIELDS=(--field density_a velocity_a gradient_a scalar_a scalarGradient_a --scalar-dataset Phi)
 # one domain for both runs: on <= 8 cores the time-aware tuner splits the CPU reference, and a split sampled deposit
 # differs from one domain by ~4e-3, which would fail this suite on Linux
-COMMON=(--grid $G --periodic --input 105 --MpcUnit 1 --verbose 1 --partition 1 1 1 "${FIELDS[@]}")
+COMMON=(--grid $G --periodic --input-format 105 --mpc-unit 1 --verbose 1 --partition 1 1 1 "${FIELDS[@]}")
 run() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL: $* (see $out.log)"; exit 1; }
         grep -q "using the CPU interpolation\|using the CPU deposit\|deposit unavailable" "$out.log" && { echo "FAIL: $out fell back to the CPU"; exit 1; }; return 0; }
 echo ">> DTFE: CPU, GPU item kernel, GPU per-tet kernel"
@@ -50,8 +50,8 @@ echo ">> DTFE: CPU, GPU item kernel, GPU per-tet kernel"
 run "$TMP/d_gpu"  "${DTFE_BIN}" "$SNAP" "$TMP/d_gpu" "${COMMON[@]}" --gpu
 run "$TMP/d_tet"  env DTFE_GPU_ITEMS=0 "${DTFE_BIN}" "$SNAP" "$TMP/d_tet" "${COMMON[@]}" --gpu
 echo ">> PS-DTFE: CPU and GPU, sampled (nSub 2) and exact"
-"${PS_BIN}" "$SNAP" "$TMP/p_cpu" "${COMMON[@]}" --avg-subsamples 2 > "$TMP/p_cpu.log" 2>&1 || { echo "FAIL: PS-DTFE cpu"; exit 1; }
-run "$TMP/p_gpu" "${PS_BIN}" "$SNAP" "$TMP/p_gpu" "${COMMON[@]}" --avg-subsamples 2 --gpu
+"${PS_BIN}" "$SNAP" "$TMP/p_cpu" "${COMMON[@]}" --subsamples 2 > "$TMP/p_cpu.log" 2>&1 || { echo "FAIL: PS-DTFE cpu"; exit 1; }
+run "$TMP/p_gpu" "${PS_BIN}" "$SNAP" "$TMP/p_gpu" "${COMMON[@]}" --subsamples 2 --gpu
 "${PS_BIN}" "$SNAP" "$TMP/e_cpu" "${COMMON[@]}" --exact-average > "$TMP/e_cpu.log" 2>&1 || { echo "FAIL: PS-DTFE exact cpu"; exit 1; }
 run "$TMP/e_gpu" "${PS_BIN}" "$SNAP" "$TMP/e_gpu" "${COMMON[@]}" --exact-average --gpu
 "$PY" - "$TMP" <<'PYEOF'

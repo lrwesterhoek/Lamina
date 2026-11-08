@@ -30,7 +30,7 @@ PANEL_SNAPSHOTS = ['000', '017', '050', '099']
 # that opens fields via dtfelib.cli names it per run with --sim instead. The box-derived constants below (BOX_SIZE,
 # CELL_SIZE, SMOOTHING_SIGMA_MPC) exist only once a simulation is named: reading one without it raises
 # dtfelib.cli.NoSimulation (module __getattr__ at the end of this file).
-from dtfelib.cli import FIGURES_ROOT, require_sim, sim_dir
+from dtfelib.cli import FIGURES_ROOT, require_sim, sim_dir, smooth_mpc_env
 SIMULATION = os.environ.get("DTFE_SIM") or None
 
 # Comoving box sizes in h-free Mpc (raw BoxSize[ckpc/h] / h / 1000). Known simulations are
@@ -98,15 +98,17 @@ def footprint_for(sigma_cells):
     return max(3, 2 * int(round((1.1 * float(sigma_cells) - 1.0) / 2.0)) + 1)
 
 
-# A smoothing length FIXED IN Mpc: DTFE_SIGMA_MPC=2.16 smooths every box at the same physical scale --
+# A smoothing length FIXED IN Mpc: DTFE_SMOOTH_MPC=2.16 (DTFE_SIGMA_MPC, its older name, read for one release with a
+# warning: dtfelib.cli.smooth_mpc_env) smooths every box at the same physical scale --
 # 10 cells is 1.0 / 2.2 / 5.9 Mpc in TNG50 / 100 / 300, so their 10-cell catalogues are different voids -- and the
 # footprint follows it (footprint_for). Here, at import, so every module-level copy follows; the void scripts'
 # --smooth-mpc does the same at run time (dtfelib.pipeline.set_smoothing). FOR THE VOID SCRIPTS AND 'analyze.py export'
 # (which tag their outputs): analyze.py compute/plot/all refuse to run under it (the core figures are saved under
 # their production names). The cells are rounded to 1e-9, so 10 x CELL_SIZE gives exactly 10.0 cells, footprint 11
 # and the production caches.
-if os.environ.get("DTFE_SIGMA_MPC"):
-    SMOOTHING_SIGMA_CELLS = round(float(os.environ["DTFE_SIGMA_MPC"])
+_SMOOTH_MPC_ENV = smooth_mpc_env()
+if _SMOOTH_MPC_ENV:
+    SMOOTHING_SIGMA_CELLS = round(float(_SMOOTH_MPC_ENV)
                                   / (_box_size_mpc(require_sim(SIMULATION)) / FIELD_RESOLUTION), 9)
     FOOTPRINT_SIZE = footprint_for(SMOOTHING_SIGMA_CELLS)
 if SIMULATION:

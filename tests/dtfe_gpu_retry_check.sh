@@ -68,7 +68,7 @@ run() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL: $(basenam
 # the checkpoint at buffer 2
 export DTFE_GPU_CHUNK=4096 DTFE_GPU_CHECKPOINT_CHUNKS=2
 unset DTFE_GPU_FAULT_AT DTFE_GPU_SHARED DTFE_GPU_FLOAT_GRIDS DTFE_GPU_ITEMS
-C=(--grid 32 --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a gradient_a --partition 1 1 1)
+C=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a gradient_a --partition 1 1 1)
 ONE=(--max-concurrent 1)                 # one sub-domain: one batch, so 'buffer k' is a buffer of that batch
 echo ">> E1: two fault-free runs with different opening chunks (item kernel over 9 sub-domains, per-tet kernel, exact)"
 run "$TMP/a1" env DTFE_GPU_TIMING=1 "${DTFE_BIN}" "$SNAP" "$TMP/a1" "${C[@]}" --gpu
@@ -88,7 +88,7 @@ echo ">> R2: --exact-average, without and with an out-of-memory fault at buffer 
 run "$TMP/e0" "${DTFE_BIN}" "$SNAP" "$TMP/e0" "${C[@]}" "${ONE[@]}" --gpu --exact-average
 run "$TMP/e1" env DTFE_GPU_FAULT_AT=3:oom "${DTFE_BIN}" "$SNAP" "$TMP/e1" "${C[@]}" "${ONE[@]}" --gpu --exact-average
 echo ">> R3: --partition 2 2 2 over 9 threads, without and with a watchdog fault at buffer 9"
-P=(--grid 32 --periodic --input 105 --MpcUnit 1 --verbose 2 --field density_a velocity_a gradient_a --partition 2 2 2)
+P=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a gradient_a --partition 2 2 2)
 run "$TMP/p0" "${DTFE_BIN}" "$SNAP" "$TMP/p0" "${P[@]}" --gpu
 run "$TMP/p1" env DTFE_GPU_FAULT_AT=9:timeout "${DTFE_BIN}" "$SNAP" "$TMP/p1" "${P[@]}" --gpu
 echo ">> R7: the same watchdog fault, then the pace recovers after a clean stretch (set to 0 s)"
@@ -105,7 +105,7 @@ c = (np.arange(48) + 0.5) * 100. / 48           # a 48^2 plane across the 100 Mp
 X, Y = np.meshgrid(c, c, indexing="ij")
 np.stack([X.ravel(), Y.ravel(), np.full(X.size, 50.3)], 1).astype(np.float64).tofile(sys.argv[1])
 PYEOF
-PL=(--grid 32 --periodic --input 105 --MpcUnit 1 --verbose 2 --padding 15 --field density_a velocity_a gradient_a
+PL=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --padding 15 --field density_a velocity_a gradient_a
     --exact-average --partition 2 2 2 --max-concurrent 1 --sample-points "$TMP/plane.bin" --pts-vel-grad)
 ALLOW_CPU=1 run "$TMP/v1" env DTFE_GPU_FAULT_AT=3:persist DTFE_DEPOSIT_THREADS=4 "${DTFE_BIN}" "$SNAP" "$TMP/v1" "${PL[@]}" --gpu
 env DTFE_DEPOSIT_THREADS=1 "${DTFE_BIN}" "$SNAP" "$TMP/v0" "${PL[@]}" > "$TMP/v0.log" 2>&1 \

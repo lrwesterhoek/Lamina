@@ -24,6 +24,10 @@
 
 #include "env_knobs.h"
 
+// the PS partition loop's partitions in flight under its dynamic concurrency (DTFE.cpp; 0 otherwise): the core pool's
+// holders and the per-partition teams count these, not the loop's threads (some of which wait in the memory gate)
+extern std::atomic<int> dtfePartitionsInFlight;
+
 inline int coresPerTeam(char const *envOverride)
 {
     if ( long const v = Env::integer( envOverride, 0 ); v > 0 )
@@ -32,7 +36,10 @@ inline int coresPerTeam(char const *envOverride)
 #ifdef OPEN_MP
     cores = omp_get_max_threads();
     if ( omp_in_parallel() )
-        return std::max( 1, cores / std::max( 1, omp_get_num_threads() ) );
+    {
+        int const live = dtfePartitionsInFlight.load( std::memory_order_relaxed );   // (dynamic concurrency)
+        return std::max( 1, cores / std::max( 1, live > 0 ? live : omp_get_num_threads() ) );
+    }
 #endif
     return std::max( 1, cores );
 }
@@ -58,6 +65,7 @@ inline int coresPerTeam(char const *envOverride)
 extern std::atomic<int> dtfeTriangulationConcurrency;
 extern std::atomic<int> dtfeTriangulationsRemaining;
 
+
 namespace CorePool
 {
 inline int total()
@@ -77,6 +85,8 @@ inline std::atomic<int> &extra()
 
 inline int holders()
 {
+    if ( int const live = dtfePartitionsInFlight.load( std::memory_order_relaxed ); live > 0 )
+        return live;   // the dynamic loop's partitions in flight (DTFE.cpp)
     int const planned = dtfeTriangulationConcurrency.load( std::memory_order_relaxed );
     if ( planned > 0 )
         return std::max( 1, std::min( planned, dtfeTriangulationsRemaining.load( std::memory_order_relaxed ) ) );

@@ -25,7 +25,7 @@
 
 #include "gpu_host.h"
 #include "ps_deposit_params.h"
-#include "ps_mass_audit.h"     // PS_MASS_AUDIT=1: the fixed-point grid's exact total
+#include "ps_mass_audit.h"     // DTFE_MASS_AUDIT=1: the fixed-point grid's exact total
 #include "ps_deposit_msl.h"   // generated: static const char PS_DEPOSIT_MSL[]
 #include <atomic>
 extern std::atomic<int> psGpuRetries;   // ps_interpolation.cc (run_progress.h)
@@ -337,10 +337,10 @@ bool psGpuDepositFields(std::vector<float>& verts,
                           double massExtra, PSFixedUnits const& fxUnits,
                           PSGpuGrids& out, std::vector<uint32_t>& deferred, std::string& err)
 {
-    // PS_GPU_TIMING=1: one line per kernel run (threads, buffers, GPU-busy and wall seconds),
+    // DTFE_GPU_TIMING=1: one line per kernel run (threads, buffers, GPU-busy and wall seconds),
     // and per partition where its call went, before and in its hold of the GPU (PSGpuPhaseTimes: timed always,
     // printed only then)
-    bool const timing = Env::flag({"PS_GPU_TIMING"});
+    bool const timing = Env::flag({"DTFE_GPU_TIMING"});
     PSGpuPhaseTimes ph;
     auto tPh = std::chrono::steady_clock::now();
     Ctx& c = ctx();
@@ -350,8 +350,8 @@ bool psGpuDepositFields(std::vector<float>& verts,
     // Before the hold (ctxMutex below): the plan, the parameter block and the exact items' map, from the host
     // records -- work that needs no queue, done while another partition's passes hold the GPU.
     // The plan (the selected grids, their fixed-point form and device sizes; gpu_host.h, shared with ps_gpu_cuda.cu).
-    // PS_GPU_FLOAT_MASS=1 keeps float mass atomics, for comparison.
-    bool const floatMass = Env::flag({"PS_GPU_FLOAT_MASS"});
+    // DTFE_GPU_FLOAT_MASS=1 keeps float mass atomics, for comparison.
+    bool const floatMass = Env::flag({"DTFE_GPU_FLOAT_MASS"});
     PSGpuPlan const pl = psGpuPlan(subDims, fVel, fDisp, fGrad, fVolW, fCaustic, fExact, fScal, fSGrad, masses,
                                    massExtra, fxUnits, floatMass);
     size_t const nCell = pl.nCell;
@@ -378,18 +378,18 @@ bool psGpuDepositFields(std::vector<float>& verts,
     // --exact-average: split the work below the tet (depositExactItems in ps_deposit.metal), items of
     // blockCells cells of a tet's window (psExactItemBounds in gpu_host.h, shared with ps_gpu_cuda.cu), as the
     // compact map psBuildExactItemMap. The items follow the caller's cost order, keeping a SIMD group's threads on
-    // similar work. PS_EXACT_ITEMS=0 keeps the one-thread-per-tet kernel (A/B), PS_EXACT_ITEM_CELLS sets the block.
+    // similar work. DTFE_GPU_ITEMS=0 keeps the one-thread-per-tet kernel (A/B), DTFE_GPU_EXACT_CELLS sets the block.
     bool useItems = fExact;
-    useItems = useItems && Env::flag("PS_EXACT_ITEMS", true);
+    useItems = useItems && Env::flag("DTFE_GPU_ITEMS", true);
     MTL::Buffer* bItems = nullptr;
     MTL::Buffer* bSumW  = nullptr;
     size_t nItems = 0;
     uint32_t blockCells = 16;
-    if (long const v = Env::integer("PS_EXACT_ITEM_CELLS", 0); v > 0) blockCells = uint32_t(v);
+    if (long const v = Env::integer("DTFE_GPU_EXACT_CELLS", 0); v > 0) blockCells = uint32_t(v);
     psHostExactItemMap(PSHostItemsArgs{ c, verts, P, nGrid, nTetTotal, periodic, windowMode, timing, useItems,
                                         blockCells, bItems, nItems, ph });
 
-    auto const tAsk = std::chrono::steady_clock::now();   // PS_GPU_TIMING: the wait for the queue, and its hold
+    auto const tAsk = std::chrono::steady_clock::now();   // DTFE_GPU_TIMING: the wait for the queue, and its hold
     std::unique_lock<std::mutex> lock(ctxMutex());   // serialize dispatches (single queue); let go after the releases
     auto const tGot = std::chrono::steady_clock::now();
     tPh = tGot;
@@ -689,7 +689,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
     // the kernel), 4 B per tet instead of a ~130 B copy each.
     auto runLeftovers = [&]() -> bool
     {
-        auto tL = std::chrono::steady_clock::now();   // (PS_GPU_TIMING: this lambda's own host work, not its kernels)
+        auto tL = std::chrono::steady_clock::now();   // (DTFE_GPU_TIMING: this lambda's own host work, not its kernels)
         float* mb = static_cast<float*>(bM->contents());
         float const* sw = static_cast<float const*>(bSumW->contents());
         int64_t const* swx = static_cast<int64_t const*>(bSumW->contents());   // (sumWFixed: the words, little-endian)

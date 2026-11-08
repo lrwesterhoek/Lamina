@@ -65,7 +65,7 @@ def main():
          "--out", snap, "--n", str(N), "--box", str(BOX), "--amplitude-factor", str(AMP),
          "--crossed-waves", "--jitter-frac", str(JITTER), "--seed", str(SEED)])
     run([binary, snap, out, "--grid", str(GRID), "--periodic", "--partition", "2", "2", "2",
-         "--field", "density", "--input", "105", "--MpcUnit", "1", "--verbose", "0"])
+         "--field", "density", "--input-format", "105", "--mpc-unit", "1", "--verbose", "0"])
 
     den = load(out + ".den", GRID)
     streams = np.rint(load(out + ".streams", GRID)).astype(int)

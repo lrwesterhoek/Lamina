@@ -547,6 +547,24 @@ def t_series_driver():
     assert snapshot_series(Namespace(snap=98)) == [("098", None)]
 
 
+def t_runlog_averaging_by_binary():
+    """dtfelib.runlog.canonical_command reads the averaging rule from the binary, as it reads the dimension: a
+    PS-DTFE log's '-s N' / '-m M' (no effect there, dropped from its checkpoint key) stay as they are, a standard
+    log's '-s 27' is '--subsamples 3'; '--samples 27 --subsamples 3' (accepted, they agree) reads as one
+    '--subsamples 3' (docs/cleanup-plan.md P6.7, review R2/R3)."""
+    from dtfelib import runlog
+    cc = runlog.canonical_command
+    ps = cc("./PS-DTFE i o -s 8 -m 2 --grid 8")
+    assert "--subsamples" not in ps and "--average-method" not in ps, ps
+    assert cc("RUNNING: /x/PS-DTFE-2d-double i o --samples 9") == "RUNNING: /x/PS-DTFE-2d-double i o --samples 9"
+    assert cc("note\nRUNNING: ./PS-DTFE i o -s 27\n").endswith("-s 27\n")       # a whole log: its RUNNING line's binary
+    assert cc("./DTFE i o -s 27 --grid 8") == "./DTFE i o --subsamples 3 --grid 8"
+    assert cc("./DTFE i o --samples 27 --subsamples 3 --grid 8") == "./DTFE i o --subsamples 3 --grid 8"
+    assert cc("./DTFE i o --samples 20 --subsamples 3") == "./DTFE i o --samples 20 --subsamples 3"
+    assert cc("./PS-DTFE i o -s 27", averaging=True) == "./PS-DTFE i o --subsamples 3"      # explicit wins
+    assert cc("-m 2 -s 27", averaging=False) == "-m 2 -s 27"
+
+
 def t_velocity_scale():
     """FieldSet.load() converts u-units to peculiar km/s: first moments x sqrt(a), the
     dispersion (a velocity VARIANCE) x a, everything else untouched; exact no-op at z=0."""
@@ -1470,7 +1488,7 @@ def t_export_driver():
         assert len(tc["id"]) == 0 and int(pc["n_voids"]) == 0 and len(catalog.read_hdf5(root / "none" / files[1])[0]["a_mpc"]) == 0
         # --format through the CLI: csv / hdf5 / both
         for fmt, want in (("csv", [both[0]]), ("hdf5", [both[1]]), ("both", both)):
-            code, text, files = run(None, root / f"fmt_{fmt}", argv=[k0, "--out", str(root / f"fmt_{fmt}"), "--format", fmt])
+            code, text, files = run(None, root / f"fmt_{fmt}", argv=["--snaps", k0, "--out", str(root / f"fmt_{fmt}"), "--format", fmt])
             assert code == 0 and files == want, (fmt, code, files, text[-400:])
         # no --out: figures/void_catalog/<the DTFE_SIM simulation>/
         code, text, files = run([k0], None, look=Path(config.LOCAL_FIGURES_ROOT) / "void_catalog" / config.SIMULATION)
@@ -1797,7 +1815,7 @@ def t_void_scripts():
         _void_ladder_snapdir(data, 99, 0.0, 2, ("ps_output", "output", "ps_mw"))
         # ---- plot_void_profiles: two redshifts, two .npz + .png pairs, the keys that say what defines R_eff and the stack
         out = pvp.OUTPUT_DIR / "SYN"
-        code, text = run(pvp, ["--snaps", "99", "50", "--edges", "0,10,20", "--n-boot", "37"])
+        code, text = run(pvp, ["--snaps", "99", "50", "--edges", "0", "10", "20", "--n-boot", "37"])
         names = sorted(q.name for q in out.iterdir()) if out.is_dir() else []
         # a non-default --edges tags the names: '_edges0-10-20', the default stack's names stay free
         assert code == 0 and names == [f"void_profiles_ps_resolved_edges0-10-20_z{z}.{e}" for z in ("0.00", "0.50") for e in ("npz", "png")], (code, names, text[-600:])
@@ -1820,7 +1838,7 @@ def t_void_scripts():
         assert np.allclose(f["r_mpc"], rv99[f["index"]]) and list(f["count"]) == [len(want), 0] and 0 < len(want) <= 6, f["count"]
         assert np.isfinite(f["density_mean"][0]).all() and np.isnan(f["density_mean"][1]).all()
         # --radius r_eff --keep-overlaps: every resolved void, in r / R_eff, its own file
-        code, text = run(pvp, ["--snaps", "99", "--edges", "0,10,20", "--radius", "r_eff", "--keep-overlaps"])
+        code, text = run(pvp, ["--snaps", "99", "--edges", "0", "10", "20", "--radius", "r_eff", "--keep-overlaps"])
         g = npz(out / "void_profiles_ps_resolved_reff_overlaps_edges0-10-20_z0.00.npz")
         assert code == 0 and list(g["count"]) == [6, 0] and str(g["radius"]) == "r_eff" and np.array_equal(g["r_mpc"], g["r_eff_mpc"]), (code, text[-300:])
         # --prefix: the file is named by the set it holds, the primary set's file untouched
@@ -1836,10 +1854,10 @@ def t_void_scripts():
         assert code == 0 and (own / "void_profiles_ps_resolved_z0.00.png").is_file() and sorted(out.rglob("*")) == default_files, (code, text[-400:])
         assert np.allclose(npz(own / "void_profiles_ps_resolved_z0.00.npz")["edges"], _prof.default_edges_mpc(1.5 * 1.0, 64.0))
         # the default bins spelled out by hand are the default (no tag, the same file); other bins never touch it
-        dflt = ",".join(f"{e:.4g}" for e in _prof.default_edges_mpc(1.5 * 1.0, 64.0))
-        code, text = run(pvp, ["--snaps", "99", "--out", str(own), "--edges", dflt, "--n-boot", "200"])
+        dflt = [f"{e:.4g}" for e in _prof.default_edges_mpc(1.5 * 1.0, 64.0)]
+        code, text = run(pvp, ["--snaps", "99", "--out", str(own), "--edges", *dflt, "--n-boot", "200"])
         assert code == 0 and sorted(q.name for q in own.iterdir()) == ["void_profiles_ps_resolved_z0.00.npz", "void_profiles_ps_resolved_z0.00.png"], (code, sorted(q.name for q in own.iterdir()))
-        code, text = run(pvp, ["--snaps", "99", "--out", str(own), "--edges", "0,7.5,20"])
+        code, text = run(pvp, ["--snaps", "99", "--out", str(own), "--edges", "0", "7.5", "20"])
         assert code == 0 and (own / "void_profiles_ps_resolved_edges0-7.5-20_z0.00.npz").is_file(), sorted(q.name for q in own.iterdir())
         assert pvp.edges_tag([0.0, 7.5, 20.0], [0.0, 3.75, 5.25]) == "_edges0-7.5-20" and pvp.edges_tag([0, 3.75, 10.67], [0.0, 3.750001, 32.0 / 3.0]) == ""
         # an unreadable snapshot file FIRST: counted failed, the next snapshot still profiled, exit 1; a missing one too
@@ -1916,7 +1934,7 @@ def t_void_scripts():
         assert list(st["method"]) == ["ps", "ps"] and list(st["prefix"]) == ["ps_output.", "ps_output."], (st["method"], st["prefix"])
         four = ("population_evolution{}.png", "population_distributions{}.png", "population_abundance{}.png", "population_stats{}.npz")
         kept = {f.format(""): (popdir / f.format("")).stat().st_mtime_ns for f in four}
-        for args, tag in ((["--keep-overlaps"], "_overlaps"), (["--method", "dtfe"], "_dtfe")):
+        for args, tag in ((["--keep-overlaps"], "_overlaps"), (["--estimator", "dtfe"], "_dtfe")):
             code, text = run(pop, args)
             assert code == 0 and all((popdir / f.format(tag)).is_file() for f in four), (args, code, sorted(q.name for q in popdir.iterdir()), text[-400:])
             assert {f.format(""): (popdir / f.format("")).stat().st_mtime_ns for f in four} == kept, (args, "rewrote the untagged files")
@@ -2011,7 +2029,7 @@ def t_void_crossbox_outlines():
         with redirect_stdout(buf):
             try:
                 xb.main(["--replot", "--sims", "SYN", "SYN2", "SYN3", "--out", str(out), "--smooth-mpc", repr(sig),
-                         "--z", "0", "0.5", "3"])
+                         "--redshifts", "0", "0.5", "3"])
                 code = 0
             except SystemExit as e:
                 code = e.code
@@ -2206,7 +2224,7 @@ def t_power_spectrum():
 
 def t_pk_script():
     """plot_pk_compare.py in process on a synthetic snapshot: the file is named by what it holds (both estimators,
-    one --method, a --prefix), a lone estimator gets a note, and plot_pk draws each
+    one --estimator, a --prefix), a lone estimator gets a note, and plot_pk draws each
     estimator's own Nyquist pair when the grids differ in size (one grey pair when they agree)."""
     import io as _io, shutil, sys as _sys, tempfile
     from contextlib import redirect_stdout
@@ -2238,7 +2256,7 @@ def t_pk_script():
         assert "only PS-DTFE grids here" in text
         z = np.load(root / "out" / "pk_dtfe+ps_z0.50.npz")
         assert list(z["methods"]) == ["dtfe", "ps"] and str(z["prefix"]) == "" and z["dtfe_k"].shape == z["ps_k"].shape
-        code, text, names = run(["--snaps", "50", "--method", "dtfe"])
+        code, text, names = run(["--snaps", "50", "--estimator", "dtfe"])
         assert code == 0 and "pk_dtfe_z0.50.npz" in names and "pk_dtfe+ps_z0.50.npz" in names, names     # the earlier file untouched
         code, text, names = run(["--snaps", "50", "--prefix", "ps_mw"])
         assert code == 0 and "pk_ps_mw_z0.50.png" in names and str(np.load(root / "out" / "pk_ps_mw_z0.50.npz")["prefix"]) == "ps_mw"
@@ -2250,11 +2268,11 @@ def t_pk_script():
         # or another reference would write over the default figure and npz
         assert "pk_ps_ref50_z0.00.npz" in names and "pk_ps_z0.00.npz" in names, names
         before = (root / "out" / "pk_ps_z0.00.npz").read_bytes()
-        code, text, names = run(["--snaps", "99", "--nbins", "0", "--ref-snap", "-1"])
+        code, text, names = run(["--snaps", "99", "--n-bins", "0", "--ref-snap", "-1"])
         assert code == 0 and "pk_ps_nb0_noref_z0.00.npz" in names and "pk_ps_nb0_noref_z0.00.png" in names, names
-        code, text, names = run(["--snaps", "99", "--nbins", "12"])
+        code, text, names = run(["--snaps", "99", "--n-bins", "12"])
         assert code == 0 and "pk_ps_nb12_z0.00.npz" in names and (root / "out" / "pk_ps_z0.00.npz").read_bytes() == before, names
-        code, text, names = run(["--snaps", "99", "--nbins", "40", "--ref-snap", "0"])           # the defaults spelled out
+        code, text, names = run(["--snaps", "99", "--n-bins", "40", "--ref-snap", "0"])           # the defaults spelled out
         assert code == 0 and not [q for q in names if q.startswith("pk_ps_") and "_z0.00" in q and q not in (
             "pk_ps_z0.00.npz", "pk_ps_z0.00.png", "pk_ps_ref50_z0.00.npz", "pk_ps_ref50_z0.00.png", "pk_ps_nb0_noref_z0.00.npz",
             "pk_ps_nb0_noref_z0.00.png", "pk_ps_nb12_z0.00.npz", "pk_ps_nb12_z0.00.png")], names
@@ -2779,7 +2797,7 @@ def t_caustic_skeleton_script():
             assert "no caustic_class grid" in text and "parity-only" in text, text[-600:]
             # --voids asked for and refused (the header's 100 Mpc / 8 cell is not config.CELL_SIZE: the frame guard)
             assert abs(100.0 / n - config.CELL_SIZE) > 1e-3 * config.CELL_SIZE, config.CELL_SIZE
-            code, text, names = run(["--snaps", "50", "--voids", "--radius", "r_eff", "--keep-overlaps"])
+            code, text, names = run(["--snaps", "50", "--per-void", "--radius", "r_eff", "--keep-overlaps"])
             assert code == 1 and names == files("_reff_overlaps") and "failed: [50]" in text and "voids: FAILED" in text, (code, names, text[-600:])
             j = strict(root / "out" / "caustic_skeleton_z0.50_reff_overlaps.json")
             assert "cell" in j.get("voids_error", "") and "voids" not in j, j.get("voids_error")
@@ -2815,7 +2833,7 @@ def t_caustic_skeleton_script():
             with warnings.catch_warnings():             # undefined medians: None, not an all-NaN / empty (nan)median;
                 # only numpy's two messages: matplotlib's own autoscaling on the all-NaN column is not under test
                 warnings.filterwarnings("error", category=RuntimeWarning, message=r"(All-NaN slice|Mean of empty slice)")
-                code, text, names = run(["--snaps", "50", "--voids", "--cutout", "2", "--radius", "r_eff", "--keep-overlaps"])
+                code, text, names = run(["--snaps", "50", "--per-void", "--cutout", "2", "--radius", "r_eff", "--keep-overlaps"])
             tag = "_reff_overlaps_cut2"
             assert code == 0 and names == sorted(files(tag) + [f"caustic_skeleton_z0.50{tag}_voids.npz"]), (code, names, text[-600:])
             j = strict(root / "out" / f"caustic_skeleton_z0.50{tag}.json")
@@ -2829,19 +2847,19 @@ def t_caustic_skeleton_script():
             assert not (root / "default_out").exists()
             # the names. The default --voids set is untagged; a plain run into the same folder rewrites the three
             # files and removes that set's _voids.npz (an earlier run's, not this one's); other shells are '_shells...'
-            code, text, names = run(["--snaps", "50", "--voids"])
+            code, text, names = run(["--snaps", "50", "--per-void"])
             assert code == 0 and names == sorted(base + ["caustic_skeleton_z0.50_voids.npz"]), (code, names, text[-600:])
             assert strict(root / "out" / "caustic_skeleton_z0.50.json")["voids"]["n"] == 1         # row 0 has an R_v of 2 cells
             code, text, names = run(["--snaps", "50"], fresh=False)
             assert code == 0 and names == base, (code, names, text[-400:])
-            code, text, names = run(["--snaps", "50", "--voids", "--shells", "0.8,1.0,1.2"])
+            code, text, names = run(["--snaps", "50", "--per-void", "--shells", "0.8,1.0,1.2"])
             assert code == 0 and names == sorted(files("_shells0.8-1-1.2") + ["caustic_skeleton_z0.50_shells0.8-1-1.2_voids.npz"]), names
             # the void panel's title says 'distinct' when the run applied it (summ['voids']['distinct']), whatever the
             # radius (following the radius would call r_v 'distinct' even under --keep-overlaps, a distinct r_eff run
             # not)
             for args, distinct in ((["--radius", "r_eff"], True), (["--keep-overlaps"], False)):
                 del spy.titles[:]
-                code, text, names = run(["--snaps", "50", "--voids"] + args)
+                code, text, names = run(["--snaps", "50", "--per-void"] + args)
                 said = [t for t in spy.titles if "well-resolved voids" in t]
                 assert code == 0 and len(said) == 1 and ("distinct" in said[0]) == distinct, (args, said, text[-300:])
     finally:
@@ -3404,7 +3422,7 @@ def _run_py(args, env_extra=None, cwd=None, timeout=300):
 def t_pointeval_supersample_and_estimator():
     """plot_pointeval_panels.py reads a K > 1 plane (planes x nv*K x nu*K points; the density averaged
     over each KxK block as PointPlane does, the stream count the block's largest),
-    and plot_pointeval.py renders a standard-DTFE slice (output.pts_*) beside PS-DTFE grids: '--method dtfe', and
+    and plot_pointeval.py renders a standard-DTFE slice (output.pts_*) beside PS-DTFE grids: '--estimator dtfe', and
     'auto' following the slice on disk (not the grids, which have no ps_output.pts_* here)."""
     import json, shutil, tempfile
     import matplotlib.image as mimg
@@ -3453,7 +3471,7 @@ def t_pointeval_supersample_and_estimator():
         for method in ("auto", "dtfe", "ps"):
             figs = root / f"figs_{method}"
             rc, log = _run_py([plot / "plot_pointeval.py", "--data-root", data, "--sims", "SYN", "--snaps", "50",
-                               "--figures-root", figs, "--method", method, "--fields", "density"])
+                               "--figures-root", figs, "--estimator", method, "--maps", "density"])
             made = sorted(str(p.relative_to(figs)) for p in figs.rglob("*.png")) if figs.is_dir() else []
             if method == "ps":
                 assert made == [] and "no point-evaluated fields" in log, (method, made, log[-800:])
@@ -3503,7 +3521,7 @@ print("RESULT " + json.dumps(out))
         assert all(abs(got[k] - v) < 1e-6 for k, v in want.items()), got
         other = root / "other root"
         other.mkdir()
-        rc, log = _run_py([plot / "plot_halo_tracking.py", "--data-root", data, "--sim", "SYN", "--snap", "50"],
+        rc, log = _run_py([plot / "plot_halo_tracking.py", "--data-root", data, "--sim", "SYN", "--start-snap", "50"],
                           env_extra={"DTFE_DATA_ROOT": str(other)})
         assert rc != 0 and f"found under {data / 'SYN'}" in log and str(other) not in log, log[-800:]
     finally:
@@ -3679,7 +3697,7 @@ def t_science_fixes():
 def t_void_radius_and_physical_smoothing():
     """The measured void radius R_v (where the spherically averaged smoothed delta around the minimum first
     rises to 0) on an analytic field, an overdense minimum and the periodic wrap; distinct voids deepest first (and
-    across the box edge); the smoothing in Mpc -- set_smoothing and DTFE_SIGMA_MPC -- with its footprint, and the
+    across the box edge); the smoothing in Mpc -- set_smoothing and DTFE_SMOOTH_MPC -- with its footprint, and the
     anchor: 10 cells given in Mpc is exactly the current sigma, footprint and cache namespace."""
     import os as _os, subprocess as _sp, sys as _sys
     import config
@@ -3735,16 +3753,19 @@ def t_void_radius_and_physical_smoothing():
         assert pipeline.smoothing_tag() == ""                     # the production smoothing: the default names
     finally:
         config.SMOOTHING_SIGMA_CELLS, config.FOOTPRINT_SIZE, config.SMOOTHING_SIGMA_MPC = old
-    # DTFE_SIGMA_MPC at import (the module-level copies and analyze.py follow), in a fresh interpreter per box
+    # DTFE_SMOOTH_MPC at import (the module-level copies and analyze.py follow), in a fresh interpreter per box (its
+    # older name DTFE_SIGMA_MPC: tests/py_cli_alias_test.py)
     py = Path(__file__).resolve().parents[1] / "python"
     probe = "import config; print(config.SMOOTHING_SIGMA_CELLS, config.FOOTPRINT_SIZE, round(config.SMOOTHING_SIGMA_MPC, 6))"
     for sim, sig, want in (("TNG300-3-Dark", "2.1625", (2.1625 / (302.62769412459404 / 512), 5)),
                            ("TNG50-4-Dark", str(10 * 51.668142899320934 / 512), (10.0, 11))):
-        env = dict(_os.environ, DTFE_SIM=sim, DTFE_SIGMA_MPC=sig)
+        env = dict(_os.environ, DTFE_SIM=sim, DTFE_SMOOTH_MPC=sig)
+        env.pop("DTFE_SIGMA_MPC", None)
         out = _sp.run([_sys.executable, "-c", probe], cwd=py, env=env, capture_output=True, text=True).stdout.split()
         assert len(out) == 3 and abs(float(out[0]) - want[0]) < 1e-6 and int(out[1]) == want[1], (sim, out)
     # the core figures (saved under their production names) are safe from it: analyze.py compute/plot/all refuse
-    env = dict(_os.environ, DTFE_SIM="TNG100-3-Dark", DTFE_SIGMA_MPC="5.0")
+    env = dict(_os.environ, DTFE_SIM="TNG100-3-Dark", DTFE_SMOOTH_MPC="5.0")
+    env.pop("DTFE_SIGMA_MPC", None)
     r = _sp.run([_sys.executable, "analyze.py", "plot"], cwd=py, env=env, capture_output=True, text=True)
     assert r.returncode != 0 and "refused" in (r.stderr + r.stdout), (r.returncode, r.stderr[-300:])
 
@@ -3983,7 +4004,7 @@ def t_void_tracking_script():
         assert n == 8 and grids == ("dtfe", "output.") and len(released) == 3, (n, grids, released)
         # main(): the reference snapshot refused -> SystemExit naming it, before TreeSet (no trees on disk here)
         pipeline.products = lambda *a, **k: _Prod(refusal)
-        _sys.argv = ["plot_void_tracking.py", "--sim", "SYN", "--snap", "99", "--data-root", str(tmp)]
+        _sys.argv = ["plot_void_tracking.py", "--sim", "SYN", "--start-snap", "99", "--data-root", str(tmp)]
         buf = _io.StringIO()
         with redirect_stdout(buf):
             try:
@@ -4098,15 +4119,15 @@ def t_analyze_ladder_on_disk():
         config.CACHE_DIR, config.LOCAL_FIGURES_ROOT = root / "cache", str(root / "figures")
         code, text, lines = check()                              # no snapdir of the ladder at all
         assert code == 1 and "no snapshot of the config ladder" in text and len(lines) == 16, (code, text[-400:])
-        full = (("vel", 3), ("velDiv", 1), ("velShear", 6), ("velGrad", 9))     # with 'den': the five the scripts read
+        full = (("vel", 3), ("velDiv", 1), ("velShear", 6))     # with 'den': the drivers' four default fields
         for snap in ("050", "099"):                              # the header's redshift is config's (else a mismatch)
             _synthetic_snapdir(root / "data", sim, int(snap), config.get_redshift(snap), grids=("den",), extra=full)
         code, text, lines = check()
         assert code == 0 and all("OK (all PS-DTFE fields)" in lines[f"snapdir_{s}"] for s in ("050", "099")), (code, text[-800:])
         assert sum("not on disk" in ln for ln in lines.values()) == 14 and "not on disk" in lines["snapdir_067"], lines
-        (root / "data" / sim / "snapdir_050" / "ps_output.a_velGrad").unlink()
+        (root / "data" / sim / "snapdir_050" / "ps_output.a_velShear").unlink()
         code, text, lines = check()
-        assert code == 1 and "INCOMPLETE (PS-DTFE): missing ps_output.a_velGrad" in lines["snapdir_050"] and "Re-run DTFE for: 050" in text, (code, text[-600:])
+        assert code == 1 and "INCOMPLETE (PS-DTFE): missing ps_output.a_velShear" in lines["snapdir_050"] and "Re-run DTFE for: 050" in text, (code, text[-600:])
         # compute / export without ids: only 050 and 099 are asked for, the 14 others named (products stubbed: no data read)
         asked = []
 
@@ -4203,7 +4224,7 @@ def t_cache_prune():
     keys = ("SMOOTHING_SIGMA_CELLS", "FOOTPRINT_SIZE", "FIELD_RESOLUTION", "VOID_EIGENVALUE_CRITERION",
             "GRADIENT_THRESHOLD", "SMOOTHING_SIGMA_MPC")
     old = {k: getattr(config, k) for k in keys}
-    old_env = os.environ.pop("DTFE_SIGMA_MPC", None)
+    old_env = {k: os.environ.pop(k, None) for k in ("DTFE_SMOOTH_MPC", "DTFE_SIGMA_MPC")}
     try:
         config.SMOOTHING_SIGMA_CELLS, config.FOOTPRINT_SIZE, config.FIELD_RESOLUTION = 10.0, 11, 512
         config.VOID_EIGENVALUE_CRITERION, config.GRADIENT_THRESHOLD = "trace", 0.1
@@ -4253,8 +4274,7 @@ def t_cache_prune():
     finally:
         for k, v in old.items():
             setattr(config, k, v)
-        if old_env is not None:
-            os.environ["DTFE_SIGMA_MPC"] = old_env
+        os.environ.update({k: v for k, v in old_env.items() if v is not None})
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -4264,7 +4284,7 @@ def main():
     print("=" * 60)
     print("synthetic:")
     check("figures_path under the figure root at call time, save_figure there only; analyze.py plot: the caller's environment, a closing line naming the figure root (synthetic)", t_figures_path_and_analyze_plot)
-    check("the measured void radius R_v (analytic, periodic, overdense), distinct voids deepest first, the smoothing in Mpc (set_smoothing, DTFE_SIGMA_MPC, footprint) and its 10-cell anchor (synthetic)", t_void_radius_and_physical_smoothing)
+    check("the measured void radius R_v (analytic, periodic, overdense), distinct voids deepest first, the smoothing in Mpc (set_smoothing, DTFE_SMOOTH_MPC, footprint) and its 10-cell anchor (synthetic)", t_void_radius_and_physical_smoothing)
     check("distinct_mask's claims from every resolved void (a no-R_v void blocks, an unresolved one never), snapshot_stats' counts add up, void_profiles 'deep' = the de-duplication within it (synthetic)", t_distinct_claims)
     check("save_figure under a root without 'figures' in its path; the cuts are 10 sigma / L/2 / 1 cell at CALL time; a cache older than its grid is rebuilt; profile bins in sigma (synthetic)", t_science_fixes)
     check("_save_npz whole or not at all (an interrupted save leaves the old file, no temp); a cut / empty / non-zip cache is rebuilt with one write; void_outlines' clean exit on a damaged member (synthetic)", t_cache_atomic)
@@ -4292,7 +4312,7 @@ def main():
     check("slice maps: the house-style helpers' ranges and rules; the three map scripts write the same 53 files with the house norms, floors, panel labels, orientation and sizes; empty slices skipped (synthetic)", t_slice_maps)
     check("point-eval maps: one look and one path from plot_PS_DTFE (--pointeval-only and full) and plot_pointeval.py, fresh interpreters (synthetic)", t_pointeval_style)
     check("point-eval maps: slab / smooth / fixed-range renders get their own names, not 'up to date' against the plane render (synthetic)", t_pointeval_name_tags)
-    check("plot_pointeval_panels.py reads a K > 1 plane (KxK blocks: density averaged, streams the largest); plot_pointeval.py renders a standard-DTFE slice beside PS-DTFE grids (--method dtfe, and auto following the slice) (synthetic)", t_pointeval_supersample_and_estimator)
+    check("plot_pointeval_panels.py reads a K > 1 plane (KxK blocks: density averaged, streams the largest); plot_pointeval.py renders a standard-DTFE slice beside PS-DTFE grids (--estimator dtfe, and auto following the slice) (synthetic)", t_pointeval_supersample_and_estimator)
     check("plot_halo_tracking.py samples the environment from --prefix / --raw's grids, and --data-root reaches the trees (synthetic)", t_halo_tracking_grid_set)
     check("plot_velDiv_den.py / plot_PDF_CDF.py evolution summaries from this run's snapshots only, each summary naming its simulation and estimator (synthetic)", t_evolution_summaries_this_run)
     check("sample_grid conventions", t_sample_grid)
@@ -4307,6 +4327,8 @@ def main():
     check("FieldSet caustic loader (synthetic)", t_caustic_field_loader)
     check("velocity_single_stream float-streams + hidden-streams mask (synthetic)", t_velocity_single_stream_float_mask)
     check("FieldSet velocity_scale u-units conversion (synthetic)", t_velocity_scale)
+    check("run-log reader: the averaging spellings read by the binary, PS-DTFE's kept (synthetic)",
+          t_runlog_averaging_by_binary)
     check("sim_dir / find_sims: per-family and flat data layouts (synthetic)", t_sim_dir_layouts)
     check("snapdir_path / snapshot_ladder == the pasted expressions, both layouts, int and '099' ids (synthetic)",
           t_snapshot_helpers)

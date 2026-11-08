@@ -37,7 +37,7 @@ struct vertexData : public Data_structure
     double _volAcc;       // vertexDensity's per-vertex volume sum (triangulation.cpp); -1 marks a convex-hull vertex. +8 B/vertex, see auto_tune.h
 #ifdef PHASE_SPACE
     Pvector<Real,NO_DIM> _eulerianPos; // Eulerian position (triangulation vertices store Lagrangian coords in PS-DTFE mode)
-    uint64_t _particleID;              // snapshot ParticleID (stream identities, --per-stream-ids); +8 B/vertex, see auto_tune.h
+    uint64_t _particleID;              // snapshot ParticleID (stream identities, --ps-per-stream-ids); +8 B/vertex, see auto_tune.h
     int32_t  _psDeg;                   // --ps-vertex-mass: finite (non-dummy) cells incident to this vertex; +4 B/vertex
 #endif
 

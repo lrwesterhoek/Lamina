@@ -49,7 +49,7 @@ import numpy as np
 binary, tmp = sys.argv[1], sys.argv[2]
 L, n = 100.0, 16
 dx = L / n
-common = ["--grid", str(n), "--periodic", "--MpcUnit", "1"]
+common = ["--grid", str(n), "--periodic", "--mpc-unit", "1"]
 
 def run(name, infile, args):
     out = os.path.join(tmp, name)
@@ -91,7 +91,7 @@ else:
             f.write(f"{len(p)}\n0 {L} 0 {L} 0 {L}\n")
             np.savetxt(f, np.c_[p, np.ones(len(p))], fmt="%.7f")
     pin, pmoved = os.path.join(tmp, "pts_p.txt"), os.path.join(tmp, "pts_moved.txt")
-    cases.append(("tsc", pin, pmoved, ["-i", "111", "-f", "density", "--TSC"], 1e-5))
+    cases.append(("tsc", pin, pmoved, ["-i", "111", "-f", "density", "--tsc"], 1e-5))
     # the DTFE field at the cell centres (density_a's Monte Carlo points are not translation-invariant)
     cases.append(("dtfe", pin, pmoved, ["-i", "111", "-f", "density", "--partition", "1", "1", "1"], 1e-4))
 
@@ -114,9 +114,9 @@ PYEOF
     # without '--periodic' the moved region leaves the box: refused before the first pass
     printf '8\n0 1 0 1 0 1\n' > "$E2E/np.txt"
     for x in 0.1 0.6; do for y in 0.1 0.6; do for z in 0.1 0.6; do echo "$x $y $z 1" >> "$E2E/np.txt"; done; done; done
-    if ./DTFE "$E2E/np.txt" "$E2E/np" -i 111 --grid 4 --MpcUnit 1 -f density --TSC --interlace > "$E2E/np.log" 2>&1; then
+    if ./DTFE "$E2E/np.txt" "$E2E/np" -i 111 --grid 4 --mpc-unit 1 -f density --tsc --interlace > "$E2E/np.log" 2>&1; then
         echo "   FAIL  a non-periodic --interlace run without a region is not refused"; fails=$((fails+1))
-    elif grep -q "needs a '--region' or '--regionMpc'" "$E2E/np.log"; then
+    elif grep -q "needs a '--region' or '--region-mpc'" "$E2E/np.log"; then
         echo "   PASS  a non-periodic --interlace run without a region is refused before the first pass"
     else
         echo "   FAIL  non-periodic --interlace: not the expected refusal ($E2E/np.log)"; fails=$((fails+1))

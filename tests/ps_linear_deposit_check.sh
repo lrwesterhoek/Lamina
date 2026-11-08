@@ -64,7 +64,7 @@ run() {  # $1 = output root, $2 = input snapshot, rest = extra flags
     local log="${out}.log"
     set +e
     "${BIN}" "${snap}" "${out}" --grid "${GRID}" --field density velocity density_a \
-        --input 105 --MpcUnit 1 --verbose 1 "$@" > "$log" 2>&1
+        --input-format 105 --mpc-unit 1 --verbose 1 "$@" > "$log" 2>&1
     local rc=$?
     set -e
     die_on_failed_run "$rc" "$log"
@@ -95,8 +95,8 @@ if [ "${HAVE_EXACT}" -eq 1 ]; then
     echo ">> run 9: pancake, --exact-average --ps-linear-deposit (composition)"
     run "${TMP}/pld_pan_ex_l" "${SNAP_PAN}" --periodic --exact-average --ps-linear-deposit
     echo ">> runs 10-11: pancake, sampled '.a_den' at nSub 1/5 (3 is run 3) for the convergence ladder"
-    run "${TMP}/pld_pan_ns1" "${SNAP_PAN}" --periodic --avg-subsamples 1
-    run "${TMP}/pld_pan_ns5" "${SNAP_PAN}" --periodic --avg-subsamples 5
+    run "${TMP}/pld_pan_ns1" "${SNAP_PAN}" --periodic --subsamples 1
+    run "${TMP}/pld_pan_ns5" "${SNAP_PAN}" --periodic --subsamples 5
     if [ "${GPU_BUILT}" -eq 1 ]; then
         echo ">> runs 12-13: exact deposit + dispersion, CPU vs --gpu (float32 exact-clip parity)"
         # dedicated pair (with the dispersion field run() does not request): the GPU exact
@@ -106,7 +106,7 @@ if [ "${HAVE_EXACT}" -eq 1 ]; then
             rm -f "${TMP}/pld_pan_${tag}".*
             set +e
             "${BIN}" "${SNAP_PAN}" "${TMP}/pld_pan_${tag}" --grid "${GRID}" \
-                --field density velocity dispersion --input 105 --MpcUnit 1 --verbose 1 \
+                --field density velocity dispersion --input-format 105 --mpc-unit 1 --verbose 1 \
                 --periodic --exact-average ${GPUFLAG} > "${TMP}/pld_pan_${tag}.log" 2>&1
             rc=$?
             set -e

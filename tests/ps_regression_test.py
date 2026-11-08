@@ -159,7 +159,7 @@ def check_caustics(binary, snap, grid=GRID, box=BOX, amp=AMP):
                 pass
         run([binary, snap, root, "--grid", str(grid), "--periodic",
              "--field", "density", "--ps-caustics",
-             "--input", "105", "--MpcUnit", "1", "--verbose", "0"] + extra)
+             "--input-format", "105", "--mpc-unit", "1", "--verbose", "0"] + extra)
         roots[tag] = root
 
     with open(roots["serial"] + ".caustic", "rb") as fa, \
@@ -386,7 +386,7 @@ def main():
     run([binary, snap, out_root, "--grid", str(GRID), "--periodic",
          "--field", "density", "velocity", "density_a", "dispersion",
          "--sample-points", pts_file,
-         "--input", "105", "--MpcUnit", "1", "--verbose", "1"])
+         "--input-format", "105", "--mpc-unit", "1", "--verbose", "1"])
 
     den = load_field(out_root + ".den", GRID)
     streams = load_field(out_root + ".streams", GRID)

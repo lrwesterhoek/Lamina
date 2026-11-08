@@ -7,7 +7,7 @@ void outlines (tools/void_outlines.py) read it: for the production grids that is
 file. Run with DTFE_SIM set to the simulation (config reads the box for it) and DTFE_DATA_ROOT to its data root:
 
     DTFE_SIM=TNG100-3-Dark python3 python/gui/void_cache.py status < runs.json
-    DTFE_SIM=TNG100-3-Dark python3 python/gui/void_cache.py build --sim TNG100-3-Dark --snap 99 --method ps
+    DTFE_SIM=TNG100-3-Dark python3 python/gui/void_cache.py build --sim TNG100-3-Dark --snap 99 --estimator ps
 
 status  reads a JSON list of {sim, snap, method, prefix} on stdin and prints ONE JSON line: a list of
         {'state', 'why'} in the same order, state one of
@@ -24,7 +24,6 @@ build   builds (or confirms) one snapshot's catalogue, refusing when it would no
 
 from __future__ import annotations
 
-import argparse
 import contextlib
 import json
 import os
@@ -89,11 +88,12 @@ def build(sim: str, snap: int, method: str, prefix: str | None, data_root=None) 
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    from dtfelib.cli import new_parser, add_estimator_arg
+    p = new_parser(description=__doc__.split("\n\n")[0])
     p.add_argument("mode", choices=("status", "build"))
     p.add_argument("--sim", default=None)
     p.add_argument("--snap", type=int, default=None)
-    p.add_argument("--method", choices=("ps", "dtfe"), default="ps")
+    add_estimator_arg(p, choices=("ps", "dtfe"), default="ps", help="the estimator of the grids (default ps)")
     p.add_argument("--prefix", default=None, help="the grid set's output prefix (default the method's)")
     p.add_argument("--data-root", type=Path, default=None, help="the data root (default DTFE_DATA_ROOT's)")
     a = p.parse_args(argv)

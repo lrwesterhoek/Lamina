@@ -38,7 +38,7 @@ radius), and a non-default smoothing writes into its own folder (plot_void_popul
 
 Examples:
   python3 plot/plot_void_environment.py --sim TNG100-3-Dark
-  python3 plot/plot_void_environment.py --sim TNG100-3-Dark --criterion density_raw
+  python3 plot/plot_void_environment.py --sim TNG100-3-Dark --criterion density-raw
   python3 plot/plot_void_environment.py --sim TNG50-3-Dark --tracking-dir ~/tracking/TNG50-3-Dark
 """
 
@@ -59,6 +59,14 @@ from dtfelib import groupcat as gc
 from dtfelib import voids as V
 from dtfelib import figures as style
 from dtfelib import cli
+
+# --criterion's spellings at the command line (R6: words joined by '-') against classify.CRITERIA's names, which stay
+# what they are inside: the npz keys (f_vic_<c>, agree_<a>__<b>, the stored 'criterion') and the figure tags (critique
+# 22). The underscore spelling of before is read with a warning for one release.
+CRITERION_ARGS = tuple(c.replace("_", "-") for c in classify.CRITERIA)
+criterion_arg = cli.choice_type("--criterion", CRITERION_ARGS,
+                                old={c: c.replace("_", "-") for c in classify.CRITERIA if "_" in c},
+                                internal={c.replace("_", "-"): c for c in classify.CRITERIA})
 
 FOLDER = "void_environment"
 PCT = (16, 50, 84)
@@ -358,17 +366,19 @@ def main(argv=None):
     parser = make_parser("Void-in-void versus void-in-cloud across the snapshots (by default: net infall in the "
                          "2-3 R_v shell), with the sizes, depths and shapes of the two types, the agreement of the "
                          "criteria and the tracked voids' trajectories by type.")
-    parser.add_argument("--criterion", choices=classify.CRITERIA, default=classify.DEFAULT_CRITERION,
+    parser.add_argument("--criterion", type=criterion_arg, default=classify.DEFAULT_CRITERION,
+                        metavar="{" + ",".join(CRITERION_ARGS) + "}",
                         help="what makes a void void-in-cloud: velocity (default; the mean peculiar radial velocity "
-                             "of the 2-3 R_v shell is negative), density_smoothed (the smoothed density contrast "
-                             "within 3 R_v is positive) or density_raw (the raw one within 2 R_v, Ceccarelli et al. "
+                             "of the 2-3 R_v shell is negative), density-smoothed (the smoothed density contrast "
+                             "within 3 R_v is positive) or density-raw (the raw one within 2 R_v, Ceccarelli et al. "
                              "2013); every criterion is measured and compared, this one sets the type")
     parser.add_argument("--factor", type=float, default=classify.ENV_FACTOR,
                         help=f"the raw density criterion's radius: its enclosed contrast is taken within this many "
                              f"R_v (default {classify.ENV_FACTOR:g}, Ceccarelli et al. 2013)")
     add_rv_definition_arg(parser, catalog.R_V_DEFINITIONS,
                           "which R_v: crossing (the mean, default), delta08 (enclosed contrast -0.8) or ridge (the "
-                          "compensation ridge); a catalogue without it is rebuilt by the pipeline or gives no void")
+                          "compensation ridge); a catalogue without it is rebuilt by the pipeline or gives no void",
+                          dest="r_v_definition")
     parser.add_argument("--keep-overlaps", action="store_true",
                         help="every resolved void with a radius, not only the distinct ones")
     add_snaps_arg(parser, help="snapshots (default: every one with grids)")

@@ -133,7 +133,7 @@ static int sniffGadgetBinaryInput(std::string const &filename, int const inputFi
         MESSAGE::Message message( verboseLevel );
         message << MESSAGE::cYellow() << "NOTE: '" << filename << "' is not an HDF5 file but "
                 "starts with a Gadget record marker; reading it as a binary Gadget snapshot "
-                "(--input 101). Pass '--input' explicitly to override." << MESSAGE::cReset()
+                "(--input-format 101). Pass '--input-format' explicitly to override." << MESSAGE::cReset()
                 << "\n" << MESSAGE::Flush;
         return 101;
     }
@@ -196,7 +196,7 @@ void readInputData(std::vector<Particle_data> *p,
     if ( not readData._lagrangianPositionPopulated )
     {
         if ( userOptions->lagrangianInputFilename.empty() )
-            throwError( "PS-DTFE requires Lagrangian (initial condition) positions. The main input file does not contain an 'InitialCoordinates' dataset. Specify an IC snapshot using '--lagrangianInput'." );
+            throwError( "PS-DTFE requires Lagrangian (initial condition) positions. The main input file does not contain an 'InitialCoordinates' dataset. Specify an IC snapshot using '--ps-lagrangian-input'." );
 
 #ifdef HDF5
         MESSAGE::Message message( userOptions->verboseLevel );
@@ -343,7 +343,7 @@ void readInputData(std::vector<Particle_data> *p,
         readData._lagrangianPositionPopulated = true;
         message << "\t " << MESSAGE::cGreen() << "Lagrangian position matching complete." << MESSAGE::cReset() << "\n" << MESSAGE::Flush;
 #else
-        throwError( "The '--lagrangianInput' option requires HDF5 support. Please compile with -DHDF5." );
+        throwError( "The '--ps-lagrangian-input' option requires HDF5 support. Please compile with -DHDF5." );
 #endif
     }
 
@@ -359,7 +359,7 @@ void readInputData(std::vector<Particle_data> *p,
 // Functions for writing the output data
 
 
-// Dispatches output writing to the format chosen via the '--output' option.
+// Dispatches output writing to the format chosen via the '--output-format' option.
 class OutputData
 {
     public:
@@ -512,6 +512,14 @@ void writeOutputData(Quantities &uQuantities,
 
     // --exact-average: raw tetrahedron-touch count (geometric multiplicity, NOT a stream
     // count -- see '.streams' for the physical one). One file, same preference order as '.caustic'.
+    // --face-gradient: the stream average's divergence beside the mean flow's (the '_a' grid only: the face sums are
+    // exact-deposit averages)
+    if ( not aQuantities.velocity_divergence_streams.empty() )
+        output.write( aQuantities.velocity_divergence_streams, userOptions.outputFilename + ".a_velDivStreams",
+                      "stream-averaged velocity divergence (--face-gradient: the streams' own; the mean flow's is '.a_velDiv')", userOptions );
+    if ( not aQuantities.mass_flux_divergence.empty() )
+        output.write( aQuantities.mass_flux_divergence, userOptions.outputFilename + ".a_massFluxDiv",
+                      "mass flux divergence div(sum rho_s v_s) (--face-gradient; rho/rho_bar x velocity / length)", userOptions );
     if ( not uQuantities.tet_touch.empty() )
         output.write( uQuantities.tet_touch, userOptions.outputFilename + ".tetTouch", "tetrahedron-touch count", userOptions );
     else if ( not aQuantities.tet_touch.empty() )

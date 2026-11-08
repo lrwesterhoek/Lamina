@@ -19,7 +19,7 @@
 #     the same density grid (full axis: Nyquist negative; half axis: positive).
 #
 # Usage: tests/tweb_check.sh [--no-build]
-#   GRID=1300 STD=0 STRICT=0 PS_ARGS="--avg-subsamples 1" EXTRA="--scratch-dir /path" TWEB_TMP=/path \
+#   GRID=1300 STD=0 STRICT=0 PS_ARGS="--subsamples 1" EXTRA="--scratch-dir /path" TWEB_TMP=/path \
 #       tests/tweb_check.sh --no-build                 -- the >2^31-cell run: the exact deposit would take
 #   an hour there, and the sampled one is not exactly 1D, so STRICT=0 reports the premise and (B) as
 #   information; (A) and (C) stay exact. The checks stream the grids plane by plane, at any size.
@@ -64,7 +64,7 @@ run() {  # $1 = binary, $2 = output root, rest = this binary's own flags (RUN_SN
     rm -f "${out}".* "${out}"_*
     set +e
     # shellcheck disable=SC2086
-    "${bin}" "${RUN_SNAP:-${SNAP}}" "${out}" --grid "${RUN_GRID:-${GRID}}" --periodic --input 105 --MpcUnit 1 \
+    "${bin}" "${RUN_SNAP:-${SNAP}}" "${out}" --grid "${RUN_GRID:-${GRID}}" --periodic --input-format 105 --mpc-unit 1 \
         --field density tweb --lambda-th "${TH}" --verbose 1 "$@" ${EXTRA} > "${out}.log" 2>&1
     local rc=$?
     set -e

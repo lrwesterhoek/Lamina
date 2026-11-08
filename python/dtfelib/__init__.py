@@ -16,7 +16,8 @@ from .cli import make_parser, make_fieldset, snapdir, sim_dir, find_sims, use_da
 from .cli import snapdir_path, snapshot_ladder
 from .cli import NoSimulation, require_sim, NoDataRoot, require_data_root
 from .cli import add_ps_gradient_arg, mean_field_wanted
-from .cli import add_sim_arg, add_snaps_arg, add_out_arg, add_rv_definition_arg
+from .cli import add_sim_arg, add_snaps_arg, add_out_arg, add_rv_definition_arg, add_estimator_arg
+from .cli import new_parser, deprecated_alias, deprecated_option, add_list_arg, choice_type
 from .cli import snapshot_series, run_series, report_series
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "DEFAULT_SNAP", "NoSimulation", "require_sim", "NoDataRoot", "require_data_root", "sim_dir", "find_sims",
     "use_data_root", "snapdir_path", "snapshot_ladder",
     "add_ps_gradient_arg", "mean_field_wanted",
-    "add_sim_arg", "add_snaps_arg", "add_out_arg", "add_rv_definition_arg",
+    "add_sim_arg", "add_snaps_arg", "add_out_arg", "add_rv_definition_arg", "add_estimator_arg",
+    "new_parser", "deprecated_alias", "deprecated_option", "add_list_arg", "choice_type",
     "snapshot_series", "run_series", "report_series",
 ]

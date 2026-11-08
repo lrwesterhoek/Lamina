@@ -3,8 +3,8 @@ across a snapshot series.
 
 All file naming, grid geometry, units and metadata come from dtfelib.FieldSet; density is
 plotted MEAN-NORMALIZED (rho/rho_bar, identical colorbars for both estimators;
-FieldSet auto-detects the on-disk convention). --method defaults to
-'dtfe' (this is the standard-DTFE plot script); pass --method ps to plot the PS-DTFE
+FieldSet auto-detects the on-disk convention). --estimator defaults to
+'dtfe' (this is the standard-DTFE plot script); pass --estimator ps to plot the PS-DTFE
 versions of the same fields -- the divergence and the shear of PS's MEAN flow by default
 (derived from its velocity grid, the quantities standard DTFE stores),
 '--ps-gradient stored' for the PS binary's stream-averaged grids.
@@ -24,7 +24,7 @@ from scipy.ndimage import gaussian_filter
 
 from dtfelib import make_parser, FieldSet, sim_dir, snapdir_path, add_ps_gradient_arg, mean_field_wanted
 from dtfelib import figures as style
-from dtfelib.fields import extract_2d_slice as extract_slice, extract_velocity_slice
+from dtfelib.fields import extract_2d_slice as extract_slice, extract_velocity_slice, block_mean_slice
 
 style.apply()                                   # the house style (serif, SHOW_TITLES, DPI)
 
@@ -56,19 +56,20 @@ def plot_density(density_field, slice_dim, box_size, redshift=None, save_path=No
                     label=style.MAP_LABELS['density'], title=_title("DTFE Density", redshift), path=save_path)
 
 def plot_velocity(velocity_field, slice_dim, box_size, quiver_step,
-                  redshift=None, save_path=None):
+                  redshift=None, save_path=None, density_field=None):
+    """The velocity slice as arrows, each the MEAN velocity of a quiver_step x quiver_step block of cells drawn at the
+    block's centre (every cell counts, not every quiver_step-th one). density_field: the block means are
+    density-weighted (a mass-weighted PS velocity grid: FieldSet.velocity_weighting); None: the plain mean (a
+    volume-weighted grid: standard DTFE, PS-DTFE under --ps-volume-weighted)."""
     X, Y, U, V = extract_velocity_slice(velocity_field, slice_dim)
     U, V = U.T, V.T
+    W = None if density_field is None else extract_slice(density_field, slice_dim).T
 
     ny, nx = U.shape
     pixel_size = box_size / nx
-    X_mesh, Y_mesh = np.meshgrid(np.arange(nx), np.arange(ny), indexing='xy')
-    X_phys, Y_phys = X_mesh * pixel_size, Y_mesh * pixel_size
-
-    X_q = X_phys[::quiver_step, ::quiver_step]
-    Y_q = Y_phys[::quiver_step, ::quiver_step]
-    U_q = U[::quiver_step, ::quiver_step]
-    V_q = V[::quiver_step, ::quiver_step]
+    U_q, yc, xc = block_mean_slice(U, quiver_step, W)
+    V_q, _, _ = block_mean_slice(V, quiver_step, W)
+    X_q, Y_q = np.meshgrid(xc * pixel_size, yc * pixel_size, indexing='xy')
 
     mag = np.sqrt(U_q**2 + V_q**2)
     scale = np.percentile(mag, 95) * 0.5
@@ -139,8 +140,12 @@ def process_snapshot(args, snap):
 
         if PROCESS_VELOCITY and fs.has('velocity'):
             fields['velocity'] = fs.load('velocity')
+            weighting, why = fs.velocity_weighting      # the quiver's block means: as the deposit weighted the cells
+            if weighting == "mass" and fs.has('density'):
+                fields['velocity_weight'] = fs.density(units='mean')    # unsmoothed: the cells' own mass
+            print(f"  velocity arrows: {weighting}-weighted block means of {VELOCITY_QUIVER_STEP}^2 cells ({why})")
 
-        # under --method ps the divergence and the shear of the MEAN flow by default, the quantities a
+        # under --estimator ps the divergence and the shear of the MEAN flow by default, the quantities a
         # standard-DTFE map shows: FieldSet.load(..., mean_field=True) derives them from the PS velocity grid
         # ('--ps-gradient stored': the binary's PS grids, the stream average <grad v>); standard DTFE reads its grids
         mean_field = mean_field_wanted(args)
@@ -177,7 +182,7 @@ def process_snapshot(args, snap):
             if 'velocity' in fields:
                 save_path = plane_dir / f"velocity_{plane_name}_z{redshift:.2f}.png"
                 plot_velocity(fields['velocity'], slice_dim, box_size,
-                            VELOCITY_QUIVER_STEP, redshift, save_path)
+                              VELOCITY_QUIVER_STEP, redshift, save_path, fields.get('velocity_weight'))
 
             if 'divergence' in fields:
                 save_path = plane_dir / f"divergence_{plane_name}_z{redshift:.2f}.png"

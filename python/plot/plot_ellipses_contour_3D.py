@@ -3,7 +3,7 @@
 Method-, snapshot- and simulation-agnostic via dtfelib/pipeline:
 
     python3 plot/plot_ellipses_contour_3D.py                  # whole series, auto method
-    python3 plot/plot_ellipses_contour_3D.py --snap 99 --method dtfe
+    python3 plot/plot_ellipses_contour_3D.py --snap 99 --estimator dtfe
     python3 plot/plot_ellipses_contour_3D.py --sim TNG50-3-Dark
 """
 

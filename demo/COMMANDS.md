@@ -33,7 +33,7 @@ make DTFE PS-DTFE CUDA=1 -j10     # Linux/NVIDIA: the same kernels ported to CUD
 make DTFE PS-DTFE HIP=1 GPU_ARCH=gfx90a   # Linux/AMD ROCm (hipcc; one backend per build)
 make DTFE PS-DTFE CUDAEMU=1       # the CUDA/HIP sources as plain C++ on a CPU emulation of the device API:
                                   #   a validation build for machines without a GPU; tests/cudaemu_check.sh runs
-                                  #   the GPU suites on it (GPU_EMU_WARP=64 at run time: the HIP wavefront width)
+                                  #   the GPU suites on it (DTFE_GPU_EMU_WARP=64 at run time: the HIP wavefront width)
 make DTFE PS-DTFE DOUBLE=1 METAL=1 -j10   # the double-precision pair as well (./DTFE-double, ./PS-DTFE-double,
                                           # objects in o_d / o_ps_d; float64 end to end, ~2x memory; the GPU
                                           # deposits float copies of the tetrahedra). Run scripts:
@@ -45,7 +45,7 @@ make DTFE PS-DTFE DIM=2           # the 2D pair: ./DTFE-2d and ./PS-DTFE-2d (own
                                   #   ./PS-DTFE-2d snap2d.hdf5 out2d --grid 192 --periodic --field density tweb
 make PS-DTFE TBB=1                # REQUIRE tbb's parallel CGAL triangulation (the default TBB=auto compiles it in
                                   #   when tbb is installed, TBB=0 leaves it out); the opt-in is at run time,
-                                  #   --parallel-triangulation (or DTFE_TBB_THREADS=N): runs then differ at rounding
+                                  #   --parallel-triangulation (or DTFE_TRIANGULATION_THREADS=N): runs then differ at rounding
 make DTFE PS-DTFE LIBDEFLATE=0    # the tessellation cache with zlib instead of libdeflate (default auto)
 make DTFE BUILD_MODE=debug        # debug symbols, no optimization, sanitizers
 make library                      # shared libDTFE
@@ -64,7 +64,8 @@ object directory automatically. Header edits rebuild all affected objects (auto-
 
 ## Download (`scripts/download_snapshots.sh`)
 
-API key: `-k KEY`, or `TNG_API_KEY` env, or `~/.tng_api_key` (recommended). The data root, the folder that
+API key: `-k KEY` (`--api-key`), or `TNG_API_KEY` env, or `~/.tng_api_key` (recommended). The letters have long
+forms: `-c` `--groupcats`, `-t` `--trees`, `-i` `--ics`, `-s` `--sim`, `-d` `--sim-dir` (merge_HDF5.py's spellings). The data root, the folder that
 holds the simulations, is REQUIRED and has no default: `export DTFE_DATA_ROOT=~/IllustrisTNG` (or any
 `/path/to/IllustrisTNG`) before any script below; without it every script stops with "no data root" (`-d` does
 not replace it). Everything lands in the simulation's folder, `sim_dir <SIM>` in `scripts/config.sh`
@@ -92,14 +93,14 @@ Every `combined_*` file is h-FREE (ckpc, 1e10 Msun, ckpc km/s) with self-describ
 
 ```bash
 SIMDIR="$DTFE_DATA_ROOT/TNG50/TNG50-3-Dark"   # a simulation folder (here in the per-family layout)
-python3 python/tools/merge_HDF5.py -d "$SIMDIR" 0 4 17 33 50 99   # snapshots
-python3 python/tools/merge_HDF5.py -d "$SIMDIR" --groupcats 0 99  # group catalogs
+python3 python/tools/merge_HDF5.py -d "$SIMDIR" --snaps 0 4 17 33 50 99   # snapshots
+python3 python/tools/merge_HDF5.py -d "$SIMDIR" --groupcats --snaps 0 99  # group catalogs
 python3 python/tools/merge_HDF5.py -d "$SIMDIR" --trees           # SubLink trees
 python3 python/tools/merge_HDF5.py -d "$SIMDIR" --ics             # ICs conversion
 
 # everything for one sim, then delete the (verified) source chunks to save space:
 python3 python/tools/merge_HDF5.py -d "$SIMDIR" \
-    --snapshots-too --groupcats --trees --ics --delete-chunks 0 4 17 33 50 99
+    --snapshots-too --groupcats --trees --ics --delete-chunks --snaps 0 4 17 33 50 99
 
 # upgrade PRE-unification combined files in place (idempotent, chunk-free):
 python3 python/tools/merge_HDF5.py -d "$SIMDIR" --fix-units
@@ -131,14 +132,14 @@ the T-web and V-web at `LAMBDA_TH` 0.3).
 ./scripts/run_ps_dtfe.sh -e -m 99                         # exact conservative deposit on the GPU
 DTFE_SIM=TNG100-3-Dark ./scripts/run_ps_dtfe.sh 0 50 99   # sim via env
 PARTITION="5 5 5" MAX_CONCURRENT=2 ./scripts/run_ps_dtfe.sh -s TNG300-3-Dark 99   # manual memory plan
-THREADS=4 AVG_SUBSAMPLES=1 ./scripts/run_ps_dtfe.sh 99    # cap threads; one sample per cell (the '_a' files
+THREADS=4 SUBSAMPLES=1 ./scripts/run_ps_dtfe.sh 99        # cap threads; one sample per cell (the '_a' files
                                                           #   then hold the cell-centre values)
 DRY_RUN=1 ./scripts/run_ps_dtfe.sh 99                     # print the expanded command, run nothing
 AUTO_TUNE_REPORT=1 ./scripts/run_ps_dtfe.sh 99            # only the auto-tuner's split + predicted peak
 
 ./scripts/run_dtfe.sh -s TNG50-3-Dark -g 512 99           # standard DTFE (exact cell average, padding 15)
 DTFE_GPU=0 ./scripts/run_dtfe.sh 99                       # the CPU on a GPU build (the GPU is the default there)
-DTFE_EXACT=0 ./scripts/run_dtfe.sh 99                     # Monte-Carlo cell means instead of the exact average
+DTFE_EXACT_AVERAGE=0 ./scripts/run_dtfe.sh 99             # Monte-Carlo cell means instead of the exact average
 OUTPUT_PREFIX=output_mc ./scripts/run_dtfe.sh 99          # a variant beside output.* (a ps_* prefix is refused)
 ```
 
@@ -149,36 +150,42 @@ PS_VERTEX_MASS=1        # [--ps-vertex-mass]     DEFAULT 1: chart-independent te
                         #                        Set 0 only for true-lattice Lagrangian input.
 PS_VOLUME_WEIGHTED=0    # [--ps-volume-weighted] DEFAULT 1: Eulerian-volume-weighted velocity moments
                         #                        (the dispersion stays mass-weighted)
-PS_EXACT=1              # [--exact-average]      exact r3d deposit; combine with -m (GPU)
+DTFE_EXACT_AVERAGE=1    # [--exact-average]      exact r3d deposit; combine with -m (GPU)
+FACE_GRADIENT=1         # [--face-gradient]      with -e (CPU): the MEAN flow's divergence/shear from exact face sums
+                        #                        (as standard DTFE stores them) + .a_velDivStreams, .a_massFluxDiv
 PS_LINEAR_DEPOSIT=1     # [--ps-linear-deposit]  linear-profile, mass-conserving sampled deposit
                         #                        (the moments then mass-weighted: PS_VOLUME_WEIGHTED=0)
-PS_GPU=0                # [--gpu]                default auto: the GPU deposit on a GPU build (1 = -m); 0 = the CPU
-AVG_SUBSAMPLES=2        # [--avg-subsamples]     nSub for the '_a' pass (cost ~ nSub^3)
+DTFE_GPU=0              # [--gpu]                default auto: the GPU deposit on a GPU build (1 = -m); 0 = the CPU
+SUBSAMPLES=2            # [--subsamples]         nSub for the '_a' pass (cost ~ nSub^3)
 SAMPLE_POINTS=plane.bin # [--sample-points]      also point-evaluate this point set
 PTS_VEL_GRAD=1          # [--pts-vel-grad]       + per-point velocity gradient (.pts_velGrad),
                         #                        which is what makes velDiv/shear/vort maps possible
-PTS_CONVENTIONS=legacy  # [--pts-conventions]    the plane's estimators; default grid (the grids' conventions)
+PS_POINT_CONVENTIONS=legacy  # [--ps-point-conventions]  the plane's estimators; default grid (the grids' conventions)
 SCRATCH_DIR=/tmp/dtfe   # [--scratch-dir]        back the full-grid accumulators with mmap'ed
                         #                        files (out-of-core; must be LOCAL, non-synced)
 PS_CAUSTICS=0           # [--ps-caustics]        DEFAULT 1: '.caustic' fold flag + '.causticClass'
 PS_CAUSTIC_CUSPS=1      # [--ps-caustic-cusps]   + bit7 A3 cusp AND bit8 A4 swallowtail
                         #                        indicators (needs PS_CAUSTICS=1; opt-in, bit7
                         #                        0.01% false positives, ~1.8x caustic cost)
-PS_PARALLEL_TRI=1       # [--parallel-triangulation]  parallel Delaunay insert (runs differ at rounding)
-PS_LAG_PADDING=0        # [--ps-lag-padding]     the Eulerian padding rule (default: the binary's 8 spacings)
-TESS_CACHE=/tmp/dtfe-t  # [--tessellation-cache] reuse the tessellation across runs (created if
+PARALLEL_TRIANGULATION=1  # [--parallel-triangulation]  parallel Delaunay insert (runs differ at rounding)
+PS_LAGRANGIAN_PADDING=0  # [--ps-lagrangian-padding]  the Eulerian padding rule (default: the binary's 8 spacings)
+TESSELLATION_CACHE=/tmp/dtfe-t  # [--tessellation-cache] reuse the tessellation across runs (created if
                         #                        missing; LOCAL dir, ~0.15 KB/vertex -- deflated)
 LAMBDA_TH=0.3           # [--lambda-th]          T-web/V-web eigenvalue threshold
                         #                        (script default 0.3; the BINARY default is 0.0)
-LAGRANGIAN_INPUT=ics.h5 # [--lagrangianInput]    override the auto-detected combined_ics.hdf5
+PS_LAGRANGIAN_INPUT=ics.h5  # [--ps-lagrangian-input]  override the auto-detected combined_ics.hdf5
 OUTPUT_PREFIX=ps_mw     # writes <prefix>.* so an A/B grid set can sit beside the production one
-FIELDS="density_a ..."  # [--field]              override the production field list (default: all nine, tweb_a vweb_a included)
+FIELDS="density_a ..."  # [--field]              override the field list (default: density_a velocity_a divergence_a shear_a)
 PARTITION="4 4 4"       # [--partition]          explicit Lagrangian split (else auto-tuned; "1" = one triangulation)
 MAX_CONCURRENT=2        # [--max-concurrent]     cap simultaneous partition pipelines
-ORDERED_MERGE=0         # [--completion-order-merge]  merge as the partitions finish (default 1: index order)
-FIXED_POINT_MERGE=1     # [--fixed-point-merge]  opt-in order-free integer merge
-PS_RESUME=0             # start a killed partitioned run over (default 1: --resume from its checkpoint)
+PS_MERGE=completion-order  # [--ps-merge]       merge as the partitions finish (default index-order, passed
+                        #                        explicitly: the memory gate stays on under the auto-tuner's speed split)
+PS_MERGE=fixed-point    # [--ps-merge]           opt-in order-free integer merge
+DTFE_RESUME=0           # start a killed partitioned run over (default 1: --resume from its checkpoint)
 THREADS=4               # OMP_NUM_THREADS cap
+# older names, deprecated (read for one release with a warning): PS_EXACT, PS_GPU, PS_METAL, AVG_SUBSAMPLES,
+# older names, deprecated: PTS_CONVENTIONS, PS_PARALLEL_TRI, PS_LAG_PADDING, TESS_CACHE, LAGRANGIAN_INPUT,
+# older names, deprecated: ORDERED_MERGE, FIXED_POINT_MERGE, PS_RESUME (README.md, Running on TNG snapshots: the table)
 ```
 
 `run_ps_pipeline.sh` is **compute-only** (no plotting): per snapshot it regenerates the
@@ -211,17 +218,17 @@ GRID_SIZE=512 PTS_VEL_GRAD=1 ./scripts/run_ps_pipeline.sh
 
 # standard DTFE, all main fields, GPU '_a' pass (run_dtfe.sh adds --exact-average --padding 15
 # and the T-web / V-web at --lambda-th 0.3)
-./DTFE combined_099.hdf5 out --grid 512 --periodic --input 105 --MpcUnit 1000 \
+./DTFE combined_099.hdf5 out --grid 512 --periodic --input-format 105 --mpc-unit 1000 \
     --field density_a velocity_a gradient_a --gpu
 
 # PS-DTFE with separate Lagrangian input and explicit partitioning
-./PS-DTFE combined_099.hdf5 ps_out --grid 512 --periodic --input 105 --MpcUnit 1000 \
-    --field density velocity dispersion density_a --lagrangianInput combined_ics.hdf5 \
+./PS-DTFE combined_099.hdf5 ps_out --grid 512 --periodic --input-format 105 --mpc-unit 1000 \
+    --field density velocity dispersion density_a --ps-lagrangian-input combined_ics.hdf5 \
     --partition 4 4 4 --max-concurrent 3 --gpu
 
 # the PRODUCTION physics configuration (what run_ps_dtfe.sh does by default)
-./PS-DTFE combined_099.hdf5 ps_out --grid 512 --periodic --input 105 --MpcUnit 1000 \
-    --field density_a velocity_a dispersion_a --lagrangianInput combined_ics.hdf5 \
+./PS-DTFE combined_099.hdf5 ps_out --grid 512 --periodic --input-format 105 --mpc-unit 1000 \
+    --field density_a velocity_a dispersion_a --ps-lagrangian-input combined_ics.hdf5 \
     --ps-vertex-mass          `# chart-independent tet masses (removes the 1-D(z_ic)/D(z) bias)` \
     --ps-volume-weighted      `# volume-weighted velocity moments; dispersion stays mass-weighted` \
     --ps-caustics             `# the caustic classes (.caustic, .causticClass)` \
@@ -229,24 +236,24 @@ GRID_SIZE=512 PTS_VEL_GRAD=1 ./scripts/run_ps_pipeline.sh
 
 # point evaluation at arbitrary positions (text 'x y z' per line, or raw float64 Nx3);
 # the STANDARD binary supports the same flags/formats (streams = 0/1 coverage; no
-# --per-stream/--per-stream-ids; with --partition each partition answers the points in the
+# --ps-per-stream/--ps-per-stream-ids; with --partition each partition answers the points in the
 # tetrahedra it owns -- the single triangulation's values to float rounding)
-./PS-DTFE snap.hdf5 out --grid 32 --periodic --input 105 --MpcUnit 1 \
+./PS-DTFE snap.hdf5 out --grid 32 --periodic --input-format 105 --mpc-unit 1 \
     --sample-points points.txt \
-    --per-stream               `# + ragged per-stream density/velocity records` \
-    --per-stream-ids           `# + stream identities (4 sorted vertex ParticleIDs)` \
+    --ps-per-stream               `# + ragged per-stream density/velocity records` \
+    --ps-per-stream-ids           `# + stream identities (4 sorted vertex ParticleIDs)` \
     --pts-den-grad             `# + density gradient per point (and per stream)` \
     --pts-vel-grad             `# + velocity gradient per point -> div/shear/vorticity` \
     --ps-caustics              `# + '.pts_caustic': the caustic mask AT EACH POINT (same bits as` \
                                `#   '.causticClass'), so the fold skeleton can be drawn at the` \
                                `#   full point-evaluation resolution instead of on the grid` \
-    --ps-stream-density geometric   # per-stream estimator: 'dtfe' (default) | 'geometric'
-./DTFE snap.hdf5 out --grid 32 --periodic --input 105 --MpcUnit 1 \
+    --ps-stream-density geometric   # per-stream estimator: 'linear' (default; 'dtfe' is its older name) | 'geometric'
+./DTFE snap.hdf5 out --grid 32 --periodic --input-format 105 --mpc-unit 1 \
     --sample-points points.txt --pts-den-grad
 
 ./PS-DTFE snap.hdf5 out ... --ps-linear-deposit    # linear-profile mass-conserving deposit (CPU or GPU;
                                                    #   not with --ps-volume-weighted)
-./PS-DTFE snap.hdf5 out ... --avg-subsamples 2     # cheaper '_a' pass (8 sub-points)
+./PS-DTFE snap.hdf5 out ... --subsamples 2     # cheaper '_a' pass (8 sub-points)
 ./PS-DTFE snap.hdf5 out ... --ps-caustics          # + '.caustic' fold flag and '.causticClass' (CPU or GPU),
                                                    #   a bitmask per cell:
                                                    #     bit0/1  det(J)>0 / det(J)<0 tet present
@@ -276,36 +283,36 @@ GRID_SIZE=512 PTS_VEL_GRAD=1 ./scripts/run_ps_pipeline.sh
 
 # reuse the tessellation across runs: the first run writes it, later runs with the SAME inputs
 # load it and skip both the triangulation and the vertex-density pass. The grid, the fields and
-# the sample points may all change and it still hits; a changed input file, --density0 or
+# the sample points may all change and it still hits; a changed input file, --mean-density or
 # geometry is a MISS (rebuild). Needs a LOCAL directory and ~0.15 KB per tessellation vertex.
 # Partitioned runs cache every tessellation they build (PS: one file per partition; standard:
 # one per thread sub-box, or per partition under --sample-points).
 mkdir -p /private/tmp/dtfe-tess
-./PS-DTFE snap.hdf5 out1 --grid 64  --periodic --field density --MpcUnit 1 \
+./PS-DTFE snap.hdf5 out1 --grid 64  --periodic --field density --mpc-unit 1 \
     --sample-points a.bin --tessellation-cache /private/tmp/dtfe-tess     # builds + writes
-./PS-DTFE snap.hdf5 out2 --grid 256 --periodic --field density --MpcUnit 1 \
+./PS-DTFE snap.hdf5 out2 --grid 256 --periodic --field density --mpc-unit 1 \
     --sample-points b.bin --tessellation-cache /private/tmp/dtfe-tess     # reuses it
 ./PS-DTFE snap.hdf5 out ... --tessellation-cache DIR --verbose 3          # says why a lookup missed
 ./PS-DTFE snap.hdf5 out ... --field vweb --lambda-th 0.3 --scale-factor 0.25 --hubble 0.6774
 ./DTFE   snap.hdf5 out ... --exact-average         # exact r3d '_a' averaging (on the GPU with --gpu)
-./PS-DTFE snap.hdf5 out --grid 4096 --periodic --MpcUnit 1 --exact-average \
-    --ps-window 20 30 20 30 50 50.1               # only the window's cells of the 4096^3 grid: the
+./PS-DTFE snap.hdf5 out --grid 4096 --periodic --mpc-unit 1 --exact-average \
+    --grid-window 20 30 20 30 50 50.1               # only the window's cells of the 4096^3 grid: the
                                                   # full run's cells there, in seconds (the launcher's exact zoom)
-./PS-DTFE snap.hdf5 out --grid 4096 --periodic --MpcUnit 1 --exact-average --ps-window 20 30 20 30 50 50.1 \
+./PS-DTFE snap.hdf5 out --grid 4096 --periodic --mpc-unit 1 --exact-average --grid-window 20 30 20 30 50 50.1 \
     --partition 4 4 4 --tessellation-cache /private/tmp/dtfe-tess   # the query server's split and cache:
                                                   # cached partitions are loaded, those whose occupancy maps
                                                   # never reach the window are skipped
 ./PS-DTFE --full-help                              # every option with full descriptions
 ```
 
-Common to both: `--grid N [NY NZ]`, `--periodic`, `--input 101|105|106|111|112|121|122`,
-`--MpcUnit <units per Mpc>` (default 1000), `--partition X Y Z`, `--max-concurrent N`, `--verbose 0..3`,
-`--padding` (`--region` / `--regionMpc` only in the standard binary: PS-DTFE refuses them, use `--box`). Input 101 = binary Gadget, 105 = Gadget HDF5 (default), 106 = its HI data, 111 = text
+Common to both: `--grid N [NY NZ]`, `--periodic`, `--input-format 101|105|106|111|112|121|122`,
+`--mpc-unit <units per Mpc>` (default 1000), `--partition X Y Z`, `--max-concurrent N`, `--verbose 0..3`,
+`--padding` (`--region` / `--region-mpc` only in the standard binary: PS-DTFE refuses them, use `--box`). Input 101 = binary Gadget, 105 = Gadget HDF5 (default), 106 = its HI data, 111 = text
 `x y z w`, 112 = text positions-only, 121 / 122 = raw binary (count, box, pos, weights, vels / structured).
 
 **Which flags reach the GPU** (`METAL=1`, `CUDA=1` or `HIP=1` build): the grid deposit, and
 `--ps-linear-deposit`, `--ps-volume-weighted`, `--ps-vertex-mass`, `--ps-caustics`,
-the exact deposit (`--exact-average`) and `--ps-window` all compose with `--gpu`; the standard binary's
+the exact deposit (`--exact-average`) and `--grid-window` all compose with `--gpu`; the standard binary's
 `--exact-average` and the scalar fields (`NO_SCALARS=1` builds) with `--gpu`. CPU-only: point
 evaluation (`--sample-points`/`--serve`: multi-threaded over the tessellation, exact point location).
 
@@ -332,7 +339,7 @@ Estimator.from_arrays(x, velocities=v, lagrangian=q, values=phi, box=100.0)   # 
 The answers are bit-identical to a `--sample-points` run on the same points; a single point takes
 ~20 us from Python (a cell index built at start-up). Velocities come back in peculiar km/s
 (`peculiar=False` for raw Gadget units). The binary side, for other clients:
-`./PS-DTFE snap.hdf5 unused --serve --MpcUnit 1 ...` -- logs on stderr, a binary protocol on
+`./PS-DTFE snap.hdf5 unused --serve --mpc-unit 1 ...` -- logs on stderr, a binary protocol on
 stdin/stdout (protocol version 2, documented at the top of `src/CGAL_triangulation/ps_serve.cc`).
 With `--partition` (or when one tessellation would not fit and `--tessellation-cache` is given) the server
 is a COMPOSITE of partition tessellations, each with a 64^3 occupancy map ('<cache file>.occ'): a request
@@ -345,19 +352,19 @@ with the same split. `--serve-progress` writes progress lines to stderr (the lau
 python3 python/tools/upgrade_tess_cache.py "$DTFE_DATA_ROOT/.dtfe-tessellation-cache"  # old cache files -> chunked
 ```
 Cache files are written in 16 MB chunks, compressed and decompressed on several cores
-(`DTFE_TESS_CACHE_THREADS=N` pins the threads per file, `DTFE_TESS_CACHE_LEGACY=1` writes the old single
-stream; `DTFE_TESS_CACHE_ZLIB=1` uses zlib where the build has libdeflate (`make ... LIBDEFLATE=0` builds
-without it); `DTFE_TESS_CACHE_CGAL_IO=1` reads and writes the triangulation through CGAL's own stream
-operators instead of the block reader/writer, and `DTFE_TESS_CACHE_FINGERPRINT=1` prints a hash of each
+(`DTFE_TESSELLATION_CACHE_THREADS=N` pins the threads per file, `DTFE_TESSELLATION_CACHE_LEGACY=1` writes the old
+single stream; `DTFE_TESSELLATION_CACHE_ZLIB=1` uses zlib where the build has libdeflate (`make ... LIBDEFLATE=0`
+builds without it); `DTFE_TESSELLATION_CACHE_CGAL_IO=1` reads and writes the triangulation through CGAL's own stream
+operators instead of the block reader/writer, and `DTFE_TESSELLATION_CACHE_FINGERPRINT=1` prints a hash of each
 loaded structure -- both for comparisons). A partitioned run with a cache also records the snapshot's particle totals there
-(`globals_<hash>.txt`): a later `--ps-window` run whose partitions are all cached then never reads the
+(`globals_<hash>.txt`): a later `--grid-window` run whose partitions are all cached then never reads the
 snapshot. `DTFE_PTS_THREADS=N` pins the point-evaluation
 thread count (default: all cores, or cores / concurrent partitions inside a partitioned PS run).
 
 ```bash
 # per-stream Lagrangian origin and any per-particle dataset, in a batch run too
-./PS-DTFE snap.hdf5 out --sample-points pts.bin --per-stream --pts-lagrangian \
-    --pts-scalar --scalar-dataset Potential --MpcUnit 1 --periodic -g 16
+./PS-DTFE snap.hdf5 out --sample-points pts.bin --ps-per-stream --ps-per-stream-lagrangian \
+    --pts-scalar --scalar-dataset Potential --mpc-unit 1 --periodic -g 16
 #   -> out.pts_stream_lagpos (float64 x3 per stream), out.pts_scalar, out.pts_stream_scalar
 ./PS-DTFE --version           # the build stamp (git revision + time); every run logs 'Build: ...'
 ```
@@ -366,16 +373,16 @@ thread count (default: all cores, or cores / concurrent partitions inside a part
 
 ```bash
 # comparison interpolation schemes (instead of DTFE), density only for NGP/Voronoi
-./DTFE snap.hdf5 out --grid 256 --periodic --NGP            # nearest grid point
-./DTFE snap.hdf5 out --grid 256 --periodic --CIC            # cloud in cell
-./DTFE snap.hdf5 out --grid 256 --periodic --TSC            # triangular shape cloud
-./DTFE snap.hdf5 out --grid 256 --periodic --PCS            # piecewise cubic spline
-./DTFE snap.hdf5 out --grid 256 --periodic --SPH 32         # SPH, 32 nearest neighbours
-./DTFE snap.hdf5 out --grid 256 --periodic --Voronoi --field density    # 1/Voronoi-volume
+./DTFE snap.hdf5 out --grid 256 --periodic --ngp            # nearest grid point
+./DTFE snap.hdf5 out --grid 256 --periodic --cic            # cloud in cell
+./DTFE snap.hdf5 out --grid 256 --periodic --tsc            # triangular shape cloud
+./DTFE snap.hdf5 out --grid 256 --periodic --pcs            # piecewise cubic spline
+./DTFE snap.hdf5 out --grid 256 --periodic --sph 32         # SPH, 32 nearest neighbours
+./DTFE snap.hdf5 out --grid 256 --periodic --voronoi --field density    # 1/Voronoi-volume
                                                             #   density, NGP-assigned. Density
                                                             #   ONLY (other fields rejected);
                                                             #   '--field density_a' -> '.a_den'
-./DTFE snap.hdf5 out --grid 256 --periodic --CIC --interlace  # anti-aliasing (2D and PS-DTFE too; without
+./DTFE snap.hdf5 out --grid 256 --periodic --cic --interlace  # anti-aliasing (2D and PS-DTFE too; without
                                                                # --periodic it needs a --region half a cell inside
                                                                # the box). Only the density is interlaced: the T-web
                                                                # comes from the first, un-interlaced pass.
@@ -384,34 +391,34 @@ thread count (default: all cores, or cores / concurrent partitions inside a part
 # Standard binary only; the result lands in the scalar output field. It ASSUMES the local
 # distribution factorises into a spatial and a velocity part -- precisely what fails where
 # streams cross, which is what makes it worth benchmarking against PS-DTFE (below).
-./DTFE snap.hdf5 out --grid 128 --periodic --approxPSD
+./DTFE snap.hdf5 out --grid 128 --periodic --approx-phase-space-density
 
 # Benchmarking that approximation against the exact phase-space structure.
 # PS-DTFE does not need the factorisation: it resolves the streams themselves, so the exact
 # distribution function is the per-stream decomposition, and the standard scalar proxy
 # Q = rho/sigma^3 follows from fields it already deposits.
-./DTFE    snap.hdf5 ap  --grid 128 --periodic --approxPSD                        # f ~ rho*g
+./DTFE    snap.hdf5 ap  --grid 128 --periodic --approx-phase-space-density                        # f ~ rho*g
 ./PS-DTFE snap.hdf5 ex  --grid 128 --periodic --field density_a dispersion_a \
-          --lagrangianInput ics.hdf5                                             # exact rho, sigma
-./PS-DTFE snap.hdf5 exp --grid 32 --periodic --sample-points pts.bin --per-stream \
-          --lagrangianInput ics.hdf5      # the exact f itself: (rho_s, v_s) for every stream
+          --ps-lagrangian-input ics.hdf5                                             # exact rho, sigma
+./PS-DTFE snap.hdf5 exp --grid 32 --periodic --sample-points pts.bin --ps-per-stream \
+          --ps-lagrangian-input ics.hdf5      # the exact f itself: (rho_s, v_s) for every stream
 #   then, in python:
 #     from dtfelib.fields import pseudo_phase_space_density
 #     Q = pseudo_phase_space_density(fs.density(units="mean"), np.sqrt(fs.load("dispersion")))
 
 # redshift cone (spherical) grid instead of a box
-./DTFE survey.hdf5 out --grid 128 --redshiftCone 0 200 -30 30 -30 30 --origin 0 0 0
+./DTFE survey.hdf5 out --grid 128 --redshift-cone 0 200 -30 30 -30 30 --cone-origin 0 0 0
 # (--redshiftSpace d1 d2 d3 is NOT implemented in this version: the run is refused.
 #  Shift the positions before running instead.)
 
 # zoom region, sub-sampling, synthetic points, options file
 ./DTFE snap.hdf5 out --grid 256 --region 0.4 0.6 0.3 0.7 0.45 0.55   # fractions of the box
-./DTFE snap.hdf5 out --grid 256 --regionMpc 20 30 20 30 20 30        # Mpc coordinates
-./DTFE snap.hdf5 out --grid 256 --randomSample 0.1                   # keep 10% of particles
+./DTFE snap.hdf5 out --grid 256 --region-mpc 20 30 20 30 20 30        # Mpc coordinates
+./DTFE snap.hdf5 out --grid 256 --particle-fraction 0.1                   # keep 10% of particles
 ./DTFE snap.hdf5 out --grid 256 --poisson 64                         # 64^3 random positions
-./DTFE snap.hdf5 out --grid 256 --density0 2.66                       # explicit density scale
-./DTFE snap.hdf5 out --grid 256 --extensive                          # scalars are extensive
-./DTFE snap.hdf5 out --grid 256 --noTest                             # skip the padding test
+./DTFE snap.hdf5 out --grid 256 --mean-density 2.66                       # explicit density scale
+./DTFE snap.hdf5 out --grid 256 --scalars-extensive                          # scalars are extensive
+./DTFE snap.hdf5 out --grid 256 --no-padding-test                             # skip the padding test
 ./DTFE snap.hdf5 out --grid 256 --partition 3 3 3 --no-overlap       # no look-ahead triangulation
 ./DTFE --config my_options.cfg                                       # read options from a file
 ```
@@ -422,29 +429,29 @@ thread count (default: all cores, or cores / concurrent partitions inside a part
 
 All plot scripts share the CLI from `dtfelib.cli`: `--data-root PATH` (else `DTFE_DATA_ROOT`: one of the two
 is required, there is no default), `--sim NAME`,
-`--snap N`, `--method auto|ps|dtfe`, `--raw` (unaveraged grids), `--smooth SIGMA_CELLS`,
+`--snap N`, `--estimator auto|ps|dtfe`, `--raw` (unaveraged grids), `--smooth SIGMA_CELLS`,
 `--prefix` (an alternate `OUTPUT_PREFIX` grid set). `--sim` is required unless `DTFE_SIM` is set (there is no
-default simulation); `analyze.py` takes it from `DTFE_SIM` only. The lines below without either assume
-`export DTFE_SIM=TNG100-3-Dark`.
+default simulation); `analyze.py` takes `--sim`, `--data-root` and `--snaps` too. The lines below without either
+assume `export DTFE_SIM=TNG100-3-Dark`.
 
 ```bash
 python3 python/analyze.py                          # = all: compute (own process) + plot, for $DTFE_SIM
 python3 python/analyze.py check                    # which fields/products exist on disk
-python3 python/analyze.py compute 99               # derived products for snapshot 99
+python3 python/analyze.py compute --snaps 99       # derived products for snapshot 99
 python3 python/analyze.py plot --only plot_void_population.py plot_cosmic_web.py
 DTFE_SIM=TNG300-3-Dark python3 python/analyze.py all
-python3 python/analyze.py export 99                # void catalogues as CSV + HDF5
+python3 python/analyze.py export --snaps 99        # void catalogues as CSV + HDF5
 python3 python/analyze.py voids --only plot_void_fate.py     # the void scripts for DTFE_SIM
 python3 python/analyze.py cache --prune            # list unreachable cache namespaces (--yes deletes)
 python3 python/analyze.py cache --move ~/Library/Caches/DTFE   # dry run; --yes moves the cache
 
 python3 python/plot/plot_PS_DTFE.py --sim TNG50-3-Dark --snap 99      # PS field maps
-python3 python/plot/plot_DTFE.py --method dtfe --raw                  # standard DTFE maps
+python3 python/plot/plot_DTFE.py --estimator dtfe --raw               # standard DTFE maps
 python3 python/plot/plot_void_population.py --snap 99 --smooth 10
 python3 python/plot/plot_void_tracking.py --sim TNG50-3-Dark
-python3 python/plot/plot_halo_tracking.py --sim TNG50-3-Dark --method ps
+python3 python/plot/plot_halo_tracking.py --sim TNG50-3-Dark --estimator ps
 python3 python/plot/plot_marked_correlation_BBKS.py --snap 99
-python3 python/plot/plot_caustic_skeleton.py --sim TNG100-3-Dark --snap 99 --prefix ps_caustic --voids
+python3 python/plot/plot_caustic_skeleton.py --sim TNG100-3-Dark --snap 99 --prefix ps_caustic --per-void
 DTFE_SIM=TNG50-3-Dark python3 python/plot/plot_void_fate.py --sim TNG50-3-Dark --exclusive
 DTFE_VOID_GATE=none DTFE_SIM=TNG100-3-Dark python3 python/plot/plot_void_population.py --sim TNG100-3-Dark --size-fixed-r
 python3 python/plot/plot_void_crossbox.py --sims TNG50-3-Dark TNG100-3-Dark TNG300-3-Dark --smooth-mpc 2.1625   # side by side
@@ -453,15 +460,15 @@ python3 python/plot/plot_void_crossbox.py --sims TNG50-3-Dark TNG100-3-Dark TNG3
 #       plot_ellipses_contour_3D, plot_smoothing_comparison, plot_pk_compare, plot_web_streams,
 #       plot_void_profiles, plot_void_profile_evolution, plot_void_environment, plot_void_convergence
 # void scripts: set DTFE_SIM to the --sim (the cached catalogue's lengths are in that frame);
-# DTFE_SIGMA_MPC=2.1625 smooths every box at one physical scale; DTFE_CACHE_DIR moves the cache
+# DTFE_SMOOTH_MPC=2.1625 smooths every box at one physical scale; DTFE_CACHE_DIR moves the cache
 
 # point-evaluation figure pipeline (grid-free, publication resolution)
 python3 python/tools/make_image_plane.py --combined combined_099.hdf5 --axis z --nu 8192 -o plane
 python3 python/plot/plot_pointeval.py                     # one figure per field, all snapshots
 python3 python/plot/plot_pointeval_panels.py              # 3-panel density/sheet/N_streams
-python3 python/tools/compare_deposits.py --sim TNG100-3-Dark --snap 99 --a ps_sampled --b ps_output
+python3 python/tools/compare_deposits.py --sim TNG100-3-Dark --snap 99 --prefix-a ps_sampled --prefix-b ps_output
                                                           # A/B a sampled against an exact-deposit grid set
-python3 python/tools/void_outlines.py --sim TNG100-3-Dark --snap 99 --sigma-mpc 2.1625 --csv voids.csv   # void table
+python3 python/tools/void_outlines.py --sim TNG100-3-Dark --snap 99 --smooth-mpc 2.1625 --csv voids.csv   # void table
 
 # decoding the caustic mask ('.causticClass' / '.pts_caustic') in python:
 #   from dtfelib.io import (caustic_is_fold, caustic_collapse_max, caustic_is_cusp,
@@ -516,7 +523,7 @@ python3 tests/docs_drift_check.py             # README / COMMANDS.md flags and k
 python3 python/selftest.py                    # sandboxed pipeline+plots selftest (~2 min)
 tests/ps_scaling_benchmark.sh                 # strong-scaling table (MIN_EFFICIENCY=0.4); not in CI
 
-# GPU builds only (by hand; CI runs them through the CPU emulation, tests/cudaemu_check.sh):
+# GPU builds only (by hand; or through the CUDA/HIP port's CPU emulation, tests/cudaemu_check.sh):
 tests/dtfe_metal_check.sh                     # CPU vs GPU parity, standard DTFE (GPU_BUILD=CUDA=1 for CUDA)
 tests/gpu_scalar_check.sh; tests/gpu_mass_check.sh; tests/gpu_retry_check.sh; tests/dtfe_gpu_retry_check.sh
 
@@ -528,7 +535,7 @@ python3 tests/generate_ps_test_data.py --out snap.hdf5 --n 32 --box 100 \
     --margin-frac 0.2           `# non-periodic clump in vacuum instead`
 ```
 
-CI (`.github/workflows/ci.yml`) runs six jobs: build-and-test (`ci_suite.sh build core gui double 2d`,
+CI (`.github/workflows/ci.yml`) runs three jobs: build-and-test (`ci_suite.sh build core gui double 2d`,
 the standard-DTFE regression against its stored reference and the auto-tune and `--scratch-dir` suites
-included), old-python, compile-variants, cudaemu (warp width 32 and 64), cuda-compile and hip-compile.
-The Metal GPU path and the GPU suites on real hardware are local-only.
+included), old-python and compile-variants. The Metal GPU path and the GPU suites on real hardware are
+local-only, and so is the CUDA/HIP port's CPU emulation (`make CUDAEMU=1` + `tests/cudaemu_check.sh`).

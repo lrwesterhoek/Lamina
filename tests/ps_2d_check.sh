@@ -32,7 +32,7 @@
 #      server (--serve): dtfelib's Estimator(dim=2) answers byte-identical to
 #      --sample-points, a composite (partition 2 2) server equals the same split's point run, and
 #      Estimator.from_arrays builds a 2D estimator from (N, 2) arrays
-#   W  --ps-window: the window run's cells are the full run's -- the stream counts and the
+#   W  --grid-window: the window run's cells are the full run's -- the stream counts and the
 #      hidden-stream masks bit for bit, the sums within 1e-8 of the peak with the sampled deposit (a window pass takes
 #      its own fixed-point units, ps_interpolation.cc fxBoundWalk), to float rounding with the exact one
 #   CU --ps-caustic-cusps on a pancake modulated along y, psi_x = A sin(kq_x)
@@ -40,7 +40,7 @@
 #      lies on the ridge k q_x = pi where the null-direction derivative of lambda_c vanishes (the
 #      indicator marks that ridge within its fold band, as in 3D), the unmodulated pancake -- no cusps
 #      -- gets none, and no swallowtail bit is ever set in 2D
-#   CO the 2D redshift cone (DTFE-2d --redshiftCone, origin x != y): the Monte Carlo cell averages agree with the
+#   CO the 2D redshift cone (DTFE-2d --redshift-cone, origin x != y): the Monte Carlo cell averages agree with the
 #      centre values (with origin x for y the samples would average another cell)
 #   DM a 3-column snapshot through DTFE-2d / PS-DTFE-2d (and a 2-column one through DTFE / PS-DTFE, when built)
 #      is refused with a message naming the binaries to use (not a segfault or a garbage grid at exit 0)
@@ -67,16 +67,16 @@ CACHE="${TMPDIR:-/tmp}/dtfe-2d-cache"; rm -rf "$CACHE"; mkdir -p "$CACHE"
 GEN() { "$PY" tests/generate_ps_test_data.py --dim 2 "$@" >/dev/null || { echo "FAIL data gen $*"; exit 1; }; }
 RUN() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL: $* (see $out.log)"; exit 1; }; }
 G=128
-COMMON=(--grid $G --periodic --MpcUnit 1 --verbose 2)
+COMMON=(--grid $G --periodic --mpc-unit 1 --verbose 2)
 
 echo ">> pancake: sampled (nSub 3), exact, exact + caustics, sampled nSub 6, partitions, flags"
 GEN --out "$TMP/pan.hdf5" --n 96 --box 100 --amplitude-factor 1.8 --jitter-frac 0.02 --seed 3
-RUN "$TMP/pan_s"   ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_s"   "${COMMON[@]}" --field density density_a velocity_a --avg-subsamples 3
-RUN "$TMP/pan_s6"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_s6"  "${COMMON[@]}" --field density_a velocity_a dispersion_a --avg-subsamples 6
-RUN "$TMP/pan_s12" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_s12" "${COMMON[@]}" --field density_a --avg-subsamples 12
+RUN "$TMP/pan_s"   ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_s"   "${COMMON[@]}" --field density density_a velocity_a --subsamples 3
+RUN "$TMP/pan_s6"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_s6"  "${COMMON[@]}" --field density_a velocity_a dispersion_a --subsamples 6
+RUN "$TMP/pan_s12" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_s12" "${COMMON[@]}" --field density_a --subsamples 12
 RUN "$TMP/pan_x"   ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_x"   "${COMMON[@]}" --field density_a velocity_a dispersion_a --exact-average --ps-caustics
-RUN "$TMP/pan_p1"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_p1"  "${COMMON[@]}" --field density_a --avg-subsamples 2 --partition 1 1 --max-concurrent 1
-RUN "$TMP/pan_p2"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_p2"  "${COMMON[@]}" --field density_a --avg-subsamples 2 --partition 2 2 --max-concurrent 1
+RUN "$TMP/pan_p1"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_p1"  "${COMMON[@]}" --field density_a --subsamples 2 --partition 1 1 --max-concurrent 1
+RUN "$TMP/pan_p2"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_p2"  "${COMMON[@]}" --field density_a --subsamples 2 --partition 2 2 --max-concurrent 1
 RUN "$TMP/pan_vm"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_vm"  "${COMMON[@]}" --field density_a velocity_a --ps-vertex-mass --ps-volume-weighted
 RUN "$TMP/pan_hr"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_hr"  "${COMMON[@]}" --field density_a --ps-halo-release 2
 RUN "$TMP/pan_lin" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_lin" "${COMMON[@]}" --field density_a --ps-linear-deposit
@@ -84,18 +84,18 @@ RUN "$TMP/pan_c1"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_c1"  "${COMMON[@]}" --
 RUN "$TMP/pan_c2"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_c2"  "${COMMON[@]}" --field density_a --tessellation-cache "$CACHE"
 # --gpu where no GPU can run: the deposit falls back pass by pass, on any thread -- the run counts every
 # pass and says it once
-RUN "$TMP/pan_gfb" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_gfb" --grid 32 --periodic --MpcUnit 1 --verbose 2 --field density --partition 2 2 --max-concurrent 2 --gpu
+RUN "$TMP/pan_gfb" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_gfb" --grid 32 --periodic --mpc-unit 1 --verbose 2 --field density --partition 2 2 --max-concurrent 2 --gpu
 echo ">> convergence series (single-stream density, nSub 3, grid 96)"
 for n in 16 24 32 48; do
     GEN --out "$TMP/conv_$n.hdf5" --n $n --box 100 --amplitude-factor 1.8 --jitter-frac 0.02 --seed 42
-    RUN "$TMP/conv_$n" ./PS-DTFE-2d "$TMP/conv_$n.hdf5" "$TMP/conv_$n" --grid 96 --periodic --MpcUnit 1 --field density_a --avg-subsamples 3
+    RUN "$TMP/conv_$n" ./PS-DTFE-2d "$TMP/conv_$n.hdf5" "$TMP/conv_$n" --grid 96 --periodic --mpc-unit 1 --field density_a --subsamples 3
 done
 echo ">> crossed waves, a non-periodic clump, the standard 2D build"
 GEN --out "$TMP/crw.hdf5" --n 96 --box 100 --amplitude-factor 1.5 --crossed-waves --jitter-frac 0.02 --seed 5
-RUN "$TMP/crw" ./PS-DTFE-2d "$TMP/crw.hdf5" "$TMP/crw" "${COMMON[@]}" --field density density_a --avg-subsamples 2
+RUN "$TMP/crw" ./PS-DTFE-2d "$TMP/crw.hdf5" "$TMP/crw" "${COMMON[@]}" --field density density_a --subsamples 2
 GEN --out "$TMP/clump.hdf5" --n 64 --box 100 --amplitude-factor 0.5 --margin-frac 0.2 --jitter-frac 0.02 --seed 9
-RUN "$TMP/clump" ./PS-DTFE-2d "$TMP/clump.hdf5" "$TMP/clump" --grid $G --MpcUnit 1 --verbose 2 --field density --box 0 100 0 100
-RUN "$TMP/std" ./DTFE-2d "$TMP/pan.hdf5" "$TMP/std" --grid 64 --periodic --MpcUnit 1 --verbose 2 --field density_a
+RUN "$TMP/clump" ./PS-DTFE-2d "$TMP/clump.hdf5" "$TMP/clump" --grid $G --mpc-unit 1 --verbose 2 --field density --box 0 100 0 100
+RUN "$TMP/std" ./DTFE-2d "$TMP/pan.hdf5" "$TMP/std" --grid 64 --periodic --mpc-unit 1 --verbose 2 --field density_a
 echo ">> point evaluation at the cell centres (binary and text points, a partition split), --serve refused"
 "$PY" - "$TMP" "$G" <<'PTSEOF'
 import numpy as np, sys
@@ -107,39 +107,39 @@ P.astype(np.float64).tofile(f"{tmp}/centres.bin")
 np.savetxt(f"{tmp}/centres.txt", P[:997], fmt="%.17g")
 P[:997].astype(np.float64).tofile(f"{tmp}/centres997.bin")
 PTSEOF
-RUN "$TMP/pts"    ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pts"    "${COMMON[@]}" --field density velocity --avg-subsamples 1 --sample-points "$TMP/centres.bin"
+RUN "$TMP/pts"    ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pts"    "${COMMON[@]}" --field density velocity --subsamples 1 --sample-points "$TMP/centres.bin"
 RUN "$TMP/pts_p2" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pts_p2" "${COMMON[@]}" --field density --partition 2 2 --max-concurrent 1 --sample-points "$TMP/centres.bin"
 RUN "$TMP/pts_tx" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pts_tx" "${COMMON[@]}" --field density --sample-points "$TMP/centres.txt"
 RUN "$TMP/pts_bn" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pts_bn" "${COMMON[@]}" --field density --sample-points "$TMP/centres997.bin"
-RUN "$TMP/pts_std" ./DTFE-2d "$TMP/pan.hdf5" "$TMP/pts_std" --grid 64 --periodic --MpcUnit 1 --verbose 2 --field density --sample-points "$TMP/centres.bin"
-echo ">> --ps-window (sampled and exact) and --ps-caustic-cusps (a modulated pancake with two cusps)"
-WIN=(--ps-window 20 47.5 30 90)
-RUN "$TMP/w_full"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/w_full"  "${COMMON[@]}" --field density velocity --avg-subsamples 2
-RUN "$TMP/w_win"   ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/w_win"   "${COMMON[@]}" --field density velocity --avg-subsamples 2 "${WIN[@]}"
+RUN "$TMP/pts_std" ./DTFE-2d "$TMP/pan.hdf5" "$TMP/pts_std" --grid 64 --periodic --mpc-unit 1 --verbose 2 --field density --sample-points "$TMP/centres.bin"
+echo ">> --grid-window (sampled and exact) and --ps-caustic-cusps (a modulated pancake with two cusps)"
+WIN=(--grid-window 20 47.5 30 90)
+RUN "$TMP/w_full"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/w_full"  "${COMMON[@]}" --field density velocity --subsamples 2
+RUN "$TMP/w_win"   ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/w_win"   "${COMMON[@]}" --field density velocity --subsamples 2 "${WIN[@]}"
 RUN "$TMP/w_xfull" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/w_xfull" "${COMMON[@]}" --field density --exact-average
 RUN "$TMP/w_xwin"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/w_xwin"  "${COMMON[@]}" --field density --exact-average "${WIN[@]}"
 # a partitioned window over a tessellation cache: the first run writes the partitions and their occupancy
 # maps, the second skips the partitions whose streams never reach the window
 WCACHE="$TMP/w_cache"; rm -rf "$WCACHE"; mkdir -p "$WCACHE"
-WP=( --field density --avg-subsamples 2 --partition 2 2 --max-concurrent 1 )
+WP=( --field density --subsamples 2 --partition 2 2 --max-concurrent 1 )
 RUN "$TMP/w_pfull" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/w_pfull" "${COMMON[@]}" "${WP[@]}"
-SMALL=(--ps-window 5 20 5 20)
+SMALL=(--grid-window 5 20 5 20)
 RUN "$TMP/w_pc1" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/w_pc1" "${COMMON[@]}" "${WP[@]}" "${SMALL[@]}" --tessellation-cache "$WCACHE"
 RUN "$TMP/w_pc2" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/w_pc2" "${COMMON[@]}" "${WP[@]}" "${SMALL[@]}" --tessellation-cache "$WCACHE"
 GEN --out "$TMP/mod.hdf5" --n 128 --box 100 --amplitude-factor 1.2 --modulation 0.3 --jitter-frac 0.02 --seed 11
-RUN "$TMP/cu_mod"  ./PS-DTFE-2d "$TMP/mod.hdf5" "$TMP/cu_mod" --grid 256 --periodic --MpcUnit 1 --verbose 2 --field density --ps-caustics --ps-caustic-cusps
+RUN "$TMP/cu_mod"  ./PS-DTFE-2d "$TMP/mod.hdf5" "$TMP/cu_mod" --grid 256 --periodic --mpc-unit 1 --verbose 2 --field density --ps-caustics --ps-caustic-cusps
 RUN "$TMP/cu_flat" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/cu_flat" "${COMMON[@]}" --field density --ps-caustics --ps-caustic-cusps
 echo ">> the standard 2D build's --exact-average (a perfect lattice, a single-stream pancake)"
 GEN --out "$TMP/lat.hdf5" --n 64 --box 100 --amplitude-factor 0 --jitter-frac 0
 GEN --out "$TMP/span.hdf5" --n 64 --box 100 --amplitude-factor 0.8 --jitter-frac 0.05 --seed 21
-RUN "$TMP/ea_lat"  ./DTFE-2d "$TMP/lat.hdf5"  "$TMP/ea_lat"  --grid 48 --periodic --MpcUnit 1 --verbose 2 --field density_a --exact-average
-RUN "$TMP/ea_lats" ./DTFE-2d "$TMP/lat.hdf5"  "$TMP/ea_lats" --grid 48 --periodic --MpcUnit 1 --verbose 2 --field density_a --samples 400
-RUN "$TMP/ea_pan"  ./DTFE-2d "$TMP/span.hdf5" "$TMP/ea_pan"  --grid 48 --periodic --MpcUnit 1 --verbose 2 --field density_a velocity_a --exact-average
-RUN "$TMP/ea_pans" ./DTFE-2d "$TMP/span.hdf5" "$TMP/ea_pans" --grid 48 --periodic --MpcUnit 1 --verbose 2 --field density_a velocity_a --samples 400
+RUN "$TMP/ea_lat"  ./DTFE-2d "$TMP/lat.hdf5"  "$TMP/ea_lat"  --grid 48 --periodic --mpc-unit 1 --verbose 2 --field density_a --exact-average
+RUN "$TMP/ea_lats" ./DTFE-2d "$TMP/lat.hdf5"  "$TMP/ea_lats" --grid 48 --periodic --mpc-unit 1 --verbose 2 --field density_a --subsamples 20
+RUN "$TMP/ea_pan"  ./DTFE-2d "$TMP/span.hdf5" "$TMP/ea_pan"  --grid 48 --periodic --mpc-unit 1 --verbose 2 --field density_a velocity_a --exact-average
+RUN "$TMP/ea_pans" ./DTFE-2d "$TMP/span.hdf5" "$TMP/ea_pans" --grid 48 --periodic --mpc-unit 1 --verbose 2 --field density_a velocity_a --subsamples 20
 echo ">> a redshift cone off the diagonal (origin x != y), and snapshots of the other dimension"
 GEN --out "$TMP/cone.hdf5" --n 64 --box 100 --amplitude-factor 0.5 --crossed-waves --jitter-frac 0.02 --seed 4
-RUN "$TMP/cone" ./DTFE-2d "$TMP/cone.hdf5" "$TMP/cone" --grid 16 64 --periodic --MpcUnit 1 --verbose 2 \
-    --field density density_a --redshiftCone 2 25 0 359 --origin 30 60
+RUN "$TMP/cone" ./DTFE-2d "$TMP/cone.hdf5" "$TMP/cone" --grid 16 64 --periodic --mpc-unit 1 --verbose 2 \
+    --field density density_a --redshift-cone 2 25 0 359 --cone-origin 30 60
 # a 3-column (3D) snapshot through the 2D binaries, a 2-column one through the 3D binaries (when built): refused
 # by name before any read -- else HDF5 writes 3N values into a 2N buffer (a segfault or a garbage grid
 # at exit 0) or reads 3N values from a 2N dataset (a garbage grid at exit 0)
@@ -148,7 +148,7 @@ RUN "$TMP/cone" ./DTFE-2d "$TMP/cone.hdf5" "$TMP/cone" --grid 16 64 --periodic -
 for pair in "./DTFE-2d dim3 3" "./PS-DTFE-2d dim3 3" "./DTFE pan 2" "./PS-DTFE pan 2"; do
     set -- $pair
     [ -x "$1" ] || continue
-    "$1" "$TMP/$2.hdf5" "$TMP/dim_$(basename "$1")" --grid 16 --periodic --MpcUnit 1 --field density > "$TMP/dim_$(basename "$1").log" 2>&1
+    "$1" "$TMP/$2.hdf5" "$TMP/dim_$(basename "$1")" --grid 16 --periodic --mpc-unit 1 --field density > "$TMP/dim_$(basename "$1").log" 2>&1
     rc=$?
     grep -q "holds $3 coordinates per particle, but this binary is built for" "$TMP/dim_$(basename "$1").log" && said=1 || said=0
     echo "$(basename "$1") $rc $said" >> "$TMP/dimcheck.txt"

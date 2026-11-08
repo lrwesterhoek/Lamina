@@ -32,38 +32,42 @@
 #                 existing plane file regenerates the plane -- which makes every snapshot's
 #                 image plane stale, so the batch recomputes (as it must: geometry changed).
 #   GRID_SIZE     analysis grid passed to run_ps_dtfe.sh (default 512)
-#   FIELDS        forwarded to run_ps_dtfe.sh (default: its full production list)
+#   FIELDS        forwarded to run_ps_dtfe.sh (default: its own, density velocity divergence shear)
 #   SNAPS         only these snapshot numbers, e.g. "50 67 99" (default: every snapshot on disk);
 #                 the GUI's adaptive plane size runs the pipeline once per plane size with it
 #   FORCE         1 = ignore all freshness checks (default 0)
 #   PTS_VEL_GRAD  1 (default) = also evaluate the velocity gradient at every sample point
 #                 (.pts_velGrad), which is what makes the velDiv/velShear/velVort maps
 #                 possible. A snapshot lacking it counts as STALE, so a rerun recomputes it.
-#   PTS_CONVENTIONS  grid (default) | legacy: the image plane's estimators (run_ps_dtfe.sh's knob, the binary's
-#                 --pts-conventions): 'grid' = the grids' vertex masses and volume weighting at the points,
+#   PS_POINT_CONVENTIONS  grid (default) | legacy: the image plane's estimators (run_ps_dtfe.sh's knob, the binary's
+#                 --ps-point-conventions): 'grid' = the grids' vertex masses and volume weighting at the points,
 #                 'legacy' = rho_bar*V_lag masses and density-weighted stream means, which reproduce a plane made
 #                 with them. A snapshot whose run log shows the other one is recomputed.
-#   PLANES, THICKNESS, SUPERSAMPLE, WINDOW
+#   PLANES, THICKNESS, SUPERSAMPLE, PLANE_WINDOW
 #                 the plane's geometry, forwarded to make_image_plane.py: PLANES sampling planes
 #                 (default 1 = one crisp cross-section; a handful ghosts, use >= 16 with
 #                 plot_pointeval.py --project slab) across a slab of THICKNESS Mpc (default 2), KxK sub-samples per pixel
 #                 averaged into pixel-area means (default 1), and "u0 u1 v0 v1" in Mpc to image
 #                 only that part of the plane (default: the whole box).
-#   PS_GPU        1 = the deposit on the GPU (run_ps_dtfe.sh -m), 0 = the CPU (PS_METAL, the older name, is read
-#                 when PS_GPU is unset); unset (auto) = the GPU when the
+#   DTFE_GPU      1 = the deposit on the GPU (run_ps_dtfe.sh -m), 0 = the CPU; unset (auto) = the GPU when the
 #                 PS binary was built with one, as run_ps_dtfe.sh decides
 #                 (config.sh gpu_build_default: PS-DTFE, or PS-DTFE-double with DTFE_PRECISION=double),
-#                 and the CPU for the exact deposit (PS_EXACT=1)
+#                 and the CPU for the exact deposit (DTFE_EXACT_AVERAGE=1)
 #   PS_VOLUME_WEIGHTED  1 (default) = volume-weighted velocity moments, the production convention
+#   PYTHON        the python that makes the plane (default: config.sh h5py_python, the first with numpy and h5py)
+# A switch is off for 0, false, no or off and on for any other value (the binaries' rule). Older names, read for
+# one release with a warning (the new name wins when both are set): PS_GPU and PS_METAL (DTFE_GPU), PS_EXACT
+# (DTFE_EXACT_AVERAGE), PTS_CONVENTIONS (PS_POINT_CONVENTIONS), WINDOW (PLANE_WINDOW), PY (PYTHON), DTFE_GRID_SIZE.
 # The other run options reach run_ps_dtfe.sh through the environment exactly as from a terminal:
-# PS_EXACT, AVG_SUBSAMPLES, PS_VERTEX_MASS, PS_CAUSTICS, PS_CAUSTIC_CUSPS, PS_PARALLEL_TRI,
-# PARTITION, MAX_CONCURRENT, SCRATCH_DIR, TESS_CACHE, DTFE_PRECISION, OUTPUT_PREFIX, LAMBDA_TH,
-# THREADS (see its header for each). The GUI's Pipeline tab sets all of them.
+# DTFE_EXACT_AVERAGE, SUBSAMPLES, PS_VERTEX_MASS, PS_CAUSTICS, PS_CAUSTIC_CUSPS, PARALLEL_TRIANGULATION,
+# PARTITION, MAX_CONCURRENT, SCRATCH_DIR, TESSELLATION_CACHE, DTFE_PRECISION, OUTPUT_PREFIX, LAMBDA_TH,
+# THREADS, PS_MERGE, DTFE_RESUME (see its header for each, and the older names it still reads). The GUI's Pipeline
+# tab sets all of them.
 # Snapshots are auto-discovered (snapdir_*/combined_NNN.hdf5). The plane file is generated
 # once per simulation (box size is constant across its snapshots) and reused -- as long as its
 # sidecar has the requested geometry (make_image_plane.py --same-as, exit 3 = differs); otherwise it
 # is regenerated, which makes every snapshot of that simulation stale (the geometry changed, so it
-# must). A comparison that FAILS (no python, a bad WINDOW, a missing module) is not 'differs': the
+# must). A comparison that FAILS (no python, a bad PLANE_WINDOW, a missing module) is not 'differs': the
 # plane is kept, the simulation skipped with a '!!' line, and the script exits 1.
 #
 # DISK: the per-point files are KEPT (~9 GB per snapshot at NU=8192) -- they are the input
@@ -80,50 +84,66 @@ case "${1:-}" in
     "") ;;
     *) echo "Error: run_ps_pipeline.sh takes no arguments (its knobs are environment variables; --help lists them)" >&2; exit 2 ;;
 esac
-USER_GRID="${GRID_SIZE:-}"          # capture BEFORE config.sh, which sets its own GRID_SIZE
-source "${SCRIPT_DIR}/config.sh"
+source "${SCRIPT_DIR}/config.sh"    # (GRID_SIZE, and DTFE_GRID_SIZE, its older name, through config.sh's knob)
 require_data_root                    # before SIMS=all looks for simulations under it
 
-PY="${PY:-$(h5py_python)}"          # the launcher passes its own PY (config.sh h5py_python otherwise)
+knob PYTHON PY                       # (config.sh knob: the older name read for one release, with a warning)
+PYTHON="${PYTHON:-$(h5py_python)}"   # the launcher passes its own (config.sh h5py_python otherwise)
 NU="${NU:-8192}"
 AXIS="${AXIS:-z}"
 CENTER="${CENTER:-}"
-GRID_SIZE="${USER_GRID:-512}"       # 512^3 analysis grids by default (figures don't depend on it)
+GRID_SIZE="${CALLER_GRID_SIZE:-512}"   # 512^3 analysis grids by default (figures don't depend on it)
 PTS_VEL_GRAD="${PTS_VEL_GRAD:-1}"
-PTS_CONVENTIONS="${PTS_CONVENTIONS:-grid}"
+knob PS_POINT_CONVENTIONS PTS_CONVENTIONS
+PS_POINT_CONVENTIONS="${PS_POINT_CONVENTIONS:-grid}"
 PLANES="${PLANES:-1}"
 THICKNESS="${THICKNESS:-2}"
 SUPERSAMPLE="${SUPERSAMPLE:-1}"
-WINDOW="${WINDOW:-}"
-PS_GPU="${PS_GPU:-${PS_METAL:-auto}}"   # auto: resolved below, as run_ps_dtfe.sh resolves its PS_GPU (PS_METAL: the older name)
+knob PLANE_WINDOW WINDOW
+PLANE_WINDOW="${PLANE_WINDOW:-}"
+knob DTFE_GPU PS_GPU PS_METAL
+DTFE_GPU="${DTFE_GPU:-auto}"         # auto: resolved below, as run_ps_dtfe.sh resolves its DTFE_GPU
+knob DTFE_EXACT_AVERAGE PS_EXACT     # (run_ps_dtfe.sh's own knob, handed on; its default 0 there)
+# run_ps_dtfe.sh's other knobs with older names, resolved here once (exported under the new name when the old one
+# was), so the driver does not warn again for every simulation
+knob SUBSAMPLES AVG_SUBSAMPLES
+knob_merge PS_MERGE ORDERED_MERGE FIXED_POINT_MERGE
+knob DTFE_RESUME PS_RESUME
+knob TESSELLATION_CACHE TESS_CACHE
+knob PARALLEL_TRIANGULATION PS_PARALLEL_TRI
+knob PS_LAGRANGIAN_PADDING PS_LAG_PADDING
+knob -e PS_LAGRANGIAN_INPUT LAGRANGIAN_INPUT
 PS_VOLUME_WEIGHTED="${PS_VOLUME_WEIGHTED:-1}"
 FORCE="${FORCE:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 PREFIX="${OUTPUT_PREFIX:-ps_output}"
+knob_bool PTS_VEL_GRAD PS_VOLUME_WEIGHTED FORCE DRY_RUN   # 1 or 0 (config.sh); DTFE_GPU: knob_gpu below
+knob_gpu DTFE_GPU
 
 # the plane's geometry, as make_image_plane.py takes it (shared by the generation and the --same-as check)
 plane_args=(--axis "${AXIS}" --nu "${NU}" --planes "${PLANES}" --thickness "${THICKNESS}" --supersample "${SUPERSAMPLE}")
 [ -n "${CENTER}" ] && plane_args+=(--center "${CENTER}")
-if [ -n "${WINDOW}" ]; then
-    read -r w_u0 w_u1 w_v0 w_v1 w_more <<< "${WINDOW}"
+if [ -n "${PLANE_WINDOW}" ]; then
+    read -r w_u0 w_u1 w_v0 w_v1 w_more <<< "${PLANE_WINDOW}"
     if [ -z "${w_v1}" ] || [ -n "${w_more:-}" ]; then
-        echo "!! WINDOW must be four numbers 'u0 u1 v0 v1' (Mpc), got '${WINDOW}'" >&2; exit 2
+        echo "!! PLANE_WINDOW must be four numbers 'u0 u1 v0 v1' (Mpc), got '${PLANE_WINDOW}'" >&2; exit 2
     fi
-    plane_args+=(--u0 "${w_u0}" --u1 "${w_u1}" --v0 "${w_v0}" --v1 "${w_v1}")
+    plane_args+=(--plane-window "${w_u0}" "${w_u1}" "${w_v0}" "${w_v1}")
 fi
-# PS_GPU=auto (the default): the GPU when the binary run_ps_dtfe.sh will run was built with one -- the
+# DTFE_GPU=auto (the default): the GPU when the binary run_ps_dtfe.sh will run was built with one -- the
 # drivers' rule (config.sh gpu_build_default; DTFE_PRECISION picks the binary there too), so a CPU-only build is
-# not asked for the GPU (and a fallback warning) on every snapshot.
+# not asked for the GPU (and a fallback warning) on every snapshot. The exact deposit's test is run_ps_dtfe.sh's
+# (knob_on: DTFE_EXACT_AVERAGE=true is the exact deposit there too, so it is the CPU here as well).
 gpu_auto=""
-if [ "${PS_GPU}" = "auto" ] && [ "${PS_EXACT:-0}" = "1" ]; then     # the exact deposit: faster on the CPU
-    PS_GPU=0
-    gpu_auto=" (PS_GPU unset: the exact deposit is faster on the CPU)"
-elif [ "${PS_GPU}" = "auto" ]; then
+if [ "${DTFE_GPU}" = "auto" ] && knob_on DTFE_EXACT_AVERAGE; then     # the exact deposit: faster on the CPU
+    DTFE_GPU=0
+    gpu_auto=" (DTFE_GPU unset: the exact deposit is faster on the CPU)"
+elif [ "${DTFE_GPU}" = "auto" ]; then
     case "${DTFE_PRECISION:-single}" in double) ps_bin="PS-DTFE-double" ;; *) ps_bin="PS-DTFE" ;; esac
-    PS_GPU="$(gpu_build_default "${REPO_ROOT}" "${ps_bin}")"
-    gpu_auto=" (PS_GPU unset: ${ps_bin} is $([ "${PS_GPU}" = "1" ] && echo "a GPU" || echo "a CPU-only") build)"
+    DTFE_GPU="$(gpu_build_default "${REPO_ROOT}" "${ps_bin}")"
+    gpu_auto=" (DTFE_GPU unset: ${ps_bin} is $([ "${DTFE_GPU}" = "1" ] && echo "a GPU" || echo "a CPU-only") build)"
 fi
-gpu_args=(); [ "${PS_GPU}" = "1" ] && gpu_args=(-m)
+gpu_args=(); [ "${DTFE_GPU}" = "1" ] && gpu_args=(-m)
 
 if [ -z "${SIMS:-}" ]; then
     echo "Error: no simulation given: set SIMS to the simulations to process (e.g. SIMS=\"TNG100-3-Dark\"), or SIMS=all" \
@@ -138,35 +158,53 @@ if [ "${SIMS}" = "all" ]; then
     done
 fi
 echo "Simulations:${SIMS}"
-echo "Slice: axis ${AXIS}, ${NU} px, centre ${CENTER:-box/2}, planes ${PLANES}$([ "${PLANES}" != "1" ] && echo " over ${THICKNESS} Mpc"), ${SUPERSAMPLE}x${SUPERSAMPLE} sub-samples${WINDOW:+, window ${WINDOW}}   Grid: ${GRID_SIZE}^3   GPU: ${PS_GPU}${gpu_auto}   vel-grad: ${PTS_VEL_GRAD}   force: ${FORCE}"
+echo "Slice: axis ${AXIS}, ${NU} px, centre ${CENTER:-box/2}, planes ${PLANES}$([ "${PLANES}" != "1" ] && echo " over ${THICKNESS} Mpc"), ${SUPERSAMPLE}x${SUPERSAMPLE} sub-samples${PLANE_WINDOW:+, window ${PLANE_WINDOW}}   Grid: ${GRID_SIZE}^3   GPU: ${DTFE_GPU}${gpu_auto}   vel-grad: ${PTS_VEL_GRAD}   force: ${FORCE}"
 
 run() { echo "+ $*"; [ "${DRY_RUN}" = "1" ] || "$@"; }
 
 # run_settings <command line>: the options of a run_ps_dtfe.sh command that change its grids, one per line,
 # sorted -- from the RUNNING: line a run log starts with, or from a DRY_RUN=1 'would run' line (its %q
 # quoting only touches the paths, which are not compared). The binary's name carries the precision. Each option
-# is read in its canonical spelling first (the binaries' deprecated names, src/user_options.cc deprecatedOptions:
-# a log written with '--ps-exact-deposit --lambda_th 0.3' has the settings of '--exact-average --lambda-th 0.3'),
-# so a driver that emits the new names does not find every older snapshot stale.
+# is read in its canonical spelling first: old[] (renamed options) and sw[] (the merge switches, one --ps-merge
+# mode) are python/dtfelib/runlog.py's permanent table (RENAMES, SWITCHES; tests/docs_drift_check.py keeps the two
+# equal), so a log written with '--ps-exact-deposit --lambda_th 0.3 --avg-subsamples 3' has the settings of
+# '--exact-average --lambda-th 0.3 --subsamples 3', and a driver that emits the new names does not find every older
+# snapshot stale. val[] / flag[] name the canonical options compared (the merge mode is not: it moves the last float
+# bits only, and older logs carry no merge flag).
 run_settings() {
     printf '%s\n' "$1" | awk '
-        BEGIN { split("--grid --padding --avg-subsamples --field --lambda-th", v); for (i in v) val[v[i]] = 1
+        BEGIN { split("--grid --padding --subsamples --field --lambda-th --ps-point-conventions " \
+                      "--ps-lagrangian-padding --ps-alpha-shape --ps-halo-release", v); for (i in v) val[v[i]] = 1
                 split("--periodic --ps-vertex-mass --ps-volume-weighted --exact-average --ps-linear-deposit " \
-                      "--ps-caustics --ps-caustic-cusps --pts-vel-grad", b); for (i in b) flag[b[i]] = 1
-                split("--pts-conventions", c); for (i in c) val[c[i]] = 1
-                old["--ps-gpu"] = "--gpu"; old["--ps-exact-deposit"] = "--exact-average"
-                old["--ps-no-overlap"] = "--no-overlap"; old["--full_help"] = "--full-help"
-                old["--lambda_th"] = "--lambda-th" }
+                      "--ps-caustics --ps-caustic-cusps --pts-vel-grad --face-gradient", b); for (i in b) flag[b[i]] = 1
+                old["--ps-gpu"] = "--gpu"; old["--ps-exact-deposit"] = "--exact-average"; old["--ps-no-overlap"] = "--no-overlap"
+                old["--full_help"] = "--full-help"; old["--lambda_th"] = "--lambda-th"; old["--MpcUnit"] = "--mpc-unit"
+                old["--paddingMpc"] = "--padding-mpc"; old["--regionMpc"] = "--region-mpc"; old["--partNo"] = "--partition-index"
+                old["--redshiftCone"] = "--redshift-cone"; old["--origin"] = "--cone-origin"; old["--NGP"] = "--ngp"
+                old["--CIC"] = "--cic"; old["--TSC"] = "--tsc"; old["--PCS"] = "--pcs"; old["--SPH"] = "--sph"
+                old["--Voronoi"] = "--voronoi"; old["--inputFile"] = "--input-file"; old["--outputFile"] = "--output-file"
+                old["--input"] = "--input-format"; old["--output"] = "--output-format"; old["--method"] = "--average-method"
+                old["--noTest"] = "--no-padding-test"; old["--density0"] = "--mean-density"
+                old["--randomSample"] = "--particle-fraction"; old["--approxPSD"] = "--approx-phase-space-density"
+                old["--extensive"] = "--scalars-extensive"; old["--options"] = "--reader-options"
+                old["--avg-subsamples"] = "--subsamples"; old["--lagrangianInput"] = "--ps-lagrangian-input"
+                old["--ps-lag-padding"] = "--ps-lagrangian-padding"; old["--per-stream"] = "--ps-per-stream"
+                old["--per-stream-ids"] = "--ps-per-stream-ids"; old["--pts-lagrangian"] = "--ps-per-stream-lagrangian"
+                old["--pts-conventions"] = "--ps-point-conventions"; old["--ps-window"] = "--grid-window"
+                sw["--ordered-merge"] = "--ps-merge index-order"; sw["--completion-order-merge"] = "--ps-merge completion-order"
+                sw["--fixed-point-merge"] = "--ps-merge fixed-point" }
         { i = 1; if ($1 == "RUNNING:") i = 2
           bin = $i; sub(/.*\//, "", bin); print "binary " bin
           cur = ""; line = ""
           for (i = i + 1; i <= NF; i++) {
-              t = $i
+              t = $i; sv = ""
               if (t ~ /^--/) {
                   if (t in old) t = old[t]
+                  else if (t in sw) { split(sw[t], p, " "); t = p[1]; sv = p[2] }
                   if (line != "") print line
                   line = ""; cur = ""
-                  if (t in val) { cur = t; line = t } else if (t in flag) print t
+                  if (t in val) { if (sv != "") line = t " " sv; else { cur = t; line = t } }
+                  else if (t in flag) print t
               } else if (cur != "") line = line " " t
           }
           if (line != "") print line }' | sort
@@ -221,9 +259,9 @@ for sim in ${SIMS}; do
         # a stored geometry differing from the requested one (CENTER when given, planes, thickness,
         # sub-samples, window) must regenerate the plane -- and thereby invalidate every slice
         # computed against the old one. Exit 3 = differs (or an unreadable sidecar); any other failure
-        # of the tool (no python, a bad WINDOW, a missing module) keeps the plane and skips the sim.
+        # of the tool (no python, a bad PLANE_WINDOW, a missing module) keeps the plane and skips the sim.
         same_rc=0
-        same_err="$("${PY}" "${REPO_ROOT}/python/tools/make_image_plane.py" --same-as "${plane}.json" \
+        same_err="$("${PYTHON}" "${REPO_ROOT}/python/tools/make_image_plane.py" --same-as "${plane}.json" \
                     "${plane_args[@]}" 2>&1 >/dev/null)" || same_rc=$?
         if [ "${same_rc}" = "3" ]; then
             echo "-- ${sim}: the existing plane's geometry (centre, planes, thickness, sub-samples or window) differs; regenerating"
@@ -237,7 +275,7 @@ for sim in ${SIMS}; do
     fi
     if [ "${plane_new}" = "1" ] || [ ! -f "${plane}.bin" ] || [ ! -f "${plane}.json" ]; then
         first=$(printf "%03d" "${snaps[0]}")
-        run "${PY}" "${REPO_ROOT}/python/tools/make_image_plane.py" \
+        run "${PYTHON}" "${REPO_ROOT}/python/tools/make_image_plane.py" \
             --combined "${simdir}/snapdir_${first}/combined_${first}.hdf5" \
             "${plane_args[@]}" \
             -o "${plane}" || { echo "!! ${sim}: plane generation failed"; overall_rc=1; continue; }
@@ -251,7 +289,7 @@ for sim in ${SIMS}; do
     # compute would be skipped and every render fail on the size mismatch.
     plane_pts=""
     if [ "${plane_new}" != "1" ]; then
-        plane_pts="$("${PY}" -c 'import json, sys
+        plane_pts="$("${PYTHON}" -c 'import json, sys
 s = json.load(open(sys.argv[1]))
 print(int(s.get("planes", 1)) * int(s["nv"]) * int(s["nu"]) * int(s.get("supersample", 1)) ** 2)' "${plane}.json" 2>/dev/null)" \
             || plane_pts=""
@@ -259,10 +297,10 @@ print(int(s.get("planes", 1)) * int(s["nv"]) * int(s["nu"]) * int(s.get("supersa
     fi
 
     # ---- grids + point evaluation, one triangulation per snapshot ------------------------
-    # run_ps_dtfe.sh's PS_GPU follows this one: -m only switches the GPU ON, an exported PS_GPU=1 (or the older
-    # PS_METAL=1, which run_ps_dtfe.sh reads when PS_GPU is unset) would otherwise leak in
+    # run_ps_dtfe.sh's DTFE_GPU follows this one: -m only switches the GPU ON, an exported DTFE_GPU=1 would otherwise
+    # leak in (an older PS_GPU / PS_METAL was read above and unset: the driver sees the new name only)
     env_args=(SAMPLE_POINTS="${plane}.bin" PS_VOLUME_WEIGHTED="${PS_VOLUME_WEIGHTED}" PTS_VEL_GRAD="${PTS_VEL_GRAD}"
-              PTS_CONVENTIONS="${PTS_CONVENTIONS}" PS_GPU="${PS_GPU}")
+              PS_POINT_CONVENTIONS="${PS_POINT_CONVENTIONS}" DTFE_GPU="${DTFE_GPU}")
     [ -n "${FIELDS:-}" ] && env_args+=(FIELDS="${FIELDS}")
     # The settings this batch would run each snapshot with, asked from run_ps_dtfe.sh itself (DRY_RUN=1: reads,
     # runs and writes nothing), so the comparison below cannot drift from what it runs (file times alone would

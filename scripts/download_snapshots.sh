@@ -4,11 +4,11 @@
 #
 # Modes:
 #   snapshots (default) : raw particle snapshot chunks -> <DATA_DIR>/snapdir_NNN/
-#   group catalogs (-c) : FoF/Subfind fof_subhalo_tab chunks -> <DATA_DIR>/groups_NNN/
+#   group catalogs (-c, --groupcats) : FoF/Subfind fof_subhalo_tab chunks -> <DATA_DIR>/groups_NNN/
 #                         (needed by the merger-tree tracker for subhalo selection and
 #                          particle-based shape/orientation; trees themselves are separate)
-#   merger trees   (-t) : SubLink tree_extended chunks (whole simulation)
-#   initial conds  (-i) : ics.hdf5 -> <DATA_DIR>/ (single file, whole simulation). The TNG
+#   merger trees   (-t, --trees) : SubLink tree_extended chunks (whole simulation)
+#   initial conds  (-i, --ics) : ics.hdf5 -> <DATA_DIR>/ (single file, whole simulation). The TNG
 #                         API only serves ICs under the BARYONIC run's name, so for a
 #                         '-Dark' simulation the '-Dark' suffix is stripped for the API call
 #                         (same ICs; the Dark run is the DM-only evolution of them). Feed
@@ -16,13 +16,14 @@
 #                         h-free combined_ics.hdf5 that run_ps_dtfe.sh expects.
 #
 # Usage:
-#   ./download_snapshots.sh [-k API_KEY] [-c|-t|-i] [-d DATA_DIR] [-s SIMULATION] [snapshot ...]
+#   ./download_snapshots.sh [-k API_KEY] [-c|-t|-i] [-d SIM_DIR] [-s SIMULATION] [snapshot ...]
+# Long forms: --api-key, --groupcats, --trees, --ics, --sim-dir, --sim (the names merge_HDF5.py and the drivers use).
 # DTFE_DATA_ROOT, the folder that holds the simulations, is required unless -d names the simulation's folder, and so
 # is the simulation (-s or DTFE_SIM); the files land in the simulation's folder under it (config.sh sim_dir) or in -d.
 #
 # Examples:
 #   ./download_snapshots.sh -c -s TNG50-3-Dark            # groupcats for the default ladder
-#   ./download_snapshots.sh -c -s TNG300-3-Dark 99 50     # groupcats, snapshots 99+50 only
+#   ./download_snapshots.sh --groupcats --sim TNG300-3-Dark 99 50   # groupcats, snapshots 99+50 only
 #   ./download_snapshots.sh -k 0123456789abcdef 1 2 3     # raw snapshots
 #   ./download_snapshots.sh -i -s TNG100-3-Dark           # ICs (served as TNG100-3)
 #
@@ -30,6 +31,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/config.sh"
+knob PYTHON PY     # the python with h5py (PY, its older name, read for one release with a warning; config.sh knob)
 
 # ---- Defaults (override with flags / positional args) ---------------------
 # API key resolution: -k flag > TNG_API_KEY env > ~/.tng_api_key file. The key file lives
@@ -66,9 +68,9 @@ finish() {
 # -- only those (a lock or a permission error keeps the file) and only when nothing wrote them in the
 # last minute (another download may be running). A chunk that is kept although it does not open, or
 # that could not be removed, is an ERROR of this run: wget -nc would skip it and the merge refuse it.
-# Needs a python with h5py (PY, as the merge step; else the check is skipped with a note).
+# Needs a python with h5py (PYTHON, as the merge step; else the check is skipped with a note).
 prune_incomplete() {        # <dir> <glob>  -> 0, or 1 when a chunk that does not open is still there
-    local dir="$1" pat="$2" py="${PY:-python3}"
+    local dir="$1" pat="$2" py="${PYTHON:-python3}"
     [ -d "${dir}" ] || return 0
     if ! "${py}" -c "import h5py" >/dev/null 2>&1; then
         echo "  note: ${py} has no h5py; existing chunks are not checked for completeness"
@@ -142,13 +144,13 @@ fetch_listing() {           # <listing URL, no query> <dest dir>  -> 1 when the 
 }
 
 usage() {
-    echo "Usage: $0 [-k API_KEY] [-c|-t|-i] [-d DATA_DIR] [-s SIMULATION] [snapshot ...]"
-    echo "  -c  download FoF/Subfind group catalogs instead of raw snapshots"
-    echo "  -t  download the SubLink merger trees (whole simulation; snapshot list ignored)"
-    echo "  -i  download the initial conditions ics.hdf5 (whole simulation; snapshot list"
+    echo "Usage: $0 [-k|--api-key KEY] [-c|--groupcats | -t|--trees | -i|--ics] [-d|--sim-dir SIM_DIR] [-s|--sim SIMULATION] [snapshot ...]"
+    echo "  -c, --groupcats  download FoF/Subfind group catalogs instead of raw snapshots"
+    echo "  -t, --trees      download the SubLink merger trees (whole simulation; snapshot list ignored)"
+    echo "  -i, --ics        download the initial conditions ics.hdf5 (whole simulation; snapshot list"
     echo "      ignored; '-Dark' is stripped for the API call -- ICs are served under the"
     echo "      baryonic run's name only)"
-    echo "  API key: -k flag, TNG_API_KEY env, or ~/.tng_api_key file (recommended)."
+    echo "  API key: -k/--api-key, TNG_API_KEY env, or ~/.tng_api_key file (recommended)."
 }
 
 # ---- Parse arguments ------------------------------------------------------

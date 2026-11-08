@@ -9,7 +9,7 @@
 # whatever the thread or slab count. On test-sized grids the copies always fit, so the suite forces
 # the mode (DTFE_DEPOSIT_SLABS=1) and compares every output file with cmp, for every deposit variant:
 # sampled (nSub 1 and 3), linear, exact, vertex mass, volume weighted, caustics, halo release, a
-# non-periodic box, a --ps-window, --partition 2 2 2 (periodic sub-grids that wrap), and a few slabs
+# non-periodic box, a --grid-window, --partition 2 2 2 (periodic sub-grids that wrap), and a few slabs
 # that each hold many tetrahedra (DTFE_DEPOSIT_NSLABS=3) next to many thin ones. The 2D build too.
 #
 # Usage: tests/ps_slab_deposit_check.sh [--no-build]
@@ -51,7 +51,7 @@ case_() {
     local name="$1" bin="$2" snap="$3"; shift 3
     local a="${TMP}/psl_${name}_serial" b="${TMP}/psl_${name}_slab"
     rm -f "${a}".* "${b}".* "${a}"_* "${b}"_*
-    local common=( --grid "${GRID}" --input 105 --MpcUnit 1 --verbose "${VERBOSE:-2}" "$@" )
+    local common=( --grid "${GRID}" --input-format 105 --mpc-unit 1 --verbose "${VERBOSE:-2}" "$@" )
     set +e
     DTFE_DEPOSIT_THREADS=1 "${bin}" "${snap}" "${a}" "${common[@]}" > "${a}.log" 2>&1; local ra=$?
     env DTFE_DEPOSIT_SLABS=1 ${NSLABS:+DTFE_DEPOSIT_NSLABS=${NSLABS}} "${bin}" "${snap}" "${b}" "${common[@]}" > "${b}.log" 2>&1; local rb=$?
@@ -76,8 +76,8 @@ case_() {
 
 FIELDS=( --field density velocity dispersion divergence shear )
 echo ">> serial vs slab runs ..."
-case_ sampled_nsub1   "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --avg-subsamples 1
-case_ sampled_nsub3   "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --avg-subsamples 3
+case_ sampled_nsub1   "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --subsamples 1
+case_ sampled_nsub3   "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --subsamples 3
 case_ linear          "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --ps-linear-deposit
 case_ exact           "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --exact-average
 case_ vertex_mass     "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --ps-vertex-mass
@@ -86,7 +86,7 @@ case_ caustics        "${BIN}" "${SNAP}"    --periodic --field density --ps-caus
 case_ halo_release    "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --ps-halo-release 2
 case_ nonperiodic     "${BIN}" "${SNAP_NP}" --field density velocity
 case_ window          "${BIN}" "${SNAP}"    --periodic --field density velocity \
-                                            --ps-window 10 47.5 20 80 0 100
+                                            --grid-window 10 47.5 20 80 0 100
 # (a partition reports its slab mode at verbose 3 only)
 VERBOSE=3 case_ partition "${BIN}" "${SNAP}" --periodic "${FIELDS[@]}" --partition 2 2 2 --max-concurrent 1
 NSLABS=3 case_ three_slabs "${BIN}" "${SNAP}" --periodic "${FIELDS[@]}" --exact-average

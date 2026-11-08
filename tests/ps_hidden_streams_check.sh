@@ -80,7 +80,7 @@ run() {  # $1 = output root, $2 = snapshot, rest = options (files first: --parti
     rm -f "${out}".*
     local log="${out}.log"
     set +e
-    "${BIN}" "${snap}" "${out}" --grid "${GRID}" --input 105 --MpcUnit 1 --verbose 1 --periodic "$@" > "$log" 2>&1
+    "${BIN}" "${snap}" "${out}" --grid "${GRID}" --input-format 105 --mpc-unit 1 --verbose 1 --periodic "$@" > "$log" 2>&1
     local rc=$?
     set -e
     die_on_failed_run "$rc" "$log"
@@ -89,12 +89,12 @@ run() {  # $1 = output root, $2 = snapshot, rest = options (files first: --parti
 for geo in pan crw; do
     snap="${SNAP_PAN}"; [ "$geo" = crw ] && snap="${SNAP_CRW}"
     echo ">> ${geo}: sampled deposit, nSub 1 and 3 (CPU, serial)"
-    run "${TMP}/pux_${geo}" "${snap}" --field density density_a --avg-subsamples 3
+    run "${TMP}/pux_${geo}" "${snap}" --field density density_a --subsamples 3
     echo ">> ${geo}: the same, --partition 2 2 2"
-    run "${TMP}/pux_${geo}_par" "${snap}" --field density density_a --avg-subsamples 3 --partition 2 2 2
+    run "${TMP}/pux_${geo}_par" "${snap}" --field density density_a --subsamples 3 --partition 2 2 2
     if [ "${GPU}" = 1 ]; then
         echo ">> ${geo}: the same on the GPU"
-        run "${TMP}/pux_${geo}_gpu" "${snap}" --field density density_a --avg-subsamples 3 --gpu
+        run "${TMP}/pux_${geo}_gpu" "${snap}" --field density density_a --subsamples 3 --gpu
     fi
     echo ">> ${geo}: exact deposit"
     run "${TMP}/pux_${geo}_ex" "${snap}" --field density --exact-average

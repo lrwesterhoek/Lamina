@@ -327,7 +327,8 @@ def t_real_tng100_z0():
             "print(int(d.sum()), *[float(np.nanmedian(catalog.r_v_mpc(cat, k)[d])) for k in catalog.R_V_DEFINITIONS])\n")
     env = dict(os.environ, DTFE_SIM="TNG100-3-Dark")
     env.pop("DTFE_VOID_GATE", None)
-    env.pop("DTFE_SIGMA_MPC", None)             # the production namespace, whatever this shell exports
+    for name in ("DTFE_SMOOTH_MPC", "DTFE_SIGMA_MPC"):     # the production namespace, whatever this shell exports
+        env.pop(name, None)
     env.pop("DTFE_CACHE_DIR", None)
     r = subprocess.run([sys.executable, "-c", code], cwd=str(_PY), env=env, capture_output=True, text=True, timeout=600)
     assert r.returncode == 0, r.stderr[-600:]

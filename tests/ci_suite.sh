@@ -2,7 +2,7 @@
 # The Linux CI suite, ONE list shared by .github/workflows/ci.yml and the Dockerfile so the two cannot
 # drift. CPU-only: the GPU suites (dtfe_metal_check, gpu_scalar_check, gpu_mass_check, gpu_retry_check, and the
 # standard binary's dtfe_gpu_retry_check) need a GPU build and stay local (the CUDA/HIP port runs them through its
-# CPU emulation in the ci.yml job cudaemu: tests/cudaemu_check.sh). ps_auto_tune_check and ps_scratch_check run
+# CPU emulation, locally too: tests/cudaemu_check.sh on a CUDAEMU=1 build). ps_auto_tune_check and ps_scratch_check run
 # here (portable: the peak RSS from getrusage, not '/usr/bin/time -l'; a temp folder, not /private/tmp; their GPU
 # parts SKIP).
 #
@@ -47,6 +47,11 @@ stage_build() {
 run_program_suites() {
     step "standard DTFE regression (stored reference)"; env -u DTFE_TEST_REFERENCE_DIR "$PY" tests/run_tests.py
     step "standard DTFE Monte-Carlo average (unbiased, split-invariant)"; tests/dtfe_mc_average_check.sh --no-build
+    # the face method (docs/cleanup-plan.md P10): its geometry against exact references, then standard DTFE's
+    # --face-gradient against the per-tetrahedron gradient
+    step "face sweep geometry (sections, pieces, Gauss on a tessellation)"; tests/face_sweep_check.sh --no-build
+    step "standard DTFE --face-gradient (== the per-tet gradient; threads, deposits, splits)"; tests/dtfe_face_gradient_check.sh --no-build
+    step "PS-DTFE --face-gradient (the mean flow: conservative, pancake folds, splits, window, dtfelib)"; tests/ps_face_gradient_check.sh --no-build
     # methods 2 and 3, the redshift cone and the grid's point values: closed forms, other code paths and stored
     # golden values (the user-sampling part needs libDTFE: a SKIP line here, run by the variants stage)
     step "standard DTFE sampling variants (methods 2, 3, redshift cone; golden)"; tests/dtfe_sampling_check.sh --no-build
@@ -83,8 +88,9 @@ run_program_suites() {
     step "composite server split";              tests/serve_split_check.sh --no-build
     step "ordered merge, look-ahead, crash-safe outputs, progress"; tests/ps_runtime_check.sh --no-build
     step "resume of a killed partitioned run";  tests/ps_resume_check.sh --no-build
-    step "--fixed-point-merge (order-free integer merge)"; tests/ps_fixed_merge_check.sh --no-build
+    step "--ps-merge fixed-point (order-free integer merge)"; tests/ps_fixed_merge_check.sh --no-build
     step "resume of a killed partitioned standard run"; tests/dtfe_resume_check.sh --no-build
+    step "old and new flag spellings: one run, one settings key"; tests/flag_spelling_check.sh --no-build
     step "resume with --sample-points";         tests/ps_resume_points_check.sh --no-build
 }
 
@@ -147,6 +153,7 @@ stage_core() {
     step "void convergence: grid, mass, estimator"; MPLBACKEND=Agg "$PY" tests/py_convergence_test.py
     step "size function on the raw density";    MPLBACKEND=Agg "$PY" tests/py_size_function_test.py
     step "void-in-cloud criteria";               MPLBACKEND=Agg "$PY" tests/py_vic_test.py
+    step "python CLI spellings: old names as warned aliases, no abbreviations"; MPLBACKEND=Agg "$PY" tests/py_cli_alias_test.py
     # what the README tells a user to type exists in the code, and the drivers' knobs are documented
     step "docs drift (README / COMMANDS.md against the code)"; "$PY" tests/docs_drift_check.py
     # the python analysis stack end to end on a synthetic two-snapshot set (pins its own temp folders)

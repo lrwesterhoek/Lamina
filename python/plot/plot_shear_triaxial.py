@@ -3,7 +3,7 @@
 Method-, snapshot- and simulation-agnostic via the shared dtfelib.FieldSet layer:
 
     python3 plot/plot_shear_triaxial.py                    # TNG50-4-Dark, full series, auto method
-    python3 plot/plot_shear_triaxial.py --method dtfe
+    python3 plot/plot_shear_triaxial.py --estimator dtfe
     python3 plot/plot_shear_triaxial.py --snap 99          # single snapshot only
 
 PS-DTFE grids: the shear is the MEAN-FIELD one by default -- the traceless symmetric FFT gradient of
@@ -196,7 +196,7 @@ def main():
             print(f"  skipping snapshot {snapshot} (no {args.method} fields)")
             continue
         except ValueError as e:
-            # e.g. snapdir holds BOTH ps_output.* and output.* fields under --method auto
+            # e.g. snapdir holds BOTH ps_output.* and output.* fields under --estimator auto
             print(f"  Error: {e}")
             continue
         except Exception as e:

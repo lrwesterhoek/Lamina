@@ -251,7 +251,7 @@ chmod +x "$DREPO/DTFE"
 drive() {   # <log> [VAR=value ...]: the copied driver on SIM 99; echoes its exit status
     local log="$1"; shift
     local rc=0
-    env DTFE_DATA_ROOT="$DDATA" DTFE_SPACE_CHECK=0 "$@" "$DREPO/scripts/run_dtfe.sh" -s SIM -g 16 99 > "$log" 2>&1 || rc=$?
+    env DTFE_DATA_ROOT="$DDATA" SPACE_CHECK=0 "$@" "$DREPO/scripts/run_dtfe.sh" -s SIM -g 16 99 > "$log" 2>&1 || rc=$?
     echo "$rc"
 }
 DCK="$DDATA/SIM/snapdir_099/output.runlog.checkpoint"

@@ -172,7 +172,7 @@ struct Read_data
             p->clear();
             p->resize( _noParticles );
 #ifdef PHASE_SPACE
-            // keep the IDs on the particles (stream identities, --per-stream-ids); empty for
+            // keep the IDs on the particles (stream identities, --ps-per-stream-ids); empty for
             // readers that do not provide IDs -> the particles keep their 0 default
             if ( _particleIDs.size() == _noParticles )
                 for (size_t i=0; i<_noParticles; ++i)

@@ -5,7 +5,7 @@
 #  A) UNIFORM box (amp=0: Eulerian == Lagrangian bit-for-bit). The 'geometric' per-stream
 #     density is rho_bar * |det Lag| / |det Eul| = rho_bar EXACTLY, so every point evaluation
 #     must equal rho/rho_bar = 1 to double rounding -- and therefore matches the (exactly
-#     mass-conserving) nSub=1 grid deposit's mean at float level. The 'dtfe' variant must
+#     mass-conserving) nSub=1 grid deposit's mean at float level. The 'linear' variant must
 #     match to float32 vertex-density rounding. Velocities are identically zero.
 #  B) PANCAKE (amp=1.8, multi-stream): cross-checks against the nSub=1 grid deposit at the
 #     48^3 cell centers.
@@ -23,11 +23,11 @@
 #  C) PARTITION-SPLIT CONSISTENCY: --partition 2 2 2 vs serial must agree to float rounding
 #     (stream records are collected per tetrahedron and reduced in a deterministically sorted
 #     order, so only float-ULP wrap differences of periodic-image copies remain).
-#  D) Ragged --per-stream layout invariants + estimator consistency (sum of per-stream
-#     densities == total; sorted descending; offsets consistent; 'dtfe' vs 'geometric' agree
+#  D) Ragged --ps-per-stream layout invariants + estimator consistency (sum of per-stream
+#     densities == total; sorted descending; offsets consistent; 'linear' vs 'geometric' agree
 #     to ~5% in smooth single-stream regions).
 #  E) Text and binary sample-point inputs give byte-identical outputs.
-#  F) --per-stream-ids (when the binary supports it): adding the flag leaves every existing
+#  F) --ps-per-stream-ids (when the binary supports it): adding the flag leaves every existing
 #     output byte-identical; '.pts_stream_ids' has sum(streams) records of 4 ascending
 #     uint64 snapshot ParticleIDs and is byte-identical between serial and --partition 2 2 2
 #     (the id quadruple is sorted, so it is orientation- and partition-invariant).
@@ -98,28 +98,28 @@ run() {  # $1 = output root, rest = extra args
     local log="${out}.log"
     set +e
     "${BIN}" "$@" "${out}" --grid "${GRID}" --field density velocity dispersion \
-        --input 105 --MpcUnit 1 --verbose 1 > "$log" 2>&1
+        --input-format 105 --mpc-unit 1 --verbose 1 > "$log" 2>&1
     local rc=$?
     set -e
     die_on_failed_run "$rc" "$log"
 }
 
-echo ">> run 1: uniform box, 'geometric', --per-stream"
+echo ">> run 1: uniform box, 'geometric', --ps-per-stream"
 run "${TMP}/ppe_uni_geo" "${SNAP_UNI}" --periodic \
-    --sample-points "${PTS_BIN}" --per-stream --ps-stream-density geometric
-echo ">> run 2: uniform box, 'dtfe' (default)"
+    --sample-points "${PTS_BIN}" --ps-per-stream --ps-stream-density geometric
+echo ">> run 2: uniform box, 'linear' (default)"
 run "${TMP}/ppe_uni_dtfe" "${SNAP_UNI}" --periodic --sample-points "${PTS_BIN}"
-echo ">> run 3: pancake, serial, 'geometric', --per-stream"
+echo ">> run 3: pancake, serial, 'geometric', --ps-per-stream"
 run "${TMP}/ppe_pan_ser" "${SNAP_PAN}" --periodic \
-    --sample-points "${PTS_BIN}" --per-stream --ps-stream-density geometric
-echo ">> run 4: pancake, --partition 2 2 2, 'geometric', --per-stream"
+    --sample-points "${PTS_BIN}" --ps-per-stream --ps-stream-density geometric
+echo ">> run 4: pancake, --partition 2 2 2, 'geometric', --ps-per-stream"
 run "${TMP}/ppe_pan_par" "${SNAP_PAN}" --periodic --partition 2 2 2 \
-    --sample-points "${PTS_BIN}" --per-stream --ps-stream-density geometric
-echo ">> run 5: pancake, serial, 'dtfe', --per-stream"
-run "${TMP}/ppe_pan_dtfe" "${SNAP_PAN}" --periodic --sample-points "${PTS_BIN}" --per-stream
+    --sample-points "${PTS_BIN}" --ps-per-stream --ps-stream-density geometric
+echo ">> run 5: pancake, serial, 'linear', --ps-per-stream"
+run "${TMP}/ppe_pan_dtfe" "${SNAP_PAN}" --periodic --sample-points "${PTS_BIN}" --ps-per-stream
 echo ">> run 6: pancake, serial, 'geometric', TEXT sample-point input"
 run "${TMP}/ppe_pan_txt" "${SNAP_PAN}" --periodic \
-    --sample-points "${PTS_TXT}" --per-stream --ps-stream-density geometric
+    --sample-points "${PTS_TXT}" --ps-per-stream --ps-stream-density geometric
 
 echo ">> (E) text vs binary sample-point input: outputs must be byte-identical"
 for ext in .pts_den .pts_vel .pts_velDisp .pts_streams .pts_stream_offsets .pts_stream_records; do
@@ -128,27 +128,27 @@ for ext in .pts_den .pts_vel .pts_velDisp .pts_streams .pts_stream_offsets .pts_
 done
 echo "   OK"
 
-# --per-stream-ids section, gated so the script still runs against binaries predating the flag
+# --ps-per-stream-ids section, gated so the script still runs against binaries predating the flag
 # (capture first: 'grep -q' would SIGPIPE the binary and trip pipefail)
 HAVE_IDS=0
 FULL_HELP="$("${BIN}" --full-help 2>/dev/null)" || { echo "FAIL: ${BIN} --full-help exited non-zero"; exit 1; }
-if grep -q -- '--per-stream-ids' <<<"${FULL_HELP}"; then
+if grep -q -- '--ps-per-stream-ids' <<<"${FULL_HELP}"; then
     HAVE_IDS=1
-    echo ">> run 7: pancake, serial, 'geometric', --per-stream-ids (implies --per-stream)"
+    echo ">> run 7: pancake, serial, 'geometric', --ps-per-stream-ids (implies --ps-per-stream)"
     run "${TMP}/ppe_pan_ids" "${SNAP_PAN}" --periodic \
-        --sample-points "${PTS_BIN}" --per-stream-ids --ps-stream-density geometric
-    echo ">> run 8: pancake, --partition 2 2 2, 'geometric', --per-stream-ids"
+        --sample-points "${PTS_BIN}" --ps-per-stream-ids --ps-stream-density geometric
+    echo ">> run 8: pancake, --partition 2 2 2, 'geometric', --ps-per-stream-ids"
     run "${TMP}/ppe_pan_ids_par" "${SNAP_PAN}" --periodic --partition 2 2 2 \
-        --sample-points "${PTS_BIN}" --per-stream-ids --ps-stream-density geometric
-    echo ">> (F) --per-stream-ids leaves the existing outputs byte-identical"
+        --sample-points "${PTS_BIN}" --ps-per-stream-ids --ps-stream-density geometric
+    echo ">> (F) --ps-per-stream-ids leaves the existing outputs byte-identical"
     for ext in .pts_den .pts_vel .pts_velDisp .pts_streams .pts_stream_offsets .pts_stream_records; do
         cmp -s "${TMP}/ppe_pan_ser${ext}" "${TMP}/ppe_pan_ids${ext}" \
-            || { echo "FAIL: ${ext} changed when --per-stream-ids was added"; exit 1; }
+            || { echo "FAIL: ${ext} changed when --ps-per-stream-ids was added"; exit 1; }
     done
     echo "   OK"
 else
-    [ "${DTFE_TEST_REQUIRED:-0}" = "1" ] && { echo "FAIL (required): this PS-DTFE has no --per-stream-ids" >&2; exit 1; }
-    echo ">> (F) skipped: this PS-DTFE binary has no --per-stream-ids"
+    [ "${DTFE_TEST_REQUIRED:-0}" = "1" ] && { echo "FAIL (required): this PS-DTFE has no --ps-per-stream-ids" >&2; exit 1; }
+    echo ">> (F) skipped: this PS-DTFE binary has no --ps-per-stream-ids"
 fi
 
 # --pts-den-grad section, gated like (F)
@@ -159,15 +159,15 @@ if grep -q -- '--pts-den-grad' <<<"${FULL_HELP}"; then
     # components must vanish (the Lagrangian lattice is y/z-translation-invariant)
     "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP_PAN0}" --n "${N}" --box "${BOX}" \
         --amplitude-factor 1.8 --jitter-frac 0 >/dev/null
-    echo ">> run 9: jitter-free pancake, serial, 'dtfe', --per-stream --pts-den-grad"
+    echo ">> run 9: jitter-free pancake, serial, 'linear', --ps-per-stream --pts-den-grad"
     run "${TMP}/ppe_grad_ser" "${SNAP_PAN0}" --periodic \
-        --sample-points "${PTS_BIN}" --per-stream --pts-den-grad
-    echo ">> run 10: jitter-free pancake, --partition 2 2 2, 'dtfe', --per-stream --pts-den-grad"
+        --sample-points "${PTS_BIN}" --ps-per-stream --pts-den-grad
+    echo ">> run 10: jitter-free pancake, --partition 2 2 2, 'linear', --ps-per-stream --pts-den-grad"
     run "${TMP}/ppe_grad_par" "${SNAP_PAN0}" --periodic --partition 2 2 2 \
-        --sample-points "${PTS_BIN}" --per-stream --pts-den-grad
-    echo ">> run 11: jitter-free pancake, serial, 'dtfe', --per-stream (no gradient flag)"
+        --sample-points "${PTS_BIN}" --ps-per-stream --pts-den-grad
+    echo ">> run 11: jitter-free pancake, serial, 'linear', --ps-per-stream (no gradient flag)"
     run "${TMP}/ppe_grad_off" "${SNAP_PAN0}" --periodic \
-        --sample-points "${PTS_BIN}" --per-stream
+        --sample-points "${PTS_BIN}" --ps-per-stream
     echo ">> (G) --pts-den-grad leaves the existing outputs byte-identical"
     for ext in .pts_den .pts_vel .pts_velDisp .pts_streams .pts_stream_offsets .pts_stream_records; do
         cmp -s "${TMP}/ppe_grad_off${ext}" "${TMP}/ppe_grad_ser${ext}" \
@@ -223,7 +223,7 @@ fi
 
 if [ "${HAVE_IDS}" = "1" ] && [ "${HAVE_VELGRAD}" = "1" ]; then
     echo ">> (I) packed per-point records == every member stored (DTFE_PTS_FULL_RECORDS=1)"
-    for opts in "" "--per-stream-ids --pts-den-grad --pts-vel-grad"; do
+    for opts in "" "--ps-per-stream-ids --pts-den-grad --pts-vel-grad"; do
         run "${TMP}/ppe_pack" "${SNAP_PAN}" --periodic --partition 2 2 2 --sample-points "${PTS_BIN}" ${opts}
         DTFE_PTS_FULL_RECORDS=1 run "${TMP}/ppe_full" "${SNAP_PAN}" --periodic --partition 2 2 2 \
             --sample-points "${PTS_BIN}" ${opts}
@@ -237,7 +237,7 @@ if [ "${HAVE_IDS}" = "1" ] && [ "${HAVE_VELGRAD}" = "1" ]; then
         rm -f "${TMP}"/ppe_pack.* "${TMP}"/ppe_full.*
     done
 else
-    echo ">> (I) skipped: needs --per-stream-ids and --pts-vel-grad"
+    echo ">> (I) skipped: needs --ps-per-stream-ids and --pts-vel-grad"
 fi
 
 echo ">> checking the numbers ..."
@@ -289,7 +289,7 @@ check("A5 uniform velocities zero", np.abs(vel).max() == 0 and np.abs(dsp).max()
 gden = np.fromfile(f"{tmp}/ppe_uni_geo.den", dtype=REAL).astype(np.float64)
 check("A6 matches deposit mean (float32 level)", abs(gden.mean() - den.mean()) < 1e-4,
       f"|mean(deposit) - mean(points)| = {abs(gden.mean() - den.mean()):.3e}")
-# 'dtfe' variant: vertex densities are rho_bar to float32 rounding
+# 'linear' variant: vertex densities are rho_bar to float32 rounding
 den_b, _, _, st_b = load_pts(f"{tmp}/ppe_uni_dtfe")
 check("A7 uniform dtfe density (float32 level)", np.abs(den_b - st_b).max() < 1e-5,
       f"max|rho/rho_bar - streams| = {np.abs(den_b - st_b).max():.3e}")
@@ -367,7 +367,7 @@ q5, q95 = np.percentile(r, [5, 95])
 check("D5 dtfe vs geometric agree in smooth regions", 0.8 < q5 and q95 < 1.25,
       f"single-stream b/a ratio 5-95% = [{q5:.3f}, {q95:.3f}], median {np.median(r):.3f}")
 
-# ---------- (F) --per-stream-ids: stream identities ----------
+# ---------- (F) --ps-per-stream-ids: stream identities ----------
 if have_ids:
     import h5py
     ids_s = np.fromfile(f"{tmp}/ppe_pan_ids.pts_stream_ids", dtype=np.uint64).reshape(-1, 4)

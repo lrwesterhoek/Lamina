@@ -1,7 +1,7 @@
 """Void ellipsoid shape analysis (axis ratios, BBKS e/p) per snapshot.
 
     python3 plot/plot_shape_filter.py                     # all snapshots, TNG50-4-Dark, auto method
-    python3 plot/plot_shape_filter.py --snap 99 --method dtfe
+    python3 plot/plot_shape_filter.py --snap 99 --estimator dtfe
 """
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)

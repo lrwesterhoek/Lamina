@@ -43,7 +43,7 @@ SNAP="$TMP/xcheck.hdf5"
     --amplitude-factor 1.8 --jitter-frac 0.02 --seed 42 >/dev/null || { echo "FAIL data gen"; exit 1; }
 
 FIELDS="density_a velocity_a gradient_a"
-COMMON=(--grid 96 --periodic --input 105 --MpcUnit 1 --field $FIELDS)
+COMMON=(--grid 96 --periodic --input-format 105 --mpc-unit 1 --field $FIELDS)
 
 run() { # run <label> <outprefix> [extra args...]
     local label="$1" out="$2"; shift 2
@@ -74,7 +74,7 @@ assert_gpu "--gpu per-tet kernel" "$TMP/s_gpu0.log"
 # not catch a wrong shift). The shared grid (DTFE_GPU_SHARED=1, off by default: the per-sub-domain
 # grids measured faster) is compared with the default per-call path and the CPU.
 echo ">> coarse 32^3 grid: the single-cell fast path through the shared grid"
-COARSE=(--grid 32 --periodic --input 105 --MpcUnit 1 --field $FIELDS)
+COARSE=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --field $FIELDS)
 "${DTFE_BIN}" "$SNAP" "$TMP/c_cpu" "${COARSE[@]}" > "$TMP/c_cpu.log" 2>&1 || { echo "FAIL run coarse cpu"; exit 1; }
 DTFE_GPU_SHARED=1 DTFE_GPU_TIMING=1 "${DTFE_BIN}" "$SNAP" "$TMP/c_gpu" "${COARSE[@]}" --gpu > "$TMP/c_gpu.log" 2>&1 || { echo "FAIL run coarse gpu"; exit 1; }
 assert_gpu "coarse --gpu shared" "$TMP/c_gpu.log"
@@ -98,7 +98,7 @@ assert_gpu "--exact-average --gpu" "$TMP/e_gpu.log"
 # a FINE region (the launcher's exact zoom: 512^2 cells of 1.95 kpc): the GPU clips each piece in a
 # frame near the piece -- in the tetrahedron's vertex-0 frame a kpc piece Mpc away would lose its volume
 # to float cancellation. Same tolerance as the box above, the cells are 260x smaller.
-FINE=(--grid 512 512 1 --periodic --input 105 --MpcUnit 1 --field density_a velocity_a --exact-average --regionMpc 40 41 40 41 50 50.002)
+FINE=(--grid 512 512 1 --periodic --input-format 105 --mpc-unit 1 --field density_a velocity_a --exact-average --region-mpc 40 41 40 41 50 50.002)
 "${DTFE_BIN}" "$SNAP" "$TMP/f_cpu" "${FINE[@]}" > "$TMP/f_cpu.log" 2>&1 || { echo "FAIL run fine region cpu"; exit 1; }
 "${DTFE_BIN}" "$SNAP" "$TMP/f_gpu" "${FINE[@]}" --gpu > "$TMP/f_gpu.log" 2>&1 || { echo "FAIL run fine region gpu"; exit 1; }
 assert_gpu "--exact-average --gpu on a fine region" "$TMP/f_gpu.log"

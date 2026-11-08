@@ -3,7 +3,7 @@
 Method- and simulation-agnostic via dtfelib/pipeline:
 
     python3 plot/plot_phi_delta.py                       # TNG50-4-Dark, all config snapshots
-    python3 plot/plot_phi_delta.py --method dtfe
+    python3 plot/plot_phi_delta.py --estimator dtfe
     python3 plot/plot_phi_delta.py --sim TNG50-3-Dark --snap 50
 """
 

@@ -4,7 +4,7 @@ Data access goes through dtfelib.FieldSet, so the script is method- (DTFE / PS-D
 simulation- and snapshot-agnostic. Snapshots without fields on disk are skipped.
 
     python3 plot/plot_velDiv_den.py                    # all snapshots, TNG50-4-Dark, auto method
-    python3 plot/plot_velDiv_den.py --method dtfe --snap 99
+    python3 plot/plot_velDiv_den.py --estimator dtfe --snap 99
 
 PS-DTFE grids: the divergence is the MEAN FIELD div<v> by default -- the FFT divergence of the PS
 velocity grid (FieldSet.load('divergence', mean_field=True)), the quantity standard DTFE stores and linear theory
@@ -230,7 +230,7 @@ def process_snapshot(snapshot, redshift, args):
                 raise
             # both ps_output.* and output.* on disk: keep this script's historical
             # default (standard DTFE) so a plain run reproduces previous behavior
-            print("  both PS and DTFE fields present; using --method dtfe")
+            print("  both PS and DTFE fields present; using --estimator dtfe")
             fs = FieldSet(snapdir, method='dtfe', averaged=not args.raw)
         print("Loading fields")
         density_field = fs.density(units='mean')   # rho/rho_bar for BOTH methods

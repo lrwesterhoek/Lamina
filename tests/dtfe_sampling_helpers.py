@@ -9,9 +9,9 @@ A = 10.0 * np.array([[1.0, 0.3, -0.2],
                      [0.5, -0.7, 0.4],
                      [-0.6, 0.2, 0.9]])          # v = A x + b: (km/s)/Mpc, a full (non-symmetric) gradient
 B = np.array([100.0, -50.0, 25.0])               # km/s
-REGION = (2.5, 7.5)         # the regular grids' region, the same on every axis (--regionMpc)
+REGION = (2.5, 7.5)         # the regular grids' region, the same on every axis (--region-mpc)
 GRID = 8                    # the regular grid (the finer one of method 3's check is 3 GRID)
-NS = 20                     # method 2's samples per cell (-s 20)
+NS = 20                     # method 2's samples per cell (--samples 20)
 CONE = ((0.5, 2.0, 4), (30.0, 150.0, 4), (0.0, 300.0, 6))   # (min, max, bins) of r [Mpc], theta, psi [degrees]
 ORIGIN = np.array([5.0, 5.0, 5.0])
 

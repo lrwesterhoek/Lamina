@@ -5,7 +5,7 @@ metadata come from dtfelib.FieldSet. Density is plotted MEAN-NORMALIZED (rho/rho
 for both estimators; FieldSet auto-detects the on-disk convention (old PS files are physical).
 
     python3 plot/plot_PS_DTFE.py                       # TNG50-4-Dark snap 99, auto method
-    python3 plot/plot_PS_DTFE.py --method dtfe --smooth 1
+    python3 plot/plot_PS_DTFE.py --estimator dtfe --smooth 1
     python3 plot/plot_PS_DTFE.py --sim TNG50-3-Dark --snap 50
 """
 
@@ -21,7 +21,7 @@ from dtfelib import pointeval
 from dtfelib import figures as style
 from dtfelib.fields import extract_2d_slice as extract_slice, smooth_components as _smooth_each
 
-# which field families to plot (PS-only ones are skipped automatically under --method dtfe)
+# which field families to plot (PS-only ones are skipped automatically under --estimator dtfe)
 PROCESS_DENSITY = True
 PROCESS_STREAMS = True
 PROCESS_DISPERSION = True   # velocity dispersion trace + tensor magnitude

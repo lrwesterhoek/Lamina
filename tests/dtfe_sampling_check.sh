@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Golden and analytic checks of the standard binary's sampling variants that no other suite runs: the volume
-# averages '--method 2' (random points in each grid cell, seeded) and '--method 3' (equidistant points), the
-# redshift-cone grid ('--redshiftCone', unaveraged and averaged), the regular grid's point values, and user-given
+# averages '--average-method 2' (random points in each grid cell, seeded) and '--average-method 3' (equidistant points), the
+# redshift-cone grid ('--redshift-cone', unaveraged and averaged), the regular grid's point values, and user-given
 # sampling points (unaveraged and averaged; only the library API reaches them: tests/dtfe_user_sampling.cpp, built
 # against libDTFE when 'make library' has made one). Upstream code (averaged_interpolation_2.cc,
 # unaveraged_interpolation.cc), checked as it is, so that a later change to it can be held to these numbers.
@@ -10,7 +10,7 @@
 # numpy), NOT periodic, with a LINEAR velocity field v = A x + b. The DTFE interpolant of a linear field is the field
 # itself inside the particles' hull, so every velocity is known in closed form; the densities are checked against
 # other code paths or against stored values. Everything is sampled inside the region [2.5, 7.5]^3 (well inside the
-# hull); '--noTest' everywhere, since '--sample-points' turns the padding test's dummy points off and they move the
+# hull); '--no-padding-test' everywhere, since '--sample-points' turns the padding test's dummy points off and they move the
 # densities near the hull. OMP_NUM_THREADS=1 on every run: method 2 adds 1000 x the sub-domain number to its seed,
 # and more threads split a regular grid into sub-domains.
 #   S1  the regular grid's point values: velocity = A x + b and gradient = A at the cell centres; density = the
@@ -87,8 +87,10 @@ np.savetxt(os.path.join(tmp, "pts.txt"), np.vstack([grid_pts, cone_centres(), us
 np.savetxt(os.path.join(tmp, "user.txt"), us)
 PYEOF
 
-C=(--input 105 --MpcUnit 1 --noTest --regionMpc 2.5 7.5 2.5 7.5 2.5 7.5 --verbose 1)
-CONE=(--grid 4 4 6 --redshiftCone 0.5 2.0 30 150 0 300 --origin 5 5 5)
+# method 2's 20 random points per cell: a total that no '--subsamples k' (k^3) gives, and S7's golden values are
+# drawn with it, so these runs keep the deprecated total '--samples 20' (one warning line each; P6.6 decides)
+C=(--input-format 105 --mpc-unit 1 --no-padding-test --region-mpc 2.5 7.5 2.5 7.5 2.5 7.5 --verbose 1)
+CONE=(--grid 4 4 6 --redshift-cone 0.5 2.0 30 150 0 300 --cone-origin 5 5 5)
 # run <name> <program> [args...]: one run on one thread, its log beside it
 run() {
     local name="$1" prog="$2"; shift 2
@@ -97,12 +99,12 @@ run() {
 }
 echo ">> the regular grid (point values + '--sample-points'), method 2, method 3, the 3x finer grid, --exact-average"
 run u "${DTFE_BIN}" --grid 8 --field density velocity gradient density_a velocity_a gradient_a velocityStd_a \
-    -m 2 -s 20 --seed "$SEED" --sample-points "$TMP/pts.txt"
-run m3 "${DTFE_BIN}" --grid 8 --field density_a velocity_a gradient_a -m 3 -s 27
+    --average-method 2 --samples 20 --seed "$SEED" --sample-points "$TMP/pts.txt"
+run m3 "${DTFE_BIN}" --grid 8 --field density_a velocity_a gradient_a --average-method 3 --subsamples 3
 run f "${DTFE_BIN}" --grid 24 --field density
 run x "${DTFE_BIN}" --grid 8 --field density_a --exact-average
 echo ">> the redshift cone (point values and method 2)"
-run c "${DTFE_BIN}" "${CONE[@]}" --field density velocity gradient density_a velocity_a gradient_a -m 2 -s 20 --seed "$SEED"
+run c "${DTFE_BIN}" "${CONE[@]}" --field density velocity gradient density_a velocity_a gradient_a --average-method 2 --samples 20 --seed "$SEED"
 
 # user sampling: the driver against libDTFE (single precision only: the library is built single)
 USER_OK=0; USER_WHY=""
@@ -120,7 +122,7 @@ else
     fi
     echo ">> user sampling points (libDTFE: point values and method 2)"
     OMP_NUM_THREADS=1 "$DRV" "$TMP/user.txt" "$TMP/snap.hdf5" "$TMP/us" "${C[@]}" --grid 1 \
-        --field density velocity gradient density_a velocity_a gradient_a -m 2 -s 20 --seed "$SEED" > "$TMP/us.log" 2>&1 \
+        --field density velocity gradient density_a velocity_a gradient_a --average-method 2 --samples 20 --seed "$SEED" > "$TMP/us.log" 2>&1 \
         || { echo "FAIL: the user-sampling run (see $TMP/us.log)"; tail -5 "$TMP/us.log"; exit 1; }
     USER_OK=1
 fi

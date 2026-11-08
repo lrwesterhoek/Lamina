@@ -18,7 +18,7 @@
 #   NEARLAT the snapshot box [0, 100), a lattice jittered by only 1e-5 spacings (TNG's IC lattices are
 #           near-degenerate too): a top-plane seam's copies have different Delaunay stars (degrees 22 vs 26), so
 #           under --ps-vertex-mass ~400 particles deposit more or less than their weight.
-# Runs (--grid 64, --ps-vertex-mass, PS_MASS_AUDIT=2 for the per-particle closure on one domain), checks ("top
+# Runs (--grid 64, --ps-vertex-mass, DTFE_MASS_AUDIT=2 for the per-particle closure on one domain), checks ("top
 # plane": what a seam at the top particle plane gives, so each check is seen to catch it):
 #   S1 OFFSET, single stream (A k = 0.5), --partition 1, 2 2 2, 3 3 3: '.a_streams' = 1 in EVERY cell (top plane:
 #      177 cells below 1, down to 0.11, and 18 above, the same in all three), box mean of '.a_den' = 1 (top plane:
@@ -26,7 +26,7 @@
 #      partitionings: at 131000 the float sample positions sit 2^-7 apart, and with the partitions' sub-grid
 #      origins they catch a few near-flat tetrahedra differently -- ~60 interior cells O(1) apart, with either
 #      seam; tests/ps_partition_padding_check.sh holds that to rounding in a [0, L) box.)
-#   S2 OFFSET, crossed waves A k = 1.8, ONE sample per cell (--avg-subsamples 1), --partition 1 and 2 2 2: every
+#   S2 OFFSET, crossed waves A k = 1.8, ONE sample per cell (--subsamples 1), --partition 1 and 2 2 2: every
 #      sample's stream count is odd (top plane: 167 even counts -- 0, 2, 8, 10 -- along the faces), mean density 1
 #   S3 NEARLAT, single stream: the per-particle closure exact (top plane: 409 off), mean 1 (top plane: +6.1e-5),
 #      '.a_streams' = 1 within 4 cells of every face (an interior near-flat tetrahedron of this degenerate lattice
@@ -72,8 +72,8 @@ run() {  # $1 = output name, $2 = snapshot, rest = extra options
     local name="$1" snap="$2"; shift 2
     local out="${TMP}/run_${name}"
     rm -f "${out}".a_den "${out}".a_streams "${out}".a_hidden_streams
-    if ! PS_MASS_AUDIT=2 "${BIN}" "${snap}" "${out}" --grid "${GRID}" --periodic --field density_a --ps-vertex-mass \
-            --input 105 --MpcUnit 1 --verbose 2 "$@" > "${out}.log" 2>&1; then
+    if ! DTFE_MASS_AUDIT=2 "${BIN}" "${snap}" "${out}" --grid "${GRID}" --periodic --field density_a --ps-vertex-mass \
+            --input-format 105 --mpc-unit 1 --verbose 2 "$@" > "${out}.log" 2>&1; then
         echo "FAIL: run ${name} exited non-zero -- last lines of ${out}.log:"
         tail -n 15 "${out}.log" | sed 's/^/   | /'
         exit 1
@@ -83,8 +83,8 @@ run() {  # $1 = output name, $2 = snapshot, rest = extra options
 run off_p1 "${TMP}/off_ss.hdf5" --partition 1 1 1 "${OFFBOX[@]}"
 run off_p2 "${TMP}/off_ss.hdf5" --partition 2 2 2 "${OFFBOX[@]}"
 run off_p3 "${TMP}/off_ss.hdf5" --partition 3 3 3 "${OFFBOX[@]}"
-run ms_p1  "${TMP}/off_ms.hdf5" --partition 1 1 1 --avg-subsamples 1 "${OFFBOX[@]}"
-run ms_p2  "${TMP}/off_ms.hdf5" --partition 2 2 2 --avg-subsamples 1 "${OFFBOX[@]}"
+run ms_p1  "${TMP}/off_ms.hdf5" --partition 1 1 1 --subsamples 1 "${OFFBOX[@]}"
+run ms_p2  "${TMP}/off_ms.hdf5" --partition 2 2 2 --subsamples 1 "${OFFBOX[@]}"
 run near   "${TMP}/nearlat.hdf5" --partition 1 1 1
 
 "${PY}" - "${TMP}" "${GRID}" "${DTFE_TEST_REAL}" <<'PY'

@@ -43,25 +43,25 @@ class PipelineSpec:
     planes: int = 1                 # sampling planes across a slab (PLANES; 1 = one crisp cross-section)
     thickness: float = 2.0          # the slab's depth in Mpc, used when planes > 1 (THICKNESS)
     supersample: int = 1            # K: KxK sample points per pixel, averaged = pixel-area means (SUPERSAMPLE)
-    window: str = ""                # "u0 u1 v0 v1" in Mpc: only this part of the plane (WINDOW); "" = the whole box
+    window: str = ""                # "u0 u1 v0 v1" in Mpc: only this part of the plane (PLANE_WINDOW); "" = the whole box
     vel_grad: bool = True
     grid: int = 512
     fields: list[str] = field(default_factory=lambda: list(PS_DEFAULT_FIELDS))
-    deposit: str = "sampled"        # "sampled" (nsub^3 samples per cell) | "exact" (r3d clipping): PS_EXACT
-    nsub: int = 3                   # AVG_SUBSAMPLES
-    gpu: bool | None = None         # PS_GPU: the script's -m; None = the build's (gpu_build_default)
+    deposit: str = "sampled"        # "sampled" (nsub^3 samples per cell) | "exact" (r3d clipping): DTFE_EXACT_AVERAGE
+    nsub: int = 3                   # SUBSAMPLES
+    gpu: bool | None = None         # DTFE_GPU: the script's -m; None = the build's (gpu_build_default)
     vertex_mass: bool = True        # PS_VERTEX_MASS (needed for TNG IC inputs)
     volume_weighted: bool = True    # PS_VOLUME_WEIGHTED (the production convention)
     caustics: bool = True           # PS_CAUSTICS (on: run_ps_dtfe.sh's default, the production runs')
     caustic_cusps: bool = False     # PS_CAUSTIC_CUSPS
-    parallel_triangulation: bool = False   # PS_PARALLEL_TRI
+    parallel_triangulation: bool = False   # PARALLEL_TRIANGULATION
     lambda_th: float = LAMBDA_TH_DEFAULT   # LAMBDA_TH
     mem_budget_gb: float = 0.0      # DTFE_MEM_BUDGET_GB, see RunSpec
-    tess_cache: str = ""            # TESS_CACHE (run_ps_pipeline.sh forwards it to run_ps_dtfe.sh)
+    tess_cache: str = ""            # TESSELLATION_CACHE (run_ps_pipeline.sh forwards it to run_ps_dtfe.sh)
     linear_deposit: bool = False    # PS_LINEAR_DEPOSIT, see RunSpec
-    ordered_merge: bool = True      # ORDERED_MERGE (run_ps_pipeline.sh's run_ps_dtfe.sh inherits it), see RunSpec
-    start_over: bool = False        # PS_RESUME=0 (inherited the same way), see RunSpec
-    pts_conventions: str = "grid"   # PTS_CONVENTIONS: the image plane's estimators, see RunSpec
+    ordered_merge: bool = True      # PS_MERGE (run_ps_pipeline.sh's run_ps_dtfe.sh inherits it), see RunSpec
+    start_over: bool = False        # DTFE_RESUME=0 (inherited the same way), see RunSpec
+    pts_conventions: str = "grid"   # PS_POINT_CONVENTIONS: the image plane's estimators, see RunSpec
     output_prefix: str = "ps_output"
     precision: str = "single"       # "double" = the PS-DTFE-double binary (DTFE_PRECISION), see RunSpec
     partition: int = 0
@@ -70,7 +70,7 @@ class PipelineSpec:
     force: bool = False
     plan_only: bool = False         # DRY_RUN=1: print the plan, compute nothing
     render: bool = True             # then plot_pointeval.py for each simulation, with the render_* options
-    render_fields: str = ""         # comma-separated POINTEVAL_FIELDS; "" = every field the run wrote
+    render_fields: str = ""         # POINTEVAL_FIELDS, space- or comma-separated (--maps); "" = every field the run wrote
     render_project: str = "plane"   # "plane" = the central plane | "slab" = the mean over every plane (planes > 1)
     render_smooth: float = 0.0      # Gaussian smoothing of every map, in output pixels (0 = none)
     render_smooth_derivatives: float = POINTEVAL_DERIVATIVE_SMOOTH   # the gradient maps' smoothed companions (0 = none)
@@ -154,7 +154,7 @@ class PipelineSpec:
             env["SAMPLE_POINTS"] = str(plane_bin)
         else:
             env["DTFE_AUTO_PTS_N"] = str(self.plane_points(nu))
-            env["DTFE_AUTO_PTS_VELGRAD"] = "1" if self.vel_grad else "0"
+            env["DTFE_AUTO_PTS_VEL_GRAD"] = "1" if self.vel_grad else "0"   # the binaries' knob (DTFE_AUTO_PTS_VELGRAD before P6.7)
         return _rs.Step(f"memory check {sim} {nu}^2", argv, env)
 
     def stale(self, sim: str, nu: int | None = None) -> tuple[list[int], int]:
@@ -231,7 +231,7 @@ class PipelineSpec:
         if self.output_prefix.strip() == "" or re.search(r"[\s/]", self.output_prefix):
             out.append(("error", "output prefix must be a single word (no spaces or '/')"))
         if self.render:
-            bad = [f for f in self.render_fields.replace(" ", "").split(",") if f and f not in _rs.POINTEVAL_FIELDS]
+            bad = [f for f in _rs.words(self.render_fields) if f not in _rs.POINTEVAL_FIELDS]
             if bad:
                 out.append(("error", f"unknown point-evaluated field(s) {', '.join(bad)}; "
                                      f"choose from {', '.join(_rs.POINTEVAL_FIELDS)}"))
@@ -267,21 +267,17 @@ class PipelineSpec:
                "NU": str(self.nu), "AXIS": self.axis, "GRID_SIZE": str(self.grid),
                "PTS_VEL_GRAD": "1" if self.vel_grad else "0",
                "PLANES": str(self.planes), "SUPERSAMPLE": str(self.supersample),
-               # the run options, always spelled out (as RunSpec does): a stray PS_* exported in the
-               # login shell must not leak into a run
-               "PS_EXACT": "1" if self.deposit == "exact" else "0",
-               "AVG_SUBSAMPLES": str(self.nsub),
-               "PS_GPU": "1" if self.gpu else "0",        # -m only switches the GPU ON; pin the env knob too
-               "PS_METAL": "1" if self.gpu else "0",      # PS_GPU's older name, for one release
+               # the run options, always spelled out (as RunSpec does): a stray knob exported in the
+               # login shell must not leak into a run (each under its new name and its older one until P6.6)
+               "SUBSAMPLES": str(self.nsub), "AVG_SUBSAMPLES": str(self.nsub),
                "PS_VERTEX_MASS": "1" if self.vertex_mass else "0",
                "PS_VOLUME_WEIGHTED": "1" if self.volume_weighted else "0",
                "PS_CAUSTICS": "1" if self.caustics else "0",
                "PS_CAUSTIC_CUSPS": "1" if self.caustic_cusps else "0",
-               "PS_PARALLEL_TRI": "1" if self.parallel_triangulation else "0",
-               "PS_LINEAR_DEPOSIT": "1" if self.linear_deposit else "0",
-               "ORDERED_MERGE": "1" if self.ordered_merge else "0",
-               "PS_RESUME": "0" if self.start_over else "1",
-               "PTS_CONVENTIONS": self.pts_conventions}
+               "PS_LINEAR_DEPOSIT": "1" if self.linear_deposit else "0"}
+        env.update(_rs.ps_exact_env(self.deposit == "exact"))
+        env.update(_rs.ps_run_env(self))            # the GPU (-m only switches it on), merge order, start over ...
+        env.update(_rs.ps_conventions_env(self.pts_conventions))
         if self.planes > 1:
             env["THICKNESS"] = _rs._num(self.thickness)
         try:
@@ -289,7 +285,7 @@ class PipelineSpec:
         except ValueError:
             w = None
         if w:
-            env["WINDOW"] = " ".join(_rs._num(v) for v in w)
+            env["PLANE_WINDOW"] = env["WINDOW"] = " ".join(_rs._num(v) for v in w)
         if self.center.strip():
             env["CENTER"] = self.center.strip()
         if self.lambda_th != LAMBDA_TH_DEFAULT:
@@ -311,24 +307,24 @@ class PipelineSpec:
             env["FORCE"] = "1"
         if self.plan_only:
             env["DRY_RUN"] = "1"
-        env["PY"] = _rs.PYTHON             # the figure steps' python (as the download tab passes it)
+        env["PYTHON"] = env["PY"] = _rs.PYTHON     # the figure steps' python (as the download tab passes it; PY its older name)
         return [str(_rs.PIPELINE_SCRIPT)], env
 
     def _render_step(self, sim: str, nu: int, snaps: list[int] | None) -> _rs.Step:
         a = [_rs.PYTHON, str(_rs.PLOT_DIR / "plot_pointeval.py"), "--sims", sim, "--plane", str(self.plane_json(sim, nu))]
         if snaps:
-            a += ["--snaps", ",".join(str(n) for n in sorted(snaps))]
+            a += ["--snaps", *(str(n) for n in sorted(snaps))]
         if self.output_prefix != "ps_output":
             a += ["--prefix", self.output_prefix]
-        fields = ",".join(f for f in self.render_fields.replace(" ", "").split(",") if f)
-        if fields:
-            a += ["--fields", fields]
+        maps = _rs.words(self.render_fields)       # typed with commas or spaces: the script takes spaces
+        if maps:
+            a += ["--maps", *maps]
         if self.render_project == "slab" and self.planes > 1:     # one plane: the plane itself
             a += ["--project", "slab"]
         if self.render_smooth > 0:
-            a += ["--smooth", f"{self.render_smooth:g}"]
+            a += ["--smooth-px", f"{self.render_smooth:g}"]
         if self.render_smooth_derivatives != POINTEVAL_DERIVATIVE_SMOOTH:
-            a += ["--smooth-derivatives", f"{self.render_smooth_derivatives:g}"]
+            a += ["--smooth-derivatives-px", f"{self.render_smooth_derivatives:g}"]
         if self.render_fixed_range:
             a.append("--fixed-range")
         if self.render_force:

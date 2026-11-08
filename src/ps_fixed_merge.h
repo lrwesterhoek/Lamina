@@ -1,4 +1,4 @@
-/* THE FIXED-POINT MERGE of the PS-DTFE partition loop ('--fixed-point-merge', DTFE.cpp; OPT-IN).
+/* THE FIXED-POINT MERGE of the PS-DTFE partition loop ('--ps-merge fixed-point', DTFE.cpp; OPT-IN).
 
    The default merge (the staged ordered merge, DTFE.cpp) adds each partition's sub-grid -- Real values, each an exact
    fixed-point sum of the deposit rounded to Real once, so a partition's values do not depend on the run -- into float
@@ -291,7 +291,7 @@ struct Merge
         if ( loadedState.size() != slots.size() )
             throwError( "'--resume': the checkpoint holds no fixed-point merge state for this run's accumulators (",
                         loadedState.size(), " saved, " + std::to_string( slots.size() ) + " here). Run without '--resume' "
-                        "to start over (run_ps_dtfe.sh: PS_RESUME=0)." );
+                        "to start over (run_ps_dtfe.sh: DTFE_RESUME=0)." );
         for (size_t i = 0; i < slots.size(); ++i)
         {
             Slot &s = slots[i];
@@ -373,7 +373,7 @@ struct Merge
         s.bound += pmax;
         s.maxQ = std::max( s.maxQ, pmax );
         if ( s.bound >= sumLimit )
-            throwError( "--fixed-point-merge: the merged partitions' largest values of ", s.name, " sum to 2^"
+            throwError( "--ps-merge fixed-point: the merged partitions' largest values of ", s.name, " sum to 2^"
                         + fmt( log2u128( s.bound ), 4 ) + " units (" + fmt( std::ldexp( double( s.bound ), -s.K ) / s.S, 3 )
                         + " times its scale S = " + fmt( s.S, 4 ) + "), the limit " + ( sumLimitLog2 > 0 ? "2^" + std::to_string(
                         sumLimitLog2 ) + " (DTFE_TEST_FXMERGE_SUM_LIMIT)" : std::string( "2^71 - 2^63 of its 72-bit sums" ) ) + ": a cell "
@@ -391,9 +391,9 @@ struct Merge
     [[noreturn]] void valueError(Slot const &s, int const partition, double const v)
     {
         if ( not std::isfinite( v ) )
-            throwError( "--fixed-point-merge: partition ", partition, " holds a non-finite value (" + fmt( v, 6 ) + ") in "
+            throwError( "--ps-merge fixed-point: partition ", partition, " holds a non-finite value (" + fmt( v, 6 ) + ") in "
                         + s.name + ", which no integer unit can hold. The run stops." );
-        throwError( "--fixed-point-merge: partition ", partition, " holds a value of " + s.name + " of " + fmt( v, 6 )
+        throwError( "--ps-merge fixed-point: partition ", partition, " holds a value of " + s.name + " of " + fmt( v, 6 )
                     + " = " + fmt( v / s.S, 4 ) + " times its scale S = " + fmt( s.S, 4 ) + "; its unit 2^-"
                     + std::to_string( s.K ) + " holds |values| below " + fmt( std::ldexp( 1., 63 - s.K ) / s.S, 4 )
                     + " S (2^63 units). A wrapped cell could not be repaired: the run stops. Run with the default "

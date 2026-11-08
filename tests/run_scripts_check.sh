@@ -9,9 +9,10 @@
 #  A) GRID_SIZE from the ENVIRONMENT reaches the binary, and '-g' still beats it:
 #     precedence must be  -g flag > environment > config.sh default.
 #  B) A snapshot carrying its own 'InitialCoordinates' is PROCESSED without a combined_ics.hdf5 --
-#     PS-DTFE reads them when '--lagrangianInput' is omitted, so skipping it drops usable data.
-#  C) A combined_ics.hdf5, when present, is still passed as '--lagrangianInput' (B must not have
-#     moved everyone onto the snapshot path), and an empty LAGRANGIAN_INPUT= forces it off.
+#     PS-DTFE reads them when '--ps-lagrangian-input' is omitted, so skipping it drops usable data.
+#  C) A combined_ics.hdf5, when present, is still passed as '--ps-lagrangian-input' (B must not have
+#     moved everyone onto the snapshot path), and an empty PS_LAGRANGIAN_INPUT= (or LAGRANGIAN_INPUT=, its older
+#     name) forces it off.
 #  D) A snapshot with NEITHER source is skipped with a message naming both, and the run exits 1.
 #  E) Exit status is honest: processing nothing exits 1, while a PARTIAL skip stays 0 -- a
 #     partly-downloaded snapshot ladder is normal.
@@ -22,8 +23,9 @@
 #     family and lets a flat <root>/<sim> win, and run_ps_pipeline.sh discovers nested sims -- and exits 1
 #     when it finds nothing to compute (no data root, a mistyped SIMS, a SNAPS matching nothing).
 #  H) scripts/run_dtfe.sh passes --exact-average to the standard binary by default (-e and
-#     DTFE_EXACT=1 too, DTFE_EXACT=0 not; the older name DTFE_EXACT_AVERAGE still read); its padding default is 15 (a caller's PADDING /
-#     DTFE_PADDING wins), run_ps_dtfe.sh keeps config.sh's 50. run_dtfe.sh AUTO_TUNE_REPORT=1 (as
+#     DTFE_EXACT_AVERAGE=1 too, DTFE_EXACT_AVERAGE=0 not; the older name DTFE_EXACT still read, with a warning, and the
+#     new name wins over it); its padding default is 15 (a caller's PADDING / DTFE_PADDING wins), run_ps_dtfe.sh keeps
+#     config.sh's 50. run_dtfe.sh AUTO_TUNE_REPORT=1 (as
 #     run_ps_dtfe.sh): the standard binary's own report line per snapshot ('snap=099'), exit 0, nothing written.
 #  I) download_snapshots.sh + merge_HDF5.py never turn a half-finished download into a merged snapshot; a chunk the
 #     data host refuses once is fetched on the retry ('attempt 2 of 3', exit 0), one refused every time is an error.
@@ -47,23 +49,30 @@
 #  O) the drivers' single-instance lock (<prefix>.runlog.lock: a second driver refused, stale locks removed, a stop
 #     releases it) and their preflight (data disk mounted, output folder writable with room for the grids).
 #  P) run_ps_pipeline.sh's freshness test compares the run settings with the snapshot's run log, not only file times
-#     (the plane's conventions too, PTS_CONVENTIONS, which it hands to run_ps_dtfe.sh); a run log written with the
+#     (the plane's conventions too, PS_POINT_CONVENTIONS, which it hands to run_ps_dtfe.sh); a run log written with the
 #     binaries' deprecated spellings reads the same as the canonical command the driver now emits (unchanged).
-#  R) run_ps_dtfe.sh ORDERED_MERGE=1 (the default) passes --ordered-merge, ORDERED_MERGE=0
-#     --completion-order-merge, FIXED_POINT_MERGE=1 --fixed-point-merge instead of either;
-#     PTS_CONVENTIONS=legacy with SAMPLE_POINTS passes '--pts-conventions legacy', grid (the default) and a run without
-#     points pass nothing, another value is refused; a killed run's checkpoint (<prefix>.runlog.checkpoint,
-#     or config.sh ps_checkpoint_dir's name under SCRATCH_DIR) makes the next run pass --resume and say so; PS_RESUME=0,
-#     an auto-tune report and a checkpoint folder with no 'checkpoint' file in it do not.
+#  R) run_ps_dtfe.sh PS_MERGE: unset passes '--ps-merge index-order' (the driver's default, given explicitly so the
+#     memory gate stays on under the auto-tuner's speed split), a given mode passes '--ps-merge MODE', the older
+#     ORDERED_MERGE=1 / 0 and
+#     FIXED_POINT_MERGE=1 convert (fixed-point winning, as before), another value is refused;
+#     PS_POINT_CONVENTIONS=legacy with SAMPLE_POINTS passes '--ps-point-conventions legacy', grid (the default) and a
+#     run without points pass nothing, another value is refused; a killed run's checkpoint (<prefix>.runlog.checkpoint,
+#     or config.sh ps_checkpoint_dir's name under SCRATCH_DIR) makes the next run pass --resume and say so; DTFE_RESUME=0
+#     (PS_RESUME=0, its older name), an auto-tune report and a checkpoint folder with no 'checkpoint' file in it do not.
+#  T) the knob names (config.sh knob, P6.7): each older name alone gives the same command as its new name, with one
+#     'warning: OLD is deprecated, use NEW' line on stderr; both set: the new one wins (a warning, no refusal); a
+#     switch reads 0/false/no/off as off and any other value as on, as the binaries do; the drivers' long options
+#     (--sim --sim-dir --grid --gpu --exact-average --subsamples) are their letters.
 #  S) the production defaults and the rerun hygiene, against the stand-in binaries:
-#     the GPU when the Makefile's stamp says the binary has one (metal/cuda/hip; not off or cudaemu; DTFE_GPU /
-#     PS_GPU=0 wins, and so do their older names DTFE_METAL / PS_METAL when the new one is unset), the drivers'
-#     production flags by default (run_ps_dtfe.sh: volume weighting, caustics, the nine
-#     fields; run_dtfe.sh: the exact average and the web fields; PS_LINEAR_DEPOSIT=1 drops the volume weighting),
+#     the GPU when the Makefile's stamp says the binary has one (metal/cuda/hip; not off or cudaemu; DTFE_GPU=0 or 1
+#     wins, and so do its older names DTFE_METAL / PS_GPU / PS_METAL when it is unset), the drivers'
+#     production flags by default (run_ps_dtfe.sh: volume weighting, caustics, the four analysis
+#     fields; run_dtfe.sh: the exact average and the same fields; PS_LINEAR_DEPOSIT=1 drops the volume weighting;
+#     FACE_GRADIENT=1 passes --face-gradient, run_ps_dtfe.sh refusing it without -e, the volume weighting or on the GPU),
 #     run_dtfe.sh's OUTPUT_PREFIX (a 'ps_*' one refused), and a rerun's left-over files: after exit 0 the files the run
 #     did not write are MOVED to <prefix>.superseded/<stamp>/ with the old run log (the rewritten ones, the run log
 #     family, a lock and a checkpoint stay); a failed run, a dry run and an auto-tune report move nothing.
-#     run_ps_pipeline.sh's PS_GPU unset follows the PS binary's stamp the same way.
+#     run_ps_pipeline.sh's DTFE_GPU unset follows the PS binary's stamp the same way.
 #
 # Usage: tests/run_scripts_check.sh [--no-build]
 
@@ -75,7 +84,7 @@ cd "${ROOT_DIR}"
 source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the drivers run the double pair
 precision_double && export DTFE_PRECISION=double     # the drivers' own switch (run_ps_dtfe.sh / run_dtfe.sh)
 
-export PY                               # (tests/lib.sh) run_ps_pipeline.sh runs make_image_plane.py with the same python
+export PYTHON="${PY}"                   # (tests/lib.sh) run_ps_pipeline.sh runs make_image_plane.py with the same python
 
 N="${N:-16}"
 GRID="${GRID:-24}"
@@ -122,7 +131,7 @@ cp "${TMP}/HASIC/snapdir_099/combined_099.hdf5" "${TMP}/PARTIAL/snapdir_099/comb
 
 export DTFE_DATA_ROOT="${TMP}"
 # keep every run tiny and quiet: one field, no averaging sub-samples worth mentioning
-COMMON_ENV=(FIELDS=density_a AVG_SUBSAMPLES=1)
+COMMON_ENV=(FIELDS=density_a SUBSAMPLES=1)
 
 # Runs the driver with the given env assignments, capturing stdout+stderr and the exit code.
 # Echoes the exit code; the log path is "$2".
@@ -158,7 +167,7 @@ check "$(has "${TMP}/a_env.log" "Lagrangian positions: the snapshot's own 'Initi
       "the script says it is using the snapshot's own Lagrangian positions"
 check "$(has "${TMP}/a_env.log" "read from 'InitialCoordinates' dataset in main input file")" \
       "the BINARY confirms it read them from the snapshot"
-check "$(lacks "${TMP}/a_env.log" '--lagrangianInput')" "no --lagrangianInput was passed"
+check "$(lacks "${TMP}/a_env.log" '--(ps-lagrangian-input|lagrangianInput)')" "no --ps-lagrangian-input was passed"
 check "$([ -f "${TMP}/HASIC/snapdir_099/ps_output.a_den" ] && echo 0 || echo 1)" \
       "the density grid was actually written"
 
@@ -167,13 +176,19 @@ echo "(C) a combined_ics.hdf5 beside the snapshot is still used, and can be forc
 cp "${TMP}/HASIC/snapdir_099/combined_099.hdf5" "${TMP}/HASIC/combined_ics.hdf5"
 rc=$(drive "${TMP}/c_ics.log" GRID_SIZE=24 DTFE_SIM=HASIC)
 check "$([ "${rc}" = "0" ] && echo 0 || echo 1)" "run with an IC file succeeds (exit ${rc})"
-check "$(has "${TMP}/c_ics.log" '--lagrangianInput .*combined_ics\.hdf5')" \
-      "--lagrangianInput points at the IC file"
-# explicitly empty LAGRANGIAN_INPUT must fall back to the snapshot even though the file exists
-rc=$(drive "${TMP}/c_forced.log" GRID_SIZE=24 DTFE_SIM=HASIC LAGRANGIAN_INPUT=)
-check "$([ "${rc}" = "0" ] && echo 0 || echo 1)" "LAGRANGIAN_INPUT= run succeeds (exit ${rc})"
+check "$(has "${TMP}/c_ics.log" '--ps-lagrangian-input .*combined_ics\.hdf5')" \
+      "--ps-lagrangian-input points at the IC file"
+check "$(lacks "${TMP}/c_ics.log" 'is deprecated')" "... the driver emits no deprecated flag (the binary warns of none)"
+# explicitly empty PS_LAGRANGIAN_INPUT must fall back to the snapshot even though the file exists
+rc=$(drive "${TMP}/c_forced.log" GRID_SIZE=24 DTFE_SIM=HASIC PS_LAGRANGIAN_INPUT=)
+check "$([ "${rc}" = "0" ] && echo 0 || echo 1)" "PS_LAGRANGIAN_INPUT= run succeeds (exit ${rc})"
 check "$(has "${TMP}/c_forced.log" "read from 'InitialCoordinates' dataset in main input file")" \
-      "LAGRANGIAN_INPUT= forces the snapshot path despite the IC file"
+      "PS_LAGRANGIAN_INPUT= forces the snapshot path despite the IC file"
+# the older name, empty, does the same (config.sh knob -e: an empty value is a value here), with its warning
+env "${COMMON_ENV[@]}" GRID_SIZE=24 DTFE_SIM=HASIC LAGRANGIAN_INPUT= DRY_RUN=1 "${DRIVER}" 99 >"${TMP}/c_forced_old.log" 2>&1 || true
+check "$([ "$(lacks "${TMP}/c_forced_old.log" '--ps-lagrangian-input')" = 0 ] \
+         && [ "$(grep -c '^warning: LAGRANGIAN_INPUT is deprecated, use PS_LAGRANGIAN_INPUT$' "${TMP}/c_forced_old.log")" = 1 ] && echo 0 || echo 1)" \
+      "... and so does LAGRANGIAN_INPUT=, the older name, with one deprecation line"
 rm -f "${TMP}/HASIC/combined_ics.hdf5"
 
 echo ""
@@ -238,8 +253,8 @@ rc=0; DRY_RUN=1 SIMS=all DTFE_DATA_ROOT="${FAMROOT}" scripts/run_ps_pipeline.sh 
 check "$(has "${TMP}/g_pipeline.log" '^Simulations:.* FAM-1-Dark')" \
       "run_ps_pipeline.sh discovers the nested FAM-1-Dark"
 check "$([ "${rc}" = "0" ] && echo 0 || echo 1)" "... and a dry run with a snapshot to plan exits 0 (${rc})"
-# the pipeline's knobs: the GPU flag follows PS_GPU, the plane's geometry reaches
-# make_image_plane.py, and a plane whose sidecar has another geometry is regenerated. PS_GPU unset: the
+# the pipeline's knobs: the GPU flag follows DTFE_GPU, the plane's geometry reaches
+# make_image_plane.py, and a plane whose sidecar has another geometry is regenerated. DTFE_GPU unset: the
 # GPU exactly when this repository's PS binary is a GPU build (config.sh gpu_build_default; (S) varies the stamp)
 g_bin="$([ "${DTFE_PRECISION:-single}" = double ] && echo PS-DTFE-double || echo PS-DTFE)"
 g_gpu="$(bash -c 'source scripts/config.sh >/dev/null 2>&1; gpu_build_default "$1" "$2"' _ "${ROOT_DIR}" "${g_bin}")"
@@ -252,12 +267,35 @@ else
 fi
 check "$(has "${TMP}/g_pipeline.log" 'make_image_plane.py .*--planes 1 --thickness 2 --supersample 1 -o ')" \
       "... and makes a single plane without sub-sampling"
-DRY_RUN=1 PS_GPU=0 PS_VOLUME_WEIGHTED=0 PLANES=4 THICKNESS=3 SUPERSAMPLE=2 WINDOW="0 50 0 25" CENTER=40 \
+DRY_RUN=1 DTFE_GPU=0 PS_VOLUME_WEIGHTED=0 PLANES=4 THICKNESS=3 SUPERSAMPLE=2 PLANE_WINDOW="0 50 0 25" CENTER=40 \
     SIMS=all DTFE_DATA_ROOT="${FAMROOT}" scripts/run_ps_pipeline.sh >"${TMP}/g_pipeline2.log" 2>&1 || true
 check "$(has "${TMP}/g_pipeline2.log" 'PS_VOLUME_WEIGHTED=0 .*run_ps_dtfe.sh -s FAM-1-Dark -g [0-9]+ 99')" \
-      "PS_GPU=0 drops -m and PS_VOLUME_WEIGHTED=0 is passed on"
-check "$(has "${TMP}/g_pipeline2.log" 'make_image_plane.py .*--axis z --nu [0-9]+ --planes 4 --thickness 3 --supersample 2 --center 40 --u0 0 --u1 50 --v0 0 --v1 25 -o ')" \
-      "PLANES, THICKNESS, SUPERSAMPLE, CENTER and WINDOW reach make_image_plane.py"
+      "DTFE_GPU=0 drops -m and PS_VOLUME_WEIGHTED=0 is passed on"
+check "$(has "${TMP}/g_pipeline2.log" 'make_image_plane.py .*--axis z --nu [0-9]+ --planes 4 --thickness 3 --supersample 2 --center 40 --plane-window 0 50 0 25 -o ')" \
+      "PLANES, THICKNESS, SUPERSAMPLE, CENTER and PLANE_WINDOW reach make_image_plane.py"
+# the older names (WINDOW, PS_GPU): the same plan, one deprecation line each
+DRY_RUN=1 PS_GPU=0 PS_VOLUME_WEIGHTED=0 PLANES=4 THICKNESS=3 SUPERSAMPLE=2 WINDOW="0 50 0 25" CENTER=40 \
+    SIMS=all DTFE_DATA_ROOT="${FAMROOT}" scripts/run_ps_pipeline.sh >"${TMP}/g_pipeline2o.log" 2>&1 || true
+check "$([ "$(grep -v '^warning: ' "${TMP}/g_pipeline2o.log")" = "$(cat "${TMP}/g_pipeline2.log")" ] \
+         && [ "$(grep -c '^warning: WINDOW is deprecated, use PLANE_WINDOW$' "${TMP}/g_pipeline2o.log")" = 1 ] \
+         && [ "$(grep -c '^warning: PS_GPU is deprecated, use DTFE_GPU$' "${TMP}/g_pipeline2o.log")" = 1 ] && echo 0 || echo 1)" \
+      "... WINDOW and PS_GPU, the older names, plan the same, with one deprecation line each"
+# run_ps_dtfe.sh's own older knob names (the launcher still exports them): the pipeline resolves them once and hands
+# them on under the new names, so each is warned exactly once however many simulations its driver plans
+DRY_RUN=1 DTFE_GPU=0 PS_VOLUME_WEIGHTED=0 PLANES=4 THICKNESS=3 SUPERSAMPLE=2 PLANE_WINDOW="0 50 0 25" CENTER=40 \
+    AVG_SUBSAMPLES=2 ORDERED_MERGE=1 PS_RESUME=0 TESS_CACHE="${TMP}/g_tc" PS_PARALLEL_TRI=1 PS_LAG_PADDING=4 \
+    LAGRANGIAN_INPUT= SIMS=all DTFE_DATA_ROOT="${FAMROOT}" scripts/run_ps_pipeline.sh >"${TMP}/g_pipeline2k.log" 2>&1 || true
+g_k=""
+for k in AVG_SUBSAMPLES ORDERED_MERGE PS_RESUME TESS_CACHE PS_PARALLEL_TRI PS_LAG_PADDING LAGRANGIAN_INPUT; do
+    [ "$(grep -c "^warning: ${k} is deprecated, use " "${TMP}/g_pipeline2k.log")" = 1 ] || g_k="${g_k} ${k}"
+done
+DRY_RUN=1 DTFE_GPU=0 PS_VOLUME_WEIGHTED=0 PLANES=4 THICKNESS=3 SUPERSAMPLE=2 PLANE_WINDOW="0 50 0 25" CENTER=40 \
+    SUBSAMPLES=2 PS_MERGE=index-order DTFE_RESUME=0 TESSELLATION_CACHE="${TMP}/g_tc" PARALLEL_TRIANGULATION=1 \
+    PS_LAGRANGIAN_PADDING=4 PS_LAGRANGIAN_INPUT= SIMS=all DTFE_DATA_ROOT="${FAMROOT}" scripts/run_ps_pipeline.sh \
+    >"${TMP}/g_pipeline2n.log" 2>&1 || true
+check "$([ -z "${g_k}" ] && [ ! -e "${TMP}/g_tc" ] && [ "$(grep -v '^warning: ' "${TMP}/g_pipeline2k.log")" = "$(cat "${TMP}/g_pipeline2n.log")" ] \
+         && ! grep -q 'deprecated' "${TMP}/g_pipeline2n.log" && echo 0 || echo 1)" \
+      "... run_ps_dtfe.sh's older knob names, resolved once by the pipeline: one deprecation line each, none repeated per simulation (${g_k:- ok}), the plan of the new names (LAGRANGIAN_INPUT= empty too); a dry run creates no cache folder"
 # finding nothing to compute is a failure: with the data drive unmounted, a mistyped SIMS or a SNAPS
 # matching no snapshot, an ALL DONE with exit 0 would show in the launcher as a success
 mkdir -p "${TMP}/empty root"
@@ -292,7 +330,7 @@ if [ -f "${FAMROOT}/FAM/FAM-1-Dark/hires_plane_z8.json" ]; then
     check "$([ -f "${FAMROOT}/FAM/FAM-1-Dark/hires_plane_z8.bin" ] && echo 0 || echo 1)" \
           "... but a DRY_RUN removes nothing"
     # a comparison that FAILS (here: no python) is not 'differs': the plane stays, the sim is skipped with !!
-    rc5=0; PY=/nonexistent/python3 NU=8 SIMS=all DTFE_DATA_ROOT="${FAMROOT}" scripts/run_ps_pipeline.sh >"${TMP}/g_pipeline5.log" 2>&1 || rc5=$?
+    rc5=0; PYTHON=/nonexistent/python3 NU=8 SIMS=all DTFE_DATA_ROOT="${FAMROOT}" scripts/run_ps_pipeline.sh >"${TMP}/g_pipeline5.log" 2>&1 || rc5=$?
     check "$(has "${TMP}/g_pipeline5.log" '^!! FAM-1-Dark: could not compare the plane')" \
           "a failing geometry check is reported, not read as 'differs'"
     check "$([ "${rc5}" != "0" ] && [ -f "${FAMROOT}/FAM/FAM-1-Dark/hires_plane_z8.json" ] && echo 0 || echo 1)" \
@@ -303,7 +341,7 @@ if [ -f "${FAMROOT}/FAM/FAM-1-Dark/hires_plane_z8.json" ]; then
     touch -t 203001010000 "${FAMROOT}/FAM/FAM-1-Dark/snapdir_099/ps_output.pts_den" \
                           "${FAMROOT}/FAM/FAM-1-Dark/snapdir_099/ps_output.pts_velGrad"
     # the settings of the (A)-style run that made these grids: the pipeline compares them too (P)
-    rc6=0; DRY_RUN=1 NU=8 GRID_SIZE=24 FIELDS=density_a AVG_SUBSAMPLES=1 PS_VOLUME_WEIGHTED=1 PTS_VEL_GRAD=0 \
+    rc6=0; DRY_RUN=1 NU=8 GRID_SIZE=24 FIELDS=density_a SUBSAMPLES=1 PS_VOLUME_WEIGHTED=1 PTS_VEL_GRAD=0 \
         SIMS=all DTFE_DATA_ROOT="${FAMROOT}" scripts/run_ps_pipeline.sh >"${TMP}/g_pipeline6.log" 2>&1 || rc6=$?
     check "$([ "${rc6}" = "0" ] && echo 0 || echo 1)" "every snapshot up to date still exits 0 (${rc6})"
     check "$(has "${TMP}/g_pipeline6.log" 'FAM-1-Dark: all snapshots up to date')" "... with nothing to recompute"
@@ -313,7 +351,7 @@ else
 fi
 
 echo ""
-echo "(H) run_dtfe.sh -e (or DTFE_EXACT=1) runs the standard binary with --exact-average; DTFE_EXACT=0 does not."
+echo "(H) run_dtfe.sh -e (or DTFE_EXACT_AVERAGE=1) runs the standard binary with --exact-average; DTFE_EXACT_AVERAGE=0 does not."
 if [ -x "${DTFE_BIN}" ]; then
     rc=0; scripts/run_dtfe.sh -s HASIC -g 16 -e 99 >"${TMP}/h_exact.log" 2>&1 || rc=$?
     check "$([ "${rc}" = "0" ] && echo 0 || echo 1)" "run_dtfe.sh -e succeeds (exit ${rc})"
@@ -339,7 +377,7 @@ if [ -x "${DTFE_BIN}" ]; then
              && [ ! -e "${TMP}/BADIN/snapdir_099/output.runlog.partial" ] && echo 0 || echo 1)" \
           "... its log is output.runlog.failed: no output.runlog claims grids it never wrote"
     check "$([ -f "${TMP}/HASIC/snapdir_099/output.a_den" ] && echo 0 || echo 1)" "its density grid was written"
-    env -u DTFE_EXACT_AVERAGE DTFE_EXACT=1 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_env.log" 2>&1 || true
+    env -u DTFE_EXACT DTFE_EXACT_AVERAGE=1 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_env.log" 2>&1 || true
     # run_dtfe.sh reports failures in its exit status, passes the
     # launcher's scratch folder and the scripts' lambda_th default, and the binaries refuse --redshiftSpace
     rc_none=0; scripts/run_dtfe.sh -s HASIC -g 16 123 >"${TMP}/h_none.log" 2>&1 || rc_none=$?
@@ -363,14 +401,14 @@ if [ -x "${DTFE_BIN}" ]; then
     check "$([ "${pad_ps}" = "50" ] && echo 0 || echo 1)" "... while run_ps_dtfe.sh keeps config.sh's 50 (${pad_ps:-none})"
     rm -rf "${SCR_DIR}"
     # FIELDS reaches the standard binary (the launcher's ticks: the T-web), a phase-space dispersion is left out;
-    # TESS_CACHE hands a (created) local folder to --tessellation-cache
+    # TESSELLATION_CACHE hands a (created) local folder to --tessellation-cache
     TC_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dtfe-tess-check.XXXXXX")/cache"
-    rc_f=0; FIELDS="density_a tweb_a dispersion_a" TESS_CACHE="${TC_DIR}" scripts/run_dtfe.sh -s HASIC -g 16 99 \
+    rc_f=0; FIELDS="density_a tweb_a dispersion_a" TESSELLATION_CACHE="${TC_DIR}" scripts/run_dtfe.sh -s HASIC -g 16 99 \
         >"${TMP}/h_fields.log" 2>&1 || rc_f=$?
-    check "$([ "${rc_f}" = "0" ] && echo 0 || echo 1)" "run_dtfe.sh with FIELDS and TESS_CACHE succeeds (exit ${rc_f})"
+    check "$([ "${rc_f}" = "0" ] && echo 0 || echo 1)" "run_dtfe.sh with FIELDS and TESSELLATION_CACHE succeeds (exit ${rc_f})"
     check "$(has "${TMP}/h_fields.log" 'RUNNING: .*--field density_a tweb_a +--')" "... FIELDS is the field list (the T-web for standard DTFE)"
     check "$(has "${TMP}/h_fields.log" 'standard DTFE leaves it out')" "... the phase-space dispersion is left out, and it says so"
-    check "$(has "${TMP}/h_fields.log" "RUNNING: .*--tessellation-cache ${TC_DIR}")" "... TESS_CACHE becomes --tessellation-cache"
+    check "$(has "${TMP}/h_fields.log" "RUNNING: .*--tessellation-cache ${TC_DIR}")" "... TESSELLATION_CACHE becomes --tessellation-cache"
     check "$([ -d "${TC_DIR}" ] && echo 0 || echo 1)" "... and the cache folder is created"
     check "$([ -f "${TMP}/HASIC/snapdir_099/output.a_tweb" ] || ls "${TMP}/HASIC/snapdir_099/"output.*tweb* >/dev/null 2>&1; echo $?)" \
         "... and the T-web grid is written"
@@ -394,23 +432,30 @@ if [ -x "${DTFE_BIN}" ]; then
     check "$([ "${rc_bad}" = "2" ] && echo 0 || echo 1)" "a non-numeric snapshot argument is refused with exit 2 (${rc_bad})"
     rc_oct=0; scripts/run_ps_dtfe.sh -s HASIC -g 16 -n 1 099 >"${TMP}/h_oct_ps.log" 2>&1 || rc_oct=$?
     check "$(has "${TMP}/h_oct_ps.log" 'Processing snapshot 099')" "run_ps_dtfe.sh reads 099 as snapshot 99 too (exit ${rc_oct})"
-    rc_rs=0; "${DTFE_BIN}" "${TMP}/HASIC/snapdir_099/combined_099.hdf5" "${TMP}/rs_out" --grid 16 --redshiftSpace 0 0 1 --input 105 >"${TMP}/h_rs.log" 2>&1 || rc_rs=$?
+    rc_rs=0; "${DTFE_BIN}" "${TMP}/HASIC/snapdir_099/combined_099.hdf5" "${TMP}/rs_out" --grid 16 --redshiftSpace 0 0 1 --input-format 105 >"${TMP}/h_rs.log" 2>&1 || rc_rs=$?
     check "$([ "${rc_rs}" != "0" ] && echo 0 || echo 1)" "--redshiftSpace is refused (not a silent no-op), exit ${rc_rs}"
     check "$(has "${TMP}/h_rs.log" 'not implemented in this version')" "... with a message saying the transform is not implemented"
-    check "$(has "${TMP}/h_env.log" 'RUNNING: .*--exact-average')" "DTFE_EXACT=1 does the same"
-    # the exact average is the default (the production standard); DTFE_EXACT=0 is the sampled one
+    check "$(has "${TMP}/h_env.log" 'RUNNING: .*--exact-average')" "DTFE_EXACT_AVERAGE=1 does the same"
+    # the exact average is the default (the production standard); DTFE_EXACT_AVERAGE=0 is the sampled one
     rc_pl=0; env -u DTFE_EXACT -u DTFE_EXACT_AVERAGE scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_plain.log" 2>&1 || rc_pl=$?
     check "$([ "${rc_pl}" = "0" ] && [ "$(has "${TMP}/h_plain.log" 'RUNNING: .*--exact-average')" = 0 ] \
-             && [ "$(has "${TMP}/h_plain.log" 'RUNNING: .*--field density_a velocity_a gradient_a divergence_a shear_a vorticity_a tweb_a vweb_a ')" = 0 ] \
-             && echo 0 || echo 1)" "a plain run passes --exact-average and the web fields (the production defaults; exit ${rc_pl})"
-    env -u DTFE_EXACT_AVERAGE DTFE_EXACT=0 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_mc.log" 2>&1 || true
-    check "$(lacks "${TMP}/h_mc.log" '--exact-average')" "DTFE_EXACT=0 passes no --exact-average (the Monte-Carlo cell mean)"
-    # the knob's older name is read when the new one is unset, and the new one wins over it
-    env -u DTFE_EXACT DTFE_EXACT_AVERAGE=0 DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_mc_old.log" 2>&1 || true
-    DTFE_EXACT=1 DTFE_EXACT_AVERAGE=0 DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_mc_both.log" 2>&1 || true
+             && [ "$(has "${TMP}/h_plain.log" 'RUNNING: .*--field density_a velocity_a divergence_a shear_a ')" = 0 ] \
+             && echo 0 || echo 1)" "a plain run passes --exact-average and the four analysis fields (the production defaults; exit ${rc_pl})"
+    env -u DTFE_EXACT DTFE_EXACT_AVERAGE=0 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_mc.log" 2>&1 || true
+    check "$(lacks "${TMP}/h_mc.log" '--exact-average')" "DTFE_EXACT_AVERAGE=0 passes no --exact-average (the Monte-Carlo cell mean)"
+    # SUBSAMPLES (-n) reaches the Monte-Carlo mean as --subsamples, only when set
+    env -u DTFE_EXACT DTFE_EXACT_AVERAGE=0 DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 -n 2 99 >"${TMP}/h_mc_n.log" 2>&1 || true
+    check "$([ "$(has "${TMP}/h_mc_n.log" '--lambda-th +0\.3 .*--subsamples +2$')" = 0 ] && [ "$(lacks "${TMP}/h_mc.log" '--subsamples')" = 0 ] \
+             && echo 0 || echo 1)" "... -n 2 (SUBSAMPLES) passes --subsamples 2; unset, nothing (the binary's own count)"
+    # P6.7: DTFE_EXACT, the knob's older name, is read when the new one is unset (one warning); the new one wins over it
+    env -u DTFE_EXACT_AVERAGE DTFE_EXACT=0 DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_mc_old.log" 2>&1 || true
+    DTFE_EXACT=0 DTFE_EXACT_AVERAGE=1 DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_mc_both.log" 2>&1 || true
     check "$([ "$(lacks "${TMP}/h_mc_old.log" '--exact-average')" = 0 ] && [ "$(has "${TMP}/h_mc_old.log" 'DRY RUN -- would run:')" = 0 ] \
-             && [ "$(has "${TMP}/h_mc_both.log" '--lambda-th +0\.3 .*--exact-average')" = 0 ] && echo 0 || echo 1)" \
-          "... DTFE_EXACT_AVERAGE=0, the older name, does the same while DTFE_EXACT is unset; DTFE_EXACT=1 wins over it"
+             && [ "$(grep -c '^warning: DTFE_EXACT is deprecated, use DTFE_EXACT_AVERAGE$' "${TMP}/h_mc_old.log")" = 1 ] \
+             && [ "$(has "${TMP}/h_mc_both.log" '--lambda-th +0\.3 .*--exact-average')" = 0 ] \
+             && [ "$(has "${TMP}/h_mc_both.log" '^warning: DTFE_EXACT is deprecated, use DTFE_EXACT_AVERAGE \(DTFE_EXACT=0 is not read: DTFE_EXACT_AVERAGE=1 wins\)$')" = 0 ] \
+             && echo 0 || echo 1)" \
+          "... DTFE_EXACT=0, the older name, does the same while DTFE_EXACT_AVERAGE is unset, with one warning; DTFE_EXACT_AVERAGE=1 wins over it (said)"
     # the standard binary's auto-tuner reports (not 'AUTO-TUNE-REPORT unsupported'), and the driver
     # asks it the way run_ps_dtfe.sh does: a report per snapshot, nothing computed, nothing written beside the data
     rm -rf "${TMP}/HASIC/snapdir_099/output."*        # (the grids, run logs and the superseded folder of the runs above)
@@ -681,10 +726,12 @@ check "$([ "$(has "${TMP}/i_dl_refused.log" '^  Error downloading snapshot-99$')
          && [ "$(lacks "${TMP}/i_dl_refused.log" 'Download complete!')" = 0 ] && echo 0 || echo 1)" "... named as a failed snapshot and counted in the last line"
 check "$([ ! -e "${DL6}/snapdir_099/snap_099.0.hdf5" ] && echo 0 || echo 1)" "... and no chunk was left in place"
 check "$(lacks "${TMP}/i_dl_refused.log" 'dummykey')" "... the key in none of the retries' output"
-rc=0; PATH="${TMP}/fakebin:${PATH}" FAKE_WGET_LOG="${TMP}/i_urls3.log" TNG_API_KEY=dummykey PY=/nonexistent/python3 \
+# (PY, PYTHON's older name, with the suite's PYTHON unset: the alias is read, with its warning)
+rc=0; env -u PYTHON PATH="${TMP}/fakebin:${PATH}" FAKE_WGET_LOG="${TMP}/i_urls3.log" TNG_API_KEY=dummykey PY=/nonexistent/python3 \
     scripts/download_snapshots.sh -d "${DL2}" -s SIMX 99 >"${TMP}/i_download_nopy.log" 2>&1 || rc=$?
 check "$([ "${rc}" = "0" ] && echo 0 || echo 1)" "without a python with h5py the check is skipped, the download still runs (${rc})"
 check "$(has "${TMP}/i_download_nopy.log" 'has no h5py; existing chunks are not checked')" "... and says so"
+check "$(has "${TMP}/i_download_nopy.log" '^warning: PY is deprecated, use PYTHON$')" "... (PY=, the older name of PYTHON, read with one warning)"
 
 echo ""
 echo "(J) --help runs nothing, --version prints the revision, DRY_RUN=1 prints the commands and runs nothing."
@@ -733,8 +780,21 @@ check "$([ "${rc_o}" = " 1/1/0 1/1/0 1/1/0" ] && echo 0 || echo 1)" \
       "an unknown option or a missing value: the usage, exit 1; -h after other options: the usage, exit 0 (${rc_o# })"
 # a driver's own options mix with the shared ones in any order, clustered too (-me)
 rc=0; env "${COMMON_ENV[@]}" DRY_RUN=1 "${DRIVER}" -g 16 -n 2 -d "${TMP}/HASIC" -me -s HASIC 99 >"${TMP}/j_opt4.log" 2>&1 || rc=$?
-check "$([ "${rc}" = "0" ] && [ "$(has "${TMP}/j_opt4.log" 'HASIC/snapdir_099/combined_099\.hdf5 .*--grid +16 .*--avg-subsamples +2 .*--gpu +--exact-average')" = 0 ] \
+check "$([ "${rc}" = "0" ] && [ "$(has "${TMP}/j_opt4.log" 'HASIC/snapdir_099/combined_099\.hdf5 .*--grid +16 .*--subsamples +2 .*--gpu +--exact-average')" = 0 ] \
          && echo 0 || echo 1)" "... -g, -n, -m and -e mix with -d and -s in any order, -me clustered (exit ${rc})"
+# the long forms are the letters (config.sh driver_long_options): the same planned command, token for token
+rc=0; env "${COMMON_ENV[@]}" DRY_RUN=1 "${DRIVER}" --grid 16 --subsamples=2 --sim-dir "${TMP}/HASIC" --gpu --exact-average --sim HASIC 99 \
+    >"${TMP}/j_opt5.log" 2>&1 || rc=$?
+check "$([ "${rc}" = "0" ] && [ "$(sed -n '/would run:/{n;p;}' "${TMP}/j_opt5.log")" = "$(sed -n '/would run:/{n;p;}' "${TMP}/j_opt4.log")" ] \
+         && [ -n "$(sed -n '/would run:/{n;p;}' "${TMP}/j_opt5.log")" ] && echo 0 || echo 1)" \
+      "... --grid, --subsamples=K, --sim-dir, --gpu, --exact-average and --sim plan the same command as the letters (exit ${rc})"
+rc=0; env "${COMMON_ENV[@]}" DRY_RUN=1 scripts/run_dtfe.sh --sim HASIC --grid=16 --subsamples 2 99 >"${TMP}/j_opt6.log" 2>&1 || rc=$?
+rc2=0; "${DRIVER}" -s HASIC --bogus 99 >"${TMP}/j_opt7.log" 2>&1 || rc2=$?
+rc3=0; TNG_API_KEY=dummykey scripts/download_snapshots.sh -s HASIC --gpu 99 >"${TMP}/j_opt8.log" 2>&1 || rc3=$?
+check "$([ "${rc}" = "0" ] && [ "$(has "${TMP}/j_opt6.log" '--grid +16 .*--subsamples +2')" = 0 ] \
+         && [ "${rc2}" = "1" ] && [ "$(has "${TMP}/j_opt7.log" "unknown option '--bogus'")" = 0 ] && [ "$(has "${TMP}/j_opt7.log" '^Usage: ')" = 0 ] \
+         && [ "${rc3}" = "1" ] && [ "$(has "${TMP}/j_opt8.log" "unknown option '--gpu'")" = 0 ] && echo 0 || echo 1)" \
+      "... run_dtfe.sh takes them too; an unknown long option, or one the script lacks (download_snapshots.sh --gpu): the usage, exit 1 (${rc} ${rc2} ${rc3})"
 rc=0; DTFE_DATA_ROOT= scripts/run_ps_dtfe.sh -s HASIC 99 >"${TMP}/j_noroot_empty.log" 2>&1 || rc=$?
 check "$([ "${rc}" = "2" ] && [ "$(has "${TMP}/j_noroot_empty.log" "${NOROOT}")" = 0 ] && echo 0 || echo 1)" \
       "... an empty DTFE_DATA_ROOT= is no data root either (${rc})"
@@ -775,20 +835,22 @@ echo ""
 echo "(K) the binaries' --help lists the phase-space, GPU, point-evaluation and server options; no known misspelling."
 "${PS_BIN}" --help >"${TMP}/k_help_ps.log" 2>&1 || true
 "${DTFE_BIN}" --help >"${TMP}/k_help_dtfe.log" 2>&1 || true
-for o in gpu exact-average no-overlap full-help lambda-th ps-window ps-caustics ps-vertex-mass ps-volume-weighted sample-points serve serve-progress tessellation-cache auto-tune-report; do
+for o in gpu exact-average no-overlap full-help lambda-th grid-window ps-merge subsamples ps-per-stream ps-point-conventions mpc-unit ps-caustics ps-vertex-mass ps-volume-weighted sample-points serve serve-progress tessellation-cache auto-tune-report; do
     check "$(has "${TMP}/k_help_ps.log" "^ *--${o}( |$)")" "PS-DTFE --help lists --${o}"
 done
-for o in gpu exact-average no-overlap full-help lambda-th sample-points serve auto-tune-report; do
+for o in gpu exact-average no-overlap full-help lambda-th average-method subsamples mpc-unit sample-points serve auto-tune-report; do
     check "$(has "${TMP}/k_help_dtfe.log" "^ *--${o}( |$)")" "DTFE --help lists --${o}"
 done
-check "$(lacks "${TMP}/k_help_dtfe.log" '^ *--ps-gpu')" "... and not PS-DTFE's old --ps-gpu"
 "${PS_BIN}" --full-help >"${TMP}/k_full_ps.log" 2>"${TMP}/k_full_ps.err" || true
 "${DTFE_BIN}" --full-help >"${TMP}/k_full_dtfe.log" 2>&1 || true
-check "$([ "$(lacks "${TMP}/k_help_ps.log" '--(ps-gpu|ps-exact-deposit|ps-no-overlap|lambda_th|full_help)\b')" = 0 ] \
-         && [ "$(lacks "${TMP}/k_full_ps.log" '--(ps-gpu|ps-exact-deposit|ps-no-overlap|lambda_th|full_help)\b')" = 0 ] \
-         && [ "$(lacks "${TMP}/k_full_dtfe.log" '--(ps-gpu|ps-exact-deposit|ps-no-overlap|lambda_th|full_help)\b')" = 0 ] \
+check "$([ "$(lacks "${TMP}/k_help_dtfe.log" '^ *--(ps-gpu|ps-per-stream|parallel-triangulation)')" = 0 ] \
+         && [ "$(lacks "${TMP}/k_full_dtfe.log" '^ *--(ps-per-stream|ps-merge|grid-window)')" = 0 ] && echo 0 || echo 1)" \
+      "... and not PS-DTFE's old --ps-gpu, nor its stream options or its TBB insert (short and full help)"
+check "$([ "$(lacks "${TMP}/k_help_ps.log" '(^|[^-])--(ps-gpu|ps-exact-deposit|ps-no-overlap|lambda_th|full_help|MpcUnit|paddingMpc|regionMpc|partNo|redshiftCone|origin|NGP|CIC|TSC|PCS|SPH|Voronoi|input|output|inputFile|outputFile|method|samples|noTest|density0|randomSample|approxPSD|extensive|options|avg-subsamples|lagrangianInput|ps-lag-padding|per-stream|per-stream-ids|pts-lagrangian|pts-conventions|ps-window|ordered-merge|completion-order-merge|fixed-point-merge)([^-a-zA-Z_]|$)')" = 0 ] \
+         && [ "$(lacks "${TMP}/k_full_ps.log" '(^|[^-])--(ps-gpu|ps-exact-deposit|ps-no-overlap|lambda_th|full_help|MpcUnit|paddingMpc|regionMpc|partNo|redshiftCone|origin|NGP|CIC|TSC|PCS|SPH|Voronoi|input|output|inputFile|outputFile|method|samples|noTest|density0|randomSample|approxPSD|extensive|options|avg-subsamples|lagrangianInput|ps-lag-padding|per-stream|per-stream-ids|pts-lagrangian|pts-conventions|ps-window|ordered-merge|completion-order-merge|fixed-point-merge)([^-a-zA-Z_]|$)')" = 0 ] \
+         && [ "$(lacks "${TMP}/k_full_dtfe.log" '(^|[^-])--(ps-gpu|ps-exact-deposit|ps-no-overlap|lambda_th|full_help|MpcUnit|paddingMpc|regionMpc|partNo|redshiftCone|origin|NGP|CIC|TSC|PCS|SPH|Voronoi|input|output|inputFile|outputFile|method|samples|noTest|density0|randomSample|approxPSD|extensive|options|avg-subsamples|lagrangianInput|ps-lag-padding|per-stream|per-stream-ids|pts-lagrangian|pts-conventions|ps-window|ordered-merge|completion-order-merge|fixed-point-merge)([^-a-zA-Z_]|$)')" = 0 ] \
          && [ "$(has "${TMP}/k_full_ps.log" '^ *--exact-average +PS-DTFE')" = 0 ] && [ ! -s "${TMP}/k_full_ps.err" ] && echo 0 || echo 1)" \
-      "the help (short and full, both binaries) names only the canonical spellings, no deprecated one"
+      "the help (short and full, both binaries) names only the canonical spellings, no deprecated one (P6 and P6.7)"
 "${PS_BIN}" --full_help >"${TMP}/k_full_old.log" 2>"${TMP}/k_full_old.err" || true
 check "$(cmp -s "${TMP}/k_full_ps.log" "${TMP}/k_full_old.log" && grep -qx 'warning: --full_help is deprecated, use --full-help' "${TMP}/k_full_old.err" \
          && echo 0 || echo 1)" "--full_help (deprecated) still prints the full help, and one warning line on stderr"
@@ -798,7 +860,7 @@ check "$(has "${TMP}/k_full_ps.log" "'MPC_UNIT'")" "... and names the Makefile's
 # the deprecated spellings, for one release: hidden options folded onto the canonical ones (user_options.cc
 # foldDeprecatedAliases), on the command line and in a --config file
 KS="${TMP}/HASIC/snapdir_099/combined_099.hdf5"
-KC=(--grid 16 --periodic --input 105 --MpcUnit 1 --verbose 1 --field density_a tweb_a)
+KC=(--grid 16 --periodic --input-format 105 --mpc-unit 1 --verbose 1 --field density_a tweb_a)
 k_same() {   # <tag a> <tag b>: every output file of the two runs byte-identical (the logs aside)
     local f e n=0
     for f in "${TMP}/k_$1".*; do
@@ -1070,13 +1132,16 @@ for pair in "run_dtfe.sh output" "run_ps_dtfe.sh ps_output"; do
     rc=$(mdrive "${scr}" "${TMP}/o_${pfx}_reused.log" FAKE_MODE=ok)
     kill "${other}" 2>/dev/null || true; wait "${other}" 2>/dev/null || true
     check "$([ "${rc}" = "0" ] && [ ! -e "${K}" ] && echo 0 || echo 1)" "... a lock whose pid now belongs to another program is stale too (${rc})"
-    # preflight: the grids must fit on the output volume (a 20000^3 grid needs ~1e14 bytes); DTFE_SPACE_CHECK=0 skips
+    # preflight: the grids must fit on the output volume (a 20000^3 grid needs ~1e14 bytes); SPACE_CHECK=0 skips
     rc=0; env DTFE_DATA_ROOT="${MDATA}" FAKE_MODE=ok "${MREPO}/scripts/${scr}" -s SIM -g 20000 99 >"${TMP}/o_${pfx}_space.log" 2>&1 || rc=$?
     check "$([ "${rc}" = "1" ] && echo 0 || echo 1)" "... grids larger than the free space: refused, exit 1 (${rc})"
     check "$(has "${TMP}/o_${pfx}_space.log" "GB free; this run's grids need about")" "... saying how much is free and needed"
     check "$(lacks "${TMP}/o_${pfx}_space.log" '^RUNNING:')" "... before the binary started"
-    rc=0; env DTFE_DATA_ROOT="${MDATA}" FAKE_MODE=ok DTFE_SPACE_CHECK=0 "${MREPO}/scripts/${scr}" -s SIM -g 20000 99 >"${TMP}/o_${pfx}_nospace.log" 2>&1 || rc=$?
-    check "$([ "${rc}" = "0" ] && echo 0 || echo 1)" "... DTFE_SPACE_CHECK=0 skips the space check (${rc})"
+    rc=0; env DTFE_DATA_ROOT="${MDATA}" FAKE_MODE=ok SPACE_CHECK=0 "${MREPO}/scripts/${scr}" -s SIM -g 20000 99 >"${TMP}/o_${pfx}_nospace.log" 2>&1 || rc=$?
+    check "$([ "${rc}" = "0" ] && echo 0 || echo 1)" "... SPACE_CHECK=0 skips the space check (${rc})"
+    rc=0; env DTFE_DATA_ROOT="${MDATA}" FAKE_MODE=ok DTFE_SPACE_CHECK=off "${MREPO}/scripts/${scr}" -s SIM -g 20000 99 >"${TMP}/o_${pfx}_nospace2.log" 2>&1 || rc=$?
+    check "$([ "${rc}" = "0" ] && [ "$(has "${TMP}/o_${pfx}_nospace2.log" '^warning: DTFE_SPACE_CHECK is deprecated, use SPACE_CHECK$')" = 0 ] && echo 0 || echo 1)" \
+          "... and so does DTFE_SPACE_CHECK=off, the older name (one warning; 'off' is off, as in the binaries) (${rc})"
     # the data disk unplugged: one clear message up front, exit 2 (not a skip of every snapshot under a wrong path)
     rc=0; env DTFE_DATA_ROOT="${TMP}/no such disk/Illustris TNG" "${MREPO}/scripts/${scr}" -s SIM 99 >"${TMP}/o_${pfx}_root.log" 2>&1 || rc=$?
     check "$([ "${rc}" = "2" ] && echo 0 || echo 1)" "... a data root that does not exist: exit 2 (${rc})"
@@ -1105,7 +1170,7 @@ for pair in "run_ps_dtfe.sh ps_output" "run_dtfe.sh output"; do
 done
 
 echo ""
-echo "(R) run_ps_dtfe.sh: ORDERED_MERGE (1 by default), and --resume when a killed run left its checkpoint."
+echo "(R) run_ps_dtfe.sh: PS_MERGE (index-order by default, passed explicitly), and --resume when a killed run left its checkpoint."
 # Contracts K1/K2: the binary checkpoints a partitioned run in '<output>.runlog.checkpoint' (under --scratch-dir:
 # '<scratch>/<basename>.<hash of the output path>.runlog.checkpoint') and removes it on success, so a folder there
 # means a killed run. Against the stand-in binaries of (M), which print their arguments.
@@ -1113,28 +1178,42 @@ RSD="${MDATA}/SIM/snapdir_099"; RCK="${RSD}/ps_output.runlog.checkpoint"
 rm -rf "${RCK}" "${RSD}/ps_output.runlog.lock"
 rc=$(mdrive run_ps_dtfe.sh "${TMP}/r_plain.log" FAKE_MODE=ok)
 check "$([ "${rc}" = "0" ] && grep -aq '^RUNNING: ' "${TMP}/r_plain.log" && echo 0 || echo 1)" "a plain run goes (${rc})"
-# the ordered (staged) merge is the default; the driver says it either way
-check "$([ "$(lacks "${TMP}/r_plain.log" '^RUNNING: .*--(completion-order-merge|resume)')" = 0 ] \
-         && [ "$(has "${TMP}/r_plain.log" '^RUNNING: .*--ordered-merge')" = 0 ] && echo 0 || echo 1)" \
-      "... with --ordered-merge (the default) and no --resume"
-rc=$(mdrive run_ps_dtfe.sh "${TMP}/r_ordered.log" FAKE_MODE=ok ORDERED_MERGE=1)
-check "$(has "${TMP}/r_ordered.log" '^RUNNING: .*--ordered-merge')" "ORDERED_MERGE=1 passes --ordered-merge (${rc})"
-rc=$(mdrive run_ps_dtfe.sh "${TMP}/r_compl.log" FAKE_MODE=ok ORDERED_MERGE=0)
-check "$([ "$(has "${TMP}/r_compl.log" '^RUNNING: .*--completion-order-merge')" = 0 ] \
-         && [ "$(lacks "${TMP}/r_compl.log" '^RUNNING: .*--ordered-merge')" = 0 ] && echo 0 || echo 1)" \
-      "ORDERED_MERGE=0 passes --completion-order-merge, the merge as partitions finish (${rc})"
-# FIXED_POINT_MERGE=1 passes the opt-in order-free merge in place of the merge-order flag
-rc=$(mdrive run_ps_dtfe.sh "${TMP}/r_fixed.log" FAKE_MODE=ok FIXED_POINT_MERGE=1)
-check "$([ "$(has "${TMP}/r_fixed.log" '^RUNNING: .*--fixed-point-merge')" = 0 ] \
-         && [ "$(lacks "${TMP}/r_fixed.log" '^RUNNING: .*--(ordered-merge|completion-order-merge)')" = 0 ] && echo 0 || echo 1)" \
-      "FIXED_POINT_MERGE=1 passes --fixed-point-merge and no merge-order flag (${rc})"
+# the index-order (staged) merge is the binary's default; the driver passes it explicitly ('--ps-merge index-order':
+# given, the memory gate stays on under the auto-tuner's speed split, as its older '--ordered-merge' default did)
+MERGE_FLAGS='--(ps-merge|ordered-merge|completion-order-merge|fixed-point-merge)'
+merge_of() {   # <log>: the merge flags of the RUNNING line, or 'none'
+    local m; m="$(grep -a '^RUNNING: ' "$1" | grep -oE -e "${MERGE_FLAGS}( [a-z][a-z-]*)?" | tr '\n' ' ')"
+    echo "${m:-none}"
+}
+check "$([ "$(merge_of "${TMP}/r_plain.log")" = "--ps-merge index-order " ] \
+         && [ "$(lacks "${TMP}/r_plain.log" '^RUNNING: .*--resume')" = 0 ] && echo 0 || echo 1)" \
+      "... with '--ps-merge index-order' (the driver's default, explicit) and no --resume"
+m=""
+for e in PS_MERGE=index-order PS_MERGE=completion-order PS_MERGE=fixed-point ORDERED_MERGE=1 ORDERED_MERGE=0 \
+         FIXED_POINT_MERGE=1 "ORDERED_MERGE=1 FIXED_POINT_MERGE=1" FIXED_POINT_MERGE=0 "PS_MERGE=completion-order ORDERED_MERGE=1"; do
+    # shellcheck disable=SC2086
+    rc=$(mdrive run_ps_dtfe.sh "${TMP}/r_merge.log" FAKE_MODE=ok ${e})
+    m="${m}$(merge_of "${TMP}/r_merge.log")| "
+done
+check "$([ "${m}" = "--ps-merge index-order | --ps-merge completion-order | --ps-merge fixed-point | --ps-merge index-order | --ps-merge completion-order | --ps-merge fixed-point | --ps-merge fixed-point | --ps-merge index-order | --ps-merge completion-order | " ] \
+         && echo 0 || echo 1)" \
+      "PS_MERGE=MODE passes '--ps-merge MODE'; ORDERED_MERGE=1 / 0 and FIXED_POINT_MERGE=1, the older pair, convert (fixed-point winning; FIXED_POINT_MERGE=0 alone leaves the default); PS_MERGE wins over them (${m})"
+check "$([ "$(grep -c '^warning: ORDERED_MERGE is deprecated, use PS_MERGE=index-order (ORDERED_MERGE=1 is not read: PS_MERGE=completion-order wins)$' "${TMP}/r_merge.log")" = 1 ] \
+         && echo 0 || echo 1)" "... the older name is said deprecated, and that the new one wins"
+rc=$(mdrive run_ps_dtfe.sh "${TMP}/r_merge_bad.log" FAKE_MODE=ok PS_MERGE=ordered)
+check "$([ "${rc}" = "2" ] && [ "$(has "${TMP}/r_merge_bad.log" "PS_MERGE must be 'index-order', 'completion-order' or 'fixed-point'")" = 0 ] \
+         && [ "$(lacks "${TMP}/r_merge_bad.log" '^RUNNING: ')" = 0 ] && echo 0 || echo 1)" "... another value is refused before anything runs (exit ${rc})"
 mkdir -p "${RCK}"; : > "${RCK}/checkpoint"
 rc=$(mdrive run_ps_dtfe.sh "${TMP}/r_resume.log" FAKE_MODE=ok)
 check "$([ "${rc}" = "0" ] && grep -aqE -e '^RUNNING: .*--resume' "${TMP}/r_resume.log" && echo 0 || echo 1)" "a checkpoint folder beside the outputs: --resume is passed (${rc})"
 check "$(has "${TMP}/r_resume.log" "Resuming: a killed run's checkpoint is in .*ps_output\.runlog\.checkpoint")" "... and the driver says so, naming the folder"
-rc=$(mdrive run_ps_dtfe.sh "${TMP}/r_noresume.log" FAKE_MODE=ok PS_RESUME=0)
-check "$(lacks "${TMP}/r_noresume.log" '^RUNNING: .*--resume')" "PS_RESUME=0: no --resume (${rc})"
-check "$(has "${TMP}/r_noresume.log" 'PS_RESUME=0, so this run starts over')" "... and the driver says the run starts over"
+rc=$(mdrive run_ps_dtfe.sh "${TMP}/r_noresume.log" FAKE_MODE=ok DTFE_RESUME=0)
+check "$(lacks "${TMP}/r_noresume.log" '^RUNNING: .*--resume')" "DTFE_RESUME=0: no --resume (${rc})"
+check "$(has "${TMP}/r_noresume.log" 'DTFE_RESUME=0, so this run starts over')" "... and the driver says the run starts over"
+rc=$(mdrive run_ps_dtfe.sh "${TMP}/r_noresume_old.log" FAKE_MODE=ok PS_RESUME=0)
+check "$([ "$(lacks "${TMP}/r_noresume_old.log" '^RUNNING: .*--resume')" = 0 ] \
+         && [ "$(has "${TMP}/r_noresume_old.log" '^warning: PS_RESUME is deprecated, use DTFE_RESUME$')" = 0 ] && echo 0 || echo 1)" \
+      "... PS_RESUME=0, the older name, does the same, with its warning (${rc})"
 rc=$(mdrive run_ps_dtfe.sh "${TMP}/r_report.log" FAKE_MODE=report AUTO_TUNE_REPORT=1)
 check "$(lacks "${TMP}/r_report.log" '(--resume|Resuming)')" "an auto-tune report never resumes (${rc})"
 # a folder with no 'checkpoint' file (a run killed during its first write, or one that never had room) holds
@@ -1156,14 +1235,14 @@ rm -rf "${SCK}"
 # the plane's conventions: legacy only on request and only with points; the binary's default otherwise
 : > "${TMP}/r_points.txt"
 rc=$(mdrive run_ps_dtfe.sh "${TMP}/r_pc_def.log" FAKE_MODE=ok SAMPLE_POINTS="${TMP}/r_points.txt")
-rc2=$(mdrive run_ps_dtfe.sh "${TMP}/r_pc_leg.log" FAKE_MODE=ok SAMPLE_POINTS="${TMP}/r_points.txt" PTS_CONVENTIONS=legacy)
-check "$([ "$(lacks "${TMP}/r_pc_def.log" '^RUNNING: .*--pts-conventions')" = 0 ] \
-         && [ "$(has "${TMP}/r_pc_leg.log" '^RUNNING: .*--sample-points .*r_points\.txt.* --pts-conventions legacy')" = 0 ] && echo 0 || echo 1)" \
-      "PTS_CONVENTIONS: the grids' (the default) passes nothing, legacy passes --pts-conventions legacy with the points (${rc} ${rc2})"
-rc=$(mdrive run_ps_dtfe.sh "${TMP}/r_pc_nopts.log" FAKE_MODE=ok PTS_CONVENTIONS=legacy)
-check "$(lacks "${TMP}/r_pc_nopts.log" '^RUNNING: .*--pts-conventions')" "... and nothing without points (${rc})"
-rc=$(mdrive run_ps_dtfe.sh "${TMP}/r_pc_bad.log" FAKE_MODE=ok PTS_CONVENTIONS=old)
-check "$([ "${rc}" = "2" ] && [ "$(has "${TMP}/r_pc_bad.log" "PTS_CONVENTIONS must be 'grid' or 'legacy'")" = 0 ] \
+rc2=$(mdrive run_ps_dtfe.sh "${TMP}/r_pc_leg.log" FAKE_MODE=ok SAMPLE_POINTS="${TMP}/r_points.txt" PS_POINT_CONVENTIONS=legacy)
+check "$([ "$(lacks "${TMP}/r_pc_def.log" '^RUNNING: .*--(ps-point|pts)-conventions')" = 0 ] \
+         && [ "$(has "${TMP}/r_pc_leg.log" '^RUNNING: .*--sample-points .*r_points\.txt.* --ps-point-conventions legacy')" = 0 ] && echo 0 || echo 1)" \
+      "PS_POINT_CONVENTIONS: the grids' (the default) passes nothing, legacy passes --ps-point-conventions legacy with the points (${rc} ${rc2})"
+rc=$(mdrive run_ps_dtfe.sh "${TMP}/r_pc_nopts.log" FAKE_MODE=ok PS_POINT_CONVENTIONS=legacy)
+check "$(lacks "${TMP}/r_pc_nopts.log" '^RUNNING: .*--(ps-point|pts)-conventions')" "... and nothing without points (${rc})"
+rc=$(mdrive run_ps_dtfe.sh "${TMP}/r_pc_bad.log" FAKE_MODE=ok PS_POINT_CONVENTIONS=old)
+check "$([ "${rc}" = "2" ] && [ "$(has "${TMP}/r_pc_bad.log" "PS_POINT_CONVENTIONS must be 'grid' or 'legacy'")" = 0 ] \
          && [ "$(lacks "${TMP}/r_pc_bad.log" '^RUNNING: ')" = 0 ] && echo 0 || echo 1)" \
       "... another value is refused before anything runs (exit ${rc})"
 
@@ -1180,7 +1259,7 @@ ln -sfn "${ROOT_DIR}/python" "${MREPO}/python"
 pdrive() {   # <log> [VAR=value ...]: the copied pipeline on SIM; echoes its exit status
     local log="$1"; shift
     local rc=0
-    env DTFE_DATA_ROOT="${PDATA}" SIMS=SIM NU=8 GRID_SIZE=16 FIELDS="density_a velocity_a" PS_GPU=0 FAKE_MODE=ok \
+    env DTFE_DATA_ROOT="${PDATA}" SIMS=SIM NU=8 GRID_SIZE=16 FIELDS="density_a velocity_a" DTFE_GPU=0 FAKE_MODE=ok \
         "$@" "${MREPO}/scripts/run_ps_pipeline.sh" >"${log}" 2>&1 || rc=$?
     echo "${rc}"
 }
@@ -1212,16 +1291,21 @@ rc=$(pdrive "${TMP}/p_sub.log" FIELDS=density_a DRY_RUN=1)
 check "$(has "${TMP}/p_sub.log" 'up to date \(same settings\)')" "fewer fields than the grids on disk carry: still up to date"
 rc=$(pdrive "${TMP}/p_more.log" FIELDS="density_a velocity_a tweb_a" DRY_RUN=1)
 check "$(has "${TMP}/p_more.log" 'settings differ')" "... a field the grids lack: recomputed"
-rc=$(pdrive "${TMP}/p_gpu.log" PS_GPU=1 DRY_RUN=1)
+rc=$(pdrive "${TMP}/p_gpu.log" DTFE_GPU=1 DRY_RUN=1)
 check "$(has "${TMP}/p_gpu.log" 'up to date \(same settings\)')" "the GPU/CPU choice alone does not make grids stale"
 # the plane's conventions are a setting of the slice; the pipeline hands them to run_ps_dtfe.sh
-rc=$(pdrive "${TMP}/p_pc.log" PTS_CONVENTIONS=legacy DRY_RUN=1)
+rc=$(pdrive "${TMP}/p_pc.log" PS_POINT_CONVENTIONS=legacy DRY_RUN=1)
 check "$([ "$(has "${TMP}/p_pc.log" 'snap 99: settings differ from its ps_output.runlog, recomputing')" = 0 ] \
-         && grep -aq 'now: --pts-conventions legacy$' "${TMP}/p_pc.log" \
-         && [ "$(has "${TMP}/p_pc.log" '^\+ env .*PTS_CONVENTIONS=legacy .*run_ps_dtfe\.sh -s SIM')" = 0 ] && echo 0 || echo 1)" \
-      "PTS_CONVENTIONS=legacy: a slice in the grids' conventions is recomputed, the difference shown, the knob passed on (${rc})"
-rc=$(pdrive "${TMP}/p_pcg.log" PTS_CONVENTIONS=grid DRY_RUN=1)
-check "$(has "${TMP}/p_pcg.log" 'up to date \(same settings\)')" "... PTS_CONVENTIONS=grid (the default, said or not): up to date (${rc})"
+         && grep -aq 'now: --ps-point-conventions legacy$' "${TMP}/p_pc.log" \
+         && [ "$(has "${TMP}/p_pc.log" '^\+ env .*PS_POINT_CONVENTIONS=legacy .*run_ps_dtfe\.sh -s SIM')" = 0 ] && echo 0 || echo 1)" \
+      "PS_POINT_CONVENTIONS=legacy: a slice in the grids' conventions is recomputed, the difference shown, the knob passed on (${rc})"
+rc=$(pdrive "${TMP}/p_pcg.log" PS_POINT_CONVENTIONS=grid DRY_RUN=1)
+check "$(has "${TMP}/p_pcg.log" 'up to date \(same settings\)')" "... PS_POINT_CONVENTIONS=grid (the default, said or not): up to date (${rc})"
+rc=$(pdrive "${TMP}/p_pco.log" PTS_CONVENTIONS=legacy DRY_RUN=1)
+check "$([ "$(has "${TMP}/p_pco.log" '^\+ env .*PS_POINT_CONVENTIONS=legacy .*run_ps_dtfe\.sh -s SIM')" = 0 ] \
+         && [ "$(lacks "${TMP}/p_pco.log" '^\+ env .*PTS_CONVENTIONS=')" = 0 ] \
+         && [ "$(grep -c '^warning: PTS_CONVENTIONS is deprecated, use PS_POINT_CONVENTIONS$' "${TMP}/p_pco.log")" = 1 ] && echo 0 || echo 1)" \
+      "... PTS_CONVENTIONS, the older name, is read with one warning and handed on under the new name only (${rc})"
 # the binaries' deprecated spellings: a run log written with '--ps-exact-deposit --lambda_th 0.3' (an older driver)
 # against the '--exact-average --lambda-th 0.3' the driver emits now must compare UNCHANGED -- else every snapshot on
 # disk would be recomputed. run_settings alone first, then the whole freshness test on a run log rewritten that way.
@@ -1232,11 +1316,24 @@ rs_other="$(run_settings 'RUNNING: ./PS-DTFE in.hdf5 out --grid 64 --field densi
 check "$([ -n "${rs_new}" ] && [ "${rs_old}" = "${rs_new}" ] && printf '%s\n' "${rs_new}" | grep -qx -e '--exact-average' \
          && printf '%s\n' "${rs_new}" | grep -qx -e '--lambda-th 0.3' && [ "${rs_other}" != "${rs_new}" ] && echo 0 || echo 1)" \
       "run_settings: an old-spelling log and a new-spelling command are unchanged (the canonical names), another threshold is not"
-rc=$(pdrive "${TMP}/p_ex.log" PS_EXACT=1)
+# P6.7: every renamed option run_settings compares, old spelling against new (python/dtfelib/runlog.py's table),
+# and the options it newly compares (--face-gradient, the Lagrangian padding, the alpha shape, the halo release)
+rs7_old="$(run_settings 'RUNNING: ./PS-DTFE in.hdf5 out --input 105 --MpcUnit 1000 --grid 64 --avg-subsamples 3 --field density_a --lambda_th 0.3 --ps-lag-padding 8 --lagrangianInput ics.hdf5 --sample-points p.txt --pts-conventions legacy --ordered-merge --face-gradient --ps-alpha-shape 2.5 --ps-halo-release 500 --ps-window 0 1 0 1 0 1')"
+rs7_new="$(run_settings './PS-DTFE in.hdf5 out --input-format 105 --mpc-unit 1000 --grid 64 --subsamples 3 --field density_a --lambda-th 0.3 --ps-lagrangian-padding 8 --ps-lagrangian-input ics.hdf5 --sample-points p.txt --ps-point-conventions legacy --ps-merge index-order --face-gradient --ps-alpha-shape 2.5 --ps-halo-release 500 --grid-window 0 1 0 1 0 1')"
+rs7_ok=0
+for o in '--subsamples 3' '--ps-lagrangian-padding 8' '--ps-point-conventions legacy' '--face-gradient' '--ps-alpha-shape 2.5' '--ps-halo-release 500'; do
+    printf '%s\n' "${rs7_new}" | grep -qx -e "${o}" || rs7_ok=1
+done
+for o in 'face-gradient' 'ps-lagrangian-padding 9' 'ps-alpha-shape 3' 'ps-halo-release 400' 'subsamples 2'; do   # each one differs alone
+    [ "$(run_settings "./PS-DTFE in out --grid 64 --${o}")" != "$(run_settings './PS-DTFE in out --grid 64')" ] || rs7_ok=1
+done
+check "$([ -n "${rs7_new}" ] && [ "${rs7_old}" = "${rs7_new}" ] && [ "${rs7_ok}" = 0 ] && echo 0 || echo 1)" \
+      "run_settings (P6.7): --avg-subsamples 3 matches --subsamples 3, every renamed option reads the same, and the face gradient, Lagrangian padding, alpha shape and halo release count"
+rc=$(pdrive "${TMP}/p_ex.log" DTFE_EXACT_AVERAGE=1)
 head -c 512 /dev/zero > "${SD}/ps_output.pts_den"; touch -t 203001010000 "${SD}/ps_output.pts_den" "${SD}/ps_output.pts_velGrad"
 sed -e '/^RUNNING:/s/ --exact-average / --ps-exact-deposit /' -e '/^RUNNING:/s/ --lambda-th / --lambda_th /' \
     "${SD}/ps_output.runlog" > "${SD}/ps_output.runlog.old" && mv "${SD}/ps_output.runlog.old" "${SD}/ps_output.runlog"
-rc2=$(pdrive "${TMP}/p_old.log" PS_EXACT=1 DRY_RUN=1)
+rc2=$(pdrive "${TMP}/p_old.log" PS_EXACT=1 DRY_RUN=1)     # (the knob's older name: the same settings)
 check "$([ "${rc}" = 0 ] && [ "${rc2}" = 0 ] && grep -aq '^RUNNING: .* --lambda_th 0.3 .*--ps-exact-deposit ' "${SD}/ps_output.runlog" \
          && [ "$(lacks "${SD}/ps_output.runlog" '^RUNNING: .*--(exact-average|lambda-th)')" = 0 ] \
          && [ "$(has "${TMP}/p_old.log" 'snap 99: ps_output.pts_den up to date \(same settings\), skipping compute')" = 0 ] \
@@ -1259,7 +1356,8 @@ sdrive() {   # <driver> <log> [VAR=value ...]: the copied driver on SDATA's SIM 
     local scr="$1" log="$2"; shift 2
     local rc=0
     env -u DTFE_GPU -u PS_GPU -u DTFE_METAL -u PS_METAL -u PS_EXACT -u DTFE_EXACT -u DTFE_EXACT_AVERAGE -u PS_VOLUME_WEIGHTED -u PS_CAUSTICS -u FIELDS -u OUTPUT_PREFIX \
-        -u PS_LINEAR_DEPOSIT -u DTFE_PRECISION DTFE_DATA_ROOT="${SDATA}" "$@" "${MREPO}/scripts/${scr}" -s SIM -g 16 99 >"${log}" 2>&1 || rc=$?
+        -u SUBSAMPLES -u AVG_SUBSAMPLES -u PS_MERGE -u ORDERED_MERGE -u FIXED_POINT_MERGE \
+        -u PS_LINEAR_DEPOSIT -u FACE_GRADIENT -u DTFE_PRECISION DTFE_DATA_ROOT="${SDATA}" "$@" "${MREPO}/scripts/${scr}" -s SIM -g 16 99 >"${log}" 2>&1 || rc=$?
     echo "${rc}"
 }
 sline() { grep -aE -e '^ +\./(PS-)?DTFE(-double)? ' "$1" | head -1; }      # the DRY RUN's planned command
@@ -1278,36 +1376,51 @@ for c in "run_dtfe.sh o/.gpu_mode_metal" "run_dtfe.sh o/.gpu_mode_cuda" "run_dtf
 done
 check "$([ "${g}" = " gpu gpu cpu cpu cpu gpu gpu cpu cpu" ] && echo 0 || echo 1)" \
       "the GPU by default exactly when the pair's object folder says metal / cuda / hip (not off, the CPU-emulated cudaemu, none, or the other pair's) (${g# })"
-g="$(gpu_of run_dtfe.sh o/.gpu_mode_metal DTFE_GPU=0) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_GPU=0)"
+g="$(gpu_of run_dtfe.sh o/.gpu_mode_metal DTFE_GPU=0) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_GPU=0)"
 g="${g} $(gpu_of run_dtfe.sh o/.gpu_mode_off DTFE_GPU=1) $(gpu_of run_dtfe.sh o/.gpu_mode_metal DTFE_PRECISION=double)"
 g="${g} $(gpu_of run_dtfe.sh o_d/.gpu_mode_metal DTFE_PRECISION=double)"
 check "$([ "${g}" = "cpu cpu gpu cpu gpu" ] && echo 0 || echo 1)" \
-      "... DTFE_GPU / PS_GPU = 0 or 1 wins over the stamp; the double pair reads o_d (${g})"
+      "... DTFE_GPU = 0 or 1 wins over the stamp in both drivers; the double pair reads o_d (${g})"
 check "$(has "${TMP}/s_gpu.log" "^'_a' interpolation: GPU \(--gpu\) \(DTFE_GPU unset: DTFE-double is a GPU build")" "... and the driver says which, and why"
 g="$(gpu_of run_dtfe.sh o/.gpu_mode_metal DTFE_METAL=0) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_METAL=0)"
 g="${g} $(gpu_of run_dtfe.sh o/.gpu_mode_off DTFE_METAL=1) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_off PS_METAL=1)"
-g="${g} $(gpu_of run_dtfe.sh o/.gpu_mode_off DTFE_GPU=0 DTFE_METAL=1) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_GPU=1 PS_METAL=0)"
-check "$([ "${g}" = "cpu cpu gpu gpu cpu gpu" ] && echo 0 || echo 1)" \
-      "... the older names DTFE_METAL / PS_METAL are read while the new ones are unset; DTFE_GPU / PS_GPU win over them (${g})"
-g="$(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_EXACT=1) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_EXACT=1 PS_GPU=1)"
-g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_EXACT=1 PS_GPU=auto) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_EXACT=1 PS_METAL=1)"
-g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_EXACT=1 PS_METAL=auto)"
-check "$([ "${g}" = "cpu gpu cpu gpu cpu" ] && echo 0 || echo 1)" \
-      "... the exact deposit (PS_EXACT=1) runs on the CPU on a GPU build, faster there, for PS_GPU unset or auto and for the older PS_METAL alike; PS_GPU=1 or PS_METAL=1 still moves it (${g})"
+g="${g} $(gpu_of run_dtfe.sh o/.gpu_mode_off DTFE_GPU=0 DTFE_METAL=1) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_GPU=1 PS_GPU=0 PS_METAL=0)"
+g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_off PS_GPU=1) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_GPU=0 PS_METAL=1)"
+check "$([ "${g}" = "cpu cpu gpu gpu cpu gpu gpu cpu" ] && echo 0 || echo 1)" \
+      "... the older names DTFE_METAL / PS_GPU / PS_METAL are read while DTFE_GPU is unset (PS_GPU before PS_METAL); DTFE_GPU wins over them (${g})"
+g="$(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=1) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=1 DTFE_GPU=1)"
+g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=1 DTFE_GPU=auto) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_EXACT=1)"
+g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_EXACT=1 PS_METAL=1) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_EXACT=1 PS_GPU=AUTO)"
+g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=true)"
+check "$([ "${g}" = "cpu gpu cpu cpu gpu cpu cpu" ] && echo 0 || echo 1)" \
+      "... the exact deposit (DTFE_EXACT_AVERAGE=1, or PS_EXACT=1, or =true) runs on the CPU on a GPU build, faster there, for DTFE_GPU unset or auto and the older names alike; a GPU knob of 1 still moves it (${g})"
 rm -rf "${MREPO}/o" "${MREPO}/o_ps" "${MREPO}/o_d" "${MREPO}/o_ps_d"
 rc=$(sdrive run_ps_dtfe.sh "${TMP}/s_psdef.log" DRY_RUN=1)
-check "$([ "${rc}" = "0" ] && sline "${TMP}/s_psdef.log" | grep -qE -e '--field +density_a +velocity_a +gradient_a +divergence_a +shear_a +vorticity_a +dispersion_a +tweb_a +vweb_a +--lambda-th +0\.3 .*--ps-volume-weighted .*--ps-caustics' \
-         && echo 0 || echo 1)" "run_ps_dtfe.sh's defaults are production's: the nine fields, volume-weighted moments, the caustic classes (${rc})"
+check "$([ "${rc}" = "0" ] && sline "${TMP}/s_psdef.log" | grep -qE -e '--field +density_a +velocity_a +divergence_a +shear_a +--lambda-th +0\.3 .*--ps-volume-weighted .*--ps-caustics' \
+         && echo 0 || echo 1)" "run_ps_dtfe.sh's defaults are production's: the four analysis fields, volume-weighted moments, the caustic classes (${rc})"
 rc=$(sdrive run_ps_dtfe.sh "${TMP}/s_pslin.log" DRY_RUN=1 PS_LINEAR_DEPOSIT=1)
 rc2=$(sdrive run_ps_dtfe.sh "${TMP}/s_pslin2.log" DRY_RUN=1 PS_LINEAR_DEPOSIT=1 PS_VOLUME_WEIGHTED=1)
 check "$(sline "${TMP}/s_pslin.log" | grep -q -e '--ps-linear-deposit' && ! sline "${TMP}/s_pslin.log" | grep -q -e '--ps-volume-weighted' \
          && grep -aq 'velocity moments stay mass-weighted' "${TMP}/s_pslin.log" && sline "${TMP}/s_pslin2.log" | grep -q -e '--ps-volume-weighted' \
          && echo 0 || echo 1)" "... PS_LINEAR_DEPOSIT=1 drops the default volume weighting (said); an explicit PS_VOLUME_WEIGHTED=1 stays (${rc}, ${rc2})"
+# FACE_GRADIENT=1: --face-gradient in both drivers; run_ps_dtfe.sh refuses it, exit 2 before any snapshot, without the
+# exact deposit, without the volume weighting or on the GPU deposit
+rc=$(sdrive run_ps_dtfe.sh "${TMP}/s_psface.log" DRY_RUN=1 FACE_GRADIENT=1 DTFE_EXACT_AVERAGE=1)
+rc2=$(sdrive run_ps_dtfe.sh "${TMP}/s_psface2.log" DRY_RUN=1 FACE_GRADIENT=1)
+rc3=$(sdrive run_ps_dtfe.sh "${TMP}/s_psface3.log" DRY_RUN=1 FACE_GRADIENT=1 DTFE_EXACT_AVERAGE=1 PS_VOLUME_WEIGHTED=0)
+rc4=$(sdrive run_ps_dtfe.sh "${TMP}/s_psface4.log" DRY_RUN=1 FACE_GRADIENT=1 DTFE_EXACT_AVERAGE=1 DTFE_GPU=1)
+rc5=$(sdrive run_dtfe.sh "${TMP}/s_dtface.log" DRY_RUN=1 FACE_GRADIENT=1)
+check "$([ "${rc}" = "0" ] && sline "${TMP}/s_psface.log" | grep -qE -e '--exact-average .*--ps-volume-weighted +--face-gradient' \
+         && [ "${rc2}" = "2" ] && grep -aq 'needs the exact deposit' "${TMP}/s_psface2.log" \
+         && [ "${rc3}" = "2" ] && grep -aq 'needs the volume-weighted' "${TMP}/s_psface3.log" \
+         && [ "${rc4}" = "2" ] && grep -aq "runs on the CPU's exact deposit" "${TMP}/s_psface4.log" \
+         && [ "${rc5}" = "0" ] && sline "${TMP}/s_dtface.log" | grep -qE -e '--exact-average +--face-gradient$' \
+         && echo 0 || echo 1)" "FACE_GRADIENT=1 passes --face-gradient in both drivers; PS without -e, the volume weighting or on the GPU: exit 2 (${rc} ${rc2} ${rc3} ${rc4} ${rc5})"
 rc=$(sdrive run_dtfe.sh "${TMP}/s_dtdef.log" DRY_RUN=1)
-check "$([ "${rc}" = "0" ] && sline "${TMP}/s_dtdef.log" | grep -qE -e 'snapdir_099/output +--grid +16 +--padding +15 +--periodic +--field +density_a +velocity_a +gradient_a +divergence_a +shear_a +vorticity_a +tweb_a +vweb_a +--lambda-th +0\.3 +--exact-average$' \
-         && echo 0 || echo 1)" "run_dtfe.sh's defaults: padding 15, the eight fields with the T-web / V-web, the exact cell average (${rc})"
+check "$([ "${rc}" = "0" ] && sline "${TMP}/s_dtdef.log" | grep -qE -e 'snapdir_099/output +--grid +16 +--padding +15 +--periodic +--field +density_a +velocity_a +divergence_a +shear_a +--lambda-th +0\.3 +--exact-average$' \
+         && echo 0 || echo 1)" "run_dtfe.sh's defaults: padding 15, the same four fields as run_ps_dtfe.sh, the exact cell average (${rc})"
 # OUTPUT_PREFIX for run_dtfe.sh: the files and the run log under it; a PS-DTFE-style prefix refused before anything runs
-rc=$(sdrive run_dtfe.sh "${TMP}/s_pfx.log" OUTPUT_PREFIX=output_mc DTFE_EXACT=0 FAKE_MODE=ok)
+rc=$(sdrive run_dtfe.sh "${TMP}/s_pfx.log" OUTPUT_PREFIX=output_mc DTFE_EXACT_AVERAGE=0 FAKE_MODE=ok)
 check "$([ "${rc}" = "0" ] && [ -f "${SSD}/output_mc.runlog" ] && [ ! -e "${SSD}/output.runlog" ] \
          && grep -aq '^RUNNING: .*snapdir_099/output_mc --grid' "${SSD}/output_mc.runlog" && echo 0 || echo 1)" \
       "run_dtfe.sh OUTPUT_PREFIX=output_mc: the binary's output and the run log are output_mc.* (${rc})"
@@ -1348,19 +1461,19 @@ rm -rf "${SSD}/output."* "${SSD}/output.superseded"
 rc=$(sdrive run_dtfe.sh "${TMP}/s_supnone.log" FAKE_MODE=write)
 check "$([ "${rc}" = "0" ] && [ ! -e "${SSD}/output.superseded" ] && [ "$(lacks "${TMP}/s_supnone.log" 'Superseded')" = 0 ] && echo 0 || echo 1)" \
       "... and a first run into an empty prefix makes no superseded folder (${rc})"
-# run_ps_pipeline.sh's GPU default: PS_GPU unset follows the PS binary's stamp as run_ps_dtfe.sh does, so a CPU-only
+# run_ps_pipeline.sh's GPU default: DTFE_GPU unset follows the PS binary's stamp as run_ps_dtfe.sh does, so a CPU-only
 # build is never asked for the GPU (the copy (P) made, on SDATA's SIM: a dry run plans the plane and the snapshot)
 pgpu_of() {   # <stamp or none> [VAR=value ...]: 'gpu' / 'cpu' as the pipeline's planned run_ps_dtfe.sh call says
     local st="$1"; shift
     rm -rf "${MREPO}/o" "${MREPO}/o_ps" "${MREPO}/o_d" "${MREPO}/o_ps_d"
     if [ "${st}" != "none" ]; then mkdir -p "${MREPO}/${st%%/*}"; : > "${MREPO}/${st}"; fi
-    env -u PS_GPU -u PS_METAL -u PS_EXACT -u DTFE_PRECISION -u SIMS -u SNAPS DTFE_DATA_ROOT="${SDATA}" SIMS=SIM NU=8 DRY_RUN=1 "$@" \
+    env -u DTFE_GPU -u PS_GPU -u PS_METAL -u DTFE_EXACT_AVERAGE -u PS_EXACT -u DTFE_PRECISION -u SIMS -u SNAPS DTFE_DATA_ROOT="${SDATA}" SIMS=SIM NU=8 DRY_RUN=1 "$@" \
         "${MREPO}/scripts/run_ps_pipeline.sh" >"${TMP}/s_pgpu.log" 2>&1 || true
     local line
     line="$(grep -aE -e 'run_ps_dtfe\.sh -s SIM ' "${TMP}/s_pgpu.log" | tail -1)"
     if [ -z "${line}" ]; then echo none
-    elif [[ "${line}" == *" -m 99"* && "${line}" == *"PS_GPU=1 "* ]]; then echo gpu
-    elif [[ "${line}" != *" -m "* && "${line}" == *"PS_GPU=0 "* ]]; then echo cpu
+    elif [[ "${line}" == *" -m 99"* && "${line}" == *"DTFE_GPU=1 "* ]]; then echo gpu
+    elif [[ "${line}" != *" -m "* && "${line}" == *"DTFE_GPU=0 "* ]]; then echo cpu
     else echo mixed; fi
 }
 g=""
@@ -1369,16 +1482,70 @@ for c in "o_ps/.gpu_mode_metal" "o_ps/.gpu_mode_cuda" "o_ps/.gpu_mode_off" "o_ps
     g="${g} $(pgpu_of ${c})"
 done
 check "$([ "${g}" = " gpu gpu cpu cpu cpu cpu" ] && echo 0 || echo 1)" \
-      "run_ps_pipeline.sh, PS_GPU unset: the GPU (-m, PS_GPU=1 for run_ps_dtfe.sh) exactly when the PS binary's object folder says metal / cuda (not off, cudaemu, none, or the standard pair's) (${g# })"
-g="$(pgpu_of o_ps/.gpu_mode_metal PS_GPU=0) $(pgpu_of o_ps/.gpu_mode_off PS_GPU=1)"
+      "run_ps_pipeline.sh, DTFE_GPU unset: the GPU (-m, DTFE_GPU=1 for run_ps_dtfe.sh) exactly when the PS binary's object folder says metal / cuda (not off, cudaemu, none, or the standard pair's) (${g# })"
+g="$(pgpu_of o_ps/.gpu_mode_metal DTFE_GPU=0) $(pgpu_of o_ps/.gpu_mode_off DTFE_GPU=1)"
 g="${g} $(pgpu_of o_ps/.gpu_mode_metal DTFE_PRECISION=double) $(pgpu_of o_ps_d/.gpu_mode_metal DTFE_PRECISION=double)"
-check "$([ "${g}" = "cpu gpu cpu gpu" ] && echo 0 || echo 1)" "... PS_GPU = 0 or 1 wins over the stamp; the double pair reads o_ps_d (${g})"
-check "$(has "${TMP}/s_pgpu.log" 'GPU: 1 \(PS_GPU unset: PS-DTFE-double is a GPU build\)')" "... and the header says which, and why"
-g="$(pgpu_of o_ps/.gpu_mode_metal PS_EXACT=1) $(pgpu_of o_ps/.gpu_mode_metal PS_EXACT=1 PS_GPU=1)"
-check "$([ "${g}" = "cpu gpu" ] && echo 0 || echo 1)" "... the exact deposit (PS_EXACT=1): the CPU unless PS_GPU=1 (${g})"
+check "$([ "${g}" = "cpu gpu cpu gpu" ] && echo 0 || echo 1)" "... DTFE_GPU = 0 or 1 wins over the stamp; the double pair reads o_ps_d (${g})"
+check "$(has "${TMP}/s_pgpu.log" 'GPU: 1 \(DTFE_GPU unset: PS-DTFE-double is a GPU build\)')" "... and the header says which, and why"
+g="$(pgpu_of o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=1) $(pgpu_of o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=1 DTFE_GPU=1)"
+g="${g} $(pgpu_of o_ps/.gpu_mode_metal PS_EXACT=1) $(pgpu_of o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=yes)"
+check "$([ "${g}" = "cpu gpu cpu cpu" ] && echo 0 || echo 1)" \
+      "... the exact deposit (DTFE_EXACT_AVERAGE=1, the older PS_EXACT=1, or =yes: the driver's own test): the CPU unless DTFE_GPU=1 (${g})"
 g="$(pgpu_of o_ps/.gpu_mode_metal PS_METAL=0) $(pgpu_of o_ps/.gpu_mode_off PS_METAL=1) $(pgpu_of o_ps/.gpu_mode_metal PS_EXACT=1 PS_METAL=1)"
-check "$([ "${g}" = "cpu gpu gpu" ] && echo 0 || echo 1)" "... PS_METAL, the older name, is read while PS_GPU is unset (${g})"
+g="${g} $(pgpu_of o_ps/.gpu_mode_off PS_GPU=1)"
+check "$([ "${g}" = "cpu gpu gpu gpu" ] && echo 0 || echo 1)" "... PS_GPU and PS_METAL, the older names, are read while DTFE_GPU is unset (${g})"
 rm -rf "${MREPO}/o" "${MREPO}/o_ps" "${MREPO}/o_d" "${MREPO}/o_ps_d"
+
+echo ""
+echo "(T) the knobs' older names (config.sh knob, P6.7): the same command as the new name, one warning; the new one wins."
+TCD="${TMP}/t cache"
+t_pair() {   # <driver> <old=value> <new=value> [VAR=value ...]: 0 when the old name plans the new name's command,
+             # with exactly one 'warning: OLD is deprecated, use NEW' line, and the new name warns of nothing
+    local scr="$1" old="$2" new="$3"; shift 3
+    sdrive "${scr}" "${TMP}/t_old.log" DRY_RUN=1 "${old}" "$@" >/dev/null
+    sdrive "${scr}" "${TMP}/t_new.log" DRY_RUN=1 "${new}" "$@" >/dev/null
+    [ -n "$(sline "${TMP}/t_new.log")" ] && [ "$(sline "${TMP}/t_old.log")" = "$(sline "${TMP}/t_new.log")" ] \
+        && [ "$(grep -c "^warning: ${old%%=*} is deprecated, use ${new%%=*}$" "${TMP}/t_old.log")" = 1 ] \
+        && [ "$(grep -c 'is deprecated' "${TMP}/t_old.log")" = 1 ] && [ "$(lacks "${TMP}/t_new.log" 'is deprecated')" = 0 ]
+}
+t_bad=""
+for c in "run_ps_dtfe.sh AVG_SUBSAMPLES=2 SUBSAMPLES=2" "run_ps_dtfe.sh PS_PARALLEL_TRI=1 PARALLEL_TRIANGULATION=1" \
+         "run_ps_dtfe.sh PS_LAG_PADDING=4 PS_LAGRANGIAN_PADDING=4" "run_ps_dtfe.sh PS_EXACT=1 DTFE_EXACT_AVERAGE=1" \
+         "run_ps_dtfe.sh PS_GPU=1 DTFE_GPU=1" "run_ps_dtfe.sh PS_METAL=1 DTFE_GPU=1" "run_ps_dtfe.sh DTFE_PADDING=7 PADDING=7" \
+         "run_ps_dtfe.sh LAGRANGIAN_INPUT=${SDATA}/SIM/combined_ics.hdf5 PS_LAGRANGIAN_INPUT=${SDATA}/SIM/combined_ics.hdf5" \
+         "run_dtfe.sh DTFE_METAL=1 DTFE_GPU=1" "run_dtfe.sh DTFE_EXACT=0 DTFE_EXACT_AVERAGE=0" \
+         "run_dtfe.sh DTFE_PADDING=7 PADDING=7"; do
+    # shellcheck disable=SC2086
+    t_pair ${c} || t_bad="${t_bad} [${c}]"
+done
+t_pair run_ps_dtfe.sh "TESS_CACHE=${TCD}" "TESSELLATION_CACHE=${TCD}" || t_bad="${t_bad} [TESS_CACHE ps]"
+t_pair run_dtfe.sh "TESS_CACHE=${TCD}" "TESSELLATION_CACHE=${TCD}" || t_bad="${t_bad} [TESS_CACHE std]"
+: > "${TMP}/t_points.txt"
+t_pair run_ps_dtfe.sh PTS_CONVENTIONS=legacy PS_POINT_CONVENTIONS=legacy SAMPLE_POINTS="${TMP}/t_points.txt" || t_bad="${t_bad} [PTS_CONVENTIONS]"
+check "$([ -z "${t_bad}" ] && echo 0 || echo 1)" \
+      "each older knob alone plans the same command as its new name, with one deprecation line (the new name: none)${t_bad:+ -- differ:${t_bad}}"
+# both set to different values: the new one wins, with a warning, and nothing is refused (a stray export or the
+# launcher's older names beside the new ones must not stop a run during the window)
+rc=$(sdrive run_ps_dtfe.sh "${TMP}/t_both.log" DRY_RUN=1 SUBSAMPLES=2 AVG_SUBSAMPLES=4 DTFE_EXACT_AVERAGE=0 PS_EXACT=1)
+check "$([ "${rc}" = 0 ] && sline "${TMP}/t_both.log" | grep -qE -e '--subsamples +2 ' && ! sline "${TMP}/t_both.log" | grep -q -e '--exact-average' \
+         && grep -aqx 'warning: AVG_SUBSAMPLES is deprecated, use SUBSAMPLES (AVG_SUBSAMPLES=4 is not read: SUBSAMPLES=2 wins)' "${TMP}/t_both.log" \
+         && grep -aqx 'warning: PS_EXACT is deprecated, use DTFE_EXACT_AVERAGE (PS_EXACT=1 is not read: DTFE_EXACT_AVERAGE=0 wins)' "${TMP}/t_both.log" \
+         && echo 0 || echo 1)" "both names set apart: the new one wins and the warning says so, exit 0 (${rc})"
+# config.sh's own knobs, sourced alone
+t_cfg="$(env -u GRID_SIZE DTFE_GRID_SIZE=64 bash -c 'source scripts/config.sh; echo "${GRID_SIZE} ${CALLER_GRID_SIZE}"' 2>"${TMP}/t_cfg.err")"
+check "$([ "${t_cfg}" = "64 64" ] && grep -qx 'warning: DTFE_GRID_SIZE is deprecated, use GRID_SIZE' "${TMP}/t_cfg.err" && echo 0 || echo 1)" \
+      "config.sh: DTFE_GRID_SIZE, the older name, is GRID_SIZE (with a warning) (${t_cfg})"
+# a switch reads like the binaries' (src/env_knobs.h): 0/false/no/off (any case) off, any other value on
+sdrive run_ps_dtfe.sh "${TMP}/t_on.log" DRY_RUN=1 PS_CAUSTICS=1 PS_VERTEX_MASS=1 PS_CAUSTIC_CUSPS=1 >/dev/null
+sdrive run_ps_dtfe.sh "${TMP}/t_true.log" DRY_RUN=1 PS_CAUSTICS=true PS_VERTEX_MASS=YES PS_CAUSTIC_CUSPS=on >/dev/null
+sdrive run_ps_dtfe.sh "${TMP}/t_off.log" DRY_RUN=1 PS_CAUSTICS=0 PS_VERTEX_MASS=0 >/dev/null
+sdrive run_ps_dtfe.sh "${TMP}/t_false.log" DRY_RUN=1 PS_CAUSTICS=Off PS_VERTEX_MASS=false >/dev/null
+t_on="$(sline "${TMP}/t_on.log")"; t_true="$(sline "${TMP}/t_true.log")"
+t_off="$(sline "${TMP}/t_off.log")"; t_false="$(sline "${TMP}/t_false.log")"
+check "$([ -n "${t_on}" ] && [ "${t_on}" = "${t_true}" ] && [ -n "${t_off}" ] && [ "${t_off}" = "${t_false}" ] \
+         && printf '%s\n' "${t_true}" | grep -q -e '--ps-caustic-cusps' && ! printf '%s\n' "${t_false}" | grep -qE -e '--ps-(caustics|vertex-mass)' \
+         && echo 0 || echo 1)" "a switch set to true / YES / on is on, to Off / false off, as in the binaries (no longer a silent off for anything but 1)"
+rm -rf "${TCD}" "${TMP}/t_points.txt"
 rm -rf "${SDATA}"
 
 echo ""

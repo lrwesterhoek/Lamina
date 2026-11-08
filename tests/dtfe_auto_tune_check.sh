@@ -74,7 +74,7 @@ check() {  # $1 = name, $2 = 0/1 ok
 agrep() {  # set-e-safe grep assertion (ERE): $1 = check name, $2 = pattern, $3 = file
     if grep -Eq -- "$2" "$3"; then check "$1" 1; else check "$1" 0; fi
 }
-COMMON=(--periodic --input 105 --MpcUnit 1 --padding 10)
+COMMON=(--periodic --input-format 105 --mpc-unit 1 --padding 10)
 REPORT_RE='^AUTO-TUNE-REPORT partition=[0-9]+ mc=[0-9]+ predicted_gb=[0-9.]+ budget_gb=[0-9.]+ fixed_gb=[0-9.]+ .*over_budget=[01]$'
 
 # ---------- (A) the report ----------
@@ -231,7 +231,7 @@ PYEOF
 IR=("${SNAP}" "${TMP}/da_i" --grid 192 "${COMMON[@]}" --field density_a velocity_a gradient_a --partition 2 2 2
     --auto-tune-report)
 env DTFE_RAM_GB=64 "${BIN}" "${IR[@]}" --max-concurrent 1 > "${TMP}/da_i0.txt" 2>&1 || true
-env DTFE_RAM_GB=64 DTFE_AUTO_PTS_N=4194304 DTFE_AUTO_PTS_VELGRAD=1 "${BIN}" "${IR[@]}" --max-concurrent 1 \
+env DTFE_RAM_GB=64 DTFE_AUTO_PTS_N=4194304 DTFE_AUTO_PTS_VEL_GRAD=1 "${BIN}" "${IR[@]}" --max-concurrent 1 \
     --sample-points "${TMP}/da_i_plane.bin" > "${TMP}/da_i1.txt" 2>&1 || true
 p1="$(field pts_gb "${TMP}/da_i1.txt")"; f0="$(field fixed_gb "${TMP}/da_i0.txt")"; f1="$(field fixed_gb "${TMP}/da_i1.txt")"
 ok="$(awk -v p="${p1:-0}" -v a="${f0:-0}" -v b="${f1:-0}" 'BEGIN{print (p > 1.362 && p < 1.372 && b - a > p - 0.02 && b - a < p + 0.02) ? 1 : 0}')"

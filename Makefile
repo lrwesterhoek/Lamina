@@ -525,7 +525,8 @@ endif
 
 # TBB-parallel Delaunay insertion for PS-DTFE (CGAL's Parallel_tag data structure + lock grid,
 # CGAL_triangulation/triangulation.cpp; used at run time only with --parallel-triangulation or
-# DTFE_TBB_THREADS -- the default insert stays sequential and bit-reproducible). 'auto': compiled in when the tbb package is installed
+# DTFE_TRIANGULATION_THREADS (older name DTFE_TBB_THREADS, deprecated) -- the default insert stays sequential and
+# bit-reproducible). 'auto': compiled in when the tbb package is installed
 # (macOS: `brew install tbb`; Debian/Ubuntu: libtbb-dev); TBB=0 forces it off, TBB=1 requires it.
 # PS-DTFE only: the standard DTFE binary keeps its sequential insert and Fast_location hierarchy
 # (its clustered Eulerian points build 4.5x SLOWER in parallel, where PS-DTFE's near-lattice

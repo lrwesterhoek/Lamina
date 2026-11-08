@@ -48,7 +48,7 @@ struct PSGpuGrids
     //                  kernels' own words, handed over unconverted) and 'mass' stays EMPTY. The caller adds the
     //                  GPU-deferred and released tetrahedra into the same integers and converts to float once
     //                  (ps_interpolation.cc), so no deposit after the kernel rounds a share away.
-    //   massScale = 0  the float grid in 'mass' (PS_GPU_FLOAT_MASS=1, kept for A/B, or a
+    //   massScale = 0  the float grid in 'mass' (DTFE_GPU_FLOAT_MASS=1, kept for A/B, or a
     //                  total mass that gives no usable unit) and 'massFx' stays EMPTY.
     std::vector<float>    mass;     // subTotal      accumulated MASS (float form; see above)
     std::vector<int64_t>  massFx;   // subTotal      accumulated MASS (fixed-point form; see above)
@@ -72,7 +72,7 @@ struct PSGpuGrids
     std::vector<int64_t>  fx[PS_FX_N];
     float                 fxScale[PS_FX_N] = {};
     bool                  dispwIsMass = false;
-    // PS_MASS_AUDIT=1 (ps_mass_audit.h) only, else -1: the fixed-point mass grid's exact total and the
+    // DTFE_MASS_AUDIT=1 (ps_mass_audit.h) only, else -1: the fixed-point mass grid's exact total and the
     // (float) masses of the tets the kernel deferred, summed by the host before it converts/frees them
     double auditFixedTotal = -1., auditDeferredMass = -1.;
 };
@@ -108,7 +108,7 @@ struct PSGpuGrids
 // otherwise): 'scal' holds the four vertex scalars per tet (nTet*4; EMPTY when both are off), and
 // the kernel deposits the linear profile's value (and the constant gradient) times the moment
 // weight, exactly as the velocity moment, into out.scal / out.sgrad.
-// windowMode (--ps-window): the sub-box is a window of the full grid, not a partition's own box --
+// windowMode (--grid-window): the sub-box is a window of the full grid, not a partition's own box --
 // every sample / clipped piece of a tet is counted for its normalization as in the full run, only
 // those inside the sub-box are deposited.
 // massExtra: the mass the caller adds to the mass grid itself on top of 'masses' (the
@@ -212,7 +212,7 @@ bool dtfeGpuSharedDeposit(std::vector<float>& verts, std::vector<float>& dens, s
 bool dtfeGpuSharedResult(const float** den, const float** vel, const float** grad, const float** scal, const float** sgrad);
 void dtfeGpuSharedEnd();
 
-// --ps-window, the exact deposit (CPU loop and both GPU hosts' item bounds; the kernels carry a twin):
+// --grid-window, the exact deposit (CPU loop and both GPU hosts' item bounds; the kernels carry a twin):
 // the contiguous hull, in RAW (unwrapped) cell indices, of the part of a tetrahedron's span [lo, hi)
 // that lies in the window [o, o+m) or one of its periodic images (o+m may exceed n: a window wrapping
 // the seam). False when the span misses the window. A tetrahedron is shorter than the box, so at
@@ -274,7 +274,7 @@ struct PSGpuPlan
 
 // The plan of a call (its arguments as psGpuDepositFields takes them). The mass grid is an exact 64-bit fixed-point
 // sum (DepositParams.massFixed in the kernel says why) unless floatMass, the host's A/B switch to float atomics
-// (PS_GPU_FLOAT_MASS=1). Its unit covers the caller's own
+// (DTFE_GPU_FLOAT_MASS=1). Its unit covers the caller's own
 // deposits too (massExtra): the caller adds the deferred and released tets into these words.
 inline PSGpuPlan psGpuPlan(const size_t subDims[3], bool fVel, bool fDisp, bool fGrad, bool fVolW, bool fCaustic,
                            bool fExact, bool fScal, bool fSGrad, std::vector<float> const& masses, double massExtra,
@@ -307,7 +307,7 @@ inline PSGpuPlan psGpuPlan(const size_t subDims[3], bool fVel, bool fDisp, bool 
         // (a non-finite mass -- bad input, or the DTFE_TEST_NAN_SHARE hook -- is left out of the unit: its shares are
         // the non-finite guard's to drop and count, not a reason to lose the whole grid's fixed point)
         for (float const mt : masses) if (std::isfinite(mt)) totalMass += double(mt);
-        if (fxUnits.massTotal > 0.) totalMass = fxUnits.massTotal;   // (a --ps-window pass: the caller's total)
+        if (fxUnits.massTotal > 0.) totalMass = fxUnits.massTotal;   // (a --grid-window pass: the caller's total)
         p.massFixed = !floatMass && psMassFixedScale(totalMass, p.massScale);
     }
     // the dispersion's own normalizer sums exactly the mass grid's shares: with both exact it is not deposited
@@ -512,7 +512,7 @@ inline PSHostCkEnv psHostCheckpointEnv()
 }
 
 // Reports the passes' failed command buffers / kernels and the checkpoints (after any failure, else under
-// PS_GPU_TIMING). backend: "Metal", "CUDA" or "HIP"; unit: what failed, "buffer" (Metal) or "kernel" (CUDA/HIP);
+// DTFE_GPU_TIMING). backend: "Metal", "CUDA" or "HIP"; unit: what failed, "buffer" (Metal) or "kernel" (CUDA/HIP);
 // snap: the backend's GpuSnapshot (gpu_metal_retry.h / gpu_cuda_retry.cuh).
 template <class Snapshot>
 inline void psHostReportPasses(char const* backend, char const* unit, bool const success, int const nFailed,
@@ -528,7 +528,7 @@ inline void psHostReportPasses(char const* backend, char const* unit, bool const
                 snap.bytes / 1.e6, snap.sec);
 }
 
-// PS_GPU_TIMING=1: where a psGpuDepositFields call spends its time, phase by phase, in seconds (both hosts). The
+// DTFE_GPU_TIMING=1: where a psGpuDepositFields call spends its time, phase by phase, in seconds (both hosts). The
 // hold of the GPU runs from taking the host's ctxMutex to the release of the call's buffers: the GPU idles in all
 // of it but 'kernels'. The call prepares its work before it takes the lock, so the partitions that queue for the
 // GPU do that work while another one holds it; it copies its grids back and frees its buffers before it lets go,
@@ -565,7 +565,7 @@ struct PSGpuPhaseTimes
     }
 };
 
-// One line per partition (PS_GPU_TIMING): the phases before and in a hold of 'held' seconds, with snapSec = the
+// One line per partition (DTFE_GPU_TIMING): the phases before and in a hold of 'held' seconds, with snapSec = the
 // checkpoints' copies (in the hold).
 inline void psGpuReportPhases(char const* backend, int const partition, PSGpuPhaseTimes const& t, double const snapSec,
                               double const held)

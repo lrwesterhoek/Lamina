@@ -1,33 +1,33 @@
 """Track (sub)halos along their SubLink main-progenitor branch: SIZE, SHAPE, ORIENTATION,
 MERGERS and the DTFE / PS-DTFE FIELD ENVIRONMENT.
 
-Per tracked subhalo, walking back in time from --snap:
+Per tracked subhalo, walking back in time from --start-snap:
   SIZE        : total subhalo mass, half-mass radius, R_200c of the host (centrals)
                 -- straight from the extended tree nodes (no group catalogs needed).
   SHAPE       : axis ratios b/a, c/a and triaxiality T from the DM mass tensor of the
                 subhalo's member particles. Needs BOTH the group catalog (groups_NNN, for
                 particle membership offsets) and the raw snapshot chunks (snapdir_NNN) at
                 that snapshot; snapshots missing either are skipped for shape with a note.
-  ORIENTATION : drift of the major axis, |cos angle| w.r.t. the z=0 (--snap) major axis,
+  ORIENTATION : drift of the major axis, |cos angle| w.r.t. the z=0 (--start-snap) major axis,
                 and the same for the SubhaloSpin vector (catalog-level fallback that works
                 even without particle data).
   MERGERS     : secondary progenitors joining the branch (SubLink NextProgenitor chains);
                 events above --min-ratio are ticked on the mass panel.
   ENVIRONMENT : the density contrast rho/rho_bar and (where available) the T-web/V-web
                 class at the halo position, sampled from the DTFE or PS-DTFE grids of
-                every snapshot on disk (--method ps|dtfe|auto via dtfelib.FieldSet, so it
+                every snapshot on disk (--estimator ps|dtfe|auto via dtfelib.FieldSet, so it
                 works identically for both estimators). Grids are loaded once per snapshot
                 for all tracked halos. The V-web is the MEAN-FIELD one for both:
                 a PS output's is derived from its velocity grid, the V-web standard DTFE
                 stores; '--ps-gradient stored' samples the stored PS grid (stream average).
 
-Selection: --subhalo ID [ID ...] (SubfindIDs at --snap), or --top N most massive centrals
+Selection: --subhalos ID [ID ...] (SubfindIDs at --start-snap), or --n-halos N most massive centrals
 (default 5) chosen from the trees themselves.
 
 Examples:
   python3 plot/plot_halo_tracking.py --sim TNG50-3-Dark                 # top 5 centrals, z=0
-  python3 plot/plot_halo_tracking.py --sim TNG50-3-Dark --subhalo 0 17 --method dtfe
-  python3 plot/plot_halo_tracking.py --sim TNG300-3-Dark --top 10 --method ps
+  python3 plot/plot_halo_tracking.py --sim TNG50-3-Dark --subhalos 0 17 --estimator dtfe
+  python3 plot/plot_halo_tracking.py --sim TNG300-3-Dark --n-halos 10 --estimator ps
 Outputs: figures/halo_tracking/<sim>/subhalo<ID>_evolution.png + branch data as .npz (named
 _<prefix> / _raw after the ID's files for --prefix / --raw: their environment comes from other grids;
 _stored for --ps-gradient stored).
@@ -40,7 +40,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
-from dtfelib import make_parser, use_data_root, add_ps_gradient_arg, mean_field_wanted
+from dtfelib import make_parser, use_data_root, add_ps_gradient_arg, mean_field_wanted, deprecated_alias
 from dtfelib.trees import TreeSet
 from dtfelib import groupcat as gc
 from dtfelib import environment as env
@@ -241,16 +241,19 @@ def plot_one(t: dict, sim: str, subfind0: int, snap0: int, outdir: Path, tag: st
 
 def main():
     def extra(p):
-        p.add_argument("--subhalo", type=int, nargs="+",
-                       help="SubfindID(s) at --snap to track (default: --top most massive centrals)")
-        p.add_argument("--top", type=int, default=5,
-                       help="if --subhalo not given: track the N most massive centrals (default 5)")
+        p.add_argument("--subhalos", dest="subhalo", type=int, nargs="+", metavar="ID",
+                       help="SubfindID(s) at --start-snap to track (default: the --n-halos most massive centrals)")
+        deprecated_alias(p, "--subhalo", "--subhalos")
+        p.add_argument("--n-halos", dest="top", type=int, default=5, metavar="N",
+                       help="if --subhalos is not given: track the N most massive centrals (default 5)")
+        deprecated_alias(p, "--top", "--n-halos")
         p.add_argument("--min-ratio", type=float, default=0.1,
                        help="minimum secondary/main mass ratio for a merger tick (default 0.1)")
         p.add_argument("--no-environment", action="store_true",
                        help="skip sampling the DTFE/PS-DTFE field environment")
     parser = make_parser("Track subhalo size/shape/orientation/mergers/environment along "
-                         "SubLink main-progenitor branches.")
+                         "SubLink main-progenitor branches.", snap_option="--start-snap",
+                         snap_help="the snapshot the subhalos are chosen at and followed back from (default 99)")
     extra(parser)
     add_ps_gradient_arg(parser)
     args = parser.parse_args()

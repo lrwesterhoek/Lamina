@@ -6,7 +6,7 @@
 # rms per cell with the thread count or the partitioning. So the vertices are ordered by a hash of the cell's
 # vertex set and every sample is centred (averaged_interpolation_1.cc: the comment above 'mcLegacy'). Asserted on
 # demo/z0_64.gadget (262144 particles, z=0, tracked in the repo) at 64^3, --periodic --padding 12, density_a velocity_a:
-#   A1  box mean of '.a_den' within 1e-4 of 1 (measured +2.0e-5; double build +1.4e-5), and with '-s 20' (the
+#   A1  box mean of '.a_den' within 1e-4 of 1 (measured +2.0e-5; double build +1.4e-5), and with '--samples 20' (the
 #       minimum count 4, the worst Sobol prefix; measured -5.1e-6). The vertex(0) realization (DTFE_MC_LEGACY=1, kept
 #       for A/B) must FAIL the same bound (measured -3.35e-3), so the check is known to see the bias
 #   A2  the per-cell noise against --exact-average, rms(a - exact) / <exact>, is no larger than the vertex(0)
@@ -21,9 +21,9 @@
 #   A5  GPU builds only (a GPU stamp in o/ or o_d/; SKIP otherwise, so CI's CPU-only build runs A1-A4): --gpu
 #       keeps the box mean within 1e-4 of 1 and matches the CPU grid like tests/dtfe_metal_check.sh (means
 #       to 1e-5 of the peak, at most 1e-3 of the cells more than 1e-3 apart: a sample on a cell face)
-#   A6  'velocityStd_a' only with '--method 2': method 1 (the default), --exact-average, method 3 and --CIC stop
+#   A6  'velocityStd_a' only with '--average-method 2': method 1 (the default), --exact-average, method 3 and --cic stop
 #       at option parsing with exit 1 and their error (method 1's: 'You cannot use the averaging method 1 ...'),
-#       rather than leaving the grid empty and segfaulting in the sub-domain merge; '-m 2' writes a finite,
+#       rather than leaving the grid empty and segfaulting in the sub-domain merge; '--average-method 2' writes a finite,
 #       non-negative '.a_velStd'
 #   A7  'dispersion' and 'dispersion_a' (PS-DTFE fields) stop at option parsing with exit 1 and the error that names
 #       PS-DTFE, in this binary and in ./DTFE-2d when it is built (not after the triangulation with an internal
@@ -62,8 +62,9 @@ echo ">> demo/z0_64.gadget at 64^3: the default average, the legacy one (DTFE_MC
 run n
 run l DTFE_MC_LEGACY=1 --
 run e -- --exact-average
-echo ">> -s 20; --partition 2 2 2; one thread; --padding 20"
-run s -- -s 20
+echo ">> --samples 20; --partition 2 2 2; one thread; --padding 20"
+# a total of 20 points per cell, which no '--subsamples k' (k^3) gives: the deprecated '--samples 20' (P6.6 decides)
+run s -- --samples 20
 run p -- --partition 2 2 2 --max-concurrent 1
 run t OMP_NUM_THREADS=1 --
 run d -- --padding 20
@@ -75,11 +76,11 @@ if [ "$GPU" = "1" ]; then
 else
     echo ">> A5 SKIP: $OBJ carries no GPU stamp (a METAL=1 / CUDA=1 / HIP=1 / CUDAEMU=1 build runs it)"
 fi
-echo ">> A6: 'velocityStd_a' with methods 1 and 3, --exact-average and --CIC (rejected), and with -m 2"
+echo ">> A6: 'velocityStd_a' with methods 1 and 3, --exact-average and --cic (rejected), and with --average-method 2"
 V=(--grid 16 --periodic --padding 12 --field density_a velocityStd_a)
 A6=""
 for c in "m1||You cannot use the averaging method 1 " "exact|--exact-average|'--exact-average' cannot compute 'velocityStd_a'" \
-         "m3|-m 3|You cannot use the averaging method 3 " "cic|--CIC|is not available with NGP/CIC/TSC/PCS/SPH/Voronoi"; do
+         "m3|--average-method 3|You cannot use the averaging method 3 " "cic|--cic|is not available with NGP/CIC/TSC/PCS/SPH/Voronoi"; do
     IFS='|' read -r tag extra text <<< "$c"
     # shellcheck disable=SC2086   # $extra: none or one option with its value
     "${DTFE_BIN}" "$SNAP" "$TMP/v_$tag" "${V[@]}" $extra > "$TMP/v_$tag.log" 2>&1
@@ -87,7 +88,7 @@ for c in "m1||You cannot use the averaging method 1 " "exact|--exact-average|'--
     grep -qF -- "$text" "$TMP/v_$tag.log" && said=1 || said=0
     A6="$A6 $tag:$rc:$said"
 done
-"${DTFE_BIN}" "$SNAP" "$TMP/v_m2" "${V[@]}" -m 2 --seed 7 > "$TMP/v_m2.log" 2>&1 || { echo "FAIL: run v_m2 (see $TMP/v_m2.log)"; exit 1; }
+"${DTFE_BIN}" "$SNAP" "$TMP/v_m2" "${V[@]}" --average-method 2 --seed 7 > "$TMP/v_m2.log" 2>&1 || { echo "FAIL: run v_m2 (see $TMP/v_m2.log)"; exit 1; }
 echo ">> A7: 'dispersion' and 'dispersion_a' in the standard binaries (rejected: PS-DTFE fields)"
 A7=""
 DISP_BINS=("${DTFE_BIN}"); [ -x ./DTFE-2d ] && DISP_BINS+=(./DTFE-2d)
@@ -152,7 +153,7 @@ bad = [f"{tag} (exit {rc}{'' if said == '1' else ', no error text'})" for tag, r
 std = rd("v_m2", "a_velStd")
 check("A6", len(good) == 4 and std.size == 16 ** 3 and np.isfinite(std).all() and (std >= 0).all() and std.mean() > 0,
       f"velocityStd_a rejected with exit 1 and its error by {', '.join(good) or 'none'}"
-      f"{'; NOT by ' + ', '.join(bad) if bad else ''}; -m 2 writes {std.size} finite cells >= 0 (mean {std.mean():.3g})")
+      f"{'; NOT by ' + ', '.join(bad) if bad else ''}; --average-method 2 writes {std.size} finite cells >= 0 (mean {std.mean():.3g})")
 disp = [c.split(":") for c in sys.argv[4].split()]
 good = [tag for tag, rc, said in disp if rc == "1" and said == "1"]
 bad = [f"{tag} (exit {rc}{'' if said == '1' else ', no error text'})" for tag, rc, said in disp if tag not in good]

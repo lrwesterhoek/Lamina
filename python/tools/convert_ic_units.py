@@ -26,7 +26,7 @@ CHUNK = 8_000_000   # particles per IO chunk (~96 MB of float32 coordinates)
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0], allow_abbrev=False)
     ap.add_argument("input", help="IC snapshot in ckpc/h (e.g. snap_ics.hdf5)")
     ap.add_argument("output", help="h-removed output (e.g. combined_ics.hdf5)")
     args = ap.parse_args()

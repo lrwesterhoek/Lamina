@@ -52,6 +52,14 @@ constexpr double kGpuTetVelBytes = 48.;
 constexpr double kGpuTetSlack = 1.3;
 // the standard GPU deposit's tetrahedra per particle of a thread's own box: x this for the ones crossing its faces
 constexpr double kStdFaceTets = 1.3;
+// standard DTFE: the share of the busiest partition's bytes still in the footprint once the partition loop is over and
+// the derived grids are allocated (stdPeak). Fitted on a replay of the 28 logged standard runs (plan P8.9 step 1:
+// lowest -1%, mean +13%; std100_099 +43% -> +14%; there 0.5 GB of an 11.8 GB partition stayed) ...
+constexpr double kStdPostKeep = 0.35;
+// ... but a small partition stays whole: up to this many bytes are booked in full (tests/dtfe_auto_tune_check.sh E,
+// 128^3: all of a 0.42 GB partition stayed, the derived grids came on top). Both refitted in phase R from the
+// SUMMARY's 'before post-proc' line
+constexpr double kStdPostKeepFloor = 1.e9;
 // a split for speed must predict less than this share of the best wall time so far: a clear gain only
 constexpr double kSpeedSplitGain = 0.85;
 // the '--sample-points' HitSink block one point-walk thread fills before handing it over (ps_point_eval.cc's size)
@@ -190,15 +198,16 @@ struct AutoTunePS
     bool exactDeposit = false;     // --exact-average
     bool caustics     = false;     // --ps-caustics
     bool haloRelease  = false;     // --ps-halo-release (sampled deposit: the released-tet multiplicity grid)
-    bool fixedMerge   = false;     // --fixed-point-merge: the summed full grids are 9 B integer words + carries
+    bool fixedMerge   = false;     // --ps-merge fixed-point: the summed full grids are 9 B integer words + carries
+    bool faceGradient = false;     // --face-gradient (docs/cleanup-plan.md P10): the face sums (both binaries)
 };
 
 // The PS deposit's MOMENT grids as 64-bit fixed-point sums (ps_deposit_params.h PSFxGrid): on by
-// default on the GPU (both builds) and on the CPU of the single build; PS_GPU_FLOAT_MOMENTS=1 selects the float
+// default on the GPU (both builds) and on the CPU of the single build; DTFE_GPU_FLOAT_MOMENTS=1 selects the float
 // sums (ps_interpolation.cc fxGpuWanted / fxMomWanted). Read here so the model follows an A/B run too.
 inline bool autoTunePSMomentsFixed()
 {
-    return not Env::flag( { "PS_GPU_FLOAT_MOMENTS" } );
+    return not Env::flag( { "DTFE_GPU_FLOAT_MOMENTS" } );
 }
 
 // One pass's MOMENT accumulators in the PS deposit, in Real bytes per sub-grid cell: the grids
@@ -227,6 +236,9 @@ inline double autoTuneFxMomentBytes(Field &f, AutoTunePS const &ps)
     if ( ps.volumeWeighted and f.velocity_dispersion ) b += 3.*R + (densityGrid ? 0. : R);   // disp_velocity (+ disp_weight)
     if ( ps.exactDeposit ) b += R;                                                           // the exact multiplicity
     if ( ps.haloRelease and not ps.exactDeposit ) b += R;                                    // the released multiplicity
+    // --face-gradient: the face sums' int64 words (ps_interpolation.cc fx.faceS / faceN: 2 x NO_DIM x (3 + 1) per cell,
+    // in EVERY build), the same "as many again" as the Real grids they become
+    if ( ps.faceGradient and ps.exactDeposit and ps.volumeWeighted and gradient ) b += 2.*NO_DIM*(noVelComp + 2.)*R;
     return b;
 }
 
@@ -257,19 +269,27 @@ inline std::vector<double> autoTuneFxGrids(Field &f, AutoTunePS const &ps)
     if ( f.scalar ) g.push_back( noScalarComp*R );                                            // PS_FX_SCAL
     if ( f.scalar_gradient ) g.push_back( noScalarGradComp*R );                               // PS_FX_SG
     if ( ps.haloRelease and not ps.exactDeposit ) g.push_back( R );                           // PS_FX_RM
+    // --face-gradient: the face sums' words, converted after the moment grids (ps_interpolation.cc fx.faceS, then
+    // fx.faceN; autoTuneFxMomentBytes counts the same)
+    if ( ps.faceGradient and ps.exactDeposit and ps.volumeWeighted and gradient )
+    {
+        g.push_back( 2.*NO_DIM*noVelComp*R );
+        g.push_back( 2.*NO_DIM*R );
+        g.push_back( 2.*NO_DIM*R );   // fx.faceP (the mass flux)
+    }
     return g;
 }
 
 // What the input reader frees and macOS's allocator keeps, in bytes: the reader's flat arrays (gadget_reader_HDF5.cc:
 // the positions, masses and velocities 'readParticleData' asks for, the scalars, the Lagrangian positions and the
-// IDs), freed one by one as Read_data::transferData builds the particles, and with '--lagrangianInput' the IC file's
+// IDs), freed one by one as Read_data::transferData builds the particles, and with '--ps-lagrangian-input' the IC file's
 // coordinates and IDs and the by-ID table (input_output.cc; a sort index of 8 B instead of the table's 12 when the
 // IDs are not contiguous). libmalloc keeps a freed block under 4 GiB in the footprint and serves only a request of
 // about half its size or more from it, so these stay until something that large is allocated. A run with full-size
-// grids allocates them right away; a --ps-window run does not -- its window grids, the partitions' particle copies,
+// grids allocates them right away; a --grid-window run does not -- its window grids, the partitions' particle copies,
 // the tessellations (TBB's own pools) and the GPU's buffers are all far smaller or elsewhere -- so the whole residue
 // is still there when the first wave of partitions tessellates: TNG100-3-Dark z=0 (94M particles, positions from a
-// '--lagrangianInput' file) reads to 13.1 GB, 57 B/particle live and 80 kept, and peaks with the first six
+// '--ps-lagrangian-input' file) reads to 13.1 GB, 57 B/particle live and 80 kept, and peaks with the first six
 // tessellations on top (19.6 GB measured at '--partition 6 6 6 --max-concurrent 6'). Later partitions' large
 // allocations take the blocks over, so the residue is gone a few partitions in.
 inline double autoTuneReadKeptBytes(User_options const &u, double const N)
@@ -319,6 +339,28 @@ inline double autoTunePSCountBytes(Field &f, AutoTunePS const &ps, int const pha
     return b;
 }
 
+// The deposit-phase full grids the first merge sizes (Quantities SIZE_AT_MERGE: the moment weights, the face sums), in
+// bytes per cell -- the partition loop's dynamic concurrency reserves them until then (autoTuneBytesPerCell counts
+// them in the deposit phase; the predicates are its)
+inline double autoTuneMergeGrownBytes(Field &f, AutoTunePS const &ps)
+{
+    if ( not f.selected() or not ps.phaseSpace ) return 0.;
+    double const R = double(sizeof(Real));
+    bool const densityGrid = f.density or f.velocity_tweb;
+    bool const gradient = f.velocity_gradient or f.velocity_divergence or f.velocity_shear
+                          or f.velocity_vorticity or f.velocity_vweb;
+    bool const needWeight = f.velocity or f.velocity_gradient or f.velocity_dispersion
+                            or f.velocity_divergence or f.velocity_shear or f.velocity_vorticity
+                            or f.velocity_vweb or f.scalar or f.scalar_gradient;
+    double b = 0.;
+    if ( needWeight and not (densityGrid and not ps.volumeWeighted) ) b += R;   // mass_weight
+    if ( ps.volumeWeighted and f.velocity_dispersion ) b += R + 3.*R;           // disp_weight + disp_velocity
+    if ( ps.faceGradient and gradient and ps.exactDeposit and ps.volumeWeighted )
+        b += 2.*NO_DIM*(noVelComp + 2.)*R;                                        // face_velocity, _coverage, _momentum
+    if ( ps.fixedMerge ) b = b / R * 9.;                                          // int64 word + int8 carry each
+    return b;
+}
+
 // The grids only the POST phase allocates (autoTuneBytesPerCell's phase 1, below), in bytes per cell: the derived
 // fields and the T-web tidal stage, both made after the deposit loop by postProcessWebFields (web_fields.cc).
 inline double autoTuneDerivedBytes(Field &f)
@@ -329,7 +371,6 @@ inline double autoTuneDerivedBytes(Field &f)
     if ( f.velocity_divergence ) b += R;
     if ( f.velocity_shear ) b += 5.*R;
     if ( f.velocity_vorticity ) b += 3.*R;
-    if ( f.velocity_std ) b += R;
     if ( f.velocity_tweb ) b += R + 3.*R;                      // web label + eigenvalues
     if ( f.velocity_vweb ) b += R + 3.*R;
     // T-web tidal stage (computeTidalWebClassification, web_fields.cc): all live at
@@ -352,6 +393,9 @@ inline double autoTuneBytesPerCell(Field &f, AutoTunePS const &ps, int const pha
     // field.density, not the raw f.density.
     bool const densityGrid = f.density or f.velocity_tweb;
     if ( densityGrid ) b += R;
+    // velocityStd_a: sized before the loop (reserveMemory) and filled by the deposit (averaged_interpolation_2.cc;
+    // deselectVelocityDerivatives keeps it), so both phases hold it
+    if ( f.velocity_std ) b += R;
     // dispersion allocates the velocity grid too -- EXCEPT volume-weighted, where it carries
     // its own disp_velocity mean instead (counted in the deposit-phase PS block below)
     if ( f.velocity or (f.velocity_dispersion and not (ps.phaseSpace and ps.volumeWeighted)) )
@@ -360,6 +404,12 @@ inline double autoTuneBytesPerCell(Field &f, AutoTunePS const &ps, int const pha
     if ( f.velocity_dispersion ) b += 6.*R;
     if ( f.scalar ) b += noScalarComp*R;
     if ( f.scalar_gradient ) b += noScalarGradComp*R;
+    // --face-gradient (docs/cleanup-plan.md P10), the deposit phase: PS-DTFE's merged face sums (Quantities::face_velocity
+    // + face_coverage, 2 x NO_DIM x (3 + 1) Real per cell, freed in the normalization) and the cell mean velocity the
+    // mean-flow gradient needs, written or not. (Standard DTFE's face pass holds 9 doubles per cell of the sub-domain it
+    // interpolates, not of the full grid: the standard planner books it per sub-domain, AutoTuneStdInputs::faceCell.)
+    if ( ps.faceGradient and gradient and phase == 0 and ps.phaseSpace and ps.exactDeposit and ps.volumeWeighted )
+        b += 2.*NO_DIM*(noVelComp + 2.)*R + ( f.velocity ? 0. : 3.*R ) + R;   // (+ the mass flux's output grid)
 
     if ( phase == 1 )
         b += autoTuneDerivedBytes( f );   // derived fields: allocated only after the deposit loop (above)
@@ -379,7 +429,7 @@ inline double autoTuneBytesPerCell(Field &f, AutoTunePS const &ps, int const pha
         if ( ps.volumeWeighted and f.velocity_dispersion ) b += R + 3.*R;           // disp_weight + disp_velocity
     }
 
-    // '--fixed-point-merge' (ps_fixed_merge.h): during the loop every SUMMED full-grid component (counted
+    // '--ps-merge fixed-point' (ps_fixed_merge.h): during the loop every SUMMED full-grid component (counted
     // above at R: density, velocity, gradient, dispersion, scalar(s), mass_weight, disp_weight, disp_velocity; below:
     // stream_count, tet_touch) is an int64 word + an int8 carry, 9 B, and its Real grid does not exist; the masks
     // (hidden_streams, caustic_bits) stay Real. After the loop the grids convert one at a time, the largest one's Real
@@ -401,9 +451,9 @@ inline double autoTuneBytesPerCell(Field &f, AutoTunePS const &ps, int const pha
 }
 
 /* A Lagrangian partition's padding on one axis, in units of the partition's own width, for an n^3 split of N
-   particles: with '--ps-lag-padding <k>' (the default, k = 8) k mean spacings -- k n /
+   particles: with '--ps-lagrangian-padding <k>' (the default, k = 8) k mean spacings -- k n /
    N^(1/NO_DIM) partition widths, at most one period (n widths) on a periodic run -- and at least 4.2
-   '--ps-alpha-shape' cuts on a non-periodic one, with no floor; with '--ps-lag-padding 0' the Eulerian '--padding'
+   '--ps-alpha-shape' cuts on a non-periodic one, with no floor; with '--ps-lagrangian-padding 0' the Eulerian '--padding'
    fraction floored at 'floorFrac' of a partition (DTFE.cpp's PSPartitionPlan). One definition for every model below. */
 inline double autoTunePadWidths(User_options const &u, double const padFracAxis, int const n, double const N,
                                 double const floorFrac)
@@ -924,8 +974,10 @@ struct AutoTuneStdInputs
     double ptsBytes = 0.;            // ... their structures (in 'fixed')
     double ptsWalkBytes = 0.;        // ... the point-walk threads' record blocks, per partition
     double fixed = 0.;               // the irreducible term: particles + grids + points
+    double fixedLoop = 0.;           // ... while the partition loop runs: its grids only (bCellDeposit; plan P8.9)
     double perVertex = 0.;           // bytes per padded vertex while a tessellation is built (stdBytesPerPaddedVertex)
     double bGpuCell = 0.;            // the GPU deposit's bytes per sub-grid cell, per copy (0: no GPU deposit)
+    double faceCell = 0.;            // --face-gradient: avg1FacePass's 9 doubles per cell of each sub-domain it runs on
     double perTet = 0.;              // ... its bytes per extracted tetrahedron
     double tetsPerOwn = 0.;          // ... the tetrahedra extracted per particle of a thread's own box
     double snapWordFactor = 0.;      // the GPU snapshot's bytes per 4 B grid component (2: fixed-point words)
@@ -966,7 +1018,7 @@ struct AutoTuneStdPlanner : AutoTuneStdInputs
         // a partition's grids: its own (DTFE_parallel's, when split), the threads' sub-grid copies, the GPU's two
         auto gridBytes = [&](double cells, size_t nThreads) {
             return ( nParts > 1. ? cells * bCellDeposit : 0. ) + ( nThreads > 1 ? cells * bCellDeposit : 0. )
-                   + 2. * cells * bGpuCell; };
+                   + 2. * cells * bGpuCell + cells * faceCell; };
         if ( not dens.ok )
         {   // every sub-box holds the box average (the uniform count)
             double const tSplit = std::pow( double(threads), 1. / double(NO_DIM) );
@@ -1046,6 +1098,19 @@ struct AutoTuneStdPlanner : AutoTuneStdInputs
         return plans.emplace( key, plan ).first->second;
     }
 
+    /* The run's peak with 'loop' bytes (the busiest partition, its GPU snapshot and look-ahead) in the partition loop
+       (plan P8.9 step 1). The loop holds only its own grids -- density, velocity and the gradient (bCellDeposit;
+       DTFE.cpp swaps the derived fields for the gradient while it runs) -- and the derived grids are allocated after
+       it (postProcessWebFields), when the partitions are gone: but the allocator keeps freed blocks in the footprint,
+       so part of the busiest partition is booked beside them: all of it up to kStdPostKeepFloor, a share kStdPostKeep
+       of a larger one. The larger of the two phases is the peak. Never above the sum of both (the model before
+       2026-11-07), and equal to it with '--scratch-dir' or without derived fields (fixedLoop == fixed). */
+    double stdPeak(double loop) const
+    {
+        double const kept = std::min( loop, std::max( kStdPostKeep * loop, kStdPostKeepFloor ) );
+        return std::max( fixedLoop + loop, fixed + kept );
+    }
+
     AutoTuneReport chooseSplit() const;
     AutoTuneReport reportSplit(int const bestP, int const bestT, bool const nothingFits) const;
 };
@@ -1066,16 +1131,17 @@ inline AutoTuneReport AutoTuneStdPlanner::chooseSplit() const
     int bestP = pHi, bestT = 0;
     int leastP = pHi;                      // the split with the smallest predicted peak, for the nothing-fits case
     int const tLeast = autoConc ? 1 : tMax;
-    // a plan's bytes on top of 'fixed': the busiest partition and the GPU snapshot; the look-ahead is
-    // added once the split is chosen, as PS-DTFE's, and switched off when it does not fit (below)
+    // a plan's bytes: the busiest partition and the GPU snapshot (need), at the run's peak (stdPeak: the loop or the
+    // post-processing, whichever holds more); the look-ahead is added once the split is chosen, as PS-DTFE's, and
+    // switched off when it does not fit (below)
     auto need = [&](int P, int T) { StdPlan const &pl = planOf( P, T ); return pl.bytes + pl.snapshot; };
     for (int P=pLo; P<=pHi; ++P)
     {
         if ( need(P,tLeast) < need(leastP,tLeast) ) leastP = P;
         int T = tMax;
-        while ( autoConc and T>1 and fixed + need(P,T) > budget )
+        while ( autoConc and T>1 and stdPeak( need(P,T) ) > budget )
             --T;
-        if ( fixed + need(P,T) > budget )
+        if ( stdPeak( need(P,T) ) > budget )
             continue;   // not even one thread fits at this split
         if ( T > bestT or (T==bestT and P<bestP) )
         {
@@ -1121,16 +1187,18 @@ inline AutoTuneReport AutoTuneStdPlanner::reportSplit(int const bestP, int const
     // (stdLookAheadOffBudget, as PS-DTFE's psLookAheadOffBudget), and the prediction is then the plan's alone.
     report.lookAhead = ( lookAheadPossible and chosen.parts > 1 ) ? chosen.aheadMax : 0.;
     u.stdLookAheadCounted = report.lookAhead;   // the loop checks the free memory against it (DTFE.cpp)
-    if ( report.lookAhead > 0. and fixed + chosen.bytes + chosen.snapshot + report.lookAhead > budget )
+    report.fixedLoop = fixedLoop;
+    if ( report.lookAhead > 0. and stdPeak( chosen.bytes + chosen.snapshot + report.lookAhead ) > budget )
     {
         message << MESSAGE::cBold() << "AUTO-TUNE:" << MESSAGE::cReset() << " look-ahead off for this run: the busiest "
                 << "partition (~" << chosen.bytes/1.e9 << " GB) plus the next one's tessellations (~"
-                << report.lookAhead/1.e9 << " GB) do not fit the " << (budget - fixed)/1.e9 << " GB the memory budget "
-                << "leaves beside the grids and particles; partitions are prepared in turn.\n" << MESSAGE::Flush;
+                << report.lookAhead/1.e9 << " GB) do not fit the " << (budget - fixedLoop - chosen.snapshot)/1.e9
+                << " GB the memory budget leaves beside the partition loop's grids and particles; partitions are "
+                << "prepared in turn.\n" << MESSAGE::Flush;
         u.stdLookAheadOffBudget = true;
         report.lookAhead = 0.;
     }
-    double const predicted = fixed + chosen.bytes + chosen.snapshot + report.lookAhead;
+    double const predicted = stdPeak( chosen.bytes + chosen.snapshot + report.lookAhead );
     report.predicted = predicted;
     if ( Env::flag( "DTFE_AUTO_TUNE_DEBUG" ) )
     {
@@ -1188,6 +1256,219 @@ inline AutoTuneReport AutoTuneStdPlanner::reportSplit(int const bestP, int const
 
 #ifdef PHASE_SPACE
 namespace {
+
+/* The cells of the largest partition sub-grid of each n^NO_DIM split, n = 1 .. 6 (cells[n]), and of the user's own
+   split k[] when it is not cubic (cellsUser), from the particles (plan P8.2; 0: not known). The binary crops a
+   partition's grids to the Eulerian span of its kept tetrahedra per axis (psSubgridBox, ps_interpolation.cc), and that
+   span grows as structure forms: the logged 5^3 runs park ~4x the bytes per modelled cell at z = 0 as at z = 127,
+   where the model booked G/n + 40 cells per axis whatever the snapshot. (A single domain never crops: the planner
+   books the whole grid there, gpuSubCells.)
+   The partitions are equal slices of the Lagrangian box -- on a periodic run of the period [seam - L, seam), the seam
+   placed by the partition padding (DTFE.cpp regions(), lagPadding; subpartition.h psPeriodicSeam, replayed below
+   without its exactness test) -- owned by the tetrahedra's Lagrangian centroids. So per split: the particles binned on
+   a B^NO_DIM grid over that Lagrangian domain (a partition's edge rounded to the nearest bin), each bin's Eulerian
+   extent per axis in grid cells (periodic: each particle the minimal image of the bin's first one, as the deposit
+   wraps a tetrahedron about its first vertex); a partition's touched planes = its bins' extents widened below for the
+   tetrahedra; then psSubgridBox's rule (their [lo, hi], or on a periodic axis touched at both ends the complement of
+   the largest untouched run), at most the axis. DTFE_AUTO_SPAN=0: the G/n + 40 rule. */
+inline void psPartitionSpans(std::vector<Particle_data> const &p, User_options &u, double const padFrac[NO_DIM],
+                             int const *userK, double (&cells)[7], double &cellsUser)
+{
+    for (double &c : cells) c = 0.;
+    cellsUser = 0.;
+#ifdef PHASE_SPACE
+    if ( p.empty() ) return;
+    double const N = double( p.size() );
+    // bins per axis: about a lattice cell's diagonal of particles each, at most 60
+    int const B = std::max( 6, std::min( 60, int( std::pow( N, 1. / double(NO_DIM) ) / std::sqrt( double(NO_DIM) ) ) ) );
+    double bbLo[NO_DIM], bbHi[NO_DIM], boxLo[NO_DIM], boxLen[NO_DIM], dx[NO_DIM];
+    int G[NO_DIM];
+    double vol = 1.;
+    for (int d=0; d<NO_DIM; ++d)
+    {
+        double lo = double( p[0].lagPos[d] ), hi = lo;
+        for (Particle_data const &q : p) { double const v = double( q.lagPos[d] ); lo = std::min( lo, v ); hi = std::max( hi, v ); }
+        double const eps = ( hi - lo ) * 1.e-6;   // computeLagrangianBoundingBox's margin
+        bbLo[d] = lo - eps;
+        bbHi[d] = hi + eps;
+        boxLo[d] = double( u.boxCoordinates[2*d] );
+        boxLen[d] = double( u.boxCoordinates[2*d+1] ) - boxLo[d];
+        G[d] = int( u.gridSize[d] );
+        dx[d] = boxLen[d] / double( G[d] );
+        if ( not ( dx[d] > 0. ) or G[d] < 1 or not ( bbHi[d] > bbLo[d] ) ) return;
+        vol *= u.periodic ? boxLen[d] : bbHi[d] - bbLo[d];
+    }
+    // the partition padding of a split with k partitions on axis d (DTFE.cpp): --ps-lagrangian-padding k spacings (capped at a
+    // period), else the Eulerian --padding fraction floored at 0.3 of a partition; >= 4.2 alpha cuts
+    double const lagSpacing = u.psLagPadding > Real(0.) ? std::pow( vol / N, 1. / double(NO_DIM) ) : 0.;
+    auto padOf = [&](int d, int k) {
+        double const len = bbHi[d] - bbLo[d];
+        double pad = std::max( padFrac[d] * len, len / double(k) * 0.3 );
+        if ( lagSpacing > 0. )
+        {
+            pad = double( u.psLagPadding ) * lagSpacing;
+            if ( u.periodic and pad > boxLen[d] ) pad = boxLen[d];
+        }
+        if ( u.psLagAlphaRadius > 0. ) pad = std::max( pad, 4.2 * double( u.psLagAlphaRadius ) );
+        return pad;
+    };
+    // the Lagrangian domain the partitions tile, per axis: the period below the seam, or the bounding box
+    auto domainOf = [&](int d, int k, double &lo0, double &len0) {
+        if ( not u.periodic ) { lo0 = bbLo[d]; len0 = bbHi[d] - bbLo[d]; return; }
+        double const L = boxLen[d], pad = padOf( d, k );
+        double const m = std::max( 4.e-6 * L, 8. * std::ldexp( 1., std::ilogb( std::max( std::fabs( bbLo[d] ), std::fabs( bbHi[d] ) ) + L ) - 23 ) );
+        double const sd = bbLo[d] + L - pad - m;
+        double const seam = ( sd > bbHi[d] - L ) ? sd : bbHi[d];   // psPeriodicSeam, or its fallback anchor
+        lo0 = seam - L;
+        len0 = L;
+    };
+    size_t nb = 1;
+    for (int d=0; d<NO_DIM; ++d) nb *= size_t(B);
+    double const unset = std::numeric_limits<double>::quiet_NaN();
+    std::vector<double> ref;
+    std::vector<float> lo, hi;
+    double binnedLo[NO_DIM];
+    bool binned = false;
+    // per bin and axis: the Eulerian extent in grid cells over the Lagrangian domain starting at dLo (length dLen)
+    auto binAll = [&](double const (&dLo)[NO_DIM], double const (&dLen)[NO_DIM]) {
+        ref.assign( nb*NO_DIM, unset );
+        lo.assign( nb*NO_DIM, 0.f );
+        hi.assign( nb*NO_DIM, 0.f );
+        for (Particle_data const &q : p)
+        {
+            size_t b = 0;
+            for (int d=0; d<NO_DIM; ++d)
+            {
+                double t = ( double(q.lagPos[d]) - dLo[d] ) / dLen[d];
+                if ( u.periodic ) t -= std::floor( t );   // above the seam: its -L copy
+                int const i = std::min( B - 1, std::max( 0, int( t * B ) ) );
+                b = b * size_t(B) + size_t(i);
+            }
+            for (int d=0; d<NO_DIM; ++d)
+            {
+                size_t const k = b*NO_DIM + size_t(d);
+                double x = double( q.pos[d] );
+                if ( std::isnan( ref[k] ) )
+                {   // the bin's first particle: its reference and extent
+                    ref[k] = x;
+                    lo[k] = hi[k] = float( ( x - boxLo[d] ) / dx[d] );
+                    continue;
+                }
+                if ( u.periodic ) x = ref[k] + ( x - ref[k] ) - boxLen[d] * std::round( ( x - ref[k] ) / boxLen[d] );
+                float const c = float( ( x - boxLo[d] ) / dx[d] );
+                lo[k] = std::min( lo[k], c );
+                hi[k] = std::max( hi[k], c );
+            }
+        }
+    };
+    // a tetrahedron reaches about one particle spacing past the particles it joins: per axis, each bin's extent is
+    // widened by a spacing at the bin's own stretch (its Eulerian extent over its Lagrangian width, at least 1) and a
+    // cell -- inside the partition and into the padding alike. Measured against psSubgridBox on pancakes and crossed
+    // waves (32^3 - 128^3 particles, 128^3 and 384^3 grids, 2^3 and 4^3 splits): 1.00 - 2.09x the largest sub-grid,
+    // geometric mean 1.24x, never below; the G/n + 40 rule was 0.05 - 4.3x
+    double const spacingBins = double(B) / std::pow( N, 1. / double(NO_DIM) );   // a particle spacing in bin widths
+    std::vector<int> diff[NO_DIM];
+    // the largest sub-grid of the split k[] (partitions per axis)
+    auto spanOf = [&](int const (&k)[NO_DIM]) -> double {
+        double dLo[NO_DIM], dLen[NO_DIM];
+        for (int d=0; d<NO_DIM; ++d) domainOf( d, k[d], dLo[d], dLen[d] );
+        bool same = binned;
+        for (int d=0; d<NO_DIM; ++d) same = same and dLo[d] == binnedLo[d];
+        if ( not same )
+        {
+            binAll( dLo, dLen );
+            for (int d=0; d<NO_DIM; ++d) binnedLo[d] = dLo[d];
+            binned = true;
+        }
+        size_t nParts = 1;
+        for (int d=0; d<NO_DIM; ++d) nParts *= size_t( k[d] );
+        double most = 0.;
+        for (size_t pi=0; pi<nParts; ++pi)
+        {
+            int idx[NO_DIM], b0[NO_DIM], b1[NO_DIM];
+            size_t rem = pi;
+            for (int d=NO_DIM-1; d>=0; --d) { idx[d] = int( rem % size_t(k[d]) ); rem /= size_t(k[d]); }
+            for (int d=0; d<NO_DIM; ++d)
+            {   // partition idx's first bin and the next partition's, per axis
+                b0[d] = int( std::floor( double(idx[d]) * double(B) / double(k[d]) + 0.5 ) );
+                b1[d] = std::max( b0[d] + 1, int( std::floor( double(idx[d] + 1) * double(B) / double(k[d]) + 0.5 ) ) );
+            }
+            bool any[NO_DIM], full[NO_DIM];
+            for (int d=0; d<NO_DIM; ++d) { diff[d].assign( size_t( G[d] ) + 1, 0 ); any[d] = full[d] = false; }
+            auto mark = [&](int d, double a, double z) {   // planes floor(a) - 1 .. floor(z) + 1 on axis d (the
+                                                           // sampled deposit's +-1 cell, psSubgridBox)
+                long lo0 = long( std::floor( a ) ) - 1, hi0 = long( std::floor( z ) ) + 1;
+                any[d] = true;
+                if ( full[d] ) return;
+                if ( hi0 - lo0 + 1 >= G[d] ) { full[d] = true; return; }
+                if ( u.periodic )
+                {
+                    long const a0 = ( lo0 % G[d] + G[d] ) % G[d], z0 = a0 + ( hi0 - lo0 );
+                    if ( z0 < G[d] ) { ++diff[d][size_t(a0)]; --diff[d][size_t(z0) + 1]; }
+                    else { ++diff[d][size_t(a0)]; --diff[d][size_t(G[d])]; ++diff[d][0]; --diff[d][size_t(z0 - G[d]) + 1]; }
+                }
+                else
+                {
+                    lo0 = std::max( 0L, lo0 ); hi0 = std::min( long(G[d]) - 1, hi0 );
+                    if ( lo0 <= hi0 ) { ++diff[d][size_t(lo0)]; --diff[d][size_t(hi0) + 1]; }
+                }
+            };
+            int j[NO_DIM];
+            for (int e=0; e<NO_DIM; ++e) j[e] = b0[e];
+            while ( true )
+            {
+                size_t b = 0;
+                for (int e=0; e<NO_DIM; ++e) b = b * size_t(B) + size_t(std::min( j[e], B - 1 ));
+                if ( not std::isnan( ref[b*NO_DIM] ) )
+                    for (int d=0; d<NO_DIM; ++d)
+                    {
+                        size_t const kb = b*NO_DIM + size_t(d);
+                        double const binCells = dLen[d] / double(B) / dx[d];
+                        double const reach = std::max( double( hi[kb] - lo[kb] ), binCells ) * spacingBins + 1.;
+                        mark( d, double( lo[kb] ) - reach, double( hi[kb] ) + reach );
+                    }
+                int e = NO_DIM - 1;
+                while ( e >= 0 and ++j[e] >= b1[e] ) { j[e] = b0[e]; --e; }
+                if ( e < 0 ) break;
+            }
+            double c = 1.;
+            for (int d=0; d<NO_DIM; ++d)
+            {
+                double span = G[d];
+                if ( any[d] and not full[d] )
+                {
+                    int run = 0, lo0 = -1, hi0 = -1, gap = 0, cur = 0;
+                    for (int g=0; g<G[d]; ++g)
+                    {
+                        run += diff[d][size_t(g)];
+                        if ( run > 0 ) { if ( lo0 < 0 ) lo0 = g; hi0 = g; gap = std::max( gap, cur ); cur = 0; }
+                        else ++cur;
+                    }
+                    if ( lo0 >= 0 )
+                        span = ( u.periodic and lo0 == 0 and hi0 == G[d] - 1 ) ? double( G[d] - gap ) : double( hi0 - lo0 + 1 );
+                }
+                c *= span;
+            }
+            most = std::max( most, c );
+        }
+        return most;
+    };
+    for (int n=1; n<=6; ++n)
+    {
+        int k[NO_DIM];
+        for (int d=0; d<NO_DIM; ++d) k[d] = n;
+        cells[n] = spanOf( k );
+    }
+    if ( userK != nullptr )
+    {
+        int k[NO_DIM];
+        for (int d=0; d<NO_DIM; ++d) k[d] = std::max( 1, userK[d] );
+        cellsUser = spanOf( k );
+    }
+#else
+    (void)p; (void)u; (void)padFrac; (void)userK;
+#endif
+}
 
 // The mean streams per sample point the plan budgets, and why: DTFE_AUTO_PTS_STREAMS, or estimated from the particles.
 inline void autoTunePSPointStreams(User_options &u, double const N, size_t const nPts,
@@ -1251,11 +1532,12 @@ inline void autoTunePSPointStreams(User_options &u, double const N, size_t const
 
 // The bytes the '--sample-points' structures hold: per point its position and outputs, and its per-stream records.
 inline double autoTunePSPointBytes(User_options &u, size_t const nPts, bool const ptsVelGrad,
-                                   double const ptsMeanStreams)
+                                   double const ptsMeanStreams, double *recordBytes = nullptr,
+                                   double *outputBytes = nullptr)
 {
     // The STORED per-stream record is packed (ps_point_eval.cc RecLayout): denGeo + denDtfe +
     // vel[3] doubles + the 2-B caustic mask = 42 B, plus grad[3] / vgrad[9] doubles / ids[4]
-    // uint64 only with --pts-den-grad / --pts-vel-grad / --per-stream-ids. KEEP IN SYNC.
+    // uint64 only with --pts-den-grad / --pts-vel-grad / --ps-per-stream-ids. KEEP IN SYNC.
     double bStreamRec = 5. * double(sizeof(double)) + 2.;
     if ( u.psPtsDenGrad )   bStreamRec += 3. * double(sizeof(double));
     if ( ptsVelGrad )       bStreamRec += 9. * double(sizeof(double));
@@ -1278,6 +1560,10 @@ inline double autoTunePSPointBytes(User_options &u, size_t const nPts, bool cons
     if ( u.psPtsScalar )  bPtsOut += double(noScalarComp) * double(sizeof(double))
                                      * (1. + (u.psPerStream ? ptsMeanStreams : 0.));   // point + per-stream scalars
     if ( u.psPtsLagrangian ) bPtsOut += ptsMeanStreams * 3. * double(sizeof(double));  // per-stream q(x)
+    // for the loop's dynamic concurrency: the records as the partitions merge them (without their finalize locator),
+    // and what the finalize allocates after the loop (the outputs, the per-point offsets and the per-record locators)
+    if ( recordBytes ) *recordBytes = double(nPts) * ptsMeanStreams * ( bStreamRec - 8. );
+    if ( outputBytes ) *outputBytes = double(nPts) * ( bPtsOut + 2. * 8. + ptsMeanStreams * 8. );
     return double(nPts) * (bPerPoint + bPtsOut + ptsMeanStreams * bStreamRec);
 }
 
@@ -1337,12 +1623,16 @@ struct AutoTunePSInputs
     std::string budgetWhy;           // how the memory budget was set (the AUTO-TUNE line)
     double budget = 0.;              // the memory budget
     int cores = 1;                   // the threads
-    size_t outGrid[NO_DIM] = {};     // the cells allocated and written (--ps-window: the window's)
+    size_t outGrid[NO_DIM] = {};     // the cells allocated and written (--grid-window: the window's)
     double gridTotal = 0.;           // ... their product
+    double spanCells[7] = {};        // the largest partition sub-grid of an n^3 split, n <= 6 (psPartitionSpans; 0: unknown)
+    int userK[NO_DIM] = {};          // the user's --partition per axis ...
+    bool userNonCubic = false;       // ... when its counts differ (the planner's n is then u.partition[0]: partsOf)
+    double spanUser = 0.;            // ... and its largest sub-grid (psPartitionSpans; 0: unknown)
     AutoTunePS ps;                   // the PS flags
     double bCellDeposit = 0.;        // full-grid bytes per cell during the deposit (both passes)
     double bCell = 0.;               // ... the larger of the deposit and the post phase
-    std::string fxNote;              // the AUTO-TUNE line's --fixed-point-merge note
+    std::string fxNote;              // the AUTO-TUNE line's --ps-merge fixed-point note
     double padFrac[NO_DIM] = {};     // the Eulerian padding over the box length, per axis
     double partBytes = 0.;           // bytes per particle (sizeof(Particle_data))
     double kParInsert = 0.;          // the TBB insert's bytes per vertex (kParInsertBytes, 0 without it)
@@ -1350,8 +1640,10 @@ struct AutoTunePSInputs
     size_t nPts = 0;                 // the '--sample-points'
     std::string ptsStreamsWhy;       // ... the streams per point budgeted, and why
     double ptsBytes = 0.;            // ... their structures
+    double ptsRecordBytes = 0.;      // ... of which the stream records (written as the partitions merge)
+    double ptsOutputBytes = 0.;      // ... and the finalized outputs (allocated at the end)
     double particleBytes = 0.;       // the particles held (0 with deferred particles)
-    double readKept = 0.;            // the read buffers the allocator keeps (--ps-window)
+    double readKept = 0.;            // the read buffers the allocator keeps (--grid-window)
     double fixed = 0.;               // the irreducible term: particles + read buffers + grids + points
     bool psVel = false, psDisp = false, psGrad = false, psExact = false;   // the GPU deposit's grid selection
     bool momFx = false;              // the moment grids are fixed-point sums
@@ -1422,8 +1714,8 @@ struct AutoTunePSPlanner : AutoTunePSInputs
     // per-partition bytes for an n^3 Lagrangian split
     double partitionBytes(int n) const
     {
-        double const nOwn = N / double(n)/double(n)/double(n);
-        double const fPad = padFactor( n );   // k spacings, or the Eulerian rule's floor of 0.3 partition widths
+        double const nOwn = N / partsOf( n );
+        double const fPad = padFactorOf( n );   // k spacings, or the Eulerian rule's floor of 0.3 partition widths
         double const nPad = nOwn * fPad;
         double m = nPad * (partBytes + kPSVertexBytes + kParInsert);   // particle copy coexists with the growing triangulation
         // '--sample-points': each worker fills a LOCAL hits buffer (pair<uint32,StreamRec>,
@@ -1438,7 +1730,7 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             // flat tet arrays (the 16-float record 64 + masses 4 + the finite-cell ordinal 4 B/tet,
             // + vels 48 when velocity-derived grids are requested; the cost-sort permutes IN PLACE,
             // so no gather copy) + the PSGpuGrids host and device copies of the selected grids
-            // (gpuCellBytes; under --ps-window held once, snapshotBytes)
+            // (gpuCellBytes; under --grid-window held once, snapshotBytes)
             double const perTet = (kGpuTetBytes + (psVel or psDisp or psGrad ? kGpuTetVelBytes : 0.)) * kGpuTetSlack;
             m += perTet*kTetsPerVertex*nOwn + ( u.psWindowOn ? 0. : gpuCellBytes()*subCells );
             // --exact-average runs depositExactItems (ps_metal_host.cc): a per-tet weight total
@@ -1447,7 +1739,7 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             if ( psExact )
             {
                 double const nTet = kTetsPerVertex*nOwn;
-                // --ps-window: items cover only the window's cells (the hull of each tet's bbox with
+                // --grid-window: items cover only the window's cells (the hull of each tet's bbox with
                 // the window), so the window's cell count sets the items, not the virtual full grid
                 double gridCells = 1.;
                 for (int d=0; d<NO_DIM; ++d) gridCells *= double(outGrid[d]);
@@ -1465,7 +1757,7 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             // their conversion after the loop only where that exceeds the copies or slab lists, freed by then. A
             // private copy holds neither the words nor the shared counts, flags and masks (autoTunePSCountBytes), so
             // the default single build has copyPriv = 0 and every core in the copy mode, as ps_interpolation.cc's
-            // accBytes; only the float sums (double build, PS_GPU_FLOAT_MOMENTS=1) book copies.
+            // accBytes; only the float sums (double build, DTFE_GPU_FLOAT_MOMENTS=1) book copies.
             double const copyOne = bCellDeposit*subCells;
             double const copyPriv = std::max( 0., copyCell )*subCells;   // (copyCell above: one pass's copy)
             int const copyThreads = copyPriv > 0.
@@ -1491,7 +1783,7 @@ struct AutoTunePSPlanner : AutoTunePSInputs
     // partition at 1024^3 split 2^3 (volume-weighted velocity), past the gate's 4 GB headroom. Not in
     // partitionBytes(): the deposits run one at a time (ctxMutex), so whatever the concurrency there is ONE such
     // copy, added once to every plan below. (The CUDA port keeps none yet: there it is slack; the model errs high.)
-    // --ps-window: every partition's sub-grid is the whole window (subGridCells), and the grids of the deposit
+    // --grid-window: every partition's sub-grid is the whole window (subGridCells), and the grids of the deposit
     // running are held once in the same way -- the device and host copies (gpuCellBytes) and, beside them, the
     // partition's own sub-grids (bCellDeposit: its density, counts and flags; fxCell + fxMom: the fixed-point words
     // while they are converted), all freed and kept by the allocator for the next partition's deposit. In flight
@@ -1501,7 +1793,7 @@ struct AutoTunePSPlanner : AutoTunePSInputs
     {
         if ( not metalActive ) return 0.;
         double const subCells = subGridCells( n );   // the same sub-grid as partitionBytes()
-        double const nTet = kTetsPerVertex * N / double(n)/double(n)/double(n);
+        double const nTet = kTetsPerVertex * N / partsOf( n );
         double const window = u.psWindowOn ? ( gpuCellBytes() + bCellDeposit + fxCell + fxMom )*subCells : 0.;
         return (gridB + 4.)*subCells + (psExact ? (momFx ? 12. : 8.) : 4.)*nTet + window;
     }
@@ -1522,9 +1814,9 @@ struct AutoTunePSPlanner : AutoTunePSInputs
     // triangulation stage on top of the peak (the run skips a look-ahead the free memory cannot hold)
     double lookAheadBytes(int n, int c) const
     {
-        if ( not metalActive or u.psNoOverlap or u.psLookAheadOffBudget or c != 1 or n <= 1 ) return 0.;
-        double const fPad = padFactor( n );
-        return N / double(n)/double(n)/double(n) * fPad * (partBytes + kPSVertexBytes + kParInsert);
+        if ( not metalActive or u.psNoOverlap or u.psLookAheadOffBudget or c != 1 or partsOf( n ) <= 1. ) return 0.;
+        double const fPad = padFactorOf( n );
+        return N / partsOf( n ) * fPad * (partBytes + kPSVertexBytes + kParInsert);
     }
 
     // what a given split and concurrency cost; the concurrency the run WILL use (0 = all cores)
@@ -1534,9 +1826,18 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         report.partition = std::max( n, 1 );
         report.maxConcurrent = std::max( c, 1 );
         // partitions in flight: never more than there are (one domain x 10 threads is ONE domain, not ten)
-        int const inFlight = std::min( report.maxConcurrent, report.partition*report.partition*report.partition );
+        int const inFlight = int( std::min( double(report.maxConcurrent), partsOf( report.partition ) ) );
+        if ( Env::flag( "DTFE_AUTO_TUNE_DEBUG" ) )   // what the plan books per partition sub-grid (P8.2's check)
+            std::fprintf( stderr, "AUTO-TUNE-DEBUG PS booked sub-grid: %.0f cells (split %d, %.0f partitions)\n",
+                          subGridCells( report.partition ), report.partition, partsOf( report.partition ) );
         report.perPartition = partitionBytes( report.partition );
         report.gpuSnapshot = snapshotBytes( report.partition );   // once: the GPU deposits run one at a time
+        // the loop's dynamic concurrency (P8.10, DTFE.cpp): what the run allocates after its partitions are in flight
+        report.concChosen = autoConc;
+        report.reserveEnd = ( scratchOn ? 0. : gridTotal * std::max( 0., bCell - bCellDeposit ) ) + ptsOutputBytes;
+        report.reserveFirstMerge = scratchOn ? 0. : gridTotal * ( autoTuneMergeGrownBytes( u.uField, ps )
+                                                                 + autoTuneMergeGrownBytes( u.aField, ps ) );
+        report.reserveRecords = ptsRecordBytes;
         double const base = fixed + report.gpuSnapshot + double(inFlight) * report.perPartition;
         report.lookAhead = lookAheadBytes( report.partition, inFlight );
         // the split above is chosen without the look-ahead; adding it here anyway would make a plan that fits
@@ -1565,13 +1866,34 @@ struct AutoTunePSPlanner : AutoTunePSInputs
     // keeping the whole axis
     double gpuSubCells(int n) const
     {
+        // measured on the particles (P8.2): a split's partitions crop; one domain never does (psUseSubgrid is the
+        // partition path's), so n = 1 books the whole grid below whatever the particles span
+        if ( isUserSplit( n ) and spanUser > 0. ) return spanUser;
+        if ( not isUserSplit( n ) and n >= 2 and n <= 6 and spanCells[n] > 0. ) return spanCells[n];
         double c = 1.;
         for (int d=0; d<NO_DIM; ++d)
-            c *= std::min( double(outGrid[d]), double(u.gridSize[d])/double(n) + 40. );
+            c *= std::min( double(outGrid[d]), double(u.gridSize[d])/double( isUserSplit( n ) ? userK[d] : n ) + 40. );
         return c;
     }
 
-    // ... the cells it allocates: under --ps-window the WHOLE window, whatever the split (psSubgridBox,
+    // the user's own split when it is not cubic: the planner names a split by n = u.partition[0], and these give that
+    // split's partitions and padding per axis instead of n^NO_DIM (every other split is n per axis)
+    bool isUserSplit(int n) const { return userNonCubic and not autoPart and n == userK[0]; }
+    double partsOf(int n) const
+    {
+        double c = 1.;
+        for (int d=0; d<NO_DIM; ++d) c *= double( isUserSplit( n ) ? userK[d] : n );
+        return c;
+    }
+    double padFactorOf(int n) const
+    {
+        if ( not isUserSplit( n ) ) return padFactor( n );
+        double f = 1.;
+        for (int d=0; d<NO_DIM; ++d) f *= 1. + 2.*autoTunePadWidths( u, padFrac[d], userK[d], N, kPartitionPadFloor );
+        return f;
+    }
+
+    // ... the cells it allocates: under --grid-window the WHOLE window, whatever the split (psSubgridBox,
     // ps_interpolation.cc: every partition's sub-grid is the window, merged window-local, DTFE.cpp) -- the crop
     // above is per axis, so a window spanning x and y of a 4096^2 slice would book 723^2 cells at 6^3, not 4096^2
     double subGridCells(int n) const { return u.psWindowOn ? gridTotal : gpuSubCells( n ); }
@@ -1638,7 +1960,7 @@ inline std::optional<AutoTuneReport> AutoTunePSPlanner::irreducibleCase(int cons
             warning << "With the grids on scratch disk, ";
         warning << (partBytes*N)/1.e9 << " GB of particles";
         if ( readKept > 0. )
-            warning << ", " << readKept/1.e9 << " GB of read buffers the allocator keeps (--ps-window)";
+            warning << ", " << readKept/1.e9 << " GB of read buffers the allocator keeps (--grid-window)";
         if ( nPts > 0 )
             warning << " and " << ptsBytes/1.e9 << " GB for the " << double(nPts) << " --sample-points ("
                     << ptsStreamsWhy << "; DTFE_AUTO_PTS_STREAMS overrides)";
@@ -1660,7 +1982,7 @@ inline std::optional<AutoTuneReport> AutoTunePSPlanner::irreducibleCase(int cons
                 << "dispersion 24 B/cell); ";
         if ( nPts > 0 )
             warning << "(d) fewer --sample-points (a smaller image plane) or no --pts-vel-grad; ";
-        warning << "(e) more RAM. NOTE: '--partNo'/'--region' are NOT a way out -- they crop particles by "
+        warning << "(e) more RAM. NOTE: '--partition-index'/'--region' are NOT a way out -- they crop particles by "
                 << "Eulerian position and are rejected by this binary because the PS tessellation is Lagrangian.\n"
                 << "  Running anyway with --max-concurrent 1 and the split with the smallest per-partition "
                 << "triangulation; expect swapping.\n" << MESSAGE::EndWarning;
@@ -1717,8 +2039,8 @@ inline std::optional<AutoTuneReport> AutoTunePSPlanner::smallSetCase(int const u
         double const depositWork = gridTotal * nSubCube * tSample + double(nPts) * tPoint;
         auto predictedWall = [&](int n, int c) -> double
         {
-            double const parts = double(n)*double(n)*double(n);
-            double const fPad = padFactor( n );
+            double const parts = partsOf( n );
+            double const fPad = padFactorOf( n );
             double const rounds = std::ceil( parts / double(c) );
             double const triangulate = ( n == 1 ? fCopy * N : fPad * N / parts ) * tVertex;
             double const threads = ( n == 1 ) ? double(cores) : double(std::max( 1, cores / c ));
@@ -1921,7 +2243,7 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     double const budget = autoTuneBudget( ramBytes, budgetWhy );   // see the header comment
     int const cores = autoTuneCores();
 
-    // the cells actually allocated and written: with --ps-window its cells, not the (virtual) full grid
+    // the cells actually allocated and written: with --grid-window its cells, not the (virtual) full grid
     size_t outGrid[NO_DIM];
     u.outputGridSize( outGrid );
     double gridTotal = 1.;
@@ -1937,13 +2259,14 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     ps.haloRelease    = u.psHaloRelease > Real(0.);
     ps.fixedMerge     = u.psFixedPointMerge;
 #endif
+    ps.faceGradient   = u.faceGradient;
     // uField and aField each allocate their OWN full grids and coexist (two reserveMemory calls in DTFE.cpp), so
     // summing both is right. The deposit and post phases are disjoint peaks -> max, not sum.
     double const bCellDeposit = autoTuneBytesPerCell(u.uField, ps, 0) + autoTuneBytesPerCell(u.aField, ps, 0);
     double const bCellPost    = autoTuneBytesPerCell(u.uField, ps, 1) + autoTuneBytesPerCell(u.aField, ps, 1);
     double const bCell        = std::max( bCellDeposit, bCellPost );
     // said on the AUTO-TUNE line: this run's merge keeps integer grids during the loop (ps_fixed_merge.h)
-    std::string const fxNote = ps.fixedMerge ? " [--fixed-point-merge: the summed full grids counted at 9 B per component "
+    std::string const fxNote = ps.fixedMerge ? " [--ps-merge fixed-point: the summed full grids counted at 9 B per component "
                                                "and cell during the loop; nothing staged or spilled]" : "";
 
     // padding fraction of the box per axis (paddingLength was resolved to Mpc by updateEntries)
@@ -1984,7 +2307,7 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     size_t nPts = autoTuneSamplePointCount( u.psSamplePointsFile );
     if ( double const v = Env::real( "DTFE_AUTO_PTS_N", -1. ); v >= 0. )      // a plane that does not exist yet
         nPts = size_t(v);
-    bool const ptsVelGrad = u.psPtsVelGrad or Env::flag( "DTFE_AUTO_PTS_VELGRAD" );
+    bool const ptsVelGrad = u.psPtsVelGrad or Env::flag( "DTFE_AUTO_PTS_VEL_GRAD" );
     // Mean streams (containing tetrahedra) per point. No fixed number fits: it grows with the mass
     // resolution (TNG300-3-Dark 1.899 at z=0, TNG100-3-Dark 4.25 at z=0 and 2.30 at z=1). So it is
     // ESTIMATED from the particles themselves (psEstimateMeanStreams: Eulerian over Lagrangian
@@ -1994,16 +2317,17 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     double ptsMeanStreams = 2.0;
     char ptsStreamsWhy[200] = "2 streams/point assumed";
     autoTunePSPointStreams( u, N, nPts, particles, report, ptsMeanStreams, ptsStreamsWhy );
-    double const ptsBytes = autoTunePSPointBytes( u, nPts, ptsVelGrad, ptsMeanStreams );
+    double ptsRecordBytes = 0., ptsOutputBytes = 0.;
+    double const ptsBytes = autoTunePSPointBytes( u, nPts, ptsVelGrad, ptsMeanStreams, &ptsRecordBytes, &ptsOutputBytes );
 
     // IRREDUCIBLE in RAM unless scratch-backed: originals + the full-grid accumulators
     // + the point-evaluation structures.
     // --partition does NOT reduce this -- partitions sum into the SHARED full grid.
-    // a --ps-window run that started without its particles (ps_globals_record.h) holds none: only
+    // a --grid-window run that started without its particles (ps_globals_record.h) holds none: only
     // cached partitions are loaded, so their memory goes to more partitions at once. (A late read, when
     // a needed partition turns out uncached, adds them back: at most the particles' bytes over budget.)
     double const particleBytes = u.psParticlesDeferred ? 0. : partBytes*N;
-    // ... and a --ps-window run keeps what reading them freed (autoTuneReadKeptBytes: nothing it allocates is large
+    // ... and a --grid-window run keeps what reading them freed (autoTuneReadKeptBytes: nothing it allocates is large
     // enough to take those blocks over before the first partitions peak)
     double const readKept = ( u.psWindowOn and not u.psParticlesDeferred ) ? autoTuneReadKeptBytes( u, N ) : 0.;
     double const fixed = particleBytes + readKept + (scratchOn ? 0. : gridTotal*bCell) + ptsBytes;
@@ -2040,7 +2364,7 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     // 40 after the x2 in partitionBytes(), i.e. 6.7 GB per partition at 1024^3/n=2.
     // The moment grids are 64-bit fixed-point sums (ps_metal_host.cc, fxUnits): 8 B per component
     // on the device and in the host's copy where a float takes 4 (mB = 2), and dispw is not deposited (the mass
-    // grid stands for it); PS_GPU_FLOAT_MOMENTS=1 keeps the floats (mB = 1).
+    // grid stands for it); DTFE_GPU_FLOAT_MOMENTS=1 keeps the floats (mB = 1).
     bool const momFx = autoTunePSMomentsFixed();
     double const mB = momFx ? 2. : 1.;
     double const gridB  = 8. + mB * ( (psVel ? 12. : 0.) + (psDisp ? 24. : 0.) + (psGrad ? 36. : 0.)
@@ -2096,6 +2420,29 @@ AutoTuneReport autoTunePartitioning(User_options &u,
         in.padFrac[d] = padFrac[d];
     }
     in.gridTotal       = gridTotal;
+    if ( not autoPart and not u.partition.empty() )
+    {
+        for (int d=0; d<NO_DIM; ++d) in.userK[d] = int( u.partition[ size_t(d) < u.partition.size() ? size_t(d) : 0 ] );
+        for (int d=1; d<NO_DIM; ++d) in.userNonCubic = in.userNonCubic or in.userK[d] != in.userK[0];
+    }
+    if ( particles != nullptr and not u.psWindowOn and Env::flag( "DTFE_AUTO_SPAN", true ) )
+    {
+        auto const t0 = std::chrono::steady_clock::now();
+        psPartitionSpans( *particles, u, padFrac, in.userNonCubic ? in.userK : nullptr, in.spanCells, in.spanUser );
+        if ( Env::flag( "DTFE_AUTO_TUNE_DEBUG" ) )
+        {
+            std::fprintf( stderr, "AUTO-TUNE-DEBUG PS sub-grid spans (%.3f s), largest partition's cells per n^3 split "
+                          "(measured / G/n+40):", std::chrono::duration<double>( std::chrono::steady_clock::now() - t0 ).count() );
+            for (int n=1; n<=6; ++n)
+            {
+                double c = 1.;
+                for (int d=0; d<NO_DIM; ++d) c *= std::min( double(outGrid[d]), double(u.gridSize[d])/double(n) + 40. );
+                std::fprintf( stderr, " %d: %.4g / %.4g", n, in.spanCells[n], c );
+            }
+            if ( in.userNonCubic ) std::fprintf( stderr, " user split: %.4g", in.spanUser );
+            std::fprintf( stderr, "\n" );
+        }
+    }
     in.ps              = ps;
     in.bCellDeposit    = bCellDeposit;
     in.bCell           = bCell;
@@ -2106,6 +2453,8 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     in.nPts            = nPts;
     in.ptsStreamsWhy   = ptsStreamsWhy;
     in.ptsBytes        = ptsBytes;
+    in.ptsRecordBytes  = ptsRecordBytes;
+    in.ptsOutputBytes  = ptsOutputBytes;
     in.particleBytes   = particleBytes;
     in.readKept        = readKept;
     in.fixed           = fixed;
@@ -2126,7 +2475,7 @@ AutoTuneReport autoTunePartitioning(User_options &u,
 #else
     // ---- standard DTFE: partitions are processed SERIALLY (memory knob); inside one partition
     // the box is split across up to --max-concurrent threads (throughput knob). ----
-    // A '--region'/'--regionMpc' run is planned as what it triangulates: DTFE_setup crops the region
+    // A '--region'/'--region-mpc' run is planned as what it triangulates: DTFE_setup crops the region
     // first and passes a copy of the options whose box IS the region, with N = the particles inside it (unpadded),
     // so 'padFrac' above is the padding over the region's length -- the pairing a whole-box run has. The padded
     // copies the crop holds are left out of 'fixed': 36 B each next to the ~700 B per vertex of the triangulation
@@ -2143,13 +2492,13 @@ AutoTuneReport autoTunePartitioning(User_options &u,
        --pts-den-grad / --pts-vel-grad / --pts-scalar, + its uint32 point index and the uint64 locator finalize() groups
        it by; per point its position (3 doubles), its bucket entry and finalize's offset and cursor; and the finalized
        outputs (density, velocity, dispersion, stream count, + the gradients and scalars), allocated while the records
-       are still held. KEEP IN SYNC with ps_point_eval.cc and the PS term. DTFE_AUTO_PTS_N / DTFE_AUTO_PTS_VELGRAD=1
+       are still held. KEEP IN SYNC with ps_point_eval.cc and the PS term. DTFE_AUTO_PTS_N / DTFE_AUTO_PTS_VEL_GRAD=1
        size a plane that does not exist yet (the launcher's memory check). A 4096^2 plane with '--pts-vel-grad'
        holds ~4.7 GB of it. */
     size_t nPts = autoTuneSamplePointCount( u.psSamplePointsFile );
     if ( double const v = Env::real( "DTFE_AUTO_PTS_N", -1. ); v >= 0. )
         nPts = size_t( v );
-    bool const ptsVelGrad = u.psPtsVelGrad or Env::flag( "DTFE_AUTO_PTS_VELGRAD" );
+    bool const ptsVelGrad = u.psPtsVelGrad or Env::flag( "DTFE_AUTO_PTS_VEL_GRAD" );
     double bPtsVar = ( u.psPtsDenGrad ? 3. * double(sizeof(double)) : 0. ) + ( ptsVelGrad ? 9. * double(sizeof(double)) : 0. )
                    + ( u.psPtsScalar ? double(noScalarComp) * double(sizeof(double)) : 0. );
     double const bStreamRec = 5. * double(sizeof(double)) + 2. + bPtsVar + 4. + 8.;
@@ -2163,6 +2512,8 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     // libraries, the GPU runtime: 66 MB of footprint, 84 MB with --gpu -- is left out, as in the PS model: it matters on
     // sub-GB runs only, where it would make the tests' simulated small machines plan around it.)
     double const fixed = partBytes*N + (u.scratchDir.empty() ? gridTotal*bCell : 0.) + ptsBytes;
+    // ... and while the partition loop runs: its own grids only, the derived ones come after it (stdPeak)
+    double const fixedLoop = partBytes*N + (u.scratchDir.empty() ? gridTotal*bCellDeposit : 0.) + ptsBytes;
     // per padded vertex: the thread's particle copy (alive while its triangulation grows) + the triangulation, and 6%
     // for the dummy points the padding test adds (stdBytesPerPaddedVertex, shared with the partition loop's look-ahead)
     double const perVertex = stdBytesPerPaddedVertex( u );
@@ -2241,8 +2592,14 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     in.ptsBytes          = ptsBytes;
     in.ptsWalkBytes      = ptsWalkBytes;
     in.fixed             = fixed;
+    in.fixedLoop         = fixedLoop;
     in.perVertex         = perVertex;
     in.bGpuCell          = bGpuCell;
+    // the face pass (averaged_interpolation_1.cc avg1FacePass): its accumulator over the cells of the sub-domain the
+    // '_a' interpolation runs on, one per concurrent sub-domain call, which together cover the partition
+    in.faceCell = ( NO_DIM == 3 and u.faceGradient and u.aField.selected()
+                    and ( u.aField.velocity_gradient or u.aField.velocity_divergence or u.aField.velocity_shear
+                          or u.aField.velocity_vorticity or u.aField.velocity_vweb ) ) ? 9. * double(sizeof(double)) : 0.;
     in.perTet            = perTet;
     in.tetsPerOwn        = tetsPerOwn;
     in.snapWordFactor    = snapWordFactor;

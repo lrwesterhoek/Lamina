@@ -212,7 +212,7 @@ def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: 
     Standard DTFE cuts the region from the box (regionMpc, periodic or not) and integrates the
     interpolant exactly. PS-DTFE tessellates the whole box as the original run did (periodic or not)
     and deposits only into a WINDOW of a virtual full grid whose cell is the rectangle's / res
-    (--ps-window): the window's cells equal the full grid's, so the zoom is what a run at that
+    (--grid-window): the window's cells equal the full grid's, so the zoom is what a run at that
     resolution would show there. It reuses the tessellations the query server keeps on disk (the same
     cache folder and split), and the binary skips the partitions whose occupancy maps never reach
     the window. The window is snapped to that grid's cell edges, so the returned edges can differ
@@ -252,9 +252,9 @@ def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: 
         grid = [res, res]
     out_dir = Path(tempfile.mkdtemp(prefix=rs.ZOOM_DIR_PREFIX))     # runspec._kind tells it from a Custom run by this
     root = out_dir / "zoom"
-    cmd = [str(binary), str(kw["snapshot"]), str(root), "--input", str(int(kw.get("input_type", 105)))]
+    cmd = [str(binary), str(kw["snapshot"]), str(root), "--input-format", str(int(kw.get("input_type", 105)))]
     if mpc is not None:
-        cmd += ["--MpcUnit", f"{mpc:.10g}"]
+        cmd += ["--mpc-unit", f"{mpc:.10g}"]
     a0n, a1n = (float(a0[0]), float(a0[1])), (float(a1[0]), float(a1[1]))
     window_mpc = [list(r) for r in region]
     if ps:
@@ -290,8 +290,8 @@ def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: 
         if periodic:
             cmd.append("--periodic")
         cmd += list(kw.get("options", []))                          # the custom snapshot's own --box (and alpha)
-        corners = [f"{float(v):.10g}" for pair in window for v in pair]   # Mpc, as --ps-window takes
-        cmd += ["--ps-window", *corners, "--field", "density_a", "velocity_a", "dispersion_a", "gradient_a",
+        corners = [f"{float(v):.10g}" for pair in window for v in pair]   # Mpc, as --grid-window takes
+        cmd += ["--grid-window", *corners, "--field", "density_a", "velocity_a", "dispersion_a", "gradient_a",
                 "--exact-average", "--ps-caustics"]                 # (the exact deposit)
         if side.get("volume_weighted", True):
             cmd.append("--ps-volume-weighted")
@@ -300,7 +300,7 @@ def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: 
         if (bool(side.get("vertex_mass")) if side else bool(kw.get("lagrangian_input"))):
             cmd.append("--ps-vertex-mass")
         if kw.get("lagrangian_input"):
-            cmd += ["--lagrangianInput", str(kw["lagrangian_input"])]
+            cmd += ["--ps-lagrangian-input", str(kw["lagrangian_input"])]
         if (not periodic and float(side.get("alpha_shape", 3.0)) != 3.0
                 and "--ps-alpha-shape" not in cmd):
             cmd += ["--ps-alpha-shape", f"{float(side['alpha_shape']):g}"]
@@ -324,17 +324,17 @@ def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: 
         if flat:
             region, window_mpc = region[:2], window_mpc[:2]
         cmd += ["--grid", *[str(v) for v in grid]]
-        corners = [f"{float(v):.10g}" for pair in region for v in pair]     # Mpc, as --regionMpc takes
+        corners = [f"{float(v):.10g}" for pair in region for v in pair]     # Mpc, as --region-mpc takes
         if periodic:
             cmd.append("--periodic")
         cmd += list(kw.get("options", []))                          # the custom snapshot's own --box
         # the padding around the region: the binary's own '--padding 5' leaves wrong values in the
         # cells near the region's faces (as near a box face: the Delaunay tetrahedra there reach the padded
         # set's hull); the query server's 15 (dtfelib.estimator.STANDARD_PADDING, run_dtfe.sh's default) unless
-        # the snapshot's own options carry one. Placed before '--regionMpc': its corners are followed by '--field'
-        if not any(str(v) in ("--padding", "--paddingMpc") for v in kw.get("options", [])):
+        # the snapshot's own options carry one. Placed before '--region-mpc': its corners are followed by '--field'
+        if not any(str(v) in ("--padding", "--padding-mpc", "--paddingMpc") for v in kw.get("options", [])):
             cmd += ["--padding", f"{STANDARD_PADDING:g}"]
-        cmd += ["--regionMpc", *corners, "--field", "density_a", "velocity_a", "gradient_a", "--exact-average"]
+        cmd += ["--region-mpc", *corners, "--field", "density_a", "velocity_a", "gradient_a", "--exact-average"]
         if side.get("scalar_dataset"):
             cmd += ["scalar_a", "scalarGradient_a", "--scalar-dataset", str(side["scalar_dataset"])]
         if rs.gpu_built("dtfe", precision, o.dim):

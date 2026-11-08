@@ -29,9 +29,9 @@ download_snapshots.sh skips re-downloading anything whose combined product exist
 h is read from the input file's HubbleParam header (fallback: --hubble).
 
 Usage:
-    python3 merge_HDF5.py                                    # snapshot defaults below
-    python3 merge_HDF5.py -d /path/to/TNG50-4-Dark 8 17 33   # merge snapshots 8, 17, 33
-    python3 merge_HDF5.py -d DIR --groupcats 0 50 99         # groupcats for snaps 0, 50, 99
+    python3 merge_HDF5.py -d DIR                                     # snapshot defaults below
+    python3 merge_HDF5.py --sim-dir /path/to/TNG50-4-Dark --snaps 8 17 33   # merge snapshots 8, 17, 33
+    python3 merge_HDF5.py -d DIR --groupcats --snaps 0 50 99         # groupcats for snaps 0, 50, 99
     python3 merge_HDF5.py -d DIR --trees --ics --delete-chunks
 """
 
@@ -692,12 +692,16 @@ def fix_units(base_dir):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("snapshots", type=int, nargs="*", default=None,
-                    help=f"snapshot numbers to merge (default: {SNAPSHOT_NUMBERS})")
-    ap.add_argument("-d", "--data-dir", required=True,
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))     # python/: dtfelib
+    from dtfelib.cli import new_parser, deprecated_alias, add_list_arg, warn_deprecated
+    ap = new_parser(description=__doc__.splitlines()[0])
+    ap.add_argument("old_snapshots", type=int, nargs="*", metavar="snapshot", help=argparse.SUPPRESS)  # now --snaps
+    add_list_arg(ap, "--snaps", kind=int, default=None, metavar="N",
+                 help=f"snapshot numbers to merge, space-separated (default: {' '.join(map(str, SNAPSHOT_NUMBERS))})")
+    ap.add_argument("-d", "--sim-dir", dest="data_dir", required=True, metavar="DIR",
                     help="the simulation's directory holding snapdir_NNN/, e.g. '~/IllustrisTNG/TNG100/TNG100-3-Dark' "
-                         "(required: there is no default simulation)")
+                         "(required: there is no default simulation; not the data root, the folder of simulations)")
+    deprecated_alias(ap, "--data-dir", "--sim-dir")
     ap.add_argument("-n", "--num-subfiles", type=int, default=None,
                     help="chunk files per snapshot (default: auto-detected by globbing)")
     ap.add_argument("--hubble", type=float, default=H_VALUE,
@@ -716,7 +720,10 @@ def main():
     ap.add_argument("--delete-chunks", action="store_true",
                     help="delete the source chunk files after a VERIFIED merge")
     args = ap.parse_args()
-    snapshots = args.snapshots if args.snapshots else SNAPSHOT_NUMBERS
+    if args.old_snapshots:              # the positional snapshot numbers of before: --snaps (one release)
+        warn_deprecated("a positional snapshot number", f"--snaps {' '.join(map(str, args.old_snapshots))}")
+        args.snaps = list(args.snaps or []) + list(args.old_snapshots)
+    snapshots = args.snaps if args.snaps else SNAPSHOT_NUMBERS
     other_modes = args.groupcats or args.trees or args.ics or args.fix_units
     do_snapshots = ((not other_modes) or args.snapshots_too) and not args.fix_units
 

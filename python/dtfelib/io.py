@@ -46,6 +46,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .runlog import canonical_command   # a run log's older option spellings (the permanent table)
+
 # canonical field name -> (file suffix, components, ps_only)
 # The 'a_' averaged prefix is inserted automatically (averaged=True default).
 #
@@ -97,6 +99,12 @@ FIELDS = {
     "tweb_eigenvalues":  ("twebEig",       3, False),
     "vweb":              ("velVweb",       1, False),   # PS: classified from <grad v>, not grad<v> (note above FIELDS): few filaments/nodes
     "vweb_eigenvalues":  ("velVwebEig",    3, False),   # PS: classified from <grad v>, not grad<v> (note above FIELDS): few filaments/nodes
+    # --face-gradient (PS, docs/cleanup-plan.md P10.3): the run's velocity-gradient family above is then the MEAN flow's
+    # grad<v> (from exact face sums), and this one holds the stream average <grad v>'s divergence the deposit used to store
+    "divergence_streams": ("velDivStreams", 1, True),
+    # ... and the mass flux divergence div(sum_s rho_s v_s) (rho/rho_bar times velocity per Mpc) from exact face momentum
+    # sums: by continuity -a d(1+delta)/dt, the rate a region gains or loses mass, caustic sheets included (P10.4)
+    "mass_flux_divergence": ("massFluxDiv", 1, True),
 }
 
 _PREFIX = {"ps": "ps_output.", "dtfe": "output."}
@@ -263,6 +271,7 @@ def caustic_collapse_max(mask):
 # dimensionless.
 _VELOCITY_SCALE_EXP = {
     "velocity": 0.5, "divergence": 0.5, "shear": 0.5, "vorticity": 0.5, "gradient": 0.5,
+    "divergence_streams": 0.5, "mass_flux_divergence": 0.5,
     "dispersion": 1.0, "dispersion_tensor": 1.0,
 }
 
@@ -331,6 +340,26 @@ def _load_budget_bytes() -> int:
     return int(frac * _available_ram_bytes())
 
 
+def run_velocity_weighting(method: str, runlog) -> tuple[str, str]:
+    """How the velocity grid of a 'method' run whose log is 'runlog' was deposited, and how that is known:
+    ('volume' | 'mass', why) (FieldSet.velocity_weighting). A coarser view of it must be the mean a coarser run of
+    the SAME deposit gives: the plain block mean of a volume-weighted grid, sum rho v / sum rho of a mass-weighted
+    one. Standard DTFE's cell-averaged velocity is the volume average. A PS-DTFE run says it in its run log (the
+    binary's command line: the header does not record it); without the log the production convention
+    (--ps-volume-weighted, runspec's default, the TNG runlogs) is assumed, and said."""
+    import re
+    if method != "ps":
+        return "volume", "standard DTFE: the volume average"
+    log = Path(runlog)
+    try:
+        text = canonical_command(log.read_text(errors="replace"))     # (runlog.py: every spelling, one path)
+    except OSError:
+        return "volume", f"no {log.name}: the production convention (--ps-volume-weighted) assumed"
+    if re.search(r"(^|\s)--ps-volume-weighted(\s|$)", text, re.M):
+        return "volume", f"{log.name}: --ps-volume-weighted"
+    return "mass", f"{log.name}: no --ps-volume-weighted (the binary's mass-weighted default)"
+
+
 def run_lambda_th(runlog) -> float:
     """The web threshold of the run whose log is 'runlog' (FieldSet.lambda_th; the launcher's Explore reads its
     outputs' logs with it): the last '--lambda-th X' in it (the binary's command line on the 'RUNNING:'
@@ -342,7 +371,9 @@ def run_lambda_th(runlog) -> float:
         text = Path(runlog).read_text(errors="replace")
     except OSError:
         return DEFAULT_LAMBDA_TH
-    found = re.findall(r"--lambda[-_]th[ =]+([-+0-9.eE]+)", text) or re.findall(r"lambda_th = ([-+0-9.eE]+)", text)
+    # the option in its canonical spelling (runlog.py maps '--lambda_th'); the report's 'lambda_th =' is not an option
+    found = (re.findall(r"--lambda-th[ =]+([-+0-9.eE]+)", canonical_command(text))
+             or re.findall(r"lambda_th = ([-+0-9.eE]+)", text))
     try:
         return float(found[-1]) if found else DEFAULT_LAMBDA_TH
     except ValueError:
@@ -414,7 +445,7 @@ class FieldSet:
             # both estimators on disk: default deterministically to PS-DTFE (the primary
             # estimator of this project) rather than erroring -- but say so, loudly.
             print(f"[dtfelib] {self.snapdir.name}: both ps_output.* and output.* present; "
-                  "using method='ps' (pass --method dtfe to switch)")
+                  "using method='ps' (pass --estimator dtfe to switch)")
             return "ps"
         if ps: return "ps"
         if dt: return "dtfe"
@@ -434,11 +465,25 @@ class FieldSet:
                 return old
         return path
 
+    @property
+    def face_gradient(self) -> bool:
+        """Did this PS run store the MEAN flow's velocity derivatives itself ('--face-gradient', exact face sums)? Its
+        marker is the stream-average divergence it writes beside them ('.a_velDivStreams'). Standard DTFE: False (its
+        stored derivatives are the mean flow's anyway)."""
+        if self.method != "ps":
+            return False
+        try:
+            return self._field_path("divergence_streams").exists()
+        except (KeyError, ValueError):
+            return False
+
     def has(self, name: str, mean_field: bool = False) -> bool:
         """Is the grid on disk? mean_field=True asks whether load(name, mean_field=True) can serve it: under
         PS-DTFE that needs the 'velocity' grid (the mean field is derived from it), under standard DTFE the stored
         grid itself."""
         if mean_field and self.method == "ps" and name in MEAN_FIELD_NAMES:
+            if self.face_gradient:           # --face-gradient: the stored grids ARE the mean flow's
+                return self._field_path(name).exists()
             return self.has("velocity")
         try:
             return self._field_path(name).exists()
@@ -559,8 +604,9 @@ class FieldSet:
             if name not in MEAN_FIELD_NAMES:
                 raise ValueError(f"mean_field=True serves the velocity-gradient family {', '.join(MEAN_FIELD_NAMES)}; "
                                  f"not {name!r}")
-            if self.method == "ps":
+            if self.method == "ps" and not self.face_gradient:
                 return self.mean_field(name, scaled=scaled)
+            # a PS run with --face-gradient stored the mean flow's derivatives itself (exact face sums): read them
             # standard DTFE: the stored grid IS the gradient of its one single-valued velocity field, measured by the
             # estimator itself (cell averages of the interpolant's gradient) -- read it, never re-derive it
         factor = self._scale_factor32(name) if scaled else None
@@ -587,6 +633,13 @@ class FieldSet:
         if factor is not None:
             data *= factor                    # in place: fromfile owns the buffer
         return data.reshape((n, n, n) if ncomp == 1 else (n, n, n, ncomp))
+
+    @property
+    def velocity_weighting(self) -> tuple[str, str]:
+        """How this output's velocity grid was deposited, and how that is known: ('volume' | 'mass', why), from its
+        run log (run_velocity_weighting). A coarser view of it (a block mean, a quiver arrow) must be the mean a
+        coarser run of the SAME deposit gives."""
+        return run_velocity_weighting(self.method, self.snapdir / f"{self.prefix}runlog")
 
     @property
     def lambda_th(self) -> float:

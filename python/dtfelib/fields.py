@@ -105,6 +105,28 @@ def extract_2d_slice(field, slice_dim=2, slice_index=None):
         raise ValueError("slice_dim must be 0, 1, or 2")
 
 
+def block_mean_slice(a, step, weight=None):
+    """Block means of a 2D slice over step x step cells (the edge blocks hold the remainder: no cell is dropped), and
+    each block's centre in cell units (index + 0.5 for a cell). weight: a slice of the same shape, the WEIGHTED mean
+    sum w a / sum w (the plain mean where a block's weights sum to 0) -- the density for a mass-weighted velocity
+    grid (FieldSet.velocity_weighting), so the coarse value is the one a coarser run of the same deposit gives.
+    Returns (mean, centres along axis 0, centres along axis 1)."""
+    a = np.asarray(a, dtype=np.float64)
+    step = max(int(step), 1)
+    starts = [np.arange(0, n, step) for n in a.shape]
+    def bsum(x):
+        return np.add.reduceat(np.add.reduceat(x, starts[0], axis=0), starts[1], axis=1)
+    count = np.outer(np.diff(np.append(starts[0], a.shape[0])), np.diff(np.append(starts[1], a.shape[1])))
+    mean = bsum(a) / count
+    if weight is not None:
+        w = np.asarray(weight, dtype=np.float64)
+        ws = bsum(w)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mean = np.where(ws > 0, bsum(w * a) / ws, mean)
+    centres = [s + 0.5 * np.diff(np.append(s, n)) for s, n in zip(starts, a.shape)]
+    return mean, centres[0], centres[1]
+
+
 def extract_velocity_slice(velocity_field, slice_dim=2):
     idx = velocity_field.shape[slice_dim] // 2
 

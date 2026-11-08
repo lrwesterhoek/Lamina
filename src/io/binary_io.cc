@@ -89,7 +89,7 @@ void readBinaryFile_StructuredData(std::string filename,
         throwError( "The coordinates of the data box have not been specified. The function 'readBinaryFile_StructuredData' needs the box coordinates to be given as an option to the program since they are not stored in the input file!" );
     
 
-    // --options extras: [0] mass column (-1=uniform), [1] values per point (min 3), [2] threshold column (<0=off), [3] threshold (keep >=).
+    // --reader-options extras: [0] mass column (-1=uniform), [1] values per point (min 3), [2] threshold column (<0=off), [3] threshold (keep >=).
     int massColumn = -1;    // default: don't read any mass
     if ( userOptions->additionalOptions.size()!=0 )
         massColumn = atoi( userOptions->additionalOptions[0].c_str() );

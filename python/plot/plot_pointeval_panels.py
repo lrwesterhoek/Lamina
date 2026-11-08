@@ -7,7 +7,10 @@ and the pointwise stream count N_streams (discrete colormap). Because the points
 the continuous piecewise-linear field, the maps are grid-free: resolution is set by the
 pixel count of the plane file, limited only by the tessellation itself.
 
-    python3 plot/plot_pointeval_panels.py --prefix <PS-DTFE output root> --plane plane_100_99.json
+    python3 plot/plot_pointeval_panels.py --root <PS-DTFE output root> --plane plane_100_99.json
+
+The old spellings --prefix (now --root: a full output root, not a bare prefix), --output, a comma-joined --panels
+and --project mean (now slab) are read with a warning for one release.
 """
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
@@ -20,6 +23,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import BoundaryNorm, ListedColormap, LogNorm
+
+from dtfelib.cli import new_parser, add_out_arg, add_list_arg, deprecated_alias, choice_type
 
 PANELS = ("density", "sheet", "streams")
 
@@ -56,17 +61,18 @@ def stream_cmap_norm(smax: int):
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--prefix", required=True, type=Path,
-                   help="output root passed to the binary (reads <prefix>.pts_den/.pts_streams)")
+    p = new_parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--root", dest="prefix", required=True, type=Path,
+                   help="output root passed to the binary (reads <root>.pts_den/.pts_streams)")
+    deprecated_alias(p, "--prefix", "--root")
     p.add_argument("--plane", required=True, type=Path, help="sidecar JSON from tools/make_image_plane.py")
-    p.add_argument("-o", "--output", "--out", type=Path, default=None,
-                   help="image path (default <prefix>_pointeval_panels.png)")
-    p.add_argument("--panels", default=",".join(PANELS),
-                   help=f"comma list from {{{','.join(PANELS)}}} (default all three)")
-    p.add_argument("--project", choices=("plane", "mean"), default="plane",
+    add_out_arg(p, help="image path (default <root>_pointeval_panels.png)", metavar="PNG")
+    add_list_arg(p, "--panels", default=list(PANELS), metavar="PANEL",
+                 help=f"space-separated, from {' '.join(PANELS)} (default all three)")
+    p.add_argument("--project", type=choice_type("--project", ("plane", "slab"), old={"mean": "slab"}),
+                   default="plane", metavar="{plane,slab}",
                    help="density panels: 'plane' (default) = the central plane, a crisp "
-                        "cross-section of the continuous field; 'mean' = average over all "
+                        "cross-section of the continuous field; 'slab' = average over all "
                         "sampled planes -- a smooth projection ONLY with many planes "
                         "(>= 16): a handful of planes GHOSTS, stamping every inclined "
                         "structure once per plane with the inter-plane offset")
@@ -83,17 +89,17 @@ def main() -> None:
                         "colorbars -- for zooming, posters and compositing")
     args = p.parse_args()
 
-    panels = [s.strip() for s in args.panels.split(",") if s.strip()]
+    panels = list(args.panels)
     bad = set(panels) - set(PANELS)
     if bad or not panels:
         raise SystemExit(f"unknown panels {sorted(bad)}; choose from {PANELS}")
 
     side = json.loads(args.plane.read_text())
     den, streams = load_planes(args.prefix, side)
-    proj = den.mean(axis=0) if args.project == "mean" else den[side["planes"] // 2]
+    proj = den.mean(axis=0) if args.project == "slab" else den[side["planes"] // 2]
     s_mid = streams[side["planes"] // 2]                 # pointwise count on the central plane
-    if args.project == "mean" and 1 < side["planes"] < 16:
-        print(f"WARNING: --project mean over only {side['planes']} planes ghosts inclined "
+    if args.project == "slab" and 1 < side["planes"] < 16:
+        print(f"WARNING: --project slab over only {side['planes']} planes ghosts inclined "
               f"structures (one copy per plane); regenerate with --planes 16+ or use --project plane")
     extent = [side["u0"], side["u1"], side["v0"], side["v1"]]
     # percentile auto-stretch: the dynamic range grows by ~4 decades from z=20 (quasi-linear,
@@ -110,7 +116,7 @@ def main() -> None:
     if args.image:
         # pixel-exact export: colormap the raw sample grid directly (uint8 RGBA, one image
         # pixel per sample point), bypassing matplotlib's figure machinery entirely
-        base = args.output or args.prefix.with_name(args.prefix.name + "_pointeval_panels.png")
+        base = args.out or args.prefix.with_name(args.prefix.name + "_pointeval_panels.png")
         for name in panels:
             if name == "streams":
                 cmap, norm, _ = stream_cmap_norm(s_mid.max())
@@ -118,7 +124,7 @@ def main() -> None:
             else:
                 cmap = plt.get_cmap("gray" if name == "density" else "gray_r")
                 rgba = cmap(LogNorm(vmin=vmin, vmax=vmax)(np.clip(proj, vmin, vmax)), bytes=True)
-            out = base if (len(panels) == 1 and args.output) else \
+            out = base if (len(panels) == 1 and args.out) else \
                 base.with_name(f"{base.stem}_{name}{base.suffix}")
             # flip: same origin='lower' as the figure. A COPY: matplotlib < 3.9 hands the reversed view to PIL,
             # which refuses a non-C-contiguous array (CI's numpy 1.26 set)
@@ -160,7 +166,7 @@ def main() -> None:
         ax.set_ylabel(f"${side['v_axis']}$ [Mpc]")
     axes[-1].set_xlabel(f"${side['u_axis']}$ [Mpc]")
 
-    out = args.output or args.prefix.with_name(args.prefix.name + "_pointeval_panels.png")
+    out = args.out or args.prefix.with_name(args.prefix.name + "_pointeval_panels.png")
     # native resolution: the drawn axes span ~all of width_in after constrained_layout;
     # dpi = nu/width gives >= one output pixel per sampled pixel (colorbars add margin)
     dpi = args.dpi or max(200, round(side["nu"] / width_in))

@@ -229,7 +229,7 @@ private:
        CHUNK_MARKER (8 bytes)   member_0 ... member_{n-1}   (each a complete gzip member)
        index: uint64 n, then n x (uint64 compressed size, uint64 uncompressed size)
        footer: uint64 index offset (from the file start), CHUNK_FOOTER (8 bytes)
-   The members concatenate to a valid multi-member gzip file. DTFE_TESS_CACHE_LEGACY=1 writes the
+   The members concatenate to a valid multi-member gzip file. DTFE_TESSELLATION_CACHE_LEGACY=1 writes the
    single stream (tests); python/tools/upgrade_tess_cache.py converts single-stream files, byte for byte. */
 static const char   CHUNK_MARKER[8] = { 'D','T','F','E','C','H','K','1' };
 static const char   CHUNK_FOOTER[8] = { 'D','T','F','E','C','H','K','E' };
@@ -238,10 +238,10 @@ static const size_t CHUNK_BYTES     = size_t(16) << 20;
 inline std::atomic<int> &activeLoads() { static std::atomic<int> n{ 0 }; return n; }
 
 // threads for one load's or save's chunks: a few, fewer while other loads run (the composite server
-// loads up to 8 partitions at once); DTFE_TESS_CACHE_THREADS pins it
+// loads up to 8 partitions at once); DTFE_TESSELLATION_CACHE_THREADS pins it
 inline size_t chunkThreads()
 {
-    if ( long const v = Env::integer( "DTFE_TESS_CACHE_THREADS", 0 ); v > 0 )
+    if ( long const v = Env::integer( "DTFE_TESSELLATION_CACHE_THREADS", 0 ); v > 0 )
         return size_t( v );
     unsigned const hw = std::max( 1u, std::thread::hardware_concurrency() );
     int const others = std::max( 0, activeLoads().load() - 1 );
@@ -253,11 +253,11 @@ inline size_t chunkThreads()
    (1.9 GB of body in 114 chunks): compression at level 1 2.4x faster than zlib and 3% smaller;
    decompression 1.13x faster than macOS's own zlib (Apple tunes it for its chips), more against
    stock zlib. The members stay plain gzip (libdeflate checks the CRC itself), so every build reads
-   every cache. DTFE_TESS_CACHE_ZLIB=1 uses zlib for both directions (for comparisons). */
+   every cache. DTFE_TESSELLATION_CACHE_ZLIB=1 uses zlib for both directions (for comparisons). */
 inline bool useLibdeflate()
 {
 #ifdef DTFE_HAVE_LIBDEFLATE
-    static bool const v = not Env::flag( "DTFE_TESS_CACHE_ZLIB" );
+    static bool const v = not Env::flag( "DTFE_TESSELLATION_CACHE_ZLIB" );
     return v;
 #else
     return false;
@@ -577,9 +577,9 @@ inline std::string makeDescriptor(User_options const &userOptions)
         d << userOptions.lagrangianRegion.coords[i] << ',';
     d << " subgrid=" << (userOptions.psUseSubgrid?1:0)
       << " deferNorm=" << (userOptions.psDeferNormalization?1:0) << '\n';
-    // --ps-lag-padding sets the padded box instead of the Eulerian fraction recorded above. Written
+    // --ps-lagrangian-padding sets the padded box instead of the Eulerian fraction recorded above. Written
     // only when it is in force -- k > 0 on a Lagrangian-partitioned run (PSPartitionPlan; a single triangulation
-    // has no partition padding): '--ps-lag-padding 0' (the Eulerian padding) writes no line, so its caches
+    // has no partition padding): '--ps-lagrangian-padding 0' (the Eulerian padding) writes no line, so its caches
     // keep the descriptor they have without the option
     if ( userOptions.psLagPadding > Real(0.) and userOptions.partitionOn and userOptions.partNo < 0 )
         d << "lagPadding=" << userOptions.psLagPadding << '\n';
@@ -592,7 +592,7 @@ inline std::string makeDescriptor(User_options const &userOptions)
        'region' = its box, as PS's lagRegion is). The lines above therefore name the partition already; a
        'partitionRegion' line repeating 'box' would only make every existing cache miss. */
     // anything that changes WHICH particles are triangulated, or their coordinates. The random
-    // SEED belongs here only when '--randomSample' is on, because that is the one case where it
+    // SEED belongs here only when '--particle-fraction' is on, because that is the one case where it
     // decides which particles enter the triangulation (random.cc); otherwise it merely seeds the
     // method-2/3 Monte-Carlo interpolation, which runs after the cached stages -- and since an
     // unspecified '--seed' is std::rand() per run, including it unconditionally would make every
@@ -722,13 +722,13 @@ inline void removeStaleParts(std::string const &path)
    it), so the loaded triangulation -- its iteration order included -- is CGAL's. Only dimension 3 is
    handled: a cached partition is never flat, and anything else is reported as unreadable (a miss,
    rebuilt). Writing goes the same way (writeTriangulationBlocks: CGAL's bytes, written in blocks).
-   DTFE_TESS_CACHE_CGAL_IO=1 uses CGAL's own reader and writer instead (for comparisons). */
+   DTFE_TESSELLATION_CACHE_CGAL_IO=1 uses CGAL's own reader and writer instead (for comparisons). */
 
 template <class Tr> using Tds_of = typename Tr::Triangulation_data_structure;
 
 inline bool useCgalIO()
 {
-    static bool const v = Env::flag( "DTFE_TESS_CACHE_CGAL_IO" );
+    static bool const v = Env::flag( "DTFE_TESSELLATION_CACHE_CGAL_IO" );
     return v;
 }
 
@@ -886,7 +886,7 @@ inline bool readTriangulationBlocks(std::streambuf &sb, Tr &dt)
 }
 
 
-// DTFE_TESS_CACHE_FINGERPRINT=1: after a load, print a hash of the loaded STRUCTURE -- every vertex's
+// DTFE_TESSELLATION_CACHE_FINGERPRINT=1: after a load, print a hash of the loaded STRUCTURE -- every vertex's
 // point and the index of the cell it stores, every cell's vertex and neighbour indices, in iteration
 // order -- so the tests can show that the block reader builds exactly what CGAL's reader builds (the
 // outputs alone could not: a point location gives the same answer from any starting cell).
@@ -1158,14 +1158,14 @@ inline bool tryLoad(DT &dt, User_options const &userOptions)
 #endif
     if ( not structureOk or dt.number_of_vertices() == 0 ) { dt.clear(); return false; }
 #if NO_DIM == 3
-    if ( Env::flag( "DTFE_TESS_CACHE_FINGERPRINT" ) ) printStructureFingerprint( dt );
+    if ( Env::flag( "DTFE_TESSELLATION_CACHE_FINGERPRINT" ) ) printStructureFingerprint( dt );
 #endif
     if ( not readPayload( zin, dt ) )           { dt.clear(); return false; }
     return true;
 }
 
 
-// the triangulation part of a cache body: in blocks, or through CGAL (DTFE_TESS_CACHE_CGAL_IO=1, or
+// the triangulation part of a cache body: in blocks, or through CGAL (DTFE_TESSELLATION_CACHE_CGAL_IO=1, or
 // a triangulation that is not 3D); a refused write leaves the stream bad, which save() reports
 template <class Tr>
 inline void writeTriangulation(std::ostream &zout, Tr const &dt)
@@ -1235,8 +1235,8 @@ inline void save(DT &dt, User_options const &userOptions)
 
         // The header above stays uncompressed so a staleness check costs one small read; the
         // tessellation and payload go through zlib in independent chunks (ChunkDeflateBuf), or as
-        // one stream under DTFE_TESS_CACHE_LEGACY=1 (the single-stream format, for tests)
-        bool const legacy = Env::flag( "DTFE_TESS_CACHE_LEGACY" );
+        // one stream under DTFE_TESSELLATION_CACHE_LEGACY=1 (the single-stream format, for tests)
+        bool const legacy = Env::flag( "DTFE_TESSELLATION_CACHE_LEGACY" );
         if ( not legacy )
         {
             os.write( CHUNK_MARKER, 8 );

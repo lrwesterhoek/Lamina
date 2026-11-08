@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Resume of a killed partitioned PS-DTFE run (src/partition_checkpoint.h), on a small synthetic
 # snapshot split into 64 partitions:
-#   C1  an uninterrupted '--ordered-merge' run (the reference) checkpoints, says what it cost, and removes its
+#   C1  an uninterrupted '--ps-merge index-order' run (the reference) checkpoints, says what it cost, and removes its
 #       '<output>.runlog.checkpoint' once the outputs are in place
 #   C2  a run killed after 20 partitions (DTFE_TEST_EXIT_AFTER_PARTITIONS=20: a SIGKILL right after a checkpoint)
 #       exits 137, writes no output, and leaves the checkpoint with its manifest of >= 20 merged partitions
 #   C3  '--resume' with a changed setting ('--grid') refuses, names the differing line, keeps the checkpoint
-#   C4  '--resume' (with '--ps-no-overlap' and '--tessellation-cache', which the settings key leaves out) continues: every
+#   C4  '--resume' (with '--no-overlap' and '--tessellation-cache', which the settings key leaves out) continues: every
 #       output byte-identical to the reference, the checkpoint removed; a dead writer's temp file is cleaned up.
 #       The same --max-concurrent and thread count as the killed run: the deposit inside a partition splits its
 #       sums by the threads a partition gets, so another count differs at float rounding (C6 covers that case)
 #   C5  '--resume' with nothing to resume refuses
-#   C6  a run killed while merging in COMPLETION order ('--completion-order-merge') resumes too: mass conserved
+#   C6  a run killed while merging in COMPLETION order ('--ps-merge completion-order') resumes too: mass conserved
 #   C7  '--scratch-dir': the checkpoint goes to the scratch folder under the name scripts/config.sh
 #       ps_checkpoint_dir computes (the basename + a hash of the whole output path)
 #   C9  too little room for a checkpoint (DTFE_TEST_CHECKPOINT_FREE_BYTES): the run warns, writes none, and finishes
@@ -23,7 +23,7 @@
 #   C11 '--interlace' (two passes, the second on a half-cell-shifted grid) writes no checkpoint, and '--resume' with it
 #       is refused: one checkpoint and key for both passes would mix the shifted and unshifted grids
 #   C12 a run killed before any checkpoint could be written leaves no (empty) checkpoint folder for the driver to resume
-#   C13 a checkpoint of another binary ('binary=' key line: the revision AND link time) is refused, naming PS_RESUME=0
+#   C13 a checkpoint of another binary ('binary=' key line: the revision AND link time) is refused, naming DTFE_RESUME=0
 #   C14 a commit whose renames failed (exit 3, the outputs left as '.part.<pid>') keeps the checkpoint
 #   C15 the deprecated spellings share the canonical names' settings key: a run killed with '--ps-exact-deposit
 #       --lambda_th 0.3' resumes under '--exact-average --lambda-th 0.3', every output byte-identical to an
@@ -49,12 +49,12 @@ SNAP="$TMP/waves.hdf5"
 PASS=0; FAILS=0
 check() { if [ "$2" = 0 ]; then PASS=$((PASS+1)); echo "  PASS $1"; else FAILS=$((FAILS+1)); echo "  FAIL $1"; fi; }
 # same <a> <b>, merged_count <checkpoint folder>: tests/lib.sh
-C=(--grid 48 --periodic --input 105 --MpcUnit 1 --field density velocity density_a velocity_a dispersion_a
+C=(--grid 48 --periodic --input-format 105 --mpc-unit 1 --field density velocity density_a velocity_a dispersion_a
    --partition 4 4 4)
 
-echo ">> C1: the uninterrupted --ordered-merge reference (64 partitions, --max-concurrent 4)"
+echo ">> C1: the uninterrupted --ps-merge index-order reference (64 partitions, --max-concurrent 4)"
 grep -q -- "--resume" <<< "$("${BIN}" --help 2>&1)"; check "C1 '--resume' is in the help" $?
-OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/ref" "${C[@]}" --verbose 2 --max-concurrent 4 --ordered-merge > "$TMP/ref.log" 2>&1 \
+OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/ref" "${C[@]}" --verbose 2 --max-concurrent 4 --ps-merge index-order > "$TMP/ref.log" 2>&1 \
     || { echo "FAIL: ref (see $TMP/ref.log)"; exit 1; }
 grep -q "checkpoints of the merged grids go to '$TMP/ref.runlog.checkpoint'" "$TMP/ref.log" \
     && grep -q "checkpoints: [0-9]* written" "$TMP/ref.log" && [ ! -e "$TMP/ref.runlog.checkpoint" ]
@@ -62,7 +62,7 @@ check "C1 the run checkpointed and removed '<output>.runlog.checkpoint' after wr
 grep -a "checkpoints: " "$TMP/ref.log" | sed 's/^/   /'
 
 echo ">> C2: killed after 20 partitions"
-OMP_NUM_THREADS=4 DTFE_TEST_EXIT_AFTER_PARTITIONS=20 "$BIN" "$SNAP" "$TMP/k" "${C[@]}" --verbose 2 --max-concurrent 4 --ordered-merge \
+OMP_NUM_THREADS=4 DTFE_TEST_EXIT_AFTER_PARTITIONS=20 "$BIN" "$SNAP" "$TMP/k" "${C[@]}" --verbose 2 --max-concurrent 4 --ps-merge index-order \
     > "$TMP/k.log" 2>&1; rc=$?
 CK="$TMP/k.runlog.checkpoint"
 n="$(merged_count "$CK" 2>/dev/null || echo 0)"
@@ -75,16 +75,16 @@ echo ">> C3: --resume with another --grid refuses"
     && [ -s "$CK/checkpoint" ] && [ ! -e "$TMP/k.den" ]
 check "C3 refused, naming the differing line, and the checkpoint is kept" $?
 
-echo ">> C4: --resume (with --ps-no-overlap --tessellation-cache)"
+echo ">> C4: --resume (with --no-overlap --tessellation-cache)"
 sleep 0 & DEAD=$!; wait "$DEAD"   # a pid that no longer runs
 echo torn > "$CK/checkpoint.tmp.$DEAD"
 mkdir -p "$TMP/tc"
-OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/k" "${C[@]}" --max-concurrent 4 --resume --verbose 2 --ps-no-overlap \
+OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/k" "${C[@]}" --max-concurrent 4 --resume --verbose 2 --no-overlap \
     --tessellation-cache "$TMP/tc" > "$TMP/k4.log" 2>&1; rc=$?
 [ "$rc" = 0 ] && grep -q -- "--resume: $n of 64 partitions are already in the checkpoint" "$TMP/k4.log" \
     && grep -q "partitions $((64 - n))/$((64 - n))" "$TMP/k4.log"
 check "C4 the resume computed only the $((64 - n)) partitions the checkpoint lacked" $?
-same "$TMP/ref" "$TMP/k"; check "C4 every output byte-identical to the uninterrupted --ordered-merge run" $?
+same "$TMP/ref" "$TMP/k"; check "C4 every output byte-identical to the uninterrupted --ps-merge index-order run" $?
 [ ! -e "$CK" ]; check "C4 the checkpoint (and the dead writer's temp file) removed on success" $?
 
 echo ">> C5: --resume with nothing to resume"
@@ -94,9 +94,9 @@ check "C5 refused: nothing to resume" $?
 
 echo ">> C6: killed while merging in completion order, then resumed"
 OMP_NUM_THREADS=4 DTFE_TEST_EXIT_AFTER_PARTITIONS=25 "$BIN" "$SNAP" "$TMP/u" "${C[@]}" --verbose 2 --max-concurrent 4 \
-    --completion-order-merge > "$TMP/u.log" 2>&1; rc1=$?
-# (the resume keeps the flag, as run_ps_dtfe.sh ORDERED_MERGE=0 would: --resume merges in index order over it)
-OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/u" "${C[@]}" --verbose 2 --max-concurrent 4 --completion-order-merge --resume \
+    --ps-merge completion-order > "$TMP/u.log" 2>&1; rc1=$?
+# (the resume keeps the flag, as run_ps_dtfe.sh PS_MERGE=completion-order would: --resume merges in index order over it)
+OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/u" "${C[@]}" --verbose 2 --max-concurrent 4 --ps-merge completion-order --resume \
     > "$TMP/u2.log" 2>&1; rc2=$?
 [ "$rc1" = 137 ] && [ "$rc2" = 0 ] && [ ! -e "$TMP/u.runlog.checkpoint" ]
 check "C6 killed (137), resumed (0), checkpoint removed" $?
@@ -117,7 +117,7 @@ check "C6 the grids equal the reference to float rounding (no partition lost or 
 echo ">> C7: --scratch-dir holds the checkpoint"
 SCR="$TMP/scratch"; mkdir -p "$SCR"
 SCK="$(source scripts/config.sh && ps_checkpoint_dir "$TMP/s" "$SCR")"
-OMP_NUM_THREADS=4 DTFE_TEST_EXIT_AFTER_PARTITIONS=10 "$BIN" "$SNAP" "$TMP/s" "${C[@]}" --verbose 2 --max-concurrent 4 --ordered-merge \
+OMP_NUM_THREADS=4 DTFE_TEST_EXIT_AFTER_PARTITIONS=10 "$BIN" "$SNAP" "$TMP/s" "${C[@]}" --verbose 2 --max-concurrent 4 --ps-merge index-order \
     --scratch-dir "$SCR" > "$TMP/s.log" 2>&1; rc1=$?
 [ "$rc1" = 137 ] && [ -s "$SCK/checkpoint" ] && [ ! -e "$TMP/s.runlog.checkpoint" ]
 check "C7 the checkpoint is in the scratch folder, where config.sh ps_checkpoint_dir says ($(basename "$SCK"))" $?
@@ -127,14 +127,14 @@ check "C7 resumed from the scratch folder: byte-identical, checkpoint removed" $
 
 echo ">> C9: no room for a checkpoint"
 OMP_NUM_THREADS=4 DTFE_TEST_CHECKPOINT_FREE_BYTES=1000000 "$BIN" "$SNAP" "$TMP/room" "${C[@]}" --verbose 2 --max-concurrent 4 \
-    --ordered-merge > "$TMP/room.log" 2>&1; rc=$?
+    --ps-merge index-order > "$TMP/room.log" 2>&1; rc=$?
 [ "$rc" = 0 ] && grep -q "checkpoint could not be written (only 0 GB free" "$TMP/room.log" \
     && ! grep -q "checkpoints: [0-9]* written" "$TMP/room.log" && [ ! -e "$TMP/room.runlog.checkpoint" ] \
     && same "$TMP/ref" "$TMP/room"
 check "C9 warned, wrote no checkpoint, and the outputs are the reference's" $?
 
 echo ">> C10: auto-tuned split (no --partition), killed, resumed"
-A=(--grid 48 --periodic --input 105 --MpcUnit 1 --verbose 2 --field density velocity density_a velocity_a)
+A=(--grid 48 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density velocity density_a velocity_a)
 AT=(env OMP_NUM_THREADS=4 DTFE_RAM_GB=0.05 DTFE_AUTO_MINN=1000)
 "${AT[@]}" "$BIN" "$SNAP" "$TMP/aref" "${A[@]}" > "$TMP/aref.log" 2>&1 || { echo "FAIL: aref (see $TMP/aref.log)"; exit 1; }
 "${AT[@]}" DTFE_TEST_EXIT_AFTER_PARTITIONS=50 "$BIN" "$SNAP" "$TMP/a" "${A[@]}" > "$TMP/a1.log" 2>&1; rc1=$?
@@ -204,9 +204,9 @@ PYEOF
 rcp=$?
 "$BIN" "$SNAP" "$TMP/rb" "${C[@]}" --verbose 2 --max-concurrent 4 --resume > "$TMP/rb2.log" 2>&1; rc2=$?
 [ "$rc1" = 137 ] && [ "$rcp" = 0 ] && [ "$rc2" != 0 ] && grep -q "'--resume' refused" "$TMP/rb2.log" \
-    && grep -q "checkpoint: binary=an-older-build" "$TMP/rb2.log" && grep -q "PS_RESUME=0" "$TMP/rb2.log" \
+    && grep -q "checkpoint: binary=an-older-build" "$TMP/rb2.log" && grep -q "run_ps_dtfe.sh: DTFE_RESUME=0" "$TMP/rb2.log" \
     && [ -s "$TMP/rb.runlog.checkpoint/checkpoint" ]
-check "C13 refused, naming the 'binary=' line and PS_RESUME=0; the checkpoint is kept" $?
+check "C13 refused, naming the 'binary=' line and DTFE_RESUME=0 (run_ps_dtfe.sh's knob); the checkpoint is kept" $?
 rm -rf "$TMP/rb.runlog.checkpoint"
 
 echo ">> C14: outputs that could not be put in place keep the checkpoint"
@@ -218,15 +218,18 @@ check "C14 exit $rc (renames failed): the checkpoint stays for a resume" $?
 rm -rf "$TMP/cm.den" "$TMP/cm.runlog.checkpoint" "$TMP"/cm.*.part.*
 
 echo ">> C15: the deprecated spellings resume under the canonical names (one settings key)"
-X_OLD=("${C[@]}" --verbose 2 --max-concurrent 4 --ordered-merge --ps-exact-deposit --lambda_th 0.3)
-X_NEW=("${C[@]}" --verbose 2 --max-concurrent 4 --ordered-merge --exact-average --lambda-th 0.3)
+C_OLD=("${C[@]/#--input-format/--input}"); C_OLD=("${C_OLD[@]/#--mpc-unit/--MpcUnit}")
+X_OLD=("${C_OLD[@]}" --verbose 2 --max-concurrent 4 --ordered-merge --ps-exact-deposit --lambda_th 0.3)
+X_NEW=("${C[@]}" --verbose 2 --max-concurrent 4 --ps-merge index-order --exact-average --lambda-th 0.3)
 OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/xref" "${X_NEW[@]}" > "$TMP/xref.log" 2>&1 || { echo "FAIL: xref (see $TMP/xref.log)"; exit 1; }
 OMP_NUM_THREADS=4 DTFE_TEST_EXIT_AFTER_PARTITIONS=20 "$BIN" "$SNAP" "$TMP/x" "${X_OLD[@]}" > "$TMP/x1.log" 2>&1; rc1=$?
 nx="$(merged_count "$TMP/x.runlog.checkpoint" 2>/dev/null || echo 0)"
 OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/x" "${X_NEW[@]}" --resume > "$TMP/x2.log" 2>&1; rc2=$?
 [ "$rc1" = 137 ] && [ "$rc2" = 0 ] && grep -q -- "--resume: $nx of 64 partitions are already in the checkpoint" "$TMP/x2.log" \
     && grep -q "^warning: --ps-exact-deposit is deprecated, use --exact-average$" "$TMP/x1.log" \
-    && grep -q "^warning: --lambda_th is deprecated, use --lambda-th$" "$TMP/x1.log" && ! grep -q "deprecated" "$TMP/x2.log"
+    && grep -q "^warning: --lambda_th is deprecated, use --lambda-th$" "$TMP/x1.log" \
+    && grep -q "^warning: --MpcUnit is deprecated, use --mpc-unit$" "$TMP/x1.log" \
+    && grep -q "^warning: --ordered-merge is deprecated, use --ps-merge index-order$" "$TMP/x1.log" && ! grep -q "deprecated" "$TMP/x2.log"
 check "C15 killed with the old spellings after $nx partitions (each warned), resumed with the canonical ones (exit $rc1, $rc2)" $?
 same "$TMP/xref" "$TMP/x"; check "C15 every output byte-identical to the uninterrupted run with the canonical names" $?
 
@@ -235,7 +238,7 @@ OBJ=o_ps; precision_double && OBJ=o_ps_d
 if [ ! -d "$OBJ" ] || [ -f "$OBJ/.gpu_mode_off" ] || [ ! -f "$OBJ/.gpu_mode_metal" ]; then
     echo "  SKIP C8: $OBJ is not a Metal GPU build"
 else
-    G=("${C[@]}" --verbose 2 --max-concurrent 1 --ordered-merge --gpu)
+    G=("${C[@]}" --verbose 2 --max-concurrent 1 --ps-merge index-order --gpu)
     "$BIN" "$SNAP" "$TMP/gref" "${G[@]}" > "$TMP/gref.log" 2>&1 || { echo "FAIL: gref (see $TMP/gref.log)"; exit 1; }
     DTFE_TEST_EXIT_AFTER_PARTITIONS=12 "$BIN" "$SNAP" "$TMP/g" "${G[@]/#--gpu/--ps-gpu}" > "$TMP/g1.log" 2>&1; rc1=$?
     "$BIN" "$SNAP" "$TMP/g" "${G[@]}" --resume > "$TMP/g2.log" 2>&1; rc2=$?

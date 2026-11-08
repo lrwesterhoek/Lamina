@@ -302,7 +302,7 @@ class SpecsMixin:
         c.sample_points = self.o_points.text().strip()
         c.pts_vel_grad = self.o_pvg.isChecked()
         c.pts_conventions = self.o_pc.currentData() or "grid"
-        c.stream_density = self.o_sdens.currentData() or "dtfe"
+        c.stream_density = self.o_sdens.currentData() or "linear"
         c.per_stream = self.o_pstream.isChecked()
         c.per_stream_ids = self.o_pids.isChecked()
         c.halo_release = self.o_halo.value()
