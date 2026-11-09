@@ -219,12 +219,13 @@ static inline void depositCell(thread const DGrids& G,
 }
 
 kernel void depositAveraged1(
-    device const float*     verts    [[buffer(0)]],   // nTet*12: 4 vertices, relative to region lower corner
+    device const float*     verts    [[buffer(0)]],   // nTet*12: 4 vertices, relative to the base cell's corner (cells) or the region's
     device const float*     dens     [[buffer(1)]],   // nTet*4:  vertex densities
     device const float*     vels     [[buffer(2)]],   // nTet*12: vertex velocities (dummy when fVel==fGrad==0)
     device const float*     vols     [[buffer(3)]],   // nTet:    tetrahedron volume (CPU value)
     device const uint*      cnts     [[buffer(4)]],   // nTet:    sample count; 0 = single-grid-cell fast path
     device const uint*      flats    [[buffer(5)]],   // nTet:    FULL-grid flat index for the fast path (the host adds subOff)
+    device const int*       cells    [[buffer(22)]],  // nTet*3:  each tetrahedron's base cell (sub-grid indices; its positions are relative to that cell's corner): 0 under the region frame
     device const float4*    sobol    [[buffer(6)]],   // maxNN: shared Sobol barycentric table (xyz, pad)
     device atomic_float*    denGrid  [[buffer(7)]],
     device atomic_float*    velGrid  [[buffer(8)]],
@@ -315,7 +316,7 @@ kernel void depositAveraged1(
         for (int d=0;d<3;++d) p[d] = q0*Ax[0][d] + q1*Ax[1][d] + q2*Ax[2][d];
         int pos[3]; bool in=true;
         for (int d=0;d<3;++d) {
-            pos[d] = int(floor((base[d]+p[d])*P.invDx[d]));
+            pos[d] = cells[tid*3+d] + int(floor((base[d]+p[d])*P.invDx[d]));
             if (pos[d]<0 || pos[d]>=P.nGrid[d]) { in=false; break; }
         }
         if (!in) continue;   // sample outside this batch's sub-grid
@@ -511,7 +512,7 @@ template <int K>
 static inline void depositItem(
     device const float*     verts, device const float* dens, device const float* vels,
     device const float*     vols,  device const uint*  cnts, device const uint*  flats,
-    device const float4*    sobol,
+    device const int*       cells, device const float4* sobol,
     thread const DGrids&    G,
     device const float*     scal,
     constant DepositParams& P, uint3 const it, uint const lane,
@@ -598,7 +599,7 @@ static inline void depositItem(
         for (int d=0;d<3;++d) p[d] = q0*Ax[0][d] + q1*Ax[1][d] + q2*Ax[2][d];
         int pos[3]; bool in=true;
         for (int d=0;d<3;++d) {
-            pos[d] = int(floor((base[d]+p[d])*P.invDx[d]));
+            pos[d] = cells[tid*3+d] + int(floor((base[d]+p[d])*P.invDx[d]));
             if (pos[d]<0 || pos[d]>=P.nGrid[d]) { in=false; break; }
         }
         if (!in) continue;
@@ -787,6 +788,7 @@ kernel void NAME(                                                               
     device const float*     vols     [[buffer(3)]],                                         \
     device const uint*      cnts     [[buffer(4)]],                                         \
     device const uint*      flats    [[buffer(5)]],                                         \
+    device const int*       cells    [[buffer(22)]], /* each tetrahedron's base cell */     \
     device const float4*    sobol    [[buffer(6)]],                                         \
     device atomic_float*    denGrid  [[buffer(7)]],                                         \
     device atomic_float*    velGrid  [[buffer(8)]],                                         \
@@ -824,7 +826,7 @@ kernel void NAME(                                                               
     }                                                                                       \
     threadgroup_barrier(mem_flags::mem_threadgroup);                                        \
     if (iid < P.nTet)                                                                       \
-        depositItem<K>(verts, dens, vels, vols, cnts, flats, sobol, G, scal,                \
+        depositItem<K>(verts, dens, vels, vols, cnts, flats, cells, sobol, G, scal,         \
                        P, itemOf(itemStart, blockTet, P.nTetTotal, P.itemBase + iid), lane, \
                        tKeys, tVals, tValsX);                                               \
     threadgroup_barrier(mem_flags::mem_threadgroup);                                        \
@@ -872,6 +874,7 @@ kernel void depositExactAverage(
     device atomic_uint*     scalX    [[buffer(19)]],
     device atomic_uint*     sgX      [[buffer(20)]],
     device atomic_uint*     badX     [[buffer(21)]],
+    device const int*       cells    [[buffer(22)]],   // nTet*3: each tetrahedron's base cell (sub-grid indices)
     uint iid [[thread_position_in_grid]])
 {
     if (iid >= P.nTet) return;
@@ -938,16 +941,18 @@ kernel void depositExactAverage(
         densGrad[i]=s;
     }
 
-    // the window of grid cells overlapped by the tetrahedron's bounding box (the CPU's iLo/iHi:
-    // sub-grid indices, clamped to the sub-grid)
+    // the window of grid cells overlapped by the tetrahedron's bounding box, as LOCAL cell offsets c from its base
+    // cell cb (the host's frame: the positions are relative to that cell's corner, so this arithmetic is the same
+    // in every sub-domain), clamped so that the sub-grid index cb + c lies in the sub-grid (the CPU's iLo/iHi)
+    int const cb[3] = { cells[tid*3+0], cells[tid*3+1], cells[tid*3+2] };
     int iLo[3], iHi[3];
     for (int d=0; d<3; ++d) {
         float lo = 0.0f, hi = 0.0f;
         for (int v=0; v<3; ++v) { lo = min(lo, Ax[v][d]); hi = max(hi, Ax[v][d]); }
         iLo[d] = int(floor((base[d] + lo) * P.invDx[d]));
         iHi[d] = int(floor((base[d] + hi) * P.invDx[d])) + 1;
-        if (iLo[d] < 0) iLo[d] = 0;
-        if (iHi[d] > P.nGrid[d]) iHi[d] = P.nGrid[d];
+        if (iLo[d] < -cb[d]) iLo[d] = -cb[d];
+        if (iHi[d] > P.nGrid[d] - cb[d]) iHi[d] = P.nGrid[d] - cb[d];
     }
     ulong const n1 = ulong(max(iHi[1] - iLo[1], 0));
     ulong const n2 = ulong(max(iHi[2] - iLo[2], 0));
@@ -973,12 +978,13 @@ kernel void depositExactAverage(
     float3 const thi = max(max(float3(0.0f), t1), max(t2, t3));
 
     for (; w < wEnd; ++w) {
-        int const pos[3] = { iLo[0] + a0, iLo[1] + a1, iLo[2] + a2 };
+        int const c[3] = { iLo[0] + a0, iLo[1] + a1, iLo[2] + a2 };            // local cell offsets
+        int const pos[3] = { cb[0] + c[0], cb[1] + c[1], cb[2] + c[2] };          // sub-grid indices
         if (ulong(++a2) == n2) { a2 = 0; if (ulong(++a1) == n1) { a1 = 0; ++a0; } }
         // the cell in the vertex-0 frame: a cell wholly outside a face plane holds no piece
-        float3 const ccen = float3((float(pos[0]) + 0.5f) * P.dx[0] - base[0],
-                                   (float(pos[1]) + 0.5f) * P.dx[1] - base[1],
-                                   (float(pos[2]) + 0.5f) * P.dx[2] - base[2]);
+        float3 const ccen = float3((float(c[0]) + 0.5f) * P.dx[0] - base[0],
+                                   (float(c[1]) + 0.5f) * P.dx[1] - base[1],
+                                   (float(c[2]) + 0.5f) * P.dx[2] - base[2]);
         if (box_outside_tet(faces, ccen, hcell)) continue;
         // clipped in the OVERLAP frame (exact_clip.metal.inc: origin at the centre of the tet bbox's
         // overlap with the cell, where the piece lies -- no frame far from the piece cancels)

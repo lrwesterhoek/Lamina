@@ -339,8 +339,14 @@ COMMON_I=(--grid 1700 --periodic --field density_a --input-format 105 --mpc-unit
 env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_i_cpu" "${COMMON_I[@]}" > "${TMP}/at_i_cpu.log" 2>&1
 pi=$(sed -n 's/^AUTO-TUNE-REPORT partition=\([0-9]*\) .*/\1/p' "${TMP}/at_i_cpu.log" | head -1)
 ob=$(sed -n 's/^AUTO-TUNE-REPORT .*over_budget=\([01]\).*/\1/p' "${TMP}/at_i_cpu.log" | head -1)
-check "I1 CPU: a small set on a 1700^3 grid splits for memory (partition ${pi:-none}, over_budget ${ob:-none})" \
-      "$([ -n "${pi}" ] && [ "${pi}" -ge 2 ] && [ "${ob}" = "0" ] && echo 1 || echo 0)"
+# The start-up peak (P8.2, phase R 2026-11-09): under --scratch-dir each full grid is zero-filled in anonymous memory
+# before its file is mapped over it, so the prediction is at least particles + kept read blocks + the largest grid. The
+# single build's 1700^3 density grid is 19.7 GB and stays under the 38.4 GB budget; the double build's is 39.3 GB, which
+# no split can lower: there the planner must say so (the start-up line) and report over_budget=1 -- as the production
+# 1536^3 run of 2026-11-05 should have been told (its 203 GB of zero fills on a 68.7 GB machine, predicted 39.8 GB).
+su=$(grep -c 'the predicted peak is the start-up one' "${TMP}/at_i_cpu.log" || true)
+check "I1 CPU: a small set on a 1700^3 grid splits for memory (partition ${pi:-none}, over_budget ${ob:-none}; over budget only with the start-up peak named, ${su} line(s))" \
+      "$([ -n "${pi}" ] && [ "${pi}" -ge 2 ] && { [ "${ob}" = "0" ] || [ "${su:-0}" -ge 1 ]; } && echo 1 || echo 0)"
 env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_i_gpu" "${COMMON_I[@]}" --gpu > "${TMP}/at_i_gpu.log" 2>&1
 if grep -q "GPU (--gpu)" "${TMP}/at_i_gpu.log"; then
     pg=$(sed -n 's/^AUTO-TUNE-REPORT partition=\([0-9]*\) .*/\1/p' "${TMP}/at_i_gpu.log" | head -1)

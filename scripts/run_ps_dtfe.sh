@@ -312,7 +312,7 @@ gpu_auto_resolve DTFE_GPU "${PS_BIN}" DTFE_EXACT_AVERAGE   # DTFE_GPU=auto: the 
 if [ "${FACE_GRADIENT}" = "1" ]; then                 # the binary refuses these too, but per snapshot: say it once here
     [ "${DTFE_EXACT_AVERAGE}" = "1" ] || { echo "Error: FACE_GRADIENT=1 needs the exact deposit: add -e (DTFE_EXACT_AVERAGE=1)." >&2; exit 2; }
     [ "${PS_VOLUME_WEIGHTED}" = "1" ] || { echo "Error: FACE_GRADIENT=1 needs the volume-weighted moments (PS_VOLUME_WEIGHTED=1)." >&2; exit 2; }
-    [ "${DTFE_GPU}" = "1" ] && { echo "Error: FACE_GRADIENT=1 runs on the CPU's exact deposit: drop -m / DTFE_GPU=1." >&2; exit 2; }
+    # (since 2026-11-09 the face sums also come beside the GPU deposit, from a CPU walk: -m / DTFE_GPU=1 is allowed; D17)
 fi
 
 n_ok=0; n_skipped=0; n_failed=0; n_planned=0   # summarised at the end; see the exit-status note there

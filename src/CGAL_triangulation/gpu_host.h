@@ -172,13 +172,14 @@ struct DTFEGpuGrids
 // so two runs give byte-identical grids (DTFE_GPU_FLOAT_GRIDS=1 keeps the float atomics
 // for A/B). A failed command buffer resumes from the batch's last checkpoint, the PS deposit's policy
 // (gpu_metal_retry.h); a false return after the upload means that policy gave up.
-bool dtfeGpuDepositAveraged1(std::vector<float>& verts,      // nTet*12: 4 vertices, region-relative
+bool dtfeGpuDepositAveraged1(std::vector<float>& verts,      // nTet*12: 4 vertices, relative to the base cell's corner (cells) or the region's
                              std::vector<float>& dens,       // nTet*4:  vertex densities
                              std::vector<float>& vels,       // nTet*12: 4 vertex velocities (empty if unused)
                              std::vector<float>& scal,       // nTet*4:  vertex scalars (empty if unused)
                              std::vector<float>& vols,       // nTet:    tetrahedron volumes
                              std::vector<uint32_t>& cnts,    // nTet:    sample counts (0 = fast path)
                              std::vector<uint32_t>& flats,   // nTet:    fast-path flat grid indices
+                             std::vector<int32_t>& cells,    // nTet*3:  each tetrahedron's base cell (sub-grid indices, may lie outside it): the frame of its positions; 0 = the region's corner
                              const std::vector<float>& sobol,// maxNN*3 barycentric table (not consumed)
                              const double dx[3], const size_t nGrid[3],
                              bool fDen, bool fVel, bool fGrad, bool fScal, bool fSGrad, bool exact,
@@ -205,6 +206,7 @@ bool dtfeGpuSharedActive();
 bool dtfeGpuSharedDeposit(std::vector<float>& verts, std::vector<float>& dens, std::vector<float>& vels,
                           std::vector<float>& scal,
                           std::vector<float>& vols, std::vector<uint32_t>& cnts, std::vector<uint32_t>& flats,
+                          std::vector<int32_t>& cells,
                           const std::vector<float>& sobol, const double dx[3], const size_t nGrid[3],
                           const size_t subOff[3], std::string& err);
 bool dtfeGpuSharedResult(const float** den, const float** vel, const float** grad, const float** scal, const float** sgrad);

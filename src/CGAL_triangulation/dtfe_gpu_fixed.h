@@ -209,7 +209,8 @@ inline void dtfeShiftFlats(std::vector<uint32_t> const& cnts, std::vector<uint32
 // this double one only within rounding of an integer, which the margin covers; surplus blocks idle). Without
 // items only the counts are taken. Adds the batch's items, samples and single-cell tetrahedra to nItems /
 // nSamples / nSingle; false (err set) beyond 2^32 items.
-inline bool dtfeItemMap(std::vector<float> const& verts, std::vector<uint32_t> const& cnts, const double dx[3],
+inline bool dtfeItemMap(std::vector<float> const& verts, std::vector<uint32_t> const& cnts,
+                        std::vector<int32_t> const& cells, const double dx[3],
                         const size_t nGrid[3], bool useItems, bool exact, uint32_t itemSamples, uint32_t exactCells,
                         int blockShift, std::vector<uint32_t>& itemStart, std::vector<uint32_t>& blockTet,
                         size_t& nItems, size_t& nSamples, size_t& nSingle, std::string& err)
@@ -241,7 +242,9 @@ inline bool dtfeItemMap(std::vector<float> const& verts, std::vector<uint32_t> c
                 double const vlo = (base + lo) / dx[d], vhi = (base + hi) / dx[d];
                 double const flo = std::floor(vlo - (1.e-3 + 1.e-5 * std::fabs(vlo)));
                 double const fhi = std::floor(vhi + (1.e-3 + 1.e-5 * std::fabs(vhi)));
-                int64_t iLo = std::isfinite(flo) ? int64_t(flo) : 0, iHi = std::isfinite(fhi) ? int64_t(fhi) + 1 : 0;
+                // the positions are relative to the tetrahedron's base cell cb (sub-grid indices): the kernel's frame
+                int64_t const cb = cells.empty() ? 0 : int64_t(cells[t*3 + d]);
+                int64_t iLo = cb + (std::isfinite(flo) ? int64_t(flo) : 0), iHi = cb + (std::isfinite(fhi) ? int64_t(fhi) + 1 : 0);
                 iLo = std::max<int64_t>(iLo, 0); iHi = std::min<int64_t>(iHi, int64_t(nGrid[d]));
                 nw = iHi > iLo ? nw * uint64_t(iHi - iLo) : 0;
             }

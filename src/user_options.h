@@ -161,8 +161,32 @@ struct User_options
     bool   partitionGiven;// true if the user passed '--partition' at all -- including '1 1 1', which asks for ONE triangulation (partitionOn stays false) and must keep the auto-tuner from choosing a split
     std::vector<size_t> partition;// grid along which to split the particle data so the Delaunay triangulation runs on parts (time/memory)
     std::vector<size_t> subgridOffset; // set by copySubgridInformation(): this sub-grid's origin (cells) in the grid it was split from -- the GPU's shared deposit maps the sub-domain into that grid
+    // The run's GRID FRAME, the same in every partition and thread sub-domain (plan P10.8): the full grid's size, this
+    // sub-grid's origin in it (cumulative over the partition and the thread levels) and the grid box in double. Set by
+    // copySubgridInformation() the first time it splits the grid (from gridSize/boxCoordinates, then the run's);
+    // empty in a run that never splits, where gridSize/boxCoordinates are the frame. gridFrame() reads it either way.
+    // The exact-average deposits form their geometry in this frame (averaged_interpolation_1.cc GridFrame), so a
+    // tetrahedron's shares do not depend on the split.
+    std::vector<size_t> fullGridSize;
+    std::vector<long>   fullGridOffset;
+    std::vector<double> fullGridBox;   // xMin, xMax, yMin, yMax, ...
+    inline void gridFrame(double origin[], double dxGlobal[], long offset[]) const
+    {
+        bool const split = fullGridSize.size() == size_t(NO_DIM);
+        for (int d = 0; d < NO_DIM; ++d)
+        {
+            double const lo = split ? fullGridBox[2*d] : double( boxCoordinates.coords[2*d] );
+            double const hi = split ? fullGridBox[2*d+1] : double( boxCoordinates.coords[2*d+1] );
+            origin[d]   = lo;
+            dxGlobal[d] = ( hi - lo ) / double( split ? fullGridSize[d] : gridSize[d] );
+            offset[d]   = split ? fullGridOffset[d] : 0;
+        }
+    }
     int    partNo;        // which partition the program should output (index in 'fileGrid')
     int    maxConcurrent; // cap on concurrently-built Delaunay triangulations (peak RAM ~ concurrency x per-triangulation); 0 = all threads. PS-DTFE: concurrent Lagrangian partitions; standard DTFE: concurrent spatial sub-triangulations.
+    bool   psParallelTriangulation;    // --parallel-triangulation (PS-DTFE's option; both binaries read DTFE_TRIANGULATION_THREADS): build each Delaunay triangulation on the performance cores with CGAL's TBB insert (a PARALLEL_TRIANGULATION build: TBB=auto/1 for PS-DTFE, TBB_STD=1 for the standard binaries). The default for both binaries since 2026-11-09 for tessellations of at least DTFE_TRIANGULATION_MIN_POINTS (1e6) points (the insert's vertex and cell order differ run to run, so sums in walk order differ at rounding); the auto-tuner budgets its extra bytes per vertex (auto_tune.h)
+    bool   parallelTriangulationForced; // --parallel-triangulation: the parallel insert for every tessellation, whatever its size (the default rule has the threshold)
+    bool   sequentialTriangulation;    // --sequential-triangulation: the sequential insert (bit-reproducible run to run) for every tessellation
     bool   autoTuneReport;  // --auto-tune-report: print the auto-tuner's decision and predicted peak memory as ONE machine-readable line after loading the input, then exit (the GUI's memory check)
     bool   maxConcurrentOn; // true if the user gave --max-concurrent explicitly (0 is both the default and a legal value, so presence must be tracked separately for the auto-tuner)
     
@@ -186,6 +210,7 @@ struct User_options
     bool   useMetal;      // standard DTFE: run the method-1 '_a' interpolation on the GPU; needs a Metal build (METAL=1, else falls back to the CPU loop with a warning). Set by --gpu.
     bool   exactAverage;  // standard DTFE --exact-average: compute the '_a' fields by integrating the LINEAR DTFE interpolant exactly over every cell∩tet intersection (CPU: vendored r3d, order-1 moments) instead of Monte-Carlo sampling; --subsamples is ignored. Runs on the GPU too with --gpu (float32 z-sweep with exact Gauss-Legendre quadrature, metal/exact_clip.metal.inc) and in 2D (triangles clipped by hand); runs on the method-1 scatter topology. The production standard of run_dtfe.sh.
     bool   faceGradient;  // --face-gradient (docs/cleanup-plan.md P10): the velocity gradient and its derived fields from EXACT FACE integrals of the interpolant (Gauss), averaged_interpolation_1.cc avg1FacePass
+    bool   perTetGradient;// --per-tet-gradient (standard DTFE, D13 2026-11-09): keep the deposit's per-tetrahedron gradient where the face gradient is now the default; DTFE_FACE_GRADIENT=0 does the same, =1 forces the face gradient
     bool   gpuAlias;      // scratch for the backend-neutral --gpu switch (both binaries; PS-DTFE's deprecated --ps-gpu folds into it); OR-ed into useMetal/psUseMetal after parsing (the deprecated --ps-gpu binds it too: foldDeprecatedAliases leaves one of the two entries for po::notify)
     // --sample-points point evaluation, BOTH binaries (see ps_point_eval.h): PS-DTFE reports
     // one stream per folded tetrahedron; the standard binary the Eulerian DTFE interpolant
@@ -209,7 +234,6 @@ struct User_options
     bool   psLinearDeposit;            // PS-DTFE --ps-linear-deposit: weight each tetrahedron's interior samples by the DTFE-interpolated linear density (renormalized per tet, so the deposited total still equals the tet mass EXACTLY) instead of equal shares
     bool   psCausticCusps;      // --ps-caustic-cusps: also estimate the A3 (cusp) indicator, bit 7 of the caustic mask. Opt-in: it costs a neighbour gather per near-fold tetrahedron and, being a finite-difference estimator on an irregular tessellation, carries a measurable false-positive rate (see ps_caustic_class.h)
     bool   psCaustics;                 // PS-DTFE --ps-caustics: record per grid cell whether tetrahedra of BOTH map orientations (sign of det(Ax) = Lagrangian->Eulerian parity, flips at each fold) overlap it; the 0/1 flag is written as '<output>.caustic'. CPU and GPU deposits; 3D only.
-    bool   psParallelTriangulation;    // PS-DTFE --parallel-triangulation: build the Delaunay triangulation on the performance cores (TBB build). Off by default: the parallel insert's vertex and cell order differ run to run, so float outputs then differ at rounding (stream counts do not); a sequential insert reproduces bit for bit
     Real   psAlphaShape;               // PS-DTFE --ps-alpha-shape <c>: a NON-periodic run keeps only the tetrahedra whose Lagrangian circumradius is at most c mean particle spacings -- the cloud's alpha shape instead of its convex hull (default 3; 0 = the whole hull)
     Real   psLagPadding;               // PS-DTFE --ps-lagrangian-padding <k>: pad each Lagrangian partition by k mean particle spacings (and >= 4.2 alpha cuts) instead of the Eulerian --padding fraction with its 0.3-partition floor; default 8, 0 = the Eulerian rule
     Real   psHaloRelease;              // PS-DTFE --ps-halo-release <D>: during the GRID deposit, a tetrahedron whose geometric stream density rho_geo/rho_bar = V_lag/V_eul exceeds D is deposited monolithically at its Eulerian centroid cell (the sub-sample-spacing fallback path) instead of being rasterized over its bbox. 0 (default) = off. Mass conservation is exact; point evaluation is unaffected.

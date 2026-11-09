@@ -1308,6 +1308,83 @@ static PSFixedBounds psFxBoundWalk(PSPassCtx const &passCtx, PSFxState const &fx
     return fb;
 }
 
+#if NO_DIM==3
+// --face-gradient beside a GPU deposit (docs/cleanup-plan.md D17): the face sums (psDepositFaces) of every kept
+// tetrahedron from ONE CPU walk over the tessellation, on the bound walk's skeleton (the same filter, mass, gradient
+// and block order as the deposit loop; the GPU-deferred tetrahedra included, so the deposit loop skips its own face
+// block under metalDeposited), into the words psCpuFixedUnits allocated. Mass, velocity, the per-stream gradient and
+// the dispersion stay the device's: this walk writes the face words only, shared by its threads (relaxed atomics,
+// order-free like the deposit loop's). Costs the walk the CPU face deposit costs beside its exact deposit.
+static void psFaceWalk(PSPassCtx const &passCtx, PSFxState &fx, bool const psVertexMass)
+{
+    DT &dt = passCtx.dt;   // (PS_FINITE_CELLS_BEGIN / END)
+    User_options &userOptions = passCtx.userOptions;
+    Box &boxCoordinates = passCtx.boxCoordinates;
+    size_t const noTotalCells = passCtx.noTotalCells;
+    bool const windowMode = passCtx.windowMode;
+    auto windowTouched = [&passCtx](Real const (&ep)[NO_DIM+1][NO_DIM]) { return psWindowTouched( passCtx, ep ); };
+    Real boxL[2*NO_DIM], dxL[NO_DIM];
+    size_t nGridL[NO_DIM], subOriginL[NO_DIM], subDimsL[NO_DIM];
+    for (int d = 0; d < NO_DIM; ++d)
+    {
+        boxL[2*d] = boxCoordinates[2*d]; boxL[2*d+1] = boxCoordinates[2*d+1];
+        dxL[d] = passCtx.dx[d]; nGridL[d] = passCtx.nGrid[d];
+        subOriginL[d] = passCtx.subOrigin[d]; subDimsL[d] = passCtx.subDims[d];
+    }
+    bool const periodic = userOptions.periodic;
+    double const avgDensity = double( userOptions.averageDensity );
+    int64_t *const wS = fx.faceS.w.data(), *const wN = fx.faceN.w.data(), *const wP = fx.faceP.w.data();
+    float const sS = fx.faceS.scale, sN = fx.faceN.scale, sP = fx.faceP.scale;
+    size_t const BLK = 256;
+    size_t const nBlocks = noTotalCells / BLK + 1;
+    size_t const nT = size_t( std::max( 1, std::min( psDepositThreads(), int( std::min<size_t>( nBlocks, 1024 ) ) ) ) );
+    bool const atomic = nT > 1;
+    auto faceRun = [&](size_t const th)
+    {
+        size_t idx = 0;
+        for (auto it = PS_FINITE_CELLS_BEGIN; it != PS_FINITE_CELLS_END; ++it, ++idx)
+        {
+            if ( ( idx / BLK ) % nT != th ) continue;
+            Cell_handle cell = it;
+            PSCellGeometry geo;
+            if ( !psFilterCell(cell, userOptions, boxCoordinates, true, NULL, geo, false,
+                               [&](Real const (&ep)[NO_DIM+1][NO_DIM]) { return windowMode && !windowTouched(ep); }) ) continue;
+            double tetMass;   // (the deposit loop's: psVertexShareMass, or rho_bar times the Lagrangian volume, in Real)
+            if ( psVertexMass ) tetMass = double( Real( psVertexShareMass(cell) ) );
+            else
+            {
+                double Lag[NO_DIM][NO_DIM];
+                for (int v = 0; v < NO_DIM; ++v)
+                    for (int i = 0; i < NO_DIM; ++i)
+                        Lag[v][i] = double(cell->vertex(v+1)->point()[i]) - double(cell->vertex(0)->point()[i]);
+                tetMass = double( Real( avgDensity * std::fabs(determinant(Lag)) / factorial(NO_DIM) ) );
+            }
+            if ( !(tetMass > 0.) ) tetMass = 0.;
+            // the constant velocity gradient, as the deposit loop forms it (geo.posMatInv, Real)
+            Vertex_handle base = cell->vertex(0);
+            Real velGrad[NO_DIM][noVelComp], temp[NO_DIM][noVelComp];
+            for (int v = 0; v < NO_DIM; ++v)
+                for (size_t i = 0; i < noVelComp; ++i)
+                    temp[v][i] = cell->vertex(v+1)->info().velocity(i) - base->info().velocity(i);
+            matrixMultiplication<noVelComp>(geo.posMatInv, temp, velGrad);
+            double v0[noVelComp];
+            for (size_t j = 0; j < noVelComp; ++j) v0[j] = double( base->info().velocity(j) );
+            double const vTet = double(geo.cellAbsDet) / double(factorial(NO_DIM));
+            double const rhoTet = ( vTet > 0. && avgDensity > 0. ) ? tetMass / ( vTet * avgDensity ) : 0.;
+            psDepositFaces( geo.eulerPos, boxL, dxL, nGridL, periodic, subOriginL, subDimsL, 0L, LONG_MAX,
+                            velGrad, v0, wS, sS, wN, sN, wP, sP, rhoTet, atomic );
+        }
+    };
+    {
+        CorePool::Hold const hold( int(nT) - 1 );   // (a static team: its cores counted in the pool, thread_count.h)
+        std::vector<std::thread> pool;
+        for (size_t th = 1; th < nT; ++th) pool.emplace_back( faceRun, th );
+        faceRun( 0 );
+        for (std::thread &x : pool) x.join();
+    }
+}
+#endif
+
 // The pass's sub-grid box: the --grid-window box, or (psUseSubgrid) the Eulerian bbox of the partition's kept cells.
 static inline void psSubgridBox(PSPassCtx const &passCtx, size_t &psKeptCells)
 {
@@ -1735,7 +1812,10 @@ static inline void psCpuFixedUnits(PSPassCtx const &passCtx, PSGridsCtx const &g
     }
     // --face-gradient: the face sums' units, from the same walk; their words (int64: the dynamic team's threads add in
     // any order) for every cell of the pass. No unit (a bound that is not finite): the face gradient is off for the pass.
-    if ( !metalDeposited && fx.face )
+    // Under a GPU deposit too (docs/cleanup-plan.md D17): the words are then psFaceWalk's, one CPU walk over the kept
+    // tetrahedra after the device's deposit (the bound walk runs once more for their units: the device's bounds are
+    // the extraction's locals; the same sums, so a GPU and a CPU deposit of one pass take the same face units).
+    if ( fx.face )
     {
         PSFixedBounds const &fb = bounds();
         float sS = 0.f, sN = 0.f, sP = 0.f;
@@ -3702,10 +3782,13 @@ void interpolateGrid_phaseSpace(DT &dt,
         bool const dwOffL = massFxOn;
         auto fxAddL = [&](int const g, size_t const at, Real const v)
         { psAddMassFixed( fxWL[g], at, psFixedShare( double(v), fxSL[g], g ), massFxAtomicL ); };
-        // --face-gradient: the face sums' words (null: off), shared by every thread like the moments' (psDepositFaces)
-        int64_t *const faceSWL = fx.face ? fx.faceS.w.data() : nullptr;
-        int64_t *const faceNWL = fx.face ? fx.faceN.w.data() : nullptr;
-        int64_t *const facePWL = fx.face ? fx.faceP.w.data() : nullptr;
+        // --face-gradient: the face sums' words (null: off), shared by every thread like the moments' (psDepositFaces).
+        // Not under a GPU deposit: psFaceWalk then sums every kept tetrahedron's faces, the deferred ones this loop
+        // deposits included (D17)
+        bool const faceHereL = fx.face && !metalDeposited;
+        int64_t *const faceSWL = faceHereL ? fx.faceS.w.data() : nullptr;
+        int64_t *const faceNWL = faceHereL ? fx.faceN.w.data() : nullptr;
+        int64_t *const facePWL = faceHereL ? fx.faceP.w.data() : nullptr;
         float const faceSSL = fx.faceS.scale, faceNSL = fx.faceN.scale, facePSL = fx.faceP.scale;
         double const avgDensityL = double( userOptions.averageDensity );
         (void)faceSWL; (void)faceNWL; (void)facePWL; (void)faceSSL; (void)faceNSL; (void)facePSL; (void)avgDensityL;
@@ -4801,6 +4884,19 @@ void interpolateGrid_phaseSpace(DT &dt,
                 << MESSAGE::cMagenta() << deferredOrd.size() << MESSAGE::cReset() << " GPU-deferred tetrahedra on the CPU in "
                 << std::chrono::duration<double>(std::chrono::steady_clock::now() - tCpuLoop0).count() << " s ("
                 << nDepThreads << ( nDepThreads == 1 ? " thread" : " threads" ) << ").\n" << MESSAGE::Flush;
+
+#if NO_DIM==3
+    // --face-gradient beside the GPU deposit (D17): the face sums of every kept tetrahedron from one CPU walk
+    if ( metalDeposited && fx.face && !fx.faceS.w.empty() )
+    {
+        auto const tFace0 = std::chrono::steady_clock::now();
+        psFaceWalk( passCtx, fx, psVertexMass );
+        lap( PS_PH_CPU );
+        if ( not userOptions.psSuppressGridStats )
+            message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " face sums (--face-gradient) of the GPU-deposited tetrahedra on the CPU in "
+                    << std::chrono::duration<double>(std::chrono::steady_clock::now() - tFace0).count() << " s.\n" << MESSAGE::Flush;
+    }
+#endif
 
     // Whichever deposit ran (GPU success above skipped the CPU loop; a GPU FAILURE fell back
     // to the CPU loop, which needed the triangulation), its last read of dt is behind us.

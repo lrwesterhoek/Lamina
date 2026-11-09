@@ -685,11 +685,22 @@ void copySubgridInformation(User_options *userOptions,
 							std::vector< std::vector<size_t> > &subgridList,
 							std::vector< Box > &subgridCoords)
 {
+	// the run's grid frame (user_options.h gridFrame): recorded at the FIRST split, when gridSize and boxCoordinates
+	// are still the run's; a later split (a partition's thread sub-boxes) adds its origin to the offset
+	if ( userOptions->fullGridSize.size() != size_t(NO_DIM) )
+	{
+		userOptions->fullGridSize = userOptions->gridSize;
+		userOptions->fullGridOffset.assign( NO_DIM, 0 );
+		userOptions->fullGridBox.assign( 2*NO_DIM, 0. );
+		for (int i=0; i<2*NO_DIM; ++i)
+			userOptions->fullGridBox[i] = double( userOptions->boxCoordinates[i] );
+	}
 	userOptions->subgridOffset.assign( NO_DIM, 0 );
 	for (int i=0; i<NO_DIM; ++i)
 	{
 		userOptions->gridSize[i] = subgridList[userOptions->partNo][2*i+1] - subgridList[userOptions->partNo][2*i];
 		userOptions->subgridOffset[i] = subgridList[userOptions->partNo][2*i];
+		userOptions->fullGridOffset[i] += long( subgridList[userOptions->partNo][2*i] );
 	}
 	userOptions->region = subgridCoords[userOptions->partNo];
 }

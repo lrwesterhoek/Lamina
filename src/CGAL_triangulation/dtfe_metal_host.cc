@@ -263,7 +263,7 @@ struct Grids
 struct Batch
 {
     MTL::Buffer *bV = nullptr, *bD = nullptr, *bU = nullptr, *bVol = nullptr, *bCnt = nullptr,
-                *bFlt = nullptr, *bS = nullptr, *bG = nullptr, *bB = nullptr, *bSc = nullptr;
+                *bFlt = nullptr, *bS = nullptr, *bG = nullptr, *bB = nullptr, *bSc = nullptr, *bC = nullptr;
     DepositParams P{};
     size_t nTet = 0, nItems = 0, nSamples = 0, nSingle = 0;
     bool   needVel = false, needScal = false;
@@ -272,7 +272,7 @@ struct Batch
 
     void release()
     {
-        for (MTL::Buffer** b : {&bV, &bD, &bU, &bVol, &bCnt, &bFlt, &bS, &bG, &bB, &bSc}) if (*b) { (*b)->release(); *b = nullptr; }
+        for (MTL::Buffer** b : {&bV, &bD, &bU, &bVol, &bCnt, &bFlt, &bS, &bG, &bB, &bSc, &bC}) if (*b) { (*b)->release(); *b = nullptr; }
     }
 };
 
@@ -281,6 +281,7 @@ struct Batch
 bool uploadBatch(Ctx& c, std::vector<float>& verts, std::vector<float>& dens, std::vector<float>& vels,
                  std::vector<float>& scal,
                  std::vector<float>& vols, std::vector<uint32_t>& cnts, std::vector<uint32_t>& flats,
+                 std::vector<int32_t>& cells,
                  const std::vector<float>& sobol, const double dx[3], const size_t nGrid[3],
                  const size_t subOff[3], const size_t fullGrid[3], bool fDen, bool fVel, bool fGrad,
                  bool fScal, bool fSGrad, bool exact, bool allowFixed, Batch& b, std::string& err)
@@ -301,7 +302,7 @@ bool uploadBatch(Ctx& c, std::vector<float>& verts, std::vector<float>& dens, st
     dtfeShiftFlats(cnts, flats, nGrid, subOff, fullGrid);
     std::vector<uint32_t> itemStart, blockTet;
     P.nTetTotal = uint32_t(b.nTet);
-    if (!dtfeItemMap(verts, cnts, dx, nGrid, b.k.useItems, exact, b.k.itemSamples, exactCells, ITEM_BLOCK_SHIFT,
+    if (!dtfeItemMap(verts, cnts, cells, dx, nGrid, b.k.useItems, exact, b.k.itemSamples, exactCells, ITEM_BLOCK_SHIFT,
                      itemStart, blockTet, b.nItems, b.nSamples, b.nSingle, err))
         return false;
 
@@ -322,11 +323,12 @@ bool uploadBatch(Ctx& c, std::vector<float>& verts, std::vector<float>& dens, st
     b.bVol = upload(vols.data(),  vols.size()  * sizeof(float));    std::vector<float>().swap(vols);
     b.bCnt = upload(cnts.data(),  cnts.size()  * sizeof(uint32_t)); std::vector<uint32_t>().swap(cnts);
     b.bFlt = upload(flats.data(), flats.size() * sizeof(uint32_t)); std::vector<uint32_t>().swap(flats);
+    b.bC   = upload(cells.data(), cells.size() * sizeof(int32_t));  std::vector<int32_t>().swap(cells);
     std::vector<float> const sobol4 = dtfeSobol4(sobol);
     b.bS   = upload(sobol4.data(), sobol4.size() * sizeof(float));
     b.bG   = upload(itemStart.data(), itemStart.size() * sizeof(uint32_t));
     b.bB   = upload(blockTet.data(), blockTet.size() * sizeof(uint32_t));
-    if (!b.bV || !b.bD || !b.bU || !b.bSc || !b.bVol || !b.bCnt || !b.bFlt || !b.bS || !b.bG || !b.bB)
+    if (!b.bV || !b.bD || !b.bU || !b.bSc || !b.bVol || !b.bCnt || !b.bFlt || !b.bC || !b.bS || !b.bG || !b.bB)
     {
         err = "Metal buffer allocation failed (out of GPU-visible memory?)";
         b.release();
@@ -479,6 +481,7 @@ bool runBatch(Ctx& c, Batch& b, Grids& g, ChunkState& cs, Stats& st, bool shared
             enc->setBuffer(b.bVol, 0, 3);
             enc->setBuffer(b.bCnt, 0, 4);
             enc->setBuffer(b.bFlt, 0, 5);
+            enc->setBuffer(b.bC,   0, 22);
         }
         else
         {
@@ -488,6 +491,7 @@ bool runBatch(Ctx& c, Batch& b, Grids& g, ChunkState& cs, Stats& st, bool shared
             enc->setBuffer(b.bVol, start * sizeof(float),      3);
             enc->setBuffer(b.bCnt, start * sizeof(uint32_t),   4);
             enc->setBuffer(b.bFlt, start * sizeof(uint32_t),   5);
+            enc->setBuffer(b.bC,   start * 3 * sizeof(int32_t), 22);
         }
         enc->setBuffer(b.bS,   0, 6);
         enc->setBuffer(g.den,  0, 7);
@@ -581,6 +585,7 @@ bool dtfeGpuDepositAveraged1(std::vector<float>& verts,
                                std::vector<float>& vols,
                                std::vector<uint32_t>& cnts,
                                std::vector<uint32_t>& flats,
+                               std::vector<int32_t>& cells,
                                const std::vector<float>& sobol,
                                const double dx[3], const size_t nGrid[3],
                                bool fDen, bool fVel, bool fGrad, bool fScal, bool fSGrad, bool exact,
@@ -596,7 +601,7 @@ bool dtfeGpuDepositAveraged1(std::vector<float>& verts,
     NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
     size_t const zero[3] = {0, 0, 0};
     Batch b;      // uploaded WITHOUT the mutex: the sub-domains' host work overlaps the queue
-    if (!uploadBatch(c, verts, dens, vels, scal, vols, cnts, flats, sobol, dx, nGrid, zero, nGrid, fDen, fVel, fGrad,
+    if (!uploadBatch(c, verts, dens, vels, scal, vols, cnts, flats, cells, sobol, dx, nGrid, zero, nGrid, fDen, fVel, fGrad,
                      fScal, fSGrad, exact, true, b, err))
     { pool->release(); return false; }
     Grids g;
@@ -697,6 +702,7 @@ bool dtfeGpuSharedActive()
 bool dtfeGpuSharedDeposit(std::vector<float>& verts, std::vector<float>& dens, std::vector<float>& vels,
                           std::vector<float>& scal,
                           std::vector<float>& vols, std::vector<uint32_t>& cnts, std::vector<uint32_t>& flats,
+                          std::vector<int32_t>& cells,
                           const std::vector<float>& sobol, const double dx[3], const size_t nGrid[3],
                           const size_t subOff[3], std::string& err)
 {
@@ -712,7 +718,7 @@ bool dtfeGpuSharedDeposit(std::vector<float>& verts, std::vector<float>& dens, s
     Batch b;      // uploaded WITHOUT the mutex: the threads' uploads overlap each other and the queue
     // (the float atomics: the shared grid has one unit for every batch, which no batch's bound sets -- the exact
     // sums are the per-call path's)
-    if (!uploadBatch(c, verts, dens, vels, scal, vols, cnts, flats, sobol, dx, nGrid, subOff, s.grids.full,
+    if (!uploadBatch(c, verts, dens, vels, scal, vols, cnts, flats, cells, sobol, dx, nGrid, subOff, s.grids.full,
                      s.grids.fDen, s.grids.fVel, s.grids.fGrad, s.grids.fScal, s.grids.fSGrad, false, false, b, err))
     { pool->release(); return false; }
 

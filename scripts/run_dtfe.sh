@@ -88,11 +88,13 @@ SUBSAMPLES="${SUBSAMPLES:-}"     # k = --subsamples k: k points per axis, k^3 pe
                                  # (DTFE_EXACT_AVERAGE=0); EMPTY (default) = the binary's own count. The same unit
                                  # as run_ps_dtfe.sh's SUBSAMPLES; -n k sets it
 THREADS="${THREADS:-}"           # cap OpenMP threads globally (OMP_NUM_THREADS); empty = all cores (as run_ps_dtfe.sh)
-FACE_GRADIENT="${FACE_GRADIENT:-0}"  # 1 = --face-gradient: the velocity gradient (and the divergence and shear built on
-                                 # it) from exact face integrals of the interpolant (Gauss), a second route to the
-                                 # stored per-tetrahedron gradient (the same values to 1e-5 of the rms; ~15% more
-                                 # time, 9 doubles per cell); 3D. run_ps_dtfe.sh's FACE_GRADIENT is where it changes
-                                 # the result (PS-DTFE's mean flow)
+FACE_GRADIENT="${FACE_GRADIENT:-}"   # the velocity gradient's route (and the divergence and shear built on it). EMPTY
+                                 # (default) = the binary's own: since 2026-11-09 the exact face integrals of the
+                                 # interpolant (Gauss; docs/cleanup-plan.md D13), in double, the same for every
+                                 # deposit and device; 1 = --face-gradient (the same, asked explicitly); 0 =
+                                 # --per-tet-gradient, the deposit's own per-tetrahedron gradient (float32 on the
+                                 # GPU; the route of the production grids made before 2026-11-09). 3D only.
+                                 # run_ps_dtfe.sh's FACE_GRADIENT is where it changes the result (PS-DTFE's mean flow)
 DRY_RUN="${DRY_RUN:-0}"          # 1 = print the commands and paths, run nothing
 AUTO_TUNE_REPORT="${AUTO_TUNE_REPORT:-0}"  # 1 = only ASK the binary's auto-tuner what this run would need
                                  # (--auto-tune-report): per snapshot one line
@@ -219,6 +221,7 @@ for i in "${SNAPSHOTS[@]}"; do
     [ "${DTFE_EXACT_AVERAGE}" = "1" ] && exact_args=(--exact-average)
     [ -n "${SUBSAMPLES}" ] && exact_args+=(--subsamples "${SUBSAMPLES}")   # (SUBSAMPLES, see the top: only when set)
     [ "${FACE_GRADIENT}" = "1" ] && exact_args+=(--face-gradient)     # (FACE_GRADIENT, see the top)
+    [ "${FACE_GRADIENT}" = "0" ] && exact_args+=(--per-tet-gradient)  # the deposit's own gradient (the route before 2026-11-09)
 
     # pass --partition/--max-concurrent only when set; otherwise the binary auto-tunes them
     part_args=()

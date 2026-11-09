@@ -117,7 +117,7 @@ sudo yum install gsl-devel boost-devel CGAL-devel mpfr-devel hdf5-devel gmp-deve
 sudo pacman -S base-devel gsl boost cgal mpfr hdf5 gmp fftw
 ```
 
-Optional: `tbb` (the parallel triangulation of PS-DTFE) and `libdeflate` (faster tessellation-cache compression);
+Optional: `tbb` (the parallel Delaunay insert of both binaries) and `libdeflate` (faster tessellation-cache compression);
 the Makefile uses them when it finds them.
 
 ### Quick start
@@ -149,7 +149,7 @@ Build variables (combine them on one `make` line):
 | `METAL=1` | Apple Silicon: the standard binary's `_a` interpolation and the PS-DTFE deposit on the GPU (`--gpu` in both), with a CPU fallback |
 | `DOUBLE=1` | the double-precision pair `DTFE-double` / `PS-DTFE-double` (see Precision) |
 | `DIM=2` | the 2D pair `DTFE-2d` / `PS-DTFE-2d` (`-2d-double` with `DOUBLE=1`); CPU only |
-| `TBB=auto` / `1` / `0` | the parallel Delaunay insert of PS-DTFE (`--parallel-triangulation`): when found / required / left out |
+| `TBB=auto` / `1` / `0` | the parallel Delaunay insert of both binaries (the default for tessellations of a million points or more where cores are free; `--parallel-triangulation` / `--sequential-triangulation`; `TBB_STD` sets the standard pair apart): when found / required / left out |
 | `LIBDEFLATE=auto` / `1` / `0` | libdeflate instead of zlib for the tessellation cache (both write plain gzip) |
 | `BUILD_MODE=debug` | debug symbols, no optimization, sanitizers |
 | `EXTRA_FLAGS`, `CC_OVERRIDE`, `<LIB>_PATH_OVERRIDE` | extra compiler flags, another compiler, a library elsewhere (see the Makefile's header) |
@@ -322,7 +322,7 @@ one release when the new one is unset, with one `warning: OLD is deprecated, use
 | `DTFE_DEPOSIT_SLABS` | PS-DTFE CPU deposit in slabs along x: 1 forces, 0 forbids (the GPU-deferred tetrahedra's too) | automatic |
 | `DTFE_DEPOSIT_NSLABS` | the number of slabs (at most 64) | from the cost per plane |
 | `DTFE_PTS_THREADS` | threads of the point evaluation | the cores left per partition |
-| `DTFE_TRIANGULATION_THREADS` | PS-DTFE: switches the parallel insert on (as `--parallel-triangulation`) with this many threads | off (the flag alone: the performance cores, at most 6) |
+| `DTFE_TRIANGULATION_THREADS` | both binaries: forces the parallel insert (as `--parallel-triangulation`) with this many threads; `DTFE_TRIANGULATION_MIN_POINTS` moves the default rule's size threshold | unset (the rule: tessellations of at least 1000000 points, the performance cores, at most 6, divided among the tessellations built at once) |
 | `DTFE_TESSELLATION_CACHE_THREADS` | threads per tessellation-cache load or save | up to 4 |
 | `DTFE_OVERLAP` | the look-ahead of a partitioned run (both binaries): 1 forces it (on the CPU too), 0 forbids it | with a GPU deposit |
 | `DTFE_MERGE_STAGE_GB` | PS-DTFE: a fixed cap on the partitions parked for the ordered merge, in GB (0: none parked) | the free-memory rule |
@@ -387,7 +387,7 @@ The options that shape the result (the drivers' production settings are marked):
 | `--exact-average` (the exact deposit), `--ps-linear-deposit`, `--grid-window` | see Field evaluation methods |
 | `--ps-alpha-shape` | non-periodic clouds: keep tetrahedra with Lagrangian circumradius up to this many mean spacings (default 3; 0 = the convex hull) |
 | `--ps-lagrangian-padding` | the padding of each Lagrangian partition in mean spacings (default 8; 0 = the Eulerian `--padding` rule, under which a TNG partition triangulates 7-9x the particles it owns) |
-| `--parallel-triangulation` | parallel Delaunay insert (TBB builds; `DTFE_TRIANGULATION_THREADS`): faster, but two identical runs then differ at float rounding |
+| `--parallel-triangulation` | force the parallel Delaunay insert (TBB builds) for every tessellation; the default rule applies it to tessellations of at least a million points where more than one core is free (3.1x on the triangulation of TNG100 at 512^3 with one partition in flight; nothing at the auto plan's concurrency). Two identical runs then differ at rounding in what is summed in walk order (CPU float sums, the face pass's last bit, PS-DTFE's velocity moments); `--sequential-triangulation` keeps the bit-reproducible insert |
 
 **Streams and hidden streams.** The stream count is measured at the sub-samples of each cell, so it cannot see a fold
 thinner than the sampling. `.hidden_streams` bit 1 (value 1) marks exactly the cells a folded tetrahedron overlaps
@@ -463,9 +463,13 @@ A cell's value is either the field at the cell centre (`density`, ...) or its av
   the production setting (`run_dtfe.sh` passes it unless `DTFE_EXACT_AVERAGE=0`).
 * **Face gradient** (`--face-gradient`, both binaries, 3D): the velocity gradient and the divergence, shear,
   vorticity and V-web built on it from EXACT FACE INTEGRALS of the interpolant (Gauss: the cell average of grad v is the
-  integral of v n over the cell's faces divided by its volume). Standard DTFE: the same values as the per-tetrahedron
-  gradient (a second, independent route; 1e-5 of the rms on the 64^3 demo), whatever the deposit. PS-DTFE (with the
-  exact CPU deposit and `--ps-volume-weighted`): the gradient of the volume-weighted MEAN velocity, the quantity
+  integral of v n over the cell's faces divided by its volume). Standard DTFE: THE DEFAULT since 2026-11-09 -- the
+  per-tetrahedron gradient's exact cell average, formed in double and the same for every deposit and device (the
+  deposit's own gradient, float32 on the GPU, differs from it by 5e-7 of the gradient rms per sub-domain at 512^3);
+  `--per-tet-gradient` (or `DTFE_FACE_GRADIENT=0`) keeps the deposit's own gradient, the route of grids made before
+  that date and the 2D build's only one. PS-DTFE (with the
+  exact deposit, on the CPU or -- since 2026-11-09, the face sums then from a CPU walk beside the device's deposit --
+  the GPU, and `--ps-volume-weighted`): the gradient of the volume-weighted MEAN velocity, the quantity
   standard DTFE stores, as the difference of the face-averaged mean velocities -- conservative (a periodic box's mean
   divergence is 0), with the caustics' jumps as exact face differences -- where the default stores the stream average of
   each stream's own gradient (written beside it as `.a_velDivStreams`). The same face sums give the mass flux
@@ -680,7 +684,7 @@ is unset or the data disk is missing, and skips a snapshot whose folder is not w
 | `SCRATCH_DIR` | the full grids as files outside RAM (large runs) | off |
 | `FIELDS`, `OUTPUT_PREFIX`, `LAMBDA_TH` | the fields, the files' prefix, the web threshold | density, velocity, divergence, shear in both drivers (the gradient, vorticity, dispersion, T-web and V-web on request), `ps_output` (standard DTFE `output`; a `ps_*` prefix refused there), 0.3 |
 | `PS_VERTEX_MASS`, `PS_VOLUME_WEIGHTED`, `PS_CAUSTICS` | PS-DTFE: vertex masses; volume-weighted velocity moments; the caustic classes | 1, 1, 1 |
-| `FACE_GRADIENT` | 1 = `--face-gradient` (see Face gradient above): PS-DTFE the mean flow's velocity derivatives plus `.a_velDivStreams` and `.a_massFluxDiv` (needs `-e`, the CPU deposit and `PS_VOLUME_WEIGHTED=1`); standard DTFE the same gradient by a second route | 0 |
+| `FACE_GRADIENT` | 1 = `--face-gradient` (see Face gradient above): PS-DTFE the mean flow's velocity derivatives plus `.a_velDivStreams` and `.a_massFluxDiv` (needs `-e` and `PS_VOLUME_WEIGHTED=1`; with the GPU deposit the face sums come from a CPU walk beside it); standard DTFE the same gradient by a second route, its default since 2026-11-09 (0 = `--per-tet-gradient`, the deposit's own; empty = the binary's default) | PS 0; standard empty |
 | `SAMPLE_POINTS`, `PTS_VEL_GRAD` | a `--sample-points` file evaluated in the same run; with velocity gradients | off, 0 |
 | `PS_POINT_CONVENTIONS` | PS-DTFE planes: `grid` (the grids' conventions) or `legacy` (`--ps-point-conventions legacy`) | `grid` |
 | `TESSELLATION_CACHE` | a `--tessellation-cache` folder | off |

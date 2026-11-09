@@ -40,7 +40,7 @@ constexpr double kPSVertexBytes = 666.;
 constexpr double kStdVertexBytes = 648.;
 // '--parallel-triangulation' (TBB): the sorted point+payload copy and CGAL's own copy of it, per vertex in flight
 // (203 B measured on PS-DTFE)
-constexpr double kParInsertBytes = 210.;
+constexpr double kParInsertBytes = 800.;   // measured 2026-11-09 at TNG100 z=0, 512^3: +4.4 GB max RSS with one partition of ~5.7M padded vertices inserted on 6 threads (was 210, the 0.26M-point estimate)
 // Delaunay tetrahedra per vertex of a 3D tessellation (the Poisson mean, which the measured runs follow)
 constexpr double kTetsPerVertex = 6.77;
 // the PS GPU deposit's flat arrays per tetrahedron: the 16-float record (64 B), the mass and the finite-cell ordinal
@@ -448,6 +448,31 @@ inline double autoTuneBytesPerCell(Field &f, AutoTunePS const &ps, int const pha
         if ( ps.haloRelease and not ps.exactDeposit and phase == 0 ) b += R;
     }
     return b;
+}
+
+// The largest single pre-sized full grid of a field set, in bytes per cell: the deposit-phase grids psReserveGrids
+// sizes before the partition loop (the merge-grown weights and face sums of autoTuneMergeGrownBytes come at the first
+// merge, the derived fields after the loop). Under --scratch-dir ScratchAlloc::zeroResize fills each of them with zeros
+// in anonymous memory before its file is mapped over it (ZeroFillScope, macOS), so the largest one is a start-up peak
+// of the run: particles + the read blocks kept + this grid (AutoTunePSPlanner::reserveZeroFillPeak). Plan P8.2 as
+// rescoped in phase R (2026-11-09): the 1024^3 CPU exact rerun measured a 38.95 GB footprint against a 32.38 GB loop
+// prediction; 56 B x N + 80 B x N + the 25.77 GB dispersion grid = 38.58 GB.
+inline double autoTuneLargestGridBytesPerCell(Field &f, AutoTunePS const &ps)
+{
+    if ( not f.selected() ) return 0.;
+    double const R = double(sizeof(Real));
+    bool const gradient = f.velocity_gradient or f.velocity_divergence or f.velocity_shear
+                          or f.velocity_vorticity or f.velocity_vweb;
+    double comps = 0.;
+    if ( f.density or f.velocity_tweb or f.velocity_std ) comps = 1.;
+    if ( f.velocity or (f.velocity_dispersion and not (ps.phaseSpace and ps.volumeWeighted)) ) comps = std::max( comps, 3. );
+    if ( gradient ) comps = std::max( comps, 9. );
+    if ( f.velocity_dispersion ) comps = std::max( comps, 6. );
+    if ( f.scalar ) comps = std::max( comps, double(noScalarComp) );
+    if ( f.scalar_gradient ) comps = std::max( comps, double(noScalarGradComp) );
+    if ( ps.phaseSpace ) comps = std::max( comps, 1. );          // the counts, flags and masks (autoTunePSCountBytes)
+    // '--ps-merge fixed-point': the summed grids are int64 words + an int8 carry per component during the loop
+    return comps * ( ps.phaseSpace and ps.fixedMerge ? 9. : R );
 }
 
 /* A Lagrangian partition's padding on one axis, in units of the partition's own width, for an n^3 split of N
@@ -921,7 +946,8 @@ inline double stdBytesPerPaddedVertex(User_options const &u)
 {
     double const kDT = kStdVertexBytes + 10. * ( double(sizeof(Real)) - 4. );   // the double build: +10 B per 4 B of Real
 #if defined(PARALLEL_TRIANGULATION) && NO_DIM==3
-    double const kParInsert = u.psParallelTriangulation ? kParInsertBytes : 0.;
+    double const kParInsert = 0.;   // (the parallel insert's bytes are added per plan in finishReport, where the threads per partition and the threshold are known)
+    (void)u;
 #else
     double const kParInsert = 0.;
     (void)u;
@@ -1521,7 +1547,11 @@ inline void autoTunePSPointStreams(User_options &u, double const N, size_t const
                                                   haveRegion ? rLo : nullptr, haveRegion ? rHi : nullptr );
         if ( est > 0. )
         {
-            ptsMeanStreams = std::max( 1., 1. + 2.*(est - 1.) );
+            // plan P8.5 (phase R, 2026-11-09): 1 + 1.4 (est - 1), from 1 + 2 (est - 1). The three measured point
+            // sets (the runs' own .pts_streams): TNG100-3-Dark z=0 4.25 streams against an estimate of 4.00, TNG50-3-Dark
+            // z=0 5.38 against 5.79, TNG100-3-Dark z=1 2.30 against 2.02; 1.4 keeps at least 5% above each of them
+            // (1.3 would leave 1% at z=1), and books 5.20 / 7.71 / 2.43 instead of 7.00 / 10.59 / 3.04.
+            ptsMeanStreams = std::max( 1., 1. + 1.4*(est - 1.) );
             report.streamsEstimate = est;
             snprintf( ptsStreamsWhy, sizeof(ptsStreamsWhy),
                       "%.2f streams/point estimated from %d Lagrangian patches%s, budgeted as %.2f", est, patches,
@@ -1644,6 +1674,9 @@ struct AutoTunePSInputs
     double ptsOutputBytes = 0.;      // ... and the finalized outputs (allocated at the end)
     double particleBytes = 0.;       // the particles held (0 with deferred particles)
     double readKept = 0.;            // the read buffers the allocator keeps (--grid-window)
+    double readKeptAll = 0.;         // ... what every run still holds right after the read (the reserve peak below)
+    double largestGridBytes = 0.;    // the largest pre-sized full grid (autoTuneLargestGridBytesPerCell x the cells)
+    double scratchMinBytes = 0.;     // --scratch-dir's threshold: grids of at least this are scratch-backed (0: no scratch)
     double fixed = 0.;               // the irreducible term: particles + read buffers + grids + points
     bool psVel = false, psDisp = false, psGrad = false, psExact = false;   // the GPU deposit's grid selection
     bool momFx = false;              // the moment grids are fixed-point sums
@@ -1820,6 +1853,20 @@ struct AutoTunePSPlanner : AutoTunePSInputs
     }
 
     // what a given split and concurrency cost; the concurrency the run WILL use (0 = all cores)
+    // the start-up peak of psReserveGrids under --scratch-dir (finishReport; plan P8.2, phase R 2026-11-09): every
+    // scratch-backed full grid is zero-filled in anonymous memory before its file is mapped over it (ZeroFillScope),
+    // the largest one on top of the particles and the read blocks the allocator still keeps. 0 when no grid is
+    // scratch-backed, and on Linux, where the scope is a no-op (scratch_alloc.cc).
+    double reserveZeroFillPeak() const
+    {
+#ifdef __APPLE__
+        if ( not scratchOn or scratchMinBytes <= 0. or largestGridBytes < scratchMinBytes ) return 0.;
+        return particleBytes + readKeptAll + largestGridBytes;
+#else
+        return 0.;
+#endif
+    }
+
     AutoTuneReport finishReport(int n, int c) const
     {
         report.valid = true;
@@ -1831,6 +1878,14 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             std::fprintf( stderr, "AUTO-TUNE-DEBUG PS booked sub-grid: %.0f cells (split %d, %.0f partitions)\n",
                           subGridCells( report.partition ), report.partition, partsOf( report.partition ) );
         report.perPartition = partitionBytes( report.partition );
+#if defined(PARALLEL_TRIANGULATION) && NO_DIM==3
+        // the TBB insert's copies, where the insert runs in parallel: >= 2 threads per partition and a partition of at
+        // least the default rule's DTFE_TRIANGULATION_MIN_POINTS padded points (triangulation.cpp), or forced
+        if ( u.psParallelTriangulation and int(std::thread::hardware_concurrency()) / std::max( 1, inFlight ) >= 2
+             and ( u.parallelTriangulationForced
+                   or N / partsOf( report.partition ) * padFactorOf( report.partition ) >= double( Env::integer( "DTFE_TRIANGULATION_MIN_POINTS", 1000000L ) ) ) )
+            report.perPartition += N / partsOf( report.partition ) * padFactorOf( report.partition ) * kParInsertBytes;
+#endif
         report.gpuSnapshot = snapshotBytes( report.partition );   // once: the GPU deposits run one at a time
         // the loop's dynamic concurrency (P8.10, DTFE.cpp): what the run allocates after its partitions are in flight
         report.concChosen = autoConc;
@@ -1856,7 +1911,20 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             u.psLookAheadOffBudget = true;
             report.lookAhead = 0.;
         }
-        report.predicted = base + report.lookAhead;
+        // the start-up peak of psReserveGrids under --scratch-dir (reserveZeroFillPeak): the loop term above still
+        // chooses the split; this lifts the prediction, and so the over-budget check, where that transient is the
+        // run's peak -- the 1024^3 class with few partitions in flight (plan P8.2, phase R 2026-11-09)
+        report.reservePeak = reserveZeroFillPeak();
+        report.predicted = std::max( base + report.lookAhead, report.reservePeak );
+        if ( report.reservePeak > base + report.lookAhead )
+            message << MESSAGE::cBold() << "AUTO-TUNE:" << MESSAGE::cReset() << " the predicted peak is the start-up "
+                    << "one: the particles, the read buffers kept and the zero fill of the largest scratch-backed grid "
+                    << "(~" << report.reservePeak/1.e9 << " GB in all) exceed the partition loop's ~"
+                    << (base + report.lookAhead)/1.e9 << " GB; the plan is the loop's"
+                    << ( report.reservePeak > budget ? " -- and no split lowers it: it is over the budget whatever the"
+                                                        " plan (a smaller grid, fewer fields, a larger DTFE_MEM_BUDGET_GB,"
+                                                        " or Linux, where the zero fill goes to the file)" : "" )
+                    << ".\n" << MESSAGE::Flush;
         return report;
     }
 
@@ -2265,6 +2333,9 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     double const bCellDeposit = autoTuneBytesPerCell(u.uField, ps, 0) + autoTuneBytesPerCell(u.aField, ps, 0);
     double const bCellPost    = autoTuneBytesPerCell(u.uField, ps, 1) + autoTuneBytesPerCell(u.aField, ps, 1);
     double const bCell        = std::max( bCellDeposit, bCellPost );
+    // the largest pre-sized full grid, for the --scratch-dir start-up peak (AutoTunePSPlanner::reserveZeroFillPeak)
+    double const largestGridBytes = std::max( autoTuneLargestGridBytesPerCell(u.uField, ps),
+                                              autoTuneLargestGridBytesPerCell(u.aField, ps) ) * gridTotal;
     // said on the AUTO-TUNE line: this run's merge keeps integer grids during the loop (ps_fixed_merge.h)
     std::string const fxNote = ps.fixedMerge ? " [--ps-merge fixed-point: the summed full grids counted at 9 B per component "
                                                "and cell during the loop; nothing staged or spilled]" : "";
@@ -2284,15 +2355,13 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     // and each concurrent partition holds a full padded triangulation (the dominant cost). ----
     // per padded vertex: the tessellation (kPSVertexBytes) and, beside it while it grows, the particle copy
     double const partBytes = double(sizeof(Particle_data));
-    // '--parallel-triangulation' (TBB): the sorted point+payload copy and CGAL's own copy of it outlive the particle
-    // copy during the insert: +203 B per vertex in flight, measured (autoTuneServe's kBuild 330 holds it there).
-    // Counted whenever asked for: with fewer than 2 threads per partition the insert runs sequentially and this
-    // errs high.
-#if defined(PARALLEL_TRIANGULATION) && NO_DIM==3
-    double const kParInsert = u.psParallelTriangulation ? kParInsertBytes : 0.;
-#else
+    // '--parallel-triangulation' (TBB; PS-DTFE's default since 2026-11-09): the sorted point+payload copy and CGAL's
+    // own copy of it outlive the particle copy during the insert: +203 B per vertex in flight, measured
+    // (autoTuneServe's kBuild 330 holds it there). The insert runs in parallel only where the cores divided by the
+    // concurrency leave at least 2 threads (triangulation.cpp), so the split search below counts nothing for it --
+    // a default-on insert would otherwise move every PS plan -- and finishReport adds it to the chosen plan's
+    // prediction where that holds (the live memory gate covers the rest).
     double const kParInsert = 0.;
-#endif
     // --scratch-dir (already armed by DTFE_setup when set): the full-grid accumulators live in
     // mmap'ed files, so they leave the RAM model -- the kernel pages them against the disk and
     // RSS stays bounded. The RAM check then covers only the particles + per-partition terms,
@@ -2450,6 +2519,10 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     in.partBytes       = partBytes;
     in.kParInsert      = kParInsert;
     in.scratchOn       = scratchOn;
+    in.largestGridBytes = largestGridBytes;
+    in.readKeptAll     = u.psParticlesDeferred ? 0. : autoTuneReadKeptBytes( u, N );
+    // the same knob and default as the route itself (DTFE.cpp: ScratchAlloc::scratchArm)
+    in.scratchMinBytes = scratchOn ? ( Env::real( "DTFE_SCRATCH_MIN_GB", 0. ) > 0. ? Env::real( "DTFE_SCRATCH_MIN_GB", 0. ) : 1. ) * 1.e9 : 0.;
     in.nPts            = nPts;
     in.ptsStreamsWhy   = ptsStreamsWhy;
     in.ptsBytes        = ptsBytes;

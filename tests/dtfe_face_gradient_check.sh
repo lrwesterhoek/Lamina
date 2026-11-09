@@ -14,7 +14,14 @@
 #       9.0e-6); a '--partition 2 2 2' split within 1e-4 of the single domain (measured 1.8e-6) with every
 #       sub-domain's FACE-CHECK passing; the periodic box mean of the divergence below 1e-6 of its rms (8e-10)
 #   G5  '--face-gradient' with '--cic' stops at option parsing with exit 1 and the error naming the DTFE method
-# About 40 s on the Mac (8 runs of 2-7 s).
+#   G6  (a GPU build) the GPU exact average on '--partition 3 3 3' against one domain: byte-identical density and
+#       divergence -- every tetrahedron's shares are formed in the grid frame (plan P10.8) and summed in fixed point,
+#       so the split cannot move them -- and the shear within 1e-9 of its rms (measured 7e-13: the demo's flow is
+#       v = 1000 x, so the off-diagonal gradient is a thousandth of the diagonal and sits at the last bits of the
+#       fixed-point unit, which is the batch's, and of the face sums' cancellation); and every sub-domain's
+#       FACE-CHECK against the GPU deposit within the full-size bound (rms_rel <= 3e-6 per record, above_1e-4
+#       <= 1e-5 of the cells pooled)
+# About 50 s on the Mac (9 runs of 2-7 s).
 # Usage: tests/dtfe_face_gradient_check.sh [--no-build]   (--no-build is accepted and ignored: nothing is built)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,8 +53,8 @@ run() {
 }
 same() { cmp -s "$TMP/$1.a_velDiv" "$TMP/$2.a_velDiv" && cmp -s "$TMP/$1.a_velShear" "$TMP/$2.a_velShear"; }
 
-echo ">> demo/z0_64.gadget at 64^3: --exact-average with and without --face-gradient (one domain, one thread)"
-run e  OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 -- --exact-average
+echo ">> demo/z0_64.gadget at 64^3: --exact-average with --per-tet-gradient and with --face-gradient (one domain, one thread)"
+run e  OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 -- --exact-average --per-tet-gradient   # the deposit's own gradient (the face route is the default since 2026-11-09)
 run f  OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 DTFE_FACE_CHECK=1 -- --exact-average --face-gradient
 line="$(grep -a 'FACE-CHECK' "$TMP/f.log" | head -1 | sed 's/.*FACE-CHECK/FACE-CHECK/')"
 read -r mx above <<< "$(echo "$line" | awk '{for (i=1;i<=NF;i++) { if ($i=="max_rel") m=$(i+1); if ($i=="above_1e-4") a=$(i+1) } print m, a}')"
@@ -101,6 +108,35 @@ for good, what in ((d_fe <= 1e-4 and s_fe <= 1e-4,
     ok = ok and good
 sys.exit(0 if ok else 1)
 PY
+
+echo ">> the GPU exact average on a 3^3 split against one domain (the deposit's grid frame, plan P10.8)"
+if [ "$GPU" = "1" ]; then
+    run g3 DTFE_FACE_CHECK=1 -- --exact-average --face-gradient --gpu --partition 3 3 3 --max-concurrent 1
+    if grep -q "using the CPU interpolation" "$TMP/g3.log"; then fail "G6 the --gpu 3^3 run fell back to the CPU (see $TMP/g3.log)"
+    # the double build keeps what float rounding hides: the GPU deposit is float32 (its grids are converted to float
+    # once), so its density can differ by a float ulp where the two splits' fixed-point units round apart, and the
+    # face sums' order shows in the divergence; there every grid is compared within 1e-7 of its rms instead
+    elif DBL=0 && { ! precision_double || DBL=1; } && { precision_double || { cmp -s "$TMP/g.a_den" "$TMP/g3.a_den" && cmp -s "$TMP/g.a_velDiv" "$TMP/g3.a_velDiv"; }; } \
+         && "$PY" -c "
+import sys, numpy as np
+ok = True
+for f in ('a_den', 'a_velDiv', 'a_velShear'):
+    a = np.fromfile('$TMP/g.' + f, dtype='${DTFE_TEST_REAL}').astype(np.float64); b = np.fromfile('$TMP/g3.' + f, dtype='${DTFE_TEST_REAL}').astype(np.float64)
+    r = np.abs(a - b).max() / np.sqrt((a**2).mean()); print('   (G6 %s: 3^3 split vs one domain %.2g of its rms)' % (f, r)); ok = ok and r <= ($DBL and 1e-7 or 1e-9)
+sys.exit(0 if ok else 1)"; then
+        if precision_double; then pass "G6 GPU exact average, --partition 3 3 3 == one domain within 1e-7 of each grid's rms (double build: a float32 deposit)"
+        else pass "G6 GPU exact average, --partition 3 3 3 == one domain: byte-identical density and divergence, shear within 1e-9"; fi
+    else fail "G6 the 3^3 split moves the GPU exact average (the density, the divergence or the shear differ from the one-domain run)"; fi
+    read -r nchk6 worst6 pooled6 <<< "$(grep -a 'FACE-CHECK' "$TMP/g3.log" | sed 's/.*FACE-CHECK/FACE-CHECK/' \
+        | awk '{for (i=1;i<=NF;i++) { if ($i=="rms_rel" && $(i+1)+0 > w) w=$(i+1)+0; if ($i=="above_1e-4") a+=$(i+1); if ($i=="compared") c+=$(i+1) }; n++} END {printf "%d %.3g %.3g", n, w, (c>0 ? a/c : 1)}')"
+    if [ "${nchk6:-0}" -ge 27 ] && "$PY" -c "import sys; sys.exit(0 if float('$worst6') <= 3e-6 and float('$pooled6') <= 1e-5 else 1)"; then
+        pass "G6 FACE-CHECK against the GPU deposit on the 3^3 split: $nchk6 records, worst rms_rel $worst6, $pooled6 of the cells above 1e-4"
+    else
+        fail "G6 FACE-CHECK against the GPU deposit on the 3^3 split: $nchk6 records, worst rms_rel $worst6, $pooled6 of the cells above 1e-4 (bound 3e-6, 1e-5)"
+    fi
+else
+    echo "   (G6: not a GPU build)"
+fi
 
 echo ">> refusal: --face-gradient --cic"
 "${DTFE_BIN}" "$SNAP" "$TMP/c" --grid 16 --periodic --field density_a divergence_a --face-gradient --cic > "$TMP/c.log" 2>&1

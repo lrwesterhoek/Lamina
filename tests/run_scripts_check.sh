@@ -843,9 +843,9 @@ for o in gpu exact-average no-overlap full-help lambda-th average-method subsamp
 done
 "${PS_BIN}" --full-help >"${TMP}/k_full_ps.log" 2>"${TMP}/k_full_ps.err" || true
 "${DTFE_BIN}" --full-help >"${TMP}/k_full_dtfe.log" 2>&1 || true
-check "$([ "$(lacks "${TMP}/k_help_dtfe.log" '^ *--(ps-gpu|ps-per-stream|parallel-triangulation)')" = 0 ] \
+check "$([ "$(lacks "${TMP}/k_help_dtfe.log" '^ *--(ps-gpu|ps-per-stream)')" = 0 ] \
          && [ "$(lacks "${TMP}/k_full_dtfe.log" '^ *--(ps-per-stream|ps-merge|grid-window)')" = 0 ] && echo 0 || echo 1)" \
-      "... and not PS-DTFE's old --ps-gpu, nor its stream options or its TBB insert (short and full help)"
+      "... and not PS-DTFE's old --ps-gpu, nor its stream options (short and full help; the TBB insert is in both binaries since 2026-11-09)"
 check "$([ "$(lacks "${TMP}/k_help_ps.log" '(^|[^-])--(ps-gpu|ps-exact-deposit|ps-no-overlap|lambda_th|full_help|MpcUnit|paddingMpc|regionMpc|partNo|redshiftCone|origin|NGP|CIC|TSC|PCS|SPH|Voronoi|input|output|inputFile|outputFile|method|samples|noTest|density0|randomSample|approxPSD|extensive|options|avg-subsamples|lagrangianInput|ps-lag-padding|per-stream|per-stream-ids|pts-lagrangian|pts-conventions|ps-window|ordered-merge|completion-order-merge|fixed-point-merge)([^-a-zA-Z_]|$)')" = 0 ] \
          && [ "$(lacks "${TMP}/k_full_ps.log" '(^|[^-])--(ps-gpu|ps-exact-deposit|ps-no-overlap|lambda_th|full_help|MpcUnit|paddingMpc|regionMpc|partNo|redshiftCone|origin|NGP|CIC|TSC|PCS|SPH|Voronoi|input|output|inputFile|outputFile|method|samples|noTest|density0|randomSample|approxPSD|extensive|options|avg-subsamples|lagrangianInput|ps-lag-padding|per-stream|per-stream-ids|pts-lagrangian|pts-conventions|ps-window|ordered-merge|completion-order-merge|fixed-point-merge)([^-a-zA-Z_]|$)')" = 0 ] \
          && [ "$(lacks "${TMP}/k_full_dtfe.log" '(^|[^-])--(ps-gpu|ps-exact-deposit|ps-no-overlap|lambda_th|full_help|MpcUnit|paddingMpc|regionMpc|partNo|redshiftCone|origin|NGP|CIC|TSC|PCS|SPH|Voronoi|input|output|inputFile|outputFile|method|samples|noTest|density0|randomSample|approxPSD|extensive|options|avg-subsamples|lagrangianInput|ps-lag-padding|per-stream|per-stream-ids|pts-lagrangian|pts-conventions|ps-window|ordered-merge|completion-order-merge|fixed-point-merge)([^-a-zA-Z_]|$)')" = 0 ] \
@@ -1403,7 +1403,7 @@ check "$(sline "${TMP}/s_pslin.log" | grep -q -e '--ps-linear-deposit' && ! slin
          && grep -aq 'velocity moments stay mass-weighted' "${TMP}/s_pslin.log" && sline "${TMP}/s_pslin2.log" | grep -q -e '--ps-volume-weighted' \
          && echo 0 || echo 1)" "... PS_LINEAR_DEPOSIT=1 drops the default volume weighting (said); an explicit PS_VOLUME_WEIGHTED=1 stays (${rc}, ${rc2})"
 # FACE_GRADIENT=1: --face-gradient in both drivers; run_ps_dtfe.sh refuses it, exit 2 before any snapshot, without the
-# exact deposit, without the volume weighting or on the GPU deposit
+# exact deposit or without the volume weighting; with the GPU deposit it passes both flags (since 2026-11-09, D17)
 rc=$(sdrive run_ps_dtfe.sh "${TMP}/s_psface.log" DRY_RUN=1 FACE_GRADIENT=1 DTFE_EXACT_AVERAGE=1)
 rc2=$(sdrive run_ps_dtfe.sh "${TMP}/s_psface2.log" DRY_RUN=1 FACE_GRADIENT=1)
 rc3=$(sdrive run_ps_dtfe.sh "${TMP}/s_psface3.log" DRY_RUN=1 FACE_GRADIENT=1 DTFE_EXACT_AVERAGE=1 PS_VOLUME_WEIGHTED=0)
@@ -1412,9 +1412,12 @@ rc5=$(sdrive run_dtfe.sh "${TMP}/s_dtface.log" DRY_RUN=1 FACE_GRADIENT=1)
 check "$([ "${rc}" = "0" ] && sline "${TMP}/s_psface.log" | grep -qE -e '--exact-average .*--ps-volume-weighted +--face-gradient' \
          && [ "${rc2}" = "2" ] && grep -aq 'needs the exact deposit' "${TMP}/s_psface2.log" \
          && [ "${rc3}" = "2" ] && grep -aq 'needs the volume-weighted' "${TMP}/s_psface3.log" \
-         && [ "${rc4}" = "2" ] && grep -aq "runs on the CPU's exact deposit" "${TMP}/s_psface4.log" \
+         && [ "${rc4}" = "0" ] && sline "${TMP}/s_psface4.log" | grep -qE -e '--exact-average .*--ps-volume-weighted +--face-gradient' \
          && [ "${rc5}" = "0" ] && sline "${TMP}/s_dtface.log" | grep -qE -e '--exact-average +--face-gradient$' \
-         && echo 0 || echo 1)" "FACE_GRADIENT=1 passes --face-gradient in both drivers; PS without -e, the volume weighting or on the GPU: exit 2 (${rc} ${rc2} ${rc3} ${rc4} ${rc5})"
+         && echo 0 || echo 1)" "FACE_GRADIENT=1 passes --face-gradient in both drivers, with --gpu too; PS without -e or the volume weighting: exit 2 (${rc} ${rc2} ${rc3} ${rc4} ${rc5})"
+rc=$(sdrive run_dtfe.sh "${TMP}/s_dtpertet.log" DRY_RUN=1 FACE_GRADIENT=0)
+check "$([ "${rc}" = "0" ] && sline "${TMP}/s_dtpertet.log" | grep -qE -e '--exact-average +--per-tet-gradient$' && echo 0 || echo 1)" \
+      "FACE_GRADIENT=0 passes --per-tet-gradient to run_dtfe.sh (the face gradient is the standard binary's default since 2026-11-09) (${rc})"
 rc=$(sdrive run_dtfe.sh "${TMP}/s_dtdef.log" DRY_RUN=1)
 check "$([ "${rc}" = "0" ] && sline "${TMP}/s_dtdef.log" | grep -qE -e 'snapdir_099/output +--grid +16 +--padding +15 +--periodic +--field +density_a +velocity_a +divergence_a +shear_a +--lambda-th +0\.3 +--exact-average$' \
          && echo 0 || echo 1)" "run_dtfe.sh's defaults: padding 15, the same four fields as run_ps_dtfe.sh, the exact cell average (${rc})"

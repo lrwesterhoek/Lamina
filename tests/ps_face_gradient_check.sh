@@ -18,8 +18,11 @@
 #   P5  '--partition 2 2 2': within 1e-5 of the rms of one domain (measured 9e-7), box mean below 1e-6 of the rms
 #   P6  '--grid-window' (one z cell across the box): the full run's z = 16 slice, byte-identical in the single build
 #       (the double build shows the window's own fixed-point unit: within 1e-9 of the rms, measured 2e-11)
-#   P7  refusals at option parsing (exit 1): without '--exact-average', without '--ps-volume-weighted'; with '--gpu'
-#       in a GPU build
+#   P7  refusals at option parsing (exit 1): without '--exact-average', without '--ps-volume-weighted'
+#   P11 (a GPU build) '--gpu': the GPU exact deposit with the face sums from the CPU walk beside it (docs/cleanup-plan.md
+#       D17): the mean flow's divergence and the mass flux divergence byte-identical to the CPU run's (the same face
+#       words, the same units), the density within the GPU deposit's float tolerance, the stream average within 5e-2
+#       of its rms (the device's float per-stream gradient), and the run neither fell back nor skipped the walk
 #   P8  dtfelib: FieldSet.face_gradient is True for the run (False without the flag) and load('divergence',
 #       mean_field=True) returns the stored grid itself
 #   P9  the face sums ride the checkpoint: a '--partition 2 2 2' run killed after 3 partitions
@@ -258,8 +261,40 @@ refuse() {   # refuse <what> <expected message part> [args ...]
 }
 refuse "without --exact-average" "add '--exact-average'" --ps-volume-weighted --face-gradient
 refuse "without --ps-volume-weighted" "add '--ps-volume-weighted'" --exact-average --face-gradient
-if [ "$GPU" = "1" ]; then refuse "with --gpu" "drop '--gpu'" --exact-average --ps-volume-weighted --face-gradient --gpu
-else echo "   (P7's --gpu case: not a GPU build)"; fi
+
+if [ "$GPU" = "1" ]; then
+    echo ">> the GPU exact deposit with the face sums from the CPU walk beside it (--gpu --face-gradient)"
+    run gpu pan_2.0 OMP_NUM_THREADS=1 -- --ps-volume-weighted --face-gradient --gpu
+    if ! grep -q " GPU (" "$TMP/gpu.log" || grep -q "using the CPU deposit" "$TMP/gpu.log"; then
+        fail "P11 the --gpu run did not deposit on the GPU (see $TMP/gpu.log)"
+    elif ! grep -q "face sums (--face-gradient) of the GPU-deposited" "$TMP/gpu.log"; then
+        fail "P11 the --gpu run did not run the face walk (see $TMP/gpu.log)"
+    else
+        "$PY" - "$TMP" "$DTFE_TEST_REAL" <<'EOF' || FAIL=1
+import numpy as np, sys
+tmp, dt = sys.argv[1], np.dtype(sys.argv[2])
+rd = lambda name: np.fromfile(f"{tmp}/{name}", dtype=dt).astype(np.float64)
+ok = True
+for suf, tol, what in (("a_velDiv", 0.0, "the mean flow's divergence"), ("a_massFluxDiv", 0.0, "the mass flux divergence")):
+    c, g = rd(f"f2.0.{suf}"), rd(f"gpu.{suf}")
+    r = np.sqrt((c ** 2).mean()) or 1.0
+    d = float(np.abs(c - g).max()) / r
+    if d <= tol: print(f"   PASS  P11 {what}: GPU exact + face walk == CPU exact + face ({d:.1e} of the rms; byte-identical)")
+    else: print(f"   FAIL  P11 {what}: GPU exact + face walk differs from the CPU run by {d:.3g} of the rms"); ok = False
+c, g = rd("f2.0.a_den"), rd("gpu.a_den")
+scale = float(np.abs(c).max()) or 1.0
+mean_rel, peak = abs(float(c.mean()) - float(g.mean())) / scale, float(np.abs(c - g).max()) / scale
+if mean_rel <= 1e-5 and peak <= 5e-2: print(f"   PASS  P11 density: GPU exact vs CPU exact mean-rel {mean_rel:.1e}, peak-rel {peak:.1e}")
+else: print(f"   FAIL  P11 density: GPU exact vs CPU exact mean-rel {mean_rel:.1e}, peak-rel {peak:.1e}"); ok = False
+c, g = rd("f2.0.a_velDivStreams"), rd("gpu.a_velDivStreams")
+r = np.sqrt((c ** 2).mean()) or 1.0
+d = float(np.abs(c - g).max()) / r
+if d <= 5e-2: print(f"   PASS  P11 the stream average's divergence (the device's float gradient): {d:.1e} of the rms")
+else: print(f"   FAIL  P11 the stream average's divergence differs by {d:.3g} of the rms"); ok = False
+sys.exit(0 if ok else 1)
+EOF
+    fi
+else echo "   (P11's --gpu case: not a GPU build)"; fi
 
 echo ">> dtfelib reads the stored mean-flow grids"
 for k in f2.0 b2.0; do

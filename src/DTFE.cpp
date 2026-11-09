@@ -46,6 +46,7 @@
 #include "quantities.h"
 #include "subpartition.h"
 #include "miscellaneous.h"
+#include "phase_totals.h"   // the run's per-stage totals (dtfeFinishFields prints them)
 #include <limits>
 
 #include "message.h"
@@ -2737,6 +2738,10 @@ static void dtfeFinishFields(DTFE_State &state, User_options &userOptions, Quant
     runProgressPhase( "post-processing" );
     postProcessWebFields( userOptions, uQuantities, aQuantities );
 
+    // the run's phase totals (phase_totals.h): every stage printComputationTime timed, summed over all threads and
+    // sub-domains -- what each phase cost the machine, for the device rule and the pipeline of plan P11
+    PhaseTotals::report( userOptions.verboseLevel );
+
 #ifndef PHASE_SPACE
     // --gpu: the sub-domain deposits that fell back to the CPU (as the PS binary's partition count
     // after its loop): each prints its reason as a warning of its own thread, and this line says how many there
@@ -2958,8 +2963,12 @@ static void DTFE_parallelImpl(vector<Particle_data> *allParticles,
     {
         size_t const full[3] = { userOptions.gridSize[0], userOptions.gridSize[1], userOptions.gridSize[2] };
         std::string err;
+        // the gradient only when the deposit supplies it: under --face-gradient (the default) each sub-domain's
+        // face pass writes it (averaged_interpolation_1.cc skips the per-tetrahedron gradient the same way)
+        bool const sharedGrad = userOptions.aField.velocity_gradient
+                                and not ( userOptions.faceGradient and not Env::flag( "DTFE_FACE_CHECK" ) );
         gpuShared = dtfeGpuSharedBegin( full, userOptions.aField.density, userOptions.aField.velocity,
-                                        userOptions.aField.velocity_gradient, userOptions.aField.scalar,
+                                        sharedGrad, userOptions.aField.scalar,
                                         userOptions.aField.scalar_gradient, err );
         if ( not gpuShared and userOptions.verboseLevel>=2 )
             message << "(GPU: no shared grid, " << err << "; each sub-domain deposits on its own)\n" << MESSAGE::Flush;
@@ -2967,9 +2976,13 @@ static void DTFE_parallelImpl(vector<Particle_data> *allParticles,
 #endif
 
 
+    // the team's concurrency, for the parallel insertion's thread budget (triangulation.cpp divides the cores by it,
+    // as in the PS partition loops; without it each of the noProcessors sub-boxes would insert on 6 threads at once)
+    ConcurrentTriangulationPlan triangulationPlan( noProcessors, noProcessors );
 #pragma omp parallel num_threads( noProcessors )
     {
         int const threadNo = omp_get_thread_num();
+        ConcurrentTriangulationGuard concurrentTriangulation;
         // region allocated to this thread (dtfeSubdomainOptions: its sub-grid, box and padded box)
         User_options tempOptions = dtfeSubdomainOptions( userOptions, threadNo, noProcessors, pGrid, subgridList, subgridCoords );
 
@@ -3022,7 +3035,11 @@ static void DTFE_parallelImpl(vector<Particle_data> *allParticles,
                 for (size_t i=0; i<nCell; ++i)
                     for (size_t j=0; j<noVelComp; ++j) aQuantities->velocity[i][j] += Real(gVel[i*3+j]) / cellVolume;
             }
-            if ( gGrad and aQuantities->velocity_gradient.size()==nCell )
+            // the gradient: not when the face pass wrote it (--face-gradient, the default since 2026-11-09): each
+            // thread's sub-grid then already holds the face gradient, which copySubgridResultsToMain copied, and the
+            // device's per-tetrahedron gradient (deposited only under DTFE_FACE_CHECK=1 now, see sharedGrad) would be
+            // added on top of it -- a doubled gradient, found by tests/dtfe_metal_check.sh's shared-grid runs
+            if ( gGrad and aQuantities->velocity_gradient.size()==nCell and not userOptions.faceGradient )
             {
                 #pragma omp parallel for
                 for (size_t i=0; i<nCell; ++i)

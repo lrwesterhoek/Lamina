@@ -277,6 +277,11 @@ struct AutoTuneReport
     // records, budgeted: their unmerged share is still to come)
     bool   concChosen = false;
     double reserveEnd = 0., reserveFirstMerge = 0., reserveRecords = 0.;
+    // PS-DTFE under --scratch-dir on macOS (plan P8.2 as rescoped in phase R, 2026-11-09): the start-up peak of
+    // psReserveGrids, which zero-fills each scratch-backed full grid in anonymous memory before its file is mapped
+    // over it (ScratchAlloc::ZeroFillScope): the particles + the read blocks kept + the largest pre-sized grid.
+    // 'predicted' is at least this (0: no scratch-backed grid, or Linux, where the scope is a no-op)
+    double reservePeak = 0.;
     std::string line() const
     {
         if ( not valid ) return "AUTO-TUNE-REPORT unsupported";

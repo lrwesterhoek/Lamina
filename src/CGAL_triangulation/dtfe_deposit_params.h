@@ -6,10 +6,13 @@
    has int32_t and uint32_t), arrays and no vector types (a float3 would be padded to 16 bytes), no includes under
    MSL. Its static_assert runs in both compilers and pins the layout.
 
-   A batch = one sub-domain's tetrahedra. Positions are relative to the SUB-DOMAIN's lower corner and nGrid is its
-   sub-grid (so the cell classification is the CPU loop's, bit for bit); a sample inside the sub-grid is owned by
-   this batch and lands at full-grid cell pos + subOff. With subOff = 0 and fullGrid = nGrid this is the plain
-   single-grid deposit. Buffer numbers are those of metal/dtfe_deposit.metal. */
+   A batch = one sub-domain's tetrahedra. nGrid is its sub-grid; a sample inside the sub-grid is owned by this batch
+   and lands at full-grid cell pos + subOff. With subOff = 0 and fullGrid = nGrid this is the plain single-grid
+   deposit. Positions are relative to a corner the host chooses per tetrahedron and names by its sub-grid cell
+   (buffer 22, 'cells'): the exact average's base cell of the FULL grid (averaged_interpolation_1.cc GridFrame, plan
+   P10.8: the same frame in every sub-domain, so the same shares), the Monte-Carlo average's sub-domain lower corner
+   (cell 0, so the cell classification is the CPU loop's, bit for bit). Buffer numbers are those of
+   metal/dtfe_deposit.metal. */
 #ifndef DTFE_DEPOSIT_PARAMS_H
 #define DTFE_DEPOSIT_PARAMS_H
 

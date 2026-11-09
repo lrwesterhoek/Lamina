@@ -40,6 +40,9 @@ with h5py.File(sys.argv[1], "a") as f:
 PYEOF
 G=32
 FIELDS=(--field density_a velocity_a gradient_a scalar_a scalarGradient_a --scalar-dataset Phi)
+# the kernel's gradient is what this suite compares: the deposit's own route (the face gradient is the standard
+# binary's default since 2026-11-09); the environment switch, since PS-DTFE runs with the same fields and ignores it
+export DTFE_FACE_GRADIENT=0
 # one domain for both runs: on <= 8 cores the time-aware tuner splits the CPU reference, and a split sampled deposit
 # differs from one domain by ~4e-3, which would fail this suite on Linux
 COMMON=(--grid $G --periodic --input-format 105 --mpc-unit 1 --verbose 1 --partition 1 1 1 "${FIELDS[@]}")

@@ -38,6 +38,10 @@ for b in DTFE DTFE-double DTFE-2d PS-DTFE PS-DTFE-double PS-DTFE-2d; do
 done
 "$PY" tests/generate_ps_test_data.py --out "$OUT/w48.hdf5" --n 48 --box 100 --amplitude-factor 1.8 --jitter-frac 0.02 --seed 7 --crossed-waves >/dev/null
 "$PY" tests/generate_ps_test_data.py --out "$OUT/w2d.hdf5" --n 64 --box 100 --amplitude-factor 1.8 --jitter-frac 0.02 --seed 7 --crossed-waves --dim 2 >/dev/null
+# the velocity gradient's route: the standard binary's default became the face gradient on 2026-11-09 (D13), which moves
+# every standard derivative file against a reference set from before; DTFE_FACE_GRADIENT=0 keeps the deposit's own
+# gradient on a binary that knows the switch and is ignored by an older one, so both sides compare the same route
+export DTFE_FACE_GRADIENT=0
 C=(--periodic --input 105 --MpcUnit 1 --verbose 1)
 F3=(--field density_a velocity_a gradient_a divergence_a shear_a vorticity_a tweb_a vweb_a)
 F2=(--field density_a velocity_a gradient_a divergence_a vorticity_a)

@@ -71,7 +71,8 @@ void psWriteOccupancyIfMissing(DT &dt, User_options &partOpts);       // ps_serv
 void delaunayTriangulation(DT *dt,
                            vector<Particle_data> *p,
                            int const verboseLevel,
-                           bool const parallelAllowed);
+                           bool const parallelAllowed,
+                           bool const parallelForced = false);
 
 void vertexDensity(DT & dt,
                 User_options &userOptions);
@@ -120,13 +121,9 @@ bool buildTessellation(vector<Particle_data> *p,
     if ( not tessellationLoaded )
     {
     t.start();
-    delaunayTriangulation( &dt, p, userOptions.verboseLevel,
-#ifdef PHASE_SPACE
-                           userOptions.psParallelTriangulation || Env::isSet( "DTFE_TRIANGULATION_THREADS" )
-#else
-                           false
-#endif
-                         );
+    delaunayTriangulation( &dt, p, userOptions.verboseLevel,   // (both binaries since 2026-11-09, plan P11.3)
+                           userOptions.psParallelTriangulation || Env::isSet( "DTFE_TRIANGULATION_THREADS" ),
+                           userOptions.parallelTriangulationForced || Env::isSet( "DTFE_TRIANGULATION_THREADS" ) );
     printComputationTime( &t, &userOptions, "triangulation" );
     vector<Particle_data>().swap(*p);  // data lives in the triangulation now; swap-with-empty actually frees the input array (clear() keeps capacity)
 
@@ -498,25 +495,32 @@ static void insertSequential(DT *dt, vector<Particle_data> *p, MESSAGE::Message 
     message << "100\%.\n" << MESSAGE::Flush;
 }
 
-// Inserts every particle into the Delaunay triangulation. PS-DTFE builds (TBB=auto/1, the
-// PARALLEL_TRIANGULATION data structure) insert in parallel with CGAL's lock grid when the run
-// asks for it ('--parallel-triangulation' or DTFE_TRIANGULATION_THREADS) and more than one core is free for
-// this tessellation: the cores are shared among the tessellations being built at the same time
-// (the partition loops), and capped by OMP_NUM_THREADS. OFF by default: the parallel insert's
-// vertex and cell order differ from run to run, so float outputs differ at rounding between two
-// identical runs (four test suites and the --serve == --sample-points contract need them bit-
-// identical); the sequential insert is reproducible bit for bit. The parallel
-// insert sorts and inserts a COPY of the points (CGAL keeps a second one), so the particles are
-// freed as soon as that copy exists; auto_tune.h budgets the difference. A partition loop gets its
-// cores divided by its planned concurrency, so with every core already busy it inserts sequentially
-// and only the loop's tail, with fewer partitions left than cores, inserts in parallel. The standard DTFE binary
-// keeps the sequential insert and its Fast_location hierarchy: its clustered Eulerian points make
-// the parallel insert 4.5x SLOWER (0.26M particles: 1.05 s -> 4.7 s), where the near-lattice
-// Lagrangian points of PS-DTFE build 2x faster on ten cores (1.44 s -> 0.74 s).
+// Inserts every particle into the Delaunay triangulation. A PARALLEL_TRIANGULATION build (TBB=auto/1 for PS-DTFE,
+// TBB_STD likewise for the standard binaries since 2026-11-09, plan P11.3) inserts in parallel with CGAL's lock grid
+// by the default rule of both binaries (2026-11-09, plan P11.3) -- a tessellation of at least
+// DTFE_TRIANGULATION_MIN_POINTS points (1000000) when more than one core is free for it -- or forced by
+// '--parallel-triangulation' / DTFE_TRIANGULATION_THREADS=N at any size: the cores are shared among the
+// tessellations being built at the same time (the partition loops, the standard sub-domain team:
+// ConcurrentTriangulationPlan), and capped by OMP_NUM_THREADS. The parallel insert's vertex and cell order differ
+// from run to run, so whatever is summed in that order moves at rounding between two identical runs: the standard
+// CPU deposits' float sums, the face pass's double sums (the last bit in 2e-7 of the values at 512^3), the vertex
+// densities and the points (~1e-15), and PS-DTFE's velocity moments, whose shares are formed in each tetrahedron's
+// vertex frame (4e-7 of the rms in 5% of the values; tests/dev/bytecmp.sh with DTFE_TRIANGULATION_THREADS=6);
+// unchanged: PS-DTFE's fixed-point density and the GPU exact average's grids (P10.8: byte-identical at 512^3).
+// '--sequential-triangulation' (or DTFE_TRIANGULATION_THREADS=1) keeps the sequential insert, reproducible bit for
+// bit; the test suites' inputs are far below the threshold, so they compare sequential builds. The parallel insert
+// sorts and inserts a COPY of the points (CGAL keeps a second one), so the particles are freed as soon as that copy
+// exists; auto_tune.h budgets the difference. Measured: PS-DTFE's near-lattice Lagrangian points build 2x faster on
+// ten cores (0.26M particles: 1.44 s -> 0.74 s); the standard binary's clustered Eulerian points built 4.5x SLOWER
+// on the demo (0.26M: 1.05 s -> 4.7 s) but 3.1x FASTER at TNG100 z = 0 (512^3, one partition of ~5M padded points in
+// flight, 6 threads: 675 s -> 218 s summed over 27 partitions, +4.4 GB in flight), hence the threshold; at the auto
+// plan's concurrency (9-10 tessellations at once) the budget is one thread and nothing changes (435 s both ways, the
+// GPU exact grids byte-identical).
 void delaunayTriangulation(DT *dt,
                            vector<Particle_data> *p,
                            int const verboseLevel,
-                           bool const parallelAllowed)
+                           bool const parallelAllowed,
+                           bool const parallelForced)
 {
     MESSAGE::Message message( verboseLevel );
 
@@ -528,6 +532,17 @@ void delaunayTriangulation(DT *dt,
     // a partition loop: its planned concurrency already fills the cores (see above)
     int const planned = std::min( dtfeTriangulationConcurrency.load(), dtfeTriangulationsRemaining.load() );
     threads = std::max( 1, std::min( threads, int(std::thread::hardware_concurrency()) / std::max( 1, planned ) ) );
+    // the size threshold of the default rule (see above): below it the sequential insert is as fast or faster
+    if ( threads > 1 && !parallelForced )
+    {
+        long const minPoints = Env::integer( "DTFE_TRIANGULATION_MIN_POINTS", 1000000L );
+        if ( long(p->size()) < minPoints )
+        {
+            message << "\n(the parallel insert is for tessellations of at least " << minPoints << " points; this one has "
+                    << p->size() << ": sequential)" << MESSAGE::Flush;
+            threads = 1;
+        }
+    }
     if ( threads > 1 )
     {
         message << "\nConstructing the Delaunay triangulation (parallel, TBB, " << threads << " threads) ... " << MESSAGE::Flush;
@@ -566,7 +581,7 @@ void delaunayTriangulation(DT *dt,
         return;
     }
 #else
-    (void)parallelAllowed;
+    (void)parallelAllowed; (void)parallelForced;
 #endif
     insertSequential( dt, p, message );
     message << "The triangulation has " << dt->number_of_vertices() << " points.\n" << MESSAGE::Flush;

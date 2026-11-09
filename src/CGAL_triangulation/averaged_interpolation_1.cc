@@ -259,6 +259,57 @@ int checkCellPosition(Cell &cell,
     return MULTIPLE_GRID_CELLS;
 }
 
+/* The exact average's GRID FRAME (plan P10.8). Its deposits -- the CPU's r3d / ps_clip2d clipping, the GPU kernel
+   and the face pass -- form a tetrahedron's geometry relative to the corner of the FULL grid's cell holding its base
+   vertex: origin + g * dxG in double, with g the cell's global index (user_options.h gridFrame: the run's grid box and
+   full grid, this sub-grid's origin in it). The vertices relative to that corner are exact in double and narrow to a
+   float whose rounding does not depend on the sub-domain, and the cells are named by their global index minus the
+   sub-grid's origin, so every sub-domain computes the same shares for the same tetrahedron. (The sub-domain frame,
+   checkCellPosition's, rounded the GPU deposit's float vertices by up to 2^-24 of the sub-domain's extent: 1.9e-6 Mpc,
+   a strip of cells off by up to 1e-2 of the gradient's rms in TNG100's 3^3 plan, the P10 status. The Monte-Carlo
+   average keeps that frame and its bytes.) */
+struct GridFrame
+{
+    double origin[NO_DIM], dxG[NO_DIM];
+    long   offset[NO_DIM];     // this sub-grid's origin in the full grid (cells)
+    explicit GridFrame(User_options const &o) { o.gridFrame( origin, dxG, offset ); }
+    // the global cell holding coordinate x on axis d
+    inline long cellOf(double const x, int const d) const { return long( std::floor( ( x - origin[d] ) / dxG[d] ) ); }
+    // the position of the global plane g on axis d: ONE expression for every tetrahedron and sub-domain, so the
+    // face pass decides a plane's side alike for a vertex shared by two tetrahedra
+    inline double plane(long const g, int const d) const { return origin[d] + double(g) * dxG[d]; }
+};
+// One tetrahedron in the frame: the base vertex's cell (sub-grid indices, outside [0, nGrid) for a padding
+// tetrahedron), that cell's corner, the base vertex relative to it (in [0, dxG) up to rounding), and whether every
+// vertex lies in that one cell. vertexMatrix: the other vertices relative to the base, exact double differences.
+struct TetFrame
+{
+    int    cell[NO_DIM];
+    double corner[NO_DIM], base[NO_DIM];
+    bool   single;
+};
+template <typename Cell>
+inline TetFrame tetFrame(Cell &c, GridFrame const &F, double vertexMatrix[][NO_DIM])
+{
+    TetFrame t;
+    t.single = true;
+    for (int d=0; d<NO_DIM; ++d)
+    {
+        double const x0 = double( c->vertex(0)->point()[d] );
+        long const g = F.cellOf( x0, d );
+        t.cell[d] = int( g - F.offset[d] );
+        t.corner[d] = F.plane( g, d );
+        t.base[d] = x0 - t.corner[d];
+        for (int v=1; v<NO_DIM+1; ++v)
+        {
+            double const xv = double( c->vertex(v)->point()[d] );
+            vertexMatrix[v-1][d] = xv - x0;
+            if ( F.cellOf( xv, d ) != g ) t.single = false;
+        }
+    }
+    return t;
+}
+
 
 
 // Returns true if 'gridCell' is in range, writing its flat array index to 'cellIndex'.
@@ -433,6 +484,8 @@ struct Avg1GpuCtx
     int mortonShift;
     std::vector<float> &tetVerts, &tetDens, &tetVels, &tetScal, &tetVols;
     std::vector<uint32_t> &tetCnts, &tetFlats, &tetKeys;
+    std::vector<int32_t> &tetCells;    // each tetrahedron's base cell, the frame of its positions (GridFrame; 0 = the region's corner)
+    double dxDeposit[3];               // the kernel's cell size: the grid frame's for the exact average, the sub-domain's for Monte Carlo
 };
 
 // Orders the tetrahedra along a Morton curve of their base cell before dispatch, so the
@@ -448,6 +501,7 @@ static inline void avg1MortonOrder(Avg1GpuCtx &c)
     std::vector<float> &tetVerts = c.tetVerts, &tetDens = c.tetDens, &tetVels = c.tetVels, &tetScal = c.tetScal,
                        &tetVols = c.tetVols;
     std::vector<uint32_t> &tetCnts = c.tetCnts, &tetFlats = c.tetFlats, &tetKeys = c.tetKeys;
+    std::vector<int32_t> &tetCells = c.tetCells;
     bool const needVel = c.needVel, needScal = c.needScal;
     int const mortonShift = c.mortonShift;
     size_t const nT = tetCnts.size();
@@ -515,6 +569,12 @@ static inline void avg1MortonOrder(Avg1GpuCtx &c)
         for (size_t i=0; i<nT; ++i) sf[i] = tetFlats[order[i].second];
         tetFlats.swap(sf);
     }
+    {
+        std::vector<int32_t> sl(nT*3);
+        for (size_t i=0; i<nT; ++i)
+        { size_t const src = order[i].second; for (int k=0; k<3; ++k) sl[i*3+k] = tetCells[src*3+k]; }
+        tetCells.swap(sl);
+    }
 }
 
 // Deposits the extracted tetrahedra on the GPU: into the shared full grid of a DTFE_parallel call, else into a grid
@@ -524,12 +584,12 @@ static inline bool avg1GpuDispatch(Avg1GpuCtx &c, Avg1Grids const &grids, std::v
     User_options &userOptions = c.userOptions;
     MESSAGE::Message &message = c.message;
     size_t *nGrid = c.nGrid;
-    Real (&dx)[NO_DIM] = c.dx;
     size_t const gridSize = c.gridSize;
     bool const exactAvg = c.exactAvg, fDen = c.fDen, fVel = c.fVel, fGrad = c.fGrad, fScal = c.fScal, fSGrad = c.fSGrad;
     std::vector<float> &tetVerts = c.tetVerts, &tetDens = c.tetDens, &tetVels = c.tetVels, &tetScal = c.tetScal,
                        &tetVols = c.tetVols;
     std::vector<uint32_t> &tetCnts = c.tetCnts, &tetFlats = c.tetFlats;
+    std::vector<int32_t> &tetCells = c.tetCells;
     std::vector<Real>                         *density = grids.density;
     std::vector< Pvector<Real,noVelComp> >    *velocity = grids.velocity;
     std::vector< Pvector<Real,noGradComp> >   *velocity_gradient = grids.velocity_gradient;
@@ -537,7 +597,7 @@ static inline bool avg1GpuDispatch(Avg1GpuCtx &c, Avg1Grids const &grids, std::v
     std::vector< Pvector<Real,noScalarGradComp> > *scalar_gradient = grids.scalar_gradient;
     bool metalDeposited = false;
     std::vector<float> sobolTable( quasiRandomNumbers_buf.begin(), quasiRandomNumbers_buf.end() );
-    double dxv[3] = { double(dx[0]), double(dx[1]), double(dx[2]) };
+    double dxv[3] = { c.dxDeposit[0], c.dxDeposit[1], c.dxDeposit[2] };   // (the grid frame's for the exact average)
     size_t const nTetsDeposited = tetCnts.size();   // the deposit call consumes (frees) the arrays
     DTFEGpuGrids gpuOut;
     std::string metalErr;
@@ -552,7 +612,7 @@ static inline bool avg1GpuDispatch(Avg1GpuCtx &c, Avg1Grids const &grids, std::v
     if ( dtfeGpuSharedActive() and userOptions.subgridOffset.size()==size_t(NO_DIM) )
     {
         size_t subOff[3] = { userOptions.subgridOffset[0], userOptions.subgridOffset[1], userOptions.subgridOffset[2] };
-        if ( dtfeGpuSharedDeposit( tetVerts, tetDens, tetVels, tetScal, tetVols, tetCnts, tetFlats,
+        if ( dtfeGpuSharedDeposit( tetVerts, tetDens, tetVels, tetScal, tetVols, tetCnts, tetFlats, tetCells,
                                    sobolTable, dxv, nGrid, subOff, metalErr ) )
             sharedDone = true;
         else if ( not tetCnts.empty() )     // the arrays survive only when the upload itself failed
@@ -574,7 +634,7 @@ static inline bool avg1GpuDispatch(Avg1GpuCtx &c, Avg1Grids const &grids, std::v
     bool perCallOk = false, perCallFailed = false;
     if ( not sharedDone and not sharedFailed and not tetCnts.empty() )
     {
-        perCallOk = dtfeGpuDepositAveraged1( tetVerts, tetDens, tetVels, tetScal, tetVols, tetCnts, tetFlats,
+        perCallOk = dtfeGpuDepositAveraged1( tetVerts, tetDens, tetVels, tetScal, tetVols, tetCnts, tetFlats, tetCells,
                                              sobolTable, dxv, nGrid, fDen, fVel, fGrad, fScal, fSGrad, exactAvg, gpuOut, metalErr );
         perCallFailed = not perCallOk;
     }
@@ -721,6 +781,50 @@ static inline void avg1SingleCell(Avg1CpuCtx const &C, McCell &mc, Real posMatri
     if ( dummy.dummyVertices ) updateDummyGridCells( index, dummy.incompleteCells );
 #endif
 }
+// The same for the exact average (plan P10.8): its gradients in double (posInvD, matrixInverseDouble's), each share
+// narrowed once.
+static inline void avg1SingleCellExact(Avg1CpuCtx const &C, McCell &mc, double posInvD[][NO_DIM], Real const cellVolume,
+                                       size_t const index, Avg1Dummy const &dummy)
+{
+    (void)posInvD;
+    Field const &field = C.field;
+    std::vector<Real>                             * const &density = C.grids.density;
+    if (field.density) (*density)[index] += averageDensity(mc) * cellVolume;
+#ifdef VELOCITY
+    std::vector< Pvector<Real,noVelComp> >        * const &velocity = C.grids.velocity;
+    std::vector< Pvector<Real,noGradComp> >       * const &velocity_gradient = C.grids.velocity_gradient;
+    if (field.velocity) (*velocity)[index] += averageVelocity(mc) * cellVolume;
+    if (field.velocity_gradient)
+    {
+        double velGrad[NO_DIM][noVelComp];
+        velocityGradDouble( mc, posInvD, velGrad );
+        Pvector<Real,noGradComp> pg;
+        for (size_t j = 0; j < noVelComp; ++j)
+            for (size_t i = 0; i < NO_DIM; ++i)
+                pg[j*NO_DIM+i] = Real( velGrad[i][j] * double(cellVolume) );
+        (*velocity_gradient)[index] += pg;
+    }
+#endif
+#ifdef SCALAR
+    std::vector< Pvector<Real,noScalarComp> >     * const &scalar = C.grids.scalar;
+    std::vector< Pvector<Real,noScalarGradComp> > * const &scalar_gradient = C.grids.scalar_gradient;
+    if (field.scalar) (*scalar)[index] += averageScalar(mc) * cellVolume;
+    if (field.scalar_gradient)
+    {
+        double sGrad[NO_DIM][noScalarComp];
+        scalarGradDouble( mc, posInvD, sGrad );
+        Pvector<Real,noScalarGradComp> pg;
+        for (size_t j = 0; j < noScalarComp; ++j)
+            for (size_t i = 0; i < NO_DIM; ++i)
+                pg[j*NO_DIM+i] = Real( sGrad[i][j] * double(cellVolume) );
+        (*scalar_gradient)[index] += pg;
+    }
+#endif
+#ifdef TEST_PADDING
+    if ( dummy.dummyNeighbors ) updateDummyGridCells( index, dummy.incompleteCells_d );
+    if ( dummy.dummyVertices ) updateDummyGridCells( index, dummy.incompleteCells );
+#endif
+}
 #endif
 
 
@@ -728,17 +832,17 @@ static inline void avg1SingleCell(Avg1CpuCtx const &C, McCell &mc, Real posMatri
 // ----- exact volume average (--exact-average): analytic cell∩tet integration -----
 // The interpolant is LINEAR inside the tet, so its integral over each intersection
 // piece is the centroid value times the piece volume -- order-1 r3d moments suffice
-// (Powell & Abel 2015). Same vertex-0-relative frame as the sampled path (densGrad,
-// velGrad and the field evaluators all take base-relative coordinates); out-of-region
-// window cells are skipped exactly like out-of-region samples. The single-grid-cell
-// fast path (avg1SingleCell, already exact for linear fields) is shared with the sampled mode.
+// (Powell & Abel 2015). The geometry is the grid frame's (GridFrame / TetFrame, plan P10.8): the tet in its vertex-0
+// frame (vertexMatrix, exact double differences), the cells as offsets from its base cell, whose corner its base
+// position is relative to -- the same arithmetic in every sub-domain. The gradients and the values are formed in
+// double (posInvD: matrixInverseDouble) and each share is narrowed once. Out-of-region window cells are skipped
+// exactly like out-of-region samples. The single-grid-cell fast path is avg1SingleCellExact.
 // Thread th clips only the cells of its own x planes.
-static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, Finite_cells_iterator &itC, double vertexMatrix[][NO_DIM],
-                                Real basePosition[NO_DIM], Real posMatrixInverse[][NO_DIM], Avg1Dummy const &dummy)
+static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, McCell &mc, double vertexMatrix[][NO_DIM],
+                                TetFrame const &tf, GridFrame const &F, double posInvD[][NO_DIM], Avg1Dummy const &dummy)
 {
     Field const &field = C.field;
     size_t * const &nGrid = C.nGrid;
-    Real * const &dx = C.dx;
     int const nT = C.nT;
     std::vector<Real>                             * const &density = C.grids.density;
 #ifdef VELOCITY
@@ -751,16 +855,18 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, Finite_cells_
 #endif
     size_t index;
 
-    Vertex_handle base = itC->vertex(0);
-    Real densGrad[NO_DIM];
-    densityGrad( itC, posMatrixInverse, densGrad );
+    double densGrad[NO_DIM];
+    densityGradDouble( mc, posInvD, densGrad );
+    double const dens0 = double( mc.v[0]->info().density() );
 #ifdef VELOCITY
-    Real velGrad[NO_DIM][noVelComp];
-    velocityGrad( itC, posMatrixInverse, velGrad );
+    double velGrad[NO_DIM][noVelComp], vel0[noVelComp];
+    velocityGradDouble( mc, posInvD, velGrad );
+    for (size_t j = 0; j < noVelComp; ++j) vel0[j] = double( mc.v[0]->info().velocity(j) );
 #endif
 #ifdef SCALAR
-    Real sGrad[NO_DIM][noScalarComp];
-    scalarGrad( itC, posMatrixInverse, sGrad );
+    double sGrad[NO_DIM][noScalarComp], sc0[noScalarComp];
+    scalarGradDouble( mc, posInvD, sGrad );
+    for (size_t j = 0; j < noScalarComp; ++j) sc0[j] = double( mc.v[0]->info().myScalar()[j] );
 #endif
 
     r3d_rvec3 tv[NO_DIM+1];
@@ -773,7 +879,7 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, Finite_cells_
     r3d_poly tetPoly;
     r3d_init_tet(&tetPoly, tv);
 
-    // window of grid cells overlapped by the tet bbox (region-frame indices, clamped)
+    // window of grid cells overlapped by the tet bbox: sub-grid indices from the offsets to the base cell, clamped
     int iLo[NO_DIM], iHi[NO_DIM];
     for (int d = 0; d < NO_DIM; ++d)
     {
@@ -783,8 +889,8 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, Finite_cells_
             if (vertexMatrix[v][d] < lo) lo = vertexMatrix[v][d];
             if (vertexMatrix[v][d] > hi) hi = vertexMatrix[v][d];
         }
-        iLo[d] = int( std::floor( (double(basePosition[d]) + lo) / double(dx[d]) ) );
-        iHi[d] = int( std::floor( (double(basePosition[d]) + hi) / double(dx[d]) ) ) + 1;
+        iLo[d] = tf.cell[d] + int( std::floor( (tf.base[d] + lo) / F.dxG[d] ) );
+        iHi[d] = tf.cell[d] + int( std::floor( (tf.base[d] + hi) / F.dxG[d] ) ) + 1;
         if (iLo[d] < 0) iLo[d] = 0;
         if (iHi[d] > int(nGrid[d])) iHi[d] = int(nGrid[d]);
     }
@@ -794,8 +900,8 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, Finite_cells_
     exactSweep::sweep( tetPoly, iLo, iHi,
         [&](int const d, int const g, double &lo, double &hi)
         {
-            lo = g * double(dx[d]) - double(basePosition[d]);
-            hi = lo + double(dx[d]);
+            lo = double( g - tf.cell[d] ) * F.dxG[d] - tf.base[d];
+            hi = lo + F.dxG[d];
         },
         [&](int const d, int const g) -> long { return ( d == 0 and nT > 1 and not C.owns( th, g ) ) ? -1 : g; },
         [&](int const *g, long const *, r3d_poly &piece)
@@ -805,16 +911,55 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, Finite_cells_
         if ( !(mom[0] > 0.) ) return;
 
         index = ( size_t(g[0])*nGrid[1] + size_t(g[1]) )*nGrid[2] + size_t(g[2]);
-        Real const dV = Real(mom[0]);
-        Point centroid( mom[1]/mom[0], mom[2]/mom[0], mom[3]/mom[0] );
-        if (field.density) (*density)[index] += densityValue(densGrad, base, centroid) * dV;
+        double const dV = mom[0];
+        double const cen[3] = { mom[1]/mom[0], mom[2]/mom[0], mom[3]/mom[0] };   // the piece's centroid, vertex-0 frame
+        if (field.density)
+        {
+            double v = dens0;
+            for (int i = 0; i < NO_DIM; ++i) v += densGrad[i] * cen[i];
+            (*density)[index] += Real( v * dV );
+        }
 #ifdef VELOCITY
-        if (field.velocity) (*velocity)[index] += velocityValue(velGrad, base, centroid) * dV;
-        if (field.velocity_gradient) (*velocity_gradient)[index] += velocityGradient(velGrad) * dV;
+        if (field.velocity)
+        {
+            Pvector<Real,noVelComp> pv;
+            for (size_t j = 0; j < noVelComp; ++j)
+            {
+                double v = vel0[j];
+                for (int i = 0; i < NO_DIM; ++i) v += velGrad[i][j] * cen[i];
+                pv[j] = Real( v * dV );
+            }
+            (*velocity)[index] += pv;
+        }
+        if (field.velocity_gradient)
+        {
+            Pvector<Real,noGradComp> pg;
+            for (size_t j = 0; j < noVelComp; ++j)
+                for (size_t i = 0; i < NO_DIM; ++i)
+                    pg[j*NO_DIM+i] = Real( velGrad[i][j] * dV );
+            (*velocity_gradient)[index] += pg;
+        }
 #endif
 #ifdef SCALAR
-        if (field.scalar) (*scalar)[index] += scalarValue(sGrad, base, centroid) * dV;
-        if (field.scalar_gradient) (*scalar_gradient)[index] += scalarGradient(sGrad) * dV;
+        if (field.scalar)
+        {
+            Pvector<Real,noScalarComp> ps;
+            for (size_t j = 0; j < noScalarComp; ++j)
+            {
+                double v = sc0[j];
+                for (int i = 0; i < NO_DIM; ++i) v += sGrad[i][j] * cen[i];
+                ps[j] = Real( v * dV );
+            }
+            (*scalar)[index] += ps;
+        }
+        if (field.scalar_gradient)
+        {
+            Pvector<Real,noScalarGradComp> pg;
+            for (size_t j = 0; j < noScalarComp; ++j)
+                for (size_t i = 0; i < NO_DIM; ++i)
+                    pg[j*NO_DIM+i] = Real( sGrad[i][j] * dV );
+            (*scalar_gradient)[index] += pg;
+        }
 #endif
 #ifdef TEST_PADDING
         if ( dummy.dummyNeighbors ) updateDummyGridCells( index, dummy.incompleteCells_d );
@@ -824,14 +969,14 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, Finite_cells_
 }
 #elif NO_DIM==2 && !defined(MY_SCALAR)
 // ----- exact area average (--exact-average), 2D: the same integral with the triangle clipped
-// against each cell by ps_clip2d.h (area and first moments: the centroid of each piece) -----
+// against each cell by ps_clip2d.h (area and first moments: the centroid of each piece), in the grid frame
+// (TetFrame) with the gradients in double, as the 3D path -----
 // Thread th clips only the cells of its own x planes.
-static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, Finite_cells_iterator &itC, double vertexMatrix[][NO_DIM],
-                                Real basePosition[NO_DIM], Real posMatrixInverse[][NO_DIM], Avg1Dummy const &dummy)
+static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, McCell &mc, double vertexMatrix[][NO_DIM],
+                                TetFrame const &tf, GridFrame const &F, double posInvD[][NO_DIM], Avg1Dummy const &dummy)
 {
     Field const &field = C.field;
     size_t * const &nGrid = C.nGrid;
-    Real * const &dx = C.dx;
     int const nT = C.nT;
     std::vector<Real>                             * const &density = C.grids.density;
 #ifdef VELOCITY
@@ -844,16 +989,18 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, Finite_cells_
 #endif
     size_t index;
 
-    Vertex_handle base = itC->vertex(0);
-    Real densGrad[NO_DIM];
-    densityGrad( itC, posMatrixInverse, densGrad );
+    double densGrad[NO_DIM];
+    densityGradDouble( mc, posInvD, densGrad );
+    double const dens0 = double( mc.v[0]->info().density() );
 #ifdef VELOCITY
-    Real velGrad[NO_DIM][noVelComp];
-    velocityGrad( itC, posMatrixInverse, velGrad );
+    double velGrad[NO_DIM][noVelComp], vel0[noVelComp];
+    velocityGradDouble( mc, posInvD, velGrad );
+    for (size_t j = 0; j < noVelComp; ++j) vel0[j] = double( mc.v[0]->info().velocity(j) );
 #endif
 #ifdef SCALAR
-    Real sGrad[NO_DIM][noScalarComp];
-    scalarGrad( itC, posMatrixInverse, sGrad );
+    double sGrad[NO_DIM][noScalarComp], sc0[noScalarComp];
+    scalarGradDouble( mc, posInvD, sGrad );
+    for (size_t j = 0; j < noScalarComp; ++j) sc0[j] = double( mc.v[0]->info().myScalar()[j] );
 #endif
     double tri[3][2] = { {0., 0.},
                          {vertexMatrix[0][0], vertexMatrix[0][1]},
@@ -870,8 +1017,8 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, Finite_cells_
             if (vertexMatrix[v][d] < lo) lo = vertexMatrix[v][d];
             if (vertexMatrix[v][d] > hi) hi = vertexMatrix[v][d];
         }
-        iLo[d] = int( std::floor( (double(basePosition[d]) + lo) / double(dx[d]) ) );
-        iHi[d] = int( std::floor( (double(basePosition[d]) + hi) / double(dx[d]) ) ) + 1;
+        iLo[d] = tf.cell[d] + int( std::floor( (tf.base[d] + lo) / F.dxG[d] ) );
+        iHi[d] = tf.cell[d] + int( std::floor( (tf.base[d] + hi) / F.dxG[d] ) ) + 1;
         if (iLo[d] < 0) iLo[d] = 0;
         if (iHi[d] > int(nGrid[d])) iHi[d] = int(nGrid[d]);
     }
@@ -884,22 +1031,61 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, Finite_cells_
         double lo[2], hi[2], mom[psClip2d::MOMENTS];
         for (int d = 0; d < 2; ++d)
         {
-            lo[d] = gij[d] * double(dx[d]) - double(basePosition[d]);
-            hi[d] = lo[d] + double(dx[d]);
+            lo[d] = double( gij[d] - tf.cell[d] ) * F.dxG[d] - tf.base[d];
+            hi[d] = lo[d] + F.dxG[d];
         }
         if ( not psClip2d::clipTriangleToCell( tri, lo, hi, mom ) ) continue;
 
         index = size_t(gi)*nGrid[1] + size_t(gj);
-        Real const dV = Real(mom[0]);
-        Point centroid( mom[1]/mom[0], mom[2]/mom[0] );
-        if (field.density) (*density)[index] += densityValue(densGrad, base, centroid) * dV;
+        double const dV = mom[0];
+        double const cen[2] = { mom[1]/mom[0], mom[2]/mom[0] };
+        if (field.density)
+        {
+            double v = dens0;
+            for (int i = 0; i < NO_DIM; ++i) v += densGrad[i] * cen[i];
+            (*density)[index] += Real( v * dV );
+        }
 #ifdef VELOCITY
-        if (field.velocity) (*velocity)[index] += velocityValue(velGrad, base, centroid) * dV;
-        if (field.velocity_gradient) (*velocity_gradient)[index] += velocityGradient(velGrad) * dV;
+        if (field.velocity)
+        {
+            Pvector<Real,noVelComp> pv;
+            for (size_t j = 0; j < noVelComp; ++j)
+            {
+                double v = vel0[j];
+                for (int i = 0; i < NO_DIM; ++i) v += velGrad[i][j] * cen[i];
+                pv[j] = Real( v * dV );
+            }
+            (*velocity)[index] += pv;
+        }
+        if (field.velocity_gradient)
+        {
+            Pvector<Real,noGradComp> pg;
+            for (size_t j = 0; j < noVelComp; ++j)
+                for (size_t i = 0; i < NO_DIM; ++i)
+                    pg[j*NO_DIM+i] = Real( velGrad[i][j] * dV );
+            (*velocity_gradient)[index] += pg;
+        }
 #endif
 #ifdef SCALAR
-        if (field.scalar) (*scalar)[index] += scalarValue(sGrad, base, centroid) * dV;
-        if (field.scalar_gradient) (*scalar_gradient)[index] += scalarGradient(sGrad) * dV;
+        if (field.scalar)
+        {
+            Pvector<Real,noScalarComp> ps;
+            for (size_t j = 0; j < noScalarComp; ++j)
+            {
+                double v = sc0[j];
+                for (int i = 0; i < NO_DIM; ++i) v += sGrad[i][j] * cen[i];
+                ps[j] = Real( v * dV );
+            }
+            (*scalar)[index] += ps;
+        }
+        if (field.scalar_gradient)
+        {
+            Pvector<Real,noScalarGradComp> pg;
+            for (size_t j = 0; j < noScalarComp; ++j)
+                for (size_t i = 0; i < NO_DIM; ++i)
+                    pg[j*NO_DIM+i] = Real( sGrad[i][j] * dV );
+            (*scalar_gradient)[index] += pg;
+        }
 #endif
 #ifdef TEST_PADDING
         if ( dummy.dummyNeighbors ) updateDummyGridCells( index, dummy.incompleteCells_d );
@@ -1024,14 +1210,18 @@ static inline void avg1McTet(Avg1CpuCtx const &C, McCell &mc, double vertexMatri
    deposit adds up -- reached here by a second, independent route (face_sweep.h: every grid plane's section through
    every tetrahedron, clipped to the face squares; a face piece's integral is its centroid value times its area, added
    to the cell below the plane and subtracted from the cell above). It is exact whatever the '_a' deposit was (the
-   exact average, Monte Carlo, the GPU), and the same machinery gives PS-DTFE its mean-flow gradient (P10.3).
+   exact average, Monte Carlo, the GPU), and the same machinery gives PS-DTFE its mean-flow gradient (P10.3). Its
+   geometry is the grid frame's (GridFrame, plan P10.8): the planes' sides are decided on absolute double positions
+   against planes named by their global index, and the gradient is formed in double from the hashed vertex order, so
+   the result is the same in every split.
    acc: gridSize x 9 doubles, the integral of grad v over each cell in velocityGradient()'s layout ([j*3+i] =
    dv_j/dx_i). The x planes are dealt out as in the deposit (thread th adds only to the cells of its own slabs, every
    thread walking every tetrahedron in order), so the sums are bit-identical at any thread count. degenerate (when
    not null) collects the cells a tetrahedron with a zeroed inverse can reach: its velocity is constant there, so its
    faces carry jumps that the per-tetrahedron gradient (0) does not see -- the DTFE_FACE_CHECK comparison skips them. */
-static void avg1FacePass( DT &dt, Box &boxCoordinates, Bbox &fullBox, size_t *nGrid, Real *dx, int const nT,
-                          int const slabW, std::vector<double> &acc, std::vector<unsigned char> *degenerate )
+static void avg1FacePass( DT &dt, GridFrame const &F, Bbox &fullBox, size_t *nGrid, int const nT,
+                          int const slabW, bool const legacyOrder, std::vector<double> &acc,
+                          std::vector<unsigned char> *degenerate )
 {
     size_t const gridSize = nGrid[0]*nGrid[1]*nGrid[2];
     acc.assign( gridSize * noGradComp, 0. );
@@ -1045,40 +1235,41 @@ static void avg1FacePass( DT &dt, Box &boxCoordinates, Bbox &fullBox, size_t *nG
         {
             if ( cellOutsideRegion( dt, itC, fullBox ) )
                 continue;
-            McCell mc = mcVertexOrder( itC, true );          // CGAL's order (base = vertex 0), as the exact average
+            McCell mc = mcVertexOrder( itC, legacyOrder );   // the deposits' vertex order (hashed; CGAL's under DTFE_MC_LEGACY=1), base = vertex 0
             double vertexMatrix[NO_DIM][NO_DIM];
-            int baseGridCell[NO_DIM];
-            Real basePosition[NO_DIM];
-            checkCellPosition( mc, boxCoordinates, dx, vertexMatrix, baseGridCell, basePosition );
-            // the vertices in the region frame, as every tetrahedron sharing one computes it (a float position minus
-            // the float corner is exact in double): the planes' sides are decided on these, so two tetrahedra never
-            // decide a shared face lying in a grid plane differently (face_sweep.h). p: the base-relative frame,
-            // X[v] - X[0] exactly.
+            for (int v = 0; v < NO_DIM; ++v)
+                for (int d = 0; d < NO_DIM; ++d)
+                    vertexMatrix[v][d] = double( mc.v[v+1]->point()[d] ) - double( mc.v[0]->point()[d] );
+            // X: the vertices' ABSOLUTE positions, exact in double. The planes' sides are decided on these against
+            // F.plane(), ONE expression of the global plane index, so every tetrahedron sharing a vertex, in any
+            // sub-domain, computes the same signed distance, and two tetrahedra never decide a shared face lying in a
+            // grid plane differently (face_sweep.h). p: the base-relative frame, X[v] - X[0] exactly.
             double X[4][3], p[4][3];
             for (int v = 0; v < 4; ++v)
                 for (int d = 0; d < 3; ++d)
                 {
-                    X[v][d] = double( mc.v[v]->point()[d] ) - double( boxCoordinates[2*d] );
+                    X[v][d] = double( mc.v[v]->point()[d] );
                     p[v][d] = v == 0 ? 0. : vertexMatrix[v-1][d];
                 }
-            // the grid planes the tetrahedron may own a section of (min <= plane < max, region frame), and its window
-            // of grid cells
+            // the grid planes the tetrahedron may own a section of (min <= plane < max; sub-grid indices), and its
+            // window of grid cells
             int pFirst[3], pLast[3], iLo[3], iHi[3];
             bool crosses = false;
             for (int d = 0; d < 3; ++d)
             {
                 double mn = X[0][d], mx = X[0][d];
                 for (int v = 1; v < 4; ++v) { mn = std::min( mn, X[v][d] ); mx = std::max( mx, X[v][d] ); }
-                double const h = double( dx[d] );
-                pFirst[d] = int( std::floor( mn / h ) );
-                if ( pFirst[d] * h < mn ) ++pFirst[d];
-                pLast[d] = int( std::floor( mx / h ) );
-                if ( pLast[d] * h >= mx ) --pLast[d];
-                pFirst[d] = std::max( 0, pFirst[d] );
-                pLast[d] = std::min( int(nGrid[d]), pLast[d] );
+                long g0 = F.cellOf( mn, d );                  // the first plane at or above mn
+                while ( F.plane( g0, d ) < mn ) ++g0;
+                while ( F.plane( g0 - 1, d ) >= mn ) --g0;
+                long g1 = F.cellOf( mx, d );                  // the last plane below mx
+                while ( F.plane( g1, d ) >= mx ) --g1;
+                while ( F.plane( g1 + 1, d ) < mx ) ++g1;
+                pFirst[d] = int( std::max( 0L, g0 - F.offset[d] ) );
+                pLast[d] = int( std::min( long(nGrid[d]), g1 - F.offset[d] ) );
                 crosses = crosses or pFirst[d] <= pLast[d];
-                iLo[d] = int( std::floor( mn / h ) );
-                iHi[d] = int( std::floor( mx / h ) ) + 1;
+                iLo[d] = int( F.cellOf( mn, d ) - F.offset[d] );
+                iHi[d] = int( F.cellOf( mx, d ) - F.offset[d] ) + 1;
             }
             // a tetrahedron owning no section adds nothing to any face (its cell's faces lie outside it)
             if ( not crosses ) continue;
@@ -1090,17 +1281,18 @@ static void avg1FacePass( DT &dt, Box &boxCoordinates, Bbox &fullBox, size_t *nG
                 for (int gi = a; gi < b and not mine; ++gi) mine = owns( th, gi );
                 if ( not mine ) continue;
             }
-            Real posMatrixInverse[NO_DIM][NO_DIM];
-            matrixInverse( vertexMatrix, posMatrixInverse );
-            Real velGrad[NO_DIM][noVelComp];
-            velocityGrad( mc, posMatrixInverse, velGrad );
+            // the gradient in double, from the double inverse (plan P10.8: not the float rounding of the labelling)
+            double posInv[NO_DIM][NO_DIM];
+            matrixInverseDouble( vertexMatrix, posInv );
+            double velGrad[NO_DIM][noVelComp];
+            velocityGradDouble( mc, posInv, velGrad );
             double vb[noVelComp];
             for (size_t j = 0; j < noVelComp; ++j) vb[j] = double( mc.v[0]->info().velocity(j) );
             if ( degenerate )
             {
                 bool zero = true;
                 for (int i = 0; i < 3 and zero; ++i)
-                    for (int j = 0; j < 3 and zero; ++j) zero = posMatrixInverse[i][j] == Real(0);
+                    for (int j = 0; j < 3 and zero; ++j) zero = posInv[i][j] == 0.;
                 if ( zero )
                     for (int i = std::max( 0, iLo[0] - 1 ); i < std::min( int(nGrid[0]), iHi[0] + 1 ); ++i)
                         if ( owns( th, i ) )
@@ -1119,7 +1311,7 @@ static void avg1FacePass( DT &dt, Box &boxCoordinates, Bbox &fullBox, size_t *nG
                     // an x plane: its two cells' slabs; a y or z plane: its strips' (in-plane u = x, below)
                     if ( a == 0 and nT > 1 and not ( ( pl > 0 and owns( th, pl - 1 ) ) or ( pl < int(nGrid[0]) and owns( th, pl ) ) ) )
                         continue;
-                    double const P = pl * double(dx[a]);
+                    double const P = F.plane( long(pl) + F.offset[a], a );
                     double dist[4];
                     for (int v = 0; v < 4; ++v) dist[v] = X[v][a] - P;
                     faceSweep::Polygon sec;
@@ -1129,8 +1321,8 @@ static void avg1FacePass( DT &dt, Box &boxCoordinates, Bbox &fullBox, size_t *nG
                         [&](int const k, int const g, double &blo, double &bhi)
                         {
                             int const ax = k == 0 ? u : w;
-                            blo = g * double(dx[ax]) - X[0][ax];
-                            bhi = blo + double(dx[ax]);
+                            blo = F.plane( long(g) + F.offset[ax], ax ) - X[0][ax];
+                            bhi = F.plane( long(g) + 1 + F.offset[ax], ax ) - X[0][ax];
                         },
                         [&](int const k, int const g) -> long
                         { return ( k == 0 and u == 0 and nT > 1 and not owns( th, g ) ) ? -1 : g; },
@@ -1138,12 +1330,12 @@ static void avg1FacePass( DT &dt, Box &boxCoordinates, Bbox &fullBox, size_t *nG
                         {
                             double q[3];
                             q[a] = c; q[u] = m[1] / m[0]; q[w] = m[2] / m[0];
-                            double F[noVelComp];
+                            double Fj[noVelComp];   // the piece's flux of each velocity component
                             for (size_t j = 0; j < noVelComp; ++j)
                             {
                                 double vj = vb[j];
-                                for (int i = 0; i < 3; ++i) vj += double( velGrad[i][j] ) * q[i];
-                                F[j] = vj * m[0];
+                                for (int i = 0; i < 3; ++i) vj += velGrad[i][j] * q[i];
+                                Fj[j] = vj * m[0];
                             }
                             int cell[3];
                             cell[u] = g[0]; cell[w] = g[1];
@@ -1154,7 +1346,7 @@ static void avg1FacePass( DT &dt, Box &boxCoordinates, Bbox &fullBox, size_t *nG
                                 if ( nT > 1 and not owns( th, cell[0] ) ) continue;
                                 double *out = &acc[flat( cell[0], cell[1], cell[2] ) * noGradComp];
                                 for (size_t j = 0; j < noVelComp; ++j)
-                                    out[j*NO_DIM + size_t(a)] += side == 0 ? F[j] : -F[j];
+                                    out[j*NO_DIM + size_t(a)] += side == 0 ? Fj[j] : -Fj[j];
                             }
                         } );
                 }
@@ -1196,6 +1388,38 @@ void interpolateGrid_averaged_1(DT &dt,
 #elif NO_DIM==3
     Bbox fullBox( boxCoordinates[0], boxCoordinates[2], boxCoordinates[4], boxCoordinates[1], boxCoordinates[3], boxCoordinates[5] );
 #endif
+    // The exact average's grid frame (GridFrame, plan P10.8) and its prefilter box: the region widened by 1e-6 of its
+    // length on each side, so that a tetrahedron reaching into the region's first or last cell by less than the float
+    // rounding of the region's corner is not dropped before the frame's integer cells decide (a tetrahedron outside
+    // the sub-grid deposits nothing).
+    GridFrame const frame( userOptions );
+    if ( exactAvg )   // the frame must be the grid this call fills: its sub-grid's planes at the region's faces
+        for (int d=0; d<NO_DIM; ++d)
+        {
+            double const lo = frame.plane( frame.offset[d], d ), hi = frame.plane( frame.offset[d] + long(nGrid[d]), d );
+            if ( std::fabs( lo - double(boxCoordinates[2*d]) ) > 1e-3 * frame.dxG[d]
+                 or std::fabs( hi - double(boxCoordinates[2*d+1]) ) > 1e-3 * frame.dxG[d] )
+            {
+                MESSAGE::Error error;
+                error << "The exact average's grid frame does not match this region: axis " << d << " spans [" << lo
+                      << ", " << hi << "] in the frame but [" << boxCoordinates[2*d] << ", " << boxCoordinates[2*d+1]
+                      << "] in the region (user_options.h gridFrame, subpartition.h copySubgridInformation)." << MESSAGE::EndError;
+            }
+        }
+    Bbox fullBoxExact = fullBox;
+    {
+        // the margin scales with the coordinates' magnitude (the float rounding of a corner does), not only the length
+        double m[NO_DIM];
+        for (int d=0; d<NO_DIM; ++d)
+            m[d] = 1e-6 * std::max( double( boxLength[d] ), std::max( std::fabs( double(boxCoordinates[2*d]) ), std::fabs( double(boxCoordinates[2*d+1]) ) ) );
+#if NO_DIM==2
+        fullBoxExact = Bbox( fullBox.xmin() - m[0], fullBox.ymin() - m[1], fullBox.xmax() + m[0], fullBox.ymax() + m[1] );
+#elif NO_DIM==3
+        fullBoxExact = Bbox( fullBox.xmin() - m[0], fullBox.ymin() - m[1], fullBox.zmin() - m[2],
+                             fullBox.xmax() + m[0], fullBox.ymax() + m[1], fullBox.zmax() + m[2] );
+#endif
+    }
+    Bbox depositBox = exactAvg ? fullBoxExact : fullBox;   // the deposits' prefilter (cellOutsideRegion)
     
     
     // output field vectors
@@ -1221,13 +1445,28 @@ void interpolateGrid_averaged_1(DT &dt,
         warning << "Because there are less than " << NO_DIM+1 << " vertices in the Delaunay triangulation there is no cell and hence there is no information that can be used to interpolate the fields to a grid. All field values will be initialized to 0.\n" << MESSAGE::EndWarning;
         return;
     }
+#if NO_DIM==3 && defined(VELOCITY) && !defined(MY_SCALAR)
+    // --face-gradient (the default since 2026-11-09): the face pass at the end supplies the velocity gradient and
+    // overwrites the deposit's, so the deposits -- the CPU loops and the GPU kernels, which read this 'field' --
+    // skip their per-tetrahedron gradient (9 of the 13 components of a velocity run; the gradient's share of
+    // the deposit). DTFE_FACE_CHECK=1 keeps it: the check compares the two. The grids were zeroed above with
+    // the full field; the flag is restored before the face pass, whose output avg1Normalize then divides.
+    bool const faceSuppliesGradient = userOptions.faceGradient and field.velocity_gradient and not Env::flag( "DTFE_FACE_CHECK" );
+    if ( faceSuppliesGradient ) field.velocity_gradient = false;
+#endif
 
 
 
     Real dx[NO_DIM];        // grid spacing along each axis
     for (size_t i=0; i<NO_DIM; ++i)
         dx[i] = boxLength[i] / nGrid[i];
-    Real const gridCellVolume = (NO_DIM==2) ? (dx[0]*dx[1]) : (dx[0]*dx[1]*dx[2]);
+    Real gridCellVolume = (NO_DIM==2) ? (dx[0]*dx[1]) : (dx[0]*dx[1]*dx[2]);
+    if ( exactAvg )   // the grid frame's cell volume: the same in every sub-domain (plan P10.8)
+    {
+        double v = 1.;
+        for (int d=0; d<NO_DIM; ++d) v *= frame.dxG[d];
+        gridCellVolume = Real(v);
+    }
 #ifdef TEST_PADDING
     vector<size_t> incompleteCells_d;// grid cells with a dummy-point error in the density field
     vector<size_t> incompleteCells;  // grid cells with a dummy-point error in the other fields
@@ -1245,11 +1484,13 @@ void interpolateGrid_averaged_1(DT &dt,
     //     exactly, so a tetrahedron's mass and momentum are exact and only their split over the grid cells is
     //     sampled. The shifted weights lambda_ij + c_j stay >= 0 for n <= 34; beyond, the most negative is -0.013
     //     (n = 88), which gives a negative sample only at a 70x density contrast across one tetrahedron.
-    // tests/dtfe_mc_average_check.sh checks the mass, the momentum and the split invariance. --exact-average keeps
-    // CGAL's order. DTFE_MC_LEGACY=1 selects the uncentred CGAL-order realization (A/B, and to reproduce grids
-    // made with it).
+    // tests/dtfe_mc_average_check.sh checks the mass, the momentum and the split invariance. --exact-average takes
+    // the same vertex order (plan P10.8): its per-tetrahedron gradient is formed from vertex 0, in float on the GPU,
+    // and CGAL's order -- which differs between the triangulations of two splits -- moved the exact grids by 2.7e-5
+    // of their rms between a 3^3 and a 6^3 plan (the P10 status). DTFE_MC_LEGACY=1 selects CGAL's order for both
+    // (and the uncentred Monte-Carlo realization: A/B, and to reproduce grids made with it).
     bool const mcLegacy = Env::flag( "DTFE_MC_LEGACY" );
-    bool const legacyOrder = exactAvg or mcLegacy;
+    bool const legacyOrder = mcLegacy;
     bool const centreMC = not exactAvg and not mcLegacy;
     if ( mcLegacy and not exactAvg )
     {
@@ -1310,6 +1551,7 @@ void interpolateGrid_averaged_1(DT &dt,
 
         std::vector<float>    tetVerts, tetDens, tetVels, tetScal, tetVols;
         std::vector<uint32_t> tetCnts, tetFlats, tetKeys;
+        std::vector<int32_t>  tetCells;
         tetVerts.reserve( nKept*12 );
         tetKeys.reserve( nKept );
         // Morton key of a grid cell (sub-grid coordinates clamped into the grid; axes coarsened to
@@ -1334,24 +1576,39 @@ void interpolateGrid_averaged_1(DT &dt,
         tetVols.reserve( nKept );
         tetCnts.reserve( nKept );
         tetFlats.reserve( nKept );
+        tetCells.reserve( nKept*NO_DIM );
 
         for (Finite_cells_iterator itC = dt.finite_cells_begin(); itC != dt.finite_cells_end(); ++itC)
         {
-            if ( cellOutsideRegion(dt, itC, fullBox) )
+            if ( cellOutsideRegion(dt, itC, depositBox) )
                 continue;
 
-            // the CPU loop's vertex order (mcVertexOrder: the hashed order for the sampled average, CGAL's
-            // under --exact-average); the kernels take vertex 0 as the base, in the order given
+            // the CPU loop's vertex order (mcVertexOrder: the hashed order; DTFE_MC_LEGACY=1 keeps CGAL's); the
+            // kernels take vertex 0 as the base, in the order given
             McCell mc = mcVertexOrder( itC, legacyOrder );
             double vertexMatrix[NO_DIM][NO_DIM];
             int baseGridCell[NO_DIM];
             Real basePosition[NO_DIM];
-            int cellPosition = checkCellPosition( mc, boxCoordinates, dx, vertexMatrix, baseGridCell, basePosition );
+            TetFrame tf{};
+            bool single;
+            if ( exactAvg )
+            {   // the grid frame (plan P10.8): the base cell's corner is this tetrahedron's origin
+                tf = tetFrame( mc, frame, vertexMatrix );
+                single = tf.single;
+                for (int d=0; d<NO_DIM; ++d)
+                {
+                    baseGridCell[d] = tf.cell[d];
+                    basePosition[d] = Real( double(mc.v[0]->point()[d]) - double(boxCoordinates[2*d]) );   // (TEST_PADDING's sampling below)
+                }
+            }
+            else
+                single = checkCellPosition( mc, boxCoordinates, dx, vertexMatrix, baseGridCell, basePosition ) == SINGLE_GRID_CELL;
+            (void)basePosition;
             Real cellVolume = volume( dt, itC );
 
             size_t index;
             uint32_t cnt = 0, flat = 0;
-            if ( cellPosition==SINGLE_GRID_CELL and isGridCellIndex( baseGridCell, nGrid, &index ) )
+            if ( single and isGridCellIndex( baseGridCell, nGrid, &index ) )
                 flat = uint32_t(index);   // cnt 0 = deposit the centroid value at 'flat'
             else
                 cnt = uint32_t( sampleCount( cellVolume ) );
@@ -1369,11 +1626,15 @@ void interpolateGrid_averaged_1(DT &dt,
                 for (int j=0; j<NO_DIM; ++j) c += cw[j] * (f[j+1] - f[0]);
                 return c; };
 
-            // vertex positions relative to the region's lower corner (subtracted in double, so
-            // the narrowed floats match the CPU's Real basePosition exactly)
+            // vertex positions: the exact average's relative to its base cell's corner (tetFrame, in double, so the
+            // narrowed floats are the same in every sub-domain, plan P10.8), with that cell beside them; the Monte-Carlo
+            // average's relative to the region's lower corner (subtracted in double, so the narrowed floats match the
+            // CPU's Real basePosition exactly), cell 0
             for (int v=0; v<NO_DIM+1; ++v)
                 for (int d=0; d<NO_DIM; ++d)
-                    tetVerts.push_back( float( double(mc.v[v]->point()[d]) - double(boxCoordinates[2*d]) ) );
+                    tetVerts.push_back( float( double(mc.v[v]->point()[d]) - ( exactAvg ? tf.corner[d] : double(boxCoordinates[2*d]) ) ) );
+            for (int d=0; d<NO_DIM; ++d)
+                tetCells.push_back( exactAvg ? int32_t(tf.cell[d]) : 0 );
             if ( centreThis )
             {
                 double f[NO_DIM+1];
@@ -1449,9 +1710,13 @@ void interpolateGrid_averaged_1(DT &dt,
         }
 
         Avg1GpuCtx gpu{ userOptions, message, nGrid, dx, gridSize, exactAvg, fDen, fVel, fGrad, fScal, fSGrad, needVel,
-                        needScal, mortonShift, tetVerts, tetDens, tetVels, tetScal, tetVols, tetCnts, tetFlats, tetKeys };
+                        needScal, mortonShift, tetVerts, tetDens, tetVels, tetScal, tetVols, tetCnts, tetFlats, tetKeys,
+                        tetCells, { exactAvg ? frame.dxG[0] : double(dx[0]), exactAvg ? frame.dxG[1] : double(dx[1]),
+                                    exactAvg ? frame.dxG[2] : double(dx[2]) } };
         avg1MortonOrder( gpu );
+        Timer tGpu; tGpu.start();
         metalDeposited = avg1GpuDispatch( gpu, grids, quasiRandomNumbers_buf );
+        printComputationTime( &tGpu, &userOptions, "GPU deposit (upload, dispatch, read-back)" );   // (phase_totals.h)
     }
 #else
     avg1NoGpuWarning( userOptions );
@@ -1500,7 +1765,7 @@ void interpolateGrid_averaged_1(DT &dt,
             message.updateProgress( ++prev );
 
 
-        if ( cellOutsideRegion( dt, itC, fullBox) )
+        if ( cellOutsideRegion( dt, itC, depositBox) )
             continue;
 
         // threads (above), the Monte-Carlo average: a first test on the cell's own vertices, before the vertex order
@@ -1533,11 +1798,20 @@ void interpolateGrid_averaged_1(DT &dt,
 #endif
 
 
-        McCell mc = mcVertexOrder( itC, legacyOrder );   // vertex order (base = mc.v[0]); CGAL's under --exact-average
+        McCell mc = mcVertexOrder( itC, legacyOrder );   // vertex order (base = mc.v[0]): the hashed one; CGAL's under DTFE_MC_LEGACY=1
         double vertexMatrix[NO_DIM][NO_DIM]; // vertex differences of the Delaunay cell
         int baseGridCell[NO_DIM];  // grid cell containing the base point
-        Real basePosition[NO_DIM]; // base point position relative to the box's lower-left corner
-        int cellPosition = checkCellPosition( mc, boxCoordinates, dx, vertexMatrix, baseGridCell, basePosition );
+        Real basePosition[NO_DIM]; // base point position relative to the box's lower-left corner (the Monte-Carlo average)
+        TetFrame tf{};             // the exact average's frame (plan P10.8): the base cell and the position in it
+        bool single;
+        if ( exactAvg )
+        {
+            tf = tetFrame( mc, frame, vertexMatrix );
+            single = tf.single;
+            for (int d=0; d<NO_DIM; ++d) baseGridCell[d] = tf.cell[d];
+        }
+        else
+            single = checkCellPosition( mc, boxCoordinates, dx, vertexMatrix, baseGridCell, basePosition ) == SINGLE_GRID_CELL;
         size_t index;
 
         // threads (above): a cell none of whose x planes this thread owns -- the single grid cell it falls in, or
@@ -1548,7 +1822,7 @@ void interpolateGrid_averaged_1(DT &dt,
         bool mcSlabs = false;   // a Monte-Carlo cell of the threaded loop (avg1McTet<true>)
         if ( nT > 1 )
         {
-            if ( cellPosition==SINGLE_GRID_CELL and isGridCellIndex( baseGridCell, nGrid, &index ) )
+            if ( single and isGridCellIndex( baseGridCell, nGrid, &index ) )
             {
                 if ( not cpu.owns( th, baseGridCell[0] ) ) continue;
             }
@@ -1567,8 +1841,17 @@ void interpolateGrid_averaged_1(DT &dt,
                     lo -= eps;
                     hi += eps;
                 }
-                int a = int( std::floor( (double(basePosition[0]) + lo) / double(dx[0]) ) );
-                int b = int( std::floor( (double(basePosition[0]) + hi) / double(dx[0]) ) ) + 1;
+                int a, b;
+                if ( exactAvg )
+                {   // the exact path's own window expression (avg1ExactTet), in the grid frame
+                    a = tf.cell[0] + int( std::floor( (tf.base[0] + lo) / frame.dxG[0] ) );
+                    b = tf.cell[0] + int( std::floor( (tf.base[0] + hi) / frame.dxG[0] ) ) + 1;
+                }
+                else
+                {
+                    a = int( std::floor( (double(basePosition[0]) + lo) / double(dx[0]) ) );
+                    b = int( std::floor( (double(basePosition[0]) + hi) / double(dx[0]) ) ) + 1;
+                }
                 if (a < 0) a = 0;
                 if (b > int(nGrid[0])) b = int(nGrid[0]);
                 bool mine = false;
@@ -1578,22 +1861,30 @@ void interpolateGrid_averaged_1(DT &dt,
         }
 
         Real cellVolume = volume( dt, itC );
+#ifndef MY_SCALAR
+        // --exact-average: the inverse and the gradients in double (plan P10.8) and the grid frame's windows. A cell
+        // inside one grid cell adds its centroid value times its volume (exact for the linear interpolant); the others
+        // the analytic cell∩tet (3D r3d) / cell∩triangle (2D ps_clip2d) integration.
+        if ( exactAvg )
+        {
+            double posInvD[NO_DIM][NO_DIM];
+            matrixInverseDouble( vertexMatrix, posInvD );
+            if ( single and isGridCellIndex( baseGridCell, nGrid, &index ) )
+                avg1SingleCellExact( cpu, mc, posInvD, cellVolume, index, dummy );
+            else
+                avg1ExactTet( cpu, th, mc, vertexMatrix, tf, frame, posInvD, dummy );
+            continue;
+        }
+#endif
         Real posMatrixInverse[NO_DIM][NO_DIM];  // inverse vertex position-difference matrix
         if ( not mcSlabs )   // (avg1McTet<true> inverts it for a cell with a sample of this thread's only)
             matrixInverse( vertexMatrix, posMatrixInverse );
 
         // cell fits in one grid cell -> add its centroid value times volume, no MC sampling needed
 #ifndef MY_SCALAR
-        if ( cellPosition==SINGLE_GRID_CELL and isGridCellIndex( baseGridCell, nGrid, &index ) )
+        if ( single and isGridCellIndex( baseGridCell, nGrid, &index ) )
         {
             avg1SingleCell( cpu, mc, posMatrixInverse, cellVolume, index, dummy );
-            continue;
-        }
-
-        // --exact-average: analytic cell∩tet (3D r3d) / cell∩triangle (2D ps_clip2d) integration
-        if ( exactAvg )
-        {
-            avg1ExactTet( cpu, th, itC, vertexMatrix, basePosition, posMatrixInverse, dummy );
             continue;
         }
 #endif
@@ -1646,6 +1937,7 @@ void interpolateGrid_averaged_1(DT &dt,
 #if NO_DIM==3 && defined(VELOCITY) && !defined(MY_SCALAR)
     // --face-gradient: the velocity gradient's cell integrals from the faces (avg1FacePass) replace the deposit's;
     // DTFE_FACE_CHECK=1 first compares them (one 'FACE-CHECK' line on stderr per call, i.e. per sub-domain)
+    if ( faceSuppliesGradient ) field.velocity_gradient = true;   // (the deposits skipped it; see the top)
     if ( userOptions.faceGradient and field.velocity_gradient )
     {
         int const nTf = exactAverageThreads();
@@ -1653,7 +1945,9 @@ void interpolateGrid_averaged_1(DT &dt,
         bool const check = Env::flag( "DTFE_FACE_CHECK" );
         std::vector<double> acc;
         std::vector<unsigned char> degen;
-        avg1FacePass( dt, boxCoordinates, fullBox, nGrid, dx, nTf, slabWf, acc, check ? &degen : nullptr );
+        Timer tFace; tFace.start();
+        avg1FacePass( dt, frame, fullBoxExact, nGrid, nTf, slabWf, legacyOrder, acc, check ? &degen : nullptr );
+        printComputationTime( &tFace, &userOptions, "face gradient pass (--face-gradient)" );   // (phase_totals.h)
         if ( check )
         {
             // relative to the rms of the deposit's integrals over all cells and components

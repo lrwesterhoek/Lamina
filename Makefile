@@ -277,10 +277,10 @@ ps_gpu_mode_check:
 .PHONY: dtfe_gpu_mode_check
 dtfe_gpu_mode_check:
 	@$(MKDIR_P) $(OBJ_DIR)
-	@if [ ! -f $(OBJ_DIR)/.gpu_mode_$(GPU_MODE) ] || [ ! -f $(OBJ_DIR)/.dim_$(DIM) ] || [ ! -f $(OBJ_DIR)/.prec_$(PRECISION) ] || [ ! -f $(OBJ_DIR)/.deflate_$(HAVE_LIBDEFLATE) ] || [ ! -f $(OBJ_DIR)/$(FLAGS_STAMP) ] || { [ -n "$(FPC_STAMP)" ] && [ ! -f $(OBJ_DIR)/$(FPC_STAMP) ]; }; then \
+	@if [ ! -f $(OBJ_DIR)/.gpu_mode_$(GPU_MODE) ] || [ ! -f $(OBJ_DIR)/.dim_$(DIM) ] || [ ! -f $(OBJ_DIR)/.prec_$(PRECISION) ] || [ ! -f $(OBJ_DIR)/.tbb_$(TBB_STD) ] || [ ! -f $(OBJ_DIR)/.deflate_$(HAVE_LIBDEFLATE) ] || [ ! -f $(OBJ_DIR)/$(FLAGS_STAMP) ] || { [ -n "$(FPC_STAMP)" ] && [ ! -f $(OBJ_DIR)/$(FPC_STAMP) ]; }; then \
 		echo ">> DTFE build mode is now '$(GPU_MODE)', $(DIM)D, $(PRECISION), $(BUILD_MODE) (flags $(FLAGS_SUM)), libdeflate=$(HAVE_LIBDEFLATE)$(if $(FPC_STAMP),$(comma) no FMA contraction); wiping $(OBJ_DIR) to avoid mixed objects"; \
-		rm -f $(OBJ_DIR)/*$(OBJ_EXT) $(OBJ_DIR)/*.d $(OBJ_DIR)/dtfe_deposit_msl.h $(OBJ_DIR)/.gpu_mode_* $(OBJ_DIR)/.dim_* $(OBJ_DIR)/.prec_* $(OBJ_DIR)/.deflate_* $(OBJ_DIR)/.fpc_* $(OBJ_DIR)/.flags_* $(OBJ_DIR)/.metal_mode_* $(OBJ_DIR)/.build_mode; \
-		touch $(OBJ_DIR)/.gpu_mode_$(GPU_MODE) $(OBJ_DIR)/.dim_$(DIM) $(OBJ_DIR)/.prec_$(PRECISION) $(OBJ_DIR)/.deflate_$(HAVE_LIBDEFLATE) $(OBJ_DIR)/$(FLAGS_STAMP) $(if $(FPC_STAMP),$(OBJ_DIR)/$(FPC_STAMP)); \
+		rm -f $(OBJ_DIR)/*$(OBJ_EXT) $(OBJ_DIR)/*.d $(OBJ_DIR)/dtfe_deposit_msl.h $(OBJ_DIR)/.gpu_mode_* $(OBJ_DIR)/.dim_* $(OBJ_DIR)/.prec_* $(OBJ_DIR)/.tbb_* $(OBJ_DIR)/.deflate_* $(OBJ_DIR)/.fpc_* $(OBJ_DIR)/.flags_* $(OBJ_DIR)/.metal_mode_* $(OBJ_DIR)/.build_mode; \
+		touch $(OBJ_DIR)/.gpu_mode_$(GPU_MODE) $(OBJ_DIR)/.dim_$(DIM) $(OBJ_DIR)/.prec_$(PRECISION) $(OBJ_DIR)/.tbb_$(TBB_STD) $(OBJ_DIR)/.deflate_$(HAVE_LIBDEFLATE) $(OBJ_DIR)/$(FLAGS_STAMP) $(if $(FPC_STAMP),$(OBJ_DIR)/$(FPC_STAMP)); \
 		printf '%s' "$(strip $(GPU_BUILD_ARG) $(PREC_BUILD_ARG) $(DIM_BUILD_ARG))" > $(OBJ_DIR)/.build_mode; \
 	fi
 
@@ -474,6 +474,19 @@ else
     PS_TBB_LIBS  :=
     TBB_BUILD_ARG := $(if $(filter 0,$(TBB)),TBB=0,)
 endif
+# TBB_STD=1: the same parallel insertion in the STANDARD binaries (DTFE, DTFE-double, DTFE-2d and the library), for
+# the measurement of docs/cleanup-plan.md P11 (the standard binary's clustered Eulerian points built 4.5x SLOWER in
+# parallel on the demo); its data structure drops Fast_location, so o/ is stamped and wiped on a toggle. Off by
+# default; needs the tbb package like TBB=1. DTFE_TRIANGULATION_THREADS=N or '--parallel-triangulation' turn the
+# insert on at run time, as for PS-DTFE.
+TBB_STD ?= $(TBB_PS)
+ifeq ($(TBB_STD),1)
+    OPTIONS      += -DPARALLEL_TRIANGULATION -DCGAL_LINKED_WITH_TBB
+    INCLUDES     += $(call sysinc,$(TBB_PATH)/include)
+    STD_TBB_LIBS := -L$(TBB_PATH)/lib -ltbb -ltbbmalloc
+else
+    STD_TBB_LIBS :=
+endif
 
 # Platform-specific OpenMP settings only
 ifeq ($(PLATFORM),macos)
@@ -590,7 +603,7 @@ DTFE: dtfe_gpu_mode_check
 
 DTFE-build: set_directories $(OBJ_DIR)/DTFE$(OBJ_EXT) $(OBJ_DIR)/triangulation$(OBJ_EXT) $(OBJ_DIR)/main$(OBJ_EXT) $(OBJ_DIR)/kdtree2$(OBJ_EXT) $(OBJ_DIR)/r3d$(OBJ_EXT) $(DTFE_CC_OBJS) $(IO_CC_OBJS) $(TRIANG_CC_OBJS) $(DTFE_GPU_OBJS) Makefile
 	$(CC) $(COMPILE_FLAGS) $(BUILD_INFO_FLAGS) -o $(OBJ_DIR)/build_info$(OBJ_EXT) -c $(SRC)/build_info.cc
-	$(CC) $(COMPILE_FLAGS) $(OBJ_DIR)/DTFE$(OBJ_EXT) $(OBJ_DIR)/triangulation$(OBJ_EXT) $(OBJ_DIR)/main$(OBJ_EXT) $(OBJ_DIR)/kdtree2$(OBJ_EXT) $(OBJ_DIR)/r3d$(OBJ_EXT) $(OBJ_DIR)/build_info$(OBJ_EXT) $(DTFE_CC_OBJS) $(IO_CC_OBJS) $(TRIANG_CC_OBJS) $(DTFE_GPU_OBJS) $(DTFE_LIB) $(DTFE_GPU_LIBS) -o $(BIN_DIR)/DTFE$(BIN_SUFFIX)$(EXE_EXT)
+	$(CC) $(COMPILE_FLAGS) $(OBJ_DIR)/DTFE$(OBJ_EXT) $(OBJ_DIR)/triangulation$(OBJ_EXT) $(OBJ_DIR)/main$(OBJ_EXT) $(OBJ_DIR)/kdtree2$(OBJ_EXT) $(OBJ_DIR)/r3d$(OBJ_EXT) $(OBJ_DIR)/build_info$(OBJ_EXT) $(DTFE_CC_OBJS) $(IO_CC_OBJS) $(TRIANG_CC_OBJS) $(DTFE_GPU_OBJS) $(DTFE_LIB) $(DTFE_GPU_LIBS) $(STD_TBB_LIBS) -o $(BIN_DIR)/DTFE$(BIN_SUFFIX)$(EXE_EXT)
 
 
 $(OBJ_DIR)/main$(OBJ_EXT): $(addprefix $(SRC)/, $(MAIN_SOURCES)) Makefile
@@ -831,7 +844,7 @@ library-build: set_directories set_directories_2 $(addprefix $(SRC)/, $(LIB_FILE
 	$(CC) $(COMPILE_FLAGS) -fPIC $(DTFE_INC) -o $(OBJ_DIR)/web_fields_l$(OBJ_EXT) -c $(SRC)/web_fields.cc
 	$(CC) $(COMPILE_FLAGS) -fPIC $(DTFE_INC) -o $(OBJ_DIR)/auto_tune_l$(OBJ_EXT) -c $(SRC)/auto_tune.cc
 	$(CC) $(COMPILE_FLAGS) -fPIC $(DTFE_INC) -o $(OBJ_DIR)/scratch_alloc_stub_l$(OBJ_EXT) -c $(SRC)/scratch_alloc_stub.cc
-	$(CC) $(COMPILE_FLAGS) -shared $(OBJ_DIR)/DTFE_l$(OBJ_EXT) $(OBJ_DIR)/triangulation_l$(OBJ_EXT) $(OBJ_DIR)/kdtree2_l$(OBJ_EXT) $(OBJ_DIR)/r3d$(OBJ_EXT) $(OBJ_DIR)/scratch_alloc_stub_l$(OBJ_EXT) $(DTFE_CC_LIB_OBJS) $(IO_CC_LIB_OBJS) $(TRIANG_CC_LIB_OBJS) $(DTFE_GPU_L_OBJS) $(DTFE_LIB) $(DTFE_GPU_LIBS) -o $(LIB_DIR)/libDTFE$(SHARED_EXT)
+	$(CC) $(COMPILE_FLAGS) -shared $(OBJ_DIR)/DTFE_l$(OBJ_EXT) $(OBJ_DIR)/triangulation_l$(OBJ_EXT) $(OBJ_DIR)/kdtree2_l$(OBJ_EXT) $(OBJ_DIR)/r3d$(OBJ_EXT) $(OBJ_DIR)/scratch_alloc_stub_l$(OBJ_EXT) $(DTFE_CC_LIB_OBJS) $(IO_CC_LIB_OBJS) $(TRIANG_CC_LIB_OBJS) $(DTFE_GPU_L_OBJS) $(DTFE_LIB) $(DTFE_GPU_LIBS) $(STD_TBB_LIBS) -o $(LIB_DIR)/libDTFE$(SHARED_EXT)
 
 
 clean:

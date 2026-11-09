@@ -143,6 +143,66 @@ inline Pvector<Real,noScalarGradComp> scalarGradient(Real sGrad[][noScalarComp])
 
 
 
+// The gradients in DOUBLE, for the exact-average deposits (averaged_interpolation_1.cc, plan P10.8): the vertex
+// differences are exact in double for float data, the inverse is matrixInverseDouble's, and the products are rounded
+// once where the caller narrows them, so the result does not follow the float rounding of CGAL's vertex labelling
+// (which differs between the triangulations of two splits: at TNG100 z = 0 the float gradients of the same
+// tetrahedra differed by 2.7e-5 of their rms between a 3^3 and a 6^3 plan, up to 7.6e-3 in flat ones).
+template <typename Cell>
+inline void densityGradDouble(Cell &cell,
+                              double posMatrixInverse[][NO_DIM],
+                              double *densGrad)
+{
+    double dens[NO_DIM];
+    for (int i=0; i<NO_DIM; ++i)
+        dens[i] = double( cell->vertex(i+1)->info().density() ) - double( cell->vertex(0)->info().density() );
+    for (int i=0; i<NO_DIM; ++i)
+    {
+        double s = 0.;
+        for (int j=0; j<NO_DIM; ++j)
+            s += posMatrixInverse[i][j] * dens[j];
+        densGrad[i] = s;
+    }
+}
+template <typename Cell>
+inline void velocityGradDouble(Cell &cell,
+                               double posMatrixInverse[][NO_DIM],
+                               double velGrad[][noVelComp])
+{
+    double temp[NO_DIM][noVelComp];
+    for (size_t v = 0; v<NO_DIM; ++v)
+        for (size_t i=0; i<noVelComp; ++i)
+            temp[v][i] = double( cell->vertex(v+1)->info().velocity(i) ) - double( cell->vertex(0)->info().velocity(i) );
+    for (int i=0; i<NO_DIM; ++i)
+        for (size_t j=0; j<noVelComp; ++j)
+        {
+            double s = 0.;
+            for (int k=0; k<NO_DIM; ++k)
+                s += posMatrixInverse[i][k] * temp[k][j];
+            velGrad[i][j] = s;
+        }
+}
+template <typename Cell>
+inline void scalarGradDouble(Cell &cell,
+                             double posMatrixInverse[][NO_DIM],
+                             double sGrad[][noScalarComp])
+{
+    double temp[NO_DIM][noScalarComp];
+    for (size_t v = 0; v<NO_DIM; ++v)
+        for (size_t i=0; i<noScalarComp; ++i)
+            temp[v][i] = double( cell->vertex(v+1)->info().myScalar()[i] ) - double( cell->vertex(0)->info().myScalar()[i] );
+    for (int i=0; i<NO_DIM; ++i)
+        for (size_t j=0; j<noScalarComp; ++j)
+        {
+            double s = 0.;
+            for (int k=0; k<NO_DIM; ++k)
+                s += posMatrixInverse[i][k] * temp[k][j];
+            sGrad[i][j] = s;
+        }
+}
+
+
+
 // Evaluates the user-defined scalar (personalizedFunction) at a sample point, supplying it the
 // interpolated density, velocity, and their gradients in the cell.
 template <typename Cell>

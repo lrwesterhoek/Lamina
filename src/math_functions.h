@@ -145,9 +145,12 @@ inline bool adjugateInverse(double const m[][NO_DIM], T inv[][NO_DIM], double &d
 
 
 // Matrix inverse: closed-form for 2x2/3x3 (adjugateInverse), Gauss-Jordan otherwise; zero result if
-// (near-)singular (isRelativelySingular).
-inline void matrixInverse(double matrix[][NO_DIM],
-                          Real result[][NO_DIM])
+// (near-)singular (isRelativelySingular). The result type T is Real (matrixInverse: the grids' deposits) or double
+// (matrixInverseDouble: the exact-average deposits' gradients, plan P10.8, formed in double and narrowed once at the
+// end so that they do not follow the float rounding of the vertex labelling).
+template <typename T>
+inline void matrixInverseT(double matrix[][NO_DIM],
+                           T result[][NO_DIM])
 {
 #if NO_DIM==2 || NO_DIM==3
     double det;
@@ -155,7 +158,7 @@ inline void matrixInverse(double matrix[][NO_DIM],
                               [matrix](double const d) { return isRelativelySingular( d, matrix ); } ) )
         for (int r=0; r<NO_DIM; ++r)
             for (int c=0; c<NO_DIM; ++c)
-                result[r][c] = Real(0.);
+                result[r][c] = T(0.);
 #else
     // general case: Gauss-Jordan elimination with partial pivoting
     double aug[NO_DIM][2*NO_DIM];
@@ -181,7 +184,7 @@ inline void matrixInverse(double matrix[][NO_DIM],
         {
             for (int r=0; r<NO_DIM; ++r)
                 for (int c=0; c<NO_DIM; ++c)
-                    result[r][c] = Real(0.);
+                    result[r][c] = T(0.);
             return;
         }
         for (int j=0; j<2*NO_DIM; ++j) aug[i][j] /= pivot;
@@ -195,8 +198,18 @@ inline void matrixInverse(double matrix[][NO_DIM],
     }
     for (int i=0; i<NO_DIM; ++i)
         for (int j=0; j<NO_DIM; ++j)
-            result[i][j] = Real(aug[i][j+NO_DIM]);
+            result[i][j] = T(aug[i][j+NO_DIM]);
 #endif
+}
+inline void matrixInverse(double matrix[][NO_DIM],
+                          Real result[][NO_DIM])
+{
+    matrixInverseT<Real>( matrix, result );
+}
+inline void matrixInverseDouble(double matrix[][NO_DIM],
+                                double result[][NO_DIM])
+{
+    matrixInverseT<double>( matrix, result );
 }
 
 

@@ -97,6 +97,9 @@ J="-j$(sysctl -n hw.ncpu 2>/dev/null || echo 8)"
 run build       make "$J" DTFE PS-DTFE METAL=1
 run build_d     make "$J" DTFE PS-DTFE METAL=1 DOUBLE=1
 run build_2d    make "$J" DTFE PS-DTFE DIM=2
+# the shared library too, when one is built: tests/dtfe_sampling_check.sh links its user-sampling driver against it,
+# and a header change (User_options grew fields on 2026-11-09) makes a stale library crash that driver
+[ -e "$ROOT/libDTFE.dylib" ] || [ -e "$ROOT/libDTFE.so" ] && run build_lib make "$J" library METAL=1
 run ci_core     tests/ci_suite.sh core
 run ci_double   tests/ci_suite.sh double
 run ci_2d       tests/ci_suite.sh 2d

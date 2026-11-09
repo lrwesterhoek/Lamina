@@ -33,6 +33,7 @@
 #define TRIANGULATION_MISCELLANEOUS_HEADER
 
 #include "../math_functions.h"
+#include "../phase_totals.h"    // the run's per-stage totals (printComputationTime adds to them)
 
 
 // Report elapsed time for a computation stage.
@@ -41,6 +42,7 @@ inline void printComputationTime(Timer *t, User_options *userOptions,
 {
     t->stop();
     userOptions->totalTime += t->time();
+    PhaseTotals::add( computationQuantityName, t->time() );   // the run's totals (phase_totals.h), whatever the verbosity
     MESSAGE::Message message( userOptions->verboseLevel );
     // wall-clock timer: report seconds directly, must not divide by noProcessors
     message << MESSAGE::cGreen() << "  >>> Time: " << t->time() << " sec. (" << computationQuantityName << ")" << MESSAGE::cReset() << "\n" << MESSAGE::Flush;
