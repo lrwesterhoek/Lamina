@@ -309,6 +309,12 @@ struct PSPartitionPlan
         // seamExact = every periodic copy an exact shift (else the fallback anchor lagBox_hi)
     Real   seam[NO_DIM];
     bool   seamExact[NO_DIM];
+        // the smallest and the largest lagPos per axis (xMin, xMax, yMin, ...; no margin, unlike lagBox), with
+        // which a partition's selection skips the periodic passes that cannot reach it
+        // (findParticlesInBoxLagrangianPeriodic); not known without the particles or when a lagPos is not a number
+    Real   lagExtent[2*NO_DIM];
+    bool   lagExtentKnown = false;
+    Real const* selectionExtent() const { return lagExtentKnown ? lagExtent : nullptr; }
 
     void init(DTFE_State &state, Box &lagBoxGlobal, bool const hasLagrangianPeriodicCopies,
               MESSAGE::Message &message)
@@ -331,6 +337,26 @@ struct PSPartitionPlan
 
         for (int d=0; d<NO_DIM; ++d)
             lagLen[d] = lagBox[2*d+1] - lagBox[2*d];
+
+        // the exact extent of the particles as they are selected (nothing moves them between here and the
+        // partition loop); a lagPos that is not a number passes the selection's box test in every pass, so
+        // the extent is then left unknown and no pass is skipped
+        lagExtentKnown = not state.particles.empty();
+        if ( lagExtentKnown )
+        {
+            for (int d=0; d<NO_DIM; ++d)
+                lagExtent[2*d] = lagExtent[2*d+1] = state.particles[0].lagPos[d];
+            bool ordered = true;
+            for (Particle_data const &q : state.particles)
+                for (int d=0; d<NO_DIM; ++d)
+                {
+                    Real const x = q.lagPos[d];
+                    if ( x < lagExtent[2*d] )   lagExtent[2*d]   = x;
+                    if ( x > lagExtent[2*d+1] ) lagExtent[2*d+1] = x;
+                    if ( not ( x == x ) ) ordered = false;
+                }
+            lagExtentKnown = ordered;
+        }
 
         // Eulerian box length per axis: the period used to shift each partition's deferred copies
         for (int d=0; d<NO_DIM; ++d)
@@ -1311,7 +1337,7 @@ static void psServeComposite(DTFE_State &state, User_options &userOptions, PSPar
             [&](std::vector<Particle_data> &out)
             {
                 findParticlesInBoxLagrangianPeriodic( state.particles, &out, lagPadded,
-                                                      plan.eulerLen, plan.periodicCopies, 0 );
+                                                      plan.eulerLen, plan.periodicCopies, 0, plan.selectionExtent() );
             }, nullptr, nullptr );
     }
     std::vector<Particle_data>().swap( state.particles );
@@ -2328,6 +2354,36 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     // One partition's work, in two stages: PREPARE (select its particles; with 'build', also its
     // tessellation and vertex densities) and DEPOSIT (the grid passes, then the merge). The look-ahead
     // below runs the prepare stage of partition k+1 on another thread while partition k deposits.
+    // EXPERIMENT (DTFE_PS_GPU_SHARE = the per mille of the partitions whose deposit runs on the GPU; unset or 1000 =
+    // all of them, the '--gpu' run as it was). The other partitions deposit on the CPU, so that both devices work at
+    // once: a '--gpu' run keeps ~2 cores busy beside a GPU that every partition queues for, and a CPU run leaves the
+    // GPU idle. Which partition goes where is a rule of its index alone (the GPU's share spread evenly over the
+    // indices), never of the timing, so a rerun deposits every partition on the same device. A CPU partition takes
+    // the path of the GPU fallback (ps_interpolation.cc: the same fixed-point units as a GPU deposit of the pass, so
+    // the merge sees no difference); its grids differ from a GPU deposit's at the float rounding of the two exact
+    // integrations, so a mixed run equals neither the GPU run nor the CPU run to the last bit. The share is
+    // in the checkpoint key (partition_checkpoint.h settingsKey): a resume with another share is refused.
+    long const psGpuShare = std::max( 0L, std::min( 1000L, long( Env::integer( "DTFE_PS_GPU_SHARE", 1000 ) ) ) );
+    auto depositsOnCpu = [psGpuShare](int const pi) -> bool
+    { return ( long(pi) + 1 ) * psGpuShare / 1000 == long(pi) * psGpuShare / 1000; };
+#if defined(PS_GPU) && NO_DIM==3   // (a build without the GPU deposit has no partition on the GPU to report)
+    if ( state.options.psUseMetal and psGpuShare < 1000 )
+    {
+        int onGpu = 0, toDeposit = 0;   // (outside the grid window or restored from a checkpoint = no deposit)
+        for (int pi = 0; pi < totalPartitions; ++pi)
+        {
+            if ( skipPartition[size_t(pi)] ) continue;
+            ++toDeposit;
+            onGpu += depositsOnCpu( pi ) ? 0 : 1;
+        }
+        message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " DTFE_PS_GPU_SHARE=" << psGpuShare << ": "
+                << onGpu << " of the " << toDeposit << " partitions to deposit do so on the GPU, the other "
+                << toDeposit - onGpu << " on the CPU with r3d clipping, whatever the header's 'grid deposit' line says "
+                << "(an experiment: the grids differ from an all-GPU and from an all-CPU run at the float rounding of "
+                << "the two integrations).\n" << MESSAGE::Flush;
+    }
+#endif
+
     auto prepare = [&](int const pi, bool const build, PSPrepared &P)
     {
         auto const t0 = std::chrono::steady_clock::now();
@@ -2342,13 +2398,14 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
         // particles are never needed, so their selection (a scan of every particle, ~3 s for TNG100-3's
         // 94M, plus a copy of the padded share) is skipped -- the load must then succeed (psCacheOnly)
         P.opt = partitionOptions( lagRegion );
+        if ( P.opt.psUseMetal and depositsOnCpu( pi ) ) P.opt.psUseMetal = false;   // (DTFE_PS_GPU_SHARE, above)
         P.cacheOnly = not P.skipped and not state.options.tessellationCacheDir.empty()
                       and psTessellationCached( P.opt );
         if ( not P.skipped and not P.cacheOnly and state.options.psParticlesDeferred )
             throwError( "internal: a partition needs its particles, but they were not read (the globals record path)." );
         if ( not P.skipped and not P.cacheOnly )
             findParticlesInBoxLagrangianPeriodic( state.particles, &P.part, lagPadded,
-                                                  plan.eulerLen, plan.periodicCopies, 0 );
+                                                  plan.eulerLen, plan.periodicCopies, 0, plan.selectionExtent() );
         // an empty (or skipped) partition builds nothing but still takes its turn in the ordered merge
         P.emptyPartition = P.skipped or ( not P.cacheOnly and P.part.empty() );
         P.opt.psCacheOnly = P.cacheOnly;

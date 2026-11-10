@@ -19,7 +19,7 @@
 #       '.den' over each cell; velocity_a = A x_c + b (the points are symmetric about the centre); gradient_a = A
 #   S3  method 2, 20 random points: gradient_a = A; the samples' mean position, A^-1 (velocity_a - b), lies inside
 #       its own cell and scatters about the centre by dx / sqrt(12 x 20) per axis (within 40%); density_a against
-#       '--exact-average' (Monte-Carlo noise only: rms 0.082 of the mean, 0.04-0.16 accepted); velocityStd_a's mean
+#       '--exact' (Monte-Carlo noise only: rms 0.082 of the mean, 0.04-0.16 accepted); velocityStd_a's mean
 #       square = the linear field's expectation |A|_F^2 dx^2 / 12 x 19/20 (within 10%). These hold for any
 #       realization; the realization itself is golden in S7 (the coordinates are drawn in separate statements,
 #       x, y, z, so no compiler can reorder the draws)
@@ -118,12 +118,14 @@ runx() {
     OMP_NUM_THREADS=1 "$prog" "$snap" "$TMP/$name" "${C0[@]}" "$@" > "$TMP/$name.log" 2>&1 \
         || { echo "FAIL: run $name (see $TMP/$name.log)"; tail -5 "$TMP/$name.log"; exit 1; }
 }
-echo ">> the regular grid (point values + '--sample-points'), method 2, method 3, the 3x finer grid, --exact-average"
+echo ">> the regular grid (point values + '--sample-points'), method 2, method 3, the 3x finer grid, --exact"
+# (an '--average-method' or a sample count selects the sampled average by itself: the exact one is the default since
+# 2026-11-09, and the method-2 / method-3 runs here need no '--sampled')
 run u "${DTFE_BIN}" --grid 8 --field density velocity gradient density_a velocity_a gradient_a velocityStd_a \
     --average-method 2 --samples 20 --seed "$SEED" --sample-points "$TMP/pts.txt"
 run m3 "${DTFE_BIN}" --grid 8 --field density_a velocity_a gradient_a --average-method 3 --subsamples 3
 run f "${DTFE_BIN}" --grid 24 --field density
-run x "${DTFE_BIN}" --grid 8 --field density_a --exact-average
+run x "${DTFE_BIN}" --grid 8 --field density_a --exact
 echo ">> the redshift cone (point values and method 2)"
 run c "${DTFE_BIN}" "${CONE[@]}" --field density velocity gradient density_a velocity_a gradient_a --average-method 2 --samples 20 --seed "$SEED"
 echo ">> past the convex hull: a cone leaving the particles, a grid below a slab of particles (point values + '--sample-points')"
@@ -241,7 +243,7 @@ vs = rd("u", "a_velStd")
 vratio = float((vs ** 2).mean() / ((A ** 2).sum() * dx ** 2 / 12 * (NS - 1) / NS))
 check("S3", 0.9 < vratio < 1.1 and bool(np.isfinite(vs).all()),
       f"method 2: velocityStd_a, the cells' mean square {vratio:.3f} x the linear field's expectation (0.9-1.1)")
-check("S3", 0.04 < rms < 0.16, f"method 2: density_a against --exact-average, rms {rms:.3f} of the mean (Monte-Carlo noise: 0.04-0.16)")
+check("S3", 0.04 < rms < 0.16, f"method 2: density_a against --exact, rms {rms:.3f} of the mean (Monte-Carlo noise: 0.04-0.16)")
 # S4 / S5 the redshift cone
 den_check("S4", "cone points", rd("c", "den"), pts_den[ng:ng + nc])
 vel_check("S4", "cone points", rd("c", "vel", 3), cone_x)

@@ -10,16 +10,16 @@
 # (DTFE_GPU_CHUNK 4096) and a checkpoint every 2 buffers:
 #   E1  exact sums: two fault-free runs with different opening chunks (4096 and 65536 work items) write
 #       byte-identical '.a_den', '.a_vel', '.a_velGrad' -- the item kernel over 9 sub-domains whose batches race
-#       for the device, the per-tetrahedron kernel (DTFE_GPU_ITEMS=0), and --exact-average
+#       for the device, the per-tetrahedron kernel (DTFE_GPU_ITEMS=0), and --exact
 #   E2  DTFE_GPU_FLOAT_GRIDS=1 (the float atomics, kept for A/B) runs the float sums
 #       and agrees with the default to 1e-5 of the peak; the default agrees with the CPU's box mean to 1e-5 of
 #       the peak (tests/dtfe_metal_check.sh is the full CPU parity suite)
 #   R1  the item kernel in one batch (--max-concurrent 1), an 'innocent victim' fault at buffer 3: the batch
 #       resumes from the checkpoint at the same pace (250 ms) and its three grids are byte-identical to E1's
 #       fault-free one-batch run
-#   R2  --exact-average, an 'oom' fault: classified 'resource', the pace escalates (62 ms), grids byte-identical
+#   R2  --exact, an 'oom' fault: classified 'resource', the pace escalates (62 ms), grids byte-identical
 #   R3  9 sub-domains under --partition 2 2 2, a 'timeout' (watchdog) fault at buffer 9: byte-identical
-#   R4  a 'persist' fault (every buffer from the 3rd on fails) under --exact-average: the sub-domain goes to the
+#   R4  a 'persist' fault (every buffer from the 3rd on fails) under --exact: the sub-domain goes to the
 #       CPU after 3 failures of the same chunk, the run says how many sub-domains ran on the CPU, and the CPU's
 #       '.a_den' agrees with the GPU's to 1e-4 of the peak
 #   R5  the failed buffers are counted: 1, 1, 3 (the deposit's summary lines)
@@ -32,7 +32,7 @@
 #       re-zeroes the batch's owner box and resumes from its start; the grids agree with a fault-free shared run
 #       to 1e-5 of the peak
 #   R8  the image-plane shape of the recipe's dtfe27planes stage: '--sample-points' with
-#       '--exact-average' under --partition 2 2 2 (one triangulation per partition, DTFE_parallel's single-
+#       '--exact' under --partition 2 2 2 (one triangulation per partition, DTFE_parallel's single-
 #       triangulation branch) and a 'persist' fault, so every partition's grid falls back to the CPU: the fallback
 #       runs the THREADED exact average (DTFE_DEPOSIT_THREADS=4: the log says so once per partition), and its
 #       '.a_*' grids and '.pts_*' answers are byte-identical to a one-thread CPU run
@@ -69,35 +69,38 @@ export DTFE_GPU_CHUNK=4096 DTFE_GPU_CHECKPOINT_CHUNKS=2
 unset DTFE_GPU_FAULT_AT DTFE_GPU_SHARED DTFE_GPU_FLOAT_GRIDS DTFE_GPU_ITEMS
 C=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a gradient_a --partition 1 1 1)
 ONE=(--max-concurrent 1)                 # one sub-domain: one batch, so 'buffer k' is a buffer of that batch
+# The kernels of E1's item and per-tet runs, E2, R1, R3, R7, S1 and N1 are the Monte-Carlo ones, so those runs pass
+# '--sampled' (the exact average is the default since 2026-11-09; the shared grid serves the sampled average only).
+# C and P name no mode: the exact runs (E1's x, R2, R4) share C and add '--exact'.
 echo ">> E1: two fault-free runs with different opening chunks (item kernel over 9 sub-domains, per-tet kernel, exact)"
-run "$TMP/a1" env DTFE_GPU_TIMING=1 "${DTFE_BIN}" "$SNAP" "$TMP/a1" "${C[@]}" --gpu
-run "$TMP/a2" env DTFE_GPU_CHUNK=65536 "${DTFE_BIN}" "$SNAP" "$TMP/a2" "${C[@]}" --gpu
-run "$TMP/k1" env DTFE_GPU_ITEMS=0 "${DTFE_BIN}" "$SNAP" "$TMP/k1" "${C[@]}" --gpu
-run "$TMP/k2" env DTFE_GPU_ITEMS=0 DTFE_GPU_CHUNK=25088 "${DTFE_BIN}" "$SNAP" "$TMP/k2" "${C[@]}" --gpu
-run "$TMP/x1" "${DTFE_BIN}" "$SNAP" "$TMP/x1" "${C[@]}" --gpu --exact-average
-run "$TMP/x2" env DTFE_GPU_CHUNK=1024 "${DTFE_BIN}" "$SNAP" "$TMP/x2" "${C[@]}" --gpu --exact-average
+run "$TMP/a1" env DTFE_GPU_TIMING=1 "${DTFE_BIN}" "$SNAP" "$TMP/a1" "${C[@]}" --gpu --sampled
+run "$TMP/a2" env DTFE_GPU_CHUNK=65536 "${DTFE_BIN}" "$SNAP" "$TMP/a2" "${C[@]}" --gpu --sampled
+run "$TMP/k1" env DTFE_GPU_ITEMS=0 "${DTFE_BIN}" "$SNAP" "$TMP/k1" "${C[@]}" --gpu --sampled
+run "$TMP/k2" env DTFE_GPU_ITEMS=0 DTFE_GPU_CHUNK=25088 "${DTFE_BIN}" "$SNAP" "$TMP/k2" "${C[@]}" --gpu --sampled
+run "$TMP/x1" "${DTFE_BIN}" "$SNAP" "$TMP/x1" "${C[@]}" --gpu --exact
+run "$TMP/x2" env DTFE_GPU_CHUNK=1024 "${DTFE_BIN}" "$SNAP" "$TMP/x2" "${C[@]}" --gpu --exact
 echo ">> E2: the float sums (A/B) and the CPU"
 run "$TMP/f1" env DTFE_GPU_FLOAT_GRIDS=1 DTFE_GPU_TIMING=1 \
-    "${DTFE_BIN}" "$SNAP" "$TMP/f1" "${C[@]}" --gpu
-"${DTFE_BIN}" "$SNAP" "$TMP/c1" "${C[@]}" > "$TMP/c1.log" 2>&1 || { echo "FAIL: the CPU run (see $TMP/c1.log)"; exit 1; }
+    "${DTFE_BIN}" "$SNAP" "$TMP/f1" "${C[@]}" --gpu --sampled
+"${DTFE_BIN}" "$SNAP" "$TMP/c1" "${C[@]}" --sampled > "$TMP/c1.log" 2>&1 || { echo "FAIL: the CPU run (see $TMP/c1.log)"; exit 1; }
 echo ">> R1: one batch, without and with an innocent-victim fault at buffer 3"
-run "$TMP/t0" "${DTFE_BIN}" "$SNAP" "$TMP/t0" "${C[@]}" "${ONE[@]}" --gpu
-run "$TMP/t1" env DTFE_GPU_FAULT_AT=3 "${DTFE_BIN}" "$SNAP" "$TMP/t1" "${C[@]}" "${ONE[@]}" --gpu
-echo ">> R2: --exact-average, without and with an out-of-memory fault at buffer 3"
-run "$TMP/e0" "${DTFE_BIN}" "$SNAP" "$TMP/e0" "${C[@]}" "${ONE[@]}" --gpu --exact-average
-run "$TMP/e1" env DTFE_GPU_FAULT_AT=3:oom "${DTFE_BIN}" "$SNAP" "$TMP/e1" "${C[@]}" "${ONE[@]}" --gpu --exact-average
+run "$TMP/t0" "${DTFE_BIN}" "$SNAP" "$TMP/t0" "${C[@]}" "${ONE[@]}" --gpu --sampled
+run "$TMP/t1" env DTFE_GPU_FAULT_AT=3 "${DTFE_BIN}" "$SNAP" "$TMP/t1" "${C[@]}" "${ONE[@]}" --gpu --sampled
+echo ">> R2: --exact, without and with an out-of-memory fault at buffer 3"
+run "$TMP/e0" "${DTFE_BIN}" "$SNAP" "$TMP/e0" "${C[@]}" "${ONE[@]}" --gpu --exact
+run "$TMP/e1" env DTFE_GPU_FAULT_AT=3:oom "${DTFE_BIN}" "$SNAP" "$TMP/e1" "${C[@]}" "${ONE[@]}" --gpu --exact
 echo ">> R3: --partition 2 2 2 over 9 threads, without and with a watchdog fault at buffer 9"
 P=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a gradient_a --partition 2 2 2)
-run "$TMP/p0" "${DTFE_BIN}" "$SNAP" "$TMP/p0" "${P[@]}" --gpu
-run "$TMP/p1" env DTFE_GPU_FAULT_AT=9:timeout "${DTFE_BIN}" "$SNAP" "$TMP/p1" "${P[@]}" --gpu
+run "$TMP/p0" "${DTFE_BIN}" "$SNAP" "$TMP/p0" "${P[@]}" --gpu --sampled
+run "$TMP/p1" env DTFE_GPU_FAULT_AT=9:timeout "${DTFE_BIN}" "$SNAP" "$TMP/p1" "${P[@]}" --gpu --sampled
 echo ">> R7: the same watchdog fault, then the pace recovers after a clean stretch (set to 0 s)"
-run "$TMP/p2" env DTFE_GPU_FAULT_AT=9:timeout DTFE_GPU_PACE_RECOVER_SEC=0 "${DTFE_BIN}" "$SNAP" "$TMP/p2" "${P[@]}" --gpu
-echo ">> R4: --exact-average, a persistent fault from buffer 3 on: the sub-domain goes to the CPU"
-ALLOW_CPU=1 run "$TMP/y1" env DTFE_GPU_FAULT_AT=3:persist "${DTFE_BIN}" "$SNAP" "$TMP/y1" "${C[@]}" "${ONE[@]}" --gpu --exact-average
+run "$TMP/p2" env DTFE_GPU_FAULT_AT=9:timeout DTFE_GPU_PACE_RECOVER_SEC=0 "${DTFE_BIN}" "$SNAP" "$TMP/p2" "${P[@]}" --gpu --sampled
+echo ">> R4: --exact, a persistent fault from buffer 3 on: the sub-domain goes to the CPU"
+ALLOW_CPU=1 run "$TMP/y1" env DTFE_GPU_FAULT_AT=3:persist "${DTFE_BIN}" "$SNAP" "$TMP/y1" "${C[@]}" "${ONE[@]}" --gpu --exact
 echo ">> S1: the shared full grid (DTFE_GPU_SHARED=1), without and with an innocent fault at buffer 5"
-run "$TMP/s0" env DTFE_GPU_SHARED=1 "${DTFE_BIN}" "$SNAP" "$TMP/s0" "${C[@]}" --gpu
-run "$TMP/s1" env DTFE_GPU_SHARED=1 DTFE_GPU_FAULT_AT=5 "${DTFE_BIN}" "$SNAP" "$TMP/s1" "${C[@]}" --gpu
-echo ">> R8: a --sample-points plane with --exact-average, a persistent fault: every partition on the threaded CPU average"
+run "$TMP/s0" env DTFE_GPU_SHARED=1 "${DTFE_BIN}" "$SNAP" "$TMP/s0" "${C[@]}" --gpu --sampled
+run "$TMP/s1" env DTFE_GPU_SHARED=1 DTFE_GPU_FAULT_AT=5 "${DTFE_BIN}" "$SNAP" "$TMP/s1" "${C[@]}" --gpu --sampled
+echo ">> R8: a --sample-points plane with --exact, a persistent fault: every partition on the threaded CPU average"
 "$PY" - "$TMP/plane.bin" <<'PYEOF' || { echo "FAIL: R8 points"; exit 1; }
 import sys, numpy as np
 c = (np.arange(48) + 0.5) * 100. / 48           # a 48^2 plane across the 100 Mpc box, off the grid planes
@@ -105,12 +108,12 @@ X, Y = np.meshgrid(c, c, indexing="ij")
 np.stack([X.ravel(), Y.ravel(), np.full(X.size, 50.3)], 1).astype(np.float64).tofile(sys.argv[1])
 PYEOF
 PL=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --padding 15 --field density_a velocity_a gradient_a
-    --exact-average --partition 2 2 2 --max-concurrent 1 --sample-points "$TMP/plane.bin" --pts-vel-grad)
+    --exact --partition 2 2 2 --max-concurrent 1 --sample-points "$TMP/plane.bin" --pts-vel-grad)
 ALLOW_CPU=1 run "$TMP/v1" env DTFE_GPU_FAULT_AT=3:persist DTFE_DEPOSIT_THREADS=4 "${DTFE_BIN}" "$SNAP" "$TMP/v1" "${PL[@]}" --gpu
 env DTFE_DEPOSIT_THREADS=1 "${DTFE_BIN}" "$SNAP" "$TMP/v0" "${PL[@]}" > "$TMP/v0.log" 2>&1 \
     || { echo "FAIL: the one-thread CPU plane run (see $TMP/v0.log)"; exit 1; }
 echo ">> N1: the non-finite guard (DTFE_TEST_NAN_SHARE=50: NaN vertex densities in about one tetrahedron in 50)"
-run "$TMP/n1" env DTFE_TEST_NAN_SHARE=50 "${DTFE_BIN}" "$SNAP" "$TMP/n1" "${C[@]}" "${ONE[@]}" --gpu
+run "$TMP/n1" env DTFE_TEST_NAN_SHARE=50 "${DTFE_BIN}" "$SNAP" "$TMP/n1" "${C[@]}" "${ONE[@]}" --gpu --sampled
 "$PY" - "$TMP" <<'PYEOF'
 import numpy as np, re, sys
 import os as _os; REAL = np.dtype(_os.environ.get("DTFE_TEST_REAL", "float32"))   # tests/precision.sh
@@ -142,12 +145,12 @@ def by_cause(name):   # the last 'GPU deposit retries:' line of the run, as (N, 
 
 for a, b, what in (("a1", "a2", "item kernel, 9 sub-domains, opening chunk 4096 vs 65536"),
                    ("k1", "k2", "per-tet kernel (DTFE_GPU_ITEMS=0), opening chunk 4096 vs 25088"),
-                   ("x1", "x2", "--exact-average, opening chunk 4096 vs 1024")):
+                   ("x1", "x2", "--exact, opening chunk 4096 vs 1024")):
     ok, detail = same(a, b)
     check("E1", ok, f"{what}: byte-identical grids ({detail})")
 L = log("a1")
 check("E1", "fixed-point sums" in L and "float sums" not in L,
-      "the default runs the exact sums (every batch's timing line says 'fixed-point sums')")
+      "the default sums are the exact ones (every batch's timing line of a1, a sampled run, says 'fixed-point sums')")
 L = log("f1")
 check("E2", "float sums" in L and "fixed-point sums" not in L,
       "DTFE_GPU_FLOAT_GRIDS=1 runs the float atomics (the timing lines say 'float sums')")
@@ -161,7 +164,7 @@ for ext in ("a_den", "a_vel"):
 
 for tag, ref, run, what, cause, pace in (
         ("R1", "t0", "t1", "item kernel, one batch", "innocent victim", "250 ms"),
-        ("R2", "e0", "e1", "--exact-average", "resource", "62 ms"),
+        ("R2", "e0", "e1", "--exact", "resource", "62 ms"),
         ("R3", "p0", "p1", "--partition 2 2 2, 9 threads", "watchdog", None)):
     L = log(run)
     resumed = re.search(r"\[" + cause + r"\] -- resuming from the (checkpoint|pass start) at thread", L)

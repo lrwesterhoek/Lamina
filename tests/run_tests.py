@@ -471,13 +471,18 @@ def _has_flag(name, flag):
     return True
 
 
+# The gate of the two exact-average tests: '--sampled', the switch that came with '--exact' on 2026-11-09. Not
+# '--exact' itself: an older binary's help has it inside '--exact-average' (a substring test finds it there).
+EXACT_GATE = "--sampled"
+
+
 def test_exact_average_lattice(tmpdir):
-    """--exact-average on a PERFECT periodic lattice: every vertex density equals the mean
+    """--exact on a PERFECT periodic lattice: every vertex density equals the mean
     exactly, the linear interpolant is the constant 1, so the exact cell integration must
     return 1 in EVERY grid cell to float rounding (the sampled average is only ~1 on
-    average). Gated on the binary supporting the flag."""
+    average). Gated on the binary knowing the flags (EXACT_GATE)."""
     name = "exact_average_lattice"
-    if not _has_flag(name, "--exact-average"):
+    if not _has_flag(name, EXACT_GATE):
         return
     n_per_dim, box_size = 6, 10.0
     particles = make_lattice_particles(n_per_dim, box_size)
@@ -486,7 +491,7 @@ def test_exact_average_lattice(tmpdir):
     write_text_input(infile, particles, (0, box_size, 0, box_size, 0, box_size))
 
     ok, out = run_dtfe(infile, outfile, grid_size=12, input_type=111, output_type=101,
-                       field="density_a", extra_args=["--periodic", "--exact-average"])
+                       field="density_a", extra_args=["--periodic", "--exact"])
     if not ok:
         report(name, False, "DTFE execution failed")
         return
@@ -506,12 +511,12 @@ def test_exact_average_lattice(tmpdir):
 
 
 def test_exact_average_convergence(tmpdir):
-    """Method-1 sampled '_a' density approaches the --exact-average grid MONOTONICALLY as
+    """Method-1 sampled '_a' density approaches the --exact grid MONOTONICALLY as
     --subsamples grows (5, 10, 22: 125, 1000, 10648 points per cell; Sobol quasi-random sampling:
-    deterministic, no seed involved). Gated
-    on the binary supporting the flag."""
+    deterministic, no seed involved; the count alone selects the sampled average). Gated
+    on the binary knowing the flags (EXACT_GATE)."""
     name = "exact_average_convergence"
-    if not _has_flag(name, "--exact-average"):
+    if not _has_flag(name, EXACT_GATE):
         return
     box_size, grid = 10.0, 8
     particles = make_seeded_random_particles(300, box_size, seed=7)
@@ -520,9 +525,9 @@ def test_exact_average_convergence(tmpdir):
 
     out_exact = os.path.join(tmpdir, f"{name}_exact")
     ok, _ = run_dtfe(infile, out_exact, grid_size=grid, input_type=111, output_type=101,
-                     field="density_a", extra_args=["--exact-average"])
+                     field="density_a", extra_args=["--exact"])
     if not ok:
-        report(name, False, "exact-average run failed")
+        report(name, False, "--exact run failed")
         return
     exact = _read_float32(out_exact + ".a_den")
 
@@ -549,12 +554,12 @@ def test_exact_average_convergence(tmpdir):
 # whose padding-test dummy points sit on a regular lattice against the convex hull: co-spherical ties that CGAL
 # breaks differently per platform (rel err ~1.6 Mac vs Linux), so no stored reference could hold. Instead: a
 # PERIODIC box of 1000 seeded random points (no exact ties: the Delaunay tessellation is unique, so every correct
-# CGAL builds the same one), the point-sampled density and the --exact-average cell average (no Monte Carlo: the
+# CGAL builds the same one), the point-sampled density and the --exact cell average (no Monte Carlo: the
 # sampled density_a depends on insertion order -- 25% per cell when the input is shuffled), written as binary
 # floats (the text output keeps 6 digits).
 REGRESSION_REF = "regression_periodic.txt"
 REGRESSION_ARGS = ["-i", "111", "-o", "101", "-g", "12", "-f", "density", "density_a", "--mpc-unit", "1",
-                   "--periodic", "--exact-average"]
+                   "--periodic", "--exact"]
 # Per value |new - ref| <= RTOL * |ref| (every density here is >= 0.35, so no absolute floor is needed). Measured on
 # the Mac, against this reference (max rel over the 2 x 1728 values, two seeds):
 #   the double build (no float rounding at all)       2.7e-5      one thread (another reduction order)   2.5e-5
@@ -571,7 +576,7 @@ REGRESSION_RTOL = 3e-4
 def _write_regression_ref(path, den, den_a):
     with open(path, "w") as f:
         f.write("# tests/run_tests.py test_regression reference: 1000 seeded points (seed 12345), periodic 10^3 box, "
-                "a 12^3 grid; columns = density (point sample), density_a (--exact-average)\n")
+                "a 12^3 grid; columns = density (point sample), density_a (--exact)\n")
         for a, b in zip(den, den_a):
             f.write(f"{a:.9e} {b:.9e}\n")
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Contract check for the batch driver scripts/run_ps_dtfe.sh (and the shared scripts/config.sh, and
-# run_dtfe.sh's exact-average switch).
+# run_dtfe.sh's exact / sampled cell average).
 #
 # Every other suite tests the BINARY; this one tests the shell around it, where failures stay silent
 # (a discarded environment variable, or snapshots skipped for a file they do not need). Runs against a
@@ -22,9 +22,12 @@
 #     root whose name has a space: the driver finds and processes the simulation there, config.sh's sim_dir puts a new simulation beside its
 #     family and lets a flat <root>/<sim> win, and run_ps_pipeline.sh discovers nested sims -- and exits 1
 #     when it finds nothing to compute (no data root, a mistyped SIMS, a SNAPS matching nothing).
-#  H) scripts/run_dtfe.sh passes --exact-average to the standard binary by default (-e and
-#     DTFE_EXACT_AVERAGE=1 too, DTFE_EXACT_AVERAGE=0 not; the older name DTFE_EXACT still read, with a warning, and the
-#     new name wins over it); its padding default is 15 (a caller's PADDING / DTFE_PADDING wins), run_ps_dtfe.sh keeps
+#  H) scripts/run_dtfe.sh passes --exact to the standard binary by default (-e, --exact and DTFE_EXACT_AVERAGE=1 too)
+#     and --sampled for DTFE_EXACT_AVERAGE=0 or --sampled, or a SUBSAMPLES count (-n) while the knob is unset (then
+#     with --subsamples N); -e or DTFE_EXACT_AVERAGE=1 beside a count stays exact, with one note; -e and --sampled
+#     together are refused; --exact-average, the older long form, is -e with one warning; the older knob name
+#     DTFE_EXACT still read, with a warning, and the new name wins over it. Its padding default is 15 (a caller's
+#     PADDING / DTFE_PADDING wins), run_ps_dtfe.sh keeps
 #     config.sh's 50. run_dtfe.sh AUTO_TUNE_REPORT=1 (as
 #     run_ps_dtfe.sh): the standard binary's own report line per snapshot ('snap=099'), exit 0, nothing written.
 #  I) download_snapshots.sh + merge_HDF5.py never turn a half-finished download into a merged snapshot; a chunk the
@@ -35,8 +38,9 @@
 #     SIMS) refuses with exit 2 and says so, -d or not, while --help still works and sourcing config.sh exits nothing.
 #     The drivers' shared option loop (config.sh driver_options): a bad option exits 1 with the usage, -h anywhere 0.
 #  K) the binaries' own --help lists the phase-space / GPU / point-evaluation / server options the scripts and the
-#     launcher use, and the help texts carry none of the known misspellings. The deprecated spellings (--ps-gpu,
-#     --ps-exact-deposit, --ps-no-overlap, --lambda_th, --full_help) are hidden from the help but still accepted, on
+#     launcher use (--exact and --sampled in both), and the help texts carry none of the known misspellings. The
+#     deprecated spellings (--ps-gpu, --exact-average, --ps-exact-deposit, --ps-no-overlap, --lambda_th, --full_help)
+#     are hidden from the help but still accepted, on
 #     the command line and in a --config file: one 'deprecated' warning line each and the same outputs as the
 #     canonical names; an old and a new spelling with different values from one source are refused, while across
 #     the command line and the file the command line wins (as for any option), whichever spelling each uses.
@@ -50,7 +54,9 @@
 #     releases it) and their preflight (data disk mounted, output folder writable with room for the grids).
 #  P) run_ps_pipeline.sh's freshness test compares the run settings with the snapshot's run log, not only file times
 #     (the plane's conventions too, PS_POINT_CONVENTIONS, which it hands to run_ps_dtfe.sh); a run log written with the
-#     binaries' deprecated spellings reads the same as the canonical command the driver now emits (unchanged).
+#     binaries' deprecated spellings reads the same as the canonical command the driver now emits (unchanged). The
+#     deposit: an older exact log ('--subsamples 3 --ps-exact-deposit' / '--exact-average') matches '--exact', an older
+#     sampled one (a count, no flag) matches '--sampled' with that count or none, and not the exact default.
 #  R) run_ps_dtfe.sh PS_MERGE: unset passes '--ps-merge index-order' (the driver's default, given explicitly so the
 #     memory gate stays on under the auto-tuner's speed split), a given mode passes '--ps-merge MODE', the older
 #     ORDERED_MERGE=1 / 0 and
@@ -62,13 +68,16 @@
 #  T) the knob names (config.sh knob, P6.7): each older name alone gives the same command as its new name, with one
 #     'warning: OLD is deprecated, use NEW' line on stderr; both set: the new one wins (a warning, no refusal); a
 #     switch reads 0/false/no/off as off and any other value as on, as the binaries do; the drivers' long options
-#     (--sim --sim-dir --grid --gpu --exact-average --subsamples) are their letters.
+#     (--sim --sim-dir --grid --gpu --exact --subsamples) are their letters, --sampled the sampled deposit, and
+#     --exact-average (the older --exact) is -e with one warning.
 #  S) the production defaults and the rerun hygiene, against the stand-in binaries:
 #     the GPU when the Makefile's stamp says the binary has one (metal; not off; DTFE_GPU=0 or 1
 #     wins, and so do its older names DTFE_METAL / PS_GPU / PS_METAL when it is unset), the drivers'
 #     production flags by default (run_ps_dtfe.sh: volume weighting, caustics, the four analysis
-#     fields; run_dtfe.sh: the exact average and the same fields; PS_LINEAR_DEPOSIT=1 drops the volume weighting;
-#     FACE_GRADIENT=1 passes --face-gradient, run_ps_dtfe.sh refusing it without -e, the volume weighting or on the GPU),
+#     fields, the exact deposit (--exact, on the CPU on a GPU build; a SUBSAMPLES count or DTFE_EXACT_AVERAGE=0: the
+#     sampled one, on the GPU); run_dtfe.sh: the exact average and the same fields; PS_LINEAR_DEPOSIT=1 drops the
+#     volume weighting; FACE_GRADIENT=1 passes --face-gradient, run_ps_dtfe.sh refusing it with the sampled deposit or
+#     without the volume weighting),
 #     run_dtfe.sh's OUTPUT_PREFIX (a 'ps_*' one refused), and a rerun's left-over files: after exit 0 the files the run
 #     did not write are MOVED to <prefix>.superseded/<stamp>/ with the old run log (the rewritten ones, the run log
 #     family, a lock and a checkpoint stay); a failed run, a dry run and an auto-tune report move nothing.
@@ -130,7 +139,8 @@ PYEOF
 cp "${TMP}/HASIC/snapdir_099/combined_099.hdf5" "${TMP}/PARTIAL/snapdir_099/combined_099.hdf5"
 
 export DTFE_DATA_ROOT="${TMP}"
-# keep every run tiny and quiet: one field, no averaging sub-samples worth mentioning
+# keep every run tiny and quiet: one field, no averaging sub-samples worth mentioning (a count alone selects the
+# sampled deposit: these runs pass '--sampled --subsamples 1')
 COMMON_ENV=(FIELDS=density_a SUBSAMPLES=1)
 
 # Runs the driver with the given env assignments, capturing stdout+stderr and the exit code.
@@ -249,21 +259,27 @@ mkdir -p "${FAMROOT}/FAM-3-Dark"
 flat="$(DTFE_DATA_ROOT="${FAMROOT}" bash -c 'source scripts/config.sh; sim_dir FAM-3-Dark')"
 check "$([ "${flat}" = "${FAMROOT}/FAM-3-Dark" ] && echo 0 || echo 1)" \
       "an existing flat <root>/FAM-3-Dark wins (got '${flat}')"
-rc=0; DRY_RUN=1 SIMS=all DTFE_DATA_ROOT="${FAMROOT}" scripts/run_ps_pipeline.sh >"${TMP}/g_pipeline.log" 2>&1 || rc=$?
+G_AVG=(-u DTFE_EXACT_AVERAGE -u PS_EXACT -u SUBSAMPLES -u AVG_SUBSAMPLES)   # the deposit's knobs: the defaults here
+rc=0; env "${G_AVG[@]}" DRY_RUN=1 SIMS=all DTFE_DATA_ROOT="${FAMROOT}" scripts/run_ps_pipeline.sh >"${TMP}/g_pipeline.log" 2>&1 || rc=$?
 check "$(has "${TMP}/g_pipeline.log" '^Simulations:.* FAM-1-Dark')" \
       "run_ps_pipeline.sh discovers the nested FAM-1-Dark"
 check "$([ "${rc}" = "0" ] && echo 0 || echo 1)" "... and a dry run with a snapshot to plan exits 0 (${rc})"
-# the pipeline's knobs: the GPU flag follows DTFE_GPU, the plane's geometry reaches
-# make_image_plane.py, and a plane whose sidecar has another geometry is regenerated. DTFE_GPU unset: the
+# the pipeline's knobs: the GPU flag follows DTFE_GPU and the deposit, the plane's geometry reaches
+# make_image_plane.py, and a plane whose sidecar has another geometry is regenerated. DTFE_GPU unset: the CPU for
+# the exact deposit (the default, handed on as DTFE_EXACT_AVERAGE=1); for the sampled one (a SUBSAMPLES count) the
 # GPU exactly when this repository's PS binary is a GPU build (config.sh gpu_build_default; (S) varies the stamp)
+check "$([ "$(has "${TMP}/g_pipeline.log" 'DTFE_GPU=0 DTFE_EXACT_AVERAGE=1 .*run_ps_dtfe.sh -s FAM-1-Dark -g [0-9]+ 99')" = 0 ] \
+         && [ "$(has "${TMP}/g_pipeline.log" '^Slice: .* deposit: exact \(the default\) ')" = 0 ] && echo 0 || echo 1)" \
+      "the pipeline's default run_ps_dtfe.sh call: the exact deposit (DTFE_EXACT_AVERAGE=1, said in the header) on the CPU, no -m, whatever the build"
 g_bin="$([ "${DTFE_PRECISION:-single}" = double ] && echo PS-DTFE-double || echo PS-DTFE)"
 g_gpu="$(bash -c 'source scripts/config.sh >/dev/null 2>&1; gpu_build_default "$1" "$2"' _ "${ROOT_DIR}" "${g_bin}")"
+env "${G_AVG[@]}" DRY_RUN=1 SUBSAMPLES=2 SIMS=all DTFE_DATA_ROOT="${FAMROOT}" scripts/run_ps_pipeline.sh >"${TMP}/g_pipeline_s.log" 2>&1 || true
 if [ "${g_gpu}" = "1" ]; then
-    check "$(has "${TMP}/g_pipeline.log" 'run_ps_dtfe.sh -s FAM-1-Dark -g [0-9]+ -m 99')" \
-          "the pipeline's default run_ps_dtfe.sh call carries -m (${g_bin} is a GPU build here)"
+    check "$(has "${TMP}/g_pipeline_s.log" 'DTFE_GPU=1 DTFE_EXACT_AVERAGE=0 .*run_ps_dtfe.sh -s FAM-1-Dark -g [0-9]+ -m 99')" \
+          "... SUBSAMPLES=2 alone: the sampled deposit (DTFE_EXACT_AVERAGE=0 handed on), with -m (${g_bin} is a GPU build here)"
 else
-    check "$(has "${TMP}/g_pipeline.log" 'run_ps_dtfe.sh -s FAM-1-Dark -g [0-9]+ 99')" \
-          "the pipeline's default run_ps_dtfe.sh call has no -m (${g_bin} is a CPU-only build here)"
+    check "$(has "${TMP}/g_pipeline_s.log" 'DTFE_GPU=0 DTFE_EXACT_AVERAGE=0 .*run_ps_dtfe.sh -s FAM-1-Dark -g [0-9]+ 99')" \
+          "... SUBSAMPLES=2 alone: the sampled deposit (DTFE_EXACT_AVERAGE=0 handed on), no -m (${g_bin} is a CPU-only build here)"
 fi
 check "$(has "${TMP}/g_pipeline.log" 'make_image_plane.py .*--planes 1 --thickness 2 --supersample 1 -o ')" \
       "... and makes a single plane without sub-sampling"
@@ -351,15 +367,16 @@ else
 fi
 
 echo ""
-echo "(H) run_dtfe.sh -e (or DTFE_EXACT_AVERAGE=1) runs the standard binary with --exact-average; DTFE_EXACT_AVERAGE=0 does not."
+echo "(H) run_dtfe.sh runs the standard binary with --exact by default (-e, DTFE_EXACT_AVERAGE=1), --sampled for DTFE_EXACT_AVERAGE=0 or a count alone."
 if [ -x "${DTFE_BIN}" ]; then
     rc=0; scripts/run_dtfe.sh -s HASIC -g 16 -e 99 >"${TMP}/h_exact.log" 2>&1 || rc=$?
     check "$([ "${rc}" = "0" ] && echo 0 || echo 1)" "run_dtfe.sh -e succeeds (exit ${rc})"
-    check "$(has "${TMP}/h_exact.log" 'RUNNING: .*--exact-average')" "the binary was called with --exact-average"
+    check "$(has "${TMP}/h_exact.log" 'RUNNING: .*--exact( |$)')" "the binary was called with --exact"
     if precision_double; then
         check "$(has "${TMP}/h_exact.log" 'RUNNING: .*DTFE-double ')" "DTFE_PRECISION=double: run_dtfe.sh ran ./DTFE-double"
     fi
-    check "$(has "${TMP}/h_exact.log" 'EXACT cell-tetrahedron integration')" "... and reports the exact cell average"
+    check "$(has "${TMP}/h_exact.log" 'volume averaging +: EXACT cell-tetrahedron integration of the linear interpolant \(--exact;')" \
+          "... and reports the exact cell average, asked for by --exact"
     # what the wrapper run_ps_dtfe.sh has -- wall time, peak memory, a de-ANSI'd runlog
     check "$(has "${TMP}/h_exact.log" '^  Wall time: [0-9]+ min [0-9]+ s$')" "run_dtfe.sh reports the wall time per snapshot"
     if [ -x /usr/bin/time ]; then
@@ -435,27 +452,69 @@ if [ -x "${DTFE_BIN}" ]; then
     rc_rs=0; "${DTFE_BIN}" "${TMP}/HASIC/snapdir_099/combined_099.hdf5" "${TMP}/rs_out" --grid 16 --redshiftSpace 0 0 1 --input-format 105 >"${TMP}/h_rs.log" 2>&1 || rc_rs=$?
     check "$([ "${rc_rs}" != "0" ] && echo 0 || echo 1)" "--redshiftSpace is refused (not a silent no-op), exit ${rc_rs}"
     check "$(has "${TMP}/h_rs.log" 'not implemented in this version')" "... with a message saying the transform is not implemented"
-    check "$(has "${TMP}/h_env.log" 'RUNNING: .*--exact-average')" "DTFE_EXACT_AVERAGE=1 does the same"
+    check "$(has "${TMP}/h_env.log" 'RUNNING: .*--exact( |$)')" "DTFE_EXACT_AVERAGE=1 does the same"
     # the exact average is the default (the production standard); DTFE_EXACT_AVERAGE=0 is the sampled one
-    rc_pl=0; env -u DTFE_EXACT -u DTFE_EXACT_AVERAGE scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_plain.log" 2>&1 || rc_pl=$?
-    check "$([ "${rc_pl}" = "0" ] && [ "$(has "${TMP}/h_plain.log" 'RUNNING: .*--exact-average')" = 0 ] \
+    rc_pl=0; env -u DTFE_EXACT -u DTFE_EXACT_AVERAGE -u SUBSAMPLES -u AVG_SUBSAMPLES scripts/run_dtfe.sh -s HASIC -g 16 99 \
+        >"${TMP}/h_plain.log" 2>&1 || rc_pl=$?
+    check "$([ "${rc_pl}" = "0" ] && [ "$(has "${TMP}/h_plain.log" 'RUNNING: .*--exact( |$)')" = 0 ] \
              && [ "$(has "${TMP}/h_plain.log" 'RUNNING: .*--field density_a velocity_a divergence_a shear_a ')" = 0 ] \
-             && echo 0 || echo 1)" "a plain run passes --exact-average and the four analysis fields (the production defaults; exit ${rc_pl})"
-    env -u DTFE_EXACT DTFE_EXACT_AVERAGE=0 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_mc.log" 2>&1 || true
-    check "$(lacks "${TMP}/h_mc.log" '--exact-average')" "DTFE_EXACT_AVERAGE=0 passes no --exact-average (the Monte-Carlo cell mean)"
+             && [ "$(has "${TMP}/h_plain.log" 'volume averaging +: EXACT cell-tetrahedron integration')" = 0 ] \
+             && echo 0 || echo 1)" "a plain run passes --exact and the four analysis fields (the production defaults; exit ${rc_pl})"
+    env -u DTFE_EXACT -u SUBSAMPLES -u AVG_SUBSAMPLES DTFE_EXACT_AVERAGE=0 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_mc.log" 2>&1 || true
+    check "$([ "$(lacks "${TMP}/h_mc.log" 'RUNNING: .*--exact( |$)')" = 0 ] && [ "$(has "${TMP}/h_mc.log" 'RUNNING: .*--sampled( |$)')" = 0 ] \
+             && [ "$(has "${TMP}/h_mc.log" 'volume averaging +: SAMPLED \(--sampled\)')" = 0 ] && echo 0 || echo 1)" \
+          "DTFE_EXACT_AVERAGE=0 passes --sampled, not --exact: the Monte-Carlo cell mean, said in the run log"
     # SUBSAMPLES (-n) reaches the Monte-Carlo mean as --subsamples, only when set
     env -u DTFE_EXACT DTFE_EXACT_AVERAGE=0 DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 -n 2 99 >"${TMP}/h_mc_n.log" 2>&1 || true
-    check "$([ "$(has "${TMP}/h_mc_n.log" '--lambda-th +0\.3 .*--subsamples +2$')" = 0 ] && [ "$(lacks "${TMP}/h_mc.log" '--subsamples')" = 0 ] \
+    check "$([ "$(has "${TMP}/h_mc_n.log" '--lambda-th +0\.3 .*--sampled +--subsamples +2$')" = 0 ] && [ "$(lacks "${TMP}/h_mc.log" '--subsamples')" = 0 ] \
              && echo 0 || echo 1)" "... -n 2 (SUBSAMPLES) passes --subsamples 2; unset, nothing (the binary's own count)"
     # P6.7: DTFE_EXACT, the knob's older name, is read when the new one is unset (one warning); the new one wins over it
-    env -u DTFE_EXACT_AVERAGE DTFE_EXACT=0 DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_mc_old.log" 2>&1 || true
+    env -u DTFE_EXACT_AVERAGE -u SUBSAMPLES DTFE_EXACT=0 DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_mc_old.log" 2>&1 || true
     DTFE_EXACT=0 DTFE_EXACT_AVERAGE=1 DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_mc_both.log" 2>&1 || true
-    check "$([ "$(lacks "${TMP}/h_mc_old.log" '--exact-average')" = 0 ] && [ "$(has "${TMP}/h_mc_old.log" 'DRY RUN -- would run:')" = 0 ] \
+    check "$([ "$(lacks "${TMP}/h_mc_old.log" '--exact( |$)')" = 0 ] && [ "$(has "${TMP}/h_mc_old.log" '--lambda-th +0\.3 .*--sampled$')" = 0 ] \
              && [ "$(grep -c '^warning: DTFE_EXACT is deprecated, use DTFE_EXACT_AVERAGE$' "${TMP}/h_mc_old.log")" = 1 ] \
-             && [ "$(has "${TMP}/h_mc_both.log" '--lambda-th +0\.3 .*--exact-average')" = 0 ] \
+             && [ "$(has "${TMP}/h_mc_both.log" '--lambda-th +0\.3 .*--exact( |$)')" = 0 ] \
              && [ "$(has "${TMP}/h_mc_both.log" '^warning: DTFE_EXACT is deprecated, use DTFE_EXACT_AVERAGE \(DTFE_EXACT=0 is not read: DTFE_EXACT_AVERAGE=1 wins\)$')" = 0 ] \
              && echo 0 || echo 1)" \
           "... DTFE_EXACT=0, the older name, does the same while DTFE_EXACT_AVERAGE is unset, with one warning; DTFE_EXACT_AVERAGE=1 wins over it (said)"
+    # the rule (config.sh average_resolve, the binary's own): -e / --exact or --sampled first, then DTFE_EXACT_AVERAGE,
+    # then a SUBSAMPLES count (the Monte-Carlo mean), then the default (exact); the banner names what decided. Dry
+    # runs with the knobs unset first (and the CPU, so nothing stands between --lambda-th and the cell average); the
+    # planned command always names the cell average, --subsamples only the sampled one
+    hplan() {   # <log> [VAR=value ...] [-- driver options]: echoes run_dtfe.sh's planned command line
+        local log="$1" e=()
+        shift
+        while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do e+=("$1"); shift; done
+        [ "$#" -gt 0 ] && shift
+        env -u DTFE_EXACT -u DTFE_EXACT_AVERAGE -u SUBSAMPLES -u AVG_SUBSAMPLES -u FACE_GRADIENT -u DTFE_METAL DTFE_GPU=0 \
+            ${e[@]+"${e[@]}"} DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 "$@" 99 >"${log}" 2>&1 || true
+        sed -n '/would run:/{n;p;}' "${log}"
+    }
+    h_def="$(hplan "${TMP}/h_def.log")"; h_sub="$(hplan "${TMP}/h_sub.log" SUBSAMPLES=2)"
+    h_n="$(hplan "${TMP}/h_n.log" -- -n 2)"; h_off="$(hplan "${TMP}/h_off.log" DTFE_EXACT_AVERAGE=0)"
+    check "$(printf '%s\n' "${h_def}" | grep -qE -e '--lambda-th +0\.3 +--exact$' \
+             && grep -aqxF 'Cell averages: exact (--exact; the default)' "${TMP}/h_def.log" \
+             && printf '%s\n' "${h_sub}" | grep -qE -e '--lambda-th +0\.3 +--sampled +--subsamples +2$' && [ "${h_n}" = "${h_sub}" ] \
+             && grep -aqxF 'Cell averages: sampled, Monte-Carlo sample means (--sampled --subsamples 2; SUBSAMPLES=2)' "${TMP}/h_sub.log" \
+             && printf '%s\n' "${h_off}" | grep -qE -e '--lambda-th +0\.3 +--sampled$' \
+             && grep -aqxF 'Cell averages: sampled, Monte-Carlo sample means (--sampled; DTFE_EXACT_AVERAGE=0)' "${TMP}/h_off.log" \
+             && echo 0 || echo 1)" \
+          "the default passes --exact; SUBSAMPLES=2 or -n 2 alone --sampled --subsamples 2; DTFE_EXACT_AVERAGE=0 --sampled (the banner says why)"
+    h_esub="$(hplan "${TMP}/h_esub.log" SUBSAMPLES=2 -- -e)"; h_kesub="$(hplan "${TMP}/h_kesub.log" DTFE_EXACT_AVERAGE=1 -- -n 2)"
+    check "$([ "${h_esub}" = "${h_def}" ] && [ "${h_kesub}" = "${h_def}" ] \
+             && [ "$(grep -c '^Note: SUBSAMPLES=2 is ignored: -e asks for the exact cell average' "${TMP}/h_esub.log")" = 1 ] \
+             && [ "$(grep -c '^Note: SUBSAMPLES=2 is ignored: DTFE_EXACT_AVERAGE=1 asks for the exact cell average' "${TMP}/h_kesub.log")" = 1 ] \
+             && echo 0 || echo 1)" "-e beside SUBSAMPLES=2, and DTFE_EXACT_AVERAGE=1 beside -n 2: --exact without --subsamples, one note each"
+    h_lex="$(hplan "${TMP}/h_lex.log" -- --exact)"; h_lsa="$(hplan "${TMP}/h_lsa.log" DTFE_EXACT_AVERAGE=1 -- --sampled)"
+    h_lea="$(hplan "${TMP}/h_lea.log" DTFE_EXACT_AVERAGE=0 -- --exact-average)"; h_le0="$(hplan "${TMP}/h_le0.log" DTFE_EXACT_AVERAGE=0 -- -e)"
+    check "$([ -n "${h_def}" ] && [ "${h_lex}" = "${h_def}" ] && [ "${h_lsa}" = "${h_off}" ] && [ "${h_lea}" = "${h_def}" ] && [ "${h_le0}" = "${h_def}" ] \
+             && [ "$(grep -c '^warning: --exact-average is deprecated, use --exact$' "${TMP}/h_lea.log")" = 1 ] \
+             && [ "$(lacks "${TMP}/h_le0.log" 'deprecated')" = 0 ] && [ "$(lacks "${TMP}/h_lex.log" 'deprecated')" = 0 ] && echo 0 || echo 1)" \
+          "--exact is -e; --sampled beats DTFE_EXACT_AVERAGE=1 and -e DTFE_EXACT_AVERAGE=0; --exact-average, the older long form, is -e with one warning"
+    rc=0; env -u DTFE_EXACT -u DTFE_EXACT_AVERAGE DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 -e --sampled 99 >"${TMP}/h_both.log" 2>&1 || rc=$?
+    check "$([ "${rc}" = "1" ] && [ "$(has "${TMP}/h_both.log" "^Error: '-e' \('--exact'\) and '--sampled' exclude each other")" = 0 ] \
+             && [ "$(has "${TMP}/h_both.log" '^Usage: ')" = 0 ] && [ "$(lacks "${TMP}/h_both.log" 'would run:')" = 0 ] && echo 0 || echo 1)" \
+          "-e and --sampled together are refused with the usage, exit 1, nothing planned (${rc})"
     # the standard binary's auto-tuner reports (not 'AUTO-TUNE-REPORT unsupported'), and the driver
     # asks it the way run_ps_dtfe.sh does: a report per snapshot, nothing computed, nothing written beside the data
     rm -rf "${TMP}/HASIC/snapdir_099/output."*        # (the grids, run logs and the superseded folder of the runs above)
@@ -780,21 +839,38 @@ check "$([ "${rc_o}" = " 1/1/0 1/1/0 1/1/0" ] && echo 0 || echo 1)" \
       "an unknown option or a missing value: the usage, exit 1; -h after other options: the usage, exit 0 (${rc_o# })"
 # a driver's own options mix with the shared ones in any order, clustered too (-me)
 rc=0; env "${COMMON_ENV[@]}" DRY_RUN=1 "${DRIVER}" -g 16 -n 2 -d "${TMP}/HASIC" -me -s HASIC 99 >"${TMP}/j_opt4.log" 2>&1 || rc=$?
-check "$([ "${rc}" = "0" ] && [ "$(has "${TMP}/j_opt4.log" 'HASIC/snapdir_099/combined_099\.hdf5 .*--grid +16 .*--subsamples +2 .*--gpu +--exact-average')" = 0 ] \
-         && echo 0 || echo 1)" "... -g, -n, -m and -e mix with -d and -s in any order, -me clustered (exit ${rc})"
+check "$([ "${rc}" = "0" ] && [ "$(has "${TMP}/j_opt4.log" 'HASIC/snapdir_099/combined_099\.hdf5 .*--grid +16 .*--gpu +--exact( |$)')" = 0 ] \
+         && [ "$(lacks "${TMP}/j_opt4.log" '^ +\./PS-DTFE.*--subsamples')" = 0 ] \
+         && [ "$(grep -c '^Note: SUBSAMPLES=2 is ignored: -e asks for the exact deposit' "${TMP}/j_opt4.log")" = 1 ] \
+         && echo 0 || echo 1)" "... -g, -n, -m and -e mix with -d and -s in any order, -me clustered: -e keeps the exact deposit, -n 2 said ignored (exit ${rc})"
 # the long forms are the letters (config.sh driver_long_options): the same planned command, token for token
-rc=0; env "${COMMON_ENV[@]}" DRY_RUN=1 "${DRIVER}" --grid 16 --subsamples=2 --sim-dir "${TMP}/HASIC" --gpu --exact-average --sim HASIC 99 \
+rc=0; env "${COMMON_ENV[@]}" DRY_RUN=1 "${DRIVER}" --grid 16 --subsamples=2 --sim-dir "${TMP}/HASIC" --gpu --exact --sim HASIC 99 \
     >"${TMP}/j_opt5.log" 2>&1 || rc=$?
 check "$([ "${rc}" = "0" ] && [ "$(sed -n '/would run:/{n;p;}' "${TMP}/j_opt5.log")" = "$(sed -n '/would run:/{n;p;}' "${TMP}/j_opt4.log")" ] \
-         && [ -n "$(sed -n '/would run:/{n;p;}' "${TMP}/j_opt5.log")" ] && echo 0 || echo 1)" \
-      "... --grid, --subsamples=K, --sim-dir, --gpu, --exact-average and --sim plan the same command as the letters (exit ${rc})"
+         && [ -n "$(sed -n '/would run:/{n;p;}' "${TMP}/j_opt5.log")" ] && [ "$(lacks "${TMP}/j_opt5.log" 'deprecated')" = 0 ] && echo 0 || echo 1)" \
+      "... --grid, --subsamples=K, --sim-dir, --gpu, --exact and --sim plan the same command as the letters (exit ${rc})"
+# --exact-average, the older long form of -e, for one release: the same plan, one warning (the binaries' wording)
+rc=0; env "${COMMON_ENV[@]}" DRY_RUN=1 "${DRIVER}" --grid 16 --subsamples=2 --sim-dir "${TMP}/HASIC" --gpu --exact-average --sim HASIC 99 \
+    >"${TMP}/j_opt5o.log" 2>&1 || rc=$?
+check "$([ "${rc}" = "0" ] && [ "$(sed -n '/would run:/{n;p;}' "${TMP}/j_opt5o.log")" = "$(sed -n '/would run:/{n;p;}' "${TMP}/j_opt4.log")" ] \
+         && [ "$(grep -c '^warning: --exact-average is deprecated, use --exact$' "${TMP}/j_opt5o.log")" = 1 ] \
+         && [ "$(grep -c 'deprecated' "${TMP}/j_opt5o.log")" = 1 ] && echo 0 || echo 1)" \
+      "... --exact-average (the older --exact) plans the same, with one 'warning: --exact-average is deprecated, use --exact' (exit ${rc})"
+# --sampled: the sampled deposit, named; with a count, the count too (in place of -e's --exact)
+rc=0; env "${COMMON_ENV[@]}" DRY_RUN=1 "${DRIVER}" --grid 16 --subsamples=2 --sim-dir "${TMP}/HASIC" --gpu --sampled --sim HASIC 99 \
+    >"${TMP}/j_opt5s.log" 2>&1 || rc=$?
+check "$([ "${rc}" = "0" ] && [ "$(has "${TMP}/j_opt5s.log" 'combined_099\.hdf5 .*--grid +16 .*--gpu +--sampled +--subsamples +2 ')" = 0 ] \
+         && [ "$(lacks "${TMP}/j_opt5s.log" '^ +\./PS-DTFE.*--exact( |$)')" = 0 ] && echo 0 || echo 1)" \
+      "... --sampled with --subsamples=2: --sampled --subsamples 2, no --exact (exit ${rc})"
 rc=0; env "${COMMON_ENV[@]}" DRY_RUN=1 scripts/run_dtfe.sh --sim HASIC --grid=16 --subsamples 2 99 >"${TMP}/j_opt6.log" 2>&1 || rc=$?
 rc2=0; "${DRIVER}" -s HASIC --bogus 99 >"${TMP}/j_opt7.log" 2>&1 || rc2=$?
 rc3=0; TNG_API_KEY=dummykey scripts/download_snapshots.sh -s HASIC --gpu 99 >"${TMP}/j_opt8.log" 2>&1 || rc3=$?
-check "$([ "${rc}" = "0" ] && [ "$(has "${TMP}/j_opt6.log" '--grid +16 .*--subsamples +2')" = 0 ] \
+rc4=0; TNG_API_KEY=dummykey scripts/download_snapshots.sh -s HASIC --sampled 99 >"${TMP}/j_opt9.log" 2>&1 || rc4=$?
+check "$([ "${rc}" = "0" ] && [ "$(has "${TMP}/j_opt6.log" '--grid +16 .*--sampled +--subsamples +2')" = 0 ] \
          && [ "${rc2}" = "1" ] && [ "$(has "${TMP}/j_opt7.log" "unknown option '--bogus'")" = 0 ] && [ "$(has "${TMP}/j_opt7.log" '^Usage: ')" = 0 ] \
-         && [ "${rc3}" = "1" ] && [ "$(has "${TMP}/j_opt8.log" "unknown option '--gpu'")" = 0 ] && echo 0 || echo 1)" \
-      "... run_dtfe.sh takes them too; an unknown long option, or one the script lacks (download_snapshots.sh --gpu): the usage, exit 1 (${rc} ${rc2} ${rc3})"
+         && [ "${rc3}" = "1" ] && [ "$(has "${TMP}/j_opt8.log" "unknown option '--gpu'")" = 0 ] \
+         && [ "${rc4}" = "1" ] && [ "$(has "${TMP}/j_opt9.log" "unknown option '--sampled'")" = 0 ] && echo 0 || echo 1)" \
+      "... run_dtfe.sh takes them too (a count alone: --sampled --subsamples 2); an unknown long option, or one the script lacks (download_snapshots.sh --gpu, --sampled): the usage, exit 1 (${rc} ${rc2} ${rc3} ${rc4})"
 rc=0; DTFE_DATA_ROOT= scripts/run_ps_dtfe.sh -s HASIC 99 >"${TMP}/j_noroot_empty.log" 2>&1 || rc=$?
 check "$([ "${rc}" = "2" ] && [ "$(has "${TMP}/j_noroot_empty.log" "${NOROOT}")" = 0 ] && echo 0 || echo 1)" \
       "... an empty DTFE_DATA_ROOT= is no data root either (${rc})"
@@ -835,10 +911,10 @@ echo ""
 echo "(K) the binaries' --help lists the phase-space, GPU, point-evaluation and server options; no known misspelling."
 "${PS_BIN}" --help >"${TMP}/k_help_ps.log" 2>&1 || true
 "${DTFE_BIN}" --help >"${TMP}/k_help_dtfe.log" 2>&1 || true
-for o in gpu exact-average no-overlap full-help lambda-th grid-window ps-merge subsamples ps-per-stream ps-point-conventions mpc-unit ps-caustics ps-vertex-mass ps-volume-weighted sample-points serve serve-progress tessellation-cache auto-tune-report; do
+for o in gpu exact sampled no-overlap full-help lambda-th grid-window ps-merge subsamples ps-per-stream ps-point-conventions mpc-unit ps-caustics ps-vertex-mass ps-volume-weighted sample-points serve serve-progress tessellation-cache auto-tune-report; do
     check "$(has "${TMP}/k_help_ps.log" "^ *--${o}( |$)")" "PS-DTFE --help lists --${o}"
 done
-for o in gpu exact-average no-overlap full-help lambda-th average-method subsamples mpc-unit sample-points serve auto-tune-report; do
+for o in gpu exact sampled no-overlap full-help lambda-th average-method subsamples mpc-unit sample-points serve auto-tune-report; do
     check "$(has "${TMP}/k_help_dtfe.log" "^ *--${o}( |$)")" "DTFE --help lists --${o}"
 done
 "${PS_BIN}" --full-help >"${TMP}/k_full_ps.log" 2>"${TMP}/k_full_ps.err" || true
@@ -846,10 +922,11 @@ done
 check "$([ "$(lacks "${TMP}/k_help_dtfe.log" '^ *--(ps-gpu|ps-per-stream)')" = 0 ] \
          && [ "$(lacks "${TMP}/k_full_dtfe.log" '^ *--(ps-per-stream|ps-merge|grid-window)')" = 0 ] && echo 0 || echo 1)" \
       "... and not PS-DTFE's old --ps-gpu, nor its stream options (short and full help; the TBB insert is in both binaries since 2026-11-09)"
-check "$([ "$(lacks "${TMP}/k_help_ps.log" '(^|[^-])--(ps-gpu|ps-exact-deposit|ps-no-overlap|lambda_th|full_help|MpcUnit|paddingMpc|regionMpc|partNo|redshiftCone|origin|NGP|CIC|TSC|PCS|SPH|Voronoi|input|output|inputFile|outputFile|method|samples|noTest|density0|randomSample|approxPSD|extensive|options|avg-subsamples|lagrangianInput|ps-lag-padding|per-stream|per-stream-ids|pts-lagrangian|pts-conventions|ps-window|ordered-merge|completion-order-merge|fixed-point-merge)([^-a-zA-Z_]|$)')" = 0 ] \
-         && [ "$(lacks "${TMP}/k_full_ps.log" '(^|[^-])--(ps-gpu|ps-exact-deposit|ps-no-overlap|lambda_th|full_help|MpcUnit|paddingMpc|regionMpc|partNo|redshiftCone|origin|NGP|CIC|TSC|PCS|SPH|Voronoi|input|output|inputFile|outputFile|method|samples|noTest|density0|randomSample|approxPSD|extensive|options|avg-subsamples|lagrangianInput|ps-lag-padding|per-stream|per-stream-ids|pts-lagrangian|pts-conventions|ps-window|ordered-merge|completion-order-merge|fixed-point-merge)([^-a-zA-Z_]|$)')" = 0 ] \
-         && [ "$(lacks "${TMP}/k_full_dtfe.log" '(^|[^-])--(ps-gpu|ps-exact-deposit|ps-no-overlap|lambda_th|full_help|MpcUnit|paddingMpc|regionMpc|partNo|redshiftCone|origin|NGP|CIC|TSC|PCS|SPH|Voronoi|input|output|inputFile|outputFile|method|samples|noTest|density0|randomSample|approxPSD|extensive|options|avg-subsamples|lagrangianInput|ps-lag-padding|per-stream|per-stream-ids|pts-lagrangian|pts-conventions|ps-window|ordered-merge|completion-order-merge|fixed-point-merge)([^-a-zA-Z_]|$)')" = 0 ] \
-         && [ "$(has "${TMP}/k_full_ps.log" '^ *--exact-average +PS-DTFE')" = 0 ] && [ ! -s "${TMP}/k_full_ps.err" ] && echo 0 || echo 1)" \
+check "$([ "$(lacks "${TMP}/k_help_ps.log" '(^|[^-])--(ps-gpu|exact-average|ps-exact-deposit|ps-no-overlap|lambda_th|full_help|MpcUnit|paddingMpc|regionMpc|partNo|redshiftCone|origin|NGP|CIC|TSC|PCS|SPH|Voronoi|input|output|inputFile|outputFile|method|samples|noTest|density0|randomSample|approxPSD|extensive|options|avg-subsamples|lagrangianInput|ps-lag-padding|per-stream|per-stream-ids|pts-lagrangian|pts-conventions|ps-window|ordered-merge|completion-order-merge|fixed-point-merge)([^-a-zA-Z_]|$)')" = 0 ] \
+         && [ "$(lacks "${TMP}/k_full_ps.log" '(^|[^-])--(ps-gpu|exact-average|ps-exact-deposit|ps-no-overlap|lambda_th|full_help|MpcUnit|paddingMpc|regionMpc|partNo|redshiftCone|origin|NGP|CIC|TSC|PCS|SPH|Voronoi|input|output|inputFile|outputFile|method|samples|noTest|density0|randomSample|approxPSD|extensive|options|avg-subsamples|lagrangianInput|ps-lag-padding|per-stream|per-stream-ids|pts-lagrangian|pts-conventions|ps-window|ordered-merge|completion-order-merge|fixed-point-merge)([^-a-zA-Z_]|$)')" = 0 ] \
+         && [ "$(lacks "${TMP}/k_full_dtfe.log" '(^|[^-])--(ps-gpu|exact-average|ps-exact-deposit|ps-no-overlap|lambda_th|full_help|MpcUnit|paddingMpc|regionMpc|partNo|redshiftCone|origin|NGP|CIC|TSC|PCS|SPH|Voronoi|input|output|inputFile|outputFile|method|samples|noTest|density0|randomSample|approxPSD|extensive|options|avg-subsamples|lagrangianInput|ps-lag-padding|per-stream|per-stream-ids|pts-lagrangian|pts-conventions|ps-window|ordered-merge|completion-order-merge|fixed-point-merge)([^-a-zA-Z_]|$)')" = 0 ] \
+         && [ "$(has "${TMP}/k_full_ps.log" '^ *--exact +PS-DTFE')" = 0 ] && [ "$(has "${TMP}/k_full_ps.log" '^ *--sampled( |$)')" = 0 ] \
+         && [ "$(has "${TMP}/k_full_dtfe.log" '^ *--sampled( |$)')" = 0 ] && [ ! -s "${TMP}/k_full_ps.err" ] && echo 0 || echo 1)" \
       "the help (short and full, both binaries) names only the canonical spellings, no deprecated one (P6 and P6.7)"
 "${PS_BIN}" --full_help >"${TMP}/k_full_old.log" 2>"${TMP}/k_full_old.err" || true
 check "$(cmp -s "${TMP}/k_full_ps.log" "${TMP}/k_full_old.log" && grep -qx 'warning: --full_help is deprecated, use --full-help' "${TMP}/k_full_old.err" \
@@ -871,13 +948,15 @@ k_same() {   # <tag a> <tag b>: every output file of the two runs byte-identical
     done
     [ "${n}" -gt 0 ]
 }
-rc1=0; "${PS_BIN}" "${KS}" "${TMP}/k_new" "${KC[@]}" --exact-average --lambda-th 0.3 --no-overlap >"${TMP}/k_new.log" 2>"${TMP}/k_new.err" || rc1=$?
+rc1=0; "${PS_BIN}" "${KS}" "${TMP}/k_new" "${KC[@]}" --exact --lambda-th 0.3 --no-overlap >"${TMP}/k_new.log" 2>"${TMP}/k_new.err" || rc1=$?
 rc2=0; "${PS_BIN}" "${KS}" "${TMP}/k_old" "${KC[@]}" --ps-exact-deposit --lambda_th 0.3 --ps-no-overlap >"${TMP}/k_old.log" 2>"${TMP}/k_old.err" || rc2=$?
-check "$([ "${rc1}" = 0 ] && [ "${rc2}" = 0 ] && k_same new old && echo 0 || echo 1)" \
-      "PS-DTFE: --ps-exact-deposit --lambda_th 0.3 --ps-no-overlap give the outputs of --exact-average --lambda-th 0.3 --no-overlap, byte for byte (${rc1}, ${rc2})"
+rc3=0; "${PS_BIN}" "${KS}" "${TMP}/k_ea" "${KC[@]}" --exact-average --lambda-th 0.3 --no-overlap >"${TMP}/k_ea.log" 2>"${TMP}/k_ea.err" || rc3=$?
+check "$([ "${rc1}" = 0 ] && [ "${rc2}" = 0 ] && [ "${rc3}" = 0 ] && k_same new old && k_same new ea && echo 0 || echo 1)" \
+      "PS-DTFE: --ps-exact-deposit --lambda_th 0.3 --ps-no-overlap, and --exact-average, give the outputs of --exact --lambda-th 0.3 --no-overlap, byte for byte (${rc1}, ${rc2}, ${rc3})"
 check "$([ "$(grep -c 'is deprecated, use' "${TMP}/k_old.err")" = 3 ] \
-         && grep -qx 'warning: --ps-exact-deposit is deprecated, use --exact-average' "${TMP}/k_old.err" \
+         && grep -qx 'warning: --ps-exact-deposit is deprecated, use --exact' "${TMP}/k_old.err" \
          && grep -qx 'warning: --lambda_th is deprecated, use --lambda-th' "${TMP}/k_old.err" \
+         && [ "$(grep -c 'is deprecated, use' "${TMP}/k_ea.err")" = 1 ] && grep -qx 'warning: --exact-average is deprecated, use --exact' "${TMP}/k_ea.err" \
          && [ "$(lacks "${TMP}/k_new.err" 'deprecated')" = 0 ] && [ "$(lacks "${TMP}/k_old.log" 'deprecated')" = 0 ] && echo 0 || echo 1)" \
       "... one 'warning: --old is deprecated, use --new' line per old name, on stderr only; none for the canonical names"
 printf '# a configuration file of an older release\nps-exact-deposit = true\nlambda_th = 0.3\nps-no-overlap = 1\n' > "${TMP}/k_old.cfg"
@@ -912,7 +991,7 @@ k_one_warning() {   # <tag>: exactly one deprecation line on stderr, the --lambd
         && grep -qx 'warning: --lambda_th is deprecated, use --lambda-th' "${TMP}/k_$1.err"
 }
 for b in ps dtfe; do
-    if [ "${b}" = ps ]; then bin="${PS_BIN}"; ref=new; extra=(--exact-average --no-overlap)
+    if [ "${b}" = ps ]; then bin="${PS_BIN}"; ref=new; extra=(--exact --no-overlap)
     else bin="${DTFE_BIN}"; ref=dok; extra=(); fi
     r1="$(k_run "${bin}" "${b}_lfile" ${extra[@]+"${extra[@]}"} --config "${TMP}/k_lam_old.cfg")"
     r2="$(k_run "${bin}" "${b}_lold" ${extra[@]+"${extra[@]}"} --config "${TMP}/k_lam_old.cfg" --lambda-th 0.3)"
@@ -1256,10 +1335,11 @@ cp "${TMP}/HASIC/snapdir_099/combined_099.hdf5" "${PDATA}/SIM/snapdir_099/"
 : > "${PDATA}/SIM/combined_ics.hdf5"
 cp scripts/run_ps_pipeline.sh "${MREPO}/scripts/"
 ln -sfn "${ROOT_DIR}/python" "${MREPO}/python"
-pdrive() {   # <log> [VAR=value ...]: the copied pipeline on SIM; echoes its exit status
+pdrive() {   # <log> [VAR=value ...]: the copied pipeline on SIM (the deposit's knobs unset first); echoes its exit status
     local log="$1"; shift
     local rc=0
-    env DTFE_DATA_ROOT="${PDATA}" SIMS=SIM NU=8 GRID_SIZE=16 FIELDS="density_a velocity_a" DTFE_GPU=0 FAKE_MODE=ok \
+    env -u DTFE_EXACT_AVERAGE -u PS_EXACT -u SUBSAMPLES -u AVG_SUBSAMPLES \
+        DTFE_DATA_ROOT="${PDATA}" SIMS=SIM NU=8 GRID_SIZE=16 FIELDS="density_a velocity_a" DTFE_GPU=0 FAKE_MODE=ok \
         "$@" "${MREPO}/scripts/run_ps_pipeline.sh" >"${log}" 2>&1 || rc=$?
     echo "${rc}"
 }
@@ -1267,8 +1347,8 @@ SD="${PDATA}/SIM/snapdir_099"
 rc=$(pdrive "${TMP}/p_first.log")
 head -c 512 /dev/zero > "${SD}/ps_output.pts_den"           # a slice of the 8^2 plane: 64 float64, as a real run leaves
 touch -t 203001010000 "${SD}/ps_output.pts_den" "${SD}/ps_output.pts_velGrad"   # what a real run leaves (newer than its inputs)
-check "$([ "${rc}" = "0" ] && grep -aq '^RUNNING: ./PS-DTFE[^ ]* .*--grid 16 ' "${SD}/ps_output.runlog" && echo 0 || echo 1)" \
-      "a first pipeline run computes the snapshot, its run log carries the command (${rc})"
+check "$([ "${rc}" = "0" ] && grep -aq '^RUNNING: ./PS-DTFE[^ ]* .*--grid 16 .*--exact ' "${SD}/ps_output.runlog" && echo 0 || echo 1)" \
+      "a first pipeline run computes the snapshot (the exact deposit, the default), its run log carries the command (${rc})"
 rc=$(pdrive "${TMP}/p_same.log")
 check "$([ "${rc}" = "0" ] && echo 0 || echo 1)" "... a rerun with the same settings exits 0 (${rc})"
 check "$(has "${TMP}/p_same.log" 'snap 99: ps_output.pts_den up to date \(same settings\), skipping compute')" "... and skips the snapshot: same settings"
@@ -1306,16 +1386,30 @@ check "$([ "$(has "${TMP}/p_pco.log" '^\+ env .*PS_POINT_CONVENTIONS=legacy .*ru
          && [ "$(lacks "${TMP}/p_pco.log" '^\+ env .*PTS_CONVENTIONS=')" = 0 ] \
          && [ "$(grep -c '^warning: PTS_CONVENTIONS is deprecated, use PS_POINT_CONVENTIONS$' "${TMP}/p_pco.log")" = 1 ] && echo 0 || echo 1)" \
       "... PTS_CONVENTIONS, the older name, is read with one warning and handed on under the new name only (${rc})"
-# the binaries' deprecated spellings: a run log written with '--ps-exact-deposit --lambda_th 0.3' (an older driver)
-# against the '--exact-average --lambda-th 0.3' the driver emits now must compare UNCHANGED -- else every snapshot on
-# disk would be recomputed. run_settings alone first, then the whole freshness test on a run log rewritten that way.
+# the binaries' deprecated spellings: a run log written with '--subsamples 3 --ps-exact-deposit --lambda_th 0.3' (an
+# older driver, which named the count beside the exact deposit too) against the '--exact --lambda-th 0.3' the driver
+# emits now must compare UNCHANGED -- else every snapshot on disk would be recomputed. run_settings alone first, then
+# the whole freshness test on a run log rewritten that way.
 eval "$(awk '$0 == "run_settings() {" { on = 1 } on { print } on && $0 == "}" { exit }' "${MREPO}/scripts/run_ps_pipeline.sh")"
-rs_old="$(run_settings 'RUNNING: ./PS-DTFE in.hdf5 out --grid 64 --field density_a --lambda_th 0.3 --ps-gpu --ps-exact-deposit --ps-no-overlap --ps-caustics')"
-rs_new="$(run_settings './PS-DTFE in.hdf5 out --grid 64 --field density_a --lambda-th 0.3 --gpu --exact-average --no-overlap --ps-caustics')"
+rs_old="$(run_settings 'RUNNING: ./PS-DTFE in.hdf5 out --grid 64 --subsamples 3 --field density_a --lambda_th 0.3 --ps-gpu --ps-exact-deposit --ps-no-overlap --ps-caustics')"
+rs_ea="$(run_settings 'RUNNING: ./PS-DTFE in.hdf5 out --grid 64 --avg-subsamples 3 --field density_a --lambda-th 0.3 --exact-average --ps-caustics')"
+rs_new="$(run_settings './PS-DTFE in.hdf5 out --grid 64 --field density_a --lambda-th 0.3 --gpu --exact --no-overlap --ps-caustics')"
 rs_other="$(run_settings 'RUNNING: ./PS-DTFE in.hdf5 out --grid 64 --field density_a --lambda_th 0.2 --ps-exact-deposit --ps-caustics')"
-check "$([ -n "${rs_new}" ] && [ "${rs_old}" = "${rs_new}" ] && printf '%s\n' "${rs_new}" | grep -qx -e '--exact-average' \
+check "$([ -n "${rs_new}" ] && [ "${rs_old}" = "${rs_new}" ] && [ "${rs_ea}" = "${rs_new}" ] && printf '%s\n' "${rs_new}" | grep -qx -e '--exact' \
+         && ! printf '%s\n' "${rs_new}" | grep -q -e '^--subsamples' \
          && printf '%s\n' "${rs_new}" | grep -qx -e '--lambda-th 0.3' && [ "${rs_other}" != "${rs_new}" ] && echo 0 || echo 1)" \
-      "run_settings: an old-spelling log and a new-spelling command are unchanged (the canonical names), another threshold is not"
+      "run_settings: an old-spelling exact log (--ps-exact-deposit or --exact-average, beside the old count) and the new --exact command are unchanged (the count is no setting of the exact deposit), another threshold is not"
+# an older SAMPLED run named no deposit flag and always a count: it is the command a sampled pipeline run emits now
+# ('--sampled', with that count or none: the binary's own 3), and not the exact default's
+rs_s_old="$(run_settings 'RUNNING: ./PS-DTFE in.hdf5 out --grid 64 --subsamples 3 --field density_a --lambda-th 0.3 --ps-caustics')"
+rs_s_new="$(run_settings './PS-DTFE in.hdf5 out --grid 64 --field density_a --lambda-th 0.3 --sampled --ps-caustics')"
+rs_s_n3="$(run_settings './PS-DTFE in.hdf5 out --grid 64 --field density_a --lambda-th 0.3 --sampled --subsamples 3 --ps-caustics')"
+rs_s_n2="$(run_settings './PS-DTFE in.hdf5 out --grid 64 --field density_a --lambda-th 0.3 --sampled --subsamples 2 --ps-caustics')"
+rs_x="$(run_settings './PS-DTFE in.hdf5 out --grid 64 --field density_a --lambda-th 0.3 --exact --ps-caustics')"
+check "$([ -n "${rs_s_new}" ] && [ "${rs_s_old}" = "${rs_s_new}" ] && [ "${rs_s_n3}" = "${rs_s_new}" ] && [ "${rs_s_n2}" != "${rs_s_new}" ] \
+         && [ "${rs_x}" != "${rs_s_old}" ] && printf '%s\n' "${rs_s_new}" | grep -qx -e '--subsamples 3' \
+         && ! printf '%s\n' "${rs_s_new}" | grep -qE -e '^--(exact|sampled)$' && echo 0 || echo 1)" \
+      "run_settings: an older sampled log (a count, no flag) is '--sampled' with that count or none, not '--sampled --subsamples 2', not '--exact'"
 # P6.7: every renamed option run_settings compares, old spelling against new (python/dtfelib/runlog.py's table),
 # and the options it newly compares (--face-gradient, the Lagrangian padding, the alpha shape, the halo release)
 rs7_old="$(run_settings 'RUNNING: ./PS-DTFE in.hdf5 out --input 105 --MpcUnit 1000 --grid 64 --avg-subsamples 3 --field density_a --lambda_th 0.3 --ps-lag-padding 8 --lagrangianInput ics.hdf5 --sample-points p.txt --pts-conventions legacy --ordered-merge --face-gradient --ps-alpha-shape 2.5 --ps-halo-release 500 --ps-window 0 1 0 1 0 1')"
@@ -1331,14 +1425,31 @@ check "$([ -n "${rs7_new}" ] && [ "${rs7_old}" = "${rs7_new}" ] && [ "${rs7_ok}"
       "run_settings (P6.7): --avg-subsamples 3 matches --subsamples 3, every renamed option reads the same, and the face gradient, Lagrangian padding, alpha shape and halo release count"
 rc=$(pdrive "${TMP}/p_ex.log" DTFE_EXACT_AVERAGE=1)
 head -c 512 /dev/zero > "${SD}/ps_output.pts_den"; touch -t 203001010000 "${SD}/ps_output.pts_den" "${SD}/ps_output.pts_velGrad"
-sed -e '/^RUNNING:/s/ --exact-average / --ps-exact-deposit /' -e '/^RUNNING:/s/ --lambda-th / --lambda_th /' \
+sed -e '/^RUNNING:/s/ --exact / --avg-subsamples 3 --ps-exact-deposit /' -e '/^RUNNING:/s/ --lambda-th / --lambda_th /' \
     "${SD}/ps_output.runlog" > "${SD}/ps_output.runlog.old" && mv "${SD}/ps_output.runlog.old" "${SD}/ps_output.runlog"
 rc2=$(pdrive "${TMP}/p_old.log" PS_EXACT=1 DRY_RUN=1)     # (the knob's older name: the same settings)
-check "$([ "${rc}" = 0 ] && [ "${rc2}" = 0 ] && grep -aq '^RUNNING: .* --lambda_th 0.3 .*--ps-exact-deposit ' "${SD}/ps_output.runlog" \
-         && [ "$(lacks "${SD}/ps_output.runlog" '^RUNNING: .*--(exact-average|lambda-th)')" = 0 ] \
+rc3=$(pdrive "${TMP}/p_old_def.log" DRY_RUN=1)            # (the exact default: the same settings too)
+check "$([ "${rc}" = 0 ] && [ "${rc2}" = 0 ] && [ "${rc3}" = 0 ] \
+         && grep -aq '^RUNNING: .* --lambda_th 0.3 .*--avg-subsamples 3 --ps-exact-deposit ' "${SD}/ps_output.runlog" \
+         && [ "$(lacks "${SD}/ps_output.runlog" '^RUNNING: .*--(exact|exact-average|lambda-th|sampled) ')" = 0 ] \
          && [ "$(has "${TMP}/p_old.log" 'snap 99: ps_output.pts_den up to date \(same settings\), skipping compute')" = 0 ] \
-         && echo 0 || echo 1)" "a run log with the old spellings (--ps-exact-deposit --lambda_th) is up to date for a driver emitting the new ones (${rc}, ${rc2})"
-rc=$(pdrive "${TMP}/p_back.log")                 # back to the sampled deposit for the checks below
+         && [ "$(has "${TMP}/p_old_def.log" 'snap 99: ps_output.pts_den up to date \(same settings\), skipping compute')" = 0 ] \
+         && echo 0 || echo 1)" "a run log with the old spellings (--avg-subsamples 3 --ps-exact-deposit --lambda_th) is up to date for a driver emitting the new ones, PS_EXACT=1 or the default (${rc}, ${rc2}, ${rc3})"
+# the same log as an older SAMPLED run wrote it (the count, no deposit flag): current for a sampled pipeline run
+# (DTFE_EXACT_AVERAGE=0 without a count, or SUBSAMPLES=3), stale for the exact default and for another count
+sed -e '/^RUNNING:/s/ --ps-exact-deposit / /' "${SD}/ps_output.runlog" > "${SD}/ps_output.runlog.old" \
+    && mv "${SD}/ps_output.runlog.old" "${SD}/ps_output.runlog"
+rc=$(pdrive "${TMP}/p_os0.log" DTFE_EXACT_AVERAGE=0 DRY_RUN=1); rc2=$(pdrive "${TMP}/p_os3.log" SUBSAMPLES=3 DRY_RUN=1)
+rc3=$(pdrive "${TMP}/p_osd.log" DRY_RUN=1); rc4=$(pdrive "${TMP}/p_os2.log" SUBSAMPLES=2 DRY_RUN=1)
+check "$([ "$(lacks "${SD}/ps_output.runlog" '^RUNNING: .*--(exact|ps-exact-deposit|exact-average|sampled) ')" = 0 ] \
+         && [ "$(has "${TMP}/p_os0.log" 'snap 99: ps_output.pts_den up to date \(same settings\)')" = 0 ] \
+         && [ "$(has "${TMP}/p_os3.log" 'snap 99: ps_output.pts_den up to date \(same settings\)')" = 0 ] \
+         && [ "$(has "${TMP}/p_osd.log" 'snap 99: settings differ from its ps_output.runlog, recomputing')" = 0 ] \
+         && grep -aq 'was: --subsamples 3$' "${TMP}/p_osd.log" && grep -aq 'now: --exact$' "${TMP}/p_osd.log" \
+         && [ "$(has "${TMP}/p_os2.log" 'snap 99: settings differ from its ps_output.runlog, recomputing')" = 0 ] \
+         && grep -aq 'now: --subsamples 2$' "${TMP}/p_os2.log" && echo 0 || echo 1)" \
+      "an older sampled run's log (a count, no flag): up to date for DTFE_EXACT_AVERAGE=0 and SUBSAMPLES=3, recomputed for the exact default and SUBSAMPLES=2 (${rc} ${rc2} ${rc3} ${rc4})"
+rc=$(pdrive "${TMP}/p_back.log")                 # a real run again (the exact default) for the checks below
 head -c 512 /dev/zero > "${SD}/ps_output.pts_den"; touch -t 203001010000 "${SD}/ps_output.pts_den" "${SD}/ps_output.pts_velGrad"
 mv "${SD}/ps_output.runlog" "${SD}/ps_output.runlog.keep"
 rc=$(pdrive "${TMP}/p_nolog.log" GRID_SIZE=24 DRY_RUN=1)
@@ -1369,8 +1480,12 @@ gpu_of() {   # <driver> <stamp or none> [VAR=value ...]: 'gpu' / 'cpu' as the pl
     sline "${TMP}/s_gpu.log" | grep -qE -e ' --(ps-)?gpu( |$)' && echo gpu || echo cpu
 }
 g=""
+# (run_ps_dtfe.sh with DTFE_EXACT_AVERAGE=0: the sampled deposit, which follows the stamp; the exact one, its
+# default, is the CPU's, below)
 for c in "run_dtfe.sh o/.gpu_mode_metal" "run_dtfe.sh o/.gpu_mode_off" "run_dtfe.sh none" \
-         "run_ps_dtfe.sh o_ps/.gpu_mode_metal" "run_ps_dtfe.sh o_ps/.gpu_mode_off" "run_ps_dtfe.sh o/.gpu_mode_metal"; do
+         "run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=0" "run_ps_dtfe.sh o_ps/.gpu_mode_off DTFE_EXACT_AVERAGE=0" \
+         "run_ps_dtfe.sh o/.gpu_mode_metal DTFE_EXACT_AVERAGE=0"; do
+    # shellcheck disable=SC2086
     g="${g} $(gpu_of ${c})"
 done
 check "$([ "${g}" = " gpu cpu cpu gpu cpu cpu" ] && echo 0 || echo 1)" \
@@ -1391,35 +1506,57 @@ g="$(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=1) $(gpu_of r
 g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=1 DTFE_GPU=auto) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_EXACT=1)"
 g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_EXACT=1 PS_METAL=1) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_EXACT=1 PS_GPU=AUTO)"
 g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=true)"
-check "$([ "${g}" = "cpu gpu cpu cpu gpu cpu cpu" ] && echo 0 || echo 1)" \
-      "... the exact deposit (DTFE_EXACT_AVERAGE=1, or PS_EXACT=1, or =true) runs on the CPU on a GPU build, faster there, for DTFE_GPU unset or auto and the older names alike; a GPU knob of 1 still moves it (${g})"
+g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal SUBSAMPLES=3)"
+g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal SUBSAMPLES=3 DTFE_EXACT_AVERAGE=1)"
+check "$([ "${g}" = "cpu gpu cpu cpu gpu cpu cpu cpu gpu cpu" ] && echo 0 || echo 1)" \
+      "... the exact deposit (DTFE_EXACT_AVERAGE=1, or PS_EXACT=1, or =true, or nothing: the default) runs on the CPU on a GPU build, faster there, for DTFE_GPU unset or auto and the older names alike; a GPU knob of 1 still moves it; a SUBSAMPLES count alone is the sampled deposit, the GPU's (${g})"
 rm -rf "${MREPO}/o" "${MREPO}/o_ps" "${MREPO}/o_d" "${MREPO}/o_ps_d"
 rc=$(sdrive run_ps_dtfe.sh "${TMP}/s_psdef.log" DRY_RUN=1)
-check "$([ "${rc}" = "0" ] && sline "${TMP}/s_psdef.log" | grep -qE -e '--field +density_a +velocity_a +divergence_a +shear_a +--lambda-th +0\.3 .*--ps-volume-weighted .*--ps-caustics' \
-         && echo 0 || echo 1)" "run_ps_dtfe.sh's defaults are production's: the four analysis fields, volume-weighted moments, the caustic classes (${rc})"
+check "$([ "${rc}" = "0" ] && sline "${TMP}/s_psdef.log" | grep -qE -e '--field +density_a +velocity_a +divergence_a +shear_a +--lambda-th +0\.3 +--exact +.*--ps-volume-weighted .*--ps-caustics' \
+         && ! sline "${TMP}/s_psdef.log" | grep -q -e '--subsamples' && grep -aqxF 'Cell averages: exact deposit (--exact; the default)' "${TMP}/s_psdef.log" \
+         && echo 0 || echo 1)" "run_ps_dtfe.sh's defaults are production's: the four analysis fields, the exact deposit (--exact, no count), volume-weighted moments, the caustic classes (${rc})"
+# the sampled deposit: DTFE_EXACT_AVERAGE=0 names no count (the binary's 3), a SUBSAMPLES count alone selects it and is
+# passed; -e (or DTFE_EXACT_AVERAGE=1) beside a count keeps the exact deposit, with one note
+rc=$(sdrive run_ps_dtfe.sh "${TMP}/s_pssam.log" DRY_RUN=1 DTFE_EXACT_AVERAGE=0)
+rc2=$(sdrive run_ps_dtfe.sh "${TMP}/s_pssub.log" DRY_RUN=1 SUBSAMPLES=2)
+rc3=$(sdrive run_ps_dtfe.sh "${TMP}/s_psksub.log" DRY_RUN=1 SUBSAMPLES=2 DTFE_EXACT_AVERAGE=1)
+check "$([ "${rc}${rc2}${rc3}" = "000" ] && sline "${TMP}/s_pssam.log" | grep -qE -e '--lambda-th +0\.3 +--sampled +--ps-vertex-mass ' \
+         && grep -aqxF 'Cell averages: sampled deposit, nSub^3 sub-points per cell (--sampled; DTFE_EXACT_AVERAGE=0)' "${TMP}/s_pssam.log" \
+         && sline "${TMP}/s_pssub.log" | grep -qE -e '--lambda-th +0\.3 +--sampled +--subsamples +2 +--ps-vertex-mass ' \
+         && grep -aqxF 'Cell averages: sampled deposit, nSub^3 sub-points per cell (--sampled --subsamples 2; SUBSAMPLES=2)' "${TMP}/s_pssub.log" \
+         && sline "${TMP}/s_psksub.log" | grep -qE -e '--lambda-th +0\.3 +--exact +--ps-vertex-mass ' \
+         && [ "$(grep -c '^Note: SUBSAMPLES=2 is ignored: DTFE_EXACT_AVERAGE=1 asks for the exact deposit' "${TMP}/s_psksub.log")" = 1 ] \
+         && echo 0 || echo 1)" \
+      "... DTFE_EXACT_AVERAGE=0: --sampled (no count); SUBSAMPLES=2 alone: --sampled --subsamples 2; DTFE_EXACT_AVERAGE=1 beside it: --exact, the count said ignored (${rc} ${rc2} ${rc3})"
 rc=$(sdrive run_ps_dtfe.sh "${TMP}/s_pslin.log" DRY_RUN=1 PS_LINEAR_DEPOSIT=1)
 rc2=$(sdrive run_ps_dtfe.sh "${TMP}/s_pslin2.log" DRY_RUN=1 PS_LINEAR_DEPOSIT=1 PS_VOLUME_WEIGHTED=1)
 check "$(sline "${TMP}/s_pslin.log" | grep -q -e '--ps-linear-deposit' && ! sline "${TMP}/s_pslin.log" | grep -q -e '--ps-volume-weighted' \
          && grep -aq 'velocity moments stay mass-weighted' "${TMP}/s_pslin.log" && sline "${TMP}/s_pslin2.log" | grep -q -e '--ps-volume-weighted' \
          && echo 0 || echo 1)" "... PS_LINEAR_DEPOSIT=1 drops the default volume weighting (said); an explicit PS_VOLUME_WEIGHTED=1 stays (${rc}, ${rc2})"
-# FACE_GRADIENT=1: --face-gradient in both drivers; run_ps_dtfe.sh refuses it, exit 2 before any snapshot, without the
-# exact deposit or without the volume weighting; with the GPU deposit it passes both flags (since 2026-11-09, D17)
+# FACE_GRADIENT=1: --face-gradient in both drivers; run_ps_dtfe.sh refuses it, exit 2 before any snapshot, with the
+# sampled deposit (DTFE_EXACT_AVERAGE=0, or a count alone; the exact one is the default) or without the volume
+# weighting; with the GPU deposit it passes both flags (since 2026-11-09, D17)
 rc=$(sdrive run_ps_dtfe.sh "${TMP}/s_psface.log" DRY_RUN=1 FACE_GRADIENT=1 DTFE_EXACT_AVERAGE=1)
 rc2=$(sdrive run_ps_dtfe.sh "${TMP}/s_psface2.log" DRY_RUN=1 FACE_GRADIENT=1)
 rc3=$(sdrive run_ps_dtfe.sh "${TMP}/s_psface3.log" DRY_RUN=1 FACE_GRADIENT=1 DTFE_EXACT_AVERAGE=1 PS_VOLUME_WEIGHTED=0)
 rc4=$(sdrive run_ps_dtfe.sh "${TMP}/s_psface4.log" DRY_RUN=1 FACE_GRADIENT=1 DTFE_EXACT_AVERAGE=1 DTFE_GPU=1)
 rc5=$(sdrive run_dtfe.sh "${TMP}/s_dtface.log" DRY_RUN=1 FACE_GRADIENT=1)
-check "$([ "${rc}" = "0" ] && sline "${TMP}/s_psface.log" | grep -qE -e '--exact-average .*--ps-volume-weighted +--face-gradient' \
-         && [ "${rc2}" = "2" ] && grep -aq 'needs the exact deposit' "${TMP}/s_psface2.log" \
+rc6=$(sdrive run_ps_dtfe.sh "${TMP}/s_psface6.log" DRY_RUN=1 FACE_GRADIENT=1 DTFE_EXACT_AVERAGE=0)
+rc7=$(sdrive run_ps_dtfe.sh "${TMP}/s_psface7.log" DRY_RUN=1 FACE_GRADIENT=1 SUBSAMPLES=2)
+check "$([ "${rc}" = "0" ] && sline "${TMP}/s_psface.log" | grep -qE -e '--exact .*--ps-volume-weighted +--face-gradient' \
+         && [ "${rc2}" = "0" ] && sline "${TMP}/s_psface2.log" | grep -qE -e '--exact .*--ps-volume-weighted +--face-gradient' \
          && [ "${rc3}" = "2" ] && grep -aq 'needs the volume-weighted' "${TMP}/s_psface3.log" \
-         && [ "${rc4}" = "0" ] && sline "${TMP}/s_psface4.log" | grep -qE -e '--exact-average .*--ps-volume-weighted +--face-gradient' \
-         && [ "${rc5}" = "0" ] && sline "${TMP}/s_dtface.log" | grep -qE -e '--exact-average +--face-gradient$' \
-         && echo 0 || echo 1)" "FACE_GRADIENT=1 passes --face-gradient in both drivers, with --gpu too; PS without -e or the volume weighting: exit 2 (${rc} ${rc2} ${rc3} ${rc4} ${rc5})"
+         && [ "${rc4}" = "0" ] && sline "${TMP}/s_psface4.log" | grep -qE -e '--gpu +--exact .*--ps-volume-weighted +--face-gradient' \
+         && [ "${rc5}" = "0" ] && sline "${TMP}/s_dtface.log" | grep -qE -e '--exact +--face-gradient$' \
+         && [ "${rc6}" = "2" ] && grep -aqxF 'Error: FACE_GRADIENT=1 needs the exact deposit (the default): DTFE_EXACT_AVERAGE=0 asks for the sampled one.' "${TMP}/s_psface6.log" \
+         && [ "${rc7}" = "2" ] && grep -aqxF 'Error: FACE_GRADIENT=1 needs the exact deposit (the default): SUBSAMPLES=2 asks for the sampled one.' "${TMP}/s_psface7.log" \
+         && echo 0 || echo 1)" \
+      "FACE_GRADIENT=1 passes --face-gradient in both drivers, alone (the exact deposit, the default) and with --gpu; PS with the sampled deposit (DTFE_EXACT_AVERAGE=0, SUBSAMPLES=2) or without the volume weighting: exit 2 (${rc} ${rc2} ${rc3} ${rc4} ${rc5} ${rc6} ${rc7})"
 rc=$(sdrive run_dtfe.sh "${TMP}/s_dtpertet.log" DRY_RUN=1 FACE_GRADIENT=0)
-check "$([ "${rc}" = "0" ] && sline "${TMP}/s_dtpertet.log" | grep -qE -e '--exact-average +--per-tet-gradient$' && echo 0 || echo 1)" \
+check "$([ "${rc}" = "0" ] && sline "${TMP}/s_dtpertet.log" | grep -qE -e '--exact +--per-tet-gradient$' && echo 0 || echo 1)" \
       "FACE_GRADIENT=0 passes --per-tet-gradient to run_dtfe.sh (the face gradient is the standard binary's default since 2026-11-09) (${rc})"
 rc=$(sdrive run_dtfe.sh "${TMP}/s_dtdef.log" DRY_RUN=1)
-check "$([ "${rc}" = "0" ] && sline "${TMP}/s_dtdef.log" | grep -qE -e 'snapdir_099/output +--grid +16 +--padding +15 +--periodic +--field +density_a +velocity_a +divergence_a +shear_a +--lambda-th +0\.3 +--exact-average$' \
+check "$([ "${rc}" = "0" ] && sline "${TMP}/s_dtdef.log" | grep -qE -e 'snapdir_099/output +--grid +16 +--padding +15 +--periodic +--field +density_a +velocity_a +divergence_a +shear_a +--lambda-th +0\.3 +--exact$' \
          && echo 0 || echo 1)" "run_dtfe.sh's defaults: padding 15, the same four fields as run_ps_dtfe.sh, the exact cell average (${rc})"
 # OUTPUT_PREFIX for run_dtfe.sh: the files and the run log under it; a PS-DTFE-style prefix refused before anything runs
 rc=$(sdrive run_dtfe.sh "${TMP}/s_pfx.log" OUTPUT_PREFIX=output_mc DTFE_EXACT_AVERAGE=0 FAKE_MODE=ok)
@@ -1464,12 +1601,14 @@ rc=$(sdrive run_dtfe.sh "${TMP}/s_supnone.log" FAKE_MODE=write)
 check "$([ "${rc}" = "0" ] && [ ! -e "${SSD}/output.superseded" ] && [ "$(lacks "${TMP}/s_supnone.log" 'Superseded')" = 0 ] && echo 0 || echo 1)" \
       "... and a first run into an empty prefix makes no superseded folder (${rc})"
 # run_ps_pipeline.sh's GPU default: DTFE_GPU unset follows the PS binary's stamp as run_ps_dtfe.sh does, so a CPU-only
-# build is never asked for the GPU (the copy (P) made, on SDATA's SIM: a dry run plans the plane and the snapshot)
+# build is never asked for the GPU (the copy (P) made, on SDATA's SIM: a dry run plans the plane and the snapshot) --
+# for the sampled deposit (DTFE_EXACT_AVERAGE=0 below); the exact one, the default, is the CPU's
 pgpu_of() {   # <stamp or none> [VAR=value ...]: 'gpu' / 'cpu' as the pipeline's planned run_ps_dtfe.sh call says
     local st="$1"; shift
     rm -rf "${MREPO}/o" "${MREPO}/o_ps" "${MREPO}/o_d" "${MREPO}/o_ps_d"
     if [ "${st}" != "none" ]; then mkdir -p "${MREPO}/${st%%/*}"; : > "${MREPO}/${st}"; fi
-    env -u DTFE_GPU -u PS_GPU -u PS_METAL -u DTFE_EXACT_AVERAGE -u PS_EXACT -u DTFE_PRECISION -u SIMS -u SNAPS DTFE_DATA_ROOT="${SDATA}" SIMS=SIM NU=8 DRY_RUN=1 "$@" \
+    env -u DTFE_GPU -u PS_GPU -u PS_METAL -u DTFE_EXACT_AVERAGE -u PS_EXACT -u SUBSAMPLES -u AVG_SUBSAMPLES -u DTFE_PRECISION -u SIMS -u SNAPS \
+        DTFE_DATA_ROOT="${SDATA}" SIMS=SIM NU=8 DRY_RUN=1 "$@" \
         "${MREPO}/scripts/run_ps_pipeline.sh" >"${TMP}/s_pgpu.log" 2>&1 || true
     local line
     line="$(grep -aE -e 'run_ps_dtfe\.sh -s SIM ' "${TMP}/s_pgpu.log" | tail -1)"
@@ -1480,18 +1619,20 @@ pgpu_of() {   # <stamp or none> [VAR=value ...]: 'gpu' / 'cpu' as the pipeline's
 }
 g=""
 for c in "o_ps/.gpu_mode_metal" "o_ps/.gpu_mode_off" "none" "o/.gpu_mode_metal"; do
-    g="${g} $(pgpu_of ${c})"
+    # shellcheck disable=SC2086
+    g="${g} $(pgpu_of ${c} DTFE_EXACT_AVERAGE=0)"
 done
 check "$([ "${g}" = " gpu cpu cpu cpu" ] && echo 0 || echo 1)" \
-      "run_ps_pipeline.sh, DTFE_GPU unset: the GPU (-m, DTFE_GPU=1 for run_ps_dtfe.sh) exactly when the PS binary's object folder says metal (not off, none, or the standard pair's) (${g# })"
-g="$(pgpu_of o_ps/.gpu_mode_metal DTFE_GPU=0) $(pgpu_of o_ps/.gpu_mode_off DTFE_GPU=1)"
-g="${g} $(pgpu_of o_ps/.gpu_mode_metal DTFE_PRECISION=double) $(pgpu_of o_ps_d/.gpu_mode_metal DTFE_PRECISION=double)"
+      "run_ps_pipeline.sh, DTFE_GPU unset, the sampled deposit: the GPU (-m, DTFE_GPU=1 for run_ps_dtfe.sh) exactly when the PS binary's object folder says metal (not off, none, or the standard pair's) (${g# })"
+g="$(pgpu_of o_ps/.gpu_mode_metal DTFE_GPU=0 DTFE_EXACT_AVERAGE=0) $(pgpu_of o_ps/.gpu_mode_off DTFE_GPU=1)"
+g="${g} $(pgpu_of o_ps/.gpu_mode_metal DTFE_PRECISION=double DTFE_EXACT_AVERAGE=0) $(pgpu_of o_ps_d/.gpu_mode_metal DTFE_PRECISION=double DTFE_EXACT_AVERAGE=0)"
 check "$([ "${g}" = "cpu gpu cpu gpu" ] && echo 0 || echo 1)" "... DTFE_GPU = 0 or 1 wins over the stamp; the double pair reads o_ps_d (${g})"
 check "$(has "${TMP}/s_pgpu.log" 'GPU: 1 \(DTFE_GPU unset: PS-DTFE-double is a GPU build\)')" "... and the header says which, and why"
 g="$(pgpu_of o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=1) $(pgpu_of o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=1 DTFE_GPU=1)"
 g="${g} $(pgpu_of o_ps/.gpu_mode_metal PS_EXACT=1) $(pgpu_of o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=yes)"
-check "$([ "${g}" = "cpu gpu cpu cpu" ] && echo 0 || echo 1)" \
-      "... the exact deposit (DTFE_EXACT_AVERAGE=1, the older PS_EXACT=1, or =yes: the driver's own test): the CPU unless DTFE_GPU=1 (${g})"
+g="${g} $(pgpu_of o_ps/.gpu_mode_metal) $(pgpu_of o_ps/.gpu_mode_metal SUBSAMPLES=3)"
+check "$([ "${g}" = "cpu gpu cpu cpu cpu gpu" ] && echo 0 || echo 1)" \
+      "... the exact deposit (DTFE_EXACT_AVERAGE=1, the older PS_EXACT=1, =yes, or nothing: the default; the driver's own rule): the CPU unless DTFE_GPU=1; a SUBSAMPLES count alone is the sampled deposit, the GPU's (${g})"
 g="$(pgpu_of o_ps/.gpu_mode_metal PS_METAL=0) $(pgpu_of o_ps/.gpu_mode_off PS_METAL=1) $(pgpu_of o_ps/.gpu_mode_metal PS_EXACT=1 PS_METAL=1)"
 g="${g} $(pgpu_of o_ps/.gpu_mode_off PS_GPU=1)"
 check "$([ "${g}" = "cpu gpu gpu gpu" ] && echo 0 || echo 1)" "... PS_GPU and PS_METAL, the older names, are read while DTFE_GPU is unset (${g})"
@@ -1528,7 +1669,7 @@ check "$([ -z "${t_bad}" ] && echo 0 || echo 1)" \
 # both set to different values: the new one wins, with a warning, and nothing is refused (a stray export or the
 # launcher's older names beside the new ones must not stop a run during the window)
 rc=$(sdrive run_ps_dtfe.sh "${TMP}/t_both.log" DRY_RUN=1 SUBSAMPLES=2 AVG_SUBSAMPLES=4 DTFE_EXACT_AVERAGE=0 PS_EXACT=1)
-check "$([ "${rc}" = 0 ] && sline "${TMP}/t_both.log" | grep -qE -e '--subsamples +2 ' && ! sline "${TMP}/t_both.log" | grep -q -e '--exact-average' \
+check "$([ "${rc}" = 0 ] && sline "${TMP}/t_both.log" | grep -qE -e '--sampled +--subsamples +2 ' && ! sline "${TMP}/t_both.log" | grep -qE -e '--exact( |$)' \
          && grep -aqx 'warning: AVG_SUBSAMPLES is deprecated, use SUBSAMPLES (AVG_SUBSAMPLES=4 is not read: SUBSAMPLES=2 wins)' "${TMP}/t_both.log" \
          && grep -aqx 'warning: PS_EXACT is deprecated, use DTFE_EXACT_AVERAGE (PS_EXACT=1 is not read: DTFE_EXACT_AVERAGE=0 wins)' "${TMP}/t_both.log" \
          && echo 0 || echo 1)" "both names set apart: the new one wins and the warning says so, exit 0 (${rc})"

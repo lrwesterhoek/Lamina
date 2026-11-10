@@ -270,7 +270,7 @@ def get_cosmology_params(z, H0=67.74, Omega_m0=0.3089, Omega_Lambda0=0.6911):
 # WHY SPECTRAL: for a band-limited field the FFT derivative of the cell AVERAGES is exactly the cell average of the
 # derivative (the box filter commutes with d/dx), and the cell average is what an '_a' grid holds. The odd derivative
 # of the Nyquist mode is set to zero (its sine vanishes at every grid point). Measured on a synthetic Zel'dovich field
-# (32^3 particles, standard binary with --exact-average, grids 32/64/128^3): applied to the binary's own 'a_vel' it
+# (32^3 particles, standard binary with --exact, grids 32/64/128^3): applied to the binary's own 'a_vel' it
 # reproduces its 'a_velDiv' with correlation 0.998/0.995/0.998 (rms difference 7/10/6% of the rms) and its V-web
 # label in 98.5/96.6/97.8% of the cells; central second-order differences do worse (0.992/0.995/0.997, 95.8/96.6/
 # 97.4%). The rest is the interpolant's power above the grid's Nyquist frequency, which no derivative of the cell

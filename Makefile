@@ -441,15 +441,14 @@ ifeq ($(HAVE_LIBDEFLATE),1)
     BASE_LIBS += -ldeflate
 endif
 
-# TBB-parallel Delaunay insertion for PS-DTFE (CGAL's Parallel_tag data structure + lock grid,
-# CGAL_triangulation/triangulation.cpp; used at run time only with --parallel-triangulation or
-# DTFE_TRIANGULATION_THREADS (older name DTFE_TBB_THREADS, deprecated) -- the default insert stays sequential and
-# bit-reproducible). 'auto': compiled in when the tbb package is installed
-# (macOS: `brew install tbb`; Debian/Ubuntu: libtbb-dev); TBB=0 forces it off, TBB=1 requires it.
-# PS-DTFE only: the standard DTFE binary keeps its sequential insert and Fast_location hierarchy
-# (its clustered Eulerian points build 4.5x SLOWER in parallel, where PS-DTFE's near-lattice
-# Lagrangian points build 2x faster). The DT type changes with it, so o_ps/ is stamped and wiped
-# on a toggle like the GPU mode. Override the TBB location with TBB_PATH_OVERRIDE=/path.
+# TBB-parallel Delaunay insertion (CGAL's Parallel_tag data structure + lock grid,
+# CGAL_triangulation/triangulation.cpp). At run time the parallel insert builds tessellations of at least
+# DTFE_TRIANGULATION_MIN_POINTS (1e6) points where more than one core is free for them (the result is the same
+# Delaunay tessellation; see docs/cleanup-plan.md P11.3), or always with --parallel-triangulation or
+# DTFE_TRIANGULATION_THREADS (older name DTFE_TBB_THREADS, deprecated). 'auto': compiled in when the tbb package
+# is installed (macOS: `brew install tbb`; Debian/Ubuntu: libtbb-dev); TBB=0 forces it off, TBB=1 requires it.
+# The DT type changes with it, so o_ps/ is stamped and wiped on a toggle like the GPU mode. Override the TBB
+# location with TBB_PATH_OVERRIDE=/path.
 TBB ?= auto
 ifeq ($(PLATFORM),macos)
     TBB_PATH := $(or $(TBB_PATH_OVERRIDE),$(BREW_PREFIX)/opt/tbb)
@@ -474,11 +473,11 @@ else
     PS_TBB_LIBS  :=
     TBB_BUILD_ARG := $(if $(filter 0,$(TBB)),TBB=0,)
 endif
-# TBB_STD=1: the same parallel insertion in the STANDARD binaries (DTFE, DTFE-double, DTFE-2d and the library), for
-# the measurement of docs/cleanup-plan.md P11 (the standard binary's clustered Eulerian points built 4.5x SLOWER in
-# parallel on the demo); its data structure drops Fast_location, so o/ is stamped and wiped on a toggle. Off by
-# default; needs the tbb package like TBB=1. DTFE_TRIANGULATION_THREADS=N or '--parallel-triangulation' turn the
-# insert on at run time, as for PS-DTFE.
+# TBB_STD: the same data structure in the STANDARD binaries (DTFE, DTFE-double, DTFE-2d and the library); follows
+# TBB since 2026-11-09 (docs/cleanup-plan.md P11.3), TBB_STD=0 keeps them on the sequential insert with the
+# Fast_location hierarchy. The DT type is part of the library's DTFE() signature, so a program linked against
+# libDTFE must be compiled with the same defines: demo/examples/Makefile repeats this block (keep the two the
+# same). o/ is stamped and wiped on a toggle.
 TBB_STD ?= $(TBB_PS)
 ifeq ($(TBB_STD),1)
     OPTIONS      += -DPARALLEL_TRIANGULATION -DCGAL_LINKED_WITH_TBB
@@ -658,7 +657,7 @@ $(OBJ_DIR)/kdtree2$(OBJ_EXT): $(SRC)/kdtree/kdtree2.hpp $(SRC)/kdtree/kdtree2.cp
 	$(CC) -O3 -ffast-math -fomit-frame-pointer -Wno-deprecated-declarations -MMD -MP $(MACOS_ISYSROOT) $(DTFE_INC) -o $(OBJ_DIR)/kdtree2$(OBJ_EXT) -c $(SRC)/kdtree/kdtree2.cpp
 
 # vendored r3d (third_party/r3d, plain C99; see its README for license/citation): exact
-# tetrahedron-cell intersection moments for --ps-exact-deposit / --exact-average. One
+# tetrahedron-cell intersection moments for --exact (both binaries' default '_a' average). One
 # object per dir; -fPIC so the o/ object also links into libDTFE (one shared object,
 # no _l twin). -x c: $(CC) is a C++ driver.
 R3D_SRC = third_party/r3d/r3d.c

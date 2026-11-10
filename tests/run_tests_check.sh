@@ -8,7 +8,8 @@
 #   R1  run_tests.py, a ./DTFE whose --full-help exits 3: both exact-average tests FAIL ('--full-help exited
 #       with 3', not a skip: a crash is not a missing flag) and the run exits 1, with or without
 #       DTFE_TEST_REQUIRED=1
-#   R2  run_tests.py, a ./DTFE whose --full-help lacks --exact-average: both tests SKIP and the run exits 0;
+#   R2  run_tests.py, a ./DTFE whose --full-help lacks --sampled (the tests' gate, as in a binary from before
+#       2026-11-09): both tests SKIP and the run exits 0;
 #       under DTFE_TEST_REQUIRED=1 both FAIL ('DTFE_TEST_REQUIRED=1, but ...') and it exits 1
 #   R3  run_tests.py, a fresh DTFE_TEST_REFERENCE_DIR: the regression is a SKIP (', 1 skipped' in the Results
 #       line) and the run exits 0 EVEN under DTFE_TEST_REQUIRED=1 (no build can supply a reference; ci_suite.sh
@@ -43,12 +44,12 @@ cp tests/run_tests.py "$TMP/rt/tests/"
 cat > "$TMP/rt/DTFE" <<'EOF'
 #!/usr/bin/env bash
 # stand-in ./DTFE: STUB_HELP=fail -> --full-help exits 3; STUB_HELP=noflag -> the real --full-help without the
-# --exact-average lines; everything else is the real binary (REAL_DTFE)
+# lines that name --sampled (the gate of the exact-average tests); everything else is the real binary (REAL_DTFE)
 if [ "${1:-}" = "--full-help" ]; then
     case "${STUB_HELP:-}" in
         fail)   echo "stand-in: --full-help is broken" >&2; exit 3 ;;
         noflag) help="$("${REAL_DTFE}" --full-help)" || exit $?
-                printf '%s\n' "$help" | grep -v -e '--exact-average'; exit 0 ;;
+                printf '%s\n' "$help" | grep -v -e '--sampled'; exit 0 ;;
     esac
 fi
 exec "${REAL_DTFE}" "$@"
@@ -72,14 +73,14 @@ for req in 0 1; do
              && [ "$(count "$TMP/r1_$req.log" '^  FAIL ')" = "2" ] && echo 0 || echo 1)" \
           "DTFE_TEST_REQUIRED=$req: both exact-average tests FAIL (--full-help exited with 3), nothing else does, exit 1 ($rc)"
 done
-echo ">> R2: --full-help without --exact-average"
+echo ">> R2: --full-help without --sampled"
 rc=$(rt "$TMP/r2_0.log" "$(fresh)" STUB_HELP=noflag)
-check "$([ "$rc" = "0" ] && [ "$(count "$TMP/r2_0.log" '^  SKIP  exact_average_(lattice|convergence) -- DTFE has no --exact-average$')" = "2" ] \
+check "$([ "$rc" = "0" ] && [ "$(count "$TMP/r2_0.log" '^  SKIP  exact_average_(lattice|convergence) -- DTFE has no --sampled$')" = "2" ] \
          && [ "$(count "$TMP/r2_0.log" '^  FAIL ')" = "0" ] && echo 0 || echo 1)" \
-      "both exact-average tests SKIP (DTFE has no --exact-average), no failure, exit 0 ($rc)"
+      "both exact-average tests SKIP (DTFE has no --sampled), no failure, exit 0 ($rc)"
 check "$(has "$TMP/r2_0.log" '^Results: [0-9]+/[0-9]+ passed, 3 skipped$')" "... the Results line counts them (and the regression's) as skipped"
 rc=$(rt "$TMP/r2_1.log" "$(fresh)" STUB_HELP=noflag DTFE_TEST_REQUIRED=1)
-check "$([ "$rc" = "1" ] && [ "$(count "$TMP/r2_1.log" '^  FAIL  exact_average_(lattice|convergence) -- DTFE_TEST_REQUIRED=1, but DTFE has no --exact-average$')" = "2" ] \
+check "$([ "$rc" = "1" ] && [ "$(count "$TMP/r2_1.log" '^  FAIL  exact_average_(lattice|convergence) -- DTFE_TEST_REQUIRED=1, but DTFE has no --sampled$')" = "2" ] \
          && echo 0 || echo 1)" "DTFE_TEST_REQUIRED=1: both FAIL instead, exit 1 ($rc)"
 echo ">> R3: no regression reference (a fresh DTFE_TEST_REFERENCE_DIR)"
 ref="$(fresh)"

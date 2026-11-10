@@ -3,7 +3,9 @@
    - an EMPTY value is the same as an unset one (for every kind of value);
    - a flag is off when set to 0, false, no or off (in any case) and on when set to anything else (flag(n, true): a
      switch that is on by default, which only those values turn off);
-   - a tristate (a switch with an automatic default) is -1 while unset or set to auto, else the flag;
+   - a tristate (a switch with an automatic default: DTFE_FACE_GRADIENT, and DTFE_EXACT_AVERAGE, which both binaries
+     read as a pin of the '_a' average, --exact or --sampled, that the flags beat) is -1 while unset or set to auto,
+     else the flag;
    - a number is the value read by std::atol / std::atof; the caller checks its range and keeps its default otherwise;
    - a Name may carry an ALIAS, read only when the name itself is unset: a renamed knob kept for a release. The
      renamed ones are listed once, in 'renamed' below (docs/cleanup-plan.md P6.7: one DTFE_ name per concept in both

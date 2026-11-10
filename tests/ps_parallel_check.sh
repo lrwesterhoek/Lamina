@@ -45,13 +45,15 @@ echo ">> generating test snapshot ..."
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" \
     --out "${SNAP}" --n "${N}" --box "${BOX}" --amplitude-factor "${AMP}" >/dev/null
 
+# Every run here is the sampled deposit ('density_a' would select the exact one): the exact integer '.streams' below
+# and the team rules the logs name are its own.
 run() {  # $1 = thread count, $2 = output root
     rm -f "$2".*
     local log="$2.log"
     local t0=$SECONDS
     set +e
     OMP_NUM_THREADS="$1" "${BIN}" "${SNAP}" "$2" \
-        --grid "${GRID}" --periodic --partition ${PARTITION} --field density velocity density_a \
+        --grid "${GRID}" --periodic --partition ${PARTITION} --field density velocity density_a --sampled \
         --input-format 105 --mpc-unit 1 --verbose 1 > "$log" 2>&1
     local rc=$?
     set -e
@@ -121,7 +123,7 @@ run_team() {  # $1 = DTFE_DEPOSIT_THREADS ('' = unset), $2 = output root, $3 = o
     rm -f "$2".*
     set +e
     env ${1:+DTFE_DEPOSIT_THREADS=$1} ${3:-} OMP_NUM_THREADS="${NPROC}" "${BIN}" "${SNAP}" "$2" \
-        --grid "${GRID}" --periodic --partition ${PARTITION} --field density velocity density_a velocity_a \
+        --grid "${GRID}" --periodic --partition ${PARTITION} --field density velocity density_a velocity_a --sampled \
         --input-format 105 --mpc-unit 1 --verbose 3 > "$2.log" 2>&1
     local rc=$?
     set -e

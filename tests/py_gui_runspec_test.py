@@ -93,9 +93,16 @@ def _run_command(tmp, sim):
                       slice_plane=str(sim / "hires_plane_z64.bin"), partition=4, max_concurrent=3,
                       output_prefix="ps_test")
     argv, env = spec.command()
-    check("PS argv: script, sim, grid, nSub, GPU, exact, sorted snapshots",
-          argv == [str(rs.PS_SCRIPT), "-s", "TNG100-3-Dark", "-g", "256", "-n", "2", "-m", "-e", "4", "99"],
-          str(argv))
+    check("PS argv: script, sim, grid, GPU, exact, sorted snapshots (no nSub: the exact deposit has none, and the "
+          "count is pinned empty under both names)",
+          argv == [str(rs.PS_SCRIPT), "-s", "TNG100-3-Dark", "-g", "256", "-m", "-e", "4", "99"]
+          and env["SUBSAMPLES"] == "" and env["AVG_SUBSAMPLES"] == "", f"{argv} {env}")
+    samp = rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[4], grid=256, nsub=2, gpu=False,
+                      deposit="sampled")
+    check("... the sampled deposit passes its nSub (-n) and no -e, pinned by DTFE_EXACT_AVERAGE=0",
+          samp.command()[0] == [str(rs.PS_SCRIPT), "-s", "TNG100-3-Dark", "-g", "256", "-n", "2", "4"]
+          and samp.command()[1]["DTFE_EXACT_AVERAGE"] == "0" and "SUBSAMPLES" not in samp.command()[1],
+          str(samp.command()))
     check("PS env carries the physics, slice and resources",
           env["DTFE_DATA_ROOT"] == str(tmp) and env["PS_CAUSTICS"] == "1"
           and env["PS_VOLUME_WEIGHTED"] == "1" and env["PS_VERTEX_MASS"] == "1"
@@ -125,18 +132,20 @@ def _run_command(tmp, sim):
           dt.command()[1].get("DTFE_EXACT") == "0" and dte.command()[1].get("DTFE_EXACT") == "1"
           and dt.command()[1].get("DTFE_EXACT_AVERAGE") == "0" and dte.command()[1].get("DTFE_EXACT_AVERAGE") == "1",
           f"{dt.command()[1]} {dte.command()[1]}")
-    # a standard-DTFE job STARTS at the exact cell average, run_dtfe.sh's and the
-    # production setting; a PS-DTFE job at the sampled deposit; a choice saved in a settings dict is kept
+    # a job STARTS at the exact cell average, both estimators (both drivers' and the binaries' default since
+    # 2026-11-09, the production setting); a choice saved in a settings dict is kept
     dflt = rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[4], estimator="dtfe", gpu=False)
-    check("a standard-DTFE job starts at the exact cell average (-e, DTFE_EXACT_AVERAGE=1), a PS-DTFE one at the "
-          "sampled deposit, Grids and Custom alike; a saved choice is kept, a settings dict without one gets the "
-          "estimator's own",
+    check("a job starts at the exact cell average (standard DTFE: -e, DTFE_EXACT_AVERAGE=1), PS-DTFE and standard "
+          "DTFE, Grids, Pipeline and Custom alike; a saved choice is kept, a settings dict without one gets the "
+          "production one",
           dflt.deposit == "exact" and "-e" in dflt.command()[0] and dflt.command()[1]["DTFE_EXACT_AVERAGE"] == "1"
-          and rs.RunSpec().deposit == "sampled" and rs.CustomSpec().deposit == "sampled"
-          and rs.CustomSpec(estimator="dtfe").deposit == "exact"
-          and rs.production_deposit("dtfe") == "exact" and rs.production_deposit("ps") == "sampled"
+          and rs.RunSpec().deposit == "exact" and rs.CustomSpec().deposit == "exact"
+          and rs.PipelineSpec().deposit == "exact" and rs.CustomSpec(estimator="dtfe").deposit == "exact"
+          and rs.production_deposit("dtfe") == "exact" and rs.production_deposit("ps") == "exact"
           and rs.RunSpec.from_dict({"estimator": "dtfe", "deposit": "sampled"}).deposit == "sampled"
+          and rs.RunSpec.from_dict({"deposit": "sampled"}).deposit == "sampled"
           and rs.RunSpec.from_dict({"estimator": "dtfe"}).deposit == "exact"
+          and rs.PipelineSpec.from_dict({"deposit": "sampled"}).deposit == "sampled"
           and rs.CustomSpec.from_dict(rs.CustomSpec(estimator="dtfe", deposit="sampled").to_dict()).deposit
           == "sampled", f"{dflt.deposit} {dflt.command()}")
     def _presets():                      # (imported here: the module's own tests import it later)
@@ -500,9 +509,12 @@ def _memory_check(tmp):
     pm = rs.PipelineSpec(data_root=str(tmp), sims=["TNG100-3-Dark"], nu=64, grid=128, scratch_dir=str(tmp.parent))
     have = pm.check_step("TNG100-3-Dark", [99, 4], 64)                 # hires_plane_z64.bin exists
     need = pm.check_step("TNG100-3-Dark", [99], 32)                    # hires_plane_z32 does not
-    check("a pipeline check passes the pipeline's settings, the plane file when it exists ...",
-          have.argv[1:] == ["-s", "TNG100-3-Dark", "-g", "128"] + (["-m"] if rs.gpu_build_default("ps") else [])
-          + ["4", "99"]
+    gpu_have = rs.PipelineSpec(data_root=str(tmp), sims=["TNG100-3-Dark"], nu=64, grid=128,
+                               gpu=True).check_step("TNG100-3-Dark", [99, 4], 64)
+    check("a pipeline check passes the pipeline's settings (the exact deposit, the default, on the CPU: no -m; a "
+          "ticked GPU: -m), the plane file when it exists ...",
+          have.argv[1:] == ["-s", "TNG100-3-Dark", "-g", "128", "4", "99"] and not pm.gpu
+          and gpu_have.argv[1:] == ["-s", "TNG100-3-Dark", "-g", "128", "-m", "4", "99"]
           and have.env["SAMPLE_POINTS"].endswith("hires_plane_z64.bin") and have.env["AUTO_TUNE_REPORT"] == "1"
           and have.env["PS_VOLUME_WEIGHTED"] == "1" and have.env["SCRATCH_DIR"] == str(tmp.parent), str(have.env))
     check("... and only its point count when it does not exist yet",
@@ -536,9 +548,9 @@ def _queue(tmp):
             rs.QueuedJob.of("plots", rs.PlotSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99],
                                                  sets=["fields", "voidpop"])),
             rs.QueuedJob.of("data", rs.DataSpec(data_root=str(tmp), sim="TNG50-4-Dark", snapshots=[99]))]
-    check("each job kind gets a one-line summary",
-          [j.title for j in jobs] == ["Grids · TNG100-3-Dark · 004 099 · PS-DTFE 512³",
-                                      "Pipeline · TNG100-3-Dark · plane 64² · grid 512³ · + figures",
+    check("each job kind gets a one-line summary (the exact deposit, the default, named)",
+          [j.title for j in jobs] == ["Grids · TNG100-3-Dark · 004 099 · PS-DTFE 512³, exact",
+                                      "Pipeline · TNG100-3-Dark · plane 64² · grid 512³, exact · + figures",
                                       "Plots · TNG100-3-Dark · 099 · Field slice maps, Void population",
                                       "Data · TNG50-4-Dark · 099 · download + merge"],
           str([j.title for j in jobs]))
@@ -638,11 +650,15 @@ def gpu_branches(tmp: Path, snap: Path):
             check(f"the faked stamp is what the build checks read ({built})",
                   rs.gpu_built("ps") is built and rs.gpu_built("dtfe") is built
                   and rs.gpu_backend("ps") == ("Metal" if built else ""))
-            # a fresh job's GPU tick is the build's; a saved one stays
-            check(f"a fresh job's GPU tick is the build's ({built}): the Grids job (both estimators, double too), the "
-                  "pipeline; a saved tick is kept either way",
-                  rs.RunSpec().gpu is built and rs.RunSpec(estimator="dtfe").gpu is built
-                  and rs.RunSpec(precision="double").gpu is built and rs.PipelineSpec().gpu is built
+            # a fresh job's GPU tick is the build's, except at PS-DTFE's exact deposit (the default since 2026-11-09),
+            # which starts on the CPU; a saved one stays
+            check(f"a fresh job's GPU tick is the build's ({built}): the Grids job (standard DTFE; PS-DTFE's sampled "
+                  "deposit, double too), the sampled pipeline; PS-DTFE's exact deposit, the default, starts on the "
+                  "CPU (Grids and Pipeline); a saved tick is kept either way",
+                  rs.RunSpec(deposit="sampled").gpu is built and rs.RunSpec(estimator="dtfe").gpu is built
+                  and rs.RunSpec(precision="double", deposit="sampled").gpu is built
+                  and rs.PipelineSpec(deposit="sampled").gpu is built
+                  and rs.RunSpec().gpu is False and rs.PipelineSpec().gpu is False
                   and rs.RunSpec.from_dict({"gpu": not built}).gpu is (not built)
                   and rs.PipelineSpec.from_dict({"gpu": not built}).gpu is (not built)
                   and rs.RunSpec(gpu=True).gpu is True,
@@ -695,10 +711,13 @@ def _gpu_advice_checks(tmp: Path, snap: Path):
     dex = rs.RunSpec(sim="TNG50-4", snapshots=[99], estimator="dtfe", deposit="exact", gpu=False, grid=256,
                      data_root=str(tmp))
     cex = rs.CustomSpec(input_file=str(snap), estimator="dtfe", deposit="exact", gpu=False, grid=256)
-    check("standard DTFE exact: the custom command passes --exact-average (not the PS flag), and without the GPU "
-          "both specs say the GPU is ~1.6x faster (when built)",
-          "--exact-average" in cex.command() and "--ps-exact-deposit" not in cex.command()
-          and "--exact-average" not in rs.CustomSpec(input_file=str(snap), estimator="dtfe", deposit="sampled").command()
+    csa = rs.CustomSpec(input_file=str(snap), estimator="dtfe", deposit="sampled").command()
+    check("standard DTFE exact: the custom command passes --exact (no older name, no --sampled), the sampled one "
+          "--sampled (no count: the binary's own), and without the GPU both specs say the GPU is ~1.6x faster (when "
+          "built)",
+          "--exact" in cex.command() and "--sampled" not in cex.command()
+          and not {"--exact-average", "--ps-exact-deposit"} & set(cex.command())
+          and "--sampled" in csa and "--exact" not in csa and "--subsamples" not in csa
           and (any("1.6x" in m for _, m in dex.problems()) and any("1.6x" in m for _, m in cex.problems())) == dt_gpu,
           str(cex.problems()))
     # the Custom tab's standard run starts at the exact cell average and pads
@@ -707,11 +726,16 @@ def _gpu_advice_checks(tmp: Path, snap: Path):
     cd0, cd2 = (rs.CustomSpec(input_file=str(snap), estimator="dtfe").command(),
                 rs.CustomSpec(input_file=str(snap), estimator="dtfe", dim=2, deposit="sampled").command())
     cps = rs.CustomSpec(input_file=str(snap), estimator="ps").command()
-    check("the Custom tab's standard run: --exact-average by default and '--padding 15' (3D and 2D, either average); "
-          "a PS-DTFE run passes no --padding",
-          "--exact-average" in cd0 and STANDARD_PADDING == 15.0
+    cpss = rs.CustomSpec(input_file=str(snap), estimator="ps", deposit="sampled", nsub=2).command()
+    check("the Custom tab's standard run: --exact by default and '--padding 15' (3D and 2D, either average); "
+          "a PS-DTFE run passes no --padding, --exact by default (no count), '--sampled --subsamples k' sampled",
+          "--exact" in cd0 and STANDARD_PADDING == 15.0
           and all(c.count("--padding") == 1 and c[c.index("--padding") + 1] == "15" for c in (cd0, cd2))
-          and "--padding" not in cps and "--exact-average" not in cd2, f"{cd0} {cd2} {cps}")
+          and "--padding" not in cps and "--exact" not in cd2 and "--sampled" in cd2
+          and "--exact" in cps and "--sampled" not in cps and "--subsamples" not in cps
+          and "--exact" not in cpss and "--sampled" in cpss
+          and cpss[cpss.index("--sampled") + 1:cpss.index("--sampled") + 3] == ["--subsamples", "2"],
+          f"{cd0} {cd2} {cps} {cpss}")
 
 
 def tick_helpers():
@@ -903,16 +927,21 @@ def _custom_snapshot(tmp, np, P):
           f"{cpp} {set(RL.RENAMES.items()) ^ set(awk.items())} {awk_sw}")
     cx = rs.CustomSpec(input_file=str(snap), estimator="ps", deposit="exact", gpu=True, fields=["density_a", "tweb_a"])
     cxa = cx.command()
-    check("the Custom tab emits the canonical names (--exact-average, --gpu, --lambda-th), none the binaries deprecate",
-          "--exact-average" in cxa and "--gpu" in cxa and cxa[cxa.index("--lambda-th") + 1] == "0.3"
+    check("the Custom tab emits the canonical names (--exact, --gpu, --lambda-th), none the binaries deprecate",
+          "--exact" in cxa and "--gpu" in cxa and cxa[cxa.index("--lambda-th") + 1] == "0.3"
           and not set(cxa) & set(cpp), str(cxa))
     old = R.RunRecord(path=Path("o.runlog"), binary="PS-DTFE", command="./PS-DTFE in o --grid 64 --avg-subsamples 2 "
                       "--lambda_th 0.3 --ps-gpu --ps-exact-deposit --ps-caustics")
-    new = R.RunRecord(path=Path("n.runlog"), binary="PS-DTFE", command="./PS-DTFE in n --grid 64 --avg-subsamples 2 "
+    mid = R.RunRecord(path=Path("m.runlog"), binary="PS-DTFE", command="./PS-DTFE in m --grid 64 --avg-subsamples 2 "
                       "--lambda-th 0.3 --gpu --exact-average --ps-caustics")
-    check("a run log with the deprecated spellings reads as one with the canonical names (settings, options, GPU)",
-          old.settings() == new.settings() and old.options_text() == new.options_text() == "exact, caustics, GPU"
-          and old.has("--exact-average") and new.has("--ps-exact-deposit") and old.gpu and old.nsub == 2
+    new = R.RunRecord(path=Path("n.runlog"), binary="PS-DTFE", command="./PS-DTFE in n --grid 64 --subsamples 2 "
+                      "--lambda-th 0.3 --gpu --exact --ps-caustics")
+    check("a run log with the deprecated spellings reads as one with the canonical names (settings, options, GPU; "
+          "both older names of the exact deposit, '--ps-exact-deposit' and '--exact-average', are '--exact')",
+          old.settings() == mid.settings() == new.settings()
+          and old.options_text() == mid.options_text() == new.options_text() == "exact, caustics, GPU"
+          and old.exact and mid.exact and new.exact and old.has("--exact") and mid.has("--ps-exact-deposit")
+          and new.has("--exact-average") and old.gpu and old.nsub == 2
           and R.canonical_command("--lambda_th=0.3 /a/--ps-gpu") == "--lambda-th=0.3 /a/--ps-gpu",
           f"{old.settings()} {old.options_text()}")
     # P6.7: every rename of the second pass, with its value transforms
@@ -965,7 +994,9 @@ def _custom_snapshot(tmp, np, P):
                                    partition=2, max_concurrent=2, scratch_dir=str(work), lagrangian="separate",
                                    lagrangian_file=str(snap), box=[0, 1, 0, 1, 0, 1], parallel_triangulation=True,
                                    alpha_shape=2.5, periodic=False, ordered_merge=True),
-                     rs.CustomSpec(input_file=str(snap), estimator="dtfe", gpu=True)):
+                     rs.CustomSpec(input_file=str(snap), estimator="ps", deposit="sampled", nsub=2),
+                     rs.CustomSpec(input_file=str(snap), estimator="dtfe", gpu=True),
+                     rs.CustomSpec(input_file=str(snap), estimator="dtfe", deposit="sampled")):
             emitted |= {a for a in spec.command() if a.startswith("--")}
         known = set(ps_help) | set(dt_help)
         unknown = sorted(emitted - known)
@@ -1101,6 +1132,13 @@ def _custom_snapshot(tmp, np, P):
           and not [m for s in (m_on, m_on_copy) for m in errors(s) if "extra options" in m]
           and m_on_copy.command()[-2:] == ["--ps-merge", "index-order"],
           str(errors(m_off) + errors(m_off_copy) + errors(m_on) + errors(m_on_copy) + m_on_copy.command()[-3:]))
+    # the cell average: the tab names it either way ('--exact' or '--sampled'), so either flag among the extra
+    # options, or an older name of '--exact', repeats it (the binary refuses '--exact' beside '--sampled')
+    avg = [rs.CustomSpec(input_file=str(snap), grid=64, output_dir=str(work), deposit=dep, extra_args=e)
+           for dep, e in (("exact", "--sampled"), ("sampled", "--exact-average"), ("exact", "--ps-exact-deposit"))]
+    check("... '--exact' or '--sampled' (or an older name of '--exact') among the extra options repeats the tab's cell "
+          "average, whichever it is",
+          all(any("repeat --exact / --sampled," in m for m in errors(s)) for s in avg), str([errors(s) for s in avg]))
     q = rs.QueuedJob.of("custom", c)
     check("custom: a queued custom-snapshot job rebuilds and has a summary",
           q.build() == c and q.title.startswith("Custom snapshot · cloud.hdf5 · PS-DTFE 64³"), q.title)
@@ -1281,23 +1319,27 @@ def _presets_help(sim, P, R):
     cc = rs.CustomSpec()
     P.apply_preset(cc, P.BUILTIN_PRESETS["Publication"][1], planes)
     check("a preset applies to a custom-snapshot job too (fields it lacks are skipped)", cc.grid == 512 and cc.caustics)
-    # the presets give a standard-DTFE job its production cell average (the exact one), a PS-DTFE job the
-    # sampled deposit; 'Quick look' samples both
-    sd, sp, ql, cd = (rs.RunSpec(estimator="dtfe", deposit="sampled"), rs.RunSpec(deposit="exact"),
+    # the presets give both estimators their production cell average (the exact one, since 2026-11-09); 'Quick look'
+    # samples both (nSub 1: the quickest); a user preset's 'deposit_dtfe' still applies to a standard-DTFE job
+    sd, sp, ql, cd = (rs.RunSpec(estimator="dtfe", deposit="sampled"), rs.RunSpec(deposit="sampled"),
                       rs.RunSpec(estimator="dtfe"), rs.CustomSpec(estimator="dtfe", deposit="sampled"))
     ch = P.apply_preset(sd, P.BUILTIN_PRESETS["Standard"][1], planes)
-    P.apply_preset(sp, P.BUILTIN_PRESETS["Standard"][1], planes)
+    chp = P.apply_preset(sp, P.BUILTIN_PRESETS["Standard"][1], planes)
     P.apply_preset(ql, P.BUILTIN_PRESETS["Quick look"][1], planes)
     P.apply_preset(cd, P.BUILTIN_PRESETS["Publication"][1], planes)
-    check("preset 'Standard'/'Publication' on standard DTFE: the exact cell average; on PS-DTFE the sampled deposit; "
-          "'Quick look' samples both; a preset naming the estimator follows it",
-          sd.deposit == "exact" and "deposit" in ch and sp.deposit == "sampled" and ql.deposit == "sampled"
-          and cd.deposit == "exact" and "deposit_dtfe" not in sd.to_dict()
+    check("preset 'Standard'/'Publication': the exact cell average on both estimators; 'Quick look' samples both; "
+          "a preset naming the estimator follows it",
+          sd.deposit == "exact" and "deposit" in ch and sp.deposit == "exact" and "deposit" in chp
+          and ql.deposit == "sampled" and cd.deposit == "exact" and "deposit_dtfe" not in sd.to_dict()
+          and not any("deposit_dtfe" in s for _, s in P.BUILTIN_PRESETS.values())
           and P.apply_preset(rs.RunSpec(estimator="dtfe"), {"estimator": "ps", "deposit": "sampled",
                                                             "deposit_dtfe": "exact"}) == ["estimator", "deposit"],
           f"{sd.deposit} {sp.deposit} {ql.deposit} {cd.deposit} {ch}")
-    check("the standard-DTFE averaging labels name the exact one the default",
-          "default" in P.label("exact_dtfe") and "default" not in P.label("sampled_dtfe"))
+    check("the averaging labels name the exact one the default, both estimators (the sampled one not)",
+          "default" in P.label("exact_dtfe") and "default" not in P.label("sampled_dtfe")
+          and "default" in P.label("exact") and "default" not in P.label("sampled")
+          and P.OPTION_TEXT["exact"][1] == P.OPTION_TEXT["exact_dtfe"][1] == "--exact"
+          and P.OPTION_TEXT["sampled"][1] == P.OPTION_TEXT["sampled_dtfe"][1] == "--sampled")
     real = P.flag_help("PS-DTFE")
     if real:
         check("the binary's own --full_help: every production flag has a description",
@@ -2325,19 +2367,23 @@ def pipeline_options(tmp: Path, sim: Path):
     run_keys = ("PS_EXACT", "AVG_SUBSAMPLES", "PS_GPU", "PS_VERTEX_MASS", "PS_VOLUME_WEIGHTED", "PS_CAUSTICS",
                 "PS_CAUSTIC_CUSPS", "PS_PARALLEL_TRI", "PLANES", "SUPERSAMPLE")
     env = rs.PipelineSpec(**base).command()[1]
-    # the caustic classes are on by default (run_ps_dtfe.sh's default and the production runs'); the GPU
+    # the caustic classes are on by default (run_ps_dtfe.sh's default and the production runs'); the exact deposit
+    # too (the default since 2026-11-09: no sub-sample count, pinned empty, and the CPU); the sampled deposit's GPU
     # when the PS pair was built with one (rs.gpu_build_default, scripts/config.sh's rule)
     gpu = "1" if rs.gpu_build_default("ps") else "0"
-    check("defaults: every run option is spelled out for run_ps_dtfe.sh (a stray PS_* in the login shell cannot leak in)",
-          [env[k] for k in run_keys] == ["0", "3", gpu, "1", "1", "1", "0", "0", "1", "1"]
-          and "THICKNESS" not in env and "WINDOW" not in env, str(env))
-    q = rs.PipelineSpec(**base, deposit="exact", nsub=1, gpu=False, vertex_mass=False, volume_weighted=False,
+    env_s = rs.PipelineSpec(**base, deposit="sampled").command()[1]
+    check("defaults: every run option is spelled out for run_ps_dtfe.sh (a stray PS_* in the login shell cannot leak "
+          "in); the exact deposit with the count pinned empty, the sampled one with its nSub",
+          [env[k] for k in run_keys] == ["1", "", "0", "1", "1", "1", "0", "0", "1", "1"]
+          and env["SUBSAMPLES"] == "" and [env_s[k] for k in run_keys[:3]] == ["0", "3", gpu]
+          and env_s["SUBSAMPLES"] == "3" and "THICKNESS" not in env and "WINDOW" not in env, f"{env} {env_s}")
+    q = rs.PipelineSpec(**base, deposit="sampled", nsub=1, gpu=False, vertex_mass=False, volume_weighted=False,
                         caustics=True, caustic_cusps=True, parallel_triangulation=True, planes=16, thickness=3.5,
                         supersample=2, window="10 60 0 25", precision="double")
     env = q.command()[1]
     check("every option switched: the environment follows",
           [env[k] for k in run_keys + ("THICKNESS", "WINDOW", "DTFE_PRECISION")]
-          == ["1", "1", "0", "0", "0", "1", "1", "1", "16", "2", "3.5", "10 60 0 25", "double"], str(env))
+          == ["0", "1", "0", "0", "0", "1", "1", "1", "16", "2", "3.5", "10 60 0 25", "double"], str(env))
     # P6.7: each run-script knob under its new name AND its older one (the same value) until P6.6, so a stray older
     # export in the login shell is overwritten; the new names are the ones the drivers read first
     pairs = (("DTFE_EXACT_AVERAGE", "PS_EXACT"), ("SUBSAMPLES", "AVG_SUBSAMPLES"), ("DTFE_GPU", "PS_GPU"),
@@ -2353,7 +2399,7 @@ def pipeline_options(tmp: Path, sim: Path):
                       gpu=True, tess_cache="/private/tmp/t").command()[1]
     check("the knobs under their new names and their older ones alike (Pipeline, PS and standard Grids jobs; P6.7)",
           not both(env) and not both(tq) and not both(g_ps) and not both(g_dt, std_pairs)
-          and env["SUBSAMPLES"] == "1" and env["DTFE_EXACT_AVERAGE"] == "1" and env["PLANE_WINDOW"] == "10 60 0 25"
+          and env["SUBSAMPLES"] == "1" and env["DTFE_EXACT_AVERAGE"] == "0" and env["PLANE_WINDOW"] == "10 60 0 25"
           and env["PYTHON"] == rs.PYTHON and tq["TESSELLATION_CACHE"] == "/private/tmp/t"
           and g_ps["DTFE_EXACT_AVERAGE"] == "1" and g_ps["DTFE_GPU"] == "1" and g_ps["DTFE_RESUME"] == "0"
           and g_ps["PS_POINT_CONVENTIONS"] == "grid" and g_ps["PS_MERGE"] == "index-order"
@@ -2375,13 +2421,16 @@ def pipeline_options(tmp: Path, sim: Path):
     pinned = ("SUBSAMPLES", "THREADS")
     st_dt = rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99], estimator="dtfe").steps()
     exported = [ln for ln in rs.export_script(st_dt, "t").splitlines() if "run_dtfe.sh" in ln and not ln.startswith("#")]
-    ps_argv = rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99], nsub=2).command()[0]
+    ps_argv = rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99], nsub=2,
+                         deposit="sampled").command()[0]
     check("a standard Grids job pins SUBSAMPLES and THREADS empty (run_dtfe.sh: the binary's count, all cores): both "
-          "keys in the env its step runs with and in the line shown and exported; a PS one leaves them to -n and the shell",
+          "keys in the env its step runs with and in the line shown and exported; a PS one leaves the thread cap to "
+          "the shell and its count to -n (sampled), or pins the count empty (the exact deposit has none)",
           len(st_dt) == 1 and len(exported) == 1
           and all(k in e and e[k] == "" for e in (st_dt[0].env, g_dt) for k in pinned) and "AVG_SUBSAMPLES" not in g_dt
           and all(f" {k}='' " in f" {ln} " for ln in (lines[3], st_dt[0].line(), exported[0]) for k in pinned)
-          and "SUBSAMPLES" not in g_ps and "THREADS" not in g_ps and ps_argv[ps_argv.index("-n") + 1] == "2",
+          and g_ps.get("SUBSAMPLES") == "" and "THREADS" not in g_ps and "-n" in ps_argv
+          and ps_argv[ps_argv.index("-n") + 1] == "2",
           f"{st_dt[0].env if st_dt else None} | {g_dt} | {lines[3]} | {exported} | {ps_argv}")
     check("... the merge tick is the explicit index order (PS_MERGE=index-order: the memory gate stays on under the "
           "speed split), unticked the completion order; ORDERED_MERGE the same until P6.6",
@@ -2391,7 +2440,8 @@ def pipeline_options(tmp: Path, sim: Path):
     st = q.check_step("TNG100-3-Dark", [99], 32)
     check("the memory check carries the run options and the precision, and no -m without the GPU",
           st.argv[1:] == ["-s", "TNG100-3-Dark", "-g", "128", "99"] and st.env["DTFE_PRECISION"] == "double"
-          and st.env["PS_EXACT"] == "1" and st.env["PS_CAUSTICS"] == "1" and st.env["AUTO_TUNE_REPORT"] == "1"
+          and st.env["PS_EXACT"] == "0" and st.env["AVG_SUBSAMPLES"] == "1" and st.env["PS_CAUSTICS"] == "1"
+          and st.env["AUTO_TUNE_REPORT"] == "1"
           and st.env["PTS_VEL_GRAD"] == "1" and not any(k in st.env for k in rs.PIPELINE_ONLY_KEYS),
           f"{st.argv} {st.env}")
     # 16 planes x 32 x nv x 2^2, nv = round(32 * 25 / 50) = 16 (square pixels over the window's aspect)
@@ -2514,9 +2564,9 @@ def pipeline_options(tmp: Path, sim: Path):
     check("a malformed window is an error", "error" in lv and "window" in msg, msg)
     lv, msg = levels(rs.PipelineSpec(**base, render_fields="density,bogus"))
     check("an unknown point-evaluated field is an error", "error" in lv and "bogus" in msg, msg)
-    check("the queue summary names an exact deposit",
-          ", exact" in rs.job_summary("pipeline", rs.PipelineSpec(**base, deposit="exact"))
-          and ", exact" not in rs.job_summary("pipeline", rs.PipelineSpec(**base)))
+    check("the queue summary names an exact deposit (the default), not a sampled one",
+          ", exact" in rs.job_summary("pipeline", rs.PipelineSpec(**base))
+          and ", exact" not in rs.job_summary("pipeline", rs.PipelineSpec(**base, deposit="sampled")))
     check("the pipeline's plan line is parsed with and without -m (PS_GPU)",
           rs.parse_progress("+ env SAMPLE_POINTS=/p.bin PS_VOLUME_WEIGHTED=1 PTS_VEL_GRAD=1 /r/scripts/run_ps_dtfe.sh "
                             "-s S -g 512 -m 50 99\n").get("planned") == 2
@@ -2526,8 +2576,9 @@ def pipeline_options(tmp: Path, sim: Path):
     check("runspec's point-eval constants match dtfelib.pointeval (not imported there: matplotlib)",
           rs.POINTEVAL_FIELDS == tuple(pointeval.STYLES) and rs.POINTEVAL_DERIVATIVE_SMOOTH == pointeval.DERIVATIVE_SMOOTH)
     old = rs.PipelineSpec.from_dict({"sims": ["TNG50-4"], "nu": 4096, "render": False})
-    check("settings saved before these options load with the scripts' defaults",
-          old.deposit == "sampled" and old.gpu is rs.gpu_build_default("ps") and old.planes == 1
+    check("settings saved before these options load with the scripts' defaults (the exact deposit, since 2026-11-09, "
+          "on the CPU: no deposit was stored, so none is overridden)",
+          old.deposit == "exact" and old.gpu is False and old.planes == 1
           and old.render_project == "plane" and not old.render)
 
 
@@ -2971,6 +3022,40 @@ def run_log_contract():
               and dx.settings().get("estimator") == "dtfe" and "exact average" in dx.options_text()
               and "exact average" not in dm.options_text() and "exact average" not in lin.options_text(),
               f"{dx.settings()} {dm.settings()} {dx.options_text()!r}")
+        # the exact average is the default since 2026-11-09: a log is read by its header's cell-average line first
+        # (a command without a flag ran exact), then by the command ('--exact' and its older names against
+        # '--sampled'); an older log with neither was sampled (dm above, std)
+        std_x = ("\t volume averaging       : EXACT cell-tetrahedron integration of the linear interpolant (--exact, "
+                 "the default; r3d, or a z-sweep on the GPU with --gpu; --subsamples ignored)\n")
+        heads = {
+            "hx": "RUNNING: /x/DTFE in.hdf5 hx --grid 64 --field density_a\n" + std_x,
+            "hs": "RUNNING: /x/DTFE in.hdf5 hs --grid 64 --subsamples 2 --field density_a\n\t volume averaging       : "
+                  "SAMPLED (a sampling count or method was given; --exact integrates the cells exactly)\n",
+            "hc": "RUNNING: /x/DTFE in.hdf5 hc --grid 64 --exact --redshift-cone 1 2 0 1 0 1 --field density_a\n"
+                  "\t volume averaging       : SAMPLED (a redshift cone grid has no exact form)\n",
+            "px": "RUNNING: /x/PS-DTFE in.hdf5 px --grid 64 --field density_a\n\t grid deposit           : EXACT "
+                  "tetrahedron-cell intersection moments (--exact, the default; r3d clipping; nSub ignored)\n",
+            "ps": "RUNNING: /x/PS-DTFE in.hdf5 ps --grid 64 --sampled --field density_a\n\t grid deposit           : "
+                  "SAMPLED on nSub^3 sub-points (--sampled)\n",
+            "po": "RUNNING: /x/PS-DTFE in.hdf5 po --grid 64 --ps-exact-deposit --field density_a\n\t grid deposit"
+                  "           : EXACT tetrahedron-cell intersection moments (--exact-average; r3d clipping; nSub ignored)\n",
+            "pf": "RUNNING: /x/PS-DTFE in.hdf5 pf --grid 64 --exact --field density\n",
+            "two": "RUNNING: /x/DTFE in.hdf5 two --grid 64 --sampled --field density_a\n\t volume averaging       : "
+                   "SAMPLED (--sampled)\nRUNNING: /x/DTFE in.hdf5 two --grid 64 --field density_a\n" + std_x,
+        }
+        for name, text in heads.items():
+            _write_log(d / f"{name}.runlog", text)
+        hr = {name: R.parse_runlog(d / f"{name}.runlog") for name in heads}
+        got = {name: (r.exact, r.settings().get("deposit")) for name, r in hr.items()}
+        check("the cell average read from a log: the header line first (a flagless new run exact, a count or a "
+              "redshift cone sampled even beside '--exact'), then the command ('--exact', an old "
+              "'--ps-exact-deposit'), an older flagless log sampled; a log of two runs reads its first",
+              got == {"hx": (True, "exact"), "hs": (False, "sampled"), "hc": (False, "sampled"),
+                      "px": (True, "exact"), "ps": (False, "sampled"), "po": (True, "exact"), "pf": (True, "exact"),
+                      "two": (False, "sampled")}
+              and hr["hx"].header_average == "exact" and hr["pf"].header_average == ""
+              and "exact average" in hr["hx"].options_text() and "exact" in hr["px"].options_text().split(", ")
+              and not dm.exact and not std.exact, str(got))
         _write_log(d / "gpu.runlog", "Build: PS-DTFE 3333333 (built 2026-10-01T09:00:00Z)\n"
                    "RUNNING: /x/PS-DTFE in.hdf5 gpu --grid 64 --periodic --partition 2 2 2 --ps-gpu --ps-vertex-mass\n"
                    "PS-DTFE Metal: Metal command buffer failed: Impacting Interactivity; retrying the partition deposit "

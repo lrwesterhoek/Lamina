@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# The standard-DTFE Monte-Carlo cell average ('_a', method 1, the default without --exact-average) is UNBIASED
+# The standard-DTFE Monte-Carlo cell average ('_a', method 1, '--sampled'; the exact average '--exact' is the default
+# since 2026-11-09, so every Monte-Carlo run below says '--sampled' or passes a sample count) is UNBIASED
 # and independent of the partition / thread / padding split. Mapping the same short Sobol prefix from CGAL's
 # vertex(0) into every tetrahedron is neither: the prefix does not average to the centroid and CGAL's vertex
 # slots follow density, so such '_a' grids lose 0.17-0.29% of their mass, and the realization changes by ~10-23%
@@ -9,7 +10,7 @@
 #   A1  box mean of '.a_den' within 1e-4 of 1 (measured +2.0e-5; double build +1.4e-5), and with '--samples 20' (the
 #       minimum count 4, the worst Sobol prefix; measured -5.1e-6). The vertex(0) realization (DTFE_MC_LEGACY=1, kept
 #       for A/B) must FAIL the same bound (measured -3.35e-3), so the check is known to see the bias
-#   A2  the per-cell noise against --exact-average, rms(a - exact) / <exact>, is no larger than the vertex(0)
+#   A2  the per-cell noise against --exact, rms(a - exact) / <exact>, is no larger than the vertex(0)
 #       realization's and below 0.07 (measured 0.0625 against 0.0826, both builds)
 #   A3  split invariance: --partition 2 2 2 --max-concurrent 1, OMP_NUM_THREADS=1 and --padding 20 against
 #       the default run: the cells agree to float summation order (measured 6e-6 relative), except where a
@@ -17,18 +18,19 @@
 #       (the demo's float-kpc positions and the dyadic Sobol samples put one there in the double build: two
 #       cells 3e-3 apart); at most 1e-4 of the cells may differ by more than 1e-4, and the box sums agree to
 #       1e-6. The vertex(0) realization differs in all cells, by 10% rms between one and ten threads
-#   A4  the momentum: the box sum of '.a_vel' agrees with --exact-average's to 1e-4 of sum|v| (measured 1.2e-5)
+#   A4  the momentum: the box sum of '.a_vel' agrees with --exact's to 1e-4 of sum|v| (measured 1.2e-5)
 #   A5  GPU builds only (a GPU stamp in o/ or o_d/; SKIP otherwise, so CI's CPU-only build runs A1-A4): --gpu
 #       keeps the box mean within 1e-4 of 1 and matches the CPU grid like tests/dtfe_metal_check.sh (means
 #       to 1e-5 of the peak, at most 1e-3 of the cells more than 1e-3 apart: a sample on a cell face)
-#   A6  'velocityStd_a' only with '--average-method 2': method 1 (the default), --exact-average, method 3 and --cic stop
+#   A6  'velocityStd_a' only with '--average-method 2': method 1 (the default; with no flag a 'velocityStd_a' run is
+#       sampled, since the exact average cannot compute it), --exact, method 3 and --cic stop
 #       at option parsing with exit 1 and their error (method 1's: 'You cannot use the averaging method 1 ...'),
 #       rather than leaving the grid empty and segfaulting in the sub-domain merge; '--average-method 2' writes a finite,
 #       non-negative '.a_velStd'
 #   A7  'dispersion' and 'dispersion_a' (PS-DTFE fields) stop at option parsing with exit 1 and the error that names
 #       PS-DTFE, in this binary and in ./DTFE-2d when it is built (not after the triangulation with an internal
 #       size error in 3D and a segfault in 2D)
-# --exact-average itself does not sample (tests/run_tests.py's stored
+# --exact itself does not sample (tests/run_tests.py's stored
 # regression covers it). About 20 s on the Mac (7 runs of 2-3 s, and A6's and A7's short ones).
 # Usage: tests/dtfe_mc_average_check.sh [--no-build]   (--no-build is accepted and ignored: nothing is built)
 set -uo pipefail
@@ -58,28 +60,29 @@ run() {
     env ${envs[@]+"${envs[@]}"} "${DTFE_BIN}" "$SNAP" "$TMP/$name" "${C[@]}" ${pad[@]+"${pad[@]}"} "$@" > "$TMP/$name.log" 2>&1 \
         || { echo "FAIL: run $name (see $TMP/$name.log)"; exit 1; }
 }
-echo ">> demo/z0_64.gadget at 64^3: the default average, the legacy one (DTFE_MC_LEGACY=1), --exact-average"
-run n
-run l DTFE_MC_LEGACY=1 --
-run e -- --exact-average
+echo ">> demo/z0_64.gadget at 64^3: the Monte-Carlo average, the legacy one (DTFE_MC_LEGACY=1), --exact"
+run n -- --sampled
+run l DTFE_MC_LEGACY=1 -- --sampled
+run e -- --exact
 echo ">> --samples 20; --partition 2 2 2; one thread; --padding 20"
-# a total of 20 points per cell, which no '--subsamples k' (k^3) gives: the deprecated '--samples 20' (P6.6 decides)
+# a total of 20 points per cell, which no '--subsamples k' (k^3) gives: the deprecated '--samples 20' (P6.6 decides);
+# a count selects the sampled average by itself
 run s -- --samples 20
-run p -- --partition 2 2 2 --max-concurrent 1
-run t OMP_NUM_THREADS=1 --
-run d -- --padding 20
+run p -- --sampled --partition 2 2 2 --max-concurrent 1
+run t OMP_NUM_THREADS=1 -- --sampled
+run d -- --sampled --padding 20
 if [ "$GPU" = "1" ]; then
     echo ">> GPU build: --gpu"
-    run g -- --gpu
+    run g -- --sampled --gpu
     grep -q " GPU (" "$TMP/g.log" || { echo "FAIL: the --gpu run did not attempt the GPU (see $TMP/g.log)"; exit 1; }
     grep -q "using the CPU interpolation" "$TMP/g.log" && { echo "FAIL: the --gpu run fell back to the CPU (see $TMP/g.log)"; exit 1; }
 else
     echo ">> A5 SKIP: $OBJ carries no GPU stamp (a METAL=1 build runs it)"
 fi
-echo ">> A6: 'velocityStd_a' with methods 1 and 3, --exact-average and --cic (rejected), and with --average-method 2"
+echo ">> A6: 'velocityStd_a' with methods 1 and 3, --exact and --cic (rejected), and with --average-method 2"
 V=(--grid 16 --periodic --padding 12 --field density_a velocityStd_a)
 A6=""
-for c in "m1||You cannot use the averaging method 1 " "exact|--exact-average|'--exact-average' cannot compute 'velocityStd_a'" \
+for c in "m1||You cannot use the averaging method 1 " "exact|--exact|'--exact' cannot compute 'velocityStd_a'" \
          "m3|--average-method 3|You cannot use the averaging method 3 " "cic|--cic|is not available with NGP/CIC/TSC/PCS/SPH/Voronoi"; do
     IFS='|' read -r tag extra text <<< "$c"
     # shellcheck disable=SC2086   # $extra: none or one option with its value
@@ -137,7 +140,7 @@ for name, what in (("p", "--partition 2 2 2"), ("t", "OMP_NUM_THREADS=1"), ("d",
           f"the median cell {np.median(relc):.0e}, the largest {relc.max():.1e}), box sums {dsum:.0e} apart (< 1e-6)")
 nv, ev = rd("n", "a_vel").reshape(-1, 3), rd("e", "a_vel").reshape(-1, 3)
 mom = float(np.abs(nv.sum(0) - ev.sum(0)).max() / np.abs(ev).sum(0).max())
-check("A4", mom < 1e-4, f"box sum of '.a_vel' against --exact-average: {mom:.1e} of sum|v| (< 1e-4)")
+check("A4", mom < 1e-4, f"box sum of '.a_vel' against --exact: {mom:.1e} of sum|v| (< 1e-4)")
 if gpu:
     g = rd("g")
     dg = g.mean() - 1

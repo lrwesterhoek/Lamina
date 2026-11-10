@@ -5,8 +5,8 @@
 robust clipping and analytic volume/moment computation over polyhedra — the exact
 conservative voxelization method of **Powell & Abel (2015)**, *An exact general remeshing
 scheme applied to physically conservative voxelization*, JCP 297, 340 (arXiv:1412.4941);
-report LA-UR-15-26964. Please cite both when using `--ps-exact-deposit` / `--exact-average`
-results in research.
+report LA-UR-15-26964. Please cite both when using results of the exact deposits (`--exact`,
+since 2026-11-09 the default of both binaries for the '_a' fields) in research.
 
 Copyright (C) 2015, DOE and Los Alamos National Security, LLC. Permission is granted to the
 public to copy and use this software without charge, provided that the Notice and any
@@ -17,10 +17,10 @@ text at the top of `r3d.c` / `r3d.h`).
 defines `R3D_MAX_VERTS` (128 here; upstream default 512: see the header).
 
 Used by the CPU paths (the GPU paths integrate the same intersections by their own z-sweep,
-metal/exact_clip.metal.inc and its CUDA twin src/CGAL_triangulation/gpu_exact_clip.cuh):
-- `PS-DTFE --ps-exact-deposit` — exact tetrahedron-cell intersection volumes/moments in the
+metal/exact_clip.metal.inc):
+- `PS-DTFE --exact` — exact tetrahedron-cell intersection volumes/moments in the
   phase-space grid deposit (src/CGAL_triangulation/ps_interpolation.cc);
-- `DTFE --exact-average` — exact volume-averaged '_a' fields for the standard estimator
+- `DTFE --exact` — exact volume-averaged '_a' fields for the standard estimator
   (src/CGAL_triangulation/averaged_interpolation_*.cc).
 Both walk each tetrahedron's cells through src/CGAL_triangulation/exact_sweep.h (clipped once per slab and
 column; the same r3d_clip calls as six planes per cell, so bit-identical).

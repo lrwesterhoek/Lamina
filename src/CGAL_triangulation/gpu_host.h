@@ -97,7 +97,7 @@ struct PSGpuGrids
 // 2 = det<0) into out.caustic at every deposited sample -- OR is order-invariant, so the
 // result matches the CPU deposit's bits (float-vs-double det sign only differs below the
 // degeneracy cut, where cells are dropped).
-// fExact (--exact-average) replaces the nSub^3 sampling by the kernels' float32 exact clipping
+// fExact (--exact) replaces the nSub^3 sampling by the kernels' float32 exact clipping
 // (sweep_moments in metal/exact_clip.metal.inc: a sweep in z, analytic tet-cell volume + order-2 moments); nSub is then
 // ignored. The CPU path stays
 // the DOUBLE-precision reference -- the GPU exact deposit agrees to float rounding, like
@@ -161,7 +161,7 @@ struct DTFEGpuGrids
 // otherwise): 'scal' holds the four vertex scalars per tet (empty when both are off); the kernels
 // deposit it like the density (linear over the tet) and its constant gradient like the velocity
 // gradient.
-// exact (--exact-average): the analytic volume average instead of the samples -- every tetrahedron
+// exact (--exact): the analytic volume average instead of the samples -- every tetrahedron
 // is clipped against each grid cell of its bounding box (the kernels' float32 z-sweep, sweep_moments) and
 // deposits the linear interpolant's integral over each piece; 'cnts' then only marks the
 // single-cell tetrahedra (0), which take the centroid fast path as on the CPU. Matches the CPU's
@@ -391,7 +391,7 @@ inline PSDepositParams psGpuParams(PSGpuPlan const& p, PSFixedUnits const& fxUni
     return P;
 }
 
-// --exact-average's work items: an item is (tet, block of blockCells cells of its bbox window); the host only
+// --exact's work items: an item is (tet, block of blockCells cells of its bbox window); the host only
 // needs an UPPER bound of each window -- the kernel re-derives it in float and idles surplus blocks. The float and
 // double floors can differ only when the value is within rounding of an integer, so only such a bound is widened
 // (by eps, far above the float error): padding every axis by a cell instead would inflate a 2-3 cell window up to
@@ -476,7 +476,7 @@ inline void psBuildExactItemMap(std::vector<uint64_t> const& bound, uint32_t con
 // escalated pace (paceTargetSec: the backend's GpuPace::targetSec).
 inline size_t psHostFirstChunk(bool const fExact, double const paceTargetSec, size_t const MIN_CHUNK)
 {
-    // --exact-average costs ~1-2 orders of magnitude more per tet (analytic clipping of
+    // --exact costs ~1-2 orders of magnitude more per tet (analytic clipping of
     // every cell in the window vs a barycentric test per sample), so start far smaller: the
     // adaptive controller only retargets AFTER the first chunk, and one oversized opening
     // buffer is exactly what the watchdog kills.

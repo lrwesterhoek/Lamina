@@ -47,8 +47,9 @@ class PipelineSpec:
     vel_grad: bool = True
     grid: int = 512
     fields: list[str] = field(default_factory=lambda: list(PS_DEFAULT_FIELDS))
-    deposit: str = "sampled"        # "sampled" (nsub^3 samples per cell) | "exact" (r3d clipping): DTFE_EXACT_AVERAGE
-    nsub: int = 3                   # SUBSAMPLES
+    deposit: str = "exact"          # "exact" (r3d clipping; the default, run_ps_pipeline.sh's too) | "sampled" (nsub^3
+                                    # samples per cell): DTFE_EXACT_AVERAGE
+    nsub: int = 3                   # SUBSAMPLES (the sampled deposit only)
     gpu: bool | None = None         # DTFE_GPU: the script's -m; None = the build's (gpu_build_default)
     vertex_mass: bool = True        # PS_VERTEX_MASS (needed for TNG IC inputs)
     volume_weighted: bool = True    # PS_VOLUME_WEIGHTED (the production convention)
@@ -268,8 +269,10 @@ class PipelineSpec:
                "PTS_VEL_GRAD": "1" if self.vel_grad else "0",
                "PLANES": str(self.planes), "SUPERSAMPLE": str(self.supersample),
                # the run options, always spelled out (as RunSpec does): a stray knob exported in the
-               # login shell must not leak into a run (each under its new name and its older one until P6.6)
-               "SUBSAMPLES": str(self.nsub), "AVG_SUBSAMPLES": str(self.nsub),
+               # login shell must not leak into a run (each under its new name and its older one until P6.6). The
+               # count only for the sampled deposit; pinned EMPTY for the exact one, which has no sub-samples
+               "SUBSAMPLES": str(self.nsub) if self.deposit != "exact" else "",
+               "AVG_SUBSAMPLES": str(self.nsub) if self.deposit != "exact" else "",
                "PS_VERTEX_MASS": "1" if self.vertex_mass else "0",
                "PS_VOLUME_WEIGHTED": "1" if self.volume_weighted else "0",
                "PS_CAUSTICS": "1" if self.caustics else "0",

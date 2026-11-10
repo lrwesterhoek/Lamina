@@ -131,10 +131,10 @@ stage_core() {
     # and the out-of-core accumulators bit-identical to in-RAM runs
     step "auto-tune (memory model, budget, splits)"; tests/ps_auto_tune_check.sh --no-build
     # the standard binary's tuner too (its report, the counted padded vertices of the run's own split, the
-    # user's thread count, the SUMMARY's memory model line). CPU-only here: its GPU half (E with --gpu --exact-average)
+    # user's thread count, the SUMMARY's memory model line). CPU-only here: its GPU half (E with --gpu --exact)
     # skips on a build whose o/.build_mode names no GPU, H runs on the DTFE-2d the build stage makes; it pins
     # OMP_NUM_THREADS=10 on purpose (the plans of a 10-core machine), so a 4-core runner only oversubscribes. The one
-    # timing-sensitive check is E's measured peak <= 1.35x the prediction (getrusage max RSS on Linux)
+    # timing-sensitive check is E's measured peak <= 1.35x the prediction (getrusage max RSS on Linux; a --sampled run)
     step "standard auto-tune (report, counted split, memory model)"; tests/dtfe_auto_tune_check.sh --no-build
     step "--scratch-dir (out-of-core accumulators)"; tests/ps_scratch_check.sh --no-build
     # AFTER the program suites: ps_caustic_class_check.sh leaves the crossed-waves run (pcc_out.*) under the

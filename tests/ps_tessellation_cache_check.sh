@@ -233,8 +233,9 @@ echo "(G2) a PARTITIONED standard run caches every partition's sub-domains"
 # of the same split shares them).
 PSCACHE="${CACHE}-stdpart"; rm -rf "${PSCACHE}"; mkdir -p "${PSCACHE}"
 if [ -x "${DTFE_BIN}" ]; then
-    SP=(--grid "${GRID}" --periodic --mpc-unit 1 --padding 5 --field density density_a velocity_a --seed 5 --partition 2 2 2
-        --max-concurrent 2)
+    # the seeded Monte Carlo average, as written: '--seed' alone does not select it beside the '_a' fields
+    SP=(--grid "${GRID}" --periodic --mpc-unit 1 --padding 5 --field density density_a velocity_a --sampled --seed 5
+        --partition 2 2 2 --max-concurrent 2)
     srun() { env OMP_NUM_THREADS=2 "${DTFE_BIN}" "${SNAP}" "$@" >/dev/null 2>&1 || true; }
     sameout() {  # every output of $1 byte-identical in $2 (the padding test's per-thread files are not outputs)
         local n=0 f

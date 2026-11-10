@@ -367,7 +367,7 @@ for geo in pan crw; do
     rm -f "${TMP}/pcj_${geo}"_*.*
     "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_s"   "${JO[@]}" --max-concurrent 1 --field density density_a --subsamples 3 >/dev/null
     "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_a3"  "${JO[@]}" --max-concurrent 1 --field density_a --subsamples 3 >/dev/null
-    "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_ex"  "${JO[@]}" --max-concurrent 1 --field density --exact-average >/dev/null
+    "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_ex"  "${JO[@]}" --max-concurrent 1 --field density --exact >/dev/null
     "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_par" "${JO[@]}" --field density density_a --subsamples 3 --partition 2 2 2 >/dev/null
     if [ "${GPUJ}" = 1 ]; then
         "${BIN}" "${J[@]}" "${TMP}/pcj_${geo}_gpu" "${JO[@]}" --max-concurrent 1 --field density density_a \

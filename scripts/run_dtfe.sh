@@ -9,19 +9,22 @@
 # padding in mean particle spacings, defaults to 15 here, not config.sh's 50 (the PS-DTFE scripts' value).
 #
 # Usage:
-#   ./run_dtfe.sh [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n SUBSAMPLES] [-m] [-e] [snapshot ...]
-#     long forms: --sim-dir, --sim, --grid, --subsamples, --gpu, --exact-average (the same as the letters)
+#   ./run_dtfe.sh [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n SUBSAMPLES] [-m] [-e | --sampled] [snapshot ...]
+#     long forms: --sim-dir, --sim, --grid, --subsamples, --gpu, --exact (the same as the letters); --sampled
 #     -m   run the '_a' interpolation on the GPU (--gpu; same as DTFE_GPU=1). The default (DTFE_GPU unset, 'auto')
 #          is the GPU when the binary was built with one (the Makefile's o/.gpu_mode_metal stamp;
 #          o_d for DTFE_PRECISION=double), else the CPU; DTFE_GPU=0 runs the CPU on a GPU build.
-#     -e   every '_a' cell the EXACT average of the linear interpolant over the cell (--exact-average). The
-#          DEFAULT (DTFE_EXACT_AVERAGE=1, the production standard: no sampling noise, the mass exact to ~3e-8);
-#          -e overrides an exported DTFE_EXACT_AVERAGE=0. DTFE_EXACT_AVERAGE=0 gives the Monte-Carlo sample mean
-#          (1.1-1.7x faster at 512^3 on the GPU before the exact clipping got faster; the CPU and the GPU now clip at
-#          the same speed)
+#     -e   every '_a' cell the EXACT average of the linear interpolant over the cell (--exact). The DEFAULT
+#          (DTFE_EXACT_AVERAGE=1, the production standard: no sampling noise, the mass exact to ~3e-8); -e overrides
+#          an exported DTFE_EXACT_AVERAGE=0 and keeps the exact average beside a SUBSAMPLES count (ignored, said).
+#     --sampled  the Monte-Carlo sample mean instead (the same as DTFE_EXACT_AVERAGE=0). At 512^3 (TNG100-3-Dark
+#          z=0, 2026-11-09) it took 315 s on the CPU and 433 s on the GPU, the exact average with the face
+#          gradient 431 s and 439 s.
 #     -n   SUBSAMPLES: k sampling points per axis (k^3 per cell) of the Monte-Carlo mean (--subsamples k, the same
-#          unit as run_ps_dtfe.sh's); passed only when set (the binary's own default otherwise; the exact average
-#          ignores it)
+#          unit as run_ps_dtfe.sh's); passed only when set (the binary's own default otherwise). While
+#          DTFE_EXACT_AVERAGE is unset (and neither -e nor --sampled is given) a count selects the Monte-Carlo mean,
+#          as the binary does; beside -e or DTFE_EXACT_AVERAGE=1 it is ignored.
+#     --exact-average, the older name of --exact, is still read for one release (with a warning).
 #     The drivers' letters are their own: -m is the GPU and -s the simulation here (the binaries' -m and -s, the
 #          averaging method and a total sample count, are deprecated: --average-method, --subsamples).
 #   Production defaults: GRID_SIZE 512 (config.sh), padding 15, the GPU when built, the exact cell
@@ -81,11 +84,15 @@ DTFE_GPU="${DTFE_GPU:-auto}"     # 1 = the '_a' interpolation on the GPU (--gpu)
                                  # gpu_build_default), resolved below once DTFE_PRECISION has chosen the binary.
                                  # The same knob as run_ps_dtfe.sh's
 knob DTFE_EXACT_AVERAGE DTFE_EXACT
+_caller_exact="${DTFE_EXACT_AVERAGE:-}"   # (the caller's own value: unset, a SUBSAMPLES count selects the sampled mean)
 DTFE_EXACT_AVERAGE="${DTFE_EXACT_AVERAGE:-1}"  # 1 (default, the production standard) = exact cell
-                                 # averages (--exact-average: no sampling noise, mass exact to ~3e-8); 0 = the
-                                 # Monte-Carlo sample mean. The same knob as run_ps_dtfe.sh's (whose default is 0)
-SUBSAMPLES="${SUBSAMPLES:-}"     # k = --subsamples k: k points per axis, k^3 per cell, for the Monte-Carlo mean
-                                 # (DTFE_EXACT_AVERAGE=0); EMPTY (default) = the binary's own count. The same unit
+                                 # averages (--exact: no sampling noise, mass exact to ~3e-8); 0 = the Monte-Carlo
+                                 # sample mean (--sampled). Unset, a SUBSAMPLES count makes it 0 (config.sh
+                                 # average_resolve, the binary's rule). The same knob, default and rule as
+                                 # run_ps_dtfe.sh's; the driver passes --exact or --sampled on every run
+SUBSAMPLES="${SUBSAMPLES:-}"     # k = --subsamples k: k points per axis, k^3 per cell, for the Monte-Carlo mean;
+                                 # EMPTY (default) = the binary's own count. Set while DTFE_EXACT_AVERAGE is unset, it
+                                 # selects the Monte-Carlo mean; beside an exact one it is ignored. The same unit
                                  # as run_ps_dtfe.sh's SUBSAMPLES; -n k sets it
 THREADS="${THREADS:-}"           # cap OpenMP threads globally (OMP_NUM_THREADS); empty = all cores (as run_ps_dtfe.sh)
 FACE_GRADIENT="${FACE_GRADIENT:-}"   # the velocity gradient's route (and the divergence and shear built on it). EMPTY
@@ -152,7 +159,7 @@ if [ -z "${FIELDS// }" ]; then
 fi
 
 knob_bool DTFE_EXACT_AVERAGE FACE_GRADIENT DRY_RUN AUTO_TUNE_REPORT PTS_VEL_GRAD DTFE_RESUME   # 1 or 0 (config.sh)
-usage() { echo "Usage: $0 [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n SUBSAMPLES] [-m] [-e] [snapshot ...]"; }
+usage() { echo "Usage: $0 [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n SUBSAMPLES] [-m] [-e | --sampled] [snapshot ...]"; }
 
 driver_help_version "${BASH_SOURCE[0]}" "${1:-}"   # -h / --help print the header and run nothing; --version the revision
 # OUTPUT_PREFIX (above): one word, and not PS-DTFE's 'ps_*' naming (after --help, which a stray export must not block)
@@ -171,11 +178,12 @@ own_option() {   # <letter>: this driver's own options; -d, -s, -h and the data 
         g) GRID_SIZE="${OPTARG}" ;;
         n) SUBSAMPLES="${OPTARG}" ;;
         m) DTFE_GPU=1 ;;
-        e) DTFE_EXACT_AVERAGE=1 ;;
+        e|S) average_option "$1" ;;      # -e / --exact, --sampled (config.sh: S only carries the long form)
     esac
 }
-driver_options "g:n:me" own_option "$@"   # then the data root (unless -d) and the simulation are required
+driver_options "g:n:meS" own_option "$@"   # then the data root (unless -d) and the simulation are required
 shift $((OPTIND - 1))
+average_resolve "cell average"   # DTFE_EXACT_AVERAGE 1 or 0: the options, the knob, a SUBSAMPLES count, the default
 
 snapshot_args "$@"              # positional arguments override the default snapshot list (config.sh)
 
@@ -197,9 +205,9 @@ echo "Starting DTFE processing..."
 echo "Data directory: ${DATA_DIR}"
 echo "Grid size: ${GRID_SIZE}   Fields: ${FIELDS}   Output prefix: ${OUTPUT_PREFIX}"
 if [ "${DTFE_EXACT_AVERAGE}" = "1" ]; then
-    echo "Cell averages: exact (--exact-average)"
+    echo "Cell averages: exact (--exact; ${average_src})"
 else
-    echo "Cell averages: Monte-Carlo sample means (DTFE_EXACT_AVERAGE=0${SUBSAMPLES:+, --subsamples ${SUBSAMPLES}})"
+    echo "Cell averages: sampled, Monte-Carlo sample means (--sampled${SUBSAMPLES:+ --subsamples ${SUBSAMPLES}}; ${average_src})"
 fi
 echo "'_a' interpolation: $([ "${DTFE_GPU}" = "1" ] && echo "GPU (--gpu)" || echo "CPU")${gpu_auto}"
 [ -n "${SCRATCH_DIR}" ] && echo "Scratch directory: ${SCRATCH_DIR} (grids out of core)"
@@ -217,9 +225,12 @@ for i in "${SNAPSHOTS[@]}"; do
     # GPU interpolation toggle (-m / DTFE_GPU=1); ignored with a warning on non-GPU builds.
     metal_args=()
     [ "${DTFE_GPU}" = "1" ] && metal_args=(--gpu)
-    exact_args=()
-    [ "${DTFE_EXACT_AVERAGE}" = "1" ] && exact_args=(--exact-average)
-    [ -n "${SUBSAMPLES}" ] && exact_args+=(--subsamples "${SUBSAMPLES}")   # (SUBSAMPLES, see the top: only when set)
+    # the cell average, named both ways (the run log then says which ran); the count only for the sampled one
+    exact_args=(--exact)
+    if [ "${DTFE_EXACT_AVERAGE}" != "1" ]; then
+        exact_args=(--sampled)
+        [ -n "${SUBSAMPLES}" ] && exact_args+=(--subsamples "${SUBSAMPLES}")   # (SUBSAMPLES, see the top: only when set)
+    fi
     [ "${FACE_GRADIENT}" = "1" ] && exact_args+=(--face-gradient)     # (FACE_GRADIENT, see the top)
     [ "${FACE_GRADIENT}" = "0" ] && exact_args+=(--per-tet-gradient)  # the deposit's own gradient (the route before 2026-11-09)
 

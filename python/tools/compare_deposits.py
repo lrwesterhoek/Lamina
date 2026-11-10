@@ -1,6 +1,6 @@
-"""A/B a sampled-deposit grid set against an exact-deposit (--exact-average) one.
+"""A/B a sampled-deposit grid set (--sampled) against an exact-deposit (--exact, the default) one.
 
-Answers the practical question "is the exact deposit worth its ~2.7x wall time?" with
+Answers the practical question "how far is the sampled deposit from the exact one?" with
 numbers instead of impressions, focused on the regimes that matter for void work:
 
   * mass conservation      (both should be ~1; the exact deposit is exact by construction)

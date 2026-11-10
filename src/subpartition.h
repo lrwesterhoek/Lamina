@@ -72,7 +72,8 @@ void findParticlesInBoxLagrangianPeriodic(std::vector<Particle_data> &p,
                                           Box const &paddedBox,
                                           Real const eulerLen[],
                                           bool const periodic,
-                                          int verboseLevel)
+                                          int verboseLevel,
+                                          Real const *lagExtent = nullptr)
 {
     MESSAGE::Message message( verboseLevel );
     message << "Finding particles (with on-the-fly periodic images) with Lagrangian positions in box " << paddedBox.print() << " ... " << MESSAGE::Flush;
@@ -90,6 +91,26 @@ void findParticlesInBoxLagrangianPeriodic(std::vector<Particle_data> &p,
             size_t rem = n;
             for (int d=NO_DIM-1; d>=0; --d)
             { off[d] = Real(int(rem%3) - 1) * eulerLen[d]; rem /= 3; }
+        }
+
+        // A pass whose shifted particles all miss the box along one axis selects nothing, so its scan of every
+        // particle is skipped: 7^3 = 343 scans remain of the 27 x 216 = 5832 of a 6x6x6 run with the exact seam, 8^3 =
+        // 512 with the fallback seam at the box's upper face (an inner partition needs the unshifted pass only).
+        // lagExtent = the smallest and the largest lagPos per axis (xMin, xMax,
+        // yMin, ...; nullptr = not known, every pass runs). The test is the particle test below applied to
+        // those two extremes with the same float sum, and a float sum is monotonic in each term:
+        // fl(max + off) < lo gives fl(lagPos + off) < lo for every particle, likewise at the upper side. The
+        // passes that run, their order and their output are those of the full loop.
+        if ( lagExtent )
+        {
+            bool miss = false;
+            for (size_t i=0; i<NO_DIM and not miss; ++i)
+            {
+                Real const shiftedMin = lagExtent[2*i]   + off[i];
+                Real const shiftedMax = lagExtent[2*i+1] + off[i];
+                miss = shiftedMax<paddedBox.coords[2*i] or shiftedMin>paddedBox.coords[2*i+1];
+            }
+            if ( miss ) continue;
         }
 
         for (vectorIterator it=p.begin(); it!=p.end(); ++it)

@@ -839,7 +839,7 @@ DTFE_ITEM_KERNEL(depositAveraged1Items8, 8)
 
 
 // ---------------------------------------------------------------------------------------
-// depositExactAverage: --exact-average on the GPU. One thread per ITEM = (tetrahedron, block of
+// depositExactAverage: --exact on the GPU. One thread per ITEM = (tetrahedron, block of
 // P.itemSamples consecutive cells of its bounding-box window, in gi-gj-gk order), the phase-space
 // depositExactItems' split: each piece of the tetrahedron inside a cell deposits the LINEAR
 // interpolant's integral over the piece -- its centroid value times the piece volume (order-1

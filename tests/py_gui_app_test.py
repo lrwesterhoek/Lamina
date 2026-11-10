@@ -395,14 +395,18 @@ def _pipeline_options(qa, w, tmp, sim, seen, tick):
     """The Pipeline tab's options in its environment, render step, estimate and memory check; a real run."""
     print("pipeline options:")
     # the caustic classes are on by default (run_ps_dtfe.sh's default, the production runs'), so the
-    # cusps box is enabled (unticked) from the start
+    # cusps box is enabled (unticked) from the start; the exact deposit too (the default since 2026-11-09), on
+    # the CPU, its sub-samples greyed
     check("the run options show the scripts' defaults; cusps wait for caustics, the slab and projection for planes",
-          w.p_deposit.currentData() == "sampled" and w.p_nsub.value() == 3 and w.p_nsub.isEnabled()
-          and w.p_gpu.isChecked() == rs.gpu_build_default("ps") and w.p_vm.isChecked() and w.p_vw.isChecked()
+          w.p_deposit.currentData() == "exact" and w.p_nsub.value() == 3 and not w.p_nsub.isEnabled()
+          and not w.p_gpu.isChecked() and w.p_vm.isChecked() and w.p_vw.isChecked()
           and w.p_ca.isChecked()
           and w.p_cu.isEnabled() and not w.p_cu.isChecked() and not w.p_pt.isHidden() and w.p_planes.value() == 1
           and not w.p_thick.isEnabled() and w.p_super.value() == 1 and not w.p_rproject.isEnabled()
           and w.p_render_box.isEnabled() and w.p_rsmoothd.value() == rs.POINTEVAL_DERIVATIVE_SMOOTH)
+    w.p_deposit.setCurrentIndex(w.p_deposit.findData("sampled"))     # its count reaches the environment below
+    qa.processEvents()
+    check("... the sampled deposit makes the sub-samples editable", w.pipe.deposit == "sampled" and w.p_nsub.isEnabled())
     w.p_ca.setChecked(True)
     w.p_cu.setChecked(True)
     w.p_gpu.setChecked(False)
@@ -468,7 +472,7 @@ def _pipeline_options(qa, w, tmp, sim, seen, tick):
     w.p_rfields.editingFinished.emit()
     w.p_rproject.setCurrentIndex(0)
     qa.processEvents()
-    check("back at the defaults: the same two steps, GPU on",
+    check("back at the earlier options (the sampled deposit, on the GPU): the same two steps, GPU on",
           [st.label for st in w.pipe.steps()] == [f"run_ps_pipeline.sh {SIM}", f"plot_pointeval.py {SIM}"]
           and w.pipe.command()[1]["PS_GPU"] == "1" and w.pipe.planes == 1 and w.pipe.render_fields == "")
     seen.clear()
@@ -921,6 +925,19 @@ def _queue(qa, w, tmp, data, repo_figs, sim):
           moved == (False, False, True, False, False) and wr.spec.gpu and not wr.pipe.gpu and wr.custom.gpu,
           f"{moved} {wr.spec.gpu} {wr.pipe.gpu} {wr.custom.gpu}")
     wr.close()
+    # the exact deposit is PS-DTFE's default too since 2026-11-09, but a saved PS-DTFE job keeps its sampled deposit
+    # (it was selectable beside the exact one, so it may be the user's choice): Grids, Pipeline and Custom tabs
+    mig4 = QSettings(str(tmp / "gui_mig4.ini"), QSettings.IniFormat)
+    mig4.setValue("spec", _json.dumps(rs.RunSpec(data_root=str(data), deposit="sampled", nsub=2).to_dict()))
+    mig4.setValue("pipeline", _json.dumps(rs.PipelineSpec(deposit="sampled").to_dict()))
+    mig4.setValue("custom", _json.dumps(rs.CustomSpec(estimator="ps", deposit="sampled").to_dict()))
+    mig4.sync()
+    wp = A.MainWindow(remember=True, settings=QSettings(str(tmp / "gui_mig4.ini"), QSettings.IniFormat))
+    kept = (wp.spec.deposit, wp.pipe.deposit, wp.custom.deposit, wp.deposit_combo.currentData(),
+            wp.p_deposit.currentData(), wp.o_deposit.currentData(), wp.spec.nsub)
+    wp.close()
+    check("a saved PS-DTFE job at the sampled deposit keeps it (Grids, Pipeline and Custom tabs): no one-time move",
+          kept == ("sampled",) * 6 + (2,), str(kept))
 
 
 def _stop(qa, w):
@@ -1282,8 +1299,8 @@ def _presets(qa, w, P):
           w.spec.deposit == "exact" and w.gpu_check.isChecked() == rs.gpu_built("dtfe"))
     w.ps_radio.setChecked(True)
     qa.processEvents()
-    check("... and back on PS-DTFE the choice reads as the phase-space deposit again, at its production setting "
-          "(the sampled deposit, sub-samples editable)",
+    check("... and back on PS-DTFE the choice reads as the phase-space deposit again, at the one chosen for it before "
+          "the switch (the sampled deposit, sub-samples editable; its production setting is the exact one)",
           w.deposit_combo.itemText(w.deposit_combo.findData("exact")) == P.label("exact") and w.spec.estimator == "ps"
           and w.spec.deposit == "sampled" and w.deposit_combo.currentData() == "sampled" and w.nsub_spin.isEnabled())
     # a choice made for an estimator comes back with it: PS-DTFE's exact deposit after PS -> standard ->
@@ -1356,22 +1373,27 @@ def _custom_snapshot(qa, w, tmp, P):
     qa.processEvents()
     cmd = w.cmd_view.toPlainText()
     check("Custom tab: switching to standard DTFE moves the choice to the exact cell average; its command passes "
-          "--exact-average and '--padding 15'",
+          "--exact and '--padding 15'",
           w.custom.estimator == "dtfe" and w.custom.deposit == "exact" and w.o_deposit.currentData() == "exact"
           and w.o_deposit.itemText(w.o_deposit.findData("exact")) == P.label("exact_dtfe")
-          and "--exact-average" in cmd and "--padding 15" in cmd and "--ps-exact-deposit" not in cmd, cmd)
+          and "--exact" in cmd.split() and "--padding 15" in cmd
+          and not {"--exact-average", "--ps-exact-deposit", "--sampled"} & set(cmd.split()), cmd)
     w.o_ps.setChecked(True)
     qa.processEvents()
-    check("... back on PS-DTFE: the sampled deposit again, no '--padding'",
-          w.custom.estimator == "ps" and w.custom.deposit == "sampled" and "--padding" not in w.cmd_view.toPlainText()
-          and "--subsamples" in w.cmd_view.toPlainText(), w.cmd_view.toPlainText())
-    w.o_deposit.setCurrentIndex(w.o_deposit.findData("exact"))      # the choice per estimator, here too
+    cmd = w.cmd_view.toPlainText()
+    check("... back on PS-DTFE: the demo's exact deposit again (the default since 2026-11-09), no '--padding', no "
+          "sub-sample count",
+          w.custom.estimator == "ps" and w.custom.deposit == "exact" and "--padding" not in cmd
+          and "--exact" in cmd.split() and "--subsamples" not in cmd and "--sampled" not in cmd.split(), cmd)
+    w.o_deposit.setCurrentIndex(w.o_deposit.findData("sampled"))    # the choice per estimator, here too
     w.o_dtfe.setChecked(True)
     w.o_ps.setChecked(True)
     qa.processEvents()
-    check("Custom tab: PS-DTFE's exact deposit comes back after a switch to standard DTFE and back",
-          w.custom.estimator == "ps" and w.custom.deposit == "exact" and "--exact-average" in w.cmd_view.toPlainText(),
-          w.cmd_view.toPlainText())
+    cmd = w.cmd_view.toPlainText().split()
+    check("Custom tab: PS-DTFE's sampled deposit comes back after a switch to standard DTFE and back, named with its "
+          "count ('--sampled --subsamples k')",
+          w.custom.estimator == "ps" and w.custom.deposit == "sampled" and "--sampled" in cmd
+          and "--exact" not in cmd and "--subsamples" in cmd, " ".join(cmd))
     w.o_deposit.setCurrentIndex(w.o_deposit.findData("sampled"))
     qa.processEvents()
     check("a periodic box: no alpha-shape row", not w.o_snap_form.isRowVisible(w.o_alpha)
@@ -2593,7 +2615,7 @@ def _exact_zoom(w, tmp, x, img):
     check("the exact zoom's command for a PERIODIC phase-space run: PS-DTFE on the whole periodic box, deposited "
           "into a window of a virtual grid (the run's cells along the slice axis), the exact deposit, no region cut",
           cmd is not None and cmd[0].endswith("PS-DTFE") and "--periodic" in cmd and "--grid-window" in cmd
-          and "--exact-average" in cmd and "--box" not in cmd and "--region-mpc" not in cmd and gi >= 0
+          and "--exact" in cmd and "--box" not in cmd and "--region-mpc" not in cmd and gi >= 0
           and cmd[gi + 1 + geo[0]] == str(x.current.n) and all(int(cmd[gi + 1 + a]) >= 64 for a in geo[2])
           and grid_[geo[0]] == 1 and edges is not None, str(cmd))
     check("... which reuses the query server's tessellation cache folder and asks for the progress lines",
@@ -2601,8 +2623,9 @@ def _exact_zoom(w, tmp, x, img):
           and "--verbose" in cmd and cmd[cmd.index("--verbose") + 1] == "2", str(cmd))
     x.zoom_res.setValue(64)
     # an 8-of-32-cell square: the zoom's virtual grid (64 cells across it) then tiles the box exactly, so the
-    # window is the same region as the slice's cells; the on-disk run is the SAMPLED deposit, whose region
-    # mass differs from the exact one by what the straddling streams put across the edge (a few percent here)
+    # window is the same region as the slice's cells; the on-disk run is the demo's exact deposit (the default since
+    # 2026-11-09), so the two region masses agree but for rounding; a sampled demo's differed by what the
+    # straddling streams put across the edge (a few percent here), which the 5% bound still allows
     sq = (img.height() // 4, img.width() // 4, img.height() // 2 - 1, img.width() // 2 - 1)
     ref = region_mean(x, *sq)
     x._dragged(*sq)
@@ -2780,7 +2803,7 @@ def _exact_zoom_partitioned(qa, w, tmp, demo, root, cmd, x, sq):
     cmd, root_, grid_, _e = x.exact_zoom_command(x.current, geo[0], geo[1], geo[2], (geo[3][0], geo[4][0]), (geo[3][1], geo[4][1]), 48)
     check("the exact zoom's command: the standard binary on the region, one slice cell thick, the exact average, "
           "padded by the query server's 15 spacings (the binary's own 5 is too thin at the region's faces)",
-          cmd is not None and cmd[0].endswith("DTFE") and "--region-mpc" in cmd and "--exact-average" in cmd
+          cmd is not None and cmd[0].endswith("DTFE") and "--region-mpc" in cmd and "--exact" in cmd
           and cmd[cmd.index("--grid") + 1:cmd.index("--grid") + 4].count("1") == 1
           and "--padding" in cmd and cmd[cmd.index("--padding") + 1] == "15"
           and "--" not in w.explore_view.title.text(), str(cmd))
@@ -2821,7 +2844,7 @@ def _exact_zoom_partitioned(qa, w, tmp, demo, root, cmd, x, sq):
     geo = x._geometry()
     cmd, _r, _g, _e = x.exact_zoom_command(x.current, geo[0], geo[1], geo[2], (geo[3][0], geo[4][0]), (geo[3][1], geo[4][1]), 64)
     check("the exact zoom's command for a non-periodic phase-space run: PS-DTFE on the whole cloud, a window, the exact deposit",
-          ok and cmd is not None and cmd[0].endswith("PS-DTFE") and "--grid-window" in cmd and "--exact-average" in cmd
+          ok and cmd is not None and cmd[0].endswith("PS-DTFE") and "--grid-window" in cmd and "--exact" in cmd
           and "--periodic" not in cmd and "--box" not in cmd and "--ps-volume-weighted" in cmd, str(cmd))
     img = w.explore_view.canvas._img
     x.zoom_res.setValue(64)
@@ -3270,7 +3293,7 @@ def two_d_gui(qa, w, tmp):
     ri = cmd.index("--region-mpc") if cmd and "--region-mpc" in cmd else -1
     check("... its exact zoom: DTFE-2d on a 4-number region, a 64 x 64 grid, the exact average",
           cmd is not None and Path(cmd[0]).name == "DTFE-2d" and ri > 0 and cmd[ri + 5] == "--field"
-          and cmd[cmd.index("--grid") + 1:cmd.index("--grid") + 3] == ["64", "64"] and "--exact-average" in cmd
+          and cmd[cmd.index("--grid") + 1:cmd.index("--grid") + 3] == ["64", "64"] and "--exact" in cmd
           and "--gpu" not in cmd and "--padding" in cmd and cmd[cmd.index("--padding") + 1] == "15", str(cmd))
     x._dragged(img.height() // 4, img.width() // 4, img.height() // 2, img.width() // 2)
     ok = wait_for(lambda: x.is_zoomed() and not x._zoom_pending and bool(x._zoom.get("exact")) and not x._exact_running, 120)

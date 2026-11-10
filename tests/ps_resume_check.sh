@@ -26,7 +26,7 @@
 #   C13 a checkpoint of another binary ('binary=' key line: the revision AND link time) is refused, naming DTFE_RESUME=0
 #   C14 a commit whose renames failed (exit 3, the outputs left as '.part.<pid>') keeps the checkpoint
 #   C15 the deprecated spellings share the canonical names' settings key: a run killed with '--ps-exact-deposit
-#       --lambda_th 0.3' resumes under '--exact-average --lambda-th 0.3', every output byte-identical to an
+#       --lambda_th 0.3' resumes under '--exact --lambda-th 0.3', every output byte-identical to an
 #       uninterrupted run with the canonical names
 #   C8  GPU builds only: a killed '--ps-gpu' run (the deprecated spelling) resumes under '--gpu' to the exactly summed
 #       grids of an uninterrupted '--gpu' run byte for byte in EVERY grid, the velocity and dispersion included (exact
@@ -221,14 +221,14 @@ rm -rf "$TMP/cm.den" "$TMP/cm.runlog.checkpoint" "$TMP"/cm.*.part.*
 echo ">> C15: the deprecated spellings resume under the canonical names (one settings key)"
 C_OLD=("${C[@]/#--input-format/--input}"); C_OLD=("${C_OLD[@]/#--mpc-unit/--MpcUnit}")
 X_OLD=("${C_OLD[@]}" --verbose 2 --max-concurrent 4 --ordered-merge --ps-exact-deposit --lambda_th 0.3)
-X_NEW=("${C[@]}" --verbose 2 --max-concurrent 4 --ps-merge index-order --exact-average --lambda-th 0.3)
+X_NEW=("${C[@]}" --verbose 2 --max-concurrent 4 --ps-merge index-order --exact --lambda-th 0.3)
 OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/xref" "${X_NEW[@]}" > "$TMP/xref.log" 2>&1 || { echo "FAIL: xref (see $TMP/xref.log)"; exit 1; }
 OMP_NUM_THREADS=4 DTFE_TEST_EXIT_AFTER_PARTITIONS=20 "$BIN" "$SNAP" "$TMP/x" "${X_OLD[@]}" > "$TMP/x1.log" 2>&1; rc1=$?
 nx="$(merged_count "$TMP/x.runlog.checkpoint" 2>/dev/null || echo 0)"
 [ "${nx:-0}" -gt 0 ] || no_checkpoint_why "$TMP/x1.log" "$TMP"
 OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/x" "${X_NEW[@]}" --resume > "$TMP/x2.log" 2>&1; rc2=$?
 [ "$rc1" = 137 ] && [ "$rc2" = 0 ] && grep -q -- "--resume: $nx of 64 partitions are already in the checkpoint" "$TMP/x2.log" \
-    && grep -q "^warning: --ps-exact-deposit is deprecated, use --exact-average$" "$TMP/x1.log" \
+    && grep -q "^warning: --ps-exact-deposit is deprecated, use --exact$" "$TMP/x1.log" \
     && grep -q "^warning: --lambda_th is deprecated, use --lambda-th$" "$TMP/x1.log" \
     && grep -q "^warning: --MpcUnit is deprecated, use --mpc-unit$" "$TMP/x1.log" \
     && grep -q "^warning: --ordered-merge is deprecated, use --ps-merge index-order$" "$TMP/x1.log" && ! grep -q "deprecated" "$TMP/x2.log"

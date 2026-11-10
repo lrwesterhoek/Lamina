@@ -145,8 +145,8 @@ def region_faces(binary):
     except OSError:
         gpu = False
     variants = [("sampled", []), ("linear", ["--ps-linear-deposit"])]
-    if "--exact-average" in helptext:          # the exact deposit
-        variants.append(("exact", ["--exact-average"]))
+    if "--sampled" in helptext:                # the exact deposit ('--exact', listed beside '--sampled')
+        variants.append(("exact", ["--exact"]))
     if gpu:
         variants += [(name + " GPU", extra + ["--gpu"]) for name, extra in list(variants)]
     # one triangulation: a partitioned non-periodic run differs from a single one at the Lagrangian

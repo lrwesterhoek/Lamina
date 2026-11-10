@@ -36,7 +36,7 @@ class CustomSpec:
     lagrangian_file: str = ""
     grid: int = 128
     nsub: int = 3
-    deposit: str = ""               # as RunSpec's: "" = the estimator's production one (standard DTFE: the exact average)
+    deposit: str = ""               # as RunSpec's: "" = the estimator's production one (the exact one, both estimators)
     fields: list[str] = field(default_factory=lambda: ["density_a", "velocity_a", "dispersion_a"])
     gpu: bool = False
     vertex_mass: bool = False       # needed when the initial positions are PERTURBED (e.g. TNG's z=127)
@@ -74,7 +74,7 @@ class CustomSpec:
                                     # without the path any later missing input would quietly become a demo
 
     def __post_init__(self):
-        if not self.deposit:            # a standard-DTFE run starts at the exact cell average
+        if not self.deposit:            # a run starts at the exact cell average (both estimators)
             self.deposit = _rs.production_deposit(self.estimator)
 
     def name(self) -> str:
@@ -123,10 +123,12 @@ class CustomSpec:
         if self.tess_cache:
             a += ["--tessellation-cache", str(Path(self.tess_cache).expanduser())]
         if ps:
+            # the cell average named either way (the binaries share both names), never left to the binary's default:
+            # the run log then says which it was to any reader, and the count only beside the sampled deposit
             if self.deposit == "exact":
-                a.append("--exact-average")         # the exact deposit (the binaries share the name)
+                a.append("--exact")
             else:
-                a += ["--subsamples", str(self.nsub)]
+                a += ["--sampled", "--subsamples", str(self.nsub)]
             if self.lagrangian == "separate" and self.lagrangian_file:
                 a += ["--ps-lagrangian-input", str(Path(self.lagrangian_file).expanduser())]
             for on, flag in ((self.gpu and three, "--gpu"), (self.vertex_mass, "--ps-vertex-mass"),
@@ -150,8 +152,9 @@ class CustomSpec:
         else:
             if self.gpu and three:
                 a.append("--gpu")
-            if self.deposit == "exact":
-                a.append("--exact-average")
+            # the cell average named either way, as above (the sampled one at the binary's own count: the tab has
+            # no count for standard DTFE)
+            a.append("--exact" if self.deposit == "exact" else "--sampled")
             # the padding: the binary's own 5 mean spacings leave wrong values within a few spacings of
             # a box face (or of the --box region's faces); 15, run_dtfe.sh's and the standard server's value
             # (dtfelib.estimator.STANDARD_PADDING). PS-DTFE pads in Lagrangian space by its own rules: nothing added
@@ -358,8 +361,11 @@ class CustomSpec:
 
                 def names(tokens):      # the option names, canonical, no '=value': '--lambda_th=0.4' -> '--lambda-th';
                     # a merge switch is '--ps-merge' (canonical_flag gives its 'option value' pair; the run copy migrates
-                    # the switch to that pair, so beside the tab's own '--ps-merge' the binary would get it twice)
-                    return {R.canonical_flag(t.split("=", 1)[0]).split()[0] for t in tokens if t.startswith("--")}
+                    # the switch to that pair, so beside the tab's own '--ps-merge' the binary would get it twice).
+                    # '--exact' and '--sampled' are one setting, the cell average, which the tab always names: either
+                    # one among the extra options repeats it (the other one the binary refuses beside it)
+                    found = {R.canonical_flag(t.split("=", 1)[0]).split()[0] for t in tokens if t.startswith("--")}
+                    return {"--exact / --sampled" if n in ("--exact", "--sampled") else n for n in found}
                 twice = sorted(names(extra) & names(self._own_command()))
                 if twice:
                     out.append(("error", f"the extra options repeat {', '.join(twice)}, which the tab sets already "
@@ -488,12 +494,13 @@ def hdf5_has(path, dataset: str) -> bool | None:
 
 def demo_spec(output_dir=None, gpu: bool | None = None) -> CustomSpec:
     """The first-run demo: a synthetic 32^3 crossed-wave snapshot (streams 1/3/9/27) and a quick
-    PS-DTFE run on it -- about half a minute, no download. gpu None: where the deposit pays for
-    32^3 particles (the CPU, see recommended_gpu)."""
+    PS-DTFE run on it with the default (exact) deposit -- about half a minute, no download. gpu None:
+    where that deposit pays for 32^3 particles (the CPU, see recommended_gpu). nSub 2 is kept for a
+    switch to the sampled deposit."""
     od = Path(output_dir).expanduser() if output_dir else CUSTOM_OUT_DEFAULT / "demo"
     fields = ["density_a", "velocity_a", "dispersion_a", "divergence_a"]
     if gpu is None:
-        gpu = _rs.recommended_gpu("sampled", fields, 32 ** 3)
+        gpu = _rs.recommended_gpu(_rs.production_deposit("ps"), fields, 32 ** 3)
     return CustomSpec(input_file=str(od / "crossed_waves_32.hdf5"), input_type=105, mpc_unit=1.0,
                       periodic=True, estimator="ps", lagrangian="file", grid=64, nsub=2,
                       fields=fields, gpu=gpu, vertex_mass=False, volume_weighted=True, caustics=True,

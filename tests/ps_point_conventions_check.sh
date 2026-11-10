@@ -8,7 +8,7 @@
 #  A) IDENTITY: without --ps-vertex-mass / --ps-volume-weighted 'grid' and 'legacy' give byte-identical '.pts_*'
 #     files, and with both options the GRIDS of the two runs are byte-identical (the conventions are the points').
 #  B) THE IC BIAS: single-stream crossed waves whose InitialCoordinates are displaced towards the final positions
-#     by alpha = 0.1645 (TNG's D(z=127)/D(z=20)), --ps-vertex-mass --ps-volume-weighted --exact-average, a slab
+#     by alpha = 0.1645 (TNG's D(z=127)/D(z=20)), --ps-vertex-mass --ps-volume-weighted --exact, a slab
 #     of four sub-planes through one cell layer: the plane's cell blocks against the grid's cells (and against the
 #     analytic cell averages) have slope ~1 with 'grid', ~1-alpha with 'legacy' -- for 'linear' and 'geometric';
 #     the perturbed-IC plane equals the true-IC plane to ~1%. The exact deposit isolates the conventions: the
@@ -106,18 +106,19 @@ run "${TMP}/a_on_legacy"  "${TMP}/in_crw.hdf5" "${AF[@]}" "${VMW[@]}" --ps-point
 echo ">> B: perturbed-IC slab (exact deposit), both estimators and conventions; the sampled deposit for comparison"
 for est in linear geometric; do
     for conv in grid legacy; do
-        run "${TMP}/b_${est}_${conv}" "${TMP}/in_pic.hdf5" --field density_a "${VMW[@]}" --exact-average \
+        run "${TMP}/b_${est}_${conv}" "${TMP}/in_pic.hdf5" --field density_a "${VMW[@]}" --exact \
             --sample-points "${TMP}/in_slab.bin" --ps-stream-density "${est}" --ps-point-conventions "${conv}"
     done
-    run "${TMP}/b_${est}_true" "${TMP}/in_lin.hdf5" --field density_a --exact-average \
+    run "${TMP}/b_${est}_true" "${TMP}/in_lin.hdf5" --field density_a --exact \
         --sample-points "${TMP}/in_slab.bin" --ps-stream-density "${est}"
 done
-run "${TMP}/b_sampled_grid"   "${TMP}/in_pic.hdf5" --field density_a "${VMW[@]}" --sample-points "${TMP}/in_slab.bin"
-run "${TMP}/b_sampled_legacy" "${TMP}/in_pic.hdf5" --field density_a "${VMW[@]}" --sample-points "${TMP}/in_slab.bin" \
+# the comparison is the nSub = 3 sampled deposit, which 'density_a' alone no longer selects
+run "${TMP}/b_sampled_grid"   "${TMP}/in_pic.hdf5" --field density_a "${VMW[@]}" --sampled --sample-points "${TMP}/in_slab.bin"
+run "${TMP}/b_sampled_legacy" "${TMP}/in_pic.hdf5" --field density_a "${VMW[@]}" --sampled --sample-points "${TMP}/in_slab.bin" \
     --ps-point-conventions legacy
 echo ">> C: uniform near-lattice box"
 for est in linear geometric; do
-    run "${TMP}/c_${est}_full" "${TMP}/in_uni.hdf5" --field density_a "${VMW[@]}" --exact-average \
+    run "${TMP}/c_${est}_full" "${TMP}/in_uni.hdf5" --field density_a "${VMW[@]}" --exact \
         --sample-points "${TMP}/in_full.bin" --ps-stream-density "${est}"
     run "${TMP}/c_${est}_rand" "${TMP}/in_uni.hdf5" --field density_a "${VMW[@]}" \
         --sample-points "${TMP}/in_rand.bin" --ps-stream-density "${est}"
@@ -203,7 +204,7 @@ for est in ("linear", "geometric"):
           f"'legacy': the evolved-IC suppression, ~1-alpha = {1. - alpha:.3f} (slopes {sl:.3f}, {al:.3f})")
     check(f"B3 {est}", abs(st - 1.) < 0.02, f"'grid': the perturbed-IC plane equals the true-IC plane (slope {st:.4f})")
 gs = grid_layer("b_sampled_grid")
-print(f"   (the production nSub=3 sampled deposit of this box: plane-vs-grid slope 'grid' "
+print(f"   (the nSub=3 sampled deposit of this box: plane-vs-grid slope 'grid' "
       f"{slope(slab_blocks('b_sampled_grid'), gs):.3f}, 'legacy' {slope(slab_blocks('b_sampled_legacy'), gs):.3f}; "
       f"that grid against the analytic cells {slope(gs, ana):.3f}, residual rms {np.std(gs - ana):.3f} -- "
       f"the exact deposit's {np.std(grid_layer('b_linear_grid') - ana):.3f})")

@@ -923,9 +923,15 @@ inline void printStructureFingerprint(Tr const &dt)
             uint64_t const a[2] = { vi.at( c->vertex( q ) ), ci.at( c->neighbor( q ) ) };
             mix( a, sizeof a );
         }
-    // on a line of its own: other threads' progress output may have left the current line open
-    std::fprintf( stderr, "\nTESS_FINGERPRINT %zu %zu %016llx\n", size_t( dt.number_of_vertices() ),
-                  size_t( dt.tds().number_of_cells() ), (unsigned long long)h );
+    // On a line of its own, in ONE write: other threads' progress output may have left the current line open, and
+    // through the line-buffered stderr the leading newline would leave on its own (macOS flushes that stream at
+    // every newline), so a progress figure of another thread could still land between it and the line.
+    char line[96];
+    int const n = std::snprintf( line, sizeof line, "\nTESS_FINGERPRINT %zu %zu %016llx\n",
+                                 size_t( dt.number_of_vertices() ), size_t( dt.tds().number_of_cells() ),
+                                 (unsigned long long)h );
+    std::fflush( stderr );
+    if ( n > 0 and size_t( n ) < sizeof line and ::write( STDERR_FILENO, line, size_t( n ) ) < 0 ) {}   // a test aid
 }
 
 

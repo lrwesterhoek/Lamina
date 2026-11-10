@@ -67,7 +67,7 @@ int dtfeGpuFallbacksTaken(bool reset)
 #include "gpu_host.h"
 #endif
 
-// --exact-average: analytic cell∩tet moments (vendored r3d, Powell & Abel 2015, in 3D; the
+// --exact: analytic cell∩tet moments (vendored r3d, Powell & Abel 2015, in 3D; the
 // triangle clipper ps_clip2d.h in 2D; MY_SCALAR is not linear inside a tet, so it keeps the MC
 // loop -- rejected at parsing). r3d.h carries its own extern "C" guard.
 #if NO_DIM==3 && !defined(MY_SCALAR)
@@ -155,7 +155,7 @@ inline uint64_t mcVertexHash(Vertex_handle const &v)
 }
 
 // The vertex order of the Monte-Carlo average. 'legacy' keeps CGAL's own order (vertex(0) as the base), which
-// the --exact-average path uses and DTFE_MC_LEGACY=1 selects for the sampled path (A/B). Otherwise the
+// the --exact path uses and DTFE_MC_LEGACY=1 selects for the sampled path (A/B). Otherwise the
 // NO_DIM+1 vertices are sorted by a key that depends only on the cell's own vertex SET: each vertex's
 // coordinate hash mixed with the (order-free) sum of the cell's hashes, ties (never seen; 64-bit keys) broken
 // by the coordinates.
@@ -415,7 +415,7 @@ static inline void avg1Announce(MESSAGE::Message &message, size_t *nGrid, Box &b
         message << "\nComputing interpolation of the fields volume averaged over the sampling cell on a regular "
                 << MESSAGE::printElements( nGrid, NO_DIM, "*" ) << " grid in the region "
                 << boxCoordinates.print()
-                << ". The volume average integrates the linear interpolant EXACTLY over every grid-cell/tetrahedron intersection (--exact-average: r3d on the CPU, a z-sweep on the GPU; '--subsamples' is ignored).\n"
+                << ". The volume average integrates the linear interpolant EXACTLY over every grid-cell/tetrahedron intersection (--exact: r3d on the CPU, a z-sweep on the GPU; '--subsamples' is ignored).\n"
                 << "\t Done: " << MESSAGE::Flush;
     else
         message << "\nComputing interpolation of the fields volume averaged over the sampling cell on a regular "
@@ -450,7 +450,7 @@ static inline void avg1ZeroGrids(User_options &userOptions, Field &field, size_t
 // Whether this pass may use the GPU deposit: --gpu, at most one scalar component and at most 2^32 grid cells.
 static inline bool avg1GpuUsable(User_options &userOptions, Field &field, size_t const gridSize)
 {
-    bool tryMetal = userOptions.useMetal;   // (--exact-average runs on the GPU too: depositExactAverage)
+    bool tryMetal = userOptions.useMetal;   // (--exact runs on the GPU too: depositExactAverage)
 #ifdef SCALAR
     if ( tryMetal and (field.scalar or field.scalar_gradient) and noScalarComp != 1 )
     {
@@ -829,7 +829,7 @@ static inline void avg1SingleCellExact(Avg1CpuCtx const &C, McCell &mc, double p
 
 
 #if NO_DIM==3 && !defined(MY_SCALAR)
-// ----- exact volume average (--exact-average): analytic cell∩tet integration -----
+// ----- exact volume average (--exact): analytic cell∩tet integration -----
 // The interpolant is LINEAR inside the tet, so its integral over each intersection
 // piece is the centroid value times the piece volume -- order-1 r3d moments suffice
 // (Powell & Abel 2015). The geometry is the grid frame's (GridFrame / TetFrame, plan P10.8): the tet in its vertex-0
@@ -968,7 +968,7 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, McCell &mc, d
     } );
 }
 #elif NO_DIM==2 && !defined(MY_SCALAR)
-// ----- exact area average (--exact-average), 2D: the same integral with the triangle clipped
+// ----- exact area average (--exact), 2D: the same integral with the triangle clipped
 // against each cell by ps_clip2d.h (area and first moments: the centroid of each piece), in the grid frame
 // (TetFrame) with the gradients in double, as the 3D path -----
 // Thread th clips only the cells of its own x planes.
@@ -1367,14 +1367,14 @@ static void avg1FacePass( DT &dt, GridFrame const &F, Bbox &fullBox, size_t *nGr
 
 // Volume-averaged grid interpolation (method 1): quasi-Monte-Carlo sampling inside each Delaunay cell,
 // with the sample count proportional to cell volume; scatters each sample's field value into its grid cell.
-// --exact-average replaces the MC inner loop by analytic cell∩tet integration (r3d; NO_DIM==3 only).
+// --exact replaces the MC inner loop by analytic cell∩tet integration (r3d; NO_DIM==3 only).
 void interpolateGrid_averaged_1(DT &dt,
                                 User_options &userOptions,
                                 Quantities *quantities)
 {
     size_t *nGrid = &(userOptions.gridSize[0]); // grid size along each axis
     size_t const NN = userOptions.noPoints;     // average random points per grid cell
-    // --exact-average: analytic cell∩tet integration of the linear interpolant (3D CPU only)
+    // --exact: analytic cell∩tet integration of the linear interpolant (3D CPU only)
     bool const exactAvg = userOptions.exactAverage;
     size_t const minNN = NN/6 + 1;              // minimum sample points per Delaunay cell
     Real const minRatio = 1./6.;                // vol(Delaunay)/vol(grid) below which minNN is used
@@ -1484,7 +1484,7 @@ void interpolateGrid_averaged_1(DT &dt,
     //     exactly, so a tetrahedron's mass and momentum are exact and only their split over the grid cells is
     //     sampled. The shifted weights lambda_ij + c_j stay >= 0 for n <= 34; beyond, the most negative is -0.013
     //     (n = 88), which gives a negative sample only at a 70x density contrast across one tetrahedron.
-    // tests/dtfe_mc_average_check.sh checks the mass, the momentum and the split invariance. --exact-average takes
+    // tests/dtfe_mc_average_check.sh checks the mass, the momentum and the split invariance. --exact takes
     // the same vertex order (plan P10.8): its per-tetrahedron gradient is formed from vertex 0, in float on the GPU,
     // and CGAL's order -- which differs between the triangulations of two splits -- moved the exact grids by 2.7e-5
     // of their rms between a 3^3 and a 6^3 plan (the P10 status). DTFE_MC_LEGACY=1 selects CGAL's order for both
@@ -1862,7 +1862,7 @@ void interpolateGrid_averaged_1(DT &dt,
 
         Real cellVolume = volume( dt, itC );
 #ifndef MY_SCALAR
-        // --exact-average: the inverse and the gradients in double (plan P10.8) and the grid frame's windows. A cell
+        // --exact: the inverse and the gradients in double (plan P10.8) and the grid frame's windows. A cell
         // inside one grid cell adds its centroid value times its volume (exact for the linear interpolant); the others
         // the analytic cell∩tet (3D r3d) / cell∩triangle (2D ps_clip2d) integration.
         if ( exactAvg )

@@ -45,11 +45,12 @@ build_target "${1:-}" PS-DTFE o_ps
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP}" --n "${N}" --box 100 \
     --amplitude-factor 1.8 --crossed-waves >/dev/null
 
+# the sampled deposit ('density_a' would select the exact one): P2 and P3's tolerances are its sub-samples'
 run() {  # $1 = output name, rest = extra options
     local name="$1"; shift
     local out="${TMP}/run_${name}"
     rm -f "${out}".a_den "${out}".a_streams "${out}".a_hidden_streams
-    if ! "${BIN}" "${SNAP}" "${out}" --grid "${GRID}" --periodic --field density_a --ps-vertex-mass \
+    if ! "${BIN}" "${SNAP}" "${out}" --grid "${GRID}" --periodic --field density_a --sampled --ps-vertex-mass \
             --input-format 105 --mpc-unit 1 --verbose 1 "$@" > "${out}.log" 2>&1; then
         echo "FAIL: run ${name} exited non-zero -- last lines of ${out}.log:"
         tail -n 15 "${out}.log" | sed 's/^/   | /'

@@ -68,8 +68,11 @@ sys.exit(0 if n and worst < lim else 1)
 PYEOF
 }
 C=(--grid 48 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --partition 3 3 3)
-F1=(--field density velocity gradient dispersion scalar scalarGradient density_a velocity_a --scalar-dataset Potential)
-F2=(--field density velocity dispersion --ps-volume-weighted --exact-average --ps-caustics)
+# set 1 runs the sampled deposit (its '_a' fields would select the exact one) and set 2 the exact one, so X1 and X2
+# cover both; X4's overflow and sum bounds were set on set 1's sampled grids
+F1=(--field density velocity gradient dispersion scalar scalarGradient density_a velocity_a --scalar-dataset Potential
+    --sampled)
+F2=(--field density velocity dispersion --ps-volume-weighted --exact --ps-caustics)
 FX=(--ps-merge fixed-point)
 
 if precision_double; then
@@ -189,7 +192,9 @@ OBJ=o_ps
 if [ ! -d "$OBJ" ] || [ -f "$OBJ/.gpu_mode_off" ] || [ ! -f "$OBJ/.gpu_mode_metal" ]; then
     echo "  SKIP X7: $OBJ is not a Metal GPU build"
 else
-    G=("${C[@]}" --field density velocity gradient dispersion density_a --ps-volume-weighted --gpu)
+    # '--sampled': the GPU's sampled deposit, which this case has always run (with 'density_a' and no flag the
+    # deposit is the exact one since 2026-11-09)
+    G=("${C[@]}" --field density velocity gradient dispersion density_a --ps-volume-weighted --gpu --sampled)
     OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/g1" "${G[@]}" "${FX[@]}" --max-concurrent 1 > "$TMP/g1.log" 2>&1 || { echo "FAIL: g1 (see $TMP/g1.log)"; exit 1; }
     OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/g2" "${G[@]}" "${FX[@]}" --max-concurrent 2 > "$TMP/g2.log" 2>&1 || { echo "FAIL: g2 (see $TMP/g2.log)"; exit 1; }
     OMP_NUM_THREADS=4 DTFE_TEST_DELAY_PARTITION=0:2 "$BIN" "$SNAP" "$TMP/g4" "${G[@]}" "${FX[@]}" --max-concurrent 4 > "$TMP/g4.log" 2>&1 \

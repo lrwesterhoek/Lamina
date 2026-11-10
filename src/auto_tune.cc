@@ -195,7 +195,7 @@ struct AutoTunePS
 {
     bool phaseSpace   = false;
     bool volumeWeighted = false;   // --ps-volume-weighted
-    bool exactDeposit = false;     // --exact-average
+    bool exactDeposit = false;     // the exact deposit (--exact; resolved by readOptions, the default with an '_a' field)
     bool caustics     = false;     // --ps-caustics
     bool haloRelease  = false;     // --ps-halo-release (sampled deposit: the released-tet multiplicity grid)
     bool fixedMerge   = false;     // --ps-merge fixed-point: the summed full grids are 9 B integer words + carries
@@ -677,7 +677,7 @@ void autoTuneServe(User_options &u, size_t const nParticles)
 namespace {
 
 /* ---- Standard DTFE: what one partition's thread sub-triangulations hold, from the data --------------------------
-   The standard '--exact-average' run peaks 25-30% above the sampled one in footprint (TNG100-3-Dark z=1, 3^3,
+   The standard '--exact' run peaks 25-30% above the sampled one in footprint (TNG100-3-Dark z=1, 3^3,
    9 threads: 37.4 vs 30.0 GB), yet what the code allocates has no exact-average term:
      - CPU (averaged_interpolation_1.cc): the exact loop clips each tetrahedron against its cell window with r3d on the
        stack -- no per-tetrahedron or per-cell storage that the Monte-Carlo loop does not have;
@@ -1766,7 +1766,7 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             // (gpuCellBytes; under --grid-window held once, snapshotBytes)
             double const perTet = (kGpuTetBytes + (psVel or psDisp or psGrad ? kGpuTetVelBytes : 0.)) * kGpuTetSlack;
             m += perTet*kTetsPerVertex*nOwn + ( u.psWindowOn ? 0. : gpuCellBytes()*subCells );
-            // --exact-average runs depositExactItems (ps_metal_host.cc): a per-tet weight total
+            // the exact deposit (--exact) runs depositExactItems (ps_metal_host.cc): a per-tet weight total
             // (4 B) + the item list, 8 B per 16 cells of a tet's bbox window -- ~20x the tet's
             // volume in cells on the crossed-waves benchmark, at least one item -- capped at 32M items
             if ( psExact )
@@ -2322,7 +2322,7 @@ AutoTuneReport autoTunePartitioning(User_options &u,
 #ifdef PHASE_SPACE
     ps.phaseSpace     = true;
     ps.volumeWeighted = u.psVolumeWeighted;
-    ps.exactDeposit   = u.psExactDeposit;
+    ps.exactDeposit   = u.psExactDeposit;   // resolved (readOptions: '--exact', '--sampled', the pin or the default)
     ps.caustics       = u.psCaustics;
     ps.haloRelease    = u.psHaloRelease > Real(0.);
     ps.fixedMerge     = u.psFixedPointMerge;

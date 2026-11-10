@@ -1,7 +1,7 @@
 //  The GPU exact tetrahedron-cell intersection: the volume and the first and second moments of one
 //  tetrahedron intersected with one axis-aligned grid cell, in float32. Shared by the phase-space
-//  deposit (ps_deposit.metal: --exact-average) and the standard-DTFE exact volume average
-//  (dtfe_deposit.metal: --exact-average); the Makefile PREPENDS this file to both kernel sources
+//  deposit (ps_deposit.metal: --exact) and the standard-DTFE exact volume average
+//  (dtfe_deposit.metal: --exact); the Makefile PREPENDS this file to both kernel sources
 //  when it embeds them (and metal/validate_deposit.cpp does the same when it loads the source).
 //  Keep it self-contained: it is compiled before everything else in each kernel source.
 #include <metal_stdlib>
@@ -111,7 +111,7 @@ static inline bool box_outside_tet(thread const TetPlanes& F, float3 c, float3 h
 // causticClass is identical. One known residual: a tet face lying exactly in a cell plane (a
 // perfect lattice) leaves a slab <= 1e-7 cell thick in the cell it only touches, which then
 // counts as a tet touch; its mass is ~1e-7 of the tet's. Speed (M1 Max, one partition, the whole
-// --exact-average): 18.1 -> 8.7 s for 0.26M particles on 256^3, 10.8 -> 6.2 s for 2.1M on
+// --exact): 18.1 -> 8.7 s for 0.26M particles on 256^3, 10.8 -> 6.2 s for 2.1M on
 // 128^3, 35.7 -> 18.1 s for 2.1M on 256^3, against the r3d port.
 // ================================================================================================
 #define SW_NCAND 34

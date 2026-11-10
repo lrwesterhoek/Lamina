@@ -389,7 +389,7 @@ class TabsMixin:
         deposit.currentIndexChanged.connect(
             lambda _i: self._deposit_changed(deposit, gpu, self._tab_estimator(tab),
                                              self.custom.dim if tab == "custom" else 3))
-        g.form.addRow("Cell average", deposit)        # both estimators: sampled or exact (the flag is --exact-average)
+        g.form.addRow("Cell average", deposit)        # both estimators: exact (--exact, the default) or --sampled
         g.form.addRow("Grid", row)
         g.form.addRow("", gpu)
         for role, w in (("deposit", deposit), ("grid", combo), ("grid_cells", cells), ("nsub", nsub), ("gpu", gpu)):
@@ -488,9 +488,9 @@ class TabsMixin:
 
     def _deposit_changed(self, combo: QComboBox, gpu: QCheckBox, estimator: str = "ps", dim: int = 3):
         """Picking the exact deposit sets the GPU box to that deposit's faster side (rs.recommended_gpu):
-        PS-DTFE the CPU (14.5 min against 17.7 min on the GPU for TNG100-3-Dark at 512³), standard DTFE's
+        PS-DTFE the CPU (1133 s against 1156 s on the GPU for TNG100-3-Dark at 512³), standard DTFE's
         exact cell average the GPU (1.6x, 2.0 s against 3.3 s at 0.26M); the box stays editable. A tick this
-        removed comes back when the choice leaves the exact deposit (the sampled deposit's start), unless the
+        removed comes back when the choice leaves the exact deposit (for the sampled one), unless the
         box was set otherwise meanwhile. A 2D run has no GPU."""
         if not self._loading:
             want = estimator != "ps"
@@ -526,12 +526,12 @@ class TabsMixin:
 
     def _estimator_switched(self, combo: QComboBox, ps_now: bool):
         """An estimator switch by the user moves the deposit choice to the new estimator's production setting
-        (rs.production_deposit): PS-DTFE the sampled deposit, standard DTFE the exact cell average,
-        run_dtfe.sh's default; keeping 'sampled' would run a standard job on the biased Monte-Carlo average
-        unless it was changed by hand. (With two choices, 'a choice at the old estimator's production setting
-        follows to the new one's' is the same rule.) The other choice stays selectable afterwards. A choice made
-        for an estimator comes back with it (per tab, this session): else PS-DTFE's exact deposit would be lost on
-        the way PS -> standard -> PS, the switch back giving the sampled one."""
+        (rs.production_deposit): the exact one for both (PS-DTFE's exact deposit, standard DTFE's exact cell
+        average; both drivers' default); keeping 'sampled' would run a standard job on the biased Monte-Carlo
+        average unless it was changed by hand. (With two choices, 'a choice at the old estimator's production
+        setting follows to the new one's' is the same rule.) The other choice stays selectable afterwards. A choice
+        made for an estimator comes back with it (per tab, this session): else a sampled deposit chosen for PS-DTFE
+        would be lost on the way PS -> standard -> PS, the switch back giving the exact one."""
         if self._loading:
             return
         new, old = ("ps", "dtfe") if ps_now else ("dtfe", "ps")
@@ -547,17 +547,15 @@ class TabsMixin:
         elif combo.currentData() != want:
             was = gpu.isChecked()
             combo.setCurrentIndex(max(combo.findData(want), 0))      # its signal: the GPU tick, _changed
-            on_gpu = ", on the GPU (1.6x faster than the CPU)" if gpu.isChecked() and not was else ""
-            if want != rs.production_deposit(new) and ps_now:            # the user's own choice back
-                self.status_message("PS-DTFE: the exact deposit again, as chosen for it before"
-                                    + (", on the CPU (faster than the GPU)" if was and not gpu.isChecked() else ""))
-            elif want != rs.production_deposit(new):
-                self.status_message("standard DTFE: the Monte-Carlo average again, as chosen for it before; the "
-                                    "exact cell average stays selectable")
-            else:
-                self.status_message(f"standard DTFE: the exact cell average, its production setting{on_gpu}; the "
-                                    "Monte-Carlo average stays selectable" if not ps_now else
-                                    "PS-DTFE: the sampled deposit, its production setting")
+            now = gpu.isChecked()
+            where = (", on the GPU" if now and not was else
+                     ", on the CPU (faster on production runs)" if was and not now else "")
+            words = ({"exact": "the exact deposit", "sampled": "the sampled deposit"} if ps_now else
+                     {"exact": "the exact cell average", "sampled": "the Monte-Carlo average"})
+            how = (" again, as chosen for it before" if want != rs.production_deposit(new)   # the user's own choice
+                   else ", its production setting")
+            self.status_message(f"{'PS-DTFE' if ps_now else 'standard DTFE'}: {words[want]}{how}{where}; "
+                                f"{words['sampled' if want == 'exact' else 'exact']} stays selectable")
 
     @staticmethod
     def _deposit_texts(combo: QComboBox, ps: bool, force: bool = False):

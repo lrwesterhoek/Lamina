@@ -27,7 +27,9 @@
     spelling, User_options::commandTokens: '--ps-gpu' and '--gpu' give one key) minus the
     options that cannot change a grid value (--resume, --ps-merge, --no-overlap, --verbose,
     --max-concurrent, --scratch-dir, --tessellation-cache), the input files' size+mtime, the resolved
-    partition split and the grid. '--resume' refuses, naming the lines that differ, when the key differs.
+    '_a' average (exact or sampled) and gradient route (face or per-tet), which an environment pin can change
+    without the command line, the resolved partition split and the grid. '--resume' refuses, naming the lines
+    that differ, when the key differs.
     It over-refuses rather than under-refuses (a reordered command line is a different key).
 
     MERGE ORDER: the manifest lists the merged partitions as a SET, so a run merging in completion order
@@ -254,6 +256,24 @@ inline std::string settingsKey(User_options const &u)
     // grids, so neither mode can resume the other's (beginLoop refuses it by name)
     if ( u.psFixedPointMerge )
         k << "merge=fixed-point\n";
+#endif
+    // the resolved '_a' average and gradient route: an environment pin (DTFE_EXACT_AVERAGE, DTFE_FACE_GRADIENT) or
+    // a default changes them without changing the command line. Always written, so a checkpoint from before these
+    // lines never matches.
+#ifdef PHASE_SPACE
+    k << "average=" << ( u.psExactDeposit ? "exact" : "sampled" ) << '\n';
+#else
+    k << "average=" << ( u.exactAverage ? "exact" : "sampled" ) << '\n';
+#endif
+    k << "gradient=" << ( u.faceGradient ? "face" : "per-tet" ) << '\n';
+#ifdef PHASE_SPACE
+    // DTFE_PS_GPU_SHARE (DTFE.cpp): which partitions of a '--gpu' run deposit on the GPU. Written only for a mixed
+    // run, so the key of an all-GPU run has no such line.
+    if ( u.psUseMetal )
+    {
+        long const share = std::max( 0L, std::min( 1000L, long( Env::integer( "DTFE_PS_GPU_SHARE", 1000 ) ) ) );
+        if ( share < 1000 ) k << "gpu-share=" << share << '\n';
+    }
 #endif
     k << "partition=";
     for ( size_t p : u.partition ) k << p << ',';

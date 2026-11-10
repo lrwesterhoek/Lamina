@@ -11,7 +11,7 @@
 #       byte-identical to a run without the fault, '.a_streams' identical, and so is '.a_vel': the moment
 #       grids are exact fixed-point sums too. DTFE_GPU_FLOAT_MOMENTS=1 in the environment selects the float sums
 #       (4e-7 apart run to run) and a tolerance of 1e-6 of the peak
-#   R2  --exact-average (the items passes + leftovers), an 'oom' fault: same assertions, and the pace
+#   R2  --exact (the items passes + leftovers), an 'oom' fault: same assertions, and the pace
 #       escalates (shorter buffers) as a resource error should; its '.a_streams' (the exact multiplicity) is a
 #       fixed-point sum as well: identical
 #   R3  --partition 2 2 2 --max-concurrent 1, a 'timeout' (watchdog) fault in a later partition: same
@@ -62,9 +62,9 @@ echo ">> R1: one-thread-per-tet deposit, without and with an innocent-victim fau
 run "$TMP/t0" "${PS_BIN}" "$SNAP" "$TMP/t0" "${C[@]}"
 grep -q " GPU deposit (" "$TMP/t0.log" || { echo "FAIL: t0 did not run the GPU deposit (see $TMP/t0.log)"; exit 1; }
 run "$TMP/t1" env DTFE_GPU_FAULT_AT=3 "${PS_BIN}" "$SNAP" "$TMP/t1" "${C[@]}"
-echo ">> R2: --exact-average, without and with an out-of-memory fault at buffer 3"
-run "$TMP/e0" "${PS_BIN}" "$SNAP" "$TMP/e0" "${C[@]}" --exact-average
-run "$TMP/e1" env DTFE_GPU_FAULT_AT=3:oom "${PS_BIN}" "$SNAP" "$TMP/e1" "${C[@]}" --exact-average
+echo ">> R2: --exact, without and with an out-of-memory fault at buffer 3"
+run "$TMP/e0" "${PS_BIN}" "$SNAP" "$TMP/e0" "${C[@]}" --exact
+run "$TMP/e1" env DTFE_GPU_FAULT_AT=3:oom "${PS_BIN}" "$SNAP" "$TMP/e1" "${C[@]}" --exact
 echo ">> R3: 2 x 2 x 2 partitions, without and with a watchdog fault at buffer 9"
 run "$TMP/p0" "${PS_BIN}" "$SNAP" "$TMP/p0" "${C[@]}" "${P[@]}"
 run "$TMP/p1" env DTFE_GPU_FAULT_AT=9:timeout "${PS_BIN}" "$SNAP" "$TMP/p1" "${C[@]}" "${P[@]}"
@@ -90,7 +90,7 @@ def failed_buffers(text):
     return sum(int(x) for x in m)
 for tag, ref, run, what, cause, pace in (
         ("R1", "t0", "t1", "per-tet deposit", "innocent victim", "250 ms"),
-        ("R2", "e0", "e1", "--exact-average", "resource", "62 ms"),
+        ("R2", "e0", "e1", "--exact", "resource", "62 ms"),
         ("R3", "p0", "p1", "--partition 2 2 2", "watchdog", None)):
     L = log(run)
     resumed = re.search(r"\[" + cause + r"\] -- resuming from the (checkpoint|pass start) at thread", L)

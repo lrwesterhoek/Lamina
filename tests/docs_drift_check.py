@@ -53,7 +53,9 @@ DTFE_RE = re.compile(r"\bDTFE_[A-Z0-9_]*[A-Z0-9]\b")
 # the binaries' deprecated spellings and their canonical names (src/user_options.cc deprecatedOptions), the
 # names the docs may give only on a 'deprecated' line; the readers' permanent table (python/dtfelib/runlog.py,
 # re-exported by python/gui/results.py, copied into scripts/run_ps_pipeline.sh run_settings) is a superset (E)
-DEPRECATED = {"--ps-gpu": "--gpu", "--ps-exact-deposit": "--exact-average", "--ps-no-overlap": "--no-overlap",
+DEPRECATED = {"--ps-gpu": "--gpu", "--ps-exact-deposit": "--exact", "--ps-no-overlap": "--no-overlap",
+              # 2026-11-09: '--exact' / '--sampled', the exact average the default (both binaries)
+              "--exact-average": "--exact",
               "--full_help": "--full-help", "--lambda_th": "--lambda-th",
               # P6.7 (the binaries' second pass; PS-DTFE's merge switches are deprecatedSwitches, the readers' SWITCHES)
               "--avg-subsamples": "--subsamples", "--lagrangianInput": "--ps-lagrangian-input",

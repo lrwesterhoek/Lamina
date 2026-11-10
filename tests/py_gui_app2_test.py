@@ -500,11 +500,24 @@ def t_qt(tmp: Path):
         std_env = w.spec.command()[1]
         w.ps_radio.setChecked(True)
         w._read_widgets()
+        # PS-DTFE: the sampled deposit takes its count from -n; the exact one (the default) has none: no -n, and the
+        # count pinned empty. The choice found is put back afterwards
+        first, gpu_first = w.spec.deposit, w.gpu_check.isChecked()
+        w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("sampled"))
+        w._read_widgets()
+        sampled_cmd = w.spec.command()
+        w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("exact"))
+        w._read_widgets()
+        exact_cmd = w.spec.command()
+        w.deposit_combo.setCurrentIndex(w.deposit_combo.findData(first))
+        w.gpu_check.setChecked(gpu_first)          # (the exact deposit's GPU rule may have moved it)
+        w._read_widgets()
         check("a standard-DTFE Grids job pins SUBSAMPLES and THREADS empty (run_dtfe.sh's own defaults); the PS job "
-              "takes its count from -n",
+              "takes its count from -n (the sampled deposit) or pins it empty (the exact one, which has none)",
               std_env.get("SUBSAMPLES") == "" and std_env.get("THREADS") == "" and w.spec.estimator == "ps"
-              and "SUBSAMPLES" not in w.spec.command()[1] and "-n" in w.spec.command()[0],
-              ({k: std_env.get(k) for k in ("SUBSAMPLES", "THREADS")}, w.spec.estimator))
+              and "SUBSAMPLES" not in sampled_cmd[1] and "-n" in sampled_cmd[0]
+              and exact_cmd[1].get("SUBSAMPLES") == "" and "-n" not in exact_cmd[0] and w.spec.deposit == first,
+              ({k: std_env.get(k) for k in ("SUBSAMPLES", "THREADS")}, w.spec.estimator, sampled_cmd, exact_cmd))
         w.om_check.setChecked(False)
         (d / "om.runlog").write_text(LOG_OK.format(root=d / "om").replace("--periodic", "--periodic --ordered-merge"))
         w._load_run_settings(R.parse_runlog(d / "om.runlog", "TNGQ-1-Dark", 99))

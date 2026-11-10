@@ -292,7 +292,7 @@ def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: 
         cmd += list(kw.get("options", []))                          # the custom snapshot's own --box (and alpha)
         corners = [f"{float(v):.10g}" for pair in window for v in pair]   # Mpc, as --grid-window takes
         cmd += ["--grid-window", *corners, "--field", "density_a", "velocity_a", "dispersion_a", "gradient_a",
-                "--exact-average", "--ps-caustics"]                 # (the exact deposit)
+                "--exact", "--ps-caustics"]                         # (the exact deposit, named: the zoom needs it)
         if side.get("volume_weighted", True):
             cmd.append("--ps-volume-weighted")
         # chart-independent tet masses: as the custom run recorded it, or, for a TNG output (no
@@ -334,7 +334,7 @@ def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: 
         # the snapshot's own options carry one. Placed before '--region-mpc': its corners are followed by '--field'
         if not any(str(v) in ("--padding", "--padding-mpc", "--paddingMpc") for v in kw.get("options", [])):
             cmd += ["--padding", f"{STANDARD_PADDING:g}"]
-        cmd += ["--region-mpc", *corners, "--field", "density_a", "velocity_a", "gradient_a", "--exact-average"]
+        cmd += ["--region-mpc", *corners, "--field", "density_a", "velocity_a", "gradient_a", "--exact"]
         if side.get("scalar_dataset"):
             cmd += ["scalar_a", "scalarGradient_a", "--scalar-dataset", str(side["scalar_dataset"])]
         if rs.gpu_built("dtfe", precision, o.dim):

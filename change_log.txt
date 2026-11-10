@@ -1,4 +1,76 @@
 UNRELEASED (since 1.0.0)
+- PS-DTFE, two speed changes that move no byte (2026-11-09, from the look at where a 512^3 run's time goes;
+  docs/cleanup-plan.md P12.2). (1) The periodic particle selection skips an image pass that cannot select anything:
+  the smallest and the largest Lagrangian coordinate per axis are taken once, and a pass whose shifted extent misses
+  the partition's padded box along an axis is not scanned (findParticlesInBoxLagrangianPeriodic in
+  src/subpartition.h). At '--partition 6 6 6' that leaves 343 scans of every particle (512 with the fallback seam at
+  the box's upper face) of the 27 x 216 = 5832 before. (2) A partition's thread that waits for the GPU or holds it
+  lends its core to the core pool for that time (CoreLend in src/CGAL_triangulation/ps_metal_host.cc), so the CPU work
+  of the other partitions can claim one helper more; a claim on the pool never changes a result. Checked against
+  2f428bc's binary: CPU and GPU runs of the exact deposit at '--partition 1', '2 2 2', '3 3 3' and '4 4 4' on a small
+  test snapshot, 15 files each, 0 differ; TNG100-3-Dark z=0 at 512^3 with '--gpu', 23 of 23 files byte for byte the
+  2f428bc bench's. Also in the code, documented nowhere else and not for production: the experiment
+  DTFE_PS_GPU_SHARE=<per mille>, which deposits that share of a '--gpu' run's partitions on the GPU and the others on
+  the CPU at the same time (chosen by partition index alone; the share is in the checkpoint key); unset = every
+  partition on the GPU, as before.
+- '--exact' and '--sampled' choose the '_a' cell averages in both binaries (every build), and THE EXACT AVERAGE IS
+  THE DEFAULT for both estimators (docs/cleanup-plan.md D20 and P12, decided 2026-11-09 after the P11.1 bench; it
+  reverses D2's canonical name '--exact-average' and settles D15): standard DTFE integrates the linear interpolant
+  over every cell exactly (r3d on the CPU, the z-sweep with --gpu), PS-DTFE runs the exact conservative deposit.
+  '--sampled' selects the sampled averages: standard DTFE's Monte-Carlo average ('--average-method',
+  '--subsamples'), PS-DTFE's deposit on nSub^3 sub-points. The rules, first match wins: '--exact' with '--sampled'
+  is refused; a flag wins; then the new environment pin DTFE_EXACT_AVERAGE, read by both binaries (1 = exact,
+  0 = sampled, unset or 'auto' = no pin); then an explicit sampling count selects the sampled average (a non-default
+  '--subsamples'; in standard DTFE also '--average-method' of any value and the deprecated '--samples', on the
+  command line or in a '--config' file), so every command line that set a count keeps its meaning; otherwise exact
+  where it applies. Where it does not -- velocityStd_a, a redshift cone grid, a MY_SCALAR build, the other
+  interpolation methods -- standard DTFE samples by itself and the run log says why; a PS-DTFE run without an '_a'
+  field is unchanged unless '--exact' is given. The exact default never turns a command line that ran before into
+  an error: an explicit '--exact' keeps every error '--exact-average' raised (the name changed in the text, nothing
+  else), '--exact' with a redshift cone grid warns and samples, and a count beside '--exact' is accepted and
+  ignored. The run log's header says which average ran and why: standard DTFE's 'volume averaging' line reads
+  'EXACT cell-tetrahedron integration of the linear interpolant (<reason>; ...)' or 'SAMPLED (<reason>)', PS-DTFE's
+  'grid deposit' line 'EXACT tetrahedron-cell intersection moments (<reason>; ...)' or 'SAMPLED on nSub^3
+  sub-points (<reason>)'; the reason names the flag, the pin, the count, the default ('--exact, the default') or
+  why the exact form does not apply ('velocityStd_a has no exact form').
+  The old names stay for one release (D9), hidden, each with one deprecation line: '--exact-average' (both binaries)
+  and PS-DTFE's '--ps-exact-deposit' now alias '--exact' ('warning: --exact-average is deprecated, use --exact'),
+  and the run-log readers map both to '--exact'. The partition checkpoint's settings key gains two lines before
+  'partition=', 'average=exact|sampled' and 'gradient=face|per-tet' (the resolved choices, so an environment pin of
+  DTFE_EXACT_AVERAGE or DTFE_FACE_GRADIENT now changes the key, a gap D13 had left); checkpoints written before
+  this change no longer match (intended). User_options keeps its constructor defaults: a program that fills it
+  without readOptions keeps the sampled average unless it sets the member. Drivers: run_dtfe.sh and run_ps_dtfe.sh
+  (and run_ps_pipeline.sh through it) average exactly by default -- run_ps_dtfe.sh sampled before -- and pass
+  '--exact' or '--sampled' on every command, '--subsamples' only with '--sampled' and only when SUBSAMPLES is set
+  (run_ps_dtfe.sh's SUBSAMPLES default is now empty: the binary's own 3); with DTFE_EXACT_AVERAGE unset a SUBSAMPLES
+  count (-n) selects the sampled average, while '-e' or DTFE_EXACT_AVERAGE=1 beside it stays exact (one note line);
+  '--exact' and '--sampled' are the drivers' long options ('-e' stays; the drivers' '--exact-average' warns for one
+  release). The pipeline's freshness test maps the old spellings to '--exact' and leaves '--sampled' out, so under
+  the exact default a PS grid set made with the sampled deposit counts as stale and is recomputed exact
+  (DTFE_EXACT_AVERAGE=0 keeps it current). The launcher ticks 'Cell average: Exact' for both estimators by default
+  (a saved explicit choice is kept) and passes the mode explicitly; a run log with neither marker reads as sampled.
+  What moves: an unflagged run with an '_a' field now gives the exact grids; in PS-DTFE the exact deposit then drives
+  every grid pass of such a run ('.streams' included), writes '.tetTouch', and the auto-tuner books its memory and
+  time, so the plan can change. Why: the bench of 2026-11-09 (TNG100-3-Dark z=0, 512^3, Apple M1 Max, commit
+  2f428bc) measured the exact average at about the sampled one's wall time, without its sampling noise: standard
+  DTFE 439 s exact against 433 s sampled on the GPU, 431 s against 315 s on the CPU; PS-DTFE exact 1133 s on the CPU
+  and 1156 s on the GPU, sampled (nSub 3) 1260 s on the GPU and 1644 s on the CPU. The tests: the suites spell
+  '--exact', the runs that mean the sampled average pass '--sampled' or a count, tests/ps_auto_tune_check.sh and the
+  dev tools tests/dev/bytecmp.sh and tune_report_set.sh pin DTFE_EXACT_AVERAGE=0 (the dev tools keep the old
+  spellings: they also drive binaries from before the change), the help probes key on '--sampled', and
+  tests/flag_spelling_check.sh gains cases for the alias, the refused pair, flag against pin, a count alone and the
+  default. (Implemented 2026-11-09; built and gated 2026-11-10: docs/cleanup-plan.md P12 has the gates' results.)
+- MEASURED 2026-11-09 (docs/cleanup-plan.md P11.1; no code change): the P11 bench on this tree's binaries,
+  TNG100-3-Dark z=0 at 512^3, one run at a time. Standard DTFE: GPU exact 439 s (3^3 plan, 34 GB), GPU sampled 433 s,
+  CPU exact 431 s (2^3 plan, 38.5 GB; 380 s with --per-tet-gradient), CPU sampled 315 s; 4.2 M points add 190 s.
+  PS-DTFE with the points: exact CPU 1133 s, exact GPU 1156 s (a quarter of the CPU seconds), sampled GPU 1260 s,
+  sampled CPU 1644 s; with --face-gradient 1737 s on the CPU and 1454 s with --gpu. The run that equals the P10.8
+  reference in configuration reproduces its density, velocity and velocity gradient byte for byte. The parallel
+  insert's default rule engaged in none of these runs (one core per tessellation in the standard plan; 771,057
+  padded points per partition in PS-DTFE's). KNOWN, NOT YET FIXED: PS-DTFE's auto-tuner under-books
+  '--face-gradient' -- the face words are missing from the plan under --gpu and counted at half their size on the CPU
+  in the single build -- so those two runs peaked at 49.6 and 46.4 GB against a 41.2 GB budget. Until the plan is
+  corrected (P11.7), give such a run a smaller DTFE_MEM_BUDGET_GB or '--max-concurrent'.
 - Standard DTFE's velocity gradient -- and the divergence, shear, vorticity and V-web built on it -- comes from the
   EXACT FACE INTEGRALS of the interpolant by default (docs/cleanup-plan.md D13, decided 2026-11-09 once P10.8's
   full-size check passed): formed in double, the same grids for every deposit (sampled, exact) and device, the

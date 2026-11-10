@@ -7,7 +7,8 @@
 # Builds against the shared library produced by `make library` at the repo root
 # (run automatically as a prerequisite). The OPTIONS block below MUST match the
 # root Makefile's OPTIONS_COMMON (they set the data-structure layout, so a
-# mismatch gives silent ABI corruption, not a link error).
+# mismatch gives silent ABI corruption, not a link error), and the TBB block
+# must match the root's TBB / TBB_STD block (the triangulation type).
 #
 #   make            # builds ../../libDTFE and then DTFE_particle_density
 
@@ -69,6 +70,34 @@ LIBRARIES = -L$(GSL_PATH)/lib -L$(BOOST_PATH)/lib -L$(CGAL_PATH)/lib \
 COMPILE_FLAGS = -O3 -std=c++17 -frounding-math -Wno-deprecated-declarations $(OPENMP_FLAG) -DNDEBUG $(OPTIONS)
 LIBS = -L$(ROOT) -lDTFE $(LIBRARIES) -lboost_thread -lboost_filesystem -lboost_program_options \
        -lgsl -lgslcblas -lm -lgmp -lmpfr
+
+# ---- MUST match the root Makefile's TBB / TBB_STD block ----
+# The library's Delaunay type follows TBB_STD there: with the tbb package installed (TBB=auto) libDTFE is built
+# with CGAL's parallel data structure (-DPARALLEL_TRIANGULATION), and a caller compiled without that define asks
+# for a DTFE() overload the library does not have (undefined reference at link time). The same detection is
+# repeated here, so 'make', 'make TBB=0', 'make TBB_STD=0' and TBB_PATH_OVERRIDE=/path give a matching pair (the
+# command-line variables reach the 'make library' below as well).
+TBB ?= auto
+ifeq ($(UNAME_S),Darwin)
+    TBB_PATH := $(or $(TBB_PATH_OVERRIDE),$(BREW_PREFIX)/opt/tbb)
+else
+    TBB_PATH := $(or $(TBB_PATH_OVERRIDE),/usr)
+endif
+TBB_PS := 0
+ifeq ($(TBB),1)
+    TBB_PS := 1
+endif
+ifeq ($(TBB),auto)
+    ifneq ($(wildcard $(TBB_PATH)/include/tbb/task_arena.h $(TBB_PATH)/include/oneapi/tbb/task_arena.h),)
+        TBB_PS := 1
+    endif
+endif
+TBB_STD ?= $(TBB_PS)
+ifeq ($(TBB_STD),1)
+    OPTIONS  += -DPARALLEL_TRIANGULATION -DCGAL_LINKED_WITH_TBB
+    INCLUDES += -I $(TBB_PATH)/include
+    LIBS     += -L$(TBB_PATH)/lib -ltbb -ltbbmalloc
+endif
 
 DTFE_particle_density: main_particle_density.cpp
 	$(MAKE) -C $(ROOT) library

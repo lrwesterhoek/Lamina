@@ -22,7 +22,8 @@
 # differences the change under test did not make. The tuner's plans have their own gate (tests/dev/tune_report_set.sh).
 # The runs spell PS-DTFE's options the old way ('--ps-gpu', '--ps-exact-deposit'): both sides run the same command,
 # and a reference set from before the one flag scheme knows only those; the current binaries take them as deprecated
-# aliases (a 'warning: ... is deprecated' line in the log, the same outputs).
+# aliases (a 'warning: ... is deprecated' line in the log, the same outputs). The same holds for '--exact-average',
+# which both binaries took until '--exact' replaced it on 2026-11-09.
 # Usage: tests/dev/bytecmp.sh [--gpu-exact] <reference binaries dir> <output dir>   (exit 0 = every file identical)
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -42,6 +43,11 @@ done
 # every standard derivative file against a reference set from before; DTFE_FACE_GRADIENT=0 keeps the deposit's own
 # gradient on a binary that knows the switch and is ignored by an older one, so both sides compare the same route
 export DTFE_FACE_GRADIENT=0
+# the '_a' average: the exact one became both binaries' default on 2026-11-09, which moves every unflagged '_a' run
+# against a reference set from before; DTFE_EXACT_AVERAGE=0 keeps those runs sampled on a binary that reads the pin
+# (a binary from before reads no such variable, and samples them anyway), and the '--exact-average' /
+# '--ps-exact-deposit' runs stay exact on both sides, since a flag beats the pin
+export DTFE_EXACT_AVERAGE=0
 C=(--periodic --input 105 --MpcUnit 1 --verbose 1)
 F3=(--field density_a velocity_a gradient_a divergence_a shear_a vorticity_a tweb_a vweb_a)
 F2=(--field density_a velocity_a gradient_a divergence_a vorticity_a)

@@ -46,6 +46,9 @@ FIELDS="density_a velocity_a gradient_a"
 # --per-tet-gradient: this suite validates the KERNEL's gradient against the CPU's; the face gradient (the default since
 # 2026-11-09) would make both sides the same CPU face pass
 COMMON=(--grid 96 --periodic --input-format 105 --mpc-unit 1 --field $FIELDS --per-tet-gradient)
+# The single-box and partitioned runs pass '--sampled': they validate the Monte-Carlo kernels (the item and the
+# per-tetrahedron one) against the CPU's samples, and the exact average is the default since 2026-11-09. COMMON
+# itself names no mode, because the exact pair (e) below runs with it too.
 
 run() { # run <label> <outprefix> [extra args...]
     local label="$1" out="$2"; shift 2
@@ -63,20 +66,21 @@ assert_gpu() { # assert_gpu <label> <log>
 }
 
 echo ">> single box"
-run cpu       "$TMP/s_cpu"
-run gpu       "$TMP/s_gpu" --gpu
+run cpu       "$TMP/s_cpu" --sampled
+run gpu       "$TMP/s_gpu" --sampled --gpu
 assert_gpu "--gpu" "$TMP/s_gpu.log"
-run gpu-again "$TMP/s_gpu2" --gpu            # run-to-run: only atomic summation order may differ
+run gpu-again "$TMP/s_gpu2" --sampled --gpu  # run-to-run: only atomic summation order may differ
 assert_gpu "--gpu (second run)" "$TMP/s_gpu2.log"
 echo ">> single box, per-tetrahedron kernel (DTFE_GPU_ITEMS=0: the A/B reference kernel)"
-DTFE_GPU_ITEMS=0 run gpu-pertet "$TMP/s_gpu0" --gpu
+DTFE_GPU_ITEMS=0 run gpu-pertet "$TMP/s_gpu0" --sampled --gpu
 assert_gpu "--gpu per-tet kernel" "$TMP/s_gpu0.log"
 # A coarse grid makes most tetrahedra single-cell: the fast path, whose cell index the host
 # shifts into the shared full grid (a 96^3 grid, with hardly any single-cell tetrahedron, would
 # not catch a wrong shift). The shared grid (DTFE_GPU_SHARED=1, off by default: the per-sub-domain
-# grids measured faster) is compared with the default per-call path and the CPU.
+# grids measured faster) is compared with the default per-call path and the CPU. The shared grid serves the sampled
+# average only (the exact one never takes it), so these runs, and the face runs below, pass '--sampled'.
 echo ">> coarse 32^3 grid: the single-cell fast path through the shared grid"
-COARSE=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --field $FIELDS --per-tet-gradient)   # (the kernel's gradient, as COMMON)
+COARSE=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --field $FIELDS --per-tet-gradient --sampled)   # (the kernel's gradient, as COMMON)
 "${DTFE_BIN}" "$SNAP" "$TMP/c_cpu" "${COARSE[@]}" > "$TMP/c_cpu.log" 2>&1 || { echo "FAIL run coarse cpu"; exit 1; }
 DTFE_GPU_SHARED=1 DTFE_GPU_TIMING=1 "${DTFE_BIN}" "$SNAP" "$TMP/c_gpu" "${COARSE[@]}" --gpu > "$TMP/c_gpu.log" 2>&1 || { echo "FAIL run coarse gpu"; exit 1; }
 assert_gpu "coarse --gpu shared" "$TMP/c_gpu.log"
@@ -90,7 +94,7 @@ fi
 # face pass writes it in every run, so through the shared grid the device must NOT add a gradient on top -- it did
 # until that day (a doubled gradient: shared-vs-percall 1.06, caught by the coarse runs above while they were unpinned)
 echo ">> coarse 32^3 grid, the face gradient (the default) through the shared grid"
-FACE=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --field $FIELDS)
+FACE=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --field $FIELDS --sampled)
 "${DTFE_BIN}" "$SNAP" "$TMP/cf_cpu" "${FACE[@]}" > "$TMP/cf_cpu.log" 2>&1 || { echo "FAIL run coarse face cpu"; exit 1; }
 DTFE_GPU_SHARED=1 "${DTFE_BIN}" "$SNAP" "$TMP/cf_gpu" "${FACE[@]}" --gpu > "$TMP/cf_gpu.log" 2>&1 || { echo "FAIL run coarse face gpu shared"; exit 1; }
 assert_gpu "coarse face --gpu shared" "$TMP/cf_gpu.log"
@@ -99,23 +103,23 @@ assert_gpu "coarse face --gpu per-call" "$TMP/cf_gpu1.log"
 grep -q "face gradient pass" "$TMP/cf_gpu.log" || { echo "FAIL: the coarse face --gpu run did not run the face pass (is the face gradient still the default?)"; exit 1; }
 
 echo ">> partitioned (2 2 2)"
-run cpu-part  "$TMP/p_cpu" --partition 2 2 2 --max-concurrent 2
-run gpu-part  "$TMP/p_gpu" --partition 2 2 2 --max-concurrent 2 --gpu
+run cpu-part  "$TMP/p_cpu" --partition 2 2 2 --max-concurrent 2 --sampled
+run gpu-part  "$TMP/p_gpu" --partition 2 2 2 --max-concurrent 2 --sampled --gpu
 assert_gpu "partitioned --gpu" "$TMP/p_gpu.log"
-# --exact-average: the analytic volume average (r3d) on the GPU (depositExactAverage) against the
+# --exact: the analytic volume average (r3d) on the GPU (depositExactAverage) against the
 # CPU's double-precision r3d -- no sampling at all, so this pair should sit well inside the sampled
 # tolerances (only the float clipping and the atomic order differ)
-echo ">> exact volume average (--exact-average)"
-run cpu-exact "$TMP/e_cpu" --exact-average
-run gpu-exact "$TMP/e_gpu" --exact-average --gpu
-assert_gpu "--exact-average --gpu" "$TMP/e_gpu.log"
+echo ">> exact volume average (--exact)"
+run cpu-exact "$TMP/e_cpu" --exact
+run gpu-exact "$TMP/e_gpu" --exact --gpu
+assert_gpu "--exact --gpu" "$TMP/e_gpu.log"
 # a FINE region (the launcher's exact zoom: 512^2 cells of 1.95 kpc): the GPU clips each piece in a
 # frame near the piece -- in the tetrahedron's vertex-0 frame a kpc piece Mpc away would lose its volume
 # to float cancellation. Same tolerance as the box above, the cells are 260x smaller.
-FINE=(--grid 512 512 1 --periodic --input-format 105 --mpc-unit 1 --field density_a velocity_a --exact-average --region-mpc 40 41 40 41 50 50.002)
+FINE=(--grid 512 512 1 --periodic --input-format 105 --mpc-unit 1 --field density_a velocity_a --exact --region-mpc 40 41 40 41 50 50.002)
 "${DTFE_BIN}" "$SNAP" "$TMP/f_cpu" "${FINE[@]}" > "$TMP/f_cpu.log" 2>&1 || { echo "FAIL run fine region cpu"; exit 1; }
 "${DTFE_BIN}" "$SNAP" "$TMP/f_gpu" "${FINE[@]}" --gpu > "$TMP/f_gpu.log" 2>&1 || { echo "FAIL run fine region gpu"; exit 1; }
-assert_gpu "--exact-average --gpu on a fine region" "$TMP/f_gpu.log"
+assert_gpu "--exact --gpu on a fine region" "$TMP/f_gpu.log"
 
 "$PY" - "$TMP" <<'EOF'
 import numpy as np, sys

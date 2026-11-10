@@ -1,4 +1,4 @@
-/* The 2D counterpart of r3d for '--exact-average' in a DIM=2 phase-space build: a triangle clipped
+/* The 2D counterpart of r3d for '--exact' in a DIM=2 phase-space build: a triangle clipped
    to an axis-aligned grid cell, and the moments of the piece up to second order.
 
    r3d (third_party/r3d, Powell & Abel 2015) clips a tetrahedron against a cell's six planes and

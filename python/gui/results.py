@@ -54,6 +54,12 @@ _PARTITION = re.compile(r"--partition (\d+) (\d+)(?: (\d+))?")    # a 2D run's s
 _CONC = re.compile(r"--max-concurrent (\d+)")
 _NSUB = re.compile(r"--subsamples (\d+)")             # (canonical: an older log's '--avg-subsamples' reads so)
 _MERGE = re.compile(r"(?:^|\s)--ps-merge (\S+)")
+# the run-log header's line on the cell average, the run's own word on it: standard DTFE 'volume averaging : EXACT
+# cell-tetrahedron integration ...' or 'SAMPLED (...)', PS-DTFE 'grid deposit : EXACT tetrahedron-cell intersection
+# moments ...' or 'SAMPLED on nSub^3 sub-points (...)'. Binaries since 2026-11-09 print it either way (the exact
+# average is their default, so a command without a flag says nothing); older ones printed only the exact line
+_AVERAGE = re.compile(r"^\s*(?:volume averaging|grid deposit)\s+:\s+(EXACT (?:cell-tetrahedron integration"
+                      r"|tetrahedron-cell intersection moments)|SAMPLED\b)", re.M)
 # the binaries' older spellings and their canonical names: dtfelib/runlog.py's permanent table (the binaries accept
 # a subset for one release, src/user_options.cc deprecatedOptions). Every reader of a command line maps them first,
 # so a run log written with either reads the same (RunRecord.has, and every regex below runs on canonical_command's
@@ -240,6 +246,7 @@ class RunRecord:
     prefix: str = ""
     binary: str = ""                # PS-DTFE | DTFE (-2d, -double; "" when unknown)
     command: str = ""               # the RUNNING line (paths unquoted, as the binary printed it)
+    header_average: str = ""        # 'exact' | 'sampled': the header's cell-average line (_AVERAGE); '' without one
     build_rev: str = ""
     build_time: _dt.datetime | None = None
     finished: _dt.datetime | None = None   # the log's modification time = when the run ended
@@ -277,6 +284,17 @@ class RunRecord:
         """The command carries the option 'flag' (either spelling of a renamed one; an old merge switch is the
         '--ps-merge' mode it stands for: has('--ordered-merge') == has('--ps-merge index-order'))."""
         return re.search(rf"(^|\s){re.escape(canonical_flag(flag))}(\s|$)", self.canonical) is not None
+
+    @property
+    def exact(self) -> bool:
+        """The run's cell averages were exact (standard DTFE's '_a' fields; PS-DTFE's grid deposit): the header's line
+        says so when the log has one (a binary since 2026-11-09 prints it either way, and resolves a command without a
+        flag to its exact default); else the command, '--exact' (read in canonical spelling: '--exact-average' and
+        '--ps-exact-deposit' too) against '--sampled' or nothing -- an older log without either was sampled, the
+        default until then."""
+        if self.header_average:
+            return self.header_average == "exact"
+        return self.has("--exact")
 
     @property
     def estimator(self) -> str:
@@ -359,7 +377,7 @@ class RunRecord:
     def options_text(self) -> str:
         bits = []
         if self.estimator == "ps":
-            if self.has("--exact-average"):        # the exact deposit ('--ps-exact-deposit' in older logs)
+            if self.exact:                            # the exact deposit (the header, else '--exact' or an older name)
                 bits.append("exact")
             elif self.nsub:
                 bits.append(f"nSub {self.nsub}")
@@ -375,7 +393,7 @@ class RunRecord:
                 bits.append("ordered merge")
             elif self.merge == "completion-order":    # opt-in (the default is the ordered merge)
                 bits.append("completion-order merge")
-        elif self.has("--exact-average"):       # standard DTFE: the exact cell average tells the production grids
+        elif self.exact:                        # standard DTFE: the exact cell average tells the production grids
             bits.append("exact average")        # from the Monte-Carlo ones
         if self.gpu:
             bits.append("GPU")
@@ -408,7 +426,7 @@ class RunRecord:
         if self.grid:
             d["grid"] = self.grid
         if self.estimator == "ps":
-            d.update(deposit="exact" if self.has("--exact-average") else "sampled",
+            d.update(deposit="exact" if self.exact else "sampled",
                      # always set: 'Load settings' must also turn the box OFF for a standard-deposit run
                      linear_deposit=self.has("--ps-linear-deposit"),
                      vertex_mass=self.has("--ps-vertex-mass"),
@@ -431,7 +449,7 @@ class RunRecord:
             if self.fields:
                 d["fields"] = self.fields
         elif self.estimator == "dtfe":      # its cell average, both ways (else the Grids tab's choice would stay)
-            d["deposit"] = "exact" if self.has("--exact-average") else "sampled"
+            d["deposit"] = "exact" if self.exact else "sampled"
         return d
 
 
@@ -488,8 +506,8 @@ def run_inputs(rec: RunRecord) -> set[Path]:
 # the text-derived fields of every run log read, by path, with the (size, mtime_ns) they were read at:
 # the launcher rescans every 30 s on its GUI thread, and a TNG50 z=0 log is large and on the
 # external disk; an unchanged log is not read again
-_LOG_FIELDS = ("binary", "build_rev", "build_time", "command", "gpu_retried", "gpu_retries", "gpu_retries_by_cause",
-               "wall_seconds", "peak_rss_gb", "footprint_gb", "ok")
+_LOG_FIELDS = ("binary", "build_rev", "build_time", "command", "header_average", "gpu_retried", "gpu_retries",
+               "gpu_retries_by_cause", "wall_seconds", "peak_rss_gb", "footprint_gb", "ok")
 _LOG_CACHE: dict[str, tuple[int, int, dict]] = {}
 
 
@@ -512,6 +530,11 @@ def _parse_text(rec: RunRecord, text: str):
                 if exe.endswith(name):
                     rec.binary = name
                     break
+        # the cell-average line of THIS command's header (it follows the RUNNING line; a log may hold more runs)
+        nxt = _RUNNING.search(text, m.end())
+        a = _AVERAGE.search(text, m.end(), nxt.start() if nxt else len(text))
+        if a:
+            rec.header_average = "exact" if a.group(1).startswith("EXACT") else "sampled"
     rec.gpu_retried = _GPU_RETRY.search(text) is not None
     tallies = _GPU_RETRIES.findall(text)
     if tallies:                     # the last: a resumed run's log holds each attempt's

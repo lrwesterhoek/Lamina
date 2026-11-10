@@ -96,8 +96,8 @@ struct Quantities
     std::vector<Real>                         velocity_vweb;        // V-web classification label (0=void, 1=wall, 2=filament, 3=node)
     std::vector< Pvector<Real,NO_DIM> >       velocity_vweb_eigenvalues; // V-web eigenvalues (sorted descending)
 #ifdef PHASE_SPACE
-    std::vector<Real>                         stream_count;       // stream multiplicity at each grid point: the sampled deposit's sample-mean, or --exact-average's analytic volume-weighted (1/V_cell)sum(V_int). A FLOAT under both -- compare against integers with PS_STREAM_TOL, never with ==/> 1 exactly (see below)
-    std::vector<Real>                         tet_touch;          // --exact-average only: raw INTEGER count of tetrahedra with a nonzero intersection with the cell (incl. corner grazes), written as '.tetTouch'. A geometric multiplicity, NOT a stream count -- 'stream_count' carries the volume-weighted (physical) multiplicity under every deposit.
+    std::vector<Real>                         stream_count;       // stream multiplicity at each grid point: the sampled deposit's sample-mean, or --exact's analytic volume-weighted (1/V_cell)sum(V_int). A FLOAT under both -- compare against integers with PS_STREAM_TOL, never with ==/> 1 exactly (see below)
+    std::vector<Real>                         tet_touch;          // --exact only: raw INTEGER count of tetrahedra with a nonzero intersection with the cell (incl. corner grazes), written as '.tetTouch'. A geometric multiplicity, NOT a stream count -- 'stream_count' carries the volume-weighted (physical) multiplicity under every deposit.
     std::vector<Real>                         mass_weight;        // per-cell summed moment weight (mass shares, or the EULERIAN-VOLUME shares under --ps-volume-weighted); normalizes velocity/gradient/scalar. Internal to normalizePhaseSpace, never written out
     // --ps-volume-weighted + dispersion only: the dispersion stays MASS-weighted (sigma_ij is a
     // moment of the phase-space distribution f, so it is f- i.e. mass-weighted by definition),
@@ -195,7 +195,7 @@ struct Quantities
         SIZE_VELOCITY,      // the velocity: its flag, or the dispersion's (which needs <v> too)
         SIZE_PS_ANY,        // PS-DTFE: whenever any field of that side is selected
         SIZE_PS_CAUSTICS,   // PS-DTFE: '--ps-caustics', when any field of that side is selected
-        SIZE_PS_EXACT,      // PS-DTFE: '--exact-average', when any field of that side is selected
+        SIZE_PS_EXACT,      // PS-DTFE: '--exact', when any field of that side is selected
         SIZE_AT_MERGE       // never pre-sized: the merge grows it at a partition's first values (the moment weights)
     };
     enum FieldScale { SCALE_ONE = 0, SCALE_WEIGHT, SCALE_MASS, SCALE_VEL_W, SCALE_VEL_M, SCALE_VEL2_M, SCALE_GRAD_W,

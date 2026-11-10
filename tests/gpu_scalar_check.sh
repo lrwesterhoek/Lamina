@@ -3,8 +3,8 @@
 # per-particle dataset ('--scalar-dataset', a smooth function of position written into the test
 # snapshot) must agree between the CPU and the GPU deposit the way the velocity and its gradient do.
 # Builds with ONE scalar component (the default, NO_SCALARS=1): the GPU declines other builds.
-#   DTFE    sampled '_a' interpolation: the item kernel (default), the per-tet kernel (DTFE_GPU_ITEMS=0)
-#   PS-DTFE the sampled deposit (nSub 2) and the exact deposit (--exact-average)
+#   DTFE    sampled '_a' interpolation (--sampled): the item kernel (default), the per-tet kernel (DTFE_GPU_ITEMS=0)
+#   PS-DTFE the sampled deposit (nSub 2) and the exact deposit (--exact)
 # Tolerance = the parity class of the velocity fields on the same box: values (scalar, density,
 # velocity) mean 1e-3 and per-cell 5e-2 beyond a 1e-3 fraction; GRADIENTS at caustics are a
 # float-sensitive quantity (the inverse edge matrix of a tetrahedron near a fold amplifies the
@@ -49,14 +49,16 @@ COMMON=(--grid $G --periodic --input-format 105 --mpc-unit 1 --verbose 1 --parti
 run() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL: $* (see $out.log)"; exit 1; }
         grep -q "using the CPU interpolation\|using the CPU deposit\|deposit unavailable" "$out.log" && { echo "FAIL: $out fell back to the CPU"; exit 1; }; return 0; }
 echo ">> DTFE: CPU, GPU item kernel, GPU per-tet kernel"
-"${DTFE_BIN}" "$SNAP" "$TMP/d_cpu" "${COMMON[@]}" > "$TMP/d_cpu.log" 2>&1 || { echo "FAIL: DTFE cpu"; exit 1; }
-run "$TMP/d_gpu"  "${DTFE_BIN}" "$SNAP" "$TMP/d_gpu" "${COMMON[@]}" --gpu
-run "$TMP/d_tet"  env DTFE_GPU_ITEMS=0 "${DTFE_BIN}" "$SNAP" "$TMP/d_tet" "${COMMON[@]}" --gpu
+# '--sampled': the two kernels under test are the Monte-Carlo ones (the exact average is the default since 2026-11-09);
+# COMMON names no mode, since the PS runs below share it (their '--subsamples 2' selects the sampled deposit)
+"${DTFE_BIN}" "$SNAP" "$TMP/d_cpu" "${COMMON[@]}" --sampled > "$TMP/d_cpu.log" 2>&1 || { echo "FAIL: DTFE cpu"; exit 1; }
+run "$TMP/d_gpu"  "${DTFE_BIN}" "$SNAP" "$TMP/d_gpu" "${COMMON[@]}" --sampled --gpu
+run "$TMP/d_tet"  env DTFE_GPU_ITEMS=0 "${DTFE_BIN}" "$SNAP" "$TMP/d_tet" "${COMMON[@]}" --sampled --gpu
 echo ">> PS-DTFE: CPU and GPU, sampled (nSub 2) and exact"
 "${PS_BIN}" "$SNAP" "$TMP/p_cpu" "${COMMON[@]}" --subsamples 2 > "$TMP/p_cpu.log" 2>&1 || { echo "FAIL: PS-DTFE cpu"; exit 1; }
 run "$TMP/p_gpu" "${PS_BIN}" "$SNAP" "$TMP/p_gpu" "${COMMON[@]}" --subsamples 2 --gpu
-"${PS_BIN}" "$SNAP" "$TMP/e_cpu" "${COMMON[@]}" --exact-average > "$TMP/e_cpu.log" 2>&1 || { echo "FAIL: PS-DTFE exact cpu"; exit 1; }
-run "$TMP/e_gpu" "${PS_BIN}" "$SNAP" "$TMP/e_gpu" "${COMMON[@]}" --exact-average --gpu
+"${PS_BIN}" "$SNAP" "$TMP/e_cpu" "${COMMON[@]}" --exact > "$TMP/e_cpu.log" 2>&1 || { echo "FAIL: PS-DTFE exact cpu"; exit 1; }
+run "$TMP/e_gpu" "${PS_BIN}" "$SNAP" "$TMP/e_gpu" "${COMMON[@]}" --exact --gpu
 "$PY" - "$TMP" <<'PYEOF'
 import numpy as np, sys
 import os as _os; REAL = np.dtype(_os.environ.get("DTFE_TEST_REAL", "float32"))   # tests/precision.sh

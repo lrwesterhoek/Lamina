@@ -1,5 +1,5 @@
 /* The CPU exact deposits' tetrahedron-cell clipping, done once per slab and column instead of once
-   per cell: '--exact-average' in both binaries (ps_interpolation.cc and averaged_interpolation_1.cc).
+   per cell: '--exact' in both binaries (ps_interpolation.cc and averaged_interpolation_1.cc).
 
    Both used to clip the whole tetrahedron against the six planes of EVERY cell of its bounding box
    (r3d_clip(&piece, planes, 6), planes in the order x-lo, x-hi, y-lo, y-hi, z-lo, z-hi). r3d_clip

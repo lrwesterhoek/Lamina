@@ -4,7 +4,7 @@
 # and of N (their count), and the gradient is the difference of the face-averaged mean velocities, (S_up/N_up -
 # S_lo/N_lo) / dx -- instead of the stream average of each stream's own gradient, which the run writes beside it as
 # '.a_velDivStreams'. On Zel'dovich pancakes (tests/generate_ps_test_data.py, 32^3 particles, box 100 Mpc, 20% jitter,
-# 32^3 grid, --exact-average --ps-volume-weighted, density_a velocity_a divergence_a shear_a):
+# 32^3 grid, --exact --ps-volume-weighted, density_a velocity_a divergence_a shear_a):
 #   P1  single stream (amplitude factor 0.6): the face gradient equals the stream average to 1e-5 of the divergence's
 #       rms (measured 9.5e-7), and '.a_velDivStreams' is byte-identical to the divergence of a run without the flag
 #   P2  three streams across two folds (amplitude factor 2): the periodic box mean of the mean flow's divergence is 0 to
@@ -18,7 +18,8 @@
 #   P5  '--partition 2 2 2': within 1e-5 of the rms of one domain (measured 9e-7), box mean below 1e-6 of the rms
 #   P6  '--grid-window' (one z cell across the box): the full run's z = 16 slice, byte-identical in the single build
 #       (the double build shows the window's own fixed-point unit: within 1e-9 of the rms, measured 2e-11)
-#   P7  refusals at option parsing (exit 1): without '--exact-average', without '--ps-volume-weighted'
+#   P7  refusals at option parsing (exit 1): with '--sampled' (the exact deposit is the default for these '_a' fields,
+#       so only the sampled one asked for conflicts), without '--ps-volume-weighted'
 #   P11 (a GPU build) '--gpu': the GPU exact deposit with the face sums from the CPU walk beside it (docs/cleanup-plan.md
 #       D17): the mean flow's divergence and the mass flux divergence byte-identical to the CPU run's (the same face
 #       words, the same units), the density within the GPU deposit's float tolerance, the stream average within 5e-2
@@ -59,7 +60,7 @@ for amp in 0.6 2.0; do
         --amplitude-factor "$amp" --jitter-frac 0.2 > "$TMP/gen_$amp.log" 2>&1 \
         || { echo "FAIL: generate_ps_test_data.py (see $TMP/gen_$amp.log)"; exit 1; }
 done
-C=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --field density_a velocity_a divergence_a shear_a --exact-average)
+C=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --field density_a velocity_a divergence_a shear_a --exact)
 # run <name> <input> [env assignments ...] -- [extra args ...]
 run() {
     local name="$1" input="$2"; shift 2
@@ -213,7 +214,7 @@ for src, tag in (("pan_2.0", "drift"), ("cw", "cwdrift")):
 PY
     for tag in drift cwdrift; do for k in 0 1 2 3 4 5 6 7 8; do
         "${PS_BIN}" "$TMP/${tag}_$k.hdf5" "$TMP/${tag}_$k" --grid 32 --periodic --input-format 105 --mpc-unit 1 \
-            --field density_a divergence_a --exact-average --ps-volume-weighted --face-gradient \
+            --field density_a divergence_a --exact --ps-volume-weighted --face-gradient \
             > "$TMP/${tag}_$k.log" 2>&1 || { echo "FAIL: run ${tag}_$k (see $TMP/${tag}_$k.log)"; exit 1; }
     done; done
 fi
@@ -259,8 +260,8 @@ refuse() {   # refuse <what> <expected message part> [args ...]
     if [ "$rc" = "1" ] && grep -q -- "$msg" "$TMP/r.log"; then pass "P7 $what: exit 1 at option parsing"
     else fail "P7 $what: exit $rc (see $TMP/r.log)"; fi
 }
-refuse "without --exact-average" "add '--exact-average'" --ps-volume-weighted --face-gradient
-refuse "without --ps-volume-weighted" "add '--ps-volume-weighted'" --exact-average --face-gradient
+refuse "with --sampled" "add '--exact' (or drop '--sampled')" --sampled --ps-volume-weighted --face-gradient
+refuse "without --ps-volume-weighted" "add '--ps-volume-weighted'" --exact --face-gradient
 
 if [ "$GPU" = "1" ]; then
     echo ">> the GPU exact deposit with the face sums from the CPU walk beside it (--gpu --face-gradient)"

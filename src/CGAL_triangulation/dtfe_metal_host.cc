@@ -267,7 +267,7 @@ struct Batch
     DepositParams P{};
     size_t nTet = 0, nItems = 0, nSamples = 0, nSingle = 0;
     bool   needVel = false, needScal = false;
-    bool   exact = false;          // --exact-average: depositExactAverage over cell-block items
+    bool   exact = false;          // --exact: depositExactAverage over cell-block items
     DTFEGpuKnobs k;                // dtfe_gpu_fixed.h
 
     void release()

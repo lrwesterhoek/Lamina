@@ -12,7 +12,7 @@
 #     inside test). Every point of a cell with streams==1 and no bit 1 must be single-stream
 #     (0 violations, nSub=1 and nSub=3 grids). The cells a conservative mass flag would
 #     drop but bit 1 keeps are counted and must exist (else the test is vacuous).
-#  Y) THE EXACT DEPOSIT (--exact-average): its '.streams' is the analytic cell-mean stream
+#  Y) THE EXACT DEPOSIT (--exact): its '.streams' is the analytic cell-mean stream
 #     count (1/V_cell) sum V(tet ^ cell), which is 1 iff the cell is single-stream almost
 #     everywhere. Unflagged single-stream cells must read 1 (to float rounding); EVERY cell
 #     whose multi-stream volume the samples missed (streams==1 but exact > 1) must be flagged;
@@ -97,7 +97,7 @@ for geo in pan crw; do
         run "${TMP}/pux_${geo}_gpu" "${snap}" --field density density_a --subsamples 3 --gpu
     fi
     echo ">> ${geo}: exact deposit"
-    run "${TMP}/pux_${geo}_ex" "${snap}" --field density --exact-average
+    run "${TMP}/pux_${geo}_ex" "${snap}" --field density --exact
     echo ">> ${geo}: dense exact point evaluation"
     run "${TMP}/pux_${geo}_pts" "${snap}" --field density --sample-points "${PTS}"
 done

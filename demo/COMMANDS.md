@@ -5,7 +5,7 @@ repository root; quote paths that contain spaces. Scripts that need h5py should 
 run with a python whose h5py works (the shell scripts and tests pick one: `PYTHON`, else the first of `python3`,
 Homebrew's and `/usr/local`'s that imports numpy and h5py).
 The binaries' `--full-help` and each script's `--help` are the reference for every option and default.
-Both binaries share one name per shared option (`--gpu`, `--exact-average`, `--no-overlap`, `--full-help`, `--lambda-th`);
+Both binaries share one name per shared option (`--gpu`, `--exact`, `--sampled`, `--no-overlap`, `--full-help`, `--lambda-th`);
 the older spellings are deprecated and still accepted for one release, with a warning.
 
 ---
@@ -119,23 +119,28 @@ below assume `export DTFE_DATA_ROOT=~/IllustrisTNG`), and so is the simulation: 
 the lines below without `-s` assume `export DTFE_SIM=TNG100-3-Dark`). Positional
 arguments override the snapshot list (default: 99). Partitioning is auto-tuned unless `PARTITION` /
 `MAX_CONCURRENT` are set. Both default to the production settings (512^3, the GPU on a GPU build,
-the T-web and V-web at `LAMBDA_TH` 0.3).
+the T-web and V-web at `LAMBDA_TH` 0.3) and, since 2026-11-09, to the exact cell average (`--exact`; PS-DTFE's
+exact deposit runs on the CPU unless `-m`); `--sampled`, `DTFE_EXACT_AVERAGE=0` or a `SUBSAMPLES` count (`-n`)
+selects the sampled one.
 
 ```bash
-./scripts/run_ps_dtfe.sh                                  # PS-DTFE, snapshot 99 of $DTFE_SIM
+./scripts/run_ps_dtfe.sh                                  # PS-DTFE, snapshot 99 of $DTFE_SIM (exact deposit)
 ./scripts/run_ps_dtfe.sh -s TNG300-3-Dark 99              # one sim, one snapshot
-./scripts/run_ps_dtfe.sh -g 512 -n 2 -m 99                # grid 512^3, nSub=2, GPU deposit
-./scripts/run_ps_dtfe.sh -e -m 99                         # exact conservative deposit on the GPU
+./scripts/run_ps_dtfe.sh -g 512 -n 2 -m 99                # grid 512^3, the sampled deposit at nSub=2 (the count
+                                                          #   selects it), on the GPU
+./scripts/run_ps_dtfe.sh -m 99                            # the exact conservative deposit (the default) on the GPU
+./scripts/run_ps_dtfe.sh --sampled -m 99                  # the nSub^3 sampled deposit (nSub 3) on the GPU
 DTFE_SIM=TNG100-3-Dark ./scripts/run_ps_dtfe.sh 0 50 99   # sim via env
 PARTITION="5 5 5" MAX_CONCURRENT=2 ./scripts/run_ps_dtfe.sh -s TNG300-3-Dark 99   # manual memory plan
-THREADS=4 SUBSAMPLES=1 ./scripts/run_ps_dtfe.sh 99        # cap threads; one sample per cell (the '_a' files
-                                                          #   then hold the cell-centre values)
+THREADS=4 SUBSAMPLES=1 ./scripts/run_ps_dtfe.sh 99        # cap threads; the sampled deposit at one sample per
+                                                          #   cell (the '_a' files then hold the cell-centre values)
 DRY_RUN=1 ./scripts/run_ps_dtfe.sh 99                     # print the expanded command, run nothing
 AUTO_TUNE_REPORT=1 ./scripts/run_ps_dtfe.sh 99            # only the auto-tuner's split + predicted peak
 
 ./scripts/run_dtfe.sh -s TNG50-3-Dark -g 512 99           # standard DTFE (exact cell average, padding 15)
 DTFE_GPU=0 ./scripts/run_dtfe.sh 99                       # the CPU on a GPU build (the GPU is the default there)
 DTFE_EXACT_AVERAGE=0 ./scripts/run_dtfe.sh 99             # Monte-Carlo cell means instead of the exact average
+./scripts/run_dtfe.sh --sampled -n 4 99                   # the same with 4^3 points per cell (-n alone selects it too)
 OUTPUT_PREFIX=output_mc ./scripts/run_dtfe.sh 99          # a variant beside output.* (a ps_* prefix is refused)
 ```
 
@@ -146,13 +151,15 @@ PS_VERTEX_MASS=1        # [--ps-vertex-mass]     DEFAULT 1: chart-independent te
                         #                        Set 0 only for true-lattice Lagrangian input.
 PS_VOLUME_WEIGHTED=0    # [--ps-volume-weighted] DEFAULT 1: Eulerian-volume-weighted velocity moments
                         #                        (the dispersion stays mass-weighted)
-DTFE_EXACT_AVERAGE=1    # [--exact-average]      exact r3d deposit; combine with -m (GPU)
-FACE_GRADIENT=1         # [--face-gradient]      with -e (CPU): the MEAN flow's divergence/shear from exact face sums
+DTFE_EXACT_AVERAGE=0    # [--sampled]            the nSub^3 sampled deposit (a SUBSAMPLES count selects it too);
+                        #                        DEFAULT the exact deposit [--exact] (-e; r3d on the CPU, a z-sweep with -m)
+FACE_GRADIENT=1         # [--face-gradient]      with the exact deposit: the MEAN flow's divergence/shear from exact face sums
                         #                        (as standard DTFE stores them) + .a_velDivStreams, .a_massFluxDiv
 PS_LINEAR_DEPOSIT=1     # [--ps-linear-deposit]  linear-profile, mass-conserving sampled deposit
                         #                        (the moments then mass-weighted: PS_VOLUME_WEIGHTED=0)
 DTFE_GPU=0              # [--gpu]                default auto: the GPU deposit on a GPU build (1 = -m); 0 = the CPU
-SUBSAMPLES=2            # [--subsamples]         nSub for the '_a' pass (cost ~ nSub^3)
+SUBSAMPLES=2            # [--subsamples]         nSub of the sampled '_a' pass (cost ~ nSub^3); set, it selects
+                        #                        the sampled deposit [--sampled] unless DTFE_EXACT_AVERAGE=1 or -e
 SAMPLE_POINTS=plane.bin # [--sample-points]      also point-evaluate this point set
 PTS_VEL_GRAD=1          # [--pts-vel-grad]       + per-point velocity gradient (.pts_velGrad),
                         #                        which is what makes velDiv/shear/vort maps possible
@@ -212,7 +219,7 @@ GRID_SIZE=512 PTS_VEL_GRAD=1 ./scripts/run_ps_pipeline.sh
 # --periodic up to a quarter of a thread's cells lie outside the tessellation, with it ~1%.
 ./DTFE demo/z0_64.gadget out --grid 64 --field density --periodic --padding 12
 
-# standard DTFE, all main fields, GPU '_a' pass (run_dtfe.sh adds --exact-average --padding 15
+# standard DTFE, all main fields, GPU '_a' pass, exact by default (run_dtfe.sh adds --exact --padding 15
 # and the T-web / V-web at --lambda-th 0.3)
 ./DTFE combined_099.hdf5 out --grid 512 --periodic --input-format 105 --mpc-unit 1000 \
     --field density_a velocity_a gradient_a --gpu
@@ -228,7 +235,7 @@ GRID_SIZE=512 PTS_VEL_GRAD=1 ./scripts/run_ps_pipeline.sh
     --ps-vertex-mass          `# chart-independent tet masses (removes the 1-D(z_ic)/D(z) bias)` \
     --ps-volume-weighted      `# volume-weighted velocity moments; dispersion stays mass-weighted` \
     --ps-caustics             `# the caustic classes (.caustic, .causticClass)` \
-    --gpu
+    --exact                   `# the exact deposit (the default; the driver passes it, and runs it on the CPU)`
 
 # point evaluation at arbitrary positions (text 'x y z' per line, or raw float64 Nx3);
 # the STANDARD binary supports the same flags/formats (streams = 0/1 coverage; no
@@ -249,7 +256,7 @@ GRID_SIZE=512 PTS_VEL_GRAD=1 ./scripts/run_ps_pipeline.sh
 
 ./PS-DTFE snap.hdf5 out ... --ps-linear-deposit    # linear-profile mass-conserving deposit (CPU or GPU;
                                                    #   not with --ps-volume-weighted)
-./PS-DTFE snap.hdf5 out ... --subsamples 2     # cheaper '_a' pass (8 sub-points)
+./PS-DTFE snap.hdf5 out ... --subsamples 2     # the sampled '_a' pass at 8 sub-points (a count selects --sampled)
 ./PS-DTFE snap.hdf5 out ... --ps-caustics          # + '.caustic' fold flag and '.causticClass' (CPU or GPU),
                                                    #   a bitmask per cell:
                                                    #     bit0/1  det(J)>0 / det(J)<0 tet present
@@ -272,7 +279,9 @@ GRID_SIZE=512 PTS_VEL_GRAD=1 ./scripts/run_ps_pipeline.sh
                                                    #   bit8 is NOT a subset of bit7. ~1.8x the
                                                    #   caustic pass, so off by default.
 ./PS-DTFE snap.hdf5 out ... --ps-halo-release 300  # halo-interior tets -> centroid deposit
-./PS-DTFE snap.hdf5 out ... --exact-average             # exact deposit (r3d on the CPU; --gpu: a z-sweep)
+./PS-DTFE snap.hdf5 out ... --exact                     # exact deposit, the default with an '_a' field (r3d on the
+                                                          #   CPU; --gpu: a z-sweep); without '_a' fields it is opt-in
+./PS-DTFE snap.hdf5 out ... --sampled                   # the nSub^3 sampled deposit instead (--subsamples k, default 3)
 ./PS-DTFE snap.hdf5 out ... --scratch-dir /tmp/dtfe       # out-of-core full-grid accumulators
 ./PS-DTFE snap.hdf5 out ... --auto-tune-report            # the auto-tuner's plan as one line, nothing run
 ./PS-DTFE snap.hdf5 out ... --partition 4 4 4 --resume    # continue a killed partitioned run (both binaries)
@@ -290,11 +299,12 @@ mkdir -p /private/tmp/dtfe-tess
     --sample-points b.bin --tessellation-cache /private/tmp/dtfe-tess     # reuses it
 ./PS-DTFE snap.hdf5 out ... --tessellation-cache DIR --verbose 3          # says why a lookup missed
 ./PS-DTFE snap.hdf5 out ... --field vweb --lambda-th 0.3 --scale-factor 0.25 --hubble 0.6774
-./DTFE   snap.hdf5 out ... --exact-average         # exact r3d '_a' averaging (on the GPU with --gpu)
-./PS-DTFE snap.hdf5 out --grid 4096 --periodic --mpc-unit 1 --exact-average \
+./DTFE   snap.hdf5 out ... --exact                 # exact r3d '_a' averaging, the default (on the GPU with --gpu)
+./DTFE   snap.hdf5 out ... --sampled               # Monte-Carlo '_a' averages (--subsamples k, --average-method)
+./PS-DTFE snap.hdf5 out --grid 4096 --periodic --mpc-unit 1 --exact \
     --grid-window 20 30 20 30 50 50.1               # only the window's cells of the 4096^3 grid: the
                                                   # full run's cells there, in seconds (the launcher's exact zoom)
-./PS-DTFE snap.hdf5 out --grid 4096 --periodic --mpc-unit 1 --exact-average --grid-window 20 30 20 30 50 50.1 \
+./PS-DTFE snap.hdf5 out --grid 4096 --periodic --mpc-unit 1 --exact --grid-window 20 30 20 30 50 50.1 \
     --partition 4 4 4 --tessellation-cache /private/tmp/dtfe-tess   # the query server's split and cache:
                                                   # cached partitions are loaded, those whose occupancy maps
                                                   # never reach the window are skipped
@@ -308,8 +318,8 @@ Common to both: `--grid N [NY NZ]`, `--periodic`, `--input-format 101|105|106|11
 
 **Which flags reach the GPU** (`METAL=1` build): the grid deposit, and
 `--ps-linear-deposit`, `--ps-volume-weighted`, `--ps-vertex-mass`, `--ps-caustics`,
-the exact deposit (`--exact-average`) and `--grid-window` all compose with `--gpu`; the standard binary's
-`--exact-average` and the scalar fields (`NO_SCALARS=1` builds) with `--gpu`. CPU-only: point
+the exact deposit (`--exact`) and `--grid-window` all compose with `--gpu`; the standard binary's
+exact average (`--exact`) and the scalar fields (`NO_SCALARS=1` builds) with `--gpu`. CPU-only: point
 evaluation (`--sample-points`/`--serve`: multi-threaded over the tessellation, exact point location).
 
 ### Interactive point evaluation (`--serve`, `dtfelib.Estimator`)

@@ -510,7 +510,7 @@ void writeOutputData(Quantities &uQuantities,
     if ( not aQuantities.hidden_streams.empty() )
         output.write( aQuantities.hidden_streams, userOptions.outputFilename + ".a_hidden_streams", "averaged-grid hidden-stream flags", userOptions );
 
-    // --exact-average: raw tetrahedron-touch count (geometric multiplicity, NOT a stream
+    // --exact: raw tetrahedron-touch count (geometric multiplicity, NOT a stream
     // count -- see '.streams' for the physical one). One file, same preference order as '.caustic'.
     // --face-gradient: the stream average's divergence beside the mean flow's (the '_a' grid only: the face sums are
     // exact-deposit averages)

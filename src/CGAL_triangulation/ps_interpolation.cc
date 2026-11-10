@@ -319,7 +319,7 @@ static void psDepositFaces( Real const (&eulerPos)[NO_DIM+1][NO_DIM], Real const
 #include "../env_knobs.h"
 
 #if NO_DIM==3
-// --exact-average: analytic tetrahedron-cell intersection moments (Powell & Abel 2015).
+// --exact: analytic tetrahedron-cell intersection moments (Powell & Abel 2015).
 // Vendored C library; r3d.h carries its own extern "C" guard. 3D only.
 #include "../../third_party/r3d/r3d.h"
 #include "exact_sweep.h"    // the per-slab/column clipping of the exact deposit
@@ -2462,7 +2462,7 @@ static inline void psExportStreams(PSPassCtx const &passCtx, PSGridsCtx const &g
     std::vector<PSCausticClass::CausticMask> &orientBits = gridsCtx.orientBits;
     bool const psExact = gridsCtx.psExact, psCaustics = gridsCtx.psCaustics;
     // Export the per-grid-point stream count: the sampled deposit's sample-mean multiplicity,
-    // or -- under --exact-average -- the ANALYTIC cell-mean multiplicity (1/V_cell) sum V_int,
+    // or -- under --exact -- the ANALYTIC cell-mean multiplicity (1/V_cell) sum V_int,
     // its exact nSub->infinity limit. Both are the same physical quantity on the same scale, so
     // single-stream cells select the same way under either deposit -- but only TO A TOLERANCE
     // (PS_STREAM_TOL / dtfelib.STREAM_TOL): this is a float, never exactly 1.
@@ -2496,7 +2496,7 @@ static inline void psExportStreams(PSPassCtx const &passCtx, PSGridsCtx const &g
                                             | (subSampleMassFlag[i] ? 2 : 0) );
     } );
 
-    // --exact-average: also export the raw integer tet-touch count ('.tetTouch'), the
+    // --exact: also export the raw integer tet-touch count ('.tetTouch'), the
     // number of tetrahedra with a nonzero intersection with the cell. Kept as a geometric
     // diagnostic (tessellation multiplicity, hundreds in resolved regions); it is NOT a
     // stream count and is not comparable to the sampled deposit's '.streams'.
@@ -3475,7 +3475,7 @@ void interpolateGrid_phaseSpace(DT &dt,
     auto markFlipped = [passCtx](PSCellGeometry const &geo, std::vector<unsigned char> &flags,
                                  long const xLo = 0, long const xHi = LONG_MAX, bool const shared = false)
     { psMarkFlipped( passCtx, geo, flags, xLo, xHi, shared ); };
-    // --exact-average: exact cell-mean stream multiplicity = (1/V_cell) * sum_tets V_int,
+    // --exact: exact cell-mean stream multiplicity = (1/V_cell) * sum_tets V_int,
     // the analytic nSub->infinity limit of the sampled definition (which is the sample-mean
     // multiplicity). On the same scale as the sampled '.streams', so single-stream masking
     // works under either deposit -- but ONLY to a tolerance (|s-1| < 1e-3, see
@@ -3507,7 +3507,7 @@ void interpolateGrid_phaseSpace(DT &dt,
     double const psHaloRelease = double(userOptions.psHaloRelease);
     size_t nReleased = 0;
 
-    // --exact-average: analytic per-cell intersection moments instead of nSub^3 sampling.
+    // --exact: analytic per-cell intersection moments instead of nSub^3 sampling.
     // The exact deposit is the nSub->infinity limit, so nSub is ignored. '.streams' carries
     // the volume-weighted multiplicity (see exactMult above): a FLOAT, so the partition merge
     // is NOT bit-exact -- the per-tet volume shares sum in thread order. The raw integer
@@ -3582,7 +3582,7 @@ void interpolateGrid_phaseSpace(DT &dt,
     // still equals tetMass exactly and mass conservation is untouched.
     bool const psLinear = userOptions.psLinearDeposit;
     std::vector<Real>   insideW;
-    // --exact-average per-tet scratch: 10 order-2 moments and the mass weight per hit cell
+    // --exact per-tet scratch: 10 order-2 moments and the mass weight per hit cell
     std::vector<double> exMom, exW;
 
     if ( not userOptions.psSuppressGridStats )
@@ -4099,7 +4099,7 @@ void interpolateGrid_phaseSpace(DT &dt,
             }
     #endif
 
-            // ===================== exact conservative deposit (--exact-average) =====================
+            // ===================== exact conservative deposit (--exact) =====================
             // r3d (Powell & Abel 2015): clip the Eulerian tetrahedron against every grid cell in
             // its bbox window and integrate the moments analytically. All geometry lives in
             // coordinates RELATIVE to (wrapped) vertex 0 -- the same affine frame as velGrad and
@@ -4726,7 +4726,7 @@ void interpolateGrid_phaseSpace(DT &dt,
                 }
                 else if ( !useCentroid )
                     psAddCount( streamCount[flatIdx], countAtomicL );
-                // --exact-average fall-through (empty clip window, released or sub-resolution
+                // --exact fall-through (empty clip window, released or sub-resolution
                 // tets): the tet's volume is shared equally among its nInside samples, so each
                 // carries V_tet/nInside -- for the monolithic centroid fallback (nInside==1) that
                 // is exactly V_tet/V_cell, the same volume fraction the exact path deposits.

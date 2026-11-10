@@ -10,13 +10,17 @@
 # What is pinned, so that the lines depend on the binaries and the flags only:
 #   - the inputs: synthetic snapshots made here with the generator's fixed seed (42);
 #   - the machine: DTFE_RAM_GB simulates its RAM (no live free-memory term), OMP_NUM_THREADS the threads;
-#   - DTFE_AUTO_MINN=1000: these small snapshots are tuned as the large ones are.
+#   - DTFE_AUTO_MINN=1000: these small snapshots are tuned as the large ones are;
+#   - the '_a' average: DTFE_EXACT_AVERAGE=0 keeps the unflagged runs sampled, as a binary from before 2026-11-09
+#     (when the exact average became the default) runs them -- it reads no such variable -- while the exact lines keep
+#     their old flags ('--ps-exact-deposit', '--exact-average'), which beat the pin.
 # hardware_concurrency() (the point-evaluation blocks) is the one machine term left: compare on the same machine.
 set -u
 BIN="$(cd "${1:?binary dir}" && pwd)" || exit 2
 OUT="${2:?out file}"; mkdir -p "$(dirname "$OUT")" && OUT="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
 PY="${3:-${PY:-python3}}"
 THREADS="${TUNE_SET_THREADS:-10}"
+export DTFE_EXACT_AVERAGE=0   # the sampled average for every unflagged run, on either binary set (see above)
 cd "$(dirname "${BASH_SOURCE[0]}")/../.." || exit 2   # the repository root: tests/generate_ps_test_data.py
 T="$(mktemp -d "${TMPDIR:-/tmp}/tune-set.XXXXXX")"
 PAN64="$T/pancake64.hdf5"; PAN128="$T/pancake128.hdf5"; CW64="$T/crossed64.hdf5"

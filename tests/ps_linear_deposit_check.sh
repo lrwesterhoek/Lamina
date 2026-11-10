@@ -11,7 +11,7 @@
 #     (identical .streams, high correlation, bounded max ratio -- no new caustic spikes).
 #  C) GPU parity (GPU builds only): the GPU linear deposit matches the CPU linear deposit
 #     within the usual float32 atomic tolerances.
-#  D) [gated on --exact-average support] the r3d exact conservative deposit: mass
+#  D) [gated on --exact / --sampled support] the r3d exact conservative deposit: mass
 #     conservation at (or below) the sampled deposit's float floor, '.den' == '.a_den'
 #     bit-exact (the exact deposit is nSub-independent), the raw integer '.tetTouch'
 #     count bit-exact between same-split partitioned runs at 1 and N threads, '.streams'
@@ -47,8 +47,10 @@ GPU_BUILT=0
 [ -f o_ps/.gpu_mode_off ] || GPU_BUILT=1
 # capture FIRST -- piping the binary straight into grep -q would SIGPIPE it under pipefail
 FULL_HELP="$("${BIN}" --full-help 2>/dev/null)" || { echo "FAIL: ${BIN} --full-help exited non-zero"; exit 1; }
-HAVE_EXACT=0
-grep -q -- '--exact-average' <<<"${FULL_HELP}" && HAVE_EXACT=1   # the exact deposit (the runs keep its old name)
+# '--sampled' marks a binary with a flag for each deposit ('--exact', the default for an '_a' field, and '--sampled');
+# an older one deposits sampled by default and may lack the exact deposit: runs 1-5 then pass no flag, 6-13 are skipped
+HAVE_EXACT=0; SAMPLED=""
+grep -q -- '--sampled' <<<"${FULL_HELP}" && { HAVE_EXACT=1; SAMPLED="--sampled"; }
 
 echo ">> generating test snapshots ..."
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP_UNI}" --n "${N}" --box "${BOX}" \
@@ -70,30 +72,32 @@ run() {  # $1 = output root, $2 = input snapshot, rest = extra flags
     die_on_failed_run "$rc" "$log"
 }
 
+# runs 1-5: the sampled deposit at the binary's own nSub 3 ('density_a' would select the exact one): A-C hold its
+# nSub = 1 and 3 grids, and run 3 is the nSub = 3 rung of D's convergence ladder
 echo ">> run 1: uniform box, uniform deposit"
-run "${TMP}/pld_uni_u" "${SNAP_UNI}" --periodic
+run "${TMP}/pld_uni_u" "${SNAP_UNI}" --periodic ${SAMPLED}
 echo ">> run 2: uniform box, --ps-linear-deposit"
-run "${TMP}/pld_uni_l" "${SNAP_UNI}" --periodic --ps-linear-deposit
+run "${TMP}/pld_uni_l" "${SNAP_UNI}" --periodic ${SAMPLED} --ps-linear-deposit
 echo ">> run 3: pancake, uniform deposit"
-run "${TMP}/pld_pan_u" "${SNAP_PAN}" --periodic
+run "${TMP}/pld_pan_u" "${SNAP_PAN}" --periodic ${SAMPLED}
 echo ">> run 4: pancake, --ps-linear-deposit"
-run "${TMP}/pld_pan_l" "${SNAP_PAN}" --periodic --ps-linear-deposit
+run "${TMP}/pld_pan_l" "${SNAP_PAN}" --periodic ${SAMPLED} --ps-linear-deposit
 if [ "${GPU_BUILT}" -eq 1 ]; then
     echo ">> run 5: pancake, --ps-linear-deposit --gpu (GPU parity)"
-    run "${TMP}/pld_pan_lg" "${SNAP_PAN}" --periodic --ps-linear-deposit --gpu
+    run "${TMP}/pld_pan_lg" "${SNAP_PAN}" --periodic ${SAMPLED} --ps-linear-deposit --gpu
 else
     echo ">> run 5 skipped (CPU-only build: no GPU parity to check)"
 fi
 
 if [ "${HAVE_EXACT}" -eq 1 ]; then
-    echo ">> run 6: pancake, --exact-average"
-    run "${TMP}/pld_pan_ex" "${SNAP_PAN}" --periodic --exact-average
-    echo ">> run 7: pancake, --exact-average, --partition 2 2 2, 1 thread"
-    OMP_NUM_THREADS=1 run "${TMP}/pld_pan_ex_p1" "${SNAP_PAN}" --periodic --exact-average --partition 2 2 2
-    echo ">> run 8: pancake, --exact-average, --partition 2 2 2, all threads"
-    run "${TMP}/pld_pan_ex_pN" "${SNAP_PAN}" --periodic --exact-average --partition 2 2 2
-    echo ">> run 9: pancake, --exact-average --ps-linear-deposit (composition)"
-    run "${TMP}/pld_pan_ex_l" "${SNAP_PAN}" --periodic --exact-average --ps-linear-deposit
+    echo ">> run 6: pancake, --exact"
+    run "${TMP}/pld_pan_ex" "${SNAP_PAN}" --periodic --exact
+    echo ">> run 7: pancake, --exact, --partition 2 2 2, 1 thread"
+    OMP_NUM_THREADS=1 run "${TMP}/pld_pan_ex_p1" "${SNAP_PAN}" --periodic --exact --partition 2 2 2
+    echo ">> run 8: pancake, --exact, --partition 2 2 2, all threads"
+    run "${TMP}/pld_pan_ex_pN" "${SNAP_PAN}" --periodic --exact --partition 2 2 2
+    echo ">> run 9: pancake, --exact --ps-linear-deposit (composition)"
+    run "${TMP}/pld_pan_ex_l" "${SNAP_PAN}" --periodic --exact --ps-linear-deposit
     echo ">> runs 10-11: pancake, sampled '.a_den' at nSub 1/5 (3 is run 3) for the convergence ladder"
     run "${TMP}/pld_pan_ns1" "${SNAP_PAN}" --periodic --subsamples 1
     run "${TMP}/pld_pan_ns5" "${SNAP_PAN}" --periodic --subsamples 5
@@ -107,7 +111,7 @@ if [ "${HAVE_EXACT}" -eq 1 ]; then
             set +e
             "${BIN}" "${SNAP_PAN}" "${TMP}/pld_pan_${tag}" --grid "${GRID}" \
                 --field density velocity dispersion --input-format 105 --mpc-unit 1 --verbose 1 \
-                --periodic --exact-average ${GPUFLAG} > "${TMP}/pld_pan_${tag}.log" 2>&1
+                --periodic --exact ${GPUFLAG} > "${TMP}/pld_pan_${tag}.log" 2>&1
             rc=$?
             set -e
             if [ "${rc}" -ne 0 ]; then
@@ -120,8 +124,8 @@ if [ "${HAVE_EXACT}" -eq 1 ]; then
         echo ">> runs 12-13 skipped (CPU-only build: no exact-deposit GPU parity to check)"
     fi
 else
-    [ "${DTFE_TEST_REQUIRED:-0}" = "1" ] && { echo "FAIL (required): this PS-DTFE has no --exact-average" >&2; exit 1; }
-    echo ">> runs 6-13 skipped (binary lacks --exact-average)"
+    [ "${DTFE_TEST_REQUIRED:-0}" = "1" ] && { echo "FAIL (required): this PS-DTFE has no --exact / --sampled" >&2; exit 1; }
+    echo ">> runs 6-13 skipped (binary lacks --exact / --sampled)"
 fi
 
 echo ">> checking the numbers ..."
@@ -184,7 +188,7 @@ if gpu:
 else:
     print("   SKIP C GPU parity (CPU-only build)")
 
-# ---------- (D) exact conservative deposit (--exact-average, r3d) ----------
+# ---------- (D) exact conservative deposit (--exact, r3d) ----------
 if have_exact:
     ex = load(f"{tmp}/pld_pan_ex", ".den")
     exa = load(f"{tmp}/pld_pan_ex", ".a_den")
@@ -274,7 +278,7 @@ if have_exact:
     else:
         print("   SKIP D exact GPU parity (CPU-only build)")
 else:
-    print("   SKIP D exact deposit (binary lacks --exact-average)")
+    print("   SKIP D exact deposit (binary lacks --exact / --sampled)")
 
 print("-" * 60)
 if fails:

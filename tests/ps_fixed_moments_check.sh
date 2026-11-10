@@ -9,7 +9,7 @@
 # 32^3 crossed waves (folds everywhere: deferred tets, multi-stream cells, large gradients):
 #   F1  two --gpu runs with different opening chunk sizes (PS_GPU_CHUNK 2000 and 25000: other
 #       atomics share a command buffer, other orders) write byte-identical grids -- every '.a_*' output -- for the
-#       sampled deposit, --ps-volume-weighted, --exact-average (its items' per-tet weight totals are exact too)
+#       sampled deposit, --ps-volume-weighted, --exact (its items' per-tet weight totals are exact too)
 #       and --ps-halo-release (the host's released tets). GPU builds only.
 #   F2  the CPU deposit on 1 thread, 6 threads in the copy mode (DTFE_DEPOSIT_SLABS=0: one set of words, atomic
 #       adds) and 6 in the slab mode writes byte-identical grids, for the same four variants. Single build only:
@@ -50,7 +50,7 @@ run() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL: $(basenam
 C=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a dispersion_a gradient_a
    --subsamples 2)
 VARIANTS="samp vw ex hr"
-opts() { case "$1" in samp) ;; vw) echo --ps-volume-weighted ;; ex) echo --exact-average ;;
+opts() { case "$1" in samp) ;; vw) echo --ps-volume-weighted ;; ex) echo --exact ;;
          hr) echo --ps-halo-release 50 ;; esac; }
 
 echo "============================================================"

@@ -3,7 +3,7 @@
 #   - environment: DTFE_DATA_ROOT=/path/to/IllustrisTNG DTFE_SIM=TNG50-3-Dark ./run_ps_dtfe.sh
 #                  GRID_SIZE=256 PADDING=40 ./run_ps_dtfe.sh -s TNG50-3-Dark
 #   - script flags: ./run_ps_dtfe.sh -s TNG50-3-Dark -d /path/to/sim -g 256 99
-#                   (long forms: --sim, --sim-dir, --grid, --gpu, --exact-average, --subsamples)
+#                   (long forms: --sim, --sim-dir, --grid, --gpu, --exact, --sampled, --subsamples)
 # The data root and the simulation have NO default: every run sets DTFE_DATA_ROOT (require_data_root; a driver's -d,
 # the simulation's own folder, stands in for it) and names the simulation with -s or DTFE_SIM (require_simulation).
 # The Python side (python/dtfelib/cli.py) honours the same DTFE_DATA_ROOT / DTFE_SIM variables.
@@ -462,9 +462,12 @@ driver_options() {
 
 # driver_long_options <getopts spec> "$@": _drv_args = the arguments with each long option the drivers share spelled
 # as its letter, token for token (so the caller's 'shift $((OPTIND - 1))' on its own arguments stays right):
-#   --sim S -> -s S, --sim-dir D -> -d D, --grid N -> -g N, --gpu -> -m, --exact-average -> -e, --subsamples K -> -n K,
-#   --help -> -h; download_snapshots.sh's --groupcats -> -c, --trees -> -t, --ics -> -i, --api-key K -> -k K
-#   (merge_HDF5.py's names for the same products); '--grid=N' -> '-gN'.
+#   --sim S -> -s S, --sim-dir D -> -d D, --grid N -> -g N, --gpu -> -m, --exact -> -e, --sampled -> -S,
+#   --subsamples K -> -n K, --help -> -h; download_snapshots.sh's --groupcats -> -c, --trees -> -t, --ics -> -i,
+#   --api-key K -> -k K (merge_HDF5.py's names for the same products); '--grid=N' -> '-gN'. -S only carries --sampled
+#   to getopts (the usage lines do not offer it: the sampled average is asked for by name). --exact-average, the
+#   older name of --exact, is still read for one release, with one 'warning: --exact-average is deprecated, use
+#   --exact' line (the binaries' wording).
 # Only up to the first argument that is not an option (or '--'), as getopts reads them, and a letter's value is never
 # translated (-s --gpu names a simulation '--gpu'). A long option whose letter the script lacks, or an unknown one,
 # prints the usage and exits 1, as an unknown letter does.
@@ -481,7 +484,7 @@ driver_long_options() {
                 case "${t}" in *=*) val="${t#*=}" ;; esac
                 case "${name}" in
                     --sim) letter=s ;; --sim-dir) letter=d ;; --grid) letter=g ;; --gpu) letter=m ;;
-                    --exact-average) letter=e ;; --subsamples) letter=n ;; --help) letter=h ;;
+                    --exact|--exact-average) letter=e ;; --sampled) letter=S ;; --subsamples) letter=n ;; --help) letter=h ;;
                     --groupcats) letter=c ;; --trees) letter=t ;; --ics) letter=i ;; --api-key) letter=k ;;
                     *) letter="" ;;
                 esac
@@ -499,6 +502,9 @@ driver_long_options() {
                         if [ "${t}" != "${name}" ]; then
                             echo "Error: option '${name}' takes no value." >&2; usage; exit 1
                         fi
+                        if [ "${name}" = "--exact-average" ]; then
+                            echo "warning: --exact-average is deprecated, use --exact" >&2
+                        fi
                         _drv_args+=("-${letter}") ;;
                 esac ;;
             -?*)
@@ -510,6 +516,47 @@ driver_long_options() {
             *)   _drv_args+=("${t}"); stop=1 ;;
         esac
     done
+}
+
+# average_option e|S: a driver's -e (--exact) or --sampled (-S, see driver_long_options): DTFE_EXACT_AVERAGE becomes 1
+# or 0, and _avg_flag names the option for average_resolve ('both' once the two were given: refused there).
+average_option() {
+    local f=--sampled v=0
+    if [ "$1" = "e" ]; then f=-e; v=1; fi
+    if [ -n "${_avg_flag:-}" ] && [ "${_avg_flag}" != "${f}" ]; then
+        _avg_flag=both
+    else
+        _avg_flag="${f}"; DTFE_EXACT_AVERAGE="${v}"
+    fi
+}
+
+# average_resolve [what]: DTFE_EXACT_AVERAGE, the knob both drivers read, as 1 or 0 by the binaries' own rule (since
+# 2026-11-09 the exact cell average / deposit is the default and the sampled one an option): -e or --sampled first
+# (average_option; the two together are refused), then DTFE_EXACT_AVERAGE when the caller set it (_caller_exact, its
+# value before the driver filled in the default; empty is unset, and so is 'auto' in any case, as the binaries read
+# it), then a SUBSAMPLES count (the environment or -n),
+# which asks for the sampled one, then the default, exact. average_src names which of these decided (the banner says
+# it). With <what> ('cell average', 'deposit'): an exact one asked for beside a count earns one note that the count is
+# ignored (the binaries take the pair the same way). The drivers then pass --exact or --sampled on every run, so the
+# run log says which ran; run_ps_pipeline.sh calls it without <what> (the driver it starts says the note).
+average_resolve() {
+    case "${_caller_exact:-}" in [Aa][Uu][Tt][Oo]) _caller_exact="" ;; esac   # no pin (src/env_knobs.h tristate)
+    if [ "${_avg_flag:-}" = "both" ]; then
+        echo "Error: '-e' ('--exact') and '--sampled' exclude each other: the '_a' cell averages are integrated exactly or sampled." >&2
+        usage; exit 1
+    elif [ -n "${_avg_flag:-}" ]; then
+        average_src="${_avg_flag}"
+    elif [ -n "${_caller_exact:-}" ]; then
+        knob_bool DTFE_EXACT_AVERAGE
+        average_src="DTFE_EXACT_AVERAGE=${DTFE_EXACT_AVERAGE}"
+    elif [ -n "${SUBSAMPLES:-}" ]; then
+        DTFE_EXACT_AVERAGE=0; average_src="SUBSAMPLES=${SUBSAMPLES}"
+    else
+        DTFE_EXACT_AVERAGE=1; average_src="the default"
+    fi
+    if [ -n "${1:-}" ] && [ "${DTFE_EXACT_AVERAGE}" = "1" ] && [ -n "${SUBSAMPLES:-}" ]; then
+        echo "Note: SUBSAMPLES=${SUBSAMPLES} is ignored: ${average_src} asks for the exact $1, which samples nothing (--sampled or DTFE_EXACT_AVERAGE=0 runs the sampled one with it)"
+    fi
 }
 
 # driver_help_version <script> [its first argument]: '-h' / '--help' prints the script's header (line 2 up to the
@@ -564,8 +611,9 @@ driver_binary() {
 # gpu_auto_resolve <knob> <binary> [cpu_first knob]: the GPU knob (DTFE_GPU) left at 'auto' (or empty) becomes
 # gpu_build_default's answer for <binary> (1 on a GPU build), and gpu_auto the note the start banner adds; a knob set
 # to an on or off value is kept as 1 or 0 (knob_gpu) and gpu_auto is empty. When the switch named by cpu_first is on
-# (knob_on), 'auto' is the CPU on every build: run_ps_dtfe.sh names DTFE_EXACT_AVERAGE, as PS-DTFE's exact deposit is
-# faster on the CPU on production runs (TNG100-3-Dark z=0 at 512^3: 14.5 min against 17.7 min on the GPU).
+# (knob_on), 'auto' is the CPU on every build: run_ps_dtfe.sh names DTFE_EXACT_AVERAGE (average_resolve has set it by
+# then; the exact deposit is the default), as PS-DTFE's exact deposit is a little faster on the CPU on production runs
+# (TNG100-3-Dark z=0 at 512^3, 2026-11-09: 1133 s on the CPU against 1156 s on the GPU).
 gpu_auto_resolve() {
     local knob="$1" bin="$2" cpu_first="${3:-}" v
     gpu_auto=""
@@ -574,7 +622,7 @@ gpu_auto_resolve() {
     v="$(gpu_build_default "${REPO_ROOT}" "${bin}")"
     if [ -n "${cpu_first}" ] && knob_on "${cpu_first}" && [ "${v}" = "1" ]; then
         printf -v "${knob}" '%s' 0
-        gpu_auto=" (${knob} unset: the exact deposit is faster on the CPU; ${knob}=1 runs it on the GPU)"
+        gpu_auto=" (${knob} unset: the exact deposit is a little faster on the CPU; ${knob}=1 runs it on the GPU)"
         return 0
     fi
     printf -v "${knob}" '%s' "${v}"

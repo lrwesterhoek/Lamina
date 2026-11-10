@@ -27,6 +27,7 @@
 #include "ps_deposit_params.h"
 #include "ps_mass_audit.h"     // DTFE_MASS_AUDIT=1: the fixed-point grid's exact total
 #include "ps_deposit_msl.h"   // generated: static const char PS_DEPOSIT_MSL[]
+#include "../thread_count.h"   // CorePool: the core of a thread that waits for the GPU is lent to the pool
 #include <atomic>
 extern std::atomic<int> psGpuRetries;   // ps_interpolation.cc (run_progress.h)
 extern std::atomic<int> psGpuRetriesByCause[4];   // ... by cause: innocent, timeout, oom, other
@@ -375,7 +376,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
 
     NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
 
-    // --exact-average: split the work below the tet (depositExactItems in ps_deposit.metal), items of
+    // --exact: split the work below the tet (depositExactItems in ps_deposit.metal), items of
     // blockCells cells of a tet's window (psExactItemBounds in gpu_host.h), as the
     // compact map psBuildExactItemMap. The items follow the caller's cost order, keeping a SIMD group's threads on
     // similar work. DTFE_GPU_ITEMS=0 keeps the one-thread-per-tet kernel (A/B), DTFE_GPU_EXACT_CELLS sets the block.
@@ -390,6 +391,19 @@ bool psGpuDepositFields(std::vector<float>& verts,
                                         blockCells, bItems, nItems, ph });
 
     auto const tAsk = std::chrono::steady_clock::now();   // DTFE_GPU_TIMING: the wait for the queue, and its hold
+    // From here to the return this thread sleeps: first in the queue for the GPU, then in each buffer's
+    // waitUntilCompleted (its own work in the hold, the uploads and the copy-back, is a few percent of it). Its core
+    // is lent to the core pool for that time (thread_count.h: one helper more may be claimed), so the CPU work that
+    // follows the free cores can take it: the sub-grid merge and the normalization, and in a run that deposits a
+    // share of its partitions on the CPU (DTFE_PS_GPU_SHARE, DTFE.cpp) their deposit teams. A claim on the pool
+    // never changes a result.
+    struct CoreLend
+    {
+        CoreLend()  { CorePool::extra().fetch_sub( 1, std::memory_order_relaxed ); }
+        ~CoreLend() { CorePool::extra().fetch_add( 1, std::memory_order_relaxed ); }
+        CoreLend(CoreLend const &) = delete;
+        CoreLend &operator=(CoreLend const &) = delete;
+    } const coreLend;
     std::unique_lock<std::mutex> lock(ctxMutex());   // serialize dispatches (single queue); let go after the releases
     auto const tGot = std::chrono::steady_clock::now();
     tPh = tGot;
@@ -441,6 +455,12 @@ bool psGpuDepositFields(std::vector<float>& verts,
     // chunk size.
     size_t const MIN_CHUNK = fExact ? 50 : 2000;
     size_t const MAX_CHUNK = 500000;
+    // The exact items have a cap of their own. Under it a buffer runs a small part of the 0.25 s target, so the
+    // gap after each buffer costs several times the intended ~3% of the deposit. A cap eight times as large gave
+    // byte-identical grids sooner (the chunk size changes no item's deposit and the fixed-point sums do not depend
+    // on the order), but in part of that run the display then waited several frames for the GPU, where the short
+    // buffers never held it for longer than one frame. So the short buffers stay the rule.
+    size_t const MAX_CHUNK_ITEMS = 500000;
     GpuPace& pace = gpuPace();        // targetSec 0.25 s, gapUs 8 ms (~3% overhead) until escalated
     size_t baseChunk = psHostFirstChunk(fExact, pace.targetSec, MIN_CHUNK);
     std::string lastErr;
@@ -466,7 +486,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
     // checkpoints skip them too. False (lastErr set) when the pass gave up (the caller falls back).
     // badW: this pass's counter words of the non-finite guard (badRun above).
     auto runChunked = [&](MTL::ComputePipelineState* pso, size_t nThreads, size_t firstChunk,
-                          size_t minChunk, std::vector<MTL::Buffer*> const& extras, bool gridsZero,
+                          size_t minChunk, size_t maxChunk, std::vector<MTL::Buffer*> const& extras, bool gridsZero,
                           bool gridsKeepZero, uint32_t* badW, auto&& bind) -> bool
     {
         auto const tRun = std::chrono::steady_clock::now();
@@ -481,7 +501,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
         pass.pso = pso;
         pass.nThreads = nThreads;
         pass.minChunk = minChunk;
-        pass.maxChunk = MAX_CHUNK;
+        pass.maxChunk = maxChunk;
         pass.ckOn = snap.take(ckBufs, zeroMask, 0);
         pass.ckBufs = &ckBufs;
         if (gridsKeepZero) pass.ckMask = zeroMask;
@@ -523,7 +543,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
     auto runPerTet = [&](MTL::Buffer* vB, MTL::Buffer* uB, MTL::Buffer* mB, MTL::Buffer* dB, MTL::Buffer* sB, size_t nT,
                          bool gridsZero) -> bool
     {
-        return runChunked(c.pso, nT, baseChunk, MIN_CHUNK, { mB }, gridsZero, false, static_cast<uint32_t*>(bBad->contents()),
+        return runChunked(c.pso, nT, baseChunk, MIN_CHUNK, MAX_CHUNK, { mB }, gridsZero, false, static_cast<uint32_t*>(bBad->contents()),
                           [&](MTL::ComputeCommandEncoder* enc, size_t start, uint32_t n)
         {
             P.nTet = n;
@@ -560,7 +580,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
         // Phase 0 writes only sumW (the grids are still zero), phase 1 only the grids (sumW is read)
         std::vector<MTL::Buffer*> extras;
         if (phase == 0) extras.push_back(bSumW);
-        return runChunked(c.psoItems[phase], nItems, 8192, 1024, extras, true, phase == 0,
+        return runChunked(c.psoItems[phase], nItems, 8192, 1024, MAX_CHUNK_ITEMS, extras, true, phase == 0,
                           static_cast<uint32_t*>(bSumW->contents()) + badAt,
                           [&](MTL::ComputeCommandEncoder* enc, size_t start, uint32_t n)
         {

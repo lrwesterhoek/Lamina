@@ -49,7 +49,7 @@ struct PSDepositParams
     // caustic grid (buffer 11; dummy when 0) at every deposited sample. OR is commutative and
     // idempotent, so the result is chunk-, thread- and partition-order invariant.
     int32_t  fCaustic;
-    // --exact-average: replace the nSub^3 sub-sampled deposit by analytic tet-cell clipping
+    // --exact: replace the nSub^3 sub-sampled deposit by analytic tet-cell clipping
     // (sweep_moments in exact_clip.metal.inc, see exact_cell_clip in metal/ps_deposit.metal). Ignores nSub; a tet
     // whose whole clip window comes up empty (sliver below float resolution) falls through to
     // the sampled path, whose empty window then drives the centroid fallback -- the same

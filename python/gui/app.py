@@ -162,9 +162,10 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         self.data = data or self._restore("data", rs.DataSpec)
         self.custom = custom or self._restore("custom", rs.CustomSpec)
         if custom is None and not self._restore_json("custom", None):
-            # a fresh custom-snapshot job uses the GPU when built with one (the Grids and Pipeline tabs' rule,
-            # rs.gpu_build_default)
-            self.custom.gpu = rs.gpu_build_default("ps")
+            # a fresh custom-snapshot job uses the GPU when built with one, unless it starts at PS-DTFE's exact
+            # deposit, the default, which runs on the CPU (the Grids and Pipeline tabs' rule, rs.gpu_build_default)
+            self.custom.gpu = rs.gpu_build_default("ps") and not (self.custom.estimator == "ps"
+                                                                  and self.custom.deposit == "exact")
         # standard DTFE's production cell average is the exact one (rs.production_deposit). A state saved by an
         # older launcher holds its start, 'sampled', for a standard-DTFE Grids or Custom job (the Monte-Carlo
         # average, never really chosen: it was the only start): moved to 'exact' ONCE; the Monte-Carlo average
@@ -174,6 +175,9 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
                 if given is None and sp.estimator == "dtfe" and sp.deposit == "sampled":
                     sp.deposit = "exact"
             self.settings.setValue("dtfe_exact_start", json.dumps(True))
+        # PS-DTFE's production deposit is the exact one too since 2026-11-09, but a saved PS-DTFE job (Grids,
+        # Pipeline, Custom) keeps its deposit: 'sampled' was selectable beside 'exact' there, so a stored 'sampled'
+        # may be the user's own choice and is not moved. A fresh job starts at the exact deposit
         # the partitions merge in index order by default (the staged merge; run_ps_dtfe.sh PS_MERGE=index-order, the
         # binary's default). A state saved by an older launcher holds its start, off, on the Grids, Pipeline and
         # Custom tabs (never really chosen: it was the start): moved to on ONCE; unticking it later is kept

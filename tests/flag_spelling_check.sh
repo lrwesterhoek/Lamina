@@ -12,9 +12,10 @@
 #   F1  PS-DTFE sampled, '--partition 2 2 2': -i/-p/-g/-f, --MpcUnit, --avg-subsamples, --ps-lag-padding, --lambda_th,
 #       --ordered-merge, --ps-stream-density dtfe, --ps-no-overlap, and PS-DTFE's '-m 2 -s 27' (no effect there: a
 #       warning each, left out of the key) against --input-format, --mpc-unit, --subsamples, --ps-lagrangian-padding,
-#       --lambda-th, --ps-merge index-order, --ps-stream-density linear, --no-overlap
+#       --lambda-th, --ps-merge index-order, --ps-stream-density linear, --no-overlap; the key names the sampled
+#       average (the count selects it under either spelling)
 #   F2  PS-DTFE exact deposit, fixed-point merge: --ps-exact-deposit --fixed-point-merge (with the old --ordered-merge
-#       beside it, accepted: fixed-point wins) against --exact-average --ps-merge fixed-point; the key names the merge
+#       beside it, accepted: fixed-point wins) against --exact --ps-merge fixed-point; the key names the merge
 #       (the double pair, which refuses the fixed-point merge: --ordered-merge against --ps-merge index-order)
 #   F3  PS-DTFE window: --ps-window against --grid-window, '--partition 2 2 2'
 #   F4  PS-DTFE point evaluation, '--partition 2 2 2': --per-stream --per-stream-ids --pts-lagrangian --pts-conventions
@@ -38,6 +39,14 @@
 #   F11 the renamed environment knobs, in both binaries: DTFE_PS_CHECKPOINT=0 writes no checkpoint, as
 #       DTFE_CHECKPOINT=0 does; DTFE_NO_PROGRESS=1 leaves no progress sidecar, as DTFE_PROGRESS=0 does; each old name
 #       warns once at start-up ("warning: OLD is deprecated, use NEW"), the new one never
+#   F14 the '_a' average (2026-11-09: '--exact', the default, and '--sampled'), in both binaries: '--exact-average'
+#       against '--exact' (standard DTFE partitioned, its key naming 'average=exact'; PS-DTFE one domain); then, one
+#       domain, the run log's header line that names the average and why (the literals the drivers and python/ read)
+#       with the outputs of the run it stands for: no flag is '--exact, the default'; DTFE_EXACT_AVERAGE=0 / =1 alone
+#       sample / integrate exactly; a flag beats the pin both ways; a '--subsamples' count alone (standard DTFE: an
+#       '--average-method' too, 1 included) selects the sampled average; '--exact --sampled' is refused; standard
+#       DTFE on a redshift cone grid: '--exact' warns and samples, no flag samples silently, both the outputs of
+#       '--sampled' and the header 'SAMPLED (a redshift cone grid has no exact form)'
 # The reference runs of tests/dev/bytecmp.sh and tests/dev/tune_report_set.sh keep the old spellings on purpose (they
 # also run binaries from before the scheme); this suite is where the two spellings are compared.
 # About half a minute on the Mac.
@@ -54,6 +63,9 @@ STD="$(cd "$(dirname "${DTFE_BIN}")" && pwd)/$(basename "${DTFE_BIN}")"
 TMP="${DTFE_TEST_TMP}/flag_spelling_check"
 rm -rf "$TMP"; mkdir -p "$TMP"
 TMP="$(cd "$TMP" && pwd -P)"
+# the '_a' average's environment pin: F14 sets it where it tests it, and its no-flag case needs it unset (an export
+# from a login shell would steer every run without a flag)
+unset DTFE_EXACT_AVERAGE
 SNAP="$TMP/waves.hdf5"
 "$PY" tests/generate_ps_test_data.py --out "$SNAP" --n 24 --box 100 --amplitude-factor 1.8 \
     --jitter-frac 0.02 --seed 7 --crossed-waves >/dev/null || { echo "FAIL data gen"; exit 1; }
@@ -136,6 +148,7 @@ pair F1 "$PS" 3 "$(dep MpcUnit mpc-unit)" "$(dep avg-subsamples subsamples)" "$(
     "$(dep lambda_th lambda-th)" "$(dep ordered-merge 'ps-merge index-order')" \
     "$(dep 'ps-stream-density dtfe' 'ps-stream-density linear')" "$(dep ps-no-overlap no-overlap)" \
     "warning: -m/--method has no effect in PS-DTFE $NOEFF" "warning: -s/--samples has no effect in PS-DTFE $NOEFF"
+grep -qx "average=sampled" <<< "$LASTKEY"; check "F1 the key names the sampled average ('average=sampled')" $?
 
 echo ">> F2: PS-DTFE exact deposit, fixed-point merge"
 MO=(--fixed-point-merge --ordered-merge); MN=(--ps-merge fixed-point)
@@ -146,9 +159,9 @@ if precision_double; then   # the double build refuses the fixed-point merge (64
 fi
 OLD=(@SNAP@ @OUT@ --input 105 --MpcUnit 1 --periodic --grid 24 --partition 2 2 2 --max-concurrent 2 --ps-exact-deposit
      "${MO[@]}" --field density_a velocity_a dispersion_a)
-NEW=(@SNAP@ @OUT@ --input-format 105 --mpc-unit 1 --periodic --grid 24 --partition 2 2 2 --max-concurrent 2 --exact-average
+NEW=(@SNAP@ @OUT@ --input-format 105 --mpc-unit 1 --periodic --grid 24 --partition 2 2 2 --max-concurrent 2 --exact
      "${MN[@]}" --field density_a velocity_a dispersion_a)
-pair F2 "$PS" 3 "$(dep input input-format)" "$(dep MpcUnit mpc-unit)" "$(dep ps-exact-deposit exact-average)" "$MW" \
+pair F2 "$PS" 3 "$(dep input input-format)" "$(dep MpcUnit mpc-unit)" "$(dep ps-exact-deposit exact)" "$MW" \
     "$(dep ordered-merge 'ps-merge index-order')"
 if ! precision_double; then
     grep -qx "merge=fixed-point" <<< "$LASTKEY"; check "F2 the key names the fixed-point merge ('merge=fixed-point')" $?
@@ -288,6 +301,74 @@ for b in PS STD; do
             "warning: DTFE_NO_PROGRESS is deprecated, use DTFE_PROGRESS=0" \
         && ! grep -q "deprecated" "$TMP/F11${b}n.log" "$TMP/F11${b}d.log"
     check "F11 $b: each old name warned once, the new names never" $?
+done
+
+echo ">> F14: the '_a' average, both binaries: --exact (the default since 2026-11-09), --sampled, DTFE_EXACT_AVERAGE"
+# the old spelling '--exact-average' is '--exact' (PS-DTFE's '--ps-exact-deposit' is F2's): standard DTFE partitioned,
+# so the key is compared too and must name the exact average; PS-DTFE on one domain
+OLD=(@SNAP@ @OUT@ --input-format 105 --mpc-unit 1 --periodic --grid 24 --partition 2 2 2 --max-concurrent 2 --exact-average
+     --field density_a velocity_a)
+NEW=(@SNAP@ @OUT@ --input-format 105 --mpc-unit 1 --periodic --grid 24 --partition 2 2 2 --max-concurrent 2 --exact
+     --field density_a velocity_a)
+LASTKEY=""
+pair F14std "$STD" 3 "$(dep exact-average exact)"
+grep -qx "average=exact" <<< "$LASTKEY"; check "F14std the key names the exact average ('average=exact')" $?
+OLD=(@SNAP@ @OUT@ --input-format 105 --mpc-unit 1 --periodic --grid 24 --partition 1 --exact-average --field density_a velocity_a)
+NEW=(@SNAP@ @OUT@ --input-format 105 --mpc-unit 1 --periodic --grid 24 --partition 1 --exact --field density_a velocity_a)
+pair F14ps "$PS" 0 "$(dep exact-average exact)"
+# hdr <log> <text>: the run log's header carries the line (src/user_options.cc printOptions: which average runs and
+# why, in the literals the drivers and python/ read)
+hdr() { grep -qF -- "$2" "$1"; }
+for b in STD PS; do
+    bin="$STD"; XL="volume averaging       : EXACT cell-tetrahedron integration of the linear interpolant ("
+    SL="volume averaging       : SAMPLED ("; CL="a sampling count or method was given; --exact integrates the cells exactly"
+    if [ "$b" = PS ]; then
+        bin="$PS"; XL="grid deposit           : EXACT tetrahedron-cell intersection moments ("
+        SL="grid deposit           : SAMPLED on nSub^3 sub-points ("; CL="a --subsamples count was given; --exact deposits every tetrahedron exactly"
+    fi
+    M=("$SNAP" @OUT@ --input-format 105 --mpc-unit 1 --periodic --grid 24 --partition 1 --field density_a velocity_a)
+    o="$TMP/F14mode_$b"
+    go "$bin" "$o.x" "${M[@]}" --exact; r1=$?
+    go "$bin" "$o.s" "${M[@]}" --sampled; r2=$?
+    go "$bin" "$o.d" "${M[@]}"; r3=$?
+    [ "$r1$r2$r3" = 000 ] && hdr "$o.x.log" "${XL}--exact; " && hdr "$o.s.log" "${SL}--sampled)" \
+        && hdr "$o.d.log" "${XL}--exact, the default; " && same "$o.x" "$o.d" && ! cmp -s "$o.x.a_den" "$o.s.a_den"
+    check "F14 $b: no flag runs the exact average ('--exact, the default'), the outputs of '--exact'; '--sampled' samples (exit $r1, $r2, $r3)" $?
+    RUN_ENV=(DTFE_EXACT_AVERAGE=0); go "$bin" "$o.p0" "${M[@]}"; r1=$?; go "$bin" "$o.fx" "${M[@]}" --exact; r2=$?
+    RUN_ENV=(DTFE_EXACT_AVERAGE=1); go "$bin" "$o.p1" "${M[@]}"; r3=$?; go "$bin" "$o.fs" "${M[@]}" --sampled; r4=$?
+    RUN_ENV=()
+    [ "$r1$r3" = 00 ] && hdr "$o.p0.log" "${SL}--sampled from DTFE_EXACT_AVERAGE=0)" && same "$o.s" "$o.p0" \
+        && hdr "$o.p1.log" "${XL}--exact from DTFE_EXACT_AVERAGE=1; " && same "$o.x" "$o.p1"
+    check "F14 $b: DTFE_EXACT_AVERAGE=0 alone samples, =1 alone integrates exactly, each said in the header (exit $r1, $r3)" $?
+    [ "$r2$r4" = 00 ] && hdr "$o.fx.log" "${XL}--exact; " && same "$o.x" "$o.fx" \
+        && hdr "$o.fs.log" "${SL}--sampled)" && same "$o.s" "$o.fs"
+    check "F14 $b: a flag beats the pin both ways (DTFE_EXACT_AVERAGE=0 with --exact, =1 with --sampled; exit $r2, $r4)" $?
+    go "$bin" "$o.c" "${M[@]}" --subsamples 2; r1=$?
+    go "$bin" "$o.cs" "${M[@]}" --sampled --subsamples 2; r2=$?
+    [ "$r1$r2" = 00 ] && hdr "$o.c.log" "${SL}${CL})" && same "$o.cs" "$o.c"
+    check "F14 $b: a '--subsamples' count alone selects the sampled average, said in the header (exit $r1, $r2)" $?
+    if [ "$b" = STD ]; then   # an '--average-method' of any value is a sampling request too, 1 (the default method) included
+        go "$bin" "$o.m1" "${M[@]}" --average-method 1; r1=$?
+        [ "$r1" = 0 ] && hdr "$o.m1.log" "${SL}${CL})" && same "$o.s" "$o.m1"
+        check "F14 $b: '--average-method 1' alone selects the sampled average, the outputs of '--sampled' (exit $r1)" $?
+        # a redshift cone grid has no exact form (its '_a' fields are sampled, method 2): '--exact' warns and
+        # samples, the default samples without a word; both give the outputs of '--sampled'. The seed is pinned:
+        # method 2 draws random points, and without '--seed' the generator starts from the clock (two of the
+        # three runs then agree only when they start within the same second).
+        K=("$SNAP" @OUT@ --input-format 105 --mpc-unit 1 --periodic --grid 4 4 6 --redshift-cone 5 40 30 150 0 300
+           --cone-origin 50 50 50 --partition 1 --field density_a velocity_a --seed 7)
+        KW="'--exact' does not apply to a redshift cone grid"; KS="${SL}a redshift cone grid has no exact form)"
+        go "$bin" "$o.kx" "${K[@]}" --exact; r1=$?
+        go "$bin" "$o.ks" "${K[@]}" --sampled; r2=$?
+        go "$bin" "$o.kd" "${K[@]}"; r3=$?
+        [ "$r1$r2$r3" = 000 ] && grep -qF -- "$KW" "$o.kx.log" && ! grep -qF -- "$KW" "$o.ks.log" "$o.kd.log" \
+            && hdr "$o.kx.log" "$KS" && hdr "$o.kd.log" "$KS" && hdr "$o.ks.log" "${SL}--sampled)" \
+            && same "$o.kx" "$o.ks" && same "$o.kd" "$o.ks"
+        check "F14 $b: on a redshift cone grid '--exact' warns and samples, no flag samples silently, both the outputs of '--sampled' (exit $r1, $r2, $r3)" $?
+    fi
+    go "$bin" "$o.xs" "${M[@]}" --exact --sampled; r1=$?
+    [ "$r1" = 1 ] && grep -qF -- "'--exact' and '--sampled' exclude each other" "$o.xs.log" && [ ! -e "$o.xs.a_den" ]
+    check "F14 $b: '--exact --sampled' is refused at option parsing, naming both (exit $r1)" $?
 done
 
 echo ""

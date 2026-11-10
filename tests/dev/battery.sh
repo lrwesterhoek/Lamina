@@ -20,6 +20,7 @@
 #   --list          print the stage names and exit
 # Exit 0 when every stage that ran passed and the tree did not change during the run.
 set -uo pipefail
+unset DTFE_EXACT_AVERAGE   # the '_a' average's pin: an export from the caller's shell would steer every stage's runs
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "${BASH_SOURCE[0]}"; exit 2; }
 

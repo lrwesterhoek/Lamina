@@ -56,15 +56,17 @@ run "$TMP/ps_d"  ./PS-DTFE-double "$SNAP" "$TMP/ps_d"  "${COMMON[@]}" --field de
 run "$TMP/pts_f" ./PS-DTFE        "$SNAP" "$TMP/pts_f" --grid 16 --periodic --input-format 105 --mpc-unit 1 --verbose 1 --field density --sample-points "$TMP/slice.bin"
 run "$TMP/pts_d" ./PS-DTFE-double "$SNAP" "$TMP/pts_d" --grid 16 --periodic --input-format 105 --mpc-unit 1 --verbose 1 --field density --sample-points "$TMP/slice.bin"
 echo ">> standard DTFE cell averages, both pairs, CPU"
-run "$TMP/dt_f"  ./DTFE        "$SNAP" "$TMP/dt_f" "${COMMON[@]}" --field density_a velocity_a
-run "$TMP/dt_d"  ./DTFE-double "$SNAP" "$TMP/dt_d" "${COMMON[@]}" --field density_a velocity_a
+# the sampled average (an '_a' field would select the exact one): D4 and D5 hold it to the parity class of its
+# sample flips, as the PS runs above with their count
+run "$TMP/dt_f"  ./DTFE        "$SNAP" "$TMP/dt_f" "${COMMON[@]}" --field density_a velocity_a --sampled
+run "$TMP/dt_d"  ./DTFE-double "$SNAP" "$TMP/dt_d" "${COMMON[@]}" --field density_a velocity_a --sampled
 DOUBLE_GPU=0
 if [ -d o_ps_d ] && [ ! -f o_ps_d/.gpu_mode_off ] && [ -d o_d ] && [ ! -f o_d/.gpu_mode_off ]; then   # any GPU backend stamp
     DOUBLE_GPU=1
     echo ">> GPU deposits of the double pair"
     run "$TMP/ps_dg" ./PS-DTFE-double "$SNAP" "$TMP/ps_dg" --grid $G --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a --subsamples 2 --ps-caustics --gpu
     gpu_ok "$TMP/ps_dg.log" || { echo "FAIL: PS-DTFE-double --gpu did not run on the GPU"; exit 1; }
-    run "$TMP/dt_dg" ./DTFE-double "$SNAP" "$TMP/dt_dg" --grid $G --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a --gpu
+    run "$TMP/dt_dg" ./DTFE-double "$SNAP" "$TMP/dt_dg" --grid $G --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a --sampled --gpu
     gpu_ok "$TMP/dt_dg.log" || { echo "FAIL: DTFE-double --gpu did not run on the GPU"; exit 1; }
 else
     echo ">> the double pair has no GPU (built without METAL=1): D5 skipped"

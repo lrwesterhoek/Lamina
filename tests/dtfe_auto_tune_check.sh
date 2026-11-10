@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The STANDARD-DTFE auto-tuner (src/auto_tune.h): the report, the counted split and the thread plan of PS-DTFE's
-# tuner, and the memory model of the production '--exact-average' runs.
+# tuner, and the memory model of the production '--exact' runs.
 #
 # The exact average allocates nothing extra; what drives the peak is the padded vertex count. The load-balanced split
 # gives a dense partition a small volume and a fixed-length padding shell, so a box-average particle count per thread
@@ -21,7 +21,10 @@
 #  E) an auto-tuned run ends its SUMMARY with the 'memory model' line (predicted vs measured, as PS runs do), and the
 #     measured peak stays within 1.35x of the prediction (the allocator keeps freed triangulation memory between
 #     partitions: up to ~30% above the plan on sub-GB runs, while at TNG scale the prediction is 19-90% HIGH, see
-#     auto_tune.h): CPU sampled average, and the GPU exact average when the build has a GPU.
+#     auto_tune.h): CPU sampled average ('--sampled': the 1.35x was set on its measured peak; the exact average is
+#     the default since 2026-11-09), and the GPU exact average when the build has a GPU.
+#     The other runs name no mode: the standard tuner has no term for the averaging (auto_tune.cc), and what A-D and
+#     F-I check -- the plan, the threads' particle counts, a byte identity -- is the same under either average.
 #  F) the tuner only chooses: an auto-tuned run is byte-identical to the same split given by hand.
 #  G) on a simulated small machine the tuner picks a split its counted model says fits (over_budget=0) and names the
 #     busiest partition's vertex count in its AUTO-TUNE line.
@@ -159,11 +162,11 @@ print("OKE 1" if q <= 1.35 * p else "OKE 0")
 PYEOF
     rm -f "${TMP}/da_${tag}".a_* "${TMP}/da_${tag}"*badGridPoints*
 }
-out="$(run_e e_cpu)"; printf '%s\n' "${out}" | grep '^   \.\.\.\.' || true
+out="$(run_e e_cpu --sampled)"; printf '%s\n' "${out}" | grep '^   \.\.\.\.' || true
 check "E the SUMMARY of an auto-tuned standard run carries the 'memory model' line" "$(grep -q NOLINE <<< "${out}" && echo 0 || echo 1)"
 check "E CPU, sampled average: measured <= 1.35x predicted" "$(grep -q 'OKE 1' <<< "${out}" && echo 1 || echo 0)"
 if [ "${GPU}" = 1 ]; then
-    out="$(run_e e_gpu --gpu --exact-average)"; printf '%s\n' "${out}" | grep '^   \.\.\.\.' || true
+    out="$(run_e e_gpu --gpu --exact)"; printf '%s\n' "${out}" | grep '^   \.\.\.\.' || true
     check "E GPU, exact average: measured <= 1.35x predicted" "$(grep -q 'OKE 1' <<< "${out}" && echo 1 || echo 0)"
 else
     echo "   SKIP  E GPU (this build has no GPU backend)"

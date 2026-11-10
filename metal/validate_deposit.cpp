@@ -21,7 +21,7 @@
 //        the analytic volume-weighted mean in mom/momw and mass-weighted mean in dispvel/dispw
 //    T12 --ps-caustics path (fCaustic): a tet and its orientation-flip stamp distinct bits;
 //        together every covered cell reads exactly 3 (the fold-caustic flag)
-//    T13 --exact-average path (fExact): the 6-tet Freudenthal cube at density 1 deposits
+//    T13 --exact path (fExact): the 6-tet Freudenthal cube at density 1 deposits
 //        exactly mass 1 and multiplicity 1 into each of the 8 cells it tiles, nothing outside
 //    T14 the production exact path, depositExactItems (a tet's window split over many threads,
 //        two phases through a per-tet weight total): T13's analytic cube with one cell per item,
@@ -1001,7 +1001,7 @@ static void t12_causticBits(Gpu& g){
     verdict("T12 fCaustic orientation OR",ok,detail);
 }
 
-// T13: --exact-average kernel path (fExact, the z-sweep of exact_clip.metal.inc). A cube split into the
+// T13: --exact kernel path (fExact, the z-sweep of exact_clip.metal.inc). A cube split into the
 // 6-tet Freudenthal tessellation with density 1 (mass = tet volume) has a FULLY analytic
 // exact deposit: the cube [2,4]^3 covers 8 grid cells of dx=1 exactly, so each receives
 // mass 1.000..., the multiplicity sum(V_int)/V_cell is exactly 1 in each (the tessellation

@@ -2,6 +2,11 @@
 # the suites run and the helpers several suites share. Prints nothing when sourced and runs only the python probe;
 # the suite's own set -e / -u apply.
 
+# The '_a' average's pin (both binaries and the drivers read it): an export from the caller's shell would steer
+# every run that names no '--exact' / '--sampled'. A suite that wants the pin exports it after sourcing this file
+# (tests/ps_auto_tune_check.sh, tests/dev/bytecmp.sh).
+unset DTFE_EXACT_AVERAGE
+
 # A python with numpy and a WORKING h5py: $PYTHON, else the probe in scripts/h5py_python.sh.
 source "$(dirname "${BASH_SOURCE[0]}")/../scripts/h5py_python.sh"
 PY="$(h5py_python)"

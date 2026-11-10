@@ -36,7 +36,7 @@
 #   D11 scripts/run_dtfe.sh (copied beside a stand-in binary): a checkpoint file beside the outputs, or under
 #       SCRATCH_DIR, makes the run pass --resume and say so; DTFE_RESUME=0, and a folder without a 'checkpoint'
 #       file, do not
-#   D12 GPU builds only (a GPU stamp in o/ or o_d/; SKIP otherwise): a killed '--gpu --exact-average' run (the
+#   D12 GPU builds only (a GPU stamp in o/ or o_d/; SKIP otherwise): a killed '--gpu --exact' run (the
 #       production standard) resumes; '.den' (CPU) byte-identical, and the '_a' grids too (the GPU's exact fixed-point
 #       sums; within 1e-5 of their peak when DTFE_GPU_FLOAT_GRIDS=1)
 #   D13 a '--sample-points --pts-vel-grad' plane (64^2 points across the box, the shape of the
@@ -52,8 +52,11 @@
 #       resumed for 2 more with '--no-overlap' (out of the settings key) and then with the look-ahead (it looks ahead
 #       to the next partition the checkpoint lacks), D13's plane (one tessellation
 #       per partition), a cold and a warm '--tessellation-cache' (the warm run loads every sub-domain: the cache
-#       folder is left untouched), a machine without the free memory for it (the look-ahead pauses), and on GPU builds D12's '--gpu --exact-average' reference against '--no-overlap'
-#       and a '--gpu' (Monte-Carlo average) pair with and without it
+#       folder is left untouched), a machine without the free memory for it (the look-ahead pauses), and on GPU builds D12's '--gpu --exact' reference against '--no-overlap'
+#       and a '--gpu --sampled' (Monte-Carlo average) pair with and without it
+# The CPU runs name no averaging mode, so their '_a' fields take the default, the exact average (since 2026-11-09):
+# every check here holds one run's outputs against another's of the same split, byte for byte, which the exact CPU
+# average gives as the Monte-Carlo one does (its sums do not depend on the deposit's thread count).
 # About a minute on the Mac (about 30 runs of 2-4 s).
 # Usage: tests/dtfe_resume_check.sh [--no-build]   (--no-build is accepted and ignored: the binaries are used as built)
 set -uo pipefail
@@ -284,13 +287,13 @@ rc=$(drive "$TMP/d_scr.log" SCRATCH_DIR="$DSCR")
 [ "$rc" = 0 ] && grep -aqE '^RUNNING: .*--resume' "$TMP/d_scr.log"
 check "D11 SCRATCH_DIR: the checkpoint in the scratch folder makes the run pass --resume (exit $rc)" $?
 
-echo ">> D12: a killed --gpu --exact-average run"
+echo ">> D12: a killed --gpu --exact run"
 GPU=0
 [ -n "$(gpu_backend_of "$OBJ")" ] && GPU=1
 if [ "$GPU" != 1 ]; then
     echo "  SKIP D12: $OBJ carries no GPU stamp (a METAL=1 build runs it)"
 else
-    G=("${C[@]}" "${MC[@]}" --gpu --exact-average)
+    G=("${C[@]}" "${MC[@]}" --gpu --exact)
     "${RUN[@]}" "$TMP/gref" "${G[@]}" > "$TMP/gref.log" 2>&1 || { echo "FAIL: gref (see $TMP/gref.log)"; exit 1; }
     DTFE_TEST_EXIT_AFTER_PARTITIONS=12 "${RUN[@]}" "$TMP/g" "${G[@]}" > "$TMP/g1.log" 2>&1; rc1=$?
     "${RUN[@]}" "$TMP/g" "${G[@]}" --resume > "$TMP/g2.log" 2>&1; rc2=$?
@@ -401,11 +404,12 @@ if [ "$GPU" = 1 ]; then
     if [ "${DTFE_GPU_FLOAT_GRIDS:-0}" = 1 ]; then
         echo "  SKIP D14 GPU byte identity: the float atomics were asked for"
     else
-        same "$TMP/gref" "$TMP/gn"; check "D14 --gpu --exact-average with and without the look-ahead: every output byte-identical" $?
-        # the GPU's Monte-Carlo average (the production default) too, the look-ahead made to run (DTFE_FREE_GB)
-        env OMP_NUM_THREADS=2 DTFE_FREE_GB=1000 "$BIN" "$SNAP" "$TMP/gm" "${C[@]}" "${MC[@]}" --gpu > "$TMP/gm.log" 2>&1 \
+        same "$TMP/gref" "$TMP/gn"; check "D14 --gpu --exact with and without the look-ahead: every output byte-identical" $?
+        # the GPU's Monte-Carlo average ('--sampled'; the production default until 2026-11-09) too, the look-ahead made
+        # to run (DTFE_FREE_GB)
+        env OMP_NUM_THREADS=2 DTFE_FREE_GB=1000 "$BIN" "$SNAP" "$TMP/gm" "${C[@]}" "${MC[@]}" --gpu --sampled > "$TMP/gm.log" 2>&1 \
             || { echo "FAIL: gm (see $TMP/gm.log)"; exit 1; }
-        env OMP_NUM_THREADS=2 DTFE_FREE_GB=1000 "$BIN" "$SNAP" "$TMP/gmn" "${C[@]}" "${MC[@]}" --gpu --no-overlap \
+        env OMP_NUM_THREADS=2 DTFE_FREE_GB=1000 "$BIN" "$SNAP" "$TMP/gmn" "${C[@]}" "${MC[@]}" --gpu --sampled --no-overlap \
             > "$TMP/gmn.log" 2>&1 || { echo "FAIL: gmn (see $TMP/gmn.log)"; exit 1; }
         [ "$(grep -c 'look-ahead: partition [0-9]* prepared' "$TMP/gm.log")" = 26 ] && ! grep -q "look-ahead on" "$TMP/gmn.log" \
             && ! grep -q "using the CPU interpolation" "$TMP/gm.log" "$TMP/gmn.log" && same "$TMP/gm" "$TMP/gmn"

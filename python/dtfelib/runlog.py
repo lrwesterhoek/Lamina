@@ -26,7 +26,7 @@ import re
 RENAMES = {
     # P6 (2026-11-07): one name for a concept both binaries have, and no snake_case
     "--ps-gpu": "--gpu",
-    "--ps-exact-deposit": "--exact-average",
+    "--ps-exact-deposit": "--exact",        # straight to the 2026-11-09 name below (the table does not chain)
     "--ps-no-overlap": "--no-overlap",
     "--full_help": "--full-help",
     "--lambda_th": "--lambda-th",
@@ -64,6 +64,9 @@ RENAMES = {
     "--pts-lagrangian": "--ps-per-stream-lagrangian",
     "--pts-conventions": "--ps-point-conventions",
     "--ps-window": "--grid-window",         # it crops the output grid: no stream concept
+    # 2026-11-09: the exact cell average is the default of both binaries, '--sampled' the other choice, and the
+    # switch took the short name. A log with neither flag is read by its header line (gui/results.py RunRecord.exact)
+    "--exact-average": "--exact",
 }
 # the three merge switches of PS-DTFE are one mode. Precedence when a log has more than one, as the binary
 # reads them: '--fixed-point-merge' wins (beside '--ordered-merge' it is accepted), then '--ordered-merge' (beside

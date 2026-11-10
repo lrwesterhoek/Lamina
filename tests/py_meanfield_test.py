@@ -21,7 +21,7 @@ a PS output the standard quantity, from its velocity grid, in the binary's conve
     rounding for all six names, every axis, planes at the box faces and on a slab boundary, random (not band-limited)
     float32 and float64 grids of even and odd size, read through a minimal slab reader (no array, no memmap).
   * BINARY (the acceptance test; skipped when the binaries are not built -- a FAILURE under DTFE_TEST_REQUIRED=1):
-    a Zel'dovich field plus a rotational flow, 32^3 particles, through the standard binary with --exact-average at
+    a Zel'dovich field plus a rotational flow, 32^3 particles, through the standard binary with --exact at
     32^3 and 64^3: the mean field of its OWN a_vel reproduces its a_velDiv (correlation >= 0.99), every gradient,
     shear and vorticity component (>= 0.97), its V-web labels (>= 95% of the cells), and our V-web normalisation +
     Cardano applied to its stored gradient give its stored eigenvalues and labels exactly. Through PS-DTFE
@@ -438,7 +438,7 @@ def t_binary_standard():
         d.mkdir(parents=True)
         _zeldovich_snapshot(d / "combined_050.hdf5")
         _run_bin([dtfe_bin, d / "combined_050.hdf5", d / "output", "--grid", grid, "--periodic", "--input-format", 105,
-                  "--padding", 15, "--exact-average", "--field", "density_a", "velocity_a", "gradient_a", "divergence_a",
+                  "--padding", 15, "--exact", "--field", "density_a", "velocity_a", "gradient_a", "divergence_a",
                   "shear_a", "vorticity_a", "vweb_a", "--lambda-th", 0.3, "--verbose", 1], d / "output.runlog")
         fs = FieldSet(d, method="dtfe")
         assert fs.lambda_th == 0.3 and fs._dtype_of("velocity") == real, (fs.lambda_th, fs._dtype_of("velocity"))
@@ -479,7 +479,7 @@ def t_binary_ps():
     common = ["--grid", 64, "--periodic", "--input-format", 105, "--padding", 15, "--lambda-th", 0.3, "--verbose", 1]
     _run_bin([ps_bin, d / "combined_050.hdf5", d / "ps_output", *common, "--subsamples", 3, "--ps-volume-weighted",
               "--field", "density_a", "velocity_a", "divergence_a", "vweb_a"], d / "ps_output.runlog")
-    _run_bin([dtfe_bin, d / "combined_050.hdf5", d / "output", *common, "--exact-average",
+    _run_bin([dtfe_bin, d / "combined_050.hdf5", d / "output", *common, "--exact",
               "--field", "density_a", "velocity_a", "divergence_a", "vweb_a"], d / "output.runlog")
     ps, dt = FieldSet(d, method="ps"), FieldSet(d, method="dtfe")
     multi = float(np.mean(ps.load("streams") > 1.001))

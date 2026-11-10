@@ -68,11 +68,13 @@ OFFBOX=(--box "${X0}" "${X1}" "${X0}" "${X1}" "${X0}" "${X1}")
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${TMP}/nearlat.hdf5" --n 32 --box 100 \
     --amplitude-factor 0.5 --crossed-waves --jitter-frac 0.00001 >/dev/null
 
+# the sampled deposit ('density_a' would select the exact one): the closure audit and the top-plane counts above are
+# its own (S2's '--subsamples 1' sets its count beside it)
 run() {  # $1 = output name, $2 = snapshot, rest = extra options
     local name="$1" snap="$2"; shift 2
     local out="${TMP}/run_${name}"
     rm -f "${out}".a_den "${out}".a_streams "${out}".a_hidden_streams
-    if ! DTFE_MASS_AUDIT=2 "${BIN}" "${snap}" "${out}" --grid "${GRID}" --periodic --field density_a --ps-vertex-mass \
+    if ! DTFE_MASS_AUDIT=2 "${BIN}" "${snap}" "${out}" --grid "${GRID}" --periodic --field density_a --sampled --ps-vertex-mass \
             --input-format 105 --mpc-unit 1 --verbose 2 "$@" > "${out}.log" 2>&1; then
         echo "FAIL: run ${name} exited non-zero -- last lines of ${out}.log:"
         tail -n 15 "${out}.log" | sed 's/^/   | /'

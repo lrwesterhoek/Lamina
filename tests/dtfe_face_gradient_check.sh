@@ -8,7 +8,7 @@
 #   G1  DTFE_FACE_CHECK=1: the face integrals equal the exact average's per-tetrahedron gradient in every cell to
 #       1e-4 of the gradient's rms (measured at most 1.1e-5, rms 1.2e-7; the demo has no degenerate tetrahedron)
 #   G2  the deposit threads, one domain (DTFE_DEPOSIT_THREADS 1, 3, 10): '.a_velDiv' and '.a_velShear' byte-identical
-#   G3  the face gradient does not depend on the deposit: the Monte-Carlo average's and, in a GPU build, the --gpu
+#   G3  the face gradient does not depend on the deposit: the Monte-Carlo average's ('--sampled') and, in a GPU build, the --gpu
 #       deposit's '.a_velDiv' and '.a_velShear' byte-identical to the exact CPU run's
 #   G4  the final grids: face vs per-tetrahedron divergence and shear within 1e-4 of their rms (measured 4.4e-6 and
 #       9.0e-6); a '--partition 2 2 2' split within 1e-4 of the single domain (measured 1.8e-6) with every
@@ -53,9 +53,9 @@ run() {
 }
 same() { cmp -s "$TMP/$1.a_velDiv" "$TMP/$2.a_velDiv" && cmp -s "$TMP/$1.a_velShear" "$TMP/$2.a_velShear"; }
 
-echo ">> demo/z0_64.gadget at 64^3: --exact-average with --per-tet-gradient and with --face-gradient (one domain, one thread)"
-run e  OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 -- --exact-average --per-tet-gradient   # the deposit's own gradient (the face route is the default since 2026-11-09)
-run f  OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 DTFE_FACE_CHECK=1 -- --exact-average --face-gradient
+echo ">> demo/z0_64.gadget at 64^3: --exact with --per-tet-gradient and with --face-gradient (one domain, one thread)"
+run e  OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 -- --exact --per-tet-gradient   # the deposit's own gradient (the face route is the default since 2026-11-09)
+run f  OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 DTFE_FACE_CHECK=1 -- --exact --face-gradient
 line="$(grep -a 'FACE-CHECK' "$TMP/f.log" | head -1 | sed 's/.*FACE-CHECK/FACE-CHECK/')"
 read -r mx above <<< "$(echo "$line" | awk '{for (i=1;i<=NF;i++) { if ($i=="max_rel") m=$(i+1); if ($i=="above_1e-4") a=$(i+1) } print m, a}')"
 if [ -n "$line" ] && "$PY" -c "import sys; sys.exit(0 if float('$mx') <= 1e-4 and int('$above') == 0 else 1)"; then
@@ -65,15 +65,15 @@ else
 fi
 
 echo ">> deposit threads 3 and 10 (one domain); the Monte-Carlo average; the GPU"
-run f3  OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=3  -- --exact-average --face-gradient
-run f10 OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=10 -- --exact-average --face-gradient
+run f3  OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=3  -- --exact --face-gradient
+run f10 OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=10 -- --exact --face-gradient
 if same f f3 && same f f10; then pass "G2 1, 3 and 10 deposit threads: byte-identical divergence and shear"
 else fail "G2 the deposit threads change the face gradient"; fi
-run m  OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 -- --face-gradient
+run m  OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 -- --sampled --face-gradient   # (the exact average is the default since 2026-11-09)
 if same f m; then pass "G3 the Monte-Carlo average's face gradient == the exact average's (byte-identical)"
 else fail "G3 the Monte-Carlo average changes the face gradient"; fi
 if [ "$GPU" = "1" ]; then
-    run g OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 -- --exact-average --face-gradient --gpu
+    run g OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 -- --exact --face-gradient --gpu
     if grep -q "using the CPU interpolation" "$TMP/g.log"; then fail "G3 the --gpu run fell back to the CPU (see $TMP/g.log)"
     elif same f g; then pass "G3 the GPU deposit's face gradient == the CPU's (byte-identical)"
     else fail "G3 the GPU deposit changes the face gradient"; fi
@@ -82,7 +82,7 @@ else
 fi
 
 echo ">> --partition 2 2 2 (each sub-domain checked)"
-run p DTFE_FACE_CHECK=1 -- --exact-average --face-gradient --partition 2 2 2 --max-concurrent 1
+run p DTFE_FACE_CHECK=1 -- --exact --face-gradient --partition 2 2 2 --max-concurrent 1
 nchk=$(grep -ac 'FACE-CHECK' "$TMP/p.log")
 nbad=$(grep -a 'FACE-CHECK' "$TMP/p.log" | sed 's/.*FACE-CHECK/FACE-CHECK/' \
        | awk '{for (i=1;i<=NF;i++) { if ($i=="max_rel" && $(i+1)+0 > 1e-4) b++; if ($i=="above_1e-4" && $(i+1)+0 > 0) b++ } } END {print b+0}')
@@ -111,7 +111,7 @@ PY
 
 echo ">> the GPU exact average on a 3^3 split against one domain (the deposit's grid frame, plan P10.8)"
 if [ "$GPU" = "1" ]; then
-    run g3 DTFE_FACE_CHECK=1 -- --exact-average --face-gradient --gpu --partition 3 3 3 --max-concurrent 1
+    run g3 DTFE_FACE_CHECK=1 -- --exact --face-gradient --gpu --partition 3 3 3 --max-concurrent 1
     if grep -q "using the CPU interpolation" "$TMP/g3.log"; then fail "G6 the --gpu 3^3 run fell back to the CPU (see $TMP/g3.log)"
     # the double build keeps what float rounding hides: the GPU deposit is float32 (its grids are converted to float
     # once), so its density can differ by a float ulp where the two splits' fixed-point units round apart, and the

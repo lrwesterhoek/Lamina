@@ -352,7 +352,7 @@ static inline void depositSampleBatch(thread const FieldGrids& G, uint flat, uin
 }
 
 // ------------------------------------------------------------------------------------------------
-// Exact deposit (--exact-average), one window cell at a time. Shared by depositExactItems (the
+// Exact deposit (--exact), one window cell at a time. Shared by depositExactItems (the
 // production path: many threads per large tet, below) and depositFields (one thread per tet: the
 // few tets the items pass leaves over).
 // ------------------------------------------------------------------------------------------------
@@ -969,7 +969,7 @@ kernel void depositFields(
     float const sg = detC > 0.0f ? 1.0f : -1.0f;
     float const invNSub = 1.0f / float(nSub);
 
-    // ===================== exact conservative deposit (--exact-average) =====================
+    // ===================== exact conservative deposit (--exact) =====================
     // Mirrors the CPU exact path: PASS 0 sums the per-cell weights (V_int, or the exact linear-
     // profile integral under fLinear), PASS 1 renormalizes the shares to the tet mass and
     // deposits the exact moments. A tet whose whole window clips empty (sliver below float
@@ -1107,7 +1107,7 @@ kernel void depositFields(
                         // moment weight: equal V_eul share under fVolW (fLinear is rejected
                         // with fVolW at option parsing), else the mass share w
                         float wm = fVolW ? mw / float(N + Nout) : w;
-                        // --exact-average fall-through: share the tet volume over its samples
+                        // --exact fall-through: share the tet volume over its samples
                         float sv = fExact ? (tetVol*invCellVol)/float(N + Nout) : 0.0f;
                         if (P.debugNoAtomic == 0u)
                             depositSample(G, flat, rel, w, wm, obits, u0, vG, s0, sG, fVel, fDisp, fGrad, fVolW, fCaustic, fExact, sv, true, false, fScal, fSGrad, batched);

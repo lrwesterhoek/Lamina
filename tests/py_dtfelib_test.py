@@ -366,7 +366,7 @@ def t_velocity_single_stream():
 
 
 def t_velocity_single_stream_float_mask():
-    """velocity_single_stream must survive a FLOAT '.streams' grid (--exact-average).
+    """velocity_single_stream must survive a FLOAT '.streams' grid (--exact, the exact deposit).
 
     The exact deposit writes the analytic volume-weighted multiplicity, so single-stream
     cells land on 1.0 +/- float32 eps rather than exactly 1. A 'streams != 1' mask would
@@ -388,7 +388,7 @@ def t_velocity_single_stream_float_mask():
         # is exactly 1.0 (drawing uniform noise instead would round part of the grid back
         # onto 1.0 and let a '!= 1' mask pass). Plus a genuine multi-stream slab at the
         # analytic pancake value 3 and caustic-straddling cells at a fractional
-        # multiplicity -- the shapes --exact-average actually produces.
+        # multiplicity -- the shapes --exact actually produces.
         one, ulp = np.float32(1.0), np.spacing(np.float32(1.0))
         st = (one + rng.choice(np.float32([-1.0, 1.0]), (n, n, n))
                   * rng.integers(1, 4, (n, n, n)).astype(np.float32) * ulp).astype(np.float32)
@@ -563,6 +563,12 @@ def t_runlog_averaging_by_binary():
     assert cc("./DTFE i o --samples 20 --subsamples 3") == "./DTFE i o --samples 20 --subsamples 3"
     assert cc("./PS-DTFE i o -s 27", averaging=True) == "./PS-DTFE i o --subsamples 3"      # explicit wins
     assert cc("-m 2 -s 27", averaging=False) == "-m 2 -s 27"
+    # the exact average's older names (2026-11-09: '--exact', the default; PS-DTFE's '--ps-exact-deposit' maps to
+    # it directly), and nothing else named like it
+    assert cc("./PS-DTFE i o --ps-exact-deposit --grid 8") == "./PS-DTFE i o --exact --grid 8"
+    assert cc("./DTFE i o --exact-average --grid 8") == "./DTFE i o --exact --grid 8"
+    assert cc("./DTFE i o --exact --sampled /a/--exact-average") == "./DTFE i o --exact --sampled /a/--exact-average"
+    assert runlog.canonical_flag("--exact-average") == runlog.canonical_flag("--ps-exact-deposit") == "--exact"
 
 
 def t_velocity_scale():
@@ -4404,7 +4410,8 @@ def main():
     check("FieldSet caustic loader (synthetic)", t_caustic_field_loader)
     check("velocity_single_stream float-streams + hidden-streams mask (synthetic)", t_velocity_single_stream_float_mask)
     check("FieldSet velocity_scale u-units conversion (synthetic)", t_velocity_scale)
-    check("run-log reader: the averaging spellings read by the binary, PS-DTFE's kept (synthetic)",
+    check("run-log reader: the averaging spellings read by the binary, PS-DTFE's kept; the exact average's older "
+          "names read as --exact (synthetic)",
           t_runlog_averaging_by_binary)
     check("sim_dir / find_sims: per-family and flat data layouts (synthetic)", t_sim_dir_layouts)
     check("snapdir_path / snapshot_ladder == the pasted expressions, both layouts, int and '099' ids (synthetic)",

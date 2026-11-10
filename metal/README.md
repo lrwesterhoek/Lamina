@@ -41,7 +41,7 @@ CI builds no GPU backend (its runners are Linux): all of these are local.
 | file | role |
 |---|---|
 | `metal/ps_deposit.metal` | PS-DTFE kernels: `depositFields` (one thread per tetrahedron: mass, velocity moment, dispersion second moment, gradient moment, stream count, scalar; the sampled path, the centroid fallback and the deferrals) and `depositExactItems` (the exact deposit, one thread per block of a tetrahedron's window cells) |
-| `metal/dtfe_deposit.metal` | standard-DTFE kernels: `depositAveraged1` (per tetrahedron, A/B), `depositAveraged1Items2/4/8` (the item kernels), `depositExactAverage` (`--exact-average`) |
+| `metal/dtfe_deposit.metal` | standard-DTFE kernels: `depositAveraged1` (per tetrahedron, A/B), `depositAveraged1Items2/4/8` (the item kernels), `depositExactAverage` (`--exact`) |
 | `metal/exact_clip.metal.inc` | the exact tetrahedron-cell intersection moments (`sweep_moments`, a register-resident z-sweep) and the face-plane cell skip, prepended to both kernel sources |
 | `metal/validate_deposit.cpp`, `metal/build_prototype.sh` | the kernel harness and its build (offline-compiles `ps_deposit.metallib` when Xcode's Metal toolchain is installed, which only the harness loads; git-ignored) |
 | `src/CGAL_triangulation/gpu_host.h` | the host interface the callers see (deposit calls, `PSGpuGrids`, the shared-grid API `dtfeGpuShared*`, `psWindowHull`) and the PS host's plain-C++ steps |
@@ -94,7 +94,7 @@ cannot index registers at run time, and the earlier float32 r3d port (a vertex g
 832 B/thread and was latency-bound. Two rules keep it exact in float: the Green cross term is written so that a
 collapsed segment gives exactly 0 under FMA contraction, and close breakpoints are never merged (merging integrated
 across kinks and broke thin slivers). Order 1 (pass 0) and order 2 (pass 1) give bit-identical volumes. The whole
-PS-DTFE's exact deposit (`--exact-average`) on an M1 Max (one partition): 18.1 -> 8.7 s for 0.26M particles on 256^3, 10.8 -> 6.2 s for
+PS-DTFE's exact deposit (`--exact`) on an M1 Max (one partition): 18.1 -> 8.7 s for 0.26M particles on 256^3, 10.8 -> 6.2 s for
 2.1M on 128^3, 35.7 -> 18.1 s for 2.1M on 256^3. The file's header comment has the details.
 
 **The clip's frame.** A piece's moments taken about a far origin cancel (r3d's origin-apex simplices lost the volume
@@ -112,7 +112,7 @@ column by column).
 
 ## Standard-DTFE `_a` interpolation
 
-Method 1 of `averaged_interpolation_1.cc`: a tetrahedron inside one cell deposits its centroid value times its volume;
+Method 1 of `averaged_interpolation_1.cc` (the Monte-Carlo average, `--sampled`): a tetrahedron inside one cell deposits its centroid value times its volume;
 a larger one scatters value × V/n at n shared Sobol samples (centred, in the hashed vertex order; up to 10 000). The CPU
 precomputes volumes, sample counts and single-cell indices with its own helpers, so both paths make the same decisions.
 
@@ -128,14 +128,15 @@ precomputes volumes, sample counts and single-cell indices with its own helpers,
   (`DTFE_GPU_TABLE=0` turns it off). This matters in voids, where a tetrahedron's samples never repeat a cell within one
   item. On 2.1M particles at 512^3 the largest sub-domain takes 0.7 s on the item kernels and 45 s on the per-tet kernel
   (`depositAveraged1`, `DTFE_GPU_ITEMS=0`), whose 10 000-sample threads trip the watchdog.
-- **`--exact-average`** (`depositExactAverage`): the exact deposit's item split (16 cells, `DTFE_GPU_EXACT_CELLS`), each
+- **`--exact`** (`depositExactAverage`; the default `_a` average since 2026-11-09): the exact deposit's item split (16 cells, `DTFE_GPU_EXACT_CELLS`), each
   piece depositing the interpolant's centroid value and the gradients times its volume, one dispatch. Agrees with the
   CPU to float rounding (density 4e-7, velocity 7e-7, gradient 2e-6 of the peak on the 96^3 test box of
   `dtfe_metal_check.sh`).
 - **Sub-domains.** Each OpenMP sub-domain deposits its own sub-grid, serialized on the one queue. The alternative, one
   full grid on the device for the whole call (`DTFE_GPU_SHARED=1`, `DTFE_GPU_SHARED_GB` cap), is tested but off: its
   atomics' footprint on the full grid cost more than the zeroing and read-back it saves (2.1M at 512^3: 12.9 s against
-  10.6 s). It keeps float sums and sampled averages only.
+  10.6 s). It keeps float sums and sampled averages only, so under the exact default it engages only in a run that
+  samples (`--sampled`, or a sampling count).
 
 The sampled GPU grid agrees with the CPU's except in 0.1-0.2% of the cells, where a sample within float rounding of a
 cell face lands in the neighbouring cell (`dtfe_metal_check.sh`: means to 1e-5, cells to 5e-2 outside a 1e-3 fraction).
@@ -212,8 +213,8 @@ and `PS_GPU_TIMING`, `PS_GPU_FLOAT_MASS`, `PS_GPU_FLOAT_MOMENTS` (deprecated: `D
 | `DTFE_GPU_ITEM_SAMPLES=n` | samples per work item of the item kernels (4-100000) | 48 |
 | `DTFE_GPU_CACHE_K=2\|4\|8` | slots of the item kernels' per-thread cell cache | 2 |
 | `DTFE_GPU_TABLE` | `0` turns the threadgroup cell table off (evictions go to device atomics) | on |
-| `DTFE_GPU_EXACT_CELLS=n` | cells per `--exact-average` item (both binaries) | 16 |
-| `DTFE_GPU_SHARED` | one shared full grid on the device for the whole call (sampled, float sums) | off |
+| `DTFE_GPU_EXACT_CELLS=n` | cells per item of the exact deposit (`--exact`, both binaries) | 16 |
+| `DTFE_GPU_SHARED` | one shared full grid on the device for the whole call (`--sampled` only, float sums) | off |
 | `DTFE_GPU_SHARED_GB` | the shared grid's cap in GB | 25% of RAM |
 | `DTFE_GPU_CHUNK` | standard DTFE: the opening chunk (the item kernels round it up to a multiple of 256) | 65536 items; per-tet kernel 25088 tetrahedra, exact 8192 items |
 | `PS_GPU_CHUNK` | PS-DTFE: the per-tet kernel's opening chunk in tetrahedra | 25000; exact deposit 500 |

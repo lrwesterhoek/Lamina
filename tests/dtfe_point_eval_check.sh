@@ -244,7 +244,10 @@ GPU=0
 [ -n "$(gpu_backend_of "${OBJ}")" ] && GPU=1
 if [ "${GPU}" = "1" ]; then
     echo ">> run 11: --gpu (the '_a' grid per partition on the GPU): the points are the CPU's, byte for byte"
-    GPU_FLAGS=(--sample-points "${PTS_X}" --pts-den-grad --pts-vel-grad --periodic --field density_a --partition 2 2 2)
+    # '--sampled': this is the one run of the Monte-Carlo GPU kernel beside a point plane (the exact average, the
+    # default since 2026-11-09, beside one is tests/dtfe_gpu_retry_check.sh R8's, under a fault)
+    GPU_FLAGS=(--sample-points "${PTS_X}" --pts-den-grad --pts-vel-grad --periodic --field density_a --partition 2 2 2
+               --sampled)
     runp "${BIN}" "${TMP}/dpe_x_p2c" "${SNAP_X}" "${GPU_FLAGS[@]}"
     runp "${BIN}" "${TMP}/dpe_x_p2g" "${SNAP_X}" "${GPU_FLAGS[@]}" --gpu
     grep -q " GPU (" "${TMP}/dpe_x_p2g.log" \

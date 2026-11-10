@@ -6,18 +6,26 @@
 # shared defaults (SNAPSHOTS, GRID_SIZE, PADDING) live in config.sh.
 #
 # Usage:
-#   ./run_ps_dtfe.sh [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n SUBSAMPLES] [-m] [-e] [snapshot ...]
-#     long forms: --sim-dir, --sim, --grid, --subsamples, --gpu, --exact-average (the same as the letters)
+#   ./run_ps_dtfe.sh [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n SUBSAMPLES] [-m] [-e | --sampled] [snapshot ...]
+#     long forms: --sim-dir, --sim, --grid, --subsamples, --gpu, --exact (the same as the letters); --sampled
 #     -n   SUBSAMPLES: k sub-points per axis (k^3 per cell) of the sampled deposit's '_a' fields (--subsamples k;
-#          default 3)
+#          passed only when set, the binary's 3 otherwise). While DTFE_EXACT_AVERAGE is unset (and neither -e nor
+#          --sampled is given) a count selects the sampled deposit, as the binary does; beside -e or
+#          DTFE_EXACT_AVERAGE=1 it is ignored (said).
 #     -m   run the deposit on the GPU (--gpu; same as DTFE_GPU=1). The default (DTFE_GPU unset, 'auto') is the GPU
 #          when the binary was built with one (the Makefile's o_ps/.gpu_mode_metal stamp; o_ps_d for
-#          DTFE_PRECISION=double), else the CPU -- but the CPU for the exact deposit (-e), faster there on
-#          production runs; DTFE_GPU=0 runs the CPU deposit on a GPU build.
-#     -e   exact conservative deposit (same as DTFE_EXACT_AVERAGE=1; --exact-average, on the CPU unless -m)
+#          DTFE_PRECISION=double), else the CPU -- but the CPU for the exact deposit (the default), a little faster
+#          there on production runs; DTFE_GPU=0 runs the CPU deposit on a GPU build.
+#     -e   the exact conservative deposit (--exact; DTFE_EXACT_AVERAGE=1): the DEFAULT, on the CPU unless -m; -e
+#          overrides an exported DTFE_EXACT_AVERAGE=0 and keeps the exact deposit beside a SUBSAMPLES count.
+#     --sampled  the nSub^3 sub-sampled deposit instead (DTFE_EXACT_AVERAGE=0), on the GPU when built. At 512^3
+#          (TNG100-3-Dark z=0, 2026-11-09) the exact deposit took 1133 s on the CPU and 1156 s on the GPU, the
+#          sampled one (nSub 3) 1260 s on the GPU and 1644 s on the CPU.
+#     --exact-average, the older name of --exact, is still read for one release (with a warning).
 #     The drivers' letters are their own: -m is the GPU and -s the simulation here (PS-DTFE's own -m and -s are
 #          deprecated and have no effect there).
-#   Production defaults: GRID_SIZE 512 (config.sh), the GPU when built, vertex masses, volume-weighted
+#   Production defaults: GRID_SIZE 512 (config.sh), the exact deposit on the CPU (-m for the GPU; --sampled runs on
+#   the GPU when built), vertex masses, volume-weighted
 #   velocity moments, the caustic classes, FIELDS = density, velocity, its divergence and shear (the same set as
 #   run_dtfe.sh's; the gradient, vorticity, dispersion, T-web and V-web through FIELDS), LAMBDA_TH 0.3.
 #   A rerun into a prefix that holds an earlier run's files: once it exits 0, the files it did not write (an image
@@ -34,8 +42,8 @@
 #   PS_LAGRANGIAN_PADDING TESSELLATION_CACHE OUTPUT_PREFIX FIELDS LAMBDA_TH PS_LAGRANGIAN_INPUT DTFE_PRECISION DRY_RUN
 #   AUTO_TUNE_REPORT (1 = only the auto-tuner's memory report per snapshot, nothing computed) PS_MERGE DTFE_RESUME,
 #   and config.sh's GRID_SIZE, PADDING, SPACE_CHECK. A switch is off for 0, false, no or off and on for any other
-#   value (the binaries' rule). DTFE_GPU, DTFE_EXACT_AVERAGE and DTFE_RESUME are run_dtfe.sh's knobs too (each driver
-#   keeps its default: the exact average is run_dtfe.sh's, the sampled deposit this one's).
+#   value (the binaries' rule). DTFE_GPU, DTFE_EXACT_AVERAGE and DTFE_RESUME are run_dtfe.sh's knobs too, with the
+#   same defaults there (the exact cell average is run_dtfe.sh's, the exact deposit this one's).
 #   Older names, read for one release with a warning (the new name wins when both are set): PS_GPU and PS_METAL
 #   (DTFE_GPU), PS_EXACT (DTFE_EXACT_AVERAGE), PS_RESUME (DTFE_RESUME), AVG_SUBSAMPLES (SUBSAMPLES), ORDERED_MERGE and
 #   FIXED_POINT_MERGE (PS_MERGE), PS_PARALLEL_TRI (PARALLEL_TRIANGULATION), PS_LAG_PADDING (PS_LAGRANGIAN_PADDING),
@@ -63,7 +71,10 @@ MAX_CONCURRENT="${MAX_CONCURRENT:-}"  # cap on concurrent partitions. EMPTY (def
                            # partition split; set to override (0 = all cores). Peak RAM ~ fixed + cap x
                            # per-triangulation, verify via the "Peak memory (RSS)" line after each run.
 knob SUBSAMPLES AVG_SUBSAMPLES     # (config.sh knob: the older name read for one release, with a warning)
-SUBSAMPLES="${SUBSAMPLES:-3}"   # nSub per axis, nSub^3 sub-points for the '_a' fields (--subsamples); dominant runtime cost (~nSub^3), 1 = no averaging. Override: -n 1 or SUBSAMPLES=1
+SUBSAMPLES="${SUBSAMPLES:-}"    # nSub per axis, nSub^3 sub-points for the sampled deposit's '_a' fields (--subsamples,
+                           # passed only with --sampled); EMPTY (default) = the binary's own 3. The sampled deposit's
+                           # dominant runtime cost (~nSub^3), 1 = no averaging. Set while DTFE_EXACT_AVERAGE is unset
+                           # (-n k or SUBSAMPLES=k), it selects the sampled deposit; the exact one ignores it
 MPC_UNIT=1000              # length of 1 Mpc in the input's units (1000 for ckpc/h): a constant, not a knob (TNG only)
 THREADS="${THREADS:-}"     # cap OpenMP threads globally; empty = all cores
 SCRATCH_DIR="${SCRATCH_DIR:-}"  # out-of-core mode (--scratch-dir): back the full-resolution grid
@@ -96,7 +107,8 @@ PS_POINT_CONVENTIONS="${PS_POINT_CONVENTIONS:-grid}"  # with SAMPLE_POINTS: the 
 knob DTFE_GPU PS_GPU PS_METAL
 DTFE_GPU="${DTFE_GPU:-auto}"  # 1 = the deposit on the GPU (--gpu), 0 = the CPU; 'auto' (default: it
                            # follows the build) = 1 when the binary is a GPU build (config.sh gpu_build_default),
-                           # resolved below once DTFE_PRECISION has chosen the binary; 0 with DTFE_EXACT_AVERAGE=1.
+                           # resolved below once DTFE_PRECISION has chosen the binary; 0 for the exact deposit
+                           # (DTFE_EXACT_AVERAGE=1, the default).
                            # The same knob as run_dtfe.sh's
 knob_merge PS_MERGE ORDERED_MERGE FIXED_POINT_MERGE
 PS_MERGE="${PS_MERGE:-index-order}"   # how the partitions' grids are merged (--ps-merge, always passed):
@@ -167,20 +179,24 @@ TESSELLATION_CACHE="${TESSELLATION_CACHE:-}"  # directory for the reusable on-di
                            # Must be a LOCAL, non-synced dir; costs ~0.15 KB per tessellation
                            # vertex (the file is deflated: 225 MB per 1.5e6 vertices).
 knob DTFE_EXACT_AVERAGE PS_EXACT
-DTFE_EXACT_AVERAGE="${DTFE_EXACT_AVERAGE:-0}"  # 1 = exact conservative deposit (--exact-average): analytic tet-cell
+_caller_exact="${DTFE_EXACT_AVERAGE:-}"   # (the caller's own value: unset, a SUBSAMPLES count selects the sampled deposit)
+DTFE_EXACT_AVERAGE="${DTFE_EXACT_AVERAGE:-1}"  # 1 (default) = exact conservative deposit (--exact): analytic tet-cell
                            # clipping instead of the nSub^3 sub-sampled deposit -- no sampling noise, mass
                            # conservation to the arithmetic's precision. Runs on the CPU by default (r3d in
-                           # double, the reference; TNG100-3-Dark z=0 at 512^3 in 14.5 min, the sampled GPU
-                           # deposit's time) and on the GPU with -m (a float32 z-sweep, 17.7 min there; faster
-                           # only around a few million particles). SUBSAMPLES is ignored (the exact
-                           # deposit is the nSub->infinity limit, so '.den' == '.a_den'). Override: -e.
-                           # The same knob as run_dtfe.sh's, whose default is 1 (its exact cell average)
+                           # double, the reference) and on the GPU with -m (a float32 z-sweep); TNG100-3-Dark z=0 at
+                           # 512^3 (2026-11-09): 1133 s on the CPU, 1156 s on the GPU, against 1260 s for the sampled
+                           # deposit (nSub 3) on the GPU and 1644 s on the CPU. SUBSAMPLES is ignored (the exact
+                           # deposit is the nSub->infinity limit, so '.den' == '.a_den'). 0 = the sampled deposit
+                           # (--sampled); unset, a SUBSAMPLES count makes it 0 (config.sh average_resolve, the
+                           # binary's rule). The same knob, default and rule as run_dtfe.sh's (its exact cell average);
+                           # the driver passes --exact or --sampled on every run
 FACE_GRADIENT="${FACE_GRADIENT:-0}"  # 1 = --face-gradient: the velocity gradient family (divergence, shear, ...) of the
                            # volume-weighted MEAN velocity from exact face sums, the quantity standard DTFE stores
                            # (conservative, the caustics' jumps as exact face differences), where the default stores
                            # the stream average of each stream's own gradient; it also writes '.a_velDivStreams' (that
                            # stream average's divergence) and '.a_massFluxDiv' (div of sum_s rho_s v_s: by continuity
-                           # the rate a cell gains or loses mass). Needs the exact CPU deposit (-e, not -m) and
+                           # the rate a cell gains or loses mass). Needs the exact deposit (the default, on the CPU or
+                           # with -m: not --sampled, DTFE_EXACT_AVERAGE=0 or a SUBSAMPLES count alone) and
                            # PS_VOLUME_WEIGHTED=1 (the default); 3D. 30 more numbers per cell in the merged grids.
 
 DATA_DIR=""                # default: sim_dir $SIMULATION (config.sh); override with -d
@@ -210,7 +226,7 @@ OUTPUT_PREFIX="${OUTPUT_PREFIX:-ps_output}"   # -> <snapdir>/<prefix>.*  Overrid
                            # mass-weighted (physical) dispersion next to the default volume-weighted shear/divergence
                            # set. dtfelib.FieldSet reads the 'ps_output.' prefix, so keep the primary set there.
 
-usage() { echo "Usage: $0 [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n SUBSAMPLES] [-m] [-e] [snapshot ...]"; }
+usage() { echo "Usage: $0 [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n SUBSAMPLES] [-m] [-e | --sampled] [snapshot ...]"; }
 
 driver_help_version "${BASH_SOURCE[0]}" "${1:-}"   # -h / --help print the header and run nothing; --version the revision
 
@@ -223,11 +239,12 @@ own_option() {   # <letter>: this driver's own options; -d, -s, -h and the data 
         g) GRID_SIZE="${OPTARG}" ;;
         n) SUBSAMPLES="${OPTARG}" ;;
         m) DTFE_GPU=1 ;;
-        e) DTFE_EXACT_AVERAGE=1 ;;
+        e|S) average_option "$1" ;;      # -e / --exact, --sampled (config.sh: S only carries the long form)
     esac
 }
-driver_options "g:n:me" own_option "$@"   # then the data root (unless -d) and the simulation are required
+driver_options "g:n:meS" own_option "$@"   # then the data root (unless -d) and the simulation are required
 shift $((OPTIND - 1))
+average_resolve "deposit"   # DTFE_EXACT_AVERAGE 1 or 0: the options, the knob, a SUBSAMPLES count, the default
 
 snapshot_args "$@"              # positional arguments override the default snapshot list (config.sh)
 case "${PS_POINT_CONVENTIONS}" in
@@ -280,10 +297,11 @@ PYEOF
 
 # Phase-space fields; '.streams' and '.hidden_streams' are always written, each field also gets a '_a'
 # (averaged) form. Single-stream cells are streams==1 AND bit 1 of hidden_streams clear (see demo/COMMANDS.md).
-# Both forms are mass-conserving (each tetrahedron deposits its full mass onto the grid). The '_a'
-# fields resolve each grid cell with an nSub^3 sub-sample grid (SUBSAMPLES, default 3), so they
-# are smoother / better resolved at caustics -- prefer them for science plots. The plain fields use a
-# single sample per cell (coarser, but the same conserved quantity).
+# Both forms are mass-conserving (each tetrahedron deposits its full mass onto the grid). The exact deposit (the
+# default) integrates every tetrahedron-cell intersection, so the two forms coincide. The sampled one (--sampled)
+# resolves each grid cell of the '_a' fields with an nSub^3 sub-sample grid (SUBSAMPLES, the binary's 3 when unset),
+# smoother / better resolved at caustics than the plain fields' single sample per cell (coarser, but the same
+# conserved quantity) -- prefer the '_a' fields for science plots.
 # divergence/shear/vorticity are rigorous only in single-stream cells; for multi-stream kinematics
 # use 'dispersion_a' + the stream count. vweb classifies the cosmic web from the velocity
 # gradient (density-weighted across streams), so it inherits the same single-stream caveat.
@@ -308,9 +326,10 @@ cd "$REPO_ROOT" || exit 1
 DTFE_PRECISION="${DTFE_PRECISION:-single}"
 driver_binary PS_BIN PS-DTFE "${DTFE_PRECISION}"      # ./PS-DTFE or ./PS-DTFE-double (config.sh)
 gpu_auto_resolve DTFE_GPU "${PS_BIN}" DTFE_EXACT_AVERAGE   # DTFE_GPU=auto: the GPU when this binary was built with
-                                                      # one, the CPU for the exact deposit
+                                                      # one, the CPU for the exact deposit (the default)
 if [ "${FACE_GRADIENT}" = "1" ]; then                 # the binary refuses these too, but per snapshot: say it once here
-    [ "${DTFE_EXACT_AVERAGE}" = "1" ] || { echo "Error: FACE_GRADIENT=1 needs the exact deposit: add -e (DTFE_EXACT_AVERAGE=1)." >&2; exit 2; }
+    # (the exact deposit is the default: what conflicts is --sampled, DTFE_EXACT_AVERAGE=0 or a count alone)
+    [ "${DTFE_EXACT_AVERAGE}" = "1" ] || { echo "Error: FACE_GRADIENT=1 needs the exact deposit (the default): ${average_src} asks for the sampled one." >&2; exit 2; }
     [ "${PS_VOLUME_WEIGHTED}" = "1" ] || { echo "Error: FACE_GRADIENT=1 needs the volume-weighted moments (PS_VOLUME_WEIGHTED=1)." >&2; exit 2; }
     # (since 2026-11-09 the face sums also come beside the GPU deposit, from a CPU walk: -m / DTFE_GPU=1 is allowed; D17)
 fi
@@ -328,6 +347,11 @@ runlog_contract_start
 echo "Starting PS-DTFE processing..."
 echo "Data directory: ${DATA_DIR}"
 echo "Grid size: ${GRID_SIZE}   Partition: [${PARTITION:-auto}]   Fields: ${FIELDS}"
+if [ "${DTFE_EXACT_AVERAGE}" = "1" ]; then
+    echo "Cell averages: exact deposit (--exact; ${average_src})"
+else
+    echo "Cell averages: sampled deposit, nSub^3 sub-points per cell (--sampled${SUBSAMPLES:+ --subsamples ${SUBSAMPLES}}; ${average_src})"
+fi
 echo "Deposit: $([ "${DTFE_GPU}" = "1" ] && echo "GPU (--gpu)" || echo "CPU")${gpu_auto}   volume-weighted: ${PS_VOLUME_WEIGHTED}   caustics: ${PS_CAUSTICS}   face gradient: ${FACE_GRADIENT}   prefix: ${OUTPUT_PREFIX}"
 echo ""
 
@@ -354,9 +378,13 @@ for i in "${SNAPSHOTS[@]}"; do
         tess_args=(--tessellation-cache "${TESSELLATION_CACHE}")
     fi
 
-    # Exact conservative deposit toggle (-e / DTFE_EXACT_AVERAGE=1); CPU and GPU deposits.
-    exact_args=()
-    [ "${DTFE_EXACT_AVERAGE}" = "1" ] && exact_args=(--exact-average)
+    # The deposit, named both ways (the run log then says which ran): the exact one (-e / DTFE_EXACT_AVERAGE=1, the
+    # default; CPU and GPU deposits) or --sampled, with --subsamples only when SUBSAMPLES is set (the binary's 3 else).
+    exact_args=(--exact)
+    if [ "${DTFE_EXACT_AVERAGE}" != "1" ]; then
+        exact_args=(--sampled)
+        [ -n "${SUBSAMPLES}" ] && exact_args+=(--subsamples "${SUBSAMPLES}")
+    fi
 
     # Chart-independent tet masses (PS_VERTEX_MASS=1, default -- see the comment at the top).
     vmass_args=()
@@ -437,7 +465,6 @@ for i in "${SNAPSHOTS[@]}"; do
         --padding ${PADDING}
         --periodic
         ${part_args[@]+"${part_args[@]}"}
-        --subsamples ${SUBSAMPLES}
         --input-format 105
         --mpc-unit ${MPC_UNIT}
         --field ${FIELDS}

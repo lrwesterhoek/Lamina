@@ -86,6 +86,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${ROOT}"
 source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double pair
+# the plans, reports and peaks asserted here were measured on the sampled deposit, which an '_a' run without a count
+# no longer gets by default: pin it for every run (both binaries read the pin; W's own '--exact' beats it)
+export DTFE_EXACT_AVERAGE=0
 
 N="${N:-64}"; BOX="${BOX:-100.0}"
 BIN="${PS_BIN}"
@@ -643,7 +646,7 @@ echo ">> W: --grid-window books the whole window, its deposit's grids once"
 run_w() {  # $1 = log; the rest = extra flags
     local log="$1"; shift
     "${BIN}" "${SNAP}" "${TMP}/at_w" --grid 2048 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a \
-        --gpu --ps-vertex-mass --ps-volume-weighted --exact-average --partition 2 2 2 --max-concurrent 1 \
+        --gpu --ps-vertex-mass --ps-volume-weighted --exact --partition 2 2 2 --max-concurrent 1 \
         --grid-window 0 "${BOX}" 0 "${BOX}" "$(awk -v b="${BOX}" 'BEGIN{print b/2}')" "$(awk -v b="${BOX}" 'BEGIN{print b/2 + 1e-4}')" \
         "$@" > "${log}" 2>&1 || true
 }

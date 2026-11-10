@@ -1,4 +1,4 @@
-# tests/run_tests.py test_regression reference: 1000 seeded points (seed 12345), periodic 10^3 box, a 12^3 grid; columns = density (point sample), density_a (--exact-average)
+# tests/run_tests.py test_regression reference: 1000 seeded points (seed 12345), periodic 10^3 box, a 12^3 grid; columns = density (point sample), density_a (--exact)
 6.079334021e-01 8.032218218e-01
 9.245584607e-01 8.214952946e-01
 1.018365145e+00 9.905242920e-01

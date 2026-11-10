@@ -25,8 +25,9 @@ _PRODUCTION = ["density_a", "velocity_a", "divergence_a", "shear_a"]
 
 # name -> (one-line description, settings). The settings are RunSpec / CustomSpec fields; a
 # preset leaves every field it does not name as it was. 'slice_plane': "largest" = the largest
-# image plane found for the simulation (none: no slice). 'deposit' is PS-DTFE's; 'deposit_dtfe', when
-# given, is the cell average a standard-DTFE job gets instead (the exact one, standard DTFE's production setting).
+# image plane found for the simulation (none: no slice). 'deposit' is the cell average of both estimators (the
+# exact one is the production setting of both since 2026-11-09); 'deposit_dtfe', when given, is the one a
+# standard-DTFE job gets instead (no built-in preset needs it any more; apply_preset still reads it).
 BUILTIN_PRESETS: dict[str, tuple[str, dict]] = {
     "Quick look": ("128³ grid, density and velocity only: about a minute on a laptop-sized "
                    "snapshot, for checking that everything works",
@@ -35,18 +36,18 @@ BUILTIN_PRESETS: dict[str, tuple[str, dict]] = {
                     "caustic_cusps": False, "slice_plane": ""}),
     "Standard": ("512³ grid, the production fields (density, velocity, divergence, shear) with the "
                  "literature-standard weighting",
-                 {"grid": 512, "nsub": 3, "deposit": "sampled", "deposit_dtfe": "exact", "fields": list(_PRODUCTION),
+                 {"grid": 512, "nsub": 3, "deposit": "exact", "fields": list(_PRODUCTION),
                   "vertex_mass": True, "volume_weighted": True, "caustics": False,
                   "caustic_cusps": False, "slice_plane": ""}),
     "Publication": ("Standard + caustic stratification + a hi-res point-evaluated slice (the "
                     "largest image plane of the simulation) for figures",
-                    {"grid": 512, "nsub": 3, "deposit": "sampled", "deposit_dtfe": "exact", "fields": list(_PRODUCTION),
+                    {"grid": 512, "nsub": 3, "deposit": "exact", "fields": list(_PRODUCTION),
                      "vertex_mass": True, "volume_weighted": True, "caustics": True,
                      "caustic_cusps": False, "slice_plane": "largest", "slice_vel_grad": True}),
-    "Exact deposit": ("256³ grid with the exact tetrahedron-cell clipping instead of sampling: "
-                      "noise-free cell values. PS-DTFE runs it on the CPU (9 s for a 0.26M-particle snapshot; at "
-                      "512³ TNG100-3-Dark takes as long as the sampled GPU deposit, 14.5 min), standard DTFE's "
-                      "exact average on the GPU",
+    "Exact deposit": ("256³ grid, density and velocity with the exact tetrahedron-cell clipping (the default "
+                      "cell average): noise-free cell values. PS-DTFE runs it on the CPU (9 s for a 0.26M-particle "
+                      "snapshot; at 512³ TNG100-3-Dark 1133 s, faster than the sampled GPU deposit's 1260 s), "
+                      "standard DTFE's exact average on the GPU",
                       {"grid": 256, "deposit": "exact", "fields": ["density_a", "velocity_a"],
                        "vertex_mass": True, "volume_weighted": True, "slice_plane": ""}),
 }
@@ -113,17 +114,20 @@ OPTION_TEXT = {
     "slice_vel_grad":  ("Velocity gradient at each slice point (divergence, shear, vorticity maps)",
                         "--pts-vel-grad"),
     "pts_conventions": ("Plane conventions", "--ps-point-conventions"),     # the image plane's estimators
-    "exact":           ("Exact: analytic tetrahedron-cell clipping (noise-free; best on the CPU)", "--exact-average"),
+    "exact":           ("Exact: analytic tetrahedron-cell clipping (noise-free; the default, best on the CPU)",
+                        "--exact"),
     "parallel_triangulation": ("Parallel triangulation (faster; repeats differ at float rounding)",
                                "--parallel-triangulation"),
     "ordered_merge":   ("Merge the partitions in index order (bit-identical repeats; the default)",
                         "--ps-merge"),
     "alpha_shape":     ("Alpha shape: drop Lagrangian tetrahedra wider than this many mean particle spacings "
                         "(0 keeps the whole convex hull)", "--ps-alpha-shape"),
-    "sampled":         ("Sampled: nSub³ points per cell (fast, the default)", "--subsamples"),
-    "sampled_dtfe":    ("Sampled: the Monte-Carlo mean over points in each cell (faster)", "--subsamples"),
-    "exact_dtfe":      ("Exact: each cell the exact average of the interpolated field (noise-free; the default, "
-                        "best on the GPU)", "--exact-average"),
+    # the two cell averages: their help is the binaries' '--exact' / '--sampled' text (a binary from before
+    # 2026-11-09 knows '--exact' by its old name, '--exact-average', which flag_help files under both)
+    "sampled":         ("Sampled: nSub³ points per cell", "--sampled"),
+    "sampled_dtfe":    ("Sampled: the Monte-Carlo mean over points in each cell (faster on the CPU)", "--sampled"),
+    "exact_dtfe":      ("Exact: each cell the exact average of the interpolated field (noise-free; the default)",
+                        "--exact"),
     "periodic":        ("The box is periodic (a cosmological simulation)", "--periodic"),
     "scalar":          ("Also interpolate a per-particle value", "--scalar-dataset"),
 }
