@@ -188,9 +188,10 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
                 if given is None and not sp.ordered_merge:
                     sp.ordered_merge = True
             self.settings.setValue("ordered_merge_start", json.dumps(True))
-        # PS-DTFE's exact deposit ran on the CPU for a while (2026-11-09: a little faster there at every core). An
-        # older launcher ticked the GPU whenever the exact deposit was picked (never really chosen: it was forced), so
-        # a saved Grids, Pipeline or Custom job with the exact deposit had its GPU unticked ONCE
+        # PS-DTFE's exact deposit started on the CPU for a day (2026-11-09: 1133 s there with every core against
+        # 1156 s on the GPU for TNG100-3-Dark at 512³, a tie). An older launcher ticked the GPU whenever the exact
+        # deposit was picked (never really chosen: it was forced), so a saved Grids, Pipeline or Custom job with the
+        # exact deposit had its GPU unticked ONCE
         if self.remember and not self._restore_json("ps_exact_cpu_start", False):
             for sp, given in ((self.spec, spec), (self.pipe, pipeline), (self.custom, custom)):
                 if given is None and getattr(sp, "estimator", "ps") == "ps" and sp.deposit == "exact" and sp.gpu:
@@ -225,8 +226,9 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         # the deposit choice per estimator, per tab ('grids', 'own'): {estimator: 'sampled' | 'exact'}, what an
         # estimator switch brings back (_estimator_switched; this session only)
         self._deposit_kept: dict[str, dict[str, str]] = {}
-        # the GPU boxes the exact deposit unticked (PS-DTFE: faster on the CPU), ticked again when the choice leaves
-        # the exact deposit unless the box was set otherwise meanwhile (_deposit_changed, _gpu_set_by_hand)
+        # the GPU boxes the exact deposit's device rule unticked, ticked again when the choice leaves the exact
+        # deposit unless the box was set otherwise meanwhile (_deposit_changed, _gpu_set_by_hand). The rule
+        # (rs.recommended_gpu) gives the exact deposit the GPU in every machine use now, so the set stays empty
         self._gpu_unticked_by_exact: set = set()
         self._gpu_auto_setting = False
         # the GPU boxes last set by hand (not by a rule, not by a load): a change of the machine use keeps their tick

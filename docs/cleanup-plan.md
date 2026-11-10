@@ -1,7 +1,7 @@
 # Lamina: cleanup and polish plan
 
 Status (2026-11-09): P0, P1, P6 (P6.6, the alias removal, is for the next release), P7 and P10.1–P10.7 done; most of P2–P5 and P9
-done (each phase's status line says what is open); phase R's calibration night ran 2026-11-08/09 (the R status; P10.8, decided and done on 2026-11-09 (D16), D15 settled the same evening by D20 (exact; P12, committed as `39583f0`); P13 (the run modes, added 2026-11-10: committed as `9bfa39a`); P11.7 item 1 (the PS tuner's face sums) done 2026-11-10; the rest of R was not launched); P8
+done (each phase's status line says what is open); phase R's calibration night ran 2026-11-08/09 (the R status; P10.8, decided and done on 2026-11-09 (D16), D15 settled the same evening by D20 (exact; P12, committed as `39583f0`); P13 (the run modes, added 2026-11-10: committed as `9bfa39a`); P11.7 items 1 (the PS tuner's face sums), 2, 4, 5 and 6 done 2026-11-10 (item 3, the pinned runs, open); the rest of R was not launched); P8
 partly done (P8.1 for the classes phase R ran; P8.2 as the partition span and the start-up zero fill, P8.5, P8.7, P8.9 step 1 and P8.10 in code, gates green on 2026-11-09 (G-battery 32 of 32 over two runs, G-linux); P8.3 and P8.4 not needed; the rest open, see the P8 status). **Added 2026-11-07 (afternoon), owner's order:** P10 (shared exact velocity derivatives, the face method)
 joins the plan, and **every code item is finished and checked on small data before any rerun**; the reruns then run
 once, as one campaign (phase R, after P10). P0.1 and P0.2 landed in `60a072a`; P0.3's CI fixes and P0.4 landed in `70e153e` and `38eb4be`; P0 closed on
@@ -2363,7 +2363,9 @@ Standard DTFE (10 threads; the face gradient is the default):
   parallel insert does not engage even when forced.
 - Full-size byte gate: a equals the P10.8 reference run in density, velocity and velocity gradient. The gradient
   skip, the face default and the insertion rule moved no byte of the production configuration.
-- The points add 190 s, with 250 s of system time. The point files' I/O is the suspect; not looked at yet.
+- The points add 190 s, with 250 s of system time. Looked at on 2026-11-10 (P11.7 item 4): on a run a sixth of this
+  size the system time is the parallel insert's lock waits, and both it and the added wall belong to the shape a
+  points run takes (one tessellation per partition), not to the point files' I/O or the evaluation.
 
 PS-DTFE (all with the 4.2 M points and `--pts-vel-grad`, `--ps-vertex-mass --ps-volume-weighted --ps-caustics`; the
 tuner's 6³ plan, budget 41.2 GB):
@@ -2458,7 +2460,8 @@ standard exact average too), which the bench of the final binaries fills in.
 GPU deposit), into the face words `psCpuFixedUnits` now allocates under either deposit; the bound walk runs once more
 for their units, so a GPU and a CPU run of one pass form the same face words (byte-identical mean-flow divergence).
 Sequential with the deposit for now (the GPU is idle during the walk; concurrency with the next sub-domain's deposit
-is P11.6's pipeline).
+is P11.6's pipeline). Since 2026-11-10 (P11.7 items 2 and 5) the single build takes those units from the bounds the
+extraction summed, without the second bound walk, and the walk rejects on a copy of the loop's own span test.
 
 **Status 2026-11-09 16:30.** P11.2, P11.3 (the default rule: the parallel insert for tessellations of ≥ 1e6 points
 where cores are free, both binaries; D19 for the owner) and P11.5 (D17) done; P11.4's mechanism in the drivers, its
@@ -2483,6 +2486,11 @@ the correction is under the PS table above), so D15 and D18 do not wait for a tu
 l ran with 4 in flight, at a peak footprint of 33.4 GB, where the corrected plan chooses 3: whether to run it again at
 3, or first to trim the lanes' common over-booking so that the plan allows 4, is the owner's.
 
+**Status 2026-11-10, evening.** P11.7 items 2, 4, 5 and 6 are done (below; the changes sit on `c8dd4fb`): the face
+units from the extraction's bounds, the face walk on the loop's own test, the points' system time traced to the
+parallel insert's lock waits (no code change), the speed texts. P11.7 leaves item 3: the two pinned runs for the
+device rule's table (D18).
+
 **P11.6 The sub-domain pipeline (the widened overlap).** **Dropped 2026-11-09 16:00 on the cheap experiment's
 numbers** (`p11-mc1.sh`; p11-placement.md section 5). One tessellation in flight with the look-ahead (`--partition 3
 3 3 --max-concurrent 1`, standard GPU exact + face, TNG100 z = 0, 512³): 811 s wall, 581 s with the parallel insert
@@ -2495,7 +2503,7 @@ rebuild that team by hand. What stays: the parallel insert's thread budget (core
 small `--max-concurrent`), at +4.4 GB per in-flight partition here (the tuner's term), and nothing at the auto plan's
 concurrency.
 
-**P11.7 What the bench leaves (recorded 2026-11-09 21:00; item 1 done 2026-11-10, the rest not started).**
+**P11.7 What the bench leaves (recorded 2026-11-09 21:00; items 1, 2, 4, 5 and 6 done 2026-11-10, item 3 open).**
 1. **DONE 2026-11-10.** The PS tuner's face words (memory safety, first). As recorded on 2026-11-09: the term missing
    on the GPU path under `--face-gradient` (2·3·(3+2) int64 words = 240 B per sub-grid cell), and the same words
    booked as `Real` on the CPU path. As found: the default CPU path booked the words in full (in the single build 120
@@ -2527,16 +2535,85 @@ concurrency.
    run_mode_check in both precisions, `tests/dev/tune_report_set.sh` (124 lines: the 110 from before, 11 for the face
    plans, 3 for the review's cases; against the binaries of `9bfa39a` 13 move -- 8 of the face lines, the 3 review
    lines and the double build's two "dens exact" lines that plan the private copies -- and none changes its partition
-   or its count in flight), ps_face_gradient_check in both precisions, the 2D suite. Open,
-   the owner's: runs j and l again; trimming the lanes' common over-booking, which would give l its fourth lane back.
-2. The face walk's second bound walk on the GPU path: hand the extraction's bounds to the fixed-point units instead
-   of walking again (the same sums, so the face units and the bytes are unchanged).
+   or its count in flight), ps_face_gradient_check in both precisions, the 2D suite, the Mac battery (33 of 33
+   stages) and the Linux check (every stage). Committed as `c8dd4fb`. Open, the owner's: runs j and l again;
+   trimming the lanes' common over-booking, which would give l its fourth lane back.
+2. **DONE 2026-11-10.** The face walk's second bound walk on the GPU path. The bounds the GPU extraction sums (the 10
+   moment bounds and the three face bounds, in the bound walk's block order) stay in the pass's fixed-point state
+   (`PSFxState::gpuBounds`, `gpuBoundsValid`) and stand in for `psFxBoundWalk` when `psCpuFixedUnits` forms the face
+   units after a GPU deposit (`psFxBoundsFromGpu`). The walk remains where the two sums are not the same doubles --
+   the double build, whose extraction works on float copies, and a run under the NaN test hook -- and where the
+   extraction summed no bounds (`DTFE_GPU_FLOAT_MOMENTS=1` without a window). `DTFE_DEBUG_FX_BOUNDS=1` walks anyway
+   and compares the 13 doubles byte for byte (a line on stderr; a difference stops the run); P12 of
+   `tests/ps_face_gradient_check.sh` requires its "0 differ" in three single-build runs (a window, a non-periodic box,
+   the lattice box). The time the walk took is not measured, so no saving is recorded.
 3. The two standard runs pinned to 2³ (the GPU at the CPU's plan), for the device rule's table (P11.4, D18).
-4. The points' 250 s of system time.
-5. A light review of the face walk's filter against the deposit loop's for the two cases the P11 test does not
-   exercise (`--grid-window`, the non-periodic hull path).
-6. The stale speed claims: the drivers' "the exact deposit is faster on the CPU" (`gpu_auto_resolve`, measured on
-   older binaries; the two now tie) and the `--gpu` help text.
+4. **DONE 2026-11-10 (measured; no code change).** The points' 250 s of system time. It is the parallel insert's lock
+   waits, not the point files' I/O and not the evaluation. Measured on a sixth of the bench's particles (256³
+   synthetic particles, grid 256, `--partition 2 2 2`, standard GPU exact with the face gradient, 2048² points with
+   `--pts-vel-grad`; one run per line). A points run changes the run's shape: each partition is triangulated once,
+   whole, so the partitions run one at a time on the parallel insert (6 threads here) with the look-ahead, where a run
+   without points splits each partition into thread sub-boxes. Wall / system time: without points 58 / 8 s; with
+   points 98 / 30 s (1.2 M involuntary context switches against 0.1 M); with points and `--sequential-triangulation`
+   104 / 5 s; without points at `--max-concurrent 1`, the same shape, 92 / 30 s (sequential: 109 / 5 s). So the system
+   time and the 40 s of wall belong to the shape: the evaluation itself is 3 s, summed over the 8 partitions. A stack
+   sample of the points run (every 10 ms) puts the system calls in the insert's lock waits: 2342 samples in the yield
+   call `swtch_pri`, 2273 of them from CGAL's parallel insert (its lock grid's `try_lock_cell_impl` and the insert's
+   own retry), against 39 in `write`. By the insert's thread count (`DTFE_TRIANGULATION_THREADS`; wall / system /
+   triangulation summed): 2: 96 / 6 / 61 s; 3: 102 / 8 / 40 s; 4: 93 / 8 / 31 s; 6, the default here: 95 / 11 / 28 s;
+   8: 104 / 43 / 40 s. The look-ahead is not the source and earns its place: off (`DTFE_OVERLAP=0`) 124 and 118 s with
+   23 and 17 s of system time, on 94 and 94 s with 23 and 26 s. Over these runs the default's system time varied
+   between 11 and 30 s. No code change: the sequential insert removes the system time and costs wall, and no thread
+   count beats the default's wall by more than the spread between runs. The full-size picture fits (P11.6's
+   experiment: one tessellation in flight with the parallel insert 581 s against the auto plan's 435 s; run d 632 s),
+   but the lock waits' share there is not measured. Open: the thread series on TNG100 at 512³. Candidates if it
+   confirms: a lower thread count for this shape (4 has the default's wall here at 8 s of system time) and the
+   resolution of CGAL's lock grid.
+5. **DONE 2026-11-10.** The face walk's filter against the deposit loop's. The review (readers and a judge over the
+   two code paths) found the walk and the loop apart in three cases, and a gap in a test hook. (a) A tetrahedron
+   wholly outside a non-periodic grid: the loop skips it (`outsideGrid`); the walk, which had no such test without a
+   window, deposited the section of a tetrahedron with a face in the grid's upper boundary plane (three particles in
+   that plane, as on a lattice; in the single build also one within a rounding below it) into the last layer's upper
+   face. (b) Under `--grid-window` in the single build the loop's span is a float quotient and the walk's
+   (`psWindowTouched`) a double one; the float quotient can round a vertex just below a grid plane onto it, the loop
+   then skips a tetrahedron the walk kept, and its section went into the window's upper face. (c) The loop's face call
+   sat under its clipped-volume test, so a tetrahedron without clipped volume in any cell left no face in a CPU run
+   and its sections under the walk. (d) `DTFE_TEST_NAN_SHARE` did not reach the walk: a GPU run dropped no face share
+   where the CPU run dropped 66926. Fixed: the walk rejects on a copy of the loop's test (`psLoopSpanReaches`: the
+   `Real` span, the outside-grid test, the window's span; a KEEP IN STEP note on both), while `psWindowTouched` stays
+   for the extraction and the bound walk, where a superset is harmless (the bounds only set a unit); the loop deposits
+   the faces ahead of its volume test; the hook is in the walk. The loop's move is the one change a CPU run can show:
+   a tetrahedron whose clipped volume is lost in every cell now leaves its face sections, as it did beside a GPU
+   deposit (none in the 180 files of the comparison below). Measured on the binaries of `c8dd4fb` (a 32³ lattice
+   without jitter in a `--box` whose upper x face is a particle plane, grid 32): the GPU run's `.a_massFluxDiv`
+   differed from the CPU run's in 1024 values, one layer, by up to 0.37 of the rms (`.a_velDiv` in 1024 values by
+   3.1e-7, `.a_velShear` in 2048 by 6.3e-7). After: the mass flux divergence byte-identical, `.a_velDiv` and
+   `.a_velShear` too below the last x layer, and within 3.3e-8 of the rms in it (1.7e-8 in the double build). That
+   residue is not the face sums': neither device deposits the outside tetrahedra's section, so the layer's upper face
+   has no stream and its x gradient stays the stream average, each device's own float sum. Depositing that section on
+   both devices instead (the tetrahedron's face in the boundary plane is the grid's own face) would close it and is
+   not done: it changes CPU bytes, so it is the owner's to ask for. Test: P12 of `tests/ps_face_gradient_check.sh` (a
+   GPU build; a one-cell window, a non-periodic box and the NaN hook byte for byte, the lattice box as above). Case
+   (b) has no constructed input: P12's window run covers the path, not the rounding.
+6. **DONE 2026-11-10.** The stale speed claims. `gpu_auto_resolve`'s note had already gone with the run modes (P13:
+   the GPU for PS-DTFE's exact deposit in every mode). Corrected now: PS-DTFE's `--gpu` help (it called the deposit
+   "the dominant cost"; it gives the bench's 1156 s on the GPU against 1133 s on the CPU for the exact deposit and
+   1260 against 1644 s for the sampled one), two comments in the launcher (`python/gui/app.py`) and the device table's
+   comment in `scripts/config.sh` (the launcher's one difference, `GPU_PAYS_FROM`). What still reads "faster on the
+   CPU" is standard DTFE's sampled average in performance (315 against 433 s), which is current.
+
+**Items 2, 4, 5 and 6: checks (2026-11-10).** Against binaries built from a clean export of `c8dd4fb`:
+`tests/dev/bytecmp.sh --gpu-exact` 261 files, 0 differ; `--face-gradient` runs, which bytecmp does not make (CPU:
+periodic in one domain and in 2³ partitions, a one-cell window, a non-periodic box, the lattice box, crossed waves;
+GPU: periodic in one domain and in 2³, crossed waves; both precisions), 180 files, 0 differ, so the moved face block
+and the bounds hand-over move no byte there; `tests/dev/tune_report_set.sh` 124 lines identical. Green on the tree:
+ps_face_gradient_check (23 s; 25 s double), ps_fixed_moments_check and ps_window_check in both precisions,
+run_scripts_check, docs_drift_check, py_gui_runspec_test. The review of the batch (three readers, a judge) confirmed
+no defect; it leaves one cosmetic difference: a NaN vertex mass (NaN particle weights) is counted as left out by the
+loop and zeroed by the walk, the same words under a different count in the log. Then, on the tree as it stands: the
+Mac battery, 33 of 33 stages (19:24 to 20:14, the tree unchanged over it), and CI's Linux stages in Colima (build,
+core, double, 2d, variants, oldpy, ruff), all passed (20:14 to 20:52). Only this sentence was written after them. Item
+3 stays open (two full-size runs, on the owner's go).
 
 **Gates:** bytecmp (placement moves no byte), the GPU suites, the battery, Linux; P11.1 repeated with the rule on.
 

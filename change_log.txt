@@ -1,4 +1,42 @@
 UNRELEASED (since 1.0.0)
+- PS-DTFE: beside a GPU deposit, a '--face-gradient' pass forms the face sums of the tetrahedra the CPU deposit forms
+  them for, and takes their units from the GPU extraction (docs/cleanup-plan.md P11.7 items 2, 5 and 6, 2026-11-10).
+  THE FILTER. After a GPU deposit one CPU walk over the kept tetrahedra makes the face sums (psFaceWalk); in a CPU run
+  the deposit loop makes them. The two chose the tetrahedra by different tests, and they differed in three cases. A
+  tetrahedron wholly outside a non-periodic grid ('--box', '--region') with a face in the grid's upper boundary plane
+  (particles in that plane, as on a lattice): the loop skips it, the walk deposited its section into the last layer's
+  upper face. Under '--grid-window' in the single build the loop's span of cells is a float quotient and the walk's
+  was a double one: the float quotient can round a vertex just below a grid plane onto it, and the loop then skips a
+  tetrahedron the walk kept. And the loop's face call sat under its clipped-volume test, so a tetrahedron without
+  clipped volume in any cell left no face in a CPU run and its sections in a GPU run. Now the walk rejects on a copy
+  of the loop's own test (psLoopSpanReaches; the two carry a note to keep them in step) and the loop deposits the
+  faces ahead of its volume test. The test hook DTFE_TEST_NAN_SHARE reaches the walk as it reaches the loop (a GPU run
+  dropped no face share where the CPU run dropped 66926). MEASURED on the binaries before the change (a 32^3 lattice
+  without jitter in a '--box' whose upper x face is a particle plane, grid 32): the GPU run's '.a_massFluxDiv'
+  differed from the CPU run's in 1024 values, one layer, by up to 0.37 of the field's rms ('.a_velDiv' in 1024 values
+  by 3.1e-7, '.a_velShear' in 2048 by 6.3e-7). With the change the mass flux divergence is byte-identical, and
+  '.a_velDiv' and '.a_velShear' too below the last x layer; in that layer they differ by up to 3.3e-8 of the rms
+  (1.7e-8 in the double build). Neither device deposits the outside tetrahedra's section, so that layer's upper face
+  has no stream and its x gradient stays the stream average, which is each device's own float sum. THE UNITS. In the
+  single build the fixed-point units of the face sums come from the bounds the GPU extraction has already summed, not
+  from a second walk over the tetrahedra: the same sums in the same order, so no byte moves. DTFE_DEBUG_FX_BOUNDS=1
+  walks anyway, prints '13 bounds of the GPU extraction checked against the bound walk, 0 differ' on stderr and stops
+  the run on a difference. The double build (its extraction works on float copies) and a run under DTFE_TEST_NAN_SHARE
+  keep the walk. THE TEXTS. PS-DTFE's '--gpu' help called the deposit the dominant cost; it now gives the bench of
+  2026-11-09 (TNG100-3-Dark z = 0 at 512^3, M1 Max: with the exact deposit 1156 s on the GPU and 1133 s on every CPU
+  core, a tie; with the sampled one 1260 s and 1644 s). Two comments in the launcher and the device table's comment in
+  scripts/config.sh no longer say that PS-DTFE's exact deposit is faster on the CPU. WHAT MOVES: the face-gradient
+  grids of a GPU run on a non-periodic grid where tetrahedra outside it touch its upper boundary plane, and of a
+  single-build GPU run under '--grid-window' in the rounding case; and those of a CPU run with a tetrahedron that
+  leaves no clipped volume in any cell, whose face sections now count as they did beside a GPU deposit (no such
+  tetrahedron in the runs compared below). A periodic GPU run without a window cannot move (the new test returns
+  before any arithmetic). No other output: against binaries built from the commit before (tests/dev/bytecmp.sh
+  --gpu-exact) 261 files compare, 0 differ; '--face-gradient' runs, which bytecmp does not make (CPU: periodic in one
+  domain and in 2^3 partitions, a one-cell window, a non-periodic box, the lattice box, crossed waves; GPU: periodic
+  in one domain and in 2^3, crossed waves; both precisions), 180 files, 0 differ; and the 124 lines of
+  tests/dev/tune_report_set.sh are identical. Tests: ps_face_gradient_check.sh P12 (a GPU build: a CPU and a '--gpu'
+  run byte for byte in a one-cell window, in a non-periodic box and under the NaN hook; the lattice box as above; the
+  bounds line in three single-build runs).
 - PS-DTFE's auto-tuner books the face sums of '--face-gradient' where a pass holds them (docs/cleanup-plan.md P11.7
   item 1, 2026-11-10). With the face sums a GPU lane's largest state comes AFTER its hold of the device: the host
   words the deposit handed back, the face sums' own words, made only then for the CPU's face walk, and the Real grids

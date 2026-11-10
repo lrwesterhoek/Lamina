@@ -352,7 +352,9 @@ units n bits finer) and `DTFE_TEST_FXMERGE_SUM_LIMIT=n` (its sums capped at 2^n)
 auto-tuned plan of k partitions at once: the dynamic concurrency's floor), `DTFE_AUTO_TUNE_DEBUG` (prints the
 standard auto-tuner's busiest partition per thread, PS-DTFE's partition sub-grids, measured, booked and real, and the
 terms of its dynamic concurrency's start check), `DTFE_DEBUG_DEGREES` (checks the lazy vertex degrees after a GPU
-deposit against a full pass), `DTFE_PTS_FULL_RECORDS` (keeps every point record member, unpacked: the packing test),
+deposit against a full pass), `DTFE_DEBUG_FX_BOUNDS` (PS-DTFE, single precision: checks the bounds a `--face-gradient`
+pass takes over from the GPU extraction against a bound walk's), `DTFE_PTS_FULL_RECORDS` (keeps every point record
+member, unpacked: the packing test),
 `DTFE_TESSELLATION_CACHE_FINGERPRINT` (prints a loaded tessellation's structure fingerprint),
 `DTFE_TESSELLATION_CACHE_LEGACY` (writes the single-stream cache format), `DTFE_TESSELLATION_CACHE_ZLIB` (zlib instead
 of libdeflate) and `DTFE_TESSELLATION_CACHE_CGAL_IO`

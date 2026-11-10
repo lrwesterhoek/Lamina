@@ -671,7 +671,8 @@ driver_binary() {
 # TNG100-3-Dark z=0, 512^3: 439 s on the GPU against 431 s) and for its sampled one in gentle and balanced. The one
 # exception is standard DTFE's sampled average in performance, which runs on the CPU: faster there (315 s against
 # 433 s on the GPU), measured with every core, which only performance gives it. A CPU-only build runs on the CPU.
-# The launcher mirrors this table (python/gui/runspec.py recommended_gpu) -- keep the two in step.
+# The launcher mirrors this table (python/gui/runspec.py recommended_gpu) -- keep the two in step -- with one
+# difference: it starts a sampled PS-DTFE run below ~1M particles on the CPU (GPU_PAYS_FROM there).
 gpu_auto_resolve() {
     local knob="$1" bin="$2" est="$3" exact="$4" mode="$5" v what="the GPU"
     gpu_auto=""

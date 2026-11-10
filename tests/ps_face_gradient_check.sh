@@ -24,6 +24,15 @@
 #       D17): the mean flow's divergence and the mass flux divergence byte-identical to the CPU run's (the same face
 #       words, the same units), the density within the GPU deposit's float tolerance, the stream average within 5e-2
 #       of its rms (the device's float per-stream gradient), and the run neither fell back nor skipped the walk
+#   P12 (a GPU build) the face walk keeps the tetrahedra the CPU deposit loop keeps (docs/cleanup-plan.md P11.7): a CPU
+#       and a '--gpu' run write the mean flow's grids and the mass flux divergence byte for byte in a one-cell
+#       '--grid-window', in a non-periodic '--box', and under the NaN test hook (DTFE_TEST_NAN_SHARE=50, single
+#       build, with the same number of face shares left out). In a '--box' whose upper x face is a particle plane of
+#       a lattice without jitter (tetrahedra outside the box with a face in that plane: neither device deposits
+#       their section) the mass flux divergence is byte-identical, and the mean flow's gradient too below the last x
+#       layer: that layer's upper face has no stream, so its x gradient stays the stream average, the device's own
+#       float. In the single build the bounds a face pass takes over from the GPU extraction equal the bound walk's
+#       (DTFE_DEBUG_FX_BOUNDS=1)
 #   P8  dtfelib: FieldSet.face_gradient is True for the run (False without the flag) and load('divergence',
 #       mean_field=True) returns the stored grid itself
 #   P9  the face sums ride the checkpoint: a '--partition 2 2 2' run killed after 3 partitions
@@ -37,7 +46,7 @@
 #       integrated by Simpson's rule, caustic cells included, to 0.05 max / 2e-3 rms of the rms (measured 0.022 /
 #       7.2e-4 and 0.028 / 7.1e-4), and 4 -> 8 intervals shrink the rms by at least 2.5 (measured 3.8 and 4.0); the
 #       thread, slab-mode and resume checks (P4, P9) compare '.a_massFluxDiv' too
-# About 15 s on the Mac (25 s in the double build).
+# About 25 s on the Mac in a GPU build, single or double (measured 23 s and 25 s).
 # Usage: tests/ps_face_gradient_check.sh [--no-build]   (--no-build is accepted and ignored: nothing is built)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -296,6 +305,98 @@ sys.exit(0 if ok else 1)
 EOF
     fi
 else echo "   (P11's --gpu case: not a GPU build)"; fi
+
+if [ "$GPU" = "1" ]; then
+    echo ">> the face walk's filter against the deposit loop's (--gpu): a window, non-periodic boxes, the NaN hook"
+    "$PY" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "$TMP/lat.hdf5" --n 32 --box 100 \
+        --amplitude-factor 2.0 --jitter-frac 0 > "$TMP/gen_lat.log" 2>&1 \
+        || { echo "FAIL: generate_ps_test_data.py (see $TMP/gen_lat.log)"; exit 1; }
+    # the lattice's x range for '--box': the upper face is a particle plane (one float32 x per lattice plane) and, with
+    # 28.125 = 32 x 0.87890625 exact in float and in double, grid plane 32 in both builds
+    "$PY" - "$TMP/lat.hdf5" > "$TMP/edge.txt" 2> "$TMP/edge.log" <<'EOF' || { echo "FAIL: the lattice box's edge (see $TMP/edge.log)"; exit 1; }
+import sys, h5py, numpy as np
+with h5py.File(sys.argv[1], "r") as f:
+    x = np.unique(f["PartType1/Coordinates"][:, 0])
+assert x.size == 32 and x.dtype == np.float32, (x.size, x.dtype)
+hi = float(x[np.argmin(np.abs(x - 70.0))])
+lo = hi - 28.125
+assert float(np.float32(lo)) == lo and hi - lo == 28.125, (lo, hi)
+print(repr(lo), repr(hi))
+EOF
+    read -r XLO XHI < "$TMP/edge.txt"
+    B=(--grid 32 --input-format 105 --mpc-unit 1 --field density_a velocity_a divergence_a shear_a --exact
+       --ps-volume-weighted --face-gradient)
+    runb() { local C=("${B[@]}"); run "$@"; }   # 'run' without --periodic
+    JB=(--box 35.9375 64.0625 35.9375 64.0625 35.9375 64.0625)
+    LB=(--box "$XLO" "$XHI" 30 70 30 70)
+    run  gwin pan_2.0 OMP_NUM_THREADS=1 DTFE_DEBUG_FX_BOUNDS=1 -- --ps-volume-weighted --face-gradient \
+        --grid-window 0.01 99.99 0.01 99.99 50.1 53.0 --gpu
+    runb jc pan_2.0 OMP_NUM_THREADS=1 -- "${JB[@]}"
+    runb jg pan_2.0 OMP_NUM_THREADS=1 DTFE_DEBUG_FX_BOUNDS=1 -- "${JB[@]}" --gpu
+    runb lc lat     OMP_NUM_THREADS=1 -- "${LB[@]}"
+    runb lg lat     OMP_NUM_THREADS=1 DTFE_DEBUG_FX_BOUNDS=1 -- "${LB[@]}" --gpu
+    gpu_walked() {   # the run deposited on the GPU and ran the face walk beside it
+        grep -q " GPU (" "$TMP/$1.log" && ! grep -q "using the CPU deposit" "$TMP/$1.log" \
+            && grep -q "face sums (--face-gradient) of the GPU-deposited" "$TMP/$1.log"
+    }
+    bounds_ok() {    # single build: the extraction's bounds were taken over and equal the bound walk's
+        precision_double || grep -q "13 bounds of the GPU extraction checked against the bound walk, 0 differ" "$TMP/$1.log"
+    }
+    gpu_run_ok() {   # gpu_run_ok <gpu run> <what>: says what is wrong with the run, if anything
+        if ! gpu_walked "$1"; then
+            fail "P12 $2: the --gpu run did not deposit on the GPU or skipped the face walk (see $TMP/$1.log)"; return 1
+        elif ! bounds_ok "$1"; then
+            fail "P12 $2: no bounds check line of DTFE_DEBUG_FX_BOUNDS (see $TMP/$1.log)"; return 1
+        fi
+    }
+    pair() {         # pair <cpu run> <gpu run> <what>
+        gpu_run_ok "$2" "$3" || return 0
+        if meanflow "$1" "$2"; then pass "P12 $3: the mean flow's grids and the mass flux divergence, GPU == CPU byte for byte"
+        else fail "P12 $3: the GPU run's mean flow grids differ from the CPU run's"; fi
+    }
+    pair win gwin "a one-cell --grid-window"
+    pair jc  jg   "a non-periodic --box"
+    if gpu_run_ok lg "a particle plane as the box face"; then
+        "$PY" - "$TMP" "$DTFE_TEST_REAL" <<'EOF' || FAIL=1
+import numpy as np, sys
+tmp, dt = sys.argv[1], np.dtype(sys.argv[2])
+n, ok = 32, True
+flux = [np.fromfile(f"{tmp}/{k}.a_massFluxDiv", dtype=dt) for k in ("lc", "lg")]
+rms = float(np.sqrt((flux[0].astype(np.float64) ** 2).mean()))
+if rms > 0 and np.array_equal(flux[0], flux[1]):
+    print("   PASS  P12 a particle plane as the box face: the mass flux divergence, GPU == CPU byte for byte")
+else:
+    d = float(np.abs(flux[0].astype(np.float64) - flux[1]).max()) / (rms or 1.0)
+    print(f"   FAIL  P12 a particle plane as the box face: the mass flux divergence differs by {d:.3g} of the rms "
+          f"(rms {rms:.3g})"); ok = False
+for suf, nc in (("a_velDiv", 1), ("a_velShear", 5)):
+    c, g = (np.fromfile(f"{tmp}/{k}.{suf}", dtype=dt).reshape(n, n, n, nc) for k in ("lc", "lg"))
+    r = float(np.sqrt((c.astype(np.float64) ** 2).mean())) or 1.0
+    last = float(np.abs(c[n - 1].astype(np.float64) - g[n - 1]).max()) / r
+    if np.array_equal(c[: n - 1], g[: n - 1]) and last <= 1e-5:
+        print(f"   PASS  P12 a particle plane as the box face: {suf} byte-identical below the last x layer "
+              f"(that layer, the stream average along x: {last:.1e} of the rms)")
+    else:
+        below = float(np.abs(c[: n - 1].astype(np.float64) - g[: n - 1]).max()) / r
+        print(f"   FAIL  P12 a particle plane as the box face: {suf} differs by {below:.3g} of the rms below the last x "
+              f"layer, {last:.3g} in it"); ok = False
+sys.exit(0 if ok else 1)
+EOF
+    fi
+    if ! precision_double; then   # the hook's shares are fixed-point words: the single build (ps_fixed_moments_check.sh F5)
+        run nc pan_2.0 OMP_NUM_THREADS=1 DTFE_TEST_NAN_SHARE=50 -- --ps-volume-weighted --face-gradient
+        run ng pan_2.0 OMP_NUM_THREADS=1 DTFE_TEST_NAN_SHARE=50 -- --ps-volume-weighted --face-gradient --gpu
+        drops() { sed -n 's/.*face mass flux (--face-gradient) grid \([0-9][0-9]*\).*/\1/p' "$TMP/$1.log" | head -1; }
+        dc="$(drops nc)"; dg="$(drops ng)"
+        if ! gpu_walked ng; then
+            fail "P12 the NaN hook: the --gpu run did not deposit on the GPU or skipped the face walk (see $TMP/ng.log)"
+        elif [ -n "$dc" ] && [ "$dc" -gt 0 ] && [ "$dc" = "$dg" ] && meanflow nc ng; then
+            pass "P12 the NaN hook: $dc face shares left out on both devices, the mean flow's grids byte for byte"
+        else
+            fail "P12 the NaN hook: face shares left out CPU '${dc}' / GPU '${dg}', or the grids differ (see $TMP/ng.log)"
+        fi
+    fi
+else echo "   (P12's --gpu cases: not a GPU build)"; fi
 
 echo ">> dtfelib reads the stored mean-flow grids"
 for k in f2.0 b2.0; do

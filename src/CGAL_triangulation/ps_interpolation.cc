@@ -865,6 +865,40 @@ static inline bool psWindowTouched(PSPassCtx const &passCtx, Real const (&ep)[NO
     return true;
 }
 
+// The exact CPU deposit loop's own test of whether a tetrahedron reaches the grid and, under --grid-window, the
+// window, on its wrapped Eulerian positions: the loop's bounding-box cell span, formed in Real exactly as its block
+// "iMin / iMax" forms it (interpolateGrid_phaseSpace -- KEEP THE TWO IN STEP). psFaceWalk rejects on this test, not on
+// psWindowTouched: that one divides in double, and in a single build the loop's float quotient can round up onto
+// a grid plane where the double one stays below it, so the two spans can differ by one cell for a vertex within a
+// rounding of a plane -- and psWindowTouched has no rule for a tetrahedron wholly outside a non-periodic grid, which
+// the loop skips ("outsideGrid"). With this test the face sums beside a GPU deposit come from exactly the tetrahedra
+// the CPU loop deposits faces for (the loop's face block sits right after its span test, before any volume test).
+static inline bool psLoopSpanReaches(Real const (&ep)[NO_DIM+1][NO_DIM], Real const *boxL, Real const *dxL,
+                                     size_t const *nGridL, bool const periodic, bool const windowMode,
+                                     size_t const *subOriginL, size_t const *subDimsL)
+{
+    if ( periodic && !windowMode ) return true;   // (a periodic grid without a window: every kept tetrahedron reaches it)
+    int iMinU[NO_DIM], iMaxU[NO_DIM];
+    for (int d = 0; d < NO_DIM; ++d)
+    {
+        Real eMin = ep[0][d], eMax = ep[0][d];
+        for (int v = 1; v <= NO_DIM; ++v)
+        {
+            if (ep[v][d] < eMin) eMin = ep[v][d];
+            if (ep[v][d] > eMax) eMax = ep[v][d];
+        }
+        iMinU[d] = int(floor((eMin - boxL[2*d]) / dxL[d]));
+        iMaxU[d] = int(floor((eMax - boxL[2*d]) / dxL[d])) + 1;
+        // the loop's "outsideGrid" (it tests the clamped span, which says the same)
+        if ( !periodic && ( iMinU[d] >= (int)nGridL[d] || iMaxU[d] <= 0 ) ) return false;
+    }
+    if ( windowMode )
+        for (int d = 0; d < NO_DIM; ++d)
+            if ( !psSpanTouches(iMinU[d], iMaxU[d], long(nGridL[d]), periodic, long(subOriginL[d]), long(subDimsL[d])) )
+                return false;
+    return true;
+}
+
 // The centroid-fallback cell of a tetrahedron: its Eulerian centroid (Real, from the wrapped
 // positions) and that centroid's flat sub-grid index; false when it lies outside this grid/
 // partition region, where the deposit drops the tet. ONE definition for the CPU fallback,
@@ -1059,6 +1093,11 @@ struct PSFxState
     bool face = false;
     PSFxWords faceS, faceN, faceP;   // (faceP: the normal momentum through each face, P10.4's mass flux)
     Real const *gridDx = nullptr;
+    // the bounds the GPU extraction summed for this pass (psGpuExtractAndDeposit: the bound walk's sums over the same
+    // tetrahedra in the same block order), kept for the face sums' units, so that no second bound walk runs after a
+    // GPU deposit (psFxBoundsFromGpu says when they stand in for the walk's)
+    PSFixedBounds gpuBounds;
+    bool gpuBoundsValid = false;
 
     // the Real accumulator of grid g, allocated (zeroed) if the pass has none yet: a grid that is not a fixed-point
     // sum after all (no unit, or the GPU's float grid)
@@ -1312,7 +1351,9 @@ static PSFixedBounds psFxBoundWalk(PSPassCtx const &passCtx, PSFxState const &fx
 // --face-gradient beside a GPU deposit (docs/cleanup-plan.md D17): the face sums (psDepositFaces) of every kept
 // tetrahedron from ONE CPU walk over the tessellation, on the bound walk's skeleton (the same filter, mass, gradient
 // and block order as the deposit loop; the GPU-deferred tetrahedra included, so the deposit loop skips its own face
-// block under metalDeposited), into the words psCpuFixedUnits allocated. Mass, velocity, the per-stream gradient and
+// block under metalDeposited), into the words psCpuFixedUnits allocated. The tetrahedra are the deposit loop's own:
+// its filter, then its span test (psLoopSpanReaches: the grid of a non-periodic run, the window of --grid-window).
+// Mass, velocity, the per-stream gradient and
 // the dispersion stay the device's: this walk writes the face words only, shared by its threads (relaxed atomics,
 // order-free like the deposit loop's). Costs the walk the CPU face deposit costs beside its exact deposit.
 static void psFaceWalk(PSPassCtx const &passCtx, PSFxState &fx, bool const psVertexMass)
@@ -1322,7 +1363,6 @@ static void psFaceWalk(PSPassCtx const &passCtx, PSFxState &fx, bool const psVer
     Box &boxCoordinates = passCtx.boxCoordinates;
     size_t const noTotalCells = passCtx.noTotalCells;
     bool const windowMode = passCtx.windowMode;
-    auto windowTouched = [&passCtx](Real const (&ep)[NO_DIM+1][NO_DIM]) { return psWindowTouched( passCtx, ep ); };
     Real boxL[2*NO_DIM], dxL[NO_DIM];
     size_t nGridL[NO_DIM], subOriginL[NO_DIM], subDimsL[NO_DIM];
     for (int d = 0; d < NO_DIM; ++d)
@@ -1347,8 +1387,11 @@ static void psFaceWalk(PSPassCtx const &passCtx, PSFxState &fx, bool const psVer
             if ( ( idx / BLK ) % nT != th ) continue;
             Cell_handle cell = it;
             PSCellGeometry geo;
+            // (the span test as the filter's early reject: on the wrapped positions the loop tests, before the inverse)
             if ( !psFilterCell(cell, userOptions, boxCoordinates, true, NULL, geo, false,
-                               [&](Real const (&ep)[NO_DIM+1][NO_DIM]) { return windowMode && !windowTouched(ep); }) ) continue;
+                               [&](Real const (&ep)[NO_DIM+1][NO_DIM])
+                               { return !psLoopSpanReaches( ep, boxL, dxL, nGridL, periodic, windowMode, subOriginL, subDimsL ); }) )
+                continue;
             double tetMass;   // (the deposit loop's: psVertexShareMass, or rho_bar times the Lagrangian volume, in Real)
             if ( psVertexMass ) tetMass = double( Real( psVertexShareMass(cell) ) );
             else
@@ -1360,6 +1403,11 @@ static void psFaceWalk(PSPassCtx const &passCtx, PSFxState &fx, bool const psVer
                 tetMass = double( Real( avgDensity * std::fabs(determinant(Lag)) / factorial(NO_DIM) ) );
             }
             if ( !(tetMass > 0.) ) tetMass = 0.;
+            // DTFE_TEST_NAN_SHARE (ps_deposit_params.h), after the clamp as in the deposit loop: the hooked tetrahedron's
+            // density is NaN there, so its momentum shares (P) are dropped and counted; the same here
+            if ( fixedShareTestNanEvery() && fixedShareTestNan( double(cell->vertex(0)->point()[0]), double(cell->vertex(0)->point()[1]),
+                                                                double(cell->vertex(0)->point()[NO_DIM-1]) ) )
+                tetMass = std::numeric_limits<double>::quiet_NaN();
             // the constant velocity gradient, as the deposit loop forms it (geo.posMatInv, Real)
             Vertex_handle base = cell->vertex(0);
             Real velGrad[NO_DIM][noVelComp], temp[NO_DIM][noVelComp];
@@ -1711,6 +1759,35 @@ static inline void psDebugDegreesCheck(PSPassCtx const &passCtx, bool const degr
     }
 }
 
+// Whether the bounds of the GPU extraction (fx.gpuBounds) stand in for the bound walk's after a GPU deposit: only
+// where the two are the same words. The extraction rounds the tet mass to float and the walk to Real, so a single
+// build only; and under the NaN test hook (DTFE_TEST_NAN_SHARE) the extraction's bound leaves the hooked tetrahedra's
+// mass out while the walk keeps it, so not then either. Everything else is the same code on the same tetrahedra
+// (psFilterCell with the window test, fx.tetBound per tet, blocks of 256 finite cells summed in block order).
+static inline bool psFxBoundsFromGpu(bool const metalDeposited, PSFxState const &fx)
+{
+    return metalDeposited && fx.gpuBoundsValid && std::is_same<Real, float>::value && fixedShareTestNanEvery() == 0;
+}
+
+// DTFE_DEBUG_FX_BOUNDS: checks the bounds taken over from the GPU extraction (psFxBoundsFromGpu) against the bound
+// walk's, word for word (the moment grids' bounds and the 3 face bounds), and stops the run on a difference. Only
+// where they are used: a pass with face sums (--face-gradient) after a GPU deposit.
+static inline void psDebugFxBoundsCheck(PSPassCtx const &passCtx, PSFxState const &fx, bool const metalDeposited,
+                                        bool const psVertexMass)
+{
+    if ( !fx.face || !psFxBoundsFromGpu( metalDeposited, fx ) || !Env::flag( "DTFE_DEBUG_FX_BOUNDS" ) ) return;
+    PSFixedBounds const walk = psFxBoundWalk( passCtx, fx, psVertexMass );
+    PSFixedBounds const &gpu = fx.gpuBounds;
+    int bad = 0;
+    for (int g = 0; g < PS_FX_CPU_N; ++g) bad += std::memcmp( &walk.B[g], &gpu.B[g], sizeof(double) ) != 0;
+    bad += std::memcmp( &walk.faceS, &gpu.faceS, sizeof(double) ) != 0;
+    bad += std::memcmp( &walk.faceN, &gpu.faceN, sizeof(double) ) != 0;
+    bad += std::memcmp( &walk.faceP, &gpu.faceP, sizeof(double) ) != 0;
+    std::fprintf( stderr, "DTFE_DEBUG_FX_BOUNDS: %d bounds of the GPU extraction checked against the bound walk, %d differ\n",
+                  PS_FX_CPU_N + 3, bad );
+    if ( bad ) throwError( "DTFE_DEBUG_FX_BOUNDS: the GPU extraction's bounds differ from the bound walk's." );
+}
+
 // The CPU deposit's fixed-point units: the mass accumulator and the moment grids' units.
 static inline void psCpuFixedUnits(PSPassCtx const &passCtx, PSGridsCtx const &gridsCtx, bool const metalDeposited,
                                    PSFxState &fx, bool const psVertexMass)
@@ -1730,9 +1807,13 @@ static inline void psCpuFixedUnits(PSPassCtx const &passCtx, PSGridsCtx const &g
     bool const massFxWanted = gridsCtx.massFxWanted, fxMomWanted = gridsCtx.fxMomWanted;
     PSFixedBounds walkBounds;
     bool walked = false;
-    // the bound walk, once per pass whoever asks first (the mass grid under --grid-window, the moment grids, the face sums)
+    // the pass's bounds, once per pass whoever asks first (the mass grid under --grid-window, the moment grids, the face
+    // sums): the bound walk -- or, after a GPU deposit, the sums its extraction already made over the same tetrahedra
+    // (fx.gpuBounds, where psFxBoundsFromGpu lets them stand in; only the face sums ask then), so no second walk runs
+    bool const boundsFromGpu = psFxBoundsFromGpu( metalDeposited, fx );
     auto bounds = [&]() -> PSFixedBounds const &
     {
+        if ( boundsFromGpu ) return fx.gpuBounds;
         if ( !walked ) { walkBounds = fxBoundWalk(); walked = true; }
         return walkBounds;
     };
@@ -1810,11 +1891,12 @@ static inline void psCpuFixedUnits(PSPassCtx const &passCtx, PSGridsCtx const &g
             for (int g = 0; g < PS_FX_CPU_N; ++g)
                 if ( !( g == PS_FX_DW && massFxOn ) ) fx.ensureReal( g );   // (nothing selected: a no-op)
     }
-    // --face-gradient: the face sums' units, from the same walk; their words (int64: the dynamic team's threads add in
+    // --face-gradient: the face sums' units, from the same bounds; their words (int64: the dynamic team's threads add in
     // any order) for every cell of the pass. No unit (a bound that is not finite): the face gradient is off for the pass.
     // Under a GPU deposit too (docs/cleanup-plan.md D17): the words are then psFaceWalk's, one CPU walk over the kept
-    // tetrahedra after the device's deposit (the bound walk runs once more for their units: the device's bounds are
-    // the extraction's locals; the same sums, so a GPU and a CPU deposit of one pass take the same face units).
+    // tetrahedra after the device's deposit, and their units come from the bounds the extraction summed (bounds()
+    // above; the same sums as the walk's, so a GPU and a CPU deposit of one pass take the same face units). Where
+    // those do not stand in (a double build, the NaN test hook), the bound walk runs once more for them.
     if ( fx.face )
     {
         PSFixedBounds const &fb = bounds();
@@ -2715,9 +2797,9 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
         // the bounds of the moment grids' fixed-point units (fxg): every tet that passes the filter --
         // the ones handed to the GPU (those it will defer to the CPU included), the released ones the host deposits
         // itself, and those of no mass -- summed per block of 256 finite cells and then block by block, EXACTLY as
-        // the CPU deposit's bound walk sums them (fxBoundWalk, below), so a GPU and a CPU deposit of the same pass
+        // the CPU deposit's bound walk sums them (psFxBoundWalk), so a GPU and a CPU deposit of the same pass
         // take the same units. Under --grid-window both count only the tets that reach the window (this loop skips
-        // the others before the filter; the CPU walk applies the same test, fxBoundWalk says why),
+        // the others before the filter; the CPU walk applies the same test, psFxBoundWalk says why),
         // and the window's MASS unit is taken from these bounds as well (B[DW], PSFixedUnits.massTotal) -- so the
         // bounds are summed under --grid-window even when the moments are float sums (DTFE_GPU_FLOAT_MOMENTS=1)
         bool const fxBoundsWanted = fxGpuWanted || windowMode;
@@ -2974,6 +3056,9 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
         PSFixedBounds gpuBounds;
         for (PSFixedBounds const &b : gpuBoundPart) gpuBounds.add( b );   // in block order (see gpuBoundPart)
         std::vector<PSFixedBounds>().swap( gpuBoundPart );
+        // kept for the pass: the face sums' units are taken from these after the deposit (psCpuFixedUnits)
+        fx.gpuBounds = gpuBounds;
+        fx.gpuBoundsValid = fxBoundsWanted;
         if ( fxGpuWanted )
         {
             bool const dispOwn = psVolWeighted && fDisp;
@@ -3629,6 +3714,7 @@ void interpolateGrid_phaseSpace(DT &dt,
 #endif // PS_GPU
 
     psCpuFixedUnits( passCtx, gridsCtx, metalDeposited, fx, psVertexMass );
+    psDebugFxBoundsCheck( passCtx, fx, metalDeposited, psVertexMass );
 
     // The per-cell scatter. The CPU deposit runs on several threads (depositThreads, capped by the memory its private
     // accumulators may take): thread t takes every T-th block of 256 cells into its own copies, summed in thread order
@@ -4005,7 +4091,8 @@ void interpolateGrid_phaseSpace(DT &dt,
             bool const released = psHaloRelease > 0. && absDetLag > psHaloRelease * geo.cellAbsDet;
             if (released && (!slabList || int(slabFirst[curOrd]) == slab)) ++nReleased;   // once per tet
 
-            // Eulerian bounding box of this cell (from the wrapped positions).
+            // Eulerian bounding box of this cell (from the wrapped positions). psLoopSpanReaches repeats this block's
+            // span, "outsideGrid" and window test for psFaceWalk: KEEP THE TWO IN STEP.
             Real eMin[NO_DIM], eMax[NO_DIM];
             for (int d = 0; d < NO_DIM; ++d)
             {
@@ -4233,6 +4320,22 @@ void interpolateGrid_phaseSpace(DT &dt,
                 }
     #endif
 
+    #if NO_DIM==3
+                // --face-gradient: this tetrahedron's face sums (psDepositFaces). Ahead of the volume gate below, not
+                // under it: psFaceWalk forms the same sums beside a GPU deposit and knows no clipped volume, so both take
+                // every tetrahedron that passed the filter and the span test above. (A face share needs the tetrahedron
+                // on both sides of its plane, so the gate would only withhold the sections of a sliver r3d loses.)
+                if ( faceSWL )
+                {
+                    double v0[noVelComp];
+                    for (size_t j = 0; j < noVelComp; ++j) v0[j] = double( cell->vertex(0)->info().velocity(j) );
+                    double const vTet = double(geo.cellAbsDet) / double(factorial(NO_DIM));
+                    double const rhoTet = ( vTet > 0. && avgDensityL > 0. ) ? double(tetMass) / ( vTet * avgDensityL ) : 0.;
+                    psDepositFaces( geo.eulerPos, boxL, dxL, nGridL, periodicL, subOriginL, subDimsL, slabLoL, slabHiL,
+                                    velGrad, v0, faceSWL, faceSSL, faceNWL, faceNSL, facePWL, facePSL, rhoTet, massFxAtomicL );
+                }
+    #endif
+
                 // PASS 2 (exact): renormalize the shares to tetMass, exact per tet. A tet that leaves a
                 // non-periodic grid is normalized by its WHOLE weight instead (the analytic volume, or the
                 // linear profile's integral over the tet; max() guards rounding), so the grid keeps exactly
@@ -4388,17 +4491,6 @@ void interpolateGrid_phaseSpace(DT &dt,
                         if ( psCausticsL )
                             psOrMask( orientBits[flatIdx], (PSCausticClass::CausticMask)((geo.cellDet > 0. ? 1 : 2) | tetCausticClass), countAtomicL );
                     }
-    #if NO_DIM==3
-                    if ( faceSWL )   // --face-gradient: this tetrahedron's face sums (psDepositFaces)
-                    {
-                        double v0[noVelComp];
-                        for (size_t j = 0; j < noVelComp; ++j) v0[j] = double( cell->vertex(0)->info().velocity(j) );
-                        double const vTet = double(geo.cellAbsDet) / double(factorial(NO_DIM));
-                        double const rhoTet = ( vTet > 0. && avgDensityL > 0. ) ? double(tetMass) / ( vTet * avgDensityL ) : 0.;
-                        psDepositFaces( geo.eulerPos, boxL, dxL, nGridL, periodicL, subOriginL, subDimsL, slabLoL, slabHiL,
-                                        velGrad, v0, faceSWL, faceSSL, faceNWL, faceNSL, facePWL, facePSL, rhoTet, massFxAtomicL );
-                    }
-    #endif
                     continue;   // next tetrahedron (the sampled PASS 1/2 below is skipped)
                 }
                 if ( windowModeL ) continue;   // no volume in the window: nothing to deposit (see above)
