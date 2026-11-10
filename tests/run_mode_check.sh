@@ -22,6 +22,10 @@
 #       plan runs at most 2 partitions at once
 #   M7  gentle with '--max-concurrent G+1' (where G+1 <= N0) raises the budget to G+1 ('(raised: --max-concurrent G+1
 #       was given)'), both binaries
+#   M7b gentle with DTFE_TRIANGULATION_THREADS=G+1 (where G+1 <= N0; a build with the parallel insert, else SKIP):
+#       PS-DTFE's one domain inserts on G+1 threads, as it does under performance ('(parallel, TBB, G+1 threads)');
+#       the standard team (the largest 2^a*3^b <= G sub-domains) on min(G+1, N0/team) threads each -- a pinned count
+#       is cut by the machine's threads shared among the builds, not by the mode's lowered budget
 #   M8  Linux: gentle runs at nice 10 ('; nice 10)'), under 'nice -n 15' it keeps 15 ('; nice 15 kept)'); balanced
 #       and performance name no nice; macOS: no mode's line names one
 #   M9a OMP_NUM_THREADS=2: PS-DTFE '--exact --partition 2 2 2 --max-concurrent 2' and standard '--exact --partition 1'
@@ -258,6 +262,46 @@ if [ "$K" -le "$N0" ]; then
     check "M7 STD: the same (exit $r2)" $?
 else
     echo "  SKIP M7: gentle's $G threads + 1 is more than this machine's $N0"
+fi
+
+echo ">> M7b: a pinned DTFE_TRIANGULATION_THREADS keeps its count under gentle"
+# src/CGAL_triangulation/triangulation.cpp delaunayTriangulation: the pin is an explicit lever, like OMP_NUM_THREADS
+# and '--max-concurrent' -- capped by the machine's threads shared among the builds in flight (and by
+# OMP_NUM_THREADS), not by the mode's lowered budget
+if [ "$K" -le "$N0" ]; then
+    PINNED="(parallel, TBB, $K threads)"
+    RUN_ENV=(DTFE_TRIANGULATION_THREADS="$K")
+    go "$TMP/M7b_PS_perf" "$PS" "${A[@]}" --partition 1 1 1 --run-mode performance; r0=$?
+    go "$TMP/M7b_PS" "$PS" "${A[@]}" --partition 1 1 1 --run-mode gentle; r1=$?
+    RUN_ENV=()
+    if [ "$r0" = 0 ] && has "$TMP/M7b_PS_perf.log" "$PINNED"; then
+        [ "$r1" = 0 ] && has "$TMP/M7b_PS.log" "$PINNED"
+        check "M7b PS: gentle with DTFE_TRIANGULATION_THREADS=$K inserts on $K threads, as performance does (exit $r1)" $?
+    else
+        echo "  SKIP M7b PS: no '$PINNED' line under performance (a build without the parallel insert; exit $r0)"
+    fi
+    # the standard team under gentle: NP sub-domains, the largest 2^a*3^b <= G (src/subpartition.h parallelGrid),
+    # each on min(K, N0/NP) threads. Whether the build has the parallel insert shows under performance with a
+    # team of 2 (N0/2 threads each, capped at the 2 pinned).
+    NP=1; a=1
+    while [ "$a" -le "$G" ]; do
+        b=$a; while [ "$b" -le "$G" ]; do [ "$b" -gt "$NP" ] && NP=$b; b=$((b * 3)); done
+        a=$((a * 2))
+    done
+    T=$((N0 / NP)); [ "$T" -le "$K" ] || T="$K"
+    RUN_ENV=(OMP_NUM_THREADS=2 DTFE_TRIANGULATION_THREADS=2)
+    go "$TMP/M7b_STD_probe" "$STD" "${A[@]}" --run-mode performance; r0=$?
+    RUN_ENV=(DTFE_TRIANGULATION_THREADS="$K")
+    go "$TMP/M7b_STD" "$STD" "${A[@]}" --run-mode gentle; r2=$?
+    RUN_ENV=()
+    if [ "$N0" -ge 4 ] && [ "$T" -ge 2 ] && [ "$r0" = 0 ] && has "$TMP/M7b_STD_probe.log" "(parallel, TBB, 2 threads)"; then
+        [ "$r2" = 0 ] && has "$TMP/M7b_STD.log" "(parallel, TBB, $T threads)"
+        check "M7b STD: gentle's team of $NP with DTFE_TRIANGULATION_THREADS=$K inserts on $T threads each (exit $r2)" $?
+    else
+        echo "  SKIP M7b STD: no '(parallel, TBB, 2 threads)' line from a team of 2 under performance (a build without the parallel insert, or fewer than 4 threads; exit $r0)"
+    fi
+else
+    echo "  SKIP M7b: gentle's $G threads + 1 is more than this machine's $N0"
 fi
 
 echo ">> M8: the priority (Linux: gentle at nice 10; macOS: none)"

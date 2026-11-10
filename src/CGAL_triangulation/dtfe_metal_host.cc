@@ -378,8 +378,9 @@ bool runBatch(Ctx& c, Batch& b, Grids& g, ChunkState& cs, Stats& st, bool shared
     size_t firstChunk = exact ? 8192 : useItems ? 65536 : 25088;
     // DTFE_GPU_CHUNK: the opening chunk
     if (long const v = Env::integer({"DTFE_GPU_CHUNK"}, 0); v > 0) firstChunk = size_t(v);
-    GpuPace& pace = gpuPace();        // targetSec 0.25 s, gapUs 8 ms (~3% overhead) until escalated
-    // an escalated pace (an earlier batch's failures) opens with a proportionally smaller chunk
+    GpuPace& pace = gpuPace();        // the run mode's pace until escalated: 8 ms gaps after buffers of 0.25 s
+                                      // (performance: ~3% idle) or 0.05 s (gentle, balanced: ~14%)
+    // a pace below the default's (an earlier batch's failures, or a gentler mode) opens with a proportionally smaller chunk
     if (pace.targetSec < GPU_PACE_TARGET0)
         firstChunk = std::max(size_t(double(firstChunk) * pace.targetSec / GPU_PACE_TARGET0), MIN_CHUNK);
     if (cs.chunk == 0) cs.chunk = firstChunk;

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The G-tuner baseline of docs/cleanup-plan.md (P0.3 step 3): a FIXED list of '--auto-tune-report' configurations
-# (91 until 2026-11-07, 110 since: the P8/P10 lines appended at the end), one line each, "<label><TAB><the AUTO-TUNE-REPORT line>". Run it with the reference binaries once
+# (91 until 2026-11-07, 110 until 2026-11-10, 124 since: the P8/P10 lines, then the P11.7 face lines and the three of
+# their review, appended at the end), one line each, "<label><TAB><the AUTO-TUNE-REPORT line>". Run it with the reference binaries once
 # and keep the set with them; rerun it with the binaries of a change and diff the two: only the configurations the
 # change targets may differ.
 #
@@ -115,6 +116,49 @@ one "ps face exact cpu ram=64 grid=256 prod" 64 PS-DTFE "$PAN64" "${PS_COMMON[@]
     --ps-exact-deposit --face-gradient
 one "ps face exact cpu N=128 ram=8 grid=1024 prod" 8 PS-DTFE "$PAN128" "${PS_COMMON[@]}" --grid 1024 "${PROD[@]}" \
     --ps-exact-deposit --face-gradient
+
+# ---- added 2026-11-10 (plan P11.7 item 1): the face sums where the tuner booked them short -- a GPU lane after its
+# hold (the face words are made after the device's deposit, the Real face grids beside them at the conversion), the
+# double build and the float-moment knob (no fixed-point moment term carried them there), a gradient asked without
+# the velocity (the face gradient deposits the mean velocity too), one domain on each device (the copy cell counted
+# the mass-flux grid once for every deposit thread) -- with a mixed run and, as the control, the same GPU
+# configuration without the face sums. Appended, so the first 110 lines keep their order. (Newer flags: a binary
+# from before 2026-11-10 knows no '--gpu-share' and gives that line no report.)
+one "ps face exact gpu ram=64 grid=256 prod" 64 PS-DTFE "$PAN64" "${PS_COMMON[@]}" --grid 256 "${PROD[@]}" \
+    --ps-exact-deposit --face-gradient --ps-gpu
+one "ps face exact gpu N=128 ram=8 grid=1024 prod" 8 PS-DTFE "$PAN128" "${PS_COMMON[@]}" --grid 1024 "${PROD[@]}" \
+    --ps-exact-deposit --face-gradient --ps-gpu
+one "ps N=128 ram=8 grid=1024 prod exact gpu" 8 PS-DTFE "$PAN128" "${PS_COMMON[@]}" --grid 1024 "${PROD[@]}" \
+    --ps-exact-deposit --ps-gpu
+one "ps face exact gpu share=0.5 N=128 ram=8 grid=1024 prod" 8 PS-DTFE "$PAN128" "${PS_COMMON[@]}" --grid 1024 "${PROD[@]}" \
+    --ps-exact-deposit --face-gradient --ps-gpu --gpu-share 0.5
+one "ps-double face exact cpu N=128 ram=8 grid=1024 prod" 8 PS-DTFE-double "$PAN128" "${PS_COMMON[@]}" --grid 1024 "${PROD[@]}" \
+    --ps-exact-deposit --face-gradient
+one "ps-double face exact gpu N=128 ram=8 grid=1024 prod" 8 PS-DTFE-double "$PAN128" "${PS_COMMON[@]}" --grid 1024 "${PROD[@]}" \
+    --ps-exact-deposit --face-gradient --ps-gpu
+EXTRA_ENV="DTFE_GPU_FLOAT_MOMENTS=1" \
+    one "ps face exact cpu float moments N=128 ram=8 grid=1024 prod" 8 PS-DTFE "$PAN128" "${PS_COMMON[@]}" --grid 1024 "${PROD[@]}" \
+    --ps-exact-deposit --face-gradient
+one "ps face exact cpu gradient only N=128 ram=8 grid=1024" 8 PS-DTFE "$PAN128" "${PS_COMMON[@]}" --grid 1024 \
+    --field gradient_a --ps-volume-weighted --ps-exact-deposit --face-gradient
+one "ps face exact gpu gradient only N=128 ram=8 grid=1024" 8 PS-DTFE "$PAN128" "${PS_COMMON[@]}" --grid 1024 \
+    --field gradient_a --ps-volume-weighted --ps-exact-deposit --face-gradient --ps-gpu
+one "ps face exact cpu one domain ram=64 grid=256 prod" 64 PS-DTFE "$PAN64" "${PS_COMMON[@]}" --grid 256 "${PROD[@]}" \
+    --ps-exact-deposit --face-gradient --partition 1 1 1
+one "ps face exact gpu one domain ram=64 grid=256 prod" 64 PS-DTFE "$PAN64" "${PS_COMMON[@]}" --grid 256 "${PROD[@]}" \
+    --ps-exact-deposit --face-gradient --ps-gpu --partition 1 1 1
+# ... and what the review of those found (same day): a face pass of the u field alone, which deposits no mean
+# velocity (only the '_a' pass implies it), and a scalar with its gradient on a GPU lane, whose grids the lane's
+# booking left out, with and without the face sums. (The double build's exact multiplicity in each thread's copy
+# shows in the two "ps-double ... dens exact" lines above that plan the copy mode.)
+one "ps face exact gpu u gradient only N=128 ram=8 grid=1024" 8 PS-DTFE "$PAN128" "${PS_COMMON[@]}" --grid 1024 \
+    --field gradient --ps-volume-weighted --ps-exact-deposit --face-gradient --ps-gpu
+one "ps face exact gpu N=128 ram=8 grid=1024 prod + scalar" 8 PS-DTFE "$PAN128" "${PS_COMMON[@]}" --grid 1024 \
+    --field density_a velocity_a gradient_a divergence_a shear_a vorticity_a dispersion_a scalar_a scalarGradient_a \
+    --ps-volume-weighted --ps-exact-deposit --face-gradient --ps-gpu
+one "ps N=128 ram=8 grid=1024 prod + scalar exact gpu" 8 PS-DTFE "$PAN128" "${PS_COMMON[@]}" --grid 1024 \
+    --field density_a velocity_a gradient_a divergence_a shear_a vorticity_a dispersion_a scalar_a scalarGradient_a \
+    --ps-volume-weighted --ps-exact-deposit --ps-gpu
 
 echo "$n configurations -> $OUT ($(grep -c $'\tAUTO-TUNE-REPORT ' "$OUT") with a report line)"
 rm -rf "$T"

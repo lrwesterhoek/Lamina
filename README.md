@@ -322,7 +322,7 @@ one release when the new one is unset, with one `warning: OLD is deprecated, use
 | `DTFE_DEPOSIT_SLABS` | PS-DTFE CPU deposit in slabs along x: 1 forces, 0 forbids (the GPU-deferred tetrahedra's too) | automatic |
 | `DTFE_DEPOSIT_NSLABS` | the number of slabs (at most 64) | from the cost per plane |
 | `DTFE_PTS_THREADS` | threads of the point evaluation | the cores left per partition |
-| `DTFE_TRIANGULATION_THREADS` | both binaries: forces the parallel insert (as `--parallel-triangulation`) with this many threads; `DTFE_TRIANGULATION_MIN_POINTS` moves the default rule's size threshold | unset (the rule: tessellations of at least 1000000 points, the performance cores, at most 6, divided among the tessellations built at once) |
+| `DTFE_TRIANGULATION_THREADS` | both binaries: forces the parallel insert (as `--parallel-triangulation`) with this many threads (capped by `OMP_NUM_THREADS` and by the machine's threads divided among the tessellations built at once, not by a gentler `--run-mode`); `DTFE_TRIANGULATION_MIN_POINTS` moves the default rule's size threshold | unset (the rule: tessellations of at least 1000000 points, the performance cores, at most 6, divided among the tessellations built at once) |
 | `DTFE_TESSELLATION_CACHE_THREADS` | threads per tessellation-cache load or save | up to 4 |
 | `DTFE_OVERLAP` | the look-ahead of a partitioned run (both binaries): 1 forces it (on the CPU too), 0 forbids it | with a GPU deposit |
 | `DTFE_MERGE_STAGE_GB` | PS-DTFE: a fixed cap on the partitions parked for the ordered merge, in GB (0: none parked) | the free-memory rule |

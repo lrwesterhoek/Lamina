@@ -501,7 +501,8 @@ static void insertSequential(DT *dt, vector<Particle_data> *p, MESSAGE::Message 
 // DTFE_TRIANGULATION_MIN_POINTS points (1000000) when more than one core is free for it -- or forced by
 // '--parallel-triangulation' / DTFE_TRIANGULATION_THREADS=N at any size: the cores are shared among the
 // tessellations being built at the same time (the partition loops, the standard sub-domain team:
-// ConcurrentTriangulationPlan), and capped by OMP_NUM_THREADS. The parallel insert's vertex and cell order differ
+// ConcurrentTriangulationPlan), and capped by OMP_NUM_THREADS; a run mode's lowered thread budget (run_mode.h) caps
+// the rule's count but not a count given with DTFE_TRIANGULATION_THREADS. The parallel insert's vertex and cell order differ
 // from run to run, so whatever is summed in that order moves at rounding between two identical runs: the standard
 // CPU deposits' float sums, the face pass's double sums (the last bit in 2e-7 of the values at 512^3), the vertex
 // densities and the points (~1e-15), and PS-DTFE's velocity moments, whose shares are formed in each tetrahedron's
@@ -526,12 +527,19 @@ void delaunayTriangulation(DT *dt,
 
 #if defined(PARALLEL_TRIANGULATION) && NO_DIM==3
     int threads = parallelAllowed ? parallelInsertCores() : 1;
+    // A count given with DTFE_TRIANGULATION_THREADS is an explicit lever: like OMP_NUM_THREADS and '--max-concurrent'
+    // (user_options.cc applyRunMode) it beats a run mode's lowered thread budget, and keeps the caps it had before the
+    // modes -- the OpenMP default at start-up (OMP_NUM_THREADS, or the machine's threads) and the hardware threads
+    // shared among the builds. The rule's own count follows the mode.
+    RunModeState const &mode = runModeState();
+    bool const pinnedOverMode = mode.budgetLowered && Env::integer( "DTFE_TRIANGULATION_THREADS", 0 ) > 0;
 #ifdef OPEN_MP
-    threads = std::min( threads, dtfeOmpMax() );
+    threads = std::min( threads, pinnedOverMode ? std::max( 1, mode.ompDefault ) : dtfeOmpMax() );
 #endif
     // a partition loop: its planned concurrency already fills the cores (see above)
     int const planned = std::min( dtfeTriangulationConcurrency.load(), dtfeTriangulationsRemaining.load() );
-    threads = std::max( 1, std::min( threads, dtfeHardwareThreads() / std::max( 1, planned ) ) );
+    int const hardware = pinnedOverMode ? std::max( 1, int( std::thread::hardware_concurrency() ) ) : dtfeHardwareThreads();
+    threads = std::max( 1, std::min( threads, hardware / std::max( 1, planned ) ) );
     // the size threshold of the default rule (see above): below it the sequential insert is as fast or faster
     if ( threads > 1 && !parallelForced )
     {

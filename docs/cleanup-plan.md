@@ -1,7 +1,7 @@
 # Lamina: cleanup and polish plan
 
 Status (2026-11-09): P0, P1, P6 (P6.6, the alias removal, is for the next release), P7 and P10.1–P10.7 done; most of P2–P5 and P9
-done (each phase's status line says what is open); phase R's calibration night ran 2026-11-08/09 (the R status; P10.8, decided and done on 2026-11-09 (D16), D15 settled the same evening by D20 (exact; P12, implemented, gates green on 2026-11-10, uncommitted); P13 (the run modes, added 2026-11-10: implemented, benched, gates green, uncommitted); the rest of R was not launched); P8
+done (each phase's status line says what is open); phase R's calibration night ran 2026-11-08/09 (the R status; P10.8, decided and done on 2026-11-09 (D16), D15 settled the same evening by D20 (exact; P12, committed as `39583f0`); P13 (the run modes, added 2026-11-10: committed as `9bfa39a`); P11.7 item 1 (the PS tuner's face sums) done 2026-11-10; the rest of R was not launched); P8
 partly done (P8.1 for the classes phase R ran; P8.2 as the partition span and the start-up zero fill, P8.5, P8.7, P8.9 step 1 and P8.10 in code, gates green on 2026-11-09 (G-battery 32 of 32 over two runs, G-linux); P8.3 and P8.4 not needed; the rest open, see the P8 status). **Added 2026-11-07 (afternoon), owner's order:** P10 (shared exact velocity derivatives, the face method)
 joins the plan, and **every code item is finished and checked on small data before any rerun**; the reruns then run
 once, as one campaign (phase R, after P10). P0.1 and P0.2 landed in `60a072a`; P0.3's CI fixes and P0.4 landed in `70e153e` and `38eb4be`; P0 closed on
@@ -117,7 +117,7 @@ are acted on. Each phase updates `change_log.txt` and the README section it touc
 | **P8** | Auto-tuner calibration and a time objective | plans change; outputs do not (checked with the plan pinned) | G-tuner, G-real | P2, P3.8 | L |
 | **P9** | CPU and GPU optimisations | no (each item is byte-identical by design) | G-byte, G-gpu, G-real timing (G-emu until D11) | P2, P4.1 | L |
 | **P10** | Shared exact velocity derivatives (the face method) for both estimators, PS mean-flow gradient and mass flux | standard: no (same gradient), except P10.8 (the standard exact-average grids move by rounding: 6e-8 of the rms on the CPU exact bytecmp runs, 2e-16 in the double build; the 3³ plan's strip by up to 1e-2 in single cells; the P10 status has the 512³ figures); PS: new and changed velocity-derivative grids | G-build, G-byte (standard), the P10 tests, G-battery, G-linux | P3, P9.2 | L |
-| **R** | The rerun campaign, once, after every code item: P2.3's reruns, P8.1/P8.2's calibration, the PS exact reruns with the P10 grids, the science comparisons. **Calibration night done 2026-11-08/09** (the R status); the rest waits on D15 and D16 (and on P10.8 if D16 puts it first) | the products | G-real | all code items | machine nights |
+| **R** | The rerun campaign, once, after every code item: P2.3's reruns, P8.1/P8.2's calibration, the PS exact reruns with the P10 grids, the science comparisons. **Calibration night done 2026-11-08/09** (the R status); the rest is not launched (D16 decided and P10.8 done on 2026-11-09, D15 settled by D20) | the products | G-real | all code items | machine nights |
 
 **Order (owner, 2026-11-07).** All code first: the open code items of P3–P9 and all of P10, each checked on small
 data (the synthetic and 64³–256³ test sets, `--auto-tune-report` plans). Then phase R runs the real simulations once.
@@ -981,7 +981,7 @@ the `.npz` / `.csv` products and the `--help` text of every script touched. P5 i
 ## P6. One flag scheme, with a deprecation path
 
 **Status 2026-11-08.** P6.1–P6.5 done, with D2, D3 (the `*_METAL_*` knob aliases are no longer read) and D9, and the
-second pass P6.7 (a-f, below; uncommitted; every gate green on 2026-11-08: the battery twice, bytecmp 261/0, the tuner set 110/110); P6.6 (its removal list is below) is for the next release. Choices made where the plan left room: the deprecation line goes to stderr in lower
+second pass P6.7 (a-f, below; committed as `d7626b6`; every gate green on 2026-11-08: the battery twice, bytecmp 261/0, the tuner set 110/110); P6.6 (its removal list is below) is for the next release. Choices made where the plan left room: the deprecation line goes to stderr in lower
 case (`warning: --old is deprecated, use --new`), so stdout and upper-case `WARNING` greps are unaffected; the
 standard binary gets no `--ps-gpu` alias (it never had one); README and `demo/COMMANDS.md` may name an old spelling
 only on a line that says "deprecated"; the help never names them; the launcher still exports `DTFE_METAL`,
@@ -1686,7 +1686,7 @@ the core pool (`CorePool` in `src/thread_count.h`: holders = min(planned concurr
 
 **Status 2026-11-09 (phase R).** P8.1 re-baselined for the classes the night ran; P8.2 rescoped again (the start-up
 zero fill) and P8.5 (1.4) in code, gates green (Gates, below); P8.3 and P8.4 not needed; P8.9 step 1's
-check done, its refit open; P8.10 not measured. In code, uncommitted on `4e2b35b`: `src/auto_tune.{h,cc}`.
+check done, its refit open; P8.10 not measured. In code since `2f428bc`: `src/auto_tune.{h,cc}`.
 - P8.1, the final model (`4e2b35b`) only; the 11-07 runs are an earlier model (the old `G/n + 40` span: a replica
   reproduces their predictions to 0.01 GB) and stay out of the fit:
 
@@ -2368,24 +2368,31 @@ Standard DTFE (10 threads; the face gradient is the default):
 PS-DTFE (all with the 4.2 M points and `--pts-vel-grad`, `--ps-vertex-mass --ps-volume-weighted --ps-caustics`; the
 tuner's 6³ plan, budget 41.2 GB):
 
-| run | configuration | in flight | wall | CPU (user) | peak memory |
-|---|---|---|---|---|---|
-| k | sampled CPU (`--subsamples 3`) | 6 | 1644 s | 14829 s | 36.5 GB |
-| k2 | sampled GPU | 4 | 1260 s | 4246 s | 36.8 GB |
-| h | exact CPU | 6 | 1133 s | 9637 s | 37.5 GB |
-| i | exact GPU | 4 | 1156 s | 2451 s | 36.1 GB |
-| l | exact GPU + `--face-gradient` (D17) | 4 | 1454 s | 4947 s | 49.6 GB |
-| j | exact CPU + `--face-gradient` | 3 | 1737 s | 14198 s | 46.4 GB |
-| m | j with `--sequential-triangulation` | 3 | 1756 s | 14203 s | 46.3 GB |
+| run | configuration | in flight | wall | CPU (user) | max RSS | peak footprint |
+|---|---|---|---|---|---|---|
+| k | sampled CPU (`--subsamples 3`) | 6 | 1644 s | 14829 s | 36.5 GB | 29.5 GB |
+| k2 | sampled GPU | 4 | 1260 s | 4246 s | 36.8 GB | 28.6 GB |
+| h | exact CPU | 6 | 1133 s | 9637 s | 37.5 GB | 29.6 GB |
+| i | exact GPU | 4 | 1156 s | 2451 s | 36.1 GB | 29.9 GB |
+| l | exact GPU + `--face-gradient` (D17) | 4 | 1454 s | 4947 s | 49.6 GB | 33.4 GB |
+| j | exact CPU + `--face-gradient` | 3 | 1737 s | 14198 s | 46.4 GB | 30.4 GB |
+| m | j with `--sequential-triangulation` | 3 | 1756 s | 14203 s | 46.3 GB | 29.4 GB |
+
+(Both memory columns are `/usr/bin/time -l`'s, from the run logs; the footprint column was added on 2026-11-10. The
+max RSS also counts the resident pages of the `--scratch-dir` files, which hold the full grids and which the plan
+leaves out of RAM: the tuner's prediction and budget are to be read against the peak footprint.)
 
 - Without the face gradient the exact deposit is the fastest PS option on both devices: h and i agree within 2%, the
   GPU at a quarter of the CPU seconds, and both beat the sampled deposits (GPU 1260 s, CPU 1644 s).
 - The face gradient is expensive in work, not only in concurrency: +47% CPU seconds on the CPU path (h → j) and +102%
   on the GPU path (i → l), for +604 s and +298 s of wall. On the CPU path the face words also halve the concurrency.
-- **Both face runs exceeded the tuner's budget** (46.4 and 49.6 GB against 41.2 GB). The tuner omits the face words
-  on the GPU path (it kept run i's plan for l) and books them at half their size on the CPU path (the words are
-  int64, booked as `Real`: 4 B in the single build). j and l therefore ran at concurrencies the corrected tuner will
-  not choose; their walls are not yet the configuration's cost.
+- **No run exceeded the tuner's budget (corrected 2026-11-10).** This bullet set the face runs' 46.4 and 49.6 GB
+  against the 41.2 GB budget, but those are max RSS; their peak footprints were 30.4 and 33.4 GB. Nor did the default
+  CPU path book the face words at half their size: it booked them in full, and the half-size booking was
+  `DTFE_GPU_FLOAT_MOMENTS=1`'s. What the plan did lack under `--face-gradient` is a GPU lane's state after its hold of
+  the device, 0.2 and 0.5 GB at one lane on 64³-particle test runs (P11.7 item 1, done). j ran at the concurrency the
+  corrected plan chooses (3); l ran with 4 in flight where the corrected plan chooses 3, so its wall is that of 4
+  lanes.
 - The parallel insert engaged in no PS run: a 6³ partition holds 771,057 padded points, below the 1e6 threshold.
   j equals m byte for byte, but that says nothing about the insert.
 - Phase sums of l over its 216 passes: GPU deposit 1690 s, extraction 373 s, the CPU phase (the bound walk and the
@@ -2470,6 +2477,12 @@ is ready to commit; `commit-batches-2026-11-09.md` in the session notes says how
 (P11.1) ran on its binaries and is recorded above; P11.7 lists what it leaves. D15 and D18 wait for the tuner fix
 and the reruns of j and l; D19 is the owner's (the rule engaged in neither production configuration at 512³).
 
+**Status 2026-11-10.** P11.7 item 1 is done: the plan books a GPU lane's state after its hold of the device, and the
+face sums on their own. The bench's face runs had not exceeded the budget (their max RSS had been read as the peak;
+the correction is under the PS table above), so D15 and D18 do not wait for a tuner fix. Run j stands as measured. Run
+l ran with 4 in flight, at a peak footprint of 33.4 GB, where the corrected plan chooses 3: whether to run it again at
+3, or first to trim the lanes' common over-booking so that the plan allows 4, is the owner's.
+
 **P11.6 The sub-domain pipeline (the widened overlap).** **Dropped 2026-11-09 16:00 on the cheap experiment's
 numbers** (`p11-mc1.sh`; p11-placement.md section 5). One tessellation in flight with the look-ahead (`--partition 3
 3 3 --max-concurrent 1`, standard GPU exact + face, TNG100 z = 0, 512³): 811 s wall, 581 s with the parallel insert
@@ -2482,10 +2495,40 @@ rebuild that team by hand. What stays: the parallel insert's thread budget (core
 small `--max-concurrent`), at +4.4 GB per in-flight partition here (the tuner's term), and nothing at the auto plan's
 concurrency.
 
-**P11.7 What the bench leaves (recorded 2026-11-09 21:00, not started).**
-1. The PS tuner's face words (memory safety, first): the term missing on the GPU path under `--face-gradient`
-   (2·3·(3+2) int64 words = 240 B per sub-grid cell), and the same words booked as `Real` on the CPU path. Gate:
-   ps_auto_tune_check, `tests/dev/tune_report_set.sh`, ps_face_gradient_check P11; then runs j and l again.
+**P11.7 What the bench leaves (recorded 2026-11-09 21:00; item 1 done 2026-11-10, the rest not started).**
+1. **DONE 2026-11-10.** The PS tuner's face words (memory safety, first). As recorded on 2026-11-09: the term missing
+   on the GPU path under `--face-gradient` (2·3·(3+2) int64 words = 240 B per sub-grid cell), and the same words
+   booked as `Real` on the CPU path. As found: the default CPU path booked the words in full (in the single build 120
+   B of `Real` slots and 120 B of word excess); the half-size booking was `DTFE_GPU_FLOAT_MOMENTS=1`'s. The GPU path's
+   gap was real: with the face sums a lane's largest state comes after its hold of the device (the words the deposit
+   handed back, the face words made then, the `Real` grids of their conversion, less the freed words the allocator
+   returns), 514 against the hold's 388 B per sub-grid cell for the production selection, 902 against 388 in the
+   double build. A lane now books the larger (`gpuAfterHoldCellBytes`, `afterHoldReuse`). With it: the face sums are
+   booked on their own (`autoTuneFaceOn`, `autoTuneFaceBytes`; the double build and `DTFE_GPU_FLOAT_MOMENTS=1` lacked
+   the conversion's overlap and counted the sums in the deposit threads' private copies), the cell mean velocity an
+   `_a` face pass implies has its words (24 B per cell; a face pass of the cell-centre gradient alone deposits no
+   velocity and loses the grid the plan gave it), the one-domain peak walks the face conversion in every build, and
+   the mass flux's grid is out of the private copy. Measured on 64³ particles at grid 256 (2×2×2, two snapshots;
+   old plan / new plan / peak footprint, GB): GPU with 1 in flight 5.89 / 6.26 / 6.06 and 6.87 / 7.45 / 7.37; with 4
+   in flight 9.67 / 11.16 / 9.30 and 12.60 / 14.93 / 10.68; with 8 in flight 14.82 / 17.79 / 10.55 and 20.35 / 25.01
+   / 13.05; one
+   domain, CPU 14.10 / 13.50 / 8.95 and GPU 15.89 / 15.89 / 11.50. The new plan covers every measurement. Beyond one
+   lane it is far above them, as the old one was: every lane is booked at the largest partition's sub-grid and at its
+   own peak at once. So on the bench's command run l now plans 3 in flight (38.36 GB predicted; 4 would book 44.0 GB
+   of the 41.23) where it ran 4 at a peak footprint of 33.4 GB; h, i and j keep their plans. The review of the change
+   (the same day) found four things, corrected with it: the implied velocity is the `_a` pass's only (above; the
+   1024³ tune line of a cell-centre gradient on a GPU lane goes 209.56 → 201.05 GB); a GPU lane left out the grids of
+   a selected scalar and of its gradient (the production selection with `scalar_a scalarGradient_a`: 452 against 388
+   B per sub-grid cell in the hold, 538 against 506 after it; without the face sums the 1024³ tune line goes 160.92 →
+   162.62 GB); where the moments are float sums (the double build, `DTFE_GPU_FLOAT_MOMENTS=1`) the exact deposit's
+   multiplicity is one more `Real` grid in each deposit thread's private copy (double build, density alone, grid 256,
+   8 in flight: 7.87 GB planned where 5.20 were); and run_mode_check's M7b took the standard binary's team under
+   gentle for G sub-domains where it is the largest 2^a·3^b ≤ G. Gates: ps_auto_tune_check (new section Z) and
+   run_mode_check in both precisions, `tests/dev/tune_report_set.sh` (124 lines: the 110 from before, 11 for the face
+   plans, 3 for the review's cases; against the binaries of `9bfa39a` 13 move -- 8 of the face lines, the 3 review
+   lines and the double build's two "dens exact" lines that plan the private copies -- and none changes its partition
+   or its count in flight), ps_face_gradient_check in both precisions, the 2D suite. Open,
+   the owner's: runs j and l again; trimming the lanes' common over-booking, which would give l its fourth lane back.
 2. The face walk's second bound walk on the GPU path: hand the extraction's bounds to the fixed-point units instead
    of walking again (the same sums, so the face units and the bytes are unchanged).
 3. The two standard runs pinned to 2³ (the GPU at the CPU's plan), for the device rule's table (P11.4, D18).
@@ -2775,7 +2818,7 @@ rounding, while the pipeline still counts those grids as current), and PS-DTFE's
 performance with the free cores beside it). The drivers always pass `--run-mode`, so the scripts and the binaries ship
 together.
 
-**Status 2026-11-10: IMPLEMENTED, BUILT, BENCHED, GATES GREEN, in the tree on top of `39583f0`** (code, drivers,
+**Status 2026-11-10: IMPLEMENTED, BUILT, BENCHED, GATES GREEN, committed as `9bfa39a` on top of `39583f0`** (code, drivers,
 launcher, tests and docs edited in parallel, one file set per agent, by the contract's ownership table; then built,
 reviewed and fixed in a copy of the tree, and applied to the tree as one patch). Passed in the copy before the bench:
 G-build for the three pairs (`METAL=1`, `METAL=1 DOUBLE=1`, `DIM=2`), the Metal binaries checked with
@@ -2852,12 +2895,12 @@ Each decision has a recommended default, so the plan can proceed if no answer co
 | D12 | PS velocity derivatives | **write both** the mean-flow gradient (with the caustic sheets) and the regular part ⟨∇v⟩ | only one of them |
 | D13 | standard DTFE's gradient | **DECIDED 2026-11-09 (owner, 14:40): the face gradient is the default** (`--per-tet-gradient` / `DTFE_FACE_GRADIENT=0` keep the deposit's own; the drivers' `FACE_GRADIENT` empty = the binary's default, 0 = per-tet, 1 = face; bytecmp pins the per-tet route, the GPU suites pin it where they test the kernel's gradient; the production grids made before this date hold the per-tet gradient). The record of the decision's path: **keep the per-tet deposit as the default.** **Checked 2026-11-09 (phase R): the condition is not met.** The full-size check (`std100_099_face`: TNG100-3-Dark z = 0, 512³, GPU exact average, 3³) fails the test's bound in 133 of 243 records: 64,978 cells (4.8e-4) above 1e-4, worst 1.2e-2, 99.7% of them in one strip where the **deposit's** float32 region frame rounds (the P10 status); elsewhere, and on a CPU 256³ run with an exact frame, the two agree to an rms of 2–7e-7 with a sparse tail (attributed to float32, not tested). The face path replaces the deposit's gradient once P10.8 (the frame fix) is in and a `std100_099_face` rerun (8 min) passes the restated bound (the P10 status; the demo's G1 keeps 1e-4). Until then `--face-gradient` is the exact side where the frame rounds, except in the degenerate cells, where it keeps the flattened tetrahedron's flux that the deposit zeroes (neither route validated there). **At 6³ (`std100_099_split6_face`, 2026-11-09 06:42) the check nearly passes: 903 cells (6.7e-6) above 1e-4, worst 1.9e-3, worst record rms 2.9e-6, no strip; it meets the proposed restated bound, so the 3³ strip is the frame as predicted (the P10 status).** **P10.8 done 2026-11-09 (afternoon), and its 512³ rerun on the production 3³ plan meets the restated bound (294 cells above 1e-4 = 2.2e-6 pooled, worst record rms 5.4e-7, no degenerate cell, worst 5.7e-4; the P10 status), so the switch's condition holds. The switch itself — the face path as the default gradient of every standard run, which changes every standard gradient output (bytecmp re-taken for the Monte-Carlo runs' derivative files too) and the drivers' default — is the owner's call; `--face-gradient` stays opt-in until then.** | keep both paths |
 | D14 | default field set | **density, velocity, divergence, shear in both drivers (done 2026-11-07)**; the rest on request | — |
-| D15 | the PS deposit for the campaign (added 2026-11-09, phase R) | **measure first, then choose by the outputs the analysis needs; one deposit throughout a simulation.** The night does not support "CPU exact costs the same and the GPU is unreliable": like for like at TNG100-3-Dark z = 0 the two tie (1377 against 1379 s, different builds), at the eight other logged redshifts CPU exact took 1.21–1.43× the GPU wall (the 27 logged runs by ratio: 11.4 h against 9.8 h), the TNG50 run's length is attributed to its hand plan (mc 2 against the logged mc 6; no park room, so 58 spills), not to its GPU failures (about 4% of the wall), and both deposits conserve mass (mean ρ/ρ̄ = 1 to 3e-8, no empty cell). But the face grids (grad⟨v⟩, div p for R's void mass flux) exist only with CPU exact, whose stream counts and caustic bits are also fuller (32.9% multi-stream cells against 24.5%). The measurement that settles the cost: TNG50-3-Dark z = 0, CPU exact + `--face-gradient` + `--sample-points … --pts-vel-grad`, after an `--auto-tune-report` (0.75–2.4 h by scaling, up to 5.5 h; all 10 cores). A CPU exact command must carry the points (`ps100_099_face512`'s did not). **Bench 2026-11-09 (P11.1; the committed tree, TNG100-3-Dark z = 0, 512³, with the points):** exact CPU 1133 s, exact GPU 1156 s, sampled GPU 1260 s, sampled CPU 1644 s. With the face gradient, which since D17 also comes with the GPU exact deposit: exact CPU 1737 s (46.4 GB), exact GPU 1454 s (49.6 GB) -- both over the 41.2 GB budget, so rerun them after P11.7 item 1 before choosing. **Decided 2026-11-09 (evening, owner; D20): the exact deposit, the default of both binaries since; the device stays D18's, and the face runs still wait on P11.7 item 1.** | GPU sampled + points as logged (byte-reproducible at a given split; the TNG50 run, whose one pass fell back to the CPU, differs; faster at z > 0, about 7 cores left free), without the face grids |
+| D15 | the PS deposit for the campaign (added 2026-11-09, phase R) | **measure first, then choose by the outputs the analysis needs; one deposit throughout a simulation.** The night does not support "CPU exact costs the same and the GPU is unreliable": like for like at TNG100-3-Dark z = 0 the two tie (1377 against 1379 s, different builds), at the eight other logged redshifts CPU exact took 1.21–1.43× the GPU wall (the 27 logged runs by ratio: 11.4 h against 9.8 h), the TNG50 run's length is attributed to its hand plan (mc 2 against the logged mc 6; no park room, so 58 spills), not to its GPU failures (about 4% of the wall), and both deposits conserve mass (mean ρ/ρ̄ = 1 to 3e-8, no empty cell). But the face grids (grad⟨v⟩, div p for R's void mass flux) exist only with CPU exact, whose stream counts and caustic bits are also fuller (32.9% multi-stream cells against 24.5%). The measurement that settles the cost: TNG50-3-Dark z = 0, CPU exact + `--face-gradient` + `--sample-points … --pts-vel-grad`, after an `--auto-tune-report` (0.75–2.4 h by scaling, up to 5.5 h; all 10 cores). A CPU exact command must carry the points (`ps100_099_face512`'s did not). **Bench 2026-11-09 (P11.1; the committed tree, TNG100-3-Dark z = 0, 512³, with the points):** exact CPU 1133 s, exact GPU 1156 s, sampled GPU 1260 s, sampled CPU 1644 s. With the face gradient, which since D17 also comes with the GPU exact deposit: exact CPU 1737 s (46.4 GB max RSS, 30.4 GB peak footprint), exact GPU 1454 s (49.6 GB, 33.4 GB) -- both inside the 41.2 GB budget by footprint (corrected 2026-11-10: the max RSS had been read as the peak). **Decided 2026-11-09 (evening, owner; D20): the exact deposit, the default of both binaries since; the device stays D18's.** The face runs waited on P11.7 item 1, done on 2026-11-10: j stands as measured, l ran with 4 in flight where the corrected plan chooses 3. | GPU sampled + points as logged (byte-reproducible at a given split; the TNG50 run, whose one pass fell back to the CPU, differs; faster at z > 0, about 7 cores left free), without the face grids |
 | D16 | the frame fix before the campaign (added 2026-11-09, phase R) | **yes: P10.8 first, both parts.** The frame part is established by the 6³ face-check run (`std100_099_split6_face`, the P10 status): it removes the rounding strips (the 3³ plan's; a 6³ plan has none) and lets D13 switch under the restated bound. It does not, by itself, make the standard grids reproducible across splits: the ~1e-5 box-wide split dependence (the P2 status) is in the face pass too and is not the frame; its leading candidate, the per-tetrahedron gradient's float labelling dependence, is P10.8's second part, an hour to test and small to fix. Together they are what could bring the cross-split differences down to the float sum order (~1e-7); byte identity would need fixed-point sums as in PS-DTFE. Each moves the standard exact-average grids (bytecmp re-taken); effort M for the frame (kernel and host), S for the gradient; verify as P10.8 says. The PS campaign waits on it only if P10.8 finds the same frame in the PS deposits. **Done 2026-11-09 (the P10 status of that afternoon). PS-DTFE's deposits name their cells from the full box's corner and spacing in every partition (`ps_interpolation.cc`: `region` stays the box in a partition's options, the GPU's `boxLo` is the box's lower corner), so they have no sub-domain frame and the PS campaign never waited on this; the ~1e-5 PS-DTFE moved across splits at z = 1 (the P2 status) has another source, not established.** | run the standard campaign now with its ~1e-5 reproducibility across splits and builds recorded, D13 at "keep both paths" |
 | D17 | the PS face gradient on the GPU exact deposit (added 2026-11-09, after the owner's rule "one method, sampled and exact, on whichever device is faster") | **DONE 2026-11-09 16:00 (code; P11.5): `--face-gradient --gpu` runs, the face sums from one CPU walk after the GPU deposit, byte-identical mean-flow grids to the CPU run's; its speed against the CPU exact run is the bench's run m.** Before: the PS face gradient (the mean-flow derivatives and the mass flux the void analysis needs) exists only on the CPU exact deposit, which refuses `--gpu`; the GPU exact PS deposit has no face sums and has never run at production size, so its speed against the CPU's is unmeasured. Without it the PS campaign is CPU exact (1.2–1.4× the GPU sampled wall at z > 0, equal at z = 0, the face pass up to +21%). Item sketch (P10.9): the face sums as a CPU pass beside the GPU deposit (the standard binary's way: the pass walks the tessellation, which the GPU run keeps), the volume-weighted mean from the GPU's grids; effort M | leave the PS face gradient on the CPU; the campaign as D15 says |
 | D19 | run-to-run byte reproducibility vs the parallel insert's default (added 2026-11-09 16:30, P11.3) | **open, for the owner.** The default rule inserts tessellations of ≥ 1e6 points in parallel where cores are free (3.1× on the triangulation of a low-concurrency 512³ run, nothing at the auto plan's concurrency); two identical runs then differ at rounding in the CPU deposits' float sums, the face pass's last bit and PS-DTFE's velocity moments (the PS density and the GPU exact grids stay byte-identical). The owner's instruction of 13:50 ("turn the TBB insertion on for all binaries") stands; its premise -- the deposits no longer depend on the construction order -- holds for the GPU exact average and the PS density only. Alternative: `--sequential-triangulation` as the default and the parallel insert chosen by the drivers for runs with few tessellations in flight (1024³, `MAX_CONCURRENT` ≤ 2), or a canonical vertex order in PS-DTFE's deposit (the standard `mcVertexOrder`'s way) so its moments stop depending on the order (effort M). **Bench 2026-11-09 (P11.1):** the rule engaged in neither production configuration at 512³ (standard: the auto plan leaves one core per tessellation; PS-DTFE: 771,057 padded points per 6³ partition, below the threshold), so there the default costs no reproducibility and gains no time; the choice matters for the memory-bound runs with few tessellations in flight (1024³) | keep the rule (this tree) |
-| D18 | the device chosen by the program (added 2026-11-09, the same rule) | **open (the mechanism exists, the rule awaits the bench; P11.4).** The drivers' `DTFE_GPU=auto` (`gpu_auto_resolve`) already picks the device per build and, for PS-DTFE, per deposit; the binaries' `--gpu` stays explicit; the auto-tuner plans partitions and threads around it but never picks the device. After P10.8 the GPU and the CPU exact deposits of standard DTFE differ only by float rounding, so the choice is speed and memory alone: a rule in the tuner (a GPU build with a device present → `--gpu` for the standard exact average, which is 6.6× the CPU on the demo; the PS exact deposit stays on the CPU while D17 is open) with `--gpu`/`--no-gpu` as overrides; effort S. The drivers and the launcher then stop passing `--gpu`. **Bench 2026-11-09 (P11.1):** the demo's 6.6× does not carry to 512³: the standard run is CPU-bound, GPU exact (439 s at 3³) ties CPU exact (431 s at 2³) and the CPU sampled run is the fastest (315 s); for PS-DTFE exact GPU ties exact CPU (1156 against 1133 s) at a quarter of the CPU seconds, and D17 is done. The rule's table still needs the GPU at 2³ and the face runs under the corrected tuner (P11.7 items 1 and 3) | keep `--gpu` explicit (the drivers pass it) |
-| D20 | the `_a` average's flags and default (added 2026-11-09 evening, after the P11.1 bench) | **DECIDED 2026-11-09 (owner): `--exact` / `--sampled`, exact is the default for both estimators** ("exact is the right strategy across the board, but keep sampled as an option"). Reverses D2's canonical name `--exact-average`, which stays a deprecated alias of `--exact` in both binaries (as `--ps-exact-deposit` does in PS-DTFE), removed per D9; settles D15. The bench behind it: the exact average costs about the sampled one's wall without its sampling noise (standard DTFE 439 against 433 s on the GPU, 431 against 315 s on the CPU; PS-DTFE exact CPU 1133 s, GPU 1156 s against sampled GPU 1260 s, CPU 1644 s). The rules, what moves and the gates: P12. Implemented 2026-11-09, gates green on 2026-11-10, uncommitted | keep the sampled default with `--exact-average` opt-in (D2) |
+| D18 | the device chosen by the program (added 2026-11-09, the same rule) | **open (the mechanism exists, the rule awaits the bench; P11.4).** The drivers' `DTFE_GPU=auto` (`gpu_auto_resolve`) already picks the device per build and, for PS-DTFE, per deposit; the binaries' `--gpu` stays explicit; the auto-tuner plans partitions and threads around it but never picks the device. After P10.8 the GPU and the CPU exact deposits of standard DTFE differ only by float rounding, so the choice is speed and memory alone: a rule in the tuner (a GPU build with a device present → `--gpu` for the standard exact average, which is 6.6× the CPU on the demo; the PS exact deposit stays on the CPU while D17 is open) with `--gpu`/`--no-gpu` as overrides; effort S. The drivers and the launcher then stop passing `--gpu`. **Bench 2026-11-09 (P11.1):** the demo's 6.6× does not carry to 512³: the standard run is CPU-bound, GPU exact (439 s at 3³) ties CPU exact (431 s at 2³) and the CPU sampled run is the fastest (315 s); for PS-DTFE exact GPU ties exact CPU (1156 against 1133 s) at a quarter of the CPU seconds, and D17 is done. The rule's table still needs the GPU at 2³ (P11.7 item 3); the tuner's face booking is corrected (P11.7 item 1, 2026-11-10: the GPU face run now plans 3 in flight where it ran 4) | keep `--gpu` explicit (the drivers pass it) |
+| D20 | the `_a` average's flags and default (added 2026-11-09 evening, after the P11.1 bench) | **DECIDED 2026-11-09 (owner): `--exact` / `--sampled`, exact is the default for both estimators** ("exact is the right strategy across the board, but keep sampled as an option"). Reverses D2's canonical name `--exact-average`, which stays a deprecated alias of `--exact` in both binaries (as `--ps-exact-deposit` does in PS-DTFE), removed per D9; settles D15. The bench behind it: the exact average costs about the sampled one's wall without its sampling noise (standard DTFE 439 against 433 s on the GPU, 431 against 315 s on the CPU; PS-DTFE exact CPU 1133 s, GPU 1156 s against sampled GPU 1260 s, CPU 1644 s). The rules, what moves and the gates: P12. Implemented 2026-11-09, gates green on 2026-11-10, committed as `39583f0` | keep the sampled default with `--exact-average` opt-in (D2) |
 
 ## Not proposed, and why
 

@@ -70,13 +70,18 @@
 #     partition keeps the plan's 1, as do DTFE_DYNAMIC_CONCURRENCY=0 and a user's '--max-concurrent'; room for about
 #     five admits 2-6, not every waiting thread at once (the gate counts what it admitted); the double build keeps the
 #     plan's (its sums follow the thread order); a dynamic run killed after 3 partitions and resumed writes the same grids.
+#  Z) a GPU lane books what it holds AFTER the device's deposit when '--face-gradient' forms its face sums on the
+#     CPU (plan P11.7 item 1: the handed-back host words, the face sums' words and the Real grids their conversion
+#     builds, less the freed words the allocator hands back). Plan-only: the lane with the face sums minus the lane
+#     without, per booked sub-grid cell, is the planner's own after-hold minus hold (DTFE_AUTO_TUNE_DEBUG=1), and
+#     no less than 100 B/cell. GPU builds only.
 #
 # The 2^32 GPU sub-grid guard (ps_interpolation.cc) is NOT exercised here: it needs a real
 # >4.29e9-cell partition sub-grid, i.e. >32 GB of buffers. It mirrors the validated guard in
 # averaged_interpolation_1.cc line-for-line.
 #
 # Portable: runs on Linux too (tests/ci_suite.sh core) -- the peak RSS from getrusage, no macOS-only
-# command; the GPU-only parts (H3, I2/I3, L, M) SKIP on a CPU build.
+# command; the GPU-only parts (H3, I2/I3, L, M, W, Z) SKIP on a CPU build.
 #
 # Usage: tests/ps_auto_tune_check.sh [--no-build]
 
@@ -87,7 +92,7 @@ ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${ROOT}"
 source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double pair
 # the plans, reports and peaks asserted here were measured on the sampled deposit, which an '_a' run without a count
-# no longer gets by default: pin it for every run (both binaries read the pin; W's own '--exact' beats it)
+# no longer gets by default: pin it for every run (both binaries read the pin; W's and Z's own '--exact' beats it)
 export DTFE_EXACT_AVERAGE=0
 
 N="${N:-64}"; BOX="${BOX:-100.0}"
@@ -757,6 +762,50 @@ run_x "1 2 2, pancake" "${SNAP_XP}" --periodic --partition 1 2 2
 run_x "2 3 4, pancake" "${SNAP_XP}" --periodic --partition 2 3 4
 run_x "4 1 1, pancake" "${SNAP_XP}" --periodic --partition 4 1 1
 rm -f "${SNAP_XC}" "${SNAP_XW}" "${SNAP_XP}" "${TMP}"/at_x*
+
+# ---------- (Z) a GPU lane books the face sums it holds after the device's deposit ----------
+# With '--face-gradient' beside the GPU deposit a lane's largest state comes AFTER the hold: the host words the
+# device hands back, the fixed-point face sums made for the face walk, and the Real grids the conversion builds
+# beside them (ps_interpolation.cc psCpuFixedUnits, psFaceWalk, psFixedToReal), less the freed words the allocator
+# hands back (auto_tune.cc gpuAfterHoldCellBytes, afterHoldReuse). The plan booked the hold alone until 2026-11-10
+# (plan P11.7 item 1): the face sums added nothing to a GPU lane. Plan-only: a lane is p(2 in flight) - p(1); the
+# lane with the face sums minus the lane without, per booked sub-grid cell, against the planner's own
+# 'PS GPU lane grids' line -- in this selection 514 against 388 B/cell in the single build, 902 against 388 in the
+# double build (no fixed-point words to reuse), 582 against 212 under DTFE_GPU_FLOAT_MOMENTS=1. The report's GB
+# have two decimals: 4 B/cell of rounding on this sub-grid.
+echo ">> Z: a GPU lane books the face sums it holds after the device's deposit"
+run_z() {  # $1 = --max-concurrent, $2 = log, rest = options
+    local mc="$1" log="$2"; shift 2
+    env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 DTFE_AUTO_TUNE_DEBUG=1 "${BIN}" "${SNAP}" "${TMP}/at_z" --grid 256 \
+        --field density_a velocity_a gradient_a dispersion_a --ps-volume-weighted --input-format 105 --mpc-unit 1 \
+        --verbose 2 --periodic --exact --gpu --partition 2 2 2 --max-concurrent "${mc}" --auto-tune-report "$@" \
+        > "${log}" 2>&1 || true
+}
+run_z 1 "${TMP}/at_z_f1.log" --face-gradient
+if grep -q "GPU (--gpu)" "${TMP}/at_z_f1.log"; then
+    run_z 2 "${TMP}/at_z_f2.log" --face-gradient
+    run_z 1 "${TMP}/at_z_n1.log"; run_z 2 "${TMP}/at_z_n2.log"
+    r="$("${PY}" - "${TMP}/at_z_f1.log" "${TMP}/at_z_f2.log" "${TMP}/at_z_n1.log" "${TMP}/at_z_n2.log" <<'PYEOF'
+import re, sys
+t = [open(p, errors="replace").read() for p in sys.argv[1:5]]
+p = [re.search(r"^AUTO-TUNE-REPORT .*predicted_gb=([0-9.]+) ", x, re.M) for x in t]
+cells = re.findall(r"booked sub-grid: (\d+) cells", t[0])
+lane = re.findall(r"PS GPU lane grids: hold (\d+) B/cell, after the hold (\d+) B/cell", t[0])
+if all(p) and cells and lane:
+    g = [float(m.group(1)) for m in p]
+    extra = ((g[1] - g[0]) - (g[3] - g[2]))*1e9/int(cells[-1])
+    print(f"{extra:.0f} {int(lane[-1][1]) - int(lane[-1][0])} {lane[-1][0]} {lane[-1][1]}")
+else:
+    print("none none none none")
+PYEOF
+)"
+    read -r zx zd zh za <<< "${r}"
+    check "Z the plan books a GPU lane's state after the hold: +${zx} B/cell with the face sums (the planner's after-hold ${za} - hold ${zh} = ${zd} B/cell)" \
+          "$([ "${zx}" != none ] && awk -v x="${zx}" -v d="${zd}" 'BEGIN{exit !(d >= 100 && x >= d - 10 && x <= d + 10)}' && echo 1 || echo 0)"
+else
+    echo "   SKIP  Z (this build has no GPU backend)"
+fi
+rm -f "${TMP}"/at_z*
 
 echo "------------------------------------------------------------"
 if [ "${FAILS}" -gt 0 ]; then

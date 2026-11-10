@@ -1,4 +1,44 @@
 UNRELEASED (since 1.0.0)
+- PS-DTFE's auto-tuner books the face sums of '--face-gradient' where a pass holds them (docs/cleanup-plan.md P11.7
+  item 1, 2026-11-10). With the face sums a GPU lane's largest state comes AFTER its hold of the device: the host
+  words the deposit handed back, the face sums' own words, made only then for the CPU's face walk, and the Real grids
+  their conversion builds beside them, less the freed words the allocator hands back. The plan booked the hold alone.
+  A lane now books the larger of the two -- 514 against 388 B per sub-grid cell for the production selection in the
+  single build, 902 against 388 in the double build -- and DTFE_AUTO_TUNE_DEBUG=1 prints both ('PS GPU lane grids:
+  hold .. B/cell, after the hold .. B/cell'). Corrected with it, all under '--face-gradient' only: the face sums are
+  int64 words in every build, shared by the deposit threads, so they are booked on their own and no longer with the
+  moment words -- the double build and DTFE_GPU_FLOAT_MOMENTS=1 booked no room for their conversion and counted them
+  in every deposit thread's private copy, which holds none, and DTFE_GPU_FLOAT_MOMENTS=1 in the single build booked
+  the words at half their size (120 B per cell for 240); the cell mean velocity an '_a' face pass deposits without
+  being selected has its words booked (24 B per cell), and a face pass of the cell-centre gradient alone, which
+  deposits no velocity, loses the velocity grid the plan gave it; the one-domain peak walks the face conversion in
+  every build; and a deposit thread's private copy no longer counts the mass flux's grid, which the normalization
+  makes. Found by the review of this change and corrected with it, with or without the face sums: a GPU lane books
+  the grids of a selected scalar and of its gradient, which it left out (the production selection with 'scalar_a
+  scalarGradient_a': 452 against 388 B per sub-grid cell during the hold, 538 against 506 after it with the face
+  sums); and where the moments are float sums (the double build, DTFE_GPU_FLOAT_MOMENTS=1) a deposit thread's private
+  copy counts the exact deposit's multiplicity grid, which it holds there (the double build, density alone at grid
+  256 with 8 partitions in flight: 7.87 GB planned where 5.20 were). MEASURED (64^3 particles at grid 256, 2x2x2, two
+  snapshots; predicted against the peak memory footprint): with one GPU lane in flight 6.26 and 7.45 GB predicted
+  for 6.06 and 7.37 GB measured, where the old plan's 5.89 and 6.87 GB were under; with 4 and 8 lanes the plan stays
+  well above the measurement (8 lanes: 25.0 GB for 13.1), as it did before (20.4), because every lane is booked at
+  the largest partition's sub-grid and at its own peak at once. WHAT MOVES: plans with
+  '--face-gradient', GPU plans with a scalar field, and exact-deposit plans whose moments are float sums where the
+  deposit threads hold private copies (small sub-grids); no grid changes, and no line of tests/dev/tune_report_set.sh
+  changes its partition or its count in flight. The P11 bench's GPU face run now plans 3 partitions in flight (38.4 GB
+  predicted of a 41.2 GB budget) where it ran 4 at a peak footprint of 33.4 GB. Tests: ps_auto_tune_check.sh Z (the
+  plan-only difference a face pass makes to a GPU lane is the planner's own after-hold minus hold);
+  tests/dev/tune_report_set.sh has 14 more lines (124 in all: 11 face plans, 3 for the review's cases); against the
+  binaries before this change 13 lines move (8 of the face plans, the 3 review lines and the double build's two
+  'dens exact' lines that plan the private copies).
+- DTFE_TRIANGULATION_THREADS=N keeps its N threads under '--run-mode gentle' and 'balanced' (2026-11-10). The pin is
+  an explicit lever like OMP_NUM_THREADS, but the insert's count was still cut by the mode's lowered thread budget
+  (PS-DTFE under gentle on a 10-thread machine: 4 threads for a pin of 5). It now has the caps it had before the
+  modes: OMP_NUM_THREADS, and the machine's threads shared among the tessellations built at once. So the standard
+  binary's team under gentle (4 sub-domains at a time on that machine) inserts on min(N, threads / team) = 2 threads
+  each, where it fell back to the sequential insert. The default rule's count follows the mode as before.
+  tests/run_mode_check.sh M7b. Also: 'make library' copies env_knobs.h and run_mode.h into DTFE_include (message.h and
+  user_options.h include them; a program that included the installed DTFE.h did not compile).
 - RUN MODES: '--run-mode gentle|balanced|performance' in both binaries (every build; docs/cleanup-plan.md P13, the
   owner's request of 2026-11-09, designed and decided 2026-11-10) says how hard a run may lean on the machine. The
   resolution, first match wins: the flag (exact lower case; a second one is refused); the new environment variable
@@ -138,10 +178,11 @@ UNRELEASED (since 1.0.0)
   sampled CPU 1644 s; with --face-gradient 1737 s on the CPU and 1454 s with --gpu. The run that equals the P10.8
   reference in configuration reproduces its density, velocity and velocity gradient byte for byte. The parallel
   insert's default rule engaged in none of these runs (one core per tessellation in the standard plan; 771,057
-  padded points per partition in PS-DTFE's). KNOWN, NOT YET FIXED: PS-DTFE's auto-tuner under-books
-  '--face-gradient' -- the face words are missing from the plan under --gpu and counted at half their size on the CPU
-  in the single build -- so those two runs peaked at 49.6 and 46.4 GB against a 41.2 GB budget. Until the plan is
-  corrected (P11.7), give such a run a smaller DTFE_MEM_BUDGET_GB or '--max-concurrent'.
+  padded points per partition in PS-DTFE's). CORRECTED 2026-11-10: this entry said that the two face runs peaked at
+  49.6 and 46.4 GB against a 41.2 GB budget. Those are maximum resident set sizes, which also count the resident pages
+  of the '--scratch-dir' files (the full grids, which the plan leaves out of RAM); the runs' peak memory footprints
+  were 33.4 and 30.4 GB, inside the budget. What the tuner did mis-book under '--face-gradient' is in the entry of
+  2026-11-10 on its face sums (above).
 - Standard DTFE's velocity gradient -- and the divergence, shear, vorticity and V-web built on it -- comes from the
   EXACT FACE INTEGRALS of the interpolant by default (docs/cleanup-plan.md D13, decided 2026-11-09 once P10.8's
   full-size check passed): formed in double, the same grids for every deposit (sampled, exact) and device, the

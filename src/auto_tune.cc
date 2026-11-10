@@ -200,6 +200,8 @@ struct AutoTunePS
     bool haloRelease  = false;     // --ps-halo-release (sampled deposit: the released-tet multiplicity grid)
     bool fixedMerge   = false;     // --ps-merge fixed-point: the summed full grids are 9 B integer words + carries
     bool faceGradient = false;     // --face-gradient (docs/cleanup-plan.md P10): the face sums (both binaries)
+    Field const *meanFlowField = nullptr;   // ... and the pass that then deposits the cell mean velocity unselected
+                                            // (the '_a' field: autoTuneFaceVelocity; not set = either pass)
 };
 
 // The PS deposit's MOMENT grids as 64-bit fixed-point sums (ps_deposit_params.h PSFxGrid): on by
@@ -208,6 +210,34 @@ struct AutoTunePS
 inline bool autoTunePSMomentsFixed()
 {
     return not Env::flag( { "DTFE_GPU_FLOAT_MOMENTS" } );
+}
+
+// '--face-gradient' in PS-DTFE (docs/cleanup-plan.md P10): the pass deposits the face sums -- ps_interpolation.cc
+// fx.faceS, faceN and faceP, 2 x NO_DIM x (3 + 1 + 1) components per sub-grid cell. Their accumulators are int64
+// words in EVERY build, shared by the deposit threads (no private copies), made only after a GPU lane's hold of the
+// device (psCpuFixedUnits; psFaceWalk fills them on the CPU) and converted to their Real grids
+// (Quantities::face_velocity, face_coverage, face_momentum) after the moment grids. So the planner books them on
+// their own (AutoTunePSInputs::faceR and fxFace) and not with the moment words, which only the single build holds
+// as words.
+inline bool autoTuneFaceOn(Field &f, AutoTunePS const &ps)
+{
+    return f.selected() and ps.phaseSpace and ps.faceGradient and ps.exactDeposit and ps.volumeWeighted
+           and ( f.velocity_gradient or f.velocity_divergence or f.velocity_shear or f.velocity_vorticity
+                 or f.velocity_vweb );
+}
+
+// ... and whether such a pass deposits the cell mean velocity, selected or not: the '_a' pass does (DTFE.cpp
+// implies 'velocity' for aField, after the tuner has run); a face pass of the other field runs without it
+// (ps_interpolation.cc haveVel goes by the field's own flag, and the face gradient reads the face sums only).
+inline bool autoTuneFaceVelocity(Field &f, AutoTunePS const &ps)
+{
+    return autoTuneFaceOn( f, ps ) and ( ps.meanFlowField == nullptr or ps.meanFlowField == &f );
+}
+
+// ... and the face sums' Real grids, in bytes per cell (their words: 8 B per component, x 8 / sizeof(Real))
+inline double autoTuneFaceBytes(Field &f, AutoTunePS const &ps)
+{
+    return autoTuneFaceOn( f, ps ) ? 2.*NO_DIM*(noVelComp + 2.)*double(sizeof(Real)) : 0.;
 }
 
 // One pass's MOMENT accumulators in the PS deposit, in Real bytes per sub-grid cell: the grids
@@ -227,7 +257,7 @@ inline double autoTuneFxMomentBytes(Field &f, AutoTunePS const &ps)
                             or f.velocity_divergence or f.velocity_shear or f.velocity_vorticity
                             or f.velocity_vweb or f.scalar or f.scalar_gradient;
     double b = 0.;
-    if ( f.velocity or (f.velocity_dispersion and not ps.volumeWeighted) ) b += 3.*R;
+    if ( f.velocity or autoTuneFaceVelocity( f, ps ) or (f.velocity_dispersion and not ps.volumeWeighted) ) b += 3.*R;
     if ( gradient ) b += 9.*R;
     if ( f.velocity_dispersion ) b += 6.*R;
     if ( f.scalar ) b += noScalarComp*R;
@@ -236,9 +266,7 @@ inline double autoTuneFxMomentBytes(Field &f, AutoTunePS const &ps)
     if ( ps.volumeWeighted and f.velocity_dispersion ) b += 3.*R + (densityGrid ? 0. : R);   // disp_velocity (+ disp_weight)
     if ( ps.exactDeposit ) b += R;                                                           // the exact multiplicity
     if ( ps.haloRelease and not ps.exactDeposit ) b += R;                                    // the released multiplicity
-    // --face-gradient: the face sums' int64 words (ps_interpolation.cc fx.faceS / faceN: 2 x NO_DIM x (3 + 1) per cell,
-    // in EVERY build), the same "as many again" as the Real grids they become
-    if ( ps.faceGradient and ps.exactDeposit and ps.volumeWeighted and gradient ) b += 2.*NO_DIM*(noVelComp + 2.)*R;
+    // (not the face sums: words in every build, booked on their own -- autoTuneFaceBytes above)
     return b;
 }
 
@@ -256,7 +284,8 @@ inline std::vector<double> autoTuneFxGrids(Field &f, AutoTunePS const &ps)
     bool const needWeight = f.velocity or f.velocity_gradient or f.velocity_dispersion
                             or f.velocity_divergence or f.velocity_shear or f.velocity_vorticity
                             or f.velocity_vweb or f.scalar or f.scalar_gradient;
-    if ( f.velocity or (f.velocity_dispersion and not ps.volumeWeighted) ) g.push_back( 3.*R );   // PS_FX_MOM
+    if ( f.velocity or autoTuneFaceVelocity( f, ps ) or (f.velocity_dispersion and not ps.volumeWeighted) )
+        g.push_back( 3.*R );                                                                  // PS_FX_MOM
     if ( f.velocity_dispersion ) g.push_back( 6.*R );                                         // PS_FX_M2
     if ( gradient ) g.push_back( 9.*R );                                                      // PS_FX_GRAD
     if ( needWeight and not (densityGrid and not ps.volumeWeighted) ) g.push_back( R );       // PS_FX_MOMW
@@ -269,14 +298,7 @@ inline std::vector<double> autoTuneFxGrids(Field &f, AutoTunePS const &ps)
     if ( f.scalar ) g.push_back( noScalarComp*R );                                            // PS_FX_SCAL
     if ( f.scalar_gradient ) g.push_back( noScalarGradComp*R );                               // PS_FX_SG
     if ( ps.haloRelease and not ps.exactDeposit ) g.push_back( R );                           // PS_FX_RM
-    // --face-gradient: the face sums' words, converted after the moment grids (ps_interpolation.cc fx.faceS, then
-    // fx.faceN; autoTuneFxMomentBytes counts the same)
-    if ( ps.faceGradient and ps.exactDeposit and ps.volumeWeighted and gradient )
-    {
-        g.push_back( 2.*NO_DIM*noVelComp*R );
-        g.push_back( 2.*NO_DIM*R );
-        g.push_back( 2.*NO_DIM*R );   // fx.faceP (the mass flux)
-    }
+    // (the face sums' words are converted after these, in every build: oneDomainPeak walks them itself)
     return g;
 }
 
@@ -347,16 +369,13 @@ inline double autoTuneMergeGrownBytes(Field &f, AutoTunePS const &ps)
     if ( not f.selected() or not ps.phaseSpace ) return 0.;
     double const R = double(sizeof(Real));
     bool const densityGrid = f.density or f.velocity_tweb;
-    bool const gradient = f.velocity_gradient or f.velocity_divergence or f.velocity_shear
-                          or f.velocity_vorticity or f.velocity_vweb;
     bool const needWeight = f.velocity or f.velocity_gradient or f.velocity_dispersion
                             or f.velocity_divergence or f.velocity_shear or f.velocity_vorticity
                             or f.velocity_vweb or f.scalar or f.scalar_gradient;
     double b = 0.;
     if ( needWeight and not (densityGrid and not ps.volumeWeighted) ) b += R;   // mass_weight
     if ( ps.volumeWeighted and f.velocity_dispersion ) b += R + 3.*R;           // disp_weight + disp_velocity
-    if ( ps.faceGradient and gradient and ps.exactDeposit and ps.volumeWeighted )
-        b += 2.*NO_DIM*(noVelComp + 2.)*R;                                        // face_velocity, _coverage, _momentum
+    b += autoTuneFaceBytes( f, ps );                                            // face_velocity, _coverage, _momentum
     if ( ps.fixedMerge ) b = b / R * 9.;                                          // int64 word + int8 carry each
     return b;
 }
@@ -404,12 +423,14 @@ inline double autoTuneBytesPerCell(Field &f, AutoTunePS const &ps, int const pha
     if ( f.velocity_dispersion ) b += 6.*R;
     if ( f.scalar ) b += noScalarComp*R;
     if ( f.scalar_gradient ) b += noScalarGradComp*R;
-    // --face-gradient (docs/cleanup-plan.md P10), the deposit phase: PS-DTFE's merged face sums (Quantities::face_velocity
-    // + face_coverage, 2 x NO_DIM x (3 + 1) Real per cell, freed in the normalization) and the cell mean velocity the
-    // mean-flow gradient needs, written or not. (Standard DTFE's face pass holds 9 doubles per cell of the sub-domain it
-    // interpolates, not of the full grid: the standard planner books it per sub-domain, AutoTuneStdInputs::faceCell.)
-    if ( ps.faceGradient and gradient and phase == 0 and ps.phaseSpace and ps.exactDeposit and ps.volumeWeighted )
-        b += 2.*NO_DIM*(noVelComp + 2.)*R + ( f.velocity ? 0. : 3.*R ) + R;   // (+ the mass flux's output grid)
+    // --face-gradient (docs/cleanup-plan.md P10), the deposit phase: PS-DTFE's merged face sums (Quantities::face_velocity,
+    // face_coverage and face_momentum, 2 x NO_DIM x (3 + 1 + 1) Real per cell, freed in the normalization:
+    // autoTuneFaceBytes) and the cell mean velocity the mean-flow gradient needs, written or not. (Standard DTFE's face
+    // pass holds 9 doubles per cell of the sub-domain it interpolates, not of the full grid: the standard planner books
+    // it per sub-domain, AutoTuneStdInputs::faceCell.)
+    if ( phase == 0 and autoTuneFaceOn( f, ps ) )
+        b += autoTuneFaceBytes( f, ps ) + ( ( f.velocity or not autoTuneFaceVelocity( f, ps ) ) ? 0. : 3.*R )
+             + R;                                                           // (+ the mass flux's output grid)
 
     if ( phase == 1 )
         b += autoTuneDerivedBytes( f );   // derived fields: allocated only after the deposit loop (above)
@@ -1623,7 +1644,8 @@ inline void autoTuneScratchSpaceCheck(User_options &u, bool const scratchOn, dou
 }
 
 // The bytes per sub-grid cell of one CPU deposit thread's private copy: the larger pass's grids that are not
-// fixed-point sums.
+// fixed-point sums. Never the face sums (words the threads share, in every build: ps_interpolation.cc accBytes
+// counts neither them nor the mass flux's grid, which the normalization makes).
 inline double autoTunePSCopyCell(User_options &u, AutoTunePS &ps, bool const momFx)
 {
     double copyCell = 0.;
@@ -1633,8 +1655,12 @@ inline double autoTunePSCopyCell(User_options &u, AutoTunePS &ps, bool const mom
         double const R = double(sizeof(Real));
         bool const massFx = ps.phaseSpace and sizeof(Real) == 4 and ( f->density or f->velocity_tweb );   // as fxCell
         double const fxPass = ( ps.phaseSpace and sizeof(Real) == 4 and momFx ) ? autoTuneFxMomentBytes(*f, ps) : 0.;
+        double const facePass = autoTuneFaceOn(*f, ps) ? autoTuneFaceBytes(*f, ps) + R : 0.;   // (+ the mass flux's grid)
+        // the exact multiplicity is a Real sum every thread copies where the moments are float sums (exactMult in
+        // accBytes; it becomes the stream count, the slot the count bytes take out, only at the export)
+        double const exactCopy = ( ps.phaseSpace and ps.exactDeposit and not ( sizeof(Real) == 4 and momFx ) ) ? R : 0.;
         copyCell = std::max( copyCell, autoTuneBytesPerCell(*f, ps, 0) - autoTunePSCountBytes(*f, ps, 0)
-                                       - ( massFx ? R : 0. ) - fxPass );
+                                       - ( massFx ? R : 0. ) - fxPass - facePass + exactCopy );
     }
     return copyCell;
 }
@@ -1684,7 +1710,9 @@ struct AutoTunePSInputs
     double gridB = 0.;               // the GPU grids' bytes per cell and copy
     bool psDensity = false;          // a density grid is selected
     double fxCell = 0.;              // the fixed-point mass words' extra bytes per sub-grid cell
-    double fxMom = 0.;               // ... the moment words' (the larger pass)
+    double fxMom = 0.;               // ... the moment words' (the larger pass; without the face sums)
+    double faceR = 0.;               // '--face-gradient': the face sums' Real grids per sub-grid cell (the larger pass)
+    double fxFace = 0.;              // ... and what their words, int64 in EVERY build, take beyond those
     double copyCell = 0.;            // one CPU deposit thread's private copy per sub-grid cell
     double threadScratch = 0.;       // the deposit threads' per-tetrahedron sample lists, in all
 };
@@ -1704,9 +1732,10 @@ struct AutoTunePSPlanner : AutoTunePSInputs
     // grid's conversion at once (38.8 GB for a 768^3 run that peaks at 22.9). Modelled per pass (u, then a), in
     // ps_interpolation.cc's order: during the loop the fixed-point words (the density's 8 B, each moment grid's 2 x
     // its Real bytes), the int stream count, the flags and the Real accumulators that are not fixed-point sums; after
-    // it each moment grid's Real grid beside its words, the words freed grid by grid (psFxToReal), then the density
-    // from the mass words; then the export grids ('.streams' or '.tetTouch', '.hidden_streams', the caustic bits, the
-    // volume-weighted dispersion's density copy).
+    // it each moment grid's Real grid beside its words, the words freed grid by grid (psFxToReal), then the face
+    // sums' the same way (words in every build: autoTuneFaceBytes), then the density from the mass words; then the
+    // export grids ('.streams' or '.tetTouch', '.hidden_streams', the caustic bits, the volume-weighted dispersion's
+    // density copy).
     // A freed block under 4 GiB stays in the footprint (macOS's allocator keeps it, serving later requests of at
     // least half its size), so the export grids pile on top of freed words smaller than that; the next pass reuses
     // what the previous one freed, and the derived fields come last. Bytes, for 'cells' sub-grid cells.
@@ -1725,17 +1754,20 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             std::vector<double> const G = fxOn ? autoTuneFxGrids(*f, ps) : std::vector<double>();
             double sumG = 0.;
             for (double const g : G) sumG += g;
+            double const faceRf = autoTuneFaceBytes(*f, ps), faceW = faceRf * 8. / R;   // the face sums' grids, words
             double const mask = ps.caustics ? double(sizeof(PSCausticClass::CausticMask)) : 0.;
             double const E = R + R + ( ps.caustics ? R : 0. )                                    // the export grids
                            + ( ( ps.volumeWeighted and f->velocity_dispersion and massFx ) ? R : 0. );
             // the loop's temporaries: the pass's slots, less the grids made after it, plus the words and the int count
-            double const pre = autoTuneBytesPerCell(*f, ps, 0) - E - sumG - ( massFx ? R : 0. )
-                             + 2.*sumG + ( massFx ? 8. : 0. ) + double(sizeof(int));
+            double const pre = autoTuneBytesPerCell(*f, ps, 0) - E - sumG - ( massFx ? R : 0. ) - faceRf
+                             + 2.*sumG + ( massFx ? 8. : 0. ) + faceW + double(sizeof(int));
             double const reuse = std::min( kept, pre*cells );   // ... in what the previous pass freed
             kept -= reuse;
             live += pre*cells;
             peak = std::max( peak, live + kept );
             for (double const g : G) { alloc( g ); release( 2.*g ); }
+            if ( faceRf > 0. )   // fx.faceS, faceN, faceP: each one's Real grid beside its words, the words then freed
+                for (double const c : { double(noVelComp), 1., 1. }) { alloc( 2.*NO_DIM*c*R ); release( 2.*NO_DIM*c*8. ); }
             if ( massFx ) { alloc( R ); release( 8. ); }
             alloc( E );
             release( double(sizeof(int)) + 2. + mask );   // the int count, the flags, the caustic mask (pass end)
@@ -1764,16 +1796,18 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         {
             double cpu = 0., gpuPre = 0.;
             mixedLane( n, cpu, gpuPre );
-            return m + std::max( gpuPre, cpu );
+            return m + std::max( cpu, gpuPre + gpuAfterHoldCellBytes( n )*subCells );   // (the latter 0 without a face pass)
         }
         if ( metalActive )
         {
             // flat tet arrays (the 16-float record 64 + masses 4 + the finite-cell ordinal 4 B/tet,
             // + vels 48 when velocity-derived grids are requested; the cost-sort permutes IN PLACE,
             // so no gather copy) + the PSGpuGrids host and device copies of the selected grids
-            // (gpuCellBytes; under --grid-window held once, snapshotBytes)
+            // (gpuCellBytes; under --grid-window held once, snapshotBytes) -- or what the lane holds once its
+            // deposit has let go of the device, where a face pass makes that the larger (gpuAfterHoldCellBytes)
             double const perTet = (kGpuTetBytes + (psVel or psDisp or psGrad ? kGpuTetVelBytes : 0.)) * kGpuTetSlack;
-            m += perTet*kTetsPerVertex*nOwn + ( u.psWindowOn ? 0. : gpuCellBytes()*subCells );
+            m += perTet*kTetsPerVertex*nOwn
+               + ( u.psWindowOn ? 0. : std::max( gpuCellBytes(), gpuAfterHoldCellBytes( n ) )*subCells );
             // the exact deposit (--exact) runs depositExactItems (ps_metal_host.cc): a per-tet weight total
             // (4 B) + the item list, 8 B per 16 cells of a tet's bbox window -- ~20x the tet's
             // volume in cells on the crossed-waves benchmark, at least one item -- capped at 32M items
@@ -1798,7 +1832,9 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             // their conversion after the loop only where that exceeds the copies or slab lists, freed by then. A
             // private copy holds neither the words nor the shared counts, flags and masks (autoTunePSCountBytes), so
             // the default single build has copyPriv = 0 and every core in the copy mode, as ps_interpolation.cc's
-            // accBytes; only the float sums (double build, DTFE_GPU_FLOAT_MOMENTS=1) book copies.
+            // accBytes; only the float sums (double build, DTFE_GPU_FLOAT_MOMENTS=1) book copies. The face sums are
+            // words in every build: fxFace beyond their Real grids during the deposit, and those grids (faceR)
+            // beside the words at the conversion.
             double const copyOne = bCellDeposit*subCells;
             double const copyPriv = std::max( 0., copyCell )*subCells;   // (copyCell above: one pass's copy)
             int const copyThreads = copyPriv > 0.
@@ -1812,7 +1848,8 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             if ( n == 1 and not userPartitionOn and not scratchOn )
                 m += helpers + threadScratch + std::max( 0., oneDomainPeak( subCells ) - bCell*subCells );
             else
-                m += copyOne + (fxCell + fxMom)*subCells + std::max( helpers, (fxCell + fxMom)*subCells );
+                m += copyOne + (fxCell + fxMom + fxFace)*subCells
+                   + std::max( helpers, (fxCell + fxMom + faceR)*subCells );
         }
         return m;
     }
@@ -1822,9 +1859,10 @@ struct AutoTunePSPlanner : AutoTunePSInputs
        deposit holds the GPU (ps_metal_host.cc: the buffers are made once ctxMutex is taken, the output grids allocated
        only then), so one lane at a time holds them: snapshotBytes adds them once. A lane waiting for the GPU holds
        only what is built before the lock -- the flat tet arrays and the exact items -- and a CPU lane its deposit's
-       sub-grids with the copies or slab lists; a GPU lane after its hold keeps host grids no larger than those. So a
-       lane books the larger of the two (partitionBytes), each with its branch's expressions above, the GPU's without
-       its grids (gpuCellBytes). For a split only (n >= 2): one domain has no partition loop, and so no share. */
+       sub-grids with the copies or slab lists; a GPU lane after its hold keeps host grids no larger than those,
+       unless its pass makes the face sums then (gpuAfterHoldCellBytes, beside its arrays). So a lane books the larger
+       of the two (partitionBytes), each with its branch's expressions above, the GPU's without its grids
+       (gpuCellBytes). For a split only (n >= 2): one domain has no partition loop, and so no share. */
     void mixedLane(int n, double &cpu, double &gpuPre) const
     {
         double const nOwn = N / partsOf( n );
@@ -1848,7 +1886,7 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             ? std::min( cores, 1 + int( std::min( double(cores), psDepositThreadBytes() / copyPriv ) ) ) : cores;
         double const slabBytes = kTetsPerVertex * nPad * ( 8. + 1. + 2.*4. + 20. );
         double const helpers = 2 * copyThreads < cores ? slabBytes : double(copyThreads - 1) * copyPriv;
-        cpu = copyOne + (fxCell + fxMom)*subCells + std::max( helpers, (fxCell + fxMom)*subCells );
+        cpu = copyOne + (fxCell + fxMom + fxFace)*subCells + std::max( helpers, (fxCell + fxMom + faceR)*subCells );
     }
 
     // The GPU deposit's host snapshot (ps_metal_host.cc GpuSnapshot): to resume a failed command buffer
@@ -1861,7 +1899,8 @@ struct AutoTunePSPlanner : AutoTunePSInputs
     // --grid-window: every partition's sub-grid is the whole window (subGridCells), and the grids of the deposit
     // running are held once in the same way -- the device and host copies (gpuCellBytes) and, beside them, the
     // partition's own sub-grids (bCellDeposit: its density, counts and flags; fxCell + fxMom: the fixed-point words
-    // while they are converted), all freed and kept by the allocator for the next partition's deposit. In flight
+    // while they are converted; fxFace: a face pass's words, or all it holds after the hold where that is more),
+    // all freed and kept by the allocator for the next partition's deposit. In flight
     // and waiting, a partition holds only its tessellation (with the window's cells counted per partition, three
     // in flight would book them three times: +20% at 3^3 over 2.1M particles on a 4096^2 window, measured).
     // A mixed run's split (mixedLane) holds the device and host copies (gpuCellBytes) the same way: the deposit holding
@@ -1871,7 +1910,9 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         if ( not metalActive ) return 0.;
         double const subCells = subGridCells( n );   // the same sub-grid as partitionBytes()
         double const nTet = kTetsPerVertex * N / partsOf( n );
-        double const window = u.psWindowOn ? ( gpuCellBytes() + bCellDeposit + fxCell + fxMom )*subCells : 0.;
+        double const window = u.psWindowOn
+            ? ( bCellDeposit + std::max( gpuCellBytes() + fxCell + fxMom + fxFace, gridB + 4. + fxFace + faceR ) )*subCells
+            : 0.;
         if ( mixed and n >= 2 and not u.psWindowOn )   // + the lock holder's device and host grids, once
             return (gridB + 4.)*subCells + (psExact ? (momFx ? 12. : 8.) : 4.)*nTet + window + gpuCellBytes()*subCells;
         return (gridB + 4.)*subCells + (psExact ? (momFx ? 12. : 8.) : 4.)*nTet + window;
@@ -1886,6 +1927,65 @@ struct AutoTunePSPlanner : AutoTunePSInputs
     {
         double const hostFx = ( ps.phaseSpace and not psDensity ) ? 4. : 0.;
         return 2.*gridB + 4. + hostFx;
+    }
+
+    // A GPU lane AFTER its hold of the device, per sub-grid cell, when its pass makes the face sums ('--face-gradient';
+    // 0 otherwise). The device grids are gone by then; the host keeps what the deposit handed back (gridB + 4: the
+    // mass and moment words), and only now come the face sums' words (ps_interpolation.cc psCpuFixedUnits, filled by
+    // psFaceWalk on the CPU; fxFace + faceR). Then all of them are converted grid by grid into the partition's
+    // sub-grids (psFixedToReal: a grid's Real values allocated, its words freed), the allocator keeping the freed
+    // words. The sub-grids are the partition's own (bCellDeposit; one domain: the run's grids, in 'fixed', as in the
+    // CPU branch), less what the conversion takes from freed words instead (afterHoldReuse). Every lane in flight
+    // can be in that state at once -- the walk is CPU work, nothing serializes it -- so it is booked per lane, in
+    // place of the hold where it is the larger: 514 against 388 B/cell in the production selection (density,
+    // velocity, gradient and volume-weighted dispersion, exact). Without the face sums nothing is allocated after
+    // the hold but the Real grids the words become, and the hold's booking has covered every run measured: this
+    // term is the face pass's alone.
+    double gpuAfterHoldCellBytes(int n) const
+    {
+        if ( faceR <= 0. ) return 0.;
+        double const own = ( n == 1 and not userPartitionOn and not scratchOn ) ? 0. : bCellDeposit;
+        return own + gridB + 4. + fxFace + faceR - afterHoldReuse( subGridCells( n ) );
+    }
+
+    // The Real bytes per sub-grid cell that the conversion after a face pass's GPU deposit takes from freed words and
+    // not from new memory, for sub-grids of 'cells' cells: the single build with fixed-point moments, where the
+    // device's words are the host's (swapped in) and psFixedToReal converts them one grid at a time -- the moment
+    // grids in autoTuneFxGrids' order, the three face sums, the mass last. macOS's allocator keeps a freed block
+    // under 4 GiB and gives it to a later request of about half its size or more (autoTuneReadKeptBytes above), so
+    // the dispersion's Real grid goes into the velocity's freed words, the gradient's into the dispersion's, the face
+    // velocities' into the gradient's. Counted here only for a request of MORE than half the block (the smallest
+    // such block), which is what the allocator did at every size tried: the production selection's sequence replayed
+    // on its own peaked at 478 B/cell for 2.5M-cell sub-grids and 490 for 8.4M (a request of exactly half was served
+    // at the first size and not at the second), against 514 booked here and 670 with no reuse. The smaller of the
+    // passes' sums (the face words are booked for the larger pass); 0 in the double build and with
+    // DTFE_GPU_FLOAT_MOMENTS=1, whose copy-back fills Real grids beside all the words.
+    double afterHoldReuse(double const cells) const
+    {
+        if ( not ( ps.phaseSpace and sizeof(Real) == 4 and momFx ) ) return 0.;
+        double const B4 = kAllocKeepBytes;      // the allocator returns a freed block of this size or more
+        double const R = double(sizeof(Real));
+        double least = -1.;
+        for (Field *f : { &u.uField, &u.aField })
+        {
+            if ( autoTuneFaceBytes( *f, ps ) <= 0. ) continue;
+            std::vector<double> kept;           // the freed words not yet taken, bytes per cell each
+            double reused = 0.;
+            auto convert = [&](double const real, double const words)
+            {
+                int best = -1;
+                for (size_t i = 0; i < kept.size(); ++i)
+                    if ( kept[i] >= real and kept[i] < 2.*real and ( best < 0 or kept[i] < kept[size_t(best)] ) )
+                        best = int(i);
+                if ( best >= 0 ) { reused += real; kept.erase( kept.begin() + best ); }
+                if ( words*cells < B4 ) kept.push_back( words );
+            };
+            for (double const g : autoTuneFxGrids( *f, ps )) convert( g, 2.*g );
+            for (double const c : { double(noVelComp), 1., 1. }) convert( 2.*NO_DIM*c*R, 2.*NO_DIM*c*8. );
+            if ( f->density or f->velocity_tweb ) convert( R, 8. );
+            least = least < 0. ? reused : std::min( least, reused );
+        }
+        return std::max( 0., least );
     }
 
     // The partition look-ahead (DTFE.cpp): at one partition in flight with the GPU deposit, the NEXT
@@ -1931,6 +2031,9 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             std::fprintf( stderr, "AUTO-TUNE-DEBUG PS mixed lane: cpu %.3f GB, gpu pre-lock %.3f GB, once %.3f GB\n",
                           cpu/1.e9, gpuPre/1.e9, once/1.e9 );
         }
+        if ( metalActive and faceR > 0. and Env::flag( "DTFE_AUTO_TUNE_DEBUG" ) )   // a face pass's GPU lane (P11.7)
+            std::fprintf( stderr, "AUTO-TUNE-DEBUG PS GPU lane grids: hold %.0f B/cell, after the hold %.0f B/cell\n",
+                          gpuCellBytes(), gpuAfterHoldCellBytes( report.partition ) );
         report.perPartition = partitionBytes( report.partition );
 #if defined(PARALLEL_TRIANGULATION) && NO_DIM==3
         // the TBB insert's copies, where the insert runs in parallel: >= 2 threads per partition and a partition of at
@@ -2451,6 +2554,7 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     ps.fixedMerge     = u.psFixedPointMerge;
 #endif
     ps.faceGradient   = u.faceGradient;
+    ps.meanFlowField  = &u.aField;
     // uField and aField each allocate their OWN full grids and coexist (two reserveMemory calls in DTFE.cpp), so
     // summing both is right. The deposit and post phases are disjoint peaks -> max, not sum.
     double const bCellDeposit = autoTuneBytesPerCell(u.uField, ps, 0) + autoTuneBytesPerCell(u.aField, ps, 0);
@@ -2539,13 +2643,17 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     // The per-tet/per-cell GPU-deposit pieces this field selection needs (unselected moment grids are not
     // allocated; the tet velocities are extracted only for a velocity-derived grid). The velocity derivatives are
     // folded into the gradient after auto-tune runs, so they count here as gradient requests.
-    // dispersion implies the velocity/mom grids only when NOT volume-weighted (5d gating)
+    // dispersion implies the velocity/mom grids only when NOT volume-weighted (5d gating); the '_a' pass of a
+    // '--face-gradient' run deposits the mean velocity, selected or not (autoTuneFaceVelocity)
     bool const psVel  = u.uField.velocity or u.aField.velocity
                         or ((u.uField.velocity_dispersion or u.aField.velocity_dispersion)
-                            and not ps.volumeWeighted);
+                            and not ps.volumeWeighted)
+                        or autoTuneFaceVelocity( u.uField, ps ) or autoTuneFaceVelocity( u.aField, ps );
     bool const psDisp = u.uField.velocity_dispersion or u.aField.velocity_dispersion;
     bool const psGrad = u.uField.velocity_gradient or u.uField.selectedVelocityDerivatives()
                         or u.aField.velocity_gradient or u.aField.selectedVelocityDerivatives();
+    bool const psScal  = u.uField.scalar or u.aField.scalar;                       // (gpu_host.h out.scal, out.sgrad)
+    bool const psSGrad = u.uField.scalar_gradient or u.aField.scalar_gradient;
     // flags gating the remaining GPU buffers (ps_metal_host.cc)
     bool const psVolW  = ps.volumeWeighted;
     bool const psCaust = ps.caustics;
@@ -2562,7 +2670,9 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     double const gridB  = 8. + mB * ( (psVel ? 12. : 0.) + (psDisp ? 24. : 0.) + (psGrad ? 36. : 0.)
                                     + (psVolW ? 4. : 0.)                  // momw
                                     + (psExact ? 4. : 0.)                 // streamvol
-                                    + ((psVolW and psDisp) ? 12. : 0.) )  // dispvel
+                                    + ((psVolW and psDisp) ? 12. : 0.)    // dispvel
+                                    + (psScal ? 4.*noScalarComp : 0.)     // scal
+                                    + (psSGrad ? 4.*noScalarGradComp : 0.) )   // sgrad
                         + (psCaust ? 4. : 0.)                             // caustic
                         + ((psVolW and psDisp and not momFx) ? 4. : 0.);  // dispw
 
@@ -2577,6 +2687,11 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     // words live (as many again as its Real moment grids: the larger pass), which also leave the private copies
     double const fxMom   = ( ps.phaseSpace and sizeof(Real) == 4 and momFx )
                          ? std::max( autoTuneFxMomentBytes(u.uField, ps), autoTuneFxMomentBytes(u.aField, ps) ) : 0.;
+    // ... and the face sums ('--face-gradient'), int64 words in EVERY build: faceR = their Real grids per sub-grid
+    // cell (the larger pass; in bCellDeposit), fxFace = what the words take beyond those (as many again in the
+    // single build, nothing in the double build, whose grids are as wide as the words)
+    double const faceR   = std::max( autoTuneFaceBytes(u.uField, ps), autoTuneFaceBytes(u.aField, ps) );
+    double const fxFace  = faceR * ( 8./double(sizeof(Real)) - 1. );
     // One private copy of the CPU deposit's copy mode, per sub-grid cell: the Real accumulators of ONE
     // pass -- the passes deposit one after the other, each copying only its own grids that are not fixed-point
     // sums (ps_interpolation.cc accBytes, of the 'quantities' it fills). Both passes' grids less one pass's words
@@ -2664,6 +2779,8 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     in.psDensity       = psDensity;
     in.fxCell          = fxCell;
     in.fxMom           = fxMom;
+    in.faceR           = faceR;
+    in.fxFace          = fxFace;
     in.copyCell        = copyCell;
     in.threadScratch   = threadScratch;
     AutoTunePSPlanner const planner{ in, u, report, message };
