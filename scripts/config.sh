@@ -3,7 +3,7 @@
 #   - environment: DTFE_DATA_ROOT=/path/to/IllustrisTNG DTFE_SIM=TNG50-3-Dark ./run_ps_dtfe.sh
 #                  GRID_SIZE=256 PADDING=40 ./run_ps_dtfe.sh -s TNG50-3-Dark
 #   - script flags: ./run_ps_dtfe.sh -s TNG50-3-Dark -d /path/to/sim -g 256 99
-#                   (long forms: --sim, --sim-dir, --grid, --gpu, --exact, --sampled, --subsamples)
+#                   (long forms: --sim, --sim-dir, --grid, --gpu, --exact, --sampled, --subsamples, --run-mode)
 # The data root and the simulation have NO default: every run sets DTFE_DATA_ROOT (require_data_root; a driver's -d,
 # the simulation's own folder, stands in for it) and names the simulation with -s or DTFE_SIM (require_simulation).
 # The Python side (python/dtfelib/cli.py) honours the same DTFE_DATA_ROOT / DTFE_SIM variables.
@@ -105,6 +105,20 @@ knob_gpu() {
         ""|[Aa][Uu][Tt][Oo]) printf -v "$1" '%s' auto ;;
         *) knob_bool "$1" ;;
     esac
+}
+
+# knob_run_mode: DTFE_RUN_MODE, the drivers' run mode, normalised in place to lower case (tr: bash 3.2 has no ${v,,});
+# empty is auto. gentle, balanced, performance and auto are kept; any other value stops the driver, exit 2 (as an
+# unknown PS_MERGE does). run_mode_resolve calls it on the caller's own value.
+knob_run_mode() {
+    local v
+    v="$(printf '%s' "${DTFE_RUN_MODE:-}" | tr '[:upper:]' '[:lower:]')"
+    case "${v}" in
+        "") v=auto ;;
+        gentle|balanced|performance|auto) ;;
+        *) echo "Error: DTFE_RUN_MODE must be 'gentle', 'balanced', 'performance' or 'auto' (got '${DTFE_RUN_MODE}')." >&2; exit 2 ;;
+    esac
+    DTFE_RUN_MODE="${v}"
 }
 
 # Root of the simulation data, the folder that holds the simulations. Two layouts are recognised (see sim_dir):
@@ -463,11 +477,11 @@ driver_options() {
 # driver_long_options <getopts spec> "$@": _drv_args = the arguments with each long option the drivers share spelled
 # as its letter, token for token (so the caller's 'shift $((OPTIND - 1))' on its own arguments stays right):
 #   --sim S -> -s S, --sim-dir D -> -d D, --grid N -> -g N, --gpu -> -m, --exact -> -e, --sampled -> -S,
-#   --subsamples K -> -n K, --help -> -h; download_snapshots.sh's --groupcats -> -c, --trees -> -t, --ics -> -i,
-#   --api-key K -> -k K (merge_HDF5.py's names for the same products); '--grid=N' -> '-gN'. -S only carries --sampled
-#   to getopts (the usage lines do not offer it: the sampled average is asked for by name). --exact-average, the
-#   older name of --exact, is still read for one release, with one 'warning: --exact-average is deprecated, use
-#   --exact' line (the binaries' wording).
+#   --subsamples K -> -n K, --run-mode M -> -R M, --help -> -h; download_snapshots.sh's --groupcats -> -c, --trees -> -t,
+#   --ics -> -i, --api-key K -> -k K (merge_HDF5.py's names for the same products); '--grid=N' -> '-gN'. -S and -R only
+#   carry --sampled and --run-mode to getopts (the usage lines do not offer the letters: the sampled average and the
+#   run mode are asked for by name). --exact-average, the older name of --exact, is still read for one release, with
+#   one 'warning: --exact-average is deprecated, use --exact' line (the binaries' wording).
 # Only up to the first argument that is not an option (or '--'), as getopts reads them, and a letter's value is never
 # translated (-s --gpu names a simulation '--gpu'). A long option whose letter the script lacks, or an unknown one,
 # prints the usage and exits 1, as an unknown letter does.
@@ -485,6 +499,7 @@ driver_long_options() {
                 case "${name}" in
                     --sim) letter=s ;; --sim-dir) letter=d ;; --grid) letter=g ;; --gpu) letter=m ;;
                     --exact|--exact-average) letter=e ;; --sampled) letter=S ;; --subsamples) letter=n ;; --help) letter=h ;;
+                    --run-mode) letter=R ;;
                     --groupcats) letter=c ;; --trees) letter=t ;; --ics) letter=i ;; --api-key) letter=k ;;
                     *) letter="" ;;
                 esac
@@ -559,6 +574,45 @@ average_resolve() {
     fi
 }
 
+# run_mode_option <mode>: a driver's --run-mode MODE (-R, see driver_long_options): gentle, balanced, performance or
+# auto, in lower case as the binaries take them, kept in _run_mode_flag for run_mode_resolve; another word prints the
+# usage and exits 1.
+run_mode_option() {
+    case "$1" in
+        gentle|balanced|performance|auto) _run_mode_flag="$1" ;;
+        *) echo "Error: --run-mode must be 'gentle', 'balanced', 'performance' or 'auto' (got '$1')." >&2; usage; exit 1 ;;
+    esac
+}
+
+# run_mode_resolve: DTFE_RUN_MODE, the run mode the drivers pass on every run as '--run-mode MODE' (how hard the run
+# may lean on the machine: gentle, balanced or performance; the binaries' '--full-help --run-mode' says what each sets),
+# so the run log says which ran. --run-mode first (run_mode_option), then DTFE_RUN_MODE when the caller set it
+# (_caller_run_mode, its value before the driver filled in the default; any case, knob_run_mode), then the default;
+# 'auto' in either place chooses nothing and passes on to the next (as the binaries read DTFE_RUN_MODE=auto). The
+# default is performance inside a batch job (SLURM_JOB_ID or PBS_JOBID set: the job's cores are the run's), else
+# balanced (most of the machine, and the display never waits on the GPU). A mode given with --run-mode is the one
+# read: DTFE_RUN_MODE is not checked then, as in the binaries. run_mode_src names what decided (the banner says it).
+# run_ps_pipeline.sh resolves it once and hands the word on as DTFE_RUN_MODE.
+run_mode_resolve() {
+    run_mode_src=""
+    if [ -n "${_run_mode_flag:-}" ] && [ "${_run_mode_flag}" != "auto" ]; then
+        DTFE_RUN_MODE="${_run_mode_flag}"; run_mode_src="--run-mode"
+    else
+        DTFE_RUN_MODE="${_caller_run_mode:-}"
+        knob_run_mode                                   # lower case, empty = auto; another word: exit 2
+        [ "${DTFE_RUN_MODE}" = "auto" ] || run_mode_src="DTFE_RUN_MODE=${_caller_run_mode}"
+    fi
+    if [ "${DTFE_RUN_MODE}" = "auto" ]; then
+        if [ -n "${SLURM_JOB_ID:-}" ]; then
+            DTFE_RUN_MODE=performance; run_mode_src="the default inside a batch job (SLURM_JOB_ID)"
+        elif [ -n "${PBS_JOBID:-}" ]; then
+            DTFE_RUN_MODE=performance; run_mode_src="the default inside a batch job (PBS_JOBID)"
+        else
+            DTFE_RUN_MODE=balanced; run_mode_src="the default"
+        fi
+    fi
+}
+
 # driver_help_version <script> [its first argument]: '-h' / '--help' prints the script's header (line 2 up to the
 # first blank line, '# ' stripped) and the caller's usage line (its 'usage' function); '--version' prints the
 # repository revision. Both exit 0; any other argument returns.
@@ -608,25 +662,37 @@ driver_binary() {
     fi
 }
 
-# gpu_auto_resolve <knob> <binary> [cpu_first knob]: the GPU knob (DTFE_GPU) left at 'auto' (or empty) becomes
-# gpu_build_default's answer for <binary> (1 on a GPU build), and gpu_auto the note the start banner adds; a knob set
-# to an on or off value is kept as 1 or 0 (knob_gpu) and gpu_auto is empty. When the switch named by cpu_first is on
-# (knob_on), 'auto' is the CPU on every build: run_ps_dtfe.sh names DTFE_EXACT_AVERAGE (average_resolve has set it by
-# then; the exact deposit is the default), as PS-DTFE's exact deposit is a little faster on the CPU on production runs
-# (TNG100-3-Dark z=0 at 512^3, 2026-11-09: 1133 s on the CPU against 1156 s on the GPU).
+# gpu_auto_resolve <knob> <binary> <ps|dtfe> <exact 1|0> <mode>: the GPU knob (DTFE_GPU) left at 'auto' (or empty)
+# becomes the device the drivers choose for <binary>'s estimator, its deposit (DTFE_EXACT_AVERAGE, as average_resolve
+# set it) and the run mode (run_mode_resolve), and gpu_auto the note the start banner adds; a knob set to an on or off
+# value is kept as 1 or 0 (knob_gpu) and gpu_auto is empty. On a GPU build (gpu_build_default) 'auto' is the GPU: for
+# PS-DTFE with either deposit in every mode (in performance the drivers' '--gpu-share auto' then deposits part of the
+# partitions on the free cores beside it), for standard DTFE's exact average in every mode (a tie with the CPU at
+# TNG100-3-Dark z=0, 512^3: 439 s on the GPU against 431 s) and for its sampled one in gentle and balanced. The one
+# exception is standard DTFE's sampled average in performance, which runs on the CPU: faster there (315 s against
+# 433 s on the GPU), measured with every core, which only performance gives it. A CPU-only build runs on the CPU.
+# The launcher mirrors this table (python/gui/runspec.py recommended_gpu) -- keep the two in step.
 gpu_auto_resolve() {
-    local knob="$1" bin="$2" cpu_first="${3:-}" v
+    local knob="$1" bin="$2" est="$3" exact="$4" mode="$5" v what="the GPU"
     gpu_auto=""
     knob_gpu "${knob}"
     [ "${!knob}" = "auto" ] || return 0
     v="$(gpu_build_default "${REPO_ROOT}" "${bin}")"
-    if [ -n "${cpu_first}" ] && knob_on "${cpu_first}" && [ "${v}" = "1" ]; then
+    if [ "${v}" != "1" ]; then
         printf -v "${knob}" '%s' 0
-        gpu_auto=" (${knob} unset: the exact deposit is a little faster on the CPU; ${knob}=1 runs it on the GPU)"
+        gpu_auto=" (${knob} unset: ${bin#./} is a CPU-only build; ${knob}=0 or 1 chooses)"
         return 0
     fi
-    printf -v "${knob}" '%s' "${v}"
-    gpu_auto=" (${knob} unset: ${bin#./} is $([ "${v}" = "1" ] && echo "a GPU" || echo "a CPU-only") build; ${knob}=0 or 1 chooses)"
+    if [ "${est}" = "dtfe" ] && [ "${exact}" != "1" ] && [ "${mode}" = "performance" ]; then
+        printf -v "${knob}" '%s' 0
+        gpu_auto=" (${knob} unset: performance: standard DTFE's sampled average is faster on the CPU (315 s against 433 s, TNG100-3-Dark z=0 at 512^3); ${knob}=1 runs it on the GPU)"
+        return 0
+    fi
+    if [ "${est}" = "ps" ] && [ "${exact}" = "1" ] && [ "${mode}" = "performance" ]; then
+        what="the exact deposit on the GPU and the free cores (--gpu-share auto)"
+    fi
+    printf -v "${knob}" '%s' 1
+    gpu_auto=" (${knob} unset: ${bin#./} is a GPU build; ${mode}: ${what}; ${knob}=0 or 1 chooses)"
 }
 
 # time_wrap_resolve: TIME_WRAP, the peak-memory wrapper put in front of the binary, resolved once and OPTIONAL:

@@ -54,6 +54,7 @@ _PARTITION = re.compile(r"--partition (\d+) (\d+)(?: (\d+))?")    # a 2D run's s
 _CONC = re.compile(r"--max-concurrent (\d+)")
 _NSUB = re.compile(r"--subsamples (\d+)")             # (canonical: an older log's '--avg-subsamples' reads so)
 _MERGE = re.compile(r"(?:^|\s)--ps-merge (\S+)")
+_RUN_MODE = re.compile(r"(?:^|\s)--run-mode[ =](\S+)")    # the machine use (a log without it: performance)
 # the run-log header's line on the cell average, the run's own word on it: standard DTFE 'volume averaging : EXACT
 # cell-tetrahedron integration ...' or 'SAMPLED (...)', PS-DTFE 'grid deposit : EXACT tetrahedron-cell intersection
 # moments ...' or 'SAMPLED on nSub^3 sub-points (...)'. Binaries since 2026-11-09 print it either way (the exact
@@ -413,6 +414,13 @@ class RunRecord:
         '--completion-order-merge' or '--fixed-point-merge'), '' when it gave none (the default, index order)."""
         m = _MERGE.search(self.canonical)
         return m.group(1) if m else ""
+
+    @property
+    def run_mode(self) -> str:
+        """The machine use the command gave ('--run-mode MODE'), else 'performance': the binaries' default, which an
+        older binary, without the option, ran at too."""
+        m = _RUN_MODE.search(self.canonical)
+        return m.group(1) if m else "performance"
 
     @property
     def legacy_points(self) -> bool:
@@ -934,16 +942,19 @@ def stale_reasons(rec: RunRecord) -> list[tuple[str, str]]:
 
 # ---------------------------------------------------------------------- time estimates
 def time_estimate(records, *, sim: str, grid: int, estimator: str, gpu: bool,
-                  sliced: bool, precision: str = "single", dim: int = 3) -> tuple[float, int] | None:
+                  sliced: bool, precision: str = "single", dim: int = 3,
+                  run_mode: str = "performance") -> tuple[float, int] | None:
     """(median seconds per snapshot, number of runs) of successful earlier runs with the same
-    simulation, grid, estimator, GPU use, slice/no slice, precision and dimension; None without any
-    (a double-precision run takes about twice as long: it must not predict a single one).
+    simulation, grid, estimator, GPU use, slice/no slice, precision, dimension and machine use; None without any
+    (a double-precision run takes about twice as long: it must not predict a single one; a gentle run on half the
+    performance cores must not predict a performance one, nor the other way round). 'run_mode' defaults to
+    performance, what a log without '--run-mode' ran at (RunRecord.run_mode).
     A run under a second is one: the binary's SUMMARY prints its wall time in whole seconds ('0s', 0.0 here), and
     a truthiness test would drop such runs as if they had no time (the launcher test's 32^3 run takes 0.5 s)."""
     times = [r.wall_seconds for r in records
              if r.ok and r.wall_seconds is not None and r.sim == sim and r.grid == grid
              and r.estimator == estimator and r.gpu == gpu and r.sliced == sliced
-             and r.precision == precision and r.dim == dim]
+             and r.precision == precision and r.dim == dim and r.run_mode == run_mode]
     return (statistics.median(times), len(times)) if times else None
 
 

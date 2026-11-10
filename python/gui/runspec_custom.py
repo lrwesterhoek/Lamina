@@ -39,6 +39,7 @@ class CustomSpec:
     deposit: str = ""               # as RunSpec's: "" = the estimator's production one (the exact one, both estimators)
     fields: list[str] = field(default_factory=lambda: ["density_a", "velocity_a", "dispersion_a"])
     gpu: bool = False
+    run_mode: str = "balanced"      # --run-mode, the machine use, see RunSpec (the binary's own default: performance)
     vertex_mass: bool = False       # needed when the initial positions are PERTURBED (e.g. TNG's z=127)
     volume_weighted: bool = True
     caustics: bool = False
@@ -108,6 +109,8 @@ class CustomSpec:
         out = self.output_root()
         a = [str(self.binary()), str(Path(self.input_file).expanduser()), str(out),
              "--grid", str(self.grid), "--input-format", str(self.input_type), "--mpc-unit", f"{self.mpc_unit:g}"]
+        # the machine use, always named (the binary's own default is performance: every core, long GPU buffers)
+        a += ["--run-mode", self.run_mode]
         if self.periodic:
             a.append("--periodic")
         if len(self.box) == 2 * self.dim:
@@ -137,6 +140,8 @@ class CustomSpec:
                              (self.parallel_triangulation and three, "--parallel-triangulation")):
                 if on:
                     a.append(flag)
+            if self.gpu and three and self.deposit == "exact":     # the machine use's share of a partitioned GPU
+                a += ["--gpu-share", "auto"]                         # deposit (the drivers' GPU_SHARE default)
             if not self.periodic and self.alpha_shape != 3.0:
                 a += ["--ps-alpha-shape", f"{self.alpha_shape:g}"]
             if self.linear_deposit:
@@ -278,7 +283,7 @@ class CustomSpec:
         n = hdf5_particle_count(f) if (f.is_file() and self.input_type == 105) else None
         out += _rs.gpu_advice(self.gpu, self.deposit, self.fields if ps else (_rs.dtfe_fields(self.fields) or _rs.DTFE_DEFAULT_FIELDS), n,
                               self.estimator,
-                              grid=self.grid, precision=self.precision, dim=d)
+                              grid=self.grid, precision=self.precision, dim=d, run_mode=self.run_mode)
         if self.box:
             if len(self.box) != 2 * d or any(self.box[2 * i + 1] <= self.box[2 * i] for i in range(d)):
                 names = "xlo xhi ylo yhi" + (" zlo zhi" if d == 3 else "")
@@ -363,7 +368,9 @@ class CustomSpec:
                     # a merge switch is '--ps-merge' (canonical_flag gives its 'option value' pair; the run copy migrates
                     # the switch to that pair, so beside the tab's own '--ps-merge' the binary would get it twice).
                     # '--exact' and '--sampled' are one setting, the cell average, which the tab always names: either
-                    # one among the extra options repeats it (the other one the binary refuses beside it)
+                    # one among the extra options repeats it (the other one the binary refuses beside it). The
+                    # machine use ('--run-mode', always named) and the GPU share ('--gpu-share', named for an exact
+                    # GPU run) are one setting each, whatever value the extra options give them
                     found = {R.canonical_flag(t.split("=", 1)[0]).split()[0] for t in tokens if t.startswith("--")}
                     return {"--exact / --sampled" if n in ("--exact", "--sampled") else n for n in found}
                 twice = sorted(names(extra) & names(self._own_command()))
@@ -495,8 +502,8 @@ def hdf5_has(path, dataset: str) -> bool | None:
 def demo_spec(output_dir=None, gpu: bool | None = None) -> CustomSpec:
     """The first-run demo: a synthetic 32^3 crossed-wave snapshot (streams 1/3/9/27) and a quick
     PS-DTFE run on it with the default (exact) deposit -- about half a minute, no download. gpu None:
-    where that deposit pays for 32^3 particles (the CPU, see recommended_gpu). nSub 2 is kept for a
-    switch to the sampled deposit."""
+    that deposit's device in the default machine use (the GPU when built, see recommended_gpu). nSub 2 is kept
+    for a switch to the sampled deposit."""
     od = Path(output_dir).expanduser() if output_dir else CUSTOM_OUT_DEFAULT / "demo"
     fields = ["density_a", "velocity_a", "dispersion_a", "divergence_a"]
     if gpu is None:

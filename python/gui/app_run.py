@@ -352,7 +352,7 @@ class RunMixin:
             return None
         t = R.time_estimate(self._runs(), sim=spec.sim, grid=spec.grid, estimator=spec.estimator,
                             gpu=spec.gpu and rs.gpu_built(spec.estimator),
-                            sliced=bool(spec.slice_plane), precision=spec.precision)
+                            sliced=bool(spec.slice_plane), precision=spec.precision, run_mode=spec.run_mode)
         if t is None:
             return None
         return t[0] if per_snapshot else t[0] * max(1, len(spec.snapshots))

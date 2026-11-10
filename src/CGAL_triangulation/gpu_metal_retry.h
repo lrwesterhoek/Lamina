@@ -10,8 +10,9 @@
 
    Included by the two Metal hosts INSIDE their anonymous namespace, after <Metal/Metal.hpp>, "../message.h" (which
    brings env_knobs.h) and the std headers (<algorithm> <chrono> <cmath> <cstdio> <cstdlib> <cstring> <memory> <new>
-   <string> <vector> <unistd.h>). A binary links ONE Metal host (PS-DTFE: ps_metal_host.cc, DTFE and libDTFE: dtfe_metal_host.cc),
-   so the process-wide statics below (the pace, the fault hook) are that binary's. */
+   <string> <vector> <unistd.h>). The host includes "../run_mode.h" (runModeState: the run mode's pace base) at file
+   scope, before its anonymous namespace. A binary links ONE Metal host (PS-DTFE: ps_metal_host.cc, DTFE and libDTFE:
+   dtfe_metal_host.cc), so the process-wide statics below (the pace, the fault hook) are that binary's. */
 
 // What a failed command buffer says about its cause. Both watchdog flavours share Metal's Timeout code (2), so
 // the description is read first:
@@ -67,18 +68,20 @@ int gpuRetryCause(GpuFault f, long code, std::string const& desc)
 // But not for the rest of the PROCESS: one 'Impacting Interactivity' fault -- a moment of display
 // use -- would then slow every later partition (72% GPU duty after one escalation, 29% after two: hours
 // on an 8 h TNG50 run). So the pace
-// steps back one notch -- the inverse of one escalation, buffers x4 and gaps /3, toward 0.25 s / 8 ms -- after
+// steps back one notch -- the inverse of one escalation, buffers x4 and gaps /3, toward the run mode's base (gpuPace
+// below: 0.25 s / 8 ms in performance, 0.05 s / 8 ms in gentle and balanced) -- after
 // every DTFE_GPU_PACE_RECOVER_SEC (default 90) seconds of GPU work (buffers + gaps) without a fault of ours;
 // counted in GPU work, not wall time, so the triangulations between deposits are no evidence the display is
 // quiet. An escalation within a deposit therefore holds for at least that long. An innocent victim neither
 // escalates nor resets the clean count. Guarded by the host's ctxMutex (only touched inside psGpuDepositFields,
 // or dtfe_metal_host.cc's runBatch, whose callers hold it). The pass loop (gpuRunPass, below) steps it with
 // onFault / onClean.
-double const GPU_PACE_TARGET0 = 0.25;   // the default pace the recovery returns to
+double const GPU_PACE_TARGET0 = 0.25;   // the default pace (performance's base, the binaries' default run mode)
 useconds_t const GPU_PACE_GAP0 = 8000;
 struct GpuPace
 {
     double targetSec = 0.25; useconds_t gapUs = 8000; double cleanSec = 0.;
+    double target0 = GPU_PACE_TARGET0; useconds_t gap0 = GPU_PACE_GAP0;   // the base the recovery returns to (gpuPace)
     // a failure of our own (a watchdog kill, a resource error; not an innocent victim): escalate for the rest of the
     // process -- 4x shorter buffers (at least 20 ms), 3x wider gaps (at most 50 ms) -- and count the clean work afresh
     void onFault()
@@ -87,22 +90,35 @@ struct GpuPace
         gapUs     = std::min(gapUs * 3, useconds_t(50000));
         cleanSec  = 0.;
     }
-    // a buffer that succeeded after el seconds: an escalated pace counts the clean GPU work (the buffer and its gap)
-    // and, once that reaches recoverSec, steps back one notch, the inverse of onFault. True when it stepped back,
-    // with 'clean' = the clean seconds that earned it (the count then starts afresh), for the caller's message.
+    // a buffer that succeeded after el seconds: a pace escalated past the base (target0, gap0) counts the clean GPU
+    // work (the buffer and its gap) and, once that reaches recoverSec, steps back one notch toward the base, the
+    // inverse of onFault. True when it stepped back, with 'clean' = the clean seconds that earned it (the count then
+    // starts afresh), for the caller's message.
     bool onClean(double const el, double const recoverSec, double& clean)
     {
-        if (!(targetSec < GPU_PACE_TARGET0 || gapUs > GPU_PACE_GAP0)) return false;
+        if (!(targetSec < target0 || gapUs > gap0)) return false;
         cleanSec += el + gapUs / 1e6;
         if (!(cleanSec >= recoverSec)) return false;
-        targetSec = std::min(targetSec * 4.0, GPU_PACE_TARGET0);
-        gapUs     = std::max(gapUs / 3, GPU_PACE_GAP0);
+        targetSec = std::min(targetSec * 4.0, target0);
+        gapUs     = std::max(gapUs / 3, gap0);
         clean     = cleanSec;
         cleanSec  = 0.;
         return true;
     }
 };
-GpuPace& gpuPace() { static GpuPace p; return p; }
+// The process's pace, from the run mode's base (run_mode.h): 0.25 s buffers in performance and 0.05 s in gentle and
+// balanced, 8 ms gaps in every mode; a recovery returns to it. First touched inside a deposit, after main's
+// readOptions applied the mode (a caller that never reads the options, libDTFE, keeps performance's).
+GpuPace& gpuPace()
+{
+    static GpuPace p = [] {
+        GpuPace q;
+        q.target0 = q.targetSec = runModeState().gpuTargetSec;
+        q.gap0    = q.gapUs     = GPU_PACE_GAP0;
+        return q;
+    }();
+    return p;
+}
 
 // The test hook DTFE_GPU_FAULT_AT=<k>[:<kind>]: the k-th command buffer of the PROCESS (1-based, counted over
 // every pass and partition; buffers that failed for real are not counted) runs to completion -- its atomics ARE deposited, the worst case of a buffer killed
@@ -357,9 +373,13 @@ bool gpuRunPass(GpuPassSpec& p, GpuRetryRun& run, size_t& chunk, Encode&& encode
         }
         double clean = 0.;
         if (pace.onClean(el, p.paceRecoverSec, clean))   // an escalated pace stepped back after a clean stretch
+        {   // a step that reached the base names it: the 0.25 s / 8 ms default, or a run mode's lower base
+            char const* const atBase = pace.targetSec >= GPU_PACE_TARGET0 && pace.gapUs <= GPU_PACE_GAP0 ? " (the default)"
+                                     : pace.targetSec >= pace.target0 && pace.gapUs <= pace.gap0 ? " (the run mode's)"
+                                     : "";
             fprintf(stderr, "%s: %.0f s of GPU work without a fault -- pace eased to %.0f ms "
-                            "buffers, %.0f ms gaps%s\n", p.tag, clean, pace.targetSec * 1e3, pace.gapUs / 1e3,
-                    pace.targetSec >= GPU_PACE_TARGET0 && pace.gapUs <= GPU_PACE_GAP0 ? " (the default)" : "");
+                            "buffers, %.0f ms gaps%s\n", p.tag, clean, pace.targetSec * 1e3, pace.gapUs / 1e3, atBase);
+        }
         long const every = p.ckChunks >= 0 ? p.ckChunks : std::max(1L, long(std::lround(10.0 / pace.targetSec)));
         if (p.periodic && p.ckOn && every > 0 && long(sinceCk) >= every && start < p.nThreads)
         {   // the queue is drained (waitUntilCompleted above): the buffers hold exactly [0, start)

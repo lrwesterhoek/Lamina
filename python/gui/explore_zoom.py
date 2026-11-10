@@ -304,11 +304,14 @@ def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: 
         if (not periodic and float(side.get("alpha_shape", 3.0)) != 3.0
                 and "--ps-alpha-shape" not in cmd):
             cmd += ["--ps-alpha-shape", f"{float(side['alpha_shape']):g}"]
-        # the GPU, unlike a full grid's exact run (rs.recommended_gpu: the CPU): a zoom puts large tetrahedra
+        # the GPU, as a full grid's exact run (rs.recommended_gpu): a zoom puts large tetrahedra
         # into one thin slice of fine cells, where the GPU's exact items lead (a 512² slice of a 4096³ grid
         # over 2.1M particles: deposit 1.2 s against 3.0 s on the CPU; 0.26M particles: a tie)
         if rs.gpu_built("ps", precision, o.dim):
             cmd.append("--gpu")
+        # balanced: the zoom runs beside the launcher, where the binary's own default (performance: every core,
+        # long GPU buffers) would keep the display waiting
+        cmd += ["--run-mode", "balanced"]
         # the query server's tessellations on disk: the same cache folder and split, so a cached
         # partition is loaded instead of rebuilt and one that never reaches the window is skipped;
         # the concurrency is the binary's (its auto-tuner sizes it by the window and the free memory)
@@ -339,6 +342,7 @@ def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: 
             cmd += ["scalar_a", "scalarGradient_a", "--scalar-dataset", str(side["scalar_dataset"])]
         if rs.gpu_built("dtfe", precision, o.dim):
             cmd.append("--gpu")
+        cmd += ["--run-mode", "balanced"]                           # (beside the launcher, as the phase-space zoom)
         plan["snapshot"] = str(kw["snapshot"])
     plan.update(cmd=cmd, root=str(root), grid=grid, edges=(a0n, a1n), window=window_mpc)
     return plan

@@ -51,6 +51,7 @@
 
 #include "message.h"
 #include "env_knobs.h"
+#include "run_mode.h"   // the run mode's core budget (dtfeOmpMax) and the look-ahead thread's (dtfeAdoptCoreBudget)
 #include "auto_tune.h"
 #include "scratch_alloc.h"
 #include "ps_point_eval.h"
@@ -184,6 +185,7 @@ static void runLookAhead(std::vector<int> const &order, NeedBytes &&needBytes, P
                 aheadRan = true;
                 ahead = std::thread( [&, nextI]()
                 {
+                    dtfeAdoptCoreBudget();   // a fresh thread has the OpenMP default: the run mode's budget too
                     try { prepare( nextI, true, next ); }
                     catch ( ... ) { aheadError = std::current_exception(); }
                 } );
@@ -556,6 +558,78 @@ static std::vector<double> psPartitionCosts(std::vector<Particle_data> const &pa
     for (double &c : cost) c = std::max( c, 1. );   // an empty partition still takes a moment
     return cost;
 }
+
+#if defined(PS_GPU) && NO_DIM==3
+// a resolved GPU share as the run log writes it: 1 (every partition on the GPU), else its fraction to two places
+static std::string psGpuShareFraction(long const mille)
+{
+    if ( mille >= 1000 ) return "1";
+    char b[16];
+    std::snprintf( b, sizeof(b), "%.2f", double(mille) / 1000. );
+    return b;
+}
+#endif
+
+// the note for a number given as '--gpu-share' where it does not apply ('auto' says nothing there): why, and where
+// every partition deposits instead
+static void psGpuShareNote(User_options const &u, char const *cause, char const *device)
+{
+    MESSAGE::Message message( u.verboseLevel );
+    message << "note: '--gpu-share " << u.psGpuShareText << "' does not apply to " << cause
+            << ": every partition deposits on " << device << ".\n" << MESSAGE::Flush;
+}
+
+/* THE GPU SHARE ('--gpu-share'; the partition loop's rule of the index, psPartitionedRun): of a partitioned '--gpu'
+   run's exact deposits, the per mille that run on the GPU, the others on the CPU at the same time. Resolved before the
+   plan, since the tuner books a mixed run's partitions by it (auto_tune.cc). First match wins:
+     1. where it does not apply -- a build without the 3D GPU deposit, a run without '--gpu', the sampled deposit --
+        1000, and a number given is told why;
+     2. a number given (or none: the default 1000);
+     3. 'auto' with '--resume': the checkpoint's, from its key's 'gpu-share=' line (none: 1000), as the split is
+        adopted from it (DTFE_setup); a checkpoint that cannot be read leaves it to the next rule and the resume's own
+        refusal;
+     4. 'auto': the run mode's (autoTuneGpuShare).
+   One domain has no partition loop, and the plan alone tells: DTFE_setup sets 1000 after it. */
+static void psResolveGpuShare(User_options &u, size_t const nParticles)
+{
+    bool const number = u.psGpuShareGiven and u.psGpuShareSpec >= 0;
+    u.psGpuShareMille = 1000;
+#if defined(PS_GPU) && NO_DIM==3
+    if ( not u.psUseMetal or not u.psExactDeposit )
+    {
+        if ( number )
+            psGpuShareNote( u, not u.psUseMetal ? "a run without '--gpu'" : "the sampled deposit",
+                            not u.psUseMetal ? "the CPU" : "the GPU" );
+        return;
+    }
+    if ( u.psGpuShareSpec >= 0 )
+    {
+        u.psGpuShareMille = u.psGpuShareSpec;
+        if ( u.psGpuShareGiven ) u.psGpuShareSource = "--gpu-share " + u.psGpuShareText;
+        return;
+    }
+    if ( u.psResume )
+    {
+        PartitionCheckpoint::Manifest m;
+        std::string none;
+        if ( PartitionCheckpoint::readManifest( PartitionCheckpoint::directoryFor( u ), m, none ) )
+        {
+            u.psGpuShareMille = PartitionCheckpoint::keyGpuShareMille( m.key );
+            u.psGpuShareSource = "--resume: the checkpoint's";
+            MESSAGE::Message message( u.verboseLevel );
+            message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " --resume: the GPU share "
+                    << psGpuShareFraction( u.psGpuShareMille ) << " is the checkpoint's.\n" << MESSAGE::Flush;
+            return;
+        }
+    }
+    std::string why;
+    u.psGpuShareMille = autoTuneGpuShare( u, double(nParticles), why );
+    u.psGpuShareSource = "--gpu-share auto: " + why;
+#else
+    (void)nParticles;
+    if ( number ) psGpuShareNote( u, "this CPU-only build", "the CPU" );
+#endif
+}
 #endif
 
 
@@ -687,6 +761,10 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
 #elif defined(DTFE_GPU)
         gpuActive = userOptions.useMetal;
 #endif
+#ifdef PHASE_SPACE
+        // the GPU share first: the tuner books a mixed run's partitions by it (auto_tune.cc mixedLane)
+        psResolveGpuShare( userOptions, nParticles );
+#endif
         // the particles the run triangulates: a region run's padded crop (in the region's frame, periodic images
         // shifted in), whose counts the standard tuner replays its split on (auto_tune.h StdTuneDensity)
         AutoTuneReport const report = autoTunePartitioning( regionCropped ? tuneOptions : userOptions, nTune,
@@ -716,6 +794,11 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
             // the GPU deposit's host snapshot -- one at a time, allocated during a deposit, not yet in the free
             // memory a partition sees when it starts -- is in each check once
             userOptions.psPartitionBytes = report.perPartition + report.gpuSnapshot;
+            // A MIXED run's split ('--gpu-share' < 1): that term is the GPU lock holder's device and host grids too,
+            // larger than a lane's own arrays (TNG100-3-Dark z=0 at 512^3: 5.1 GB against 3.3 GB), and still held by one
+            // partition whatever the number in flight. The dynamic concurrency's ledger, which counts every partition
+            // in flight, books it once (an all-GPU run's ledger is as it was: the term in every partition)
+            userOptions.psOnceBytes = report.mixedLanes ? report.gpuSnapshot : 0.;
             // what the budget leaves for the look-ahead beside one partition (checked against the free memory
             // only, a budget set low on purpose would be passed by one tessellation)
             userOptions.psLookAheadRoom = report.budget - report.fixed - report.gpuSnapshot - report.perPartition;
@@ -736,6 +819,15 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
         }
         if ( Env::isSet( "DTFE_TEST_PARK_ROOM_GB" ) )
             userOptions.psParkRoom = std::max( 0., Env::real( "DTFE_TEST_PARK_ROOM_GB", 0. ) ) * 1.e9;
+        // one domain has no partition loop, and so no GPU share: known only now, from the plan (psResolveGpuShare).
+        // Its report is the all-GPU one already (the tuner's mixed lanes are for a split), so the plan stands
+        if ( not userOptions.partitionOn )
+        {
+            if ( userOptions.psGpuShareMille < 1000 and userOptions.psGpuShareGiven
+                 and userOptions.psGpuShareSpec >= 0 )   // (a number: 'auto' is silent where it does not apply)
+                psGpuShareNote( userOptions, "one domain (no partition loop)", "the GPU" );
+            userOptions.psGpuShareMille = 1000;
+        }
 #endif
         if ( userOptions.autoTuneReport )   // the memory check: the decision and prediction, nothing else
         {
@@ -885,11 +977,12 @@ static void standardPartitionOwnBox(std::vector<size_t> const &range, std::vecto
 /* DTFE_parallel's thread split, in pieces the standard partition loop's look-ahead shares: it prepares a
    partition's sub-domains EXACTLY as DTFE_parallel would (the same threads, the same split, the same per-thread
    options and particles), so these are the one definition of each. */
-// the threads DTFE_parallel may split one call over: every OpenMP thread, at most '--max-concurrent'
+// the threads DTFE_parallel may split one call over: every OpenMP thread of the run mode's budget (run_mode.h), at most
+// '--max-concurrent'
 static int dtfeParallelThreads(User_options const &userOptions)
 {
 #ifdef OPEN_MP
-    int n = omp_get_max_threads();
+    int n = dtfeOmpMax();
     if ( userOptions.maxConcurrent > 0 and userOptions.maxConcurrent < n )
         n = userOptions.maxConcurrent;
     return n;
@@ -1314,7 +1407,7 @@ static void psServeComposite(DTFE_State &state, User_options &userOptions, PSPar
     if ( userOptions.maxConcurrent > 0 and userOptions.maxConcurrent < concurrency )
         concurrency = userOptions.maxConcurrent;
 #ifdef OPEN_MP
-    concurrency = std::max( 1, std::min( concurrency, omp_get_max_threads() ) );
+    concurrency = std::max( 1, std::min( concurrency, dtfeOmpMax() ) );
 #endif
     psServeCompositeBegin( state.options, plan.total );
     ConcurrentTriangulationPlan triangulationPlan( concurrency, plan.total );
@@ -1891,7 +1984,10 @@ static void psRunPartitionLoop(PSLoopCtx &c, PartitionMemoryGate &memoryGate, Pr
     {
         message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " look-ahead on: partition k+1 is "
                 << "tessellated on a CPU thread while partition k deposits"
-                << ( gpuDeposit ? " on the GPU" : " (DTFE_OVERLAP=1)" ) << " (~" << std::round( aheadBytes/1.e7 )/100.
+                << ( gpuDeposit ? " on the GPU" : " (DTFE_OVERLAP=1)" )
+                << ( state.options.psGpuShareMille < 1000
+                     ? " (and on the CPU for the GPU share's other partitions)" : "" )
+                << " (~" << std::round( aheadBytes/1.e7 )/100.
                 << " GB more in memory; '--no-overlap' switches it off).\n" << MESSAGE::Flush;
 
         // every partition in index order (a skipped one too: it takes its turn in the ordered merge), the next one
@@ -2180,7 +2276,7 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
 #ifdef OPEN_MP
     // never more than the threads, like the serve paths and DTFE_parallel: '--max-concurrent 0' with a
     // hand-set '--partition 5 5 5' would start all 125 partitions at once, with no memory gate
-    psConcurrency = std::min( psConcurrency, omp_get_max_threads() );
+    psConcurrency = std::min( psConcurrency, dtfeOmpMax() );
 #endif
     if ( psConcurrency < 1 ) psConcurrency = 1;
     /* DYNAMIC CONCURRENCY (plan P8.10). The plan fixes the split and what one partition adds, but its concurrency is
@@ -2203,15 +2299,22 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     {
         bool const orderFree = std::is_same<Real, float>::value and not Env::flag( "DTFE_GPU_FLOAT_MOMENTS" )
                                and not Env::flag( "DTFE_GPU_FLOAT_MASS" ) and not Env::flag( "DTFE_MASS_AUDIT" );
-        int const most = std::min( totalPartitions, omp_get_max_threads() );
-        double const need = state.options.psPartitionBytes;
+        int const most = std::min( totalPartitions, dtfeOmpMax() );
+        // one more than the plan's: each its own arrays, and what one partition at a time holds once (a mixed run's
+        // psOnceBytes; 0 otherwise, where every partition books psPartitionBytes in full)
+        double const once = std::min( state.options.psOnceBytes, state.options.psPartitionBytes );
+        double const need = double( psFloor + 1 ) * ( state.options.psPartitionBytes - once ) + once;
         double const reserve = state.options.psReserveEnd + state.options.psReserveFirstMerge;
         dynStartFree = autoTuneSystemFree();
         dynStartOwn = autoTuneOwnFootprint();
         bool const room = dynStartFree >= 0. and dynStartOwn >= 0.
-                          and dynStartFree - kAutoTuneHeadroom - reserve >= double( psFloor + 1 ) * need
+                          and dynStartFree - kAutoTuneHeadroom - reserve >= need
                           and ( state.options.psBudgetBytes <= 0.
-                                or dynStartOwn + double( psFloor + 1 ) * need + reserve <= state.options.psBudgetBytes );
+                                or dynStartOwn + need + reserve <= state.options.psBudgetBytes );
+        if ( Env::flag( "DTFE_AUTO_TUNE_DEBUG" ) )   // the start check's terms (tests/run_mode_check.sh reads them)
+            std::fprintf( stderr, "AUTO-TUNE-DEBUG PS dynamic start: partition %.0f B, once %.0f B, reserve %.0f B, "
+                          "free %.3f GB, own %.3f GB, budget %.3f GB\n", state.options.psPartitionBytes, once, reserve,
+                          dynStartFree/1.e9, dynStartOwn/1.e9, state.options.psBudgetBytes/1.e9 );
         if ( not orderFree ) dynamicWhyNot = "the double build's or the float sums' grids would follow the count";
         else if ( most <= psFloor ) dynamicWhyNot = "the plan already runs one partition per core or partition";
         else if ( not room ) dynamicWhyNot = "the free memory or the budget at the start holds no partition beyond it";
@@ -2339,6 +2442,7 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     {
         memoryGate.dynamic = true;
         memoryGate.floor = psFloor;
+        memoryGate.once = std::min( state.options.psOnceBytes, state.options.psPartitionBytes );
         memoryGate.total = std::max( 1, progress.toProcess );
         memoryGate.reserveEnd = state.options.psReserveEnd;
         memoryGate.reserveRecords = state.options.psReserveRecords;
@@ -2354,33 +2458,40 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     // One partition's work, in two stages: PREPARE (select its particles; with 'build', also its
     // tessellation and vertex densities) and DEPOSIT (the grid passes, then the merge). The look-ahead
     // below runs the prepare stage of partition k+1 on another thread while partition k deposits.
-    // EXPERIMENT (DTFE_PS_GPU_SHARE = the per mille of the partitions whose deposit runs on the GPU; unset or 1000 =
-    // all of them, the '--gpu' run as it was). The other partitions deposit on the CPU, so that both devices work at
-    // once: a '--gpu' run keeps ~2 cores busy beside a GPU that every partition queues for, and a CPU run leaves the
-    // GPU idle. Which partition goes where is a rule of its index alone (the GPU's share spread evenly over the
-    // indices), never of the timing, so a rerun deposits every partition on the same device. A CPU partition takes
-    // the path of the GPU fallback (ps_interpolation.cc: the same fixed-point units as a GPU deposit of the pass, so
-    // the merge sees no difference); its grids differ from a GPU deposit's at the float rounding of the two exact
-    // integrations, so a mixed run equals neither the GPU run nor the CPU run to the last bit. The share is
-    // in the checkpoint key (partition_checkpoint.h settingsKey): a resume with another share is refused.
-    long const psGpuShare = std::max( 0L, std::min( 1000L, long( Env::integer( "DTFE_PS_GPU_SHARE", 1000 ) ) ) );
+    // THE GPU SHARE ('--gpu-share', resolved before the plan: psResolveGpuShare) = the per mille of a '--gpu' run's
+    // exact deposits that run on the GPU; 1000, the default, is all of them. The other partitions deposit on the CPU
+    // at the same time, so that both devices work at once: a '--gpu' run keeps ~2 cores busy beside a GPU that every
+    // partition queues for, and a CPU run leaves the GPU idle. Which partition goes where is a rule of its index alone
+    // (the GPU's share spread evenly over the indices), never of the timing, the concurrency or the window and resume
+    // skips, so a rerun or a resume deposits every partition on the same device. A CPU partition takes the path of the
+    // GPU fallback (ps_interpolation.cc: the same fixed-point units as a GPU deposit of the pass, so the merge sees no
+    // difference) without counting as one; its grids differ from a GPU deposit's at the float rounding of the two
+    // exact integrations, so a mixed run equals neither the GPU run nor the CPU run to the last bit. The resolved
+    // share below 1000 is in the checkpoint key (partition_checkpoint.h settingsKey): a resume with another is refused.
+    long const psGpuShare = state.options.psGpuShareMille;
     auto depositsOnCpu = [psGpuShare](int const pi) -> bool
     { return ( long(pi) + 1 ) * psGpuShare / 1000 == long(pi) * psGpuShare / 1000; };
 #if defined(PS_GPU) && NO_DIM==3   // (a build without the GPU deposit has no partition on the GPU to report)
-    if ( state.options.psUseMetal and psGpuShare < 1000 )
+    if ( state.options.psGpuShareGiven and state.options.psUseMetal and state.options.psExactDeposit )
     {
-        int onGpu = 0, toDeposit = 0;   // (outside the grid window or restored from a checkpoint = no deposit)
-        for (int pi = 0; pi < totalPartitions; ++pi)
+        if ( psGpuShare < 1000 )
         {
-            if ( skipPartition[size_t(pi)] ) continue;
-            ++toDeposit;
-            onGpu += depositsOnCpu( pi ) ? 0 : 1;
+            int onGpu = 0, toDeposit = 0;   // (outside the grid window or restored from a checkpoint = no deposit)
+            for (int pi = 0; pi < totalPartitions; ++pi)
+            {
+                if ( skipPartition[size_t(pi)] ) continue;
+                ++toDeposit;
+                onGpu += depositsOnCpu( pi ) ? 0 : 1;
+            }
+            message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " GPU share "
+                    << psGpuShareFraction( psGpuShare ) << " (" << state.options.psGpuShareSource << "): " << onGpu
+                    << " of the " << toDeposit << " partitions to deposit do so on the GPU, the other "
+                    << toDeposit - onGpu << " on the CPU with r3d clipping (a mixed run's grids differ from an all-GPU "
+                    << "run's at float rounding).\n" << MESSAGE::Flush;
         }
-        message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " DTFE_PS_GPU_SHARE=" << psGpuShare << ": "
-                << onGpu << " of the " << toDeposit << " partitions to deposit do so on the GPU, the other "
-                << toDeposit - onGpu << " on the CPU with r3d clipping, whatever the header's 'grid deposit' line says "
-                << "(an experiment: the grids differ from an all-GPU and from an all-CPU run at the float rounding of "
-                << "the two integrations).\n" << MESSAGE::Flush;
+        else
+            message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " GPU share 1 ("
+                    << state.options.psGpuShareSource << "): every partition deposits on the GPU.\n" << MESSAGE::Flush;
     }
 #endif
 
@@ -2398,7 +2509,7 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
         // particles are never needed, so their selection (a scan of every particle, ~3 s for TNG100-3's
         // 94M, plus a copy of the padded share) is skipped -- the load must then succeed (psCacheOnly)
         P.opt = partitionOptions( lagRegion );
-        if ( P.opt.psUseMetal and depositsOnCpu( pi ) ) P.opt.psUseMetal = false;   // (DTFE_PS_GPU_SHARE, above)
+        if ( P.opt.psUseMetal and depositsOnCpu( pi ) ) P.opt.psUseMetal = false;   // (--gpu-share, above)
         P.cacheOnly = not P.skipped and not state.options.tessellationCacheDir.empty()
                       and psTessellationCached( P.opt );
         if ( not P.skipped and not P.cacheOnly and state.options.psParticlesDeferred )
@@ -2454,7 +2565,8 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
                 << "(the plan's " << psFloor << ").\n" << MESSAGE::Flush;
         // the SUMMARY's predicted-vs-measured line: the plan's prediction with the partitions that ran beyond it
         if ( most > psFloor and runProgressPredicted() > 0. )
-            runProgressSetPredicted( runProgressPredicted() + double( most - psFloor ) * state.options.psPartitionBytes );
+            runProgressSetPredicted( runProgressPredicted() + double( most - psFloor )
+                                     * ( state.options.psPartitionBytes - memoryGate.once ) );   // (once: in the plan's)
     }
     psReportLoopEnd( loop );
 
@@ -2485,7 +2597,7 @@ static void dtfeServeComposite(DTFE_State &state, User_options &userOptions, int
     if ( userOptions.maxConcurrent > 0 and userOptions.maxConcurrent < concurrency )
         concurrency = userOptions.maxConcurrent;
 #ifdef OPEN_MP
-    concurrency = std::max( 1, std::min( concurrency, omp_get_max_threads() ) );
+    concurrency = std::max( 1, std::min( concurrency, dtfeOmpMax() ) );
 #endif
     psServeCompositeBegin( state.options, totalPartitions );
 #ifdef OPEN_MP

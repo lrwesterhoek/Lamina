@@ -18,7 +18,7 @@
 # its combined_*.hdf5 and the plane file (and, with PTS_VEL_GRAD=1, its .pts_velGrad exists),
 # AND the settings in its <prefix>.runlog match this run's (grid, sub-samples, padding, lambda-th,
 # precision, the deposit options, and every requested field among its fields; not the GPU/CPU
-# choice, the split or the build).
+# choice, the run mode, the GPU share, the split or the build).
 # A snapshot without a run log is judged by the file times alone (said per snapshot).
 # Interrupted batches continue where they stopped. FORCE=1 recomputes everything.
 #
@@ -51,12 +51,15 @@
 #                 only that part of the plane (default: the whole box).
 #   DTFE_GPU      1 = the deposit on the GPU (run_ps_dtfe.sh -m), 0 = the CPU; unset (auto) = the GPU when the
 #                 PS binary was built with one, as run_ps_dtfe.sh decides
-#                 (config.sh gpu_build_default: PS-DTFE, or PS-DTFE-double with DTFE_PRECISION=double),
-#                 and the CPU for the exact deposit (DTFE_EXACT_AVERAGE=1, the default)
+#                 (config.sh gpu_auto_resolve: PS-DTFE, or PS-DTFE-double with DTFE_PRECISION=double),
+#                 for both deposits and in every run mode
 #   DTFE_EXACT_AVERAGE  1 (default) = the exact deposit (--exact), 0 = the sampled one (--sampled); unset, a
 #                 SUBSAMPLES count selects the sampled one (run_ps_dtfe.sh's rule, config.sh average_resolve).
 #                 A run log of an older sampled run names no deposit flag: its grids are stale for the exact
 #                 default and current for a sampled pipeline run (the same count, or none: the binary's 3).
+#   DTFE_RUN_MODE gentle | balanced | performance | auto (default): how hard each run may lean on the machine
+#                 (run_ps_dtfe.sh's --run-mode): auto = balanced, or performance inside a SLURM or PBS job
+#                 (config.sh run_mode_resolve); resolved once here and handed on. It never makes grids stale.
 #   PS_VOLUME_WEIGHTED  1 (default) = volume-weighted velocity moments, the production convention
 #   PYTHON        the python that makes the plane (default: config.sh h5py_python, the first with numpy and h5py)
 # A switch is off for 0, false, no or off and on for any other value (the binaries' rule). Older names, read for
@@ -65,8 +68,8 @@
 # The other run options reach run_ps_dtfe.sh through the environment exactly as from a terminal:
 # SUBSAMPLES, PS_VERTEX_MASS, PS_CAUSTICS, PS_CAUSTIC_CUSPS, PARALLEL_TRIANGULATION,
 # PARTITION, MAX_CONCURRENT, SCRATCH_DIR, TESSELLATION_CACHE, DTFE_PRECISION, OUTPUT_PREFIX, LAMBDA_TH,
-# THREADS, PS_MERGE, DTFE_RESUME (see its header for each, and the older names it still reads). The GUI's Pipeline
-# tab sets all of them.
+# THREADS, PS_MERGE, DTFE_RESUME, GPU_SHARE (see its header for each, and the older names it still reads). The GUI's
+# Pipeline tab sets all of them.
 # Snapshots are auto-discovered (snapdir_*/combined_NNN.hdf5). The plane file is generated
 # once per simulation (box size is constant across its snapshots) and reused -- as long as its
 # sidecar has the requested geometry (make_image_plane.py --same-as, exit 3 = differs); otherwise it
@@ -107,6 +110,8 @@ knob PLANE_WINDOW WINDOW
 PLANE_WINDOW="${PLANE_WINDOW:-}"
 knob DTFE_GPU PS_GPU PS_METAL
 DTFE_GPU="${DTFE_GPU:-auto}"         # auto: resolved below, as run_ps_dtfe.sh resolves its DTFE_GPU
+_caller_run_mode="${DTFE_RUN_MODE:-}"   # (the caller's own value: run_mode_resolve, below)
+DTFE_RUN_MODE="${DTFE_RUN_MODE:-auto}"  # auto: resolved below, as run_ps_dtfe.sh resolves its DTFE_RUN_MODE
 knob DTFE_EXACT_AVERAGE PS_EXACT     # (run_ps_dtfe.sh's own knob: resolved below by its rule and handed on)
 # run_ps_dtfe.sh's other knobs with older names, resolved here once (exported under the new name when the old one
 # was), so the driver does not warn again for every simulation
@@ -139,18 +144,14 @@ fi
 # DTFE_EXACT_AVERAGE (env_args below), so the GPU choice here and the deposit there cannot disagree.
 _caller_exact="${DTFE_EXACT_AVERAGE:-}"
 average_resolve
-# DTFE_GPU=auto (the default): the GPU when the binary run_ps_dtfe.sh will run was built with one -- the
-# drivers' rule (config.sh gpu_build_default; DTFE_PRECISION picks the binary there too), so a CPU-only build is
-# not asked for the GPU (and a fallback warning) on every snapshot -- but the CPU for the exact deposit, as there.
-gpu_auto=""
-if [ "${DTFE_GPU}" = "auto" ] && [ "${DTFE_EXACT_AVERAGE}" = "1" ]; then     # the exact deposit: a little faster on the CPU
-    DTFE_GPU=0
-    gpu_auto=" (DTFE_GPU unset: the exact deposit is a little faster on the CPU)"
-elif [ "${DTFE_GPU}" = "auto" ]; then
-    case "${DTFE_PRECISION:-single}" in double) ps_bin="PS-DTFE-double" ;; *) ps_bin="PS-DTFE" ;; esac
-    DTFE_GPU="$(gpu_build_default "${REPO_ROOT}" "${ps_bin}")"
-    gpu_auto=" (DTFE_GPU unset: ${ps_bin} is $([ "${DTFE_GPU}" = "1" ] && echo "a GPU" || echo "a CPU-only") build)"
-fi
+# The run mode, by run_ps_dtfe.sh's rule too (config.sh run_mode_resolve): DTFE_RUN_MODE when given, else balanced, or
+# performance inside a SLURM or PBS job. Resolved once and handed on as DTFE_RUN_MODE (env_args below).
+run_mode_resolve
+# DTFE_GPU=auto (the default): the drivers' device for the deposit and the run mode (config.sh gpu_auto_resolve, the
+# rule run_ps_dtfe.sh applies; DTFE_PRECISION picks the binary there too): the GPU when the binary run_ps_dtfe.sh will
+# run was built with one, so a CPU-only build is not asked for the GPU (and a fallback warning) on every snapshot.
+case "${DTFE_PRECISION:-single}" in double) ps_bin="PS-DTFE-double" ;; *) ps_bin="PS-DTFE" ;; esac
+gpu_auto_resolve DTFE_GPU "${ps_bin}" ps "${DTFE_EXACT_AVERAGE}" "${DTFE_RUN_MODE}"
 gpu_args=(); [ "${DTFE_GPU}" = "1" ] && gpu_args=(-m)
 
 if [ -z "${SIMS:-}" ]; then
@@ -167,6 +168,7 @@ if [ "${SIMS}" = "all" ]; then
 fi
 echo "Simulations:${SIMS}"
 echo "Slice: axis ${AXIS}, ${NU} px, centre ${CENTER:-box/2}, planes ${PLANES}$([ "${PLANES}" != "1" ] && echo " over ${THICKNESS} Mpc"), ${SUPERSAMPLE}x${SUPERSAMPLE} sub-samples${PLANE_WINDOW:+, window ${PLANE_WINDOW}}   Grid: ${GRID_SIZE}^3   GPU: ${DTFE_GPU}${gpu_auto}   deposit: $([ "${DTFE_EXACT_AVERAGE}" = "1" ] && echo exact || echo sampled) (${average_src})   vel-grad: ${PTS_VEL_GRAD}   force: ${FORCE}"
+echo "Run mode: ${DTFE_RUN_MODE} (${run_mode_src})"
 
 run() { echo "+ $*"; [ "${DRY_RUN}" = "1" ] || "$@"; }
 
@@ -178,11 +180,12 @@ run() { echo "+ $*"; [ "${DRY_RUN}" = "1" ] || "$@"; }
 # equal), so a log written with '--ps-exact-deposit --lambda_th 0.3 --avg-subsamples 3' has the settings of
 # '--exact --lambda-th 0.3 --subsamples 3', and a driver that emits the new names does not find every older
 # snapshot stale. val[] / flag[] name the canonical options compared (the merge mode is not: it moves the last float
-# bits only, and older logs carry no merge flag). The deposit: '--exact' is compared (older logs: '--exact-average' or
-# '--ps-exact-deposit'), '--sampled' is not (an older sampled run named no flag), and the '--subsamples' count only
-# for the sampled deposit: the exact one ignores it (older drivers passed '--subsamples 3' beside it), and a sampled
-# one without a count runs the binary's own 3 (older drivers always named it). So an older exact log and an older
-# sampled one each compare equal to the command the driver now emits for the same deposit.
+# bits only, and older logs carry no merge flag; nor are '--run-mode' and '--gpu-share', for the same reasons). The
+# deposit: '--exact' is compared (older logs: '--exact-average' or '--ps-exact-deposit'), '--sampled' is not (an
+# older sampled run named no flag), and the '--subsamples' count only for the sampled deposit: the exact one ignores
+# it (older drivers passed '--subsamples 3' beside it), and a sampled one without a count runs the binary's own 3
+# (older drivers always named it). So an older exact log and an older sampled one each compare equal to the command
+# the driver now emits for the same deposit.
 run_settings() {
     printf '%s\n' "$1" | awk '
         function out(l) { if (l ~ /^--subsamples( |$)/) subs = l; else print l }
@@ -314,9 +317,11 @@ print(int(s.get("planes", 1)) * int(s["nv"]) * int(s["nu"]) * int(s.get("supersa
     # ---- grids + point evaluation, one triangulation per snapshot ------------------------
     # run_ps_dtfe.sh's DTFE_GPU follows this one: -m only switches the GPU ON, an exported DTFE_GPU=1 would otherwise
     # leak in (an older PS_GPU / PS_METAL was read above and unset: the driver sees the new name only); its deposit
-    # (DTFE_EXACT_AVERAGE, resolved above) too, so the GPU choice was made for the deposit it runs
+    # (DTFE_EXACT_AVERAGE) and run mode (DTFE_RUN_MODE), resolved above, too, so the GPU choice was made for the
+    # deposit and the mode it runs
     env_args=(SAMPLE_POINTS="${plane}.bin" PS_VOLUME_WEIGHTED="${PS_VOLUME_WEIGHTED}" PTS_VEL_GRAD="${PTS_VEL_GRAD}"
-              PS_POINT_CONVENTIONS="${PS_POINT_CONVENTIONS}" DTFE_GPU="${DTFE_GPU}" DTFE_EXACT_AVERAGE="${DTFE_EXACT_AVERAGE}")
+              PS_POINT_CONVENTIONS="${PS_POINT_CONVENTIONS}" DTFE_GPU="${DTFE_GPU}" DTFE_EXACT_AVERAGE="${DTFE_EXACT_AVERAGE}"
+              DTFE_RUN_MODE="${DTFE_RUN_MODE}")
     [ -n "${FIELDS:-}" ] && env_args+=(FIELDS="${FIELDS}")
     # The settings this batch would run each snapshot with, asked from run_ps_dtfe.sh itself (DRY_RUN=1: reads,
     # runs and writes nothing), so the comparison below cannot drift from what it runs (file times alone would

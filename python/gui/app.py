@@ -162,10 +162,12 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         self.data = data or self._restore("data", rs.DataSpec)
         self.custom = custom or self._restore("custom", rs.CustomSpec)
         if custom is None and not self._restore_json("custom", None):
-            # a fresh custom-snapshot job uses the GPU when built with one, unless it starts at PS-DTFE's exact
-            # deposit, the default, which runs on the CPU (the Grids and Pipeline tabs' rule, rs.gpu_build_default)
-            self.custom.gpu = rs.gpu_build_default("ps") and not (self.custom.estimator == "ps"
-                                                                  and self.custom.deposit == "exact")
+            # a fresh custom-snapshot job starts on the drivers' automatic device for its deposit and machine use, as
+            # the Grids and Pipeline tabs' jobs do (rs.gpu_build_default, rs.recommended_gpu: the GPU on a GPU build
+            # for PS-DTFE's exact deposit, the default)
+            c = self.custom
+            c.gpu = rs.gpu_build_default(c.estimator, c.precision, c.dim) and rs.recommended_gpu(
+                c.deposit, c.fields, None, c.estimator, c.precision, c.dim, run_mode=c.run_mode)
         # standard DTFE's production cell average is the exact one (rs.production_deposit). A state saved by an
         # older launcher holds its start, 'sampled', for a standard-DTFE Grids or Custom job (the Monte-Carlo
         # average, never really chosen: it was the only start): moved to 'exact' ONCE; the Monte-Carlo average
@@ -186,14 +188,23 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
                 if given is None and not sp.ordered_merge:
                     sp.ordered_merge = True
             self.settings.setValue("ordered_merge_start", json.dumps(True))
-        # PS-DTFE's exact deposit runs on the CPU (faster on production runs, rs.recommended_gpu). An older launcher
-        # ticked the GPU whenever the exact deposit was picked (never really chosen: it was forced), so a saved
-        # Grids, Pipeline or Custom job with the exact deposit has its GPU unticked ONCE; ticking it later is kept
+        # PS-DTFE's exact deposit ran on the CPU for a while (2026-11-09: a little faster there at every core). An
+        # older launcher ticked the GPU whenever the exact deposit was picked (never really chosen: it was forced), so
+        # a saved Grids, Pipeline or Custom job with the exact deposit had its GPU unticked ONCE
         if self.remember and not self._restore_json("ps_exact_cpu_start", False):
             for sp, given in ((self.spec, spec), (self.pipe, pipeline), (self.custom, custom)):
                 if given is None and getattr(sp, "estimator", "ps") == "ps" and sp.deposit == "exact" and sp.gpu:
                     sp.gpu = False
             self.settings.setValue("ps_exact_cpu_start", json.dumps(True))
+        # ... and now runs on the GPU in every machine use (the run modes, D22; rs.recommended_gpu): at balanced, the
+        # default, a CPU run would have only the performance cores less a quarter. A saved PS-DTFE exact job (Grids,
+        # Pipeline, Custom) on the CPU has its GPU ticked ONCE when the pair has one; unticking it later is kept
+        if self.remember and not self._restore_json("run_mode_start", False):
+            for sp, given in ((self.spec, spec), (self.pipe, pipeline), (self.custom, custom)):
+                if (given is None and getattr(sp, "estimator", "ps") == "ps" and sp.deposit == "exact" and not sp.gpu
+                        and rs.gpu_built("ps", sp.precision, getattr(sp, "dim", 3))):
+                    sp.gpu = True
+            self.settings.setValue("run_mode_start", json.dumps(True))
 
     def _init_state(self):
         """The window's state outside its widgets: the remembered lists, the job and queue in progress, the checks."""
@@ -218,6 +229,9 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         # the exact deposit unless the box was set otherwise meanwhile (_deposit_changed, _gpu_set_by_hand)
         self._gpu_unticked_by_exact: set = set()
         self._gpu_auto_setting = False
+        # the GPU boxes last set by hand (not by a rule, not by a load): a change of the machine use keeps their tick
+        # (_run_mode_changed, _gpu_set_by_hand; this session only)
+        self._gpu_by_hand: set = set()
         self._steps: list[rs.Step] = []
         self._step_i, self._results = -1, []
         self._job_tab, self._job_start = GRIDS, None
@@ -695,7 +709,7 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
                 est += f"   ·   slice {rs.plane_points(s.slice_plane)/1e6:.1f}M points"
             t = R.time_estimate(self._runs(), sim=s.sim, grid=s.grid, estimator=s.estimator,
                                 gpu=s.gpu and rs.gpu_built(s.estimator),
-                                sliced=bool(s.slice_plane), precision=s.precision)
+                                sliced=bool(s.slice_plane), precision=s.precision, run_mode=s.run_mode)
             if t and n:
                 est += (f"   ·   ≈ {R.format_duration(t[0])} per snapshot (median of {t[1]} earlier run"
                         f"{'s' if t[1] != 1 else ''}), ≈ {R.format_duration(t[0] * n)} in all")
@@ -858,7 +872,8 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
             if side is None:
                 self.status_message(f"{rec.prefix}: no settings file beside its log (made before 2026-09-30?)")
                 return
-            self.custom = rs.CustomSpec.from_dict(side)
+            # the tab's machine use stays (it is about this machine now, not about the run: D22)
+            self.custom = rs.CustomSpec.from_dict(dict(side, run_mode=self.custom.run_mode))
             self._load_into_widgets()
             self.tabs.setCurrentIndex(OWN)
             self._changed()

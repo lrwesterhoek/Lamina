@@ -50,7 +50,9 @@ class PipelineSpec:
     deposit: str = "exact"          # "exact" (r3d clipping; the default, run_ps_pipeline.sh's too) | "sampled" (nsub^3
                                     # samples per cell): DTFE_EXACT_AVERAGE
     nsub: int = 3                   # SUBSAMPLES (the sampled deposit only)
-    gpu: bool | None = None         # DTFE_GPU: the script's -m; None = the build's (gpu_build_default)
+    gpu: bool | None = None         # DTFE_GPU: the script's -m; None = the build's (gpu_build_default), by the
+                                    # machine use (recommended_gpu)
+    run_mode: str = "balanced"      # DTFE_RUN_MODE (run_ps_pipeline.sh hands it on to run_ps_dtfe.sh), see RunSpec
     vertex_mass: bool = True        # PS_VERTEX_MASS (needed for TNG IC inputs)
     volume_weighted: bool = True    # PS_VOLUME_WEIGHTED (the production convention)
     caustics: bool = True           # PS_CAUSTICS (on: run_ps_dtfe.sh's default, the production runs')
@@ -85,8 +87,10 @@ class PipelineSpec:
     plan_key: str = ""              # memory_key() the plan was checked for (settings changed -> stale)
 
     def __post_init__(self):
-        if self.gpu is None:            # a fresh pipeline's GPU tick is the PS build's (a saved one is kept),
-            self.gpu = _rs.gpu_build_default("ps", self.precision) and self.deposit != "exact"   # exact: the CPU
+        if self.gpu is None:            # a fresh pipeline's GPU tick is the drivers' automatic device on the PS
+            self.gpu = (_rs.gpu_build_default("ps", self.precision)   # build (a saved one is kept), see RunSpec
+                        and _rs.recommended_gpu(self.deposit, self.fields, None, "ps", self.precision,
+                                                run_mode=self.run_mode))
 
     def plane_json(self, sim: str, nu: int | None = None) -> Path:
         return _rs.sim_dir(sim, self.data_root) / f"hires_plane_{self.axis}{nu or self.nu}.json"

@@ -65,6 +65,7 @@
 #include "user_options.h"
 #include "particle_data.h"
 #include "env_knobs.h"
+#include "run_mode.h"      // the run mode's core budget (autoTuneCores) and start-up threads (autoTuneGpuShare)
 
 
 // The free memory the tuner leaves untouched: the budget is capped at what the other programs leave free minus this,
@@ -249,10 +250,11 @@ inline double autoTuneBudget(double ramBytes, std::string &why)
     return budget;
 }
 
+// the threads the tuner plans for: the run mode's core budget (run_mode.h), the OpenMP maximum unless it was lowered
 inline int autoTuneCores()
 {
 #ifdef OPEN_MP
-    return std::max( omp_get_max_threads(), 1 );
+    return dtfeOmpMax();
 #else
     return 1;
 #endif
@@ -270,6 +272,8 @@ struct AutoTuneReport
     double lookAhead = 0.;      // bytes the partition look-ahead adds to 'predicted' (0: none runs)
     double gpuSnapshot = 0.;    // bytes of the GPU deposit's host snapshot (with --grid-window: and of the deposit's window
                                 // grids), held by ONE partition at a time (in 'predicted')
+    bool   mixedLanes = false;  // PS-DTFE: a mixed run's split ('--gpu-share' < 1): gpuSnapshot is also the GPU lock
+                                // holder's device and host grids, and the dynamic concurrency books it once
     double streamsEstimate = -1., streamsBudgeted = 0.;
     // PS-DTFE, for the partition loop's dynamic concurrency (plan P8.10): whether the tuner chose the concurrency (a
     // user's --max-concurrent is kept as given), and what the run still allocates once its partitions are in flight --
@@ -304,6 +308,14 @@ AutoTuneReport autoTunePartitioning(User_options &u,
                                     bool const userSampling,
                                     bool const metalActive,
                                     std::vector<Particle_data> const *particles = nullptr);
+
+/* '--gpu-share auto' (PS-DTFE; DTFE.cpp psResolveGpuShare, before the plan): the per mille of a partitioned '--gpu'
+   run's exact deposits that run on the GPU, the others on the free cores at once (auto_tune.cc; the run modes'
+   decision D11, docs/cleanup-plan.md). In performance, for the single build without the float sums, from
+   DTFE_AUTO_MINN particles and at 4 or more start-up threads N0, it is 50*lround(20/(1 + rho (N0 - 1.8))) clamped to
+   [500, 1000] (600 on the 10-core M1 Max; rho 0.09, DTFE_GPU_SHARE_RHO); else 1000. 'why' says which rule decided and
+   its inputs, e.g. 'performance, 10 threads, rho 0.09' or 'balanced: every partition on the GPU'. */
+long autoTuneGpuShare(User_options const &u, double nParticles, std::string &why);
 
 /* '--serve' on data too large for ONE tessellation: turn it into a composite server (ps_point_eval.cc)
    of n^3 partitions -- when '--tessellation-cache' lets the partitions live on disk. Without the
@@ -355,15 +367,23 @@ struct PartitionMemoryGate
        'floor' (the plan's mc) partitions pass by the rule above. One more only while the LEDGER holds it: the free
        memory read when the loop started (startFree), less the headroom, the reserve (what the run has still to allocate:
        reserveEnd, the grids the first merge sizes until it has run, the unmerged share of the budgeted point records)
-       and the run's own growth beside its partitions in flight (its footprint since the start less 'need' per partition
-       in flight: parked sub-grids, written records), holds 'need' for every partition in flight plus this one -- so a
-       burst of waiting threads gets in only as far as that room goes, whatever the live readings have not seen yet --
-       and the same total stays within the budget; and the live free memory still holds one 'need' (other programs).
-       'live' (when given) is the partitions in flight, for the deposit teams' core pool (thread_count.h). */
+       and the run's own growth beside its partitions in flight (its footprint since the start less what the partitions
+       in flight book, need - once each and the once part once: parked sub-grids, written records), holds that for
+       every partition in flight plus this one -- so a burst of waiting threads gets in only as far as that room goes,
+       whatever the live readings have not seen yet -- and the same total stays within the budget; and the live free
+       memory still holds one 'need' (other programs). 'live' (when given) is the partitions in flight, for the deposit
+       teams' core pool (thread_count.h). */
     bool dynamic = false;
     int floor = 1, total = 1, finished = 0, maxInFlight = 0;
     double reserveEnd = 0., reserveFirstMerge = 0., reserveRecords = 0., budget = 0.;
     double startFree = -1., startOwn = -1.;
+    /* A MIXED run's split ('--gpu-share' < 1): 'once' is the part of 'need' that one partition at a time holds (the GPU
+       lock holder's snapshot, device and host grids), so the ledger books it once and need - once for each partition
+       in flight; the live check keeps the whole 'need' (the lock may be free when this partition reaches it). 0: every
+       partition books 'need' in full (an all-GPU run's snapshot too, as before). Like a lane not yet at its peak, the
+       once part booked while no deposit holds the GPU can hide up to that much of the run's other growth; it nets out
+       what the footprint keeps of the last holder's grids. */
+    double once = 0.;
     double (*footprint)() = nullptr;
     std::atomic<int> *live = nullptr;
     double reserve() const
@@ -376,9 +396,10 @@ struct PartitionMemoryGate
         if ( not ( free >= 0. ) or free - headroom < need ) return false;       // the machine now (other programs)
         double const own = footprint != nullptr ? footprint() : -1.;
         if ( startFree < 0. or startOwn < 0. or own < 0. ) return false;
-        double const booked = double(inFlight) * need;
+        double const lane = need - once;
+        double const booked = double(inFlight) * lane + ( inFlight > 0 ? once : 0. );
         double const other = std::max( 0., ( own - startOwn ) - booked );     // the run's growth beside its partitions
-        double const all = double( inFlight + 1 ) * need;
+        double const all = double( inFlight + 1 ) * lane + once;
         if ( startFree - headroom - reserve() - other < all ) return false;
         if ( budget > 0. and startOwn + other + all + reserve() > budget ) return false;
         return true;

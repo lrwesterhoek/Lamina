@@ -66,6 +66,7 @@ def main():
         pts_conventions_flag()
         pts_conventions_choice()
         estimator_per_snapshot(tmp)
+        run_modes(tmp)
     finally:
         shutil.rmtree(tmp.parent)
     print("-" * 60)
@@ -506,13 +507,14 @@ def _memory_check(tmp):
           rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[4]).memory_key()
           == rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99]).memory_key()
           != rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[4], grid=256).memory_key())
-    pm = rs.PipelineSpec(data_root=str(tmp), sims=["TNG100-3-Dark"], nu=64, grid=128, scratch_dir=str(tmp.parent))
+    pm = rs.PipelineSpec(data_root=str(tmp), sims=["TNG100-3-Dark"], nu=64, grid=128, scratch_dir=str(tmp.parent),
+                         gpu=False)
     have = pm.check_step("TNG100-3-Dark", [99, 4], 64)                 # hires_plane_z64.bin exists
     need = pm.check_step("TNG100-3-Dark", [99], 32)                    # hires_plane_z32 does not
     gpu_have = rs.PipelineSpec(data_root=str(tmp), sims=["TNG100-3-Dark"], nu=64, grid=128,
                                gpu=True).check_step("TNG100-3-Dark", [99, 4], 64)
-    check("a pipeline check passes the pipeline's settings (the exact deposit, the default, on the CPU: no -m; a "
-          "ticked GPU: -m), the plane file when it exists ...",
+    check("a pipeline check passes the pipeline's settings (the exact deposit, the default, with the GPU unticked: no "
+          "-m; a ticked GPU: -m), the plane file when it exists ...",
           have.argv[1:] == ["-s", "TNG100-3-Dark", "-g", "128", "4", "99"] and not pm.gpu
           and gpu_have.argv[1:] == ["-s", "TNG100-3-Dark", "-g", "128", "-m", "4", "99"]
           and have.env["SAMPLE_POINTS"].endswith("hires_plane_z64.bin") and have.env["AUTO_TUNE_REPORT"] == "1"
@@ -650,19 +652,26 @@ def gpu_branches(tmp: Path, snap: Path):
             check(f"the faked stamp is what the build checks read ({built})",
                   rs.gpu_built("ps") is built and rs.gpu_built("dtfe") is built
                   and rs.gpu_backend("ps") == ("Metal" if built else ""))
-            # a fresh job's GPU tick is the build's, except at PS-DTFE's exact deposit (the default since 2026-11-09),
-            # which starts on the CPU; a saved one stays
-            check(f"a fresh job's GPU tick is the build's ({built}): the Grids job (standard DTFE; PS-DTFE's sampled "
-                  "deposit, double too), the sampled pipeline; PS-DTFE's exact deposit, the default, starts on the "
-                  "CPU (Grids and Pipeline); a saved tick is kept either way",
-                  rs.RunSpec(deposit="sampled").gpu is built and rs.RunSpec(estimator="dtfe").gpu is built
+            # a fresh job's GPU tick is the drivers' automatic device on the build (the run modes' device table,
+            # D21): the GPU, but for standard DTFE's sampled average in performance; a saved one stays
+            check(f"a fresh job's GPU tick is the drivers' automatic device ({built}): PS-DTFE's exact deposit, the "
+                  "default, on the GPU in every machine use (Grids and Pipeline), its sampled one too (double as well); "
+                  "standard DTFE's exact average too, its sampled one in gentle and balanced but not in performance; "
+                  "a saved tick is kept either way",
+                  all(rs.RunSpec(run_mode=m).gpu is built and rs.PipelineSpec(run_mode=m).gpu is built
+                      and rs.RunSpec(deposit="sampled", run_mode=m).gpu is built
+                      and rs.PipelineSpec(deposit="sampled", run_mode=m).gpu is built
+                      and rs.RunSpec(estimator="dtfe", run_mode=m).gpu is built
+                      and rs.RunSpec(estimator="dtfe", deposit="sampled", run_mode=m).gpu is (built and m != "performance")
+                      for m in rs.RUN_MODES)
+                  and rs.RunSpec().gpu is built and rs.PipelineSpec().gpu is built
                   and rs.RunSpec(precision="double", deposit="sampled").gpu is built
-                  and rs.PipelineSpec(deposit="sampled").gpu is built
-                  and rs.RunSpec().gpu is False and rs.PipelineSpec().gpu is False
                   and rs.RunSpec.from_dict({"gpu": not built}).gpu is (not built)
                   and rs.PipelineSpec.from_dict({"gpu": not built}).gpu is (not built)
-                  and rs.RunSpec(gpu=True).gpu is True,
-                  f"{rs.RunSpec().gpu} {rs.PipelineSpec().gpu}")
+                  and rs.RunSpec(gpu=True).gpu is True
+                  and rs.RunSpec(estimator="dtfe", deposit="sampled", run_mode="performance", gpu=True).gpu is True,
+                  f"{rs.RunSpec().gpu} {rs.PipelineSpec().gpu} "
+                  f"{rs.RunSpec(estimator='dtfe', deposit='sampled', run_mode='performance').gpu}")
             _gpu_advice_checks(tmp, snap)
     finally:
         rs._objdir = real
@@ -677,48 +686,71 @@ def _gpu_advice_checks(tmp: Path, snap: Path):
           and len(adv(False, "sampled", ["density_a"], 2_100_000, "ps")) == (1 if ps_gpu else 0)
           and adv(False, "sampled", ["density_a"], 260_000, "ps") == []
           and adv(True, "sampled", ["density_a"], 7_100_000, "ps") == [])
-    check("gpu advice: the exact deposit warns only with the GPU ticked on a production-size run (the CPU is faster)",
-          len(adv(True, "exact", ["density_a"], 94_000_000, "ps")) == 1
-          and adv(True, "exact", ["density_a"], 2_100_000, "ps") == []
-          and adv(True, "exact", ["density_a"], None, "ps") == []
-          and adv(False, "exact", ["density_a"], None, "ps") == []
-          and adv(False, "exact", ["density_a"], 94_000_000, "ps") == []
+    modes = rs.RUN_MODES
+    check("gpu advice: PS-DTFE's exact deposit never warns, the GPU ticked or not, in any machine use (the GPU's, "
+          "1156 s against 1133 s on all CPU cores: no 'untick the GPU' any more)",
+          all(adv(g, "exact", ["density_a"], n, "ps", run_mode=m) == []
+              for g in (True, False) for n in (94_000_000, 2_100_000, None) for m in modes)
           and adv(True, "sampled", ["density_a"], None, "ps") == [])
-    check("gpu advice: standard DTFE with the GPU unticked on a fine grid is told the GPU is 1.5-2.3x faster; not at 256³",
-          adv(True, "sampled", rs.DTFE_DEFAULT_FIELDS, 7_100_000, "dtfe", grid=512) == []
-          and adv(False, "sampled", rs.DTFE_DEFAULT_FIELDS, 7_100_000, "dtfe", grid=256) == []
-          and len(adv(False, "sampled", rs.DTFE_DEFAULT_FIELDS, 7_100_000, "dtfe", grid=1024)) == (1 if dt_gpu else 0))
+    perf = adv(True, "sampled", rs.DTFE_DEFAULT_FIELDS, 94_000_000, "dtfe", grid=512, run_mode="performance")
+    check("gpu advice: standard DTFE warns only for its sampled average with the GPU ticked in performance (the "
+          "CPU's there, 315 s against 433 s); no 'tick the GPU' on a fine grid or for the exact average any more",
+          len(perf) == (1 if dt_gpu else 0) and all("315 s against 433 s" in m for _, m in perf)
+          and all(adv(True, "sampled", rs.DTFE_DEFAULT_FIELDS, 94_000_000, "dtfe", grid=512, run_mode=m) == []
+                  for m in ("gentle", "balanced"))
+          and all(adv(False, d, rs.DTFE_DEFAULT_FIELDS, 7_100_000, "dtfe", grid=gr, run_mode=m) == []
+                  for d in ("sampled", "exact") for gr in (256, 512, 1024) for m in modes)
+          and all(adv(True, "exact", rs.DTFE_DEFAULT_FIELDS, 7_100_000, "dtfe", grid=512, run_mode=m) == []
+                  for m in modes), str(perf))
     rec = rs.recommended_gpu
-    check("recommended GPU: exact never (the CPU), sampled from ~1M particles, standard DTFE when built",
-          rec("exact", ["density_a"], 1000) is False and rec("exact", ["density_a"], 10 ** 8) is False
+    check("recommended GPU (the drivers' device table): PS-DTFE's exact deposit the GPU in every machine use, its "
+          "sampled one from ~1M particles, standard DTFE the GPU but for its sampled average in performance; "
+          "balanced when not given; all only when built",
+          all(rec("exact", ["density_a"], n, run_mode=m) == ps_gpu for n in (1000, 10 ** 8, None) for m in modes)
           and rec("sampled", ["density_a"], 32 ** 3) is False
           and rec("sampled", ["density_a"], 19_000_000) == ps_gpu and rec("sampled", ["density_a"], None) == ps_gpu
+          and all(rec(d, ["density_a"], 1e9, "dtfe", run_mode=m) == (dt_gpu and not (d == "sampled"
+                                                                                        and m == "performance"))
+                  for d in ("exact", "sampled") for m in modes)
           and rec("sampled", ["density_a"], 1e9, "dtfe") == dt_gpu)
+    # the advice and the recommendation agree: a tick at the recommended device is never warned about
+    told = [(e, d, n, m) for e in ("ps", "dtfe") for d in ("exact", "sampled")
+            for n in (32 ** 3, 1_500_000, 2_100_000, 94_000_000, None) for m in modes
+            if adv(rec(d, ["density_a"], n, e, run_mode=m), d, ["density_a"], n, e, grid=512, run_mode=m)]
+    check("... and a GPU tick at the recommended device gets no GPU advice, for either estimator, deposit and "
+          "machine use", not told, str(told[:4]))
     ex = rs.RunSpec(sim="TNG50-4", snapshots=[99], deposit="exact", gpu=True, data_root=str(tmp))
     msgs = [m for level, m in ex.problems() if level == "warning" and "exact" in m]
     ex.gpu = False
-    check("a Grids exact run of 20M particles with the GPU gets ONE warning (the duplicate is gone), none without it",
-          len(msgs) == 1 and not [m for level, m in ex.problems() if level == "warning" and "exact" in m], str(msgs))
+    check("a Grids exact run of 20M particles gets no GPU warning, the GPU ticked or not (the 'untick the GPU' "
+          "warning is gone)",
+          not msgs and not [m for level, m in ex.problems() if level == "warning" and "exact" in m], str(msgs))
     dtg = rs.RunSpec(sim="TNG50-4", snapshots=[99], estimator="dtfe", gpu=True, grid=512, data_root=str(tmp))
     cm = rs.CustomSpec(input_file=str(snap), estimator="dtfe", gpu=True, grid=512)
     check("a standard-DTFE 512³ run with the GPU gets no GPU warning (Grids and custom)",
           not any("GPU" in m and level == "warning" and "METAL" not in m for level, m in dtg.problems() + cm.problems()),
           str(dtg.problems()))
     dtg.gpu = cm.gpu = False
-    check("... and with the GPU unticked both are told it is faster (when built)",
-          (any("faster" in m for _, m in dtg.problems()) and any("faster" in m for _, m in cm.problems())) == dt_gpu,
-          str(cm.problems()))
+    check("... and with the GPU unticked neither is told to tick it (431 s against 439 s for the exact average: a tie)",
+          not any("faster" in m for _, m in dtg.problems() + cm.problems()), str(cm.problems()))
+    dts = rs.RunSpec(sim="TNG50-4", snapshots=[99], estimator="dtfe", deposit="sampled", gpu=True, grid=512,
+                     run_mode="performance", data_root=str(tmp))
+    on_cpu = [m for level, m in dts.problems() if level == "warning" and "faster on the CPU" in m]
+    dts.run_mode = "balanced"
+    check("... the sampled average with the GPU in performance is told the CPU is faster there (when built), in "
+          "balanced not",
+          len(on_cpu) == (1 if dt_gpu else 0) and not any("faster" in m for _, m in dts.problems()), str(on_cpu))
     dex = rs.RunSpec(sim="TNG50-4", snapshots=[99], estimator="dtfe", deposit="exact", gpu=False, grid=256,
                      data_root=str(tmp))
     cex = rs.CustomSpec(input_file=str(snap), estimator="dtfe", deposit="exact", gpu=False, grid=256)
     csa = rs.CustomSpec(input_file=str(snap), estimator="dtfe", deposit="sampled").command()
     check("standard DTFE exact: the custom command passes --exact (no older name, no --sampled), the sampled one "
-          "--sampled (no count: the binary's own), and without the GPU both specs say the GPU is ~1.6x faster (when "
-          "built)",
+          "--sampled (no count: the binary's own), and without the GPU neither spec warns (a tie, 431 s against "
+          "439 s)",
           "--exact" in cex.command() and "--sampled" not in cex.command()
           and not {"--exact-average", "--ps-exact-deposit"} & set(cex.command())
           and "--sampled" in csa and "--exact" not in csa and "--subsamples" not in csa
-          and (any("1.6x" in m for _, m in dex.problems()) and any("1.6x" in m for _, m in cex.problems())) == dt_gpu,
+          and not any("faster" in m for _, m in dex.problems() + cex.problems()),
           str(cex.problems()))
     # the Custom tab's standard run starts at the exact cell average and pads
     # with 15 mean spacings (dtfelib.estimator.STANDARD_PADDING, run_dtfe.sh's and the standard server's value) instead
@@ -736,6 +768,192 @@ def _gpu_advice_checks(tmp: Path, snap: Path):
           and "--exact" not in cpss and "--sampled" in cpss
           and cpss[cpss.index("--sampled") + 1:cpss.index("--sampled") + 3] == ["--subsamples", "2"],
           f"{cd0} {cd2} {cps} {cpss}")
+
+
+def run_modes(tmp: Path):
+    """The machine use (the run modes, D22-D26): every run job's field, its environment and command, the checks, the
+    SLURM export, the queue line, the memory key, the run records and the time estimates, the presets; then the
+    drivers' device table."""
+    import textwrap
+    import presets as P
+    import results as R
+    print("launcher: the machine use (run modes):")
+    base = dict(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99])
+    snap = tmp / "TNG100" / "TNG100-3-Dark" / "snapdir_099" / "combined_099.hdf5"
+    pipe = dict(data_root=str(tmp), sims=["TNG100-3-Dark"])
+    jobs = (rs.RunSpec(**base), rs.PipelineSpec(**pipe), rs.CustomSpec(input_file=str(snap)))
+    check("every run job holds the machine use, balanced by default (the drivers' default); it survives a round trip "
+          "and a queued job, and a job saved without it loads as balanced",
+          rs.RUN_MODES == ("gentle", "balanced", "performance") and all(j.run_mode == "balanced" for j in jobs)
+          and all(type(j).from_dict(dict(j.to_dict(), run_mode="gentle")).run_mode == "gentle" for j in jobs)
+          and all(type(j).from_dict({k: v for k, v in j.to_dict().items() if k != "run_mode"}).run_mode == "balanced"
+                  for j in jobs)
+          and rs.QueuedJob.of("grids", rs.RunSpec(run_mode="performance", **base)).build().run_mode == "performance")
+    lines = lambda t: sum(max(1, len(textwrap.wrap(ln, 90))) for ln in t.split("\n"))     # noqa: E731
+    check("each machine use has a menu text and an item tip of at most two lines, neither with '--'",
+          set(rs.RUN_MODE_TEXT) == set(rs.RUN_MODES)
+          and all(label and lines(tip) <= 2 and "--" not in label + tip for label, tip in rs.RUN_MODE_TEXT.values()),
+          str({k: lines(t) for k, (_, t) in rs.RUN_MODE_TEXT.items()}))
+    gentle = rs.RunSpec(run_mode="gentle", **base)
+    ps_env, dt_env = gentle.command()[1], rs.RunSpec(estimator="dtfe", run_mode="performance", **base).command()[1]
+    pj = rs.PipelineSpec(run_mode="gentle", **pipe)
+    pe = pj.command()[1]
+    probes = (gentle.check_step().env, rs.RunSpec(estimator="dtfe", run_mode="gentle", **base).check_step().env,
+              pj.check_step("TNG100-3-Dark", [99], 64).env)
+    check("DTFE_RUN_MODE in every job's environment (Grids with either estimator, Pipeline) and in their memory checks; "
+          "GPU_SHARE pinned to auto for run_ps_dtfe.sh (Grids and Pipeline: the machine use's share), not for "
+          "run_dtfe.sh; the command shown names it",
+          ps_env["DTFE_RUN_MODE"] == "gentle" and dt_env["DTFE_RUN_MODE"] == "performance"
+          and pe["DTFE_RUN_MODE"] == "gentle" and all(e.get("DTFE_RUN_MODE") == "gentle" for e in probes)
+          and ps_env["GPU_SHARE"] == pe["GPU_SHARE"] == probes[2]["GPU_SHARE"] == "auto" and "GPU_SHARE" not in dt_env
+          and " DTFE_RUN_MODE=gentle " in f" {gentle.shell_line()} ", f"{ps_env} {dt_env}")
+
+    def after(a, flag):
+        return a[a.index(flag) + 1] if flag in a else None
+    cps = rs.CustomSpec(input_file=str(snap), deposit="exact", gpu=True, run_mode="gentle")
+    check("the Custom command always names the machine use ('--run-mode', once), and '--gpu-share auto' only for "
+          "PS-DTFE's exact deposit on the GPU (not sampled, not without the GPU, not standard DTFE, not 2D); its "
+          "memory check too",
+          after(cps.command(), "--run-mode") == "gentle" and cps.command().count("--run-mode") == 1
+          and after(cps.command(), "--gpu-share") == "auto" and after(cps.check_step().argv, "--run-mode") == "gentle"
+          and after(rs.CustomSpec(input_file=str(snap)).command(), "--run-mode") == "balanced"
+          and after(rs.CustomSpec(input_file=str(snap), estimator="dtfe", run_mode="performance").command(),
+                    "--run-mode") == "performance"
+          and not any("--gpu-share" in c for c in (
+              rs.CustomSpec(input_file=str(snap), deposit="sampled", gpu=True).command(),
+              rs.CustomSpec(input_file=str(snap), deposit="exact", gpu=False).command(),
+              rs.CustomSpec(input_file=str(snap), estimator="dtfe", gpu=True).command(),
+              rs.CustomSpec(input_file=str(snap), dim=2, gpu=True).command())), str(cps.command()))
+    rep = [m for lv, m in rs.CustomSpec(input_file=str(snap), extra_args="--run-mode=performance").problems()
+           if lv == "error" and "repeat" in m]
+    rep2 = [m for lv, m in rs.CustomSpec(input_file=str(snap), gpu=True, extra_args="--gpu-share 0.5").problems()
+            if lv == "error" and "repeat" in m]
+    check("... the extra options cannot give the machine use or the GPU share again (one setting each, the tab's)",
+          len(rep) == 1 and "--run-mode" in rep[0] and len(rep2) == 1 and "--gpu-share" in rep2[0], f"{rep} {rep2}")
+    was = os.environ.pop("OMP_NUM_THREADS", None)
+    try:
+        quiet = [m for j in jobs for _, m in j.problems() if "OMP_NUM_THREADS" in m]
+        os.environ["OMP_NUM_THREADS"] = "3"
+        said = [(lv, m) for j in jobs for lv, m in j.problems() if "OMP_NUM_THREADS" in m]
+    finally:
+        os.environ.pop("OMP_NUM_THREADS", None)
+        if was is not None:
+            os.environ["OMP_NUM_THREADS"] = was
+    bad = (rs.RunSpec(run_mode="fast", **base), rs.PipelineSpec(run_mode="fast", **pipe),
+           rs.CustomSpec(input_file=str(snap), run_mode="fast"))
+    check("an unknown machine use is an error on every run tab; an OMP_NUM_THREADS the launcher inherited is said on "
+          "each (it keeps its thread count in every mode), nothing without one",
+          all(("error", "Machine use: unknown value fast") in j.problems() for j in bad)
+          and not any(lv == "error" and "Machine use" in m for j in jobs for lv, m in j.problems())
+          and not quiet and said == [("info", "OMP_NUM_THREADS=3 in the launcher's environment keeps the thread count "
+                                              "whatever the machine use")] * 3, str(said))
+    steps = gentle.steps() + rs.CustomSpec(input_file=str(snap), run_mode="gentle").steps()
+    cluster = rs.export_script(steps, "t", slurm={"job_name": "x"})
+    here = rs.export_script(steps, "t")
+    check("a SLURM export runs in performance: each step's DTFE_RUN_MODE and a Custom step's '--run-mode' value, with "
+          "one comment line saying so; a plain export and the job's own steps keep the launcher's choice",
+          "DTFE_RUN_MODE=performance" in cluster and "--run-mode performance" in cluster
+          and "DTFE_RUN_MODE=gentle" not in cluster and "--run-mode gentle" not in cluster
+          and cluster.splitlines().count("# machine use: performance on the cluster (the launcher's choice is for this "
+                                         "machine)") == 1
+          and "DTFE_RUN_MODE=gentle" in here and "--run-mode gentle" in here and "machine use" not in here
+          and steps[0].env["DTFE_RUN_MODE"] == "gentle" and after(steps[-1].argv, "--run-mode") == "gentle", cluster)
+    check("the queue line names the machine use when it is not balanced (the default)",
+          rs.job_summary("grids", rs.RunSpec(**base)).endswith("³, exact")
+          and rs.job_summary("grids", gentle).endswith("³, exact, gentle")
+          and ", performance · " in rs.job_summary("pipeline", rs.PipelineSpec(run_mode="performance", **pipe))
+          and ", balanced" not in rs.job_summary("pipeline", rs.PipelineSpec(**pipe))
+          and ", performance -> " in rs.job_summary("custom", rs.CustomSpec(input_file=str(snap), run_mode="performance")),
+          rs.job_summary("grids", gentle))
+    check("the machine use is part of every run job's memory-check key (its thread budget changes the tuner's plan)",
+          all(j.memory_key() != type(j).from_dict(dict(j.to_dict(), run_mode="gentle")).memory_key() for j in jobs))
+
+    def rec(cmd, sec):
+        r = R.RunRecord(path=Path("/x/r.runlog"), sim="S", prefix="ps_output", binary="PS-DTFE")
+        r.ok, r.wall_seconds, r.command = True, sec, f"/x/PS-DTFE in.hdf5 out --grid 64{cmd}"
+        return r
+    recs = [rec("", 100), rec(" --run-mode gentle", 300), rec(" --run-mode=balanced", 200), rec(" --run-mode performance", 120)]
+    kw = dict(sim="S", grid=64, estimator="ps", gpu=False, sliced=False)
+    check("run records: the machine use from the logged command ('--run-mode MODE' or '=MODE'; none: performance, the "
+          "binaries' default); a time estimate is per machine use (performance when not given); 'Load settings' "
+          "leaves it out",
+          [r.run_mode for r in recs] == ["performance", "gentle", "balanced", "performance"]
+          and R.time_estimate(recs, **kw) == (110, 2) and R.time_estimate(recs, run_mode="gentle", **kw) == (300, 1)
+          and R.time_estimate(recs, run_mode="balanced", **kw) == (200, 1) and "run_mode" not in recs[1].settings(),
+          f"{[r.run_mode for r in recs]} {R.time_estimate(recs, **kw)}")
+    g = rs.RunSpec(run_mode="gentle", **base)
+    c = rs.CustomSpec(input_file=str(snap), run_mode="performance")
+    for name in P.BUILTIN_PRESETS:
+        P.apply_preset(g, P.preset(name, {})[1])
+        P.apply_preset(c, P.preset(name, {})[1])
+    check("presets leave the machine use alone: not a preset key, untouched by every built-in preset (Grids and "
+          "Custom); its label is the selector's",
+          g.run_mode == "gentle" and c.run_mode == "performance" and "run_mode" not in P.PRESET_KEYS
+          and "run_mode" not in P.capture(g) and P.OPTION_TEXT["run_mode"] == ("Machine use", "--run-mode"))
+    driver_device_table()
+
+
+def driver_device_table():
+    """A fresh job's GPU tick and rs.recommended_gpu against the drivers' own automatic device (scripts/config.sh
+    gpu_auto_resolve, the run modes' device table D21): for every estimator, deposit, machine use and GPU stamp of the
+    pair's object folder (metal, off, none) they equal what the driver's DRY_RUN plans (its command's --gpu). The
+    drivers run copied into stand-in repositories with stand-in binaries, as tests/run_scripts_check.sh does, one per
+    stamp; rs._objdir points at the same object folders."""
+    import re as _re
+    print("launcher: the drivers' automatic device:")
+    real = rs._objdir
+    base = Path(tempfile.mkdtemp(prefix="gui_devices_"))
+    procs = {}
+    try:
+        data = base / "data"
+        (data / "SIM" / "snapdir_099").mkdir(parents=True)
+        (data / "SIM" / "snapdir_099" / "combined_099.hdf5").touch()
+        (data / "SIM" / "combined_ics.hdf5").touch()          # run_ps_dtfe.sh: the Lagrangian positions are there
+        # the knobs of the login shell out: every DTFE_* and PS_* (the GPU, the deposit, the mode, the precision ...),
+        # the counts, the share and a batch job's id (a SLURM or PBS job means performance)
+        keep = {k: v for k, v in os.environ.items() if not k.startswith(("DTFE_", "PS_")) and k not in (
+            "SUBSAMPLES", "AVG_SUBSAMPLES", "GPU_SHARE", "SLURM_JOB_ID", "PBS_JOBID", "FIELDS", "OUTPUT_PREFIX",
+            "PARTITION", "MAX_CONCURRENT", "THREADS", "SAMPLE_POINTS")}
+        for stamp in ("metal", "off", "none"):
+            repo = base / stamp
+            (repo / "scripts").mkdir(parents=True)
+            for name in ("run_dtfe.sh", "run_ps_dtfe.sh", "config.sh"):
+                shutil.copy(ROOT / "scripts" / name, repo / "scripts" / name)
+            for b in ("DTFE", "PS-DTFE"):
+                (repo / b).write_text("#!/usr/bin/env bash\nexit 0\n")
+                (repo / b).chmod(0o755)
+            if stamp != "none":
+                for obj in ("o", "o_ps"):
+                    (repo / obj).mkdir()
+                    (repo / obj / f".gpu_mode_{stamp}").touch()
+            for est, script in (("ps", "run_ps_dtfe.sh"), ("dtfe", "run_dtfe.sh")):
+                for dep in ("exact", "sampled"):
+                    for mode in rs.RUN_MODES:
+                        env = dict(keep, DTFE_DATA_ROOT=str(data), DRY_RUN="1", DTFE_RUN_MODE=mode,
+                                   DTFE_EXACT_AVERAGE="1" if dep == "exact" else "0")
+                        procs[(stamp, est, dep, mode)] = subprocess.Popen(
+                            [str(repo / "scripts" / script), "-s", "SIM", "-g", "16", "99"], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        wrong = []
+        for (stamp, est, dep, mode), p in procs.items():
+            out, _ = p.communicate(timeout=120)
+            line = next((ln for ln in out.splitlines() if _re.match(r"^ +\./(PS-)?DTFE\s", ln)), None)
+            planned = None if line is None else bool(_re.search(r"\s--(ps-)?gpu(\s|$)", line))
+            rs._objdir = (lambda estimator, precision="single", dim=3, repo=base / stamp:
+                          repo / real(estimator, precision, dim).name)
+            gui = (rs.recommended_gpu(dep, ["density_a"], None, est, run_mode=mode),
+                   rs.RunSpec(estimator=est, deposit=dep, run_mode=mode).gpu)
+            if planned is None or gui != (planned, planned):
+                wrong.append(f"{stamp} {est} {dep} {mode}: driver {planned} (exit {p.returncode}"
+                             + ("" if line else f": {out.strip().splitlines()[-1:] or ''}") + f"), launcher {gui}")
+        check("a fresh job's GPU tick and the recommended GPU are the drivers' DRY_RUN device for every estimator, "
+              "deposit, machine use and stamp (metal, off, none)", not wrong, "; ".join(wrong[:4]))
+    finally:
+        rs._objdir = real
+        for p in procs.values():
+            if p.poll() is None:
+                p.kill()
+        shutil.rmtree(base, ignore_errors=True)
 
 
 def tick_helpers():
@@ -2368,13 +2586,13 @@ def pipeline_options(tmp: Path, sim: Path):
                 "PS_CAUSTIC_CUSPS", "PS_PARALLEL_TRI", "PLANES", "SUPERSAMPLE")
     env = rs.PipelineSpec(**base).command()[1]
     # the caustic classes are on by default (run_ps_dtfe.sh's default and the production runs'); the exact deposit
-    # too (the default since 2026-11-09: no sub-sample count, pinned empty, and the CPU); the sampled deposit's GPU
-    # when the PS pair was built with one (rs.gpu_build_default, scripts/config.sh's rule)
+    # too (the default since 2026-11-09: no sub-sample count, pinned empty); either deposit's GPU when the PS pair
+    # was built with one (rs.gpu_build_default, scripts/config.sh's rule; the exact deposit's in every machine use)
     gpu = "1" if rs.gpu_build_default("ps") else "0"
     env_s = rs.PipelineSpec(**base, deposit="sampled").command()[1]
     check("defaults: every run option is spelled out for run_ps_dtfe.sh (a stray PS_* in the login shell cannot leak "
           "in); the exact deposit with the count pinned empty, the sampled one with its nSub",
-          [env[k] for k in run_keys] == ["1", "", "0", "1", "1", "1", "0", "0", "1", "1"]
+          [env[k] for k in run_keys] == ["1", "", gpu, "1", "1", "1", "0", "0", "1", "1"]
           and env["SUBSAMPLES"] == "" and [env_s[k] for k in run_keys[:3]] == ["0", "3", gpu]
           and env_s["SUBSAMPLES"] == "3" and "THICKNESS" not in env and "WINDOW" not in env, f"{env} {env_s}")
     q = rs.PipelineSpec(**base, deposit="sampled", nsub=1, gpu=False, vertex_mass=False, volume_weighted=False,
@@ -2577,8 +2795,8 @@ def pipeline_options(tmp: Path, sim: Path):
           rs.POINTEVAL_FIELDS == tuple(pointeval.STYLES) and rs.POINTEVAL_DERIVATIVE_SMOOTH == pointeval.DERIVATIVE_SMOOTH)
     old = rs.PipelineSpec.from_dict({"sims": ["TNG50-4"], "nu": 4096, "render": False})
     check("settings saved before these options load with the scripts' defaults (the exact deposit, since 2026-11-09, "
-          "on the CPU: no deposit was stored, so none is overridden)",
-          old.deposit == "exact" and old.gpu is False and old.planes == 1
+          "on the GPU when the PS pair has one: no deposit or GPU was stored, so none is overridden)",
+          old.deposit == "exact" and old.gpu is rs.gpu_build_default("ps") and old.planes == 1
           and old.render_project == "plane" and not old.render)
 
 

@@ -1,7 +1,7 @@
 # Lamina: cleanup and polish plan
 
 Status (2026-11-09): P0, P1, P6 (P6.6, the alias removal, is for the next release), P7 and P10.1–P10.7 done; most of P2–P5 and P9
-done (each phase's status line says what is open); phase R's calibration night ran 2026-11-08/09 (the R status; P10.8, decided and done on 2026-11-09 (D16), D15 settled the same evening by D20 (exact; P12, implemented, gates green on 2026-11-10, uncommitted); the rest of R was not launched); P8
+done (each phase's status line says what is open); phase R's calibration night ran 2026-11-08/09 (the R status; P10.8, decided and done on 2026-11-09 (D16), D15 settled the same evening by D20 (exact; P12, implemented, gates green on 2026-11-10, uncommitted); P13 (the run modes, added 2026-11-10: implemented, benched, gates green, uncommitted); the rest of R was not launched); P8
 partly done (P8.1 for the classes phase R ran; P8.2 as the partition span and the start-up zero fill, P8.5, P8.7, P8.9 step 1 and P8.10 in code, gates green on 2026-11-09 (G-battery 32 of 32 over two runs, G-linux); P8.3 and P8.4 not needed; the rest open, see the P8 status). **Added 2026-11-07 (afternoon), owner's order:** P10 (shared exact velocity derivatives, the face method)
 joins the plan, and **every code item is finished and checked on small data before any rerun**; the reruns then run
 once, as one campaign (phase R, after P10). P0.1 and P0.2 landed in `60a072a`; P0.3's CI fixes and P0.4 landed in `70e153e` and `38eb4be`; P0 closed on
@@ -2560,15 +2560,15 @@ bound by the triangulation on both devices. Three changes to PS-DTFE came out of
    prototype's binary, whose exact deposit put 4M items in a GPU buffer instead of this batch's 500k (those buffers
    alone, every partition on the GPU: 1025 s): 712 s at a share of 0.6 (753 s at 0.5, 747 s at 0.7) against the
    bench's 1133 s (CPU) and 1156 s (GPU); a mixed run at 500k is not measured. The grids differ from
-   the pure runs' at float rounding, the mass stays exact. Unset = every partition on the GPU, as before. Not for
-   production as it stands: no flag, no plan of its own in the tuner.
+   the pure runs' at float rounding, the mass stays exact. Unset = every partition on the GPU, as before. P13 made it
+   `--gpu-share` and removed the name.
 Checked against `2f428bc`'s binary: pure CPU and pure GPU runs of the exact deposit at `--partition 1`, `2 2 2`,
 `3 3 3` and `4 4 4` on a small test snapshot, 15 files each, 0 differ; TNG100-3-Dark z = 0 at 512³ with `--gpu`, 23
 of 23 files byte-identical to the bench's. The gates below ran on the tree with these changes.
 
-**Status 2026-11-10: IMPLEMENTED, BUILT, GATES GREEN, uncommitted** (code, drivers, tests, Python and docs edited in
-parallel, one file set per agent, by the contract's ownership table; then built, reviewed and the review's findings
-fixed).
+**Status 2026-11-10: IMPLEMENTED, BUILT, GATES GREEN, COMMITTED as `39583f0`** (code, drivers, tests, Python and docs
+edited in parallel, one file set per agent, by the contract's ownership table; then built, reviewed and the review's
+findings fixed).
 
 **Gates run 2026-11-09 23:44 to 2026-11-10 01:40, all passed:**
 1. G-build: a clean rebuild of the six binaries, no warning; the Metal ones carry their kernels (`strings | grep -c`:
@@ -2589,6 +2589,224 @@ fixed).
 7. G-linux: CI's Linux stages in Colima (build, core, double, 2d, variants, oldpy, ruff) all passed. The `variants`
    stage fails on the pushed `2f428bc` and passes with this tree's `demo/examples/Makefile` TBB block, so `master`
    should not be moved to `2f428bc` before that block is committed.
+
+## P13. Run modes: gentle / balanced / performance (added 2026-11-10, the owner's request)
+
+**Owner's request (2026-11-09, 23:25):** "maybe a good idea to make an option in the GUI as well as a flag to have a
+gentle mode, balanced mode, performance mode". It came the evening exact became the default (P12), after the question
+which method leaves the laptop usable for simple tasks during a run, and with the wish for an implementation that uses
+the CPU and the GPU together. A design panel (three designs, two challenges, one judge) settled it on 2026-11-10.
+Session notes: `run-mode-contract.md` (the final contract: the decisions, the interfaces and texts every file follows,
+the test plan and the file ownership; it wins over the panel's answers) and `inv-findings-hybrid.md` (the
+measurements). D1-D29 below are that contract's numbers, not the owner's table at the end of this file.
+
+**P13.1 The decisions, in short.**
+1. D1, the defaults: the binaries default to performance (every core, 0.25 s GPU buffers, no priority change,
+   `--gpu-share 1`), the drivers and the launcher to balanced; the drivers' `DTFE_RUN_MODE=auto` is performance inside
+   a SLURM or PBS job (`SLURM_JOB_ID`, `PBS_JOBID`); the drivers and the launcher always pass the resolved
+   `--run-mode`, as they pass `--exact` or `--sampled`.
+2. D2, CPU + GPU: `--gpu` puts every partition on the GPU in every mode; `--gpu-share auto` is the run mode's share
+   (D11 in performance, 1 in gentle and balanced), and the drivers and the launcher pass it on every PS exact run on
+   the GPU, so a bare `./PS-DTFE --gpu` stays byte-identical to `2f428bc`.
+3. D3, the spelling: one valued option, `--run-mode gentle|balanced|performance` (exact lower case), in both binaries
+   and every build; no `--gentle` / `--balanced` / `--performance` switches. `DTFE_RUN_MODE` is read by both binaries
+   and the three drivers (any case; unset, empty or `auto` = not given; any other word an error); the drivers take
+   `--run-mode MODE` (getopts letter R).
+4. D4, the mechanism: the process-wide state in the new `src/run_mode.h` (`runModeState()`) with three helpers,
+   `dtfeOmpMax`, `dtfeHardwareThreads` and `dtfeAdoptCoreBudget`, that return today's value unless the mode lowered
+   the budget; they replace `omp_get_max_threads()` and `hardware_concurrency()` where a thread team is sized;
+   `applyRunMode` calls `omp_set_num_threads` once before any thread exists, and the look-ahead thread adopts the
+   budget first thing.
+5. D5, the formula: N0 = the OpenMP default at start-up; base = min(N0, the performance cores) on Apple silicon, else
+   N0; gentle max(1, base/2), balanced max(1, base - clamp(round(base/4), 1, 4)), performance N0 (4 / 6 / 10 on an
+   M1 Max, 32 / 60 / 64 on 64 cores); no SMT detection.
+6. D6, an explicit lever beats the mode: a non-empty `OMP_NUM_THREADS` keeps its count (logged 'kept'), the
+   `DTFE_*_THREADS` pins keep their teams, a `--max-concurrent k` above the budget raises it to k (logged 'raised';
+   not under a kept `OMP_NUM_THREADS`), `--max-concurrent 0` is the mode's budget; `--partition`, `DTFE_GPU` and
+   `--gpu-share` stay as given.
+7. D7, the tuner: no recalibration; `autoTuneCores()` returns the budget, so both tuners plan for it.
+8. D8, the priority: gentle on Linux only, nice 10 before any thread exists, never lowered, the outcome in the header
+   line; on macOS no mode sets a priority (no taskpolicy, background band, QoS class or I/O policy).
+9. D9, the GPU pace: 0.05 s buffers in gentle and balanced, 0.25 s in performance, the 8 ms gap in every mode;
+   `GpuPace` gains its base (`target0`, `gap0`), so an escalated pace recovers to the mode's base and not to 0.25 s;
+   the eased line keeps `(the default)` at 0.25 s / 8 ms and says `(the run mode's)` at a lower base; the first-chunk
+   references stay at 0.25 s.
+10. D10, PS-DTFE's exact item cap: 4M items per GPU buffer in performance, 500k (the `2f428bc` value) in gentle and
+    balanced; byte-neutral, with no tuner term; standard DTFE keeps its own cap.
+11. D11, the share: partition pi deposits on the CPU when floor((pi+1) s / 1000) = floor(pi s / 1000), s the resolved
+    per mille; `auto` gives 1000 outside performance, in the double build, under the float-sum variants or
+    `DTFE_MASS_AUDIT`, below `DTFE_AUTO_MINN` particles and under 4 threads, else 50 round(20 / (1 + 0.09 (N0 - 1.8)))
+    within [500, 1000] (600 at 10 threads; `DTFE_GPU_SHARE_RHO` replaces the 0.09).
+12. D12, where it applies: a PS-DTFE 3D GPU build, `--gpu`, the exact deposit and a partitioned run; elsewhere the
+    share is 1000, a number gets one note naming why, `auto` is silent, and a plan that ends in one domain is reset
+    after the report.
+13. D13, the mixed run's memory model: per lane the common terms plus the larger of the CPU deposit and the GPU's
+    pre-lock arrays, and the GPU snapshot and the lock holder's grids once; the existing GPU and CPU branches
+    untouched, so a share of 1 plans as before; to be validated on the bench input before it is trusted (predicted
+    32.5-41.2 GB). **Validated 2026-11-10 (the plan only, no run): predicted 34.68 GB at `--partition 6 6 6
+    --max-concurrent 3` on that night's 37.4 GB budget (snapshot term 5.07 GB, lane 3.33 GB); by the same terms the
+    full 41.2 GB budget holds 4 at once (38.0 GB), not the 6 of the 712 s hand plan (44.7 GB by the model, 30.7 GB
+    measured).** The dynamic concurrency (P8.10) is what can add the lanes the model does not book, and under a mixed
+    plan it could not start: its start check and its ledger booked the once part with every partition (8.4 GB each).
+    **Fixed 2026-11-10:** `AutoTuneReport::mixedLanes` marks a mixed split, `psOnceBytes` carries its snapshot term,
+    and the start check, `PartitionMemoryGate::roomForOneMore` and the summary's prediction book it once and the lane
+    per partition in flight; with no once part (every all-GPU and CPU plan) the arithmetic is the earlier one. The
+    live check keeps the whole partition, the basic gate and the parking rule are untouched. `DTFE_AUTO_TUNE_DEBUG`
+    prints the start check's terms; `tests/run_mode_check.sh` G8 holds the start check at both sides of the budget,
+    the ledger's second partition and the summary's prediction. Left as it was: the all-GPU ledger books its snapshot
+    per lane (D29's over-booking, the same separate commit). **Reviewed lightly 2026-11-10: correct and safe to
+    keep**; what the review left for later commits: (a) the lane's max(CPU deposit, GPU pre-lock arrays) covers the
+    host grids a GPU lane keeps after the lock only by argument, and adding (gpuCellBytes - grid - 4 B) x subCells to
+    that max needs its own `tune_report_set` check; (b) the GPU snapshot's host copies live until the host function
+    returns and could be freed before the unlock (`src/ps_metal_host.cc`); (c) `psParkRoom` does not shrink for the
+    partitions the dynamic concurrency starts beyond the plan's (P8.10's behaviour from before this change), so
+    parking could take such a run past the budget by up to a lane for each of them.
+14. D14, the tuner's lines: AUTO-TUNE-REPORT unchanged (no share key, `over_budget` last); the human line's tag reads
+    `, GPU deposit with the free cores (GPU share 0.60)` when mixed.
+15. D15, the checkpoint key: `--run-mode` and `--gpu-share` leave the command lines; a mixed run writes
+    `gpu-share=<per mille>` (none at 1000); `--resume` with `auto` adopts the checkpoint's share (missing = 1000), and
+    an explicit share that differs is refused by name.
+16. D16, look-ahead, CPU teams and merge: no new rule; a share partition takes today's CPU path (the core lend
+    included) and never counts as a GPU fallback; the look-ahead line names the share's CPU partitions.
+17. D17, the experiment's name: `DTFE_PS_GPU_SHARE` (P12.2's, in no release) is removed, with one note when it is set;
+    the binary has no environment name for the share; the drivers' knob is `GPU_SHARE` (run_ps_dtfe.sh);
+    `DTFE_GPU_SHARE_RHO` is the dev override.
+18. D18, the run-log texts: a `run mode` header line before the `1Mpc =` line, a `GPU share` header line when the flag
+    is given with `--gpu`, and the post-plan share line; every existing literal byte for byte, and no fallback phrase
+    in the new texts.
+19. D19, the errors: an unknown `--run-mode`, an unknown `DTFE_RUN_MODE`, a `--gpu-share` that is not 'auto' or a
+    fraction from 0 to 1 (so the experiment's `600` is refused); a second `--run-mode` and standard DTFE's
+    `--gpu-share` are boost's own refusals.
+20. D20, the drivers: config.sh's `knob_run_mode`, `run_mode_option` and `run_mode_resolve` (flag, then the caller's
+    knob, then auto); `gpu_auto_resolve <knob> <binary> <ps|dtfe> <exact> <mode>`, which the pipeline now calls too;
+    the tokens after the existing `part_args`; a `Run mode:` banner line; the pipeline resolves once and forwards
+    `DTFE_RUN_MODE`; its `run_settings` unchanged (the mode never makes a snapshot stale).
+21. D21, the automatic device on a GPU build (drivers and launcher): the GPU for PS-DTFE's exact deposit too (before:
+    the CPU), for its sampled deposit and for standard DTFE's exact average; standard DTFE's sampled average on the
+    CPU in performance (315 s against 433 s on the GPU), on the GPU otherwise; the CPU on a CPU-only build.
+22. D22, the launcher: `run_mode` (default balanced) in the three specs; `DTFE_RUN_MODE` in every job's environment,
+    `GPU_SHARE=auto` in a PS job's; a 'Machine use' combo right after the GPU tick; the GPU advice mirrors D21 and a
+    mode change re-applies the tick unless it was set by hand; a one-time `run_mode_start` migration ticks the GPU of
+    saved PS exact jobs; the mode stays out of presets and 'Load settings'.
+23. D23, the GUI's device advice rewritten per mode, with bench numbers only.
+24. D24, a SLURM export runs performance, with one comment line saying so.
+25. D25, Explore's zoom passes `--run-mode balanced`; dtfelib's `Estimator` takes `run_mode` (unset: nothing passed),
+    and the launcher's Explore gives it balanced.
+26. D26, the run records: `run_mode` from the logged command line (absent: performance) joins the time estimate's key
+    and the job summary, not `settings()`.
+27. D27, the tests: the new `tests/run_mode_check.sh` in `run_program_suites` (core and double, CI and the battery);
+    `unset DTFE_RUN_MODE` in `tests/lib.sh`, `tests/dev/battery.sh` and `tests/dev/tune_report_set.sh`; no share pin;
+    the driver cases in `run_scripts_check.sh`, the GUI cases in its two suites.
+28. D28, the numbers the repository quotes: the P11.1 bench table, the two rows below with their conditions, the gap
+    model and the display probes; the rest is stated as not measured. **Amended 2026-11-10:** plus the mode bench's
+    rows below, each time with their conditions (the night's machine state and the control run's 789 s).
+29. D29, left out on purpose (each a separate commit with a deliberate gate diff): the pure-GPU model's per-lane
+    over-booking of its grids, the scratch-write side finding, a rho from the hardware, SMT detection, a mixed share
+    for balanced.
+
+**Measured** (D28; TNG100-3-Dark z = 0, 512³, M1 Max, PS-DTFE's exact deposit, 2026-11-09, `2f428bc` plus the
+selection skip and the core lend): the GPU at 4M items per buffer (performance's buffers) with the tuner's plan
+1025 s; a GPU share of 0.6 with `--partition 6 6 6 --max-concurrent 6` given by hand 712 s; against the `2f428bc`
+bench's 1133 s on the CPU and 1156 s on the GPU. The gaps between buffers: 18.6% of the time the run holds the GPU at
+50 ms buffers and 4.4% at 250 ms by the model, 17.4% measured at 53 ms. The display probes: late by more than a 60 Hz
+frame in 0.0% of the samples at 53 ms buffers, in 5.6% (up to 214 ms) at 155 ms. **Not measured:** nice 10, a CPU
+run at a lowered thread budget, and any mode on a machine at rest (the mode bench below ran under a screen saver).
+
+**Mode bench 2026-11-10** (03:46-06:54, one run each with the binaries directly; the input and fields of the `2f428bc`
+bench; the code of the copy's scratch checkpoint `11f269a`; session notes `run-mode-bench-notes.md`,
+`inv/results-modes/summary.txt` and the contract's section 15). The machine was not at rest: a screen saver drew all
+night, and with no run the GPU was 59% and the efficiency cores 67% busy (28% and 50% the evening before). Two
+controls with the binaries from before the modes give the night's level: the binary and command of the 712 s run took
+789 s, standard DTFE's `--gpu --exact` 478 s (439 s in the bench, 466 s the evening before). So the rows compare with
+each other and with the controls, not with the bench table.
+
+| run | wall | plan | predicted | peak | grids |
+|---|---|---|---|---|---|
+| PS performance at a 36.4 GB budget (40.4 GB free at the start) | 1028 s | 6 6 6, 3 at once, none added | 34.7 GB | 28.9 GB | the mixed run's |
+| PS performance at the full 41.2 GB budget | 908 s | 6 6 6, 4 at once, up to 5 in flight | 38.0 GB (41.3 GB with the fifth) | 29.8 GB | identical to the row above |
+| the same with `DTFE_FREE_GB=1000` (the free-memory reading overridden) | 893 s | the same, up to 5 in flight | 38.0 GB (41.3 GB with the fifth) | 29.3 GB | identical |
+| PS performance, `--partition 6 6 6 --max-concurrent 6` by hand | 783 s | 6 at once | 44.7 GB | 31.4 GB | identical |
+| control: the 712 s run's binary and command | 789 s | 6 at once | 48.9 GB (the earlier model) | 31.2 GB | identical |
+| PS balanced (6 threads) | 1444 s | 6 6 6, 4 at once, every partition on the GPU | 39.4 GB | 30.0 GB | the bench's GPU run's, byte for byte |
+| PS gentle (4 threads) | 1408 s | the same | 39.3 GB | 30.0 GB | the same bytes |
+| standard performance (10 threads) | 486 s | 3 3 3, look-ahead off | 34.9 GB | 33.1 GB | the bench's, byte for byte |
+| control: the standard binary from before the modes | 478 s | the same | 34.9 GB | 33.8 GB | the same bytes |
+| standard balanced (6 threads) | 447 s | 3 3 3, look-ahead on | 41.2 GB | 41.3 GB | 8 of 10 differ at float rounding |
+| standard gentle (4 threads) | 444 s | 3 3 3, look-ahead on | 37.6 GB | 40.7 GB | 8 of 10 differ at float rounding |
+
+What it shows:
+
+1. No regression from the prototype to this code: 783 s against the control's 789 s with the same plan and the same
+   bytes; standard 486 s against 478 s. The night's level is about 11% above the evening's for PS-DTFE (789 against
+   712 s).
+2. Performance's own plan: since the once booking (item 13) the dynamic concurrency starts under a mixed plan and
+   reaches 5 partitions in flight at the full budget. Its start check with the run's own numbers: own 15.63 GB + 5
+   lanes and the once part 21.72 GB + reserve 3.58 GB = 40.94 GB against the 41.23 GB budget; six would need 44.27 GB.
+   The run with the free-memory reading overridden reaches the same 5, so the budget term is the limit, not the free
+   memory. At a 36.4 GB budget the plan is 3 at once and none is added.
+3. The plan costs time: 908 s against 783 s with 6 at once by hand (125 s or 16% more), and the 6 peak at 31.4 GB
+   where the model predicts 44.7 GB (the run with 5 in flight: 29.8 GB against 41.3 GB). The model books about 13 GB
+   more than a mixed run takes at 6 lanes, so the mode's own plan runs fewer partitions at once than the memory holds.
+4. PS balanced and gentle are within 3% of each other (1444 and 1408 s, 1.4 busy cores on average): with every
+   partition on the GPU the thread budget hardly matters. They take 1.6 times performance's 908 s.
+5. Standard DTFE: performance is the slowest of the three. The tuner's 10-thread plan leaves the look-ahead no memory
+   on this input (the binary from before the modes plans the same), the 6- and 4-thread plans have it. Their peaks:
+   41.3 GB at a 41.2 GB budget (balanced) and 40.7 GB against 37.6 GB predicted (gentle).
+6. Standard DTFE's `--gpu` grids follow the thread count too: 8 of the 10 grids of balanced and of gentle differ from
+   performance's and from each other's, the rms of the difference at most 1.4e-10 of the field's.
+7. Responsiveness: the night's probes do not rank the modes. Two runs of one configuration differ more than the modes
+   do (the GPU probe late by more than a 120 Hz frame in 18.5% of the samples of one performance run and in 44.3% of
+   its repeat). The evening's numbers (`inv/results/`) stay the ones to quote.
+
+Open after the bench, the owner's call (nothing of it is changed):
+
+- PS-DTFE's memory model for a mixed plan (the lanes and the points output): a refit to the measured peaks would let
+  performance plan 6 at once on this input. A planner change with its own `tests/dev/tune_report_set.sh` diff.
+- Standard DTFE in performance: a plan that gives up thread sub-boxes for the look-ahead where the memory holds only
+  one of the two (447 s at 6 threads against 486 s at 10 here). It changes default plans, and grids at float rounding.
+- The standard look-ahead's prediction (gentle: 40.7 GB measured against 37.6 GB; balanced at the budget's edge).
+- A repeat of the mode bench on a machine at rest, for numbers that compare with the bench table and for the
+  responsiveness ranking.
+
+**What moves.** The binaries' defaults keep the `2f428bc` bytes and tuner reports; the one intended difference,
+performance's 4M item cap, changes no byte and has no tuner term. The drivers' and the launcher's runs default to
+balanced: fewer threads (standard DTFE's grids, the GPU's too, then differ from earlier all-core runs at float
+rounding, while the pipeline still counts those grids as current), and PS-DTFE's exact deposit on the GPU (in
+performance with the free cores beside it). The drivers always pass `--run-mode`, so the scripts and the binaries ship
+together.
+
+**Status 2026-11-10: IMPLEMENTED, BUILT, BENCHED, GATES GREEN, in the tree on top of `39583f0`** (code, drivers,
+launcher, tests and docs edited in parallel, one file set per agent, by the contract's ownership table; then built,
+reviewed and fixed in a copy of the tree, and applied to the tree as one patch). Passed in the copy before the bench:
+G-build for the three pairs (`METAL=1`, `METAL=1 DOUBLE=1`, `DIM=2`), the Metal binaries checked with
+`strings | grep -c`; the program suites in both precisions (`tests/run_mode_check.sh` included), the drivers' and the
+launcher's suites; G-byte (`tests/dev/bytecmp.sh --gpu-exact` against the `2f428bc` reference set: every file
+identical) and G-tuner (`tests/dev/tune_report_set.sh` against the `2f428bc` reference: every line identical). The k=9
+cases of `gpu_retry_check.sh` still fault where they expect under the 4M cap: no re-pin.
+
+**Gates run 2026-11-10 07:20 to 08:50, on the tree with the bench texts above, all passed:**
+1. `make library METAL=1`: built, no warning.
+2. G-battery: 33 of 33 stages, `deprecation_gate` included; `tests/run_mode_check.sh` 55 passed, 0 failed in `ci_core`
+   and 47 passed, 0 failed in `ci_double` (two skips there by design: the double build's CPU sums follow the thread
+   count, and it has no dynamic concurrency). The four Metal binaries carry their kernels (5 / 15 / 5 / 15).
+3. G-linux: CI's Linux stages in Colima (build, core, double, 2d, variants, oldpy, ruff; the launcher's suites run in
+   the Mac battery's `ci_gui`) all passed. `tests/run_mode_check.sh` there: 35 passed, 0 failed (core) and 34 passed,
+   0 failed (double), on 8 threads without performance cores (gentle 4, balanced 6, performance 8); the priority block
+   passed (gentle at nice 10, an inherited nice 15 kept, no nice named by the other modes); the GPU block is skipped
+   on the CPU-only builds.
+
+**Applied to the tree 2026-11-10 12:29** (on `39583f0`): every tracked file equals the gated copy's, byte for byte
+(the copy differs from the gates' tree in the bench texts of `change_log.txt` and one comment line of
+`src/user_options.cc`). The three pairs and the library rebuilt there without a warning, the Metal binaries carry
+their kernels (5 / 15 / 5 / 15), and `tests/run_mode_check.sh` (55 passed, 0 failed; double 47 passed, 0 failed),
+`tests/ci_suite.sh 2d` and `tests/docs_drift_check.py` (36 passed, 0 failed) passed again. The battery and the Linux
+check were not repeated on the tree.
+
+Then, for the owner and not a gate, on the bench input: one `--auto-tune-report` with `DTFE_AUTO_TUNE_DEBUG=1` of
+`--gpu --exact --gpu-share auto --run-mode performance` (predicted_gb must land in 32.5-41.2 GB; the plan's
+concurrency) — **done 2026-11-10, item 13 above: 34.68 GB, 3 at once**; optionally a performance run on the tuner's
+plan against the 712 s hand plan, and a balanced run (the GPU at 50 ms) against 1156 s — **both done 2026-11-10, the
+mode bench above** (with the binaries directly, not through the drivers).
 
 ## R. The rerun campaign (once, after every code item)
 

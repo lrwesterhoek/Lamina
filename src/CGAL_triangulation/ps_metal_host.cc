@@ -28,6 +28,7 @@
 #include "ps_mass_audit.h"     // DTFE_MASS_AUDIT=1: the fixed-point grid's exact total
 #include "ps_deposit_msl.h"   // generated: static const char PS_DEPOSIT_MSL[]
 #include "../thread_count.h"   // CorePool: the core of a thread that waits for the GPU is lent to the pool
+#include "../run_mode.h"       // runModeState(): the run mode's pace base (gpu_metal_retry.h) and exact-item cap
 #include <atomic>
 extern std::atomic<int> psGpuRetries;   // ps_interpolation.cc (run_progress.h)
 extern std::atomic<int> psGpuRetriesByCause[4];   // ... by cause: innocent, timeout, oom, other
@@ -395,7 +396,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
     // waitUntilCompleted (its own work in the hold, the uploads and the copy-back, is a few percent of it). Its core
     // is lent to the core pool for that time (thread_count.h: one helper more may be claimed), so the CPU work that
     // follows the free cores can take it: the sub-grid merge and the normalization, and in a run that deposits a
-    // share of its partitions on the CPU (DTFE_PS_GPU_SHARE, DTFE.cpp) their deposit teams. A claim on the pool
+    // share of its partitions on the CPU ('--gpu-share', DTFE.cpp) their deposit teams. A claim on the pool
     // never changes a result.
     struct CoreLend
     {
@@ -455,13 +456,13 @@ bool psGpuDepositFields(std::vector<float>& verts,
     // chunk size.
     size_t const MIN_CHUNK = fExact ? 50 : 2000;
     size_t const MAX_CHUNK = 500000;
-    // The exact items have a cap of their own. Under it a buffer runs a small part of the 0.25 s target, so the
-    // gap after each buffer costs several times the intended ~3% of the deposit. A cap eight times as large gave
-    // byte-identical grids sooner (the chunk size changes no item's deposit and the fixed-point sums do not depend
-    // on the order), but in part of that run the display then waited several frames for the GPU, where the short
-    // buffers never held it for longer than one frame. So the short buffers stay the rule.
-    size_t const MAX_CHUNK_ITEMS = 500000;
-    GpuPace& pace = gpuPace();        // targetSec 0.25 s, gapUs 8 ms (~3% overhead) until escalated
+    // The exact items have a cap of their own, the run mode's (run_mode.h psItemCap). Under 500k items a buffer ran
+    // 53 ms: the short buffers of gentle and balanced, with which the display never waited longer than a frame.
+    // Performance raises it to 4M, which gave byte-identical grids in 1025 s against 1156 s (TNG100-3-Dark z=0 at
+    // 512^3) but let the display wait up to 214 ms (at 155 ms buffers) when something else wanted the GPU. The chunk
+    // size changes no item's deposit, and the fixed-point sums do not depend on the order.
+    size_t const MAX_CHUNK_ITEMS = runModeState().psItemCap;
+    GpuPace& pace = gpuPace();        // the run mode's target (0.25 s performance, 0.05 s otherwise), 8 ms gaps, until escalated
     size_t baseChunk = psHostFirstChunk(fExact, pace.targetSec, MIN_CHUNK);
     std::string lastErr;
 

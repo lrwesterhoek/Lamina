@@ -45,9 +45,10 @@ BUILTIN_PRESETS: dict[str, tuple[str, dict]] = {
                      "vertex_mass": True, "volume_weighted": True, "caustics": True,
                      "caustic_cusps": False, "slice_plane": "largest", "slice_vel_grad": True}),
     "Exact deposit": ("256³ grid, density and velocity with the exact tetrahedron-cell clipping (the default "
-                      "cell average): noise-free cell values. PS-DTFE runs it on the CPU (9 s for a 0.26M-particle "
-                      "snapshot; at 512³ TNG100-3-Dark 1133 s, faster than the sampled GPU deposit's 1260 s), "
-                      "standard DTFE's exact average on the GPU",
+                      "cell average): noise-free cell values, on the GPU for both estimators (at 512³ on "
+                      "TNG100-3-Dark PS-DTFE takes 1156 s, against 1133 s on every CPU core and 1260 s for the "
+                      "sampled GPU deposit; standard DTFE 439 s against 431 s); in performance a partitioned "
+                      "PS-DTFE run also deposits on the free cores",
                       {"grid": 256, "deposit": "exact", "fields": ["density_a", "velocity_a"],
                        "vertex_mass": True, "volume_weighted": True, "slice_plane": ""}),
 }
@@ -65,6 +66,7 @@ def preset(name: str, user: dict) -> tuple[str, dict] | None:
     return None
 
 
+# (not the machine use, run_mode: it is about this machine now, not about the grids, so a preset leaves it alone)
 PRESET_KEYS = ("grid", "nsub", "deposit", "fields", "gpu", "vertex_mass", "volume_weighted",
                "caustics", "caustic_cusps", "slice_plane", "slice_vel_grad", "estimator")
 
@@ -114,18 +116,19 @@ OPTION_TEXT = {
     "slice_vel_grad":  ("Velocity gradient at each slice point (divergence, shear, vorticity maps)",
                         "--pts-vel-grad"),
     "pts_conventions": ("Plane conventions", "--ps-point-conventions"),     # the image plane's estimators
-    "exact":           ("Exact: analytic tetrahedron-cell clipping (noise-free; the default, best on the CPU)",
-                        "--exact"),
+    "exact":           ("Exact: analytic tetrahedron-cell clipping (noise-free; the default)", "--exact"),
     "parallel_triangulation": ("Parallel triangulation (faster; repeats differ at float rounding)",
                                "--parallel-triangulation"),
     "ordered_merge":   ("Merge the partitions in index order (bit-identical repeats; the default)",
                         "--ps-merge"),
+    "run_mode":        ("Machine use", "--run-mode"),     # how hard the run leans on the machine (not in presets)
     "alpha_shape":     ("Alpha shape: drop Lagrangian tetrahedra wider than this many mean particle spacings "
                         "(0 keeps the whole convex hull)", "--ps-alpha-shape"),
     # the two cell averages: their help is the binaries' '--exact' / '--sampled' text (a binary from before
     # 2026-11-09 knows '--exact' by its old name, '--exact-average', which flag_help files under both)
     "sampled":         ("Sampled: nSub³ points per cell", "--sampled"),
-    "sampled_dtfe":    ("Sampled: the Monte-Carlo mean over points in each cell (faster on the CPU)", "--sampled"),
+    "sampled_dtfe":    ("Sampled: the Monte-Carlo mean over points in each cell (faster on all CPU cores)",
+                        "--sampled"),
     "exact_dtfe":      ("Exact: each cell the exact average of the interpolated field (noise-free; the default)",
                         "--exact"),
     "periodic":        ("The box is periodic (a cosmological simulation)", "--periodic"),

@@ -6,26 +6,33 @@
 # shared defaults (SNAPSHOTS, GRID_SIZE, PADDING) live in config.sh.
 #
 # Usage:
-#   ./run_ps_dtfe.sh [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n SUBSAMPLES] [-m] [-e | --sampled] [snapshot ...]
-#     long forms: --sim-dir, --sim, --grid, --subsamples, --gpu, --exact (the same as the letters); --sampled
+#   ./run_ps_dtfe.sh [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n SUBSAMPLES] [-m] [-e | --sampled]
+#                    [--run-mode MODE] [snapshot ...]
+#     long forms: --sim-dir, --sim, --grid, --subsamples, --gpu, --exact (the same as the letters); --sampled,
+#          --run-mode
 #     -n   SUBSAMPLES: k sub-points per axis (k^3 per cell) of the sampled deposit's '_a' fields (--subsamples k;
 #          passed only when set, the binary's 3 otherwise). While DTFE_EXACT_AVERAGE is unset (and neither -e nor
 #          --sampled is given) a count selects the sampled deposit, as the binary does; beside -e or
 #          DTFE_EXACT_AVERAGE=1 it is ignored (said).
 #     -m   run the deposit on the GPU (--gpu; same as DTFE_GPU=1). The default (DTFE_GPU unset, 'auto') is the GPU
 #          when the binary was built with one (the Makefile's o_ps/.gpu_mode_metal stamp; o_ps_d for
-#          DTFE_PRECISION=double), else the CPU -- but the CPU for the exact deposit (the default), a little faster
-#          there on production runs; DTFE_GPU=0 runs the CPU deposit on a GPU build.
-#     -e   the exact conservative deposit (--exact; DTFE_EXACT_AVERAGE=1): the DEFAULT, on the CPU unless -m; -e
-#          overrides an exported DTFE_EXACT_AVERAGE=0 and keeps the exact deposit beside a SUBSAMPLES count.
+#          DTFE_PRECISION=double), for both deposits and in every run mode, else the CPU; DTFE_GPU=0 runs the CPU
+#          deposit on a GPU build.
+#     -e   the exact conservative deposit (--exact; DTFE_EXACT_AVERAGE=1): the DEFAULT, on the GPU when built; -e
+#          overrides an exported DTFE_EXACT_AVERAGE=0 and keeps the exact deposit beside a SUBSAMPLES count. On the
+#          GPU it is passed with '--gpu-share GPU_SHARE' (auto: performance deposits part of a partitioned run's
+#          partitions on the free cores beside the GPU; gentle and balanced keep every partition on the GPU).
 #     --sampled  the nSub^3 sub-sampled deposit instead (DTFE_EXACT_AVERAGE=0), on the GPU when built. At 512^3
 #          (TNG100-3-Dark z=0, 2026-11-09) the exact deposit took 1133 s on the CPU and 1156 s on the GPU, the
 #          sampled one (nSub 3) 1260 s on the GPU and 1644 s on the CPU.
+#     --run-mode MODE  how hard the run may lean on the machine (DTFE_RUN_MODE the same; the option wins): gentle (half
+#          the performance cores, short GPU buffers, on Linux nice 10), balanced (the performance cores less a quarter,
+#          short GPU buffers) or performance (every core, long GPU buffers); auto = balanced, performance in a batch job.
 #     --exact-average, the older name of --exact, is still read for one release (with a warning).
 #     The drivers' letters are their own: -m is the GPU and -s the simulation here (PS-DTFE's own -m and -s are
 #          deprecated and have no effect there).
-#   Production defaults: GRID_SIZE 512 (config.sh), the exact deposit on the CPU (-m for the GPU; --sampled runs on
-#   the GPU when built), vertex masses, volume-weighted
+#   Production defaults: GRID_SIZE 512 (config.sh), the exact deposit (on the GPU when built, as the sampled one),
+#   vertex masses, volume-weighted
 #   velocity moments, the caustic classes, FIELDS = density, velocity, its divergence and shear (the same set as
 #   run_dtfe.sh's; the gradient, vorticity, dispersion, T-web and V-web through FIELDS), LAMBDA_TH 0.3.
 #   A rerun into a prefix that holds an earlier run's files: once it exits 0, the files it did not write (an image
@@ -37,13 +44,14 @@
 #   Run logs, beside the outputs: <prefix>.runlog belongs to the grids on disk, <prefix>.runlog.failed
 #   to the last failed or stopped attempt, <prefix>.runlog.partial to a run still going (or killed outright).
 #   Knobs (environment; each is explained where the script sets it): PARTITION MAX_CONCURRENT SUBSAMPLES THREADS
-#   SCRATCH_DIR SAMPLE_POINTS PTS_VEL_GRAD PS_POINT_CONVENTIONS DTFE_GPU DTFE_EXACT_AVERAGE FACE_GRADIENT
-#   PS_VERTEX_MASS PS_VOLUME_WEIGHTED PS_LINEAR_DEPOSIT PS_CAUSTICS PS_CAUSTIC_CUSPS PARALLEL_TRIANGULATION
-#   PS_LAGRANGIAN_PADDING TESSELLATION_CACHE OUTPUT_PREFIX FIELDS LAMBDA_TH PS_LAGRANGIAN_INPUT DTFE_PRECISION DRY_RUN
-#   AUTO_TUNE_REPORT (1 = only the auto-tuner's memory report per snapshot, nothing computed) PS_MERGE DTFE_RESUME,
-#   and config.sh's GRID_SIZE, PADDING, SPACE_CHECK. A switch is off for 0, false, no or off and on for any other
-#   value (the binaries' rule). DTFE_GPU, DTFE_EXACT_AVERAGE and DTFE_RESUME are run_dtfe.sh's knobs too, with the
-#   same defaults there (the exact cell average is run_dtfe.sh's, the exact deposit this one's).
+#   SCRATCH_DIR SAMPLE_POINTS PTS_VEL_GRAD PS_POINT_CONVENTIONS DTFE_GPU DTFE_RUN_MODE GPU_SHARE DTFE_EXACT_AVERAGE
+#   FACE_GRADIENT PS_VERTEX_MASS PS_VOLUME_WEIGHTED PS_LINEAR_DEPOSIT PS_CAUSTICS PS_CAUSTIC_CUSPS
+#   PARALLEL_TRIANGULATION PS_LAGRANGIAN_PADDING TESSELLATION_CACHE OUTPUT_PREFIX FIELDS LAMBDA_TH PS_LAGRANGIAN_INPUT
+#   DTFE_PRECISION DRY_RUN AUTO_TUNE_REPORT (1 = only the auto-tuner's memory report per snapshot, nothing computed)
+#   PS_MERGE DTFE_RESUME, and config.sh's GRID_SIZE, PADDING, SPACE_CHECK. A switch is off for 0, false, no or off
+#   and on for any other value (the binaries' rule). DTFE_GPU, DTFE_RUN_MODE, DTFE_EXACT_AVERAGE and DTFE_RESUME are
+#   run_dtfe.sh's knobs too, with the same defaults there (the exact cell average is run_dtfe.sh's, the exact deposit
+#   this one's).
 #   Older names, read for one release with a warning (the new name wins when both are set): PS_GPU and PS_METAL
 #   (DTFE_GPU), PS_EXACT (DTFE_EXACT_AVERAGE), PS_RESUME (DTFE_RESUME), AVG_SUBSAMPLES (SUBSAMPLES), ORDERED_MERGE and
 #   FIXED_POINT_MERGE (PS_MERGE), PS_PARALLEL_TRI (PARALLEL_TRIANGULATION), PS_LAG_PADDING (PS_LAGRANGIAN_PADDING),
@@ -107,9 +115,15 @@ PS_POINT_CONVENTIONS="${PS_POINT_CONVENTIONS:-grid}"  # with SAMPLE_POINTS: the 
 knob DTFE_GPU PS_GPU PS_METAL
 DTFE_GPU="${DTFE_GPU:-auto}"  # 1 = the deposit on the GPU (--gpu), 0 = the CPU; 'auto' (default: it
                            # follows the build) = 1 when the binary is a GPU build (config.sh gpu_build_default),
-                           # resolved below once DTFE_PRECISION has chosen the binary; 0 for the exact deposit
-                           # (DTFE_EXACT_AVERAGE=1, the default).
+                           # resolved below once DTFE_PRECISION has chosen the binary, for both deposits and in
+                           # every run mode (config.sh gpu_auto_resolve).
                            # The same knob as run_dtfe.sh's
+_caller_run_mode="${DTFE_RUN_MODE:-}"   # (the caller's own value: config.sh run_mode_resolve reads it after the options)
+DTFE_RUN_MODE="${DTFE_RUN_MODE:-auto}"  # how hard the run may lean on the machine, passed on every run as '--run-mode
+                           # MODE': gentle, balanced or performance (any case); 'auto' (default) = balanced, or
+                           # performance inside a SLURM or PBS job (config.sh run_mode_resolve; --run-mode MODE
+                           # wins). The same knob as run_dtfe.sh's
+GPU_SHARE="${GPU_SHARE:-auto}"   # the exact GPU deposit's --gpu-share: auto (default, the run mode's) or a fraction 0..1
 knob_merge PS_MERGE ORDERED_MERGE FIXED_POINT_MERGE
 PS_MERGE="${PS_MERGE:-index-order}"   # how the partitions' grids are merged (--ps-merge, always passed):
                            #   index-order (default) = the binary's own order, GIVEN: the partitions' grids are added in
@@ -182,8 +196,9 @@ knob DTFE_EXACT_AVERAGE PS_EXACT
 _caller_exact="${DTFE_EXACT_AVERAGE:-}"   # (the caller's own value: unset, a SUBSAMPLES count selects the sampled deposit)
 DTFE_EXACT_AVERAGE="${DTFE_EXACT_AVERAGE:-1}"  # 1 (default) = exact conservative deposit (--exact): analytic tet-cell
                            # clipping instead of the nSub^3 sub-sampled deposit -- no sampling noise, mass
-                           # conservation to the arithmetic's precision. Runs on the CPU by default (r3d in
-                           # double, the reference) and on the GPU with -m (a float32 z-sweep); TNG100-3-Dark z=0 at
+                           # conservation to the arithmetic's precision. Runs on the GPU when built (a float32
+                           # z-sweep; in performance part of the partitions on the free cores beside it, GPU_SHARE)
+                           # and on the CPU with DTFE_GPU=0 (r3d in double, the reference); TNG100-3-Dark z=0 at
                            # 512^3 (2026-11-09): 1133 s on the CPU, 1156 s on the GPU, against 1260 s for the sampled
                            # deposit (nSub 3) on the GPU and 1644 s on the CPU. SUBSAMPLES is ignored (the exact
                            # deposit is the nSub->infinity limit, so '.den' == '.a_den'). 0 = the sampled deposit
@@ -195,8 +210,8 @@ FACE_GRADIENT="${FACE_GRADIENT:-0}"  # 1 = --face-gradient: the velocity gradien
                            # (conservative, the caustics' jumps as exact face differences), where the default stores
                            # the stream average of each stream's own gradient; it also writes '.a_velDivStreams' (that
                            # stream average's divergence) and '.a_massFluxDiv' (div of sum_s rho_s v_s: by continuity
-                           # the rate a cell gains or loses mass). Needs the exact deposit (the default, on the CPU or
-                           # with -m: not --sampled, DTFE_EXACT_AVERAGE=0 or a SUBSAMPLES count alone) and
+                           # the rate a cell gains or loses mass). Needs the exact deposit (the default, on the GPU or
+                           # the CPU: not --sampled, DTFE_EXACT_AVERAGE=0 or a SUBSAMPLES count alone) and
                            # PS_VOLUME_WEIGHTED=1 (the default); 3D. 30 more numbers per cell in the merged grids.
 
 DATA_DIR=""                # default: sim_dir $SIMULATION (config.sh); override with -d
@@ -226,7 +241,7 @@ OUTPUT_PREFIX="${OUTPUT_PREFIX:-ps_output}"   # -> <snapdir>/<prefix>.*  Overrid
                            # mass-weighted (physical) dispersion next to the default volume-weighted shear/divergence
                            # set. dtfelib.FieldSet reads the 'ps_output.' prefix, so keep the primary set there.
 
-usage() { echo "Usage: $0 [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n SUBSAMPLES] [-m] [-e | --sampled] [snapshot ...]"; }
+usage() { echo "Usage: $0 [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n SUBSAMPLES] [-m] [-e | --sampled] [--run-mode MODE] [snapshot ...]"; }
 
 driver_help_version "${BASH_SOURCE[0]}" "${1:-}"   # -h / --help print the header and run nothing; --version the revision
 
@@ -240,11 +255,13 @@ own_option() {   # <letter>: this driver's own options; -d, -s, -h and the data 
         n) SUBSAMPLES="${OPTARG}" ;;
         m) DTFE_GPU=1 ;;
         e|S) average_option "$1" ;;      # -e / --exact, --sampled (config.sh: S only carries the long form)
+        R) run_mode_option "${OPTARG}" ;;   # --run-mode MODE (config.sh: R only carries the long form)
     esac
 }
-driver_options "g:n:meS" own_option "$@"   # then the data root (unless -d) and the simulation are required
+driver_options "g:n:meSR:" own_option "$@"   # then the data root (unless -d) and the simulation are required
 shift $((OPTIND - 1))
 average_resolve "deposit"   # DTFE_EXACT_AVERAGE 1 or 0: the options, the knob, a SUBSAMPLES count, the default
+run_mode_resolve            # DTFE_RUN_MODE: --run-mode, the knob, the default (balanced; performance in a batch job)
 
 snapshot_args "$@"              # positional arguments override the default snapshot list (config.sh)
 case "${PS_POINT_CONVENTIONS}" in
@@ -325,8 +342,9 @@ cd "$REPO_ROOT" || exit 1
 # twice the memory. Default single (./PS-DTFE). Nothing falls back silently: a missing binary stops.
 DTFE_PRECISION="${DTFE_PRECISION:-single}"
 driver_binary PS_BIN PS-DTFE "${DTFE_PRECISION}"      # ./PS-DTFE or ./PS-DTFE-double (config.sh)
-gpu_auto_resolve DTFE_GPU "${PS_BIN}" DTFE_EXACT_AVERAGE   # DTFE_GPU=auto: the GPU when this binary was built with
-                                                      # one, the CPU for the exact deposit (the default)
+gpu_auto_resolve DTFE_GPU "${PS_BIN}" ps "${DTFE_EXACT_AVERAGE}" "${DTFE_RUN_MODE}"   # DTFE_GPU=auto: the GPU when
+                                                      # this binary was built with one, for both deposits in every
+                                                      # run mode (config.sh)
 if [ "${FACE_GRADIENT}" = "1" ]; then                 # the binary refuses these too, but per snapshot: say it once here
     # (the exact deposit is the default: what conflicts is --sampled, DTFE_EXACT_AVERAGE=0 or a count alone)
     [ "${DTFE_EXACT_AVERAGE}" = "1" ] || { echo "Error: FACE_GRADIENT=1 needs the exact deposit (the default): ${average_src} asks for the sampled one." >&2; exit 2; }
@@ -353,6 +371,7 @@ else
     echo "Cell averages: sampled deposit, nSub^3 sub-points per cell (--sampled${SUBSAMPLES:+ --subsamples ${SUBSAMPLES}}; ${average_src})"
 fi
 echo "Deposit: $([ "${DTFE_GPU}" = "1" ] && echo "GPU (--gpu)" || echo "CPU")${gpu_auto}   volume-weighted: ${PS_VOLUME_WEIGHTED}   caustics: ${PS_CAUSTICS}   face gradient: ${FACE_GRADIENT}   prefix: ${OUTPUT_PREFIX}"
+echo "Run mode: ${DTFE_RUN_MODE} (${run_mode_src}${OMP_NUM_THREADS:+; OMP_NUM_THREADS=${OMP_NUM_THREADS} keeps its thread count})"
 echo ""
 
 for i in "${SNAPSHOTS[@]}"; do
@@ -457,6 +476,13 @@ for i in "${SNAPSHOTS[@]}"; do
     # the merge mode (PS_MERGE, see the top: index-order by default, passed explicitly so the memory gate stays on
     # under the auto-tuner's speed split; the run log names it, results.py reads it back)
     part_args+=(--ps-merge "${PS_MERGE}")
+    # the run mode, on every run (DTFE_RUN_MODE, see the top: the run log then says which ran and why), and the GPU
+    # share for the exact deposit on the GPU (GPU_SHARE, see the top: 'auto' is the run mode's); a share given for
+    # another run is passed too, so the binary's note says why it does not apply
+    part_args+=(--run-mode "${DTFE_RUN_MODE}")
+    if { [ "${DTFE_GPU}" = "1" ] && [ "${DTFE_EXACT_AVERAGE}" = "1" ]; } || [ "${GPU_SHARE}" != "auto" ]; then
+        part_args+=(--gpu-share "${GPU_SHARE}")
+    fi
     # a killed partitioned run left its checkpoint: resume it (config.sh resume_args_for)
     resume_args_for "${output_root}" DTFE_RESUME "${DTFE_RESUME}"
 

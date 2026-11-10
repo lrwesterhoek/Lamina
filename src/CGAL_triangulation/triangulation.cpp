@@ -445,7 +445,7 @@ static int parallelInsertCores()
 {
     if ( long const v = Env::integer( "DTFE_TRIANGULATION_THREADS", 0 ); v > 0 )
         return int( v );
-    int cores = int( std::thread::hardware_concurrency() );
+    int cores = dtfeHardwareThreads();
 #ifdef __APPLE__
     int perf = 0;
     size_t sz = sizeof(perf);
@@ -527,11 +527,11 @@ void delaunayTriangulation(DT *dt,
 #if defined(PARALLEL_TRIANGULATION) && NO_DIM==3
     int threads = parallelAllowed ? parallelInsertCores() : 1;
 #ifdef OPEN_MP
-    threads = std::min( threads, omp_get_max_threads() );
+    threads = std::min( threads, dtfeOmpMax() );
 #endif
     // a partition loop: its planned concurrency already fills the cores (see above)
     int const planned = std::min( dtfeTriangulationConcurrency.load(), dtfeTriangulationsRemaining.load() );
-    threads = std::max( 1, std::min( threads, int(std::thread::hardware_concurrency()) / std::max( 1, planned ) ) );
+    threads = std::max( 1, std::min( threads, dtfeHardwareThreads() / std::max( 1, planned ) ) );
     // the size threshold of the default rule (see above): below it the sequential insert is as fast or faster
     if ( threads > 1 && !parallelForced )
     {

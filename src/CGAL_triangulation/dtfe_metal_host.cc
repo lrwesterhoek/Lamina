@@ -44,6 +44,7 @@
 #include "dtfe_deposit_msl.h"   // generated: static const char DTFE_DEPOSIT_MSL[]
 #define ITEM_BLOCK_SHIFT 5      // == the kernel's: log2 of the items per entry of the block table
 #include "../message.h"         // ANSI colour helpers only (retry warning below)
+#include "../run_mode.h"        // runModeState(): the run mode's pace base (gpu_metal_retry.h gpuPace)
 extern std::atomic<int> dtfeGpuRetries;            // averaged_interpolation_1.cc (run_progress.h)
 extern std::atomic<int> dtfeGpuRetriesByCause[4];  // ... by cause: innocent, timeout, oom, other
 
@@ -338,9 +339,10 @@ bool uploadBatch(Ctx& c, std::vector<float>& verts, std::vector<float>& dens, st
 }
 
 // The chunk controller's chunk, carried from one batch to the next on the shared grid (a per-call batch starts
-// afresh). The pace -- the buffers' target length and the gaps -- is the process-wide GpuPace (gpu_metal_retry.h):
-// a per-call pace would die with its sub-domain, and the next one, on the same busy display, would meet the
-// watchdog at the full pace again.
+// afresh). The pace -- the buffers' target length and the gaps -- is the process-wide GpuPace (gpu_metal_retry.h),
+// whose base is the run mode's (run_mode.h: 0.25 s buffers in performance, 0.05 s in gentle and balanced): a per-call
+// pace would die with its sub-domain, and the next one, on the same busy display, would meet the watchdog at the
+// full pace again.
 struct ChunkState
 {
     size_t     chunk     = 0;       // 0 = not started: use the kernel's first chunk

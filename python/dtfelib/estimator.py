@@ -177,6 +177,8 @@ class Estimator:
                        memory; answers are bit-identical to an unpartitioned server.
     max_concurrent     partitions triangulated at once while the composite starts
                        ('--max-concurrent').
+    run_mode           '--run-mode': how hard the server leans on the machine, 'gentle', 'balanced' or
+                       'performance'; None (default) keeps the binary's default, performance.
     peculiar           convert velocities to peculiar km/s with the snapshot's scale factor
                        (FieldSet convention); False returns the binary's raw units.
     padding            '--padding' in mean particle spacings. None (default): STANDARD_PADDING (15) for the
@@ -206,7 +208,8 @@ class Estimator:
                  scalars: bool = False, scalar_dataset: str | None = None,
                  lagrangian_positions: bool = False,
                  tessellation_cache=None, partition=None, resident: int | None = None,
-                 max_concurrent: int | None = None, peculiar: bool = True, padding: float | None = None,
+                 max_concurrent: int | None = None, run_mode: str | None = None, peculiar: bool = True,
+                 padding: float | None = None,
                  options=(),
                  binary=None, precision: str = "single", dim: int = 3, verbose: int = 0, log_path=None,
                  progress: bool = False, _owned_dir=None, _shift=None, _on_spawn=None):
@@ -231,6 +234,8 @@ class Estimator:
         self._workdir = Path(tempfile.mkdtemp(prefix="dtfe-serve-"))
         cmd = [str(self.binary), str(self.snapshot), str(self._workdir / "serve"),
                "--serve", "--input-format", str(int(input_type)), "--verbose", str(int(verbose))]
+        if run_mode is not None:
+            cmd += ["--run-mode", str(run_mode)]
         if periodic:
             cmd.append("--periodic")
         if mpc_unit is not None:

@@ -90,6 +90,7 @@ run_program_suites() {
     step "--ps-merge fixed-point (order-free integer merge)"; tests/ps_fixed_merge_check.sh --no-build
     step "resume of a killed partitioned standard run"; tests/dtfe_resume_check.sh --no-build
     step "old and new flag spellings: one run, one settings key"; tests/flag_spelling_check.sh --no-build
+    step "run modes (gentle / balanced / performance, --gpu-share)"; tests/run_mode_check.sh --no-build
     step "resume with --sample-points";         tests/ps_resume_points_check.sh --no-build
 }
 

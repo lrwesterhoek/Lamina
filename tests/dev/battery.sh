@@ -21,6 +21,8 @@
 # Exit 0 when every stage that ran passed and the tree did not change during the run.
 set -uo pipefail
 unset DTFE_EXACT_AVERAGE   # the '_a' average's pin: an export from the caller's shell would steer every stage's runs
+# the run mode: the binaries' default, performance, is the 2f428bc behaviour; a login export must not steer the runs
+unset DTFE_RUN_MODE
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "${BASH_SOURCE[0]}"; exit 2; }
 

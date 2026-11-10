@@ -9,6 +9,7 @@
 #include "tessellation_cache.h" // composite --serve: partitions reloaded from '--tessellation-cache'
 #include "../auto_tune.h"       // composite --serve: the memory budget that sizes the resident set
 #include "../env_knobs.h"
+#include "../run_mode.h"        // dtfeHardwareThreads: the run mode's thread budget (the loaders)
 
 
 // '--tessellation-cache' load or build of a tessellation plus its vertex densities (triangulation.cpp,
@@ -1009,7 +1010,7 @@ static void compositeStartLoads(std::vector<size_t> const &need, size_t const nP
     for (size_t i = 0; i < nPre; ++i) L.preIndex[L.toLoad[i]] = long(i);
     if ( nPre > 0 )
     {
-        unsigned const hw = std::max( 1u, std::thread::hardware_concurrency() );
+        unsigned const hw = unsigned( dtfeHardwareThreads() );
         size_t const nThreads = std::min<size_t>( nPre, std::max<size_t>( 1, std::min( 8u, std::max( 1u, hw / 2u ) ) ) );
         for (size_t t = 0; t < nThreads; ++t)
             L.loaders.emplace_back( [&L, nPre]()   // (L outlives the threads: its destructor joins them)

@@ -70,6 +70,7 @@
 #include "../define.h"
 #include "../env_knobs.h"
 #include "../message.h"
+#include "../run_mode.h"          // dtfeHardwareThreads: the run mode's thread budget
 #include "../user_options.h"
 
 
@@ -243,7 +244,7 @@ inline size_t chunkThreads()
 {
     if ( long const v = Env::integer( "DTFE_TESSELLATION_CACHE_THREADS", 0 ); v > 0 )
         return size_t( v );
-    unsigned const hw = std::max( 1u, std::thread::hardware_concurrency() );
+    unsigned const hw = unsigned( dtfeHardwareThreads() );
     int const others = std::max( 0, activeLoads().load() - 1 );
     return std::max<size_t>( 1, std::min<size_t>( 4, size_t(hw) / size_t(1 + others) / 2 ) );
 }

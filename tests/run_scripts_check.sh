@@ -21,7 +21,8 @@
 #  G) The PER-FAMILY data layout (<root>/<family>/<sim>, e.g. <root>/TNG100/TNG100-3-Dark), under a
 #     root whose name has a space: the driver finds and processes the simulation there, config.sh's sim_dir puts a new simulation beside its
 #     family and lets a flat <root>/<sim> win, and run_ps_pipeline.sh discovers nested sims -- and exits 1
-#     when it finds nothing to compute (no data root, a mistyped SIMS, a SNAPS matching nothing).
+#     when it finds nothing to compute (no data root, a mistyped SIMS, a SNAPS matching nothing). Its default call of
+#     run_ps_dtfe.sh: the exact deposit and the balanced run mode, on the GPU exactly when this build has one.
 #  H) scripts/run_dtfe.sh passes --exact to the standard binary by default (-e, --exact and DTFE_EXACT_AVERAGE=1 too)
 #     and --sampled for DTFE_EXACT_AVERAGE=0 or --sampled, or a SUBSAMPLES count (-n) while the knob is unset (then
 #     with --subsamples N); -e or DTFE_EXACT_AVERAGE=1 beside a count stays exact, with one note; -e and --sampled
@@ -36,9 +37,11 @@
 #     revision, an argument to the pipeline is an error, DRY_RUN=1 prints the drivers' commands and runs nothing.
 #     There is no default data root or simulation: every driver without DTFE_DATA_ROOT (or without -s / DTFE_SIM /
 #     SIMS) refuses with exit 2 and says so, -d or not, while --help still works and sourcing config.sh exits nothing.
-#     The drivers' shared option loop (config.sh driver_options): a bad option exits 1 with the usage, -h anywhere 0.
+#     The drivers' shared option loop (config.sh driver_options): a bad option exits 1 with the usage, -h anywhere 0;
+#     the long forms are the letters, --run-mode MODE in both drivers (download_snapshots.sh refuses it).
 #  K) the binaries' own --help lists the phase-space / GPU / point-evaluation / server options the scripts and the
-#     launcher use (--exact and --sampled in both), and the help texts carry none of the known misspellings. The
+#     launcher use (--exact, --sampled and --run-mode in both, --gpu-share in PS-DTFE's), and the help texts carry
+#     none of the known misspellings. The
 #     deprecated spellings (--ps-gpu, --exact-average, --ps-exact-deposit, --ps-no-overlap, --lambda_th, --full_help)
 #     are hidden from the help but still accepted, on
 #     the command line and in a --config file: one 'deprecated' warning line each and the same outputs as the
@@ -68,20 +71,30 @@
 #  T) the knob names (config.sh knob, P6.7): each older name alone gives the same command as its new name, with one
 #     'warning: OLD is deprecated, use NEW' line on stderr; both set: the new one wins (a warning, no refusal); a
 #     switch reads 0/false/no/off as off and any other value as on, as the binaries do; the drivers' long options
-#     (--sim --sim-dir --grid --gpu --exact --subsamples) are their letters, --sampled the sampled deposit, and
-#     --exact-average (the older --exact) is -e with one warning.
+#     (--sim --sim-dir --grid --gpu --exact --subsamples --run-mode) are their letters, --sampled the sampled deposit,
+#     and --exact-average (the older --exact) is -e with one warning (J runs them; download_snapshots.sh has no
+#     --run-mode).
 #  S) the production defaults and the rerun hygiene, against the stand-in binaries:
 #     the GPU when the Makefile's stamp says the binary has one (metal; not off; DTFE_GPU=0 or 1
-#     wins, and so do its older names DTFE_METAL / PS_GPU / PS_METAL when it is unset), the drivers'
+#     wins, and so do its older names DTFE_METAL / PS_GPU / PS_METAL when it is unset), by run mode: PS-DTFE's two
+#     deposits and standard DTFE's exact average on the GPU in every mode, standard DTFE's sampled average in gentle
+#     and balanced, the CPU for it in performance (config.sh gpu_auto_resolve, said in the banner); the drivers'
 #     production flags by default (run_ps_dtfe.sh: volume weighting, caustics, the four analysis
-#     fields, the exact deposit (--exact, on the CPU on a GPU build; a SUBSAMPLES count or DTFE_EXACT_AVERAGE=0: the
-#     sampled one, on the GPU); run_dtfe.sh: the exact average and the same fields; PS_LINEAR_DEPOSIT=1 drops the
+#     fields, the exact deposit (--exact; a SUBSAMPLES count or DTFE_EXACT_AVERAGE=0: the sampled one); run_dtfe.sh:
+#     the balanced run mode, the exact average and the same fields; PS_LINEAR_DEPOSIT=1 drops the
 #     volume weighting; FACE_GRADIENT=1 passes --face-gradient, run_ps_dtfe.sh refusing it with the sampled deposit or
 #     without the volume weighting),
 #     run_dtfe.sh's OUTPUT_PREFIX (a 'ps_*' one refused), and a rerun's left-over files: after exit 0 the files the run
 #     did not write are MOVED to <prefix>.superseded/<stamp>/ with the old run log (the rewritten ones, the run log
 #     family, a lock and a checkpoint stay); a failed run, a dry run and an auto-tune report move nothing.
-#     run_ps_pipeline.sh's DTFE_GPU unset follows the PS binary's stamp the same way.
+#     run_ps_pipeline.sh's DTFE_GPU unset follows the PS binary's stamp the same way, for both deposits.
+#  U) the run mode (config.sh run_mode_resolve), against the stand-in binaries: both drivers pass '--run-mode MODE' on
+#     every run, balanced by default; --run-mode MODE (or =MODE) first, then DTFE_RUN_MODE in any case, then the
+#     default, auto (or empty) passing on to the next, performance inside a SLURM or PBS job; the banner names the
+#     source and a kept OMP_NUM_THREADS; a bad option value exits 1 with the usage, a bad knob 2. run_ps_dtfe.sh passes
+#     '--gpu-share GPU_SHARE' (auto by default) with the exact deposit on the GPU, and a share given for any other run;
+#     run_dtfe.sh's sampled average in performance runs on the CPU; run_ps_pipeline.sh resolves the mode once and hands
+#     DTFE_RUN_MODE on after DTFE_EXACT_AVERAGE.
 #
 # Usage: tests/run_scripts_check.sh [--no-build]
 
@@ -259,26 +272,32 @@ mkdir -p "${FAMROOT}/FAM-3-Dark"
 flat="$(DTFE_DATA_ROOT="${FAMROOT}" bash -c 'source scripts/config.sh; sim_dir FAM-3-Dark')"
 check "$([ "${flat}" = "${FAMROOT}/FAM-3-Dark" ] && echo 0 || echo 1)" \
       "an existing flat <root>/FAM-3-Dark wins (got '${flat}')"
-G_AVG=(-u DTFE_EXACT_AVERAGE -u PS_EXACT -u SUBSAMPLES -u AVG_SUBSAMPLES)   # the deposit's knobs: the defaults here
+G_AVG=(-u DTFE_EXACT_AVERAGE -u PS_EXACT -u SUBSAMPLES -u AVG_SUBSAMPLES -u DTFE_RUN_MODE -u GPU_SHARE -u SLURM_JOB_ID -u PBS_JOBID)   # the deposit's and the run mode's knobs: the defaults here
 rc=0; env "${G_AVG[@]}" DRY_RUN=1 SIMS=all DTFE_DATA_ROOT="${FAMROOT}" scripts/run_ps_pipeline.sh >"${TMP}/g_pipeline.log" 2>&1 || rc=$?
 check "$(has "${TMP}/g_pipeline.log" '^Simulations:.* FAM-1-Dark')" \
       "run_ps_pipeline.sh discovers the nested FAM-1-Dark"
 check "$([ "${rc}" = "0" ] && echo 0 || echo 1)" "... and a dry run with a snapshot to plan exits 0 (${rc})"
-# the pipeline's knobs: the GPU flag follows DTFE_GPU and the deposit, the plane's geometry reaches
-# make_image_plane.py, and a plane whose sidecar has another geometry is regenerated. DTFE_GPU unset: the CPU for
-# the exact deposit (the default, handed on as DTFE_EXACT_AVERAGE=1); for the sampled one (a SUBSAMPLES count) the
-# GPU exactly when this repository's PS binary is a GPU build (config.sh gpu_build_default; (S) varies the stamp)
-check "$([ "$(has "${TMP}/g_pipeline.log" 'DTFE_GPU=0 DTFE_EXACT_AVERAGE=1 .*run_ps_dtfe.sh -s FAM-1-Dark -g [0-9]+ 99')" = 0 ] \
-         && [ "$(has "${TMP}/g_pipeline.log" '^Slice: .* deposit: exact \(the default\) ')" = 0 ] && echo 0 || echo 1)" \
-      "the pipeline's default run_ps_dtfe.sh call: the exact deposit (DTFE_EXACT_AVERAGE=1, said in the header) on the CPU, no -m, whatever the build"
+# the pipeline's knobs: the GPU flag follows DTFE_GPU, the plane's geometry reaches make_image_plane.py, and a plane
+# whose sidecar has another geometry is regenerated. DTFE_GPU unset: the GPU exactly when this repository's PS binary
+# is a GPU build (config.sh gpu_auto_resolve; (S) varies the stamp and the run mode), for the exact deposit (the
+# default, handed on as DTFE_EXACT_AVERAGE=1) and the sampled one (a SUBSAMPLES count) alike; the run mode (balanced,
+# the default) is handed on after the deposit
 g_bin="$([ "${DTFE_PRECISION:-single}" = double ] && echo PS-DTFE-double || echo PS-DTFE)"
 g_gpu="$(bash -c 'source scripts/config.sh >/dev/null 2>&1; gpu_build_default "$1" "$2"' _ "${ROOT_DIR}" "${g_bin}")"
 env "${G_AVG[@]}" DRY_RUN=1 SUBSAMPLES=2 SIMS=all DTFE_DATA_ROOT="${FAMROOT}" scripts/run_ps_pipeline.sh >"${TMP}/g_pipeline_s.log" 2>&1 || true
 if [ "${g_gpu}" = "1" ]; then
-    check "$(has "${TMP}/g_pipeline_s.log" 'DTFE_GPU=1 DTFE_EXACT_AVERAGE=0 .*run_ps_dtfe.sh -s FAM-1-Dark -g [0-9]+ -m 99')" \
+    check "$([ "$(has "${TMP}/g_pipeline.log" 'DTFE_GPU=1 DTFE_EXACT_AVERAGE=1 DTFE_RUN_MODE=balanced .*run_ps_dtfe.sh -s FAM-1-Dark -g [0-9]+ -m 99')" = 0 ] \
+             && [ "$(has "${TMP}/g_pipeline.log" '^Slice: .* deposit: exact \(the default\) ')" = 0 ] \
+             && [ "$(has "${TMP}/g_pipeline.log" '^Run mode: balanced \(the default\)$')" = 0 ] && echo 0 || echo 1)" \
+          "the pipeline's default run_ps_dtfe.sh call: the exact deposit (DTFE_EXACT_AVERAGE=1) in the balanced run mode, both said in the header, with -m (${g_bin} is a GPU build here)"
+    check "$(has "${TMP}/g_pipeline_s.log" 'DTFE_GPU=1 DTFE_EXACT_AVERAGE=0 DTFE_RUN_MODE=balanced .*run_ps_dtfe.sh -s FAM-1-Dark -g [0-9]+ -m 99')" \
           "... SUBSAMPLES=2 alone: the sampled deposit (DTFE_EXACT_AVERAGE=0 handed on), with -m (${g_bin} is a GPU build here)"
 else
-    check "$(has "${TMP}/g_pipeline_s.log" 'DTFE_GPU=0 DTFE_EXACT_AVERAGE=0 .*run_ps_dtfe.sh -s FAM-1-Dark -g [0-9]+ 99')" \
+    check "$([ "$(has "${TMP}/g_pipeline.log" 'DTFE_GPU=0 DTFE_EXACT_AVERAGE=1 DTFE_RUN_MODE=balanced .*run_ps_dtfe.sh -s FAM-1-Dark -g [0-9]+ 99')" = 0 ] \
+             && [ "$(has "${TMP}/g_pipeline.log" '^Slice: .* deposit: exact \(the default\) ')" = 0 ] \
+             && [ "$(has "${TMP}/g_pipeline.log" '^Run mode: balanced \(the default\)$')" = 0 ] && echo 0 || echo 1)" \
+          "the pipeline's default run_ps_dtfe.sh call: the exact deposit (DTFE_EXACT_AVERAGE=1) in the balanced run mode, both said in the header, no -m (${g_bin} is a CPU-only build here)"
+    check "$(has "${TMP}/g_pipeline_s.log" 'DTFE_GPU=0 DTFE_EXACT_AVERAGE=0 DTFE_RUN_MODE=balanced .*run_ps_dtfe.sh -s FAM-1-Dark -g [0-9]+ 99')" \
           "... SUBSAMPLES=2 alone: the sampled deposit (DTFE_EXACT_AVERAGE=0 handed on), no -m (${g_bin} is a CPU-only build here)"
 fi
 check "$(has "${TMP}/g_pipeline.log" 'make_image_plane.py .*--planes 1 --thickness 2 --supersample 1 -o ')" \
@@ -394,7 +413,7 @@ if [ -x "${DTFE_BIN}" ]; then
              && [ ! -e "${TMP}/BADIN/snapdir_099/output.runlog.partial" ] && echo 0 || echo 1)" \
           "... its log is output.runlog.failed: no output.runlog claims grids it never wrote"
     check "$([ -f "${TMP}/HASIC/snapdir_099/output.a_den" ] && echo 0 || echo 1)" "its density grid was written"
-    env -u DTFE_EXACT DTFE_EXACT_AVERAGE=1 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_env.log" 2>&1 || true
+    env -u DTFE_EXACT -u DTFE_RUN_MODE -u GPU_SHARE -u SLURM_JOB_ID -u PBS_JOBID DTFE_EXACT_AVERAGE=1 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_env.log" 2>&1 || true
     # run_dtfe.sh reports failures in its exit status, passes the
     # launcher's scratch folder and the scripts' lambda_th default, and the binaries refuse --redshiftSpace
     rc_none=0; scripts/run_dtfe.sh -s HASIC -g 16 123 >"${TMP}/h_none.log" 2>&1 || rc_none=$?
@@ -407,7 +426,7 @@ if [ -x "${DTFE_BIN}" ]; then
     check "$(has "${TMP}/h_scratch.log" 'RUNNING: .*--lambda-th 0.3')" "run_dtfe.sh passes the scripts' lambda-th default (0.3, the binary's own is 0)"
     # standard DTFE pads with 15 spacings by default (complete at z = 0 on TNG50/100/300), not config.sh's
     # 50, which stays the PS-DTFE scripts' value; a caller's PADDING or DTFE_PADDING still wins, PADDING first
-    pad_of() { env -u PADDING -u DTFE_PADDING "$@" DRY_RUN=1 "${PAD_DRIVER}" -s HASIC -g 16 99 2>&1 \
+    pad_of() { env -u PADDING -u DTFE_PADDING -u DTFE_RUN_MODE -u GPU_SHARE -u SLURM_JOB_ID -u PBS_JOBID "$@" DRY_RUN=1 "${PAD_DRIVER}" -s HASIC -g 16 99 2>&1 \
                    | grep -oE -e '--padding +[0-9]+' | head -1 | grep -oE '[0-9]+$'; }
     PAD_DRIVER=scripts/run_dtfe.sh
     pad_def="$(pad_of)"; pad_p="$(pad_of PADDING=12)"; pad_d="$(pad_of DTFE_PADDING=13)"; pad_pd="$(pad_of PADDING=11 DTFE_PADDING=13)"
@@ -454,22 +473,22 @@ if [ -x "${DTFE_BIN}" ]; then
     check "$(has "${TMP}/h_rs.log" 'not implemented in this version')" "... with a message saying the transform is not implemented"
     check "$(has "${TMP}/h_env.log" 'RUNNING: .*--exact( |$)')" "DTFE_EXACT_AVERAGE=1 does the same"
     # the exact average is the default (the production standard); DTFE_EXACT_AVERAGE=0 is the sampled one
-    rc_pl=0; env -u DTFE_EXACT -u DTFE_EXACT_AVERAGE -u SUBSAMPLES -u AVG_SUBSAMPLES scripts/run_dtfe.sh -s HASIC -g 16 99 \
+    rc_pl=0; env -u DTFE_EXACT -u DTFE_EXACT_AVERAGE -u SUBSAMPLES -u AVG_SUBSAMPLES -u DTFE_RUN_MODE -u GPU_SHARE -u SLURM_JOB_ID -u PBS_JOBID scripts/run_dtfe.sh -s HASIC -g 16 99 \
         >"${TMP}/h_plain.log" 2>&1 || rc_pl=$?
     check "$([ "${rc_pl}" = "0" ] && [ "$(has "${TMP}/h_plain.log" 'RUNNING: .*--exact( |$)')" = 0 ] \
              && [ "$(has "${TMP}/h_plain.log" 'RUNNING: .*--field density_a velocity_a divergence_a shear_a ')" = 0 ] \
              && [ "$(has "${TMP}/h_plain.log" 'volume averaging +: EXACT cell-tetrahedron integration')" = 0 ] \
              && echo 0 || echo 1)" "a plain run passes --exact and the four analysis fields (the production defaults; exit ${rc_pl})"
-    env -u DTFE_EXACT -u SUBSAMPLES -u AVG_SUBSAMPLES DTFE_EXACT_AVERAGE=0 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_mc.log" 2>&1 || true
+    env -u DTFE_EXACT -u SUBSAMPLES -u AVG_SUBSAMPLES -u DTFE_RUN_MODE -u GPU_SHARE -u SLURM_JOB_ID -u PBS_JOBID DTFE_EXACT_AVERAGE=0 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_mc.log" 2>&1 || true
     check "$([ "$(lacks "${TMP}/h_mc.log" 'RUNNING: .*--exact( |$)')" = 0 ] && [ "$(has "${TMP}/h_mc.log" 'RUNNING: .*--sampled( |$)')" = 0 ] \
              && [ "$(has "${TMP}/h_mc.log" 'volume averaging +: SAMPLED \(--sampled\)')" = 0 ] && echo 0 || echo 1)" \
           "DTFE_EXACT_AVERAGE=0 passes --sampled, not --exact: the Monte-Carlo cell mean, said in the run log"
     # SUBSAMPLES (-n) reaches the Monte-Carlo mean as --subsamples, only when set
-    env -u DTFE_EXACT DTFE_EXACT_AVERAGE=0 DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 -n 2 99 >"${TMP}/h_mc_n.log" 2>&1 || true
+    env -u DTFE_EXACT -u DTFE_RUN_MODE -u GPU_SHARE -u SLURM_JOB_ID -u PBS_JOBID DTFE_EXACT_AVERAGE=0 DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 -n 2 99 >"${TMP}/h_mc_n.log" 2>&1 || true
     check "$([ "$(has "${TMP}/h_mc_n.log" '--lambda-th +0\.3 .*--sampled +--subsamples +2$')" = 0 ] && [ "$(lacks "${TMP}/h_mc.log" '--subsamples')" = 0 ] \
              && echo 0 || echo 1)" "... -n 2 (SUBSAMPLES) passes --subsamples 2; unset, nothing (the binary's own count)"
     # P6.7: DTFE_EXACT, the knob's older name, is read when the new one is unset (one warning); the new one wins over it
-    env -u DTFE_EXACT_AVERAGE -u SUBSAMPLES DTFE_EXACT=0 DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_mc_old.log" 2>&1 || true
+    env -u DTFE_EXACT_AVERAGE -u SUBSAMPLES -u DTFE_RUN_MODE -u GPU_SHARE -u SLURM_JOB_ID -u PBS_JOBID DTFE_EXACT=0 DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_mc_old.log" 2>&1 || true
     DTFE_EXACT=0 DTFE_EXACT_AVERAGE=1 DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 99 >"${TMP}/h_mc_both.log" 2>&1 || true
     check "$([ "$(lacks "${TMP}/h_mc_old.log" '--exact( |$)')" = 0 ] && [ "$(has "${TMP}/h_mc_old.log" '--lambda-th +0\.3 .*--sampled$')" = 0 ] \
              && [ "$(grep -c '^warning: DTFE_EXACT is deprecated, use DTFE_EXACT_AVERAGE$' "${TMP}/h_mc_old.log")" = 1 ] \
@@ -486,7 +505,7 @@ if [ -x "${DTFE_BIN}" ]; then
         shift
         while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do e+=("$1"); shift; done
         [ "$#" -gt 0 ] && shift
-        env -u DTFE_EXACT -u DTFE_EXACT_AVERAGE -u SUBSAMPLES -u AVG_SUBSAMPLES -u FACE_GRADIENT -u DTFE_METAL DTFE_GPU=0 \
+        env -u DTFE_EXACT -u DTFE_EXACT_AVERAGE -u SUBSAMPLES -u AVG_SUBSAMPLES -u FACE_GRADIENT -u DTFE_METAL -u DTFE_RUN_MODE -u GPU_SHARE -u SLURM_JOB_ID -u PBS_JOBID DTFE_GPU=0 \
             ${e[@]+"${e[@]}"} DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 "$@" 99 >"${log}" 2>&1 || true
         sed -n '/would run:/{n;p;}' "${log}"
     }
@@ -511,7 +530,7 @@ if [ -x "${DTFE_BIN}" ]; then
              && [ "$(grep -c '^warning: --exact-average is deprecated, use --exact$' "${TMP}/h_lea.log")" = 1 ] \
              && [ "$(lacks "${TMP}/h_le0.log" 'deprecated')" = 0 ] && [ "$(lacks "${TMP}/h_lex.log" 'deprecated')" = 0 ] && echo 0 || echo 1)" \
           "--exact is -e; --sampled beats DTFE_EXACT_AVERAGE=1 and -e DTFE_EXACT_AVERAGE=0; --exact-average, the older long form, is -e with one warning"
-    rc=0; env -u DTFE_EXACT -u DTFE_EXACT_AVERAGE DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 -e --sampled 99 >"${TMP}/h_both.log" 2>&1 || rc=$?
+    rc=0; env -u DTFE_EXACT -u DTFE_EXACT_AVERAGE -u DTFE_RUN_MODE -u GPU_SHARE -u SLURM_JOB_ID -u PBS_JOBID DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 -e --sampled 99 >"${TMP}/h_both.log" 2>&1 || rc=$?
     check "$([ "${rc}" = "1" ] && [ "$(has "${TMP}/h_both.log" "^Error: '-e' \('--exact'\) and '--sampled' exclude each other")" = 0 ] \
              && [ "$(has "${TMP}/h_both.log" '^Usage: ')" = 0 ] && [ "$(lacks "${TMP}/h_both.log" 'would run:')" = 0 ] && echo 0 || echo 1)" \
           "-e and --sampled together are refused with the usage, exit 1, nothing planned (${rc})"
@@ -871,6 +890,15 @@ check "$([ "${rc}" = "0" ] && [ "$(has "${TMP}/j_opt6.log" '--grid +16 .*--sampl
          && [ "${rc3}" = "1" ] && [ "$(has "${TMP}/j_opt8.log" "unknown option '--gpu'")" = 0 ] \
          && [ "${rc4}" = "1" ] && [ "$(has "${TMP}/j_opt9.log" "unknown option '--sampled'")" = 0 ] && echo 0 || echo 1)" \
       "... run_dtfe.sh takes them too (a count alone: --sampled --subsamples 2); an unknown long option, or one the script lacks (download_snapshots.sh --gpu, --sampled): the usage, exit 1 (${rc} ${rc2} ${rc3} ${rc4})"
+# --run-mode MODE (getopts' R): both drivers plan the mode it names; download_snapshots.sh runs no binary and has none
+rc=0; env "${COMMON_ENV[@]}" DRY_RUN=1 "${DRIVER}" -s HASIC -g 16 --run-mode gentle 99 >"${TMP}/j_rm1.log" 2>&1 || rc=$?
+rc2=0; env "${COMMON_ENV[@]}" DRY_RUN=1 scripts/run_dtfe.sh -s HASIC -g 16 --run-mode=performance 99 >"${TMP}/j_rm2.log" 2>&1 || rc2=$?
+rc3=0; TNG_API_KEY=dummykey scripts/download_snapshots.sh -s HASIC --run-mode gentle 99 >"${TMP}/j_rm3.log" 2>&1 || rc3=$?
+check "$([ "${rc}" = "0" ] && [ "$(has "${TMP}/j_rm1.log" 'combined_099\.hdf5 .*--run-mode +gentle ')" = 0 ] \
+         && [ "${rc2}" = "0" ] && [ "$(has "${TMP}/j_rm2.log" 'combined_099\.hdf5 .*--run-mode +performance ')" = 0 ] \
+         && [ "${rc3}" = "1" ] && [ "$(has "${TMP}/j_rm3.log" "unknown option '--run-mode'")" = 0 ] && [ "$(has "${TMP}/j_rm3.log" '^Usage: ')" = 0 ] \
+         && echo 0 || echo 1)" \
+      "... --run-mode MODE (and --run-mode=MODE) plans that mode in both drivers; download_snapshots.sh has no run mode: the usage, exit 1 (${rc} ${rc2} ${rc3})"
 rc=0; DTFE_DATA_ROOT= scripts/run_ps_dtfe.sh -s HASIC 99 >"${TMP}/j_noroot_empty.log" 2>&1 || rc=$?
 check "$([ "${rc}" = "2" ] && [ "$(has "${TMP}/j_noroot_empty.log" "${NOROOT}")" = 0 ] && echo 0 || echo 1)" \
       "... an empty DTFE_DATA_ROOT= is no data root either (${rc})"
@@ -911,10 +939,10 @@ echo ""
 echo "(K) the binaries' --help lists the phase-space, GPU, point-evaluation and server options; no known misspelling."
 "${PS_BIN}" --help >"${TMP}/k_help_ps.log" 2>&1 || true
 "${DTFE_BIN}" --help >"${TMP}/k_help_dtfe.log" 2>&1 || true
-for o in gpu exact sampled no-overlap full-help lambda-th grid-window ps-merge subsamples ps-per-stream ps-point-conventions mpc-unit ps-caustics ps-vertex-mass ps-volume-weighted sample-points serve serve-progress tessellation-cache auto-tune-report; do
+for o in gpu exact sampled no-overlap full-help lambda-th grid-window ps-merge subsamples ps-per-stream ps-point-conventions mpc-unit ps-caustics ps-vertex-mass ps-volume-weighted sample-points serve serve-progress tessellation-cache auto-tune-report run-mode gpu-share; do
     check "$(has "${TMP}/k_help_ps.log" "^ *--${o}( |$)")" "PS-DTFE --help lists --${o}"
 done
-for o in gpu exact sampled no-overlap full-help lambda-th average-method subsamples mpc-unit sample-points serve auto-tune-report; do
+for o in gpu exact sampled no-overlap full-help lambda-th average-method subsamples mpc-unit sample-points serve auto-tune-report run-mode; do
     check "$(has "${TMP}/k_help_dtfe.log" "^ *--${o}( |$)")" "DTFE --help lists --${o}"
 done
 "${PS_BIN}" --full-help >"${TMP}/k_full_ps.log" 2>"${TMP}/k_full_ps.err" || true
@@ -1338,7 +1366,7 @@ ln -sfn "${ROOT_DIR}/python" "${MREPO}/python"
 pdrive() {   # <log> [VAR=value ...]: the copied pipeline on SIM (the deposit's knobs unset first); echoes its exit status
     local log="$1"; shift
     local rc=0
-    env -u DTFE_EXACT_AVERAGE -u PS_EXACT -u SUBSAMPLES -u AVG_SUBSAMPLES \
+    env -u DTFE_EXACT_AVERAGE -u PS_EXACT -u SUBSAMPLES -u AVG_SUBSAMPLES -u DTFE_RUN_MODE -u GPU_SHARE -u SLURM_JOB_ID -u PBS_JOBID \
         DTFE_DATA_ROOT="${PDATA}" SIMS=SIM NU=8 GRID_SIZE=16 FIELDS="density_a velocity_a" DTFE_GPU=0 FAKE_MODE=ok \
         "$@" "${MREPO}/scripts/run_ps_pipeline.sh" >"${log}" 2>&1 || rc=$?
     echo "${rc}"
@@ -1467,7 +1495,7 @@ sdrive() {   # <driver> <log> [VAR=value ...]: the copied driver on SDATA's SIM 
     local scr="$1" log="$2"; shift 2
     local rc=0
     env -u DTFE_GPU -u PS_GPU -u DTFE_METAL -u PS_METAL -u PS_EXACT -u DTFE_EXACT -u DTFE_EXACT_AVERAGE -u PS_VOLUME_WEIGHTED -u PS_CAUSTICS -u FIELDS -u OUTPUT_PREFIX \
-        -u SUBSAMPLES -u AVG_SUBSAMPLES -u PS_MERGE -u ORDERED_MERGE -u FIXED_POINT_MERGE \
+        -u SUBSAMPLES -u AVG_SUBSAMPLES -u PS_MERGE -u ORDERED_MERGE -u FIXED_POINT_MERGE -u DTFE_RUN_MODE -u GPU_SHARE -u SLURM_JOB_ID -u PBS_JOBID \
         -u PS_LINEAR_DEPOSIT -u FACE_GRADIENT -u DTFE_PRECISION DTFE_DATA_ROOT="${SDATA}" "$@" "${MREPO}/scripts/${scr}" -s SIM -g 16 99 >"${log}" 2>&1 || rc=$?
     echo "${rc}"
 }
@@ -1480,11 +1508,9 @@ gpu_of() {   # <driver> <stamp or none> [VAR=value ...]: 'gpu' / 'cpu' as the pl
     sline "${TMP}/s_gpu.log" | grep -qE -e ' --(ps-)?gpu( |$)' && echo gpu || echo cpu
 }
 g=""
-# (run_ps_dtfe.sh with DTFE_EXACT_AVERAGE=0: the sampled deposit, which follows the stamp; the exact one, its
-# default, is the CPU's, below)
+# (the drivers' defaults: the exact average and deposit, the balanced run mode; the table by mode is below)
 for c in "run_dtfe.sh o/.gpu_mode_metal" "run_dtfe.sh o/.gpu_mode_off" "run_dtfe.sh none" \
-         "run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=0" "run_ps_dtfe.sh o_ps/.gpu_mode_off DTFE_EXACT_AVERAGE=0" \
-         "run_ps_dtfe.sh o/.gpu_mode_metal DTFE_EXACT_AVERAGE=0"; do
+         "run_ps_dtfe.sh o_ps/.gpu_mode_metal" "run_ps_dtfe.sh o_ps/.gpu_mode_off" "run_ps_dtfe.sh o/.gpu_mode_metal"; do
     # shellcheck disable=SC2086
     g="${g} $(gpu_of ${c})"
 done
@@ -1502,14 +1528,28 @@ g="${g} $(gpu_of run_dtfe.sh o/.gpu_mode_off DTFE_GPU=0 DTFE_METAL=1) $(gpu_of r
 g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_off PS_GPU=1) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_GPU=0 PS_METAL=1)"
 check "$([ "${g}" = "cpu cpu gpu gpu cpu gpu gpu cpu" ] && echo 0 || echo 1)" \
       "... the older names DTFE_METAL / PS_GPU / PS_METAL are read while DTFE_GPU is unset (PS_GPU before PS_METAL); DTFE_GPU wins over them (${g})"
-g="$(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=1) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=1 DTFE_GPU=1)"
-g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=1 DTFE_GPU=auto) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_EXACT=1)"
-g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_EXACT=1 PS_METAL=1) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_EXACT=1 PS_GPU=AUTO)"
-g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=true)"
-g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal SUBSAMPLES=3)"
-g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal SUBSAMPLES=3 DTFE_EXACT_AVERAGE=1)"
-check "$([ "${g}" = "cpu gpu cpu cpu gpu cpu cpu cpu gpu cpu" ] && echo 0 || echo 1)" \
-      "... the exact deposit (DTFE_EXACT_AVERAGE=1, or PS_EXACT=1, or =true, or nothing: the default) runs on the CPU on a GPU build, faster there, for DTFE_GPU unset or auto and the older names alike; a GPU knob of 1 still moves it; a SUBSAMPLES count alone is the sampled deposit, the GPU's (${g})"
+# the device by run mode (config.sh gpu_auto_resolve; the launcher's recommended_gpu mirrors it), on GPU builds: per
+# mode PS-DTFE's exact and sampled deposits, then standard DTFE's exact and sampled averages
+g=""
+for m in gentle balanced performance; do
+    g="${g}${m}: $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_RUN_MODE=${m})"
+    g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_RUN_MODE=${m} DTFE_EXACT_AVERAGE=0)"
+    g="${g} $(gpu_of run_dtfe.sh o/.gpu_mode_metal DTFE_RUN_MODE=${m})"
+    g="${g} $(gpu_of run_dtfe.sh o/.gpu_mode_metal DTFE_RUN_MODE=${m} DTFE_EXACT_AVERAGE=0) | "
+done
+check "$([ "${g}" = "gentle: gpu gpu gpu gpu | balanced: gpu gpu gpu gpu | performance: gpu gpu gpu cpu | " ] && echo 0 || echo 1)" \
+      "... by run mode (PS exact, PS sampled, standard exact, standard sampled): the GPU on a GPU build, but the CPU for standard DTFE's sampled average in performance, faster there with every core (${g})"
+g="$(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=1 DTFE_GPU=auto) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_EXACT=1)"
+g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal PS_EXACT=1 PS_GPU=AUTO) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=true)"
+g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal SUBSAMPLES=3 DTFE_EXACT_AVERAGE=1) $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_metal DTFE_GPU=0)"
+g="${g} $(gpu_of run_ps_dtfe.sh o_ps/.gpu_mode_off DTFE_RUN_MODE=performance) $(gpu_of run_dtfe.sh o/.gpu_mode_off DTFE_RUN_MODE=gentle)"
+g="${g} $(gpu_of run_dtfe.sh o/.gpu_mode_metal DTFE_RUN_MODE=performance DTFE_EXACT_AVERAGE=0 DTFE_GPU=1)"
+g="${g} $(gpu_of run_dtfe.sh o/.gpu_mode_metal SUBSAMPLES=3 DTFE_RUN_MODE=performance)"
+g="${g} $(gpu_of run_dtfe.sh o/.gpu_mode_metal DTFE_EXACT_AVERAGE=0 SLURM_JOB_ID=1)"
+check "$([ "${g}" = "gpu gpu gpu gpu gpu cpu cpu cpu gpu cpu cpu" ] \
+         && grep -aqF "'_a' interpolation: CPU (DTFE_GPU unset: performance: standard DTFE's sampled average is faster on the CPU (315 s against 433 s, TNG100-3-Dark z=0 at 512^3); DTFE_GPU=1 runs it on the GPU)" "${TMP}/s_gpu.log" \
+         && echo 0 || echo 1)" \
+      "... the exact deposit (DTFE_EXACT_AVERAGE=1, PS_EXACT=1, =true, auto, the older names) on the GPU as the sampled one, DTFE_GPU=0 or a CPU-only build the CPU; standard DTFE's sampled average in performance (a count alone, or the batch-job default) the CPU, said, unless DTFE_GPU=1 (${g})"
 rm -rf "${MREPO}/o" "${MREPO}/o_ps" "${MREPO}/o_d" "${MREPO}/o_ps_d"
 rc=$(sdrive run_ps_dtfe.sh "${TMP}/s_psdef.log" DRY_RUN=1)
 check "$([ "${rc}" = "0" ] && sline "${TMP}/s_psdef.log" | grep -qE -e '--field +density_a +velocity_a +divergence_a +shear_a +--lambda-th +0\.3 +--exact +.*--ps-volume-weighted .*--ps-caustics' \
@@ -1556,8 +1596,8 @@ rc=$(sdrive run_dtfe.sh "${TMP}/s_dtpertet.log" DRY_RUN=1 FACE_GRADIENT=0)
 check "$([ "${rc}" = "0" ] && sline "${TMP}/s_dtpertet.log" | grep -qE -e '--exact +--per-tet-gradient$' && echo 0 || echo 1)" \
       "FACE_GRADIENT=0 passes --per-tet-gradient to run_dtfe.sh (the face gradient is the standard binary's default since 2026-11-09) (${rc})"
 rc=$(sdrive run_dtfe.sh "${TMP}/s_dtdef.log" DRY_RUN=1)
-check "$([ "${rc}" = "0" ] && sline "${TMP}/s_dtdef.log" | grep -qE -e 'snapdir_099/output +--grid +16 +--padding +15 +--periodic +--field +density_a +velocity_a +divergence_a +shear_a +--lambda-th +0\.3 +--exact$' \
-         && echo 0 || echo 1)" "run_dtfe.sh's defaults: padding 15, the same four fields as run_ps_dtfe.sh, the exact cell average (${rc})"
+check "$([ "${rc}" = "0" ] && sline "${TMP}/s_dtdef.log" | grep -qE -e 'snapdir_099/output +--grid +16 +--padding +15 +--periodic +--run-mode +balanced +--field +density_a +velocity_a +divergence_a +shear_a +--lambda-th +0\.3 +--exact$' \
+         && echo 0 || echo 1)" "run_dtfe.sh's defaults: padding 15, the balanced run mode, the same four fields as run_ps_dtfe.sh, the exact cell average (${rc})"
 # OUTPUT_PREFIX for run_dtfe.sh: the files and the run log under it; a PS-DTFE-style prefix refused before anything runs
 rc=$(sdrive run_dtfe.sh "${TMP}/s_pfx.log" OUTPUT_PREFIX=output_mc DTFE_EXACT_AVERAGE=0 FAKE_MODE=ok)
 check "$([ "${rc}" = "0" ] && [ -f "${SSD}/output_mc.runlog" ] && [ ! -e "${SSD}/output.runlog" ] \
@@ -1600,15 +1640,15 @@ rm -rf "${SSD}/output."* "${SSD}/output.superseded"
 rc=$(sdrive run_dtfe.sh "${TMP}/s_supnone.log" FAKE_MODE=write)
 check "$([ "${rc}" = "0" ] && [ ! -e "${SSD}/output.superseded" ] && [ "$(lacks "${TMP}/s_supnone.log" 'Superseded')" = 0 ] && echo 0 || echo 1)" \
       "... and a first run into an empty prefix makes no superseded folder (${rc})"
-# run_ps_pipeline.sh's GPU default: DTFE_GPU unset follows the PS binary's stamp as run_ps_dtfe.sh does, so a CPU-only
-# build is never asked for the GPU (the copy (P) made, on SDATA's SIM: a dry run plans the plane and the snapshot) --
-# for the sampled deposit (DTFE_EXACT_AVERAGE=0 below); the exact one, the default, is the CPU's
+# run_ps_pipeline.sh's GPU default: DTFE_GPU unset follows the PS binary's stamp as run_ps_dtfe.sh does (config.sh
+# gpu_auto_resolve, for both deposits in every run mode), so a CPU-only build is never asked for the GPU (the copy (P)
+# made, on SDATA's SIM: a dry run plans the plane and the snapshot)
 pgpu_of() {   # <stamp or none> [VAR=value ...]: 'gpu' / 'cpu' as the pipeline's planned run_ps_dtfe.sh call says
     local st="$1"; shift
     rm -rf "${MREPO}/o" "${MREPO}/o_ps" "${MREPO}/o_d" "${MREPO}/o_ps_d"
     if [ "${st}" != "none" ]; then mkdir -p "${MREPO}/${st%%/*}"; : > "${MREPO}/${st}"; fi
     env -u DTFE_GPU -u PS_GPU -u PS_METAL -u DTFE_EXACT_AVERAGE -u PS_EXACT -u SUBSAMPLES -u AVG_SUBSAMPLES -u DTFE_PRECISION -u SIMS -u SNAPS \
-        DTFE_DATA_ROOT="${SDATA}" SIMS=SIM NU=8 DRY_RUN=1 "$@" \
+        -u DTFE_RUN_MODE -u GPU_SHARE -u SLURM_JOB_ID -u PBS_JOBID DTFE_DATA_ROOT="${SDATA}" SIMS=SIM NU=8 DRY_RUN=1 "$@" \
         "${MREPO}/scripts/run_ps_pipeline.sh" >"${TMP}/s_pgpu.log" 2>&1 || true
     local line
     line="$(grep -aE -e 'run_ps_dtfe\.sh -s SIM ' "${TMP}/s_pgpu.log" | tail -1)"
@@ -1627,12 +1667,18 @@ check "$([ "${g}" = " gpu cpu cpu cpu" ] && echo 0 || echo 1)" \
 g="$(pgpu_of o_ps/.gpu_mode_metal DTFE_GPU=0 DTFE_EXACT_AVERAGE=0) $(pgpu_of o_ps/.gpu_mode_off DTFE_GPU=1)"
 g="${g} $(pgpu_of o_ps/.gpu_mode_metal DTFE_PRECISION=double DTFE_EXACT_AVERAGE=0) $(pgpu_of o_ps_d/.gpu_mode_metal DTFE_PRECISION=double DTFE_EXACT_AVERAGE=0)"
 check "$([ "${g}" = "cpu gpu cpu gpu" ] && echo 0 || echo 1)" "... DTFE_GPU = 0 or 1 wins over the stamp; the double pair reads o_ps_d (${g})"
-check "$(has "${TMP}/s_pgpu.log" 'GPU: 1 \(DTFE_GPU unset: PS-DTFE-double is a GPU build\)')" "... and the header says which, and why"
-g="$(pgpu_of o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=1) $(pgpu_of o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=1 DTFE_GPU=1)"
-g="${g} $(pgpu_of o_ps/.gpu_mode_metal PS_EXACT=1) $(pgpu_of o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=yes)"
-g="${g} $(pgpu_of o_ps/.gpu_mode_metal) $(pgpu_of o_ps/.gpu_mode_metal SUBSAMPLES=3)"
-check "$([ "${g}" = "cpu gpu cpu cpu cpu gpu" ] && echo 0 || echo 1)" \
-      "... the exact deposit (DTFE_EXACT_AVERAGE=1, the older PS_EXACT=1, =yes, or nothing: the default; the driver's own rule): the CPU unless DTFE_GPU=1; a SUBSAMPLES count alone is the sampled deposit, the GPU's (${g})"
+check "$(has "${TMP}/s_pgpu.log" 'GPU: 1 \(DTFE_GPU unset: PS-DTFE-double is a GPU build; balanced: the GPU; DTFE_GPU=0 or 1 chooses\)')" \
+      "... and the header says which, and why (the run mode too)"
+# the exact deposit, the default: the same rule, the GPU on a GPU build in every run mode (in performance with the free
+# cores beside it, through run_ps_dtfe.sh's '--gpu-share auto')
+g="$(pgpu_of o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=1) $(pgpu_of o_ps/.gpu_mode_metal PS_EXACT=1)"
+g="${g} $(pgpu_of o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=yes DTFE_RUN_MODE=gentle) $(pgpu_of o_ps/.gpu_mode_metal SUBSAMPLES=3)"
+g="${g} $(pgpu_of o_ps/.gpu_mode_metal DTFE_EXACT_AVERAGE=1 DTFE_GPU=0) $(pgpu_of o_ps/.gpu_mode_off DTFE_RUN_MODE=performance)"
+g="${g} $(pgpu_of o_ps/.gpu_mode_metal DTFE_RUN_MODE=performance)"
+check "$([ "${g}" = "gpu gpu gpu gpu cpu cpu gpu" ] \
+         && grep -aqF 'GPU: 1 (DTFE_GPU unset: PS-DTFE is a GPU build; performance: the exact deposit on the GPU and the free cores (--gpu-share auto); DTFE_GPU=0 or 1 chooses)' "${TMP}/s_pgpu.log" \
+         && echo 0 || echo 1)" \
+      "... the exact deposit (DTFE_EXACT_AVERAGE=1, the older PS_EXACT=1, =yes, or nothing: the default; the driver's own rule): the GPU on a GPU build in every run mode, as the sampled one (a SUBSAMPLES count); DTFE_GPU=0 or a CPU-only build: the CPU; performance says the free cores join in (${g})"
 g="$(pgpu_of o_ps/.gpu_mode_metal PS_METAL=0) $(pgpu_of o_ps/.gpu_mode_off PS_METAL=1) $(pgpu_of o_ps/.gpu_mode_metal PS_EXACT=1 PS_METAL=1)"
 g="${g} $(pgpu_of o_ps/.gpu_mode_off PS_GPU=1)"
 check "$([ "${g}" = "cpu gpu gpu gpu" ] && echo 0 || echo 1)" "... PS_GPU and PS_METAL, the older names, are read while DTFE_GPU is unset (${g})"
@@ -1688,6 +1734,104 @@ check "$([ -n "${t_on}" ] && [ "${t_on}" = "${t_true}" ] && [ -n "${t_off}" ] &&
          && printf '%s\n' "${t_true}" | grep -q -e '--ps-caustic-cusps' && ! printf '%s\n' "${t_false}" | grep -qE -e '--ps-(caustics|vertex-mass)' \
          && echo 0 || echo 1)" "a switch set to true / YES / on is on, to Off / false off, as in the binaries (no longer a silent off for anything but 1)"
 rm -rf "${TCD}" "${TMP}/t_points.txt"
+
+echo ""
+echo "(U) the run mode: --run-mode, DTFE_RUN_MODE and the batch-job default; GPU_SHARE beside the exact GPU deposit."
+# Dry runs of the copied drivers beside the stand-in binaries of (M), on SDATA's SIM 99, the stamps made as (S) makes
+# them: the drivers resolve one mode (config.sh run_mode_resolve) and pass it on every run as '--run-mode MODE'
+rm -rf "${MREPO}/o" "${MREPO}/o_ps" "${MREPO}/o_d" "${MREPO}/o_ps_d"
+udrive() {   # <driver> <log> [VAR=value ...] [-- driver options]: a dry run of the copied driver; echoes its exit status
+    local scr="$1" log="$2" e=() rc=0
+    shift 2
+    while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do e+=("$1"); shift; done
+    [ "$#" -gt 0 ] && shift
+    env -u DTFE_GPU -u PS_GPU -u DTFE_METAL -u PS_METAL -u DTFE_EXACT_AVERAGE -u PS_EXACT -u DTFE_EXACT -u SUBSAMPLES \
+        -u AVG_SUBSAMPLES -u DTFE_PRECISION -u DTFE_RUN_MODE -u GPU_SHARE -u SLURM_JOB_ID -u PBS_JOBID -u OMP_NUM_THREADS \
+        -u THREADS DTFE_DATA_ROOT="${SDATA}" DRY_RUN=1 ${e[@]+"${e[@]}"} "${MREPO}/scripts/${scr}" -s SIM -g 16 "$@" 99 \
+        >"${log}" 2>&1 || rc=$?
+    echo "${rc}"
+}
+umode() {    # <driver> [VAR=value ...] [-- driver options]: '<the planned --run-mode> [<the banner's run mode line>]'
+    local scr="$1"; shift
+    udrive "${scr}" "${TMP}/u_mode.log" "$@" >/dev/null
+    printf '%s [%s]' "$(sline "${TMP}/u_mode.log" | grep -oE -e '--run-mode +[a-z]+' | sed -e 's/^--run-mode *//')" \
+        "$(sed -n 's/^Run mode: //p' "${TMP}/u_mode.log")"
+}
+rc=$(udrive run_dtfe.sh "${TMP}/u_std.log"); rc2=$(udrive run_ps_dtfe.sh "${TMP}/u_ps.log")
+check "$([ "${rc}${rc2}" = "00" ] && sline "${TMP}/u_std.log" | grep -qE -e ' --periodic +--run-mode +balanced +--field ' \
+         && sline "${TMP}/u_ps.log" | grep -qE -e ' --ps-merge +index-order +--run-mode +balanced +--input-format ' \
+         && grep -aqxF 'Run mode: balanced (the default)' "${TMP}/u_std.log" && grep -aqxF 'Run mode: balanced (the default)' "${TMP}/u_ps.log" \
+         && echo 0 || echo 1)" "both drivers pass '--run-mode balanced' by default, and the banner says why (${rc} ${rc2})"
+u_bad=""
+for scr in run_dtfe.sh run_ps_dtfe.sh; do
+    for c in "balanced [balanced (the default)]|" "gentle [gentle (--run-mode)]|-- --run-mode gentle" \
+             "performance [performance (--run-mode)]|-- --run-mode=performance" \
+             "gentle [gentle (DTFE_RUN_MODE=GENTLE)]|DTFE_RUN_MODE=GENTLE" "balanced [balanced (the default)]|DTFE_RUN_MODE=auto" \
+             "balanced [balanced (the default)]|DTFE_RUN_MODE=" "performance [performance (--run-mode)]|DTFE_RUN_MODE=gentle -- --run-mode performance" \
+             "gentle [gentle (DTFE_RUN_MODE=gentle)]|DTFE_RUN_MODE=gentle -- --run-mode auto" \
+             "gentle [gentle (--run-mode)]|DTFE_RUN_MODE=fast -- --run-mode gentle" \
+             "performance [performance (the default inside a batch job (SLURM_JOB_ID))]|SLURM_JOB_ID=1" \
+             "performance [performance (the default inside a batch job (PBS_JOBID))]|PBS_JOBID=1" \
+             "balanced [balanced (DTFE_RUN_MODE=balanced)]|SLURM_JOB_ID=1 DTFE_RUN_MODE=balanced" \
+             "balanced [balanced (the default; OMP_NUM_THREADS=3 keeps its thread count)]|THREADS=3"; do
+        # shellcheck disable=SC2086
+        got="$(umode "${scr}" ${c#*|})"
+        [ "${got}" = "${c%%|*}" ] || u_bad="${u_bad} [${scr} ${c#*|}: ${got}]"
+    done
+done
+check "$([ -z "${u_bad}" ] && echo 0 || echo 1)" \
+      "--run-mode MODE (or =MODE) first (DTFE_RUN_MODE beside it is not read, a bad one neither), then DTFE_RUN_MODE in any case, then the default: balanced, performance inside a SLURM or PBS job; auto (or empty) chooses nothing; the banner names the source and a kept OMP_NUM_THREADS${u_bad:+ -- differ:${u_bad}}"
+rc=$(udrive run_ps_dtfe.sh "${TMP}/u_badopt.log" -- --run-mode fast); rc2=$(udrive run_dtfe.sh "${TMP}/u_badopt2.log" -- --run-mode GENTLE)
+check "$([ "${rc}" = "1" ] && grep -aqxF "Error: --run-mode must be 'gentle', 'balanced', 'performance' or 'auto' (got 'fast')." "${TMP}/u_badopt.log" \
+         && [ "${rc2}" = "1" ] && grep -aqxF "Error: --run-mode must be 'gentle', 'balanced', 'performance' or 'auto' (got 'GENTLE')." "${TMP}/u_badopt2.log" \
+         && [ "$(has "${TMP}/u_badopt.log" '^Usage: ')" = 0 ] && [ "$(lacks "${TMP}/u_badopt.log" 'would run:')" = 0 ] && echo 0 || echo 1)" \
+      "... another --run-mode word (or a capital one: the option is lower case, as the binaries take it) is refused with the usage, exit 1, nothing planned (${rc} ${rc2})"
+rc=$(udrive run_ps_dtfe.sh "${TMP}/u_badknob.log" DTFE_RUN_MODE=fast); rc2=$(udrive run_dtfe.sh "${TMP}/u_badknob2.log" DTFE_RUN_MODE=fast)
+check "$([ "${rc}" = "2" ] && grep -aqxF "Error: DTFE_RUN_MODE must be 'gentle', 'balanced', 'performance' or 'auto' (got 'fast')." "${TMP}/u_badknob.log" \
+         && [ "${rc2}" = "2" ] && grep -aqxF "Error: DTFE_RUN_MODE must be 'gentle', 'balanced', 'performance' or 'auto' (got 'fast')." "${TMP}/u_badknob2.log" \
+         && [ "$(lacks "${TMP}/u_badknob.log" 'would run:')" = 0 ] && echo 0 || echo 1)" \
+      "... another DTFE_RUN_MODE value is refused before anything runs, exit 2 (${rc} ${rc2})"
+# the GPU share: '--gpu-share GPU_SHARE' (auto by default) beside the exact deposit on the GPU; a share given for
+# another run is passed too (the binary says why it does not apply), auto is not
+share_of() { sline "$1" | grep -oE -e '--gpu-share +[^ ]+' | sed -e 's/^--gpu-share *//' || true; }   # (none: empty)
+mkdir -p "${MREPO}/o_ps"; : > "${MREPO}/o_ps/.gpu_mode_metal"
+udrive run_ps_dtfe.sh "${TMP}/u_sh_def.log" >/dev/null; udrive run_ps_dtfe.sh "${TMP}/u_sh_half.log" GPU_SHARE=0.5 >/dev/null
+udrive run_ps_dtfe.sh "${TMP}/u_sh_perf.log" DTFE_RUN_MODE=performance >/dev/null
+udrive run_ps_dtfe.sh "${TMP}/u_sh_cpu.log" DTFE_GPU=0 >/dev/null; udrive run_ps_dtfe.sh "${TMP}/u_sh_cpuh.log" DTFE_GPU=0 GPU_SHARE=0.5 >/dev/null
+udrive run_ps_dtfe.sh "${TMP}/u_sh_sam.log" DTFE_EXACT_AVERAGE=0 >/dev/null
+u_sh="$(share_of "${TMP}/u_sh_def.log")|$(share_of "${TMP}/u_sh_half.log")|$(share_of "${TMP}/u_sh_perf.log")"
+u_sh="${u_sh}|$(share_of "${TMP}/u_sh_cpu.log")|$(share_of "${TMP}/u_sh_cpuh.log")|$(share_of "${TMP}/u_sh_sam.log")"
+check "$([ "${u_sh}" = "auto|0.5|auto||0.5|" ] && sline "${TMP}/u_sh_def.log" | grep -qE -e '--gpu +--exact( |$)' \
+         && ! sline "${TMP}/u_sh_cpu.log" | grep -qE -e ' --gpu( |$)' \
+         && grep -aqF 'Deposit: GPU (--gpu) (DTFE_GPU unset: PS-DTFE is a GPU build; performance: the exact deposit on the GPU and the free cores (--gpu-share auto); DTFE_GPU=0 or 1 chooses)' "${TMP}/u_sh_perf.log" \
+         && echo 0 || echo 1)" \
+      "run_ps_dtfe.sh on a GPU build: the exact deposit on the GPU with '--gpu-share auto' (GPU_SHARE=0.5: 0.5; performance says the free cores join in); DTFE_GPU=0 and the sampled deposit pass none, a given share still (${u_sh})"
+# standard DTFE's sampled average in performance on a GPU build: the CPU (faster there), said
+mkdir -p "${MREPO}/o"; : > "${MREPO}/o/.gpu_mode_metal"
+rc=$(udrive run_dtfe.sh "${TMP}/u_std_perf.log" DTFE_RUN_MODE=performance DTFE_EXACT_AVERAGE=0)
+check "$([ "${rc}" = "0" ] && ! sline "${TMP}/u_std_perf.log" | grep -qE -e ' --gpu( |$)' && sline "${TMP}/u_std_perf.log" | grep -qE -e '--run-mode +performance ' \
+         && grep -aqxF "'_a' interpolation: CPU (DTFE_GPU unset: performance: standard DTFE's sampled average is faster on the CPU (315 s against 433 s, TNG100-3-Dark z=0 at 512^3); DTFE_GPU=1 runs it on the GPU)" "${TMP}/u_std_perf.log" \
+         && echo 0 || echo 1)" "run_dtfe.sh's sampled average in performance on a GPU build: no --gpu, and the banner says why (${rc})"
+# the pipeline resolves the mode once and hands it on after the deposit; the exact deposit goes to the GPU (-m)
+upipe() {    # <log> [VAR=value ...]: the pipeline's planned run_ps_dtfe.sh call (the copy (P) made, on SDATA's SIM)
+    local log="$1"; shift
+    env -u DTFE_GPU -u PS_GPU -u PS_METAL -u DTFE_EXACT_AVERAGE -u PS_EXACT -u SUBSAMPLES -u AVG_SUBSAMPLES -u DTFE_PRECISION \
+        -u SIMS -u SNAPS -u DTFE_RUN_MODE -u GPU_SHARE -u SLURM_JOB_ID -u PBS_JOBID \
+        DTFE_DATA_ROOT="${SDATA}" SIMS=SIM NU=8 DRY_RUN=1 "$@" "${MREPO}/scripts/run_ps_pipeline.sh" >"${log}" 2>&1 || true
+    grep -aE -e 'run_ps_dtfe\.sh -s SIM ' "${log}" | tail -1 || true
+}
+u_p1="$(upipe "${TMP}/u_pipe1.log")"; u_p2="$(upipe "${TMP}/u_pipe2.log" DTFE_RUN_MODE=GENTLE)"
+u_p3="$(upipe "${TMP}/u_pipe3.log" SLURM_JOB_ID=1)"
+rc=0; env -u SIMS DTFE_DATA_ROOT="${SDATA}" SIMS=SIM NU=8 DRY_RUN=1 DTFE_RUN_MODE=fast "${MREPO}/scripts/run_ps_pipeline.sh" \
+    >"${TMP}/u_pipe_bad.log" 2>&1 || rc=$?
+check "$([[ "${u_p1}" == *" DTFE_GPU=1 DTFE_EXACT_AVERAGE=1 DTFE_RUN_MODE=balanced "*"run_ps_dtfe.sh -s SIM "*" -m 99" ]] \
+         && grep -aqxF 'Run mode: balanced (the default)' "${TMP}/u_pipe1.log" \
+         && [[ "${u_p2}" == *" DTFE_EXACT_AVERAGE=1 DTFE_RUN_MODE=gentle "* ]] && grep -aqxF 'Run mode: gentle (DTFE_RUN_MODE=GENTLE)' "${TMP}/u_pipe2.log" \
+         && [[ "${u_p3}" == *" DTFE_EXACT_AVERAGE=1 DTFE_RUN_MODE=performance "* ]] \
+         && grep -aqxF 'Run mode: performance (the default inside a batch job (SLURM_JOB_ID))' "${TMP}/u_pipe3.log" \
+         && [ "${rc}" = "2" ] && [ "$(has "${TMP}/u_pipe_bad.log" "^Error: DTFE_RUN_MODE must be ")" = 0 ] && echo 0 || echo 1)" \
+      "run_ps_pipeline.sh resolves the mode once (said in its header) and hands DTFE_RUN_MODE=<mode> on after DTFE_EXACT_AVERAGE, the exact deposit on the GPU (-m); a bad knob: exit 2 (${rc})"
+rm -rf "${MREPO}/o" "${MREPO}/o_ps" "${MREPO}/o_d" "${MREPO}/o_ps_d"
 rm -rf "${SDATA}"
 
 echo ""

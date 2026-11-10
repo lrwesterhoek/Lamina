@@ -168,14 +168,22 @@ w·v_i·v_j is a float32 product before the sum, as on the CPU path.
 
 macOS kills command buffers when sustained GPU load starves the display
 (`kIOGPUCommandBufferCallbackErrorImpactingInteractivity`); a pipelined submission was killed even with ~0.1 s
-buffers, serialized submission with small gaps survives. So the hosts submit serialized chunks that adapt toward ~0.25 s each (PS start 25 000 tetrahedra, 500 for the exact deposit;
-`PS_GPU_CHUNK`, `DTFE_GPU_CHUNK`) with an ~8 ms gap. A killed buffer may have deposited part of its atomics, so a chunk is never retried alone: each pass keeps a
+buffers, serialized submission with small gaps survives. So the hosts submit serialized chunks that adapt toward the
+run mode's target (README *Run mode*): ~0.25 s each in performance, the binaries' default, and ~0.05 s in gentle and
+balanced, the drivers' and the launcher's default (PS start 25 000 tetrahedra, 500 for the exact deposit;
+`PS_GPU_CHUNK`, `DTFE_GPU_CHUNK`; the opening chunk scales with the target against a 0.25 s reference, so a 50 ms base
+opens 5x smaller), with an ~8 ms gap in every mode. PS-DTFE's exact deposit caps a buffer's items by the run mode too:
+4M in performance, 500k in gentle and balanced. At 53 ms buffers a probe of the display path was never late by more
+than a 60 Hz frame, at 155 ms in 5.6% of its samples (up to 214 ms). The chunk size changes no item's deposit, so the
+grids are the same at either cap; standard DTFE's item kernels keep their own cap, and there only the target follows
+the mode. A killed buffer may have deposited part of its atomics, so a chunk is never retried alone: each pass keeps a
 host snapshot of its grids at its start and every ~10 s of GPU work (`DTFE_GPU_CHECKPOINT_CHUNKS=n`: every n buffers,
 0 = the pass start only), and a failure restores the last snapshot and continues (the standard-DTFE host first
 drains its queue with an empty buffer, as a killed buffer's atomics can land late; the PS host restores at once). An "innocent
 victim" error (another process hung the GPU) retries at once; a watchdog or memory error makes the process-wide pace
 4x shorter buffers with 3x wider gaps, easing back one notch after 90 s of clean GPU work
-(`DTFE_GPU_PACE_RECOVER_SEC`). Three failures of one chunk, sixteen in one deposit or a lost device hand the partition
+(`DTFE_GPU_PACE_RECOVER_SEC`), never beyond the run mode's base (its line ends `(the default)` at 0.25 s / 8 ms,
+`(the run mode's)` at a shorter base). Three failures of one chunk, sixteen in one deposit or a lost device hand the partition
 (standard DTFE: the sub-domain) to the CPU. `DTFE_GPU_FAULT_AT=<k>[:innocent|timeout|oom|persist]` makes the k-th buffer fail after it ran (the retry
 suites). Running with the display idle avoids the watchdog. Both hosts run their command buffers through ONE loop,
 `gpuRunPass` in `gpu_metal_retry.h` (`ps_metal_host.cc` `runChunked` per pass, `dtfe_metal_host.cc` `runBatch` per
@@ -223,7 +231,8 @@ and `PS_GPU_TIMING`, `PS_GPU_FLOAT_MASS`, `PS_GPU_FLOAT_MOMENTS` (deprecated: `D
 | `DTFE_GPU_FLOAT_MOMENTS` | PS-DTFE: the float moment sums on GPU and CPU, for A/B | off |
 | `DTFE_GPU_FLOAT_GRIDS` | standard DTFE: float atomics for the `_a` grids, for A/B | off |
 | `DTFE_GPU_CHECKPOINT_CHUNKS=n` | a grid snapshot every n buffers; 0 = at the pass start only | every ~10 s of GPU work |
-| `DTFE_GPU_PACE_RECOVER_SEC=s` | clean GPU work after which an escalated pace eases back one notch | 90 |
+| `DTFE_GPU_PACE_RECOVER_SEC=s` | clean GPU work after which an escalated pace eases back one notch, toward the run mode's base (0.25 s buffers in performance, 0.05 s in gentle and balanced) | 90 |
+| `DTFE_GPU_SHARE_RHO` | PS-DTFE `--gpu-share auto` in performance: the GPU's constant rho of the share model 1/(1 + rho (threads - 1.8)) (an M1 Max's GPU; a stronger GPU wants a smaller one), for development | 0.09 |
 
 For testing and debugging only: `DTFE_GPU_DEBUG_NOWRITE` (a timing experiment: every kernel does all its work but
 writes no grid), `DTFE_GPU_DEBUG_NOATOMIC=1|2|3` (timing: 1 issues no atomics in the final reduction, 2 also skips the

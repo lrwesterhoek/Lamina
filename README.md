@@ -238,9 +238,9 @@ The development tools in `tests/dev/` (not run by CI; macOS):
 ./PS-DTFE <input file> <output prefix> [options]      # phase-space DTFE (Lagrangian tessellation)
 ./PS-DTFE --help          # the options in short;  --full-help: every option with its default and caveats
 ```
-Both binaries spell a shared option the same way (`--gpu`, `--exact`, `--sampled`, `--no-overlap`, `--subsamples`,
-`--mpc-unit`, `--input-format`, ...), in lower-case kebab-case, with a `ps-` prefix exactly for what needs phase-space
-streams, the Lagrangian tessellation or caustics. The older spellings are still accepted for one release (on the
+Both binaries spell a shared option the same way (`--gpu`, `--exact`, `--sampled`, `--run-mode`, `--no-overlap`,
+`--subsamples`, `--mpc-unit`, `--input-format`, ...), in lower-case kebab-case, with a `ps-` prefix exactly for what
+needs phase-space streams, the Lagrangian tessellation or caustics. The older spellings are still accepted for one release (on the
 command line and in a `--config` file) with one `warning: --old is deprecated, use --new` line and the same outputs;
 deprecated: `--MpcUnit`, `--input 105`, `-m 2`, `--avg-subsamples`, `--exact-average`, `--ps-window`, `--ordered-merge`, `--NGP`, ...
 (change_log.txt has the full table of the deprecated names).
@@ -310,7 +310,7 @@ one release when the new one is unset, with one `warning: OLD is deprecated, use
 | `DTFE_MEM_FRACTION` | the auto-tuner's budget as a fraction of the RAM (0.1-0.95) | 0.60 |
 | `DTFE_MEM_BUDGET_GB` | the budget outright, in GB (still capped by the free memory less 4 GB) | unset: the fraction |
 | `DTFE_AUTO_MINN` | particles below which a run stays in one domain unless a split is predicted clearly faster | 2e6 |
-| `DTFE_DYNAMIC_CONCURRENCY` | 0 = PS-DTFE runs the auto-tuner's number of partitions at once; by default, when the tuner chose it, more start while the live free memory and the budget hold them (the grids are the same) | 1 |
+| `DTFE_DYNAMIC_CONCURRENCY` | 0 = PS-DTFE runs the auto-tuner's number of partitions at once; by default, when the tuner chose it, more start while the live free memory and the budget hold them (the grids are the same); a mixed run (`--gpu-share` below 1) books the GPU lock holder's grids once, not per partition | 1 |
 | `DTFE_AUTO_SPAN` | 0 = PS-DTFE's planner books a partition's sub-grid as G/n + 40 cells per axis instead of measuring each partition's Eulerian span on the particles | 1 |
 | `DTFE_AUTO_T_VERTEX`, `DTFE_AUTO_T_SAMPLE`, `DTFE_AUTO_T_POINT` | the speed split's single-thread seconds per vertex, per sample, per point | 3.6e-6, 3.5e-7, 7.5e-7 |
 | `DTFE_AUTO_PTS_N` | the number of points the auto-tuner budgets (a `--sample-points` file not written yet) | the file's count |
@@ -335,6 +335,8 @@ one release when the new one is unset, with one `warning: OLD is deprecated, use
 | `DTFE_SERVE_INDEX` | `--serve`: 1 forces the cell index, 0 the walk (a composite server ignores 0) | automatic |
 | `DTFE_SERVE_BUDGET_GB` | composite `--serve`: the memory for the resident partitions, in GB | the auto-tuner's budget |
 | `DTFE_EXACT_AVERAGE` | both binaries: pins the `_a` cell average, `1` (on) as `--exact`, `0` (off) as `--sampled`; a flag on the command line wins, and the run log's header names the source | unset (or `auto`): no pin -- a sampling count or method selects the sampled average, else exact where it applies (Field evaluation methods) |
+| `DTFE_RUN_MODE` | both binaries: the run mode, as `--run-mode` (`gentle`, `balanced` or `performance`, in any case; *Run mode* under *Memory, partitions and long runs*); an empty value or `auto` is unset, any other word an error, a flag on the command line wins, and the run log's `run mode` line names the source | unset: performance |
+| `DTFE_GPU_SHARE_RHO` | PS-DTFE, for development: the constant of `--gpu-share auto`'s model in performance, 1/(1 + rho (threads - 1.8)) (a stronger GPU than an M1 Max's wants a smaller one) | 0.09 |
 | `DTFE_MC_LEGACY` | standard DTFE `--average-method 1`: the uncentred CGAL-order Monte-Carlo realization (A/B) | off |
 | `DTFE_MASS_AUDIT` | PS-DTFE: 1 prints each pass's mass bookkeeping, 2 adds the per-particle closure (one domain) | 0 |
 | `TMPDIR` | the rescue folder and the merge spills without `--scratch-dir` | `/tmp` |
@@ -348,7 +350,8 @@ For testing and debugging only: `DTFE_TEST_CHECKPOINT_FREE_BYTES` (the free byte
 units n bits finer) and `DTFE_TEST_FXMERGE_SUM_LIMIT=n` (its sums capped at 2^n), for the overflow checks,
 `DTFE_TEST_NAN_SHARE=k` (every k-th share NaN: the exact sums' guard), `DTFE_TEST_PLAN_MC=k` (stands for an
 auto-tuned plan of k partitions at once: the dynamic concurrency's floor), `DTFE_AUTO_TUNE_DEBUG` (prints the
-standard auto-tuner's busiest partition per thread, and PS-DTFE's partition sub-grids, measured, booked and real), `DTFE_DEBUG_DEGREES` (checks the lazy vertex degrees after a GPU
+standard auto-tuner's busiest partition per thread, PS-DTFE's partition sub-grids, measured, booked and real, and the
+terms of its dynamic concurrency's start check), `DTFE_DEBUG_DEGREES` (checks the lazy vertex degrees after a GPU
 deposit against a full pass), `DTFE_PTS_FULL_RECORDS` (keeps every point record member, unpacked: the packing test),
 `DTFE_TESSELLATION_CACHE_FINGERPRINT` (prints a loaded tessellation's structure fingerprint),
 `DTFE_TESSELLATION_CACHE_LEGACY` (writes the single-stream cache format), `DTFE_TESSELLATION_CACHE_ZLIB` (zlib instead
@@ -498,7 +501,8 @@ without an `_a` field runs as before unless `--exact` is given. The run log's he
   integrated analytically over every grid cell (CPU: r3d clipping; GPU: the z-sweep). On TNG100-3-Dark z = 0 at
   512^3 (Apple M1 Max, a sample-point plane evaluated in the same run) it takes 1133 s on the CPU and 1156 s on the
   GPU, against 1260 s for the sampled deposit on the GPU and 1644 s on the CPU. The drivers' `DTFE_GPU=auto` and the
-  launcher run it on the CPU (`-m` / `DTFE_GPU=1` for the GPU). The GPU hands the tetrahedra whose dispersion
+  launcher run it on the GPU of a GPU build, in performance together with the free cores (`--gpu-share auto`);
+  `DTFE_GPU=0` keeps the CPU. The GPU hands the tetrahedra whose dispersion
   float32 cannot resolve to the CPU's double deposit (20.6M of them on TNG100-3-Dark z = 0 at 512^3).
 * **Window** (`--grid-window x0 x1 y0 y1 z0 z1`, PS-DTFE, Mpc): only the cells of the full `--grid` inside that box are
   deposited and written, equal to the full run's cells (counts and masks bit for bit, sums to the last fixed-point
@@ -572,6 +576,69 @@ the launcher's Check memory). A run with a prediction ends its SUMMARY with the 
 - A point evaluation's memory grows with the stream count at its points, which the tuner estimates from the plane's
   own slab (42 B per stream at least, 114 with `--pts-vel-grad`).
 
+**Run mode.** `--run-mode gentle|balanced|performance` (both binaries, every build; `DTFE_RUN_MODE`, in any case, is
+the same choice, and the flag wins) sets how hard a run leans on the machine: `performance` takes every core and long
+GPU buffers, `balanced` most of the performance cores and short buffers, so the display never waits on the GPU, and
+`gentle` half of them, so the machine stays usable beside the run. The binaries default to `performance`, the
+behaviour of earlier releases; the drivers and the launcher default to `balanced` (`performance` inside a SLURM or PBS
+job and in the launcher's SLURM scripts) and pass the mode on every run. A mode fills in only what was not given: a
+non-empty `OMP_NUM_THREADS` keeps its thread count, the `DTFE_*_THREADS` pins keep their teams, a `--max-concurrent`
+above the mode's threads raises them to it, and `--partition`, `DTFE_GPU` and `--gpu-share` stay as given; the memory
+budget, the estimator, the fields and the merge are not the mode's. The run log's header line `run mode : <mode>
+(<source>; <threads>[; GPU buffers up to 250|50 ms][; nice 10])` says what was set and why. The mode changes no
+PS-DTFE single-precision byte; standard DTFE's grids follow the thread count at float rounding, as with
+`OMP_NUM_THREADS`. The checkpoint's settings key leaves the mode out, so a run killed in one mode resumes in another.
+
+| what the mode sets | `gentle` | `balanced` | `performance` |
+|---|---|---|---|
+| threads, from the base: the performance cores on Apple silicon, else every core | half the base, at least 1 | the base less a quarter of it, holding back 1 to 4 | every core (the OpenMP default) |
+| threads on 2 cores / 8 cores / an M1 Max (8 + 2) / 64 cores | 1 / 4 / 4 / 32 | 1 / 6 / 6 / 60 | 2 / 8 / 10 / 64 |
+| priority | nice 10 on Linux (never lowered); unchanged on macOS | unchanged | unchanged |
+| GPU command buffers (8 ms gaps in every mode) | ~50 ms | ~50 ms | ~250 ms |
+| PS-DTFE exact deposit: items per GPU buffer | 500k | 500k | 4M |
+| `--gpu-share auto` (PS-DTFE) | 1 | 1 | from the threads: 0.6 at 10, 0.65 at 8, 0.85 at 4 |
+| the device the drivers and the launcher pick on a GPU build | the GPU | the GPU | the GPU; standard DTFE's sampled average the CPU |
+
+The items per buffer change no byte. `--gpu-share auto|<fraction>` (PS-DTFE, the exact deposit of a partitioned
+`--gpu` run) deposits that share of the partitions on the GPU and the others on the free CPU cores at the same time,
+chosen by the partition index alone, so a rerun repeats it. The binary's default is 1, every partition on the GPU;
+`auto` is the run mode's share: in performance 1/(1 + 0.09 (threads - 1.8)) in steps of 0.05, between 0.5 and 1
+(`DTFE_GPU_SHARE_RHO` replaces the 0.09), and 1 in the double build, with `DTFE_GPU_FLOAT_MOMENTS`,
+`DTFE_GPU_FLOAT_MASS` or `DTFE_MASS_AUDIT`, below `DTFE_AUTO_MINN` particles and under 4 threads; 1 in gentle and
+balanced. The drivers (`GPU_SHARE`, default `auto`) and the launcher pass `--gpu-share auto` on every PS exact run on
+the GPU, so their performance runs use both devices. A mixed run's grids differ from an all-GPU or an all-CPU run's at
+float rounding, and the mass stays exact. The resolved share is in the checkpoint key (a `gpu-share=` line, only below
+1), and `--resume` with `auto` keeps the checkpoint's. A number is ignored, with a note, without `--gpu`, for the
+sampled deposit, in a CPU-only build and for one domain. The run log's `PS-DTFE: GPU share <share> (<source>): ...`
+line says how many partitions deposit on each device, and a mixed plan's AUTO-TUNE line ends `GPU deposit with the
+free cores (GPU share <share>)`.
+
+Measured on TNG100-3-Dark z = 0 at 512³ (M1 Max, PS-DTFE's exact deposit): 1133 s on the CPU and 1156 s on the GPU at
+500k items per buffer (the bench of `2f428bc`); on 2026-11-09, with `2f428bc` plus the selection skip and the core lend,
+1025 s on the GPU at 4M items per buffer (performance's buffers) with the tuner's plan, and 712 s at a GPU share of 0.6
+with `--partition 6 6 6 --max-concurrent 6` given by hand. The gaps between buffers take 18.6% of the time a run holds
+the GPU at 50 ms buffers and 4.4% at 250 ms by the model (17.4% measured at 53 ms). A probe of the display path was
+late by more than a 60 Hz frame in 0.0% of its samples at 53 ms buffers, and in 5.6% (up to 214 ms) at 155 ms.
+
+The modes themselves were timed once each on that input in the night of 2026-11-10, while a screen saver drew all
+night (with no run the GPU was 59% and the efficiency cores 67% busy, against 28% and 50% the evening before: the
+binary and command of the 712 s run took 789 s that night, so these times compare with each other and not with the
+ones above):
+
+| run | `gentle` | `balanced` | `performance` |
+|---|---|---|---|
+| PS-DTFE, exact deposit, `--gpu --gpu-share auto` | 1408 s | 1444 s | 908 s on the tuner's plan (4 partitions at once, a fifth added at run time); 783 s with `--partition 6 6 6 --max-concurrent 6` given by hand |
+| standard DTFE, exact average, face gradient, `--gpu` | 444 s | 447 s | 486 s |
+
+PS-DTFE's gentle and balanced runs kept 1.4 cores busy on average and wrote the bytes of the `2f428bc` bench's GPU
+run; performance kept 6 cores busy. The tuner's memory model books more than a mixed run takes (4 at once and a fifth
+added at run time: predicted 41.3 GB, peak 29.8 GB; 6 at once by hand: predicted 44.7 GB, peak 31.4 GB), so
+performance's own plan runs fewer partitions at once than the memory holds. Standard DTFE's 10-thread plan had no
+memory left for the look-ahead on this input (the next partition triangulated during the GPU's work; so before the
+modes too), which the 6- and 4-thread plans had: balanced and gentle were the faster runs here, at peaks of 41.3 and
+40.7 GB against 33.1 GB. Not measured: nice 10, a CPU run at a lowered thread budget, and any mode on a machine at
+rest.
+
 **Padding.** Every partition (and in standard DTFE every thread's sub-box) carries its own padding. The binary's
 default of 5 mean spacings is too short for the emptiest voids at z = 0: `run_dtfe.sh`, dtfelib's standard server and
 the launcher pass 15, complete at z = 0 on TNG50/100/300-3-Dark (10 is not). An incomplete padding leaves
@@ -595,7 +662,8 @@ which rounds differently, so such a run is reproducible only where the fallback 
 **Resume.** A partitioned run of either binary saves its merged grids and the list of finished partitions in
 `<prefix>.runlog.checkpoint` (or in `--scratch-dir`). After a crash, `--resume` computes only the missing partitions,
 and refuses when the build, the inputs, the split or the command line changed (`--verbose`, `--max-concurrent`,
-`--scratch-dir`, `--tessellation-cache` and the overlap and merge-order flags may change). A resumed PS run merged in
+`--run-mode`, `--scratch-dir`, `--tessellation-cache` and the overlap and merge-order flags may change, `--gpu-share`
+(PS-DTFE) while the share it resolves to stays the same: *Run mode* above). A resumed PS run merged in
 index order, and a resumed standard CPU or `--gpu` run at the same thread count, are byte-identical to an uninterrupted
 one; `--sample-points` runs resume too. The drivers resume by themselves (`DTFE_RESUME=0` starts over, in both);
 `DTFE_CHECKPOINT=0` writes no checkpoints; `--interlace` runs are not checkpointed. Two limits: a standard run that
@@ -615,7 +683,9 @@ outputs are byte-identical either way.
 **GPU failures.** The GPU deposit runs as short paced command buffers with a snapshot of the
 grids every ~10 s of GPU work (`DTFE_GPU_CHECKPOINT_CHUNKS`). A killed buffer (the display watchdog, another program's
 GPU hang, out of memory) restores the last snapshot and retries by cause; a watchdog or memory error slows the pace,
-which eases back after a clean stretch (`DTFE_GPU_PACE_RECOVER_SEC`). Three failures of one chunk, sixteen in a deposit
+which eases back after a clean stretch (`DTFE_GPU_PACE_RECOVER_SEC`) to the run mode's base: ~250 ms buffers in
+performance, ~50 ms in gentle and balanced, 8 ms gaps in every mode (the `pace eased` line then ends `(the default)`
+or `(the run mode's)`). Three failures of one chunk, sixteen in a deposit
 or a lost device send that partition (standard DTFE: that sub-domain) to the CPU. The run log ends with
 `GPU deposit retries: N (innocent a, timeout b, oom c, other d)`. `DTFE_GPU_FAULT_AT=<k>[:innocent|timeout|oom|persist]`
 is the test hook. Standard DTFE's GPU `_a` grids are exact 64-bit fixed-point sums, so two `--gpu` runs are
@@ -672,8 +742,9 @@ The files and fields of the TNG data are described in the
 2. **Run an estimator**: `DTFE_SIM=TNG100-3-Dark scripts/run_ps_dtfe.sh 50 99` (phase-space) or
    `DTFE_SIM=TNG100-3-Dark scripts/run_dtfe.sh 50 99` (standard; with no numbers both run snapshot 99). Both default to the production
    settings, so `-g 512` and `-e` are not needed: since 2026-11-09 both drivers average exactly by default and pass
-   `--exact` (`--sampled`, `DTFE_EXACT_AVERAGE=0` or a `SUBSAMPLES` count selects the sampled average), and `DTFE_GPU`
-   picks the device (`-m` forces the GPU).
+   `--exact` (`--sampled`, `DTFE_EXACT_AVERAGE=0` or a `SUBSAMPLES` count selects the sampled average), `DTFE_GPU`
+   picks the device (`-m` forces the GPU), and the run mode is `balanced` (`performance` inside a SLURM or PBS job)
+   unless `--run-mode` or `DTFE_RUN_MODE` says otherwise.
    `DRY_RUN=1` prints each snapshot's command and runs nothing; `--help` lists every knob.
    `SIMS=all scripts/run_ps_pipeline.sh` runs every simulation on disk, adds a full-box image plane per snapshot, and resumes
    (a snapshot is skipped when its outputs are newer than its inputs and its run log shows the same settings). Under the
@@ -698,7 +769,9 @@ is unset or the data disk is missing, and skips a snapshot whose folder is not w
 | `DTFE_SMOOTH_MPC` | the void catalogue's smoothing in Mpc, the same in every box (for the void scripts and `analyze.py export`) | unset: 10 cells |
 | `GRID_SIZE` (or `-g`) | cells per axis of the grids | 512 (`config.sh`; the production grids of both estimators) |
 | `PADDING` | the padding of each partition (and in standard DTFE of each thread's sub-box) in mean particle spacings | standard DTFE 15 (`run_dtfe.sh`), PS-DTFE 50 (`config.sh`; it matters only for an unsplit tessellation or `PS_LAGRANGIAN_PADDING=0`) |
-| `DTFE_GPU` (`-m`, `--gpu`) | the deposit / interpolation on the GPU (1) or the CPU (0), both drivers | `auto` (the GPU when the binary was built with one, else the CPU; PS-DTFE's exact deposit, its default, the CPU) |
+| `DTFE_GPU` (`-m`, `--gpu`) | the deposit / interpolation on the GPU (1) or the CPU (0), both drivers | `auto` (by the run mode: the GPU when the binary was built with one, except standard DTFE's sampled average in performance, which runs faster on the CPU; else the CPU) |
+| `DTFE_RUN_MODE` (`--run-mode`) | how hard a run leans on the machine (*Run mode* under *Memory, partitions and long runs*): `gentle`, `balanced` or `performance`, passed as `--run-mode` on every run, both drivers and the pipeline | `auto` (balanced, or performance inside a SLURM or PBS job) |
+| `GPU_SHARE` (`--gpu-share`) | PS-DTFE: the share of a partitioned GPU run's partitions that deposit on the GPU, the others on the free cores at the same time; passed with the exact deposit on the GPU, and whenever it is not `auto` (so that the binary's note shows) | `auto` (the run mode's share) |
 | `DTFE_EXACT_AVERAGE` (`-e`, `--exact`, `--sampled`) | 1 = the exact average (`--exact`: PS-DTFE's exact deposit, standard DTFE's exact cell averages), 0 = the sampled one (`--sampled`: PS-DTFE's nSub^3 deposit, standard DTFE's Monte-Carlo cell mean); the drivers pass one of the two flags on every run | exact in both drivers; while it is unset a `SUBSAMPLES` count selects sampled (`-e` or an explicit 1 beside the count stays exact) |
 | `SUBSAMPLES` (`-n`, `--subsamples`) | k sub-samples per axis, k^3 per cell, for the sampled average: PS-DTFE's sampled deposit, standard DTFE's Monte-Carlo mean | unset: none passed (with `--sampled` the binary's own count, PS-DTFE 3) |
 | `PARTITION`, `MAX_CONCURRENT` | the split of the box and how many parts run at once | auto-tuned |
@@ -834,7 +907,12 @@ hands to every job as `DTFE_DATA_ROOT`; it starts without one), building the pro
 
 Every tab shows the exact commands its choices stand for, flags combinations that would be refused or would not fit
 (**Check memory** asks the auto-tuner per snapshot), and can export them as a bash script or a SLURM job. A fresh job
-ticks the GPU only when the binary was built with one.
+ticks the GPU when the binary was built with one, except standard DTFE's sampled average under Performance.
+**Machine use** (Gentle / Balanced / Performance: `--run-mode`, *Run mode* above; Balanced by default) sits right after
+the GPU tick on the Grids, Pipeline and Custom tabs. Changing it re-applies the recommended GPU tick unless the tick was
+set by hand; a generated SLURM script runs Performance (the choice is for this machine); presets and *Load settings*
+leave it alone. The first start after this change ticks the GPU once on the saved PS-DTFE exact jobs, since the GPU
+now runs that deposit in every mode.
 
 The labels follow the option names: **Standard DTFE** / **PS-DTFE** (the estimator), **Cell average: Sampled /
 Exact** for both (`--sampled` / `--exact`; Exact is ticked by default since 2026-11-09, a saved choice is kept), **Grid window (Mpc)** on the Custom tab (`--grid-window`) beside **Plane window

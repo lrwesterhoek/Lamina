@@ -1,4 +1,77 @@
 UNRELEASED (since 1.0.0)
+- RUN MODES: '--run-mode gentle|balanced|performance' in both binaries (every build; docs/cleanup-plan.md P13, the
+  owner's request of 2026-11-09, designed and decided 2026-11-10) says how hard a run may lean on the machine. The
+  resolution, first match wins: the flag (exact lower case; a second one is refused); the new environment variable
+  DTFE_RUN_MODE, read by both binaries and the three drivers (any case; unset, empty or 'auto' = not given; any other
+  word is an error); otherwise performance, the binaries' default, which is the behaviour of 2f428bc. What a mode
+  sets: the thread budget (N0 = the OpenMP default; base = the performance cores on Apple silicon, else N0; gentle
+  max(1, base/2), balanced base less round(base/4) clamped to 1-4, performance N0: 4 / 6 / 10 threads on an M1 Max),
+  set once before any thread exists and read wherever a thread team is sized (src/run_mode.h; the look-ahead thread
+  adopts it), so the auto-tuners plan for it; on Linux gentle runs at nice 10 (never lowered; macOS gets no priority
+  change); the GPU's command buffers aim at 50 ms in gentle and balanced and 250 ms in performance, with 8 ms gaps in
+  every mode, and an escalated pace eases back to that base (the line ends '(the default)' or '(the run mode's)');
+  PS-DTFE's exact deposit puts at most 500k items in a GPU buffer in gentle and balanced and 4M in performance (no
+  byte changes). An explicit lever beats the mode: OMP_NUM_THREADS keeps its thread count, the DTFE_*_THREADS pins
+  keep their teams, a '--max-concurrent' above the mode's threads raises them, and '--partition', DTFE_GPU and
+  '--gpu-share' stay as given; the memory budget, the estimator, the fields and the merge are not the mode's.
+  PS-DTFE's new '--gpu-share auto|<fraction>' (default 1: every partition on the GPU, as before) deposits that share
+  of a partitioned '--gpu' run's exact-deposit partitions on the GPU and the others on the free CPU cores at the same
+  time, chosen by partition index alone; 'auto' is the run mode's share: in performance 50 round(20/(1 + 0.09
+  (N0 - 1.8))) per mille within [500, 1000], 0.6 at 10 threads (DTFE_GPU_SHARE_RHO replaces the 0.09), and 1 in gentle
+  and balanced, in the double build, under the float-sum variants or DTFE_MASS_AUDIT, below DTFE_AUTO_MINN particles
+  and under 4 threads. A number that does not apply (without '--gpu', the sampled deposit, a CPU-only build, one
+  domain) is ignored with one note, and anything but 'auto' or a fraction from 0 to 1 is refused ('600' too). A mixed
+  run's grids differ from an all-GPU run's at float rounding, the mass stays exact; its auto-tuner books the GPU
+  snapshot and the lock holder's grids once and per lane the larger of the CPU deposit and the GPU's pre-lock arrays,
+  and its AUTO-TUNE line reads ', GPU deposit with the free cores (GPU share 0.60)' (the AUTO-TUNE-REPORT line is
+  unchanged). The dynamic concurrency (DTFE_DYNAMIC_CONCURRENCY) books a mixed plan the same way: the part one
+  partition at a time holds (the plan's snapshot term) once in its start check, its ledger and the summary's
+  prediction, the rest per partition in flight; booked per partition, as an all-GPU or a CPU plan still is (their
+  arithmetic is unchanged), no partition beyond the plan's could start (8.4 GB each against a lane's 3.3 GB on
+  TNG100-3-Dark z=0 at 512^3). DTFE_AUTO_TUNE_DEBUG prints the start check's terms ('AUTO-TUNE-DEBUG PS dynamic start:
+  partition <B> B, once <B> B, reserve <B> B, free <GB> GB, own <GB> GB, budget <GB> GB'). The partition checkpoint's
+  settings key leaves '--run-mode' and '--gpu-share' out and gains 'gpu-share=<per mille>' for a mixed run only;
+  '--resume' with 'auto' adopts the checkpoint's share ('PS-DTFE: --resume: the GPU share 0.50 is the checkpoint's.').
+  The run log's header gains 'run mode : <mode> (<source>; <threads>[; GPU buffers up to 250|50 ms][; nice 10])',
+  where the threads read '<B> of <N0> threads', '... (raised: --max-concurrent <k> was given)' or '<N0> threads (kept:
+  OMP_NUM_THREADS=<v> was given)', and, with '--gpu-share' and '--gpu', 'GPU share : <text> (...)'; after the plan,
+  'PS-DTFE: GPU share 0.60 (<source>): <n> of the <m> partitions to deposit do so on the GPU, the other <k> on the CPU
+  with r3d clipping (...)' or 'PS-DTFE: GPU share 1 (<source>): every partition deposits on the GPU.'. Every existing
+  literal stays byte for byte. Drivers: run_dtfe.sh, run_ps_dtfe.sh and run_ps_pipeline.sh take '--run-mode MODE' and
+  the knob DTFE_RUN_MODE (default 'auto': balanced, or performance inside a SLURM or PBS job) and pass '--run-mode' on
+  every run; run_ps_dtfe.sh also takes GPU_SHARE (default 'auto') and passes '--gpu-share' with the exact deposit on
+  the GPU. Their automatic device on a GPU build is the GPU, now for PS-DTFE's exact deposit too (it was the CPU),
+  except standard DTFE's sampled average in performance, which runs on the CPU (315 s against 433 s on the GPU in the
+  2f428bc bench). The launcher: a 'Machine use' selector (Gentle / Balanced / Performance, Balanced by default) right
+  after the GPU tick on the Grids, Pipeline and Custom tabs, which re-applies the recommended GPU tick unless the tick
+  was set by hand; a SLURM export runs performance; the first start ticks the GPU once on saved PS exact jobs; presets
+  and 'Load settings' leave the mode alone; the run records keep the mode apart in their time estimates. Explore's
+  zoom and its query server run their binaries in balanced (dtfelib's Estimator takes run_mode=, unset by default).
+  The experiment's DTFE_PS_GPU_SHARE (in no release) is gone: when it is set, one note points to '--gpu-share 0.6'.
+  Measured on TNG100-3-Dark z=0 at 512^3 (Apple M1 Max, PS-DTFE's exact deposit, 2026-11-09, 2f428bc plus the
+  selection skip and the core lend): the GPU at 4M items per buffer (performance's buffers) with the tuner's plan 1025
+  s, a GPU share of 0.6 with '--partition 6 6 6 --max-concurrent 6' given by hand 712 s, against 1133 s on the CPU and
+  1156 s on the GPU in the 2f428bc bench. The modes themselves, one run each on that input with this code in the night
+  of 2026-11-10, while a screen saver drew all night (with no run the GPU was 59% and the efficiency cores 67% busy,
+  against 28% and 50% the evening before; the binary and command of the 712 s run took 789 s that night, so these
+  times compare with each other and not with the lines above). PS-DTFE's exact deposit with '--gpu --gpu-share auto':
+  performance 908 s on the tuner's plan at the full 41.2 GB budget ('--partition 6 6 6 --max-concurrent 4', predicted
+  38 GB; the dynamic concurrency had up to 5 partitions in flight, predicted 41.3 GB; peak 29.8 GB) and 1028 s at a
+  36.4 GB budget (3 at once, none added), against 783 s with '--max-concurrent 6' given by hand (predicted 44.7 GB,
+  peak 31.4 GB): the plan's memory model books more than a mixed run takes, so the mode's own plan runs fewer
+  partitions at once than the memory holds; balanced 1444 s and gentle 1408 s (every partition on the GPU, 1.4 busy
+  cores on average, every grid byte for byte the 2f428bc bench's GPU run's; the mixed runs' grids are the same bytes
+  at 3, 4 and 6 at once). Standard DTFE's exact average with the face gradient and '--gpu': performance 486 s (the
+  10-thread plan leaves the look-ahead no memory, as before the modes), balanced 447 s and gentle 444 s (6 and 4
+  threads, the look-ahead on; peaks 41.3 and 40.7 GB at the 41.2 GB budget against performance's 33.1 GB; their grids
+  differ from performance's at float rounding, the rms of the difference at most 1.4e-10 of a field's). Not measured:
+  nice 10, a CPU run at a lowered thread budget, any mode on a machine at rest. The tests: tests/run_mode_check.sh (in
+  run_program_suites, so in CI's core and double stages and the battery's; its G8 holds the dynamic concurrency's once
+  booking: the start check at both sides of the budget, the ledger's second partition and the summary's prediction),
+  'unset DTFE_RUN_MODE' in tests/lib.sh, tests/dev/battery.sh and tests/dev/tune_report_set.sh (the binaries' default
+  needs no pin), and the drivers' and the launcher's cases in their suites. (Implemented 2026-11-10; the program,
+  driver and launcher suites, tests/dev/bytecmp.sh --gpu-exact and tests/dev/tune_report_set.sh against 2f428bc pass;
+  docs/cleanup-plan.md P13 keeps the gates' results.)
 - PS-DTFE, two speed changes that move no byte (2026-11-09, from the look at where a 512^3 run's time goes;
   docs/cleanup-plan.md P12.2). (1) The periodic particle selection skips an image pass that cannot select anything:
   the smallest and the largest Lagrangian coordinate per axis are taken once, and a pass whose shifted extent misses
@@ -9,10 +82,8 @@ UNRELEASED (since 1.0.0)
   of the other partitions can claim one helper more; a claim on the pool never changes a result. Checked against
   2f428bc's binary: CPU and GPU runs of the exact deposit at '--partition 1', '2 2 2', '3 3 3' and '4 4 4' on a small
   test snapshot, 15 files each, 0 differ; TNG100-3-Dark z=0 at 512^3 with '--gpu', 23 of 23 files byte for byte the
-  2f428bc bench's. Also in the code, documented nowhere else and not for production: the experiment
-  DTFE_PS_GPU_SHARE=<per mille>, which deposits that share of a '--gpu' run's partitions on the GPU and the others on
-  the CPU at the same time (chosen by partition index alone; the share is in the checkpoint key); unset = every
-  partition on the GPU, as before.
+  2f428bc bench's. The experiment that came with them, DTFE_PS_GPU_SHARE=<per mille>, became '--gpu-share' (the run
+  modes, above).
 - '--exact' and '--sampled' choose the '_a' cell averages in both binaries (every build), and THE EXACT AVERAGE IS
   THE DEFAULT for both estimators (docs/cleanup-plan.md D20 and P12, decided 2026-11-09 after the P11.1 bench; it
   reverses D2's canonical name '--exact-average' and settles D15): standard DTFE integrates the linear interpolant

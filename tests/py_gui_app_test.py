@@ -241,7 +241,12 @@ def _form_widths(qa, w):
                 out.append(f"{tag}{w.tabs.tabText(i)} {s.widget().minimumSizeHint().width()} > {s.viewport().width()}")
         return out
     wide = too_wide(range(w.tabs.count()))
-    check("every tab's form fits its pane at 1100 px (no right edge cut off)", not wide, "; ".join(wide))
+    import app_tabs as T
+    from PySide6.QtWidgets import QComboBox
+    sized = all(w._shared(t, r).sizeAdjustPolicy() == QComboBox.AdjustToMinimumContentsLengthWithIcon
+                for t in T.RUN_TABS for r in ("run_mode", "precision"))
+    check("every tab's form fits its pane at 1100 px (no right edge cut off; the Machine use selector sized like the "
+          "precision menu)", not wide and sized, "; ".join(wide))
     groups = w.findChildren(Collapsible)
     was_open, built = [g.is_open() for g in groups], (rs.tbb_built, rs.gpu_built)
     rs.tbb_built = rs.gpu_built = lambda *a, **k: False
@@ -396,10 +401,10 @@ def _pipeline_options(qa, w, tmp, sim, seen, tick):
     print("pipeline options:")
     # the caustic classes are on by default (run_ps_dtfe.sh's default, the production runs'), so the
     # cusps box is enabled (unticked) from the start; the exact deposit too (the default since 2026-11-09), on
-    # the CPU, its sub-samples greyed
+    # the GPU when the pair has one (every machine use), its sub-samples greyed
     check("the run options show the scripts' defaults; cusps wait for caustics, the slab and projection for planes",
           w.p_deposit.currentData() == "exact" and w.p_nsub.value() == 3 and not w.p_nsub.isEnabled()
-          and not w.p_gpu.isChecked() and w.p_vm.isChecked() and w.p_vw.isChecked()
+          and w.p_gpu.isChecked() == rs.gpu_built("ps") and w.p_vm.isChecked() and w.p_vw.isChecked()
           and w.p_ca.isChecked()
           and w.p_cu.isEnabled() and not w.p_cu.isChecked() and not w.p_pt.isHidden() and w.p_planes.value() == 1
           and not w.p_thick.isEnabled() and w.p_super.value() == 1 and not w.p_rproject.isEnabled()
@@ -455,11 +460,12 @@ def _pipeline_options(qa, w, tmp, sim, seen, tick):
     w.p_ca.setChecked(True)
     qa.processEvents()
     check("... and ticking it again brings the cusps back", w.pipe.caustic_cusps and w.p_cu.isEnabled())
-    w.p_gpu.setChecked(rs.gpu_built("ps"))
+    w.p_gpu.setChecked(False)
     w.p_deposit.setCurrentIndex(w.p_deposit.findData("exact"))
     qa.processEvents()
-    check("the exact deposit unticks the GPU (the CPU is faster, as on the Grids tab) and greys the sub-samples",
-          w.pipe.deposit == "exact" and not w.p_gpu.isChecked() and not w.pipe.gpu
+    check("the exact deposit ticks the GPU (when built; its device in every machine use, as on the Grids tab) and "
+          "greys the sub-samples",
+          w.pipe.deposit == "exact" and w.p_gpu.isChecked() == rs.gpu_built("ps") and w.pipe.gpu == rs.gpu_built("ps")
           and not w.p_nsub.isEnabled() and w.pipe.command()[1]["PS_EXACT"] == "1")
     for cb in (w.p_ca, w.p_cu, w.p_rfixed):
         cb.setChecked(False)
@@ -906,9 +912,12 @@ def _queue(qa, w, tmp, data, repo_figs, sim):
           moved == (True,) * 6 and not wq.spec.ordered_merge and wq.pipe.ordered_merge and wq.custom.ordered_merge,
           f"{moved} {wq.spec.ordered_merge} {wq.pipe.ordered_merge} {wq.custom.ordered_merge}")
     wq.close()
-    # PS-DTFE's exact deposit runs on the CPU; an older launcher ticked the GPU whenever it was picked: a saved PS
-    # exact job opens with the GPU unticked, once (Grids, Pipeline, Custom); standard DTFE's exact average keeps
-    # its tick, and a GPU ticked again afterwards survives the next restart
+    # PS-DTFE's exact deposit runs on the GPU in every machine use (the run modes, D22). Two one-time moves meet a
+    # saved PS exact job: an older launcher's forced GPU tick was unticked once (ps_exact_cpu_start, 2026-11-09), and
+    # a job on the CPU is ticked once when the pair has a GPU (run_mode_start). A state older than both opens on the
+    # GPU when built (Grids, Pipeline); standard DTFE's exact average keeps its tick; a GPU unticked by hand
+    # afterwards survives the next restart
+    ps_gpu = rs.gpu_built("ps")
     mig3 = QSettings(str(tmp / "gui_mig3.ini"), QSettings.IniFormat)
     mig3.setValue("spec", _json.dumps(rs.RunSpec(data_root=str(data), deposit="exact", gpu=True).to_dict()))
     mig3.setValue("pipeline", _json.dumps(rs.PipelineSpec(deposit="exact", gpu=True).to_dict()))
@@ -916,15 +925,40 @@ def _queue(qa, w, tmp, data, repo_figs, sim):
     mig3.sync()
     we = A.MainWindow(remember=True, settings=QSettings(str(tmp / "gui_mig3.ini"), QSettings.IniFormat))
     moved = (we.spec.gpu, we.pipe.gpu, we.custom.gpu, we.gpu_check.isChecked(), we.p_gpu.isChecked())
-    we.gpu_check.setChecked(True)
+    we.gpu_check.setChecked(False)
     qa.processEvents()
     we.close()
     wr = A.MainWindow(remember=True, settings=QSettings(str(tmp / "gui_mig3.ini"), QSettings.IniFormat))
-    check("a saved PS-DTFE exact job with the old forced GPU tick opens on the CPU (Grids and Pipeline tabs), once; "
-          "a standard-DTFE exact job keeps its GPU, and a tick made afterwards survives the next restart",
-          moved == (False, False, True, False, False) and wr.spec.gpu and not wr.pipe.gpu and wr.custom.gpu,
-          f"{moved} {wr.spec.gpu} {wr.pipe.gpu} {wr.custom.gpu}")
+    check("a saved PS-DTFE exact job with an older launcher's forced GPU tick opens on the GPU when the pair has one "
+          "(unticked once, ticked once: Grids and Pipeline tabs); a standard-DTFE exact job keeps its GPU, and a GPU "
+          "unticked afterwards survives the next restart",
+          moved == (ps_gpu, ps_gpu, True, ps_gpu, ps_gpu) and not wr.spec.gpu and wr.pipe.gpu == ps_gpu
+          and wr.custom.gpu, f"{moved} {wr.spec.gpu} {wr.pipe.gpu} {wr.custom.gpu}")
     wr.close()
+    # a state saved by the launcher of 2026-11-09 (ps_exact_cpu_start done, its PS exact jobs on the CPU): ticked
+    # once, Grids and Custom; a PS-DTFE sampled job keeps its CPU, the machine use of each tab its own value
+    mig5 = QSettings(str(tmp / "gui_mig5.ini"), QSettings.IniFormat)
+    mig5.setValue("ps_exact_cpu_start", _json.dumps(True))
+    mig5.setValue("spec", _json.dumps(rs.RunSpec(data_root=str(data), deposit="exact", gpu=False,
+                                                 run_mode="gentle").to_dict()))
+    mig5.setValue("pipeline", _json.dumps(rs.PipelineSpec(deposit="sampled", gpu=False).to_dict()))
+    mig5.setValue("custom", _json.dumps(rs.CustomSpec(estimator="ps", deposit="exact", gpu=False,
+                                                      run_mode="performance").to_dict()))
+    mig5.sync()
+    wn = A.MainWindow(remember=True, settings=QSettings(str(tmp / "gui_mig5.ini"), QSettings.IniFormat))
+    moved = (wn.spec.gpu, wn.pipe.gpu, wn.custom.gpu, wn.gpu_check.isChecked(), wn.o_gpu.isChecked(),
+             wn.run_mode_combo.currentData(), wn.p_run_mode.currentData(), wn.o_run_mode.currentData())
+    wn.o_gpu.setChecked(False)
+    qa.processEvents()
+    wn.close()
+    wt = A.MainWindow(remember=True, settings=QSettings(str(tmp / "gui_mig5.ini"), QSettings.IniFormat))
+    check("a saved PS-DTFE exact job on the CPU (the launcher of 2026-11-09) opens on the GPU when built, once (Grids "
+          "and Custom tabs; a sampled Pipeline job keeps its CPU, each tab its machine use): a GPU unticked "
+          "afterwards survives the next restart",
+          moved == (ps_gpu, False, ps_gpu, ps_gpu, ps_gpu, "gentle", "balanced", "performance")
+          and wt.spec.gpu == ps_gpu and not wt.custom.gpu and wt._restore_json("run_mode_start", False) is True,
+          f"{moved} {wt.spec.gpu} {wt.custom.gpu}")
+    wt.close()
     # the exact deposit is PS-DTFE's default too since 2026-11-09, but a saved PS-DTFE job keeps its sampled deposit
     # (it was selectable beside the exact one, so it may be the user's choice): Grids, Pipeline and Custom tabs
     mig4 = QSettings(str(tmp / "gui_mig4.ini"), QSettings.IniFormat)
@@ -1017,6 +1051,7 @@ def new_user_features(qa, w, tmp, data, sim):
     import setup_wizard as SW
     _layout(qa, w)
     _presets(qa, w, P)
+    _machine_use(qa, w, P)
     demo, root, json = _custom_snapshot(qa, w, tmp, P)
     _runs(qa, w)
     x, s99, QTest = _explore(qa, w, tmp, sim, root)
@@ -1256,21 +1291,18 @@ def _presets(qa, w, P):
     qa.processEvents()
     check("... back to single: the knob is gone", w.spec.precision == "single"
           and "DTFE_PRECISION" not in w.cmd_view.toPlainText())
-    w.gpu_check.setChecked(rs.gpu_built("ps"))
+    w.gpu_check.setChecked(False)                                   # by hand, at the sampled deposit: the CPU
     w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("exact"))
     qa.processEvents()
-    check("picking the exact deposit unticks the GPU: faster on the CPU on production runs",
-          not w.gpu_check.isChecked() and not w.spec.gpu and w.spec.deposit == "exact")
+    check("picking the exact deposit ticks the GPU (when built: its device in every machine use, 1156 s against "
+          "1133 s on all CPU cores), and the status line says so",
+          w.gpu_check.isChecked() == rs.gpu_built("ps") and w.spec.gpu == rs.gpu_built("ps")
+          and w.spec.deposit == "exact" and ("1156 s against 1133 s" in w.status.text()) == rs.gpu_built("ps"),
+          w.status.text())
     w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("sampled"))
     qa.processEvents()
-    check("... and back to the sampled deposit the tick comes back (when built)",
+    check("... and back to the sampled deposit the tick stays (the GPU's too, when built)",
           w.gpu_check.isChecked() == rs.gpu_built("ps") and w.spec.gpu == rs.gpu_built("ps"))
-    w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("exact"))
-    w.gpu_check.setChecked(True)
-    w.gpu_check.setChecked(False)                                   # by hand, in the exact deposit: the CPU
-    w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("sampled"))
-    qa.processEvents()
-    check("... unless the box was set by hand meanwhile", not w.gpu_check.isChecked() and not w.spec.gpu)
     w.gpu_check.setChecked(False)
     qa.processEvents()
     # standard DTFE: the same choice is its cell average (run_dtfe.sh -e = the exact one), in its own words. Switching
@@ -1321,8 +1353,8 @@ def _presets(qa, w, P):
     w.ps_radio.setChecked(True)
     qa.processEvents()
     check("the deposit choice per estimator: PS-DTFE's exact deposit comes back after a switch to standard DTFE and "
-          "back (on the CPU), standard DTFE's Monte-Carlo average too",
-          on_dtfe == "exact" and back_ps == ("exact", "exact", False)
+          "back (on the GPU, when built), standard DTFE's Monte-Carlo average too",
+          on_dtfe == "exact" and back_ps == ("exact", "exact", rs.gpu_built("ps"))
           and back_dtfe == ("sampled", True) and w.spec.deposit == "exact", f"{on_dtfe} {back_ps} {back_dtfe}")
     w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("sampled"))
     qa.processEvents()
@@ -1334,6 +1366,100 @@ def _presets(qa, w, P):
     combo.setCurrentIndex(combo.findData("mine"))
     w._delete_preset("grids")
     check("... and can be deleted", combo.findData("mine") < 0 and "mine" not in w.user_presets)
+
+
+def _machine_use(qa, w, P):
+    """The machine use on the three run tabs: the selector right after the GPU tick, its texts, the spec, the command
+    and the status line; a change of it re-applies the device table's GPU tick unless the tick was set by hand, and
+    a preset leaves it alone. Ends where it began: balanced everywhere, the Grids tab on PS-DTFE's sampled deposit
+    with the GPU unticked."""
+    print("machine use:")
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QComboBox
+    import app_tabs as T
+    combos = [w._shared(t, "run_mode") for t in T.RUN_TABS]
+    gpus = [w._shared(t, "gpu") for t in T.RUN_TABS]
+
+    def after_gpu(combo, gpu):              # the estimator group's form: the selector's row right below the tick's
+        form = combo.parentWidget().layout()
+        return (form.getWidgetPosition(combo)[0] == form.getWidgetPosition(gpu)[0] + 1
+                and form.labelForField(combo).text() == "Machine use")
+    tips = [str(c.itemData(i, Qt.ToolTipRole) or "") for c in combos for i in range(c.count())]
+    check("the Machine use selector sits right below the GPU tick on the Grids, Custom snapshot and Pipeline tabs: one "
+          "kind of widget, the three modes in order, balanced at the start, each item with its tip (at most two lines, "
+          "no '--'); the tooltip the first sentence of the binary's own help",
+          all(isinstance(c, QComboBox) and after_gpu(c, g) for c, g in zip(combos, gpus))
+          and all([c.itemData(i) for i in range(c.count())] == list(rs.RUN_MODES) and c.currentData() == "balanced"
+                  for c in combos)
+          and tips == [rs.RUN_MODE_TEXT[m][1] for m in rs.RUN_MODES] * 3
+          and all(tip_lines(t) <= 2 and "--" not in t for t in tips)
+          and all("--" not in c.itemText(i) for c in combos for i in range(c.count()))
+          and all(c.toolTip() == P.short_tooltip("run_mode") and tip_lines(c.toolTip()) <= 2 for c in combos)
+          and combos[0].toolTip().startswith("How hard the run may lean on the machine"),
+          f"{combos[0].toolTip()!r} {tips[:1]}")
+    dt_gpu, ps_gpu = rs.gpu_built("dtfe"), rs.gpu_built("ps")
+    w.tabs.setCurrentIndex(A.GRIDS)
+    w.dtfe_radio.setChecked(True)
+    w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("exact"))      # the rule's tick: the GPU (when built)
+    w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("sampled"))    # the Monte-Carlo average keeps it
+    qa.processEvents()
+    start = w.gpu_check.isChecked()
+    w.run_mode_combo.setCurrentIndex(w.run_mode_combo.findData("performance"))
+    qa.processEvents()
+    perf = (w.spec.run_mode, w.gpu_check.isChecked(), w.spec.gpu, w.status.text(), rs.shell(*w.spec.command()))
+    w.run_mode_combo.setCurrentIndex(w.run_mode_combo.findData("gentle"))
+    qa.processEvents()
+    gentle = (w.spec.run_mode, w.gpu_check.isChecked(), rs.shell(*w.spec.command()))
+    check("Grids: a new machine use reaches the spec and the command (DTFE_RUN_MODE) and moves the GPU tick by the "
+          "device table: standard DTFE's sampled average leaves the GPU in performance (the CPU's there, 315 s against "
+          "433 s: the status line says so) and comes back to it in gentle (when built)",
+          start == dt_gpu and perf[:3] == ("performance", False, False) and perf[3].startswith("Performance: ")
+          and ("315 s against 433 s" in perf[3]) == dt_gpu and " DTFE_RUN_MODE=performance " in f" {perf[4]} "
+          and gentle[:2] == ("gentle", dt_gpu) and " DTFE_RUN_MODE=gentle " in f" {gentle[2]} ",
+          f"{perf[:4]} {gentle[:2]}")
+    w.gpu_check.setChecked(not w.gpu_check.isChecked())             # by hand, against the rule
+    hand = w.gpu_check.isChecked()
+    w.run_mode_combo.setCurrentIndex(w.run_mode_combo.findData("balanced"))
+    w.run_mode_combo.setCurrentIndex(w.run_mode_combo.findData("performance"))
+    qa.processEvents()
+    check("... unless the tick was set by hand: a new machine use then keeps it",
+          w.gpu_check.isChecked() == hand and w.spec.gpu == hand and w.spec.run_mode == "performance")
+    w.ps_radio.setChecked(True)
+    w.gpu_check.setChecked(False)
+    w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("exact"))      # a deposit pick: the rule's tick again
+    qa.processEvents()
+    mixed = (w.gpu_check.isChecked(), w.status.text(), rs.shell(*w.spec.command()))
+    check("PS-DTFE's exact deposit in performance: on the GPU (when built), 'the exact deposit runs on the GPU and the "
+          "free cores together (performance)'; its job passes GPU_SHARE=auto and DTFE_RUN_MODE=performance",
+          mixed[0] == ps_gpu
+          and ("the exact deposit runs on the GPU and the free cores together (performance)" in mixed[1]) == ps_gpu
+          and " GPU_SHARE=auto " in f" {mixed[2]} " and " DTFE_RUN_MODE=performance " in f" {mixed[2]} ", str(mixed[:2]))
+    w.o_run_mode.setCurrentIndex(w.o_run_mode.findData("gentle"))
+    w.p_run_mode.setCurrentIndex(w.p_run_mode.findData("performance"))
+    qa.processEvents()
+    own, penv = w.custom.command(), w.pipe.command()[1]
+    check("Custom snapshot and Pipeline: the machine use reaches the spec, the Custom command ('--run-mode') and the "
+          "pipeline's environment (DTFE_RUN_MODE, GPU_SHARE=auto)",
+          w.custom.run_mode == "gentle" and own[own.index("--run-mode") + 1] == "gentle"
+          and w.pipe.run_mode == "performance" and penv["DTFE_RUN_MODE"] == "performance" and penv["GPU_SHARE"] == "auto",
+          f"{own} {penv}")
+    combo = w._preset_grids[0]
+    combo.setCurrentIndex(combo.findData("Quick look"))
+    w._apply_preset("grids")
+    combo = w._preset_custom[0]
+    combo.setCurrentIndex(combo.findData("Exact deposit"))
+    w._apply_preset("custom")
+    qa.processEvents()
+    check("a preset leaves the machine use alone (Grids and Custom snapshot tabs)",
+          (w.spec.run_mode, w.run_mode_combo.currentData(), w.custom.run_mode, w.o_run_mode.currentData())
+          == ("performance", "performance", "gentle", "gentle"))
+    for c in combos:
+        c.setCurrentIndex(c.findData("balanced"))
+    w.deposit_combo.setCurrentIndex(w.deposit_combo.findData("sampled"))
+    w.gpu_check.setChecked(False)
+    qa.processEvents()
+    check("... and back at balanced on every tab", (w.spec.run_mode, w.pipe.run_mode, w.custom.run_mode)
+          == ("balanced",) * 3 and w.spec.estimator == "ps" and w.spec.deposit == "sampled" and not w.spec.gpu)
 
 
 def _custom_snapshot(qa, w, tmp, P):
@@ -1358,13 +1484,16 @@ def _custom_snapshot(qa, w, tmp, P):
           and "total wall time" in runlog.read_text() and json.loads(side.read_text())["box_mpc"] == [0, 100] * 3,
           w.status.text())
     keep_custom = rs.CustomSpec.from_dict(w.custom.to_dict())
-    w.custom = rs.CustomSpec()
+    w.custom = rs.CustomSpec(run_mode="gentle")
     w._load_into_widgets()
     w._load_run_settings(A.R.parse_runlog(runlog))
-    check("Runs > Load settings of a custom run fills the Custom tab from its settings file",
+    check("Runs > Load settings of a custom run fills the Custom tab from its settings file, and leaves the tab's "
+          "machine use as it was (the run's balanced is about then, not now)",
           w.tabs.currentIndex() == A.OWN and Path(w.custom.input_file) == Path(demo.input_file)
           and w.custom.grid == demo.grid and w.custom.output_name == demo.output_name
-          and Path(w.o_file.text()) == Path(demo.input_file), w.custom.input_file)
+          and Path(w.o_file.text()) == Path(demo.input_file)
+          and json.loads(side.read_text())["run_mode"] == "balanced"
+          and w.custom.run_mode == "gentle" and w.o_run_mode.currentData() == "gentle", w.custom.input_file)
     w.custom = keep_custom
     w._load_into_widgets()
     # the Custom tab's standard run starts at the exact cell average and pads with
@@ -1425,8 +1554,8 @@ def _custom_snapshot(qa, w, tmp, P):
     combo.setCurrentIndex(combo.findData("Exact deposit"))
     w._apply_preset("custom")
     qa.processEvents()
-    check("... and the exact-deposit preset leaves it to the rule too: PS-DTFE's exact deposit on the CPU",
-          w.custom.deposit == "exact" and not w.custom.gpu and not w.o_gpu.isChecked())
+    check("... and the exact-deposit preset leaves it to the rule too: PS-DTFE's exact deposit on the GPU (when built)",
+          w.custom.deposit == "exact" and w.custom.gpu == rs.gpu_built("ps") and w.o_gpu.isChecked() == w.custom.gpu)
     w.custom = rs.demo_spec(tmp / "demo", gpu=False)
     w._load_into_widgets()
     w._changed()
@@ -2529,6 +2658,8 @@ def _zoom_progress(w, tmp, x, img):
     kw = x.server_kwargs()
     check("the 'Partitions in memory' value reaches the server with no partition set (the binary splits a big "
           "snapshot itself)", ok and kw is not None and kw.get("resident") == 3 and "partition" not in kw, str(kw))
+    check("... and the query server runs in balanced, beside the launcher (run_mode='balanced', D25)",
+          kw is not None and kw.get("run_mode") == "balanced", str(kw))
     x.resident.setValue(0)
     x.server_state.setText(E.NO_SNAPSHOT_TEXT)
     x.restore_state({"snapshots": {}, "resident": 0})
@@ -2540,6 +2671,9 @@ def _zoom_progress(w, tmp, x, img):
     wait_for(lambda: not x._server_starting, 300)
     check("the demo snapshot's server starts as a 2x2x2 composite", x._server_running and x._server.n_partitions == 8,
           x.server_state.text())
+    argv = [str(a) for a in (getattr(x._server.est, "command", None) or [])]
+    check("... its binary was started with '--run-mode balanced' (dtfelib's Estimator(run_mode=...))",
+          any(argv[i:i + 2] == ["--run-mode", "balanced"] for i in range(len(argv))), " ".join(argv))
     maxima = []
     x.zoom_progress.valueChanged.connect(lambda _v: maxima.append(x.zoom_progress.maximum()))
     x._dragged(img.height() // 4, img.width() // 4, img.height() // 2, img.width() // 2)
@@ -2618,9 +2752,11 @@ def _exact_zoom(w, tmp, x, img):
           and "--exact" in cmd and "--box" not in cmd and "--region-mpc" not in cmd and gi >= 0
           and cmd[gi + 1 + geo[0]] == str(x.current.n) and all(int(cmd[gi + 1 + a]) >= 64 for a in geo[2])
           and grid_[geo[0]] == 1 and edges is not None, str(cmd))
-    check("... which reuses the query server's tessellation cache folder and asks for the progress lines",
+    check("... which reuses the query server's tessellation cache folder, asks for the progress lines and runs "
+          "balanced (beside the launcher, not the binary's performance)",
           "--tessellation-cache" in cmd and cmd[cmd.index("--tessellation-cache") + 1] == str(tmp / "tess")
-          and "--verbose" in cmd and cmd[cmd.index("--verbose") + 1] == "2", str(cmd))
+          and "--verbose" in cmd and cmd[cmd.index("--verbose") + 1] == "2"
+          and cmd.count("--run-mode") == 1 and cmd[cmd.index("--run-mode") + 1] == "balanced", str(cmd))
     x.zoom_res.setValue(64)
     # an 8-of-32-cell square: the zoom's virtual grid (64 cells across it) then tiles the box exactly, so the
     # window is the same region as the slice's cells; the on-disk run is the demo's exact deposit (the default since
@@ -2806,6 +2942,7 @@ def _exact_zoom_partitioned(qa, w, tmp, demo, root, cmd, x, sq):
           cmd is not None and cmd[0].endswith("DTFE") and "--region-mpc" in cmd and "--exact" in cmd
           and cmd[cmd.index("--grid") + 1:cmd.index("--grid") + 4].count("1") == 1
           and "--padding" in cmd and cmd[cmd.index("--padding") + 1] == "15"
+          and "--run-mode" in cmd and cmd[cmd.index("--run-mode") + 1] == "balanced"
           and "--" not in w.explore_view.title.text(), str(cmd))
     x.zoom_res.setValue(64)                           # (64 is the spin box's minimum)
     ref = region_mean(x, img.height() // 4, img.width() // 4, img.height() // 2, img.width() // 2)

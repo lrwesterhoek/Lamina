@@ -37,6 +37,7 @@ SHARED_WIDGETS = {
     "grid_cells":              ("grid_cells",    "o_grid_cells",   "p_grid_cells"),
     "nsub":                    ("nsub_spin",     "o_nsub",         "p_nsub"),
     "gpu":                     ("gpu_check",     "o_gpu",          "p_gpu"),
+    "run_mode":                ("run_mode_combo", "o_run_mode",    "p_run_mode"),
     "vertex_mass":             ("vm_check",      "o_vm",           "p_vm"),
     "volume_weighted":         ("vw_check",      "o_vw",           "p_vw"),
     "caustics":                ("ca_check",      "o_ca",           "p_ca"),
@@ -312,9 +313,8 @@ class TabsMixin:
         planes = rs.planes(self._sim_path()) if (target == "grids" and self._sim_path()) else []
         changed = P.apply_preset(spec, settings, planes)
         if "gpu" not in settings:          # the preset leaves the GPU to the run's size (see recommended_gpu)
-            n = (rs.dm_particles(spec.sim) if target == "grids" else
-                 rs.hdf5_particle_count(Path(spec.input_file).expanduser()) if spec.input_file else None)
-            rec = rs.recommended_gpu(spec.deposit, spec.fields, n, spec.estimator, spec.precision)
+            rec = rs.recommended_gpu(spec.deposit, spec.fields, self._tab_particles(target), spec.estimator,
+                                     spec.precision, run_mode=spec.run_mode)
             if spec.gpu != rec:
                 spec.gpu = rec
                 changed.append("gpu")
@@ -373,8 +373,8 @@ class TabsMixin:
         return "ps"
 
     def _estimator_group(self, tab: str, title: str, *first_rows) -> QGroupBox:
-        """The deposit, the grid row and the GPU tick of a run tab, after its own first rows (the Grids tab's
-        estimator choice)."""
+        """The deposit, the grid row, the GPU tick and the machine use of a run tab, after its own first rows (the
+        Grids tab's estimator choice)."""
         g = group(title, *first_rows)
         deposit = QComboBox()
         for key in ("sampled", "exact"):
@@ -389,10 +389,21 @@ class TabsMixin:
         deposit.currentIndexChanged.connect(
             lambda _i: self._deposit_changed(deposit, gpu, self._tab_estimator(tab),
                                              self.custom.dim if tab == "custom" else 3))
+        # the machine use (--run-mode, the drivers' DTFE_RUN_MODE): the row after the GPU tick, which follows it
+        mode = QComboBox()
+        mode.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)   # (sized like the precision's)
+        mode.setMinimumContentsLength(24)
+        for key in rs.RUN_MODES:
+            mode.addItem(rs.RUN_MODE_TEXT[key][0], key)
+            mode.setItemData(mode.count() - 1, rs.RUN_MODE_TEXT[key][1], Qt.ToolTipRole)
+        option_tip(mode, "run_mode")
+        mode.currentIndexChanged.connect(lambda _i: self._run_mode_changed(tab))
         g.form.addRow("Cell average", deposit)        # both estimators: exact (--exact, the default) or --sampled
         g.form.addRow("Grid", row)
         g.form.addRow("", gpu)
-        for role, w in (("deposit", deposit), ("grid", combo), ("grid_cells", cells), ("nsub", nsub), ("gpu", gpu)):
+        g.form.addRow(P.label("run_mode"), mode)
+        for role, w in (("deposit", deposit), ("grid", combo), ("grid_cells", cells), ("nsub", nsub), ("gpu", gpu),
+                        ("run_mode", mode)):
             self._set_shared(tab, role, w)
         return g
 
@@ -487,22 +498,28 @@ class TabsMixin:
         return w
 
     def _deposit_changed(self, combo: QComboBox, gpu: QCheckBox, estimator: str = "ps", dim: int = 3):
-        """Picking the exact deposit sets the GPU box to that deposit's faster side (rs.recommended_gpu):
-        PS-DTFE the CPU (1133 s against 1156 s on the GPU for TNG100-3-Dark at 512³), standard DTFE's
-        exact cell average the GPU (1.6x, 2.0 s against 3.3 s at 0.26M); the box stays editable. A tick this
-        removed comes back when the choice leaves the exact deposit (for the sampled one), unless the
-        box was set otherwise meanwhile. A 2D run has no GPU."""
+        """Picking the exact deposit sets the GPU box to that deposit's device in the tab's machine use
+        (rs.recommended_gpu, the drivers' automatic device): the GPU for both estimators in every machine use
+        (PS-DTFE 1156 s against 1133 s on all CPU cores for TNG100-3-Dark at 512³, standard DTFE's exact cell
+        average 439 s against 431 s; in performance a partitioned PS-DTFE run also deposits on the free cores); the
+        box stays editable. A tick this removed comes back when the choice leaves the exact deposit (for the sampled
+        one), unless the box was set otherwise meanwhile. A 2D run has no GPU."""
         if not self._loading:
-            want = estimator != "ps"
+            tab = self._gpu_tab(gpu)
+            mode = self._tab_run_mode(tab)
             if combo.currentData() == "exact":
-                if rs.gpu_built(estimator, dim=dim) and gpu.isChecked() != want:   # (either pair has the GPU when the single one has)
+                want = rs.recommended_gpu("exact", self._tab_spec(tab).fields, None, estimator, dim=dim,
+                                          run_mode=mode)
+                built = rs.gpu_built(estimator, dim=dim)       # (either pair has the GPU when the single one has)
+                changed = built and gpu.isChecked() != want
+                if changed:
                     self._gpu_auto_set(gpu, want)
                     if not want:
                         self._gpu_unticked_by_exact.add(gpu)
-                    self.status_message("exact deposit: the GPU is unticked (the CPU is faster on production runs)"
-                                        if estimator == "ps" else
-                                        "exact cell averages: the GPU is ticked (1.6x faster than the CPU at 0.26M "
-                                        "particles)")
+                elif built:
+                    self._gpu_by_hand.discard(gpu)      # the box holds the rule's tick now, as if the rule had set it
+                if changed or (built and estimator == "ps" and gpu.isChecked() and mode == "performance"):
+                    self.status_message(self._exact_device_text(estimator, gpu.isChecked(), mode))
             elif gpu in self._gpu_unticked_by_exact:
                 self._gpu_unticked_by_exact.discard(gpu)
                 if not gpu.isChecked():
@@ -510,19 +527,87 @@ class TabsMixin:
                     self.status_message("the GPU is ticked again, as before the exact deposit")
         self._changed()
 
+    @staticmethod
+    def _exact_device_text(estimator: str, on: bool, mode: str) -> str:
+        """The status line of the exact deposit's device, in the words of the estimator and the machine use."""
+        what = "exact deposit" if estimator == "ps" else "exact cell averages"
+        if not on:
+            return f"{what}: the GPU is unticked ({mode}: the CPU)"
+        if estimator == "ps" and mode == "performance":
+            return "the exact deposit runs on the GPU and the free cores together (performance)"
+        if estimator == "ps":
+            return (f"{what}: the GPU is ticked (about as fast as all CPU cores: 1156 s against 1133 s for "
+                    "TNG100-3-Dark at 512³)")
+        return f"{what}: the GPU is ticked (a tie with all CPU cores: 439 s against 431 s for TNG100-3-Dark at 512³)"
+
     def _gpu_auto_set(self, gpu: QCheckBox, on: bool):
-        """a GPU tick set by a rule, not by hand (_gpu_set_by_hand leaves the exact deposit's memory alone)"""
+        """a GPU tick set by a rule, not by hand (_gpu_set_by_hand leaves the exact deposit's memory alone); the box
+        is the rule's again, so a change of the machine use moves it"""
         self._gpu_auto_setting = True
         try:
             gpu.setChecked(on)              # (its toggled signal runs _changed)
         finally:
             self._gpu_auto_setting = False
+        self._gpu_by_hand.discard(gpu)
 
     def _gpu_set_by_hand(self, gpu: QCheckBox):
         """the box changed otherwise than by the exact deposit's rule (by hand, a loaded spec, a preset): the
-        tick that rule removed is no longer one to bring back"""
+        tick that rule removed is no longer one to bring back. Changed by hand (neither by a rule nor while a spec or
+        preset is loaded) it keeps its tick when the machine use changes (_run_mode_changed), this session"""
         if not self._gpu_auto_setting:
             self._gpu_unticked_by_exact.discard(gpu)
+        if self._gpu_auto_setting or self._loading:
+            self._gpu_by_hand.discard(gpu)
+        else:
+            self._gpu_by_hand.add(gpu)
+
+    def _gpu_tab(self, gpu: QCheckBox) -> str:
+        """The run tab a GPU box is on."""
+        return next(t for t in RUN_TABS if self._shared(t, "gpu") is gpu)
+
+    def _tab_spec(self, tab: str):
+        """The job of a run tab."""
+        return {"grids": self.spec, "custom": self.custom, "pipeline": self.pipe}[tab]
+
+    def _tab_run_mode(self, tab: str) -> str:
+        """The machine use a run tab's choices apply to now: from its menu (as _tab_estimator, before _read_widgets)."""
+        return self._shared(tab, "run_mode").currentData() or "balanced"
+
+    def _tab_particles(self, tab: str) -> int | None:
+        """The particles of a run tab's input, where it says: a TNG simulation's DM count (the Pipeline: its largest
+        simulation's), the custom snapshot's HDF5 header; None when unknown."""
+        if tab == "grids":
+            return rs.dm_particles(self.spec.sim)
+        if tab == "custom":
+            return rs.hdf5_particle_count(Path(self.custom.input_file).expanduser()) if self.custom.input_file else None
+        return max((rs.dm_particles(s) or 0 for s in self.pipe.sims), default=0) or None
+
+    def _run_mode_changed(self, tab: str):
+        """A new machine use on a run tab: its GPU tick follows it (rs.recommended_gpu, the drivers' automatic device:
+        standard DTFE's sampled average on the CPU in performance, the GPU otherwise) unless it was set by hand
+        (_gpu_set_by_hand), and the status line says what the machine use does with the run."""
+        if self._loading:
+            return
+        self._read_widgets()
+        spec, gpu, est = self._tab_spec(tab), self._shared(tab, "gpu"), self._tab_estimator(tab)
+        dim = getattr(spec, "dim", 3)
+        changed, built = False, rs.gpu_built(est, spec.precision, dim)
+        if gpu not in self._gpu_by_hand and built:
+            want = rs.recommended_gpu(spec.deposit, spec.fields, self._tab_particles(tab), est, spec.precision, dim,
+                                      run_mode=spec.run_mode)
+            changed = gpu.isChecked() != want
+            if changed:
+                self._gpu_auto_set(gpu, want)       # (its toggled signal runs _changed)
+        text = rs.RUN_MODE_TEXT[spec.run_mode][0]
+        if built and gpu.isChecked() and est == "ps" and spec.deposit == "exact" and spec.run_mode == "performance":
+            text += "; the exact deposit runs on the GPU and the free cores together (performance)"
+        elif changed:
+            text += "; the GPU is ticked" if gpu.isChecked() else "; the GPU is unticked"
+            if not gpu.isChecked() and est == "dtfe" and spec.deposit == "sampled":
+                text += (" (standard DTFE's sampled average is faster on the CPU: 315 s against 433 s for "
+                         "TNG100-3-Dark at 512³)")
+        self.status_message(text)
+        self._changed()
 
     def _estimator_switched(self, combo: QComboBox, ps_now: bool):
         """An estimator switch by the user moves the deposit choice to the new estimator's production setting
@@ -541,15 +626,14 @@ class TabsMixin:
         want = kept.get(new) or rs.production_deposit(new)
         gpu = self.gpu_check if combo is self.deposit_combo else self.o_gpu
         if combo.currentData() == want == "exact":
-            # the choice stays, the estimator's GPU rule does not (PS-DTFE's exact deposit on the CPU, standard
-            # DTFE's exact average on the GPU): applied as a pick of the choice would
+            # the choice stays, the GPU rule is the new estimator's (rs.recommended_gpu: the two may part):
+            # applied as a pick of the choice would
             self._deposit_changed(combo, gpu, new, 3 if combo is self.deposit_combo else self.custom.dim)
         elif combo.currentData() != want:
             was = gpu.isChecked()
             combo.setCurrentIndex(max(combo.findData(want), 0))      # its signal: the GPU tick, _changed
             now = gpu.isChecked()
-            where = (", on the GPU" if now and not was else
-                     ", on the CPU (faster on production runs)" if was and not now else "")
+            where = (", on the GPU" if now and not was else ", on the CPU" if was and not now else "")
             words = ({"exact": "the exact deposit", "sampled": "the sampled deposit"} if ps_now else
                      {"exact": "the exact cell average", "sampled": "the Monte-Carlo average"})
             how = (" again, as chosen for it before" if want != rs.production_deposit(new)   # the user's own choice
@@ -900,7 +984,9 @@ class TabsMixin:
             self._read_widgets()
             c = self.custom
             n = rs.hdf5_particle_count(Path(f).expanduser())
-            self.o_gpu.setChecked(rs.recommended_gpu(c.deposit, c.fields, n, c.estimator, c.precision, c.dim))
+            self.o_gpu.setChecked(rs.recommended_gpu(c.deposit, c.fields, n, c.estimator, c.precision, c.dim,
+                                                     run_mode=c.run_mode))
+            self._gpu_by_hand.discard(self.o_gpu)          # the file's rule set it, not a hand
         self._changed()
 
     # ================================================================ Pipeline tab

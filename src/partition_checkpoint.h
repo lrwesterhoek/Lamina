@@ -26,9 +26,11 @@
     link time: a rebuilt binary does not resume), the command line (every deprecated option name in its canonical
     spelling, User_options::commandTokens: '--ps-gpu' and '--gpu' give one key) minus the
     options that cannot change a grid value (--resume, --ps-merge, --no-overlap, --verbose,
-    --max-concurrent, --scratch-dir, --tessellation-cache), the input files' size+mtime, the resolved
+    --max-concurrent, --run-mode, --scratch-dir, --tessellation-cache) and '--gpu-share' (as typed, 'auto' and the
+    number it resolves to would differ), the input files' size+mtime, the resolved
     '_a' average (exact or sampled) and gradient route (face or per-tet), which an environment pin can change
-    without the command line, the resolved partition split and the grid. '--resume' refuses, naming the lines
+    without the command line, the resolved GPU share of a mixed '--gpu' run (a 'gpu-share=' line below 1000; an
+    all-GPU run has none), the resolved partition split and the grid. '--resume' refuses, naming the lines
     that differ, when the key differs.
     It over-refuses rather than under-refuses (a reordered command line is a different key).
 
@@ -198,11 +200,13 @@ inline std::string commandKeyLines(std::vector<std::string> const &tokens)
 {
     // '--ps-merge': the index and the completion order move the grids at float rounding only, and a run killed
     // under one order must resume under the other (--resume merges in index order); fixed-point is dropped here
-    // because the key's own 'merge=fixed-point' line carries it
+    // because the key's own 'merge=fixed-point' line carries it. '--run-mode': like '--max-concurrent' it changes no
+    // PS-DTFE single-precision byte, and a run killed in one mode must resume in another (a balanced run of the day
+    // overnight in performance). '--gpu-share': the key's own 'gpu-share=' line carries the resolved share
     static char const *const dropFlag[]  = { "--resume", "--ps-no-overlap",
                                              "--no-overlap" };  // (the look-ahead switch of both binaries)
     static char const *const dropValue[] = { "--verbose", "-v", "--max-concurrent", "--scratch-dir", "--tessellation-cache",
-                                             "--ps-merge" };
+                                             "--ps-merge", "--run-mode", "--gpu-share" };
     auto isOption = [](std::string const &t)
     {   // '--name' or '-x'; a negative number ('-0.1') is a value
         return t.size() >= 2 and t[0] == '-' and ( t[1] == '-' or std::isalpha( (unsigned char)t[1] ) );
@@ -267,13 +271,9 @@ inline std::string settingsKey(User_options const &u)
 #endif
     k << "gradient=" << ( u.faceGradient ? "face" : "per-tet" ) << '\n';
 #ifdef PHASE_SPACE
-    // DTFE_PS_GPU_SHARE (DTFE.cpp): which partitions of a '--gpu' run deposit on the GPU. Written only for a mixed
-    // run, so the key of an all-GPU run has no such line.
-    if ( u.psUseMetal )
-    {
-        long const share = std::max( 0L, std::min( 1000L, long( Env::integer( "DTFE_PS_GPU_SHARE", 1000 ) ) ) );
-        if ( share < 1000 ) k << "gpu-share=" << share << '\n';
-    }
+    // the resolved share of a mixed '--gpu' run (DTFE.cpp psResolveGpuShare): which partitions deposit on the GPU, a
+    // rule of their index; an all-GPU run writes no line
+    if ( u.psGpuShareMille < 1000 ) k << "gpu-share=" << u.psGpuShareMille << '\n';
 #endif
     k << "partition=";
     for ( size_t p : u.partition ) k << p << ',';
@@ -281,6 +281,17 @@ inline std::string settingsKey(User_options const &u)
     for ( int d = 0; d < NO_DIM; ++d ) k << u.gridSize[d] << ',';
     k << '\n';
     return k.str();
+}
+
+// the GPU share (per mille) a settings key holds: its 'gpu-share=' line, else 1000 (an all-GPU or a CPU run);
+// '--resume' with '--gpu-share auto' adopts it (DTFE.cpp psResolveGpuShare)
+inline long keyGpuShareMille(std::string const &key)
+{
+    std::istringstream is( key );
+    std::string l;
+    while ( std::getline( is, l ) )
+        if ( l.rfind( "gpu-share=", 0 ) == 0 ) return std::stol( l.substr( 10 ) );
+    return 1000;
 }
 
 // The manifest: the text header of the checkpoint file

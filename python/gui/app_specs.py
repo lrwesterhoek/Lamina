@@ -47,6 +47,12 @@ class SpecsMixin:
             return ",".join(w.item(i).text() for i in range(w.count()) if w.item(i).checkState() == Qt.Checked)
         return w.text().strip()
 
+    @staticmethod
+    def _known_mode(mode: str) -> str:
+        """A spec's machine use as the menus hold it: an unknown one (a hand-edited setting) shows as balanced, the
+        default, not as the first item, gentle."""
+        return mode if mode in rs.RUN_MODES else "balanced"
+
     # ================================================================ spec <-> widgets
     def _load_into_widgets(self):
         self._loading = True
@@ -87,6 +93,7 @@ class SpecsMixin:
         self.om_check.setChecked(s.ordered_merge)
         self.so_check.setChecked(s.start_over)
         self.prec_combo.setCurrentIndex(max(self.prec_combo.findData(s.precision), 0))
+        self.run_mode_combo.setCurrentIndex(self.run_mode_combo.findData(self._known_mode(s.run_mode)))
         # Pipeline
         self.p_nu.setCurrentText(str(p.nu))
         self.p_adaptive.setChecked(p.adaptive)
@@ -120,6 +127,7 @@ class SpecsMixin:
         self.p_fields_box.lambda_spin.setValue(p.lambda_th)
         self.p_prefix.setText(p.output_prefix)
         self.p_prec.setCurrentIndex(max(self.p_prec.findData(p.precision), 0))
+        self.p_run_mode.setCurrentIndex(self.p_run_mode.findData(self._known_mode(p.run_mode)))
         self.p_force.setChecked(p.force)
         self.p_plan.setChecked(p.plan_only)
         self.p_render.setChecked(p.render)
@@ -174,6 +182,7 @@ class SpecsMixin:
         self.o_pt.setChecked(c.parallel_triangulation)
         self.o_om.setChecked(c.ordered_merge)
         self.o_prec.setCurrentIndex(max(self.o_prec.findData(c.precision), 0))
+        self.o_run_mode.setCurrentIndex(self.o_run_mode.findData(self._known_mode(c.run_mode)))
         self._own_last_file = c.input_file
         # Plots
         for i in range(self.fig_list.count()):
@@ -231,6 +240,7 @@ class SpecsMixin:
         s.ordered_merge = self.om_check.isChecked()
         s.start_over = self.so_check.isChecked()
         s.precision = self.prec_combo.currentData() or "single"
+        s.run_mode = self.run_mode_combo.currentData() or "balanced"
         # Pipeline
         p.sims = _checked(self.p_sims)
         p.nu = _int(self.p_nu.currentText())
@@ -264,6 +274,7 @@ class SpecsMixin:
         p.lambda_th = self.p_fields_box.lambda_spin.value()
         p.output_prefix = self.p_prefix.text().strip()
         p.precision = self.p_prec.currentData() or "single"
+        p.run_mode = self.p_run_mode.currentData() or "balanced"
         p.force = self.p_force.isChecked()
         p.plan_only = self.p_plan.isChecked()
         p.render = self.p_render.isChecked()
@@ -323,6 +334,7 @@ class SpecsMixin:
         c.parallel_triangulation = self.o_pt.isChecked()
         c.ordered_merge = self.o_om.isChecked()
         c.precision = self.o_prec.currentData() or "single"
+        c.run_mode = self.o_run_mode.currentData() or "balanced"
         # Plots
         pl.sets = _checked(self.fig_list)
         pl.method = self.pl_method.currentData() or "auto"

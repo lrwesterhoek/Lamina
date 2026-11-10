@@ -1,6 +1,7 @@
 /* The auto-tuner's model (auto_tune.h is its interface and holds the machine queries): the memory model of a
-   PS-DTFE and of a standard-DTFE run, the planners that choose --partition / --max-concurrent from it, and the
-   '--serve' split. Only autoTunePartitioning, autoTuneServe and stdLookAheadBytes are seen outside this file. */
+   PS-DTFE and of a standard-DTFE run, the planners that choose --partition / --max-concurrent from it, the
+   '--serve' split and the automatic GPU share. Only autoTunePartitioning, autoTuneServe, stdLookAheadBytes and
+   autoTuneGpuShare are seen outside this file. */
 
 #include "auto_tune.h"
 
@@ -11,7 +12,6 @@
 #include <sys/statvfs.h>
 #include <sys/stat.h>
 #include <fstream>
-#include <thread>      // hardware_concurrency: the point-evaluation HitSink blocks, one per thread
 #include <dirent.h>    // autoTuneServe: the cached partition splits of a snapshot
 #include <map>
 #include <functional>  // the standard-DTFE split replay (stdTuneSplit)
@@ -1644,6 +1644,7 @@ inline double autoTunePSCopyCell(User_options &u, AutoTunePS &ps, bool const mom
 struct AutoTunePSInputs
 {
     bool metalActive = false;        // the GPU deposit will run (flag given AND compiled in)
+    bool mixed = false;              // ... on the GPU share's partitions only, the rest on the CPU ('--gpu-share' < 1)
     bool autoPart = false;           // --partition left to the tuner
     bool userPartitionOn = false;    // a user's split that runs the partition path ('--partition 1 2 2' too)
     bool autoConc = false;           // --max-concurrent left to the tuner
@@ -1755,9 +1756,16 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         // padded to 176 B) and merges it under the mutex at the end, so this part DOES scale
         // down with a finer split -- roughly this partition's share of the total records.
         if ( nPts > 0 )
-            m += double(std::thread::hardware_concurrency()) * kHitSinkBlockBytes;   // one HitSink block per thread
+            m += double(dtfeHardwareThreads()) * kHitSinkBlockBytes;   // one HitSink block per thread
         // Eulerian sub-grid this partition allocates (subGridCells below)
         double const subCells = subGridCells( n );
+        // a mixed run's split: the larger of a CPU lane's deposit and a GPU lane's arrays before the lock (mixedLane)
+        if ( mixed and n >= 2 )
+        {
+            double cpu = 0., gpuPre = 0.;
+            mixedLane( n, cpu, gpuPre );
+            return m + std::max( gpuPre, cpu );
+        }
         if ( metalActive )
         {
             // flat tet arrays (the 16-float record 64 + masses 4 + the finite-cell ordinal 4 B/tet,
@@ -1809,6 +1817,40 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         return m;
     }
 
+    /* A MIXED run ('--gpu-share' below 1, DTFE.cpp psResolveGpuShare): the share's partitions deposit on the GPU, the
+       others on the CPU, at the same time. The GPU deposit's device grids and their host copies exist only while a
+       deposit holds the GPU (ps_metal_host.cc: the buffers are made once ctxMutex is taken, the output grids allocated
+       only then), so one lane at a time holds them: snapshotBytes adds them once. A lane waiting for the GPU holds
+       only what is built before the lock -- the flat tet arrays and the exact items -- and a CPU lane its deposit's
+       sub-grids with the copies or slab lists; a GPU lane after its hold keeps host grids no larger than those. So a
+       lane books the larger of the two (partitionBytes), each with its branch's expressions above, the GPU's without
+       its grids (gpuCellBytes). For a split only (n >= 2): one domain has no partition loop, and so no share. */
+    void mixedLane(int n, double &cpu, double &gpuPre) const
+    {
+        double const nOwn = N / partsOf( n );
+        double const nPad = nOwn * padFactorOf( n );
+        double const subCells = subGridCells( n );
+        // the GPU lane before the lock: the flat tet arrays, + the exact deposit's weight totals and item list
+        double const perTet = (kGpuTetBytes + (psVel or psDisp or psGrad ? kGpuTetVelBytes : 0.)) * kGpuTetSlack;
+        gpuPre = perTet*kTetsPerVertex*nOwn;
+        if ( psExact )
+        {
+            double const nTet = kTetsPerVertex*nOwn;
+            double gridCells = 1.;
+            for (int d=0; d<NO_DIM; ++d) gridCells *= double(outGrid[d]);
+            double const cellsPerTet = gridCells / (6.*double(N));
+            gpuPre += (momFx ? 8. : 4.)*nTet + 8.*std::min( 32.e6, nTet*(1. + 20.*cellsPerTet/16.) );
+        }
+        // the CPU lane: the CPU branch's partition formula
+        double const copyOne = bCellDeposit*subCells;
+        double const copyPriv = std::max( 0., copyCell )*subCells;
+        int const copyThreads = copyPriv > 0.
+            ? std::min( cores, 1 + int( std::min( double(cores), psDepositThreadBytes() / copyPriv ) ) ) : cores;
+        double const slabBytes = kTetsPerVertex * nPad * ( 8. + 1. + 2.*4. + 20. );
+        double const helpers = 2 * copyThreads < cores ? slabBytes : double(copyThreads - 1) * copyPriv;
+        cpu = copyOne + (fxCell + fxMom)*subCells + std::max( helpers, (fxCell + fxMom)*subCells );
+    }
+
     // The GPU deposit's host snapshot (ps_metal_host.cc GpuSnapshot): to resume a failed command buffer
     // the deposit keeps a host copy of every buffer its kernel writes -- the device grids (gridB, with the 8 B
     // fixed-point mass for the 4 B float one: +4 B/cell), the per-tet masses (4 B/tet) and the exact items' weight
@@ -1822,12 +1864,16 @@ struct AutoTunePSPlanner : AutoTunePSInputs
     // while they are converted), all freed and kept by the allocator for the next partition's deposit. In flight
     // and waiting, a partition holds only its tessellation (with the window's cells counted per partition, three
     // in flight would book them three times: +20% at 3^3 over 2.1M particles on a 4096^2 window, measured).
+    // A mixed run's split (mixedLane) holds the device and host copies (gpuCellBytes) the same way: the deposit holding
+    // the GPU has them, one at a time, so they are added here once and not per partition.
     double snapshotBytes(int n) const
     {
         if ( not metalActive ) return 0.;
         double const subCells = subGridCells( n );   // the same sub-grid as partitionBytes()
         double const nTet = kTetsPerVertex * N / partsOf( n );
         double const window = u.psWindowOn ? ( gpuCellBytes() + bCellDeposit + fxCell + fxMom )*subCells : 0.;
+        if ( mixed and n >= 2 and not u.psWindowOn )   // + the lock holder's device and host grids, once
+            return (gridB + 4.)*subCells + (psExact ? (momFx ? 12. : 8.) : 4.)*nTet + window + gpuCellBytes()*subCells;
         return (gridB + 4.)*subCells + (psExact ? (momFx ? 12. : 8.) : 4.)*nTet + window;
     }
 
@@ -1877,16 +1923,25 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         if ( Env::flag( "DTFE_AUTO_TUNE_DEBUG" ) )   // what the plan books per partition sub-grid (P8.2's check)
             std::fprintf( stderr, "AUTO-TUNE-DEBUG PS booked sub-grid: %.0f cells (split %d, %.0f partitions)\n",
                           subGridCells( report.partition ), report.partition, partsOf( report.partition ) );
+        if ( mixed and report.partition >= 2 and Env::flag( "DTFE_AUTO_TUNE_DEBUG" ) )   // a mixed lane's terms
+        {
+            double cpu = 0., gpuPre = 0.;
+            mixedLane( report.partition, cpu, gpuPre );
+            double const once = u.psWindowOn ? 0. : gpuCellBytes()*subGridCells( report.partition );
+            std::fprintf( stderr, "AUTO-TUNE-DEBUG PS mixed lane: cpu %.3f GB, gpu pre-lock %.3f GB, once %.3f GB\n",
+                          cpu/1.e9, gpuPre/1.e9, once/1.e9 );
+        }
         report.perPartition = partitionBytes( report.partition );
 #if defined(PARALLEL_TRIANGULATION) && NO_DIM==3
         // the TBB insert's copies, where the insert runs in parallel: >= 2 threads per partition and a partition of at
         // least the default rule's DTFE_TRIANGULATION_MIN_POINTS padded points (triangulation.cpp), or forced
-        if ( u.psParallelTriangulation and int(std::thread::hardware_concurrency()) / std::max( 1, inFlight ) >= 2
+        if ( u.psParallelTriangulation and dtfeHardwareThreads() / std::max( 1, inFlight ) >= 2
              and ( u.parallelTriangulationForced
                    or N / partsOf( report.partition ) * padFactorOf( report.partition ) >= double( Env::integer( "DTFE_TRIANGULATION_MIN_POINTS", 1000000L ) ) ) )
             report.perPartition += N / partsOf( report.partition ) * padFactorOf( report.partition ) * kParInsertBytes;
 #endif
         report.gpuSnapshot = snapshotBytes( report.partition );   // once: the GPU deposits run one at a time
+        report.mixedLanes = mixed and report.partition >= 2;      // (the dynamic concurrency's ledger books it once then)
         // the loop's dynamic concurrency (P8.10, DTFE.cpp): what the run allocates after its partitions are in flight
         report.concChosen = autoConc;
         report.reserveEnd = ( scratchOn ? 0. : gridTotal * std::max( 0., bCell - bCellDeposit ) ) + ptsOutputBytes;
@@ -1968,6 +2023,17 @@ struct AutoTunePSPlanner : AutoTunePSInputs
 
     // one partition's padding factor in an n^3 split (k spacings, or the Eulerian rule's floor)
     double padFactor(int n) const { return autoTunePadFactor( u, padFrac, n, N, kPartitionPadFloor ); }
+
+    // the AUTO-TUNE line's device: ', GPU deposit', with the share a mixed run deposits on the GPU when the plan is
+    // partitioned (one domain has no share: DTFE.cpp sets it to 1 after the plan); '' without the GPU deposit
+    std::string deviceTag() const
+    {
+        if ( not metalActive ) return "";
+        if ( not ( mixed and u.partitionOn ) ) return ", GPU deposit";
+        char b[64];
+        snprintf( b, sizeof(b), ", GPU deposit with the free cores (GPU share %.2f)", double(u.psGpuShareMille)/1000. );
+        return b;
+    }
 
     AutoTuneReport choose() const;
     std::optional<AutoTuneReport> irreducibleCase(int const userC, int const userN, int const nGpuMin,
@@ -2172,7 +2238,7 @@ inline std::optional<AutoTuneReport> AutoTunePSPlanner::smallSetCase(int const u
 inline std::optional<AutoTuneReport> AutoTunePSPlanner::overBudgetCase(int const userC, int const nGpuMin,
                                                                         bool const overBudget) const
 {
-    char buf[512];
+    char buf[1024];
     if ( overBudget )
     {
         // over budget whatever we do (warned above): one partition at a time, split so that the
@@ -2188,7 +2254,7 @@ inline std::optional<AutoTuneReport> AutoTunePSPlanner::overBudgetCase(int const
                   "--max-concurrent %d (smallest partition, ~%.3g GB; predicted peak ~%.3g GB%s)",
                   N, MESSAGE::printElements( u.gridSize, "x" ).c_str(), ramBytes/1.e9, budget/1.e9,
                   bestN, bestN, bestN, u.maxConcurrent, partitionBytes(bestN)/1.e9,
-                  (fixed + snapshotBytes(bestN) + partitionBytes(bestN))/1.e9, metalActive ? ", GPU deposit" : "" );
+                  (fixed + snapshotBytes(bestN) + partitionBytes(bestN))/1.e9, deviceTag().c_str() );
         message << "\n" << MESSAGE::cBold() << "AUTO-TUNE:" << MESSAGE::cReset() << " " << buf << fxNote
                 << ". Pass --partition/--max-concurrent to override.\n           memory budget: "
                 << budgetWhy << "\n" << MESSAGE::Flush;
@@ -2200,7 +2266,7 @@ inline std::optional<AutoTuneReport> AutoTunePSPlanner::overBudgetCase(int const
 // The memory-driven split: the coarsest split whose concurrency the budget allows, and the AUTO-TUNE line stating it.
 inline AutoTuneReport AutoTunePSPlanner::memorySplit(int const userC, int const nGpuMin) const
 {
-    char buf[512];
+    char buf[1024];
     // Concurrency target = the core count, GPU or not. The GPU deposits do serialize on one
     // queue (ps_metal_host.cc ctxMutex), but the dominant per-partition cost is the CPU work
     // AROUND them -- Lagrangian triangulation + vertex densities, ~7 s of an ~8 s partition at
@@ -2265,7 +2331,7 @@ inline AutoTuneReport AutoTunePSPlanner::memorySplit(int const userC, int const 
               "(predicted peak ~%.3g GB%s%s%s)",
               N, MESSAGE::printElements( u.gridSize, "x" ).c_str(), ramBytes/1.e9, budget/1.e9,
               MESSAGE::printElements( u.partition, " " ).c_str(), u.maxConcurrent,     // NO_DIM numbers
-              predicted/1.e9, metalActive ? ", GPU deposit" : "", scratchNote, ptsNote );
+              predicted/1.e9, deviceTag().c_str(), scratchNote, ptsNote );
     message << "\n" << MESSAGE::cBold() << "AUTO-TUNE:" << MESSAGE::cReset() << " " << buf << fxNote
             << autoTuneOverrideNote( autoPart, autoConc ) << "\n           memory budget: "
             << budgetWhy << "\n" << MESSAGE::Flush;
@@ -2274,6 +2340,63 @@ inline AutoTuneReport AutoTunePSPlanner::memorySplit(int const userC, int const 
 
 }  // namespace
 #endif
+
+/* '--gpu-share auto' (auto_tune.h): the per mille of a partitioned PS-DTFE '--gpu' run's exact deposits that run on the
+   GPU, the others on the free cores at the same time (DTFE.cpp psResolveGpuShare; which partition goes where is a rule
+   of its index there). Only performance mixes the devices. The double build and the float sums keep every partition on
+   the GPU: their CPU deposit teams are static and do not take a waiting GPU lane's core, and a mixed run would add
+   float32 GPU partitions to double CPU ones. So does a small set (below the tuner's DTFE_AUTO_MINN: the split there is
+   for speed) and a machine with too few cores beside the GPU. Otherwise the two sides balance: with c = N0 - 1.8 of
+   the start-up threads (N0, run_mode.h) beside the GPU lanes and rho a CPU core's deposit rate over the GPU's, the GPU
+   takes 1/(1 + rho c), rounded to 0.05 and kept in [0.5, 1]. rho = 0.09 fits the M1 Max: 0.6 at its 10 threads, the
+   share of the measured mixed run (README); DTFE_GPU_SHARE_RHO > 0 replaces it. Erring toward the GPU is never slower
+   than the all-GPU run, since the wall time is the slower of the two sides; the 0.5 floor bounds the other way. */
+long autoTuneGpuShare(User_options const &u, double const nParticles, std::string &why)
+{
+    char buf[160];
+    if ( u.runMode != RunMode::Performance )
+    {
+        why = std::string( runModeName( u.runMode ) ) + ": every partition on the GPU";
+        return 1000;
+    }
+    if ( sizeof(Real) != 4 )
+    {
+        why = "performance, the double build: every partition on the GPU";
+        return 1000;
+    }
+    for (char const *knob : { "DTFE_GPU_FLOAT_MOMENTS", "DTFE_GPU_FLOAT_MASS", "DTFE_MASS_AUDIT" })
+        if ( Env::flag( knob ) )
+        {
+            why = std::string( "performance, " ) + knob + ": every partition on the GPU";
+            return 1000;
+        }
+    // the tuner's small-set threshold, read as autoTunePartitioning reads it
+    double minN = kAutoMinN;
+    if ( double const v = Env::real( "DTFE_AUTO_MINN", 0. ); v > 0. )
+        minN = v;
+    if ( nParticles < minN )
+    {
+        snprintf( buf, sizeof(buf), "performance, %.3g particles (below %.3g): every partition on the GPU",
+                  nParticles, minN );
+        why = buf;
+        return 1000;
+    }
+    int const n0 = runModeState().ompDefault;   // the start-up threads, never a budget --max-concurrent raised
+    double const c = double(n0) - 1.8;
+    if ( c < 2. )
+    {
+        snprintf( buf, sizeof(buf), "performance, %d threads: every partition on the GPU", n0 );
+        why = buf;
+        return 1000;
+    }
+    double rho = Env::real( "DTFE_GPU_SHARE_RHO", 0.09 );
+    if ( not ( rho > 0. ) ) rho = 0.09;
+    double const x = 1. / ( 1. + rho * c );
+    long const share = std::max( 500L, std::min( 1000L, 50L * std::lround( 20. * x ) ) );
+    snprintf( buf, sizeof(buf), "performance, %d threads, rho %g", n0, rho );
+    why = buf;
+    return share;
+}
 
 AutoTuneReport autoTunePartitioning(User_options &u,
                                     size_t const nParticles,
@@ -2474,6 +2597,7 @@ AutoTuneReport autoTunePartitioning(User_options &u,
 
     AutoTunePSInputs in;
     in.metalActive     = metalActive;
+    in.mixed           = metalActive and u.psGpuShareMille < 1000;   // (DTFE.cpp psResolveGpuShare, before the plan)
     in.autoPart        = autoPart;
     in.userPartitionOn = userPartitionOn;
     in.autoConc        = autoConc;
@@ -2579,7 +2703,7 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     double const bPtsOut    = double(sizeof(double)) + 3. * double(sizeof(double)) + 6. * double(sizeof(double)) + 4. + bPtsVar;
     double const ptsBytes   = double(nPts) * ( bPerPoint + bPtsOut + bStreamRec );
     // ... and each point-walk thread fills one 16 MB block of records before it hands it over (HitSink), per partition
-    double const ptsWalkBytes = nPts > 0 ? double(std::thread::hardware_concurrency()) * kHitSinkBlockBytes : 0.;
+    double const ptsWalkBytes = nPts > 0 ? double(dtfeHardwareThreads()) * kHitSinkBlockBytes : 0.;
 
     // --scratch-dir: the full-grid accumulators are mmap-backed and leave the RAM model. (The process itself -- code,
     // libraries, the GPU runtime: 66 MB of footprint, 84 MB with --gpu -- is left out, as in the PS model: it matters on

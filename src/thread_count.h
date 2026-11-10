@@ -6,7 +6,8 @@
      cores left per team member, so the two levels never oversubscribe;
    - a positive value of the environment variable 'envOverride' pins it (benchmarks, tests): DTFE_DEPOSIT_THREADS
      for the two deposits, DTFE_PTS_THREADS for the point evaluation.
-   The callers run their threads as std::thread pools, not as a nested OpenMP region (disabled by default).
+   The callers run their threads as std::thread pools, not as a nested OpenMP region (disabled by default). The
+   core budget of the run mode (run_mode.h) is the OpenMP maximum here: dtfeOmpMax() and dtfeHardwareThreads().
    DTFE.cpp's dtfeParallelThreads is another rule (the OpenMP maximum capped by '--max-concurrent', with no
    override) and stays out of this one. Below it: the process-wide core pool (CorePool) of the work that may follow
    the free cores, and the range helpers that run on them (parallelRanges, poolRanges). */
@@ -23,6 +24,7 @@
 #endif
 
 #include "env_knobs.h"
+#include "run_mode.h"
 
 // the PS partition loop's partitions in flight under its dynamic concurrency (DTFE.cpp; 0 otherwise): the core pool's
 // holders and the per-partition teams count these, not the loop's threads (some of which wait in the memory gate)
@@ -32,9 +34,9 @@ inline int coresPerTeam(char const *envOverride)
 {
     if ( long const v = Env::integer( envOverride, 0 ); v > 0 )
         return int( v );
-    int cores = int( std::thread::hardware_concurrency() );
+    int cores = dtfeHardwareThreads();
 #ifdef OPEN_MP
-    cores = omp_get_max_threads();
+    cores = dtfeOmpMax();
     if ( omp_in_parallel() )
     {
         int const live = dtfePartitionsInFlight.load( std::memory_order_relaxed );   // (dynamic concurrency)
@@ -71,9 +73,9 @@ namespace CorePool
 inline int total()
 {
 #ifdef OPEN_MP
-    return std::max( 1, omp_get_max_threads() );
+    return dtfeOmpMax();
 #else
-    return std::max( 1, int( std::thread::hardware_concurrency() ) );
+    return dtfeHardwareThreads();
 #endif
 }
 

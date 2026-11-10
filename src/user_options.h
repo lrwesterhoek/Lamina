@@ -39,6 +39,7 @@ namespace po = boost::program_options;
 #include "miscellaneous.h"
 #include "box.h"
 #include "message.h"
+#include "run_mode.h"
 
 
 
@@ -189,6 +190,17 @@ struct User_options
     bool   sequentialTriangulation;    // --sequential-triangulation: the sequential insert (bit-reproducible run to run) for every tessellation
     bool   autoTuneReport;  // --auto-tune-report: print the auto-tuner's decision and predicted peak memory as ONE machine-readable line after loading the input, then exit (the GUI's memory check)
     bool   maxConcurrentOn; // true if the user gave --max-concurrent explicitly (0 is both the default and a legal value, so presence must be tracked separately for the auto-tuner)
+    // the run mode (run_mode.h; resolveRunMode, applyRunMode): how hard the run may lean on the machine, both binaries
+    RunMode runMode;               // --run-mode gentle|balanced|performance, else DTFE_RUN_MODE (any case), else performance (the binaries' default)
+    std::string runModeSource;     // why the mode is what it is: '--run-mode gentle', '--run-mode gentle from DTFE_RUN_MODE=GENTLE' or '--run-mode performance, the default' (the run log's 'run mode' line)
+    int    coreBudget;             // the threads the mode allows (applyRunMode; runModeState().coreBudget): N0, the OpenMP default at start-up, or the mode's share of it; 0 before applyRunMode
+    std::string coreBudgetNote;    // why the budget is not the mode's own: 'kept: OMP_NUM_THREADS=<v> was given' or 'raised: --max-concurrent <k> was given'; empty otherwise
+    std::string priorityNote;      // gentle on Linux: 'nice 10', 'nice <n> kept' or 'priority unchanged (setpriority: <why>)'; empty otherwise
+    bool   psGpuShareGiven;        // PS-DTFE --gpu-share was given (the standard binary has no such option)
+    long   psGpuShareSpec;         // --gpu-share as given: per mille 0..1000 (1000 = every partition on the GPU, the default), -1 = auto (the run mode's share)
+    std::string psGpuShareText;    // --gpu-share's value as typed ('0.6', 'auto'), for the run log
+    long   psGpuShareMille;        // the RESOLVED share, per mille (DTFE.cpp psResolveGpuShare, before the auto-tuner): the partitions of a partitioned '--gpu' exact run that deposit on the GPU, the others on the CPU; 1000 = all of them
+    std::string psGpuShareSource;  // why the share is what it is (psResolveGpuShare): '--gpu-share 0.6', '--gpu-share auto: ...', '--resume: the checkpoint's'
     
     
     bool   paddingOn;     // true if a padding value is set
@@ -292,6 +304,7 @@ struct User_options
     bool   psCacheOnly = false;  // PS-DTFE partition path: the partition's particles were NOT selected because its cached tessellation's header matched -- a load that then fails is an error, never an empty build (internal, no option)
     bool   psUseSubgrid;        // PS-DTFE partition path: allocate only each partition's Eulerian bounding box, mapped back via addFromSubgrid -> lower peak memory
     double psPartitionBytes;    // PS-DTFE partition path: what ONE partition in flight adds (the auto-tuner's estimate, + the GPU deposit's host snapshot once); the memory gate before each partition waits for this much free memory (0 = no estimate: no gate)
+    double psOnceBytes;         // PS-DTFE partition path, a mixed run's split ('--gpu-share' < 1): the part of psPartitionBytes one partition at a time holds (the GPU lock holder's snapshot and grids); the dynamic concurrency books it once, not per partition (0: every partition books psPartitionBytes in full)
     bool   psOrderedMerge;      // PS-DTFE partition path: merge the partitions' grids in index order (bit-reproducible sums). THE DEFAULT (the STAGED ordered merge, DTFE.cpp: a partition finished before its turn hands its sub-grids to a staging map, within the memory the machine has free, and its thread goes on, so threads do not idle behind a slow partition -- waiting behind one can cost 35%); '--ps-merge completion-order' (psCompletionOrderMergeFlag) adds in completion order instead (the grids then differ run to run in the last bits, even the exact Metal mass grid). The auto-tuner's SPEED split of a small set always merges in order (psSpeedSplit). '--ps-merge index-order' is accepted and changes nothing
     bool   psOrderedMergeFlag;  // the user gave --ps-merge index-order, or --resume (psOrderedMerge is then set too); unlike the speed split, such a run keeps the memory gate (DTFE.cpp)
     bool   psCompletionOrderMergeFlag; // --ps-merge completion-order: the partitions' grids are added as they finish (no staging, not bit-reproducible); --resume overrides it
@@ -360,6 +373,7 @@ private:
     void readRegionOptions(po::variables_map &vm);       // '--grid-window', '--region', '--region-mpc'
     void foldDeprecatedAliases(po::variables_map &vm);   // the deprecated spellings onto the canonical options
     void resolveAverageMode(po::variables_map &vm);      // '--exact' / '--sampled': the '_a' average (exactAverage, psExactDeposit)
+    void resolveRunMode(po::variables_map &vm);          // '--run-mode' / DTFE_RUN_MODE (runMode) and PS-DTFE's '--gpu-share' as given
     void checkGpuOptions(po::variables_map &vm);         // '--gpu', the triangulation's insert, the gradient route, '--exact'
     void checkDirectoryOptions();                        // '--scratch-dir', '--tessellation-cache'
     void checkPointEvalOptions(po::variables_map &vm);   // '--sample-points', '--serve' and their companions
@@ -370,6 +384,7 @@ private:
     void readRedshiftConeOptions(po::variables_map &vm); // '--redshift-cone', '--cone-origin'
     void readAdditionalOptions(po::variables_map &vm);   // the grid methods, '--interlace', units, '--redshiftSpace'
     void applyMethodFieldRules();                        // the field choice the build and the grid method allow
+    void applyRunMode();                                 // the mode's levers: the thread budget, the GPU pace and item cap, gentle's nice (run_mode.h)
 };
 
 

@@ -6,6 +6,8 @@
 # every run that names no '--exact' / '--sampled'. A suite that wants the pin exports it after sourcing this file
 # (tests/ps_auto_tune_check.sh, tests/dev/bytecmp.sh).
 unset DTFE_EXACT_AVERAGE
+# The run mode: the binaries' default, performance, is the 2f428bc behaviour; a login export must not steer the runs.
+unset DTFE_RUN_MODE
 
 # A python with numpy and a WORKING h5py: $PYTHON, else the probe in scripts/h5py_python.sh.
 source "$(dirname "${BASH_SOURCE[0]}")/../scripts/h5py_python.sh"

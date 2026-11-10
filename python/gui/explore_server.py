@@ -129,8 +129,9 @@ class ServerMixin:
             return None
         cache = Path(self.cache_edit.text().strip() or _ex.default_cache_dir(str(o.dir))).expanduser()
         ps = bool(kw.get("phase_space", True))   # the standard binary has no streams: it refuses --per-stream
+        # run_mode balanced: the server runs beside the launcher, as the exact zoom does (explore_zoom.py)
         kw.update(per_stream=ps, lagrangian_positions=ps, caustics=ps, velocity_gradient=True,
-                  tessellation_cache=str(cache), verbose=1, progress=True)
+                  tessellation_cache=str(cache), verbose=1, progress=True, run_mode="balanced")
         if self.server_partition:
             kw["partition"] = int(self.server_partition)
         if self.resident.value() > 0:           # also for the composite the binary splits a big snapshot into

@@ -5,7 +5,7 @@ repository root; quote paths that contain spaces. Scripts that need h5py should 
 run with a python whose h5py works (the shell scripts and tests pick one: `PYTHON`, else the first of `python3`,
 Homebrew's and `/usr/local`'s that imports numpy and h5py).
 The binaries' `--full-help` and each script's `--help` are the reference for every option and default.
-Both binaries share one name per shared option (`--gpu`, `--exact`, `--sampled`, `--no-overlap`, `--full-help`, `--lambda-th`);
+Both binaries share one name per shared option (`--gpu`, `--exact`, `--sampled`, `--run-mode`, `--no-overlap`, `--full-help`, `--lambda-th`);
 the older spellings are deprecated and still accepted for one release, with a warning.
 
 ---
@@ -119,9 +119,9 @@ below assume `export DTFE_DATA_ROOT=~/IllustrisTNG`), and so is the simulation: 
 the lines below without `-s` assume `export DTFE_SIM=TNG100-3-Dark`). Positional
 arguments override the snapshot list (default: 99). Partitioning is auto-tuned unless `PARTITION` /
 `MAX_CONCURRENT` are set. Both default to the production settings (512^3, the GPU on a GPU build,
-the T-web and V-web at `LAMBDA_TH` 0.3) and, since 2026-11-09, to the exact cell average (`--exact`; PS-DTFE's
-exact deposit runs on the CPU unless `-m`); `--sampled`, `DTFE_EXACT_AVERAGE=0` or a `SUBSAMPLES` count (`-n`)
-selects the sampled one.
+the T-web and V-web at `LAMBDA_TH` 0.3) and, since 2026-11-09, to the exact cell average (`--exact`); `--sampled`,
+`DTFE_EXACT_AVERAGE=0` or a `SUBSAMPLES` count (`-n`) selects the sampled one. They pass the run mode on every run,
+`balanced` unless `--run-mode` or `DTFE_RUN_MODE` says otherwise (`performance` inside a SLURM or PBS job).
 
 ```bash
 ./scripts/run_ps_dtfe.sh                                  # PS-DTFE, snapshot 99 of $DTFE_SIM (exact deposit)
@@ -130,6 +130,8 @@ selects the sampled one.
                                                           #   selects it), on the GPU
 ./scripts/run_ps_dtfe.sh -m 99                            # the exact conservative deposit (the default) on the GPU
 ./scripts/run_ps_dtfe.sh --sampled -m 99                  # the nSub^3 sampled deposit (nSub 3) on the GPU
+./scripts/run_ps_dtfe.sh --run-mode gentle -s TNG100-3-Dark 99   # the machine stays usable: half the performance
+                                                          #   cores, ~50 ms GPU buffers (nice 10 on Linux)
 DTFE_SIM=TNG100-3-Dark ./scripts/run_ps_dtfe.sh 0 50 99   # sim via env
 PARTITION="5 5 5" MAX_CONCURRENT=2 ./scripts/run_ps_dtfe.sh -s TNG300-3-Dark 99   # manual memory plan
 THREADS=4 SUBSAMPLES=1 ./scripts/run_ps_dtfe.sh 99        # cap threads; the sampled deposit at one sample per
@@ -158,6 +160,10 @@ FACE_GRADIENT=1         # [--face-gradient]      with the exact deposit: the MEA
 PS_LINEAR_DEPOSIT=1     # [--ps-linear-deposit]  linear-profile, mass-conserving sampled deposit
                         #                        (the moments then mass-weighted: PS_VOLUME_WEIGHTED=0)
 DTFE_GPU=0              # [--gpu]                default auto: the GPU deposit on a GPU build (1 = -m); 0 = the CPU
+DTFE_RUN_MODE=gentle    # [--run-mode]           gentle / balanced / performance; default auto: balanced
+                        #                        (performance inside a SLURM or PBS job)
+GPU_SHARE=0.5           # [--gpu-share]          the exact deposit on the GPU: the share of the partitions deposited
+                        #                        on the GPU, the rest on the free cores; default auto (the run mode's)
 SUBSAMPLES=2            # [--subsamples]         nSub of the sampled '_a' pass (cost ~ nSub^3); set, it selects
                         #                        the sampled deposit [--sampled] unless DTFE_EXACT_AVERAGE=1 or -e
 SAMPLE_POINTS=plane.bin # [--sample-points]      also point-evaluate this point set
@@ -235,7 +241,12 @@ GRID_SIZE=512 PTS_VEL_GRAD=1 ./scripts/run_ps_pipeline.sh
     --ps-vertex-mass          `# chart-independent tet masses (removes the 1-D(z_ic)/D(z) bias)` \
     --ps-volume-weighted      `# volume-weighted velocity moments; dispersion stays mass-weighted` \
     --ps-caustics             `# the caustic classes (.caustic, .causticClass)` \
-    --exact                   `# the exact deposit (the default; the driver passes it, and runs it on the CPU)`
+    --exact                   `# the exact deposit (the default; the driver passes it, with --gpu on a GPU build)`
+
+# the exact deposit on the GPU and the free CPU cores at once: performance's auto share (0.6 on a 10-core
+# M1 Max; the drivers pass '--gpu-share auto' whenever the exact deposit runs on the GPU)
+./PS-DTFE combined_099.hdf5 ps_out --grid 512 --periodic --input-format 105 --mpc-unit 1000 \
+    --field density_a velocity_a dispersion_a --gpu --exact --run-mode performance --gpu-share auto
 
 # point evaluation at arbitrary positions (text 'x y z' per line, or raw float64 Nx3);
 # the STANDARD binary supports the same flags/formats (streams = 0/1 coverage; no

@@ -148,7 +148,9 @@ class RunSpec:
     nsub: int = 3
     fields: list[str] = field(default_factory=lambda: list(PS_DEFAULT_FIELDS))
     gpu: bool | None = None          # None (not given) = the build's: on when the pair was built with a GPU backend,
-                                     # gpu_build_default()
+                                     # gpu_build_default(), and the device table says the GPU (recommended_gpu)
+    run_mode: str = "balanced"       # DTFE_RUN_MODE, the machine use (RUN_MODES): how hard the run may lean on the
+                                     # machine; balanced, the drivers' default
     vertex_mass: bool = True         # --ps-vertex-mass (script default on; needed for TNG IC inputs)
     volume_weighted: bool = True     # --ps-volume-weighted (the production convention)
     caustics: bool = True            # --ps-caustics: on, as run_ps_dtfe.sh's default and every
@@ -182,9 +184,10 @@ class RunSpec:
     def __post_init__(self):
         if not self.deposit:            # a job starts at the exact cell average (both estimators)
             self.deposit = production_deposit(self.estimator)
-        if self.gpu is None:            # a fresh job's GPU tick is the build's (a saved one is kept), but
-            self.gpu = (gpu_build_default(self.estimator, self.precision)   # PS-DTFE's exact deposit: the CPU
-                        and not (self.estimator == "ps" and self.deposit == "exact"))
+        if self.gpu is None:            # a fresh job's GPU tick is the drivers' automatic device (a saved one is
+            self.gpu = (gpu_build_default(self.estimator, self.precision)   # kept): the build's, by the machine use
+                        and recommended_gpu(self.deposit, self.fields, None, self.estimator, self.precision,
+                                            run_mode=self.run_mode))
 
     # ------------------------------------------------------------------ data
     def sim_path(self) -> Path:
@@ -227,7 +230,7 @@ class RunSpec:
             # (a hi-res slice with an explicit Partition is allowed: the standard binary answers the slice's points
             # per partition, each from the tetrahedra it owns)
             out += gpu_advice(self.gpu, self.deposit, dtfe_fields(self.fields) or DTFE_DEFAULT_FIELDS, dm_particles(self.sim),
-                              "dtfe", grid=self.grid, precision=self.precision)
+                              "dtfe", grid=self.grid, precision=self.precision, run_mode=self.run_mode)
 
         out += _busy_problems()
 
@@ -272,6 +275,7 @@ class RunSpec:
                 env["SAMPLE_POINTS"] = str(self.slice_plane)
                 env["PTS_VEL_GRAD"] = "1" if self.slice_vel_grad else "0"
             env["DTFE_GPU"] = "1" if self.gpu else "0"       # -m only switches the GPU ON; pin the env knob too
+            env["DTFE_RUN_MODE"] = self.run_mode             # the machine use, spelled out (ps_run_env for PS-DTFE)
             # and the cell average, both ways: run_dtfe.sh's default is the exact one, so a
             # 'sampled' job without this would run exact (-e, like -m, only switches it on)
             env["DTFE_EXACT_AVERAGE"] = "1" if self.deposit == "exact" else "0"
@@ -396,7 +400,11 @@ def script_text(steps: list[Step]) -> str:
 def export_script(steps: list[Step], title: str, slurm: dict | None = None) -> str:
     """The job as a runnable bash script (run from the repository root, as the GUI does), or as a
     SLURM batch job for a cluster (e.g. Hábrók): slurm = {job_name, time, cpus, mem, partition,
-    mail} (empty values are left out). Like the GUI, the script goes on after a failed step."""
+    mail} (empty values are left out). Like the GUI, the script goes on after a failed step. A SLURM job runs in
+    performance: each step's DTFE_RUN_MODE, and a Custom step's '--run-mode' value, become 'performance' (the
+    launcher's machine use is for this machine)."""
+    if slurm is not None:
+        steps = [_cluster_step(st) for st in steps]
     lines = ["#!/usr/bin/env bash"]
     if slurm is not None:
         opts = [("job-name", slurm.get("job_name") or "dtfe"), ("time", slurm.get("time")),
@@ -413,11 +421,24 @@ def export_script(steps: list[Step], title: str, slurm: dict | None = None) -> s
               'cd "$REPO" || exit 1']
     if slurm is not None:
         lines.append('export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"   # the binaries use OpenMP')
+        lines.append("# machine use: performance on the cluster (the launcher's choice is for this machine)")
     lines += ["set -o pipefail", "failed=0"]
     for st in steps:
         lines += [f"# {st.label}", _export_line(st)]
     lines += ['[ "$failed" -eq 0 ] || echo "$failed step(s) failed" >&2', 'exit "$failed"', ""]
     return "\n".join(lines)
+
+
+def _cluster_step(st: Step) -> Step:
+    """A step as a SLURM job runs it: its DTFE_RUN_MODE (a driver's knob) and its '--run-mode' value (a Custom step
+    runs the binary itself) set to performance, in a copy (the job's own steps stay as they are)."""
+    env, argv = dict(st.env), list(st.argv)
+    if "DTFE_RUN_MODE" in env:
+        env["DTFE_RUN_MODE"] = "performance"
+    for i, a in enumerate(argv[:-1]):
+        if a == "--run-mode":
+            argv[i + 1] = "performance"
+    return Step(st.label, argv, env, st.tee, st.after)
 
 
 def _export_line(st: Step) -> str:
@@ -457,9 +478,16 @@ def machine_ram_gb() -> float:
 
 
 def _run_option_problems(spec) -> list[tuple[str, str]]:
-    """The shared run options: the tessellation cache folder (local, existing: the binary refuses iCloud and
-    does not create it -- the scripts do, the Custom run does not) and the memory budget."""
+    """The shared run options: the machine use (an unknown one is an error; an OMP_NUM_THREADS the launcher inherited
+    keeps its thread count in every mode, the binaries' rule), the tessellation cache folder (local, existing: the
+    binary refuses iCloud and does not create it -- the scripts do, the Custom run does not) and the memory budget."""
     out = []
+    mode = getattr(spec, "run_mode", "balanced")
+    if mode not in RUN_MODES:
+        out.append(("error", f"Machine use: unknown value {mode}"))
+    if os.environ.get("OMP_NUM_THREADS"):
+        out.append(("info", f"OMP_NUM_THREADS={os.environ['OMP_NUM_THREADS']} in the launcher's environment keeps "
+                            "the thread count whatever the machine use"))
     tc = getattr(spec, "tess_cache", "")
     if tc:
         d = Path(tc).expanduser()
@@ -506,13 +534,16 @@ def ps_run_env(spec) -> dict[str, str]:
     cannot leak in), each under its new name and its older one: the GPU (-m only switches it on), the parallel
     triangulation, the start-over tick and the merge order. The merge tick is the explicit index order
     (PS_MERGE=index-order, which keeps the memory gate on under the auto-tuner's speed split, as the launcher's
-    ORDERED_MERGE=1 always did), unticked the merge as partitions finish (completion-order)."""
+    ORDERED_MERGE=1 always did), unticked the merge as partitions finish (completion-order). The machine use
+    (DTFE_RUN_MODE) and the GPU share, 'auto' (GPU_SHARE: the machine use's share of an exact deposit on the GPU),
+    pinned the same way."""
     on = lambda b: "1" if b else "0"
     return {"DTFE_GPU": on(spec.gpu), "PS_GPU": on(spec.gpu), "PS_METAL": on(spec.gpu),
             "PARALLEL_TRIANGULATION": on(spec.parallel_triangulation), "PS_PARALLEL_TRI": on(spec.parallel_triangulation),
             "PS_MERGE": "index-order" if spec.ordered_merge else "completion-order",
             "ORDERED_MERGE": on(spec.ordered_merge),       # K1
-            "DTFE_RESUME": on(not spec.start_over), "PS_RESUME": on(not spec.start_over)}
+            "DTFE_RESUME": on(not spec.start_over), "PS_RESUME": on(not spec.start_over),
+            "DTFE_RUN_MODE": spec.run_mode, "GPU_SHARE": "auto"}
 
 
 def ps_exact_env(exact: bool) -> dict[str, str]:
@@ -643,7 +674,7 @@ def _pts_conventions_problems(spec, points: bool) -> list[tuple[str, str]]:
 def _ps_option_problems(spec, n_particles) -> list[tuple[str, str]]:
     """The phase-space run options' checks, shared by the Grids and Pipeline jobs (duck-typed on the
     option names both carry: fields, deposit, nsub, gpu, caustics, caustic_cusps, parallel_triangulation,
-    vertex_mass, precision)."""
+    vertex_mass, precision, run_mode)."""
     out: list[tuple[str, str]] = []
     if not spec.fields:
         out.append(("error", "no fields selected"))
@@ -660,7 +691,8 @@ def _ps_option_problems(spec, n_particles) -> list[tuple[str, str]]:
         if spec.caustics and spec.gpu:
             out.append(("warning", "the linear deposit on the GPU keeps only the fold parity of the caustic classes "
                                    "(no collapse counts): run it on the CPU for the full classification"))
-    out += gpu_advice(spec.gpu, spec.deposit, spec.fields, n_particles, "ps", precision=spec.precision)
+    out += gpu_advice(spec.gpu, spec.deposit, spec.fields, n_particles, "ps", precision=spec.precision,
+                      run_mode=getattr(spec, "run_mode", "balanced"))
     if spec.parallel_triangulation and not tbb_built(spec.precision):
         out.append(("warning", "parallel triangulation asked for, but the binary was built without TBB: ignored"))
     elif spec.parallel_triangulation:
@@ -702,6 +734,22 @@ PRECISION_TEXT = {"single": "single precision (the default)",
 
 DIMS = (3, 2)
 DIM_TEXT = {3: "3D", 2: "2D: a snapshot in a plane (two-column coordinates; the 2D programs, CPU only)"}
+
+# The machine use: how hard a run may lean on the machine (both binaries' '--run-mode', the drivers' DTFE_RUN_MODE).
+# Balanced is the drivers' and the launcher's default; the binaries' own is performance (a SLURM export runs it).
+# Each mode's menu text and its item tip (at most two lines).
+RUN_MODES = ("gentle", "balanced", "performance")
+RUN_MODE_TEXT = {
+    "gentle": ("Gentle: the machine stays fully usable",
+               "Half the performance cores and short GPU buffers, and on Linux a lower priority:\n"
+               "the machine stays usable while the run takes what is left."),
+    "balanced": ("Balanced: most of the machine (the default)",
+                 "The performance cores less a quarter and short GPU buffers (about 50 ms):\n"
+                 "the display never waits on the GPU."),
+    "performance": ("Performance: the fastest run",
+                    "Every core and long GPU buffers; a partitioned phase-space exact run on the GPU\n"
+                    "also deposits on the free cores. The binaries' default, and a cluster job's."),
+}
 
 
 def binary_name(estimator: str, precision: str = "single", dim: int = 3) -> str:
@@ -1104,18 +1152,20 @@ def _snaps_text(snaps) -> str:
 
 
 def job_summary(kind: str, spec) -> str:
-    """One line naming what a job does, for the queue list."""
+    """One line naming what a job does, for the queue list (its machine use when it is not balanced, the default)."""
+    mode = getattr(spec, "run_mode", "balanced")
+    mode = "" if mode == "balanced" else f", {mode}"
     if kind == "custom":
         est = "PS-DTFE" if spec.estimator == "ps" else "DTFE"
         cells = "²" if getattr(spec, "dim", 3) == 2 else "³"
-        return f"Custom snapshot · {Path(spec.input_file).name} · {est} {spec.grid}{cells} -> {spec.output_root()}"
+        return f"Custom snapshot · {Path(spec.input_file).name} · {est} {spec.grid}{cells}{mode} -> {spec.output_root()}"
     if kind == "grids":
         est = "PS-DTFE" if spec.estimator == "ps" else "DTFE"
         extra = ", exact" if spec.deposit == "exact" else ""
-        return f"Grids · {spec.sim} · {_snaps_text(spec.snapshots)} · {est} {spec.grid}³{extra}"
+        return f"Grids · {spec.sim} · {_snaps_text(spec.snapshots)} · {est} {spec.grid}³{extra}{mode}"
     if kind == "pipeline":
         return (f"Pipeline · {', '.join(spec.sims)} · plane {spec.nu}² · grid {spec.grid}³"
-                + (", exact" if spec.deposit == "exact" else "")
+                + (", exact" if spec.deposit == "exact" else "") + mode
                 + (" · plan only" if spec.plan_only else " · + figures" if spec.render else ""))
     if kind == "plots":
         names = [FIGURE_SET[k].title for k in spec.sets if k in FIGURE_SET]
@@ -1308,44 +1358,36 @@ def tbb_built(precision: str = "single", dim: int = 3) -> bool:
 
 
 # Where the GPU deposit pays, measured on this machine (256^3 sampled grids): 0.26M
-# particles CPU 18 s vs GPU 24 s, 2.1M 51 vs 20 s, 7.1M 115 vs 40 s; the exact deposit (whole runs): 0.26M
-# CPU 8.9 s vs GPU 10.8 s, 2.1M 23 vs 18 s, TNG100-3-Dark z=0 (94M) at 512^3 1133 vs 1156 s (2026-11-09; the
-# sampled nSub 3 deposit there: GPU 1260 s, CPU 1644 s) -- so exact runs start on the CPU, and a ticked GPU warns
-# from PS_EXACT_CPU_FROM (a round number between the 2.1M and 94M measurements, nothing measured in between);
-# a run that writes no grid (a slice alone) deposits nothing.
-# Standard DTFE (the work-item kernel with the threadgroup cell table):
-# 7.1M particles at 512^3 CPU 39.1 s vs GPU 17.3 s (with the velocity gradient 48.2 vs 32.0 s), 2.1M at
-# 512^3 24.6 vs 10.6 s, 0.26M at 256^3 3.8 vs 2.0 s; 7.1M at 256^3 ties (14.2 vs 14.4 s: reading,
-# triangulation and writing are the floor there). So the GUI starts standard-DTFE jobs on the GPU when
-# it is built and says so when a fine-grid run has it unticked. Its exact cell average (--exact):
-# 0.26M particles at 256^3 CPU 3.3 s vs GPU 2.0 s (whole runs); TNG100-3-Dark z=0 at 512^3 with the face
-# gradient, CPU 431 s vs GPU 439 s (2026-11-09: a tie, the triangulation and the I/O dominate there).
+# particles CPU 18 s vs GPU 24 s, 2.1M 51 vs 20 s, 7.1M 115 vs 40 s -- so a small sampled PS-DTFE run starts on the
+# CPU (GPU_PAYS_FROM); a run that writes no grid (a slice alone) deposits nothing. Everything else starts on the
+# drivers' automatic device (scripts/config.sh gpu_auto_resolve), from the bench on TNG100-3-Dark z=0 at 512^3
+# (2026-11-09, every core): PS-DTFE's exact deposit CPU 1133 s vs GPU 1156 s (the sampled nSub 3 deposit there: GPU
+# 1260 s, CPU 1644 s), so the GPU in every machine use -- it leaves the cores to the machine in gentle and balanced,
+# and in performance '--gpu-share auto' (the jobs' GPU_SHARE) deposits part of a partitioned run on the free cores.
+# Standard DTFE's exact cell average with the face gradient CPU 431 s vs GPU 439 s (a tie: the triangulation and the
+# I/O dominate there), so the GPU; its sampled average CPU 315 s vs GPU 433 s, so the CPU in performance and the GPU
+# in gentle and balanced (a CPU run at their lowered thread budget is not measured).
 GPU_PAYS_FROM = 1_000_000
-PS_EXACT_CPU_FROM = 10_000_000
-DTFE_GPU_PAYS_FROM_GRID = 512
 
 
 def gpu_advice(gpu: bool, deposit: str, fields, n_particles, estimator: str,
-               grid: int = 0, precision: str = "single", dim: int = 3) -> list[tuple[str, str]]:
-    """A warning when the GPU setting is the slower one for this run; [] when it is right or unknown
-    (and for a 2D run, which has no GPU)."""
+               grid: int = 0, precision: str = "single", dim: int = 3,
+               run_mode: str = "balanced") -> list[tuple[str, str]]:
+    """A warning when the GPU setting is the slower one for this run in this machine use ('run_mode'); [] when it is
+    right or unknown (and for a 2D run, which has no GPU). Standard DTFE: its sampled average with the GPU ticked in
+    performance (faster on the CPU there); the GPU elsewhere is the device table's (recommended_gpu), and a CPU run at
+    the lowered thread budget of gentle or balanced is not measured. PS-DTFE's exact deposit: none (the GPU in every
+    machine use, a tie with every CPU core); its sampled deposit by the particle count."""
     if dim == 2:
         return []
     if estimator == "dtfe":
-        if deposit == "exact" and not gpu and gpu_built("dtfe", precision):
-            return [("warning", "the exact cell average is ~1.6x faster on the GPU (2.0 s against 3.3 s at 256³ "
-                                "with 0.26M particles); tick the GPU")]
-        if not gpu and grid >= DTFE_GPU_PAYS_FROM_GRID and gpu_built("dtfe", precision):
-            return [("warning", f"standard DTFE on a {grid}³ grid: the GPU interpolation is 1.5-2.3x faster than "
-                                "the CPU (17 s against 39 s at 512³ with 7.1M particles); tick the GPU")]
+        if gpu and deposit == "sampled" and run_mode == "performance" and gpu_built("dtfe", precision):
+            return [("warning", "performance: standard DTFE's sampled average is faster on the CPU (315 s against "
+                                "433 s on the GPU for TNG100-3-Dark at 512³); untick the GPU")]
         return []
     if estimator != "ps" or not fields:
         return []
     if deposit == "exact":
-        if gpu and n_particles is not None and n_particles >= PS_EXACT_CPU_FROM:
-            return [("warning", f"{n_particles/1e6:.3g}M particles: the exact deposit is faster on the CPU on "
-                                "production runs (1133 s against 1156 s on the GPU for TNG100-3-Dark at 512³); "
-                                "untick the GPU")]
         return []
     if n_particles is None:
         return []
@@ -1359,18 +1401,21 @@ def gpu_advice(gpu: bool, deposit: str, fields, n_particles, estimator: str,
 
 
 def recommended_gpu(deposit: str, fields, n_particles, estimator: str = "ps", precision: str = "single",
-                    dim: int = 3) -> bool:
-    """The GPU setting a fresh job should start with (the GPU built; see gpu_advice). Standard DTFE:
-    the GPU (1.5-2.3x faster on fine grids, a tie on coarse ones). PS-DTFE's exact deposit, the default: the CPU
-    (faster on production runs; run_ps_dtfe.sh's choice too unless the GPU is asked for). A double build hands the
-    GPU float copies of its tetrahedra: the deposit's sums are single precision, everything else double.
-    A 2D job: never (the 2D programs are CPU-only)."""
+                    dim: int = 3, run_mode: str = "balanced") -> bool:
+    """The GPU setting a fresh job should start with in the machine use 'run_mode' (the GPU built; see gpu_advice):
+    the drivers' automatic device (scripts/config.sh gpu_auto_resolve). PS-DTFE's exact deposit, the default: the GPU
+    in every machine use (1156 s against 1133 s on every CPU core for TNG100-3-Dark at 512³; in performance the
+    drivers' '--gpu-share auto' adds the free cores). Standard DTFE: the GPU, except its sampled average in
+    performance (315 s on the CPU against 433 s on the GPU there); its exact cell average is a tie (439 s against
+    431 s). PS-DTFE's sampled deposit: the GPU from ~1M particles. A double build hands the GPU float copies of its
+    tetrahedra: the deposit's sums are single precision, everything else double. A 2D job: never (the 2D programs
+    are CPU-only)."""
     if not gpu_built(estimator, precision, dim):
         return False
     if estimator != "ps":
-        return True
+        return not (deposit == "sampled" and run_mode == "performance")
     if deposit == "exact":
-        return False
+        return True
     return bool(fields) and (n_particles is None or n_particles >= GPU_PAYS_FROM)
 
 

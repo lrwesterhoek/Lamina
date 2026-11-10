@@ -48,6 +48,7 @@
 #include "box.h"
 #include "miscellaneous.h"
 #include "message.h"
+#include "run_mode.h"       // dtfeOmpMax: the run mode's thread budget
 #include <limits>
 #ifdef OPEN_MP
     #include <omp.h>
@@ -252,7 +253,7 @@ void printElapsedTime(boost::timer *t, User_options *userOptions,
 inline bool selectionRunsParallel(size_t const N)
 {
 #ifdef OPEN_MP
-    return N >= (size_t(1) << 18) and not omp_in_parallel() and omp_get_max_threads() >= 2;
+    return N >= (size_t(1) << 18) and not omp_in_parallel() and dtfeOmpMax() >= 2;
 #else
     (void)N;
     return false;
