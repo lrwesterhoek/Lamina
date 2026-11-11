@@ -303,8 +303,9 @@ struct User_options
     bool   psSuppressGridStats; // PS-DTFE partition path: silence per-partition coverage/stream stats (each covers ~1/Npart of the grid); aggregate reported once after the loop
     bool   psCacheOnly = false;  // PS-DTFE partition path: the partition's particles were NOT selected because its cached tessellation's header matched -- a load that then fails is an error, never an empty build (internal, no option)
     bool   psUseSubgrid;        // PS-DTFE partition path: allocate only each partition's Eulerian bounding box, mapped back via addFromSubgrid -> lower peak memory
-    double psPartitionBytes;    // PS-DTFE partition path: what ONE partition in flight adds (the auto-tuner's estimate, + the GPU deposit's host snapshot once); the memory gate before each partition waits for this much free memory (0 = no estimate: no gate)
-    double psOnceBytes;         // PS-DTFE partition path, a mixed run's split ('--gpu-share' < 1): the part of psPartitionBytes one partition at a time holds (the GPU lock holder's snapshot and grids); the dynamic concurrency books it once, not per partition (0: every partition books psPartitionBytes in full)
+    double psPartitionBytes;    // PS-DTFE partition path: what ONE partition in flight adds (the auto-tuner's whole lane, perPartition + laneOnce, + the GPU deposit's host snapshot once); the memory gate before each partition waits for this much free memory (0 = no estimate: no gate)
+    double psOnceBytes;         // PS-DTFE partition path, a mixed run's split ('--gpu-share' < 1): the part of psPartitionBytes one partition at a time holds (the GPU lock holder's snapshot and grids, and the lane share's laneOnce); the dynamic concurrency books it once, not per partition (0: every partition books psPartitionBytes in full)
+    int psInFlightCap;          // PS-DTFE partition path: the most partitions in flight the auto-tuner's lane share holds for; the dynamic concurrency stops there (0: no limit)
     bool   psOrderedMerge;      // PS-DTFE partition path: merge the partitions' grids in index order (bit-reproducible sums). THE DEFAULT (the STAGED ordered merge, DTFE.cpp: a partition finished before its turn hands its sub-grids to a staging map, within the memory the machine has free, and its thread goes on, so threads do not idle behind a slow partition -- waiting behind one can cost 35%); '--ps-merge completion-order' (psCompletionOrderMergeFlag) adds in completion order instead (the grids then differ run to run in the last bits, even the exact Metal mass grid). The auto-tuner's SPEED split of a small set always merges in order (psSpeedSplit). '--ps-merge index-order' is accepted and changes nothing
     bool   psOrderedMergeFlag;  // the user gave --ps-merge index-order, or --resume (psOrderedMerge is then set too); unlike the speed split, such a run keeps the memory gate (DTFE.cpp)
     bool   psCompletionOrderMergeFlag; // --ps-merge completion-order: the partitions' grids are added as they finish (no staging, not bit-reproducible); --resume overrides it
@@ -317,7 +318,7 @@ struct User_options
     double psReserveRecords;    // ... the point stream records it writes as the partitions merge (budgeted), bytes
     double psReserveFirstMerge; // ... the deposit grids the first merge sizes (moment weights, face sums), bytes
     double psBudgetBytes;       // ... the auto-tuner's memory budget (0: none known)
-    double psParkRoom;          // what the memory budget leaves beside the auto-tuner's predicted peak (budget - predicted): the staged ordered merge parks finished partitions in RAM only within it and spills the rest (DTFE.cpp parkWhere; HUGE_VAL = no budget known)
+    double psParkRoom;          // what the memory budget leaves beside the auto-tuner's predicted peak with every partition lane whole (budget - predictedWholeLanes): the staged ordered merge parks finished partitions in RAM only within it and spills the rest (DTFE.cpp parkWhere; HUGE_VAL = no budget known)
     double psLookAheadRoom;     // what the memory budget leaves beside the grids, particles and ONE partition (the auto-tuner's budget - fixed - perPartition): the look-ahead runs only when it holds no more (DTFE.cpp; HUGE_VAL = no budget known)
     bool   psDeferNormalization; // PS-DTFE partition path: keep fields as density-weighted moments (no per-partition normalize) so they sum linearly and normalize once afterwards; correct for multi-stream cells spanning partitions
 #endif
@@ -326,7 +327,7 @@ struct User_options
     bool   stdTessellationPrebuilt; // set by dtfeInterpolatePrebuilt (triangulation.cpp): the look-ahead built this sub-domain's tessellation already, so DTFE_interpolation skips buildTessellation
     bool   stdNoOverlap;        // --no-overlap: no look-ahead tessellation of partition k+1 while partition k deposits on the GPU
     bool   stdLookAheadOffBudget; // set by the auto-tuner: the busiest partition plus the next one's tessellations do not fit the memory budget, so this run has no look-ahead (its predicted peak counts none)
-    double stdLookAheadCounted; // the auto-tuner's count of the look-ahead's bytes: the partition that needs the most, from the particles (0 = no plan); the loop's free-memory check takes the larger of it and its own uniform count
+    double stdLookAheadCounted; // the auto-tuner's booked look-ahead: kStdLookAheadFactor x its count of the partition that needs the most, from the particles (0 = no plan); the loop's free-memory check takes the larger of it and its own uniform count
     double stdLookAheadRoom;    // what the memory budget leaves beside the grids, particles, the GPU snapshot and ONE partition (the auto-tuner's budget - fixed - gpuSnapshot - perPartition); HUGE_VAL = no budget known
 #endif
     // both binaries (standard DTFE resumes its partition loop through the same partition_checkpoint.h)

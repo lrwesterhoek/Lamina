@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The G-tuner baseline of docs/cleanup-plan.md (P0.3 step 3): a FIXED list of '--auto-tune-report' configurations
-# (91 until 2026-11-07, 110 until 2026-11-10, 124 since: the P8/P10 lines, then the P11.7 face lines and the three of
-# their review, appended at the end), one line each, "<label><TAB><the AUTO-TUNE-REPORT line>". Run it with the reference binaries once
+# (91 until 2026-11-07, 110 until 2026-11-10, 124 until 2026-11-11, 127 since: the P8/P10 lines, the P11.7 face
+# lines and the three of their review, then the three lane-share lines of P11.8, appended at the end), one line
+# each, "<label><TAB><the AUTO-TUNE-REPORT line>". Run it with the reference binaries once
 # and keep the set with them; rerun it with the binaries of a change and diff the two: only the configurations the
 # change targets may differ.
 #
@@ -159,6 +160,21 @@ one "ps face exact gpu N=128 ram=8 grid=1024 prod + scalar" 8 PS-DTFE "$PAN128" 
 one "ps N=128 ram=8 grid=1024 prod + scalar exact gpu" 8 PS-DTFE "$PAN128" "${PS_COMMON[@]}" --grid 1024 \
     --field density_a velocity_a gradient_a divergence_a shear_a vorticity_a dispersion_a scalar_a scalarGradient_a \
     --ps-volume-weighted --ps-exact-deposit --ps-gpu
+
+# 2026-11-11 (plan P11.8): the lane share of several partitions in flight. Each PS line among the 124 above plans
+# one partition at a time, more in flight than the share is measured for, a CPU deposit, or no evaluation points:
+# the share moves none of them (P11.8's look-ahead factor and post floor move 8 standard lines, all at grid 1024).
+# These three plan 2 to 4 in flight with every deposit on the GPU (2 to 6 with the free cores depositing too) and
+# evaluation points booked, where the first lane is booked whole and each other one at a share.
+EXTRA_ENV="DTFE_AUTO_PTS_N=4000000" \
+one "ps lane share exact gpu pts N=128 ram=8 grid=256 prod" 8 PS-DTFE "$PAN128" "${PS_COMMON[@]}" --grid 256 \
+    "${PROD[@]}" --ps-exact-deposit --ps-gpu
+EXTRA_ENV="DTFE_AUTO_PTS_N=4000000" \
+one "ps lane share exact gpu share 0.5 pts N=128 ram=8 grid=256 prod" 8 PS-DTFE "$PAN128" "${PS_COMMON[@]}" --grid 256 \
+    "${PROD[@]}" --ps-exact-deposit --ps-gpu --gpu-share 0.5
+EXTRA_ENV="DTFE_AUTO_PTS_N=4000000" \
+one "ps lane share face exact gpu pts N=128 ram=11 grid=256 prod" 11 PS-DTFE "$PAN128" "${PS_COMMON[@]}" --grid 256 \
+    "${PROD[@]}" --ps-exact-deposit --face-gradient --ps-gpu
 
 echo "$n configurations -> $OUT ($(grep -c $'\tAUTO-TUNE-REPORT ' "$OUT") with a report line)"
 rm -rf "$T"

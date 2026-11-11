@@ -268,12 +268,17 @@ struct AutoTuneReport
     int    partition = 1, maxConcurrent = 1;
     double predicted = 0., fixed = 0., budget = 0., pts = 0.;   // bytes
     double fixedLoop = 0.;      // standard DTFE: 'fixed' while the partition loop runs (its grids only; 0: as fixed)
-    double perPartition = 0.;   // bytes ONE partition in flight adds (the run's memory gate waits for this much)
+    double perPartition = 0.;   // bytes each partition in flight adds; under PS-DTFE's lane share the first adds laneOnce
+                                // more (the run's memory gate waits for perPartition + laneOnce + gpuSnapshot)
     double lookAhead = 0.;      // bytes the partition look-ahead adds to 'predicted' (0: none runs)
     double gpuSnapshot = 0.;    // bytes of the GPU deposit's host snapshot (with --grid-window: and of the deposit's window
                                 // grids), held by ONE partition at a time (in 'predicted')
     bool   mixedLanes = false;  // PS-DTFE: a mixed run's split ('--gpu-share' < 1): gpuSnapshot is also the GPU lock
                                 // holder's device and host grids, and the dynamic concurrency books it once
+    double laneOnce = 0.;       // PS-DTFE lane share (auto_tune.cc laneShareCut): what the first partition in flight holds
+                                // beyond each other one, in 'predicted' once (0: every lane booked whole)
+    double predictedWholeLanes = 0.;   // ... 'predicted' with every lane whole: the staged merge's park room
+    int    inFlightCap = 0;     // ... the most partitions in flight that booking holds for (0: no limit)
     double streamsEstimate = -1., streamsBudgeted = 0.;
     // PS-DTFE, for the partition loop's dynamic concurrency (plan P8.10): whether the tuner chose the concurrency (a
     // user's --max-concurrent is kept as given), and what the run still allocates once its partitions are in flight --
@@ -378,7 +383,8 @@ struct PartitionMemoryGate
     double reserveEnd = 0., reserveFirstMerge = 0., reserveRecords = 0., budget = 0.;
     double startFree = -1., startOwn = -1.;
     /* A MIXED run's split ('--gpu-share' < 1): 'once' is the part of 'need' that one partition at a time holds (the GPU
-       lock holder's snapshot, device and host grids), so the ledger books it once and need - once for each partition
+       lock holder's snapshot, device and host grids and, under the lane share, what the first partition holds beyond
+       the others: laneOnce), so the ledger books it once and need - once for each partition
        in flight; the live check keeps the whole 'need' (the lock may be free when this partition reaches it). 0: every
        partition books 'need' in full (an all-GPU run's snapshot too, as before). Like a lane not yet at its peak, the
        once part booked while no deposit holds the GPU can hide up to that much of the run's other growth; it nets out

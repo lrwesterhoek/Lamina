@@ -53,13 +53,29 @@ constexpr double kGpuTetSlack = 1.3;
 // the standard GPU deposit's tetrahedra per particle of a thread's own box: x this for the ones crossing its faces
 constexpr double kStdFaceTets = 1.3;
 // standard DTFE: the share of the busiest partition's bytes still in the footprint once the partition loop is over and
-// the derived grids are allocated (stdPeak). Fitted on a replay of the 28 logged standard runs (plan P8.9 step 1:
-// lowest -1%, mean +13%; std100_099 +43% -> +14%; there 0.5 GB of an 11.8 GB partition stayed) ...
+// the derived grids are allocated (stdPeak). Fitted on a replay of the logged standard runs (plan P8.9 step 1; there
+// 0.5 GB of an 11.8 GB partition stayed); refit 2026-11-10 with kStdPostKeepGrids and kStdLookAheadFactor on the
+// 27-run record: lowest -4.7% (std_exact_gpu_face_mc1_ptri), mean +8.7% over 24 rows; std100_099 (6^3 x 8, an
+// interim build) +27.5% and the 6^3 face trio +38% to +41%: over, accepted (see kStdPostKeepGrids) ...
 constexpr double kStdPostKeep = 0.35;
 // ... but a small partition stays whole: up to this many bytes are booked in full (tests/dtfe_auto_tune_check.sh E,
 // 128^3: all of a 0.42 GB partition stayed, the derived grids came on top). Both refitted in phase R from the
-// SUMMARY's 'before post-proc' line
+// SUMMARY's 'before post-proc' line. The absolute floor: kStdPostKeepGrids raises it where the post-processing
+// allocates more than 2 GB
 constexpr double kStdPostKeepFloor = 1.e9;
+// ... and the floor of what stays after the loop, as a share of the grids only the post-processing allocates
+// (fixed - fixedLoop: the derived fields and the T-web stage; 0 with '--scratch-dir' or without derived fields).
+// FITTED on ONE run: std100_099_split6 (6^3 x 9, '--per-tet-gradient', 35.11 GB after the loop) needs >= 0.476 for
+// -5%; the 4^3 timing plan stays chosen at its 33.9 GB budget up to 0.511. Its three face-gradient twins peaked at
+// 23.95-24.43 GB, below 'fixed': which state a run gets depends on the machine, not on the gradient route
+constexpr double kStdPostKeepGrids = 0.5;
+// standard DTFE: what a look-ahead build holds beyond the tessellations and particle copy it is counted with
+// (StdPlan::aheadMax). Not itemized, FITTED (2026-11-10, the 27-run record): the build's transients (at one thread per
+// partition the TBB insert's sorted copies by the default rule, triangulation.cpp: mc1_ptri - mc1 = +4.44 GB) and the
+// count grid's under-count of the busiest partition at 4-6 threads (std_gentle: 12.2 M padded vertices planned,
+// 15.67 M in the run). std_gentle needs >= 1.114 and std_exact_gpu_face_mc1_ptri >= 1.258 for -5%; the points run
+// (std_exact_gpu_face_pts) keeps its look-ahead under the 41.23 GB budget up to 1.294
+constexpr double kStdLookAheadFactor = 1.275;
 // a split for speed must predict less than this share of the best wall time so far: a clear gain only
 constexpr double kSpeedSplitGain = 0.85;
 // the '--sample-points' HitSink block one point-walk thread fills before handing it over (ps_point_eval.cc's size)
@@ -73,6 +89,27 @@ constexpr double kAllocKeepBytes = 4294967296.;
 constexpr double kGpuCellCap = double(UINT32_MAX);
 // the Eulerian padding rule's floor, in partition widths (DTFE.cpp's PSPartitionPlan; autoTunePadWidths)
 constexpr double kPartitionPadFloor = 0.3;
+// PS-DTFE LANE SHARE (plan P11.8; memorySplit's plans only, see AutoTunePSPlanner::laneShareOn). Beside the first
+// partition in flight, booked whole (partitionBytes), each other lane books this share of its own sub-grid state: a CPU
+// deposit's sub-grids and words (times the CPU share of a mixed run's partitions), a face pass's state after the GPU
+// hold. FITTED, not derived: TNG100-3-Dark z=0, 512^3, 6^3, exact, 16.8M sample points (2026-11-09/10): the 8 mixed
+// runs (3 to 6 in flight, GPU share 0.5 to 0.7) and the all-GPU face run with points (4 in flight, 33.41 GB), which
+// sets the ceiling (0.562 at +15%); a 2^3 face run on a 64^3 grid without points (outside the share) needs 0.489 or
+// more. Never below the split's mean sub-grid over its largest (laneSpread).
+constexpr double kPSLaneShare = 0.55;
+// ... and the share of the GPU hold grids (gpuCellBytes) each other all-GPU lane books: one deposit holds the device at
+// a time (ctxMutex), and a lane after its hold keeps its own sub-grids (bCellDeposit, 116 of 396 B/cell on TNG).
+// FITTED on the 7 all-GPU TNG runs with points of the same record, whose ceiling is 0.36 (one at +15%); a flat 4-lane
+// run outside the share needs 0.052 or more.
+constexpr double kPSLaneShareHold = 0.30;
+// the most partitions in flight the shares hold for: what was measured (mixed runs up to 6, all-GPU runs 4). Above it
+// every lane is booked whole, and the dynamic concurrency stops there (DTFE.cpp psInFlightCap)
+constexpr int kPSLaneShareMax = 6;
+constexpr int kPSLaneShareMaxGpu = 4;
+// under --scratch-dir the full grids below its threshold stay in RAM and 'fixed' books none of them: 3.2-3.8 GB at
+// 512^3 in the production selection (the phase R calibration), here in units of the threshold (scratchMinBytes, 1 GB
+// by default). The lane share books them (laneShareCover); with every lane booked whole that booking hid them
+constexpr double kPSScratchRamGrids = 3.8;
 
 // Full-grid bytes per cell for one field selection, for ONE of the two phases:
 //
@@ -959,15 +996,15 @@ inline std::vector< std::vector<double> > stdTuneSplit(StdTuneDensity const &den
 
 // Bytes per padded vertex of a standard sub-domain while its tessellation is built: the thread's particle copy (alive
 // while the triangulation grows) + the triangulation (96 B incl. the double volume accumulator + 6.77 cells x 72 B +
-// slack; the double build's vertex data in 8 B instead of 4: +50 B/vertex) + the TBB insert's sorted copies with
-// '--parallel-triangulation' (+203 B per vertex, measured on PS), and 6% for the dummy points the padding test adds on
-// the padded box's faces (3-5% of a sub-box at TNG scale). One definition for the plan below and the partition loop's
-// look-ahead.
+// slack; the double build's vertex data in 8 B instead of 4: +50 B/vertex), and 6% for the dummy points the padding
+// test adds on the padded box's faces (3-5% of a sub-box at TNG scale). The standard model books no TBB copy per
+// vertex: a look-ahead build's is in kStdLookAheadFactor; an in-team TBB insert (2-5 threads by hand) is not booked.
+// One definition for the plan below and the partition loop's look-ahead.
 inline double stdBytesPerPaddedVertex(User_options const &u)
 {
     double const kDT = kStdVertexBytes + 10. * ( double(sizeof(Real)) - 4. );   // the double build: +10 B per 4 B of Real
 #if defined(PARALLEL_TRIANGULATION) && NO_DIM==3
-    double const kParInsert = 0.;   // (the parallel insert's bytes are added per plan in finishReport, where the threads per partition and the threshold are known)
+    double const kParInsert = 0.;   // (none: see above; finishReport is PS-DTFE's)
     (void)u;
 #else
     double const kParInsert = 0.;
@@ -1149,12 +1186,14 @@ struct AutoTuneStdPlanner : AutoTuneStdInputs
        (plan P8.9 step 1). The loop holds only its own grids -- density, velocity and the gradient (bCellDeposit;
        DTFE.cpp swaps the derived fields for the gradient while it runs) -- and the derived grids are allocated after
        it (postProcessWebFields), when the partitions are gone: but the allocator keeps freed blocks in the footprint,
-       so part of the busiest partition is booked beside them: all of it up to kStdPostKeepFloor, a share kStdPostKeep
-       of a larger one. The larger of the two phases is the peak. Never above the sum of both (the model before
-       2026-11-07), and equal to it with '--scratch-dir' or without derived fields (fixedLoop == fixed). */
+       so part of the busiest partition is booked beside them: all of it up to the larger of kStdPostKeepFloor and
+       kStdPostKeepGrids x the post-only grids (fixed - fixedLoop), a share kStdPostKeep of a larger one. The larger
+       of the two phases is the peak. Never above the sum of both (the model before 2026-11-07), and equal to it with
+       '--scratch-dir' or without derived fields (fixedLoop == fixed). */
     double stdPeak(double loop) const
     {
-        double const kept = std::min( loop, std::max( kStdPostKeep * loop, kStdPostKeepFloor ) );
+        double const keepFloor = std::max( kStdPostKeepFloor, kStdPostKeepGrids * ( fixed - fixedLoop ) );
+        double const kept = std::min( loop, std::max( kStdPostKeep * loop, keepFloor ) );
         return std::max( fixedLoop + loop, fixed + kept );
     }
 
@@ -1230,15 +1269,17 @@ inline AutoTuneReport AutoTuneStdPlanner::reportSplit(int const bestP, int const
     report.perPartition = chosen.bytes;
     report.gpuSnapshot = chosen.snapshot;
     // the look-ahead (DTFE.cpp): with the GPU deposit and more than one partition, the next partition's
-    // particle copy and tessellations on top of the peak. A plan that fits without it but not with it runs without it
-    // (stdLookAheadOffBudget, as PS-DTFE's psLookAheadOffBudget), and the prediction is then the plan's alone.
-    report.lookAhead = ( lookAheadPossible and chosen.parts > 1 ) ? chosen.aheadMax : 0.;
+    // particle copy and tessellations on top of the peak, booked at kStdLookAheadFactor x the count (aheadMax): the
+    // gate below, the report, the prediction and the run (stdLookAheadCounted) read this one figure. A plan that fits
+    // without it but not with it runs without it (stdLookAheadOffBudget, as PS-DTFE's psLookAheadOffBudget), and the
+    // prediction is then the plan's alone.
+    report.lookAhead = ( lookAheadPossible and chosen.parts > 1 ) ? kStdLookAheadFactor * chosen.aheadMax : 0.;
     u.stdLookAheadCounted = report.lookAhead;   // the loop checks the free memory against it (DTFE.cpp)
     report.fixedLoop = fixedLoop;
     if ( report.lookAhead > 0. and stdPeak( chosen.bytes + chosen.snapshot + report.lookAhead ) > budget )
     {
         message << MESSAGE::cBold() << "AUTO-TUNE:" << MESSAGE::cReset() << " look-ahead off for this run: the busiest "
-                << "partition (~" << chosen.bytes/1.e9 << " GB) plus the next one's tessellations (~"
+                << "partition (~" << chosen.bytes/1.e9 << " GB) plus the next one's look-ahead build (~"
                 << report.lookAhead/1.e9 << " GB) do not fit the " << (budget - fixedLoop - chosen.snapshot)/1.e9
                 << " GB the memory budget leaves beside the partition loop's grids and particles; partitions are "
                 << "prepared in turn.\n" << MESSAGE::Flush;
@@ -1305,7 +1346,8 @@ inline AutoTuneReport AutoTuneStdPlanner::reportSplit(int const bestP, int const
 namespace {
 
 /* The cells of the largest partition sub-grid of each n^NO_DIM split, n = 1 .. 6 (cells[n]), and of the user's own
-   split k[] when it is not cubic (cellsUser), from the particles (plan P8.2; 0: not known). The binary crops a
+   split k[] when it is not cubic (cellsUser), from the particles (plan P8.2; 0: not known), and the mean over the
+   split's partitions (mean[n], meanUser): the lane share's floor (laneSpread). The binary crops a
    partition's grids to the Eulerian span of its kept tetrahedra per axis (psSubgridBox, ps_interpolation.cc), and that
    span grows as structure forms: the logged 5^3 runs park ~4x the bytes per modelled cell at z = 0 as at z = 127,
    where the model booked G/n + 40 cells per axis whatever the snapshot. (A single domain never crops: the planner
@@ -1319,10 +1361,13 @@ namespace {
    tetrahedra; then psSubgridBox's rule (their [lo, hi], or on a periodic axis touched at both ends the complement of
    the largest untouched run), at most the axis. DTFE_AUTO_SPAN=0: the G/n + 40 rule. */
 inline void psPartitionSpans(std::vector<Particle_data> const &p, User_options &u, double const padFrac[NO_DIM],
-                             int const *userK, double (&cells)[7], double &cellsUser)
+                             int const *userK, double (&cells)[7], double &cellsUser, double (&mean)[7],
+                             double &meanUser)
 {
     for (double &c : cells) c = 0.;
     cellsUser = 0.;
+    for (double &c : mean) c = 0.;
+    meanUser = 0.;
 #ifdef PHASE_SPACE
     if ( p.empty() ) return;
     double const N = double( p.size() );
@@ -1415,8 +1460,8 @@ inline void psPartitionSpans(std::vector<Particle_data> const &p, User_options &
     // geometric mean 1.24x, never below; the G/n + 40 rule was 0.05 - 4.3x
     double const spacingBins = double(B) / std::pow( N, 1. / double(NO_DIM) );   // a particle spacing in bin widths
     std::vector<int> diff[NO_DIM];
-    // the largest sub-grid of the split k[] (partitions per axis)
-    auto spanOf = [&](int const (&k)[NO_DIM]) -> double {
+    // the largest sub-grid of the split k[] (partitions per axis), and the mean over its partitions (avg)
+    auto spanOf = [&](int const (&k)[NO_DIM], double &avg) -> double {
         double dLo[NO_DIM], dLen[NO_DIM];
         for (int d=0; d<NO_DIM; ++d) domainOf( d, k[d], dLo[d], dLen[d] );
         bool same = binned;
@@ -1429,7 +1474,7 @@ inline void psPartitionSpans(std::vector<Particle_data> const &p, User_options &
         }
         size_t nParts = 1;
         for (int d=0; d<NO_DIM; ++d) nParts *= size_t( k[d] );
-        double most = 0.;
+        double most = 0., sum = 0.;
         for (size_t pi=0; pi<nParts; ++pi)
         {
             int idx[NO_DIM], b0[NO_DIM], b1[NO_DIM];
@@ -1497,23 +1542,25 @@ inline void psPartitionSpans(std::vector<Particle_data> const &p, User_options &
                 c *= span;
             }
             most = std::max( most, c );
+            sum += c;
         }
+        avg = sum / double(nParts);
         return most;
     };
     for (int n=1; n<=6; ++n)
     {
         int k[NO_DIM];
         for (int d=0; d<NO_DIM; ++d) k[d] = n;
-        cells[n] = spanOf( k );
+        cells[n] = spanOf( k, mean[n] );
     }
     if ( userK != nullptr )
     {
         int k[NO_DIM];
         for (int d=0; d<NO_DIM; ++d) k[d] = std::max( 1, userK[d] );
-        cellsUser = spanOf( k );
+        cellsUser = spanOf( k, meanUser );
     }
 #else
-    (void)p; (void)u; (void)padFrac; (void)userK;
+    (void)p; (void)u; (void)padFrac; (void)userK; (void)mean; (void)meanUser;
 #endif
 }
 
@@ -1683,9 +1730,11 @@ struct AutoTunePSInputs
     size_t outGrid[NO_DIM] = {};     // the cells allocated and written (--grid-window: the window's)
     double gridTotal = 0.;           // ... their product
     double spanCells[7] = {};        // the largest partition sub-grid of an n^3 split, n <= 6 (psPartitionSpans; 0: unknown)
+    double spanMean[7] = {};         // ... and the mean of the split's partition sub-grids (psPartitionSpans; 0: unknown)
     int userK[NO_DIM] = {};          // the user's --partition per axis ...
     bool userNonCubic = false;       // ... when its counts differ (the planner's n is then u.partition[0]: partsOf)
     double spanUser = 0.;            // ... and its largest sub-grid (psPartitionSpans; 0: unknown)
+    double spanMeanUser = 0.;        // ... and the mean of its sub-grids
     AutoTunePS ps;                   // the PS flags
     double bCellDeposit = 0.;        // full-grid bytes per cell during the deposit (both passes)
     double bCell = 0.;               // ... the larger of the deposit and the post phase
@@ -1889,6 +1938,77 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         cpu = copyOne + (fxCell + fxMom + fxFace)*subCells + std::max( helpers, (fxCell + fxMom + faceR)*subCells );
     }
 
+    /* THE LANE SHARE (plan P11.8). c partitions in flight are never all at their own peak when the run peaks: the GPU
+       lanes queue for one device (ctxMutex), a CPU lane holds its sub-grids only around its deposit, and the
+       partitions' sub-grids differ in size. So a plan made by memorySplit books the first lane whole (partitionBytes)
+       and each other one laneShareCut less, for 2 to laneShareCap partitions in flight, where the measured runs were. */
+    bool laneMixed(int n) const { return mixed and n >= 2; }            // partitionBytes' mixed branch
+    // the split's mean sub-grid over its largest (psPartitionSpans): the share's floor. 1 when not known
+    double laneSpread(int n) const
+    {
+        double most = 0., mean = 0.;
+        if ( isUserSplit( n ) ) { most = spanUser; mean = spanMeanUser; }
+        else if ( n >= 2 and n <= 6 ) { most = spanCells[n]; mean = spanMean[n]; }
+        return ( most > 0. and mean > 0. ) ? std::min( 1., mean / most ) : 1.;
+    }
+    // where the share holds: the runs it was fitted on (the GPU deposit of the 3-D single build with fixed-point
+    // moments, sample points, a split, no window; a mixed run with half its partitions or more on the GPU, no face pass)
+    bool laneShareOn(int n) const
+    {
+        return NO_DIM == 3 and metalActive and sizeof(Real) == 4 and momFx and not Env::flag( "DTFE_GPU_FLOAT_MASS" )
+               and not Env::flag( "DTFE_MASS_AUDIT" ) and nPts > 0 and partsOf( n ) > 1. and not u.psWindowOn
+               and gpuSubCells( n ) <= kGpuCellCap   // (a larger sub-grid is deposited on the CPU: choose()'s warning)
+               and not ( mixed and ( n < 2 or faceR > 0. or u.psGpuShareMille < 500 ) );
+    }
+    int laneShareCap(int n) const { return laneMixed( n ) ? kPSLaneShareMax : kPSLaneShareMaxGpu; }
+    // what each lane beside the first does not hold at the run's peak, bytes: partitionBytes' own-state term less the
+    // same term at the share (0 <= cut <= that term; the tessellation, copies, HitSink blocks and GPU arrays stay whole)
+    double laneShareCut(int n) const
+    {
+        double const subCells = subGridCells( n );
+        double const f = std::max( kPSLaneShare, laneSpread( n ) );
+        double const after = gpuAfterHoldCellBytes( n );                 // 0 without a face pass
+        if ( laneMixed( n ) )
+        {
+            double cpu = 0., gpuPre = 0.;
+            mixedLane( n, cpu, gpuPre );
+            double const cpuShare = 1. - double( u.psGpuShareMille ) / 1000.;
+            return std::max( cpu, gpuPre + after*subCells ) - std::max( f*cpuShare*cpu, gpuPre + f*after*subCells );
+        }
+        double const hold = gpuCellBytes();
+        return ( std::max( hold, after ) - std::max( kPSLaneShareHold*hold, f*after ) ) * subCells;
+    }
+    // the full grids --scratch-dir leaves in RAM ('fixed' books none), less the point outputs 'fixed' books but the
+    // loop never holds (allocated after it): what the share must still book, once
+    double laneShareCover() const
+    {
+        if ( not scratchOn ) return 0.;
+        return std::max( 0., std::min( gridTotal*bCellDeposit, kPSScratchRamGrids*scratchMinBytes ) - ptsOutputBytes );
+    }
+    // the TBB insert's copies of one partition, bytes, at inFlight partitions in flight: where the insert runs in
+    // parallel, that is with >= 2 threads per partition and a partition of at least the default rule's
+    // DTFE_TRIANGULATION_MIN_POINTS padded points (triangulation.cpp), or forced. 0 elsewhere
+    double parInsertBytes(int n, int inFlight) const
+    {
+#if defined(PARALLEL_TRIANGULATION) && NO_DIM==3
+        double const padded = N / partsOf( n ) * padFactorOf( n );
+        if ( u.psParallelTriangulation and dtfeHardwareThreads() / std::max( 1, inFlight ) >= 2
+             and ( u.parallelTriangulationForced
+                   or padded >= double( Env::integer( "DTFE_TRIANGULATION_MIN_POINTS", 1000000L ) ) ) )
+            return padded * kParInsertBytes;
+#else
+        (void)n; (void)inFlight;
+#endif
+        return 0.;
+    }
+    // the loop's prediction at c in flight under the share: finishReport's figure, the TBB copies included (cMem
+    // leaves them out, so they move no plan of the split search; here they can only lower the count the share adds)
+    double laneSharePeak(int n, int c) const
+    {
+        return fixed + snapshotBytes( n ) + double(c)*( partitionBytes( n ) + parInsertBytes( n, c ) )
+               - std::max( 0., double(c - 1)*laneShareCut( n ) - laneShareCover() );
+    }
+
     // The GPU deposit's host snapshot (ps_metal_host.cc GpuSnapshot): to resume a failed command buffer
     // the deposit keeps a host copy of every buffer its kernel writes -- the device grids (gridB, with the 8 B
     // fixed-point mass for the 4 B float one: +4 B/cell), the per-tet masses (4 B/tet) and the exact items' weight
@@ -2013,7 +2133,7 @@ struct AutoTunePSPlanner : AutoTunePSInputs
 #endif
     }
 
-    AutoTuneReport finishReport(int n, int c) const
+    AutoTuneReport finishReport(int n, int c, bool const share = false) const
     {
         report.valid = true;
         report.partition = std::max( n, 1 );
@@ -2035,14 +2155,28 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             std::fprintf( stderr, "AUTO-TUNE-DEBUG PS GPU lane grids: hold %.0f B/cell, after the hold %.0f B/cell\n",
                           gpuCellBytes(), gpuAfterHoldCellBytes( report.partition ) );
         report.perPartition = partitionBytes( report.partition );
-#if defined(PARALLEL_TRIANGULATION) && NO_DIM==3
-        // the TBB insert's copies, where the insert runs in parallel: >= 2 threads per partition and a partition of at
-        // least the default rule's DTFE_TRIANGULATION_MIN_POINTS padded points (triangulation.cpp), or forced
-        if ( u.psParallelTriangulation and dtfeHardwareThreads() / std::max( 1, inFlight ) >= 2
-             and ( u.parallelTriangulationForced
-                   or N / partsOf( report.partition ) * padFactorOf( report.partition ) >= double( Env::integer( "DTFE_TRIANGULATION_MIN_POINTS", 1000000L ) ) ) )
-            report.perPartition += N / partsOf( report.partition ) * padFactorOf( report.partition ) * kParInsertBytes;
-#endif
+        // the lane share (memorySplit's plans, 'share'): the first lane whole, each other one laneShareCut less, so the
+        // cut is booked once (laneOnce); every lane whole (the model before P11.8) at one partition in flight and
+        // above the cap
+        report.laneOnce = 0.;
+        report.inFlightCap = 0;
+        double laneCover = 0.;
+        if ( share and inFlight >= 2 and laneShareOn( report.partition ) and inFlight <= laneShareCap( report.partition ) )
+        {
+            report.laneOnce = laneShareCut( report.partition );
+            report.perPartition -= report.laneOnce;
+            report.inFlightCap = laneShareCap( report.partition );
+            laneCover = std::min( laneShareCover(), double(inFlight - 1) * report.laneOnce );   // never above whole lanes
+        }
+        if ( share and laneShareOn( report.partition ) and Env::flag( "DTFE_AUTO_TUNE_DEBUG" ) )   // memorySplit's plans
+            std::fprintf( stderr, "AUTO-TUNE-DEBUG PS lane share: first lane %.3f GB, each other %.3f GB, spread %.3f, "
+                          "share %.3f, scratch grids %.3f GB, used for 2 to %d in flight (%d planned)\n",
+                          partitionBytes( report.partition )/1.e9,
+                          ( partitionBytes( report.partition ) - laneShareCut( report.partition ) )/1.e9,
+                          laneSpread( report.partition ), std::max( kPSLaneShare, laneSpread( report.partition ) ),
+                          laneShareCover()/1.e9, laneShareCap( report.partition ), inFlight );
+        // the TBB insert's copies, where the insert runs in parallel (parInsertBytes)
+        report.perPartition += parInsertBytes( report.partition, inFlight );
         report.gpuSnapshot = snapshotBytes( report.partition );   // once: the GPU deposits run one at a time
         report.mixedLanes = mixed and report.partition >= 2;      // (the dynamic concurrency's ledger books it once then)
         // the loop's dynamic concurrency (P8.10, DTFE.cpp): what the run allocates after its partitions are in flight
@@ -2051,7 +2185,8 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         report.reserveFirstMerge = scratchOn ? 0. : gridTotal * ( autoTuneMergeGrownBytes( u.uField, ps )
                                                                  + autoTuneMergeGrownBytes( u.aField, ps ) );
         report.reserveRecords = ptsRecordBytes;
-        double const base = fixed + report.gpuSnapshot + double(inFlight) * report.perPartition;
+        double const base = fixed + report.gpuSnapshot + report.laneOnce + double(inFlight) * report.perPartition
+                            + laneCover;
         report.lookAhead = lookAheadBytes( report.partition, inFlight );
         // the split above is chosen without the look-ahead; adding it here anyway would make a plan that fits
         // report over_budget=1 (the launcher's memory check would halve a plane that fits) and run past a
@@ -2074,6 +2209,9 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         // run's peak -- the 1024^3 class with few partitions in flight (plan P8.2, phase R 2026-11-09)
         report.reservePeak = reserveZeroFillPeak();
         report.predicted = std::max( base + report.lookAhead, report.reservePeak );
+        // ... and with every lane whole (the staged merge's park room, DTFE.cpp): 'predicted' itself without the share
+        report.predictedWholeLanes = std::max( base - laneCover + double(inFlight - 1) * report.laneOnce
+                                               + report.lookAhead, report.reservePeak );
         if ( report.reservePeak > base + report.lookAhead )
             message << MESSAGE::cBold() << "AUTO-TUNE:" << MESSAGE::cReset() << " the predicted peak is the start-up "
                     << "one: the particles, the read buffers kept and the zero fill of the largest scratch-backed grid "
@@ -2375,7 +2513,8 @@ inline AutoTuneReport AutoTunePSPlanner::memorySplit(int const userC, int const 
     // AROUND them -- Lagrangian triangulation + vertex densities, ~7 s of an ~8 s partition at
     // 2.1M particles / 256^3 -- which runs fully in parallel. A cap of 3 would run 8
     // partitions in three waves: 21 s on the GPU vs 9.5 s on the CPU. Memory still bounds it:
-    // partitionBytes() counts the GPU buffers a waiting partition holds, and cMem caps c.
+    // partitionBytes() counts the GPU buffers a waiting partition holds, and cMem caps c. Where only the first lane
+    // is booked whole (laneShareCut), the concurrency rises past cMem up to laneShareCap.
     int const targetC = cores;
 
     int bestN = -1, bestC = 0;
@@ -2407,6 +2546,15 @@ inline AutoTuneReport AutoTunePSPlanner::memorySplit(int const userC, int const 
                 << "--max-concurrent 1 at the finest split. Expect swapping; a finer --partition than "
                 << nHi << "^3 may still help.\n" << MESSAGE::EndWarning;
     }
+    else if ( autoConc and laneShareOn( bestN ) )
+    {   // the lane share (finishReport): more partitions in flight where only the first is booked whole, up to the cap:
+        // the most in flight whose own prediction fits (laneSharePeak, the TBB copies included: no count this search
+        // adds reports over_budget; the split search's own count, which leaves the copies out, still can). The copies
+        // end where a partition has fewer than 2 threads, so a count that does not fit can lie below one that does
+        int const cMost = std::min( { targetC, int( partsOf( bestN ) ), laneShareCap( bestN ) } );
+        for (int c = bestC + 1; c <= cMost; ++c)
+            if ( laneSharePeak( bestN, c ) <= budget ) bestC = c;
+    }
 
     if ( autoPart )
     {
@@ -2419,7 +2567,7 @@ inline AutoTuneReport AutoTunePSPlanner::memorySplit(int const userC, int const 
     // the concurrency the run WILL use: the tuner's, or the user's own (0 = all cores)
     int const effC = autoConc ? bestC : userC;
     // the report first: it decides whether the look-ahead fits the budget, and the message states its prediction
-    AutoTuneReport const decided = finishReport( bestN, effC );
+    AutoTuneReport const decided = finishReport( bestN, effC, true );
     double const predicted = decided.predicted;
     char scratchNote[256] = "";
     if ( scratchOn )
@@ -2587,7 +2735,8 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     // (autoTuneServe's kBuild 330 holds it there). The insert runs in parallel only where the cores divided by the
     // concurrency leave at least 2 threads (triangulation.cpp), so the split search below counts nothing for it --
     // a default-on insert would otherwise move every PS plan -- and finishReport adds it to the chosen plan's
-    // prediction where that holds (the live memory gate covers the rest).
+    // prediction where that holds (the live memory gate covers the rest). The lane share's search counts it
+    // (laneSharePeak): that search only adds partitions in flight to a plan the split search made.
     double const kParInsert = 0.;
     // --scratch-dir (already armed by DTFE_setup when set): the full-grid accumulators live in
     // mmap'ed files, so they leave the RAM model -- the kernel pages them against the disk and
@@ -2736,7 +2885,8 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     if ( particles != nullptr and not u.psWindowOn and Env::flag( "DTFE_AUTO_SPAN", true ) )
     {
         auto const t0 = std::chrono::steady_clock::now();
-        psPartitionSpans( *particles, u, padFrac, in.userNonCubic ? in.userK : nullptr, in.spanCells, in.spanUser );
+        psPartitionSpans( *particles, u, padFrac, in.userNonCubic ? in.userK : nullptr, in.spanCells, in.spanUser,
+                          in.spanMean, in.spanMeanUser );
         if ( Env::flag( "DTFE_AUTO_TUNE_DEBUG" ) )
         {
             std::fprintf( stderr, "AUTO-TUNE-DEBUG PS sub-grid spans (%.3f s), largest partition's cells per n^3 split "
@@ -2748,6 +2898,13 @@ AutoTuneReport autoTunePartitioning(User_options &u,
                 std::fprintf( stderr, " %d: %.4g / %.4g", n, in.spanCells[n], c );
             }
             if ( in.userNonCubic ) std::fprintf( stderr, " user split: %.4g", in.spanUser );
+            std::fprintf( stderr, "\n" );
+            // the lane share's floor (laneSpread)
+            std::fprintf( stderr, "AUTO-TUNE-DEBUG PS span spread (mean over largest) per n^3 split:" );
+            for (int n=2; n<=6; ++n)
+                std::fprintf( stderr, " %d: %.3f", n, in.spanCells[n] > 0. ? in.spanMean[n] / in.spanCells[n] : 1. );
+            if ( in.userNonCubic and in.spanUser > 0. )
+                std::fprintf( stderr, " user split: %.3f", in.spanMeanUser / in.spanUser );
             std::fprintf( stderr, "\n" );
         }
     }

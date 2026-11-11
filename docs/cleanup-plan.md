@@ -1846,6 +1846,10 @@ memory or the `DTFE_MEM_*` knobs. Effort: S.
   1. Check the standard planner's prediction on the P2.3 run.
   2. Give it the P8.8 objective, with the standard's serial partitions and threads per partition.
 - Effort: L.
+- **2026-11-11 (P11.8):** step 1's prediction is refitted where the mode bench found it too low: the look-ahead is
+  booked at `kStdLookAheadFactor` = 1.275 times its count, and the post-processing side keeps at least
+  `kStdPostKeepGrids` = 0.5 times the grids only the post-processing allocates (the 1 GB of `kStdPostKeepFloor` stays
+  the minimum). Step 2 is open.
 
 **P8.10 Dynamic concurrency in the PS partition loop.** — *done in code 2026-11-07 (the owner: "continue with … the remaining plan items"); not yet measured: it did not start in phase R's runs (the P8 status).*
 - Today the plan fixes `--max-concurrent` before the loop starts (`psConcurrency`, the loop's `num_threads`).
@@ -2491,6 +2495,12 @@ units from the extraction's bounds, the face walk on the loop's own test, the po
 parallel insert's lock waits (no code change), the speed texts. P11.7 leaves item 3: the two pinned runs for the
 device rule's table (D18).
 
+**Status 2026-11-11.** P11.8 (after P11.7's checks, below) trims the lanes' common over-booking, the open point of
+P11.7 item 1, and refits standard DTFE's two under-predictions of the mode bench (P13). In code, uncommitted. Run l's
+plan allows 4 in flight again (38.3 GB predicted; 33.4 GB measured at 4), and performance's plan on the bench input is
+the 6 at once of the 783 s hand plan. No run has been made on a new plan: three confirming runs are the owner's
+(P11.8's last point).
+
 **P11.6 The sub-domain pipeline (the widened overlap).** **Dropped 2026-11-09 16:00 on the cheap experiment's
 numbers** (`p11-mc1.sh`; p11-placement.md section 5). One tessellation in flight with the look-ahead (`--partition 3
 3 3 --max-concurrent 1`, standard GPU exact + face, TNG100 z = 0, 512³): 811 s wall, 581 s with the parallel insert
@@ -2537,7 +2547,8 @@ concurrency.
    lines and the double build's two "dens exact" lines that plan the private copies -- and none changes its partition
    or its count in flight), ps_face_gradient_check in both precisions, the 2D suite, the Mac battery (33 of 33
    stages) and the Linux check (every stage). Committed as `c8dd4fb`. Open, the owner's: runs j and l again;
-   trimming the lanes' common over-booking, which would give l its fourth lane back.
+   trimming the lanes' common over-booking, which would give l its fourth lane back. **Trimmed 2026-11-11 (P11.8): the
+   plan gives l 4 in flight.**
 2. **DONE 2026-11-10.** The face walk's second bound walk on the GPU path. The bounds the GPU extraction sums (the 10
    moment bounds and the three face bounds, in the bound walk's block order) stay in the pass's fixed-point state
    (`PSFxState::gpuBounds`, `gpuBoundsValid`) and stand in for `psFxBoundWalk` when `psCpuFixedUnits` forms the face
@@ -2614,6 +2625,161 @@ loop and zeroed by the walk, the same words under a different count in the log. 
 Mac battery, 33 of 33 stages (19:24 to 20:14, the tree unchanged over it), and CI's Linux stages in Colima (build,
 core, double, 2d, variants, oldpy, ruff), all passed (20:14 to 20:52). Only this sentence was written after them. Item
 3 stays open (two full-size runs, on the owner's go).
+
+**P11.8 The planner's refit: PS-DTFE's lane share, standard DTFE's look-ahead and post floor.** — *done in code
+2026-11-11 (the owner: "Yes, start" to the planner batch); uncommitted; no run on a new plan yet.* The mode bench
+(P13) and run l (P11.7 item 1) left two planner findings. PS-DTFE's model books every partition in flight (a lane)
+whole and predicts 20 to 45% above the measured peak once several are in flight with evaluation points: 44.7 GB for
+the 6 of the hand plan, 31.4 GB measured. Standard DTFE's predicts too little in two places: gentle's look-ahead (37.6
+GB against 40.7 GB measured) and the 6³ per-tetrahedron plan (31.7 GB against 35.1 GB). The accept band is a
+prediction from 5% under to 15% above the measured peak footprint; under is the unsafe side. All sizes below are GB on
+TNG100-3-Dark z = 0 at 512³ unless a line says otherwise.
+- **The lane share (PS-DTFE).** The first lane in flight is booked whole (`partitionBytes`) and each other one
+  `laneShareCut` less; the report carries the difference as `laneOnce`, booked once. The share f is the larger of
+  `kPSLaneShare` = 0.55 and the mean partition span over the largest. In a mixed run (`--gpu-share` under 1) a lane's
+  cut is max(CPU deposit, GPU arrays before the lock) − max(f × the CPU's fraction of the partitions × CPU deposit,
+  GPU arrays before the lock). In an all-GPU run it is (max(hold, after) − max(`kPSLaneShareHold` × hold, f × after))
+  per sub-grid cell, with `kPSLaneShareHold` = 0.30, `hold` the grids of a deposit's hold of the device and `after` a
+  face pass's state behind it (0 without `--face-gradient`): one deposit holds the device at a time, and a lane keeps
+  its own sub-grids after its hold (116 of the 396 B per cell here). The tessellation, the particle copies, the point
+  blocks and the GPU's arrays stay whole. Under `--scratch-dir` the model had no term for what the scratch-backed
+  grids keep in RAM (the whole lanes hid it); the share books it as `laneShareCover`: at most `kPSScratchRamGrids` =
+  3.8 times the scratch threshold, less the point outputs (0.216 GB here), and never more than the cut.
+- **Scope (`laneShareOn`).** 3D, Metal, single precision, fixed-point moments (not under `DTFE_GPU_FLOAT_MASS` or
+  `DTFE_MASS_AUDIT`), evaluation points, more than one partition, no `--ps-window`, sub-grids within the GPU's cell
+  cap; a mixed run only from `--gpu-share` 0.5 and without a face pass. Counts in flight: 2 to `kPSLaneShareMaxGpu` =
+  4 (all-GPU) and 2 to `kPSLaneShareMax` = 6 (mixed), the counts measured. Above the cap every lane is whole, and the
+  dynamic concurrency (P8.10) stops at it (`psInFlightCap`; its line: "the memory model's lane share holds for no more
+  partitions in flight than the plan's"). Only `memorySplit`'s plans use the share, a user's `--partition` and
+  `--max-concurrent` within the range included. A CPU run, a run without points, the double build and 2D plan as
+  before.
+- **At run time** (`src/DTFE.cpp`). The memory gate's lane is the whole one (`psPartitionBytes` = `perPartition` +
+  `laneOnce` + the snapshot); a mixed run's `psOnceBytes` carries `laneOnce`; the look-ahead's room subtracts it; and
+  the staged merge's park room is the budget less the prediction with every lane whole (`predictedWholeLanes`), so
+  parking is as it was (1.80, 1.94 and 2.38 GB for balanced, gentle and the GPU sampled run). `DTFE_AUTO_TUNE_DEBUG=1`
+  prints the terms: "PS lane share: first lane … GB, each other … GB, spread …, share …, scratch grids … GB, used for
+  2 to N in flight (M planned)".
+- **The fit.** `kPSLaneShare` on the 8 mixed runs (3 to 6 in flight, GPU share 0.5 to 0.7) and on the all-GPU face run
+  with points (4 in flight, 33.41 GB), which sets the ceiling: up to 0.562 it stays within +15%; a 2³ face run on the
+  64³ pancake without points needs at least 0.489. `kPSLaneShareHold` on the 7 all-GPU runs with points: the ceiling
+  is 0.36, and a flat 4-lane run needs at least 0.052. The table replays the formulas of before and of now on the
+  runs' logs (6³ partitions; the names are the logs'); the binaries' `--auto-tune-report` lines give the same figures
+  for the six probed (performance, run l, balanced, gentle, run i, GPU sampled).
+
+  | run | in flight | measured | before | now |
+  |---|---|---|---|---|
+  | ps_perf (36.4 GB budget) | 3 | 28.93 | 34.68 (+19.9%) | 30.84 (+6.6%) |
+  | ps_perf_dbg, the 5 it reached | 5 | 29.81 | 41.34 (+38.7%) | 33.44 (+12.2%) |
+  | ps_perf_dbg, the plan's 4 | 4 | 29.81 | 38.01 (+27.5%) | 32.14 (+7.8%) |
+  | ps_perf_free1000, the 5 it reached | 5 | 29.34 | 41.34 (+40.9%) | 33.44 (+14.0%) |
+  | ps_perf_free1000, the plan's 4 | 4 | 29.34 | 38.01 (+29.6%) | 32.14 (+9.5%) |
+  | ps_perf_mc6 | 6 | 31.41 | 44.67 (+42.2%) | 34.74 (+10.6%) |
+  | ctl_ps_hyb600_mc6_old | 6 | 31.21 | 44.67 (+43.1%) | 34.74 (+11.3%) |
+  | ps_hyb500_mc6 (share 0.5) | 6 | 32.49 | 44.67 (+37.5%) | 35.45 (+9.1%) |
+  | ps_hyb600_mc6 | 6 | 30.72 | 44.67 (+45.4%) | 34.74 (+13.1%) |
+  | ps_hyb700_mc6 | 6 | 31.01 | 44.67 (+44.0%) | 34.45 (+11.1%) |
+  | ps_bal | 4 | 30.00 | 39.43 (+31.4%) | 32.62 (+8.7%) |
+  | ps_gentle | 4 | 30.02 | 39.30 (+30.9%) | 32.49 (+8.2%) |
+  | ps_exact_gpu_pts | 4 | 30.43 | 39.70 (+30.5%) | 32.89 (+8.1%) |
+  | ps_gpu_cap | 4 | 30.12 | 39.70 (+31.8%) | 32.89 (+9.2%) |
+  | bench i | 4 | 29.89 | 39.70 (+32.8%) | 32.89 (+10.1%) |
+  | bench l (GPU, face gradient) | 4 | 33.41 | 44.03 (+31.8%) | 38.26 (+14.5%) |
+  | bench k2 (GPU, sampled) | 4 | 28.61 | 38.85 (+35.8%) | 32.32 (+13.0%) |
+  | phase R ps100_099_final (GPU, sampled) | 3 | 27.21 | 34.45 (+26.6%) | 30.17 (+10.9%) |
+
+  These 18 rows of 16 runs: +6.6% to +14.5%, where they were +19.9% to +45.4%. Outside the share and as before: the
+  CPU runs (+27.7% to +33.6%), phase R's face512 (+8.1%) and exact1024 (−0.9%), the pancake g1 (−6.8%). The TNG50-3
+  run (2 in flight by hand, 34.93 GB) goes from 47.11 (+34.9%) to 43.44 (+24.4%). One count further the model gives
+  48.00 (performance at 7, every lane whole), 43.95 (balanced at 5), 49.69 (run l at 5) and 43.25 (GPU sampled at 5),
+  all above the 41.23 GB budget.
+- **Plans that move** (the binaries' report lines, 41.23 GB budget; before → now). Performance: `partition=6 mc=4
+  predicted_gb=38.01` → `mc=6` 34.74 (first lane 3.329, each other 1.299). Run l (GPU, exact, face gradient, points):
+  `mc=3` 38.36 → `mc=4` 38.26 (5.669 and 3.677). Balanced: `mc=4` 39.43 → 32.62 (4.521 and 2.178). Gentle: `mc=4`
+  39.30 → 32.49. Run i: `mc=4` 39.70 → 32.89. GPU sampled: `mc=4` 38.85 → 32.32. The same on both sides: the CPU runs
+  h (`mc=6`, 39.60) and j (`mc=3`, 38.84), performance at 1 in flight (28.58) and at 7 (48.00, over budget). At the
+  36.4 GB budget of the mode bench's night performance goes from `mc=3` (34.68) to `mc=6` (34.74).
+- **Standard DTFE.** (1) The look-ahead is booked at `kStdLookAheadFactor` = 1.275 times its count (`aheadMax`), in
+  one place (`reportSplit`): the gate that switches it off, the report, the prediction and the run's free-memory check
+  (`stdLookAheadCounted`) read that figure. The count left out the TBB insert's sorted copies (mc1 with the parallel
+  insert peaked 4.44 GB above mc1 without) and under-counted the busiest partition at 4 to 6 threads (gentle: 12.2 M
+  padded vertices planned, 15.67 M in the run). Gentle needs a factor of at least 1.114 and mc1 with the parallel
+  insert 1.258 to come within −5%; the run with points keeps its look-ahead under the budget up to 1.294. (2) Of the
+  busiest partition the post side of `stdPeak` keeps at least `kStdPostKeepGrids` = 0.5 times the grids only the
+  post-processing allocates (`fixed` − `fixedLoop`), with the 1 GB of P8.9 as the minimum and the partition as the
+  maximum. It is fitted on one run: the 6³ per-tetrahedron plan (35.11 GB) needs at least 0.476 for −5%, and the
+  timing plan (4³ at a 33.9 GB budget) stays chosen up to 0.511. Its three face-gradient twins peaked at 23.95 to
+  24.43 GB, below the grids' own size: which of the two states a run is in after the loop depends on the machine, not
+  on the gradient route, and the floor books the higher one. The rows of the record that move (the binaries' report
+  lines give the same figures for the five probed: gentle, balanced, the 6³ per-tetrahedron plan, mc1 and the timing
+  plan):
+
+  | run | measured | before | now |
+  |---|---|---|---|
+  | std100_099 (interim build `745daac`; 6³, 8 threads, per-tet) | 26.46 | 30.08 (+13.7%) | 33.73 (+27.5%) |
+  | std100_099_split6 (6³, 9 threads, per-tet) | 35.11 | 31.70 (−9.7%) | 33.73 (−3.9%) |
+  | the three 6³ face-gradient runs | 24.00, 23.95, 24.43 | 31.71 (+32.1%, +32.4%, +29.8%) | 33.73 (+40.5%, +40.8%, +38.1%) |
+  | bench mc1 (3³, one at a time, sequential insert) | 32.75 | 34.05 (+4.0%) | 35.45 (+8.2%) |
+  | mc1 with the parallel insert | 37.19 | 34.05 (−8.4%) | 35.45 (−4.7%) |
+  | GPU face run with 16.8 M points | 40.76 | 39.58 (−2.9%) | 41.08 (+0.8%) |
+  | bench timing plan (4³, 9 threads, 33.9 GB budget) | 30.86 | 31.80 (+3.0%) | 33.73 (+9.3%) |
+  | std_gentle (3³, 4 threads) | 40.66 | 37.57 (−7.6%) | 40.12 (−1.3%) |
+  | std_bal (3³, 6 threads), with the look-ahead as it ran | 41.31 | 41.20 (−0.3%) | 44.36 (+7.4%) |
+
+  The other 16 of the 27 rows keep their prediction. On 24 rows (27 less the interim build, the killed run and
+  balanced, whose plan changes): mean +6.4% → +8.7%, lowest −9.7% → −4.7%, rows more than 5% under 3 → 0, rows more
+  than 15% above 4 → 4 (the face trio and phase R's face run at +23.7%, all four above it before).
+- **What it costs.** Balanced loses its look-ahead on this input: booked at 44.36 it no longer fits the 41.23 GB
+  budget (it measured 41.31), and the 6-thread plan is now 33.73 without it ("look-ahead off for this run", which now
+  names "the next one's look-ahead build", 14.66 GB). That plan has no measurement; the 9-thread runs of the same
+  split without look-ahead measured 33.14 to 34.27 GB, and balanced took 447 s with the look-ahead. Performance's
+  look-ahead stays off (it would need 57.8 GB; 52.9 GB before). The interim build's run and the face trio are booked
+  further above their peaks (the table). At 1024³ without `--scratch-dir` the floor (62.3 GB with all fields, 12.9 GB
+  with density, velocity, divergence and shear) exceeds any partition, so the post side is `fixed` plus the busiest
+  partition, the sum of before 2026-11-07. On a 48 GiB machine (30.92 GB budget) a 512³ production plan fits a busiest
+  partition of 4.98 GB where 14.2 GB fitted: a finer split or fewer threads. Not booked, as before: an in-team TBB
+  insert at `--max-concurrent` 2 to 5 by hand.
+- **The tune set** (`tests/dev/tune_report_set.sh`, 127 lines: the 124 and three for the lane share), against binaries
+  built from a clean export of `ae81362`: 11 lines differ. Of the 124 no PS line moves, and 8 standard lines do, none
+  in its partition or its count in flight: "dtfe ram=64 grid=1024 plain gpu" and "… exact gpu" by the factor
+  (look-ahead 0.383 → 0.489 GB, predicted 28.48 → 28.58 GB at a 38.40 GB budget); and by the floor "dtfe prod ram=8
+  grid=1024 plain" and "… exact" and "dtfe prod ram=64 grid=1024 plain" and "… exact" (82.69 → 84.68 GB), "dtfe all
+  fields ram=64 grid=1024 exact" (181.51 → 183.50 GB) and "dtfe prod ram=64 grid=1024 exact gpu" (84.48 → 89.79 GB),
+  all six `partition=6 mc=1` and over budget on both sides. The three new lines (the 128³ pancake at grid 256, 4 M
+  points): every deposit on the GPU `mc=4` 4.50 → 4.22 GB (4.80 GB budget); `--gpu-share 0.5` `mc=5` 4.77 → `mc=6`
+  4.71 GB; with the face gradient `mc=4` 6.52 → 6.28 GB (6.60 GB budget).
+- **Reviews** (light: readers and a judge, twice). The first found one defect of weight, fixed: the share's search for
+  the count in flight left out the TBB insert's copies (`kParInsertBytes`, 800 B per padded vertex of each partition
+  in flight, where the insert runs in parallel), which `finishReport` adds, so a plan could print `over_budget=1`.
+  `laneSharePeak` now holds them, and the search takes the largest count whose own prediction fits (the prediction
+  does not grow with every count: the copies end where a partition has fewer than 2 threads, from 6 in flight on 10
+  threads). Probed on the binaries before and after the fix (2³ partitions of the 64³ pancake at grid 256, 4 M points,
+  14 budgets): without `--parallel-triangulation` all 28 plans are the same; with it 5 of 14 (every deposit on the
+  GPU) and 4 of 14 (`--gpu-share 0.5`) were over budget and are within it, each with one partition fewer in flight.
+  Also taken: no share above the GPU's 2³² cell cap, and a wrong comment in the test. The second review, of the fix,
+  confirmed no defect in it and narrowed one comment. Left, each small: the split search's own count does not book the
+  copies (every deposit on the GPU, the insert forced, a 5.5 GB budget: `mc=5` at 5.51 GB, over budget, before and
+  after); the planner does not read `DTFE_TRIANGULATION_THREADS` (an insert it does not see costs under 0.8 GB per
+  partition in flight; the live memory gate covers it); near a run's end the cores are divided by the partitions left,
+  so the last ones can insert in parallel where the plan priced none; the split choice itself does not use the share;
+  an all-GPU run books a lane the dynamic concurrency adds whole; section Q fails, where it should skip, under
+  `DTFE_GPU_FLOAT_MOMENTS`, `DTFE_GPU_FLOAT_MASS` or `DTFE_MASS_AUDIT` and on a GPU build without TBB.
+- **Gates (2026-11-11, 00:27 to 00:46, on the binaries with the fix, against binaries built from a clean export of
+  `ae81362`).** `tests/dev/bytecmp.sh --gpu-exact`: 261 files, 0 differ. The tune set as above, no bad line on either
+  side, the reference's first 124 lines the frozen set. The 17 plan probes (10 PS, 7 standard), whose lines are the
+  ones quoted above. ps_auto_tune_check with the new section Q (Q1 to Q7): 82 OK single, 69 OK and 2 skipped double.
+  dtfe_auto_tune_check: 22 OK single, 20 OK and 1 skipped double. run_mode_check 57 and 49 passed, ps_runtime_check 41
+  and 41, dtfe_resume_check 44 and 44, docs_drift_check. The search's comment was narrowed after these (the code
+  outside comments is the same text); the binaries rebuilt from it give the same 17 plan lines.
+- **Open, the owner's: three full-size runs, none made** (a quiet machine, Colima stopped, `/usr/bin/time -l`,
+  `DTFE_AUTO_TUNE_DEBUG=1`). (1) Run l on its new plan (the bench's GPU face run with points, without `--partition`
+  and `--max-concurrent`): expected `--partition 6 6 6 --max-concurrent 4` at 38.26 predicted; within the band at a
+  peak footprint of 33.3 to 40.3 (it measured 33.4 at 4 in flight). (2) Performance on its own plan: 6³ with 6 in
+  flight at 34.74 predicted, within the band at 30.2 to 36.6, the wall time against 783 s. (3) Standard DTFE under
+  `--run-mode balanced`: expected 3³, 6 threads, 33.73 predicted and the "look-ahead off for this run" line; within
+  the band at 29.3 to 35.5, the wall time against 447 s. A cheap fourth: `--partition 3 3 3 --max-concurrent 1` (35.45
+  predicted, within the band at 30.8 to 37.3). Left for later: the CPU runs' +27.7% to +33.6%, the TNG50-3 run's
+  +24.4%, the pancake's −6.8%, and a standard plan that steps its threads down to keep the look-ahead (the mode
+  bench's open point, now with balanced as a case).
 
 **Gates:** bytecmp (placement moves no byte), the GPU suites, the battery, Linux; P11.1 repeated with the rule on.
 
@@ -2780,7 +2946,9 @@ measurements). D1-D29 below are that contract's numbers, not the owner's table a
     that max needs its own `tune_report_set` check; (b) the GPU snapshot's host copies live until the host function
     returns and could be freed before the unlock (`src/ps_metal_host.cc`); (c) `psParkRoom` does not shrink for the
     partitions the dynamic concurrency starts beyond the plan's (P8.10's behaviour from before this change), so
-    parking could take such a run past the budget by up to a lane for each of them.
+    parking could take such a run past the budget by up to a lane for each of them. **2026-11-11 (P11.8): the lane
+    share books a mixed run's other lanes at a share, and the full budget holds the 6 of the hand plan (34.7 GB
+    predicted, 31.4 GB measured); the all-GPU ledger's snapshot per lane is as it was.**
 14. D14, the tuner's lines: AUTO-TUNE-REPORT unchanged (no share key, `over_budget` last); the human line's tag reads
     `, GPU deposit with the free cores (GPU share 0.60)` when mixed.
 15. D15, the checkpoint key: `--run-mode` and `--gpu-share` leave the command lines; a mixed run writes
@@ -2822,7 +2990,8 @@ measurements). D1-D29 below are that contract's numbers, not the owner's table a
     rows below, each time with their conditions (the night's machine state and the control run's 789 s).
 29. D29, left out on purpose (each a separate commit with a deliberate gate diff): the pure-GPU model's per-lane
     over-booking of its grids, the scratch-write side finding, a rho from the hardware, SMT detection, a mixed share
-    for balanced.
+    for balanced. **2026-11-11: the per-lane over-booking is refitted for the runs with evaluation points (P11.8); the
+    rest stays out.**
 
 **Measured** (D28; TNG100-3-Dark z = 0, 512³, M1 Max, PS-DTFE's exact deposit, 2026-11-09, `2f428bc` plus the
 selection skip and the core lend): the GPU at 4M items per buffer (performance's buffers) with the tuner's plan
@@ -2867,11 +3036,15 @@ What it shows:
 3. The plan costs time: 908 s against 783 s with 6 at once by hand (125 s or 16% more), and the 6 peak at 31.4 GB
    where the model predicts 44.7 GB (the run with 5 in flight: 29.8 GB against 41.3 GB). The model books about 13 GB
    more than a mixed run takes at 6 lanes, so the mode's own plan runs fewer partitions at once than the memory holds.
+   **2026-11-11 (P11.8): refitted; the mode's plan on this input is the 6 at once (34.7 GB predicted). Not timed on
+   its own plan.**
 4. PS balanced and gentle are within 3% of each other (1444 and 1408 s, 1.4 busy cores on average): with every
    partition on the GPU the thread budget hardly matters. They take 1.6 times performance's 908 s.
 5. Standard DTFE: performance is the slowest of the three. The tuner's 10-thread plan leaves the look-ahead no memory
    on this input (the binary from before the modes plans the same), the 6- and 4-thread plans have it. Their peaks:
-   41.3 GB at a 41.2 GB budget (balanced) and 40.7 GB against 37.6 GB predicted (gentle).
+   41.3 GB at a 41.2 GB budget (balanced) and 40.7 GB against 37.6 GB predicted (gentle). **2026-11-11 (P11.8): the
+   look-ahead is booked at 1.275 times its count. Gentle predicts 40.1 GB and keeps it; balanced's 6-thread plan no
+   longer has it (44.4 GB with it, 33.7 GB without; not timed).**
 6. Standard DTFE's `--gpu` grids follow the thread count too: 8 of the 10 grids of balanced and of gentle differ from
    performance's and from each other's, the rms of the difference at most 1.4e-10 of the field's.
 7. Responsiveness: the night's probes do not rank the modes. Two runs of one configuration differ more than the modes
@@ -2881,10 +3054,13 @@ What it shows:
 Open after the bench, the owner's call (nothing of it is changed):
 
 - PS-DTFE's memory model for a mixed plan (the lanes and the points output): a refit to the measured peaks would let
-  performance plan 6 at once on this input. A planner change with its own `tests/dev/tune_report_set.sh` diff.
+  performance plan 6 at once on this input. A planner change with its own `tests/dev/tune_report_set.sh` diff. **Done
+  2026-11-11 (P11.8).**
 - Standard DTFE in performance: a plan that gives up thread sub-boxes for the look-ahead where the memory holds only
   one of the two (447 s at 6 threads against 486 s at 10 here). It changes default plans, and grids at float rounding.
 - The standard look-ahead's prediction (gentle: 40.7 GB measured against 37.6 GB; balanced at the budget's edge).
+  **Done 2026-11-11 (P11.8). Balanced's 6-thread plan now runs without the look-ahead on this input, which makes it a
+  second case for the point above.**
 - A repeat of the mode bench on a machine at rest, for numbers that compare with the bench table and for the
   responsiveness ranking.
 

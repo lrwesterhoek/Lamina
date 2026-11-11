@@ -1,4 +1,60 @@
 UNRELEASED (since 1.0.0)
+- The auto-tuner's memory model is refitted to the measured peaks (docs/cleanup-plan.md P11.8, 2026-11-11): PS-DTFE's
+  partitions in flight share their sub-grid state, and standard DTFE's look-ahead and what its partition loop leaves
+  behind are booked higher. Plans and printed predictions change, no deposit arithmetic: against binaries of the
+  commit before, tests/dev/bytecmp.sh --gpu-exact (every run's plan pinned) compares 261 files, 0 differ. PS-DTFE, THE
+  LANE SHARE. The model booked every partition in flight (a lane) with its full state, as if all of them held their
+  largest sub-grids at the same moment. The measured peaks lie far below that: on TNG100-3-Dark z = 0 at 512^3 with
+  evaluation points, 6 in flight by hand peaked at 31.4 GB where the model said 44.7 GB. Now the first lane is booked
+  whole and each other one at a share of its sub-grid state. In a mixed run ('--gpu-share' under 1) that is 0.55 of a
+  CPU deposit's state times the fraction of the partitions the CPU deposits; in an all-GPU run 0.30 of the grids of a
+  deposit's hold of the device (one deposit holds it at a time) and 0.55 of a '--face-gradient' pass's state behind
+  the hold. Where the partitions' spans are more alike than that (the mean span over the largest), the ratio takes the
+  place of the 0.55. The tessellation, the particle copies, the point blocks and the GPU's arrays stay whole. The
+  share holds where it was measured: a 3D single-precision Metal run with fixed-point sums and evaluation points
+  ('--sample-points'), without '--ps-window', with 2 to 4 partitions in flight when every deposit is on the GPU and 2
+  to 6 when the free cores deposit too ('--gpu-share' from 0.5, no face pass). Above those counts every lane is booked
+  whole again, and the dynamic concurrency adds no partition beyond them. Elsewhere (a CPU run, a run without points,
+  the double build, 2D) the model is the one before. Under '--scratch-dir' the share also books what the
+  scratch-backed grids keep in RAM, which the whole lanes had hidden (at most 3.8 times the scratch threshold, less
+  the point outputs). DTFE_AUTO_TUNE_DEBUG=1 prints the terms ('PS lane share: first lane ... GB, each other ... GB,
+  ...'). WHAT MOVES on that input (the binaries' '--auto-tune-report' lines, 41.2 GB budget): '--run-mode performance'
+  plans 6 in flight at 34.7 GB (4 at 38.0 GB before; 783 s with the 6 by hand against 908 s on the old plan); the GPU
+  face run with points plans 4 at 38.3 GB (3 at 38.4 GB before; it had run with 4, at 33.4 GB); balanced and gentle
+  keep 4 in flight and print 32.6 and 32.5 GB (39.4 and 39.3 GB before; 30.0 GB measured). The formulas replayed on
+  the logs of the 16 TNG100 runs in scope (18 rows, two runs at two counts) predict 6.6% to 14.5% above the measured
+  peak, where they predicted 19.9% to 45.4% above. A CPU run's prediction stays 28% to 34% above. No run has been made
+  on a new plan yet. STANDARD DTFE predicted too little in two places. The look-ahead (the next partition triangulated
+  during the GPU's work) is now booked at 1.275 times its count: the count left out the parallel insert's sorted
+  copies and under-counted the busiest partition at 4 to 6 threads ('--run-mode gentle': 37.6 GB predicted, 40.7 GB
+  measured, now 40.1 GB; one partition at a time with the parallel insert: 34.1 GB, 37.2 GB measured, now 35.5 GB).
+  And of the busiest partition the model now keeps, after the partition loop, at least half the size of the grids only
+  the post-processing allocates (1 GB at least before; 0.35 of a larger partition as before): the 6^3 plan with
+  '--per-tet-gradient' measured 35.1 GB against 31.7 GB predicted, now 33.7 GB. On 24 runs of the record (27 less an
+  interim build, a killed run and balanced, whose plan changes) the lowest prediction is 4.7% under the measured peak
+  (9.7% under before, with three runs more than 5% under) and the mean 8.7% above (6.4% before). The 'look-ahead off
+  for this run' line now names 'the next one's look-ahead build' and gives the booked size. THE COSTS. '--run-mode
+  balanced' loses its look-ahead on that input: with it the 6-thread plan is booked at 44.4 GB (it measured 41.3 GB at
+  a 41.2 GB budget), so it now runs without, at 33.7 GB predicted (447 s with the look-ahead; not timed without). Runs
+  that keep little after the loop are booked higher too: three 6^3 face-gradient runs (24.0 to 24.4 GB measured) go
+  from 31.7 to 33.7 GB predicted, 38% to 41% above, and the interim build's 6^3 run (26.5 GB) from 30.1 to 33.7 GB,
+  27.5% above. At 1024^3 without '--scratch-dir' the floor exceeds any partition, so the post-processing side is the
+  sum of the grids and the busiest partition again. And on a machine with less memory a 512^3 production plan must
+  make its busiest partition smaller (48 GiB: 5.0 GB where 14.2 GB fitted), by a finer split or fewer threads. THE
+  TUNE SET (tests/dev/tune_report_set.sh, 127 lines: the 124 and three for the lane share). Of the 124, no PS line
+  moves and 8 standard lines do, all at grid 1024, none in its partition or its count in flight: two by the factor
+  (28.48 to 28.58 GB, within their budget) and six by the floor (2.0 to 5.3 GB more; over budget before and after).
+  THE REVIEW found that the share's search for the count in flight left out the parallel insert's copies (800 B per
+  padded vertex of each partition in flight, where the insert runs in parallel), which the prediction adds: with
+  '--parallel-triangulation' given, a plan could print 'over_budget=1'. The search now takes the largest count whose
+  own prediction fits. Probed on the binaries before and after the fix (2^3 partitions of a 64^3 pancake at grid 256,
+  4 M evaluation points, 14 budgets, all on the GPU and with '--gpu-share 0.5'): 9 of the 28 plans with the flag were
+  over budget and are within it, each with one partition fewer in flight; the other 19, and all 28 without the flag,
+  are the same. Left as it was: the split search's own count does not book those copies (the live memory gate covers
+  them), and the planner does not read DTFE_TRIANGULATION_THREADS. Tests: ps_auto_tune_check.sh section Q (a GPU
+  build; Q1 to Q7: the plan against the printed lane terms with every deposit on the GPU and with '--gpu-share 0.5',
+  no share without points, the scratch term, the insert's copies, the cap under the dynamic concurrency with the grids
+  of '--max-concurrent 1', and a budget the share's plan stays within).
 - PS-DTFE: beside a GPU deposit, a '--face-gradient' pass forms the face sums of the tetrahedra the CPU deposit forms
   them for, and takes their units from the GPU extraction (docs/cleanup-plan.md P11.7 items 2, 5 and 6, 2026-11-10).
   THE FILTER. After a GPU deposit one CPU walk over the kept tetrahedra makes the face sums (psFaceWalk); in a CPU run

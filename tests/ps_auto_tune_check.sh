@@ -75,13 +75,19 @@
 #     builds, less the freed words the allocator hands back). Plan-only: the lane with the face sums minus the lane
 #     without, per booked sub-grid cell, is the planner's own after-hold minus hold (DTFE_AUTO_TUNE_DEBUG=1), and
 #     no less than 100 B/cell. GPU builds only.
+#  Q) THE LANE SHARE (plan P11.8): with several partitions in flight the plan books the first lane whole and each
+#     other one at a share of it (they do not peak together, and one of them is the largest), for 2 to 4 in flight
+#     on the GPU alone, 2 to 6 with the free cores depositing; above that, without evaluation points and in the
+#     double build every lane is whole. Plan-only against the planner's own 'PS lane share' line, the cover under
+#     '--scratch-dir' included; then a run under a budget of 4 whole lanes: 6 in flight, none added by the dynamic
+#     concurrency, the grids of '--max-concurrent 1' byte for byte. GPU builds only.
 #
 # The 2^32 GPU sub-grid guard (ps_interpolation.cc) is NOT exercised here: it needs a real
 # >4.29e9-cell partition sub-grid, i.e. >32 GB of buffers. It mirrors the validated guard in
 # averaged_interpolation_1.cc line-for-line.
 #
 # Portable: runs on Linux too (tests/ci_suite.sh core) -- the peak RSS from getrusage, no macOS-only
-# command; the GPU-only parts (H3, I2/I3, L, M, W, Z) SKIP on a CPU build.
+# command; the GPU-only parts (H3, I2/I3, L, M, Q, W, Z) SKIP on a CPU build.
 #
 # Usage: tests/ps_auto_tune_check.sh [--no-build]
 
@@ -806,6 +812,149 @@ else
     echo "   SKIP  Z (this build has no GPU backend)"
 fi
 rm -f "${TMP}"/at_z*
+
+# ---------- (Q) the lane share of several partitions in flight ----------
+# Partitions in flight do not reach their largest state at the same moment, and only one of them has the largest
+# sub-grid: the plan books the first lane whole and each other lane at a share of it (plan P11.8; auto_tune.cc
+# laneShareCut: the larger of 0.55 and the mean span over the largest, the device's hold grids at 0.30), for 2 to 4
+# in flight when every deposit is on the GPU and 2 to 6 when the free cores deposit too. Above that every lane is
+# booked whole, as it is without evaluation points (no measurement there) and in the double build.
+# Plan-only, from the report's 'predicted_gb' at a given '--max-concurrent' and the planner's own 'PS lane share'
+# line (DTFE_AUTO_TUNE_DEBUG=1), with base = p(1) less its look-ahead, A = a whole lane, B = a shared one:
+#   Q1 all on the GPU: p(c) = base + (c-1) B up to 4 in flight, base + 4 A at 5;
+#   Q2 '--gpu-share 0.5': the same up to 6 in flight, base + 6 A at 7;
+#   Q3 no evaluation points: no share (every lane whole: p(3) - base is twice p(2) - base);
+#   Q4 '--scratch-dir': what the share leaves out is covered up to what the scratch grids keep in memory (C):
+#      p(4) = base + 3 B + min(C, 3 (A - B)).
+# Q5 runs Q2's selection under a budget that holds 4 whole lanes: the plan is 6 in flight, the dynamic concurrency
+# adds none (the share is measured for no more), and the grids are those of '--max-concurrent 1' byte for byte.
+# Q6 and Q7: the share's own search counts the parallel insert's copies (it left them out and the report added
+# them: a plan could exceed its own budget; found in review, 2026-11-11). Q6 reads what a forced
+# '--parallel-triangulation' books a lane (T: 3 in flight with it less 3 without); Q7 plans under a budget that
+# holds 3 in flight by the share without the copies and not with them: 2 in flight, within the budget.
+# The report's GB have two decimals: sums of a few of them agree within 0.03 GB. GPU builds only.
+echo ">> Q: the lane share of several partitions in flight"
+if precision_double; then
+    echo "   SKIP  Q (the double build books every lane whole)"
+else
+QSCR="${TMP}/at_q_scr"; mkdir -p "${QSCR}"
+Q_ARGS=(--field density_a velocity_a --input-format 105 --mpc-unit 1 --verbose 2 --periodic --exact --gpu --partition 2 2 2)
+run_q() {  # $1 = tag, then 'VAR=value' assignments, then '--' and extra options
+    local tag="$1"; shift
+    local envs=()
+    while [ $# -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
+    [ $# -gt 0 ] && shift
+    env OMP_NUM_THREADS=10 DTFE_RAM_GB=64 DTFE_FREE_GB=1000 DTFE_AUTO_MINN=1000 DTFE_AUTO_TUNE_DEBUG=1 \
+        ${envs[@]+"${envs[@]}"} "${BIN}" "${SNAP}" "${TMP}/at_q_${tag}" "${Q_ARGS[@]}" "$@" \
+        > "${TMP}/at_q_${tag}.log" 2>&1 || true
+}
+for c in 1 2 3 4 5; do
+    run_q "g${c}" DTFE_AUTO_PTS_N=4000000 -- --grid 256 --max-concurrent "${c}" --auto-tune-report
+done
+if grep -q "GPU (--gpu)" "${TMP}/at_q_g1.log"; then
+    run_q f3 DTFE_AUTO_PTS_N=4000000 -- --grid 256 --parallel-triangulation --max-concurrent 3 --auto-tune-report
+    for c in 1 2 6 7; do
+        run_q "m${c}" DTFE_AUTO_PTS_N=4000000 -- --grid 256 --gpu-share 0.5 --max-concurrent "${c}" --auto-tune-report
+    done
+    for c in 1 2 3; do run_q "n${c}" -- --grid 256 --max-concurrent "${c}" --auto-tune-report; done
+    for c in 1 4; do
+        run_q "c${c}" DTFE_AUTO_PTS_N=100000 -- --grid 512 --scratch-dir "${QSCR}" --max-concurrent "${c}" \
+            --auto-tune-report
+    done
+    r="$("${PY}" - "${TMP}" <<'PYEOF'
+import re, sys
+TOL = 0.03
+def read(tag):  # the predicted peak, its look-ahead and the last lane-share line (A, B, C, most in flight) of a log
+    t = open(f"{sys.argv[1]}/at_q_{tag}.log", errors="replace").read()
+    m = re.search(r"^AUTO-TUNE-REPORT .*predicted_gb=([0-9.]+) .*lookahead_gb=([0-9.]+) ", t, re.M)
+    s = re.findall(r"PS lane share: first lane ([0-9.]+) GB, each other ([0-9.]+) GB, .*scratch grids ([0-9.]+) GB, "
+                   r"used for 2 to ([0-9]+) in flight", t)
+    return float(m.group(1)), float(m.group(2)), tuple(float(x) for x in s[-1]) if s else None
+def near(a, b):
+    return abs(a - b) <= TOL
+def q1():
+    p = {c: read(f"g{c}") for c in (1, 2, 3, 4, 5)}
+    A, B, C, most = p[2][2]
+    base = p[1][0] - p[1][1]
+    ok = (most == 4 and A - B > 0.1 and all(near(p[c][0], base + (c - 1)*B) for c in (2, 3, 4))
+          and near(p[5][0], base + 4*A))
+    return ok, (f"all on the GPU: a whole lane {A:.3f} GB, a shared one {B:.3f} GB; 1 to 5 in flight "
+                + " ".join(f"{p[c][0]:.2f}" for c in (1, 2, 3, 4, 5)) + " GB (shared up to 4, whole at 5)"), None
+def q2():
+    p = {c: read(f"m{c}") for c in (1, 2, 6, 7)}
+    A, B, C, most = p[2][2]
+    base = p[1][0] - p[1][1]
+    ok = (most == 6 and A - B > 0.1 and near(p[2][0], base + B) and near(p[6][0], base + 5*B)
+          and near(p[7][0], base + 6*A) and base + 4*A - p[6][0] > 0.2)
+    # the budget of Q5: half way between 6 in flight by the share and 5 whole lanes
+    return ok, (f"'--gpu-share 0.5': a whole lane {A:.3f} GB, a shared one {B:.3f} GB; 1, 2, 6 and 7 in flight "
+                + " ".join(f"{p[c][0]:.2f}" for c in (1, 2, 6, 7)) + " GB (shared up to 6, whole at 7)"), \
+           (p[6][0] + base + 4*A)/2
+def q3():
+    p = {c: read(f"n{c}") for c in (1, 2, 3)}
+    base = p[1][0] - p[1][1]
+    lane = p[2][0] - base
+    ok = all(p[c][2] is None for c in p) and lane > 0.1 and near(p[3][0], base + 2*lane)
+    return ok, (f"no evaluation points: no share, every lane {lane:.2f} GB (1 to 3 in flight "
+                + " ".join(f"{p[c][0]:.2f}" for c in (1, 2, 3)) + " GB)"), None
+def q4():
+    p = {c: read(f"c{c}") for c in (1, 4)}
+    A, B, C, most = p[4][2]
+    base = p[1][0] - p[1][1]
+    want = base + 3*B + min(C, 3*(A - B))
+    ok = C > 0.1 and near(p[4][0], want)
+    return ok, (f"'--scratch-dir': 4 in flight {p[4][0]:.2f} GB = base {base:.2f} + 3 shared lanes of {B:.3f} + the "
+                f"smaller of {C:.3f} GB of scratch grids and the {3*(A - B):.3f} GB the share leaves out"), None
+def q6():
+    p3, f3 = read("g3")[0], read("f3")[0]
+    A, B, C, most = read("g2")[2]
+    T = (f3 - p3)/3
+    ok = 0.02 < T < B
+    # the budget of Q7: 3 in flight by the share fit it without the copies, not with them
+    return ok, (f"'--parallel-triangulation': {T:.3f} GB of insert copies a lane (3 in flight {f3:.2f} GB, "
+                f"{p3:.2f} GB without it)"), p3 + 1.5*T
+for name, f in (("Q1", q1), ("Q2", q2), ("Q3", q3), ("Q4", q4), ("Q6", q6)):
+    try:
+        ok, text, budget = f()
+    except Exception as e:  # a missing report or lane-share line
+        ok, text, budget = False, f"not read from the plans ({type(e).__name__}: {e})", None
+    print(f"{name}|{1 if ok else 0}|{text}")
+    if ok and budget is not None:
+        print(f"BUDGET{name}|{budget:.2f}|")
+PYEOF
+)"
+    qb=""; qb6=""
+    while IFS='|' read -r qn qo qd; do
+        case "${qn}" in
+            BUDGETQ2) qb="${qo}" ;;
+            BUDGETQ6) qb6="${qo}" ;;
+            *) check "${qn} ${qd}" "${qo}" ;;
+        esac
+    done <<< "${r}"
+    if [ -n "${qb}" ]; then
+        run_q run DTFE_AUTO_PTS_N=4000000 DTFE_MEM_BUDGET_GB="${qb}" -- --grid 256 --gpu-share 0.5
+        run_q ref DTFE_AUTO_PTS_N=4000000 DTFE_MEM_BUDGET_GB="${qb}" -- --grid 256 --gpu-share 0.5 --max-concurrent 1
+        check "Q5 a budget of ${qb} GB (4 whole lanes): the plan is 6 in flight, none added by the dynamic concurrency, the grids of '--max-concurrent 1'" \
+              "$(grep -q -- "--partition 2 2 2 --max-concurrent 6 " "${TMP}/at_q_run.log" \
+                 && grep -q "dynamic concurrency not started: the memory model's lane share" "${TMP}/at_q_run.log" \
+                 && [ -s "${TMP}/at_q_ref.a_den" ] && cmp -s "${TMP}/at_q_ref.a_den" "${TMP}/at_q_run.a_den" \
+                 && cmp -s "${TMP}/at_q_ref.a_vel" "${TMP}/at_q_run.a_vel" && echo 1 || echo 0)"
+    else
+        check "Q5 the run under a budget between the two bookings (no budget: Q2 failed)" 0
+    fi
+    if [ -n "${qb6}" ]; then
+        run_q f DTFE_AUTO_PTS_N=4000000 DTFE_MEM_BUDGET_GB="${qb6}" -- --grid 256 --parallel-triangulation \
+            --auto-tune-report
+        check "Q7 a budget of ${qb6} GB (3 in flight by the share without the insert's copies): the plan is 2 in flight and within the budget" \
+              "$(grep -q "^AUTO-TUNE-REPORT partition=2 mc=2 .*over_budget=0" "${TMP}/at_q_f.log" && echo 1 || echo 0)"
+    else
+        check "Q7 the plan under a budget between the two (no budget: Q6 failed)" 0
+    fi
+else
+    echo "   SKIP  Q (this build has no GPU backend)"
+fi
+fi
+rm -rf "${TMP}"/at_q_*
 
 echo "------------------------------------------------------------"
 if [ "${FAILS}" -gt 0 ]; then

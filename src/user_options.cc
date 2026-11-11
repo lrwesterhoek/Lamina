@@ -180,6 +180,7 @@ User_options::User_options()
     psLookAheadRoom = HUGE_VAL;     // set from the auto-tuner's report (DTFE.cpp): no budget known = no budget limit
     psPartitionBytes = 0.;   // set from the auto-tuner's report (DTFE.cpp): the partition memory gate
     psOnceBytes = 0.;        // ... a mixed run's share of it that one partition at a time holds
+    psInFlightCap = 0;       // ... the lane share's limit on the partitions in flight (0: none)
     psUseSubgrid = false;
     psTessellationPrebuilt = false;   // set only by psInterpolatePrebuilt (the partition look-ahead)
     psMayClearDT = false;   // set only by the DTFE_interpolation overload that owns its DT

@@ -792,23 +792,28 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
         {
             // the partition memory gate (auto_tune.h). It compares ONE partition's need with the free memory, so
             // the GPU deposit's host snapshot -- one at a time, allocated during a deposit, not yet in the free
-            // memory a partition sees when it starts -- is in each check once
-            userOptions.psPartitionBytes = report.perPartition + report.gpuSnapshot;
+            // memory a partition sees when it starts -- is in each check once. A whole lane: under the lane share
+            // (auto_tune.cc laneShareCut) the first partition's laneOnce is part of it
+            userOptions.psPartitionBytes = report.perPartition + report.laneOnce + report.gpuSnapshot;
             // A MIXED run's split ('--gpu-share' < 1): that term is the GPU lock holder's device and host grids too,
-            // larger than a lane's own arrays (TNG100-3-Dark z=0 at 512^3: 5.1 GB against 3.3 GB), and still held by one
-            // partition whatever the number in flight. The dynamic concurrency's ledger, which counts every partition
-            // in flight, books it once (an all-GPU run's ledger is as it was: the term in every partition)
-            userOptions.psOnceBytes = report.mixedLanes ? report.gpuSnapshot : 0.;
+            // larger than a lane's own arrays (TNG100-3-Dark z=0 at 512^3: 5.1 GB against a whole lane's 3.3 GB), and
+            // still held by one partition whatever the number in flight. The dynamic concurrency's ledger, which counts
+            // every partition in flight, books it once, and the lane share's laneOnce with it (an all-GPU run's ledger
+            // is as it was: the whole lane in every partition)
+            userOptions.psOnceBytes = report.mixedLanes ? report.gpuSnapshot + report.laneOnce : 0.;
             // what the budget leaves for the look-ahead beside one partition (checked against the free memory
             // only, a budget set low on purpose would be passed by one tessellation)
-            userOptions.psLookAheadRoom = report.budget - report.fixed - report.gpuSnapshot - report.perPartition;
-            // what the budget leaves beside the predicted peak for partitions parked by the staged ordered merge:
-            // the prediction does not count them, and on macOS the free-memory reading alone does not stop them (the
-            // compressor and swap keep 'free' above the spill threshold: TNG100 z=0 could park 74 GB in RAM on a
-            // 64 GB machine). DTFE_TEST_PARK_ROOM_GB sets it (tests).
-            userOptions.psParkRoom = report.budget - report.predicted;
+            userOptions.psLookAheadRoom = report.budget - report.fixed - report.gpuSnapshot - report.perPartition
+                                        - report.laneOnce;
+            // what the budget leaves beside the predicted peak -- with every lane booked whole (predictedWholeLanes:
+            // the measured runs that set the lane share spilled under that booking) -- for partitions parked by the
+            // staged ordered merge: the prediction does not count them, and on macOS the free-memory reading alone
+            // does not stop them (the compressor and swap keep 'free' above the spill threshold: TNG100 z=0 could park
+            // 74 GB in RAM on a 64 GB machine). DTFE_TEST_PARK_ROOM_GB sets it (tests).
+            userOptions.psParkRoom = report.budget - report.predictedWholeLanes;
             // the partition loop's dynamic concurrency (plan P8.10): only over a concurrency the tuner chose
             userOptions.psDynamicConcurrency = report.concChosen and Env::flag( "DTFE_DYNAMIC_CONCURRENCY", true );
+            userOptions.psInFlightCap = report.inFlightCap;   // ... and never past the lane share's cap (0: none)
             userOptions.psReserveEnd = report.reserveEnd;
             userOptions.psReserveRecords = report.reserveRecords;
             userOptions.psReserveFirstMerge = report.reserveFirstMerge;
@@ -2289,7 +2294,8 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
        words whatever the team size; the double build and the float sums (DTFE_GPU_FLOAT_MOMENTS / _MASS, DTFE_MASS_AUDIT)
        sum per-thread copies in thread order, so their grids would follow the in-flight count: they keep the plan's.
        Not for a user's --max-concurrent, the speed split (no gate), or a start whose free memory (records aside: the
-       gate books their unmerged share as it goes) holds no partition beyond the plan's (that run keeps its look-ahead). */
+       gate books their unmerged share as it goes) holds no partition beyond the plan's (that run keeps its look-ahead),
+       and never past the lane share's cap (psInFlightCap: the memory model was measured up to there). */
     int const psFloor = psConcurrency;   // the plan's mc
     bool dynamicConc = false;
     char const *dynamicWhyNot = nullptr;
@@ -2299,7 +2305,8 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     {
         bool const orderFree = std::is_same<Real, float>::value and not Env::flag( "DTFE_GPU_FLOAT_MOMENTS" )
                                and not Env::flag( "DTFE_GPU_FLOAT_MASS" ) and not Env::flag( "DTFE_MASS_AUDIT" );
-        int const most = std::min( totalPartitions, dtfeOmpMax() );
+        int const capShare = state.options.psInFlightCap;   // the lane share's limit (0: none)
+        int const most = std::min( totalPartitions, capShare > 0 ? std::min( capShare, dtfeOmpMax() ) : dtfeOmpMax() );
         // one more than the plan's: each its own arrays, and what one partition at a time holds once (a mixed run's
         // psOnceBytes; 0 otherwise, where every partition books psPartitionBytes in full)
         double const once = std::min( state.options.psOnceBytes, state.options.psPartitionBytes );
@@ -2316,7 +2323,10 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
                           "free %.3f GB, own %.3f GB, budget %.3f GB\n", state.options.psPartitionBytes, once, reserve,
                           dynStartFree/1.e9, dynStartOwn/1.e9, state.options.psBudgetBytes/1.e9 );
         if ( not orderFree ) dynamicWhyNot = "the double build's or the float sums' grids would follow the count";
-        else if ( most <= psFloor ) dynamicWhyNot = "the plan already runs one partition per core or partition";
+        else if ( most <= psFloor )
+            dynamicWhyNot = ( capShare > 0 and capShare < std::min( totalPartitions, dtfeOmpMax() ) )
+                            ? "the memory model's lane share holds for no more partitions in flight than the plan's"
+                            : "the plan already runs one partition per core or partition";
         else if ( not room ) dynamicWhyNot = "the free memory or the budget at the start holds no partition beyond it";
         else
         {
@@ -2782,7 +2792,8 @@ static void dtfePartitionedRun(DTFE_State &state, vector<Sample_point> &samples,
        interpolation is unchanged, and each partition still ASSIGNS its own part of the grids in index order, so
        every output is byte-identical (tests/dtfe_resume_check.sh D14). It holds the next partition's particle copy
        and tessellations; before each look-ahead the free memory, less 4 GB of headroom, is checked against that
-       (auto_tune.h stdLookAheadBytes, the uniform count of one partition, or the auto-tuner's count when larger),
+       (auto_tune.h stdLookAheadBytes, the uniform count of one partition, or the auto-tuner's booked figure when
+       larger: its count x kStdLookAheadFactor),
        and the partition is prepared in turn when it does not fit; the auto-tuner counts it in its prediction and
        switches it off for a run whose budget cannot hold it (stdLookAheadOffBudget). '--no-overlap' switches it off; DTFE_OVERLAP=1 forces it on
        a CPU run too (the tests' byte-identity check on any build), DTFE_OVERLAP=0 switches it off. A '--resume'
@@ -2805,8 +2816,9 @@ static void dtfePartitionedRun(DTFE_State &state, vector<Sample_point> &samples,
     }
     // what one partition's look-ahead holds: its padded particle copy + the tessellations of its sub-domains
     // (auto_tune.h, the model's bytes per padded vertex); the partitions hold about the same particles (the split
-    // balances them), so the uniform count of the partition's geometry -- or the auto-tuner's count from the
-    // particles, of the partition that needs the most, when it is larger (on clustered data the padding shells
+    // balances them), so the uniform count of the partition's geometry -- or the auto-tuner's booked figure (its
+    // count from the particles of the partition that needs the most, x kStdLookAheadFactor: auto_tune.cc
+    // reportSplit) when it is larger (on clustered data the padding shells
     // of a dense partition hold more than the uniform count: auto_tune.h StdTuneDensity)
     aheadBytes = [&](int const i) -> double
     {

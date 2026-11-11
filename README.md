@@ -629,17 +629,23 @@ ones above):
 
 | run | `gentle` | `balanced` | `performance` |
 |---|---|---|---|
-| PS-DTFE, exact deposit, `--gpu --gpu-share auto` | 1408 s | 1444 s | 908 s on the tuner's plan (4 partitions at once, a fifth added at run time); 783 s with `--partition 6 6 6 --max-concurrent 6` given by hand |
+| PS-DTFE, exact deposit, `--gpu --gpu-share auto` | 1408 s | 1444 s | 908 s on that night's tuner plan (4 partitions at once, a fifth added at run time); 783 s with `--partition 6 6 6 --max-concurrent 6` given by hand |
 | standard DTFE, exact average, face gradient, `--gpu` | 444 s | 447 s | 486 s |
 
 PS-DTFE's gentle and balanced runs kept 1.4 cores busy on average and wrote the bytes of the `2f428bc` bench's GPU
-run; performance kept 6 cores busy. The tuner's memory model books more than a mixed run takes (4 at once and a fifth
-added at run time: predicted 41.3 GB, peak 29.8 GB; 6 at once by hand: predicted 44.7 GB, peak 31.4 GB), so
-performance's own plan runs fewer partitions at once than the memory holds. Standard DTFE's 10-thread plan had no
+run; performance kept 6 cores busy. That night's memory model booked more than a mixed run takes (4 at once and a
+fifth added at run time: predicted 41.3 GB, peak 29.8 GB; 6 at once by hand: predicted 44.7 GB, peak 31.4 GB), so
+performance's own plan ran fewer partitions at once than the memory holds. Standard DTFE's 10-thread plan had no
 memory left for the look-ahead on this input (the next partition triangulated during the GPU's work; so before the
 modes too), which the 6- and 4-thread plans had: balanced and gentle were the faster runs here, at peaks of 41.3 and
 40.7 GB against 33.1 GB. Not measured: nice 10, a CPU run at a lowered thread budget, and any mode on a machine at
 rest.
+
+The memory model has since been refitted to these peaks (`change_log.txt`, 2026-11-11), and the tuner's plans on this
+input are no longer the ones timed above. PS-DTFE's performance plans the 6 partitions at once itself (34.7 GB
+predicted). Standard DTFE's look-ahead is booked at 1.275 times its count: gentle keeps it (40.1 GB predicted), and
+balanced's 6-thread plan, which peaked at the budget's edge with it, now runs without it (33.7 GB predicted). Neither
+new plan has been timed.
 
 **Padding.** Every partition (and in standard DTFE every thread's sub-box) carries its own padding. The binary's
 default of 5 mean spacings is too short for the emptiest voids at z = 0: `run_dtfe.sh`, dtfelib's standard server and
