@@ -1,4 +1,44 @@
 UNRELEASED (since 1.0.0)
+- The auto-tuner: the owner's decision 4b and the planner points left from the leftovers batch (docs/cleanup-plan.md
+  P11.8, 2026-11-11). STANDARD DTFE UNDER '--run-mode balanced': a plan whose look-ahead does not fit beside its busiest
+  partition first looks for a smaller team (DTFE_parallel's 8, 6, 4, 3 or 2 threads; not one tessellation) whose
+  partition and look-ahead build fit, and keeps the look-ahead with it ('AUTO-TUNE: look-ahead kept for this run with 4
+  threads per partition instead of 6 ...'); DTFE_LOOKAHEAD_TEAM=0 keeps the plan of before. TNG100-3-Dark z=0 at 512^3
+  plans 3^3 with 4 threads at 40.12 GB predicted and an 11.82 GB look-ahead, gentle's plan, where it planned 6 threads
+  at 33.73 GB without the look-ahead. Measured, one balanced run each way: 429 s at a peak of 41.6 GB with the
+  smaller team (0.4 GB above the budget) against 536 s at 30.2 GB without it, so it is the default. Performance and
+  gentle plan as before. A look-ahead the budget switches off now leaves one tessellation's parallel-insert copies in
+  the partition's booking (its factor held them only while it ran). PS-DTFE: the split search books the insert's copies
+  at one partition in flight too, so a coarse split that fits only without them gives way to a finer one (it planned
+  over_budget=1). The planner's uniform count (a call without the particles) pads the team the run forms. An all-GPU
+  run's dynamic concurrency books the GPU snapshot and the lane share's first lane once, and each partition it adds at
+  the plan's lane, as the plan does (a mixed run did so already). No plan of the tune set (127 lines) moves; of the 17
+  TNG100 probes only the balanced standard one. Tests: dtfe_auto_tune_check.sh K, L, M; ps_auto_tune_check.sh O4, Y7;
+  run_mode_check.sh G8 (the all-GPU run's once part).
+- Tests (2026-11-11, the batch after the leftovers; no binary changes). ps_runtime_check.sh R3 keeps its look-ahead
+  check under the debug switches DTFE_GPU_FLOAT_MOMENTS and DTFE_GPU_FLOAT_MASS and skips only its byte comparison
+  there: those switches make the GPU's sums float atomics, so two identical '--gpu' runs differ; DTFE_MASS_AUDIT keeps
+  every grid exact and R3 compares as before. The suite reads an old PS_ name of those switches only while its DTFE_
+  name is unset, as the binaries do (R7 too). tests/dev/deprecation_gate.sh reads the battery's stage logs as well
+  ('--stage-logs', which tests/dev/battery.sh passes): a 'warning: ... is deprecated' line that a suite lets through
+  to its stage log (a program's stderr, a data generator's, a python suite's own) fails the gate, unless it comes
+  from one of the suites whose every case is an old spelling (flag_spelling_check, py_cli_alias_test,
+  run_scripts_check, named by their steps); the build stages' logs are not read. dtfe_mc_average_check.sh A1 runs
+  '--subsamples 2' (8 points per cell, at least 2 per tetrahedron) instead of the deprecated total '--samples 20'
+  (the box-mean bound holds for any count: the centred samples give every tetrahedron its exact mass), and
+  dtfe_sampling_check.sh's method-2 runs name no count and take method 2's default of 20 points, the same draws, so
+  its golden values stand; neither suite is on the gate's allow-list any more. A file the gate lists but cannot read is
+  named (UNREADABLE) and fails the gate, instead of counting as clean.
+- The launcher, three small changes (2026-11-11; no output byte changes). The Custom tab names the merge order on
+  every PS-DTFE command: '--ps-merge index-order' with the merge tick on (the default), as the drivers' PS_MERGE does,
+  so a small run under the auto-tuner's speed split (fewer than 2e6 particles) keeps the memory gate on, where before
+  it ran without it; '--ps-merge completion-order' unticked, as before. When the extra options name a merge
+  themselves ('--ps-merge MODE' or one of the older switches) the tab adds none. The face-gradient tick moved from the
+  folded Advanced group to the 'Phase-space options' group (the same label, tool tip and effect; off by default, one
+  constant in python/gui/runspec.py for the three tabs). A standard-DTFE Grids job pins run_dtfe.sh's FACE_GRADIENT
+  empty (the binary's own route, the face gradient), as it pins SUBSAMPLES and THREADS, so a FACE_GRADIENT exported
+  in the shell the launcher started from no longer reaches the job. Tests: py_gui_runspec_test.py,
+  py_gui_app_test.py, py_gui_app2_test.py.
 - The launcher's 3D view (Explore, 'Show in 3D') takes the eye into the box (2026-11-11; the exception to the 3D rule
   in docs/cleanup-plan.md). In perspective (the default) scrolling in moves the eye along the line of sight under the
   cursor, into the box and on through the field, and scrolling out backs away; before, a zoom only enlarged the picture
@@ -19,10 +59,10 @@ UNRELEASED (since 1.0.0)
   eye inside) and the checks labelled 12, under part 10 (the camera's pixels, the dolly along the cursor's ray, the
   planes and the picked point from inside).
 - The launcher has a tick box for the face gradient ('Gradient of the mean velocity from exact face integrals', in the
-  folded Advanced group of the Grids, Pipeline and Custom tabs; PS-DTFE, 3D; off by default, as the driver). A Grids or
-  Pipeline job sets the driver's FACE_GRADIENT (1 or 0), the Custom tab adds '--face-gradient'. Before the run the
-  launcher names what the binary would refuse with it (the sampled deposit, moments that are not volume weighted, the
-  halo release); the tick and the linear deposit exclude each other.
+  'Phase-space options' group of the Grids, Pipeline and Custom tabs, its last row; PS-DTFE, 3D; off by default, as the
+  driver). A Grids or Pipeline job sets the driver's FACE_GRADIENT (1 or 0), the Custom tab adds '--face-gradient'.
+  Before the run the launcher names what the binary would refuse with it (the sampled deposit, moments that are not
+  volume weighted, the halo release); the tick and the linear deposit exclude each other.
 - The auto-tuner, what the refit below had left (docs/cleanup-plan.md P11.8, the leftovers batch, 2026-11-11). Plans
   and printed predictions change, no deposit arithmetic: against binaries of the commit before, tests/dev/bytecmp.sh
   --gpu-exact compares 261 files, 0 differ; of the tune set's 127 lines nine predict more (below) and none changes its
@@ -821,7 +861,7 @@ UNRELEASED (since 1.0.0)
     '--ps-merge index-order' (PS_MERGE's default, where the older default passed '--ordered-merge'), so a small run
     under the auto-tuner's speed split (N < 2e6) keeps the memory gate on as before, where a bare binary run drops it
     (the grids are byte-identical either way). The launcher's merge tick passes the same on the Grids and Pipeline
-    tabs; the Custom tab at the default passes none (a binary command);
+    tabs, and since 2026-11-11 on the Custom tab too ('--ps-merge index-order', unless its extra options name a merge);
   * DTFE_EXACT_AVERAGE now wins over DTFE_EXACT; the drivers read true/yes/on (and false/no/off) for every switch,
     not only 1; run_dtfe.sh reads THREADS and SUBSAMPLES; the pipeline hands PYTHON to run_ps_dtfe.sh and resolves the
     driver's older knob names once, so a batch warns once per name, not per simulation;

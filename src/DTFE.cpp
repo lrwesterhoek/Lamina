@@ -802,9 +802,9 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
             // A MIXED run's split ('--gpu-share' < 1): that term is the GPU lock holder's device and host grids too,
             // larger than a lane's own arrays (TNG100-3-Dark z=0 at 512^3: 5.1 GB against a whole lane's 3.3 GB), and
             // still held by one partition whatever the number in flight. The dynamic concurrency's ledger, which counts
-            // every partition in flight, books it once, and the lane share's laneOnce with it (an all-GPU run's ledger
-            // is as it was: the whole lane in every partition)
-            userOptions.psOnceBytes = report.mixedLanes ? report.gpuSnapshot + report.laneOnce : 0.;
+            // every partition in flight, books what the plan books once (onceBytes) -- that term (in an all-GPU run the
+            // snapshot alone) and the lane share's laneOnce -- once, and every partition at the plan's lane (perPartition)
+            userOptions.psOnceBytes = report.onceBytes;
             // what the budget leaves for the look-ahead beside one partition (checked against the free memory
             // only, a budget set low on purpose would be passed by one tessellation)
             userOptions.psLookAheadRoom = report.budget - report.fixed - report.gpuSnapshot - report.perPartition
@@ -2331,8 +2331,8 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
                                and not Env::flag( "DTFE_GPU_FLOAT_MASS" ) and not Env::flag( "DTFE_MASS_AUDIT" );
         int const capShare = state.options.psInFlightCap;   // the lane share's limit (0: none)
         int const most = std::min( totalPartitions, capShare > 0 ? std::min( capShare, dtfeOmpMax() ) : dtfeOmpMax() );
-        // one more than the plan's: each its own arrays, and what one partition at a time holds once (a mixed run's
-        // psOnceBytes; 0 otherwise, where every partition books psPartitionBytes in full)
+        // one more than the plan's: each its own lane, and what one partition at a time holds once (psOnceBytes: the GPU
+        // snapshot and the lane share's laneOnce; 0 on the CPU, where every partition books psPartitionBytes in full)
         double const once = std::min( state.options.psOnceBytes, state.options.psPartitionBytes );
         double const need = double( psFloor + 1 ) * ( state.options.psPartitionBytes - once ) + once;
         double const reserve = state.options.psReserveEnd + state.options.psReserveFirstMerge;

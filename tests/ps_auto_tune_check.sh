@@ -44,7 +44,9 @@
 #     z=0 z2048 plane the box mean 17.98 budgets 34.95 streams/point (19.3 GB) while its points average 5.38.
 #  O) '--parallel-triangulation' (TBB builds) is costed: its insert copies (800 B per vertex in flight,
 #     measured) raise the predicted peak; O2 DTFE_TRIANGULATION_THREADS forces them (=1 none); O3 the split search's
-#     own count books them: a budget that holds 2 in flight without them and 1 with them plans 1. SKIP without TBB.
+#     own count books them: a budget that holds 2 in flight without them and 1 with them plans 1; O4 at one in flight
+#     too: a budget that holds one 2^3 partition without them and not with them (the split left to the tuner, one
+#     thread) plans a finer split within it. SKIP without TBB; O2-O4 also below 4 threads.
 #  P) the tessellation model pads a partition by the binary's DEFAULT Lagrangian padding ('--ps-lagrangian-padding
 #     8' spacings, not the Eulerian '--padding' fraction floored at 0.3 of a partition): the default predicts what
 #     an explicit '--ps-lagrangian-padding 8' does, and '--ps-lagrangian-padding 0' (the Eulerian rule) predicts something else.
@@ -71,6 +73,8 @@
 #     partition keeps the plan's 1, as do DTFE_DYNAMIC_CONCURRENCY=0 and a user's '--max-concurrent'; room for about
 #     five admits 2-6, not every waiting thread at once (the gate counts what it admitted); the double build keeps the
 #     plan's (its sums follow the thread order); a dynamic run killed after 3 partitions and resumed writes the same grids.
+#     Y7 (GPU builds): an all-GPU run's ledger books the GPU snapshot once, as the plan does (the start check's once
+#     part is the report's snapshot_gb).
 #  Z) a GPU lane books what it holds AFTER the device's deposit when '--face-gradient' forms its face sums on the
 #     CPU (plan P11.7 item 1: the handed-back host words, the face sums' words and the Real grids their conversion
 #     builds, less the freed words the allocator hands back). Plan-only: the lane with the face sums minus the lane
@@ -95,7 +99,7 @@
 # averaged_interpolation_1.cc line-for-line.
 #
 # Portable: runs on Linux too (tests/ci_suite.sh core) -- the peak RSS from getrusage, no macOS-only
-# command; the GPU-only parts (H3, I2/I3, L, M, Q, V, W, Z) SKIP on a CPU build.
+# command; the GPU-only parts (H3, I2/I3, L, M, Q, V, W, Y7, Z) SKIP on a CPU build.
 #
 # Usage: tests/ps_auto_tune_check.sh [--no-build]
 
@@ -590,8 +594,30 @@ if grep -aq "parallel, TBB" "${BIN}"; then   # the insert's own message: only in
         else
             check "O3 the budget between the two bookings (not formed from ${s1:-none}, ${s2:-none}, ${f2:-none} GB)" 0
         fi
+        # O4: ... and at one partition in flight: the split left to the tuner on one thread (OMP_NUM_THREADS=1, so one
+        # in flight at every split, and the search stops at the first split that has it). A budget that holds one 2^3
+        # partition without the forced insert's copies and not with them, and one 3^3 partition with them: the plan is
+        # a finer split, within the budget (it was 2^3 with over_budget=1)
+        rep_o4() {  # prints 'partition mc over_budget predicted_gb'
+            env OMP_NUM_THREADS=1 DTFE_RAM_GB=64 DTFE_AUTO_MINN=1000 "${BIN}" "${SNAP}" "${TMP}/at_o" --grid 256 --periodic \
+                --input-format 105 --mpc-unit 1 --field density --auto-tune-report "$@" 2>/dev/null \
+                | sed -n 's/^AUTO-TUNE-REPORT partition=\([0-9]*\) mc=\([0-9]*\) predicted_gb=\([0-9.]*\) .*over_budget=\([01]\)$/\1 \2 \4 \3/p'
+        }
+        read -r _ _ _ u2 <<< "$(rep_o4 --partition 2 2 2 --max-concurrent 1)"
+        read -r _ _ _ c2 <<< "$(rep_o4 --partition 2 2 2 --max-concurrent 1 --parallel-triangulation)"
+        read -r _ _ _ c3 <<< "$(rep_o4 --partition 3 3 3 --max-concurrent 1 --parallel-triangulation)"
+        # the budget half way between one 2^3 partition without and with the copies, above one 3^3 one with them
+        b4=$(awk -v a="${u2:-0}" -v b="${c2:-0}" -v c="${c3:-0}" 'BEGIN{x = (b - a)/2;
+            if (a > 0 && c > 0 && x > 0.02 && a + x - c > 0.02) printf "%.3f", a + x}')
+        if [ -n "${b4}" ]; then
+            read -r op om oo _ <<< "$(DTFE_MEM_BUDGET_GB="${b4}" rep_o4 --parallel-triangulation)"
+            check "O4 a budget of ${b4} GB (one 2^3 partition ${u2} GB, with the insert's copies ${c2} GB; one 3^3 with them ${c3} GB): --partition ${op:-none}, ${om:-none} in flight, over_budget=${oo:-none}" \
+                  "$([ "${op:-0}" -ge 3 ] 2>/dev/null && [ "${om:-}" = 1 ] && [ "${oo:-}" = 0 ] && echo 1 || echo 0)"
+        else
+            check "O4 the budget between the two bookings (not formed from ${u2:-none}, ${c2:-none}, ${c3:-none} GB)" 0
+        fi
     else
-        echo "   SKIP  O2, O3 (the forced insert books nothing here: fewer than 4 threads)"
+        echo "   SKIP  O2, O3, O4 (the forced insert books nothing here: fewer than 4 threads)"
     fi
 else
     echo "   SKIP  O (no TBB in this build)"
@@ -797,6 +823,26 @@ run_y kill DTFE_TEST_PLAN_MC=1 DTFE_FREE_GB=1000 DTFE_TEST_EXIT_AFTER_PARTITIONS
 run_y kill DTFE_TEST_PLAN_MC=1 DTFE_FREE_GB=1000 -- --resume
 check "Y4 a dynamic run killed after 3 partitions and resumed: the same grids" \
       "$(grep -q -- "--resume: 3 of 27 partitions" "${TMP}/at_y_kill.log" && y_same kill && echo 1 || echo 0)"
+# Y7 (GPU builds): the ledger of an all-GPU run books what the plan books once beside its lanes -- the GPU deposit's
+# host snapshot (one deposit holds the device at a time; no evaluation points, so no lane share) -- once, and each
+# partition in flight at its lane, as the plan does: the start check's 'once' part is the report's snapshot_gb
+Y7_ARGS=(--input-format 105 --mpc-unit 1 --periodic --grid 192 --field density_a velocity_a --partition 2 2 2 --verbose 2
+         --gpu)
+env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 "${BIN}" "${SNAP_Y}" "${TMP}/at_y_g" "${Y7_ARGS[@]}" --auto-tune-report \
+    > "${TMP}/at_y_gr.log" 2>&1 || true
+if grep -q "GPU (--gpu)" "${TMP}/at_y_gr.log"; then
+    env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 DTFE_TEST_PLAN_MC=1 DTFE_AUTO_TUNE_DEBUG=1 "${BIN}" "${SNAP_Y}" "${TMP}/at_y_g" \
+        "${Y7_ARGS[@]}" > "${TMP}/at_y_g.log" 2>&1 || true
+    sg=$(sed -n 's/^AUTO-TUNE-REPORT .* snapshot_gb=\([0-9.]*\) .*/\1/p' "${TMP}/at_y_gr.log" | head -1)
+    read -r yp yo <<< "$(sed -n 's/^AUTO-TUNE-DEBUG PS dynamic start: partition \([0-9]*\) B, once \([0-9]*\) B,.*/\1 \2/p' \
+                         "${TMP}/at_y_g.log" | head -1)"
+    check "Y7 an all-GPU run books its GPU snapshot once: the start check's once part (${yo:-?} B of the partition's ${yp:-?} B) is the plan's snapshot_gb ${sg:-?}" \
+          "$(awk -v p="${yp:-0}" -v o="${yo:-0}" -v s="${sg:-x}" \
+                 'BEGIN{exit !(s ~ /^[0-9.]+$/ && s > 0.002 && o > 0 && o < p && o/1e9 - s < 0.0006 && s - o/1e9 < 0.0006)}' \
+             && echo 1 || echo 0)"
+else
+    echo "   SKIP  Y7 (this build has no GPU backend)"
+fi
 rm -rf "${SNAP_Y}" "${TMP}"/at_y_*
 fi
 

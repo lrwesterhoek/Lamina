@@ -1339,17 +1339,42 @@ def _custom_snapshot(tmp, np, P):
           and not [m for m in errors(other) if "extra options" in m],
           str(errors(old_sp) + errors(old_eq) + errors(grid_eq) + errors(other)))
     # a merge switch in the extra options repeats the tab's own '--ps-merge' when the tick is off (the migrated run
-    # copy would hand the binary '--ps-merge' twice); with the tick on the tab passes no merge, so the switch stands
+    # copy would hand the binary '--ps-merge' twice); with the tick on and the extra options naming a merge, the tab
+    # leaves its own '--ps-merge index-order' out, so the switch stands
     m_off, m_on = (rs.CustomSpec(input_file=str(snap), grid=64, output_dir=str(work), ordered_merge=om,
                                  extra_args="--ordered-merge") for om in (False, True))
     m_off_copy, m_on_copy = (rs.CustomSpec.from_dict(s.to_dict()) for s in (m_off, m_on))
     check("... a merge switch beside the tab's own '--ps-merge' is the same error (live spec and migrated copy alike), "
-          "and no error when the tab passes no merge",
+          "and no error when the extra options name the merge with the tick on (the tab then gives none)",
           "--ps-merge" in m_off._own_command() and "--ps-merge" not in m_on._own_command()
           and all(any("repeat --ps-merge," in m for m in errors(s)) for s in (m_off, m_off_copy))
           and not [m for s in (m_on, m_on_copy) for m in errors(s) if "extra options" in m]
           and m_on_copy.command()[-2:] == ["--ps-merge", "index-order"],
           str(errors(m_off) + errors(m_off_copy) + errors(m_on) + errors(m_on_copy) + m_on_copy.command()[-3:]))
+    # the tick on (the default): the tab names the index order itself (R7: a GIVEN index order keeps the memory gate on
+    # under the auto-tuner's speed split, as the drivers' PS_MERGE does), unless the extra options name a merge in any
+    # spelling the binary takes; then the extras' merge is the command's only one
+    pair = lambda cmd, mode: any(cmd[i:i + 2] == ["--ps-merge", mode] for i in range(len(cmd)))  # noqa: E731
+    plain = rs.CustomSpec(input_file=str(snap), grid=64, output_dir=str(work))
+    named = {e: rs.CustomSpec(input_file=str(snap), grid=64, output_dir=str(work), extra_args=e)
+             for e in ("--ps-merge fixed-point", "--ps-merge=completion-order", "--fixed-point-merge",
+                       "--completion-order-merge --seed 7")}
+    named_copies = {e: rs.CustomSpec.from_dict(s.to_dict()) for e, s in named.items()}
+    unclosed = rs.CustomSpec(input_file=str(snap), grid=64, output_dir=str(work), extra_args="--ps-merge 'fixed-point")
+    check("... the tick on: '--ps-merge index-order' on the tab's own command when the extra options name no merge "
+          "(an unparsed extra line names none); a merge in the extra options ('--ps-merge MODE', '--ps-merge=MODE' or "
+          "an older switch) is no repeat, and the command carries only the extras' merge (live spec and saved copy)",
+          plain.ordered_merge and pair(plain._own_command(), "index-order") and pair(plain.command(), "index-order")
+          and plain.command().count("--ps-merge") == 1 and pair(unclosed._own_command(), "index-order")
+          and all(s._extra_names_merge() and "--ps-merge" not in s._own_command()
+                  and not [m for m in errors(s) if "extra options" in m]
+                  and not pair(s.command(), "index-order")
+                  for s in list(named.values()) + list(named_copies.values()))
+          and pair(named["--ps-merge fixed-point"].command(), "fixed-point")
+          and named["--ps-merge fixed-point"].command().count("--ps-merge") == 1
+          and pair(named_copies["--fixed-point-merge"].command(), "fixed-point")
+          and not plain._extra_names_merge(),
+          f"{plain.command()[-4:]} {[(e, s.command()[-3:], errors(s)) for e, s in named.items()]}")
     # the cell average: the tab names it either way ('--exact' or '--sampled'), so either flag among the extra
     # options, or an older name of '--exact', repeats it (the binary refuses '--exact' beside '--sampled')
     avg = [rs.CustomSpec(input_file=str(snap), grid=64, output_dir=str(work), deposit=dep, extra_args=e)
@@ -1987,22 +2012,37 @@ def point_window_linear(tmp: Path):
           env.get("SAMPLE_POINTS") == str(pts) and lin.get("PS_LINEAR_DEPOSIT") == "1"
           and rs.RunSpec(**base).command()[1].get("PS_LINEAR_DEPOSIT") == "0", f"{env} {lin}")
     # the face gradient (PS-DTFE '--face-gradient'): FACE_GRADIENT spelled out on the Grids and Pipeline jobs, the flag
-    # on a 3D PS-DTFE Custom command; a standard-DTFE job sets nothing (its face gradient is the binary's default)
+    # on a 3D PS-DTFE Custom command; a standard-DTFE job pins it EMPTY (its face gradient is the binary's default)
     pbase = dict(data_root=str(tmp), sims=["TNG100-3-Dark"], nu=64, grid=128)
     fg_pipe = rs.PipelineSpec(face_gradient=True, **pbase)
     fg_own = lambda **k: rs.CustomSpec(input_file=str(snap), **k).command()          # noqa: E731
     check("face gradient: FACE_GRADIENT spelled out on the Grids and Pipeline jobs (and the Pipeline's memory check), "
-          "absent for standard DTFE; '--face-gradient' on the Custom command only when ticked, for PS-DTFE in 3D",
-          rs.RunSpec(**base).command()[1].get("FACE_GRADIENT") == "0"
+          "empty for standard DTFE whatever the tick; '--face-gradient' on the Custom command only when ticked, for "
+          "PS-DTFE in 3D",
+          rs.RunSpec(face_gradient=False, **base).command()[1].get("FACE_GRADIENT") == "0"
           and rs.RunSpec(face_gradient=True, **base).command()[1].get("FACE_GRADIENT") == "1"
-          and rs.PipelineSpec(**pbase).command()[1].get("FACE_GRADIENT") == "0"
+          and rs.PipelineSpec(face_gradient=False, **pbase).command()[1].get("FACE_GRADIENT") == "0"
           and fg_pipe.command()[1].get("FACE_GRADIENT") == "1"
           and fg_pipe.check_step("TNG100-3-Dark", [99], 64).env.get("FACE_GRADIENT") == "1"
-          and "FACE_GRADIENT" not in rs.RunSpec(estimator="dtfe", face_gradient=True, **base).command()[1]
-          and "--face-gradient" in fg_own(face_gradient=True) and "--face-gradient" not in fg_own()
+          and rs.RunSpec(estimator="dtfe", face_gradient=True, **base).command()[1].get("FACE_GRADIENT") == ""
+          and "--face-gradient" in fg_own(face_gradient=True) and "--face-gradient" not in fg_own(face_gradient=False)
           and "--face-gradient" not in fg_own(estimator="dtfe", face_gradient=True)
           and "--face-gradient" not in fg_own(dim=2, face_gradient=True),
           f"{fg_pipe.command()[1]} {fg_own(face_gradient=True)}")
+    # a standard-DTFE Grids job pins run_dtfe.sh's FACE_GRADIENT EMPTY, its memory check too, as it pins SUBSAMPLES
+    # and THREADS: empty is the driver's default (the binary's own route, the face gradient), so the command is the one
+    # a clean shell runs, and a FACE_GRADIENT exported in the login shell (0: '--per-tet-gradient', 1: an explicit
+    # '--face-gradient') does not reach the job, whose environment is laid over the launcher's
+    std_jobs = [rs.RunSpec(estimator="dtfe", **base), rs.RunSpec(estimator="dtfe", deposit="sampled", gpu=False, **base),
+                rs.RunSpec(estimator="dtfe", face_gradient=True, **base)]
+    std_envs = [s.command()[1] for s in std_jobs] + [s.check_step().env for s in std_jobs]
+    leaked = [dict({"FACE_GRADIENT": "0"}, **e).get("FACE_GRADIENT") for e in std_envs]
+    check("a standard-DTFE Grids job pins FACE_GRADIENT empty (run_dtfe.sh's default: the binary's face gradient), in "
+          "the memory check too and whatever the PS-only tick holds, so an exported FACE_GRADIENT cannot leak in; "
+          "the command names no gradient route",
+          all(e.get("FACE_GRADIENT") == "" for e in std_envs) and leaked == [""] * len(std_envs)
+          and not any(a in ("--face-gradient", "--per-tet-gradient") for s in std_jobs for a in s.command()[0]),
+          str([{k: e.get(k) for k in ("FACE_GRADIENT", "SUBSAMPLES", "THREADS")} for e in std_envs]))
     # ... and what the binary and the drivers refuse with it, said before the run (only the face-gradient messages:
     # the fake snapshot has other problems of its own)
     fg_said = lambda spec, lv: [m for lvl, m in spec.problems() if lvl == lv and "face gradient" in m]   # noqa: E731
@@ -2027,9 +2067,24 @@ def point_window_linear(tmp: Path):
           and any("3D only" in m for m in fg_said(flat, "info")) and not fg_said(flat, "error"),
           f"{no_grad.problems()} {[spec.problems() for spec in prod]} {flat.problems()}")
     check("... the memory check is kept per face-gradient tick (the binary's tuner books the face sums)",
-          rs.RunSpec(face_gradient=True).memory_key() != rs.RunSpec().memory_key()
-          and fg_pipe.memory_key() != rs.PipelineSpec(**pbase).memory_key()
-          and rs.CustomSpec(face_gradient=True).memory_key() != rs.CustomSpec().memory_key())
+          rs.RunSpec(face_gradient=True).memory_key() != rs.RunSpec(face_gradient=False).memory_key()
+          and fg_pipe.memory_key() != rs.PipelineSpec(face_gradient=False, **pbase).memory_key()
+          and rs.CustomSpec(face_gradient=True).memory_key() != rs.CustomSpec(face_gradient=False).memory_key())
+    # the tick's default is one constant for the three jobs (runspec.FACE_GRADIENT_DEFAULT, off: run_ps_dtfe.sh's and
+    # the binary's default): a new job starts there, and a saved one without the key (older than the tick) takes it;
+    # a saved one keeps its own. The checks above name the tick's state, so they hold whichever way the default goes
+    saved = {"Grids": (rs.RunSpec, rs.RunSpec(**base).to_dict()),
+             "Pipeline": (rs.PipelineSpec, rs.PipelineSpec(**pbase).to_dict()),
+             "Custom": (rs.CustomSpec, rs.CustomSpec(input_file=str(snap)).to_dict())}
+    loaded = {k: (cls.from_dict({n: v for n, v in d.items() if n != "face_gradient"}).face_gradient,
+                  cls.from_dict(dict(d, face_gradient=not rs.FACE_GRADIENT_DEFAULT)).face_gradient)
+              for k, (cls, d) in saved.items()}
+    check("... a new job's tick is runspec.FACE_GRADIENT_DEFAULT (off) on the Grids, Pipeline and Custom jobs; a saved "
+          "job without the key loads the default, one with it keeps its own",
+          rs.FACE_GRADIENT_DEFAULT is False
+          and all(cls().face_gradient is rs.FACE_GRADIENT_DEFAULT for cls in (rs.RunSpec, rs.PipelineSpec, rs.CustomSpec))
+          and all(v == (rs.FACE_GRADIENT_DEFAULT, not rs.FACE_GRADIENT_DEFAULT) for v in loaded.values()),
+          str(loaded))
     nodt = [m for lv, m in rs.CustomSpec(input_file=str(snap), estimator="dtfe", fields=["dispersion_a"]).problems()
             if lv == "error"]
     check("a Custom standard-DTFE run with only the dispersion ticked is refused (it would pass a bare --field)",
@@ -3361,17 +3416,19 @@ def ordered_merge_settings():
         pon = rs.PipelineSpec(sims=["TNG50-4"], ordered_merge=True)
         # ON by default (the staged merge in index order: run_ps_dtfe.sh's and the binary's default); off
         # is the merge as partitions finish (ORDERED_MERGE=0 / --ps-merge completion-order)
+        pair = lambda cmd, mode: any(cmd[i:i + 2] == ["--ps-merge", mode] for i in range(len(cmd)))  # noqa: E731
         check("ordered merge: Grids and Pipeline jobs set ORDERED_MERGE for run_ps_dtfe.sh (spelled out when off, so a "
-              "stray export cannot leak in), the Pipeline's memory check too; the Custom tab passes '--ps-merge' only off "
-              "the default (PS only): off = --ps-merge completion-order",
+              "stray export cannot leak in), the Pipeline's memory check too; the Custom tab always names the merge "
+              "(PS only): on = --ps-merge index-order (the default), off = --ps-merge completion-order",
               on.get("ORDERED_MERGE") == "1" and off.get("ORDERED_MERGE") == "0"
               and rs.RunSpec(sim="TNG50-4", snapshots=[99]).command()[1].get("ORDERED_MERGE") == "1"
               and pon.command()[1].get("ORDERED_MERGE") == "1"
               and pon.check_step("TNG50-4", [99], 1024).env.get("ORDERED_MERGE") == "1"
               and rs.PipelineSpec(sims=["TNG50-4"]).command()[1].get("ORDERED_MERGE") == "1"
               and rs.PipelineSpec(sims=["TNG50-4"], ordered_merge=False).command()[1].get("ORDERED_MERGE") == "0"
-              and "--ps-merge" not in rs.CustomSpec(input_file=str(snap), ordered_merge=True).command()
-              and "--ps-merge" not in rs.CustomSpec(input_file=str(snap)).command()
+              and pair(rs.CustomSpec(input_file=str(snap), ordered_merge=True).command(), "index-order")
+              and pair(rs.CustomSpec(input_file=str(snap)).command(), "index-order")
+              and rs.CustomSpec(input_file=str(snap)).command().count("--ps-merge") == 1
               and rs.CustomSpec(input_file=str(snap), ordered_merge=False).command()[-2:] == ["--ps-merge", "completion-order"]
               and not {"--ordered-merge", "--completion-order-merge", "--ps-merge"} & set(
                   rs.CustomSpec(input_file=str(snap), estimator="dtfe", ordered_merge=False).command()), str(on))

@@ -101,8 +101,10 @@ np.savetxt(os.path.join(tmp, "g2pts.txt"), grid_centres(*SLAB_REGION, SLAB_GRID)
 np.savetxt(os.path.join(tmp, "user_out.txt"), outside_samples(us))
 PYEOF
 
-# method 2's 20 random points per cell: a total that no '--subsamples k' (k^3) gives, and S7's golden values are
-# drawn with it, so these runs keep the deprecated total '--samples 20' (one warning line each; P6.6 decides)
+# method 2's 20 random points per cell (NS), with which S7's golden values are drawn: a total that no '--subsamples k'
+# (k^3) gives, so the method-2 runs name no count and take method 2's own default, 20 (user_options.cc
+# readAveragingOptions; the cone and the user points keep it too). The deprecated total '--samples 20' gave the same
+# 20 draws; it goes with the old spellings (docs/cleanup-plan.md P6.6), the default stays
 C0=(--input-format 105 --mpc-unit 1 --no-padding-test --verbose 1)
 C=("${C0[@]}" --region-mpc 2.5 7.5 2.5 7.5 2.5 7.5)
 CONE=(--grid 4 4 6 --redshift-cone 0.5 2.0 30 150 0 300 --cone-origin 5 5 5)
@@ -122,12 +124,12 @@ echo ">> the regular grid (point values + '--sample-points'), method 2, method 3
 # (an '--average-method' or a sample count selects the sampled average by itself: the exact one is the default since
 # 2026-11-09, and the method-2 / method-3 runs here need no '--sampled')
 run u "${DTFE_BIN}" --grid 8 --field density velocity gradient density_a velocity_a gradient_a velocityStd_a \
-    --average-method 2 --samples 20 --seed "$SEED" --sample-points "$TMP/pts.txt"
+    --average-method 2 --seed "$SEED" --sample-points "$TMP/pts.txt"
 run m3 "${DTFE_BIN}" --grid 8 --field density_a velocity_a gradient_a --average-method 3 --subsamples 3
 run f "${DTFE_BIN}" --grid 24 --field density
 run x "${DTFE_BIN}" --grid 8 --field density_a --exact
 echo ">> the redshift cone (point values and method 2)"
-run c "${DTFE_BIN}" "${CONE[@]}" --field density velocity gradient density_a velocity_a gradient_a --average-method 2 --samples 20 --seed "$SEED"
+run c "${DTFE_BIN}" "${CONE[@]}" --field density velocity gradient density_a velocity_a gradient_a --average-method 2 --seed "$SEED"
 echo ">> past the convex hull: a cone leaving the particles, a grid below a slab of particles (point values + '--sample-points')"
 runx c2 "$TMP/snap.hdf5" "${DTFE_BIN}" --region-mpc 0 10 0 10 0 10 --grid 4 4 6 --redshift-cone 0.5 2.0 30 150 0 300 --cone-origin 9 5 5 \
     --field density velocity gradient --sample-points "$TMP/c2pts.txt"
@@ -150,10 +152,10 @@ else
     fi
     echo ">> user sampling points (libDTFE: point values and method 2)"
     OMP_NUM_THREADS=1 "$DRV" "$TMP/user.txt" "$TMP/snap.hdf5" "$TMP/us" "${C[@]}" --grid 1 \
-        --field density velocity gradient density_a velocity_a gradient_a --average-method 2 --samples 20 --seed "$SEED" > "$TMP/us.log" 2>&1 \
+        --field density velocity gradient density_a velocity_a gradient_a --average-method 2 --seed "$SEED" > "$TMP/us.log" 2>&1 \
         || { echo "FAIL: the user-sampling run (see $TMP/us.log)"; tail -5 "$TMP/us.log"; exit 1; }
     OMP_NUM_THREADS=1 "$DRV" "$TMP/user_out.txt" "$TMP/snap.hdf5" "$TMP/us2" "${C[@]}" --grid 1 \
-        --field density velocity gradient density_a velocity_a gradient_a --average-method 2 --samples 20 --seed "$SEED" > "$TMP/us2.log" 2>&1 \
+        --field density velocity gradient density_a velocity_a gradient_a --average-method 2 --seed "$SEED" > "$TMP/us2.log" 2>&1 \
         || { echo "FAIL: the user-sampling run with outside points (see $TMP/us2.log)"; tail -5 "$TMP/us2.log"; exit 1; }
     USER_OK=1
 fi

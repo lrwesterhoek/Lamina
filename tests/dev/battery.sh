@@ -4,10 +4,11 @@
 # no simulation data (DTFE_DATA_ROOT points at an empty folder, as on CI). 32 stages, about 1.5-2 h on 10 cores.
 # It builds the three binary pairs first (METAL=1, METAL=1 DOUBLE=1, DIM=2) and runs on this checkout; do not edit
 # the tree while it runs (the summary says if it changed). The last stage, 'deprecation_gate', fails on a
-# 'warning: ... is deprecated' line in the suites' temporary files written since this battery started, except those
-# of the suites that test the old spellings (the allow-list in tests/dev/deprecation_gate.sh). A suite that several
-# stages run (ci_core and then ci_double into the same DTFE_TEST_TMP) clears its folder or rewrites its logs on each
-# run, so the gate sees each suite's last run of the battery; '--only deprecation_gate' alone reads the whole folder.
+# 'warning: ... is deprecated' line in the suites' temporary files or in the stage logs written since this battery
+# started (what a suite does not redirect reaches only its stage log), except those of the suites that test the old
+# spellings (the allow-lists in tests/dev/deprecation_gate.sh). A suite that several stages run (ci_core and then
+# ci_double into the same DTFE_TEST_TMP) clears its folder or rewrites its logs on each run, so the gate sees each
+# suite's last run of the battery; '--only deprecation_gate' alone reads the whole folder and every stage log in it.
 #
 # Usage: tests/dev/battery.sh <scratch dir> [--ci-python PATH] [--gui-python PATH] [--only NAME,NAME...] [--list]
 #   <scratch dir>   logs (<scratch>/battery/<stage>.log and SUMMARY.txt), the suites' temporary files and the
@@ -121,7 +122,7 @@ run gpu_retry_d env DTFE_TEST_PRECISION=double tests/gpu_retry_check.sh --no-bui
 for t in $PY_SUITES; do
     run "${t%%:*}_np126" env DTFE_DATA_ROOT="$ER" "$CI_PY" "tests/${t#*:}.py"
 done
-run deprecation_gate tests/dev/deprecation_gate.sh "$DTFE_TEST_TMP" ${gate_mark[@]+"${gate_mark[@]}"}
+run deprecation_gate tests/dev/deprecation_gate.sh --stage-logs "$L" "$DTFE_TEST_TMP" ${gate_mark[@]+"${gate_mark[@]}"}
 
 tree_ok=1; [ "$(fingerprint)" = "$tree0" ] || tree_ok=0
 {

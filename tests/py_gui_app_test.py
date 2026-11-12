@@ -1169,8 +1169,9 @@ def _polish(qa, w):
     import atexit
     import json as _json
     from PySide6.QtCore import QPoint
-    from PySide6.QtWidgets import QComboBox, QWidget
+    from PySide6.QtWidgets import QCheckBox, QComboBox, QWidget
     import app_tabs as T
+    import presets as P
     from app_widgets import OPEN_KEY, tip_lines
 
     def y_of(wd):
@@ -1233,6 +1234,12 @@ def _polish(qa, w):
     check("an opened group is open again at the next start (one settings key); a window that does not remember "
           "starts folded", saved == {"pipeline.resources": True} and w2.p_res_group.is_open()
           and not w2.res_group.is_open() and not w3.p_res_group.is_open(), str(saved))
+    # a fresh window's face-gradient ticks and jobs start at one constant (runspec.FACE_GRADIENT_DEFAULT: off now; the
+    # day the face gradient becomes PS-DTFE's default, that one line ticks all three tabs)
+    fresh = [w3._shared(t, "face_gradient").isChecked() for t in T.RUN_TABS] + [
+        w3.spec.face_gradient, w3.pipe.face_gradient, w3.custom.face_gradient]
+    check("a fresh window: the face-gradient tick of the Grids, Custom and Pipeline tabs and their jobs at "
+          "runspec.FACE_GRADIENT_DEFAULT", fresh == [rs.FACE_GRADIENT_DEFAULT] * 6, str(fresh))
     w2.close()
     w3.close()
     # the shared groups are one table: each role a widget of the right kind on every tab that has it
@@ -1244,9 +1251,10 @@ def _polish(qa, w):
           and not w.fields_box.isAncestorOf(w.cu_check) and w.adv_group.isAncestorOf(w.cu_check)
           and w.adv_group.isAncestorOf(w.ld_check) and w.p_adv_group.isAncestorOf(w.p_rfixed)
           and w.o_adv_group.isAncestorOf(w.o_pstream))
-    # the face gradient (PS-DTFE '--face-gradient'): a tick in the Advanced group of all three run tabs, read into
-    # each job and named in the group's summary; exclusive with the linear deposit (it needs the volume weighting,
-    # which the linear deposit excludes). The ticks are put back as they were (the later sections use this window)
+    # the face gradient (PS-DTFE '--face-gradient'): a tick in the visible 'Phase-space options' group of all three run
+    # tabs (since 2026-11-11; before in the folded Advanced group), read into each job, no longer in the Advanced
+    # group's summary; exclusive with the linear deposit (it needs the volume weighting, which the linear deposit
+    # excludes). The ticks are put back as they were (the later sections use this window)
     trios = [(w._shared(t, "face_gradient"), w._shared(t, "linear_deposit"), w._shared(t, "volume_weighted"))
              for t in T.RUN_TABS]
     was = [[cb.isChecked() for cb in trio] for trio in trios]
@@ -1256,12 +1264,19 @@ def _polish(qa, w):
     qa.processEvents()
     w._read_widgets()
     w._update_summaries()
-    check("the face-gradient tick: in the Advanced group of all three run tabs, read into each job (FACE_GRADIENT=1 "
-          "for the Grids job's run_ps_dtfe.sh), named in the folded group's summary",
-          w.adv_group.isAncestorOf(w.fg_check) and w.p_adv_group.isAncestorOf(w.p_fg)
-          and w.o_adv_group.isAncestorOf(w.o_fg) and w.spec.face_gradient and w.pipe.face_gradient
-          and w.custom.face_gradient and w.spec.command()[1].get("FACE_GRADIENT") == "1"
-          and "face gradient" in w.adv_group.summary_text() and "face gradient" in w.p_adv_group.summary_text(),
+    ps_adv = [(w._shared(t, "ps_group"), w._shared(t, "advanced")) for t in T.RUN_TABS]
+    check("the face-gradient tick: in the 'Phase-space options' group of all three run tabs (the group's last box, "
+          "not in the folded Advanced group or its summary), read into each job (FACE_GRADIENT=1 for the Grids job's "
+          "run_ps_dtfe.sh)",
+          all(ps.isAncestorOf(fg) and not adv.isAncestorOf(fg) and "face gradient" not in adv.summary_text()
+              for (ps, adv), (fg, _ld, _vw) in zip(ps_adv, trios))
+          and w.ps_group.isAncestorOf(w.fg_check) and w.o_ps_group.isAncestorOf(w.o_fg)
+          and w.p_ps_group.isAncestorOf(w.p_fg) and w.ps_group.title() == P.LABELS["ps_options"]
+          and all(g.layout().itemAt(g.layout().count() - 1).widget() is fg and isinstance(fg, QCheckBox)
+                  for (g, _adv), (fg, _ld, _vw) in zip(ps_adv, trios))
+          and T.PS_OPTIONS[-1] == "face_gradient" and "face_gradient" not in T.EXPERT_OPTIONS
+          and w.spec.face_gradient and w.pipe.face_gradient
+          and w.custom.face_gradient and w.spec.command()[1].get("FACE_GRADIENT") == "1",
           f"{w.adv_group.summary_text()!r} {w.p_adv_group.summary_text()!r}")
     gone, back = [], []
     for fg, ld, _vw in trios:

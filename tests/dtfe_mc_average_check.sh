@@ -7,9 +7,12 @@
 # rms per cell with the thread count or the partitioning. So the vertices are ordered by a hash of the cell's
 # vertex set and every sample is centred (averaged_interpolation_1.cc: the comment above 'mcLegacy'). Asserted on
 # demo/z0_64.gadget (262144 particles, z=0, tracked in the repo) at 64^3, --periodic --padding 12, density_a velocity_a:
-#   A1  box mean of '.a_den' within 1e-4 of 1 (measured +2.0e-5; double build +1.4e-5), and with '--samples 20' (the
-#       minimum count 4, the worst Sobol prefix; measured -5.1e-6). The vertex(0) realization (DTFE_MC_LEGACY=1, kept
-#       for A/B) must FAIL the same bound (measured -3.35e-3), so the check is known to see the bias
+#   A1  box mean of '.a_den' within 1e-4 of 1 (measured +2.0e-5; double build +1.4e-5), and with '--subsamples 2'
+#       (8 points per cell: a tetrahedron under a sixth of a grid cell takes the minimum count, 8/6 + 1 = 2 in
+#       integer division, the shortest Sobol prefix; measured +2.4e-5, double build -1.3e-5). The bound holds for
+#       any count: the centred samples give every tetrahedron its exact mass and deposit it inside it
+#       (averaged_interpolation_1.cc, the comment above 'mcLegacy'). The vertex(0) realization (DTFE_MC_LEGACY=1,
+#       kept for A/B) must FAIL the same bound (measured -3.35e-3), so the check is known to see the bias
 #   A2  the per-cell noise against --exact, rms(a - exact) / <exact>, is no larger than the vertex(0)
 #       realization's and below 0.07 (measured 0.0625 against 0.0826, both builds)
 #   A3  split invariance: --partition 2 2 2 --max-concurrent 1, OMP_NUM_THREADS=1 and --padding 20 against
@@ -64,10 +67,12 @@ echo ">> demo/z0_64.gadget at 64^3: the Monte-Carlo average, the legacy one (DTF
 run n -- --sampled
 run l DTFE_MC_LEGACY=1 -- --sampled
 run e -- --exact
-echo ">> --samples 20; --partition 2 2 2; one thread; --padding 20"
-# a total of 20 points per cell, which no '--subsamples k' (k^3) gives: the deprecated '--samples 20' (P6.6 decides);
-# a count selects the sampled average by itself
-run s -- --samples 20
+echo ">> --subsamples 2; --partition 2 2 2; one thread; --padding 20"
+# a low count, 2^3 = 8 points per cell (the default is 100): every tetrahedron under a sixth of a grid cell takes the
+# minimum count, 2, the shortest Sobol prefix; a count selects the sampled average by itself. (It replaces the
+# deprecated total '--samples 20', minimum count 4, which no '--subsamples k' gives and which goes with the old
+# spellings: docs/cleanup-plan.md P6.6)
+run s -- --subsamples 2
 run p -- --sampled --partition 2 2 2 --max-concurrent 1
 run t OMP_NUM_THREADS=1 -- --sampled
 run d -- --sampled --padding 20
@@ -123,7 +128,7 @@ if not (n.size == l.size == e.size == s.size == 64 ** 3):
 MEAN_TOL = 1e-4
 dn, dl, ds = n.mean() - 1, l.mean() - 1, s.mean() - 1
 check("A1", abs(dn) < MEAN_TOL and abs(ds) < MEAN_TOL and abs(dl) > MEAN_TOL,
-      f"box mean - 1: {dn:+.2e} (default), {ds:+.2e} (-s 20), both < {MEAN_TOL:.0e}; the old realization "
+      f"box mean - 1: {dn:+.2e} (default), {ds:+.2e} (--subsamples 2), both < {MEAN_TOL:.0e}; the old realization "
       f"{dl:+.2e} fails it, as it must (exact {e.mean() - 1:+.1e})")
 rn = float(np.sqrt(((n - e) ** 2).mean()) / e.mean())
 rl = float(np.sqrt(((l - e) ** 2).mean()) / e.mean())

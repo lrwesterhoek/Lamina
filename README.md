@@ -213,7 +213,7 @@ The development tools in `tests/dev/` (not run by CI; macOS):
 * `tests/dev/battery.sh <scratch dir>` runs everything above that a Mac can run, in 32 stages (about 1.5-2 h): the three
   builds, the `core`, `double`, `2d` and `gui` stages, the GPU suites in single and double precision, the Python
   suites under CI's package versions with no simulation data, and `deprecation_gate` (no unexpected 'is deprecated'
-  line in the suites' temporary files). `tests/dev/make_ci_venv.sh` makes that Python (python
+  line in the suites' temporary files or in the stages' logs). `tests/dev/make_ci_venv.sh` makes that Python (python
   3.11, numpy 1.26.4, scipy 1.11.4, matplotlib 3.6.3; by default in `~/.venvs/dtfe-ci`). `--list` names the stages,
   `--only` picks some, and `<scratch dir>/battery/SUMMARY.txt` records the commit and whether the tree changed
   during the run.
@@ -310,7 +310,8 @@ one release when the new one is unset, with one `warning: OLD is deprecated, use
 | `DTFE_MEM_FRACTION` | the auto-tuner's budget as a fraction of the RAM (0.1-0.95) | 0.60 |
 | `DTFE_MEM_BUDGET_GB` | the budget outright, in GB (still capped by the free memory less 4 GB) | unset: the fraction |
 | `DTFE_AUTO_MINN` | particles below which a run stays in one domain unless a split is predicted clearly faster | 2e6 |
-| `DTFE_DYNAMIC_CONCURRENCY` | 0 = PS-DTFE runs the auto-tuner's number of partitions at once; by default, when the tuner chose it, more start while the live free memory and the budget hold them (the grids are the same); a mixed run (`--gpu-share` below 1) books the GPU lock holder's grids once, not per partition | 1 |
+| `DTFE_DYNAMIC_CONCURRENCY` | 0 = PS-DTFE runs the auto-tuner's number of partitions at once; by default, when the tuner chose it, more start while the live free memory and the budget hold them (the grids are the same); what the plan books once -- the GPU deposit's snapshot (a mixed run's lock holder's grids with it) and the lane share's first lane -- is booked once, not per partition | 1 |
+| `DTFE_LOOKAHEAD_TEAM` | standard DTFE under `--run-mode balanced`: 0 = a plan whose look-ahead does not fit beside the busiest partition runs without it (the plan of before); by default the auto-tuner first looks for a smaller team (8, 6, 4, 3 or 2 threads per partition) that keeps the look-ahead within the budget, and says so | 1 |
 | `DTFE_AUTO_SPAN` | 0 = PS-DTFE's planner books a partition's sub-grid as G/n + 40 cells per axis instead of measuring each partition's Eulerian span on the particles | 1 |
 | `DTFE_AUTO_T_VERTEX`, `DTFE_AUTO_T_SAMPLE`, `DTFE_AUTO_T_POINT` | the speed split's single-thread seconds per vertex, per sample, per point | 3.6e-6, 3.5e-7, 7.5e-7 |
 | `DTFE_AUTO_PTS_N` | the number of points the auto-tuner budgets (a `--sample-points` file not written yet) | the file's count |
@@ -349,7 +350,8 @@ For testing and debugging only: `DTFE_TEST_CHECKPOINT_FREE_BYTES` (the free byte
 `DTFE_TEST_PARK_ROOM_GB` (the RAM parking's budget room), `DTFE_TEST_FXMERGE_SHIFT=n` (the `--ps-merge fixed-point`
 units n bits finer) and `DTFE_TEST_FXMERGE_SUM_LIMIT=n` (its sums capped at 2^n), for the overflow checks,
 `DTFE_TEST_NAN_SHARE=k` (every k-th share NaN: the exact sums' guard), `DTFE_TEST_PLAN_MC=k` (stands for an
-auto-tuned plan of k partitions at once: the dynamic concurrency's floor), `DTFE_AUTO_TUNE_DEBUG` (prints the
+auto-tuned plan of k partitions at once: the dynamic concurrency's floor), `DTFE_TEST_TUNE_UNIFORM` (the standard
+auto-tuner plans with the uniform count, as for a call without the particles), `DTFE_AUTO_TUNE_DEBUG` (prints the
 standard auto-tuner's busiest partition per thread, PS-DTFE's partition sub-grids, measured, booked and real, and the
 terms of its dynamic concurrency's start check), `DTFE_DEBUG_DEGREES` (checks the lazy vertex degrees after a GPU
 deposit against a full pass), `DTFE_DEBUG_FX_BOUNDS` (PS-DTFE, single precision: checks the bounds a `--face-gradient`
@@ -927,10 +929,14 @@ now runs that deposit in every mode.
 The labels follow the option names: **Standard DTFE** / **PS-DTFE** (the estimator), **Cell average: Sampled /
 Exact** for both (`--sampled` / `--exact`; Exact is ticked by default since 2026-11-09, a saved choice is kept), **Grid window (Mpc)** on the Custom tab (`--grid-window`) beside **Plane window
 (Mpc)** on the Pipeline tab (`PLANE_WINDOW`), **Concurrent triangulations** (`--max-concurrent`, which caps the
-triangulations built at once in both binaries). The merge tick on the Grids and Pipeline tabs passes `PS_MERGE=index-order`
-(an explicit index order: the memory gate stays on under the auto-tuner's speed split); the Custom tab passes
-`--ps-merge` only for a choice other than the default. Saved settings written with older option names (the Custom
-tab's extra options, its stream density, a plot's criterion or panel projection) load under the new ones.
+triangulations built at once in both binaries). The merge tick gives the index order explicitly on all three run tabs
+(`PS_MERGE=index-order` on the Grids and Pipeline tabs, `--ps-merge index-order` on the Custom tab, which leaves the
+merge to its extra options when they name one): the memory gate stays on under the auto-tuner's speed split. The
+face-gradient tick (`--face-gradient`, `FACE_GRADIENT`; PS-DTFE, 3D, off by default) is the last row of the
+**Phase-space options** group of the three run tabs; before the run the launcher names what the binary would refuse with
+it (the sampled deposit, velocities that are not volume weighted, the halo release). A standard-DTFE Grids job pins
+`FACE_GRADIENT` empty: the binary's own route, the face gradient. Saved settings written with older option names (the
+Custom tab's extra options, its stream density, a plot's criterion or panel projection) load under the new ones.
 
 The code lives in `python/gui`: `app.py` (the window) with the mixins `app_tabs.py`, `app_specs.py`, `app_run.py`,
 `app_menus.py`, `app_check.py` and `app_widgets.py`; `explore.py` with `explore_canvas.py`, `explore_grid.py`,

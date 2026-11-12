@@ -274,9 +274,13 @@ struct AutoTuneReport
     double gpuSnapshot = 0.;    // bytes of the GPU deposit's host snapshot (with --grid-window: and of the deposit's window
                                 // grids), held by ONE partition at a time (in 'predicted')
     bool   mixedLanes = false;  // PS-DTFE: a mixed run's split ('--gpu-share' < 1): gpuSnapshot is also the GPU lock
-                                // holder's device and host grids, and the dynamic concurrency books it once
+                                // holder's device and host grids (booked once: onceBytes)
     double laneOnce = 0.;       // PS-DTFE lane share (auto_tune.cc laneShareCut): what the first partition in flight holds
                                 // beyond each other one, in 'predicted' once (0: every lane booked whole)
+    double onceBytes = 0.;      // PS-DTFE: what 'predicted' books once beside its lanes, whatever the count in flight:
+                                // gpuSnapshot (one deposit holds the GPU at a time) and laneOnce (0 on the CPU). The
+                                // dynamic concurrency's ledger books it once and each lane as 'predicted' does
+                                // (DTFE.cpp psOnceBytes; PartitionMemoryGate::once)
     double predictedWholeLanes = 0.;   // ... 'predicted' with every lane whole: the staged merge's park room
     int    inFlightCap = 0;     // ... the most partitions in flight that booking holds for (0: no limit)
     double streamsEstimate = -1., streamsBudgeted = 0.;
@@ -382,13 +386,14 @@ struct PartitionMemoryGate
     int floor = 1, total = 1, finished = 0, maxInFlight = 0;
     double reserveEnd = 0., reserveFirstMerge = 0., reserveRecords = 0., budget = 0.;
     double startFree = -1., startOwn = -1.;
-    /* A MIXED run's split ('--gpu-share' < 1): 'once' is the part of 'need' that one partition at a time holds (the GPU
-       lock holder's snapshot, device and host grids and, under the lane share, what the first partition holds beyond
-       the others: laneOnce), so the ledger books it once and need - once for each partition
-       in flight; the live check keeps the whole 'need' (the lock may be free when this partition reaches it). 0: every
-       partition books 'need' in full (an all-GPU run's snapshot too, as before). Like a lane not yet at its peak, the
-       once part booked while no deposit holds the GPU can hide up to that much of the run's other growth; it nets out
-       what the footprint keeps of the last holder's grids. */
+    /* 'once' is the part of 'need' that one partition at a time holds (AutoTuneReport::onceBytes): the GPU deposit's
+       host snapshot -- in a MIXED run's split ('--gpu-share' < 1) with the lock holder's device and host grids -- and,
+       under the lane share, what the first partition holds beyond the others (laneOnce). So the ledger books it once
+       and need - once for each partition in flight, as the plan's prediction does (a lane the dynamic concurrency
+       adds included); the live check keeps the whole 'need' (the GPU may be free when this partition reaches it).
+       0: every partition books 'need' in full (a CPU run). Like a lane not yet at its peak, the once part booked
+       while no deposit holds the GPU can hide up to that much of the run's other growth; it nets out what the
+       footprint keeps of the last holder's grids. */
     double once = 0.;
     double (*footprint)() = nullptr;
     std::atomic<int> *live = nullptr;

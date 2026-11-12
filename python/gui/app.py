@@ -568,8 +568,8 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         # ---- Grids tab
         s = self.spec
         ps = s.estimator == "ps"
-        for w in (self.nsub_spin, self.ps_group, self.ld_check, self.fg_check, self.prefix_edit):
-            w.setEnabled(ps)                # the hi-res slice works with both estimators
+        for w in (self.nsub_spin, self.ps_group, self.ld_check, self.prefix_edit):
+            w.setEnabled(ps)                # the hi-res slice works with both estimators (the group greys the face tick)
         self._deposit_texts(self.deposit_combo, ps)       # both estimators: standard DTFE's exact cell average
         for name, cb in self.field_checks.items():
             cb.setEnabled(ps or name in rs.DTFE_ALLOWED_FIELDS)

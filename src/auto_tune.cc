@@ -1022,7 +1022,8 @@ inline std::vector< std::vector<double> > stdTuneSplit(StdTuneDensity const &den
 // slack; the double build's vertex data in 8 B instead of 4: +50 B/vertex), and 6% for the dummy points the padding
 // test adds on the padded box's faces (3-5% of a sub-box at TNG scale). No TBB copy per vertex here: planOf books the
 // insert's copies per sub-domain where it runs in parallel (autoTuneParallelInsert: a team of 2-5 threads of 10, or a
-// lone tessellation where no look-ahead is booked); a look-ahead build's are in kStdLookAheadFactor.
+// lone tessellation where no look-ahead is booked or the budget switches it off); a look-ahead build's are in
+// kStdLookAheadFactor.
 // One definition for the plan below and the partition loop's look-ahead.
 inline double stdBytesPerPaddedVertex(User_options const &u)
 {
@@ -1059,8 +1060,21 @@ namespace {
 // of 'fixed', the padded vertices its sub-triangulations hold, and those per thread (DTFE_AUTO_TUNE_DEBUG)
 // (+ the GPU snapshot of its largest thread sub-grid, and the look-ahead's bytes: the tessellation stage
 // of the partition that needs the most, which may be any partition's turn to be prepared ahead)
-struct StdPlan { double bytes = 0., vertices = 0., snapshot = 0., aheadMax = 0.; int part = -1; size_t parts = 1;
-                 std::vector<double> perThread; };
+// (+ bytesNoAhead: the busiest partition's bytes where no look-ahead runs after all -- a budget that switches it off,
+// reportSplit -- with a lone tessellation's TBB copies, which kStdLookAheadFactor holds while the look-ahead runs)
+struct StdPlan { double bytes = 0., vertices = 0., snapshot = 0., aheadMax = 0., bytesNoAhead = 0.; int part = -1;
+                 size_t parts = 1; std::vector<double> perThread; };
+
+// DTFE_parallel's team at up to t threads: the largest 2^a 3^b <= t (subpartition.h parallelGrid; its grid-shape step
+// leaves fewer only on a grid too small to split)
+inline int stdTeamSize(int const t)
+{
+    int best = 1;
+    for (long p2 = 1; p2 <= long(t); p2 *= 2)
+        for (long p = p2; p <= long(t); p *= 3)
+            best = std::max( best, int( p ) );
+    return best;
+}
 
 /* What the standard-DTFE plan reads: its inputs, resolved once by autoTunePartitioning from the options, the data and
    the machine. Values, set by name there; the planner below only reads them. */
@@ -1128,20 +1142,35 @@ struct AutoTuneStdPlanner : AutoTuneStdInputs
             return ( nParts > 1. ? cells * bCellDeposit : 0. ) + ( nThreads > 1 ? cells * bCellDeposit : 0. )
                    + 2. * cells * bGpuCell + cells * faceCell; };
         if ( not dens.ok )
-        {   // every sub-box holds the box average (the uniform count)
-            double const tSplit = std::pow( double(threads), 1. / double(NO_DIM) );
+        {   // every sub-box holds the box average (the uniform count), on the team the run forms: DTFE_parallel's
+            // thread grid of a partition's grid (parallelGrid: 2^a 3^b threads, 4 of 5), each sub-box padded on its own
+            // faces -- as the counted branch below, and as the loop's own uniform look-ahead count (stdLookAheadBytes)
+            size_t g[NO_DIM];
+            for (int d=0; d<NO_DIM; ++d)
+            {
+                g[d] = 1;
+                pgOptions.gridSize[d] = size_t( std::max( 1LL, (long long)std::llround( double( u.gridSize[d] )
+                                                                                        / double( partsP[d] ) ) ) );
+            }
+            if ( threads > 1 )
+                parallelGrid( size_t(threads), pgOptions, g );
+            size_t team = 1;
+            for (int d=0; d<NO_DIM; ++d) team *= g[d];
             double f = 1.;
-            for (int d=0; d<NO_DIM; ++d) f *= 1. + 2.*padFrac[d]*double(partsP[d])*tSplit;
+            for (int d=0; d<NO_DIM; ++d) f *= 1. + 2.*padFrac[d]*double(partsP[d])*double(g[d]);
             double const own = N / nParts;
             plan.vertices = own * f;
+            // the TBB insert's copies, each sub-box at the average (as the counted branch below): a team's, or a lone
+            // tessellation's where no look-ahead holds them (bytesNoAhead: where a budget switches it off)
+            double const copies = autoTuneParallelInsert( u, plan.vertices / double( team ), int( team ) )
+                                  ? plan.vertices * kParInsertBytes : 0.;
+            bool const aheadHolds = team <= 1 and lookAheadPossible and nParts > 1.;
             plan.bytes = plan.vertices * perVertex + own * tetsPerOwn * perTet
-                       + gridBytes( gridTotal / nParts, size_t(threads) ) + ( nPts > 0 ? ptsWalkBytes : 0. )
-                       // the TBB insert's copies, each sub-box at the average (as the counted branch below)
-                       + ( ( threads > 1 or not ( lookAheadPossible and nParts > 1. ) )
-                           and autoTuneParallelInsert( u, plan.vertices / double( threads ), int( threads ) )
-                           ? plan.vertices * kParInsertBytes : 0. );
+                       + gridBytes( gridTotal / nParts, team ) + ( nPts > 0 ? ptsWalkBytes : 0. )
+                       + ( aheadHolds ? 0. : copies );
+            plan.bytesNoAhead = plan.bytes + ( aheadHolds ? copies : 0. );
             plan.part = 0;
-            plan.snapshot = snapWordFactor * bGpuCell * gridTotal / nParts / double( threads );
+            plan.snapshot = snapWordFactor * bGpuCell * gridTotal / nParts / double( team );
             double fPart = 1.;
             for (int d=0; d<NO_DIM; ++d) fPart *= 1. + 2.*padFrac[d]*double(partsP[d]);
             plan.aheadMax = plan.vertices * perVertex + ( nParts > 1. ? own * fPart * partBytes : 0. );
@@ -1168,7 +1197,7 @@ struct AutoTuneStdPlanner : AutoTuneStdInputs
                 for (int d=0; d<NO_DIM; ++d) nThreads *= pGrid[d];
                 std::vector< std::vector<double> > const boxes = nThreads > 1
                     ? stdTuneSplit( dens, origin, dxGrid, pr, pGrid ) : std::vector< std::vector<double> >( 1, pr );
-                double bytes = 0., vertices = 0., maxThreadCells = 0.;
+                double bytes = 0., vertices = 0., maxThreadCells = 0., aloneCopies = 0.;
                 std::vector<double> perThread;
                 auto boxCount = [&](std::vector<double> const &b, bool const padded) {
                     double lo[NO_DIM], hi[NO_DIM];
@@ -1186,10 +1215,15 @@ struct AutoTuneStdPlanner : AutoTuneStdInputs
                     bytes += padded * perVertex + boxCount( b, false ) * tetsPerOwn * perTet;
                     // the TBB insert's copies (triangulation.cpp): a team whose sub-domains each insert in parallel
                     // holds every one's at once; a lone tessellation's are in kStdLookAheadFactor only where the
-                    // look-ahead is booked (GPU deposit, more than one partition: reportSplit)
-                    if ( ( nThreads > 1 or not ( lookAheadPossible and nParts > 1. ) )
-                         and autoTuneParallelInsert( u, padded, int( nThreads ) ) )
-                        bytes += padded * kParInsertBytes;
+                    // look-ahead is booked (GPU deposit, more than one partition: reportSplit), and kept aside for a
+                    // budget that switches it off (bytesNoAhead)
+                    if ( autoTuneParallelInsert( u, padded, int( nThreads ) ) )
+                    {
+                        if ( nThreads > 1 or not ( lookAheadPossible and nParts > 1. ) )
+                            bytes += padded * kParInsertBytes;
+                        else
+                            aloneCopies += padded * kParInsertBytes;
+                    }
                     double c = 1.;
                     for (int d=0; d<NO_DIM; ++d) c *= std::max( 1., b[2*d+1] - b[2*d] );
                     maxThreadCells = std::max( maxThreadCells, c );
@@ -1204,6 +1238,7 @@ struct AutoTuneStdPlanner : AutoTuneStdInputs
                 // this partition prepared ahead: its particle copy and its sub-domains' tessellations
                 if ( nParts > 1. )
                     plan.aheadMax = std::max( plan.aheadMax, vertices * perVertex + partPadded * partBytes );
+                plan.bytesNoAhead = std::max( plan.bytesNoAhead, bytes + aloneCopies );
                 if ( bytes > plan.bytes )
                 {
                     plan.bytes = bytes;
@@ -1231,8 +1266,38 @@ struct AutoTuneStdPlanner : AutoTuneStdInputs
         return std::max( fixedLoop + loop, fixed + kept );
     }
 
+    /* '--run-mode balanced' (the owner's decision 4b, 2026-11-11): a chosen team of T threads whose busiest partition
+       leaves no room for the look-ahead (reportSplit would switch it off) gives way to the largest smaller team that
+       has room -- DTFE_parallel's teams, 2^a 3^b threads, down to 2. A smaller team pads fewer sub-boxes, so it holds
+       fewer padded vertices both in the busiest partition and in the next one's look-ahead build (which the loop
+       prepares with the same thread grid); the larger GPU snapshot of its larger sub-grids and, where a sub-domain then
+       gets 2 threads or more, the parallel insert's copies count against it (planOf). Not one tessellation: with the
+       look-ahead it ran 581 s against 435 s for the 9-thread team without it (plan P11.6). Only where the tuner chose
+       the threads, and only under balanced: which of the two plans runs faster is not measured, and
+       DTFE_LOOKAHEAD_TEAM=0 keeps the plan of before (T threads, the look-ahead off). 'tried': a smaller team was
+       looked for. Returns the team, or T. */
+    int lookAheadTeam(int const P, int const T, bool &tried) const
+    {
+        tried = false;
+        auto const aheadFits = [&](int const t) {
+            StdPlan const &pl = planOf( P, t );
+            double const ahead = ( lookAheadPossible and pl.parts > 1 ) ? kStdLookAheadFactor * pl.aheadMax : 0.;
+            return stdPeak( pl.bytes + pl.snapshot + ahead ) <= budget; };
+        if ( not ( autoConc and lookAheadPossible and not oneTessellation
+                   and runModeState().mode == RunMode::Balanced and Env::flag( "DTFE_LOOKAHEAD_TEAM", true ) )
+             or aheadFits( T ) )
+            return T;
+        if ( stdTeamSize( T ) <= 2 )   // no smaller team of 2 or more threads exists: nothing to try
+            return T;
+        tried = true;
+        for (int t = stdTeamSize( T ) - 1; t >= 2; --t)
+            if ( stdTeamSize( t ) == t and aheadFits( t ) )
+                return t;
+        return T;
+    }
+
     AutoTuneReport chooseSplit() const;
-    AutoTuneReport reportSplit(int const bestP, int const bestT, bool const nothingFits) const;
+    AutoTuneReport reportSplit(int const bestP, int const chosenT, bool const nothingFits) const;
 };
 
 // Searches the splits for the coarsest one that fits with the most threads (or, when none fits, the least demanding).
@@ -1284,10 +1349,14 @@ inline AutoTuneReport AutoTuneStdPlanner::chooseSplit() const
     return reportSplit( bestP, bestT, nothingFits );
 }
 
-// Fills the report of the chosen split, turns off a look-ahead that does not fit, and states the choice.
-inline AutoTuneReport AutoTuneStdPlanner::reportSplit(int const bestP, int const bestT, bool const nothingFits) const
+// Fills the report of the chosen split, keeps the look-ahead with a smaller team under '--run-mode balanced'
+// (lookAheadTeam) or turns off a look-ahead that does not fit, and states the choice.
+inline AutoTuneReport AutoTuneStdPlanner::reportSplit(int const bestP, int const chosenT, bool const nothingFits) const
 {
     char buf[512];
+    // the team: the chosen one, or under balanced a smaller one that keeps the look-ahead
+    bool teamTried = false;
+    int const bestT = nothingFits ? chosenT : lookAheadTeam( bestP, chosenT, teamTried );
     /* The report: the same line PS prints, so the
        launcher's 'Check memory', run_dtfe.sh AUTO_TUNE_REPORT=1 and the SUMMARY's predicted-vs-measured line work for
        standard runs too. mc = the threads of a partition (its concurrent sub-triangulations); the partitions run one
@@ -1310,17 +1379,32 @@ inline AutoTuneReport AutoTuneStdPlanner::reportSplit(int const bestP, int const
     report.lookAhead = ( lookAheadPossible and chosen.parts > 1 ) ? kStdLookAheadFactor * chosen.aheadMax : 0.;
     u.stdLookAheadCounted = report.lookAhead;   // the loop checks the free memory against it (DTFE.cpp)
     report.fixedLoop = fixedLoop;
+    if ( bestT < chosenT )   // (balanced: the chosen team had no room for it, this one has: lookAheadTeam)
+    {
+        StdPlan const &full = planOf( bestP, chosenT );
+        message << MESSAGE::cBold() << "AUTO-TUNE:" << MESSAGE::cReset() << " look-ahead kept for this run with "
+                << bestT << " threads per partition instead of " << chosenT << " (--run-mode balanced): the busiest "
+                << "partition (~" << chosen.bytes/1.e9 << " GB) plus the next one's look-ahead build (~"
+                << report.lookAhead/1.e9 << " GB) fit the " << (budget - fixedLoop - chosen.snapshot)/1.e9
+                << " GB the memory budget leaves beside the partition loop's grids and particles, where with "
+                << chosenT << " threads they would not (~" << full.bytes/1.e9 << " GB plus ~"
+                << kStdLookAheadFactor * full.aheadMax/1.e9 << " GB); DTFE_LOOKAHEAD_TEAM=0 keeps " << chosenT
+                << " threads and prepares the partitions in turn.\n" << MESSAGE::Flush;
+    }
     if ( report.lookAhead > 0. and stdPeak( chosen.bytes + chosen.snapshot + report.lookAhead ) > budget )
     {
         message << MESSAGE::cBold() << "AUTO-TUNE:" << MESSAGE::cReset() << " look-ahead off for this run: the busiest "
                 << "partition (~" << chosen.bytes/1.e9 << " GB) plus the next one's look-ahead build (~"
                 << report.lookAhead/1.e9 << " GB) do not fit the " << (budget - fixedLoop - chosen.snapshot)/1.e9
                 << " GB the memory budget leaves beside the partition loop's grids and particles; partitions are "
-                << "prepared in turn.\n" << MESSAGE::Flush;
+                << "prepared in turn" << ( teamTried ? " (--run-mode balanced: no smaller team of 2 or more threads "
+                                                       "has room for it either)" : "" ) << ".\n" << MESSAGE::Flush;
         u.stdLookAheadOffBudget = true;
         report.lookAhead = 0.;
+        // ... and a lone tessellation's insert copies, which the look-ahead's factor held, are the partition's again
+        report.perPartition = chosen.bytesNoAhead;
     }
-    double const predicted = stdPeak( chosen.bytes + chosen.snapshot + report.lookAhead );
+    double const predicted = stdPeak( report.perPartition + chosen.snapshot + report.lookAhead );
     report.predicted = predicted;
     if ( Env::flag( "DTFE_AUTO_TUNE_DEBUG" ) )
     {
@@ -1328,7 +1412,7 @@ inline AutoTuneReport AutoTuneStdPlanner::reportSplit(int const bestP, int const
                       "%d of %zu: %.0f padded vertices, %.3f GB on top of %.3f GB; per thread:",
                       dens.ok ? "counted from the particles" : "uniform", countSec, plans.size(),
                       std::chrono::duration<double>( std::chrono::steady_clock::now() - tuneStart ).count() - countSec,
-                      chosen.part + 1, chosen.parts, chosen.vertices, chosen.bytes/1.e9, fixed/1.e9 );
+                      chosen.part + 1, chosen.parts, chosen.vertices, report.perPartition/1.e9, fixed/1.e9 );
         for (double v : chosen.perThread) std::fprintf( stderr, " %.0f", v );
         std::fprintf( stderr, "\n" );
     }
@@ -2236,7 +2320,13 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         // the TBB insert's copies, where the insert runs in parallel (parInsertBytes)
         report.perPartition += parInsertBytes( report.partition, inFlight );
         report.gpuSnapshot = snapshotBytes( report.partition );   // once: the GPU deposits run one at a time
-        report.mixedLanes = mixed and report.partition >= 2;      // (the dynamic concurrency's ledger books it once then)
+        report.mixedLanes = mixed and report.partition >= 2;      // (gpuSnapshot is then the lock holder's grids too)
+        // what 'predicted' (below) books once beside its lanes, in every run with the GPU deposit: the snapshot and the
+        // lane share's laneOnce. The dynamic concurrency's ledger books the same (DTFE.cpp psOnceBytes): the first lane
+        // whole, each other one -- one it adds beyond the plan's included, up to inFlightCap -- at perPartition
+        // (not with '--scratch-dir' grids below the threshold in an all-GPU run, laneCover: the ledger has no term for
+        // them, so every partition in flight books its whole lane there, as before the lane share was booked once)
+        report.onceBytes = ( laneCover > 0. and not report.mixedLanes ) ? 0. : report.gpuSnapshot + report.laneOnce;
         // the loop's dynamic concurrency (P8.10, DTFE.cpp): what the run allocates after its partitions are in flight
         report.concChosen = autoConc;
         report.reserveEnd = ( scratchOn ? 0. : gridTotal * std::max( 0., bCell - bCellDeposit ) ) + ptsOutputBytes;
@@ -2580,8 +2670,9 @@ inline AutoTuneReport AutoTunePSPlanner::memorySplit(int const userC, int const 
     // 2.1M particles / 256^3 -- which runs fully in parallel. A cap of 3 would run 8
     // partitions in three waves: 21 s on the GPU vs 9.5 s on the CPU. Memory still bounds it:
     // partitionBytes() counts the GPU buffers a waiting partition holds, and cMem caps c, with the TBB insert's copies
-    // where c leaves 2 threads a partition (parInsertBytes). Where only the first lane is booked whole
-    // (laneShareCut), the concurrency rises past cMem up to laneShareCap.
+    // where c leaves 2 threads a partition (parInsertBytes; at one in flight too, where a split that fits only without
+    // them gives way to a finer one). Where only the first lane is booked whole (laneShareCut), the concurrency rises
+    // past cMem up to laneShareCap.
     int const targetC = cores;
 
     int bestN = -1, bestC = 0;
@@ -2592,21 +2683,23 @@ inline AutoTuneReport AutoTunePSPlanner::memorySplit(int const userC, int const 
         double const m = partitionBytes(n);
         int cMem = int( std::floor( (budget - fixed - snapshotBytes(n)) / m ) );
         int c = std::min( { targetC, n*n*n, cMem } );
-        // one partition in flight books its own sub-grids beside the hold too (finishReport): a split whose one
-        // partition fits only without them is not taken, unless the lane share plans two in flight there
-        if ( c == 1 and fixed + snapshotBytes(n) + m + loneLaneSubGrids(n) > budget
-             and not ( autoConc and targetC >= 2 and laneShareOn( n ) and partsOf( n ) >= 2.
-                       and laneShareCap( n ) >= 2 and laneSharePeak( n, 2 ) <= budget ) )
-            c = 0;
-        // ... and with each partition's TBB insert copies where they run (parInsertBytes, which finishReport books at
-        // the partitions in flight, never more than the split has): they end where a partition has fewer than 2
-        // threads, so each count is checked with its own, and only a count that does not fit with them is taken away
-        // (one in flight stays: there only a finer split helps)
+        // each partition's TBB insert copies where they run (parInsertBytes, which finishReport books at the partitions
+        // in flight, never more than the split has): they end where a partition has fewer than 2 threads, so each count
+        // is checked with its own, and only a count that does not fit with them is taken away
         auto const fitsWithCopies = [&](int const cc) {
             int const f = std::min( cc, int( partsOf( n ) ) );
             return fixed + snapshotBytes( n ) + double(f)*( m + parInsertBytes( n, f ) ) <= budget; };
         while ( c > 1 and not fitsWithCopies( c ) )
             --c;
+        // one partition in flight (cMem's, or what the copies left) books finishReport's figure there: its insert's
+        // copies where the insert runs in parallel (a tessellation of DTFE_TRIANGULATION_MIN_POINTS points or more with
+        // 2 or more threads for it, or forced: parInsertBytes) and, on the GPU, its own sub-grids beside the hold. A
+        // split whose one partition fits only without them is not taken -- the next finer split is tried -- unless the
+        // lane share plans two in flight there
+        if ( c == 1 and fixed + snapshotBytes(n) + m + parInsertBytes( n, 1 ) + loneLaneSubGrids(n) > budget
+             and not ( autoConc and targetC >= 2 and laneShareOn( n ) and partsOf( n ) >= 2.
+                       and laneShareCap( n ) >= 2 and laneSharePeak( n, 2 ) <= budget ) )
+            c = 0;
         if ( c > bestC or bestN<0 )
         {
             bestN = n;
@@ -3108,7 +3201,9 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     // the count grid of the particles (StdTuneDensity: one pass); without particles in memory, the uniform count
     auto const tuneStart = std::chrono::steady_clock::now();
     StdTuneDensity dens;
-    if ( particles != nullptr and not particles->empty() )
+    // (DTFE_TEST_TUNE_UNIFORM=1, tests: the uniform count, as for a call without the particles, which the binaries
+    // never make: tests/dtfe_auto_tune_check.sh M)
+    if ( particles != nullptr and not particles->empty() and not Env::flag( "DTFE_TEST_TUNE_UNIFORM" ) )
         dens.build( *particles, u );
     double const countSec = std::chrono::duration<double>( std::chrono::steady_clock::now() - tuneStart ).count();
     // '--sample-points' evaluates ONE tessellation per partition (DTFE_parallel runs no thread split for it)

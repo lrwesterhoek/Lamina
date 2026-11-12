@@ -75,7 +75,7 @@ def load(path, grid, ncomp=1):
 
 def run(cmd, log=None, echo="head", quiet=False, **kw):
     """Run a command the way the suites run the binaries. With 'log', stdout and stderr go to that file, where
-    tests/dev/deprecation_gate.sh reads them (the battery's stage log is not read), and a failed run prints the
+    tests/dev/deprecation_gate.sh reads them (a battery's stage logs it reads too), and a failed run prints the
     file's last 40 lines before it raises. Without a log, 'quiet' sends stdout to /dev/null (the data generators).
     'echo' prints the command first: 'head' its first three words, 'full' the whole line when it is short, None
     nothing. Other keywords go to subprocess.run (cwd=...)."""

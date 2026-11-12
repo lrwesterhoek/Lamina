@@ -179,7 +179,7 @@ User_options::User_options()
     psParkRoom = HUGE_VAL;          // set from the auto-tuner's report (DTFE.cpp): no budget known = the free-memory rule alone
     psLookAheadRoom = HUGE_VAL;     // set from the auto-tuner's report (DTFE.cpp): no budget known = no budget limit
     psPartitionBytes = 0.;   // set from the auto-tuner's report (DTFE.cpp): the partition memory gate
-    psOnceBytes = 0.;        // ... a mixed run's share of it that one partition at a time holds
+    psOnceBytes = 0.;        // ... the part of it that one partition at a time holds
     psInFlightCap = 0;       // ... the lane share's limit on the partitions in flight (0: none)
     psUseSubgrid = false;
     psTessellationPrebuilt = false;   // set only by psInterpolatePrebuilt (the partition look-ahead)

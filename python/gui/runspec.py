@@ -107,6 +107,10 @@ PS_DEFAULT_FIELDS = list(DEFAULT_FIELDS)
 WEB_FIELDS = ("tweb_a", "vweb_a")        # the cosmic-web classes: the only consumers of lambda_th
 LAMBDA_TH_DEFAULT = 0.3                  # run_ps_dtfe.sh / run_dtfe.sh LAMBDA_TH (the binary alone: 0.0, so a Custom
                                          # run without it would classify differently from a scripted one)
+# the PS-DTFE face-gradient tick of a NEW job (RunSpec, PipelineSpec and CustomSpec start from it; a saved job keeps its
+# own, an older one without the key takes this): off, as run_ps_dtfe.sh's FACE_GRADIENT and the binary. One name, so
+# the default of all three tabs moves in one line when the face gradient becomes PS-DTFE's default
+FACE_GRADIENT_DEFAULT = False
 # run_dtfe.sh's FIELDS default: the same set (it has no PS-only field, so dtfe_fields() keeps it whole)
 DTFE_DEFAULT_FIELDS = list(DEFAULT_FIELDS)
 # what the standard binary computes (no dispersion: PS only)
@@ -171,9 +175,9 @@ class RunSpec:
     mem_budget_gb: float = 0.0       # DTFE_MEM_BUDGET_GB: the auto-tuner's memory budget; 0 = its own (free RAM)
     tess_cache: str = ""             # TESSELLATION_CACHE: reuse the tessellation across runs (a local folder); "" = none
     linear_deposit: bool = False     # PS_LINEAR_DEPOSIT: --ps-linear-deposit (density-weighted inside each tet)
-    face_gradient: bool = False      # FACE_GRADIENT: --face-gradient (PS-DTFE: the gradient of the volume-weighted
-                                     # MEAN velocity from exact face sums; needs the exact deposit and the volume
-                                     # weighting; 3D)
+    face_gradient: bool = FACE_GRADIENT_DEFAULT   # FACE_GRADIENT: --face-gradient (PS-DTFE: the gradient of the
+                                     # volume-weighted MEAN velocity from exact face sums; needs the exact deposit and
+                                     # the volume weighting; 3D)
     ordered_merge: bool = True       # PS_MERGE=index-order: --ps-merge index-order, given (partitions merged in index
                                      # order: bit-identical repeats; given, it keeps the memory gate on under the
                                      # auto-tuner's speed split). ON by default, the binary's default order
@@ -293,6 +297,11 @@ class RunSpec:
             # login shell cannot leak in. An OMP_NUM_THREADS export still reaches the binary (run_dtfe.sh sets it
             # only for a non-empty THREADS)
             env["SUBSAMPLES"] = env["THREADS"] = ""
+            # the gradient route, pinned EMPTY the same way: run_dtfe.sh's own default, the binary's (the face
+            # gradient, standard DTFE's default since 2026-11-09). The tab has no route for a standard run (its face
+            # tick is a PS-DTFE option), so a FACE_GRADIENT=0 exported in the login shell cannot turn it into
+            # '--per-tet-gradient', nor a 1 add '--face-gradient' to the command (and the run log) the job shows
+            env["FACE_GRADIENT"] = ""
             if self.gpu:
                 argv.append("-m")
             if self.deposit == "exact":

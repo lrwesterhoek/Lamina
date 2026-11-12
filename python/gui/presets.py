@@ -188,7 +188,6 @@ LABELS = {
 ADVANCED_SHORT = {
     "caustic_cusps": "cusps and swallowtails",
     "linear_deposit": "linear density",
-    "face_gradient": "face gradient",
     "per_stream": "stream by stream",
     "per_stream_ids": "stream IDs",
     "render_fixed_range": "fixed density range",

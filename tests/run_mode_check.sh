@@ -59,7 +59,8 @@
 #   G8  the dynamic concurrency of a mixed run (single precision; DTFE_TEST_PLAN_MC=1, DTFE_FREE_GB=1000, grid 128,
 #       '--gpu-share 0.5 --partition 2 2 2', DTFE_AUTO_TUNE_DEBUG=1): the start check's line names a 'once' part
 #       between 0 and the partition's bytes, more than the plan's 1 partition is in flight, and the grids are the
-#       '--max-concurrent 1' run's; an all-GPU run's line says 'once 0 B'; with DTFE_MEM_BUDGET_GB at own + reserve
+#       '--max-concurrent 1' run's; an all-GPU run's line names its GPU snapshot as the once part (below the mixed
+#       run's); with DTFE_MEM_BUDGET_GB at own + reserve
 #       + 2 lanes + 1.5 times the once part the dynamic concurrency starts (the once part is booked once, not per
 #       partition) and a second partition gets in flight (the ledger books it once too), at own + reserve + 2 lanes
 #       + half the once part it does not start (it is booked); each of the two runs' own start lines puts its budget
@@ -540,8 +541,9 @@ else
         [ "$r1$r2" = 00 ] && same "$TMP/G8_ref" "$TMP/G8_dyn" && no_fallback "$TMP/G8_dyn.log" "$TMP/G8_ref.log"
         check "G8 every grid byte-identical to the --max-concurrent 1 run's, no CPU fallback (exit $r2)" $?
         read -r Pa Oa Ra OWNa <<< "$(start_of "$TMP/G8_all.log")"
-        [ "$r3" = 0 ] && [ "${Oa:-x}" = 0 ] && [ "${Pa:-0}" -gt 0 ] && has "$TMP/G8_all.log" "$STARTED"
-        check "G8 an all-GPU run: 'once 0 B' (every partition books its ${Pa:-?} B in full) (exit $r3)" $?
+        [ "$r3" = 0 ] && [ "${Oa:-0}" -gt 0 ] 2>/dev/null && [ "$Oa" -lt "${Pa:-0}" ] && [ "$Oa" -lt "${O8:-0}" ] \
+            && has "$TMP/G8_all.log" "$STARTED"
+        check "G8 an all-GPU run: its GPU snapshot once (once ${Oa:-?} B of the partition's ${Pa:-?} B, below the mixed run's ${O8:-?} B, which holds the lock holder's grids too) (exit $r3)" $?
         if [ "${O8:-0}" -gt 0 ] 2>/dev/null; then
             # the budget the start check compares: own + reserve + (floor + 1) lanes + the once part once
             B_IN="$(awk -v p="$P8" -v o="$O8" -v r="$R8" -v own="$OWN8" 'BEGIN { printf "%.6f", ( own*1e9 + r + 2*(p-o) + 1.5*o ) / 1e9 }')"

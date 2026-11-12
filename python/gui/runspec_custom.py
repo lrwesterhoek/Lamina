@@ -15,7 +15,7 @@ from pathlib import Path
 import runspec as _rs
 from dtfelib import runlog as _runlog
 from dtfelib.estimator import STANDARD_PADDING
-from runspec import CUSTOM_OUT_DEFAULT, LAMBDA_TH_DEFAULT   # the dataclass defaults
+from runspec import CUSTOM_OUT_DEFAULT, FACE_GRADIENT_DEFAULT, LAMBDA_TH_DEFAULT   # the dataclass defaults
 
 
 @dataclass
@@ -57,8 +57,8 @@ class CustomSpec:
     mem_budget_gb: float = 0.0      # DTFE_MEM_BUDGET_GB in the binary's environment, see RunSpec
     tess_cache: str = ""            # --tessellation-cache <folder>; "" = none
     linear_deposit: bool = False    # --ps-linear-deposit (PS only; not with the volume-weighted velocities)
-    face_gradient: bool = False     # --face-gradient (PS only, 3D; needs the exact deposit and the volume-weighted
-                                    # velocities), see RunSpec
+    face_gradient: bool = FACE_GRADIENT_DEFAULT   # --face-gradient (PS only, 3D; needs the exact deposit and the
+                                    # volume-weighted velocities), see RunSpec
     ordered_merge: bool = True      # --ps-merge index-order, the default (PS only; off: --ps-merge completion-order), see RunSpec
     sample_points: str = ""         # --sample-points <file>: the fields at these points too ('.pts_*'); "" = none
     pts_vel_grad: bool = True       # ... with the velocity gradient at each point (--pts-vel-grad)
@@ -149,10 +149,14 @@ class CustomSpec:
                 a += ["--ps-alpha-shape", f"{self.alpha_shape:g}"]
             if self.linear_deposit:
                 a.append("--ps-linear-deposit")
-            # the merge order only when it is not the binary's default (the index order): a log without '--ps-merge'
-            # reads back as the index order ('Load settings'), and the extra options may then name a merge themselves
+            # the merge order always named, as the drivers' PS_MERGE does (R7, docs/cleanup-plan.md): a GIVEN index
+            # order keeps the memory gate on under the auto-tuner's speed split (a run of fewer than 2e6 particles),
+            # which the binary's default order alone leaves off. Left to the extra options when they name a merge
+            # themselves ('--ps-merge fixed-point'): the tab's own would repeat the option, which the binary refuses
             if not self.ordered_merge:
                 a += ["--ps-merge", "completion-order"]
+            elif not self._extra_names_merge():
+                a += ["--ps-merge", "index-order"]
             if self.halo_release > 0:
                 a += ["--ps-halo-release", _rs._num(self.halo_release)]
             if len(self.window) == 2 * self.dim:
@@ -186,6 +190,13 @@ class CustomSpec:
             if ps and self.pts_conventions == "legacy":     # 'grid' is the binary's default: no flag for it
                 a += ["--ps-point-conventions", "legacy"]
         return a
+
+    def _extra_names_merge(self) -> bool:
+        """The extra options give the merge mode themselves: '--ps-merge MODE' (or '--ps-merge=MODE'), or one of the
+        older switches the binary still takes ('--ordered-merge', '--completion-order-merge', '--fixed-point-merge'),
+        each read through the run-log readers' table (canonical_flag), as problems() reads them."""
+        return any(_runlog.canonical_flag(t.split("=", 1)[0]).split()[0] == "--ps-merge"
+                   for t in _extra_options(self.extra_args) if t.startswith("--"))
 
     def memory_key(self) -> str:
         return _rs._memory_key(self, ("output_dir", "output_name", "demo_n", "demo_file", "lambda_th", "tess_cache",

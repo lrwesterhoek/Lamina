@@ -60,9 +60,11 @@ SHARED_WIDGETS = {
     "resources":               ("res_group",     "o_res_group",    "p_res_group"),
     "advanced":                ("adv_group",     "o_adv_group",    "p_adv_group"),
 }
-# the phase-space options of the 'Phase-space options' group, then the expert ones of the Advanced group (P.label keys)
-PS_OPTIONS = ("vertex_mass", "volume_weighted", "caustics")
-EXPERT_OPTIONS = ("caustic_cusps", "linear_deposit", "face_gradient")
+# the phase-space options of the 'Phase-space options' group, then the expert ones of the Advanced group (P.label keys).
+# The face gradient is in sight, the group's last row (since 2026-11-11, before in the folded Advanced group: a tick set
+# by hand, for the mean flow's derivatives and the mass flux, not only through the drivers)
+PS_OPTIONS = ("vertex_mass", "volume_weighted", "caustics", "face_gradient")
+EXPERT_OPTIONS = ("caustic_cusps", "linear_deposit")
 
 
 def field_label(name: str, label: str) -> str:
@@ -409,7 +411,8 @@ class TabsMixin:
         return g
 
     def _ps_options_group(self, tab: str) -> QGroupBox:
-        """The phase-space options of a run tab (its expert ones are in the Advanced group)."""
+        """The phase-space options of a run tab, the face gradient last (its expert ones are in the Advanced group,
+        which pairs the face gradient with the linear deposit: built after this group, it finds both boxes)."""
         g = QGroupBox(L["ps_options"])
         v = QVBoxLayout(g)
         for key in PS_OPTIONS:
@@ -422,8 +425,9 @@ class TabsMixin:
         return g
 
     def _advanced_group(self, tab: str, *extra) -> Collapsible:
-        """The expert options of a run tab, folded (P.LABELS 'advanced'): the cusps, the linear density and the face
-        gradient, then the tab's own 'extra' (key, tick box) pairs. The summary names the ticked ones."""
+        """The expert options of a run tab, folded (P.LABELS 'advanced'): the cusps and the linear density, then the
+        tab's own 'extra' (key, tick box) pairs. The summary names the ticked ones. Built after _ps_options_group: the
+        linear density excludes two of that group's boxes, the volume weighting and the face gradient."""
         boxes = []
         for key in EXPERT_OPTIONS:
             cb = QCheckBox(P.label(key))
@@ -432,7 +436,7 @@ class TabsMixin:
             self._set_shared(tab, key, cb)
             boxes.append((key, cb))
         _exclusive(self._shared(tab, "linear_deposit"), self._shared(tab, "volume_weighted"))
-        # the face gradient needs the volume weighting, which the linear deposit excludes
+        # the face gradient (in the phase-space group) needs the volume weighting, which the linear deposit excludes
         _exclusive(self._shared(tab, "face_gradient"), self._shared(tab, "linear_deposit"))
         boxes += list(extra)
 

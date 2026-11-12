@@ -12,7 +12,8 @@ from pathlib import Path
 import runspec as _rs
 from dtfelib.cli import FIGURES_ROOT
 from dtfelib.io import plane_geometry_matches
-from runspec import LAMBDA_TH_DEFAULT, POINTEVAL_DERIVATIVE_SMOOTH, PS_DEFAULT_FIELDS   # the dataclass defaults
+from runspec import (FACE_GRADIENT_DEFAULT, LAMBDA_TH_DEFAULT,   # the dataclass defaults
+                     POINTEVAL_DERIVATIVE_SMOOTH, PS_DEFAULT_FIELDS)
 
 
 def _window_values(text: str) -> list[float] | None:
@@ -62,7 +63,7 @@ class PipelineSpec:
     mem_budget_gb: float = 0.0      # DTFE_MEM_BUDGET_GB, see RunSpec
     tess_cache: str = ""            # TESSELLATION_CACHE (run_ps_pipeline.sh forwards it to run_ps_dtfe.sh)
     linear_deposit: bool = False    # PS_LINEAR_DEPOSIT, see RunSpec
-    face_gradient: bool = False     # FACE_GRADIENT, see RunSpec
+    face_gradient: bool = FACE_GRADIENT_DEFAULT   # FACE_GRADIENT, see RunSpec
     ordered_merge: bool = True      # PS_MERGE (run_ps_pipeline.sh's run_ps_dtfe.sh inherits it), see RunSpec
     start_over: bool = False        # DTFE_RESUME=0 (inherited the same way), see RunSpec
     pts_conventions: str = "grid"   # PS_POINT_CONVENTIONS: the image plane's estimators, see RunSpec

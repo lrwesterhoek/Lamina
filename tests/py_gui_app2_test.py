@@ -487,14 +487,17 @@ def t_qt(tmp: Path):
         for cb in (w.om_check, w.p_om, w.o_om):
             cb.setChecked(True)
         w._read_widgets()
+        own = w.custom.command()
         check("the ordered-merge tick reaches the Grids, Pipeline and Custom jobs (PS_MERGE=index-order, the older "
-              "ORDERED_MERGE=1 beside it until P6.6; the Custom tab: the binary's default index order, no '--ps-merge')",
+              "ORDERED_MERGE=1 beside it until P6.6; the Custom tab: '--ps-merge index-order', given as the drivers "
+              "give it)",
               all(e.get("PS_MERGE") == "index-order" and e.get("ORDERED_MERGE") == "1"
                   for e in (w.spec.command()[1], w.pipe.command()[1]))
-              and "--ps-merge" not in w.custom.command(),
-              (w.spec.ordered_merge, w.pipe.ordered_merge, w.custom.ordered_merge))
-        # a standard Grids job pins run_dtfe.sh's Monte-Carlo count and thread cap empty (the tab holds neither for it):
-        # a SUBSAMPLES / THREADS exported in the login shell cannot leak in
+              and any(own[i:i + 2] == ["--ps-merge", "index-order"] for i in range(len(own)))
+              and own.count("--ps-merge") == 1,
+              (w.spec.ordered_merge, w.pipe.ordered_merge, w.custom.ordered_merge, own))
+        # a standard Grids job pins run_dtfe.sh's Monte-Carlo count, thread cap and gradient route empty (the tab holds
+        # none of them for it): a SUBSAMPLES / THREADS / FACE_GRADIENT exported in the login shell cannot leak in
         w.dtfe_radio.setChecked(True)
         w._read_widgets()
         std_env = w.spec.command()[1]
@@ -512,12 +515,14 @@ def t_qt(tmp: Path):
         w.deposit_combo.setCurrentIndex(w.deposit_combo.findData(first))
         w.gpu_check.setChecked(gpu_first)          # (the exact deposit's GPU rule may have moved it)
         w._read_widgets()
-        check("a standard-DTFE Grids job pins SUBSAMPLES and THREADS empty (run_dtfe.sh's own defaults); the PS job "
-              "takes its count from -n (the sampled deposit) or pins it empty (the exact one, which has none)",
-              std_env.get("SUBSAMPLES") == "" and std_env.get("THREADS") == "" and w.spec.estimator == "ps"
+        check("a standard-DTFE Grids job pins SUBSAMPLES, THREADS and FACE_GRADIENT empty (run_dtfe.sh's own defaults); "
+              "the PS job takes its count from -n (the sampled deposit) or pins it empty (the exact one, which has none)",
+              std_env.get("SUBSAMPLES") == "" and std_env.get("THREADS") == "" and std_env.get("FACE_GRADIENT") == ""
+              and w.spec.estimator == "ps"
               and "SUBSAMPLES" not in sampled_cmd[1] and "-n" in sampled_cmd[0]
               and exact_cmd[1].get("SUBSAMPLES") == "" and "-n" not in exact_cmd[0] and w.spec.deposit == first,
-              ({k: std_env.get(k) for k in ("SUBSAMPLES", "THREADS")}, w.spec.estimator, sampled_cmd, exact_cmd))
+              ({k: std_env.get(k) for k in ("SUBSAMPLES", "THREADS", "FACE_GRADIENT")}, w.spec.estimator, sampled_cmd,
+               exact_cmd))
         w.om_check.setChecked(False)
         (d / "om.runlog").write_text(LOG_OK.format(root=d / "om").replace("--periodic", "--periodic --ordered-merge"))
         w._load_run_settings(R.parse_runlog(d / "om.runlog", "TNGQ-1-Dark", 99))

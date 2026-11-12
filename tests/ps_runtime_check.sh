@@ -8,7 +8,8 @@
 #       to '--no-overlap', and the log says it ran
 #   R3  GPU builds only: the look-ahead of a '--gpu' run at --max-concurrent 1 (on by default) against
 #       '--no-overlap': every grid byte-identical (.den, .a_den, .streams, ... and the velocity, an exact
-#       fixed-point sum like the rest); SKIP on a CPU build
+#       fixed-point sum like the rest); SKIP on a CPU build. Under the debug switch DTFE_GPU_FLOAT_MOMENTS or
+#       DTFE_GPU_FLOAT_MASS (GPU sums as float atomics: two identical runs differ) only the byte comparison SKIPs
 #   R4  crash-safe outputs: a finished run leaves no '<file>.part.<pid>' and no progress sidecar; a stale
 #       '.part.<pid>' of a dead pid is removed at the start, one of a live pid is kept, and one whose final file
 #       is missing is kept with its mv (it may be the only copy); a run whose output
@@ -191,14 +192,18 @@ R7_ROOM_LANES=0.9      # the RAM room, in lanes (the dynamic start line's partit
 R7_PLAN_RAM_MIN=3      # the plan's own run (sgp): at least this many waited in memory
 R7_DYN_RAM_MAX=2       # the dynamic run (sgd): at most this many waited in memory ...
 R7_DYN_SPILL_MIN=2     # ... and at least this many spilled to disk
-# With DTFE_GPU_FLOAT_MOMENTS, DTFE_GPU_FLOAT_MASS or DTFE_MASS_AUDIT set (empty and 0/false/no/off are unset; the old
-# PS_ names count) the single build keeps the plan's count as well: those sums follow the thread order
-R7_SW=""
+# With DTFE_GPU_FLOAT_MOMENTS, DTFE_GPU_FLOAT_MASS or DTFE_MASS_AUDIT set (empty and 0/false/no/off are unset; an old
+# PS_ name counts while its DTFE_ name is empty or unset, as the binaries read it: src/env_knobs.h) the single build
+# keeps the plan's count as well: those sums follow the thread order. R3_SW: the two float switches among them, under
+# which R3's GPU grids are float atomic sums (R3 says why)
+R7_SW=""; R3_SW=""
 for sw in DTFE_GPU_FLOAT_MOMENTS DTFE_GPU_FLOAT_MASS DTFE_MASS_AUDIT \
           PS_GPU_FLOAT_MOMENTS PS_GPU_FLOAT_MASS PS_MASS_AUDIT; do
+    case "$sw" in PS_*) tw="DTFE_${sw#PS_}"; [ -z "${!tw:-}" ] || continue ;; esac   # the new name set: it is the one read
     case "$(printf '%s' "${!sw:-0}" | tr '[:upper:]' '[:lower:]')" in
         0|false|no|off) ;;
-        *) R7_SW="${R7_SW:+${R7_SW} }${sw}" ;;
+        *) R7_SW="${R7_SW:+${R7_SW} }${sw}"
+           case "$sw" in *_FLOAT_*) R3_SW="${R3_SW:+${R3_SW} }${sw}" ;; esac ;;
     esac
 done
 if precision_double; then
@@ -260,12 +265,22 @@ else
     grep -q "look-ahead on: .* on the GPU" "$TMP/gl.log" \
         && ! grep -q "using the CPU deposit\|deposit unavailable\|ran on the CPU instead" "$TMP/gl.log" "$TMP/gn.log"
     check "R3 a --gpu run at --max-concurrent 1 looks ahead by default (and neither run fell back to the CPU)" $?
-    ok=0
-    # the velocity too: every PS grid of a GPU deposit is an exact fixed-point sum
-    for e in den a_den streams a_streams hidden_streams a_hidden_streams vel; do
-        cmp -s "$TMP/gn.$e" "$TMP/gl.$e" || { echo "    differs: .$e"; ok=1; }
-    done
-    check "R3 GPU look-ahead vs --no-overlap: every grid (the velocity included) byte-identical" $ok
+    # The byte comparison needs the GPU's sums to be order-free. The two float switches (R3_SW, read above R7) make
+    # some of them float atomics, whose result follows the order the device threads add in, so two identical --gpu
+    # runs differ with the look-ahead or without it: DTFE_GPU_FLOAT_MOMENTS hands the device no fixed-point units
+    # (ps_interpolation.cc fxGpuWanted): the moment grids and the exact deposit's per-tetrahedron weight totals, which
+    # divide every share (the mass's too), are float sums; DTFE_GPU_FLOAT_MASS keeps the mass grid a float sum
+    # (ps_metal_host.cc floatMass). DTFE_MASS_AUDIT keeps every grid exact: it is compared.
+    if [ -n "${R3_SW}" ]; then
+        echo "  SKIP R3 GPU look-ahead vs --no-overlap byte for byte: ${R3_SW} set (float atomic sums on the GPU differ between any two runs)"
+    else
+        ok=0
+        # the velocity too: every PS grid of a GPU deposit is an exact fixed-point sum
+        for e in den a_den streams a_streams hidden_streams a_hidden_streams vel; do
+            cmp -s "$TMP/gn.$e" "$TMP/gl.$e" || { echo "    differs: .$e"; ok=1; }
+        done
+        check "R3 GPU look-ahead vs --no-overlap: every grid (the velocity included) byte-identical" $ok
+    fi
 fi
 
 echo ">> R4: crash-safe outputs"
