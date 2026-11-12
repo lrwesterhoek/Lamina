@@ -62,6 +62,7 @@ class PipelineSpec:
     mem_budget_gb: float = 0.0      # DTFE_MEM_BUDGET_GB, see RunSpec
     tess_cache: str = ""            # TESSELLATION_CACHE (run_ps_pipeline.sh forwards it to run_ps_dtfe.sh)
     linear_deposit: bool = False    # PS_LINEAR_DEPOSIT, see RunSpec
+    face_gradient: bool = False     # FACE_GRADIENT, see RunSpec
     ordered_merge: bool = True      # PS_MERGE (run_ps_pipeline.sh's run_ps_dtfe.sh inherits it), see RunSpec
     start_over: bool = False        # DTFE_RESUME=0 (inherited the same way), see RunSpec
     pts_conventions: str = "grid"   # PS_POINT_CONVENTIONS: the image plane's estimators, see RunSpec
@@ -281,7 +282,8 @@ class PipelineSpec:
                "PS_VOLUME_WEIGHTED": "1" if self.volume_weighted else "0",
                "PS_CAUSTICS": "1" if self.caustics else "0",
                "PS_CAUSTIC_CUSPS": "1" if self.caustic_cusps else "0",
-               "PS_LINEAR_DEPOSIT": "1" if self.linear_deposit else "0"}
+               "PS_LINEAR_DEPOSIT": "1" if self.linear_deposit else "0",
+               "FACE_GRADIENT": "1" if self.face_gradient else "0"}
         env.update(_rs.ps_exact_env(self.deposit == "exact"))
         env.update(_rs.ps_run_env(self))            # the GPU (-m only switches it on), merge order, start over ...
         env.update(_rs.ps_conventions_env(self.pts_conventions))

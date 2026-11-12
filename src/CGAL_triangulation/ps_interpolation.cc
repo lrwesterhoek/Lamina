@@ -1402,7 +1402,9 @@ static void psFaceWalk(PSPassCtx const &passCtx, PSFxState &fx, bool const psVer
                         Lag[v][i] = double(cell->vertex(v+1)->point()[i]) - double(cell->vertex(0)->point()[i]);
                 tetMass = double( Real( avgDensity * std::fabs(determinant(Lag)) / factorial(NO_DIM) ) );
             }
-            if ( !(tetMass > 0.) ) tetMass = 0.;
+            // the deposit loop's clamp: a negative mass to 0, a NaN kept, so that its momentum shares (P) are left
+            // out and counted here as the loop counts them (a zero share would add the same nothing, uncounted)
+            if ( tetMass < 0. ) tetMass = 0.;
             // DTFE_TEST_NAN_SHARE (ps_deposit_params.h), after the clamp as in the deposit loop: the hooked tetrahedron's
             // density is NaN there, so its momentum shares (P) are dropped and counted; the same here
             if ( fixedShareTestNanEvery() && fixedShareTestNan( double(cell->vertex(0)->point()[0]), double(cell->vertex(0)->point()[1]),

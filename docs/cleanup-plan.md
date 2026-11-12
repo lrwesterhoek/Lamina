@@ -54,6 +54,18 @@ elsewhere, and will drift. Items therefore name `file:function` first and give l
     error falls back to QPainter for the session.
   - A 3D item must not change the rendered pixels. Part 11 of `tests/py_gui_explore_test.py` compares QPainter's
     16-bit compositing with `volume3d.composite`, and parts 10–11 must keep passing unchanged.
+    - One asked-for exception, 2026-11-11 (the owner: the volume "looks like a sticker", and zooming in should show the
+      field inside): in perspective a zoom in moves the eye into the box, and the volume is drawn for an eye inside it
+      (each pixel from the slice stack its ray crosses most). The pictures from outside, measured against the commit
+      before (QPainter, 640x480, a TNG100 256³ cube, fitted, seven turns): the parallel projection draws the pixels of
+      before at every turn. In perspective a pixel whose ray runs more along another axis than the middle of the view's
+      now takes that axis's slices, so an oblique view changes there: at the default turn a quarter of the volume's
+      pixels (the middle difference 8 of 255, a tenth of them over 38), two thirds looking down the box's diagonal
+      (there also more opaque, by 13 of 255 on average), a ninth at a third oblique turn, and none at the other four
+      (face on, turned 20° and tilted 10°, tilted 60°, from nearly straight above). It is the same field on another
+      stack of slices. Parts 10–11 gain the checks for the eye inside; the ones that pinned the old perspective (the
+      eye stopping short of the window, one slicing axis for the whole view) gave way to the per-pixel and the dolly
+      checks. `change_log.txt` has the entry.
   - The GPU must stay within its tolerance of QPainter: `volume_gl_parity` in the same suite, run in a child process
     on the default Qt platform. It SKIPs without a display or OpenGL, so CI never runs it: run it on the Mac for
     any item that touches the volume's drawing.
@@ -264,15 +276,18 @@ else), so `#if NO_DIM==3 || NO_DIM==2` is always true.
 - Risk: none. Effort: S.
 
 **P1.4 Functions with no caller** (checked by `grep -w` over src, metal, tests, python and scripts) — *done 2026-11-06.* Our two are
-gone; the upstream ones stay (D10).
+gone; of the upstream ones, `Box::isParticleLagrangianInBox`, `upperBoundCheck` and both `superfluous_options` were
+deleted on 2026-11-11 (D10; no caller in src, metal, tests, python, scripts or demo); the rest stay.
 - `particle_data_traits.h`: `compareParticles`, `sameParticle`.
 - Not dead: `triangulation_miscellaneous.h:vertexPositionMatrix` has a caller in `demo/examples/main_particle_density.cpp`
   (the first grep left `demo/` out). It stays.
 - **upstream**:
-  - `Box::isParticleLagrangianInBox`;
+  - `Box::isParticleLagrangianInBox` (deleted 2026-11-11);
   - the `Particle_data` setters `setDelta`, `setLagrangianPosition`, `setScalar`, `setVelocity`, `setWeight`,
     `setPosition`;
-  - in `miscellaneous.h`: `upperBoundCheck` and both `superfluous_options`;
+  - `setDelta` and `setPosition` are not dead: `tests/dtfe_user_sampling.cpp:40-41` calls them (the `Sample_point`
+    API);
+  - in `miscellaneous.h`: `upperBoundCheck` and both `superfluous_options` (deleted 2026-11-11);
   - in `src/kdtree`: `n_nearest_brute_force`, `r_count`, `r_count_around_point`, `r_nearest_around_point`.
 - The upstream ones are optional, see D10.
 - Risk: none. Effort: S. Verify: G-build, which must include the CUDA/HIP compile jobs on CI (until D11).
@@ -1941,7 +1956,8 @@ taken on a busy machine except P9.3's. The re-times on a quiet machine (old and 
   block-start iterator index (8 B per 256 cells) instead of an 8 B/cell handle vector, so the tuner's model needs no
   new term. The pool also counts the static teams while they run (`CorePool::Hold`: copy/slab deposit, a pinned
   team, slab binning, the private-copies merge, `psFxBoundWalk`, the parallel insert's arena), found by the night's
-  review; still uncounted: the point evaluation's team, standard DTFE's `_a` average team and the look-ahead thread.
+  review; since 2026-11-11 also the point evaluation's team and the look-ahead thread; standard DTFE's `_a` average
+  team stays uncounted (that binary has no pool user, so nothing would read it).
   Follow-up: `psFxBoundWalk` could claim blocks too.
 - P9.3: the MC average reuses the exact path's interleaved x-plane slabs; byte-identical at 1/4/8 threads in the
   single, double and 2D builds. It applies where one triangulation has the cores: a `--sample-points` run, 2×2×2
@@ -2069,7 +2085,10 @@ about 15 min, near the CPU's 14m27s, so the CPU default for PS exact stays unles
 
 ## P10. Shared exact velocity derivatives (the face method)
 
-**Status 2026-11-07.** P10.1–P10.7 done (CPU), with the drivers' `FACE_GRADIENT` knob; a launcher tick is optional (the reruns use the drivers).
+**Status 2026-11-07.** P10.1–P10.7 done (CPU), with the drivers' `FACE_GRADIENT` knob. The launcher has the tick since
+2026-11-11 (the folded Advanced group of the Grids, Pipeline and Custom tabs, PS-DTFE jobs in 3D; off by default, as the
+driver: `FACE_GRADIENT` 1 or 0 for a Grids or Pipeline job, `--face-gradient` on the Custom tab; the launcher names
+before the run what the binary refuses with it).
 - P10.1: `src/CGAL_triangulation/face_sweep.h` (sections with caller-given signed distances, so tetrahedra sharing a
   face lying in a grid plane decide it alike; the strip/cell clip). `tests/face_sweep_check.sh`: sections integrate
   to the tetrahedron's volume and first moments (3e-13), pieces add up to their section (3e-11), and Gauss on a Kuhn
@@ -2621,7 +2640,8 @@ and the bounds hand-over move no byte there; `tests/dev/tune_report_set.sh` 124 
 ps_face_gradient_check (23 s; 25 s double), ps_fixed_moments_check and ps_window_check in both precisions,
 run_scripts_check, docs_drift_check, py_gui_runspec_test. The review of the batch (three readers, a judge) confirmed
 no defect; it leaves one cosmetic difference: a NaN vertex mass (NaN particle weights) is counted as left out by the
-loop and zeroed by the walk, the same words under a different count in the log. Then, on the tree as it stands: the
+loop and zeroed by the walk, the same words under a different count in the log (aligned on 2026-11-11: the walk
+clamps as the loop does and keeps a NaN, so both count those shares). Then, on the tree as it stands: the
 Mac battery, 33 of 33 stages (19:24 to 20:14, the tree unchanged over it), and CI's Linux stages in Colima (build,
 core, double, 2d, variants, oldpy, ruff), all passed (20:14 to 20:52). Only this sentence was written after them. Item
 3 stays open (two full-size runs, on the owner's go).
@@ -2736,8 +2756,8 @@ TNG100-3-Dark z = 0 at 512³ unless a line says otherwise.
   further above their peaks (the table). At 1024³ without `--scratch-dir` the floor (62.3 GB with all fields, 12.9 GB
   with density, velocity, divergence and shear) exceeds any partition, so the post side is `fixed` plus the busiest
   partition, the sum of before 2026-11-07. On a 48 GiB machine (30.92 GB budget) a 512³ production plan fits a busiest
-  partition of 4.98 GB where 14.2 GB fitted: a finer split or fewer threads. Not booked, as before: an in-team TBB
-  insert at `--max-concurrent` 2 to 5 by hand.
+  partition of 4.98 GB where 14.2 GB fitted: a finer split or fewer threads. Not booked then, as before: an in-team
+  TBB insert at `--max-concurrent` 2 to 5 by hand (booked since the leftovers batch, below).
 - **The tune set** (`tests/dev/tune_report_set.sh`, 127 lines: the 124 and three for the lane share), against binaries
   built from a clean export of `ae81362`: 11 lines differ. Of the 124 no PS line moves, and 8 standard lines do, none
   in its partition or its count in flight: "dtfe ram=64 grid=1024 plain gpu" and "… exact gpu" by the factor
@@ -2756,13 +2776,14 @@ TNG100-3-Dark z = 0 at 512³ unless a line says otherwise.
   14 budgets): without `--parallel-triangulation` all 28 plans are the same; with it 5 of 14 (every deposit on the
   GPU) and 4 of 14 (`--gpu-share 0.5`) were over budget and are within it, each with one partition fewer in flight.
   Also taken: no share above the GPU's 2³² cell cap, and a wrong comment in the test. The second review, of the fix,
-  confirmed no defect in it and narrowed one comment. Left, each small: the split search's own count does not book the
-  copies (every deposit on the GPU, the insert forced, a 5.5 GB budget: `mc=5` at 5.51 GB, over budget, before and
-  after); the planner does not read `DTFE_TRIANGULATION_THREADS` (an insert it does not see costs under 0.8 GB per
-  partition in flight; the live memory gate covers it); near a run's end the cores are divided by the partitions left,
-  so the last ones can insert in parallel where the plan priced none; the split choice itself does not use the share;
-  an all-GPU run books a lane the dynamic concurrency adds whole; section Q fails, where it should skip, under
-  `DTFE_GPU_FLOAT_MOMENTS`, `DTFE_GPU_FLOAT_MASS` or `DTFE_MASS_AUDIT` and on a GPU build without TBB.
+  confirmed no defect in it and narrowed one comment. Left then, each small: the split search's own count did not book
+  the copies (every deposit on the GPU, the insert forced, a 5.5 GB budget: `mc=5` at 5.51 GB, over budget, before and
+  after); the planner did not read `DTFE_TRIANGULATION_THREADS` (the live memory gate covered an insert the plan did
+  not see); near a run's end the cores are divided by the partitions left, so the last ones could insert in parallel
+  where the plan priced none; section Q failed, where it should skip, under `DTFE_GPU_FLOAT_MOMENTS`,
+  `DTFE_GPU_FLOAT_MASS` or `DTFE_MASS_AUDIT` and on a GPU build without TBB. These four are done (the leftovers batch,
+  below). Still left: the split choice itself does not use the share; an all-GPU run books a lane the dynamic
+  concurrency adds whole.
 - **Gates (2026-11-11, 00:27 to 00:46, on the binaries with the fix, against binaries built from a clean export of
   `ae81362`).** `tests/dev/bytecmp.sh --gpu-exact`: 261 files, 0 differ. The tune set as above, no bad line on either
   side, the reference's first 124 lines the frozen set. The 17 plan probes (10 PS, 7 standard), whose lines are the
@@ -2778,8 +2799,106 @@ TNG100-3-Dark z = 0 at 512³ unless a line says otherwise.
   `--run-mode balanced`: expected 3³, 6 threads, 33.73 predicted and the "look-ahead off for this run" line; within
   the band at 29.3 to 35.5, the wall time against 447 s. A cheap fourth: `--partition 3 3 3 --max-concurrent 1` (35.45
   predicted, within the band at 30.8 to 37.3). Left for later: the CPU runs' +27.7% to +33.6%, the TNG50-3 run's
-  +24.4%, the pancake's −6.8%, and a standard plan that steps its threads down to keep the look-ahead (the mode
-  bench's open point, now with balanced as a case).
+  +24.4%, and a standard plan that steps its threads down to keep the look-ahead (the mode bench's open point, now
+  with balanced as a case). The pancake's −6.8% is closed (one partition in flight on the GPU, below).
+- **The leftovers batch (2026-11-11, on the commit of the refit; no full-size run): the insert's copies.** What the
+  reviews above had left, where it needs no run. The split search's own count books the parallel insert's copies
+  (`kParInsertBytes`, 800 B per padded vertex of each partition in flight whose insert runs in parallel) and takes away
+  a partition in flight that fits only without them. Probed on both binaries (2³ partitions of the 64³ pancake at grid
+  256, 4 M points, every deposit on the GPU, `--parallel-triangulation`, 10 threads): at a 5.5 GB budget the commit
+  before plans `mc=5` at 5.51 GB with `over_budget=1`, the tree `mc=4` at 3.91 GB; at 4.5 and 5.0 GB (`mc=4`, 3.91 GB)
+  and at 6.0 GB (`mc=6`, 5.77 GB) both plan the same, as they do at 5.5 GB without the flag (`mc=5`, 5.07 GB). Both
+  planners read `DTFE_TRIANGULATION_THREADS` as the run does (a count forces the insert, 1 keeps it sequential beside
+  `--parallel-triangulation`). Standard DTFE books a team whose sub-domains each insert in parallel (`--max-concurrent`
+  2 to 5 on 10 threads, sub-domains of 1e6 points or a forced insert) and one tessellation's insert where no look-ahead
+  runs. In PS-DTFE an insert the plan priced as sequential (fewer than 2 threads a partition) stays sequential at the
+  run's end, where the cores are divided by the partitions left (`triangulation.cpp`; which partition inserts last is a
+  matter of timing, so no test at test size). Tests: ps_auto_tune_check O2 ("`DTFE_TRIANGULATION_THREADS=2` books the
+  forced insert's copies (0.35 = 0.35 GB), `=1` beside `--parallel-triangulation` none (0.18 = 0.18 GB)") and O3 (a
+  budget of 0.70 GB that holds 2 in flight without the copies and 1 with them plans 1, within it); dtfe_auto_tune_check
+  J (a team of 2 with the forced insert 0.67 → 0.80 GB, one tessellation without a look-ahead 0.57 → 0.66 GB, each 800
+  B per padded vertex).
+- **One partition in flight on the GPU (the leftovers batch).** The pancake g1 row (64³ pancake, 256³, the production
+  fields, exact, `--gpu --partition 2 2 2 --max-concurrent 1`) measured 5.38 GB against 5.02 predicted (−6.8%), its
+  flat twin 4.16 against 4.04 (−2.8%). The GPU lane booked nothing for the partition's own sub-grids beside the
+  device's hold, which the CPU branch (`copyOne`), the window path (`snapshotBytes`) and a face pass
+  (`gpuAfterHoldCellBytes`) do book: per booked cell the runs held 702 to 713 B against 584, which is 118 to 129 B
+  beyond the booking, of which the new term books 110 (with `fixed` at the loop's 110 B/cell). Now a GPU run with every
+  partition on the GPU, split, one partition in flight, and neither a face pass nor a window books `bCellDeposit` x its
+  sub-grid beside the hold (`loneLaneSubGrids`, in `finishReport`; the split search takes no split whose one partition
+  fits only without it): 5.53 GB (+2.7%) and 4.37 GB (+5.1%), and the earlier build's pancake run (5.22 GB measured)
+  goes from −3.8% to +5.9%. The face runs at one in flight (+1.0%, +3.4%) and every plan with two or more in flight
+  keep their figure. The tune set: 9 of the 127 lines predict more, `predicted_gb` only, all PS at grid 1024 on the GPU
+  with `partition=6 mc=1 over_budget=1` on both sides ("ps ram=8 grid=1024 dens sampled gpu" 15.67 → 15.94 GB, "… dens
+  exact gpu" 20.48 → 20.83, "ps ram=8 grid=1024 prod sampled gpu" and its ram=64 twin 139.59 → 141.62, their exact
+  twins 144.40 → 146.51, "ps N=128 ram=8 grid=1024 dens exact gpu" 20.54 → 20.86, "… prod exact gpu" 143.74 → 145.69,
+  "… prod + scalar exact gpu" 162.62 → 164.86); no line changes its split or its count in flight, and the 17 plan
+  probes are unchanged. `DTFE_AUTO_TUNE_DEBUG=1` prints 'PS one partition in flight: its own sub-grids beside the
+  device's hold, B B/cell x N cells = X GB'. Tests: ps_auto_tune_check Z (the term without the face sums and none with
+  them; a real run of that plan at test size, predicted at 0.97 of its measured peak or above) and Q8. That run's peak
+  is not one number: with either binary it measured 4.79 GB in most runs and up to 5.61 GB (ten repeats of the test's
+  command, the binary of the commit before and the tree's in turn: 4.79, 4.95, 4.79, 5.43, 4.79 GB and 4.79, 5.61,
+  4.79, 4.79, 4.79 GB; 5.22, 5.38 and 5.41 GB in earlier runs; why it varies was not looked into). The 5.02 GB of
+  before lay under five of those peaks, by up to 10.5%; the 5.53 GB of now lies under one (5.61 GB, by 1.4%) and 15.4%
+  over the common 4.79 GB, so the pancake row's +2.7% is one draw from −1.4% to +15.4%. The flat twin was not repeated.
+- **The mixed run's three review items (P13.1 item 13, a to c; the leftovers batch).** (a) A mixed run's GPU lane books
+  the host grids the copy-back leaves it after the lock, inside the lane's larger-of (`gpuAfterLockCellBytes`: the lane
+  is the larger of a CPU deposit and the pre-lock arrays with those grids). (b) The GPU snapshot's host copies are
+  freed before the unlock, so the one the planner books for the run is the only one (`ps_metal_host.cc`). (c) The
+  parking room shrinks by a lane for each partition the dynamic concurrency runs beyond the plan's (`DTFE.cpp`,
+  `parkFloor`), the lane the ledger admitted it with. Bytes: none in the gate set (bytecmp pins its plans and has no
+  mixed run). An auto-tuned mixed run where the term of (a) binds may get a finer split, and so different grids, as
+  with any planner change; it moves none of the 17 probes and no tune-set line. Tests: ps_auto_tune_check V for (a)
+  (plan-only, 128³ particles on a 128³ grid in 2³: the all-GPU lane less the mixed one 0.096 GB against the planner's
+  own terms 0.098 GB, where the old booking would be 0.06 GB or more off); ps_runtime_check R7 for (c) (the dynamic run
+  kept 1 partition in memory and spilled 25 where the plan's own 4 kept 26, byte-identical grids). No test at test size
+  for (b) (gpu_retry_check R1 to R3 cover the passes and their restores). Not covered: (c) reads the count in flight
+  without the gate's lock, so it can be off by one lane for one park, and the once part's share of the lane is not
+  tested.
+- **The batch's smaller items.** The upstream functions without a caller are deleted (P1.4). The core pool counts the
+  point evaluation's team and the look-ahead thread (P9.2). `psFaceWalk` clamps a negative tetrahedron mass as the loop
+  does and keeps a NaN (P11.7; ps_face_gradient_check P12, single build: "the NaN hook: 66926 face shares left out on
+  both devices", "a NaN mass: 112 face shares left out on both devices"). The launcher has the face-gradient tick (P10)
+  and lost a dead helper (`_gpu_unticked_by_exact`).
+- **The suites under the debug switches (the leftovers batch).** Under `DTFE_MASS_AUDIT`, `DTFE_GPU_FLOAT_MASS` or
+  `DTFE_GPU_FLOAT_MOMENTS` a single-precision run keeps the plan's partitions in flight (the dynamic concurrency starts
+  only without them: `DTFE.cpp`, unchanged) and the plan books no share. ps_auto_tune_check assumed the dynamic count
+  and failed there at the commit before, measured with its binaries: 8 checks under `DTFE_MASS_AUDIT=1` and under
+  `DTFE_GPU_FLOAT_MASS=1` (Y1, Y5, Q1, Q2, Q4, Q5, Q6, Q7), 9 under `DTFE_GPU_FLOAT_MOMENTS=1` (S1 with them). Now Y1
+  checks the plan's count there, Y5 and section Q skip, and S1 and V skip under the float moments: 79 OK and 2 skipped
+  under `DTFE_MASS_AUDIT=1` and under `DTFE_GPU_FLOAT_MASS=1`, 77 OK and 4 skipped under `DTFE_GPU_FLOAT_MOMENTS=1`, 88
+  OK with `DTFE_MASS_AUDIT=0`. ps_runtime_check's R7 skips there: 41 passed and 1 skipped under `DTFE_MASS_AUDIT=1`;
+  under `DTFE_GPU_FLOAT_MOMENTS=1` 40 passed, 1 skipped and R3 failed, as at the commit before (40 passed and R3 failed
+  under the switch, 41 passed without it).
+- **Gates of the leftovers batch (2026-11-11, 11:16 to 12:30, against binaries built from a clean export of
+  `2d262e4`).** `tests/dev/bytecmp.sh --gpu-exact`: 261 files, 0 differ. The tune set: 127 lines, no bad line on either
+  side, the nine lines above and no other. The 17 plan probes: the report lines of the commit before. docs_drift_check:
+  36 passed. ps_auto_tune_check 88 OK single, 72 OK and 3 skipped double (Y, V and Q, by design); dtfe_auto_tune_check
+  24 OK single, 22 OK and 1 skipped double; ps_runtime_check 42 passed single, 41 and 1 skipped double;
+  ps_face_gradient_check in both precisions; run_mode_check 57 passed, dtfe_resume_check 44 passed, gpu_retry_check.
+  The launcher's suites with both pythons (numpy 2 and numpy 1.26): py_gui_explore_test 262 passed, py_gui_app2_test 59
+  passed and 1 skipped, py_gui_runspec_test 435 passed, py_gui_app_test 401 passed. A review of the code (three
+  readers, a judge each) found nothing of high or medium weight and confirmed two low points, both in the list below. A
+  fact check of these records (three readers, three judges) found wrong sentences; each was measured again by hand
+  before the records were written (the Z run's spread, the sampled plans' 106 B/cell, the 3D view's pictures from
+  outside, the checks that failed under the switches at the commit before). Then, on the batch's tree as it stood
+  after these records: the Mac battery (12:40 to 13:28), 33 of 33 stages passed with the tree unchanged during it,
+  and the Linux check on a copy of it (13:29 to 14:05), all seven stages passed (build, core, double, 2d, variants,
+  oldpy, ruff).
+- **Still left of the leftovers (each needs a full-size run or is small).** The split choice with the share: by a
+  replica of the model it would move balanced and gentle from 6³ to 5³ at 4 in flight (about 39.2 and 39.0 GB
+  predicted, on a split the share was not measured on), so one measured balanced run at `--partition 5 5 5
+  --max-concurrent 4` first. An all-GPU run books a lane the dynamic concurrency adds whole. The uniform branch of
+  standard DTFE's planner takes `threads` as its team; the look-ahead's switch-off case with the insert's copies has no
+  test. PS-DTFE's split search lowers a count above one for the insert's copies but leaves one in flight on a coarse
+  split whose partition fits only without them, where a finer split might fit (the plan then says `over_budget=1`; the
+  review's one confirmed planner point, low). A standard-DTFE Grids job of the launcher leaves `FACE_GRADIENT` as the
+  launcher's own environment has it (older than this batch; the review's other confirmed point, low). Three prediction
+  errors that only runs can settle (the CPU runs' +27.7% to +33.6%, the TNG50-3 run's +24.4%, the mixed lane's term (a)
+  against a measured mixed peak). Under `DTFE_GPU_FLOAT_MOMENTS=1` two identical GPU runs give different grids
+  (measured at test size with the binary of `2d262e4` and with this batch's alike; with the switch at 0 both are
+  byte-identical), so ps_runtime_check's R3 fails under that debug switch: older than this batch, no code changed for
+  it; R3 could skip there.
 
 **Gates:** bytecmp (placement moves no byte), the GPU suites, the battery, Linux; P11.1 repeated with the rule on.
 
@@ -2948,7 +3067,10 @@ measurements). D1-D29 below are that contract's numbers, not the owner's table a
     partitions the dynamic concurrency starts beyond the plan's (P8.10's behaviour from before this change), so
     parking could take such a run past the budget by up to a lane for each of them. **2026-11-11 (P11.8): the lane
     share books a mixed run's other lanes at a share, and the full budget holds the 6 of the hand plan (34.7 GB
-    predicted, 31.4 GB measured); the all-GPU ledger's snapshot per lane is as it was.**
+    predicted, 31.4 GB measured); the all-GPU ledger's snapshot per lane is as it was.** **2026-11-11 (the leftovers
+    batch, P11.8): (a) to (c) done: the lane's larger-of holds those host grids (`gpuAfterLockCellBytes`;
+    ps_auto_tune_check V), the snapshot's host copies are freed before the unlock, and the parking room shrinks by a
+    lane for each partition beyond the plan's (ps_runtime_check R7).**
 14. D14, the tuner's lines: AUTO-TUNE-REPORT unchanged (no share key, `over_budget` last); the human line's tag reads
     `, GPU deposit with the free cores (GPU share 0.60)` when mixed.
 15. D15, the checkpoint key: `--run-mode` and `--gpu-share` leave the command lines; a mixed run writes

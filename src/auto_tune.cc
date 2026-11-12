@@ -632,6 +632,29 @@ inline char const *autoTuneOverrideNote(bool const autoPart, bool const autoConc
                                       "memory limits come from it).";
 }
 
+// Whether a tessellation of 'padded' points is inserted in parallel (CGAL's TBB insert, whose sorted copies the
+// planners book at kParInsertBytes a point) while 'builds' tessellations are built at once: triangulation.cpp's rule
+// (delaunayTriangulation) at the planned count. On the default rule (at least DTFE_TRIANGULATION_MIN_POINTS points),
+// with '--parallel-triangulation' or with DTFE_TRIANGULATION_THREADS set (both: any size; a count of 1 keeps the insert
+// sequential, and a count beats a run mode's lowered thread budget), where the machine's threads divided by the builds
+// leave 2 or more. The OpenMP cap is not followed: at 1 thread it books copies the run does not make (the safe side).
+inline bool autoTuneParallelInsert(User_options const &u, double const padded, int const builds)
+{
+#if defined(PARALLEL_TRIANGULATION) && NO_DIM==3
+    long const pinned = Env::integer( "DTFE_TRIANGULATION_THREADS", 0 );
+    bool const pinSet = Env::isSet( "DTFE_TRIANGULATION_THREADS" );
+    if ( not ( u.psParallelTriangulation or pinSet ) or pinned == 1 ) return false;
+    int const hardware = ( pinned > 0 and runModeState().budgetLowered )
+                         ? std::max( 1, int( std::thread::hardware_concurrency() ) ) : dtfeHardwareThreads();
+    return hardware / std::max( 1, builds ) >= 2
+           and ( u.parallelTriangulationForced or pinSet
+                 or padded >= double( Env::integer( "DTFE_TRIANGULATION_MIN_POINTS", 1000000L ) ) );
+#else
+    (void)u; (void)padded; (void)builds;
+    return false;
+#endif
+}
+
 }  // namespace
 
 void autoTuneServe(User_options &u, size_t const nParticles)
@@ -760,7 +783,7 @@ namespace {
    grid cells), the thread grid of each partition (parallelGrid, as DTFE_parallel) and its split are replayed with
    the run's functions, and every padded thread box is counted, periodic images included. A partition costs:
      - per padded vertex (+6% for the padding test's dummy points): its particle copy, which coexists with the
-       growing triangulation, + kDT (+ the TBB insert's copies with '--parallel-triangulation');
+       growing triangulation, + kDT, + the TBB insert's copies where a thread box inserts in parallel (planOf);
      - on the GPU, per tetrahedron of the thread's own box (6.77 per particle, x1.3 for the ones crossing its faces):
        the flat arrays, one sort copy and the item table, which turn into the uploaded batch one array at a time;
      - its sub-grids: the threads' copies, the partition's own grids, and the GPU deposit's host and device grids;
@@ -997,8 +1020,9 @@ inline std::vector< std::vector<double> > stdTuneSplit(StdTuneDensity const &den
 // Bytes per padded vertex of a standard sub-domain while its tessellation is built: the thread's particle copy (alive
 // while the triangulation grows) + the triangulation (96 B incl. the double volume accumulator + 6.77 cells x 72 B +
 // slack; the double build's vertex data in 8 B instead of 4: +50 B/vertex), and 6% for the dummy points the padding
-// test adds on the padded box's faces (3-5% of a sub-box at TNG scale). The standard model books no TBB copy per
-// vertex: a look-ahead build's is in kStdLookAheadFactor; an in-team TBB insert (2-5 threads by hand) is not booked.
+// test adds on the padded box's faces (3-5% of a sub-box at TNG scale). No TBB copy per vertex here: planOf books the
+// insert's copies per sub-domain where it runs in parallel (autoTuneParallelInsert: a team of 2-5 threads of 10, or a
+// lone tessellation where no look-ahead is booked); a look-ahead build's are in kStdLookAheadFactor.
 // One definition for the plan below and the partition loop's look-ahead.
 inline double stdBytesPerPaddedVertex(User_options const &u)
 {
@@ -1111,7 +1135,11 @@ struct AutoTuneStdPlanner : AutoTuneStdInputs
             double const own = N / nParts;
             plan.vertices = own * f;
             plan.bytes = plan.vertices * perVertex + own * tetsPerOwn * perTet
-                       + gridBytes( gridTotal / nParts, size_t(threads) ) + ( nPts > 0 ? ptsWalkBytes : 0. );
+                       + gridBytes( gridTotal / nParts, size_t(threads) ) + ( nPts > 0 ? ptsWalkBytes : 0. )
+                       // the TBB insert's copies, each sub-box at the average (as the counted branch below)
+                       + ( ( threads > 1 or not ( lookAheadPossible and nParts > 1. ) )
+                           and autoTuneParallelInsert( u, plan.vertices / double( threads ), int( threads ) )
+                           ? plan.vertices * kParInsertBytes : 0. );
             plan.part = 0;
             plan.snapshot = snapWordFactor * bGpuCell * gridTotal / nParts / double( threads );
             double fPart = 1.;
@@ -1156,6 +1184,12 @@ struct AutoTuneStdPlanner : AutoTuneStdInputs
                     perThread.push_back( padded );
                     vertices += padded;
                     bytes += padded * perVertex + boxCount( b, false ) * tetsPerOwn * perTet;
+                    // the TBB insert's copies (triangulation.cpp): a team whose sub-domains each insert in parallel
+                    // holds every one's at once; a lone tessellation's are in kStdLookAheadFactor only where the
+                    // look-ahead is booked (GPU deposit, more than one partition: reportSplit)
+                    if ( ( nThreads > 1 or not ( lookAheadPossible and nParts > 1. ) )
+                         and autoTuneParallelInsert( u, padded, int( nThreads ) ) )
+                        bytes += padded * kParInsertBytes;
                     double c = 1.;
                     for (int d=0; d<NO_DIM; ++d) c *= std::max( 1., b[2*d+1] - b[2*d] );
                     maxThreadCells = std::max( maxThreadCells, c );
@@ -1767,8 +1801,9 @@ struct AutoTunePSInputs
 };
 
 /* The PS-DTFE plan once its inputs are known (autoTunePartitioning): the memory model of a split (partitionBytes,
-   oneDomainPeak, snapshotBytes, lookAheadBytes), the report of a choice (finishReport) and the phases that choose the
-   split (choose). It reads the inputs by name (its base) and writes only through the three references. */
+   oneDomainPeak, snapshotBytes, lookAheadBytes, loneLaneSubGrids), the report of a choice (finishReport) and the
+   phases that choose the split (choose). It reads the inputs by name (its base) and writes only through the three
+   references. */
 struct AutoTunePSPlanner : AutoTunePSInputs
 {
     User_options &u;                 // the options the plan sets: --partition, --max-concurrent, the look-ahead switch
@@ -1840,12 +1875,13 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             m += double(dtfeHardwareThreads()) * kHitSinkBlockBytes;   // one HitSink block per thread
         // Eulerian sub-grid this partition allocates (subGridCells below)
         double const subCells = subGridCells( n );
-        // a mixed run's split: the larger of a CPU lane's deposit and a GPU lane's arrays before the lock (mixedLane)
+        // a mixed run's split: the larger of a CPU lane's deposit and a GPU lane's arrays before the lock with the
+        // grids it keeps after it (mixedLane, gpuAfterLockCellBytes)
         if ( mixed and n >= 2 )
         {
             double cpu = 0., gpuPre = 0.;
             mixedLane( n, cpu, gpuPre );
-            return m + std::max( cpu, gpuPre + gpuAfterHoldCellBytes( n )*subCells );   // (the latter 0 without a face pass)
+            return m + std::max( cpu, gpuPre + gpuAfterLockCellBytes( n )*subCells );
         }
         if ( metalActive )
         {
@@ -1908,10 +1944,11 @@ struct AutoTunePSPlanner : AutoTunePSInputs
        deposit holds the GPU (ps_metal_host.cc: the buffers are made once ctxMutex is taken, the output grids allocated
        only then), so one lane at a time holds them: snapshotBytes adds them once. A lane waiting for the GPU holds
        only what is built before the lock -- the flat tet arrays and the exact items -- and a CPU lane its deposit's
-       sub-grids with the copies or slab lists; a GPU lane after its hold keeps host grids no larger than those,
-       unless its pass makes the face sums then (gpuAfterHoldCellBytes, beside its arrays). So a lane books the larger
-       of the two (partitionBytes), each with its branch's expressions above, the GPU's without its grids
-       (gpuCellBytes). For a split only (n >= 2): one domain has no partition loop, and so no share. */
+       sub-grids with the copies or slab lists; a GPU lane after its hold keeps the host grids the copy-back made, and
+       with a face pass the face sums too (gpuAfterLockCellBytes, beside its arrays: booked, not left to the CPU lane
+       being the larger). So a lane books the larger of the two (partitionBytes), each with its branch's expressions
+       above, the GPU's without the lock holder's grids (gpuCellBytes). For a split only (n >= 2): one domain has no
+       partition loop, and so no share. */
     void mixedLane(int n, double &cpu, double &gpuPre) const
     {
         double const nOwn = N / partsOf( n );
@@ -1973,7 +2010,10 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             double cpu = 0., gpuPre = 0.;
             mixedLane( n, cpu, gpuPre );
             double const cpuShare = 1. - double( u.psGpuShareMille ) / 1000.;
-            return std::max( cpu, gpuPre + after*subCells ) - std::max( f*cpuShare*cpu, gpuPre + f*after*subCells );
+            // the whole lane as partitionBytes books it, less the shared one as it was fitted (the host grids after
+            // the lock are the first lane's: each other lane stays at its fitted share)
+            return std::max( cpu, gpuPre + gpuAfterLockCellBytes( n )*subCells )
+                   - std::max( f*cpuShare*cpu, gpuPre + f*after*subCells );
         }
         double const hold = gpuCellBytes();
         return ( std::max( hold, after ) - std::max( kPSLaneShareHold*hold, f*after ) ) * subCells;
@@ -1986,23 +2026,15 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         return std::max( 0., std::min( gridTotal*bCellDeposit, kPSScratchRamGrids*scratchMinBytes ) - ptsOutputBytes );
     }
     // the TBB insert's copies of one partition, bytes, at inFlight partitions in flight: where the insert runs in
-    // parallel, that is with >= 2 threads per partition and a partition of at least the default rule's
-    // DTFE_TRIANGULATION_MIN_POINTS padded points (triangulation.cpp), or forced. 0 elsewhere
+    // parallel (autoTuneParallelInsert: >= 2 threads per partition and a partition of at least the default rule's
+    // DTFE_TRIANGULATION_MIN_POINTS padded points, or forced by the flag or by DTFE_TRIANGULATION_THREADS). 0 elsewhere
     double parInsertBytes(int n, int inFlight) const
     {
-#if defined(PARALLEL_TRIANGULATION) && NO_DIM==3
         double const padded = N / partsOf( n ) * padFactorOf( n );
-        if ( u.psParallelTriangulation and dtfeHardwareThreads() / std::max( 1, inFlight ) >= 2
-             and ( u.parallelTriangulationForced
-                   or padded >= double( Env::integer( "DTFE_TRIANGULATION_MIN_POINTS", 1000000L ) ) ) )
-            return padded * kParInsertBytes;
-#else
-        (void)n; (void)inFlight;
-#endif
-        return 0.;
+        return autoTuneParallelInsert( u, padded, inFlight ) ? padded * kParInsertBytes : 0.;
     }
-    // the loop's prediction at c in flight under the share: finishReport's figure, the TBB copies included (cMem
-    // leaves them out, so they move no plan of the split search; here they can only lower the count the share adds)
+    // the loop's prediction at c in flight under the share: finishReport's figure, the TBB copies included (as in the
+    // split search's count: they can only lower the count the share adds)
     double laneSharePeak(int n, int c) const
     {
         return fixed + snapshotBytes( n ) + double(c)*( partitionBytes( n ) + parInsertBytes( n, c ) )
@@ -2058,14 +2090,27 @@ struct AutoTunePSPlanner : AutoTunePSInputs
     // CPU branch), less what the conversion takes from freed words instead (afterHoldReuse). Every lane in flight
     // can be in that state at once -- the walk is CPU work, nothing serializes it -- so it is booked per lane, in
     // place of the hold where it is the larger: 514 against 388 B/cell in the production selection (density,
-    // velocity, gradient and volume-weighted dispersion, exact). Without the face sums nothing is allocated after
-    // the hold but the Real grids the words become, and the hold's booking has covered every run measured: this
+    // velocity, gradient and volume-weighted dispersion, exact). Without the face sums the lane books the hold
+    // alone, and a lane with one partition in flight books its own sub-grids beside it once (loneLaneSubGrids): this
     // term is the face pass's alone.
     double gpuAfterHoldCellBytes(int n) const
     {
         if ( faceR <= 0. ) return 0.;
         double const own = ( n == 1 and not userPartitionOn and not scratchOn ) ? 0. : bCellDeposit;
         return own + gridB + 4. + fxFace + faceR - afterHoldReuse( subGridCells( n ) );
+    }
+
+    // A GPU lane of a MIXED run after its hold, per sub-grid cell (partitionBytes' mixed branch). The device grids are
+    // gone; the host keeps the words the copy-back made (ps_metal_host.cc psHostCopyBack: the mass as 8 B words, the
+    // moment words, the stream counts) until the pass has turned them into its sub-grids: gridB + 4, as
+    // gpuAfterHoldCellBytes books the same words. An all-GPU lane books the whole hold, which holds them; a mixed lane
+    // books the hold once (snapshotBytes), so it books them here, beside its arrays -- or a face pass's state behind
+    // the hold, which holds the same words and is the larger (gpuAfterHoldCellBytes). --grid-window: snapshotBytes
+    // holds them once (gridB + 4 in its window term).
+    double gpuAfterLockCellBytes(int n) const
+    {
+        double const host = u.psWindowOn ? 0. : gridB + 4.;
+        return std::max( host, gpuAfterHoldCellBytes( n ) );
     }
 
     // The Real bytes per sub-grid cell that the conversion after a face pass's GPU deposit takes from freed words and
@@ -2118,6 +2163,18 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         return N / partsOf( n ) * fPad * (partBytes + kPSVertexBytes + kParInsert);
     }
 
+    // ONE partition in flight on the GPU (partitionBytes' GPU branch, no face pass, no window): beside the device's
+    // hold the partition also holds its own sub-grids (bCellDeposit), which the CPU branch (copyOne), the window path
+    // (snapshotBytes) and a face pass (gpuAfterHoldCellBytes) book and this lane did not. With two or more in flight
+    // the other lanes' bookings cover them. Measured 2026-11-10 (64^3 pancake and flat sets, 256^3 production fields,
+    // exact, 2^3, one in flight): 5.22 to 5.38 and 4.16 GB against 5.02 and 4.04 booked without this, 5.53 and 4.37
+    // with it; the same runs with '--face-gradient' (+1.0%, +3.4%) book their own sub-grids after the hold already.
+    double loneLaneSubGrids(int n) const
+    {
+        if ( not metalActive or ( mixed and n >= 2 ) or u.psWindowOn or faceR > 0. or partsOf( n ) <= 1. ) return 0.;
+        return bCellDeposit * subGridCells( n );
+    }
+
     // what a given split and concurrency cost; the concurrency the run WILL use (0 = all cores)
     // the start-up peak of psReserveGrids under --scratch-dir (finishReport; plan P8.2, phase R 2026-11-09): every
     // scratch-backed full grid is zero-filled in anonymous memory before its file is mapped over it (ZeroFillScope),
@@ -2148,8 +2205,9 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             double cpu = 0., gpuPre = 0.;
             mixedLane( report.partition, cpu, gpuPre );
             double const once = u.psWindowOn ? 0. : gpuCellBytes()*subGridCells( report.partition );
-            std::fprintf( stderr, "AUTO-TUNE-DEBUG PS mixed lane: cpu %.3f GB, gpu pre-lock %.3f GB, once %.3f GB\n",
-                          cpu/1.e9, gpuPre/1.e9, once/1.e9 );
+            double const afterLock = gpuAfterLockCellBytes( report.partition )*subGridCells( report.partition );
+            std::fprintf( stderr, "AUTO-TUNE-DEBUG PS mixed lane: cpu %.3f GB, gpu pre-lock %.3f GB, once %.3f GB, "
+                          "after the lock %.3f GB\n", cpu/1.e9, gpuPre/1.e9, once/1.e9, afterLock/1.e9 );
         }
         if ( metalActive and faceR > 0. and Env::flag( "DTFE_AUTO_TUNE_DEBUG" ) )   // a face pass's GPU lane (P11.7)
             std::fprintf( stderr, "AUTO-TUNE-DEBUG PS GPU lane grids: hold %.0f B/cell, after the hold %.0f B/cell\n",
@@ -2185,8 +2243,14 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         report.reserveFirstMerge = scratchOn ? 0. : gridTotal * ( autoTuneMergeGrownBytes( u.uField, ps )
                                                                  + autoTuneMergeGrownBytes( u.aField, ps ) );
         report.reserveRecords = ptsRecordBytes;
+        // one partition in flight on the GPU: its own sub-grids beside the device's hold (loneLaneSubGrids)
+        double const lone = inFlight == 1 ? loneLaneSubGrids( report.partition ) : 0.;
+        if ( lone > 0. and Env::flag( "DTFE_AUTO_TUNE_DEBUG" ) )
+            std::fprintf( stderr, "AUTO-TUNE-DEBUG PS one partition in flight: its own sub-grids beside the device's "
+                          "hold, %.0f B/cell x %.0f cells = %.3f GB\n", bCellDeposit, subGridCells( report.partition ),
+                          lone/1.e9 );
         double const base = fixed + report.gpuSnapshot + report.laneOnce + double(inFlight) * report.perPartition
-                            + laneCover;
+                            + laneCover + lone;
         report.lookAhead = lookAheadBytes( report.partition, inFlight );
         // the split above is chosen without the look-ahead; adding it here anyway would make a plan that fits
         // report over_budget=1 (the launcher's memory check would halve a plane that fits) and run past a
@@ -2197,7 +2261,7 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         if ( report.lookAhead > 0. and base + report.lookAhead > budget )
         {
             message << MESSAGE::cBold() << "AUTO-TUNE:" << MESSAGE::cReset() << " look-ahead off for this run: one "
-                    << "partition (~" << report.perPartition/1.e9 << " GB) plus the next one's tessellation (~"
+                    << "partition (~" << (report.perPartition + lone)/1.e9 << " GB) plus the next one's tessellation (~"
                     << report.lookAhead/1.e9 << " GB) does not fit the " << (budget - fixed)/1.e9 << " GB the "
                     << "memory budget leaves beside the grids and particles; partitions are prepared in turn.\n"
                     << MESSAGE::Flush;
@@ -2385,8 +2449,10 @@ inline std::optional<AutoTuneReport> AutoTunePSPlanner::smallSetCase(int const u
     // on a very fine grid (1700^3 from 0.26M particles) one domain's sub-grid accumulators and the
     // deposit threads' private copies are tens of GB, and only a split shrinks them. Such a run takes
     // the memory-driven split below instead (unsplit it is predicted at 83 GB, over budget).
+    // (with the TBB insert's copies of the one in flight: one domain of 1e6 particles or more inserts in parallel)
     bool const smallFits = not autoPart or fixed + snapshotBytes( std::max( 1, nGpuMin ) )
-                                           + partitionBytes( std::max( 1, nGpuMin ) ) <= budget;
+                                           + partitionBytes( std::max( 1, nGpuMin ) )
+                                           + parInsertBytes( std::max( 1, nGpuMin ), 1 ) <= budget;
     if ( N < minN and smallFits )     // small particle set AND the grid fits: one domain, or a split for SPEED
     {
         if ( not autoPart )
@@ -2513,8 +2579,9 @@ inline AutoTuneReport AutoTunePSPlanner::memorySplit(int const userC, int const 
     // AROUND them -- Lagrangian triangulation + vertex densities, ~7 s of an ~8 s partition at
     // 2.1M particles / 256^3 -- which runs fully in parallel. A cap of 3 would run 8
     // partitions in three waves: 21 s on the GPU vs 9.5 s on the CPU. Memory still bounds it:
-    // partitionBytes() counts the GPU buffers a waiting partition holds, and cMem caps c. Where only the first lane
-    // is booked whole (laneShareCut), the concurrency rises past cMem up to laneShareCap.
+    // partitionBytes() counts the GPU buffers a waiting partition holds, and cMem caps c, with the TBB insert's copies
+    // where c leaves 2 threads a partition (parInsertBytes). Where only the first lane is booked whole
+    // (laneShareCut), the concurrency rises past cMem up to laneShareCap.
     int const targetC = cores;
 
     int bestN = -1, bestC = 0;
@@ -2525,6 +2592,21 @@ inline AutoTuneReport AutoTunePSPlanner::memorySplit(int const userC, int const 
         double const m = partitionBytes(n);
         int cMem = int( std::floor( (budget - fixed - snapshotBytes(n)) / m ) );
         int c = std::min( { targetC, n*n*n, cMem } );
+        // one partition in flight books its own sub-grids beside the hold too (finishReport): a split whose one
+        // partition fits only without them is not taken, unless the lane share plans two in flight there
+        if ( c == 1 and fixed + snapshotBytes(n) + m + loneLaneSubGrids(n) > budget
+             and not ( autoConc and targetC >= 2 and laneShareOn( n ) and partsOf( n ) >= 2.
+                       and laneShareCap( n ) >= 2 and laneSharePeak( n, 2 ) <= budget ) )
+            c = 0;
+        // ... and with each partition's TBB insert copies where they run (parInsertBytes, which finishReport books at
+        // the partitions in flight, never more than the split has): they end where a partition has fewer than 2
+        // threads, so each count is checked with its own, and only a count that does not fit with them is taken away
+        // (one in flight stays: there only a finer split helps)
+        auto const fitsWithCopies = [&](int const cc) {
+            int const f = std::min( cc, int( partsOf( n ) ) );
+            return fixed + snapshotBytes( n ) + double(f)*( m + parInsertBytes( n, f ) ) <= budget; };
+        while ( c > 1 and not fitsWithCopies( c ) )
+            --c;
         if ( c > bestC or bestN<0 )
         {
             bestN = n;
@@ -2548,8 +2630,8 @@ inline AutoTuneReport AutoTunePSPlanner::memorySplit(int const userC, int const 
     }
     else if ( autoConc and laneShareOn( bestN ) )
     {   // the lane share (finishReport): more partitions in flight where only the first is booked whole, up to the cap:
-        // the most in flight whose own prediction fits (laneSharePeak, the TBB copies included: no count this search
-        // adds reports over_budget; the split search's own count, which leaves the copies out, still can). The copies
+        // the most in flight whose own prediction fits (laneSharePeak, the TBB copies included, as in the split
+        // search's own count: neither leaves a count above one in flight whose loop exceeds the budget). The copies
         // end where a partition has fewer than 2 threads, so a count that does not fit can lie below one that does
         int const cMost = std::min( { targetC, int( partsOf( bestN ) ), laneShareCap( bestN ) } );
         for (int c = bestC + 1; c <= cMost; ++c)
@@ -2731,12 +2813,11 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     // per padded vertex: the tessellation (kPSVertexBytes) and, beside it while it grows, the particle copy
     double const partBytes = double(sizeof(Particle_data));
     // '--parallel-triangulation' (TBB; PS-DTFE's default since 2026-11-09): the sorted point+payload copy and CGAL's
-    // own copy of it outlive the particle copy during the insert: +203 B per vertex in flight, measured
-    // (autoTuneServe's kBuild 330 holds it there). The insert runs in parallel only where the cores divided by the
-    // concurrency leave at least 2 threads (triangulation.cpp), so the split search below counts nothing for it --
-    // a default-on insert would otherwise move every PS plan -- and finishReport adds it to the chosen plan's
-    // prediction where that holds (the live memory gate covers the rest). The lane share's search counts it
-    // (laneSharePeak): that search only adds partitions in flight to a plan the split search made.
+    // own copy of it outlive the particle copy during the insert (kParInsertBytes per vertex in flight; autoTuneServe's
+    // kBuild 330 holds it there). The insert runs in parallel only where the cores divided by the concurrency leave at
+    // least 2 threads (triangulation.cpp), so it is no per-vertex term here -- a default-on insert would otherwise move
+    // every PS plan -- but booked per count in flight (parInsertBytes): the split search's count, the lane share's
+    // search (laneSharePeak) and finishReport's prediction hold it where it runs.
     double const kParInsert = 0.;
     // --scratch-dir (already armed by DTFE_setup when set): the full-grid accumulators live in
     // mmap'ed files, so they leave the RAM model -- the kernel pages them against the disk and

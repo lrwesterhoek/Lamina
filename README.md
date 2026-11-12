@@ -904,10 +904,12 @@ hands to every job as `DTFE_DATA_ROOT`; it starts without one), building the pro
   evaluation); an **exact** zoom (a real run on the region: `--region-mpc` for standard DTFE, `--grid-window` for
   PS-DTFE); void outlines from the analysis catalogue (*Sizes* keeps a range of radii); *Compare with*, the figure grid across outputs and redshifts,
   and *Save image* with publication presets. PS velocity derivatives are shown as the mean field ∇⟨v⟩ by default
-  (*PS derivatives* switches to the stored ⟨∇v⟩). **Show in 3D** puts the map's field on three planes through the box
-  with the voids at their true size, as spheres of radius R_v or as the catalogue's fitted ellipsoids: drag to turn
-  it, right-drag to move it, scroll to zoom; click a void to inspect it, double-click it to close up (the planes
-  through its centre at full resolution).
+  (*PS derivatives* switches to the stored ⟨∇v⟩). **Show in 3D** draws the map's field as a translucent volume (or on
+  three planes through the box) with the voids at their true size, as spheres of radius R_v or as the catalogue's
+  fitted ellipsoids: drag to turn it, right-drag to move it, scroll to zoom. In perspective (the default) scrolling
+  in moves the eye toward what is under the cursor, into the box and on through the field, which is then drawn all
+  around the eye; scrolling out backs away. Click a void to inspect it, double-click it to close up (its
+  surroundings at full resolution).
 - Beside the log: **Queue** (jobs run one after another, kept across sessions), **Figures**, **Runs** (every run log on
   disk: settings, time, peak memory; outputs made by a build before a fix that changed them, legacy planes and
   resumable runs are marked; load the settings back, open in Explore, move to the Trash, build the void catalogue) and

@@ -647,57 +647,126 @@ def visible_fraction(prep: dict, lo: float, symmetric: bool = False) -> float:
 
 
 # ---------------------------------------------------------------------- the slices on the screen
-def slice_axis(cam: V.Camera, lo, hi) -> tuple[int, np.ndarray]:
+def slice_axis(cam: V.Camera, lo, hi, shape=None) -> tuple[int, np.ndarray]:
     """The slicing axis and the reference ray's direction (unit, toward the window): orthographic, the axis facing
     the viewer most (|cos| >= 1/sqrt 3: never edge on) and the view direction. Perspective: every pixel's ray has
-    its own direction, so the axis is the one whose worst ray -- over the rays from the eye to the window's
-    corners -- is the least oblique (never an axis whose slab holds the eye: some of its slices would be seen
-    edge on), and the reference ray is the one to the window's centre."""
+    its own direction and its own axis (slice_plan's parts); these are the ray through the middle of the view and
+    the axis whose slices it crosses most of ('shape': the cells along each axis; cubic cells without it)."""
     lo, hi = np.asarray(lo, dtype=np.float64), np.asarray(hi, dtype=np.float64)
+    t = cam.toward()
     if not cam.perspective:
-        t = cam.toward()
         return int(np.argmax(np.abs(t))), -t
-    e = cam.eye()
-    rays = V.box_corners(lo, hi) - e
-    # the smallest |cos| of a ray to the window with each axis: at a corner (the nearest face's |gap| over the
-    # farthest reach), or 0 when the eye is level with the axis's slab (a ray into the window then runs along it)
-    worst = (np.abs(rays) / np.linalg.norm(rays, axis=1)[:, None]).min(axis=0)
-    worst[(e >= lo) & (e <= hi)] = 0.0
-    c = 0.5 * (lo + hi) - e
-    a = int(np.argmax(worst)) if worst.max() > 0 else int(np.argmax(np.abs(cam.toward())))
-    return a, c / np.linalg.norm(c)
+    cell = np.ones(3) if shape is None else (hi - lo) / np.asarray(shape, dtype=np.float64)
+    return int(np.argmax(np.abs(t) / cell)), -t
 
 
-def slice_plan(cam: V.Camera, lo, hi, shape) -> dict:
-    """How the slice stack of a cube of 'shape' cells filling lo..hi (Mpc) lands on the screen of 'cam':
-    {'axis' (slice_axis), 'order' (slice indices, front first: perspective, nearest the eye first), 'transforms'
-    ((m, 9): slice i's image pixels -> screen, view3d.plane_transform's numbers; image rows along the first remaining
-    axis, columns along the second, as slice_images gives them), 'size' (the image's width, height), 'exponent' (the
-    path through a slice over the reference thickness, along the reference ray)}. Perspective: each ray crosses the
-    slices at its own angle, so its true path is the spacing over its own |cos|, and a uniform field's optical
-    depth varies across the picture by that ratio to the reference ray's (some tens of percent at the first fit,
-    more zoomed in near a corner) -- 2D texture slicing's inherent error; orthographic it is exact."""
-    lo, hi = np.asarray(lo, dtype=np.float64), np.asarray(hi, dtype=np.float64)
-    a, ray = slice_axis(cam, lo, hi)
+def _slice_transforms(cam: V.Camera, lo, cell, shape, a: int) -> tuple[np.ndarray, tuple, np.ndarray]:
+    """The (m, 9) image -> screen numbers of the m slices across axis 'a' (slice_plan's 'transforms'), the image's
+    (width, height), and per slice whether any of it is in front of the eye (all, orthographic)."""
     r0, r1 = V.rest_axes(a)
     m = int(shape[a])
-    d = (hi - lo) / np.asarray(shape, dtype=np.float64)
-    pos = lo[a] + (np.arange(m) + 0.5) * d[a]
+    pos = lo[a] + (np.arange(m) + 0.5) * cell[a]
     P = cam.matrix()
     ex, ey, step, origin = np.zeros(3), np.zeros(3), np.zeros(3), lo.copy()
-    ex[r1], ey[r0], step[a] = d[r1], d[r0], d[a]
+    ex[r1], ey[r0], step[a] = cell[r1], cell[r0], cell[a]
     origin[a] = pos[0]
     hx, hy = P[:, :3] @ ex, P[:, :3] @ ey
     h0 = (P @ np.append(origin, 1.0))[None, :] + np.arange(m)[:, None] * (P[:, :3] @ step)[None, :]
-    # divided by |w| at each slice's origin: w keeps its sign (plane_transform's reason)
-    T = np.concatenate([np.broadcast_to(hx, (m, 3)), np.broadcast_to(hy, (m, 3)), h0], axis=1) / np.abs(h0[:, 2:3])
-    if cam.perspective:
-        order = np.argsort(np.abs(pos - cam.eye()[a]), kind="stable")
-    else:
-        order = np.arange(m) if ray[a] > 0 else np.arange(m)[::-1]  # the viewer on the high side: high slices first
+    T = np.concatenate([np.broadcast_to(hx, (m, 3)), np.broadcast_to(hy, (m, 3)), h0], axis=1)
+    size = (int(shape[r1]), int(shape[r0]))
+    if not cam.perspective:
+        # divided by |w| at each slice's origin: w keeps its sign (plane_transform's reason)
+        return T / np.abs(h0[:, 2:3]), size, np.ones(m, dtype=bool)
+    # Perspective: w is the depth in front of the eye, and with the eye inside the window a slice can run from in
+    # front of it to behind it (Qt cuts the image where w reaches 0). Divided by the largest w over the slice's
+    # four corners: positive whenever any of the slice is in front, and Qt's cut is then at a fixed fraction of it.
+    w = h0[:, 2:3] + np.array([0.0, size[0] * hx[2], size[1] * hy[2], size[0] * hx[2] + size[1] * hy[2]])[None, :]
+    far = w.max(axis=1)
+    ahead = far > 1e-9 * cam.distance()
+    return T / np.where(ahead, far, 1.0)[:, None], size, ahead
+
+
+def slice_plan(cam: V.Camera, lo, hi, shape) -> dict:
+    """How the slice stacks of a cube of 'shape' cells filling lo..hi (Mpc) land on the screen of 'cam':
+    {'perspective', 'exponent' (the path through a slice over the reference thickness, along the reference ray),
+    'parts': the stacks to draw, each {'axis', 'sign' (+1: its rays run up the axis), 'order' (slice indices,
+    front first), 'transforms' ((m, 9): slice i's image pixels -> screen, view3d.plane_transform's numbers; image
+    rows along the first remaining axis, columns along the second, as slice_images gives them), 'size' (the
+    image's width, height), 'first'}, and 'axis', 'order', 'transforms', 'size' of the part that draws the middle
+    of the view}.
+
+    Orthographic: one part draws the whole picture (slice_axis's), exactly.
+
+    Perspective: each pixel's ray has its own direction, and the eye may be anywhere, also inside the window. A
+    pixel is drawn from the stack across the axis its ray crosses the most slices of (in cells: the largest
+    component of its direction), so the picture has up to six parts (an axis and a sense each: the faces of a
+    cube around the eye; part_ids gives each pixel's), no slice is seen at more than 55 degrees from face on, and
+    only the slices ahead of the eye along a part's sense are drawn, nearest first. Where two parts meet, a ray
+    crosses as many slices of the one as of the other, so one exponent serves all: the reference ray's (through
+    the middle of the view). A ray's true path through a slice is the spacing over its own |cos|, so a uniform
+    field's optical depth varies across the picture by that ratio to the reference ray's (at most sqrt 3) -- 2D
+    texture slicing's inherent error. 'first' = (slice, weight): the nearest slice ahead of the eye stands for the
+    stretch between the eye and itself, so it counts by its distance in slices (weight < 1 within one slice of the
+    eye): flying through the field, a slice fades as the eye reaches it and never pops. 'view' = (q0, qx, qy, eye):
+    screen point (x, y) lies at q0 + x qx + y qy in cells from 'lo' on the target's plane, the eye at 'eye';
+    'screen' = the view's size (cam.width, cam.height)."""
+    lo, hi = np.asarray(lo, dtype=np.float64), np.asarray(hi, dtype=np.float64)
+    shape = tuple(int(n) for n in shape)
+    cell = (hi - lo) / np.asarray(shape, dtype=np.float64)
+    a, ray = slice_axis(cam, lo, hi, shape)
     ref = float(np.max(hi - lo)) / REF_CELLS
-    return {"axis": a, "order": order, "transforms": T, "size": (int(shape[r1]), int(shape[r0])),
-            "exponent": float(d[a] / max(abs(ray[a]), 1e-9) / ref) if ref > 0 else 1.0}
+    plan = {"axis": a, "perspective": bool(cam.perspective),
+            "exponent": float(cell[a] / max(abs(ray[a]), 1e-9) / ref) if ref > 0 else 1.0}
+    if not cam.perspective:
+        T, size, _ = _slice_transforms(cam, lo, cell, shape, a)
+        m = shape[a]
+        order = np.arange(m) if ray[a] > 0 else np.arange(m)[::-1]  # the viewer on the high side: high slices first
+        plan["parts"] = [{"axis": a, "sign": 1 if ray[a] > 0 else -1, "order": order, "transforms": T, "size": size,
+                          "first": None}]
+    else:
+        eye = (cam.eye() - lo) / cell
+        corner = cam.target + (-0.5 * cam.width * cam.R[0] + 0.5 * cam.height * cam.R[1]) / cam.scale
+        plan["view"] = ((corner - lo) / cell, cam.R[0] / (cam.scale * cell), -cam.R[1] / (cam.scale * cell), eye)
+        plan["screen"] = (int(cam.width), int(cam.height))
+        plan["parts"] = []
+        for b in range(3):
+            T, size, ahead = _slice_transforms(cam, lo, cell, shape, b)
+            gap = np.arange(shape[b]) + 0.5 - eye[b]                # each slice's distance up the axis, in slices
+            for sign in (1, -1):
+                front = np.nonzero(sign * gap > 0)[0][::sign]       # nearest the eye first
+                if front.size:
+                    first = (int(front[0]), float(min(1.0, sign * gap[front[0]])))
+                    plan["parts"].append({"axis": b, "sign": sign, "order": front[ahead[front]], "transforms": T,
+                                          "size": size, "first": first})
+    mid = [q for q in plan["parts"] if q["axis"] == a and q["sign"] == (1 if ray[a] > 0 else -1)]
+    if mid:
+        plan.update(order=mid[0]["order"], transforms=mid[0]["transforms"], size=mid[0]["size"])
+    else:                                                           # the middle of the view looks away from the window
+        r0, r1 = V.rest_axes(a)
+        plan.update(order=np.zeros(0, dtype=np.intp), transforms=np.zeros((shape[a], 9)), size=(shape[r1], shape[r0]))
+    return plan
+
+
+def part_ids(plan: dict, width: int, height: int) -> np.ndarray | None:
+    """Which of slice_plan's parts draws each pixel of a width x height picture of the plan's whole view: (height,
+    width) int8 of 2 axis + (0: the ray runs up the axis, 1: down it), at the pixels' centres; None: orthographic
+    (the one part draws all). Ties go to the lower axis (volume_gl's shader takes the same)."""
+    if not plan["perspective"]:
+        return None
+    q0, qx, qy, eye = plan["view"]
+    x = (np.arange(width) + 0.5) * (plan["screen"][0] / width)
+    y = (np.arange(height) + 0.5) * (plan["screen"][1] / height)
+    D = [(q0[k] - eye[k]) + x[None, :] * qx[k] + y[:, None] * qy[k] for k in range(3)]
+    A = [np.abs(v) for v in D]
+    out = np.where(A[1] >= A[2], np.int8(2), np.int8(4)) + (np.where(A[1] >= A[2], D[1], D[2]) < 0)
+    first = (A[0] >= A[1]) & (A[0] >= A[2])
+    out[first] = (D[0] < 0)[first]
+    return out.astype(np.int8, copy=False)
+
+
+def part_id(part: dict) -> int:
+    """A part's number in part_ids."""
+    return 2 * int(part["axis"]) + (1 if part["sign"] < 0 else 0)
 
 
 def composite(rgba: np.ndarray) -> np.ndarray:

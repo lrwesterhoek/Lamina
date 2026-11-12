@@ -38,7 +38,10 @@
 #       '--max-concurrent 1' run and to R1; a spilling run killed after 10 merges checkpointed partitions 0-9 and
 #       resumes byte-identical; DTFE_MERGE_SPILL=0 brings back the wait. The 'merge time:' line: partitions parked
 #       behind the held-back partition 0 (> 0 s parked), none parked but threads waiting with DTFE_MERGE_STAGE_GB=0
-#       (> 0 s holding a thread), the resumed run's count (the 17 it merged), the completion-order run's lock wait
+#       (> 0 s holding a thread), the resumed run's count (the 17 it merged), the completion-order run's lock wait;
+#       under the dynamic concurrency (DTFE_TEST_PLAN_MC=1, single build) the RAM room is a lane less for each
+#       partition in flight beyond the plan's: at 0.9 of a lane the dynamic run spills what the plan's own 4 keep in
+#       memory, byte-identical
 #   R8  the progress sidecar of a run that does not finish: one that stops on an error (a missing input, found by the
 #       reader after the sidecar is armed; also the standard binary when it is built) exits 1 and leaves none, as the
 #       launcher then reads a failed attempt from its run log instead of a death; one killed after 2 partitions
@@ -175,6 +178,55 @@ nstr="$(sed -n 's/.*ordered merge: \([0-9]*\) partition(s) finished before their
 grep -q "the memory budget leaves beside the plan" "$TMP/sgr.log" && [ "${nsgr:-0}" -gt 0 ] && [ "$nsgr" = "$nstr" ] \
     && same "$TMP/sg0" "$TMP/sgr"
 check "R7 ... and no room in the memory budget (DTFE_TEST_PARK_ROOM_GB=0): all ${nsgr:-?} parked partition(s) spilled, byte-identical" $?
+# ... and that room a lane less for each partition the dynamic concurrency runs beyond the plan's. DTFE_TEST_PLAN_MC=1
+# stands for a plan of one partition at a time, which the dynamic concurrency runs 4 at once; the room is 0.9 of a
+# lane (the dynamic start line's partition less its once part, DTFE_AUTO_TUNE_DEBUG=1). At the plan's own 4 (nothing
+# beyond it) partitions park in RAM within it; in the dynamic run one that parks beside two or more others in flight
+# finds no room left and spills, so only the last few wait in memory. The double build runs the plan's one at a time
+# (its sums follow the thread count): nothing parks there.
+# The counts follow the timing (partition 0's 2 s hold against the others on three threads): the thresholds below are
+# the ones to tune from a run's log; the dynamic run keeping fewer in memory than the plan's own, under the same room
+# and the same hold, is the part that tells the rule from the old one
+R7_ROOM_LANES=0.9      # the RAM room, in lanes (the dynamic start line's partition less its once part)
+R7_PLAN_RAM_MIN=3      # the plan's own run (sgp): at least this many waited in memory
+R7_DYN_RAM_MAX=2       # the dynamic run (sgd): at most this many waited in memory ...
+R7_DYN_SPILL_MIN=2     # ... and at least this many spilled to disk
+# With DTFE_GPU_FLOAT_MOMENTS, DTFE_GPU_FLOAT_MASS or DTFE_MASS_AUDIT set (empty and 0/false/no/off are unset; the old
+# PS_ names count) the single build keeps the plan's count as well: those sums follow the thread order
+R7_SW=""
+for sw in DTFE_GPU_FLOAT_MOMENTS DTFE_GPU_FLOAT_MASS DTFE_MASS_AUDIT \
+          PS_GPU_FLOAT_MOMENTS PS_GPU_FLOAT_MASS PS_MASS_AUDIT; do
+    case "$(printf '%s' "${!sw:-0}" | tr '[:upper:]' '[:lower:]')" in
+        0|false|no|off) ;;
+        *) R7_SW="${R7_SW:+${R7_SW} }${sw}" ;;
+    esac
+done
+if precision_double; then
+    echo "  SKIP R7: the RAM room beyond the plan's partitions (the double build runs no dynamic concurrency)"
+elif [ -n "${R7_SW}" ]; then
+    echo "  SKIP R7: the RAM room beyond the plan's partitions (${R7_SW} is set: no dynamic concurrency there)"
+else
+    DTFE_TEST_PLAN_MC=1 DTFE_AUTO_TUNE_DEBUG=1 "${GA[@]}" "$TMP/sgl" "${C[@]}" --partition 3 3 3 > "$TMP/sgl.log" 2>&1 \
+        || { echo "FAIL: sgl (see $TMP/sgl.log)"; exit 1; }
+    room="$(sed -n 's/^AUTO-TUNE-DEBUG PS dynamic start: partition \([0-9]*\) B, once \([0-9]*\) B,.*/\1 \2/p' \
+            "$TMP/sgl.log" | head -n 1 | awk -v f="$R7_ROOM_LANES" 'NF == 2 { printf "%.6f", f * ($1 - $2) / 1e9 }')"
+    DTFE_TEST_PLAN_MC=1 DTFE_TEST_PARK_ROOM_GB="${room:-0}" DTFE_SPILL_MIN_GB=2 "${GA[@]}" "$TMP/sgd" "${C[@]}" \
+        --partition 3 3 3 > "$TMP/sgd.log" 2>&1 || { echo "FAIL: sgd (see $TMP/sgd.log)"; exit 1; }
+    DTFE_TEST_PARK_ROOM_GB="${room:-0}" DTFE_SPILL_MIN_GB=2 "${GA[@]}" "$TMP/sgp" "${C[@]}" \
+        --partition 3 3 3 > "$TMP/sgp.log" 2>&1 || { echo "FAIL: sgp (see $TMP/sgp.log)"; exit 1; }
+    # nram <log>: how many of the partitions that finished before their turn waited in memory (parked in RAM)
+    nram() { sed -n 's/.*ordered merge: .* before their turn: \([0-9]*\) waited in memory.*/\1/p' "$1"; }
+    rd="$(nram "$TMP/sgd.log")"; rp="$(nram "$TMP/sgp.log")"; sd="$(nspill "$TMP/sgd.log")"
+    np="$(sed -n 's/.*building up to \([0-9]*\) partition triangulation.*/\1/p' "$TMP/sgp.log" | head -n 1)"
+    r7="${room:-?} GB, ${R7_ROOM_LANES} of a lane: the dynamic run kept ${rd:-?} in memory (<= ${R7_DYN_RAM_MAX}) and"
+    r7="${r7} spilled ${sd:-?} (>= ${R7_DYN_SPILL_MIN}), the plan's own ${np:-?} kept ${rp:-?} (>= ${R7_PLAN_RAM_MIN})"
+    [ -n "${room}" ] && grep -q "dynamic: at least the plan's 1" "$TMP/sgd.log" \
+        && grep -q "dynamic concurrency not started" "$TMP/sgp.log" \
+        && [ "${rd:-99}" -lt "${rp:-0}" ] && [ "${rp:-0}" -ge "$R7_PLAN_RAM_MIN" ] \
+        && [ "${rd:-99}" -le "$R7_DYN_RAM_MAX" ] && [ "${sd:-0}" -ge "$R7_DYN_SPILL_MIN" ] \
+        && same "$TMP/sg0" "$TMP/sgd" && same "$TMP/sg0" "$TMP/sgp"
+    check "R7 ... and that room a lane less for each partition in flight beyond the plan's (${r7}); byte-identical" $?
+fi
 
 echo ">> R2: the look-ahead on the CPU deposit (DTFE_OVERLAP=1) against --no-overlap"
 "$BIN" "$SNAP" "$TMP/n1" "${C[@]}" --partition 3 3 3 --max-concurrent 1 --no-overlap > "$TMP/n1.log" 2>&1 \

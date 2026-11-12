@@ -502,7 +502,7 @@ inline PSHostCkEnv psHostCheckpointEnv()
     // snapshot). Unset: every ~10 s of GPU work (n = 10 s / the current buffer target, so an escalated pace of
     // 0.02 s buffers does not checkpoint 12x as often). A checkpoint copies the accumulator grids (~24 B per cell
     // for density + velocity: ~0.4 GB at 256^3, ~0.1 s) into ONE spare host
-    // copy, allocated at the first checkpoint and held until the partition's deposit returns.
+    // copy, allocated at the first checkpoint and freed before the deposit lets go of the GPU (one at a time).
     long ckChunks = -1;
     if (Env::isSet("DTFE_GPU_CHECKPOINT_CHUNKS")) ckChunks = std::max(0L, Env::integer("DTFE_GPU_CHECKPOINT_CHUNKS", 0));
     // DTFE_GPU_PACE_RECOVER_SEC=<s>: the clean GPU work after which an escalated pace steps back (GpuPace)
@@ -545,7 +545,7 @@ inline void psHostReportPasses(char const* backend, char const* unit, bool const
 //   leftovers  the exact items' leftovers around their own kernels: the scan, the gathers, the write-back
 //   copyBack   the output grids' shapes (psGpuInitGrids), the deferred tets' scan and the grids back to the host
 //              (psHostCopyBack)
-//   releases   the device buffers' release
+//   releases   the device buffers' release and the snapshot's host copies
 // The checkpoints' copies are GpuSnapshot::sec; what is left of the hold (encoding, the guard counters' reads, the
 // failed buffers' own time) is reported as 'other'.
 struct PSGpuPhaseTimes

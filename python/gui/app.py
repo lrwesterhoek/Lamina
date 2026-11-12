@@ -226,10 +226,7 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         # the deposit choice per estimator, per tab ('grids', 'own'): {estimator: 'sampled' | 'exact'}, what an
         # estimator switch brings back (_estimator_switched; this session only)
         self._deposit_kept: dict[str, dict[str, str]] = {}
-        # the GPU boxes the exact deposit's device rule unticked, ticked again when the choice leaves the exact
-        # deposit unless the box was set otherwise meanwhile (_deposit_changed, _gpu_set_by_hand). The rule
-        # (rs.recommended_gpu) gives the exact deposit the GPU in every machine use now, so the set stays empty
-        self._gpu_unticked_by_exact: set = set()
+        # True while a rule (not a hand, not a load) sets a GPU box (_gpu_auto_set)
         self._gpu_auto_setting = False
         # the GPU boxes last set by hand (not by a rule, not by a load): a change of the machine use keeps their tick
         # (_run_mode_changed, _gpu_set_by_hand; this session only)
@@ -571,7 +568,7 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         # ---- Grids tab
         s = self.spec
         ps = s.estimator == "ps"
-        for w in (self.nsub_spin, self.ps_group, self.ld_check, self.prefix_edit):
+        for w in (self.nsub_spin, self.ps_group, self.ld_check, self.fg_check, self.prefix_edit):
             w.setEnabled(ps)                # the hi-res slice works with both estimators
         self._deposit_texts(self.deposit_combo, ps)       # both estimators: standard DTFE's exact cell average
         for name, cb in self.field_checks.items():
@@ -604,6 +601,7 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         for w in (self.o_sdens, self.o_pstream, self.o_pids, self.o_pc):      # the sample points' phase-space options
             w.setEnabled(cps and bool(c.sample_points))
         self.o_cu.setEnabled(cps and c.caustics)
+        self.o_fg.setEnabled(cps and not flat)      # the face sweep is 3D only (the 2D programs: no flag)
         self.o_pvg.setEnabled(bool(c.sample_points))
         self._deposit_texts(self.o_deposit, cps)
         for name, cb in self.o_fields.items():

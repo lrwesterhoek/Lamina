@@ -1,4 +1,57 @@
 UNRELEASED (since 1.0.0)
+- The launcher's 3D view (Explore, 'Show in 3D') takes the eye into the box (2026-11-11; the exception to the 3D rule
+  in docs/cleanup-plan.md). In perspective (the default) scrolling in moves the eye along the line of sight under the
+  cursor, into the box and on through the field, and scrolling out backs away; before, a zoom only enlarged the picture
+  of the box from outside. From inside, the field is drawn all around the eye: each pixel takes the slices across the
+  axis its ray crosses most (up to six parts, the faces of a cube around the eye; no slice is seen at more than 55
+  degrees from face on, and the slice nearest the eye fades), in QPainter's picture and in the GL shader alike. The box
+  edges, the three planes, the void cuts and the scale bar are drawn from inside too. THE PICTURES FROM OUTSIDE,
+  against the commit before (QPainter, 640x480, a TNG100 256^3 cube, fitted, seven turns): the parallel projection
+  draws the same pixels at every turn. In perspective a pixel whose ray runs more along another axis than the middle of
+  the view's now takes that axis's slices, so an oblique view changes there: at the default turn a quarter of the
+  volume's pixels (the middle difference 8 of 255, a tenth of them over 38), two thirds looking down the box's diagonal
+  (there also more opaque, by 13 of 255 on average), a ninth at a third oblique turn, none at the other four (face on,
+  turned 20 and tilted 10 degrees, tilted 60 degrees, from nearly straight above). It is the same field on another
+  stack of slices. Limits: turning or panning inside the box can carry the eye out of it; a scroll in with the cursor
+  off the box does not take the eye into it (the eye moves along that line of sight and no longer stops short of the
+  box, so it can pass beside it). Tests: py_gui_explore_test.py part 11 (the slice plan; from inside, QPainter's
+  picture against a march along each pixel's own ray; the GPU's picture against QPainter's, from outside and with the
+  eye inside) and the checks labelled 12, under part 10 (the camera's pixels, the dolly along the cursor's ray, the
+  planes and the picked point from inside).
+- The launcher has a tick box for the face gradient ('Gradient of the mean velocity from exact face integrals', in the
+  folded Advanced group of the Grids, Pipeline and Custom tabs; PS-DTFE, 3D; off by default, as the driver). A Grids or
+  Pipeline job sets the driver's FACE_GRADIENT (1 or 0), the Custom tab adds '--face-gradient'. Before the run the
+  launcher names what the binary would refuse with it (the sampled deposit, moments that are not volume weighted, the
+  halo release); the tick and the linear deposit exclude each other.
+- The auto-tuner, what the refit below had left (docs/cleanup-plan.md P11.8, the leftovers batch, 2026-11-11). Plans
+  and printed predictions change, no deposit arithmetic: against binaries of the commit before, tests/dev/bytecmp.sh
+  --gpu-exact compares 261 files, 0 differ; of the tune set's 127 lines nine predict more (below) and none changes its
+  split or its count in flight; the 17 TNG100 plan probes are unchanged. THE PARALLEL INSERT'S COPIES are booked
+  wherever the run makes them. PS-DTFE's split search takes away a partition in flight that fits only without them,
+  where its own count could plan 'over_budget=1' (2^3 partitions of a 64^3 pancake at grid 256 with 4 M evaluation
+  points, every deposit on the GPU, '--parallel-triangulation', a 5.5 GB budget: 5 in flight at 5.51 GB before, 4 at
+  3.91 GB now). Both planners read DTFE_TRIANGULATION_THREADS as the run does (a count forces the insert, 1 keeps it
+  sequential). Standard DTFE books a team whose sub-domains each insert in parallel ('--max-concurrent' 2 to 5 on 10
+  threads, sub-domains of 1e6 points or a forced insert) and one tessellation's insert where no look-ahead runs. In
+  PS-DTFE an insert the plan priced as sequential (fewer than 2 threads a partition) stays sequential at the run's end,
+  where the cores were shared among the partitions left. ONE PARTITION IN FLIGHT ON THE GPU books its own sub-grids
+  beside the device's grids, which only the CPU deposit, the window and the face pass had booked: a 64^3 pancake at
+  256^3 with the production fields, one partition at a time on the GPU, measured up to 5.61 GB (4.79 GB in most of its
+  runs) where 5.02 GB were predicted; now 5.53 GB. Only GPU runs with every partition on the GPU, split, one partition
+  in flight, and neither a face pass nor a window, predict more (110 B per sub-grid cell with the production fields and
+  the exact deposit, 106 with the sampled one): the nine tune-set lines, all at grid 1024 and over budget before and
+  after. A MIXED RUN ('--gpu-share' under 1): a GPU lane books the host grids it keeps after the device's lock (the
+  lane is the larger of a CPU deposit and the GPU arrays with those grids); the GPU snapshot's host copies are freed
+  before the next partition takes the device; and the room for parked partitions shrinks by a lane for each partition
+  the dynamic concurrency runs beyond the plan's. Tests: ps_auto_tune_check.sh O2, O3, Q8, V and Z (Z with a real run
+  at test size), dtfe_auto_tune_check.sh J, ps_runtime_check.sh R7. ps_auto_tune_check.sh now follows the debug
+  switches DTFE_GPU_FLOAT_MOMENTS, DTFE_GPU_FLOAT_MASS and DTFE_MASS_AUDIT, under which a run keeps the plan's
+  partitions in flight and the plan books no share: section Q and Y5 skip, Y1 checks the plan's count, and S1 and V
+  skip under the float moments; ps_runtime_check.sh R7 skips under them too.
+- Smaller: PS-DTFE's face walk (the face sums beside a GPU deposit) clamps a negative tetrahedron mass as the deposit
+  loop does and keeps a NaN, so both devices leave out and count the same face shares (ps_face_gradient_check.sh P12);
+  the core pool counts the point evaluation's team and the look-ahead thread; deleted, without a caller:
+  Box::isParticleLagrangianInBox, upperBoundCheck and both superfluous_options.
 - The auto-tuner's memory model is refitted to the measured peaks (docs/cleanup-plan.md P11.8, 2026-11-11): PS-DTFE's
   partitions in flight share their sub-grid state, and standard DTFE's look-ahead and what its partition loop leaves
   behind are booked higher. Plans and printed predictions change, no deposit arithmetic: against binaries of the
@@ -50,11 +103,11 @@ UNRELEASED (since 1.0.0)
   own prediction fits. Probed on the binaries before and after the fix (2^3 partitions of a 64^3 pancake at grid 256,
   4 M evaluation points, 14 budgets, all on the GPU and with '--gpu-share 0.5'): 9 of the 28 plans with the flag were
   over budget and are within it, each with one partition fewer in flight; the other 19, and all 28 without the flag,
-  are the same. Left as it was: the split search's own count does not book those copies (the live memory gate covers
-  them), and the planner does not read DTFE_TRIANGULATION_THREADS. Tests: ps_auto_tune_check.sh section Q (a GPU
-  build; Q1 to Q7: the plan against the printed lane terms with every deposit on the GPU and with '--gpu-share 0.5',
-  no share without points, the scratch term, the insert's copies, the cap under the dynamic concurrency with the grids
-  of '--max-concurrent 1', and a budget the share's plan stays within).
+  are the same. The split search's own count and DTFE_TRIANGULATION_THREADS followed (the leftovers bullet above).
+  Tests: ps_auto_tune_check.sh section Q (a GPU build; Q1 to Q7: the plan against the printed lane terms with every
+  deposit on the GPU and with '--gpu-share 0.5', no share without points, the scratch term, the insert's copies, the
+  cap under the dynamic concurrency with the grids of '--max-concurrent 1', and a budget the share's plan stays
+  within).
 - PS-DTFE: beside a GPU deposit, a '--face-gradient' pass forms the face sums of the tetrahedra the CPU deposit forms
   them for, and takes their units from the GPU extraction (docs/cleanup-plan.md P11.7 items 2, 5 and 6, 2026-11-10).
   THE FILTER. After a GPU deposit one CPU walk over the kept tetrahedra makes the face sums (psFaceWalk); in a CPU run

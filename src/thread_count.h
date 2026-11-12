@@ -55,10 +55,10 @@ inline int coresPerTeam(char const *envOverride)
    - extra(): the helper threads running beside their callers now: the pool's own (each claimed by take and given
      back by give when it ends) and those of the teams that do not ask it, each counted by a Hold for its lifetime --
      the PS-DTFE grid pass's static teams (ps_interpolation.cc: the copy- and slab-mode CPU deposit, a pinned
-     dynamic team, the slab binning, the copies' merge, the fixed-point bound walk) and the parallel insertion's TBB
-     arena (triangulation.cpp). Not counted: the point evaluation's team (ps_point_eval.cc), the standard binary's
-     '_a' average (averaged_interpolation_1.cc) and a partition loop's look-ahead thread (DTFE.cpp; a parallel
-     insertion it runs is counted).
+     dynamic team, the slab binning, the copies' merge, the fixed-point bound walk, the face walk), the point
+     evaluation's team (ps_point_eval.cc forEachCellParallel), a partition loop's look-ahead thread (DTFE.cpp
+     runLookAhead) and the parallel insertion's TBB arena (triangulation.cpp). Not counted: the standard binary's
+     '_a' average (averaged_interpolation_1.cc): that binary has no pool user (no take), so nothing would read it.
    free = total - holders - extra: what a helper may take (take) without oversubscribing the cores; a partition that
    finishes frees its core here. A counted team does not wait for free cores (its size is its own rule's): the pool's
    users yield to it, not it to them. A claim never changes a result: only work whose outcome is independent of how

@@ -171,6 +171,9 @@ class RunSpec:
     mem_budget_gb: float = 0.0       # DTFE_MEM_BUDGET_GB: the auto-tuner's memory budget; 0 = its own (free RAM)
     tess_cache: str = ""             # TESSELLATION_CACHE: reuse the tessellation across runs (a local folder); "" = none
     linear_deposit: bool = False     # PS_LINEAR_DEPOSIT: --ps-linear-deposit (density-weighted inside each tet)
+    face_gradient: bool = False      # FACE_GRADIENT: --face-gradient (PS-DTFE: the gradient of the volume-weighted
+                                     # MEAN velocity from exact face sums; needs the exact deposit and the volume
+                                     # weighting; 3D)
     ordered_merge: bool = True       # PS_MERGE=index-order: --ps-merge index-order, given (partitions merged in index
                                      # order: bit-identical repeats; given, it keeps the memory gate on under the
                                      # auto-tuner's speed split). ON by default, the binary's default order
@@ -314,6 +317,7 @@ class RunSpec:
             "PS_CAUSTICS": "1" if self.caustics else "0",
             "PS_CAUSTIC_CUSPS": "1" if self.caustic_cusps else "0",
             "PS_LINEAR_DEPOSIT": "1" if self.linear_deposit else "0",
+            "FACE_GRADIENT": "1" if self.face_gradient else "0",
             "OUTPUT_PREFIX": self.output_prefix,
         })
         env.update(ps_run_env(self))
@@ -671,10 +675,32 @@ def _pts_conventions_problems(spec, points: bool) -> list[tuple[str, str]]:
                      "means); compare it with the grids knowing that")]
 
 
+def _face_gradient_problems(spec) -> list[tuple[str, str]]:
+    """The face gradient's checks (PS-DTFE; Grids, Pipeline and Custom jobs, duck-typed): what the binary and the driver
+    refuse, said before the run, and the one case where the flag does nothing (no field built on the velocity
+    gradient, _FROM_GRADIENT)."""
+    out: list[tuple[str, str]] = []
+    if not getattr(spec, "face_gradient", False):
+        return out
+    if spec.deposit != "exact":
+        out.append(("error", "the face gradient integrates the faces in the exact deposit: choose the exact cell "
+                             "average"))
+    if not spec.volume_weighted:
+        out.append(("error", "the face gradient is the gradient of the volume-weighted mean velocity: tick the "
+                             "volume-weighted velocities"))
+    if getattr(spec, "halo_release", 0.0) > 0:
+        out.append(("error", "the face gradient cannot be combined with the halo release (a released tetrahedron "
+                             "deposits as a point and has no faces)"))
+    if not any(f in _FROM_GRADIENT for f in spec.fields):
+        out.append(("info", "the face gradient changes the gradient, divergence, shear, vorticity and V-web fields: "
+                            "none is ticked, so it does nothing"))
+    return out
+
+
 def _ps_option_problems(spec, n_particles) -> list[tuple[str, str]]:
     """The phase-space run options' checks, shared by the Grids and Pipeline jobs (duck-typed on the
     option names both carry: fields, deposit, nsub, gpu, caustics, caustic_cusps, parallel_triangulation,
-    vertex_mass, precision, run_mode)."""
+    vertex_mass, precision, run_mode, face_gradient)."""
     out: list[tuple[str, str]] = []
     if not spec.fields:
         out.append(("error", "no fields selected"))
@@ -691,6 +717,7 @@ def _ps_option_problems(spec, n_particles) -> list[tuple[str, str]]:
         if spec.caustics and spec.gpu:
             out.append(("warning", "the linear deposit on the GPU keeps only the fold parity of the caustic classes "
                                    "(no collapse counts): run it on the CPU for the full classification"))
+    out += _face_gradient_problems(spec)
     out += gpu_advice(spec.gpu, spec.deposit, spec.fields, n_particles, "ps", precision=spec.precision,
                       run_mode=getattr(spec, "run_mode", "balanced"))
     if spec.parallel_triangulation and not tbb_built(spec.precision):

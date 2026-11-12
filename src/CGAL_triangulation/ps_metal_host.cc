@@ -701,6 +701,10 @@ bool psGpuDepositFields(std::vector<float>& verts,
 
     for (MTL::Buffer* b : {bV,bU,bM,bD,bSc,bP,bMass,bMassFx,bMom,bM2,bGrad,bStr,bMomW,bCaust,bSV,bDV,bDW,bScal,bSG,bBad}) b->release();
     pool->release();
+    // ... and the passes' snapshot, the host copies of the grids: the auto-tuner books one for the run
+    // (snapshotBytes), so it goes before the next partition can take the GPU and make its own. No pass restores from
+    // it any more; its seconds (snap.sec) stay for the timing line below
+    std::vector<GpuSnapshot::Blob>().swap(snap.blobs);
     ph.releases += PSGpuPhaseTimes::lap(tPh);
     auto const tFree = tPh;
     lock.unlock();

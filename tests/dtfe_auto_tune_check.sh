@@ -35,10 +35,14 @@
 #     under DTFE_GPU_FLOAT_GRIDS=1, none on the CPU), I3 the partition loop's look-ahead (lookahead_gb, in
 #     predicted_gb; none with --no-overlap or on one domain) and I4 a budget that holds the plan but not its
 #     look-ahead: the look-ahead is switched off for the run (said, lookahead_gb=0, over_budget=0).
+#  J) a team whose sub-domains each insert in parallel (TBB builds, 4 threads or more) books the insert's copies:
+#     at '--max-concurrent 2' a forced '--parallel-triangulation' adds 800 B per padded vertex of the busiest
+#     partition, and so does one tessellation ('--max-concurrent 1') where no look-ahead is booked (as on the CPU).
 #
 # Usage: tests/dtfe_auto_tune_check.sh [--no-build]     (DTFE_TEST_TMP, DTFE_TEST_PRECISION=double as the others)
 
 set -euo pipefail
+unset DTFE_TRIANGULATION_THREADS DTFE_TBB_THREADS   # the insert's own switch moves the plans: the suite sets none
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -265,6 +269,34 @@ else
     echo "   SKIP  I2-I4 (this build has no GPU backend)"
 fi
 rm -f "${TMP}"/da_i.* "${TMP}"/da_i*badGridPoints*
+
+# ---------- (J) the in-team parallel insert ----------
+echo ">> J: a team's parallel insert is in the plan"
+NCPU="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
+if grep -aq "parallel, TBB" "${BIN}" && [ "${NCPU}" -ge 4 ]; then
+    JR=("${SNAP}" "${TMP}/da_j" --grid 192 "${COMMON[@]}" --field density_a velocity_a gradient_a --partition 2 2 2
+        --auto-tune-report)
+    for t in 1 2; do
+        env DTFE_RAM_GB=64 DTFE_AUTO_TUNE_DEBUG=1 "${BIN}" "${JR[@]}" --max-concurrent "${t}" > "${TMP}/da_j${t}.txt" 2>&1 || true
+        env DTFE_RAM_GB=64 DTFE_AUTO_TUNE_DEBUG=1 "${BIN}" "${JR[@]}" --max-concurrent "${t}" --parallel-triangulation \
+            > "${TMP}/da_j${t}f.txt" 2>&1 || true
+    done
+    busiest() { sed -n 's/^AUTO-TUNE-DEBUG standard: .* busiest partition [0-9]* of [0-9]*: \([0-9]*\) padded vertices.*/\1/p' "$1" | head -1; }
+    # the forced plan's busiest partition can be another one: the rise lies between 800 B x either one's vertices
+    rise() { awk -v a="${1:-0}" -v b="${2:-0}" -v u="${3:-0}" -v f="${4:-0}" \
+                 'BEGIN{e = b - a; print (u > 0 && f > 0 && e > 800.*u/1.e9 - 0.011 && e < 800.*f/1.e9 + 0.011) ? 1 : 0}'; }
+    u1="$(busiest "${TMP}/da_j1.txt")"; f1="$(busiest "${TMP}/da_j1f.txt")"
+    u2="$(busiest "${TMP}/da_j2.txt")"; f2="$(busiest "${TMP}/da_j2f.txt")"
+    a1="$(field predicted_gb "${TMP}/da_j1.txt")"; b1="$(field predicted_gb "${TMP}/da_j1f.txt")"
+    a2="$(field predicted_gb "${TMP}/da_j2.txt")"; b2="$(field predicted_gb "${TMP}/da_j2f.txt")"
+    check "J a team of 2 books the forced insert's copies (${a2:-?} -> ${b2:-?} GB: 800 B x ${u2:-?} to ${f2:-?} padded vertices)" \
+          "$(rise "${a2}" "${b2}" "${u2}" "${f2}")"
+    check "J one tessellation without a look-ahead books them too (${a1:-?} -> ${b1:-?} GB: 800 B x ${u1:-?} to ${f1:-?})" \
+          "$(rise "${a1}" "${b1}" "${u1}" "${f1}")"
+    rm -f "${TMP}"/da_j*
+else
+    echo "   SKIP  J (a build without the parallel insert, or fewer than 4 threads)"
+fi
 
 echo "------------------------------------------------------------"
 if [ "${FAILS}" -gt 0 ]; then

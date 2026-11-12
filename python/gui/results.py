@@ -384,6 +384,8 @@ class RunRecord:
                 bits.append(f"nSub {self.nsub}")
             if self.has("--ps-linear-deposit"):       # the two deposit variants of one snapshot must differ here
                 bits.append("linear deposit")
+            if self.has("--face-gradient"):           # the mean flow's gradient: the same snapshot, another divergence
+                bits.append("face gradient")
             if self.has("--ps-vertex-mass"):
                 bits.append("vertex mass")
             if self.has("--ps-volume-weighted"):
@@ -437,6 +439,7 @@ class RunRecord:
             d.update(deposit="exact" if self.exact else "sampled",
                      # always set: 'Load settings' must also turn the box OFF for a standard-deposit run
                      linear_deposit=self.has("--ps-linear-deposit"),
+                     face_gradient=self.has("--face-gradient"),
                      vertex_mass=self.has("--ps-vertex-mass"),
                      volume_weighted=self.has("--ps-volume-weighted"),
                      caustics=self.has("--ps-caustics"), caustic_cusps=self.has("--ps-caustic-cusps"),

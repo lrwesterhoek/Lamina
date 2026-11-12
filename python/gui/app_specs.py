@@ -80,6 +80,7 @@ class SpecsMixin:
         self.ca_check.setChecked(s.caustics)
         self.cu_check.setChecked(s.caustic_cusps)
         self.ld_check.setChecked(s.linear_deposit)
+        self.fg_check.setChecked(s.face_gradient)
         self.vg_check.setChecked(s.slice_vel_grad)
         self.pc_combo.setCurrentIndex(max(self.pc_combo.findData(s.pts_conventions), 0))
         self.part_spin.setValue(s.partition)
@@ -116,6 +117,7 @@ class SpecsMixin:
         self.p_ca.setChecked(p.caustics)
         self.p_cu.setChecked(p.caustic_cusps)
         self.p_ld.setChecked(p.linear_deposit)
+        self.p_fg.setChecked(p.face_gradient)
         self.p_pt.setChecked(p.parallel_triangulation)
         self.p_om.setChecked(p.ordered_merge)
         self.p_so.setChecked(p.start_over)
@@ -160,6 +162,7 @@ class SpecsMixin:
         self.o_ca.setChecked(c.caustics)
         self.o_cu.setChecked(c.caustic_cusps)
         self.o_ld.setChecked(c.linear_deposit)
+        self.o_fg.setChecked(c.face_gradient)
         self.o_points.setText(c.sample_points)
         self.o_pvg.setChecked(c.pts_vel_grad)
         self.o_pc.setCurrentIndex(max(self.o_pc.findData(c.pts_conventions), 0))
@@ -226,6 +229,7 @@ class SpecsMixin:
         s.caustics = self.ca_check.isChecked()
         s.caustic_cusps = self.cu_check.isChecked() and self.ca_check.isChecked()   # a greyed box cannot be unticked
         s.linear_deposit = self.ld_check.isChecked()
+        s.face_gradient = self.fg_check.isChecked()
         s.slice_plane = self.plane_combo.currentData() or ""
         s.slice_vel_grad = self.vg_check.isChecked()
         s.pts_conventions = self.pc_combo.currentData() or "grid"
@@ -263,6 +267,7 @@ class SpecsMixin:
         p.caustics = self.p_ca.isChecked()
         p.caustic_cusps = self.p_cu.isChecked() and self.p_ca.isChecked()
         p.linear_deposit = self.p_ld.isChecked()
+        p.face_gradient = self.p_fg.isChecked()
         p.parallel_triangulation = self.p_pt.isChecked()
         p.ordered_merge = self.p_om.isChecked()
         p.start_over = self.p_so.isChecked()
@@ -310,6 +315,7 @@ class SpecsMixin:
         c.caustics = self.o_ca.isChecked()
         c.caustic_cusps = self.o_cu.isChecked() and self.o_ca.isChecked()
         c.linear_deposit = self.o_ld.isChecked()
+        c.face_gradient = self.o_fg.isChecked()
         c.sample_points = self.o_points.text().strip()
         c.pts_vel_grad = self.o_pvg.isChecked()
         c.pts_conventions = self.o_pc.currentData() or "grid"

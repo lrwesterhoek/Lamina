@@ -52,16 +52,6 @@ struct Box
                 return false;
         return true;
     }
-#ifdef PHASE_SPACE
-    // Returns true if the particle's Lagrangian (initial) position lies inside the box.
-    template <typename Particle> bool isParticleLagrangianInBox(Particle &p) const
-    {
-        for (size_t i=0; i<NO_DIM; ++i)
-            if ( p.lagPos[i]<coords[2*i] or p.lagPos[i]>coords[2*i+1] )
-                return false;
-        return true;
-    }
-#endif
     // Returns true if the point lies inside the box.
     template <typename Point> bool isPointInBox(Point &p) const
     {

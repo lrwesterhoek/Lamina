@@ -76,7 +76,7 @@
 
 #include "../output_staging.h"   // the .pts_* files are staged with the grids (crash-safe outputs)
 #include "../env_knobs.h"
-#include "../thread_count.h" // coresPerTeam: the point evaluation's threads
+#include "../thread_count.h" // coresPerTeam: the point evaluation's threads; CorePool::Hold: their cores in the pool
 
 namespace psPointEvalDetail {
 
@@ -279,7 +279,9 @@ void forEachCellParallel(DT &dt, int nThreads, Work work)
     if ( nT <= 1 )
         run(0);
     else
-    {
+    {   // a fixed team beside the partition loop's other work: its cores counted in the core pool while it runs, so the
+        // pooled loops of the other partitions in flight do not take them as free (thread_count.h CorePool::Hold)
+        CorePool::Hold const hold( int(nT) - 1 );
         std::vector<std::thread> pool;
         pool.reserve( nT - 1 );
         for (size_t t = 1; t < nT; ++t)

@@ -32,8 +32,10 @@ CLOSE_UP_MIN_CELLS = 8          # ... and at least this many cells ...
 CLOSE_UP_FIT = 1.2              # ... and this much past the drawn shape (an ellipsoid's a), so all of it shows
 PERSPECTIVE_FOCAL = 1.2         # perspective: the focal length in view-heights (the shorter side): a 45 degree field of
                                 # view; at the first fit of a box the eye is some 2.2 of its sides away
-NEAR = 0.05                     # ... and never nearer to the drawn window's nearest corner than this much of its side
-                                # (along the view): zoomed in further, the eye stops and the view narrows instead
+DOLLY_MIN = 0.2                 # zooming in moves the eye along the cursor's line of sight, into the window drawn:
+                                # its share of the way to a point no nearer than this much of the window's largest
+                                # side ahead, so every further step flies the same distance on through the field
+NEAR_EDGE = 1e-3                # a line is drawn up to this much of the eye's distance in front of the eye
 
 # the twelve edges of a box, as pairs of corner numbers (bit k of a corner = the high end along axis k)
 BOX_EDGES = [(a, a | (1 << k)) for a in range(8) for k in range(3) if not a & (1 << k)]
@@ -59,7 +61,8 @@ class Camera:
     """A view of the box: 'target' (Mpc) at the centre of a width x height screen, 'scale' pixels per Mpc (at the
     target's depth), turned by yaw and pitch (degrees); orthographic, or with 'perspective' an eye on the line
     through the target toward the viewer, focal/scale away (PERSPECTIVE_FOCAL: a fixed field of view, so zooming
-    moves the eye), never nearer to 'bounds' (lo, hi: the window drawn) than NEAR of its side."""
+    moves the eye: along the cursor's line of sight, into 'bounds' (lo, hi: the window drawn) and on through them
+    up to their far side; see zoom)."""
 
     def __init__(self, target=(0.0, 0.0, 0.0), scale: float = 1.0, yaw: float = DEFAULT_YAW,
                  pitch: float = DEFAULT_PITCH, width: int = 800, height: int = 600, perspective: bool = False):
@@ -67,7 +70,7 @@ class Camera:
         self.scale, self.yaw, self.pitch = float(scale), float(yaw), float(pitch)
         self.width, self.height = int(width), int(height)
         self.perspective = bool(perspective)
-        self.bounds: tuple | None = None                # (lo, hi) Mpc: the eye stays outside (perspective)
+        self.bounds: tuple | None = None                # (lo, hi) Mpc: the window drawn (zoom flies through it)
         self._R = (None, None)                          # (yaw, pitch), rotation: one per turn, not per projection
 
     @property
@@ -83,20 +86,15 @@ class Camera:
 
     @property
     def focal(self) -> float:
-        """Perspective: the focal length in pixels before the eye stops at the window (distance())."""
+        """Perspective: the focal length in pixels."""
         return PERSPECTIVE_FOCAL * max(min(self.width, self.height), 1)
 
     def distance(self) -> float:
-        """Perspective: the eye's distance from the target along toward() (Mpc): focal / scale, but never nearer to
-        the bounds' nearest corner than NEAR of their side (inf: orthographic)."""
+        """Perspective: the eye's distance from the target along toward() (Mpc): focal / scale, wherever that puts
+        the eye (outside the bounds or within them); inf: orthographic."""
         if not self.perspective:
             return np.inf
-        d = self.focal / self.scale
-        if self.bounds is not None:
-            lo, hi = (np.asarray(b, dtype=np.float64) for b in self.bounds)
-            ahead = float(((box_corners(lo, hi) - self.target) @ self.R[2]).max())
-            d = max(d, ahead + NEAR * float(np.max(hi - lo)))
-        return float(d)
+        return float(self.focal / self.scale)
 
     def eye(self) -> np.ndarray:
         """Perspective: the eye's position (Mpc)."""
@@ -162,12 +160,67 @@ class Camera:
         self.target -= (dx * R[0] - dy * R[1]) / self.scale
 
     def zoom(self, factor: float, x: float | None = None, y: float | None = None):
-        """Magnify by 'factor' about screen point (x, y) (the centre by default): what is under it stays."""
+        """Magnify by 'factor' about screen point (x, y) (the centre by default): what is under it stays.
+        Perspective: the field of view is fixed, so the eye moves instead, along the line of sight under (x, y),
+        every point of which stays under the cursor: zooming in it goes its share (1 - 1 / factor) of the way to a
+        point on that line. That point is where the line meets the target's plane (the plain rule: scale x
+        factor), kept on the part of the line inside 'bounds' (the window drawn): no nearer than DOLLY_MIN of the
+        bounds' largest side ahead of the eye (past where the line enters them, the eye outside), so every step
+        flies the same distance on through the field, and no farther than where the line leaves them, so the eye
+        closes in on the far wall and never passes it. A line of sight that misses the bounds keeps the plain
+        rule. The target, on the eye's own line of view, follows: where the plain rule puts it, but with the eye
+        inside the bounds no nearer than DOLLY_MIN of the largest side ahead of it and no farther than the wall
+        ahead, so it stays in the bounds too. Zooming out backs the eye away along the line of sight by the plain
+        rule, and no slower than from a target DOLLY_MIN of the largest side ahead."""
         if x is None or y is None:
             x, y = 0.5 * self.width, 0.5 * self.height
+        factor = float(factor)
         keep = self.unproject(x, y)
-        self.scale *= float(factor)
-        self.target += keep - self.unproject(x, y)
+        if not self.perspective or self.bounds is None:
+            self.scale *= factor
+            self.target += keep - self.unproject(x, y)
+            return
+        if factor == 1.0:
+            return
+        # Design: the picture depends on the eye alone (and the turn), so the zoom is a rule for the eye; the target
+        # is bookkeeping (the pivot of a turn, the speed of a pan, the scale of the other projection). Not chosen:
+        # stopping the eye at the window (the picture then only magnifies: flat), a field of view that widens
+        # inside, a separate fly mode with keys, a target clipped to the window (the eye jumps with it).
+        lo, hi = (np.asarray(b, dtype=np.float64) for b in self.bounds)
+        span = float(np.max(hi - lo))
+        eps = 1e-9 * span
+
+        def inside(q) -> bool:
+            return bool(np.all((q >= lo - eps) & (q <= hi + eps)))
+
+        def chord(q, u) -> tuple[float, float]:
+            """The part of the line q + t u, t >= 0, inside the bounds: t where it enters them (0: q inside) and t
+            where it leaves; it misses them when the second is not past the first."""
+            with np.errstate(divide="ignore", invalid="ignore"):
+                t1, t2 = (lo - q) / u, (hi - q) / u
+            along, within = u != 0.0, (q >= lo - eps) & (q <= hi + eps)
+            near = np.where(along, np.minimum(t1, t2), np.where(within, -np.inf, np.inf))
+            far = np.where(along, np.maximum(t1, t2), np.where(within, np.inf, -np.inf))
+            return max(float(near.max()), 0.0), float(far.min())
+
+        d, eye0 = self.distance(), self.eye()
+        fwd = -self.toward()
+        u = keep - eye0                                 # the line of sight: the target's plane at t = 1, depth t d
+        nearest = DOLLY_MIN * span
+        if factor > 1.0:
+            t = 1.0
+            enter, leave = chord(eye0, u)
+            if leave > enter:
+                t = min(max(t, enter + min(nearest / d, leave - enter)), leave)
+            eye = eye0 + (1.0 - 1.0 / factor) * t * u
+            d2 = t * d / factor
+            if inside(eye):                             # flying: the target no nearer than 'nearest' ahead of the eye,
+                d2 = min(max(d2, nearest), max(chord(eye, fwd)[1], 1e-6 * span))       # and on the wall ahead at most
+        else:
+            t = max(1.0, nearest / d)
+            eye = eye0 - (1.0 / factor - 1.0) * t * u
+            d2 = d + (1.0 / factor - 1.0) * t * d
+        self.scale, self.target = self.focal / d2, eye + d2 * fwd
 
     def fit(self, lo, hi, margin: float = FIT_MARGIN):
         """Centre the window lo..hi (Mpc) and scale it to fill 'margin' of the view as it is turned now (perspective:
@@ -175,7 +228,7 @@ class Camera:
         lo, hi = np.asarray(lo, dtype=np.float64), np.asarray(hi, dtype=np.float64)
         self.target = 0.5 * (lo + hi)
         if self.perspective:
-            # the eye focal / s away and the focal length focal (unstopped): a corner v (view frame) lands at
+            # the eye focal / s away and the focal length focal: a corner v (view frame) lands at
             # focal v / (focal / s - v_z) from the centre, inside margin x half the view when
             # 1 / s >= |v_x| / (margin W / 2) + v_z / focal (and so for y): the smallest such s fills the view
             v = (box_corners(lo, hi) - self.target) @ self.R.T
@@ -204,7 +257,8 @@ def box_corners(lo, hi) -> np.ndarray:
 def hidden_edges(cam: Camera, lo, hi) -> set[int]:
     """The edges (indices into BOX_EDGES) behind the box: orthographic, the three meeting at its corner farthest
     away; perspective, every edge whose two faces both turn away from the eye (four when the eye is level with a
-    face's span, as straight in front of a face)."""
+    face's span, as straight in front of a face; all twelve for an eye inside the box: each is seen through the
+    field)."""
     if not cam.perspective:
         _, depth = cam.project(box_corners(lo, hi))
         far = int(np.argmax(depth))
@@ -217,6 +271,41 @@ def hidden_edges(cam: Camera, lo, hi) -> set[int]:
         if not front:
             out.add(i)
     return out
+
+
+def segment_on_screen(cam: Camera, a, b) -> tuple | None:
+    """The screen ends ((x0, y0), (x1, y1)) of the part of the segment a-b (Mpc) that can be drawn: in front of the
+    eye (perspective: cut NEAR_EDGE of the eye's distance in front of it, where project() would give NaN beyond)
+    and within three view sizes of the view (a line's far end right beside the eye lands millions of pixels away);
+    None when no part is."""
+    pts = np.array([a, b], dtype=np.float64)
+    if cam.perspective:
+        d = cam.distance()
+        w = d - (pts - cam.target) @ cam.R[2]            # the distance in front of the eye, along the view
+        near = NEAR_EDGE * d
+        if w[0] < near and w[1] < near:
+            return None
+        for i in (0, 1):
+            if w[i] < near:
+                pts[i] = pts[1 - i] + (pts[i] - pts[1 - i]) * (w[1 - i] - near) / (w[1 - i] - w[i])
+    xy, _ = cam.project(pts)
+    if not np.all(np.isfinite(xy)):
+        return None
+    # Liang-Barsky against the view grown by its own size on every side
+    t0, t1, delta = 0.0, 1.0, xy[1] - xy[0]
+    for k, (low, high) in enumerate(((-cam.width, 2.0 * cam.width), (-cam.height, 2.0 * cam.height))):
+        for q, r in ((-delta[k], xy[0, k] - low), (delta[k], high - xy[0, k])):
+            if q == 0.0:
+                if r < 0.0:
+                    return None
+            elif q < 0.0:
+                t0 = max(t0, r / q)
+            else:
+                t1 = min(t1, r / q)
+    if t0 > t1:
+        return None
+    p0, p1 = xy[0] + t0 * delta, xy[0] + t1 * delta
+    return (float(p0[0]), float(p0[1])), (float(p1[0]), float(p1[1]))
 
 
 # ---------------------------------------------------------------------- the planes
@@ -295,7 +384,9 @@ def plane_transform(cam: Camera, origin, ex, ey) -> tuple[float, ...]:
     h0 = P @ np.append(np.asarray(origin, dtype=np.float64), 1.0)
     # divided by |w| at the origin, not w: the same map, but w keeps its sign (positive in front of the eye), so Qt's
     # projective drawing does not take every point in front for one behind (an origin corner behind the eye)
-    return tuple(float(v) for v in np.concatenate([hx, hy, h0]) / abs(h0[2]))
+    # (an origin exactly in the eye's plane, w = 0: divided by the largest |number| instead)
+    h = np.concatenate([hx, hy, h0])
+    return tuple(float(v) for v in h / (abs(h0[2]) if abs(h0[2]) > 1e-12 * np.abs(h).max() else np.abs(h).max()))
 
 
 def texture_transform(axis: int, pos: float, lo2, hi2, width: int, height: int, cam: Camera) -> tuple[float, ...]:
@@ -315,6 +406,38 @@ def texture_rect(q: dict, lo2, hi2, width: int, height: int) -> tuple[float, flo
     (u0, u1), (v0, v1) = q["u"], q["v"]
     sx, sy = width / (hi2[0] - lo2[0]), height / (hi2[1] - lo2[1])
     return (u0 - lo2[0]) * sx, (hi2[1] - v1) * sy, (u1 - u0) * sx, (v1 - v0) * sy
+
+
+def screen_polygon(T9, rect, width: float, height: float) -> np.ndarray:
+    """The outline on the screen of the part of a picture's rectangle 'rect' (x, y, w, h in its pixels) that lies in
+    front of the eye and in the view grown by its own size, under plane_transform's nine numbers T9: (k, 2) pixels
+    in order, k = 0 when nothing of it is there. A rectangle partly behind the eye has no outline as a whole (the
+    corners behind it land on the other side of the screen), so it is cut before the division by w."""
+    m11, m12, m13, m21, m22, m23, m31, m32, m33 = (float(v) for v in T9)
+    x, y, w, h = (float(v) for v in rect)
+    c = np.array([(x, y), (x + w, y), (x + w, y + h), (x, y + h)])
+    P = np.column_stack([m11 * c[:, 0] + m21 * c[:, 1] + m31, m12 * c[:, 0] + m22 * c[:, 1] + m32,
+                         m13 * c[:, 0] + m23 * c[:, 1] + m33])           # (X, Y, w): the pixel (X / w, Y / w)
+    near = 1e-9 * float(np.abs(P[:, 2]).max())
+    if not near > 0.0:
+        return np.zeros((0, 2))
+    sides = ((0.0, 0.0, 1.0, -near),                 # in front of the eye (w >= 0 follows from the sides below
+                                                     # too; this one keeps the division at the end clear of 0)
+             (1.0, 0.0, width, 0.0), (-1.0, 0.0, 2.0 * width, 0.0),      # -width <= X / w <= 2 width
+             (0.0, 1.0, height, 0.0), (0.0, -1.0, 2.0 * height, 0.0))    # -height <= Y / w <= 2 height
+    for sx, sy, sw, s0 in sides:                         # Sutherland-Hodgman: one side at a time, edges cut where
+        f = sx * P[:, 0] + sy * P[:, 1] + sw * P[:, 2] + s0              # they cross it
+        kept = []
+        for i in range(len(P)):
+            j = (i + 1) % len(P)
+            if f[i] >= 0.0:
+                kept.append(P[i])
+            if (f[i] >= 0.0) != (f[j] >= 0.0):
+                kept.append(P[i] + f[i] / (f[i] - f[j]) * (P[j] - P[i]))
+        P = np.array(kept).reshape(-1, 3)
+        if len(P) < 3:
+            return np.zeros((0, 2))
+    return P[:, :2] / P[:, 2:3]
 
 
 # ---------------------------------------------------------------------- the voids

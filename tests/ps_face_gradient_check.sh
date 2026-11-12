@@ -26,13 +26,14 @@
 #       of its rms (the device's float per-stream gradient), and the run neither fell back nor skipped the walk
 #   P12 (a GPU build) the face walk keeps the tetrahedra the CPU deposit loop keeps (docs/cleanup-plan.md P11.7): a CPU
 #       and a '--gpu' run write the mean flow's grids and the mass flux divergence byte for byte in a one-cell
-#       '--grid-window', in a non-periodic '--box', and under the NaN test hook (DTFE_TEST_NAN_SHARE=50, single
-#       build, with the same number of face shares left out). In a '--box' whose upper x face is a particle plane of
-#       a lattice without jitter (tetrahedra outside the box with a face in that plane: neither device deposits
-#       their section) the mass flux divergence is byte-identical, and the mean flow's gradient too below the last x
-#       layer: that layer's upper face has no stream, so its x gradient stays the stream average, the device's own
-#       float. In the single build the bounds a face pass takes over from the GPU extraction equal the bound walk's
-#       (DTFE_DEBUG_FX_BOUNDS=1)
+#       '--grid-window', in a non-periodic '--box', under the NaN test hook (DTFE_TEST_NAN_SHARE=50, single
+#       build, with the same number of face shares left out) and for a real NaN vertex mass (one particle's mass NaN
+#       under '--ps-vertex-mass', '--mean-density' given; the same). In a '--box' whose upper x face is a particle
+#       plane of a lattice without jitter (tetrahedra outside the box with a face in that plane: neither device
+#       deposits their section) the mass flux divergence is byte-identical, and the mean flow's gradient too below
+#       the last x layer: that layer's upper face has no stream, so its x gradient stays the stream average, the
+#       device's own float. In the single build the bounds a face pass takes over from the GPU extraction equal the
+#       bound walk's (DTFE_DEBUG_FX_BOUNDS=1)
 #   P8  dtfelib: FieldSet.face_gradient is True for the run (False without the flag) and load('divergence',
 #       mean_field=True) returns the stored grid itself
 #   P9  the face sums ride the checkpoint: a '--partition 2 2 2' run killed after 3 partitions
@@ -394,6 +395,36 @@ EOF
             pass "P12 the NaN hook: $dc face shares left out on both devices, the mean flow's grids byte for byte"
         else
             fail "P12 the NaN hook: face shares left out CPU '${dc}' / GPU '${dg}', or the grids differ (see $TMP/ng.log)"
+        fi
+        # a real NaN vertex mass (one particle's mass NaN under --ps-vertex-mass; --mean-density keeps rho_bar finite,
+        # which the particles' own mean would not be): the walk keeps the NaN as the loop does, so both devices leave
+        # out, and count, the same face shares
+        "$PY" - "$TMP/pan_2.0.hdf5" "$TMP/pan_nanm.hdf5" > "$TMP/gen_nanm.log" 2>&1 <<'EOF' \
+            || { echo "FAIL: the NaN-mass snapshot (see $TMP/gen_nanm.log)"; exit 1; }
+import shutil, sys
+import h5py
+import numpy as np
+src, dst = sys.argv[1], sys.argv[2]
+shutil.copyfile(src, dst)
+with h5py.File(dst, "r+") as f:
+    mt = np.array(f["Header"].attrs["MassTable"], dtype=np.float64)
+    n = int(f["Header"].attrs["NumPart_ThisFile"][1])
+    m = np.full(n, mt[1], dtype=np.float32)
+    m[n // 3] = np.nan
+    mt[1] = 0.0                        # per-particle masses: the reader takes the 'Masses' dataset
+    f["Header"].attrs["MassTable"] = mt
+    f["PartType1"].create_dataset("Masses", data=m)
+EOF
+        NM=(--ps-volume-weighted --face-gradient --ps-vertex-mass --mean-density 0.032768)   # 32^3 x mass 1 / 100^3
+        run nmc pan_nanm OMP_NUM_THREADS=1 -- "${NM[@]}"
+        run nmg pan_nanm OMP_NUM_THREADS=1 -- "${NM[@]}" --gpu
+        dc="$(drops nmc)"; dg="$(drops nmg)"
+        if ! gpu_walked nmg; then
+            fail "P12 a NaN mass: the --gpu run did not deposit on the GPU or skipped the face walk (see $TMP/nmg.log)"
+        elif [ -n "$dc" ] && [ "$dc" -gt 0 ] && [ "$dc" = "$dg" ] && meanflow nmc nmg; then
+            pass "P12 a NaN mass: $dc face shares left out on both devices, the mean flow's grids byte for byte"
+        else
+            fail "P12 a NaN mass: face shares left out CPU '${dc}' / GPU '${dg}', or grids differ (see $TMP/nmg.log)"
         fi
     fi
 else echo "   (P12's --gpu cases: not a GPU build)"; fi

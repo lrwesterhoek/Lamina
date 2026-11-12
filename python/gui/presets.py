@@ -107,6 +107,9 @@ OPTION_TEXT = {
     "caustic_cusps":   ("Also mark cusps and swallowtails (slower, CPU)", "--ps-caustic-cusps"),
     "linear_deposit":  ("Linear density inside each tetrahedron (excludes volume weighting)",
                         "--ps-linear-deposit"),
+    # (its prerequisites, the exact deposit and the volume weighting, are in its What's This (the binary's help) and
+    # in the run checks: naming them here too would make the tick wider than the run tabs' forms)
+    "face_gradient":   ("Gradient of the mean velocity from exact face integrals", "--face-gradient"),
     "sample_points":   ("Also evaluate the fields at these points", "--sample-points"),
     "window":          ("Deposit only this window of the grid", "--grid-window"),
     "halo_release":    ("Release halo interiors above this density (rho/rho_bar; off = never)", "--ps-halo-release"),
@@ -185,6 +188,7 @@ LABELS = {
 ADVANCED_SHORT = {
     "caustic_cusps": "cusps and swallowtails",
     "linear_deposit": "linear density",
+    "face_gradient": "face gradient",
     "per_stream": "stream by stream",
     "per_stream_ids": "stream IDs",
     "render_fixed_range": "fixed density range",

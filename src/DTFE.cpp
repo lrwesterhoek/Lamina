@@ -52,6 +52,7 @@
 #include "message.h"
 #include "env_knobs.h"
 #include "run_mode.h"   // the run mode's core budget (dtfeOmpMax) and the look-ahead thread's (dtfeAdoptCoreBudget)
+#include "thread_count.h"   // CorePool::Hold: the look-ahead thread's core counted in the core pool
 #include "auto_tune.h"
 #include "scratch_alloc.h"
 #include "ps_point_eval.h"
@@ -185,6 +186,9 @@ static void runLookAhead(std::vector<int> const &order, NeedBytes &&needBytes, P
                 aheadRan = true;
                 ahead = std::thread( [&, nextI]()
                 {
+                    // this thread's core counted in the core pool while it prepares: partition k's pooled loops and a
+                    // CPU-share deposit's team beside it then do not take it as free (thread_count.h CorePool::Hold)
+                    CorePool::Hold const hold( 1 );
                     dtfeAdoptCoreBudget();   // a fresh thread has the OpenMP default: the run mode's budget too
                     try { prepare( nextI, true, next ); }
                     catch ( ... ) { aheadError = std::current_exception(); }
@@ -809,7 +813,8 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
             // the measured runs that set the lane share spilled under that booking) -- for partitions parked by the
             // staged ordered merge: the prediction does not count them, and on macOS the free-memory reading alone
             // does not stop them (the compressor and swap keep 'free' above the spill threshold: TNG100 z=0 could park
-            // 74 GB in RAM on a 64 GB machine). DTFE_TEST_PARK_ROOM_GB sets it (tests).
+            // 74 GB in RAM on a 64 GB machine); a lane less for each partition the dynamic concurrency runs beyond the
+            // plan's (parkWhere). DTFE_TEST_PARK_ROOM_GB sets it (tests).
             userOptions.psParkRoom = report.budget - report.predictedWholeLanes;
             // the partition loop's dynamic concurrency (plan P8.10): only over a concurrency the tuner chose
             userOptions.psDynamicConcurrency = report.concChosen and Env::flag( "DTFE_DYNAMIC_CONCURRENCY", true );
@@ -1581,6 +1586,7 @@ struct PSMergeStaging
     // one is checked against must leave them out (k writers would pass one reading together)
     double spillPendingBytes = 0.;
     std::string parkRoomText;   // the RAM parking's budget room (psParkRoom), when one is known
+    int parkFloor = 0;          // the plan's mc when the dynamic concurrency runs more partitions (0: it does not)
     // what the merge took over the run (psReportLoopEnd's 'merge time:' line), summed under mergeMutex: the adds into
     // the full grids, their checkpoints (afterMerge) and the spilled sub-grids read back -- the serial work under the
     // lock -- and the waits before it: a parked partition's from its park to its merge (its thread went on), and a
@@ -1634,9 +1640,18 @@ struct PSMergeStaging
             if ( freeNow < 0. ) ram = stagedBytes + bytes <= 2.e9;   // free memory unknown: a small fixed room
             else ram = freeNow - 4.e9 - ( gateGuards ? options.psPartitionBytes : 0. ) >= bytes;
             // and within what the memory budget leaves beside the plan's predicted peak (psParkRoom says
-            // why: the free memory alone could let TNG100 z=0 park 74 GB). stagedBytes counts RAM-parked ones only
+            // why: the free memory alone could let TNG100 z=0 park 74 GB). stagedBytes counts RAM-parked ones only.
+            // That prediction has the plan's partitions in flight: each one the dynamic concurrency runs beyond them,
+            // besides this one (its lane is what it parks), takes a lane off the room -- the lane the ledger admitted
+            // it with and the SUMMARY's prediction adds for it -- or the parked ones could take the run past the budget
             if ( ram and std::isfinite( options.psParkRoom ) )
-                ram = stagedBytes + bytes <= std::max( 0., options.psParkRoom );
+            {
+                int const beyond = parkFloor > 0
+                    ? std::max( 0, dtfePartitionsInFlight.load( std::memory_order_relaxed ) - 1 - parkFloor ) : 0;
+                double const lane = options.psPartitionBytes
+                                    - std::min( options.psOnceBytes, options.psPartitionBytes );
+                ram = stagedBytes + bytes <= std::max( 0., options.psParkRoom - double(beyond) * lane );
+            }
         }
         if ( ram ) return PARK_RAM;
         if ( disk ) return PARK_DISK;
@@ -1689,12 +1704,21 @@ static void psReportMergeMode(PSLoopCtx &c)
     auto &spillDir = c.merge.spillDir;
     auto &spillUsable = c.merge.spillUsable;
     auto &parkRoomText = c.merge.parkRoomText;
+    auto &parkFloor = c.merge.parkFloor;
     if ( std::isfinite( state.options.psParkRoom ) )
     {
         char rb[96];
         std::snprintf( rb, sizeof(rb), ", in RAM up to the %.1f GB the memory budget leaves beside the plan",
                        std::max( 0., state.options.psParkRoom ) / 1.e9 );
         parkRoomText = rb;
+        if ( parkFloor > 0 )   // the dynamic concurrency: the room shrinks beyond the plan's partitions (parkWhere)
+        {
+            double const lane = state.options.psPartitionBytes
+                                - std::min( state.options.psOnceBytes, state.options.psPartitionBytes );
+            std::snprintf( rb, sizeof(rb), ", less a lane (%.2f GB) for each partition in flight beyond the plan's %d",
+                           lane / 1.e9, parkFloor );
+            parkRoomText += rb;
+        }
     }
     if ( orderedMerge and psConcurrency > 1 )
         message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " partitions merge in index order "
@@ -2428,6 +2452,7 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     // like a parked one; the tuner's model does not count parked sub-grids (the gate keeps them honest).
     // (the state of all this: PSMergeStaging, above, with parkWhere)
     PSMergeStaging merge( state.options, fixedMerge, psConcurrency );
+    if ( dynamicConc ) merge.parkFloor = psFloor;   // (parkWhere: the partitions beyond the plan's shrink its RAM room)
     // test hook: DTFE_TEST_DELAY_PARTITION=i:s holds partition i for s seconds before its merge, so the partitions
     // after it finish first and the staging is certain to happen (tests/ps_runtime_check.sh R7)
     int delayPartition = -1;

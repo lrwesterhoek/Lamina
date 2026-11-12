@@ -57,6 +57,8 @@ class CustomSpec:
     mem_budget_gb: float = 0.0      # DTFE_MEM_BUDGET_GB in the binary's environment, see RunSpec
     tess_cache: str = ""            # --tessellation-cache <folder>; "" = none
     linear_deposit: bool = False    # --ps-linear-deposit (PS only; not with the volume-weighted velocities)
+    face_gradient: bool = False     # --face-gradient (PS only, 3D; needs the exact deposit and the volume-weighted
+                                    # velocities), see RunSpec
     ordered_merge: bool = True      # --ps-merge index-order, the default (PS only; off: --ps-merge completion-order), see RunSpec
     sample_points: str = ""         # --sample-points <file>: the fields at these points too ('.pts_*'); "" = none
     pts_vel_grad: bool = True       # ... with the velocity gradient at each point (--pts-vel-grad)
@@ -137,6 +139,7 @@ class CustomSpec:
             for on, flag in ((self.gpu and three, "--gpu"), (self.vertex_mass, "--ps-vertex-mass"),
                              (self.volume_weighted, "--ps-volume-weighted"), (self.caustics, "--ps-caustics"),
                              (self.caustic_cusps, "--ps-caustic-cusps"),
+                             (self.face_gradient and three, "--face-gradient"),
                              (self.parallel_triangulation and three, "--parallel-triangulation")):
                 if on:
                     a.append(flag)
@@ -354,6 +357,11 @@ class CustomSpec:
         if ps and self.linear_deposit and self.volume_weighted:
             out.append(("error", "the linear deposit weights by density inside each tetrahedron, the volume-weighted "
                                  "velocities by volume: untick one (the binary refuses both)"))
+        if ps and self.face_gradient:
+            if d == 2:
+                out.append(("info", "the face gradient is 3D only: this 2D run leaves it out"))
+            else:
+                out += _rs._face_gradient_problems(self)
         if (self.output_root().parent / (self.name() + ".a_den")).exists():
             out.append(("info", f"'{name}' already has outputs in this folder: they will be overwritten"))
         if self.extra_args.strip():

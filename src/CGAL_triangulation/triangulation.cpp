@@ -431,6 +431,7 @@ void dtfeInterpolatePrebuilt(std::shared_ptr<void> &tessellation, vector<Sample_
 // PLANNED bound, not a live count of the builds already running -- the first partition to reach
 // its insert would otherwise see only itself and take every core on top of the other nine
 // sequential inserts (measured: the TNG region's 27-partition run slows from 137 to 158 s).
+// PS-DTFE counts only the concurrency where it leaves a build fewer than 2 cores (delaunayTriangulation, below).
 std::atomic<int> dtfeTriangulationConcurrency{0};
 std::atomic<int> dtfeTriangulationsRemaining{0};
 std::atomic<int> dtfePartitionsInFlight{0};   // (thread_count.h: the dynamic PS loop's)
@@ -536,9 +537,20 @@ void delaunayTriangulation(DT *dt,
 #ifdef OPEN_MP
     threads = std::min( threads, pinnedOverMode ? std::max( 1, mode.ompDefault ) : dtfeOmpMax() );
 #endif
-    // a partition loop: its planned concurrency already fills the cores (see above)
-    int const planned = std::min( dtfeTriangulationConcurrency.load(), dtfeTriangulationsRemaining.load() );
+    // a partition loop: its planned concurrency already fills the cores (see above). Near its end the cores are shared
+    // among the builds left -- in PS-DTFE only where the concurrency the loop runs with (the plan's, or the dynamic
+    // concurrency's larger one) leaves each build 2 or more: the auto-tuner books the insert's copies per count in
+    // flight (auto_tune.cc parInsertBytes), so an insert that is sequential at that concurrency stays sequential to the
+    // loop's end instead of adding copies the plan has no room for. (Standard DTFE: unchanged; a team's builds start
+    // together.)
+    int const concurrency = dtfeTriangulationConcurrency.load();
     int const hardware = pinnedOverMode ? std::max( 1, int( std::thread::hardware_concurrency() ) ) : dtfeHardwareThreads();
+#ifdef PHASE_SPACE
+    bool const keepShare = concurrency > 0 && hardware / concurrency < 2;
+#else
+    bool const keepShare = false;
+#endif
+    int const planned = keepShare ? concurrency : std::min( concurrency, dtfeTriangulationsRemaining.load() );
     threads = std::max( 1, std::min( threads, hardware / std::max( 1, planned ) ) );
     // the size threshold of the default rule (see above): below it the sequential insert is as fast or faster
     if ( threads > 1 && !parallelForced )

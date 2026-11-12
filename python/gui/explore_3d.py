@@ -19,7 +19,8 @@ import time
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QImage, QPainter, QPainterPath, QPen, QPolygonF, QTransform
+from PySide6.QtGui import (QBitmap, QColor, QFontMetrics, QImage, QPainter, QPainterPath, QPen, QPolygonF, QRegion,
+                           QTransform)
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
                                QSlider, QSpinBox, QVBoxLayout, QWidget)
 
@@ -54,7 +55,10 @@ DETAIL_TIP = ("The volume's cells a side, at most: the grid is averaged over blo
 PERSPECTIVE_TIP = ("Perspective: the box seen from an eye at a finite distance, its near side drawn larger, as the eye "
                    "expects (without it a box reads as widening toward the back). The voids' outlines are then true "
                    "in shape but their size depends on their depth, and the scale bar holds at the window's centre. "
-                   "Off: a parallel projection, every void a circle of its true size against the box.")
+                   "Zooming in moves the eye toward what is under the cursor: into the box and on through the "
+                   "field, which is then drawn all around from where the eye is (zoom out to back away again). "
+                   "Off: a parallel projection, every void a circle of its true size against the box; zooming "
+                   "magnifies the box seen from outside.")
 RANGE_TIP = ("The shown range on the map's scale: below its low end a cell is transparent, from there the opacity "
              "rises to its high end; the colour spans the same range. A density's range opens at ρ/ρ̄ = 1: its "
              "voids and underdense walls are see-through. A diverging field (velocity divergence, eigenvalues) is "
@@ -159,55 +163,120 @@ def _canvas(width: int, height: int, scale: float) -> tuple[QImage, QTransform]:
     return img, QTransform.fromScale(iw / max(width, 1), ih / max(height, 1))
 
 
-def _composite(img: QImage, S: QTransform, plan: dict, slices) -> None:
-    """Draw (index, (h, w) uint64 RGBA64 pixels) slices onto img, front first, with the 'under' operator
-    (DestinationOver), each by its plan transform (then S) and smoothly (bilinear) resampled."""
-    w, h = plan["size"]
+def _region(mask: np.ndarray) -> QRegion:
+    """The region of a picture's pixels where the boolean (h, w) 'mask' is set."""
+    h, w = mask.shape
+    stride = ((w + 31) // 32) * 4                   # a 1-bit image's rows are padded to 32 bits
+    bits = np.zeros((h, stride), dtype=np.uint8)
+    packed = np.packbits(mask, axis=1)
+    bits[:, :packed.shape[1]] = packed
+    img = QImage(bits.data, w, h, stride, QImage.Format_Mono)
+    img.setColor(0, 0xffffffff)                     # a bitmap's region is its black (1) pixels
+    img.setColor(1, 0xff000000)
+    return QRegion(QBitmap.fromImage(img))          # (fromImage copies: 'bits' may go)
+
+
+def part_regions(plan: dict, width: int, height: int) -> list:
+    """The parts of a slice plan that draw pixels of a width x height picture of its view, each with the region of
+    its pixels: [(part, QRegion)] (None for a part that draws all, as orthographic's one does)."""
+    ids = VOL.part_ids(plan, width, height)
+    if ids is None:
+        return [(q, None) for q in plan["parts"]]
+    out = []
+    for q in plan["parts"]:
+        mask = ids == VOL.part_id(q)
+        if len(q["order"]) and mask.any():
+            out.append((q, None if mask.all() else _region(mask)))
+    return out
+
+
+def _faded(px: np.ndarray, weight: float) -> np.ndarray:
+    """RGBA64 premultiplied pixels ((h, w) uint64) at 'weight' of their colour and opacity (a copy)."""
+    c = np.ascontiguousarray(px).view(np.uint16)
+    return np.rint(c * np.float32(weight)).astype(np.uint16).view(np.uint64)
+
+
+def _composite(img: QImage, S: QTransform, part: dict, slices, region: QRegion | None = None) -> None:
+    """Draw (index, (h, w) uint64 RGBA64 pixels) slices of a plan's part onto img, front first, with the 'under'
+    operator (DestinationOver), each by its transform (then S) and smoothly (bilinear) resampled; only within
+    'region' (img's pixels: the part's own, part_regions) when given. The part's nearest slice at its weight
+    (slice_plan's 'first')."""
+    w, h = part["size"]
+    first = part.get("first")
     q = QPainter(img)
     q.setCompositionMode(QPainter.CompositionMode_DestinationOver)
     q.setRenderHint(QPainter.SmoothPixmapTransform, True)
+    if region is not None:
+        q.setClipRegion(region)                     # set before any transform: in img's pixels, and it stays
     for i, px in slices:
-        q.setTransform(QTransform(*plan["transforms"][int(i)]) * S)
+        if first is not None and int(i) == first[0] and first[1] < 1.0:
+            px = _faded(px, first[1])
+        q.setTransform(QTransform(*part["transforms"][int(i)]) * S)
         q.drawImage(0, 0, QImage(px.data, w, h, 8 * w, QImage.Format_RGBA64_Premultiplied))
     q.end()
 
 
-def render_slices(stack: np.ndarray, plan: dict, width: int, height: int, scale: float = 1.0) -> QImage:
+def render_slices(stacks, plan: dict, width: int, height: int, scale: float = 1.0) -> QImage:
     """The volume's picture on a width x height view (drawn at 'scale' of it: smaller while turning, larger on a
-    high-density screen): the slices of 'stack' ((m, h, w) uint64, Format_RGBA64_Premultiplied pixels:
-    volume3d.transfer of the levels) placed by 'plan' (volume3d.slice_plan) and composited front to back onto a
-    transparent 16-bit image. Transparent where nothing is."""
+    high-density screen): the slices of 'stacks' (by slicing axis, a dict or a sequence: (m, h, w) uint64,
+    Format_RGBA64_Premultiplied pixels, volume3d.transfer of the levels; or the one array across plan['axis'] when
+    that part draws the whole picture, as orthographic) placed by 'plan' (volume3d.slice_plan), each part within its
+    own pixels, and composited front to back onto a transparent 16-bit image. Transparent where nothing is."""
     img, S = _canvas(width, height, scale)
-    _composite(img, S, plan, ((i, stack[int(i)]) for i in plan["order"]))
+    for part, region in part_regions(plan, img.width(), img.height()):
+        if not isinstance(stacks, np.ndarray):
+            stack = stacks[part["axis"]]
+        elif part["axis"] == plan["axis"]:
+            stack = stacks
+        else:
+            raise ValueError("this view draws from more than one slicing axis: render_slices needs every stack")
+        _composite(img, S, part, ((i, stack[int(i)]) for i in part["order"]), region)
     return img
 
 
 class SharpPicture:
     """A settled volume picture drawn a few slices at a time (pump), so the window stays responsive while a large
     cube is drawn at the screen's full resolution: each slice's colours gathered from its levels on volume3d's
-    threads (numpy lets go of the GIL), a few slices ahead, and composited in order here."""
+    threads (numpy lets go of the GIL), a few slices ahead, and composited in order here, part by part (a
+    perspective view draws from up to three slicing axes: volume3d.slice_plan)."""
     AHEAD = 24                                  # slices gathered ahead of the one drawn
 
-    def __init__(self, key, images, lut: np.ndarray, plan: dict, width: int, height: int, ratio: float):
-        self.key, self.images, self.lut, self.plan = key, images, lut, plan
+    def __init__(self, key, src: dict, lut: np.ndarray, plan: dict, width: int, height: int, ratio: float):
+        self.key, self.lut, self.plan = key, lut, plan
         # the picture in device pixels (S maps the view onto them); deliberately no setDevicePixelRatio: QPainter
         # would scale by it again on top of S (a Retina picture twice its size), and _draw_volume draws it into
         # the widget's rect whatever its pixel count
         self.img, self.S = _canvas(width, height, ratio)
-        self.order = [int(i) for i in plan["order"]]
+        self.parts = part_regions(plan, self.img.width(), self.img.height())
+        self.images = {a: VOL.slice_images(src, a) for a in sorted({q["axis"] for q, _ in self.parts})}
+        self.order = [(n, int(i)) for n, (q, _) in enumerate(self.parts) for i in q["order"]]   # (part, slice)
         self.next = 0                           # the next slice (in order) to draw
         self.futures: dict = {}
         self.t0 = time.perf_counter()
         self.ms = 0.0
 
-    def _gather(self, i: int) -> np.ndarray:
-        w, h = self.plan["size"]
+    def _gather(self, n: int, i: int) -> np.ndarray:
+        part = self.parts[n][0]
+        w, h = part["size"]
         out = np.empty((h, w), dtype=np.uint64)
-        np.take(self.lut, self.images[i], out=out, mode="clip")    # levels < 256 = len(lut): clip never acts,
-        return out                                                  # and it skips 'raise''s bounds pass
+        # levels < 256 = len(lut): clip never acts, and it skips 'raise''s bounds pass
+        np.take(self.lut, self.images[part["axis"]][i], out=out, mode="clip")
+        return out
 
     def done(self) -> bool:
         return self.next >= len(self.order)
+
+    def _draw(self, ready: list):
+        """Composite the gathered (part, slice, pixels) in order, each run of one part at once."""
+        k = 0
+        while k < len(ready):
+            n = ready[k][0]
+            run = []
+            while k < len(ready) and ready[k][0] == n:
+                run.append(ready[k][1:])
+                k += 1
+            part, region = self.parts[n]
+            _composite(self.img, self.S, part, run, region)
 
     def pump(self, budget_s: float = float("inf")) -> bool:
         """Draw slices for about budget_s seconds (all: inf); True when the picture is complete."""
@@ -215,19 +284,19 @@ class SharpPicture:
         ready = []
         while not self.done():
             for k in range(self.next, min(self.next + self.AHEAD, len(self.order))):
-                i = self.order[k]
-                if i not in self.futures:
-                    self.futures[i] = VOL.gui_pool().submit(self._gather, i)
-            i = self.order[self.next]
-            ready.append((i, self.futures.pop(i).result()))
+                at = self.order[k]
+                if at not in self.futures:
+                    self.futures[at] = VOL.gui_pool().submit(self._gather, *at)
+            at = self.order[self.next]
+            ready.append(at + (self.futures.pop(at).result(),))
             self.next += 1
             if len(ready) >= 8 or self.done() or time.perf_counter() > end:
-                _composite(self.img, self.S, self.plan, ready)
+                self._draw(ready)
                 ready = []
             if time.perf_counter() > end:
                 break
         if ready:
-            _composite(self.img, self.S, self.plan, ready)
+            self._draw(ready)
         if self.done():
             self.ms = 1e3 * (time.perf_counter() - self.t0)
         return self.done()
@@ -365,7 +434,7 @@ class View3D(QWidget):
         self.update()
 
     def _sized(self):
-        """The camera to the widget's size and the window drawn (a perspective eye stays outside it)."""
+        """The camera to the widget's size and the window drawn (zooming flies a perspective eye into it)."""
         self.cam.width, self.cam.height = max(self.width(), 1), max(self.height(), 1)
         self.cam.bounds = None if self.lo is None else (self.lo, self.hi)
 
@@ -417,7 +486,11 @@ class View3D(QWidget):
             inv, ok = T.inverted()
             if not ok:
                 continue
-            p = inv.map(QPointF(x, y))
+            w = inv.m13() * x + inv.m23() * y + inv.m33()   # the map backward by hand: QTransform.map holds w at a
+            if w <= 0.0:                                 # near limit of its own. Perspective, w <= 0: this line of
+                continue                                 # sight meets the plane BEHIND the eye (the eye in the window)
+            p = QPointF((inv.m11() * x + inv.m21() * y + inv.m31()) / w,
+                        (inv.m12() * x + inv.m22() * y + inv.m32()) / w)
             if not rect.contains(p):
                 continue
             pl = self.planes[axis]
@@ -448,7 +521,7 @@ class View3D(QWidget):
         self._sized()
         cam, lo, hi = self.cam, self.lo, self.hi
         v = self.voids
-        corners, _ = cam.project(V.box_corners(lo, hi))
+        corners = V.box_corners(lo, hi)
         hidden = V.hidden_edges(cam, lo, hi)
         self._draw_edges(p, corners, hidden, True)
         screen = None
@@ -523,13 +596,20 @@ class View3D(QWidget):
             return self._picture[1]
         src = vol["coarse"] if vol.get("coarse") is not None else vol["fine"]
         plan = VOL.slice_plan(self.cam, self.lo, self.hi, src["shape"])
-        skey = (id(src), plan["axis"], round(plan["exponent"], 2), self.transfer)
+        # the coloured stacks kept from frame to frame, one per slicing axis in use (a perspective view draws from
+        # up to three: 33 MB each at 160^3); all remade when the cube, the range or the exponent changes
+        skey = (id(src), round(plan["exponent"], 2), self.transfer)
         hit = self._stacks.get("quick")
         if hit is None or hit[0] != skey:
-            self._stacks.pop("quick", None)             # the old one freed before the new one is made
-            hit = (skey, VOL.gather(self._lut(plan), VOL.slice_images(src, plan["axis"])))
+            self._stacks.pop("quick", None)             # the old ones freed before the new ones are made
+            hit = (skey, {})
             self._stacks["quick"] = hit
-        img = render_slices(hit[1], plan, self.cam.width, self.cam.height, FAST_SCALE)
+        img, S = _canvas(self.cam.width, self.cam.height, FAST_SCALE)
+        for part, region in part_regions(plan, img.width(), img.height()):
+            a = part["axis"]
+            if a not in hit[1]:
+                hit[1][a] = VOL.gather(self._lut(plan), VOL.slice_images(src, a))
+            _composite(img, S, part, ((i, hit[1][a][int(i)]) for i in part["order"]), region)
         self._picture = (key, img)
         return img
 
@@ -573,8 +653,7 @@ class View3D(QWidget):
         key = self._sharp_key() if key is None else key
         src = self.volume["fine"]
         plan = VOL.slice_plan(self.cam, self.lo, self.hi, src["shape"])
-        self._job = SharpPicture(key, VOL.slice_images(src, plan["axis"]), self._lut(plan), plan,
-                                 self.cam.width, self.cam.height, key[1])
+        self._job = SharpPicture(key, src, self._lut(plan), plan, self.cam.width, self.cam.height, key[1])
         return self._job
 
     def _stop_job(self):
@@ -704,10 +783,16 @@ class View3D(QWidget):
             if not group:
                 continue
             if self.cam.perspective:                    # the quad's outline on the screen (a homography keeps lines)
-                if clip and quad is None:
-                    quad = QPainterPath()
-                    quad.addPolygon(T.map(QPolygonF(rect)))
-                    quad.closeSubpath()
+                if clip and quad is None:           # (cut in front of the eye first: a quad partly behind it
+                    quad = QPainterPath()           # has no outline as a whole, and the clip would hide every cut)
+                    outline = V.screen_polygon(
+                        (T.m11(), T.m12(), T.m13(), T.m21(), T.m22(), T.m23(), T.m31(), T.m32(), T.m33()),
+                        (rect.x(), rect.y(), rect.width(), rect.height()), self.cam.width, self.cam.height)
+                    if len(outline):
+                        quad.addPolygon(QPolygonF([QPointF(float(u), float(v)) for u, v in outline]))
+                        quad.closeSubpath()
+                if clip and quad.isEmpty():         # nothing of the quad is in the view
+                    continue
                 p.setTransform(QTransform())
                 p.setClipPath(quad) if clip else p.setClipping(False)
             else:
@@ -844,12 +929,15 @@ class View3D(QWidget):
         p.restore()
 
     def _draw_edges(self, p: QPainter, corners, hidden: set, behind: bool):
-        """The window's twelve edges: the three behind it dashed first, the rest over everything."""
+        """The window's twelve edges (corners: its eight, Mpc): those behind it dashed first, the rest over
+        everything; of an edge passing the eye (the eye inside the window) the part in front of it."""
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setPen(_pen(QColor(200, 200, 200, 110), 1.0, Qt.DashLine) if behind else _pen(QColor(220, 220, 220), 1.2))
         for i, (a, b) in enumerate(V.BOX_EDGES):
             if (i in hidden) == behind:
-                p.drawLine(QPointF(*corners[a]), QPointF(*corners[b]))
+                ends = V.segment_on_screen(self.cam, corners[a], corners[b])
+                if ends is not None:
+                    p.drawLine(QPointF(*ends[0]), QPointF(*ends[1]))
 
     def _draw_label(self, p: QPainter):
         """The inspected void's name beside its outline."""
@@ -886,14 +974,18 @@ class View3D(QWidget):
 
     def _draw_scale(self, p: QPainter):
         """A bar of a round length in Mpc, in the lower-right corner (perspective: true at the target's depth, the
-        middle of the window when fitted)."""
+        middle of the window when fitted; with the eye inside the window, that depth ahead of the eye is said)."""
         span = self.width() / self.cam.scale
         length = G.nice_length(span)
         px = length * self.cam.scale
         if not (8 <= px <= self.width() - 40):
             return
         fm = QFontMetrics(p.font())
-        label = f"{length:g} Mpc" + (" at the centre" if self.cam.perspective else "")
+        label = f"{length:g} Mpc"
+        if self.cam.perspective:
+            eye = self.cam.eye()
+            inside = self.lo is not None and bool(np.all((eye >= self.lo) & (eye <= self.hi)))
+            label += f" at {self.cam.distance():.3g} Mpc ahead" if inside else " at the centre"
         bx, by = self.width() - 14 - max(px, fm.horizontalAdvance(label)), self.height() - 14
         p.setPen(QPen(QColor("white"), 3, Qt.SolidLine, Qt.FlatCap))
         p.drawLine(QPointF(bx, by), QPointF(bx + px, by))

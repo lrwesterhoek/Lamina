@@ -58,21 +58,9 @@ void lowerBoundCheck(T1 const target,
         error << "Some program variable failed a consitency check. The variable " << errorMessage << " has the value " << target << ", but it should be larger or equal than " << minValue << " ." << MESSAGE::EndError;
     }
 }
-// Error out unless target <= maxValue.
-template <typename T1>
-void upperBoundCheck(T1 const target,
-                    T1 const maxValue,
-                    std::string errorMessage)
-{
-    if ( target>maxValue )
-    {
-        MESSAGE::Error error;
-        error << "Some program variables failed a consitency check. The variable " << errorMessage << " has the value " << target << ", but it should be smaller or equal than " << maxValue << " ." << MESSAGE::EndError;
-    }
-}
 
 
-// The next 4 functions require the 'boost/program_options.hpp' library.
+// The next 2 functions require the 'boost/program_options.hpp' library.
 // Error out if 'opt1' and 'opt2' are both specified.
 template <typename T>
 void conflicting_options(const T &vm,
@@ -95,34 +83,6 @@ void option_dependency(const T &vm,
         {
             MESSAGE::Error error;
             error << "Option '" << for_what << "' requires option '" << required_option << "'!\n" << MESSAGE::EndError;
-        }
-}
-
-
-// Error out if 'opt1' is supplied without 'opt2'.
-template <typename T>
-void superfluous_options(const T &vm,
-                        const char* opt1, const char* opt2)
-{
-    if (vm.count(opt1) && !vm[opt1].defaulted())
-        if (vm.count(opt2) == 0 || vm[opt2].defaulted())
-        {
-            MESSAGE::Error error;
-            error << "The option '" << opt1 << "' can be used only in the presence of '" << opt2 << "'. It does not make sense to use '" << opt1 << "' otherwise!\n" << MESSAGE::EndError;
-        }
-}
-// Error out if 'opt1' is supplied while 'optionsOn' is false; 'optionsName' names the required options.
-template <typename T>
-void superfluous_options(const T &vm,
-                        const char* opt1,
-                        const bool optionsOn,
-                        std::string const optionsName)
-{
-    if (vm.count(opt1) && !vm[opt1].defaulted())
-        if ( not optionsOn )
-        {
-            MESSAGE::Error error;
-            error << "The option '" << opt1 << "' can be used only in the presence of option/s: " << optionsName << ". It does not make sense to use '" << opt1 << "' otherwise!\n" << MESSAGE::EndError;
         }
 }
 

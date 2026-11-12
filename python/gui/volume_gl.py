@@ -4,7 +4,9 @@ slice stack, at the speed of the graphics chip -- a 1024^3 cube turns in real ti
 How: the cube's levels (volume3d.prepare's 'q', one byte a cell) are one 3D integer texture, the transfer function's
 256 RGBA64 entries (volume3d.transfer) a 256 x 1 RGBA16 texture, and a fragment shader casts each pixel's ray
 through the cube. It is not a free ray-marcher: it walks the very slices QPainter draws -- the planes through the
-cells' centres normal to slice_plan's axis -- and at each it takes the sample QPainter's bilinear drawImage takes
+cells' centres normal to slice_plan's axis (perspective: each pixel the axis its ray runs along most, slice_plan's
+parts, so an eye inside the cube sees the field all around) -- and at each it takes the sample QPainter's bilinear
+drawImage takes
 there: the four nearest cells' colours (looked up first, then mixed: the slice images are coloured before they are
 resampled) mixed by the ray's place between them, composited front to back with the 'under' operator. So it is the
 QPainter picture computed in 32-bit floats instead of 16-bit integers per slice, the same opacity correction (the
@@ -69,8 +71,8 @@ FRAGMENT = """#version 410 core
 uniform usampler3D vol;         // the levels; texel (s, t, r) = cell (k2, k1, k0)
 uniform sampler2D lut;          // 256 x 1: each level's premultiplied RGBA (volume3d.transfer)
 uniform ivec3 shape;            // cells along x, y, z (the cube's axes 0, 1, 2)
-uniform int axis, ra, rb;       // the slicing axis and the two others
-uniform ivec3 eA, eRa, eRb;     // those axes' unit steps in texel order
+uniform int axis, ra, rb;       // orthographic: the slicing axis and the two others (a perspective pixel slices
+uniform ivec3 eA, eRa, eRb;     // along the axis its own ray runs along most: main); their unit steps in texel order
 uniform vec3 q0, qx, qy;        // the target plane's point under picture point (x, y): q0 + x qx + y qy (cell units)
 uniform vec3 eye, dir;          // perspective: the eye (cell units); orthographic: the rays' direction
 uniform int persp;
@@ -103,10 +105,21 @@ void main() {
             t1 = min(t1, max(u, v));
         }
     }
-    float Da = D[axis];
+    int ax = axis, ar = ra, br = rb;
+    ivec3 uA = eA, uRa = eRa, uRb = eRb;
+    if (persp != 0) {                           // volume3d.slice_plan's parts: a face of a cube around the eye each
+        vec3 A = abs(D);
+        ax = (A.x >= A.y && A.x >= A.z) ? 0 : (A.y >= A.z ? 1 : 2);
+        ar = ax == 0 ? 1 : 0;
+        br = ax == 2 ? 1 : 2;
+        uA = ivec3(ax == 2, ax == 1, ax == 0);
+        uRa = ivec3(ar == 2, ar == 1, ar == 0);
+        uRb = ivec3(br == 2, br == 1, br == 0);
+    }
+    float Da = D[ax];
     if (!(t0 <= t1) || abs(Da) < 1e-30) { frag = vec4(0.0); return; }
-    int ma = shape[axis], mra = shape[ra], mrb = shape[rb];
-    float Oa = O[axis], ca = Oa + t0 * Da, cb = Oa + t1 * Da;
+    int ma = shape[ax], mra = shape[ar], mrb = shape[br];
+    float Oa = O[ax], ca = Oa + t0 * Da, cb = Oa + t1 * Da;
     int dk = Da > 0.0 ? 1 : -1;
     int k0 = dk > 0 ? int(ceil(ca - 0.5)) : int(floor(ca - 0.5));     // the first and last slice the ray meets
     int k1 = dk > 0 ? int(floor(cb - 0.5)) : int(ceil(cb - 0.5));
@@ -116,9 +129,9 @@ void main() {
         int r = ((k0 - phase) % stride + stride) % stride;
         k0 += dk > 0 ? (r == 0 ? 0 : stride - r) : -r;
     }
-    float Ora = O[ra], Orb = O[rb], Dra = D[ra], Drb = D[rb], sa = Dra / Da, sb = Drb / Da;
+    float Ora = O[ar], Orb = O[br], Dra = D[ar], Drb = D[br], sa = Dra / Da, sb = Drb / Da;
     float fra = float(mra), frb = float(mrb), fB = float(B);
-    int nbRa = nb[ra], nbRb = nb[rb];
+    int nbRa = nb[ar], nbRb = nb[br];
     vec4 acc = vec4(0.0);
     int kCheck = k0;                            // the slice at which the ray enters a block not yet looked at
     for (int k = k0; dk * (k1 - k) >= 0; k += dk * stride) {
@@ -127,7 +140,7 @@ void main() {
         if (skip != 0 && dk * (k - kCheck) >= 0) {   // a new block: wholly transparent (skipped exactly) or not?
             int bA = k / B;
             int bRa = clamp(int(floor(u / fB)), 0, nbRa - 1), bRb = clamp(int(floor(v / fB)), 0, nbRb - 1);
-            uvec2 mm = texelFetch(occ, bA * eA + bRa * eRa + bRb * eRb, 0).rg;
+            uvec2 mm = texelFetch(occ, bA * uA + bRa * uRa + bRb * uRb, 0).rg;
             // where the ray leaves the block, as its coordinate along the slicing axis
             float tx = (float(Da > 0.0 ? min((bA + 1) * B, ma) : bA * B) - Oa) / Da;
             if (abs(Dra) > 1e-30) tx = min(tx, (float(Dra > 0.0 ? min((bRa + 1) * B, mra) : bRa * B) - Ora) / Dra);
@@ -151,15 +164,17 @@ void main() {
         int iu = int(gu), iv = int(gv);
         int u0 = clamp(iu, 0, mra - 1), u1 = clamp(iu + 1, 0, mra - 1);
         int v0 = clamp(iv, 0, mrb - 1), v1 = clamp(iv + 1, 0, mrb - 1);
-        ivec3 base = k * eA;
-        uint l00 = texelFetch(vol, base + u0 * eRa + v0 * eRb, 0).r;
-        uint l01 = texelFetch(vol, base + u0 * eRa + v1 * eRb, 0).r;
-        uint l10 = texelFetch(vol, base + u1 * eRa + v0 * eRb, 0).r;
-        uint l11 = texelFetch(vol, base + u1 * eRa + v1 * eRb, 0).r;
+        ivec3 base = k * uA;
+        uint l00 = texelFetch(vol, base + u0 * uRa + v0 * uRb, 0).r;
+        uint l01 = texelFetch(vol, base + u0 * uRa + v1 * uRb, 0).r;
+        uint l10 = texelFetch(vol, base + u1 * uRa + v0 * uRb, 0).r;
+        uint l11 = texelFetch(vol, base + u1 * uRa + v1 * uRb, 0).r;
         if (clearLevel(l00) && clearLevel(l01) && clearLevel(l10) && clearLevel(l11)) continue;
         vec4 c00 = texelFetch(lut, ivec2(int(l00), 0), 0), c01 = texelFetch(lut, ivec2(int(l01), 0), 0);
         vec4 c10 = texelFetch(lut, ivec2(int(l10), 0), 0), c11 = texelFetch(lut, ivec2(int(l11), 0), 0);
         vec4 s = mix(mix(c00, c01, wv), mix(c10, c11, wv), wu);
+        // the slice nearest the eye fades in over its spacing (slice_plan's 'first': nothing pops as the eye passes)
+        if (persp != 0) s *= min(1.0, float(dk) * kk / float(stride));
         acc += (1.0 - acc.a) * s;
         if (acc.a >= done) break;
     }
@@ -542,7 +557,8 @@ class Renderer:
     def render(self, cam, lo, hi, plan: dict, lut: np.ndarray, width: int, height: int, stride: int = 1,
                deep: bool = False, level: int = 0) -> np.ndarray:
         """The volume's picture of the cube on the GPU (ready()) as 'cam' sees it: width x height pixels over the
-        camera's view (cam.width x cam.height), slices along plan['axis'] (volume3d.slice_plan of the cube's shape),
+        camera's view (cam.width x cam.height), slices along plan['axis'] (volume3d.slice_plan of the cube's shape;
+        perspective: along each pixel's own axis, the plan's parts, the slice nearest the eye faded as its 'first'),
         coloured by 'lut' (volume3d.transfer, corrected for stride x the plan's path). Returns premultiplied pixels,
         rows from the top: (h, w, 4) uint8 B, G, R, A (QImage.Format_ARGB32_Premultiplied's bytes), or with 'deep'
         (h, w, 4) uint16 R, G, B, A (Format_RGBA64_Premultiplied's). 'level' 1: the cube's half (plan and lut made

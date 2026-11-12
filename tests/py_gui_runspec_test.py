@@ -1211,7 +1211,7 @@ def _custom_snapshot(tmp, np, P):
                                    volume_weighted=True, caustics=True, caustic_cusps=True, scalar_dataset="Masses",
                                    partition=2, max_concurrent=2, scratch_dir=str(work), lagrangian="separate",
                                    lagrangian_file=str(snap), box=[0, 1, 0, 1, 0, 1], parallel_triangulation=True,
-                                   alpha_shape=2.5, periodic=False, ordered_merge=True),
+                                   alpha_shape=2.5, periodic=False, ordered_merge=True, face_gradient=True),
                      rs.CustomSpec(input_file=str(snap), estimator="ps", deposit="sampled", nsub=2),
                      rs.CustomSpec(input_file=str(snap), estimator="dtfe", gpu=True),
                      rs.CustomSpec(input_file=str(snap), estimator="dtfe", deposit="sampled")):
@@ -1986,6 +1986,50 @@ def point_window_linear(tmp: Path):
     check("the Grids job: a hi-res slice for standard DTFE too (SAMPLE_POINTS), PS_LINEAR_DEPOSIT spelled out",
           env.get("SAMPLE_POINTS") == str(pts) and lin.get("PS_LINEAR_DEPOSIT") == "1"
           and rs.RunSpec(**base).command()[1].get("PS_LINEAR_DEPOSIT") == "0", f"{env} {lin}")
+    # the face gradient (PS-DTFE '--face-gradient'): FACE_GRADIENT spelled out on the Grids and Pipeline jobs, the flag
+    # on a 3D PS-DTFE Custom command; a standard-DTFE job sets nothing (its face gradient is the binary's default)
+    pbase = dict(data_root=str(tmp), sims=["TNG100-3-Dark"], nu=64, grid=128)
+    fg_pipe = rs.PipelineSpec(face_gradient=True, **pbase)
+    fg_own = lambda **k: rs.CustomSpec(input_file=str(snap), **k).command()          # noqa: E731
+    check("face gradient: FACE_GRADIENT spelled out on the Grids and Pipeline jobs (and the Pipeline's memory check), "
+          "absent for standard DTFE; '--face-gradient' on the Custom command only when ticked, for PS-DTFE in 3D",
+          rs.RunSpec(**base).command()[1].get("FACE_GRADIENT") == "0"
+          and rs.RunSpec(face_gradient=True, **base).command()[1].get("FACE_GRADIENT") == "1"
+          and rs.PipelineSpec(**pbase).command()[1].get("FACE_GRADIENT") == "0"
+          and fg_pipe.command()[1].get("FACE_GRADIENT") == "1"
+          and fg_pipe.check_step("TNG100-3-Dark", [99], 64).env.get("FACE_GRADIENT") == "1"
+          and "FACE_GRADIENT" not in rs.RunSpec(estimator="dtfe", face_gradient=True, **base).command()[1]
+          and "--face-gradient" in fg_own(face_gradient=True) and "--face-gradient" not in fg_own()
+          and "--face-gradient" not in fg_own(estimator="dtfe", face_gradient=True)
+          and "--face-gradient" not in fg_own(dim=2, face_gradient=True),
+          f"{fg_pipe.command()[1]} {fg_own(face_gradient=True)}")
+    # ... and what the binary and the drivers refuse with it, said before the run (only the face-gradient messages:
+    # the fake snapshot has other problems of its own)
+    fg_said = lambda spec, lv: [m for lvl, m in spec.problems() if lvl == lv and "face gradient" in m]   # noqa: E731
+    fg_runs = [rs.RunSpec(face_gradient=True, deposit="sampled", **base),
+               rs.RunSpec(face_gradient=True, volume_weighted=False, **base),
+               rs.CustomSpec(input_file=str(snap), face_gradient=True, halo_release=2.0),
+               rs.PipelineSpec(face_gradient=True, deposit="sampled", **pbase),
+               rs.PipelineSpec(face_gradient=True, volume_weighted=False, **pbase)]
+    refused = [fg_said(spec, "error") for spec in fg_runs]
+    check("... refused where the binary or the driver refuses it: the sampled deposit, no volume weighting, the halo "
+          "release (Grids, Custom and Pipeline jobs)",
+          all(refused) and "exact" in refused[0][0] and "volume-weighted" in refused[1][0]
+          and "halo release" in refused[2][0] and "exact" in refused[3][0] and "volume-weighted" in refused[4][0],
+          str(refused))
+    no_grad = rs.RunSpec(face_gradient=True, fields=["density_a"], **base)
+    prod = [rs.RunSpec(face_gradient=True, **base), fg_pipe]
+    flat = rs.CustomSpec(input_file=str(snap), dim=2, face_gradient=True)
+    check("... a note (no error) when no field built on the velocity gradient is ticked (the flag then does nothing); "
+          "nothing said with the production settings; a 2D Custom run notes that it leaves the flag out",
+          fg_said(no_grad, "info") and not fg_said(no_grad, "error")
+          and not any(fg_said(spec, lv) for spec in prod for lv in ("error", "warning", "info"))
+          and any("3D only" in m for m in fg_said(flat, "info")) and not fg_said(flat, "error"),
+          f"{no_grad.problems()} {[spec.problems() for spec in prod]} {flat.problems()}")
+    check("... the memory check is kept per face-gradient tick (the binary's tuner books the face sums)",
+          rs.RunSpec(face_gradient=True).memory_key() != rs.RunSpec().memory_key()
+          and fg_pipe.memory_key() != rs.PipelineSpec(**pbase).memory_key()
+          and rs.CustomSpec(face_gradient=True).memory_key() != rs.CustomSpec().memory_key())
     nodt = [m for lv, m in rs.CustomSpec(input_file=str(snap), estimator="dtfe", fields=["dispersion_a"]).problems()
             if lv == "error"]
     check("a Custom standard-DTFE run with only the dispersion ticked is refused (it would pass a bare --field)",
@@ -3230,6 +3274,14 @@ def run_log_contract():
               lin.settings().get("linear_deposit") is True and std.settings().get("linear_deposit") is False
               and "linear deposit" in lin.options_text() and "linear deposit" not in std.options_text(),
               f"{lin.settings()} {std.settings()} {lin.options_text()!r}")
+        # the face gradient the same way (a RunSpec field, so 'Load settings' sets it)
+        _write_log(d / "fg.runlog", "RUNNING: /x/PS-DTFE in.hdf5 fg --grid 64 --face-gradient\n")
+        fg = R.parse_runlog(d / "fg.runlog")
+        check("settings(): a --face-gradient run turns the face-gradient box on, a run without it OFF (the key is "
+              "there); the Options column says 'face gradient'",
+              fg.settings().get("face_gradient") is True and std.settings().get("face_gradient") is False
+              and "face gradient" in fg.options_text() and "face gradient" not in std.options_text()
+              and all(hasattr(rs.RunSpec(), k) for k in fg.settings()), f"{fg.settings()} {fg.options_text()!r}")
         # a standard-DTFE run's cell average reaches 'Load settings' both ways
         _write_log(d / "dx.runlog", "RUNNING: /x/DTFE in.hdf5 dx --grid 64 --periodic --exact-average --padding 15\n")
         _write_log(d / "dm.runlog", "RUNNING: /x/DTFE in.hdf5 dm --grid 64 --periodic --padding 15\n")

@@ -43,6 +43,7 @@ SHARED_WIDGETS = {
     "caustics":                ("ca_check",      "o_ca",           "p_ca"),
     "caustic_cusps":           ("cu_check",      "o_cu",           "p_cu"),
     "linear_deposit":          ("ld_check",      "o_ld",           "p_ld"),
+    "face_gradient":           ("fg_check",      "o_fg",           "p_fg"),
     "ps_group":                ("ps_group",      "o_ps_group",     "p_ps_group"),
     "fields":                  ("field_checks",  "o_fields",       "p_fields"),
     "fields_box":              ("fields_box",    "o_fields_box",   "p_fields_box"),
@@ -61,7 +62,7 @@ SHARED_WIDGETS = {
 }
 # the phase-space options of the 'Phase-space options' group, then the expert ones of the Advanced group (P.label keys)
 PS_OPTIONS = ("vertex_mass", "volume_weighted", "caustics")
-EXPERT_OPTIONS = ("caustic_cusps", "linear_deposit")
+EXPERT_OPTIONS = ("caustic_cusps", "linear_deposit", "face_gradient")
 
 
 def field_label(name: str, label: str) -> str:
@@ -421,8 +422,8 @@ class TabsMixin:
         return g
 
     def _advanced_group(self, tab: str, *extra) -> Collapsible:
-        """The expert options of a run tab, folded (P.LABELS 'advanced'): the cusps and the linear density, then the
-        tab's own 'extra' (key, tick box) pairs. The summary names the ticked ones."""
+        """The expert options of a run tab, folded (P.LABELS 'advanced'): the cusps, the linear density and the face
+        gradient, then the tab's own 'extra' (key, tick box) pairs. The summary names the ticked ones."""
         boxes = []
         for key in EXPERT_OPTIONS:
             cb = QCheckBox(P.label(key))
@@ -431,6 +432,8 @@ class TabsMixin:
             self._set_shared(tab, key, cb)
             boxes.append((key, cb))
         _exclusive(self._shared(tab, "linear_deposit"), self._shared(tab, "volume_weighted"))
+        # the face gradient needs the volume weighting, which the linear deposit excludes
+        _exclusive(self._shared(tab, "face_gradient"), self._shared(tab, "linear_deposit"))
         boxes += list(extra)
 
         def summary():
@@ -502,8 +505,7 @@ class TabsMixin:
         (rs.recommended_gpu, the drivers' automatic device): the GPU for both estimators in every machine use
         (PS-DTFE 1156 s against 1133 s on all CPU cores for TNG100-3-Dark at 512³, standard DTFE's exact cell
         average 439 s against 431 s; in performance a partitioned PS-DTFE run also deposits on the free cores); the
-        box stays editable. A tick this removed comes back when the choice leaves the exact deposit (for the sampled
-        one), unless the box was set otherwise meanwhile. A 2D run has no GPU."""
+        box stays editable. A 2D run has no GPU."""
         if not self._loading:
             tab = self._gpu_tab(gpu)
             mode = self._tab_run_mode(tab)
@@ -514,17 +516,10 @@ class TabsMixin:
                 changed = built and gpu.isChecked() != want
                 if changed:
                     self._gpu_auto_set(gpu, want)
-                    if not want:
-                        self._gpu_unticked_by_exact.add(gpu)
                 elif built:
                     self._gpu_by_hand.discard(gpu)      # the box holds the rule's tick now, as if the rule had set it
                 if changed or (built and estimator == "ps" and gpu.isChecked() and mode == "performance"):
                     self.status_message(self._exact_device_text(estimator, gpu.isChecked(), mode))
-            elif gpu in self._gpu_unticked_by_exact:
-                self._gpu_unticked_by_exact.discard(gpu)
-                if not gpu.isChecked():
-                    self._gpu_auto_set(gpu, True)
-                    self.status_message("the GPU is ticked again, as before the exact deposit")
         self._changed()
 
     @staticmethod
@@ -541,8 +536,8 @@ class TabsMixin:
         return f"{what}: the GPU is ticked (a tie with all CPU cores: 439 s against 431 s for TNG100-3-Dark at 512³)"
 
     def _gpu_auto_set(self, gpu: QCheckBox, on: bool):
-        """a GPU tick set by a rule, not by hand (_gpu_set_by_hand leaves the exact deposit's memory alone); the box
-        is the rule's again, so a change of the machine use moves it"""
+        """a GPU tick set by a rule, not by hand; the box is the rule's again, so a change of the machine use
+        moves it"""
         self._gpu_auto_setting = True
         try:
             gpu.setChecked(on)              # (its toggled signal runs _changed)
@@ -551,11 +546,8 @@ class TabsMixin:
         self._gpu_by_hand.discard(gpu)
 
     def _gpu_set_by_hand(self, gpu: QCheckBox):
-        """the box changed otherwise than by the exact deposit's rule (by hand, a loaded spec, a preset): the
-        tick that rule removed is no longer one to bring back. Changed by hand (neither by a rule nor while a spec or
-        preset is loaded) it keeps its tick when the machine use changes (_run_mode_changed), this session"""
-        if not self._gpu_auto_setting:
-            self._gpu_unticked_by_exact.discard(gpu)
+        """the box changed (by hand, a loaded spec, a preset or a rule). Changed by hand (neither by a rule nor while a
+        spec or preset is loaded) it keeps its tick when the machine use changes (_run_mode_changed), this session"""
         if self._gpu_auto_setting or self._loading:
             self._gpu_by_hand.discard(gpu)
         else:

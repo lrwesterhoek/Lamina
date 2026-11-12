@@ -42,7 +42,12 @@
      R is a circle of R x scale at any turn and an ellipsoid's outline is its projection's, the planes' quads are
      painted in an exact back-to-front order (checked ray by ray), the principal sections' arcs and the textures'
      affine maps land where the 3D points project, an ellipsoid's cut on a plane agrees with the inside test (spheres':
-     the map's circles), picking takes the smallest outline, the close-up window and the periodic cell window. In the window: Show in 3D shows the map's slice and the middle of
+     the map's circles), picking takes the smallest outline, the close-up window and the periodic cell window. In
+     perspective (the checks labelled 12): a zoom in moves the eye along the cursor's line of sight, into the box
+     and on through the field, and never out of it again; a cursor off the box keeps the plain rule; a zoom out
+     backs away; a line or a picture's rectangle that passes the eye is cut to its part in front of it
+     (segment_on_screen, screen_polygon); from inside, the void cuts on a plane that passes the eye and the point
+     picked under the cursor. In the window: Show in 3D shows the map's slice and the middle of
      the other axes as stored (the same values), the distinct voids as spheres of R_v x scale; the slider moves its
      plane; hover names a void and reads a plane's value; a click inspects the void (the inspector, the menu), a
      double-click closes up on it (the planes through its centre, cut to the window periodically, the neighbours at
@@ -57,7 +62,10 @@
      as slice() takes it, plain reads (a cube the map cached used, none added), a grid written again read again,
      an averaging cancelled; the levels within half a step; the transfer function transparent below the range,
      monotone, premultiplied, corrected for the path through a slice, |value| for a diverging field; the slices'
-     images placed where their 3D corners project, front first. QPainter's 16-bit compositing equals the reference
+     images placed where their 3D corners project, front first; in perspective each pixel is drawn from the stack
+     across the axis its ray crosses the most slices of (slice_plan, part_ids: a part for each axis and sense),
+     and with the eye inside the cube QPainter's picture is, pixel by pixel, the march along that pixel's own
+     ray. QPainter's 16-bit compositing equals the reference
      'under' compositing; the front half is what is seen from either side; a dense ball is opaque, a ray missing it
      transparent. In the window: the volume is the default (the planes one choice away), of the stored values, a
      density from rho/rho_bar = 1 in the map's colours with the bar on that range; the ray through a void is
@@ -68,8 +76,9 @@
      contract); in a process of its own on the default platform, where an OpenGL context can be made, the GPU's
      picture equals QPainter's within 1.5/255 at every pixel not within 1/32 px of a slice's projected edge (Qt
      rasterises polygons to 1/64 px: a pixel there may take one slice more or less), smooth and spiky fields, both
-     projections, three turns; skipping empty blocks changes no pixel; the window's own picture against
-     volume_picture() (else SKIP: no display, no OpenGL).
+     projections, three turns, from outside and with the eye in the window; skipping empty blocks changes no
+     pixel; the window's own picture against volume_picture(), fitted and zoomed in (else SKIP: no display, no
+     OpenGL).
  12. the Explore and 3D-view tooltips take at most two lines (the map, the voids, the 3D view in both styles, the
      Save options dialog); a long text is its first sentence, the whole text the control's What's This.
 
@@ -1498,13 +1507,83 @@ def perspective_pure():
     for c in (cam, ortho):
         h = np.c_[pts, np.ones(len(pts))] @ c.matrix().T
         ok_m &= bool(np.allclose(h[:, :2] / h[:, 2:], c.project(pts)[0]))
-    z = cam.copy()
-    z.zoom(80.0)
-    zv = (corners - z.target) @ z.R[2]
-    check("12. the camera matrix gives project()'s pixels (either projection); zoomed far in the eye stops NEAR of "
-          "the window's side short of its nearest corner and the view narrows instead (the scale still holds at the "
-          "target, every corner in front)", ok_m and np.isclose(z.distance(), zv.max() + V.NEAR * 100.0)
-          and np.all(np.isfinite(z.project(corners)[0])) and z.focal / z.scale < z.distance(), f"{z.distance()}")
+    check("12. the camera matrix gives project()'s pixels (either projection)", ok_m)
+    # zooming in is a dolly along the cursor's ray: into the box, on through the field, up to its far side
+    z, step = cam.copy(), 2.0 ** 0.25
+    cx, cy = 520.0, 300.0                                 # the cursor, off the centre
+    ray = z.unproject(cx, cy) - z.eye()
+    ray /= np.linalg.norm(ray)
+    eyes, dist, targ, under = [z.eye()], [z.distance()], [z.target.copy()], []
+    for _ in range(60):
+        keep = z.unproject(cx, cy)
+        z.zoom(step, cx, cy)
+        eyes.append(z.eye())
+        dist.append(z.distance())
+        targ.append(z.target.copy())
+        under.append(float(np.hypot(*(z.project(keep)[0][0] - [cx, cy]))))
+    eyes, dist, targ = np.array(eyes), np.array(dist), np.array(targ)
+    inside = np.all((eyes > lo) & (eyes < hi), axis=1)
+    first_in = int(np.argmax(inside))
+    ahead = V.DOLLY_MIN * 100.0
+    fly = np.flatnonzero(np.isclose(dist, ahead))         # the steps flown: the target kept 'ahead' of the eye
+    wall = int(fly[-1]) + 1                               # from here the target is at the far side: closing in
+    off = eyes - eyes[0]
+    on_ray = np.abs(off - (off @ ray)[:, None] * ray).max(axis=1)
+    moved = np.linalg.norm(np.diff(eyes[fly], axis=0), axis=1)
+    plain = np.flatnonzero(np.array(dist[1:]) > ahead)    # the first steps: the plain rule (scale x step)
+    check("12. zooming in (perspective) dollies the eye along the cursor's ray, into the box (inside it within a "
+          "dozen steps of the fitted view and from then on); far from the box it is the plain rule (the distance "
+          "/ step, the point under the cursor stays); with the target DOLLY_MIN of the box ahead it flies on, the "
+          "same distance every step, the target inside the box; at the far side it closes in on the wall",
+          not inside[0] and 0 < first_in <= 12 and np.all(inside[first_in:]) and len(plain) >= 5
+          and np.allclose(dist[plain + 1], dist[plain] / step) and max(under[i] for i in plain) < 1e-6
+          and len(fly) >= 5 and np.all(np.diff(fly) == 1) and on_ray[:wall].max() < 1e-6
+          and np.allclose(moved, moved[0]) and moved[0] > 0.1 * ahead * (1.0 - 1.0 / step)
+          and np.all((targ >= lo - 1e-9) & (targ <= hi + 1e-9)) and wall < 60
+          and np.all(np.diff(dist[wall:]) < 0) and np.all(np.array(dist[wall:]) < ahead) and dist[-1] > 0,
+          f"in at {first_in}, plain {len(plain)}, flown {len(fly)}, wall {wall}, off ray {on_ray[:wall].max():.2g}, "
+          f"moved {moved.min():.4g}..{moved.max():.4g}, last distance {dist[-1]:.3g}")
+    back = z.copy()
+    for _ in range(80):
+        back.zoom(1.0 / step)
+    out_d = back.distance()
+    back2 = back.copy()
+    keep = back2.unproject(cx, cy)
+    back2.zoom(1.0 / step, cx, cy)
+    ortho_z = ortho.copy()
+    ortho_z.zoom(80.0)
+    check("12. zooming out backs the eye away again (out of the box, the plain rule: the distance x step, the "
+          "point under the cursor stays); orthographic, a zoom only magnifies: no eye, the target at the centre",
+          not np.all((back.eye() > lo) & (back.eye() < hi)) and out_d > 300.0
+          and np.isclose(back2.distance(), out_d * step)
+          and np.hypot(*(back2.project(keep)[0][0] - [cx, cy])) < 1e-6
+          and np.isinf(ortho_z.distance()) and np.isclose(ortho_z.scale, 80.0 * ortho.scale)
+          and np.allclose(ortho_z.target, ortho.target), f"{out_d} {back2.distance()}")
+    # what can be drawn of a line that passes the eye: its part in front, cut to the neighbourhood of the view
+    zin = cam.copy()
+    for _ in range(14):
+        zin.zoom(step)
+    ein = zin.eye()
+    in_box = bool(np.all((ein > lo) & (ein < hi)))
+    fwd = -zin.toward()
+    a_pt, b_pt = ein + 30.0 * fwd + 4.0 * zin.R[0], ein - 25.0 * fwd + 9.0 * zin.R[1]     # ahead, behind
+    seg_ab = V.segment_on_screen(zin, a_pt, b_pt)
+    seg_ba = V.segment_on_screen(zin, b_pt, a_pt)
+    mid_pt = a_pt + 0.3 * (b_pt - a_pt)                   # still ahead of the eye
+    pa, pm = zin.project(a_pt)[0][0], zin.project(mid_pt)[0][0]
+    cross_s = (pm - pa)[0] * (np.array(seg_ab[1]) - pa)[1] - (pm - pa)[1] * (np.array(seg_ab[1]) - pa)[0]
+    grown = lambda q_: -800 - 1e-6 <= q_[0] <= 1600 + 1e-6 and -700 - 1e-6 <= q_[1] <= 1400 + 1e-6   # noqa: E731
+    whole = V.segment_on_screen(cam, corners[0], corners[7])
+    check("12. segment_on_screen: a segment wholly in view is its projected ends; one passing the eye (inside the "
+          "box) is drawn from its end ahead along its own projected line to the view's neighbourhood, either way "
+          "round; one behind the eye not at all; project() has no pixel for a point behind the eye",
+          in_box and np.allclose(whole, cam.project(corners[[0, 7]])[0]) and seg_ab is not None
+          and np.allclose(seg_ab[0], pa) and abs(cross_s) < 1e-6 * max(1.0, np.hypot(*(pm - pa))) * 2400.0
+          and grown(seg_ab[1]) and np.hypot(*(np.array(seg_ab[1]) - pa)) > 50.0
+          and np.allclose(seg_ba[0], seg_ab[1]) and np.allclose(seg_ba[1], seg_ab[0])
+          and V.segment_on_screen(zin, b_pt, ein + 5.0 * zin.toward()) is None
+          and np.all(np.isnan(zin.project(b_pt)[0])) and len(V.hidden_edges(zin, lo, hi)) == 12,
+          f"{in_box} {seg_ab} {pa} {cross_s}")
     # a plane's texture through a homography: corners and inside land where they project; orthographic = texture_map
     tex = np.array([[0, 0], [80, 0], [0, 100], [80, 100], [23.0, 61.0]], dtype=float)
     want, _ = cam.project([[10.0, 45.0, 90.0], [90.0, 45.0, 90.0], [10.0, 45.0, 5.0], [90.0, 45.0, 5.0],
@@ -1595,21 +1674,67 @@ def perspective_pure():
     check("12. plane_transform divides by |w|: with the texture's origin corner behind the eye (a whole-box plane "
           "drawn against a close-up) the points in front keep w > 0 (Qt draws them)", w_origin < 0 < w_in,
           f"{w_origin} {w_in} {e4}")
-    # the slicing axis in perspective: never one whose slab holds the eye while another does not
-    bad_axis = 0
+    # the slicing axis in perspective is each pixel's own: the axis its ray crosses the most slices of
+    shape5 = (40, 52, 34)
+    cell5 = (hi - lo) / np.array(shape5, dtype=np.float64)
+    W5, H5 = 61, 49                                       # odd: a pixel's centre in the middle of the view
+    xs5, ys5 = (v.ravel() for v in np.meshgrid(np.arange(W5) + 0.5, np.arange(H5) + 0.5))
+    bad_axis = bad_part = bad_mid = bad_fly = n_in = n_px = 0
     for _ in range(300):
-        c5 = V.Camera(width=900, height=700, yaw=rng.uniform(-180, 180), pitch=rng.uniform(-85, 85), perspective=True)
+        c5 = V.Camera(width=W5, height=H5, yaw=rng.uniform(-180, 180), pitch=rng.uniform(-85, 85), perspective=True)
         c5.bounds = (lo, hi)
         c5.fit(lo, hi)
-        c5.zoom(rng.uniform(0.8, 3.0))
-        c5.pan(*rng.uniform(-300, 300, 2))
+        for _n in range(int(rng.integers(0, 30))):
+            c5.zoom(2.0 ** 0.25, *rng.uniform((0, 0), (W5, H5)))
+        c5.pan(*rng.uniform(-20, 20, 2))
         e5 = c5.eye()
-        a5, _ray = VOL.slice_axis(c5, lo, hi)
-        outside = (e5 < lo) | (e5 > hi)
-        bad_axis += bool(outside.any() and not outside[a5])
-    check("12. the slicing axis in perspective is the least oblique for every ray to the window: never an axis whose "
-          "slab holds the eye (slices seen edge on) while another axis's does not (300 turns, zooms, pans)",
-          bad_axis == 0, f"{bad_axis}")
+        n_in += bool(np.all((e5 > lo) & (e5 < hi)))
+        plan5 = VOL.slice_plan(c5, lo, hi, shape5)
+        ids = VOL.part_ids(plan5, W5, H5).ravel()
+        pts = c5.target + ((xs5 - 0.5 * W5)[:, None] * c5.R[0] - (ys5 - 0.5 * H5)[:, None] * c5.R[1]) / c5.scale
+        d5 = (pts - e5) / cell5                           # each pixel's ray, in cells
+        A5 = np.sort(np.abs(d5), axis=1)
+        clear = A5[:, 2] > A5[:, 1] * (1.0 + 1e-9)        # not on a seam between two parts
+        ax5 = np.argmax(np.abs(d5), axis=1)
+        want = 2 * ax5 + (d5[np.arange(len(d5)), ax5] < 0)
+        bad_axis += int(np.count_nonzero(clear & (ids != want)))
+        mid = (H5 // 2) * W5 + W5 // 2
+        bad_mid += bool(clear[mid] and ids[mid] // 2 != plan5["axis"])
+        parts5 = {VOL.part_id(q_): q_ for q_ in plan5["parts"]}
+        eye_c = (e5 - lo) / cell5
+        for pid in np.unique(ids[clear]):
+            sel = clear & (ids == pid)
+            ax, sg = int(pid) // 2, (1 if pid % 2 == 0 else -1)
+            r0, r1 = V.rest_axes(ax)
+            k = np.arange(shape5[ax]) + 0.5               # the slices' positions along the axis, in cells
+            t = (k[None, :] - eye_c[ax]) / d5[sel, ax][:, None]
+            hit = (t > 0)
+            for r in (r0, r1):
+                at = eye_c[r] + t * d5[sel, r][:, None]
+                hit &= (at > 1e-9) & (at < shape5[r] - 1e-9)
+            crossed = np.flatnonzero(hit.any(axis=0))     # the slices some pixel of the part looks at
+            n_px += int(np.count_nonzero(hit.any(axis=1)))
+            q_ = parts5.get(int(pid))
+            bad_part += bool(crossed.size and (q_ is None or q_["sign"] != sg
+                                              or not set(crossed.tolist()) <= set(int(i) for i in q_["order"])))
+        # the parts follow the turn alone: flying on (and panning) leaves every pixel with its part
+        c6 = c5.copy()
+        c6.zoom(2.0 ** 0.25, *rng.uniform((0, 0), (W5, H5)))
+        c6.pan(*rng.uniform(-10, 10, 2))
+        ids6 = VOL.part_ids(VOL.slice_plan(c6, lo, hi, shape5), W5, H5).ravel()
+        bad_fly += int(np.count_nonzero(clear & (ids6 != ids)))
+    ortho5 = V.Camera(width=W5, height=H5, yaw=20, pitch=30)
+    ortho5.fit(lo, hi)
+    plan_o = VOL.slice_plan(ortho5, lo, hi, shape5)
+    check("12. the slicing axis in perspective is each pixel's own (part_ids): the axis its ray crosses the most "
+          "slices of and the sense it runs along it, the middle pixel's the plan's 'axis'; every slice a pixel "
+          "looks at inside the window is in its part's order (300 turns, zooms from far outside to inside the "
+          "window, pans; cells not cubic); a part follows the turn alone, so flying on leaves every pixel with "
+          "its own; orthographic: one part, no part_ids",
+          bad_axis == 0 and bad_part == 0 and bad_mid == 0 and bad_fly == 0 and 60 < n_in < 280 and n_px > 100000
+          and VOL.part_ids(plan_o, W5, H5) is None and len(plan_o["parts"]) == 1
+          and plan_o["parts"][0]["first"] is None,
+          f"{bad_axis} {bad_part} {bad_mid} {bad_fly}, {n_in} inside, {n_px} px")
     # the edges behind the box: hidden exactly when the line of sight to them crosses the box
     bad, tried = 0, 0
     for _ in range(40):
@@ -1655,6 +1780,170 @@ def perspective_pure():
                 wrong += max(hits, key=lambda h: rank[h[1]])[1] != min(hits)[1]
     check("12. the planes' quads from the eye: along every ray from it the nearest quad is painted last",
           overlaps > 300 and wrong == 0, f"{wrong} wrong of {overlaps}")
+    # the zoom from any view: a cursor off the box, any cursor once inside, after a pan and a turn, at the far wall
+    off_line = off_plain = 0.0
+    never_in = True
+    for cx_, cy_ in ((100.0, 600.0), (780.0, 20.0)):          # lines of sight that miss the box (the fitted view)
+        z2 = cam.copy()
+        e_ = [z2.eye()]
+        r_ = z2.unproject(cx_, cy_) - z2.eye()
+        r_ /= np.linalg.norm(r_)
+        for _ in range(60):
+            d_ = z2.distance()
+            z2.zoom(step, cx_, cy_)
+            off_plain = max(off_plain, abs(z2.distance() * step / d_ - 1.0))
+            e_.append(z2.eye())
+        e_ = np.array(e_)
+        never_in &= not np.any(np.all((e_ > lo) & (e_ < hi), axis=1))
+        o_ = e_ - e_[0]
+        off_line = max(off_line, float(np.abs(o_ - (o_ @ r_)[:, None] * r_).max()))
+    check("12. ... a cursor off the box (its line of sight misses the box): the plain rule every step, the eye on "
+          "that line all the way (no jump onto the box)", never_in and off_line < 1e-6 and off_plain < 1e-9,
+          f"off the line {off_line:.3g}, off the rule {off_plain:.3g}, inside {not never_in}")
+    left = entered = t_out = 0
+    for case in range(120):
+        hi_b = np.full(3, 100.0) if case % 2 else np.array([100.0, 60.0, 30.0])
+        c4 = V.Camera(width=640, height=480, yaw=rng.uniform(0, 360), pitch=rng.uniform(-80, 80), perspective=True)
+        c4.bounds = (lo, hi_b)
+        c4.fit(lo, hi_b)
+        was_in = False
+        x_, y_ = rng.uniform(0, 640), rng.uniform(0, 480)
+        for notch in range(60):
+            if notch % 7 == 6:                                # the cursor moves now and then
+                x_, y_ = rng.uniform(0, 640), rng.uniform(0, 480)
+            c4.zoom(step, x_, y_)
+            e_ = c4.eye()
+            now_in = bool(np.all((e_ >= lo - 1e-9) & (e_ <= hi_b + 1e-9)))
+            left += was_in and not now_in
+            t_out += now_in and not np.all((c4.target >= lo - 1e-3) & (c4.target <= hi_b + 1e-3))
+            was_in = was_in or now_in
+        entered += was_in
+    check("12. ... once the eye is inside the box no zoom in carries it out again, and the target stays in the box "
+          "with it (any turn, any cursor, a box of unequal sides)", left == 0 and t_out == 0 and entered >= 60,
+          f"{left} steps out, {t_out} targets out, {entered} of 120 entered")
+    tried = never = went_out = off = backward = past = 0
+    slowest = 0
+    for case in range(150):
+        hi_b = np.full(3, 100.0) if case % 2 else np.array([100.0, 60.0, 30.0])
+        c4 = V.Camera(width=800, height=700, yaw=rng.uniform(-180, 180), pitch=rng.uniform(-80, 80), perspective=True)
+        c4.bounds = (lo, hi_b)
+        c4.fit(lo, hi_b)
+        c4.pan(rng.uniform(-300, 300), rng.uniform(-300, 300))
+        c4.turn(rng.uniform(-200, 200), rng.uniform(-100, 100))
+        c4.target = c4.target + rng.uniform(-150, 150) * c4.toward()    # its plane in front of or beyond the box
+        e0 = c4.eye()
+        p_ = lo + rng.uniform(0.15, 0.85, 3) * (hi_b - lo)              # a point of the box, under the cursor
+        (x_, y_), = c4.project(p_[None])[0]
+        if np.all((e0 > lo) & (e0 < hi_b)) or not (0 < x_ < 800 and 0 < y_ < 700) or (e0 - p_) @ c4.toward() <= 0:
+            continue
+        tried += 1
+        r_ = (p_ - e0) / np.linalg.norm(p_ - e0)
+        with np.errstate(divide="ignore"):
+            leave = float(np.where(r_ > 0, (hi_b - e0) / r_, np.where(r_ < 0, (lo - e0) / r_, np.inf)).min())
+        e_ = [e0]
+        for _ in range(80):
+            c4.zoom(step, x_, y_)
+            e_.append(c4.eye())
+        e_ = np.array(e_)
+        is_in = np.all((e_ >= lo - 1e-7) & (e_ <= hi_b + 1e-7), axis=1)
+        along = (e_ - e0) @ r_
+        first = int(np.argmax(is_in))
+        never += not is_in.any()
+        went_out += bool(is_in.any()) and not is_in[first:].all()
+        off += np.linalg.norm((e_ - e0) - along[:, None] * r_, axis=1).max() > 1e-6
+        backward += bool(np.any(np.diff(along) <= 0))
+        past += along.max() > leave + 1e-6
+        slowest = max(slowest, first)
+    check("12. ... after a pan and a turn (the target's plane in front of the box or beyond it) a zoom in with the "
+          "cursor on the box still enters it, within 30 steps: forward every step along the cursor's line of sight, "
+          "never past the far side", tried >= 80 and never == went_out == off == backward == past == 0
+          and slowest <= 30, f"{tried} tried: never in {never}, out again {went_out}, off the line {off}, backward "
+          f"{backward}, past the far side {past}, slowest entry {slowest}")
+    at_wall = cam.copy()
+    for _ in range(60):
+        at_wall.zoom(step)
+    e_w, d_w = at_wall.eye(), at_wall.distance()
+    out1 = at_wall.copy()
+    out1.zoom(1.0 / step)
+    step_out = float(np.linalg.norm(out1.eye() - e_w))
+    at_wall.turn(180.0 / V.TURN_PER_PIXEL, 0.0)                         # turned round: the whole box ahead again
+    moves = []
+    for _ in range(6):
+        a_ = at_wall.eye()
+        at_wall.zoom(step)
+        moves.append(float(np.linalg.norm(at_wall.eye() - a_)))
+    flight = (1.0 - 1.0 / step) * ahead
+    check("12. ... at the far wall (the target a small distance ahead): one step out backs the eye away as from a "
+          "target DOLLY_MIN of the box ahead, and turned round the eye flies at the full step again",
+          0 < d_w < 0.05 * ahead and np.isclose(step_out, (step - 1.0) * ahead)
+          and min(moves) > flight * (1.0 - 1e-9) and np.allclose(moves[1:], flight)
+          and np.isclose(at_wall.distance(), ahead),
+          f"distance {d_w:.3g}, step out {step_out:.4g}, moves {np.round(moves, 3)}, flight {flight:.4g}")
+    # screen_polygon: a picture's rectangle cut to what of it is in front of the eye and near the view, against
+    # the map taken backward on a grid of screen points
+    Wp, Hp, mp = 640, 480, 64
+    gx, gy = np.meshgrid(np.linspace(-Wp + 3.0, 2 * Wp - 3.0, 97), np.linspace(-Hp + 3.0, 2 * Hp - 3.0, 73))
+    grid = np.column_stack([gx.ravel(), gy.ravel(), np.ones(gx.size)])
+    kinds = {"whole": 0, "behind": 0, "passes the eye": 0, "past the view": 0}
+    bad_poly, judged = [], 0
+    for case in range(240):
+        c5 = V.Camera(width=Wp, height=Hp, yaw=rng.uniform(-180, 180), pitch=rng.uniform(-85, 85),
+                      perspective=case % 4 != 3)
+        c5.bounds = (lo, hi)
+        c5.fit(lo, hi)
+        c5.target = rng.uniform(10.0, 90.0, 3)                          # the eye put by hand: mostly inside the box
+        c5.scale = (c5.focal / rng.uniform(2.0, 60.0)) if c5.perspective else c5.scale * rng.uniform(0.5, 12.0)
+        axis_ = int(rng.integers(3))
+        T9 = V.texture_transform(axis_, float(rng.uniform(5, 95)), (0.0, 0.0), (100.0, 100.0), mp, mp, c5)
+        x0_, y0_ = rng.uniform(0, 0.5 * mp, 2)
+        rect = (0.0, 0.0, float(mp), float(mp)) if case % 3 else (x0_, y0_, *rng.uniform(4.0, 0.5 * mp, 2))
+        m11, m12, m13, m21, m22, m23, m31, m32, m33 = T9
+        A_ = np.array([[m11, m21, m31], [m12, m22, m32], [m13, m23, m33]])
+        cs = np.array([(rect[0], rect[1]), (rect[0] + rect[2], rect[1]), (rect[0] + rect[2], rect[1] + rect[3]),
+                       (rect[0], rect[1] + rect[3])])
+        hc = np.column_stack([cs, np.ones(4)]) @ A_.T
+        poly = V.screen_polygon(T9, rect, Wp, Hp)
+        if np.all(hc[:, 2] <= 0.0):
+            kinds["behind"] += 1
+            if len(poly):
+                bad_poly.append((case, "behind"))
+            continue
+        on_grid = np.all(hc[:, 2] > 0.0) and bool(np.all(
+            (np.abs(hc[:, 0] / hc[:, 2] - 0.5 * Wp) < 1.5 * Wp) & (np.abs(hc[:, 1] / hc[:, 2] - 0.5 * Hp) < 1.5 * Hp)))
+        if on_grid:
+            kinds["whole"] += 1
+            if poly.shape != (4, 2) or not np.allclose(poly, hc[:, :2] / hc[:, 2:3]):
+                bad_poly.append((case, "whole"))
+            continue
+        kinds["passes the eye" if np.any(hc[:, 2] <= 0.0) else "past the view"] += 1
+        back = grid @ np.linalg.inv(A_).T                               # (x, y, 1) / w of the picture's point there
+        with np.errstate(divide="ignore", invalid="ignore"):
+            tx, ty = back[:, 0] / back[:, 2], back[:, 1] / back[:, 2]
+        ref_in = (back[:, 2] > 0.0) & (tx >= rect[0]) & (tx <= rect[0] + rect[2]) & (ty >= rect[1]) \
+            & (ty <= rect[1] + rect[3])
+        if len(poly) < 3:
+            if ref_in.any():
+                bad_poly.append((case, "empty"))
+            continue
+        nxt = np.roll(poly, -1, axis=0)
+        edge = nxt - poly
+        length = np.hypot(edge[:, 0], edge[:, 1])
+        turn_ = np.sign(np.sum(poly[:, 0] * nxt[:, 1] - nxt[:, 0] * poly[:, 1]))
+        real = length > 1e-9
+        side = turn_ * (edge[real, 0][None] * (grid[:, 1][:, None] - poly[real, 1][None])
+                        - edge[real, 1][None] * (grid[:, 0][:, None] - poly[real, 0][None])) / length[real][None]
+        deep, clear = np.all(side >= 2.0, axis=1), np.any(side <= -2.0, axis=1)     # 2 px from its outline
+        judged += int(deep.sum() + clear.sum())
+        if (not np.all(np.isfinite(poly)) or np.any(poly[:, 0] < -Wp - 1e-6) or np.any(poly[:, 0] > 2 * Wp + 1e-6)
+                or np.any(poly[:, 1] < -Hp - 1e-6) or np.any(poly[:, 1] > 2 * Hp + 1e-6)
+                or np.any(deep & ~ref_in) or np.any(clear & ref_in)):
+            bad_poly.append((case, "cut", int((deep & ~ref_in).sum()), int((clear & ref_in).sum())))
+    check("12. screen_polygon: a rectangle wholly in front and near the view is its four mapped corners, one "
+          "wholly behind the eye is nothing, one that passes the eye or runs past the view grown by its own size "
+          "is cut there (finite corners; against the map taken backward on a grid of screen points; either "
+          "projection)", not bad_poly and min(kinds.values()) >= 4 and kinds["whole"] >= 20
+          and kinds["passes the eye"] >= 30 and kinds["past the view"] >= 30 and judged > 100000,
+          f"{bad_poly[:5]} {kinds} judged {judged}")
 
 
 def volume_pure():
@@ -1827,53 +2116,100 @@ def volume_pure():
           "diverging field by |value|: both tails alike, the middle transparent, the colours apart",
           np.allclose(a2, 1.0 - (1.0 - a1) ** 2.5, atol=1e-4) and sym[0, 3] == 0 and sym[3, 3] == 0
           and sym[1, 3] == sym[5, 3] > 0 and sym[2, 3] == sym[4, 3] > 0 and not np.array_equal(sym[1, :3], sym[5, :3]))
-    # the slices on the screen, either projection
+    # the slices on the screen, either projection; in perspective a part for each axis and sense the rays run along
     rng = np.random.default_rng(5)
     lo3, hi3, shape = np.zeros(3), np.array([12.0, 16.0, 10.0]), (6, 8, 5)
     d = (hi3 - lo3) / np.array(shape)
-    plans_ok, axes_ok, order_ok, rays = True, True, True, 0
-    for persp in (False, True):
+    plans_ok, axes_ok, order_ok, first_ok = True, True, True, True
+    rays, deep_rays, pts, faded, inside, most = 0, 0, 0, 0, 0, 0
+    for persp, deep in ((False, False), (True, False), (True, True)):
         for yaw, pitch in [(-50.0, 33.0)] + [tuple(rng.uniform(-89, 89, 2)) for _ in range(12)]:
             cam = V.Camera(target=(6, 8, 5), scale=9.0, yaw=yaw, pitch=pitch, width=640, height=480,
                            perspective=persp)
             cam.bounds = (lo3, hi3)
             cam.fit(lo3, hi3)
+            for _ in range(int(rng.integers(10, 26)) if deep else 0):     # zoomed in: the eye in or at the window
+                cam.zoom(2.0 ** 0.25, *rng.uniform((0.0, 0.0), (640.0, 480.0)))
             plan = VOL.slice_plan(cam, lo3, hi3, shape)
             a, t = plan["axis"], cam.toward()
-            r0, r1 = V.rest_axes(a)
-            w, h = plan["size"]
-            for i in (0, shape[a] // 2, shape[a] - 1):
-                T = plan["transforms"][i]
-                for x, y in ((0, 0), (w, 0), (0, h), (w, h), (0.3 * w, 0.7 * h)):
-                    P = np.zeros(3)
-                    P[a] = lo3[a] + (i + 0.5) * d[a]
-                    P[r1] = lo3[r1] + x * d[r1]             # columns along the second remaining axis
-                    P[r0] = lo3[r0] + y * d[r0]             # rows along the first
-                    xy, _ = cam.project(P)
-                    wt = T[2] * x + T[5] * y + T[8]
-                    got = ((T[0] * x + T[3] * y + T[6]) / wt, (T[1] * x + T[4] * y + T[7]) / wt)
-                    plans_ok &= bool(np.allclose(got, xy[0]))
-            ax, ray = VOL.slice_axis(cam, lo3, hi3)
-            axes_ok &= a == ax and (w, h) == (shape[r1], shape[r0]) \
-                and (persp or a == int(np.argmax(np.abs(t)))) \
-                and np.isclose(plan["exponent"], d[a] / abs(ray[a]) / (16.0 / VOL.REF_CELLS))
-            # front first: every ray (from the eye, or along the view) meets the slices it crosses in plan order
-            rank = {int(i): n for n, i in enumerate(plan["order"])}
-            src = cam.eye() if persp else None
-            for X in rng.uniform(lo3, hi3, (25, 3)):
-                o_ = src if persp else X + 1e3 * t
-                dvec = X - o_
-                if abs(dvec[a]) < 1e-9:
+            ax, ray = VOL.slice_axis(cam, lo3, hi3, shape)
+            parts = {(int(q_["axis"]), int(q_["sign"])): q_ for q_ in plan["parts"]}
+            mid = parts.get((a, 1 if ray[a] > 0 else -1))
+            ec = (cam.eye() - lo3) / d if persp else None           # the eye, in cells from the window's corner
+            inside += int(persp and bool(np.all((ec > 0) & (ec < np.array(shape)))))
+            most = max(most, len(parts))
+            axes_ok &= a == ax and len(parts) == len(plan["parts"]) \
+                and bool(np.isclose(plan["exponent"], d[a] / abs(ray[a]) / (16.0 / VOL.REF_CELLS))) \
+                and (a == int(np.argmax(np.abs(t) / d)) and 1 <= len(parts) <= 6 if persp
+                     else a == int(np.argmax(np.abs(t))) and len(parts) == 1) \
+                and (plan["order"] is mid["order"] and plan["transforms"] is mid["transforms"]
+                     and plan["size"] == mid["size"] if mid is not None else deep and len(plan["order"]) == 0)
+            for (b, sign), part in parts.items():
+                r0, r1 = V.rest_axes(b)
+                w, h = part["size"]
+                order = [int(i) for i in part["order"]]
+                axes_ok &= (w, h) == (shape[r1], shape[r0]) and len(part["transforms"]) == shape[b]
+                # a slice's image lands where its 3D points project (those in front of the eye)
+                for i in sorted({order[0], order[len(order) // 2], order[-1]}) if order else ():
+                    T = part["transforms"][i]
+                    for x, y in ((0, 0), (w, 0), (0, h), (w, h), (0.3 * w, 0.7 * h)):
+                        P = np.zeros(3)
+                        P[b] = lo3[b] + (i + 0.5) * d[b]
+                        P[r1] = lo3[r1] + x * d[r1]         # columns along the second remaining axis
+                        P[r0] = lo3[r0] + y * d[r0]         # rows along the first
+                        xy, _ = cam.project(P)
+                        if not np.all(np.isfinite(xy[0])):  # behind the eye: Qt cuts the image there
+                            continue
+                        wt = T[2] * x + T[5] * y + T[8]
+                        got = ((T[0] * x + T[3] * y + T[6]) / wt, (T[1] * x + T[4] * y + T[7]) / wt)
+                        plans_ok &= bool(wt > 0 and np.allclose(got, xy[0], rtol=1e-5, atol=1e-6))
+                        pts += 1
+                # the nearest slice ahead of the eye, by its distance in slices; the others in order beyond it
+                if not persp:
+                    first_ok &= part["first"] is None
                     continue
-                pos = lo3[a] + (np.arange(shape[a]) + 0.5) * d[a]
-                s_ = (pos - o_[a]) / dvec[a]
-                hit = [int(i) for i in np.argsort(s_) if s_[i] > 0]
-                order_ok &= all(rank[i] < rank[j] for i, j in zip(hit, hit[1:]))
-                rays += 1
-    check("11. slice_plan, orthographic and perspective: the axis facing the viewer most (perspective: the least oblique for every ray to the window); a slice's image (rows along "
-          "the first remaining axis) lands where its 3D points project, corners and inside (homographies); every ray "
-          "meets the slices front first; the path through a slice its spacing over |cos|, over the reference",
-          plans_ok and axes_ok and order_ok and rays > 500, f"{plans_ok} {axes_ok} {order_ok} {rays}")
+                k0, wgt = part["first"]
+                gaps = sign * (np.arange(shape[b]) + 0.5 - ec[b])
+                gap = float(gaps[gaps > 0].min())
+                first_ok &= bool(np.isclose(gaps[k0], gap) and np.isclose(wgt, min(1.0, gap))
+                                 and (not order or sign * (order[0] - k0) >= 0)
+                                 and all(sign * (j - i) > 0 for i, j in zip(order, order[1:])))
+                faded += int(deep and wgt < 1.0)
+            # front first: a ray (from the eye, or along the view) meets every slice of its part that it crosses
+            # in the window, in the part's order
+            for X in rng.uniform(lo3, hi3, (200 if deep else 25, 3)):   # few of them are in a close view
+                if persp:
+                    xy, _ = cam.project(X)
+                    if not (np.all(np.isfinite(xy[0])) and 0 <= xy[0][0] <= 640 and 0 <= xy[0][1] <= 480):
+                        continue                            # not in the view
+                    o_ = cam.eye()
+                    dvec = X - o_
+                    b = int(np.argmax(np.abs(dvec / d)))    # the axis this ray crosses most slices of
+                    part = parts.get((b, 1 if dvec[b] > 0 else -1))
+                else:
+                    o_ = X + 1e3 * t
+                    dvec, b, part = X - o_, a, plan["parts"][0]
+                if abs(dvec[b]) < 1e-9:
+                    continue
+                r0, r1 = V.rest_axes(b)
+                rank = {} if part is None else {int(i): n for n, i in enumerate(part["order"])}
+                s_ = (lo3[b] + (np.arange(shape[b]) + 0.5) * d[b] - o_[b]) / dvec[b]
+                hit = [int(i) for i in np.argsort(s_) if s_[i] > 0
+                       and all(lo3[r] <= o_[r] + s_[i] * dvec[r] <= hi3[r] for r in (r0, r1))]
+                order_ok &= all(i in rank for i in hit) and all(rank[i] < rank[j] for i, j in zip(hit, hit[1:]))
+                rays += bool(hit)
+                deep_rays += bool(hit) and deep
+    check("11. slice_plan: orthographic, one part across the axis facing the viewer most; perspective, a part for "
+          "each axis and sense with slices ahead of the eye (all six with the eye in the window; a pixel draws from "
+          "the one its ray runs along most), the middle of the view's across the axis its ray crosses most slices "
+          "of; a slice's image (rows along the first remaining "
+          "axis) lands where its 3D points in front of the eye project, corners and inside (homographies); every ray "
+          "meets all the slices of its part that it crosses, front first; the nearest slice ahead of the eye counts "
+          "by its distance in slices; the path through a slice its spacing over |cos|, over the reference",
+          plans_ok and axes_ok and order_ok and first_ok and rays > 800 and deep_rays > 150 and pts > 800
+          and faded >= 10 and inside >= 5 and most == 6,
+          f"{plans_ok} {axes_ok} {order_ok} {first_ok} rays {rays} ({deep_rays} zoomed in) points {pts} "
+          f"faded {faded} inside {inside} parts {most}")
     check("11. the reference compositing ('under', front first): an opaque front hides the back; translucent "
           "layers add as c_front + (1 - a_front) c_back",
           np.allclose(VOL.composite([[1, 0, 0, 1], [0, 0, 1, 1]]), [1, 0, 0, 1])
@@ -1970,18 +2306,50 @@ def volume_render():
         cam.yaw = yaw
         plan = VOL.slice_plan(cam, np.zeros(3), np.full(3, 16.0), q2.shape)
         lut = VOL.transfer(VOL.level_values(qr2), 0.5, 2.0, 1.0, plan["exponent"], rb, gamma=1e-9)
-        seen.append(_rgba64(X3.render_slices(lut[VOL.oriented(q2)[plan["axis"]]], plan, W, W))[200, 200])
+        seen.append(_rgba64(X3.render_slices([lut[s_] for s_ in VOL.oriented(q2)], plan, W, W))[200, 200])
     check("11. ... and the front half is what is seen in perspective as well (red from -y, blue from +y)",
           np.allclose(seen[0], [1, 0, 0, 1], atol=2e-3) and np.allclose(seen[1], [0, 0, 1, 1], atol=2e-3), f"{seen}")
+    # the eye inside the cube: each pixel against a march along its own ray (no Qt), a translucent picture
+    q3, qr3 = VOL.quantize(VOL.scaled(_gl_field(24, False), True))
+    st3, lev3 = VOL.oriented(q3), VOL.level_values(qr3)
+    lo3, hi3, W3, H3 = np.zeros(3), np.full(3, 24.0), 320, 240
+    worst, n_in, drawn, alphas, kept = 0.0, 0, [], [], 1.0
+    for tgt, yaw, pitch, dist in (((12, 12, 12), -35, 25, 6.0), ((9.3, 14.1, 11.2), 60, -40, 4.0),
+                                  ((15.2, 8.7, 13.9), -120, 70, 3.0), ((3.1, 20.2, 5.5), 100, -15, 2.0),
+                                  ((21.0, 3.3, 18.8), -70, 50, 5.0)):
+        cam3 = V.Camera(target=tgt, scale=1.0, yaw=yaw, pitch=pitch, width=W3, height=H3, perspective=True)
+        cam3.bounds = (lo3, hi3)
+        cam3.scale = cam3.focal / dist                    # the eye 'dist' Mpc behind the target
+        plan = VOL.slice_plan(cam3, lo3, hi3, q3.shape)
+        lut = VOL.transfer(lev3, float(lev3[40]), float(lev3[230]), 0.04, plan["exponent"], G.lut("inferno"))
+        col = [lut[s_] for s_ in st3]
+        pix = _rgba64(X3.render_slices(col, plan, W3, H3))
+        ref = _ray_march(cam3, lo3, hi3, [c_.view(np.uint16).reshape(c_.shape + (4,)).astype(np.float64) / 65535.0
+                                          for c_ in col], W3, H3)
+        ok = ~_part_seams(plan, W3, H3) & (_slice_edge_px(cam3, lo3, hi3, q3.shape, plan, W3, H3) >= 1.0 / 32)
+        worst = max(worst, float(np.abs(pix - ref).max(axis=2)[ok].max()) * 255.0)
+        e3 = cam3.eye()
+        n_in += bool(np.all((e3 > lo3) & (e3 < hi3)))
+        drawn.append(len(X3.part_regions(plan, W3, H3)))
+        alphas.append(float(ref[..., 3].mean()))
+        kept = min(kept, float(ok.mean()))
+    check("11. the eye inside the cube: QPainter's picture is, pixel by pixel, the march along that pixel's own ray "
+          "over the slices of its own part (across the axis the ray runs along most), nearest first, bilinear in "
+          "each slice, the nearest by its distance in slices: within 0.25/255 at every pixel not beside another "
+          "part's or within 1/32 px of a slice's edge (five eyes in the cube, translucent pictures of one part and "
+          "of three)",
+          worst <= 0.25 and n_in == 5 and min(drawn) == 1 and max(drawn) == 3 and min(alphas) > 0.15
+          and max(alphas) < 0.9 and kept > 0.9,
+          f"worst {worst:.4f}/255, {n_in} inside, parts {drawn}, alpha {np.round(alphas, 3)}, kept {kept:.3f}")
     # the sharp picture drawn a few slices at a time is the one drawn at once, at the screen's own resolution
     v3._sharp, v3._job = None, None
     whole = _rgba64(v3.volume_picture())
     job = v3._start_job()
     names, real_gather = set(), job._gather
 
-    def spy_gather(i):
+    def spy_gather(*at):
         names.add(threading.current_thread().name)
-        return real_gather(i)
+        return real_gather(*at)
     job._gather = spy_gather
     ticks = 0
     while not job.pump(0.0005):
@@ -2058,27 +2426,110 @@ def volume_render():
 
 
 def _slice_edge_px(cam, lo, hi, shape, plan, W, H) -> np.ndarray:
-    """Each pixel centre's distance (px) to the nearest projected edge of a slice of the stack (slice_plan's quads,
-    exactly: a projective map takes the quad's edges to segments): where QPainter's 1/64-pixel polygon rasterisation
-    and the GPU's exact inside test may disagree on one slice."""
+    """Each pixel centre's distance (px) to the nearest projected edge of a slice the plan draws (the quads of
+    every part's slices, exactly: a projective map takes a quad's edges to segments; with the eye in the window,
+    the stretch of an edge in front of the eye): where QPainter's 1/64-pixel polygon rasterisation and an exact
+    inside test (the GPU's, a ray march's) may disagree on one slice."""
     import view3d as V
-    a = plan["axis"]
-    r0, r1 = V.rest_axes(a)
     d = (hi - lo) / np.asarray(shape, dtype=np.float64)
     yy, xx = np.mgrid[0:H, 0:W] + 0.5
     P = np.stack([xx.ravel(), yy.ravel()], 1)
     best = np.full(len(P), np.inf)
-    for k in range(int(shape[a])):
-        c = np.zeros((4, 3))
-        c[:, a] = lo[a] + (k + 0.5) * d[a]
-        c[:, r0] = [lo[r0], hi[r0], hi[r0], lo[r0]]
-        c[:, r1] = [lo[r1], lo[r1], hi[r1], hi[r1]]
-        xy, _ = cam.project(c)
-        for i in range(4):
-            p0, e = xy[i], xy[(i + 1) % 4] - xy[i]
-            t = np.clip(((P - p0) @ e) / max(float(e @ e), 1e-12), 0.0, 1.0)
-            best = np.minimum(best, np.hypot(*(P - (p0 + t[:, None] * e)).T))
+    for part in plan["parts"]:
+        a = int(part["axis"])
+        r0, r1 = V.rest_axes(a)
+        for k in part["order"]:
+            c = np.zeros((4, 3))
+            c[:, a] = lo[a] + (int(k) + 0.5) * d[a]
+            c[:, r0] = [lo[r0], hi[r0], hi[r0], lo[r0]]
+            c[:, r1] = [lo[r1], lo[r1], hi[r1], hi[r1]]
+            for i in range(4):
+                seg = V.segment_on_screen(cam, c[i], c[(i + 1) % 4])
+                if seg is None:
+                    continue
+                p0 = np.asarray(seg[0], dtype=np.float64)
+                e = np.asarray(seg[1], dtype=np.float64) - p0
+                t = np.clip(((P - p0) @ e) / max(float(e @ e), 1e-12), 0.0, 1.0)
+                best = np.minimum(best, np.hypot(*(P - (p0 + t[:, None] * e)).T))
     return best.reshape(H, W)
+
+
+def _part_seams(plan, W, H) -> np.ndarray:
+    """True at the pixels beside a pixel of another part of the plan (volume3d.part_ids): where a rounding of a
+    ray's direction may give the pixel to either. None are in an orthographic picture."""
+    import volume3d as VOL
+    ids = VOL.part_ids(plan, W, H)
+    out = np.zeros((H, W), dtype=bool)
+    if ids is not None:
+        dx, dy = ids[:, 1:] != ids[:, :-1], ids[1:] != ids[:-1]
+        out[:, 1:] |= dx
+        out[:, :-1] |= dx
+        out[1:] |= dy
+        out[:-1] |= dy
+    return out
+
+
+def _ray_march(cam, lo, hi, rgba, W, H) -> np.ndarray:
+    """A perspective view's volume picture ((H, W, 4), premultiplied, 0..1) by the rule alone, without Qt: each
+    pixel's ray from the eye through the pixel's centre; the stack across the axis the ray runs along most, in
+    cells (ties to the lower axis); its slices ahead of the eye, nearest first, each sampled bilinearly where the
+    ray crosses it (nothing outside the image), the nearest one at its distance in slices; composited 'under'.
+    rgba: per axis, the (m, h, w, 4) premultiplied colours of volume3d's slice images."""
+    import view3d as V
+    shape = np.array([rgba[b].shape[0] for b in range(3)])
+    cell = (hi - lo) / shape
+    e = (cam.eye() - lo) / cell
+    xs, ys = np.meshgrid(np.arange(W) + 0.5, np.arange(H) + 0.5)
+    c = cam.target + ((xs - 0.5 * W)[..., None] * cam.R[0] - (ys - 0.5 * H)[..., None] * cam.R[1]) / cam.scale
+    D = (c - lo) / cell - e                                 # the rays, in cells
+    ax = np.argmax(np.abs(D), axis=2)
+    out = np.zeros((H, W, 4))
+    for b in range(3):
+        r0, r1 = V.rest_axes(b)
+        tex = rgba[b]
+        m, h, w = tex.shape[:3]
+        gap = np.arange(m) + 0.5 - e[b]
+        for sign in (1, -1):
+            sel = (ax == b) & (sign * D[..., b] > 0)
+            if not sel.any():
+                continue
+            dv, acc = D[sel], np.zeros((int(sel.sum()), 4))
+            for n, i in enumerate(np.nonzero(sign * gap > 0)[0][::sign]):
+                s = gap[i] / dv[:, b]
+                u, v = e[r1] + s * dv[:, r1] - 0.5, e[r0] + s * dv[:, r0] - 0.5      # columns along r1, rows r0
+                on = (u > -0.5) & (u < w - 0.5) & (v > -0.5) & (v < h - 0.5)
+                u0, v0 = np.floor(u).astype(int), np.floor(v).astype(int)
+                fu, fv = (u - u0)[:, None], (v - v0)[:, None]
+                ua, ub = np.clip(u0, 0, w - 1), np.clip(u0 + 1, 0, w - 1)
+                va, vb = np.clip(v0, 0, h - 1), np.clip(v0 + 1, 0, h - 1)
+                px = ((tex[i][va, ua] * (1 - fu) + tex[i][va, ub] * fu) * (1 - fv)
+                      + (tex[i][vb, ua] * (1 - fu) + tex[i][vb, ub] * fu) * fv)
+                px = np.where(on[:, None], px, 0.0)
+                if n == 0:
+                    px = px * min(1.0, sign * gap[i])
+                acc += (1.0 - acc[:, 3:4]) * px
+            out[sel] = acc
+    return out
+
+
+def _strided_plan(plan, stride) -> dict:
+    """A slice plan with every stride-th slice only, as volume_gl takes them while the view turns: those with
+    k = (stride - 1) // 2 (mod stride); in perspective the nearest of them ahead of the eye at its distance in
+    strides (the stretch it stands for)."""
+    phase = (stride - 1) // 2
+    parts = []
+    for part in plan["parts"]:
+        keep = np.array([int(i) for i in part["order"] if int(i) % stride == phase], dtype=np.intp)
+        first = part["first"]
+        if first is not None:
+            gap = part["sign"] * (np.arange(len(part["transforms"])) + 0.5 - plan["view"][3][part["axis"]])
+            ahead = [int(k) for k in np.nonzero(gap > 0)[0] if int(k) % stride == phase]
+            first = None
+            if ahead:
+                k = min(ahead, key=lambda j: gap[j])
+                first = (k, float(min(1.0, gap[k] / stride)))
+        parts.append(dict(part, order=keep, first=first))
+    return dict(plan, parts=parts)
 
 
 def _gl_field(m, spiky, seed=3) -> np.ndarray:
@@ -2107,44 +2558,71 @@ def gl_child():
         print(f"GL-SKIP: {VGL.unavailable_reason()}", flush=True)
         return
     W, H = 320, 280
+    turns = ((-35.0, 25.0), (60.0, -40.0), (170.0, 10.0))
+    # orthographic; perspective from the fitted view in through the window's face to an eye within it (wheel notches
+    # about the middle of the view, then about a point off it: one on the window at every turn, or the eye would
+    # pass beside it)
+    views = [(False, yaw, pitch, 0, None) for yaw, pitch in turns] \
+        + [(True, yaw, pitch, n, at) for yaw, pitch in turns
+           for n, at in ((0, None), (8, None), (14, (100.0, 90.0)), (22, (205.0, 175.0)))]
+
+    def off_by(got, ref, cam, lo, hi, shape, plan, drawn):
+        """|got - ref| in 1/255 per pixel; the pixels off the edges of the slices 'drawn' and off the parts' seams;
+        the seam pixels off the edges."""
+        d = np.abs(got - ref).max(axis=2) * 255.0
+        tie = _slice_edge_px(cam, lo, hi, shape, drawn, W, H) < 1.0 / 32
+        seam = _part_seams(plan, W, H)
+        return d, ~tie & ~seam, seam & ~tie, tie
+
     for spiky in (False, True):
         shape = (32, 36, 26)                    # no two sides alike: the axes' order is tested too
         vals = np.ascontiguousarray(_gl_field(40, spiky)[:shape[0], :shape[1], :shape[2]])
         lo, hi = np.zeros(3), np.array([32.0, 36.0, 26.0])
         prep = VOL.prepare({"values": vals, "lo": lo, "hi": hi, "cells": shape, "key": None}, True)
         q = prep["fine"]["q"]
+        st3 = [VOL.slice_images(prep["fine"], a_) for a_ in range(3)]
+        top = 0.8 * float(prep["levels"][-1])
         r.begin_upload(("parity", spiky), q)
         r.upload_step(float("inf"))
-        for persp in (False, True):
-            for yaw, pitch in ((-35.0, 25.0), (60.0, -40.0), (170.0, 10.0)):
-                cam = V.Camera(yaw=yaw, pitch=pitch, width=W, height=H, perspective=persp)
-                cam.bounds = (lo, hi)
-                cam.fit(lo, hi)
-                plan = VOL.slice_plan(cam, lo, hi, q.shape)
-                lut = VOL.transfer(prep["levels"], 0.0, 0.8 * float(prep["levels"][-1]), 0.6,
-                                   float(np.round(plan["exponent"], 2)), G.lut("inferno"))
-                stack = np.ascontiguousarray(lut[VOL.slice_images(prep["fine"], plan["axis"])])
-                ref = _rgba64(X3.render_slices(stack, plan, W, H, 1.0))
-                gl = r.render(cam, lo, hi, plan, lut, W, H, deep=True).astype(np.float64) / 65535.0
-                d = np.abs(gl - ref).max(axis=2) * 255.0
-                tie = _slice_edge_px(cam, lo, hi, q.shape, plan, W, H) < 1.0 / 32
-                # the same at stride 4 with and without skipping the empty blocks: not a pixel apart
-                lut4 = VOL.transfer(prep["levels"], 0.0, 0.8 * float(prep["levels"][-1]), 0.6,
-                                    float(np.round(plan["exponent"], 2)) * 4, G.lut("inferno"))
-                a4 = r.render(cam, lo, hi, plan, lut4, W, H, stride=4, deep=True)
-                keep, VGL.SKIP_FROM_STRIDE = VGL.SKIP_FROM_STRIDE, 10 ** 6
-                try:
-                    b4 = r.render(cam, lo, hi, plan, lut4, W, H, stride=4, deep=True)
-                finally:
-                    VGL.SKIP_FROM_STRIDE = keep
-                print("GL-PARITY " + json.dumps({
-                    "case": f"{'spiky' if spiky else 'smooth'} {'perspective' if persp else 'orthographic'} "
-                            f"yaw {yaw:g} pitch {pitch:g} (axis {plan['axis']})",
-                    "max_off_ties": float(d[~tie].max()), "p99": float(np.percentile(d, 99)), "mean": float(d.mean()),
-                    "ties": float(tie.mean()), "covered": float((ref[..., 3] > 0).mean()),
-                    "skip_same": bool(np.array_equal(a4, b4)), "skipped_any": bool((a4[..., 3] > 0).any())}),
-                    flush=True)
+        for persp, yaw, pitch, notches, at in views:
+            cam = V.Camera(yaw=yaw, pitch=pitch, width=W, height=H, perspective=persp)
+            cam.bounds = (lo, hi)
+            cam.fit(lo, hi)
+            for _ in range(notches):
+                cam.zoom(2.0 ** 0.25, *(at or ()))
+            plan = VOL.slice_plan(cam, lo, hi, q.shape)
+            expo = float(np.round(plan["exponent"], 2))
+            lut = VOL.transfer(prep["levels"], 0.0, top, 0.6, expo, G.lut("inferno"))
+            ref = _rgba64(X3.render_slices([np.ascontiguousarray(lut[s_]) for s_ in st3], plan, W, H, 1.0))
+            gl = r.render(cam, lo, hi, plan, lut, W, H, deep=True).astype(np.float64) / 65535.0
+            d, off, seam, tie = off_by(gl, ref, cam, lo, hi, q.shape, plan, plan)
+            # every 4th slice (a turning frame): QPainter's picture of the same slices; and the same with and
+            # without skipping the empty blocks: not a pixel apart
+            lut4 = VOL.transfer(prep["levels"], 0.0, top, 0.6, expo * 4, G.lut("inferno"))
+            a4 = r.render(cam, lo, hi, plan, lut4, W, H, stride=4, deep=True)
+            keep, VGL.SKIP_FROM_STRIDE = VGL.SKIP_FROM_STRIDE, 10 ** 6
+            try:
+                b4 = r.render(cam, lo, hi, plan, lut4, W, H, stride=4, deep=True)
+            finally:
+                VGL.SKIP_FROM_STRIDE = keep
+            plan4 = _strided_plan(plan, 4)
+            ref4 = _rgba64(X3.render_slices([np.ascontiguousarray(lut4[s_]) for s_ in st3], plan4, W, H, 1.0))
+            d4, off4, seam4, _ = off_by(a4.astype(np.float64) / 65535.0, ref4, cam, lo, hi, q.shape, plan, plan4)
+            eye = cam.eye()
+            drawn = len(X3.part_regions(plan, W, H))            # the parts with pixels in this picture
+            print("GL-PARITY " + json.dumps({
+                "case": f"{'spiky' if spiky else 'smooth'} {'perspective' if persp else 'orthographic'} "
+                        f"yaw {yaw:g} pitch {pitch:g} zoom {notches} ({drawn} parts)",
+                "inside": bool(persp and np.all((eye > lo) & (eye < hi))), "parts": drawn,
+                "max_off_ties": float(d[off].max()), "p99": float(np.percentile(d, 99)), "mean": float(d.mean()),
+                "ties": float(tie.mean()), "covered": float((ref[..., 3] > 0).mean()),
+                "seams": int(seam.sum()), "seam_over": int((d[seam] > 1.5).sum()),
+                "max4_off_ties": float(d4[off4].max()), "mean4": float(d4.mean()),
+                "seam4_over": int((d4[seam4] > 1.5).sum()), "seams4": int(seam4.sum()),
+                "skip_same": bool(np.array_equal(a4, b4)), "skipped_any": bool((a4[..., 3] > 0).any())}),
+                flush=True)
     # the half cube (level 1, the turning frames'): the GPU's picture of it equals QPainter's of the same half cube
+    # and slices (every 2nd), from outside and with the eye in the window
     m = 72                                      # MIP_FROM or more a side: the half is made
     vals = np.ascontiguousarray(_gl_field(m, True))
     lo, hi = np.zeros(3), np.full(3, float(m))
@@ -2152,25 +2630,32 @@ def gl_child():
     r.begin_upload("half", prep2["fine"]["q"], prep2["levels"], prep2["qrange"], prep2["log"])
     r.upload_step(float("inf"))
     half = VGL.mip_levels(prep2["fine"]["q"], prep2["levels"], prep2["qrange"], True)
-    cam = V.Camera(yaw=-35.0, pitch=25.0, width=W, height=H, perspective=True)
-    cam.bounds = (lo, hi)
-    cam.fit(lo, hi)
-    plan = VOL.slice_plan(cam, lo, hi, half.shape)
-    lut = VOL.transfer(prep2["levels"], 0.0, 0.8 * float(prep2["levels"][-1]), 0.6,
-                       float(np.round(plan["exponent"], 2)) * 2, G.lut("inferno"))
-    gl = r.render(cam, lo, hi, plan, lut, W, H, stride=2, deep=True, level=1).astype(np.float64) / 65535.0
-    order = [int(i) for i in plan["order"] if int(i) % 2 == 0]     # QPainter's every 2nd slice (the shader's phase 0)
-    stack = np.ascontiguousarray(lut[VOL.oriented(half)[plan["axis"]]])
-    img, S = X3._canvas(W, H, 1.0)
-    X3._composite(img, S, plan, ((i, stack[i]) for i in order))
-    ref_s2 = _rgba64(img)
-    d = np.abs(gl - ref_s2).max(axis=2) * 255.0
-    tie = _slice_edge_px(cam, lo, hi, half.shape, plan, W, H) < 1.0 / 32
-    print("GL-HALF " + json.dumps({"same_levels": bool(r.ready("half", 1) and r.shape(1) == half.shape),
-                                   "max_off_ties": float(d[~tie].max()), "mean": float(d.mean()),
-                                   "covered": float((ref_s2[..., 3] > 0).mean())}), flush=True)
+    sth = VOL.oriented(half)
+    res = {"same_levels": bool(r.ready("half", 1) and r.shape(1) == half.shape)}
+    for name, notches in (("", 0), ("inside_", 14)):
+        cam = V.Camera(yaw=-35.0, pitch=25.0, width=W, height=H, perspective=True)
+        cam.bounds = (lo, hi)
+        cam.fit(lo, hi)
+        for _ in range(notches):
+            cam.zoom(2.0 ** 0.25, 100.0, 90.0)
+        plan = VOL.slice_plan(cam, lo, hi, half.shape)
+        lut = VOL.transfer(prep2["levels"], 0.0, 0.8 * float(prep2["levels"][-1]), 0.6,
+                           float(np.round(plan["exponent"], 2)) * 2, G.lut("inferno"))
+        gl = r.render(cam, lo, hi, plan, lut, W, H, stride=2, deep=True, level=1).astype(np.float64) / 65535.0
+        plan2 = _strided_plan(plan, 2)          # QPainter's every 2nd slice, the shader's
+        ref_s2 = _rgba64(X3.render_slices([np.ascontiguousarray(lut[s_]) for s_ in sth], plan2, W, H, 1.0))
+        d, off, seam, _ = off_by(gl, ref_s2, cam, lo, hi, half.shape, plan, plan2)
+        eye = cam.eye()
+        res.update({name + "max_off_ties": float(d[off].max()), name + "mean": float(d.mean()),
+                    name + "covered": float((ref_s2[..., 3] > 0).mean()),
+                    name + "seam_over": int((d[seam] > 1.5).sum()), name + "seams": int(seam.sum()),
+                    name + "eye_in": bool(np.all((eye > lo) & (eye < hi))),
+                    name + "parts": len(X3.part_regions(plan, W, H))})
+    print("GL-HALF " + json.dumps(res), flush=True)
     r.forget_cube()
-    # the window's own picture: View3D's GPU frame against its volume_picture() (8 bits a channel on screen)
+    # the window's own picture: View3D's GPU frame against its volume_picture() (8 bits a channel on screen), the
+    # fitted view and one zoomed into the window
+    lo, hi = np.zeros(3), np.array([32.0, 36.0, 26.0])
     v3 = X3.View3D()
     v3.resize(W, H)
     v3._ratio = lambda: 1.0
@@ -2179,24 +2664,39 @@ def gl_child():
         v3.set_volume(prep, lo, hi)
         v3.set_transfer(0.0, 0.8 * float(prep["levels"][-1]), 0.6, "viridis")
         v3.set_perspective(True)
-        tries = 0
-        while v3._gl_frame() is False and tries < 1000:
-            VGL.renderer().upload_step(float("inf"))
-            tries += 1
-        img = v3._gl_frame()
-        px = VGL.to_qimage(np.ascontiguousarray(img.px)).convertToFormat(X3.QImage.Format_RGBA64_Premultiplied)
-        gl8 = _rgba64(px)
-        ref = _rgba64(v3.volume_picture())
-        plan = VOL.slice_plan(v3.cam, lo, hi, prep["fine"]["shape"])
-        tie = _slice_edge_px(v3.cam, lo, hi, prep["fine"]["shape"], plan, W, H) < 1.0 / 32
-        d = np.abs(gl8 - ref).max(axis=2) * 255.0
+
+        def window_off():
+            """The window's GPU frame against its volume_picture(), as the view stands."""
+            tries = 0
+            while v3._gl_frame() is False and tries < 1000:
+                VGL.renderer().upload_step(float("inf"))
+                tries += 1
+            img = v3._gl_frame()
+            px = VGL.to_qimage(np.ascontiguousarray(img.px)).convertToFormat(X3.QImage.Format_RGBA64_Premultiplied)
+            plan = VOL.slice_plan(v3.cam, lo, hi, prep["fine"]["shape"])
+            d, off, seam, _ = off_by(_rgba64(px), _rgba64(v3.volume_picture()), v3.cam, lo, hi,
+                                     prep["fine"]["shape"], plan, plan)
+            return img, d, off, seam, plan
+
+        img, d, off, seam, _ = window_off()
+        win = {"size": [img.width(), img.height()], "max_off_ties": float(d[off].max()), "mean": float(d.mean()),
+               "note": v3.gl_note}
+        for _ in range(14):                     # the wheel, into the window
+            v3.cam.zoom(2.0 ** 0.25, 100.0, 90.0)
+        v3._fast = False
+        img, d, off, seam, plan = window_off()
+        eye = v3.cam.eye()
+        win.update({"inside_max_off_ties": float(d[off].max()), "inside_mean": float(d.mean()),
+                    "inside_seam_over": int((d[seam] > 1.5).sum()), "inside_seams": int(seam.sum()),
+                    "eye_in": bool(np.all((eye > lo) & (eye < hi))),
+                    "inside_parts": len(X3.part_regions(plan, W, H)),
+                    "inside_note": v3.gl_note})
         # a range or opacity slider dragged: the turning frames until it rests (a settled frame each move is slow)
         v3._fast = False
         v3.set_transfer(0.1, 0.8 * float(prep["levels"][-1]), 0.5, "viridis")
         slider = v3._fast and v3._settle.isActive() and v3._gl_frame() is not None and v3._gl_step is not None
-        print("GL-WINDOW " + json.dumps({"size": [img.width(), img.height()], "max_off_ties": float(d[~tie].max()),
-                                         "mean": float(d.mean()), "note": v3.gl_note, "slider_turns": bool(slider)}),
-              flush=True)
+        win["slider_turns"] = bool(slider)
+        print("GL-WINDOW " + json.dumps(win), flush=True)
     finally:
         X3.SHARP_CELL_PX = keep_cap
         v3.set_volume(None)
@@ -2229,30 +2729,46 @@ def volume_gl_parity():
     cases = [json.loads(ln[len("GL-PARITY "):]) for ln in out.splitlines() if ln.startswith("GL-PARITY ")]
     win = next((json.loads(ln[len("GL-WINDOW "):]) for ln in out.splitlines() if ln.startswith("GL-WINDOW ")), None)
     done = "GL-DONE" in out and p.returncode == 0
-    check("11. GPU parity: the child ran every case to its end", done and len(cases) == 12 and win is not None
+    check("11. GPU parity: the child ran every case to its end", done and len(cases) == 30 and win is not None
           and "GL-HALF " in out,
           f"exit {p.returncode}, {len(cases)} cases; {p.stderr.strip()[-600:]}")
     if not cases:
         return
     worst = max(cases, key=lambda c: c["max_off_ties"])
+    n_in = sum(c["inside"] for c in cases)
     check("11. the GPU's picture equals QPainter's within 1.5/255 at every pixel not within 1/32 px of a slice's "
-          "projected edge (12 cases: smooth and spiky fields, orthographic and perspective, three turns); over all "
+          "projected edge nor beside another part's pixels (30 cases: smooth and spiky fields; orthographic, three "
+          "turns; perspective, three turns, each from the fitted view in through the window's face to an eye inside "
+          "it, one to three parts in a picture); the pixels beside another part's as well, but for 1 in 100 of them; "
+          "over all "
           "pixels p99 <= 1/255 and the mean <= 0.1/255",
           all(c["max_off_ties"] <= 1.5 and c["p99"] <= 1.0 and c["mean"] <= 0.1 and c["covered"] > 0.2
-              and c["ties"] < 0.1 for c in cases),
-          f"worst {worst}; " + "; ".join(f"{c['case']}: {c['max_off_ties']:.2f}" for c in cases))
-    check("11. ... skipping the empty blocks (stride 4) changes not a pixel",
-          all(c["skip_same"] and c["skipped_any"] for c in cases),
-          str([c["case"] for c in cases if not c["skip_same"]]))
+              and c["ties"] < 0.1 and c["seam_over"] <= 0.01 * c["seams"] + 2 for c in cases)
+          and n_in == 18 and max(c["parts"] for c in cases) == 3
+          and sum(c["seams"] > 100 for c in cases) >= 12,
+          f"{n_in} inside; worst {worst}; " + "; ".join(f"{c['case']}: {c['max_off_ties']:.2f}" for c in cases))
+    worst4 = max(cases, key=lambda c: c["max4_off_ties"])
+    check("11. ... every 4th slice (a turning frame's stride; in perspective the nearest of them ahead of the eye "
+          "by its distance in strides) is QPainter's picture of the same slices within 1.5/255 off the slices' "
+          "edges and the parts' seams, and skipping the empty blocks changes not a pixel",
+          all(c["skip_same"] and c["skipped_any"] and c["max4_off_ties"] <= 1.5 and c["mean4"] <= 0.1
+              and c["seam4_over"] <= 0.01 * c["seams4"] + 2 for c in cases),
+          f"worst {worst4}; skip differs: {[c['case'] for c in cases if not c['skip_same']]}")
     half = next((json.loads(ln[len("GL-HALF "):]) for ln in out.splitlines() if ln.startswith("GL-HALF ")), None)
     check("11. ... the cube's half (drawn while turning, every 2nd slice of it) is the GPU's too: QPainter's picture "
-          "of the same half cube and slices within 1.5/255 off the slices' edges",
-          half is not None and half["same_levels"] and half["max_off_ties"] <= 1.5 and half["covered"] > 0.2,
+          "of the same half cube and slices within 1.5/255 off the slices' edges, from outside and with the eye in "
+          "the window",
+          half is not None and half["same_levels"] and half["max_off_ties"] <= 1.5 and half["covered"] > 0.2
+          and half["inside_max_off_ties"] <= 1.5 and half["inside_eye_in"] and half["inside_covered"] > 0.9
+          and half["inside_seam_over"] <= 0.01 * half["inside_seams"] + 2,
           str(half))
     if win is not None:
         check("11. ... and in the window: View3D's GPU frame (8 bits) is its volume_picture() within 1.5/255 off the "
-              "slices' edges", win["max_off_ties"] <= 1.5 and win["mean"] <= 0.2 and win["note"] == ""
-              and win["size"] == [320, 280], str(win))
+              "slices' edges, the fitted view and one zoomed into the window (the eye inside)",
+              win["max_off_ties"] <= 1.5 and win["mean"] <= 0.2 and win["note"] == ""
+              and win["size"] == [320, 280] and win["eye_in"] and win["inside_max_off_ties"] <= 1.5
+              and win["inside_mean"] <= 0.45 and win["inside_note"] == ""
+              and win["inside_seam_over"] <= 0.01 * win["inside_seams"] + 2, str(win))
         check("11. ... a slider moved while the GPU draws: its turning frames until the view rests, not a settled "
               "frame per move", win.get("slider_turns") is True, str(win))
 
@@ -3345,6 +3861,178 @@ def planes3d_alone():
           f"{line!r} {p.stderr.strip()[-400:]}")
 
 
+def planes3d_inside():
+    """12. the planes with the eye inside the box, on a view of its own: the void cuts on planes that pass the eye,
+    and what is picked under the cursor."""
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        print(f"SKIP (3D planes from inside): PySide6 is not importable ({e})")
+        return
+    from PySide6.QtGui import QImage
+    import explore_3d as X3
+    import view3d as V
+    print("3D planes from inside the box")
+    qa = QApplication.instance() or QApplication([])
+    L, m, W, H, nv = 100.0, 64, 640, 480, 10
+    rng = np.random.default_rng(5)
+    centres, radii = rng.uniform(0.2 * L, 0.8 * L, (nv, 3)), rng.uniform(6.0, 16.0, nv)
+    voids = {"centres": centres, "M": V.sphere_matrices(radii), "reach": radii, "rows": np.arange(nv),
+             "labels": [str(k) for k in range(nv)], "r_eff": None, "box": L}
+    pos = np.array([47.0, 53.0, 50.0])
+    t = np.linspace(0.0, 2.0 * np.pi, 36001)[:-1]
+
+    def grown(mask, r):
+        o = np.zeros_like(mask)
+        for dy in range(-r, r + 1):
+            for dx in range(-r, r + 1):
+                if dx * dx + dy * dy > r * r + 1:
+                    continue
+                ys, yd = (slice(dy, None), slice(None, H - dy)) if dy >= 0 else (slice(None, dy), slice(-dy, None))
+                xs, xd = (slice(dx, None), slice(None, W - dx)) if dx >= 0 else (slice(None, dx), slice(-dx, None))
+                o[yd, xd] |= mask[ys, xs]
+        return o
+
+    def pixels():
+        v.repaint()
+        qa.processEvents()
+        img = v.grab().toImage().convertToFormat(QImage.Format_RGB888)
+        w, h = img.width(), img.height()
+        a = np.frombuffer(img.constBits(), np.uint8, h * img.bytesPerLine()).reshape(h, img.bytesPerLine())
+        a = a[:, :3 * w].reshape(h, w, 3).astype(np.int32)
+        return a[::w // W, ::w // W]                        # (a device pixel ratio)
+
+    def scene(shown):
+        planes = []
+        for a in range(3):
+            if not shown[a]:
+                planes.append(None)
+                continue
+            vals = 0.25 + 0.1 * rng.random((m, m))
+            rgb, _ = G.colorize(np.ascontiguousarray(vals.T[::-1]), "inferno", log=False, symmetric=False,
+                                vrange=(0.0, 1.0))
+            planes.append({"rgb": np.ascontiguousarray(rgb), "values": vals, "lo2": (0.0, 0.0), "hi2": (L, L),
+                           "pos": float(pos[a]), "stride": 1})
+        return planes
+
+    def cut_samples(shown):
+        """Points on the voids' cuts with the planes shown (n, 3) and the plane of each (n,)."""
+        P, A = [], []
+        for a in range(3):
+            if not shown[a]:
+                continue
+            r0, r1 = V.rest_axes(a)
+            for c, r in zip(centres, radii):
+                d = pos[a] - c[a]
+                if abs(d) >= r:
+                    continue
+                rho = np.sqrt(r * r - d * d)
+                p = np.zeros((len(t), 3))
+                p[:, a], p[:, r0], p[:, r1] = pos[a], c[r0] + rho * np.cos(t), c[r1] + rho * np.sin(t)
+                ok = (p[:, r0] >= 0) & (p[:, r0] <= L) & (p[:, r1] >= 0) & (p[:, r1] <= L)
+                P.append(p[ok])
+                A.append(np.full(int(ok.sum()), a))
+        return np.concatenate(P), np.concatenate(A)
+
+    def unhidden(cam, P, A, shown):
+        """Not behind another plane (the planes opaque), nor too near one to say."""
+        e = cam.eye()
+        vis = np.ones(len(P), bool)
+        for b in range(3):
+            if not shown[b]:
+                continue
+            de, dp = e[b] - pos[b], P[:, b] - pos[b]
+            s = de / (de - dp + 1e-300)
+            X = e[None] + s[:, None] * (P - e[None])
+            vis &= ~((A != b) & (de * dp < 0) & np.all((X >= 0) & (X <= L), axis=1))
+            vis &= ~((A != b) & (np.abs(dp) < 0.6))
+        return vis
+
+    v = X3.View3D()
+    v.resize(W, H)
+    v.show()
+    v.style, v.opacity = "planes", 1.0
+    v._draw_void = lambda *a, **k: None                     # the cuts only
+    cases = []
+    for shown in ((False, False, True), (True, True, True)):    # eyes put near a cut of the z plane, looking along it
+        for k in range(nv):
+            d = pos[2] - centres[k, 2]
+            if abs(d) >= radii[k]:
+                continue
+            rho = float(np.sqrt(radii[k] ** 2 - d * d))
+            for phi, dist, pitch in ((0.3, 0.8, 8.0), (2.1, 1.3, 20.0), (4.0, 0.5, -12.0), (5.5, 2.0, 35.0)):
+                tgt = np.array([centres[k, 0] + rho * np.cos(phi), centres[k, 1] + rho * np.sin(phi), pos[2]])
+                cases.append((shown, (float(np.degrees(phi)) + 77.0, pitch), tgt, dist * rho))
+    bad, passing, seen = [], 0, 0
+    picks = wrong = nothing_ahead = 0
+    try:
+        for ci, (shown, turn, tgt, dist) in enumerate(cases):
+            v.set_scene(scene(shown), np.zeros(3), np.full(3, L))
+            v.set_perspective(True)
+            v.cam.yaw, v.cam.pitch = turn
+            v.fit()
+            v.cam.target, v.cam.scale = tgt.copy(), v.cam.focal / dist
+            v.set_voids(voids)
+            with_cuts = pixels()
+            v.set_voids(None)
+            cuts = np.abs(with_cuts - pixels()).sum(axis=2) > 40
+            cam = v.cam
+            e = cam.eye()
+            P, A = cut_samples(shown)
+            xy, _depth = cam.project(P)
+            front = np.isfinite(xy).all(axis=1)
+            on = front & (xy[:, 0] >= 3) & (xy[:, 0] < W - 3) & (xy[:, 1] >= 3) & (xy[:, 1] < H - 3)
+            px = np.where(on[:, None], xy, 0.0).astype(int)
+            truth = np.zeros((H, W), bool)
+            truth[px[on, 1], px[on, 0]] = True
+            stray = cuts & ~grown(truth, 3)
+            stray[:3] = stray[-3:] = stray[:, :3] = stray[:, -3:] = False
+            stray[H - 60:] = False                              # the scale bar's text changes with nothing
+            vis = on & unhidden(cam, P, A, shown)
+            missed = vis & ~grown(cuts, 2)[px[:, 1], px[:, 0]]
+            inside = bool(np.all((e > 0) & (e < L)))
+            passing += inside and bool((~front).any())          # a cut that passes the eye's own plane
+            seen += int(vis.sum())
+            if stray.sum() > 6 or missed.sum() > max(4, 0.004 * vis.sum()):
+                bad.append((ci, int(stray.sum()), int(missed.sum()), int(vis.sum())))
+            if not all(shown):
+                continue
+            for x_, y_ in rng.uniform((5.0, 5.0), (W - 5.0, H - 5.0), (60, 2)):     # what is picked under a point
+                dvec = cam.unproject(x_, y_) - e
+                hits, unsure, behind = [], False, False
+                for a in range(3):
+                    if abs(dvec[a]) < 1e-12:
+                        unsure = True
+                        continue
+                    s_ = (pos[a] - e[a]) / dvec[a]
+                    pt = e + s_ * dvec
+                    r0, r1 = V.rest_axes(a)
+                    edge = min(pt[r0], L - pt[r0], pt[r1], L - pt[r1])
+                    unsure |= abs(edge) < 0.05 or abs(s_) < 1e-9
+                    if edge > 0 and s_ > 0:
+                        hits.append((s_, a, pt))
+                    behind |= edge > 0 and s_ < 0
+                if unsure:
+                    continue
+                picks += 1
+                got = v.point_at(float(x_), float(y_))
+                nothing_ahead += behind and not hits
+                if not hits:
+                    wrong += got is not None
+                    continue
+                _s, a, pt = min(hits, key=lambda h_: h_[0])
+                wrong += got is None or got[0] != a or float(np.abs(got[1] - pt).max()) > 0.5 * L / m + 1e-6
+    finally:
+        v.close()
+    check("12. the planes from inside the box: the void cuts on a plane that passes the eye are drawn where they "
+          "are (every cut pixel on a projected cut, every unhidden point of a cut drawn; eyes put next to a cut, "
+          "one plane and all three)", not bad and len(cases) >= 16 and passing >= 8 and seen > 20000,
+          f"bad (case, stray px, missed, of) {bad[:6]}; {len(cases)} cases, {passing} pass the eye, {seen} points")
+    check("12. ... the point picked under the cursor is the nearest plane point in FRONT of the eye along that line "
+          "of sight; none when the planes lie only behind it", wrong == 0 and picks > 300 and nothing_ahead >= 10,
+          f"{wrong} wrong of {picks}; {nothing_ahead} with a plane only behind the eye")
+
+
 def view3d_remembered():
     """10. the 3D view's choices across a restart (ExploreControls.state / restore_state): set in one window, restored
     into a fresh one; a state saved before them leaves the defaults."""
@@ -3552,6 +4240,7 @@ def main():
         volume_gl_parity()
         gui()
         view3d_gui()
+        planes3d_inside()
         view3d_volume_gui()
         view3d_remembered()
         short_tooltips()

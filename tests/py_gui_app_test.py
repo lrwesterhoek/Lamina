@@ -201,8 +201,9 @@ def _window(qa, w, spec):
     check("Run is enabled for a valid spec", w.run_btn.isEnabled())
     w.dtfe_radio.setChecked(True)
     qa.processEvents()
-    check("DTFE mode disables the PS-only options (the hi-res slice works with both estimators) and switches script",
-          not w.ps_group.isEnabled() and w.slice_group.isEnabled()
+    check("DTFE mode disables the PS-only options (the face gradient too: standard DTFE's is the binary's default; the "
+          "hi-res slice works with both estimators) and switches script",
+          not w.ps_group.isEnabled() and not w.fg_check.isEnabled() and w.slice_group.isEnabled()
           and "scripts/run_dtfe.sh" in w.cmd_view.toPlainText())
     w.ps_radio.setChecked(True)
     w.snap_list.item(0).setCheckState(w.snap_list.item(0).checkState().Unchecked)
@@ -259,7 +260,8 @@ def _form_widths(qa, w):
         w.tabs.setCurrentIndex(A.OWN)
         w.o_dim.setCurrentIndex(w.o_dim.findData(2))
         qa.processEvents()
-        flat = w.custom.dim == 2 and "3D only" in w.o_pt.text() and "CPU" in w.o_gpu.text()
+        flat = (w.custom.dim == 2 and "3D only" in w.o_pt.text() and "CPU" in w.o_gpu.text()
+                and not w.o_fg.isEnabled())     # (the face sweep is 3D only: its tick greyed)
         wide += too_wide([A.OWN], "open, 2D: ")
         w.o_dim.setCurrentIndex(w.o_dim.findData(3))
     finally:
@@ -269,7 +271,7 @@ def _form_widths(qa, w):
         w.refresh()
         qa.processEvents()
     check("... and with every group open on a build without the GPU or TBB (the ticks' notes shown), the Custom tab "
-          "in 2D too", groups and noted and flat and not wide and w.custom.dim == 3,
+          "in 2D too (its face-gradient tick greyed)", groups and noted and flat and not wide and w.custom.dim == 3,
           "; ".join(wide) or f"{len(groups)} groups, notes {noted}, 2D {flat}")
     w.tabs.setCurrentIndex(A.TAB_NAMES.index("pipeline"))
     qa.processEvents()
@@ -1242,6 +1244,39 @@ def _polish(qa, w):
           and not w.fields_box.isAncestorOf(w.cu_check) and w.adv_group.isAncestorOf(w.cu_check)
           and w.adv_group.isAncestorOf(w.ld_check) and w.p_adv_group.isAncestorOf(w.p_rfixed)
           and w.o_adv_group.isAncestorOf(w.o_pstream))
+    # the face gradient (PS-DTFE '--face-gradient'): a tick in the Advanced group of all three run tabs, read into
+    # each job and named in the group's summary; exclusive with the linear deposit (it needs the volume weighting,
+    # which the linear deposit excludes). The ticks are put back as they were (the later sections use this window)
+    trios = [(w._shared(t, "face_gradient"), w._shared(t, "linear_deposit"), w._shared(t, "volume_weighted"))
+             for t in T.RUN_TABS]
+    was = [[cb.isChecked() for cb in trio] for trio in trios]
+    for fg, _ld, vw in trios:
+        vw.setChecked(True)
+        fg.setChecked(True)
+    qa.processEvents()
+    w._read_widgets()
+    w._update_summaries()
+    check("the face-gradient tick: in the Advanced group of all three run tabs, read into each job (FACE_GRADIENT=1 "
+          "for the Grids job's run_ps_dtfe.sh), named in the folded group's summary",
+          w.adv_group.isAncestorOf(w.fg_check) and w.p_adv_group.isAncestorOf(w.p_fg)
+          and w.o_adv_group.isAncestorOf(w.o_fg) and w.spec.face_gradient and w.pipe.face_gradient
+          and w.custom.face_gradient and w.spec.command()[1].get("FACE_GRADIENT") == "1"
+          and "face gradient" in w.adv_group.summary_text() and "face gradient" in w.p_adv_group.summary_text(),
+          f"{w.adv_group.summary_text()!r} {w.p_adv_group.summary_text()!r}")
+    gone, back = [], []
+    for fg, ld, _vw in trios:
+        ld.setChecked(True)
+        gone.append(not fg.isChecked())
+        fg.setChecked(True)
+        back.append(not ld.isChecked())
+    qa.processEvents()
+    check("... exclusive with the linear deposit on every run tab: ticking either unticks the other",
+          all(gone) and all(back) and w.spec.face_gradient and not w.spec.linear_deposit, f"{gone} {back}")
+    for (fg, ld, vw), (fg0, ld0, vw0) in zip(trios, was):     # (in this order: a tick unticks its exclusive partner)
+        fg.setChecked(fg0)
+        ld.setChecked(ld0)
+        vw.setChecked(vw0)
+    qa.processEvents()
     long_tips = []
     for i in range(A.EXPLORE):
         page = w.tabs.widget(i).widget()
