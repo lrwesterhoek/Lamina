@@ -139,6 +139,13 @@ bool psTessellationCached(User_options const &opts);
 // loop runs its non-master threads at verbose 0, so DTFE() reports the count after the loop.
 int psGpuFallbacksTaken(bool reset = false);
 
+// The deposit passes since the last reset whose face walk (--face-gradient) ran beside the GPU deposit
+// (DTFE_FACE_WALK_EARLY, ps_interpolation.cc): those whose walk was kept, the walks thrown away after a failed device
+// call, the walks' summed wall time and the part of it their passes still waited for after the device call had
+// returned; reset = true also zeroes them. A pass says so itself only where it prints its grid lines, which the
+// partition loop suppresses, so DTFE() reports the sums after the loop.
+void psFaceWalksEarlyTaken(long long &kept, long long &discarded, double &walkSec, double &waitSec, bool reset = false);
+
 // Auto-tune: the mean number of streams at a random point of the box -- sum|V_Euler| over
 // sum V_Lagrange of the Lagrangian tessellation -- estimated from up to 256 random Lagrangian
 // patches, before any triangulation of the run exists. Needs the particles' Lagrangian

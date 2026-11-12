@@ -362,8 +362,11 @@ auto-tuner plans with the uniform count, as for a call without the particles), `
 standard auto-tuner's busiest partition per thread, PS-DTFE's partition sub-grids, measured, booked and real, and the
 terms of its dynamic concurrency's start check), `DTFE_DEBUG_DEGREES` (checks the lazy vertex degrees after a GPU
 deposit against a full pass), `DTFE_DEBUG_FX_BOUNDS` (PS-DTFE, single precision: checks the bounds a `--face-gradient`
-pass takes over from the GPU extraction against a bound walk's), `DTFE_PTS_FULL_RECORDS` (keeps every point record
-member, unpacked: the packing test),
+pass takes over from the GPU extraction against a bound walk's), `DTFE_FACE_WALK_EARLY` (PS-DTFE on the GPU, single
+precision: a `--face-gradient` pass makes its face sums while the device deposits instead of after it; the same
+bytes, kept only when the device call succeeded; the pass then holds the face sums during the device call, which
+the memory plan books only in a `--grid-window` run: for timing measurements), `DTFE_PTS_FULL_RECORDS` (keeps every
+point record member, unpacked: the packing test),
 `DTFE_TESSELLATION_CACHE_FINGERPRINT` (prints a loaded tessellation's structure fingerprint),
 `DTFE_TESSELLATION_CACHE_LEGACY` (writes the single-stream cache format), `DTFE_TESSELLATION_CACHE_ZLIB` (zlib instead
 of libdeflate) and `DTFE_TESSELLATION_CACHE_CGAL_IO`

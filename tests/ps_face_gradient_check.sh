@@ -65,6 +65,17 @@
 #       twin's rms in the single build (measured 7.7e-11, in 2 of the slice's 9216 gradient values, both near zero),
 #       1e-9 in the double build (measured 0); dtfelib's load(name, stream_average=True) gives the same grid for a
 #       face run and a '--per-tet-gradient' run
+#   P16 (a GPU build) the face walk beside the device call (DTFE_FACE_WALK_EARLY=1, an opt-in switch for timing
+#       measurements; README.md): in the single build a '--gpu' run says that its face sums were made beside the GPU
+#       deposit and writes the grids of the run without the switch byte for byte (the mean flow's, the mass flux
+#       divergence, the density and the velocity) -- on one domain, in a one-cell '--grid-window' (the mean flow of
+#       the CPU run too) and on a 2^3 split with 4 partitions in flight, whose closing line counts the walks: all
+#       8 kept, none thrown away. After a device call that fails (DTFE_GPU_FAULT_AT=1:persist) the walk's sums are
+#       thrown away and the CPU deposit makes them: the grids of the same run without the switch byte for byte,
+#       the mean flow the CPU run's; on the split no walk is kept and some are thrown away. A NaN vertex mass leaves
+#       out, and counts, the same face shares with the switch, beside a device call that succeeds and beside one
+#       that fails (once, not twice); under the NaN test hook the switch does nothing. Nor does it in the double
+#       build, whose face pass takes its bounds from a bound walk of its own
 #   P8  dtfelib: FieldSet.face_gradient is True for the run (False with '--per-tet-gradient') and load('divergence',
 #       mean_field=True) returns the stored grid itself
 #   P9  the face sums ride the checkpoint: a '--partition 2 2 2' run killed after 3 partitions
@@ -78,7 +89,7 @@
 #       integrated by Simpson's rule, caustic cells included, to 0.05 max / 2e-3 rms of the rms (measured 0.022 /
 #       7.2e-4 and 0.028 / 7.1e-4), and 4 -> 8 intervals shrink the rms by at least 2.5 (measured 3.8 and 4.0); the
 #       thread, slab-mode and resume checks (P4, P9) compare '.a_massFluxDiv' too
-# About 27 s on the Mac in a GPU build, single or double (measured 26 to 28 s).
+# About 47 s on the Mac in a GPU build (single; 38 s in the double build, where P16 is one run; each measured once).
 # Usage: tests/ps_face_gradient_check.sh [--no-build]   (--no-build is accepted and ignored: nothing is built)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -87,6 +98,7 @@ cd "$ROOT" || exit 1
 source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double pair
 # the gradient route's environment pin: the runs below name their route by flag, and P14 checks the binary's default
 unset DTFE_FACE_GRADIENT
+unset DTFE_FACE_WALK_EARLY   # (the face walk beside the device call: P16 sets it per run)
 precision_require "${PS_BIN}"
 [ -x "${PS_BIN}" ] || { echo "FAIL: ${PS_BIN} is not built"; exit 1; }
 TMP="${DTFE_TEST_TMP}/ps_face_gradient_check"
@@ -662,6 +674,85 @@ EOF
         fi
     fi
 else echo "   (P12's --gpu cases: not a GPU build)"; fi
+
+if [ "$GPU" = "1" ]; then
+    echo ">> the face walk beside the device call (DTFE_FACE_WALK_EARLY=1): a window, a 2^3 split, a failed call"
+    E=DTFE_FACE_WALK_EARLY=1
+    FAULT=DTFE_GPU_FAULT_AT=1:persist     # every command buffer fails: the CPU deposits (tests/gpu_retry_check.sh R4)
+    beside() { grep -q "of the GPU-deposited tetrahedra on the CPU in .*(beside the GPU deposit)" "$TMP/$1.log"; }
+    fell_back() {    # the run's device call failed and the CPU deposit made the face sums
+        grep -q "using the CPU deposit\|ran on the CPU instead" "$TMP/$1.log" \
+            && ! grep -q "face sums (--face-gradient) of the GPU-deposited" "$TMP/$1.log"
+    }
+    walks() {        # the partition loop's closing line: '<walks kept> <walks thrown away>' (empty without one)
+        sed -n 's/.*(DTFE_FACE_WALK_EARLY) in \([0-9]*\) pass(es).*; \([0-9]*\) walk(s) thrown away.*/\1 \2/p' \
+            "$TMP/$1.log" | head -1
+    }
+    # what two '--gpu' runs share byte for byte: the face-derived grids and the exact fixed-point sums
+    grids_same() {
+        meanflow "$1" "$2" && cmp -s "$TMP/$1.a_den" "$TMP/$2.a_den" && cmp -s "$TMP/$1.a_vel" "$TMP/$2.a_vel"
+    }
+    PG=(--ps-volume-weighted --face-gradient --partition 2 2 2 --max-concurrent 4 --gpu)
+    run gpue pan_2.0 OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=4 "$E" -- --ps-volume-weighted --face-gradient --gpu
+    if precision_double; then
+        if gpu_walked gpue && ! beside gpue && grids_same gpu gpue; then
+            pass "P16 the double build: the switch does nothing (the walk after the deposit, the same grids)"
+        else fail "P16 the double build: DTFE_FACE_WALK_EARLY=1 changes the run (see $TMP/gpue.log)"; fi
+    else
+        run gwine pan_2.0 OMP_NUM_THREADS=1 "$E" -- --ps-volume-weighted --face-gradient \
+            --grid-window 0.01 99.99 0.01 99.99 50.1 53.0 --gpu
+        run gp8  pan_2.0 OMP_NUM_THREADS=4 -- "${PG[@]}"
+        run gp8e pan_2.0 OMP_NUM_THREADS=4 "$E" -- "${PG[@]}"
+        run gfl  pan_2.0 OMP_NUM_THREADS=1 "$FAULT" -- --ps-volume-weighted --face-gradient --gpu
+        run gfe  pan_2.0 OMP_NUM_THREADS=1 "$FAULT" "$E" -- --ps-volume-weighted --face-gradient --gpu
+        run gp8f pan_2.0 OMP_NUM_THREADS=4 "$FAULT" "$E" -- "${PG[@]}"
+        if ! gpu_walked gpue || ! beside gpue || beside gpu; then
+            fail "P16 one domain: no face walk beside the device call, or one without the switch (see $TMP/gpue.log)"
+        elif grids_same gpu gpue; then
+            pass "P16 one domain: the face sums beside the device call, the grids of the walk after it byte for byte"
+        else fail "P16 one domain: the face walk beside the device call changes a grid (see $TMP/gpue.log)"; fi
+        if ! gpu_walked gwine || ! beside gwine; then
+            fail "P16 a one-cell --grid-window: no face walk beside the device call (see $TMP/gwine.log)"
+        elif grids_same gwin gwine && meanflow win gwine; then
+            pass "P16 a one-cell --grid-window: the grids of the walk after the deposit, the CPU's mean flow"
+        else fail "P16 a one-cell --grid-window: the face walk beside the device call changes a grid"; fi
+        w8="$(walks gp8e)"
+        if [ -n "$(walks gp8)" ] || [ "$w8" != "8 0" ]; then
+            fail "P16 a 2^3 split, 4 in flight: '${w8}' walks kept / thrown away, want '8 0' (see $TMP/gp8e.log)"
+        elif grids_same gp8 gp8e; then
+            pass "P16 a 2^3 split, 4 in flight: 8 walks beside their device calls, the grids of the run without"
+        else fail "P16 a 2^3 split, 4 in flight: the face walks beside the device calls change a grid"; fi
+        if ! fell_back gfl || ! fell_back gfe; then
+            fail "P16 a failed device call: the run did not fall back to the CPU deposit (see $TMP/gfe.log)"
+        elif grids_same gfl gfe && same gfl gfe && meanflow f2.0 gfe; then
+            pass "P16 a failed device call: the walk's sums thrown away, the grids of the run without the switch"
+        else fail "P16 a failed device call: the run with the switch differs from the one without ($TMP/gfe.log)"; fi
+        wf="$(walks gp8f)"
+        if [ "${wf% *}" = "0" ] && [ "${wf#* }" -gt 0 ] 2>/dev/null && meanflow gp8 gp8f; then
+            pass "P16 a 2^3 split, every device call failing: ${wf#* } walks thrown away, none kept, the same mean flow"
+        else
+            fail "P16 a 2^3 split, every device call failing: '${wf}' walks kept / thrown away (see $TMP/gp8f.log)"
+        fi
+        # a NaN vertex mass (P12's snapshot): the shares the walk leaves out are counted once, with either outcome
+        run nmge pan_nanm OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=4 "$E" -- "${NM[@]}" --gpu
+        run nmfe pan_nanm OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=4 "$FAULT" "$E" -- "${NM[@]}" --gpu
+        dc="$(drops nmc)"; dg="$(drops nmge)"; df="$(drops nmfe)"
+        if ! gpu_walked nmge || ! beside nmge || ! fell_back nmfe; then
+            fail "P16 a NaN mass: no walk beside the device call, or no fallback under the fault (see $TMP/nmge.log)"
+        elif [ -n "$dc" ] && [ "$dc" -gt 0 ] && [ "$dc" = "$dg" ] && [ "$dc" = "$df" ] && meanflow nmc nmge \
+             && meanflow nmc nmfe; then
+            pass "P16 a NaN mass: $dc face shares left out beside a device call that succeeds and one that fails"
+        else
+            fail "P16 a NaN mass: face shares left out CPU '${dc}' / beside the call '${dg}' / a failed call '${df}'"
+        fi
+        # the NaN test hook: its bounds are not the extraction's, so the walk stays after the deposit
+        run nge pan_2.0 OMP_NUM_THREADS=1 DTFE_TEST_NAN_SHARE=50 "$E" -- --ps-volume-weighted --face-gradient --gpu
+        dc="$(drops ng)"; dg="$(drops nge)"
+        if gpu_walked nge && ! beside nge && [ -n "$dc" ] && [ "$dc" = "$dg" ] && meanflow ng nge; then
+            pass "P16 the NaN hook: the switch does nothing ($dc face shares left out, the same grids)"
+        else fail "P16 the NaN hook: DTFE_FACE_WALK_EARLY=1 changes the run (see $TMP/nge.log)"; fi
+    fi
+else echo "   (P16's --gpu cases: not a GPU build)"; fi
 
 echo ">> dtfelib reads the stored mean-flow grids"
 for k in f2.0 b2.0; do

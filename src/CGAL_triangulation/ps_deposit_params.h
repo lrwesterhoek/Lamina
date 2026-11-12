@@ -174,9 +174,26 @@ enum FixedShareSlot { FX_DROP_MASS = 10, FX_DROP_SUMW = 11, FX_DROP_FACE_S = 12,
 static_assert( int(PS_FX_CPU_N) <= int(FX_DROP_MASS), "a moment grid's slot would be the mass grid's" );
 // The run's dropped shares by slot: every pass (CPU, or a GPU host after a deposit it kept) adds its counts here
 inline std::atomic<unsigned long long> fixedShareDrops[FX_DROP_SLOTS] = {};
+// A thread whose counts are not the run's yet points this at FX_DROP_SLOTS counters of its own (null: the run's). The
+// face walk beside the GPU deposit does (ps_interpolation.cc PSEarlyFaceWalk): its sums are thrown away when the
+// device call fails, and the CPU deposit then counts the same shares itself.
+inline thread_local unsigned long long *fixedShareDropSink = nullptr;
+struct FixedShareDropSinkScope   // sets the sink for a scope of the calling thread
+{
+    explicit FixedShareDropSinkScope(unsigned long long *const sink) : before( fixedShareDropSink )
+    {
+        fixedShareDropSink = sink;
+    }
+    ~FixedShareDropSinkScope() { fixedShareDropSink = before; }
+    FixedShareDropSinkScope(FixedShareDropSinkScope const &) = delete;
+    FixedShareDropSinkScope &operator=(FixedShareDropSinkScope const &) = delete;
+private:
+    unsigned long long *const before;
+};
 // Counts n dropped shares of a slot (the cold path of the guard; also the GPU hosts' per-pass totals)
 inline void fixedShareDropped(int const slot, unsigned long long const n = 1)
 {
+    if ( fixedShareDropSink ) { fixedShareDropSink[slot] += n; return; }
     fixedShareDrops[slot].fetch_add( n, std::memory_order_relaxed );
 }
 // The guard itself: the share's integer in q, or false (q = 0, counted in 'slot') for a product that has none

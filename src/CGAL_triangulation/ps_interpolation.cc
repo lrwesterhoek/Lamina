@@ -40,6 +40,7 @@
 #include <iomanip>   // the phase-timing line
 #include <mutex>     // the stream statistics over cell ranges (psStreamStats)
 #include <sstream>   // the phase-timing line
+#include <system_error> // a thread the system refuses (PSEarlyFaceWalk)
 #include <thread>    // the CPU deposit's threads (psDepositThreads)
 #include <type_traits>
 #include <unordered_map>   // DTFE_DEBUG_DEGREES self-check
@@ -61,6 +62,19 @@ static std::atomic<int> psGpuFallbacks{ 0 };
 int psGpuFallbacksTaken(bool reset)
 {
     return reset ? psGpuFallbacks.exchange( 0 ) : psGpuFallbacks.load();
+}
+
+// The face walks beside the GPU deposit (DTFE_FACE_WALK_EARLY, PSEarlyFaceWalk; ps_point_eval.h psFaceWalksEarlyTaken):
+// the passes whose walk was kept, the walks thrown away after a failed device call, the walks' summed wall time and
+// the part of it their passes still waited for after the device call had returned (microseconds).
+static std::atomic<long long> psFaceEarlyKept{ 0 }, psFaceEarlyDiscarded{ 0 };
+static std::atomic<long long> psFaceEarlyWalkUs{ 0 }, psFaceEarlyWaitUs{ 0 };
+void psFaceWalksEarlyTaken(long long &kept, long long &discarded, double &walkSec, double &waitSec, bool reset)
+{
+    kept      = reset ? psFaceEarlyKept.exchange( 0 )      : psFaceEarlyKept.load();
+    discarded = reset ? psFaceEarlyDiscarded.exchange( 0 ) : psFaceEarlyDiscarded.load();
+    walkSec = double( reset ? psFaceEarlyWalkUs.exchange( 0 ) : psFaceEarlyWalkUs.load() ) * 1e-6;
+    waitSec = double( reset ? psFaceEarlyWaitUs.exchange( 0 ) : psFaceEarlyWaitUs.load() ) * 1e-6;
 }
 
 // Failed GPU deposit attempts of this run (run_progress.h: the progress sidecar's gpu_retries), counted by
@@ -1142,6 +1156,16 @@ struct PSFxState
     // GPU deposit (psFxBoundsFromGpu says when they stand in for the walk's)
     PSFixedBounds gpuBounds;
     bool gpuBoundsValid = false;
+    // the face walk ran beside the GPU deposit (DTFE_FACE_WALK_EARLY, PSEarlyFaceWalk) and the device call succeeded:
+    // the face words are filled and their units set, so psCpuFixedUnits and the walk after the deposit leave them
+    // alone; and that walk's wall time
+    bool faceWalked = false;
+    double faceWalkSec = 0.;
+    // forgets the face words and their units (a walk beside the GPU deposit that is thrown away)
+    void faceRelease()
+    {
+        for (PSFxWords *const p : { &faceS, &faceN, &faceP }) { std::vector<int64_t>().swap( p->w ); p->scale = 0.f; }
+    }
 
     // the Real accumulator of grid g, allocated (zeroed) if the pass has none yet: a grid that is not a fixed-point
     // sum after all (no unit, or the GPU's float grid)
@@ -1402,7 +1426,12 @@ static PSFixedBounds psFxBoundWalk(PSPassCtx const &passCtx, PSFxState const &fx
 // Mass, velocity, the per-stream gradient and
 // the dispersion stay the device's: this walk writes the face words only, shared by its threads (relaxed atomics,
 // order-free like the deposit loop's). Costs the walk the CPU face deposit costs beside its exact deposit.
-static void psFaceWalk(PSPassCtx const &passCtx, PSFxState &fx, bool const psVertexMass)
+// 'threads': the walk's team, the caller's psDepositThreads() (the walk beside the GPU deposit runs on a thread of
+// its own, outside the partition loop's team, where that count would be the whole machine's). 'dropsOut' (FX_DROP_SLOTS
+// counters, or null: the run's): where the walk's dropped shares are counted, for a walk whose sums may yet be thrown
+// away (PSEarlyFaceWalk).
+static void psFaceWalk(PSPassCtx const &passCtx, PSFxState &fx, bool const psVertexMass, int const threads,
+                       unsigned long long *const dropsOut)
 {
     DT &dt = passCtx.dt;   // (PS_FINITE_CELLS_BEGIN / END)
     User_options &userOptions = passCtx.userOptions;
@@ -1423,10 +1452,12 @@ static void psFaceWalk(PSPassCtx const &passCtx, PSFxState &fx, bool const psVer
     float const sS = fx.faceS.scale, sN = fx.faceN.scale, sP = fx.faceP.scale;
     size_t const BLK = 256;
     size_t const nBlocks = noTotalCells / BLK + 1;
-    size_t const nT = size_t( std::max( 1, std::min( psDepositThreads(), int( std::min<size_t>( nBlocks, 1024 ) ) ) ) );
+    size_t const nT = size_t( std::max( 1, std::min( threads, int( std::min<size_t>( nBlocks, 1024 ) ) ) ) );
     bool const atomic = nT > 1;
+    std::vector<unsigned long long> dropPart( dropsOut ? nT * FX_DROP_SLOTS : 0, 0ull );   // (per walk thread)
     auto faceRun = [&](size_t const th)
     {
+        FixedShareDropSinkScope const sink( dropsOut ? &dropPart[th * FX_DROP_SLOTS] : nullptr );
         size_t idx = 0;
         for (auto it = PS_FINITE_CELLS_BEGIN; it != PS_FINITE_CELLS_END; ++it, ++idx)
         {
@@ -1480,6 +1511,9 @@ static void psFaceWalk(PSPassCtx const &passCtx, PSFxState &fx, bool const psVer
         faceRun( 0 );
         for (std::thread &x : pool) x.join();
     }
+    if ( dropsOut )
+        for (size_t th = 0; th < nT; ++th)
+            for (int k = 0; k < FX_DROP_SLOTS; ++k) dropsOut[k] += dropPart[th * FX_DROP_SLOTS + k];
 }
 #endif
 
@@ -1838,6 +1872,24 @@ static inline void psDebugFxBoundsCheck(PSPassCtx const &passCtx, PSFxState cons
     if ( bad ) throwError( "DTFE_DEBUG_FX_BOUNDS: the GPU extraction's bounds differ from the bound walk's." );
 }
 
+// The face sums' units (--face-gradient) from a pass's bounds, and their zeroed words (int64: the walk's or the
+// dynamic team's threads add in any order) for every cell of the pass. False, with nothing changed, when a bound gives
+// no unit.
+static inline bool psFaceUnits(PSFxState &fx, PSFixedBounds const &fb, size_t const totalGrid)
+{
+    float sS = 0.f, sN = 0.f, sP = 0.f;
+    bool const units = psMomentFixedScale( fb.faceS, sS ) && psMomentFixedScale( fb.faceN, sN )
+                       && psMomentFixedScale( fb.faceP, sP ) && sS > 0.f && sN > 0.f && sP > 0.f;
+    if ( !units ) return false;
+    fx.faceS.scale = sS;
+    fx.faceS.w.assign( totalGrid * 2 * NO_DIM * noVelComp, 0 );
+    fx.faceN.scale = sN;
+    fx.faceN.w.assign( totalGrid * 2 * NO_DIM, 0 );
+    fx.faceP.scale = sP;
+    fx.faceP.w.assign( totalGrid * 2 * NO_DIM, 0 );
+    return true;
+}
+
 // The CPU deposit's fixed-point units: the mass accumulator and the moment grids' units.
 static inline void psCpuFixedUnits(PSPassCtx const &passCtx, PSGridsCtx const &gridsCtx, bool const metalDeposited,
                                    PSFxState &fx, bool const psVertexMass)
@@ -1947,21 +1999,11 @@ static inline void psCpuFixedUnits(PSPassCtx const &passCtx, PSGridsCtx const &g
     // tetrahedra after the device's deposit, and their units come from the bounds the extraction summed (bounds()
     // above; the same sums as the walk's, so a GPU and a CPU deposit of one pass take the same face units). Where
     // those do not stand in (a double build, the NaN test hook), the bound walk runs once more for them.
-    if ( fx.face )
+    // (fx.faceWalked: the walk beside the GPU deposit took the units from those bounds and filled the words already.)
+    if ( fx.face && !fx.faceWalked )
     {
         PSFixedBounds const &fb = bounds();
-        float sS = 0.f, sN = 0.f, sP = 0.f;
-        if ( psMomentFixedScale( fb.faceS, sS ) && psMomentFixedScale( fb.faceN, sN ) && psMomentFixedScale( fb.faceP, sP )
-             && sS > 0.f && sN > 0.f && sP > 0.f )
-        {
-            fx.faceS.scale = sS;
-            fx.faceS.w.assign( totalGrid * 2 * NO_DIM * noVelComp, 0 );
-            fx.faceN.scale = sN;
-            fx.faceN.w.assign( totalGrid * 2 * NO_DIM, 0 );
-            fx.faceP.scale = sP;
-            fx.faceP.w.assign( totalGrid * 2 * NO_DIM, 0 );
-        }
-        else
+        if ( !psFaceUnits( fx, fb, totalGrid ) )
         {
             fx.face = false;
             MESSAGE::Warning warning( userOptions.verboseLevel );
@@ -2728,6 +2770,60 @@ struct PSGpuCtx
     std::vector<uint32_t> &deferredOrd;
 };
 
+// The face walk beside the GPU deposit (DTFE_FACE_WALK_EARLY=1): psFaceWalk on a thread of its own while the pass's
+// thread waits in the device call, joined right after that call and before the copy-back. The walk reads the
+// tessellation, the pass's box and the vertex degrees and writes the face words only; the device call touches none of
+// them. Its dropped shares are counted apart ('drops'), and its sums are the pass's only once the device call has
+// succeeded: after a failed call the caller throws both away, and the CPU deposit makes the face sums as it does
+// without the switch. The thread counts as one core of the pool while it runs (the pass's own core is lent for the
+// device call: ps_metal_host.cc CoreLend); the walk's team is psFaceWalk's. The destructor joins, so an exception on
+// the pass's thread cannot leave the walk running on a pass that is being torn down.
+struct PSEarlyFaceWalk
+{
+    std::thread th;
+    std::exception_ptr error;
+    double sec = 0.;
+    unsigned long long drops[FX_DROP_SLOTS] = {};
+    bool started = false;
+    PSEarlyFaceWalk() = default;
+    PSEarlyFaceWalk(PSEarlyFaceWalk const &) = delete;
+    PSEarlyFaceWalk &operator=(PSEarlyFaceWalk const &) = delete;
+    ~PSEarlyFaceWalk() { if ( th.joinable() ) th.join(); }
+    // (a thread the system refuses leaves 'started' false: the walk then runs after the deposit, as without the switch)
+    void start(PSPassCtx const &passCtx, PSFxState &fx, bool const psVertexMass, int const threads)
+    {
+        try
+        {
+            th = std::thread( [this, &passCtx, &fx, psVertexMass, threads]
+            {
+                try
+                {
+                    CorePool::Hold const hold( 1 );
+                    auto const t0 = std::chrono::steady_clock::now();
+                    psFaceWalk( passCtx, fx, psVertexMass, threads, drops );
+                    sec = std::chrono::duration<double>( std::chrono::steady_clock::now() - t0 ).count();
+                }
+                catch (...) { error = std::current_exception(); }
+            } );
+            started = true;
+        }
+        catch (std::system_error const &) { started = false; }
+    }
+    // waits for the walk; an exception it met is thrown here, on the pass's thread
+    void join()
+    {
+        if ( th.joinable() ) th.join();
+        if ( error ) std::rethrow_exception( error );
+    }
+};
+// ... and the run's count of them (psFaceWalksEarlyTaken)
+static inline void psFaceWalkEarlyCount(bool const kept, double const walkSec, double const waitSec)
+{
+    ( kept ? psFaceEarlyKept : psFaceEarlyDiscarded ).fetch_add( 1 );
+    psFaceEarlyWalkUs.fetch_add( (long long)( walkSec * 1e6 ) );
+    psFaceEarlyWaitUs.fetch_add( (long long)( waitSec * 1e6 ) );
+}
+
 // GPU deposit (--gpu, GPU build): the extraction walk (with the CPU loop's filters), the cost sort, the call, and
 // the GPU's grids taken over as the pass's (the released tets added on the host); metalDeposited on success, else the
 // CPU deposits the pass (a template: the audit, the phase clock and the grid sum are the pass's types). The walk stays
@@ -3123,6 +3219,18 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
         // takes it (fxBoundWalk), not from the host's sum of the masses it is handed
         if ( windowMode ) fxUnits.massTotal = gpuBounds.B[PS_FX_DW];
         lap( PS_PH_SORT );
+        // DTFE_FACE_WALK_EARLY=1: the face walk (--face-gradient) starts here, beside the device call, instead of
+        // after the deposit -- where the walk after the deposit would take its units from these same bounds
+        // (psFxBoundsFromGpu: a single build without the NaN test hook) and they give a unit. Its words are that
+        // walk's: the same units, the same order-free integer sums. (The face words are then held during the device
+        // call, which the planner books only under --grid-window: a switch for measurements, off by default.)
+        PSEarlyFaceWalk earlyFace;
+        if ( fx.face && psFxBoundsFromGpu( true, fx ) && Env::flag( "DTFE_FACE_WALK_EARLY" )
+             && psFaceUnits( fx, fx.gpuBounds, totalGrid ) )
+        {
+            earlyFace.start( passCtx, fx, ctx.psVertexMass, psDepositThreads() );
+            if ( !earlyFace.started ) fx.faceRelease();
+        }
         // (the GPU call's wall time includes any wait for the device: concurrent partitions queue on it)
         bool gpuOk = psGpuDepositFields(tetVerts, tetVels, tetMasses, tetDens, tetScal, bl, dxv,
                                   nGrid, subOrigin, subDims, nSub,
@@ -3145,6 +3253,22 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
                 metalErr = "the GPU returned a moment grid of the wrong size";
             }
         lap( PS_PH_GPU );
+        if ( earlyFace.started )
+        {   // before the copy-back; what is left of the walk counts as CPU deposit time, like the later walk's
+            auto const tJoin0 = std::chrono::steady_clock::now();
+            earlyFace.join();
+            double const waited = std::chrono::duration<double>( std::chrono::steady_clock::now() - tJoin0 ).count();
+            lap( PS_PH_CPU );
+            psFaceWalkEarlyCount( gpuOk, earlyFace.sec, waited );
+            if ( gpuOk )
+            {
+                fx.faceWalked = true;
+                fx.faceWalkSec = earlyFace.sec;
+                for (int k = 0; k < FX_DROP_SLOTS; ++k)
+                    if ( earlyFace.drops[k] ) fixedShareDropped( k, earlyFace.drops[k] );
+            }
+            else fx.faceRelease();   // (the CPU deposit makes the face sums, and counts their dropped shares, itself)
+        }
         if ( gpuOk )
         {
             fx.logUnits( "GPU", gpuOut.massScale, gpuOut.fxScale );   // (--verbose 3)
@@ -5085,15 +5209,22 @@ void interpolateGrid_phaseSpace(DT &dt,
                 << nDepThreads << ( nDepThreads == 1 ? " thread" : " threads" ) << ").\n" << MESSAGE::Flush;
 
 #if NO_DIM==3
-    // --face-gradient beside the GPU deposit (D17): the face sums of every kept tetrahedron from one CPU walk
+    // --face-gradient beside the GPU deposit (D17): the face sums of every kept tetrahedron from one CPU walk -- here,
+    // after the deposit, or (DTFE_FACE_WALK_EARLY: fx.faceWalked) already made while the device call ran
     if ( metalDeposited && fx.face && !fx.faceS.w.empty() )
     {
-        auto const tFace0 = std::chrono::steady_clock::now();
-        psFaceWalk( passCtx, fx, psVertexMass );
-        lap( PS_PH_CPU );
+        double faceSec = fx.faceWalkSec;
+        if ( !fx.faceWalked )
+        {
+            auto const tFace0 = std::chrono::steady_clock::now();
+            psFaceWalk( passCtx, fx, psVertexMass, psDepositThreads(), nullptr );
+            lap( PS_PH_CPU );
+            faceSec = std::chrono::duration<double>( std::chrono::steady_clock::now() - tFace0 ).count();
+        }
         if ( not userOptions.psSuppressGridStats )
             message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " face sums (--face-gradient) of the GPU-deposited tetrahedra on the CPU in "
-                    << std::chrono::duration<double>(std::chrono::steady_clock::now() - tFace0).count() << " s.\n" << MESSAGE::Flush;
+                    << faceSec << " s" << ( fx.faceWalked ? " (beside the GPU deposit)" : "" ) << ".\n"
+                    << MESSAGE::Flush;
     }
 #endif
 

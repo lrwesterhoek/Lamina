@@ -2161,6 +2161,21 @@ static void psReportLoopEnd(PSLoopCtx &c)
                 << "the master thread's partitions print the reason (above, when one of them fell back); the "
                 << "grids are complete, the run only took longer.\n" << MESSAGE::EndWarning;
     }
+    // DTFE_FACE_WALK_EARLY: what the face walks beside the GPU deposit came to, once for the loop (a pass says so
+    // itself only where it prints its grid lines, which the partition loop suppresses)
+    {
+        long long kept = 0, discarded = 0;
+        double walkSec = 0., waitSec = 0.;
+        psFaceWalksEarlyTaken( kept, discarded, walkSec, waitSec, true );
+        if ( kept + discarded > 0 )
+        {
+            MESSAGE::Message early( userOptions.verboseLevel );
+            early << "PS-DTFE: face sums (--face-gradient) beside the GPU deposit (DTFE_FACE_WALK_EARLY) in " << kept
+                  << " pass(es): the walks took " << walkSec << " s in all, " << waitSec
+                  << " s of it after the device call had returned; " << discarded
+                  << " walk(s) thrown away after a failed GPU deposit.\n" << MESSAGE::Flush;
+        }
+    }
 
     PartitionCheckpoint::reportWrites( std::chrono::duration<double>( std::chrono::steady_clock::now() - psLoopStart ).count(),
                                        userOptions.verboseLevel );
@@ -2532,6 +2547,11 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     // the gate keeps; this plan stays the loop's threads, the parallel insert's share)
     ConcurrentTriangulationPlan triangulationPlan( psConcurrency, totalPartitions );
     psGpuFallbacksTaken( true );   // counted from here; reported once after the loop
+    {   // ... and the face walks beside the GPU deposit (DTFE_FACE_WALK_EARLY)
+        long long kept, discarded;
+        double walkSec, waitSec;
+        psFaceWalksEarlyTaken( kept, discarded, walkSec, waitSec, true );
+    }
     // a partition starts only when the machine has the memory for it (or nothing else is in flight);
     // under the ordered merge it waits only behind lower-numbered partitions (auto_tune.h)
     // (under '--ps-merge fixed-point' orderedMerge is false -- no partition waits for its turn, so the gate

@@ -117,6 +117,9 @@ item's code follows in a later batch; nothing here is built unless it says so.
   tessellations (D19: P11.3's records of 2026-11-11; PS-DTFE's output bytes move once); the regular part's full
   gradient, shear and vorticity in PS-DTFE (D12: P10.10); the face gradient as PS-DTFE's default where the run
   qualifies, as in standard DTFE (D13, after D15 and D17: P10's status).
+  The face sweep's first step, without a kernel, is built as an opt-in (2026-11-12: the existing CPU walk beside the
+  device call, `DTFE_FACE_WALK_EARLY=1`; 13.7–16.5% less wall time at 256³, 7.2% on one 512³ pair; P11's status of
+  that day). Whether it becomes the default, and whether the kernel follows, is the owner's.
 - **Decided on 2026-11-11 after the explanations:** the three small fixes that change output bytes at about 1e-8 (P4.4's
   linear weights from one compiled order, P11.7 item 5's boundary-plane section, a run-wide fixed-point unit after
   P10.8) are all to be built, before the production campaign, so that the campaign's grids come from the repaired code.
@@ -127,14 +130,17 @@ item's code follows in a later batch; nothing here is built unless it says so.
   grids then differ from the grids on disk in the last digits, and the byte comparisons' references move once, after
   these three and the canonical vertex order (D19). D6: the fixed-point merge stays opt-in.
 - **Small code items, no full-size run:** the split choice with the lane share (P11.8's "Still left of the leftovers":
-  the 5³ run is made, one 6³ run on the same binaries is left, then the owner decides); `psFxBoundWalk` could claim
-  blocks (P9.2). Standard DTFE's `_a` average team stays outside the core pool by design (P9.2). Done on 2026-11-11
-  (the next batch's records in P11.8): a standard Grids job's `FACE_GRADIENT`, ps_runtime_check R3 under
-  `DTFE_GPU_FLOAT_MOMENTS=1`, the deprecation gate reading the battery's stage logs (P6.7's item 6).
+  both runs are made, the pair on 2026-11-12: 5³ is 1.7% faster than 6³ for 6.34 GB more peak footprint; the owner
+  decides); `psFxBoundWalk` could claim blocks (P9.2). Standard DTFE's `_a` average team stays outside the core pool
+  by design (P9.2). Done on 2026-11-11 (the next batch's records in P11.8): a standard Grids job's `FACE_GRADIENT`,
+  ps_runtime_check R3 under `DTFE_GPU_FLOAT_MOMENTS=1`, the deprecation gate reading the battery's stage logs (P6.7's
+  item 6).
 - **Larger:** P8.8, a time objective for the planner, and P8.9 step 2, the same for standard DTFE (both need a sweep of
   full-size runs); why PS-DTFE's grids differ across splits (the dispersion moves by over 1% in 0.02% of the cells, the
-  P2 status of 2026-11-07): designed 2026-11-11 (the P2 status, "Cross-split analysis"), an analysis of the existing
-  grids that waits for the maintainer's run; the standard face trio's over-prediction (P11.8).
+  P2 status of 2026-11-07): analysed on the existing z = 1 pair on 2026-11-12 (the P2 status, "Cross-split analysis":
+  85% of the flagged cells change by no more than rounding that the subtraction amplifies, just over half of the cells
+  far beyond it sit on a moved centroid fallback of the sampled deposit, the rest are open; by a proxy the seams are
+  not the main cause), a pair on today's binaries is left; the standard face trio's over-prediction (P11.8).
 
 ---
 
@@ -190,7 +196,7 @@ are acted on. Each phase updates `change_log.txt` and the README section it touc
 | **P8** | Auto-tuner calibration and a time objective | plans change; outputs do not (checked with the plan pinned) | G-tuner, G-real | P2, P3.8 | L |
 | **P9** | CPU and GPU optimisations | no (each item is byte-identical by design) | G-byte, G-gpu, G-real timing (G-emu until D11) | P2, P4.1 | L |
 | **P10** | Shared exact velocity derivatives (the face method) for both estimators, PS mean-flow gradient and mass flux | standard: no (same gradient), except P10.8 (the standard exact-average grids move by rounding: 6e-8 of the rms on the CPU exact bytecmp runs, 2e-16 in the double build; the 3³ plan's strip by up to 1e-2 in single cells; the P10 status has the 512³ figures); PS: new and changed velocity-derivative grids | G-build, G-byte (standard), the P10 tests, G-battery, G-linux | P3, P9.2 | L |
-| **P11** | Which device for which phase, chosen by the program: per-phase timing, the parallel insert's rule, the PS face gradient beside the GPU exact deposit (D17), the 512³ bench (P11.1), the face walk's and the tuner's fixes (P11.7) and the lane-share refit (P11.8); P11.6 dropped. **Committed** in `2f428bc`, `c8dd4fb`, `ae81362` and `2d262e4`; P11.7 item 3 and P11.8's confirming runs open | no at a given plan (placement moves no byte: bytecmp); above 1e6 points the parallel insert moves the CPU float sums and PS-DTFE's velocity moments at rounding between runs (D19); plans change (P11.7, P11.8) | G-byte, G-tuner, the face suites, G-battery, G-linux; the bench | P10, P8 | 2026-11-09 to 2026-11-11, plus the 14-run bench (P11.1) |
+| **P11** | Which device for which phase, chosen by the program: per-phase timing, the parallel insert's rule, the PS face gradient beside the GPU exact deposit (D17), the 512³ bench (P11.1), the face walk's and the tuner's fixes (P11.7) and the lane-share refit (P11.8); P11.6 dropped; the face walk beside the device call an opt-in (the status of 2026-11-12). **Committed** in `2f428bc`, `c8dd4fb`, `ae81362` and `2d262e4`; P11.7 item 3 and P11.8's confirming runs open | no at a given plan (placement moves no byte: bytecmp); above 1e6 points the parallel insert moves the CPU float sums and PS-DTFE's velocity moments at rounding between runs (D19); plans change (P11.7, P11.8) | G-byte, G-tuner, the face suites, G-battery, G-linux; the bench | P10, P8 | 2026-11-09 to 2026-11-11, plus the 14-run bench (P11.1) |
 | **P12** | `--exact` / `--sampled`, the exact average the default of both binaries (D20); PS-DTFE's selection skip and core lend. **Committed** as `39583f0` | yes for unflagged runs with an `_a` field (now exact; PS-DTFE adds `.tetTouch`); a run that names its average keeps its bytes | G-build, G-battery, G-byte, G-gpu, G-tuner, G-docs, G-gui, G-linux | P6, P11.1 | 2026-11-09 evening to 2026-11-10 (code and gates) |
 | **P13** | Run modes `--run-mode gentle\|balanced\|performance` and `--gpu-share` (a mixed CPU + GPU PS exact run), the launcher's 'Machine use'; the mode bench of 2026-11-10. **Committed** as `9bfa39a` | the binaries' defaults: no; the drivers' and the launcher's balanced default runs fewer threads (standard DTFE's grids then differ from all-core runs at float rounding); a mixed run's grids differ at float rounding, the mass exact | G-build, G-battery (`tests/run_mode_check.sh`), G-byte, G-tuner, G-linux | P12 | 2026-11-10 (code, the mode bench, gates) |
 | **R** | The rerun campaign, once, after every code item: P2.3's reruns, P8.1/P8.2's calibration, the PS exact reruns with the P10 grids, the science comparisons. **Calibration night done 2026-11-08/09** (the R status); the rest is not launched (D16 decided and P10.8 done on 2026-11-09, D15 settled by D20) | the products | G-real | all code items | machine nights |
@@ -545,11 +551,13 @@ P2.1, P2.2, P2.4 and P2.5 done; P2.3 partly (three of its reruns).
   - Outputs: the z = 0 PS rerun (the logged run's 6³ split) is byte-identical to the logged run in all seven grids
     compared (density, velocity, dispersion, streams, caustics, the points' density and streams). The other two
     changed split (6³ vs 5³ and 3³): mean differences ~1e-5 of the mean, the same mass; the PS dispersion moves by
-    more than 1% in 0.02% of the cells (most likely the tetrahedra at the partition seams; not checked), up to 30× in
-    a few. Only the same-split run checks tonight's code against the logged one (the others also differ in build).
-  - Cross-split analysis (designed 2026-11-11; nothing run yet). In a periodic run, which tetrahedra exist, who owns
-    them and which samples they hold are the same in every split. The ownership is exact (`ps_cell_filter.h`), the
-    inside test is exact and the seam copies are exact shifts. What moves with the split is rounding:
+    more than 1% in 0.02% of the cells (first read as the tetrahedra at the partition seams; analysed on 2026-11-12,
+    the next item: by a proxy the seams are not the main cause), up to 30× in a few. Only the same-split run checks
+    tonight's code against the logged one (the others also differ in build).
+  - Cross-split analysis (designed 2026-11-11; run on the existing z = 1 pair on 2026-11-12, the result under the
+    design). In a periodic run, which tetrahedra exist, who owns them and which samples they hold are the same in
+    every split. The ownership is exact (`ps_cell_filter.h`), the inside test is exact and the seam copies are exact
+    shifts. What moves with the split is rounding:
     - H1, each tetrahedron's velocity profile, formed in float in CGAL's vertex-0 frame. That frame follows each
       partition's insertion history (P11.3's bytecmp B: the PS velocity moments move, the density does not).
     - H2, the default merge, which adds each partition's once-rounded floats in index order.
@@ -565,7 +573,36 @@ P2.1, P2.2, P2.4 and P2.5 done; P2.3 partly (three of its reruns).
     The analysis script (design note `cross-split.md`, script `cross_split.py`, both in the session notes) separates
     these on the existing grids: the change of σ² in units of ⟨v²⟩ (rounding: a few u), the density test (H1 leaves it
     identical; H2 moves it one ulp where partitions meet), the location against the Lagrangian faces, neighbour pairs,
-    the points and the build lines. Result: TO MEASURE.
+    the points and the build lines.
+
+    Result (2026-11-12; a read-only analysis of the existing z = 1 pair at 512³, the 6³ rerun of 2026-11-07 against
+    the 5³ production set of 2026-10-14; the record `cross-split-z1-2026-11-12.txt` in the session notes). Both are
+    sampled deposits, made before the canonical vertex order (D19). The builds differ (the 5³ set's `Build:` line
+    reads 49ccb9e with uncommitted changes); on one split the same two builds gave the byte-identical z = 0 grids
+    above, so the pair is read as a measure of the split, which is an inference. The dispersion differs by more than
+    1% in 25176 cells (0.01876%), by up to 39.9×. By the change of σ² in units u = 2^-24 of ⟨v²⟩ they fall into three
+    classes: 21520 cells (85.48%) up to 32 u, 977 (3.881%) from 32 to 1024 u, 2679 (10.64%) beyond.
+    - Up to 32 u is rounding that the subtraction amplifies: 92.57% of that class are single-stream cells, 99.87% have
+      σ²/⟨v²⟩ below 1e-4, and the density is identical in 88.17%. With the particle count matched, 35.6% of the class
+      have a particle within one particle spacing of a Lagrangian face of either split, against 23.7% of random cells
+      (within 2 spacings 44.2% against 34.4%, within 4 58.6% against 52.3%). By this proxy the seams account for about
+      13 to 16% of the class. The proxy can miss a cell that two partitions feed, and the clustering below is not
+      controlled for.
+    - Beyond 1024 u, 1522 cells (56.81%) sit on a density cell that itself differs by more than 4 last places, 1521 of
+      them on a pair of neighbours with opposite, equal changes: a tetrahedron that holds no sample, which the sampled
+      deposit puts whole into the cell of its centroid, and whose centroid falls in one cell under one split and in
+      the neighbour under the other. All 5718 density cells that differ by more than 4 last places carry that
+      fallback's flag. The other 1157 cells keep their density (identical in 88.42%) and move by up to 29.8×: their
+      cause is open. Candidates from the code, none shown: the vertex-0 frame at thin tetrahedra (H1), or a thin
+      tetrahedron on the CPU in one split and on the GPU in the other. Neither class beyond 32 u shows an excess near
+      the faces.
+    - Not seen: other tetrahedra (over the whole grid the stream count differs in 1.387% of the cells, in each by at
+      most 3 last places), a clamp of a negative diagonal, a partition on the other route. Not separated: H1, the
+      per-pass unit and the deferred tetrahedra. Half of the flagged cells lie in 35 of the 512 blocks of 64³ cells,
+      which is not explained.
+
+    Whether today's default (exact deposits, the canonical vertex order) still shows either class is not measured.
+    Proposed, not run: one 6³ / 5³ pair on today's binaries with the outputs kept, then the same analysis.
 - (Done on 2026-11-08/09 except the CPU `--ps-window` runs: the status of 2026-11-09 below.) Open: P2.3's TNG50-3-Dark
   z = 0 rerun (GPU sampled + points, ~2.4 h logged), the 1024³ CPU exact run (53 min
   logged) and the CPU `--ps-window` runs. **Moved to phase R** (after all code items, owner 2026-11-07).
@@ -2446,6 +2483,12 @@ double build's float32 GPU deposit). (Committed 2026-11-09 as `2f428bc`.) Uncomm
     `tests/dev/tune_report_set.sh` move (all standard DTFE), 29 under the switch. The suites above and the battery
     passed (30 of 30 stages; its three build stages left out, the tree built clean without a warning). Not run: the
     Linux check and any 512³ run.
+  - At full size (2026-11-12): TNG100-3-Dark z = 0 at 512³ on the committed binaries (30bae11), the planner's own 3³
+    split and then `--partition 6 6 6` named, one run at a time: all 10 output files are byte-identical between the
+    two. 3³ took 521.89 s at 33.93 GB of peak footprint, 6³ 1241.59 s at 26.34 GB (2.38 times as long for 7.59 GB
+    less). The model predicted 35.65 and 33.73 GB; the measured peaks lie 1.71 GB (5%) and 7.39 GB (22%) under them,
+    the second in a run whose post-processing set the peak (24.79 GB before it) on a split the planner does not choose
+    here. No GPU retry or fallback line in either run.
   - Open: a GPU run's sub-domain that falls back to the CPU allocates its words unbooked (tens of MB for an ordinary
     sub-domain; logged, no wrong output); the device's `maxBufferLength` is reached at half the cells of before (16 B
     per component: a sub-domain of over about 1e8 cells with `--per-tet-gradient` or `DTFE_FACE_CHECK=1`, which auto
@@ -2748,8 +2791,10 @@ Lagrangian lexicographic order, the last two swapped back where that is an odd p
 positive orientation is the stream parity every deposit and the kernels read), each neighbour moved with its vertex;
 one thread per tessellation (CGAL keeps the compact container's bookkeeping in a neighbour slot). Cost: 0.86 s for
 23.1 million cells at 2.1e6 points, on one thread (0.037 s per million; "canonical vertex order" in the phase totals;
-that run took 7.2 and 7.0 s against 6.2 and 6.0 s under the switch; not measured at 512³). The cusp stencil of
-`--ps-caustic-cusps` orders its ring strictly (distance, centroid, vertices) instead of by the cells' addresses.
+that run took 7.2 and 7.0 s against 6.2 and 6.0 s under the switch; at 512³ on 2026-11-12, the face-walk pair of that
+day's status: 34.13 s and 34.32 s summed over the 216 tessellations of a run with 4 partitions in flight, against
+1342.27 s and 1246.08 s of wall time; no run under the switch at that size). The cusp stencil of `--ps-caustic-cusps`
+orders its ring strictly (distance, centroid, vertices) instead of by the cells' addresses.
 `DTFE_PS_VERTEX_ORDER_LEGACY=1` keeps CGAL's numbering and the stencil's address order; the partition checkpoint's
 settings key names it (`vertex-order=legacy`, partition_checkpoint.h settingsKey), so a `--resume` across the switch
 is refused. Gates (2026-11-11): bytecmp `--gpu-exact` with `DTFE_PS_VERTEX_ORDER_LEGACY=1` against the commit before:
@@ -2806,7 +2851,8 @@ for their units, so a GPU and a CPU run of one pass form the same face words (by
 decision table.) Sequential with the deposit for now (the GPU is idle during the walk; concurrency with the next
 sub-domain's deposit is P11.6's pipeline). Since 2026-11-10 (P11.7 items 2 and 5) the single build takes those units
 from the bounds the extraction summed, without the second bound walk, and the walk rejects on a copy of the loop's own
-span test.
+span test. Since 2026-11-12 an opt-in switch starts the walk beside the pass's own device call (the status of that
+day, below).
 
 **Status 2026-11-09 16:30.** (Committed that evening as `2f428bc`, the next status; D19 answered 2026-11-11, the
 decision table.) P11.2, P11.3 (the default rule: the parallel insert for tessellations of ≥ 1e6 points
@@ -2845,6 +2891,79 @@ confirming series".) P11.8 (after P11.7's checks, below) trims the lanes' common
 item 1, and refits standard DTFE's two under-predictions of the mode bench (P13). In code, uncommitted. Run l's plan
 allows 4 in flight again (38.3 GB predicted; 33.4 GB measured at 4), and performance's plan on the bench input is the 6
 at once of the 783 s hand plan. The runs on the new plans were made on 2026-11-11 (P11.8's "The confirming series").
+
+**Status 2026-11-12 (the face walk beside the device call: an opt-in, in code).** The first step of the face
+sweep's item (the owner's answer of 2026-11-11, under the decision table): no kernel, P11.5's walk moved in
+time. With `DTFE_FACE_WALK_EARLY=1` a single-precision `--face-gradient` pass on the GPU starts `psFaceWalk` on a
+helper thread after the cost sort, as its device call starts, and joins it after the call (`PSEarlyFaceWalk` in
+`ps_interpolation.cc`; the helper holds one core of the pool). P11.7 item 2 made that possible: the face units come
+from the bounds the extraction summed, so the walk needs nothing of the deposit. The walk's left-out shares go to a
+sink of its own and are counted only when its sums are kept, which is when the device call succeeded; after a failed
+call the sums are thrown away and the CPU deposit makes them, as before. The switch does nothing in the double build
+(its face pass has a bound walk of its own) and under `DTFE_TEST_NAN_SHARE`. The output bytes are the same with and
+without it. The planner is unchanged while the switch is opt-in, although such a pass holds its face words during the
+device call, which no term books outside `--grid-window` (whose window term already sums them beside the device
+copies).
+
+Gates, on the tree of P10's run-wide units plus this change: the byte comparison against that tree's binaries (261
+files, 0 differ); `tests/ps_face_gradient_check.sh` P16 (seven lines in the single build: one domain, a one-cell
+`--grid-window`, a 2³ split with 4 in flight, a failed device call on one domain and on the split, a NaN vertex mass,
+the NaN hook; one line in the double build); the 12 suites around the PS GPU deposit without the switch (the face and
+the retry suite in both builds) and 11 of them again with the switch in the environment, where only
+`ps_parallel_check`'s runs take the early walk (2 one-domain logs), so P16 is the coverage; the battery, 30 of 30
+without its build stages. Not run on it when this status was written: the Linux check, the battery's three build
+stages.
+
+Timed once at 256³ (2026-11-12; 128³ crossed-wave particles, `--exact --ps-volume-weighted --face-gradient --gpu`, the
+`_a` density, velocity, divergence and shear; three runs without and three with the switch in turns per plan; the
+screen saver was drawing on the machine throughout, for both arms alike). Wall seconds and peak footprint, the three
+runs' range (mean):
+
+| plan | wall without the switch, s | wall with, s | saved (means) | peak without, GB | peak with, GB |
+|---|---|---|---|---|---|
+| one domain | 37.55–38.22 (37.84) | 32.62–32.68 (32.65) | 5.19 s, 13.7% | 12.370–13.149 | 16.215–16.219 |
+| 2³, 1 in flight | 37.63–38.52 (38.07) | 31.72–31.91 (31.80) | 6.27 s, 16.5% | 8.304–8.305 | 8.958–8.965 |
+| 2³, 4 in flight | 25.32–26.61 (26.06) | 21.93–22.39 (22.20) | 3.86 s, 14.8% | 12.021–13.739 | 13.149–13.669 |
+| 3³, 4 in flight | 25.96–26.65 (26.26) | 21.93–22.10 (22.01) | 4.26 s, 16.2% | 10.015–10.074 | 10.325–10.328 |
+
+Every grid is byte-identical within each plan (9 files per run, all 24 runs). On one domain the walk takes 8.3–8.5 s
+in either place; with one pass in flight it is over before the device call returns (at 2³ the walks take 9.0–9.1 s
+over the 8 passes, under 1e-4 s of it after their calls). The device phase is longer beside the walk: 15.0–15.1 →
+18.5–18.6 s on one domain, 15.5 → 18.2–18.3 s summed over the 8 passes, so not all of the walk's seconds are saved;
+why the device call slows is not traced. With 4 in flight the walks take 31.6–36.0 s in all at 2³ and 30.4–31.5 s at
+3³, 2.0–3.7 s and 2.3–2.5 s of it after their device calls had returned. Memory: the peak rises by 3.07–3.85 GB on one
+domain (3.42 GB between the means), by 0.65–0.66 GB at 2³ with one in flight and by 0.25–0.31 GB at 3³ with 4 in
+flight; at 2³ with 4 in flight the two ranges overlap. The plan's prediction covered every measured peak (25.78, 9.29,
+22.44 and 18.97 GB predicted for the four plans).
+
+**The 512³ pair (2026-11-12, 03:43–04:29).** TNG100-3-Dark z = 0, run l's command (P11.1) with `--partition 6 6 6
+--max-concurrent 4` named, which is the plan the planner chooses for it (38.26 GB predicted), and `--face-gradient`
+named; one binary for both arms, the switch off and then on; one run at a time, no other run, build or test beside
+them, no samplers. Each output set was hashed and then removed.
+
+| | without the switch | with |
+|---|---|---|
+| wall | 1342.27 s | 1246.08 s |
+| the partition loop | 20 m 11 s | 18 m 23 s |
+| field interpolation, summed over the 216 passes | 3630.84 s | 3044.2 s |
+| peak footprint | 34.09 GB | 35.48 GB |
+| maximum resident size | 44.09 GB | 47.18 GB |
+| checkpoints written | 2 in 1 m 3 s | 3 in 1 m 46 s |
+
+96.2 s less, 7.2% of the wall time, with all 28 output files byte-identical. The 216 walks took 1244.17 s in all, 5.47
+s of it after their device calls had returned, and none was thrown away. The passes' field interpolation fell by 587 s
+summed, under half of what the walks take: the device phase, which includes a pass's wait for the device, grew beside
+the walks (2262.5 s over the 216 passes with the switch; the last total the log without it prints reads 1590.4 s over
+213 passes, with 1206.8 s of CPU deposit, the walk's place there). That fits P11.1's reading of run l, that the passes
+wait for the device (not timed with `DTFE_GPU_TIMING` here either), so the walk's seconds are only partly won. The run
+without the switch repeats run l of P11.8's confirming series (1338.35 s, 33.09 GB) within 0.3% of the wall time
+(1342.27 s). Memory: 1.39 GB more peak footprint (35.48 GB, under the plan's 38.26 GB) and 3.09 GB more resident size
+(47.18 GB, against 44.09 GB).
+
+Open, and the owner's: whether the switch becomes the default, which needs its memory term in the planner first
+(outside `--grid-window`), and whether a GPU kernel for the face sweep follows. A reading of the pair for that
+question, not a measurement: a kernel would move the walk's work onto the device, which the passes on this plan
+already seem to wait for.
 
 **P11.6 The sub-domain pipeline (the widened overlap).** **Dropped 2026-11-09 16:00 on the cheap experiment's
 numbers** (`p11-mc1.sh`; p11-placement.md section 5). One tessellation in flight with the look-ahead (`--partition 3
@@ -3305,13 +3424,16 @@ All sizes below are GB on TNG100-3-Dark z = 0 at 512³ unless a line says otherw
   choice with the share: by a replica of the model it would move balanced and gentle from 6³ to 5³ at 4 in flight (about
   39.2 and 39.0 GB predicted, on a split the share was not measured on), so one measured balanced run at `--partition 5
   5 5 --max-concurrent 4` first. (Made: 1197 s at 35.23 GB, a gain of about 6% over 6³ that lies inside the day's
-  spread; one 6³ run on the same binaries is left.) The four small planner items are done (the planner batch, below).
-  Three prediction
-  errors that only runs can settle (the CPU runs' +27.7% to +33.6%, the TNG50-3 run's +24.4%, the mixed lane's term (a)
-  against a measured mixed peak). The CPU error was measured again with the series: +28.1%. Under
-  `DTFE_GPU_FLOAT_MOMENTS=1` two identical GPU runs give different grids (measured at test size with the binary of
-  `2d262e4` and with this batch's alike; with the switch at 0 both are byte-identical); ps_runtime_check's R3 skips its
-  byte comparison there since the next batch (below).
+  spread. The pair on one night and one binary, 2026-11-12 (the confirming series' binary, built before the canonical
+  vertex order; one run at a time): 6³ 1437.28 s at 29.96 GB of peak footprint, 5³ 1412.96 s at 36.30 GB, so 5³ is
+  1.7% faster for 6.34 GB more. That 5³ run repeats the 2026-11-11 command on the same binary with byte-identical
+  output and took 18.0% longer (its GPU deposit, summed over the passes, 27.7% longer); the cause is not established,
+  so only the same-night difference stands. The owner decides; 6³ stays the plan until then.) The four small planner
+  items are done (the planner batch, below). Three prediction errors that only runs can settle (the CPU runs' +27.7%
+  to +33.6%, the TNG50-3 run's +24.4%, the mixed lane's term (a) against a measured mixed peak). The CPU error was
+  measured again with the series: +28.1%. Under `DTFE_GPU_FLOAT_MOMENTS=1` two identical GPU runs give different grids
+  (measured at test size with the binary of `2d262e4` and with this batch's alike; with the switch at 0 both are
+  byte-identical); ps_runtime_check's R3 skips its byte comparison there since the next batch (below).
 - **The launcher (next batch, 2026-11-11).** Decision 1a: the Custom tab passes `--ps-merge index-order` unless its
   extra options name a merge (R7 above). Decision 15b: the face-gradient tick is the last row of the visible
   'Phase-space options' group of the three run tabs (was: the folded Advanced group); its default for a new job is
@@ -3801,6 +3923,9 @@ the table.
   be designed now, and one measured run decides whether it stays (P11.8, P13's open points).
 - A GPU kernel for the PS face sweep is the next large item, designed first (the CPU phase with the face walk, P11.1's
   run l).
+  First (the owner's answer of the same day) the cheap step: the existing CPU walk beside the device call, built and
+  measured, and the numbers back to the owner before any kernel work. Built as an opt-in on 2026-11-12 and measured
+  (13.7–16.5% less wall time at 256³, 7.2% on one 512³ pair; P11's status of that day).
 - The owner gave the go for P11.8's four confirming runs; they were made on 2026-11-11 (P11.8, "The confirming
   series").
 - The sample total that is not a cube (`--samples 20`) goes when the old aliases go (P6.6), and the two suites that use

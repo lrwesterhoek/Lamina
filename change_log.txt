@@ -1,4 +1,36 @@
 UNRELEASED (since 1.0.0)
+- PS-DTFE: DTFE_FACE_WALK_EARLY=1, an opt-in switch for timing measurements, makes the face sums of a
+  '--face-gradient' pass while the GPU deposits instead of after it (single precision, a pass that deposits on the
+  GPU; docs/cleanup-plan.md P11's status of 2026-11-12: the first step of the face sweep's item, which the owner asked
+  on 2026-11-11 to have built and measured before any GPU kernel). The pass starts its CPU face walk on a helper
+  thread as its device call starts and joins it after the call; the helper holds one core of the pool. The walk needs
+  nothing of the deposit, since its fixed-point units come from the bounds the extraction summed. The output bytes are
+  the same. The walk's sums are kept only when the device call succeeded: after a failed call they are thrown away and
+  the CPU deposit makes them, as before. The switch does nothing in the double build, whose face pass has a bound walk
+  of its own, and under the NaN test hook. The run log says what happened: a one-domain run's face line says '(beside
+  the GPU deposit)', a partitioned run closes with a line that counts the walks kept and thrown away. Timed at 256^3
+  (128^3 crossed-wave particles; exact, volume weighted, the face gradient, on the GPU; three runs without and three
+  with the switch in turns per plan, the screen saver drawing on the machine throughout), mean wall without -> with:
+  37.84 -> 32.65 s on one domain, 38.07 -> 31.80 s at 2^3 partitions with one in flight, 26.06 -> 22.20 s at 2^3 and
+  26.26 -> 22.01 s at 3^3 with four in flight, 13.7 to 16.5% less, every grid byte-identical in all 24 runs. With one
+  pass in flight the walk (8.3 to 8.5 s on one domain, in either place) is over before the device call returns (at 2^3
+  the closing line counts under 1e-4 s of the walks after their calls), but the device phase is longer beside it (by
+  3.4 to 3.6 s on one domain and 2.7 to 2.8 s at 2^3; not traced), so 5.2 and 6.3 s are saved. One pair at 512^3
+  (TNG100-3-Dark z = 0; P11.1's run l's command with '--partition 6 6 6 --max-concurrent 4', the plan the planner
+  chooses for it; one binary, the switch off and then on, no other run, build or test beside them): 1342.27 -> 1246.08
+  s of wall, 7.2% less, all 28 output files byte-identical. Its 216 walks took 1244.17 s in all, 5.47 s of it after
+  their device calls had returned, but the passes' field interpolation fell by only 587 s summed (3630.84 -> 3044.2
+  s): the passes' device phase, which includes the wait for the device, grew beside the walks (2262.5 s over the 216
+  passes; the last total the log without the switch prints reads 1590.4 s over 213 passes). Memory: the pass holds its
+  face sums during the device call, which the memory plan does not book outside a '--grid-window' run while the switch
+  is opt-in. At 256^3 the peak footprint rose from 12.4-13.1 to 16.2 GB on one domain, by 0.65 to 0.66 GB at 2^3 with
+  one in flight and by 0.25 to 0.31 GB at 3^3 with four in flight; at 2^3 with four in flight it shows no clear change
+  (12.0-13.7 against 13.1-13.7 GB). At 512^3 it rose from 34.09 to 35.48 GB (the maximum resident size from 44.09 to
+  47.18 GB). The plan's prediction covered every measured peak (38.26 GB at 512^3). Whether the switch becomes the
+  default, which needs its memory term first, and whether a GPU kernel follows are the owner's decisions.
+  tests/ps_face_gradient_check.sh P16 pins the switch (the same grids on one domain, in a one-cell '--grid-window' and
+  on a 2^3 split with 4 in flight; the fallback after a failed device call, on one domain and on the split; a NaN
+  vertex mass; the two cases where it does nothing).
 - Standard DTFE's exact grids no longer depend on the partition split, the thread count or the order of the parallel
   insert (single precision, an all-GPU or an all-CPU run; docs/cleanup-plan.md P10's status after P10.8, the owner's
   decision 2c of 2026-11-11; src/fixed_units.h). Every grid sums its shares as integers in ONE fixed-point unit for
