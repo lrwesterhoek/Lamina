@@ -54,6 +54,10 @@
 #       per partition), a cold and a warm '--tessellation-cache' (the warm run loads every sub-domain: the cache
 #       folder is left untouched), a machine without the free memory for it (the look-ahead pauses), and on GPU builds D12's '--gpu --exact' reference against '--no-overlap'
 #       and a '--gpu --sampled' (Monte-Carlo average) pair with and without it
+#   D15 the run-wide fixed-point units' line of the settings key (src/fixed_units.h runUnitsKeyLine: the environment
+#       switches them without the command line): a run killed under DTFE_RUN_UNITS_LEGACY=1 is not resumed without
+#       it, nor under it with another DTFE_TEST_RUN_UNIT_SHIFT; each refusal names the 'units=' lines that differ,
+#       and the checkpoint is kept
 # The CPU runs name no averaging mode, so their '_a' fields take the default, the exact average (since 2026-11-09):
 # every check here holds one run's outputs against another's of the same split, byte for byte, which the exact CPU
 # average gives as the Monte-Carlo one does (its sums do not depend on the deposit's thread count).
@@ -418,6 +422,23 @@ if [ "$GPU" = 1 ]; then
 else
     echo "  SKIP D14 GPU: $OBJ carries no GPU stamp"
 fi
+
+echo ">> D15: a resume across DTFE_RUN_UNITS_LEGACY or DTFE_TEST_RUN_UNIT_SHIFT is refused (the 'units=' key line)"
+unset DTFE_RUN_UNITS_LEGACY DTFE_TEST_RUN_UNIT_SHIFT   # (the caller's shell: the runs below set their own)
+DTFE_RUN_UNITS_LEGACY=1 DTFE_TEST_EXIT_AFTER_PARTITIONS=3 "${RUN[@]}" "$TMP/ul" "${C[@]}" "${MC[@]}" \
+    > "$TMP/ul1.log" 2>&1; rc1=$?
+"${RUN[@]}" "$TMP/ul" "${C[@]}" "${MC[@]}" --resume > "$TMP/ul2.log" 2>&1; rc2=$?
+DTFE_RUN_UNITS_LEGACY=1 DTFE_TEST_RUN_UNIT_SHIFT=-20 "${RUN[@]}" "$TMP/ul" "${C[@]}" "${MC[@]}" --resume \
+    > "$TMP/ul3.log" 2>&1; rc3=$?
+[ "$rc1" = 137 ] && [ "$(merged_count "$TMP/ul.runlog.checkpoint" 2>/dev/null)" = 3 ] \
+    && [ "$rc2" != 0 ] && grep -q "'--resume' refused" "$TMP/ul2.log" \
+    && grep -qF "checkpoint: units=legacy N=48/61/72 shift=0" "$TMP/ul2.log" \
+    && grep -qF "this run  : units=run-wide N=48/61/72 shift=0" "$TMP/ul2.log" \
+    && [ "$rc3" != 0 ] && grep -qF "this run  : units=legacy N=48/61/72 shift=-20" "$TMP/ul3.log" \
+    && [ -s "$TMP/ul.runlog.checkpoint/checkpoint" ] && [ ! -e "$TMP/ul.den" ]
+check "D15 killed under DTFE_RUN_UNITS_LEGACY=1 (exit $rc1); resumed without it (exit $rc2) and under another \
+shift (exit $rc3): both refused, naming the 'units=' lines; the checkpoint kept" $?
+rm -rf "$TMP/ul.runlog.checkpoint"
 
 echo "RESULT: $PASS passed, $FAILS failed"
 [ "$FAILS" = 0 ] || exit 1

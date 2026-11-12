@@ -34,7 +34,9 @@
 #   Production defaults: GRID_SIZE 512 (config.sh), the exact deposit (on the GPU when built, as the sampled one),
 #   vertex masses, volume-weighted
 #   velocity moments, the caustic classes, FIELDS = density, velocity, its divergence and shear (the same set as
-#   run_dtfe.sh's; the gradient, vorticity, dispersion, T-web and V-web through FIELDS), LAMBDA_TH 0.3.
+#   run_dtfe.sh's; the gradient, vorticity, dispersion, T-web and V-web through FIELDS), LAMBDA_TH 0.3, and the
+#   binary's velocity-gradient route (FACE_GRADIENT empty: the face gradient, with the exact deposit and the volume
+#   weighting).
 #   A rerun into a prefix that holds an earlier run's files: once it exits 0, the files it did not write (an image
 #   plane, caustics or a field the new run lacks) are MOVED into <prefix>.superseded/<date_time>/ with the old
 #   run log (config.sh supersede_extras; never deleted), so the folder holds one run's set.
@@ -205,14 +207,24 @@ DTFE_EXACT_AVERAGE="${DTFE_EXACT_AVERAGE:-1}"  # 1 (default) = exact conservativ
                            # (--sampled); unset, a SUBSAMPLES count makes it 0 (config.sh average_resolve, the
                            # binary's rule). The same knob, default and rule as run_dtfe.sh's (its exact cell average);
                            # the driver passes --exact or --sampled on every run
-FACE_GRADIENT="${FACE_GRADIENT:-0}"  # 1 = --face-gradient: the velocity gradient family (divergence, shear, ...) of the
-                           # volume-weighted MEAN velocity from exact face sums, the quantity standard DTFE stores
-                           # (conservative, the caustics' jumps as exact face differences), where the default stores
-                           # the stream average of each stream's own gradient; it also writes '.a_velDivStreams' (that
-                           # stream average's divergence) and '.a_massFluxDiv' (div of sum_s rho_s v_s: by continuity
-                           # the rate a cell gains or loses mass). Needs the exact deposit (the default, on the GPU or
-                           # the CPU: not --sampled, DTFE_EXACT_AVERAGE=0 or a SUBSAMPLES count alone) and
-                           # PS_VOLUME_WEIGHTED=1 (the default); 3D. 30 more numbers per cell in the merged grids.
+FACE_GRADIENT="${FACE_GRADIENT:-}"   # the velocity gradient's route (the divergence, shear, vorticity and V-web are
+                           # built on it), as run_dtfe.sh's FACE_GRADIENT. EMPTY (default) = the binary's own
+                           # (docs/cleanup-plan.md D13): the face gradient wherever the run qualifies -- the exact
+                           # deposit (the default, on the GPU or the CPU), PS_VOLUME_WEIGHTED=1 (the default), 3D --
+                           # and the stream average of each stream's own gradient elsewhere (the run log's 'velocity
+                           # gradient' line says which and why); 1 = --face-gradient, asked for explicitly (refused
+                           # below with the sampled deposit -- --sampled, DTFE_EXACT_AVERAGE=0 or a SUBSAMPLES count
+                           # alone -- or without the volume weighting); 0 = --per-tet-gradient, the stream average,
+                           # the route of the older PS grids made without FACE_GRADIENT=1. The face gradient is the
+                           # volume-weighted MEAN velocity's, the quantity standard DTFE stores (conservative, the
+                           # caustics' jumps as exact face differences), and the run also writes '.a_velDivStreams'
+                           # (the stream average's divergence; and its gradient, shear and vorticity as
+                           # '.a_velGradStreams', '.a_velShearStreams', '.a_velVortStreams' for those FIELDS,
+                           # docs/cleanup-plan.md D12) and '.a_massFluxDiv' (div of sum_s rho_s v_s: by continuity the
+                           # rate a cell gains or loses mass). 30 more numbers per cell in the merged grids (and 5 per
+                           # cell for the default FIELDS' shear twin, after the partition loop); TNG100-3-Dark z=0 at
+                           # 512^3 (the plan's P11.1 bench): 1454 s against 1156 s on the GPU, 1737 s against 1133 s
+                           # on the CPU.
 
 DATA_DIR=""                # default: sim_dir $SIMULATION (config.sh); override with -d
 PS_LINEAR_DEPOSIT="${PS_LINEAR_DEPOSIT:-0}"  # 1 = --ps-linear-deposit: each tetrahedron's mass spread by the linear
@@ -319,19 +331,20 @@ PYEOF
 # resolves each grid cell of the '_a' fields with an nSub^3 sub-sample grid (SUBSAMPLES, the binary's 3 when unset),
 # smoother / better resolved at caustics than the plain fields' single sample per cell (coarser, but the same
 # conserved quantity) -- prefer the '_a' fields for science plots.
-# divergence/shear/vorticity are rigorous only in single-stream cells; for multi-stream kinematics
-# use 'dispersion_a' + the stream count. vweb classifies the cosmic web from the velocity
-# gradient (density-weighted across streams), so it inherits the same single-stream caveat.
+# Without the face gradient (FACE_GRADIENT=0, the sampled deposit, PS_VOLUME_WEIGHTED=0) divergence/shear/vorticity
+# are the stream average, rigorous only in single-stream cells; for multi-stream kinematics use 'dispersion_a' + the
+# stream count, and vweb, classified from that gradient, inherits the same single-stream caveat.
 # tweb = T-web from the TIDAL tensor (FFT Poisson solve of the RAW density grid, in C++); vweb =
 # V-web from the multi-stream velocity shear. LAMBDA_TH is the eigenvalue threshold for BOTH webs
 # (dimensionless; literature ~0.2-0.4; the binary's own default is 0.0).
 # The binary applies NO smoothing anywhere; smoothing is a plot-time choice in plot_PS_DTFE.py.
 LAMBDA_TH="${LAMBDA_TH:-0.3}"
 # The analysis set, the same as run_dtfe.sh's: density, velocity, divergence, shear. The divergence and shear grids
-# are derived from the multi-stream velocity gradient, the stream average <grad v> (single-stream caveat above);
-# dtfelib's figures differentiate the velocity grid instead (the mean field, as standard DTFE's), unless run with
-# '--ps-gradient stored'. The gradient, vorticity, the PS-only dispersion and the T-web / V-web classes are written
-# only when FIELDS names them (all nine: the grids of the 2026-10 production runs).
+# are derived from the velocity gradient: by default the gradient of the mean velocity from exact face sums, the
+# quantity standard DTFE stores, which dtfelib's figures read as stored; with the stream average <grad v> instead
+# (FACE_GRADIENT=0 and the other cases above; single-stream caveat) the figures differentiate the velocity grid,
+# unless run with '--ps-gradient stored'. The gradient, vorticity, the PS-only dispersion and the T-web / V-web
+# classes are written only when FIELDS names them (all nine: the grids of the 2026-10 production runs).
 # Env-overridable, e.g. FIELDS="density_a velocity_a" for a lighter batch.
 FIELDS="${FIELDS:-density_a velocity_a divergence_a shear_a}"
 
@@ -370,7 +383,7 @@ if [ "${DTFE_EXACT_AVERAGE}" = "1" ]; then
 else
     echo "Cell averages: sampled deposit, nSub^3 sub-points per cell (--sampled${SUBSAMPLES:+ --subsamples ${SUBSAMPLES}}; ${average_src})"
 fi
-echo "Deposit: $([ "${DTFE_GPU}" = "1" ] && echo "GPU (--gpu)" || echo "CPU")${gpu_auto}   volume-weighted: ${PS_VOLUME_WEIGHTED}   caustics: ${PS_CAUSTICS}   face gradient: ${FACE_GRADIENT}   prefix: ${OUTPUT_PREFIX}"
+echo "Deposit: $([ "${DTFE_GPU}" = "1" ] && echo "GPU (--gpu)" || echo "CPU")${gpu_auto}   volume-weighted: ${PS_VOLUME_WEIGHTED}   caustics: ${PS_CAUSTICS}   face gradient: ${FACE_GRADIENT:-default}   prefix: ${OUTPUT_PREFIX}"
 echo "Run mode: ${DTFE_RUN_MODE} (${run_mode_src}${OMP_NUM_THREADS:+; OMP_NUM_THREADS=${OMP_NUM_THREADS} keeps its thread count})"
 echo ""
 
@@ -413,6 +426,7 @@ for i in "${SNAPSHOTS[@]}"; do
     vw_args=()
     [ "${PS_VOLUME_WEIGHTED}" = "1" ] && vw_args=(--ps-volume-weighted)
     [ "${FACE_GRADIENT}" = "1" ] && vw_args+=(--face-gradient)     # (FACE_GRADIENT, see the top)
+    [ "${FACE_GRADIENT}" = "0" ] && vw_args+=(--per-tet-gradient)  # the stream average of each stream's own gradient
 
     # Parallel Delaunay insertion (PARALLEL_TRIANGULATION=1, opt-in -- see the comment at the top).
     ptri_args=()

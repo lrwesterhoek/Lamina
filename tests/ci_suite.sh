@@ -50,6 +50,8 @@ run_program_suites() {
     # --face-gradient against the per-tetrahedron gradient
     step "face sweep geometry (sections, pieces, Gauss on a tessellation)"; tests/face_sweep_check.sh --no-build
     step "standard DTFE --face-gradient (== the per-tet gradient; threads, deposits, splits)"; tests/dtfe_face_gradient_check.sh --no-build
+    # the run-wide fixed-point units: the exact '_a' grids byte-identical at any split (its CPU half; the GPU's SKIPs)
+    step "standard DTFE split independence (run-wide units)"; tests/split_bytes_check.sh --no-build
     step "PS-DTFE --face-gradient (the mean flow: conservative, pancake folds, splits, window, dtfelib)"; tests/ps_face_gradient_check.sh --no-build
     # methods 2 and 3, the redshift cone and the grid's point values: closed forms, other code paths and stored
     # golden values (the user-sampling part needs libDTFE: a SKIP line here, run by the variants stage)

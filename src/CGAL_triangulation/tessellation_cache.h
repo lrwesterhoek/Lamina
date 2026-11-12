@@ -608,6 +608,13 @@ inline std::string makeDescriptor(User_options const &userOptions)
     d << '\n';
     // vertex densities live in the file, and they are normalized by this
     d << "density0=" << userOptions.averageDensity << '\n';
+#ifndef PHASE_SPACE
+    // ... and summed exactly (triangulation.cpp vertexDensityStarSums, in the run-wide unit 2^-K) or in double, which
+    // can differ in the last bit. Written only for the exact sums, so the double sums' caches (DTFE_RUN_UNITS_LEGACY=1,
+    // the double build) keep the descriptor they have without it
+    if ( userOptions.runUnits.starSums( double( userOptions.averageDensity ) ) )
+        d << "starSums=run-wide K=" << userOptions.runUnits.K[RU_VERTEX_VOLUME] << '\n';
+#endif
     return d.str();
 }
 
@@ -1075,6 +1082,9 @@ inline bool headerMatches(User_options const &userOptions)
 
 // Loads the tessellation for this partition into 'dt'. Returns false (a miss) whenever the file is
 // absent, unreadable, or was written for different inputs -- the caller then builds as usual.
+// The cells keep the file's vertex numbering. PS-DTFE: every caller then renumbers them in the canonical
+// vertex order (ps_vertex_order.h; buildTessellation, the composite server's loads), since a file written
+// without that order holds CGAL's numbering.
 inline bool tryLoad(DT &dt, User_options const &userOptions)
 {
     if ( userOptions.tessellationCacheDir.empty() ) return false;

@@ -83,7 +83,8 @@
 #     fields, the exact deposit (--exact; a SUBSAMPLES count or DTFE_EXACT_AVERAGE=0: the sampled one); run_dtfe.sh:
 #     the balanced run mode, the exact average and the same fields; PS_LINEAR_DEPOSIT=1 drops the
 #     volume weighting; FACE_GRADIENT=1 passes --face-gradient, run_ps_dtfe.sh refusing it with the sampled deposit or
-#     without the volume weighting),
+#     without the volume weighting; unset it passes neither route flag and 0 passes --per-tet-gradient, in both
+#     drivers),
 #     run_dtfe.sh's OUTPUT_PREFIX (a 'ps_*' one refused), and a rerun's left-over files: after exit 0 the files the run
 #     did not write are MOVED to <prefix>.superseded/<stamp>/ with the old run log (the rewritten ones, the run log
 #     family, a lock and a checkpoint stay); a failed run, a dry run and an auto-tune report move nothing.
@@ -1446,7 +1447,8 @@ rs7_ok=0
 for o in '--subsamples 3' '--ps-lagrangian-padding 8' '--ps-point-conventions legacy' '--face-gradient' '--ps-alpha-shape 2.5' '--ps-halo-release 500'; do
     printf '%s\n' "${rs7_new}" | grep -qx -e "${o}" || rs7_ok=1
 done
-for o in 'face-gradient' 'ps-lagrangian-padding 9' 'ps-alpha-shape 3' 'ps-halo-release 400' 'subsamples 2'; do   # each one differs alone
+for o in 'face-gradient' 'per-tet-gradient' 'ps-lagrangian-padding 9' 'ps-alpha-shape 3' 'ps-halo-release 400' \
+         'subsamples 2'; do   # each one differs alone
     [ "$(run_settings "./PS-DTFE in out --grid 64 --${o}")" != "$(run_settings './PS-DTFE in out --grid 64')" ] || rs7_ok=1
 done
 check "$([ -n "${rs7_new}" ] && [ "${rs7_old}" = "${rs7_new}" ] && [ "${rs7_ok}" = 0 ] && echo 0 || echo 1)" \
@@ -1595,6 +1597,16 @@ check "$([ "${rc}" = "0" ] && sline "${TMP}/s_psface.log" | grep -qE -e '--exact
 rc=$(sdrive run_dtfe.sh "${TMP}/s_dtpertet.log" DRY_RUN=1 FACE_GRADIENT=0)
 check "$([ "${rc}" = "0" ] && sline "${TMP}/s_dtpertet.log" | grep -qE -e '--exact +--per-tet-gradient$' && echo 0 || echo 1)" \
       "FACE_GRADIENT=0 passes --per-tet-gradient to run_dtfe.sh (the face gradient is the standard binary's default since 2026-11-09) (${rc})"
+# run_ps_dtfe.sh's FACE_GRADIENT as run_dtfe.sh's (D13): unset passes neither route flag (the binary's default, the
+# face gradient where the run qualifies), 0 passes --per-tet-gradient
+rc=$(sdrive run_ps_dtfe.sh "${TMP}/s_psfgdef.log" DRY_RUN=1)
+rc2=$(sdrive run_ps_dtfe.sh "${TMP}/s_pspertet.log" DRY_RUN=1 FACE_GRADIENT=0)
+check "$([ "${rc}" = "0" ] && [ -n "$(sline "${TMP}/s_psfgdef.log")" ] \
+         && ! sline "${TMP}/s_psfgdef.log" | grep -qE -e '--(face|per-tet)-gradient' \
+         && [ "${rc2}" = "0" ] \
+         && sline "${TMP}/s_pspertet.log" | grep -qE -e '--ps-volume-weighted +--per-tet-gradient' \
+         && echo 0 || echo 1)" \
+      "run_ps_dtfe.sh FACE_GRADIENT unset: no route flag (the binary's default); 0: --per-tet-gradient (${rc} ${rc2})"
 rc=$(sdrive run_dtfe.sh "${TMP}/s_dtdef.log" DRY_RUN=1)
 check "$([ "${rc}" = "0" ] && sline "${TMP}/s_dtdef.log" | grep -qE -e 'snapdir_099/output +--grid +16 +--padding +15 +--periodic +--run-mode +balanced +--field +density_a +velocity_a +divergence_a +shear_a +--lambda-th +0\.3 +--exact$' \
          && echo 0 || echo 1)" "run_dtfe.sh's defaults: padding 15, the balanced run mode, the same four fields as run_ps_dtfe.sh, the exact cell average (${rc})"

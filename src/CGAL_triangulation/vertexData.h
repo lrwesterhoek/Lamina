@@ -24,6 +24,7 @@
 #ifndef VERTEX_DATA_HEADER
 #define VERTEX_DATA_HEADER
 
+#include <cstring>   // memcpy: the star sum's low limb in the double scratch's bytes
 #include "../define.h"
 #include "../particle_data.h"
 
@@ -35,6 +36,9 @@ struct vertexData : public Data_structure
     bool   dummy;         // true if vertex is a dummy test point (padding-efficiency test)
     bool   dummyNeighbor; // true if vertex has at least one dummy neighbor (padding test for density)
     double _volAcc;       // vertexDensity's per-vertex volume sum (triangulation.cpp); -1 marks a convex-hull vertex. +8 B/vertex, see auto_tune.h
+#ifndef PHASE_SPACE
+    uint64_t _volAccHi;   // the high limb of vertexDensity's exact star sum (volumeLimbs); +8 B/vertex, auto_tune.cc
+#endif
 #ifdef PHASE_SPACE
     Pvector<Real,NO_DIM> _eulerianPos; // Eulerian position (triangulation vertices store Lagrangian coords in PS-DTFE mode)
     uint64_t _particleID;              // snapshot ParticleID (stream identities, --ps-per-stream-ids); +8 B/vertex, see auto_tune.h
@@ -44,6 +48,9 @@ struct vertexData : public Data_structure
 
     public:
     vertexData(){ dummy=false; dummyNeighbor=false; _volAcc=0.;
+#ifndef PHASE_SPACE
+        _volAccHi=0;
+#endif
 #ifdef PHASE_SPACE
         _particleID=0;
         _psDeg=0;
@@ -83,6 +90,31 @@ struct vertexData : public Data_structure
     // remaining accessors for 'Data_structure' are in "particle_data.h"
 
     inline double& volumeAccumulator() { return _volAcc; }                       // vertexDensity's scratch (triangulation.cpp)
+#ifndef PHASE_SPACE
+    // vertexDensity's exact star sum (triangulation.cpp vertexDensityStarSums), a 128-bit integer: its low 64 bits in
+    // the 8 bytes of the double scratch above (copied, never read through the double), its high 64 bits in _volAccHi,
+    // which also carries the sum's marks (markVolumeLimbs: a value no sum reaches). Once the sum is converted, the
+    // double view volumeAccumulator() is the scratch again.
+    inline __int128 volumeLimbs() const
+    {
+        uint64_t lo;
+        std::memcpy( &lo, &_volAcc, sizeof lo );
+        return __int128( ( (unsigned __int128)_volAccHi << 64 ) | lo );
+    }
+    inline void setVolumeLimbs(__int128 const x)
+    {
+        uint64_t const lo = uint64_t( (unsigned __int128)x );
+        std::memcpy( &_volAcc, &lo, sizeof lo );
+        _volAccHi = uint64_t( (unsigned __int128)x >> 64 );
+    }
+    inline int64_t volumeHighLimb() const { return int64_t( _volAccHi ); }
+    // the mark 'high' in the high limb, a zero low limb (whose bytes read as the double 0.)
+    inline void markVolumeLimbs(int64_t const high)
+    {
+        _volAcc = 0.;
+        _volAccHi = uint64_t( high );
+    }
+#endif
     inline void setDummy() { dummy=true; dummyNeighbor=true; setDensity(0.); }    // mark as a dummy test point
     inline void setDummyNeighbor() { dummyNeighbor=true; }                        // mark as adjacent to a dummy
     inline bool isDummy() { return dummy; }

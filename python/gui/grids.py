@@ -61,10 +61,12 @@ FIELD_HELP = {
     "scalar": "The particles' own value (the run's scalar dataset, e.g. a potential), interpolated like the density.",
 }
 # The velocity derivatives (dtfelib.io.MEAN_FIELD_NAMES). Standard DTFE stores them as the derivatives of
-# its one velocity field, the mean field grad<v>; PS-DTFE stores, in a multi-stream cell, the stream average of each
-# stream's own gradient <grad v> (dtfelib/io.py, the note above FIELDS: a divergence whose box mean is not 0, a V-web
-# with almost no filaments) -- so a map of a PS divergence beside a standard one compares two quantities. Explore
-# shows a phase-space output's as either ('PS velocity derivatives'): 'mean-field', computed from its velocity grid
+# its one velocity field, the mean field grad<v>; so does a PS-DTFE run with the face gradient (its default with the
+# exact deposit and the volume weighting, docs/cleanup-plan.md D13; OutputSet.face_gradient). A PS-DTFE run without it
+# stores, in a multi-stream cell, the stream average of each stream's own gradient <grad v> (dtfelib/io.py, the note
+# above FIELDS: a divergence whose box mean is not 0, a V-web with almost no filaments) -- so a map of such a PS
+# divergence beside a standard one compares two quantities. Explore shows that phase-space output's as either
+# ('PS velocity derivatives'): 'mean-field', computed from its velocity grid
 # one slice at a time (dtfelib.fields.mean_field_gradient_plane, the figure scripts' spectral derivative and their
 # default, '--ps-gradient' of dtfelib.cli), or 'stored'. Every map, title, colour bar and figure-grid panel says
 # which (field_label).
@@ -555,13 +557,22 @@ class OutputSet:
                 "the box is not a cube" if float(np.ptp(self.length)) > 1e-9 * float(np.max(self.length)) else "")
         return self._mf_reason
 
+    @property
+    def face_gradient(self) -> bool:
+        """A phase-space output whose run took the face gradient (PS-DTFE's default with the exact deposit and the
+        volume weighting, docs/cleanup-plan.md D13, or '--face-gradient'): its stored velocity derivatives ARE the
+        mean field grad<v>, from exact face sums. The marker is the stream average's divergence the run writes beside
+        them ('.a_velDivStreams'), as dtfelib's FieldSet.face_gradient reads it."""
+        return estimator_label(self) == "PS-DTFE" and "divergence_streams" in self.files
+
     def gradient_family(self, name: str, gradient: str = "stored") -> str:
         """Which velocity derivative a map of 'name' shows: '' none (another field); 'mean' the mean field
-        grad<v> (a standard-DTFE output's stored grid, or with gradient 'mean-field' a phase-space output's computed
-        from its velocity where mean_field_reason allows); 'stream' a phase-space output's stored stream average."""
+        grad<v> (a standard-DTFE output's or a face-gradient output's stored grid, or with gradient 'mean-field' a
+        phase-space output's computed from its velocity where mean_field_reason allows); 'stream' a phase-space
+        output's stored stream average."""
         if name not in GRADIENT_FIELDS:
             return ""
-        if estimator_label(self) != "PS-DTFE":
+        if estimator_label(self) != "PS-DTFE" or self.face_gradient:   # (a face run stores the mean field)
             return "mean"
         return "mean" if gradient == "mean-field" and not self.mean_field_reason() else "stream"
 
@@ -588,12 +599,13 @@ class OutputSet:
         z, a single number); measured on a rigid rotation (curl = 2 Omega). The 'caustic'
         map of a periodic phase-space run is the exact fold flag, not the stored grid (fold_exact).
         gradient 'mean-field': a phase-space output's velocity derivatives as the mean field, computed
-        from its velocity grid (gradient_family 'mean'); 'stored' (the default) or any other field: the file's grid."""
+        from its velocity grid (gradient_family 'mean'; a face-gradient output's stored grid is the mean field
+        already); 'stored' (the default) or any other field: the file's grid."""
         index = self.n // 2 if index is None else int(index)
         if name == "caustic" and self.fold_exact():
             return self._fold_plane(int(axis), index)
         if gradient == "mean-field" and self.gradient_family(name, gradient) == "mean" \
-                and estimator_label(self) == "PS-DTFE":
+                and estimator_label(self) == "PS-DTFE" and not self.face_gradient:
             plane = self._mean_field_plane(name, int(axis), index)
         else:
             plane = self._raw_plane(name, int(axis), index)

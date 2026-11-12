@@ -22,6 +22,7 @@
 # Exit 0 when every stage that ran passed and the tree did not change during the run.
 set -uo pipefail
 unset DTFE_EXACT_AVERAGE   # the '_a' average's pin: an export from the caller's shell would steer every stage's runs
+unset DTFE_FACE_GRADIENT  # the gradient route's pin: both binaries read it, so an export would steer every PS stage too
 # the run mode: the binaries' default, performance, is the 2f428bc behaviour; a login export must not steer the runs
 unset DTFE_RUN_MODE
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -49,7 +50,7 @@ PY_SUITES="dtfelib:py_dtfelib_test void_core:py_void_core_test profiles:py_profi
 selected() { [ -z "$ONLY" ] || [[ "$ONLY" == *",$1,"* ]]; }
 if [ "$LIST" = 1 ]; then
     for s in build build_d build_2d ci_core ci_double ci_2d ci_gui dtfe_metal gpu_scalar gpu_mass gpu_retry dtfe_gpu_retry \
-             auto_tune scratch padding_d gpu_mass_d auto_tune_d gpu_retry_d; do echo "$s"; done
+             split_bytes auto_tune scratch padding_d gpu_mass_d auto_tune_d gpu_retry_d; do echo "$s"; done
     for t in $PY_SUITES; do echo "${t%%:*}_np126"; done
     echo deprecation_gate
     exit 0
@@ -113,6 +114,7 @@ run gpu_scalar  tests/gpu_scalar_check.sh --no-build
 run gpu_mass    tests/gpu_mass_check.sh --no-build
 run gpu_retry   tests/gpu_retry_check.sh --no-build
 run dtfe_gpu_retry tests/dtfe_gpu_retry_check.sh --no-build
+run split_bytes tests/split_bytes_check.sh --no-build
 run auto_tune   tests/ps_auto_tune_check.sh --no-build
 run scratch     tests/ps_scratch_check.sh --no-build
 run padding_d   env DTFE_TEST_PRECISION=double tests/ps_partition_padding_check.sh --no-build

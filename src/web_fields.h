@@ -14,6 +14,11 @@ void computeDivergenceShearVorticity(Field &fields,
                                      int const verboseLevel,
                                      Quantities *quantities);
 
+// The traceless symmetric and the antisymmetric part of a stored velocity gradient ([j*NO_DIM+i] = dv_j/dx_i): the
+// shear and vorticity grids, and PS-DTFE's regular-part twins of them (Quantities::psStreamsTwinsCell)
+Pvector<Real,noShearComp> velocityShear(Pvector<Real,noGradComp> &velGrad);
+Pvector<Real,noVortComp> velocityVorticity(Pvector<Real,noGradComp> &velGrad);
+
 // Derives the V-web cosmic-web classification from the velocity gradient.
 void computeWebClassification(Field &fields,
                                int const verboseLevel,

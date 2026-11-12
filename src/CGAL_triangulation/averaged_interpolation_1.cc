@@ -27,6 +27,7 @@
 #include "face_sweep.h"          // --face-gradient: exact face integrals (avg1FacePass)
 #include "../env_knobs.h"
 #include "../thread_count.h"   // coresPerTeam: the exact average's CPU threads
+#include "ps_deposit_params.h"   // fixedShareDropped: the run-wide words' guard counts its dropped shares (any build)
 #include <typeinfo>
 #include <stdio.h>
 #include <atomic>
@@ -154,8 +155,8 @@ inline uint64_t mcVertexHash(Vertex_handle const &v)
     return h;
 }
 
-// The vertex order of the Monte-Carlo average. 'legacy' keeps CGAL's own order (vertex(0) as the base), which
-// the --exact path uses and DTFE_MC_LEGACY=1 selects for the sampled path (A/B). Otherwise the
+// The vertex order of the deposits, the Monte-Carlo and the exact average alike. 'legacy' keeps CGAL's own order
+// (vertex(0) as the base), which DTFE_MC_LEGACY=1 selects for both (A/B). Otherwise the
 // NO_DIM+1 vertices are sorted by a key that depends only on the cell's own vertex SET: each vertex's
 // coordinate hash mixed with the (order-free) sum of the cell's hashes, ties (never seen; 64-bit keys) broken
 // by the coordinates.
@@ -634,8 +635,22 @@ static inline bool avg1GpuDispatch(Avg1GpuCtx &c, Avg1Grids const &grids, std::v
     bool perCallOk = false, perCallFailed = false;
     if ( not sharedDone and not sharedFailed and not tetCnts.empty() )
     {
+        // the run-wide units of the five grids (fixed_units.h RunUnits, set before any split: DTFE.cpp
+        // runUnitsSetup), which an exact batch sums in (dtfe_gpu_fixed.h dtfeBatchParams)
+        static_assert( RU_DENSITY == 0 and RU_VELOCITY == 1 and RU_GRADIENT == 2 and RU_SCALAR == 3
+                       and RU_SCALAR_GRADIENT == 4, "the run-wide slots of the standard grids are fxScale's order" );
+        RunUnits const &ru = userOptions.runUnits;
+        DTFEGpuRunUnits units;
+        units.on = ru.filled;
+        for (int g=0; g<5; ++g)
+        {
+            units.has[g] = ru.has( RU_DENSITY + g );
+            units.K[g] = ru.K[RU_DENSITY + g];
+            units.capBits[g] = ru.capBits( RU_DENSITY + g );
+        }
         perCallOk = dtfeGpuDepositAveraged1( tetVerts, tetDens, tetVels, tetScal, tetVols, tetCnts, tetFlats, tetCells,
-                                             sobolTable, dxv, nGrid, fDen, fVel, fGrad, fScal, fSGrad, exactAvg, gpuOut, metalErr );
+                                             sobolTable, dxv, nGrid, fDen, fVel, fGrad, fScal, fSGrad, exactAvg, units,
+                                             gpuOut, metalErr );
         perCallFailed = not perCallOk;
     }
     if ( sharedDone )
@@ -719,6 +734,60 @@ static inline void avg1Normalize(Field &field, Avg1Grids const &grids, Real cons
 #endif
 }
 
+// Whether this pass's CPU sums -- the exact average's and the face pass's -- take the run-wide fixed-point words
+// (fixed_units.h): the single build (a double build's CPU sums stay double: the words resolve 2^-48 of a grid's
+// natural cell scale, coarser than a double), the units set (DTFE.cpp runUnitsSetup, for every run with a grid; a
+// library caller that fills the options without DTFE_setup keeps the Real sums), not DTFE_RUN_UNITS_LEGACY=1.
+static inline bool avg1RunWords(User_options const &userOptions)
+{
+    return sizeof(Real) == 4 and userOptions.runUnits.filled and not runUnitsLegacy();
+}
+
+// The exact average's run-wide words on the CPU (fixed_units.h: one unit per grid for the whole run, from global
+// quantities, set before any split): an FxWords per grid the CPU loop deposits, in the order of the standard grids'
+// run-wide slots RU_DENSITY .. RU_SCALAR_GRADIENT -- also the guard's drop slots (DTFE.cpp fixedShareDropsReact) --
+// each with its unit 2^K and share cap, and each thread's carry list per grid. A grid without words (on false) sums
+// in Real; so does every grid of the Monte-Carlo average, of the double build and under DTFE_RUN_UNITS_LEGACY=1.
+// Every add is OWNED: thread th adds only to the cells of its own x planes (Avg1CpuCtx::owns: the r3d sweep skips the
+// other threads' planes, the 2D clip loop and the single-cell path test them), so no two threads write one word and
+// fxAddOwned's plain add suffices; its crossings of the int64 range go to the thread's own list, which fxCarryFinish
+// sums after the loop. The sums are exact: they do not depend on the thread count, the walk order or the sub-domain
+// split.
+struct Avg1Words
+{
+    bool    on[5] = {};
+    FxWords f[5];
+    double  scale[5] = {}, cap[5] = {};     // 2^K as a double, and the cap on one share's integer (RunUnits::cap)
+    std::vector<FxCarryList> lists[5];      // [grid][thread]
+    // one share of grid g -- the float the deposit formed -- into component 'at' by thread th: its integer at the unit
+    // (the exact product rounded to nearest even, fxShare); a share without one below the cap (a NaN, an infinity)
+    // adds nothing and is counted in the grid's slot, as the GPU's guard does
+    inline void add(int const th, int const g, size_t const at, Real const share)
+    {
+        __int128 q;
+        if ( not fxShare( double( share ) * scale[g], cap[g], q ) )
+        {
+            fixedShareDropped( g );
+            return;
+        }
+        fxAddOwned( f[g].w[at], q, uint64_t( at ), lists[g][size_t( th )] );
+    }
+};
+
+// A grid of n-component cells from its words, each component rounded once (fixed_units.h fxToReal): a dense pass
+// over the words, then each carry entry overwrites its component (fxToRealGrid's order, per component of a Pvector)
+template <size_t n>
+static void avg1WordsToGrid(FxWords const &f, std::vector< Pvector<Real,n> > &grid)
+{
+    size_t const cells = std::min( grid.size(), f.w.size() / n );
+    for (size_t c = 0; c < cells; ++c)
+        for (size_t k = 0; k < n; ++k)
+            grid[c][k] = fxToReal( __int128( f.w[c*n + k] ), f.K );
+    for (FxCarry const &e : f.carry)
+        if ( e.first < cells * n )
+            grid[e.first / n][e.first % n] = fxToReal( fxValue( f, e.first ), f.K );
+}
+
 // The CPU loop's run-wide inputs (interpolateGrid_averaged_1 sets them once; its threads share them): the fields and
 // their grids, the grid geometry, the Monte-Carlo average's Sobol table, and the threads' x-plane slabs. The
 // helpers below bind its members by REFERENCE ('* const &'), so their loops read them from memory as the lambda's
@@ -732,6 +801,7 @@ struct Avg1CpuCtx
     Real            (*quasiRandomNumbers)[NO_DIM];
     bool              centreMC;       // the Monte-Carlo samples are centred (see mcLegacy)
     int               nT, slabW;      // threads, and the width of the x-plane slabs they deal out
+    Avg1Words        *words;          // the exact average's run-wide words (null: every grid sums in Real)
     // does thread th deposit into x plane gi? (the slabs of slabW planes go to the threads in turn)
     bool owns(int const th, int const gi) const { return nT == 1 or ( gi / slabW ) % nT == th; }
 };
@@ -782,18 +852,31 @@ static inline void avg1SingleCell(Avg1CpuCtx const &C, McCell &mc, Real posMatri
 #endif
 }
 // The same for the exact average (plan P10.8): its gradients in double (posInvD, matrixInverseDouble's), each share
-// narrowed once.
-static inline void avg1SingleCellExact(Avg1CpuCtx const &C, McCell &mc, double posInvD[][NO_DIM], Real const cellVolume,
-                                       size_t const index, Avg1Dummy const &dummy)
+// narrowed once, then added by thread th into the run-wide words (Avg1Words) or, without them, into the Real grid.
+static inline void avg1SingleCellExact(Avg1CpuCtx const &C, int const th, McCell &mc, double posInvD[][NO_DIM],
+                                       Real const cellVolume, size_t const index, Avg1Dummy const &dummy)
 {
     (void)posInvD;
     Field const &field = C.field;
+    Avg1Words * const W = C.words;
     std::vector<Real>                             * const &density = C.grids.density;
-    if (field.density) (*density)[index] += averageDensity(mc) * cellVolume;
+    if (field.density)
+    {
+        if ( W and W->on[RU_DENSITY] ) W->add( th, RU_DENSITY, index, averageDensity(mc) * cellVolume );
+        else (*density)[index] += averageDensity(mc) * cellVolume;
+    }
 #ifdef VELOCITY
     std::vector< Pvector<Real,noVelComp> >        * const &velocity = C.grids.velocity;
     std::vector< Pvector<Real,noGradComp> >       * const &velocity_gradient = C.grids.velocity_gradient;
-    if (field.velocity) (*velocity)[index] += averageVelocity(mc) * cellVolume;
+    if (field.velocity)
+    {
+        if ( W and W->on[RU_VELOCITY] )
+        {
+            Pvector<Real,noVelComp> const pv = averageVelocity(mc) * cellVolume;
+            for (size_t j = 0; j < noVelComp; ++j) W->add( th, RU_VELOCITY, index*noVelComp + j, pv[j] );
+        }
+        else (*velocity)[index] += averageVelocity(mc) * cellVolume;
+    }
     if (field.velocity_gradient)
     {
         double velGrad[NO_DIM][noVelComp];
@@ -802,13 +885,24 @@ static inline void avg1SingleCellExact(Avg1CpuCtx const &C, McCell &mc, double p
         for (size_t j = 0; j < noVelComp; ++j)
             for (size_t i = 0; i < NO_DIM; ++i)
                 pg[j*NO_DIM+i] = Real( velGrad[i][j] * double(cellVolume) );
-        (*velocity_gradient)[index] += pg;
+        if ( W and W->on[RU_GRADIENT] )
+            for (size_t q = 0; q < noGradComp; ++q) W->add( th, RU_GRADIENT, index*noGradComp + q, pg[q] );
+        else
+            (*velocity_gradient)[index] += pg;
     }
 #endif
 #ifdef SCALAR
     std::vector< Pvector<Real,noScalarComp> >     * const &scalar = C.grids.scalar;
     std::vector< Pvector<Real,noScalarGradComp> > * const &scalar_gradient = C.grids.scalar_gradient;
-    if (field.scalar) (*scalar)[index] += averageScalar(mc) * cellVolume;
+    if (field.scalar)
+    {
+        if ( W and W->on[RU_SCALAR] )
+        {
+            Pvector<Real,noScalarComp> const ps = averageScalar(mc) * cellVolume;
+            for (size_t j = 0; j < noScalarComp; ++j) W->add( th, RU_SCALAR, index*noScalarComp + j, ps[j] );
+        }
+        else (*scalar)[index] += averageScalar(mc) * cellVolume;
+    }
     if (field.scalar_gradient)
     {
         double sGrad[NO_DIM][noScalarComp];
@@ -817,7 +911,11 @@ static inline void avg1SingleCellExact(Avg1CpuCtx const &C, McCell &mc, double p
         for (size_t j = 0; j < noScalarComp; ++j)
             for (size_t i = 0; i < NO_DIM; ++i)
                 pg[j*NO_DIM+i] = Real( sGrad[i][j] * double(cellVolume) );
-        (*scalar_gradient)[index] += pg;
+        if ( W and W->on[RU_SCALAR_GRADIENT] )
+            for (size_t q = 0; q < noScalarGradComp; ++q)
+                W->add( th, RU_SCALAR_GRADIENT, index*noScalarGradComp + q, pg[q] );
+        else
+            (*scalar_gradient)[index] += pg;
     }
 #endif
 #ifdef TEST_PADDING
@@ -835,8 +933,9 @@ static inline void avg1SingleCellExact(Avg1CpuCtx const &C, McCell &mc, double p
 // (Powell & Abel 2015). The geometry is the grid frame's (GridFrame / TetFrame, plan P10.8): the tet in its vertex-0
 // frame (vertexMatrix, exact double differences), the cells as offsets from its base cell, whose corner its base
 // position is relative to -- the same arithmetic in every sub-domain. The gradients and the values are formed in
-// double (posInvD: matrixInverseDouble) and each share is narrowed once. Out-of-region window cells are skipped
-// exactly like out-of-region samples. The single-grid-cell fast path is avg1SingleCellExact.
+// double (posInvD: matrixInverseDouble) and each share is narrowed once, then added into the run-wide words
+// (Avg1Words) or, without them, into the Real grid. Out-of-region window cells are skipped exactly like
+// out-of-region samples. The single-grid-cell fast path is avg1SingleCellExact.
 // Thread th clips only the cells of its own x planes.
 static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, McCell &mc, double vertexMatrix[][NO_DIM],
                                 TetFrame const &tf, GridFrame const &F, double posInvD[][NO_DIM], Avg1Dummy const &dummy)
@@ -844,6 +943,7 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, McCell &mc, d
     Field const &field = C.field;
     size_t * const &nGrid = C.nGrid;
     int const nT = C.nT;
+    Avg1Words * const W = C.words;
     std::vector<Real>                             * const &density = C.grids.density;
 #ifdef VELOCITY
     std::vector< Pvector<Real,noVelComp> >        * const &velocity = C.grids.velocity;
@@ -917,7 +1017,9 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, McCell &mc, d
         {
             double v = dens0;
             for (int i = 0; i < NO_DIM; ++i) v += densGrad[i] * cen[i];
-            (*density)[index] += Real( v * dV );
+            if ( W and W->on[RU_DENSITY] ) W->add( th, RU_DENSITY, index, Real( v * dV ) );
+            else
+                (*density)[index] += Real( v * dV );
         }
 #ifdef VELOCITY
         if (field.velocity)
@@ -929,7 +1031,10 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, McCell &mc, d
                 for (int i = 0; i < NO_DIM; ++i) v += velGrad[i][j] * cen[i];
                 pv[j] = Real( v * dV );
             }
-            (*velocity)[index] += pv;
+            if ( W and W->on[RU_VELOCITY] )
+                for (size_t j = 0; j < noVelComp; ++j) W->add( th, RU_VELOCITY, index*noVelComp + j, pv[j] );
+            else
+                (*velocity)[index] += pv;
         }
         if (field.velocity_gradient)
         {
@@ -937,7 +1042,10 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, McCell &mc, d
             for (size_t j = 0; j < noVelComp; ++j)
                 for (size_t i = 0; i < NO_DIM; ++i)
                     pg[j*NO_DIM+i] = Real( velGrad[i][j] * dV );
-            (*velocity_gradient)[index] += pg;
+            if ( W and W->on[RU_GRADIENT] )
+                for (size_t q = 0; q < noGradComp; ++q) W->add( th, RU_GRADIENT, index*noGradComp + q, pg[q] );
+            else
+                (*velocity_gradient)[index] += pg;
         }
 #endif
 #ifdef SCALAR
@@ -950,7 +1058,10 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, McCell &mc, d
                 for (int i = 0; i < NO_DIM; ++i) v += sGrad[i][j] * cen[i];
                 ps[j] = Real( v * dV );
             }
-            (*scalar)[index] += ps;
+            if ( W and W->on[RU_SCALAR] )
+                for (size_t j = 0; j < noScalarComp; ++j) W->add( th, RU_SCALAR, index*noScalarComp + j, ps[j] );
+            else
+                (*scalar)[index] += ps;
         }
         if (field.scalar_gradient)
         {
@@ -958,7 +1069,11 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, McCell &mc, d
             for (size_t j = 0; j < noScalarComp; ++j)
                 for (size_t i = 0; i < NO_DIM; ++i)
                     pg[j*NO_DIM+i] = Real( sGrad[i][j] * dV );
-            (*scalar_gradient)[index] += pg;
+            if ( W and W->on[RU_SCALAR_GRADIENT] )
+                for (size_t q = 0; q < noScalarGradComp; ++q)
+                    W->add( th, RU_SCALAR_GRADIENT, index*noScalarGradComp + q, pg[q] );
+            else
+                (*scalar_gradient)[index] += pg;
         }
 #endif
 #ifdef TEST_PADDING
@@ -970,7 +1085,7 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, McCell &mc, d
 #elif NO_DIM==2 && !defined(MY_SCALAR)
 // ----- exact area average (--exact), 2D: the same integral with the triangle clipped
 // against each cell by ps_clip2d.h (area and first moments: the centroid of each piece), in the grid frame
-// (TetFrame) with the gradients in double, as the 3D path -----
+// (TetFrame) with the gradients in double, and the shares into the run-wide words, as the 3D path -----
 // Thread th clips only the cells of its own x planes.
 static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, McCell &mc, double vertexMatrix[][NO_DIM],
                                 TetFrame const &tf, GridFrame const &F, double posInvD[][NO_DIM], Avg1Dummy const &dummy)
@@ -978,6 +1093,7 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, McCell &mc, d
     Field const &field = C.field;
     size_t * const &nGrid = C.nGrid;
     int const nT = C.nT;
+    Avg1Words * const W = C.words;
     std::vector<Real>                             * const &density = C.grids.density;
 #ifdef VELOCITY
     std::vector< Pvector<Real,noVelComp> >        * const &velocity = C.grids.velocity;
@@ -1043,7 +1159,9 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, McCell &mc, d
         {
             double v = dens0;
             for (int i = 0; i < NO_DIM; ++i) v += densGrad[i] * cen[i];
-            (*density)[index] += Real( v * dV );
+            if ( W and W->on[RU_DENSITY] ) W->add( th, RU_DENSITY, index, Real( v * dV ) );
+            else
+                (*density)[index] += Real( v * dV );
         }
 #ifdef VELOCITY
         if (field.velocity)
@@ -1055,7 +1173,10 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, McCell &mc, d
                 for (int i = 0; i < NO_DIM; ++i) v += velGrad[i][j] * cen[i];
                 pv[j] = Real( v * dV );
             }
-            (*velocity)[index] += pv;
+            if ( W and W->on[RU_VELOCITY] )
+                for (size_t j = 0; j < noVelComp; ++j) W->add( th, RU_VELOCITY, index*noVelComp + j, pv[j] );
+            else
+                (*velocity)[index] += pv;
         }
         if (field.velocity_gradient)
         {
@@ -1063,7 +1184,10 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, McCell &mc, d
             for (size_t j = 0; j < noVelComp; ++j)
                 for (size_t i = 0; i < NO_DIM; ++i)
                     pg[j*NO_DIM+i] = Real( velGrad[i][j] * dV );
-            (*velocity_gradient)[index] += pg;
+            if ( W and W->on[RU_GRADIENT] )
+                for (size_t q = 0; q < noGradComp; ++q) W->add( th, RU_GRADIENT, index*noGradComp + q, pg[q] );
+            else
+                (*velocity_gradient)[index] += pg;
         }
 #endif
 #ifdef SCALAR
@@ -1076,7 +1200,10 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, McCell &mc, d
                 for (int i = 0; i < NO_DIM; ++i) v += sGrad[i][j] * cen[i];
                 ps[j] = Real( v * dV );
             }
-            (*scalar)[index] += ps;
+            if ( W and W->on[RU_SCALAR] )
+                for (size_t j = 0; j < noScalarComp; ++j) W->add( th, RU_SCALAR, index*noScalarComp + j, ps[j] );
+            else
+                (*scalar)[index] += ps;
         }
         if (field.scalar_gradient)
         {
@@ -1084,7 +1211,11 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, McCell &mc, d
             for (size_t j = 0; j < noScalarComp; ++j)
                 for (size_t i = 0; i < NO_DIM; ++i)
                     pg[j*NO_DIM+i] = Real( sGrad[i][j] * dV );
-            (*scalar_gradient)[index] += pg;
+            if ( W and W->on[RU_SCALAR_GRADIENT] )
+                for (size_t q = 0; q < noScalarGradComp; ++q)
+                    W->add( th, RU_SCALAR_GRADIENT, index*noScalarGradComp + q, pg[q] );
+            else
+                (*scalar_gradient)[index] += pg;
         }
 #endif
 #ifdef TEST_PADDING
@@ -1214,17 +1345,35 @@ static inline void avg1McTet(Avg1CpuCtx const &C, McCell &mc, double vertexMatri
    geometry is the grid frame's (GridFrame, plan P10.8): the planes' sides are decided on absolute double positions
    against planes named by their global index, and the gradient is formed in double from the hashed vertex order, so
    the result is the same in every split.
-   acc: gridSize x 9 doubles, the integral of grad v over each cell in velocityGradient()'s layout ([j*3+i] =
-   dv_j/dx_i). The x planes are dealt out as in the deposit (thread th adds only to the cells of its own slabs, every
-   thread walking every tetrahedron in order), so the sums are bit-identical at any thread count. degenerate (when
-   not null) collects the cells a tetrahedron with a zeroed inverse can reach: its velocity is constant there, so its
-   faces carry jumps that the per-tetrahedron gradient (0) does not see -- the DTFE_FACE_CHECK comparison skips them. */
+   The sums: gridSize x 9 components, the integral of grad v over each cell in velocityGradient()'s layout ([j*3+i]
+   = dv_j/dx_i). words (when not null): the run-wide fixed-point words (fixed_units.h FxWords, 8 B per component) at
+   the face unit 2^-K, words->K, which the caller takes from RunUnits (RU_FACE: N = 61 on the rigorous per-cell
+   bound 2 vmax A -- one tessellation tiles every grid plane once, so a cell's flux of v_j through its faces lies
+   within twice the largest |velocity component| times the largest face area); each piece's flux becomes ONE integer
+   (the double product times 2^K, rounded to nearest even), added to the cell below the plane and subtracted from the
+   cell above, so the sums are exact and the same in every split and walk order; a flux without an integer below
+   wordCap (a NaN, an infinity) adds nothing and is counted (AVG1_FACE_DROP_SLOT). Otherwise acc: the same sums in
+   double, in walk order. The x planes are dealt out as in the deposit (thread th adds only to the cells of its own
+   slabs, every thread walking every tetrahedron in order: every add is owned, so no two threads write one word, and
+   each thread keeps its crossings of the int64 range in its own list, summed after the threads by fxCarryFinish), so
+   the sums are bit-identical at any thread count. degenerate (when not null) collects the cells a tetrahedron with a
+   zeroed inverse can reach: its velocity is constant there, so its faces carry jumps that the per-tetrahedron
+   gradient (0) does not see -- the DTFE_FACE_CHECK comparison skips them. */
+static int const AVG1_FACE_DROP_SLOT = 5;   // the guard's slot of the face pass (0..4: the deposits' grids; DTFE.cpp)
 static void avg1FacePass( DT &dt, GridFrame const &F, Bbox &fullBox, size_t *nGrid, int const nT,
                           int const slabW, bool const legacyOrder, std::vector<double> &acc,
-                          std::vector<unsigned char> *degenerate )
+                          std::vector<unsigned char> *degenerate, FxWords *words, double const wordCap )
 {
     size_t const gridSize = nGrid[0]*nGrid[1]*nGrid[2];
-    acc.assign( gridSize * noGradComp, 0. );
+    std::vector<FxCarryList> lists( words ? size_t( nT ) : 0 );   // [thread]: its crossings of the int64 range
+    double const wordScale = words ? std::ldexp( 1., words->K ) : 0.;
+    if ( words )
+    {
+        words->w.assign( gridSize * noGradComp, 0 );
+        words->carry.clear();
+    }
+    else
+        acc.assign( gridSize * noGradComp, 0. );
     if ( degenerate ) degenerate->assign( gridSize, 0 );
     auto owns = [&](int const th, int const gi) { return nT == 1 or ( gi / slabW ) % nT == th; };
     auto flat = [&](int const i, int const j, int const k) {
@@ -1337,6 +1486,11 @@ static void avg1FacePass( DT &dt, GridFrame const &F, Bbox &fullBox, size_t *nGr
                                 for (int i = 0; i < 3; ++i) vj += velGrad[i][j] * q[i];
                                 Fj[j] = vj * m[0];
                             }
+                            __int128 Fq[noVelComp] = {};   // ... as one integer at the face unit (words)
+                            bool FqOk[noVelComp] = {};
+                            if ( words )
+                                for (size_t j = 0; j < noVelComp; ++j)
+                                    FqOk[j] = fxShare( Fj[j] * wordScale, wordCap, Fq[j] );
                             int cell[3];
                             cell[u] = g[0]; cell[w] = g[1];
                             for (int side = 0; side < 2; ++side)   // the cell below the plane (+), the cell above (-)
@@ -1344,6 +1498,18 @@ static void avg1FacePass( DT &dt, GridFrame const &F, Bbox &fullBox, size_t *nGr
                                 cell[a] = side == 0 ? pl - 1 : pl;
                                 if ( cell[a] < 0 or cell[a] >= int(nGrid[a]) ) continue;
                                 if ( nT > 1 and not owns( th, cell[0] ) ) continue;
+                                if ( words )
+                                {   // (a flux left out counts once per add: each add is one thread's, at any count)
+                                    size_t const at = flat( cell[0], cell[1], cell[2] ) * noGradComp + size_t(a);
+                                    for (size_t j = 0; j < noVelComp; ++j)
+                                    {
+                                        if ( not FqOk[j] ) { fixedShareDropped( AVG1_FACE_DROP_SLOT ); continue; }
+                                        size_t const k = at + j*NO_DIM;
+                                        fxAddOwned( words->w[k], side == 0 ? Fq[j] : -Fq[j], uint64_t( k ),
+                                                    lists[size_t( th )] );
+                                    }
+                                    continue;
+                                }
                                 double *out = &acc[flat( cell[0], cell[1], cell[2] ) * noGradComp];
                                 for (size_t j = 0; j < noVelComp; ++j)
                                     out[j*NO_DIM + size_t(a)] += side == 0 ? Fj[j] : -Fj[j];
@@ -1362,6 +1528,7 @@ static void avg1FacePass( DT &dt, GridFrame const &F, Bbox &fullBox, size_t *nGr
         pass( 0 );
         for (std::thread &x : pool) x.join();
     }
+    if ( words ) fxCarryFinish( *words, lists, "the face gradient ('--face-gradient')" );
 }
 #endif
 
@@ -1548,6 +1715,11 @@ void interpolateGrid_averaged_1(DT &dt,
         // CGAL cell walk, which measures comparably to the whole extraction -- the padded fraction
         // outside the region is small for standard-DTFE partitions, unlike the PS Lagrangian ones)
         size_t const nKept = dt.number_of_finite_cells();
+        // the single-cell share's volume (the exact kernel reads a tetrahedron's volume only there):
+        // canonicalTetVolume, the same whatever CGAL's labelling of the cell, where the CPU's exact sums take the
+        // run-wide words too (avg1RunWords: the single build, not DTFE_RUN_UNITS_LEGACY=1); CGAL's otherwise, and for
+        // the sample count
+        bool const canonicalVolumes = exactAvg and avg1RunWords( userOptions );
 
         std::vector<float>    tetVerts, tetDens, tetVels, tetScal, tetVols;
         std::vector<uint32_t> tetCnts, tetFlats, tetKeys;
@@ -1677,7 +1849,10 @@ void interpolateGrid_averaged_1(DT &dt,
                     tetScal.push_back( centreThis ? float(f[v] + c) : float(mc.v[v]->info().myScalar()[0]) );
             }
 #endif
-            tetVols.push_back( float(cellVolume) );
+            if ( canonicalVolumes and cnt == 0 )
+                tetVols.push_back( float( canonicalTetVolume( itC ) ) );
+            else
+                tetVols.push_back( float(cellVolume) );
             tetCnts.push_back( cnt );
             tetFlats.push_back( flat );
             tetKeys.push_back( mortonKey( baseGridCell ) );
@@ -1745,7 +1920,58 @@ void interpolateGrid_averaged_1(DT &dt,
         message << ( exactAvg ? "(exact average on " : "(Monte-Carlo average on " ) << nT << " CPU threads, slabs of "
                 << slabW << " x planes) " << MESSAGE::Flush;
     std::vector< std::vector<size_t> > incD( static_cast<size_t>( nT ) ), incF( static_cast<size_t>( nT ) );   // TEST_PADDING's flagged cells, per thread
-    Avg1CpuCtx const cpu{ field, grids, nGrid, dx, quasiRandomNumbers, centreMC, nT, slabW };
+    // --exact: the run-wide words of the grids this loop deposits (Avg1Words; avg1RunWords says when), zeroed, 8 B per
+    // component beside the Real grids until the loop's end. A pass the GPU handed back ('using the CPU interpolation')
+    // runs this same loop on them.
+    Avg1Words words;
+    bool wordsOn = false;
+#ifndef MY_SCALAR
+    if ( exactAvg and avg1RunWords( userOptions ) )
+    {
+        RunUnits const &ru = userOptions.runUnits;
+        size_t const comps[5] = { 1, noVelComp, noGradComp, noScalarComp, noScalarGradComp };
+        bool sel[5] = { field.density, false, false, false, false };
+#ifdef VELOCITY
+        sel[RU_VELOCITY] = field.velocity;
+        sel[RU_GRADIENT] = field.velocity_gradient;   // (off under the face default: the face pass supplies it)
+#endif
+#ifdef SCALAR
+        sel[RU_SCALAR] = field.scalar;
+        sel[RU_SCALAR_GRADIENT] = field.scalar_gradient;
+#endif
+        for (int g = 0; g < 5; ++g)
+        {
+            if ( not sel[g] or not ru.has( RU_DENSITY + g ) ) continue;
+            words.on[g] = wordsOn = true;
+            words.f[g].w.assign( gridSize * comps[g], 0 );
+            words.f[g].K = ru.K[RU_DENSITY + g];
+            words.scale[g] = ru.scaleD( RU_DENSITY + g );
+            words.cap[g] = ru.cap( RU_DENSITY + g );
+            words.lists[g].resize( size_t( nT ) );
+        }
+        // The cap (fixed_units.h) lets one cell component receive 2^32 shares, one per tetrahedron at most: a
+        // tessellation of more cells is refused rather than summed without that guarantee.
+#if NO_DIM==2
+        size_t const nTess = dt.number_of_faces();
+#else
+        size_t const nTess = dt.number_of_finite_cells();
+#endif
+        if ( wordsOn and nTess >= ( size_t( 1 ) << 32 ) )
+        {
+            MESSAGE::Error error;
+            error << "The exact average's run-wide fixed-point sums take fewer than 2^32 Delaunay cells per sub-domain "
+                  << "(src/fixed_units.h, the share cap), and this sub-domain's tessellation has " << nTess
+                  << ". Split the run into more partitions ('--partition'), or set DTFE_RUN_UNITS_LEGACY=1 for the "
+                  << "float sums." << MESSAGE::EndError;
+        }
+    }
+#endif
+    // the single-cell share's volume: canonicalTetVolume, the same whatever CGAL's labelling of the cell, where the
+    // exact sums take the run-wide words (as the GPU extraction's); CGAL's for the Monte-Carlo average and the sample
+    // count
+    bool const canonicalVolumes = exactAvg and avg1RunWords( userOptions );
+    Avg1CpuCtx const cpu{ field, grids, nGrid, dx, quasiRandomNumbers, centreMC, nT, slabW,
+                          wordsOn ? &words : nullptr };
     auto cpuLoop = [&](int const th, std::vector<size_t> &incompleteCells_d, std::vector<size_t> &incompleteCells)
     {
     (void)incompleteCells_d; (void)incompleteCells;
@@ -1870,7 +2096,12 @@ void interpolateGrid_averaged_1(DT &dt,
             double posInvD[NO_DIM][NO_DIM];
             matrixInverseDouble( vertexMatrix, posInvD );
             if ( single and isGridCellIndex( baseGridCell, nGrid, &index ) )
-                avg1SingleCellExact( cpu, mc, posInvD, cellVolume, index, dummy );
+            {   // the share's volume: canonicalTetVolume where the words are the run-wide ones (canonicalVolumes)
+                if ( canonicalVolumes )
+                    avg1SingleCellExact( cpu, th, mc, posInvD, Real( canonicalTetVolume( itC ) ), index, dummy );
+                else
+                    avg1SingleCellExact( cpu, th, mc, posInvD, cellVolume, index, dummy );
+            }
             else
                 avg1ExactTet( cpu, th, mc, vertexMatrix, tf, frame, posInvD, dummy );
             continue;
@@ -1931,6 +2162,31 @@ void interpolateGrid_averaged_1(DT &dt,
         incompleteCells.insert( incompleteCells.end(), incF[size_t(th)].begin(), incF[size_t(th)].end() );
     }
 #endif
+    // the run-wide words into the Real grids, before the face pass (whose DTFE_FACE_CHECK reads the deposit's
+    // gradient): the threads' carry lists summed, then every component rounded once (fixed_units.h fxToReal) and
+    // assigned (the loop added nothing to these grids). The words are freed here.
+    if ( wordsOn )
+    {
+        static char const *const what[5] = { "the exact average's density", "the exact average's velocity",
+                                             "the exact average's velocity gradient", "the exact average's scalar",
+                                             "the exact average's scalar gradient" };
+        for (int g = 0; g < 5; ++g)
+            if ( words.on[g] ) fxCarryFinish( words.f[g], words.lists[g], what[g] );
+        if ( words.on[RU_DENSITY] ) fxToRealGrid( words.f[RU_DENSITY], density->data(), gridSize );
+#ifdef VELOCITY
+        if ( words.on[RU_VELOCITY] ) avg1WordsToGrid( words.f[RU_VELOCITY], *velocity );
+        if ( words.on[RU_GRADIENT] ) avg1WordsToGrid( words.f[RU_GRADIENT], *velocity_gradient );
+#endif
+#ifdef SCALAR
+        if ( words.on[RU_SCALAR] ) avg1WordsToGrid( words.f[RU_SCALAR], *scalar );
+        if ( words.on[RU_SCALAR_GRADIENT] ) avg1WordsToGrid( words.f[RU_SCALAR_GRADIENT], *scalar_gradient );
+#endif
+        for (FxWords &f : words.f)
+        {
+            std::vector<int64_t>().swap( f.w );
+            FxCarryList().swap( f.carry );
+        }
+    }
     }   // end of the CPU interpolation (skipped when the Metal deposit succeeded)
 
 
@@ -1945,9 +2201,20 @@ void interpolateGrid_averaged_1(DT &dt,
         bool const check = Env::flag( "DTFE_FACE_CHECK" );
         std::vector<double> acc;
         std::vector<unsigned char> degen;
+        // the run-wide words at the face unit (fixed_units.h RU_FACE), whatever the deposit -- exact, Monte-Carlo or
+        // GPU -- so every route gives the same face gradient (avg1RunWords: the single build, not
+        // DTFE_RUN_UNITS_LEGACY=1); otherwise the double sums
+        RunUnits const &ru = userOptions.runUnits;
+        bool const faceOnWords = avg1RunWords( userOptions ) and ru.has( RU_FACE );
+        FxWords faceWords;
+        faceWords.K = ru.K[RU_FACE];
         Timer tFace; tFace.start();
-        avg1FacePass( dt, frame, fullBoxExact, nGrid, nTf, slabWf, legacyOrder, acc, check ? &degen : nullptr );
+        avg1FacePass( dt, frame, fullBoxExact, nGrid, nTf, slabWf, legacyOrder, acc, check ? &degen : nullptr,
+                      faceOnWords ? &faceWords : nullptr, ru.cap( RU_FACE ) );
         printComputationTime( &tFace, &userOptions, "face gradient pass (--face-gradient)" );   // (phase_totals.h)
+        // component i's integral in double: from the words (their exact integer, rounded once), or the double sum
+        auto faceAt = [&](size_t const i) -> double
+        { return faceOnWords ? fxToReal<double>( fxValue( faceWords, i ), faceWords.K ) : acc[i]; };
         if ( check )
         {
             // relative to the rms of the deposit's integrals over all cells and components
@@ -1963,7 +2230,8 @@ void interpolateGrid_averaged_1(DT &dt,
                 double cw = 0.;
                 for (size_t q = 0; q < noGradComp; ++q)
                 {
-                    double const e = std::fabs( acc[c*noGradComp + q] - double( (*velocity_gradient)[c][q] ) ) / ( scale > 0. ? scale : 1. );
+                    double const e = std::fabs( faceAt( c*noGradComp + q ) - double( (*velocity_gradient)[c][q] ) )
+                                     / ( scale > 0. ? scale : 1. );
                     cw = std::max( cw, e );
                     sum2 += e * e;
                 }
@@ -1975,8 +2243,11 @@ void interpolateGrid_averaged_1(DT &dt,
                           "scale %.6g\n", gridSize, n, nDegen, worst, n ? std::sqrt( sum2 / double( n * noGradComp ) ) : 0.,
                           above, scale );
         }
-        for (size_t c = 0; c < gridSize; ++c)
-            for (size_t q = 0; q < noGradComp; ++q) (*velocity_gradient)[c][q] = Real( acc[c*noGradComp + q] );
+        if ( faceOnWords )   // each component rounded once from its exact integer (fixed_units.h fxToReal)
+            avg1WordsToGrid( faceWords, *velocity_gradient );
+        else
+            for (size_t c = 0; c < gridSize; ++c)
+                for (size_t q = 0; q < noGradComp; ++q) (*velocity_gradient)[c][q] = Real( acc[c*noGradComp + q] );
     }
 #endif
 

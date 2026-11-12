@@ -166,7 +166,9 @@ struct PSFixedUnits
 // tests the double product, which is the same float times the same 2^k, exactly. A finite in-range share takes
 // the same integer as without the guard, so normal data is unaffected bit for bit.
 // The count slots: PS-DTFE g = PSFxGrid (0 .. PS_FX_CPU_N-1), the mass grid, the exact items' per-tet weight totals;
-// standard DTFE 0..4 = its grids (dtfe_gpu_fixed.h: density, velocity, velocity gradient, scalar, its gradient).
+// standard DTFE 0..4 = its grids (dtfe_gpu_fixed.h: density, velocity, velocity gradient, scalar, its gradient; the
+// CPU exact average's run-wide words count in the same slots, averaged_interpolation_1.cc Avg1Words), 5 = the face
+// pass's words (avg1FacePass).
 enum FixedShareSlot { FX_DROP_MASS = 10, FX_DROP_SUMW = 11, FX_DROP_FACE_S = 12, FX_DROP_FACE_N = 13, FX_DROP_FACE_P = 14,
                       FX_DROP_SLOTS = 16 };
 static_assert( int(PS_FX_CPU_N) <= int(FX_DROP_MASS), "a moment grid's slot would be the mass grid's" );

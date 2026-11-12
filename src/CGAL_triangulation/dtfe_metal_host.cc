@@ -16,8 +16,9 @@
    see the long comment at the dispatch loop -- and so is its retry policy: chunk
    checkpoints, the cause of a failed buffer, the process-wide pace that eases back after a clean
    stretch, the run's retry counters (gpu_metal_retry.h, shared with that host). The grids are
-   exact 64-bit fixed-point sums (metal/dtfe_deposit.metal's header; the units at
-   batchFixedScales), so two runs write byte-identical '_a' grids. */
+   exact fixed-point sums (metal/dtfe_deposit.metal's header), so two runs write byte-identical '_a' grids: an
+   exact batch's in 128-bit words in the run-wide units (src/fixed_units.h RunUnits), the same in every partition and
+   thread split; a sampled batch's in 64-bit words in its own units (dtfe_gpu_fixed.h dtfeBatchParams). */
 
 #define NS_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
@@ -41,6 +42,7 @@
 #include "gpu_host.h"
 #include "dtfe_gpu_fixed.h"     // batchFixedScales + psMassFixedMass: the exact sums' units
 #include "dtfe_deposit_params.h" // DTFEDepositParams: the kernels' parameter block
+#include "../fixed_units.h"     // fxLimbsValue + fxToReal: the run-wide 128-bit words into floats
 #include "dtfe_deposit_msl.h"   // generated: static const char DTFE_DEPOSIT_MSL[]
 #define ITEM_BLOCK_SHIFT 5      // == the kernel's: log2 of the items per entry of the block table
 #include "../message.h"         // ANSI colour helpers only (retry warning below)
@@ -199,31 +201,50 @@ struct Grids
     MTL::Buffer* sgrad = nullptr;  // nCell*3   its gradient
     size_t full[3] = {0, 0, 0};
     bool fDen = false, fVel = false, fGrad = false, fScal = false, fSGrad = false;
-    bool fixed = false;            // the components are 8-byte fixed-point words, else floats
+    // the components' words, the batch's P.fixedSum: 0 floats (4 B), 1 the 64-bit fixed-point words of the batch's
+    // own units (8 B: two 32-bit words), 2 the run-wide 128-bit words of an exact batch (16 B: four 32-bit limbs)
+    uint32_t words = 0;
+    std::string err;               // why alloc failed, when it knows (a buffer over the device's largest)
 
     size_t nCell() const { return full[0] * full[1] * full[2]; }
-    size_t compBytes() const { return fixed ? 8 : 4; }
+    size_t compBytes() const { return words == 2u ? 16 : words == 1u ? 8 : 4; }
     std::vector<MTL::Buffer*> buffers() const { return { den, vel, grad, scal, sgrad }; }
     // gpuZero: zero the buffers with ONE blit on the device (the per-call path allocates under the device mutex,
-    // where a CPU memset of a 512^3 sub-domain's exact words -- up to 1.6 GB -- would idle the GPU);
-    // a failed blit falls back to the memset
-    bool alloc(Ctx& c, const size_t fullGrid[3], bool d, bool v, bool g, bool s, bool sg, bool fx = false,
+    // where a CPU memset of a 512^3 sub-domain's exact words -- up to 3.2 GB in the 128-bit words -- would idle the
+    // GPU); a failed blit falls back to the memset. A grid longer than the device's largest buffer
+    // (maxBufferLength: the 128-bit words of a large sub-domain's velocity gradient can reach it) is not asked for:
+    // err names it, and the caller's sub-domain goes to the CPU as on any failed allocation.
+    bool alloc(Ctx& c, const size_t fullGrid[3], bool d, bool v, bool g, bool s, bool sg, uint32_t wordsMode = 0u,
                bool gpuZero = false)
     {
         for (int i = 0; i < 3; ++i) full[i] = fullGrid[i];
         fDen = d; fVel = v; fGrad = g; fScal = s; fSGrad = sg;
-        fixed = fx;
+        words = wordsMode;
+        err.clear();
         size_t const cb = compBytes();
-        auto newBuf = [&](size_t bytes) {
+        size_t const maxLen = size_t(c.dev->maxBufferLength());
+        auto newBuf = [&](size_t bytes, char const* name) -> MTL::Buffer* {
+            if (bytes > maxLen)
+            {
+                if (err.empty())
+                {
+                    char buf[256];
+                    std::snprintf(buf, sizeof(buf), "the %s grid takes %.2f GB in %zu-byte words, over the %.2f GB "
+                                  "of the device's largest buffer (maxBufferLength)", name, double(bytes) / 1e9, cb,
+                                  double(maxLen) / 1e9);
+                    err = buf;
+                }
+                return nullptr;
+            }
             MTL::Buffer* b = c.dev->newBuffer(bytes, MTL::ResourceStorageModeShared);
             if (b && !gpuZero) std::memset(b->contents(), 0, bytes);
             return b;
         };
-        den  = newBuf(fDen  ? nCell() * cb     : 4);
-        vel  = newBuf(fVel  ? nCell() * cb * 3 : 4);
-        grad = newBuf(fGrad ? nCell() * cb * 9 : 4);
-        scal = newBuf(fScal ? nCell() * cb     : 4);
-        sgrad = newBuf(fSGrad ? nCell() * cb * 3 : 4);
+        den  = newBuf(fDen  ? nCell() * cb     : 4, "density");
+        vel  = newBuf(fVel  ? nCell() * cb * 3 : 4, "velocity");
+        grad = newBuf(fGrad ? nCell() * cb * 9 : 4, "velocity gradient");
+        scal = newBuf(fScal ? nCell() * cb     : 4, "scalar");
+        sgrad = newBuf(fSGrad ? nCell() * cb * 3 : 4, "scalar gradient");
         bool const ok = den && vel && grad && scal && sgrad;
         if (ok && gpuZero)
         {
@@ -285,14 +306,16 @@ bool uploadBatch(Ctx& c, std::vector<float>& verts, std::vector<float>& dens, st
                  std::vector<int32_t>& cells,
                  const std::vector<float>& sobol, const double dx[3], const size_t nGrid[3],
                  const size_t subOff[3], const size_t fullGrid[3], bool fDen, bool fVel, bool fGrad,
-                 bool fScal, bool fSGrad, bool exact, bool allowFixed, Batch& b, std::string& err)
+                 bool fScal, bool fSGrad, bool exact, bool allowFixed, DTFEGpuRunUnits const& units, Batch& b,
+                 std::string& err)
 {
     b.k = dtfeGpuKnobs(c.itemsOk);
     b.exact = exact;
-    // the parameter block, with the exact sums' units from this batch's values (dtfe_gpu_fixed.h)
+    // the parameter block, with the exact sums' mode and units: an exact batch's run-wide ones, else from this
+    // batch's values (dtfe_gpu_fixed.h)
     DepositParams& P = b.P;
     uint32_t const exactCells = dtfeBatchParams(P, b.k, verts, dens, vels, scal, vols, dx, nGrid, subOff, fullGrid,
-                                                fDen, fVel, fGrad, fScal, fSGrad, exact, allowFixed);
+                                                fDen, fVel, fGrad, fScal, fSGrad, exact, allowFixed, units);
     if (exact) b.k.useItems = true;    // the exact kernel is an item kernel (cell blocks), always
     else if (b.k.useItems && !itemPso(c, b.k.cacheK, fDen && !b.k.noWrite, fVel && !b.k.noWrite, fGrad && !b.k.noWrite,
                                       fScal && !b.k.noWrite, fSGrad && !b.k.noWrite, P.fixedSum != 0))
@@ -592,7 +615,7 @@ bool dtfeGpuDepositAveraged1(std::vector<float>& verts,
                                const std::vector<float>& sobol,
                                const double dx[3], const size_t nGrid[3],
                                bool fDen, bool fVel, bool fGrad, bool fScal, bool fSGrad, bool exact,
-                               DTFEGpuGrids& out, std::string& err)
+                               DTFEGpuRunUnits const& units, DTFEGpuGrids& out, std::string& err)
 {
     Ctx& c = [&]() -> Ctx& { std::lock_guard<std::mutex> lock(ctxMutex()); return ctx(); }();
     if (!c.ready) { err = c.err; return false; }
@@ -605,7 +628,7 @@ bool dtfeGpuDepositAveraged1(std::vector<float>& verts,
     size_t const zero[3] = {0, 0, 0};
     Batch b;      // uploaded WITHOUT the mutex: the sub-domains' host work overlaps the queue
     if (!uploadBatch(c, verts, dens, vels, scal, vols, cnts, flats, cells, sobol, dx, nGrid, zero, nGrid, fDen, fVel, fGrad,
-                     fScal, fSGrad, exact, true, b, err))
+                     fScal, fSGrad, exact, true, units, b, err))
     { pool->release(); return false; }
     Grids g;
     ChunkState cs;
@@ -616,11 +639,12 @@ bool dtfeGpuDepositAveraged1(std::vector<float>& verts,
         std::lock_guard<std::mutex> lock(ctxMutex());   // serialize dispatches (single queue)
         // The grids are allocated HERE, under the device mutex: allocated before it, every sub-domain waiting
         // for the device would hold its zeroed grids (all of them at once while the batches queue up), and the
-        // exact sums' words are 8 B per component -- a 512^3 run with the velocity gradient would wait on
-        // ~1.6 GB per sub-domain. So one batch's at a time (and the one being converted below), zeroed on the GPU.
-        if (!g.alloc(c, nGrid, fDen, fVel, fGrad, fScal, fSGrad, b.P.fixedSum != 0, true))
+        // exact sums' words are 8 B per component (a sampled batch) or 16 B (an exact batch's run-wide words) --
+        // a 512^3 run with the velocity gradient would wait on ~1.6 GB (3.2 GB) per sub-domain. So one batch's at a
+        // time (and the one being converted below), zeroed on the GPU.
+        if (!g.alloc(c, nGrid, fDen, fVel, fGrad, fScal, fSGrad, b.P.fixedSum, true))
         {
-            err = "Metal buffer allocation failed (out of GPU-visible memory?)";
+            err = g.err.empty() ? "Metal buffer allocation failed (out of GPU-visible memory?)" : g.err;
             ok = false;
         }
         else
@@ -631,7 +655,22 @@ bool dtfeGpuDepositAveraged1(std::vector<float>& verts,
         }
     }
     if (timingOn() && g.den) dtfeLogBatch("Metal", b, st, 0., el, -1.);
-    if (ok && g.fixed)
+    if (ok && g.words == 2u)
+    {   // the run-wide 128-bit words: every cell's integer from its four limbs, rounded ONCE to the float these grids
+        // hand over in every build (fixed_units.h fxToReal: the integer to float, then the exact scaling by 2^-K;
+        // scale = 2^K exactly, so ilogb gives K), outside the device mutex
+        auto toFloat = [](std::vector<float>& dst, MTL::Buffer* src, float scale) {
+            uint32_t const* limbs = static_cast<uint32_t const*>(src->contents());
+            int const K = std::ilogb(scale);
+            for (size_t i = 0; i < dst.size(); ++i) dst[i] = fxToReal<float>(fxLimbsValue(limbs + 4 * i), K);
+        };
+        if (fDen)   toFloat(out.density,     g.den,   b.P.fxScale[0]);
+        if (fVel)   toFloat(out.velocity,    g.vel,   b.P.fxScale[1]);
+        if (fGrad)  toFloat(out.grad,        g.grad,  b.P.fxScale[2]);
+        if (fScal)  toFloat(out.scalar,      g.scal,  b.P.fxScale[3]);
+        if (fSGrad) toFloat(out.scalar_grad, g.sgrad, b.P.fxScale[4]);
+    }
+    else if (ok && g.words == 1u)
     {   // the exact sums: every cell's integer, rounded once to the float of the contract (psMassFixedMass:
         // q / scale in double), outside the device mutex
         auto toFloat = [](std::vector<float>& dst, MTL::Buffer* src, float scale) {
@@ -684,8 +723,9 @@ bool dtfeGpuSharedBegin(const size_t fullGrid[3], bool fDen, bool fVel, bool fGr
         return false;
     if (!s.grids.alloc(c, fullGrid, fDen, fVel, fGrad, fScal, fSGrad))
     {
+        err = std::string("Metal buffer allocation failed for the shared grid")
+            + (s.grids.err.empty() ? std::string() : ": " + s.grids.err);
         s.grids.release();
-        err = "Metal buffer allocation failed for the shared grid";
         return false;
     }
     s.cs = ChunkState();
@@ -722,7 +762,8 @@ bool dtfeGpuSharedDeposit(std::vector<float>& verts, std::vector<float>& dens, s
     // (the float atomics: the shared grid has one unit for every batch, which no batch's bound sets -- the exact
     // sums are the per-call path's)
     if (!uploadBatch(c, verts, dens, vels, scal, vols, cnts, flats, cells, sobol, dx, nGrid, subOff, s.grids.full,
-                     s.grids.fDen, s.grids.fVel, s.grids.fGrad, s.grids.fScal, s.grids.fSGrad, false, false, b, err))
+                     s.grids.fDen, s.grids.fVel, s.grids.fGrad, s.grids.fScal, s.grids.fSGrad, false, false,
+                     DTFEGpuRunUnits(), b, err))
     { pool->release(); return false; }
 
     bool ok;

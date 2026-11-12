@@ -125,6 +125,16 @@ struct Quantities
     // --face-gradient: the divergence of the stream average of each stream's own gradient (the deposit's regular part,
     // what 'velocity_gradient' held before the mean flow's replaced it), written as '.a_velDivStreams'
     std::vector<Real>                         velocity_divergence_streams;
+    // ... and that regular part's own gradient, shear and vorticity (docs/cleanup-plan.md D12), each made only where
+    // the run writes its mean-flow twin ('gradient_a', 'shear_a', 'vorticity_a': User_options::psStreamsTwins), by the
+    // derivations web_fields.cc applies to a stored gradient -- so their bytes are what a run without the face
+    // gradient stores as '.a_velGrad', '.a_velShear', '.a_velVort'. Written as '.a_velGradStreams',
+    // '.a_velShearStreams', '.a_velVortStreams'
+    std::vector< Pvector<Real,noGradComp> >   velocity_gradient_streams;
+    std::vector< Pvector<Real,noShearComp> >  velocity_shear_streams;
+    std::vector< Pvector<Real,noVortComp> >   velocity_vorticity_streams;
+    bool psStreamsTwinsOn = false;            // psFaceGradientBegin made one of them
+    void psStreamsTwinsCell(size_t const i, Pvector<Real,noGradComp> g);   // quantities.cc
     // --face-gradient, cell i once its velocity_gradient is normalized: keep the regular part's divergence, then make
     // the gradient the face-averaged mean flow's along every axis both of whose faces are covered. A no-op without the
     // face sums.
@@ -143,6 +153,7 @@ struct Quantities
         }
         Pvector<Real,noGradComp> &g = velocity_gradient[i];
         velocity_divergence_streams[i] = g[0] + g[NO_DIM+1] + g[2*NO_DIM+2];   // [j*NO_DIM+i]: the trace
+        if ( psStreamsTwinsOn ) psStreamsTwinsCell( i, g );   // (a copy: the mean flow's overwrites g below)
         for (int a = 0; a < NO_DIM; ++a)
         {
             Real const nLo = face_coverage[i][a], nUp = face_coverage[i][NO_DIM + a];
@@ -152,12 +163,17 @@ struct Quantities
                                             - face_velocity[i][size_t(a)*noVelComp + j] / nLo ) / psFaceDx[a];
         }
     }
-    // before / after the cells: the regular part's divergence grid sized, the face sums released
-    inline void psFaceGradientBegin(size_t const n)
+    // before / after the cells: the regular part's divergence grid sized -- and its gradient, shear and vorticity as
+    // 'twins' asks (bits 0, 1, 2: User_options::psStreamsTwins) --, the face sums released
+    inline void psFaceGradientBegin(size_t const n, unsigned const twins = 0u)
     {
         if ( face_velocity.empty() ) return;
         velocity_divergence_streams.assign( n, Real(0.) );
         if ( not face_momentum.empty() ) mass_flux_divergence.assign( n, Real(0.) );
+        if ( twins & 1u ) velocity_gradient_streams.assign( n, Pvector<Real,noGradComp>::zero() );
+        if ( twins & 2u ) velocity_shear_streams.assign( n, Pvector<Real,noShearComp>::zero() );
+        if ( twins & 4u ) velocity_vorticity_streams.assign( n, Pvector<Real,noVortComp>::zero() );
+        psStreamsTwinsOn = ( twins & 7u ) != 0u;
     }
     inline void psFaceGradientEnd()
     {
@@ -264,7 +280,9 @@ struct Quantities
     // field selected -> no mass_weight was filled), pass weightFromDensityScale =
     // cellVolume * averageDensity so the per-cell mass is reconstructed from the summed
     // (rho/rho_bar) density; 0 normalizes by the mass_weight grid only.
-    void normalizePhaseSpace(Field const &field, Real const weightFromDensityScale = Real(0.));
+    // streamsTwins: the regular part's twins of a face pass (psFaceGradientBegin's 'twins')
+    void normalizePhaseSpace(Field const &field, Real const weightFromDensityScale = Real(0.),
+                             unsigned const streamsTwins = 0u);
     void addFromSubgrid(Quantities const &other, size_t const *fullGrid, size_t const *mainOrigin = nullptr, size_t const *mainDims = nullptr);   // mainOrigin/mainDims: this grid is itself a window of the full grid (--grid-window) // like addFrom but 'other' stores only its Eulerian box; maps each cell into the full grid (dims fullGrid)
     void finalizeHiddenStreams();   // after the merge: clear '.hidden_streams' bit 1 where '.streams' reads multi-stream (idempotent)
 #endif

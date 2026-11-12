@@ -567,8 +567,8 @@ TRIANG_CC_SOURCES = $(addprefix CGAL_triangulation/, unaveraged_interpolation.cc
 ALL_FILES = $(DTFE_SOURCES) $(DTFE_CC_SOURCES) $(TRIANG_SOURCES) $(MAIN_SOURCES) kdtree/kdtree2.hpp kdtree/kdtree2.cpp
 LIB_FILES = $(DTFE_SOURCES) $(DTFE_CC_SOURCES) $(TRIANG_SOURCES)
 
-# (every header these include goes with them: message.h reads env_knobs.h, user_options.h run_mode.h)
-HEADERS_1 = DTFE.h define.h user_options.h particle_data.h quantities.h Pvector.h math_functions.h  message.h box.h miscellaneous.h interpolations.h env_knobs.h run_mode.h
+# (every header these include goes with them: message.h reads env_knobs.h, user_options.h run_mode.h and fixed_units.h)
+HEADERS_1 = DTFE.h define.h user_options.h particle_data.h quantities.h Pvector.h math_functions.h  message.h box.h miscellaneous.h interpolations.h env_knobs.h run_mode.h fixed_units.h
 HEADERS_2 = $(addprefix CGAL_triangulation/, CGAL_include_2D.h CGAL_include_3D.h vertexData.h particle_data_traits.h)
 
 # Make's built-in rules are off: every object and binary here has a rule of its own, and make must never fall back on
@@ -789,19 +789,20 @@ $(OBJ_DIR_PS)/ps_mean_streams$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_mean_strea
 # Metal GPU deposit host (METAL=1 only). The kernel source is embedded via a generated header so
 # the binary needs no runtime file lookup; Metal compiles it once per process.
 # The kernels' parameter blocks are the hosts' own header (ps_kernel_params.h / dtfe_deposit_params.h, plain C++
-# that is valid MSL), prepended after the exact clip helpers.
-$(OBJ_DIR_PS)/ps_deposit_msl.h: metal/ps_deposit.metal metal/exact_clip.metal.inc $(SRC)/CGAL_triangulation/ps_kernel_params.h Makefile
+# that is valid MSL), prepended after the exact clip helpers and the run-wide fixed-point words
+# (metal/fixed_words.metal.inc).
+$(OBJ_DIR_PS)/ps_deposit_msl.h: metal/ps_deposit.metal metal/exact_clip.metal.inc metal/fixed_words.metal.inc $(SRC)/CGAL_triangulation/ps_kernel_params.h Makefile
 	@$(MKDIR_P) $(OBJ_DIR_PS)
-	{ printf 'static const char PS_DEPOSIT_MSL[] = R"MSL(\n'; cat metal/exact_clip.metal.inc $(SRC)/CGAL_triangulation/ps_kernel_params.h metal/ps_deposit.metal; printf '\n)MSL";\n'; } > $@.tmp
+	{ printf 'static const char PS_DEPOSIT_MSL[] = R"MSL(\n'; cat metal/exact_clip.metal.inc metal/fixed_words.metal.inc $(SRC)/CGAL_triangulation/ps_kernel_params.h metal/ps_deposit.metal; printf '\n)MSL";\n'; } > $@.tmp
 	mv $@.tmp $@
 
 $(OBJ_DIR_PS)/ps_metal_host$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_metal_host.cc $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_metal_retry.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(SRC)/CGAL_triangulation/ps_kernel_params.h $(OBJ_DIR_PS)/ps_deposit_msl.h Makefile
 	$(CC) $(COMPILE_FLAGS_PS) -isystem third_party/metal-cpp -I $(OBJ_DIR_PS) -o $@ -c $(SRC)/CGAL_triangulation/ps_metal_host.cc
 
 # Standard-DTFE Metal deposit host (METAL=1 only), same embedding scheme in $(OBJ_DIR).
-$(OBJ_DIR)/dtfe_deposit_msl.h: metal/dtfe_deposit.metal metal/exact_clip.metal.inc $(SRC)/CGAL_triangulation/dtfe_deposit_params.h Makefile
+$(OBJ_DIR)/dtfe_deposit_msl.h: metal/dtfe_deposit.metal metal/exact_clip.metal.inc metal/fixed_words.metal.inc $(SRC)/CGAL_triangulation/dtfe_deposit_params.h Makefile
 	@$(MKDIR_P) $(OBJ_DIR)
-	{ printf 'static const char DTFE_DEPOSIT_MSL[] = R"MSL(\n'; cat metal/exact_clip.metal.inc $(SRC)/CGAL_triangulation/dtfe_deposit_params.h metal/dtfe_deposit.metal; printf '\n)MSL";\n'; } > $@.tmp
+	{ printf 'static const char DTFE_DEPOSIT_MSL[] = R"MSL(\n'; cat metal/exact_clip.metal.inc metal/fixed_words.metal.inc $(SRC)/CGAL_triangulation/dtfe_deposit_params.h metal/dtfe_deposit.metal; printf '\n)MSL";\n'; } > $@.tmp
 	mv $@.tmp $@
 
 $(OBJ_DIR)/dtfe_metal_host$(OBJ_EXT): $(SRC)/CGAL_triangulation/dtfe_metal_host.cc $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_metal_retry.h $(SRC)/CGAL_triangulation/dtfe_gpu_fixed.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(SRC)/CGAL_triangulation/dtfe_deposit_params.h $(OBJ_DIR)/dtfe_deposit_msl.h Makefile

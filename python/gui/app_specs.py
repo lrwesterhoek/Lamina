@@ -79,8 +79,11 @@ class SpecsMixin:
         self.vw_check.setChecked(s.volume_weighted)
         self.ca_check.setChecked(s.caustics)
         self.cu_check.setChecked(s.caustic_cusps)
-        self.ld_check.setChecked(s.linear_deposit)
+        # the face gradient before the linear deposit: the two ticks exclude each other (ticking one unticks the
+        # other), so the one set last wins. A job can hold both (a linear-deposit run's log names no gradient route;
+        # a saved job without the face key takes its default): it keeps its linear deposit, the face tick off
         self.fg_check.setChecked(s.face_gradient)
+        self.ld_check.setChecked(s.linear_deposit)
         self.vg_check.setChecked(s.slice_vel_grad)
         self.pc_combo.setCurrentIndex(max(self.pc_combo.findData(s.pts_conventions), 0))
         self.part_spin.setValue(s.partition)
@@ -116,8 +119,8 @@ class SpecsMixin:
         self.p_vw.setChecked(p.volume_weighted)
         self.p_ca.setChecked(p.caustics)
         self.p_cu.setChecked(p.caustic_cusps)
+        self.p_fg.setChecked(p.face_gradient)          # (before the linear deposit, as on the Grids tab)
         self.p_ld.setChecked(p.linear_deposit)
-        self.p_fg.setChecked(p.face_gradient)
         self.p_pt.setChecked(p.parallel_triangulation)
         self.p_om.setChecked(p.ordered_merge)
         self.p_so.setChecked(p.start_over)
@@ -161,8 +164,8 @@ class SpecsMixin:
         self.o_vw.setChecked(c.volume_weighted)
         self.o_ca.setChecked(c.caustics)
         self.o_cu.setChecked(c.caustic_cusps)
+        self.o_fg.setChecked(c.face_gradient)          # (before the linear deposit, as on the Grids tab)
         self.o_ld.setChecked(c.linear_deposit)
-        self.o_fg.setChecked(c.face_gradient)
         self.o_points.setText(c.sample_points)
         self.o_pvg.setChecked(c.pts_vel_grad)
         self.o_pc.setCurrentIndex(max(self.o_pc.findData(c.pts_conventions), 0))

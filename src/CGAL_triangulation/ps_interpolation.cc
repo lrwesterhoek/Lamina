@@ -30,7 +30,7 @@
 
 #include "triangulation_common.h"
 
-#include <algorithm> // sort/unique/nth_element for the deduplicated nearest-N cusp stencil
+#include <algorithm> // sort/unique (nth_element under the legacy order) for the deduplicated nearest-N cusp stencil
 #include <atomic>    // the slab deposit's dynamic slab pickup
 #include <chrono>    // timing of the GPU-deferred CPU deposits
 #include <climits>   // LONG_MAX (markFlipped's default slab bounds)
@@ -53,6 +53,7 @@
 // unless PS_GPU is set)
 #include "gpu_host.h"
 #include "ps_clip2d.h"      // the 2D exact deposit's clipper (DIM=2 builds)
+#include "ps_vertex_order.h" // psVertexOrderLegacy: the cusp stencil's order under CGAL's numbering
 #include "../thread_count.h" // coresPerTeam: the CPU deposit's threads (psDepositThreads)
 
 // The deposit passes that asked for the GPU and ran on the CPU (ps_point_eval.h psGpuFallbacksTaken).
@@ -871,8 +872,9 @@ static inline bool psWindowTouched(PSPassCtx const &passCtx, Real const (&ep)[NO
 // psWindowTouched: that one divides in double, and in a single build the loop's float quotient can round up onto
 // a grid plane where the double one stays below it, so the two spans can differ by one cell for a vertex within a
 // rounding of a plane -- and psWindowTouched has no rule for a tetrahedron wholly outside a non-periodic grid, which
-// the loop skips ("outsideGrid"). With this test the face sums beside a GPU deposit come from exactly the tetrahedra
-// the CPU loop deposits faces for (the loop's face block sits right after its span test, before any volume test).
+// the loop skips ("outsideGrid"). With this test and psOwnsUpperBoundarySection the face sums beside a GPU deposit come
+// from exactly the tetrahedra the CPU loop deposits faces for (the loop's face block sits right after its span test,
+// before any volume test; its face-only block in the "outsideGrid" branch).
 static inline bool psLoopSpanReaches(Real const (&ep)[NO_DIM+1][NO_DIM], Real const *boxL, Real const *dxL,
                                      size_t const *nGridL, bool const periodic, bool const windowMode,
                                      size_t const *subOriginL, size_t const *subDimsL)
@@ -897,6 +899,48 @@ static inline bool psLoopSpanReaches(Real const (&ep)[NO_DIM+1][NO_DIM], Real co
             if ( !psSpanTouches(iMinU[d], iMaxU[d], long(nGridL[d]), periodic, long(subOriginL[d]), long(subDimsL[d])) )
                 return false;
     return true;
+}
+
+// --face-gradient in a non-periodic run without a window: does a tetrahedron the span test puts OUTSIDE the grid (the
+// loop's "outsideGrid", psLoopSpanReaches) own the grid's section in an UPPER boundary plane? That section is the upper
+// face of the last layer of cells, and no tetrahedron inside the grid owns it (face_sweep.h's half-open rule gives one
+// whose top lies in the plane none): skipped, it left that face without a stream, and the layer's gradient across it
+// fell back to the stream average, each device's own float sum. True when, on every axis where the span starts at the
+// grid's end (iMinU == nGrid, the loop's Real quotient), the lowest vertex lies in the plane or below it -- tested in
+// double, since a float quotient may round a vertex just below the plane onto it, against the same rounded product
+// nGrid * dx that psDepositFaces' first-plane test forms (exact in a single build, where dx is a float, but not always
+// in a double build; the shared rounding is what makes the two agree) -- and on every other axis the span reaches the
+// grid. (A lattice puts three particles in the plane; other data at most a vertex
+// within a rounding of it.) The lower boundary plane needs no rule: its owners reach the grid (iMaxU > 0). The deposit
+// loop and psFaceWalk deposit such a tetrahedron's face sums and nothing else of it; psDepositFaces then finds just the
+// boundary section (its other planes lie beyond the grid). Not under --grid-window: a window's fixed-point units come
+// from the bounds of the tetrahedra that reach it (psFxBoundWalk, the GPU extraction) and, on the GPU under
+// --ps-vertex-mass, so do its vertex degrees (lazyDegrees), none of which covers a tetrahedron outside the grid; a
+// window keeps the deposit loop's tetrahedra, as at its own planes inside the grid. KEEP IN STEP with the loop's span
+// block and psLoopSpanReaches.
+static inline bool psOwnsUpperBoundarySection(Real const (&ep)[NO_DIM+1][NO_DIM], Real const *boxL, Real const *dxL,
+                                              size_t const *nGridL, bool const periodic, bool const windowMode)
+{
+    if ( periodic || windowMode ) return false;   // (no boundary plane; a window: see above)
+    bool atEnd = false;
+    for (int d = 0; d < NO_DIM; ++d)
+    {
+        Real eMin = ep[0][d], eMax = ep[0][d];
+        for (int v = 1; v <= NO_DIM; ++v)
+        {
+            if (ep[v][d] < eMin) eMin = ep[v][d];
+            if (ep[v][d] > eMax) eMax = ep[v][d];
+        }
+        int const iMinU = int(floor((eMin - boxL[2*d]) / dxL[d]));
+        int const iMaxU = int(floor((eMax - boxL[2*d]) / dxL[d])) + 1;
+        if ( iMaxU <= 0 || iMinU > (int)nGridL[d] ) return false;   // below the grid, or a whole cell beyond its end
+        if ( iMinU < (int)nGridL[d] ) continue;                       // reaches the grid along this axis
+        // at the end: psDepositFaces' test (its first plane, ceil(min / dx), is nGrid exactly when min <= nGrid dx,
+        // the same rounded double product as here)
+        if ( double(eMin) - double(boxL[2*d]) > double(nGridL[d]) * double(dxL[d]) ) return false;
+        atEnd = true;
+    }
+    return atEnd;
 }
 
 // The centroid-fallback cell of a tetrahedron: its Eulerian centroid (Real, from the wrapped
@@ -1352,7 +1396,9 @@ static PSFixedBounds psFxBoundWalk(PSPassCtx const &passCtx, PSFxState const &fx
 // tetrahedron from ONE CPU walk over the tessellation, on the bound walk's skeleton (the same filter, mass, gradient
 // and block order as the deposit loop; the GPU-deferred tetrahedra included, so the deposit loop skips its own face
 // block under metalDeposited), into the words psCpuFixedUnits allocated. The tetrahedra are the deposit loop's own:
-// its filter, then its span test (psLoopSpanReaches: the grid of a non-periodic run, the window of --grid-window).
+// its filter, then its span test (psLoopSpanReaches: the grid of a non-periodic run, the window of --grid-window), or,
+// outside a non-periodic grid without a window, its face-only test (psOwnsUpperBoundarySection: the section in an upper
+// boundary plane).
 // Mass, velocity, the per-stream gradient and
 // the dispersion stay the device's: this walk writes the face words only, shared by its threads (relaxed atomics,
 // order-free like the deposit loop's). Costs the walk the CPU face deposit costs beside its exact deposit.
@@ -1387,10 +1433,12 @@ static void psFaceWalk(PSPassCtx const &passCtx, PSFxState &fx, bool const psVer
             if ( ( idx / BLK ) % nT != th ) continue;
             Cell_handle cell = it;
             PSCellGeometry geo;
-            // (the span test as the filter's early reject: on the wrapped positions the loop tests, before the inverse)
+            // (the span test as the filter's early reject: on the wrapped positions the loop tests, before the inverse;
+            // with the loop's face-only case, a tetrahedron outside the grid that owns an upper boundary section)
             if ( !psFilterCell(cell, userOptions, boxCoordinates, true, NULL, geo, false,
                                [&](Real const (&ep)[NO_DIM+1][NO_DIM])
-                               { return !psLoopSpanReaches( ep, boxL, dxL, nGridL, periodic, windowMode, subOriginL, subDimsL ); }) )
+                               { return !psLoopSpanReaches( ep, boxL, dxL, nGridL, periodic, windowMode, subOriginL, subDimsL )
+                                        && !psOwnsUpperBoundarySection( ep, boxL, dxL, nGridL, periodic, windowMode ); }) )
                 continue;
             double tetMass;   // (the deposit loop's: psVertexShareMass, or rho_bar times the Lagrangian volume, in Real)
             if ( psVertexMass ) tetMass = double( Real( psVertexShareMass(cell) ) );
@@ -2375,9 +2423,11 @@ static inline void psNormalizeMoments(PSPassCtx const &passCtx, PSGridsCtx const
         }
         else
         {
-            // --face-gradient: the mean flow's gradient from the face sums (Quantities::psFaceGradientCell)
+            // --face-gradient: the mean flow's gradient from the face sums (Quantities::psFaceGradientCell), the
+            // regular part's twins kept for the '_a' pass the writer writes (User_options::psStreamsTwins, DTFE_setup)
             bool const face = !quantities->face_velocity.empty() && field.velocity_gradient;
-            if ( face ) quantities->psFaceGradientBegin( totalGrid );   // (psFaceDx: set with fx.face)
+            unsigned const twins = &field == &passCtx.userOptions.aField ? passCtx.userOptions.psStreamsTwins : 0u;
+            if ( face ) quantities->psFaceGradientBegin( totalGrid, twins );   // (psFaceDx: set with fx.face)
             for (size_t i = 0; i < totalGrid; ++i)
             {
                 Real const w = weightIsDensity ? quantities->density[i] : massWeight[i];
@@ -4050,11 +4100,40 @@ void interpolateGrid_phaseSpace(DT &dt,
                             rc.d2 = d2;
                             cand.push_back( rc );
                         }
-                        if ( cand.size() > size_t(MAX_STENCIL) )
+                        /* The nearest MAX_STENCIL in a STRICT order: the distance, then the Lagrangian
+                           centroid, then the cell's vertices. The cells' addresses and the ring's walk follow the
+                           insertion history, so neither may pick a tie or order the fit's sums. The order is
+                           canonical because the cells' numbering is (ps_vertex_order.h): the centroids and the
+                           distances are sums over the vertices in that numbering, and two distinct cells differ in
+                           their vertex sequence. Under DTFE_PS_VERTEX_ORDER_LEGACY=1 (CGAL's numbering) the ring
+                           keeps the address order and the partial selection by distance, so the switch gives the
+                           grids made without the order, the A3/A4 bits included. */
+                        if ( psVertexOrderLegacy() )
                         {
-                            std::nth_element( cand.begin(), cand.begin() + MAX_STENCIL, cand.end(),
-                                              [](RingCand const &a, RingCand const &b){ return a.d2 < b.d2; } );
-                            cand.resize( MAX_STENCIL );
+                            if ( cand.size() > size_t(MAX_STENCIL) )
+                            {
+                                std::nth_element( cand.begin(), cand.begin() + MAX_STENCIL, cand.end(),
+                                                  [](RingCand const &a, RingCand const &b){ return a.d2 < b.d2; } );
+                                cand.resize( MAX_STENCIL );
+                            }
+                        }
+                        else
+                        {
+                            std::sort( cand.begin(), cand.end(), [](RingCand const &a, RingCand const &b)
+                            {
+                                if ( a.d2 != b.d2 ) return a.d2 < b.d2;
+                                for (int d = 0; d < NO_DIM; ++d)
+                                    if ( a.nc[d] != b.nc[d] ) return a.nc[d] < b.nc[d];
+                                for (int v = 0; v <= NO_DIM; ++v)
+                                    for (int d = 0; d < NO_DIM; ++d)
+                                    {
+                                        double const x = double( a.cell->vertex(v)->point()[d] );
+                                        double const y = double( b.cell->vertex(v)->point()[d] );
+                                        if ( x != y ) return x < y;
+                                    }
+                                return false;
+                            } );
+                            if ( cand.size() > size_t(MAX_STENCIL) ) cand.resize( MAX_STENCIL );
                         }
 
                         for (size_t ci = 0; ci < cand.size() and nb < MAX_STENCIL; ++ci)
@@ -4094,7 +4173,8 @@ void interpolateGrid_phaseSpace(DT &dt,
             if (released && (!slabList || int(slabFirst[curOrd]) == slab)) ++nReleased;   // once per tet
 
             // Eulerian bounding box of this cell (from the wrapped positions). psLoopSpanReaches repeats this block's
-            // span, "outsideGrid" and window test for psFaceWalk: KEEP THE TWO IN STEP.
+            // span, "outsideGrid" and window test for psFaceWalk, and psOwnsUpperBoundarySection its face-only case:
+            // KEEP THEM IN STEP.
             Real eMin[NO_DIM], eMax[NO_DIM];
             for (int d = 0; d < NO_DIM; ++d)
             {
@@ -4134,7 +4214,31 @@ void interpolateGrid_phaseSpace(DT &dt,
                     if (iMin[d] >= (int)nGridL[d] || iMax[d] <= 0) { outsideGrid = true; break; }
                 }
             }
-            if (outsideGrid) { continue; }
+            if (outsideGrid)
+            {
+    #if NO_DIM==3
+                // --face-gradient: outside the grid, but owning its section in an upper boundary plane -- the
+                // upper face of the last layer, which no tetrahedron inside owns (psOwnsUpperBoundarySection;
+                // psFaceWalk asks the same): that section and nothing else, no volume, stream or moment share. As
+                // the face block below forms it (the options guarantee the exact deposit and no halo release there).
+                if ( faceSWL && psOwnsUpperBoundarySection( eulerPos, boxL, dxL, nGridL, periodicL, windowModeL ) )
+                {
+                    Vertex_handle base = cell->vertex(0);
+                    Real faceGrad[NO_DIM][noVelComp], temp[NO_DIM][noVelComp];
+                    for (int v = 0; v < NO_DIM; ++v)
+                        for (size_t i = 0; i < noVelComp; ++i)
+                            temp[v][i] = cell->vertex(v+1)->info().velocity(i) - base->info().velocity(i);
+                    matrixMultiplication<noVelComp>(posMatInv, temp, faceGrad);
+                    double v0[noVelComp];
+                    for (size_t j = 0; j < noVelComp; ++j) v0[j] = double( base->info().velocity(j) );
+                    double const vTet = double(geo.cellAbsDet) / double(factorial(NO_DIM));
+                    double const rhoTet = ( vTet > 0. && avgDensityL > 0. ) ? double(tetMass) / ( vTet * avgDensityL ) : 0.;
+                    psDepositFaces( geo.eulerPos, boxL, dxL, nGridL, periodicL, subOriginL, subDimsL, slabLoL, slabHiL,
+                                    faceGrad, v0, faceSWL, faceSSL, faceNWL, faceNSL, facePWL, facePSL, rhoTet, massFxAtomicL );
+                }
+    #endif
+                continue;
+            }
             if ( windowModeL )
             {   // --grid-window: a tetrahedron that misses the window on some axis deposits nothing
                 bool touches = true;
@@ -4325,7 +4429,8 @@ void interpolateGrid_phaseSpace(DT &dt,
     #if NO_DIM==3
                 // --face-gradient: this tetrahedron's face sums (psDepositFaces). Ahead of the volume gate below, not
                 // under it: psFaceWalk forms the same sums beside a GPU deposit and knows no clipped volume, so both take
-                // every tetrahedron that passed the filter and the span test above. (A face share needs the tetrahedron
+                // every tetrahedron that passed the filter and the span test above (and the span block's face-only
+                // case, outside the grid with an upper boundary section). (A face share needs the tetrahedron
                 // on both sides of its plane, so the gate would only withhold the sections of a sliver r3d loses.)
                 if ( faceSWL )
                 {

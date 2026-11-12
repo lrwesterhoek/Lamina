@@ -108,9 +108,11 @@ WEB_FIELDS = ("tweb_a", "vweb_a")        # the cosmic-web classes: the only cons
 LAMBDA_TH_DEFAULT = 0.3                  # run_ps_dtfe.sh / run_dtfe.sh LAMBDA_TH (the binary alone: 0.0, so a Custom
                                          # run without it would classify differently from a scripted one)
 # the PS-DTFE face-gradient tick of a NEW job (RunSpec, PipelineSpec and CustomSpec start from it; a saved job keeps its
-# own, an older one without the key takes this): off, as run_ps_dtfe.sh's FACE_GRADIENT and the binary. One name, so
-# the default of all three tabs moves in one line when the face gradient becomes PS-DTFE's default
-FACE_GRADIENT_DEFAULT = False
+# own, an older one without the key takes this): on, as the binary's default route wherever a run qualifies
+# (docs/cleanup-plan.md D13; src/user_options.cc kPsFaceGradientDefault). A ticked job asks for the face gradient only
+# where it qualifies (face_gradient_env). One name, so the default of all three tabs moves in one line: False starts a
+# new job at the stream average of each stream's own gradient
+FACE_GRADIENT_DEFAULT = True
 # run_dtfe.sh's FIELDS default: the same set (it has no PS-only field, so dtfe_fields() keeps it whole)
 DTFE_DEFAULT_FIELDS = list(DEFAULT_FIELDS)
 # what the standard binary computes (no dispersion: PS only)
@@ -175,9 +177,10 @@ class RunSpec:
     mem_budget_gb: float = 0.0       # DTFE_MEM_BUDGET_GB: the auto-tuner's memory budget; 0 = its own (free RAM)
     tess_cache: str = ""             # TESSELLATION_CACHE: reuse the tessellation across runs (a local folder); "" = none
     linear_deposit: bool = False     # PS_LINEAR_DEPOSIT: --ps-linear-deposit (density-weighted inside each tet)
-    face_gradient: bool = FACE_GRADIENT_DEFAULT   # FACE_GRADIENT: --face-gradient (PS-DTFE: the gradient of the
-                                     # volume-weighted MEAN velocity from exact face sums; needs the exact deposit and
-                                     # the volume weighting; 3D)
+    face_gradient: bool = FACE_GRADIENT_DEFAULT   # FACE_GRADIENT (face_gradient_env): PS-DTFE's gradient of the
+                                     # volume-weighted MEAN velocity from exact face sums where the job qualifies
+                                     # (the exact deposit, the volume weighting, 3D); unticked the stream average of
+                                     # each stream's own gradient (--per-tet-gradient)
     ordered_merge: bool = True       # PS_MERGE=index-order: --ps-merge index-order, given (partitions merged in index
                                      # order: bit-identical repeats; given, it keeps the memory gate on under the
                                      # auto-tuner's speed split). ON by default, the binary's default order
@@ -302,6 +305,10 @@ class RunSpec:
             # tick is a PS-DTFE option), so a FACE_GRADIENT=0 exported in the login shell cannot turn it into
             # '--per-tet-gradient', nor a 1 add '--face-gradient' to the command (and the run log) the job shows
             env["FACE_GRADIENT"] = ""
+            # ... and the binary's own switch the same way (it reads an empty value as unset): install_gui_app.sh
+            # imports every DTFE_* from the login shell, where a DTFE_FACE_GRADIENT=0 would turn the job to the
+            # deposit's own gradient behind the command it shows
+            env["DTFE_FACE_GRADIENT"] = ""
             if self.gpu:
                 argv.append("-m")
             if self.deposit == "exact":
@@ -326,7 +333,7 @@ class RunSpec:
             "PS_CAUSTICS": "1" if self.caustics else "0",
             "PS_CAUSTIC_CUSPS": "1" if self.caustic_cusps else "0",
             "PS_LINEAR_DEPOSIT": "1" if self.linear_deposit else "0",
-            "FACE_GRADIENT": "1" if self.face_gradient else "0",
+            "FACE_GRADIENT": face_gradient_env(self),
             "OUTPUT_PREFIX": self.output_prefix,
         })
         env.update(ps_run_env(self))
@@ -684,26 +691,37 @@ def _pts_conventions_problems(spec, points: bool) -> list[tuple[str, str]]:
                      "means); compare it with the grids knowing that")]
 
 
-def _face_gradient_problems(spec) -> list[tuple[str, str]]:
-    """The face gradient's checks (PS-DTFE; Grids, Pipeline and Custom jobs, duck-typed): what the binary and the driver
-    refuse, said before the run, and the one case where the flag does nothing (no field built on the velocity
-    gradient, _FROM_GRADIENT)."""
-    out: list[tuple[str, str]] = []
+def face_gradient_applies(spec) -> bool:
+    """Does this PS-DTFE job qualify for the face gradient (duck-typed: Grids, Pipeline and Custom jobs)? The binary's
+    rule (src/user_options.cc faceGradientBlocker): the exact deposit, the volume-weighted velocities, no halo release,
+    3D."""
+    return (spec.deposit == "exact" and bool(spec.volume_weighted)
+            and not getattr(spec, "halo_release", 0.0) > 0 and getattr(spec, "dim", 3) == 3)
+
+
+def face_gradient_env(spec) -> str:
+    """The velocity gradient's route of a PS-DTFE job, as run_ps_dtfe.sh's FACE_GRADIENT: '1' (--face-gradient) where
+    the tick is on and the job qualifies, '0' (--per-tet-gradient) where the tick is off, '' (the binary's default,
+    which keeps the stream average there and says why in the run log) where the tick is on and the job does not
+    qualify. Spelled out every time, so a FACE_GRADIENT exported in the login shell cannot leak in."""
     if not getattr(spec, "face_gradient", False):
-        return out
-    if spec.deposit != "exact":
-        out.append(("error", "the face gradient integrates the faces in the exact deposit: choose the exact cell "
-                             "average"))
-    if not spec.volume_weighted:
-        out.append(("error", "the face gradient is the gradient of the volume-weighted mean velocity: tick the "
-                             "volume-weighted velocities"))
-    if getattr(spec, "halo_release", 0.0) > 0:
-        out.append(("error", "the face gradient cannot be combined with the halo release (a released tetrahedron "
-                             "deposits as a point and has no faces)"))
-    if not any(f in _FROM_GRADIENT for f in spec.fields):
-        out.append(("info", "the face gradient changes the gradient, divergence, shear, vorticity and V-web fields: "
-                            "none is ticked, so it does nothing"))
-    return out
+        return "0"
+    return "1" if face_gradient_applies(spec) else ""
+
+
+def _face_gradient_problems(spec) -> list[tuple[str, str]]:
+    """The face gradient's note (PS-DTFE in 3D; Grids, Pipeline and Custom jobs, duck-typed). The tick is on by default
+    (FACE_GRADIENT_DEFAULT) and asks for the face gradient only where the job qualifies (face_gradient_applies);
+    elsewhere the binary keeps the stream average of each stream's own gradient and says why in the run log -- said
+    here before the run, where a field built on the velocity gradient is ticked (_FROM_GRADIENT)."""
+    if (not getattr(spec, "face_gradient", False) or face_gradient_applies(spec)
+            or not any(f in _FROM_GRADIENT for f in spec.fields)):
+        return []
+    why = ("the sampled deposit" if spec.deposit != "exact"
+           else "velocities that are not volume weighted" if not spec.volume_weighted
+           else "the halo release")
+    return [("info", f"the face gradient needs the exact deposit, the volume-weighted velocities and no halo release: "
+                     f"with {why} this job keeps the stream average of each stream's own gradient")]
 
 
 def _ps_option_problems(spec, n_particles) -> list[tuple[str, str]]:

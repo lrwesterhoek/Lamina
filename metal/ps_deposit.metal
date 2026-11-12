@@ -498,7 +498,8 @@ static inline bool exact_cell_clip(thread const ExactTet& E, thread const int ra
     float3 const thi = max(max(float3(0.0f), E.t1), max(E.t2, E.t3));
     float3 const org = 0.5f * (max(clo, tlo) + min(chi, thi));
     // order 1 in pass 0: the same arithmetic for V and the first moments as order 2, so the
-    // passes' volumes agree to the bit
+    // passes' volumes agree to the bit (the first moments need not: --ps-linear-deposit, whose weight
+    // uses them, clips at order 2 in both passes, depositExactItems' kItemsPhase 2)
     sweep_moments(-org, E.t1 - org, E.t2 - org, E.t3 - org, clo - org, chi - org, full, mo);
     if (!(mo[0] > 0.0f)) return false;
 
@@ -1175,6 +1176,15 @@ static inline uint2 psItemOf(device const uint* itemStart, device const uint* bl
 // The pass a depositExactItems pipeline runs (== ExactItemParams.phase): the host builds one pipeline per value,
 // so the summing pass carries none of the deposit's registers (an M1 Max then fits 512 threads per threadgroup
 // instead of 384: phase 0 ran 12-23% faster, the deposit up to 8%).
+// 2 = both passes in ONE pipeline, the pass read from ExactItemParams.phase at run time: the host takes it under
+// --ps-linear-deposit (P.fLinear). That weight is built from the clip's first moments, and two pipelines may contract
+// them differently under fast math (docs/cleanup-plan.md P4.4: about 17% of the pieces, by up to 3.7e-8 of a cell),
+// so phase 0's total missed the weights phase 1 deposits and a tet deposited m (sum w1 / sum w0), about 1e-8 off its
+// mass. In one pipeline both passes run the same compiled clip (order 2, the deposit's), so both form the same
+// weights; the total carries only the per-item float sum's rounding (phase 0 sums an item's weights in float and
+// adds that sum to the tet's total once), as the uniform deposit's does. Values 0 and 1 fold to the constants they
+// always were (deposit = phase 1, the clip's order 2 only there), so the uniform deposit's two pipelines are the code
+// they were.
 constant uint kItemsPhase [[function_constant(0)]];
 
 // The per-tet numbers depositFields derives in its preamble, for the exact path (keep in sync).
@@ -1320,7 +1330,9 @@ kernel void depositExactItems(
     device atomic_uint* const bad = sumWX + ulong(IP.badAt);   // the guard's counters (ExactItemParams.badAt)
     uint2 const it = psItemOf(itemMap, itemMap + (ulong(IP.nTet) + 1ul), IP.nTet, IP.itemBase + lid);   // (tet, block)
     uint  const tet = it.x;
-    bool const deposit = kItemsPhase == 1u;
+    // (kItemsPhase 2: the pass from IP.phase, the clip at order 2 in both; see kItemsPhase)
+    bool const deposit = kItemsPhase == 2u ? IP.phase == 1u : kItemsPhase == 1u;
+    bool const fullMoments = kItemsPhase != 0u;
     float const m = masses[tet];
     if (m <= 0.0f) return;           // deferred by an earlier, retried attempt
     bool const sumWFixed = (P.fxMask & FX_SUMW_BIT) != 0u;
@@ -1371,7 +1383,7 @@ kernel void depositExactItems(
         if (window_flat(raw, P, flat) != 2) continue;   // outside the sub-box / window
         float mo[10], wt;
         float3 cc;
-        if (!exact_cell_clip(E, raw, P, deposit, fLinear, mo, wt, cc)) continue;
+        if (!exact_cell_clip(E, raw, P, fullMoments, fLinear, mo, wt, cc)) continue;
         if (!deposit) acc += wt;
         else exact_cell_deposit(G, flat, mo, wt * shareFac, E, fVel, fDisp, fGrad, fVolW, fCaustic, fScal, fSGrad, cc);
     }

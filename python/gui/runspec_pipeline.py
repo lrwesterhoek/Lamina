@@ -284,7 +284,7 @@ class PipelineSpec:
                "PS_CAUSTICS": "1" if self.caustics else "0",
                "PS_CAUSTIC_CUSPS": "1" if self.caustic_cusps else "0",
                "PS_LINEAR_DEPOSIT": "1" if self.linear_deposit else "0",
-               "FACE_GRADIENT": "1" if self.face_gradient else "0"}
+               "FACE_GRADIENT": _rs.face_gradient_env(self)}
         env.update(_rs.ps_exact_env(self.deposit == "exact"))
         env.update(_rs.ps_run_env(self))            # the GPU (-m only switches it on), merge order, start over ...
         env.update(_rs.ps_conventions_env(self.pts_conventions))

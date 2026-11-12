@@ -2,7 +2,8 @@
 # The standard-DTFE GPU deposit ('--gpu', ./DTFE): the PS deposit's chunk checkpoints and
 # cause-aware retry (src/CGAL_triangulation/gpu_metal_retry.h, shared with the PS host;
 # the pass loop is runBatch in dtfe_metal_host.cc), and its exact sums -- the '_a' grids as
-# 64-bit fixed-point sums, metal/dtfe_deposit.metal's header -- which make two runs byte-identical (with float
+# fixed-point sums (the sampled average's in 64-bit words, the exact average's in the run-wide 128-bit words),
+# metal/dtfe_deposit.metal's header -- which make two runs byte-identical (with float
 # atomics two fault-free runs differ in 26-49% of the cells, up to 1e-6). tests/gpu_retry_check.sh is the PS twin of
 # this suite and its fault hook is the same: DTFE_GPU_FAULT_AT=<k>[:innocent|timeout|oom|persist] lets the k-th command
 # buffer of the process run to completion -- its atomics ARE in the grids -- and then reports it as
@@ -39,6 +40,9 @@
 #   N1  the non-finite guard of the exact sums (ps_deposit_params.h psFixedShareOk): DTFE_TEST_NAN_SHARE=50
 #       makes about one tetrahedron in 50 hand the kernel NaN vertex densities; the run reports once how many density
 #       shares it left out, and its '.a_den' has no NaN or infinity
+#   N2  the same under --exact, whose batches sum in the run-wide 128-bit words (src/fixed_units.h RunUnits; the
+#       guard is fixed_words.metal.inc shareLimbs): reported once, '.a_den' finite; and the exact runs' timing lines
+#       (x1) say 'run-wide 128-bit fixed-point sums' for every batch
 # GPU builds only (METAL=1): skipped (exit 0) otherwise, a local GPU suite like tests/gpu_retry_check.sh (not in
 # tests/ci_suite.sh). ~30 s on Metal (M1 Max). DTFE_TEST_PRECISION=double runs ./DTFE-double.
 # Usage: tests/dtfe_gpu_retry_check.sh [--no-build]   (--no-build is accepted and ignored)
@@ -77,7 +81,7 @@ run "$TMP/a1" env DTFE_GPU_TIMING=1 "${DTFE_BIN}" "$SNAP" "$TMP/a1" "${C[@]}" --
 run "$TMP/a2" env DTFE_GPU_CHUNK=65536 "${DTFE_BIN}" "$SNAP" "$TMP/a2" "${C[@]}" --gpu --sampled
 run "$TMP/k1" env DTFE_GPU_ITEMS=0 "${DTFE_BIN}" "$SNAP" "$TMP/k1" "${C[@]}" --gpu --sampled
 run "$TMP/k2" env DTFE_GPU_ITEMS=0 DTFE_GPU_CHUNK=25088 "${DTFE_BIN}" "$SNAP" "$TMP/k2" "${C[@]}" --gpu --sampled
-run "$TMP/x1" "${DTFE_BIN}" "$SNAP" "$TMP/x1" "${C[@]}" --gpu --exact
+run "$TMP/x1" env DTFE_GPU_TIMING=1 "${DTFE_BIN}" "$SNAP" "$TMP/x1" "${C[@]}" --gpu --exact
 run "$TMP/x2" env DTFE_GPU_CHUNK=1024 "${DTFE_BIN}" "$SNAP" "$TMP/x2" "${C[@]}" --gpu --exact
 echo ">> E2: the float sums (A/B) and the CPU"
 run "$TMP/f1" env DTFE_GPU_FLOAT_GRIDS=1 DTFE_GPU_TIMING=1 \
@@ -114,6 +118,8 @@ env DTFE_DEPOSIT_THREADS=1 "${DTFE_BIN}" "$SNAP" "$TMP/v0" "${PL[@]}" > "$TMP/v0
     || { echo "FAIL: the one-thread CPU plane run (see $TMP/v0.log)"; exit 1; }
 echo ">> N1: the non-finite guard (DTFE_TEST_NAN_SHARE=50: NaN vertex densities in about one tetrahedron in 50)"
 run "$TMP/n1" env DTFE_TEST_NAN_SHARE=50 "${DTFE_BIN}" "$SNAP" "$TMP/n1" "${C[@]}" "${ONE[@]}" --gpu --sampled
+echo ">> N2: the same under --exact (the run-wide 128-bit words)"
+run "$TMP/n2" env DTFE_TEST_NAN_SHARE=50 "${DTFE_BIN}" "$SNAP" "$TMP/n2" "${C[@]}" "${ONE[@]}" --gpu --exact
 "$PY" - "$TMP" <<'PYEOF'
 import numpy as np, re, sys
 import os as _os; REAL = np.dtype(_os.environ.get("DTFE_TEST_REAL", "float32"))   # tests/precision.sh
@@ -151,6 +157,10 @@ for a, b, what in (("a1", "a2", "item kernel, 9 sub-domains, opening chunk 4096 
 L = log("a1")
 check("E1", "fixed-point sums" in L and "float sums" not in L,
       "the default sums are the exact ones (every batch's timing line of a1, a sampled run, says 'fixed-point sums')")
+L = log("x1")
+nx, nw = len(re.findall(r"DTFE Metal timing: exact kernel", L)), L.count("run-wide 128-bit fixed-point sums")
+check("N2", nx > 0 and nw == nx,
+      f"--exact sums in the run-wide 128-bit words: {nw} of {nx} batch timing lines of x1 say so")
 L = log("f1")
 check("E2", "float sums" in L and "fixed-point sums" not in L,
       "DTFE_GPU_FLOAT_GRIDS=1 runs the float atomics (the timing lines say 'float sums')")
@@ -225,6 +235,15 @@ check("N1", len(m) == 1 and int(m[0][1]) > 0,
 den = rd("n1", "a_den")
 check("N1", den.size > 0 and bool(np.isfinite(den).all()), f"NaN vertex densities: '.a_den' finite everywhere ({den.size} cells)")
 check("N1", not re.search(r"share\(s\) of the exact fixed-point sums", log("a1")), "a run without the hook reports no dropped share")
+m = re.findall(r"(\d+) share\(s\) of the exact fixed-point sums were not finite.*?density grid (\d+)", log("n2"))
+check("N2", len(m) == 1 and int(m[0][1]) > 0,
+      "--exact, NaN vertex densities: the run reports its dropped density shares once"
+      + (f" ({m[0][1]})" if m else " -- NO such warning"))
+den = rd("n2", "a_den")
+check("N2", den.size > 0 and bool(np.isfinite(den).all()),
+      f"--exact, NaN vertex densities: '.a_den' finite everywhere ({den.size} cells)")
+check("N2", not re.search(r"share\(s\) of the exact fixed-point sums", log("x1")),
+      "an exact run without the hook reports no dropped share")
 print("RESULT:", "PASS  (two GPU runs write the same grids, and a failed GPU buffer resumes from its checkpoint with "
       "exact grids, by cause; only a persistent failure reaches the CPU)" if not fails else f"FAIL ({fails} check(s))")
 sys.exit(1 if fails else 0)

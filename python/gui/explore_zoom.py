@@ -295,6 +295,10 @@ def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: 
                 "--exact", "--ps-caustics"]                         # (the exact deposit, named: the zoom needs it)
         if side.get("volume_weighted", True):
             cmd.append("--ps-volume-weighted")
+        # the velocity gradient's route as the output's own run took it (its '.a_velDivStreams' marks the face
+        # gradient, PS-DTFE's default with the exact deposit and the volume weighting, D13): the zoom's derivatives
+        # are then the map's, and an output made with the stream average keeps it
+        cmd.append("--face-gradient" if o.face_gradient and "--ps-volume-weighted" in cmd else "--per-tet-gradient")
         # chart-independent tet masses: as the custom run recorded it, or, for a TNG output (no
         # sidecar: the batch script's default, on, when the converted ICs are the Lagrangian input)
         if (bool(side.get("vertex_mass")) if side else bool(kw.get("lagrangian_input"))):
@@ -757,10 +761,12 @@ class ZoomMixin:
         if self.compare.currentData() is not None:
             note += " · the comparison applies to the slice map: the zoom shows A"
         # a zoom is a point evaluation (or an exact run on the region): a phase-space output's velocity derivatives are
-        # there the stream average, whatever the choice; standard DTFE's the containing tetrahedron's
+        # there the stream average, except in an exact zoom of a face-gradient output (the zoom takes its route);
+        # standard DTFE's the containing tetrahedron's
         o = req["output"]
         ps = G.estimator_label(o) == "PS-DTFE"
-        fam = "" if req["field"] not in G.GRADIENT_FIELDS else "stream" if ps else "mean"
+        face = bool(z.get("exact")) and o.face_gradient
+        fam = "" if req["field"] not in G.GRADIENT_FIELDS else "stream" if ps and not face else "mean"
         label = G.field_label(o, req["field"], fam)
         self.ps_gradient_note.setText("")
         self._out_form_map.setRowVisible(self.ps_gradient_note, False)

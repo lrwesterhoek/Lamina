@@ -61,6 +61,12 @@ _RUN_MODE = re.compile(r"(?:^|\s)--run-mode[ =](\S+)")    # the machine use (a l
 # average is their default, so a command without a flag says nothing); older ones printed only the exact line
 _AVERAGE = re.compile(r"^\s*(?:volume averaging|grid deposit)\s+:\s+(EXACT (?:cell-tetrahedron integration"
                       r"|tetrahedron-cell intersection moments)|SAMPLED\b)", re.M)
+# the run-log header's line on the velocity gradient's route (both binaries, where a field built on the gradient is
+# computed): 'velocity gradient : from EXACT FACE ...' for the face gradient, any other text for the deposit's own
+# (PS-DTFE: the stream average of each stream's own gradient). A PS-DTFE log of a binary older than its face-gradient
+# default (docs/cleanup-plan.md D13) has none: its route is the stream average unless the command names
+# '--face-gradient'
+_GRADIENT = re.compile(r"^\s*velocity gradient\s+:\s+(from EXACT FACE)?", re.M)
 # the binaries' older spellings and their canonical names: dtfelib/runlog.py's permanent table (the binaries accept
 # a subset for one release, src/user_options.cc deprecatedOptions). Every reader of a command line maps them first,
 # so a run log written with either reads the same (RunRecord.has, and every regex below runs on canonical_command's
@@ -248,6 +254,7 @@ class RunRecord:
     binary: str = ""                # PS-DTFE | DTFE (-2d, -double; "" when unknown)
     command: str = ""               # the RUNNING line (paths unquoted, as the binary printed it)
     header_average: str = ""        # 'exact' | 'sampled': the header's cell-average line (_AVERAGE); '' without one
+    header_gradient: str = ""       # 'face' | 'per-tet': the header's velocity-gradient line (_GRADIENT); '' if none
     build_rev: str = ""
     build_time: _dt.datetime | None = None
     finished: _dt.datetime | None = None   # the log's modification time = when the run ended
@@ -296,6 +303,16 @@ class RunRecord:
         if self.header_average:
             return self.header_average == "exact"
         return self.has("--exact")
+
+    @property
+    def face_gradient(self) -> bool:
+        """PS-DTFE: the run's velocity-gradient family is the mean flow's, from exact face sums -- the header's line
+        says so when the log has one (the binary prints it where a field built on the gradient is computed, and
+        resolves a command without a route flag to its default, D13); else the command's '--face-gradient' (an older
+        binary's run without it holds the stream average, that binary's only default)."""
+        if self.header_gradient:
+            return self.header_gradient == "face"
+        return self.has("--face-gradient")
 
     @property
     def estimator(self) -> str:
@@ -384,7 +401,7 @@ class RunRecord:
                 bits.append(f"nSub {self.nsub}")
             if self.has("--ps-linear-deposit"):       # the two deposit variants of one snapshot must differ here
                 bits.append("linear deposit")
-            if self.has("--face-gradient"):           # the mean flow's gradient: the same snapshot, another divergence
+            if self.face_gradient:                    # the mean flow's gradient: the same snapshot, another divergence
                 bits.append("face gradient")
             if self.has("--ps-vertex-mass"):
                 bits.append("vertex mass")
@@ -439,7 +456,9 @@ class RunRecord:
             d.update(deposit="exact" if self.exact else "sampled",
                      # always set: 'Load settings' must also turn the box OFF for a standard-deposit run
                      linear_deposit=self.has("--ps-linear-deposit"),
-                     face_gradient=self.has("--face-gradient"),
+                     # the tick: off only where the run named the stream average ('--per-tet-gradient'); a run that
+                     # named no route took the binary's default, which a ticked job asks for where it qualifies
+                     face_gradient=not self.has("--per-tet-gradient"),
                      vertex_mass=self.has("--ps-vertex-mass"),
                      volume_weighted=self.has("--ps-volume-weighted"),
                      caustics=self.has("--ps-caustics"), caustic_cusps=self.has("--ps-caustic-cusps"),
@@ -517,8 +536,8 @@ def run_inputs(rec: RunRecord) -> set[Path]:
 # the text-derived fields of every run log read, by path, with the (size, mtime_ns) they were read at:
 # the launcher rescans every 30 s on its GUI thread, and a TNG50 z=0 log is large and on the
 # external disk; an unchanged log is not read again
-_LOG_FIELDS = ("binary", "build_rev", "build_time", "command", "header_average", "gpu_retried", "gpu_retries",
-               "gpu_retries_by_cause", "wall_seconds", "peak_rss_gb", "footprint_gb", "ok")
+_LOG_FIELDS = ("binary", "build_rev", "build_time", "command", "header_average", "header_gradient", "gpu_retried",
+               "gpu_retries", "gpu_retries_by_cause", "wall_seconds", "peak_rss_gb", "footprint_gb", "ok")
 _LOG_CACHE: dict[str, tuple[int, int, dict]] = {}
 
 
@@ -546,6 +565,9 @@ def _parse_text(rec: RunRecord, text: str):
         a = _AVERAGE.search(text, m.end(), nxt.start() if nxt else len(text))
         if a:
             rec.header_average = "exact" if a.group(1).startswith("EXACT") else "sampled"
+        g = _GRADIENT.search(text, m.end(), nxt.start() if nxt else len(text))   # the route's line, the same way
+        if g:
+            rec.header_gradient = "face" if g.group(1) else "per-tet"
     rec.gpu_retried = _GPU_RETRY.search(text) is not None
     tallies = _GPU_RETRIES.findall(text)
     if tallies:                     # the last: a resumed run's log holds each attempt's

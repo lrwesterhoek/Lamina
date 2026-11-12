@@ -57,6 +57,7 @@
 #include "scratch_alloc.h"
 #include "ps_point_eval.h"
 #include "ps_globals_record.h"
+#include "fixed_units.h"   // the run-wide fixed-point units (runUnitsSetup)
 #include "run_progress.h"   // the '<output>.runlog.progress' sidecar
 #include "partition_checkpoint.h"   // checkpoint + '--resume' of a partitioned run (both binaries)
 #include "web_fields.h"   // postProcessWebFields: the derived velocity fields and the V-web / T-web (web_fields.cc)
@@ -637,6 +638,58 @@ static void psResolveGpuShare(User_options &u, size_t const nParticles)
 #endif
 
 
+/* The run-wide fixed-point units (fixed_units.h RunUnits): one unit per accumulator for the whole run, from the grid,
+   the mean density and one pass over the particles the run uses (after '--poisson' and '--random-sample'). Set here,
+   before the planner, the partition loop and any thread sub-domain, so every split holds the same units; the copies
+   of the options carry them. The cell sides are the grid box over '--grid' -- 'region': the box, or the '--region'
+   box DTFE_setup crops to below -- as the grid frame's (user_options.h gridFrame). A run without a grid (sample
+   points only) has none, and neither has a run that starts without its particles (ps_globals_record.h): the record
+   holds no velocities. One run-log line, from global quantities only, so it is the same at every split. */
+static void runUnitsSetup(User_options &u, vector<Particle_data> &particles)
+{
+    u.runUnits = RunUnits();
+    if ( u.gridSize.size() != size_t(NO_DIM) ) return;
+    MESSAGE::Message message( u.verboseLevel );
+    if ( u.psParticlesDeferred )
+    {
+        message << "fixed-point units (run-wide): none (the run started without its particles, and the globals "
+                << "record holds no velocities).\n" << MESSAGE::Flush;
+        return;
+    }
+    double side[NO_DIM];
+    for (int d = 0; d < NO_DIM; ++d)
+        side[d] = ( double( u.region.coords[2*d+1] ) - double( u.region.coords[2*d] ) ) / double( u.gridSize[d] );
+    bool volumeWeighted = false;
+    int subsamples = 1;
+#ifdef PHASE_SPACE
+    volumeWeighted = u.psVolumeWeighted;
+    subsamples = u.psAvgSubsamples;
+#endif
+    u.runUnits.fill( side, double( u.averageDensity ), volumeWeighted, subsamples, RunUnits::measure( particles ) );
+    message << u.runUnits.text() << "\n" << MESSAGE::Flush;
+    std::string const out = u.runUnits.outOfRange();
+    if ( not out.empty() )
+    {
+        MESSAGE::Warning warning( u.verboseLevel );
+        warning << "fixed-point units (run-wide): the unit of " << out << " lies outside 2^-120 .. 2^120; that grid "
+                << "keeps its per-batch or per-pass unit.\n" << MESSAGE::EndWarning;
+    }
+#if defined(SCALAR) && !defined(PHASE_SPACE)
+    // '--approx-phase-space-density' replaces each particle's scalar by f = rho g after this point (DTFE()'s
+    // computeVelocitySpaceDensity, then the vertex loop after the tessellation, triangulation.cpp), so smax measured
+    // the file's scalar, not the f the scalar grids sum: those two take no run-wide unit (has() false) and keep the
+    // GPU batch's own unit and the CPU's float sums, whose last bits follow the split
+    if ( u.approxPSD )
+    {
+        u.runUnits.ok[RU_SCALAR] = u.runUnits.ok[RU_SCALAR_GRADIENT] = false;
+        message << "fixed-point units (run-wide): the scalar and scalar gradient grids keep the GPU batch's own unit "
+                << "and the CPU's float sums ('--approx-phase-space-density' sets the scalar to f = rho g later).\n"
+                << MESSAGE::Flush;
+    }
+#endif
+}
+
+
 // Common DTFE setup: optional random/subsampled particles, consistency checks, velocity-derivative
 // selection, and region/partition extraction. Mutates userOptions (averageDensity, region).
 DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
@@ -667,6 +720,7 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
         userOptions.averageDensity = averageDensity( *particlePointer, userOptions );
         userOptions.psAverageDensityFromParticles = true;
     }
+    runUnitsSetup( userOptions, *particlePointer );
 
     // --scratch-dir: arm the out-of-core allocator BEFORE any full-grid allocation and before
     // auto-tune (which excludes the disk-backed grid term from its RAM model when armed). The
@@ -870,6 +924,13 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
     // --face-gradient: the mean-flow gradient (S-flux - <v> N-flux) / sum V_s needs the cell mean velocity <v>, which is
     // then deposited whether or not 'velocity_a' is written (the writer goes by the user's own fields)
     if ( userOptions.faceGradient and state.options.aField.velocity_gradient ) state.options.aField.velocity = true;
+    // ... and the regular part's own gradient, shear and vorticity are kept beside the mean flow's where the user's
+    // '_a' fields write the mean flow's (docs/cleanup-plan.md D12): the normalization reads this mask, since the copy
+    // above keeps only the gradient
+    state.options.psStreamsTwins = userOptions.faceGradient
+        ? ( ( userOptions.aField.velocity_gradient ? 1u : 0u ) | ( userOptions.aField.velocity_shear ? 2u : 0u )
+            | ( userOptions.aField.velocity_vorticity ? 4u : 0u ) )
+        : 0u;
 #endif
     // the T-web is computed from the density grid (tidal tensor): make sure density is interpolated.
     // Drop the tweb flag itself from the internal copy -- the interpolation never fills the T-web
@@ -1116,8 +1177,9 @@ static void psUnwrapEulerian(std::vector<Particle_data> &particles, User_options
 #endif
 
 // The host's reaction to shares the non-finite guard of the exact fixed-point sums dropped (ps_deposit_params.h
-// psFixedShareOk: a NaN, an infinity or a product beyond 2^63 adds nothing and is counted, on the CPU and in every
-// GPU kernel). THE one place that decides what such a run does: a warning that names each grid and its count,
+// psFixedShareOk: a NaN, an infinity or a product beyond 2^63 -- in the run-wide 128-bit words, at or above the
+// share cap, fixed_units.h RunUnits -- adds nothing and is counted, on the CPU and in every GPU kernel). THE one
+// place that decides what such a run does: a warning that names each grid and its count,
 // once per DTFE() call (the counts are taken and reset here), and the run goes on -- the grids are written,
 // without those shares (a float sum would turn their cells NaN). To fail the run instead, throw here
 // (throwError). Nothing is printed when nothing was dropped.
@@ -1131,9 +1193,11 @@ static void fixedShareDropsReact(User_options const &userOptions)
         "released multiplicity", "mass (density)", "exact-deposit weight totals", "face velocity flux (--face-gradient)",
         "face stream flux (--face-gradient)", "face mass flux (--face-gradient)", "" };
 #else
-    // the standard GPU deposit's grids (dtfe_gpu_fixed.h batchFixedScales)
+    // the standard deposits' grids (the GPU's, dtfe_gpu_fixed.h; the CPU exact average's run-wide words,
+    // averaged_interpolation_1.cc Avg1Words), then the face pass's words (avg1FacePass)
     static char const *const names[FX_DROP_SLOTS] = {
-        "density", "velocity", "velocity gradient", "scalar", "scalar gradient", "", "", "", "", "", "", "", "", "", "", "" };
+        "density", "velocity", "velocity gradient", "scalar", "scalar gradient", "face velocity flux (--face-gradient)",
+        "", "", "", "", "", "", "", "", "", "" };
 #endif
     unsigned long long total = 0;
     std::string what;
@@ -1147,9 +1211,9 @@ static void fixedShareDropsReact(User_options const &userOptions)
     }
     if ( total == 0 ) return;
     MESSAGE::Warning warning( userOptions.verboseLevel );
-    warning << total << " share(s) of the exact fixed-point sums were not finite or beyond the 64-bit range and were "
-            << "left out (" << what << "). The grids are written without them; a non-finite input value (a NaN or an "
-            << "infinite position, velocity or mass) is the usual cause.\n" << MESSAGE::EndWarning;
+    warning << total << " share(s) of the exact fixed-point sums were not finite or beyond their words' range and "
+            << "were left out (" << what << "). The grids are written without them; a non-finite input value (a NaN "
+            << "or an infinite position, velocity or mass) is the usual cause.\n" << MESSAGE::EndWarning;
 }
 
 #ifdef PHASE_SPACE
@@ -2175,7 +2239,8 @@ static void psNormalizeMoments(DTFE_State &state, Quantities *uQuantities, Quant
         aQuantities->psFaceDx[d] = uQuantities->psFaceDx[d] =
             (state.options.region[2*d+1] - state.options.region[2*d]) / Real(state.options.gridSize[d]);
     uQuantities->normalizePhaseSpace( state.options.uField, weightScale );
-    aQuantities->normalizePhaseSpace( state.options.aField, weightScale );
+    // (the regular part's twins: the '_a' grids only, as the writer writes them -- DTFE_setup's psStreamsTwins)
+    aQuantities->normalizePhaseSpace( state.options.aField, weightScale, state.options.psStreamsTwins );
 
     // DTFE_MASS_AUDIT=1, (h): the merged grid against the passes' sums and the input mass, per pass kind
     if ( PSMassAudit::on() )

@@ -20,6 +20,15 @@
 #     at nSub = 1/3/5 approaching the exact grid MONOTONICALLY (L1), and the
 #     '--ps-linear-deposit' composition (exact order-1 linear-density shares) conserving
 #     mass and staying strongly correlated with the exact uniform deposit.
+#  E) (GPU builds) the GPU exact deposit with '--ps-linear-deposit': both of its item passes run on the ONE pipeline
+#     that reads the pass at run time (kItemsPhase 2 in metal/ps_deposit.metal; DTFE_GPU_TIMING names it
+#     'exactItems linear'), so both passes form the same weights and a tetrahedron's total carries only the rounding
+#     of each item's float sum -- two pipelines may round the clip's first moments apart, which put a tetrahedron's
+#     deposit about 1e-8 off its mass (docs/cleanup-plan.md P4.4) -- while the uniform exact deposit keeps its two
+#     pipelines ('depositExactItems'). Both conserve mass to the float rounding of their shares: DTFE_MASS_AUDIT's
+#     'handed-deferred-fixed' within 1e-7 of the mass handed to the GPU, in every pass. (That level cannot show the
+#     1e-8 per tetrahedron, whose sign varies, under shares that round by up to 6e-8 each: the pipeline names are
+#     the check that the linear passes share one compiled clip.)
 #
 # Usage: tests/ps_linear_deposit_check.sh [--no-build]
 
@@ -120,12 +129,16 @@ if [ "${HAVE_EXACT}" -eq 1 ]; then
                 exit 1
             fi
         done
+        echo ">> runs 14-15: exact deposit --gpu, uniform and --ps-linear-deposit (its pipelines and the mass audit: E)"
+        DTFE_MASS_AUDIT=1 DTFE_GPU_TIMING=1 run "${TMP}/pld_pan_exug" "${SNAP_PAN}" --periodic --exact --gpu --partition 1 1 1
+        DTFE_MASS_AUDIT=1 DTFE_GPU_TIMING=1 run "${TMP}/pld_pan_exlg" "${SNAP_PAN}" --periodic --exact --ps-linear-deposit \
+            --gpu --partition 1 1 1
     else
-        echo ">> runs 12-13 skipped (CPU-only build: no exact-deposit GPU parity to check)"
+        echo ">> runs 12-15 skipped (CPU-only build: no exact-deposit GPU parity to check)"
     fi
 else
     [ "${DTFE_TEST_REQUIRED:-0}" = "1" ] && { echo "FAIL (required): this PS-DTFE has no --exact / --sampled" >&2; exit 1; }
-    echo ">> runs 6-13 skipped (binary lacks --exact / --sampled)"
+    echo ">> runs 6-15 skipped (binary lacks --exact / --sampled)"
 fi
 
 echo ">> checking the numbers ..."
@@ -275,8 +288,37 @@ if have_exact:
         srel = np.abs(sc - sg).max() / (np.abs(sc).max() + 1e-30)
         check("D exact GPU streams match CPU", srel < 1e-3,
               f"max rel = {srel:.3e} (float volume-weighted multiplicity)")
+        # (E) runs 14-15: which pipeline ran each item pass (DTFE_GPU_TIMING), and the mass audit of every pass
+        import re
+        num = r"([-+]?(?:nan|inf|[0-9.]+(?:[eE][-+]?[0-9]+)?))"
+        def gpu_log(tag):
+            with open(f"{tmp}/{tag}.log") as fh:
+                return fh.read()
+        def item_passes(text):   # (passes on the linear pipeline, passes on the two-pipeline pair)
+            return (len(re.findall(r"PS-DTFE Metal: exactItems linear\s", text)),
+                    len(re.findall(r"PS-DTFE Metal: depositExactItems\s", text)))
+        def audit(text):         # [(handed, handed-deferred-fixed)] of every pass line with a GPU part
+            rows = []
+            for line in text.splitlines():
+                if not line.startswith("PS mass audit: partition"):
+                    continue
+                h, x = re.search(r"gpu handed " + num, line), re.search(r"handed-deferred-fixed " + num, line)
+                if h and x:
+                    rows.append((float(h.group(1)), float(x.group(1))))
+            return rows
+        for tag, what, lin_want in (("pld_pan_exug", "uniform", False), ("pld_pan_exlg", "--ps-linear-deposit", True)):
+            text = gpu_log(tag)
+            nl, nd = item_passes(text)
+            ok = (nl >= 2 and nd == 0) if lin_want else (nd >= 2 and nl == 0)
+            check(f"E exact GPU {what}: its item passes on {'one pipeline' if lin_want else 'two pipelines'}", ok,
+                  f"{nl} pass(es) on 'exactItems linear', {nd} on 'depositExactItems'"
+                  + (" (want every pass on the linear one)" if lin_want else " (want none on the linear one)"))
+            rows = audit(text)
+            worst = max((abs(x) / h if h > 0 else float("inf") for h, x in rows), default=float("inf"))
+            check(f"E exact GPU {what}: mass audit", len(rows) > 0 and worst <= 1e-7,
+                  f"|handed-deferred-fixed| / handed = {worst:.2e} over {len(rows)} pass(es) (<= 1e-7: the shares' rounding)")
     else:
-        print("   SKIP D exact GPU parity (CPU-only build)")
+        print("   SKIP D exact GPU parity, E (CPU-only build)")
 else:
     print("   SKIP D exact deposit (binary lacks --exact / --sampled)")
 

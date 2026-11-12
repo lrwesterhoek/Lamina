@@ -113,7 +113,8 @@ FACE_GRADIENT="${FACE_GRADIENT:-}"   # the velocity gradient's route (and the di
                                  # deposit and device; 1 = --face-gradient (the same, asked explicitly); 0 =
                                  # --per-tet-gradient, the deposit's own per-tetrahedron gradient (float32 on the
                                  # GPU; the route of the production grids made before 2026-11-09). 3D only.
-                                 # run_ps_dtfe.sh's FACE_GRADIENT is where it changes the result (PS-DTFE's mean flow)
+                                 # run_ps_dtfe.sh's FACE_GRADIENT is the same knob with the same default (PS-DTFE:
+                                 # the mean flow's gradient where the run qualifies)
 DRY_RUN="${DRY_RUN:-0}"          # 1 = print the commands and paths, run nothing
 AUTO_TUNE_REPORT="${AUTO_TUNE_REPORT:-0}"  # 1 = only ASK the binary's auto-tuner what this run would need
                                  # (--auto-tune-report): per snapshot one line

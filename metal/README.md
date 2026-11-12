@@ -19,8 +19,8 @@ make DTFE PS-DTFE DOUBLE=1 METAL=1 # the double pair: float copies of the tetrah
 A METAL=1 build defines `-DPS_GPU` / `-DDTFE_GPU`. The mode (metal or off) is stamped in `o/` and
 `o_ps/` (`.gpu_mode_*`, `.build_mode` holds its make argument); a switch wipes the objects, so a binary never mixes GPU
 and plain objects. `make DTFE $(cat o/.build_mode)` rebuilds in the current mode. The Metal kernels are embedded at build
-time (`o/dtfe_deposit_msl.h`, `o_ps/ps_deposit_msl.h`, each with `exact_clip.metal.inc` prepended) and compiled once per
-process. Dependency: the header-only **metal-cpp**, vendored at `third_party/metal-cpp`.
+time (`o/dtfe_deposit_msl.h`, `o_ps/ps_deposit_msl.h`, each with `exact_clip.metal.inc` and `fixed_words.metal.inc`
+prepended) and compiled once per process. Dependency: the header-only **metal-cpp**, vendored at `third_party/metal-cpp`.
 
 Tests (GPU builds; the PS suites use the GPU when the `o_ps/` stamp says metal):
 - `tests/dtfe_metal_check.sh` (builds in the `o/.build_mode` mode, METAL=1 when that is empty): standard DTFE
@@ -43,6 +43,7 @@ CI builds no GPU backend (its runners are Linux): all of these are local.
 | `metal/ps_deposit.metal` | PS-DTFE kernels: `depositFields` (one thread per tetrahedron: mass, velocity moment, dispersion second moment, gradient moment, stream count, scalar; the sampled path, the centroid fallback and the deferrals) and `depositExactItems` (the exact deposit, one thread per block of a tetrahedron's window cells) |
 | `metal/dtfe_deposit.metal` | standard-DTFE kernels: `depositAveraged1` (per tetrahedron, A/B), `depositAveraged1Items2/4/8` (the item kernels), `depositExactAverage` (`--exact`) |
 | `metal/exact_clip.metal.inc` | the exact tetrahedron-cell intersection moments (`sweep_moments`, a register-resident z-sweep) and the face-plane cell skip, prepended to both kernel sources |
+| `metal/fixed_words.metal.inc` | the run-wide 128-bit fixed-point words (`shareLimbs`, `addLimbs`, `addLimbsN`: four 32-bit atomic limbs per component; `src/fixed_units.h` holds the units, the caps and the host's words), prepended to both kernel sources after `exact_clip.metal.inc`; the kernel harness assembles its source without it |
 | `metal/validate_deposit.cpp`, `metal/build_prototype.sh` | the kernel harness and its build (offline-compiles `ps_deposit.metallib` when Xcode's Metal toolchain is installed, which only the harness loads; git-ignored) |
 | `src/CGAL_triangulation/gpu_host.h` | the host interface the callers see (deposit calls, `PSGpuGrids`, the shared-grid API `dtfeGpuShared*`, `psWindowHull`) and the PS host's plain-C++ steps |
 | `src/CGAL_triangulation/ps_metal_host.cc`, `dtfe_metal_host.cc` | the Metal hosts: device and pipelines, the chunked dispatch controller, retries |
@@ -150,15 +151,21 @@ z = 0's box mass), and their order varies, so the grids are fixed-point integer 
   5e-4 off).
 - **PS moment grids** (velocity, dispersion and its own mean and weight, gradients, scalar): each in its own unit from a
   bound the caller sums (`PSDepositParams.fxMask`, `PSFixedBounds`, `psMomentFixedScale`).
-- **Standard `_a` grids**: 64-bit sums with a unit per batch from a bound on its total share (`dtfe_gpu_fixed.h`); the
-  item kernel's chunks start at multiples of 256 items (`DTFE_GPU_CHUNK` is rounded up), so the
-  SIMD-group sums are fixed too.
+- **Standard `_a` grids, exact** (`depositExactAverage`): 128-bit sums, four `atomic_uint` limbs per component
+  (`fixed_words.metal.inc`), in one unit per grid for the whole run (`src/fixed_units.h` `RunUnits`, from the grid,
+  the mean density and the particles' largest velocity), so every partition and thread split rounds every share
+  alike; a cap on each share's integer keeps every cell below 2^126 in any order. `DTFE_RUN_UNITS_LEGACY=1` keeps the
+  sampled grids' 64-bit sums for them.
+- **Standard `_a` grids, sampled**: 64-bit sums with a unit per batch from a bound on its total share
+  (`dtfe_gpu_fixed.h`); the item kernel's chunks start at multiples of 256 items (`DTFE_GPU_CHUNK` is rounded up), so
+  the SIMD-group sums are fixed too.
 
 The hosts hand the words over unconverted (`PSGpuGrids::massFx`); the CPU adds the deferred tetrahedra and the
 `--ps-halo-release` centroid deposits as the same integers and converts once. So every grid is identical from run to
 run whatever the order of the atomics (`gpu_mass_check.sh`, `ps_fixed_moments_check.sh`, `dtfe_gpu_retry_check.sh`);
 the remaining differences against the CPU are its float arithmetic (~1e-6 of the peak). A share without an integer
-value (NaN, infinity, beyond 2^63 units) is left out and counted, and the run warns per grid (`DTFE_TEST_NAN_SHARE`).
+value (NaN, infinity, beyond 2^63 units; in the 128-bit words, at or above the share cap) is left out and counted,
+and the run warns per grid (`DTFE_TEST_NAN_SHARE`).
 A double build converts the words to double once. The float modes stay for A/B: `DTFE_GPU_FLOAT_MASS=1`,
 `DTFE_GPU_FLOAT_MOMENTS=1`, `DTFE_GPU_FLOAT_GRIDS=1` (and `DTFE_GPU_SHARED=1`),
 all run-to-run variable at the ulp level. Each dispersion share

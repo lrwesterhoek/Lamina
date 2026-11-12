@@ -29,6 +29,7 @@
 #include "message.h"
 #ifdef PHASE_SPACE
 #include "thread_count.h"   // poolRanges: the parallel merge and normalization
+#include "web_fields.h"     // velocityShear / velocityVorticity: the regular part's twins, the stored grids' arithmetic
 #endif
 
 
@@ -182,7 +183,8 @@ void Quantities::finalizeHiddenStreams()
 // The weight is either the explicit mass_weight grid, or -- when the density field was selected and
 // the partitions aliased the weight to it -- reconstructed as density * weightFromDensityScale
 // (= density * cellVolume * averageDensity, undoing the rho/rho_bar conversion; saves 4 B/cell).
-void Quantities::normalizePhaseSpace(Field const &field, Real const weightFromDensityScale)
+void Quantities::normalizePhaseSpace(Field const &field, Real const weightFromDensityScale,
+                                     unsigned const streamsTwins)
 {
     bool const fromDensity = this->mass_weight.empty();
     if ( fromDensity and (weightFromDensityScale <= Real(0.) or this->density.empty()) )
@@ -197,7 +199,7 @@ void Quantities::normalizePhaseSpace(Field const &field, Real const weightFromDe
         return;   // no weighted moments were accumulated (e.g. density-only field selection)
     // --face-gradient: the gradient of the mean flow from the face sums (psFaceGradientCell), with the volume weights
     bool const face = not this->face_velocity.empty() and field.velocity_gradient;
-    if ( face ) psFaceGradientBegin( n );
+    if ( face ) psFaceGradientBegin( n, streamsTwins );
     // every cell on its own (the same arithmetic per cell): split over the free cores (thread_count.h poolRanges)
     poolRanges( n, size_t(1) << 16, CorePool::total(), [&](size_t const lo, size_t const hi)
     {
@@ -261,6 +263,17 @@ void Quantities::normalizePhaseSpace(Field const &field, Real const weightFromDe
     std::vector<Real>().swap( this->mass_weight );
     std::vector<Real>().swap( this->disp_weight );
     std::vector< Pvector<Real,noVelComp> >().swap( this->disp_velocity );
+}
+
+
+// --face-gradient, cell i: the regular part's gradient g (normalized, before the mean flow's replaces it) and the shear
+// and vorticity web_fields.cc derives from a stored gradient -- the same functions on the same values, so the bytes are
+// a run's without the face gradient (tests/ps_face_gradient_check.sh P15)
+void Quantities::psStreamsTwinsCell(size_t const i, Pvector<Real,noGradComp> g)
+{
+    if ( not velocity_gradient_streams.empty() )  velocity_gradient_streams[i]  = g;
+    if ( not velocity_shear_streams.empty() )     velocity_shear_streams[i]     = velocityShear( g );
+    if ( not velocity_vorticity_streams.empty() ) velocity_vorticity_streams[i] = velocityVorticity( g );
 }
 
 

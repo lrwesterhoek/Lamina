@@ -185,14 +185,18 @@ run() { echo "+ $*"; [ "${DRY_RUN}" = "1" ] || "$@"; }
 # older sampled run named no flag), and the '--subsamples' count only for the sampled deposit: the exact one ignores
 # it (older drivers passed '--subsamples 3' beside it), and a sampled one without a count runs the binary's own 3
 # (older drivers always named it). So an older exact log and an older sampled one each compare equal to the command
-# the driver now emits for the same deposit.
+# the driver now emits for the same deposit. The velocity gradient's route is compared as named ('--face-gradient',
+# '--per-tet-gradient'); a command naming neither takes the binary's default, so an older log naming neither (the
+# stream average, PS-DTFE's route before D13) compares equal to it: its slice, the pipeline's product, is the same
+# either way (the points do not depend on the route), and FORCE=1 or FACE_GRADIENT=1 recomputes its grids.
 run_settings() {
     printf '%s\n' "$1" | awk '
         function out(l) { if (l ~ /^--subsamples( |$)/) subs = l; else print l }
         BEGIN { split("--grid --padding --subsamples --field --lambda-th --ps-point-conventions " \
                       "--ps-lagrangian-padding --ps-alpha-shape --ps-halo-release", v); for (i in v) val[v[i]] = 1
                 split("--periodic --ps-vertex-mass --ps-volume-weighted --exact --ps-linear-deposit " \
-                      "--ps-caustics --ps-caustic-cusps --pts-vel-grad --face-gradient", b); for (i in b) flag[b[i]] = 1
+                      "--ps-caustics --ps-caustic-cusps --pts-vel-grad --face-gradient --per-tet-gradient", b)
+                for (i in b) flag[b[i]] = 1
                 old["--ps-gpu"] = "--gpu"; old["--exact-average"] = "--exact"; old["--ps-exact-deposit"] = "--exact"
                 old["--ps-no-overlap"] = "--no-overlap"
                 old["--full_help"] = "--full-help"; old["--lambda_th"] = "--lambda-th"; old["--MpcUnit"] = "--mpc-unit"

@@ -1,8 +1,10 @@
-/* The standard-DTFE GPU deposit's exact sums: the units of its 64-bit fixed-point grids, for
+/* The standard-DTFE GPU deposit's exact sums: the units of its fixed-point grids, for
    the GPU host of the standard binary (dtfe_metal_host.cc). Host-side only, plain C++ (no
-   backend includes); the fixed-point rule itself is the phase-space mass grid's (ps_deposit_params.h:
-   psMassFixedScale picks the unit, psMassFixedMass converts a cell back). Why the grids are integer sums, and how
-   the kernels keep them independent of the order their atomics land in: metal/dtfe_deposit.metal's header.
+   backend includes). An exact batch takes the run-wide units and 128-bit words (src/fixed_units.h RunUnits,
+   dtfeBatchParams below); a sampled batch takes the 64-bit words in units from its own bound (batchFixedScales),
+   whose rule is the phase-space mass grid's (ps_deposit_params.h: psMassFixedScale picks the unit, psMassFixedMass
+   converts a cell back). Why the grids are integer sums, and how the kernels keep them independent of the order
+   their atomics land in: metal/dtfe_deposit.metal's header.
    Below batchFixedScales: the other host-side steps that need no Metal type (the knobs, a batch's parameter block
    and item map, the timing line, the shared grid's checks). */
 #ifndef DTFE_GPU_FIXED_H
@@ -16,18 +18,20 @@
 #include <string>
 #include <vector>
 
-#include "gpu_host.h"            // DTFEGpuGrids
+#include "gpu_host.h"            // DTFEGpuGrids, DTFEGpuRunUnits
 #include "ps_deposit_params.h"
 #include "../env_knobs.h"
+#include "../fixed_units.h"      // runUnitsLegacy, runUnitShift: the run-wide units' switch and test hook
 
-// The grids are 64-bit fixed-point sums (the kernel's header says why): grid g holds integers in
-// units of 1/scale[g], scale = 2^k, set per BATCH from a bound B of the sum of |share| over everything the batch
-// can deposit -- no cell, holding part of that sum, can exceed it. psMassFixedScale (the PS mass grid's rule) puts
-// 2B at 2^61..2^62 units, so B itself sits at 2^60..2^61: a factor 4 below the 2^63 of the signed words for the
-// kernel's float rounding of a sample value (the inverse edge matrix of a tetrahedron near the degeneracy cut
-// amplifies it; a few per cent at worst). B, per grid, sums V_tet * max|value| over the batch's tetrahedra: a
-// sample, a clipped piece's centroid and the single-cell centroid all lie in the tetrahedron, where the linear
-// interpolant is a convex combination of the vertex values as uploaded (the Monte-Carlo centring shift is in
+// The per-batch units (a sampled batch's 64-bit grids, every batch's under DTFE_RUN_UNITS_LEGACY=1, and an exact
+// batch's grid without a run-wide unit: dtfeBatchParams; the kernel's header says why the grids are integer sums):
+// grid g holds integers in units of 1/scale[g], scale = 2^k, set per BATCH from a bound B of the sum of |share| over
+// everything the batch can deposit -- no cell, holding part of that sum, can exceed it. psMassFixedScale (the PS mass
+// grid's rule) puts 2B at 2^61..2^62 units, so B itself sits at 2^60..2^61: a factor 4 below the 2^63 of the signed
+// words for the kernel's float rounding of a sample value (the inverse edge matrix of a tetrahedron near the
+// degeneracy cut amplifies it; a few per cent at worst). B, per grid, sums V_tet * max|value| over the batch's
+// tetrahedra: a sample, a clipped piece's centroid and the single-cell centroid all lie in the tetrahedron, where the
+// linear interpolant is a convex combination of the vertex values as uploaded (the Monte-Carlo centring shift is in
 // them already). The two gradients are per-tetrahedron constants: computed here in double from the kernel's own
 // float edges and differences, with the degeneracy cut relaxed to half the kernel's (inverse3zero's 1e-6 of the
 // row-length product), so a tetrahedron the float kernel keeps is never bounded as zero. The resolution this
@@ -142,9 +146,18 @@ inline DTFEGpuKnobs dtfeGpuKnobs(bool itemsOk)
 
 // ---------------------------------------------------------------- one sub-domain's batch
 // The batch's parameter block, in either host's DepositParams (zeroed by the host; the fields named here are
-// the same in both): the exact sums' units from this batch's values, before the upload consumes them -- the
+// the same in both): the exact sums' mode and units, before the upload consumes the batch's values -- the
 // shared full grid (allowFixed false) and DTFE_GPU_FLOAT_GRIDS=1 keep the float atomics --, the grids' geometry,
 // the field flags (all off under DTFE_GPU_DEBUG_NOWRITE) and the item length.
+//   The exact sums. An EXACT batch (--exact) sums in the run-wide 128-bit words (P.fixedSum = 2): every grid in the
+// run's unit 2^-units.K[g] and below its share cap (fixed_units.h RunUnits: one unit per grid for the whole run, from
+// global quantities, so every partition and thread split rounds every share alike; no bound pass runs). A grid
+// without a run-wide unit (units.has false: its K outside [-120, 120], or a scalar grid of
+// '--approx-phase-space-density') takes this batch's own unit (batchFixedScales) in the same words, which hold either.
+// A SAMPLED batch, and every batch under DTFE_RUN_UNITS_LEGACY=1 or of a run without the units (units.on false), sums
+// in the 64-bit words in units from the batch's own bound (P.fixedSum = 1), or in float atomics (0) when a bound is
+// not finite. DTFE_TEST_RUN_UNIT_SHIFT=n makes the run-wide units 2^n finer (RunUnits::fill) and, under
+// DTFE_RUN_UNITS_LEGACY=1 only, the batch's own units too, so a split test can show that the per-batch units fail it.
 // DTFE_GPU_DEBUG_NOATOMIC: 1 = no atomics in the final reduction; 2 = also skip the gradient's reduction loop;
 // 3 = also the gradient's eviction atomics (timing experiments only). Returns the exact kernel's item, a block
 // of cells of the tetrahedron's window (DTFE_GPU_EXACT_CELLS, default 16), which is then P.itemSamples.
@@ -153,12 +166,40 @@ inline uint32_t dtfeBatchParams(Params& P, DTFEGpuKnobs const& k, const std::vec
                                 const std::vector<float>& dens, const std::vector<float>& vels,
                                 const std::vector<float>& scal, const std::vector<float>& vols, const double dx[3],
                                 const size_t nGrid[3], const size_t subOff[3], const size_t fullGrid[3], bool fDen,
-                                bool fVel, bool fGrad, bool fScal, bool fSGrad, bool exact, bool allowFixed)
+                                bool fVel, bool fGrad, bool fScal, bool fSGrad, bool exact, bool allowFixed,
+                                DTFEGpuRunUnits const& units)
 {
     P.fixedSum = 0;
     for (int g = 0; g < 5; ++g) P.fxScale[g] = 1.f;
-    if (allowFixed && !k.floatGrids && !k.noWrite)
+    for (int g = 0; g < 5; ++g) P.fxCapBits[g] = 0u;
+    bool const runWide = exact && units.on && !runUnitsLegacy();
+    if (allowFixed && !k.floatGrids && !k.noWrite && runWide)
+    {   // the run-wide 128-bit words; a grid without a run-wide unit takes the batch's own (none: no bound pass)
+        bool const on[5] = { fDen, fVel, fGrad, fScal, fSGrad };
+        bool own[5];
+        bool anyOwn = false;
+        for (int g = 0; g < 5; ++g) { own[g] = on[g] && !units.has[g]; anyOwn = anyOwn || own[g]; }
+        float ownScale[5] = { 1.f, 1.f, 1.f, 1.f, 1.f };
+        if (!anyOwn
+            || batchFixedScales(verts, dens, vels, scal, vols, own[0], own[1], own[2], own[3], own[4], ownScale))
+        {
+            P.fixedSum = 2u;
+            for (int g = 0; g < 5; ++g)
+            {
+                P.fxScale[g] = own[g] ? ownScale[g] : units.has[g] ? std::ldexp(1.f, units.K[g]) : 1.f;
+                P.fxCapBits[g] = units.capBits[g];
+            }
+        }
+    }
+    else if (allowFixed && !k.floatGrids && !k.noWrite)
+    {
         P.fixedSum = batchFixedScales(verts, dens, vels, scal, vols, fDen, fVel, fGrad, fScal, fSGrad, P.fxScale) ? 1u : 0u;
+        // the test hook on the per-batch units (DTFE_RUN_UNITS_LEGACY=1 only; unset: the per-batch units unchanged,
+        // bit for bit)
+        if (P.fixedSum != 0u && runUnitsLegacy() && runUnitShift() != 0)
+            for (int g = 0; g < 5; ++g)
+                if (float const s = std::ldexp(P.fxScale[g], runUnitShift()); std::isnormal(s)) P.fxScale[g] = s;
+    }
     for (int d = 0; d < 3; ++d)
     {
         P.dx[d]       = float(dx[d]);
@@ -293,7 +334,8 @@ inline void dtfeLogBatch(const char* backend, const Batch& b, const Stats& st, d
             backend,
             b.exact ? "exact" : b.k.useItems ? (b.k.cacheK == 8 ? "item/K8" : b.k.cacheK == 2 ? "item/K2" : "item/K4") : "per-tet",
             b.nTet, b.nSingle, b.k.useItems ? b.nItems : size_t(0), b.P.itemSamples, b.exact ? "cells" : "samples", b.nSamples, b.P.tableEntries,
-            b.P.fixedSum ? "fixed-point" : "float", st.chunks, st.retries, runSec, runSec > 0 ? b.nSamples / runSec / 1e6 : 0.0,
+            b.P.fixedSum == 2u ? "run-wide 128-bit fixed-point" : b.P.fixedSum ? "fixed-point" : "float",
+            st.chunks, st.retries, runSec, runSec > 0 ? b.nSamples / runSec / 1e6 : 0.0,
             sinceBegin >= 0 ? "" : "\n");
     if (sinceBegin >= 0)
         std::fprintf(stderr, "; shared grid: batch ready %.2f s after begin, waited %.2f s for the device\n",

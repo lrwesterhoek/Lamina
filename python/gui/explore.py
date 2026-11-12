@@ -67,8 +67,10 @@ PS_GRADIENT_TIP = ("How a phase-space output's velocity divergence, shear, vorti
                    "second per slice at 512³; the V-web at the run's own threshold). Stream average: the grids the "
                    "program stored, the average of each stream's own gradient ⟨∇v⟩, which differs in multi-stream "
                    "cells (its divergence does not average to zero over the box, its V-web finds few filaments). "
-                   "A standard-DTFE output is always shown as stored: its grids are the mean field. The hi-res slices "
-                   "and the zooms are point evaluations: the stream average. Every title, colour bar and figure-grid "
+                   "A standard-DTFE output, and a phase-space one made with the face gradient (the program's default "
+                   "with the exact deposit and the volume weighting), is always shown as stored: its grids are the "
+                   "mean field. The hi-res slices and the point zooms are point evaluations: the stream average (an "
+                   "exact zoom takes the output's own route). Every title, colour bar and figure-grid "
                    "panel of a phase-space output says which it shows.")
 VOID_REFF_TIP = ("Also draw each void's R_eff = (a b c)^⅓ of its fitted ellipsoid, dashed, around the same centre: "
                  "R_eff is about 1.6 R_v, the open question of which radius describes the void")

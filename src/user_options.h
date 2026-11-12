@@ -40,6 +40,7 @@ namespace po = boost::program_options;
 #include "box.h"
 #include "message.h"
 #include "run_mode.h"
+#include "fixed_units.h"
 
 
 
@@ -183,6 +184,10 @@ struct User_options
             offset[d]   = split ? fullGridOffset[d] : 0;
         }
     }
+    // The run-wide fixed-point units (fixed_units.h RunUnits): one unit per accumulator for the whole run, set by
+    // DTFE_setup (DTFE.cpp runUnitsSetup) from the grid, the mean density and the particles before any split, and
+    // carried by every copy of the options, so every partition and thread sub-domain holds the same ones
+    RunUnits runUnits;
     int    partNo;        // which partition the program should output (index in 'fileGrid')
     int    maxConcurrent; // cap on concurrently-built Delaunay triangulations (peak RAM ~ concurrency x per-triangulation); 0 = all threads. PS-DTFE: concurrent Lagrangian partitions; standard DTFE: concurrent spatial sub-triangulations.
     bool   psParallelTriangulation;    // --parallel-triangulation (PS-DTFE's option; both binaries read DTFE_TRIANGULATION_THREADS): build each Delaunay triangulation on the performance cores with CGAL's TBB insert (a PARALLEL_TRIANGULATION build: TBB=auto/1 for PS-DTFE, TBB_STD=1 for the standard binaries). The default for both binaries since 2026-11-09 for tessellations of at least DTFE_TRIANGULATION_MIN_POINTS (1e6) points (the insert's vertex and cell order differ run to run, so sums in walk order differ at rounding); the auto-tuner budgets its extra bytes per vertex (auto_tune.h)
@@ -224,8 +229,20 @@ struct User_options
     bool   exactFlag;     // scratch for the --exact switch (both binaries; the deprecated --exact-average and PS-DTFE's --ps-exact-deposit bind it too): resolveAverageMode folds it into exactAverage / psExactDeposit
     bool   sampledFlag;   // scratch for the --sampled switch (both binaries), folded likewise
     std::string averageModeSource; // why the run averages as it does (resolveAverageMode): '--exact, the default', '--sampled', ... -- the reason the run log's 'volume averaging' / 'grid deposit' line gives; empty where no such line is printed
-    bool   faceGradient;  // --face-gradient (docs/cleanup-plan.md P10): the velocity gradient and its derived fields from EXACT FACE integrals of the interpolant (Gauss), averaged_interpolation_1.cc avg1FacePass
-    bool   perTetGradient;// --per-tet-gradient (standard DTFE, D13 2026-11-09): keep the deposit's per-tetrahedron gradient where the face gradient is now the default; DTFE_FACE_GRADIENT=0 does the same, =1 forces the face gradient
+    bool   faceGradient;  // --face-gradient (docs/cleanup-plan.md P10): the velocity gradient and its derived fields
+                          // from EXACT FACE integrals of the interpolant (Gauss), averaged_interpolation_1.cc
+                          // avg1FacePass; both binaries' default where it applies (checkGpuOptions, D13), PS-DTFE's
+                          // face sums in ps_interpolation.cc
+    bool   perTetGradient;// --per-tet-gradient (both binaries, D13): keep the deposit's per-tetrahedron gradient
+                          // (PS-DTFE: the stream average of each stream's own) where the face gradient is the default;
+                          // DTFE_FACE_GRADIENT=0 does the same, =1 asks for the face gradient
+    std::string faceGradientSource; // why the velocity gradient takes its route (checkGpuOptions): '--face-gradient',
+                          // '--per-tet-gradient', 'DTFE_FACE_GRADIENT=0' or '=1', 'the default where it applies', or
+                          // what keeps the default off (faceGradientBlocker) -- the reason the run log's 'velocity
+                          // gradient' line gives
+    unsigned psStreamsTwins = 0u; // PS-DTFE face gradient (docs/cleanup-plan.md D12): the regular part's twins the
+                          // writer asks for, bit 0 'gradient_a', 1 'shear_a', 2 'vorticity_a'; set by DTFE_setup
+                          // from the user's '_a' fields, never by an option (Quantities::psFaceGradientBegin)
     bool   gpuAlias;      // scratch for the backend-neutral --gpu switch (both binaries; PS-DTFE's deprecated --ps-gpu folds into it); OR-ed into useMetal/psUseMetal after parsing (the deprecated --ps-gpu binds it too: foldDeprecatedAliases leaves one of the two entries for po::notify)
     // --sample-points point evaluation, BOTH binaries (see ps_point_eval.h): PS-DTFE reports
     // one stream per folded tetrahedron; the standard binary the Eulerian DTFE interpolant
@@ -376,6 +393,8 @@ private:
     void resolveAverageMode(po::variables_map &vm);      // '--exact' / '--sampled': the '_a' average (exactAverage, psExactDeposit)
     void resolveRunMode(po::variables_map &vm);          // '--run-mode' / DTFE_RUN_MODE (runMode) and PS-DTFE's '--gpu-share' as given
     void checkGpuOptions(po::variables_map &vm);         // '--gpu', the triangulation's insert, the gradient route, '--exact'
+    std::string faceGradientBlocker(po::variables_map const &vm) const;   // why the face gradient is not this run's
+                                                                          // default route ("" where it is)
     void checkDirectoryOptions();                        // '--scratch-dir', '--tessellation-cache'
     void checkPointEvalOptions(po::variables_map &vm);   // '--sample-points', '--serve' and their companions
     void checkPsDepositOptions(po::variables_map &vm);   // PS-DTFE only: caustics, alpha shape, deposit variants

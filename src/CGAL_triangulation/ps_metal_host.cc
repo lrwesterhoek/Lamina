@@ -43,9 +43,11 @@ struct Ctx
     MTL::Device*               dev  = nullptr;
     MTL::CommandQueue*         q    = nullptr;
     MTL::ComputePipelineState* pso  = nullptr;   // depositFields: one thread per tet
-    MTL::ComputePipelineState* psoItems[2] = { nullptr, nullptr };   // depositExactItems: one per (tet, cell block),
-                                                                     // a pipeline per pass (its kItemsPhase)
+    MTL::ComputePipelineState* psoItems[3] = { nullptr, nullptr, nullptr };   // depositExactItems: one per (tet, cell
+                                                                     // block), a pipeline per pass (its kItemsPhase),
+                                                                     // and [2] both passes of --ps-linear-deposit
     std::string                err;
+    std::string                errLinear;   // why psoItems[2] is null: its compile failed (the others stand)
     bool                       ready = false;
 };
 
@@ -71,7 +73,8 @@ void ctxInit(Ctx& c)
     }
     for (auto [name, dst, phase] : { std::tuple<const char*, MTL::ComputePipelineState**, int>{"depositFields", &c.pso, -1},
                                      std::tuple<const char*, MTL::ComputePipelineState**, int>{"depositExactItems", &c.psoItems[0], 0},
-                                     std::tuple<const char*, MTL::ComputePipelineState**, int>{"depositExactItems", &c.psoItems[1], 1} })
+                                     std::tuple<const char*, MTL::ComputePipelineState**, int>{"depositExactItems", &c.psoItems[1], 1},
+                                     std::tuple<const char*, MTL::ComputePipelineState**, int>{"depositExactItems", &c.psoItems[2], 2} })
     {
         MTL::Function* fn = nullptr;
         if (phase < 0) fn = lib->newFunction(NS::String::string(name, NS::UTF8StringEncoding));
@@ -83,12 +86,26 @@ void ctxInit(Ctx& c)
             fn = lib->newFunction(NS::String::string(name, NS::UTF8StringEncoding), fcv, &nsErr);
             fcv->release();
         }
-        if (!fn) { c.err = std::string("kernel '") + name + "' not found"; return; }
+        // Pipeline 2 serves only --ps-linear-deposit: when it fails it stays null and the device still serves every
+        // other run (runItems sends a linear run's partitions to the CPU with this reason).
+        if (!fn)
+        {
+            // phase 2 is a specialization of a kernel that phases 0 and 1 found: the compiler's reason, not 'not found'
+            std::string const why = phase == 2
+                ? std::string("kernel '") + name + "' (kItemsPhase 2) did not compile: "
+                      + (nsErr ? nsErr->localizedDescription()->utf8String() : "unknown")
+                : std::string("kernel '") + name + "' not found";
+            if (phase == 2) { c.errLinear = why; continue; }
+            c.err = why;
+            return;
+        }
         *dst = c.dev->newComputePipelineState(fn, &nsErr);
         if (!*dst)
         {
-            c.err = std::string("pipeline state failed: ")
-                  + (nsErr ? nsErr->localizedDescription()->utf8String() : "unknown");
+            std::string const why = std::string("pipeline state failed: ")
+                                  + (nsErr ? nsErr->localizedDescription()->utf8String() : "unknown");
+            if (phase == 2) { c.errLinear = why; continue; }
+            c.err = why;
             return;
         }
     }
@@ -518,7 +535,8 @@ bool psGpuDepositFields(std::vector<float>& verts,
         ph.kernels += pass.busy;
         if (timing)
             fprintf(stderr, "PS-DTFE Metal: %-17s %10zu threads  %6zu buffers  %8.3f s busy  %8.3f s wall\n",
-                    pso == c.pso ? "depositFields" : "depositExactItems", nThreads, pass.buffers, pass.busy,
+                    pso == c.pso ? "depositFields" : pso == c.psoItems[2] ? "exactItems linear" : "depositExactItems",
+                    nThreads, pass.buffers, pass.busy,
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - tRun).count());
         return true;
     };
@@ -578,10 +596,19 @@ bool psGpuDepositFields(std::vector<float>& verts,
     auto runItems = [&](uint32_t phase) -> bool
     {
         // an item clips at most blockCells cells: far cheaper and more uniform than a whole tet.
-        // Phase 0 writes only sumW (the grids are still zero), phase 1 only the grids (sumW is read)
+        // Phase 0 writes only sumW (the grids are still zero), phase 1 only the grids (sumW is read).
+        // --ps-linear-deposit runs both phases on the one pipeline that reads the phase from IP (kItemsPhase 2 in
+        // metal/ps_deposit.metal): its weights come from the clip's first moments, which two pipelines may round
+        // apart, so the summed total would miss the weights deposited by about 1e-8 of a tet's mass
+        MTL::ComputePipelineState* const pso = c.psoItems[P.fLinear != 0 ? 2u : phase];
+        if (P.fLinear != 0 && !c.psoItems[2])
+        {   // that pipeline did not compile (ctxInit): the caller deposits this partition on the CPU
+            lastErr = "the --ps-linear-deposit item pipeline did not compile: " + c.errLinear;
+            return false;
+        }
         std::vector<MTL::Buffer*> extras;
         if (phase == 0) extras.push_back(bSumW);
-        return runChunked(c.psoItems[phase], nItems, 8192, 1024, MAX_CHUNK_ITEMS, extras, true, phase == 0,
+        return runChunked(pso, nItems, 8192, 1024, MAX_CHUNK_ITEMS, extras, true, phase == 0,
                           static_cast<uint32_t*>(bSumW->contents()) + badAt,
                           [&](MTL::ComputeCommandEncoder* enc, size_t start, uint32_t n)
         {

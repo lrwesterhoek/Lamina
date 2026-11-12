@@ -36,8 +36,10 @@ namespace {
 // a finished PS-DTFE tessellation, per vertex: the 112 B vertex (with the uint64 ParticleID and the double volume
 // accumulator) + 6.77 cells x 72 B (CGAL's cell) + allocator slack; a compiled sizeof probe and measured runs
 constexpr double kPSVertexBytes = 666.;
-// ... and a standard-DTFE one (no ParticleID; stdBytesPerPaddedVertex adds the double build's wider vertex data)
-constexpr double kStdVertexBytes = 648.;
+// ... and a standard-DTFE one (no ParticleID; stdBytesPerPaddedVertex adds the double build's wider vertex data): the
+// measured 648 B and the 8 B of the exact star sum's high limb (vertexData::_volAccHi, the standard binary only, in
+// every build and under DTFE_RUN_UNITS_LEGACY=1 too: the field is compiled in)
+constexpr double kStdVertexBytes = 648. + 8.;
 // '--parallel-triangulation' (TBB): the sorted point+payload copy and CGAL's own copy of it, per vertex in flight
 // (203 B measured on PS-DTFE)
 constexpr double kParInsertBytes = 800.;   // measured 2026-11-09 at TNG100 z=0, 512^3: +4.4 GB max RSS with one partition of ~5.7M padded vertices inserted on 6 threads (was 210, the 0.26M-point estimate)
@@ -277,6 +279,19 @@ inline double autoTuneFaceBytes(Field &f, AutoTunePS const &ps)
     return autoTuneFaceOn( f, ps ) ? 2.*NO_DIM*(noVelComp + 2.)*double(sizeof(Real)) : 0.;
 }
 
+// ... and the regular part's twins (docs/cleanup-plan.md D12, P10.10): the stream average's own gradient, shear and
+// vorticity a face pass keeps beside the mean flow's, each where the '_a' pass writes its mean-flow twin
+// (Quantities::psStreamsTwinsCell; DTFE_setup sets User_options::psStreamsTwins from these flags), in Real bytes per
+// cell. Made in the normalization, after the partition loop, beside the face sums; kept to the output. (The tuner runs
+// before DTFE_setup folds the derived fields into the gradient, so the flags here are the user's.)
+inline double autoTuneStreamsTwinBytes(Field &f, AutoTunePS const &ps)
+{
+    if ( not autoTuneFaceVelocity( f, ps ) ) return 0.;   // (the '_a' pass, the writer's; either pass when not set)
+    double const R = double(sizeof(Real));
+    return ( ( f.velocity_gradient ? double(noGradComp) : 0. ) + ( f.velocity_shear ? double(noShearComp) : 0. )
+             + ( f.velocity_vorticity ? double(noVortComp) : 0. ) ) * R;
+}
+
 // One pass's MOMENT accumulators in the PS deposit, in Real bytes per sub-grid cell: the grids
 // ps_interpolation.cc holds as fixed-point words while the pass deposits ('fxg' -- velocity, gradient,
 // dispersion, scalar and its gradient, the moment weight, the dispersion's own mean and weight, the exact and the
@@ -469,8 +484,8 @@ inline double autoTuneBytesPerCell(Field &f, AutoTunePS const &ps, int const pha
         b += autoTuneFaceBytes( f, ps ) + ( ( f.velocity or not autoTuneFaceVelocity( f, ps ) ) ? 0. : 3.*R )
              + R;                                                           // (+ the mass flux's output grid)
 
-    if ( phase == 1 )
-        b += autoTuneDerivedBytes( f );   // derived fields: allocated only after the deposit loop (above)
+    if ( phase == 1 )   // the derived fields and the regular part's twins: allocated only after the deposit loop
+        b += autoTuneDerivedBytes( f ) + autoTuneStreamsTwinBytes( f, ps );
     else if ( ps.phaseSpace )
     {
         // ---- deposit-phase PS weight grids (freed in psNormalizeMoments, before the derived fields) ----
@@ -1018,7 +1033,7 @@ inline std::vector< std::vector<double> > stdTuneSplit(StdTuneDensity const &den
 }
 
 // Bytes per padded vertex of a standard sub-domain while its tessellation is built: the thread's particle copy (alive
-// while the triangulation grows) + the triangulation (96 B incl. the double volume accumulator + 6.77 cells x 72 B +
+// while the triangulation grows) + the triangulation (104 B incl. the star sum's two 8-B limbs + 6.77 cells x 72 B +
 // slack; the double build's vertex data in 8 B instead of 4: +50 B/vertex), and 6% for the dummy points the padding
 // test adds on the padded box's faces (3-5% of a sub-box at TNG scale). No TBB copy per vertex here: planOf books the
 // insert's copies per sub-domain where it runs in parallel (autoTuneParallelInsert: a team of 2-5 threads of 10, or a
@@ -1099,10 +1114,12 @@ struct AutoTuneStdInputs
     double fixedLoop = 0.;           // ... while the partition loop runs: its grids only (bCellDeposit; plan P8.9)
     double perVertex = 0.;           // bytes per padded vertex while a tessellation is built (stdBytesPerPaddedVertex)
     double bGpuCell = 0.;            // the GPU deposit's bytes per sub-grid cell, per copy (0: no GPU deposit)
-    double faceCell = 0.;            // --face-gradient: avg1FacePass's 9 doubles per cell of each sub-domain it runs on
-    double perTet = 0.;              // ... its bytes per extracted tetrahedron
+    double faceCell = 0.;            // --face-gradient: avg1FacePass's 9 sums of 8 B per sub-domain cell
+    double bCpuWordCell = 0.;        // the CPU exact average's run-wide words per cell of each sub-domain (Avg1Words)
+    double perTet = 0.;              // ... the GPU deposit's bytes per extracted tetrahedron
     double tetsPerOwn = 0.;          // ... the tetrahedra extracted per particle of a thread's own box
-    double snapWordFactor = 0.;      // the GPU snapshot's bytes per 4 B grid component (2: fixed-point words)
+    double snapWordFactor = 0.;      // the GPU snapshot's bytes per 4 B grid component (2: 64-bit words; 4: 128-bit)
+    double deviceWordGrowth = 0.;    // ... and the device words' growth beyond the fitted 8 B (the 128-bit words)
     bool lookAheadPossible = false;  // the partition look-ahead runs (GPU deposit, more than one partition)
     std::chrono::steady_clock::time_point tuneStart;   // when the tuner started (DTFE_AUTO_TUNE_DEBUG)
     double countSec = 0.;            // ... and the seconds its count grid took
@@ -1137,10 +1154,11 @@ struct AutoTuneStdPlanner : AutoTuneStdInputs
         double nParts = 1.;
         for (int d=0; d<NO_DIM; ++d) nParts *= double( partsP[d] );
         plan.parts = size_t( nParts );
-        // a partition's grids: its own (DTFE_parallel's, when split), the threads' sub-grid copies, the GPU's two
+        // a partition's grids: its own (DTFE_parallel's, when split), the threads' sub-grid copies, the GPU's two, the
+        // face pass's sums and the CPU exact average's words
         auto gridBytes = [&](double cells, size_t nThreads) {
             return ( nParts > 1. ? cells * bCellDeposit : 0. ) + ( nThreads > 1 ? cells * bCellDeposit : 0. )
-                   + 2. * cells * bGpuCell + cells * faceCell; };
+                   + 2. * cells * bGpuCell + cells * faceCell + cells * bCpuWordCell; };
         if ( not dens.ok )
         {   // every sub-box holds the box average (the uniform count), on the team the run forms: DTFE_parallel's
             // thread grid of a partition's grid (parallelGrid: 2^a 3^b threads, 4 of 5), each sub-box padded on its own
@@ -1170,7 +1188,7 @@ struct AutoTuneStdPlanner : AutoTuneStdInputs
                        + ( aheadHolds ? 0. : copies );
             plan.bytesNoAhead = plan.bytes + ( aheadHolds ? copies : 0. );
             plan.part = 0;
-            plan.snapshot = snapWordFactor * bGpuCell * gridTotal / nParts / double( team );
+            plan.snapshot = ( snapWordFactor + deviceWordGrowth ) * bGpuCell * gridTotal / nParts / double( team );
             double fPart = 1.;
             for (int d=0; d<NO_DIM; ++d) fPart *= 1. + 2.*padFrac[d]*double(partsP[d]);
             plan.aheadMax = plan.vertices * perVertex + ( nParts > 1. ? own * fPart * partBytes : 0. );
@@ -1234,7 +1252,8 @@ struct AutoTuneStdPlanner : AutoTuneStdInputs
                 bytes += ( nParts > 1. ? partPadded : std::max( 0., partPadded - N ) ) * partBytes;
                 bytes += gridBytes( cells, nThreads ) + ( nPts > 0 ? ptsWalkBytes : 0. );
                 // the run's largest thread sub-grid, whichever partition holds it (the snapshot is held by one at a time)
-                plan.snapshot = std::max( plan.snapshot, snapWordFactor * bGpuCell * maxThreadCells );
+                plan.snapshot = std::max( plan.snapshot,
+                                          ( snapWordFactor + deviceWordGrowth ) * bGpuCell * maxThreadCells );
                 // this partition prepared ahead: its particle copy and its sub-domains' tessellations
                 if ( nParts > 1. )
                     plan.aheadMax = std::max( plan.aheadMax, vertices * perVertex + partPadded * partBytes );
@@ -1880,6 +1899,7 @@ struct AutoTunePSInputs
     double fxMom = 0.;               // ... the moment words' (the larger pass; without the face sums)
     double faceR = 0.;               // '--face-gradient': the face sums' Real grids per sub-grid cell (the larger pass)
     double fxFace = 0.;              // ... and what their words, int64 in EVERY build, take beyond those
+    double twinR = 0.;               // ... the regular part's twins per full-grid cell (autoTuneStreamsTwinBytes)
     double copyCell = 0.;            // one CPU deposit thread's private copy per sub-grid cell
     double threadScratch = 0.;       // the deposit threads' per-tetrahedron sample lists, in all
 };
@@ -1940,8 +1960,10 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             alloc( E );
             release( double(sizeof(int)) + 2. + mask );   // the int count, the flags, the caustic mask (pass end)
         }
-        // the derived fields and the T-web stage come on top of what the passes left
-        alloc( autoTuneDerivedBytes(u.uField) + autoTuneDerivedBytes(u.aField) );
+        // the regular part's twins (made in the normalization, beside the face sums this model still counts), the
+        // derived fields and the T-web stage come on top of what the passes left
+        alloc( autoTuneStreamsTwinBytes(u.uField, ps) + autoTuneStreamsTwinBytes(u.aField, ps)
+               + autoTuneDerivedBytes(u.uField) + autoTuneDerivedBytes(u.aField) );
         return peak;
     }
 
@@ -2329,7 +2351,11 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         report.onceBytes = ( laneCover > 0. and not report.mixedLanes ) ? 0. : report.gpuSnapshot + report.laneOnce;
         // the loop's dynamic concurrency (P8.10, DTFE.cpp): what the run allocates after its partitions are in flight
         report.concChosen = autoConc;
-        report.reserveEnd = ( scratchOn ? 0. : gridTotal * std::max( 0., bCell - bCellDeposit ) ) + ptsOutputBytes;
+        // (the regular part's twins are made beside the deposit phase's grids, in the normalization: bCellDeposit +
+        // twinR there)
+        report.reserveEnd = ( scratchOn ? 0. : gridTotal * std::max( 0., std::max( bCell, bCellDeposit + twinR )
+                                                                         - bCellDeposit ) )
+                            + ptsOutputBytes;
         report.reserveFirstMerge = scratchOn ? 0. : gridTotal * ( autoTuneMergeGrownBytes( u.uField, ps )
                                                                  + autoTuneMergeGrownBytes( u.aField, ps ) );
         report.reserveRecords = ptsRecordBytes;
@@ -2362,10 +2388,19 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         // chooses the split; this lifts the prediction, and so the over-budget check, where that transient is the
         // run's peak -- the 1024^3 class with few partitions in flight (plan P8.2, phase R 2026-11-09)
         report.reservePeak = reserveZeroFillPeak();
-        report.predicted = std::max( base + report.lookAhead, report.reservePeak );
+        // the normalization (docs/cleanup-plan.md P10.10): the regular part's twins beside the deposit phase's full
+        // grids, no partition in flight; the loop term still chooses the split, this lifts the prediction where it is
+        // the peak ('fixed' books bCell's grids: only what the twins add beyond that counts)
+        double const normPeak = twinR > 0.
+            ? fixed + ( scratchOn ? 0. : gridTotal * std::max( 0., bCellDeposit + twinR - bCell ) ) : 0.;
+        if ( twinR > 0. and Env::flag( "DTFE_AUTO_TUNE_DEBUG" ) )
+            std::fprintf( stderr, "AUTO-TUNE-DEBUG PS normalization: the regular part's twins %.0f B/cell beside the "
+                          "deposit phase's %.0f (bCell %.0f), %.3f GB in all\n", twinR, bCellDeposit, bCell,
+                          normPeak/1.e9 );
+        report.predicted = std::max( { base + report.lookAhead, report.reservePeak, normPeak } );
         // ... and with every lane whole (the staged merge's park room, DTFE.cpp): 'predicted' itself without the share
-        report.predictedWholeLanes = std::max( base - laneCover + double(inFlight - 1) * report.laneOnce
-                                               + report.lookAhead, report.reservePeak );
+        report.predictedWholeLanes = std::max( { base - laneCover + double(inFlight - 1) * report.laneOnce
+                                                 + report.lookAhead, report.reservePeak, normPeak } );
         if ( report.reservePeak > base + report.lookAhead )
             message << MESSAGE::cBold() << "AUTO-TUNE:" << MESSAGE::cReset() << " the predicted peak is the start-up "
                     << "one: the particles, the read buffers kept and the zero fill of the largest scratch-backed grid "
@@ -2958,7 +2993,10 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     // term does not depend on N, so a small snapshot on a huge --grid is exactly the case
     // that must not slip through to a silent 60+ GB allocation.
 
-    autoTuneScratchSpaceCheck( u, scratchOn, gridTotal, bCell );
+    // the regular part's twins (docs/cleanup-plan.md P10.10): made beside the deposit phase's grids in the
+    // normalization, so the scratch volume holds bCellDeposit + twinR there (the larger of that and bCell)
+    double const twinR = autoTuneStreamsTwinBytes(u.uField, ps) + autoTuneStreamsTwinBytes(u.aField, ps);
+    autoTuneScratchSpaceCheck( u, scratchOn, gridTotal, std::max( bCell, bCellDeposit + twinR ) );
 
     // ---- Is the IRREDUCIBLE term alone over budget? --------------------------------------
     // If so ('fixed > budget' below), no --partition value can help: partitions are summed into the shared full
@@ -3112,6 +3150,7 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     in.fxMom           = fxMom;
     in.faceR           = faceR;
     in.fxFace          = fxFace;
+    in.twinR           = twinR;
     in.copyCell        = copyCell;
     in.threadScratch   = threadScratch;
     AutoTunePSPlanner const planner{ in, u, report, message };
@@ -3192,8 +3231,18 @@ AutoTuneReport autoTunePartitioning(User_options &u,
        DTFE_GPU_FLOAT_GRIDS=1), so the run holds ONE such copy, of the largest sub-grid:
        added once to the busiest partition's bytes (StdPlan::snapshot). (The partition CHECKPOINT itself,
        partition_checkpoint.h, writes the full grids from where they are, allocating nothing; the partition's own
-       sub-grids are still alive then and already in its bytes.) */
-    double const snapWordFactor = Env::flag( { "DTFE_GPU_FLOAT_GRIDS" } ) ? 1. : 2.;
+       sub-grids are still alive then and already in its bytes.)
+         An exact run's batches sum in the run-wide 128-bit words instead (dtfe_gpu_fixed.h dtfeBatchParams; not
+       under DTFE_RUN_UNITS_LEGACY=1): 16 B per 4-B component, so the snapshot takes 4 x bGpuCell per cell, and the
+       device words grow by 8 B per component beyond the 8 B the fitted '2. * cells * bGpuCell' of planOf's
+       gridBytes holds (left as fitted). Device words exist only for the batch holding the device mutex and the one
+       still converting its words outside it (dtfe_metal_host.cc dtfeGpuDepositAveraged1: allocated under the mutex,
+       converted and released after it), so the growth is booked ONCE per run beside the snapshot, for two batches
+       of the largest sub-grid: 2 x 2 x bGpuCell per cell (deviceWordGrowth). The sampled average keeps the 64-bit
+       words. */
+    bool const runWideWords = u.exactAverage and not runUnitsLegacy() and not Env::flag( { "DTFE_GPU_FLOAT_GRIDS" } );
+    double const snapWordFactor = Env::flag( { "DTFE_GPU_FLOAT_GRIDS" } ) ? 1. : runWideWords ? 4. : 2.;
+    double const deviceWordGrowth = runWideWords ? 4. : 0.;
     // the look-ahead (DTFE.cpp) runs with the GPU deposit when more than one partition is computed
     bool const lookAheadPossible = metalActive and bGpuCell > 0. and u.DTFE and u.method == 1
                                    and not u.stdNoOverlap and not u.redshiftConeOn;
@@ -3247,9 +3296,27 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     in.faceCell = ( NO_DIM == 3 and u.faceGradient and u.aField.selected()
                     and ( u.aField.velocity_gradient or u.aField.velocity_divergence or u.aField.velocity_shear
                           or u.aField.velocity_vorticity or u.aField.velocity_vweb ) ) ? 9. * double(sizeof(double)) : 0.;
+    /* The CPU exact average's run-wide words (averaged_interpolation_1.cc Avg1Words): 8 B per component of each grid
+       its loop deposits, over the cells of the sub-domain it interpolates, beside the Real grids until the loop ends
+       -- one set per concurrent sub-domain call, which together cover the partition, as faceCell. Only where the CPU
+       deposits the '_a' grids: a GPU run's fallback sub-domain is not booked. The gradient is deposited only where the
+       face pass does not supply it (the face default without DTFE_FACE_CHECK=1 skips it). None in the double build or
+       under DTFE_RUN_UNITS_LEGACY=1 (the Real sums): there the term adds 0. and the plans stay the Real sums' to the
+       bit. */
+    if ( not metalActive and u.DTFE and u.method == 1 and u.exactAverage and sizeof(Real) == 4
+         and not runUnitsLegacy() and u.aField.selected() )
+    {
+        bool const den = u.aField.density or u.aField.velocity_tweb;
+        bool const grad = ( u.aField.velocity_gradient or u.aField.selectedVelocityDerivatives() )
+                          and not ( NO_DIM == 3 and u.faceGradient and not Env::flag( "DTFE_FACE_CHECK" ) );
+        in.bCpuWordCell = 8. * ( ( den ? 1. : 0. ) + ( u.aField.velocity ? double(noVelComp) : 0. )
+                                 + ( grad ? double(noGradComp) : 0. ) + ( u.aField.scalar ? double(noScalarComp) : 0. )
+                                 + ( u.aField.scalar_gradient ? double(noScalarGradComp) : 0. ) );
+    }
     in.perTet            = perTet;
     in.tetsPerOwn        = tetsPerOwn;
     in.snapWordFactor    = snapWordFactor;
+    in.deviceWordGrowth  = deviceWordGrowth;
     in.lookAheadPossible = lookAheadPossible;
     in.tuneStart         = tuneStart;
     in.countSec          = countSec;

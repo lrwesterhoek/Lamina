@@ -1234,12 +1234,17 @@ def _polish(qa, w):
     check("an opened group is open again at the next start (one settings key); a window that does not remember "
           "starts folded", saved == {"pipeline.resources": True} and w2.p_res_group.is_open()
           and not w2.res_group.is_open() and not w3.p_res_group.is_open(), str(saved))
-    # a fresh window's face-gradient ticks and jobs start at one constant (runspec.FACE_GRADIENT_DEFAULT: off now; the
-    # day the face gradient becomes PS-DTFE's default, that one line ticks all three tabs)
+    # a fresh window's face-gradient ticks and jobs start at one constant (runspec.FACE_GRADIENT_DEFAULT: on, as the
+    # binary's PS-DTFE route wherever a run qualifies, docs/cleanup-plan.md D13; that one line moves all three tabs);
+    # the default Grids job (the exact deposit, the volume-weighted velocities) qualifies, so it names the route
     fresh = [w3._shared(t, "face_gradient").isChecked() for t in T.RUN_TABS] + [
         w3.spec.face_gradient, w3.pipe.face_gradient, w3.custom.face_gradient]
+    fresh_env = w3.spec.command()[1].get("FACE_GRADIENT")
     check("a fresh window: the face-gradient tick of the Grids, Custom and Pipeline tabs and their jobs at "
-          "runspec.FACE_GRADIENT_DEFAULT", fresh == [rs.FACE_GRADIENT_DEFAULT] * 6, str(fresh))
+          "runspec.FACE_GRADIENT_DEFAULT; the default PS-DTFE Grids job's FACE_GRADIENT follows it (1 or 0)",
+          fresh == [rs.FACE_GRADIENT_DEFAULT] * 6 and w3.spec.estimator == "ps" and w3.spec.deposit == "exact"
+          and w3.spec.volume_weighted and fresh_env == ("1" if rs.FACE_GRADIENT_DEFAULT else "0"),
+          f"{fresh} {fresh_env!r}")
     w2.close()
     w3.close()
     # the shared groups are one table: each role a widget of the right kind on every tab that has it

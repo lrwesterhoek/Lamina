@@ -10,6 +10,9 @@
 #include "../auto_tune.h"       // composite --serve: the memory budget that sizes the resident set
 #include "../env_knobs.h"
 #include "../run_mode.h"        // dtfeHardwareThreads: the run mode's thread budget (the loaders)
+#ifdef PHASE_SPACE
+#include "ps_vertex_order.h"    // composite --serve: the canonical vertex order of a tessellation it loads itself
+#endif
 
 
 // '--tessellation-cache' load or build of a tessellation plus its vertex densities (triangulation.cpp,
@@ -776,6 +779,7 @@ static bool ensureResident(size_t const p, double &loadSeconds)
     std::unique_ptr<DT> dt( new DT );
     if ( not TessellationCache::tryLoad( *dt, P.opts ) ) return false;
 #ifdef PHASE_SPACE
+    psVertexOrderQuiet( *dt );   // a file written without the canonical order holds CGAL's numbering
     if ( g_pe.ctx.vertexMass )   // the grid conventions' vertex-mass pass, once per load (not per request)
         prepareVertexMass( *dt, P.opts );
 #endif
@@ -839,7 +843,12 @@ void psServeCompositeAddPartition(int const index, User_options &partOptions,
         bool have = caching and TessellationCache::headerMatches( P.opts )
                     and TessellationCache::tryLoad( *dt, P.opts );
         if ( have )
+        {
             how = "loaded";
+#ifdef PHASE_SPACE
+            psVertexOrderQuiet( *dt );   // a file written without the canonical order holds CGAL's numbering
+#endif
+        }
         else
         {
             std::vector<Particle_data> particles;
@@ -1022,6 +1031,9 @@ static void compositeStartLoads(std::vector<size_t> const &need, size_t const nP
                     auto const t0 = std::chrono::steady_clock::now();
                     std::unique_ptr<DT> dt( new DT );
                     bool const ok = TessellationCache::tryLoad( *dt, g_serve.comp.parts[L.toLoad[i]].opts );
+#ifdef PHASE_SPACE
+                    if ( ok ) psVertexOrderQuiet( *dt );   // (each loader renumbers its own tessellation)
+#endif
                     double const sec = std::chrono::duration<double>( std::chrono::steady_clock::now() - t0 ).count();
                     std::lock_guard<std::mutex> lk( L.preMutex );
                     L.pre[i].dt = std::move( dt );

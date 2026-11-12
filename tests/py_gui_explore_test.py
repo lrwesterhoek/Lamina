@@ -35,7 +35,10 @@
      mean_field=True) cut there (the six names, every axis, through slice()'s components and units); standard DTFE
      unchanged; 2D, non-periodic and window outputs keep the stored grid and say why; while a job caps the cube cache
      the velocity is read in slabs, never cached whole, the same numbers; a rewritten velocity grid is not served
-     from the plane cache. In the window: the map, its title, colour bar and saved figure say the family, the choice
+     from the plane cache; a face-gradient output (its '.a_velDivStreams', PS-DTFE's default with the exact deposit
+     and the volume weighting) shows its stored grids, the mean field, with either choice, and its exact zoom takes
+     '--face-gradient' (an output without the marker '--per-tet-gradient'). In the window: the map, its title,
+     colour bar and saved figure say the family, the choice
      reaches Compare with (A's and B's families) and the figure grid (a stored PS panel never shares a colour bar
      with a mean-field one), it is remembered, a zoom says the stream average (and its zoom line is text).
  10. the 3D view (view3d.py, explore_3d.py): the camera's rotation is orthonormal and right-handed, a sphere of radius
@@ -3380,6 +3383,27 @@ def mean_field_pure():
           lab == ("velocity divergence (mean field ∇⟨v⟩)", "velocity divergence (stream average ⟨∇v⟩)",
                   "velocity divergence", "velocity divergence (mean field ∇⟨v⟩)", "density ρ/ρ̄")
           and not any("--" in t for t in lab), str(lab))
+    # a face-gradient output (PS-DTFE's default with the exact deposit and the volume weighting, docs/cleanup-plan.md
+    # D13): its run writes the stream average's divergence beside the family ('.a_velDivStreams'), whose stored grids
+    # are then the mean field itself -- shown as stored with either choice, and labelled the mean field. The same
+    # grids without the marker keep both families
+    face = face_outputs(d)
+    face_o, plain_o = (G.OutputSet(face / p, box=ps_o.box, redshift=ps_o.redshift) for p in ("ps_face", "ps_plain"))
+    stored_face = face_o.slice("divergence", 2, 9, "value", "stored")
+    check("9. a face-gradient output ('.a_velDivStreams' beside its family): its stored grids are the mean field, "
+          "shown as stored with either choice and labelled so; without the marker the same grids keep both families; "
+          "dtfelib's FieldSet.face_gradient agrees",
+          face_o.face_gradient and not plain_o.face_gradient and not ps_o.face_gradient and not dt_o.face_gradient
+          and face_o.gradient_family("shear", "stored") == "mean" == face_o.gradient_family("shear", "mean-field")
+          and face_o.gradient_family("density", "mean-field") == ""
+          and plain_o.gradient_family("shear", "stored") == "stream"
+          and plain_o.gradient_family("shear", "mean-field") == "mean"
+          and np.array_equal(face_o.slice("divergence", 2, 9, "value", "mean-field"), stored_face)
+          and np.allclose(stored_face, stored[:, :, 9] * sa, rtol=1e-6)
+          and not np.allclose(plain_o.slice("divergence", 2, 9, "value", "mean-field"), stored_face)
+          and FieldSet(face, method="ps", prefix="ps_face").face_gradient
+          and not FieldSet(face, method="ps", prefix="ps_plain").face_gradient,
+          f"{face_o.face_gradient} {plain_o.face_gradient} {face_o.gradient_family('shear', 'stored')}")
     # a job running: the cube cache capped below the velocity cube -> slabs from the file, nothing cached whole
     real_run, real_get = G.RUN_CUBE_BYTES, G._SlabFile.__getitem__
     slabs = []
@@ -3418,6 +3442,57 @@ def mean_field_pure():
     check("9. a velocity grid written again: its new mean field, not the cached plane (twice the velocity, twice "
           "the divergence)", np.allclose(after, 2.0 * before, rtol=1e-5, atol=1e-6 * np.abs(before).max()))
     G.drop_cubes()
+
+
+def face_outputs(d: Path) -> Path:
+    """Two copies of part 9's PS-DTFE output beside a copy of its snapshot: 'ps_face' with the face gradient's marker
+    ('.a_velDivStreams', here a copy of its divergence), 'ps_plain' without it."""
+    face = TMP / "mf face"
+    face.mkdir(exist_ok=True)
+    shutil.copy(d / "combined_050.hdf5", face / "combined_050.hdf5")
+    for p in d.glob("ps_output.a_*"):
+        for prefix in ("ps_face", "ps_plain"):
+            shutil.copy(p, face / p.name.replace("ps_output", prefix, 1))
+    shutil.copy(face / "ps_face.a_velDiv", face / "ps_face.a_velDivStreams")
+    return face
+
+
+def face_gradient_zoom():
+    """9. the exact zoom of a phase-space output takes the output's own velocity-gradient route: '--face-gradient' for
+    a face-gradient output (its '.a_velDivStreams'), '--per-tet-gradient' for one without it -- the plan only (a
+    stand-in for the binary, nothing run)."""
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        print(f"SKIP (the exact zoom's gradient route): PySide6 is not importable ({e})")
+        return
+    import explore_zoom as XZ
+    QApplication.instance() or QApplication([])
+    print("the exact zoom's gradient route")
+    face = TMP / "mf face"
+    if not (face / "ps_face.a_velDivStreams").is_file():
+        face = face_outputs(mean_field_data(TMP / "mf data"))
+    box = ((0.0, 0.0, 0.0), (MF_BOX, MF_BOX, MF_BOX))
+    outs = {p: G.OutputSet(face / p, box=box, redshift=MF_Z) for p in ("ps_face", "ps_plain")}
+    fake = face / "PS-DTFE-standin"
+    fake.write_text("")
+    real_name, plans = XZ.rs.binary_name, {}
+    XZ.rs.binary_name = lambda estimator, precision="single", dim=3: str(fake)     # (an absolute path: REPO_ROOT / it)
+    try:
+        for p, o in outs.items():
+            plans[p] = XZ.exact_zoom_plan(o, 2, 9, [0, 1], (4.0, 12.0), (4.0, 12.0), 16, None, str(face / "cache"), 0)
+    finally:
+        XZ.rs.binary_name = real_name
+        for plan in plans.values():
+            if plan.get("root"):
+                shutil.rmtree(Path(plan["root"]).parent, ignore_errors=True)
+    cmds = {p: plan.get("cmd") or [] for p, plan in plans.items()}
+    routes = {p: [a for a in c if a in ("--face-gradient", "--per-tet-gradient")] for p, c in cmds.items()}
+    check("9. the exact zoom takes the output's own route: '--face-gradient' for a face-gradient output, "
+          "'--per-tet-gradient' for one without the marker (both exact and volume-weighted)",
+          routes == {"ps_face": ["--face-gradient"], "ps_plain": ["--per-tet-gradient"]}
+          and all("--exact" in c and "--ps-volume-weighted" in c for c in cmds.values()),
+          f"{routes} {[plan.get('note') for plan in plans.values()]}")
 
 
 def mean_field_gui():
@@ -4248,6 +4323,7 @@ def main():
         fold_map()
         keep_slice()
         mean_field_gui()
+        face_gradient_zoom()
         save_settings()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)

@@ -57,8 +57,8 @@ class CustomSpec:
     mem_budget_gb: float = 0.0      # DTFE_MEM_BUDGET_GB in the binary's environment, see RunSpec
     tess_cache: str = ""            # --tessellation-cache <folder>; "" = none
     linear_deposit: bool = False    # --ps-linear-deposit (PS only; not with the volume-weighted velocities)
-    face_gradient: bool = FACE_GRADIENT_DEFAULT   # --face-gradient (PS only, 3D; needs the exact deposit and the
-                                    # volume-weighted velocities), see RunSpec
+    face_gradient: bool = FACE_GRADIENT_DEFAULT   # the route, see RunSpec: --face-gradient where the run qualifies,
+                                    # --per-tet-gradient unticked (PS only, 3D)
     ordered_merge: bool = True      # --ps-merge index-order, the default (PS only; off: --ps-merge completion-order), see RunSpec
     sample_points: str = ""         # --sample-points <file>: the fields at these points too ('.pts_*'); "" = none
     pts_vel_grad: bool = True       # ... with the velocity gradient at each point (--pts-vel-grad)
@@ -136,10 +136,14 @@ class CustomSpec:
                 a += ["--sampled", "--subsamples", str(self.nsub)]
             if self.lagrangian == "separate" and self.lagrangian_file:
                 a += ["--ps-lagrangian-input", str(Path(self.lagrangian_file).expanduser())]
+            # the velocity gradient's route (D13): the tick asks for the face gradient where the run qualifies and for
+            # the stream average where it is off; a ticked run that does not qualify names neither (the binary keeps
+            # the stream average and says why), nor does a 2D run or one whose extra options name a route themselves
+            route = _rs.face_gradient_env(self) if three and not self._extra_names_route() else ""
             for on, flag in ((self.gpu and three, "--gpu"), (self.vertex_mass, "--ps-vertex-mass"),
                              (self.volume_weighted, "--ps-volume-weighted"), (self.caustics, "--ps-caustics"),
                              (self.caustic_cusps, "--ps-caustic-cusps"),
-                             (self.face_gradient and three, "--face-gradient"),
+                             (route == "1", "--face-gradient"), (route == "0", "--per-tet-gradient"),
                              (self.parallel_triangulation and three, "--parallel-triangulation")):
                 if on:
                     a.append(flag)
@@ -198,6 +202,12 @@ class CustomSpec:
         return any(_runlog.canonical_flag(t.split("=", 1)[0]).split()[0] == "--ps-merge"
                    for t in _extra_options(self.extra_args) if t.startswith("--"))
 
+    def _extra_names_route(self) -> bool:
+        """The extra options name the velocity gradient's route themselves ('--face-gradient' or '--per-tet-gradient'):
+        the tab's own would repeat or contradict it, which the binary refuses."""
+        return any(t.split("=", 1)[0] in ("--face-gradient", "--per-tet-gradient")
+                   for t in _extra_options(self.extra_args) if t.startswith("--"))
+
     def memory_key(self) -> str:
         return _rs._memory_key(self, ("output_dir", "output_name", "demo_n", "demo_file", "lambda_th", "tess_cache",
                                       "pts_conventions"))
@@ -215,8 +225,14 @@ class CustomSpec:
                         self.run_env())
 
     def run_env(self) -> dict[str, str]:
-        """The binary's environment: the memory budget (the cache is an argument here, not TESSELLATION_CACHE)."""
-        return {k: v for k, v in _rs._run_option_env(self).items() if k not in _rs.TESS_CACHE_KEYS}
+        """The binary's environment: the memory budget (the cache is an argument here, not TESSELLATION_CACHE); for
+        standard DTFE also DTFE_FACE_GRADIENT pinned empty (the binary reads that as unset): the tab names no gradient
+        route for a standard run, so a 0 exported in the login shell cannot turn it to the deposit's own gradient
+        behind the command shown."""
+        env = {k: v for k, v in _rs._run_option_env(self).items() if k not in _rs.TESS_CACHE_KEYS}
+        if self.estimator != "ps":
+            env["DTFE_FACE_GRADIENT"] = ""
+        return env
 
     def steps(self) -> list[_rs.Step]:
         out = []
@@ -368,11 +384,10 @@ class CustomSpec:
         if ps and self.linear_deposit and self.volume_weighted:
             out.append(("error", "the linear deposit weights by density inside each tetrahedron, the volume-weighted "
                                  "velocities by volume: untick one (the binary refuses both)"))
-        if ps and self.face_gradient:
-            if d == 2:
-                out.append(("info", "the face gradient is 3D only: this 2D run leaves it out"))
-            else:
-                out += _rs._face_gradient_problems(self)
+        # (2D: the tick is greyed; the 2D programs have no face gradient. A route named in the extra options is the
+        # run's own: the tab's tick does not decide it, and the binary refuses a named face gradient that cannot run)
+        if ps and d == 3 and not self._extra_names_route():
+            out += _rs._face_gradient_problems(self)
         if (self.output_root().parent / (self.name() + ".a_den")).exists():
             out.append(("info", f"'{name}' already has outputs in this folder: they will be overwritten"))
         if self.extra_args.strip():

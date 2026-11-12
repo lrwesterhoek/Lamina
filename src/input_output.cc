@@ -517,6 +517,19 @@ void writeOutputData(Quantities &uQuantities,
     if ( not aQuantities.velocity_divergence_streams.empty() )
         output.write( aQuantities.velocity_divergence_streams, userOptions.outputFilename + ".a_velDivStreams",
                       "stream-averaged velocity divergence (--face-gradient: the streams' own; the mean flow's is '.a_velDiv')", userOptions );
+    // ... and its gradient, shear and vorticity, where the run writes the mean flow's (docs/cleanup-plan.md D12)
+    if ( not aQuantities.velocity_gradient_streams.empty() )
+        output.write( aQuantities.velocity_gradient_streams, userOptions.outputFilename + ".a_velGradStreams",
+                      "stream-averaged velocity gradient (--face-gradient: the streams' own; the mean flow's is "
+                      "'.a_velGrad')", userOptions );
+    if ( not aQuantities.velocity_shear_streams.empty() )
+        output.write( aQuantities.velocity_shear_streams, userOptions.outputFilename + ".a_velShearStreams",
+                      "stream-averaged velocity shear (--face-gradient: the streams' own; the mean flow's is "
+                      "'.a_velShear')", userOptions );
+    if ( not aQuantities.velocity_vorticity_streams.empty() )
+        output.write( aQuantities.velocity_vorticity_streams, userOptions.outputFilename + ".a_velVortStreams",
+                      "stream-averaged velocity vorticity (--face-gradient: the streams' own; the mean flow's is "
+                      "'.a_velVort')", userOptions );
     if ( not aQuantities.mass_flux_divergence.empty() )
         output.write( aQuantities.mass_flux_divergence, userOptions.outputFilename + ".a_massFluxDiv",
                       "mass flux divergence div(sum rho_s v_s) (--face-gradient; rho/rho_bar x velocity / length)", userOptions );

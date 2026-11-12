@@ -33,7 +33,9 @@ mkdir -p "$TMP"
 SNAP="$TMP/waves.hdf5"
 [ -f "$SNAP" ] || "$PY" tests/generate_ps_test_data.py --out "$SNAP" --n 32 --box 100 --seed 9 --crossed-waves >/dev/null || { echo "FAIL data gen"; exit 1; }
 G=64
-BASE=(--periodic --mpc-unit 1 --field density velocity dispersion gradient --ps-caustics --max-concurrent 1)
+# --per-tet-gradient: this suite checks the deposit's window; the face sums' window is ps_face_gradient_check's P6/P9
+BASE=(--periodic --mpc-unit 1 --field density velocity dispersion gradient --ps-caustics --max-concurrent 1
+      --per-tet-gradient)
 # window A: cells [8,24) x [40,52) x [30,31) (dx = 100/64 = 1.5625 Mpc); window B straddles the seam along x:
 # cells [56,64)+[0,8), i.e. x in [87.5, 112.5) -- given as a box beyond the period, which the option wraps
 WA=(--grid-window 12.5 37.5 62.5 81.25 46.875 48.4375)

@@ -187,6 +187,43 @@ inline Real volume(DT & dt,
 #endif
 }
 
+// The area (2D) or volume (3D) of a Delaunay cell, in double, whatever CGAL's labelling of its vertices: the vertices
+// sorted lexicographically by their exact coordinates, the NO_DIM edges taken from the smallest, |det| / NO_DIM!.
+// volume() above takes CGAL's vertex 0 as the base, and the tessellations of two partition or thread splits can label
+// one cell differently, so the last bit of its volume can differ between them; here the same four (three) points give
+// the same operations and the same bits. The vertices are distinct points, so the order is total (a NaN coordinate
+// compares false and leaves the order as given). The run-wide sums take it where a whole cell's volume is summed: the
+// vertex star sums (triangulation.cpp vertexDensity) and the single-cell share of the exact average
+// (averaged_interpolation_1.cc).
+template <typename DTCell>
+inline double canonicalTetVolume(DTCell cell)   // a cell handle or a finite-cell iterator (copied: both are small)
+{
+    double x[NO_DIM+1][NO_DIM];
+    for (int v = 0; v <= NO_DIM; ++v)
+        for (int d = 0; d < NO_DIM; ++d)
+            x[v][d] = double( cell->vertex(v)->point()[d] );
+    auto less = [&x](int const a, int const b) {
+        for (int d = 0; d < NO_DIM; ++d)
+            if ( x[a][d] != x[b][d] ) return x[a][d] < x[b][d];
+        return false; };
+    int o[NO_DIM+1];
+    for (int v = 0; v <= NO_DIM; ++v) o[v] = v;
+    for (int i = 1; i <= NO_DIM; ++i)   // an insertion sort of the NO_DIM+1 vertices
+        for (int j = i; j > 0 and less( o[j], o[j-1] ); --j)
+            std::swap( o[j], o[j-1] );
+    double e[NO_DIM][NO_DIM];
+    for (int v = 0; v < NO_DIM; ++v)
+        for (int d = 0; d < NO_DIM; ++d)
+            e[v][d] = x[o[v+1]][d] - x[o[0]][d];
+#if NO_DIM==2
+    return std::fabs( e[0][0] * e[1][1] - e[0][1] * e[1][0] ) / 2.;
+#elif NO_DIM==3
+    return std::fabs( e[0][0] * ( e[1][1] * e[2][2] - e[1][2] * e[2][1] )
+                    - e[0][1] * ( e[1][0] * e[2][2] - e[1][2] * e[2][0] )
+                    + e[0][2] * ( e[1][0] * e[2][1] - e[1][1] * e[2][0] ) ) / 6.;
+#endif
+}
+
 
 
 // Flattens multi-dimensional grid indices into a single row-major array index.

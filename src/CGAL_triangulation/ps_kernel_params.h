@@ -93,7 +93,8 @@ struct PSDepositParams
 static_assert(sizeof(PSDepositParams) == 41 * 4, "PSDepositParams: 41 four-byte fields, no padding (host == kernel)");
 
 // depositExactItems' per-dispatch parameters (Metal buffer 17, set per command buffer): the items of this chunk,
-// the pass (== the pipeline's kItemsPhase), the cells per item, and badAt = the word of the sumW buffer where the
+// the pass (== the pipeline's kItemsPhase, 0 or 1; the kernel reads it only in the kItemsPhase-2 pipeline, which runs
+// both passes of --ps-linear-deposit), the cells per item, and badAt = the word of the sumW buffer where the
 // non-finite guard's counters start, past the per-tet totals (Metal: every one of the 31 buffer slots is taken, so
 // they ride in that buffer's tail).
 // itemBase = the chunk's first item and nTet = the tets of the items' map (gpu_host.h psBuildExactItemMap): the

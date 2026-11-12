@@ -155,6 +155,10 @@ def main():
                     help="2 writes a 2D snapshot for the DIM=2 builds (PS-DTFE-2d / DTFE-2d): an n^2 "
                          "lattice and two-column Coordinates/Velocities/InitialCoordinates; with "
                          "--crossed-waves the stream counts are {1,3,9} (default 3)")
+    ap.add_argument("--linear-velocity", type=float, nargs=9, default=None, metavar="G",
+                    help="replace the velocities by the linear field v_j = sum_i G[j][i] (x_i - c), c the box "
+                         "centre, nine numbers row by row (G[j][i] = dv_j/dx_i: the binaries' gradient layout "
+                         "[j*3+i]); 3D with --margin-frac > 0 only (a linear field is not periodic)")
     args = ap.parse_args()
 
     q, x, velocity = build_pancake(args.n, args.box, args.amplitude_factor,
@@ -163,6 +167,13 @@ def main():
     if args.offset != 0.0:
         q = q + args.offset
         x = x + args.offset
+    if args.linear_velocity is not None:
+        if args.dim != 3 or args.margin_frac <= 0.0:
+            sys.exit("ERROR: --linear-velocity needs --dim 3 and --margin-frac > 0 (a linear field is not periodic).")
+        G = np.asarray(args.linear_velocity, dtype=np.float64).reshape(3, 3)
+        # at the positions as the file stores them (float32), centred for float headroom
+        velocity = (x.astype(np.float32).astype(np.float64) - (args.offset + 0.5 * args.box)) @ G.T
+        print(f"  linear velocity G    : {G.ravel().tolist()} (dv_j/dx_i, row j)")
     write_snapshot(args.out, q, x, velocity, args.box, args.mass)
 
     n = x.shape[0]

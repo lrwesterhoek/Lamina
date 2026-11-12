@@ -75,6 +75,11 @@
 #     plan's (its sums follow the thread order); a dynamic run killed after 3 partitions and resumed writes the same grids.
 #     Y7 (GPU builds): an all-GPU run's ledger books the GPU snapshot once, as the plan does (the start check's once
 #     part is the report's snapshot_gb).
+#  T) THE FACE GRADIENT'S DEFAULT is what the plan books: PS-DTFE takes the face gradient by default where the run
+#     qualifies (the exact deposit, --ps-volume-weighted, no halo release; docs/cleanup-plan.md D13) and the planner
+#     reads the resolved route: a run without a flag plans as its default route (the one its header names),
+#     '--face-gradient' books more than '--per-tet-gradient', and a sampled run without a flag plans as
+#     '--per-tet-gradient' and says why in its header. Plan-only, every build.
 #  Z) a GPU lane books what it holds AFTER the device's deposit when '--face-gradient' forms its face sums on the
 #     CPU (plan P11.7 item 1: the handed-back host words, the face sums' words and the Real grids their conversion
 #     builds, less the freed words the allocator hands back). Plan-only: the lane with the face sums minus the lane
@@ -105,6 +110,7 @@
 
 set -euo pipefail
 unset DTFE_TRIANGULATION_THREADS DTFE_TBB_THREADS   # the insert's own switch moves the plans: the suite sets it itself
+unset DTFE_FACE_GRADIENT   # the gradient route's pin moves the PS plans: the runs name their route, T reads the default
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -881,6 +887,41 @@ run_x "2 3 4, pancake" "${SNAP_XP}" --periodic --partition 2 3 4
 run_x "4 1 1, pancake" "${SNAP_XP}" --periodic --partition 4 1 1
 rm -f "${SNAP_XC}" "${SNAP_XW}" "${SNAP_XP}" "${TMP}"/at_x*
 
+# ---------- (T) the face gradient's default is what the plan books ----------
+# PS-DTFE takes the face gradient by default where the run qualifies (the exact deposit, --ps-volume-weighted, no halo
+# release; docs/cleanup-plan.md D13) and the auto-tuner reads the resolved route: a run without a flag plans as its
+# default (src/user_options.cc kPsFaceGradientDefault, as the header names it), '--face-gradient' books the face sums
+# and '--per-tet-gradient' none, and a sampled run without a flag plans as '--per-tet-gradient' (it keeps the stream
+# average, says so, and does not stop). Plan-only, every build.
+echo ">> T: the face gradient's default is what the plan books"
+run_t() {  # $1 = log, rest = options
+    local log="$1"; shift
+    env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 "${BIN}" "${SNAP}" "${TMP}/at_t" --grid 256 \
+        --field density_a velocity_a gradient_a divergence_a --ps-volume-weighted --input-format 105 --mpc-unit 1 \
+        --verbose 2 --periodic --partition 2 2 2 --max-concurrent 2 --auto-tune-report "$@" > "${log}" 2>&1 || true
+}
+t_line() { grep -m1 '^AUTO-TUNE-REPORT ' "$1" || true; }
+t_gb() { t_line "$1" | sed -n 's/.* predicted_gb=\([0-9.]*\) .*/\1/p'; }
+run_t "${TMP}/at_t_d.log" --exact
+run_t "${TMP}/at_t_f.log" --exact --face-gradient
+run_t "${TMP}/at_t_p.log" --exact --per-tet-gradient
+run_t "${TMP}/at_t_sd.log" --sampled
+run_t "${TMP}/at_t_sp.log" --sampled --per-tet-gradient
+t_def=f
+if grep -qF "is not PS-DTFE's default" "${TMP}/at_t_d.log"; then t_def=p; fi   # the default the header names
+t_dl="$(t_line "${TMP}/at_t_d.log")"; t_rl="$(t_line "${TMP}/at_t_${t_def}.log")"
+check "T1 a qualifying run without a flag plans as its default route (${t_def}: the run with that route's flag)" \
+      "$([ -n "${t_dl}" ] && [ "${t_dl}" = "${t_rl}" ] && echo 1 || echo 0)"
+t_fg="$(t_gb "${TMP}/at_t_f.log")"; t_pg="$(t_gb "${TMP}/at_t_p.log")"
+check "T2 the face sums are booked: --face-gradient ${t_fg} GB > --per-tet-gradient ${t_pg} GB" \
+      "$(awk -v f="${t_fg}" -v p="${t_pg}" 'BEGIN{print (f != "" && p != "" && f + 0 > p + 0) ? 1 : 0}')"
+t_sl="$(t_line "${TMP}/at_t_sd.log")"; t_ql="$(t_line "${TMP}/at_t_sp.log")"
+check "T3 a sampled run without a flag plans as --per-tet-gradient and names why in its header" \
+      "$([ -n "${t_sl}" ] && [ "${t_sl}" = "${t_ql}" ] \
+         && grep -qF "velocity gradient      : the stream average of each stream" "${TMP}/at_t_sd.log" \
+         && echo 1 || echo 0)"
+rm -f "${TMP}"/at_t*
+
 # ---------- (Z) a GPU lane books the face sums it holds after the device's deposit ----------
 # With '--face-gradient' beside the GPU deposit a lane's largest state comes AFTER the hold: the host words the
 # device hands back, the fixed-point face sums made for the face walk, and the Real grids the conversion builds
@@ -907,7 +948,7 @@ run_z 1 "${TMP}/at_z_f1.log" --face-gradient
 if grep -q "GPU (--gpu)" "${TMP}/at_z_f1.log"; then
     V_GPU=1
     run_z 2 "${TMP}/at_z_f2.log" --face-gradient
-    run_z 1 "${TMP}/at_z_n1.log"; run_z 2 "${TMP}/at_z_n2.log"
+    run_z 1 "${TMP}/at_z_n1.log" --per-tet-gradient; run_z 2 "${TMP}/at_z_n2.log" --per-tet-gradient
     r="$("${PY}" - "${TMP}/at_z_f1.log" "${TMP}/at_z_f2.log" "${TMP}/at_z_n1.log" "${TMP}/at_z_n2.log" <<'PYEOF'
 import re, sys
 t = [open(p, errors="replace").read() for p in sys.argv[1:5]]
@@ -940,7 +981,7 @@ PYEOF
         env OMP_NUM_THREADS=10 DTFE_RAM_GB=64 DTFE_FREE_GB=1000 "${BIN}" "${SNAP}" "${TMP}/at_z_g1" --grid 256 \
             --field density_a velocity_a gradient_a divergence_a shear_a vorticity_a dispersion_a \
             --ps-volume-weighted --input-format 105 --mpc-unit 1 --verbose 2 --periodic --exact --gpu \
-            --partition 2 2 2 --max-concurrent 1 > "${TMP}/at_z_g1.log" 2>&1 || true
+            --partition 2 2 2 --max-concurrent 1 --per-tet-gradient > "${TMP}/at_z_g1.log" 2>&1 || true
         mz="$("${PY}" - "${TMP}/at_z_g1.log" <<'PYEOF'
 import re, sys
 m = re.search(r"memory model\s*:\s*([\d.]+) GB predicted \(auto-tune\) vs ([\d.]+) GB measured",
@@ -982,7 +1023,7 @@ else
         env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 DTFE_AUTO_MINN=1000 DTFE_AUTO_TUNE_DEBUG=1 "${BIN}" "${SNAP_V}" \
             "${TMP}/at_v" --grid 128 --field density_a velocity_a gradient_a dispersion_a --ps-volume-weighted \
             --input-format 105 --mpc-unit 1 --verbose 2 --periodic --exact --gpu --partition 2 2 2 \
-            --max-concurrent "${mc}" --auto-tune-report "$@" > "${TMP}/at_v_${tag}.log" 2>&1 || true
+            --max-concurrent "${mc}" --auto-tune-report --per-tet-gradient "$@" > "${TMP}/at_v_${tag}.log" 2>&1 || true
     }
     run_v m1 1 --gpu-share 0.5; run_v m2 2 --gpu-share 0.5; run_v g1 1; run_v g2 2
     r="$("${PY}" - "${TMP}" <<'PYEOF'

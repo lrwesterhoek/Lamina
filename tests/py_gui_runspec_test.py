@@ -1213,6 +1213,7 @@ def _custom_snapshot(tmp, np, P):
                                    lagrangian_file=str(snap), box=[0, 1, 0, 1, 0, 1], parallel_triangulation=True,
                                    alpha_shape=2.5, periodic=False, ordered_merge=True, face_gradient=True),
                      rs.CustomSpec(input_file=str(snap), estimator="ps", deposit="sampled", nsub=2),
+                     rs.CustomSpec(input_file=str(snap), estimator="ps", face_gradient=False),
                      rs.CustomSpec(input_file=str(snap), estimator="dtfe", gpu=True),
                      rs.CustomSpec(input_file=str(snap), estimator="dtfe", deposit="sampled")):
             emitted |= {a for a in spec.command() if a.startswith("--")}
@@ -1241,9 +1242,10 @@ def _custom_snapshot(tmp, np, P):
         std_used = set(rs.RunSpec(sim="TNG50-4", snapshots=[99], estimator="dtfe", slice_plane=str(snap),
                                   scratch_dir=str(work), partition=2, max_concurrent=2, tess_cache=str(work),
                                   fields=["density_a", "tweb_a"]).command()[1]) - {"DTFE_DATA_ROOT"}
-        std_knobs = script_knobs("run_dtfe.sh", "config.sh") | {"DTFE_PRECISION", "DTFE_MEM_BUDGET_GB"}
-        check("... and every one a standard Grids job sets is one run_dtfe.sh reads (the precision and the budget: "
-              "config.sh / the binary)", std_used <= std_knobs, str(sorted(std_used - std_knobs)))
+        std_knobs = script_knobs("run_dtfe.sh", "config.sh") | {"DTFE_PRECISION", "DTFE_MEM_BUDGET_GB",
+                                                                "DTFE_FACE_GRADIENT"}
+        check("... and every one a standard Grids job sets is one run_dtfe.sh reads (the precision, the budget and the "
+              "gradient route's pin: config.sh / the binary)", std_used <= std_knobs, str(sorted(std_used - std_knobs)))
         pipe_used = set(rs.PipelineSpec(sims=["TNG50-4"], window="0 10 0 10", planes=4, center="5",
                                         tess_cache=str(work), partition=2, max_concurrent=2, scratch_dir=str(work),
                                         force=True, plan_only=True).command()[1]) - {"DTFE_DATA_ROOT"}
@@ -2011,23 +2013,39 @@ def point_window_linear(tmp: Path):
     check("the Grids job: a hi-res slice for standard DTFE too (SAMPLE_POINTS), PS_LINEAR_DEPOSIT spelled out",
           env.get("SAMPLE_POINTS") == str(pts) and lin.get("PS_LINEAR_DEPOSIT") == "1"
           and rs.RunSpec(**base).command()[1].get("PS_LINEAR_DEPOSIT") == "0", f"{env} {lin}")
-    # the face gradient (PS-DTFE '--face-gradient'): FACE_GRADIENT spelled out on the Grids and Pipeline jobs, the flag
-    # on a 3D PS-DTFE Custom command; a standard-DTFE job pins it EMPTY (its face gradient is the binary's default)
+    # the face gradient's route (PS-DTFE, docs/cleanup-plan.md D13): FACE_GRADIENT spelled out on the Grids and Pipeline
+    # jobs -- 1 (--face-gradient) where the tick is on and the job qualifies, 0 (--per-tet-gradient) where it is off,
+    # EMPTY (the binary's default: it keeps the stream average and says why) where the tick is on and the job does not
+    # qualify -- and the matching flag on a 3D PS-DTFE Custom command; a standard-DTFE job pins it EMPTY (its face
+    # gradient is the binary's default)
     pbase = dict(data_root=str(tmp), sims=["TNG100-3-Dark"], nu=64, grid=128)
     fg_pipe = rs.PipelineSpec(face_gradient=True, **pbase)
     fg_own = lambda **k: rs.CustomSpec(input_file=str(snap), **k).command()          # noqa: E731
-    check("face gradient: FACE_GRADIENT spelled out on the Grids and Pipeline jobs (and the Pipeline's memory check), "
-          "empty for standard DTFE whatever the tick; '--face-gradient' on the Custom command only when ticked, for "
-          "PS-DTFE in 3D",
-          rs.RunSpec(face_gradient=False, **base).command()[1].get("FACE_GRADIENT") == "0"
-          and rs.RunSpec(face_gradient=True, **base).command()[1].get("FACE_GRADIENT") == "1"
-          and rs.PipelineSpec(face_gradient=False, **pbase).command()[1].get("FACE_GRADIENT") == "0"
-          and fg_pipe.command()[1].get("FACE_GRADIENT") == "1"
+    routes = lambda argv: [a for a in argv if a in ("--face-gradient", "--per-tet-gradient")]   # noqa: E731
+    fg_env = lambda spec: spec.command()[1].get("FACE_GRADIENT")                    # noqa: E731
+    check("face gradient: FACE_GRADIENT spelled out on the Grids and Pipeline jobs (and the Pipeline's memory check): "
+          "1 ticked where the job qualifies, 0 unticked, empty ticked where it does not (the sampled deposit), a new "
+          "job's by runspec.FACE_GRADIENT_DEFAULT; empty for standard DTFE whatever the tick. The Custom command the "
+          "same way for PS-DTFE in 3D ('--face-gradient', '--per-tet-gradient'), neither flag where a ticked run does "
+          "not qualify, in 2D, for standard DTFE, nor beside extra options that name a route",
+          fg_env(rs.RunSpec(face_gradient=False, **base)) == "0"
+          and fg_env(rs.RunSpec(face_gradient=True, **base)) == "1"
+          and fg_env(rs.RunSpec(**base)) == ("1" if rs.FACE_GRADIENT_DEFAULT else "0")
+          and fg_env(rs.RunSpec(face_gradient=True, deposit="sampled", **base)) == ""
+          and fg_env(rs.PipelineSpec(face_gradient=False, **pbase)) == "0" and fg_env(fg_pipe) == "1"
+          and fg_env(rs.PipelineSpec(face_gradient=True, deposit="sampled", **pbase)) == ""
           and fg_pipe.check_step("TNG100-3-Dark", [99], 64).env.get("FACE_GRADIENT") == "1"
-          and rs.RunSpec(estimator="dtfe", face_gradient=True, **base).command()[1].get("FACE_GRADIENT") == ""
-          and "--face-gradient" in fg_own(face_gradient=True) and "--face-gradient" not in fg_own(face_gradient=False)
-          and "--face-gradient" not in fg_own(estimator="dtfe", face_gradient=True)
-          and "--face-gradient" not in fg_own(dim=2, face_gradient=True),
+          and fg_env(rs.RunSpec(estimator="dtfe", face_gradient=True, **base)) == ""
+          and routes(fg_own(face_gradient=True)) == ["--face-gradient"]
+          and routes(fg_own(face_gradient=False)) == ["--per-tet-gradient"]
+          and routes(fg_own()) == (["--face-gradient"] if rs.FACE_GRADIENT_DEFAULT else ["--per-tet-gradient"])
+          and not routes(fg_own(face_gradient=True, deposit="sampled"))
+          and not routes(fg_own(face_gradient=True, halo_release=2.0))
+          and not routes(fg_own(estimator="dtfe", face_gradient=True))
+          and not routes(fg_own(estimator="dtfe", face_gradient=False))
+          and not routes(fg_own(dim=2, face_gradient=True)) and not routes(fg_own(dim=2, face_gradient=False))
+          and routes(fg_own(face_gradient=False, extra_args="--face-gradient")) == ["--face-gradient"]
+          and routes(fg_own(face_gradient=True, extra_args="--per-tet-gradient")) == ["--per-tet-gradient"],
           f"{fg_pipe.command()[1]} {fg_own(face_gradient=True)}")
     # a standard-DTFE Grids job pins run_dtfe.sh's FACE_GRADIENT EMPTY, its memory check too, as it pins SUBSAMPLES
     # and THREADS: empty is the driver's default (the binary's own route, the face gradient), so the command is the one
@@ -2037,51 +2055,76 @@ def point_window_linear(tmp: Path):
                 rs.RunSpec(estimator="dtfe", face_gradient=True, **base)]
     std_envs = [s.command()[1] for s in std_jobs] + [s.check_step().env for s in std_jobs]
     leaked = [dict({"FACE_GRADIENT": "0"}, **e).get("FACE_GRADIENT") for e in std_envs]
+    std_custom = [rs.CustomSpec(input_file=str(snap), estimator="dtfe", face_gradient=t) for t in (True, False)]
+    std_custom_envs = [c.run_env() for c in std_custom] + [c.check_step().env for c in std_custom]
     check("a standard-DTFE Grids job pins FACE_GRADIENT empty (run_dtfe.sh's default: the binary's face gradient), in "
           "the memory check too and whatever the PS-only tick holds, so an exported FACE_GRADIENT cannot leak in; "
-          "the command names no gradient route",
+          "the binary's own DTFE_FACE_GRADIENT the same way (a standard Custom run's too: install_gui_app.sh imports "
+          "every DTFE_* from the login shell); a PS-DTFE job, whose route the tick names, leaves the binary's switch "
+          "alone; the command names no gradient route",
           all(e.get("FACE_GRADIENT") == "" for e in std_envs) and leaked == [""] * len(std_envs)
+          and all(e.get("DTFE_FACE_GRADIENT") == "" for e in std_envs + std_custom_envs)
+          and "DTFE_FACE_GRADIENT" not in rs.RunSpec(**base).command()[1]
+          and "DTFE_FACE_GRADIENT" not in rs.CustomSpec(input_file=str(snap)).run_env()
           and not any(a in ("--face-gradient", "--per-tet-gradient") for s in std_jobs for a in s.command()[0]),
-          str([{k: e.get(k) for k in ("FACE_GRADIENT", "SUBSAMPLES", "THREADS")} for e in std_envs]))
-    # ... and what the binary and the drivers refuse with it, said before the run (only the face-gradient messages:
-    # the fake snapshot has other problems of its own)
+          str([{k: e.get(k) for k in ("FACE_GRADIENT", "DTFE_FACE_GRADIENT", "SUBSAMPLES", "THREADS")}
+               for e in std_envs + std_custom_envs]))
+    # ... and where a ticked job does not qualify (the sampled deposit, velocities that are not volume weighted, the
+    # halo release), one note before the run says that it keeps the stream average, as the binary does (it goes on and
+    # says why); no error. Only the face-gradient messages: the fake snapshot has other problems of its own
     fg_said = lambda spec, lv: [m for lvl, m in spec.problems() if lvl == lv and "face gradient" in m]   # noqa: E731
+    grad_fields = ["density_a", "velocity_a", "divergence_a"]
     fg_runs = [rs.RunSpec(face_gradient=True, deposit="sampled", **base),
                rs.RunSpec(face_gradient=True, volume_weighted=False, **base),
-               rs.CustomSpec(input_file=str(snap), face_gradient=True, halo_release=2.0),
+               rs.CustomSpec(input_file=str(snap), face_gradient=True, halo_release=2.0, fields=grad_fields),
                rs.PipelineSpec(face_gradient=True, deposit="sampled", **pbase),
                rs.PipelineSpec(face_gradient=True, volume_weighted=False, **pbase)]
-    refused = [fg_said(spec, "error") for spec in fg_runs]
-    check("... refused where the binary or the driver refuses it: the sampled deposit, no volume weighting, the halo "
-          "release (Grids, Custom and Pipeline jobs)",
-          all(refused) and "exact" in refused[0][0] and "volume-weighted" in refused[1][0]
-          and "halo release" in refused[2][0] and "exact" in refused[3][0] and "volume-weighted" in refused[4][0],
-          str(refused))
-    no_grad = rs.RunSpec(face_gradient=True, fields=["density_a"], **base)
-    prod = [rs.RunSpec(face_gradient=True, **base), fg_pipe]
-    flat = rs.CustomSpec(input_file=str(snap), dim=2, face_gradient=True)
-    check("... a note (no error) when no field built on the velocity gradient is ticked (the flag then does nothing); "
-          "nothing said with the production settings; a 2D Custom run notes that it leaves the flag out",
-          fg_said(no_grad, "info") and not fg_said(no_grad, "error")
-          and not any(fg_said(spec, lv) for spec in prod for lv in ("error", "warning", "info"))
-          and any("3D only" in m for m in fg_said(flat, "info")) and not fg_said(flat, "error"),
-          f"{no_grad.problems()} {[spec.problems() for spec in prod]} {flat.problems()}")
-    check("... the memory check is kept per face-gradient tick (the binary's tuner books the face sums)",
+    noted = [fg_said(spec, "info") for spec in fg_runs]
+    check("... a ticked job that does not qualify: one note, no error or warning, that it keeps the stream average, "
+          "naming the cause (the sampled deposit, no volume weighting, the halo release; Grids, Custom and Pipeline "
+          "jobs)",
+          all(len(n) == 1 and "keeps the stream average" in n[0] for n in noted)
+          and not any(fg_said(spec, lv) for spec in fg_runs for lv in ("error", "warning"))
+          and "with the sampled deposit" in noted[0][0] and "not volume weighted" in noted[1][0]
+          and "with the halo release" in noted[2][0] and "with the sampled deposit" in noted[3][0]
+          and "not volume weighted" in noted[4][0], str(noted))
+    no_grad = rs.RunSpec(face_gradient=True, deposit="sampled", fields=["density_a"], **base)
+    prod = [rs.RunSpec(face_gradient=True, **base), fg_pipe, rs.RunSpec(face_gradient=False, deposit="sampled", **base),
+            rs.CustomSpec(input_file=str(snap), face_gradient=True, fields=grad_fields)]
+    flat = rs.CustomSpec(input_file=str(snap), dim=2, face_gradient=True, deposit="sampled", fields=grad_fields)
+    named = rs.CustomSpec(input_file=str(snap), face_gradient=True, deposit="sampled", fields=grad_fields,
+                          extra_args="--face-gradient")     # the extra options name the route: the binary decides
+    check("... nothing said where no field built on the velocity gradient is ticked (the route changes nothing), with "
+          "the production settings, with the tick off, on a 2D Custom run (its tick greyed: no face gradient in 2D), "
+          "or on a Custom run whose extra options name the route",
+          not any(fg_said(spec, lv) for spec in [no_grad, flat, named] + prod for lv in ("error", "warning", "info")),
+          f"{no_grad.problems()} {[spec.problems() for spec in prod]} {flat.problems()} {named.problems()}")
+    check("... the memory check is kept per face-gradient tick (the binary's tuner books the face sums), from a new "
+          "job's tick too",
           rs.RunSpec(face_gradient=True).memory_key() != rs.RunSpec(face_gradient=False).memory_key()
           and fg_pipe.memory_key() != rs.PipelineSpec(face_gradient=False, **pbase).memory_key()
-          and rs.CustomSpec(face_gradient=True).memory_key() != rs.CustomSpec(face_gradient=False).memory_key())
-    # the tick's default is one constant for the three jobs (runspec.FACE_GRADIENT_DEFAULT, off: run_ps_dtfe.sh's and
-    # the binary's default): a new job starts there, and a saved one without the key (older than the tick) takes it;
-    # a saved one keeps its own. The checks above name the tick's state, so they hold whichever way the default goes
+          and rs.CustomSpec(face_gradient=True).memory_key() != rs.CustomSpec(face_gradient=False).memory_key()
+          and rs.RunSpec(face_gradient=not rs.FACE_GRADIENT_DEFAULT).memory_key() != rs.RunSpec().memory_key()
+          and rs.PipelineSpec(face_gradient=not rs.FACE_GRADIENT_DEFAULT).memory_key() != rs.PipelineSpec().memory_key()
+          and rs.CustomSpec(face_gradient=not rs.FACE_GRADIENT_DEFAULT).memory_key() != rs.CustomSpec().memory_key())
+    # the tick's default is one constant for the three jobs (runspec.FACE_GRADIENT_DEFAULT, on: the binary's own route
+    # wherever a run qualifies, src/user_options.cc kPsFaceGradientDefault): a new job starts there, and a saved one
+    # without the key (older than the tick) takes it; a saved one keeps its own. The checks above name the tick's
+    # state, so they hold whichever way the default goes; the two defaults move together (the way back, D13)
     saved = {"Grids": (rs.RunSpec, rs.RunSpec(**base).to_dict()),
              "Pipeline": (rs.PipelineSpec, rs.PipelineSpec(**pbase).to_dict()),
              "Custom": (rs.CustomSpec, rs.CustomSpec(input_file=str(snap)).to_dict())}
     loaded = {k: (cls.from_dict({n: v for n, v in d.items() if n != "face_gradient"}).face_gradient,
                   cls.from_dict(dict(d, face_gradient=not rs.FACE_GRADIENT_DEFAULT)).face_gradient)
               for k, (cls, d) in saved.items()}
-    check("... a new job's tick is runspec.FACE_GRADIENT_DEFAULT (off) on the Grids, Pipeline and Custom jobs; a saved "
-          "job without the key loads the default, one with it keeps its own",
-          rs.FACE_GRADIENT_DEFAULT is False
+    import re
+    kdef = re.search(r"^static constexpr bool kPsFaceGradientDefault\s*=\s*(true|false)\s*;",
+                     (ROOT / "src" / "user_options.cc").read_text(), re.M)
+    check("... a new job's tick is runspec.FACE_GRADIENT_DEFAULT on the Grids, Pipeline and Custom jobs, the binary's "
+          "PS-DTFE default (src/user_options.cc kPsFaceGradientDefault); a saved job without the key loads the "
+          "default, one with it keeps its own",
+          isinstance(rs.FACE_GRADIENT_DEFAULT, bool) and kdef is not None
+          and rs.FACE_GRADIENT_DEFAULT == (kdef.group(1) == "true")
           and all(cls().face_gradient is rs.FACE_GRADIENT_DEFAULT for cls in (rs.RunSpec, rs.PipelineSpec, rs.CustomSpec))
           and all(v == (rs.FACE_GRADIENT_DEFAULT, not rs.FACE_GRADIENT_DEFAULT) for v in loaded.values()),
           str(loaded))
@@ -3329,14 +3372,35 @@ def run_log_contract():
               lin.settings().get("linear_deposit") is True and std.settings().get("linear_deposit") is False
               and "linear deposit" in lin.options_text() and "linear deposit" not in std.options_text(),
               f"{lin.settings()} {std.settings()} {lin.options_text()!r}")
-        # the face gradient the same way (a RunSpec field, so 'Load settings' sets it)
+        # the face gradient the same way (a RunSpec field, so 'Load settings' sets it): the box is off only for a run
+        # that named the stream average; the Options column reads the route from the header's 'velocity gradient' line
+        # (the binary resolves a command without a route flag to its default, D13), else from the command (an older
+        # binary's run without '--face-gradient' holds the stream average)
         _write_log(d / "fg.runlog", "RUNNING: /x/PS-DTFE in.hdf5 fg --grid 64 --face-gradient\n")
-        fg = R.parse_runlog(d / "fg.runlog")
-        check("settings(): a --face-gradient run turns the face-gradient box on, a run without it OFF (the key is "
-              "there); the Options column says 'face gradient'",
-              fg.settings().get("face_gradient") is True and std.settings().get("face_gradient") is False
-              and "face gradient" in fg.options_text() and "face gradient" not in std.options_text()
-              and all(hasattr(rs.RunSpec(), k) for k in fg.settings()), f"{fg.settings()} {fg.options_text()!r}")
+        _write_log(d / "pt.runlog", "RUNNING: /x/PS-DTFE in.hdf5 pt --grid 64 --per-tet-gradient\n")
+        _write_log(d / "fh.runlog", "RUNNING: /x/PS-DTFE in.hdf5 fh --grid 64 --exact --ps-volume-weighted\n"
+                   "\t velocity gradient      : from EXACT FACE sums, the gradient of the volume-weighted MEAN "
+                   "velocity (the default where it applies; '.a_velDivStreams' holds the stream average's "
+                   "divergence)\n")
+        _write_log(d / "sh.runlog", "RUNNING: /x/PS-DTFE in.hdf5 sh --grid 64 --sampled --ps-volume-weighted\n"
+                   "\t velocity gradient      : the stream average of each stream's own gradient (the face gradient "
+                   "needs the exact deposit; this run deposits sampled (--sampled))\n")
+        fg, pt, fh, sh = (R.parse_runlog(d / f"{n}.runlog") for n in ("fg", "pt", "fh", "sh"))
+        again = R.parse_runlog(d / "fh.runlog")             # the same log again: from the cache of read logs
+        check("settings(): a --face-gradient run turns the face-gradient box on, a --per-tet-gradient run OFF, a run "
+              "that named no route on (the binary's default; the key is there); the Options column says 'face "
+              "gradient' for a --face-gradient run and for one whose header's line names the face sums (also from the "
+              "cache of read logs), not for a --per-tet-gradient run, a header naming the stream average or an older "
+              "log with neither",
+              fg.settings().get("face_gradient") is True and pt.settings().get("face_gradient") is False
+              and std.settings().get("face_gradient") is True and fh.settings().get("face_gradient") is True
+              and "face gradient" in fg.options_text() and "face gradient" in fh.options_text()
+              and "face gradient" not in pt.options_text() and "face gradient" not in sh.options_text()
+              and "face gradient" not in std.options_text()
+              and (fh.header_gradient, sh.header_gradient, std.header_gradient) == ("face", "per-tet", "")
+              and again.header_gradient == "face" and again.face_gradient and not sh.face_gradient
+              and all(hasattr(rs.RunSpec(), k) for k in fg.settings()),
+              f"{fg.settings()} {fg.options_text()!r} {fh.header_gradient!r} {again.header_gradient!r}")
         # a standard-DTFE run's cell average reaches 'Load settings' both ways
         _write_log(d / "dx.runlog", "RUNNING: /x/DTFE in.hdf5 dx --grid 64 --periodic --exact-average --padding 15\n")
         _write_log(d / "dm.runlog", "RUNNING: /x/DTFE in.hdf5 dm --grid 64 --periodic --padding 15\n")

@@ -29,9 +29,11 @@
     --max-concurrent, --run-mode, --scratch-dir, --tessellation-cache) and '--gpu-share' (as typed, 'auto' and the
     number it resolves to would differ), the input files' size+mtime, the resolved
     '_a' average (exact or sampled) and gradient route (face or per-tet), which an environment pin can change
-    without the command line, the resolved GPU share of a mixed '--gpu' run (a 'gpu-share=' line below 1000; an
-    all-GPU run has none), the resolved partition split and the grid. '--resume' refuses, naming the lines
-    that differ, when the key differs.
+    without the command line, the run-wide fixed-point units' rule and test shift (a 'units=' line,
+    fixed_units.h runUnitsKeyLine: DTFE_RUN_UNITS_LEGACY, DTFE_TEST_RUN_UNIT_SHIFT), the resolved GPU share of a
+    mixed '--gpu' run (a 'gpu-share=' line below 1000; an all-GPU run has none), PS-DTFE's 'vertex-order=legacy'
+    under DTFE_PS_VERTEX_ORDER_LEGACY=1 (CGAL's vertex numbering; a default run has no such line), the resolved
+    partition split and the grid. '--resume' refuses, naming the lines that differ, when the key differs.
     It over-refuses rather than under-refuses (a reordered command line is a different key).
 
     MERGE ORDER: the manifest lists the merged partitions as a SET, so a run merging in completion order
@@ -118,6 +120,7 @@
 #include "quantities.h"
 #include "message.h"
 #include "env_knobs.h"
+#include "fixed_units.h"   // runUnitsKeyLine: the run-wide units' line of the key
 #include "cache_key_lines.h"
 #include "output_staging.h"
 #include "ps_point_eval.h"   // the '--sample-points' records of the merged partitions
@@ -261,6 +264,9 @@ inline std::string settingsKey(User_options const &u)
     if ( u.psFixedPointMerge )
         k << "merge=fixed-point\n";
 #endif
+    // the run-wide fixed-point units' rule (fixed_units.h runUnitsKeyLine): DTFE_RUN_UNITS_LEGACY and
+    // DTFE_TEST_RUN_UNIT_SHIFT change the units without changing the command line. Both binaries.
+    k << runUnitsKeyLine() << '\n';
     // the resolved '_a' average and gradient route: an environment pin (DTFE_EXACT_AVERAGE, DTFE_FACE_GRADIENT) or
     // a default changes them without changing the command line. Always written, so a checkpoint from before these
     // lines never matches.
@@ -274,6 +280,10 @@ inline std::string settingsKey(User_options const &u)
     // the resolved share of a mixed '--gpu' run (DTFE.cpp psResolveGpuShare): which partitions deposit on the GPU, a
     // rule of their index; an all-GPU run writes no line
     if ( u.psGpuShareMille < 1000 ) k << "gpu-share=" << u.psGpuShareMille << '\n';
+    // CGAL's vertex numbering (DTFE_PS_VERTEX_ORDER_LEGACY=1, ps_vertex_order.h): an environment pin that moves the
+    // grids' last bits without changing the command line, so neither numbering resumes the other's partitions;
+    // written only when set, so a default key has no such line
+    if ( Env::flag( "DTFE_PS_VERTEX_ORDER_LEGACY" ) ) k << "vertex-order=legacy\n";
 #endif
     k << "partition=";
     for ( size_t p : u.partition ) k << p << ',';

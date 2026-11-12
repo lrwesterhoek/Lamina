@@ -36,6 +36,9 @@
 #  L) Two runs writing one cache folder at the same moment both succeed and leave a whole cache and no temp
 #     file: each writer has its own '<file>.part.<pid>' / '<map>.occ.tmp.<pid>'.
 #  M) A save removes the temp files of DEAD writers of that file and keeps a live writer's.
+#  N) A file in CGAL's vertex numbering (written under DTFE_PS_VERTEX_ORDER_LEGACY=1, as by every binary without the
+#     canonical order of src/CGAL_triangulation/ps_vertex_order.h) is renumbered on load: the hit's grids equal the
+#     uncached run's byte for byte and its log names the cells renumbered; a canonical file's load renumbers none.
 #  A2) The body is DEFLATED while magic/version/descriptor stay plaintext, so a staleness check
 #     needs no inflation. Compression takes 735 MB down to 225 MB per 1.5e6 vertices at zlib
 #     level 1 -- level 6 saves a further 5% but costs 24 s more on every write.
@@ -487,6 +490,56 @@ else
     check 0 "the concurrent runs left two cache files to plant temp files beside"
 fi
 rm -rf "${CC}"
+
+echo ""
+echo "(N) a file in CGAL's vertex numbering is renumbered on load (the canonical vertex order, D19)"
+# PS-DTFE renumbers every cell in a canonical vertex order after the insert and after a cache load. A file written
+# under DTFE_PS_VERTEX_ORDER_LEGACY=1 holds CGAL's numbering, as every file of a binary without the order does: a
+# run without the switch that loads it renumbers its cells and writes the uncached run's grids byte for byte. No
+# '--sample-points' here: its 'linear' density reads the cached vertex densities, which such a writer forms in CGAL's
+# frames (they may differ in the last bit).
+OCACHE="${CACHE}-order"; rm -rf "${OCACHE}" "${OCACHE}2"; mkdir -p "${OCACHE}" "${OCACHE}2"
+ORD=(--grid "${GRID}" --periodic --partition 1 --max-concurrent 1 --mpc-unit 1 --verbose 3
+     --field density velocity density_a velocity_a)
+run_ord() {   # run_ord <outroot> [VAR=value ...] -- <extra args...>; the log beside the outputs
+    local out="$1"; shift
+    local envs=()
+    while [ $# -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
+    [ $# -gt 0 ] && shift
+    rm -f "${out}".*
+    env ${envs[@]+"${envs[@]}"} "${BIN}" "${SNAP}" "${out}" "${ORD[@]}" "$@" > "${out}.log" 2>&1 || true
+}
+# the count of '(the canonical vertex order renumbered N cells)' in a log (--verbose 3), empty when there is none
+renumbered() {
+    { sed -n 's/.*(the canonical vertex order renumbered \([0-9][0-9]*\) cells).*/\1/p' "$1" | head -1; } || true
+}
+grids_same() {   # every output of run a (not its log) byte-identical in run b, and at least one
+    local n=0 f
+    for f in "$1".*; do
+        case "$f" in *.log|*.runlog*|*.part.*) continue ;; esac
+        cmp -s "$f" "$2${f#"$1"}" || { note "differs: ${f#"$1"}"; return 1; }
+        n=$((n+1))
+    done
+    [ "${n}" -gt 0 ]
+}
+run_ord "${TMP}/ptc_ord_ref" --
+run_ord "${TMP}/ptc_ord_w" DTFE_PS_VERTEX_ORDER_LEGACY=1 -- --tessellation-cache "${OCACHE}"
+run_ord "${TMP}/ptc_ord_hit" -- --tessellation-cache "${OCACHE}"
+nl=$(grep -c "Reused the cached" "${TMP}/ptc_ord_hit.log" || true)
+rw="$(renumbered "${TMP}/ptc_ord_w.log")"; rh="$(renumbered "${TMP}/ptc_ord_hit.log")"
+check "$(grep -qF "DTFE_PS_VERTEX_ORDER_LEGACY=1" "${TMP}/ptc_ord_w.log" && [ -z "${rw}" ] && echo 1 || echo 0)" \
+      "the writer under DTFE_PS_VERTEX_ORDER_LEGACY=1 says so and renumbers nothing"
+check "$([ "${nl}" -ge 1 ] && [ -n "${rh}" ] && [ "${rh}" -gt 0 ] && echo 1 || echo 0)" \
+      "a run without the switch loads that file (${nl} hit) and renumbers ${rh:-no} cells"
+check "$(grids_same "${TMP}/ptc_ord_ref" "${TMP}/ptc_ord_hit" && echo 1 || echo 0)" \
+      "... and writes the uncached run's grids byte for byte"
+run_ord "${TMP}/ptc_ord_w2" -- --tessellation-cache "${OCACHE}2"
+run_ord "${TMP}/ptc_ord_hit2" -- --tessellation-cache "${OCACHE}2"
+nl=$(grep -c "Reused the cached" "${TMP}/ptc_ord_hit2.log" || true)
+rh="$(renumbered "${TMP}/ptc_ord_hit2.log")"
+ok=0; [ "${nl}" -ge 1 ] && [ "${rh}" = 0 ] && grids_same "${TMP}/ptc_ord_ref" "${TMP}/ptc_ord_hit2" && ok=1
+check "${ok}" "a canonical file loads (${nl} hit) with ${rh:-no} cells renumbered, the grids byte for byte"
+rm -rf "${OCACHE}" "${OCACHE}2"
 
 echo ""
 echo "------------------------------------------------------------"

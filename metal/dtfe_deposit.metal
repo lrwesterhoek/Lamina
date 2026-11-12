@@ -30,7 +30,7 @@
 //  Remaining CPU/GPU differences are float rounding (double vertex differences on the
 //  CPU) and, with DTFE_GPU_FLOAT_GRIDS=1 only, atomic summation order.
 //
-//  Exact sums. The grids are 64-bit FIXED-POINT sums by default (DepositParams.fixedSum,
+//  Exact sums. The grids are FIXED-POINT sums by default (DepositParams.fixedSum; a sampled batch's in 64-bit words,
 //  the phase-space mass grid's scheme, metal/ps_deposit.metal depositMass): every share becomes the
 //  integer rint(share * scale) and is added in two 32-bit words with the carry done by hand, so a cell's
 //  total does not depend on the order the atomics land in, and two runs write byte-identical grids.
@@ -43,8 +43,14 @@
 //  leaves a thread or a SIMD group (the leader's sums, an eviction, a per-sample or per-piece deposit),
 //  and the threadgroup table holds integers too. The scale per grid is 2^k from a bound of the batch's
 //  sum of |share| that the host computes before the upload, so no cell can overflow
-//  (src/CGAL_triangulation/dtfe_gpu_fixed.h batchFixedScales). DTFE_GPU_FLOAT_GRIDS=1
-//  (DTFE_GPU_FLOAT_GRIDS=1) keeps the float atomics for A/B, as does the opt-in shared full grid
+//  (src/CGAL_triangulation/dtfe_gpu_fixed.h batchFixedScales).
+//  The EXACT batches (the exact-average kernel, P.fixedSum = 2) sum in 128-bit words instead, four 32-bit limbs per
+//  component (fixed_words.metal.inc), in units 2^-K fixed for the whole run from global quantities
+//  (src/fixed_units.h RunUnits): a batch's unit then no longer depends on which tetrahedra the split put in it, so
+//  every split rounds every share alike, and a cap on each share's integer (P.fxCapBits) keeps every cell sum below
+//  2^126 in any order, where no bound per batch exists. They have no float pre-sum (one integer per piece), so the
+//  chunk alignment does not concern them. DTFE_RUN_UNITS_LEGACY=1 keeps them on the 64-bit words of the batch's own
+//  units. DTFE_GPU_FLOAT_GRIDS=1 keeps the float atomics for A/B, as does the opt-in shared full grid
 //  (DTFE_GPU_SHARED=1). Measured cost (0.26M particles at 256^3 on a GPU shared with another
 //  run, so indicative): the exact-average kernel none; the item kernel 1.6-1.9x for density + velocity
 //  (the integer table holds half the entries and every value takes two atomics), 10-15% with the velocity
@@ -78,13 +84,14 @@ constant bool FC_FIXED [[function_constant(5)]];
 
 // The parameter block (buffer 10), one batch = one sub-domain's tetrahedra: DTFEDepositParams in
 // src/CGAL_triangulation/dtfe_deposit_params.h, the hosts' own struct, which the Makefile prepends to this source after
-// exact_clip.metal.inc -- one definition, so the kernels and the hosts cannot drift apart. Its fields are documented
-// there.
+// exact_clip.metal.inc and fixed_words.metal.inc -- one definition, so the kernels and the hosts cannot drift apart.
+// Its fields are documented there.
 typedef DTFEDepositParams DepositParams;
 
 // The accumulated grids of one dispatch, float and fixed-point views of the same buffers (one of the two
 // is used, by P.fixedSum). Component c of flat cell f is at [f*comps + c]; a fixed-point component holds
-// two uint words, [2*(f*comps + c)] low and [+1] high.
+// two uint words, [2*(f*comps + c)] low and [+1] high (P.fixedSum 1), or four limbs, [4*(f*comps + c)] lowest to
+// [+3] highest (P.fixedSum 2, fixed_words.metal.inc).
 struct DGrids {
     device atomic_float* den;  device atomic_float* vel;  device atomic_float* grad;
     device atomic_float* scal; device atomic_float* sg;
@@ -157,6 +164,19 @@ static inline void addSG(thread const DGrids& G, constant DepositParams& P, bool
     else atomic_fetch_add_explicit(&G.sg[at], v, memory_order_relaxed);
 }
 
+// One share of grid slot g into the run-wide 128-bit words (P.fixedSum == 2, the exact batches): the same float
+// share as above, its integer in the run's unit 1/P.fxScale[g] as four limbs (fixed_words.metal.inc shareLimbs),
+// added limb by limb at component 'at' (addLimbs). A share without an integer below the grid's cap -- a NaN, an
+// infinity, a product at or above 2^capLog2 units (P.fxCapBits[g]) -- adds nothing and is counted in the grid's word
+// of 'bad', as fxq's are: below the cap, no interleaving of a batch's adds can wrap a cell (src/fixed_units.h).
+static inline void addRun(device atomic_uint* x, device atomic_uint* bad, constant DepositParams& P, uint g,
+                          ulong at, float v) {
+    uint a[4];
+    bool neg = false;
+    if (shareLimbs(v, P.fxScale[g], P.fxCapBits[g], a, neg)) addLimbs(x, at, a, neg);
+    else atomic_fetch_add_explicit(&bad[g], 1u, memory_order_relaxed);
+}
+
 // full-grid flat index of a sub-grid cell (the host guarantees fullGrid cells < 2^32)
 static inline uint fullFlat(constant DepositParams& P, thread const int pos[3]) {
     return (uint(pos[0] + P.subOff[0]) * uint(P.fullGrid[1]) + uint(pos[1] + P.subOff[1])) * uint(P.fullGrid[2])
@@ -195,7 +215,8 @@ static inline void inverse3zero(thread const float A[3][3], thread float inv[3][
 
 // One deposit of (den, vel, gradFlat) * w into grid cell 'flat'. Offsets are 64-bit BECAUSE
 // flat*9 WOULD overflow a 32-bit uint above ~782^3 (as in the PS deposit). The 2^32-cell cap
-// on 'flat' is guarded in averaged_interpolation_1.cc.
+// on 'flat' is guarded in averaged_interpolation_1.cc. P.fixedSum == 2 (uniform per dispatch: the exact batches)
+// takes the run-wide 128-bit words, else the 64-bit words (1) or the float atomics (0).
 static inline void depositCell(thread const DGrids& G,
                                constant DepositParams& P,
                                ulong flat, float den,
@@ -203,6 +224,22 @@ static inline void depositCell(thread const DGrids& G,
                                thread const float gradFlat[9],
                                float sc, thread const float sG[3], float w)
 {
+    if (P.fixedSum == 2u) {
+        if (P.fDen)
+            addRun(G.denX, G.bad, P, 0u, flat, den*w);
+        if (P.fVel)
+            for (int j=0;j<3;++j)
+                addRun(G.velX, G.bad, P, 1u, flat*3ul+ulong(j), vel[j]*w);
+        if (P.fGrad)
+            for (int q=0;q<9;++q)
+                addRun(G.gradX, G.bad, P, 2u, flat*9ul+ulong(q), gradFlat[q]*w);
+        if (P.fScal)
+            addRun(G.scalX, G.bad, P, 3u, flat, sc*w);
+        if (P.fSGrad)
+            for (int i=0;i<3;++i)
+                addRun(G.sgX, G.bad, P, 4u, flat*3ul+ulong(i), sG[i]*w);
+        return;
+    }
     if (P.fDen)
         addDen(G, P, P.fixedSum != 0u, flat, den*w);
     if (P.fVel)

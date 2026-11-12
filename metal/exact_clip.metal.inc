@@ -92,8 +92,10 @@ static inline bool box_outside_tet(thread const TetPlanes& F, float3 c, float3 h
 // order-2 one and skips the rest, so the exact deposit's pass 0 (weights) and pass 1 (deposit)
 // see identical volumes. Only the volumes: compiled as two pipelines, Metal's fast math may contract
 // the first moments differently (measured: ~17% of pairs off, by at most 3.7e-8 of the cell),
-// which reaches a deposit only through
-// --ps-linear-deposit's weight (about 1e-8 of a tet's mass).
+// which would reach a deposit only through --ps-linear-deposit's weight (about 1e-8 of a tet's
+// mass): that deposit runs both passes at order 2 in one pipeline (ps_deposit.metal,
+// depositExactItems' kItemsPhase 2), so both passes form the same weights and its total carries
+// only the rounding of each item's float sum, as the uniform deposit's does.
 //
 // The frame. The exact deposits clip in a frame whose origin is the centre of the OVERLAP of the
 // tet's bounding box with the cell, so the clipped piece -- which lies in that overlap -- has

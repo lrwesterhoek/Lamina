@@ -155,8 +155,11 @@ PS_VOLUME_WEIGHTED=0    # [--ps-volume-weighted] DEFAULT 1: Eulerian-volume-weig
                         #                        (the dispersion stays mass-weighted)
 DTFE_EXACT_AVERAGE=0    # [--sampled]            the nSub^3 sampled deposit (a SUBSAMPLES count selects it too);
                         #                        DEFAULT the exact deposit [--exact] (-e; r3d on the CPU, a z-sweep with -m)
-FACE_GRADIENT=1         # [--face-gradient]      with the exact deposit: the MEAN flow's divergence/shear from exact face sums
-                        #                        (as standard DTFE stores them) + .a_velDivStreams, .a_massFluxDiv
+FACE_GRADIENT=0         # [--per-tet-gradient]   the stream average of each stream's own gradient; DEFAULT (empty) the
+                        #                        binary's: with the exact deposit and the volume weighting the MEAN flow's
+                        #                        divergence/shear from exact face sums (as standard DTFE stores them)
+                        #                        + .a_velDivStreams (+ .a_velShearStreams ...: the streams' own),
+                        #                        .a_massFluxDiv (1 = --face-gradient, asked for)
 PS_LINEAR_DEPOSIT=1     # [--ps-linear-deposit]  linear-profile, mass-conserving sampled deposit
                         #                        (the moments then mass-weighted: PS_VOLUME_WEIGHTED=0)
 DTFE_GPU=0              # [--gpu]                default auto: the GPU deposit on a GPU build (1 = -m); 0 = the CPU

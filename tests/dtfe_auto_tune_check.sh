@@ -2,7 +2,8 @@
 # The STANDARD-DTFE auto-tuner (src/auto_tune.h): the report, the counted split and the thread plan of PS-DTFE's
 # tuner, and the memory model of the production '--exact' runs.
 #
-# The exact average allocates nothing extra; what drives the peak is the padded vertex count. The load-balanced split
+# The exact average allocates little extra (on the CPU its run-wide words: 8 B per deposited component of each
+# sub-domain cell); what drives the peak is the padded vertex count. The load-balanced split
 # gives a dense partition a small volume and a fixed-length padding shell, so a box-average particle count per thread
 # sub-box under-counts it (TNG50-3-Dark z=0: 35.4M padded particles in one partition's 4 threads, 7.8M at the box
 # average; the exact run, whose threads all wait on the GPU with their triangulations alive, peaks at 44.5 GB). The
@@ -23,16 +24,19 @@
 #     partitions: up to ~30% above the plan on sub-GB runs, while at TNG scale the prediction is 19-90% HIGH, see
 #     auto_tune.h): CPU sampled average ('--sampled': the 1.35x was set on its measured peak; the exact average is
 #     the default since 2026-11-09), and the GPU exact average when the build has a GPU.
-#     The other runs name no mode: the standard tuner has no term for the averaging (auto_tune.cc), and what A-D and
-#     F-I check -- the plan, the threads' particle counts, a byte identity -- is the same under either average.
+#     The other runs name no mode: the standard tuner's terms for the exact average (auto_tune.cc: its CPU words and
+#     its GPU words) are a few bytes per grid cell, and what A-D and F-I check -- the plan, the threads' particle
+#     counts, a byte identity -- holds under either average.
 #  F) the tuner only chooses: an auto-tuned run is byte-identical to the same split given by hand.
 #  G) on a simulated small machine the tuner picks a split its counted model says fits (over_budget=0) and names the
 #     busiest partition's vertex count in its AUTO-TUNE line.
 #  H) the 2D build (DTFE-2d, when built): a valid report from the counted model, counts within 15% of the run's.
 #  I) the plan's further terms, each a field of the report line: I1 a '--sample-points' plane's records
 #     (pts_gb: 326 B per point with --pts-vel-grad, one record per point, in fixed_gb too; DTFE_AUTO_PTS_N sizes a plane
-#     that is not on disk); on GPU builds I2 the GPU deposit's host snapshot of its grids (snapshot_gb: 8-B words, half
-#     under DTFE_GPU_FLOAT_GRIDS=1, none on the CPU), I3 the partition loop's look-ahead (lookahead_gb, in
+#     that is not on disk); on GPU builds I2 the GPU deposit's host snapshot of its grids and the growth of its device
+#     words (snapshot_gb: the exact average's run-wide 128-bit words, 16 B per 4-B component, plus 8 B more per
+#     component for each of two batches' device words = 8x the float grids' under DTFE_GPU_FLOAT_GRIDS=1; the 64-bit
+#     words of DTFE_RUN_UNITS_LEGACY=1 2x; none on the CPU), I3 the partition loop's look-ahead (lookahead_gb, in
 #     predicted_gb; none with --no-overlap or on one domain) and I4 a budget that holds the plan but not its
 #     look-ahead: the look-ahead is switched off for the run (said, lookahead_gb=0, over_budget=0).
 #  J) a team whose sub-domains each insert in parallel (TBB builds, 4 threads or more) books the insert's copies:
@@ -264,9 +268,15 @@ if [ "${GPU}" = 1 ]; then
     env DTFE_RAM_GB=64 DTFE_GPU_FLOAT_GRIDS=1 "${BIN}" "${IR[@]}" --max-concurrent 2 --gpu \
         > "${TMP}/da_i3.txt" 2>&1 || true
     env DTFE_RAM_GB=64 "${BIN}" "${IR[@]}" --max-concurrent 2 --gpu --no-overlap > "${TMP}/da_i4.txt" 2>&1 || true
+    env DTFE_RAM_GB=64 DTFE_RUN_UNITS_LEGACY=1 "${BIN}" "${IR[@]}" --max-concurrent 2 --gpu \
+        > "${TMP}/da_i6.txt" 2>&1 || true
     s2="$(field snapshot_gb "${TMP}/da_i2.txt")"; s3="$(field snapshot_gb "${TMP}/da_i3.txt")"
-    check "I2 --gpu: the snapshot of the largest thread sub-grid (${s2:-?} GB), half under the float grids (${s3:-?} GB)" \
-          "$(awk -v a="${s2:-0}" -v b="${s3:-0}" 'BEGIN{print (a > 0.02 && b > 0. && a / b > 1.95 && a / b < 2.05) ? 1 : 0}')"
+    s6="$(field snapshot_gb "${TMP}/da_i6.txt")"
+    # (the GB carry three decimals: the float grids' ~0.02 GB leaves the ratios a few per cent of play)
+    check "I2 --gpu: snapshot + device words of the largest sub-grid ${s2:-?} GB = 8x the float grids (${s3:-?} GB), \
+2x under DTFE_RUN_UNITS_LEGACY=1 (${s6:-?} GB)" \
+          "$(awk -v a="${s2:-0}" -v b="${s3:-0}" -v c="${s6:-0}" \
+             'BEGIN{print (a > 0.02 && b > 0. && a / b > 7.7 && a / b < 8.3 && c / b > 1.95 && c / b < 2.05) ? 1 : 0}')"
     l2="$(field lookahead_gb "${TMP}/da_i2.txt")"; l4="$(field lookahead_gb "${TMP}/da_i4.txt")"
     q2="$(field predicted_gb "${TMP}/da_i2.txt")"; q4="$(field predicted_gb "${TMP}/da_i4.txt")"
     check "I3 --gpu over 8 partitions: the look-ahead (${l2:-?} GB) is in predicted_gb (${q4:-?} -> ${q2:-?}); none with --no-overlap (${l4:-?})" \

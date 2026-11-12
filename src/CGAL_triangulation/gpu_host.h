@@ -149,6 +149,20 @@ struct DTFEGpuGrids
     std::vector<float> scalar_grad; // nCell*3  accumulated scalar gradient * volume [i*3 + d] (fSGrad)
 };
 
+// The run-wide fixed-point units of the five grids (fixed_units.h RunUnits, slots RU_DENSITY .. RU_SCALAR_GRADIENT,
+// which the caller copies in from its options): grid g = density, velocity, velocity gradient, scalar, its gradient,
+// the order of DTFEDepositParams.fxScale. One unit 2^-K[g] per grid for the whole run, so every split rounds every
+// share of an exact batch alike (dtfe_gpu_fixed.h dtfeBatchParams). on false: a run without them (the batches keep
+// their own units); has[g] false: that grid's K lies outside [-120, 120], or it is a scalar grid of
+// '--approx-phase-space-density' (DTFE.cpp runUnitsSetup), and it keeps its batch's unit.
+struct DTFEGpuRunUnits
+{
+    bool     on = false;
+    bool     has[5] = {};
+    int      K[5] = {};
+    uint32_t capBits[5] = {};   // the float bits of each grid's share cap (RunUnits::capBits; the kernels' compare)
+};
+
 // Runs the method-1 volume-averaged deposit on the default GPU device. Vertex positions
 // must be relative to the region's lower corner; vols/cnts/flats carry the CPU-computed
 // tetrahedron volume, sample count (0 = single-grid-cell fast path), and fast-path flat
@@ -166,12 +180,13 @@ struct DTFEGpuGrids
 // deposits the linear interpolant's integral over each piece; 'cnts' then only marks the
 // single-cell tetrahedra (0), which take the centroid fast path as on the CPU. Matches the CPU's
 // double-precision r3d to float rounding.
-// The device sums every grid as an exact 64-bit fixed-point integer per cell (dtfe_gpu_fixed.h
-// sets the units from a bound of the batch's shares; metal/dtfe_deposit.metal's header says how the kernels keep
-// the sum independent of the order their threads add in) and the host converts each cell to these floats once,
-// so two runs give byte-identical grids (DTFE_GPU_FLOAT_GRIDS=1 keeps the float atomics
-// for A/B). A failed command buffer resumes from the batch's last checkpoint, the PS deposit's policy
-// (gpu_metal_retry.h); a false return after the upload means that policy gave up.
+// The device sums every grid as an exact fixed-point integer per cell (metal/dtfe_deposit.metal's header says how
+// the kernels keep the sum independent of the order their threads add in) and the host converts each cell to these
+// floats once, so two runs give byte-identical grids (DTFE_GPU_FLOAT_GRIDS=1 keeps the float atomics for A/B). An
+// exact batch sums in 128-bit words in the run-wide units 'units' (the same in every split; DTFE_RUN_UNITS_LEGACY=1
+// or units.on false: as a sampled batch); a sampled batch in 64-bit words, its units set by dtfe_gpu_fixed.h from a
+// bound of the batch's shares. A failed command buffer resumes from the batch's last checkpoint, the PS deposit's
+// policy (gpu_metal_retry.h); a false return after the upload means that policy gave up.
 bool dtfeGpuDepositAveraged1(std::vector<float>& verts,      // nTet*12: 4 vertices, relative to the base cell's corner (cells) or the region's
                              std::vector<float>& dens,       // nTet*4:  vertex densities
                              std::vector<float>& vels,       // nTet*12: 4 vertex velocities (empty if unused)
@@ -183,6 +198,7 @@ bool dtfeGpuDepositAveraged1(std::vector<float>& verts,      // nTet*12: 4 verti
                              const std::vector<float>& sobol,// maxNN*3 barycentric table (not consumed)
                              const double dx[3], const size_t nGrid[3],
                              bool fDen, bool fVel, bool fGrad, bool fScal, bool fSGrad, bool exact,
+                             DTFEGpuRunUnits const& units,   // the run-wide units (exact batches)
                              DTFEGpuGrids& out, std::string& err);
 
 // ---- shared accumulator: the sub-domains of one DTFE_parallel call deposit into ONE full grid.

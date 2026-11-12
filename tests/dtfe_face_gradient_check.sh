@@ -14,14 +14,27 @@
 #       9.0e-6); a '--partition 2 2 2' split within 1e-4 of the single domain (measured 1.8e-6) with every
 #       sub-domain's FACE-CHECK passing; the periodic box mean of the divergence below 1e-6 of its rms (8e-10)
 #   G5  '--face-gradient' with '--cic' stops at option parsing with exit 1 and the error naming the DTFE method
-#   G6  (a GPU build) the GPU exact average on '--partition 3 3 3' against one domain: byte-identical density and
-#       divergence -- every tetrahedron's shares are formed in the grid frame (plan P10.8) and summed in fixed point,
-#       so the split cannot move them -- and the shear within 1e-9 of its rms (measured 7e-13: the demo's flow is
-#       v = 1000 x, so the off-diagonal gradient is a thousandth of the diagonal and sits at the last bits of the
-#       fixed-point unit, which is the batch's, and of the face sums' cancellation); and every sub-domain's
-#       FACE-CHECK against the GPU deposit within the full-size bound (rms_rel <= 3e-6 per record, above_1e-4
-#       <= 1e-5 of the cells pooled)
-# About 50 s on the Mac (9 runs of 2-7 s).
+#   G6  (a GPU build) the GPU exact average on '--partition 3 3 3' against one domain: every output byte-identical
+#       (cmp of every output file) -- every tetrahedron's shares are formed in the grid frame
+#       (plan P10.8), from vertex densities summed exactly over each vertex's star and from single-cell volumes in
+#       a vertex order of their own (canonicalTetVolume, not CGAL's labelling), and summed in the run's fixed-point
+#       unit (src/fixed_units.h RunUnits), and the face pass, whose
+#       sums replace the deposit's gradient (the 3^3 run g3 passes DTFE_FACE_CHECK=1, the one-domain g does not:
+#       S3 of tests/split_bytes_check.sh pins that the check moves no byte), sums each face piece's flux as an
+#       integer in its own run-wide unit, so the split moves no sum; the shear, the off-diagonal gradient of the
+#       demo's v = 1000 x flow, sits at the last bits of the face sums' cancellation, which identical integers repeat.
+#       The double build keeps its double face sums (walk order): there each grid is compared within 1e-7 of its rms.
+#       And every sub-domain's FACE-CHECK against the GPU deposit within the full-size bound (rms_rel <= 3e-6 per
+#       record, above_1e-4 <= 1e-5 of the cells pooled)
+#   G7  (the single build) the order of the work does not reach the grids: the CPU exact average in a team of 2
+#       sub-domains (OMP_NUM_THREADS=2) byte-identical to G2's one-domain run, and -- in a build with the parallel
+#       insert (TBB), on a machine of 4 threads or more -- with each sub-domain inserted on 2 TBB threads
+#       (DTFE_TRIANGULATION_THREADS=2: another cell order and labelling, from run to run) byte-identical to the
+#       sequential insert, on the CPU and (a GPU build) on the GPU against G3's one-domain run: the vertex densities
+#       are exact star sums and the single-cell volumes canonical (src/CGAL_triangulation/triangulation.cpp
+#       vertexDensityStarSums, triangulation_miscellaneous.h canonicalTetVolume). The double build keeps its double
+#       sums: SKIP there
+# About 65 s on the Mac (12 runs of 2-7 s).
 # Usage: tests/dtfe_face_gradient_check.sh [--no-build]   (--no-build is accepted and ignored: nothing is built)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,6 +65,26 @@ run() {
         || { echo "FAIL: run $name (see $TMP/$name.log)"; exit 1; }
 }
 same() { cmp -s "$TMP/$1.a_velDiv" "$TMP/$2.a_velDiv" && cmp -s "$TMP/$1.a_velShear" "$TMP/$2.a_velShear"; }
+# differing <run a> <run b>: the outputs of a that are not byte-identical to b's, and those only b wrote (empty: every
+# output identical); the logs and the run's bookkeeping are not outputs
+differing() {
+    local d="" n=0 f s
+    for f in "$TMP/$1".*; do
+        [ -e "$f" ] || continue
+        s="${f#"$TMP/$1"}"
+        case "$s" in .log|.runlog*|*.part.*) continue ;; esac
+        n=$((n+1))
+        cmp -s "$f" "$TMP/$2$s" || d="$d $s"
+    done
+    for f in "$TMP/$2".*; do
+        [ -e "$f" ] || continue
+        s="${f#"$TMP/$2"}"
+        case "$s" in .log|.runlog*|*.part.*) continue ;; esac
+        [ -e "$TMP/$1$s" ] || d="$d $s(only in $2)"
+    done
+    [ "$n" -gt 0 ] || d=" (run $1 wrote no output)"
+    echo "$d"
+}
 
 echo ">> demo/z0_64.gadget at 64^3: --exact with --per-tet-gradient and with --face-gradient (one domain, one thread)"
 run e  OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 -- --exact --per-tet-gradient   # the deposit's own gradient (the face route is the default since 2026-11-09)
@@ -113,20 +146,25 @@ echo ">> the GPU exact average on a 3^3 split against one domain (the deposit's 
 if [ "$GPU" = "1" ]; then
     run g3 DTFE_FACE_CHECK=1 -- --exact --face-gradient --gpu --partition 3 3 3 --max-concurrent 1
     if grep -q "using the CPU interpolation" "$TMP/g3.log"; then fail "G6 the --gpu 3^3 run fell back to the CPU (see $TMP/g3.log)"
-    # the double build keeps what float rounding hides: the GPU deposit is float32 (its grids are converted to float
-    # once), so its density can differ by a float ulp where the two splits' fixed-point units round apart, and the
-    # face sums' order shows in the divergence; there every grid is compared within 1e-7 of its rms instead
-    elif DBL=0 && { ! precision_double || DBL=1; } && { precision_double || { cmp -s "$TMP/g.a_den" "$TMP/g3.a_den" && cmp -s "$TMP/g.a_velDiv" "$TMP/g3.a_velDiv"; }; } \
-         && "$PY" -c "
+    elif ! precision_double; then
+        # every output: the deposit's shares in the run's fixed-point unit, the face fluxes in the face pass's words
+        differ="$(differing g g3)"
+        if [ -z "$differ" ]; then
+            pass "G6 GPU exact average, --partition 3 3 3 == one domain: every output byte-identical"
+        else fail "G6 the 3^3 split moves the GPU exact average:$differ differ from the one-domain run"; fi
+    # the double build keeps its double face sums (walk order: the run-wide words serve the single build), so their
+    # order shows in the divergence and the shear; there every grid is compared within 1e-7 of its rms instead
+    elif "$PY" -c "
 import sys, numpy as np
 ok = True
 for f in ('a_den', 'a_velDiv', 'a_velShear'):
-    a = np.fromfile('$TMP/g.' + f, dtype='${DTFE_TEST_REAL}').astype(np.float64); b = np.fromfile('$TMP/g3.' + f, dtype='${DTFE_TEST_REAL}').astype(np.float64)
-    r = np.abs(a - b).max() / np.sqrt((a**2).mean()); print('   (G6 %s: 3^3 split vs one domain %.2g of its rms)' % (f, r)); ok = ok and r <= ($DBL and 1e-7 or 1e-9)
+    a = np.fromfile('$TMP/g.' + f, dtype='${DTFE_TEST_REAL}').astype(np.float64)
+    b = np.fromfile('$TMP/g3.' + f, dtype='${DTFE_TEST_REAL}').astype(np.float64)
+    r = np.abs(a - b).max() / np.sqrt((a**2).mean())
+    print('   (G6 %s: 3^3 split vs one domain %.2g of its rms)' % (f, r)); ok = ok and r <= 1e-7
 sys.exit(0 if ok else 1)"; then
-        if precision_double; then pass "G6 GPU exact average, --partition 3 3 3 == one domain within 1e-7 of each grid's rms (double build: a float32 deposit)"
-        else pass "G6 GPU exact average, --partition 3 3 3 == one domain: byte-identical density and divergence, shear within 1e-9"; fi
-    else fail "G6 the 3^3 split moves the GPU exact average (the density, the divergence or the shear differ from the one-domain run)"; fi
+        pass "G6 GPU exact average, --partition 3 3 3 == one domain within 1e-7 of each grid's rms (double build)"
+    else fail "G6 the 3^3 split moves the GPU exact average (a grid differs by over 1e-7 of its rms)"; fi
     read -r nchk6 worst6 pooled6 <<< "$(grep -a 'FACE-CHECK' "$TMP/g3.log" | sed 's/.*FACE-CHECK/FACE-CHECK/' \
         | awk '{for (i=1;i<=NF;i++) { if ($i=="rms_rel" && $(i+1)+0 > w) w=$(i+1)+0; if ($i=="above_1e-4") a+=$(i+1); if ($i=="compared") c+=$(i+1) }; n++} END {printf "%d %.3g %.3g", n, w, (c>0 ? a/c : 1)}')"
     if [ "${nchk6:-0}" -ge 27 ] && "$PY" -c "import sys; sys.exit(0 if float('$worst6') <= 3e-6 and float('$pooled6') <= 1e-5 else 1)"; then
@@ -145,6 +183,39 @@ if [ "$rc" = "1" ] && grep -q "'--face-gradient' needs the DTFE interpolation me
     pass "G5 --face-gradient --cic stops at option parsing (exit 1, names the DTFE method)"
 else
     fail "G5 --face-gradient --cic: exit $rc (see $TMP/c.log)"
+fi
+
+echo ">> the parallel insert against the sequential one, a team of 2 sub-domains against one domain"
+# OMP_NUM_THREADS=2: DTFE_parallel's team of 2 sub-domains; DTFE_TRIANGULATION_THREADS=2 inserts each on 2 TBB
+# threads, =1 sequentially (src/CGAL_triangulation/triangulation.cpp delaunayTriangulation); differing: above
+T7=(--exact --face-gradient --run-mode performance)
+if precision_double; then
+    echo "   (G7: the double build keeps its double sums: SKIP)"
+else
+    run t1 OMP_NUM_THREADS=2 DTFE_TRIANGULATION_THREADS=1 -- "${T7[@]}"
+    run t2 OMP_NUM_THREADS=2 DTFE_TRIANGULATION_THREADS=2 -- "${T7[@]}"
+    d="$(differing f3 t1)"
+    if [ -z "$d" ]; then pass "G7 CPU exact average, a team of 2 sub-domains == one domain: every output byte-identical"
+    else fail "G7 the team of 2 sub-domains moves the CPU exact average:$d differ from the one-domain run"; fi
+    if ! grep -qF "(parallel, TBB, 2 threads)" "$TMP/t2.log"; then
+        echo "   (G7 parallel insert: no '(parallel, TBB, 2 threads)' line in $TMP/t2.log -- a build without the"
+        echo "    parallel insert, or fewer than 4 threads: SKIP)"
+    else
+        d="$(differing t1 t2)"
+        if [ -z "$d" ]; then pass "G7 CPU exact average, the parallel insert == the sequential one: outputs identical"
+        else fail "G7 the parallel insert moves the CPU exact average:$d differ from the sequential insert"; fi
+        if [ "$GPU" = "1" ]; then
+            run tg2 OMP_NUM_THREADS=2 DTFE_TRIANGULATION_THREADS=2 -- "${T7[@]}" --gpu
+            d="$(differing g tg2)"
+            if grep -q "using the CPU interpolation" "$TMP/tg2.log"; then
+                fail "G7 the --gpu team run fell back to the CPU (see $TMP/tg2.log)"
+            elif [ -z "$d" ]; then
+                pass "G7 GPU exact average, the parallel insert in a team of 2 == one domain: every output identical"
+            else fail "G7 the parallel insert in a team of 2 moves the GPU exact average:$d differ from one domain"; fi
+        else
+            echo "   (G7's GPU half: not a GPU build)"
+        fi
+    fi
 fi
 
 if [ "$FAIL" = "0" ]; then echo "RESULT: PASS"; else echo "RESULT: FAIL"; exit 1; fi

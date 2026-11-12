@@ -84,6 +84,7 @@
 #include "define.h"
 #include "message.h"
 #include "env_knobs.h"
+#include "fixed_units.h"   // RunUnits::measure: the particles' total mass, vmax and smax
 #include "particle_data.h"
 #include "quantities.h"
 #include "user_options.h"
@@ -160,18 +161,11 @@ struct Merge
     void setup(Quantities &u, Quantities &a, User_options const &opt, std::vector<Particle_data> &particles)
     {
         on = true;
-        double totalMass = 0.;
-        double vm = 0., sm = 0.;
-        for (Particle_data &p : particles)
-        {
-            totalMass += double( p.weight() );
-            for (size_t j = 0; j < noVelComp; ++j) vm = std::max( vm, std::fabs( double( p.velocity( int(j) ) ) ) );
-#ifdef SCALAR
-            for (size_t j = 0; j < noScalarComp; ++j) sm = std::max( sm, std::fabs( double( p.scalar( int(j) ) ) ) );
-#endif
-        }
-        vmax = vm;
-        smax = sm;
+        // the one O(N) pass of the run-wide units (fixed_units.h RunUnits::measure), over this array in its order
+        RunMoments const moments = RunUnits::measure( particles );
+        double const totalMass = moments.totalMass;
+        vmax = moments.vmax;
+        smax = moments.smax;
         double fullCells = 1.;
         cellVol = 1.;
         dxMin = HUGE_VAL;

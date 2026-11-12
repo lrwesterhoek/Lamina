@@ -497,7 +497,8 @@ def t_qt(tmp: Path):
               and own.count("--ps-merge") == 1,
               (w.spec.ordered_merge, w.pipe.ordered_merge, w.custom.ordered_merge, own))
         # a standard Grids job pins run_dtfe.sh's Monte-Carlo count, thread cap and gradient route empty (the tab holds
-        # none of them for it): a SUBSAMPLES / THREADS / FACE_GRADIENT exported in the login shell cannot leak in
+        # none of them for it): a SUBSAMPLES / THREADS / FACE_GRADIENT exported in the login shell cannot leak in, nor
+        # the binary's own DTFE_FACE_GRADIENT
         w.dtfe_radio.setChecked(True)
         w._read_widgets()
         std_env = w.spec.command()[1]
@@ -515,14 +516,16 @@ def t_qt(tmp: Path):
         w.deposit_combo.setCurrentIndex(w.deposit_combo.findData(first))
         w.gpu_check.setChecked(gpu_first)          # (the exact deposit's GPU rule may have moved it)
         w._read_widgets()
-        check("a standard-DTFE Grids job pins SUBSAMPLES, THREADS and FACE_GRADIENT empty (run_dtfe.sh's own defaults); "
-              "the PS job takes its count from -n (the sampled deposit) or pins it empty (the exact one, which has none)",
+        check("a standard-DTFE Grids job pins SUBSAMPLES, THREADS and FACE_GRADIENT empty (run_dtfe.sh's own "
+              "defaults), DTFE_FACE_GRADIENT too (the binary's default route); the PS job takes its count from -n "
+              "(the sampled deposit) or pins it empty (the exact one, which has none)",
               std_env.get("SUBSAMPLES") == "" and std_env.get("THREADS") == "" and std_env.get("FACE_GRADIENT") == ""
+              and std_env.get("DTFE_FACE_GRADIENT") == ""
               and w.spec.estimator == "ps"
               and "SUBSAMPLES" not in sampled_cmd[1] and "-n" in sampled_cmd[0]
               and exact_cmd[1].get("SUBSAMPLES") == "" and "-n" not in exact_cmd[0] and w.spec.deposit == first,
-              ({k: std_env.get(k) for k in ("SUBSAMPLES", "THREADS", "FACE_GRADIENT")}, w.spec.estimator, sampled_cmd,
-               exact_cmd))
+              ({k: std_env.get(k) for k in ("SUBSAMPLES", "THREADS", "FACE_GRADIENT", "DTFE_FACE_GRADIENT")},
+               w.spec.estimator, sampled_cmd, exact_cmd))
         w.om_check.setChecked(False)
         (d / "om.runlog").write_text(LOG_OK.format(root=d / "om").replace("--periodic", "--periodic --ordered-merge"))
         w._load_run_settings(R.parse_runlog(d / "om.runlog", "TNGQ-1-Dark", 99))
@@ -536,6 +539,15 @@ def t_qt(tmp: Path):
         check("'Load settings' carries the ordered merge: on for a run made with it (and for one without a flag, "
               "the default), off for a --completion-order-merge run",
               on and off and w.om_check.isChecked(), (on, off))
+        # a linear-deposit run's log names no gradient route (the linear deposit leaves the face gradient out), so its
+        # settings hold both ticks, which exclude each other: 'Load settings' keeps the linear deposit, face tick off
+        ld_log = LOG_OK.format(root=d / "ld").replace("--periodic", "--periodic --ps-linear-deposit")
+        (d / "ld.runlog").write_text(ld_log)
+        w._load_run_settings(R.parse_runlog(d / "ld.runlog", "TNGQ-1-Dark", 99))
+        ld_got = (w.ld_check.isChecked(), w.fg_check.isChecked(), w.spec.linear_deposit, w.spec.face_gradient)
+        w._load_run_settings(R.parse_runlog(d / "ps_output.runlog", "TNGQ-1-Dark", 99))
+        check("'Load settings' of a --ps-linear-deposit run without a gradient route keeps the linear deposit (the "
+              "face-gradient tick, its exclusive partner, off)", ld_got == (True, False, True, False), ld_got)
         # the start-over tick (Grids, Pipeline) reaches run_ps_dtfe.sh as DTFE_RESUME=0 (and PS_RESUME); the banner of a
         # refused resume ticks it; its text has no '--'; 'Load settings' leaves it alone (a one-off choice)
         so, pso = getattr(w, "so_check", None), getattr(w, "p_so", None)

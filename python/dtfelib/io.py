@@ -17,8 +17,10 @@ analysis/plot script works with either method unchanged:
   * availability       PS-only fields (streams, dispersion, ...) raise a clear error under
                        method='dtfe'; use .has(name) to branch.
   * same name, other   the velocity-GRADIENT family (gradient, divergence, shear, vorticity,
-    quantity           vweb) is the gradient of the mean velocity under DTFE but the stream
-                       average of each stream's own gradient <grad v> under PS-DTFE; the two agree
+    quantity           vweb) is the gradient of the mean velocity under DTFE and under a PS-DTFE
+                       run with the face gradient (its default where the run qualifies:
+                       FieldSet.face_gradient), but the stream average of each stream's own
+                       gradient <grad v> under a PS-DTFE run without it; the two agree
                        only in single-stream cells (see the note above FIELDS). load(name,
                        mean_field=True) gives the DTFE quantity for both. The fold-caustic
                        flag of older grids is per sample and low: take it
@@ -34,7 +36,7 @@ Usage:
     rho   = fs.density(units="mean")            # rho/rho_bar for BOTH methods
     v     = fs.load("velocity")                 # (N,N,N,3) km/s
     v1    = fs.velocity_single_stream()         # velocity, NaN unless single-stream (PS only)
-    div   = fs.load("divergence", mean_field=True)  # div<v> for BOTH methods (PS: by FFT of 'velocity')
+    div   = fs.load("divergence", mean_field=True)  # div<v> for BOTH methods (PS: stored, or by FFT of 'velocity')
     if fs.has("streams"): s = fs.load("streams")
     print(fs)                                   # method, grid, box, z, rho_bar
 """
@@ -50,6 +52,12 @@ from .runlog import canonical_command   # a run log's older option spellings (th
 
 # canonical field name -> (file suffix, components, ps_only)
 # The 'a_' averaged prefix is inserted automatically (averaged=True default).
+#
+# PS-DTFE STORES THE MEAN FLOW'S grad<v> BY DEFAULT where the run qualifies (the exact deposit, --ps-volume-weighted,
+# no halo release, 3D; docs/cleanup-plan.md D13, the face gradient): such a run writes '.a_velDivStreams' beside the
+# family, FieldSet.face_gradient is True and load(name, mean_field=True) returns the stored grid. What follows holds
+# for a run without it ('--per-tet-gradient', the sampled deposit, mass-weighted moments, the halo release, 2D, and
+# the runs of a binary older than that default).
 #
 # THE VELOCITY-GRADIENT FAMILY UNDER PS-DTFE: 'gradient', 'divergence',
 # 'shear', 'vorticity' and the V-web ('vweb', 'vweb_eigenvalues', classified from that gradient with
@@ -91,17 +99,23 @@ FIELDS = {
     "tet_touch":         ("tetTouch",      1, True),   # --exact (the exact deposit): raw count of tetrahedra touching the cell (geometric multiplicity, runs to hundreds -- NOT a stream count; use 'streams' for that)
     "dispersion":        ("velDisp",       1, True),
     "dispersion_tensor": ("velDispTensor", 6, True),   # xx,xy,xz,yy,yz,zz
-    "divergence":        ("velDiv",        1, False),   # PS: the stream average <grad v> of each stream's own gradient, not grad<v> (note above FIELDS)
-    "shear":             ("velShear",      5, False),   # PS: the stream average <grad v> of each stream's own gradient, not grad<v> (note above FIELDS)
-    "vorticity":         ("velVort",       3, False),   # PS: the stream average <grad v> of each stream's own gradient, not grad<v> (note above FIELDS)
-    "gradient":          ("velGrad",       9, False),   # PS: the stream average <grad v> of each stream's own gradient, not grad<v> (note above FIELDS)
+    "divergence":        ("velDiv",        1, False),   # PS: grad<v> (face gradient) or <grad v> (note above FIELDS)
+    "shear":             ("velShear",      5, False),   # PS: grad<v> (face gradient) or <grad v> (note above FIELDS)
+    "vorticity":         ("velVort",       3, False),   # PS: grad<v> (face gradient) or <grad v> (note above FIELDS)
+    "gradient":          ("velGrad",       9, False),   # PS: grad<v> (face gradient) or <grad v> (note above FIELDS)
     "tweb":              ("tweb",          1, False),
     "tweb_eigenvalues":  ("twebEig",       3, False),
-    "vweb":              ("velVweb",       1, False),   # PS: classified from <grad v>, not grad<v> (note above FIELDS): few filaments/nodes
-    "vweb_eigenvalues":  ("velVwebEig",    3, False),   # PS: classified from <grad v>, not grad<v> (note above FIELDS): few filaments/nodes
-    # --face-gradient (PS, docs/cleanup-plan.md P10.3): the run's velocity-gradient family above is then the MEAN flow's
-    # grad<v> (from exact face sums), and this one holds the stream average <grad v>'s divergence the deposit used to store
+    "vweb":              ("velVweb",       1, False),   # PS: from grad<v> (face gradient) or <grad v> (see FIELDS)
+    "vweb_eigenvalues":  ("velVwebEig",    3, False),   # PS: from grad<v> (face gradient) or <grad v> (see FIELDS)
+    # the face gradient (PS: its default where the run qualifies, docs/cleanup-plan.md D13, or --face-gradient; P10.3):
+    # the run's velocity-gradient family above is then the MEAN flow's grad<v> (from exact face sums), and this one
+    # holds the divergence of the stream average <grad v>, the family of a run without it; these three its gradient,
+    # shear and vorticity, each where the run wrote the mean flow's (docs/cleanup-plan.md D12: the bytes a
+    # '--per-tet-gradient' run writes as 'gradient', 'shear', 'vorticity'). load(name, stream_average=True) reads them
     "divergence_streams": ("velDivStreams", 1, True),
+    "gradient_streams":   ("velGradStreams", 9, True),
+    "shear_streams":      ("velShearStreams", 5, True),
+    "vorticity_streams":  ("velVortStreams", 3, True),
     # ... and the mass flux divergence div(sum_s rho_s v_s) (rho/rho_bar times velocity per Mpc) from exact face momentum
     # sums: by continuity -a d(1+delta)/dt, the rate a region gains or loses mass, caustic sheets included (P10.4)
     "mass_flux_divergence": ("massFluxDiv", 1, True),
@@ -114,6 +128,8 @@ _PREFIX = {"ps": "ps_output.", "dtfe": "output."}
 # LAMBDA_TH default (run_dtfe.sh / run_ps_dtfe.sh pass --lambda-th 0.3; the binary's own default is 0).
 MEAN_FIELD_NAMES = ("gradient", "divergence", "shear", "vorticity", "vweb", "vweb_eigenvalues")
 DEFAULT_LAMBDA_TH = 0.3
+# The family load(..., stream_average=True) serves: the stream average <grad v> under either gradient route (D12)
+STREAM_AVERAGE_NAMES = ("gradient", "divergence", "shear", "vorticity")
 
 # Fields the binary writes ONCE, with no 'a_' (averaged) counterpart: the deposit produces a
 # single grid for them regardless of the u/a pass (see writeOutputData in src/input_output.cc).
@@ -271,7 +287,8 @@ def caustic_collapse_max(mask):
 # dimensionless.
 _VELOCITY_SCALE_EXP = {
     "velocity": 0.5, "divergence": 0.5, "shear": 0.5, "vorticity": 0.5, "gradient": 0.5,
-    "divergence_streams": 0.5, "mass_flux_divergence": 0.5,
+    "divergence_streams": 0.5, "gradient_streams": 0.5, "shear_streams": 0.5, "vorticity_streams": 0.5,
+    "mass_flux_divergence": 0.5,
     "dispersion": 1.0, "dispersion_tensor": 1.0,
 }
 
@@ -467,9 +484,10 @@ class FieldSet:
 
     @property
     def face_gradient(self) -> bool:
-        """Did this PS run store the MEAN flow's velocity derivatives itself ('--face-gradient', exact face sums)? Its
-        marker is the stream-average divergence it writes beside them ('.a_velDivStreams'). Standard DTFE: False (its
-        stored derivatives are the mean flow's anyway)."""
+        """Did this PS run store the MEAN flow's velocity derivatives itself (the face gradient, exact face sums:
+        PS-DTFE's default where the run qualifies, docs/cleanup-plan.md D13, or '--face-gradient')? Its marker is the
+        stream-average divergence it writes beside them ('.a_velDivStreams'). Standard DTFE: False (its stored
+        derivatives are the mean flow's anyway)."""
         if self.method != "ps":
             return False
         try:
@@ -477,12 +495,17 @@ class FieldSet:
         except (KeyError, ValueError):
             return False
 
-    def has(self, name: str, mean_field: bool = False) -> bool:
+    def has(self, name: str, mean_field: bool = False, stream_average: bool = False) -> bool:
         """Is the grid on disk? mean_field=True asks whether load(name, mean_field=True) can serve it: under
         PS-DTFE that needs the 'velocity' grid (the mean field is derived from it), under standard DTFE the stored
-        grid itself."""
+        grid itself. stream_average=True asks the same of load(name, stream_average=True): a face-gradient run's
+        '_streams' grid, any other run's stored grid."""
+        if mean_field and stream_average:
+            raise ValueError("mean_field=True and stream_average=True ask for two different quantities: give one")
+        if stream_average and self.method == "ps" and self.face_gradient and name in STREAM_AVERAGE_NAMES:
+            name = f"{name}_streams"         # the face run stored the mean flow's under the plain name
         if mean_field and self.method == "ps" and name in MEAN_FIELD_NAMES:
-            if self.face_gradient:           # --face-gradient: the stored grids ARE the mean flow's
+            if self.face_gradient:           # the face gradient: the stored grids ARE the mean flow's
                 return self._field_path(name).exists()
             return self.has("velocity")
         try:
@@ -574,7 +597,8 @@ class FieldSet:
         shape = (n, n, n) if ncomp == 1 else (n, n, n, ncomp)
         return np.memmap(path, dtype=dtype, mode="r", shape=shape)
 
-    def load(self, name: str, scaled: bool = True, mode: str = "auto", mean_field: bool = False) -> np.ndarray:
+    def load(self, name: str, scaled: bool = True, mode: str = "auto", mean_field: bool = False,
+             stream_average: bool = False) -> np.ndarray:
         """Field as stored on disk, shape (N,N,N) or (N,N,N,ncomp) -- with velocity-derived
         fields converted from Gadget u-units to peculiar km/s (see _VELOCITY_SCALE_EXP;
         a no-op at z=0). Pass scaled=False for the raw on-disk numbers.
@@ -595,18 +619,36 @@ class FieldSet:
 
         mean_field=True (names of MEAN_FIELD_NAMES only): the derivatives of the MEAN velocity grad<v>,
         the quantity standard DTFE stores, whatever the method -- the stored grid under standard DTFE (exactly what
-        load(name) returns), under PS-DTFE mean_field(name) computed from the 'velocity' grid instead of the
-        stored stream average <grad v> (the note above FIELDS). Same units and layout as the stored grids; the
-        computed grid is always an in-memory array ('mode' does not apply to it)."""
+        load(name) returns), under PS-DTFE the stored grid of a face-gradient run (face_gradient), else
+        mean_field(name) computed from the 'velocity' grid instead of the stored stream average <grad v> (the note
+        above FIELDS). Same units and layout as the stored grids; the computed grid is always an in-memory array
+        ('mode' does not apply to it).
+
+        stream_average=True (names of STREAM_AVERAGE_NAMES only): the stream average <grad v> under either gradient
+        route -- a PS face-gradient run's '_streams' grid (FIELDS: 'gradient_streams', ...; the bytes a
+        '--per-tet-gradient' run stores under the plain name), any other PS run's stored grid (which is that average),
+        a standard run's stored grid (one stream). The opposite of mean_field=True: give one of the two."""
         if mode not in ("auto", "ram", "memmap"):
             raise ValueError(f"mode must be 'auto', 'ram' or 'memmap', got {mode!r}")
+        if stream_average:
+            if mean_field:
+                raise ValueError("mean_field=True and stream_average=True ask for two different quantities: give one")
+            if name not in STREAM_AVERAGE_NAMES:
+                raise ValueError(f"stream_average=True serves {', '.join(STREAM_AVERAGE_NAMES)}; not {name!r}")
+            if self.method == "ps" and self.face_gradient:
+                plain, name = name, f"{name}_streams"   # the face run stored the mean flow's under the plain name
+                if not self._field_path(name).exists():
+                    raise FileNotFoundError(
+                        f"{self._field_path(name)}: this face-gradient run wrote no stream average of {plain!r}; it is "
+                        f"written beside the mean flow's when {plain + '_a'!r} is asked (a binary before "
+                        "docs/cleanup-plan.md D12 wrote the divergence alone, 'divergence_streams')")
         if mean_field:
             if name not in MEAN_FIELD_NAMES:
                 raise ValueError(f"mean_field=True serves the velocity-gradient family {', '.join(MEAN_FIELD_NAMES)}; "
                                  f"not {name!r}")
             if self.method == "ps" and not self.face_gradient:
                 return self.mean_field(name, scaled=scaled)
-            # a PS run with --face-gradient stored the mean flow's derivatives itself (exact face sums): read them
+            # a PS run with the face gradient stores the mean flow's derivatives itself (exact face sums): read them
             # standard DTFE: the stored grid IS the gradient of its one single-valued velocity field, measured by the
             # estimator itself (cell averages of the interpolant's gradient) -- read it, never re-derive it
         factor = self._scale_factor32(name) if scaled else None

@@ -60,6 +60,9 @@ void interpolateGrid_phaseSpace(DT &dt, User_options &userOptions, Quantities *q
 #include "tessellation_cache.h"   // '--tessellation-cache': reuse the tessellation across runs
 #include "../env_knobs.h"
 #ifdef PHASE_SPACE
+#include "ps_vertex_order.h"      // psVertexOrderPass: the canonical vertex order of the cells (D19)
+#endif
+#ifdef PHASE_SPACE
 void interpolatePoints_phaseSpace(DT &dt, User_options &userOptions);   // ps_point_eval.cc
 #else
 void interpolatePoints_standard(DT &dt, User_options &userOptions);    // ps_point_eval.cc
@@ -106,6 +109,11 @@ bool buildTessellation(vector<Particle_data> *p,
                     << "): triangulation and vertex-density passes skipped.\n" << MESSAGE::Flush;
             // only NOW are the particles redundant -- on a miss they are the triangulation's input
             vector<Particle_data>().swap(*p);
+#ifdef PHASE_SPACE
+            // a file written without the canonical order (by a binary before it, or under
+            // DTFE_PS_VERTEX_ORDER_LEGACY=1) holds CGAL's numbering; on a canonical file the pass changes nothing
+            psVertexOrderPass( dt, userOptions );
+#endif
         }
     }
 
@@ -126,6 +134,11 @@ bool buildTessellation(vector<Particle_data> *p,
                            userOptions.parallelTriangulationForced || Env::isSet( "DTFE_TRIANGULATION_THREADS" ) );
     printComputationTime( &t, &userOptions, "triangulation" );
     vector<Particle_data>().swap(*p);  // data lives in the triangulation now; swap-with-empty actually frees the input array (clear() keeps capacity)
+#ifdef PHASE_SPACE
+    // before the vertex densities (their per-cell volumes are formed in each cell's vertex-0 frame) and before the
+    // cache, which then stores the canonical numbering (ps_vertex_order.h)
+    psVertexOrderPass( dt, userOptions );
+#endif
 
     // Skip the padding test under PS-DTFE: dummy points use Eulerian coords, which corrupt the Lagrangian triangulation.
 #if defined(TEST_PADDING) && !defined(PHASE_SPACE)
@@ -503,12 +516,16 @@ static void insertSequential(DT *dt, vector<Particle_data> *p, MESSAGE::Message 
 // '--parallel-triangulation' / DTFE_TRIANGULATION_THREADS=N at any size: the cores are shared among the
 // tessellations being built at the same time (the partition loops, the standard sub-domain team:
 // ConcurrentTriangulationPlan), and capped by OMP_NUM_THREADS; a run mode's lowered thread budget (run_mode.h) caps
-// the rule's count but not a count given with DTFE_TRIANGULATION_THREADS. The parallel insert's vertex and cell order differ
-// from run to run, so whatever is summed in that order moves at rounding between two identical runs: the standard
-// CPU deposits' float sums, the face pass's double sums (the last bit in 2e-7 of the values at 512^3), the vertex
-// densities and the points (~1e-15), and PS-DTFE's velocity moments, whose shares are formed in each tetrahedron's
-// vertex frame (4e-7 of the rms in 5% of the values; tests/dev/bytecmp.sh with DTFE_TRIANGULATION_THREADS=6);
-// unchanged: PS-DTFE's fixed-point density and the GPU exact average's grids (P10.8: byte-identical at 512^3).
+// the rule's count but not a count given with DTFE_TRIANGULATION_THREADS. The parallel insert's vertex and cell order
+// differ from run to run, so whatever is summed in that order moves at rounding between two identical runs: the
+// standard Monte-Carlo average's CPU float sums, the points (~1e-15), and the double builds' CPU sums (the exact
+// average, the face pass, the vertex densities); unchanged: in the single build, standard DTFE's exact '_a' grids on
+// either device, its face pass and its vertex densities (integer sums in one unit for the whole run,
+// src/fixed_units.h: vertexDensityStarSums below, with the single-cell volumes of canonicalTetVolume, which do not
+// follow CGAL's labelling; tests/split_bytes_check.sh S4), and every grid of the single-precision PS-DTFE, except
+// under '--ps-linear-deposit' (which reads the vertex densities), whose cells are renumbered in a canonical vertex
+// order before any use (ps_vertex_order.h, D19). Under DTFE_PS_VERTEX_ORDER_LEGACY=1 (CGAL's numbering) its velocity
+// moments move by 4e-7 of the rms in 5% of the values (tests/dev/bytecmp.sh with DTFE_TRIANGULATION_THREADS=6).
 // '--sequential-triangulation' (or DTFE_TRIANGULATION_THREADS=1) keeps the sequential insert, reproducible bit for
 // bit; the test suites' inputs are far below the threshold, so they compare sequential builds. The parallel insert
 // sorts and inserts a COPY of the points (CGAL keeps a second one), so the particles are freed as soon as that copy
@@ -608,13 +625,152 @@ void delaunayTriangulation(DT *dt,
 }
 
 
+#ifndef PHASE_SPACE
+// The marks of vertexDensityStarSums in a vertex's high limb (vertexData::markVolumeLimbs). No star sum reaches them:
+// a sum stays below 2^126, so its high limb below 2^62.
+static int64_t const STAR_HULL   = INT64_MIN;       // a convex-hull vertex: out of the sums, its density undefined
+static int64_t const STAR_DOUBLE = INT64_MIN + 1;   // a vertex with a cell beyond the share cap: the double sum
+
+/* vertexDensity's exact star sums, the standard binary (fixed_units.h RunUnits::starSums says when). Each finite cell
+   adds its volume -- canonicalTetVolume's, the same whatever CGAL's labelling of the cell -- as ONE integer in the
+   run-wide unit 2^-K (RU_VERTEX_VOLUME: W_bar = (NO_DIM+1) (M / n) / rho_bar, a vertex's mean star volume, at
+   [2^71, 2^72) units) to each of its NO_DIM+1 vertices, into a 128-bit integer per vertex in two 64-bit limbs
+   (vertexData::volumeLimbs; plain adds: the pass is serial). Integer adds commute, so a vertex's sum does not depend
+   on the cell order, which differs between the tessellations of two partition or thread splits and between the
+   parallel and the sequential insert; the double sums of vertexDensity's other path round in that order. A sum stays
+   below 2^126: each volume's integer is below the cap, 2^94 units = 2^22 W_bar, and a vertex has fewer than 2^32
+   cells. A cell whose volume has no integer below the cap (a NaN, or a cell above 2^22 W_bar: not seen in practice)
+   marks its vertices STAR_DOUBLE; a second pass gives those vertices the other path's double sum, in cell order, from
+   CGAL's volumes, and one warning counts them. Each sum is converted once (fxToReal: one rounding of the integer, an
+   exact scaling) and goes into the other path's density expression; the double scratch is left holding the vertex's
+   star volume, -1 on the hull, as the other path leaves it. */
+static void vertexDensityStarSums(DT &dt, User_options &userOptions, Real const factor)
+{
+    RunUnits const &ru = userOptions.runUnits;
+    int const K = ru.K[RU_VERTEX_VOLUME];
+    double const scale = ru.scaleD( RU_VERTEX_VOLUME ), cap = ru.cap( RU_VERTEX_VOLUME );
+
+    // 1. zero the sums, then mark every vertex of an infinite cell -- the convex hull -- STAR_HULL
+    for (DT::Finite_vertices_iterator vIT = dt.finite_vertices_begin(); vIT != dt.finite_vertices_end(); ++vIT)
+        vIT->info().setVolumeLimbs( 0 );
+    {
+        std::vector<Cell_handle> infiniteCells;
+#if NO_DIM==2
+        DT::Face_circulator fc = dt.incident_faces( dt.infinite_vertex() );
+        if ( fc != 0 )
+        {
+            infiniteCells.push_back( fc++ );
+            for (; fc != infiniteCells[0]; ++fc)
+                infiniteCells.push_back( fc );
+        }
+#elif NO_DIM==3
+        dt.incident_cells( dt.infinite_vertex(), std::back_inserter(infiniteCells) );
+#endif
+        for (size_t c = 0; c < infiniteCells.size(); ++c)
+            for (int v = 0; v <= NO_DIM; ++v)
+            {
+                Vertex_handle vh = infiniteCells[c]->vertex(v);
+                if ( dt.is_infinite(vh) ) continue;
+                vh->info().markVolumeLimbs( STAR_HULL );
+                vh->info().setDummyNeighbor();
+            }
+    }
+
+    // 2. one pass over the finite cells: each cell's volume as one integer into its vertices' sums
+    size_t overCap = 0;   // cells whose volume has no integer below the cap
+#if NO_DIM==2
+    for (DT::Finite_faces_iterator itC = dt.finite_faces_begin(); itC != dt.finite_faces_end(); ++itC)
+#elif NO_DIM==3
+    for (DT::Finite_cells_iterator itC = dt.finite_cells_begin(); itC != dt.finite_cells_end(); ++itC)
+#endif
+    {
+        Cell_handle cell = itC;
+        __int128 q = 0;
+        bool const ok = fxShare( canonicalTetVolume( cell ) * scale, cap, q );
+        if ( not ok ) ++overCap;
+#ifdef TEST_PADDING
+        bool const dummyCell = hasDummyVertex( cell );
+#endif
+        for (int v = 0; v <= NO_DIM; ++v)
+        {
+            vertexData &info = cell->vertex(v)->info();
+#ifdef TEST_PADDING
+            if ( dummyCell ) info.setDummyNeighbor();
+#endif
+            int64_t const high = info.volumeHighLimb();
+            if ( high == STAR_HULL or high == STAR_DOUBLE ) continue;   // out of the sums / the double sum below
+            if ( ok ) info.setVolumeLimbs( info.volumeLimbs() + q );
+            else info.markVolumeLimbs( STAR_DOUBLE );
+        }
+    }
+
+    // 3. the vertices marked STAR_DOUBLE: the other path's double sum, in cell order, in the double scratch (which
+    //    markVolumeLimbs left at 0.)
+    if ( overCap > 0 )
+    {
+#if NO_DIM==2
+        for (DT::Finite_faces_iterator itC = dt.finite_faces_begin(); itC != dt.finite_faces_end(); ++itC)
+#elif NO_DIM==3
+        for (DT::Finite_cells_iterator itC = dt.finite_cells_begin(); itC != dt.finite_cells_end(); ++itC)
+#endif
+        {
+            Cell_handle cell = itC;
+            bool marked = false;
+            for (int v = 0; v <= NO_DIM; ++v)
+                marked = marked or cell->vertex(v)->info().volumeHighLimb() == STAR_DOUBLE;
+            if ( not marked ) continue;
+#if NO_DIM==2
+            double const vol = double( dt.triangle( cell ).area() );
+#elif NO_DIM==3
+            double const vol = double( dt.tetrahedron( cell ).volume() );
+#endif
+            for (int v = 0; v <= NO_DIM; ++v)
+            {
+                vertexData &info = cell->vertex(v)->info();
+                if ( info.volumeHighLimb() != STAR_DOUBLE ) continue;
+                double &acc = info.volumeAccumulator();
+                if ( acc >= 0. ) acc += vol;
+            }
+        }
+    }
+
+    // 4. the densities: each sum converted once, then the other path's expression
+    size_t doubleVertices = 0;
+    for (DT::Finite_vertices_iterator vIT = dt.finite_vertices_begin(); vIT != dt.finite_vertices_end(); ++vIT)
+    {
+        vertexData &info = vIT->info();
+        int64_t const high = info.volumeHighLimb();
+        if ( high == STAR_DOUBLE ) ++doubleVertices;
+        double const acc = high == STAR_HULL ? -1. : high == STAR_DOUBLE ? info.volumeAccumulator()
+                                                                         : fxToReal<double>( info.volumeLimbs(), K );
+        info.setVolumeLimbs( 0 );
+        info.volumeAccumulator() = acc;   // the double scratch, as the other path leaves it
+#ifdef TEST_PADDING
+        if ( info.isDummy() ) continue;
+#endif
+        if ( acc < 0. ) { info.setDensity( 0. ); continue; }   // convex hull: density undefined
+        info.setDensity( acc > 0. ? Real( double(info.weight()) * double(factor) / acc ) : Real(0.) );
+    }
+    if ( overCap > 0 )
+    {
+        MESSAGE::Warning warning( userOptions.verboseLevel );
+        warning << overCap << " Delaunay cell(s) had a volume without an integer below the exact star sums' cap "
+                << "(2^22 times the mean star volume, or not finite); their " << doubleVertices << " vertices take the "
+                << "double star sums, whose last bit can depend on the partition split.\n" << MESSAGE::EndWarning;
+    }
+}
+#endif
+
+
 // Estimates the density at each vertex. Standard DTFE: (mass-conservation factor) / total volume of
 // incident Delaunay cells. PS-DTFE: avgDensity * V_Lagrangian / V_Eulerian for the incident cells.
 // The sums run over the CELLS, each adding its volume to its NO_DIM+1 vertices in double, instead of
 // over every vertex's incident cells -- a CGAL adjacency walk that recomputes each cell's volume
 // NO_DIM+1 times (0.63 s vs ~0.1 s for 0.26M particles, a fifth of the whole run).
 // Convex-hull vertices (an incident infinite cell: density undefined) are marked first, from the
-// infinite cells, and stay out of the sums. A vertex sum runs in cell order and in double.
+// infinite cells, and stay out of the sums. A vertex sum runs in cell order and in double -- but for
+// the standard binary's exact star sums (vertexDensityStarSums), which RunUnits::starSums selects
+// (not under DTFE_RUN_UNITS_LEGACY=1, nor in the double build or PS-DTFE).
 void vertexDensity(DT & dt,
                   User_options &userOptions)
 {
@@ -632,6 +788,15 @@ void vertexDensity(DT & dt,
         return;
     }
     Real const factor = (NO_DIM+1.) / userOptions.averageDensity;  // mass-conservation normalization; NO_DIM+1 = vertices per Delaunay cell
+#ifndef PHASE_SPACE
+    // the exact star sums (vertexDensityStarSums above); the double sums below otherwise
+    if ( userOptions.runUnits.starSums( double( userOptions.averageDensity ) ) )
+    {
+        vertexDensityStarSums( dt, userOptions, factor );
+        message << "Done.\n" << MESSAGE::Flush;
+        return;
+    }
+#endif
 
     // 1. zero the accumulators, then mark every vertex of an infinite cell -- the convex hull -- with -1
     for (DT::Finite_vertices_iterator vIT = dt.finite_vertices_begin(); vIT != dt.finite_vertices_end(); ++vIT)
