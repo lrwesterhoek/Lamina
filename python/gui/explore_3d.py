@@ -11,7 +11,10 @@ one affine transform and each sphere to a circle. The volume is direct volume re
 transfer function on the map's scale, composited front to back in 16 bits a channel. On screen, where OpenGL is
 there, the volume's picture comes from the GPU instead (volume_gl.py: the same slices, samples and compositing, in
 real time at 1024^3); offscreen (the tests, which have no OpenGL), for Save image and without OpenGL from QPainter
-(volume_picture), the overlays always from QPainter."""
+(volume_picture), the overlays always from QPainter.
+
+With the map's Contours tick the planes carry the map's contour lines (each plane's own, mapped by its transform)
+and the volume the levels as thin shells (contours.shell_plan, in its transfer function), with their key."""
 
 from __future__ import annotations
 
@@ -24,17 +27,20 @@ from PySide6.QtGui import (QBitmap, QColor, QFontMetrics, QImage, QPainter, QPai
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
                                QSlider, QSpinBox, QVBoxLayout, QWidget)
 
+import contours as CT
 import grids as G
 import view3d as V
 import volume3d as VOL
 import volume_gl as VGL
 from app_widgets import button_row, flush, tip, tip_auto
+from explore_canvas import segments_path
 
 VIEW3D_TIP = ("Show the map's field in 3D: the whole box as a translucent volume (or on three planes), with the "
-              "voids as spheres of their true size. The volume: the field averaged down to the detail chosen, its "
+              "voids at their true size. The volume: the field averaged down to the detail chosen, its "
               "low values see-through and its high values opaque in the map's colours; the planes: the map's own "
-              "slice and the middle of the other two. The voids: spheres of radius R_v (R_eff dashed when ticked "
-              "above) at their true size against the box. A void near a face is drawn once, at its catalogue "
+              "slice and the middle of the other two. The voids as the Map group's 'Voids' row draws them: their "
+              "ellipsoids at the mean density (the planes show the same sections as the map), or spheres of R_v; "
+              "the other outline dashed when ticked there. A void near a face is drawn once, at its catalogue "
               "centre, and may reach past the box. Any change to the map's field or colours follows (the planes: "
               "its slice too); the voids need 'Voids' ticked.")
 STYLE_ITEMS = (("volume", "volume"), ("planes", "planes"))
@@ -83,17 +89,36 @@ CLOSE_TIP = ("Look at the chosen void from near: the camera flies to it and the 
 BG = QColor(26, 27, 31)                     # the 3D view's background: white outlines read on it
 SELECTED = QColor(255, 196, 64)
 HOVERED = QColor(120, 220, 255)
-SHAPE_ITEMS = (("spheres of R_v", "sphere"), ("fitted ellipsoids", "ellipsoid"))
-SHAPE_TIP = ("How the voids are drawn: spheres of R_v, or the catalogue's fitted ellipsoids. Spheres of R_v: where "
-             "the smoothed density around the centre rises back to the mean. Fitted ellipsoids: the catalogue's fit "
-             "to the density minimum's curvature (its Hessian), semi-axes a >= b >= c along their own directions, "
-             "whose (a b c)^⅓ is R_eff; their widest section is drawn, all three on the void inspected, and the "
-             "planes show where each ellipsoid cuts them. A close-up sizes its cube by R_v, or R_eff, and always "
-             "holds the whole shape.")
+SHAPE_ITEMS = (("as ellipsoids", "ellipsoid"), ("as spheres of R_v", "sphere"))
+SHAPE_TIP = ("How the voids are drawn on the map and in the 3D view: as their ellipsoids, or as spheres of R_v. "
+             "Ellipsoids: around each density minimum the quadratic fit of its curvature (the Hessian's eigenvalues "
+             "and eigenvectors), cut where it returns to the mean density: semi-axes a >= b >= c along their own "
+             "directions, R_ell = (a b c)^⅓. The map draws the ellipse where it cuts the slice and a dot at the "
+             "minimum; the 3D view the ellipsoid, all three principal sections on the void inspected, and the planes "
+             "where each one cuts them. A void without such an ellipsoid (its minimum not below the mean) is its dot "
+             "alone. Spheres of R_v: where the spherical average of the smoothed density returns to the mean, drawn "
+             "as before. A close-up sizes its cube by R_ell, or R_v, and always holds the whole shape.")
+MARK_CELLS = 1.5                # a void without an ellipsoid: a sphere of this many cells at its centre (its mark)
 EDGE = QColor(12, 12, 14)                   # the dark edge under an outline: it reads over a bright plane
 DIM = QColor(120, 122, 128)                 # a close-up's neighbours: opaque grey (a translucent line is slow)
 QUIET = QColor(165, 190, 205)               # the voids over the volume: a thin, cool line apart from its warm colours
+# Many voids in one view (the whole box: some 250 at the production smoothing) cover the screen two or three times
+# over: as outlines they are a hairball (looked at on TNG300-3-Dark). Above CROWD_VOIDS (and not in a close-up) every
+# void but the hovered and the inspected one is a faint fill and a dot at its centre (over the volume, where the fill
+# cannot be seen, also its outline, thin and faint): where the voids are, their shapes, and which one the mouse is
+# on, read at a glance; the planes keep each void's section, as the map draws it.
+CROWD_VOIDS = 40
+CROWD_FILL_ALPHA = {"planes": 20, "volume": 8}  # each void's fill (of 255): overlaps add up, a lone void stays faint;
+                                                # over the volume fainter (the field's own picture must not wash out)
+CROWD_LINE_ALPHA = {"planes": 0, "volume": 90}  # each void's outline (of 255) over the volume, where the fill cannot be
+                                                # seen: thin and faint, so the ellipsoids read without a hairball
+CROWD_DOT_PX = 1.8
 AXIS_COLOURS = (QColor(235, 95, 85), QColor(110, 205, 105), QColor(95, 150, 245))
+SHELL_COPY_CELLS = 512 ** 3     # a close-up's cube of up to this many cells gets a copy of its levels with its own
+                                # void's shells only (two bytes a cell more); a larger one shows every void's shells
+VOID_FLOOR_SHARE = 0.3          # a close-up's contour shells start at the lowest density within this share of the
+                                # void's smallest radius from its centre (the catalogue's centre is the minimum of the
+                                # smoothed field; the grid's own lies near it)
 
 
 def volume_scene(req: dict) -> dict:
@@ -126,8 +151,8 @@ def planes3d(req: dict) -> dict:
     for a in range(3):
         if not req["shown"][a]:
             continue
-        plane = G.smoothed(o.slice(req["field"], a, req["index"][a], req["component"], req["ps_gradient"]),
-                           req["smooth"])
+        plane = G.map_plane(o, req["field"], a, req["index"][a], req["component"], req["ps_gradient"], req["smooth"],
+                            bool(req.get("smooth3d")))          # smoothed as the map is: in 2D, or the cube in 3D
         r0, r1 = V.rest_axes(a)
         vals = plane[np.ix_(idx[r0], idx[r1])]
         s = V.stride_for(*vals.shape)
@@ -140,19 +165,27 @@ def planes3d(req: dict) -> dict:
         vrange = G.value_range(np.concatenate(both) if both else np.zeros(1), req["log"],
                                (req["clip"], 100 - req["clip"]), req["symmetric"])
     planes = [None, None, None]
+    bar = None                                          # the contour levels for the colour bar (shared: one range)
     for a, item in enumerate(raw):
         if item is None:
             continue
         vals, s = item
         r0, r1 = V.rest_axes(a)
         img = np.ascontiguousarray(vals.T[::-1])        # the map's image: columns along r0, rows r1 downward
-        rgb, _ = G.colorize(img, req["cmap"], log=req["log"], symmetric=req["symmetric"], vrange=vrange)
+        rgb, shown = G.colorize(img, req["cmap"], log=req["log"], symmetric=req["symmetric"], vrange=vrange)
         lo2 = (float(wlo[r0]), float(wlo[r1]))
         hi2 = (lo2[0] + vals.shape[0] * s * cell[r0], lo2[1] + vals.shape[1] * s * cell[r1])
         pos = V.plane_position(req["index"][a], o.lo[a], cell[a], wlo[a], whi[a], float(o.length[a]))
         planes[a] = {"rgb": np.ascontiguousarray(rgb), "values": vals, "lo2": lo2, "hi2": hi2, "pos": pos,
                      "stride": s}
-    return {"request": req, "planes": planes, "lo": wlo, "hi": whi, "vrange": vrange}
+        if req.get("contours"):                         # the map's lines on this plane, in its texture's pixels
+            lines = CT.map_lines(vals, req["field"], shown, req["log"], req["cmap"],
+                                 detail=req.get("contour_detail", CT.DETAIL))
+            if lines is not None:
+                planes[a]["lines"] = {"segments": CT.image_segments(lines),
+                                      "rgb": CT.solid_colours(lines["levels"], shown, req["cmap"])}
+                bar = bar or dict(lines, segments=None)
+    return {"request": req, "planes": planes, "lo": wlo, "hi": whi, "vrange": vrange, "contours": bar}
 
 
 def _canvas(width: int, height: int, scale: float) -> tuple[QImage, QTransform]:
@@ -373,7 +406,12 @@ class View3D(QWidget):
         self._anim: QVariantAnimation | None = None
         self.style = "volume"               # 'volume' or 'planes': what is drawn of the field
         self.volume: dict | None = None     # volume3d.prepare's dict
-        self.transfer: tuple | None = None  # (lo, hi, opacity, cmap, symmetric, gamma): volume3d.transfer's
+        # (lo, hi, opacity, cmap, symmetric, gamma, shells): volume3d.transfer's; shells contours.shell_spec or None
+        self.transfer: tuple | None = None
+        self.shell_key: dict | None = None  # the contour shells' key drawn at the top left: {'head', 'items':
+                                            # [(QColor, text)]} (the volume with the Contours tick), else None
+        self._line_cuts: dict = {}          # the planes' contour lines cut to each quad: {(lines, rect): pieces}
+        self._line_paths: dict = {}         # ... and on the screen: {(lines, rect, map, size): [(QColor, path)]}
         self._stacks: dict = {}             # the coarse cube's slices coloured: (key, stack), while turning
         self._picture = None                # (key, QImage): the quick picture (while turning, or until the sharp one)
         self._sharp = None                  # (key, QImage): the settled picture at the screen's full resolution
@@ -413,14 +451,17 @@ class View3D(QWidget):
         self.fit()
 
     def set_transfer(self, lo: float, hi: float, opacity: float, cmap: str, symmetric: bool = False,
-                     gamma: float = VOL.DEFAULT_GAMMA):
+                     gamma: float = VOL.DEFAULT_GAMMA, shells: tuple | None = None):
         """The volume's transfer function: transparent below 'lo' (the map's scale: log10 of a density), the opacity
-        rising to 'opacity' at 'hi', coloured with 'cmap' over lo..hi (volume3d.transfer)."""
-        self.transfer = (float(lo), float(hi), float(opacity), str(cmap), bool(symmetric), float(gamma))
+        rising to 'opacity' at 'hi', coloured with 'cmap' over lo..hi (volume3d.transfer); 'shells' the contour
+        shells laid into it (contours.shell_spec), None none."""
+        self.transfer = (float(lo), float(hi), float(opacity), str(cmap), bool(symmetric), float(gamma),
+                         shells or None)
         self._gl_moving()
 
     def set_scene(self, planes, lo, hi):
         self.planes = planes
+        self._line_cuts, self._line_paths = {}, {}      # the contour lines' pieces of the planes shown before
         for pl in planes or ():
             if pl is not None and "img" not in pl:
                 h, w, _ = pl["rgb"].shape
@@ -432,6 +473,12 @@ class View3D(QWidget):
     def set_voids(self, voids: dict | None):
         self.voids = voids
         self.update()
+
+    def crowded(self) -> bool:
+        """So many voids in the view (the whole box, not a close-up) that each but the hovered and the inspected one
+        is drawn as a faint fill and its centre, over the volume with a faint outline (CROWD_VOIDS)."""
+        v = self.voids
+        return bool(v) and not self.focus and len(v["rows"]) > CROWD_VOIDS
 
     def _sized(self):
         """The camera to the widget's size and the window drawn (zooming flies a perspective eye into it)."""
@@ -568,6 +615,8 @@ class View3D(QWidget):
         self._draw_label(p)
         self._draw_triad(p)
         self._draw_scale(p)
+        if volume:
+            self._draw_shell_key(p)
         p.end()
 
     def _view_key(self) -> tuple:
@@ -579,9 +628,9 @@ class View3D(QWidget):
     def _lut(self, plan: dict, stride: int = 1) -> np.ndarray:
         """The transfer function's table for this plan (its opacity corrected for the path through a slice, to 1 %;
         every stride-th slice drawn: through stride of them)."""
-        lo, hi, opacity, cmap, symmetric, gamma = self.transfer
+        lo, hi, opacity, cmap, symmetric, gamma, shells = self.transfer
         return VOL.transfer(self.volume["levels"], lo, hi, opacity, float(np.round(plan["exponent"], 2)) * stride,
-                            G.lut(cmap), symmetric, gamma)
+                            G.lut(cmap), symmetric, gamma, shells)
 
     def quick_picture(self) -> QImage | None:
         """The volume's quick picture as the view now stands: the coarse cube (volume3d.COARSE_MAX cells a side at
@@ -765,6 +814,8 @@ class View3D(QWidget):
                         bool(not self._fast and max(np.hypot(T.m11(), T.m12()), np.hypot(T.m21(), T.m22())) < 1.0))
         p.setOpacity(self.opacity)
         p.drawImage(rect, img, rect)
+        if pl.get("lines") is not None and not self._fast:  # the contour lines on it, under the voids' cuts (not
+            self._draw_lines(p, pl["lines"], rect, T)        # while turning: as the cuts, a rough plane's are slow)
         p.setOpacity(1.0)
         inside, crossing = [], []
         for c in cuts.get(a) or ():
@@ -814,6 +865,72 @@ class View3D(QWidget):
         p.restore()
         self._drawn.append((a, transforms[a], rect))
 
+    def _draw_lines(self, p: QPainter, lines: dict, rect: QRectF, T: QTransform):
+        """A plane's contour lines (planes3d's 'lines': per level its pieces in the texture's pixels and its opaque
+        colour) on the quad showing 'rect' of the texture: cut to it, mapped by the plane's map T in numpy (no Qt
+        clip or projective stroke: view3d.segments_on_screen) and stroked by a cosmetic one-pixel pen, antialiased,
+        at the planes' opacity (the painter's). The colour is the map's line laid over its own level's colour
+        (contours.solid_colours): what the map shows along it. On a high-dpi screen the stroke is repeated one device
+        pixel right and one down, the map's rule (explore_canvas: a wider pen outlines the whole path first, seconds
+        for a rough plane): about one point wide, as the map's."""
+        T9 = (T.m11(), T.m12(), T.m13(), T.m21(), T.m22(), T.m23(), T.m31(), T.m32(), T.m33())
+        box = (rect.left(), rect.top(), rect.right(), rect.bottom())
+        key = (id(lines), box, T9, self.cam.width, self.cam.height)
+        paths = self._line_paths.get(key)
+        if paths is None:                               # cut to the quad (kept while the scene is), then mapped
+            cut = self._line_cuts.get((id(lines), box))
+            if cut is None:
+                cut = [CT.clip_segments(segs, *box) for segs in lines["segments"]]
+                self._line_cuts[(id(lines), box)] = cut
+            paths = []
+            for segs, rgb in zip(cut, lines["rgb"]):
+                scr = V.segments_on_screen(segs, T9, self.cam.width, self.cam.height) if len(segs) else segs
+                if len(scr):
+                    paths.append((QColor.fromRgbF(*(float(c) for c in rgb)), segments_path(scr)))
+            if len(self._line_paths) > 64:              # another view: the last one's paths go
+                self._line_paths = {}
+            self._line_paths[key] = paths
+        dpr = self._ratio()
+        shifts = ((0.0, 0.0),) if dpr < 1.5 else ((0.0, 0.0), (1.0 / dpr, 0.0), (0.0, 1.0 / dpr))
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setBrush(Qt.NoBrush)
+        for colour, path in paths:
+            p.setPen(_pen(colour, 1.0))
+            for dx, dy in shifts:
+                p.setTransform(QTransform.fromTranslate(dx, dy))
+                p.drawPath(path)
+        p.restore()
+
+    def _draw_shell_key(self, p: QPainter):
+        """The contour shells' key at the top left: their values in their colours (the volume with Contours ticked),
+        so the picture and a saved one say what each shell is."""
+        key = self.shell_key
+        if not key or not key.get("items"):
+            return
+        fm = QFontMetrics(p.font())
+        h, dot = fm.height(), 0.62 * fm.height()
+        widths = [dot + 4 + fm.horizontalAdvance(t) for _c, t in key["items"]]
+        head = key["head"]
+        bw = 10 + fm.horizontalAdvance(head) + sum(widths) + 10 * len(widths) + 6
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(0, 0, 0, 150))
+        p.drawRoundedRect(QRectF(8.0, 8.0, bw, h + 8), 3, 3)
+        x, y = 14.0, 12.0
+        p.setPen(QColor(225, 225, 230))
+        p.drawText(QRectF(x, y, fm.horizontalAdvance(head) + 2, h), Qt.AlignLeft | Qt.AlignVCenter, head)
+        x += fm.horizontalAdvance(head) + 10
+        for (colour, text), w in zip(key["items"], widths):
+            p.setPen(_pen(colour, 2.0))                 # a ring: a shell seen edge on
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(QRectF(x, y + (h - dot) / 2, dot, dot))
+            p.setPen(colour)
+            p.drawText(QRectF(x + dot + 4, y, w, h), Qt.AlignLeft | Qt.AlignVCenter, text)
+            x += w + 10
+        p.restore()
+
     def _sections(self, p: QPainter, x: float, y: float, k: int, sections, colour, which, near_alpha=210,
                   far_alpha=70):
         """Void k's principal sections 'which' (indices into view3d.SECTIONS): each one's near half bright, its far
@@ -862,6 +979,23 @@ class View3D(QWidget):
         colour = SELECTED if sel else HOVERED if hov else DIM if dim else QUIET if quiet else QColor("white")
         unit = QRectF(-1.0, -1.0, 2.0, 2.0)
         p.setRenderHint(QPainter.Antialiasing, True)
+        if self.crowded() and not (sel or hov):        # many voids: a faint fill and its centre's dot
+            p.save()
+            p.setPen(Qt.NoPen)
+            p.setTransform(QTransform(u[0], u[1], w[0], w[1], x, y))
+            p.setBrush(QColor(colour.red(), colour.green(), colour.blue(), CROWD_FILL_ALPHA.get(self.style, 20)))
+            p.drawEllipse(unit)
+            line = CROWD_LINE_ALPHA.get(self.style, 0)
+            if line:
+                p.setBrush(Qt.NoBrush)
+                p.setPen(_pen(QColor(colour.red(), colour.green(), colour.blue(), line), 1.0))
+                p.drawEllipse(unit)
+                p.setPen(Qt.NoPen)
+            p.setTransform(QTransform())
+            p.setBrush(QColor(colour.red(), colour.green(), colour.blue(), 200))
+            p.drawEllipse(QPointF(x, y), CROWD_DOT_PX, CROWD_DOT_PX)
+            p.restore()
+            return
         p.save()
         p.setTransform(QTransform(u[0], u[1], w[0], w[1], x, y))
         if dim or quiet:                                # a close-up's neighbour, or any void over the volume:
@@ -1197,8 +1331,8 @@ class View3DMixin:
         transfer function, the voids, the view's state line; then the 3D state and the view's signals."""
         g = QGroupBox("3D view")
         v = QVBoxLayout(g)
-        v.addWidget(self._note("The map's field as a translucent volume (or on three planes) with the voids as "
-                               "spheres of their true size. Drag to turn it, right-drag (or shift-drag) to move it, "
+        v.addWidget(self._note("The map's field as a translucent volume (or on three planes) with the voids at "
+                               "their true size. Drag to turn it, right-drag (or shift-drag) to move it, "
                                "scroll to zoom. Click a void to inspect it; double-click it (or Close up) to look at "
                                "it from near."))
         self._build_3d_view_row(v)
@@ -1295,21 +1429,15 @@ class View3DMixin:
         v.addWidget(self.volume3d_box)
 
     def _build_3d_voids(self, v):
-        """The voids' rows: how they are drawn, then the void menu with Close up and Whole box."""
-        shape_label = QLabel("Voids as")
-        self.void3d_shape = QComboBox()
-        for text, shape in SHAPE_ITEMS:
-            self.void3d_shape.addItem(text, shape)
-        tip_auto(self.void3d_shape, SHAPE_TIP)
-        self.void3d_shape.currentIndexChanged.connect(self._3d_shape_changed)
-        v.addLayout(button_row(shape_label, self.void3d_shape))
+        """The voids' row: the void menu with Close up and Whole box (how they are drawn is the Map group's choice,
+        beside the Voids tick: void3d_shape)."""
         row = QHBoxLayout()
         row.addWidget(QLabel("Void"))
         self.void3d = QComboBox()
         self.void3d.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         self.void3d.setMinimumContentsLength(18)
-        tip(self.void3d, "The distinct, well-resolved voids, the largest first (by R_v, or by R_eff when they are "
-                         "drawn as ellipsoids): choose one to inspect it")
+        tip(self.void3d, "The distinct, well-resolved voids, the largest first (by the size drawn: R_ell of the "
+                         "ellipsoids, or R_v): choose one to inspect it")
         self.void3d.activated.connect(self._void3d_chosen)
         row.addWidget(self.void3d, 1)
         self.void3d_close = tip_auto(QPushButton("Close up"), CLOSE_TIP)
@@ -1337,6 +1465,10 @@ class View3DMixin:
         # the volume's shown range on the map's scale and what it is of: {'of': (field, component, log, symmetric),
         # 'lo', 'hi'}; a volume of another field (or scale) opens at its own default range
         self._3d_tf = None
+        self._3d_shells = None                  # the volume's contour shells shown (contours.shell_plan), or None
+        self._3d_within = None                  # (key, cube): a close-up's cube with its own void's shells only
+        self._3d_floor_kept = None              # (key, _3d_void_floor's value or None)
+        self._3d_basin_kept = None              # _3d_basin's dict: a close-up's void up to its outer shell
         self._3d_ticker = QTimer(self, interval=200)   # the averaging's progress, while it runs
         self._3d_ticker.timeout.connect(self._3d_progress)
 
@@ -1442,6 +1574,7 @@ class View3DMixin:
         else:
             self._3d_shown = False
             self._3d_cancel()
+            self._3d_within = self._3d_basin_kept = None    # a close-up's copy of its levels with its shells freed
             view.view3d.set_volume(None)            # its coloured slices (128 MB at 256³) freed; the averaged
             view.view3d.setVisible(False)           # cube stays in volume3d's cache: shown again at once
             view.canvas.setVisible(True)
@@ -1495,10 +1628,14 @@ class View3DMixin:
         style = self.view3d_style.currentData()
         req = {"output": o, "field": name, "component": self.component.currentText(), "cmap": self.cmap.currentText(),
                "log": log, "clip": self.clip.value(), "smooth": self.smooth.value(),
+               "smooth3d": self.smooth3d.isChecked() and self.smooth3d.isEnabled(),
                "symmetric": name in G.DIVERGING and not log,
                "ps_gradient": self.ps_gradient.currentData() or G.PS_GRADIENT_DEFAULT,
                "index": list(self._3d_index), "shown": [cb.isChecked() for cb in self.view3d_axes],
-               "lo": np.asarray(lo, dtype=np.float64), "hi": np.asarray(hi, dtype=np.float64), "style": style}
+               "lo": np.asarray(lo, dtype=np.float64), "hi": np.asarray(hi, dtype=np.float64), "style": style,
+               # the map's Contours tick: the planes' lines, the volume's shells (never on a class map: why_not)
+               "contours": self.contours.isChecked() and not CT.why_not(name, self.cmap.currentText()),
+               "contour_detail": self.contour_detail.value()}
         if style == "volume":
             req["want"] = int(self.view3d_detail.currentData())
             req["detail"], req["note"] = self._3d_detail(o, req["lo"], req["hi"])
@@ -1517,7 +1654,8 @@ class View3DMixin:
                 if self._3d_busy and not flying:
                     self._3d_cancel()               # back to what is shown: the volume under way is moot
                 if shown:
-                    self._3d_res["request"].update(cmap=req["cmap"], note=req["note"])
+                    self._3d_res["request"].update(cmap=req["cmap"], note=req["note"], contours=req["contours"],
+                                                   contour_detail=req["contour_detail"])
                     self._3d_apply_tf()
                 return
         fixed = self._fixed_range(log)
@@ -1624,7 +1762,11 @@ class View3DMixin:
         o = req["output"]
         label = self._gradient_label(req)
         comp = G.component_suffix(req["component"])
-        self.view.colorbar.set(req["cmap"], res["vrange"], G.colourbar_label(label, req), req["log"])
+        lines = res.get("contours")                     # the planes' contour levels: marked, said in the tooltip
+        self.view.colorbar.set(req["cmap"], res["vrange"], G.colourbar_label(label, req), req["log"],
+                               levels=(lines["levels"], lines["colours"]) if lines else None)
+        self.view.colorbar.setToolTip(CT.describe(lines))
+        self._contour_count(lines)
         unit = "Mpc" if o.box is not None else "cells"
         planes = ", ".join(f"{V.AXES[a]} = {pl['pos']:.2f}" for a, pl in enumerate(res["planes"]) if pl is not None)
         where = f"close-up on void {self._3d_close['row']}" if self._3d_close is not None else "the whole box"
@@ -1795,14 +1937,123 @@ class View3DMixin:
             return
         req, tf = res["request"], self._3d_tf
         cmap = self.cmap.currentText()
-        self.view.view3d.set_transfer(tf["lo"], tf["hi"], opacity, cmap, req["symmetric"])
+        prep = res["volume"]
+        # the Contours tick: shells of the map's levels where the volume is clear (contours.shell_plan); in a close-up
+        # of the density around the void looked at, from its own minimum, and drawn only near it
+        shells, cube = None, prep
+        if req.get("contours"):
+            args = (req["field"], prep["levels"], prep["counts"], tf["lo"], bool(req["log"]), bool(req["symmetric"]),
+                    cmap)
+            detail = int(req.get("contour_detail", CT.DETAIL))      # the level slider: the map's levels, its count
+            floor = self._3d_void_floor(res)
+            if floor is None:                           # the whole cube
+                shells = CT.shell_plan(*args, slopes=VOL.level_slopes(prep), cells=max(prep["shape"]), detail=detail)
+            else:                                       # a close-up: the shells of its void's basin, from its floor
+                first = CT.shell_plan(*args, floor=floor, detail=detail)
+                basin = None if first is None else \
+                    self._3d_basin(prep, float(np.max(first["levels"] + 2.0 * first["half"])))
+                if basin is not None:
+                    shells = CT.shell_plan(*args[:2], basin["counts"], *args[3:], floor=floor, slopes=basin["slopes"],
+                                           cells=max(prep["shape"]), detail=detail)
+                    if shells is not None and int(np.prod(prep["shape"])) <= SHELL_COPY_CELLS:
+                        cube = self._3d_shell_cube(prep, basin, CT.shell_spec(shells), bool(req["symmetric"]))
+        if cube is prep:
+            self._3d_within = None                      # a close-up's copy freed once not drawn
+        self._3d_shells = shells
+        spec = CT.shell_spec(shells)
+        v3 = self.view.view3d
+        if v3.volume is not cube:
+            v3.set_volume(cube, res["lo"], res["hi"])
+        v3.shell_key = self._3d_shell_key(shells)
+        v3.set_transfer(tf["lo"], tf["hi"], opacity, cmap, req["symmetric"], shells=spec)
         self.vol3d_lo_text.setText(self._3d_value_text(tf["lo"]))
         self.vol3d_hi_text.setText(self._3d_value_text(tf["hi"]))
         label = self._gradient_label(dict(req, ps_gradient="stored"))      # the volume is of the stored grid
         vr = (-tf["hi"], tf["hi"]) if req["symmetric"] else (tf["lo"], tf["hi"])
+        marks = None
+        if shells:                                      # a shell inside the bar's range is marked there (|value|:
+            pos = shells["levels"]                      # both signs); the rest, below it, are in the key
+            rgba = np.column_stack([shells["colours"] / 255.0, np.ones(len(pos))])
+            if req["symmetric"]:
+                pos, rgba = np.concatenate([-pos, pos]), np.concatenate([rgba, rgba])
+            marks = (pos, rgba)
         self.view.colorbar.set(cmap, vr, G.colourbar_label(label, req)
-                               + (" (|value| shown)" if req["symmetric"] else ""), req["log"])
+                               + (" (|value| shown)" if req["symmetric"] else ""), req["log"], levels=marks)
+        self.view.colorbar.setToolTip(CT.describe_shells(shells) if shells else CT.NO_SHELLS
+                                      if req.get("contours") and req["field"] not in CT.SHELL_FIELDS else "")
+        self._contour_count(shells, "shell")
         self._3d_state()
+
+    def _3d_void_floor(self, res: dict) -> float | None:
+        """A density volume's close-up: the lowest value (the map's scale) near the centre of the void looked at --
+        within VOID_FLOOR_SHARE of its smallest radius (the fitted ellipsoid's c when drawn so, else R_v), at least
+        one cell -- for its contour shells to nest around that void's own minimum (contours.shell_plan's 'floor').
+        None for the whole box, another field or a void without a radius. Kept for the cube, the void and its
+        shape."""
+        close, vres, prep = self._3d_close, self._void_result_3d(), res.get("volume")
+        if close is None or vres is None or prep is None or (res.get("request") or {}).get("field") != "density":
+            return None
+        row = int(close["row"])
+        key = (id(prep), row, tuple(np.round(close["centre"], 9)), self._3d_ellipsoids())
+        if self._3d_floor_kept is not None and self._3d_floor_kept[0] == key:
+            return self._3d_floor_kept[1]
+        small = float(vres["_r_v"][row])
+        drawn = G.drawn_ellipsoids(vres)
+        if self._3d_ellipsoids() and drawn["ok"][row]:
+            small = float(np.min(drawn["semi"][row]))       # the drawn ellipsoid's c
+        lo, hi = np.asarray(prep["lo"], dtype=np.float64), np.asarray(prep["hi"], dtype=np.float64)
+        shape = np.asarray(prep["fine"]["shape"])
+        cell = (hi - lo) / shape
+        c = (np.asarray(close["centre"], dtype=np.float64) - lo) / cell        # the centre in the cube's cells
+        floor = None
+        if np.isfinite(small) and small > 0 and np.all((c >= 0) & (c <= shape)):
+            rad = np.maximum(VOID_FLOOR_SHARE * small / cell, 1.0)
+            a0 = np.clip(np.floor(c - rad).astype(int), 0, shape - 1)
+            a1 = np.clip(np.ceil(c + rad).astype(int) + 1, 1, shape)
+            q = prep["fine"]["q"][a0[0]:a1[0], a0[1]:a1[1], a0[2]:a1[2]]
+            g = np.ogrid[a0[0]:a1[0], a0[1]:a1[1], a0[2]:a1[2]]
+            ball = sum(((g[k] + 0.5 - c[k]) / rad[k]) ** 2 for k in range(3)) <= 1.0
+            inner = q[ball & (q > 0)]
+            floor = float(prep["levels"][int(inner.min())]) if inner.size else None
+        self._3d_floor_kept = (key, floor)
+        return floor
+
+    def _3d_basin(self, prep: dict, top: float) -> dict | None:
+        """A close-up's void up to its outer contour shell (volume3d.basin from its centre), where its shells are
+        drawn: {'key', 'top', 'counts' (its cells' level counts), 'slopes' (the field's slope per level there)};
+        None when the centre is not below 'top'. Kept for the cube, the void and the value (a range slider dragged
+        does not remake it); the mask itself is made again when a copy of the levels needs it (_3d_shell_cube), not
+        held (a byte a cell)."""
+        close = self._3d_close
+        key = (id(prep), tuple(np.round(close["centre"], 9)), round(top, 9))
+        if self._3d_basin_kept is None or self._3d_basin_kept["key"] != key:
+            mask = VOL.basin(prep, close["centre"], top)
+            self._3d_basin_kept = None if mask is None else {
+                "key": key, "top": top, "counts": np.bincount(prep["fine"]["q"][mask], minlength=VOL.LEVELS),
+                "slopes": VOL.level_slopes(prep, mask)}
+            if self._3d_basin_kept is None:
+                return None
+        return self._3d_basin_kept
+
+    def _3d_shell_cube(self, prep: dict, basin: dict, spec, symmetric: bool) -> dict:
+        """A close-up's cube with its own void's contour shells only (volume3d.shells_within its basin: the
+        neighbours' shells left out, the volume's own picture the same); kept while the shells' values and bands,
+        the basin and the cube stay (a range slider dragged redraws it, it does not remake it)."""
+        key = (tuple((s_[0], s_[5]) for s_ in spec), basin["key"])
+        if self._3d_within is None or self._3d_within[0] != key:
+            self._3d_within = None                      # the old copy freed before the new one is made
+            mask = VOL.basin(prep, self._3d_close["centre"], basin["top"])
+            self._3d_within = (key, prep if mask is None else VOL.shells_within(prep, mask, spec, symmetric))
+        return self._3d_within[1]
+
+    def _3d_shell_key(self, shells: dict | None) -> dict | None:
+        """The view's key of the contour shells (View3D.shell_key): each value in its shell's colour."""
+        if not shells:
+            return None
+        head = ("ρ/ρ̄" if shells["field"] == "density" else "|value|" if shells["symmetric"] else "value") + " ="
+        return {"head": "contour shells, " + head,
+                "items": [(QColor(*(int(c) for c in rgb)), f"{v:.0f}" if abs(v) >= 100 else f"{v:.2g}")
+                          for v, rgb in zip(shells["values"], shells["colours"])]}
 
     def _3d_state(self):
         """The title and the state line of the volume shown: its cells, how many of the grid's each averages, how
@@ -1840,9 +2091,15 @@ class View3DMixin:
         res = self._void_cache.get(self._void_cache_key(o))
         return None if not res or "error" in res else res
 
+    def _3d_rows(self, res: dict) -> np.ndarray:
+        """The voids the 3D view draws: the Sizes range by the size drawn (void_rows), with that size defined -- an
+        R_v for the spheres; for the ellipsoids every distinct void (one without an ellipsoid is its centre's mark)."""
+        rows = self.void_rows(res)
+        return rows if self._3d_ellipsoids() else rows[np.isfinite(res["_r_v"][rows])]
+
     def _3d_voids(self):
-        """The spheres over the planes (the distinct, well-resolved voids with an R_v; in a close-up those reaching
-        into its cube, at their periodic image nearest the void looked at) and the void menu."""
+        """The voids over the volume or the planes (their ellipsoids or spheres, as the map draws them; in a close-up
+        those reaching into its cube, at their periodic image nearest the void looked at) and the void menu."""
         v3 = self.view.view3d
         res = self._void_result_3d() if self._3d_shown else None
         self._3d_fill_list(res)
@@ -1851,13 +2108,14 @@ class View3DMixin:
             v3.set_voids(None)
             self._3d_buttons()
             return
-        rows = self.void_rows(res, "_r_eff" if self._3d_ellipsoids() else "_r_v")     # the Sizes range, by the size drawn
-        rows = rows[np.isfinite(res["_r_v"][rows])]
+        rows = self._3d_rows(res)                   # the Sizes range, by the size drawn
         if self._3d_close is not None and self._3d_close["row"] not in rows:
             rows = np.append(rows, self._3d_close["row"])        # the void looked at stays, whatever its size
         centres = res["_centres"][rows]
         M, reach, labels = self._3d_shapes(res, rows)
-        r_eff = res["_r_eff"][rows] if self.void_reff.isChecked() else None
+        r_eff = None                        # the other radius, dashed: R_eff beside the spheres, R_v beside ellipsoids
+        if self.void_reff.isChecked():
+            r_eff = res["_r_v" if self._3d_ellipsoids() else "_r_eff"][rows]
         box = float(res["box_mpc"])
         if self._3d_close is not None:
             centres = V.nearest_images(centres, self._3d_close["centre"], box)
@@ -1875,19 +2133,21 @@ class View3DMixin:
         return self.void3d_shape.currentData() == "ellipsoid"
 
     def _3d_shapes(self, res: dict, rows) -> tuple[np.ndarray, np.ndarray, list]:
-        """The voids' shapes as drawn (view3d: centre + M u, |u| <= 1): spheres of R_v, or the fitted ellipsoids
-        (a void without a fit keeps its sphere); the radius each reaches (R_v, or a); their labels."""
+        """The voids' shapes as drawn (view3d: centre + M u, |u| <= 1): spheres of R_v, or the ellipsoids at the mean
+        density (grids.drawn_ellipsoids: the map's; a void without one is a small sphere at its centre, its mark);
+        the radius each reaches (R_v, or a); their labels."""
         rows = np.asarray(rows, dtype=np.int64)
         r_v = res["_r_v"][rows]
-        M, reach = V.sphere_matrices(r_v), r_v.copy()
-        labels = [f"void {k} · R_v {r:.2f} Mpc" for k, r in zip(rows, r_v)]
-        if self._3d_ellipsoids() and "_semi" in res:
-            semi = res["_semi"][rows]
-            fit = np.all(np.isfinite(semi) & (semi > 0), axis=1)
-            M[fit] = V.ellipsoid_matrices(semi[fit], res["_dirs"][rows][fit])
-            reach[fit] = semi[fit].max(axis=1)
-            labels = [f"void {k} · a, b, c = " + ", ".join(f"{s:.2f}" for s in semi[j]) + " Mpc" if fit[j]
-                      else labels[j] for j, k in enumerate(rows)]
+        if not self._3d_ellipsoids():
+            return V.sphere_matrices(r_v), r_v.copy(), [f"void {k} · R_v {r:.2f} Mpc" for k, r in zip(rows, r_v)]
+        d = G.drawn_ellipsoids(res)
+        ok = d["ok"][rows]
+        mark = MARK_CELLS * float(res.get("cell_mpc") or res["box_mpc"] / res["n_grid"])
+        M = V.sphere_matrices(np.full(len(rows), mark))
+        M[ok] = d["M"][rows][ok]
+        reach = np.where(ok, d["semi"][rows][:, 0], mark)
+        labels = [f"void {k} · a, b, c = " + ", ".join(f"{s:.2f}" for s in d["semi"][k]) + " Mpc" if ok[j]
+                  else f"void {k} · no ellipsoid (its centre)" for j, k in enumerate(rows)]
         return M, reach, labels
 
     def _3d_shape_changed(self, *_):
@@ -1908,14 +2168,15 @@ class View3DMixin:
         if res is None:
             self.void3d.addItem("tick 'Voids' above" if not self.voids.isChecked() else "no voids (yet)", None)
         else:
-            name, key_r = ("R_eff", "_r_eff") if self._3d_ellipsoids() else ("R_v", "_r_v")
-            rows = self.void_rows(res, key_r)
-            rows, radius = rows[np.isfinite(res["_r_v"][rows])], res[key_r]
+            key_r = self._void_radius_key()
+            name = "R_ell" if key_r == "_r_ell" else "R_v"
+            rows, radius = self._3d_rows(res), res[key_r]
             self.void3d.addItem(f"{len(rows)} voids: choose one" if len(rows) else "no void in the Sizes range", None)
             for k in sorted(rows, key=lambda k: -np.nan_to_num(radius[k], nan=-1.0)):
                 delta = res["delta"][k]
-                self.void3d.addItem(f"void {k} · {name} {radius[k]:.2f} Mpc"
-                                    + ("" if delta is None else f" · δ {float(delta):.2f}"), int(k))
+                size = f"{name} {radius[k]:.2f} Mpc" if np.isfinite(radius[k]) else "no ellipsoid"
+                self.void3d.addItem(f"void {k} · {size}" + ("" if delta is None else f" · δ {float(delta):.2f}"),
+                                    int(k))
         self.void3d.blockSignals(False)
         self._3d_list_select()
 
@@ -1959,7 +2220,7 @@ class View3DMixin:
         row = int(row)
         c = np.asarray(res["_centres"][row], dtype=np.float64)
         reach = float(self._3d_shapes(res, [row])[1][0])         # the drawn shape's reach: R_v, or the ellipsoid's a
-        r = float(res["_r_eff"][row]) if self._3d_ellipsoids() else reach      # its radius: R_v, or R_eff
+        r = float(res[self._void_radius_key()][row])            # its size: R_v, or the ellipsoid's R_ell
         if not np.isfinite(r):
             r = reach
         if not np.isfinite(r):
@@ -2024,8 +2285,8 @@ class View3DMixin:
         v3 = self.view.view3d
         v3.painter_only = True                  # QPainter's picture, as the tests hold it (not the GPU's)
         try:
+            v3._fast = False                    # the settled picture: the planes' lines and cuts too
             if v3.style == "volume" and v3.volume is not None:
-                v3._fast = False
                 v3.volume_picture()
             if not v3.grab().save(str(path)):
                 raise OSError(f"could not write {path}")

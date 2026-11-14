@@ -28,6 +28,16 @@
 #   C15 the deprecated spellings share the canonical names' settings key: a run killed with '--ps-exact-deposit
 #       --lambda_th 0.3' resumes under '--exact --lambda-th 0.3', every output byte-identical to an
 #       uninterrupted run with the canonical names
+#   C16 the settings key names the fixed-point units (its 'units=' line, src/fixed_units.h runUnitsKeyLine): a run
+#       killed in the default's per-pass units is refused under DTFE_PS_RUN_UNITS=1 (the run-wide units), naming both
+#       lines, and resumes with DTFE_RUN_UNITS_LEGACY=1 beside that switch (the per-pass units again: it beats it)
+#   C17 the word merge ('--ps-merge fixed-point', single build; fix 3 S6): a run killed after 20 partitions holds
+#       their words, and the key's 'units=' line lists every accumulator's unit ('units=run-wide ... K=mass:...');
+#       refused by name, the checkpoint kept: a '--resume' without '--ps-merge' (the mode is not taken from the
+#       checkpoint: the merge-mode line), one with other units (DTFE_TEST_RUN_UNIT_SHIFT=1) and one under
+#       DTFE_RUN_UNITS_LEGACY=1 (the merge of before), each naming both 'units=' lines; '--ps-merge fixed-point
+#       --resume' at another --max-concurrent (the merge is order-free) writes the uninterrupted word-merge run's
+#       outputs byte for byte. The double build refuses the option: SKIP
 #   C8  GPU builds only: a killed '--ps-gpu' run (the deprecated spelling) resumes under '--gpu' to the exactly summed
 #       grids of an uninterrupted '--gpu' run byte for byte in EVERY grid, the velocity and dispersion included (exact
 #       fixed-point sums); SKIP otherwise
@@ -234,6 +244,64 @@ OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/x" "${X_NEW[@]}" --resume > "$TMP/x2.log"
     && grep -q "^warning: --ordered-merge is deprecated, use --ps-merge index-order$" "$TMP/x1.log" && ! grep -q "deprecated" "$TMP/x2.log"
 check "C15 killed with the old spellings after $nx partitions (each warned), resumed with the canonical ones (exit $rc1, $rc2)" $?
 same "$TMP/xref" "$TMP/x"; check "C15 every output byte-identical to the uninterrupted run with the canonical names" $?
+
+echo ">> C16: a checkpoint in the other fixed-point units is refused (DTFE_PS_RUN_UNITS)"
+# killed in the default's per-pass units, whatever the caller's environment selects for the other checks
+OMP_NUM_THREADS=4 DTFE_TEST_EXIT_AFTER_PARTITIONS=5 env -u DTFE_RUN_UNITS_LEGACY -u DTFE_PS_RUN_UNITS "$BIN" "$SNAP" \
+    "$TMP/ru" "${C[@]}" --verbose 2 --max-concurrent 4 > "$TMP/ru.log" 2>&1; rc1=$?
+OMP_NUM_THREADS=4 env -u DTFE_RUN_UNITS_LEGACY DTFE_PS_RUN_UNITS=1 "$BIN" "$SNAP" "$TMP/ru" "${C[@]}" --verbose 2 \
+    --max-concurrent 4 --resume > "$TMP/ru2.log" 2>&1; rc2=$?
+[ "$rc1" = 137 ] && [ "$rc2" != 0 ] && grep -q "'--resume' refused" "$TMP/ru2.log" \
+    && grep -qF "checkpoint: units=legacy N=48/61/72 shift=0" "$TMP/ru2.log" \
+    && grep -qF "this run  : units=run-wide N=48/61/72 shift=0" "$TMP/ru2.log" \
+    && grep -qF "passes sum in units of their own" "$TMP/ru.log" && [ -s "$TMP/ru.runlog.checkpoint/checkpoint" ]
+check "C16 killed in the per-pass units (exit $rc1), refused under DTFE_PS_RUN_UNITS=1 naming both 'units=' lines; the checkpoint is kept" $?
+OMP_NUM_THREADS=4 DTFE_RUN_UNITS_LEGACY=1 DTFE_PS_RUN_UNITS=1 "$BIN" "$SNAP" "$TMP/ru" "${C[@]}" --verbose 2 \
+    --max-concurrent 4 --resume > "$TMP/ru3.log" 2>&1; rc3=$?
+[ "$rc3" = 0 ] && grep -q -- "--resume: [0-9]* of 64 partitions are already in the checkpoint" "$TMP/ru3.log" \
+    && [ ! -e "$TMP/ru.runlog.checkpoint" ]
+check "C16 resumed with DTFE_RUN_UNITS_LEGACY=1 beside the switch (exit $rc3): the per-pass units, the same key" $?
+rm -rf "$TMP/ru.runlog.checkpoint"
+
+echo ">> C17: the word merge (--ps-merge fixed-point): killed, the refusals, resumed"
+if precision_double; then
+    echo "  SKIP C17: the double build refuses '--ps-merge fixed-point'"
+else
+    # the run-wide units come with the option itself; the switches and hooks that would steer them, off
+    WE=(env -u DTFE_RUN_UNITS_LEGACY -u DTFE_PS_RUN_UNITS -u DTFE_TEST_RUN_UNIT_SHIFT -u DTFE_GPU_FLOAT_MASS
+        -u DTFE_GPU_FLOAT_MOMENTS OMP_NUM_THREADS=4)
+    W=("${C[@]}" --verbose 2 --ps-merge fixed-point)
+    "${WE[@]}" "$BIN" "$SNAP" "$TMP/wref" "${W[@]}" --max-concurrent 4 > "$TMP/wref.log" 2>&1 \
+        || { echo "FAIL: wref (see $TMP/wref.log)"; exit 1; }
+    "${WE[@]}" DTFE_TEST_EXIT_AFTER_PARTITIONS=20 "$BIN" "$SNAP" "$TMP/w" "${W[@]}" --max-concurrent 4 \
+        > "$TMP/w1.log" 2>&1; rc1=$?
+    WK="$TMP/w.runlog.checkpoint"
+    nw="$(merged_count "$WK" 2>/dev/null || echo 0)"
+    [ -s "$WK/checkpoint" ] || no_checkpoint_why "$TMP/w1.log" "$TMP"
+    [ "$rc1" = 137 ] && [ "${nw:-0}" -ge 20 ] && [ "${nw:-0}" -lt 64 ] && grep -aq "^merge=fixed-point" "$WK/checkpoint" \
+        && grep -aq "^units=run-wide N=48/61/72 shift=0 K=mass:" "$WK/checkpoint" \
+        && grep -aq "^field x.fxw.u.mass 8 " "$WK/checkpoint" && ! grep -aq "^field u.density " "$WK/checkpoint"
+    check "C17 killed (exit $rc1) after ${nw:-?} of 64 partitions: their words in the checkpoint, the key's units line with its K list" $?
+    "${WE[@]}" "$BIN" "$SNAP" "$TMP/w" "${C[@]}" --verbose 2 --max-concurrent 4 --resume > "$TMP/w_mode.log" 2>&1; rc1=$?
+    "${WE[@]}" DTFE_TEST_RUN_UNIT_SHIFT=1 "$BIN" "$SNAP" "$TMP/w" "${W[@]}" --max-concurrent 4 --resume \
+        > "$TMP/w_shift.log" 2>&1; rc2=$?
+    "${WE[@]}" DTFE_RUN_UNITS_LEGACY=1 "$BIN" "$SNAP" "$TMP/w" "${W[@]}" --max-concurrent 4 --resume \
+        > "$TMP/w_leg.log" 2>&1; rc3=$?
+    [ "$rc1" != 0 ] && grep -q "was written by a run with '--ps-merge fixed-point'" "$TMP/w_mode.log" \
+        && [ "$rc2" != 0 ] && grep -qF "holds the '--ps-merge fixed-point' sums of other fixed-point units" "$TMP/w_shift.log" \
+        && grep -qF "checkpoint: units=run-wide N=48/61/72 shift=0 K=mass:" "$TMP/w_shift.log" \
+        && grep -qF "this run  : units=run-wide N=48/61/72 shift=1 K=mass:" "$TMP/w_shift.log" \
+        && [ "$rc3" != 0 ] && grep -qF "checkpoint: units=run-wide N=48/61/72 shift=0 K=mass:" "$TMP/w_leg.log" \
+        && grep -qF "this run  : units=legacy N=48/61/72 shift=0" "$TMP/w_leg.log" \
+        && [ -s "$WK/checkpoint" ] && [ ! -e "$TMP/w.den" ]
+    check "C17 refused, the checkpoint kept: no '--ps-merge' (exit $rc1), other units (exit $rc2), the merge of before (exit $rc3)" $?
+    "${WE[@]}" "$BIN" "$SNAP" "$TMP/w" "${W[@]}" --max-concurrent 2 --resume > "$TMP/w2.log" 2>&1; rc=$?
+    [ "$rc" = 0 ] && grep -q -- "--resume: $nw of 64 partitions are already in the checkpoint" "$TMP/w2.log" \
+        && grep -qF "words added to the checkpoint's as it finishes" "$TMP/w2.log" && [ ! -e "$WK" ]
+    check "C17 '--ps-merge fixed-point --resume' at --max-concurrent 2 (exit $rc) continued the $nw partitions' words" $?
+    same "$TMP/wref" "$TMP/w"; check "C17 every output byte-identical to the uninterrupted word-merge run" $?
+    rm -rf "$WK"
+fi
 
 echo ">> C8: a killed --ps-gpu run, resumed under --gpu"
 OBJ=o_ps; precision_double && OBJ=o_ps_d

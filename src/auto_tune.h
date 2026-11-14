@@ -28,7 +28,12 @@
      DTFE_AUTO_SPAN     0 = PS-DTFE books a partition's sub-grid as G/n + 40 cells per axis (the model before
                         2026-11-07) instead of each partition's Eulerian span measured on the particles (default 1)
      DTFE_DYNAMIC_CONCURRENCY  0 = PS-DTFE's partition loop runs the plan's number of partitions at once; by default,
-                        over a concurrency the tuner chose, more while the live memory holds them (PartitionMemoryGate) */
+                        over a concurrency the tuner chose, more while the live memory holds them (PartitionMemoryGate)
+     DTFE_AUTO_TIME     1 = the time objective (both binaries, from DTFE_AUTO_MINN particles; off by default): among
+                        the plans the memory model accepts, the one with the smallest predicted partition loop, where
+                        it beats the memory objective's plan by 10% (auto_tune.cc kAutoTimeGain); only where its
+                        constants were calibrated, else the memory objective's plan and the reason
+                        (docs/cleanup-plan.md P8.8, P8.9) */
 
 /* This header is the tuner's interface: the machine queries (RAM, free memory, the budget, the cores), the report,
    the partition memory gate and the entry points. The model itself -- the bytes per cell and per vertex, the
@@ -65,7 +70,7 @@
 #include "user_options.h"
 #include "particle_data.h"
 #include "env_knobs.h"
-#include "run_mode.h"      // the run mode's core budget (autoTuneCores) and start-up threads (autoTuneGpuShare)
+#include "run_mode.h"      // the run mode's core budget (autoTuneCores) and threads (autoTuneGpuShare)
 
 
 // The free memory the tuner leaves untouched: the budget is capped at what the other programs leave free minus this,
@@ -103,6 +108,20 @@ inline double psDepositThreadBytes()
         return v * 1.e9;
     return std::max( 2.e9, 0.2 * autoTunePhysicalRAM() );
 }
+
+#ifdef PHASE_SPACE
+// PS-DTFE's face walk beside the GPU deposit (ps_interpolation.cc PSEarlyFaceWalk): a '--face-gradient' pass that
+// deposits on the GPU walks its face sums on a helper thread while the device deposits, instead of after the deposit.
+// The pass then makes the face sums' words before its device call and holds them through it, which the partition
+// model books (auto_tune.cc AutoTunePSInputs::earlyFace) wherever this says the walk is on. The walk is the default
+// (the same output bytes as the walk after the deposit); DTFE_FACE_WALK_EARLY=0 is a developer's off switch, to
+// measure the walk after the deposit against it once more, and =1 means what the default means. Not a user option.
+constexpr bool kPsFaceWalkEarlyDefault = true;
+inline bool psFaceWalkEarly()
+{
+    return Env::flag( "DTFE_FACE_WALK_EARLY", kPsFaceWalkEarlyDefault );
+}
+#endif
 
 // Bytes free for NEW allocations right now (what every program, this one included, leaves free);
 // < 0 when the OS cannot tell. DTFE_FREE_GB overrides it (tests).
@@ -295,17 +314,32 @@ struct AutoTuneReport
     // over it (ScratchAlloc::ZeroFillScope): the particles + the read blocks kept + the largest pre-sized grid.
     // 'predicted' is at least this (0: no scratch-backed grid, or Linux, where the scope is a no-op)
     double reservePeak = 0.;
+    // the time objective (DTFE_AUTO_TIME=1, auto_tune.cc): the predicted partition loop and whole run of the plan
+    // taken, and the whole run of the memory objective's plan, in seconds (-1: no prediction -- the switch off, a
+    // configuration it is not calibrated for, or a plan it does not reach)
+    double timeLoop = -1., timeWall = -1., timeWallMem = -1.;
+    // PS-DTFE with the face walk beside the GPU deposit (auto_tune.h psFaceWalkEarly): the face sums' words one
+    // partition holds through its device call, booked beside every lane's hold (in 'predicted'; 0: no such walk)
+    double faceWalk = 0.;
     std::string line() const
     {
         if ( not valid ) return "AUTO-TUNE-REPORT unsupported";
-        // (the GPU snapshot and the look-ahead are in 'predicted' too, listed so a check can see each term; the
-        // parsers read key=value pairs, and over_budget stays last)
+        // (the GPU snapshot and the look-ahead are in 'predicted' too, listed so a check can see each term, and so
+        // are the face walk's words where they are booked; the time objective's two keys follow where it predicted.
+        // Each only then, so every other line stays as it was; the parsers read key=value pairs, and over_budget
+        // stays last)
+        char walk[64] = "";
+        if ( faceWalk > 0. ) snprintf( walk, sizeof(walk), "facewalk_gb=%.3f ", faceWalk/1.e9 );
+        char t[80] = "";
+        if ( timeWall > 0. )
+            snprintf( t, sizeof(t), "time_s=%.0f time_mem_s=%.0f ", timeWall, timeWallMem );
         char b[480];
         snprintf( b, sizeof(b), "AUTO-TUNE-REPORT partition=%d mc=%d predicted_gb=%.2f budget_gb=%.2f "
                   "fixed_gb=%.2f pts_gb=%.3f streams_est=%.3f streams_budget=%.3f snapshot_gb=%.3f lookahead_gb=%.3f "
-                  "over_budget=%d",
+                  "%s%sover_budget=%d",
                   partition, maxConcurrent, predicted/1.e9, budget/1.e9, fixed/1.e9, pts/1.e9,
-                  streamsEstimate, streamsBudgeted, gpuSnapshot/1.e9, lookAhead/1.e9, predicted > budget ? 1 : 0 );
+                  streamsEstimate, streamsBudgeted, gpuSnapshot/1.e9, lookAhead/1.e9, walk, t,
+                  predicted > budget ? 1 : 0 );
         return b;
     }
 };
@@ -322,9 +356,12 @@ AutoTuneReport autoTunePartitioning(User_options &u,
    run's exact deposits that run on the GPU, the others on the free cores at once (auto_tune.cc; the run modes'
    decision D11, docs/cleanup-plan.md). In performance, for the single build without the float sums, from
    DTFE_AUTO_MINN particles and at 4 or more start-up threads N0, it is 50*lround(20/(1 + rho (N0 - 1.8))) clamped to
-   [500, 1000] (600 on the 10-core M1 Max; rho 0.09, DTFE_GPU_SHARE_RHO); else 1000. 'why' says which rule decided and
-   its inputs, e.g. 'performance, 10 threads, rho 0.09' or 'balanced: every partition on the GPU'. */
-long autoTuneGpuShare(User_options const &u, double nParticles, std::string &why);
+   [500, 1000] (600 on the 10-core M1 Max; rho 0.09, DTFE_GPU_SHARE_RHO); else 1000. everyMode ('--gpu-share mixed')
+   applies the same model in gentle and balanced too, on the mode's own threads in place of N0 (balanced 750 on the
+   M1 Max's 6; never a '--max-concurrent' raise). 'why' says which rule decided and its inputs, beginning with the
+   run mode, e.g. 'performance, 10 threads, rho 0.09', 'balanced, 6 threads, rho 0.09' or 'balanced: every partition
+   on the GPU'. */
+long autoTuneGpuShare(User_options const &u, double nParticles, std::string &why, bool everyMode);
 
 /* '--serve' on data too large for ONE tessellation: turn it into a composite server (ps_point_eval.cc)
    of n^3 partitions -- when '--tessellation-cache' lets the partitions live on disk. Without the

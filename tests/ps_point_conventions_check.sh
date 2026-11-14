@@ -112,10 +112,12 @@ for est in linear geometric; do
     run "${TMP}/b_${est}_true" "${TMP}/in_lin.hdf5" --field density_a --exact \
         --sample-points "${TMP}/in_slab.bin" --ps-stream-density "${est}"
 done
-# the comparison is the nSub = 3 sampled deposit, which 'density_a' alone no longer selects
-run "${TMP}/b_sampled_grid"   "${TMP}/in_pic.hdf5" --field density_a "${VMW[@]}" --sampled --sample-points "${TMP}/in_slab.bin"
-run "${TMP}/b_sampled_legacy" "${TMP}/in_pic.hdf5" --field density_a "${VMW[@]}" --sampled --sample-points "${TMP}/in_slab.bin" \
-    --ps-point-conventions legacy
+# the comparison is the nSub = 3 sampled deposit ('--sampled --subsamples 3': 'density_a' alone selects the exact
+# one, and '--sampled' alone takes 1 point per cell axis)
+run "${TMP}/b_sampled_grid"   "${TMP}/in_pic.hdf5" --field density_a "${VMW[@]}" --sampled --subsamples 3 \
+    --sample-points "${TMP}/in_slab.bin"
+run "${TMP}/b_sampled_legacy" "${TMP}/in_pic.hdf5" --field density_a "${VMW[@]}" --sampled --subsamples 3 \
+    --sample-points "${TMP}/in_slab.bin" --ps-point-conventions legacy
 echo ">> C: uniform near-lattice box"
 for est in linear geometric; do
     run "${TMP}/c_${est}_full" "${TMP}/in_uni.hdf5" --field density_a "${VMW[@]}" --exact \

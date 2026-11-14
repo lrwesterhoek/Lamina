@@ -71,6 +71,9 @@ run_program_suites() {
     step "slab-mode deposit == serial";         tests/ps_slab_deposit_check.sh --no-build
     step "exact mass grid (CPU fixed point)";   tests/ps_mass_exact_check.sh --no-build
     step "exact moment grids (fixed point; thread-count independent)"; tests/ps_fixed_moments_check.sh --no-build
+    # PS-DTFE's switch for the run-wide units (its default is a unit per pass): the same suite on the 128-bit words
+    step "exact moment grids (PS-DTFE in the run-wide units)"
+    DTFE_PS_RUN_UNITS=1 tests/ps_fixed_moments_check.sh --no-build
     step "caustic stratification";              tests/ps_caustic_class_check.sh --no-build
     step "tessellation cache";                  tests/ps_tessellation_cache_check.sh --no-build
     step "PS point evaluation";                 tests/ps_point_eval_check.sh --no-build
@@ -79,6 +82,8 @@ run_program_suites() {
     step "exact point location + --serve";      tests/point_exact_serve_check.sh --no-build
     step "exact hidden-streams flag";           tests/ps_hidden_streams_check.sh --no-build
     step "window == full run";                  tests/ps_window_check.sh --no-build
+    step "window == full run (PS-DTFE in the run-wide units)"
+    DTFE_PS_RUN_UNITS=1 tests/ps_window_check.sh --no-build
     step "non-periodic suite";                  "$PY" tests/ps_nonperiodic_test.py --no-build
     step "batch drivers";                       tests/run_scripts_check.sh --no-build
     step "T-web (tidal tensor)";                tests/tweb_check.sh --no-build

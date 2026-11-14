@@ -1,16 +1,85 @@
 """The Explore tab's drawing widgets (explore.py re-exports them): ImageCanvas, the map -- an RGB array scaled to
-fit, with its axes, scale bar, vector arrows, void outlines and the figure grid's panel labels, reporting the image
-pixel under the mouse, clicks and dragged rectangles -- and ColorBar, the map's colour scale with its ticks and the
-quantity's name. Qt and numpy only: no workers, no state of the Explore pane."""
+fit, with its axes, scale bar, contour lines, vector arrows, void outlines and the figure grid's panel labels,
+reporting the image pixel under the mouse, clicks and dragged rectangles -- and ColorBar, the map's colour scale with
+its ticks, the contour levels and the quantity's name. Qt and numpy only: no workers, no state of the Explore pane."""
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
-from PySide6.QtCore import QLineF, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QImage, QLinearGradient, QPainter, QPen, QPixmap
+from PySide6.QtCore import QByteArray, QDataStream, QIODevice, QLineF, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFontMetrics, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QLabel, QSizePolicy, QWidget
 
+import contours as C
 import grids as G
+
+
+def segments_path(segs) -> QPainterPath:
+    """One QPainterPath of line pieces ((k, 2, 2) arrays, or a list of them): a move to each piece's first end and a
+    line to its second. Read from QDataStream bytes made in numpy -- QPainterPath's stream format: the element count,
+    each element's type and x, y (big-endian int32 and doubles), the start of the last subpath and the fill rule (two
+    int32) -- so a slice's hundreds of thousands of pieces cost no Python loop; built element by element should the
+    stream not give them all back."""
+    parts = segs if isinstance(segs, (list, tuple)) else [segs]
+    arrs = [np.asarray(s, dtype=np.float64).reshape(-1, 2, 2) for s in parts]
+    pts = np.concatenate([a.reshape(-1, 2) for a in arrs]) if arrs else np.zeros((0, 2))
+    path = QPainterPath()
+    n = int(pts.shape[0])
+    if n == 0:
+        return path
+    rec = np.zeros(n, dtype=[("t", ">i4"), ("x", ">f8"), ("y", ">f8")])
+    rec["t"][1::2] = 1                              # QPainterPath.MoveToElement = 0, LineToElement = 1
+    rec["x"], rec["y"] = pts[:, 0], pts[:, 1]
+    raw = QByteArray(np.array([n], ">i4").tobytes() + rec.tobytes() + np.array([n - 2, 0], ">i4").tobytes())
+    stream = QDataStream(raw, QIODevice.ReadOnly)   # 'raw' stays referenced while the stream reads it
+    stream >> path
+    if path.elementCount() != n:
+        path = QPainterPath()
+        for (x0, y0), (x1, y1) in pts.reshape(-1, 2, 2).tolist():
+            path.moveTo(x0, y0)
+            path.lineTo(x1, y1)
+    return path
+
+
+def contour_paths(per_level, colours) -> list:
+    """The canvas's contour groups: [(QColor, QPainterPath)], one path per line colour (contours.colours: black or
+    white) holding every level of that colour, from 'per_level' (one (k, 2, 2) array of image pixels per level).
+    Built on the slice worker's thread with the slice; the canvas only strokes them."""
+    groups: dict = {}
+    for segs, rgba in zip(per_level, colours):
+        if np.size(segs):
+            groups.setdefault(tuple(int(round(255 * c)) for c in rgba[:3]), []).append(segs)
+    return [(QColor(*rgb), segments_path(segs)) for rgb, segs in groups.items()]
+
+
+def stroke_layer(paths, size: tuple) -> QImage:
+    """The contour lines' layer: contour_paths' 'paths' (image pixels) stroked opaque and antialiased on a transparent
+    picture of 'size' = (width, height, device pixel ratio, image width, image height) -- the layer ImageCanvas lays
+    over its map (ImageCanvas.layer_size). The pen is a cosmetic ONE pixel wide: Qt strokes those directly, while a
+    wider pen outlines the whole path first (a slice's hundreds of thousands of pieces take seconds then, not
+    milliseconds); on a high-dpi screen the line is that stroke repeated one device pixel right and one down, about
+    one point wide. Runs on any thread (a QImage): the slice worker strokes a new slice's lines at the size the canvas
+    showed the last one, so a scroll (or the level slider) does not stroke them on the GUI thread."""
+    w, h, dpr, iw, ih = size
+    layer = QImage(int(w), int(h), QImage.Format_ARGB32_Premultiplied)
+    layer.fill(Qt.transparent)
+    q = QPainter(layer)
+    q.setRenderHint(QPainter.Antialiasing, True)
+    sx, sy = w / float(iw), h / float(ih)               # image pixels -> the layer's pixels
+    shifts = ((0, 0),) if dpr < 1.5 else ((0, 0), (1, 0), (0, 1))
+    for colour, path in paths:
+        pen = QPen(colour, 1.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        pen.setCosmetic(True)                           # one layer pixel wide, whatever the scale
+        for dx, dy in shifts:
+            q.resetTransform()
+            q.translate(dx, dy)
+            q.scale(sx, sy)
+            q.strokePath(path, pen)
+    q.end()
+    layer.setDevicePixelRatio(dpr)
+    return layer
 
 
 class ImageCanvas(QLabel):
@@ -31,11 +100,23 @@ class ImageCanvas(QLabel):
         self._drag: QRectF | None = None     # the rectangle being dragged out (view coordinates)
         self.marker: tuple[int, int] | None = None
         self.arrows: dict | None = None     # grids.OutputSet.arrow_field(), drawn over the map
-        self.circles: list | None = None    # grids.void_circles(): [(x, y, rx, ry, k)] in image pixels, the void outlines
+        # the void outlines in image pixels (grids.void_overlay): circles [(x, y, rx, ry, k)] -- spheres of R_v -- or
+        # the ellipsoids' sections [(x, y, rx, ry, angle, k)], turned by 'angle' degrees (QPainter's sense)
+        self.circles: list | None = None
         self.dashed: list | None = None     # the same for the R_eff outlines, drawn dashed
         # the figure grid: per circle (circles, then dashed) the tile (x0, y0, w, h) in image pixels it is clipped to
         self.circle_clips: list | None = None
+        # the voids drawn as their ellipsoids: each centre's mark [(x, y, k, own)] in image pixels (filled on the
+        # centre's own layer); for the figure grid each one's tile to clip to
+        self.marks: list | None = None
+        self.mark_clips: list | None = None
         self.labels: list | None = None     # [(x, y, text)] in image pixels: the figure grid's panel labels
+        # contour_paths(): [(QColor, QPainterPath in image pixels)], the contour lines under the arrows and outlines
+        self.contours: list | None = None
+        self._contour_layer = None          # (key, contours, QImage): the lines stroked at this size, kept while held
+        # (size, paths, QImage): 'paths' (the very list set as 'contours') stroked by the slice worker at the size it
+        # expected (stroke_layer), or None; taken only while it is of the lines shown and of the map's size now
+        self.contour_layer: tuple | None = None
         # {"x": (lo, hi, name), "y": (lo, hi, name), "unit": "Mpc"|"cells"}: the axes drawn around the image
         # (x increasing to the right, y UPWARD) and the scale bar; None for the figure grid's tiles
         self.axes: dict | None = None
@@ -96,10 +177,14 @@ class ImageCanvas(QLabel):
         # smooth when shrinking a big slice; crisp cells when a small grid is blown up
         p.setRenderHint(QPainter.SmoothPixmapTransform, self._img.width() > t.width())
         p.drawImage(t, self._img)
+        if self.contours:
+            self._draw_contours(p, t, dpr)
         if self.arrows is not None:
             self._draw_arrows(p, t)
         if self.circles or self.dashed:
             self._draw_circles(p, t)
+        if self.marks:
+            self._draw_marks(p, t)
         if self.labels:
             self._draw_labels(p, t)
         if self.axes:
@@ -119,6 +204,35 @@ class ImageCanvas(QLabel):
             p.drawRect(self._drag)
         p.end()
         self.setPixmap(pm)
+
+    def layer_size(self, t: QRectF | None = None, dpr: float | None = None) -> tuple | None:
+        """The contour layer's size for the map shown now (stroke_layer's 'size': its pixels, the device pixel ratio
+        and the image's size), None without a map: the slice worker strokes the next slice's lines at it."""
+        t = self._target() if t is None else t
+        if t is None:
+            return None
+        dpr = self.devicePixelRatioF() if dpr is None else dpr
+        return (max(1, math.ceil(t.width() * dpr)), max(1, math.ceil(t.height() * dpr)), float(dpr),
+                self._img.width(), self._img.height())
+
+    def _draw_contours(self, p: QPainter, t: QRectF, dpr: float):
+        """The contour lines: their layer (stroke_layer) laid over the map at contours.ALPHA -- stroked opaque, as a
+        translucent pen would darken every point where two pieces of a line meet. The layer the slice worker stroked
+        with the lines is taken when it has this size; else (a new size: the window resized, a first slice) it is
+        stroked here. Kept until the lines, the map's place or the screen's scale change (a drag redraws often)."""
+        key = (round(t.left(), 3), round(t.top(), 3), round(t.width(), 3), round(t.height(), 3), dpr,
+               self._img.width(), self._img.height())
+        held = self._contour_layer
+        if held is None or held[0] != key or held[1] is not self.contours:
+            size = self.layer_size(t, dpr)
+            ready = self.contour_layer
+            fits = ready is not None and ready[0] == size and ready[1] is self.contours
+            layer = ready[2] if fits else stroke_layer(self.contours, size)
+            self._contour_layer = (key, self.contours, layer)
+        p.save()
+        p.setOpacity(C.ALPHA)
+        p.drawImage(t, self._contour_layer[2])
+        p.restore()
 
     def _draw_labels(self, p: QPainter, t: QRectF):
         """White text on a translucent box at image positions (the grid's 'z = 1.50' per panel)."""
@@ -228,16 +342,45 @@ class ImageCanvas(QLabel):
         p.setBrush(Qt.NoBrush)
         solid, dashed = list(self.circles or []), list(self.dashed or [])
         clips = self.circle_clips if self.circle_clips and len(self.circle_clips) == len(solid) + len(dashed) else None
-        for j, (x, y, rx, ry, _k) in enumerate(solid + dashed):
+        for j, o in enumerate(solid + dashed):
+            x, y, rx, ry = o[:4]
             if clips is not None:
                 cx, cy, cw, ch = clips[j]
                 p.setClipRect(QRectF(t.left() + cx * s, t.top() + cy * s, cw * s, ch * s))
             else:
                 p.setClipRect(t)
             style = Qt.DashLine if j >= len(solid) else Qt.SolidLine
+            turned = len(o) > 5                     # an ellipsoid's section: turned by its angle
+            if turned:
+                p.save()
+                p.translate(t.left() + x * s, t.top() + y * s)
+                p.rotate(o[4])
+            centre = QPointF(0.0, 0.0) if turned else QPointF(t.left() + x * s, t.top() + y * s)
             for pen in (QPen(QColor(0, 0, 0, 170), 2.6, style), QPen(QColor("white"), 1.2, style)):
                 p.setPen(pen)
-                p.drawEllipse(QPointF(t.left() + x * s, t.top() + y * s), rx * s, ry * s)
+                p.drawEllipse(centre, rx * s, ry * s)
+            if turned:
+                p.restore()
+        p.restore()
+
+    def _draw_marks(self, p: QPainter, t: QRectF):
+        """The voids' centres (the minima drawn as their ellipsoids' sections): a dot filled on the centre's own layer,
+        a ring elsewhere, white over a dark edge, clipped to the map or each to its figure-grid tile."""
+        s = t.width() / self._img.width()
+        p.save()
+        p.setRenderHint(QPainter.Antialiasing, True)
+        marks = list(self.marks or [])
+        mclips = self.mark_clips if self.mark_clips and len(self.mark_clips) == len(marks) else None
+        for j, (x, y, _k, own) in enumerate(marks):
+            c = mclips[j] if mclips else None
+            p.setClipRect(t if c is None else QRectF(t.left() + c[0] * s, t.top() + c[1] * s, c[2] * s, c[3] * s))
+            c = QPointF(t.left() + x * s, t.top() + y * s)
+            p.setPen(QPen(QColor(0, 0, 0, 170), 1.0))
+            p.setBrush(QColor("white") if own else Qt.NoBrush)
+            p.drawEllipse(c, 3.2, 3.2)
+            if not own:
+                p.setPen(QPen(QColor("white"), 1.4))
+                p.drawEllipse(c, 2.4, 2.4)
         p.restore()
 
     def resizeEvent(self, e):
@@ -301,12 +444,31 @@ class ColorBar(QWidget):
         super().__init__()
         self.setFixedHeight(self.BAR + 4 + 2 * QFontMetrics(self.font()).height() + 6)
         self.cmap, self.vrange, self.label, self.log = "viridis", (0.0, 1.0), "", False
+        self.levels = None                  # (positions in the bar's units, (k, 4) RGBA): the contour lines' values
 
-    def set(self, cmap: str, vrange, label: str, log: bool = False):
+    def set(self, cmap: str, vrange, label: str, log: bool = False, levels=None):
         """'label' is the full text ('log₁₀ ' included: Save image labels its log10 data with it);
-        'log': the range is in log10 units, the ticks read 10^k."""
+        'log': the range is in log10 units, the ticks read 10^k. 'levels': the map's contour levels as (positions,
+        colours) -- contours.map_lines' 'levels' and 'colours' -- marked across the bar in the lines' own colours;
+        None (any map without contours) marks none."""
         self.cmap, self.vrange, self.label, self.log = cmap, vrange, label, bool(log)
+        self.levels = levels
         self.update()
+
+    def level_marks(self, width: int | None = None) -> list[tuple[float, tuple]]:
+        """(x, RGBA 0..255) of every contour level drawn across the bar (inside it only)."""
+        if not self.levels:
+            return []
+        W = float(width if width is not None else self.width())
+        lo, hi = self.vrange
+        span = (hi - lo) if hi > lo else 1.0
+        pos, cols = self.levels
+        out = []
+        for v, c in zip(np.asarray(pos, dtype=np.float64).reshape(-1), np.asarray(cols).reshape(-1, 4)):
+            x = (float(v) - lo) / span * W
+            if 0.0 < x < W:
+                out.append((x, tuple(int(round(255 * float(k))) for k in c)))
+        return out
 
     def shown_label(self) -> str:
         """The bar's own text: on a log map the ticks already read 10^k, so 'log₁₀ ' is dropped."""
@@ -345,6 +507,9 @@ class ColorBar(QWidget):
             g.setColorAt(i / 255, QColor(*[int(v) for v in lut[i]]))
         g.setColorAt(1.0, QColor(*[int(v) for v in lut[255]]))
         p.fillRect(0, 0, W, B, g)
+        for x, rgba in self.level_marks(W):     # the contour levels: a thin line across the bar in the line's colour
+            p.setPen(QPen(QColor(*rgba), 1.0))
+            p.drawLine(QPointF(x, 0), QPointF(x, B))
         p.setPen(self.palette().windowText().color())
         fm = QFontMetrics(self.font())
         h = fm.height()

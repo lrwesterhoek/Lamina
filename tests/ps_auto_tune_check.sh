@@ -80,17 +80,32 @@
 #     reads the resolved route: a run without a flag plans as its default route (the one its header names),
 #     '--face-gradient' books more than '--per-tet-gradient', and a sampled run without a flag plans as
 #     '--per-tet-gradient' and says why in its header. Plan-only, every build.
+# AB) THE WORD MERGE's face sums ('--ps-merge fixed-point' in the single 3-D build; fix 3 S7): the merged full grid
+#     holds every face once (8 B x NO_DIM x (noVelComp + 2) = 120 B per cell and side, where a pass holds both faces,
+#     240 B), with one boundary plane per axis on a grid that is not periodic, and the close-out makes no Real face
+#     grid: the deposit phase's full-grid bytes per cell of the planner's normalization line (DTFE_AUTO_TUNE_DEBUG=1)
+#     are the hand-computed ones, periodic and in a '--box'. Plan-only; the double build refuses the option (SKIP).
 #  Z) a GPU lane books what it holds AFTER the device's deposit when '--face-gradient' forms its face sums on the
 #     CPU (plan P11.7 item 1: the handed-back host words, the face sums' words and the Real grids their conversion
 #     builds, less the freed words the allocator hands back). Plan-only: the lane with the face sums minus the lane
 #     without, per booked sub-grid cell, is the planner's own after-hold minus hold (DTFE_AUTO_TUNE_DEBUG=1), and
 #     no less than 100 B/cell. One partition in flight on the GPU books its own sub-grids beside the hold without
 #     the face sums, none with them; a real run of that plan (single build: about 10 s, a peak of 4.8 to 5.6 GB from
-#     run to run) is predicted at 0.97 of its measured peak or above. GPU builds only.
+#     run to run) is predicted at 0.97 of its measured peak or above. The plans under DTFE_FACE_WALK_EARLY=0 (the walk
+#     after the deposit): the default's walk beside the device call books the face words beside the hold, which then
+#     outweighs the state after it in this selection (U). GPU builds only.
 #  V) a MIXED run's GPU lane (plan P13.1 item 13 a) books the host grids it keeps after the lock, beside its arrays,
 #     where those outweigh its CPU deposit (128^3 particles on a 128^3 grid, 2^3): plan-only, the all-GPU lane less
 #     the mixed one is the planner's pre-lock + once - max(cpu, pre-lock + after the lock) (DTFE_AUTO_TUNE_DEBUG=1),
 #     and the old booking would be 0.06 GB or more off. Single build, GPU builds only.
+#  U) THE FACE WALK BESIDE THE GPU DEPOSIT (the default; DTFE_FACE_WALK_EARLY=0, a developer's off switch, keeps the
+#     walk after the deposit): a '--face-gradient' pass on the GPU makes its face sums' words (30 int64 per sub-grid
+#     cell) before its device call and holds them through it; the plan books them beside every lane's hold and lists
+#     them ('facewalk_gb' on the report line, 'face sums held through each device call' on the AUTO-TUNE line, which
+#     names no variable) only where the walk is on. Plan-only: unset and =1 plan alike; the default (single build)
+#     adds 2 x (max(hold + face sums, after the hold) - max(hold, after the hold)) per booked cell at 2 in flight
+#     over =0, which lists no term (the planner's own 'PS GPU lane grids' line); '--per-tet-gradient' and the
+#     double build plan as =0. GPU builds only.
 #  Q) THE LANE SHARE (plan P11.8): with several partitions in flight the plan books the first lane whole and each
 #     other one at a share of it (they do not peak together, and one of them is the largest), for 2 to 4 in flight
 #     on the GPU alone, 2 to 6 with the free cores depositing; above that, without evaluation points and in the
@@ -98,26 +113,43 @@
 #     '--scratch-dir' included; then a run under a budget of 4 whole lanes: 6 in flight, none added by the dynamic
 #     concurrency, the grids of '--max-concurrent 1' byte for byte; and one partition in flight on the GPU alone
 #     books its own sub-grids beside the device's hold (Q8). GPU builds only.
+# AA) THE TIME OBJECTIVE (DTFE_AUTO_TIME=1, docs/cleanup-plan.md P8.8; plan-only but AA5), on the CPU class (the exact
+#     deposit, no face sums, sample points, performance): AA1 without it (unset or 0) the report line is the one of
+#     before, without time keys; AA2 with a band of 0 (DTFE_AUTO_TIME_GAIN=0: never leaves the memory plan) the line
+#     gains 'time_s=X time_mem_s=X' before over_budget (the double build falls back, said); AA3 a budget that holds
+#     3^3 x 10 in flight and 2^3 x 4 but not 2^3 x 8, and 1000 s a partition (DTFE_AUTO_T_PS_PART): the coarser
+#     split is taken (time_s < time_mem_s, over_budget=0, said); AA4 the sampled deposit, a run without sample points,
+#     the face sums on the CPU and the CPU under '--run-mode balanced' fall back, each said, without time keys; AA5 a
+#     real run with the switch writes the grids of its plan given by hand; AA6 (GPU builds) the all-GPU class gains
+#     the keys, and the face sums under balanced fall back (with the walk after the deposit, DTFE_FACE_WALK_EARLY=0:
+#     the default's walk beside it is a class of its own, named first: under performance it falls back, said, without
+#     time keys); AA7 a hand-set split is predicted and kept.
 #
 # The 2^32 GPU sub-grid guard (ps_interpolation.cc) is NOT exercised here: it needs a real
 # >4.29e9-cell partition sub-grid, i.e. >32 GB of buffers. It mirrors the validated guard in
 # averaged_interpolation_1.cc line-for-line.
 #
 # Portable: runs on Linux too (tests/ci_suite.sh core) -- the peak RSS from getrusage, no macOS-only
-# command; the GPU-only parts (H3, I2/I3, L, M, Q, V, W, Y7, Z) SKIP on a CPU build.
+# command; the GPU-only parts (H3, I2/I3, L, M, Q, U, V, W, Y7, Z) SKIP on a CPU build.
 #
 # Usage: tests/ps_auto_tune_check.sh [--no-build]
 
 set -euo pipefail
 unset DTFE_TRIANGULATION_THREADS DTFE_TBB_THREADS   # the insert's own switch moves the plans: the suite sets it itself
 unset DTFE_FACE_GRADIENT   # the gradient route's pin moves the PS plans: the runs name their route, T reads the default
+unset DTFE_AUTO_TIME DTFE_AUTO_TIME_GAIN DTFE_AUTO_T_PS_PART   # the time objective: only AA sets them
+unset DTFE_FACE_WALK_EARLY   # the walk beside the GPU deposit (default) moves the GPU face plans: U, Z, AA6 set it
+unset DTFE_TEST_NAN_SHARE    # (the NaN test hook keeps that walk, and its booking, off: U would not see the term)
+unset DTFE_GPU_FACES DTFE_FACE_F32   # the GPU face kernel books its face records in the GPU lanes: moves Z's plans
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${ROOT}"
 source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double pair
 # the plans, reports and peaks asserted here were measured on the sampled deposit, which an '_a' run without a count
-# no longer gets by default: pin it for every run (both binaries read the pin; W's and Z's own '--exact' beats it)
+# no longer gets by default: pin it for every run (both binaries read the pin; W's and Z's own '--exact' beats it).
+# They were measured at the count each run names: '--subsamples 1' (A-F, J, S) or, where a sampled '_a' run names none,
+# 3 per cell axis, which such a run pins as '--subsamples 3' (the sampled deposit's default is 1)
 export DTFE_EXACT_AVERAGE=0
 
 N="${N:-64}"; BOX="${BOX:-100.0}"
@@ -326,8 +358,8 @@ COMMON_H=(--input-format 105 --mpc-unit 1 --verbose 2 --auto-tune-report)
 env OMP_NUM_THREADS=10 DTFE_RAM_GB=64 DTFE_AUTO_PTS_N=4194304 "${BIN}" "${SNAP}" "${TMP}/at_h1" --grid 16 --field density --periodic \
     "${COMMON_H[@]}" > "${TMP}/at_h1.log" 2>&1
 agrep "H1 a triangulation-bound small run is split for speed" "^AUTO-TUNE-REPORT partition=[23] mc=[2-9]|^AUTO-TUNE-REPORT partition=[23] mc=[1-9][0-9]" "${TMP}/at_h1.log"
-# H2: a 256^3 sampled grid is deposit-bound -> one domain, and its predicted peak is sane
-env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_h2" --grid 256 --field density_a velocity_a --periodic \
+# H2: a 256^3 sampled grid (3^3 sub-points per cell) is deposit-bound -> one domain, and its predicted peak is sane
+env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_h2" --grid 256 --field density_a velocity_a --periodic --subsamples 3 \
     "${COMMON_H[@]}" > "${TMP}/at_h2.log" 2>&1
 agrep "H2 a deposit-bound small run keeps one domain" "^AUTO-TUNE-REPORT partition=1 " "${TMP}/at_h2.log"
 ph=$(sed -n 's/.* predicted_gb=\([0-9.]*\) .*/\1/p' "${TMP}/at_h2.log")
@@ -336,7 +368,7 @@ check "H2 the single-domain report predicts a sane peak: ${ph:-none} GB < 12" \
 # H3 (GPU builds): the GPU deposit serialises on one queue -> a split cannot speed it up
 if [ "${GPU_H}" = 1 ]; then
     env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_h3" --grid 256 --field density_a velocity_a --periodic --gpu \
-        "${COMMON_H[@]}" > "${TMP}/at_h3.log" 2>&1
+        --subsamples 3 "${COMMON_H[@]}" > "${TMP}/at_h3.log" 2>&1
     agrep "H3 a GPU grid keeps one domain" "^AUTO-TUNE-REPORT partition=1 " "${TMP}/at_h3.log"
 else
     echo "   SKIP  H3 (this build has no GPU backend)"
@@ -368,7 +400,8 @@ rm -f "${TMP}"/at_h*.den "${TMP}"/at_h*.streams "${TMP}"/at_h*.hidden_streams
 # domain when that domain's deposit buffers do not fit (83 GB unsplit): it splits for memory.
 echo ">> I: very fine grids (1700^3, grids on scratch)"
 ISCR="${TMPDIR:-/tmp}/dtfe-at-scratch"; mkdir -p "${ISCR}"
-COMMON_I=(--grid 1700 --periodic --field density_a --input-format 105 --mpc-unit 1 --verbose 2 --scratch-dir "${ISCR}" --auto-tune-report)
+COMMON_I=(--grid 1700 --periodic --field density_a --subsamples 3 --input-format 105 --mpc-unit 1 --verbose 2 --scratch-dir "${ISCR}"
+          --auto-tune-report)
 env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/at_i_cpu" "${COMMON_I[@]}" > "${TMP}/at_i_cpu.log" 2>&1
 pi=$(sed -n 's/^AUTO-TUNE-REPORT partition=\([0-9]*\) .*/\1/p' "${TMP}/at_i_cpu.log" | head -1)
 ob=$(sed -n 's/^AUTO-TUNE-REPORT .*over_budget=\([01]\).*/\1/p' "${TMP}/at_i_cpu.log" | head -1)
@@ -485,7 +518,7 @@ rm -f "${TMP}"/at_k.*
 echo ">> L: the look-ahead is counted against the budget"
 run_l() {  # $1 = budget in GB, $2 = log
     env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 DTFE_AUTO_MINN=1000 DTFE_MEM_BUDGET_GB="$1" "${BIN}" "${SNAP}" "${TMP}/at_l" \
-        --grid 64 --field density_a --input-format 105 --mpc-unit 1 --verbose 2 --periodic --gpu \
+        --grid 64 --field density_a --subsamples 3 --input-format 105 --mpc-unit 1 --verbose 2 --periodic --gpu \
         --partition 2 2 2 --max-concurrent 1 --auto-tune-report > "$2" 2>&1 || true
 }
 run_l 50 "${TMP}/at_l1.log"
@@ -507,29 +540,56 @@ rm -f "${TMP}"/at_l*
 
 # ---------- (M) the GPU deposit's host snapshot is in the prediction, once ----------
 # The Metal deposit keeps a host copy of its accumulator buffers (ps_metal_host.cc GpuSnapshot: the grids, the
-# 8 B fixed-point mass, the per-tet masses) to resume a failed command buffer: ~4.7 GB
+# fixed-point mass, the per-tet masses) to resume a failed command buffer: ~4.7 GB
 # per partition at 1024^3 split 2^3. The deposits run one at a time, so the copy is counted ONCE whatever the
 # concurrency: predicted(c) = fixed + c x per-partition + snapshot, i.e. snapshot = p(2) - fixed - 2 (p(3) - p(2)).
+# Under DTFE_PS_RUN_UNITS=1 the once part also holds the run-wide 128-bit device words' growth beyond the per-lane
+# hold (auto_tune.cc snapshotBytes, growDev), which only the deposit holding the GPU has. The check follows the
+# environment's units; when that is the default (a unit per pass), a second pair of reports runs under
+# DTFE_PS_RUN_UNITS=1, so the booking of the 128-bit words is held on every run of this suite.
 echo ">> M: the GPU deposit's snapshot is counted once"
-run_m() {  # $1 = --max-concurrent, $2 = log
-    env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 "${BIN}" "${SNAP}" "${TMP}/at_m" --grid 256 \
-        --field density_a velocity_a --ps-volume-weighted --input-format 105 --mpc-unit 1 --verbose 2 --periodic --gpu \
-        --partition 2 2 2 --max-concurrent "$1" --auto-tune-report > "$2" 2>&1 || true
+# PS-DTFE sums in the run-wide units only with DTFE_PS_RUN_UNITS=1 (and not under DTFE_RUN_UNITS_LEGACY=1)
+ps_units_wide() { [ "${DTFE_PS_RUN_UNITS:-0}" != "0" ] && [ "${DTFE_RUN_UNITS_LEGACY:-0}" = "0" ]; }
+run_m() {  # $1 = --max-concurrent, $2 = log, then the run's own environment settings (NAME=value)
+    local c="$1" log="$2"; shift 2
+    env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 ${@+"$@"} "${BIN}" "${SNAP}" "${TMP}/at_m" --grid 256 \
+        --field density_a velocity_a --subsamples 3 --ps-volume-weighted --input-format 105 --mpc-unit 1 --verbose 2 \
+        --periodic --gpu --partition 2 2 2 --max-concurrent "$c" --auto-tune-report > "$log" 2>&1 || true
+}
+gb() { sed -n "s/^AUTO-TUNE-REPORT .*$1=\([0-9.]*\) .*/\1/p" "$2" | head -1; }
+m_pair() {  # $1 = the check's name, $2 = 1: the run-wide units (0: a unit per pass), then the pair's settings
+    local name="$1" wide="$2" p2 p3 f2 sm lo hi ex; shift 2
+    run_m 2 "${TMP}/at_m2.log" ${@+"$@"}; run_m 3 "${TMP}/at_m3.log" ${@+"$@"}
+    p2=$(gb predicted_gb "${TMP}/at_m2.log"); p3=$(gb predicted_gb "${TMP}/at_m3.log"); f2=$(gb fixed_gb "${TMP}/at_m2.log")
+    # expected, over the (256/2 + 40)^3 = 4.74M sub-grid cells (+ the per-tet masses), per cell:
+    #  - a unit per pass (the default, and DTFE_RUN_UNITS_LEGACY=1; 64-bit device words): 24 B of selected grids +
+    #    4 B of the 64-bit mass = 0.133 GB (measured 0.114 GB) with float moments (DTFE_GPU_FLOAT_MOMENTS=1), and
+    #    with the velocity moment and its weight (16 B) as 64-bit words, 16 B more: 0.209 GB (measured 0.190 GB);
+    #  - the run-wide units (DTFE_PS_RUN_UNITS=1): the snapshot's copy of the device buffers at their length -- 72 B
+    #    of selected grids (the 8 B of mass and streams, the velocity moment and its weight as 128-bit words, 16 B
+    #    per component) + 12 B of the 128-bit mass beyond its 4 -- and the device words' growth beyond the per-lane
+    #    hold, 40 B (32 B of moment words + 8 B of mass): 124 B x 4.74M = 0.59 GB (derived from the bytes per cell
+    #    x the cells; read off the report as below: 0.580 GB, 0.570 GB in the double build); there
+    #    DTFE_GPU_FLOAT_MOMENTS=1 keeps the floats: 24 B + 12 B of mass + 8 B of mass growth = 44 B x 4.74M =
+    #    0.21 GB (derived; read off the report as below: 0.190 GB in the single build).
+    sm=$(awk -v a="${p2:-0}" -v b="${p3:-0}" -v f="${f2:-0}" 'BEGIN{printf "%.3f", a - f - 2*(b - a)}')
+    if [ "$wide" = 0 ]; then
+        if [ "${DTFE_GPU_FLOAT_MOMENTS:-${PS_GPU_FLOAT_MOMENTS:-0}}" != "0" ]; then   # (the old name: still read)
+            lo=0.10; hi=0.17; ex=0.13
+        else lo=0.16; hi=0.25; ex=0.21; fi
+    elif [ "${DTFE_GPU_FLOAT_MOMENTS:-${PS_GPU_FLOAT_MOMENTS:-0}}" != "0" ]; then   # (the old name: deprecated)
+        lo=0.17; hi=0.25; ex=0.21    # derived: (24 + 12 + 8) B x 4.74M cells
+    else lo=0.50; hi=0.68; ex=0.59; fi   # derived: (72 + 12 + 40) B x 4.74M cells
+    check "${name}: ${sm} GB beyond 2 partitions (expected ~${ex} GB; predicted ${p2:-none} / ${p3:-none} GB at 2 / 3 in flight)" \
+          "$(awk -v s="${sm}" -v lo="${lo}" -v hi="${hi}" 'BEGIN{exit !(s >= lo && s <= hi)}' && echo 1 || echo 0)"
 }
 run_m 2 "${TMP}/at_m2.log"
 if grep -q "GPU (--gpu)" "${TMP}/at_m2.log"; then
-    run_m 3 "${TMP}/at_m3.log"
-    gb() { sed -n "s/^AUTO-TUNE-REPORT .*$1=\([0-9.]*\) .*/\1/p" "$2" | head -1; }
-    p2=$(gb predicted_gb "${TMP}/at_m2.log"); p3=$(gb predicted_gb "${TMP}/at_m3.log"); f2=$(gb fixed_gb "${TMP}/at_m2.log")
-    # expected: (24 B of selected grids + 4 B of the 64-bit mass) x the (256/2 + 40)^3 sub-grid cells = 0.133 GB
-    # (+ the per-tet masses; measured 0.114 GB) -- with the velocity moment and its weight (16 B) as
-    # 64-bit words, 16 B more: 0.209 GB (measured 0.190 GB). DTFE_GPU_FLOAT_MOMENTS=1 keeps the floats.
-    sm=$(awk -v a="${p2:-0}" -v b="${p3:-0}" -v f="${f2:-0}" 'BEGIN{printf "%.3f", a - f - 2*(b - a)}')
-    if [ "${DTFE_GPU_FLOAT_MOMENTS:-${PS_GPU_FLOAT_MOMENTS:-0}}" != "0" ]; then   # (the old name: deprecated, still read)
-        lo=0.10; hi=0.17; ex=0.13
-    else lo=0.16; hi=0.25; ex=0.21; fi
-    check "M the GPU snapshot is counted once: ${sm} GB beyond 2 partitions (expected ~${ex} GB; predicted ${p2:-none} / ${p3:-none} GB at 2 / 3 in flight)" \
-          "$(awk -v s="${sm}" -v lo="${lo}" -v hi="${hi}" 'BEGIN{exit !(s >= lo && s <= hi)}' && echo 1 || echo 0)"
+    mw=0; if ps_units_wide; then mw=1; fi
+    m_pair "M the GPU snapshot is counted once" "$mw"
+    if [ "$mw" = 0 ] && [ "${DTFE_RUN_UNITS_LEGACY:-0}" = "0" ]; then   # (the units this environment leaves out)
+        m_pair "M ... and with the run-wide 128-bit device words (DTFE_PS_RUN_UNITS=1)" 1 DTFE_PS_RUN_UNITS=1
+    fi
 else
     echo "   SKIP  M (this build has no GPU backend)"
 fi
@@ -550,7 +610,7 @@ for name, x in (("far", 0.1 * box), ("fold", 0.5 * box)):    # outside / through
 PYEOF
 est_n() {  # $1 = plane, $2 = DTFE_AUTO_PTS_BOXMEAN
     env DTFE_RAM_GB=64 DTFE_AUTO_PTS_BOXMEAN="$2" "${BIN}" "${SNAP_N}" "${TMP}/at_n" --grid 32 --periodic --input-format 105 \
-        --mpc-unit 1 --field density_a --sample-points "${TMP}/at_n_$1.bin" --auto-tune-report 2>/dev/null \
+        --mpc-unit 1 --field density_a --subsamples 3 --sample-points "${TMP}/at_n_$1.bin" --auto-tune-report 2>/dev/null \
         | sed -n 's/^AUTO-TUNE-REPORT .* streams_est=\([0-9.]*\) .*/\1/p'
 }
 nf=$(est_n far 0); nd=$(est_n fold 0); nb=$(est_n far 1)
@@ -773,7 +833,8 @@ if precision_double; then
 else
 SNAP_Y="${TMP}/at_y.hdf5"
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP_Y}" --n 48 --box 100 --amplitude-factor 1.8 >/dev/null
-Y_ARGS=(--input-format 105 --mpc-unit 1 --periodic --grid 96 --field density_a velocity_a divergence_a --partition 3 3 3 --verbose 2)
+Y_ARGS=(--input-format 105 --mpc-unit 1 --periodic --grid 96 --field density_a velocity_a divergence_a --subsamples 3
+        --partition 3 3 3 --verbose 2)
 run_y() {  # $1 = tag, then 'VAR=value' assignments, then '--' and extra options
     local tag="$1"; shift
     local envs=()
@@ -832,8 +893,8 @@ check "Y4 a dynamic run killed after 3 partitions and resumed: the same grids" \
 # Y7 (GPU builds): the ledger of an all-GPU run books what the plan books once beside its lanes -- the GPU deposit's
 # host snapshot (one deposit holds the device at a time; no evaluation points, so no lane share) -- once, and each
 # partition in flight at its lane, as the plan does: the start check's 'once' part is the report's snapshot_gb
-Y7_ARGS=(--input-format 105 --mpc-unit 1 --periodic --grid 192 --field density_a velocity_a --partition 2 2 2 --verbose 2
-         --gpu)
+Y7_ARGS=(--input-format 105 --mpc-unit 1 --periodic --grid 192 --field density_a velocity_a --subsamples 3 --partition 2 2 2
+         --verbose 2 --gpu)
 env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 "${BIN}" "${SNAP_Y}" "${TMP}/at_y_g" "${Y7_ARGS[@]}" --auto-tune-report \
     > "${TMP}/at_y_gr.log" 2>&1 || true
 if grep -q "GPU (--gpu)" "${TMP}/at_y_gr.log"; then
@@ -860,7 +921,8 @@ SNAP_XC="${TMP}/at_x_clump.hdf5"; SNAP_XW="${TMP}/at_x_waves.hdf5"; SNAP_XP="${T
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP_XP}" --n 48 --box 100 --amplitude-factor 1.8 >/dev/null
 run_x() {  # $1 = label, $2 = snapshot, rest = options: the booked sub-grid covers the largest real one
     local label="$1" snap="$2"; shift 2
-    DTFE_AUTO_TUNE_DEBUG=1 "${BIN}" "${snap}" "${TMP}/at_x" --input-format 105 --mpc-unit 1 --field density_a --grid 64 "$@" \
+    DTFE_AUTO_TUNE_DEBUG=1 "${BIN}" "${snap}" "${TMP}/at_x" --input-format 105 --mpc-unit 1 --field density_a --subsamples 3 \
+        --grid 64 "$@" \
         > "${TMP}/at_x.log" 2>&1 || true
     local r
     r="$("${PY}" - "${TMP}/at_x.log" <<'PYEOF'
@@ -905,8 +967,8 @@ t_gb() { t_line "$1" | sed -n 's/.* predicted_gb=\([0-9.]*\) .*/\1/p'; }
 run_t "${TMP}/at_t_d.log" --exact
 run_t "${TMP}/at_t_f.log" --exact --face-gradient
 run_t "${TMP}/at_t_p.log" --exact --per-tet-gradient
-run_t "${TMP}/at_t_sd.log" --sampled
-run_t "${TMP}/at_t_sp.log" --sampled --per-tet-gradient
+run_t "${TMP}/at_t_sd.log" --sampled --subsamples 3
+run_t "${TMP}/at_t_sp.log" --sampled --subsamples 3 --per-tet-gradient
 t_def=f
 if grep -qF "is not PS-DTFE's default" "${TMP}/at_t_d.log"; then t_def=p; fi   # the default the header names
 t_dl="$(t_line "${TMP}/at_t_d.log")"; t_rl="$(t_line "${TMP}/at_t_${t_def}.log")"
@@ -922,6 +984,51 @@ check "T3 a sampled run without a flag plans as --per-tet-gradient and names why
          && echo 1 || echo 0)"
 rm -f "${TMP}"/at_t*
 
+# ---------- (AB) the word merge books its merged face sums once per face ----------
+# '--ps-merge fixed-point' in the single 3-D build (the word merge; fix 3 S7, src/auto_tune.cc
+# autoTuneWordFaceFullBytes): the merged full grid holds each face sum once, a pass both faces per cell, and the
+# close-out makes no Real face grid. The '_a' face set below, by hand (src/auto_tune.cc autoTuneBytesPerCell, R = 4):
+#   at R: density 4 + velocity 12 + gradient 36 + the face sums' Real grids 120 + the mass flux's grid 4 + mass_weight
+#   4 = 180; x 8 / R = 360; + the exact deposit's counts over R (SV 8 - 4, tet touches 4 - 4) 4; + the close-out's
+#   largest Real grid (the gradient) 36: 400; - the face words of a pass's layout 240 + the merged grid's 8 x 3 x 5 =
+#   120: 280; + the counts, flags and masks (stream count 4, hidden streams 4, the two flags 2, tet touches 4) 14:
+#   294 B per cell (the merge of before S7 booked 414: every face twice; bCell = 294). Beside it the normalization
+#   makes the twins (the '_a' gradient 36 + shear 20) 56 and the stream average's divergence 4: 60. In a '--box' (not
+#   periodic, 64 cells per axis) the boundary planes add 8 x 5 x 3 / 64 = 1.875: 295.875, printed 296.
+echo ">> AB: the word merge books its merged face sums once per face"
+if precision_double; then
+    echo "   SKIP  AB (the double build refuses '--ps-merge fixed-point')"
+else
+    run_ab() {  # $1 = log, rest = options
+        local log="$1"; shift
+        env -u DTFE_RUN_UNITS_LEGACY -u DTFE_PS_RUN_UNITS -u DTFE_GPU_FLOAT_MASS -u DTFE_GPU_FLOAT_MOMENTS \
+            DTFE_RAM_GB=64 DTFE_FREE_GB=1000 DTFE_AUTO_TUNE_DEBUG=1 "${BIN}" "${SNAP}" "${TMP}/at_ab" --grid 64 \
+            --field density_a velocity_a gradient_a divergence_a shear_a --exact --ps-volume-weighted \
+            --face-gradient --ps-merge fixed-point --input-format 105 --mpc-unit 1 --verbose 2 --partition 2 2 2 \
+            --max-concurrent 2 --auto-tune-report "$@" > "${log}" 2>&1 || true
+    }
+    ab_norm() {  # $1 = log: the normalization line's own bytes, deposit phase and bCell (B/cell), or "none none none"
+        local re v
+        re='.*PS normalization: the regular part.s twins and the stream average.s divergence \([0-9]*\) B\/cell '
+        re="${re}"'beside the deposit phase.s \([0-9]*\) (bCell \([0-9]*\)).*'
+        v="$(sed -n "s/${re}/\1 \2 \3/p" "$1" | head -n 1)"
+        echo "${v:-none none none}"
+    }
+    run_ab "${TMP}/at_ab_p.log" --periodic
+    run_ab "${TMP}/at_ab_b.log" --box 20 80 20 80 20 80
+    check "AB0 both plans are the word merge's (its setup line)" \
+          "$(grep -qF -- "--ps-merge fixed-point: the passes hand over their exact words" "${TMP}/at_ab_p.log" \
+             && grep -qF -- "--ps-merge fixed-point: the passes hand over their exact words" "${TMP}/at_ab_b.log" \
+             && echo 1 || echo 0)"
+    read -r ut up uc <<< "$(ab_norm "${TMP}/at_ab_p.log")"
+    check "AB1 periodic: the deposit phase books ${up} B/cell (bCell ${uc}, beside it ${ut}): 294, 294, 60 by hand" \
+          "$([ "${up}" = 294 ] && [ "${uc}" = 294 ] && [ "${ut}" = 60 ] && echo 1 || echo 0)"
+    read -r bt bp bc <<< "$(ab_norm "${TMP}/at_ab_b.log")"
+    check "AB2 in a '--box': ${bp} B/cell (bCell ${bc}, beside it ${bt}): the planes' 1.875 more, 296, 296, 60" \
+          "$([ "${bp}" = 296 ] && [ "${bc}" = 296 ] && [ "${bt}" = 60 ] && echo 1 || echo 0)"
+fi
+rm -f "${TMP}"/at_ab*
+
 # ---------- (Z) a GPU lane books the face sums it holds after the device's deposit ----------
 # With '--face-gradient' beside the GPU deposit a lane's largest state comes AFTER the hold: the host words the
 # device hands back, the fixed-point face sums made for the face walk, and the Real grids the conversion builds
@@ -936,12 +1043,15 @@ rm -f "${TMP}"/at_t*
 # without the face sums at one in flight runs for real, with the production fields (single build): its prediction
 # is within 3% of the measured peak or above it.
 echo ">> Z: a GPU lane books the face sums it holds after the device's deposit"
+# (DTFE_FACE_WALK_EARLY=0: the walk after the deposit, whose after-hold state this section checks. With the walk
+# beside the device call, the default, a face lane books max(hold + its face words, after the hold), whose hold side
+# outweighs the state after the hold in this selection: section U checks that term)
 run_z() {  # $1 = --max-concurrent, $2 = log, rest = options
     local mc="$1" log="$2"; shift 2
-    env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 DTFE_AUTO_TUNE_DEBUG=1 "${BIN}" "${SNAP}" "${TMP}/at_z" --grid 256 \
-        --field density_a velocity_a gradient_a dispersion_a --ps-volume-weighted --input-format 105 --mpc-unit 1 \
-        --verbose 2 --periodic --exact --gpu --partition 2 2 2 --max-concurrent "${mc}" --auto-tune-report "$@" \
-        > "${log}" 2>&1 || true
+    env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 DTFE_AUTO_TUNE_DEBUG=1 DTFE_FACE_WALK_EARLY=0 "${BIN}" "${SNAP}" \
+        "${TMP}/at_z" --grid 256 --field density_a velocity_a gradient_a dispersion_a --ps-volume-weighted \
+        --input-format 105 --mpc-unit 1 --verbose 2 --periodic --exact --gpu --partition 2 2 2 \
+        --max-concurrent "${mc}" --auto-tune-report "$@" > "${log}" 2>&1 || true
 }
 V_GPU=0   # (section V below runs on a GPU build only)
 run_z 1 "${TMP}/at_z_f1.log" --face-gradient
@@ -1052,6 +1162,99 @@ PYEOF
 )"
     check "V a mixed run's GPU lane books the host grids it keeps after the lock: ${r#*|}" "${r%%|*}"
     rm -f "${SNAP_V}" "${TMP}"/at_v*
+fi
+
+# ---------- (U) the face walk beside the GPU deposit books its face sums through the device call ----------
+# The face walk beside the GPU deposit (auto_tune.h psFaceWalkEarly: the default; DTFE_FACE_WALK_EARLY=0, the
+# developer's off switch, keeps it after the deposit) makes a '--face-gradient' pass on the GPU walk
+# its face sums on a helper thread while the device deposits: the pass makes their words (30 int64 per sub-grid
+# cell, 240 B) before its device call and holds them through it, its wait for the device included
+# (ps_interpolation.cc psFaceUnits, PSEarlyFaceWalk). The plan books them beside every lane's hold (auto_tune.cc
+# earlyFace) and lists them on the report line ('facewalk_gb', before 'over_budget') and the AUTO-TUNE line, only
+# where the walk is on. Plan-only, on Z's selection at 2 in flight (no evaluation points: both lanes
+# whole, no look-ahead, no lone lane): U1 unset and =1 give the same report line (the default is the walk), and the
+# default run's log names no variable; U2 (single build) the default lists the term (the planner's 'face sums' bytes
+# per cell times its booked sub-grid), says so on the AUTO-TUNE line ('face sums held through each device call'),
+# and raises the prediction over =0's by 2 x (max(hold + face sums, after the hold) - max(hold, after the
+# hold)) per booked cell, from the planner's 'PS GPU lane grids' line (628 against 514 B per cell in this
+# selection), where =0 lists no term; in the double build the default plans as =0 (no walk beside the deposit
+# there: its face pass has a bound walk of its own); U3 '--per-tet-gradient' makes no face sums, and the default
+# then plans as =0. The report's GB have two decimals: 0.02 GB of tolerance on the rise. GPU builds only.
+echo ">> U: the face walk beside the GPU deposit books its face sums through the device call"
+if [ "${V_GPU}" != 1 ]; then
+    echo "   SKIP  U (this build has no GPU backend)"
+elif [ "${SW_FMOM}" = 1 ]; then
+    echo "   SKIP  U (DTFE_GPU_FLOAT_MOMENTS is set: no bounds for the walk, which then stays after the deposit)"
+else
+    run_u() {  # $1 = tag, then 'VAR=value' assignments, then '--' and extra options
+        local tag="$1"; shift
+        local envs=()
+        while [ $# -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
+        [ $# -gt 0 ] && shift
+        env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 DTFE_AUTO_MINN=1000 DTFE_AUTO_TUNE_DEBUG=1 ${envs[@]+"${envs[@]}"} \
+            "${BIN}" "${SNAP}" "${TMP}/at_u" --grid 256 --field density_a velocity_a gradient_a dispersion_a \
+            --ps-volume-weighted --input-format 105 --mpc-unit 1 --verbose 2 --periodic --exact --gpu \
+            --partition 2 2 2 --max-concurrent 2 --auto-tune-report "$@" > "${TMP}/at_u_${tag}.log" 2>&1 || true
+    }
+    run_u n -- --face-gradient
+    run_u 0 DTFE_FACE_WALK_EARLY=0 -- --face-gradient
+    run_u e DTFE_FACE_WALK_EARLY=1 -- --face-gradient
+    run_u p -- --per-tet-gradient
+    run_u p0 DTFE_FACE_WALK_EARLY=0 -- --per-tet-gradient
+    u_prec=single
+    if precision_double; then u_prec=double; fi
+    r="$("${PY}" - "${TMP}" "${u_prec}" <<'PYEOF'
+import re, sys
+def read(tag):  # the log, its report line and its AUTO-TUNE line ("" where missing)
+    try:
+        t = open(f"{sys.argv[1]}/at_u_{tag}.log", errors="replace").read()
+    except OSError:
+        return "", "", ""
+    rep = re.search(r"^AUTO-TUNE-REPORT .*$", t, re.M)
+    tune = re.search(r"^AUTO-TUNE: .* -> --partition.*$", t, re.M)
+    return t, rep.group(0) if rep else "", tune.group(0) if tune else ""
+def gb(line, key):
+    m = re.search(r" " + key + r"=([0-9.]+)", line)
+    return float(m.group(1)) if m else None
+out = []
+W = "face sums held through each device call"   # (the AUTO-TUNE line where the term is booked)
+try:
+    n, z, e, p, p0 = (read(k) for k in ("n", "0", "e", "p", "p0"))
+    ok = bool(n[1]) and n[1] == e[1] and bool(n[2]) and "DTFE_FACE_WALK_EARLY" not in n[0]
+    out.append(f"{int(ok)}|U1 unset and DTFE_FACE_WALK_EARLY=1 plan alike (the default is the walk beside the "
+               f"deposit), and the default run names no variable")
+    if sys.argv[2] == "single":
+        H, A = (float(x) for x in re.findall(r"PS GPU lane grids: hold (\d+) B/cell, after the hold (\d+) B/cell",
+                                             n[0])[-1])
+        E = float(re.findall(r"PS face walk beside the GPU deposit: face sums (\d+) B/cell", n[0])[-1])
+        C = float(re.findall(r"booked sub-grid: (\d+) cells", n[0])[-1])
+        fw = gb(n[1], "facewalk_gb")
+        d = gb(n[1], "predicted_gb") - gb(z[1], "predicted_gb")
+        want = 2.*(max(H + E, A) - max(H, A))*C/1e9
+        ok = (E == 240. and fw is not None and abs(fw - E*C/1e9) <= 0.001 and want > 0.05 and abs(d - want) <= 0.02
+              and re.search(r" facewalk_gb=[0-9.]+ over_budget=[01]$", n[1]) is not None
+              and W in n[2] and bool(z[2]) and W not in z[2] and "facewalk_gb" not in z[1]
+              and "PS face walk beside the GPU deposit" not in z[0])
+        out.append(f"{int(ok)}|U2 the default books the face sums ({E:.0f} B/cell x {C:.0f} cells = "
+                   f"facewalk_gb {fw}): the prediction rises {d:.2f} GB over DTFE_FACE_WALK_EARLY=0 = 2 x (max("
+                   f"{H:.0f} + {E:.0f}, {A:.0f}) - max({H:.0f}, {A:.0f})) B/cell = {want:.2f} GB, said on the "
+                   f"AUTO-TUNE line; =0 books and lists none")
+    else:
+        ok = bool(n[1]) and n[1] == z[1] and "facewalk_gb" not in n[1] and W not in n[2]
+        out.append(f"{int(ok)}|U2 the double build: the default plans as DTFE_FACE_WALK_EARLY=0 (no walk beside "
+                   f"the deposit there)")
+    ok = bool(p[1]) and p[1] == p0[1] and "facewalk_gb" not in p[1]
+    out.append(f"{int(ok)}|U3 --per-tet-gradient makes no face sums: the default plans as DTFE_FACE_WALK_EARLY=0")
+except Exception as x:  # a missing report or debug line
+    out.append(f"0|U not read from the plans ({type(x).__name__}: {x})")
+print("\n".join(out))
+PYEOF
+)"
+    [ -n "${r}" ] || r="0|U not read from the plans (no output)"
+    while IFS= read -r u_line; do
+        check "${u_line#*|}" "${u_line%%|*}"
+    done <<< "${r}"
+    rm -f "${TMP}"/at_u*
 fi
 
 # ---------- (Q) the lane share of several partitions in flight ----------
@@ -1232,6 +1435,152 @@ else
 fi
 fi
 rm -rf "${TMP}"/at_q_*
+
+# ---------- (AA) the time objective (DTFE_AUTO_TIME=1) ----------
+echo ">> AA: the time objective (DTFE_AUTO_TIME)"
+# The CPU class: the exact deposit ('--exact' beats the suite's sampled pin) without the face sums (no gradient field),
+# sample points (DTFE_AUTO_PTS_N sizes a plane the report needs no file for), performance on 10 threads;
+# DTFE_AUTO_MINN=1000 makes the 64^3 set a large one, as in the tune set
+U_ARGS=(--grid 64 --input-format 105 --mpc-unit 1 --verbose 2 --periodic)
+U_CPU=(--field density_a velocity_a --exact --run-mode performance)
+run_u() {  # $1 = tag, then 'VAR=value' assignments, then '--' and the options: one report run
+    local tag="$1"; shift
+    local envs=()
+    while [ $# -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
+    [ $# -gt 0 ] && shift
+    env OMP_NUM_THREADS=10 DTFE_RAM_GB=64 DTFE_AUTO_MINN=1000 DTFE_AUTO_PTS_N=1000000 ${envs[@]+"${envs[@]}"} \
+        "${BIN}" "${SNAP}" "${TMP}/at_u_${tag}" "${U_ARGS[@]}" --auto-tune-report "$@" > "${TMP}/at_u_${tag}.log" 2>&1 \
+        || true
+}
+u_line() { grep -E '^AUTO-TUNE-REPORT ' "${TMP}/at_u_$1.log" | head -1 || true; }   # the report line
+u_strip() { sed -E 's/ time_s=[0-9]+ time_mem_s=[0-9]+ over_budget=/ over_budget=/'; }   # ... without the time keys
+u_keys() {  # the report line's 'time_s time_mem_s', empty without them
+    sed -n -E 's/^AUTO-TUNE-REPORT .* time_s=([0-9]+) time_mem_s=([0-9]+) over_budget=[01]$/\1 \2/p' \
+        "${TMP}/at_u_$1.log" | head -1
+}
+u_gb() { sed -n "s/^AUTO-TUNE-REPORT .* predicted_gb=\([0-9.]*\) .*/\1/p" "${TMP}/at_u_$1.log" | head -1; }
+U_LINE="AUTO-TUNE: time objective (DTFE_AUTO_TIME):"
+run_u u1a -- "${U_CPU[@]}"
+run_u u1b DTFE_AUTO_TIME=0 -- "${U_CPU[@]}"
+ru="$(u_line u1a)"
+check "AA1 without the switch (unset, or DTFE_AUTO_TIME=0): the same report line, no time keys, no time line" \
+      "$([ -n "${ru}" ] && [ "$(u_line u1b)" = "${ru}" ] && ! grep -q 'time_s=' "${TMP}/at_u_u1a.log" "${TMP}/at_u_u1b.log" \
+         && ! grep -qF -e "${U_LINE}" "${TMP}/at_u_u1a.log" "${TMP}/at_u_u1b.log" && echo 1 || echo 0)"
+run_u u2 DTFE_AUTO_TIME=1 DTFE_AUTO_TIME_GAIN=0 -- "${U_CPU[@]}"
+U_POS=1   # the configurations the constants hold for: the single build without a float-sum or audit knob
+if precision_double; then
+    U_POS=0
+    check "AA2 the double build: the memory objective's plan, said; the report line of AA1" \
+          "$(grep -qF -e "${U_LINE} not calibrated for the double build; the memory objective's plan." \
+                "${TMP}/at_u_u2.log" && [ "$(u_line u2)" = "${ru}" ] && echo 1 || echo 0)"
+elif [ -n "${SW_SET}" ]; then
+    U_POS=0
+    echo "   SKIP  AA2-AA7 (${SW_SET} is set: the time objective falls back there)"
+else
+    ku="$(u_keys u2)"
+    check "AA2 the CPU class, a band of 0: AA1's report line with time_s = time_mem_s (${ku:-none}) before over_budget, and the time line" \
+          "$([ -n "${ru}" ] && [ -n "${ku}" ] && [ "${ku% *}" = "${ku#* }" ] && [ "$(u_line u2 | u_strip)" = "${ru}" ] \
+             && grep -qF -e "${U_LINE} this plan predicts ~" "${TMP}/at_u_u2.log" && echo 1 || echo 0)"
+fi
+if [ "${U_POS}" = 1 ]; then
+    # AA3: a forced departure. The hand-set plans' predictions are the split search's own test quantity on the CPU
+    # (no snapshot, look-ahead or lane share there); a budget 0.02 GB above the larger of 2^3 x 4 and 3^3 x 10, and
+    # at least 0.02 GB below 2^3 x 8 (the budget is 60% of DTFE_RAM_GB): the memory objective plans 3^3 x 10
+    run_u q24 -- "${U_CPU[@]}" --partition 2 2 2 --max-concurrent 4
+    run_u q28 -- "${U_CPU[@]}" --partition 2 2 2 --max-concurrent 8
+    run_u q310 -- "${U_CPU[@]}" --partition 3 3 3 --max-concurrent 10
+    q24="$(u_gb q24)"; q28="$(u_gb q28)"; q310="$(u_gb q310)"
+    ur="$(awk -v a="${q24:-0}" -v b="${q28:-0}" -v c="${q310:-0}" 'BEGIN{m = (a > c ? a : c) + 0.02;
+        if (a > 0 && c > 0 && m + 0.02 < b) printf "%.4f", m / 0.6}')"
+    if [ -n "${ur}" ]; then
+        ubud="$(awk -v r="${ur}" 'BEGIN{printf "%.2f", 0.6*r}')"
+        run_u u3m DTFE_RAM_GB="${ur}" -- "${U_CPU[@]}"
+        run_u u3t DTFE_RAM_GB="${ur}" DTFE_AUTO_TIME=1 DTFE_AUTO_TIME_GAIN=1 DTFE_AUTO_T_PS_PART=1000 -- "${U_CPU[@]}"
+        k3="$(u_keys u3t)"
+        check "AA3 a budget of ${ubud} GB (2^3 x 4: ${q24} GB, 3^3 x 10: ${q310} GB, 2^3 x 8: ${q28} GB): the memory objective plans 3^3 x 10, the time objective at 1000 s a partition 2^3 with 4 to 7 in flight (time_s time_mem_s: ${k3:-none}), over_budget=0, said" \
+              "$(grep -Eq '^AUTO-TUNE-REPORT partition=3 mc=10 ' "${TMP}/at_u_u3m.log" \
+                 && grep -Eq '^AUTO-TUNE-REPORT partition=2 mc=[4-7] .*over_budget=0$' "${TMP}/at_u_u3t.log" \
+                 && [ -n "${k3}" ] && [ "${k3% *}" -lt "${k3#* }" ] \
+                 && grep -qF -e "for the memory objective's --partition 3 3 3 --max-concurrent 10." "${TMP}/at_u_u3t.log" \
+                 && echo 1 || echo 0)"
+    else
+        echo "   SKIP  AA3 (no budget between 2^3 x 4 / 3^3 x 10, ${q24:-?} / ${q310:-?} GB, and 2^3 x 8, ${q28:-?} GB)"
+    fi
+fi
+# AA4: the configurations the constants were not calibrated on fall back, each said, the report line without the keys
+U_WHY_S="the sampled deposit"; U_WHY_P="a run without --sample-points"
+U_WHY_F="the face sums on the CPU"; U_WHY_B="the CPU deposit under --run-mode balanced or gentle"
+if [ "${U_POS}" = 0 ]; then   # (the double build or a float-sum knob is named first)
+    U_WHY_S=""; U_WHY_P=""; U_WHY_F=""; U_WHY_B=""
+fi
+run_u u4s DTFE_AUTO_TIME=1 -- --field density_a velocity_a --subsamples 3 --run-mode performance
+run_u u4p DTFE_AUTO_TIME=1 DTFE_AUTO_PTS_N=0 -- "${U_CPU[@]}"
+run_u u4f DTFE_AUTO_TIME=1 -- --field density_a velocity_a gradient_a --ps-volume-weighted --exact --run-mode performance
+run_u u4b DTFE_AUTO_TIME=1 -- --field density_a velocity_a --exact --run-mode balanced
+for c in "u4s|${U_WHY_S}" "u4p|${U_WHY_P}" "u4f|${U_WHY_F}" "u4b|${U_WHY_B}"; do
+    tag="${c%%|*}"; why="${c#*|}"
+    check "AA4 ${tag}: not calibrated for ${why:-this build}, said; no time keys" \
+          "$(grep -qF -e "${U_LINE} not calibrated for ${why}" "${TMP}/at_u_${tag}.log" \
+             && [ -n "$(u_line "${tag}")" ] && ! grep -q 'time_s=' "${TMP}/at_u_${tag}.log" && echo 1 || echo 0)"
+done
+if [ "${U_POS}" = 1 ]; then
+    # AA5: a real run (a 16 x 16 plane of points) with the switch writes the grids and points of its plan given by hand
+    "${PY}" - "${TMP}/at_u_plane.bin" "${BOX}" <<'PYEOF'
+import sys, numpy as np
+c = (np.arange(16) + 0.5) * float(sys.argv[2]) / 16
+X, Y = np.meshgrid(c, c, indexing="ij")
+np.stack([X.ravel(), Y.ravel(), np.full(X.size, 0.5 * float(sys.argv[2]))], 1).astype(np.float64).tofile(sys.argv[1])
+PYEOF
+    rc=0
+    env OMP_NUM_THREADS=10 DTFE_RAM_GB=64 DTFE_FREE_GB=1000 DTFE_AUTO_MINN=1000 DTFE_AUTO_TIME=1 "${BIN}" "${SNAP}" \
+        "${TMP}/at_u_r1" "${U_ARGS[@]}" "${U_CPU[@]}" --sample-points "${TMP}/at_u_plane.bin" \
+        > "${TMP}/at_u_r1.log" 2>&1 || rc=$?
+    up="$(sed -n 's/.*AUTO-TUNE: .* -> --partition \([0-9]*\) [0-9]* [0-9]* --max-concurrent \([0-9]*\) .*/\1|\2/p' \
+          "${TMP}/at_u_r1.log" | head -1)"
+    if [ -n "${up}" ]; then
+        env OMP_NUM_THREADS=10 DTFE_RAM_GB=64 DTFE_FREE_GB=1000 DTFE_AUTO_MINN=1000 "${BIN}" "${SNAP}" \
+            "${TMP}/at_u_r2" "${U_ARGS[@]}" "${U_CPU[@]}" --sample-points "${TMP}/at_u_plane.bin" \
+            --partition "${up%%|*}" "${up%%|*}" "${up%%|*}" --max-concurrent "${up##*|}" > "${TMP}/at_u_r2.log" 2>&1 || true
+    fi
+    check "AA5 a real run with the switch (exit ${rc}, plan ${up:-none}) states its prediction and writes the .a_den, .a_vel and .pts_den of that plan given by hand" \
+          "$([ "${rc}" = 0 ] && [ -n "${up}" ] && grep -qF -e "${U_LINE} this plan predicts ~" "${TMP}/at_u_r1.log" \
+             && [ -s "${TMP}/at_u_r1.a_den" ] && cmp -s "${TMP}/at_u_r1.a_den" "${TMP}/at_u_r2.a_den" \
+             && cmp -s "${TMP}/at_u_r1.a_vel" "${TMP}/at_u_r2.a_vel" \
+             && cmp -s "${TMP}/at_u_r1.pts_den" "${TMP}/at_u_r2.pts_den" && echo 1 || echo 0)"
+    # AA6 (GPU builds): the all-GPU class gains the keys; its face sums under '--run-mode balanced' fall back
+    U_GPU=(--field density_a velocity_a --exact --gpu --run-mode performance)
+    run_u u6a -- "${U_GPU[@]}"
+    if grep -q "GPU (--gpu)" "${TMP}/at_u_u6a.log"; then
+        run_u u6b DTFE_AUTO_TIME=1 DTFE_AUTO_TIME_GAIN=0 -- "${U_GPU[@]}"
+        rg="$(u_line u6a)"; kg="$(u_keys u6b)"
+        check "AA6 the all-GPU class, a band of 0: the switch-off report line with time_s = time_mem_s (${kg:-none})" \
+              "$([ -n "${rg}" ] && [ -n "${kg}" ] && [ "${kg% *}" = "${kg#* }" ] && [ "$(u_line u6b | u_strip)" = "${rg}" ] \
+                 && echo 1 || echo 0)"
+        # (DTFE_FACE_WALK_EARLY=0: the walk after the deposit, the configuration the GPU face class was measured on.
+        # The default's walk beside the device call is named first, before the run mode: auto_tune.cc timeClass)
+        run_u u6f DTFE_AUTO_TIME=1 DTFE_FACE_WALK_EARLY=0 -- --field density_a velocity_a gradient_a \
+            --ps-volume-weighted --exact --gpu --run-mode balanced
+        check "AA6 the face sums on the GPU under --run-mode balanced: not calibrated, said; no time keys" \
+              "$(grep -qF -e "${U_LINE} not calibrated for the face sums under --run-mode balanced or gentle" \
+                    "${TMP}/at_u_u6f.log" && ! grep -q 'time_s=' "${TMP}/at_u_u6f.log" && echo 1 || echo 0)"
+        # (the default: the face walk beside the device call, whose time the constants were not measured with)
+        run_u u6w DTFE_AUTO_TIME=1 -- --field density_a velocity_a gradient_a --ps-volume-weighted --exact --gpu \
+            --run-mode performance
+        check "AA6 the face sums on the GPU, their walk beside the device call (the default): not calibrated, said" \
+              "$(grep -qF -e "${U_LINE} not calibrated for the face walk beside the GPU deposit" \
+                    "${TMP}/at_u_u6w.log" && ! grep -q 'time_s=' "${TMP}/at_u_u6w.log" && echo 1 || echo 0)"
+    else
+        echo "   SKIP  AA6 (this build has no GPU backend)"
+    fi
+    # AA7: a hand-set split is predicted and kept
+    run_u u7a -- "${U_CPU[@]}" --partition 3 3 3 --max-concurrent 4
+    run_u u7b DTFE_AUTO_TIME=1 -- "${U_CPU[@]}" --partition 3 3 3 --max-concurrent 4
+    r7="$(u_line u7a)"; k7="$(u_keys u7b)"
+    check "AA7 a hand-set split: kept (the switch-off report line), predicted (time_s = time_mem_s: ${k7:-none}), said" \
+          "$([ -n "${r7}" ] && [ -n "${k7}" ] && [ "${k7% *}" = "${k7#* }" ] && [ "$(u_line u7b | u_strip)" = "${r7}" ] \
+             && grep -qF -e "--partition is given, so it is only predicted." "${TMP}/at_u_u7b.log" && echo 1 || echo 0)"
+fi
+rm -f "${TMP}"/at_u_*
 
 echo "------------------------------------------------------------"
 if [ "${FAILS}" -gt 0 ]; then

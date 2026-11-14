@@ -1,12 +1,15 @@
 /* Metal backend of the PS-DTFE GPU deposit (implements gpu_host.h). Owns the metal-cpp
    implementation symbols for the whole binary; compiled only when METAL=1 (which defines
    PS_GPU for the callers). The kernel source is embedded at build time (o_ps/ps_deposit_msl.h,
-   generated from metal/ps_deposit.metal) and runtime-compiled once per process; the pipeline
-   state is cached. */
+   generated from metal/ps_deposit.metal) and runtime-compiled once per word size the process
+   uses (pipes(), behind a "#define PS_FX_WORDS 0|2" line); the pipeline states are cached. The GPU face kernel of
+   DTFE_GPU_FACES=1 (o_ps/ps_face_msl.h, from metal/ps_face.metal) is a library of its own, compiled once in the safe
+   math mode by the first face pass (facePipes()). */
 
 #define NS_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
 #include <Metal/Metal.hpp>
+#include <objc/runtime.h>   // the face library's options: whether this macOS has the math-mode selectors
 
 #include <algorithm>
 #include <chrono>
@@ -26,7 +29,9 @@
 #include "gpu_host.h"
 #include "ps_deposit_params.h"
 #include "ps_mass_audit.h"     // DTFE_MASS_AUDIT=1: the fixed-point grid's exact total
+#include "../fixed_units.h"    // FxWords + fxFoldLimbs: the run-wide 128-bit words into int64 words and a carry
 #include "ps_deposit_msl.h"   // generated: static const char PS_DEPOSIT_MSL[]
+#include "ps_face_msl.h"      // generated: static const char PS_FACE_MSL[] (DTFE_GPU_FACES=1)
 #include "../thread_count.h"   // CorePool: the core of a thread that waits for the GPU is lent to the pool
 #include "../run_mode.h"       // runModeState(): the run mode's pace base (gpu_metal_retry.h) and exact-item cap
 #include <atomic>
@@ -38,10 +43,11 @@ namespace {
 
 using DepositParams = PSDepositParams;   // shared host struct (ps_deposit_params.h)
 
-struct Ctx
+// The pipelines of one word size. The kernel source takes the size as a preprocessor constant (PS_FX_WORDS in
+// metal/ps_deposit.metal), so a library carries only its own add path: one runtime compile per size a process uses
+// (a run has one size; PSGpuPlan::words).
+struct Pipes
 {
-    MTL::Device*               dev  = nullptr;
-    MTL::CommandQueue*         q    = nullptr;
     MTL::ComputePipelineState* pso  = nullptr;   // depositFields: one thread per tet
     MTL::ComputePipelineState* psoItems[3] = { nullptr, nullptr, nullptr };   // depositExactItems: one per (tet, cell
                                                                      // block), a pipeline per pass (its kItemsPhase),
@@ -51,30 +57,65 @@ struct Ctx
     bool                       ready = false;
 };
 
+// The face kernel's pipeline (DTFE_GPU_FACES=1: metal/ps_face.metal faceSweepItems), the 64-bit words only
+struct FacePipes
+{
+    MTL::ComputePipelineState* pso = nullptr;
+    std::string                err;
+    bool                       ready = false;
+};
+
+struct Ctx
+{
+    MTL::Device*               dev  = nullptr;
+    MTL::CommandQueue*         q    = nullptr;
+    Pipes                      pipes[2];       // [0] the 64-bit words (PSDepositParams.fxWords 0), [1] the wide (2)
+    std::once_flag             pipesOnce[2];   // pipes()
+    FacePipes                  facePipes;      // facePipes()
+    std::once_flag             faceOnce;
+    std::string                err;
+    bool                       ready = false;
+};
+
 // serializes the dispatches (one queue): a psGpuDepositFields call holds it from its uploads to the end of its passes
 std::mutex& ctxMutex() { static std::mutex m; return m; }
 
-// The device, its queue and the pipelines (the runtime compile of the kernel source): ctx() runs this once.
+// The device and its queue: ctx() runs this once.
 void ctxInit(Ctx& c)
 {
     c.dev = MTL::CreateSystemDefaultDevice();
     if (!c.dev) { c.err = "no Metal device"; return; }
     c.q = c.dev->newCommandQueue();
+    if (!c.q) { c.err = "no Metal command queue"; return; }
+    c.ready = true;
+}
 
+// The pipelines of one word size (the runtime compile of the kernel source behind its "#define PS_FX_WORDS" line,
+// with the compiler's default options for either size): pipes() runs this once per size.
+void pipesInit(Ctx& c, uint32_t const words, Pipes& p)
+{
+    // (the compiler's messages are autoreleased: copied into p.err / p.errLinear before the pool goes)
+    struct Pool
+    {
+        NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
+        ~Pool() { pool->release(); }
+    } const pool;
+    auto const t0 = std::chrono::steady_clock::now();
+    std::string const src = std::string("#define PS_FX_WORDS ") + (words == 2u ? "2" : "0") + "\n" + PS_DEPOSIT_MSL;
     NS::Error* nsErr = nullptr;
     MTL::Library* lib = c.dev->newLibrary(
-        NS::String::string(PS_DEPOSIT_MSL, NS::UTF8StringEncoding),
+        NS::String::string(src.c_str(), NS::UTF8StringEncoding),
         (MTL::CompileOptions*)nullptr, &nsErr);
     if (!lib)
     {
-        c.err = std::string("kernel compile failed: ")
+        p.err = std::string("kernel compile failed: ")
               + (nsErr ? nsErr->localizedDescription()->utf8String() : "unknown");
         return;
     }
-    for (auto [name, dst, phase] : { std::tuple<const char*, MTL::ComputePipelineState**, int>{"depositFields", &c.pso, -1},
-                                     std::tuple<const char*, MTL::ComputePipelineState**, int>{"depositExactItems", &c.psoItems[0], 0},
-                                     std::tuple<const char*, MTL::ComputePipelineState**, int>{"depositExactItems", &c.psoItems[1], 1},
-                                     std::tuple<const char*, MTL::ComputePipelineState**, int>{"depositExactItems", &c.psoItems[2], 2} })
+    for (auto [name, dst, phase] : { std::tuple<const char*, MTL::ComputePipelineState**, int>{"depositFields", &p.pso, -1},
+                                     std::tuple<const char*, MTL::ComputePipelineState**, int>{"depositExactItems", &p.psoItems[0], 0},
+                                     std::tuple<const char*, MTL::ComputePipelineState**, int>{"depositExactItems", &p.psoItems[1], 1},
+                                     std::tuple<const char*, MTL::ComputePipelineState**, int>{"depositExactItems", &p.psoItems[2], 2} })
     {
         MTL::Function* fn = nullptr;
         if (phase < 0) fn = lib->newFunction(NS::String::string(name, NS::UTF8StringEncoding));
@@ -95,8 +136,8 @@ void ctxInit(Ctx& c)
                 ? std::string("kernel '") + name + "' (kItemsPhase 2) did not compile: "
                       + (nsErr ? nsErr->localizedDescription()->utf8String() : "unknown")
                 : std::string("kernel '") + name + "' not found";
-            if (phase == 2) { c.errLinear = why; continue; }
-            c.err = why;
+            if (phase == 2) { p.errLinear = why; continue; }
+            p.err = why;
             return;
         }
         *dst = c.dev->newComputePipelineState(fn, &nsErr);
@@ -104,12 +145,26 @@ void ctxInit(Ctx& c)
         {
             std::string const why = std::string("pipeline state failed: ")
                                   + (nsErr ? nsErr->localizedDescription()->utf8String() : "unknown");
-            if (phase == 2) { c.errLinear = why; continue; }
-            c.err = why;
+            if (phase == 2) { p.errLinear = why; continue; }
+            p.err = why;
             return;
         }
     }
-    c.ready = true;
+    p.ready = true;
+    // DTFE_GPU_TIMING=1: what the compile cost and how the device groups each pipeline's threads
+    if (Env::flag({"DTFE_GPU_TIMING"}))
+    {
+        fprintf(stderr, "PS-DTFE Metal: pipelines for word size %u compiled in %.3f s\n", unsigned(words),
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        MTL::ComputePipelineState* const all[4] = { p.pso, p.psoItems[0], p.psoItems[1], p.psoItems[2] };
+        char const* const names[4] = { "depositFields", "exact items pass 0", "exact items pass 1",
+                                       "exact items linear" };
+        for (int i = 0; i < 4; ++i)
+            if (all[i])
+                fprintf(stderr, "PS-DTFE Metal: pipeline %-18s  %4lu threads per group at most, %3lu wide\n",
+                        names[i], static_cast<unsigned long>(all[i]->maxTotalThreadsPerThreadgroup()),
+                        static_cast<unsigned long>(all[i]->threadExecutionWidth()));
+    }
 }
 
 // The process's device context, built by the first caller (std::call_once: the partitions prepare their deposits
@@ -120,6 +175,81 @@ Ctx& ctx()
     static std::once_flag once;
     std::call_once(once, ctxInit, std::ref(c));
     return c;
+}
+
+// The pipelines of the given word size, compiled by the first caller that asks for that size (as ctx())
+Pipes const& pipes(Ctx& c, uint32_t const words)
+{
+    int const i = words == 2u ? 1 : 0;
+    std::call_once(c.pipesOnce[i], pipesInit, std::ref(c), words, std::ref(c.pipes[i]));
+    return c.pipes[i];
+}
+
+// The face kernel's pipeline (DTFE_GPU_FACES=1): the embedded source (metal/ps_face.metal with fixed_words.metal.inc,
+// ps_kernel_params.h, ps_common.metal.inc and src/CGAL_triangulation/face_sweep_f32.h in front) behind
+// "#define PS_FX_WORDS 0" -- the 64-bit words, the only ones a face pass takes -- compiled in Metal's SAFE math mode:
+// face_sweep_f32.h's float shares are the CPU's bit for bit only when every operation is a correctly rounded IEEE
+// single operation and none is reassociated or contracted. The deposit's library keeps the compiler's default fast
+// math (pipesInit). fastMathEnabled = false is that mode on every macOS; macOS 15 also names the mode and the
+// precise library functions, selectors an older runtime does not have, so each is asked for first. (Which of the
+// operations the device rounds as the CPU does is what the kernel's probe, faceProbe, checks: the harness's.)
+// facePipes() runs this once.
+void facePipesInit(Ctx& c, FacePipes& p)
+{
+    struct Pool
+    {
+        NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
+        ~Pool() { pool->release(); }
+    } const pool;
+    auto const t0 = std::chrono::steady_clock::now();
+    std::string const src = std::string("#define PS_FX_WORDS 0\n") + PS_FACE_MSL;
+    MTL::CompileOptions* opt = MTL::CompileOptions::alloc()->init();
+    if (!opt) { p.err = "the face kernel's compile options could not be made"; return; }
+    opt->setFastMathEnabled(false);
+    Class const optClass = object_getClass(reinterpret_cast<id>(opt));
+    if (class_respondsToSelector(optClass, sel_registerName("setMathMode:")))
+        opt->setMathMode(MTL::MathModeSafe);
+    if (class_respondsToSelector(optClass, sel_registerName("setMathFloatingPointFunctions:")))
+        opt->setMathFloatingPointFunctions(MTL::MathFloatingPointFunctionsPrecise);
+    NS::Error* nsErr = nullptr;
+    MTL::Library* lib = c.dev->newLibrary(NS::String::string(src.c_str(), NS::UTF8StringEncoding), opt, &nsErr);
+    opt->release();
+    if (!lib)
+    {
+        p.err = std::string("face kernel compile failed: ")
+              + (nsErr ? nsErr->localizedDescription()->utf8String() : "unknown");
+        return;
+    }
+    MTL::Function* fn = lib->newFunction(NS::String::string("faceSweepItems", NS::UTF8StringEncoding));
+    if (!fn)
+    {
+        p.err = "kernel 'faceSweepItems' not found";
+        lib->release();
+        return;
+    }
+    p.pso = c.dev->newComputePipelineState(fn, &nsErr);
+    fn->release();
+    lib->release();
+    if (!p.pso)
+    {
+        p.err = std::string("face pipeline state failed: ")
+              + (nsErr ? nsErr->localizedDescription()->utf8String() : "unknown");
+        return;
+    }
+    p.ready = true;
+    if (Env::flag({"DTFE_GPU_TIMING"}))
+        fprintf(stderr, "PS-DTFE Metal: face pipeline compiled in %.3f s; faceSweepItems  %4lu threads per group at "
+                        "most, %3lu wide\n",
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+                static_cast<unsigned long>(p.pso->maxTotalThreadsPerThreadgroup()),
+                static_cast<unsigned long>(p.pso->threadExecutionWidth()));
+}
+
+// The face kernel's pipeline, compiled by the first face pass that asks (as pipes())
+FacePipes const& facePipes(Ctx& c)
+{
+    std::call_once(c.faceOnce, facePipesInit, std::ref(c), std::ref(c.facePipes));
+    return c.facePipes;
 }
 
 } // namespace
@@ -306,7 +436,23 @@ void psHostCopyBack(PSHostCopyArgs const& k)
         if (massAudit) out.auditDeferredMass = deferredMass;
     }
 
-    if (pl.massFixed)
+    if (pl.massFixed && pl.words == 2u)
+    {
+        // the run-wide 128-bit words: each cell's four limbs folded into its int64 word and the exact carry
+        // (fixed_units.h fxFoldLimbs), handed over unconverted, as the 64-bit words below
+        FxWords f;
+        fxFoldLimbs(static_cast<uint32_t const*>(bMassFx->contents()), nCell, f);
+        out.massFx.swap(f.w);
+        out.massFxCarry.swap(f.carry);
+        if (massAudit)
+        {   // the exact integer total in 128 bits (in the run's unit a pass's mass can lie beyond 2^63 units)
+            __int128 q = 0;
+            for (int64_t const w : out.massFx) q += __int128(w);
+            for (auto const& c : out.massFxCarry) q += __int128(c.second) * (__int128(1) << 64);
+            out.auditFixedTotal = double(q) / double(pl.massScale);
+        }
+    }
+    else if (pl.massFixed)
     {
         // the words themselves, not their float decode: adding the deferred tets' shares into decoded floats
         // would round away every share below half an ulp of a busy cell, always downward (1.6e-5 of the box
@@ -324,7 +470,7 @@ void psHostCopyBack(PSHostCopyArgs const& k)
     else
         std::memcpy(out.mass.data(), bMass->contents(), nCell * 4);
     // each moment grid: its words (fixed point; each low/high pair IS the int64 on this little-endian
-    // host, as for the mass) or its floats
+    // host, as for the mass; the run-wide 128-bit words folded with their carry, as the mass) or its floats
     MTL::Buffer* const fxBuf[PS_FX_N] = { bMom, bM2, bGrad, bMomW, bSV, bDV, nullptr, bScal, bSG };
     std::vector<float>* const flt[PS_FX_N] = { &out.mom, &out.m2, &out.grad, &out.momw, &out.streamvol, &out.dispvel,
                                                nullptr, &out.scal, &out.sgrad };
@@ -332,12 +478,259 @@ void psHostCopyBack(PSHostCopyArgs const& k)
     {
         if (!pl.sel[g] || !fxBuf[g]) continue;
         size_t const n = nCell * PS_FX_COMPS[g];
-        if (pl.fxOn[g]) { out.fx[g].resize(n); std::memcpy(out.fx[g].data(), fxBuf[g]->contents(), n * 8); }
+        if (pl.fxOn[g] && pl.words == 2u)
+        {
+            FxWords f;
+            fxFoldLimbs(static_cast<uint32_t const*>(fxBuf[g]->contents()), n, f);
+            out.fx[g].swap(f.w);
+            out.fxCarry[g].swap(f.carry);
+        }
+        else if (pl.fxOn[g]) { out.fx[g].resize(n); std::memcpy(out.fx[g].data(), fxBuf[g]->contents(), n * 8); }
         else std::memcpy(flt[g]->data(), fxBuf[g]->contents(), n * 4);
     }
     std::memcpy(out.streams.data(), bStr->contents(),  nCell * 4);
     if (fCaustic) std::memcpy(out.caustic.data(), bCaust->contents(), nCell * 4);
     if (pl.fDispOwn && !pl.dispwIsMass) std::memcpy(out.dispw.data(), bDW->contents(), nCell * 4);
+}
+
+// The core of a thread that sleeps until the GPU is done with its work (the queue, then each buffer's
+// waitUntilCompleted), lent to the core pool for that time (thread_count.h: one helper more may be claimed); see
+// psGpuDepositFields. A claim on the pool never changes a result.
+struct CoreLend
+{
+    CoreLend()  { CorePool::extra().fetch_sub( 1, std::memory_order_relaxed ); }
+    ~CoreLend() { CorePool::extra().fetch_add( 1, std::memory_order_relaxed ); }
+    CoreLend(CoreLend const &) = delete;
+    CoreLend &operator=(CoreLend const &) = delete;
+};
+
+// ---- the GPU face kernel's pass (DTFE_GPU_FACES=1; gpu_host.h PSGpuFaceJob) ----
+
+// Before the hold: the face pipeline (compiled by the first job: facePipes()) and the job's items' map in its GPU
+// buffer -- psBuildExactItemMap with blockCells 1, a record's items being the sum of its three plane counts
+// (ps_kernel_params.h PS_FACE_REC_COUNT), so an item is (record, its number among the record's items), which the
+// kernel turns into (axis, plane). False, with job.err set and no buffer held, when the job cannot run; true with
+// bMap and fp null when no record has an item (the pass then has nothing to sweep).
+bool psHostFacePrepare(Ctx& c, PSGpuFaceJob& job, FacePipes const*& fp, MTL::Buffer*& bMap)
+{
+    auto tPh = std::chrono::steady_clock::now();
+    fp = nullptr;
+    bMap = nullptr;
+    job.ok = false;
+    job.mismatches = 0;
+    for (unsigned long long& d : job.drops) d = 0;
+    job.err.clear();
+    if (job.P.fxWords != 0u)
+    {
+        job.err = "the face kernel takes the 64-bit words only";
+        return false;
+    }
+    if (job.recs.size() % size_t(PS_FACE_REC_FLOATS) != 0)
+    {
+        job.err = "face record size mismatch (PS_FACE_REC_FLOATS floats per record)";
+        return false;
+    }
+    size_t const nRec = job.recs.size() / size_t(PS_FACE_REC_FLOATS);
+    std::vector<uint64_t> items(nRec);
+    size_t nItems = 0;
+    for (size_t r = 0; r < nRec; ++r)
+    {
+        uint32_t cnt[3];
+        std::memcpy(cnt, &job.recs[r * size_t(PS_FACE_REC_FLOATS) + size_t(PS_FACE_REC_COUNT)], sizeof cnt);
+        items[r] = uint64_t(cnt[0]) + uint64_t(cnt[1]) + uint64_t(cnt[2]);
+        nItems += size_t(items[r]);
+    }
+    job.nRec = nRec;
+    job.nItems = nItems;
+    job.mapSec += PSGpuPhaseTimes::lap(tPh);
+    if (nItems == 0) return true;
+    FacePipes const& p = facePipes(c);   // (its compile is timed on its own: facePipesInit)
+    tPh = std::chrono::steady_clock::now();
+    if (!p.ready)
+    {
+        job.err = p.err;
+        return false;
+    }
+    if (!psExactItemMapFits(nRec, nItems))
+    {
+        job.err = "too many face items for 32-bit item numbers";
+        return false;
+    }
+    bMap = c.dev->newBuffer(psExactItemMapWords(nRec, nItems) * sizeof(uint32_t), MTL::ResourceStorageModeShared);
+    if (!bMap)
+    {
+        job.err = "Metal buffer allocation failed (the face items' map)";
+        return false;
+    }
+    psBuildExactItemMap(items, 1u, nItems, static_cast<uint32_t*>(bMap->contents()));
+    job.P.nRec = uint32_t(nRec);
+    fp = &p;
+    job.mapSec += PSGpuPhaseTimes::lap(tPh);
+    return true;
+}
+
+// In a hold of the GPU (the caller holds ctxMutex): a prepared job's face pass. The records go up (the host's copy
+// freed at once), the three word buffers start zeroed (shared storage: on unified memory the copy back is a memcpy;
+// the host's words are std::vectors, not page-aligned, so they cannot be wrapped without a copy), faceSweepItems runs
+// over the items through gpuRunPass as the exact deposit's items do (the run mode's pace and item cap, the first
+// chunk 8192 items, at least 1024; every buffer counted by DTFE_GPU_FAULT_AT's hook), and the words come back into
+// the job one accumulator at a time, each device buffer released after its copy. A failed buffer restores the words
+// to zero and restarts at item 0 (no periodic checkpoint: the words are known zero at the start, so the snapshot
+// holds nothing, and the pass is short); the retry policy's limits count the failed buffers of the deposit in the
+// same hold too (nFailed). False -- job.ok false and no word kept -- when the pass gave up, a buffer could not be
+// had, or the device counted an item whose plane count differed from its record's (job.mismatches: its words are not
+// the CPU's). Takes bMap (released here).
+bool psHostFacePass(Ctx& c, PSGpuFaceJob& job, FacePipes const* fp, MTL::Buffer*& bMap, int& nFailed,
+                    int& nResumedCk, bool const timing)
+{
+    auto const tPass = std::chrono::steady_clock::now();
+    auto tPh = tPass;
+    size_t const nS = job.nCell * 18, nN = job.nCell * 6;
+    job.ok = false;
+    if (job.nItems == 0)
+    {   // no record owns a section: every face word of the pass is zero
+        std::vector<float>().swap(job.recs);
+        job.wS.assign(nS, 0);
+        job.wN.assign(nN, 0);
+        job.wP.assign(nN, 0);
+        if (bMap) { bMap->release(); bMap = nullptr; }
+        job.ok = true;
+        job.heldSec += PSGpuPhaseTimes::lap(tPh);
+        return true;
+    }
+    if (!fp || !fp->pso || !bMap)
+    {   // (psHostFacePrepare did not return true for this job)
+        job.err = "the face pass was not prepared";
+        if (bMap) { bMap->release(); bMap = nullptr; }
+        return false;
+    }
+    // (the command buffers are autoreleased and retain the buffers they ran on: drained before the hold ends)
+    NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
+    auto zeroBuf = [&](size_t bytes) {
+        MTL::Buffer* b = c.dev->newBuffer(bytes, MTL::ResourceStorageModeShared);
+        if (b) std::memset(b->contents(), 0, bytes);
+        return b;
+    };
+    MTL::Buffer* bR = c.dev->newBuffer(job.recs.data(), job.recs.size() * sizeof(float),
+                                       MTL::ResourceStorageModeShared);
+    std::vector<float>().swap(job.recs);
+    MTL::Buffer* bS = zeroBuf(nS * 8);
+    MTL::Buffer* bN = zeroBuf(nN * 8);
+    MTL::Buffer* bP = zeroBuf(nN * 8);
+    // the guard's and the plane counts' counters (PS_FACE_CNT_*): gpuRunPass zeroes and reads FX_DROP_SLOTS words
+    static_assert(PS_FACE_CNT_WORDS <= int(FX_DROP_SLOTS), "the face counters fit gpuRunPass' counter words");
+    MTL::Buffer* bC = zeroBuf(size_t(FX_DROP_SLOTS) * 4);
+    job.uploadSec += PSGpuPhaseTimes::lap(tPh);
+    auto finish = [&](bool const ok) -> bool
+    {
+        auto tRel = std::chrono::steady_clock::now();
+        for (MTL::Buffer* b : { bR, bS, bN, bP, bC, bMap }) if (b) b->release();
+        bR = bS = bN = bP = bC = nullptr;
+        bMap = nullptr;
+        pool->release();
+        job.releaseSec += PSGpuPhaseTimes::lap(tRel);
+        job.heldSec += std::chrono::duration<double>(std::chrono::steady_clock::now() - tPass).count();
+        job.ok = ok;
+        return ok;
+    };
+    if (!bR || !bS || !bN || !bP || !bC)
+    {
+        job.err = "Metal buffer allocation failed (the face pass: out of GPU-visible memory?)";
+        return finish(false);
+    }
+    GpuSnapshot snap;
+    std::string lastErr;
+    unsigned long long bad[FX_DROP_SLOTS] = {};
+    GpuRetryRun run{ snap, nFailed, nResumedCk, lastErr, bad };
+    std::vector<MTL::Buffer*> ckBufs = { bS, bN, bP };
+    std::vector<bool> const zeroMask(ckBufs.size(), true);
+    GpuPassSpec pass;
+    pass.tag = "PS-DTFE Metal";
+    pass.scope = "hold";   // (GPU_MAX_FAILS_TOTAL: the deposit's failed buffers in the same hold count too)
+    pass.q = c.q;
+    pass.pso = fp->pso;
+    pass.nThreads = job.nItems;
+    pass.minChunk = 1024;
+    pass.maxChunk = std::max<size_t>(runModeState().psItemCap, pass.minChunk);
+    pass.ckOn = snap.take(ckBufs, zeroMask, 0);   // (all zero: nothing copied)
+    pass.periodic = false;
+    pass.ckBufs = &ckBufs;
+    pass.ckMask = zeroMask;
+    pass.ckChunks = 0;
+    pass.paceRecoverSec = psHostCheckpointEnv().paceRecoverSec;
+    pass.badW = static_cast<uint32_t*>(bC->contents());
+    PSFaceParams FP = job.P;
+    FP.fxWords = 0u;
+    for (uint32_t& cb : FP.capBits) cb = 0u;
+    size_t chunk = 8192;
+    auto const tRun = std::chrono::steady_clock::now();
+    bool const ran = gpuRunPass(pass, run, chunk,
+                                [&](MTL::ComputeCommandEncoder* enc, size_t start, uint32_t n)
+    {
+        FP.itemBase = uint32_t(start);
+        FP.nItems = n;
+        enc->setBuffer(bR,   0, 0);
+        enc->setBuffer(bMap, 0, 1);
+        enc->setBuffer(bS,   0, 2);
+        enc->setBuffer(bN,   0, 3);
+        enc->setBuffer(bP,   0, 4);
+        enc->setBuffer(bC,   0, 5);
+        enc->setBytes(&FP, sizeof FP, 6);
+    },
+                                [&] { snap.restore(); return snap.start; },
+                                [] {});
+    job.gapSec += pass.gaps;
+    tPh = std::chrono::steady_clock::now();
+    if (!ran)
+    {
+        job.err = lastErr;
+        fprintf(stderr, "%sPS-DTFE Metal: the face pass gave up (%s); the CPU face walk makes this pass's face sums "
+                        "instead (the same words)%s\n", MESSAGE::cYellow(), lastErr.c_str(), MESSAGE::cReset());
+        return finish(false);
+    }
+    job.busySec += pass.busy;
+    job.buffers += pass.buffers;
+    if (timing)
+        fprintf(stderr, "PS-DTFE Metal: %-17s %10zu threads  %6zu buffers  %8.3f s busy  %8.3f s wall\n",
+                "faceSweepItems", job.nItems, pass.buffers, pass.busy,
+                std::chrono::duration<double>(tPh - tRun).count());
+    job.mismatches = bad[PS_FACE_CNT_MISMATCH];
+    if (job.mismatches > 0)
+    {
+        job.err = "the device's plane count differed from the records' for "
+                + std::to_string(job.mismatches) + " face item(s)";
+        fprintf(stderr, "%sPS-DTFE Metal: %llu face item(s) whose plane count the device found other than the host's "
+                        "(face_sweep_f32.h fsPlanes: a device rounding the canonical arithmetic does not allow for; "
+                        "the kernel's probe faceProbe shows which); the CPU face walk makes this pass's face sums "
+                        "instead%s\n", MESSAGE::cYellow(), job.mismatches, MESSAGE::cReset());
+        return finish(false);
+    }
+    for (int k = 0; k < 3; ++k) job.drops[k] = bad[PS_FACE_CNT_S + k];
+    // the words back, one accumulator at a time (each pair of uint, low word first, IS the int64 on this
+    // little-endian host, as for the deposit's words), each device buffer freed after its copy
+    job.wS.resize(nS);
+    std::memcpy(job.wS.data(), bS->contents(), nS * 8);
+    bS->release();
+    bS = nullptr;
+    job.wN.resize(nN);
+    std::memcpy(job.wN.data(), bN->contents(), nN * 8);
+    bN->release();
+    bN = nullptr;
+    job.wP.resize(nN);
+    std::memcpy(job.wP.data(), bP->contents(), nN * 8);
+    job.copySec += PSGpuPhaseTimes::lap(tPh);
+    return finish(true);
+}
+
+// DTFE_GPU_TIMING=1: one line per face pass, in psGpuReportPhases' style
+void psHostReportFace(PSGpuFaceJob const& job)
+{
+    fprintf(stderr, "PS-DTFE Metal: partition %d face pass: %zu records (%.1f MB), %zu items; before the hold: "
+                    "items' map %.3f s; in the hold: uploads %.3f s, kernels %.3f s (%zu buffers), pacing gaps "
+                    "%.3f s, copy-back %.3f s, releases %.3f s, %.3f s in all\n",
+            PSMassAudit::partition, job.nRec, double(job.nRec) * PS_FACE_REC_FLOATS * 4. / 1.e6, job.nItems,
+            job.mapSec, job.uploadSec, job.busySec, job.buffers, job.gapSec, job.copySec, job.releaseSec,
+            job.heldSec);
 }
 
 } // namespace
@@ -354,7 +747,8 @@ bool psGpuDepositFields(std::vector<float>& verts,
                           bool fVel, bool fDisp, bool fGrad, bool fLinear,
                           bool fVolW, bool fCaustic, bool fExact, bool fScal, bool fSGrad, bool windowMode,
                           double massExtra, PSFixedUnits const& fxUnits,
-                          PSGpuGrids& out, std::vector<uint32_t>& deferred, std::string& err)
+                          PSGpuGrids& out, std::vector<uint32_t>& deferred, std::string& err,
+                          PSGpuFaceJob* faceJob)
 {
     // DTFE_GPU_TIMING=1: one line per kernel run (threads, buffers, GPU-busy and wall seconds),
     // and per partition where its call went, before and in its hold of the GPU (PSGpuPhaseTimes: timed always,
@@ -362,6 +756,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
     bool const timing = Env::flag({"DTFE_GPU_TIMING"});
     PSGpuPhaseTimes ph;
     auto tPh = std::chrono::steady_clock::now();
+    if (faceJob) faceJob->ok = false;   // (DTFE_GPU_FACES=1: set only by a face pass that made the words)
     Ctx& c = ctx();
     if (!c.ready) { err = c.err; return false; }
     ph.device += PSGpuPhaseTimes::lap(tPh);
@@ -373,12 +768,19 @@ bool psGpuDepositFields(std::vector<float>& verts,
     bool const floatMass = Env::flag({"DTFE_GPU_FLOAT_MASS"});
     PSGpuPlan const pl = psGpuPlan(subDims, fVel, fDisp, fGrad, fVolW, fCaustic, fExact, fScal, fSGrad, masses,
                                    massExtra, fxUnits, floatMass);
+    // The pipelines of the plan's word size: compiled by the first deposit that asks (pipes()), booked as the
+    // device's time. The parameter block below carries the same size (P.fxWords = pl.words).
+    ph.plan += PSGpuPhaseTimes::lap(tPh);
+    Pipes const& pp = pipes(c, pl.words);
+    ph.device += PSGpuPhaseTimes::lap(tPh);
+    if (!pp.ready) { err = pp.err; return false; }
     size_t const nCell = pl.nCell;
     deferred.clear();
     if (masses.empty())                 // nothing to deposit (empty partition; the caller may still add released tets)
     {
         psGpuInitGrids(out, pl, fxUnits);
         psGpuZeroWords(out, pl);
+        if (faceJob) psGpuFaceSums(*faceJob);   // (the face records of massless tetrahedra: their own hold)
         return true;
     }
     if (verts.size() != masses.size() * size_t(PS_TET_STRIDE))
@@ -407,6 +809,11 @@ bool psGpuDepositFields(std::vector<float>& verts,
     if (long const v = Env::integer("DTFE_GPU_EXACT_CELLS", 0); v > 0) blockCells = uint32_t(v);
     psHostExactItemMap(PSHostItemsArgs{ c, verts, P, nGrid, nTetTotal, periodic, windowMode, timing, useItems,
                                         blockCells, bItems, nItems, ph });
+    // DTFE_GPU_FACES=1: the face pass's pipeline and items' map, before the hold as well (a job that cannot run
+    // leaves faceJob->ok false: the caller's CPU face walk makes the same words)
+    FacePipes const* facePipe = nullptr;
+    MTL::Buffer* bFaceMap = nullptr;
+    bool const faceRun = faceJob && psHostFacePrepare(c, *faceJob, facePipe, bFaceMap);
 
     auto const tAsk = std::chrono::steady_clock::now();   // DTFE_GPU_TIMING: the wait for the queue, and its hold
     // From here to the return this thread sleeps: first in the queue for the GPU, then in each buffer's
@@ -414,14 +821,8 @@ bool psGpuDepositFields(std::vector<float>& verts,
     // is lent to the core pool for that time (thread_count.h: one helper more may be claimed), so the CPU work that
     // follows the free cores can take it: the sub-grid merge and the normalization, and in a run that deposits a
     // share of its partitions on the CPU ('--gpu-share', DTFE.cpp) their deposit teams. A claim on the pool
-    // never changes a result.
-    struct CoreLend
-    {
-        CoreLend()  { CorePool::extra().fetch_sub( 1, std::memory_order_relaxed ); }
-        ~CoreLend() { CorePool::extra().fetch_add( 1, std::memory_order_relaxed ); }
-        CoreLend(CoreLend const &) = delete;
-        CoreLend &operator=(CoreLend const &) = delete;
-    } const coreLend;
+    // never changes a result. (CoreLend: above.)
+    CoreLend const coreLend;
     std::unique_lock<std::mutex> lock(ctxMutex());   // serialize dispatches (single queue); let go after the releases
     auto const tGot = std::chrono::steady_clock::now();
     tPh = tGot;
@@ -458,7 +859,33 @@ bool psGpuDepositFields(std::vector<float>& verts,
     if (!bV || !bU || !bM || !bD || !bSc || !bP || !bMass || !bMassFx || !bMom || !bM2 || !bGrad || !bStr || !bMomW || !bCaust || !bSV || !bDV || !bDW || !bScal || !bSG || !bBad)
     {
         err = "Metal buffer allocation failed (out of GPU-visible memory?)";
+        if (pl.words == 2u)
+        {   // the run-wide 128-bit words: a grid longer than the device's largest buffer cannot be had at all (the
+            // velocity gradient's 144 B per cell of a large sub-grid can reach it); name the first such grid
+            size_t const maxLen = size_t(c.dev->maxBufferLength());
+            struct { size_t bytes; size_t word; char const* name; } const grids[] = {
+                { pl.massFxBytes, 16, "mass" },
+                { pl.momBytes,  pl.fxOn[PS_FX_MOM]  ? 16u : 4u, "velocity moment" },
+                { pl.m2Bytes,   pl.fxOn[PS_FX_M2]   ? 16u : 4u, "second moment" },
+                { pl.gradBytes, pl.fxOn[PS_FX_GRAD] ? 16u : 4u, "velocity gradient" },
+                { pl.momwBytes, pl.fxOn[PS_FX_MOMW] ? 16u : 4u, "moment weight" },
+                { pl.svBytes,   pl.fxOn[PS_FX_SV]   ? 16u : 4u, "multiplicity" },
+                { pl.dvBytes,   pl.fxOn[PS_FX_DV]   ? 16u : 4u, "dispersion mean" },
+                { pl.scalBytes, pl.fxOn[PS_FX_SCAL] ? 16u : 4u, "scalar" },
+                { pl.sgBytes,   pl.fxOn[PS_FX_SG]   ? 16u : 4u, "scalar gradient" } };
+            for (auto const& g : grids)
+                if (g.bytes > maxLen)
+                {
+                    char buf[256];
+                    std::snprintf(buf, sizeof(buf), "the %s grid takes %.2f GB in %zu-byte words, over the %.2f GB "
+                                  "of the device's largest buffer (maxBufferLength)", g.name, double(g.bytes) / 1e9,
+                                  g.word, double(maxLen) / 1e9);
+                    err = buf;
+                    break;
+                }
+        }
         for (MTL::Buffer* b : {bV,bU,bM,bD,bSc,bP,bMass,bMassFx,bMom,bM2,bGrad,bStr,bMomW,bCaust,bSV,bDV,bDW,bScal,bSG,bBad,bItems,bSumW}) if (b) b->release();
+        if (bFaceMap) bFaceMap->release();
         pool->release();
         return false;
     }
@@ -535,7 +962,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
         ph.kernels += pass.busy;
         if (timing)
             fprintf(stderr, "PS-DTFE Metal: %-17s %10zu threads  %6zu buffers  %8.3f s busy  %8.3f s wall\n",
-                    pso == c.pso ? "depositFields" : pso == c.psoItems[2] ? "exactItems linear" : "depositExactItems",
+                    pso == pp.pso ? "depositFields" : pso == pp.psoItems[2] ? "exactItems linear" : "depositExactItems",
                     nThreads, pass.buffers, pass.busy,
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - tRun).count());
         return true;
@@ -562,7 +989,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
     auto runPerTet = [&](MTL::Buffer* vB, MTL::Buffer* uB, MTL::Buffer* mB, MTL::Buffer* dB, MTL::Buffer* sB, size_t nT,
                          bool gridsZero) -> bool
     {
-        return runChunked(c.pso, nT, baseChunk, MIN_CHUNK, MAX_CHUNK, { mB }, gridsZero, false, static_cast<uint32_t*>(bBad->contents()),
+        return runChunked(pp.pso, nT, baseChunk, MIN_CHUNK, MAX_CHUNK, { mB }, gridsZero, false, static_cast<uint32_t*>(bBad->contents()),
                           [&](MTL::ComputeCommandEncoder* enc, size_t start, uint32_t n)
         {
             P.nTet = n;
@@ -600,10 +1027,10 @@ bool psGpuDepositFields(std::vector<float>& verts,
         // --ps-linear-deposit runs both phases on the one pipeline that reads the phase from IP (kItemsPhase 2 in
         // metal/ps_deposit.metal): its weights come from the clip's first moments, which two pipelines may round
         // apart, so the summed total would miss the weights deposited by about 1e-8 of a tet's mass
-        MTL::ComputePipelineState* const pso = c.psoItems[P.fLinear != 0 ? 2u : phase];
-        if (P.fLinear != 0 && !c.psoItems[2])
-        {   // that pipeline did not compile (ctxInit): the caller deposits this partition on the CPU
-            lastErr = "the --ps-linear-deposit item pipeline did not compile: " + c.errLinear;
+        MTL::ComputePipelineState* const pso = pp.psoItems[P.fLinear != 0 ? 2u : phase];
+        if (P.fLinear != 0 && !pp.psoItems[2])
+        {   // that pipeline did not compile (pipesInit): the caller deposits this partition on the CPU
+            lastErr = "the --ps-linear-deposit item pipeline did not compile: " + pp.errLinear;
             return false;
         }
         std::vector<MTL::Buffer*> extras;
@@ -717,6 +1144,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
     {
         err = lastErr;
         for (MTL::Buffer* b : {bV,bU,bM,bD,bSc,bP,bMass,bMassFx,bMom,bM2,bGrad,bStr,bMomW,bCaust,bSV,bDV,bDW,bScal,bSG,bBad}) b->release();
+        if (bFaceMap) bFaceMap->release();   // (no face pass after a deposit the GPU gave up: the CPU makes both)
         pool->release();
         return false;
     }
@@ -734,6 +1162,15 @@ bool psGpuDepositFields(std::vector<float>& verts,
     std::vector<GpuSnapshot::Blob>().swap(snap.blobs);
     ph.releases += PSGpuPhaseTimes::lap(tPh);
     auto const tFree = tPh;
+    // DTFE_GPU_FACES=1: the face pass in the same hold, now that the deposit's device buffers are gone (what lives
+    // through it: the deposit's grids handed back in 'out' and the face words). It never touches the deposit's
+    // result: a face pass that gives up leaves faceJob->ok false and the caller's CPU face walk makes the words.
+    auto tHoldEnd = tFree;
+    if (faceRun)
+    {
+        psHostFacePass(c, *faceJob, facePipe, bFaceMap, nFailed, nResumedCk, timing);
+        tHoldEnd = std::chrono::steady_clock::now();
+    }
     lock.unlock();
     // the deposit is kept (its grids are back; a unified-memory copy-back cannot fail): its dropped shares join the
     // run's counts (reported once at the end, DTFE.cpp)
@@ -743,8 +1180,47 @@ bool psGpuDepositFields(std::vector<float>& verts,
     {
         double const held = std::chrono::duration<double>(tFree - tGot).count();
         psGpuReportPhases("Metal", PSMassAudit::partition, ph, snap.sec, held);
+        if (faceRun) psHostReportFace(*faceJob);
         fprintf(stderr, "PS-DTFE Metal: partition %d waited %.3f s for the GPU and held it %.3f s\n",
-                PSMassAudit::partition, std::chrono::duration<double>(tGot - tAsk).count(), held);
+                PSMassAudit::partition, std::chrono::duration<double>(tGot - tAsk).count(),
+                std::chrono::duration<double>(tHoldEnd - tGot).count());
     }
     return true;
+}
+
+// The face sums of a job in a hold of their own (gpu_host.h): the pipeline and the items' map before the hold, the
+// face pass in it (psHostFacePass), its core lent to the pool while it waits, as psGpuDepositFields does.
+bool psGpuFaceSums(PSGpuFaceJob& job)
+{
+    bool const timing = Env::flag({"DTFE_GPU_TIMING"});
+    job.ok = false;
+    Ctx& c = ctx();
+    if (!c.ready) { job.err = c.err; return false; }
+    FacePipes const* fp = nullptr;
+    MTL::Buffer* bMap = nullptr;
+    if (!psHostFacePrepare(c, job, fp, bMap)) return false;
+    if (job.nItems == 0)
+    {   // (no record: nothing for the device, so no hold -- the words are zero)
+        int nFailed = 0, nResumedCk = 0;
+        return psHostFacePass(c, job, fp, bMap, nFailed, nResumedCk, timing);
+    }
+    auto const tAsk = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point tGot, tEnd;
+    bool ok = false;
+    {
+        CoreLend const coreLend;
+        std::unique_lock<std::mutex> lock(ctxMutex());
+        tGot = std::chrono::steady_clock::now();
+        int nFailed = 0, nResumedCk = 0;   // (the face pass's own: no deposit in this hold)
+        ok = psHostFacePass(c, job, fp, bMap, nFailed, nResumedCk, timing);
+        tEnd = std::chrono::steady_clock::now();
+    }
+    if (timing)
+    {
+        psHostReportFace(job);
+        fprintf(stderr, "PS-DTFE Metal: partition %d waited %.3f s for the GPU and held it %.3f s (the face pass)\n",
+                PSMassAudit::partition, std::chrono::duration<double>(tGot - tAsk).count(),
+                std::chrono::duration<double>(tEnd - tGot).count());
+    }
+    return ok;
 }

@@ -51,7 +51,7 @@
 
    WHY NOTHING WRAPS. A 128-bit word holds |x| < 2^127. Every integer added is below 2^(126 - c) and one cell component
    receives at most 2^c of them, so every partial sum -- a subset sum, in whatever order the adds land -- stays below
-   2^126. The device's four limbs hold the sum modulo 2^128 exactly (fixed_words.metal.inc addLimbs), and so the sum
+   2^126. The device's four limbs hold the sum modulo 2^128 exactly (fixed_words.metal.inc), and so the sum
    itself. FxWords hold word + 2^64 carry exactly for any |value| below 2^127. The standard face pass: one tessellation
    tiles each grid plane once and every vertex velocity is a particle's, so a cell's face word lies within 2 vmax A,
    below 2^61 units -- an int64 holds it with room for a float excess of a share up to a factor just under 4, and the
@@ -72,12 +72,18 @@
    compiler's __int128 conversion), then a scaling that is exact while the result is a normal float -- the fixed merge's
    'finish' (ps_fixed_merge.h). A double conversion and then a float one would round twice.
 
-   THE SWITCH AND THE HOOK. DTFE_RUN_UNITS_LEGACY=1 (runUnitsLegacy, read once): a deposit that takes these units runs
-   its per-batch or per-pass path instead, with its 64-bit words and its float or double sums, for A/B comparisons; the
-   checkpoint key names the switch (runUnitsKeyLine), so a resume across it is refused. DTFE_TEST_RUN_UNIT_SHIFT=n
-   (runUnitShift, read once) makes every N_g larger by n, every unit 2^n finer: -20 makes nearly every share round,
-   +40 pushes cells into limbs 2 and 3 and into the host carries. A deposit on its legacy path adds n to its own unit's
-   exponent likewise, so the split tests can show that the legacy path fails them. The vertex star sums take no
+   THE SWITCHES AND THE HOOK. DTFE_RUN_UNITS_LEGACY=1 (runUnitsLegacy, read once): a deposit that takes these units
+   runs its per-batch or per-pass path instead, with its 64-bit words and its float or double sums, for A/B
+   comparisons. PS-DTFE's passes run that per-pass path BY DEFAULT and take these units only under DTFE_PS_RUN_UNITS=1
+   or '--ps-merge fixed-point' in the single 3-D build, whose merge adds the passes' words (runUnitsPsFixedMerge; the
+   same helper; DTFE_RUN_UNITS_LEGACY=1 beats both): their 128-bit words cost its deposits wall time
+   (docs/cleanup-plan.md, fix 3 S5). A default PS-DTFE run still measures the units, prints their line and writes
+   their moments into the globals record of a tessellation cache, so a run started from that cache under
+   DTFE_PS_RUN_UNITS=1 finds them. The checkpoint key names the mode (runUnitsKeyLine), so a resume across it is
+   refused. DTFE_TEST_RUN_UNIT_SHIFT=n (runUnitShift, read once) makes every N_g larger by n, every unit 2^n finer:
+   -20 makes nearly every share round, +40 pushes cells into limbs 2 and 3 and into the host carries. A deposit on its
+   legacy path adds n to its own unit's exponent likewise, so the split tests can show that the legacy path fails
+   them. The vertex star sums take no
    shift: their shares are double volumes, which round at any unit, and their cap lies only 2^22 W_bar above a cell's
    integer, so a finer unit would only send their cells to the double sums of their fallback (triangulation.cpp
    vertexDensityStarSums) and a coarser one round small stars away.
@@ -87,11 +93,13 @@
 #define DTFE_FIXED_UNITS_H
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -99,12 +107,68 @@
 #include "env_knobs.h"
 #include "message.h"
 
-// DTFE_RUN_UNITS_LEGACY=1: a deposit that takes the run-wide units runs its per-batch or per-pass path instead
-// (the header comment)
+// The builds in which '--ps-merge fixed-point' merges the passes' exact words (the word merge, fix 3 S6:
+// ps_fixed_merge.h): PS-DTFE's single-precision 3-D build. The double and the 2-D builds keep that merge of the
+// passes' rounded Real grids and the per-pass units it had: their CPU sums are not all words (ps_interpolation.cc
+// massFxWanted, fxMomWanted need a float Real), and the option refuses the double build anyway (user_options.cc).
+inline constexpr bool runUnitsWordMergeBuild()
+{
+#if defined(PHASE_SPACE) && NO_DIM == 3
+    return std::is_same<Real, float>::value;
+#else
+    return false;
+#endif
+}
+
+// '--ps-merge fixed-point' in such a build (runUnitsWordMergeBuild): the merge adds the partitions' words, so every
+// partition must deposit in one unit, and the option switches the run-wide units on as DTFE_PS_RUN_UNITS=1 does.
+// The options are not visible here, so DTFE_setup (DTFE.cpp runUnitsSetup) says it once per DTFE() call, before any
+// reader of the mode below: the units line, the planner, the checkpoint key, the passes. An atomic, so the deposit
+// threads read it safely; it never changes while a partition loop or a pass runs. Never set (a library caller of the
+// passes alone, a tool): false, the mode of before.
+inline std::atomic<bool> &runUnitsPsFixedMergeFlag()
+{
+    static std::atomic<bool> on{ false };
+    return on;
+}
+inline void runUnitsSetPsFixedMerge(bool const on)
+{
+    runUnitsPsFixedMergeFlag().store( on and runUnitsWordMergeBuild(), std::memory_order_release );
+}
+inline bool runUnitsPsFixedMerge() { return runUnitsPsFixedMergeFlag().load( std::memory_order_acquire ); }
+
+// The deposits' mode (the header comment): true = a deposit that could take the run-wide units runs its per-batch or
+// per-pass path instead. Standard DTFE: only under DTFE_RUN_UNITS_LEGACY=1 (read once). PS-DTFE (a PHASE_SPACE
+// build; every object of that binary is compiled with it, so the two bodies never meet in one program): unless
+// DTFE_PS_RUN_UNITS=1 asks for the run-wide units, or '--ps-merge fixed-point' does in the build of its word merge
+// (runUnitsPsFixedMerge); under DTFE_RUN_UNITS_LEGACY=1 whatever those say. (The environment is read once.)
 inline bool runUnitsLegacy()
 {
+#ifdef PHASE_SPACE
+    static bool const legacy = Env::flag( "DTFE_RUN_UNITS_LEGACY" );
+    static bool const psUnits = Env::flag( "DTFE_PS_RUN_UNITS" );
+    return legacy or not ( psUnits or runUnitsPsFixedMerge() );
+#else
     static bool const on = Env::flag( "DTFE_RUN_UNITS_LEGACY" );
     return on;
+#endif
+}
+
+// What the units line (RunUnits::text) says about that mode: nothing when the deposits take the run-wide units (but
+// that '--ps-merge fixed-point' switched them on, where it did)
+inline char const *runUnitsLegacyNote()
+{
+#ifdef PHASE_SPACE
+    if ( not runUnitsLegacy() )
+        return runUnitsPsFixedMerge() and not Env::flag( "DTFE_PS_RUN_UNITS" )
+               ? "; on for '--ps-merge fixed-point' (its merge adds the passes' words)" : "";
+#endif
+    if ( not runUnitsLegacy() ) return "";
+#ifdef PHASE_SPACE
+    if ( not Env::flag( "DTFE_RUN_UNITS_LEGACY" ) )
+        return "; PS-DTFE's passes sum in units of their own (DTFE_PS_RUN_UNITS=1: in these)";
+#endif
+    return ", DTFE_RUN_UNITS_LEGACY=1";
 }
 
 // DTFE_TEST_RUN_UNIT_SHIFT=n: every run-wide unit 2^n finer (the overflow and split tests); 0 unset or out of range
@@ -321,8 +385,9 @@ struct RunUnits
         return t;
     }
 
-    // The run log's line: the inputs and every listed accumulator's K (its unit 2^-K), then the caps. Global
-    // quantities only, so the line is the same at every split (the split tests compare it).
+    // The run log's line: the inputs and every listed accumulator's K (its unit 2^-K), then the caps and the mode's
+    // note (runUnitsLegacyNote). Global quantities only, so the line is the same at every split (the split tests
+    // compare it).
     std::string text() const
     {
         if ( not filled ) return "fixed-point units (run-wide): none";
@@ -346,7 +411,7 @@ struct RunUnits
 #endif
         t += b;
         if ( shift != 0 ) t += ", DTFE_TEST_RUN_UNIT_SHIFT=" + std::to_string( shift );
-        if ( runUnitsLegacy() ) t += ", DTFE_RUN_UNITS_LEGACY=1";
+        t += runUnitsLegacyNote();
         return t;
     }
 };

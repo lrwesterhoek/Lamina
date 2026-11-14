@@ -18,9 +18,9 @@ the map's frame), R_v and R_eff in Mpc (null where there is none), 'resolved' (t
 (catalog.distinct_mask: the resolved voids with an R_v whose centre lies inside the sphere of min(R_v, R_eff) of no
 deeper resolved void, one without R_v claiming its R_eff; the sample of the profiles and the abundance), the
 central delta, each resolved void's fitted ellipsoid ('semi_axes_mpc' a >= b >= c, 'ellipsoid_axes' their unit
-directions in that order; null where not resolved), and the frame and smoothing they were found at. Exit 1 with the
-reason on stderr when there is no
-catalogue (no grids, no snapshot header).
+directions in that order; null where not resolved), the Hessian's eigenvalues at every minimum ('eigenvalues_cells',
+signed, in cell units, in the semi-axes' order), and the frame and smoothing they were found at. Exit 1 with the
+reason on stderr when there is no catalogue (no grids, no snapshot header).
 
 --smooth-mpc S finds the voids at a smoothing of S Mpc instead of the production one (the same physical scale in
 every box: the cross-box comparison), cached under that smoothing's own namespace; 'r_v_defs' carries every R_v
@@ -126,17 +126,21 @@ def r_v_definitions(cat) -> dict:
 CSV_HEAD = ("void", "x_mpc", "y_mpc", "z_mpc")
 
 
-def write_csv(res: dict, path, rows=None) -> str:
+def write_csv(res: dict, path, rows=None, extra=None, extra_note: str = "") -> str:
     """The voids of an outlines() result as a CSV table (one row per void; 'rows' = the catalogue rows to write, all
     by default): the centre (cell centre, Mpc), R_v (the 'crossing' definition) and every other R_v definition the
-    result has, R_eff, the central delta, resolved and distinct (0/1). Empty fields where a value is undefined. A
-    '#' line first says the snapshot, the frame and the smoothing, so a quoted number can be traced back."""
+    result has, R_eff, the central delta, resolved and distinct (0/1), then 'extra' columns ({name: values per
+    catalogue row}: the launcher's drawn ellipsoid, said by 'extra_note' in the '#' line). Empty fields where a value
+    is undefined. A '#' line first says the snapshot, the frame and the smoothing, so a quoted number can be traced
+    back."""
     import csv
     path = Path(path)
     n = len(res["centres_mpc"])
     rows = range(n) if rows is None else [int(k) for k in rows]
     defs = {d: v for d, v in (res.get("r_v_defs") or {}).items() if d != "crossing"}
-    head = list(CSV_HEAD) + ["r_v_mpc"] + [f"r_v_{d}_mpc" for d in defs] + ["r_eff_mpc", "delta", "resolved", "distinct"]
+    extra = dict(extra or {})
+    head = list(CSV_HEAD) + ["r_v_mpc"] + [f"r_v_{d}_mpc" for d in defs] + ["r_eff_mpc", "delta", "resolved",
+                                                                            "distinct"] + list(extra)
 
     def num(v):
         return "" if v is None or v != v else f"{float(v):.6g}"
@@ -144,14 +148,15 @@ def write_csv(res: dict, path, rows=None) -> str:
         f.write(f"# {res.get('sim', '')} snapshot {res.get('snap', '')} {res.get('method', '')}"
                 f"{(' prefix ' + res['prefix']) if res.get('prefix') else ''}: box {num(res.get('box_mpc'))} Mpc, "
                 f"{res.get('n_grid', '')}^3 cells, sigma {num(res.get('sigma_mpc'))} Mpc; centres = cell centres; "
-                f"R_v = first up-crossing of the mean, R_eff = (a b c)^(1/3) of the resolved ellipsoid\n")
+                f"R_v = first up-crossing of the mean, R_eff = (a b c)^(1/3) of the catalogue's resolved ellipsoid"
+                f"{('; ' + extra_note) if extra_note else ''}\n")
         w = csv.writer(f)
         w.writerow(head)
         for k in rows:
             c = res["centres_mpc"][k]
             w.writerow([k] + [num(v) for v in c] + [num(res["r_v_mpc"][k])] + [num(v[k]) for v in defs.values()]
                        + [num(res["r_eff_mpc"][k]), num(res["delta"][k]), int(bool(res["resolved"][k])),
-                          int(bool(res["distinct"][k]))])
+                          int(bool(res["distinct"][k]))] + [num(v[k]) for v in extra.values()])
     return str(path)
 
 
@@ -199,6 +204,12 @@ def outlines(sim, snap, prefix=None, data_root=None, method="auto", sigma_mpc=No
     dirs = np.swapaxes(np.asarray(cat["orientations"], dtype=np.float64).reshape(-1, 3, 3), 1, 2)
     semi_out = [s.round(6).tolist() if ok else None for s, ok in zip(semi, resolved)]
     dirs_out = [d.round(6).tolist() if ok else None for d, ok in zip(dirs, resolved)]
+    # the Hessian's eigenvalues at each minimum (the catalogue's, in cell units: d^2 delta / d cell^2), signed, in the
+    # order of the semi-axes above (|lambda| ascending: pipeline._ellipsoid_fits' argsort); the launcher draws the
+    # ellipsoid where the quadratic fit returns to the mean density from them, which needs their signs
+    ev = np.asarray(cat["eigenvalues"], dtype=np.float64).reshape(-1, 3)
+    ev = np.take_along_axis(ev, np.argsort(np.abs(ev) + 1e-12, axis=1), axis=1)
+    ev_out = [[float(v) for v in e] if np.isfinite(e).all() else None for e in ev]
     return {"sim": sim, "snap": int(snap), "prefix": prefix or "", "method": method, "box_mpc": box, "cell_mpc": cell,
             "n_grid": n, "sigma_mpc": pipeline.smoothing_length_mpc(), "footprint": int(pipeline.config.FOOTPRINT_SIZE),
             "namespace": pipeline._param_hash(), "centres_mpc": centres.round(6).tolist(),
@@ -207,7 +218,7 @@ def outlines(sim, snap, prefix=None, data_root=None, method="auto", sigma_mpc=No
             "delta": _finite_or_none(np.asarray(cat["delta_values"], dtype=np.float64)),
             "sigma_asked_mpc": float(sigma_mpc) if sigma_mpc else 0.0,
             "r_v_defs": {d: _finite_or_none(v) for d, v in defs.items()},
-            "semi_axes_mpc": semi_out, "ellipsoid_axes": dirs_out}
+            "semi_axes_mpc": semi_out, "ellipsoid_axes": dirs_out, "eigenvalues_cells": ev_out}
 
 
 def main(argv=None):

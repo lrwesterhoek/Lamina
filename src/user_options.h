@@ -143,6 +143,7 @@ struct User_options
     std::string psGlobalsKey;           // its key, computed in main() BEFORE the input is read (the box as given)
     bool   psParticlesDeferred = false;
     size_t psPresetN = 0;               // the recorded particle count (padding, auto-tune)
+    RunMoments psPresetMoments;         // the recorded moments of the run-wide fixed-point units (runUnitsSetup)
     Box    psPresetLagBox;              // the recorded bounding box of the initial positions
     bool   psAverageDensityFromParticles = false;   // set when the run computed the mean density from its particles
     bool   periodic;      // true if the particle data is in a periodic box
@@ -199,13 +200,14 @@ struct User_options
     RunMode runMode;               // --run-mode gentle|balanced|performance, else DTFE_RUN_MODE (any case), else performance (the binaries' default)
     std::string runModeSource;     // why the mode is what it is: '--run-mode gentle', '--run-mode gentle from DTFE_RUN_MODE=GENTLE' or '--run-mode performance, the default' (the run log's 'run mode' line)
     int    coreBudget;             // the threads the mode allows (applyRunMode; runModeState().coreBudget): N0, the OpenMP default at start-up, or the mode's share of it; 0 before applyRunMode
+    int    coreBudgetOwn;          // coreBudget before a '--max-concurrent' raise (applyRunMode): the threads '--gpu-share mixed' counts outside performance (auto_tune.cc autoTuneGpuShare), so that no '--max-concurrent' moves its share; 0 before applyRunMode
     std::string coreBudgetNote;    // why the budget is not the mode's own: 'kept: OMP_NUM_THREADS=<v> was given' or 'raised: --max-concurrent <k> was given'; empty otherwise
     std::string priorityNote;      // gentle on Linux: 'nice 10', 'nice <n> kept' or 'priority unchanged (setpriority: <why>)'; empty otherwise
     bool   psGpuShareGiven;        // PS-DTFE --gpu-share was given (the standard binary has no such option)
-    long   psGpuShareSpec;         // --gpu-share as given: per mille 0..1000 (1000 = every partition on the GPU, the default), -1 = auto (the run mode's share)
-    std::string psGpuShareText;    // --gpu-share's value as typed ('0.6', 'auto'), for the run log
+    long   psGpuShareSpec;         // --gpu-share as given: per mille 0..1000 (1000 = every partition on the GPU, the default), -1 = auto (the run mode's share), -2 = mixed (auto's model in every run mode)
+    std::string psGpuShareText;    // --gpu-share's value as typed ('0.6', 'auto', 'mixed'), for the run log
     long   psGpuShareMille;        // the RESOLVED share, per mille (DTFE.cpp psResolveGpuShare, before the auto-tuner): the partitions of a partitioned '--gpu' exact run that deposit on the GPU, the others on the CPU; 1000 = all of them
-    std::string psGpuShareSource;  // why the share is what it is (psResolveGpuShare): '--gpu-share 0.6', '--gpu-share auto: ...', '--resume: the checkpoint's'
+    std::string psGpuShareSource;  // why the share is what it is (psResolveGpuShare): '--gpu-share 0.6', '--gpu-share auto: ...', '--gpu-share mixed: ...', '--resume: the checkpoint's'
     
     
     bool   paddingOn;     // true if a padding value is set
@@ -261,7 +263,7 @@ struct User_options
     int    serveResident;              // --serve-resident N: with '--serve --partition', how many partition tessellations stay in memory at once (the rest are reloaded from '--tessellation-cache' on demand); 0 = automatic
     bool   psStreamDensityGeometric;   // PS-DTFE --ps-stream-density: true = 'geometric' (m_tet/V_eul, matches the mass-conserving deposit), false = 'linear' (vertex-density interpolation, matches the Feldbrugge reference; DEFAULT; 'dtfe' is its deprecated name). Always false in the standard binary.
 #ifdef PHASE_SPACE
-    int    psAvgSubsamples; // PS-DTFE --subsamples: linear sub-sample count nSub for the sampled deposit's '_a' fields (nSub^NO_DIM sub-grid per cell, cost ~nSub^NO_DIM); 3 = 27 sub-points (default), 1 = cell-centre. The exact deposit ignores it.
+    int    psAvgSubsamples; // PS-DTFE --subsamples: linear sub-sample count nSub for the sampled deposit's '_a' fields (nSub^NO_DIM sub-grid per cell; more points, a smoother cell average and more time); 1 = one point per cell, at its centre (the default). The exact deposit ignores it where it clips; an exact run without a count holds 3 here (user_options.cc kPsExactSliverSubsamples: its slivers' sampled fallback).
     bool   psUseMetal;      // PS-DTFE: run the grid deposit on the GPU; needs a Metal build (METAL=1, else falls back to the CPU deposit with a warning). Set by --gpu.
     bool   psLinearDeposit;            // PS-DTFE --ps-linear-deposit: weight each tetrahedron's interior samples by the DTFE-interpolated linear density (renormalized per tet, so the deposited total still equals the tet mass EXACTLY) instead of equal shares
     bool   psCausticCusps;      // --ps-caustic-cusps: also estimate the A3 (cusp) indicator, bit 7 of the caustic mask. Opt-in: it costs a neighbour gather per near-fold tetrahedron and, being a finite-difference estimator on an irregular tessellation, carries a measurable false-positive rate (see ps_caustic_class.h)
@@ -326,7 +328,16 @@ struct User_options
     bool   psOrderedMerge;      // PS-DTFE partition path: merge the partitions' grids in index order (bit-reproducible sums). THE DEFAULT (the STAGED ordered merge, DTFE.cpp: a partition finished before its turn hands its sub-grids to a staging map, within the memory the machine has free, and its thread goes on, so threads do not idle behind a slow partition -- waiting behind one can cost 35%); '--ps-merge completion-order' (psCompletionOrderMergeFlag) adds in completion order instead (the grids then differ run to run in the last bits, even the exact Metal mass grid). The auto-tuner's SPEED split of a small set always merges in order (psSpeedSplit). '--ps-merge index-order' is accepted and changes nothing
     bool   psOrderedMergeFlag;  // the user gave --ps-merge index-order, or --resume (psOrderedMerge is then set too); unlike the speed split, such a run keeps the memory gate (DTFE.cpp)
     bool   psCompletionOrderMergeFlag; // --ps-merge completion-order: the partitions' grids are added as they finish (no staging, not bit-reproducible); --resume overrides it
-    bool   psFixedPointMerge;   // --ps-merge fixed-point (opt-in): every partition's sub-grids are added AS IT FINISHES into exact integer full-grid accumulators (int64 words + int8 carries, src/ps_fixed_merge.h), so the sums cannot depend on the completion order or the concurrency and nothing parks or spills; differs from the ordered merge at ~1e-7. Exclusive with --ps-merge completion-order ('--ps-merge index-order', which changes nothing, is accepted beside it); refused in the double build and with --grid-window
+    bool   psFixedPointMerge;   // --ps-merge fixed-point (opt-in): every partition's sub-grids are added AS IT FINISHES into exact integer full-grid accumulators (int64 words + int8 carries, src/ps_fixed_merge.h), so the sums cannot depend on the completion order or the concurrency and nothing parks or spills; differs from the ordered merge at ~1e-7. Exclusive with --ps-merge completion-order ('--ps-merge index-order', which changes nothing, is accepted beside it); refused in the double build and with --grid-window. Also given without --partition (a one-domain run: the word merge below closes it out the same way; the other two modes change nothing there)
+    // ... and in the single 3-D build THE WORD MERGE (fix 3 S6; set by DTFE.cpp runUnitsSetup: the option, the
+    // run-wide units on -- the option switches them on, fixed_units.h runUnitsPsFixedMerge; not
+    // DTFE_RUN_UNITS_LEGACY=1 -- and a grid): every pass hands its exact words over unconverted
+    // (Quantities::psWords), the merge adds them, and ONE close-out converts and normalizes, a one-domain run's
+    // included (DTFE.cpp psCloseOutMoments). False: the merge of the passes' rounded Real grids above, the moments
+    // normalized as before. DTFE_GPU_FLOAT_MASS=1 / DTFE_GPU_FLOAT_MOMENTS=1 (no words) are refused with the option
+    // in this build (readPartitionOptions). The planner books it (auto_tune.cc AutoTunePS::wordMerge), the checkpoint
+    // key names its units (partition_checkpoint.h wordMergeKeyUnits)
+    bool   psWordMerge = false;
     bool   psSpeedSplit;        // set by the auto-tuner: its SPEED split of a small set -- tiny uniform partitions, ordered merge, no memory gate
     bool   psNoOverlap;         // --no-overlap (deprecated: --ps-no-overlap): no look-ahead tessellation of partition k+1 while partition k deposits on the GPU (DTFE.cpp)
     bool   psLookAheadOffBudget; // set by the auto-tuner: one partition plus the look-ahead's tessellation does not fit the memory budget, so this run has no look-ahead (its predicted peak counts none)

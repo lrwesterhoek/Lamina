@@ -46,7 +46,10 @@
 #       sample / integrate exactly; a flag beats the pin both ways; a '--subsamples' count alone (standard DTFE: an
 #       '--average-method' too, 1 included) selects the sampled average; '--exact --sampled' is refused; standard
 #       DTFE on a redshift cone grid: '--exact' warns and samples, no flag samples silently, both the outputs of
-#       '--sampled' and the header 'SAMPLED (a redshift cone grid has no exact form)'
+#       '--sampled' and the header 'SAMPLED (a redshift cone grid has no exact form)'; PS-DTFE's '--sampled' without
+#       a count deposits on one point per cell axis: its header's 'avg sub-samples (nSub) : 1', the outputs of
+#       '--sampled --subsamples 1'; its exact default without a count keeps the count 3 where an exact pass still
+#       reads one (the outputs and the units line of '--exact --subsamples 3')
 # The reference runs of tests/dev/bytecmp.sh and tests/dev/tune_report_set.sh keep the old spellings on purpose (they
 # also run binaries from before the scheme); this suite is where the two spellings are compared.
 # About half a minute on the Mac.
@@ -334,6 +337,18 @@ for b in STD PS; do
     [ "$r1$r2$r3" = 000 ] && hdr "$o.x.log" "${XL}--exact; " && hdr "$o.s.log" "${SL}--sampled)" \
         && hdr "$o.d.log" "${XL}--exact, the default; " && same "$o.x" "$o.d" && ! cmp -s "$o.x.a_den" "$o.s.a_den"
     check "F14 $b: no flag runs the exact average ('--exact, the default'), the outputs of '--exact'; '--sampled' samples (exit $r1, $r2, $r3)" $?
+    if [ "$b" = PS ]; then   # PS-DTFE's sampled deposit without a count: one point per cell axis
+        go "$bin" "$o.s1" "${M[@]}" --sampled --subsamples 1; r1=$?
+        [ "$r1" = 0 ] && hdr "$o.s.log" "avg sub-samples (nSub) : 1 " && same "$o.s" "$o.s1"
+        check "F14 $b: '--sampled' without a count deposits on 1 point per cell axis (its header's count), the outputs of '--sampled --subsamples 1' (exit $r1)" $?
+        # the new default is the sampled deposit's alone: an exact run without a count keeps the count 3 where an exact
+        # pass still reads one (src/user_options.cc kPsExactSliverSubsamples), told by the units line's share cap
+        go "$bin" "$o.x3" "${M[@]}" --exact --subsamples 3; r1=$?
+        ul() { grep -a -m1 -F "fixed-point units (run-wide):" "$1"; }
+        [ "$r1" = 0 ] && same "$o.d" "$o.x3" && [ -n "$(ul "$o.d.log")" ] && [ "$(ul "$o.d.log")" = "$(ul "$o.x3.log")" ] \
+            && [ "$(ul "$o.d.log")" != "$(ul "$o.s.log")" ]
+        check "F14 $b: the exact default without a count keeps the count 3 where the exact pass reads one (the outputs and the units line of '--exact --subsamples 3', not the sampled default's share cap; exit $r1)" $?
+    fi
     RUN_ENV=(DTFE_EXACT_AVERAGE=0); go "$bin" "$o.p0" "${M[@]}"; r1=$?; go "$bin" "$o.fx" "${M[@]}" --exact; r2=$?
     RUN_ENV=(DTFE_EXACT_AVERAGE=1); go "$bin" "$o.p1" "${M[@]}"; r3=$?; go "$bin" "$o.fs" "${M[@]}" --sampled; r4=$?
     RUN_ENV=()

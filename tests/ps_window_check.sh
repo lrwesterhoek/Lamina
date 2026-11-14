@@ -5,16 +5,23 @@
 # --partition 2 2 2 split (held to the partitioned full run: partitions differ from the single
 # triangulation by summation order). Then the launcher's zoom shape: an anisotropic 256x256x16 grid
 # windowed to one coarse slice, exact deposit, with the wall times of both runs.
-# Contracts: the SAMPLED deposit counts a straddling tet's samples over its whole bounding box, so
-# the CPU window has the full run's values: its counts and masks identical bytes, its summed grids identical to
-# the rounding of the fixed-point units -- a window pass takes ITS OWN units (from the tets that
-# reach the window, the same on the GPU and the CPU: ps_interpolation.cc fxBoundWalk), so a share below ~2^-38 of
-# the bound can round to another last unit than in the full run (peak-relative < 1e-8; measured 1e-10, in the
-# velocity gradient only, on these waves). The EXACT deposit clips only the window's cells and normalizes each tet by
-# its whole weight, so its moments agree to float rounding (the counts, masks and multiplicity are still identical
-# bytes); the GPU takes the usual parity class. GPU builds: a GPU window and the CPU window of the same pass
-# (--partition 2 2 2, --verbose 3) take the same fixed-point units -- their 'fixed-point units' lines, one per pass, are
-# equal -- and their grids agree to the GPU parity class (the kernels form their shares in float). With
+# Contracts: the SAMPLED deposit counts a straddling tet's samples over its whole bounding box, so the CPU window has
+# the full run's values. By default a window pass takes ITS OWN fixed-point units (from the tets that reach the
+# window, the same on the GPU and the CPU: ps_interpolation.cc fxBoundWalk), so a share below ~2^-38 of the bound can
+# round to another last unit than in the full run (peak-relative < 1e-8; measured 1e-10, in the velocity gradient
+# only, on these waves); the double build's CPU deposit sums in doubles. In both the sampled CPU window is held to
+# peak-relative 1e-8 (its counts and masks still identical bytes). Under DTFE_PS_RUN_UNITS=1 (the single build) the
+# bytes are identical in every grid: a window run then sums in the full run's fixed-point units (src/fixed_units.h
+# RunUnits, one unit per grid for the whole run; a run started from a cached globals record, version 2, takes the full
+# run's moments from it), so every share rounds to the same integer as in the full run. The EXACT deposit clips only
+# the window's cells and normalizes each tet by the larger of its pieces' summed weight and its whole weight, the full
+# run by the summed weight, so its moments agree to float rounding (the counts, masks and multiplicity are still
+# identical bytes); the GPU takes the usual parity class. The cache's globals record is version 2 ('globals=2', with
+# the moments of the run-wide units), and under DTFE_PS_RUN_UNITS=1 a cached window run prints the same 'fixed-point
+# units (run-wide):' line as the uncached one (by default its 'none' line: its passes take units of their own).
+# GPU builds: a GPU window and the CPU window of the same pass (--partition 2 2 2, --verbose 3) take the same
+# fixed-point units -- their 'fixed-point units' lines, one per pass, are equal -- and their grids agree to the GPU
+# parity class (the kernels form their shares in float). With
 # '--tessellation-cache', a window run skips the partitions whose occupancy maps (written by a composite server or by an
 # earlier batch run) never reach the window: identical bytes to the uncached run, the skip count reported. The units
 # comparison runs in the single build only (the double build's CPU sums are doubles). --no-build is accepted and
@@ -26,6 +33,8 @@ cd "$ROOT" || exit 1
 source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double pair
 precision_require "$PS_BIN"
 [ -x "$PS_BIN" ] || { echo "FAIL: $PS_BIN is not built"; exit 1; }
+# PS-DTFE sums in the run-wide units only with DTFE_PS_RUN_UNITS=1 (and not under DTFE_RUN_UNITS_LEGACY=1)
+ps_units_wide() { [ "${DTFE_PS_RUN_UNITS:-0}" != "0" ] && [ "${DTFE_RUN_UNITS_LEGACY:-0}" = "0" ]; }
 OBJ_PS=o_ps; precision_double && OBJ_PS=o_ps_d     # the build whose GPU mode counts
 GPU=0; [ -d $OBJ_PS ] && [ ! -f $OBJ_PS/.gpu_mode_off ] && ls $OBJ_PS/.gpu_mode_* >/dev/null 2>&1 && GPU=1
 TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}/window_check"
@@ -114,6 +123,11 @@ nt=$(ls "$CACHE"/*.tess 2>/dev/null | wc -l | tr -d ' '); no=$(ls "$CACHE"/*.tes
 ng=$(ls "$CACHE"/globals_*.txt 2>/dev/null | wc -l | tr -d ' ')
 [ "$ng" = 1 ] && echo "  PASS ... and the snapshot's globals record (particle count, mean density, initial-position box)" \
     || { echo "  FAIL the server left $ng globals records"; exit 1; }
+gv=$(head -1 "$(ls "$CACHE"/globals_*.txt | head -1)")
+[ "$gv" = "globals=2" ] && echo "  PASS ... version 2 (the moments of the run-wide fixed-point units)" \
+    || { echo "  FAIL the globals record starts '$gv', not 'globals=2'"; exit 1; }
+# the run-wide units line of a run: one line, or empty
+runits() { grep -a -o 'fixed-point units (run-wide): .*' "$1" | head -1; }
 PART=(--partition 2 2 2)
 # (the log line names the option by its canonical name, '--grid-window:', whichever spelling the run used)
 skipped() { sed -n 's/.*--grid-window: \([0-9]*\) of \([0-9]*\) partitions never reach.*/\1/p' "$1" | head -1; }
@@ -130,6 +144,18 @@ for mode in sampled exact; do
             || { echo "  FAIL $mode window $w: no partition skipped ('$k')"; exit 1; }
         grep -q "Reused the cached tessellation" "$TMP/${mode}_${w}_cached.log" && echo "  PASS $mode window $w: the processed partitions were loaded from the cache" \
             || { echo "  FAIL $mode window $w: no cache hit"; exit 1; }
+        uc=$(runits "$TMP/${mode}_${w}_cached.log"); un=$(runits "$TMP/${mode}_${w}_nocache.log")
+        if ! ps_units_wide; then   # (the default: each pass its own units)
+            if [ "${uc#*none}" != "$uc" ]; then
+                echo "  PASS $mode window $w: on the per-pass units the run started from the record sets none"
+            else
+                echo "  FAIL $mode window $w: on the per-pass units the cached units line is '$uc'"; exit 1
+            fi
+        elif [ -n "$un" ] && [ "$uc" = "$un" ] && [ "${un#*cell volume}" != "$un" ]; then
+            echo "  PASS $mode window $w: the run started from the record takes the uncached run's units"
+        else
+            echo "  FAIL $mode window $w: the units lines differ (cached: '$uc'; uncached: '$un')"; exit 1
+        fi
         for f in den vel velDisp velDispTensor velGrad streams hidden_streams caustic causticClass; do
             cmp -s "$TMP/${mode}_${w}_nocache.$f" "$TMP/${mode}_${w}_cached.$f" || { echo "  FAIL $mode window $w: .$f differs between the cached (skipping) run and the uncached one"; exit 1; }
         done
@@ -220,11 +246,14 @@ if "$PS_BIN" "$SNAP" "$TMP/lin" --grid $G "${BASE[@]}" --exact --ps-linear-depos
 else
     grep -q "ps-linear-deposit" "$TMP/lin.log" && echo "  PASS refused with the reason" || { echo "  FAIL: refused without naming --ps-linear-deposit"; exit 1; }
 fi
-"$PY" - "$TMP" "$G" "$GPU" <<'PYEOF'
+# the sampled CPU window's class: identical bytes only in the run-wide units of the single build (DTFE_PS_RUN_UNITS=1)
+SCLS=bytes
+{ precision_double || ! ps_units_wide; } && SCLS=window
+"$PY" - "$TMP" "$G" "$GPU" "$SCLS" <<'PYEOF'
 import numpy as np, sys
 import os as _os; REAL = np.dtype(_os.environ.get("DTFE_TEST_REAL", "float32"))   # tests/precision.sh
 from pathlib import Path
-tmp = Path(sys.argv[1]); G = int(sys.argv[2]); gpu = sys.argv[3] == "1"
+tmp = Path(sys.argv[1]); G = int(sys.argv[2]); gpu = sys.argv[3] == "1"; sampledCls = sys.argv[4]
 fails = 0
 FIELDS = (("den", 1), ("vel", 3), ("velDisp", 1), ("velDispTensor", 6), ("velGrad", 9), ("streams", 1),
           ("hidden_streams", 1), ("caustic", 1), ("causticClass", 1))
@@ -241,8 +270,10 @@ def window_of(full, lo, dims):
     idx = [np.arange(lo[d], lo[d] + dims[d]) % full.shape[d] for d in range(3)]
     return full[np.ix_(*idx)]
 def compare(tag, fullp, winp, lo, dims, shape, cls):
-    """cls: 'bytes' (identical), 'window' (sampled CPU: counts and masks identical, summed grids to the fixed-point
-    units' rounding), 'tight' (exact CPU: moments to float rounding), 'gpu' (the parity class)"""
+    """cls: 'bytes' (identical; the sampled CPU window in the run-wide units, DTFE_PS_RUN_UNITS=1), 'window' (the
+    sampled CPU window by default or in the double build: counts and masks identical, summed grids to the rounding of
+    the pass's own units or of the double sums), 'tight' (exact CPU: moments to float rounding), 'gpu' (the parity
+    class)"""
     global fails
     fields = FIELDS + ((("tetTouch", 1),) if "exact" in tag or "zoom" in tag else ())
     for name, nc in fields:
@@ -269,7 +300,7 @@ def compare(tag, fullp, winp, lo, dims, shape, cls):
         fails += not ok
 LO, DIMS, SHAPE = (8, 40, 30), (16, 12, 1), (G, G, G)
 SEAM = (56, 40, 30)
-for mode, cls in (("sampled", "window"), ("exact", "tight")):
+for mode, cls in (("sampled", sampledCls), ("exact", "tight")):
     compare(f"{mode} window == full",                        f"{mode}_full",     f"{mode}_win",   LO,   DIMS, SHAPE, cls)
     compare(f"{mode} seam window == full (wrapped cells)",   f"{mode}_full",     f"{mode}_seam",  SEAM, DIMS, SHAPE, cls)
     compare(f"{mode} window, partition 2 2 2 == full, partition 2 2 2", f"{mode}_fullpart", f"{mode}_part", LO, DIMS, SHAPE, cls)

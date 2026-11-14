@@ -70,7 +70,9 @@ class MenusMixin:
         self.show_cmds_action.setShortcut(QKeySequence("Ctrl+Shift+C"))
         self.show_cmds_action.setChecked(self.show_commands)
         self.show_cmds_action.toggled.connect(self._toggle_commands)
-        bar.addMenu("View").addAction(self.show_cmds_action)
+        view = bar.addMenu("View")
+        view.addAction(self.show_cmds_action)
+        self._build_advanced_action(view)       # the opt-in Advanced settings (app_advanced.py)
 
     def _build_run_menu(self, bar):
         run_menu = bar.addMenu("Run")
@@ -342,9 +344,12 @@ class MenusMixin:
                 ("E-mail", mail)]
         for label, w in rows:
             f.addRow(label, w)
+        m = self.spec.mode() if self.tabs.currentIndex() == _app.GRIDS else None
         t = R.time_estimate(self._runs(), sim=self.spec.sim, grid=self.spec.grid, estimator=self.spec.estimator,
-                            gpu=False, sliced=bool(self.spec.slice_plane), precision=self.spec.precision) \
-            if self.tabs.currentIndex() == _app.GRIDS else None
+                            gpu=False, sliced=bool(self.spec.slice_plane), precision=rs.job_precision(self.spec),
+                            exact=m.deposit == "exact",
+                            nsub=m.nsub if self.spec.estimator == "ps" and m.deposit == "sampled" else None) \
+            if m is not None else None
         f.addRow(_note("No GPU on a cluster: GPU options fall back to the CPU. Set REPO and the data paths "
                        "in the script." + (f" Earlier CPU runs: ≈ {R.format_duration(t[0])} per snapshot." if t else "")))
 
@@ -395,7 +400,7 @@ class MenusMixin:
 
     def start_demo(self):
         """The demo (runspec.demo_spec): generate, run, then open it in Explore."""
-        demo = rs.demo_spec()               # (the CPU deposit: faster than the GPU at 32^3 particles)
+        demo = rs.demo_spec()               # (Exact, on its quality's device: CustomSpec.mode())
         self.custom = demo
         self._load_into_widgets()
         self.tabs.setCurrentIndex(_app.OWN)

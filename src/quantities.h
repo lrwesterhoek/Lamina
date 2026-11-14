@@ -75,6 +75,83 @@ inline bool subgridTarget(size_t const *c, size_t const *o, size_t const *full,
     }
     return true;
 }
+
+/* THE WORDS OF THE WORD MERGE ('--ps-merge fixed-point' in the single 3-D build: User_options::psWordMerge; fix 3
+   S6). A pass hands its exact sums over UNCONVERTED, in the run-wide units (src/fixed_units.h RunUnits): per PS-DTFE
+   accumulator its int64 words with their sparse carry and K (FxWords), indexed by the accumulator's RunUnitGrid
+   slot (at: RU_PS_MASS, RU_PS_FX + PSFxGrid g -- MOM, M2, GRAD, MOMW, SV, DV, DW, SCAL, SG, RM --, RU_PS_FACE_S / N /
+   P), and its int stream counts. The merge (src/ps_fixed_merge.h) adds a partition's into the full grid's -- integer
+   adds, so the result does not depend on the split, the order or the device's arithmetic of the adds --, and ONE
+   close-out (Quantities::psWordsClose, then normalizePhaseSpace) turns the full grid's into the Real grids: the
+   merged words of a partitioned run, a one-domain run's own. EMPTY (on false, every vector empty) without the word
+   merge: the struct then costs its own few hundred bytes per Quantities and nothing else. Which Real grid each
+   accumulator becomes: psWordsClose.
+   THE FACE SUMS (--face-gradient: RU_PS_FACE_S / N / P; fix 3 S7). A pass's words hold them PER CELL, both faces of
+   every axis (comps: S.w[cell*2*NO_DIM*noVelComp + (side*NO_DIM + a)*noVelComp + j], N and P [cell*2*NO_DIM +
+   side*NO_DIM + a], side 1 the upper face, 0 the lower), so a face inside the pass's sub-grid is held twice, by the
+   cell below (its upper) and the cell above (its lower). The merged full grid's words -- and a one-domain run's after
+   its close-out has routed them alike (ps_fixed_merge.h oneDomainFacesOnce) -- hold every face ONCE (faceOnce):
+   each cell its NO_DIM UPPER faces (cellComps: S.w[(cell*NO_DIM + a)*noVelComp + j], N and P [cell*NO_DIM + a]);
+   a cell's lower face is the upper face of the cell below it (wrapped where the grid is periodic), and on a grid
+   that is not, the lower faces of layer 0 of axis a are that axis' BOUNDARY PLANE (plane[f][a], (cells /
+   dims[a]) * facePer cells' components, indexed row-major over the other axes). The merge's rule:
+   ps_fixed_merge.h addFaceSlot; the gradient reads them as words: Quantities::psFaceGradientCellWords. */
+struct PSWordGrids
+{
+    static int const N = RU_PS_FACE_P - RU_PS_MASS + 1;   // the PS-DTFE accumulators, from RU_PS_MASS
+    static int const NF = RU_PS_FACE_P - RU_PS_FACE_S + 1;   // the face sums among them (S, N, P)
+    bool on = false;                // words handed over (else nothing below is in use)
+    bool exact = false;             // the exact deposit: 'count' is the tet touches, SV the stream count
+    bool dwIsMass = false;          // DW is the mass grid's sums, not handed over: the close-out copies the mass
+    size_t samplesPerCell = 1;      // the pass's nSub^NO_DIM: the sampled stream count's divisor
+    size_t cells = 0;               // the grid's cells (the pass's sub-grid, or the full grid)
+    FxWords g[N];                   // [slot - RU_PS_MASS]: EMPTY w = this accumulator has no words
+    std::vector<int> count;         // the int stream counts: the sampled in-simplex samples, or the exact tet touches
+    std::vector<size_t> presized;   // the merge: each summed Real grid's cells before the loop (forEachField order)
+    // the once layout of the face sums (the header comment): the merged full grid's, never a pass's
+    bool faceOnce = false;          // the face slots hold each face once (else per cell, as a pass hands them over)
+    bool periodic = false;          // faceOnce: the grid wraps on every axis (layer 0's lower face: the top layer's)
+    size_t dims[NO_DIM] = {};       // faceOnce: the grid's cells per axis (row-major, the last axis fastest)
+    FxWords plane[NF][NO_DIM];      // faceOnce, not periodic: [f][a] axis a's boundary plane of face sum f
+    bool faceDirect[NF] = {};       // the close-out (psWordsClose): face sum f's unit is 2^-K with |K| <= 120 ...
+    Real faceInv[NF] = {};          // ... and 2^-K then (psFaceGradientCellWords converts as psWordsToGrid)
+    FxWords &at(int const slot) { return g[slot - RU_PS_MASS]; }
+    FxWords const &at(int const slot) const { return g[slot - RU_PS_MASS]; }
+    static bool isFace(int const slot) { return slot >= RU_PS_FACE_S && slot <= RU_PS_FACE_P; }
+    // a face sum's components per face: S noVelComp, N and P 1
+    static size_t facePer(int const slot) { return comps( slot ) / size_t( 2 * NO_DIM ); }
+    // the components per cell of accumulator 'slot' in THIS grid's layout: comps, or for a face sum in the once
+    // layout its upper faces only (half of comps). Every size or index of a merged full grid's words takes this.
+    size_t cellComps(int const slot) const { return faceOnce && isFace( slot ) ? comps( slot ) / 2 : comps( slot ); }
+    // the cells of axis a's boundary plane (the grid's layer 0 on a): cells / dims[a]
+    size_t planeCells(int const a) const { return dims[a] > 0 ? cells / dims[a] : 0; }
+    FxWords &boundary(int const slot, int const a) { return plane[slot - RU_PS_FACE_S][a]; }
+    FxWords const &boundary(int const slot, int const a) const { return plane[slot - RU_PS_FACE_S][a]; }
+    // the components per cell of accumulator 'slot' in a PASS's layout (the layout of its words: cell by cell, as its
+    // Real grid; the face sums both faces of every axis)
+    static size_t comps(int const slot)
+    {
+        switch ( slot )
+        {
+        case RU_PS_FX + 0: case RU_PS_FX + 5: return noVelComp;   // MOM, DV
+        case RU_PS_FX + 1: return noDispComp;                     // M2
+        case RU_PS_FX + 2: return noGradComp;                     // GRAD
+        case RU_PS_FX + 7: return noScalarComp;                   // SCAL
+        case RU_PS_FX + 8: return noScalarGradComp;               // SG
+        case RU_PS_FACE_S: return size_t( 2 * NO_DIM ) * noVelComp;
+        case RU_PS_FACE_N: case RU_PS_FACE_P: return size_t( 2 * NO_DIM );
+        default: return 1;                                        // the mass, MOMW, SV, DW, RM
+        }
+    }
+    // a name without spaces (the checkpoint's blobs: ps_fixed_merge.h)
+    static char const *key(int const slot)
+    {
+        static char const *const k[N] = { "mass", "MOM", "M2", "GRAD", "MOMW", "SV", "DV", "DW", "SCAL", "SG", "RM",
+                                          "faceS", "faceN", "faceP" };
+        return slot >= RU_PS_MASS && slot <= RU_PS_FACE_P ? k[slot - RU_PS_MASS] : "?";
+    }
+    void release() { *this = PSWordGrids(); }   // (the vectors' storage freed)
+};
 #endif
 
 
@@ -113,6 +190,8 @@ struct Quantities
     // face's two cells hold the same sums. normalizePhaseSpace makes the gradient of the face-averaged MEAN velocity
     // from them, (S_up/N_up - S_lo/N_lo) / dx: conservative (it telescopes: a periodic box's mean divergence is 0), the
     // stream average itself where the stream count is constant through the cell, exact for a planar flow. Never written.
+    // (The word merge never makes these three: its merged face sums stay words, once per face, until the gradient:
+    // psFaceWordsHeld below.)
     std::vector< Pvector<Real,2*NO_DIM*noVelComp> > face_velocity;
     std::vector< Pvector<Real,2*NO_DIM> >          face_coverage;
     // ... and the momentum through each face (P10.4): face_momentum[side*NO_DIM + a] = the integral of sum_s rho_s v_s,a
@@ -140,6 +219,7 @@ struct Quantities
     // face sums.
     inline void psFaceGradientCell(size_t const i)
     {
+        if ( psWords.faceOnce ) { psFaceGradientCellWords( i ); return; }   // the word merge: its words (below)
         if ( face_velocity.empty() ) return;
         if ( not face_momentum.empty() )
         {   // the mass flux: (the momentum out through the upper faces - in through the lower) / the cell volume
@@ -164,12 +244,14 @@ struct Quantities
         }
     }
     // before / after the cells: the regular part's divergence grid sized -- and its gradient, shear and vorticity as
-    // 'twins' asks (bits 0, 1, 2: User_options::psStreamsTwins) --, the face sums released
+    // 'twins' asks (bits 0, 1, 2: User_options::psStreamsTwins) --, the face sums released (the word merge's words
+    // too: psWords)
     inline void psFaceGradientBegin(size_t const n, unsigned const twins = 0u)
     {
-        if ( face_velocity.empty() ) return;
+        if ( face_velocity.empty() and not psFaceWordsHeld() ) return;
         velocity_divergence_streams.assign( n, Real(0.) );
-        if ( not face_momentum.empty() ) mass_flux_divergence.assign( n, Real(0.) );
+        if ( not face_momentum.empty() or ( psFaceWordsHeld() and not psWords.at( RU_PS_FACE_P ).w.empty() ) )
+            mass_flux_divergence.assign( n, Real(0.) );
         if ( twins & 1u ) velocity_gradient_streams.assign( n, Pvector<Real,noGradComp>::zero() );
         if ( twins & 2u ) velocity_shear_streams.assign( n, Pvector<Real,noShearComp>::zero() );
         if ( twins & 4u ) velocity_vorticity_streams.assign( n, Pvector<Real,noVortComp>::zero() );
@@ -180,11 +262,36 @@ struct Quantities
         std::vector< Pvector<Real,2*NO_DIM*noVelComp> >().swap( face_velocity );
         std::vector< Pvector<Real,2*NO_DIM> >().swap( face_coverage );
         std::vector< Pvector<Real,2*NO_DIM> >().swap( face_momentum );
+        psFaceWordsRelease();
     }
+    // the word merge (fix 3 S7): the merged face sums stay words, once per face (PSWordGrids' header comment), from
+    // the close-out's first half (psWordsClose, which converts every other accumulator and frees it) until the
+    // gradient is made from them -- held: both S and N have words (P, the mass flux, may be absent)
+    bool psFaceWordsHeld() const
+    {
+        return psWords.faceOnce and not psWords.at( RU_PS_FACE_S ).w.empty()
+               and not psWords.at( RU_PS_FACE_N ).w.empty();
+    }
+    // ... cell i's gradient and mass flux from them (quantities.cc): psFaceGradientCell's arithmetic, each face sum
+    // converted as psWordsToGrid converts, a cell's lower faces read as the cell below's upper ones (or the boundary
+    // plane's)
+    void psFaceGradientCellWords(size_t const i);
+    // ... and their release (psFaceGradientEnd, and normalizePhaseSpace on every way out: a side whose gradient is
+    // not made keeps no words); a no-op without them
+    void psFaceWordsRelease() { if ( psWords.faceOnce ) psWords.release(); }
     std::vector<Real>                         hidden_streams;     // PS-DTFE: a small bitmask in Real, written as '.hidden_streams'. BIT 1 (value 1) = the cell holds multi-stream volume its '.streams' does not show: a negatively oriented (folded) tetrahedron overlaps it with positive volume while '.streams' reads single-stream -- a fold thinner than the sub-sample spacing. Exact in a periodic box (degree-1 map: a point is multi-stream iff a flipped tet covers it), so the single-stream mask is '.streams == 1 (to PS_STREAM_TOL) and not (hidden_streams & 1)': every point of such a cell lies on one stream. BIT 2 (value 2) = the cell received MASS from a tetrahedron none of whose sub-samples lies in it (the centroid fallback, or a --ps-halo-release tet): the cell mean includes a sub-resolution piece, possibly of the SAME stream -- a quadrature note, not a stream count (non-periodic runs also set bit 1 there, conservatively). Legacy '.unresolved' files hold only 0/1 (the mass flag), which reads as bit 1 and so stays conservative. OR-merged like caustic_bits; finalizeHiddenStreams() clears bit 1 where '.streams' already reads multi-stream
     // PS-DTFE partition sub-grid in global grid-cell units, so addFromSubgrid() can map cells back.
     size_t ps_subOrigin[NO_DIM] = {0};
     size_t ps_subDims[NO_DIM]   = {0};   // [0]==0 means "not a sub-grid" (vectors span the full grid)
+    // the word merge (PSWordGrids above): the pass's words handed over unconverted, or the full grid's merged ones
+    // until the close-out (their face sums until the gradient: psFaceWordsHeld). Outside the field list on purpose:
+    // no checkpoint, spill or Real merge walks it (the merge keeps its own words in the checkpoint: ps_fixed_merge.h)
+    PSWordGrids psWords;
+    // THE CLOSE-OUT's first half (quantities.cc): the words to their Real grids, each component rounded once, the
+    // density to rho/rho_bar (times invRhoBar / cellVolume, the pass's expression), the stream counts; a no-op
+    // without words. The face sums stay words, once per face (psFaceWordsHeld). normalizePhaseSpace follows
+    // (DTFE.cpp psCloseOutMoments).
+    void psWordsClose(Real const invRhoBar, Real const cellVolume);
 #endif
 
     /* THE FIELD LIST. forEachField(f) calls f(info, merge, member) for every grid above, in this order, which is also

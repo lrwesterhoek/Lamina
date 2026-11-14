@@ -53,6 +53,10 @@ _GRID = re.compile(r"--grid (\d+)")
 _PARTITION = re.compile(r"--partition (\d+) (\d+)(?: (\d+))?")    # a 2D run's split has two numbers
 _CONC = re.compile(r"--max-concurrent (\d+)")
 _NSUB = re.compile(r"--subsamples (\d+)")             # (canonical: an older log's '--avg-subsamples' reads so)
+# the PS-DTFE run-log header's count line, 'avg sub-samples (nSub) : N', printed by every sampled run with an '_a' field
+# (src/user_options.cc): the count of a run whose command names none (the drivers pass '--subsamples' only when
+# SUBSAMPLES is set), which took the binary's default -- 3 points per cell axis before Fast became one
+_NSUB_HEAD = re.compile(r"^\s*avg sub-samples \(nSub\)\s*:\s*(\d+)", re.M)
 _MERGE = re.compile(r"(?:^|\s)--ps-merge (\S+)")
 _RUN_MODE = re.compile(r"(?:^|\s)--run-mode[ =](\S+)")    # the machine use (a log without it: performance)
 # the run-log header's line on the cell average, the run's own word on it: standard DTFE 'volume averaging : EXACT
@@ -255,6 +259,7 @@ class RunRecord:
     command: str = ""               # the RUNNING line (paths unquoted, as the binary printed it)
     header_average: str = ""        # 'exact' | 'sampled': the header's cell-average line (_AVERAGE); '' without one
     header_gradient: str = ""       # 'face' | 'per-tet': the header's velocity-gradient line (_GRADIENT); '' if none
+    header_nsub: int | None = None  # the header's count line (_NSUB_HEAD): a sampled PS-DTFE run's; None without one
     build_rev: str = ""
     build_time: _dt.datetime | None = None
     finished: _dt.datetime | None = None   # the log's modification time = when the run ended
@@ -350,8 +355,10 @@ class RunRecord:
 
     @property
     def nsub(self) -> int | None:
+        """The sampled deposit's points per cell axis: the command's '--subsamples k', else the header's count line
+        (a PS-DTFE run whose command names none: the binary's default then), else None."""
         m = _NSUB.search(self.canonical)
-        return int(m.group(1)) if m else None
+        return int(m.group(1)) if m else self.header_nsub
 
     @property
     def gpu(self) -> bool:
@@ -394,11 +401,13 @@ class RunRecord:
 
     def options_text(self) -> str:
         bits = []
+        if self.estimator in ("ps", "dtfe"):
+            # the quality, in the launcher's words: Exact (the exact cell averages: the header's line, else
+            # '--exact' or an older name of it) or Fast (the sampled ones)
+            bits.append("Exact" if self.exact else "Fast")
         if self.estimator == "ps":
-            if self.exact:                            # the exact deposit (the header, else '--exact' or an older name)
-                bits.append("exact")
-            elif self.nsub:
-                bits.append(f"nSub {self.nsub}")
+            if not self.exact and self.nsub:          # Fast runs at two counts must differ here
+                bits.append(f"{self.nsub} sample{'s' if self.nsub != 1 else ''} per cell axis")
             if self.has("--ps-linear-deposit"):       # the two deposit variants of one snapshot must differ here
                 bits.append("linear deposit")
             if self.face_gradient:                    # the mean flow's gradient: the same snapshot, another divergence
@@ -413,8 +422,6 @@ class RunRecord:
                 bits.append("ordered merge")
             elif self.merge == "completion-order":    # opt-in (the default is the ordered merge)
                 bits.append("completion-order merge")
-        elif self.exact:                        # standard DTFE: the exact cell average tells the production grids
-            bits.append("exact average")        # from the Monte-Carlo ones
         if self.gpu:
             bits.append("GPU")
         if self.precision == "double":
@@ -536,8 +543,8 @@ def run_inputs(rec: RunRecord) -> set[Path]:
 # the text-derived fields of every run log read, by path, with the (size, mtime_ns) they were read at:
 # the launcher rescans every 30 s on its GUI thread, and a TNG50 z=0 log is large and on the
 # external disk; an unchanged log is not read again
-_LOG_FIELDS = ("binary", "build_rev", "build_time", "command", "header_average", "header_gradient", "gpu_retried",
-               "gpu_retries", "gpu_retries_by_cause", "wall_seconds", "peak_rss_gb", "footprint_gb", "ok")
+_LOG_FIELDS = ("binary", "build_rev", "build_time", "command", "header_average", "header_gradient", "header_nsub",
+               "gpu_retried", "gpu_retries", "gpu_retries_by_cause", "wall_seconds", "peak_rss_gb", "footprint_gb", "ok")
 _LOG_CACHE: dict[str, tuple[int, int, dict]] = {}
 
 
@@ -568,6 +575,9 @@ def _parse_text(rec: RunRecord, text: str):
         g = _GRADIENT.search(text, m.end(), nxt.start() if nxt else len(text))   # the route's line, the same way
         if g:
             rec.header_gradient = "face" if g.group(1) else "per-tet"
+        k = _NSUB_HEAD.search(text, m.end(), nxt.start() if nxt else len(text))   # the count's line, the same way
+        if k:
+            rec.header_nsub = int(k.group(1))
     rec.gpu_retried = _GPU_RETRY.search(text) is not None
     tallies = _GPU_RETRIES.findall(text)
     if tallies:                     # the last: a resumed run's log holds each attempt's
@@ -968,18 +978,22 @@ def stale_reasons(rec: RunRecord) -> list[tuple[str, str]]:
 # ---------------------------------------------------------------------- time estimates
 def time_estimate(records, *, sim: str, grid: int, estimator: str, gpu: bool,
                   sliced: bool, precision: str = "single", dim: int = 3,
-                  run_mode: str = "performance") -> tuple[float, int] | None:
+                  run_mode: str = "performance", exact: bool | None = None,
+                  nsub: int | None = None) -> tuple[float, int] | None:
     """(median seconds per snapshot, number of runs) of successful earlier runs with the same
-    simulation, grid, estimator, GPU use, slice/no slice, precision, dimension and machine use; None without any
-    (a double-precision run takes about twice as long: it must not predict a single one; a gentle run on half the
-    performance cores must not predict a performance one, nor the other way round). 'run_mode' defaults to
-    performance, what a log without '--run-mode' ran at (RunRecord.run_mode).
+    simulation, grid, estimator, GPU use, slice/no slice, precision, dimension, machine use and, when 'exact' is
+    given, quality (RunRecord.exact: Exact True, Fast False), and when 'nsub' is given (a sampled PS-DTFE job's
+    count) that count (RunRecord.nsub); None without any (a double-precision run takes about twice as long: it must
+    not predict a single one; a gentle run on half the performance cores must not predict a performance one, nor the
+    other way round; a Fast run must not predict an Exact one, nor a run at another count a Fast one). 'run_mode'
+    defaults to performance, what a log without '--run-mode' ran at (RunRecord.run_mode).
     A run under a second is one: the binary's SUMMARY prints its wall time in whole seconds ('0s', 0.0 here), and
     a truthiness test would drop such runs as if they had no time (the launcher test's 32^3 run takes 0.5 s)."""
     times = [r.wall_seconds for r in records
              if r.ok and r.wall_seconds is not None and r.sim == sim and r.grid == grid
              and r.estimator == estimator and r.gpu == gpu and r.sliced == sliced
-             and r.precision == precision and r.dim == dim and r.run_mode == run_mode]
+             and r.precision == precision and r.dim == dim and r.run_mode == run_mode
+             and (exact is None or r.exact == exact) and (nsub is None or r.nsub == nsub)]
     return (statistics.median(times), len(times)) if times else None
 
 
@@ -1003,9 +1017,9 @@ def diagnose(log: str, exit_codes=()) -> list[Diagnosis]:
     if _OOM.search(tail) or any(c in (137, -9, 9) for c in codes):
         out.append(Diagnosis("Out of memory",
                              "The run needed more memory than the machine had. 'Check memory' shows "
-                             "what each snapshot needs; a scratch directory moves the grids to disk "
-                             "(bit-identical results), and a smaller slice plane or fewer concurrent "
-                             "partitions lower the rest.", "check_memory"))
+                             "what each snapshot needs; a scratch directory (More) moves the grids to disk "
+                             "(bit-identical results), and a smaller grid, fewer fields or a smaller slice "
+                             "plane lower the rest.", "check_memory"))
     if re.search(r"no snapshots under|data root not found|no data root|No such file or directory: '?/Volumes/", tail):
         out.append(Diagnosis("Data not found",
                              "The data folder is missing. Is the external disk plugged in? Choose "

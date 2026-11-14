@@ -190,7 +190,7 @@ class CheckMixin:
                                            f"{r['budget_gb']:.0f} GB budget: it will swap and slow the machine "
                                            + ("(a smaller slice plane, no velocity gradient at the slice, fewer "
                                               "fields or a scratch directory lower it)" if s.estimator == "ps" else
-                                              "(fewer fields, a smaller padding or a scratch directory lower it)")))
+                                              "(fewer fields or a scratch directory lower it)")))
                 else:
                     fits.append(r)
             if fits and not unchecked:

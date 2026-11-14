@@ -1,4 +1,502 @@
 UNRELEASED (since 1.0.0)
+- PS-DTFE Fast is one point per cell axis (2026-11-14, on the scratch line; the owner's decision after the
+  measurement night: asked "Should PS-DTFE Fast become one point per cell axis, or the stream-average route?", he
+  answered "Yes, one point"; docs/cleanup-plan.md P14, "The measurement night", and D21; README.md, 'Field
+  evaluation methods', Sampled deposit, and 'Graphical launcher'). The program: PS-DTFE's sampled deposit takes ONE
+  point per cell axis by default (src/user_options.cc: psAvgSubsamples and the '--subsamples' default, 1); it was 3,
+  27 points per cell in 3D. So '--sampled' with no count now writes different grids than before: those of '--sampled
+  --subsamples 1'; '--subsamples 3' gives the earlier ones. '--subsamples N' keeps its meaning (N per axis). The help
+  ('--subsamples', '--sampled' and their -h lines) and the header's 'avg sub-samples (nSub)' line say what one point
+  is: one sub-point at the cell centre, quick, with noisy per-cell values, so smooth the grids before use; more points
+  give a smoother cell average and take more time. They carry no timing number or ratio (the '~3.4x faster' claims
+  are gone; the 2026-11-09 sampled timings in the '--gpu' help now say nSub 3, as the '--exact' help's did). The exact
+  deposit (the default, '--exact') does not change, its outputs byte for byte: an exact pass still reads the count where r3d leaves
+  a tetrahedron no piece (sampled at the count), for a partition's one-cell sub-grid ring and for the run-wide units'
+  share cap, so an exact run without a count keeps 3 there (kPsExactSliverSubsamples, set in resolveAverageMode; a run with no '_a' field keeps it too), and
+  an explicit '--exact --subsamples N' keeps N as before. Standard DTFE does not change at all (its outputs byte for
+  byte, its own count spellings too: '-s 27' / '--samples 27' = '--subsamples 3'). 2D builds inherit the default; the
+  measurements were made in 3D only. The drivers (scripts/run_ps_dtfe.sh, run_ps_pipeline.sh) pass '--subsamples'
+  only when SUBSAMPLES is set, so the program's default is their one definition of Fast; their texts say 1, and
+  run_ps_pipeline.sh's freshness test (run_settings) reads a sampled command without a count as 1 (it read 3): an
+  older sampled set whose run log names 3 stays current for SUBSAMPLES=3 and is recomputed for a sampled run without
+  a count, and a log that names no count is read by its header's count line (a set a binary from before this change
+  made at 3 is recomputed too). The launcher: Fast passes one point per cell axis ('-n 1' on the Grids tab, SUBSAMPLES=1 on the Pipeline
+  tab, '--sampled --subsamples 1' on the Custom tab); its PS-DTFE grey line reads "One sample per cell: quick, with
+  noisy per-cell values (smooth before use)." (with an Advanced count above one it names no count); the Advanced settings' "Samples per cell axis" stays selectable from 1
+  to 6, its Automatic now 1; the time estimates compare a PS-DTFE Fast job with Fast runs of the same count only; the
+  Runs list names a PS-DTFE Fast run's count (its command's, else its header's count line); Load settings of a
+  sampled PS-DTFE run at another count (3: Fast before this change) makes that count the job's Advanced Samples. Why
+  (the measurement night, TNG100-3-Dark, z = 0, 512^3, balanced mode, ONE run each): wall time PS-DTFE Exact
+  1327.94 s, the sampled deposit with 1 point per axis 552.77 s (2.4 times faster), with 3 points per axis 2371.19 s. The
+  density, 1 point per axis against Exact: per cell the median |relative difference| is 0.271 and 31.470% of the cells
+  lie below 0.05 of the mean against 19.884%; after Gaussian smoothing the median is 8.12e-03 at 2 cells and 2.67e-04
+  at 10 cells; the mean density is 1.000000 in both. The analysis pipeline's void catalogue at the production
+  smoothing (10 cells) on both density grids: 495 minima on Exact and 497 on 1 point, 103 and 102 resolved, 83 and 82
+  in the distinct sample, whose median R_v is 7.418 Mpc and 7.498 Mpc. The velocity divergence against the exact
+  deposit with the same (stream-average) derivative: rms difference over the reference's rms 1.46 per cell, 0.049
+  after smoothing at 10 cells. The tests: the PS-DTFE suites whose runs checked the 27-point deposit without naming a
+  count (tests/ps_*_check.sh, ps_regression_test.py, run_mode_check.sh) name '--subsamples 3' on those runs, so they
+  check what they checked before; tests/flag_spelling_check.sh F14 checks the new default (the header's count 1, the
+  outputs of '--sampled --subsamples 1') and that an exact run without a count keeps the count 3 where it reads one;
+  tests/run_scripts_check.sh's run_settings checks and the launcher suites state the new default, and one more check
+  there reads a no-count log by its header's count line. tests/dev/bytecmp.sh keeps its old spellings on purpose and is unchanged: its five sampled
+  PS-DTFE runs name no count, so they differ from a reference set built before this change (regenerate it, or give
+  them the count 3: the owner's call). Left open: the measurement night's other calls (the GPU face kernel and
+  DTFE_FACE_F32, standard Fast on the CPU, whether standard Fast is worth a mode); the timing
+  pair for 3 points per axis (balanced against performance, DTFE_GPU_TIMING=1), as the count stays selectable.
+  Checks: compiled (single, double, 2D, the library: no warning). A byte proof on a small pancake box against the
+  programs from before the change, 21 comparisons as expected: new '--sampled' is new '--sampled --subsamples 1'; new
+  '--sampled --subsamples 3' is the earlier '--sampled'; the exact deposit and standard DTFE are the earlier ones
+  (single and double, CPU and GPU, 2D); a PS-DTFE run with no '_a' field too, its units line included. The suites
+  this change touches, once: flag_spelling_check (80 passed single, 74 double), ps_auto_tune_check,
+  run_scripts_check, ps_2d_check, ps_face_gradient_check, ps_fixed_merge_check (41), ps_halo_release_check,
+  ps_linear_deposit_check (single and double), ps_parallel_check, ps_partition_padding_check,
+  ps_periodic_seam_check, ps_point_conventions_check, ps_slab_deposit_check, run_mode_check (68),
+  ps_regression_test.py, docs_drift_check (36) and the launcher's four (469, 396, 388 and 82 passed, 1 skipped, 0
+  failed). Not run: the battery's other stages, the Linux check, a 512^3 run of the new default itself (the
+  measurement night's one-point run named '--subsamples 1' on the earlier program).
+- Explore: a continuous contour slider, and the voids drawn as their ellipsoids (2026-11-14, on the scratch line;
+  the owner's "it would be nice if the slider had more levels or even continuous" and "make sure the voids are
+  determined in 3d using the gradient and hessian of the field, and using the eigen values to approximate the void
+  shapes as ellipsoid or ellipses when projecting on/intersecting a 2d plane"; README.md, 'Graphical launcher',
+  Explore). The slider has 73 positions instead of four stops, the default in the middle: each spaces the lines a
+  little closer than the one before, by one factor on every layer, so a line keeps its value from layer to layer;
+  dragging redraws a few times a second and the last position when let go; an old saved stop loads at the nearest
+  position. On a real slice (TNG100-3-Dark, snapshot 99, smoothed over 4 cells) the ends and the default draw 4, 16
+  and 40 lines; the four stops drew 2, 4, 16 and 39. The voids: the catalogue already found them in 3D (minima of
+  the smoothed density, the Hessian's eigenvectors and eigenvalues), but Explore drew circles of R_v, and in 3D the
+  catalogue's ellipsoids at a scale, 2 cells / √λ, that is no surface of the field; they covered the map many times
+  over. Each void is now the ellipsoid where the quadratic fit around its minimum returns to the mean density,
+  semi-axes √(2 |δ_min| / λ) (the catalogue's times √(|δ_min| / 2)), computed in one place (grids.drawn_ellipsoids).
+  The map draws each ellipsoid's exact section with the slice and a mark at the minimum, filled on its own layer;
+  the 3D view draws the same ellipsoids (with more than 40 in view each a faint shape and a dot, over the volume a
+  faint outline; the hovered and the inspected one in full) and the planes carry the sections. One 'Voids as'
+  choice (ellipsoids, the default, or spheres of R_v) covers the map and the 3D view; Sizes, the inspector, the 3D
+  menu and the CSV go by the drawn size R_ell. A '3D' tick beside Smoothing shows the slice of the cube smoothed in
+  3D, the voids' own field (the map's smoothing was 2D, another field), and a grey line under the Voids row says
+  which field the voids belong to; the smoothed cubes share Explore's cube memory and are freed when another output
+  is shown. The void σ box starts at two cells, steps from the production value, searches when the value is
+  committed, says what it is doing and asks before a search estimated over two minutes. The count beside Sizes also
+  gives the catalogue's number of minima: only its distinct sample is drawn (TNG300-3-Dark, snapshot 99, 10 cells:
+  248 of 650 minima; 241 have a fit beyond the catalogue's size limits, some of the deepest among them, and 161
+  pass them but lie inside a deeper void or have no R_v). The helper (python/tools/void_outlines.py) passes the Hessian's eigenvalues. Nothing in
+  python/dtfelib changed: the catalogue, its samples and the thesis numbers are as they were. Checked on the
+  scratch copy: the four launcher suites (job specifications 468 passed, end-to-end 396, Explore 388, memory strip
+  82 and 1 skipped; 0 failed), the Explore suite again after the last edits (388 passed, 0 failed); the real-data
+  pictures (TNG300-3-Dark: the map at three layers, the planes, the volume, a close-up) read by eye against the
+  view before. Left open: whether Explore should also mark the minima outside the distinct sample (drawing every
+  minimum's ellipsoid tangles the map again: looked at); a zoomed map with ellipses and a search at a small σ were
+  not exercised on real data; not seen in a native window.
+- Explore: contour lines on the map and in the 3D view (2026-11-13, on the scratch line; the owner's "the contour
+  plots in my python scripts ... i want that in here as well, where you can see the contours evolve through the
+  layers" and "changeable with a slider"; README.md, 'Graphical launcher', Explore). A 'Contours' tick in the Map
+  group draws thin contour lines of the map's field on every layer, at round levels of its colour scale marked on the
+  colour bar, with a slider (fewer to more, four stops, each spacing the round values two or five times wider or
+  closer; the label counts the lines). The levels come from the colour range alone, so a line keeps its value from
+  layer to layer; for the density about three quarters of them lie below the mean and the mean itself is one, as in
+  python/plot/plot_ellipses_contour_3D.py. Each line is black or white, whichever shows on the colour map there. The
+  lines follow the smoothing, a comparison, a hi-res slice and a zoom, appear in saved images and in the figure grid,
+  and are not offered on class maps (T-web, V-web, caustic flags) or with a discrete colour map. In the 3D view the
+  tick draws them on the three planes, and in the volume the density's void-side levels as thin shells with a key; a
+  void's close-up shows its own basin's shells from its minimum up, to read against its fitted ellipsoid. The shells
+  are part of the volume's transfer table, so the OpenGL and the QPainter picture agree. The marching squares are
+  numpy code in the new python/gui/contours.py (no new dependency), and a slice's lines are prepared on the slice
+  worker. With the tick off nothing is computed. Checked on the scratch copy: the four launcher suites on the merged
+  tree (job specifications 468 passed, end-to-end 396, Explore 332, second end-to-end 82 and 1 skipped; 0 failed); the
+  pictures of the map (coarse to fine), the planes and a void's close-up read by eye. Left open: the Save options have
+  no tick of their own for the lines (they are drawn while arrows or void outlines are kept); the 3D planes still
+  build their line paths on the user-interface thread; tuned on synthetic data only, no real simulation grid yet; not
+  seen in a native window.
+- The launcher's finishing round, and PS-DTFE's '--gpu-share mixed' (2026-11-13, on the scratch line; the owner:
+  "shouldnt there be a CPU+GPU option as well? ... all features need to ... work properly and intuitively";
+  docs/cleanup-plan.md P14, phase C). The program: '--gpu-share mixed' (the drivers' GPU_SHARE=mixed), a third
+  spelling of the option: the GPU and the free cores together in every run mode, at the share the 'auto' model gives
+  for the mode's own threads (balanced 0.75, gentle 0.85 on an M1 Max; performance as 'auto'), with 'auto's other
+  exceptions (the double build, the float-sum switches, a small set, too few threads: 1); silent where it does not
+  apply, and '--resume' keeps the checkpoint's share, as for 'auto'. A number is still taken as given. The launcher:
+  the Advanced Device row offers CPU, GPU and CPU + GPU (saved as false, true and 'mixed'; older jobs keep their
+  meaning): GPU keeps every partition of PS-DTFE's exact deposit on the GPU in every machine use (GPU_SHARE=1,
+  '--gpu-share 1', where it passed 'auto' before: the one intended change of an existing setting's command), CPU + GPU
+  asks the program for its own share in every machine use (offered on a GPU build for PS-DTFE in 3D and single
+  precision, refused under Fast with "only the Exact deposit can be shared"); a share goes out only where it applies
+  (PS-DTFE Exact on the GPU in 3D), and the memory check and the exported scripts carry it. The Automatic note and the
+  run tabs' grey line say the same in the same words ("Automatic: CPU + GPU", "Runs on: the CPU and the GPU together
+  (...)"; the tooltip says that only a run split into partitions shares, that a machine use with too few cores beside
+  the GPU keeps it on the GPU, and that the log says which). The Custom tab's extra options that name the device
+  ('--gpu', for PS-DTFE '--gpu-share') set it alone (no tab flag, a Device setting not passed, 'Runs on' says so;
+  '--gpu-share' without '--gpu' is warned about; on a standard-DTFE job it is an error), and '--ps-linear-deposit'
+  there is an error. Also: a saved override beyond the float range no longer raises; the Grids estimate says
+  '(float64)' under Double; a custom run's Load settings says when the tab's Advanced settings go back to Automatic;
+  the parallel insert's 'On' is offered only with TBB; a job's settings read 'Name: value' in one form ('Advanced:
+  Device: CPU; Partitions: 4'); the two-mode note at the start keeps 'Advanced settings on'; the queue's detail pane
+  marks information lines as such; a refused setting leaves the memory key alone; a queue entry from before the two
+  modes gets a title in their words; the PS-DTFE Exact grey line is one line ("Each tetrahedron's exact share of each
+  cell; exact derivatives of the mean flow."); the full-resolution grids figure is the most a run holds at once (a
+  face run's face sums go before the derived fields and the web classes are made, so the default fields with both web
+  classes at 512^3 no longer warn about a scratch folder). The records' measurement markers now read "to be
+  measured:". Checked on the scratch copy: builds of all four kinds; tests/run_mode_check.sh single 68 and double 58
+  passed, 0 failed; the four launcher suites on the merged tree (job specifications 468 passed, end-to-end 396,
+  Explore 332, second end-to-end 82 and 1 skipped; 0 failed); the two-mode golden comparison identical (118 cases) and
+  the saved forms (43 lines); every Advanced row against the launcher before the two modes identical (498 cases) but
+  the stated GPU share 1 of Device GPU on PS-DTFE Exact; five real small runs from launcher-built commands (CPU + GPU
+  under balanced: share 0.75, 20 of 27 and 6 of 8 partitions on the GPU; GPU: share 1; Automatic under performance:
+  0.60). Not checked: the battery's other stages, the Linux check, a native window, a full-size run. Left open: the
+  drivers' start banner still prints '(--gpu-share auto)' whatever GPU_SHARE is (scripts/config.sh, asserted by
+  tests/run_scripts_check.sh); a run killed while it shared and restarted with Device GPU has its resume refused (the
+  checkpoint's share differs: tick Start over).
+- The launcher: opt-in Advanced settings (2026-11-13, on the scratch line; the owner's "an advanced mode ... but make
+  it opt in"; docs/cleanup-plan.md P14, phase C, the Advanced settings; README.md, 'Graphical launcher'). View >
+  Advanced Settings, off by default and kept under one settings key (`advanced_settings`; each group's fold under
+  `<tab>.advanced_settings`, as every folded group's), adds an 'Advanced' group at the end of the Grids, Custom
+  snapshot and Pipeline tabs with nine of the controls the two-mode launcher removed, each with the meaning and range
+  it had before and shown where it was shown then: Device, Samples per cell axis, Velocity derivatives, Partitions per
+  axis, Concurrent triangulations, Memory budget (GB), Parallel triangulation, Merge order and (Grids and Pipeline,
+  once the double-precision program of the job is built) Precision. Every row starts on Automatic, with a grey note of
+  what Automatic gives the job now; a row on Automatic passes nothing. Each run job has one new saved field,
+  `advanced` (written only when it holds a setting, so a job without one is saved byte for byte as before; an older
+  launcher reading such a job drops the field); one rule (python/gui/runspec.py `_refusal`) says which setting a job
+  passes, and a setting it cannot use is not passed and warned about in the Checks list. Off is the two-mode launcher:
+  no group, row or line, the jobs back to Automatic (the status line counts them); a job loaded with settings switches
+  it on and says so; a tab with a setting shows it under 'Runs on' ('Advanced: Device: CPU; Partitions: 4'), 'Runs on'
+  follows a Device setting ('(set in Advanced)'), and a queued job keeps its settings, marked 'advanced'. Load
+  settings of a TNG run puts the Grids job's settings back to Automatic, and a row the loaded job does not show goes
+  back to Automatic too; presets hold none. The time estimates compare runs of the job's precision. Not brought back:
+  the volume weighting, the linear deposit, the plane conventions, the stream density, a TNG job's tetrahedron masses,
+  Explore's partitions in memory and the round's developer switches. Standard DTFE gets no Samples and no Velocity
+  derivatives row (the launcher before the two modes had no such control for it). Checked on the scratch copy: the
+  four launcher suites (job specifications 457 passed, end-to-end 396, Explore 267, second end-to-end 78 and 1
+  skipped; 0 failed); the two-mode golden comparison identical (118 cases); every Advanced row's command and
+  environment identical to the launcher before the two modes with the same explicit setting (498 cases, faked GPU and
+  CPU-only builds), except the four cases it now refuses with a warning (the GPU on a CPU-only build, double without
+  the double programs, the parallel insert without TBB, the completion-order merge beside extra options that name a
+  merge), where the old launcher passed the setting; the screenshots: with the switch off every run-tab form is pixel
+  for pixel the two-mode one; and one offscreen window with three settings, one of them refused, read by eye (the
+  lines, the warning, the queue mark, the switch off). Not checked: the native macOS window, a real run with a
+  setting, the battery's other stages and the Linux check.
+- PS-DTFE: the face walk beside the GPU deposit is the default (2026-11-13, on the scratch line, under the owner's
+  two-mode rule; docs/cleanup-plan.md P11's status of that day on the default; README.md, 'Developer switches'). It
+  was the opt-in DTFE_FACE_WALK_EARLY=1 of 2026-11-12 (the entries below): now kPsFaceWalkEarlyDefault is true
+  (src/auto_tune.h), DTFE_FACE_WALK_EARLY=0 is a developer's off switch that puts the walk after the device call,
+  kept for one more measurement of the pair and not a user option, and =1 means what the default means. A
+  single-precision '--face-gradient' pass that deposits on the GPU walks its face sums on a helper thread while the
+  device deposits, wherever its face units come from the bounds the extraction sums (not under the NaN test hook,
+  and not where the GPU face kernel of DTFE_GPU_FACES=1 takes the pass); the double build, whose face pass walks
+  after the deposit, and every CPU pass are as before. The output bytes are those of the walk after the deposit
+  (tests/ps_face_gradient_check.sh P16 and P17 pair the default with =0). The memory plan books the face sums' words
+  each such pass holds through its device call by default, 240 B per sub-grid cell (src/auto_tune.cc earlyFace;
+  'facewalk_gb' on the '--auto-tune-report' line, "face sums held through each device call" on the AUTO-TUNE line,
+  which names no variable). Plan lines, not runs: against the scratch line's set of before this change and S7, 19 of
+  the 127 lines of tests/dev/tune_report_set.sh move, the 19 GPU face lines, each gaining 'facewalk_gb'; in 12
+  nothing else moves, in 6 'predicted_gb' rises with the partitions and the concurrency unchanged
+  ('ps ram=64 grid=256 prod exact gpu' 25.01 -> 29.23 GB, 'ps face exact gpu one domain ram=64 grid=256 prod'
+  15.89 -> 19.92 GB), and in one the plan moves: 'ps window exact gpu grid=1024 prod' from 8 partitions in flight
+  (22.44 GB predicted) to 5 (38.12 GB of a 38.40 GB budget, facewalk_gb=4.027) (to be measured: a windowed 1024^3 GPU
+  face run under the default: its wall time and peak footprint against that plan). No CPU, sampled, density-only,
+  double-build or standard-DTFE line moves. A plan-only probe of the 512^3 GPU face command (docs/cleanup-plan.md
+  P11.1, run l) on a simulated quiet 64 GiB machine, budget 41.23 GB, gives plan lines too: with the walk after the
+  deposit 6^3 partitions with 4 in flight at 38.26 GB predicted; with the walk beside it, the default, the same plan
+  at 41.00 GB (facewalk_gb=2.028), 0.23 GB inside the budget; with the face kernel on top 6^3 with 3 in flight at
+  38.15 GB (to be measured: one 512^3 run of run l's plan under the default: its wall time and peak footprint against the
+  41.00 GB predicted). The one measured 512^3 pair of the walk is the opt-in's of 2026-11-12 (the entry below; one
+  binary of that day, before the scratch line): 1342.27 s of wall with the walk after the device call against
+  1246.08 s beside it, at 34.09 against 35.48 GB of peak footprint, 28 of 28 output files identical. Three changes
+  of the review came with the default: a walk thrown away after a failed device call no longer rethrows its own
+  error (the pass falls back to the CPU deposit, as before the walk moved); no memory for the face words, or for the
+  helper thread, before the call leaves the walk after the deposit instead of stopping the pass; and the closing
+  line's seconds are the kept walks' only. That line names no variable; DTFE_FACE_WALK_EARLY set to on where no pass
+  took the walk says so in one line. No test covers the two out-of-memory fall-backs or a walk's own error after a
+  failed device call: P16 fails device calls (DTFE_GPU_FAULT_AT), whose walks are thrown away without an error of
+  their own, and no hook makes an allocation fail or a walk throw. The time objective (DTFE_AUTO_TIME=1, a developer
+  switch; its entry below) keeps its constants, which were measured with the walk after the deposit: under it every
+  single-precision GPU face run is now outside the calibrated classes (where no earlier reason applies, "not
+  calibrated for the face walk beside the GPU deposit") and keeps the memory plan, said, without time keys
+  (tests/ps_auto_tune_check.sh AA6), and its class 'GPU with face sums'
+  (kPSTimeGpuFace) is reachable only under DTFE_FACE_WALK_EARLY=0 until it is measured again (to be measured:
+  kPSTimeGpuFace refitted from 512^3 runs with the walk beside the deposit, the default); without DTFE_AUTO_TIME no
+  plan reaches that test. Checked on the scratch line with S7 (the word merge's entry below): clean builds (single,
+  double, 2-D, library) without a warning; tests/dev/bytecmp.sh --gpu-exact 261 files, 0 differ (it pins
+  DTFE_FACE_GRADIENT=0, so it does not run the walk); single build: tests/ps_face_gradient_check.sh,
+  tests/split_bytes_check.sh and tests/ps_parallel_check.sh pass, tests/ps_auto_tune_check.sh 111 OK, 0 FAIL, 1
+  SKIP; double build: tests/ps_face_gradient_check.sh and tests/ps_auto_tune_check.sh pass. Not through the battery,
+  the Linux check or a 512^3 run with this code. The markers of the entries below that ask for
+  tests/dev/tune_report_set.sh against the commit before are about each entry's own commit: compared across this
+  change, the 19 lines above move as well; with DTFE_FACE_WALK_EARLY=0 exported (the script passes the environment
+  on) they are to stay as before.
+- The launcher: one Quality choice per run tab, Exact (the default) or Fast (2026-11-13, the owner's two-mode rule;
+  docs/cleanup-plan.md P14, phase C; README.md, 'Graphical launcher'). The Grids, Custom snapshot and Pipeline tabs
+  each show one pair, Exact (first, ticked) and Fast, with a grey line saying what the choice is for the estimator
+  (PS-DTFE Exact: every tetrahedron's exact share of every cell, the mean flow's derivatives from exact face sums;
+  PS-DTFE Fast: sampled cells, the derivatives the stream average; standard DTFE Exact: the exact cell average;
+  standard DTFE Fast: a Monte-Carlo mean of the cell, the derivatives still exact, in 3D), and under the Machine use a
+  grey 'Runs on' line saying where the run goes (the device the quality implies: information, no control). The choice
+  stays when the estimator changes. Gone from the tabs, with their tooltips, interlocks, settings keys, status lines
+  and timing messages: the cell average menu (it became the pair), the sub-samples per cell axis, the GPU tick (and
+  the GPU advice of the Checks list), the volume weighting, the face-gradient tick, the linear density, the parallel
+  triangulation, the merge order, the plane conventions, the Custom tab's stream density, the partition, the
+  concurrent triangulations, the memory budget, the Grids and Pipeline tabs' precision and tetrahedron masses, and the
+  Resources and Advanced groups. Kept: the Machine use; the Custom tab's Precision row (shown once the double pair is
+  built, or while a job asks for double) and, for PS-DTFE, its Initial positions (perturbed initial conditions, whose
+  tetrahedra take their masses from the particles, or an unperturbed lattice, the default); the Pipeline's pixel
+  sub-samples and Adaptive; the output prefix, Start over, the scratch and tessellation-cache folders and the Custom
+  tab's Extra options in one folded 'More' group per tab. The Phase space group and the Custom tab's Initial positions
+  row are hidden for standard DTFE. What a choice implies is one function, python/gui/runspec.py quality_mode, which
+  the three job kinds read; the commands and environments are the launcher's of before for the matching settings (an
+  Exact job its default job, a Fast one its sampled job at the removed controls' defaults: a golden command comparison
+  against the launcher before the change is identical, P14). The Checks list says what a choice leaves out (Fast:
+  PS-DTFE's stream-average derivatives, caustic classes per sample point; Exact with the halo release or in 2D: the
+  stream-average derivatives, no mass-flux divergence). Until the binaries choose them (P14, phases A and B), the
+  launcher still passes from quality_mode: the device (DTFE_GPU and -m, '--gpu' on the Custom tab: the GPU on a GPU
+  build, except standard DTFE's Fast under Performance and PS-DTFE's Fast below a million particles); for PS-DTFE,
+  the GPU share (GPU_SHARE=auto; '--gpu-share auto' for a Custom PS-DTFE Exact run on the GPU), the volume weighting
+  (PS_VOLUME_WEIGHTED=1, '--ps-volume-weighted'), a TNG job's vertex masses (PS_VERTEX_MASS=1), PS-DTFE Fast's
+  sub-samples (-n 3, '--sampled --subsamples 3'), no forced parallel insert (PARALLEL_TRIANGULATION=0: the binary's
+  own rule), no linear deposit (PS_LINEAR_DEPOSIT=0), the index-order merge (PS_MERGE=index-order,
+  '--ps-merge index-order'), the velocity gradient's route (FACE_GRADIENT=1 or '--face-gradient' where an Exact job
+  qualifies, else none) and, with a slice, the grids' plane conventions (PS_POINT_CONVENTIONS=grid); Explore's exact
+  zoom still passes '--gpu' on a GPU build. Nothing is passed for the partition, the concurrency and the memory budget
+  (the binary's auto-tuner), nor for a TNG job's precision (single). Presets: three built in, Quick look (Fast, 128^3,
+  density and velocity), Standard (Exact, 512^3, the production fields) and Publication (Standard plus the caustics
+  and the hi-res slice on the largest image plane); 'Exact deposit' is gone, since Exact is every job's default, and
+  no description holds a measured number. Quick look now samples PS-DTFE at Fast's one count, 3 points per cell axis,
+  instead of 1. A preset sets only the quality, grid, fields, phase-space options, slice and estimator: never the
+  machine use, and no longer the Custom tab's initial positions. Older saved state loads into the two modes: a saved
+  tab job, queue entry, user preset, run log ('Load settings') or custom run's settings file maps its cell average to
+  the quality (sampled is Fast, anything else Exact) and drops every other removed setting, so a double-precision
+  Grids or Pipeline job now runs in single precision; a user's preset named like a former built-in stays the user's. A
+  saved tab job or queued job from before brings a one-time status-line note, which also says that the Grids and
+  Pipeline tabs run in single precision, and the queue is then saved back in the new model. The queue's lines name the
+  quality as Exact or Fast. The time estimates (the Grids tab, the queue, the cluster script dialog) come only from
+  earlier runs of the same quality: a Fast job is no longer predicted from Exact runs (results.py time_estimate, its
+  'exact' argument). Explore: the zoom's tick is a pair, 'Point values (instant)' (the default) and
+  'Exact cell averages (recompute)'; 'Partitions in memory' is gone (the query server is given no '--serve-resident':
+  the binary keeps as many partitions in memory as its memory budget holds); the Zoom resolution box reads 'per side'
+  (points or cells, by the chosen zoom). The Runs tab names a run's quality Exact or Fast. The launcher's texts about
+  the two choices carry no timings. Tests: tests/py_gui_runspec_test.py, tests/py_gui_app_test.py,
+  tests/py_gui_explore_test.py, tests/py_gui_app2_test.py (the counts in P14); tests/dev/gui_shots.py also saves each
+  job tab's whole form. Built on the scratch line; not through the battery or the Linux check.
+  Where an earlier entry below names a launcher control that this entry removes, this entry holds.
+- Review fixes of the scratch line's merge (2026-11-13; docs/cleanup-plan.md P8.8's record). The time objective
+  (DTFE_AUTO_TIME=1) names two more PS-DTFE configurations as not calibrated and keeps their memory plan: a GPU face
+  pass with the walk beside the deposit, now tested as psFaceWalkEarly() (src/auto_tune.h), so DTFE_FACE_WALK_EARLY=1
+  no longer takes a run without a GPU face pass out of its class, and a GPU face pass under the face kernel
+  (DTFE_GPU_FACES=1), which has no CPU face walk to time and was predicted with that walk's constants
+  (src/auto_tune.cc timeClass). The kernel's note under DTFE_GPU_FACES=1 with DTFE_FACE_WALK_EARLY=1 names
+  '--ps-merge fixed-point' beside DTFE_PS_RUN_UNITS=1 as the run-wide units under which the walk still runs
+  (ps_interpolation.cc psFaceF32Note). tests/ps_auto_tune_check.sh unsets DTFE_GPU_FACES and DTFE_FACE_F32, and
+  tests/dtfe_auto_tune_check.sh DTFE_RUN_UNITS_LEGACY, so an export of them in the shell no longer moves the suites'
+  plans or makes the twins of I2 and O the same. Without DTFE_AUTO_TIME=1 timeClass is not called, so no plan moves;
+  no output byte moves. Not run through the battery or the Linux check. Since the walk beside the deposit became the
+  default (the first entry above), every single-precision GPU face run under DTFE_AUTO_TIME=1 is outside the
+  calibrated classes unless DTFE_FACE_WALK_EARLY=0, the walk's reason names no variable, and the kernel's note prints
+  under DTFE_GPU_FACES=1 alone.
+- PS-DTFE: two developer switches for a GPU kernel of the face sums of '--face-gradient' (single precision, 3-D;
+  docs/cleanup-plan.md P11, the GPU kernel for the face sweep, steps 2 and 3 of its design; README.md, 'Developer
+  switches'), switches for one measurement of the 2026-11 round, not user options: each is hard-wired or removed once
+  measured. DTFE_FACE_F32=1 forms every face sum of the run on the CPU in one float arithmetic that the Metal kernel
+  repeats bit for bit (src/CGAL_triangulation/face_sweep_f32.h): correctly rounded IEEE single operations with
+  flush-to-zero, the Apple GPU's rule for subnormals, so the CPU runs the sweep, the boundary-plane test and the face
+  records' plane counts with the processor's flush-to-zero mode set for their duration (fsFlushed; AArch64 only, as no
+  face kernel runs elsewhere); every product that feeds a sum an explicit fused multiply-add, the corners of a section
+  ordered combinatorially, each strip's upper bound the next strip's own lower bound, a piece's moments and velocity
+  taken about its own first vertex. Its face grids differ from the default's at float rounding (to be measured: the face
+  grids under DTFE_FACE_F32=1 against the default's: tests/ps_face_gradient_check.sh P17), and no other output is to
+  move. DTFE_GPU_FACES=1 makes a GPU pass's face sums with metal/ps_face.metal faceSweepItems (one thread per face
+  record, axis and plane; a library of its own, compiled in Metal's safe math mode) in the deposit's hold of the
+  device, after the deposit, from face records the GPU extraction walk builds, and forms every CPU face sum of its run
+  in DTFE_FACE_F32's arithmetic, so its face grids are to be a DTFE_FACE_F32=1 CPU run's byte for byte and its other
+  files the same run's without the switch (tests/ps_face_gradient_check.sh P18); unset or 'auto' is 0. A face pass
+  that gives up (the GPU retry policy), cannot have its buffers or meets a plane count other than the host's leaves
+  the pass's face sums to the CPU face walk, the same words, and says why; a partitioned run closes with one line
+  counting the passes the kernel made and those whose face pass did not make them (DTFE.cpp). The kernel does not take
+  a pass in the run-wide units (DTFE_PS_RUN_UNITS=1, and so '--ps-merge fixed-point' in the single build), under the
+  NaN test hook, or under DTFE_GPU_FLOAT_MOMENTS=1 outside a '--grid-window': the CPU walk makes those, in the same
+  arithmetic. With DTFE_FACE_WALK_EARLY=1 the kernel takes the pass and the walk beside the deposit does not run (one
+  note line). The checkpoint key names the arithmetic ('face-sums=f32', one line for both switches), so a resume
+  across the arithmetic is refused and one between the two switches is not. The auto-tuner books the face records in a
+  GPU lane under DTFE_GPU_FACES=1 (124 B per extracted tetrahedron by arithmetic: the record's 28 floats and 12 B of
+  the items' map's build, for every tetrahedron until the share that gets a record is measured); the device's face
+  words of the face pass in the hold (240 B per sub-grid cell by arithmetic) are not booked, except where
+  DTFE_FACE_WALK_EARLY=1 books its term of the same size (the next entry). The PS kernels' non-finite guard, 64-bit
+  add and items' map reader moved unchanged to metal/ps_common.metal.inc. The Makefile embeds the kernel as
+  ps_face_msl.h in the PS object folder (wiped with the objects when the build mode changes), and
+  metal/build_prototype.sh also compiles metal/ps_face.metallib offline for the harness. The double and the 2-D builds
+  ignore both switches with a note line; standard DTFE is untouched. Tests: tests/face_sweep_check.sh F4-F6,
+  tests/ps_face_gradient_check.sh P17 and P18, metal/validate_deposit.cpp T16a (the device probe of the arithmetic)
+  and T16 (the kernel's words against the CPU's). Built and smoke-tested on the scratch line; not run through the
+  battery, the Linux check or at 512^3. Without the switches no output and no plan is to move (to be measured:
+  tests/dev/bytecmp.sh --gpu-exact and tests/dev/tune_report_set.sh against the commit before); whether the kernel
+  saves time (to be measured: run l's command three ways: the walk after the deposit, DTFE_FACE_WALK_EARLY=1,
+  DTFE_GPU_FACES=1). Since the walk beside the deposit became the default (the first entry above), the kernel takes
+  the pass where that walk would run by default, the walk's term is booked by default and over-books the passes the
+  kernel takes (their own face words are not that term's: src/auto_tune.cc earlyFace), and the three ways are
+  DTFE_FACE_WALK_EARLY=0, the default and DTFE_GPU_FACES=1.
+- PS-DTFE: the memory plan books the face walk beside the GPU deposit of the developer switch DTFE_FACE_WALK_EARLY
+  (the entry of 2026-11-12 below), and the deposit and the auto-tuner read the switch through one function,
+  psFaceWalkEarly in src/auto_tune.h (DTFE_FACE_WALK_EARLY=1 or =0 decides where it is set, else the constant
+  kPsFaceWalkEarlyDefault, false: the walk stays off by default, and hard-wiring it on is that one constant). Where
+  the walk runs (a '--face-gradient' pass that deposits on the GPU, single precision, without the NaN test hook, its
+  face units from the bounds the extraction sums, and not a pass the GPU face kernel of DTFE_GPU_FACES=1 takes) the
+  pass allocates its face sums' words before its device call and holds them through it, its wait for the device
+  included: 30 int64, 240 B per cell of its sub-grid (ps_interpolation.cc psFaceUnits). The plan books them beside
+  every lane's hold: a whole lane at max(hold + 240, after the hold) per sub-grid cell, under the lane share each
+  other lane at max(0.30 x hold + 240, the share x after the hold); under '--grid-window' each partition in flight
+  books the window's words and the deposit booked once no longer counts them, so one partition in flight plans as
+  before; a mixed run's GPU lane holds them after its lock already. The report line lists them as 'facewalk_gb'
+  (before 'over_budget') and the AUTO-TUNE line names the switch, both only where they are booked: without the switch
+  every plan and every report line is as before (to be measured: tests/dev/tune_report_set.sh against the commit before).
+  How close the term comes to the peaks measured with the switch on 2026-11-12, and whether run l's plan keeps 4
+  partitions in flight with it (to be measured: run l's --auto-tune-report with DTFE_FACE_WALK_EARLY=1 and one 512^3 run of
+  that plan). The plan tests the walk's conditions without the kernel's: under DTFE_GPU_FACES=1 it books the term for
+  a pass the kernel takes too, which runs no early walk but holds the kernel's face words on the device, of the same
+  size, in the deposit's hold (auto_tune.cc earlyFace). Tests: tests/ps_auto_tune_check.sh U;
+  tests/ps_face_gradient_check.sh P16's failing split now asks for no walk kept and all 8 thrown away. Built and
+  smoke-tested on the scratch line, not gated. Since 2026-11-13 the constant is true and the walk beside the deposit
+  is the default (the first entry above, with the plan probe of run l's command), and the comment at earlyFace reads
+  the kernel's case as an over-booking: the passes the kernel takes never start the walk, and its own face words are
+  not this term's.
+- The face gradient's left-overs, C++ part (docs/cleanup-plan.md P10.11). The auto-tuner books the two grids every
+  face-gradient pass of PS-DTFE keeps from its normalization to the output, the stream average's divergence
+  ('.a_velDivStreams') and the mass flux divergence ('.a_massFluxDiv'): one Real per cell each, in the '_u' pass too,
+  which writes neither (auto_tune.cc autoTuneFaceOutputBytes). Both count in the post phase; the divergence also
+  beside the deposit phase's grids at the normalization (the mass flux was booked there already), in the one-domain
+  model, the scratch volume's check and the dynamic concurrency's reserve. A face run's printed plan can move, by
+  arithmetic: by 4 B per cell (8 in the double build) and face pass where the normalization is its peak, by 8 B (16)
+  where the post phase is the larger, and where one domain's model peaks at the end (to be measured: which of the 127 lines
+  of tests/dev/tune_report_set.sh move, against the commit before). No output byte changes. The AUTO-TUNE warnings
+  that a plan does not fit (PS-DTFE: the irreducible term's list of ways out, the 'even a single partition' case;
+  standard DTFE: 'no split fits') name '--per-tet-gradient' or DTFE_FACE_GRADIENT=0 where a pass makes the face sums,
+  with what that route adds per cell (standard DTFE: only where the per-tetrahedron route books less, which the single
+  build's CPU exact average does not). '--interlace' keeps the face gradient: its second pass gives the density only,
+  so every other grid, the face gradient's included, is the first pass's, byte for byte a run without it
+  (tests/ps_face_gradient_check.sh P19, tests/dtfe_face_gradient_check.sh G8). Built and smoke-tested on the scratch
+  line, not gated.
+- The face gradient's left-overs, Python part (docs/cleanup-plan.md P10.11). The launcher's PS-DTFE jobs (Grids,
+  Pipeline, Custom and their memory checks) pin DTFE_FACE_GRADIENT empty, as the standard Grids job does: a ticked job
+  that does not qualify for the face gradient (the sampled deposit, mass-weighted moments) names no route, and a
+  DTFE_FACE_GRADIENT=1 exported in the login shell made the binary refuse it. The face tick comes back as it was when
+  the linear deposit is unticked again (a loaded job keeps its own ticks). Explore lists a face-gradient output's
+  '*Streams' twins (the stream average of each stream's own divergence, gradient, shear and vorticity) and its
+  '.a_massFluxDiv', after the velocity-gradient family, on the family's diverging scale; the vorticity twin is drawn
+  as its curl, as the vorticity is, on the map and in Show in 3D (grids.CURL_FIELDS, volume3d.py). The grid estimate
+  of the Grids and Custom tabs and the Pipeline's memory warning count a face-gradient job's face sums (30 numbers,
+  120 B per cell), its two face outputs (8 B), the twins of the fields asked (36, 20 and 12 B for 'gradient_a',
+  'shear_a' and 'vorticity_a') and the mean velocity where 'velocity_a' is not asked (python/gui/runspec.py grids_gb).
+  dtfelib: FieldSet.face_gradient of the unaveraged grids, which no file marks, reads the run's route from the run
+  log's 'velocity gradient' line (io.run_face_gradient), so a face run's '_u' mean field is its stored grid; folders
+  of a binary before the PS-DTFE face default, and folders without a log, read as before. The '--ps-gradient' help and
+  the scripts' texts say what 'stored' reads: the stream average without the face gradient, the mean flow with it;
+  plot_velDiv_den.py's summary names a face run's source. Tests: tests/py_dtfelib_test.py,
+  tests/py_gui_runspec_test.py, tests/py_gui_app_test.py, tests/py_gui_app2_test.py, tests/py_gui_explore_test.py
+  (to be measured: the Python suites on the scratch line). Built and smoke-tested on the scratch line, not gated.
+- PS-DTFE: the walk that bounds a pass's fixed-point units before a CPU deposit (ps_interpolation.cc psFxBoundWalk)
+  has its threads claim blocks of 256 cells from one counter, as the deposit's dynamic team does, instead of taking
+  every n-th block: no thread idles while another works through a slow share, and each walks only the cells of its own
+  blocks (one serial walk builds the block index; the team keeps the deposit's thread count and does not grow). The
+  walk's 13 results (10 moment bounds, 3 face bounds) are double sums made block by block, each block by the one
+  thread that claimed it in the cells' order, the blocks then added in their order: the sums, the units and every
+  output byte are, by construction, the same at any thread count, and still equal the GPU extraction's. No switch.
+  DTFE_DEBUG_FX_BOUNDS=1 also prints each walk's sums in hex with its thread count; tests/ps_fixed_moments_check.sh F6
+  compares them at 1, 3 and 6 threads with the face sums on, on the whole box and in a '--grid-window'. Built and
+  smoke-tested on the scratch line (no F6 result is recorded), not gated; time saved (to be measured: a CPU exact
+  '--face-gradient' run at 256^3, one domain and 2^3 with 4 in flight, old and new binaries).
+- Standard DTFE's memory plan books the CPU exact average's run-wide words only for the grids that get them (the ones
+  with a run-wide unit, the loop's own test RunUnits::has; auto_tune.cc, averaged_interpolation_1.cc Avg1Words). Under
+  '--approx-phase-space-density' the scalar_a and scalarGradient_a grids keep their Real sums, yet the plan booked 8 B
+  per component for them (32 B per cell for both, by arithmetic): a CPU exact plan with those fields now predicts that
+  much less, and on a tight budget may choose a coarser split or more threads. The same holds where a grid's run-wide
+  unit lies outside 2^-120 .. 2^120 (the run's own warning), and a MY_SCALAR build books none. No other plan moves
+  (to be measured: tests/dev/tune_report_set.sh against the commit before). tests/dtfe_auto_tune_check.sh O pins the term.
+  Two other booking notes of the run-wide units were checked against the code and need no change: a GPU run's
+  sub-domain that falls back to the CPU allocates its words after its GPU attempt released the bytes the plan books
+  for it (8 B per component of grids that include every grid the words are for, per cell; the opt-in DTFE_GPU_SHARED=1
+  grid excepted), and the star sums' 8 B per vertex is a member of every standard vertex, held under
+  DTFE_RUN_UNITS_LEGACY=1 too, so the plan books it in every mode. Built and smoke-tested on the scratch line, not
+  gated.
+- The auto-tuner's time objective behind the developer switch DTFE_AUTO_TIME=1 (both binaries, from DTFE_AUTO_MINN
+  particles; docs/cleanup-plan.md P8.8 and P8.9 step 2; README.md, 'Developer switches'): among the plans the memory
+  model accepts, both planners take the one with the smallest predicted partition loop, where it predicts less than
+  kAutoTimeGain = 0.90 of the memory objective's plan's (src/auto_tune.cc). Standard DTFE: per partition its slowest
+  thread sub-box's build and its deposit, with the look-ahead the larger of the next build and this deposit, at every
+  split the search tries and every 2^a 3^b team below the threads. PS-DTFE: the partitions in flight around the one
+  GPU as a closed queue solved by mean value analysis, in five classes (GPU, GPU with face sums, GPU under balanced or
+  gentle, mixed, CPU), each split of the search at the count the memory model gives it. The constants come from the
+  TNG100-3-Dark z = 0 runs at 512^3 of 2026-11-09 to 12 (auto_tune.cc names the runs of each and marks the fitted
+  ones; the plan's P8.8 record); every other configuration keeps the memory objective's plan and says why (among them
+  the double and 2-D builds, PS-DTFE's sampled deposit, a run without '--sample-points', '--grid-window', the run-wide
+  units (DTFE_PS_RUN_UNITS=1, and so '--ps-merge fixed-point'), a GPU face pass with the walk beside the deposit
+  (DTFE_FACE_WALK_EARLY=1) or under the GPU face kernel (DTFE_GPU_FACES=1; the review fixes' entry above), standard
+  DTFE's CPU deposit and '--sample-points', grids above 2e8 cells); a plan the user fixes (standard DTFE:
+  '--partition' and '--max-concurrent'; PS-DTFE: '--partition') is only predicted. DTFE_FACE_F32=1 alone is not told
+  apart: a run whose CPU face walk takes the kernel's float arithmetic keeps the default arithmetic's class. With
+  the switch an 'AUTO-TUNE: time objective
+  (DTFE_AUTO_TIME)' line states what it found (both predictions where it leaves the memory objective's plan), and the
+  AUTO-TUNE-REPORT line gains 'time_s=.. time_mem_s=..' (the predicted whole runs of the plan taken and of the memory
+  objective's plan) before 'over_budget' where it predicted. DTFE_AUTO_TIME_GAIN (the band, 0 to 1) and
+  DTFE_AUTO_T_STD_PART / DTFE_AUTO_T_PS_PART (seconds per partition) are its tests' hooks. Without the switch nothing
+  changes (to be measured: tests/dev/tune_report_set.sh with DTFE_AUTO_TIME unset, and tests/dev/bytecmp.sh, against the
+  commit before). Tests: tests/dtfe_auto_tune_check.sh N, tests/ps_auto_tune_check.sh AA. Built, and smoke-tested on
+  the scratch line with the switch unset only (no run with it on is recorded: its commit message says 'Compiled only',
+  and auto_tune.cc that nothing was verified with the switch on), not gated; how far its predictions lie from the
+  measured loops, and whether it is hard-wired or removed (to be measured: the P8.8 sweep at 512^3). Since the walk beside
+  the deposit became the default (the first entry above), every single-precision GPU face run under the switch keeps
+  the memory plan, except under DTFE_FACE_WALK_EARLY=0, until the class 'GPU with face sums' is measured with that
+  walk.
+- PS-DTFE: '--ps-merge fixed-point' merges the passes' exact words (single precision, 3-D; docs/cleanup-plan.md fix 3,
+  S6 and S7, the records after S5 in P10's status). The value 'fixed-point' of '--ps-merge' is a developer switch of
+  the 2026-11 round, not a user option (README.md, 'Developer switches'), to be hard-wired or removed once measured.
+  It switches the run-wide fixed-point units on, as DTFE_PS_RUN_UNITS=1 does (the units line then ends with a note
+  saying so), so every pass deposits in one unit per grid for the whole run, and each pass hands its sums over
+  unconverted: the mass, the moment grids and the face sums as 64-bit words with an exact carry, the stream counts as
+  integers. The merge adds them as each partition finishes, exactly and in any order, so nothing is ordered, parked or
+  spilled, and ONE close-out after the loop rounds each cell to float once and normalizes; a one-domain run given it
+  (no split, or '--partition 1 1 1') closes out its own pass the same way. A periodic one-domain run under it pads its
+  Lagrangian box as the partitions do ('--ps-lagrangian-padding' mean spacings, said in one more 'Lagrangian padding'
+  line of its log) instead of by the Eulerian fraction with its 10% floor, and so has the partitions' periodic seam,
+  which follows the padding (DTFE.cpp psLagrangianPeriodicSetup, a second commit of the same day: before it the
+  tetrahedra between the two seams were deposited from another periodic image, and their last bits followed the
+  split). The merged face sums of '--face-gradient' are held once per face (S7, the same day): each cell its upper
+  faces, the lower ones being the upper faces of the cells below, and on a grid that is not periodic (without
+  '--periodic', as in a '--box' run) one boundary plane per axis. A pass still holds both faces of every cell; the
+  merge adds every upper face, skips a lower face whose twin (the same share, held by the cell below in the same
+  pass) it adds already, and routes one without a twin to the cell below or to the boundary plane, so every share
+  counts once whatever the split; a one-domain run's face sums take the same rule before its close-out. Where a pass
+  held only one of a face's two cells, the merge's first build (S6) missed that share in the other cell. The
+  close-out keeps the face sums as words and the gradient reads them so: no float face grids.
+  DTFE_DEBUG_FACE_TWINS=1, a test hook, checks the twins word for word and counts the routed words. So a run whose
+  partitions all deposit on the CPU, or all on the GPU, is to write the same bytes at every split, one domain
+  included, at any concurrency and completion order (to be measured: tests/split_bytes_check.sh P1-P3, and one 512^3 pair:
+  the planner's split against '--partition 6 6 6'); with '--ps-lagrangian-padding 0' the partitions' padding follows
+  the split, there is no one seam, and a one-domain run and a split are not promised the same bytes. A run that mixes
+  the devices ('--gpu-share' below 1, the performance mode's automatic share, a GPU fallback) merges exactly too but
+  stays split-dependent. The grids differ from the default merge's at float rounding. Memory: 8 B per summed component
+  and cell of the full grids during the loop (4 B per stream count, 16 B per carried component; the face sums once
+  per face, 120 B per cell and face pass, the boundary planes beside them) where the default merge's float grids take
+  4 B, and each partition holds its sums as 64-bit words until its merge (its face sums both faces per cell, 240 B);
+  the auto-tuner books both, the carries excepted (to be measured: the peak footprint against the plan at 512^3). Wall time:
+  the run-wide units' (the DTFE_PS_RUN_UNITS=1 entry below) and the merge's own (to be measured: the wall time against the
+  default merge at 512^3). Refused with DTFE_GPU_FLOAT_MASS=1 or DTFE_GPU_FLOAT_MOMENTS=1 (float sums have no words)
+  and when a grid's run-wide unit lies outside 2^-120 .. 2^120. The checkpoint holds the words (the face sums once
+  per face, with their boundary planes; '--resume' refuses a checkpoint of the layout before S7); its key's 'units='
+  line lists every grid's unit, and '--resume' refuses a checkpoint of other units, or of the other merge, naming
+  both lines; '--resume' does not take the merge mode from the checkpoint (give the killed run's '--ps-merge').
+  DTFE_RUN_UNITS_LEGACY=1 keeps the merge of before (each partition's rounded grids into 72-bit integers, 9 B per
+  cell), as does the 2-D build; the double build and '--grid-window' refuse it, as before. Without it nothing changes
+  (to be measured: tests/dev/bytecmp.sh --gpu-exact and tests/dev/tune_report_set.sh against the commit before).
+  tests/ps_fixed_merge_check.sh runs the word merge (with DTFE_RUN_UNITS_LEGACY=1 exported, the merge of before);
+  tests/split_bytes_check.sh PW, P1-P3, P5 and M1, X8 of tests/ps_fixed_merge_check.sh (the face sums once per face,
+  periodic and in a '--box', one domain, 2^3 and 3^3, byte for byte; the twin check; a resume with the planes) and
+  its GPU face pair in X7, AB of tests/ps_auto_tune_check.sh (the deposit phase's bytes per cell, by hand) and the
+  word-merge cases of tests/ps_mass_exact_check.sh (X1), tests/ps_partition_padding_check.sh (P1-P4),
+  tests/ps_resume_check.sh (C17) and tests/ps_resume_points_check.sh (R11) pin it. The option's help and short help
+  (src/user_options.cc) and the run log's 'partition merge order' line say so. Checked on small data (2026-11-13):
+  the 16 reference runs of the word merge (one domain and split, with and without the face gradient, on the GPU and
+  the CPU) write every output file byte for byte as the merge before S7, on S7's own tree and again on the scratch
+  line with the walk beside the GPU deposit as the default (the first entry above), and one domain against the
+  splits differs in no file; tests/ps_fixed_merge_check.sh in the single build 41 passed, 0 failed (X8 included),
+  in the double build 1 passed (X5 only), under DTFE_RUN_UNITS_LEGACY=1 20 passed (X8 skipped); without the option
+  tests/dev/bytecmp.sh --gpu-exact compares 261 files, 0 differ, and S7 moves no line of
+  tests/dev/tune_report_set.sh (none has '--ps-merge fixed-point'). Built on the scratch line; not through the
+  battery, the Linux check or a 512^3 run.
 - PS-DTFE: DTFE_FACE_WALK_EARLY=1, an opt-in switch for timing measurements, makes the face sums of a
   '--face-gradient' pass while the GPU deposits instead of after it (single precision, a pass that deposits on the
   GPU; docs/cleanup-plan.md P11's status of 2026-11-12: the first step of the face sweep's item, which the owner asked
@@ -22,15 +520,17 @@ UNRELEASED (since 1.0.0)
   their device calls had returned, but the passes' field interpolation fell by only 587 s summed (3630.84 -> 3044.2
   s): the passes' device phase, which includes the wait for the device, grew beside the walks (2262.5 s over the 216
   passes; the last total the log without the switch prints reads 1590.4 s over 213 passes). Memory: the pass holds its
-  face sums during the device call, which the memory plan does not book outside a '--grid-window' run while the switch
-  is opt-in. At 256^3 the peak footprint rose from 12.4-13.1 to 16.2 GB on one domain, by 0.65 to 0.66 GB at 2^3 with
-  one in flight and by 0.25 to 0.31 GB at 3^3 with four in flight; at 2^3 with four in flight it shows no clear change
-  (12.0-13.7 against 13.1-13.7 GB). At 512^3 it rose from 34.09 to 35.48 GB (the maximum resident size from 44.09 to
-  47.18 GB). The plan's prediction covered every measured peak (38.26 GB at 512^3). Whether the switch becomes the
-  default, which needs its memory term first, and whether a GPU kernel follows are the owner's decisions.
-  tests/ps_face_gradient_check.sh P16 pins the switch (the same grids on one domain, in a one-cell '--grid-window' and
-  on a 2^3 split with 4 in flight; the fallback after a failed device call, on one domain and on the split; a NaN
-  vertex mass; the two cases where it does nothing).
+  face sums during the device call, which the memory plan did not book outside a '--grid-window' run (booked since
+  2026-11-13: the entry on its memory term above). At 256^3 the peak footprint rose from 12.4-13.1 to 16.2 GB on one
+  domain, by 0.65 to 0.66 GB at 2^3 with one in flight and by 0.25 to 0.31 GB at 3^3 with four in flight; at 2^3 with
+  four in flight it shows no clear change (12.0-13.7 against 13.1-13.7 GB). At 512^3 it rose from 34.09 to 35.48 GB
+  (the maximum resident size from 44.09 to 47.18 GB). The plan's prediction covered every measured peak (38.26 GB at
+  512^3). The memory term and a GPU kernel followed on 2026-11-13 (the entries above); by the owner's rule of that day
+  the switch is a developer switch, to be hard-wired or removed once measured. tests/ps_face_gradient_check.sh P16
+  pins the switch (the same grids on one domain, in a one-cell '--grid-window' and on a 2^3 split with 4 in flight;
+  the fallback after a failed device call, on one domain and on the split; a NaN vertex mass; the two cases where it
+  does nothing). Since 2026-11-13 the walk beside the deposit is the default (the first entry above);
+  DTFE_FACE_WALK_EARLY=0 puts it after the device call.
 - Standard DTFE's exact grids no longer depend on the partition split, the thread count or the order of the parallel
   insert (single precision, an all-GPU or an all-CPU run; docs/cleanup-plan.md P10's status after P10.8, the owner's
   decision 2c of 2026-11-11; src/fixed_units.h). Every grid sums its shares as integers in ONE fixed-point unit for
@@ -45,9 +545,9 @@ UNRELEASED (since 1.0.0)
   at 512^3), the CPU summed floats in its walk order (on the 64^3 demo, one domain against 3^3 partitions: 60% of the
   density cells, by up to 25 last places) and the face pass doubles (the gradient grids there by up to 4e-13 of their
   rms). Kept as they were: the '--sampled' average, the '_u' fields, the double build's CPU sums (its exact average,
-  face pass and vertex densities; its GPU exact batches take the 128-bit words too), the scalar grids under
-  '--approx-phase-space-density' (a unit per GPU batch, the CPU's float sums: f is formed after the units are set) and
-  PS-DTFE. New grids differ from the earlier ones in the last bits. On the 64^3 demo: a CPU run's density by up to 25
+  face pass and vertex densities; its GPU exact batches take the 128-bit words too) and the scalar grids under
+  '--approx-phase-space-density' (a unit per GPU batch, the CPU's float sums: f is formed after the units are set).
+  New grids differ from the earlier ones in the last bits. On the 64^3 demo: a CPU run's density by up to 25
   last places and its velocity by up to 43 (2e-4 and 3e-6 of the rms, at the largest cells), a GPU run's density and
   velocity not at all, the face gradient grids by up to 4e-13 of their rms. In the byte comparison's
   '--per-tet-gradient' rows the gradient grids move by up to 8e-6 (CPU) and 5e-8 (GPU) of their rms, and one velocity
@@ -58,10 +558,45 @@ UNRELEASED (since 1.0.0)
   books: a GPU exact batch's sums take 16 B per grid component on the device and in the host's snapshot (8 B before),
   a CPU exact sub-domain's loop 8 B per deposited component of its cells while it runs, the triangulation 8 B more per
   vertex. The standard single-precision binary's tessellation caches are rebuilt once (their key names the exact star
-  sums). tests/split_bytes_check.sh pins it (28 runs on the 64^3 demo: every output byte-identical at 1, 2^3 and 3^3
-  partitions on both devices, at 1 and 6 deposit threads, with DTFE_FACE_CHECK=1 and under the parallel insert; the
-  units 2^17 (CPU) and 2^40 (GPU) finer without a left-out share; the cap's warning), tests/dtfe_resume_check.sh D15
-  the refused resume.
+  sums). tests/split_bytes_check.sh pins it (28 standard-DTFE runs on the 64^3 demo: every output byte-identical at
+  1, 2^3 and 3^3 partitions on both devices, at 1 and 6 deposit threads, with DTFE_FACE_CHECK=1 and under the parallel
+  insert; the units 2^17 (CPU) and 2^40 (GPU) finer without a left-out share; the cap's warning),
+  tests/dtfe_resume_check.sh D15 the refused resume.
+- PS-DTFE, opt-in (DTFE_PS_RUN_UNITS=1; off by default, as the wider words cost wall time: below): every pass deposits
+  in the same run-wide fixed-point units, on the CPU and the GPU alike (the mass unit of a CPU pass then no longer
+  differs from a GPU pass's; src/fixed_units.h). The mass, the moment grids and the face sums ('--face-gradient') take
+  the units of the run log's 'fixed-point units (run-wide):' line, set once before the first partition: the GPU sums
+  them in 128-bit words (four 32-bit limbs per component), the CPU of the single build and the face sums in 64-bit
+  words with an exact carry, and each cell is rounded once. A grid without a run-wide unit keeps its pass's own unit,
+  in the same words; the per-pass 'PS-DTFE fixed-point units' line shows which. A share that is not finite or reaches
+  the cap, 2^(94 - ceil(log2 nSub^3)) units, is left out and counted. On the GPU the exact deposit's weight total per
+  tetrahedron sums per-cell integers, so it no longer depends on how the work items split a tetrahedron's cells. A
+  '--grid-window' run takes the full run's units, so a sampled window equals the full run's cells byte for byte. The
+  partitions still merge in float, so the grids still follow the split in their last bits (not under '--ps-merge
+  fixed-point' since 2026-11-13: the entry above). A CPU pass of 2^32 cells or more is refused with the reason.
+  Without the switch every pass keeps units of its own in 64-bit words and the grids are the earlier ones
+  (to be measured: default bytes); the run log's units line then says that the passes sum in units of
+  their own, and the globals record carries the units all the same (version 2; an older record makes a '--grid-window'
+  run read the particles once). The checkpoint key names the units, so a resume across the switch is refused.
+  DTFE_RUN_UNITS_LEGACY=1 beats the switch; DTFE_TEST_RUN_UNIT_SHIFT=n shifts either. Under the switch the grids
+  differ from the default's in the last bits (the byte comparison's 64^3 runs, 2026-11-12; the largest difference in
+  units of the grid's rms: a GPU exact run's density in 18.8 to 20.5% of the cells by at most 4 last places, 3.4e-6,
+  its velocity in 48%, 5.2e-7, its dispersion grids in up to 68.9%, 3.2e-6, its tidal eigenvalues in up to 30.5%,
+  3.0e-6, its gradient grids in up to 99.5%, 1.8e-5; a CPU exact run's density in no cell, its velocity in at most 5
+  cells, its dispersion grids in at most 822, its gradient grids in up to 57.3% of the cells, 1.1e-6; a sampled run
+  only in the grids made from the velocity gradient, 2.1e-7; the double build's CPU runs in no file, its GPU exact
+  run's density in 86.4% of the cells, 1.7e-7, its gradient grids in nearly every cell, 6.0e-6). Memory under the
+  switch, which the auto-tuner books once beside the GPU snapshot: the GPU's fixed-point grids take 16 B per component
+  on the device and in the host's snapshot (8 B without it), the mass 16 B per cell (8 B). Measured 2026-11-12 on
+  TNG100-3-Dark z = 0 at 512^3, exact with the face gradient on the GPU, '--partition 6 6 6 --max-concurrent 4', on
+  the build that had the run-wide units as its default: 1579.66 s against 1346.82 s before, +17.3%, at 34.66 GB of
+  peak footprint against 33.62 GB; the auto-tuner's own plan, 3 in flight where it planned 4, 1578.62 s at 33.16 GB
+  with the same bytes; in the per-pass units 1364.38 s at 33.03 GB and the earlier bytes in all 28 files; at 256^3 on
+  one domain the pass's GPU checkpoint holds 6568 MB against 3347 MB; the device's own peak was not measured.
+  tests/split_bytes_check.sh pins it (its PS-DTFE part runs under the switch: one units line at 1, 2^3 and 3^3
+  partitions on both devices; the units 2^20 finer without a left-out share; the cap's warning; a sampled window
+  byte-identical to the full run), tests/ps_window_check.sh the windows in both units (the globals record's version, a
+  cached run's units line), and tests/ci_suite.sh runs the window and the moment checks once more under the switch.
 - PS-DTFE renumbers every cell of its tessellation in a canonical vertex order before any use (docs/cleanup-plan.md
   D19, the owner's option c, 2026-11-11; src/CGAL_triangulation/ps_vertex_order.h): the vertices sorted by their
   Lagrangian position, the last two swapped back where that sort is an odd permutation, so CGAL's positive

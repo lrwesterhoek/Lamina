@@ -134,8 +134,7 @@ class ServerMixin:
                   tessellation_cache=str(cache), verbose=1, progress=True, run_mode="balanced")
         if self.server_partition:
             kw["partition"] = int(self.server_partition)
-        if self.resident.value() > 0:           # also for the composite the binary splits a big snapshot into
-            kw["resident"] = int(self.resident.value())
+        # (how many partitions a composite server keeps in memory is the binary's: it fits them to the free memory)
         return kw
 
     def _choose_snapshot(self):

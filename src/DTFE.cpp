@@ -301,6 +301,29 @@ static void psReportSeam(MESSAGE::Message &message, Real const seam[], bool cons
 }
 
 
+/* The Lagrangian padding of '--ps-lagrangian-padding <k>' (default 8): k mean particle spacings. One definition for
+   the partitions (PSPartitionPlan) and for the one triangulation of a periodic word-merge run
+   (psLagrangianPeriodicSetup), which must pad alike: the periodic seam is a function of the padding (subpartition.h
+   psPeriodicSeam), and only runs with one seam deposit every tetrahedron from the same periodic image.
+   psLagMeanSpacing: the spacing (V/N)^(1/NO_DIM) of nPart particles in a domain of side lengths len[]; 0 = no
+   spacing rule (k = 0, or no particle count or volume to take one from). */
+static double psLagMeanSpacing(Real const k, double const nPart, Real const len[])
+{
+    if ( not ( k > Real(0.) ) ) return 0.;
+    double vol = 1.;
+    for (int d=0; d<NO_DIM; ++d) vol *= double( len[d] );
+    return ( nPart > 0. and vol > 0. ) ? std::pow( vol / nPart, 1. / double(NO_DIM) ) : 0.;
+}
+/* ... and the padding on one axis: k spacings; periodic: the copies come from the +-1 images only, so more than one
+   period of padding would ask for particles no copy provides; one period already holds every neighbour (a set with
+   < 8 particles per axis -- tests only). */
+static Real psLagSpacingPadding(Real const k, double const lagSpacing, bool const periodic, Real const period)
+{
+    Real pad = Real( double(k) * lagSpacing );
+    if ( periodic and pad > period ) pad = period;
+    return pad;
+}
+
 // The Lagrangian partition geometry of a partitioned PS-DTFE run, shared by the batch partition
 // loop and the composite '--serve' builder: both must select EXACTLY the same particles for
 // partition pi (the server even reuses the batch runs' per-partition tessellation caches, whose
@@ -372,14 +395,9 @@ struct PSPartitionPlan
         // --ps-lagrangian-padding <k> (default 8): k mean particle spacings, (V/N)^(1/NO_DIM) of
         // the Lagrangian domain (the period when periodic, the cloud's bounding box otherwise); N from the recorded
         // globals when the particles are not read yet (ps_globals_record.h)
-        double lagSpacing = 0.;
-        if ( state.options.psLagPadding > Real(0.) )
-        {
-            double const nPart = state.particles.empty() ? double(state.options.psPresetN) : double(state.particles.size());
-            double vol = 1.;
-            for (int d=0; d<NO_DIM; ++d) vol *= double( periodicCopies ? eulerLen[d] : lagLen[d] );
-            if ( nPart > 0. and vol > 0. ) lagSpacing = std::pow( vol / nPart, 1. / double(NO_DIM) );
-        }
+        double const lagSpacing = psLagMeanSpacing( state.options.psLagPadding,
+                state.particles.empty() ? double(state.options.psPresetN) : double(state.particles.size()),
+                periodicCopies ? eulerLen : lagLen );
         // Lagrangian padding per axis: k spacings with no floor (--ps-lagrangian-padding, the default) -- or, with
         // '--ps-lagrangian-padding 0' (or no particle count to take a spacing from), the Eulerian fraction floored at 0.30
         // of a partition cell
@@ -389,14 +407,10 @@ struct PSPartitionPlan
             lagPadding[d] = padFrac * lagLen[d];
             if (lagPadding[d] < lagLen[d] / state.options.partition[d] * Real(0.3))
                 lagPadding[d] = lagLen[d] / state.options.partition[d] * Real(0.3);
+            // (periodic: at most one period -- psLagSpacingPadding)
             if ( lagSpacing > 0. )
-            {
-                lagPadding[d] = Real( double(state.options.psLagPadding) * lagSpacing );
-                // periodic: the per-partition copies come from the +-1 images only, so more than one period of
-                // padding would ask for particles no copy provides; one period already holds every neighbour (a
-                // set with < 8 particles per axis -- tests only)
-                if ( periodicCopies and lagPadding[d] > eulerLen[d] ) lagPadding[d] = eulerLen[d];
-            }
+                lagPadding[d] = psLagSpacingPadding( state.options.psLagPadding, lagSpacing, periodicCopies,
+                                                     eulerLen[d] );
             // --ps-alpha-shape (non-periodic): a kept tetrahedron (circumradius <= a) owned by this
             // partition has its empty circumsphere within 2a of its centroid, so with >= 2a of
             // padding it is in the partition's triangulation exactly when it is in the global one;
@@ -575,8 +589,8 @@ static std::string psGpuShareFraction(long const mille)
 }
 #endif
 
-// the note for a number given as '--gpu-share' where it does not apply ('auto' says nothing there): why, and where
-// every partition deposits instead
+// the note for a number given as '--gpu-share' where it does not apply ('auto' and 'mixed' say nothing there): why,
+// and where every partition deposits instead
 static void psGpuShareNote(User_options const &u, char const *cause, char const *device)
 {
     MESSAGE::Message message( u.verboseLevel );
@@ -588,12 +602,13 @@ static void psGpuShareNote(User_options const &u, char const *cause, char const 
    run's exact deposits, the per mille that run on the GPU, the others on the CPU at the same time. Resolved before the
    plan, since the tuner books a mixed run's partitions by it (auto_tune.cc). First match wins:
      1. where it does not apply -- a build without the 3D GPU deposit, a run without '--gpu', the sampled deposit --
-        1000, and a number given is told why;
+        1000, and a number given is told why ('auto' and 'mixed' are silent);
      2. a number given (or none: the default 1000);
-     3. 'auto' with '--resume': the checkpoint's, from its key's 'gpu-share=' line (none: 1000), as the split is
-        adopted from it (DTFE_setup); a checkpoint that cannot be read leaves it to the next rule and the resume's own
-        refusal;
-     4. 'auto': the run mode's (autoTuneGpuShare).
+     3. 'auto' or 'mixed' with '--resume': the checkpoint's, from its key's 'gpu-share=' line (none: 1000), as the
+        split is adopted from it (DTFE_setup); a checkpoint that cannot be read leaves it to the next rule and the
+        resume's own refusal;
+     4. 'auto': the run mode's (autoTuneGpuShare); 'mixed': the same model in every run mode, so that gentle and
+        balanced use both devices too (every other guard of the model stays).
    One domain has no partition loop, and the plan alone tells: DTFE_setup sets 1000 after it. */
 static void psResolveGpuShare(User_options &u, size_t const nParticles)
 {
@@ -627,9 +642,10 @@ static void psResolveGpuShare(User_options &u, size_t const nParticles)
             return;
         }
     }
+    bool const mixed = u.psGpuShareSpec == -2;   // ('mixed': the model without its run-mode rule)
     std::string why;
-    u.psGpuShareMille = autoTuneGpuShare( u, double(nParticles), why );
-    u.psGpuShareSource = "--gpu-share auto: " + why;
+    u.psGpuShareMille = autoTuneGpuShare( u, double(nParticles), why, mixed );
+    u.psGpuShareSource = std::string( mixed ? "--gpu-share mixed: " : "--gpu-share auto: " ) + why;
 #else
     (void)nParticles;
     if ( number ) psGpuShareNote( u, "this CPU-only build", "the CPU" );
@@ -643,17 +659,34 @@ static void psResolveGpuShare(User_options &u, size_t const nParticles)
    before the planner, the partition loop and any thread sub-domain, so every split holds the same units; the copies
    of the options carry them. The cell sides are the grid box over '--grid' -- 'region': the box, or the '--region'
    box DTFE_setup crops to below -- as the grid frame's (user_options.h gridFrame). A run without a grid (sample
-   points only) has none, and neither has a run that starts without its particles (ps_globals_record.h): the record
-   holds no velocities. One run-log line, from global quantities only, so it is the same at every split. */
+   points only) has none. A run that starts without its particles (ps_globals_record.h) takes the moments from the
+   globals record, which holds the full run's (the same bits), so a '--grid-window' run under DTFE_PS_RUN_UNITS=1 sums
+   in the full run's units; a record without them leaves it none, as does the per-pass path (PS-DTFE's default, and
+   DTFE_RUN_UNITS_LEGACY=1: the passes take units of their own, so such a run sets none, and its line says which of
+   the two reasons it was). One run-log line, from global quantities only, so it is the same at every split.
+   '--ps-merge fixed-point' in PS-DTFE's single 3-D build (fix 3 S6): the option switches the run-wide units on, said
+   here first, before anything reads the mode (fixed_units.h runUnitsSetPsFixedMerge: the units line below, the
+   planner, the checkpoint key, the passes); and with the units on (not DTFE_RUN_UNITS_LEGACY=1) and a grid, the
+   merge adds the passes' exact words (User_options::psWordMerge: psWordMergeSetup). */
+#ifdef PHASE_SPACE
+static void psWordMergeSetup(User_options &u, MESSAGE::Message &message);
+#endif
 static void runUnitsSetup(User_options &u, vector<Particle_data> &particles)
 {
+#ifdef PHASE_SPACE
+    // (only with a grid: a run without one sets no units -- the early return below -- and so no word merge, and its
+    // mode then reads as before everywhere, the planner's and the checkpoint key's included)
+    runUnitsSetPsFixedMerge( u.psFixedPointMerge and u.gridSize.size() == size_t(NO_DIM) );
+    u.psWordMerge = false;
+#endif
     u.runUnits = RunUnits();
     if ( u.gridSize.size() != size_t(NO_DIM) ) return;
     MESSAGE::Message message( u.verboseLevel );
-    if ( u.psParticlesDeferred )
+    if ( u.psParticlesDeferred and ( u.psPresetMoments.n == 0 or runUnitsLegacy() ) )
     {
-        message << "fixed-point units (run-wide): none (the run started without its particles, and the globals "
-                << "record holds no velocities).\n" << MESSAGE::Flush;
+        message << "fixed-point units (run-wide): none (the run started without its particles, and "
+                << ( u.psPresetMoments.n == 0 ? "the globals record holds no velocities"
+                                              : "its passes take units of their own" ) << ").\n" << MESSAGE::Flush;
         return;
     }
     double side[NO_DIM];
@@ -665,7 +698,8 @@ static void runUnitsSetup(User_options &u, vector<Particle_data> &particles)
     volumeWeighted = u.psVolumeWeighted;
     subsamples = u.psAvgSubsamples;
 #endif
-    u.runUnits.fill( side, double( u.averageDensity ), volumeWeighted, subsamples, RunUnits::measure( particles ) );
+    RunMoments const moments = u.psParticlesDeferred ? u.psPresetMoments : RunUnits::measure( particles );
+    u.runUnits.fill( side, double( u.averageDensity ), volumeWeighted, subsamples, moments );
     message << u.runUnits.text() << "\n" << MESSAGE::Flush;
     std::string const out = u.runUnits.outOfRange();
     if ( not out.empty() )
@@ -687,7 +721,40 @@ static void runUnitsSetup(User_options &u, vector<Particle_data> &particles)
                 << MESSAGE::Flush;
     }
 #endif
+#ifdef PHASE_SPACE
+    psWordMergeSetup( u, message );
+#endif
 }
+
+#ifdef PHASE_SPACE
+/* The word merge of '--ps-merge fixed-point' (fix 3 S6; ps_fixed_merge.h, quantities.h PSWordGrids): on in the single
+   3-D build when the option switched the run-wide units on (fixed_units.h runUnitsLegacy: not under
+   DTFE_RUN_UNITS_LEGACY=1, which keeps the merge of the passes' rounded grids and the bytes of before) and the run
+   has them (a grid). Each pass then hands its words over in these units, so every PS-DTFE accumulator needs its unit:
+   one outside 2^-120 .. 2^120 (fixed_units.h RunUnits::ok) would leave that grid's words in units of each pass's own,
+   which no exact merge can add -- such a run is refused here, before any work, naming the grids. One line says the
+   mode. */
+static void psWordMergeSetup(User_options &u, MESSAGE::Message &message)
+{
+    if ( not ( runUnitsWordMergeBuild() and u.psFixedPointMerge and not runUnitsLegacy() and u.runUnits.filled ) )
+        return;
+    std::string missing;
+    for (int g = RU_PS_MASS; g <= RU_PS_FACE_P; ++g)
+        if ( not u.runUnits.has( g ) )
+            missing += std::string( missing.empty() ? "" : ", " ) + RunUnits::name( g ) + " (K "
+                       + std::to_string( u.runUnits.K[g] ) + ")";
+    if ( not missing.empty() )
+        throwError( "'--ps-merge fixed-point' adds the partitions' exact words, which needs one fixed-point unit per "
+                    "grid for the whole run, and the unit of ", missing, " lies outside 2^-120 .. 2^120 (the units "
+                    "line above says why: its scale). Run with DTFE_RUN_UNITS_LEGACY=1 (the merge of the passes' "
+                    "rounded grids), or with the default merge." );
+    u.psWordMerge = true;
+    // (its own words: the tests read the units line by its 'fixed-point units (run-wide): ' prefix)
+    message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " --ps-merge fixed-point: the passes hand over "
+            << "their exact words in the run-wide units above; the merge adds them and one close-out converts them, "
+            << "a one-domain run's too (the word merge).\n" << MESSAGE::Flush;
+}
+#endif
 
 
 // Common DTFE setup: optional random/subsampled particles, consistency checks, velocity-derivative
@@ -888,7 +955,7 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
         if ( not userOptions.partitionOn )
         {
             if ( userOptions.psGpuShareMille < 1000 and userOptions.psGpuShareGiven
-                 and userOptions.psGpuShareSpec >= 0 )   // (a number: 'auto' is silent where it does not apply)
+                 and userOptions.psGpuShareSpec >= 0 )   // (a number: 'auto' and 'mixed' say nothing here)
                 psGpuShareNote( userOptions, "one domain (no partition loop)", "the GPU" );
             userOptions.psGpuShareMille = 1000;
         }
@@ -1297,6 +1364,31 @@ static void psLagrangianPeriodicSetup(DTFE_State &state, User_options &userOptio
                     lagPad[d] = partPad;
             }
         }
+        // The word merge ('--ps-merge fixed-point', fix 3 S6) gives a one-domain run the bytes of every split, and the
+        // period's seam is a function of the padding (subpartition.h psPeriodicSeam): a tetrahedron whose centroid lies
+        // between this route's seam and the partitions' would be deposited from its other periodic image, whose float
+        // coordinates differ in the last bits. So the one triangulation then pads as the partitions do
+        // (PSPartitionPlan: '--ps-lagrangian-padding' k mean spacings), and has their seam, their padded period and
+        // their copies with it: it is the plan's 1 x 1 x 1 split. With '--ps-lagrangian-padding 0' the partitions'
+        // padding follows the split, so no one seam exists and the rule above stays (the last bits then follow the
+        // split at the seam). Any other run keeps the rule above, and its bytes.
+        bool planPadding = false;
+        if ( userOptions.psWordMerge and not ( userOptions.partitionOn and userOptions.partNo < 0 ) )
+        {
+            double const lagSpacing = psLagMeanSpacing( state.options.psLagPadding, double(state.particles.size()),
+                                                        eulerLen );
+            if ( lagSpacing > 0. )
+            {
+                for (int d=0; d<NO_DIM; ++d)
+                    lagPad[d] = psLagSpacingPadding( state.options.psLagPadding, lagSpacing, true, eulerLen[d] );
+                planPadding = true;
+                msg << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " Lagrangian padding = "
+                    << MESSAGE::cMagenta() << MESSAGE::printElements( lagPad, NO_DIM, ", " ) << MESSAGE::cReset()
+                    << " (--ps-lagrangian-padding " << state.options.psLagPadding << " mean spacings of " << lagSpacing
+                    << ": the partitions' padding, so this one domain owns the period every split tiles; "
+                    << "--ps-merge fixed-point).\n" << MESSAGE::Flush;
+            }
+        }
 
         // unwrap Eulerian positions so each displacement s = pos - lagPos lies in [-L/2, L/2];
         // otherwise boundary particles get displacements near L and huge spurious simplices
@@ -1304,10 +1396,11 @@ static void psLagrangianPeriodicSetup(DTFE_State &state, User_options &userOptio
 
         // the globals a later --grid-window run can start from without reading the particles
         // (ps_globals_record.h): written by every partitioned run with a tessellation cache whose
-        // particles were read as they are, the mean density computed from them
+        // particles were read as they are, the mean density computed from them, and whose run-wide
+        // fixed-point units are set (their moments go into the record)
         if ( not state.options.tessellationCacheDir.empty() and userOptions.partitionOn and userOptions.partNo < 0
              and userOptions.psAverageDensityFromParticles and not userOptions.regionOn and userOptions.poisson == 0
-             and userOptions.randomSample < Real(0.) )
+             and userOptions.randomSample < Real(0.) and state.options.runUnits.filled )
         {
             PSGlobals::Record rec;
             rec.n = state.particles.size();
@@ -1319,6 +1412,11 @@ static void psLagrangianPeriodicSetup(DTFE_State &state, User_options &userOptio
             }
             rec.hubble = double( state.options.hubbleParam );
             rec.scaleFactor = double( state.options.scaleFactor );
+            RunMoments const &m = state.options.runUnits.moments;
+            rec.totalMass = m.totalMass;
+            rec.vmax = m.vmax;
+            rec.smax = m.smax;
+            rec.v2m = m.v2m;
             PSGlobals::write( state.options, rec );
         }
 
@@ -1344,11 +1442,13 @@ static void psLagrangianPeriodicSetup(DTFE_State &state, User_options &userOptio
         {
             // the padded period: [seam - L - pad, seam + pad] -- the originals and the -L copies of those above
             // seam - pad, no +L copy (the copy loop below makes the copies that fall inside it); the fallback seam
-            // keeps the bounding box +- pad
+            // keeps the bounding box +- pad -- but with the partitions' padding (planPadding above) the padded
+            // period too, which is what the plan's one partition selects around the top particle plane
+            // (PSPartitionPlan::regions, in the same float order)
             Box lagPaddedGlobal = lagBoxGlobal;
             for (int d=0; d<NO_DIM; ++d)
             {
-                if ( seamExactG[d] )
+                if ( seamExactG[d] or planPadding )
                 {
                     lagPaddedGlobal[2*d]   = seamG[d] - eulerLen[d] - lagPad[d];
                     lagPaddedGlobal[2*d+1] = seamG[d] + lagPad[d];
@@ -1803,7 +1903,13 @@ static void psReportMergeMode(PSLoopCtx &c)
                      : "; no spill to disk (" + spillWhy + ")" )
                 << ( state.options.psCompletionOrderMergeFlag ? "; --resume overrides --ps-merge completion-order" : "" )
                 << ".\n" << MESSAGE::Flush;
-    if ( fixedMerge )
+    if ( fixedMerge and fxMerge.words )   // (the word merge: ps_fixed_merge.h)
+        message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " --ps-merge fixed-point: each partition's "
+                << "exact words are added as it finishes into the full grid's (8 B per summed component and cell, "
+                << "and the carries; nothing parks or spills) and converted once after the loop: exact sums, "
+                << "whatever the split, the order and the concurrency. Units: " << fxMerge.unitsText() << ".\n"
+                << MESSAGE::Flush;
+    else if ( fixedMerge )
         message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " --ps-merge fixed-point: each partition is "
                 << "added as it finishes into exact integer grids (9 B per summed component and cell; the same bytes "
                 << "at any concurrency and completion order; nothing parks or spills). Units from the "
@@ -1860,7 +1966,9 @@ static void psMergeInTurn(PSLoopCtx &c, int const pi, PSPrepared &P, Quantities 
         {   // with --grid-window every partition's sub-grid IS the window: the merge is window-local
             size_t const *wo = state.options.psWindowOn ? state.options.psWindowLo   : nullptr;
             size_t const *wd = state.options.psWindowOn ? state.options.psWindowDims : nullptr;
-            if ( fixedMerge )   // the integer grids; the masks still OR into the Real ones
+            // (fixedMerge: the integer grids -- under the word merge the passes' words --; the masks still OR into
+            // the Real ones)
+            if ( fixedMerge )
                 fxMerge.add( pj, tu, ta, *uQuantities, *aQuantities, &(state.options.gridSize[0]), wo, wd );
             else
             {
@@ -2161,8 +2269,10 @@ static void psReportLoopEnd(PSLoopCtx &c)
                 << "the master thread's partitions print the reason (above, when one of them fell back); the "
                 << "grids are complete, the run only took longer.\n" << MESSAGE::EndWarning;
     }
-    // DTFE_FACE_WALK_EARLY: what the face walks beside the GPU deposit came to, once for the loop (a pass says so
-    // itself only where it prints its grid lines, which the partition loop suppresses)
+    // What the face walks beside the GPU deposit (the default, auto_tune.h psFaceWalkEarly) came to, once for the
+    // loop (a pass says so itself only where it prints its grid lines, which the partition loop suppresses). The
+    // seconds are the kept walks'. DTFE_FACE_WALK_EARLY set and on, and no pass took the walk: one line says so (only
+    // when the variable is set, so a default run that has no such pass, a CPU run for one, prints nothing more)
     {
         long long kept = 0, discarded = 0;
         double walkSec = 0., waitSec = 0.;
@@ -2170,10 +2280,34 @@ static void psReportLoopEnd(PSLoopCtx &c)
         if ( kept + discarded > 0 )
         {
             MESSAGE::Message early( userOptions.verboseLevel );
-            early << "PS-DTFE: face sums (--face-gradient) beside the GPU deposit (DTFE_FACE_WALK_EARLY) in " << kept
-                  << " pass(es): the walks took " << walkSec << " s in all, " << waitSec
+            early << "PS-DTFE: the face sums (--face-gradient) of " << kept << " pass(es) were walked beside the GPU "
+                  << "deposit and kept; those walks took " << walkSec << " s in all, " << waitSec
                   << " s of it after the device call had returned; " << discarded
-                  << " walk(s) thrown away after a failed GPU deposit.\n" << MESSAGE::Flush;
+                  << " walk(s) thrown away after a failed GPU deposit (the CPU deposit made those face sums).\n"
+                  << MESSAGE::Flush;
+        }
+        else if ( Env::isSet( "DTFE_FACE_WALK_EARLY" ) and psFaceWalkEarly() )   // asked for, and no pass took it
+        {
+            MESSAGE::Message early( userOptions.verboseLevel );
+            early << "PS-DTFE: DTFE_FACE_WALK_EARLY is on, but no pass walked its face sums beside the GPU deposit "
+                  << "(the walk needs a single-precision '--face-gradient' pass that deposits on the GPU and takes "
+                  << "its face units from the bounds the extraction sums; not under the NaN test hook, nor where "
+                  << "the GPU face kernel takes the pass).\n" << MESSAGE::Flush;
+        }
+    }
+    // DTFE_GPU_FACES=1: the passes whose face sums the GPU face kernel made, and those whose face pass did not make
+    // them (the CPU face walk did, the same words), once for the loop as the line above
+    {
+        long long made = 0, fellBack = 0;
+        double faceSec = 0.;
+        psGpuFacesTaken( made, fellBack, faceSec, true );
+        if ( made + fellBack > 0 )
+        {
+            MESSAGE::Message faces( userOptions.verboseLevel );
+            faces << "PS-DTFE: face sums (--face-gradient) by the GPU face kernel (DTFE_GPU_FACES=1) in " << made
+                  << " pass(es), " << faceSec << " s in all in the device's hold; " << fellBack
+                  << " pass(es) whose face pass did not make them, where the CPU face walk made the same words.\n"
+                  << MESSAGE::Flush;
         }
     }
 
@@ -2237,9 +2371,10 @@ static void psReportLoopEnd(PSLoopCtx &c)
     }
 }
 
-// Normalizes the summed moments once, over all partitions; DTFE_MASS_AUDIT=1 reports the run's mass closure.
-static void psNormalizeMoments(DTFE_State &state, Quantities *uQuantities, Quantities *aQuantities,
-                               double &auditInputMass)
+// THE CLOSE-OUT of the summed moments, once over all partitions -- and, under the word merge ('--ps-merge
+// fixed-point' in the single 3-D build: User_options::psWordMerge), of a one-domain run's pass too (DTFE()). Returns
+// the cell volume.
+static Real psCloseOutMoments(DTFE_State &state, Quantities *uQuantities, Quantities *aQuantities)
 {
     // fields were summed as density-weighted moments; normalize once now so cells drawing
     // streams from several partitions (multi-stream regions) come out correct. When the
@@ -2253,9 +2388,29 @@ static void psNormalizeMoments(DTFE_State &state, Quantities *uQuantities, Quant
     for (int d = 0; d < NO_DIM; ++d)
         aQuantities->psFaceDx[d] = uQuantities->psFaceDx[d] =
             (state.options.region[2*d+1] - state.options.region[2*d]) / Real(state.options.gridSize[d]);
+    // The word merge: the exact words -- the merged full grid's, or a one-domain run's own -- to Real FIRST, each
+    // component rounded once, in the pass's order: the density as mass (DW's copy where it is the mass), then times
+    // (invRhoBar / cellVolume), the pass's expression with the pass's operands (this cell volume is the pass's, the
+    // same per-axis Real divisions of the same box); the stream counts (x 1 / nSub^NO_DIM, + the released
+    // multiplicity) or the exact multiplicity and the tet touches (Quantities::psWordsClose); the face sums stay
+    // words, once per face, until normalizePhaseSpace makes the gradient from them (psFaceGradientCellWords). The
+    // hidden-streams bit 1 is cleared after this, as after every merge (dtfeFinishFields: finalizeHiddenStreams,
+    // which reads only the masks and the stream count). Without words: a no-op.
+    Real const invRhoBar = state.options.averageDensity > Real(0.) ? Real(1.) / state.options.averageDensity
+                                                                   : Real(1.);
+    uQuantities->psWordsClose( invRhoBar, cellVolume );
+    aQuantities->psWordsClose( invRhoBar, cellVolume );
     uQuantities->normalizePhaseSpace( state.options.uField, weightScale );
     // (the regular part's twins: the '_a' grids only, as the writer writes them -- DTFE_setup's psStreamsTwins)
     aQuantities->normalizePhaseSpace( state.options.aField, weightScale, state.options.psStreamsTwins );
+    return cellVolume;
+}
+
+// Normalizes the summed moments once, over all partitions; DTFE_MASS_AUDIT=1 reports the run's mass closure.
+static void psNormalizeMoments(DTFE_State &state, Quantities *uQuantities, Quantities *aQuantities,
+                               double &auditInputMass)
+{
+    Real const cellVolume = psCloseOutMoments( state, uQuantities, aQuantities );
 
     // DTFE_MASS_AUDIT=1, (h): the merged grid against the passes' sums and the input mass, per pass kind
     if ( PSMassAudit::on() )
@@ -2279,9 +2434,10 @@ static void psNormalizeMoments(DTFE_State &state, Quantities *uQuantities, Quant
         }
 }
 
-// Reports the coverage and multi-stream statistics of the summed grid over all partitions.
+// Reports the coverage and multi-stream statistics of the summed grid over all partitions (oneDomain: of a one-domain
+// run's grid after the word merge's close-out, whose pass leaves its statistics to it).
 static void psAggregateReport(Quantities *uQuantities, Quantities *aQuantities, int &totalPartitions,
-                              MESSAGE::Message &message)
+                              MESSAGE::Message &message, bool const oneDomain = false)
 {
     // aggregate coverage / stream statistics over all partitions from the summed grid
     // (per-partition figures were suppressed as misleading); prefer the unaveraged
@@ -2304,8 +2460,11 @@ static void psAggregateReport(Quantities *uQuantities, Quantities *aQuantities, 
             if (v > Real(1.) + PS_STREAM_TOL) ++multi;
             if (v > maxStreams) maxStreams = v;
         }
-        message << "\n" << MESSAGE::cCyan() << "PS-DTFE: aggregate over " << totalPartitions
-                << " partitions -- max streams " << maxStreams
+        if ( oneDomain )
+            message << "\n" << MESSAGE::cCyan() << "PS-DTFE: the one domain's grid after the close-out";
+        else
+            message << "\n" << MESSAGE::cCyan() << "PS-DTFE: aggregate over " << totalPartitions << " partitions";
+        message << " -- max streams " << maxStreams
                 << ", multi-stream grid points " << multi
                 << " (" << (100.*multi/ncell) << "\%), grid coverage "
                 << covered << "/" << ncell
@@ -2314,6 +2473,25 @@ static void psAggregateReport(Quantities *uQuantities, Quantities *aQuantities, 
                      "  -- uncovered cells may indicate insufficient padding, a grid finer than the tessellation, or legitimate empty/expanding regions" : "" )
                 << "\n" << MESSAGE::Flush;
     }
+}
+
+// A one-domain run (no '--partition', or '--partition 1 1 1') under the word merge ('--ps-merge fixed-point' in the
+// single 3-D build: User_options::psWordMerge): its pass handed its words over unconverted and left its moments
+// un-normalized (ps_interpolation.cc psHandOverWords), so the run defers its normalization to the very close-out of a
+// partitioned run (psCloseOutMoments), then reports the stream statistics its pass left to it. (The pass defers by
+// psWordMerge itself, not by psDeferNormalization: the tessellation cache's key names that one, and a one-domain
+// run's tessellation is the same either way.) Its face sums first go into the merged grid's once layout by the
+// merge's own rule (ps_fixed_merge.h oneDomainFacesOnce; fix 3 S7), so the close-out reads what a partitioned run's
+// would. A no-op without words: every other run, and both other merges.
+static void psOneDomainCloseOut(DTFE_State &state, Quantities *uQuantities, Quantities *aQuantities)
+{
+    if ( not state.options.psWordMerge or not ( uQuantities->psWords.on or aQuantities->psWords.on ) ) return;
+    PSFixedMerge::oneDomainFacesOnce( *uQuantities, state.options, 0 );
+    PSFixedMerge::oneDomainFacesOnce( *aQuantities, state.options, 1 );
+    psCloseOutMoments( state, uQuantities, aQuantities );
+    MESSAGE::Message message( state.options.verboseLevel );
+    int one = 1;
+    psAggregateReport( uQuantities, aQuantities, one, message, true );
 }
 
 // PS-DTFE --partition: the Lagrangian partitions deposited, merged in order (or fixed point), normalized, reported.
@@ -2467,7 +2645,9 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     // weights come with a partition's first values, as in the default), in units fixed now from global quantities
     // (one pass over the particles for their largest velocity). A finished partition is then added at once (no
     // index order, parking or spill), the grids go back to Real once after the loop, and their words go into the
-    // checkpoint as blobs.
+    // checkpoint as blobs. In the single 3-D build (User_options::psWordMerge) the merge adds the passes' own WORDS
+    // instead, in the run-wide units (no pass over the particles here), and psNormalizeMoments' close-out converts
+    // them once (ps_fixed_merge.h, the header comment's last section).
     bool const fixedMerge = state.options.psFixedPointMerge;
     PSFixedMerge::Merge fxMerge;
     PartitionCheckpoint::state().blobs.clear();
@@ -2547,10 +2727,12 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     // the gate keeps; this plan stays the loop's threads, the parallel insert's share)
     ConcurrentTriangulationPlan triangulationPlan( psConcurrency, totalPartitions );
     psGpuFallbacksTaken( true );   // counted from here; reported once after the loop
-    {   // ... and the face walks beside the GPU deposit (DTFE_FACE_WALK_EARLY)
+    {   // ... and the face walks beside the GPU deposit (the default, auto_tune.h psFaceWalkEarly), and the GPU face
+        // kernel's passes (DTFE_GPU_FACES=1)
         long long kept, discarded;
         double walkSec, waitSec;
         psFaceWalksEarlyTaken( kept, discarded, walkSec, waitSec, true );
+        psGpuFacesTaken( kept, discarded, walkSec, true );
     }
     // a partition starts only when the machine has the memory for it (or nothing else is in flight);
     // under the ordered merge it waits only behind lower-numbered partitions (auto_tune.h)
@@ -3120,6 +3302,9 @@ void DTFE(vector<Particle_data> *allParticles,
         // single triangulation over the whole (padded) box
         DTFE_preparePadding( state, userOptions );
         DTFE_parallel( &state.particles, samples, state.options, uQuantities, aQuantities );
+#ifdef PHASE_SPACE
+        psOneDomainCloseOut( state, uQuantities, aQuantities );
+#endif
     }
 
     dtfeFinishFields( state, userOptions, uQuantities, aQuantities );
@@ -3413,6 +3598,9 @@ void DTFE(vector<Particle_data> *allParticles,
     {
         DTFE_preparePadding( state, userOptions );
         DTFE_interpolation( &state.particles, samples, state.options, uQuantities, aQuantities, delaunay_triangulation );
+#ifdef PHASE_SPACE
+        psOneDomainCloseOut( state, uQuantities, aQuantities );   // (the word merge's close-out, as in DTFE() above)
+#endif
     }
 
     postProcessWebFields( userOptions, uQuantities, aQuantities );

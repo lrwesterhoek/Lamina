@@ -57,9 +57,10 @@ GPU_BUILT=0
 # capture FIRST -- piping the binary straight into grep -q would SIGPIPE it under pipefail
 FULL_HELP="$("${BIN}" --full-help 2>/dev/null)" || { echo "FAIL: ${BIN} --full-help exited non-zero"; exit 1; }
 # '--sampled' marks a binary with a flag for each deposit ('--exact', the default for an '_a' field, and '--sampled');
-# an older one deposits sampled by default and may lack the exact deposit: runs 1-5 then pass no flag, 6-13 are skipped
+# an older one deposits sampled by default (at nSub 3) and may lack the exact deposit: runs 1-5 then pass no flag,
+# 6-13 are skipped. SAMPLED gives the count as well (the binary's default count is 1)
 HAVE_EXACT=0; SAMPLED=""
-grep -q -- '--sampled' <<<"${FULL_HELP}" && { HAVE_EXACT=1; SAMPLED="--sampled"; }
+grep -q -- '--sampled' <<<"${FULL_HELP}" && { HAVE_EXACT=1; SAMPLED="--sampled --subsamples 3"; }
 
 echo ">> generating test snapshots ..."
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP_UNI}" --n "${N}" --box "${BOX}" \
@@ -81,7 +82,7 @@ run() {  # $1 = output root, $2 = input snapshot, rest = extra flags
     die_on_failed_run "$rc" "$log"
 }
 
-# runs 1-5: the sampled deposit at the binary's own nSub 3 ('density_a' would select the exact one): A-C hold its
+# runs 1-5: the sampled deposit at nSub 3 ('density_a' would select the exact one): A-C hold its
 # nSub = 1 and 3 grids, and run 3 is the nSub = 3 rung of D's convergence ladder
 echo ">> run 1: uniform box, uniform deposit"
 run "${TMP}/pld_uni_u" "${SNAP_UNI}" --periodic ${SAMPLED}
@@ -261,7 +262,7 @@ if have_exact:
     dmax = np.abs(d1 - dN).max() / (np.abs(d1).max() + 1e-30)
     check("D partitioned density thread-invariant", dmax < 1e-5, f"max rel = {dmax:.3e}")
     # sampled '.a_den' must approach the exact grid MONOTONICALLY with nSub
-    l1 = {}   # nSub=3 is the default of run 3 (pld_pan_u)
+    l1 = {}   # nSub=3 is the count run 3 gives (pld_pan_u)
     for ns, root in ((1, "pld_pan_ns1"), (3, "pld_pan_u"), (5, "pld_pan_ns5")):
         l1[ns] = np.abs(load(f"{tmp}/{root}", ".a_den") - exa).mean()
     check("D sampled a_den converges to exact (L1, nSub 1>3>5)",

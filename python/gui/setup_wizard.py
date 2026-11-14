@@ -10,8 +10,8 @@
                       make (the commands are shown; ticks add the double pair and the 2D programs)
   3  TNG API key      optional, only for downloading IllustrisTNG data: saved to ~/.tng_api_key with
                       owner-only permissions, never shown again or put on a command line
-  4  Try it           a synthetic demo (32^3 crossed waves, streams 1/3/9/27): generated and run in
-                      about half a minute, then opened in the Explore tab -- no download
+  4  Try it           a synthetic demo (32^3 crossed waves, streams 1/3/9/27): generated and run at
+                      Exact, then opened in the Explore tab -- no download
 
 Shown on the first launch and from the window's Setup button. Nothing here runs a computation
 itself: 'Build' runs make, and the demo is queued as an ordinary custom-snapshot job.
@@ -217,7 +217,7 @@ class SetupDialog(QDialog):
         row.addWidget(self.build_note, 1)
         pv.addLayout(row)
         self.build_double = QCheckBox("Also build the double-precision pair (every position and field in float64; "
-                                      "about twice the memory per run; picked per run with the precision setting)")
+                                      "about twice the memory per run; picked per run on the Custom snapshot tab)")
         self.build_double.toggled.connect(self._build_note)
         pv.addWidget(self.build_double)
         self.build_2d = QCheckBox("Also build the 2D programs (for snapshots in a plane, whose coordinates have two "
@@ -260,7 +260,7 @@ class SetupDialog(QDialog):
         pv.addWidget(self._title("Try it"))
         pv.addWidget(self._text(
             "The demo makes a small synthetic simulation (32³ particles on crossed Zel'dovich waves, "
-            "folded into 1, 3, 9 or 27 streams), runs PS-DTFE on it (about half a minute) and opens the "
+            "folded into 1, 3, 9 or 27 streams), runs PS-DTFE on it (a short run, at Exact) and opens the "
             "result in the Explore tab, where a click on the map lists the streams at that point. "
             f"It writes to {rs.CUSTOM_OUT_DEFAULT / 'demo'}."))
         self.demo = QCheckBox("Run the demo when I finish")

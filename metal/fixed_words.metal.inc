@@ -5,6 +5,9 @@
 //  one more add (subtract), so once every thread is done the four limbs hold the exact sum modulo 2^128, whatever the
 //  interleaving -- and the host's caps keep every partial sum below 2^126 in magnitude (RunUnits::capLog2). The limbs
 //  stay separate words, as the two-word adds of the 64-bit grids do (dtfe_deposit.metal addWordsLH).
+//  A share below 2^63 units can go in as one signed 64-bit add (addShare, addLimbs63: the PS-DTFE adds of one share);
+//  the limb arrays (shareLimbs, addLimbs, addLimbsN) take a share from 2^63 units up to the cap, the batched adds
+//  and the standard kernel's adds. The two ways leave the same bits and may meet on one word.
 //  The Makefile prepends this file to both kernel sources, after exact_clip.metal.inc. Self-contained.
 #include <metal_stdlib>
 using namespace metal;
@@ -51,6 +54,58 @@ static inline void addLimbs(device atomic_uint* x, ulong at, thread const uint a
         }
         if (c == 0u && (i == 3u || (a[i + 1u] | (i < 2u ? a[i + 2u] : 0u) | (i < 1u ? a[i + 3u] : 0u)) == 0u)) break;
     }
+}
+
+// A signed 64-bit integer r added to the four-limb word at 'at' of x, in two's complement: r's two words into limbs 0
+// and 1, then its sign extension (0 or 0xffffffff) into limbs 2 and 3, each limb's carry read off the old value its
+// own atomic returns and added to the next limb's addend, as in addLimbs. Adding 2^128 - |r| is subtracting |r|
+// modulo 2^128, so the word ends on the bits addLimbs leaves for the same integer, whatever the interleaving, and the
+// two may meet on one word. A limb whose addend comes to zero is not touched (an addend 0xffffffff plus a carry is
+// zero with the carry passed on), and for r >= 0 nothing above limb 1 is touched once no carry is left: no limb
+// arrays and no loop, and as many atomics as addLimbs needs for the same integer.
+static inline void addLimbs63(device atomic_uint* x, ulong at, long r) {
+    if (r == 0l) return;                                 // below half a unit: nothing to add
+    ulong const q = as_type<ulong>(r);
+    uint const lo = uint(q), hi = uint(q >> 32);
+    uint const ext = (r < 0l) ? 0xffffffffu : 0u;        // limbs 2 and 3 of r: its sign extension
+    device atomic_uint* const w = x + at * 4ul;
+    uint c = 0u;
+    if (lo != 0u) {
+        uint const old = atomic_fetch_add_explicit(&w[0], lo, memory_order_relaxed);
+        c = (old + lo < old) ? 1u : 0u;
+    }
+    uint d = hi + c;
+    c = (d < c) ? 1u : 0u;                               // hi = 0xffffffff and c = 1: d = 0, the carry moves on
+    if (d != 0u) {
+        uint const old = atomic_fetch_add_explicit(&w[1], d, memory_order_relaxed);
+        c = (old + d < old) ? 1u : 0u;
+    }
+    if ((ext | c) == 0u) return;                         // r >= 0 and no carry: limbs 2 and 3 take nothing
+    d = ext + c;
+    c = (d < c) ? 1u : 0u;
+    if (d != 0u) {
+        uint const old = atomic_fetch_add_explicit(&w[2], d, memory_order_relaxed);
+        c = (old + d < old) ? 1u : 0u;
+    }
+    d = ext + c;                                         // limb 3 adds modulo 2^32: nothing leaves the word
+    if (d != 0u) atomic_fetch_add_explicit(&w[3], d, memory_order_relaxed);
+}
+
+// One share rint(v * scale) into the four-limb word at 'at' of x, or false: the share has no integer below the cap
+// (shareLimbs' test on the same bits), nothing is added and the caller counts it. Below 2^63 units -- the integer
+// the 64-bit grids add, and nearly every share -- it goes in as one signed 64-bit add (addLimbs63); from 2^63 units
+// up to the cap, as limbs (shareLimbs, addLimbs). A cap below 2^63 units still binds: both tests must hold.
+static inline bool addShare(device atomic_uint* x, ulong at, float v, float scale, uint capBits) {
+    float const p = v * scale;
+    uint const bits = as_type<uint>(p) & 0x7fffffffu;
+    if (bits < 0x5f000000u && bits < capBits) {
+        addLimbs63(x, at, long(rint(p)));
+        return true;
+    }
+    uint a[4]; bool neg = false;
+    if (!shareLimbs(v, scale, capBits, a, neg)) return false;
+    addLimbs(x, at, a, neg);
+    return true;
 }
 
 // n times the magnitude a[0..3] into b[0..3], limb by limb: the low 32 bits of a[i] * n, plus the carry from the limb

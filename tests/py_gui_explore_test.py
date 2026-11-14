@@ -55,8 +55,8 @@
      plane; hover names a void and reads a plane's value; a click inspects the void (the inspector, the menu), a
      double-click closes up on it (the planes through its centre, cut to the window periodically, the neighbours at
      their nearest image); Whole box restores the planes; the fitted ellipsoids reach the launcher ((a b c)^(1/3) =
-     R_eff) and 'fitted ellipsoids' draws each as its own, a close-up then sized by R_eff and holding the whole
-     ellipsoid, its neighbours dim, the menu by R_eff; the figure grid and the 3D
+     R_eff) and 'as ellipsoids' draws each as its ellipsoid at the mean density, a close-up then sized by R_ell and
+     holding the whole ellipsoid, its neighbours dim, the menu by R_ell; the figure grid and the 3D
      view replace each other; the PNG is written; the map comes back. The Sizes range keeps the same voids on the
      map, the grid's panels and the 3D view (by R_v; the ellipsoids by R_eff), says how many, keeps a close-up's void
      and is remembered.
@@ -84,6 +84,41 @@
      OpenGL).
  12. the Explore and 3D-view tooltips take at most two lines (the map, the voids, the 3D view in both styles, the
      Save options dialog); a long text is its first sentence, the whole text the control's What's This.
+ 13. the contour lines (contours.py, the Contours tick): marching squares on fields with a known answer (a radial
+     field's level is a circle of its radius, closed; a plane's a straight open line; nothing outside the values or
+     through a NaN cell; saddles), the block-averaged copy of a wide plane, the levels fixed by the colour range and
+     not by the layer (round steps, the density's three quarters below the mean and the mean itself, a diverging
+     map's 0, the stream count's even counts), no lines on class maps and discrete colour maps, the lines' colours.
+     In the window: off by default and nothing changes; ticked, each layer's lines with the slice, ringing a void's
+     centre pixel, the levels marked on the colour bar; unticked the same picture pixel for pixel; a fixed range keeps
+     the levels across layers; the smoothing, a difference map and a zoom followed; remembered; the saved map and the
+     figure grid (screen and saved) carry them, the Bare image preset not. The level slider beside the tick: dozens
+     of positions, its default the rule's own levels, each position right a slightly closer spacing (one factor on
+     every step, the same on every layer: still nested, the density mostly below its mean and the mean a level), at
+     least two lines at the coarsest, a bounded number at the finest; the map, the grid and the 3D view following it,
+     a drag asking for no slice per position, remembered (an old saved stop at the nearest position); the worker
+     strokes the lines' layer at the canvas's size.
+ 14. the contours in the 3D view (the same tick): each plane's lines, cut to its quads and mapped to the screen by
+     its own map (pieces behind the eye left out), in the map's colour over its level, opaque; not drawn while the view
+     turns. The volume's shells in its transfer function: the table unchanged without them and changed only in their
+     bands with them; the map's round levels where the volume is clear (the density's void side), nested, at most
+     four, a quarter of the cells at most inside each in the whole box, from the void's own floor in a close-up; the
+     field's slope per level; a void's basin (not its neighbour's across a ridge); a close-up's copy of the levels
+     with the shells of its void only, the volume itself the same on it; a turned, stretched dip's shells along its
+     own axes. QPainter draws a shell as its ring; the
+     GPU's picture with shells is QPainter's (within 1.5/255). In the window: planes and volume, ticked and unticked
+     (the very same pictures), the colour bar's marks and tooltip, the shells' key, a close-up with fitted
+     ellipsoids, Save image.
+ 15. the voids as their ellipsoids (the default): the plane sections with a known answer (an axis-aligned ellipsoid
+     cut at its centre and at a height, a tilted one's centre and area as the formula gives them, a plane that misses,
+     the periodic image; the map's sections are the 3D planes' cuts), the drawn size in one place (the catalogue's
+     semi-axes times sqrt(|delta|/2), none above the mean or with a negative eigenvalue), picking a turned ellipse and
+     a centre's mark, spheres of R_v drawn as before, the CSV's columns, the 3D smoothing (the whole cube's FFT
+     Gaussian), the search's rough time. In the window: the helper's eigenvalues, each layer's ellipses and marks
+     (growing, largest on the minimum's layer, shrinking), hover and click inside an ellipse, R_v dashed, Save image
+     and its CSV, the figure grid, the grey line naming the voids' field, the '3D' tick (the cube smoothed in 3D, kept,
+     greyed out without the memory), the 3D view's ellipsoids, the smoothing box (two cells at least, its steps, a
+     search once committed and said while it runs, a long one asked first), remembered (an old saved sphere not).
 
 The pure parts (grids.void_at, void_circles_mpc, void_info, void_outlines.write_csv, view3d, volume3d) run without Qt; the rest needs
 PySide6 and reports SKIP (exit 0) without it. Usage: ~/.venvs/dtfe-gui/bin/python tests/py_gui_explore_test.py
@@ -913,6 +948,13 @@ def wait_for(qa, cond, limit):
     return cond()
 
 
+def minima(res, rows) -> str:
+    """The count line's last piece: how many minima the catalogue holds, said when that is more than its distinct
+    voids (the ones outside the sample are not drawn)."""
+    total = len(res["_shown"])
+    return f" · {total} minima" if total > len(rows) else ""
+
+
 def gui():
     try:
         from PySide6.QtWidgets import QApplication
@@ -945,6 +987,16 @@ def gui():
               "the R_v definitions", ok and "error" not in res and not asked and "r_v_defs" in res
               and "crossing" in res["r_v_defs"] and list(x._void_cache)[0][-1] == 0.0,
               str(res.get("error", ""))[:300])
+        from PySide6.QtWidgets import QFormLayout
+        form = x._out_form_map
+        vrow = form.itemAt(form.getWidgetPosition(x.voids)[0], QFormLayout.FieldRole).layout()
+        check("1. 'Voids as' sits in the Voids row and draws the ellipsoids by default (one choice for the map and the "
+              "3D view); beside them the dashed tick offers R_v's sphere, beside the spheres R_eff",
+              x.void_shape() == "ellipsoid" and x.void3d_shape.currentIndex() == 0 and vrow.indexOf(x.void3d_shape) >= 0
+              and x.void_reff.text() == "R_v too (dashed)", x.void_reff.text())
+        x.void3d_shape.setCurrentIndex(x.void3d_shape.findData("sphere"))   # parts 1 and 2 as before: spheres of
+        qa.processEvents()                                                   # R_v, drawn exactly as they were
+        check("1. ... spheres of R_v: the dashed tick reads 'R_eff too (dashed)'", x.void_reff.text() == "R_eff too (dashed)")
         c = view.canvas
         # the slice through a void's centre: there the outline is biggest
         sel = [k for k in np.nonzero(res.get("_shown", []))[0] if np.isfinite(res["_r_v"][k])]
@@ -975,8 +1027,13 @@ def gui():
               f"{x.index.value()} vs {i0}")
         x.void_reff.setChecked(True)
         qa.processEvents()
+        rows_r = x.void_rows(res)
+        g = x._geometry()
+        want_d = G.void_circles(res["_centres"][rows_r], res["_r_eff"][rows_r], BOX, g[0], x._slice_position(), g[2],
+                                g[3], g[4], g[5], g[6])
         check("1. R_eff too: dashed outlines over the map, the same voids", bool(c.dashed)
-              and c.dashed == x._void_circles("_r_eff") and {k for *_a, k in c.dashed} <= set(sel) | set(
+              and c.dashed == [(a, b, rx, ry, int(rows_r[k])) for a, b, rx, ry, k in want_d]
+              and c.dashed == x._void_overlay()["dashed"] and {k for *_a, k in c.dashed} <= set(sel) | set(
                   np.nonzero(res["_shown"])[0]), f"{c.dashed}")
         c._redraw()                                         # draws both kinds without error
         # ---- 2. the saved PNG and its CSV
@@ -1081,6 +1138,633 @@ def gui():
         rs.dtfe_processes = real_procs
         os.environ.pop("DTFE_FREE_GB", None)
         x.shutdown() if hasattr(x, "shutdown") else None
+
+
+def voids_pure():
+    """15. the voids as their ellipsoids, no Qt: the plane sections with a known answer (an axis-aligned ellipsoid cut
+    at its centre and at a height, a tilted one's area and centre, a plane that misses, the periodic image), the drawn
+    size (the catalogue's times sqrt(|delta|/2), and the guard), picking a turned ellipse, the marks, the overlay of
+    spheres as before, the saved CSV's columns, the 3D smoothing, the search's time."""
+    import view3d as V
+    print("voids as ellipsoids (pure)")
+    L = 64.0
+    lo, hi = (0.0, 0.0), (L, L)
+
+    def ell(semi, R=np.eye(3)):                  # the shape matrix of semi-axes along R's rows (view3d's M)
+        return V.ellipsoid_matrices(np.asarray(semi, float)[None], np.asarray(R, float)[None])
+    c = np.array([[30.5, 20.5, 32.5]])
+    M = ell([6.0, 4.0, 3.0])                     # a along x, b along y, c along z
+    e0 = G.void_ellipses(c, M, L, 2, 32.5, [0, 1], lo, hi, 128, 128)
+    h = 1.5
+    e1 = G.void_ellipses(c, M, L, 2, 32.5 + h, [0, 1], lo, hi, 128, 128)
+    f = np.sqrt(1 - h * h / 9.0)
+    check("15. an axis-aligned ellipsoid cut at its centre: an ellipse of its own two semi-axes (6 and 4 Mpc: 12 and 8 "
+          "pixels at 2 a Mpc), at its centre, unturned; cut at height h along its third axis: both times "
+          "sqrt(1 - h^2/c^2)", len(e0) == 1 and np.allclose(e0[0][:4], (61.0, 87.0, 12.0, 8.0))
+          and abs(np.sin(np.radians(e0[0][4]))) < 1e-9 and len(e1) == 1
+          and np.allclose(e1[0][2:4], (12.0 * f, 8.0 * f)) and np.allclose(e1[0][:2], (61.0, 87.0)), f"{e0} {e1}")
+    q, _ = np.linalg.qr(np.random.default_rng(5).normal(size=(3, 3)))
+    Mt = ell([7.0, 4.0, 2.5], q)
+    d = 1.2
+    et = G.void_ellipses(c, Mt, L, 2, 32.5 + d, [0, 1], lo, hi, 64, 64)       # one pixel a Mpc
+    Q = Mt[0] @ Mt[0].T
+    A = np.linalg.inv(Q)
+    A11, a0 = A[np.ix_([0, 1], [0, 1])], A[[0, 1], 2]
+    w0 = c[0, :2] - d * np.linalg.solve(A11, a0)       # the prototype's formula: the centre moves in the plane
+    rhs = 1.0 - d * d / Q[2, 2]
+    area = np.pi * rhs / np.sqrt(np.linalg.det(A11))   # (w - w0)^T A11 (w - w0) = rhs
+    x0, y0, rx, ry, ang, _k = et[0] if et else (0, 0, 0, 0, 0, 0)
+    t = np.linspace(0, 2 * np.pi, 24)
+    a_ = np.radians(ang)
+    px = x0 + rx * np.cos(t) * np.cos(a_) - ry * np.sin(t) * np.sin(a_)      # its outline, image pixels (y down)
+    py = y0 + rx * np.cos(t) * np.sin(a_) + ry * np.sin(t) * np.cos(a_)
+    pts = np.stack([px, L - py, np.full_like(px, 32.5 + d)], axis=1) - c[0]  # back to Mpc, relative to the centre
+    on = np.einsum("ij,jk,ik->i", pts, A, pts)
+    check("15. a tilted ellipsoid's section: its centre where the formula puts it (off the ellipsoid's own centre), "
+          "its area pi rx ry the formula's, every point of the drawn ellipse on the ellipsoid",
+          len(et) == 1 and np.allclose((x0, L - y0), w0, atol=1e-9) and abs(np.pi * rx * ry - area) < 1e-9 * area
+          and np.allclose(on, 1.0, atol=1e-9) and np.linalg.norm(w0 - c[0, :2]) > 0.1, f"{et} {w0} {area}")
+    check("15. a plane that misses the ellipsoid (beyond its reach along the normal) gives nothing",
+          G.void_ellipses(c, Mt, L, 2, 32.5 + np.sqrt(Q[2, 2]) + 0.01, [0, 1], lo, hi, 64, 64) == []
+          and G.void_ellipses(c, np.full((1, 3, 3), np.nan), L, 2, 32.5, [0, 1], lo, hi, 64, 64) == [])
+    ce = np.array([[62.5, 30.5, 10.5]])
+    edge = G.void_ellipses(ce, M, L, 2, 10.5, [0, 1], lo, hi, 64, 64)
+    check("15. the periodic image: an ellipsoid at the box's edge drawn there and across the opposite face",
+          sorted(round(e[0], 6) for e in edge) == [-1.5, 62.5] and all(e[-1] == 0 for e in edge), f"{edge}")
+    ok_x = all(np.allclose(G.void_ellipses(c, Mt, L, ax, c[0, ax] + 0.7, [b for b in range(3) if b != ax], lo, hi,
+                                           64, 64)[0][2:4],
+                           np.sort(np.linalg.svd(np.asarray(V.plane_cuts(c, Mt, L, ax, c[0, ax] + 0.7, lo, hi, 64,
+                                                                          64)[0][2]))[1])[::-1]) for ax in range(3))
+    check("15. the map's sections are the 3D view's plane cuts (view3d.plane_cuts), along every axis", ok_x)
+    # the drawn size: one place, the guard
+    res = {"centres_mpc": [[1.5, 2.5, 3.5], [10.5, 11.5, 12.5], [20.5, 3.5, 5.5], [30.5, 30.5, 30.5]],
+           "box_mpc": 64.0, "n_grid": 64, "cell_mpc": 1.0, "delta": [-0.8, 0.2, -0.6, -0.5],
+           "semi_axes_mpc": [[8.0, 5.0, 4.0], [6.0, 5.0, 4.0], [7.0, 6.0, 3.0], None],
+           "ellipsoid_axes": [np.eye(3).tolist()] * 3 + [None],
+           "eigenvalues_cells": [[4 / 64, 4 / 25, 4 / 16], [4 / 36, 4 / 25, 4 / 16], [-4 / 49, 4 / 36, 4 / 9],
+                                 [0.1, 0.2, 0.3]]}
+    dr = G.drawn_ellipsoids(res)
+    want = np.array([8.0, 5.0, 4.0]) * np.sqrt(0.8 / 2)
+    check("15. the drawn ellipsoid (grids.drawn_ellipsoids): semi-axes sqrt(2 |delta| / lambda) = the catalogue's "
+          "times sqrt(|delta|/2), R_ell their (a b c)^(1/3); none above the mean, none with a negative eigenvalue, "
+          "none for an unresolved void", list(dr["ok"]) == [True, False, False, False]
+          and np.allclose(dr["semi"][0], want) and np.isclose(dr["r"][0], np.cbrt(np.prod(want)))
+          and np.isnan(dr["semi"][1:]).all() and G.drawn_ellipsoids(res) is dr
+          and np.allclose(dr["M"][0], np.diag(want)), f"{dr['ok']} {dr['semi'][0]}")
+    old = dict(res)
+    old.pop("eigenvalues_cells")
+    old.pop("_drawn", None)
+    do = G.drawn_ellipsoids(old)
+    check("15. ... a result without the eigenvalues (an older helper): the catalogue's semi-axes times "
+          "sqrt(|delta|/2), still none above the mean", np.allclose(do["semi"][0], want) and list(do["ok"][:2]) == [True, False])
+    info = G.void_info(dict(res, r_v_mpc=[9.0, 5.0, 6.0, None], r_eff_mpc=[5.4, 4.9, 5.0, None],
+                            resolved=[True] * 3 + [False], distinct=[True] * 4), 0)
+    info2 = G.void_info(dict(res, r_v_mpc=[9.0, 5.0, 6.0, None], r_eff_mpc=[5.4, 4.9, 5.0, None],
+                             resolved=[True] * 3 + [False], distinct=[True] * 4), 1)
+    check("15. the inspector names the drawn ellipsoid's a, b, c and R_ell, the catalogue's own fit (R_eff) as the "
+          "catalogue's; a void without an ellipsoid says its centre is marked",
+          f"a, b, c = {want[0]:.2f}, {want[1]:.2f}, {want[2]:.2f} Mpc" in info and "R_ell" in info
+          and "catalogue's fit: R_eff 5.40 Mpc" in info and "centre is marked" in info2, info)
+    # picking
+    ells = [(50.0, 50.0, 20.0, 5.0, 45.0, 1), (50.0, 50.0, 3.0, 3.0, 0.0, 2)]
+    ax_pt = (50 + 15 * np.cos(np.radians(45)), 50 + 15 * np.sin(np.radians(45)))   # on its long axis, turned 45 deg
+    off = (50 + 15 * np.cos(np.radians(-45)), 50 + 15 * np.sin(np.radians(-45)))   # across it: outside
+    check("15. a click inside a turned ellipse picks its void, a point outside it (inside its unturned box) not; "
+          "the smallest of those holding the point wins; a mark within its radius picks its void",
+          G.outline_pick(*ax_pt, ellipses=ells) == 1 and G.outline_pick(*off, ellipses=ells) is None
+          and G.outline_pick(50.5, 50.0, ellipses=ells) == 2
+          and G.outline_pick(10.0, 10.0, marks=[(11.0, 10.0, 7, True)], mark_radius=2.0) == 7
+          and G.outline_pick(10.0, 10.0, marks=[(14.0, 10.0, 7, True)], mark_radius=2.0) is None
+          and G.outline_pick(11.0, 10.0, circles=[(10.0, 10.0, 5.0, 5.0, 3)]) == 3)
+    mk = G.void_marks(c, [3.0], L, 2, 32.5, [0, 1], lo, hi, 64, 64, 0.5)
+    mk2 = G.void_marks(c, [3.0], L, 2, 34.5, [0, 1], lo, hi, 64, 64, 0.5)
+    check("15. the centre's mark: where the minimum projects into the slice, filled on its own layer, hollow on a "
+          "layer the ellipsoid still reaches, none beyond it", mk == [(30.5, 43.5, 0, True)] and mk2 == [(30.5, 43.5, 0, False)]
+          and G.void_marks(c, [3.0], L, 2, 36.5, [0, 1], lo, hi, 64, 64, 0.5) == [], f"{mk} {mk2}")
+    vset = {"rows": np.array([4, 9]), "centres": np.array([[10.0, 20.0, 30.0], [62.5, 5.0, 31.0]]), "box": 64.0,
+            "shape": "sphere", "r_v": np.array([4.0, 3.0]), "M": np.full((2, 3, 3), np.nan), "reach": np.zeros((2, 3)),
+            "other": None}
+    ov = G.void_overlay(vset, 2, 30.5, [0, 1], lo, hi, 128, 128, 0.5)
+    circ = G.void_circles(vset["centres"], vset["r_v"], 64.0, 2, 30.5, [0, 1], lo, hi, 128, 128)
+    check("15. spheres of R_v: the overlay is void_circles' circles exactly, nothing else drawn",
+          ov["circles"] == [(a, b, rx, ry, int(vset["rows"][k])) for a, b, rx, ry, k in circ]
+          and not ov["ellipses"] and not ov["marks"] and not ov["dashed"])
+    sc = G.scale_ellipse(4.0, 2.0, 30.0, 0.7, 0.7)
+    t2 = np.radians(30.0)
+    stretched = G.scale_ellipse(4.0, 2.0, 30.0, 1.0, 2.0)
+    pts = np.array([[4 * np.cos(u) * np.cos(t2) - 2 * np.sin(u) * np.sin(t2),
+                     2 * (4 * np.cos(u) * np.sin(t2) + 2 * np.sin(u) * np.cos(t2))] for u in np.linspace(0, 6, 9)])
+    a2 = np.radians(stretched[2])
+    pr = pts @ np.array([[np.cos(a2), -np.sin(a2)], [np.sin(a2), np.cos(a2)]])
+    check("15. an ellipse in a saved figure's unit: scaled alike along both axes it keeps its angle; stretched, the "
+          "same curve", np.allclose(sc, (2.8, 1.4, 30.0))
+          and np.allclose((pr[:, 0] / stretched[0]) ** 2 + (pr[:, 1] / stretched[1]) ** 2, 1.0), f"{stretched}")
+    path = VO.write_csv(dict(res, r_v_mpc=[9.0, 5.0, 6.0, None], r_eff_mpc=[5.4, 4.9, 5.0, None],
+                             resolved=[True] * 3 + [False], distinct=[True] * 4, sim="S", snap=5, method="ps",
+                             prefix="", sigma_mpc=2.0), TMP / "ell.csv", rows=[0, 1],
+                        extra={"ell_a_mpc": dr["semi"][:, 0], "r_ell_mpc": dr["r"]}, extra_note="ell = drawn")
+    lines = Path(path).read_text().splitlines()
+    check("15. the saved CSV: the drawn ellipsoid's columns after the catalogue's (empty where it has none), said in "
+          "the '#' line", lines[1].endswith("distinct,ell_a_mpc,r_ell_mpc") and "ell = drawn" in lines[0]
+          and lines[2].split(",")[-2] == f"{want[0]:.6g}" and lines[3].endswith(",,"), "\n".join(lines))
+    # the map smoothed in 3D
+    rng = np.random.default_rng(2)
+    cube = rng.normal(size=(24, 20, 16)).astype(np.float32)
+    sig = 2.5
+    k0, k1, k2 = 2 * np.pi * np.fft.fftfreq(24), 2 * np.pi * np.fft.fftfreq(20), 2 * np.pi * np.fft.rfftfreq(16)
+    ref = np.fft.irfftn(np.fft.rfftn(cube.astype(np.float64)) * np.exp(-0.5 * sig ** 2 * (
+        k0[:, None, None] ** 2 + k1[None, :, None] ** 2 + k2[None, None, :] ** 2)), s=cube.shape, axes=(0, 1, 2))
+    got = G.gauss3d(cube, sig, chunk=4000.0)
+    check("15. the 3D smoothing (grids.gauss3d): one axis at a time, in small slabs, the periodic Gaussian of the whole "
+          "cube's FFT (as the catalogue smooths), in float32; the mean kept", got.dtype == np.float32
+          and np.abs(got - ref).max() < 1e-5 * np.abs(ref).max() and abs(float(got.mean()) - float(cube.mean())) < 1e-5,
+          f"{np.abs(got - ref).max()}")
+    d = TMP / "smooth3d_why"
+    d.mkdir(exist_ok=True)
+    for sfx, shape in (("a_den", (8, 8, 8)), ("a_streams", (8, 8, 8)), ("caustic", (8, 8, 8)), ("a_tweb", (8, 8, 8)),
+                       ("a_vel", (8, 8, 8, 3)), ("a_velDiv", (8, 8, 8))):
+        np.ones(shape, np.float32).tofile(str(d / f"ps.{sfx}"))
+    np.ones((16, 16), np.float32).tofile(str(d / "flat.a_den"))
+    o3 = G.OutputSet(d / "ps", box=((0, 0, 0), (8.0, 8.0, 8.0)))
+    o2 = G.OutputSet(d / "flat", dim=2)
+    why = {"dens": G.smooth3d_why(o3, "density"), "hires": G.smooth3d_why(o3, "density", hires=True),
+           "fold": G.smooth3d_why(o3, "caustic"), "class": G.smooth3d_why(o3, "tweb"), "flat": G.smooth3d_why(o2, "density"),
+           "mf": G.smooth3d_why(o3, "divergence", "mean-field"), "stored": G.smooth3d_why(o3, "divergence")}
+    check("15. the '3D' tick's reasons: a stored 3D grid smooths; not a hi-res slice, the fold map, a class map, a 2D "
+          "grid, a phase-space output's mean-field derivative (computed slice by slice); its stored grid smooths",
+          why["dens"] == "" and "hi-res" in why["hires"] and "fold" in why["fold"] and "class" in why["class"]
+          and "2D" in why["flat"] and "slice by slice" in why["mf"] and why["stored"] == "", str(why))
+    budget0, cb = G.CUBE_CACHE_BYTES, 4 * 8 ** 3      # a float32 8^3 cube: the grid's own and each smoothing alike
+    G.drop_cubes()
+    try:
+        G.CUBE_CACHE_BYTES = 3 * cb
+        d2 = TMP / "smooth3d_other"
+        d2.mkdir(exist_ok=True)
+        np.ones((8, 8, 8), np.float32).tofile(str(d2 / "q.a_den"))
+        o3b = G.OutputSet(d2 / "q", box=((0, 0, 0), (8.0, 8.0, 8.0)))
+        G.smoothed3d_cube(o3, "density", "value", 1.0)          # Compare's A and B in 3D: both smoothed cubes
+        G.smoothed3d_cube(o3b, "density", "value", 1.0)         # stay (the grids' own cube goes first)
+        both = G.smoothed3d_kept(o3, "density", "value", 1.0) and G.smoothed3d_kept(o3b, "density", "value", 1.0)
+        for s_ in (2.0, 3.0):
+            G.smoothed3d_cube(o3, "density", "value", s_)
+        held = sum(a.nbytes for a in G._CUBES.values()) + sum(a.nbytes for a in G._SMOOTH3D.values())
+        kept = {(Path(k_[0][0]).name, k_[3]) for k_ in G._SMOOTH3D}
+        freed = G.drop_smoothed3d(keep=o3b)
+        left = [(Path(k_[0][0]).name, k_[3]) for k_ in G._SMOOTH3D]
+        G.CUBE_CACHE_BYTES = cb // 2
+        why_small = G.smooth3d_why(o3, "density")
+        try:
+            G.map_plane(o3, "density", 0, 0, "value", "stored", 5.0, True)
+            refused = ""
+        except G.Smooth3DRefused as e:
+            refused = str(e)
+        plane_kept = G.map_plane(o3b, "density", 0, 0, "value", "stored", 1.0, True)    # kept already: served
+        G.cap_cubes(True)
+        why_job = G.smooth3d_why(o3, "density")
+        G.cap_cubes(False)
+    finally:
+        G.CUBE_CACHE_BYTES = budget0
+        G.drop_cubes()
+    check("15. the cubes smoothed in 3D share the cube cache's one budget with the grids' own cubes (those go first, "
+          "then the least recently used: two outputs' smoothed cubes stay side by side), those of another output go "
+          "when the map's output changes (drop_smoothed3d); one larger than the budget is never smoothed (it would "
+          "be smoothed again on every layer): the tick says why (while a job runs too) and map_plane refuses in a "
+          "sentence; a cube kept already is still served",
+          both and held <= 3 * cb and kept == {("q.a_den", 1.0), ("ps.a_den", 2.0), ("ps.a_den", 3.0)}
+          and left == [("q.a_den", 1.0)] and freed == 2 * cb and "larger than the memory" in why_small
+          and refused.startswith("Not smoothed in 3D") and "Untick 3D" in refused and "job runs" in why_job
+          and plane_kept.shape == (8, 8), f"{both} {held} {kept} {left} {freed} | {why_small} | {refused} | {why_job}")
+    import explore_voids as XV
+    ts = [XV.search_seconds(512, s_) for s_ in (10.0, 4.1, 2.0, 1.4)]
+    check("15. the search's rough time: about 10 s at the production smoothing, about 25 s at 4 cells, minutes "
+          "below two cells (as measured on a 512^3 grid), eight times that on 1024^3, a few seconds on 64^3",
+          8 < ts[0] < 15 and 18 < ts[1] < 30 and ts[2] > 60 and 150 < ts[3] < 300
+          and abs(XV.search_seconds(1024, 4.1) / ts[1] - 8) < 1e-9 and XV.search_seconds(64, 2.0) < 1
+          and XV.duration_text(23) == "about 25 s" and XV.duration_text(225) == "about 4 min", str(ts))
+
+
+def voids_ellipsoids_gui():
+    """15. the voids as their ellipsoids in the window, on gui()'s synthetic snapshot: the helper's eigenvalues, each
+    layer's sections and centre marks as the formula gives them (growing, largest on the minimum's layer, shrinking),
+    a click inside an ellipse, R_v dashed, the saved PNG and CSV, the figure grid, the 3D view's shapes, the grey line
+    naming the voids' field and the map smoothed in 3D, the smoothing box (its smallest value, its steps, a search
+    only once the value is committed, its line while it runs, a long one asked first), remembered."""
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        print(f"SKIP (voids as ellipsoids): PySide6 is not importable ({e})")
+        return
+    import explore as E
+    import explore_voids as XV
+    import runspec as rs
+    import view3d as V
+    print("voids as ellipsoids (window)")
+    qa = QApplication.instance() or QApplication([])
+    data = TMP / "data"
+    if not (data / SIM).is_dir():
+        make_snapdir(data, 50, 0.0, 7)
+    E.VOID_CACHE_DIR = TMP / "void cache"
+    view = E.ExploreView()
+    x = E.ExploreControls(view, lambda: str(data), lambda: [])
+    view.resize(900, 800)
+    view.show()
+    asked = []
+    x.confirm_void = lambda text: asked.append(text) or False
+    real_procs, real_ask = rs.dtfe_processes, XV.SEARCH_ASK_S
+    rs.dtfe_processes = lambda max_age=2.0: {"runs": [], "servers": []}
+    try:
+        x.refresh_outputs()
+        wait_for(qa, lambda: not x._busy and x._plane is not None, 30)
+        x.voids.setChecked(True)
+        ok = wait_for(qa, lambda: x._void_proc is None and bool(x._void_cache), 180)
+        res = x._void_cache.get(x._void_cache_key(x.current), {})
+        check("15. the catalogue (ellipsoids by default)", ok and "error" not in res and x.void_shape() == "ellipsoid",
+              str(res.get("error", ""))[:200])
+        if "error" in res or not res:
+            return
+        o, c = x.current, view.canvas
+        axis = x.axis.currentIndex()
+        dr = G.drawn_ellipsoids(res)
+        rows = [int(k) for k in np.nonzero(res["_shown"])[0]]
+        ev = np.array([v for v in res["eigenvalues_cells"]], dtype=float)[rows]
+        check("15. the helper passes the Hessian's eigenvalues in the semi-axes' order: 2 cells / sqrt(lambda) is the "
+              "catalogue's semi-axes, so the drawn ones are those times sqrt(|delta|/2); every shown void has one",
+              np.allclose(2 * float(res["cell_mpc"]) / np.sqrt(ev), res["_semi"][rows], rtol=1e-4)
+              and bool((ev > 0).all()) and bool(dr["ok"][rows].all()) and np.allclose(res["_r_ell"], dr["r"], equal_nan=True))
+        k0 = max(rows, key=lambda k: dr["r"][k])
+        cen = res["_centres"][k0]
+        i0 = int(cen[axis] / (BOX / N))
+        areas, fills = {}, {}
+        for di in range(-4, 5):
+            x.index.setValue((i0 + di) % N)
+            wait_for(qa, lambda: not x._busy and x._req["index"] == (i0 + di) % N, 30)
+            areas[di] = max([np.pi * e[2] * e[3] for e in c.circles or [] if len(e) == 6 and e[-1] == k0], default=0.0)
+            fills[di] = {m[3] for m in c.marks or [] if m[2] == k0}
+        grow = all(areas[d] < areas[d + 1] for d in range(-4, 0)) and all(areas[d] > areas[d + 1] for d in range(0, 4))
+        check("15. scrolling through a void: its ellipse grows, is largest on the layer of its minimum and shrinks; the "
+              "minimum's mark filled on that layer, a ring on the others", grow and areas[-4] > 0 and fills[0] == {True}
+              and fills[2] == {False} and fills[-2] == {False}, f"{areas} {fills}")
+        x.index.setValue(i0)
+        wait_for(qa, lambda: not x._busy and x._req["index"] == i0, 30)
+        g = x._geometry()
+        sel = x.void_rows(res)
+        want = G.void_ellipses(res["_centres"][sel], dr["M"][sel], BOX, axis, x._slice_position(), g[2], g[3], g[4],
+                               g[5], g[6])
+        check("15. the map's outlines are the exact plane sections of the drawn ellipsoids (grids.void_ellipses; "
+              "_void_circles gives them as it gave the circles), the Sizes count says by R_ell",
+              c.circles == [e[:5] + (int(sel[e[5]]),) for e in want] and bool(c.circles) and c.circles == x._void_circles()
+              and "(by R_ell)" in x.void_count.text(), f"{c.circles} {x.void_count.text()}")
+        e0 = next(e for e in c.circles if e[-1] == k0)
+        a_ = np.radians(e0[4])
+        px, py = e0[0] + 0.6 * e0[2] * np.cos(a_), e0[1] + 0.6 * e0[2] * np.sin(a_)   # inside, off its centre
+        x._hover(int(py), int(px))
+        hover = view.readout.text()
+        x._click(int(py), int(px))
+        check("15. hover and click inside an ellipse (away from its centre): the readout names the void with R_ell, the "
+              "inspector shows its drawn ellipsoid", f"void {k0}: R_v" in hover and "R_ell" in hover
+              and f"void {k0}" in x.void_info.text() and "drawn ellipsoid" in x.void_info.text()
+              and x.void_goto.isEnabled(), f"{hover} | {x.void_info.text()}")
+        x.void_reff.setChecked(True)
+        qa.processEvents()
+        want_d = G.void_circles(res["_centres"][sel], res["_r_v"][sel], BOX, axis, x._slice_position(), g[2], g[3],
+                                g[4], g[5], g[6])
+        check("15. 'R_v too (dashed)': R_v's circles dashed beside the ellipses", bool(c.dashed)
+              and c.dashed == [d_[:4] + (int(sel[d_[4]]),) for d_ in want_d], f"{c.dashed}")
+        import matplotlib.pyplot as plt
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import Circle, Ellipse
+        orig_close, figs = plt.close, []
+        plt.close = lambda fig=None: figs.append(fig)
+        try:
+            written = x.save_png(TMP / "ell.png")
+        finally:
+            plt.close = orig_close
+        fig = figs[0] if figs else None
+        patches = [p_ for ax in (fig.axes if fig else []) for p_ in ax.patches]
+        n_ell = sum(isinstance(p_, Ellipse) and not isinstance(p_, Circle) for p_ in patches)
+        n_circ = sum(isinstance(p_, Circle) for p_ in patches)
+        n_mark = sum(isinstance(ln, Line2D) and ln.get_marker() == "o" for ax in (fig.axes if fig else []) for ln in ax.lines)
+        lines = Path(written[1]).read_text().splitlines() if len(written) == 2 else []
+        head = lines[1].split(",") if len(lines) > 1 else []
+        row0 = next((ln.split(",") for ln in lines[2:] if ln.split(",")[0] == str(k0)), [])
+        check("15. Save image: the ellipses (two strokes each), the dashed R_v circles and the centres' marks as on "
+              "screen; the CSV beside it carries the drawn ellipsoid's a, b, c and R_ell (the inspector's numbers)",
+              fig is not None and n_ell == 2 * len(c.circles) and n_circ == 2 * len(c.dashed)
+              and n_mark == 2 * len(c.marks) and head[-4:] == ["ell_a_mpc", "ell_b_mpc", "ell_c_mpc", "r_ell_mpc"]
+              and row0 and abs(float(row0[-4]) - dr["semi"][k0][0]) < 1e-4 and "mean density" in lines[0],
+              f"{n_ell} {n_circ} {n_mark} {head[-4:]} {row0}")
+        if fig is not None:
+            orig_close(fig)
+        x.void_reff.setChecked(False)
+        x.grid_set_layout(1, 2)
+        x.grid_fill("redshifts")
+        x.show_grid(True)
+        ok = wait_for(qa, lambda: x._void_proc is None and not x._grid_busy and x._grid_pending is None
+                      and bool(c.circles), 240)
+        gfig, _n = x.grid_figure()
+        g_ell = sum(isinstance(p_, Ellipse) and not isinstance(p_, Circle) for ax in gfig.axes for p_ in ax.patches)
+        check("15. the figure grid: each panel's ellipses and marks, each clipped to its tile; its saved figure draws "
+              "them", ok and all(len(o) == 6 for o in c.circles) and len(c.circle_clips or []) == len(c.circles)
+              and len(c.mark_clips or []) == len(c.marks) and len({cl[0] for cl in c.circle_clips}) == 2 and g_ell > 0,
+              f"{len(c.circles or [])} {g_ell}")
+        orig_close(gfig)
+        x.show_grid(False)
+        wait_for(qa, lambda: not x._busy and not x._grid_shown, 30)
+        # the voids' field: the grey line, the map smoothed in 3D
+        sig_cells = float(res["sigma_mpc"]) / (BOX / N)
+        note0 = x.void_note.text()
+        check("15. the grey line under the Voids row names the voids' field while the map shows another",
+              x.void_note.isVisibleTo(x) and note0.startswith("found in the density smoothed in 3D at ")
+              and f"tick 3D and set Smoothing to {sig_cells:.1f}".rstrip("0").rstrip(".") + " to see" in note0, note0)
+        x.smooth.setValue(round(sig_cells, 1))
+        x.smooth3d.setChecked(True)
+        ok = wait_for(qa, lambda: not x._busy and x._req.get("smooth3d") and x._plane is not None, 60)
+        rho = np.fromfile(o.files["density"].path, dtype=o.dtype).reshape((N,) * 3).astype(np.float64)
+        k = 2 * np.pi * np.fft.fftfreq(N)
+        kz = 2 * np.pi * np.fft.rfftfreq(N)
+        s3 = np.fft.irfftn(np.fft.rfftn(rho) * np.exp(-0.5 * round(sig_cells, 1) ** 2 * (
+            k[:, None, None] ** 2 + k[None, :, None] ** 2 + kz[None, None, :] ** 2)), s=rho.shape, axes=(0, 1, 2))
+        want_plane = np.take(s3, i0, axis=axis)
+        check("15. '3D' beside Smoothing: the map is the slice of the density cube smoothed in 3D (the catalogue's "
+              "periodic Gaussian); the grey line goes while the map shows the voids' own field", ok
+              and np.abs(x._plane - want_plane).max() < 1e-5 * np.abs(want_plane).max() and not x.void_note.text()
+              and not x.void_note.isVisibleTo(x), f"{np.abs(x._plane - want_plane).max()} {x.void_note.text()}")
+        shown_saved = res["_shown"].copy()
+        res["_shown"][:] = False                    # a catalogue without a distinct void, the map on its field
+        x._void_note()
+        none_text, none_vis = x.void_note.text(), x.void_note.isVisibleTo(x)
+        res["_shown"][:] = shown_saved
+        x._void_note()
+        other_field = next(x.field.itemData(i_) for i_ in range(x.field.count()) if x.field.itemData(i_) != "density")
+        x.field.setCurrentIndex(x.field.findData(other_field))
+        wait_for(qa, lambda: not x._busy and x._req["field"] == other_field, 60)
+        other_text = x.void_note.text()
+        x.field.setCurrentIndex(x.field.findData("density"))
+        wait_for(qa, lambda: not x._busy and x._req["field"] == "density", 60)
+        check("15. ... the grey line says 'no distinct voids' even while the map shows their field (the tick on, "
+              "nothing drawn); on another field it asks only for what differs: show the density",
+              none_text == "no distinct voids at this smoothing" and none_vis
+              and other_text.startswith("found in the density smoothed in 3D")
+              and other_text.endswith(": show the density to see that field"), f"{none_text} | {other_text}")
+        t0 = time.time()
+        x.index.setValue((i0 + 1) % N)
+        ok = wait_for(qa, lambda: not x._busy and x._req["index"] == (i0 + 1) % N, 30)
+        check("15. ... the cube kept: the next layer its slice at once (no new smoothing)", ok
+              and G.smoothed3d_kept(o, "density", x.component.currentText(), round(sig_cells, 1))
+              and np.abs(x._plane - np.take(s3, (i0 + 1) % N, axis=axis)).max() < 1e-5 * np.abs(s3).max(),
+              f"{time.time() - t0:.2f} s")
+        os.environ["DTFE_FREE_GB"] = "1"
+        G._drop_smoothed3d()
+        x._smooth3d_sync()
+        tip, greyed = x.smooth3d.toolTip(), not x.smooth3d.isEnabled()
+        grey_note = x._void_field_text(res)
+        os.environ.pop("DTFE_FREE_GB", None)
+        x._smooth3d_sync()
+        check("15. ... greyed out, saying why, where the cube's smoothing would not fit in the free memory (the "
+              "tick kept; the grey line then asks for nothing it cannot do); enabled again when it fits",
+              greyed and "GB" in tip and "free" in tip and x.smooth3d.isEnabled() and x.smooth3d.isChecked()
+              and grey_note.startswith("found in the density smoothed in 3D") and ":" not in grey_note,
+              f"{tip} | {grey_note}")
+        budget0 = G.CUBE_CACHE_BYTES
+        G.CUBE_CACHE_BYTES = 1000                   # a job's cap, say: no smoothed cube of this grid kept
+        try:
+            x.index.setValue((i0 + 2) % N)          # the tick still on (it is synced per output and field)
+            wait_for(qa, lambda: not x._busy and x._req["index"] == (i0 + 2) % N, 60)
+            refusal = view.canvas.text()
+        finally:
+            G.CUBE_CACHE_BYTES = budget0
+        x.index.setValue(i0)
+        wait_for(qa, lambda: not x._busy and x._req["index"] == i0 and x._plane is not None, 60)
+        check("15. ... a cube the cache could not keep is not smoothed on every layer: the map says so in a sentence "
+              "(no error class) with what to do; the map back once it fits", refusal.startswith("Not smoothed in 3D")
+              and "Untick 3D beside Smoothing" in refusal and "Error" not in refusal and x._plane is not None,
+              refusal)
+        # the 3D view: the same ellipsoids
+        x.view3d_style.setCurrentIndex(x.view3d_style.findData("planes"))
+        x.view3d_toggle.setChecked(True)
+        ok = wait_for(qa, lambda: x._3d_res is not None and not x._3d_busy, 60)
+        v3 = view.view3d
+        r3 = [int(r_) for r_ in v3.voids["rows"]] if v3.voids else []
+        pl3 = (x._3d_res or {}).get("planes") or [None] * 3
+        same3 = all(p_ is not None and np.abs(p_["values"] - np.take(s3, x._3d_index[a_], axis=a_)).max()
+                    < 1e-5 * np.abs(s3).max() for a_, p_ in enumerate(pl3))
+        check("15. the 3D view draws the same ellipsoids (their shape matrices the map's) and its planes are the "
+              "slices of the cube smoothed in 3D", ok and r3 == [int(r_) for r_ in x.void_rows(res)]
+              and np.allclose(v3.voids["M"], dr["M"][r3]) and same3, f"{r3} {same3}")
+        x.view3d_toggle.setChecked(False)
+        wait_for(qa, lambda: not x._busy, 30)
+        # the figure grid's panels and a comparison's B: the slices of their cubes smoothed in 3D too
+        from explore_grid import grid_items
+        sm = x.smooth.value()
+
+        def s3_of(out):
+            cube = np.fromfile(out.files["density"].path, dtype=out.dtype).reshape((N,) * 3).astype(np.float64)
+            return np.fft.irfftn(np.fft.rfftn(cube) * np.exp(-0.5 * sm ** 2 * (
+                k[:, None, None] ** 2 + k[None, :, None] ** 2 + kz[None, None, :] ** 2)), s=cube.shape, axes=(0, 1, 2))
+        greq = x.grid_request()
+        items = grid_items(dict(greq, smooth3d=True)) if greq else []
+        panel_ok = bool(items) and all(np.abs(it["plane"] - np.take(s3_of(it["output"]), it["idx"], axis=axis)).max()
+                                       < 1e-5 * float(np.abs(it["plane"]).max()) for it in items if it is not None)
+        other = next(b_ for _, b_ in x.outputs if x.comparable(x.current, b_, "density"))
+        x.compare.setCurrentIndex(x.compare.findData(str(other.root)))
+        ok = wait_for(qa, lambda: not x._busy and x._req.get("compare") is not None and x._planes is not None, 60)
+        idx_now = x._req["index"]
+        b_ok = ok and np.abs(x._planes[1] - np.take(s3_of(other), idx_now, axis=axis)).max() < 1e-5 * np.abs(
+            x._planes[1]).max() and np.abs(x._planes[0] - np.take(s3, idx_now, axis=axis)).max() < 1e-5 * np.abs(s3).max()
+        x.compare.setCurrentIndex(0)
+        wait_for(qa, lambda: not x._busy and x._req.get("compare") is None, 30)
+        check("15. ... the figure grid's panels and a comparison's A and B: each the slice of its own cube smoothed in "
+              "3D", panel_ok and b_ok, f"{panel_ok} {b_ok}")
+        comp = x.component.currentText()
+        kept_before = G.smoothed3d_kept(o, "density", comp, sm)
+        x._show_output(other)                       # the map's output changes: the cubes of the one left go
+        wait_for(qa, lambda: not x._busy and x._req["output"] is other, 60)
+        gone, kept_new = not G.smoothed3d_kept(o, "density", comp, sm), G.smoothed3d_kept(other, "density", comp, sm)
+        x._show_output(o)
+        wait_for(qa, lambda: not x._busy and x._req["output"] is o and x._void_proc is None, 180)
+        check("15. ... another output on the map: the cubes smoothed in 3D of the one left are freed, its own kept",
+              not x._same(o, other) and kept_before and gone and kept_new, f"{kept_before} {gone} {kept_new}")
+        x.smooth3d.setChecked(False)
+        x.smooth.setValue(0.0)
+        wait_for(qa, lambda: not x._busy, 30)
+        # the smoothing box: its smallest value, its steps, a search once committed, its line while it runs
+        box = x.void_sigma
+        prod = float(res["sigma_mpc"])
+        least = min(2 * BOX / N, prod)
+        check("15. σ: the smallest value two cells of the shown grid (the production value where that is less), a step "
+              "one cell", abs(box.smallest() - least) < 1e-9 and abs(box.singleStep() - BOX / N) < 1e-9
+              and box.value() == 0.0, f"{box.smallest()} {prod}")
+        n_cache = len(x._void_cache)
+        box.stepBy(1)
+        first = box.value()
+        box.stepBy(1)
+        second = box.value()
+        waiting = x._void_sigma_pause.isActive() and x._void_sigma_now == 0.0 and x._void_proc is None
+        check("15. ... the first step up from production lands on the production value, the next one cell on; the "
+              "arrows start no search while they are clicked", abs(first - prod) < 1e-6
+              and abs(second - prod - BOX / N) < 1e-6 and waiting, f"{first} {second} {prod} {waiting}")
+        ok = wait_for(qa, lambda: x._void_proc is not None, 5)
+        running = x.void_note.text()
+        check("15. ... a short pause after the last click starts the search; the line under the row says so, with a "
+              "rough time", ok and x._void_sigma_now == second and running.startswith(f"finding the voids at σ {second:.3g} Mpc: about"),
+              running)
+        ok = wait_for(qa, lambda: x._void_proc is None and len(x._void_cache) > n_cache, 180)
+        check("15. ... found: its own catalogue, the line back to naming the field (or saying there is no distinct "
+              "void at so large a smoothing)", ok and x._void_cache_key(o) in x._void_cache
+              and x.void_note.text().startswith(("found in the density", "no distinct voids")), x.void_note.text())
+        box.setValue(second + BOX / N)              # typed or set: committed at once, a search
+        started = wait_for(qa, lambda: x._void_proc is not None, 5)
+        x.stop_void_search()                        # what the launcher does when a heavy job starts
+        stopped_text, stopped_vis = x.void_note.text(), x.void_note.isVisibleTo(x)
+        x.voids.setChecked(False)
+        x.voids.setChecked(True)
+        again = x._void_proc is not None and not x.void_note.text().startswith("stopped")
+        wait_for(qa, lambda: x._void_proc is None, 180)
+        check("15. ... a search stopped when a job starts says so under the row (the tick kept on, nothing drawn); "
+              "ticking Voids again searches", started and stopped_text.startswith("stopped when a job started")
+              and stopped_vis and again, f"{started} {stopped_text} {again}")
+        box.blockSignals(True)
+        box.setValue(least)
+        box.blockSignals(False)
+        x._void_sigma_now = box.value()
+        box.stepBy(-1)
+        check("15. ... a step down from the smallest value goes back to production", box.value() == 0.0)
+        x._void_sigma_commit()
+        XV.SEARCH_ASK_S = 0.0                       # every search 'long': the question
+        asked.clear()
+        box.setValue(prod + 3 * BOX / N)
+        qa.processEvents()
+        check("15. ... a search estimated to take long asks first in plain words; a 'no' starts nothing and puts the box "
+              "back, the line saying so", len(asked) == 1 and "Start it anyway?" in asked[0] and "--" not in asked[0]
+              and x._void_proc is None and box.value() == 0.0 and x._void_sigma_now == 0.0
+              and x.void_note.text().startswith("not started"), f"{asked} {x.void_note.text()}")
+        XV.SEARCH_ASK_S = real_ask
+        st0 = x.state()
+        x.restore_state(dict(st0, void_sigma=second))           # a remembered sigma: committed, its catalogue (cached)
+        key_r = x._void_cache_key(o)
+        drawn_r = x._void_result() is not None
+        n_before = len(x._void_cache)
+        x.restore_state(dict(st0, void_sigma=0.4))              # a state saved before: below two cells
+        low, now_low = box.value(), x._void_sigma_now
+        ok = wait_for(qa, lambda: x._void_proc is None and len(x._void_cache) > n_before, 180)
+        check("15. ... a remembered smoothing is the one searched and drawn (the key is the committed value, not the "
+              "box's); a smaller one (a state saved before) is raised to the smallest and committed as such",
+              key_r[-1] == round(second, 6) and drawn_r and abs(low - least) < 1e-9 and abs(now_low - least) < 1e-9
+              and ok and x._void_cache_key(o)[-1] == round(least, 6), f"{key_r} {low} {now_low}")
+        x.restore_state(dict(st0, void_sigma=0.0))
+        wait_for(qa, lambda: x._void_proc is None, 60)
+        XV.SEARCH_ASK_S = 0.0                       # a long search started another way (ticking Voids) asks too
+        asked.clear()
+        x.voids.setChecked(False)
+        box.blockSignals(True)
+        box.setValue(prod + 5 * BOX / N)
+        box.blockSignals(False)
+        x._void_sigma_now = box.value()
+        x.voids.setChecked(True)
+        qa.processEvents()
+        check("15. ... a long search started by ticking Voids asks too; a 'no' goes back to production, said",
+              len(asked) == 1 and x._void_proc is None and x._void_sigma_now == 0.0 and box.value() == 0.0
+              and x.void_note.text().startswith("not started"), f"{asked} {x.void_note.text()}")
+        XV.SEARCH_ASK_S = real_ask
+        # a void without an ellipsoid at the mean density: its centre's mark alone, counted
+        dr2 = G.drawn_ellipsoids(res)
+        kk = int(x.void_rows(res)[0])
+        saved_ok = dr2["ok"][kk]
+        dr2["ok"][kk] = False
+        saved_m, saved_r = dr2["M"][kk].copy(), dr2["r"][kk]
+        dr2["M"][kk], dr2["r"][kk], res["_r_ell"][kk] = np.nan, np.nan, np.nan
+        ik = int(res["_centres"][kk][axis] / (BOX / N))
+        x.index.setValue(ik)
+        wait_for(qa, lambda: not x._busy and x._req["index"] == ik, 30)
+        x._voids_redraw()
+        marks_k = [m for m in c.marks or [] if m[2] == kk]
+        outl_k = [e for e in c.circles or [] if e[-1] == kk]
+        count_text = x.void_count.text()
+        x.index.setValue((ik + 2) % N)
+        wait_for(qa, lambda: not x._busy and x._req["index"] == (ik + 2) % N, 30)
+        marks_off = [m for m in c.marks or [] if m[2] == kk]
+        dr2["ok"][kk], dr2["M"][kk], dr2["r"][kk], res["_r_ell"][kk] = saved_ok, saved_m, saved_r, saved_r
+        x._voids_redraw()
+        check("15. a void without an ellipsoid at the mean density: no outline, its centre's mark on its own layer only "
+              "(filled), counted beside Sizes", marks_k and all(m[3] for m in marks_k) and not outl_k
+              and not marks_off and "1 without an ellipsoid (centre only)" in count_text, f"{marks_k} {count_text}")
+        # remembered: the new key; an old state's spheres (the old default, saved by everyone) not read back
+        x.void3d_shape.setCurrentIndex(x.void3d_shape.findData("sphere"))
+        st = x.state()
+        x.void3d_shape.setCurrentIndex(x.void3d_shape.findData("ellipsoid"))
+        x.restore_state({"void_shape": "sphere"})
+        old_sphere = x.void_shape()
+        x.restore_state({"void_as": "sphere"})
+        new_sphere = x.void_shape()
+        x.restore_state({"void_shape": "ellipsoid"})
+        check("15. remembered under 'void_as' with the 3D tick; an old state's 'void_shape' sphere (the old default) is "
+              "not read back, its 'ellipsoid' is", st.get("void_as") == "sphere" and st.get("smooth3d") is False
+              and old_sphere == "ellipsoid" and new_sphere == "sphere" and x.void_shape() == "ellipsoid",
+              f"{st.get('void_as')} {old_sphere} {new_sphere}")
+        crowded_view(qa)
+    finally:
+        XV.SEARCH_ASK_S = real_ask
+        rs.dtfe_processes = real_procs
+        os.environ.pop("DTFE_FREE_GB", None)
+        x.shutdown()
+
+
+def crowded_view(qa):
+    """15. the 3D view with many voids (the whole box at the production smoothing holds some 250): past
+    explore_3d.CROWD_VOIDS, and not in a close-up, each void but the hovered and the inspected one a faint fill and a
+    dot; at the limit or in a close-up the outlines as before."""
+    from PySide6.QtGui import QImage
+    import explore_3d as X3
+    import view3d as V
+    L, m = 100.0, 32
+    rng = np.random.default_rng(9)
+    v = X3.View3D()
+    v.resize(420, 320)
+    v.show()
+    planes = []
+    for a in range(3):
+        vals = 0.25 + 0.1 * rng.random((m, m))
+        rgb, _ = G.colorize(np.ascontiguousarray(vals.T[::-1]), "magma", log=False, symmetric=False, vrange=(0.0, 1.0))
+        planes.append({"rgb": np.ascontiguousarray(rgb), "values": vals, "lo2": (0.0, 0.0), "hi2": (L, L),
+                       "pos": 50.0, "stride": 1})
+    v.style = "planes"
+    v.cam.perspective = False
+    v.set_scene(planes, np.zeros(3), np.full(3, L))
+    v.fit()
+    nv = X3.CROWD_VOIDS + 20
+    cen, rad = rng.uniform(10, 90, (nv, 3)), rng.uniform(3.0, 7.0, nv)
+
+    def voids(k):
+        return {"centres": cen[:k], "M": V.sphere_matrices(rad[:k]), "reach": rad[:k], "rows": np.arange(k),
+                "labels": [str(j) for j in range(k)], "r_eff": None, "box": L}
+
+    def picture():
+        v.repaint()
+        qa.processEvents()
+        img = v.grab().toImage().convertToFormat(QImage.Format_RGB888)
+        a_ = np.frombuffer(img.constBits(), np.uint8, img.height() * img.bytesPerLine())
+        return a_.reshape(img.height(), img.bytesPerLine())[:, :3 * img.width()].copy()
+    v.set_voids(None)
+    bare = picture()
+    v.set_voids(voids(nv))
+    crowd, many = v.crowded(), picture()
+    picked_many = len(v._outlines)
+    v.hover_row = 3
+    hovered = picture()
+    v.hover_row = None
+    v.focus = True
+    focus_crowd = v.crowded()
+    v.focus = False
+    v.set_voids(voids(X3.CROWD_VOIDS))
+    few = v.crowded()
+    picture()
+    check("15. the 3D view with many voids: past the limit (and not in a close-up) faint fills and dots, the view "
+          "still picks every one; the hovered one drawn in full; at the limit or in a close-up the outlines as before",
+          crowd and not focus_crowd and not few and not np.array_equal(bare, many) and picked_many == nv
+          and not np.array_equal(many, hovered) and len(v._outlines) == X3.CROWD_VOIDS,
+          f"{crowd} {focus_crowd} {few} {picked_many} {len(v._outlines)} {np.array_equal(bare, many)} "
+          f"{np.array_equal(many, hovered)}")
+    v.close()
 
 
 def view3d_pure():
@@ -1239,6 +1923,7 @@ def view3d_gui():
         check("10. the catalogue for the 3D view", ok and "error" not in res, str(res.get("error", ""))[:200])
         if "error" in res or not res:
             return
+        x.void3d_shape.setCurrentIndex(x.void3d_shape.findData("sphere"))   # the spheres' checks first (as before)
         o = x.current
         axis, index = x.axis.currentIndex(), x.index.value()
         check("10. the 3D view draws a volume by default (the planes one choice away), the planes' controls hidden; "
@@ -1350,24 +2035,27 @@ def view3d_gui():
         x.void3d_shape.setCurrentIndex(x.void3d_shape.findData("ellipsoid"))
         qa.processEvents()
         v3.repaint()
-        M = V.ellipsoid_matrices(semi, dirs)
+        dr = G.drawn_ellipsoids(res)                        # the ellipsoids drawn: at the mean density
+        M = V.ellipsoid_matrices(dr["semi"][rows], dr["dirs"][rows])
         u, w = V.outline_axes(v3.cam, M)
         drawn = {o[4]: o for o in v3._outlines}
-        check("10. 'fitted ellipsoids': every void drawn as its own ellipsoid (the outline its projection's), labelled "
-              "with its semi-axes; remembered", sorted(drawn) == rows
+        check("10. 'as ellipsoids': every void drawn as its ellipsoid at the mean density (the catalogue's semi-axes "
+              "times sqrt(|delta|/2), the outline its projection's), labelled with its semi-axes; remembered",
+              sorted(drawn) == rows and bool(dr["ok"][rows].all())
+              and np.allclose(dr["semi"][rows], semi * np.sqrt(np.abs(np.asarray(res["delta"], float)[rows]) / 2)[:, None])
               and all(np.allclose(drawn[k][2], u[j]) and np.allclose(drawn[k][3], w[j]) for j, k in enumerate(rows))
               and v3.voids["labels"][0].startswith(f"void {rows[0]} · a, b, c = ")
-              and x.state().get("void_shape") == "ellipsoid", f"{sorted(drawn)} {rows}")
+              and x.state().get("void_as") == "ellipsoid", f"{sorted(drawn)} {rows}")
         x.close_up_3d(k0)
         ok = wait_for(qa, lambda: not x._3d_busy and x._3d_close is not None
                       and x._3d_res["request"]["lo"][0] == x._3d_close["lo"][0], 30)
-        j0 = rows.index(k0)
-        lo_e, hi_e = V.close_up_window(c, res["_r_eff"][k0], float(cell.min()), float(res["box_mpc"]), semi[j0].max())
-        check("10. ... a close-up sized by R_eff, holding the whole ellipsoid; its neighbours drawn dim; the menu "
-              "sorted by R_eff", ok and np.allclose(x._3d_close["lo"], lo_e) and np.allclose(x._3d_close["hi"], hi_e)
+        lo_e, hi_e = V.close_up_window(c, res["_r_ell"][k0], float(cell.min()), float(res["box_mpc"]),
+                                       dr["semi"][k0].max())
+        check("10. ... a close-up sized by R_ell, holding the whole ellipsoid; its neighbours drawn dim; the menu "
+              "sorted by R_ell", ok and np.allclose(x._3d_close["lo"], lo_e) and np.allclose(x._3d_close["hi"], hi_e)
               and v3.focus and v3.selected == k0
               and [x.void3d.itemData(j) for j in range(1, x.void3d.count())]
-              == sorted(rows, key=lambda k: -res["_r_eff"][k]) and "R_eff" in x.void3d.itemText(1))
+              == sorted(rows, key=lambda k: -res["_r_ell"][k]) and "R_ell" in x.void3d.itemText(1))
         x.whole_box_3d()
         x.void3d_shape.setCurrentIndex(x.void3d_shape.findData("sphere"))
         wait_for(qa, lambda: not x._3d_busy and x._3d_close is None, 30)
@@ -1392,11 +2080,12 @@ def view3d_gui():
         qa.processEvents()
         hi_r = x.void_rmax.value()
         keep_v = [k for k in rows if r_v[k] <= hi_r]
-        circ_rows = {k for *_a, k in (x._void_circles() or [])}
+        circ_rows = {k for *_a, k in ((x._void_overlay() or {}).get("circles") or [])}
         check("10. Sizes: an upper bound keeps the voids of R_v up to it on the map (outlines, the figure grid's panels), "
               "the count says how many", list(x.void_rows(res)) == keep_v and 0 < len(keep_v) < len(rows)
               and circ_rows <= set(keep_v) and list(x._panel_voids(o)["rows"]) == keep_v
-              and x.void_count.text() == f"{len(keep_v)} of {len(rows)} voids", f"{keep_v} {circ_rows} {x.void_count.text()}")
+              and x.void_count.text() == f"{len(keep_v)} of {len(rows)} voids" + minima(res, rows),
+              f"{keep_v} {circ_rows} {x.void_count.text()}")
         x.view3d_toggle.setChecked(True)
         wait_for(qa, lambda: not x._3d_busy and x._3d_res is not None, 30)
         qa.processEvents()
@@ -1404,10 +2093,13 @@ def view3d_gui():
         check("10. ... and in the 3D view: the spheres and the menu", sorted(int(k) for k in v3.voids["rows"]) == keep_v
               and sorted(menu) == keep_v, f"{list(v3.voids['rows'])} {menu}")
         x.void3d_shape.setCurrentIndex(x.void3d_shape.findData("ellipsoid"))
+        x.void_rmax.setValue(float(np.mean(sorted(res["_r_ell"][rows])[:2])))   # between the two smallest R_ell
         qa.processEvents()
-        keep_e = [k for k in rows if r_eff[k] <= hi_r]
-        check("10. ... the ellipsoids by their R_eff (the size drawn), said in the count",
-              sorted(int(k) for k in v3.voids["rows"]) == keep_e and "(by R_eff)" in x.void_count.text(),
+        keep_e = [k for k in rows if res["_r_ell"][k] <= x.void_rmax.value()]
+        ov_rows = {o_[-1] for o_ in x._void_overlay()["ellipses"]} | {m[2] for m in x._void_overlay()["marks"]}
+        check("10. ... the ellipsoids by their R_ell (the size drawn), the same on the map and in the 3D view, said in "
+              "the count", sorted(int(k) for k in v3.voids["rows"]) == keep_e and 0 < len(keep_e) < len(rows)
+              and ov_rows <= set(keep_e) and "(by R_ell)" in x.void_count.text(),
               f"{list(v3.voids['rows'])} {keep_e} {x.void_count.text()}")
         x.void3d_shape.setCurrentIndex(x.void3d_shape.findData("sphere"))
         x.void_rmax.setValue(0.0)
@@ -1416,7 +2108,7 @@ def view3d_gui():
         v3.repaint()
         check("10. ... a range no void is in: none drawn, the menu says so, the view still paints",
               len(v3.voids["rows"]) == 0 and x.void3d.itemText(0) == "no void in the Sizes range" and v3._outlines == []
-              and x.void_count.text() == f"0 of {len(rows)} voids")
+              and x.void_count.text() == f"0 of {len(rows)} voids" + minima(res, rows))
         x.close_up_3d(k0)
         wait_for(qa, lambda: not x._3d_busy and x._3d_close is not None, 30)
         qa.processEvents()
@@ -1429,7 +2121,8 @@ def view3d_gui():
         x.view3d_toggle.setChecked(False)
         wait_for(qa, lambda: not x._busy, 30)
         check("10. ... no range: every distinct void again", list(x.void_rows(res)) == rows
-              and x.void_count.text() == f"all {len(rows)} voids")
+              and x.void_count.text() == f"all {len(rows)} voids" + minima(res, rows) and x.void_count.toolTip() != ""
+              and x.void_count.toolTip().count("\n") <= 1, x.void_count.text())
         check("10. the 3D texts carry no '--'; a 2D grid is refused with the reason",
               all("--" not in t for t in (X3.VIEW3D_TIP, X3.CLOSE_TIP))
               and X3.View3DMixin.view3d_applicable(type("Flat", (), {"dim": 2})()) == "only for 3D grids"
@@ -2656,6 +3349,39 @@ def gl_child():
                     name + "parts": len(X3.part_regions(plan, W, H))})
     print("GL-HALF " + json.dumps(res), flush=True)
     r.forget_cube()
+    # the contour shells (the Contours tick): narrow bands in the table, below the shown range -- the GPU's picture
+    # of them is QPainter's (both colour a cell by its level and then blend), orthographic and with the eye inside
+    import contours as CT
+    vals = np.ascontiguousarray(_gl_field(40, False)[:32, :36, :26])
+    lo, hi = np.zeros(3), np.array([32.0, 36.0, 26.0])
+    prep3 = VOL.prepare({"values": vals, "lo": lo, "hi": hi, "cells": vals.shape, "key": None}, True)
+    lv3 = prep3["levels"]
+    spec = tuple((float(lv3[k]), 120, 190, 255, 0.35, 1.5 * float(lv3[2] - lv3[1])) for k in (60, 85, 110)
+                 if lv3[k] < 0.0)
+    st3s = [VOL.slice_images(prep3["fine"], a_) for a_ in range(3)]
+    r.begin_upload("shells", prep3["fine"]["q"])
+    r.upload_step(float("inf"))
+    shells = {"n": len(spec), "cases": []}
+    for persp, notches in ((False, 0), (True, 0), (True, 14)):
+        cam = V.Camera(yaw=-35.0, pitch=25.0, width=W, height=H, perspective=persp)
+        cam.bounds = (lo, hi)
+        cam.fit(lo, hi)
+        for _ in range(notches):
+            cam.zoom(2.0 ** 0.25, 100.0, 90.0)
+        plan = VOL.slice_plan(cam, lo, hi, prep3["fine"]["shape"])
+        lut = VOL.transfer(lv3, 0.0, 0.8 * float(lv3[-1]), 0.6, float(np.round(plan["exponent"], 2)), G.lut("magma"),
+                           shells=spec)
+        lut0 = VOL.transfer(lv3, 0.0, 0.8 * float(lv3[-1]), 0.6, float(np.round(plan["exponent"], 2)), G.lut("magma"))
+        ref = _rgba64(X3.render_slices([np.ascontiguousarray(lut[s_]) for s_ in st3s], plan, W, H, 1.0))
+        ref0 = _rgba64(X3.render_slices([np.ascontiguousarray(lut0[s_]) for s_ in st3s], plan, W, H, 1.0))
+        gl = r.render(cam, lo, hi, plan, lut, W, H, deep=True).astype(np.float64) / 65535.0
+        d, off, seam, _ = off_by(gl, ref, cam, lo, hi, prep3["fine"]["shape"], plan, plan)
+        shells["cases"].append({"persp": persp, "notches": notches, "max_off_ties": float(d[off].max()),
+                                "mean": float(d.mean()), "seam_over": int((d[seam] > 1.5).sum()),
+                                "seams": int(seam.sum()), "changed": float((np.abs(ref - ref0).max(axis=2)
+                                                                             > 2.0 / 255).mean())})
+    print("GL-SHELLS " + json.dumps(shells), flush=True)
+    r.forget_cube()
     # the window's own picture: View3D's GPU frame against its volume_picture() (8 bits a channel on screen), the
     # fitted view and one zoomed into the window
     lo, hi = np.zeros(3), np.array([32.0, 36.0, 26.0])
@@ -2765,6 +3491,12 @@ def volume_gl_parity():
           and half["inside_max_off_ties"] <= 1.5 and half["inside_eye_in"] and half["inside_covered"] > 0.9
           and half["inside_seam_over"] <= 0.01 * half["inside_seams"] + 2,
           str(half))
+    sh = next((json.loads(ln[len("GL-SHELLS "):]) for ln in out.splitlines() if ln.startswith("GL-SHELLS ")), None)
+    check("14. the volume's contour shells on the GPU: its picture of the table with shells equals QPainter's within "
+          "1.5/255 off the slices' edges (orthographic, perspective, the eye inside), the shells changing the picture",
+          sh is not None and sh["n"] >= 2 and len(sh["cases"]) == 3
+          and all(c["max_off_ties"] <= 1.5 and c["mean"] <= 0.2 and c["changed"] > 0.01
+                  and c["seam_over"] <= 0.01 * c["seams"] + 2 for c in sh["cases"]), str(sh))
     if win is not None:
         check("11. ... and in the window: View3D's GPU frame (8 bits) is its volume_picture() within 1.5/255 off the "
               "slices' edges, the fitted view and one zoomed into the window (the eye inside)",
@@ -3404,6 +4136,39 @@ def mean_field_pure():
           and FieldSet(face, method="ps", prefix="ps_face").face_gradient
           and not FieldSet(face, method="ps", prefix="ps_plain").face_gradient,
           f"{face_o.face_gradient} {plain_o.face_gradient} {face_o.gradient_family('shear', 'stored')}")
+    # the stream average's twins a face-gradient run writes beside its family ('*Streams', docs/cleanup-plan.md D12)
+    # and its mass flux divergence are Explore fields: listed after the family, named the stream average, on a
+    # diverging scale, the vorticity's shown as the curl as the vorticity's is (here byte copies of the family's
+    # grids, so every component of a twin's map equals the family's)
+    twins = TMP / "mf twins"
+    twins.mkdir(exist_ok=True)
+    for p in face.glob("ps_face.*"):
+        shutil.copy(p, twins / p.name.replace("ps_face", "ps_tw", 1))
+    for sfx in ("velGrad", "velShear", "velVort"):
+        shutil.copy(twins / f"ps_tw.a_{sfx}", twins / f"ps_tw.a_{sfx}Streams")
+    shutil.copy(twins / "ps_tw.a_velDiv", twins / "ps_tw.a_massFluxDiv")
+    tw_o = G.OutputSet(twins / "ps_tw", box=ps_o.box, redshift=ps_o.redshift)
+    tw_names = ("divergence_streams", "vorticity_streams", "shear_streams", "gradient_streams")
+    tw_fields = tw_o.fields()
+    tw_same = all(np.array_equal(tw_o.slice(f"{fam}_streams", axis, 9, comp), tw_o.slice(fam, axis, 9, comp))
+                  for fam, comps in (("divergence", ("value",)), ("vorticity", ("norm", "x", "z")),
+                                     ("shear", ("1", "4")), ("gradient", ("trace (divergence)", "xy", "zx")))
+                  for comp in comps for axis in (0, 2))
+    check("9. a face-gradient output's stream-average twins ('.a_velDivStreams', '.a_velGradStreams', "
+          "'.a_velShearStreams', '.a_velVortStreams') and its '.a_massFluxDiv' are Explore fields: after the family "
+          "in the menu, named the stream average, on a diverging scale, the vorticity twin as the curl with arrows "
+          "(every component the family's map of the same bytes); no '--' in their names or tips",
+          tw_o.face_gradient and all(n in tw_fields for n in tw_names) and "mass_flux_divergence" in tw_fields
+          and max(tw_fields.index(f) for f in ("divergence", "vorticity", "shear", "gradient"))
+          < min(tw_fields.index(n) for n in tw_names)
+          and all(G.FIELD_LABELS[n].endswith(f"({G.GRADIENT_QUALIFIER['stream']})") for n in tw_names)
+          and all(n in G.DIVERGING for n in tw_names + ("mass_flux_divergence",))
+          and "vorticity_streams" in G.VECTOR_FIELDS
+          and tw_o.gradient_family("divergence_streams", "mean-field") == ""
+          and tw_o.files["gradient_streams"].ncomp == 9 and tw_o.files["shear_streams"].ncomp == 5
+          and tw_same and not any("--" in G.FIELD_LABELS[n] + G.FIELD_HELP.get(n, "")
+                                  for n in tw_names + ("mass_flux_divergence",)),
+          str(tw_fields))
     # a job running: the cube cache capped below the velocity cube -> slabs from the file, nothing cached whole
     real_run, real_get = G.RUN_CUBE_BYTES, G._SlabFile.__getitem__
     slabs = []
@@ -3780,29 +4545,29 @@ def keep_slice():
             x._server_running, x._server_output = False, None
             x._to_zoom.disconnect(spy)
             x._to_zoom.connect(x._server.zoom)
-        # 'exact' ticked: a switch never starts an exact run nor asks about one (stepping through
+        # exact cell averages chosen: a switch never starts an exact run nor asks about one (stepping through
         # redshifts would otherwise ask, or run PS-DTFE over a whole snapshot, at every step); a drag does
         calls, asked = [], []
         x._exact_zoom = lambda *a: calls.append(a)
         x.confirm_exact = lambda text: (asked.append(text), False)[1]
-        x.zoom_exact.setChecked(True)
+        x.zoom_kind.set_value("exact")
         try:
             ok = pick(x.prefix_combo, str(p50.root))      # ps_output of 050: no zoom of the window in memory
             st = x.zoom_state.text()
-            check("7. ... 'exact' ticked: no exact run started or asked about by the switch, the window kept and the "
-                  "zoom line says to drag it again",
+            check("7. ... exact cell averages chosen: no exact run started or asked about by the switch, the window "
+                  "kept and the zoom line says to drag it again",
                   ok and not calls and not asked and not x.is_zoomed() and at() == (0, N // 2)
                   and st.startswith(E.KEPT_ZOOM_TEXT) and "drag the window again" in st, f"{calls} {st!r}")
         finally:
             del x._exact_zoom
             x.confirm_exact = None
-            x.zoom_exact.setChecked(False)
+            x.zoom_kind.set_value("point")
         ok = pick(x.prefix_combo, str(d50.root))
         check("7. ... flipping back to an output zoomed a moment ago: its zoom from memory at once",
               ok and x.is_zoomed() and x._zoom_fields is f50 and x.current.prefix == "output")
         pick(x.prefix_combo, str(p50.root))               # not shown here: said in the zoom line
-        x._dragged(2, 2, 10, 10)                          # no server, 'exact' off: no zoom made
-        check("7. a drag that makes no zoom (no server, 'exact' off) leaves the kept window and its line",
+        x._dragged(2, 2, 10, 10)                          # no server, point values: no zoom made
+        check("7. a drag that makes no zoom (no server, point values) leaves the kept window and its line",
               bool(x._keep.get("zoom")) and x.zoom_state.text().startswith(E.KEPT_ZOOM_TEXT), x.zoom_state.text())
         x.index.setValue(x.index.value() + 1)             # a slice chosen by hand: the window goes with the old one
         shown()
@@ -4222,7 +4987,7 @@ def short_tooltips():
         dlg.deleteLater()
         whole = {x.view3d_toggle: X3.VIEW3D_TIP, x.view3d_style: X3.STYLE_TIP, x.view3d_detail: X3.DETAIL_TIP,
                  x.void3d_shape: X3.SHAPE_TIP, x.voids: E.VOID_TIP, x.ps_gradient: E.PS_GRADIENT_TIP,
-                 x.grid_merge: E.GRID_MERGE_TIP, x.zoom_exact: x.zoom_exact.whatsThis()}
+                 x.grid_merge: E.GRID_MERGE_TIP, x.zoom_kind.button("exact"): E.ZOOM_EXACT_TIP}
         check("every Explore and 3D-view tooltip takes at most two lines (the map, the voids, the 3D view's volume and "
               "planes, the Save options dialog)", not long_tips and len(states) == 5, f"{states} {long_tips}")
         # (the merge tick, greyed out for panels of different boxes, says so first)
@@ -4282,6 +5047,31 @@ def explore_details():
         check("the Save buttons (still the view's save_btn and save_opts_btn) sit in the left pane's Map group",
               x.isAncestorOf(view.save_btn) and x.isAncestorOf(view.save_opts_btn)
               and not view.isAncestorOf(view.save_btn) and view.save_btn.isVisibleTo(x) and view.save_btn.isEnabled())
+        # the zoom's two kinds, by what they compute (both exact in their way: not Fast/Exact): point values from the
+        # query server at once, the default, or the exact cell averages of a run on the region; the Streams group has
+        # no residency control (the binary fits its partitions in memory)
+        zk = x.zoom_kind
+        check("the Zoom group's pair reads 'Point values (instant)' (the default) and 'Exact cell averages "
+              "(recompute)'; no 'exact' tick and no 'Partitions in memory' control are left",
+              [b.text() for b in zk.radios] == ["Point values (instant)", "Exact cell averages (recompute)"]
+              and zk.value() == "point" and zk.radios[0].isChecked() and zk.isVisibleTo(x)
+              and zk.button("point").toolTip() and zk.button("exact").toolTip()
+              and not [w for w in x.findChildren(QCheckBox) if w.text().lower() == "exact"]
+              and not [w for w in x.findChildren(QLabel) if "Partitions in memory" in w.text()]
+              and not hasattr(x, "zoom_exact") and not hasattr(x, "resident"),
+              str([b.text() for b in zk.radios]))
+        calls = []
+        x._exact_zoom = lambda *a: calls.append(a)
+        try:
+            x._dragged(2, 2, 10, 10)                  # point values without a server: no exact run
+            n_point = len(calls)
+            zk.set_value("exact")
+            x._dragged(2, 2, 10, 10)                  # exact cell averages: the drag runs the program on the region
+            check("... a drag with point values and no server starts no run; with exact cell averages it starts the "
+                  "exact zoom", n_point == 0 and len(calls) == 1, f"{n_point} {len(calls)}")
+        finally:
+            del x._exact_zoom
+            zk.set_value("point")
         o = x.current
         args = (o, 2, 32, [0, 1], (10.0, 20.0), (30.0, 40.0), 64)
         m = x.exact_zoom_plan(*args)
@@ -4301,9 +5091,971 @@ def explore_details():
         x.shutdown()
 
 
+def contours_pure():
+    """13. the contour lines' pure parts (contours.py): marching squares on fields with a known answer, the block
+    averaging, the levels fixed by the colour range (not by the layer), the class maps, the lines' colours."""
+    import contours as CT
+    print("contour lines (pure)")
+    n = 101
+    i, j = np.meshgrid(np.arange(n, dtype=float), np.arange(n, dtype=float), indexing="ij")
+    r = np.hypot(i - 50.3, j - 49.6)
+    s = CT.segments(r, 20.0)
+    d = np.hypot(s[..., 0] - 50.3, s[..., 1] - 49.6)
+    _u, cnt = np.unique(s.reshape(-1, 2), axis=0, return_counts=True)
+    pts = s.reshape(-1, 2)
+    c = (pts.max(axis=0) + pts.min(axis=0)) / 2.0
+    check("13. a radial field's level is a circle of that radius about its centre, closed (every end shared by two "
+          "pieces, to the last bit)", s.shape[0] > 100 and float(np.abs(d - 20.0).max()) < 0.02
+          and bool((cnt == 2).all()) and float(np.hypot(c[0] - 50.3, c[1] - 49.6)) < 0.05,
+          f"{s.shape} {np.abs(d - 20).max()} {np.bincount(cnt)} {c}")
+    p = 0.3 * i + 0.7 * j
+    s2 = CT.segments(p, 30.0)
+    _u2, c2 = np.unique(s2.reshape(-1, 2), axis=0, return_counts=True)
+    ends = _u2[c2 == 1]
+    check("13. a plane's level is a straight line, open: two ends, both on the array's border",
+          float(np.abs(0.3 * s2[..., 0] + 0.7 * s2[..., 1] - 30.0).max()) < 1e-9 and len(ends) == 2
+          and all(min(e[0], e[1], n - 1 - e[0], n - 1 - e[1]) < 1e-9 for e in ends), f"{len(ends)} {ends}")
+    check("13. a level outside the values gives nothing; so do a level at NaN and a 1-wide array",
+          CT.segments(r, 1e3).shape == (0, 2, 2) and CT.segments(r, -1.0).shape == (0, 2, 2)
+          and CT.segments(r, float("nan")).shape == (0, 2, 2) and CT.segments(r[:1], 5.0).shape == (0, 2, 2))
+    holed = r.copy()
+    holed[69:72, 48:51] = np.nan                           # on the circle: a ratio map's grey, no piece around it
+    s3 = CT.segments(holed, 20.0)
+    near = (s3[..., 0] > 68.0) & (s3[..., 0] < 72.0) & (s3[..., 1] > 47.0) & (s3[..., 1] < 51.0)
+    check("13. a cell with a NaN corner has no piece; the rest of the line stays", len(s3) < len(s) and len(s3) > 100
+          and not bool(near.all(axis=1).any()), f"{len(s3)} {len(s)}")
+    sad = CT.segments(np.array([[1.0, 0.0], [0.0, 1.0]]), 0.5)
+    sad_up = CT.segments(np.array([[1.0, 0.0], [0.0, 1.2]]), 0.5)
+    sad_dn = CT.segments(np.array([[1.0, 0.0], [0.0, 0.9]]), 0.6)
+    check("13. a saddle cell gives two pieces, paired by its centre (the corners' mean above or below the level)",
+          sad.shape == (2, 2, 2) and sad_up.shape == (2, 2, 2) and sad_dn.shape == (2, 2, 2)
+          and not np.allclose(np.sort(sad_up.reshape(-1, 4), axis=0), np.sort(sad_dn.reshape(-1, 4), axis=0)))
+    big = np.hypot(*np.meshgrid(np.arange(1030.0) - 515.2, np.arange(1030.0) - 500.7, indexing="ij"))
+    small, c0, c1 = CT.reduced(big, 512)
+    sb = CT.plane_segments(big, [200.0], 512)[0]
+    db = np.hypot(sb[..., 0] - 515.2, sb[..., 1] - 500.7)
+    check("13. a plane wider than MAX_SIDE is contoured on block means (blocks of 3, the last one shorter), the "
+          "lines back in the full plane's coordinates: the circle of radius 200 stays one",
+          small.shape == (344, 344) and c0[0] == 1.0 and c0[1] == 4.0 and c0[-1] == 1029.0
+          and abs(small[0, 0] - big[:3, :3].mean()) < 1e-9 and abs(small[-1, -1] - big[1029, 1029]) < 1e-9
+          and float(np.abs(db - 200.0).max()) < 0.2 and len(sb) > 300,
+          f"{small.shape} {c0[:2]} {c0[-1]} {np.abs(db - 200).max()}")
+    # the levels
+    lv = CT.levels("density", (-0.8, 0.4), log=True)
+    below, above = lv[lv < 0], lv[lv > 0]
+    check("13. the density's levels (log map): round steps in log10, three quarters below the mean (every 0.05 "
+          "from -0.75), the mean itself, every 0.1 above it; the range's ends are no level",
+          0.0 in lv and np.allclose(below, np.arange(-0.75, -0.04, 0.05)) and np.allclose(above, [0.1, 0.2, 0.3])
+          and lv.min() > -0.8 and lv.max() < 0.4, f"{lv}")
+    lin = CT.levels("density", (0.15, 2.6), log=False)
+    check("13. ... on a linear map the mean rho/rho_bar = 1 and its steps in rho/rho_bar",
+          1.0 in lin and np.allclose(np.diff(lin[lin <= 1.0]), 0.05) and lin.min() >= 0.2, f"{lin}")
+    a, b = CT.levels("density", (-0.80, 0.40), True), CT.levels("density", (-0.78, 0.43), True)
+    both = np.intersect1d(a, b)
+    check("13. a range that drifts a little (the next layer's percentiles) keeps every line on the same value",
+          len(both) >= len(a) - 1 and np.array_equal(both, a[np.isin(a, b)]), f"{a} {b}")
+    # the log10 ranges the synthetic root's z-slices take (their own 1-99 % percentiles): far apart, so the steps
+    # differ, and on each side of the mean the coarser layer's lines inside both ranges are among the finer one's
+    ranges = [(-0.086, 0.018), (-0.16, 0.019), (-0.372, 0.017), (-0.256, 0.013), (-0.44, 0.009), (-0.631, 0.006),
+              (-0.683, 0.005), (-0.492, 0.006), (-0.192, 0.008), (-0.25, 0.017), (-0.501, 0.018), (-1.9, 1.7),
+              (-1.2, 2.4), (-0.9, 0.9)]
+    bad, steps = [], set()
+    for ra in ranges:
+        for rb in ranges:
+            pa, pb = CT.level_plan("density", ra, True), CT.level_plan("density", rb, True)
+            lo_, hi_ = max(ra[0], rb[0]), min(ra[1], rb[1])
+            for side, key in ((-1, "below"), (1, "above")):
+                steps.add(pa[key])
+                la = [v for v in pa["levels"] if lo_ < v < hi_ and v * side > 0]
+                lb = [v for v in pb["levels"] if lo_ < v < hi_ and v * side > 0]
+                coarse, fine = (la, lb) if pa[key] >= pb[key] else (lb, la)
+                if not set(coarse) <= set(fine):
+                    bad.append((ra, rb, side))
+    check("13. layers whose ranges differ enough for other steps (1 and 5 x 10^k) still agree: a line on two layers "
+          "is the same value on both", not bad and len(steps) >= 3, f"{bad[:3]} {sorted(steps)}")
+    p1, p2 = 1.0 + np.random.default_rng(1).normal(size=(40, 40)), np.full((40, 40), 3.0)
+    l1 = CT.map_lines(p1, "divergence", (-2.0, 2.0))
+    l2 = CT.map_lines(p2, "divergence", (-2.0, 2.0))
+    check("13. the levels come from the range alone, not from the layer's values; a diverging map has its 0",
+          l1 is not None and np.array_equal(l1["levels"], CT.levels("divergence", (-2.0, 2.0)))
+          and np.array_equal(CT.levels("divergence", (-2.0, 2.0)), CT.level_plan("divergence", (-2, 2))["levels"])
+          and 0.0 in l1["levels"] and l2 is not None and np.array_equal(l2["levels"], l1["levels"])
+          and all(s_.size == 0 for s_ in l2["segments"]), f"{l1 and l1['levels']}")
+    st = CT.levels("streams", (1.0, 9.0))
+    check("13. the stream count: lines at the even counts inside the range (2 = the edge of the single-stream "
+          "regions)", list(st) == [2.0, 4.0, 6.0, 8.0] and CT.levels("streams", (1.0, 2.0)).size == 0, f"{st}")
+    check("13. no contours on a class map (T-web, V-web, caustic flags) or with a discrete colour map; any other "
+          "field may", all(CT.why_not(f) for f in ("tweb", "vweb", "caustic", "caustic_class", "hidden_streams"))
+          and CT.why_not("density", "tab10") and not CT.why_not("density", "magma") and not CT.why_not("streams")
+          and CT.map_lines(p1, "tweb", (0.0, 3.0)) is None
+          and CT.map_lines(p1, "density", (-1.0, 2.0), cmap="tab10") is None
+          and not CT.why_not("divergence", "RdBu_r", compare=True) and CT.why_not("vweb", "RdBu_r", compare=True))
+    col = CT.colours([-0.7, 0.05, 0.3], (-0.8, 0.4), "magma")
+    mid = CT.colours([0.0], (-1.0, 1.0), "RdBu_r")
+    check("13. each line in the colour that shows on the map there: white over magma's dark voids, black over its "
+          "light peaks and RdBu_r's pale middle; 70 % opaque", np.allclose(col[0], [1, 1, 1, 0.7])
+          and np.allclose(col[2], [0, 0, 0, 0.7]) and np.allclose(mid[0], [0, 0, 0, 0.7]), f"{col} {mid}")
+    seg = {"segments": [np.array([[[0.0, 0.0], [2.0, 3.0]]])], "shape": (5, 8)}
+    im = CT.image_segments(seg)[0]
+    check("13. array point (i, j) is image pixel (i + 0.5, n1 - j - 0.5): the map's plane.T[::-1]",
+          np.allclose(im, [[[0.5, 7.5], [2.5, 4.5]]]) and np.allclose(CT.image_segments(seg, 2.0, 0.5)[0],
+                                                                       [[[1.0, 3.75], [5.0, 2.25]]]), f"{im}")
+    import figsave as FS
+    check("13. a saved map carries the lines when the options keep an overlay: every preset but Bare image",
+          CT.in_saves(FS.options()) and CT.in_saves(FS.preset("publication")) and not CT.in_saves(FS.preset("bare"))
+          and CT.in_saves(dict(FS.options(), arrows=False)))
+
+
+# the colour ranges (1-99 %) of real slices where the level slider's ends are tightest (TNG300-3-Dark 099, ps_output,
+# 512^3, axis x, eight layers, the map's smoothing 0, 4 and 10 cells): per field the fewest lines at the coarsest end
+# and the most at the finest
+REAL_RANGES = (("density", (-1.105, 1.247), True), ("density", (-1.046, 0.999), True),
+               ("density", (0.152, 6.517), False), ("density", (0.033, 10.654), False),
+               ("divergence", (-43.058, 43.058), False), ("divergence", (-133.253, 133.253), False),
+               ("velocity", (69.242, 1017.835), False), ("velocity", (86.692, 931.0), False))
+
+
+def contours_detail_pure():
+    """13. the level slider (contours' 'detail'): dozens of positions, its default the rule's own levels; each
+    position right a slightly closer spacing (one factor on every step, the same on every layer), so the count grows
+    with it; the coarsest still draws two lines on any range, the finest a bounded number; at any position the levels
+    stay nested (a line on two layers whose ranges drift is the same value), multiples of the spacing from the anchor,
+    and the density keeps most of them below its mean and the mean itself; an old saved stop maps to the nearest
+    position; the 3D volume's shells follow it within their own rule."""
+    import contours as CT
+    import volume3d as VOL
+    print("contour level slider (pure)")
+    dets = list(range(CT.DETAIL_MIN, CT.DETAIL_MAX + 1))
+    fac = {f_: [CT.factor(d_, f_) for d_ in dets] for f_ in ("density", "divergence")}
+    i0 = dets.index(CT.DETAIL)
+    even = all(np.allclose(np.diff(1.0 / np.asarray(f_[:i0 + 1])), (1.0 - 1.0 / f_[0]) / i0)
+               and np.allclose(np.diff(1.0 / np.asarray(f_[i0:])), (1.0 / f_[-1] - 1.0) / (len(dets) - 1 - i0))
+               for f_ in fac.values())
+    check("13. the level slider has at least 40 positions; at its default the factor on the rule's steps is exactly "
+          "1; each position right a slightly smaller spacing (by under 10 % a step), the lines per unit of the "
+          "colour scale (1 / factor) in even steps either side of the default, for the density and any other field",
+          len(dets) >= 40 and CT.DETAIL == 0 and CT.factor(0, "density") == 1.0 == CT.factor(0) and even
+          and all(1.0 < a_ / b_ < 1.10 for f_ in fac.values() for a_, b_ in zip(f_, f_[1:])),
+          f"{len(dets)} {even} {[round(a_ / b_, 4) for a_, b_ in zip(fac['density'], fac['density'][1:])][:5]}")
+    rng = np.random.default_rng(5)
+    same, rising, ends, dips, nested, anchored, mean_in, bad_ends = True, True, True, [], True, True, True, []
+    shares = {d_: [] for d_ in (CT.DETAIL_MIN, CT.DETAIL_MIN // 2, 0, CT.DETAIL_MAX)}
+    for _ in range(300):
+        lo, hi = -rng.uniform(0.05, 2.5), rng.uniform(0.05, 3.0)
+        maps = (("density", (lo, hi), True, 0.0), ("density", (10.0 ** lo, 10.0 ** hi), False, 1.0),
+                ("divergence", (-300.0 * hi, 300.0 * hi), False, 0.0), ("velocity", (0.0, 500.0 * hi), False, 0.0),
+                ("velocity", (100.0 * hi, 900.0 * hi), False, None))
+        for field, vr, log, anchor in maps:
+            same &= np.array_equal(CT.levels(field, vr, log), CT.levels(field, vr, log, detail=0))
+            n = [CT.levels(field, vr, log, detail=d_).size for d_ in dets]
+            n0 = n[dets.index(0)]
+            # (a ladder of floor(x) lines has at most (floor(x) + 1) / FINEST at the finest: two ladders and the mean)
+            if not (n[0] >= 2 and n[0] < n0 <= n[-1] <= (n0 + 1) / CT.FINEST + 1 and (n0 < n[-1] or n0 < 8)):
+                ends = False
+                bad_ends.append((field, vr, n[0], n0, n[-1]))
+            drop = [a_ - b_ for a_, b_ in zip(n, n[1:]) if b_ < a_]
+            if drop:                                # a line fewer only where 0, the anchor, lies outside the range
+                dips.append((field, vr, max(drop)))
+                rising &= anchor is None and max(drop) <= 1
+            for d_ in dets[::6] + [CT.DETAIL_MAX]:
+                p_ = CT.level_plan(field, vr, log, detail=d_)
+                lv = p_["levels"]
+                if field == "density":
+                    mean_in &= p_["mean"] == anchor and anchor in lv
+                    sp = np.concatenate([(anchor - lv[lv < anchor]) / p_["below"], (lv[lv > anchor] - anchor)
+                                         / p_["above"]])
+                else:
+                    sp = (lv - (anchor or 0.0)) / p_["step"]
+                anchored &= bool(np.all(np.abs(sp - np.round(sp)) < 1e-6))
+                if field == "density" and log and d_ in shares and (lv != 0.0).sum() >= 4:
+                    shares[d_].append(float((lv < 0.0).sum() / (lv != 0.0).sum()))
+            if field == "density" and log:
+                lo2, hi2 = lo * rng.uniform(0.7, 1.4), hi * rng.uniform(0.7, 1.4)
+                for d_ in dets[::3]:
+                    p1 = CT.level_plan(field, (lo, hi), True, detail=d_)
+                    p2 = CT.level_plan(field, (lo2, hi2), True, detail=d_)
+                    for P, Q, (l_, h_) in ((p1, p2, (lo2, hi2)), (p2, p1, (lo, hi))):
+                        for key, side in (("below", -1), ("above", 1)):
+                            if P[key] >= Q[key]:        # the coarser layer's lines are among the finer's
+                                sub = P["levels"][(P["levels"] > l_ + 1e-9) & (P["levels"] < h_ - 1e-9)
+                                                  & (P["levels"] * side > 0)]
+                                nested &= bool(np.all(np.isin(sub, Q["levels"])))
+    med = {d_: float(np.median(v_)) for d_, v_ in shares.items() if v_}
+    check("13. ... its default draws the rule's own levels (the round's pictures unchanged); the count grows with "
+          "it: never a line fewer a position right on the density (log and linear), a diverging map and the speed "
+          "from 0, at most one where the range does not hold 0 (the speed from 100: multiples of a spacing in a "
+          "range away from the anchor) (300 ranges each)",
+          same and rising, f"{dips[:3]}")
+    check("13. ... the coarsest draws two lines or more and fewer than the default; the finest more than the default "
+          "(where that has 8 or more: a diverging map of 7 gains its lines in pairs, never fewer) and at most 1 / "
+          "FINEST times its lines (each ladder rounded up by one)", ends, f"{bad_ends[:3]}")
+    check("13. ... at every position the levels are multiples of the spacing from the anchor (the mean, else 0); the "
+          "density's mean is always a level", anchored and mean_in)
+    check("13. ... and they stay nested: a line on two layers whose ranges drift is the same value (bit for bit)",
+          nested)
+    check("13. ... the density keeps about three quarters of its lines below the mean (the median share over 300 "
+          "ranges) at either end and between", all(0.65 <= v_ <= 0.85 for v_ in med.values()) and len(med) == 4,
+          f"{med}")
+    worst = []                                      # ranges that make _nice_step round its step up the most (sqrt 5)
+    for k_ in range(-3, 4):
+        L_ = np.sqrt(5.0) * 1.0001 * 10.0 ** k_
+        worst += [("divergence", (-6.0 * L_, 6.0 * L_), False), ("velocity", (0.0, 12.0 * L_), False),
+                  ("velocity", (7.0, 7.0 + 12.0 * L_), False), ("density", (-20.0 * L_ - 0.01, -0.01), True),
+                  ("density", (-15.0 * L_, 5.0 * L_), True)]
+    low = [(f_, vr_, CT.levels(f_, vr_, l_, detail=CT.DETAIL_MIN).size) for f_, vr_, l_ in worst]
+    check("13. ... two lines or more at the coarsest even where the rule's step is rounded up the most (a step of "
+          "sqrt(5) times the range's share: the coarsest ends are set by it)", all(c_ >= 2 for _f, _v, c_ in low),
+          f"{[w_ for w_ in low if w_[2] < 2]}")
+    real = [(CT.levels(f_, vr_, l_, detail=CT.DETAIL_MIN).size, CT.levels(f_, vr_, l_, detail=CT.DETAIL_MAX).size,
+             CT.levels(f_, vr_, l_).size) for f_, vr_, l_ in REAL_RANGES]
+    check("13. ... on real slices' ranges (TNG300-3-Dark 512³, smoothing 0 to 10 cells; the density log and linear, "
+          "the divergence, the speed) the coarsest draws 3 lines or more, the finest more than the default and at "
+          "most 1 / FINEST times its lines",
+          all(a_ >= 3 and n_ < b_ <= (n_ + 1) / CT.FINEST + 1 for a_, b_, n_ in real), f"{real}")
+    olds = {s_: CT.from_stop(s_) for s_ in (-2, -1, 0, 1)}
+    check("13. ... an old saved stop (rungs: -2..+1) maps to the nearest position: -2 (ten times coarser) the "
+          "coarsest, 0 the default, +1 the finest, -1 between",
+          olds[-2] == CT.DETAIL_MIN and olds[0] == 0 and olds[1] == CT.DETAIL_MAX and CT.DETAIL_MIN < olds[-1] < 0
+          and abs(np.log(CT.factor(olds[-1], "density") / 10.0 ** 0.5)) < 0.05, f"{olds}")
+    s5 = CT.levels("streams", (1.0, 41.0), False)
+    s27 = {d_: CT.levels("streams", (1.0, 27.0), False, detail=d_).size for d_ in (CT.DETAIL_MIN, 0, CT.DETAIL_MAX)}
+    check("13. ... the stream count: about MAX_STREAM_LINES of its even counts at the default (1 to 41 streams), "
+          "more at the finest, fewer at the coarsest (1 to 27: 13 even counts, every other one at the default), "
+          "never an odd count",
+          s5.size <= CT.MAX_STREAM_LINES and s27[CT.DETAIL_MIN] < s27[0] <= CT.MAX_STREAM_LINES < s27[CT.DETAIL_MAX]
+          and all(np.all(CT.levels("streams", vr_, False, detail=d_) % 2 == 0) for d_ in dets
+                  for vr_ in ((1.0, 41.0), (1.0, 27.0))), f"{s5.size} {s27}")
+    _rho, prep = _two_dips()
+    some = (CT.DETAIL_MIN, CT.DETAIL_MIN // 2, 0, CT.DETAIL_MAX // 2, CT.DETAIL_MAX)
+    plans = {d_: CT.shell_plan("density", prep["levels"], prep["counts"], 0.0, log=True,
+                               slopes=VOL.level_slopes(prep), cells=48, detail=d_) for d_ in some}
+    okp = True
+    for d_, sh_ in plans.items():
+        if sh_ is None:
+            continue
+        lv_map = CT.levels("density", (float(prep["levels"][1]), float(prep["levels"][-1])), True, detail=d_)
+        okp &= (sh_["levels"].size <= CT.N_SHELLS and bool(np.all(sh_["levels"] < 0.0))
+                and bool(np.all(np.isin(sh_["levels"], lv_map))))
+    check("13. ... the 3D volume's shells at any position: among the map's levels there, on the void side, at "
+          "most N_SHELLS (their own choice keeps working)", okp and plans[0] is not None
+          and plans[CT.DETAIL_MAX] is not None,
+          str({d_: (p_ and p_["levels"].tolist()) for d_, p_ in plans.items()}))
+
+
+def _two_dips(m: int = 48, sigma: float = 5.0):
+    """A density cube (m^3, cells of 1 Mpc from 0) of two Gaussian dips about (14, 24, 24) and (34, 24, 24), down to
+    rho/rho_bar = 0.1, on 1 -- a ridge between them at 0.76 -- and its prepared levels (log scale)."""
+    import volume3d as VOL
+    ii = np.indices((m, m, m)).astype(np.float64) + 0.5
+    rho = np.ones((m, m, m))
+    for c in ((14.0, 24.0, 24.0), (34.0, 24.0, 24.0)):
+        rho -= 0.9 * np.exp(-0.5 * sum((ii[k] - c[k]) ** 2 for k in range(3)) / sigma ** 2)
+    lo, hi = np.zeros(3), np.full(3, float(m))
+    prep = VOL.prepare({"values": rho.astype(np.float32), "lo": lo, "hi": hi, "cells": (m,) * 3, "key": None}, True)
+    return rho, prep
+
+
+def contours_3d_pure():
+    """14. the contours in the 3D view, their pure parts: the planes' line pieces cut to a quad and mapped to the
+    screen, their opaque colour; the volume's shells -- the transfer function unchanged without them and changed only
+    in their bands with them, their levels (the map's rule on the volume's range, where it is clear, the density's
+    void side, round, nested, at most four; in a close-up from the void's own floor), the field's slope per level,
+    a void's basin, and a close-up's copy of the levels with the shells of that basin only."""
+    import contours as CT
+    import view3d as V
+    import volume3d as VOL
+    print("contours in the 3D view (pure)")
+    seg = np.array([[[1.0, 1.0], [3.0, 2.0]], [[-2.0, 1.0], [2.0, 3.0]], [[-3.0, 1.0], [-1.0, 2.0]],
+                    [[5.0, -1.0], [5.0, 9.0]], [[0.5, 6.0], [0.5, 2.0]]])
+    cut = CT.clip_segments(seg, 0.0, 0.0, 4.0, 4.0)
+    check("14. a quad's part of its plane's lines: a piece inside kept as it is, one crossing the edge cut there "
+          "(x = 0 at y = 2), ones outside dropped, one leaving through the top cut at y = 4",
+          len(cut) == 3 and np.allclose(cut[0], seg[0]) and np.allclose(cut[1], [[0.0, 2.0], [2.0, 3.0]])
+          and np.allclose(cut[2], [[0.5, 4.0], [0.5, 2.0]]) and CT.clip_segments(np.zeros((0, 2, 2)), 0, 0, 1, 1).shape
+          == (0, 2, 2), f"{cut}")
+    T9 = (2.0, 0.5, 0.0, -0.25, 3.0, 0.0, 10.0, 20.0, 1.0)                 # affine: x' = 2x - .25y + 10, ...
+    on = V.segments_on_screen(np.array([[[1.0, 2.0], [4.0, 3.0]]]), T9, 400, 300)
+    P9 = (1.0, 0.0, 0.01, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)                    # w = 1 + 0.01 x: behind the eye for x < -100
+    behind = V.segments_on_screen(np.array([[[10.0, 5.0], [20.0, 6.0]], [[-50.0, 1.0], [-150.0, 1.0]]]), P9, 400, 300)
+    check("14. ... mapped to the screen by the plane's map (a homography: each end divided by its w); a piece with an "
+          "end behind the eye, or far past the view, left out",
+          np.allclose(on[0], [[11.5, 26.5], [17.25, 31.0]]) and len(behind) == 1
+          and np.allclose(behind[0], [[10.0 / 1.1, 5.0 / 1.1], [20.0 / 1.2, 6.0 / 1.2]]), f"{on} {behind}")
+    sc = CT.solid_colours([-0.7, 0.3], (-0.8, 0.4), "magma")
+    under = G.lut("magma")[[int(round(0.1 / 1.2 * 255)), int(round(1.1 / 1.2 * 255))]] / 255.0
+    check("14. a 3D plane's line colour: the map's line (white over dark, black over light) laid at 70 % over the "
+          "map's own colour at its level, opaque", np.allclose(sc[0], 0.7 + 0.3 * under[0])
+          and np.allclose(sc[1], 0.3 * under[1]), f"{sc}")
+    # the volume's shells
+    rho, prep = _two_dips()
+    lv, cnt = prep["levels"], prep["counts"]
+    plain = VOL.transfer(lv, 0.0, 0.5, 0.3, 1.3, G.lut("magma"))
+    check("14. the transfer function without shells is the very same table (None, or none given); the shells' "
+          "opacity is per the volume's own reference cell", CT.REF_CELLS == VOL.REF_CELLS
+          and np.array_equal(VOL.transfer(lv, 0.0, 0.5, 0.3, 1.3, G.lut("magma"), shells=None), plain))
+    sh = CT.shell_plan("density", lv, cnt, 0.0, log=True, slopes=VOL.level_slopes(prep), cells=48)
+    step = sh["step"] if sh else 0.0
+    m_ = np.round(-sh["levels"] / sh["spacing"], 6) if sh else np.zeros(1)
+    order = np.argsort(lv[1:])
+    under_ = np.interp(sh["levels"], lv[1:][order], np.cumsum(cnt[1:][order]) / cnt[1:].sum()) if sh else [1.0]
+    check("14. the volume's shells of a density: the map's round levels (multiples of the spacing from the mean) on "
+          "the void side where the volume is clear, at most four, nearest the shown range first, the deeper bluer; "
+          "each closing around at most a quarter of the cells, its whole band below the range",
+          sh is not None and 1 <= len(sh["levels"]) <= CT.N_SHELLS and np.all(sh["levels"] < 0.0)
+          and np.allclose(m_, np.round(m_)) and np.all(np.diff(sh["levels"]) < 0) and step > 0
+          and np.all(np.asarray(under_) <= CT.SHELL_ENCLOSED) and np.all(sh["levels"] + 2 * sh["half"] < 0.0)
+          and (len(sh["levels"]) < 2 or sh["colours"][-1][0] < sh["colours"][0][0]), f"{sh and sh['levels']}")
+    spec = CT.shell_spec(sh)
+    with_ = VOL.transfer(lv, 0.0, 0.5, 0.3, 1.3, G.lut("magma"), shells=spec)
+    inband = VOL.shell_weights(lv, spec)[0] > 0
+    near = [int(np.argmin(np.abs(lv[1:] - L))) + 1 for L in sh["levels"]]
+    px = with_.view(np.uint16).reshape(-1, 4).astype(np.float64) / 65535.0
+    want_a = 1.0 - (1.0 - sh["opacity"]) ** 1.3
+    check("14. ... laid into the table only in their bands (every other level the same bits): at a shell's value its "
+          "opacity (corrected for the path, as the volume's) in its colour",
+          np.array_equal(with_[~inband], plain[~inband]) and inband[near].all() and not np.array_equal(with_, plain)
+          and np.allclose(px[near, 3], want_a, atol=2e-5)
+          and np.allclose(px[near, :3], sh["colours"] / 255.0 * want_a[:, None], atol=2e-4), f"{px[near]} {want_a}")
+    nothing = CT.shell_plan("density", lv, cnt, -2.0, log=True)
+    check("14. ... none where the volume is not clear (the range opening below the voids), none on a class map or "
+          "with a discrete colour map, none on another field (the density's only: around its voids' minima)",
+          nothing is None and CT.shell_plan("tweb", lv, cnt, 0.0) is None
+          and CT.shell_plan("density", lv, cnt, 0.0, log=True, cmap="tab10") is None
+          and CT.shell_plan("velocity", lv, cnt, 0.0, log=True) is None and CT.SHELL_FIELDS == {"density"})
+    floor = float(np.log10(rho.min())) + 0.25
+    fl = CT.shell_plan("density", lv, cnt, 0.0, log=True, floor=floor)
+    check("14. ... a close-up's from its void's floor: every shell above it, however deep the rest of the cube",
+          fl is not None and np.all(fl["levels"] > floor) and len(fl["levels"]) <= CT.N_SHELLS, f"{fl and fl['levels']}")
+    ramp = np.broadcast_to((0.01 * np.arange(40, dtype=np.float64))[:, None, None], (40, 40, 40))
+    pr = VOL.prepare({"values": np.ascontiguousarray(ramp, dtype=np.float32), "lo": np.zeros(3),
+                      "hi": np.full(3, 40.0), "cells": (40,) * 3, "key": None}, False)
+    sl = VOL.level_slopes(pr)
+    mid = np.isfinite(sl) & (np.abs(pr["levels"] - 0.2) < 0.15)
+    check("14. the field's slope per level: a ramp of 0.01 a cell reads 0.01 at every level in its middle (within a "
+          "level's step)", mid.sum() > 10 and np.allclose(sl[mid], 0.01, atol=0.4 / 254), f"{sl[mid][:5]}")
+    b1 = VOL.basin(prep, (14.0, 24.0, 24.0), -0.3)
+    b2 = VOL.basin(prep, (34.0, 24.0, 24.0), -0.3)
+    q = prep["fine"]["q"]
+    check("14. a void's basin up to a value: its cells below it connected to its centre (the first dip's, not the "
+          "second's beyond the ridge between them), none from a centre outside the cube",
+          b1 is not None and b1[14, 24, 24] and not b1[34, 24, 24] and not b1[24:].any() and b2[34, 24, 24]
+          and not (b1 & b2).any() and np.all(lv[q[b1]] < -0.3) and VOL.basin(prep, (60.0, 24, 24), -0.3) is None,
+          f"{None if b1 is None else int(b1.sum())}")
+    fl1 = CT.shell_plan("density", lv, np.bincount(q[b1], minlength=256), 0.0, log=True, floor=floor,
+                        slopes=VOL.level_slopes(prep, b1), cells=48)
+    spec1 = CT.shell_spec(fl1)
+    own = VOL.shells_within(prep, b1, spec1)
+    band1 = VOL.shell_weights(lv, spec1)[0] > 0
+    q2 = own["fine"]["q"]
+    off = VOL.transfer(lv, 0.0, 0.5, 0.3, 1.3, G.lut("magma"))
+    check("14. a close-up's copy of the levels: outside its void's basin no cell left in a shell's band (the other "
+          "dip's shells gone), inside it the same; the volume without shells the very same picture on it",
+          own is not prep and np.array_equal(q2[b1], q[b1]) and not band1[q2[~b1]].any() and band1[q[~b1]].any()
+          and np.array_equal(off[q2], off[q]) and np.array_equal(own["fine"]["qT"], np.moveaxis(q2, 2, 0))
+          and own["levels"] is prep["levels"], f"{int(band1[q2[~b1]].sum())}")
+    # a turned, stretched dip (axes 9, 6 and 4 cells along known directions): its close-up's shells -- the cells of
+    # each band in its basin -- lie along the dip's own axes, with its axis ratios (what a fitted ellipsoid is
+    # compared with; the catalogue's ellipsoid of such a dip lies along them too: its Hessian's eigenvectors)
+    m = 48
+    ang, tilt = np.radians(30.0), np.radians(20.0)
+    rot = (np.array([[1, 0, 0], [0, np.cos(tilt), -np.sin(tilt)], [0, np.sin(tilt), np.cos(tilt)]])
+           @ np.array([[np.cos(ang), -np.sin(ang), 0], [np.sin(ang), np.cos(ang), 0], [0, 0, 1]]))
+    sig = np.array([9.0, 6.0, 4.0])
+    ii = np.indices((m, m, m)).astype(np.float64) + 0.5
+    u = np.stack([ii[k] - 24.0 for k in range(3)], -1) @ rot
+    rho_a = 1.0 - 0.9 * np.exp(-0.5 * ((u / sig) ** 2).sum(-1))
+    prep_a = VOL.prepare({"values": rho_a.astype(np.float32), "lo": np.zeros(3), "hi": np.full(3, float(m)),
+                          "cells": (m,) * 3, "key": None}, True)
+    lv_a, q_a = prep_a["levels"], prep_a["fine"]["q"]
+    fl_a = float(np.log10(rho_a.min())) + 0.05
+    first = CT.shell_plan("density", lv_a, prep_a["counts"], 0.0, log=True, floor=fl_a)
+    top = float(np.max(first["levels"] + 2.0 * first["half"])) if first else 0.0
+    bas = VOL.basin(prep_a, (24.0, 24.0, 24.0), top) if first else None
+    sh_a = CT.shell_plan("density", lv_a, np.bincount(q_a[bas], minlength=256), 0.0, log=True, floor=fl_a,
+                         slopes=VOL.level_slopes(prep_a, bas), cells=m) if bas is not None else None
+    along = []
+    for v_, h_ in zip(sh_a["levels"] if sh_a else (), sh_a["half"] if sh_a else ()):
+        pts = np.argwhere((np.abs(lv_a - v_) <= h_)[q_a] & bas) + 0.5
+        if len(pts) < 30:
+            continue
+        ev, vec = np.linalg.eigh(np.cov((pts - pts.mean(axis=0)).T))
+        o = np.argsort(ev)[::-1]
+        ext = np.sqrt(ev[o])
+        along.append((min(abs(float(vec[:, o[k]] @ rot[:, k])) for k in range(3)), ext / ext[0]))
+    check("14. a turned, stretched dip's close-up shells lie along its own axes with its axis ratios: the outer one "
+          "to |cos| >= 0.99 and 0.03, the smaller inner ones (fewer cells) to 0.95 and 0.1",
+          len(along) >= 2 and along[0][0] >= 0.99 and np.allclose(along[0][1], sig / sig[0], atol=0.03)
+          and all(c_ >= 0.95 and np.allclose(r_, sig / sig[0], atol=0.1) for c_, r_ in along),
+          f"{[(round(c_, 3), np.round(r_, 2).tolist()) for c_, r_ in along]}")
+
+
+def contours_3d_gui():
+    """14. the contours in the 3D view, in the window, on gui()'s synthetic snapshot (its catalogue cached by then):
+    the Contours tick draws the map's lines on the three planes (each plane's own, at the levels of their shared
+    range, marked on the colour bar; not while the view turns) and the volume's shells (in its transfer function,
+    with their key; a close-up's from its void's floor and around that void only); unticked, the very same pictures;
+    the saved image carries them; QPainter draws a shell around a dip as the ring it is seen as."""
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        print(f"SKIP (contours in the 3D view): PySide6 is not importable ({e})")
+        return
+    import contours as CT
+    import explore as E
+    import explore_3d as X3
+    import runspec as rs
+    import view3d as V
+    import volume3d as VOL
+    from app_widgets import tip_lines
+    print("contours in the 3D view (window)")
+    qa = QApplication.instance() or QApplication([])
+    # QPainter's picture of a shell: a dip's shell seen along z is a ring, brighter at its rim than across its middle
+    rho, prep = _two_dips()
+    sh = CT.shell_plan("density", prep["levels"], prep["counts"], 0.0, log=True, slopes=VOL.level_slopes(prep),
+                       cells=48)
+    W = 240
+    cam = V.Camera(target=(24, 24, 24), scale=W / 48.0, yaw=0.0, pitch=89.0, width=W, height=W)
+    plan = VOL.slice_plan(cam, np.zeros(3), np.full(3, 48.0), prep["shape"])
+    st3 = [VOL.slice_images(prep["fine"], a_) for a_ in range(3)]
+    pics = []
+    for spec in (None, CT.shell_spec(sh)):
+        lut = VOL.transfer(prep["levels"], 0.0, 0.5, 0.3, float(np.round(plan["exponent"], 2)), G.lut("magma"),
+                           shells=spec)
+        pics.append(_rgba64(X3.render_slices([np.ascontiguousarray(lut[s_]) for s_ in st3], plan, W, W)))
+    ctr = cam.project([[14.0, 24.0, 24.0]])[0][0]
+    c0 = int(round(ctr[0]))
+    prof = pics[1][int(round(ctr[1])), c0 - 50:c0 - 2, 3]     # from outside the dip in to near its centre
+    rims = [i for i in range(8, len(prof) - 8) if prof[i] == prof[i - 8:i + 9].max()
+            and prof[i] - max(prof[i - 8:i].min(), prof[i + 1:i + 9].min()) > 0.04]
+    check("14. QPainter draws a dip's shells as rings: along a line from outside the dip in to its centre (seen along "
+          "z) the nested shells' rims stand out, one after another; without shells nothing there (the volume clear "
+          "below the mean)", float(pics[0][..., 3].max()) == 0.0 and len(sh["levels"]) >= 2
+          and len(rims) >= 2 and float(prof.max()) > 0.1, f"{np.round(prof, 2)} {rims}")
+    data = TMP / "data"
+    if not (data / SIM).is_dir():
+        make_snapdir(data, 50, 0.0, 7)
+    E.VOID_CACHE_DIR = TMP / "void cache"
+    view = E.ExploreView()
+    x = E.ExploreControls(view, lambda: str(data), lambda: [])
+    view.resize(900, 760)
+    view.show()
+    real_procs = rs.dtfe_processes
+    rs.dtfe_processes = lambda max_age=2.0: {"runs": [], "servers": []}
+    v3 = view.view3d
+
+    def ready(cond=lambda: True, limit=60):
+        ok_ = wait_for(qa, lambda: x._3d_res is not None and not x._3d_busy and x._3d_pending is None and cond(),
+                       limit)
+        spin(qa, 60)
+        return ok_
+
+    def grab():
+        v3._fast = False
+        v3.repaint()
+        return v3.grab().toImage()
+
+    try:
+        x.refresh_outputs()
+        wait_for(qa, lambda: not x._busy and x._plane is not None, 30)
+        x.voids.setChecked(True)
+        wait_for(qa, lambda: x._void_proc is None and bool(x._void_cache), 180)
+        res = x._void_cache.get(x._void_cache_key(x.current), {})
+        if "error" in res or not res:
+            check("14. the catalogue for the 3D contours", False, str(res.get("error", ""))[:200])
+            return
+        x.view3d_style.setCurrentIndex(x.view3d_style.findData("planes"))
+        x.view3d_persp.setChecked(False)
+        x.view3d_toggle.setChecked(True)
+        ready(lambda: (x._3d_res or {}).get("planes") is not None)
+        off = grab()
+        pl = x._3d_res["planes"]
+        check("14. the planes, Contours off: no lines computed, none drawn, no marks on the colour bar, its tooltip "
+              "empty", all(p_ is not None and "lines" not in p_ for p_ in pl) and x._3d_res.get("contours") is None
+              and not view.colorbar.level_marks() and view.colorbar.toolTip() == "")
+        x.contours.setChecked(True)
+        ok = ready(lambda: (x._3d_res or {}).get("contours") is not None)
+        pl, bar = x._3d_res["planes"], x._3d_res.get("contours") or {}
+        lv = CT.levels("density", x._3d_res["vrange"], log=True)
+        z = pl[2]["lines"] if pl[2] is not None and "lines" in pl[2] else None
+        k = int(np.argmin(np.abs(lv - (-0.5))))
+        ring = z["segments"][k] if z else np.zeros((0, 2, 2))
+        near = ring[np.hypot(ring[..., 0].mean(axis=1) - 16.5, ring[..., 1].mean(axis=1) - 47.5) < 12]
+        cen = near.reshape(-1, 2).mean(axis=0) if len(near) else np.array([np.nan, np.nan])
+        check("14. ticked: every plane carries the map's lines (in its texture's pixels), at the levels of the planes' "
+              "shared colour range, marked on the colour bar and said in its tooltip; a void's lines ring its centre "
+              "on the map's plane", ok and all(p_ is not None and "lines" in p_ for p_ in pl)
+              and np.array_equal(bar.get("levels"), lv) and len(view.colorbar.level_marks()) == len(lv) > 5
+              and "contour lines" in view.colorbar.toolTip() and len(near) > 8
+              and float(np.hypot(cen[0] - 16.5, cen[1] - 47.5)) < 1.0, f"{ok} {len(near)} {cen}")
+        x.contour_detail.setValue(CT.DETAIL_MAX)
+        ok1 = ready(lambda: ((x._3d_res or {}).get("contours") or {}).get("detail") == CT.DETAIL_MAX)
+        bar1 = x._3d_res.get("contours") or {}
+        lv1 = CT.levels("density", x._3d_res["vrange"], log=True, detail=CT.DETAIL_MAX)
+        n1 = [len(p_["lines"]["segments"]) for p_ in x._3d_res["planes"] if p_ is not None and "lines" in p_]
+        check("14. the level slider: the planes' lines at its detail (more levels a step right), the bar's marks and "
+              "the count beside it with them", ok1 and np.array_equal(bar1.get("levels"), lv1) and len(lv1) > len(lv)
+              and n1 == [len(lv1)] * 3 and len(view.colorbar.level_marks()) == len(lv1)
+              and x.contour_count.text() == f"{len(lv1)} lines", f"{ok1} {len(lv)} {len(lv1)} {n1}")
+        x.contour_detail.setValue(0)
+        ready(lambda: ((x._3d_res or {}).get("contours") or {}).get("detail") == 0)
+        drawn = []
+        keep_draw = v3._draw_lines
+        v3._draw_lines = lambda *a_: (drawn.append(1), keep_draw(*a_))
+        try:
+            on = grab()
+            n_settled = len(drawn)
+            v3._fast = True
+            v3.repaint()
+            n_turning = len(drawn) - n_settled
+            v3._fast = True                             # Save image right after a turn: the settled picture
+            x.save_3d_png(TMP / "planes_on.png")
+            n_saved = len(drawn) - n_settled - n_turning
+        finally:
+            v3._draw_lines = keep_draw
+            v3._fast = False
+        check("14. ... drawn over each quad of the planes (the picture changes), not while the view turns (as the "
+              "voids' cuts); Save image draws them even right after a turn",
+              on != off and n_settled >= 3 and n_turning == 0 and n_saved >= 3 and (TMP / "planes_on.png").is_file(),
+              f"{n_settled} {n_turning} {n_saved}")
+        x.contours.setChecked(False)
+        ready(lambda: (x._3d_res or {}).get("contours") is None)
+        check("14. unticked: the planes' very same picture as before (pixel for pixel), no marks",
+              grab() == off and not view.colorbar.level_marks())
+        # the volume
+        x.view3d_style.setCurrentIndex(x.view3d_style.findData("volume"))
+        ready(lambda: (x._3d_res or {}).get("volume") is not None)
+        vol_off = _rgba64(v3.volume_picture())
+        tf_off = v3.transfer
+        x.contours.setChecked(True)
+        ready()
+        sh = x._3d_shells
+        tf_on = v3.transfer
+        vol_on = _rgba64(v3.volume_picture())
+        prep = x._3d_res["volume"]
+        plan = VOL.slice_plan(v3.cam, v3.lo, v3.hi, prep["shape"])
+        lut_on, lut_off = v3._lut(plan), VOL.transfer(prep["levels"], *tf_on[:2], tf_on[2],
+                                                       float(np.round(plan["exponent"], 2)), G.lut(tf_on[3]),
+                                                       tf_on[4], tf_on[5])
+        inband = VOL.shell_weights(prep["levels"], tf_on[6])[0] > 0 if tf_on[6] else np.zeros(256, bool)
+        check("14. the volume, ticked: the map's levels as shells where it is clear (the density's void side), in its "
+              "transfer function -- the table changes in their bands only -- and in its picture; their values in "
+              "the key at the top left and the colour bar's tooltip",
+              tf_off[6] is None and sh is not None and tf_on[6] == CT.shell_spec(sh) and np.all(sh["levels"] < 0.0)
+              and np.array_equal(lut_on[~inband], lut_off[~inband]) and not np.array_equal(lut_on, lut_off)
+              and not np.array_equal(vol_on, vol_off) and v3.shell_key is not None
+              and len(v3.shell_key["items"]) == len(sh["levels"]) and "contour shells" in view.colorbar.toolTip()
+              and tip_lines(view.colorbar.toolTip()) <= 2 and v3.volume is prep, f"{tf_on[6]} {view.colorbar.toolTip()}")
+        x.contour_detail.setValue(CT.DETAIL_MIN // 2)
+        ready(lambda: x._3d_res["request"].get("contour_detail") == CT.DETAIL_MIN // 2)
+        tfv = x._3d_tf
+        sh_c = CT.shell_plan("density", prep["levels"], prep["counts"], tfv["lo"], True, False, "magma",
+                             slopes=VOL.level_slopes(prep), cells=max(prep["shape"]), detail=CT.DETAIL_MIN // 2)
+        check("14. ... the level slider: the volume's shells those of its detail (within their own rule), in the "
+              "table and the key, counted beside it",
+              v3.transfer[6] == CT.shell_spec(sh_c) and (x._3d_shells is None) == (sh_c is None)
+              and x.contour_count.text().endswith(("shell", "shells")),
+              f"{sh_c and sh_c['levels']} {x.contour_count.text()}")
+        x.contour_detail.setValue(0)
+        ready(lambda: x._3d_res["request"].get("contour_detail") == 0)
+        x.contours.setChecked(False)
+        ready()
+        check("14. ... unticked: the very same volume picture as before (pixel for pixel), no key, no tooltip",
+              v3.transfer == tf_off and np.array_equal(_rgba64(v3.volume_picture()), vol_off)
+              and v3.shell_key is None and view.colorbar.toolTip() == "")
+        x.contours.setChecked(True)
+        x.field.setCurrentIndex(x.field.findData("velocity"))
+        ok = ready(lambda: (x._3d_res or {}).get("request", {}).get("field") == "velocity")
+        check("14. another field's volume (the speed): no shells (the density's only), the colour bar's tooltip says "
+              "so (two lines at most)", ok and v3.transfer[6] is None and x._3d_shells is None and v3.shell_key is None
+              and view.colorbar.toolTip() == CT.NO_SHELLS and tip_lines(CT.NO_SHELLS) <= 2, view.colorbar.toolTip())
+        x.field.setCurrentIndex(x.field.findData("density"))
+        ready(lambda: (x._3d_res or {}).get("request", {}).get("field") == "density")
+        # a close-up, the voids as fitted ellipsoids: the shells of that void, from its floor
+        x.void3d_shape.setCurrentIndex(x.void3d_shape.findData("ellipsoid"))
+        rows = [int(k_) for k_ in np.nonzero(res["_shown"] & np.isfinite(res["_r_v"]))[0]]
+        k0 = max(rows, key=lambda k_: res["_r_v"][k_])
+        x.close_up_3d(k0)
+        ok = ready(lambda: (x._3d_res or {}).get("volume") is not None and x._3d_close is not None
+                   and np.allclose(x._3d_res["request"]["lo"], x._3d_close["lo"]))
+        res3 = x._3d_res
+        prep, sh = res3["volume"], x._3d_shells
+        floor = x._3d_void_floor(res3)
+        own = v3.volume
+        spec = v3.transfer[6]
+        lo_, hi_ = np.asarray(prep["lo"]), np.asarray(prep["hi"])
+        cc = tuple(np.floor((np.asarray(x._3d_close["centre"]) - lo_) / (hi_ - lo_)
+                            * np.asarray(prep["shape"])).astype(int))
+        kept = x._3d_basin_kept or {}
+        basin = VOL.basin(prep, x._3d_close["centre"], kept["top"]) if sh and kept else None
+        band = VOL.shell_weights(prep["levels"], spec)[0] > 0 if spec else np.zeros(256, bool)
+        q, q2 = prep["fine"]["q"], own["fine"]["q"]
+        plain = VOL.transfer(prep["levels"], 0.0, 0.5, 0.3, 1.0, G.lut("magma"))
+        check("14. a close-up (fitted ellipsoids): its shells nest from its void's own floor up; the view draws a copy "
+              "of its levels with no shell outside that void's basin (around its centre) and the volume itself "
+              "unchanged on it", ok and floor is not None and sh is not None and np.all(sh["levels"] > floor)
+              and own is not prep and basin is not None and basin[cc] and not band[q2[~basin]].any()
+              and np.array_equal(plain[q2], plain[q]) and np.array_equal(kept["counts"],
+                                                                          np.bincount(q[basin], minlength=256)),
+              f"{ok} {floor} {sh and sh['levels']}")
+        x.save_3d_png(TMP / "shells_on.png")
+        x.contours.setChecked(False)
+        ready()
+        x.save_3d_png(TMP / "shells_off.png")
+        a_on, a_off = _png(TMP / "shells_on.png"), _png(TMP / "shells_off.png")
+        check("14. Save image (3D): the shells and their key in the saved picture; unticked, the close-up draws the "
+              "volume read again", a_on.shape == a_off.shape and not np.array_equal(a_on, a_off)
+              and v3.volume is x._3d_res["volume"] and x._3d_within is None)
+    finally:
+        rs.dtfe_processes = real_procs
+        x.shutdown()
+
+
+def _vr_of(x):
+    """The colour range of the map on screen, in the bar's units (the one its contour levels came from)."""
+    return tuple(float(v) for v in x.view.colorbar.vrange)
+
+
+def contours_gui():
+    """13. the Contours tick in the window: off by default and nothing changes; ticked, the lines of every layer with
+    the slice (worker), the levels marked on the colour bar and said in its tooltip; scrolling keeps the levels on a
+    fixed range; greyed out with its reason on a class map and a discrete colour map (the tick kept); remembered;
+    unticked, the very same picture as before; the saved map, the figure grid (screen and saved) and a zoom."""
+    try:
+        from PySide6.QtWidgets import QApplication, QFormLayout
+    except ImportError as e:
+        print(f"SKIP (contour lines): PySide6 is not importable ({e})")
+        return
+    import explore as E
+    import figsave as FS
+    import runspec as rs
+    from app_widgets import tip_lines
+    from matplotlib.patches import PathPatch
+    print("contour lines (window)")
+    qa = QApplication.instance() or QApplication([])
+    data = TMP / "contour data"
+    s50 = make_snapdir(data, 50, 0.5, 21)
+    make_snapdir(data, 99, 0.0, 22)
+    tw = np.zeros((N, N, N), np.float32)
+    tw[: N // 2] = 2.0
+    tw.tofile(str(s50 / "ps_output.tweb"))                  # a class map
+    view = E.ExploreView()
+    x = E.ExploreControls(view, lambda: str(data), lambda: [])
+    view.resize(800, 700)
+    view.show()
+    real_procs = rs.dtfe_processes
+    rs.dtfe_processes = lambda max_age=2.0: {"runs": [], "servers": []}
+
+    def shown(cond=lambda: True):
+        ok_ = wait_for(qa, lambda: not x._busy and x._pending is None and x._plane is not None and cond(), 30)
+        spin(qa, 60)
+        return ok_
+
+    def picture():
+        return view.canvas.pixmap().toImage()
+
+    try:
+        x.refresh_outputs()
+        x.snap_combo.setCurrentIndex(x.snap_combo.findData(99))
+        x.index.setValue(32)
+        shown(lambda: x._req["index"] == 32 and x.current.snap == 99)
+        form = x._out_form_map
+        rows_ = [(form.itemAt(r_, QFormLayout.LabelRole), form.itemAt(r_, QFormLayout.FieldRole))
+                 for r_ in range(form.rowCount())]
+        r_comp = next((r_ for r_, (_l, f_) in enumerate(rows_) if f_ is not None and f_.layout() is not None
+                       and f_.layout().indexOf(x.component) >= 0), -9)
+        lab, fld = rows_[r_comp + 1] if 0 <= r_comp + 1 < len(rows_) else (None, None)
+        lay = fld.layout() if fld is not None else None
+        check("13. one 'Contours' tick in the Map group, heading the row under the component's (as the Voids tick "
+              "heads its row), off by default, a tooltip of at most two lines; the level slider beside it, greyed "
+              "out while the tick is off, at the rule's own detail, its count empty",
+              lab is not None and lab.widget() is x.contours and lay is not None
+              and lay.indexOf(x.contour_detail) >= 0 and lay.indexOf(x.contour_count) > lay.indexOf(x.contour_detail)
+              and x.contours.text() == "Contours" and not x.contours.isChecked() and x.contours.isEnabled()
+              and tip_lines(x.contours.toolTip()) <= 2 and tip_lines(E.CONTOURS_TIP) <= 2
+              and not x.contour_detail.isEnabled() and x.contour_detail.value() == E.CT.DETAIL == 0
+              and (x.contour_detail.minimum(), x.contour_detail.maximum()) == (E.CT.DETAIL_MIN, E.CT.DETAIL_MAX)
+              and tip_lines(x.contour_detail.toolTip()) <= 2 and x.contour_count.text() == "",
+              x.contours.toolTip())
+        off = picture()
+        check("13. off: no lines computed, none drawn, no marks on the colour bar", x._req["contours"] is False
+              and x._contours is None and view.canvas.contours is None and not view.colorbar.level_marks()
+              and view.colorbar.toolTip() == "")
+        x.contours.setChecked(True)
+        shown(lambda: x._contours is not None)
+        lines = x._contours
+        on = picture()
+        marks = view.colorbar.level_marks()
+        check("13. ticked: the slice's lines from the worker (one set per level of the map's range), drawn over the "
+              "map, the levels marked across the colour bar and said in its tooltip",
+              lines is not None and x._req["contours"] is True and len(lines["segments"]) == len(lines["levels"]) > 10
+              and sum(len(s_) for s_ in lines["segments"]) > 200 and view.canvas.contours and on != off
+              and len(marks) == len(lines["levels"]) and "contour lines" in view.colorbar.toolTip()
+              and tip_lines(view.colorbar.toolTip()) <= 2 and 0.0 in lines["levels"], view.colorbar.toolTip())
+        # the void at (16, 16, 32), w = 6: its inner lines are rings about its centre's pixel (16.5, 47.5)
+        lv = lines["levels"]
+        k = int(np.argmin(np.abs(lv - (-0.5))))
+        ring = E.CT.image_segments(lines)[k]
+        near = ring[np.hypot(ring[..., 0].mean(axis=1) - 16.5, ring[..., 1].mean(axis=1) - 47.5) < 12]
+        cen = near.reshape(-1, 2).mean(axis=0) if len(near) else np.array([np.nan, np.nan])
+        check("13. ... in the map's frame: a void's lines ring its centre's pixel", len(near) > 8
+              and float(np.hypot(cen[0] - 16.5, cen[1] - 47.5)) < 1.0, f"{len(near)} {cen}")
+        x.contours.setChecked(False)
+        shown(lambda: x._contours is None)
+        check("13. unticked: the very same picture as before ticking (pixel for pixel), no marks",
+              picture() == off and not view.colorbar.level_marks() and view.canvas.contours is None)
+        x.contours.setChecked(True)
+        shown(lambda: x._contours is not None)
+        # the level slider: its default the rule's own levels; each step more or fewer, everywhere the map draws them
+        base = x._contours
+        lv_rule = E.CT.levels("density", _vr_of(x), True)
+        used_layer = (base.get("layer") is not None and view.canvas._contour_layer is not None
+                      and view.canvas._contour_layer[2] is base["layer"][2])
+        check("13. the level slider, ticked: enabled at the rule's own detail, the lines those of the rule (the "
+              "default pictures as before), counted beside it; the worker stroked their layer at the canvas's size and "
+              "the canvas laid that one (no stroke on the GUI thread)",
+              x.contour_detail.isEnabled() and x._req["contour_detail"] == 0 and base["detail"] == 0
+              and np.array_equal(base["levels"], lv_rule)
+              and x.contour_count.text() == f"{len(base['levels'])} lines" and used_layer,
+              f"{x.contour_count.text()} {used_layer}")
+        n0, p0 = len(base["levels"]), sum(len(s_) for s_ in base["segments"])
+        got = {}
+        fine, mid, coarse = E.CT.DETAIL_MAX, E.CT.DETAIL_MIN // 2, E.CT.DETAIL_MIN
+        for det in (1, fine, mid, coarse):
+            x.contour_detail.setValue(det)
+            shown(lambda: x._req["contour_detail"] == det and x._contours is not None
+                  and x._contours["detail"] == det)
+            c_ = x._contours
+            got[det] = (len(c_["levels"]), sum(len(s_) for s_ in c_["segments"]), len(view.colorbar.level_marks()),
+                        x.contour_count.text(), np.array_equal(c_["levels"], E.CT.levels("density", _vr_of(x), True,
+                                                                                         detail=det)),
+                        float(np.mean(c_["levels"] < 0.0)) if len(c_["levels"]) else 0.0)
+            if det == 1:
+                lv1_ = c_["levels"].copy()
+        check("13. ... moved, the same layer's lines again at once from the worker: one position right other lines "
+              "(a closer spacing), at the finest end more levels and pieces, half way left fewer, at the coarsest "
+              "fewer still (the bar's marks and the count with them), each the rule's levels at that position, the "
+              "density's mostly below its mean",
+              got[fine][0] > n0 > got[mid][0] > got[coarse][0] >= 2 and got[fine][1] > p0 > got[mid][1]
+              and got[1][0] >= n0 and not np.array_equal(lv1_, base["levels"])
+              and all(g_[2] == g_[0] and g_[3] == f"{g_[0]} line{'' if g_[0] == 1 else 's'}" and g_[4]
+                      for g_ in got.values()) and got[fine][5] > 0.5,
+              f"{n0} {got}")
+        x.contour_detail.setValue(E.CT.DETAIL_MAX)
+        shown(lambda: x._contours is not None and x._contours["detail"] == E.CT.DETAIL_MAX)
+        x._take_range()
+        shown(lambda: x.fixed.isChecked())
+        lv_a = x._contours["levels"].copy()
+        x.index.setValue(24)
+        shown(lambda: x._req["index"] == 24 and x._contours is not None)
+        lv_b = x._contours["levels"].copy()
+        x.fixed.setChecked(False)
+        shown()
+        check("13. ... at another detail too the levels come from the range alone: on a fixed range the same on "
+              "every layer", len(lv_a) > n0 and np.array_equal(lv_a, lv_b), f"{lv_a} {lv_b}")
+        # a drag: no new request per position the handle passes, at most one per CONTOUR_DRAG_MS, the last on release
+        x.contour_detail.setValue(0)
+        shown(lambda: x._contours is not None and x._contours["detail"] == 0)
+        asked = []
+        keep_request = x.request
+        x.request = lambda: (asked.append(x.contour_detail.value()), keep_request())[1]
+        try:
+            x.contour_detail.setSliderDown(True)        # the mouse holds the handle
+            for v_ in range(-1, -13, -1):
+                x.contour_detail.setValue(v_)
+            during = list(asked)
+            spin(qa, E.CONTOUR_DRAG_MS + 200)
+            paused = list(asked)
+            x.contour_detail.setValue(-14)
+            x.contour_detail.setValue(-15)
+            x.contour_detail.setSliderDown(False)       # released: its last position at once
+            released = list(asked)
+            x.contour_detail.setValue(-16)              # a click or a key: at once
+            clicked = list(asked)
+        finally:
+            del x.request
+        shown(lambda: x._contours is not None and x._contours["detail"] == -16)
+        check("13. ... dragged across twelve positions: no request while the handle moves, one (its position then) "
+              "after a pause, the last position as it is released; a click or a key at once; the lines then those "
+              "of that position", during == [] and paused == [-12] and released == [-12, -15]
+              and clicked == [-12, -15, -16] and x._req["contour_detail"] == -16
+              and np.array_equal(x._contours["levels"], E.CT.levels("density", _vr_of(x), True, detail=-16)),
+              f"{during} {paused} {released} {clicked}")
+        x.contour_detail.setValue(0)
+        x.index.setValue(32)
+        shown(lambda: x._req["index"] == 32 and x._contours is not None and x._contours["detail"] == 0)
+        # scrolling: the lines of every layer; on a fixed range the same levels on every layer
+        segs32 = [s_.copy() for s_ in x._contours["segments"]]
+        x.index.setValue(20)
+        shown(lambda: x._req["index"] == 20 and x._contours is not None)
+        moved = any(a_.shape != b_.shape or not np.array_equal(a_, b_)
+                    for a_, b_ in zip(segs32, x._contours["segments"]))
+        x._take_range()
+        shown(lambda: x.fixed.isChecked())
+        lv20 = x._contours["levels"].copy()
+        x.index.setValue(40)
+        shown(lambda: x._req["index"] == 40)
+        check("13. scrolling: each layer's own lines; on a fixed range the same levels on every layer",
+              moved and np.array_equal(lv20, x._contours["levels"]) and x._req["index"] == 40, f"{lv20}")
+        x.fixed.setChecked(False)
+        shown()
+        x.smooth.setValue(2.0)
+        shown(lambda: x._req["smooth"] == 2.0)
+        sm = sum(len(s_) for s_ in x._contours["segments"])
+        x.smooth.setValue(0.0)
+        shown(lambda: x._req["smooth"] == 0.0)
+        check("13. the lines follow the smoothing (fewer pieces on the smoothed map)",
+              0 < sm < sum(len(s_) for s_ in x._contours["segments"]), f"{sm}")
+        # the saved map
+        import matplotlib.pyplot as plt
+        orig_close, figs = plt.close, []
+        plt.close = lambda fig=None: figs.append(fig)
+        try:
+            x.save_png(TMP / "contours.png")
+            x.save_png(TMP / "contours_bare.png", FS.preset("bare"))
+        finally:
+            plt.close = orig_close
+        patches = [p_ for p_ in figs[0].axes[0].patches if isinstance(p_, PathPatch)] if figs else []
+        n_saved = sum(len(p_.get_path().vertices) // 2 for p_ in patches)
+        cbar = getattr(figs[0].axes[1], "_colorbar", None) if figs and len(figs[0].axes) > 1 else None
+        bar_lines = sum(len(lc.get_segments()) for lc in getattr(cbar, "lines", []))
+        check("13. Save image: the same pieces (one path per line colour), the levels across its colour bar; the "
+              "Bare image preset leaves them out (the map alone)",
+              patches and n_saved == sum(len(s_) for s_ in x._contours["segments"])
+              and bar_lines == len(x._contours["levels"])
+              and (TMP / "contours_bare.png").is_file() and _png(TMP / "contours_bare.png").shape[:2] == (N, N),
+              f"{len(patches)} {n_saved} {bar_lines}")
+        for f_ in figs:
+            orig_close(f_)
+        dlg = FS.make_dialog(x, x.save_options, x.save_context())
+        kept = dlg.options()
+        dlg.deleteLater()
+        check("13. the Save options dialog on this map (no arrows, no outlines on screen, so both greyed out) keeps "
+              "the lines in its options", not x.save_context()["arrows"] and not x.save_context()["voids"]
+              and E.CT.in_saves(kept), f"{kept.get('arrows')} {kept.get('voids')}")
+        # a class map and a discrete colour map: greyed out, why in the tooltip, the tick kept
+        x.snap_combo.setCurrentIndex(x.snap_combo.findData(50))
+        shown(lambda: x.current.snap == 50)
+        x.field.setCurrentIndex(x.field.findData("tweb"))
+        shown(lambda: x._req["field"] == "tweb")
+        check("13. a class map (T-web): the tick greyed out, its tooltip says why, no lines; the tick itself kept, "
+              "the level slider greyed out with it and its count empty",
+              not x.contours.isEnabled() and x.contours.isChecked() and "class map" in x.contours.toolTip()
+              and x._contours is None and view.canvas.contours is None and tip_lines(x.contours.toolTip()) <= 2
+              and not x.contour_detail.isEnabled() and x.contour_count.text() == "", x.contours.toolTip())
+        x.field.setCurrentIndex(x.field.findData("density"))
+        shown(lambda: x._req["field"] == "density" and x._contours is not None)
+        back = x.contours.isEnabled() and x._contours is not None
+        x.cmap.setCurrentText("tab10")
+        shown(lambda: x._req["cmap"] == "tab10")
+        check("13. back on the density the lines return; a discrete colour map (tab10) greys the tick out too",
+              back and not x.contours.isEnabled() and "discrete" in x.contours.toolTip() and x._contours is None)
+        x.cmap.setCurrentText("magma")
+        shown(lambda: x._contours is not None)
+        # a difference map: its own diverging scale, the 0 among its levels
+        x.compare.setCurrentIndex(1)
+        shown(lambda: x._req.get("compare") is not None and x._contours is not None)
+        check("13. a difference map (A − B) gets lines on its own range, 0 among them",
+              x._contours["compare"] and 0.0 in x._contours["levels"] and x.contours.isEnabled(),
+              f"{x._contours and x._contours['levels']}")
+        x.compare.setCurrentIndex(0)
+        shown(lambda: x._req.get("compare") is None)
+        # remembered
+        x.contour_detail.setValue(-17)
+        shown(lambda: x._contours is not None and x._contours["detail"] == -17)
+        st = x.state()
+        v2 = E.ExploreView()
+        x2 = E.ExploreControls(v2, lambda: str(data), lambda: [])
+        x2.refresh_outputs()
+        x2.restore_state(json.loads(json.dumps(st)))          # as the launcher keeps it: JSON in its settings
+        check("13. remembered: the window's state keeps the tick and the level slider's position and gives them back",
+              st.get("contours") is True and x2.contours.isChecked() and st.get("contour_position") == -17
+              and "contour_detail" not in st and x2.contour_detail.value() == -17,
+              f"{st.get('contours')} {st.get('contour_position')}")
+        # a state saved before the slider was continuous: its stop ('contour_detail', -2..+1) at the nearest position
+        olds_ = {}
+        for stop_ in (-2, 1, -1, 0, "x"):
+            old_ = {k_: v_ for k_, v_ in st.items() if k_ != "contour_position"}
+            old_["contour_detail"] = stop_
+            x2.contour_detail.setValue(-17)
+            x2.restore_state(json.loads(json.dumps(old_)))
+            olds_[stop_] = x2.contour_detail.value()
+        check("13. ... an old saved stop loads without an error at the nearest position (-2 the coarsest, +1 the "
+              "finest, 0 the default, -1 between); a value that is not a number leaves the slider as it was",
+              olds_[-2] == E.CT.DETAIL_MIN and olds_[1] == E.CT.DETAIL_MAX and olds_[0] == 0
+              and olds_[-1] == E.CT.from_stop(-1) and E.CT.DETAIL_MIN < olds_[-1] < 0 and olds_["x"] == -17,
+              f"{olds_}")
+        x.contour_detail.setValue(0)
+        shown(lambda: x._contours is not None and x._contours["detail"] == 0)
+        x2.shutdown()
+        # the figure grid: each panel's lines on screen and in the saved figure
+        x.grid_set_layout(1, 2)
+        x.grid_fill("redshifts")
+        x.show_grid(True)
+        ok = wait_for(qa, lambda: x._grid_shown and not x._grid_busy and x._grid_pending is None
+                      and view.canvas.contours is not None, 60)
+        fig, _n = x.grid_figure()
+        per_panel = [sum(isinstance(p_, PathPatch) for p_ in ax.patches) for ax in fig.axes[:2]]
+        bars = [ax._colorbar for ax in fig.axes[2:] if getattr(ax, "_colorbar", None) is not None]
+        marked = [len(cb_.lines) for cb_ in bars]
+        import matplotlib.pyplot as plt2
+        plt2.close(fig)
+        bare_fig, _n = x.grid_figure(FS.preset("bare"))
+        bare_panels = [sum(isinstance(p_, PathPatch) for p_ in ax.patches) for ax in bare_fig.axes[:2]]
+        plt2.close(bare_fig)
+        check("13. the figure grid: each panel's own lines on screen (its tile) and in the saved figure, its colour "
+              "bar marked; none in Bare", ok and per_panel[0] > 0 and per_panel[1] > 0 and bare_panels == [0, 0]
+              and len(marked) == 2 and all(m_ >= 1 for m_ in marked), f"{ok} {per_panel} {bare_panels} {marked}")
+        count0, paths0 = x.contour_count.text(), view.canvas.contours
+        x.contour_detail.setValue(E.CT.DETAIL_MAX)
+        ok = wait_for(qa, lambda: x._grid_shown and not x._grid_busy and x._grid_pending is None
+                      and view.canvas.contours is not paths0 and x.contour_count.text() != count0, 60)
+        spin(qa, 30)
+        held, ready = view.canvas._contour_layer, view.canvas.contour_layer
+        grid_layer = (ready is not None and held is not None and ready[1] is view.canvas.contours
+                      and held[2] is ready[2])
+        items1 = E.grid_items(x.grid_request())
+        n_grid = [len(it_["lines"]["levels"]) for it_ in items1 if it_ is not None and it_.get("lines")]
+        x.contour_detail.setValue(0)
+        wait_for(qa, lambda: x._grid_shown and not x._grid_busy and x._grid_pending is None
+                 and x.contour_count.text() == count0, 60)
+        check("13. ... the level slider redraws the grid's panels at its detail (the count beside it follows); the "
+              "worker stroked the grid's lines at the canvas's size and the canvas laid that layer",
+              ok and len(n_grid) == 2 and all(int(count0.split()[0].split("–")[0]) < n_ for n_ in n_grid)
+              and grid_layer, f"{ok} {count0} {n_grid} {grid_layer}")
+        x.show_grid(False)
+        shown(lambda: not x._grid_shown and x._contours is not None)
+        # a zoom (from memory, as one made before): its own plane's lines
+        import types
+        res = 48
+        ii, jj = np.meshgrid(np.arange(res), np.arange(res), indexing="ij")
+        dens = (0.2 + 0.9 * (1.0 - np.exp(-0.5 * ((ii - 20.0) ** 2 + (jj - 27.0) ** 2) / 8.0 ** 2)))[:, :, None]
+        f_ = types.SimpleNamespace(density=dens, streams=None, caustic=None, velocity=None, dispersion=None,
+                                   sigma=None, velocity_gradient=None, offsets=None)
+        zr = {"output": x.current, "axis": 2, "index": x.index.value(), "rest": [0, 1], "a0": (10.0, 20.0),
+              "a1": (34.0, 44.0), "res": res, "depth": 1, "stamp": x._file_stamp(x.current), "memo": True}
+        x._zoomed(zr, f_)
+        spin(qa, 60)
+        zl = x._contours
+        zring = zl["segments"][int(np.argmin(np.abs(zl["levels"] - np.log10(0.6))))] if zl else np.zeros((0, 2, 2))
+        zc = zring.reshape(-1, 2).mean(axis=0) if len(zring) else np.array([np.nan, np.nan])
+        check("13. a zoom: the lines of its own plane (its points' frame), the bar's marks with it",
+              x.is_zoomed() and zl is not None and zl["shape"] == (res, res) and len(zring) > 8
+              and float(np.hypot(zc[0] - 20.0, zc[1] - 27.0)) < 0.5 and len(view.colorbar.level_marks()) > 0,
+              f"{zl and zl['shape']} {zc}")
+        x.zoom_back()
+        spin(qa, 60)
+    finally:
+        rs.dtfe_processes = real_procs
+        x.shutdown()
+
+
 def main():
     try:
         pure()
+        voids_pure()
+        contours_pure()
+        contours_detail_pure()
+        contours_3d_pure()
         view3d_pure()
         volume_pure()
         volume_rule_pure()
@@ -4314,6 +6066,7 @@ def main():
         volume_gl_offscreen()
         volume_gl_parity()
         gui()
+        voids_ellipsoids_gui()
         view3d_gui()
         planes3d_inside()
         view3d_volume_gui()
@@ -4325,6 +6078,8 @@ def main():
         mean_field_gui()
         face_gradient_zoom()
         save_settings()
+        contours_gui()
+        contours_3d_gui()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
     print(f"\nRESULT: {len(PASS)} passed, {len(FAIL)} failed")

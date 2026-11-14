@@ -292,12 +292,12 @@ def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: 
         cmd += list(kw.get("options", []))                          # the custom snapshot's own --box (and alpha)
         corners = [f"{float(v):.10g}" for pair in window for v in pair]   # Mpc, as --grid-window takes
         cmd += ["--grid-window", *corners, "--field", "density_a", "velocity_a", "dispersion_a", "gradient_a",
-                "--exact", "--ps-caustics"]                         # (the exact deposit, named: the zoom needs it)
+                "--exact", "--ps-caustics"]                         # (Exact, named: the zoom is its cell averages)
         if side.get("volume_weighted", True):
             cmd.append("--ps-volume-weighted")
-        # the velocity gradient's route as the output's own run took it (its '.a_velDivStreams' marks the face
-        # gradient, PS-DTFE's default with the exact deposit and the volume weighting, D13): the zoom's derivatives
-        # are then the map's, and an output made with the stream average keeps it
+        # the velocity gradient's route as the output's own run took it (its '.a_velDivStreams' marks the mean flow's
+        # derivatives from exact face sums, an Exact run's in 3D without the halo release): the zoom's derivatives are
+        # then the map's, and an output that stored the stream average (a Fast run's) keeps it
         cmd.append("--face-gradient" if o.face_gradient and "--ps-volume-weighted" in cmd else "--per-tet-gradient")
         # chart-independent tet masses: as the custom run recorded it, or, for a TNG output (no
         # sidecar: the batch script's default, on, when the converted ICs are the Lagrangian input)
@@ -308,9 +308,9 @@ def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: 
         if (not periodic and float(side.get("alpha_shape", 3.0)) != 3.0
                 and "--ps-alpha-shape" not in cmd):
             cmd += ["--ps-alpha-shape", f"{float(side['alpha_shape']):g}"]
-        # the GPU, as a full grid's exact run (rs.recommended_gpu): a zoom puts large tetrahedra
-        # into one thin slice of fine cells, where the GPU's exact items lead (a 512² slice of a 4096³ grid
-        # over 2.1M particles: deposit 1.2 s against 3.0 s on the CPU; 0.26M particles: a tie)
+        # the GPU when built, as an Exact run of a full grid gets (rs.recommended_gpu): a zoom puts large tetrahedra
+        # into one thin slice of fine cells, where the GPU's exact deposit leads (the binaries do not pick a device
+        # yet, so the launcher names it)
         if rs.gpu_built("ps", precision, o.dim):
             cmd.append("--gpu")
         # balanced: the zoom runs beside the launcher, where the binary's own default (performance: every core,
@@ -373,13 +373,14 @@ class ZoomMixin:
         a1 = (lo[1] + cols[0] / n1 * (hi[1] - lo[1]), lo[1] + (cols[1] + 1) / n1 * (hi[1] - lo[1]))
         res = int(self.zoom_res.value())
         depth = (self._zoom["depth"] + 1) if self.is_zoomed() else 1
-        if self.zoom_exact.isChecked():
+        if self.zoom_kind.value() == "exact":
             self._drop_kept_zoom()              # a window of the user's own replaces one carried from another output
             self._exact_zoom(o, axis, index, rest, a0, a1, res, depth)
             return
         if not self._server_running or not self._same(self._server_output, o):
             self.view.answer_title.setText("Start the query server (left) to zoom: the region is then evaluated "
-                                           "again, point by point, at any resolution (or tick 'exact').")
+                                           "again, point by point, at any resolution (or choose "
+                                           f"'{_ex.ZOOM_EXACT_TEXT}').")
             return                              # (no zoom made: a window carried from another output stays kept)
         self._drop_kept_zoom()
         self._point_zoom(o, axis, index, rest, a0, a1, res, depth)
@@ -412,8 +413,9 @@ class ZoomMixin:
         now, the same Mpc window at the same resolution on this output's kept slice: from memory when this output's
         zoom of it was made before (switching back and forth is then instant), else by the query server when it runs
         on this output. Never by an exact run: a switch neither starts one nor asks about one (an exact zoom is a
-        drag with 'exact' ticked). Otherwise the map stays the slice, the window stays kept for the next output (or
-        for the server, once started here: server_started), and the zoom line and the status line say why."""
+        drag with exact cell averages chosen). Otherwise the map stays the slice, the window stays kept for the next
+        output (or for the server, once started here: server_started), and the zoom line and the status line say
+        why."""
         m, o = self._keep, self.current
         w = (m or {}).get("zoom")
         if not w or o is None or self._shut or self.is_zoomed():
@@ -438,8 +440,8 @@ class ZoomMixin:
                     self._req = self.request() or self._req     # this output's (its slice may wait behind another)
                     self._zoomed(dict(hit[0], depth=1, memo=True, seconds=0.0), hit[1])
                     return
-            # never an exact run: choosing an output or stepping through redshifts must not start
-            # a PS-DTFE run over the whole snapshot or ask about one; with 'exact' ticked a drag of the window does
+            # never an exact run: choosing an output or stepping through redshifts must not start a PS-DTFE run over
+            # the whole snapshot or ask about one; with exact cell averages chosen a drag of the window does
             if self._server_running and self._same(self._server_output, o):
                 self._point_zoom(o, axis, index, list(w["rest"]), a0, a1, w["res"], 1)
                 return
@@ -447,7 +449,7 @@ class ZoomMixin:
                 return
             why = ("no zoom of it is in memory for this output and no query server runs on it (start one here and "
                    "the window is evaluated)")
-            if self.zoom_exact.isChecked():
+            if self.zoom_kind.value() == "exact":
                 why += "; choosing an output never starts an exact zoom: drag the window again for one"
         text = f"{_ex.KEPT_ZOOM_TEXT}{where} kept, not shown on this output: {why}"
         self.zoom_state.setText(text)
@@ -743,8 +745,10 @@ class ZoomMixin:
         self._req, z = req, self._zoom
         note = ""
         plane = self._zoom_plane(req["field"], req["component"])
+        shown = req["field"]
         if plane is None:
             plane, note = self._zoom_plane("density", ""), " · this field has no point values: density shown"
+            shown = "density"
         plane = np.ascontiguousarray(np.asarray(plane, dtype=np.float64))
         img = np.ascontiguousarray(plane.T[::-1])
         rgb, vrange = G.colorize(img, req["cmap"], log=req["log"], clip=(req["clip"], 100 - req["clip"]),
@@ -753,16 +757,16 @@ class ZoomMixin:
         self.view.canvas.setStyleSheet("")
         self.view.canvas.marker = None
         self.view.canvas.arrows = None
-        self.view.canvas.circles = self._void_circles()
-        self.view.canvas.dashed = self._void_circles("_r_eff")
+        self._set_contours(self._zoom_contours(plane, dict(req, field=shown), vrange))
+        self._set_void_canvas(self._void_overlay())       # the voids' outlines over the zoomed region
         self.view.canvas.axes = self._canvas_axes()
         self.view.canvas.set_rgb(np.ascontiguousarray(rgb))
         self._compare_sync()
         if self.compare.currentData() is not None:
             note += " · the comparison applies to the slice map: the zoom shows A"
         # a zoom is a point evaluation (or an exact run on the region): a phase-space output's velocity derivatives are
-        # there the stream average, except in an exact zoom of a face-gradient output (the zoom takes its route);
-        # standard DTFE's the containing tetrahedron's
+        # there the stream average, except in an exact zoom of an output that stored the mean flow's (the zoom takes
+        # its route); standard DTFE's the containing tetrahedron's
         o = req["output"]
         ps = G.estimator_label(o) == "PS-DTFE"
         face = bool(z.get("exact")) and o.face_gradient
@@ -773,7 +777,8 @@ class ZoomMixin:
         if fam == "stream" and req.get("ps_gradient") == "mean-field":
             note += " · its velocity derivatives are the stream average (a point evaluation has no mean field)"
         comp = G.component_suffix(req["component"])
-        self.view.colorbar.set(req["cmap"], vrange, G.colourbar_label(label, req), req["log"])
+        self.view.colorbar.set(req["cmap"], vrange, G.colourbar_label(label, req), req["log"],
+                               levels=self._contour_marks())
         rest = z["rest"]
         kind = "exact zoom" if z.get("exact") else "zoom"
 
@@ -786,7 +791,7 @@ class ZoomMixin:
                     + self._position_text(req, units))
         self._title_make = lambda units=None: f"<b>{label}{comp}</b> — {o.title} — {kind} {z['res']}² on {where(units)}"
         self.view.title.setText(self._title_make())
-        how = "cells (exact deposit, one slice cell thick)" if z.get("exact") else "points"
+        how = "cells (exact cell averages, one slice cell thick)" if z.get("exact") else "points"
         took = ""
         if z.get("memo"):
             took = "; from memory"
@@ -802,6 +807,22 @@ class ZoomMixin:
         self.zoom_out_btn.setEnabled(True)
         self.zoom_back_btn.setEnabled(True)
         self.changed.emit()
+
+    def _zoom_contours(self, plane, req: dict, vrange):
+        """The zoom's contour lines (explore.map_contours), on the GUI thread as the zoom's colours are: a zoom plane
+        is drawn once per zoom or colour change, at most contours.MAX_SIDE a side after its block averaging. The
+        last one is kept, so a change that leaves the field, the range, the scale and the colour map alone (the
+        void outlines, the window's size) costs nothing."""
+        if not req.get("contours"):
+            return None
+        key = (req["field"], req["component"], tuple(float(v) for v in vrange), bool(req["log"]), req["cmap"],
+               plane.shape, req.get("contour_detail"))
+        memo = getattr(self, "_zoom_lines_memo", None)
+        if memo is not None and memo[0] == key and memo[1] is self._zoom and memo[2] is self._zoom_fields:
+            return memo[3]
+        lines = _ex.map_contours(plane, req, vrange)
+        self._zoom_lines_memo = (key, self._zoom, self._zoom_fields, lines)
+        return lines
 
     # ---------------------------------------------------------------- zoom progress, history, memory
     @staticmethod

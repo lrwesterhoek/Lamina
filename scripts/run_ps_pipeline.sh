@@ -56,7 +56,8 @@
 #   DTFE_EXACT_AVERAGE  1 (default) = the exact deposit (--exact), 0 = the sampled one (--sampled); unset, a
 #                 SUBSAMPLES count selects the sampled one (run_ps_dtfe.sh's rule, config.sh average_resolve).
 #                 A run log of an older sampled run names no deposit flag: its grids are stale for the exact
-#                 default and current for a sampled pipeline run (the same count, or none: the binary's 3).
+#                 default and current for a sampled pipeline run with the same count (SUBSAMPLES=3 for a log
+#                 that names 3; no count is the binary's 1, one point per cell).
 #   DTFE_RUN_MODE gentle | balanced | performance | auto (default): how hard each run may lean on the machine
 #                 (run_ps_dtfe.sh's --run-mode): auto = balanced, or performance inside a SLURM or PBS job
 #                 (config.sh run_mode_resolve); resolved once here and handed on. It never makes grids stale.
@@ -183,9 +184,12 @@ run() { echo "+ $*"; [ "${DRY_RUN}" = "1" ] || "$@"; }
 # bits only, and older logs carry no merge flag; nor are '--run-mode' and '--gpu-share', for the same reasons). The
 # deposit: '--exact' is compared (older logs: '--exact-average' or '--ps-exact-deposit'), '--sampled' is not (an
 # older sampled run named no flag), and the '--subsamples' count only for the sampled deposit: the exact one ignores
-# it (older drivers passed '--subsamples 3' beside it), and a sampled one without a count runs the binary's own 3
-# (older drivers always named it). So an older exact log and an older sampled one each compare equal to the command
-# the driver now emits for the same deposit. The velocity gradient's route is compared as named ('--face-gradient',
+# it (older drivers passed '--subsamples 3' beside it), and a sampled one without a count runs the binary's own 1,
+# one point per cell (older drivers always named the count). So an older exact log and an older sampled one each
+# compare equal to the command the driver now emits for the same deposit and count (a sampled log naming 3: with
+# SUBSAMPLES=3). A sampled log that names no count is read by its header's 'avg sub-samples (nSub)' line, the count
+# its run took (the caller appends it: a binary from before 2026-11-14 ran such a command at 3, a later one at 1).
+# The velocity gradient's route is compared as named ('--face-gradient',
 # '--per-tet-gradient'); a command naming neither takes the binary's default, so an older log naming neither (the
 # stream average, PS-DTFE's route before D13) compares equal to it: its slice, the pipeline's product, is the same
 # either way (the points do not depend on the route), and FORCE=1 or FACE_GRADIENT=1 recomputes its grids.
@@ -229,7 +233,7 @@ run_settings() {
               } else if (cur != "") line = line " " t
           }
           if (line != "") out(line)
-          if (!exact) { if (subs == "") subs = "--subsamples 3"; print subs } }' | sort
+          if (!exact) { if (subs == "") subs = "--subsamples 1"; print subs } }' | sort
 }
 
 # same_settings <have> <want> (run_settings outputs): equal, except that the grids on disk may carry MORE
@@ -363,7 +367,9 @@ print(int(s.get("planes", 1)) * int(s["nv"]) * int(s["nu"]) * int(s.get("supersa
             elif [ -z "${want}" ]; then
                 echo "-- snap ${n}: ${PREFIX}.pts_den up to date by file times (this run's settings could not be worked out: run_ps_dtfe.sh's dry run failed), skipping compute"
             else
-                have_s="$(run_settings "$(grep -a -m1 '^RUNNING:' "${rl}")")"
+                # (the log's own count line after its command: run_settings keeps the last count it reads, and an
+                # exact log has no such line)
+                have_s="$(run_settings "$(grep -a -m1 '^RUNNING:' "${rl}") $(grep -a -m1 -o 'avg sub-samples (nSub) : [0-9]*' "${rl}" | sed 's/.*: /--subsamples /')")"
                 want_s="$(run_settings "${want}")"
                 if same_settings "${have_s}" "${want_s}"; then
                     echo "-- snap ${n}: ${PREFIX}.pts_den up to date (same settings), skipping compute"

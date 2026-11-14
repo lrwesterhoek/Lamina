@@ -13,6 +13,7 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QComboBox
 
+import contours as CT
 import explore as _ex
 import figsave as FS
 import grids as G
@@ -39,13 +40,8 @@ def grid_items(req: dict) -> list:
             continue
         o, name, comp = p["output"], p["field"], p["component"]
         idx = 0 if o.dim == 2 else int(round(rel * (o.n - 1)))
-        plane = o.slice(name, axis, idx, comp, grad)
-        if smooth > 0:
-            try:
-                from scipy.ndimage import gaussian_filter
-                plane = gaussian_filter(plane, smooth, mode="wrap")
-            except ImportError:
-                pass
+        # read and smoothed as the map is (in 2D, or the slice of the cube smoothed in 3D: grids.map_plane)
+        plane = G.map_plane(o, name, axis, idx, comp, grad, smooth, bool(req.get("smooth3d")))
         log, cmap = p["log"], p["cmap"]
         symmetric = name in G.DIVERGING and not log
         img = np.ascontiguousarray(plane.T[::-1])          # the map's orientation: horizontal = first rest axis
@@ -73,6 +69,11 @@ def grid_items(req: dict) -> list:
                 lo, hi = -m, m
             for i in its:
                 i["lo"], i["hi"] = lo, hi
+    if req.get("contours"):                 # each panel's lines on its final range (a class panel gets none)
+        for it in items:
+            if it is not None:
+                it["lines"] = CT.map_lines(it["plane"], it["field"], (it["lo"], it["hi"]), it["log"], it["cmap"],
+                                           detail=req.get("contour_detail", CT.DETAIL))
     return items
 
 
@@ -130,40 +131,91 @@ def panel_label(it: dict, diff: dict) -> str:
     return "\n".join(parts) or (when or who)
 
 
-def panel_void_circles(it: dict, axis: int, n0: float, n1: float, radius: str = "r_v") -> list:
-    """A grid panel's void outlines (it['voids']: the panel's own catalogue, its shown rows) in the panel's pixels
-    (n0 x n1 over its extent; void_circles' convention), [] without a catalogue or in 2D."""
+def panel_overlay(it: dict, axis: int, n0: float, n1: float) -> dict:
+    """A grid panel's voids (it['voids']: explore_voids' set of its own catalogue's rows, the shape chosen) in the
+    panel's pixels (n0 x n1 over its extent): grids.void_overlay's circles, dashed, ellipses and marks; all empty
+    without a catalogue or in 2D."""
     v = it.get("voids")
     o = it["output"]
-    if not v or v.get(radius) is None or o.dim != 3:
-        return []
+    if not v or o.dim != 3:
+        return G.void_overlay(None, axis, 0.0, it["rest"], (0, 0), (1, 1), n0, n1, 0.5)
     pos = float(o.lo[axis] + (it["idx"] + 0.5) * o.length[axis] / o.n)
     e = it["ext"]
-    circles = G.void_circles(v["centres"], v[radius], v["box"], axis, pos, it["rest"], (e[0], e[2]), (e[1], e[3]),
-                             n0, n1)
-    return [(x, y, rx, ry, int(v["rows"][k])) for x, y, rx, ry, k in circles]
+    return G.void_overlay(v, axis, pos, it["rest"], (e[0], e[2]), (e[1], e[3]), n0, n1,
+                          0.5 * float(o.length[axis]) / float(o.n))
+
+
+def panel_void_circles(it: dict, axis: int, n0: float, n1: float, radius: str = "r_v") -> list:
+    """A grid panel's void circles in the panel's pixels (void_circles' convention): radius 'r_v' the solid ones
+    (spheres of R_v), any other the dashed ones (the other radius ticked); [] without a catalogue or in 2D."""
+    return panel_overlay(it, axis, n0, n1)["circles" if radius == "r_v" else "dashed"]
+
+
+def _grid_tile(req: dict, items: list, max_tile: int):
+    """grid_tiles' tile size T and each shown panel's (item, x0, y0) offset in the picture."""
+    sizes = [it["img"].shape[0] for it in items if it is not None]
+    if not sizes:
+        return 0, []
+    T = min(max(sizes), max_tile)                   # grid_tiles' tile size and gaps
+    gap = 0 if req["merged"] else 6
+    return T, [(it, (k % req["cols"]) * (T + gap), (k // req["cols"]) * (T + gap))
+               for k, it in enumerate(items) if it is not None]
 
 
 def grid_tile_circles(req: dict, items: list, max_tile: int = 1024) -> tuple[list, list, list]:
-    """The outlines over grid_tiles' picture: (circles, dashed, clips) in its image pixels, each panel's offset by
-    its tile and clipped to it (clips: one (x0, y0, w, h) per circle, the R_v ones first, then the R_eff ones)."""
+    """The outlines over grid_tiles' picture: (solid, dashed, clips) in its image pixels -- the solid ones circles
+    [(x, y, rx, ry, row)] or the ellipsoids' sections [(x, y, rx, ry, angle, row)] -- each panel's offset by its tile
+    and clipped to it (clips: one (x0, y0, w, h) per outline, the solid ones first, then the dashed ones)."""
+    T, tiles = _grid_tile(req, items, max_tile)
+    solid, dashed, clip_s, clip_d = [], [], [], []
+    for it, x0, y0 in tiles:
+        ov = panel_overlay(it, req["axis"], T, T)
+        for o in ov["circles"] + ov["ellipses"]:
+            solid.append((x0 + o[0], y0 + o[1]) + tuple(o[2:]))
+            clip_s.append((x0, y0, T, T))
+        for x, y, rx, ry, row in ov["dashed"]:
+            dashed.append((x0 + x, y0 + y, rx, ry, row))
+            clip_d.append((x0, y0, T, T))
+    return solid, dashed, clip_s + clip_d
+
+
+def grid_tile_marks(req: dict, items: list, max_tile: int = 1024) -> tuple[list, list]:
+    """The voids' centre marks (drawn as their ellipsoids) over grid_tiles' picture, in its image pixels, each panel's
+    offset by its tile: (marks [(x, y, row, own)], their clips)."""
+    T, tiles = _grid_tile(req, items, max_tile)
+    marks, clips = [], []
+    for it, x0, y0 in tiles:
+        for x, y, row, own in panel_overlay(it, req["axis"], T, T)["marks"]:
+            marks.append((x0 + x, y0 + y, row, own))
+            clips.append((x0, y0, T, T))
+    return marks, clips
+
+
+def grid_tile_contours(req: dict, items: list, max_tile: int = 1024) -> tuple[list, list, dict | None]:
+    """The panels' contour lines over grid_tiles' picture: (pieces, colours, shared) -- one (k, 2, 2) array of the
+    picture's pixels per level of every panel (each panel's lines scaled to its tile and offset by it: they lie inside
+    it), the levels' colours, and the first panel's contours.map_lines dict when every panel with lines has the same
+    levels (the colour bar below the picture then marks them), else None."""
     cols = req["cols"]
     sizes = [it["img"].shape[0] for it in items if it is not None]
     if not sizes:
-        return [], [], []
+        return [], [], None
     T = min(max(sizes), max_tile)                   # grid_tiles' tile size and gaps
     gap = 0 if req["merged"] else 6
-    solid, dashed, clip_s, clip_d = [], [], [], []
+    segs, colours, levels = [], [], []
     for k, it in enumerate(items):
-        if it is None:
+        lines = it.get("lines") if it is not None else None
+        if not lines:
             continue
         r, c = divmod(k, cols)
         y0, x0 = r * (T + gap), c * (T + gap)
-        for radius, out, clips in (("r_v", solid, clip_s), ("r_eff", dashed, clip_d)):
-            for x, y, rx, ry, row in panel_void_circles(it, req["axis"], T, T, radius):
-                out.append((x0 + x, y0 + y, rx, ry, row))
-                clips.append((x0, y0, T, T))
-    return solid, dashed, clip_s + clip_d
+        n0, n1 = lines["shape"]
+        for s, rgba in zip(CT.image_segments(lines, T / n0, T / n1), lines["colours"]):
+            segs.append(s + np.array([x0, y0], dtype=np.float64) if s.size else s)
+            colours.append(rgba)
+        levels.append(lines)
+    same = bool(levels) and all(np.array_equal(ln["levels"], levels[0]["levels"]) for ln in levels)
+    return segs, colours, levels[0] if same else None
 
 
 def grid_tiles(req: dict, items: list, max_tile: int = 1024) -> tuple[np.ndarray, list, tuple | None]:
@@ -291,10 +343,22 @@ def grid_figure(req: dict, items: list, dpi: float = 200.0, opts: dict | None = 
         hi = it["hi"] if it["hi"] > it["lo"] else it["lo"] + 1.0
         im = ax.imshow(data, origin="lower", extent=e, cmap=it["cmap"], vmin=it["lo"], vmax=hi,
                        aspect="equal", interpolation="nearest")
-        if it.get("voids") and o_["voids"]:  # the panel's own voids, as on screen
-            to_mpc = lambda cs: [(e[0] + x, e[3] - y, rx, k) for x, y, rx, _ry, k in cs]   # noqa: E731
-            G.draw_void_circles_mpl(ax, to_mpc(panel_void_circles(it, axis, e[1] - e[0], e[3] - e[2])),
-                                    to_mpc(panel_void_circles(it, axis, e[1] - e[0], e[3] - e[2], "r_eff")))
+        lines = it.get("lines") if CT.in_saves(o_) else None
+        if lines:                           # the panel's contour lines, as on screen
+            n0, n1 = lines["shape"]
+            G.draw_contours_mpl(ax, lines["segments"], lines["colours"],
+                                lambda ij, e=e, n0=n0, n1=n1: np.column_stack(
+                                    [e[0] + (ij[:, 0] + 0.5) / n0 * (e[1] - e[0]),
+                                     e[2] + (ij[:, 1] + 0.5) / n1 * (e[3] - e[2])]), lw=CT.LINE_WIDTH_PT)
+            ax.set_xlim(e[0], e[1])
+            ax.set_ylim(e[2], e[3])
+        if it.get("voids") and o_["voids"]:  # the panel's own voids, as on screen (one pixel per unit of the axes)
+            ov = panel_overlay(it, axis, e[1] - e[0], e[3] - e[2])
+            G.draw_void_overlay_mpl(ax, {
+                "circles": [(e[0] + x, e[3] - y, rx, k) for x, y, rx, _ry, k in ov["circles"]],
+                "dashed": [(e[0] + x, e[3] - y, rx, k) for x, y, rx, _ry, k in ov["dashed"]],
+                "ellipses": [(e[0] + x, e[3] - y, rx, ry, -a, k) for x, y, rx, ry, a, k in ov["ellipses"]],
+                "marks": [(e[0] + x, e[3] - y, k, own) for x, y, k, own in ov["marks"]]})
         label, ctext, who, when = panel_names(it)
         if bare:
             ax.set_axis_off()
@@ -317,6 +381,7 @@ def grid_figure(req: dict, items: list, dpi: float = 200.0, opts: dict | None = 
                 if o_["colorbar_label"]:
                     cb.set_label(("log₁₀ " if it["log"] else "") + label + ctext, fontsize=8 * fs)
                 cb.ax.tick_params(labelsize=7 * fs)
+                G.mark_levels_mpl(cb, lines, it["lo"], hi, CT.LINE_WIDTH_PT)
     auto = shown = grid_suptitle(req, items)
     first = next((it["output"] for it in items if it is not None), None)
     if o_["unit"] != "mpc" and req.get("position_at") and first is not None:
@@ -350,6 +415,8 @@ def grid_figure(req: dict, items: list, dpi: float = 200.0, opts: dict | None = 
         for i, (key, (im, it)) in enumerate(bars.items()):
             cax = fig.add_axes([cb_x, top - (i + 1) * h - i * gap, cb_w, h])
             cb = fig.colorbar(im, cax=cax)
+            if CT.in_saves(o_):                 # the quantity's panels share its range, so its levels
+                G.mark_levels_mpl(cb, it.get("lines"), it["lo"], it["hi"], CT.LINE_WIDTH_PT)
             label, ctext, _w, _t = panel_names(it)
             text = ("log₁₀ " if it["log"] else "") + label + ("\n" + ctext.strip() if ctext else "")
             size = 8 * fs * float(np.clip(h * H / 1.6, 0.6, 1.0))   # a short bar (many of them): smaller text
@@ -386,12 +453,28 @@ def grid_full_pixels(req: dict, items: list, opts: dict):
     sizes = [it["img"].shape[0] for it in items if it is not None]
     T = max(sizes)
     rgb, _labels, _bar = grid_tiles(req, items, max_tile=T)
-    if not opts["voids"]:
+    segs, colours, _shared = grid_tile_contours(req, items, max_tile=T) if CT.in_saves(opts) else ([], [], None)
+    lines = any(np.size(s) for s in segs)
+    solid, dashed, clips = grid_tile_circles(req, items, max_tile=T) if opts["voids"] else ([], [], [])
+    marks, mark_clips = grid_tile_marks(req, items, max_tile=T) if opts["voids"] else ([], [])
+    if not (solid or dashed or lines or marks):
         return rgb, None
-    circles, dashed, clips = grid_tile_circles(req, items, max_tile=T)
-    if not (circles or dashed):
-        return rgb, None
-    return rgb, lambda ax: FS.draw_pixel_circles(ax, rgb.shape, circles, dashed, clips)
+    # figsave draws the circles (spheres of R_v, and the dashed ones) as it always did; grids the turned sections
+    circles = [o for o in solid if len(o) == 5]
+    ells = [o for o in solid if len(o) > 5]
+    circle_clips = [c for o, c in zip(solid, clips) if len(o) == 5] + clips[len(solid):]
+    ell_clips = [c for o, c in zip(solid, clips) if len(o) > 5]
+
+    def overlay(ax):
+        H, W = rgb.shape[:2]
+        ax.set_xlim(0, W)
+        ax.set_ylim(H, 0)
+        if lines:                           # the panels' contour lines, in the picture's pixels (y down)
+            G.draw_contours_mpl(ax, segs, colours, lambda xy: xy, lw=CT.LINE_WIDTH_PT)
+        FS.draw_pixel_circles(ax, rgb.shape, circles, dashed, circle_clips)
+        if ells or marks:
+            G.draw_pixel_overlay(ax, ells, ell_clips, marks, mark_clips)
+    return rgb, overlay
 
 
 class GridMixin:
@@ -791,10 +874,12 @@ class GridMixin:
                                                     "cmap": self._grid_cmap(p[1]), "log": self._grid_log(p[1]),
                                                     "voids": self._panel_voids(p[0])}
                            for p in panels],
-                "rows": rows, "cols": cols, "axis": axis,
+                "rows": rows, "cols": cols, "axis": axis, "contours": self.contours.isChecked(),
+                "contour_detail": self.contour_detail.value(), "contour_layer": self.view.canvas.layer_size(),
                 "ps_gradient": self.ps_gradient.currentData() or G.PS_GRADIENT_DEFAULT,
                 "rel": 0.5 if cur.n <= 1 or cur.dim == 2 else index / (cur.n - 1),
                 "index": index, "clip": self.clip.value(), "smooth": self.smooth.value(),
+                "smooth3d": self.smooth3d.isChecked() and self.smooth3d.isEnabled(),
                 "shared": self.grid_shared.isChecked(),
                 "merged": self.grid_merge.isChecked() and self._grid_merge_applicable(),
                 "position": self.position.text() if cur.dim == 3 else "",
@@ -862,18 +947,27 @@ class GridMixin:
         self.view.canvas.marker = None
         self.view.canvas.arrows = self.view.canvas.circles = self.view.canvas.dashed = None
         self.view.canvas.labels = res["labels"]
+        self.view.canvas.contours = res.get("contours") or None     # each panel's own contour lines (and the layer
+        self.view.canvas.contour_layer = res.get("contour_layer")   # the worker stroked them on), counted
+        self._contour_count(res.get("counts"))
         self.view.canvas.circles = res.get("circles") or None       # each panel's own voids
         self.view.canvas.dashed = res.get("dashed") or None
         self.view.canvas.circle_clips = res.get("clips") or None
+        self.view.canvas.marks = res.get("marks") or None             # their centres (drawn as ellipsoids)
+        self.view.canvas.mark_clips = res.get("mark_clips") or None
         self.view.canvas.axes = None                # tiles of several frames: the saved figure has the axes
         self.view.canvas.set_rgb(np.ascontiguousarray(res["rgb"]))
         bar = res["bar"]
         if bar is not None:                         # one quantity: its bar below, as the single map has
             cmap, vrange, label, log = bar
-            self.view.colorbar.set(cmap, vrange, label, log)
+            shared = res.get("lines")
+            self.view.colorbar.set(cmap, vrange, label, log,
+                                   levels=(shared["levels"], shared["colours"]) if shared else None)
+            self.view.colorbar.setToolTip(CT.describe(shared))
             self.view.colorbar.setVisible(True)
         else:                                       # several: the saved figure carries one bar per quantity
             self.view.colorbar.setVisible(False)
+            self.view.colorbar.setToolTip("")
         self._grid_index = req["index"]
         n, rows, cols = res["shown"], req["rows"], req["cols"]
         pos = req["position"]

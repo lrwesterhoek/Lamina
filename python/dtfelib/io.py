@@ -55,9 +55,10 @@ from .runlog import canonical_command   # a run log's older option spellings (th
 #
 # PS-DTFE STORES THE MEAN FLOW'S grad<v> BY DEFAULT where the run qualifies (the exact deposit, --ps-volume-weighted,
 # no halo release, 3D; docs/cleanup-plan.md D13, the face gradient): such a run writes '.a_velDivStreams' beside the
-# family, FieldSet.face_gradient is True and load(name, mean_field=True) returns the stored grid. What follows holds
-# for a run without it ('--per-tet-gradient', the sampled deposit, mass-weighted moments, the halo release, 2D, and
-# the runs of a binary older than that default).
+# family, FieldSet.face_gradient is True and load(name, mean_field=True) returns the stored grid. Its unaveraged
+# ('_u') grids carry no marker of their own: their route is the run's, read from its run log (run_face_gradient).
+# What follows holds for a run without it ('--per-tet-gradient', the sampled deposit, mass-weighted moments, the halo
+# release, 2D, and the runs of a binary older than that default).
 #
 # THE VELOCITY-GRADIENT FAMILY UNDER PS-DTFE: 'gradient', 'divergence',
 # 'shear', 'vorticity' and the V-web ('vweb', 'vweb_eigenvalues', classified from that gradient with
@@ -397,6 +398,37 @@ def run_lambda_th(runlog) -> float:
         return DEFAULT_LAMBDA_TH
 
 
+# the run-log header's line on the velocity gradient's route (src/user_options.cc, printed where a field built on the
+# gradient is computed): 'velocity gradient : from EXACT FACE sums, ...' for the face gradient, any other text for the
+# stream average of each stream's own gradient (the launcher reads it the same way: python/gui/results.py _GRADIENT)
+_GRADIENT_LINE = r"^\s*velocity gradient\s+:\s+(from EXACT FACE)?"
+# the warning of a pass whose face sums found no fixed-point unit: that pass keeps the stream average
+# (src/CGAL_triangulation/ps_interpolation.cc), and the warning does not say which pass
+_FACE_OFF_FOR_A_PASS = "'--face-gradient' is off for this pass"
+
+
+def run_face_gradient(runlog) -> bool:
+    """Did the PS-DTFE run whose log is 'runlog' take the face gradient? FieldSet.face_gradient asks it for the
+    unaveraged ('_u') grids, which no file marks: the binary writes the stream average's divergence
+    ('.a_velDivStreams', the marker of the '_a' grids) for the '_a' pass only (src/input_output.cc). The route is
+    the run's, one for both passes (src/CGAL_triangulation/ps_interpolation.cc fx.face: the run's route, its exact
+    deposit and volume weighting, and a field built on the gradient), so the header's last 'velocity gradient' line
+    names it for the '_u' grids too: 'from EXACT FACE sums' for the face gradient. False without the log or one
+    that cannot be read, for a log without that line (a PS-DTFE binary before its face-gradient default,
+    docs/cleanup-plan.md D13, printed none: such folders read as before), and where a pass's face sums found no
+    fixed-point unit (that pass kept the stream average and the warning does not say which; with False
+    load(name, mean_field=True) still gives the mean flow, from the velocity grid)."""
+    import re
+    try:
+        text = Path(runlog).read_text(errors="replace")
+    except OSError:
+        return False
+    if _FACE_OFF_FOR_A_PASS in text:
+        return False
+    found = re.findall(_GRADIENT_LINE, text, re.M)
+    return bool(found) and found[-1] != ""
+
+
 def _grid_shape_of(path: Path, ncomp: int) -> tuple[int, np.dtype]:
     """(N, dtype) of a raw N^3 x ncomp grid file, from its size alone: float32 (the default
     build) or float64 (a DOUBLE=1 build). The two never collide -- N^3 = 2 M^3 has no integer
@@ -486,14 +518,19 @@ class FieldSet:
     def face_gradient(self) -> bool:
         """Did this PS run store the MEAN flow's velocity derivatives itself (the face gradient, exact face sums:
         PS-DTFE's default where the run qualifies, docs/cleanup-plan.md D13, or '--face-gradient')? Its marker is the
-        stream-average divergence it writes beside them ('.a_velDivStreams'). Standard DTFE: False (its stored
-        derivatives are the mean flow's anyway)."""
+        stream-average divergence it writes beside them ('.a_velDivStreams'). The unaveraged grids (averaged=False)
+        have no marker on disk (the binary writes it for the '_a' pass only): there the run log's route decides,
+        one route for both passes (run_face_gradient; a log of a binary before the PS-DTFE face default names none,
+        so such a folder reads as before: False). Standard DTFE: False (its stored derivatives are the mean flow's
+        anyway)."""
         if self.method != "ps":
             return False
         try:
-            return self._field_path("divergence_streams").exists()
+            if self._field_path("divergence_streams").exists():
+                return True
         except (KeyError, ValueError):
             return False
+        return not self.averaged and run_face_gradient(self.snapdir / f"{self.prefix}runlog")
 
     def has(self, name: str, mean_field: bool = False, stream_average: bool = False) -> bool:
         """Is the grid on disk? mean_field=True asks whether load(name, mean_field=True) can serve it: under
@@ -638,6 +675,11 @@ class FieldSet:
             if self.method == "ps" and self.face_gradient:
                 plain, name = name, f"{name}_streams"   # the face run stored the mean flow's under the plain name
                 if not self._field_path(name).exists():
+                    if not self.averaged:           # (the '_u' pass's face run: face_gradient read its run log)
+                        raise FileNotFoundError(
+                            f"{self._field_path(name)}: the unaveraged pass of a face-gradient run writes no stream "
+                            f"average of {plain!r} (the binary writes it beside the '_a' grids only); a "
+                            "'--per-tet-gradient' run stores it under the plain name")
                     raise FileNotFoundError(
                         f"{self._field_path(name)}: this face-gradient run wrote no stream average of {plain!r}; it is "
                         f"written beside the mean flow's when {plain + '_a'!r} is asked (a binary before "

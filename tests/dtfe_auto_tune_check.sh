@@ -53,12 +53,28 @@
 #  M) the uniform count (DTFE_TEST_TUNE_UNIFORM=1: the plan of a call without the particles) plans the team the run
 #     forms: '--max-concurrent 5' is DTFE_parallel's team of 4 (2 x 2 x 1 sub-boxes, each padded on its own faces),
 #     the same report as '--max-concurrent 4' but its mc, and that team's padded vertices.
+#  N) the time objective (DTFE_AUTO_TIME=1, docs/cleanup-plan.md P8.9 step 2; plan-only but N6): N1 without it (unset or
+#     0) the report line is the one of before, without time keys; N2 on the CPU deposit (and in the double build)
+#     it keeps the memory objective's plan and says why ('not calibrated for ...'), the report line unchanged; on GPU
+#     builds (single precision) N3 with a band of 0 (DTFE_AUTO_TIME_GAIN=0: never leaves the memory plan) the report
+#     line is N1's with 'time_s=X time_mem_s=X' before over_budget; N4 a budget that holds 3^3 x 10 threads and a
+#     coarser split with fewer threads but not 2^3 x 10, and 1000 s a partition (DTFE_AUTO_T_STD_PART): the coarser
+#     plan is taken (time_s < time_mem_s, over_budget=0, said); N5 '--sample-points' falls back (one tessellation per
+#     partition); N6 a real run with the switch writes the grids of the same plan without it; N7 a plan given in full
+#     is predicted and kept (time_s = time_mem_s, said).
+#  O) the CPU exact average's run-wide words are booked for the grids the loop gives words, the ones with a run-wide
+#     unit (single build): one domain at 256^3 with density_a, scalar_a and scalarGradient_a (a scalar dataset in a
+#     copy of the snapshot), each plan against its DTFE_RUN_UNITS_LEGACY=1 twin (no words): 40 B per cell (0.671 GB)
+#     where every grid has a unit, 8 B per cell (0.134 GB, the density alone) under '--approx-phase-space-density',
+#     whose scalar grids keep their Real sums (DTFE.cpp runUnitsSetup). The forced unaveraged scalar is in both twins.
 #
 # Usage: tests/dtfe_auto_tune_check.sh [--no-build]     (DTFE_TEST_TMP, DTFE_TEST_PRECISION=double as the others)
 
 set -euo pipefail
 unset DTFE_TRIANGULATION_THREADS DTFE_TBB_THREADS   # the insert's own switch moves the plans: the suite sets none
 unset DTFE_LOOKAHEAD_TEAM DTFE_TEST_TUNE_UNIFORM    # (L and M set them where they check them)
+unset DTFE_AUTO_TIME DTFE_AUTO_TIME_GAIN DTFE_AUTO_T_STD_PART   # the time objective: only N sets them
+unset DTFE_RUN_UNITS_LEGACY   # (I2 and O set it on their twins: an inherited one would make both twins the same)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -440,6 +456,152 @@ ve="$(awk -v n="${N}" 'BEGIN{printf "%.0f", n*n*n/8 * (1 + 80/n)^2 * (1 + 40/n)}
 check "M2 ... and pads each of the team's 2 x 2 x 1 sub-boxes on its own faces: ${vm:-?} padded vertices (${ve})" \
       "$(awk -v v="${vm:-0}" -v e="${ve}" 'BEGIN{exit !(v > e*0.995 && v < e*1.005)}' && echo 1 || echo 0)"
 rm -f "${TMP}"/da_m*
+
+# ---------- (N) the time objective (DTFE_AUTO_TIME=1) ----------
+echo ">> N: the time objective (DTFE_AUTO_TIME)"
+# DTFE_AUTO_MINN=1000: this 64^3 set counts as large, as the tuner's other checks of the large-set path do
+NR=("${SNAP}" "${TMP}/da_n" --grid 48 "${COMMON[@]}" --field density_a velocity_a gradient_a --auto-tune-report)
+n_rep() {  # $1 = log, then the environment's assignments, '--', the options: one report run
+    local log="$1"; shift
+    local envs=()
+    while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
+    [ "$#" -gt 0 ] && shift
+    env DTFE_RAM_GB=64 DTFE_AUTO_MINN=1000 ${envs[@]+"${envs[@]}"} "${BIN}" "${NR[@]}" "$@" > "${log}" 2>&1 || true
+}
+n_line() { grep -E "${REPORT_RE}" "$1" | head -1 || true; }   # the report line
+n_strip() { sed -E 's/ time_s=[0-9]+ time_mem_s=[0-9]+ over_budget=/ over_budget=/'; }   # ... without the time keys
+n_keys() {  # the report line's 'time_s time_mem_s', empty without them
+    sed -n -E 's/^AUTO-TUNE-REPORT .* time_s=([0-9]+) time_mem_s=([0-9]+) over_budget=[01]$/\1 \2/p' "$1" | head -1
+}
+TIME_LINE="AUTO-TUNE: time objective (DTFE_AUTO_TIME):"
+n_rep "${TMP}/da_n1a.txt" --
+n_rep "${TMP}/da_n1b.txt" DTFE_AUTO_TIME=0 --
+r1="$(n_line "${TMP}/da_n1a.txt")"
+check "N1 without the switch (unset, or DTFE_AUTO_TIME=0): the same report line, no time keys, no time line" \
+      "$([ -n "${r1}" ] && [ "$(n_line "${TMP}/da_n1b.txt")" = "${r1}" ] \
+         && ! grep -q 'time_s=' "${TMP}/da_n1a.txt" "${TMP}/da_n1b.txt" \
+         && ! grep -qF -e "${TIME_LINE}" "${TMP}/da_n1a.txt" "${TMP}/da_n1b.txt" && echo 1 || echo 0)"
+NWHY="the CPU deposit"; if precision_double; then NWHY="the double build"; fi
+n_rep "${TMP}/da_n2.txt" DTFE_AUTO_TIME=1 --
+check "N2 DTFE_AUTO_TIME=1 with ${NWHY}: the memory objective's plan, said; the report line of N1" \
+      "$(grep -qF -e "${TIME_LINE} not calibrated for ${NWHY}; the memory objective's plan." "${TMP}/da_n2.txt" \
+         && [ "$(n_line "${TMP}/da_n2.txt")" = "${r1}" ] && echo 1 || echo 0)"
+if [ "${GPU}" = 1 ] && ! precision_double; then
+    NG=(--gpu --exact --face-gradient)
+    # N3: a band of 0 never leaves the memory objective's plan: its report line gains the two keys, equal
+    n_rep "${TMP}/da_n3a.txt" -- "${NG[@]}"
+    n_rep "${TMP}/da_n3b.txt" DTFE_AUTO_TIME=1 DTFE_AUTO_TIME_GAIN=0 -- "${NG[@]}"
+    r3="$(n_line "${TMP}/da_n3a.txt")"; k3="$(n_keys "${TMP}/da_n3b.txt")"
+    check "N3 --gpu, a band of 0: the switch-off report line with time_s = time_mem_s (${k3:-none}) before over_budget, and the time line" \
+          "$([ -n "${r3}" ] && [ -n "${k3}" ] && [ "${k3% *}" = "${k3#* }" ] \
+             && [ "$(n_line "${TMP}/da_n3b.txt" | n_strip)" = "${r3}" ] \
+             && grep -qF -e "${TIME_LINE} this plan predicts ~" "${TMP}/da_n3b.txt" && echo 1 || echo 0)"
+    # N4: a forced departure, without the look-ahead (its switch-off would move the bookings): the plans' predictions
+    # given by hand are chooseSplit's own test quantity
+    NP=("${NG[@]}" --no-overlap)
+    n_rep "${TMP}/da_n4q22.txt" -- "${NP[@]}" --partition 2 2 2 --max-concurrent 2
+    n_rep "${TMP}/da_n4q210.txt" -- "${NP[@]}" --partition 2 2 2 --max-concurrent 10
+    n_rep "${TMP}/da_n4q310.txt" -- "${NP[@]}" --partition 3 3 3 --max-concurrent 10
+    q22="$(field predicted_gb "${TMP}/da_n4q22.txt")"; q210="$(field predicted_gb "${TMP}/da_n4q210.txt")"
+    q310="$(field predicted_gb "${TMP}/da_n4q310.txt")"
+    # a budget 0.02 GB above the larger of 2^3 x 2 and 3^3 x 10 threads and at least 0.02 GB below 2^3 x 10 (the
+    # budget is 60% of DTFE_RAM_GB): the memory objective plans 3^3 x 10, and a coarser split fits with fewer threads
+    nr="$(awk -v a="${q22:-0}" -v b="${q210:-0}" -v c="${q310:-0}" 'BEGIN{m = (a > c ? a : c) + 0.02;
+        if (a > 0 && c > 0 && m + 0.02 < b) printf "%.4f", m / 0.6}')"
+    if [ -n "${nr}" ]; then
+        nbud="$(awk -v r="${nr}" 'BEGIN{printf "%.2f", 0.6*r}')"
+        n_rep "${TMP}/da_n4m.txt" DTFE_RAM_GB="${nr}" -- "${NP[@]}"
+        n_rep "${TMP}/da_n4t.txt" DTFE_RAM_GB="${nr}" DTFE_AUTO_TIME=1 DTFE_AUTO_TIME_GAIN=1 DTFE_AUTO_T_STD_PART=1000 \
+            -- "${NP[@]}"
+        k4="$(n_keys "${TMP}/da_n4t.txt")"
+        check "N4 a budget of ${nbud} GB (2^3 x 2: ${q22} GB, 3^3 x 10: ${q310} GB, 2^3 x 10: ${q210} GB): the memory objective plans 3^3 x 10 threads, the time objective at 1000 s a partition a coarser split (time_s time_mem_s: ${k4:-none}), over_budget=0, said" \
+              "$(grep -Eq '^AUTO-TUNE-REPORT partition=3 mc=10 ' "${TMP}/da_n4m.txt" \
+                 && grep -Eq '^AUTO-TUNE-REPORT partition=[12] mc=[0-9]+ .*over_budget=0$' "${TMP}/da_n4t.txt" \
+                 && [ -n "${k4}" ] && [ "${k4% *}" -lt "${k4#* }" ] \
+                 && grep -qF -e "for the memory objective's --partition 3 3 3, 10 thread(s), look-ahead off." \
+                        "${TMP}/da_n4t.txt" && echo 1 || echo 0)"
+    else
+        echo "   SKIP  N4 (no budget between 2^3 x 2 / 3^3 x 10 threads, ${q22:-?} / ${q310:-?} GB, and 2^3 x 10, ${q210:-?} GB)"
+    fi
+    # N5: '--sample-points' (one tessellation per partition) is not calibrated
+    "${PY}" - "${TMP}/da_n_plane.bin" "${BOX}" <<'PYEOF'
+import sys, numpy as np
+c = (np.arange(16) + 0.5) * float(sys.argv[2]) / 16
+X, Y = np.meshgrid(c, c, indexing="ij")
+np.stack([X.ravel(), Y.ravel(), np.full(X.size, 0.5 * float(sys.argv[2]))], 1).astype(np.float64).tofile(sys.argv[1])
+PYEOF
+    n_rep "${TMP}/da_n5.txt" DTFE_AUTO_TIME=1 -- --gpu --exact --sample-points "${TMP}/da_n_plane.bin"
+    check "N5 --sample-points: the memory objective's plan, said (one tessellation per partition), no time keys" \
+          "$(grep -qF -e "${TIME_LINE} not calibrated for --sample-points (one tessellation per partition)" \
+                "${TMP}/da_n5.txt" && ! grep -q 'time_s=' "${TMP}/da_n5.txt" && echo 1 || echo 0)"
+    # N6: a real run under the switch (a band of 0: the plan stays the memory objective's) writes the grids of the
+    # same run without it
+    rc=0
+    env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 DTFE_AUTO_MINN=1000 DTFE_AUTO_TIME=1 DTFE_AUTO_TIME_GAIN=0 "${BIN}" "${SNAP}" \
+        "${TMP}/da_n6on" --grid 48 "${COMMON[@]}" --field density_a velocity_a gradient_a "${NG[@]}" \
+        > "${TMP}/da_n6on.txt" 2>&1 || rc=$?
+    env DTFE_RAM_GB=64 DTFE_FREE_GB=1000 DTFE_AUTO_MINN=1000 "${BIN}" "${SNAP}" \
+        "${TMP}/da_n6off" --grid 48 "${COMMON[@]}" --field density_a velocity_a gradient_a "${NG[@]}" \
+        > "${TMP}/da_n6off.txt" 2>&1 || true
+    check "N6 a real run with the switch (exit ${rc}) states its prediction and writes the switch-off run's .a_den and .a_vel byte for byte" \
+          "$([ "${rc}" = 0 ] && grep -qF -e "${TIME_LINE} this plan predicts ~" "${TMP}/da_n6on.txt" \
+             && [ -s "${TMP}/da_n6on.a_den" ] && cmp -s "${TMP}/da_n6on.a_den" "${TMP}/da_n6off.a_den" \
+             && cmp -s "${TMP}/da_n6on.a_vel" "${TMP}/da_n6off.a_vel" && echo 1 || echo 0)"
+    # N7: a plan given in full is predicted, never changed
+    n_rep "${TMP}/da_n7a.txt" -- "${NG[@]}" --partition 3 3 3 --max-concurrent 10
+    n_rep "${TMP}/da_n7b.txt" DTFE_AUTO_TIME=1 -- "${NG[@]}" --partition 3 3 3 --max-concurrent 10
+    r7="$(n_line "${TMP}/da_n7a.txt")"; k7="$(n_keys "${TMP}/da_n7b.txt")"
+    check "N7 a plan given in full: kept (the switch-off report line), predicted (time_s = time_mem_s: ${k7:-none}), said" \
+          "$([ -n "${r7}" ] && [ -n "${k7}" ] && [ "${k7% *}" = "${k7#* }" ] \
+             && [ "$(n_line "${TMP}/da_n7b.txt" | n_strip)" = "${r7}" ] \
+             && grep -qF -e "--partition and --max-concurrent are given, so it is only predicted." "${TMP}/da_n7b.txt" \
+             && echo 1 || echo 0)"
+else
+    echo "   SKIP  N3-N7 (a build without the GPU backend, or the double build: the time objective falls back there, N2)"
+fi
+rm -f "${TMP}"/da_n*
+
+# ---------- (O) the CPU exact average's words: only for the grids with a run-wide unit ----------
+echo ">> O: the CPU exact average's run-wide words in the plan (none for the scalar grids under --approx-phase-space-density)"
+if precision_double; then
+    echo "   SKIP  O (the double build's CPU exact sums are doubles: no words, no term)"
+else
+    SNAPN="${TMP}/dat_crossed${N}_phi.hdf5"
+    cp "${SNAP}" "${SNAPN}"
+    "${PY}" - "${SNAPN}" <<'PYEOF'
+import h5py, numpy as np, sys
+with h5py.File(sys.argv[1], "a") as f:
+    p = f["PartType1"]
+    x = p["Coordinates"][:]
+    p["Phi"] = (np.sin(2.0 * np.pi * x[:, 0] / 100.0) + 0.3 * x[:, 2] / 100.0).astype(np.float32)
+PYEOF
+    NR=("${SNAPN}" "${TMP}/da_n" --grid 256 "${COMMON[@]}" --field density_a scalar_a scalarGradient_a
+        --scalar-dataset Phi --exact --partition 1 1 1 --max-concurrent 1 --auto-tune-report)
+    on_top() {  # the busiest partition's GB on top of 'fixed' (the AUTO-TUNE-DEBUG line): one domain's own bytes
+        sed -n 's/^AUTO-TUNE-DEBUG standard: .* padded vertices, \([0-9.]*\) GB on top of .*/\1/p' "$1" | head -1
+    }
+    for a in plain approx; do
+        na=()
+        if [ "${a}" = approx ]; then na=(--approx-phase-space-density); fi
+        env DTFE_RAM_GB=64 DTFE_AUTO_TUNE_DEBUG=1 "${BIN}" "${NR[@]}" ${na[@]+"${na[@]}"} \
+            > "${TMP}/da_n_${a}.txt" 2>&1 || true
+        env DTFE_RAM_GB=64 DTFE_AUTO_TUNE_DEBUG=1 DTFE_RUN_UNITS_LEGACY=1 "${BIN}" "${NR[@]}" ${na[@]+"${na[@]}"} \
+            > "${TMP}/da_n_${a}_legacy.txt" 2>&1 || true
+    done
+    n1="$(on_top "${TMP}/da_n_plain.txt")"; n1l="$(on_top "${TMP}/da_n_plain_legacy.txt")"
+    n2="$(on_top "${TMP}/da_n_approx.txt")"; n2l="$(on_top "${TMP}/da_n_approx_legacy.txt")"
+    # 256^3 cells x 8 B per component: density 1 + scalar 1 + its gradient 3 = 40 B (0.671 GB); the density alone 8 B
+    # (0.134 GB). The GB carry three decimals, so each difference is good to 0.001.
+    nd() {  # nd <with words> <legacy twin> <lo> <hi>: 1 when both are numbers and their difference lies in (lo, hi)
+        awk -v a="${1:-x}" -v b="${2:-x}" -v lo="$3" -v hi="$4" \
+            'BEGIN{d = a - b; print (a != "x" && b != "x" && d > lo && d < hi) ? 1 : 0}'
+    }
+    check "O1 the words of density_a, scalar_a and scalarGradient_a, 40 B per cell: ${n1:-?} - ${n1l:-?} GB = 0.671" \
+          "$(nd "${n1}" "${n1l}" 0.665 0.677)"
+    check "O2 under --approx-phase-space-density the density's alone, 8 B per cell: ${n2:-?} - ${n2l:-?} GB = 0.134" \
+          "$(nd "${n2}" "${n2l}" 0.128 0.140)"
+    rm -f "${SNAPN}" "${TMP}"/da_n*
+fi
 
 echo "------------------------------------------------------------"
 if [ "${FAILS}" -gt 0 ]; then

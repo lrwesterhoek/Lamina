@@ -267,7 +267,7 @@ ps_gpu_mode_check:
 	@$(MKDIR_P) $(OBJ_DIR_PS)
 	@if [ ! -f $(OBJ_DIR_PS)/.gpu_mode_$(GPU_MODE) ] || [ ! -f $(OBJ_DIR_PS)/.dim_$(DIM) ] || [ ! -f $(OBJ_DIR_PS)/.prec_$(PRECISION) ] || [ ! -f $(OBJ_DIR_PS)/.tbb_$(TBB_PS) ] || [ ! -f $(OBJ_DIR_PS)/.deflate_$(HAVE_LIBDEFLATE) ] || [ ! -f $(OBJ_DIR_PS)/$(FLAGS_STAMP) ] || { [ -n "$(FPC_STAMP)" ] && [ ! -f $(OBJ_DIR_PS)/$(FPC_STAMP) ]; }; then \
 		echo ">> PS build mode is now '$(GPU_MODE)', $(DIM)D, $(PRECISION), $(BUILD_MODE) (flags $(FLAGS_SUM)), TBB=$(TBB_PS), libdeflate=$(HAVE_LIBDEFLATE)$(if $(FPC_STAMP),$(comma) no FMA contraction); wiping $(OBJ_DIR_PS) to avoid mixed objects"; \
-		rm -f $(OBJ_DIR_PS)/*$(OBJ_EXT) $(OBJ_DIR_PS)/*.d $(OBJ_DIR_PS)/ps_deposit_msl.h $(OBJ_DIR_PS)/.gpu_mode_* $(OBJ_DIR_PS)/.dim_* $(OBJ_DIR_PS)/.prec_* $(OBJ_DIR_PS)/.tbb_* $(OBJ_DIR_PS)/.deflate_* $(OBJ_DIR_PS)/.fpc_* $(OBJ_DIR_PS)/.flags_* $(OBJ_DIR_PS)/.metal_mode_* $(OBJ_DIR_PS)/.build_mode; \
+		rm -f $(OBJ_DIR_PS)/*$(OBJ_EXT) $(OBJ_DIR_PS)/*.d $(OBJ_DIR_PS)/ps_deposit_msl.h $(OBJ_DIR_PS)/ps_face_msl.h $(OBJ_DIR_PS)/.gpu_mode_* $(OBJ_DIR_PS)/.dim_* $(OBJ_DIR_PS)/.prec_* $(OBJ_DIR_PS)/.tbb_* $(OBJ_DIR_PS)/.deflate_* $(OBJ_DIR_PS)/.fpc_* $(OBJ_DIR_PS)/.flags_* $(OBJ_DIR_PS)/.metal_mode_* $(OBJ_DIR_PS)/.build_mode; \
 		touch $(OBJ_DIR_PS)/.gpu_mode_$(GPU_MODE) $(OBJ_DIR_PS)/.dim_$(DIM) $(OBJ_DIR_PS)/.prec_$(PRECISION) $(OBJ_DIR_PS)/.tbb_$(TBB_PS) $(OBJ_DIR_PS)/.deflate_$(HAVE_LIBDEFLATE) $(OBJ_DIR_PS)/$(FLAGS_STAMP) $(if $(FPC_STAMP),$(OBJ_DIR_PS)/$(FPC_STAMP)); \
 		printf '%s' "$(strip $(GPU_BUILD_ARG) $(PREC_BUILD_ARG) $(TBB_BUILD_ARG) $(DIM_BUILD_ARG))" > $(OBJ_DIR_PS)/.build_mode; \
 	fi
@@ -787,16 +787,26 @@ $(OBJ_DIR_PS)/ps_mean_streams$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_mean_strea
 	$(CC) $(COMPILE_FLAGS_PS) $(DTFE_INC) -o $@ -c $(SRC)/CGAL_triangulation/ps_mean_streams.cc
 
 # Metal GPU deposit host (METAL=1 only). The kernel source is embedded via a generated header so
-# the binary needs no runtime file lookup; Metal compiles it once per process.
+# the binary needs no runtime file lookup; Metal compiles it once per word size (ps_metal_host.cc pipes()).
 # The kernels' parameter blocks are the hosts' own header (ps_kernel_params.h / dtfe_deposit_params.h, plain C++
 # that is valid MSL), prepended after the exact clip helpers and the run-wide fixed-point words
-# (metal/fixed_words.metal.inc).
-$(OBJ_DIR_PS)/ps_deposit_msl.h: metal/ps_deposit.metal metal/exact_clip.metal.inc metal/fixed_words.metal.inc $(SRC)/CGAL_triangulation/ps_kernel_params.h Makefile
+# (metal/fixed_words.metal.inc); the PS kernels' shared guard, 64-bit add and items' map reader
+# (metal/ps_common.metal.inc) follow the parameter blocks.
+$(OBJ_DIR_PS)/ps_deposit_msl.h: metal/ps_deposit.metal metal/exact_clip.metal.inc metal/fixed_words.metal.inc $(SRC)/CGAL_triangulation/ps_kernel_params.h metal/ps_common.metal.inc Makefile
 	@$(MKDIR_P) $(OBJ_DIR_PS)
-	{ printf 'static const char PS_DEPOSIT_MSL[] = R"MSL(\n'; cat metal/exact_clip.metal.inc metal/fixed_words.metal.inc $(SRC)/CGAL_triangulation/ps_kernel_params.h metal/ps_deposit.metal; printf '\n)MSL";\n'; } > $@.tmp
+	{ printf 'static const char PS_DEPOSIT_MSL[] = R"MSL(\n'; cat metal/exact_clip.metal.inc metal/fixed_words.metal.inc $(SRC)/CGAL_triangulation/ps_kernel_params.h metal/ps_common.metal.inc metal/ps_deposit.metal; printf '\n)MSL";\n'; } > $@.tmp
 	mv $@.tmp $@
 
-$(OBJ_DIR_PS)/ps_metal_host$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_metal_host.cc $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_metal_retry.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(SRC)/CGAL_triangulation/ps_kernel_params.h $(OBJ_DIR_PS)/ps_deposit_msl.h Makefile
+# The GPU face kernel (DTFE_GPU_FACES=1, metal/ps_face.metal), the same embedding: the run-wide words, the parameter
+# blocks, the PS kernels' shared pieces and the canonical face arithmetic the CPU shares (face_sweep_f32.h) in front
+# of it, no exact clip. Its own library, compiled in Metal's safe math mode (ps_metal_host.cc); the deposit's keeps
+# the default fast math.
+$(OBJ_DIR_PS)/ps_face_msl.h: metal/ps_face.metal metal/fixed_words.metal.inc $(SRC)/CGAL_triangulation/ps_kernel_params.h metal/ps_common.metal.inc $(SRC)/CGAL_triangulation/face_sweep_f32.h Makefile
+	@$(MKDIR_P) $(OBJ_DIR_PS)
+	{ printf 'static const char PS_FACE_MSL[] = R"MSL(\n'; cat metal/fixed_words.metal.inc $(SRC)/CGAL_triangulation/ps_kernel_params.h metal/ps_common.metal.inc $(SRC)/CGAL_triangulation/face_sweep_f32.h metal/ps_face.metal; printf '\n)MSL";\n'; } > $@.tmp
+	mv $@.tmp $@
+
+$(OBJ_DIR_PS)/ps_metal_host$(OBJ_EXT): $(SRC)/CGAL_triangulation/ps_metal_host.cc $(SRC)/CGAL_triangulation/gpu_host.h $(SRC)/CGAL_triangulation/gpu_metal_retry.h $(SRC)/CGAL_triangulation/ps_deposit_params.h $(SRC)/CGAL_triangulation/ps_kernel_params.h $(SRC)/fixed_units.h $(OBJ_DIR_PS)/ps_deposit_msl.h $(OBJ_DIR_PS)/ps_face_msl.h Makefile
 	$(CC) $(COMPILE_FLAGS_PS) -isystem third_party/metal-cpp -I $(OBJ_DIR_PS) -o $@ -c $(SRC)/CGAL_triangulation/ps_metal_host.cc
 
 # Standard-DTFE Metal deposit host (METAL=1 only), same embedding scheme in $(OBJ_DIR).

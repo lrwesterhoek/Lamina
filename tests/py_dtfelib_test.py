@@ -571,6 +571,66 @@ def t_runlog_averaging_by_binary():
     assert runlog.canonical_flag("--exact-average") == runlog.canonical_flag("--ps-exact-deposit") == "--exact"
 
 
+def t_face_gradient_unaveraged():
+    """FieldSet.face_gradient of the unaveraged ('_u') grids, which no file marks (the binary writes
+    '.a_velDivStreams' for the '_a' pass only): the run log's last 'velocity gradient' header line decides
+    (io.run_face_gradient), one route for both passes; the '_a' grids keep their own marker whatever the log says.
+    No log, a log without the line (a PS-DTFE binary before its face default, even one run with '--face-gradient')
+    and a pass that fell back to the stream average read as before: False. A face run's '_u' mean field is then its
+    stored grid, and its '_u' stream average says that the unaveraged pass wrote none."""
+    import shutil
+    import tempfile
+
+    from dtfelib.io import FieldSet, run_face_gradient
+    face = ("\t velocity gradient      : from EXACT FACE sums, the gradient of the volume-weighted MEAN velocity "
+            "(the default where it applies; '.a_velDivStreams' holds the stream average's divergence; "
+            "'--per-tet-gradient' keeps the stream average)\n")
+    stream = "\t velocity gradient      : the stream average of each stream's own gradient (--per-tet-gradient)\n"
+    fell_back = ("PS-DTFE: the face sums' bounds (0, 0) give no fixed-point unit; '--face-gradient' is off for this "
+                 "pass (its gradient stays the stream average).\n")
+    root = Path(tempfile.mkdtemp(prefix="dtfe_face_u_"))
+    try:
+        d = _synthetic_snapdir(root, "SYN", 99, 0.0, n=8, grids=("den",), extra=(("velDiv", 1), ("vel", 3)))
+        rng = np.random.default_rng(3)
+        div_u = rng.normal(size=(8, 8, 8)).astype(np.float32)
+        div_u.tofile(str(d / "ps_output.velDiv"))                           # the '_u' grids, no marker of their own
+        rng.normal(size=(8, 8, 8, 3)).astype(np.float32).tofile(str(d / "ps_output.vel"))
+        log = d / "ps_output.runlog"
+
+        def routes():
+            return (FieldSet(d, method="ps", averaged=False).face_gradient,
+                    FieldSet(d, method="ps", averaged=True).face_gradient)
+        got = {"no log": routes()}
+        for key, text in (("face", "RUNNING: ./PS-DTFE in out --grid 8\n" + face),
+                          ("stream", "RUNNING: ./PS-DTFE in out --grid 8 --per-tet-gradient\n" + stream),
+                          ("older binary", "RUNNING: ./PS-DTFE in out --grid 8 --face-gradient --exact\n"),
+                          ("a pass fell back", face + fell_back),
+                          ("two headers, the face last", stream + "RUNNING: again\n" + face)):
+            log.write_text(text)
+            got[key] = routes()
+        want = {"no log": (False, False), "face": (True, False), "stream": (False, False),
+                "older binary": (False, False), "a pass fell back": (False, False),
+                "two headers, the face last": (True, False)}
+        assert got == want, got
+        assert not run_face_gradient(d / "ps_output.missing") and run_face_gradient(log)
+        # a face run's '_u' grids: the mean field is the stored grid; the unaveraged pass wrote no stream average
+        log.write_text(face)
+        fu = FieldSet(d, method="ps", averaged=False)
+        assert np.array_equal(fu.load("divergence", mean_field=True), div_u)
+        assert fu.has("divergence", mean_field=True) and not fu.has("divergence", stream_average=True)
+        try:
+            fu.load("divergence", stream_average=True)
+            raise AssertionError("a face run's '_u' stream average loaded")
+        except FileNotFoundError as e:
+            assert "unaveraged pass" in str(e), str(e)
+        # the '_a' grids: their own marker, whatever the log says (here the stream average's line)
+        np.zeros((8, 8, 8), np.float32).tofile(str(d / "ps_output.a_velDivStreams"))
+        log.write_text(stream)
+        assert routes() == (False, True), routes()
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def t_velocity_scale():
     """FieldSet.load() converts u-units to peculiar km/s: first moments x sqrt(a), the
     dispersion (a velocity VARIANCE) x a, everything else untouched; exact no-op at z=0."""
@@ -4413,6 +4473,9 @@ def main():
     check("run-log reader: the averaging spellings read by the binary, PS-DTFE's kept; the exact average's older "
           "names read as --exact (synthetic)",
           t_runlog_averaging_by_binary)
+    check("FieldSet.face_gradient of the unaveraged grids: the run log's gradient line decides, one route for both "
+          "passes; no log, an older binary's log and a pass that fell back read as before (synthetic)",
+          t_face_gradient_unaveraged)
     check("sim_dir / find_sims: per-family and flat data layouts (synthetic)", t_sim_dir_layouts)
     check("snapdir_path / snapshot_ladder == the pasted expressions, both layouts, int and '099' ids (synthetic)",
           t_snapshot_helpers)

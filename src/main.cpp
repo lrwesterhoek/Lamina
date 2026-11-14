@@ -146,6 +146,7 @@ int main( int argc, char *argv[] )
             if ( userOptions.scaleFactor < Real(0.) ) userOptions.scaleFactor = Real( rec.scaleFactor );
             userOptions.averageDensity = Real( rec.averageDensity );
             userOptions.psPresetN = rec.n;
+            userOptions.psPresetMoments = { rec.totalMass, rec.vmax, rec.smax, rec.v2m, rec.n };
             userOptions.psParticlesDeferred = true;
             particlesDeferred = true;
             MESSAGE::Message message( userOptions.verboseLevel );

@@ -67,14 +67,15 @@ echo ">> generating test snapshots ..."
 
 run() {  # $1 = threads, $2 = output root, $3 = input snapshot, rest = extra flags
     # out comes right after the input: multitoken options (--partition X Y Z) must not be
-    # able to swallow the trailing positional. The sampled deposit ('density_a' would select the exact
-    # one): the integer '.streams' and the sub-sample fallback asserted below are its own
+    # able to swallow the trailing positional. The sampled deposit at nSub 3 ('density_a' would select the
+    # exact one): the integer '.streams' and the sub-sample fallback asserted below are its own
     local threads="$1" out="$2" snap="$3"; shift 3
     rm -f "${out}".*
     local log="${out}.log"
     set +e
     OMP_NUM_THREADS="${threads}" "${BIN}" "${snap}" "${out}" --grid "${GRID}" \
-        --field density velocity density_a --sampled --input-format 105 --mpc-unit 1 --verbose 2 "$@" > "$log" 2>&1
+        --field density velocity density_a --sampled --subsamples 3 --input-format 105 --mpc-unit 1 --verbose 2 "$@" \
+        > "$log" 2>&1
     local rc=$?
     set -e
     die_on_failed_run "$rc" "$log"

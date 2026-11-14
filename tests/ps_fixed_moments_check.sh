@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Every PS-DTFE grid is an exact, order-independent sum. The MASS grid is a 64-bit fixed-point sum (GPU and
+# Every PS-DTFE grid is an exact, order-independent sum. The MASS grid is a fixed-point sum (GPU and
 # CPU), and so are the moment grids -- velocity, the dispersion's second moment, its own
 # mean and weight under --ps-volume-weighted, the velocity gradient, the moment weight, the scalar and its gradient,
 # the exact deposit's multiplicity, the released tets' multiplicity: float sums would depend on the order the GPU
 # atomics land in (two runs differ in the last bits of ~30-50% of the cells) and, on the CPU, on the thread count
-# (thread-private copies summed in thread order). Each is a set of int64 words in a power-of-two unit
-# from a bound of everything the pass deposits (ps_deposit_params.h PSFxGrid), converted to float once. Asserted on
+# (thread-private copies summed in thread order). Each is a set of integer words in a power-of-two unit, converted to
+# float once: by default int64 words in a unit from a bound of everything the pass deposits (ps_deposit_params.h
+# PSFxGrid), or under DTFE_PS_RUN_UNITS=1 the run-wide unit of the run log's 'fixed-point units (run-wide):' line
+# (src/fixed_units.h: 128-bit words on the GPU, an int64 plus an exact carry per component on the host). Asserted on
 # 32^3 crossed waves (folds everywhere: deferred tets, multi-stream cells, large gradients):
 #   F1  two --gpu runs with different opening chunk sizes (PS_GPU_CHUNK 2000 and 25000: other
 #       atomics share a command buffer, other orders) write byte-identical grids -- every '.a_*' output -- for the
@@ -23,6 +25,12 @@
 #       tetrahedron in 50 a NaN mass, on the CPU and (GPU builds) in the kernel; each run says once how many shares
 #       it left out, by grid (the mass grid among them), its '.a_den' has no NaN or infinity, and a run without
 #       the hook says nothing of the kind. Single build only (the double build's CPU sums are doubles, no words).
+#   F6  the bound walk (ps_interpolation.cc psFxBoundWalk: its threads claim blocks of 256 cells from one counter)
+#       gives the same 13 sums -- the moment bounds and the face bounds, each a double -- at 1, 3 and 6 threads, word
+#       for word: DTFE_DEBUG_FX_BOUNDS=1 prints them in hex, once per walk. The exact deposit with --face-gradient
+#       (the face bounds non-zero), on the whole box and in a --grid-window (the window filter and the mass bound);
+#       the 6-thread walk runs on a team of more than one thread; the grids of 1 and 6 threads byte-identical.
+#       Single build only, as F2.
 # 2D (PS-DTFE-2d, when built): F2's thread independence for the sampled deposit.
 # ~1-2 min (M-series Mac, 10 cores).
 # Usage: tests/ps_fixed_moments_check.sh [--no-build]   (--no-build is accepted and ignored)
@@ -93,6 +101,21 @@ if ! precision_double; then
         GPUOK=1 run "$TMP/n_gpu" env DTFE_TEST_NAN_SHARE=50 "${PS_BIN}" "$SNAP" "$TMP/n_gpu" "${C[@]}" --gpu
     fi
 fi
+F6=0
+if ! precision_double; then
+    F6=1
+    echo ">> F6: the bound walk's sums (DTFE_DEBUG_FX_BOUNDS=1) at 1, 3 and 6 threads, exact with the face sums"
+    FW=(--exact --ps-volume-weighted --face-gradient)
+    WIN=(--grid-window 0.01 99.99 0.01 99.99 50.1 53.0)
+    for t in 1 3 6; do
+        run "$TMP/w$t" env DTFE_DEPOSIT_THREADS=$t DTFE_DEPOSIT_SLABS=0 DTFE_DEBUG_FX_BOUNDS=1 \
+            "${PS_BIN}" "$SNAP" "$TMP/w$t" "${C[@]}" "${FW[@]}"
+    done
+    for t in 1 6; do
+        run "$TMP/ww$t" env DTFE_DEPOSIT_THREADS=$t DTFE_DEPOSIT_SLABS=0 DTFE_DEBUG_FX_BOUNDS=1 \
+            "${PS_BIN}" "$SNAP" "$TMP/ww$t" "${C[@]}" "${FW[@]}" "${WIN[@]}"
+    done
+fi
 D2=0
 if ! precision_double && [ -x ./PS-DTFE-2d ]; then
     D2=1
@@ -107,7 +130,7 @@ if ! precision_double && [ -x ./PS-DTFE-2d ]; then
     fi
 fi
 
-GPU="$GPU" D2="$D2" N5="$N5" VARIANTS="$VARIANTS" "$PY" - "$TMP" <<'PYEOF'
+GPU="$GPU" D2="$D2" N5="$N5" F6="$F6" VARIANTS="$VARIANTS" "$PY" - "$TMP" <<'PYEOF'
 import numpy as np, os, re, sys
 from pathlib import Path
 tmp = Path(sys.argv[1]); fails = 0
@@ -164,6 +187,24 @@ if os.environ.get("N5") == "1":
         check("F5", den.size > 0 and bool(np.isfinite(den).all()), f"{run}: '.a_den' finite everywhere ({den.size} cells)")
     clean = [r for r in (["c1_samp"] + (["g1_samp"] if gpu else [])) if DROP.search((tmp / f"{r}.log").read_text(errors="replace"))]
     check("F5", not clean, "runs without the hook report no dropped share" + (f" -- they do: {clean}" if clean else ""))
+WALK = re.compile(r"^DTFE_DEBUG_FX_BOUNDS: bound walk on (\d+) thread\(s\), (\d+ blocks; sums .*)$", re.M)
+if os.environ.get("F6") == "1":
+    for what, runs in (("whole box", ("w1", "w3", "w6")), ("--grid-window", ("ww1", "ww6"))):
+        walks = {r: WALK.findall((tmp / f"{r}.log").read_text(errors="replace")) for r in runs}
+        first = walks[runs[0]]
+        check("F6", all(walks[r] for r in runs),
+              f"{what}: every run prints its bound walks ({', '.join(f'{r} {len(walks[r])}' for r in runs)})")
+        if not all(walks[r] for r in runs):
+            continue
+        teams = [int(t) for t, _ in walks[runs[-1]]]
+        check("F6", min(teams) > 1, f"{what}: the {runs[-1]} walks run on teams of {teams} threads (more than one)")
+        sums = {r: [s for _, s in walks[r]] for r in runs}
+        diff = [r for r in runs[1:] if sums[r] != sums[runs[0]]]
+        check("F6", not diff, f"{what}: the {len(first)} walk(s) give the same 13 sums, word for word, at "
+              + ", ".join(r.lstrip("w") + " thread(s)" for r in runs) + (f" -- DIFFER: {diff}" if diff else ""))
+        face = [float.fromhex(v) for v in first[0][1].split()[-3:]]
+        check("F6", all(v > 0. for v in face), f"{what}: the face bounds are summed ({first[0][1].split()[-3:]})")
+        same(runs[0], runs[-1], f"{what}: exact with the face sums, 1 thread vs {runs[-1].lstrip('w')}", "F6")
 print("RESULT:", "PASS  (every grid of a pass is an exact sum: run- and thread-count independent)"
       if not fails else f"FAIL ({fails} check(s))")
 sys.exit(1 if fails else 0)

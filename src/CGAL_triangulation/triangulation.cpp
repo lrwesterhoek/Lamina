@@ -334,7 +334,8 @@ void DTFE_interpolation(vector<Particle_data> *p,
     {
         t.start();
 #ifdef PHASE_SPACE
-        // PS-DTFE averaged fields: sub-sample each grid cell nSub^NO_DIM times (--subsamples, default 3)
+        // PS-DTFE averaged fields: sub-sample each grid cell nSub^NO_DIM times (--subsamples, default 1; the exact
+        // deposit clips instead, its slivers sampled at the count resolveAverageMode leaves it)
         if ( not userOptions.redshiftConeOn and not userOptions.userDefinedSampling )
             interpolateGrid_phaseSpace( dt, userOptions, aQuantities, userOptions.aField, userOptions.psAvgSubsamples,
                                         userOptions.psMayClearDT );

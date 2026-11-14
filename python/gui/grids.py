@@ -11,8 +11,9 @@
                            Explore tab's click-to-query), from the TNG layout or the custom-snapshot
                            job's settings sidecar ('<prefix>.gui.json')
   field_label(o, name, ..) a map's name for a field, the velocity derivatives' family said (a phase-space
-                           output's divergence, shear, vorticity, gradient and V-web as the mean field grad<v>,
-                           computed slice by slice from its velocity grid, or as its stored stream average <grad v>)
+                           output's divergence, shear, vorticity, gradient and V-web as the mean field grad<v> --
+                           a face-gradient output's stored grids, else computed slice by slice from its velocity
+                           grid -- or as its stored stream average <grad v>)
 """
 
 from __future__ import annotations
@@ -39,11 +40,22 @@ from dtfelib.io import (FIELDS as _IO_FIELDS, LEGACY_SUFFIX, MEAN_FIELD_NAMES, _
 # '--field scalar_a'; dtfelib's analysis never reads it, the Explore map can)
 FIELDS = {**_IO_FIELDS, "scalar": ("scalar", 1, False)}
 
-# the fields worth a map, in menu order, with their labels
+# the two families of a phase-space output's velocity derivatives, as a map's name says them (field_label)
+GRADIENT_QUALIFIER = {"mean": "mean field ∇⟨v⟩", "stream": "stream average ⟨∇v⟩"}
+# the fields worth a map, in menu order, with their labels. A face-gradient run writes the stream average of each
+# stream's own gradient beside its mean-flow family (src/input_output.cc: '.a_velDivStreams' always, and
+# '.a_velGradStreams', '.a_velShearStreams', '.a_velVortStreams' where 'gradient_a', 'shear_a', 'vorticity_a' are
+# written; docs/cleanup-plan.md D12), and the mass flux divergence ('.a_massFluxDiv'): listed after the family, the
+# twins named as the stream average a map of the family's own grid says (field_label)
 FIELD_LABELS = {
     "density": "density ρ/ρ̄", "streams": "stream count", "hidden_streams": "hidden streams",
     "velocity": "velocity", "divergence": "velocity divergence", "vorticity": "vorticity",
-    "shear": "shear", "gradient": "velocity gradient", "dispersion": "velocity dispersion",
+    "shear": "shear", "gradient": "velocity gradient",
+    "divergence_streams": f"velocity divergence ({GRADIENT_QUALIFIER['stream']})",
+    "vorticity_streams": f"vorticity ({GRADIENT_QUALIFIER['stream']})",
+    "shear_streams": f"shear ({GRADIENT_QUALIFIER['stream']})",
+    "gradient_streams": f"velocity gradient ({GRADIENT_QUALIFIER['stream']})",
+    "mass_flux_divergence": "mass flux divergence", "dispersion": "velocity dispersion",
     "dispersion_tensor": "dispersion tensor", "caustic": "caustic (fold) cells",
     "caustic_class": "caustic class", "tet_touch": "tetrahedra touching",
     "tweb": "T-web class", "tweb_eigenvalues": "T-web eigenvalues", "vweb": "V-web class",
@@ -59,6 +71,13 @@ FIELD_HELP = {
                "hidden-streams bit 1). Exact for every periodic phase-space run, also those made before "
                "2026-10-13, whose stored caustic grid missed the folds thinner than the sampling.",
     "scalar": "The particles' own value (the run's scalar dataset, e.g. a potential), interpolated like the density.",
+    **{f"{n}_streams": f"The stream average of each stream's own {what} (from ⟨∇v⟩), written beside an Exact "
+                       f"run's {what} of the mean flow (from ∇⟨v⟩, exact face sums): the grid a Fast run stores as "
+                       f"its {what}. The two agree in single-stream cells."
+       for n, what in (("divergence", "divergence"), ("vorticity", "vorticity"), ("shear", "shear"),
+                       ("gradient", "velocity gradient"))},
+    "mass_flux_divergence": "∇·(Σ ρ_s v_s), the streams' momentum (ρ/ρ̄ times velocity) out of the cell per volume, "
+                            "from exact face sums: by continuity the rate the cell loses mass (an Exact run in 3D).",
 }
 # The velocity derivatives (dtfelib.io.MEAN_FIELD_NAMES). Standard DTFE stores them as the derivatives of
 # its one velocity field, the mean field grad<v>; so does a PS-DTFE run with the face gradient (its default with the
@@ -72,9 +91,10 @@ FIELD_HELP = {
 # which (field_label).
 GRADIENT_FIELDS = frozenset(MEAN_FIELD_NAMES)
 PS_GRADIENT_DEFAULT = "mean-field"
-GRADIENT_QUALIFIER = {"mean": "mean field ∇⟨v⟩", "stream": "stream average ⟨∇v⟩"}
+# the vorticity grids: the binary stores the antisymmetric part of a gradient, shown as its curl (component_values)
+CURL_FIELDS = frozenset({"vorticity", "vorticity_streams"})
 # vector fields that can be drawn as arrows (their in-plane components) over the colour map
-VECTOR_FIELDS = {"velocity", "vorticity"}
+VECTOR_FIELDS = {"velocity"} | CURL_FIELDS
 # which component menu a field offers; 'norm' = the vector's length
 COMPONENTS = {3: ["norm", "x", "y", "z"], 5: ["1", "2", "3", "4", "5"], 6: ["xx", "xy", "xz", "yy", "yz", "zz"],
               9: ["trace (divergence)", "xx", "xy", "xz", "yx", "yy", "yz", "zx", "zy", "zz"]}
@@ -189,7 +209,8 @@ def _ambiguous_dim(root: Path, plane: tuple[int, np.dtype], cube: tuple[int, np.
     return 2 if d_plane < 0.8 * d_cube else 3
 # maps that are best on a log scale by default / diverging maps / category maps
 LOG_DEFAULT = {"density", "dispersion", "tet_touch"}
-DIVERGING = {"divergence", "vorticity", "gradient", "shear", "tweb_eigenvalues", "vweb_eigenvalues"}
+DIVERGING = {"divergence", "vorticity", "gradient", "shear", "tweb_eigenvalues", "vweb_eigenvalues",
+             "divergence_streams", "vorticity_streams", "gradient_streams", "shear_streams", "mass_flux_divergence"}
 CATEGORICAL = {"streams", "hidden_streams", "caustic", "caustic_class", "tweb", "vweb"}
 
 
@@ -247,9 +268,7 @@ def cap_cubes(on: bool) -> None:
     global _CAPPED
     with _CUBES_LOCK:
         _CAPPED = bool(on)
-        budget = _cube_budget()
-        while _CUBES and sum(a.nbytes for a in _CUBES.values()) > budget:
-            _CUBES.pop(next(iter(_CUBES)))
+        _make_room(0, _CUBES, _SMOOTH3D)
         while _MF_PLANES and sum(a.nbytes for a in _MF_PLANES.values()) > _mf_budget():
             _MF_PLANES.pop(next(iter(_MF_PLANES)))
 
@@ -262,6 +281,16 @@ def cubes_capped() -> bool:
 
 def _cube_budget() -> int:
     return min(CUBE_CACHE_BYTES, RUN_CUBE_BYTES) if _CAPPED else CUBE_CACHE_BYTES
+
+
+def _make_room(nbytes: int, first: dict, second: dict) -> None:
+    """Under _CUBES_LOCK: the least recently used cubes dropped, those of 'first' before those of 'second', until
+    'nbytes' more fit in the one budget the grids' cubes (_CUBES) and the cubes smoothed in 3D (_SMOOTH3D) share."""
+    budget = _cube_budget()
+    for d in (first, second):
+        while d and sum(a.nbytes for a in _CUBES.values()) + sum(a.nbytes for a in _SMOOTH3D.values()) \
+                + nbytes > budget:
+            d.pop(next(iter(d)))
 
 
 def cube_key(path: Path, dtype, shape) -> tuple | None:
@@ -305,8 +334,7 @@ def cached_cube(path: Path, dtype, shape, axis: int | None = None, read: bool = 
             _CUBES.pop(stale)
         if nbytes > _cube_budget():           # the cap came on while this was read (a job started): use it, keep none
             return cube
-        while _CUBES and sum(a.nbytes for a in _CUBES.values()) + nbytes > _cube_budget():
-            _CUBES.pop(next(iter(_CUBES)))
+        _make_room(nbytes, _CUBES, _SMOOTH3D)  # the grids' cubes first, then the ones smoothed in 3D
         _CUBES[key] = cube
     return cube
 
@@ -620,7 +648,7 @@ class OutputSet:
         not applied, so a float64 scalar block comes back as it is (the volume's temporaries: no copy)."""
         ff = self.files[name]
         f64 = lambda a: np.asarray(a, dtype=np.float64)        # noqa: E731
-        if name == "vorticity":         # [W_xy, W_xz, W_yz] = [-w_z, w_y, -w_x] / 2 -> the curl w
+        if name in CURL_FIELDS:         # [W_xy, W_xz, W_yz] = [-w_z, w_y, -w_x] / 2 -> the curl w
             arr = -2.0 * f64(arr) if ff.ncomp == 1 else \
                 2.0 * np.stack([-f64(arr[..., 2]), f64(arr[..., 1]), -f64(arr[..., 0])], -1)
         if ff.ncomp > 1:
@@ -798,6 +826,193 @@ def smoothed(plane, sigma: float):
         except ImportError:
             pass
     return plane
+
+
+# ---------------------------------------------------------------------- the map smoothed in 3D
+# The map's Smoothing filters the SLICE; with its '3D' tick the whole cube is smoothed instead (the field the voids
+# are found in: the catalogue smooths the cube) and the map shows a slice of that. One cube per (grid file, field,
+# component, sigma), smoothed once on the slice worker and kept: scrolling the layers then costs a copy of a plane.
+# Measured on a synthetic 512^3 float32 cube (this machine, numpy 2.4): 3.5 s, 0.8 GB above the cube itself while it
+# runs, 0.54 GB kept. An exact periodic Gaussian by numpy's FFT (the catalogue's is scipy's, cut at 4 sigma: on
+# TNG300-3-Dark 512^3 the two contrasts differ by 4e-3 at most): separable, so one axis at a time over slabs of
+# about SMOOTH3D_CHUNK bytes -- the whole-cube rfftn peaked at 5.4 GB for the same cube. The smoothed cubes share the
+# cube cache's budget with the grids' own cubes (_make_room), and those of another output go when the map's output
+# changes (drop_smoothed3d): a few smoothings of a 1024^3 grid are 4.3 GB each.
+SMOOTH3D_CHUNK = 32e6
+SMOOTH3D_HEADROOM_GB = 4.0      # the tick is greyed out when the smoothing would leave less than this free
+_SMOOTH3D: dict = {}            # (cube_key, field, component, sigma) -> float32 cube, least recently used first
+
+
+def gauss3d(cube, sigma: float, chunk: float = SMOOTH3D_CHUNK) -> np.ndarray:
+    """A periodic Gaussian of 'sigma' cells over a 3D array, in float32: exp(-sigma^2 k^2 / 2) applied one axis at a
+    time (the Gaussian is separable: the three passes equal the 3D FFT filter to float32 rounding), each in slabs of
+    about 'chunk' bytes."""
+    out = np.array(cube, dtype=np.float32, copy=True)
+    if not sigma > 0:
+        return out
+    for axis in range(3):
+        m = out.shape[axis]
+        g = np.exp(-0.5 * (float(sigma) * 2.0 * np.pi * np.fft.rfftfreq(m)) ** 2).astype(np.float32)
+        shape = [1, 1, 1]
+        shape[axis] = g.size
+        g = g.reshape(shape)
+        other = 1 if axis == 0 else 0
+        step = max(1, int(chunk // (out.nbytes / out.shape[other])))
+        for s in range(0, out.shape[other], step):
+            sl = [slice(None)] * 3
+            sl[other] = slice(s, s + step)
+            f = np.fft.rfft(out[tuple(sl)], axis=axis)
+            f *= g
+            out[tuple(sl)] = np.fft.irfft(f, n=m, axis=axis)
+    return out
+
+
+def smooth3d_why(o, name: str, gradient: str = "stored", hires: bool = False) -> str:
+    """'' when the map of field 'name' can be smoothed in 3D (the whole cube), else why not in plain words: a 2D grid,
+    a hi-res slice, a map computed slice by slice (the fold flag, a phase-space output's mean-field derivatives), a
+    class map; a smoothed cube larger than the cube cache keeps (while a job runs its cap: every layer would smooth
+    the whole cube again); a cube whose smoothing would not fit in the memory free now (less SMOOTH3D_HEADROOM_GB)
+    says what it needs. The tick asks it; map_plane asks it again before smoothing a cube (a comparison's B, a grid
+    panel, or a job started since the tick was set)."""
+    why = _smooth3d_kind(o, name, gradient, hires)
+    if why:
+        return why
+    if 4.0 * float(o.n) ** 3 > _cube_budget():
+        return ("while a job runs Explore keeps no cube this large, so every layer would be smoothed again" if _CAPPED
+                else "the smoothed cube is larger than the memory Explore keeps for grids, so every layer would be "
+                     "smoothed again")
+    need = smooth3d_need(o, name)
+    if need > 0:
+        free = available_gb()
+        if free is not None and need / 1e9 > free - SMOOTH3D_HEADROOM_GB:
+            return (f"smoothing this {o.n}³ cube needs about {need / 1e9:.1f} GB and {free:.0f} GB is free (it keeps "
+                    f"{SMOOTH3D_HEADROOM_GB:.0f} GB for the other programs)")
+    return ""
+
+
+def _smooth3d_kind(o, name: str, gradient: str = "stored", hires: bool = False) -> str:
+    """smooth3d_why without the memory: '' when the map is a slice of a stored 3D grid, else why not."""
+    if o is None or name not in getattr(o, "files", {}):
+        return "no map shown"
+    if o.dim != 3:
+        return "a 2D grid is its one plane"
+    if hires:
+        return "a hi-res slice is a plane of points, not a slice of the grid"
+    if name == "caustic" and o.fold_exact():
+        return "the fold map is computed slice by slice"
+    if name in ("tweb", "vweb"):
+        return "a class map is not smoothed"
+    if gradient == "mean-field" and o.gradient_family(name, gradient) == "mean" and estimator_label(o) == "PS-DTFE" \
+            and not o.face_gradient:
+        return "this map is computed slice by slice from the velocity (the mean field)"
+    return ""
+
+
+def smooth3d_need(o, name: str) -> float:
+    """The bytes smoothing a field's cube in 3D takes at its peak (0 when it is kept already): the grid read whole
+    (unless the cube cache holds it), the values of a vector's component in float64, the smoothed float32 cube."""
+    ff = o.files[name]
+    cells = float(o.n) ** 3
+    shape = (o.n,) * 3 + ((ff.ncomp,) if ff.ncomp > 1 else ())
+    raw = 0.0 if _cube_cached(ff.path, o.dtype, shape) else cells * ff.ncomp * o.dtype.itemsize
+    values = 8.0 * cells if (ff.ncomp > 1 or name in CURL_FIELDS or o.dtype.itemsize > 4) else 0.0
+    return raw + values + 4.0 * cells + 2 * SMOOTH3D_CHUNK
+
+
+def _cube_cached(path, dtype, shape) -> bool:
+    key = cube_key(Path(path), dtype, shape)
+    with _CUBES_LOCK:
+        return key is not None and key in _CUBES
+
+
+def _smooth3d_key(o, name: str, component: str, sigma: float):
+    ff = o.files[name]
+    k = cube_key(ff.path, o.dtype, (o.n,) * 3 + ((ff.ncomp,) if ff.ncomp > 1 else ()))
+    return None if k is None else (k, name, component, round(float(sigma), 6))
+
+
+def smoothed3d_kept(o, name: str, component: str, sigma: float) -> bool:
+    """The cube of this field, component and sigma is smoothed already (its slices are instant)."""
+    key = _smooth3d_key(o, name, component, sigma)
+    with _CUBES_LOCK:
+        return key is not None and key in _SMOOTH3D
+
+
+def smoothed3d_cube(o, name: str, component: str, sigma: float) -> np.ndarray:
+    """The whole cube of a field's component (the map's values: slice()'s components and units) smoothed in 3D by a
+    periodic Gaussian of 'sigma' cells (gauss3d), float32; kept (least recently used dropped first) within the cube
+    cache's budget, shared with the grids' own cubes (_make_room) -- while a job runs its 1 GB cap -- and dropped
+    with it (drop_cubes)."""
+    key = _smooth3d_key(o, name, component, sigma)
+    if key is None:
+        raise OSError(f"{o.files[name].path} cannot be read")
+    with _CUBES_LOCK:
+        cube = _SMOOTH3D.get(key)
+        if cube is not None:
+            _SMOOTH3D[key] = _SMOOTH3D.pop(key)
+            return cube
+    ff = o.files[name]
+    arr = o._memmap(name, None)                          # the whole grid (the cached cube when it is kept)
+    if ff.ncomp == 1 and name not in CURL_FIELDS:
+        cube = gauss3d(arr, sigma)
+        factor = o.velocity_factor(name)
+        if factor != 1.0:
+            cube *= np.float32(factor)
+    else:                                                # a vector's or tensor's component: slice()'s values first
+        vals = o.component_values(name, arr, component, fresh=False)
+        del arr
+        cube = gauss3d(vals, sigma)
+        del vals
+    with _CUBES_LOCK:
+        for stale in [k for k in _SMOOTH3D if k[0][0] == key[0][0] and k[0] != key[0]]:     # the file rewritten
+            _SMOOTH3D.pop(stale)
+        if cube.nbytes <= _cube_budget():
+            # the grids' own cubes go first (a re-read is cheap, a smoothing is not): Compare's A and B, or a grid's
+            # panels, keep their smoothed cubes side by side whenever those alone fit
+            _make_room(cube.nbytes, _CUBES, _SMOOTH3D)
+            _SMOOTH3D[key] = cube
+    return cube
+
+
+def drop_smoothed3d(keep=None) -> int:
+    """Forget the cubes smoothed in 3D -- with 'keep' (an OutputSet) only those of other outputs' files, as when the
+    map's output changes; the bytes freed."""
+    files = set() if keep is None else {Path(ff.path).resolve() for ff in getattr(keep, "files", {}).values()}
+    with _CUBES_LOCK:
+        gone = [k for k in _SMOOTH3D if k[0][0] not in files]
+        n = sum(_SMOOTH3D[k].nbytes for k in gone)
+        for k in gone:
+            _SMOOTH3D.pop(k)
+    return n
+
+
+def _drop_smoothed3d() -> int:
+    return drop_smoothed3d()
+
+
+on_drop_cubes(_drop_smoothed3d)
+
+
+class Smooth3DRefused(ValueError):
+    """map_plane will not smooth this cube in 3D: its text, a whole sentence, is what the view shows."""
+
+
+def map_plane(o, name: str, axis: int, index: int, component: str, gradient: str = "stored", smooth: float = 0.0,
+              smooth3d: bool = False) -> np.ndarray:
+    """A map's plane as every view reads it (the map and its comparison, the figure grid's panels, the 3D view's
+    planes): the slice smoothed in 2D (smoothed), or with 'smooth3d' the slice of the cube smoothed in 3D at 'smooth'
+    cells (smoothed3d_cube); float64. A cube not smoothed yet is smoothed only where smooth3d_why allows it (the
+    memory free now, the cache's budget), else Smooth3DRefused saying why (the view shows it)."""
+    if smooth3d and smooth > 0 and not _smooth3d_kind(o, name, gradient):
+        if not smoothed3d_kept(o, name, component, smooth):
+            why = smooth3d_why(o, name, gradient)
+            if why:
+                raise Smooth3DRefused(f"Not smoothed in 3D: {why}. Untick 3D beside Smoothing to see the map.")
+        cube = smoothed3d_cube(o, name, component, smooth)
+        sl = [slice(None)] * 3
+        sl[int(axis)] = int(index)
+        return np.asarray(cube[tuple(sl)], dtype=np.float64)
+    return smoothed(o.slice(name, axis, index, component, gradient), smooth)
 
 
 # ---------------------------------------------------------------------- colour
@@ -991,6 +1206,45 @@ def draw_void_circles_mpl(ax, circles_mpc, dashed=(), color="white"):
     return n
 
 
+def draw_contours_mpl(ax, per_level, colours, to_xy, lw: float = 0.6, clip=None) -> int:
+    """Contour lines (contours.map_lines' 'segments': one (k, 2, 2) array per level, in the plane's array
+    coordinates) on a matplotlib axes as the screen draws them: each level in its colour (contours.colours, RGBA
+    0..1), one path per colour stroked once -- a translucent line keeps one shade where its pieces meet. 'to_xy'
+    maps an (m, 2) array of (i, j) to the axes' data coordinates; 'clip' a matplotlib patch to clip to (a figure
+    grid's tile). Returns the number of pieces drawn."""
+    from matplotlib.patches import PathPatch
+    from matplotlib.path import Path as MPath
+    groups: dict = {}
+    for segs, rgba in zip(per_level, colours):
+        if np.size(segs):
+            pts = np.asarray(segs, dtype=np.float64).reshape(-1, 2)
+            groups.setdefault(tuple(float(c) for c in rgba), []).append(pts)
+    n = 0
+    for rgba, parts in groups.items():
+        pts = to_xy(np.concatenate(parts))
+        codes = np.tile(np.array([MPath.MOVETO, MPath.LINETO], dtype=MPath.code_type), len(pts) // 2)
+        patch = PathPatch(MPath(pts, codes), fill=False, ec=rgba, lw=lw, capstyle="round", joinstyle="round",
+                          clip_on=True)
+        ax.add_patch(patch)
+        if clip is not None:
+            patch.set_clip_path(clip)
+        n += len(pts) // 2
+    return n
+
+
+def mark_levels_mpl(cb, lines: dict | None, lo: float, hi: float, lw: float = 0.6) -> int:
+    """A saved figure's colour bar (matplotlib Colorbar 'cb') marked at a map's contour levels inside lo..hi, each in
+    its line's colour, as the screen's bar marks them; 'lines' is contours.map_lines' dict (None: nothing). The marks
+    drawn."""
+    if not lines:
+        return 0
+    levels, colours = np.asarray(lines["levels"]), np.asarray(lines["colours"])
+    inside = (levels > lo) & (levels < hi)
+    if inside.any():
+        cb.add_lines(levels[inside], [tuple(c) for c in colours[inside]], [lw] * int(inside.sum()))
+    return int(inside.sum())
+
+
 def void_at(circles, x: float, y: float):
     """The catalogue row k of the outline under image position (x, y) (pixels), or None: of the circles that
     contain it the smallest one (a small void drawn inside a big one's outline stays reachable)."""
@@ -1009,10 +1263,243 @@ def _semi_axes_text(res: dict, k: int) -> str:
     return "" if semi is None else "; a, b, c = " + ", ".join(f"{float(v):.2f}" for v in semi) + " Mpc"
 
 
+# ---------------------------------------------------------------------- the voids drawn as their ellipsoids
+def _rows_array(values, n: int, width: int) -> np.ndarray:
+    """A JSON list of per-void lists (None where undefined) as an (n, width) float array, NaN where undefined."""
+    vals = list(values) if values is not None else [None] * n
+    out = [[np.nan] * width if v is None else np.ravel(v) for v in vals]
+    return np.array(out, dtype=np.float64).reshape(n, width)
+
+
+def drawn_ellipsoids(res: dict) -> dict:
+    """The voids' ellipsoids as Explore draws them -- the ONE place their size is computed: the map's sections, the
+    3D view, the inspector, the Sizes range and the saved CSV all read this. The quadratic fit around each minimum,
+    delta(x) = delta_min + 1/2 sum lambda_i x_i^2 (the catalogue's Hessian eigenvalues lambda_i and eigenvectors), at
+    the MEAN density delta = 0: centre the minimum, axes the eigenvectors, semi-axes sqrt(2 |delta_min| / lambda_i)
+    (= the catalogue's 2 cell / sqrt(lambda_i) times sqrt(|delta_min| / 2)). Only where it exists: delta_min < 0 and
+    all three eigenvalues > 0 (a true minimum below the mean) of a resolved void; elsewhere NaN and 'ok' False (drawn
+    as its centre mark alone). {'semi' (k, 3) Mpc, a >= b >= c; 'dirs' (k, 3, 3) unit directions in rows; 'M'
+    (k, 3, 3) the semi-axis vectors in columns (view3d's shape matrix); 'ok' (k,); 'r' (k,) (a b c)^(1/3) Mpc, 'R_ell'}. Kept
+    in the result ('_drawn'). A result without 'eigenvalues_cells' (an older helper) takes the catalogue's |lambda|
+    from its semi-axes, their signs unknown."""
+    kept = res.get("_drawn")
+    if kept is not None:
+        return kept
+    n = len(res["centres_mpc"])
+    cell = float(res.get("cell_mpc") or 0.0) or float(res["box_mpc"]) / float(res["n_grid"])
+    delta = np.array([np.nan if v is None else v for v in (res.get("delta") or [None] * n)], dtype=np.float64)
+    semi_cat = _rows_array(res.get("semi_axes_mpc"), n, 3)
+    dirs = _rows_array(res.get("ellipsoid_axes"), n, 9).reshape(n, 3, 3)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ev = _rows_array(res["eigenvalues_cells"], n, 3) if res.get("eigenvalues_cells") is not None \
+            else (2.0 * cell / semi_cat) ** 2
+        ok = (np.isfinite(delta) & (delta < 0) & np.all(np.isfinite(ev) & (ev > 0), axis=1)
+              & np.all(np.isfinite(dirs).reshape(n, 9), axis=1))
+        lam = np.where(ev > 0, ev, np.nan)
+        semi = np.where(ok[:, None], cell * np.sqrt(2.0 * np.abs(delta)[:, None] / lam), np.nan)
+    out = {"semi": semi, "dirs": dirs, "M": np.swapaxes(dirs, 1, 2) * semi[:, None, :], "ok": ok,
+           "r": np.cbrt(np.prod(semi, axis=1))}
+    res["_drawn"] = out
+    return out
+
+
+def void_ellipses(centres, M, box: float, axis: int, position: float, rest, lo, hi, n0, n1,
+                  periodic: bool = True) -> list[tuple[float, float, float, float, float, int]]:
+    """Where ellipsoids (centres (k, 3) Mpc, shape matrices M (k, 3, 3): view3d's centre + M u, |u| <= 1) cut the
+    shown slice, in IMAGE pixels of the map (void_circles' frame: x along rest[0], y DOWN along rest[1]):
+    [(x, y, rx, ry, angle, k)], the ellipse centred at (x, y) with semi-axes rx >= ry, the rx axis turned by 'angle'
+    degrees from the image's x axis toward its y axis (QPainter's rotate; clockwise on the screen). The exact plane
+    section, view3d.plane_cuts (the 3D view's planes draw the very same): with Q = M M^T it exists while the plane's
+    distance d from the centre has d^2 < Q_aa; its centre moves in the plane by Q_ra d / Q_aa (a tilted ellipsoid's
+    section is off its centre), its shape is (Q_rr - Q_ra Q_ar / Q_aa)(1 - d^2 / Q_aa). Each periodic image that
+    reaches the region lo..hi kept; NaN shapes skipped."""
+    import view3d as V
+    if list(rest) != list(V.rest_axes(axis)):
+        raise ValueError(f"the rest axes {list(rest)} are not the map's for axis {axis}")
+    out = []
+    for x, y, L, k in V.plane_cuts(centres, M, box, axis, position, lo, hi, n0, n1, periodic):
+        w, U = np.linalg.eigh(np.asarray(L) @ np.asarray(L).T)       # the image of the unit circle under L
+        rx, ry = float(np.sqrt(max(w[1], 0.0))), float(np.sqrt(max(w[0], 0.0)))
+        out.append((float(x), float(y), rx, ry, float(np.degrees(np.arctan2(U[1, 1], U[0, 1]))), int(k)))
+    return out
+
+
+def void_marks(centres, reach, box: float, axis: int, position: float, rest, lo, hi, n0, n1, half: float,
+               periodic: bool = True) -> list[tuple[float, float, int, bool]]:
+    """Where the voids' centres (the minima) project into the shown slice, in image pixels: [(x, y, k, own)] for the
+    voids within 'reach' (k,) of the plane along its normal (an ellipsoid's half extent along it: its section is
+    drawn; NaN: only on the centre's own layer), own = the slice is the centre's own layer (|d| < 'half', half a cell), each
+    periodic image inside the region lo..hi."""
+    c = np.asarray(centres, dtype=np.float64).reshape(-1, 3)
+    reach = np.nan_to_num(np.asarray(reach, dtype=np.float64).reshape(-1), nan=0.0)
+    L = float(box)
+    d = float(position) - c[:, axis]
+    if periodic and L > 0:
+        d -= L * np.round(d / L)
+    with np.errstate(invalid="ignore"):
+        show = np.isfinite(d) & (np.abs(d) < np.maximum(reach, float(half)))
+    (u0, v0), (u1, v1) = (float(lo[0]), float(lo[1])), (float(hi[0]), float(hi[1]))
+    sx, sy = n0 / (u1 - u0), n1 / (v1 - v0)
+    shifts = (-L, 0.0, L) if periodic and L > 0 else (0.0,)
+    out = []
+    for k in np.nonzero(show)[0]:
+        own = bool(abs(d[k]) < float(half))
+        for du in shifts:
+            u = c[k, rest[0]] + du
+            if not u0 <= u <= u1:
+                continue
+            for dv in shifts:
+                v = c[k, rest[1]] + dv
+                if v0 <= v <= v1:
+                    out.append(((u - u0) * sx, (v1 - v) * sy, int(k), own))
+    return out
+
+
+def void_overlay(v: dict | None, axis: int, position: float, rest, lo, hi, n0, n1, half: float,
+                 periodic: bool = True) -> dict:
+    """The void outlines of one slice in image pixels, for the map, a zoom, a figure grid's panel and the saves alike:
+    {'circles': [(x, y, rx, ry, row)] (spheres of R_v), 'dashed': the same for the other radius asked for,
+    'ellipses': [(x, y, rx, ry, angle, row)] (void_ellipses), 'marks': [(x, y, row, own)] (void_marks)}, rows the
+    catalogue's. 'v' (explore_voids: the rows shown): {'rows', 'centres', 'box', 'shape' ('ellipsoid' or 'sphere'),
+    'r_v', 'M' and 'reach' (the drawn ellipsoids, NaN where none; reach (k, 3) their half extents along x, y, z, or
+    (k,) along 'axis'), 'other' (the dashed circles' radii, or None)}.
+    Spheres: R_v's circles, as before the ellipsoids existed. Ellipsoids: each one's section and the mark of its
+    centre while the slice cuts it, a void without one its mark on its own layer."""
+    out = {"circles": [], "dashed": [], "ellipses": [], "marks": []}
+    if not v or not len(v["rows"]):
+        return out
+    rows = np.asarray(v["rows"], dtype=np.int64)
+    box = float(v["box"])
+    if v.get("shape") == "ellipsoid":
+        out["ellipses"] = [(x, y, rx, ry, a, int(rows[k])) for x, y, rx, ry, a, k in
+                           void_ellipses(v["centres"], v["M"], box, axis, position, rest, lo, hi, n0, n1, periodic)]
+        reach = np.asarray(v["reach"], dtype=np.float64)
+        reach = reach[:, axis] if reach.ndim == 2 else reach            # (k, 3): the half extent along each axis
+        out["marks"] = [(x, y, int(rows[k]), own) for x, y, k, own in
+                        void_marks(v["centres"], reach, box, axis, position, rest, lo, hi, n0, n1, half, periodic)]
+    else:
+        out["circles"] = [(x, y, rx, ry, int(rows[k])) for x, y, rx, ry, k in
+                          void_circles(v["centres"], v["r_v"], box, axis, position, rest, lo, hi, n0, n1, periodic)]
+    if v.get("other") is not None:
+        out["dashed"] = [(x, y, rx, ry, int(rows[k])) for x, y, rx, ry, k in
+                         void_circles(v["centres"], v["other"], box, axis, position, rest, lo, hi, n0, n1, periodic)]
+    return out
+
+
+def void_overlay_mpc(v: dict | None, axis: int, position: float, rest, lo, hi, half: float,
+                     periodic: bool = True) -> dict:
+    """void_overlay in the DATA frame of a matplotlib imshow(extent=[lo0, hi0, lo1, hi1], origin='lower') (one pixel
+    per Mpc, y measured down from hi1: void_circles_mpc's trick): circles and dashed [(u, v, r, row)], ellipses
+    [(u, v, rx, ry, angle, row)] with matplotlib's angle (counter-clockwise, y up), marks [(u, v, row, own)]."""
+    (u0, v0), (u1, v1) = (float(lo[0]), float(lo[1])), (float(hi[0]), float(hi[1]))
+    ov = void_overlay(v, axis, position, rest, lo, hi, u1 - u0, v1 - v0, half, periodic)
+    return {"circles": [(u0 + x, v1 - y, rx, k) for x, y, rx, _ry, k in ov["circles"]],
+            "dashed": [(u0 + x, v1 - y, rx, k) for x, y, rx, _ry, k in ov["dashed"]],
+            "ellipses": [(u0 + x, v1 - y, rx, ry, -a, k) for x, y, rx, ry, a, k in ov["ellipses"]],
+            "marks": [(u0 + x, v1 - y, k, own) for x, y, k, own in ov["marks"]]}
+
+
+def scale_ellipse(rx: float, ry: float, angle: float, k0: float, k1: float) -> tuple[float, float, float]:
+    """An ellipse (semi-axes rx >= ry, its rx axis at 'angle' degrees, matplotlib's sense) in axes scaled by k0 along
+    x and k1 along y (a saved figure's unit: Mpc/h, cells): (rx', ry', angle') of the same curve."""
+    if abs(k0 - k1) <= 1e-12 * max(abs(k0), abs(k1), 1e-300):
+        return rx * k0, ry * k0, angle
+    t = np.radians(angle)
+    R = np.array([[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]])
+    D = np.diag([k0, k1])
+    w, U = np.linalg.eigh(D @ R @ np.diag([rx * rx, ry * ry]) @ R.T @ D)
+    angle = float(np.degrees(np.arctan2(U[1, 1], U[0, 1])))
+    return float(np.sqrt(max(w[1], 0.0))), float(np.sqrt(max(w[0], 0.0))), angle
+
+
+MARK_PT = 3.2                   # a void centre's mark in a saved figure (points across; the screen's is 5 pixels)
+
+
+def draw_void_overlay_mpl(ax, ov: dict, color="white") -> int:
+    """void_overlay_mpc's outlines on a matplotlib axes as the screen draws them: the circles (draw_void_circles_mpl:
+    exactly as before the ellipsoids), the ellipses white over a dark edge, the centres' marks (filled on their own
+    layer, a ring elsewhere); clipped to the axes. Returns the outlines and marks drawn."""
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Ellipse
+    n = draw_void_circles_mpl(ax, ov.get("circles") or (), ov.get("dashed") or (), color) \
+        if ov.get("circles") or ov.get("dashed") else 0
+    for u, v, rx, ry, a, _k in ov.get("ellipses") or ():
+        for lw, c in ((1.6, (0, 0, 0, 0.65)), (0.7, color)):
+            ax.add_patch(Ellipse((u, v), 2 * rx, 2 * ry, angle=a, fill=False, lw=lw, ec=c, clip_on=True))
+        n += 1
+    for u, v, _k, own in ov.get("marks") or ():
+        for mew, ec in ((1.6, (0, 0, 0, 0.65)), (0.7, color)):
+            ax.add_line(Line2D([u], [v], ls="none", marker="o", ms=MARK_PT, mew=mew, mec=ec,
+                               mfc=color if own else "none", clip_on=True))
+        n += 1
+    return n
+
+
+def draw_pixel_overlay(ax, ellipses=(), ellipse_clips=(), marks=(), mark_clips=()) -> int:
+    """The figure grid's ellipses and centre marks over its full-resolution picture (image pixels, y down: the axes
+    set as figsave.draw_pixel_circles sets them), each clipped to its tile as on screen. The patches drawn."""
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Ellipse, Rectangle
+    n = 0
+    for j, (x, y, rx, ry, a, _k) in enumerate(ellipses or ()):
+        clip = ellipse_clips[j] if j < len(ellipse_clips or ()) else None
+        for lw, col in ((1.6, (0, 0, 0, 0.65)), (0.7, "white")):
+            e = Ellipse((x, y), 2 * rx, 2 * ry, angle=a, fill=False, lw=lw, ec=col)
+            ax.add_patch(e)
+            if clip is not None:
+                e.set_clip_path(Rectangle((clip[0], clip[1]), clip[2], clip[3], transform=ax.transData))
+        n += 1
+    for j, (x, y, _k, own) in enumerate(marks or ()):
+        clip = mark_clips[j] if j < len(mark_clips or ()) else None
+        for mew, ec in ((1.6, (0, 0, 0, 0.65)), (0.7, "white")):
+            ln = Line2D([x], [y], ls="none", marker="o", ms=MARK_PT, mew=mew, mec=ec, mfc="white" if own else "none")
+            ax.add_line(ln)
+            if clip is not None:
+                ln.set_clip_path(Rectangle((clip[0], clip[1]), clip[2], clip[3], transform=ax.transData))
+        n += 1
+    return n
+
+
+def outline_pick(x: float, y: float, circles=(), ellipses=(), marks=(), mark_radius: float = 3.0):
+    """The catalogue row under image position (x, y): of the outlines that contain it -- circles [(x, y, rx, ry, row)]
+    and turned ellipses [(x, y, rx, ry, angle, row)] -- the smallest (void_at's rule: a small void drawn inside a
+    big one stays reachable); else the nearest centre mark within 'mark_radius' pixels (a void drawn as its mark
+    alone); None."""
+    best = None
+    for o in list(circles or ()) + list(ellipses or ()):
+        cx, cy, rx, ry = o[:4]
+        a = np.radians(o[4]) if len(o) > 5 else 0.0
+        if rx <= 0 or ry <= 0:
+            continue
+        dx, dy = x - cx, y - cy
+        p, q = dx * np.cos(a) + dy * np.sin(a), -dx * np.sin(a) + dy * np.cos(a)
+        if (p / rx) ** 2 + (q / ry) ** 2 <= 1.0 and (best is None or rx * ry < best[0]):
+            best = (rx * ry, int(o[-1]))
+    if best is not None:
+        return best[1]
+    near = None
+    for mx, my, row, _own in marks or ():
+        r2 = (x - mx) ** 2 + (y - my) ** 2
+        if r2 <= mark_radius ** 2 and (near is None or r2 < near[0]):
+            near = (r2, int(row))
+    return None if near is None else near[1]
+
+
+def ellipsoid_text(res: dict, k: int) -> str:
+    """'26.41, 17.80, 13.60 Mpc, R_ell = (a b c)^⅓ 18.31 Mpc': the semi-axes a, b, c of void k's drawn ellipsoid
+    (drawn_ellipsoids) and its R_ell; '' where it has none."""
+    d = drawn_ellipsoids(res)
+    if not d["ok"][k]:
+        return ""
+    abc = ", ".join(f"{float(s):.2f}" for s in d["semi"][k])
+    return f"{abc} Mpc, R_ell = (a b c)^⅓ {float(d['r'][k]):.2f} Mpc"
+
+
 def void_info(res: dict, k: int, short: bool = False) -> str:
     """What the inspector says about catalogue row k of a void_outlines.py result: R_v (every definition the
-    catalogue has), R_eff, the central delta, the resolved / distinct flags and the centre. 'short' = one line
-    for the hover readout."""
+    catalogue has), the drawn ellipsoid (drawn_ellipsoids: its semi-axes and R_ell), the catalogue's own fit (R_eff,
+    its a, b, c), the central delta, the resolved / distinct flags and the centre. 'short' = one line for the hover
+    readout."""
     def mpc(v):
         return "none" if v is None or v != v else f"{float(v):.2f} Mpc"
     r_v = res["r_v_mpc"][k]
@@ -1021,14 +1508,21 @@ def void_info(res: dict, k: int, short: bool = False) -> str:
     d_text = "none" if delta is None else f"{float(delta):.3f}"
     flags = ", ".join([("resolved" if res["resolved"][k] else "not resolved"),
                        ("distinct" if res["distinct"][k] else "not distinct")])
+    drawn = drawn_ellipsoids(res)
+    r_ell = f"R_ell {mpc(drawn['r'][k])}, " if drawn["ok"][k] else ""
     if short:
-        return f"void {k}: R_v {mpc(r_v)}, R_eff {mpc(res['r_eff_mpc'][k])}, δ {d_text}, {flags}"
+        return f"void {k}: R_v {mpc(r_v)}, {r_ell}R_eff {mpc(res['r_eff_mpc'][k])}, δ {d_text}, {flags}"
     c = res["centres_mpc"][k]
     labels = {"delta08": "enclosed Δ reaches −0.8", "ridge": "compensation ridge"}
     radii = [f"R_v {mpc(r_v)} (back to the mean)"] + [f"{mpc(v)} ({labels.get(d, d)})" for d, v in others.items()]
+    ell = ellipsoid_text(res, k)
     lines = [f"<b>void {k}</b> · {flags} · centre ({', '.join(f'{float(v):.2f}' for v in c)}) Mpc",
              " · ".join(radii),
-             f"R_eff {mpc(res['r_eff_mpc'][k])} (ellipsoid (a b c)^⅓{_semi_axes_text(res, k)}) · central δ {d_text}"]
+             (f"drawn ellipsoid (where the fit returns to the mean density): a, b, c = {ell}" if ell else
+              "no ellipsoid at the mean density (δ not below the mean, or not a minimum along every axis): its "
+              "centre is marked"),
+             f"catalogue's fit: R_eff {mpc(res['r_eff_mpc'][k])} ((a b c)^⅓{_semi_axes_text(res, k)}) · "
+             f"central δ {d_text}"]
     return "<br>".join(lines)
 
 

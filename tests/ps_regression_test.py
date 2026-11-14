@@ -384,9 +384,9 @@ def main():
     gx, gy, gz = np.meshgrid(c, c, c, indexing="ij")
     np.stack([gx.ravel(), gy.ravel(), gz.ravel()], axis=1).astype(np.float64).tofile(pts_file)
 
-    # the sampled deposit (an '_a' field would select the exact one): the baseline's metrics and the nSub=1
-    # '.streams' parity in analyze() are the sampled deposit's
-    run([binary, snap, out_root, "--grid", str(GRID), "--periodic", "--sampled",
+    # the sampled deposit (an '_a' field would select the exact one), 3 points per cell axis for '.a_den': the
+    # baseline's metrics and the nSub=1 '.streams' parity in analyze() are the sampled deposit's
+    run([binary, snap, out_root, "--grid", str(GRID), "--periodic", "--sampled", "--subsamples", "3",
          "--field", "density", "velocity", "density_a", "dispersion",
          "--sample-points", pts_file,
          "--input-format", "105", "--mpc-unit", "1", "--verbose", "1"], log=out_root + ".log")

@@ -11,8 +11,9 @@
 #     long forms: --sim-dir, --sim, --grid, --subsamples, --gpu, --exact (the same as the letters); --sampled,
 #          --run-mode
 #     -n   SUBSAMPLES: k sub-points per axis (k^3 per cell) of the sampled deposit's '_a' fields (--subsamples k;
-#          passed only when set, the binary's 3 otherwise). While DTFE_EXACT_AVERAGE is unset (and neither -e nor
-#          --sampled is given) a count selects the sampled deposit, as the binary does; beside -e or
+#          passed only when set, the binary's 1 otherwise: one point per cell, quick, with noisy per-cell values;
+#          more points give a smoother cell average and take more time). While DTFE_EXACT_AVERAGE is unset (and
+#          neither -e nor --sampled is given) a count selects the sampled deposit, as the binary does; beside -e or
 #          DTFE_EXACT_AVERAGE=1 it is ignored (said).
 #     -m   run the deposit on the GPU (--gpu; same as DTFE_GPU=1). The default (DTFE_GPU unset, 'auto') is the GPU
 #          when the binary was built with one (the Makefile's o_ps/.gpu_mode_metal stamp; o_ps_d for
@@ -21,10 +22,10 @@
 #     -e   the exact conservative deposit (--exact; DTFE_EXACT_AVERAGE=1): the DEFAULT, on the GPU when built; -e
 #          overrides an exported DTFE_EXACT_AVERAGE=0 and keeps the exact deposit beside a SUBSAMPLES count. On the
 #          GPU it is passed with '--gpu-share GPU_SHARE' (auto: performance deposits part of a partitioned run's
-#          partitions on the free cores beside the GPU; gentle and balanced keep every partition on the GPU).
-#     --sampled  the nSub^3 sub-sampled deposit instead (DTFE_EXACT_AVERAGE=0), on the GPU when built. At 512^3
-#          (TNG100-3-Dark z=0, 2026-11-09) the exact deposit took 1133 s on the CPU and 1156 s on the GPU, the
-#          sampled one (nSub 3) 1260 s on the GPU and 1644 s on the CPU.
+#          partitions on the free cores beside the GPU; gentle and balanced keep every partition on the GPU; mixed:
+#          every mode uses the free cores too, at the share of the mode's threads).
+#     --sampled  the nSub^3 sub-sampled deposit instead (DTFE_EXACT_AVERAGE=0; nSub 1 unless -n or SUBSAMPLES gives
+#          a count: one point per cell, noisy per-cell values, so smooth the grids before use), on the GPU when built.
 #     --run-mode MODE  how hard the run may lean on the machine (DTFE_RUN_MODE the same; the option wins): gentle (half
 #          the performance cores, short GPU buffers, on Linux nice 10), balanced (the performance cores less a quarter,
 #          short GPU buffers) or performance (every core, long GPU buffers); auto = balanced, performance in a batch job.
@@ -82,9 +83,10 @@ MAX_CONCURRENT="${MAX_CONCURRENT:-}"  # cap on concurrent partitions. EMPTY (def
                            # per-triangulation, verify via the "Peak memory (RSS)" line after each run.
 knob SUBSAMPLES AVG_SUBSAMPLES     # (config.sh knob: the older name read for one release, with a warning)
 SUBSAMPLES="${SUBSAMPLES:-}"    # nSub per axis, nSub^3 sub-points for the sampled deposit's '_a' fields (--subsamples,
-                           # passed only with --sampled); EMPTY (default) = the binary's own 3. The sampled deposit's
-                           # dominant runtime cost (~nSub^3), 1 = no averaging. Set while DTFE_EXACT_AVERAGE is unset
-                           # (-n k or SUBSAMPLES=k), it selects the sampled deposit; the exact one ignores it
+                           # passed only with --sampled); EMPTY (default) = the binary's own 1: one point per cell, at
+                           # its centre -- quick, with noisy per-cell values (smooth the grids before use); more
+                           # points give a smoother cell average and take more time. Set while DTFE_EXACT_AVERAGE is
+                           # unset (-n k or SUBSAMPLES=k), it selects the sampled deposit; the exact one ignores it
 MPC_UNIT=1000              # length of 1 Mpc in the input's units (1000 for ckpc/h): a constant, not a knob (TNG only)
 THREADS="${THREADS:-}"     # cap OpenMP threads globally; empty = all cores
 SCRATCH_DIR="${SCRATCH_DIR:-}"  # out-of-core mode (--scratch-dir): back the full-resolution grid
@@ -125,7 +127,8 @@ DTFE_RUN_MODE="${DTFE_RUN_MODE:-auto}"  # how hard the run may lean on the machi
                            # MODE': gentle, balanced or performance (any case); 'auto' (default) = balanced, or
                            # performance inside a SLURM or PBS job (config.sh run_mode_resolve; --run-mode MODE
                            # wins). The same knob as run_dtfe.sh's
-GPU_SHARE="${GPU_SHARE:-auto}"   # the exact GPU deposit's --gpu-share: auto (default, the run mode's) or a fraction 0..1
+GPU_SHARE="${GPU_SHARE:-auto}"   # the exact GPU deposit's --gpu-share: auto (default, the run mode's), mixed (both
+                                 # devices in every run mode) or a fraction 0..1
 knob_merge PS_MERGE ORDERED_MERGE FIXED_POINT_MERGE
 PS_MERGE="${PS_MERGE:-index-order}"   # how the partitions' grids are merged (--ps-merge, always passed):
                            #   index-order (default) = the binary's own order, GIVEN: the partitions' grids are added in
@@ -199,7 +202,8 @@ _caller_exact="${DTFE_EXACT_AVERAGE:-}"   # (the caller's own value: unset, a SU
 DTFE_EXACT_AVERAGE="${DTFE_EXACT_AVERAGE:-1}"  # 1 (default) = exact conservative deposit (--exact): analytic tet-cell
                            # clipping instead of the nSub^3 sub-sampled deposit -- no sampling noise, mass
                            # conservation to the arithmetic's precision. Runs on the GPU when built (a float32
-                           # z-sweep; in performance part of the partitions on the free cores beside it, GPU_SHARE)
+                           # z-sweep; in performance part of the partitions on the free cores beside it, GPU_SHARE;
+                           # in every mode with GPU_SHARE=mixed)
                            # and on the CPU with DTFE_GPU=0 (r3d in double, the reference); TNG100-3-Dark z=0 at
                            # 512^3 (2026-11-09): 1133 s on the CPU, 1156 s on the GPU, against 1260 s for the sampled
                            # deposit (nSub 3) on the GPU and 1644 s on the CPU. SUBSAMPLES is ignored (the exact
@@ -328,9 +332,10 @@ PYEOF
 # (averaged) form. Single-stream cells are streams==1 AND bit 1 of hidden_streams clear (see demo/COMMANDS.md).
 # Both forms are mass-conserving (each tetrahedron deposits its full mass onto the grid). The exact deposit (the
 # default) integrates every tetrahedron-cell intersection, so the two forms coincide. The sampled one (--sampled)
-# resolves each grid cell of the '_a' fields with an nSub^3 sub-sample grid (SUBSAMPLES, the binary's 3 when unset),
-# smoother / better resolved at caustics than the plain fields' single sample per cell (coarser, but the same
-# conserved quantity) -- prefer the '_a' fields for science plots.
+# resolves each grid cell of the '_a' fields with an nSub^3 sub-sample grid (SUBSAMPLES; the binary's 1 when unset:
+# one point per cell, at its centre, the plain fields' own single sample -- quick, with noisy per-cell values, so
+# smooth the grids before use). More points per cell make the '_a' fields smoother / better resolved at caustics
+# than the plain fields (the same conserved quantity) and take more time.
 # Without the face gradient (FACE_GRADIENT=0, the sampled deposit, PS_VOLUME_WEIGHTED=0) divergence/shear/vorticity
 # are the stream average, rigorous only in single-stream cells; for multi-stream kinematics use 'dispersion_a' + the
 # stream count, and vweb, classified from that gradient, inherits the same single-stream caveat.
@@ -411,7 +416,7 @@ for i in "${SNAPSHOTS[@]}"; do
     fi
 
     # The deposit, named both ways (the run log then says which ran): the exact one (-e / DTFE_EXACT_AVERAGE=1, the
-    # default; CPU and GPU deposits) or --sampled, with --subsamples only when SUBSAMPLES is set (the binary's 3 else).
+    # default; CPU and GPU deposits) or --sampled, with --subsamples only when SUBSAMPLES is set (the binary's 1 else).
     exact_args=(--exact)
     if [ "${DTFE_EXACT_AVERAGE}" != "1" ]; then
         exact_args=(--sampled)
@@ -492,7 +497,7 @@ for i in "${SNAPSHOTS[@]}"; do
     part_args+=(--ps-merge "${PS_MERGE}")
     # the run mode, on every run (DTFE_RUN_MODE, see the top: the run log then says which ran and why), and the GPU
     # share for the exact deposit on the GPU (GPU_SHARE, see the top: 'auto' is the run mode's); a share given for
-    # another run is passed too, so the binary's note says why it does not apply
+    # another run is passed too, so the binary's note says why a number does not apply ('mixed' is silent there)
     part_args+=(--run-mode "${DTFE_RUN_MODE}")
     if { [ "${DTFE_GPU}" = "1" ] && [ "${DTFE_EXACT_AVERAGE}" = "1" ]; } || [ "${GPU_SHARE}" != "auto" ]; then
         part_args+=(--gpu-share "${GPU_SHARE}")

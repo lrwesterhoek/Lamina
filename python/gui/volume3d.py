@@ -19,7 +19,11 @@ of an external disk unplugged meanwhile kills the launcher with SIGBUS), a cube 
 the cache, never added to it. The work runs on a small thread pool (numpy and file reads let go of the GIL: 8
 threads gather a 1024^3 cube's colours 7.8x faster than one); memory stays near the cube's own size: its float32
 average, its levels (1 byte a cell) and their transposed copy (the slices along z), and one coarse copy of at most
-COARSE_MAX cells a side drawn while the view turns."""
+COARSE_MAX cells a side drawn while the view turns.
+
+The Contours tick lays the map's levels into the transfer function as thin shells (transfer's 'shells', their bands:
+contours.band), so both renderers draw them as they draw the rest; level_slopes, basin and shells_within serve a
+close-up, whose copy of the levels holds the shells of its own void only."""
 
 from __future__ import annotations
 
@@ -31,6 +35,7 @@ from pathlib import Path
 
 import numpy as np
 
+import contours as CT
 import grids as G
 import view3d as V
 
@@ -235,7 +240,8 @@ def average_window(o, name: str, component: str, lo, hi, detail: int = DEFAULT_D
     cubes = {s: G.cached_cube(o.files[s].path, o.dtype, file_shape(o, s), read=False) for s in srcs}
     base = {"lo": np.asarray(wlo, dtype=np.float64), "hi": np.asarray(whi, dtype=np.float64),
             "cells": tuple(len(i) for i in idx), "key": key}
-    if all(full) and shape == (n, n, n) and srcs == [name] and o.files[name].ncomp == 1 and name != "vorticity" \
+    curl = name in G.CURL_FIELDS            # a vorticity grid is shown as its curl, never as the stored values
+    if all(full) and shape == (n, n, n) and srcs == [name] and o.files[name].ncomp == 1 and not curl \
             and o.velocity_factor(name) == 1.0 and cubes[name] is not None:
         return dict(base, values=cubes[name])           # the cached grid itself (the cube cache keeps it): no averaging
     sizes1, sizes2 = np.diff(edges[1]).astype(np.float64), np.diff(edges[2]).astype(np.float64)
@@ -245,7 +251,7 @@ def average_window(o, name: str, component: str, lo, hi, detail: int = DEFAULT_D
     # a scalar field shown as stored (no component, no velocity factor, no fold flag) is the grid's own values: no
     # float64 copy of each block (summed in float64 straight from the file's floats: the same sums), and a window at
     # its own cells (the detail at least its cells) not summed at all, each averaged cell being one grid cell
-    plain = srcs == [name] and o.files[name].ncomp == 1 and name != "vorticity" and o.velocity_factor(name) == 1.0
+    plain = srcs == [name] and o.files[name].ncomp == 1 and not curl and o.velocity_factor(name) == 1.0
     unit = shape == tuple(len(i) for i in idx)
     # blocks of one size f <= 4 along y and z (1024 -> 512 or 256): each block summed by f strided adds in reduceat's
     # own order -- its first term plus the sum of the rest, that sum taken from 0 one term after another (numpy's
@@ -461,15 +467,16 @@ def levels_of(values: np.ndarray, log: bool, qrange: tuple, floor: float, progre
     return q, counts.sum(axis=0)
 
 
-def transposed(q: np.ndarray, progress: dict | None = None) -> np.ndarray:
-    """q's slices along its last axis made contiguous: out[k] = q[:, :, k] (in chunks on the pool), one x-layer's
-    2D transpose at a time: 5x faster than the 3D one at 1024^3 (0.6 s against 3.0)."""
+def transposed(q: np.ndarray, progress: dict | None = None, executor: ThreadPoolExecutor | None = None
+               ) -> np.ndarray:
+    """q's slices along its last axis made contiguous: out[k] = q[:, :, k] (in chunks on 'executor', default the
+    pool), one x-layer's 2D transpose at a time: 5x faster than the 3D one at 1024^3 (0.6 s against 3.0)."""
     out = np.empty((q.shape[2], q.shape[0], q.shape[1]), dtype=q.dtype)
 
     def one(span):
         for i in range(*span):
             out[:, i, :] = q[i].T
-    _run(one, _chunks(q.shape[0], 8), progress=progress)
+    _run(one, _chunks(q.shape[0], 8), executor, progress=progress)
     return out
 
 
@@ -592,13 +599,160 @@ def opacity_curve(t: np.ndarray, gamma: float = DEFAULT_GAMMA) -> np.ndarray:
     return np.power(np.clip(t, 0.0, 1.0), gamma)
 
 
+SLOPE_SAMPLES = 2_000_000       # level_slopes: about this many cells of the cube sampled (every s-th along each axis)
+BASIN_CELLS = 64                # basin: the flood runs on blocks of the cube, at most this many a side
+
+
+def level_slopes(prep: dict, region: np.ndarray | None = None) -> np.ndarray:
+    """How steeply the field runs through each level of a prepared cube: per level (LEVELS,) the mean |gradient| of
+    its cells, in the scaled value per cell (central differences of the levels along the three axes, times a level's
+    step), NaN where no sampled cell has that level -- from about SLOPE_SAMPLES cells (every s-th along each axis;
+    tens of ms at 1024^3); of the cells in 'region' only (a boolean mask of the cube: a close-up's void, basin) when
+    given. The whole cube's are kept in prep['slopes']. The contour shells' bands follow it (contours.shell_plan's
+    'slopes'): a band of values is a shell of about the same thickness in cells wherever the shell runs."""
+    if region is None and prep.get("slopes") is not None:
+        return prep["slopes"]
+    q = prep["fine"]["q"]
+    out = np.full(LEVELS, np.nan)
+    if min(q.shape) >= 3:
+        s = max(1, int(np.ceil((q.size / float(SLOPE_SAMPLES)) ** (1.0 / 3.0))))
+        mid = (slice(1, -1, s),) * 3
+        c = q[mid]
+        g2 = np.zeros(c.shape, dtype=np.float32)
+        for a in range(3):
+            up, down = list(mid), list(mid)
+            up[a], down[a] = slice(2, None, s), slice(0, -2, s)
+            d = q[tuple(up)].astype(np.float32) - q[tuple(down)].astype(np.float32)
+            g2 += (0.5 * d) ** 2
+        keep = np.ones(c.shape, dtype=bool) if region is None else region[mid]
+        n = np.bincount(c[keep], minlength=LEVELS)
+        w = np.bincount(c[keep], weights=np.sqrt(g2[keep]), minlength=LEVELS)
+        qlo, qhi = prep["qrange"]
+        with np.errstate(invalid="ignore", divide="ignore"):
+            out = np.where(n > 0, w / n, np.nan) * (qhi - qlo) / (LEVELS - 2)
+        out[0] = np.nan
+    if region is None:
+        prep["slopes"] = out
+    return out
+
+
+def basin(prep: dict, centre, top: float) -> np.ndarray | None:
+    """The basin of a prepared cube's minimum near 'centre' (Mpc) up to the scaled value 'top': a boolean mask of its
+    cells (the cube's shape), those at or below 'top' within a block of the region below it connected (face to face)
+    to the centre -- a close-up's own void up to its outer contour shell, without its neighbours unless they join it
+    below that value. Flooded on blocks of the cube (at most BASIN_CELLS a side) through the blocks wholly below
+    'top' (a wall thinner than a block between two voids still parts them), then grown by a block (the basin's edge
+    in partly lower blocks) and cut to the cells below 'top'. None when the centre is not in such a block or lies
+    outside the cube."""
+    q = prep["fine"]["q"]
+    m = np.asarray(q.shape)
+    lo, hi = np.asarray(prep["lo"], dtype=np.float64), np.asarray(prep["hi"], dtype=np.float64)
+    c = np.floor((np.asarray(centre, dtype=np.float64) - lo) / (hi - lo) * m).astype(int)
+    if not np.all((c >= 0) & (c < m)):
+        return None
+    v = np.asarray(prep["levels"], dtype=np.float64)
+    below = np.nonzero((v < top) & (np.arange(LEVELS) >= 1))[0]
+    if not below.size:
+        return None
+    top_level = np.uint8(below.max())
+    f = max(1, int(np.ceil(m.max() / float(BASIN_CELLS))))
+    nb = -(-m // f)
+    high = np.zeros(tuple(nb), dtype=np.uint8)          # each block's highest level (0, no value, counts as high)
+    for i in range(nb[0]):
+        blk = q[i * f:(i + 1) * f]
+        blk = np.where(blk == 0, np.uint8(255), blk)
+        r = np.maximum.reduceat(blk, np.arange(0, m[1], f), axis=1)
+        high[i] = np.maximum.reduceat(r, np.arange(0, m[2], f), axis=2).max(axis=0)
+    mask = high <= top_level
+
+    def grow(r: np.ndarray) -> np.ndarray:
+        g = r.copy()
+        g[1:] |= r[:-1]
+        g[:-1] |= r[1:]
+        g[:, 1:] |= r[:, :-1]
+        g[:, :-1] |= r[:, 1:]
+        g[:, :, 1:] |= r[:, :, :-1]
+        g[:, :, :-1] |= r[:, :, 1:]
+        return g
+    cb = tuple(c // f)
+    if not mask[cb]:
+        return None
+    region = np.zeros(mask.shape, dtype=bool)
+    region[cb] = True
+    for _ in range(int(nb.prod())):
+        grown = grow(region) & mask
+        if np.array_equal(grown, region):
+            break
+        region = grown
+    region = grow(region)                               # the basin's edge: blocks partly below 'top'
+    idx = [np.minimum(np.arange(m[a]) // f, nb[a] - 1) for a in range(3)]
+    out = np.empty(q.shape, dtype=bool)
+
+    def one(span):
+        i0, i1 = span
+        out[i0:i1] = region[np.ix_(idx[0][i0:i1], idx[1], idx[2])] & (q[i0:i1] <= top_level) & (q[i0:i1] > 0)
+    _run(one, _cell_chunks(q.shape), gui_pool())
+    return out
+
+
+def shell_weights(levels: np.ndarray, shells, symmetric: bool = False) -> tuple[np.ndarray, np.ndarray]:
+    """The contour shells' part of the transfer function (contours.shell_spec: per shell (value, r, g, b, opacity,
+    half-width), values on the map's scale, |value| when symmetric): per level its shell opacity (k,) and colour
+    ((k, 3) in 0..1): each shell its band (contours.band) at its opacity, the stronger one where two overlap."""
+    v = np.asarray(levels, dtype=np.float64)
+    a = np.abs(v) if symmetric else v
+    alpha, rgb = np.zeros(len(v)), np.zeros((len(v), 3))
+    for value, r, g, b, op, half in shells or ():
+        sa = op * CT.band(a, value, half)
+        more = sa > alpha                           # two shells that overlap: the stronger one there
+        alpha[more] = sa[more]
+        rgb[more] = np.array([r, g, b], dtype=np.float64) / 255.0
+    return alpha, rgb
+
+
+def shells_within(prep: dict, region: np.ndarray, shells, symmetric: bool = False) -> dict:
+    """A copy of a prepared cube whose contour shells (contours.shell_spec, drawn by transfer) show only within
+    'region' (a boolean mask of the cube: a close-up's own void, basin), not around its neighbours. Outside it every
+    cell whose level lies in a shell's band is moved to the nearest level in none -- a cell the volume shows clear
+    either way (the bands lie below the shown range: contours.shell_plan), its value moved by at most a band's width:
+    the volume's own picture is the same, the GPU's half cube (its value means) nearly so. Its levels 'q' and 'qT'
+    and the coarse copy's stacks are new (the GPU takes it as another cube); the rest is the cube's own. Without a
+    shell, the cube itself. On the GUI's threads (gui_pool): it runs on the GUI thread."""
+    v = np.asarray(prep["levels"], dtype=np.float64)
+    inband = shell_weights(v, shells, symmetric)[0] > 0
+    free = np.nonzero(~inband)[0]
+    free = free[free >= 1]
+    if not inband.any() or not free.size:
+        return prep
+    to = np.arange(LEVELS, dtype=np.uint8)
+    for lvl in np.nonzero(inband)[0]:
+        to[lvl] = free[int(np.argmin(np.abs(free - lvl)))]
+    q = prep["fine"]["q"]
+    q2 = np.empty_like(q)
+
+    def one(span):
+        i0, i1 = span
+        q2[i0:i1] = np.where(region[i0:i1], q[i0:i1], to[q[i0:i1]])
+    _run(one, _cell_chunks(q.shape), gui_pool())
+    coarse = prep.get("coarse")
+    if coarse is not None:
+        qc = coarse["stacks"][0]                        # oriented's axis-0 stack: the coarse levels themselves
+        near = [np.minimum(((np.arange(qc.shape[a]) + 0.5) * q.shape[a] / qc.shape[a]).astype(int), q.shape[a] - 1)
+                for a in range(3)]                      # the fine cell at each coarse cell's centre
+        qc2 = np.where(region[np.ix_(*near)], qc, to[qc])
+        coarse = {"stacks": oriented(qc2), "shape": qc2.shape}
+    return dict(prep, fine={"q": q2, "qT": transposed(q2, executor=gui_pool()), "shape": q2.shape}, coarse=coarse)
+
+
 def transfer(levels: np.ndarray, lo: float, hi: float, opacity: float, exponent: float, colours: np.ndarray,
-             symmetric: bool = False, gamma: float = DEFAULT_GAMMA) -> np.ndarray:
+             symmetric: bool = False, gamma: float = DEFAULT_GAMMA, shells=None) -> np.ndarray:
     """The 16-bit premultiplied RGBA of each level as QImage.Format_RGBA64_Premultiplied stores it (one uint64 a
     level: R, G, B, A halfwords in memory order): levels below 'lo' (and level 0) transparent, the opacity rising to
     'opacity' at 'hi' (opacity_curve) and corrected for the path through a slice ('exponent': the path over the
     reference thickness), the colour 'colours' ((256, 3) uint8, the colour map) over lo..hi. 'symmetric' (a field
-    centred on 0, a diverging map): lo..hi bound |value|, the colour spans -hi..hi."""
+    centred on 0, a diverging map): lo..hi bound |value|, the colour spans -hi..hi. 'shells' (contours.shell_spec,
+    the Contours tick): thin shells of constant value laid over the cells at their levels (shell_weights), corrected
+    for the path as the rest; None leaves the table exactly as without."""
     v = np.asarray(levels, dtype=np.float64)
     span = hi - lo if hi > lo else 1.0
     a = np.abs(v) if symmetric else v
@@ -606,14 +760,21 @@ def transfer(levels: np.ndarray, lo: float, hi: float, opacity: float, exponent:
         t = (a - lo) / span
         alpha = np.where(np.isfinite(t) & (t >= 0.0), opacity_curve(t, gamma) * float(opacity), 0.0)
     alpha = np.clip(alpha, 0.0, 1.0)
-    alpha = 1.0 - np.power(1.0 - alpha, max(float(exponent), 1e-6))
-    alpha[0] = 0.0
     if symmetric:
         top = max(abs(hi), 1e-30)
         c = np.clip((v + top) / (2.0 * top), 0.0, 1.0)
     else:
         c = np.clip(np.nan_to_num((v - lo) / span, nan=0.0, neginf=0.0), 0.0, 1.0)
     rgb = np.asarray(colours, dtype=np.float64)[np.round(c * 255).astype(np.int64)] / 255.0
+    if shells:                                      # a shell over the cell's own colour ('over', not premultiplied)
+        sa, srgb = shell_weights(v, shells, symmetric)
+        both = sa + alpha * (1.0 - sa)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mixed = (srgb * sa[:, None] + rgb * (alpha * (1.0 - sa))[:, None]) / both[:, None]
+        rgb = np.where(both[:, None] > 0, mixed, rgb)
+        alpha = np.clip(both, 0.0, 1.0)
+    alpha = 1.0 - np.power(1.0 - alpha, max(float(exponent), 1e-6))
+    alpha[0] = 0.0
     out = np.empty((len(v), 4), dtype=np.uint16)
     out[:, :3] = np.round(rgb * alpha[:, None] * 65535.0)
     out[:, 3] = np.round(alpha * 65535.0)

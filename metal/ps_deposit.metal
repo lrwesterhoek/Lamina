@@ -3,8 +3,10 @@
 //  One GPU thread per tetrahedron. Mirrors the CPU deposit in ps_interpolation.cc:
 //  each Lagrangian flow element carries a constant mass m = rho_bar * V_lag; the thread
 //  splits m equally among the Eulerian sub-sample points inside the simplex and scatters
-//  the shares into the (mass) grid with atomic adds -- an exact 64-bit fixed-point sum, see
-//  DepositParams.massFixed; every moment grid too, see DepositParams.fxMask. Total deposited == m exactly,
+//  the shares into the (mass) grid with atomic adds -- an exact fixed-point sum, see
+//  DepositParams.massFixed; every moment grid too, see DepositParams.fxMask. The words are 64-bit words in the units
+//  of the pass, or under DTFE_PS_RUN_UNITS=1 the run-wide 128-bit limbs of metal/fixed_words.metal.inc in the run's
+//  units (DepositParams.fxWords 2; the Makefile prepends that file to this source). Total deposited == m exactly,
 //  so the field is mass-conserving at any nSub and for any V_eul (no caustic spikes).
 //
 //  Which samples a tetrahedron contains is decided EXACTLY, i.e. identically to the CPU
@@ -19,9 +21,9 @@
 using namespace metal;
 
 // The parameter block (buffer 8): PSDepositParams in src/CGAL_triangulation/ps_kernel_params.h, the hosts' own
-// struct, which the Makefile prepends to this source after exact_clip.metal.inc (metal/validate_deposit.cpp and
-// metal/build_prototype.sh do the same) -- one definition, so the kernels and the hosts cannot drift apart. Its
-// fields are documented there.
+// struct, which the Makefile prepends to this source after exact_clip.metal.inc and fixed_words.metal.inc, followed
+// by metal/ps_common.metal.inc (metal/validate_deposit.cpp and metal/build_prototype.sh do the same) -- one
+// definition, so the kernels and the hosts cannot drift apart. Its fields are documented there.
 typedef PSDepositParams DepositParams;
 
 // the moment grids' indices (ps_deposit_params.h PSFxGrid -- keep in step) and the buffer slots of their words
@@ -158,10 +160,12 @@ struct FieldGrids {
     device atomic_float* scal;    // nCell     scalar moment sum(wm s) (fScal; else dummy)
     device atomic_float* sgrad;   // nCell*3   scalar-gradient moment sum(wm ds/dx_i) (fSGrad; else dummy)
     device atomic_uint*  massFx;  // nCell*2   the mass as a 64-bit fixed-point sum [flat*2] low, [flat*2+1] high (massFixed; else dummy)
+                                  //           (fxWords 2: nCell*4, the four limbs [flat*4 .. flat*4+3])
     float massScale;              // its unit: 1/massScale mass
     bool  massFixed;
     // the moment grids' fixed-point views -- the same buffers as the float pointers above, read as two
-    // uint words per component -- for the grids whose fxMask bit is set (DepositParams.fxMask)
+    // uint words per component (four limbs under fxWords 2) -- for the grids whose fxMask bit is set
+    // (DepositParams.fxMask)
     device atomic_uint*  momX;
     device atomic_uint*  m2X;
     device atomic_uint*  gradX;
@@ -176,36 +180,41 @@ struct FieldGrids {
     // the exact items' tail of the sumW buffer (ExactItemParams.badAt); the host zeroes them before each command
     // buffer and adds them up after one that succeeded
     device atomic_uint*  bad;
+    // DepositParams.fxWords and fxCapBits: 2 = the mass and fxMask grids in the run-wide 128-bit limbs, below the
+    // share cap capBits (addShare, addLimbsN); 0 = the 64-bit words below. The adds read the size from the
+    // compile-time PS_FX_WORDS (FX_WIDE, below), which the host keeps equal to fxWords
+    uint  fxWords;
+    uint  capBits;
 };
 
-// The non-finite guard of a fixed-point share (ps_deposit_params.h psFixedShareOk is the host's twin and
-// says why): a product p = share * 2^k that is not below 2^63 in magnitude -- a NaN, an infinity, an overflow -- has
-// no int64 (the float->long conversion is unspecified there) and adds NOTHING; it is counted in its slot instead.
-// The test reads the float's bits (|p| < 2^63 <=> (bits & 0x7fffffff) < 0x5f000000, NaN and inf above it), so the
-// default fast math cannot fold it away. One compare; a finite in-range share adds its integer unchanged.
+// The non-finite guard of a fixed-point share (fixedShareOk) and the 64-bit words' add (addFixedQ): in
+// metal/ps_common.metal.inc, which the Makefile prepends to this source and to the face kernel's
+// (metal/ps_face.metal). The guard's counters, one word per slot:
 constant uint FX_DROP_MASS = 10u, FX_DROP_SUMW = 11u;   // ps_deposit_params.h FixedShareSlot (keep in step)
-static inline bool fixedShareOk(float p) { return (as_type<uint>(p) & 0x7fffffffu) < 0x5f000000u; }
 
-// One 64-bit two's-complement integer q into the two-word cell 'at' of x: the low word's carry is read off the
-// value its atomic returns (the add wrapped iff the result is below it), and the high words add modulo 2^32, so
-// once every thread is done the two words hold the exact integer total, whatever the interleaving.
-static inline void addFixedQ(device atomic_uint* x, ulong at, ulong q)
-{
-    if (q == 0ul) return;                           // below half a unit: nothing to add
-    uint const lo = uint(q), hi = uint(q >> 32);
-    uint const old = atomic_fetch_add_explicit(&x[at * 2ul], lo, memory_order_relaxed);
-    uint const up = hi + ((old + lo < old) ? 1u : 0u);
-    if (up != 0u)
-        atomic_fetch_add_explicit(&x[at * 2ul + 1ul], up, memory_order_relaxed);
-}
+// The word size is a compile-time constant: the host compiles one library per size, with "#define PS_FX_WORDS 0"
+// (the 64-bit words) or "#define PS_FX_WORDS 2" (the run-wide 128-bit limbs) in front of this source
+// (ps_metal_host.cc pipes(); DepositParams.fxWords holds the same number). So each library carries one add path,
+// and the 64-bit one compiles the adds as they stood before the wide words.
+#if !defined(PS_FX_WORDS) || (PS_FX_WORDS != 0 && PS_FX_WORDS != 2)
+#error "PS_FX_WORDS must be 0 or 2 (the host compiles one library per word size)"
+#endif
+#define FX_WIDE (PS_FX_WORDS == 2)
 
 // One share v of a moment grid (component index 'at' = flat * comps + c): the fixed-point words when its fxMask
 // bit is set -- rint(v * scale), scale = 2^k so the float product is exact, the integer the host adds for the
-// same float (ps_deposit_params.h psFixedShare) -- else a float atomic.
+// same float (ps_deposit_params.h psFixedShare) -- else a float atomic. fxWords 2: the four limbs in place of the
+// two words (fixed_words.metal.inc addShare: below 2^63 units the same integer, as one signed 64-bit add), a share
+// at or above the cap counted.
 static inline void addMoment(device atomic_float* f, device atomic_uint* x, thread const FieldGrids& G, uint g,
                              ulong at, float v)
 {
     if ((G.fxMask >> g) & 1u) {
+        if (FX_WIDE) {
+            if (!addShare(x, at, v, G.fxScale[g], G.capBits))
+                atomic_fetch_add_explicit(&G.bad[g], 1u, memory_order_relaxed);
+            return;
+        }
         float const p = v * G.fxScale[g];
         if (fixedShareOk(p)) addFixedQ(x, at, as_type<ulong>(long(rint(p))));
         else atomic_fetch_add_explicit(&G.bad[g], 1u, memory_order_relaxed);   // (the guard above)
@@ -213,15 +222,21 @@ static inline void addMoment(device atomic_float* f, device atomic_uint* x, thre
     else atomic_fetch_add_explicit(&f[at], v, memory_order_relaxed);
 }
 
-// A mass share into the mass grid: the exact 64-bit fixed-point sum (massFixed), else a float atomic.
-// Two's-complement words: the low word's carry is read off the value its atomic returns (the add wrapped
+// A mass share into the mass grid: the exact fixed-point sum (massFixed), else a float atomic.
+// fxWords 2: the run-wide 128-bit limbs (addShare), below the share cap. The 64-bit words: two's-complement words,
+// the low word's carry read off the value its atomic returns (the add wrapped
 // iff the result is below it), and the high words add modulo 2^32, so once every thread is done the two
 // words hold the exact integer total, whatever the interleaving. The host keeps the partition's whole
-// mass below 2^62 units, so no share and no cell total overflows.
+// mass below 2^62 units there, so no share and no cell total overflows.
 static inline void depositMass(thread const FieldGrids& G, uint flat, float w)
 {
     if (!G.massFixed) {
         atomic_fetch_add_explicit(&G.mass[flat], w, memory_order_relaxed);
+        return;
+    }
+    if (FX_WIDE) {
+        if (!addShare(G.massFx, ulong(flat), w, G.massScale, G.capBits))
+            atomic_fetch_add_explicit(&G.bad[FX_DROP_MASS], 1u, memory_order_relaxed);
         return;
     }
     // (64-bit cell offsets inside addFixedQ: a sub-grid may hold up to 2^32 cells)
@@ -233,8 +248,15 @@ static inline void depositMass(thread const FieldGrids& G, uint flat, float w)
 // n equal shares v of moment grid g at component 'at', as ONE add of n * q (q = the integer addMoment adds for v):
 // the fixed-point grids only (fxMask bit set). Integer adds are exact and the words add modulo 2^64 whatever the
 // interleaving, so the words end where n adds of q leave them; a share the non-finite guard drops counts n times.
+// fxWords 2: n times the limbs (addLimbsN; the cap holds the n <= nSub^3 equal shares of one cell's samples).
 static inline void addMomentN(device atomic_uint* x, thread const FieldGrids& G, uint g, ulong at, float v, uint n)
 {
+    if (FX_WIDE) {
+        uint a[4]; bool neg = false;
+        if (shareLimbs(v, G.fxScale[g], G.capBits, a, neg)) addLimbsN(x, at, a, neg, n);
+        else atomic_fetch_add_explicit(&G.bad[g], n, memory_order_relaxed);
+        return;
+    }
     float const p = v * G.fxScale[g];
     if (fixedShareOk(p)) addFixedQ(x, at, as_type<ulong>(long(rint(p))) * ulong(n));
     else atomic_fetch_add_explicit(&G.bad[g], n, memory_order_relaxed);   // (the guard above)
@@ -243,6 +265,12 @@ static inline void addMomentN(device atomic_uint* x, thread const FieldGrids& G,
 // n equal mass shares w as one add of n * q (the fixed-point mass grid only: massFixed), as addMomentN
 static inline void depositMassN(thread const FieldGrids& G, uint flat, float w, uint n)
 {
+    if (FX_WIDE) {
+        uint a[4]; bool neg = false;
+        if (shareLimbs(w, G.massScale, G.capBits, a, neg)) addLimbsN(G.massFx, ulong(flat), a, neg, n);
+        else atomic_fetch_add_explicit(&G.bad[FX_DROP_MASS], n, memory_order_relaxed);
+        return;
+    }
     float const p = w * G.massScale;
     if (fixedShareOk(p)) addFixedQ(G.massFx, ulong(flat), as_type<ulong>(long(rint(p))) * ulong(n));
     else atomic_fetch_add_explicit(&G.bad[FX_DROP_MASS], n, memory_order_relaxed);   // (the non-finite guard)
@@ -414,10 +442,42 @@ struct ExactTet {
     bool   straddle;
     float  wFull;
     // the unit of this tet's weight total in the items' fixed-point sumW (FX_SUMW_BIT): 2^k with the
-    // bound V (|the linear density| at most dMax under fLinear: V dMax) at 2^59..2^60 units, so the sum of its
-    // pieces' weights -- which is that total to float rounding -- stays far below 2^63
+    // bound V (|the linear density| at most dMax under fLinear: V dMax) at [2^58, 2^59) units, so the sum of its
+    // pieces' weights -- which is that total to float rounding -- stays far below 2^63 (sumw_scale)
     float  wScale;
 };
+
+// ExactTet.wScale of a tet whose weight bound is wb0 (|det|/6), times the largest |vertex density| under fLinear:
+// wb in [2^(e-1), 2^e) puts it at [2^58, 2^59) units. Under fxWords 2 every cell's weight becomes its integer in this
+// unit before the tet's total is summed (both exact kernels), so the total is the same however the cells are cut
+// into items; each weight is >= 0 and they sum to at most wb (to float rounding), so the total stays below 2^60.
+static inline float sumw_scale(float wb0, bool fLinear, device const float* dens, ulong tet)
+{
+    float wb = wb0;
+    if (fLinear) {
+        float dMax = 0.0f;
+        for (int v=0; v<4; ++v) dMax = max(dMax, fabs(dens[tet*4ul+ulong(v)]));
+        wb *= dMax;
+    }
+    int e = 0;
+    (void)frexp(wb, e);                        // wb < 2^e
+    return (wb > 0.0f && isfinite(wb)) ? ldexp(1.0f, clamp(59 - e, -126, 126)) : 1.0f;
+}
+
+// The float nearest to hi 2^32 + lo (ties to even), rounded ONCE: the two words shifted so the top set bit is bit 31
+// of one word, every bit below that word folded into its lowest bit (a sticky bit, 7 places below float's 24), and
+// the power of two put back, which is exact. float(hi) 2^32 + float(lo) rounds twice and drops lo wherever hi needs
+// more than 24 bits: a weight total at [2^58, 2^59) units (sumw_scale) then reads low by 2^31 units on average, 5e-9
+// of it, and every share m / sumW of the tet high by as much -- on every tet, so the mass grid's sum with it.
+static inline float words_to_float(uint hi, uint lo)
+{
+    if (hi == 0u) return float(lo);
+    uint const s = clz(hi);                    // 0..31: hi != 0
+    uint top = hi, rest = lo;
+    if (s != 0u) { top = (hi << s) | (lo >> (32u - s)); rest = lo << s; }
+    if (rest != 0u) top |= 1u;
+    return ldexp(float(top), 32 - int(s));
+}
 
 // The exact dispersion's float32 limit. Each piece adds the variance of the tet's linear velocity over it,
 // G^T Cov G, with Cov from the piece's second position moments; those carry an absolute float error of ~eps ell^2
@@ -795,6 +855,7 @@ kernel void depositFields(
     device atomic_float*       scalGrid [[buffer(19)]], // nCell   scalar moment (fScal; else dummy)
     device atomic_float*       sgGrid   [[buffer(20)]], // nCell*3 scalar-gradient moment (fSGrad; else dummy)
     device atomic_uint*        massFx   [[buffer(21)]], // nCell*2 the fixed-point mass (massFixed; else dummy -- then buffer 3 is the mass)
+    //                                                    (fxWords 2: nCell*4, the four limbs of each cell)
     // the moment grids' fixed-point words (fxMask), the same buffers as 4, 5, 6, 10, 12, 13, 19, 20
     device atomic_uint*        momX     [[buffer(22)]],
     device atomic_uint*        m2X      [[buffer(23)]],
@@ -862,7 +923,7 @@ kernel void depositFields(
 
     FieldGrids G { massGrid, momGrid, m2Grid, gradGrid, strGrid, momwGrid, caustGrid, svGrid, dvGrid, dwGrid, scalGrid, sgGrid,
                    massFx, P.massScale, P.massFixed != 0, momX, m2X, gradX, momwX, svX, dvX, scalX, sgX,
-                   P.fxMask, P.fxScale, bad };
+                   P.fxMask, P.fxScale, bad, P.fxWords, P.fxCapBits };
 
     // --ps-volume-weighted: the tet's total moment weight is its Eulerian volume |det|/6
     // (matching the CPU volumeShare); default: the moment weight equals the mass share.
@@ -1007,8 +1068,20 @@ kernel void depositFields(
         float sumW = 0.0f;
         float shareFac = 0.0f;
         bool  deposited = false;
+        // fxWords 2 with the items' sumW words (FX_SUMW_BIT): pass 0 sums each cell's weight as its integer in the
+        // tet's unit (sumw_scale) and pass 1 reads the total as the items kernel does (words_to_float), so both
+        // kernels give one tet the same total; else the thread's own float sum
+        ulong sumQ = 0ul;
+        uint  sumBad = 0u;
+        bool const sumWInt = FX_WIDE && (P.fxMask & FX_SUMW_BIT) != 0u;
+        if (sumWInt) E.wScale = sumw_scale(tetVol, fLinear, dens, ulong(tid));
         for (int pass=0; pass<2; ++pass) {
             if (pass==1) {
+                if (sumWInt) {
+                    if (sumBad != 0u) atomic_fetch_add_explicit(&bad[FX_DROP_SUMW], sumBad, memory_order_relaxed);
+                    sumW = sumQ == 0ul ? 0.0f
+                                       : words_to_float(uint(sumQ >> 32), uint(sumQ)) / E.wScale;
+                }
                 if (!(sumW > 0.0f)) { if (P.windowMode != 0) return; break; }   // empty window: sampled fallback below
                 shareFac = m / ((E.straddle || P.windowMode != 0) ? max(sumW, E.wFull) : sumW);
                 deposited = true;
@@ -1022,7 +1095,15 @@ kernel void depositFields(
                 float mo[10], w;
                 float3 cc;
                 if (!exact_cell_clip(E, raw, P, pass==1, fLinear, mo, w, cc)) continue;
-                if (pass==0) { sumW += w; continue; }
+                if (pass==0) {
+                    if (sumWInt) {
+                        float const p = w * E.wScale;
+                        if (fixedShareOk(p)) sumQ += ulong(long(rint(p)));
+                        else ++sumBad;                              // (the non-finite guard, per cell)
+                    }
+                    else sumW += w;
+                    continue;
+                }
                 exact_cell_deposit(G, flat, mo, w * shareFac, E, fVel, fDisp, fGrad, fVolW, fCaustic, fScal, fSGrad, cc);
             }
         }
@@ -1158,20 +1239,8 @@ kernel void depositFields(
 // past the per-tet totals -- every one of the 31 buffer slots is taken here, so they ride in that buffer's tail
 typedef PSExactItemParams ExactItemParams;
 
-// An item's (tet, block) from the items' map (gpu_host.h psBuildExactItemMap: itemStart[nTet+1], then blockTet), the
-// standard-DTFE kernel's itemOf: the item's tet is the last t in [blockTet[blk], blockTet[blk+1]] with
-// itemStart[t] <= iid -- a binary search over at most one block's worth of tets (2^PS_ITEM_BLOCK_SHIFT + 1 entries,
-// more only across tets with no items, which the "last t" skips) -- and its block is iid - itemStart[t].
-static inline uint2 psItemOf(device const uint* itemStart, device const uint* blockTet, uint nTet, uint iid) {
-    uint const blk = iid >> PS_ITEM_BLOCK_SHIFT;
-    uint lo = blockTet[blk];
-    uint hi = min(blockTet[blk + 1u], nTet - 1u);
-    while (hi > lo) {
-        uint const mid = (lo + hi + 1u) >> 1;
-        if (itemStart[mid] <= iid) lo = mid; else hi = mid - 1u;
-    }
-    return uint2(lo, iid - itemStart[lo]);
-}
+// An item's (tet, block) from the items' map: psItemOf in metal/ps_common.metal.inc (prepended; the face kernel
+// reads its own items' map with it too).
 
 // The pass a depositExactItems pipeline runs (== ExactItemParams.phase): the host builds one pipeline per value,
 // so the summing pass carries none of the deposit's registers (an M1 Max then fits 512 threads per threadgroup
@@ -1182,9 +1251,9 @@ static inline uint2 psItemOf(device const uint* itemStart, device const uint* bl
 // so phase 0's total missed the weights phase 1 deposits and a tet deposited m (sum w1 / sum w0), about 1e-8 off its
 // mass. In one pipeline both passes run the same compiled clip (order 2, the deposit's), so both form the same
 // weights; the total carries only the per-item float sum's rounding (phase 0 sums an item's weights in float and
-// adds that sum to the tet's total once), as the uniform deposit's does. Values 0 and 1 fold to the constants they
-// always were (deposit = phase 1, the clip's order 2 only there), so the uniform deposit's two pipelines are the code
-// they were.
+// adds that sum to the tet's total once; under fxWords 2 each cell's integer, no float sum), as the uniform
+// deposit's does. Values 0 and 1 fold to the constants they always were (deposit = phase 1, the clip's order 2 only
+// there), so the uniform deposit's two pipelines are the code they were.
 constant uint kItemsPhase [[function_constant(0)]];
 
 // The per-tet numbers depositFields derives in its preamble, for the exact path (keep in sync).
@@ -1275,17 +1344,7 @@ static inline bool exact_tet_setup(uint tet, device const float* verts, device c
     E.hcell = float3(0.5f*P.dx[0], 0.5f*P.dx[1], 0.5f*P.dx[2]);
     E.wFull = exact_full_weight(fabs(d)/6.0f, P.fLinear != 0, E.d0, E.dG, E.t1, E.t2, E.t3);
     E.wScale = 1.0f;
-    if ((P.fxMask & FX_SUMW_BIT) != 0u) {
-        float wb = fabs(d)/6.0f;
-        if (P.fLinear != 0) {
-            float dMax = 0.0f;
-            for (int v=0; v<4; ++v) dMax = max(dMax, fabs(dens[ulong(tet)*4ul+ulong(v)]));
-            wb *= dMax;
-        }
-        int e = 0;
-        (void)frexp(wb, e);                        // wb < 2^e
-        E.wScale = (wb > 0.0f && isfinite(wb)) ? ldexp(1.0f, clamp(59 - e, -126, 126)) : 1.0f;
-    }
+    if ((P.fxMask & FX_SUMW_BIT) != 0u) E.wScale = sumw_scale(fabs(d)/6.0f, P.fLinear != 0, dens, ulong(tet));
     return true;
 }
 
@@ -1321,8 +1380,9 @@ kernel void depositExactItems(
     device atomic_uint*        scalX    [[buffer(28)]],
     device atomic_uint*        sgX      [[buffer(29)]],
     // FX_SUMW_BIT: sumW as two words per tet, the same buffer as 16 -- phase 0 adds each item's
-    // weight as an integer in the tet's own unit (ExactTet.wScale), so the total does not depend on the order the
-    // items land in (a float atomic's would, and every share m / sumW with it: the mass grid too)
+    // weight as an integer in the tet's own unit (ExactTet.wScale; under fxWords 2 the sum of its cells' integers),
+    // so the total does not depend on the order the items land in (a float atomic's would, and every share
+    // m / sumW with it: the mass grid too)
     device atomic_uint*        sumWX    [[buffer(30)]],
     uint lid [[thread_position_in_grid]])
 {
@@ -1352,7 +1412,13 @@ kernel void depositExactItems(
         uint const lo = atomic_load_explicit(&sumWX[ulong(tet)*2ul], memory_order_relaxed);
         int const hi = as_type<int>(atomic_load_explicit(&sumWX[ulong(tet)*2ul+1ul], memory_order_relaxed));
         if (hi < 0 || (hi == 0 && lo == 0u)) return;   // left to depositFields (host)
+        // (the wide words: in one rounding, words_to_float; else the two-step sum of the releases before it, as it
+        // was)
+#if PS_FX_WORDS == 2
+        s = words_to_float(uint(hi), lo) / E.wScale;
+#else
         s = (float(hi) * 4294967296.0f + float(lo)) / E.wScale;
+#endif
     }
     // a tet cut by the grid face keeps only its inside share: normalized by its whole weight --
     // as is every tet of a --grid-window run (only its window pieces are clipped)
@@ -1374,7 +1440,13 @@ kernel void depositExactItems(
     bool const fScal = P.fScal != 0, fSGrad = P.fSGrad != 0;
     FieldGrids G { massGrid, momGrid, m2Grid, gradGrid, strGrid, momwGrid, caustGrid, svGrid, dvGrid, dwGrid, scalGrid, sgGrid,
                    massFx, P.massScale, P.massFixed != 0, momX, m2X, gradX, momwX, svX, dvX, scalX, sgX,
-                   P.fxMask, P.fxScale, bad };
+                   P.fxMask, P.fxScale, bad, P.fxWords, P.fxCapBits };
+    // phase 0's sum of the item's cell weights: under fxWords 2 each cell's own integer in the tet's unit
+    // (sumw_scale), so the tet's total does not depend on the cells per item; else one float per item, as an integer
+    // once
+    bool const sumWInt = FX_WIDE && sumWFixed;
+    ulong accQ = 0ul;
+    uint  accBad = 0u;
     float acc = 0.0f;
     for (; w < wEnd; ++w) {
         int const raw[3] = { iMin[0] + a0, iMin[1] + a1, iMin[2] + a2 };
@@ -1384,10 +1456,21 @@ kernel void depositExactItems(
         float mo[10], wt;
         float3 cc;
         if (!exact_cell_clip(E, raw, P, fullMoments, fLinear, mo, wt, cc)) continue;
-        if (!deposit) acc += wt;
+        if (!deposit) {
+            if (sumWInt) {
+                float const p = wt * E.wScale;
+                if (fixedShareOk(p)) accQ += ulong(long(rint(p)));
+                else ++accBad;                                      // (the non-finite guard, per cell)
+            }
+            else acc += wt;
+        }
         else exact_cell_deposit(G, flat, mo, wt * shareFac, E, fVel, fDisp, fGrad, fVolW, fCaustic, fScal, fSGrad, cc);
     }
-    if (!deposit && acc > 0.0f) {
+    if (!deposit && sumWInt) {
+        if (accQ != 0ul) addFixedQ(sumWX, ulong(tet), accQ);
+        if (accBad != 0u) atomic_fetch_add_explicit(&bad[FX_DROP_SUMW], accBad, memory_order_relaxed);
+    }
+    else if (!deposit && acc > 0.0f) {
         if (sumWFixed) {
             float const p = acc * E.wScale;
             if (fixedShareOk(p)) addFixedQ(sumWX, ulong(tet), as_type<ulong>(long(rint(p))));

@@ -59,7 +59,8 @@
 #     (the plane's conventions too, PS_POINT_CONVENTIONS, which it hands to run_ps_dtfe.sh); a run log written with the
 #     binaries' deprecated spellings reads the same as the canonical command the driver now emits (unchanged). The
 #     deposit: an older exact log ('--subsamples 3 --ps-exact-deposit' / '--exact-average') matches '--exact', an older
-#     sampled one (a count, no flag) matches '--sampled' with that count or none, and not the exact default.
+#     sampled one (a count, no flag) matches '--sampled' with that count (none is the binary's 1, so an older log's 3
+#     is current for SUBSAMPLES=3 only), and not the exact default.
 #  R) run_ps_dtfe.sh PS_MERGE: unset passes '--ps-merge index-order' (the driver's default, given explicitly so the
 #     memory gate stays on under the auto-tuner's speed split), a given mode passes '--ps-merge MODE', the older
 #     ORDERED_MERGE=1 / 0 and
@@ -1429,16 +1430,19 @@ check "$([ -n "${rs_new}" ] && [ "${rs_old}" = "${rs_new}" ] && [ "${rs_ea}" = "
          && printf '%s\n' "${rs_new}" | grep -qx -e '--lambda-th 0.3' && [ "${rs_other}" != "${rs_new}" ] && echo 0 || echo 1)" \
       "run_settings: an old-spelling exact log (--ps-exact-deposit or --exact-average, beside the old count) and the new --exact command are unchanged (the count is no setting of the exact deposit), another threshold is not"
 # an older SAMPLED run named no deposit flag and always a count: it is the command a sampled pipeline run emits now
-# ('--sampled', with that count or none: the binary's own 3), and not the exact default's
+# with that count ('--sampled --subsamples 3' for a log naming 3), not '--sampled' alone (no count: the binary's own
+# 1, '--sampled --subsamples 1'), and not the exact default's
 rs_s_old="$(run_settings 'RUNNING: ./PS-DTFE in.hdf5 out --grid 64 --subsamples 3 --field density_a --lambda-th 0.3 --ps-caustics')"
 rs_s_new="$(run_settings './PS-DTFE in.hdf5 out --grid 64 --field density_a --lambda-th 0.3 --sampled --ps-caustics')"
+rs_s_n1="$(run_settings './PS-DTFE in.hdf5 out --grid 64 --field density_a --lambda-th 0.3 --sampled --subsamples 1 --ps-caustics')"
 rs_s_n3="$(run_settings './PS-DTFE in.hdf5 out --grid 64 --field density_a --lambda-th 0.3 --sampled --subsamples 3 --ps-caustics')"
 rs_s_n2="$(run_settings './PS-DTFE in.hdf5 out --grid 64 --field density_a --lambda-th 0.3 --sampled --subsamples 2 --ps-caustics')"
 rs_x="$(run_settings './PS-DTFE in.hdf5 out --grid 64 --field density_a --lambda-th 0.3 --exact --ps-caustics')"
-check "$([ -n "${rs_s_new}" ] && [ "${rs_s_old}" = "${rs_s_new}" ] && [ "${rs_s_n3}" = "${rs_s_new}" ] && [ "${rs_s_n2}" != "${rs_s_new}" ] \
-         && [ "${rs_x}" != "${rs_s_old}" ] && printf '%s\n' "${rs_s_new}" | grep -qx -e '--subsamples 3' \
+check "$([ -n "${rs_s_new}" ] && [ "${rs_s_old}" = "${rs_s_n3}" ] && [ "${rs_s_n1}" = "${rs_s_new}" ] && [ "${rs_s_old}" != "${rs_s_new}" ] \
+         && [ "${rs_s_n2}" != "${rs_s_new}" ] && [ "${rs_s_n2}" != "${rs_s_old}" ] \
+         && [ "${rs_x}" != "${rs_s_old}" ] && printf '%s\n' "${rs_s_new}" | grep -qx -e '--subsamples 1' \
          && ! printf '%s\n' "${rs_s_new}" | grep -qE -e '^--(exact|sampled)$' && echo 0 || echo 1)" \
-      "run_settings: an older sampled log (a count, no flag) is '--sampled' with that count or none, not '--sampled --subsamples 2', not '--exact'"
+      "run_settings: an older sampled log (a count, no flag) is '--sampled' with that count (3), not '--sampled' alone (the binary's 1), not '--sampled --subsamples 2', not '--exact'"
 # P6.7: every renamed option run_settings compares, old spelling against new (python/dtfelib/runlog.py's table),
 # and the options it newly compares (--face-gradient, the Lagrangian padding, the alpha shape, the halo release)
 rs7_old="$(run_settings 'RUNNING: ./PS-DTFE in.hdf5 out --input 105 --MpcUnit 1000 --grid 64 --avg-subsamples 3 --field density_a --lambda_th 0.3 --ps-lag-padding 8 --lagrangianInput ics.hdf5 --sample-points p.txt --pts-conventions legacy --ordered-merge --face-gradient --ps-alpha-shape 2.5 --ps-halo-release 500 --ps-window 0 1 0 1 0 1')"
@@ -1465,20 +1469,40 @@ check "$([ "${rc}" = 0 ] && [ "${rc2}" = 0 ] && [ "${rc3}" = 0 ] \
          && [ "$(has "${TMP}/p_old.log" 'snap 99: ps_output.pts_den up to date \(same settings\), skipping compute')" = 0 ] \
          && [ "$(has "${TMP}/p_old_def.log" 'snap 99: ps_output.pts_den up to date \(same settings\), skipping compute')" = 0 ] \
          && echo 0 || echo 1)" "a run log with the old spellings (--avg-subsamples 3 --ps-exact-deposit --lambda_th) is up to date for a driver emitting the new ones, PS_EXACT=1 or the default (${rc}, ${rc2}, ${rc3})"
-# the same log as an older SAMPLED run wrote it (the count, no deposit flag): current for a sampled pipeline run
-# (DTFE_EXACT_AVERAGE=0 without a count, or SUBSAMPLES=3), stale for the exact default and for another count
+# the same log as an older SAMPLED run wrote it (the count 3, no deposit flag): current for a sampled pipeline run at
+# that count (SUBSAMPLES=3), stale for the exact default, for another count and for DTFE_EXACT_AVERAGE=0 without one
+# (the binary's own count, 1)
 sed -e '/^RUNNING:/s/ --ps-exact-deposit / /' "${SD}/ps_output.runlog" > "${SD}/ps_output.runlog.old" \
     && mv "${SD}/ps_output.runlog.old" "${SD}/ps_output.runlog"
 rc=$(pdrive "${TMP}/p_os0.log" DTFE_EXACT_AVERAGE=0 DRY_RUN=1); rc2=$(pdrive "${TMP}/p_os3.log" SUBSAMPLES=3 DRY_RUN=1)
 rc3=$(pdrive "${TMP}/p_osd.log" DRY_RUN=1); rc4=$(pdrive "${TMP}/p_os2.log" SUBSAMPLES=2 DRY_RUN=1)
 check "$([ "$(lacks "${SD}/ps_output.runlog" '^RUNNING: .*--(exact|ps-exact-deposit|exact-average|sampled) ')" = 0 ] \
-         && [ "$(has "${TMP}/p_os0.log" 'snap 99: ps_output.pts_den up to date \(same settings\)')" = 0 ] \
+         && [ "$(has "${TMP}/p_os0.log" 'snap 99: settings differ from its ps_output.runlog, recomputing')" = 0 ] \
+         && grep -aq 'was: --subsamples 3$' "${TMP}/p_os0.log" && grep -aq 'now: --subsamples 1$' "${TMP}/p_os0.log" \
          && [ "$(has "${TMP}/p_os3.log" 'snap 99: ps_output.pts_den up to date \(same settings\)')" = 0 ] \
          && [ "$(has "${TMP}/p_osd.log" 'snap 99: settings differ from its ps_output.runlog, recomputing')" = 0 ] \
          && grep -aq 'was: --subsamples 3$' "${TMP}/p_osd.log" && grep -aq 'now: --exact$' "${TMP}/p_osd.log" \
          && [ "$(has "${TMP}/p_os2.log" 'snap 99: settings differ from its ps_output.runlog, recomputing')" = 0 ] \
          && grep -aq 'now: --subsamples 2$' "${TMP}/p_os2.log" && echo 0 || echo 1)" \
-      "an older sampled run's log (a count, no flag): up to date for DTFE_EXACT_AVERAGE=0 and SUBSAMPLES=3, recomputed for the exact default and SUBSAMPLES=2 (${rc} ${rc2} ${rc3} ${rc4})"
+      "an older sampled run's log (the count 3, no flag): up to date for SUBSAMPLES=3, recomputed for DTFE_EXACT_AVERAGE=0 without a count (now: --subsamples 1), the exact default and SUBSAMPLES=2 (${rc} ${rc2} ${rc3} ${rc4})"
+# a sampled run's log that names NO count (the drivers pass one only when SUBSAMPLES is set): its count is its
+# header's 'avg sub-samples (nSub)' line -- 3 from a binary before 2026-11-14, 1 since -- so a set made at 3 is not
+# kept as current for a sampled run without a count
+sed -e '/^RUNNING:/s/ --avg-subsamples 3 / --sampled /' "${SD}/ps_output.runlog" > "${SD}/ps_output.runlog.old" \
+    && mv "${SD}/ps_output.runlog.old" "${SD}/ps_output.runlog"
+printf '\t avg sub-samples (nSub) : 3   (each _a cell volume-averaged over nSub^3 = 27 points)\n' >> "${SD}/ps_output.runlog"
+rc=$(pdrive "${TMP}/p_oh0.log" DTFE_EXACT_AVERAGE=0 DRY_RUN=1); rc2=$(pdrive "${TMP}/p_oh3.log" SUBSAMPLES=3 DRY_RUN=1)
+sed -e 's/(nSub) : 3 /(nSub) : 1 /' "${SD}/ps_output.runlog" > "${SD}/ps_output.runlog.old" \
+    && mv "${SD}/ps_output.runlog.old" "${SD}/ps_output.runlog"
+rc3=$(pdrive "${TMP}/p_oh1.log" DTFE_EXACT_AVERAGE=0 DRY_RUN=1)
+check "$(grep -aq '^RUNNING: .* --sampled ' "${SD}/ps_output.runlog" \
+         && [ "$(lacks "${SD}/ps_output.runlog" '^RUNNING: .*--(avg-)?subsamples ')" = 0 ] \
+         && [ "$(has "${TMP}/p_oh0.log" 'snap 99: settings differ from its ps_output.runlog, recomputing')" = 0 ] \
+         && grep -aq 'was: --subsamples 3$' "${TMP}/p_oh0.log" && grep -aq 'now: --subsamples 1$' "${TMP}/p_oh0.log" \
+         && [ "$(has "${TMP}/p_oh3.log" 'snap 99: ps_output.pts_den up to date \(same settings\)')" = 0 ] \
+         && [ "$(has "${TMP}/p_oh1.log" 'snap 99: ps_output.pts_den up to date \(same settings\)')" = 0 ] \
+         && echo 0 || echo 1)" \
+      "a sampled run's log that names no count is read by its header's count line: one made at 3 is recomputed for DTFE_EXACT_AVERAGE=0 without a count and up to date for SUBSAMPLES=3; one made at 1 is up to date (${rc} ${rc2} ${rc3})"
 rc=$(pdrive "${TMP}/p_back.log")                 # a real run again (the exact default) for the checks below
 head -c 512 /dev/zero > "${SD}/ps_output.pts_den"; touch -t 203001010000 "${SD}/ps_output.pts_den" "${SD}/ps_output.pts_velGrad"
 mv "${SD}/ps_output.runlog" "${SD}/ps_output.runlog.keep"
@@ -1557,7 +1581,7 @@ rc=$(sdrive run_ps_dtfe.sh "${TMP}/s_psdef.log" DRY_RUN=1)
 check "$([ "${rc}" = "0" ] && sline "${TMP}/s_psdef.log" | grep -qE -e '--field +density_a +velocity_a +divergence_a +shear_a +--lambda-th +0\.3 +--exact +.*--ps-volume-weighted .*--ps-caustics' \
          && ! sline "${TMP}/s_psdef.log" | grep -q -e '--subsamples' && grep -aqxF 'Cell averages: exact deposit (--exact; the default)' "${TMP}/s_psdef.log" \
          && echo 0 || echo 1)" "run_ps_dtfe.sh's defaults are production's: the four analysis fields, the exact deposit (--exact, no count), volume-weighted moments, the caustic classes (${rc})"
-# the sampled deposit: DTFE_EXACT_AVERAGE=0 names no count (the binary's 3), a SUBSAMPLES count alone selects it and is
+# the sampled deposit: DTFE_EXACT_AVERAGE=0 names no count (the binary's 1), a SUBSAMPLES count alone selects it and is
 # passed; -e (or DTFE_EXACT_AVERAGE=1) beside a count keeps the exact deposit, with one note
 rc=$(sdrive run_ps_dtfe.sh "${TMP}/s_pssam.log" DRY_RUN=1 DTFE_EXACT_AVERAGE=0)
 rc2=$(sdrive run_ps_dtfe.sh "${TMP}/s_pssub.log" DRY_RUN=1 SUBSAMPLES=2)

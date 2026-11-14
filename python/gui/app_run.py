@@ -350,9 +350,11 @@ class RunMixin:
         None for other jobs or without earlier runs."""
         if not isinstance(spec, rs.RunSpec) or kind_or_tab not in (_app.GRIDS, "grids"):
             return None
+        m = spec.mode()
         t = R.time_estimate(self._runs(), sim=spec.sim, grid=spec.grid, estimator=spec.estimator,
-                            gpu=spec.gpu and rs.gpu_built(spec.estimator),
-                            sliced=bool(spec.slice_plane), precision=spec.precision, run_mode=spec.run_mode)
+                            gpu=m.gpu, sliced=bool(spec.slice_plane), precision=rs.job_precision(spec),
+                            run_mode=spec.run_mode, exact=m.deposit == "exact",
+                            nsub=m.nsub if spec.estimator == "ps" and m.deposit == "sampled" else None)
         if t is None:
             return None
         return t[0] if per_snapshot else t[0] * max(1, len(spec.snapshots))
@@ -799,9 +801,13 @@ class RunMixin:
         self.q_list.blockSignals(True)
         self.q_list.clear()
         for k, j in enumerate(self.queue, 1):
-            it = QListWidgetItem(f"{_app.QUEUE_ICON[j.state]}  {k}. {j.title}" + (f"   ({j.note})" if j.note else ""))
+            # a job queued with Advanced settings runs with them, whatever the switch says now: marked, and named in
+            # the tooltip
+            adv = self._queued_advanced(j)
+            it = QListWidgetItem(f"{_app.QUEUE_ICON[j.state]}  {k}. {j.title}" + (" · advanced" if adv else "")
+                                 + (f"   ({j.note})" if j.note else ""))
             it.setForeground(_app.QUEUE_COLOR[j.state])
-            it.setToolTip(j.title + (f"\n{j.note}" if j.note else ""))
+            it.setToolTip(j.title + (f"\nAdvanced: {adv}" if adv else "") + (f"\n{j.note}" if j.note else ""))
             self.q_list.addItem(it)
         self.q_list.blockSignals(False)
         if self.queue:
@@ -811,6 +817,17 @@ class RunMixin:
         self.results.setTabText(self.results.indexOf(self.queue_tab),
                                 f"Queue ({waiting} waiting)" if waiting else "Queue")
         self._queue_buttons()
+
+    @staticmethod
+    def _queued_advanced(job: rs.QueuedJob) -> str:
+        """A queued job's Advanced settings on one line ('Device: CPU; Partitions: 4'), '' for none or an unreadable
+        job."""
+        if not (isinstance(job.spec, dict) and job.spec.get("advanced")):
+            return ""
+        try:
+            return rs.advanced_text(job.build())
+        except (TypeError, ValueError):
+            return ""
 
     def _queue_buttons(self):
         row = self.q_list.currentRow()
@@ -839,8 +856,9 @@ class RunMixin:
             text += ["", "Commands if it started now:" if j.state == "waiting" else "Commands (as of now):",
                      rs.script_text(steps) or "(none: nothing left to do)"]
             problems = spec.problems()
-            if problems:
-                text += ["", "Checks now:"] + [("✖ " if lv == "error" else "⚠ ") + m for lv, m in problems]
+            if problems:            # (each line marked as the Checks list marks it: information is no warning)
+                text += ["", "Checks now:"] + [_app.CHECK_ICON.get(lv, _app.CHECK_ICON["warning"]).rstrip() + " " + m
+                                               for lv, m in problems]
         except (TypeError, ValueError) as e:
             text.append(f"unreadable settings: {e}")
         self.q_detail.setPlainText("\n".join(text))

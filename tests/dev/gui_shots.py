@@ -3,18 +3,24 @@
 
 Renders every tab at each window size, then the Explore tab with "Show in 3D" on (volume, then planes), and prints for
 each scrolled tab the width its form needs against the width it is given (a form wider than its viewport is clipped:
-the scroll bars are off), folded and with every folded group (Resources, Advanced) open. The window never remembers
+the scroll bars are off), folded and with every folded group (More) open. The window never remembers
 anything (remember=False: no saved settings are read or written) and the figures go to a temporary folder.
 
-    tests/dev/gui_shots.py <out dir> [--native] [--open] [--data-root DIR] [--sizes 1500x950,1100x750]
+    tests/dev/gui_shots.py <out dir> [--native] [--open] [--fast-dtfe] [--advanced] [--data-root DIR]
+                           [--sizes 1500x950,1100x750]
 
   --native     draw in a real window on the default platform (macOS: the system style, the widths a user sees); the
                default is Qt's offscreen platform, whose generic style sizes some widgets differently
   --open       take the tabs' shots with every folded group open (the widths are measured both ways regardless)
+  --fast-dtfe  the run tabs at Fast, the Grids and Custom snapshot tabs on standard DTFE (their PS-only groups hidden)
+  --advanced   View > Advanced Settings on: the run tabs' Advanced groups (folded, unless --open), every row on
+               Automatic (the window remembers nothing: the switch is not saved)
   --data-root  a simulation root to show (default: a synthetic one made in a temporary folder: one 64^3 PS-DTFE grid
                set, so Explore has a volume to draw)
 
-Needs PySide6 (the launcher's python). The PNGs are named <tab index>_<tab>_<width>.png and explore3d_<style>_<width>.png.
+Needs PySide6 (the launcher's python). The PNGs are named <tab index>_<tab>_<width>.png (the window),
+<tab index>_<tab>_<width>_form.png (a tab's whole form, below the fold too; Explore: its left pane) and
+explore3d_<style>_<width>.png.
 """
 import argparse
 import os
@@ -57,6 +63,8 @@ def main() -> int:
     ap.add_argument("out")
     ap.add_argument("--native", action="store_true")
     ap.add_argument("--open", action="store_true")
+    ap.add_argument("--fast-dtfe", action="store_true")
+    ap.add_argument("--advanced", action="store_true")
     ap.add_argument("--data-root")
     ap.add_argument("--sizes", default="1500x950,1100x750")
     a = ap.parse_args()
@@ -80,6 +88,15 @@ def main() -> int:
     data = Path(a.data_root) if a.data_root else synthetic_root(tmp / "data")
     qa = QApplication.instance() or QApplication([])
     w = A.MainWindow(rs.RunSpec(data_root=str(data)), remember=False)
+    if a.fast_dtfe:
+        w.dtfe_radio.setChecked(True)
+        w.o_dtfe.setChecked(True)
+        for pair in (w.quality_pair, w.o_quality, w.p_quality):
+            pair.button("fast").setChecked(True)
+    if a.advanced:
+        w.advanced_action.setChecked(True)          # as a user switches it on (the groups open) ...
+        for g in w.adv_boxes.values():
+            g.set_open(False)                       # ... folded like the other groups (--open opens them all)
 
     def settle(seconds: float = 0.3):
         end = time.time() + seconds
@@ -115,6 +132,10 @@ def main() -> int:
                 open_groups(groups, True)
             name = w.tabs.tabText(i).replace(" ", "_")
             w.grab().save(str(out / f"{i}_{name}_{width}.png"))
+            if isinstance(s, QScrollArea) and s.widget() is not None:
+                # ... and the tab's whole form, below the fold too (the window shows only its top; Explore: its left
+                # pane down to the Zoom group)
+                s.widget().grab().save(str(out / f"{i}_{name}_{width}_form.png"))
             if isinstance(s, QScrollArea) and s.widget() is not None:
                 fits = []                   # (needs, given): folded, then with its groups open
                 for on in ((False, True) if groups else (False,)):

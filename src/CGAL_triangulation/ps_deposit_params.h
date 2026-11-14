@@ -144,15 +144,23 @@ struct PSFixedBounds
 // The units a pass's caller hands the GPU host: scale[g] > 0 = grid g as a fixed-point sum in units
 // of 1/scale[g] (the host still deposits only the grids its flags select), 0 = float atomics
 // (DTFE_GPU_FLOAT_MOMENTS=1, or a bound without a unit); sumW = the exact items' per-tet
-// weight totals as fixed-point sums as well.
+// weight totals as fixed-point sums as well. The plain struct of the run's units for the GPU host (gpu_host.h stays
+// free of the DTFE headers): words 2 = the run-wide 128-bit device words, each grid's scale and the mass unit the
+// run's (src/fixed_units.h RunUnits) where it has one, else the pass's own.
 struct PSFixedUnits
 {
     float scale[PS_FX_N] = {};
     bool  sumW = false;
     // the total the mass grid's unit is taken from (psMassFixedScale) when > 0 (a --grid-window pass, so
     // that the GPU and the CPU window deposits take the same unit -- ps_interpolation.cc fxBoundWalk); 0 = the host's
-    // own sum of the masses it is handed plus massExtra
+    // own sum of the masses it is handed plus massExtra. Under words 2 only while the mass has no run-wide unit.
     double massTotal = 0.;
+    uint32_t words = 0;         // PSDepositParams.fxWords: 0 = 64-bit device words, 2 = the run-wide 128-bit words
+    float    massScale = 0.f;   // words 2: the mass unit 2^K (RunUnits); 0 = taken from the masses, as above
+    uint32_t capBits = 0;       // words 2: PSDepositParams.fxCapBits (RunUnits::capBits)
+    // the per-pass path with DTFE_TEST_RUN_UNIT_SHIFT=n: the mass unit the host takes from the masses, 2^n
+    // finer (src/fixed_units.h's test hook on the per-pass units); 0 otherwise
+    int      legacyShift = 0;
 };
 
 // The non-finite guard of the fixed-point shares. rint(share * scale) -> int64 is UNSPECIFIED for a
@@ -164,7 +172,9 @@ struct PSFixedUnits
 // run's counts once (fixedShareDropsReact, DTFE.cpp). Hot path: one compare. The kernels test the float product's
 // bits, (bits & 0x7fffffff) < 0x5f000000 (= 2^63), as fast math cannot fold an integer compare away; the CPU
 // tests the double product, which is the same float times the same 2^k, exactly. A finite in-range share takes
-// the same integer as without the guard, so normal data is unaffected bit for bit.
+// the same integer as without the guard, so normal data is unaffected bit for bit. The run-wide 128-bit words
+// (src/fixed_units.h) take the run's share cap 2^capLog2 in place of 2^63 (the overload with 'cap' below; the
+// kernels' shareLimbs): a share at or above it adds nothing and is counted the same way.
 // The count slots: PS-DTFE g = PSFxGrid (0 .. PS_FX_CPU_N-1), the mass grid, the exact items' per-tet weight totals;
 // standard DTFE 0..4 = its grids (dtfe_gpu_fixed.h: density, velocity, velocity gradient, scalar, its gradient; the
 // CPU exact average's run-wide words count in the same slots, averaged_interpolation_1.cc Avg1Words), 5 = the face
@@ -208,6 +218,21 @@ inline bool psFixedShareOk(double const product, int const slot, int64_t &q)
     q = int64_t( std::llrint( product ) );
     return true;
 }
+// ... for the run-wide 128-bit words: below cap = 2^capLog2 (RunUnits::cap) the share's integer (src/fixed_units.h
+// fxShare's statements: nearbyint rounds to nearest even, the integer llrint gives below 2^63, and a double holding
+// an integer below 2^127 converts to __int128 exactly), else false (q = 0, counted in 'slot'). At cap = 2^63 it
+// gives the integer of the guard above.
+inline bool psFixedShareOk(double const product, double const cap, int const slot, __int128 &q)
+{
+    if ( !( std::fabs( product ) < cap ) )   // false for a NaN too
+    {
+        fixedShareDropped( slot );
+        q = 0;
+        return false;
+    }
+    q = static_cast<__int128>( std::nearbyint( product ) );
+    return true;
+}
 
 // The guard's test hook: DTFE_TEST_NAN_SHARE=<k> makes the deposit's input NaN for about one
 // tetrahedron in k -- PS-DTFE its mass (the GPU extraction and the CPU loop alike, so every share of it is NaN), the
@@ -244,6 +269,13 @@ inline int64_t psFixedShare(double share, float scale, int slot)
 {
     int64_t q;
     psFixedShareOk( share * double(scale), slot, q );
+    return q;
+}
+// ... in the run-wide 128-bit words, below the share cap 'cap' (the kernels' shareLimbs)
+inline __int128 psFixedShare(double share, float scale, double cap, int slot)
+{
+    __int128 q;
+    psFixedShareOk( share * double(scale), cap, slot, q );
     return q;
 }
 
@@ -298,6 +330,13 @@ inline int64_t psMassFixedShare(double share, float scale)
 {
     int64_t q;
     psFixedShareOk( share * double(scale), FX_DROP_MASS, q );   // (the non-finite guard above)
+    return q;
+}
+// ... in the run-wide 128-bit words, below the share cap 'cap'
+inline __int128 psMassFixedShare(double share, float scale, double cap)
+{
+    __int128 q;
+    psFixedShareOk( share * double(scale), cap, FX_DROP_MASS, q );   // (the guard above, at the cap)
     return q;
 }
 

@@ -17,6 +17,8 @@ with live progress -- now, or as a job in the queue, which runs its jobs in sequ
 for other DTFE runs on the machine). The figures a run writes appear in the Figures browser, and
 every run on disk in the Runs browser (runs_view.py), which also flags outputs made before an
 output-changing fix. A GUI run is always one you could have typed. First launch: setup_wizard.py.
+View > Advanced Settings (off by default) adds an Advanced group to the run tabs: settings the code
+otherwise chooses, each on Automatic until changed (app_advanced.py).
 
     scripts/gui.sh
 """
@@ -34,7 +36,7 @@ from pathlib import Path
 from PySide6.QtCore import QLocale, QProcess, QSettings, Qt, QTimer
 from PySide6.QtGui import QColor, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QLabel, QLineEdit, QListWidgetItem, QMainWindow, QMessageBox,
+    QApplication, QFileDialog, QLabel, QLineEdit, QListWidgetItem, QMainWindow, QMessageBox,
     QAbstractItemView, QAbstractSpinBox, QSplitter, QStackedWidget, QStyle, QTabBar, QTabWidget, QVBoxLayout, QWidget,
 )
 
@@ -43,13 +45,14 @@ import runspec as rs  # noqa: E402
 import presets as P  # noqa: E402
 import results as R  # noqa: E402
 import grids as G  # noqa: E402
-from app_widgets import _checkable, _grow_fields, _scroll, option_tip  # noqa: E402
+from app_widgets import _checkable, _grow_fields, _scroll  # noqa: E402
 from app_widgets import CheckDelegate, FigureBrowser  # noqa: E402,F401  (re-exported)
-from app_tabs import TabsMixin  # noqa: E402
+from app_tabs import RUN_TABS, TabsMixin  # noqa: E402
 from app_specs import SpecsMixin  # noqa: E402
 from app_run import RunMixin  # noqa: E402
 from app_menus import MenusMixin  # noqa: E402
 from app_check import CheckMixin  # noqa: E402
+from app_advanced import ADVANCED_SETTING, AdvancedMixin  # noqa: E402
 
 ERROR_COLOR, WARN_COLOR, OK_COLOR = QColor("#c62828"), QColor("#b26a00"), QColor("#2e7d32")
 INFO_COLOR = QColor("gray")
@@ -94,26 +97,6 @@ QUEUE_COLOR = {"waiting": QColor("gray"), "running": QColor("#1565c0"), "done": 
 MERGED_COLOR, CHUNKS_COLOR = QColor("#2e7d32"), QColor("#b26a00")
 PER_TEXT = {"snapshot": "one call per selected snapshot", "series": "one call for all selected snapshots",
             "sim": "one call per simulation"}
-# the notes a tick shows when this build lacks what it asks for (P.noted_label)
-NO_GPU, NO_TBB = "this build has no GPU support", "this build has no TBB: ignored"
-
-
-# what the plane conventions' menu adds to the binary's own help: the Runs tab's warning about older planes
-PTS_CONVENTIONS_TIP = ("\n\nThe Runs tab warns about a phase-space plane made before 13 October 2026 with the vertex "
-                       "masses or the volume weighting: it has the old estimators. Legacy reproduces such a plane on "
-                       "purpose (its run log says so, and it is not warned about); the grids' conventions are the ones "
-                       "to compare a plane with the grids.")
-
-
-def _pts_conventions_combo(changed) -> QComboBox:
-    """The phase-space image plane's conventions (PS-DTFE '--ps-point-conventions', the scripts' PS_POINT_CONVENTIONS;
-    runspec.PTS_CONVENTIONS): the grids' (the default) or legacy."""
-    c = QComboBox()
-    for key in rs.PTS_CONVENTIONS:
-        c.addItem(rs.PTS_CONVENTIONS_TEXT[key], key)
-    option_tip(c, "pts_conventions", more=PTS_CONVENTIONS_TIP)
-    c.currentIndexChanged.connect(changed)
-    return c
 
 
 def _hint(level: str, msg: str) -> tuple[str, str]:
@@ -125,7 +108,7 @@ def _hint(level: str, msg: str) -> tuple[str, str]:
 
 
 # ==================================================================== main window
-class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainWindow):
+class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, AdvancedMixin, QMainWindow):
     def __init__(self, spec: rs.RunSpec | None = None, remember: bool = True,
                  pipeline: rs.PipelineSpec | None = None, plots: rs.PlotSpec | None = None,
                  data: rs.DataSpec | None = None, settings: QSettings | None = None,
@@ -161,51 +144,21 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         self.plots = plots or self._restore("plots", rs.PlotSpec)
         self.data = data or self._restore("data", rs.DataSpec)
         self.custom = custom or self._restore("custom", rs.CustomSpec)
-        if custom is None and not self._restore_json("custom", None):
-            # a fresh custom-snapshot job starts on the drivers' automatic device for its deposit and machine use, as
-            # the Grids and Pipeline tabs' jobs do (rs.gpu_build_default, rs.recommended_gpu: the GPU on a GPU build
-            # for PS-DTFE's exact deposit, the default)
-            c = self.custom
-            c.gpu = rs.gpu_build_default(c.estimator, c.precision, c.dim) and rs.recommended_gpu(
-                c.deposit, c.fields, None, c.estimator, c.precision, c.dim, run_mode=c.run_mode)
-        # standard DTFE's production cell average is the exact one (rs.production_deposit). A state saved by an
-        # older launcher holds its start, 'sampled', for a standard-DTFE Grids or Custom job (the Monte-Carlo
-        # average, never really chosen: it was the only start): moved to 'exact' ONCE; the Monte-Carlo average
-        # stays selectable, and a later choice of it is kept
+        # a state saved before the two quality modes -- a tab's job or a queued one -- loads through each job's
+        # from_dict (its deposit becomes the quality, the settings the modes replaced are dropped:
+        # rs.migrate_quality), said once on the status line (the queue is then saved back: _start_tabs)
+        self._modes_note = any(rs.predates_modes(d) for d in [self._restore_json(key, {}) for key in
+                                                               ("spec", "pipeline", "custom")]
+                               + list(self._restore_json("queue", [])))
+        # standard DTFE's production cell average is the exact one (Exact, rs.QUALITY_DEFAULT). A state saved by an
+        # older launcher holds its start, 'sampled' (now Fast), for a standard-DTFE Grids or Custom job (the
+        # Monte-Carlo average, never really chosen: it was the only start): moved to Exact ONCE; Fast stays
+        # selectable, and a later choice of it is kept
         if self.remember and not self._restore_json("dtfe_exact_start", False):
             for sp, given in ((self.spec, spec), (self.custom, custom)):
-                if given is None and sp.estimator == "dtfe" and sp.deposit == "sampled":
-                    sp.deposit = "exact"
+                if given is None and sp.estimator == "dtfe" and sp.quality == "fast":
+                    sp.quality = rs.QUALITY_DEFAULT
             self.settings.setValue("dtfe_exact_start", json.dumps(True))
-        # PS-DTFE's production deposit is the exact one too since 2026-11-09, but a saved PS-DTFE job (Grids,
-        # Pipeline, Custom) keeps its deposit: 'sampled' was selectable beside 'exact' there, so a stored 'sampled'
-        # may be the user's own choice and is not moved. A fresh job starts at the exact deposit
-        # the partitions merge in index order by default (the staged merge; run_ps_dtfe.sh PS_MERGE=index-order, the
-        # binary's default). A state saved by an older launcher holds its start, off, on the Grids, Pipeline and
-        # Custom tabs (never really chosen: it was the start): moved to on ONCE; unticking it later is kept
-        if self.remember and not self._restore_json("ordered_merge_start", False):
-            for sp, given in ((self.spec, spec), (self.pipe, pipeline), (self.custom, custom)):
-                if given is None and not sp.ordered_merge:
-                    sp.ordered_merge = True
-            self.settings.setValue("ordered_merge_start", json.dumps(True))
-        # PS-DTFE's exact deposit started on the CPU for a day (2026-11-09: 1133 s there with every core against
-        # 1156 s on the GPU for TNG100-3-Dark at 512³, a tie). An older launcher ticked the GPU whenever the exact
-        # deposit was picked (never really chosen: it was forced), so a saved Grids, Pipeline or Custom job with the
-        # exact deposit had its GPU unticked ONCE
-        if self.remember and not self._restore_json("ps_exact_cpu_start", False):
-            for sp, given in ((self.spec, spec), (self.pipe, pipeline), (self.custom, custom)):
-                if given is None and getattr(sp, "estimator", "ps") == "ps" and sp.deposit == "exact" and sp.gpu:
-                    sp.gpu = False
-            self.settings.setValue("ps_exact_cpu_start", json.dumps(True))
-        # ... and now runs on the GPU in every machine use (the run modes, D22; rs.recommended_gpu): at balanced, the
-        # default, a CPU run would have only the performance cores less a quarter. A saved PS-DTFE exact job (Grids,
-        # Pipeline, Custom) on the CPU has its GPU ticked ONCE when the pair has one; unticking it later is kept
-        if self.remember and not self._restore_json("run_mode_start", False):
-            for sp, given in ((self.spec, spec), (self.pipe, pipeline), (self.custom, custom)):
-                if (given is None and getattr(sp, "estimator", "ps") == "ps" and sp.deposit == "exact" and not sp.gpu
-                        and rs.gpu_built("ps", sp.precision, getattr(sp, "dim", 3))):
-                    sp.gpu = True
-            self.settings.setValue("run_mode_start", json.dumps(True))
 
     def _init_state(self):
         """The window's state outside its widgets: the remembered lists, the job and queue in progress, the checks."""
@@ -213,6 +166,11 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         self.custom_dirs: list[str] = [d for d in self._restore_json("custom_dirs", []) if isinstance(d, str)]
         self.user_presets: dict = self._restore_json("presets", {})
         self.show_commands = str(self._restore_json("show_commands", False)).lower() == "true"
+        # the opt-in Advanced settings (app_advanced.py): the switch, off unless remembered on; while it is on, each
+        # run tab's group, rows and grey line (built and deleted with the switch)
+        self.advanced_on = str(self._restore_json(ADVANCED_SETTING, False)).lower() == "true"
+        self.adv_boxes, self.adv_rows, self.adv_lines = {}, {}, {}
+        self._advanced_loaded = 0
         self._explore_saved: dict = self._restore_json("explore", {}) if self.remember else {}   # restored on first show
         self.runs_cache: list[R.RunRecord] = []            # for the time estimates
         self._runs_scanned = 0.0
@@ -222,15 +180,7 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         self._after_job = None                               # e.g. the demo: open Explore when it finishes
         self.proc: QProcess | None = None
         self._loading = False
-        self._own_last_file = ""        # the custom file whose particle count last set the GPU box
-        # the deposit choice per estimator, per tab ('grids', 'own'): {estimator: 'sampled' | 'exact'}, what an
-        # estimator switch brings back (_estimator_switched; this session only)
-        self._deposit_kept: dict[str, dict[str, str]] = {}
-        # True while a rule (not a hand, not a load) sets a GPU box (_gpu_auto_set)
-        self._gpu_auto_setting = False
-        # the GPU boxes last set by hand (not by a rule, not by a load): a change of the machine use keeps their tick
-        # (_run_mode_changed, _gpu_set_by_hand; this session only)
-        self._gpu_by_hand: set = set()
+        self._own_last_file = ""        # the custom file last read for its format and dimensions (_own_file_changed)
         self._steps: list[rs.Step] = []
         self._step_i, self._results = -1, []
         self._job_tab, self._job_start = GRIDS, None
@@ -354,6 +304,11 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         self._fill_snaps()
         self._refresh_queue()
         self.refresh()
+        if self._modes_note:
+            # (a remembered job that switched the Advanced settings on said so already: the note keeps that said,
+            # short, as the status label sits in the run panel's button row)
+            self.status_message(rs.MODES_NOTE + ("; Advanced settings on" if self._advanced_loaded else ""))
+            self._save_queue()          # the queued jobs as they now are (_save writes no queue): the note comes once
 
     def _start_polls(self):
         """The idle re-check every few seconds (jobs started or finished in a terminal, an external disk plugged in
@@ -565,77 +520,56 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         """Enable what the active job supports, then show its commands, checks and estimate."""
         tab = self.tabs.currentIndex()
         self._update_summaries()            # the folded groups' one-line summaries
-        # ---- Grids tab
+        # ---- Grids tab (a group or row of PS-DTFE's own is hidden for a standard-DTFE job, not greyed)
         s = self.spec
         ps = s.estimator == "ps"
-        for w in (self.nsub_spin, self.ps_group, self.ld_check, self.prefix_edit):
-            w.setEnabled(ps)                # the hi-res slice works with both estimators (the group greys the face tick)
-        self._deposit_texts(self.deposit_combo, ps)       # both estimators: standard DTFE's exact cell average
+        self.ps_group.setVisible(ps)
+        self.prefix_edit.setEnabled(ps)     # (run_dtfe.sh names its own outputs)
         for name, cb in self.field_checks.items():
             cb.setEnabled(ps or name in rs.DTFE_ALLOWED_FIELDS)
         self.fields_note.setText("" if ps else "Standard DTFE: the velocity dispersion is a phase-space field.")
         self.fields_note.setVisible(not ps)
         self.fields_box.sync_lambda()
-        self.cu_check.setEnabled(ps and s.caustics)
-        self.vg_check.setEnabled(bool(s.slice_plane))
-        self.pc_combo.setEnabled(ps and bool(s.slice_plane))       # a phase-space option (standard DTFE has one way)
-        self.nsub_spin.setEnabled(ps and s.deposit == "sampled")
-        gpu_ok = rs.gpu_built(s.estimator, s.precision)
-        # a build note replaces the label's own explanation (P.noted_label): the tick never widens its form
-        self.gpu_check.setText(P.noted_label("gpu" if ps else "gpu_dtfe", "" if gpu_ok else NO_GPU))
-        option_tip(self.gpu_check, *(("gpu",) if ps else ("gpu_dtfe", "DTFE")))
-        self.pt_check.setText(P.noted_label("parallel_triangulation", "" if rs.tbb_built(s.precision) else NO_TBB))
-        self.pt_check.setEnabled(ps)
-        self.om_check.setEnabled(ps)                # a PS-DTFE option (standard DTFE has no partition merge order)
-        self.so_check.setEnabled(True)              # both drivers checkpoint and resume
-        for combo in (self.prec_combo, self.o_prec, self.p_prec):     # the double pair's state, in words
-            i = combo.findData("double")
-            built = rs.binary_built("ps", "double") and rs.binary_built("dtfe", "double")
-            combo.setItemText(i, rs.PRECISION_TEXT["double"] + ("" if built else " (not built: Setup builds the pair)"))
+        self.cu_check.setEnabled(s.caustics)
+        self.vg_check.setEnabled(bool(s.slice_plane))       # the hi-res slice works with both estimators
         # ---- Custom snapshot tab
         c = self.custom
         cps = c.estimator == "ps"
-        flat = c.dim == 2                   # the 2D programs: CPU only, sequential insertion
-        for w in (self.o_lag_box, self.o_vm, self.o_vw, self.o_ca, self.o_pt, self.o_ld, self.o_window, self.o_halo):
+        flat = c.dim == 2                   # the 2D programs: CPU only
+        self.o_ps_group.setVisible(cps)
+        for w in (self.o_lag_box, self.o_window):
             w.setEnabled(cps)
-        for w in (self.o_sdens, self.o_pstream, self.o_pids, self.o_pc):      # the sample points' phase-space options
+        for w in (self.o_pstream, self.o_pids):             # the sample points' phase-space outputs
             w.setEnabled(cps and bool(c.sample_points))
-        self.o_cu.setEnabled(cps and c.caustics)
-        self.o_fg.setEnabled(cps and not flat)      # the face sweep is 3D only (the 2D programs: no flag)
+        self.o_cu.setEnabled(c.caustics)
         self.o_pvg.setEnabled(bool(c.sample_points))
-        self._deposit_texts(self.o_deposit, cps)
         for name, cb in self.o_fields.items():
             cb.setEnabled(cps or name in rs.DTFE_ALLOWED_FIELDS)
         self.o_fields_box.sync_lambda()
-        self.o_grid_cells.setText(("²" if flat else "³") + " cells    sub-samples per axis")
-        self.o_part.setSuffix(("²" if flat else "³") + " partitions")
+        self.o_grid_cells.setText(("²" if flat else "³") + " cells")
         self.o_grid.validator().setTop(65536 if flat else 4096)        # a 2D grid may be 65536² (4096³ in 3D)
         self.o_box.setToolTip(f"Optional: xlo xhi ylo yhi{'' if flat else ' zlo zhi'} in the file's units (all >= 0)")
         self.o_lag_path.setEnabled(cps and c.lagrangian == "separate")
-        self.o_nsub.setEnabled(cps and c.deposit == "sampled")
         self.o_scalar.setEnabled(c.input_type == 105)
-        self.o_pt.setText(P.noted_label("parallel_triangulation", "3D only" if flat else "" if rs.tbb_built(c.precision)
-                                        else NO_TBB))
-        self.o_pt.setEnabled(cps and not flat)
-        self.o_om.setEnabled(cps)                   # 2D runs are partitioned too
         self.o_snap_form.setRowVisible(self.o_alpha, cps and not c.periodic)
-        self.o_gpu.setEnabled(not flat)
-        self.o_gpu.setText(P.noted_label("gpu" if cps else "gpu_dtfe", "the 2D programs run on the CPU" if flat else
-                                         "" if rs.gpu_built(c.estimator, c.precision) else NO_GPU))
-        option_tip(self.o_gpu, *(("gpu",) if cps else ("gpu_dtfe", "DTFE")))
+        self.o_snap_form.setRowVisible(self.o_init_pos, cps)
+        # the precision: a row once the double-precision pair is built (Setup builds it), or while the job asks for it
+        double = rs.binary_built("ps", "double", c.dim) and rs.binary_built("dtfe", "double", c.dim)
+        self.o_snap_form.setRowVisible(self.o_prec, double or c.precision == "double")
+        self.o_prec.setItemText(self.o_prec.findData("double"), rs.PRECISION_TEXT["double"]
+                                + ("" if double else " (not built: Setup builds the pair)"))
         # ---- Pipeline tab
         p = self.pipe
         self.p_render.setEnabled(not p.plan_only)
-        self.p_render_box.setEnabled(p.render and not p.plan_only)
-        for w in (self.p_rfixed, self.p_rforce):            # the render step's options in the Advanced group
-            w.setEnabled(p.render and not p.plan_only)
+        self.p_render_box.setEnabled(p.render and not p.plan_only)    # (the fixed range and re-render ticks too)
         self.p_rproject.setEnabled(p.planes > 1)              # one plane: the plane itself
         self.p_thick.setEnabled(p.planes > 1)
         self.p_super_note.setText(f"= {p.supersample ** 2} sample point{'s' if p.supersample > 1 else ''} per pixel")
-        self.p_nsub.setEnabled(p.deposit == "sampled")
         self.p_cu.setEnabled(p.caustics)
-        self.p_gpu.setText(P.noted_label("gpu", "" if rs.gpu_built("ps", p.precision) else NO_GPU))
-        self.p_pt.setText(P.noted_label("parallel_triangulation", "" if rs.tbb_built(p.precision) else NO_TBB))
+        # ---- the run tabs' grey lines: what the quality is, where the run goes
+        for t in RUN_TABS:
+            self._sync_quality(t)
+        self._sync_advanced()               # (the Advanced groups, while the switch is on)
         # ---- shared data panel
         for w in (self.snap_list, self.all_btn, self.none_btn, self.mark_btn):
             w.setEnabled(tab not in (PIPELINE, DATA, OWN, EXPLORE))
@@ -704,12 +638,15 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
         if tab == GRIDS:
             s = self.spec
             n = len(s.snapshots)
-            est = f"full-resolution grids ≈ {s.grid_gb():.1f} GB" + ("  (float64)" if s.precision == "double" else "")
+            est = (f"full-resolution grids ≈ {s.grid_gb():.1f} GB"
+                   + ("  (float64)" if rs.job_precision(s) == "double" else ""))   # (the Advanced Precision)
             if s.estimator == "ps" and s.slice_plane:
                 est += f"   ·   slice {rs.plane_points(s.slice_plane)/1e6:.1f}M points"
-            t = R.time_estimate(self._runs(), sim=s.sim, grid=s.grid, estimator=s.estimator,
-                                gpu=s.gpu and rs.gpu_built(s.estimator),
-                                sliced=bool(s.slice_plane), precision=s.precision, run_mode=s.run_mode)
+            m = s.mode()
+            t = R.time_estimate(self._runs(), sim=s.sim, grid=s.grid, estimator=s.estimator, gpu=m.gpu,
+                                sliced=bool(s.slice_plane), precision=rs.job_precision(s), run_mode=s.run_mode,
+                                exact=m.deposit == "exact",
+                                nsub=m.nsub if s.estimator == "ps" and m.deposit == "sampled" else None)
             if t and n:
                 est += (f"   ·   ≈ {R.format_duration(t[0])} per snapshot (median of {t[1]} earlier run"
                         f"{'s' if t[1] != 1 else ''}), ≈ {R.format_duration(t[0] * n)} in all")
@@ -717,7 +654,8 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
                     + ("   ·   grids on scratch disk" if s.scratch_dir else ""))
         if tab == OWN:
             c = self.custom
-            gb = rs.grids_gb(c.grid, c.fields if c.estimator == "ps" else rs.dtfe_fields(c.fields), c.precision)
+            gb = rs.grids_gb(c.grid, c.fields if c.estimator == "ps" else rs.dtfe_fields(c.fields), c.precision,
+                             face=rs.face_route_on(c))
             return (f"grids ≈ {gb:.1f} GB" + ("  (float64)" if c.precision == "double" else "")
                     + f"   ·   outputs: {c.output_root()}.*")
         if tab == PIPELINE:
@@ -866,30 +804,51 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, QMainW
 
     def _load_run_settings(self, rec: R.RunRecord):
         """The Runs browser's 'Load settings': a TNG run's options into the Grids tab; a custom-snapshot run's
-        (its settings sidecar) into the Custom tab."""
+        (its settings sidecar, with the Advanced settings it ran with: they turn the switch on) into the Custom
+        tab. Either way a sampled PS-DTFE run's count where Fast takes another is the job's Advanced Samples
+        (rs.keep_run_count)."""
         if not rec.sim:
             side = R.custom_settings(rec)
             if side is None:
                 self.status_message(f"{rec.prefix}: no settings file beside its log (made before 2026-09-30?)")
                 return
             # the tab's machine use stays (it is about this machine now, not about the run: D22)
+            had = rs.job_advanced(self.custom)
             self.custom = rs.CustomSpec.from_dict(dict(side, run_mode=self.custom.run_mode))
+            rs.keep_run_count(self.custom, rec)     # (the sidecar holds no count; its log's command does)
             self._load_into_widgets()
+            switched, now = self._advanced_loaded, rs.job_advanced(self.custom)
             self.tabs.setCurrentIndex(OWN)
             self._changed()
-            self.status_message(f"loaded the settings of the custom run {rec.prefix}")
+            # what became of the Advanced settings: switched on for the run's; the tab's replaced by the run's, or
+            # back to Automatic (the run had none), as the TNG load says
+            self.status_message(f"loaded the settings of the custom run {rec.prefix}"
+                                + (f" (Advanced settings on: {rs.advanced_count_text(switched)})" if switched
+                                   else "; the Advanced settings are the run's" if had and now and had != now
+                                   else "; the Advanced settings are back to Automatic" if had and not now else ""))
             return
-        for k, v in rec.settings().items():
-            if hasattr(self.spec, k):
+        for k, v in rs.migrate_quality(rec.settings()).items():     # the log's cell average is the quality
+            if k in rs.RunSpec.__dataclass_fields__:
                 setattr(self.spec, k, list(v) if isinstance(v, list) else v)
+        # a run log names no Advanced settings (its flags are the run's, whoever chose them): the loaded job is the
+        # run's on Automatic, not the tab's overrides on top of it -- but for a sampled PS-DTFE run's count where
+        # Fast takes another (rs.keep_run_count)
+        had = rs.job_advanced(self.spec)
+        self.spec.advanced = {}
         self.spec.sim = rec.sim
         self.spec.snapshots = [rec.snap] if rec.snap is not None else []
+        rs.keep_run_count(self.spec, rec)
         self._load_into_widgets()
+        switched, now = self._advanced_loaded, rs.job_advanced(self.spec)
         self._fill_sim_dependent()
         self.tabs.setCurrentIndex(GRIDS)
         self._changed()
-        self.status_message(f"loaded the settings of {rec.sim} {rec.snap:03d} ({rec.prefix})"
-                            if rec.snap is not None else f"loaded the settings of {rec.prefix}")
+        # what became of the Advanced settings, as the custom load says
+        self.status_message((f"loaded the settings of {rec.sim} {rec.snap:03d} ({rec.prefix})"
+                             if rec.snap is not None else f"loaded the settings of {rec.prefix}")
+                            + (f" (Advanced settings on: {rs.advanced_count_text(switched)})" if switched
+                               else "; the Advanced settings are the run's" if had and now and had != now
+                               else "; the Advanced settings are back to Automatic" if had and not now else ""))
 
     def _explore_output(self, root: str):
         self.tabs.setCurrentIndex(EXPLORE)

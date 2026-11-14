@@ -12,8 +12,8 @@ from pathlib import Path
 import runspec as _rs
 from dtfelib.cli import FIGURES_ROOT
 from dtfelib.io import plane_geometry_matches
-from runspec import (FACE_GRADIENT_DEFAULT, LAMBDA_TH_DEFAULT,   # the dataclass defaults
-                     POINTEVAL_DERIVATIVE_SMOOTH, PS_DEFAULT_FIELDS)
+from runspec import (LAMBDA_TH_DEFAULT, POINTEVAL_DERIVATIVE_SMOOTH,   # the dataclass defaults
+                     PS_DEFAULT_FIELDS, QUALITY_DEFAULT)
 
 
 def _window_values(text: str) -> list[float] | None:
@@ -34,8 +34,8 @@ class PipelineSpec:
     """scripts/run_ps_pipeline.sh: grids + a full-box image plane for every STALE snapshot of the
     chosen simulations (resumable; snapshots are discovered, not chosen), then optionally the
     point-evaluated figures. The run options travel to run_ps_dtfe.sh through the environment, as
-    the Grids job's do (the script's own defaults are the production ones: GPU, vertex masses,
-    volume-weighted moments); the plane's geometry reaches tools/make_image_plane.py the same way."""
+    the Grids job's do (the quality's settings from mode(), as RunSpec's); the plane's geometry reaches
+    tools/make_image_plane.py the same way."""
     data_root: str = field(default_factory=lambda: _rs.default_data_root())
     sims: list[str] = field(default_factory=list)
     nu: int = 8192                  # image-plane pixels across the box
@@ -48,29 +48,14 @@ class PipelineSpec:
     vel_grad: bool = True
     grid: int = 512
     fields: list[str] = field(default_factory=lambda: list(PS_DEFAULT_FIELDS))
-    deposit: str = "exact"          # "exact" (r3d clipping; the default, run_ps_pipeline.sh's too) | "sampled" (nsub^3
-                                    # samples per cell): DTFE_EXACT_AVERAGE
-    nsub: int = 3                   # SUBSAMPLES (the sampled deposit only)
-    gpu: bool | None = None         # DTFE_GPU: the script's -m; None = the build's (gpu_build_default), by the
-                                    # machine use (recommended_gpu)
+    quality: str = QUALITY_DEFAULT  # "exact" | "fast", see RunSpec (run_ps_pipeline.sh hands its knobs on)
     run_mode: str = "balanced"      # DTFE_RUN_MODE (run_ps_pipeline.sh hands it on to run_ps_dtfe.sh), see RunSpec
-    vertex_mass: bool = True        # PS_VERTEX_MASS (needed for TNG IC inputs)
-    volume_weighted: bool = True    # PS_VOLUME_WEIGHTED (the production convention)
     caustics: bool = True           # PS_CAUSTICS (on: run_ps_dtfe.sh's default, the production runs')
     caustic_cusps: bool = False     # PS_CAUSTIC_CUSPS
-    parallel_triangulation: bool = False   # PARALLEL_TRIANGULATION
     lambda_th: float = LAMBDA_TH_DEFAULT   # LAMBDA_TH
-    mem_budget_gb: float = 0.0      # DTFE_MEM_BUDGET_GB, see RunSpec
     tess_cache: str = ""            # TESSELLATION_CACHE (run_ps_pipeline.sh forwards it to run_ps_dtfe.sh)
-    linear_deposit: bool = False    # PS_LINEAR_DEPOSIT, see RunSpec
-    face_gradient: bool = FACE_GRADIENT_DEFAULT   # FACE_GRADIENT, see RunSpec
-    ordered_merge: bool = True      # PS_MERGE (run_ps_pipeline.sh's run_ps_dtfe.sh inherits it), see RunSpec
     start_over: bool = False        # DTFE_RESUME=0 (inherited the same way), see RunSpec
-    pts_conventions: str = "grid"   # PS_POINT_CONVENTIONS: the image plane's estimators, see RunSpec
     output_prefix: str = "ps_output"
-    precision: str = "single"       # "double" = the PS-DTFE-double binary (DTFE_PRECISION), see RunSpec
-    partition: int = 0
-    max_concurrent: int = 0
     scratch_dir: str = ""
     force: bool = False
     plan_only: bool = False         # DRY_RUN=1: print the plan, compute nothing
@@ -87,12 +72,19 @@ class PipelineSpec:
     adaptive: bool = False
     plan: dict = field(default_factory=dict)
     plan_key: str = ""              # memory_key() the plan was checked for (settings changed -> stale)
+    advanced: dict = field(default_factory=dict)   # the Advanced overrides, see RunSpec (the last field)
 
     def __post_init__(self):
-        if self.gpu is None:            # a fresh pipeline's GPU tick is the drivers' automatic device on the PS
-            self.gpu = (_rs.gpu_build_default("ps", self.precision)   # build (a saved one is kept), see RunSpec
-                        and _rs.recommended_gpu(self.deposit, self.fields, None, "ps", self.precision,
-                                                run_mode=self.run_mode))
+        if not self.quality:
+            self.quality = QUALITY_DEFAULT
+        self.advanced = _rs.clean_advanced(self.advanced, type(self))
+
+    def mode(self) -> _rs.QualityMode:
+        """What this job's quality implies (runspec.quality_mode); its device by the largest simulation's
+        particles; with the Advanced overrides it passes (runspec.apply_advanced), as RunSpec's."""
+        return _rs.apply_advanced(_rs.quality_mode(
+            self.quality, "ps", self.fields, lambda: max((_rs.dm_particles(s) or 0 for s in self.sims), default=0)
+            or None, _rs.job_precision(self), run_mode=self.run_mode), self)
 
     def plane_json(self, sim: str, nu: int | None = None) -> Path:
         return _rs.sim_dir(sim, self.data_root) / f"hires_plane_{self.axis}{nu or self.nu}.json"
@@ -145,14 +137,14 @@ class PipelineSpec:
     # ------------------------------------------------------------------ memory check
     def memory_key(self) -> str:
         return _rs._memory_key(self, ("sims", "nu", "force", "plan_only", "adaptive", "plan", "plan_key",
-                                      "figures_root", "center", "thickness", "lambda_th", "start_over", "pts_conventions")
+                                      "figures_root", "center", "thickness", "lambda_th", "start_over")
                                + _rs.PIPELINE_RENDER_KEYS)
 
     def check_step(self, sim: str, snaps: list[int], nu: int) -> _rs.Step:
         """run_ps_dtfe.sh in report mode with every setting run_ps_pipeline.sh would pass it (the run
         options through the environment, the GPU flag, this plane) -- a plane not generated yet, or one
         the script will regenerate, is sized by its point count."""
-        argv = [str(_rs.PS_SCRIPT), "-s", sim, "-g", str(self.grid)] + (["-m"] if self.gpu else []) \
+        argv = [str(_rs.PS_SCRIPT), "-s", sim, "-g", str(self.grid)] + (["-m"] if self.mode().gpu else []) \
             + [str(n) for n in sorted(snaps)]
         env = {k: v for k, v in self.command()[1].items() if k not in _rs.PIPELINE_ONLY_KEYS}
         env["AUTO_TUNE_REPORT"] = "1"
@@ -196,7 +188,7 @@ class PipelineSpec:
 
     # ------------------------------------------------------------------ checks
     def problems(self) -> list[tuple[str, str]]:
-        out = _rs._root_problems(self.data_root) + _rs._run_option_problems(self)
+        out = _rs._root_problems(self.data_root) + _rs._run_option_problems(self) + _rs.advanced_problems(self)
         if not _rs._root_problems(self.data_root):
             if not self.sims:
                 out.append(("error", "no simulations selected"))
@@ -229,12 +221,7 @@ class PipelineSpec:
             self.window_values()
         except ValueError as e:
             out.append(("error", str(e)))
-        out += _rs._precision_problems("ps", self.precision)
-        if self.gpu and not _rs.gpu_built("ps", self.precision):
-            out.append(("warning", f"GPU requested, but the binary was built without GPU support ({_rs.GPU_BUILD_HINT}): "
-                                   "the deposit will run on the CPU"))
-        out += _rs._ps_option_problems(self, max((_rs.dm_particles(s) or 0 for s in self.sims), default=0) or None)
-        out += _rs._pts_conventions_problems(self, True)
+        out += _rs._ps_option_problems(self)
         if self.output_prefix.strip() == "" or re.search(r"[\s/]", self.output_prefix):
             out.append(("error", "output prefix must be a single word (no spaces or '/')"))
         if self.render:
@@ -247,10 +234,11 @@ class PipelineSpec:
         out += _rs._scratch_problems(self.scratch_dir)
         pts = self.plane_points()
         pts_gb = pts * 545e-9
-        gb = _rs.grids_gb(self.grid, self.fields, self.precision) + pts_gb
+        grids = _rs.grids_gb(self.grid, self.fields, _rs.job_precision(self), face=_rs.face_route_on(self))
+        gb = grids + pts_gb
         if not self.scratch_dir and gb > 40:
             shape = f"{self.nu}^2 image plane" + (f" ({pts / 1e6:.0f}M points)" if pts != self.nu ** 2 else "")
-            out.append(("warning", f"~{_rs.grids_gb(self.grid, self.fields, self.precision):.0f} GB of grids + "
+            out.append(("warning", f"~{grids:.0f} GB of grids + "
                                    f"~{pts_gb:.0f} GB for the {shape} will not fit next to the triangulation on "
                                    "64 GB: set a scratch directory (bit-identical results)"))
         if self.force:
@@ -270,6 +258,7 @@ class PipelineSpec:
 
     # ------------------------------------------------------------------ commands
     def command(self) -> tuple[list[str], dict[str, str]]:
+        m = self.mode()                             # the quality's settings (runspec.quality_mode)
         env = {"DTFE_DATA_ROOT": str(self.data_root), "SIMS": " ".join(self.sims),
                "NU": str(self.nu), "AXIS": self.axis, "GRID_SIZE": str(self.grid),
                "PTS_VEL_GRAD": "1" if self.vel_grad else "0",
@@ -277,17 +266,18 @@ class PipelineSpec:
                # the run options, always spelled out (as RunSpec does): a stray knob exported in the
                # login shell must not leak into a run (each under its new name and its older one until P6.6). The
                # count only for the sampled deposit; pinned EMPTY for the exact one, which has no sub-samples
-               "SUBSAMPLES": str(self.nsub) if self.deposit != "exact" else "",
-               "AVG_SUBSAMPLES": str(self.nsub) if self.deposit != "exact" else "",
-               "PS_VERTEX_MASS": "1" if self.vertex_mass else "0",
-               "PS_VOLUME_WEIGHTED": "1" if self.volume_weighted else "0",
+               "SUBSAMPLES": str(m.nsub) if m.deposit != "exact" else "",
+               "AVG_SUBSAMPLES": str(m.nsub) if m.deposit != "exact" else "",
+               "PS_VERTEX_MASS": "1" if m.vertex_mass else "0",
+               "PS_VOLUME_WEIGHTED": "1" if m.volume_weighted else "0",
                "PS_CAUSTICS": "1" if self.caustics else "0",
                "PS_CAUSTIC_CUSPS": "1" if self.caustic_cusps else "0",
-               "PS_LINEAR_DEPOSIT": "1" if self.linear_deposit else "0",
-               "FACE_GRADIENT": _rs.face_gradient_env(self)}
-        env.update(_rs.ps_exact_env(self.deposit == "exact"))
+               "PS_LINEAR_DEPOSIT": "1" if m.linear_deposit else "0",
+               "FACE_GRADIENT": _rs.face_gradient_env(self),
+               "DTFE_FACE_GRADIENT": ""}              # the binary's own switch, pinned unset as RunSpec pins it
+        env.update(_rs.ps_exact_env(m.deposit == "exact"))
         env.update(_rs.ps_run_env(self))            # the GPU (-m only switches it on), merge order, start over ...
-        env.update(_rs.ps_conventions_env(self.pts_conventions))
+        env.update(_rs.ps_conventions_env(m.pts_conventions))
         if self.planes > 1:
             env["THICKNESS"] = _rs._num(self.thickness)
         try:
@@ -305,12 +295,13 @@ class PipelineSpec:
             env["FIELDS"] = " ".join(self.fields)
         if self.output_prefix != "ps_output":
             env["OUTPUT_PREFIX"] = self.output_prefix
-        if self.precision == "double":
+        part, conc = _rs.job_partition(self), _rs.job_concurrency(self)     # the Advanced overrides, as RunSpec's
+        if _rs.job_precision(self) == "double":
             env["DTFE_PRECISION"] = "double"
-        if self.partition > 0:
-            env["PARTITION"] = f"{self.partition} {self.partition} {self.partition}"
-        if self.max_concurrent > 0:
-            env["MAX_CONCURRENT"] = str(self.max_concurrent)
+        if part > 0:
+            env["PARTITION"] = f"{part} {part} {part}"
+        if conc > 0:
+            env["MAX_CONCURRENT"] = str(conc)
         if self.scratch_dir:
             env["SCRATCH_DIR"] = str(Path(self.scratch_dir).expanduser())
         if self.force:
@@ -380,8 +371,11 @@ class PipelineSpec:
         return render
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        return _rs._with_advanced(self, asdict(self))
 
     @classmethod
     def from_dict(cls, d: dict) -> "PipelineSpec":
-        return cls(**{k: v for k, v in _rs._current_figures_root(d).items() if k in cls.__dataclass_fields__})
+        """A saved job: an older one's deposit read as its quality (runspec.migrate_quality), unknown keys dropped,
+        bad overrides too (__post_init__)."""
+        d = _rs.migrate_quality(_rs._current_figures_root(d))
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})

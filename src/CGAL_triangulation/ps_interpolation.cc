@@ -39,6 +39,7 @@
 #include <functional> // the dynamic team's recruit hook (PSBlockClaim)
 #include <iomanip>   // the phase-timing line
 #include <mutex>     // the stream statistics over cell ranges (psStreamStats)
+#include <new>       // std::bad_alloc: the face walk beside the GPU deposit falls back when its words do not fit
 #include <sstream>   // the phase-timing line
 #include <system_error> // a thread the system refuses (PSEarlyFaceWalk)
 #include <thread>    // the CPU deposit's threads (psDepositThreads)
@@ -64,9 +65,9 @@ int psGpuFallbacksTaken(bool reset)
     return reset ? psGpuFallbacks.exchange( 0 ) : psGpuFallbacks.load();
 }
 
-// The face walks beside the GPU deposit (DTFE_FACE_WALK_EARLY, PSEarlyFaceWalk; ps_point_eval.h psFaceWalksEarlyTaken):
-// the passes whose walk was kept, the walks thrown away after a failed device call, the walks' summed wall time and
-// the part of it their passes still waited for after the device call had returned (microseconds).
+// The face walks beside the GPU deposit (the default, PSEarlyFaceWalk; ps_point_eval.h psFaceWalksEarlyTaken):
+// the passes whose walk was kept, the walks thrown away after a failed device call, the kept walks' summed wall time
+// and the part of it their passes still waited for after the device call had returned (microseconds).
 static std::atomic<long long> psFaceEarlyKept{ 0 }, psFaceEarlyDiscarded{ 0 };
 static std::atomic<long long> psFaceEarlyWalkUs{ 0 }, psFaceEarlyWaitUs{ 0 };
 void psFaceWalksEarlyTaken(long long &kept, long long &discarded, double &walkSec, double &waitSec, bool reset)
@@ -75,6 +76,17 @@ void psFaceWalksEarlyTaken(long long &kept, long long &discarded, double &walkSe
     discarded = reset ? psFaceEarlyDiscarded.exchange( 0 ) : psFaceEarlyDiscarded.load();
     walkSec = double( reset ? psFaceEarlyWalkUs.exchange( 0 ) : psFaceEarlyWalkUs.load() ) * 1e-6;
     waitSec = double( reset ? psFaceEarlyWaitUs.exchange( 0 ) : psFaceEarlyWaitUs.load() ) * 1e-6;
+}
+
+// The GPU face kernel's passes (DTFE_GPU_FACES=1, PSGpuFaceJob; ps_point_eval.h psGpuFacesTaken): the passes whose
+// face sums the device made, those whose face pass did not make them after a kept GPU deposit (the CPU face walk made
+// the same words instead), and the face passes' summed time in the device's hold (microseconds).
+static std::atomic<long long> psFaceGpuMade{ 0 }, psFaceGpuFellBack{ 0 }, psFaceGpuUs{ 0 };
+void psGpuFacesTaken(long long &made, long long &fellBack, double &sec, bool reset)
+{
+    made     = reset ? psFaceGpuMade.exchange( 0 )     : psFaceGpuMade.load();
+    fellBack = reset ? psFaceGpuFellBack.exchange( 0 ) : psFaceGpuFellBack.load();
+    sec = double( reset ? psFaceGpuUs.exchange( 0 ) : psFaceGpuUs.load() ) * 1e-6;
 }
 
 // Failed GPU deposit attempts of this run (run_progress.h: the progress sidecar's gpu_retries), counted by
@@ -155,6 +167,7 @@ static size_t const PS_NOT_IN_WINDOW = size_t(-1);
 // psMassFixedShare) that the CPU deposit uses in every build, GPU or not
 #include "ps_deposit_params.h"
 #include "face_sweep.h"   // --face-gradient: the face sections (psDepositFaces)
+#include "face_sweep_f32.h"   // ... in the canonical float arithmetic (DTFE_FACE_F32, DTFE_GPU_FACES: psFaceF32)
 
 // One share into the fixed-point MASS grid (see 'massFx' in interpolateGrid_phaseSpace): a plain add
 // where one thread owns the cell (the serial loop, a slab), a relaxed atomic add where the threads of the copy mode
@@ -165,6 +178,108 @@ static inline void psAddMassFixed(int64_t *grid, size_t const flat, int64_t cons
     if ( atomic ) __atomic_fetch_add( grid + flat, q, __ATOMIC_RELAXED );
     else grid[flat] += q;
 }
+// One thread's handle on a grid's words for its adds (PSFxWords::sink): the words (null: the grid has none), the unit
+// 2^K as a double, the share cap (0: the pass's 64-bit words; > 0: the run-wide words, src/fixed_units.h), the bound
+// of the run-wide words' 64-bit add (min(cap, 2^63); 0: none) and this thread's carry list (the run-wide words only)
+struct PSFxSink
+{
+    int64_t *w = nullptr;
+    double scale = 0.;
+    double cap = 0.;
+    double fast = 0.;
+    FxCarryList *list = nullptr;
+};
+// The run-wide words' rare cases, kept out of line so that the add below stays small at every deposit site: a
+// crossing of the int64 range into the thread's list; and a share of 2^63 units or more, or one with no integer at
+// all (a NaN, an infinity, at or beyond the cap), which takes the 128-bit statements (psFixedShareOk's count in
+// 'slot', then fxAddOwned / fxAddShared)
+__attribute__((noinline, cold)) static void psFxCross(FxCarryList *const list, size_t const at, int64_t const c)
+{
+    list->push_back( FxCarry( uint64_t( at ), c ) );
+}
+__attribute__((noinline)) static void psFxAddWide(int64_t *const w, FxCarryList *const list, double const cap,
+                                                  size_t const at, double const product, int const slot,
+                                                  bool const atomic)
+{
+    __int128 q;
+    if ( !psFixedShareOk( product, cap, slot, q ) || q == 0 ) return;
+    if ( atomic ) fxAddShared( w + at, q, uint64_t( at ), *list );
+    else fxAddOwned( w[at], q, uint64_t( at ), *list );
+}
+// One share into a grid's words, the one add of the CPU deposit: the share times the unit, its integer by the guard
+// (ps_deposit_params.h psFixedShareOk: none is counted in 'slot'), added plainly where this thread owns the word and
+// atomically where the threads share it. The 64-bit words take psAddMassFixed's add; the run-wide words add below
+// the share cap and record each crossing of the int64 range in the thread's list (fxAddOwned / fxAddShared), so the
+// sum is exact at any magnitude and in any order. A share below 2^63 units (nearly every one) is added here in 64
+// bits: llrint gives the integer nearbyint gives (one rounding mode, and it fits), the share has no part beyond the
+// word, and the add and its crossing test are fxAddOwned's / fxAddShared's own -- the same word and the same list
+// entries as the 128-bit statements, which take the rest (psFxAddWide). Always inlined: one multiply, one rounding
+// and one add at each deposit site, as before the run-wide words.
+static inline __attribute__((always_inline))
+void psFxAdd(PSFxSink const &s, size_t const at, double const share, int const slot, bool const atomic)
+{
+    double const product = share * s.scale;
+    if ( s.cap == 0. )
+    {
+        int64_t q;
+        psFixedShareOk( product, slot, q );
+        psAddMassFixed( s.w, at, q, atomic );
+        return;
+    }
+    if ( std::fabs( product ) < s.fast )   // (false for a NaN too)
+    {
+        int64_t const q = int64_t( std::llrint( product ) );
+        if ( q == 0 ) return;
+        if ( atomic )
+        {
+            int64_t const old = __atomic_fetch_add( s.w + at, q, __ATOMIC_RELAXED );
+            int64_t const after = int64_t( uint64_t( old ) + uint64_t( q ) );
+            if ( q > 0 ? after < old : after > old ) psFxCross( s.list, at, q > 0 ? 1 : -1 );
+        }
+        else
+        {
+            int64_t r;
+            if ( __builtin_add_overflow( s.w[at], q, &r ) ) psFxCross( s.list, at, q > 0 ? 1 : -1 );
+            s.w[at] = r;
+        }
+        return;
+    }
+    psFxAddWide( s.w, s.list, s.cap, at, product, slot, atomic );
+}
+// A grid's fixed-point words (the moment grids' fxg, the mass grid's massFx and the face sums in
+// interpolateGrid_phaseSpace): the int64 words, the carry and K of src/fixed_units.h's FxWords, the unit as the float
+// 2^K, the share cap and the threads' carry lists. cap 0: the pass's own 64-bit words (the default; under
+// DTFE_PS_RUN_UNITS=1 a run without its units), with no carry and no lists; cap > 0: the run-wide words, K =
+// ilogb(scale). EMPTY w: the grid has no words (its Real accumulator is in use).
+struct PSFxWords : FxWords
+{
+    float scale = 0.f;
+    double cap = 0.;
+    std::vector<FxCarryList> lists;   // [thread]: sized before the threads add (ensureLists), summed by fxCarryFinish
+    void ensureLists(size_t const n) { if ( cap > 0. && lists.size() < n ) lists.resize( n ); }
+    // forgets the words, their carry, the lists and the unit
+    void release()
+    {
+        std::vector<int64_t>().swap( w );
+        FxCarryList().swap( carry );
+        std::vector<FxCarryList>().swap( lists );
+        scale = 0.f;
+        cap = 0.;
+        K = 0;
+    }
+    // thread th's handle (null words when there are none; a list only for the run-wide words, ensureLists first)
+    PSFxSink sink(size_t const th)
+    {
+        PSFxSink s;
+        if ( w.empty() ) return s;
+        s.w = w.data();
+        s.scale = double( scale );
+        s.cap = cap;
+        s.fast = cap > 0. ? std::min( cap, 9223372036854775808.0 ) : 0.;   // (2^63)
+        s.list = cap > 0. && th < lists.size() ? &lists[th] : nullptr;
+        return s;
+    }
+};
 // The deposit's order-free COUNTS and FLAGS, by the same rule: the int stream count (+1), the byte flags
 // subSampleMassFlag / flippedFlag (set to 1) and the caustic mask (OR). The copy mode's threads share them as they share
 // the fixed-point words -- +1, set and OR commute, so every thread count gives the same arrays and none needs a copy.
@@ -210,24 +325,259 @@ inline void psFxToReal(std::vector<int64_t> &w, float const scale, std::vector<E
     } );
     std::vector<int64_t>().swap( w );
 }
+// One word of the run-wide units as a Real, for the dense passes: fxToReal's value (src/fixed_units.h) without its
+// 128-bit conversion. The int64 word is rounded once to Real, as fxToReal rounds the same integer, and the product
+// with 2^-K ('inv', exact for |K| <= 120: psFxDirect) is exact wherever ldexp's scaling is -- a result of 2^-120 or
+// more is no subnormal -- and rounds as ldexp does at the float range's top. Beyond |K| = 120 the callers keep
+// fxToReal.
+inline bool psFxDirect(int const K) { return K >= -120 && K <= 120; }
+inline Real psFxWordToReal(int64_t const w, Real const inv) { return Real( w ) * inv; }
+// ... from a PSFxWords, whose words are then released: the 64-bit words as above; the run-wide words each component's
+// integer rounded once to Real at 2^-K (src/fixed_units.h fxToReal) -- a dense pass over the words, then each carry
+// entry overwrites its component (fxToRealGrid's order). The carry holds the lists' sums (psFxCarryFinish ran).
+template <class Elem>
+inline void psFxToReal(PSFxWords &F, std::vector<Elem> &grid, size_t const nCell)
+{
+    if ( F.cap == 0. )
+    {
+        psFxToReal( F.w, F.scale, grid, nCell );
+        F.release();
+        return;
+    }
+    size_t const comps = sizeof(Elem) / sizeof(Real);
+    grid.assign( nCell, Elem() );
+    int const K = F.K;
+    bool const direct = psFxDirect( K );
+    Real const inv = direct ? std::ldexp( Real( 1 ), -K ) : Real( 0 );
+    psCellRanges( nCell, [&](size_t const lo, size_t const hi)   // (cell by cell: over the free cores)
+    {
+        if ( direct )
+            for (size_t i = lo; i < hi; ++i)
+                for (size_t c = 0; c < comps; ++c)
+                    psFxComp( grid[i], c ) = psFxWordToReal( F.w[i*comps + c], inv );
+        else
+            for (size_t i = lo; i < hi; ++i)
+                for (size_t c = 0; c < comps; ++c)
+                    psFxComp( grid[i], c ) = fxToReal( __int128( F.w[i*comps + c] ), K );
+    } );
+    for (FxCarry const &e : F.carry)
+    {
+        size_t const i = size_t( e.first ) / comps, c = size_t( e.first ) % comps;
+        if ( i < nCell )
+            psFxComp( grid[i], c ) = fxToReal( __int128( F.w[e.first] )
+                                               + __int128( e.second ) * ( __int128( 1 ) << 64 ), F.K );
+    }
+    F.release();
+}
+// Component i's exact integer from a grid's words and its sorted carry (src/fixed_units.h fxValue's rule), for words
+// and a carry held apart (PSGpuGrids)
+static inline __int128 psWordValue(std::vector<int64_t> const &w, FxCarryList const &carry, size_t const i)
+{
+    __int128 v = __int128( w[i] );
+    auto const it = std::lower_bound( carry.begin(), carry.end(), uint64_t( i ),
+                                      [](FxCarry const &c, uint64_t const k) { return c.first < k; } );
+    if ( it != carry.end() && it->first == uint64_t( i ) ) v += __int128( it->second ) * ( __int128( 1 ) << 64 );
+    return v;
+}
+
+// --face-gradient's canonical float sweep (face_sweep_f32.h; docs/cleanup-plan.md P11's GPU face kernel, step 2 of
+// its design), an opt-in of the single-precision 3-D build. DTFE_FACE_F32=1: every PS face sum of the run in that
+// arithmetic, on the CPU -- the deposit loop's and psFaceWalk's, after a GPU deposit or beside it
+// (the default). DTFE_GPU_FACES=1: a GPU deposit's face sums from the Metal face kernel, which implies the
+// canonical arithmetic for every CPU face sum of the run as well (the walk after a device call that gave up, a
+// CPU-deposited partition of a mixed run, a boundary section), so that a CPU run under DTFE_FACE_F32=1 and a GPU run
+// under DTFE_GPU_FACES=1 write the same face words; 'auto' and unset are 0 for now (no measured rule yet). Each is
+// read once per process. The double and the 2-D builds have neither: psFaceF32Note says so once.
+[[maybe_unused]] static inline bool psGpuFaces()   // (unused in the double and the 2-D builds)
+{
+#if !defined(DOUBLE) && NO_DIM==3
+    static bool const on = Env::tristate( "DTFE_GPU_FACES" ) == 1;
+    return on;
+#else
+    return false;
+#endif
+}
+static inline bool psFaceF32()
+{
+#if !defined(DOUBLE) && NO_DIM==3
+    static bool const on = Env::flag( "DTFE_FACE_F32" ) || psGpuFaces();
+    return on;
+#else
+    return false;
+#endif
+}
+// One line per run under the switches: the face sums' arithmetic (a face pass of the single 3-D build), or that the
+// build ignores them. Nothing without them. DTFE_GPU_FACES=1 where the face walk would run beside the GPU deposit
+// (walkEarly: the caller's auto_tune.h psFaceWalkEarly, the default; declared after this point): the kernel makes a
+// GPU pass's face sums and that walk does not run, which a second line says.
+static inline void psFaceF32Note(MESSAGE::Message &message, bool const facePass, bool const walkEarly)
+{
+    static std::atomic<bool> said{ false };
+#if !defined(DOUBLE) && NO_DIM==3
+    if ( !facePass || !psFaceF32() || said.exchange( true ) ) return;
+    message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " the face sums (--face-gradient) in the "
+            << "canonical float arithmetic of the GPU face kernel ("
+            << ( psGpuFaces() ? "DTFE_GPU_FACES=1" : "DTFE_FACE_F32=1" )
+            << "; src/CGAL_triangulation/face_sweep_f32.h).\n" << MESSAGE::Flush;
+    if ( psGpuFaces() && walkEarly )
+        message << "note: under DTFE_GPU_FACES=1 the GPU face kernel makes a GPU deposit's face sums, so the face "
+                << "walk beside the deposit does not run (it still does under the run-wide units, "
+                << "DTFE_PS_RUN_UNITS=1 or '--ps-merge fixed-point', which the kernel does not take).\n"
+                << MESSAGE::Flush;
+#else
+    (void)facePass;
+    (void)walkEarly;
+    bool const set = Env::flag( "DTFE_FACE_F32" ) || Env::tristate( "DTFE_GPU_FACES" ) == 1;
+    if ( !set || said.exchange( true ) ) return;
+    message << "note: DTFE_FACE_F32 and DTFE_GPU_FACES are switches of the single-precision 3-D build; "
+            << "ignored here.\n" << MESSAGE::Flush;
+#endif
+}
 
 #if NO_DIM==3
+// --face-gradient: the inputs every face path takes from the host (face_sweep_f32.h: no device recomputes them), for
+// the GPU face kernel's records of DTFE_GPU_FACES=1 (step 3 of the kernel's design; unused until those exist).
+// The tetrahedron's constant velocity gradient as the deposit loop and psFaceWalk form it, operation for operation:
+// geo.posMatInv (Real) times the velocity differences to vertex 0.
+[[maybe_unused]] static inline void psFaceVelGrad(Cell_handle const &cell, PSCellGeometry const &geo,
+                                                  Real (&out)[NO_DIM][noVelComp])
+{
+    Vertex_handle const base = cell->vertex(0);
+    Real temp[NO_DIM][noVelComp];
+    for (int v = 0; v < NO_DIM; ++v)
+        for (size_t i = 0; i < noVelComp; ++i)
+            temp[v][i] = cell->vertex(v+1)->info().velocity(i) - base->info().velocity(i);
+    matrixMultiplication<noVelComp>( const_cast<Real (&)[NO_DIM][NO_DIM]>( geo.posMatInv ), temp, out );
+}
+// ... and its uniform density in rho / rho_bar for the momentum shares: the face callers' double expression (the mass
+// clamped as the deposit loop clamps it, a negative one to 0 and a NaN kept), rounded once to float. That is the
+// value psDepositFaces' canonical branch takes, float(rhoTet), from the callers' own rhoTet.
+[[maybe_unused]] static inline float psFaceRho(double tetMass, double const cellAbsDet, double const avgDensity)
+{
+    if ( tetMass < 0. ) tetMass = 0.;
+    double const vTet = cellAbsDet / double(factorial(NO_DIM));
+    return float( ( vTet > 0. && avgDensity > 0. ) ? tetMass / ( vTet * avgDensity ) : 0. );
+}
+
+#if !defined(DOUBLE)
+// The canonical sweep's pieces into the face words (psDepositFaces under psFaceF32): each piece's float shares added
+// as the double sweep's visit adds its own -- to the UPPER face of the cell below the plane and the LOWER face of the
+// cell above, the slab's local x planes only, with the same words, guard and drop slots (psFxAdd takes the share as a
+// double: its product with the unit 2^k is the float product exactly, the integer a kernel's guard and rint give)
+struct PSFaceF32Sink
+{
+    PSFxSink const &S, &N, &P;
+    size_t const *subDims;
+    long slabLo, slabHi;
+    bool atomic;
+    void piece(int const a, int const below, int const above, int const lu, int const lw, float const s0,
+               float const s1, float const s2, float const n, float const p) const
+    {
+        int u, w;
+        fsPlaneAxes( a, u, w );
+        long cl[3] = { 0, 0, 0 };   // (every slot is set below: a, u, w are 0, 1, 2 in some order)
+        cl[u] = lu;
+        cl[w] = lw;
+        double const sj[3] = { double( s0 ), double( s1 ), double( s2 ) };
+        for (int c2 = 0; c2 < 2; ++c2)   // the cell below the plane (its UPPER face), the cell above (its LOWER)
+        {
+            cl[a] = c2 == 0 ? below : above;
+            if ( cl[a] < 0 || cl[0] < slabLo || cl[0] >= slabHi ) continue;
+            size_t const flat = ( size_t( cl[0] ) * subDims[1] + size_t( cl[1] ) ) * subDims[2] + size_t( cl[2] );
+            size_t const slot = size_t( ( c2 == 0 ? 1 : 0 ) * NO_DIM + a );   // side 1 = upper, 0 = lower
+            for (size_t j = 0; j < noVelComp; ++j)
+                psFxAdd( S, flat * ( 2 * NO_DIM * noVelComp ) + slot * noVelComp + j, sj[j], FX_DROP_FACE_S, atomic );
+            psFxAdd( N, flat * ( 2 * NO_DIM ) + slot, double( n ), FX_DROP_FACE_N, atomic );
+            psFxAdd( P, flat * ( 2 * NO_DIM ) + slot, double( p ), FX_DROP_FACE_P, atomic );
+        }
+    }
+};
+// The grid of a canonical face sweep (face_sweep_f32.h FsGrid) from the region's corner, the spacing, the grid and
+// the pass's sub-box as the face walk hands them to psDepositFaces: ONE fill for the CPU's sweep, the GPU face
+// kernel's records (their plane counts) and its parameter block (psFaceParams), so the three cannot differ. 1/h is
+// formed here, once per axis, in float: the value every one of them takes.
+static inline void psFaceGrid(Real const *boxL, Real const *dxL, size_t const *nGridL, bool const periodic,
+                              size_t const *subOrigin, size_t const *subDims, FsGrid &g)
+{
+    for (int d = 0; d < 3; ++d)
+    {
+        g.lo[d] = boxL[2*d];
+        g.h[d] = dxL[d];
+        g.ih[d] = 1.f / dxL[d];
+        g.n[d] = int( nGridL[d] );
+        g.subOrigin[d] = int( subOrigin[d] );
+        g.subDims[d] = int( subDims[d] );
+    }
+    g.periodic = periodic ? 1 : 0;
+}
+// ... and as the GPU face kernel's parameter block (ps_kernel_params.h PSFaceParams), with the face words' units
+// (the 64-bit words: no share cap; nRec, itemBase and nItems are the GPU host's)
+[[maybe_unused]] static inline PSFaceParams psFaceParams(FsGrid const &g, float const (&scale)[3])
+{
+    PSFaceParams P{};
+    for (int d = 0; d < 3; ++d)
+    {
+        P.lo[d] = g.lo[d];
+        P.h[d] = g.h[d];
+        P.ih[d] = g.ih[d];
+        P.nGrid[d] = int32_t( g.n[d] );
+        P.subOrigin[d] = int32_t( g.subOrigin[d] );
+        P.subDims[d] = int32_t( g.subDims[d] );
+        P.scale[d] = scale[d];
+        P.capBits[d] = 0u;
+    }
+    P.periodic = int32_t( g.periodic );
+    P.fxWords = 0u;
+    return P;
+}
+#endif
+
 /* --face-gradient (docs/cleanup-plan.md P10.3): one kept tetrahedron's FACE sums. Every grid plane it owns a section of
    (face_sweep.h's half-open rule, decided on region-frame coordinates every tetrahedron sharing a vertex computes
    alike) is cut into the face squares it covers; a piece's integral of the stream's linear velocity is its centroid
    value times its area. The piece's integrals go to the UPPER face of the cell below the plane and the LOWER face of
    the cell above (Quantities::face_velocity / face_coverage / face_momentum's slots): S = the sum of the streams'
-   velocities, wS[cell*18 + (side*3 + a)*3 + j], N = their count, wN[cell*6 + side*3 + a] (the covered area), and P =
-   the sum of rho_s v_a, the momentum through the face (rhoTet: the tet's uniform density, rho/rho_bar), wP like wN.
-   The frame, the raw grid indices and the sub-box map are the exact deposit's (its r3d sweep's bounds and local
+   velocities, S.w[cell*18 + (side*3 + a)*3 + j], N = their count, N.w[cell*6 + side*3 + a] (the covered area), and P
+   = the sum of rho_s v_a, the momentum through the face (rhoTet: the tet's uniform density, rho/rho_bar), P.w like
+   N.w. The frame, the raw grid indices and the sub-box map are the exact deposit's (its r3d sweep's bounds and local
    index); a cell outside the sub-box (or, in slab mode, outside [slabLo, slabHi) along local x) gets nothing here: its
-   own partition or slab adds it. Fixed point (psFixedShare, the non-finite guard's slots FX_DROP_FACE_*): order-free. */
+   own partition or slab adds it. Fixed point (psFxAdd into the calling thread's sinks, the non-finite guard's slots
+   FX_DROP_FACE_*): order-free. 'canonical' (psFaceF32: DTFE_FACE_F32=1 or DTFE_GPU_FACES=1, the single build only):
+   the same sums in face_sweep_f32.h's float arithmetic, the GPU face kernel's own, instead of this double sweep. */
 static void psDepositFaces( Real const (&eulerPos)[NO_DIM+1][NO_DIM], Real const *boxL, Real const *dxL,
                             size_t const *nGridL, bool const periodic, size_t const *subOrigin, size_t const *subDims,
                             long const slabLo, long const slabHi, Real const (&velGrad)[NO_DIM][noVelComp],
-                            double const (&v0)[noVelComp], int64_t *wS, float const sS, int64_t *wN, float const sN,
-                            int64_t *wP, float const sP, double const rhoTet, bool const atomic )
+                            double const (&v0)[noVelComp], PSFxSink const &S, PSFxSink const &N, PSFxSink const &P,
+                            double const rhoTet, bool const atomic, bool const canonical )
 {
+#if !defined(DOUBLE)
+    // the canonical sweep on the same inputs: the Real (float) positions and gradient as they are, v0 back to the
+    // float it came from (exact), the density rounded once (psFaceRho's value); the region's corner, spacing and
+    // sub-box as a GPU face pass hands them to its kernel (psFaceGrid)
+    if ( canonical )
+    {
+        static_assert( noVelComp == 3, "the canonical face sweep has three velocity components" );
+        FsGrid g;
+        psFaceGrid( boxL, dxL, nGridL, periodic, subOrigin, subDims, g );
+        float E[4][3], vG[3][3], v0f[3];
+        for (int v = 0; v < 4; ++v)
+            for (int d = 0; d < 3; ++d) E[v][d] = eulerPos[v][d];
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j) vG[i][j] = velGrad[i][j];
+        for (int j = 0; j < 3; ++j) v0f[j] = float( v0[j] );
+        float const rhoF = float( rhoTet );
+        PSFaceF32Sink const sink{ S, N, P, subDims, slabLo, slabHi, atomic };
+        // (the sweep under the device's subnormal rule, its inputs formed before: face_sweep_f32.h fsFlushed)
+        fsFlushed( [&] {
+            FsTet t;
+            fsTetSet( E, g, vG, v0f, rhoF, t );
+            fsDepositTet( t, g, sink );
+        } );
+        return;
+    }
+#else
+    (void)canonical;
+#endif
     double p[4][3], X[4][3];
     for (int v = 0; v < 4; ++v)
         for (int d = 0; d < 3; ++d)
@@ -235,7 +585,8 @@ static void psDepositFaces( Real const (&eulerPos)[NO_DIM+1][NO_DIM], Real const
             X[v][d] = double( eulerPos[v][d] ) - double( boxL[2*d] );
             p[v][d] = double( eulerPos[v][d] ) - double( eulerPos[0][d] );
         }
-    // the local index of a raw grid index along axis d (wrapped on a periodic axis), or -1 outside the sub-box
+    // the local index of a raw grid index along axis d (wrapped on a periodic axis), or -1 outside the sub-box (the
+    // word merge finds a face's twin by a faithful copy of this rule: ps_fixed_merge.h psFaceLocal -- KEEP IN STEP)
     auto local = [&](int const d, long const raw) -> long
     {
         long const n = long( nGridL[d] );
@@ -305,11 +656,11 @@ static void psDepositFaces( Real const (&eulerPos)[NO_DIM+1][NO_DIM], Real const
                         size_t const flat = ( size_t( cl[0] ) * subDims[1] + size_t( cl[1] ) ) * subDims[2] + size_t( cl[2] );
                         size_t const slot = size_t( ( c2 == 0 ? 1 : 0 ) * NO_DIM + a );   // side 1 = upper, 0 = lower
                         for (size_t j = 0; j < noVelComp; ++j)
-                            psAddMassFixed( wS, flat * ( 2 * NO_DIM * noVelComp ) + slot * noVelComp + j,
-                                            psFixedShare( F[j], sS, FX_DROP_FACE_S ), atomic );
-                        psAddMassFixed( wN, flat * ( 2 * NO_DIM ) + slot, psFixedShare( m[0], sN, FX_DROP_FACE_N ), atomic );
+                            psFxAdd( S, flat * ( 2 * NO_DIM * noVelComp ) + slot * noVelComp + j, F[j],
+                                     FX_DROP_FACE_S, atomic );
+                        psFxAdd( N, flat * ( 2 * NO_DIM ) + slot, m[0], FX_DROP_FACE_N, atomic );
                         // the mass flux (P10.4): the stream's uniform density times its velocity's NORMAL component
-                        psAddMassFixed( wP, flat * ( 2 * NO_DIM ) + slot, psFixedShare( rhoTet * F[a], sP, FX_DROP_FACE_P ), atomic );
+                        psFxAdd( P, flat * ( 2 * NO_DIM ) + slot, rhoTet * F[a], FX_DROP_FACE_P, atomic );
                     }
                 } );
         }
@@ -800,8 +1151,8 @@ struct PSGridsCtx
     std::vector<Real> &massWeight;
     std::vector<Real> &dispWeight;
     std::vector< Pvector<Real,noVelComp> > &dispVel;
-    std::vector<int64_t> &massFx;
-    float &massFxScale;
+    PSFxWords &massFx;
+    float &massFxScale;   // (massFx.scale)
     bool &massFxOn;
     std::vector<size_t> &insideFlat;
     std::vector<Real> &insideRel, &insideW;
@@ -849,6 +1200,17 @@ struct PSBlockClaim
         if ( b >= blockStart.size() ) return false;
         first = blockStart[b];
         cells = std::min( blockLen, nCells - b * blockLen );
+        return true;
+    }
+    // ... and the block's index b, for a caller that keeps a result per block (psFxBoundWalk's per-block sums)
+    bool claim(size_t const th, CellIt &first, size_t &cells, size_t &block)
+    {
+        if ( th == 0 && recruit ) recruit();
+        size_t const b = next.fetch_add( 1, std::memory_order_relaxed );
+        if ( b >= blockStart.size() ) return false;
+        first = blockStart[b];
+        cells = std::min( blockLen, nCells - b * blockLen );
+        block = b;
         return true;
     }
 };
@@ -931,10 +1293,15 @@ static inline bool psLoopSpanReaches(Real const (&ep)[NO_DIM+1][NO_DIM], Real co
 // from the bounds of the tetrahedra that reach it (psFxBoundWalk, the GPU extraction) and, on the GPU under
 // --ps-vertex-mass, so do its vertex degrees (lazyDegrees), none of which covers a tetrahedron outside the grid; a
 // window keeps the deposit loop's tetrahedra, as at its own planes inside the grid. KEEP IN STEP with the loop's span
-// block and psLoopSpanReaches.
+// block and psLoopSpanReaches. 'canonical' (psFaceF32, the single build): the test of face_sweep_f32.h's own rule
+// instead (fsAbovePlane: the lowest vertex's region-frame coordinate rounded to float, the plane exact), which may
+// decide a vertex within a rounding of the plane differently from the double test, so that the gate lets through
+// every tetrahedron that rule gives a section in the plane (a GPU face kernel's records take the same flag).
 static inline bool psOwnsUpperBoundarySection(Real const (&ep)[NO_DIM+1][NO_DIM], Real const *boxL, Real const *dxL,
-                                              size_t const *nGridL, bool const periodic, bool const windowMode)
+                                              size_t const *nGridL, bool const periodic, bool const windowMode,
+                                              bool const canonical)
 {
+    (void)canonical;   // (the double build has no canonical sweep)
     if ( periodic || windowMode ) return false;   // (no boundary plane; a window: see above)
     bool atEnd = false;
     for (int d = 0; d < NO_DIM; ++d)
@@ -949,6 +1316,18 @@ static inline bool psOwnsUpperBoundarySection(Real const (&ep)[NO_DIM+1][NO_DIM]
         int const iMaxU = int(floor((eMax - boxL[2*d]) / dxL[d])) + 1;
         if ( iMaxU <= 0 || iMinU > (int)nGridL[d] ) return false;   // below the grid, or a whole cell beyond its end
         if ( iMinU < (int)nGridL[d] ) continue;                       // reaches the grid along this axis
+#if !defined(DOUBLE)
+        if ( canonical )
+        {   // (face_sweep_f32.h's test, as its fsPlanes and fsSection decide plane nGrid)
+            float const eF = float(eMin), loF = float(boxL[2*d]), hF = float(dxL[d]);
+            int const nF = int(nGridL[d]);
+            bool above = false;
+            fsFlushed( [&] { above = fsAbovePlane( eF, loF, nF, hF ); } );   // (the device's subnormal rule)
+            if ( above ) return false;
+            atEnd = true;
+            continue;
+        }
+#endif
         // at the end: psDepositFaces' test (its first plane, ceil(min / dx), is nGrid exactly when min <= nGrid dx,
         // the same rounded double product as here)
         if ( double(eMin) - double(boxL[2*d]) > double(nGridL[d]) * double(dxL[d]) ) return false;
@@ -1127,9 +1506,6 @@ static inline void psMarkFlipped(PSPassCtx const &passCtx, PSCellGeometry const 
 #endif
 }
 
-// The moment grids' fixed-point words (fxg in interpolateGrid_phaseSpace): a grid's int64 words and their unit.
-struct PSFxWords { std::vector<int64_t> w; float scale = 0.f; };
-
 // The pass's moment grids as fixed-point sums (see fxg in interpolateGrid_phaseSpace): which grids it accumulates,
 // their words, their Real accumulators and what their bounds and units are made of. Used per pass, never per cell:
 // the deposit loop reads the words straight from fxg (fxAddL).
@@ -1145,6 +1521,11 @@ struct PSFxState
     std::vector< Pvector<Real,noVelComp> > &dispVel;
     bool fxVelBound, psVolWeighted, fxScalSel, fxSGradSel;
     Real cellVolume;
+    // the pass takes the run-wide units and words (src/fixed_units.h RunUnits: set by DTFE_setup, and asked for with
+    // DTFE_PS_RUN_UNITS=1): each grid's unit is the run's where it has one, else the pass's own from the bounds,
+    // in the same 128-bit words (the device's) or int64 words with a carry (the CPU's); false, the default: the
+    // pass's own units and 64-bit words throughout
+    bool wide = false;
     // --face-gradient (docs/cleanup-plan.md P10.3): this pass accumulates the face sums (the exact CPU deposit), their
     // words (faceS: 9 per cell, faceN: NO_DIM) -- outside the PSFxGrid set, so the GPU's grids and counters are
     // untouched -- and the grid spacing their bound counts planes with
@@ -1156,15 +1537,30 @@ struct PSFxState
     // GPU deposit (psFxBoundsFromGpu says when they stand in for the walk's)
     PSFixedBounds gpuBounds;
     bool gpuBoundsValid = false;
-    // the face walk ran beside the GPU deposit (DTFE_FACE_WALK_EARLY, PSEarlyFaceWalk) and the device call succeeded:
+    // the face walk ran beside the GPU deposit (the default, PSEarlyFaceWalk) and the device call succeeded:
     // the face words are filled and their units set, so psCpuFixedUnits and the walk after the deposit leave them
     // alone; and that walk's wall time
     bool faceWalked = false;
     double faceWalkSec = 0.;
+    // ... or the GPU face kernel made them in the deposit's hold of the device (DTFE_GPU_FACES=1, PSGpuFaceJob): the
+    // same leave-alone, and faceWalkSec is then the face pass's own time in the hold
+    bool faceGpu = false;
     // forgets the face words and their units (a walk beside the GPU deposit that is thrown away)
     void faceRelease()
     {
-        for (PSFxWords *const p : { &faceS, &faceN, &faceP }) { std::vector<int64_t>().swap( p->w ); p->scale = 0.f; }
+        for (PSFxWords *const p : { &faceS, &faceN, &faceP }) p->release();
+    }
+    // a wide pass: whether its units need the pass's bounds -- some grid it may sum has no run-wide unit (the moment
+    // grids it selects, MOMW for the GPU's volume shares under --ps-volume-weighted, the mass grid, the face sums),
+    // or DTFE_DEBUG_FX_BOUNDS checks the GPU extraction's bounds of a pass with face sums
+    bool boundsNeeded() const
+    {
+        RunUnits const &ru = userOptions.runUnits;
+        for (int g = 0; g < PS_FX_CPU_N; ++g)
+            if ( ( fxSel[g] || ( g == PS_FX_MOMW && psVolWeighted ) ) && !ru.has( RU_PS_FX + g ) ) return true;
+        if ( !ru.has( RU_PS_MASS ) ) return true;
+        if ( face && ( !ru.has( RU_PS_FACE_S ) || !ru.has( RU_PS_FACE_N ) || !ru.has( RU_PS_FACE_P ) ) ) return true;
+        return face && Env::flag( "DTFE_DEBUG_FX_BOUNDS" );
     }
 
     // the Real accumulator of grid g, allocated (zeroed) if the pass has none yet: a grid that is not a fixed-point
@@ -1204,10 +1600,15 @@ struct PSFxState
         default: return 1;
         }
     }
-    // grid g becomes a fixed-point sum in units of 1/scale (its words zeroed, its Real accumulator released)
-    void start(int const g, float const scale)
+    // grid g becomes a fixed-point sum in units of 1/scale (its words zeroed, its Real accumulator released);
+    // cap > 0: the run-wide words with that share cap (K = ilogb(scale)), 0: the pass's 64-bit words
+    void start(int const g, float const scale, double const cap)
     {
         fxg[g].scale = scale;
+        fxg[g].cap = cap;
+        fxg[g].K = cap > 0. ? std::ilogb( scale ) : 0;
+        fxg[g].carry.clear();
+        fxg[g].lists.clear();
         fxg[g].w.assign( totalGrid * comps(g), 0 );
         switch ( g )
         {
@@ -1233,18 +1634,18 @@ struct PSFxState
         if ( F.w.empty() ) return;
         switch ( g )
         {
-        case PS_FX_MOM:  psFxToReal( F.w, F.scale, quantities->velocity, totalGrid ); break;
-        case PS_FX_M2:   psFxToReal( F.w, F.scale, quantities->velocity_dispersion, totalGrid ); break;
-        case PS_FX_GRAD: psFxToReal( F.w, F.scale, quantities->velocity_gradient, totalGrid ); break;
-        case PS_FX_MOMW: psFxToReal( F.w, F.scale, massWeight, totalGrid ); break;
-        case PS_FX_SV:   psFxToReal( F.w, F.scale, exactMult, totalGrid ); break;
-        case PS_FX_DV:   psFxToReal( F.w, F.scale, dispVel, totalGrid ); break;
-        case PS_FX_DW:   psFxToReal( F.w, F.scale, dispWeight, totalGrid ); break;
+        case PS_FX_MOM:  psFxToReal( F, quantities->velocity, totalGrid ); break;
+        case PS_FX_M2:   psFxToReal( F, quantities->velocity_dispersion, totalGrid ); break;
+        case PS_FX_GRAD: psFxToReal( F, quantities->velocity_gradient, totalGrid ); break;
+        case PS_FX_MOMW: psFxToReal( F, massWeight, totalGrid ); break;
+        case PS_FX_SV:   psFxToReal( F, exactMult, totalGrid ); break;
+        case PS_FX_DV:   psFxToReal( F, dispVel, totalGrid ); break;
+        case PS_FX_DW:   psFxToReal( F, dispWeight, totalGrid ); break;
 #ifdef SCALAR
-        case PS_FX_SCAL: psFxToReal( F.w, F.scale, quantities->scalar, totalGrid ); break;
-        case PS_FX_SG:   psFxToReal( F.w, F.scale, quantities->scalar_gradient, totalGrid ); break;
+        case PS_FX_SCAL: psFxToReal( F, quantities->scalar, totalGrid ); break;
+        case PS_FX_SG:   psFxToReal( F, quantities->scalar_gradient, totalGrid ); break;
 #endif
-        case PS_FX_RM:   psFxToReal( F.w, F.scale, releasedMult, totalGrid ); break;
+        case PS_FX_RM:   psFxToReal( F, releasedMult, totalGrid ); break;
         default: break;
         }
     }
@@ -1328,14 +1729,21 @@ struct PSFxState
 #endif
     }
     // the unit of grid g from its bound; 0 (and a warning naming the grid) when the bound has none: the grid then
-    // keeps the float sums
+    // keeps the float sums. On the per-pass path (the default: src/fixed_units.h runUnitsLegacy) the test hook
+    // DTFE_TEST_RUN_UNIT_SHIFT=n makes it 2^n finer where that is a normal float (a positive shift can wrap the
+    // 64-bit words, a test only).
     float unit(int const g, double const bound) const
     {
         static char const *const name[PS_FX_CPU_N] = { "velocity moment", "dispersion second moment", "velocity-gradient moment",
             "moment weight", "exact multiplicity", "dispersion mean", "dispersion weight", "scalar moment",
             "scalar-gradient moment", "released multiplicity" };
         float scale = 0.f;
-        if ( psMomentFixedScale( bound, scale ) ) return scale;
+        if ( psMomentFixedScale( bound, scale ) )
+        {
+            if ( runUnitsLegacy() && runUnitShift() != 0 )
+                if ( float const s = std::ldexp( scale, runUnitShift() ); std::isnormal( s ) ) scale = s;
+            return scale;
+        }
         MESSAGE::Warning warning( userOptions.verboseLevel );
         warning << "PS-DTFE: the " << name[g] << " grid's bound (" << bound << ") gives no fixed-point unit; this pass "
                 << "sums it in floating point (not bit-reproducible).\n" << MESSAGE::EndWarning;
@@ -1343,7 +1751,8 @@ struct PSFxState
     }
     // --verbose 3: the pass's fixed-point units, one line -- the mass grid's and each moment grid's
     // 2^k (DW, the mass grid's twin, left out) -- the same for a GPU and a CPU deposit of one pass
-    // (tests/ps_window_check.sh compares a GPU and a CPU --grid-window run's lines)
+    // (tests/ps_window_check.sh compares a GPU and a CPU --grid-window run's lines). In a wide pass these are the
+    // run's units wherever it has them (the run's line, src/fixed_units.h RunUnits::text), the pass's own elsewhere.
     void logUnits(char const *path, float const massScale, float const (&scale)[PS_FX_N]) const
     {
         if ( userOptions.verboseLevel < 3 ) return;
@@ -1357,9 +1766,13 @@ struct PSFxState
 };
 
 // The bounds of the pass's fixed-point units: one walk over the cells with the deposit's own filter (psFilterCell,
-// the inverse included) and tet mass, summing PSFixedBounds per tet (fxTetBound). Each thread takes every nT-th
-// block of 256 cells, as the copy mode does, and the per-block sums are added in block order, so the units are the
-// same at every thread count and the same a GPU deposit of the pass takes (gpuBoundPart sums the same blocks).
+// the inverse included) and tet mass, summing PSFixedBounds per tet (fxTetBound). The cells go in blocks of 256, and
+// the team's threads claim whole blocks from one counter as they come free (PSBlockClaim, as the deposit's dynamic
+// team; no thread idles on a static split's slow share, and each walks only the cells of its own blocks). Every
+// output is a double sum -- the 10 moment bounds and the 3 face bounds; the maxima (vMax, gMax, ...) are each one
+// tetrahedron's, inside tetBound -- and each block's sums are made by the one thread that claimed it, from zero, in
+// the cells' order, then added in block order on this thread: so the 13 doubles are the same at every thread count
+// and claim order, and the same a GPU deposit of the pass takes (gpuBoundPart sums the same blocks in that order).
 // --grid-window: only the tets that reach the window count (windowTouched, the test the GPU extraction drops the
 // others with), so a GPU and a CPU window deposit of one pass take the same units. That is cheaper than the full
 // run's units (no walk over every tet of the partition, no full --ps-vertex-mass degree pass) and finer in a zoom's
@@ -1374,44 +1787,78 @@ static PSFixedBounds psFxBoundWalk(PSPassCtx const &passCtx, PSFxState const &fx
     size_t const noTotalCells = passCtx.noTotalCells;
     bool const windowMode = passCtx.windowMode;
     auto windowTouched = [&passCtx](Real const (&ep)[NO_DIM+1][NO_DIM]) { return psWindowTouched( passCtx, ep ); };
+    auto const outsideWindow = [&](Real const (&ep)[NO_DIM+1][NO_DIM]) { return windowMode && !windowTouched(ep); };
     size_t const BLK = 256;
     size_t const nBlocks = noTotalCells / BLK + 1;
     std::vector<PSFixedBounds> part( nBlocks );
     size_t const nT = size_t( std::max( 1, std::min( psDepositThreads(), int( std::min<size_t>( nBlocks, 1024 ) ) ) ) );
+    // the block index: each block's first cell, from one walk over the iterator (the blocks of the static rule: cell
+    // ordinals [256 b, 256 b + 256)); no recruit hook, the team is the nT threads below
+    using BoundCellIt = decltype( PS_FINITE_CELLS_BEGIN );
+    PSBlockClaim<BoundCellIt> claim;
+    claim.blockLen = BLK;
+    claim.blockStart.reserve( nBlocks );
+    {
+        size_t k = 0;
+        for (auto it = PS_FINITE_CELLS_BEGIN; it != PS_FINITE_CELLS_END; ++it, ++k)
+            if ( k % BLK == 0 ) claim.blockStart.push_back( it );
+        claim.nCells = k;
+    }
     auto boundRun = [&](size_t const th)
     {
-        size_t idx = 0;
-        for (auto it = PS_FINITE_CELLS_BEGIN; it != PS_FINITE_CELLS_END; ++it, ++idx)
-        {
-            size_t const blk = idx / BLK;
-            if ( blk % nT != th ) continue;
-            Cell_handle cell = it;
-            PSCellGeometry geo;
-            if ( !psFilterCell(cell, userOptions, boxCoordinates, true, NULL, geo, false,
-                               [&](Real const (&ep)[NO_DIM+1][NO_DIM]) { return windowMode && !windowTouched(ep); }) ) continue;
-            double tetMass;
-            if ( psVertexMass ) tetMass = double( Real( psVertexShareMass(cell) ) );
-            else
+        auto it = PS_FINITE_CELLS_BEGIN;
+        size_t cells = 0, blk = 0;
+        while ( claim.claim( th, it, cells, blk ) )   // a whole block, its cells in the loop's order
+            for (size_t c = 0; c < cells; ++c, ++it)
             {
-                double Lag[NO_DIM][NO_DIM];
-                for (int v = 0; v < NO_DIM; ++v)
-                    for (int i = 0; i < NO_DIM; ++i)
-                        Lag[v][i] = double(cell->vertex(v+1)->point()[i]) - double(cell->vertex(0)->point()[i]);
-                tetMass = double( Real( double(userOptions.averageDensity) * std::fabs(determinant(Lag)) / factorial(NO_DIM) ) );
+                Cell_handle cell = it;
+                PSCellGeometry geo;
+                if ( !psFilterCell( cell, userOptions, boxCoordinates, true, NULL, geo, false, outsideWindow ) )
+                    continue;
+                double tetMass;
+                if ( psVertexMass ) tetMass = double( Real( psVertexShareMass(cell) ) );
+                else
+                {
+                    double Lag[NO_DIM][NO_DIM];
+                    for (int v = 0; v < NO_DIM; ++v)
+                        for (int i = 0; i < NO_DIM; ++i)
+                            Lag[v][i] = double(cell->vertex(v+1)->point()[i]) - double(cell->vertex(0)->point()[i]);
+                    tetMass = double( Real( double(userOptions.averageDensity) * std::fabs(determinant(Lag))
+                                            / factorial(NO_DIM) ) );
+                }
+                if ( !(tetMass > 0.) ) tetMass = 0.;   // (the deposit clamps a negative mass to 0)
+                fx.tetBound( cell, geo, tetMass, part[blk] );
             }
-            if ( !(tetMass > 0.) ) tetMass = 0.;   // (the deposit clamps a negative mass to 0)
-            fx.tetBound( cell, geo, tetMass, part[blk] );
-        }
     };
     {
-        CorePool::Hold const hold( int(nT) - 1 );   // (a static team: its cores counted in the pool, thread_count.h)
+        CorePool::Hold const hold( int(nT) - 1 );   // (a fixed team: its cores counted in the pool, thread_count.h)
         std::vector<std::thread> pool;
         for (size_t th = 1; th < nT; ++th) pool.emplace_back( boundRun, th );
         boundRun( 0 );
         for (std::thread &x : pool) x.join();
     }
     PSFixedBounds fb;
-    for (PSFixedBounds const &p : part) fb.add( p );   // in block order: thread-count independent
+    for (PSFixedBounds const &p : part) fb.add( p );   // in block order: thread-count and claim-order independent
+    // DTFE_DEBUG_FX_BOUNDS: the walk's 13 sums exactly (hex), with its team and blocks, one line per walk: the same
+    // sums at every thread count (tests/ps_fixed_moments_check.sh F6)
+    if ( Env::flag( "DTFE_DEBUG_FX_BOUNDS" ) )
+    {
+        std::ostringstream line;
+        line << "DTFE_DEBUG_FX_BOUNDS: bound walk on " << nT << " thread(s), " << claim.blockStart.size()
+             << " blocks; sums";
+        char word[48];
+        for (int g = 0; g < PS_FX_CPU_N; ++g)
+        {
+            std::snprintf( word, sizeof(word), " %a", fb.B[g] );
+            line << word;
+        }
+        for (double const v : { fb.faceS, fb.faceN, fb.faceP })
+        {
+            std::snprintf( word, sizeof(word), " %a", v );
+            line << word;
+        }
+        std::fprintf( stderr, "%s\n", line.str().c_str() );
+    }
     return fb;
 }
 
@@ -1429,7 +1876,8 @@ static PSFixedBounds psFxBoundWalk(PSPassCtx const &passCtx, PSFxState const &fx
 // 'threads': the walk's team, the caller's psDepositThreads() (the walk beside the GPU deposit runs on a thread of
 // its own, outside the partition loop's team, where that count would be the whole machine's). 'dropsOut' (FX_DROP_SLOTS
 // counters, or null: the run's): where the walk's dropped shares are counted, for a walk whose sums may yet be thrown
-// away (PSEarlyFaceWalk).
+// away (PSEarlyFaceWalk). Under DTFE_FACE_F32 / DTFE_GPU_FACES (psFaceF32) in the canonical float arithmetic, the
+// deposit loop's own (psDepositFaces), wherever the walk runs.
 static void psFaceWalk(PSPassCtx const &passCtx, PSFxState &fx, bool const psVertexMass, int const threads,
                        unsigned long long *const dropsOut)
 {
@@ -1447,17 +1895,21 @@ static void psFaceWalk(PSPassCtx const &passCtx, PSFxState &fx, bool const psVer
         subOriginL[d] = passCtx.subOrigin[d]; subDimsL[d] = passCtx.subDims[d];
     }
     bool const periodic = userOptions.periodic;
+    bool const canonical = psFaceF32();   // (DTFE_FACE_F32 / DTFE_GPU_FACES: face_sweep_f32.h)
     double const avgDensity = double( userOptions.averageDensity );
-    int64_t *const wS = fx.faceS.w.data(), *const wN = fx.faceN.w.data(), *const wP = fx.faceP.w.data();
-    float const sS = fx.faceS.scale, sN = fx.faceN.scale, sP = fx.faceP.scale;
     size_t const BLK = 256;
     size_t const nBlocks = noTotalCells / BLK + 1;
     size_t const nT = size_t( std::max( 1, std::min( threads, int( std::min<size_t>( nBlocks, 1024 ) ) ) ) );
     bool const atomic = nT > 1;
     std::vector<unsigned long long> dropPart( dropsOut ? nT * FX_DROP_SLOTS : 0, 0ull );   // (per walk thread)
+    // the run-wide words' carry lists, one per walk thread (psFxCarryFinish sums them with the words' other lists)
+    fx.faceS.ensureLists( nT );
+    fx.faceN.ensureLists( nT );
+    fx.faceP.ensureLists( nT );
     auto faceRun = [&](size_t const th)
     {
         FixedShareDropSinkScope const sink( dropsOut ? &dropPart[th * FX_DROP_SLOTS] : nullptr );
+        PSFxSink const S = fx.faceS.sink( th ), N = fx.faceN.sink( th ), P = fx.faceP.sink( th );
         size_t idx = 0;
         for (auto it = PS_FINITE_CELLS_BEGIN; it != PS_FINITE_CELLS_END; ++it, ++idx)
         {
@@ -1469,7 +1921,8 @@ static void psFaceWalk(PSPassCtx const &passCtx, PSFxState &fx, bool const psVer
             if ( !psFilterCell(cell, userOptions, boxCoordinates, true, NULL, geo, false,
                                [&](Real const (&ep)[NO_DIM+1][NO_DIM])
                                { return !psLoopSpanReaches( ep, boxL, dxL, nGridL, periodic, windowMode, subOriginL, subDimsL )
-                                        && !psOwnsUpperBoundarySection( ep, boxL, dxL, nGridL, periodic, windowMode ); }) )
+                                        && !psOwnsUpperBoundarySection( ep, boxL, dxL, nGridL, periodic, windowMode,
+                                                                        canonical ); }) )
                 continue;
             double tetMass;   // (the deposit loop's: psVertexShareMass, or rho_bar times the Lagrangian volume, in Real)
             if ( psVertexMass ) tetMass = double( Real( psVertexShareMass(cell) ) );
@@ -1501,7 +1954,7 @@ static void psFaceWalk(PSPassCtx const &passCtx, PSFxState &fx, bool const psVer
             double const vTet = double(geo.cellAbsDet) / double(factorial(NO_DIM));
             double const rhoTet = ( vTet > 0. && avgDensity > 0. ) ? tetMass / ( vTet * avgDensity ) : 0.;
             psDepositFaces( geo.eulerPos, boxL, dxL, nGridL, periodic, subOriginL, subDimsL, 0L, LONG_MAX,
-                            velGrad, v0, wS, sS, wN, sN, wP, sP, rhoTet, atomic );
+                            velGrad, v0, S, N, P, rhoTet, atomic, canonical );
         }
     };
     {
@@ -1874,19 +2327,67 @@ static inline void psDebugFxBoundsCheck(PSPassCtx const &passCtx, PSFxState cons
 
 // The face sums' units (--face-gradient) from a pass's bounds, and their zeroed words (int64: the walk's or the
 // dynamic team's threads add in any order) for every cell of the pass. False, with nothing changed, when a bound gives
-// no unit.
-static inline bool psFaceUnits(PSFxState &fx, PSFixedBounds const &fb, size_t const totalGrid)
+// no unit. (The per-pass path with DTFE_TEST_RUN_UNIT_SHIFT=n: each unit 2^n finer where that is a normal float, as
+// PSFxState::unit.)
+// The three units alone (S, N, P), the rule psFaceUnits applies: false when a bound gives none. (The GPU face
+// kernel's job takes them before its words exist: PSGpuFaceJob.)
+static inline bool psFaceScales(PSFixedBounds const &fb, float (&sc)[3])
 {
     float sS = 0.f, sN = 0.f, sP = 0.f;
     bool const units = psMomentFixedScale( fb.faceS, sS ) && psMomentFixedScale( fb.faceN, sN )
                        && psMomentFixedScale( fb.faceP, sP ) && sS > 0.f && sN > 0.f && sP > 0.f;
     if ( !units ) return false;
+    if ( runUnitsLegacy() && runUnitShift() != 0 )
+        for (float *const s : { &sS, &sN, &sP })
+            if ( float const t = std::ldexp( *s, runUnitShift() ); std::isnormal( t ) ) *s = t;
+    sc[0] = sS;
+    sc[1] = sN;
+    sc[2] = sP;
+    return true;
+}
+static inline bool psFaceUnits(PSFxState &fx, PSFixedBounds const &fb, size_t const totalGrid)
+{
+    float sc[3];
+    if ( !psFaceScales( fb, sc ) ) return false;
+    float const sS = sc[0], sN = sc[1], sP = sc[2];
     fx.faceS.scale = sS;
     fx.faceS.w.assign( totalGrid * 2 * NO_DIM * noVelComp, 0 );
     fx.faceN.scale = sN;
     fx.faceN.w.assign( totalGrid * 2 * NO_DIM, 0 );
     fx.faceP.scale = sP;
     fx.faceP.w.assign( totalGrid * 2 * NO_DIM, 0 );
+    return true;
+}
+// ... in a wide pass (PSFxState::wide): each face accumulator's run-wide unit (RU_PS_FACE_S / N / P) where the run
+// has one, else the rule above on the pass's bounds -- 'bounds' (a PSFixedBounds const &() callable) is asked only
+// then -- and the words are the run-wide ones (the share cap, K = ilogb(scale)), for every cell of the pass
+template <class Bounds>
+static inline bool psFaceUnits(PSFxState &fx, Bounds const &bounds, size_t const totalGrid)
+{
+    RunUnits const &ru = fx.userOptions.runUnits;
+    int const slot[3] = { RU_PS_FACE_S, RU_PS_FACE_N, RU_PS_FACE_P };
+    PSFxWords *const F[3] = { &fx.faceS, &fx.faceN, &fx.faceP };
+    size_t const n[3] = { totalGrid * 2 * NO_DIM * noVelComp, totalGrid * 2 * NO_DIM, totalGrid * 2 * NO_DIM };
+    float sc[3] = { 0.f, 0.f, 0.f };
+    for (int k = 0; k < 3; ++k)
+    {
+        if ( ru.has( slot[k] ) )
+        {
+            sc[k] = ru.scale( slot[k] );
+            continue;
+        }
+        PSFixedBounds const &fb = bounds();
+        if ( !psMomentFixedScale( k == 0 ? fb.faceS : k == 1 ? fb.faceN : fb.faceP, sc[k] ) || !( sc[k] > 0.f ) )
+            return false;
+    }
+    for (int k = 0; k < 3; ++k)
+    {
+        F[k]->release();
+        F[k]->scale = sc[k];
+        F[k]->cap = ru.cap( slot[k] );
+        F[k]->K = std::ilogb( sc[k] );
+        F[k]->w.assign( n[k], 0 );
+    }
     return true;
 }
 
@@ -1902,11 +2403,12 @@ static inline void psCpuFixedUnits(PSPassCtx const &passCtx, PSGridsCtx const &g
     Field &field = passCtx.field;
     bool const windowMode = passCtx.windowMode;
     size_t const totalGrid = gridsCtx.totalGrid;
-    std::vector<int64_t> &massFx = gridsCtx.massFx;
+    PSFxWords &massFx = gridsCtx.massFx;
     float &massFxScale = gridsCtx.massFxScale;
     bool &massFxOn = gridsCtx.massFxOn;
     bool const (&fxSel)[PS_FX_CPU_N] = gridsCtx.fxSel;
     bool const massFxWanted = gridsCtx.massFxWanted, fxMomWanted = gridsCtx.fxMomWanted;
+    RunUnits const &ru = userOptions.runUnits;
     PSFixedBounds walkBounds;
     bool walked = false;
     // the pass's bounds, once per pass whoever asks first (the mass grid under --grid-window, the moment grids, the face
@@ -1928,8 +2430,18 @@ static inline void psCpuFixedUnits(PSPassCtx const &passCtx, PSGridsCtx const &g
     // their hull). The larger of the two, over by a factor of a few (padding, periodic copies): a bit or two of the
     // 2^61..2^62 units. Deterministic (the triangulation's vertex order). --grid-window: the window's own total, B[DW]
     // of the bound walk, which a GPU window deposit takes too (PSFixedUnits.massTotal): both deposit the same integers.
+    // A wide pass takes the run's mass unit, the GPU's as well, and walks nothing; only a run without one (its K out
+    // of range) takes the pass's own unit by the rule above, in the run-wide words.
     if ( !metalDeposited && field.density && !massFxWanted )
         quantities->density.assign( totalGrid, Real(0.) );   // the float (double build: double) accumulator
+    else if ( !metalDeposited && field.density && fx.wide && ru.has( RU_PS_MASS ) )
+    {
+        massFx.w.assign( totalGrid, 0 );
+        massFxScale = ru.scale( RU_PS_MASS );
+        massFx.cap = ru.cap( RU_PS_MASS );
+        massFx.K = ru.K[RU_PS_MASS];
+        massFxOn = true;
+    }
     else if ( !metalDeposited && field.density )
     {
         double bound = 0.;
@@ -1961,9 +2473,17 @@ static inline void psCpuFixedUnits(PSPassCtx const &passCtx, PSGridsCtx const &g
         float scale = 0.f;
         if ( psMassFixedScale( bound, scale ) )
         {
-            massFx.assign( totalGrid, 0 );
+            // (the per-pass path with DTFE_TEST_RUN_UNIT_SHIFT=n: 2^n finer where that is a normal float)
+            if ( runUnitsLegacy() && runUnitShift() != 0 )
+                if ( float const s = std::ldexp( scale, runUnitShift() ); std::isnormal( s ) ) scale = s;
+            massFx.w.assign( totalGrid, 0 );
             massFxScale = scale;
             massFxOn = true;
+            if ( fx.wide )
+            {
+                massFx.cap = ru.cap( RU_PS_MASS );
+                massFx.K = std::ilogb( massFxScale );
+            }
         }
         else
             quantities->density.assign( totalGrid, Real(0.) );   // (no vertices / no mass: the float grid)
@@ -1973,19 +2493,21 @@ static inline void psCpuFixedUnits(PSPassCtx const &passCtx, PSGridsCtx const &g
     // need bounds of what the loop will deposit, before it deposits. No cheap vertex walk bounds the gradients or the
     // Eulerian volumes, so they come from the bound walk above (fxBoundWalk: under --grid-window the window's tets
     // only, as for the mass). DW is not accumulated when the mass grid is this pass's own
-    // fixed-point words (it becomes the density after the loop).
+    // fixed-point words (it becomes the density after the loop). A wide pass takes each grid's run-wide unit and asks
+    // for the bounds only for a grid without one.
     if ( !metalDeposited && fxMomWanted )
     {
         bool any = false;
         for (int g = 0; g < PS_FX_CPU_N; ++g) any = any || ( fxSel[g] && !( g == PS_FX_DW && massFxOn ) );
         if ( any )
         {
-            PSFixedBounds const &fb = bounds();
+            PSFixedBounds const *const fb = fx.wide ? nullptr : &bounds();
             for (int g = 0; g < PS_FX_CPU_N; ++g)
             {
                 if ( !fxSel[g] || ( g == PS_FX_DW && massFxOn ) ) continue;
-                float const scale = fx.unit( g, fb.B[g] );
-                if ( scale > 0.f ) fx.start( g, scale );
+                float const scale = fx.wide && ru.has( RU_PS_FX + g ) ? ru.scale( RU_PS_FX + g )
+                                                                    : fx.unit( g, ( fb ? *fb : bounds() ).B[g] );
+                if ( scale > 0.f ) fx.start( g, scale, fx.wide ? ru.cap( RU_PS_FX + g ) : 0. );
                 else fx.ensureReal( g );
             }
         }
@@ -1999,12 +2521,15 @@ static inline void psCpuFixedUnits(PSPassCtx const &passCtx, PSGridsCtx const &g
     // tetrahedra after the device's deposit, and their units come from the bounds the extraction summed (bounds()
     // above; the same sums as the walk's, so a GPU and a CPU deposit of one pass take the same face units). Where
     // those do not stand in (a double build, the NaN test hook), the bound walk runs once more for them.
-    // (fx.faceWalked: the walk beside the GPU deposit took the units from those bounds and filled the words already.)
-    if ( fx.face && !fx.faceWalked )
+    // (fx.faceWalked: the walk beside the GPU deposit took the units from those bounds and filled the words already;
+    // fx.faceGpu: the GPU face kernel did, DTFE_GPU_FACES=1.)
+    // A wide pass takes the run's face units, and the bounds only for a face accumulator without one.
+    if ( fx.face && !fx.faceWalked && !fx.faceGpu )
     {
-        PSFixedBounds const &fb = bounds();
-        if ( !psFaceUnits( fx, fb, totalGrid ) )
+        bool const units = fx.wide ? psFaceUnits( fx, bounds, totalGrid ) : psFaceUnits( fx, bounds(), totalGrid );
+        if ( !units )
         {
+            PSFixedBounds const &fb = bounds();
             fx.face = false;
             MESSAGE::Warning warning( userOptions.verboseLevel );
             warning << "PS-DTFE: the face sums' bounds (" << fb.faceS << ", " << fb.faceN << ") give no fixed-point unit; "
@@ -2336,7 +2861,7 @@ static inline void psDepositThreadsInit(PSPassCtx const &passCtx, PSGridsCtx con
     std::vector<Real> &massWeight = gridsCtx.massWeight;
     std::vector<Real> &dispWeight = gridsCtx.dispWeight;
     std::vector< Pvector<Real,noVelComp> > &dispVel = gridsCtx.dispVel;
-    std::vector<int64_t> &massFx = gridsCtx.massFx;
+    PSFxWords &massFx = gridsCtx.massFx;
     bool &massFxOn = gridsCtx.massFxOn;
     std::vector<size_t> &insideFlat = gridsCtx.insideFlat;
     std::vector<Real> &insideRel = gridsCtx.insideRel, &insideW = gridsCtx.insideW;
@@ -2344,7 +2869,7 @@ static inline void psDepositThreadsInit(PSPassCtx const &passCtx, PSGridsCtx con
     for (int th = 0; th < nDepThreads; ++th)
     {
         DepositThread &D = depT[size_t(th)];
-        D.massFx = massFxOn ? massFx.data() : nullptr;   // shared by all (its own density copy stays EMPTY)
+        D.massFx = massFxOn ? massFx.w.data() : nullptr;   // shared by all (its own density copy stays EMPTY)
         if ( th == 0 or slabMode )      // slab mode: every thread writes its own cells of the real arrays
         {
             D.q = quantities; D.streamCount = &streamCount; D.releasedMult = &releasedMult;
@@ -2375,12 +2900,34 @@ static inline void psDepositThreadsInit(PSPassCtx const &passCtx, PSGridsCtx con
     }
 }
 
+// The carries of the run-wide words (src/fixed_units.h): the device fold's carry and every thread's list of a grid
+// summed into one sorted carry (fxCarryFinish, which names the accumulator if a cell's carry leaves the int64 range),
+// after the last add of the pass -- the deposit threads, the face walk, the released and the GPU-deferred
+// tetrahedra -- and before the conversion. The pass's 64-bit words have none.
+static inline void psFxCarryFinish(PSGridsCtx const &gridsCtx, PSFxState &fx)
+{
+    for (int g = 0; g < PS_FX_CPU_N; ++g)
+    {
+        PSFxWords &F = fx.fxg[g];
+        if ( F.cap > 0. && !F.w.empty() ) fxCarryFinish( F, F.lists, RunUnits::name( RU_PS_FX + g ) );
+    }
+    if ( fx.face )
+    {
+        PSFxWords *const F[3] = { &fx.faceS, &fx.faceN, &fx.faceP };
+        for (int k = 0; k < 3; ++k)
+            if ( F[k]->cap > 0. && !F[k]->w.empty() )
+                fxCarryFinish( *F[k], F[k]->lists, RunUnits::name( RU_PS_FACE_S + k ) );
+    }
+    PSFxWords &massFx = gridsCtx.massFx;
+    if ( gridsCtx.massFxOn && massFx.cap > 0. ) fxCarryFinish( massFx, massFx.lists, RunUnits::name( RU_PS_MASS ) );
+}
+
 // The fixed-point words become their Real grids, each cell rounded once: the moment grids', then the density.
 static inline void psFixedToReal(PSPassCtx const &passCtx, PSGridsCtx const &gridsCtx, PSFxState &fx)
 {
     Quantities *quantities = passCtx.quantities;
     size_t const totalGrid = gridsCtx.totalGrid;
-    std::vector<int64_t> &massFx = gridsCtx.massFx;
+    PSFxWords &massFx = gridsCtx.massFx;
     float &massFxScale = gridsCtx.massFxScale;
     bool &massFxOn = gridsCtx.massFxOn;
     bool const dispNeedsOwnWeight = gridsCtx.dispNeedsOwnWeight;
@@ -2394,20 +2941,42 @@ static inline void psFixedToReal(PSPassCtx const &passCtx, PSGridsCtx const &gri
     for (int g = 0; g < PS_FX_CPU_N; ++g) fx.toReal( g );
     if ( fx.face )   // --face-gradient: the face sums, the same way (normalizePhaseSpace turns them into the gradient)
     {
-        psFxToReal( fx.faceS.w, fx.faceS.scale, quantities->face_velocity, totalGrid );
-        psFxToReal( fx.faceN.w, fx.faceN.scale, quantities->face_coverage, totalGrid );
-        psFxToReal( fx.faceP.w, fx.faceP.scale, quantities->face_momentum, totalGrid );
+        psFxToReal( fx.faceS, quantities->face_velocity, totalGrid );
+        psFxToReal( fx.faceN, quantities->face_coverage, totalGrid );
+        psFxToReal( fx.faceP, quantities->face_momentum, totalGrid );
     }
     if ( massFxOn )
     {
         quantities->density.assign( totalGrid, Real(0.) );
-        float const scale = massFxScale;
-        psCellRanges( totalGrid, [&](size_t const lo, size_t const hi)
+        if ( massFx.cap > 0. )
+        {   // the run-wide words: each cell's integer rounded once at 2^-K, then the carried cells (psFxToReal's)
+            int const K = massFx.K;
+            bool const direct = psFxDirect( K );
+            Real const inv = direct ? std::ldexp( Real( 1 ), -K ) : Real( 0 );
+            psCellRanges( totalGrid, [&](size_t const lo, size_t const hi)
+            {
+                if ( direct )
+                    for (size_t i = lo; i < hi; ++i) quantities->density[i] = psFxWordToReal( massFx.w[i], inv );
+                else
+                    for (size_t i = lo; i < hi; ++i)
+                        quantities->density[i] = fxToReal( __int128( massFx.w[i] ), K );
+            } );
+            for (FxCarry const &e : massFx.carry)
+                if ( e.first < totalGrid )
+                    quantities->density[e.first] =
+                        fxToReal( __int128( massFx.w[e.first] ) + __int128( e.second ) * ( __int128( 1 ) << 64 ),
+                                  massFx.K );
+        }
+        else
         {
-            for (size_t i = lo; i < hi; ++i)
-                quantities->density[i] = Real( psMassFixedMass( massFx[i], scale ) );
-        } );
-        std::vector<int64_t>().swap( massFx );
+            float const scale = massFxScale;
+            psCellRanges( totalGrid, [&](size_t const lo, size_t const hi)
+            {
+                for (size_t i = lo; i < hi; ++i)
+                    quantities->density[i] = Real( psMassFixedMass( massFx.w[i], scale ) );
+            } );
+        }
+        massFx.release();
         massFxOn = false;
         // --ps-volume-weighted: the dispersion's own mass normalizer (dispWeight) sums the very shares this grid
         // sums, at the same sites (the GPU's dispw likewise), so it takes the exact sums too. The default run's
@@ -2528,16 +3097,21 @@ static inline void psNormalizeMoments(PSPassCtx const &passCtx, PSGridsCtx const
 }
 
 // DTFE_MASS_AUDIT: the pass's audit line and the run's totals (a template: the audit and gridSum are the pass's types).
+// massUnits: the grid was not converted to rho/rho_bar (the word merge: its words are handed over as they are), so
+// gridSum() is in mass units already.
 template <class MassAudit, class GridSum>
 static inline void psMassAuditLine(PSPassCtx const &passCtx, bool const massAudit, MassAudit &audit,
-                                   GridSum const &gridSum, Real const cellVolume, double const auditGridPre)
+                                   GridSum const &gridSum, Real const cellVolume, double const auditGridPre,
+                                   bool const massUnits = false)
 {
     User_options &userOptions = passCtx.userOptions;
     Field &field = passCtx.field;
     int const nSub = passCtx.nSub;
     if ( massAudit )
     {   // (g) the pass's grid in mass units, before and after the rho/rho_bar conversion; the line (ps_mass_audit.h)
-        double const gridPost = field.density ? gridSum() * double(cellVolume) * double(userOptions.averageDensity) : -1.;
+        double const gridPost = !field.density ? -1.
+                              : massUnits ? gridSum()
+                              : gridSum() * double(cellVolume) * double(userOptions.averageDensity);
         auto rel = [](double x, double ref) { return ref != 0. ? x / ref - 1. : 0.; };
         std::ostringstream s;
         s << std::setprecision(12) << "PS mass audit: partition ";
@@ -2624,8 +3198,11 @@ static inline void psStreamStats(PSPassCtx const &passCtx, PSGridsCtx const &gri
     }
 }
 
-// Exports the per-cell stream fields: '.streams', '.hidden_streams', '.tetTouch' and the caustic bits.
-static inline void psExportStreams(PSPassCtx const &passCtx, PSGridsCtx const &gridsCtx, Real const invSamples)
+// Exports the per-cell stream fields: '.streams', '.hidden_streams', '.tetTouch' and the caustic bits. Under the word
+// merge (wordMerge) only the two masks: '.streams' and '.tetTouch' are made from the merged counts and words by the
+// close-out (Quantities::psWordsClose), the counts handed over as integers (psHandOverWords).
+static inline void psExportStreams(PSPassCtx const &passCtx, PSGridsCtx const &gridsCtx, Real const invSamples,
+                                   bool const wordMerge = false)
 {
     User_options &userOptions = passCtx.userOptions;
     Quantities *quantities = passCtx.quantities;
@@ -2642,9 +3219,10 @@ static inline void psExportStreams(PSPassCtx const &passCtx, PSGridsCtx const &g
     // its exact nSub->infinity limit. Both are the same physical quantity on the same scale, so
     // single-stream cells select the same way under either deposit -- but only TO A TOLERANCE
     // (PS_STREAM_TOL / dtfelib.STREAM_TOL): this is a float, never exactly 1.
-    if ( psExact )
+    // (the word merge: the close-out's)
+    if ( psExact && !wordMerge )
         quantities->stream_count.swap(exactMult);   // same type and exactMult is dead below: no copy
-    else
+    else if ( !wordMerge )
     {
         quantities->stream_count.resize(totalGrid);
         psCellRanges( totalGrid, [&](size_t const lo, size_t const hi)   // (cell by cell: over the free cores)
@@ -2676,7 +3254,7 @@ static inline void psExportStreams(PSPassCtx const &passCtx, PSGridsCtx const &g
     // number of tetrahedra with a nonzero intersection with the cell. Kept as a geometric
     // diagnostic (tessellation multiplicity, hundreds in resolved regions); it is NOT a
     // stream count and is not comparable to the sampled deposit's '.streams'.
-    if ( psExact )
+    if ( psExact && !wordMerge )
     {
         quantities->tet_touch.resize(totalGrid);
         psCellRanges( totalGrid, [&](size_t const lo, size_t const hi)
@@ -2718,6 +3296,63 @@ static inline void psExportStreams(PSPassCtx const &passCtx, PSGridsCtx const &g
                                        : (PSCausticClass::CausticMask)0 ) );
         } );
     }
+}
+
+// The word merge ('--ps-merge fixed-point' in the single 3-D build: User_options::psWordMerge, fix 3 S6): the pass's
+// exact sums go to its Quantities UNCONVERTED (PSWordGrids, quantities.h) -- the mass words, the moment grids' and
+// the face sums', each with its carry (psFxCarryFinish ran) and its K, and the int stream counts -- for the merge to
+// add and one close-out to convert (Quantities::psWordsClose). DW is not among them where the mass words stand for it
+// (dwIsMass: the close-out copies the mass, as psFixedToReal does). Every word must be in its accumulator's run-wide
+// unit (a pass's own unit would add apples to oranges in the merge) and every grid the pass sums must be words; a
+// pass that broke either (it cannot, DTFE_setup and the check before the deposit see to it) stops the run, naming it.
+static inline void psHandOverWords(PSPassCtx const &passCtx, PSGridsCtx const &gridsCtx, PSFxState &fx,
+                                   size_t const nSamplesPerCell)
+{
+    Quantities *quantities = passCtx.quantities;
+    Field &field = passCtx.field;
+    RunUnits const &ru = passCtx.userOptions.runUnits;
+    size_t const totalGrid = gridsCtx.totalGrid;
+    PSWordGrids &W = quantities->psWords;
+    W.release();
+    W.on = true;
+    W.exact = gridsCtx.psExact;
+    W.samplesPerCell = nSamplesPerCell;
+    W.cells = totalGrid;
+    W.dwIsMass = gridsCtx.dispNeedsOwnWeight && gridsCtx.massFxOn;
+    auto stop = [](int const slot, char const *why)
+    {
+        throwError( "internal: '--ps-merge fixed-point' merges the passes' exact words in the run's units, and this "
+                    "pass's ", RunUnits::name( slot ), " grid ", why, "." );
+    };
+    auto take = [&](PSFxWords &F, int const slot)
+    {
+        if ( F.w.empty() ) return false;
+        if ( !( F.cap > 0. ) || !ru.has( slot ) || F.K != ru.K[slot] ) stop( slot, "is not in its run-wide unit" );
+        if ( F.w.size() != totalGrid * PSWordGrids::comps( slot ) ) stop( slot, "holds a wrong number of words" );
+        FxWords &T = W.at( slot );
+        T.w.swap( F.w );
+        T.carry.swap( F.carry );
+        T.K = F.K;
+        F.release();
+        return true;
+    };
+    if ( gridsCtx.massFxOn )
+    {
+        take( gridsCtx.massFx, RU_PS_MASS );
+        gridsCtx.massFxOn = false;
+    }
+    else if ( field.density ) stop( RU_PS_MASS, "is a float sum" );
+    for (int g = 0; g < PS_FX_CPU_N; ++g)
+        if ( !take( fx.fxg[g], RU_PS_FX + g ) && gridsCtx.fxSel[g] && !( g == PS_FX_DW && W.dwIsMass ) )
+            stop( RU_PS_FX + g, "is a float sum" );
+    if ( fx.face )
+    {
+        int const slot[3] = { RU_PS_FACE_S, RU_PS_FACE_N, RU_PS_FACE_P };
+        PSFxWords *const F[3] = { &fx.faceS, &fx.faceN, &fx.faceP };
+        for (int k = 0; k < 3; ++k)
+            if ( !take( *F[k], slot[k] ) ) stop( slot[k], "has no words" );
+    }
+    W.count.swap( gridsCtx.streamCount );
 }
 
 // The pass's phase split and the run's totals so far (psPhaseTotalUs), one line each.
@@ -2770,14 +3405,15 @@ struct PSGpuCtx
     std::vector<uint32_t> &deferredOrd;
 };
 
-// The face walk beside the GPU deposit (DTFE_FACE_WALK_EARLY=1): psFaceWalk on a thread of its own while the pass's
-// thread waits in the device call, joined right after that call and before the copy-back. The walk reads the
-// tessellation, the pass's box and the vertex degrees and writes the face words only; the device call touches none of
-// them. Its dropped shares are counted apart ('drops'), and its sums are the pass's only once the device call has
-// succeeded: after a failed call the caller throws both away, and the CPU deposit makes the face sums as it does
-// without the switch. The thread counts as one core of the pool while it runs (the pass's own core is lent for the
-// device call: ps_metal_host.cc CoreLend); the walk's team is psFaceWalk's. The destructor joins, so an exception on
-// the pass's thread cannot leave the walk running on a pass that is being torn down.
+// The face walk beside the GPU deposit (the default, auto_tune.h psFaceWalkEarly; DTFE_FACE_WALK_EARLY=0 leaves it
+// after the deposit): psFaceWalk on a thread of its own while the pass's thread waits in the device call, joined
+// right after that call and before the copy-back. The walk reads the tessellation, the pass's box and the vertex
+// degrees and writes the face words only; the device call touches none of them. Its dropped shares are counted apart
+// ('drops'), and its sums are the pass's only once the device call has succeeded: after a failed call the caller
+// throws both away, and the CPU deposit makes the face sums as it does when the walk runs after the deposit. The
+// thread counts as one core of the pool while it runs (the pass's own core is lent for the device call:
+// ps_metal_host.cc CoreLend); the walk's team is psFaceWalk's. The destructor joins, so an exception on the pass's
+// thread cannot leave the walk running on a pass that is being torn down.
 struct PSEarlyFaceWalk
 {
     std::thread th;
@@ -2789,7 +3425,8 @@ struct PSEarlyFaceWalk
     PSEarlyFaceWalk(PSEarlyFaceWalk const &) = delete;
     PSEarlyFaceWalk &operator=(PSEarlyFaceWalk const &) = delete;
     ~PSEarlyFaceWalk() { if ( th.joinable() ) th.join(); }
-    // (a thread the system refuses leaves 'started' false: the walk then runs after the deposit, as without the switch)
+    // (a thread the system refuses, or one without the memory to start, leaves 'started' false: the walk then runs
+    // after the deposit, as under DTFE_FACE_WALK_EARLY=0)
     void start(PSPassCtx const &passCtx, PSFxState &fx, bool const psVertexMass, int const threads)
     {
         try
@@ -2808,20 +3445,73 @@ struct PSEarlyFaceWalk
             started = true;
         }
         catch (std::system_error const &) { started = false; }
+        catch (std::bad_alloc const &) { started = false; }   // (no memory for the thread's state: the same fallback)
     }
-    // waits for the walk; an exception it met is thrown here, on the pass's thread
-    void join()
+    // waits for the walk; an exception it met is thrown here, on the pass's thread -- unless the walk's sums are
+    // thrown away anyway (keep false: the device call failed, and the CPU deposit makes the face sums as it does when
+    // the walk runs after the deposit, so the pass falls back where it did before the walk moved)
+    void join(bool const keep = true)
     {
         if ( th.joinable() ) th.join();
-        if ( error ) std::rethrow_exception( error );
+        if ( error && keep ) std::rethrow_exception( error );
     }
 };
 // ... and the run's count of them (psFaceWalksEarlyTaken)
 static inline void psFaceWalkEarlyCount(bool const kept, double const walkSec, double const waitSec)
 {
     ( kept ? psFaceEarlyKept : psFaceEarlyDiscarded ).fetch_add( 1 );
+    if ( !kept ) return;   // (a walk thrown away: the closing line's seconds are the kept walks')
     psFaceEarlyWalkUs.fetch_add( (long long)( walkSec * 1e6 ) );
     psFaceEarlyWaitUs.fetch_add( (long long)( waitSec * 1e6 ) );
+}
+
+#if !defined(DOUBLE)
+// DTFE_GPU_FACES=1: one tetrahedron's face record for the GPU face kernel (ps_kernel_params.h PS_FACE_REC_*), pushed
+// onto 'recs' when it owns a section in some grid plane -- its plane counts per axis by face_sweep_f32.h's own rule
+// (fsPlanes on the region frame, the count the kernel takes its items from and checks again on the device), none
+// for a tetrahedron that owns no section: it adds nothing to any face sum. The floats are exactly what psFaceWalk
+// hands psDepositFaces' canonical branch for the same tetrahedron: the wrapped positions (geo.eulerPos), the velocity
+// gradient (psFaceVelGrad, the walk's product), vertex 0's velocity, and the density psFaceRho forms from the walk's
+// mass 'tetMass' (unclamped here: psFaceRho clamps a negative one to 0, as the walk does). The caller tests the
+// walk's set (psFilterCell with the walk's span tests); one call per tetrahedron of it, under the switch only.
+static void psFaceRecordPush(std::vector<float> &recs, FsGrid const &g, Cell_handle const &cell,
+                             PSCellGeometry const &geo, double const tetMass, double const avgDensity)
+{
+    float E[4][3];
+    for (int v = 0; v < 4; ++v)
+        for (int d = 0; d < 3; ++d) E[v][d] = geo.eulerPos[v][d];
+    float const noGrad[3][3] = {}, noVel[3] = {};
+    uint32_t cnt[3];
+    fsFlushed( [&] {   // (the device's subnormal rule: the kernel counts the planes again)
+        FsTet t;
+        fsTetSet( E, g, noGrad, noVel, 0.f, t );   // (the frames: the counts need nothing else)
+        for (int a = 0; a < 3; ++a)
+        {
+            int k0 = 0;
+            cnt[a] = uint32_t( fsPlanes( t, g, a, k0 ) );
+        }
+    } );
+    if ( cnt[0] == 0u && cnt[1] == 0u && cnt[2] == 0u ) return;
+    Real vG[NO_DIM][noVelComp];
+    psFaceVelGrad( cell, geo, vG );
+    size_t const at = recs.size();
+    recs.resize( at + size_t( PS_FACE_REC_FLOATS ), 0.f );
+    float *const r = recs.data() + at;
+    for (int v = 0; v < 4; ++v)
+        for (int d = 0; d < 3; ++d) r[PS_FACE_REC_E + 3*v + d] = E[v][d];
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) r[PS_FACE_REC_VG + 3*i + j] = vG[i][j];
+    for (int j = 0; j < 3; ++j) r[PS_FACE_REC_V0 + j] = cell->vertex(0)->info().velocity(j);
+    r[PS_FACE_REC_RHO] = psFaceRho( tetMass, double( geo.cellAbsDet ), avgDensity );
+    std::memcpy( r + PS_FACE_REC_COUNT, cnt, sizeof cnt );   // (three uint words in float slots: as_type on the GPU)
+}
+#endif
+// ... and the run's count of the GPU face passes (psGpuFacesTaken): made = the device's words were kept (unused in
+// the double build, which has no face kernel)
+[[maybe_unused]] static inline void psGpuFacesCount(bool const made, double const sec)
+{
+    ( made ? psFaceGpuMade : psFaceGpuFellBack ).fetch_add( 1 );
+    psFaceGpuUs.fetch_add( (long long)( sec * 1e6 ) );
 }
 
 // GPU deposit (--gpu, GPU build): the extraction walk (with the CPU loop's filters), the cost sort, the call, and
@@ -2857,11 +3547,12 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
     std::vector<Real> &massWeight = gridsCtx.massWeight;
     std::vector<Real> &dispWeight = gridsCtx.dispWeight;
     std::vector< Pvector<Real,noVelComp> > &dispVel = gridsCtx.dispVel;
-    std::vector<int64_t> &massFx = gridsCtx.massFx;
+    PSFxWords &massFx = gridsCtx.massFx;
     float &massFxScale = gridsCtx.massFxScale;
     bool &massFxOn = gridsCtx.massFxOn;
     bool const (&fxSel)[PS_FX_CPU_N] = gridsCtx.fxSel;
     PSFxWords (&fxg)[PS_FX_CPU_N] = fx.fxg;
+    RunUnits const &ru = userOptions.runUnits;
     bool const massFxWanted = gridsCtx.massFxWanted, fxMomWanted = gridsCtx.fxMomWanted, haveVel = gridsCtx.haveVel;
     bool const needWeight = gridsCtx.needWeight, weightIsDensity = gridsCtx.weightIsDensity;
     bool const dispNeedsOwnWeight = gridsCtx.dispNeedsOwnWeight, psExact = gridsCtx.psExact, psCaustics = gridsCtx.psCaustics;
@@ -2949,9 +3640,55 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
         // take the same units. Under --grid-window both count only the tets that reach the window (this loop skips
         // the others before the filter; the CPU walk applies the same test, psFxBoundWalk says why),
         // and the window's MASS unit is taken from these bounds as well (B[DW], PSFixedUnits.massTotal) -- so the
-        // bounds are summed under --grid-window even when the moments are float sums (DTFE_GPU_FLOAT_MOMENTS=1)
-        bool const fxBoundsWanted = fxGpuWanted || windowMode;
+        // bounds are summed under --grid-window even when the moments are float sums (DTFE_GPU_FLOAT_MOMENTS=1).
+        // A wide pass takes the run's units and sums them only where a grid has none (PSFxState::boundsNeeded).
+        bool const fxBoundsWanted = fx.wide ? fx.boundsNeeded() : ( fxGpuWanted || windowMode );
         std::vector<PSFixedBounds> gpuBoundPart( fxBoundsWanted ? noTotalCells / 256 + 1 : 0 );
+        // DTFE_GPU_FACES=1 (--face-gradient, the single build): the GPU face kernel's records of this pass
+        // (PSGpuFaceJob, psFaceRecordPush), built in this walk for the CPU face walk's own set -- psFilterCell, then
+        // its span test (psLoopSpanReaches) or, outside a non-periodic grid without a window, the upper boundary
+        // section's (psOwnsUpperBoundarySection, with the canonical test the switch implies) -- so that the device
+        // makes the words that walk makes. Massless and released tetrahedra are in that set (their areas and
+        // streams count), so a record is pushed before this walk's mass test. Only where the walk after the deposit
+        // would take its units from this walk's bounds (psFxBoundsFromGpu: the bounds summed here, no NaN test hook)
+        // and the pass has the 64-bit words (the run-wide units keep the CPU walk). Off, the loop below runs as
+        // without the switch: one hoisted test. (The double build has no face kernel: faceJobOn below stays false
+        // there.)
+        PSGpuFaceJob faceJob;
+#if !defined(DOUBLE)
+        bool const faceRecL = psGpuFaces() && fx.face && !fx.wide && fxBoundsWanted
+                              && std::is_same<Real, float>::value && fixedShareTestNanEvery() == 0;
+        bool const faceWinL = faceRecL && windowMode;
+        Real faceBoxL[2*NO_DIM], faceDxL[NO_DIM];
+        size_t faceNL[NO_DIM], faceSubOL[NO_DIM], faceSubDL[NO_DIM];
+        for (int d = 0; d < NO_DIM; ++d)
+        {   // (psFaceWalk's copies of the pass's box, spacing, grid and sub-box)
+            faceBoxL[2*d] = boxCoordinates[2*d]; faceBoxL[2*d+1] = boxCoordinates[2*d+1];
+            faceDxL[d] = dx[d]; faceNL[d] = nGrid[d];
+            faceSubOL[d] = subOrigin[d]; faceSubDL[d] = subDims[d];
+        }
+        bool const facePeriodic = userOptions.periodic;
+        FsGrid faceGrid{};
+        if ( faceRecL ) psFaceGrid( faceBoxL, faceDxL, faceNL, facePeriodic, faceSubOL, faceSubDL, faceGrid );
+        double const faceAvgDensity = double( userOptions.averageDensity );
+        // the face walk's set after psFilterCell (psFaceWalk's early reject, negated)
+        auto faceSpan = [&](Real const (&e)[NO_DIM+1][NO_DIM])
+        {
+            return psLoopSpanReaches( e, faceBoxL, faceDxL, faceNL, facePeriodic, windowMode, faceSubOL, faceSubDL )
+                   || psOwnsUpperBoundarySection( e, faceBoxL, faceDxL, faceNL, facePeriodic, windowMode, true );
+        };
+        // the face walk's mass of a tetrahedron this walk takes no further (psFaceWalk's expression, before its
+        // clamp)
+        auto faceWalkMass = [&](Cell_handle const &c) -> double
+        {
+            if ( psVertexMass ) return double( Real( psVertexShareMass(c) ) );
+            double Lag[NO_DIM][NO_DIM];
+            for (int v = 0; v < NO_DIM; ++v)
+                for (int i = 0; i < NO_DIM; ++i)
+                    Lag[v][i] = double(c->vertex(v+1)->point()[i]) - double(c->vertex(0)->point()[i]);
+            return double( Real( faceAvgDensity * std::fabs(determinant(Lag)) / factorial(NO_DIM) ) );
+        };
+#endif
         // grid and canonical frame of the per-tet records (the CPU exact test's own definitions)
         double  recLo[3], recLen[3], recShift[3], recWrap[3];
         int32_t recN[3];
@@ -2972,6 +3709,30 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
             // --grid-window: a tet that misses the window is dropped on its Eulerian positions, before the
             // filter's determinant and inverse -- the same set as testing after the filter, at a fraction of
             // the cost (a TNG100-3 partition walks 36M tets for a few thousand inside)
+#if !defined(DOUBLE)
+            if ( faceWinL )
+            {   // DTFE_GPU_FACES=1 under --grid-window: the early reject lets the face walk's own set through too
+                // (its span test can keep a tetrahedron the window test drops: a vertex within a rounding of a
+                // plane); such a tetrahedron gets its face record and nothing else of this walk -- no flag, bound,
+                // deposit record or degenerate-inverse count -- as without the switch. Its vertex degrees
+                // (--ps-vertex-mass) are computed here like the window's, so the walk after the deposit reads the
+                // same mass.
+                bool inWin = false;
+                size_t degHere = 0;
+                bool const keptF = psFilterCell(cell, userOptions, boxCoordinates, true, &degHere, geo, false,
+                                                [&](Real const (&ep)[NO_DIM+1][NO_DIM])
+                                                { inWin = windowTouched(ep); return !inWin && !faceSpan(ep); });
+                if ( inWin ) nDegenerateInverse += degHere;
+                if ( !keptF ) continue;
+                if ( !inWin )
+                {
+                    if ( degreesLazy ) lazyDegrees(cell);
+                    psFaceRecordPush( faceJob.recs, faceGrid, cell, geo, faceWalkMass(cell), faceAvgDensity );
+                    continue;
+                }
+            }
+            else
+#endif
             if ( !psFilterCell(cell, userOptions, boxCoordinates, true, &nDegenerateInverse, geo, false,
                                [&](Real const (&ep)[NO_DIM+1][NO_DIM]) { return windowMode && !windowTouched(ep); }) ) continue;
             markFlipped(geo, flippedFlag);     // '.hidden_streams' bit 1: geometric, so the host does it for the GPU path
@@ -2993,6 +3754,11 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
             if ( fixedShareTestNanEvery() && fixedShareTestNan( double(cell->vertex(0)->point()[0]), double(cell->vertex(0)->point()[1]),
                                                                 double(cell->vertex(0)->point()[NO_DIM-1]) ) )
                 tm = std::numeric_limits<float>::quiet_NaN();   // DTFE_TEST_NAN_SHARE (ps_deposit_params.h)
+#if !defined(DOUBLE)
+            // DTFE_GPU_FACES=1: the face record of a tetrahedron of the face walk's set, its mass the walk's own
+            if ( faceRecL && faceSpan(ep) )
+                psFaceRecordPush( faceJob.recs, faceGrid, cell, geo, double( tm ), faceAvgDensity );
+#endif
             if ( fxBoundsWanted ) fx.tetBound( cell, geo, double( tm > 0.f ? tm : 0.f ), gpuBoundPart[cellOrd / 256] );
             if (tm<=0.f) { if ( massAudit ) { audit.after += double(tm); ++audit.nAfter; } continue; }
             if ( psHaloRelease > 0. && absDetLag > psHaloRelease * geo.cellAbsDet )
@@ -3200,6 +3966,8 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
         // the moment grids' units (fxg): one per grid the kernel deposits, from the bounds above, so the
         // host's later integer adds (the deferred and released tets) stay within them too; dispw's unit only says
         // "the mass grid is it" (the host then skips it when its mass grid is fixed). DTFE_GPU_FLOAT_MOMENTS=1: none.
+        // A wide pass hands over the run's units where it has them, the run-wide 128-bit words and their share cap
+        // (one for every PS-DTFE accumulator, src/fixed_units.h), and the run's mass unit.
         PSFixedUnits fxUnits;
         PSFixedBounds gpuBounds;
         for (PSFixedBounds const &b : gpuBoundPart) gpuBounds.add( b );   // in block order (see gpuBoundPart)
@@ -3212,21 +3980,74 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
             bool const dispOwn = psVolWeighted && fDisp;
             bool const gpuSel[PS_FX_N] = { fVel, fDisp, fGrad, psVolWeighted, psExact, dispOwn, dispOwn, fScal, fSGrad };
             for (int g = 0; g < PS_FX_N; ++g)
-                if ( gpuSel[g] ) fxUnits.scale[g] = g == PS_FX_DW ? 1.f : fx.unit( g, gpuBounds.B[g] );
+                if ( gpuSel[g] )
+                    fxUnits.scale[g] = g == PS_FX_DW ? 1.f
+                                     : ( fx.wide && ru.has( RU_PS_FX + g ) ? ru.scale( RU_PS_FX + g )
+                                                                           : fx.unit( g, gpuBounds.B[g] ) );
             fxUnits.sumW = true;
         }
-        // --grid-window: the mass grid's unit from the window's own total, as the CPU window deposit
-        // takes it (fxBoundWalk), not from the host's sum of the masses it is handed
-        if ( windowMode ) fxUnits.massTotal = gpuBounds.B[PS_FX_DW];
+        if ( fx.wide )
+        {   // (the mass words are the run-wide ones under DTFE_GPU_FLOAT_MOMENTS=1 too)
+            fxUnits.words = 2u;
+            fxUnits.capBits = ru.capBits( RU_PS_MASS );
+            fxUnits.massScale = ru.has( RU_PS_MASS ) ? ru.scale( RU_PS_MASS ) : 0.f;
+            // (no run-wide mass unit: the host's own rule, under --grid-window from the window's total as below)
+            if ( windowMode && !ru.has( RU_PS_MASS ) ) fxUnits.massTotal = gpuBounds.B[PS_FX_DW];
+        }
+        else
+        {
+            // --grid-window: the mass grid's unit from the window's own total, as the CPU window deposit
+            // takes it (fxBoundWalk), not from the host's sum of the masses it is handed
+            if ( windowMode ) fxUnits.massTotal = gpuBounds.B[PS_FX_DW];
+            // (the per-pass path with DTFE_TEST_RUN_UNIT_SHIFT=n: the host's mass unit 2^n finer, as the CPU's)
+            fxUnits.legacyShift = runUnitsLegacy() ? runUnitShift() : 0;
+        }
         lap( PS_PH_SORT );
-        // DTFE_FACE_WALK_EARLY=1: the face walk (--face-gradient) starts here, beside the device call, instead of
-        // after the deposit -- where the walk after the deposit would take its units from these same bounds
-        // (psFxBoundsFromGpu: a single build without the NaN test hook) and they give a unit. Its words are that
-        // walk's: the same units, the same order-free integer sums. (The face words are then held during the device
-        // call, which the planner books only under --grid-window: a switch for measurements, off by default.)
+        // DTFE_GPU_FACES=1: the face pass's job, which the device runs in its hold after this call's deposit: the
+        // records above, the walk's grid and sub-box (psFaceGrid), and the units the walk after the deposit would
+        // take from these same bounds (psFaceUnits' rule: psFaceScales). No unit: no job (psCpuFixedUnits then turns
+        // the face sums off for the pass, as without the switch).
+        bool faceJobOn = false;
+#if !defined(DOUBLE)
+        if ( faceRecL )
+        {
+            float faceSc[3];
+            if ( psFaceScales( fx.gpuBounds, faceSc ) )
+            {
+                faceJob.P = psFaceParams( faceGrid, faceSc );
+                faceJob.nCell = totalGrid;
+                faceJobOn = true;
+            }
+            else std::vector<float>().swap( faceJob.recs );
+        }
+#endif
+        // The face walk (--face-gradient) starts here, beside the device call, instead of after the deposit (the
+        // default, auto_tune.h psFaceWalkEarly; DTFE_FACE_WALK_EARLY=0 keeps it after the deposit) -- where the walk
+        // after the deposit would take its units from these same bounds (psFxBoundsFromGpu: a single build without
+        // the NaN test hook) and they give a unit. Its words are that walk's: the same units, the same order-free
+        // integer sums. (The face words are then held through the device call, its wait for the device included,
+        // which the planner books where the walk is on: auto_tune.cc AutoTunePSInputs::earlyFace.) A wide
+        // pass takes the run's face units (these bounds only for a face accumulator without one: PSFxState::
+        // boundsNeeded sums them then), under the same two exclusions (the single build, no NaN test hook).
+        // Not where the GPU face kernel takes the pass (faceJobOn: the kernel wins; psFaceF32Note says so once).
+        // No room for the face words before the call (std::bad_alloc): they are let go, and the walk after the
+        // deposit makes them, as under DTFE_FACE_WALK_EARLY=0.
         PSEarlyFaceWalk earlyFace;
-        if ( fx.face && psFxBoundsFromGpu( true, fx ) && Env::flag( "DTFE_FACE_WALK_EARLY" )
-             && psFaceUnits( fx, fx.gpuBounds, totalGrid ) )
+        bool earlyWalk = false;
+        try
+        {
+            earlyWalk = !faceJobOn && ( fx.wide
+                ? fx.face && std::is_same<Real, float>::value && fixedShareTestNanEvery() == 0
+                  && psFaceWalkEarly()
+                  && psFaceUnits( fx, [&fx]() -> PSFixedBounds const & { return fx.gpuBounds; }, totalGrid )
+                : fx.face && psFxBoundsFromGpu( true, fx ) && psFaceWalkEarly()
+                  && psFaceUnits( fx, fx.gpuBounds, totalGrid ) );
+        }
+        catch (std::bad_alloc const &)   // (no room for the face sums before the call: the walk after it makes them)
+        {
+            fx.faceRelease();
+        }
+        if ( earlyWalk )
         {
             earlyFace.start( passCtx, fx, ctx.psVertexMass, psDepositThreads() );
             if ( !earlyFace.started ) fx.faceRelease();
@@ -3236,7 +4057,7 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
                                   nGrid, subOrigin, subDims, nSub,
                                   userOptions.periodic, fVel, fDisp, fGrad, psLinear,
                                   psVolWeighted, psCaustics, psExact, fScal, fSGrad, windowMode, hostMass, fxUnits,
-                                  gpuOut, deferredTets, metalErr);
+                                  gpuOut, deferredTets, metalErr, faceJobOn ? &faceJob : nullptr);
         // A host that chose the fixed-point unit hands back the words and leaves its float grid empty, so words
         // of another size would send the decode below into that empty grid: a failed deposit instead (the CPU
         // deposits the partition). Neither host produces it; this keeps it from reading
@@ -3256,7 +4077,7 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
         if ( earlyFace.started )
         {   // before the copy-back; what is left of the walk counts as CPU deposit time, like the later walk's
             auto const tJoin0 = std::chrono::steady_clock::now();
-            earlyFace.join();
+            earlyFace.join( gpuOk );   // (a failed call throws the walk away, and an error of the walk with it)
             double const waited = std::chrono::duration<double>( std::chrono::steady_clock::now() - tJoin0 ).count();
             lap( PS_PH_CPU );
             psFaceWalkEarlyCount( gpuOk, earlyFace.sec, waited );
@@ -3268,6 +4089,41 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
                     if ( earlyFace.drops[k] ) fixedShareDropped( k, earlyFace.drops[k] );
             }
             else fx.faceRelease();   // (the CPU deposit makes the face sums, and counts their dropped shares, itself)
+        }
+        // DTFE_GPU_FACES=1: the face words the device made in its hold become the pass's, in the units psFaceUnits
+        // would set, and their dropped shares the run's. A face pass that did not make them (it gave up, a buffer
+        // could not be had, a plane count differed on the device: the host said why) leaves them to the walk after
+        // the deposit, which makes the same words in the same arithmetic (psFaceF32: the switch implies it); a
+        // deposit the device gave up on leaves them to the CPU loop, as without the switch.
+        if ( faceJobOn )
+        {
+            size_t const nS = totalGrid * 2 * NO_DIM * noVelComp, nN = totalGrid * 2 * NO_DIM;
+            bool const made = gpuOk && faceJob.ok && faceJob.wS.size() == nS && faceJob.wN.size() == nN
+                              && faceJob.wP.size() == nN;
+            if ( gpuOk ) psGpuFacesCount( made, faceJob.heldSec );
+            if ( made )
+            {
+                PSFxWords *const F[3] = { &fx.faceS, &fx.faceN, &fx.faceP };
+                std::vector<int64_t> *const W[3] = { &faceJob.wS, &faceJob.wN, &faceJob.wP };
+                for (int k = 0; k < 3; ++k)
+                {
+                    F[k]->release();
+                    F[k]->scale = faceJob.P.scale[k];
+                    F[k]->w.swap( *W[k] );
+                }
+                fx.faceGpu = true;
+                fx.faceWalkSec = faceJob.heldSec;
+                for (int k = 0; k < 3; ++k)
+                    if ( faceJob.drops[k] ) fixedShareDropped( FX_DROP_FACE_S + k, faceJob.drops[k] );
+            }
+            else if ( gpuOk && not userOptions.psSuppressGridStats )
+                message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " the GPU face kernel did not make "
+                        << "this pass's face sums ("
+                        << ( faceJob.err.empty() ? std::string( "no words" ) : faceJob.err )
+                        << "); the CPU face walk makes them, the same words.\n" << MESSAGE::Flush;
+            for (std::vector<int64_t> *const w : { &faceJob.wS, &faceJob.wN, &faceJob.wP })
+                std::vector<int64_t>().swap( *w );
+            std::vector<float>().swap( faceJob.recs );
         }
         if ( gpuOk )
         {
@@ -3290,19 +4146,31 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
             // The mass grid (see massFx): the GPU's fixed-point words become this pass's mass grid as
             // they are -- the released and deferred tets are added into them below, and they are converted to the
             // float density after the CPU loop. Otherwise (the double build, or the float A/B grid) the density
-            // is set here, from the words converted straight to Real or from the float grid.
+            // is set here, from the words converted straight to Real or from the float grid. The run-wide words
+            // (gpuOut.words 2) come with their carry, which travels with them, and K = ilogb(scale).
             bool const gpuFixed = gpuOut.massScale > 0.f && gpuOut.massFx.size() == totalGrid;
+            bool const gpuWide = gpuOut.words == 2u;
             if ( field.density && massFxWanted && gpuFixed )
             {
-                massFx.swap( gpuOut.massFx );
+                massFx.w.swap( gpuOut.massFx );
                 massFxScale = gpuOut.massScale;
                 massFxOn = true;
+                if ( gpuWide )
+                {
+                    massFx.carry.swap( gpuOut.massFxCarry );
+                    massFx.cap = ru.cap( RU_PS_MASS );
+                    massFx.K = std::ilogb( massFxScale );
+                }
             }
             else if ( field.density )
                 quantities->density.assign( totalGrid, Real(0.) );   // (set from the GPU's grid just below)
-            std::vector<int64_t> const &gpuFx = massFxOn ? massFx : gpuOut.massFx;
+            std::vector<int64_t> const &gpuFx = massFxOn ? massFx.w : gpuOut.massFx;
+            FxCarryList const &gpuFxCarry = massFxOn ? massFx.carry : gpuOut.massFxCarry;   // (the same object's)
             auto gpuMass = [&](size_t const i) -> double   // the GPU's mass of cell i, whichever form it came in
             {
+                if ( gpuFixed && gpuWide )   // (the integer rounded once, to Real)
+                    return double( fxToReal<Real>( psWordValue( gpuFx, gpuFxCarry, i ),
+                                                   std::ilogb( gpuOut.massScale ) ) );
                 return gpuFixed ? psMassFixedMass( gpuFx[i], gpuOut.massScale ) : double( gpuOut.mass[i] );
             };
             // The moment grids (fxg): a grid the GPU returns as words becomes this pass's fixed-point grid
@@ -3324,15 +4192,30 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
                 if ( g == PS_FX_DW && massFxOn ) continue;            // (the density after the loop)
                 bool const fromMass = ( g == PS_FX_MOMW && momwIsMass ) || ( g == PS_FX_DW && dwIsMass );
                 if ( fxMomWanted && fromMass && gpuFixed && !massFxOn )
-                {   // (copied while the density below still reads them)
+                {   // (copied while the density below still reads them; the run-wide words with their carry and the
+                    // mass grid's K -- the run's K of MOMW and DW equal the mass grid's: fixed_units.h's table gives
+                    // them its scale where they alias it)
                     fxg[g].scale = gpuOut.massScale;
                     if ( field.density ) fxg[g].w = gpuOut.massFx;
                     else fxg[g].w.swap( gpuOut.massFx );
+                    if ( gpuWide )
+                    {
+                        if ( field.density ) fxg[g].carry = gpuOut.massFxCarry;
+                        else fxg[g].carry.swap( gpuOut.massFxCarry );
+                        fxg[g].cap = ru.cap( RU_PS_FX + g );
+                        fxg[g].K = std::ilogb( fxg[g].scale );
+                    }
                 }
                 else if ( fxMomWanted && !fromMass && gpuOut.fxScale[g] > 0.f )
                 {
                     fxg[g].scale = gpuOut.fxScale[g];
                     fxg[g].w.swap( gpuOut.fx[g] );
+                    if ( gpuWide )
+                    {
+                        fxg[g].carry.swap( gpuOut.fxCarry[g] );
+                        fxg[g].cap = ru.cap( RU_PS_FX + g );
+                        fxg[g].K = std::ilogb( fxg[g].scale );
+                    }
                 }
                 else
                 {
@@ -3344,13 +4227,19 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
             // CPU deposit of this pass would take (the same bounds), so the two write the same '.streams'
             if ( fxMomWanted && fxSel[PS_FX_RM] )
             {
-                float const scale = fx.unit( PS_FX_RM, gpuBounds.B[PS_FX_RM] );
-                if ( scale > 0.f ) fx.start( PS_FX_RM, scale );
+                int const slotRM = RU_PS_FX + int( PS_FX_RM );
+                float const scale = fx.wide && ru.has( slotRM ) ? ru.scale( slotRM )
+                                                                : fx.unit( PS_FX_RM, gpuBounds.B[PS_FX_RM] );
+                if ( scale > 0.f ) fx.start( PS_FX_RM, scale, fx.wide ? ru.cap( slotRM ) : 0. );
             }
             // grid g's GPU value at component index 'at' (cell x components + component), whichever form it came in
+            // (the run-wide words: the word and its carry, one rounding to Real)
             auto gpuVal = [&](int const g, size_t const at) -> double
             {
                 if ( ( g == PS_FX_MOMW && momwIsMass ) || ( g == PS_FX_DW && dwIsMass ) ) return gpuMass(at);
+                if ( gpuOut.fxScale[g] > 0.f && gpuWide )
+                    return double( fxToReal<Real>( psWordValue( gpuOut.fx[g], gpuOut.fxCarry[g], at ),
+                                                   std::ilogb( gpuOut.fxScale[g] ) ) );
                 if ( gpuOut.fxScale[g] > 0.f ) return psMassFixedMass( gpuOut.fx[g][at], gpuOut.fxScale[g] );
                 return double( (*gpuFloat[g])[at] );
             };
@@ -3413,17 +4302,21 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
             // (same accumulation sites and moments as the CPU fallback's single sample)
             // (each moment add: into the grid's fixed-point words when it has them, else its Real grid --
             // the same float product either way; fxHost)
+            // (the pass thread's adds, owned: the run-wide words' crossings go to list 0, sized here)
             auto fxHost = [&](int const g, size_t const at, Real const v) -> bool
             {
                 if ( fxg[g].w.empty() ) return false;
-                fxg[g].w[at] += psFixedShare( double(v), fxg[g].scale, g );
+                psFxAdd( fxg[g].sink( 0 ), at, double(v), g, false );
                 return true;
             };
+            massFx.ensureLists( 1 );
+            for (int g = 0; g < PS_FX_CPU_N; ++g) fxg[g].ensureLists( 1 );
             for (ReleasedTet const &rt : releasedTets)
             {
                 if (field.density)
                 {
-                    if ( massFxOn ) massFx[rt.flat] += psMassFixedShare( double(rt.mass), massFxScale );   // exact
+                    if ( massFxOn )
+                        psFxAdd( massFx.sink( 0 ), rt.flat, double(rt.mass), FX_DROP_MASS, false );   // exact
                     else quantities->density[rt.flat] += rt.mass;
                 }
                 if (needWeight && !weightIsDensity && !fxHost(PS_FX_MOMW, rt.flat, rt.momw)) massWeight[rt.flat] += rt.momw;
@@ -3637,8 +4530,10 @@ void interpolateGrid_phaseSpace(DT &dt,
     // grid, which is allocated only at the conversion (auto_tune.h counts it).
     bool const massFxWanted = std::is_same<Real, float>::value && field.density
                               && !Env::flag( { "DTFE_GPU_FLOAT_MASS" } );
-    std::vector<int64_t> massFx;   // totalGrid fixed-point words while massFxOn, else EMPTY
-    float massFxScale = 0.f;       // their unit: 1/massFxScale mass (a power of two)
+    // A pass that takes the run-wide units (PSFxState::wide) holds the words with their carry, in the run's mass unit
+    // where it has one -- the same on the CPU and the GPU -- else the pass's own unit by the rule above.
+    PSFxWords massFx;                    // totalGrid fixed-point words while massFxOn, else EMPTY
+    float &massFxScale = massFx.scale;   // their unit: 1/massFxScale mass (a power of two)
     bool massFxOn = false;
 
     // The MOMENT grids (ps_deposit_params.h PSFxGrid: the grids, their bounds and units) are exact 64-bit fixed-point
@@ -3672,10 +4567,19 @@ void interpolateGrid_phaseSpace(DT &dt,
     } audit;
     auto gridSum = [&]() -> double   // the mass grid in mass units: the fixed-point words while they live (exact)
     {
+        if ( massFxOn && massFx.cap > 0. )
+        {   // the run-wide words: in __int128, the carry and the threads' lists not summed yet included (x 2^64)
+            __int128 q = 0;
+            for (int64_t const w : massFx.w) q += w;
+            for (FxCarry const &c : massFx.carry) q += __int128( c.second ) * ( __int128( 1 ) << 64 );
+            for (FxCarryList const &l : massFx.lists)
+                for (FxCarry const &c : l) q += __int128( c.second ) * ( __int128( 1 ) << 64 );
+            return double( q ) / double( massFxScale );
+        }
         if ( massFxOn )
         {
             int64_t q = 0;
-            for (int64_t const w : massFx) q += w;
+            for (int64_t const w : massFx.w) q += w;
             return psMassFixedMass( q, massFxScale );
         }
         double s = 0.;
@@ -3831,7 +4735,36 @@ void interpolateGrid_phaseSpace(DT &dt,
     PSFxState fx{ fxg, fxSel, userOptions, quantities, field, totalGrid, massWeight, exactMult, dispWeight, releasedMult,
                   dispVel, needVelValues || field.velocity_gradient, psVolWeighted, fxScalSel, fxSGradSel, cellVolume };
     fx.face = userOptions.faceGradient && psExact && psVolWeighted && field.velocity_gradient && NO_DIM == 3;
+    psFaceF32Note( message, fx.face, psFaceWalkEarly() );   // (DTFE_FACE_F32, DTFE_GPU_FACES: a line per run, if set)
     fx.gridDx = dx;
+    fx.wide = userOptions.runUnits.filled && !runUnitsLegacy();   // (DTFE_PS_RUN_UNITS=1, and the run has its units)
+    // '--ps-merge fixed-point' in the single 3-D build (User_options::psWordMerge, fix 3 S6): this pass hands its
+    // words over unconverted (psHandOverWords) for the merge to add -- in a one-domain run too, which then defers its
+    // normalization to the same close-out (DTFE.cpp psCloseOutMoments). DTFE_setup set it only with the run-wide
+    // units on (the option switches them on) and every accumulator's unit in range, so the pass is a wide one.
+    bool const wordMerge = runUnitsWordMergeBuild() && userOptions.psWordMerge;
+    if ( wordMerge )
+    {   // (a float sum has no words to hand over: refused here, before the deposit)
+        bool anyMoment = fx.face;
+        for (int g = 0; g < PS_FX_CPU_N; ++g) anyMoment = anyMoment || fxSel[g];
+        if ( !fx.wide || massFxWanted != field.density || ( anyMoment && !fxMomWanted ) )
+            throwError( "'--ps-merge fixed-point' merges the passes' exact words, but this pass would not sum in "
+                        "the run's fixed-point words: ", !fx.wide ? "the run-wide units are off (internal)"
+                        : "DTFE_GPU_FLOAT_MASS=1 or DTFE_GPU_FLOAT_MOMENTS=1 sums in floats",
+                        ". Unset those switches, or merge with the default ('--ps-merge index-order')." );
+    }
+    // The share cap of the run-wide words (src/fixed_units.h) lets one cell component receive 2^32 shares, one per
+    // tetrahedron (its sub-samples counted in the cap): a pass of more Delaunay cells is refused rather than summed
+    // without that guarantee (the GPU deposit declines it already: its 32-bit cell ordinals).
+    if ( fx.wide && noTotalCells >= ( size_t( 1 ) << 32 ) )
+    {
+        MESSAGE::Error error;
+        error << "PS-DTFE's run-wide fixed-point sums take fewer than 2^32 Delaunay cells per pass "
+              << "(src/fixed_units.h, the share cap), and this pass's tessellation has " << noTotalCells
+              << ". Split the run into more partitions ('--partition'), or leave DTFE_PS_RUN_UNITS unset for the "
+              << "per-pass units" << ( wordMerge ? " (and merge without '--ps-merge fixed-point', which switches "
+                                                   "them on)" : "" ) << "." << MESSAGE::EndError;
+    }
     for (int d = 0; d < NO_DIM; ++d) quantities->psFaceDx[d] = dx[d];   // (the face gradient's spacing: normalization)
 
     // Reusable per-tetrahedron scratch for the mass-conserving deposit (see the cell loop): the flat
@@ -3956,6 +4889,13 @@ void interpolateGrid_phaseSpace(DT &dt,
     psSlabBinning( passCtx, layoutCtx, metalDeposited, deferredOrd );
     std::vector<DepositThread> depT( static_cast<size_t>(nDepThreads) );
     psDepositThreadsInit( passCtx, gridsCtx, depT, nDepThreads, slabMode );
+    // the run-wide words' carry lists, one per deposit thread (depositLoop's th < nDepThreads), sized before any of
+    // them starts (psFxCarryFinish sums them after the pass's last add)
+    massFx.ensureLists( size_t(nDepThreads) );
+    for (int g = 0; g < PS_FX_CPU_N; ++g) fxg[g].ensureLists( size_t(nDepThreads) );
+    fx.faceS.ensureLists( size_t(nDepThreads) );
+    fx.faceN.ensureLists( size_t(nDepThreads) );
+    fx.faceP.ensureLists( size_t(nDepThreads) );
 
     // One thread's share of the deposit: the loop over the cells, whose body is the serial loop's
     // -- its accumulators and scratch are this thread's under the SAME names (locals
@@ -4028,9 +4968,10 @@ void interpolateGrid_phaseSpace(DT &dt,
         bool const fScalL = field.scalar;
         bool const auditL = massAudit;
         // the fixed-point mass grid (null: the float density) and how this thread adds to it: atomically when
-        // the copy mode's threads share it, plainly when this thread owns its cells (one thread, or a slab)
+        // the copy mode's threads share it, plainly when this thread owns its cells (one thread, or a slab); its
+        // handle (psFxAdd: the unit, the cap and this thread's carry list)
         int64_t *const massFxL = TH.massFx;
-        float const massFxScaleL = massFxScale;
+        PSFxSink const massSinkL = massFx.sink( th );
         bool const massFxAtomicL = nT > 1 && slab < 0;
         // the stream count, the two flags and the caustic mask: the same rule (psAddCount, psSetFlag, psOrMask)
         bool const countAtomicL = massFxAtomicL;
@@ -4039,21 +4980,22 @@ void interpolateGrid_phaseSpace(DT &dt,
         // Real grid would have added. DW is not accumulated while the mass words are this pass's (massFxOn): it
         // becomes the density after the loop.
         int64_t *fxWL[PS_FX_CPU_N];
-        float fxSL[PS_FX_CPU_N];
-        for (int g = 0; g < PS_FX_CPU_N; ++g) { fxWL[g] = fxg[g].w.empty() ? nullptr : fxg[g].w.data(); fxSL[g] = fxg[g].scale; }
+        PSFxSink fxSinkL[PS_FX_CPU_N];
+        for (int g = 0; g < PS_FX_CPU_N; ++g) { fxSinkL[g] = fxg[g].sink( th ); fxWL[g] = fxSinkL[g].w; }
         bool const dwOffL = massFxOn;
         auto fxAddL = [&](int const g, size_t const at, Real const v)
-        { psAddMassFixed( fxWL[g], at, psFixedShare( double(v), fxSL[g], g ), massFxAtomicL ); };
+        { psFxAdd( fxSinkL[g], at, double(v), g, massFxAtomicL ); };
         // --face-gradient: the face sums' words (null: off), shared by every thread like the moments' (psDepositFaces).
         // Not under a GPU deposit: psFaceWalk then sums every kept tetrahedron's faces, the deferred ones this loop
         // deposits included (D17)
         bool const faceHereL = fx.face && !metalDeposited;
-        int64_t *const faceSWL = faceHereL ? fx.faceS.w.data() : nullptr;
-        int64_t *const faceNWL = faceHereL ? fx.faceN.w.data() : nullptr;
-        int64_t *const facePWL = faceHereL ? fx.faceP.w.data() : nullptr;
-        float const faceSSL = fx.faceS.scale, faceNSL = fx.faceN.scale, facePSL = fx.faceP.scale;
+        bool const faceF32L = faceHereL && psFaceF32();   // (DTFE_FACE_F32 / DTFE_GPU_FACES: face_sweep_f32.h)
+        PSFxSink const faceSL = faceHereL ? fx.faceS.sink( th ) : PSFxSink();
+        PSFxSink const faceNL = faceHereL ? fx.faceN.sink( th ) : PSFxSink();
+        PSFxSink const facePL = faceHereL ? fx.faceP.sink( th ) : PSFxSink();
+        int64_t *const faceSWL = faceSL.w;
         double const avgDensityL = double( userOptions.averageDensity );
-        (void)faceSWL; (void)faceNWL; (void)facePWL; (void)faceSSL; (void)faceNSL; (void)facePSL; (void)avgDensityL;
+        (void)faceSL; (void)faceNL; (void)facePL; (void)faceSWL; (void)avgDensityL; (void)faceF32L;
         // slab mode (slab >= 0): this slab's tetrahedra, in the loop's order, and the local x planes it
         // owns -- every write below skips the cells of other planes
         std::vector<uint32_t> const *slabList = slab >= 0 ? &slabTetLists[size_t(slab)] : nullptr;
@@ -4345,7 +5287,8 @@ void interpolateGrid_phaseSpace(DT &dt,
                 // upper face of the last layer, which no tetrahedron inside owns (psOwnsUpperBoundarySection;
                 // psFaceWalk asks the same): that section and nothing else, no volume, stream or moment share. As
                 // the face block below forms it (the options guarantee the exact deposit and no halo release there).
-                if ( faceSWL && psOwnsUpperBoundarySection( eulerPos, boxL, dxL, nGridL, periodicL, windowModeL ) )
+                if ( faceSWL
+                     && psOwnsUpperBoundarySection( eulerPos, boxL, dxL, nGridL, periodicL, windowModeL, faceF32L ) )
                 {
                     Vertex_handle base = cell->vertex(0);
                     Real faceGrad[NO_DIM][noVelComp], temp[NO_DIM][noVelComp];
@@ -4358,7 +5301,7 @@ void interpolateGrid_phaseSpace(DT &dt,
                     double const vTet = double(geo.cellAbsDet) / double(factorial(NO_DIM));
                     double const rhoTet = ( vTet > 0. && avgDensityL > 0. ) ? double(tetMass) / ( vTet * avgDensityL ) : 0.;
                     psDepositFaces( geo.eulerPos, boxL, dxL, nGridL, periodicL, subOriginL, subDimsL, slabLoL, slabHiL,
-                                    faceGrad, v0, faceSWL, faceSSL, faceNWL, faceNSL, facePWL, facePSL, rhoTet, massFxAtomicL );
+                                    faceGrad, v0, faceSL, faceNL, facePL, rhoTet, massFxAtomicL, faceF32L );
                 }
     #endif
                 continue;
@@ -4563,7 +5506,7 @@ void interpolateGrid_phaseSpace(DT &dt,
                     double const vTet = double(geo.cellAbsDet) / double(factorial(NO_DIM));
                     double const rhoTet = ( vTet > 0. && avgDensityL > 0. ) ? double(tetMass) / ( vTet * avgDensityL ) : 0.;
                     psDepositFaces( geo.eulerPos, boxL, dxL, nGridL, periodicL, subOriginL, subDimsL, slabLoL, slabHiL,
-                                    velGrad, v0, faceSWL, faceSSL, faceNWL, faceNSL, facePWL, facePSL, rhoTet, massFxAtomicL );
+                                    velGrad, v0, faceSL, faceNL, facePL, rhoTet, massFxAtomicL, faceF32L );
                 }
     #endif
 
@@ -4608,7 +5551,8 @@ void interpolateGrid_phaseSpace(DT &dt,
                         Real const momShare = psVolWeightedL ? Real( m[0] ) : massShare;
                         if (fDenL)
                         {
-                            if ( massFxL ) psAddMassFixed( massFxL, flatIdx, psMassFixedShare( double(massShare), massFxScaleL ), massFxAtomicL );
+                            if ( massFxL )
+                                psFxAdd( massSinkL, flatIdx, double(massShare), FX_DROP_MASS, massFxAtomicL );
                             else quantities->density[flatIdx] += massShare;
                         }
                         if (auditL) TH.auditShares += double(massShare);
@@ -4954,7 +5898,7 @@ void interpolateGrid_phaseSpace(DT &dt,
                 // into the fixed-point grid (massFx), exact; converted to the float density once after the loop.
                 if (fDenL)
                 {
-                    if ( massFxL ) psAddMassFixed( massFxL, flatIdx, psMassFixedShare( double(massShare), massFxScaleL ), massFxAtomicL );
+                    if ( massFxL ) psFxAdd( massSinkL, flatIdx, double(massShare), FX_DROP_MASS, massFxAtomicL );
                     else quantities->density[flatIdx] += massShare;
                 }
                 if (auditL) TH.auditShares += double(massShare);
@@ -5210,11 +6154,12 @@ void interpolateGrid_phaseSpace(DT &dt,
 
 #if NO_DIM==3
     // --face-gradient beside the GPU deposit (D17): the face sums of every kept tetrahedron from one CPU walk -- here,
-    // after the deposit, or (DTFE_FACE_WALK_EARLY: fx.faceWalked) already made while the device call ran
+    // after the deposit, or (the default: fx.faceWalked) already made while the device call ran, or
+    // (DTFE_GPU_FACES=1: fx.faceGpu) by the GPU face kernel in the deposit's hold of the device
     if ( metalDeposited && fx.face && !fx.faceS.w.empty() )
     {
         double faceSec = fx.faceWalkSec;
-        if ( !fx.faceWalked )
+        if ( !fx.faceWalked && !fx.faceGpu )
         {
             auto const tFace0 = std::chrono::steady_clock::now();
             psFaceWalk( passCtx, fx, psVertexMass, psDepositThreads(), nullptr );
@@ -5222,8 +6167,11 @@ void interpolateGrid_phaseSpace(DT &dt,
             faceSec = std::chrono::duration<double>( std::chrono::steady_clock::now() - tFace0 ).count();
         }
         if ( not userOptions.psSuppressGridStats )
-            message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset() << " face sums (--face-gradient) of the GPU-deposited tetrahedra on the CPU in "
-                    << faceSec << " s" << ( fx.faceWalked ? " (beside the GPU deposit)" : "" ) << ".\n"
+            message << MESSAGE::cBold() << "PS-DTFE:" << MESSAGE::cReset()
+                    << " face sums (--face-gradient) of the GPU-deposited tetrahedra "
+                    << ( fx.faceGpu ? "by the GPU face kernel in " : "on the CPU in " )
+                    << faceSec << " s" << ( fx.faceGpu ? " (in the deposit's hold of the GPU)"
+                                            : fx.faceWalked ? " (beside the GPU deposit)" : "" ) << ".\n"
                     << MESSAGE::Flush;
     }
 #endif
@@ -5236,7 +6184,11 @@ void interpolateGrid_phaseSpace(DT &dt,
     if ( mayClearDT )
         dt.clear();
 
-    psFixedToReal( passCtx, gridsCtx, fx );
+    psFxCarryFinish( gridsCtx, fx );
+    // '--ps-merge fixed-point' in the single 3-D build (wordMerge, set where fx.wide is): the words stay words -- no
+    // conversion, no normalization, no density or stream-count scaling here; the pass hands them over below
+    // (psHandOverWords) and ONE close-out after the merge does all of that (DTFE.cpp psCloseOutMoments)
+    if ( !wordMerge ) psFixedToReal( passCtx, gridsCtx, fx );
 
     psPassMessages( passCtx, nDegenerateInverse, nReleased );
 
@@ -5247,7 +6199,7 @@ void interpolateGrid_phaseSpace(DT &dt,
     // spanning partitions); the weight travels as mass_weight, or is reconstructed from the summed
     // density by normalizePhaseSpace when it aliases the density grid.
     Real const invSamples = Real(1.) / Real(nSamplesPerCell);
-    psNormalizeMoments( passCtx, gridsCtx );
+    if ( !wordMerge ) psNormalizeMoments( passCtx, gridsCtx );
 
     // The density grid holds MASS (the per-tet shares): divide by the cell volume and by averageDensity, so the
     // written field is rho/rho_bar (the SAME convention as standard DTFE). Mass conservation makes the box mean 1 for
@@ -5257,7 +6209,7 @@ void interpolateGrid_phaseSpace(DT &dt,
     // filters drop take their mass along in every build. The stream count is averaged over the nSub^NO_DIM
     // sub-samples below.
     double const auditGridPre = ( massAudit && field.density ) ? gridSum() : -1.;
-    if ( field.density )
+    if ( field.density && !wordMerge )
     {
         Real const invRhoBar = userOptions.averageDensity > Real(0.)
                              ? Real(1.) / userOptions.averageDensity : Real(1.);
@@ -5267,11 +6219,15 @@ void interpolateGrid_phaseSpace(DT &dt,
                 quantities->density[i] *= invRhoBar / cellVolume;
         } );
     }
-    psMassAuditLine( passCtx, massAudit, audit, gridSum, cellVolume, auditGridPre );
+    // (the word merge: the mass words are still the pass's grid, in mass units, so 'post' is that grid as it is)
+    psMassAuditLine( passCtx, massAudit, audit, gridSum, cellVolume, auditGridPre, wordMerge );
 
-    psStreamStats( passCtx, gridsCtx, invSamples, nSamplesPerCell );
+    // (the word merge: the counts and the multiplicity are words and ints until the close-out, which a one-domain
+    // run's statistics follow: DTFE.cpp)
+    if ( !wordMerge ) psStreamStats( passCtx, gridsCtx, invSamples, nSamplesPerCell );
 
-    psExportStreams( passCtx, gridsCtx, invSamples );
+    psExportStreams( passCtx, gridsCtx, invSamples, wordMerge );
+    if ( wordMerge ) psHandOverWords( passCtx, gridsCtx, fx, nSamplesPerCell );
 
     // Record the sub-grid box so the caller (addFromSubgrid) can map results back into the full shared grid.
     for (int d = 0; d < NO_DIM; ++d)

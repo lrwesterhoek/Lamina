@@ -5,9 +5,11 @@ All file naming, grid geometry, units and metadata come from dtfelib.FieldSet; d
 plotted MEAN-NORMALIZED (rho/rho_bar, identical colorbars for both estimators;
 FieldSet auto-detects the on-disk convention). --estimator defaults to
 'dtfe' (this is the standard-DTFE plot script); pass --estimator ps to plot the PS-DTFE
-versions of the same fields -- the divergence and the shear of PS's MEAN flow by default
-(derived from its velocity grid, the quantities standard DTFE stores),
-'--ps-gradient stored' for the PS binary's stream-averaged grids.
+versions of the same fields -- the divergence and the shear of PS's MEAN flow by default, the
+quantities standard DTFE stores (a face-gradient run's own grids, the PS binary's default with
+the exact deposit and the volume weighting; else derived from its velocity grid),
+'--ps-gradient stored' for the PS binary's grids as stored (the stream average <grad v> of a run
+without the face gradient, a face-gradient run's mean flow).
 
     python3 plot/plot_DTFE.py                          # TNG50-4-Dark, full snapshot series
     python3 plot/plot_DTFE.py --snap 99                # single snapshot
@@ -146,8 +148,9 @@ def process_snapshot(args, snap):
             print(f"  velocity arrows: {weighting}-weighted block means of {VELOCITY_QUIVER_STEP}^2 cells ({why})")
 
         # under --estimator ps the divergence and the shear of the MEAN flow by default, the quantities a
-        # standard-DTFE map shows: FieldSet.load(..., mean_field=True) derives them from the PS velocity grid
-        # ('--ps-gradient stored': the binary's PS grids, the stream average <grad v>); standard DTFE reads its grids
+        # standard-DTFE map shows: FieldSet.load(..., mean_field=True) reads a face-gradient run's own grids, else
+        # derives them from the PS velocity grid ('--ps-gradient stored': the binary's PS grids as they are, the
+        # stream average <grad v> of a run without the face gradient); standard DTFE reads its grids
         mean_field = mean_field_wanted(args)
         if PROCESS_DIVERGENCE and fs.has('divergence', mean_field=mean_field):
             fields['divergence'] = fs.load('divergence', mean_field=mean_field)

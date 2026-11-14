@@ -7,7 +7,12 @@
    file header alone. Any such run with '--tessellation-cache' writes them here, EXACTLY (hexadecimal
    floats), keyed by everything that decides which particles are read: the input files' paths and
    size:mtime stamps, the file type, the length unit, the periodicity, the species, a user box, the
-   sub-sampling options.
+   sub-sampling options. Beside them it writes the particles' moments that set the run-wide fixed-point
+   units (fixed_units.h RunMoments: the total mass, the largest |velocity component| and |scalar
+   component|, <v^2>_m), so a run started from the record under DTFE_PS_RUN_UNITS=1 sums in the full
+   run's units, not in units of its own (by default PS-DTFE's passes take units of their own, as the
+   full run's did, and such a run sets none: DTFE.cpp runUnitsSetup). A record of an earlier version
+   has another key, so it is not found: the run reads the particles and writes this version's record.
 
    A later '--grid-window' run (the launcher's exact zoom) whose inputs match then starts WITHOUT reading
    the particles -- 16 s of a TNG100-3 exact zoom -- taking these globals from the record. The particles
@@ -56,7 +61,7 @@ inline std::string hexReal(double const v)
 inline std::string key(User_options const &u)
 {
     std::ostringstream d;
-    d << "globals=1\n";
+    d << "globals=2\n";
     d << "real=" << sizeof(Real) << " dim=" << NO_DIM << '\n';
     d << "input=" << canonicalPath( u.inputFilename ) << ' ' << stamp( u.inputFilename ) << '\n';
     d << "type=" << u.inputFileType << '\n';
@@ -102,6 +107,8 @@ struct Record
     double box[2*NO_DIM] = {};          // the box after the header and the length unit
     double lagBox[2*NO_DIM] = {};       // the bounding box of the initial positions
     double hubble = -1., scaleFactor = -1.;   // the header's, as the reader sets them
+    // the moments of the run-wide fixed-point units (fixed_units.h RunMoments, the same bits)
+    double totalMass = 0., vmax = 0., smax = 0., v2m = 0.;
 };
 
 // Written once the globals exist (DTFE.cpp, periodic PS block): aside, then renamed.
@@ -120,6 +127,10 @@ inline void write(User_options const &u, Record const &r)
     for (int i = 0; i < 2*NO_DIM; ++i) text << hexReal( r.lagBox[i] ) << ( i + 1 < 2*NO_DIM ? "," : "\n" );
     text << "hubble=" << hexReal( r.hubble ) << '\n';
     text << "scaleFactor=" << hexReal( r.scaleFactor ) << '\n';
+    text << "totalMass=" << hexReal( r.totalMass ) << '\n';
+    text << "vmax=" << hexReal( r.vmax ) << '\n';
+    text << "smax=" << hexReal( r.smax ) << '\n';
+    text << "v2m=" << hexReal( r.v2m ) << '\n';
     text << "end\n";
     {   // the same record already there: leave it (a cache folder should not churn)
         std::ifstream old( p.c_str() );
@@ -176,8 +187,12 @@ inline bool read(User_options const &u, Record &r)
         else if ( name == "lagBox" )         { if ( not parseList( val, r.lagBox, 2*NO_DIM ) ) return false; got |= 8; }
         else if ( name == "hubble" )         { r.hubble = std::strtod( val.c_str(), nullptr ); got |= 16; }
         else if ( name == "scaleFactor" )    { r.scaleFactor = std::strtod( val.c_str(), nullptr ); got |= 32; }
+        else if ( name == "totalMass" )      { r.totalMass = std::strtod( val.c_str(), nullptr ); got |= 128; }
+        else if ( name == "vmax" )           { r.vmax = std::strtod( val.c_str(), nullptr ); got |= 256; }
+        else if ( name == "smax" )           { r.smax = std::strtod( val.c_str(), nullptr ); got |= 512; }
+        else if ( name == "v2m" )            { r.v2m = std::strtod( val.c_str(), nullptr ); got |= 1024; }
     }
-    return got == 127 and r.n > 0 and r.averageDensity > 0.;
+    return got == 2047 and r.n > 0 and r.averageDensity > 0.;
 }
 
 // A run that may start without its particles: a phase-space '--grid-window' run over a periodic box

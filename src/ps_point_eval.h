@@ -140,11 +140,17 @@ bool psTessellationCached(User_options const &opts);
 int psGpuFallbacksTaken(bool reset = false);
 
 // The deposit passes since the last reset whose face walk (--face-gradient) ran beside the GPU deposit
-// (DTFE_FACE_WALK_EARLY, ps_interpolation.cc): those whose walk was kept, the walks thrown away after a failed device
-// call, the walks' summed wall time and the part of it their passes still waited for after the device call had
-// returned; reset = true also zeroes them. A pass says so itself only where it prints its grid lines, which the
-// partition loop suppresses, so DTFE() reports the sums after the loop.
+// (the default, auto_tune.h psFaceWalkEarly; ps_interpolation.cc PSEarlyFaceWalk): those whose walk was kept, the
+// walks thrown away after a failed device call, the kept walks' summed wall time and the part of it their passes
+// still waited for after the device call had returned; reset = true also zeroes them. A pass says so itself only
+// where it prints its grid lines, which the partition loop suppresses, so DTFE() reports the sums after the loop.
 void psFaceWalksEarlyTaken(long long &kept, long long &discarded, double &walkSec, double &waitSec, bool reset = false);
+
+// The deposit passes since the last reset whose face sums (--face-gradient) the GPU face kernel made
+// (DTFE_GPU_FACES=1, ps_interpolation.cc), those whose face pass did not make them after a kept GPU deposit (the CPU
+// face walk made the same words instead), and the face passes' summed time in the device's hold; reset = true also
+// zeroes them. Reported by DTFE() after the partition loop, as the walks above.
+void psGpuFacesTaken(long long &made, long long &fellBack, double &sec, bool reset = false);
 
 // Auto-tune: the mean number of streams at a random point of the box -- sum|V_Euler| over
 // sum V_Lagrange of the Lagrangian tessellation -- estimated from up to 256 random Lagrangian

@@ -6,12 +6,14 @@ simulation- and snapshot-agnostic. Snapshots without fields on disk are skipped.
     python3 plot/plot_velDiv_den.py                    # all snapshots, TNG50-4-Dark, auto method
     python3 plot/plot_velDiv_den.py --estimator dtfe --snap 99
 
-PS-DTFE grids: the divergence is the MEAN FIELD div<v> by default -- the FFT divergence of the PS
-velocity grid (FieldSet.load('divergence', mean_field=True)), the quantity standard DTFE stores and linear theory
-predicts (theta = -a H f delta for the mean flow). The binary's own PS grid is the stream average of each stream's
-divergence <div v>, whose box mean is +40 km/s/Mpc at TNG100-3-Dark z=1 from multi-stream cells (dtfelib/io.py, the
-note above FIELDS), which the through-origin fit below cannot absorb; '--ps-gradient stored' still uses it. The
-summary file names which one a PS run used.
+PS-DTFE grids: the divergence is the MEAN FIELD div<v> by default (FieldSet.load('divergence', mean_field=True)),
+the quantity standard DTFE stores and linear theory predicts (theta = -a H f delta for the mean flow): a
+face-gradient run's own grid (the PS binary's default with the exact deposit and the volume weighting, from exact
+face sums), else the FFT divergence of the PS velocity grid. The PS grid of a run without the face gradient is the
+stream average of each stream's divergence <div v>, whose box mean is +40 km/s/Mpc at TNG100-3-Dark z=1 from
+multi-stream cells (dtfelib/io.py, the note above FIELDS), which the through-origin fit below cannot absorb;
+'--ps-gradient stored' still uses it (a face-gradient run's stored grid is the mean field either way). The summary
+file names which one a PS run used.
 """
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
@@ -210,8 +212,13 @@ def create_residual_plot(residual_slice, slice_dim, box_size, residual_norm, red
     save_figure(fig, filepath, bbox_inches='tight', facecolor='white')
     plt.close(fig)
 
-def _ps_divergence_source(args):
-    """Which divergence a PS-DTFE run of this script uses, for the log and the summary file."""
+def _ps_divergence_source(args, fs=None):
+    """Which divergence a PS-DTFE run of this script uses, for the log and the summary file. fs: the grids read; a
+    face-gradient run's stored grid is the mean field itself, read with either '--ps-gradient' choice."""
+    choice = "mean-field" if mean_field_wanted(args) else "stored"
+    if fs is not None and fs.face_gradient:
+        return (f"mean field div<v> (the binary's grid, from exact face sums: a face-gradient run; "
+                f"--ps-gradient {choice})")
     if mean_field_wanted(args):
         return "mean field div<v> (FFT divergence of the velocity grid; --ps-gradient mean-field)"
     return "stored stream average <div v> (the binary's grid; --ps-gradient stored)"
@@ -234,11 +241,12 @@ def process_snapshot(snapshot, redshift, args):
             fs = FieldSet(snapdir, method='dtfe', averaged=not args.raw)
         print("Loading fields")
         density_field = fs.density(units='mean')   # rho/rho_bar for BOTH methods
-        # the mean-field div<v> for BOTH methods by default: standard DTFE's stored grid, PS's computed from its
-        # velocity grid (module docstring); '--ps-gradient stored' reads PS's stream-averaged grid instead
+        # the mean-field div<v> for BOTH methods by default: standard DTFE's stored grid, PS's stored one of a
+        # face-gradient run, else computed from its velocity grid (module docstring); '--ps-gradient stored' reads the
+        # PS grid as stored (the stream average of a run without the face gradient)
         velDiv_field = fs.load('divergence', mean_field=mean_field_wanted(args))
         if fs.method == 'ps':
-            print(f"  PS divergence: {_ps_divergence_source(args)}")
+            print(f"  PS divergence: {_ps_divergence_source(args, fs)}")
     except FileNotFoundError as e:
         print(f"skipping snapshot {snapshot} (no {args.method} fields): {e}")
         return None
@@ -319,7 +327,7 @@ def process_snapshot(snapshot, redshift, args):
             f.write(f"Simulation: {args.sim}, estimator: {fs.method}, grids: {fs.prefix.rstrip('.')}*"
                     f"{', raw' if args.raw else ''}\n")
             if fs.method == 'ps':                   # (a standard-DTFE summary is unchanged: its grid is the mean field)
-                f.write(f"Divergence: {_ps_divergence_source(args)}\n")
+                f.write(f"Divergence: {_ps_divergence_source(args, fs)}\n")
             f.write(f"{'='*50}\n\n")
             f.write("Cosmological Parameters:\n")
             f.write(f"  Scale factor a = {a_scale:.4f}\n")

@@ -30,6 +30,16 @@
 //    T15 a tet cut by a non-periodic grid face keeps only its inside share (exact, both paths, and
 //        sampled): a --box region of a larger cloud must not collect the outside mass on its faces;
 //        T15c with large tets, whose samples beyond the grid the kernel counts column by column
+//    T16a the GPU face kernel's device probe (metal/ps_face.metal faceProbe, DTFE_GPU_FACES=1; its design's K11):
+//        division, fma, products, sums, the cross term, rint, floor, the face sweep's floor index and the fixed-point
+//        guard and integer, bit for bit against the CPU's float operations on adversarial and random operands
+//        (FACE_PROBE_N, default 2^20), normal and subnormal ones apart, the guard also against psFxAdd's double rule
+//    T16 the face kernel itself, faceSweepItems: its face words (S, N, P per side cell and slot) against
+//        face_sweep_f32.h's fsDepositTet on the CPU word for word, and its dropped shares and plane-count mismatches
+//        (none) against the CPU's: periodic with a sub-box across the seam and NaN / huge shares, not periodic with
+//        tetrahedra at and beyond the grid's ends, a one-layer window, a lattice with vertex levels on the planes
+//        (periodic and not), T7's stress set; a record whose plane count is wrong is counted and adds nothing. On the
+//        binaries' run-time library (the safe math mode), its FS_REGISTERS form and metal/ps_face.metallib if built
 //
 //  Every test runs the production kernel, 'depositFields' (T14 also 'depositExactItems'; tests without velocities switch its
 //  moment grids off). Its inside test is exact, the reference's (cpuDeposit) a float test with a
@@ -40,6 +50,7 @@
 #define NS_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
 #include <Metal/Metal.hpp>
+#include <objc/runtime.h>   // T16: whether this macOS has the face library's math-mode selectors
 
 #include <cstdio>
 #include <cstdint>
@@ -53,9 +64,11 @@
 #include <sstream>
 #include <random>
 #include <algorithm>
+#include <limits>
 
 #include "../src/CGAL_triangulation/ps_deposit_params.h"
 #include "../src/CGAL_triangulation/gpu_host.h"   // psBuildExactItemMap: the exact items' map, as the hosts build it
+#include "../src/CGAL_triangulation/face_sweep_f32.h"   // T16: the canonical face arithmetic the face kernel shares
 using DepositParams = PSDepositParams;   // shared host struct; the harness sets all field flags to 1
 
 static int  g_pass = 0, g_fail = 0;
@@ -234,11 +247,17 @@ struct Gpu {
         { std::ifstream mf("metal/ps_deposit.metallib");
           if (mf.good()) lib=dev->newLibrary(NS::URL::fileURLWithPath(NS::String::string("metal/ps_deposit.metallib",NS::UTF8StringEncoding)),&err); }
         if(!lib){
-            // the shared exact clip helpers and the parameter blocks come first, as the Makefile prepends them when it
-            // embeds the source
-            std::ifstream inc("metal/exact_clip.metal.inc"); std::ifstream prm("src/CGAL_triangulation/ps_kernel_params.h");
-            std::ifstream f(srcPath); std::stringstream ss; ss<<inc.rdbuf()<<"\n"<<prm.rdbuf()<<"\n"<<f.rdbuf(); std::string src=ss.str();
+            // the shared exact clip helpers, the run-wide fixed-point words, the parameter blocks and the PS kernels'
+            // shared guard, 64-bit add and items' map reader come first, as the Makefile prepends them when it embeds
+            // the source
+            std::ifstream inc("metal/exact_clip.metal.inc"); std::ifstream fw("metal/fixed_words.metal.inc");
+            std::ifstream prm("src/CGAL_triangulation/ps_kernel_params.h");
+            std::ifstream cmn("metal/ps_common.metal.inc");
+            std::ifstream f(srcPath); std::stringstream ss;
+            ss<<inc.rdbuf()<<"\n"<<fw.rdbuf()<<"\n"<<prm.rdbuf()<<"\n"<<cmn.rdbuf()<<"\n"<<f.rdbuf(); std::string src=ss.str();
             if(src.empty()) return false;
+            // the 64-bit words (P.fxWords 0 below): the binaries compile one library per word size
+            src="#define PS_FX_WORDS 0\n"+src;
             lib=dev->newLibrary(NS::String::string(src.c_str(),NS::UTF8StringEncoding),(MTL::CompileOptions*)nullptr,&err);
         }
         if(!lib){ printf("kernel lib load fail: %s\n", err?err->localizedDescription()->utf8String():"?"); return false; }
@@ -469,6 +488,10 @@ static void makeParams(DepositParams& P,int n,float box,int nSub,int periodic){
     // binary's suites -- tests/ps_fixed_moments_check.sh; this harness compares the float grids with its CPU reference)
     P.fxMask=0; for(int g=0;g<PS_FX_N;++g) P.fxScale[g]=0.f;
     P.debugNoAtomic=0;      // every atomic issued (PS_GPU_DEBUG_NOATOMIC is the binaries' timing experiment)
+    // the 64-bit mass words in the call's own unit (run(): psMassFixedScale), as PS-DTFE runs them by default; the
+    // run-wide 128-bit words (fxWords 2, DTFE_PS_RUN_UNITS=1) are exercised by the binaries' suites
+    // (tests/ps_fixed_moments_check.sh, tests/split_bytes_check.sh)
+    P.fxWords=0; P.fxCapBits=0;
 }
 static std::vector<float> linVel(const std::vector<float>& verts){
     // simple linear velocity field v = (2x - y, 0.5z, -x + y) at each vertex
@@ -1185,6 +1208,718 @@ static void t15_regionFace(Gpu& g){
     }
 }
 
+// ------------------------------------------------------------------ T16: the GPU face kernel (DTFE_GPU_FACES=1)
+// metal/ps_face.metal against src/CGAL_triangulation/face_sweep_f32.h on the CPU, the arithmetic the two share. The
+// face library is compiled as the binaries compile it (ps_metal_host.cc facePipesInit): fixed_words.metal.inc,
+// ps_kernel_params.h, ps_common.metal.inc, face_sweep_f32.h and ps_face.metal behind "#define PS_FX_WORDS 0", in the
+// safe math mode (fastMathEnabled false; the math-mode and precise-functions selectors where this macOS has them).
+// Each test runs on that library, on its register form ("#define FS_REGISTERS 1" in front), and on
+// metal/ps_face.metallib where build_prototype.sh made one (offline, -fno-fast-math).
+
+static uint32_t faceBits(float const x) { uint32_t u; std::memcpy(&u, &x, 4); return u; }
+static float faceFloat(uint32_t const u) { float x; std::memcpy(&x, &u, 4); return x; }
+static bool faceIsNan(uint32_t const u) { return (u & 0x7f800000u) == 0x7f800000u && (u & 0x007fffffu) != 0u; }
+static bool faceIsSub(float const x) { return x != 0.f && std::fabs(x) < 1.17549435e-38f; }   // (subnormal)
+
+struct FaceLib {
+    std::string name;                                   // how the library was made (the verdicts' tag)
+    MTL::ComputePipelineState* sweep = nullptr;          // faceSweepItems
+    MTL::ComputePipelineState* probe = nullptr;          // faceProbe
+};
+
+static bool faceReadText(char const* path, std::string& out) {
+    std::ifstream f(path);
+    if (!f.good()) return false;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    out = ss.str();
+    return true;
+}
+
+static bool facePipelines(Gpu& g, MTL::Library* lib, FaceLib& f, std::string& err) {
+    char const* const names[2] = { "faceSweepItems", "faceProbe" };
+    for (int k = 0; k < 2; ++k) {
+        NS::Error* e = nullptr;
+        MTL::Function* fn = lib->newFunction(NS::String::string(names[k], NS::UTF8StringEncoding));
+        if (!fn) { err = std::string("kernel '") + names[k] + "' not found"; return false; }
+        MTL::ComputePipelineState* p = g.dev->newComputePipelineState(fn, &e);
+        fn->release();
+        if (!p) {
+            err = std::string("pipeline ") + names[k] + ": " + (e ? e->localizedDescription()->utf8String() : "?");
+            return false;
+        }
+        (k == 0 ? f.sweep : f.probe) = p;
+    }
+    return true;
+}
+
+// the binaries' way: the source at run time, the safe math mode (registers: the FS_REGISTERS form)
+static bool faceLibSource(Gpu& g, bool const registers, FaceLib& f, std::string& err) {
+    char const* const parts[5] = { "metal/fixed_words.metal.inc", "src/CGAL_triangulation/ps_kernel_params.h",
+                                   "metal/ps_common.metal.inc", "src/CGAL_triangulation/face_sweep_f32.h",
+                                   "metal/ps_face.metal" };
+    std::string src = std::string("#define PS_FX_WORDS 0\n") + (registers ? "#define FS_REGISTERS 1\n" : "");
+    for (char const* p : parts) {
+        std::string t;
+        if (!faceReadText(p, t)) { err = std::string("cannot read ") + p; return false; }
+        src += t;
+        src += "\n";
+    }
+    MTL::CompileOptions* opt = MTL::CompileOptions::alloc()->init();
+    if (!opt) { err = "no compile options"; return false; }
+    opt->setFastMathEnabled(false);
+    Class const oc = object_getClass(reinterpret_cast<id>(opt));
+    if (class_respondsToSelector(oc, sel_registerName("setMathMode:"))) opt->setMathMode(MTL::MathModeSafe);
+    if (class_respondsToSelector(oc, sel_registerName("setMathFloatingPointFunctions:")))
+        opt->setMathFloatingPointFunctions(MTL::MathFloatingPointFunctionsPrecise);
+    NS::Error* e = nullptr;
+    MTL::Library* lib = g.dev->newLibrary(NS::String::string(src.c_str(), NS::UTF8StringEncoding), opt, &e);
+    opt->release();
+    if (!lib) { err = std::string("compile: ") + (e ? e->localizedDescription()->utf8String() : "?"); return false; }
+    f.name = registers ? "run-time library, FS_REGISTERS" : "run-time library";
+    bool const ok = facePipelines(g, lib, f, err);
+    lib->release();
+    return ok;
+}
+
+// metal/ps_face.metallib (build_prototype.sh, offline); false with err empty when there is none
+static bool faceLibOffline(Gpu& g, FaceLib& f, std::string& err) {
+    { std::ifstream mf("metal/ps_face.metallib"); if (!mf.good()) return false; }
+    NS::Error* e = nullptr;
+    MTL::Library* lib = g.dev->newLibrary(NS::URL::fileURLWithPath(NS::String::string("metal/ps_face.metallib",
+                                                                                       NS::UTF8StringEncoding)), &e);
+    if (!lib) { err = std::string("load: ") + (e ? e->localizedDescription()->utf8String() : "?"); return false; }
+    f.name = "offline metal/ps_face.metallib";
+    bool const ok = facePipelines(g, lib, f, err);
+    lib->release();
+    return ok;
+}
+
+// faceProbe's CPU twin, slot for slot (metal/ps_face.metal lists them): C++ float operations, the contraction off
+static void faceProbeRef(float const* q, uint32_t* o) {
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
+    float const a = q[0], b = q[1], c = q[2], d = q[3];
+    o[0] = faceBits(a / b);
+    o[1] = faceBits(std::fma(a, b, c));
+    o[2] = faceBits(a * b);
+    float const ad = a * d;
+    float const adc = ad + c;
+    o[3] = faceBits(adc);
+    o[4] = faceBits(a + c);
+    o[5] = faceBits(a - c);
+    float const cd = c * d;
+    float const cr = std::fma(a, b, -cd);
+    o[6] = faceBits(cr);
+    float const area = d + cr;
+    o[7] = faceBits(area);
+    o[8] = faceBits(std::rint(a));
+    o[9] = faceBits(std::floor(a));
+    int k = 0;
+    o[10] = fsFloorIndex(a, k) ? uint32_t(k) : 0x80000000u;
+    float const p = a * c;
+    bool const ok = (faceBits(p) & 0x7fffffffu) < 0x5f000000u;
+    uint64_t const r = ok ? uint64_t(int64_t(std::llrint(double(p)))) : 0ull;
+    o[11] = ok ? 1u : 0u;
+    o[12] = uint32_t(r);
+    o[13] = uint32_t(r >> 32);
+}
+
+// T16a (the kernel's design K11): faceProbe's 14 outputs against faceProbeRef, bit for bit (a NaN equal to any NaN:
+// its payload is no share, the guard drops it on both devices), on adversarial and random operands: FACE_PROBE_N
+// random sets (default 2^20; the design's 10^8 by FACE_PROBE_N=100000000, in batches of 2^22). Verdicts by group:
+// the arithmetic of normal operands (division, fma, products, sums, the cross term and its sum), the contraction
+// across statements (slot 3: none), the rounding functions, the fixed-point guard and integer (also against the CPU
+// psFxAdd's double rule where the unit c is a power of two, as every face unit is), and the same arithmetic where an
+// operand or a result is subnormal. The device flushes those to zero, so the CPU's reference runs under the same
+// rule (face_sweep_f32.h fsFlushed); without it the three arithmetic groups differ in their subnormal cases.
+static void t16a_faceProbe(Gpu& g, FaceLib const& f) {
+    if (!f.probe) { printf("  [T16a] faceProbe missing (%s), skipped\n", f.name.c_str()); return; }
+    std::vector<float> fixedCases;
+    auto add = [&](float a, float b, float c, float d) { fixedCases.push_back(a); fixedCases.push_back(b);
+                                                         fixedCases.push_back(c); fixedCases.push_back(d); };
+    float const fInf = std::numeric_limits<float>::infinity(), fNan = std::numeric_limits<float>::quiet_NaN();
+    float const fSub = 1.0e-40f, fTiny = 1.4e-45f, fMin = 1.17549435e-38f, fBig = 3.0e38f;
+    float const sp[] = { 0.f, -0.f, 1.f, -1.f, 0.5f, -0.5f, 1.5f, 2.5f, -2.5f, 3.f, 7.f, 0.1f, 1e9f, -1e9f,
+                         999999936.f, -999999936.f, 1e-9f, fSub, -fSub, fTiny, fMin, -fMin, fBig, -fBig, fInf, -fInf,
+                         fNan, 8388608.f, 8388607.5f, 16777215.f, 4194304.5f, 1.f / 3.f, 6.f };
+    for (float a : sp) for (float b : sp) add(a, b, 1.f, b);   // division, fma with c = 1
+    for (float a : sp) for (float c : sp) add(a, 3.f, c, 0.25f);   // sums, differences, rint, floor
+    // a fused result differs from the rounded product + c: (1 + 2^-12)^2 = 1 + 2^-11 + 2^-24 rounds (to even) to
+    // 1 + 2^-11, so fma(a, a, -(1 + 2^-11)) = 2^-24 where a * a + c = 0 (slots 1, 3, 6)
+    float const e12 = 1.f + 0x1p-12f;
+    add(e12, e12, -(1.f + 0x1p-11f), e12);
+    add(-e12, e12, 1.f + 0x1p-11f, e12);
+    // the guard at 2^63: a * 2^40 just below, at and above it (slots 11-13), and the units' range of powers of two
+    for (int s = -3; s <= 3; ++s) add(std::ldexp(1.f, 23) + float(s) * 0.5f, 1.f, std::ldexp(1.f, 40), 1.f);
+    add(std::nextafter(std::ldexp(1.f, 23), 0.f), 1.f, std::ldexp(1.f, 40), 1.f);
+    add(-std::ldexp(1.f, 23), 1.f, std::ldexp(1.f, 40), 1.f);
+    add(std::nextafter(-std::ldexp(1.f, 23), 0.f), 1.f, std::ldexp(1.f, 40), 1.f);
+    std::mt19937 rng(16161);
+    std::uniform_real_distribution<float> U(-1.f, 1.f), Ue(0.f, 1.f);
+    std::uniform_int_distribution<uint32_t> Ub(0u, 0xffffffffu);
+    std::uniform_int_distribution<int> Uk(-30, 70);
+    auto finiteBits = [&]() {
+        for (;;) { uint32_t const u = Ub(rng); if ((u & 0x7f800000u) != 0x7f800000u) return faceFloat(u); }
+    };
+    auto makeCase = [&](float* q, size_t const i) {
+        switch (i % 6) {
+            case 0: for (int k = 0; k < 4; ++k) q[k] = finiteBits(); break;          // every finite float alike
+            case 1: for (int k = 0; k < 4; ++k) q[k] = 1000.f * U(rng); break;       // the sweep's coordinates
+            case 2: {   // a product's rounding error: c = -round(a b), d = b (the fused and the unfused differ)
+                float const a = 0.5f + 1.5f * Ue(rng), b = 0.5f + 1.5f * Ue(rng);
+                q[0] = a; q[1] = b; q[2] = -(a * b); q[3] = b; break; }
+            case 3: {   // a share times a unit 2^k, up to and beyond 2^63 units
+                int const k = Uk(rng);
+                q[0] = std::ldexp(U(rng), 63 - k + int(Ue(rng) * 3.f) - 1); q[1] = 1.f + U(rng);
+                q[2] = std::ldexp(1.f, k); q[3] = U(rng); break; }
+            case 4: {   // subnormal operands and results
+                q[0] = std::ldexp(U(rng), -126 - int(Ue(rng) * 23.f));
+                q[1] = std::ldexp(U(rng), int(Ue(rng) * 40.f) - 20);
+                q[2] = std::ldexp(U(rng), -126 - int(Ue(rng) * 23.f));
+                q[3] = std::ldexp(U(rng), -int(Ue(rng) * 30.f));
+                break; }
+            default: {  // divisions near their rounding boundaries: an integer over a small odd divisor, and 1/h
+                q[0] = float(int(Ue(rng) * 1e6f)) + 0.5f * float(int(Ue(rng) * 3.f));
+                q[1] = (i % 12 == 5) ? float(1 + 2 * int(Ue(rng) * 50.f)) : 0.01f + Ue(rng);
+                q[2] = 1000.f * U(rng); q[3] = U(rng); break; }
+        }
+    };
+    long const nRandom = std::max(0L, getenv("FACE_PROBE_N") ? atol(getenv("FACE_PROBE_N")) : (1L << 20));
+    size_t const nFixed = fixedCases.size() / PS_FACE_PROBE_IN;
+    size_t const total = nFixed + size_t(nRandom), batch = size_t(1) << 22;
+    // mismatch counts by group: 0 arithmetic (slots 0-2, 4-7), 1 contraction (3), 2 rounding (8-10), 3 guard and
+    // integer (11-13), 4 slots 0-10 where an operand or a result is subnormal; 5 the guard against the double rule
+    // where c is a power of two
+    long bad[6] = { 0, 0, 0, 0, 0, 0 }, seen[6] = { 0, 0, 0, 0, 0, 0 };
+    char first[6][200] = { "", "", "", "", "", "" };
+    std::vector<float> in;
+    std::vector<uint32_t> ref(PS_FACE_PROBE_OUT);
+    bool failed = false;
+    for (size_t b0 = 0; b0 < total && !failed; b0 += batch) {
+        size_t const n = std::min(batch, total - b0);
+        in.assign(n * PS_FACE_PROBE_IN, 0.f);
+        for (size_t i = 0; i < n; ++i) {
+            size_t const id = b0 + i;
+            if (id < nFixed)
+                std::memcpy(&in[i * PS_FACE_PROBE_IN], &fixedCases[id * PS_FACE_PROBE_IN], PS_FACE_PROBE_IN * 4);
+            else makeCase(&in[i * PS_FACE_PROBE_IN], id);
+        }
+        MTL::Buffer* bIn = g.dev->newBuffer(in.data(), in.size() * 4, MTL::ResourceStorageModeShared);
+        MTL::Buffer* bOut = g.dev->newBuffer(n * PS_FACE_PROBE_OUT * 4, MTL::ResourceStorageModeShared);
+        uint32_t const nCase = uint32_t(n);
+        MTL::CommandBuffer* cb = g.q->commandBuffer();
+        MTL::ComputeCommandEncoder* e = cb->computeCommandEncoder();
+        e->setComputePipelineState(f.probe);
+        e->setBuffer(bIn, 0, 0); e->setBuffer(bOut, 0, 1); e->setBytes(&nCase, sizeof nCase, 2);
+        NS::UInteger tg = f.probe->maxTotalThreadsPerThreadgroup(); if (tg > 256) tg = 256;
+        e->dispatchThreads(MTL::Size(n, 1, 1), MTL::Size(tg, 1, 1));
+        e->endEncoding(); cb->commit(); cb->waitUntilCompleted();
+        if (cb->status() == MTL::CommandBufferStatusError) {
+            printf("  [T16a] command buffer failed: %s\n",
+                   cb->error() ? cb->error()->localizedDescription()->utf8String() : "?");
+            failed = true;
+        }
+        uint32_t const* out = static_cast<uint32_t const*>(bOut->contents());
+        for (size_t i = 0; i < n && !failed; ++i) {
+            float const* q = &in[i * PS_FACE_PROBE_IN];
+            fsFlushed([&] { faceProbeRef(q, ref.data()); });   // (the device's subnormal rule)
+            uint32_t const* o = out + i * PS_FACE_PROBE_OUT;
+            float const a = q[0], b = q[1], c = q[2], d = q[3];
+            bool const subCase = faceIsSub(a) || faceIsSub(b) || faceIsSub(c) || faceIsSub(d) || faceIsSub(a * b)
+                                 || faceIsSub(a * d) || faceIsSub(c * d) || faceIsSub(a / b)
+                                 || faceIsSub(std::fma(a, b, c))
+                                 || faceIsSub(a + c) || faceIsSub(a - c) || faceIsSub(faceFloat(ref[6]))
+                                 || faceIsSub(faceFloat(ref[7]));
+            for (int s = 0; s < PS_FACE_PROBE_OUT; ++s) {
+                int const grp = ( subCase && s <= 10 ) ? 4 : s == 3 ? 1 : s <= 7 ? 0 : s <= 10 ? 2 : 3;
+                bool const floatSlot = s <= 9;
+                bool const same = o[s] == ref[s] || (floatSlot && faceIsNan(o[s]) && faceIsNan(ref[s]));
+                ++seen[grp];
+                if (!same) {
+                    if (bad[grp]++ == 0)
+                        snprintf(first[grp], sizeof first[grp], "slot %d of (%a, %a, %a, %a): GPU 0x%08x, CPU 0x%08x",
+                                 s, double(a), double(b), double(c), double(d), o[s], ref[s]);
+                }
+            }
+            // the CPU deposit's own rule (ps_interpolation.cc psFxAdd: |double(v) x unit| < 2^63, llrint) where the
+            // unit c is a normal power of two
+            if ((faceBits(c) & 0x007fffffu) == 0u && c > 0.f && !faceIsSub(c) && std::isfinite(c)
+                && std::isfinite(a)) {
+                double const pd = double(a) * double(c);
+                bool const okd = std::fabs(pd) < 9223372036854775808.0;
+                uint64_t const rd = okd ? uint64_t(int64_t(std::llrint(pd))) : 0ull;
+                ++seen[5];
+                if (o[11] != (okd ? 1u : 0u) || o[12] != uint32_t(rd) || o[13] != uint32_t(rd >> 32)) {
+                    if (bad[5]++ == 0)
+                        snprintf(first[5], sizeof first[5],
+                                 "(%a x %a): GPU ok %u int 0x%08x%08x, psFxAdd ok %d int 0x%016llx",
+                                 double(a), double(c), o[11], o[13], o[12], int(okd), (unsigned long long)rd);
+                }
+            }
+        }
+        bIn->release(); bOut->release();
+    }
+    if (failed) {
+        verdict(("T16a face probe (" + f.name + ")").c_str(), false, "the probe's command buffer failed");
+        return;
+    }
+    char const* const what[6] = { "division, fma, products, sums", "no contraction across statements",
+                                  "rint, floor, fsFloorIndex", "the guard and the integer",
+                                  "subnormal operands and results", "the guard == psFxAdd (2^k units)" };
+    for (int grp = 0; grp < 6; ++grp) {
+        snprintf(detail, sizeof detail, "%ld of %ld values differ%s%s (%zu cases)", bad[grp], seen[grp],
+                 bad[grp] ? "; first: " : "", first[grp], total);
+        verdict(("T16a " + std::string(what[grp]) + " (" + f.name + ")").c_str(), bad[grp] == 0 && seen[grp] > 0,
+                detail);
+    }
+}
+
+// --- T16: faceSweepItems against fsDepositTet, word for word ---
+// one tetrahedron's canonical inputs: E[12], vG[9], v0[3], rho (as psFaceRecordPush takes them from the walk)
+static int const kFaceIn = 25;
+
+// the face words of the CPU (ps_interpolation.cc PSFaceF32Sink + psFxAdd's 64-bit words: the share times the unit in
+// double, the guard |p| < 2^63, llrint; a dropped share counted per accumulator)
+struct FaceWordSink {
+    FsGrid const& g;
+    std::vector<int64_t>& S;
+    std::vector<int64_t>& N;
+    std::vector<int64_t>& P;
+    float sc[3];
+    unsigned long long drops[3];
+    void add(std::vector<int64_t>& w, size_t const at, float const v, int const k) {
+        double const p = double(v) * double(sc[k]);
+        if (!(std::fabs(p) < 9223372036854775808.0)) { ++drops[k]; return; }
+        int64_t const q = int64_t(std::llrint(p));
+        w[at] = int64_t(uint64_t(w[at]) + uint64_t(q));
+    }
+    void piece(int const a, int const below, int const above, int const lu, int const lw, float const s0,
+               float const s1, float const s2, float const n, float const p) {
+        int u, w;
+        fsPlaneAxes(a, u, w);
+        long cl[3] = { 0, 0, 0 };
+        cl[u] = lu;
+        cl[w] = lw;
+        for (int c2 = 0; c2 < 2; ++c2) {
+            cl[a] = c2 == 0 ? below : above;
+            if (cl[a] < 0) continue;
+            size_t const flat = (size_t(cl[0]) * size_t(g.subDims[1]) + size_t(cl[1])) * size_t(g.subDims[2])
+                                + size_t(cl[2]);
+            size_t const slot = size_t((c2 == 0 ? 1 : 0) * 3 + a);
+            add(S, flat * 18 + slot * 3 + 0, s0, 0);
+            add(S, flat * 18 + slot * 3 + 1, s1, 0);
+            add(S, flat * 18 + slot * 3 + 2, s2, 0);
+            add(N, flat * 6 + slot, n, 1);
+            add(P, flat * 6 + slot, p, 2);
+        }
+    }
+};
+// ... and the bounds the units come from: the shares' magnitudes, summed (both sides), the finite ones
+struct FaceBoundSink {
+    double b[3] = { 0., 0., 0. };
+    void piece(int, int const below, int const above, int, int, float const s0, float const s1, float const s2,
+               float const n, float const p) {
+        double const m = double(below >= 0) + double(above >= 0);
+        double const s = std::fabs(double(s0)) + std::fabs(double(s1)) + std::fabs(double(s2));
+        if (std::isfinite(s)) b[0] += m * s;
+        if (std::isfinite(n)) b[1] += m * std::fabs(double(n));
+        if (std::isfinite(p)) b[2] += m * std::fabs(double(p));
+    }
+};
+
+static void faceTetOf(FsGrid const& g, float const* in, FsTet& t) {
+    float E[4][3], vG[3][3], v0[3];
+    for (int v = 0; v < 4; ++v) for (int d = 0; d < 3; ++d) E[v][d] = in[3 * v + d];
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) vG[i][j] = in[12 + 3 * i + j];
+    for (int j = 0; j < 3; ++j) v0[j] = in[21 + j];
+    fsTetSet(E, g, vG, v0, in[24], t);
+}
+
+// the records as the GPU extraction builds them (ps_interpolation.cc psFaceRecordPush: the plane counts by fsPlanes
+// on the frames, no record without a plane), and their items (the counts' sum: the items' map with blockCells 1)
+static void faceRecords(FsGrid const& g, std::vector<float> const& in, std::vector<float>& recs,
+                        std::vector<uint64_t>& items, size_t& nItems) {
+    recs.clear(); items.clear(); nItems = 0;
+    for (size_t t = 0; t * kFaceIn < in.size(); ++t) {
+        float const* x = &in[t * kFaceIn];
+        uint32_t cnt[3];
+        fsFlushed([&] {   // (the device's subnormal rule, as psFaceRecordPush)
+            FsTet ft;
+            faceTetOf(g, x, ft);
+            for (int a = 0; a < 3; ++a) { int k0 = 0; cnt[a] = uint32_t(fsPlanes(ft, g, a, k0)); }
+        });
+        if (cnt[0] == 0u && cnt[1] == 0u && cnt[2] == 0u) continue;
+        size_t const at = recs.size();
+        recs.resize(at + PS_FACE_REC_FLOATS, 0.f);
+        float* r = &recs[at];
+        for (int k = 0; k < 12; ++k) r[PS_FACE_REC_E + k] = x[k];
+        for (int k = 0; k < 9; ++k) r[PS_FACE_REC_VG + k] = x[12 + k];
+        for (int k = 0; k < 3; ++k) r[PS_FACE_REC_V0 + k] = x[21 + k];
+        r[PS_FACE_REC_RHO] = x[24];
+        std::memcpy(r + PS_FACE_REC_COUNT, cnt, sizeof cnt);
+        items.push_back(uint64_t(cnt[0]) + cnt[1] + cnt[2]);
+        nItems += size_t(items.back());
+    }
+}
+
+// the CPU's words of the records (fsTetSet on each record's floats, fsDepositTet)
+static void faceCpuWords(FsGrid const& g, std::vector<float> const& recs, float const sc[3], std::vector<int64_t>& S,
+                         std::vector<int64_t>& N, std::vector<int64_t>& P, unsigned long long drops[3]) {
+    size_t const nCell = size_t(g.subDims[0]) * size_t(g.subDims[1]) * size_t(g.subDims[2]);
+    S.assign(nCell * 18, 0); N.assign(nCell * 6, 0); P.assign(nCell * 6, 0);
+    FaceWordSink sink{ g, S, N, P, { sc[0], sc[1], sc[2] }, { 0ull, 0ull, 0ull } };
+    for (size_t r = 0; r * PS_FACE_REC_FLOATS < recs.size(); ++r) {
+        float in[kFaceIn];
+        float const* x = &recs[r * PS_FACE_REC_FLOATS];
+        for (int k = 0; k < 12; ++k) in[k] = x[PS_FACE_REC_E + k];
+        for (int k = 0; k < 9; ++k) in[12 + k] = x[PS_FACE_REC_VG + k];
+        for (int k = 0; k < 3; ++k) in[21 + k] = x[PS_FACE_REC_V0 + k];
+        in[24] = x[PS_FACE_REC_RHO];
+        fsFlushed([&] {   // (the device's subnormal rule, as psDepositFaces' canonical branch)
+            FsTet t;
+            faceTetOf(g, in, t);
+            fsDepositTet(t, g, sink);
+        });
+    }
+    for (int k = 0; k < 3; ++k) drops[k] = sink.drops[k];
+}
+
+// the GPU's words: faceSweepItems over the items in command buffers of 'chunk' items (each its own itemBase, as
+// the host's gpuRunPass chunks), the counters summed over them. False when a command buffer failed.
+static bool faceGpuWords(Gpu& g, FaceLib const& f, FsGrid const& G, std::vector<float> const& recs,
+                         std::vector<uint64_t> const& items, size_t const nItems, float const sc[3],
+                         size_t const chunk, std::vector<int64_t>& S, std::vector<int64_t>& N,
+                         std::vector<int64_t>& P, uint32_t cnt[4], double* sec = nullptr) {
+    size_t const nCell = size_t(G.subDims[0]) * size_t(G.subDims[1]) * size_t(G.subDims[2]);
+    size_t const nRec = recs.size() / PS_FACE_REC_FLOATS;
+    S.assign(nCell * 18, 0); N.assign(nCell * 6, 0); P.assign(nCell * 6, 0);
+    for (int k = 0; k < 4; ++k) cnt[k] = 0u;
+    if (nItems == 0) return true;
+    std::vector<uint32_t> map(psExactItemMapWords(nRec, nItems));
+    psBuildExactItemMap(items, 1u, nItems, map.data());
+    auto zbuf = [&](size_t n) { MTL::Buffer* b = g.dev->newBuffer(n, MTL::ResourceStorageModeShared);
+                                std::memset(b->contents(), 0, n); return b; };
+    MTL::Buffer* bR = g.dev->newBuffer(recs.data(), recs.size() * 4, MTL::ResourceStorageModeShared);
+    MTL::Buffer* bM = g.dev->newBuffer(map.data(), map.size() * 4, MTL::ResourceStorageModeShared);
+    MTL::Buffer* bS = zbuf(nCell * 18 * 8);
+    MTL::Buffer* bN = zbuf(nCell * 6 * 8);
+    MTL::Buffer* bP = zbuf(nCell * 6 * 8);
+    MTL::Buffer* bC = zbuf(size_t(FX_DROP_SLOTS) * 4);   // (as the host's: gpuRunPass' FX_DROP_SLOTS words)
+    PSFaceParams FP{};
+    for (int d = 0; d < 3; ++d) {
+        FP.lo[d] = G.lo[d]; FP.h[d] = G.h[d]; FP.ih[d] = G.ih[d];
+        FP.nGrid[d] = G.n[d]; FP.subOrigin[d] = G.subOrigin[d]; FP.subDims[d] = G.subDims[d];
+        FP.scale[d] = sc[d]; FP.capBits[d] = 0u;
+    }
+    FP.periodic = G.periodic;
+    FP.fxWords = 0u;
+    FP.nRec = uint32_t(nRec);
+    NS::UInteger tg = f.sweep->maxTotalThreadsPerThreadgroup(); if (tg > 256) tg = 256;
+    bool ok = true;
+    auto const t0 = std::chrono::high_resolution_clock::now();
+    for (size_t s0 = 0; s0 < nItems && ok; s0 += chunk) {
+        uint32_t const n = uint32_t(std::min(chunk, nItems - s0));
+        FP.itemBase = uint32_t(s0);
+        FP.nItems = n;
+        MTL::CommandBuffer* cb = g.q->commandBuffer();
+        MTL::ComputeCommandEncoder* e = cb->computeCommandEncoder();
+        e->setComputePipelineState(f.sweep);
+        e->setBuffer(bR, 0, 0); e->setBuffer(bM, 0, 1); e->setBuffer(bS, 0, 2); e->setBuffer(bN, 0, 3);
+        e->setBuffer(bP, 0, 4); e->setBuffer(bC, 0, 5); e->setBytes(&FP, sizeof FP, 6);
+        e->dispatchThreads(MTL::Size(n, 1, 1), MTL::Size(tg, 1, 1));
+        e->endEncoding(); cb->commit(); cb->waitUntilCompleted();
+        if (cb->status() == MTL::CommandBufferStatusError) {
+            printf("  [T16 ] command buffer failed: %s\n",
+                   cb->error() ? cb->error()->localizedDescription()->utf8String() : "?");
+            ok = false;
+        }
+    }
+    if (sec) *sec = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t0).count();
+    std::memcpy(S.data(), bS->contents(), nCell * 18 * 8);   // (two uint, low first: the int64 on this host)
+    std::memcpy(N.data(), bN->contents(), nCell * 6 * 8);
+    std::memcpy(P.data(), bP->contents(), nCell * 6 * 8);
+    std::memcpy(cnt, bC->contents(), 4 * 4);
+    for (MTL::Buffer* b : { bR, bM, bS, bN, bP, bC }) b->release();
+    return ok;
+}
+
+// a grid of n cells per axis from lo, spacing h, with its sub-box and wrap; 1/h formed in float, as psFaceGrid does
+static FsGrid faceGridOf(float const lo[3], float const h, int const n, bool const periodic, int const sub0[3],
+                         int const subd[3]) {
+    FsGrid g;
+    for (int d = 0; d < 3; ++d) {
+        g.lo[d] = lo[d]; g.h[d] = h; g.ih[d] = 1.f / h; g.n[d] = n;
+        g.subOrigin[d] = sub0[d]; g.subDims[d] = subd[d];
+    }
+    g.periodic = periodic ? 1 : 0;
+    return g;
+}
+
+// 'count' tetrahedra of seven kinds about the grid (tests/face_sweep_check.cpp F4's): random (2 h), tiny (h/1000)
+// and small (h/20) at a grid plane, big (over 25 h), vertices moved onto grid planes, slivers (a vertex within 1e-4
+// of the plane of the other three), Kuhn cells of the grid's own lattice; centred at 'centre' +- 3 h
+static void faceRandomTets(std::mt19937& rng, FsGrid const& g, int const count, double const centre[3],
+                           std::vector<float>& in) {
+    std::uniform_real_distribution<double> U01(0., 1.);
+    auto uni = [&](double a, double b) { return a + (b - a) * U01(rng); };
+    static int const kuhn[6][3] = { {0,1,2}, {0,2,1}, {1,0,2}, {1,2,0}, {2,0,1}, {2,1,0} };
+    double const h = double(g.h[0]);
+    for (int it = 0; it < count; ++it) {
+        int const kind = it % 7;
+        double const L = h * (kind == 0 ? 2. : kind == 1 ? 1e-3 : kind == 2 ? 0.05 : kind == 3 ? 25.
+                              : kind == 6 ? 1. : 2.);
+        double c[3];
+        for (int d = 0; d < 3; ++d) {
+            c[d] = centre[d] + uni(-3. * h, 3. * h);
+            if (kind == 1 || kind == 2)   // at a plane of the grid (region frame)
+                c[d] = double(g.lo[d]) + std::round((c[d] - double(g.lo[d])) / h) * h + uni(-0.3, 0.3) * L;
+        }
+        float E[4][3];
+        if (kind == 6) {
+            int const s = int(U01(rng) * 6.) % 6;
+            double q[3];
+            for (int d = 0; d < 3; ++d) q[d] = double(g.lo[d]) + std::round((c[d] - double(g.lo[d])) / h) * h;
+            for (int d = 0; d < 3; ++d) E[0][d] = float(q[d]);
+            for (int v = 1; v < 4; ++v) { q[kuhn[s][v - 1]] += h; for (int d = 0; d < 3; ++d) E[v][d] = float(q[d]); }
+        } else {
+            for (int v = 0; v < 4; ++v) for (int d = 0; d < 3; ++d) E[v][d] = float(c[d] + uni(-L, L));
+            if (kind == 4)
+                for (int v = 0; v < 4; ++v) for (int d = 0; d < 3; ++d)
+                    if (U01(rng) < 0.4)
+                        E[v][d] = float(double(g.lo[d]) + std::round((double(E[v][d]) - double(g.lo[d])) / h) * h);
+            if (kind == 5) {
+                double wt[3], ws = 0.;
+                for (int i = 0; i < 3; ++i) { wt[i] = uni(0.1, 1.); ws += wt[i]; }
+                for (int d = 0; d < 3; ++d)
+                    E[3][d] = float((wt[0] * E[0][d] + wt[1] * E[1][d] + wt[2] * E[2][d]) / ws
+                                    + uni(-1e-4, 1e-4) * L);
+            }
+        }
+        size_t const at = in.size();
+        in.resize(at + kFaceIn);
+        float* x = &in[at];
+        for (int v = 0; v < 4; ++v) for (int d = 0; d < 3; ++d) x[3 * v + d] = E[v][d];
+        for (int k = 0; k < 9; ++k) x[12 + k] = float(30. / L * uni(-1., 1.));
+        for (int k = 0; k < 3; ++k) x[21 + k] = float(uni(-300., 300.));
+        x[24] = float(uni(0.1, 10.));
+    }
+}
+
+// one face set through both devices: the units from the finite shares' bounds (psMomentFixedScale, as psFaceUnits'
+// rule on the walk's bounds), then the words, the dropped shares and the mismatch counter compared. 'hostile' extra
+// tetrahedra (a NaN density, a velocity near the float maximum) come after the bounds, so their shares are dropped
+// and counted on both devices. Returns false on a failed command buffer.
+static bool faceCompare(Gpu& g, FaceLib const& f, char const* name, FsGrid const& G, std::vector<float> const& in,
+                        std::vector<float> const& hostile, size_t const chunk) {
+    std::vector<float> recs;
+    std::vector<uint64_t> items;
+    size_t nItems = 0;
+    faceRecords(G, in, recs, items, nItems);
+    FaceBoundSink bs;
+    for (size_t r = 0; r * PS_FACE_REC_FLOATS < recs.size(); ++r) {
+        float x[kFaceIn];
+        float const* q = &recs[r * PS_FACE_REC_FLOATS];
+        for (int k = 0; k < 12; ++k) x[k] = q[PS_FACE_REC_E + k];
+        for (int k = 0; k < 9; ++k) x[12 + k] = q[PS_FACE_REC_VG + k];
+        for (int k = 0; k < 3; ++k) x[21 + k] = q[PS_FACE_REC_V0 + k];
+        x[24] = q[PS_FACE_REC_RHO];
+        FsTet t;
+        faceTetOf(G, x, t);
+        fsDepositTet(t, G, bs);
+    }
+    float sc[3];
+    for (int k = 0; k < 3; ++k)
+        if (!psMomentFixedScale(bs.b[k], sc[k])) sc[k] = 1.f;
+    if (!hostile.empty()) {
+        std::vector<float> all(in);
+        all.insert(all.end(), hostile.begin(), hostile.end());
+        faceRecords(G, all, recs, items, nItems);
+    }
+    std::vector<int64_t> cS, cN, cP, gS, gN, gP;
+    unsigned long long cd[3];
+    faceCpuWords(G, recs, sc, cS, cN, cP, cd);
+    uint32_t cnt[4];
+    bool const ran = faceGpuWords(g, f, G, recs, items, nItems, sc, chunk, gS, gN, gP, cnt);
+    size_t diff = 0, nonzero = 0;
+    for (size_t i = 0; i < cS.size(); ++i) { diff += cS[i] != gS[i]; nonzero += cS[i] != 0; }
+    for (size_t i = 0; i < cN.size(); ++i) { diff += cN[i] != gN[i]; diff += cP[i] != gP[i]; nonzero += cN[i] != 0; }
+    bool const dropsSame = cd[0] == cnt[PS_FACE_CNT_S] && cd[1] == cnt[PS_FACE_CNT_N] && cd[2] == cnt[PS_FACE_CNT_P];
+    bool const ok = ran && diff == 0 && nonzero > 0 && dropsSame && cnt[PS_FACE_CNT_MISMATCH] == 0u
+                    && (hostile.empty() || cd[0] + cd[2] > 0);
+    snprintf(detail, sizeof detail, "%zu records, %zu items, %zu words (%zu non-zero), %zu differ; dropped S/N/P CPU "
+             "%llu/%llu/%llu GPU %u/%u/%u; %u plane-count mismatches", recs.size() / PS_FACE_REC_FLOATS, nItems,
+             cS.size() + 2 * cN.size(), nonzero, diff, cd[0], cd[1], cd[2], cnt[PS_FACE_CNT_S], cnt[PS_FACE_CNT_N],
+             cnt[PS_FACE_CNT_P], cnt[PS_FACE_CNT_MISMATCH]);
+    verdict(("T16 " + std::string(name) + " (" + f.name + ")").c_str(), ok, detail);
+    return ran;
+}
+
+static void t16_faceKernel(Gpu& g, FaceLib const& f) {
+    if (!f.sweep) { printf("  [T16 ] faceSweepItems missing (%s), skipped\n", f.name.c_str()); return; }
+    std::mt19937 rng(1616);
+    int const n = 16;
+    int const full0[3] = { 0, 0, 0 }, full[3] = { n, n, n };
+    // (a) periodic, the region's corner off the origin, a partition's sub-box; and the hostile tetrahedra
+    {
+        float const lo[3] = { 0.37f, -1.25f, 2.5f };
+        int const sub0[3] = { 4, 3, 11 }, subd[3] = { 9, 12, 14 };   // (the last one wraps across the seam)
+        FsGrid const G = faceGridOf(lo, 0.171875f, n, true, sub0, subd);
+        std::vector<float> in, hostile;
+        double const centre[3] = { 0.37 + 8. * 0.171875, -1.25 + 0.2, 2.5 + 15.9 * 0.171875 };   // (z at the seam)
+        faceRandomTets(rng, G, 2100, centre, in);
+        faceRandomTets(rng, G, 7, centre, hostile);
+        for (int t = 0; t < 7; ++t) {   // NaN density (P dropped), a velocity at 3e38 (S and P dropped)
+            if (t % 2 == 0) hostile[size_t(t) * kFaceIn + 24] = std::numeric_limits<float>::quiet_NaN();
+            else for (int k = 0; k < 3; ++k) hostile[size_t(t) * kFaceIn + 21 + k] = 3.0e38f;
+        }
+        if (!faceCompare(g, f, "periodic, a sub-box over the seam, dropped shares", G, in, hostile, 5003)) return;
+    }
+    // (b) not periodic, the whole grid, tetrahedra at and beyond its ends (the upper boundary plane, plane n)
+    {
+        float const lo[3] = { 0.f, 0.f, 0.f };
+        FsGrid const G = faceGridOf(lo, 0.25f, n, false, full0, full);   // (h = 1/4: the planes k h exact)
+        std::vector<float> in;
+        double const lowEnd[3] = { 0.1, 2., 2. }, highEnd[3] = { 4., 3.9, 4.05 }, mid[3] = { 2., 2., 2. };
+        faceRandomTets(rng, G, 700, lowEnd, in);
+        faceRandomTets(rng, G, 700, highEnd, in);
+        faceRandomTets(rng, G, 700, mid, in);
+        if (!faceCompare(g, f, "not periodic, the grid's ends and its upper boundary plane", G, in, {}, 8192)) return;
+    }
+    // (c) a --grid-window's sub-box: one z layer of the full grid, not periodic
+    {
+        float const lo[3] = { 0.f, 0.f, 0.f };
+        int const sub0[3] = { 0, 0, 7 }, subd[3] = { n, n, 1 };
+        FsGrid const G = faceGridOf(lo, 0.25f, n, false, sub0, subd);
+        std::vector<float> in;
+        double const centre[3] = { 2., 2., 7.5 * 0.25 };
+        faceRandomTets(rng, G, 2100, centre, in);
+        if (!faceCompare(g, f, "a one-layer window", G, in, {}, 1024)) return;
+    }
+    // (d) a lattice with the grid's planes on its vertex levels: the Kuhn tessellation of 8^3 cubes of side h (the
+    //     grid's own), shifted by a quarter cell on x only, so that the last x layer reaches across the upper x plane
+    //     (plane m, the upper boundary of a grid that is not periodic: its sections go to the cells below alone);
+    //     periodic and not
+    for (int per = 0; per < 2; ++per) {
+        float const lo[3] = { 0.f, 0.f, 0.f };
+        int const m = 8;
+        int const sub0m[3] = { 0, 0, 0 }, subdm[3] = { m, m, m };
+        FsGrid const Gm = faceGridOf(lo, 0.125f, m, per == 1, sub0m, subdm);   // (h = 1/8: the planes k h exact)
+        static int const kuhn[6][3] = { {0,1,2}, {0,2,1}, {1,0,2}, {1,2,0}, {2,0,1}, {2,1,0} };
+        std::vector<float> in;
+        std::uniform_real_distribution<double> U(-1., 1.);
+        for (int cube = 0; cube < m * m * m * 6; ++cube) {
+            int const i = cube / (6 * m * m), j = (cube / (6 * m)) % m, k = (cube / 6) % m, s = cube % 6;
+            double q[3] = { (i + 0.25) * 0.125, j * 0.125, k * 0.125 };
+            float E[4][3];
+            for (int d = 0; d < 3; ++d) E[0][d] = float(q[d]);
+            for (int v = 1; v < 4; ++v) {
+                q[kuhn[s][v - 1]] += 0.125;
+                for (int d = 0; d < 3; ++d) E[v][d] = float(q[d]);
+            }
+            size_t const at = in.size();
+            in.resize(at + kFaceIn);
+            float* x = &in[at];
+            for (int v = 0; v < 4; ++v) for (int d = 0; d < 3; ++d) x[3 * v + d] = E[v][d];
+            for (int c = 0; c < 9; ++c) x[12 + c] = float(100. * U(rng));
+            for (int c = 0; c < 3; ++c) x[21 + c] = float(300. * U(rng));
+            x[24] = float(1.5 + U(rng));
+        }
+        if (!faceCompare(g, f, per ? "a lattice with y, z vertex levels on the planes, periodic"
+                                   : "a lattice with y, z vertex levels on the planes, across the upper x plane",
+                         Gm, in, {}, 4096)) return;
+    }
+    // (e) T7's stress set (normal, flat and tiny tetrahedra) on a periodic 32^3 grid
+    {
+        std::vector<float> v, u, m;
+        makeStress(20000, 10.f, 10.f / 32.f, v, u, m);
+        float const lo[3] = { 0.f, 0.f, 0.f };
+        int const sub0[3] = { 0, 0, 0 }, subd[3] = { 32, 32, 32 };
+        FsGrid const G = faceGridOf(lo, 10.f / 32.f, 32, true, sub0, subd);
+        std::vector<float> in(size_t(20000) * kFaceIn);
+        std::uniform_real_distribution<float> U(-1.f, 1.f);
+        for (size_t t = 0; t < 20000; ++t) {
+            float* x = &in[t * kFaceIn];
+            for (int k = 0; k < 12; ++k) x[k] = v[t * 12 + k];
+            for (int k = 0; k < 9; ++k) x[12 + k] = 100.f * U(rng);
+            for (int k = 0; k < 3; ++k) x[21 + k] = u[t * 12 + k];
+            x[24] = m[t];
+        }
+        if (!faceCompare(g, f, "T7's stress set, periodic 32^3", G, in, {}, 65536)) return;
+        // a record whose plane count is not the device's: every item of its axis adds nothing and is counted
+        std::vector<float> recs;
+        std::vector<uint64_t> items;
+        size_t nItems = 0;
+        faceRecords(G, in, recs, items, nItems);
+        uint32_t c0 = 0;
+        std::memcpy(&c0, &recs[PS_FACE_REC_COUNT], 4);
+        c0 += 1;
+        std::memcpy(&recs[PS_FACE_REC_COUNT], &c0, 4);
+        items[0] += 1; nItems += 1;
+        float const sc[3] = { 1.f, 1.f, 1.f };
+        std::vector<int64_t> gS, gN, gP;
+        uint32_t cnt[4];
+        bool const ran = faceGpuWords(g, f, G, recs, items, nItems, sc, 65536, gS, gN, gP, cnt);
+        snprintf(detail, sizeof detail, "%u mismatches counted (want %u: the record's axis-0 items)",
+                 cnt[PS_FACE_CNT_MISMATCH], c0);
+        verdict(("T16 a wrong plane count is counted, not added (" + f.name + ")").c_str(),
+                ran && cnt[PS_FACE_CNT_MISMATCH] == c0, detail);
+    }
+    if (getenv("BENCH")) {   // BENCH=1: the kernel against the CPU sweep (one core) on 200k stress tetrahedra
+        std::vector<float> v, u, m;
+        makeStress(200000, 10.f, 10.f / 64.f, v, u, m);
+        float const lo[3] = { 0.f, 0.f, 0.f };
+        int const sub0[3] = { 0, 0, 0 }, subd[3] = { 64, 64, 64 };
+        FsGrid const G = faceGridOf(lo, 10.f / 64.f, 64, true, sub0, subd);
+        std::vector<float> in(size_t(200000) * kFaceIn), recs;
+        std::uniform_real_distribution<float> U(-1.f, 1.f);
+        for (size_t t = 0; t < 200000; ++t) {
+            float* x = &in[t * kFaceIn];
+            for (int k = 0; k < 12; ++k) x[k] = v[t * 12 + k];
+            for (int k = 0; k < 9; ++k) x[12 + k] = 100.f * U(rng);
+            for (int k = 0; k < 3; ++k) x[21 + k] = u[t * 12 + k];
+            x[24] = m[t];
+        }
+        std::vector<uint64_t> items;
+        size_t nItems = 0;
+        faceRecords(G, in, recs, items, nItems);
+        float const sc[3] = { 1024.f, 1024.f, 1024.f };
+        std::vector<int64_t> S, N, P;
+        unsigned long long dr[3];
+        auto const t0 = std::chrono::high_resolution_clock::now();
+        faceCpuWords(G, recs, sc, S, N, P, dr);
+        double const cpu = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - t0).count();
+        uint32_t cnt[4];
+        double gpu = 0.;
+        faceGpuWords(g, f, G, recs, items, nItems, sc, size_t(4000000), S, N, P, cnt, &gpu);   // (warm-up)
+        faceGpuWords(g, f, G, recs, items, nItems, sc, size_t(4000000), S, N, P, cnt, &gpu);
+        printf("  [bench] face sweep, %zu records, %zu items, grid 64^3: CPU (1 core) %.0f ms, GPU %.0f ms (%s)\n",
+               recs.size() / PS_FACE_REC_FLOATS, nItems, cpu * 1e3, gpu * 1e3, f.name.c_str());
+    }
+}
+
+// T16a and T16 on every face library at hand: the run-time one (the binaries'), its register form, the offline one
+static void t16_face(Gpu& g) {
+    for (int k = 0; k < 3; ++k) {
+        FaceLib f;
+        std::string err;
+        bool const ok = k < 2 ? faceLibSource(g, k == 1, f, err) : faceLibOffline(g, f, err);
+        if (!ok) {
+            if (k == 2 && err.empty()) {
+                printf("  [info] no metal/ps_face.metallib: the offline face library not tested\n");
+                continue;
+            }
+            char const* const tag = k == 0 ? "run-time library" : k == 1 ? "run-time library, FS_REGISTERS"
+                                  : "offline library";
+            verdict((std::string("T16 the face library compiles (") + tag + ")").c_str(), false, err.c_str());
+            continue;
+        }
+        t16a_faceProbe(g, f);
+        t16_faceKernel(g, f);
+    }
+}
+
 // BENCH=1: time the all-fields deposit, CPU (1 core) vs GPU, on a 1M-tet stress set.
 static void bench(Gpu& g){
     if(!g.psoFld){ printf("  [bench] fields kernel missing, skipped\n"); return; }
@@ -1225,6 +1960,7 @@ int main(){
     t13_exactDeposit(g);
     t14_exactItems(g);
     t15_regionFace(g);
+    t16_face(g);
     if(getenv("BENCH")) bench(g);
     printf("------------------------------------------------------------------------\n");
     printf("SUMMARY: %d passed, %d failed\n",g_pass,g_fail);

@@ -15,7 +15,7 @@ from pathlib import Path
 import runspec as _rs
 from dtfelib import runlog as _runlog
 from dtfelib.estimator import STANDARD_PADDING
-from runspec import CUSTOM_OUT_DEFAULT, FACE_GRADIENT_DEFAULT, LAMBDA_TH_DEFAULT   # the dataclass defaults
+from runspec import CUSTOM_OUT_DEFAULT, LAMBDA_TH_DEFAULT, QUALITY_DEFAULT   # the dataclass defaults
 
 
 @dataclass
@@ -35,50 +35,52 @@ class CustomSpec:
     lagrangian: str = "file"        # "file": InitialCoordinates in the snapshot; "separate": lagrangian_file
     lagrangian_file: str = ""
     grid: int = 128
-    nsub: int = 3
-    deposit: str = ""               # as RunSpec's: "" = the estimator's production one (the exact one, both estimators)
+    quality: str = QUALITY_DEFAULT  # "exact" | "fast", see RunSpec: what it implies is quality_mode's (mode())
     fields: list[str] = field(default_factory=lambda: ["density_a", "velocity_a", "dispersion_a"])
-    gpu: bool = False
     run_mode: str = "balanced"      # --run-mode, the machine use, see RunSpec (the binary's own default: performance)
-    vertex_mass: bool = False       # needed when the initial positions are PERTURBED (e.g. TNG's z=127)
-    volume_weighted: bool = True
+    vertex_mass: bool = False       # the initial positions: PERTURBED (e.g. TNG's z=127; masses from the particles,
+                                    # --ps-vertex-mass) or an unperturbed lattice (False)
     caustics: bool = False
     caustic_cusps: bool = False
-    parallel_triangulation: bool = False   # --parallel-triangulation (opt-in, see RunSpec)
-    precision: str = "single"       # "double" = the -double binary (float64 end to end, ~2x memory), see RunSpec
+    precision: str = "single"       # "double" = the -double binary (float64 end to end, ~2x memory): it picks the
+                                    # program, as the dimension does
     alpha_shape: float = 3.0        # --ps-alpha-shape, non-periodic clouds only: emitted when not the default 3
     scalar_dataset: str = ""
     output_dir: str = str(CUSTOM_OUT_DEFAULT)
     output_name: str = ""           # "" = the input file's name
-    partition: int = 0
-    max_concurrent: int = 0
     scratch_dir: str = ""
     lambda_th: float = LAMBDA_TH_DEFAULT   # --lambda-th with a web field (the binary's own default is 0.0)
-    mem_budget_gb: float = 0.0      # DTFE_MEM_BUDGET_GB in the binary's environment, see RunSpec
     tess_cache: str = ""            # --tessellation-cache <folder>; "" = none
-    linear_deposit: bool = False    # --ps-linear-deposit (PS only; not with the volume-weighted velocities)
-    face_gradient: bool = FACE_GRADIENT_DEFAULT   # the route, see RunSpec: --face-gradient where the run qualifies,
-                                    # --per-tet-gradient unticked (PS only, 3D)
-    ordered_merge: bool = True      # --ps-merge index-order, the default (PS only; off: --ps-merge completion-order), see RunSpec
     sample_points: str = ""         # --sample-points <file>: the fields at these points too ('.pts_*'); "" = none
     pts_vel_grad: bool = True       # ... with the velocity gradient at each point (--pts-vel-grad)
-    pts_conventions: str = "grid"   # ... PS-DTFE: their estimators, '--ps-point-conventions legacy' when not the grids'
-                                    # (the binary's default), see RunSpec
     window: list[float] = field(default_factory=list)   # --grid-window x0 x1 y0 y1 [z0 z1] in Mpc: only these cells
     halo_release: float = 0.0       # --ps-halo-release D: tetrahedra denser than D x rho_bar deposited at their centroid
-    stream_density: str = "linear"  # --ps-stream-density for the sample points: 'linear' (the DTFE interpolation; the
-                                    # binary's default, which the command leaves out) | 'geometric'; a saved 'dtfe'
-                                    # (its older name) reads as 'linear' (from_dict)
     per_stream: bool = False        # --ps-per-stream: the sample points' values stream by stream (ragged '.pts_*')
     per_stream_ids: bool = False    # --ps-per-stream-ids: ... with each stream's tetrahedron particle IDs
     extra_args: str = ""            # more program options as on a command line, appended after the tab's own
     demo_n: int = 0                 # > 0: first generate the synthetic demo snapshot (crossed waves, n^3) ...
     demo_file: str = ""             # ... but only at THIS path (demo_spec sets it): the setting is persisted, and
                                     # without the path any later missing input would quietly become a demo
+    advanced: dict = field(default_factory=dict)   # the Advanced overrides, see RunSpec (not 'precision': this
+                                    # tab's own row above); the last field
 
     def __post_init__(self):
-        if not self.deposit:            # a run starts at the exact cell average (both estimators)
-            self.deposit = _rs.production_deposit(self.estimator)
+        if not self.quality:
+            self.quality = QUALITY_DEFAULT
+        self.advanced = _rs.clean_advanced(self.advanced, type(self))
+
+    def mode(self) -> _rs.QualityMode:
+        """What this job's quality implies (runspec.quality_mode) for its estimator, precision and dimension, its
+        device by the snapshot's particle count (read from the HDF5 header only where the device depends on it),
+        with the Advanced overrides it passes (runspec.apply_advanced)."""
+        return _rs.apply_advanced(_rs.quality_mode(self.quality, self.estimator, self.fields, self._particles,
+                                                   self.precision, self.dim, run_mode=self.run_mode), self)
+
+    def _particles(self) -> int | None:
+        """The input's particle count, where its HDF5 header says (else None)."""
+        if not self.input_file or self.input_type != 105:
+            return None
+        return hdf5_particle_count(Path(self.input_file).expanduser())
 
     def name(self) -> str:
         return self.output_name.strip() or (Path(self.input_file).stem if self.input_file else "output")
@@ -105,9 +107,14 @@ class CustomSpec:
         return self._own_command() + _extra_options(self.extra_args)
 
     def _own_command(self) -> list[str]:
-        """The command the tab's own controls make (command() appends the extra options)."""
+        """The command the tab's own controls make (command() appends the extra options); the quality's settings
+        from mode()."""
+        m = self.mode()
         ps = self.estimator == "ps"
         three = self.dim != 2           # a 2D run: no GPU, no parallel insertion (both 3D only)
+        # extra options that name the device ('--gpu', '--gpu-share') set it alone: the tab's own '--gpu' would repeat
+        # theirs (the binary takes each option once), and without theirs it would move the run behind their back
+        gpu = m.gpu and three and not self._extra_device_flags()
         out = self.output_root()
         a = [str(self.binary()), str(Path(self.input_file).expanduser()), str(out),
              "--grid", str(self.grid), "--input-format", str(self.input_type), "--mpc-unit", f"{self.mpc_unit:g}"]
@@ -130,34 +137,36 @@ class CustomSpec:
         if ps:
             # the cell average named either way (the binaries share both names), never left to the binary's default:
             # the run log then says which it was to any reader, and the count only beside the sampled deposit
-            if self.deposit == "exact":
+            if m.deposit == "exact":
                 a.append("--exact")
             else:
-                a += ["--sampled", "--subsamples", str(self.nsub)]
+                a += ["--sampled", "--subsamples", str(m.nsub)]
             if self.lagrangian == "separate" and self.lagrangian_file:
                 a += ["--ps-lagrangian-input", str(Path(self.lagrangian_file).expanduser())]
-            # the velocity gradient's route (D13): the tick asks for the face gradient where the run qualifies and for
-            # the stream average where it is off; a ticked run that does not qualify names neither (the binary keeps
-            # the stream average and says why), nor does a 2D run or one whose extra options name a route themselves
+            # the velocity gradient's route (D13): the face gradient where the run qualifies; a run that does not
+            # qualify names no route (the binary keeps the stream average and says why), nor does a 2D run or one
+            # whose extra options name a route themselves
             route = _rs.face_gradient_env(self) if three and not self._extra_names_route() else ""
-            for on, flag in ((self.gpu and three, "--gpu"), (self.vertex_mass, "--ps-vertex-mass"),
-                             (self.volume_weighted, "--ps-volume-weighted"), (self.caustics, "--ps-caustics"),
+            for on, flag in ((gpu, "--gpu"), (self.vertex_mass, "--ps-vertex-mass"),
+                             (m.volume_weighted, "--ps-volume-weighted"), (self.caustics, "--ps-caustics"),
                              (self.caustic_cusps, "--ps-caustic-cusps"),
                              (route == "1", "--face-gradient"), (route == "0", "--per-tet-gradient"),
-                             (self.parallel_triangulation and three, "--parallel-triangulation")):
+                             (m.parallel_triangulation and three, "--parallel-triangulation")):
                 if on:
                     a.append(flag)
-            if self.gpu and three and self.deposit == "exact":     # the machine use's share of a partitioned GPU
-                a += ["--gpu-share", "auto"]                         # deposit (the drivers' GPU_SHARE default)
+            # the share of a partitioned exact GPU deposit: the mode's ('auto', the machine use's, as the drivers'
+            # GPU_SHARE default; a Device override's '1' or 'mixed', runspec.apply_advanced)
+            if gpu and m.deposit == "exact":
+                a += ["--gpu-share", m.gpu_share]
             if not self.periodic and self.alpha_shape != 3.0:
                 a += ["--ps-alpha-shape", f"{self.alpha_shape:g}"]
-            if self.linear_deposit:
+            if m.linear_deposit:
                 a.append("--ps-linear-deposit")
             # the merge order always named, as the drivers' PS_MERGE does (R7, docs/cleanup-plan.md): a GIVEN index
             # order keeps the memory gate on under the auto-tuner's speed split (a run of fewer than 2e6 particles),
             # which the binary's default order alone leaves off. Left to the extra options when they name a merge
             # themselves ('--ps-merge fixed-point'): the tab's own would repeat the option, which the binary refuses
-            if not self.ordered_merge:
+            if not m.ordered_merge:
                 a += ["--ps-merge", "completion-order"]
             elif not self._extra_names_merge():
                 a += ["--ps-merge", "index-order"]
@@ -166,32 +175,30 @@ class CustomSpec:
             if len(self.window) == 2 * self.dim:
                 a += ["--grid-window"] + [_rs._num(v) for v in self.window]
         else:
-            if self.gpu and three:
+            if gpu:
                 a.append("--gpu")
-            # the cell average named either way, as above (the sampled one at the binary's own count: the tab has
-            # no count for standard DTFE)
-            a.append("--exact" if self.deposit == "exact" else "--sampled")
+            # the cell average named either way, as above (the sampled one at the binary's own count)
+            a.append("--exact" if m.deposit == "exact" else "--sampled")
             # the padding: the binary's own 5 mean spacings leave wrong values within a few spacings of
             # a box face (or of the --box region's faces); 15, run_dtfe.sh's and the standard server's value
             # (dtfelib.estimator.STANDARD_PADDING). PS-DTFE pads in Lagrangian space by its own rules: nothing added
             a += ["--padding", f"{STANDARD_PADDING:g}"]
-        if self.partition > 0:
-            a += ["--partition"] + [str(self.partition)] * self.dim
-        if self.max_concurrent > 0:
-            a += ["--max-concurrent", str(self.max_concurrent)]
+        part, conc = _rs.job_partition(self), _rs.job_concurrency(self)     # the Advanced overrides (both binaries)
+        if part > 0:
+            a += ["--partition"] + [str(part)] * self.dim
+        if conc > 0:
+            a += ["--max-concurrent", str(conc)]
         if self.scratch_dir:
             a += ["--scratch-dir", str(Path(self.scratch_dir).expanduser())]
         if self.sample_points:
             a += ["--sample-points", str(Path(self.sample_points).expanduser())]
             if self.pts_vel_grad:
                 a.append("--pts-vel-grad")
-            if ps and self.stream_density not in ("linear", "dtfe"):     # the binary's default ('dtfe' its older name)
-                a += ["--ps-stream-density", self.stream_density]
             if ps and self.per_stream:
                 a.append("--ps-per-stream")
             if ps and self.per_stream_ids:
                 a.append("--ps-per-stream-ids")
-            if ps and self.pts_conventions == "legacy":     # 'grid' is the binary's default: no flag for it
+            if ps and m.pts_conventions == "legacy":     # 'grid' is the binary's default: no flag for it
                 a += ["--ps-point-conventions", "legacy"]
         return a
 
@@ -208,9 +215,24 @@ class CustomSpec:
         return any(t.split("=", 1)[0] in ("--face-gradient", "--per-tet-gradient")
                    for t in _extra_options(self.extra_args) if t.startswith("--"))
 
+    def _extra_device_flags(self) -> frozenset:
+        """The device options the extra options give themselves, canonical: '--gpu' (or its older '--ps-gpu') and,
+        for PS-DTFE, '--gpu-share' (any value; standard DTFE has no such option, which problems() calls an error).
+        Where they give one, the tab adds neither of its own, a Device setting is not passed (runspec._refusal) and
+        the 'Runs on' line says the extra options set it (runspec.runs_on_text)."""
+        device = ("--gpu", "--gpu-share") if self.estimator == "ps" else ("--gpu",)
+        return frozenset(n for t in _extra_options(self.extra_args) if t.startswith("--")
+                         for n in [_runlog.canonical_flag(t.split("=", 1)[0]).split()[0]]
+                         if n in device)
+
+    def _extra_linear_deposit(self) -> bool:
+        """The extra options ask for the linear deposit ('--ps-linear-deposit'), which the program refuses beside the
+        volume-weighted velocities the tab always passes for PS-DTFE."""
+        return any(_runlog.canonical_flag(t.split("=", 1)[0]).split()[0] == "--ps-linear-deposit"
+                   for t in _extra_options(self.extra_args) if t.startswith("--"))
+
     def memory_key(self) -> str:
-        return _rs._memory_key(self, ("output_dir", "output_name", "demo_n", "demo_file", "lambda_th", "tess_cache",
-                                      "pts_conventions"))
+        return _rs._memory_key(self, ("output_dir", "output_name", "demo_n", "demo_file", "lambda_th", "tess_cache"))
 
     def demo_pending(self) -> bool:
         """The demo snapshot is to be generated first: the demo's own input path, not on disk yet."""
@@ -225,13 +247,14 @@ class CustomSpec:
                         self.run_env())
 
     def run_env(self) -> dict[str, str]:
-        """The binary's environment: the memory budget (the cache is an argument here, not TESSELLATION_CACHE); for
-        standard DTFE also DTFE_FACE_GRADIENT pinned empty (the binary reads that as unset): the tab names no gradient
-        route for a standard run, so a 0 exported in the login shell cannot turn it to the deposit's own gradient
-        behind the command shown."""
+        """The binary's environment (the cache is an argument here, not TESSELLATION_CACHE): the Advanced memory
+        budget, DTFE_MEM_BUDGET_GB, when set (runspec._run_option_env), and DTFE_FACE_GRADIENT pinned
+        empty (the binary reads that as unset), for both estimators: a standard run names no gradient route, nor does
+        a phase-space run that does not qualify for the face gradient (or a 2D one), so a 0 exported in the login
+        shell cannot turn it to the deposit's own gradient behind the command shown, nor a 1 make the binary refuse a
+        sampled run (a route the command names beats the variable anyway)."""
         env = {k: v for k, v in _rs._run_option_env(self).items() if k not in _rs.TESS_CACHE_KEYS}
-        if self.estimator != "ps":
-            env["DTFE_FACE_GRADIENT"] = ""
+        env["DTFE_FACE_GRADIENT"] = ""
         return env
 
     def steps(self) -> list[_rs.Step]:
@@ -300,20 +323,6 @@ class CustomSpec:
         if self.alpha_shape < 0:
             out.append(("error", "the alpha shape takes a number of mean particle spacings >= 0 (0 keeps the whole hull)"))
         out += _rs._precision_problems(self.estimator, self.precision, d)
-        if d == 2:
-            if self.gpu:
-                out.append(("info", "the 2D programs run on the CPU (the GPU kernels are 3D): the GPU setting is ignored"))
-            if ps and self.parallel_triangulation:
-                out.append(("info", "the parallel triangulation is 3D only: a 2D run inserts sequentially"))
-        elif ps and self.parallel_triangulation and not _rs.tbb_built(self.precision):
-            out.append(("warning", "parallel triangulation asked for, but the binary was built without TBB: ignored"))
-        elif ps and self.parallel_triangulation:
-            out.append(("warning", "parallel triangulation: faster on small sets, but two identical runs then differ "
-                                   "at float rounding (the stream counts do not)"))
-        n = hdf5_particle_count(f) if (f.is_file() and self.input_type == 105) else None
-        out += _rs.gpu_advice(self.gpu, self.deposit, self.fields if ps else (_rs.dtfe_fields(self.fields) or _rs.DTFE_DEFAULT_FIELDS), n,
-                              self.estimator,
-                              grid=self.grid, precision=self.precision, dim=d, run_mode=self.run_mode)
         if self.box:
             if len(self.box) != 2 * d or any(self.box[2 * i + 1] <= self.box[2 * i] for i in range(d)):
                 names = "xlo xhi ylo yhi" + (" zlo zhi" if d == 3 else "")
@@ -349,19 +358,17 @@ class CustomSpec:
         elif "Mobile Documents" in str(od):
             out.append(("warning", "the output folder is in iCloud Drive: grids are large, and syncing them "
                                    "is slow, so a local folder is better"))
-        if self.gpu and d == 3 and not _rs.gpu_built(self.estimator, self.precision):
-            out.append(("warning", f"GPU requested, but the binary was built without GPU support ({_rs.GPU_BUILD_HINT}): "
-                                   "it will use the CPU"))
         if not self.binary().is_file() and self.precision == "single":
             how = f"'make {self.binary().name}'" if d == 3 else f"'{_rs.build_hint('single', 2)}'"
             out.append(("error", f"{self.binary().name} is not built (Setup, or {how})"))
         out += _rs._scratch_problems(self.scratch_dir)
         out += _rs._run_option_problems(self)
+        out += _rs.advanced_problems(self)
         if self.sample_points:
             if not Path(self.sample_points).expanduser().is_file():
                 out.append(("error", f"sample-points file not found: {self.sample_points}"))
-            # (standard DTFE with an explicit Partition is allowed: the binary answers the points per partition,
-            # each from the tetrahedra it owns)
+            # (also for a split standard-DTFE run: the binary answers the points per partition, each from the
+            # tetrahedra it owns)
         if self.window:
             if not ps:
                 out.append(("info", "the window is a PS-DTFE option: this standard-DTFE run ignores it"))
@@ -370,24 +377,16 @@ class CustomSpec:
                 out.append(("error", f"the window needs {2 * d} numbers in Mpc, each upper > lower"))
             elif any(f in _rs.WEB_FIELDS for f in self.fields):
                 out.append(("error", "the T-web / V-web classes need the whole periodic grid: not with a window"))
-            elif self.linear_deposit:
-                out.append(("error", "the window cannot be combined with the linear deposit (the binary refuses it)"))
-        if ps:
-            out += _rs._pts_conventions_problems(self, bool(self.sample_points))
-        if (self.per_stream or self.per_stream_ids or self.stream_density not in ("linear", "dtfe")) \
-                and not self.sample_points:
-            out.append(("warning", "the per-stream outputs and the stream density apply to sample points: choose a "
-                                   "points file (or they do nothing)"))
+        if (self.per_stream or self.per_stream_ids) and not self.sample_points:
+            out.append(("warning", "the per-stream outputs apply to sample points: choose a points file (or they do "
+                                   "nothing)"))
         if not ps and (self.per_stream or self.per_stream_ids or self.halo_release > 0):
             out.append(("info", "per-stream outputs and the halo release are PS-DTFE options: this standard-DTFE run "
                                 "leaves them out"))
-        if ps and self.linear_deposit and self.volume_weighted:
-            out.append(("error", "the linear deposit weights by density inside each tetrahedron, the volume-weighted "
-                                 "velocities by volume: untick one (the binary refuses both)"))
-        # (2D: the tick is greyed; the 2D programs have no face gradient. A route named in the extra options is the
-        # run's own: the tab's tick does not decide it, and the binary refuses a named face gradient that cannot run)
-        if ps and d == 3 and not self._extra_names_route():
-            out += _rs._face_gradient_problems(self)
+        # what the quality leaves out (the derivatives' note not where the extra options name a route: that one is
+        # the run's own, and the binary refuses a named face gradient that cannot run)
+        if ps:
+            out += _rs._quality_problems(self, derivatives=not self._extra_names_route())
         if (self.output_root().parent / (self.name() + ".a_den")).exists():
             out.append(("info", f"'{name}' already has outputs in this folder: they will be overwritten"))
         if self.extra_args.strip():
@@ -403,25 +402,36 @@ class CustomSpec:
                     # the switch to that pair, so beside the tab's own '--ps-merge' the binary would get it twice).
                     # '--exact' and '--sampled' are one setting, the cell average, which the tab always names: either
                     # one among the extra options repeats it (the other one the binary refuses beside it). The
-                    # machine use ('--run-mode', always named) and the GPU share ('--gpu-share', named for an exact
-                    # GPU run) are one setting each, whatever value the extra options give them
+                    # machine use ('--run-mode', always named) is one setting, whatever value the extra options give
+                    # it. (The device, '--gpu' and '--gpu-share', the tab leaves to extra options that name it.)
                     found = {R.canonical_flag(t.split("=", 1)[0]).split()[0] for t in tokens if t.startswith("--")}
                     return {"--exact / --sampled" if n in ("--exact", "--sampled") else n for n in found}
                 twice = sorted(names(extra) & names(self._own_command()))
                 if twice:
                     out.append(("error", f"the extra options repeat {', '.join(twice)}, which the tab sets already "
                                          "(the program takes each option once): change it on the tab"))
+                if ps and self._extra_linear_deposit():
+                    out.append(("error", "the extra options' --ps-linear-deposit cannot run beside the "
+                                         "volume-weighted velocities the tab always passes (--ps-volume-weighted): "
+                                         "the program refuses the pair, so take it out"))
+                if self._extra_device_flags() == {"--gpu-share"}:
+                    out.append(("warning", "the extra options give --gpu-share without --gpu: the run is on the CPU, "
+                                           "where no share applies (add --gpu for the GPU)"))
+                if not ps and "--gpu-share" in names(extra):
+                    out.append(("error", "the extra options' --gpu-share is a PS-DTFE option, which standard DTFE "
+                                         "refuses at the start: take it out"))
         out += _rs._busy_problems()
         return out
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        return _rs._with_advanced(self, asdict(self))
 
     @classmethod
     def from_dict(cls, d: dict) -> "CustomSpec":
         """A saved job (the launcher's settings, a queued job, a run's '.gui.json' sidecar for 'Load settings'), its
-        flag spellings brought up to date (migrate_saved): every load path goes through here."""
-        return cls(**migrate_saved({k: v for k, v in d.items() if k in cls.__dataclass_fields__}))
+        flag spellings brought up to date and an older one's deposit read as its quality (migrate_saved): every load
+        path goes through here. Bad overrides are dropped (__post_init__)."""
+        return cls(**{k: v for k, v in migrate_saved(d).items() if k in cls.__dataclass_fields__})
 
 
 def migrate_extra_args(text: str, estimator: str = "ps", dim: int = 3) -> str:
@@ -437,17 +447,16 @@ def migrate_extra_args(text: str, estimator: str = "ps", dim: int = 3) -> str:
 
 
 def migrate_saved(d: dict) -> dict:
-    """A saved CustomSpec dict with the P6.7 renames applied (idempotent, so no one-time flag is needed): the
-    extra options' flag names (migrate_extra_args) and the stream density's older value 'dtfe' -> 'linear'."""
-    d = dict(d)
+    """A saved CustomSpec dict brought up to date (idempotent, so no one-time flag is needed): the extra options' flag
+    names (P6.7, migrate_extra_args) and the two modes (runspec.migrate_quality: an older deposit becomes the quality;
+    from_dict then drops the settings the modes replaced)."""
+    d = _rs.migrate_quality(d)
     if isinstance(d.get("extra_args"), str):
         try:
             dim = int(d.get("dim", 3))
         except (TypeError, ValueError):
             dim = 3
         d["extra_args"] = migrate_extra_args(d["extra_args"], str(d.get("estimator", "ps")), dim)
-    if d.get("stream_density") == "dtfe":
-        d["stream_density"] = "linear"
     return d
 
 
@@ -511,15 +520,27 @@ def hdf5_redshift(path) -> float | None:
         return None
 
 
+_COUNT_CACHE: dict[str, int | None] = {}
+
+
 def hdf5_particle_count(path) -> int | None:
-    """The particles of an HDF5 snapshot (the header's NumPart_Total, all types), or None."""
+    """The particles of an HDF5 snapshot (the header's NumPart_Total, all types), or None. Kept per file version
+    (path, modification time, size): a Custom job's device asks for it on every check of a Fast run
+    (CustomSpec.mode())."""
     try:
-        import h5py
-        with h5py.File(path, "r") as h:
-            n = int(sum(int(x) for x in h["Header"].attrs["NumPart_Total"]))
-        return n if n > 0 else None
-    except Exception:
+        st = Path(path).stat()
+    except (OSError, TypeError, ValueError):
         return None
+    key = f"{path}:{st.st_mtime_ns}:{st.st_size}"
+    if key not in _COUNT_CACHE:
+        try:
+            import h5py
+            with h5py.File(path, "r") as h:
+                n = int(sum(int(x) for x in h["Header"].attrs["NumPart_Total"]))
+            _COUNT_CACHE[key] = n if n > 0 else None
+        except Exception:
+            _COUNT_CACHE[key] = None
+    return _COUNT_CACHE[key]
 
 
 def hdf5_has(path, dataset: str) -> bool | None:
@@ -533,16 +554,13 @@ def hdf5_has(path, dataset: str) -> bool | None:
         return None
 
 
-def demo_spec(output_dir=None, gpu: bool | None = None) -> CustomSpec:
+def demo_spec(output_dir=None) -> CustomSpec:
     """The first-run demo: a synthetic 32^3 crossed-wave snapshot (streams 1/3/9/27) and a quick
-    PS-DTFE run on it with the default (exact) deposit -- about half a minute, no download. gpu None:
-    that deposit's device in the default machine use (the GPU when built, see recommended_gpu). nSub 2 is kept
-    for a switch to the sampled deposit."""
+    PS-DTFE run on it at the default quality, Exact, with no download (its device is the quality's,
+    CustomSpec.mode())."""
     od = Path(output_dir).expanduser() if output_dir else CUSTOM_OUT_DEFAULT / "demo"
     fields = ["density_a", "velocity_a", "dispersion_a", "divergence_a"]
-    if gpu is None:
-        gpu = _rs.recommended_gpu(_rs.production_deposit("ps"), fields, 32 ** 3)
     return CustomSpec(input_file=str(od / "crossed_waves_32.hdf5"), input_type=105, mpc_unit=1.0,
-                      periodic=True, estimator="ps", lagrangian="file", grid=64, nsub=2,
-                      fields=fields, gpu=gpu, vertex_mass=False, volume_weighted=True, caustics=True,
+                      periodic=True, estimator="ps", lagrangian="file", grid=64,
+                      fields=fields, vertex_mass=False, caustics=True,
                       output_dir=str(od), output_name="demo", demo_n=32, demo_file=str(od / "crossed_waves_32.hdf5"))

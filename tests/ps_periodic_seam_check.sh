@@ -69,7 +69,8 @@ OFFBOX=(--box "${X0}" "${X1}" "${X0}" "${X1}" "${X0}" "${X1}")
     --amplitude-factor 0.5 --crossed-waves --jitter-frac 0.00001 >/dev/null
 
 # the sampled deposit ('density_a' would select the exact one): the closure audit and the top-plane counts above are
-# its own (S2's '--subsamples 1' sets its count beside it)
+# its own, at 3 points per cell axis for S1 and S3 ('--subsamples 3' on each run) and 1 for S2 (its
+# '--subsamples 1')
 run() {  # $1 = output name, $2 = snapshot, rest = extra options
     local name="$1" snap="$2"; shift 2
     local out="${TMP}/run_${name}"
@@ -82,12 +83,12 @@ run() {  # $1 = output name, $2 = snapshot, rest = extra options
     fi
     echo "   ran ${name}"
 }
-run off_p1 "${TMP}/off_ss.hdf5" --partition 1 1 1 "${OFFBOX[@]}"
-run off_p2 "${TMP}/off_ss.hdf5" --partition 2 2 2 "${OFFBOX[@]}"
-run off_p3 "${TMP}/off_ss.hdf5" --partition 3 3 3 "${OFFBOX[@]}"
+run off_p1 "${TMP}/off_ss.hdf5" --partition 1 1 1 --subsamples 3 "${OFFBOX[@]}"
+run off_p2 "${TMP}/off_ss.hdf5" --partition 2 2 2 --subsamples 3 "${OFFBOX[@]}"
+run off_p3 "${TMP}/off_ss.hdf5" --partition 3 3 3 --subsamples 3 "${OFFBOX[@]}"
 run ms_p1  "${TMP}/off_ms.hdf5" --partition 1 1 1 --subsamples 1 "${OFFBOX[@]}"
 run ms_p2  "${TMP}/off_ms.hdf5" --partition 2 2 2 --subsamples 1 "${OFFBOX[@]}"
-run near   "${TMP}/nearlat.hdf5" --partition 1 1 1
+run near   "${TMP}/nearlat.hdf5" --partition 1 1 1 --subsamples 3
 
 "${PY}" - "${TMP}" "${GRID}" "${DTFE_TEST_REAL}" <<'PY'
 import re, sys

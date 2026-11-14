@@ -1,9 +1,10 @@
 """The launcher's own small widgets and widget helpers (moved from app.py, which re-exports CheckDelegate and
 FigureBrowser): CheckDelegate, which draws the tick boxes of a checkable list or table; FigureBrowser, the
 Figures tab's list of the figures a run wrote, with a preview; the helpers the window's forms are built
-and read with (_mono, _note, _checkable, _grow_fields, _scroll, _dir_row, _exclusive, _checked, _grid_combo,
-_state_text, _int); and the style helpers every tab builds its groups with: the spacing constants, group,
-Collapsible / advanced_group, labelled_row, field_grid, grid_row, button_row and tip."""
+and read with (_mono, _note, _checkable, _grow_fields, _scroll, _dir_row, _checked, _grid_combo, _state_text,
+_int); and the style helpers every tab builds its groups with: the spacing constants, group, Collapsible,
+ChoiceRadios (the run tabs' Quality pair and the like), FormNote, AutoRow (a row of the opt-in Advanced group),
+labelled_row, field_grid, grid_row, button_row and tip."""
 
 from __future__ import annotations
 
@@ -16,11 +17,11 @@ from pathlib import Path
 
 from PySide6.QtCore import QRect, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase, QImageReader, QIntValidator, QPixmap
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGridLayout,
-                               QGroupBox, QHBoxLayout, QLabel, QLayout, QLineEdit, QListWidget, QListWidgetItem,
-                               QPushButton, QScrollArea, QAbstractSpinBox, QSizePolicy, QSpinBox, QSplitter, QStyle,
-                               QStyledItemDelegate, QStyleFactory, QStyleOptionButton, QStyleOptionViewItem,
-                               QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout,
+                               QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLayout, QLineEdit, QListWidget,
+                               QListWidgetItem, QPushButton, QRadioButton, QScrollArea, QAbstractSpinBox, QSizePolicy,
+                               QSpinBox, QSplitter, QStyle, QStyledItemDelegate, QStyleFactory, QStyleOptionButton,
+                               QStyleOptionViewItem, QToolButton, QVBoxLayout, QWidget)
 
 import runspec as rs
 import presets as P
@@ -83,21 +84,54 @@ def field_grid(names_labels, columns: int = 3, changed=None) -> tuple[QGridLayou
     return grid, checks
 
 
-def grid_row(parent, changed, cells: str = "³ cells    sub-samples per axis") -> tuple:
-    """The 'Grid' row of a run tab: the grid's cells per axis, then the sub-samples per axis of the sampled
-    deposit. Returns (row layout, grid combo, the label between them, the sub-sample spin box)."""
+def grid_row(parent, changed, cells: str = "³ cells") -> tuple:
+    """The 'Grid' row of a run tab: the grid's cells per axis and their unit. Returns (row layout, grid combo, the
+    unit's label)."""
     row = QHBoxLayout()
     combo = _grid_combo(parent)
     combo.currentTextChanged.connect(changed)
     label = QLabel(cells)
-    nsub = QSpinBox(minimum=1, maximum=6)
-    nsub.setToolTip("nSub³ sample points per cell for the sampled deposit")
-    nsub.valueChanged.connect(changed)
     row.addWidget(combo)
     row.addWidget(label)
-    row.addWidget(nsub)
     row.addStretch(1)
-    return row, combo, label, nsub
+    return row, combo, label
+
+
+class ChoiceRadios(QWidget):
+    """One choice among a few, as radio buttons in a row (or a column): the run tabs' Quality pair, Exact then Fast,
+    and the Custom tab's initial positions. 'choices' = [(key, text, tooltip)], the first one ticked at the start;
+    value() / set_value() by key (an unknown key ticks the first); 'changed' once per change of the choice."""
+    changed = Signal()
+
+    def __init__(self, choices, vertical: bool = False):
+        super().__init__()
+        lay = flush(QVBoxLayout(self) if vertical else QHBoxLayout(self))
+        self.group = QButtonGroup(self)
+        self.radios: list[QRadioButton] = []
+        self._keys = []
+        for key, text, tip_text in choices:
+            b = QRadioButton(text)
+            if tip_text:
+                b.setToolTip(tip_text)
+            self.group.addButton(b)
+            lay.addWidget(b)
+            self.radios.append(b)
+            self._keys.append(key)
+        if not vertical:
+            lay.addStretch(1)
+        self.radios[0].setChecked(True)
+        # (a change unticks one button and ticks another: only the ticked one's signal counts)
+        self.group.buttonToggled.connect(lambda _b, on: on and self.changed.emit())
+
+    def value(self):
+        return next((k for k, b in zip(self._keys, self.radios) if b.isChecked()), self._keys[0])
+
+    def set_value(self, key):
+        i = self._keys.index(key) if key in self._keys else 0
+        self.radios[i].setChecked(True)
+
+    def button(self, key) -> QRadioButton:
+        return self.radios[self._keys.index(key)]
 
 
 def button_row(*buttons, stretch: bool = True, field: QWidget | None = None) -> QHBoxLayout:
@@ -250,13 +284,6 @@ class Collapsible(QGroupBox):
         return self._summary_text
 
 
-def advanced_group(title: str, key: str, settings=None, summary=None, *rows) -> Collapsible:
-    """A folded group of expert options ('rows' as group() takes them); its state remembered (Collapsible)."""
-    g = Collapsible(title, key, settings, summary)
-    _add_rows(g.form, rows)
-    return g
-
-
 def _mono() -> QFont:
     f = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
     f.setPointSize(11)
@@ -268,6 +295,100 @@ def _note(text: str = "") -> QLabel:
     lab.setWordWrap(True)
     lab.setStyleSheet("color: gray")
     return lab
+
+
+class FormNote(QLabel):
+    """A grey note that wraps, as a form row of its own (the run tabs' Quality and Runs on lines): exactly the height
+    of its lines at the width it is given. A plain word-wrapped label's size hint is for a guessed width, so a form
+    kept three lines' height for one line of text: a gap above it."""
+
+    def __init__(self, text: str = ""):
+        super().__init__(text)
+        self.setWordWrap(True)
+        self.setStyleSheet("color: gray")
+        self._width = -1
+
+    def sizeHint(self) -> QSize:
+        hint = super().sizeHint()
+        return QSize(hint.width(), self.heightForWidth(self.width()) if self.width() > 1 else hint.height())
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if e.size().width() != self._width:             # (a new width: the form asks for the height again, once)
+            self._width = e.size().width()
+            self.updateGeometry()
+
+
+class AutoRow(QWidget):
+    """One row of the opt-in Advanced group (app_advanced.py): its control, whose first choice is Automatic, and
+    beside it a grey note (what Automatic gives the job now, or why the row's value is not passed). The control is a
+    drop-down of (value, text) choices (set_choices), or for a number range number = (lo, hi) a number box whose
+    lowest step, one below lo, reads Automatic (as the controls before the two modes read 'auto' at 0). value() is
+    None on Automatic. set_choices and set_value never emit 'changed': only a change by the user does, once."""
+    changed = Signal()
+
+    def __init__(self, number: tuple[int, int] | None = None):
+        super().__init__()
+        row = flush(QHBoxLayout(self))
+        self.is_number = number is not None
+        self._values: list = [None]                     # the drop-down's values, by index (Automatic first)
+        if self.is_number:
+            box = QSpinBox(minimum=number[0] - 1, maximum=number[1])
+            box.setSpecialValueText(rs.AUTOMATIC)
+            box.setMinimumWidth(box.sizeHint().width() + 8)     # (macOS draws the word against the left edge)
+            box.valueChanged.connect(lambda _v: self.changed.emit())
+        else:
+            box = QComboBox()
+            box.setSizeAdjustPolicy(QComboBox.AdjustToContents)    # (its choices change with the job: never cut)
+            box.addItem(rs.AUTOMATIC)
+            box.currentIndexChanged.connect(lambda _i: self.changed.emit())
+        self.control = box
+        self.note = FormNote()
+        row.addWidget(box)
+        row.addWidget(self.note, 1)
+
+    def value(self):
+        box = self.control
+        if self.is_number:
+            return None if box.value() == box.minimum() else box.value()
+        i = box.currentIndex()
+        return self._values[i] if 0 <= i < len(self._values) else None
+
+    def set_value(self, value):
+        """Show 'value' (None: Automatic). The value shown already leaves the box alone: a refresh while the user
+        types (each key, the idle poll) must not rewrite the text being typed."""
+        box = self.control
+        if self.is_number:
+            target = box.minimum() if value is None else int(value)
+            if box.value() == target:
+                return
+            box.blockSignals(True)
+            box.setValue(target)
+        else:
+            i = next((k for k, v in enumerate(self._values) if v == value and type(v) is type(value)), 0)
+            if box.currentIndex() == i:
+                return
+            box.blockSignals(True)
+            box.setCurrentIndex(i)
+        box.blockSignals(False)
+
+    def set_choices(self, choices):
+        """The drop-down's choices, [(value, text)] with (None, Automatic) first; the value shown is kept when it is
+        still one of them (else Automatic). Unchanged choices leave the box alone."""
+        if self.is_number or [(v, self.control.itemText(i)) for i, v in enumerate(self._values)] == list(choices):
+            return
+        keep = self.value()
+        box = self.control
+        box.blockSignals(True)
+        box.clear()
+        self._values = [v for v, _ in choices]
+        for _v, text in choices:
+            box.addItem(text)
+        box.blockSignals(False)
+        self.set_value(keep)
+
+    def set_note(self, text: str):
+        self.note.setText(text)         # (an empty note stays in the row: it keeps the control at its own width)
 
 
 class CheckDelegate(QStyledItemDelegate):
@@ -323,9 +444,9 @@ def _grow_fields(root: QWidget):
         f.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
     for sb in root.findChildren(QAbstractSpinBox):      # numbers stay compact
         sb.setSizePolicy(QSizePolicy.Policy.Fixed, sb.sizePolicy().verticalPolicy())
-    # A combo box is as wide as its longest item, and the forms scroll only vertically: a long item (a deposit's
-    # explanation) made the whole tab wider than its pane and cut off the right edge. Such a combo may shrink to
-    # 24 characters; it grows back to the width the form gives it, and its list shows the items whole.
+    # A combo box is as wide as its longest item, and the forms scroll only vertically: a long item would make the
+    # whole tab wider than its pane and cut off the right edge. Such a combo may shrink to 24 characters; it grows
+    # back to the width the form gives it, and its list shows the items whole.
     for cb in root.findChildren(QComboBox):
         if cb.sizeAdjustPolicy() == QComboBox.AdjustToContentsOnFirstShow and cb.sizeHint().width() > WIDE_COMBO_PX:
             cb.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -347,12 +468,6 @@ def _dir_row(edit: QLineEdit, on_browse) -> QHBoxLayout:
     row.addWidget(edit)
     row.addWidget(b)
     return row
-
-
-def _exclusive(a: QCheckBox, b: QCheckBox):
-    """Two options the binary refuses together: ticking one unticks the other."""
-    a.toggled.connect(lambda on: on and b.setChecked(False))
-    b.toggled.connect(lambda on: on and a.setChecked(False))
 
 
 def _checked(lst: QListWidget) -> list:

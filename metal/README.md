@@ -19,8 +19,12 @@ make DTFE PS-DTFE DOUBLE=1 METAL=1 # the double pair: float copies of the tetrah
 A METAL=1 build defines `-DPS_GPU` / `-DDTFE_GPU`. The mode (metal or off) is stamped in `o/` and
 `o_ps/` (`.gpu_mode_*`, `.build_mode` holds its make argument); a switch wipes the objects, so a binary never mixes GPU
 and plain objects. `make DTFE $(cat o/.build_mode)` rebuilds in the current mode. The Metal kernels are embedded at build
-time (`o/dtfe_deposit_msl.h`, `o_ps/ps_deposit_msl.h`, each with `exact_clip.metal.inc` and `fixed_words.metal.inc`
-prepended) and compiled once per process. Dependency: the header-only **metal-cpp**, vendored at `third_party/metal-cpp`.
+time (`o/dtfe_deposit_msl.h` and `o_ps/ps_deposit_msl.h`, each with `exact_clip.metal.inc` and `fixed_words.metal.inc`
+prepended, the PS one with `ps_common.metal.inc` after its parameter blocks; and `o_ps/ps_face_msl.h`, the face kernel
+of `DTFE_GPU_FACES=1`, with `fixed_words.metal.inc`, `ps_kernel_params.h`, `ps_common.metal.inc` and
+`src/CGAL_triangulation/face_sweep_f32.h` prepended) and compiled at run time: the standard one once per process, the
+PS one once per word size (`PS_FX_WORDS`, below), the face kernel once, by the first face pass, in the safe math mode
+(*PS-DTFE face kernel*). Dependency: the header-only **metal-cpp**, vendored at `third_party/metal-cpp`.
 
 Tests (GPU builds; the PS suites use the GPU when the `o_ps/` stamp says metal):
 - `tests/dtfe_metal_check.sh` (builds in the `o/.build_mode` mode, METAL=1 when that is empty): standard DTFE
@@ -30,9 +34,11 @@ Tests (GPU builds; the PS suites use the GPU when the `o_ps/` stamp says metal):
 - The PS suites with a `--gpu` part: `ps_linear_deposit_check.sh`, `ps_vertex_mass_check.sh`,
   `ps_volume_weighted_check.sh`, `ps_halo_release_check.sh`, `ps_hidden_streams_check.sh`, `ps_caustic_class_check.sh`,
   `ps_window_check.sh`, `ps_mass_exact_check.sh`, `ps_fixed_moments_check.sh`, `point_exact_serve_check.sh`,
-  `python3 tests/ps_nonperiodic_test.py`, and `ps_double_check.sh` for the double pair.
-- The kernel harness (Metal only): `bash metal/build_prototype.sh && ./metal/validate_deposit` (T1-T15 below;
-  `BENCH=1` adds a 1M-tet timing, `DUMP_PROFILES=1` per-bin profiles, `VALIDATE_FLOAT_MASS=1` the float mass grid).
+  `ps_face_gradient_check.sh` (P18: the face kernel), `python3 tests/ps_nonperiodic_test.py`, and `ps_double_check.sh`
+  for the double pair.
+- The kernel harness (Metal only): `bash metal/build_prototype.sh && ./metal/validate_deposit` (T1-T16 below;
+  `BENCH=1` adds a 1M-tet timing and the face kernel's against the CPU sweep, `DUMP_PROFILES=1` per-bin profiles,
+  `VALIDATE_FLOAT_MASS=1` the float mass grid, `FACE_PROBE_N=n` the face probe's random cases, default 2^20).
 
 CI builds no GPU backend (its runners are Linux): all of these are local.
 
@@ -41,15 +47,18 @@ CI builds no GPU backend (its runners are Linux): all of these are local.
 | file | role |
 |---|---|
 | `metal/ps_deposit.metal` | PS-DTFE kernels: `depositFields` (one thread per tetrahedron: mass, velocity moment, dispersion second moment, gradient moment, stream count, scalar; the sampled path, the centroid fallback and the deferrals) and `depositExactItems` (the exact deposit, one thread per block of a tetrahedron's window cells) |
+| `metal/ps_face.metal` | PS-DTFE's face kernel (`DTFE_GPU_FACES=1`): `faceSweepItems` and the probe `faceProbe` |
+| `metal/ps_common.metal.inc` | the PS kernels' shared `fixedShareOk`, `addFixedQ` and `psItemOf`, prepended to both |
 | `metal/dtfe_deposit.metal` | standard-DTFE kernels: `depositAveraged1` (per tetrahedron, A/B), `depositAveraged1Items2/4/8` (the item kernels), `depositExactAverage` (`--exact`) |
 | `metal/exact_clip.metal.inc` | the exact tetrahedron-cell intersection moments (`sweep_moments`, a register-resident z-sweep) and the face-plane cell skip, prepended to both kernel sources |
-| `metal/fixed_words.metal.inc` | the run-wide 128-bit fixed-point words (`shareLimbs`, `addLimbs`, `addLimbsN`: four 32-bit atomic limbs per component; `src/fixed_units.h` holds the units, the caps and the host's words), prepended to both kernel sources after `exact_clip.metal.inc`; the kernel harness assembles its source without it |
-| `metal/validate_deposit.cpp`, `metal/build_prototype.sh` | the kernel harness and its build (offline-compiles `ps_deposit.metallib` when Xcode's Metal toolchain is installed, which only the harness loads; git-ignored) |
+| `metal/fixed_words.metal.inc` | the run-wide 128-bit fixed-point words (`addShare`, `addLimbs63`, `shareLimbs`, `addLimbs`, `addLimbsN`: four 32-bit atomic limbs per component; `src/fixed_units.h` holds the units, the caps and the host's words), prepended to both kernel sources after `exact_clip.metal.inc` (and first in front of the face kernel's), and to the kernel harness's source and the offline build (`validate_deposit.cpp`, `build_prototype.sh`) |
+| `metal/validate_deposit.cpp`, `metal/build_prototype.sh` | the kernel harness and its build (offline-compiles `ps_deposit.metallib` (and `ps_face.metallib`, in the face kernel's safe math mode) when Xcode's Metal toolchain is installed, which only the harness loads; git-ignored) |
 | `src/CGAL_triangulation/gpu_host.h` | the host interface the callers see (deposit calls, `PSGpuGrids`, the shared-grid API `dtfeGpuShared*`, `psWindowHull`) and the PS host's plain-C++ steps |
 | `src/CGAL_triangulation/ps_metal_host.cc`, `dtfe_metal_host.cc` | the Metal hosts: device and pipelines, the chunked dispatch controller, retries |
 | `src/CGAL_triangulation/gpu_metal_retry.h` | the two hosts' retry policy (snapshots, causes, pace, fault injection) and its pass loop `gpuRunPass` |
-| `src/CGAL_triangulation/ps_deposit_params.h`, `dtfe_gpu_fixed.h` | the per-tet record (`psFillTetRecord`) and the fixed-point units (`psMassFixedScale`, `psMomentFixedScale`, `PSFixedBounds`; the standard grids' units) |
+| `src/CGAL_triangulation/ps_deposit_params.h`, `dtfe_gpu_fixed.h` | the per-tet record (`psFillTetRecord`) and the fixed-point units (`psMassFixedScale`, `psMomentFixedScale`, `PSFixedBounds`: a PS pass's own units, from bounds that run by default and, under `DTFE_PS_RUN_UNITS=1`, only for a grid without a run-wide unit; the host's share guard at the cap, `psFixedShareOk`; the standard grids' units) |
 | `src/CGAL_triangulation/ps_exact_inside.h` | the CPU's exact sample-inside test the kernels' certified float test reproduces |
+| `src/CGAL_triangulation/face_sweep_f32.h` | the face sweep in one float arithmetic for the CPU and the face kernel |
 
 The call sites: `interpolateGrid_phaseSpace` in `ps_interpolation.cc` (PS-DTFE) and `averaged_interpolation_1.cc`
 (standard DTFE).
@@ -142,15 +151,70 @@ precomputes volumes, sample counts and single-cell indices with its own helpers,
 The sampled GPU grid agrees with the CPU's except in 0.1-0.2% of the cells, where a sample within float rounding of a
 cell face lands in the neighbouring cell (`dtfe_metal_check.sh`: means to 1e-5, cells to 5e-2 outside a 1e-3 fraction).
 
+## PS-DTFE face kernel (`DTFE_GPU_FACES=1`)
+
+A developer switch of the single-precision 3-D build for one measurement, not a user option (*Developer switches* in
+the README): 0 by default, `auto` 0 too. With `--face-gradient`, a GPU pass's face sums -- per sub-grid cell 30 int64
+words, 18 of S and 6 each of N and P, for the cell's lower and upper face on each axis -- come from `faceSweepItems`
+in `metal/ps_face.metal` instead of the CPU face walk, in the deposit's hold of the device after its passes and
+releases. The kernel and the CPU share `src/CGAL_triangulation/face_sweep_f32.h`, one canonical float arithmetic:
+correctly rounded IEEE single operations with flush-to-zero, the Apple GPU's rule for subnormal operands and results
+(the CPU sets AArch64's flush-to-zero mode for the duration of each such evaluation, `fsFlushed`: the sweep, the upper
+boundary plane's test and the records' plane counts), every product that feeds a sum an explicit fused multiply-add,
+no transcendental function. Under the switch every CPU face sum of the run takes that arithmetic too, so the face
+grids are a `DTFE_FACE_F32=1` CPU run's byte for byte (`tests/ps_face_gradient_check.sh` P18; the harness's T16).
+
+- Library: its own (`o_ps/ps_face_msl.h`: `fixed_words.metal.inc`, `ps_kernel_params.h`, `ps_common.metal.inc` and
+  `face_sweep_f32.h` in front of `ps_face.metal`, behind `#define PS_FX_WORDS 0`), compiled once by the first face
+  pass with fast math off, and in the safe math mode with precise functions where the macOS has those selectors
+  (`ps_metal_host.cc` `facePipesInit`). The deposit's library keeps the default fast math. The source also holds the
+  four-limb adds of `PS_FX_WORDS 2`, which no binary compiles: the kernel takes no pass under the run-wide units.
+  `#define FS_REGISTERS 1` in front compiles the polygons as register arrays (predicated writes, unrolled loops; the
+  same words); the binaries do not set it. Which form is faster: to be measured: the two forms with the harness's `BENCH=1`.
+- Records: one per tetrahedron of the CPU face walk's set that owns a section in some grid plane, built by the GPU
+  extraction walk (`ps_interpolation.cc` `psFaceRecordPush`), 28 floats: the wrapped vertices (12), the velocity
+  gradient (9), vertex 0's velocity (3), the density (1) and the planes it owns per axis as uint bits (3). Items:
+  (record, axis, plane), mapped with `psBuildExactItemMap` at one item per block; the kernel counts its axis' planes
+  again and adds nothing where the count differs (counted: the host then keeps none of the pass's words).
+- Buffers: 0 the records, 1 the items' map, 2-4 the S, N and P words (two uint per int64 word), 5 the counters
+  (`PS_FACE_CNT_S`, `PS_FACE_CNT_N` and `PS_FACE_CNT_P` the dropped shares, `PS_FACE_CNT_MISMATCH`; the host allocates
+  `FX_DROP_SLOTS` words), 6 `PSFaceParams` (`ps_kernel_params.h`, set per chunk).
+- Pass: through `gpuRunPass` (the run mode's pace and item cap, the first chunk 8192 items, at least 1024), from a
+  zero-word snapshot (a failed buffer restores the zeros and restarts at item 0; no periodic checkpoint), the words
+  copied back into the host's vectors. A pass that gives up, cannot have its buffers or counts a mismatch leaves the
+  pass's face sums to the CPU walk (the same words); a deposit the device gives up on leaves both to the CPU loop.
+  `DTFE_GPU_TIMING=1` adds a `faceSweepItems` kernel line, a `face pass:` phase line per pass and the face pipeline's
+  compile line.
+- Not taken: the run-wide units (`DTFE_PS_RUN_UNITS=1`, and `--ps-merge fixed-point`, which switches them on), the NaN
+  test hook, `DTFE_GPU_FLOAT_MOMENTS=1` without a window; the double and 2-D builds have no face kernel.
+- Probe: `faceProbe` (the design's K11) returns 14 results per operand set (division, fma, products, sums, the
+  contraction across statements, the cross term, rint, floor, the sweep's floor index, the fixed-point guard and
+  integer); the harness's T16a compares them bit for bit with the CPU's float operations under the same flush-to-zero
+  rule.
+
 ## Exact sums
 
 Float atomics drop every share below half an ulp of a busy cell's running sum, always downward (0.06% of TNG50-3-Dark
 z = 0's box mass), and their order varies, so the grids are fixed-point integer sums instead:
-- **PS mass grid**: each share added as rint(share · 2^k) into two `atomic_uint` words per cell with a carry
-  (`depositMass`), the partition's mass at 2^61..2^62 units (`psMassFixedScale`; coarser units put a zoom's 3 kpc cells
-  5e-4 off).
-- **PS moment grids** (velocity, dispersion and its own mean and weight, gradients, scalar): each in its own unit from a
-  bound the caller sums (`PSDepositParams.fxMask`, `PSFixedBounds`, `psMomentFixedScale`).
+- **PS mass grid** (`depositMass`): rint(share · 2^k) into two `atomic_uint` words per cell with a carry, the
+  partition's mass at 2^61..2^62 units (`psMassFixedScale`; coarser units put a zoom's 3 kpc cells 5e-4 off). Under
+  `DTFE_PS_RUN_UNITS=1`, and under `--ps-merge fixed-point` in the single 3-D build, which switches the same units on
+  (`PSDepositParams.fxWords` 2; 0 by default): in the run's units (`src/fixed_units.h`
+  `RunUnits`), each share's integer added into four `atomic_uint` limbs per cell (`addShare` of
+  `fixed_words.metal.inc`: below 2^63 units as one signed 64-bit add, `addLimbs63`, else as limbs, `shareLimbs` and
+  `addLimbs`; the same bits either way), the same unit in every pass and on the CPU; a cap of 2^(94 - ceil(log2
+  nSub^3)) units on each share's integer (`fxCapBits`) keeps every cell below 2^126 in any order, the `n`-fold adds of
+  a sampled cell included.
+- **PS moment grids** (velocity, dispersion and its own mean and weight, gradients, scalar; `PSDepositParams.fxMask`):
+  each in its pass's own unit from a bound the caller sums (`PSFixedBounds`, `psMomentFixedScale`), in two words per
+  component; the exact deposit's weight total per tetrahedron (`FX_SUMW_BIT`) is one integer per item, from the item's
+  float sum. With `fxWords` 2: four limbs, each grid in its run-wide unit (a grid without one takes its pass's own
+  unit from the bound, in the same words), and the weight total sums per-cell integers in the tetrahedron's own unit
+  (`sumw_scale`), so it does not depend on how the items split its cells.
+- **One PS library per word size**: `ps_deposit.metal` takes the size as the preprocessor constant `PS_FX_WORDS` (0 or
+  2; `FX_WIDE`), which the host puts in front of the embedded source when it compiles the pipelines of a size for the
+  first deposit that asks (`ps_metal_host.cc` `pipes()`), so a library carries one add path and a run compiles only
+  the size it sums in. The kernel harness and its offline build compile size 0.
 - **Standard `_a` grids, exact** (`depositExactAverage`): 128-bit sums, four `atomic_uint` limbs per component
   (`fixed_words.metal.inc`), in one unit per grid for the whole run (`src/fixed_units.h` `RunUnits`, from the grid,
   the mean density and the particles' largest velocity), so every partition and thread split rounds every share
@@ -160,7 +224,8 @@ z = 0's box mass), and their order varies, so the grids are fixed-point integer 
   (`dtfe_gpu_fixed.h`); the item kernel's chunks start at multiples of 256 items (`DTFE_GPU_CHUNK` is rounded up), so
   the SIMD-group sums are fixed too.
 
-The hosts hand the words over unconverted (`PSGpuGrids::massFx`); the CPU adds the deferred tetrahedra and the
+The hosts hand the words over unconverted (`PSGpuGrids::massFx`; the 128-bit limbs folded to 64-bit words and a
+sorted carry, `massFxCarry`, `fxCarry`); the CPU adds the deferred tetrahedra and the
 `--ps-halo-release` centroid deposits as the same integers and converts once. So every grid is identical from run to
 run whatever the order of the atomics (`gpu_mass_check.sh`, `ps_fixed_moments_check.sh`, `dtfe_gpu_retry_check.sh`);
 the remaining differences against the CPU are its float arithmetic (~1e-6 of the peak). A share without an integer
@@ -210,6 +275,15 @@ differs from the kernel's exact decisions in 0.003% of the stream counts (the pr
 stream counts. A test lattice must not be grid-commensurate (samples on shared faces, moiré per slab): the harness
 decommensurates the periods, offsets the phases and adds an affine shear while keeping the reference exact.
 
+T16a and T16 (the face kernel, `DTFE_GPU_FACES=1`): `faceProbe` against the CPU's float operations bit for bit on
+adversarial and random operands (`FACE_PROBE_N`, default 2^20), normal and subnormal ones apart, the CPU's reference
+under the device's flush-to-zero rule (`fsFlushed`), the guard also against `psFxAdd`'s double rule; and
+`faceSweepItems` against face_sweep_f32.h's `fsDepositTet` word for word (the CPU under the same rule), with its
+dropped shares and plane-count mismatches, on periodic (a sub-box across the seam, NaN and huge shares), non-periodic
+(tetrahedra at and beyond the grid's ends), one-layer window, lattice (vertex levels on the planes, periodic and not)
+and T7 stress sets, plus a record with a wrong plane count (counted, nothing added). Each runs on the run-time library
+the binaries compile, on its `FS_REGISTERS` form and on `metal/ps_face.metallib` when the offline build made one.
+
 ## Knobs
 
 Environment variables, read by the Metal hosts with the rule of the README's *Environment variables of the binaries*
@@ -236,10 +310,11 @@ and `PS_GPU_TIMING`, `PS_GPU_FLOAT_MASS`, `PS_GPU_FLOAT_MOMENTS` (deprecated: `D
 | `DTFE_GPU_TIMING` | standard DTFE: one line per batch, and the Morton order's cell sharing; PS-DTFE: one line per kernel run, the exact items and the checkpoints, and per partition how long its deposit waited for the GPU and held it, and where its time went: before the hold (device setup, plan, the exact items' bounds and map) and in it (uploads, kernels, pacing gaps, snapshots, leftovers, copy-back, releases) | off |
 | `DTFE_GPU_FLOAT_MASS` | PS-DTFE: the float mass grid on GPU and CPU, for A/B (see Exact sums) | off |
 | `DTFE_GPU_FLOAT_MOMENTS` | PS-DTFE: the float moment sums on GPU and CPU, for A/B | off |
+| `DTFE_GPU_FACES` | PS-DTFE: the face kernel (*PS-DTFE face kernel*), a developer switch (README.md) | 0 |
 | `DTFE_GPU_FLOAT_GRIDS` | standard DTFE: float atomics for the `_a` grids, for A/B | off |
 | `DTFE_GPU_CHECKPOINT_CHUNKS=n` | a grid snapshot every n buffers; 0 = at the pass start only | every ~10 s of GPU work |
 | `DTFE_GPU_PACE_RECOVER_SEC=s` | clean GPU work after which an escalated pace eases back one notch, toward the run mode's base (0.25 s buffers in performance, 0.05 s in gentle and balanced) | 90 |
-| `DTFE_GPU_SHARE_RHO` | PS-DTFE `--gpu-share auto` in performance: the GPU's constant rho of the share model 1/(1 + rho (threads - 1.8)) (an M1 Max's GPU; a stronger GPU wants a smaller one), for development | 0.09 |
+| `DTFE_GPU_SHARE_RHO` | PS-DTFE `--gpu-share auto` in performance and `mixed` in every mode: the GPU's constant rho of the share model 1/(1 + rho (threads - 1.8)) (an M1 Max's GPU; a stronger GPU wants a smaller one), for development | 0.09 |
 
 For testing and debugging only: `DTFE_GPU_DEBUG_NOWRITE` (a timing experiment: every kernel does all its work but
 writes no grid), `DTFE_GPU_DEBUG_NOATOMIC=1|2|3` (timing: 1 issues no atomics in the final reduction, 2 also skips the

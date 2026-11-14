@@ -408,6 +408,26 @@ def texture_rect(q: dict, lo2, hi2, width: int, height: int) -> tuple[float, flo
     return (u0 - lo2[0]) * sx, (hi2[1] - v1) * sy, (u1 - u0) * sx, (v1 - v0) * sy
 
 
+def segments_on_screen(segs, T9, width: float, height: float) -> np.ndarray:
+    """Line pieces ((k, 2, 2) in a picture's pixels) on the screen under plane_transform's nine numbers T9, as (m, 2,
+    2) screen pixels: each end divided by its w (a homography keeps a line straight, so a piece is its two ends). A
+    piece with an end behind the eye or near its plane (w at most 1e-6 of the largest), or one reaching past the view
+    grown by its own size to any side, is left out: in perspective, with the eye inside the window, a piece beside
+    the eye lands anywhere (screen_polygon's reason), and one so long on the screen is only that near."""
+    s = np.asarray(segs, dtype=np.float64).reshape(-1, 2)
+    if not s.size:
+        return np.zeros((0, 2, 2))
+    m11, m12, m13, m21, m22, m23, m31, m32, m33 = (float(v) for v in T9)
+    w = m13 * s[:, 0] + m23 * s[:, 1] + m33
+    near = 1e-6 * float(np.abs(w).max())
+    with np.errstate(divide="ignore", invalid="ignore"):
+        X = (m11 * s[:, 0] + m21 * s[:, 1] + m31) / w
+        Y = (m12 * s[:, 0] + m22 * s[:, 1] + m32) / w
+    ok = (w > near) & (X >= -width) & (X <= 2.0 * width) & (Y >= -height) & (Y <= 2.0 * height)
+    ok = ok.reshape(-1, 2).all(axis=1)
+    return np.stack([X, Y], axis=-1).reshape(-1, 2, 2)[ok]
+
+
 def screen_polygon(T9, rect, width: float, height: float) -> np.ndarray:
     """The outline on the screen of the part of a picture's rectangle 'rect' (x, y, w, h in its pixels) that lies in
     front of the eye and in the view grown by its own size, under plane_transform's nine numbers T9: (k, 2) pixels

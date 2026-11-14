@@ -29,59 +29,90 @@ from PySide6.QtWidgets import (
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import contours as CT  # noqa: E402  (the contour lines: marching squares and the levels)
 import figsave as FS  # noqa: E402  (the Save options: presets, units, full resolution)
 import grids as G  # noqa: E402
 import runspec as rs  # noqa: E402
-from app_widgets import tip_auto  # noqa: E402  (a long tooltip: its first sentence, the whole text the What's This)
+from app_widgets import ChoiceRadios, tip_auto  # noqa: E402  (tip_auto: a long tooltip, its What's This)
 # its parts, one module each (ExploreControls' mixins; the classes and functions re-exported, explore.<name> as
 # before): explore_canvas the map widgets, explore_grid the figure grid, explore_save Save image, explore_server the
 # point-query server, explore_voids the void outlines, explore_zoom the zoom, explore_3d the 3D view
-from explore_3d import View3D, View3DMixin, planes3d  # noqa: E402
-from explore_canvas import ColorBar, ImageCanvas  # noqa: E402,F401  (re-exported)
+from explore_3d import SHAPE_ITEMS, SHAPE_TIP, View3D, View3DMixin, planes3d  # noqa: E402
+from explore_canvas import ColorBar, ImageCanvas, contour_paths, stroke_layer  # noqa: E402,F401  (re-exported)
 from explore_grid import (GridMixin, grid_differences, grid_dpi, grid_figure, grid_full_pixels,  # noqa: E402,F401
-                          grid_items, grid_suptitle, grid_tile_circles, grid_tiles, grid_unit, panel_label, panel_names,
-                          panel_void_circles, quantity, type_tag)
+                          grid_items, grid_suptitle, grid_tile_circles, grid_tile_contours, grid_tile_marks,
+                          grid_tiles, grid_unit, panel_label, panel_names, panel_overlay, panel_void_circles,
+                          quantity, type_tag)
 from explore_save import SaveMixin  # noqa: E402
 from explore_server import ServerMixin, ServerWorker  # noqa: E402,F401  (re-exported)
+import explore_voids as XV  # noqa: E402  (the void smoothing box, the search's time)
 from explore_voids import VoidsMixin  # noqa: E402
 from explore_zoom import (ExactZoomWorker, ZoomMixin, _fields_bytes, _fmt_duration,  # noqa: E402,F401
                           load_exact_planes)
 
 VOID_TOOL = rs.REPO_ROOT / "python" / "tools" / "void_outlines.py"     # the voids of one snapshot, as JSON
 VOID_CACHE_DIR = None        # the helper's catalogue cache: None = the pipeline's own (config.CACHE_DIR); tests pin a temp one
-VOID_TIP = ("Outline the voids on the map: a circle where each distinct, well-resolved void's sphere of radius R_v "
-            "cuts this slice. R_v is where the smoothed density around its centre rises back to the mean. The "
-            "analysis pipeline's own catalogue at its production smoothing, found once per snapshot (about a minute) "
-            "and cached; a catalogue that is not cached and would not fit in the free memory is not built, and it "
-            "says so. Point at an outline for its R_v, R_eff and central δ; click it for the whole entry. Saved "
-            "images and the figure grid carry the outlines, and a saved PNG gets a CSV table of the voids beside it.")
+VOID_TIP = ("Draw the voids on the map and in the 3D view: each one's ellipsoid where it cuts this slice, or its "
+            "sphere of R_v. How they are found: the analysis pipeline smooths the density in 3D (its production "
+            "smoothing, or σ beside), takes its local minima, and at each the Hessian (the field's curvature): its "
+            "eigenvectors are the ellipsoid's axes, its eigenvalues λ its shape. The ellipsoid drawn is where that "
+            "quadratic fit around the minimum, δ_min + ½ Σ λ x², returns to the mean density: semi-axes √(2 |δ_min| "
+            "/ λ), its (a b c)^⅓ called R_ell (the catalogue's own fit, 2 cells / √λ, sets only the shape's ratios). "
+            "The map shows its section: an ellipse that grows, is largest on the layer of the minimum (marked by a "
+            "dot, filled on its own layer) and shrinks as you scroll. R_v is where the spherical average of the "
+            "smoothed density returns to the mean. The catalogue is found once per snapshot and smoothing and "
+            "cached; one that would not fit in the free memory is not built, and it says so. Point at a void for its "
+            "sizes; click it for the whole entry. Saved images and the figure grid carry the outlines, and a saved "
+            "PNG gets a CSV table of the voids beside it.")
+# the drawn shape (the Map group's 'Voids as', for the map and the 3D view alike; explore_3d keeps the items)
+VOID_RV_TIP = ("Also draw each void's sphere of R_v, dashed, around the same centre: where the spherical average of "
+               "the smoothed density returns to the mean, the size the catalogue's profiles use")
 # a heavy action beside a running DTFE job starts without a question only when it fits in the free memory less
 # this (void_outlines.HEADROOM_BYTES, the catalogue build's own margin)
 HEAVY_HEADROOM_GB = 4.0
 # the choice of a phase-space output's velocity derivatives (grids.py, GRADIENT_FIELDS): its items and tip
 PS_GRADIENT_ITEMS = (("mean field ∇⟨v⟩: from the mean velocity, as standard DTFE", "mean-field"),
-                     ("stream average ⟨∇v⟩: the stored grids", "stored"))
-PS_GRADIENT_TIP = ("How a phase-space output's velocity divergence, shear, vorticity, gradient and V-web are shown. Mean "
-                   "field (the default, as in the figure scripts): the derivatives of its mean velocity grid, ∇⟨v⟩, the "
-                   "quantity standard DTFE stores, computed slice by slice from the velocity grid (under a "
-                   "second per slice at 512³; the V-web at the run's own threshold). Stream average: the grids the "
-                   "program stored, the average of each stream's own gradient ⟨∇v⟩, which differs in multi-stream "
-                   "cells (its divergence does not average to zero over the box, its V-web finds few filaments). "
-                   "A standard-DTFE output, and a phase-space one made with the face gradient (the program's default "
-                   "with the exact deposit and the volume weighting), is always shown as stored: its grids are the "
-                   "mean field. The hi-res slices and the point zooms are point evaluations: the stream average (an "
-                   "exact zoom takes the output's own route). Every title, colour bar and figure-grid "
-                   "panel of a phase-space output says which it shows.")
-VOID_REFF_TIP = ("Also draw each void's R_eff = (a b c)^⅓ of its fitted ellipsoid, dashed, around the same centre: "
-                 "R_eff is about 1.6 R_v, the open question of which radius describes the void")
-VOID_RANGE_TIP = ("Draw only the voids of this size ('any' = no bound): by R_v, or by R_eff where the 3D view draws "
-                  "the fitted ellipsoids. R_v holds on the map, the figure grid, the saved images and their CSV and "
-                  "the 3D view's spheres. A few voids have an R_v far larger than their ellipsoid (it never returns "
-                  "to the mean nearby): an upper bound hides them")
-VOID_SIGMA_TIP = ("The smoothing the voids are found at: the analysis scripts' own ('production') or one scale in Mpc "
-                  "for every box. Production: the scripts' own 10 cells (a different physical scale in every box) and "
-                  "their cached catalogue; a value in Mpc smooths every box at that scale (the cross-box comparison), "
-                  "with its own cached catalogue, built once per snapshot and smoothing")
+                     ("stored grids: the stream average ⟨∇v⟩ (an Exact run stores ∇⟨v⟩)", "stored"))
+PS_GRADIENT_TIP = ("How a phase-space output's velocity divergence, shear, vorticity, gradient and V-web are "
+                   "shown. Mean field (the default, as in the figure scripts): the derivatives of its mean "
+                   "velocity grid, ∇⟨v⟩, the quantity standard DTFE stores, computed slice by slice from the "
+                   "velocity grid (the V-web at the run's own threshold). Stream average: the grids the program "
+                   "stored, the average of each stream's own gradient ⟨∇v⟩, which differs in multi-stream cells "
+                   "(its divergence does not average to zero over the box, its V-web finds few filaments): a Fast "
+                   "run's, and an Exact run's in 2D or with the halo release. A standard-DTFE output, and a "
+                   "phase-space Exact one in 3D (its derivatives from exact face sums), is always shown as "
+                   "stored: its grids are the mean field. The hi-res slices and the point zooms are point "
+                   "evaluations: the stream average (an exact zoom takes the output's own route). Every title, "
+                   "colour bar and figure-grid panel of a phase-space output says which it shows.")
+# the contour lines' checkbox (contours.py: the levels, their colours, the line geometry); greyed out on a class map
+CONTOURS_TIP = ("Contour lines over the map at the values marked on the colour bar (the density: mostly below the "
+                "mean); each line keeps its value from layer to layer")
+CONTOUR_DETAIL_TIP = ("Fewer contour lines (left) or more (right): each step spaces them a little closer. The number "
+                      "is the lines on the map now")
+# while the level slider is dragged, the map (and the figure grid, the 3D view, a zoom) is redrawn at most this often:
+# each position is new lines on the slice worker, and the 3D volume's shells and a zoom's lines are made on the GUI
+# thread; a click, a key or a programmatic move redraws at once
+CONTOUR_DRAG_MS = 120
+VOID_REFF_TIP = ("Also draw each void's R_eff = (a b c)^⅓ of the catalogue's fitted ellipsoid, dashed, around the "
+                 "same centre: R_eff is about 1.6 R_v, the open question of which radius describes the void")
+VOID_RANGE_TIP = ("Draw only the voids of this size ('any' = no bound), by the size drawn: R_ell = (a b c)^⅓ of the "
+                  "ellipsoid drawn, or R_v with the spheres. The map, the figure grid, the saved images and their "
+                  "CSV, and the 3D view keep the same voids. A few voids have an R_v far larger than their ellipsoid "
+                  "(the density never returns to the mean nearby): an upper bound hides them")
+VOID_COUNT_TIP = ("The voids drawn are the catalogue's distinct sample: minima whose fit passes its size limits, "
+                  "outside every deeper void. Its other minima are not drawn")
+VOID_SIGMA_TIP = ("The smoothing the voids are found at: the analysis scripts' own ('production') or one scale in "
+                  "Mpc for every box. Production: the scripts' own 10 cells (a different physical scale in every "
+                  "box) and their cached catalogue; a value in Mpc smooths every box at that scale (the cross-box "
+                  "comparison), with its own cached catalogue, built once per snapshot and smoothing. The arrows "
+                  "step from production to its own value, then one cell at a time, down to two cells: a search "
+                  "starts when you press Return, leave the box or stop clicking, and the line under the row says "
+                  "how long it should take. A small σ finds thousands of small voids, and its first search can take "
+                  "minutes: one estimated over two minutes asks first")
+SMOOTH3D_TIP = ("Smooth the whole cube in 3D instead of this slice: the slice of the density smoothed in 3D is the "
+                "field the voids are found in. The first layer takes a few seconds per field and smoothing; then "
+                "scrolling the layers is instant. The contours and the 3D view's planes follow it. A slice smoothed "
+                "in 2D is another field: its dark patches are not the sections of the 3D minima")
 
 CMAPS = ["viridis", "magma", "inferno", "cividis", "plasma", "RdBu_r", "coolwarm", "gray", "tab10"]
 AXES = ["x", "y", "z"]
@@ -100,6 +131,20 @@ GRID_MERGE_TIP = ("The panels touch, with shared axes and their colour bars in o
 GROUP_CUSTOM = "custom snapshots"
 GROUP_OPENED = "opened files"
 KEPT_ZOOM_TEXT = "zoom window "     # the zoom line's start when a window carried from another output is not shown
+# what a drag on the map computes (the Zoom group's pair): the query server's point values, at once, or the program
+# run again on the region for its exact cell averages. Both are exact in their own way: the words are not Fast/Exact
+ZOOM_POINT_TEXT = "Point values (instant)"
+ZOOM_EXACT_TEXT = "Exact cell averages (recompute)"
+ZOOM_POINT_TIP = ("The query server evaluates the dragged region again, point by point, at the resolution below "
+                  "(no grid involved); every field of the list is shown from that one evaluation. Start the server "
+                  "first.")
+ZOOM_EXACT_TIP = ("Runs DTFE / PS-DTFE again on the dragged region, one slice cell thick: every cell the exact "
+                  "average over its volume (mass is conserved), on a grid of that many cells across. A whole run, so "
+                  "slower, and no server needed; the GPU is used when the program has it. A phase-space run "
+                  "tessellates the whole box as the original run did (periodic or not) and deposits only into the "
+                  "region, so the zoom shows exactly what a full run at that resolution would show there. It reuses "
+                  "the query server's tessellations on disk and skips the partitions whose streams never reach the "
+                  "region; a zoom that would take more than a minute asks first, with an estimate.")
 
 
 def default_cache_dir(near: str) -> Path:
@@ -179,6 +224,30 @@ def pts_plane(o, side, field: str, component: str):
 
 
 # ==================================================================== workers
+def map_contours(plane, req: dict, vrange, compare: bool = False) -> dict | None:
+    """The contour lines of a map (contours.map_lines on its plane, its colour range 'vrange' as shown, its scale,
+    colour map and the level slider's detail) with the canvas's paths of them ('paths', image pixels), their marks for
+    the colour bar ('marks') and, when the request names the canvas's layer size ('contour_layer':
+    ImageCanvas.layer_size) and this plane's image has the size it was for, the lines already stroked at it ('layer':
+    stroke_layer); None where contours do not apply. Run with the slice on the worker's thread, or for a zoom on the
+    GUI thread."""
+    lines = CT.map_lines(plane, req["field"], vrange, req["log"], req["cmap"], compare=compare,
+                         detail=req.get("contour_detail", CT.DETAIL))
+    if lines is not None:
+        lines["paths"] = contour_paths(CT.image_segments(lines), lines["colours"])
+        lines["marks"] = (lines["levels"], lines["colours"])
+        size = req.get("contour_layer")
+        if size is not None and tuple(size[3:]) == tuple(np.shape(plane)):      # image = plane.T[::-1]: (n0, n1)
+            lines["layer"] = (tuple(size), lines["paths"], stroke_layer(lines["paths"], size))
+    return lines
+
+
+def failure_text(e: Exception) -> str:
+    """A worker's failure as the view says it: an error's class and text, or a refusal's own sentence (the
+    3D smoothing a cube it cannot keep: grids.Smooth3DRefused)."""
+    return str(e) if isinstance(e, G.Smooth3DRefused) else f"{type(e).__name__}: {e}"
+
+
 class SliceWorker(QObject):
     """Reads and colours one slice off the GUI thread; only the latest request is served. The figure
     grid's tiles come the same way (render_grid): coloured straight to pixels, no matplotlib."""
@@ -194,7 +263,7 @@ class SliceWorker(QObject):
         try:
             self.done3d.emit(planes3d(req))
         except Exception as e:                  # a partial file, a vanished disk
-            self.failed3d.emit(f"{type(e).__name__}: {e}")
+            self.failed3d.emit(failure_text(e))
 
     @Slot(object)
     def render_grid(self, req: dict):
@@ -202,12 +271,23 @@ class SliceWorker(QObject):
             items = grid_items(req)
             rgb, labels, bar = grid_tiles(req, items)
             circles, dashed, clips = grid_tile_circles(req, items)
+            marks, mark_clips = grid_tile_marks(req, items)     # the centres of the voids drawn as ellipsoids
+            segs, colours, shared = grid_tile_contours(req, items) if req.get("contours") else ([], [], None)
+            paths = contour_paths(segs, colours) if segs else None
+            size = req.get("contour_layer")             # stroked here at the size the canvas shows the grid
+            layer = (tuple(size), paths, stroke_layer(paths, size)) \
+                if paths and size is not None and tuple(size[3:]) == (rgb.shape[1], rgb.shape[0]) else None
             self.grid_done.emit({"request": req, "rgb": rgb, "labels": labels, "bar": bar,
                                  "shown": sum(1 for it in items if it is not None),
-                                 "circles": circles, "dashed": dashed, "clips": clips,
+                                 "circles": circles, "dashed": dashed, "clips": clips, "marks": marks,
+                                 "mark_clips": mark_clips,
+                                 "contours": paths, "contour_layer": layer,
+                                 "counts": [int(np.size(it["lines"]["levels"])) for it in items
+                                            if it is not None and it.get("lines")] if req.get("contours") else None,
+                                 "lines": shared if bar is not None else None,
                                  "title": grid_suptitle(req, items)})
         except Exception as e:
-            self.grid_failed.emit(f"{type(e).__name__}: {e}")
+            self.grid_failed.emit(failure_text(e))
 
     @Slot(object)
     def render(self, req: dict):
@@ -218,14 +298,13 @@ class SliceWorker(QObject):
                 plane, pts_side, pts_factor = pts_plane(out, req["pts"], req["field"], req["component"])
                 plane = G.smoothed(plane, req.get("smooth", 0))
             else:                                   # (a phase-space output's velocity derivatives: the family
-                grad = req.get("ps_gradient", "stored")     # asked for, grids.OutputSet.slice)
-                plane = G.smoothed(out.slice(req["field"], req["axis"], req["index"], req["component"], grad),
-                                   req.get("smooth", 0))
+                grad = req.get("ps_gradient", "stored")     # asked for, grids.OutputSet.slice; smoothed in 2D, or
+                plane = G.map_plane(out, req["field"], req["axis"], req["index"], req["component"], grad,   # the
+                                    req.get("smooth", 0), req.get("smooth3d", False))     # cube's slice in 3D
             planes = None
             if req.get("compare") is not None:      # B read and smoothed the same way; the map is A - B or log10 A/B
-                b = G.smoothed(req["compare"].slice(req["field"], req["axis"], req["index"], req["component"],
-                                                    req.get("ps_gradient", "stored")),
-                               req.get("smooth", 0))
+                b = G.map_plane(req["compare"], req["field"], req["axis"], req["index"], req["component"],
+                                req.get("ps_gradient", "stored"), req.get("smooth", 0), req.get("smooth3d", False))
                 planes = (plane, b)
                 plane = compare_planes(plane, b, req["compare_mode"])
             # image: horizontal = the first remaining axis, vertical = the second, increasing upward
@@ -237,10 +316,12 @@ class SliceWorker(QObject):
             arrows = out.arrow_field(req["field"], req["axis"], req["index"], smooth=req.get("smooth", 0),
                                      gradient=req.get("ps_gradient", "stored")) \
                 if req.get("arrows") and not req.get("pts") else None
+            lines = map_contours(plane, req, vrange, compare=planes is not None) if req.get("contours") else None
             self.done.emit({"rgb": np.ascontiguousarray(rgb), "plane": plane, "vrange": vrange, "request": req,
-                            "arrows": arrows, "planes": planes, "pts_side": pts_side, "pts_factor": pts_factor})
+                            "arrows": arrows, "planes": planes, "pts_side": pts_side, "pts_factor": pts_factor,
+                            "contours": lines})
         except Exception as e:                  # a partial file, a vanished disk
-            self.failed.emit(f"{type(e).__name__}: {e}")
+            self.failed.emit(failure_text(e))
 
 
 # ==================================================================== canvas
@@ -372,6 +453,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self._plane = None
         self._planes = None                     # (A, B) of a difference map: the hover reads both
         self._arrows = None
+        self._contours = None                   # map_contours() of the map on screen: the lines, their levels
         self._req = None
         self._pending = None
         self._busy = False
@@ -466,6 +548,35 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self.vectors.toggled.connect(self.render)
         crow.addWidget(self.vectors)
         f.addRow("Component", crow)
+        # the contour lines (the tick is the row's label, as the voids' below) and how many: the level slider, its
+        # positions each a slightly closer spacing (contours.DETAIL_MIN..DETAIL_MAX; 0 the rule's own), the lines on
+        # the map counted; no tick marks (dozens of positions would make a comb of them)
+        self.contours = QCheckBox("Contours")
+        self.contours.setToolTip(CONTOURS_TIP)
+        self.contours.toggled.connect(self.render)
+        lrow = QHBoxLayout()
+        self._contour_ends = (QLabel("fewer"), QLabel("more"))     # greyed out with the slider
+        lrow.addWidget(self._contour_ends[0])
+        self.contour_detail = QSlider(Qt.Horizontal)
+        self.contour_detail.setRange(CT.DETAIL_MIN, CT.DETAIL_MAX)
+        self.contour_detail.setValue(CT.DETAIL)
+        self.contour_detail.setSingleStep(1)
+        self.contour_detail.setPageStep(4)
+        self.contour_detail.setFixedWidth(140)
+        self.contour_detail.setToolTip(CONTOUR_DETAIL_TIP)
+        self._contour_drag = QTimer(self, singleShot=True, interval=CONTOUR_DRAG_MS)
+        self._contour_drag.timeout.connect(self.render)
+        self.contour_detail.valueChanged.connect(self._contour_detail_moved)
+        self.contour_detail.sliderReleased.connect(self._contour_detail_released)
+        lrow.addWidget(self.contour_detail)
+        lrow.addWidget(self._contour_ends[1])
+        self.contour_count = QLabel("")
+        self.contour_count.setStyleSheet("color: gray")
+        lrow.addWidget(self.contour_count)
+        lrow.addStretch(1)
+        f.addRow(self.contours, lrow)
+        for w in (self.contour_detail, *self._contour_ends):
+            w.setEnabled(False)
         # a phase-space output's velocity derivatives: the mean field (computed) or the stored stream average
         self.ps_gradient = QComboBox()
         for text, mode in PS_GRADIENT_ITEMS:
@@ -479,18 +590,26 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self.ps_gradient_note.setStyleSheet("color: gray")
         f.addRow("", self.ps_gradient_note)
         f.setRowVisible(self.ps_gradient_note, False)
-        # the void outlines (the tick is the row's label) and their options: R_eff outlines too (dashed), the
-        # smoothing the voids are found at, the void last clicked and a jump to the slice through its centre
+        # the voids (the tick is the row's label) and their options: how they are drawn (their ellipsoids or spheres
+        # of R_v, on the map and in the 3D view alike), the other outline too (dashed), the smoothing they are found
+        # at, a jump to the slice through the centre of the void last clicked; under it a grey line (a search running,
+        # why there are none, or which field they belong to)
         self.voids = QCheckBox("Voids")
         tip_auto(self.voids, VOID_TIP)
         self.voids.toggled.connect(self._voids_toggled)
         vrow = QHBoxLayout()
-        self.void_reff = QCheckBox("R_eff too (dashed)")
-        tip_auto(self.void_reff, VOID_REFF_TIP)
+        self.void3d_shape = QComboBox()                     # (its old name: the 3D view's tests and state know it)
+        for text, shape in SHAPE_ITEMS:
+            self.void3d_shape.addItem(text, shape)
+        tip_auto(self.void3d_shape, SHAPE_TIP)
+        self.void3d_shape.currentIndexChanged.connect(self._void_shape_changed)
+        self.void_shape_combo = self.void3d_shape
+        vrow.addWidget(self.void3d_shape)
+        self.void_reff = QCheckBox("R_v too (dashed)")
         self.void_reff.toggled.connect(self._void_reff_toggled)
         vrow.addWidget(self.void_reff)
         vrow.addWidget(QLabel("σ"))
-        self.void_sigma = QDoubleSpinBox()
+        self.void_sigma = XV.VoidSigmaBox()
         self.void_sigma.setRange(0.0, 50.0)
         self.void_sigma.setDecimals(3)
         self.void_sigma.setSingleStep(0.1)
@@ -498,7 +617,11 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self.void_sigma.setSpecialValueText("production")
         tip_auto(self.void_sigma, VOID_SIGMA_TIP)
         self.void_sigma.setKeyboardTracking(False)          # one search per value typed, not per keystroke
-        self.void_sigma.valueChanged.connect(self._void_sigma_changed)
+        self.void_sigma.valueChanged.connect(self._void_sigma_edited)
+        self._void_sigma_now = self._void_sigma_back = 0.0  # the smoothing committed (the catalogue's key), the one
+        self._void_refused = ""                             # before it; a search declined or stopped (said in a line)
+        self._void_sigma_pause = QTimer(self, singleShot=True, interval=XV.SIGMA_PAUSE_MS)
+        self._void_sigma_pause.timeout.connect(self._void_sigma_commit)
         vrow.addWidget(self.void_sigma)
         self.void_goto = QPushButton("Go to its centre")
         self.void_goto.setToolTip("Show the slice through the centre of the void last clicked")
@@ -507,6 +630,16 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         vrow.addWidget(self.void_goto)
         vrow.addStretch(1)
         f.addRow(self.voids, vrow)
+        self.void_note = QLabel("")
+        self.void_note.setWordWrap(True)
+        self.void_note.setStyleSheet("color: gray")
+        f.addRow("", self.void_note)
+        f.setRowVisible(self.void_note, False)
+        self._void_tick = QTimer(self, interval=1000)       # the search's time so far, in the line, while it runs
+        self._void_tick.timeout.connect(self._void_note)
+        self._void_t0 = self._void_est = None
+        self.confirm_void = None                # asked before a long void search: None = a dialog (tests: a callable)
+        self._void_other_text()
         # the voids drawn, by size: R from .. to .. (0 = no bound), and how many that leaves
         srow = QHBoxLayout()
         srow.addWidget(QLabel("R from"))
@@ -525,6 +658,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         srow.addWidget(self.void_rmax)
         self.void_count = QLabel("")
         self.void_count.setStyleSheet("color: gray")
+        self.void_count.setToolTip(VOID_COUNT_TIP)
         srow.addWidget(self.void_count)
         srow.addStretch(1)
         f.addRow("Sizes", srow)
@@ -588,7 +722,15 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self.smooth = QDoubleSpinBox(minimum=0.0, maximum=20.0, decimals=1, singleStep=0.5)
         self.smooth.setSuffix(" cells (Gaussian)")
         self.smooth.valueChanged.connect(self.render)
-        f.addRow("Smoothing", self.smooth)
+        smrow = QHBoxLayout()
+        smrow.addWidget(self.smooth)
+        # the smoothing in 3D: the slice of the whole cube smoothed (the voids' own field), kept per field and value
+        self.smooth3d = QCheckBox("3D")
+        tip_auto(self.smooth3d, SMOOTH3D_TIP)
+        self.smooth3d.toggled.connect(self._smooth3d_toggled)
+        smrow.addWidget(self.smooth3d)
+        smrow.addStretch(1)
+        f.addRow("Smoothing", smrow)
         cmp_row = QHBoxLayout()
         self.compare = QComboBox()
         self.compare.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -708,7 +850,8 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self._grid_sync_rows()
 
     def _build_streams(self, col):
-        """The 'Streams at a point' group: the query server, its cache folder and residency."""
+        """The 'Streams at a point' group: the query server and its cache folder (how many partitions it keeps in
+        memory is the binary's choice, from the free memory)."""
         g = QGroupBox("Streams at a point")
         v = QVBoxLayout(g)
         v.addWidget(self._note("With the server running, click the map."))
@@ -726,12 +869,6 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         crow.addWidget(cb)
         cf.addRow("Cache folder", crow)
         v.addLayout(cf)
-        self.resident = QSpinBox(minimum=0, maximum=512)
-        self.resident.setSpecialValueText("auto (the memory budget)")
-        tip_auto(self.resident, "A partitioned server keeps this many partition tessellations in memory (the rest "
-                                 "stay in the cache folder and are reloaded when a click or zoom needs them). More "
-                                 "keeps repeated zooms fast at the cost of memory; auto fits them to free memory")
-        cf.addRow("Partitions in memory", self.resident)
         self._snapshots: dict[str, str] = {}    # output root -> a snapshot file chosen by hand
         brow = QHBoxLayout()
         self.server_btn = QPushButton("Start query server")
@@ -749,32 +886,21 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         col.addWidget(g)
 
     def _build_zoom(self, col):
-        """The 'Zoom' group: the resolution, exact, cancel, back and out, the progress and the state line."""
+        """The 'Zoom' group: what a drag computes (point values or exact cell averages), the resolution, cancel, back
+        and out, the progress and the state line."""
         g = QGroupBox("Zoom")
         v = QVBoxLayout(g)
-        v.addWidget(self._note("With the server running, drag a rectangle on the map: the region is evaluated "
-                               "again, point by point, at the resolution below (no grid involved), and every "
-                               "field of the list can be shown from that one evaluation. Drag again to go deeper. "
-                               "'exact' runs the program itself on the region instead: mass-conserving cell "
-                               "averages (the exact deposit) at that resolution, one slice cell thick. That is "
-                               "a whole run, so slower, and needs no server."))
+        v.addWidget(self._note("Drag a rectangle on the map: the region again at the resolution below (point values "
+                               "need the query server above). Drag again to go deeper."))
+        self.zoom_kind = ChoiceRadios([("point", ZOOM_POINT_TEXT, ""), ("exact", ZOOM_EXACT_TEXT, "")])
+        tip_auto(self.zoom_kind.button("point"), ZOOM_POINT_TIP)
+        tip_auto(self.zoom_kind.button("exact"), ZOOM_EXACT_TIP)
+        v.addWidget(self.zoom_kind)
         zrow = QHBoxLayout()
         self.zoom_res = QSpinBox(minimum=64, maximum=4096, value=512, singleStep=64)
-        self.zoom_res.setSuffix(" × same points")
-        self.zoom_res.setToolTip("Points along each side of the zoomed region (512² = 262,144 points, "
-                                 "a second or two on a small box)")
+        self.zoom_res.setSuffix(" per side")
+        self.zoom_res.setToolTip("Points along each side of the zoomed region (exact cell averages: cells)")
         zrow.addWidget(self.zoom_res)
-        self.zoom_exact = QCheckBox("exact")
-        tip_auto(self.zoom_exact, "Run DTFE / PS-DTFE on the dragged region with the exact deposit, one slice cell "
-                                  "thick: every cell the exact volume average (mass is conserved). The region is a "
-                                  "grid of that many cells across. A whole run, seconds to minutes; the GPU is "
-                                   "used when the program has it. A phase-space run tessellates the whole box as "
-                                   "the original run did (periodic or not) and deposits only into the region, so "
-                                   "the zoom shows exactly what a full run at that resolution would show there. It "
-                                   "reuses the query server's tessellations on disk and skips the partitions whose "
-                                   "streams never reach the region; a zoom that would take more than a minute asks "
-                                   "first, with an estimate.")
-        zrow.addWidget(self.zoom_exact)
         self.zoom_cancel_btn = QPushButton("Cancel")
         self.zoom_cancel_btn.setToolTip("Stop the exact zoom that is running")
         self.zoom_cancel_btn.setEnabled(False)
@@ -935,7 +1061,9 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
                 c.blockSignals(False)
             self._out_form.setRowVisible(self.prefix_combo, False)
             self.current = self._plane = self._arrows = None
-            self.view.canvas.arrows = self.view.canvas.circles = self.view.canvas.dashed = None
+            self.view.canvas.arrows = None
+            self._set_void_canvas(None)
+            self._set_contours(None)
             self.info.setText("No grids yet: run the demo (Setup), a Grids job or a Custom snapshot job first.")
             self.view.canvas.set_rgb(None)
             self.view.canvas.setText("No outputs with grids found.")
@@ -1172,6 +1300,8 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         same_grid = self._same(prev, o) and prev.n == o.n and prev.dim == o.dim
         slice_now = self.index.value()
         m = self._keep if same_grid and self._keep is not None else self._keep_for(prev, o)
+        if prev is not None and not self._same(prev, o) and not self._grid_shown:
+            G.drop_smoothed3d(keep=o)       # the output left: its cubes smoothed in 3D go (the grid keeps its own)
         self.current = o
         keep = self.field.currentData()
         self.field.blockSignals(True)
@@ -1249,6 +1379,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self.cmap.setCurrentText(cmap)
         self.cmap.blockSignals(False)
         self._compare_fill()
+        self._smooth3d_sync()
         self.render()
 
     def _axis_changed(self, *_):
@@ -1289,6 +1420,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         req = {"output": o, "field": name, "axis": self.axis.currentIndex(), "index": self.index.value(),
                "component": self.component.currentText(), "cmap": self.cmap.currentText(),
                "log": self.log.isChecked(), "clip": self.clip.value(), "smooth": self.smooth.value(),
+               "smooth3d": self.smooth3d.isChecked() and self.smooth3d.isEnabled(),
                "symmetric": name in G.DIVERGING and not self.log.isChecked(),
                "arrows": self.vectors.isEnabled() and self.vectors.isChecked(),
                "ps_gradient": self.ps_gradient.currentData() or G.PS_GRADIENT_DEFAULT}
@@ -1306,7 +1438,42 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
             req.pop("vrange", None)
             req.update(compare=other, compare_mode=self.compare_mode.currentData(), log=False, symmetric=True,
                        cmap="RdBu_r", arrows=False)
+        req["contours"] = self._contours_sync(req)
+        req["contour_detail"] = self.contour_detail.value()
+        if req["contours"]:                     # the worker strokes the lines at the size the canvas shows them
+            req["contour_layer"] = self.view.canvas.layer_size()
         return req
+
+    def _contour_detail_moved(self, _value=None):
+        """The level slider moved: at once for a click, a key or a programmatic move; while it is dragged at most once
+        per CONTOUR_DRAG_MS (each redraw then takes the position of that moment; the workers serve only the latest
+        request, as for a scroll), so a drag across many positions does not ask for each of them."""
+        if self.contour_detail.isSliderDown():
+            if not self._contour_drag.isActive():
+                self._contour_drag.start()
+            return
+        self._contour_drag.stop()
+        self.render()
+
+    def _contour_detail_released(self):
+        """The drag ended: its last position drawn now if a redraw was still waiting."""
+        if self._contour_drag.isActive():
+            self._contour_drag.stop()
+            self.render()
+
+    def _contours_sync(self, req: dict) -> bool:
+        """The Contours tick for the map of request 'req': greyed out, its tooltip saying why, on a class map or a
+        colour map of discrete colours (contours.why_not); the user's tick kept either way. The level slider only
+        while the map gets lines. True when the map gets its contour lines."""
+        why = CT.why_not(req["field"], req["cmap"], req.get("compare") is not None)
+        self.contours.setEnabled(not why)
+        self.contours.setToolTip(why or CONTOURS_TIP)
+        on = not why and self.contours.isChecked()
+        for w in (self.contour_detail, *self._contour_ends):
+            w.setEnabled(on)
+        if not on:
+            self.contour_count.setText("")
+        return on
 
     def render(self, *_):
         req = self.request()
@@ -1341,6 +1508,10 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
                 return
             self._clear_zoom()                          # another slice or output, or rewritten grids: back to its map
             req = self.request()                        # ... with the comparison, which the zoom left out
+        if req.get("smooth3d") and req["smooth"] > 0 and not req.get("pts") \
+                and not G.smoothed3d_kept(o, req["field"], req["component"], req["smooth"]):
+            self.status.emit(f"smoothing the whole {G.FIELD_LABELS.get(req['field'], req['field'])} cube in 3D at "
+                             f"{req['smooth']:g} cells (once per field and smoothing: a few seconds)")
         if self._busy:
             self._pending = req             # only the latest request is served
             return
@@ -1408,24 +1579,45 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
                 "field": self.field.currentData(), "component": self.component.currentText(),
                 "axis": self.axis.currentIndex(), "index": self.index.value(),
                 "fixed": self.fixed.isChecked(), "vmin": self.vmin_edit.text(), "vmax": self.vmax_edit.text(),
-                "snapshots": dict(self._snapshots), "resident": self.resident.value(),
+                "snapshots": dict(self._snapshots),
                 "voids": self.voids.isChecked(), "void_reff": self.void_reff.isChecked(),
                 "void_sigma": self.void_sigma.value(), "ps_gradient": self.ps_gradient.currentData(),
                 "void_rmin": self.void_rmin.value(), "void_rmax": self.void_rmax.value(),
-                "void_shape": self.void3d_shape.currentData(), **self.state_3d()}
+                "void_as": self.void_shape(), "smooth3d": self.smooth3d.isChecked(),
+                "contours": self.contours.isChecked(),
+                "contour_position": self.contour_detail.value(), **self.state_3d()}
 
     def restore_state(self, d: dict) -> bool:
         """Back to a remembered state when its output is still listed (selected first by refresh_outputs)."""
-        if isinstance(d, dict):                 # the hand-chosen snapshots and the server's residency: for every output
+        if isinstance(d, dict):                 # the hand-chosen snapshots: for every output (an older state's
+            # 'resident', the server's partitions in memory, is the binary's choice now: not read)
             self._snapshots.update({k: v for k, v in (d.get("snapshots") or {}).items() if Path(v).is_file()})
-            self.resident.setValue(int(d.get("resident", 0) or 0))
             j = self.ps_gradient.findData(d.get("ps_gradient"))       # for every output too
             if j >= 0 and j != self.ps_gradient.currentIndex():
                 self.ps_gradient.setCurrentIndex(j)
-            j = self.void3d_shape.findData(d.get("void_shape"))       # the 3D view's voids: spheres or ellipsoids
+            # how the voids are drawn: 'void_as'; a state from before the ellipsoids were the default kept
+            # 'void_shape' for the 3D view alone, where spheres were the default everyone saved: only its 'ellipsoid'
+            # is read
+            old = "ellipsoid" if d.get("void_shape") == "ellipsoid" else None
+            shape = d.get("void_as") if "void_as" in d else old
+            j = self.void3d_shape.findData(shape)
             if j >= 0:
                 self.void3d_shape.setCurrentIndex(j)
+            if isinstance(d.get("smooth3d"), bool):                     # the map's smoothing in 3D: for every output
+                self.smooth3d.setChecked(d["smooth3d"])
             self.restore_state_3d(d)                                    # its style, perspective, opacity, detail
+            if isinstance(d.get("contours"), bool):                     # the contour lines: for every output too
+                self.contours.setChecked(d["contours"])
+            # ... and how many: the slider's position (clamped to it; read as restore_state_3d reads its numbers), or
+            # in a state from before the slider was continuous its old stop ('contour_detail', rungs of the round
+            # steps) at the nearest position
+            try:
+                if "contour_position" in d:
+                    self.contour_detail.setValue(int(d["contour_position"]))
+                else:
+                    self.contour_detail.setValue(CT.from_stop(int(d["contour_detail"])))
+            except (KeyError, TypeError, ValueError, OverflowError):
+                pass
             self._refresh_server_button()       # refresh_outputs ran first: it judged the server with no snapshots
         if not d or self.current is None or str(self.current.root) != d.get("root"):
             return False
@@ -1454,6 +1646,11 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
             else:
                 w.setChecked(v)
             w.blockSignals(False)
+            if w is self.void_sigma:
+                self._void_sigma_restored()     # committed (raised to two cells) before the tick asks for it
+        if self.voids.isChecked():              # ticked already (no 'toggled'): the restored smoothing's catalogue
+            self._voids_sync()
+            self._voids_redraw()
         return True
 
     # ---------------------------------------------------------------- memory guard
@@ -1578,6 +1775,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
             self._clear_zoom()
         self._pts_sync()
         self._compare_sync()
+        self._smooth3d_sync()
         self.render()
 
     def _compare_changed(self, *_):
@@ -1586,6 +1784,27 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
 
     def _ps_gradient_changed(self, *_):
         """The velocity-derivative family chosen: the map, its comparison and the figure grid again."""
+        self._smooth3d_sync()
+        self.render()
+
+    def _smooth3d_sync(self):
+        """The Smoothing row's '3D' tick for the map shown: greyed out, its tooltip saying why, where the map is not a
+        slice of a stored 3D grid or the cube's smoothing would not fit in the free memory (grids.smooth3d_why); the
+        user's tick kept either way. Asked when the output, the field, the hi-res slice or the family changes (the
+        free memory is read then, not per layer)."""
+        o, name = self.current, self.field.currentData()
+        why = G.smooth3d_why(o, name, self.ps_gradient.currentData() or G.PS_GRADIENT_DEFAULT,
+                             hires=bool(self.pts_combo.currentData())) if o is not None and name else "no map shown"
+        self.smooth3d.setEnabled(not why)
+        if why:
+            self.smooth3d.setToolTip(f"Smoothing in 3D: {why}.")
+        else:
+            tip_auto(self.smooth3d, SMOOTH3D_TIP)
+
+    def _smooth3d_toggled(self, *_):
+        """The map's smoothing in 3D on or off: the map (its contours), the grid's panels and the 3D view's planes;
+        the line under the voids says whether the map now shows their field."""
+        self._smooth3d_sync()
         self.render()
 
     def _gradient_label(self, req: dict) -> str:
@@ -1646,8 +1865,9 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self.view.canvas.marker = None
         self.view.canvas.labels = None
         self.view.canvas.arrows = self._arrows
-        self.view.canvas.circles = self._void_circles()
-        self.view.canvas.dashed = self._void_circles("_r_eff")
+        self._set_contours(res.get("contours"))
+        self._set_void_canvas(self._void_overlay())
+        self._void_note()                       # which field the voids belong to: the map may show it now
         self.view.canvas.axes = self._canvas_axes()      # BEFORE the image: its first drawing has the margins
         self.view.canvas.set_rgb(res["rgb"])
         label = self._gradient_label(req)       # the velocity derivatives' family said
@@ -1656,13 +1876,14 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         # the title as a function of the positions' unit (a figure saved in Mpc/h or cells says so)
         if req.get("compare") is not None:
             mode = dict((m, t) for t, m in COMPARE_MODES)[req["compare_mode"]]
-            self.view.colorbar.set(req["cmap"], res["vrange"], f"{mode}: {label}{comp}")
+            self.view.colorbar.set(req["cmap"], res["vrange"], f"{mode}: {label}{comp}", levels=self._contour_marks())
             head = f"<b>{mode}: {label}{comp}</b> — A = {o.title}, B = {req['compare'].title} — "
 
             def where(units=None):
                 return self._position_text(req, units)
         else:
-            self.view.colorbar.set(req["cmap"], res["vrange"], G.colourbar_label(label, req), req["log"])
+            self.view.colorbar.set(req["cmap"], res["vrange"], G.colourbar_label(label, req), req["log"],
+                                   levels=self._contour_marks())
             head = f"<b>{label}{comp}</b> — {o.title} — "
             sd, fct = self._pts_side, res.get("pts_factor") or 1
 
@@ -1682,6 +1903,32 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self._busy = True
         self._to_render.emit(req)
 
+    def _set_contours(self, lines: dict | None):
+        """The contour lines of the map on screen (map_contours' dict, or None): kept for Save image, stroked by the
+        canvas (with the layer the worker stroked, when it did), said in the colour bar's tooltip (their marks go to
+        the bar with its next set()) and counted beside the level slider."""
+        self._contours = lines
+        self.view.canvas.contours = lines["paths"] if lines else None
+        self.view.canvas.contour_layer = lines.get("layer") if lines else None
+        self.view.colorbar.setToolTip(CT.describe(lines))
+        self._contour_count(lines)
+
+    def _contour_count(self, lines, what: str = "line"):
+        """The level slider's count: how many contour levels the picture shown draws -- 'lines' a map_lines dict (or
+        None: none), or the figure grid's count per panel (a range when they differ); nothing while the map gets
+        none."""
+        if not self.contour_detail.isEnabled():
+            self.contour_count.setText("")
+            return
+        counts = lines if isinstance(lines, list) else [0 if not lines else int(np.size(lines["levels"]))]
+        lo, hi = (min(counts), max(counts)) if counts else (0, 0)
+        n = f"{lo}" if lo == hi else f"{lo}–{hi}"
+        self.contour_count.setText(f"{n} {what}{'' if hi == 1 else 's'}")
+
+    def _contour_marks(self):
+        """The colour bar's marks of the map's contour levels, or None."""
+        return self._contours["marks"] if self._contours else None
+
     def _render_failed(self, msg):
         self._busy = False
         if self._pending is not None:           # a newer slice is wanted: its result decides, not this one's
@@ -1691,9 +1938,11 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         if self.is_zoomed():                    # a slice asked for before the zoom landed: the zoom stays
             return
         self._plane = self._arrows = None
-        self.view.canvas.arrows = self.view.canvas.circles = self.view.canvas.dashed = None
+        self.view.canvas.arrows = None
+        self._set_void_canvas(None)
+        self._set_contours(None)
         self.view.canvas.set_rgb(None)
-        self.view.canvas.setText(f"Could not read this slice: {msg}")
+        self.view.canvas.setText(msg if msg.startswith("Not smoothed in 3D") else f"Could not read this slice: {msg}")
         self.changed.emit()
 
     def can_save(self) -> bool:

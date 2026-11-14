@@ -1,6 +1,7 @@
 """The Explore tab's Save image: SaveMixin, the part of ExploreControls that writes the map on screen -- the Save
 options (remembered between sessions), the file dialog, the decorated matplotlib figure or the map's own pixels with
-its arrows and void outlines, the table of the voids outlined, and the map's values as .npy or .csv."""
+its contour lines, arrows and void outlines, the table of the voids outlined, and the map's values as .npy or
+.csv."""
 
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialog, QFileDialog
 
+import contours as CT
 import explore as _ex
 import figsave as FS
 import grids as G
@@ -49,7 +51,8 @@ class SaveMixin:
             hs = [G.hubble(p["output"]) for p in panels]
             ctx["hubble"] = hs[0] if hs and all(hs) else None
             ctx["box"] = all(p["output"].box is not None for p in panels)
-            ctx["voids"] = bool(self.view.canvas.circles or self.view.canvas.dashed)
+            c = self.view.canvas
+            ctx["voids"] = bool(c.circles or c.dashed or c.marks)
             ctx["auto_title"] = self._grid_title
             if req is not None and panels:
                 T = max(p["output"].n for p in panels)
@@ -216,9 +219,11 @@ class SaveMixin:
                     t.set_wrap(True)
             if opts["colorbar"]:
                 if opts["colorbar_label"]:
-                    fig.colorbar(im, ax=ax, label=self.view.colorbar.label)
+                    cb = fig.colorbar(im, ax=ax, label=self.view.colorbar.label)
                 else:
-                    fig.colorbar(im, ax=ax)
+                    cb = fig.colorbar(im, ax=ax)
+                if CT.in_saves(opts):           # the contour levels across the bar, as on screen
+                    G.mark_levels_mpl(cb, getattr(self, "_contours", None), lo, hi, CT.LINE_WIDTH_PT)
         self._map_overlays(ax, opts, um, rest, glo, ghi, ext)
         try:
             FS.fit_width(fig, opts, opts["dpi"])
@@ -229,9 +234,21 @@ class SaveMixin:
         return fig, dpi
 
     def _map_overlays(self, ax, opts: dict, um, rest, glo, ghi, ext) -> None:
-        """The arrows and the void outlines over a saved map as on screen, each when the options keep it, in the
-        coordinates of the unit map 'um' (the axes' unit)."""
+        """The contour lines, the arrows and the void outlines over a saved map as on screen, in the coordinates of
+        the unit map 'um' (the axes' unit), each when the options keep it (the lines: contours.in_saves, with any
+        overlay)."""
         o = self._req["output"]
+        lines = getattr(self, "_contours", None)
+        if lines and CT.in_saves(opts):
+            n0, n1 = lines["shape"]
+            (u0, v0), (u1, v1) = (float(glo[0]), float(glo[1])), (float(ghi[0]), float(ghi[1]))
+
+            def to_xy(ij):                              # a sample (i, j) sits at its cell's or point's centre
+                return np.column_stack([um.x(u0 + (ij[:, 0] + 0.5) / n0 * (u1 - u0)),
+                                        um.y(v0 + (ij[:, 1] + 0.5) / n1 * (v1 - v0))])
+            G.draw_contours_mpl(ax, lines["segments"], lines["colours"], to_xy, lw=CT.LINE_WIDTH_PT)
+            ax.set_xlim(ext[0], ext[1])
+            ax.set_ylim(ext[2], ext[3])
         arrows = getattr(self, "_arrows", None)
         if opts["arrows"] and arrows is not None and arrows["vmax"] > 0:
             h = o.length / o.n                              # cell size per axis
@@ -243,14 +260,17 @@ class SaveMixin:
         res = self._void_result()
         if opts["voids"] and res is not None and self.view.canvas.circles is not None:
             axis = self._geometry()[0]
-            pos = self._slice_position()
-            sel = self.void_rows(res)                   # the Sizes range, as on screen
-            box = float(res["box_mpc"])
-            conv = lambda cs: [(um.x(u), um.y(v), r * um.k[0], int(sel[k])) for u, v, r, k in cs]   # noqa: E731
-            circ = conv(G.void_circles_mpc(res["_centres"][sel], res["_r_v"][sel], box, axis, pos, rest, glo, ghi))
-            dash = [] if not self.void_reff.isChecked() else conv(G.void_circles_mpc(
-                res["_centres"][sel], res["_r_eff"][sel], box, axis, pos, rest, glo, ghi))
-            G.draw_void_circles_mpl(ax, circ, dash)
+            o = self.current
+            half = 0.5 * float(o.length[axis]) / float(o.n)
+            # the same voids as on screen (the Sizes range, the shape chosen), in Mpc, then in the axes' unit
+            ov = G.void_overlay_mpc(self._void_set(res), axis, self._slice_position(), rest, glo, ghi, half)
+            k0, k1 = um.k[0], um.k[1]
+            ov["circles"] = [(um.x(u), um.y(v), r * k0, k) for u, v, r, k in ov["circles"]]
+            ov["dashed"] = [(um.x(u), um.y(v), r * k0, k) for u, v, r, k in ov["dashed"]]
+            ov["ellipses"] = [(um.x(u), um.y(v)) + G.scale_ellipse(rx, ry, a, k0, k1) + (k,)
+                              for u, v, rx, ry, a, k in ov["ellipses"]]
+            ov["marks"] = [(um.x(u), um.y(v), k, own) for u, v, k, own in ov["marks"]]
+            G.draw_void_overlay_mpl(ax, ov)
             ax.set_xlim(ext[0], ext[1])
             ax.set_ylim(ext[2], ext[3])
 
@@ -268,21 +288,24 @@ class SaveMixin:
         ext = [glo[0], ghi[0], glo[1], ghi[1]]
         arrows = self._arrows is not None and self._arrows["vmax"] > 0 and opts["arrows"]
         voids = opts["voids"] and self._void_result() is not None and self.view.canvas.circles is not None
+        lines = bool(getattr(self, "_contours", None)) and CT.in_saves(opts)
 
         def overlay(ax):
             ax.set_xlim(ext[0], ext[1])
             ax.set_ylim(ext[2], ext[3])
             self._map_overlays(ax, opts, FS.UnitMap(), rest, glo, ghi, ext)
-        FS.write_pixels(f, rgb, fmt, overlay if (arrows or voids) else None)
+        FS.write_pixels(f, rgb, fmt, overlay if (arrows or voids or lines) else None)
 
     def save_voids_csv(self, path) -> str:
-        """The voids outlined on the map now as a CSV table (tools/void_outlines.write_csv: centre, every R_v the
-        catalogue has, R_eff, central delta, resolved and distinct)."""
+        """The voids drawn on the map now as a CSV table (tools/void_outlines.write_csv: centre, every R_v the
+        catalogue has, the catalogue's R_eff, central delta, resolved and distinct, and the drawn ellipsoid's a, b, c
+        and R_ell: _void_csv_columns)."""
         res = self._void_result()
         rows = self.voids_shown()
         if res is None or not rows:
             raise OSError("no void outlines on the map (tick 'voids')")
-        return _ex._void_tool().write_csv(res, path, rows)
+        cols, note = self._void_csv_columns(res)
+        return _ex._void_tool().write_csv(res, path, rows, cols, note)
 
     def save_values(self, path) -> str:
         """The map's VALUES (not its colours): '.npy' = the 2D array as drawn, rows along the vertical axis from

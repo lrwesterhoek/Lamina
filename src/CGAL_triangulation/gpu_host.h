@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ps_deposit_params.h"   // PSFxGrid / PSFixedUnits: the moment grids' fixed-point words
@@ -42,15 +43,21 @@ std::string gpuDeviceName();
 struct PSGpuGrids
 {
     // The MASS grid (density = mass / cellVolume), in one of two forms:
-    //   massScale > 0  'massFx' holds each cell's exact 64-bit fixed-point sum in units of 1/massScale (the
+    //   massScale > 0  'massFx' holds each cell's exact fixed-point sum in units of 1/massScale (the
     //                  kernels' own words, handed over unconverted) and 'mass' stays EMPTY. The caller adds the
     //                  GPU-deferred and released tetrahedra into the same integers and converts to float once
     //                  (ps_interpolation.cc), so no deposit after the kernel rounds a share away.
     //   massScale = 0  the float grid in 'mass' (DTFE_GPU_FLOAT_MASS=1, kept for A/B, or a
     //                  total mass that gives no usable unit) and 'massFx' stays EMPTY.
+    // words 2 (the run-wide 128-bit device words, PSDepositParams.fxWords): every fixed-point grid comes back folded
+    // (src/fixed_units.h fxFoldLimbs) into its int64 words plus an exact sparse carry, sorted by component index --
+    // massFxCarry, fxCarry[g]: the value of component i is massFx[i] + 2^64 x its carry -- in units 2^-K with
+    // K = ilogb(scale) (the scales are powers of two); unconverted. words 0: the kernels' 64-bit words, no carry.
     std::vector<float>    mass;     // subTotal      accumulated MASS (float form; see above)
     std::vector<int64_t>  massFx;   // subTotal      accumulated MASS (fixed-point form; see above)
+    std::vector<std::pair<uint64_t, int64_t>> massFxCarry;   // words 2: its carry (FxCarryList); else EMPTY
     float                 massScale = 0.f;
+    uint32_t              words = 0;   // the device words of this deposit (PSGpuPlan::words)
     std::vector<float>    mom;      // subTotal*3    weighted velocity moment  [i*3+j]   (fVel)
     std::vector<float>    m2;       // subTotal*6    weighted 2nd moment, upper triangle [i*6+c] (fDisp)
     std::vector<float>    grad;     // subTotal*9    weighted velocity-gradient moment [i*9+j*3+i'] (fGrad)
@@ -63,11 +70,13 @@ struct PSGpuGrids
     std::vector<float>    scal;     // subTotal      scalar moment sum(wm s), one component (fScal; else EMPTY)
     std::vector<float>    sgrad;    // subTotal*3    scalar-gradient moment sum(wm ds/dx_i) [i*3+d] (fSGrad; else EMPTY)
     // The moment grids as exact fixed-point sums (PSFxGrid in ps_deposit_params.h): fxScale[g] > 0 =
-    // grid g came back as the kernels' 64-bit words in fx[g] (subTotal x its components, the float vector's
-    // layout), in units of 1/fxScale[g], and its float vector above stays EMPTY -- the caller adds the deferred
-    // and released tetrahedra into the same integers and converts once, as for the mass. 0 = the float vector.
+    // grid g came back as words in fx[g] (subTotal x its components, the float vector's layout; words 2: with its
+    // carry in fxCarry[g], as the mass), in units of 1/fxScale[g], and its float vector above stays EMPTY -- the
+    // caller adds the deferred and released tetrahedra into the same integers and converts once, as for the mass.
+    // 0 = the float vector.
     // dispwIsMass: the kernel did not deposit 'dispw' (the fixed mass grid sums the same shares): read massFx.
     std::vector<int64_t>  fx[PS_FX_N];
+    std::vector<std::pair<uint64_t, int64_t>> fxCarry[PS_FX_N];   // words 2: each grid's carry; else EMPTY
     float                 fxScale[PS_FX_N] = {};
     bool                  dispwIsMass = false;
     // DTFE_MASS_AUDIT=1 (ps_mass_audit.h) only, else -1: the fixed-point mass grid's exact total and the
@@ -115,12 +124,18 @@ struct PSGpuGrids
 // fxUnits: the units of the moment grids, chosen by the caller from bounds that cover its own adds
 // too (the deferred and released tets): a grid with scale > 0 is deposited as an exact fixed-point sum and
 // handed back as words (out.fx), the rest as float atomics; sumW makes the exact items' weight totals exact.
+// fxUnits.words 2: the run-wide 128-bit device words, in the run's units where it has them (fxUnits.massScale > 0:
+// the mass unit, in place of the one from sum(masses) + massExtra), handed back with their carries (PSGpuGrids).
 // Returns false with 'err' set if there is no device, setup fails or the GPU gives up on the deposit; 'out' is then
 // untouched (its grids are shaped and filled only after a deposit the GPU kept; the caller reads 'out' only
 // after true).
 // CONSUMES verts/vels/masses/dens/scal (several GB per partition at scale): the backend frees each one
 // right after copying it to the device, so they may be empty when the call returns --
 // the CPU fallback deposits from the triangulation, not from these arrays.
+// faceJob (DTFE_GPU_FACES=1, else null): the pass's face sums, made by the GPU face kernel in this call's hold of the
+// device, after the deposit's passes and the release of its buffers (PSGpuFaceJob below); faceJob->ok says whether
+// they were made ('facesOk'), and is false whenever the call returns false (the face pass is then not run).
+struct PSGpuFaceJob;
 bool psGpuDepositFields(std::vector<float>& verts,   // nTet*PS_TET_STRIDE: the per-tet records
                         std::vector<float>& vels,    // nTet*12: 4 vertex velocities (empty if unused)
                         std::vector<float>& masses,  // nTet: tet mass (rho_bar * V_lag, or the --ps-vertex-mass shares)
@@ -132,7 +147,43 @@ bool psGpuDepositFields(std::vector<float>& verts,   // nTet*PS_TET_STRIDE: the 
                         bool fVel, bool fDisp, bool fGrad, bool fLinear,
                         bool fVolW, bool fCaustic, bool fExact, bool fScal, bool fSGrad, bool windowMode,
                         double massExtra, PSFixedUnits const& fxUnits,
-                        PSGpuGrids& out, std::vector<uint32_t>& deferred, std::string& err);
+                        PSGpuGrids& out, std::vector<uint32_t>& deferred, std::string& err,
+                        PSGpuFaceJob* faceJob = nullptr);
+
+// ---------------------------------------------------------------- PS-DTFE face sums (DTFE_GPU_FACES=1)
+// One pass's --face-gradient face sums for the GPU face kernel (metal/ps_face.metal faceSweepItems; docs/cleanup-
+// plan.md P11, the GPU kernel for the face sweep, step 3): one face record per tetrahedron of the CPU face walk's set
+// that owns a section in some grid plane (ps_kernel_params.h PS_FACE_REC_*: built by ps_interpolation.cc's GPU
+// extraction walk), the grid and units the walk takes (PSFaceParams), and the words the device makes from them in
+// face_sweep_f32.h's canonical float arithmetic -- the CPU face walk's words under DTFE_FACE_F32=1 or
+// DTFE_GPU_FACES=1, bit for bit. The items are (record, axis, plane): a record's items are the sum of its three plane
+// counts, mapped as the exact deposit's items with blockCells 1 (psBuildExactItemMap). Only the 64-bit words
+// (fxWords 0): the caller keeps the CPU walk under the run-wide words.
+struct PSGpuFaceJob
+{
+    // in (the caller's)
+    std::vector<float> recs;    // nRec * PS_FACE_REC_FLOATS, the walk's order; CONSUMED (freed at the upload)
+    PSFaceParams       P{};     // lo, h, ih, nGrid, subOrigin, subDims, periodic, the units scale[0..2] (capBits 0,
+                                // fxWords 0); nRec, itemBase and nItems are the host's
+    size_t             nCell = 0;   // the pass's sub-grid cells (subDims product)
+    // out (the host's): the words only when ok
+    bool               ok = false;  // facesOk: the device made every face sum of the pass
+    // nCell * 18, * 6, * 6 words: the CPU's layout (ps_interpolation.cc PSFaceF32Sink)
+    std::vector<int64_t> wS, wN, wP;
+    unsigned long long drops[3] = {};  // the shares the non-finite guard dropped (FX_DROP_FACE_S, N, P): the caller
+                                       // counts them only when it keeps the words
+    unsigned long long mismatches = 0; // items whose plane count the device found other than the record's (not ok)
+    std::string        err;         // why not ok
+    // DTFE_GPU_TIMING (the face pass's own seconds and sizes)
+    size_t nRec = 0, nItems = 0, buffers = 0;
+    double mapSec = 0., uploadSec = 0., busySec = 0., gapSec = 0., copySec = 0., releaseSec = 0., heldSec = 0.;
+};
+
+// The face sums of a job on their own (the device is taken for them: ctxMutex), for a caller with no GPU deposit in
+// the same hold -- a pass whose face units are known only after its deposit, or one that deposits on the CPU. False
+// (job.ok false, job.err set) when there is no device, the face library does not compile, a buffer cannot be had,
+// the retry policy gives up (gpu_metal_retry.h) or the device's plane counts differ from the records'.
+bool psGpuFaceSums(PSGpuFaceJob& job);
 
 
 // ---------------------------------------------------------------- standard-DTFE method-1 deposit
@@ -269,8 +320,9 @@ inline constexpr size_t PS_FX_COMPS[PS_FX_N] = { 3, 6, 9, 1, 1, 3, 1, 1, 3 };
 
 // One call's plan. Only the requested moment grids are allocated, host- and device-side: the m2 (24 B/cell) and
 // grad (36 B/cell) grids dominate the deposit's footprint and most runs need neither. A grid the caller gave a
-// fixed-point unit (fxUnits) is a 64-bit integer sum: 8 B per component in place of the float's 4, bound at its
-// float index AND at its word index (22 + slot, ps_deposit.metal). An unselected grid's bytes are 4 (a dummy).
+// fixed-point unit (fxUnits) is an integer sum: 8 B per component in place of the float's 4 (64-bit words; 16 B
+// under words 2, the run-wide 128-bit words), bound at its float index AND at its word index (22 + slot,
+// ps_deposit.metal). An unselected grid's bytes are 4 (a dummy).
 struct PSGpuPlan
 {
     bool     fVel = false, fDisp = false, fGrad = false, fVolW = false, fCaustic = false, fExact = false,
@@ -280,17 +332,18 @@ struct PSGpuPlan
     bool     sel[PS_FX_N] = {};     // the moment grids the flags select (PSFxGrid order)
     bool     fxOn[PS_FX_N] = {};    // ... deposited as fixed-point words
     uint32_t fxMask = 0;            // PSDepositParams.fxMask
-    bool     massFixed = false;     // the mass grid as an exact 64-bit fixed-point sum in units of 1/massScale
+    bool     massFixed = false;     // the mass grid as an exact fixed-point sum in units of 1/massScale
     float    massScale = 1.f;
     bool     dispwIsMass = false;   // dispw is not deposited: the fixed mass grid sums its shares (PSGpuGrids)
     bool     sumWFixed = false;     // the exact items' per-tet weight totals as fixed-point sums
     size_t   momBytes = 0, m2Bytes = 0, gradBytes = 0, momwBytes = 0, caustBytes = 0, svBytes = 0, dvBytes = 0,
              dwBytes = 0, scalBytes = 0, sgBytes = 0, massBytes = 0, massFxBytes = 0;
+    uint32_t words = 0;             // PSDepositParams.fxWords (fxUnits.words): 0 = 64-bit words, 2 = 128-bit words
 };
 
-// The plan of a call (its arguments as psGpuDepositFields takes them). The mass grid is an exact 64-bit fixed-point
+// The plan of a call (its arguments as psGpuDepositFields takes them). The mass grid is an exact fixed-point
 // sum (DepositParams.massFixed in the kernel says why) unless floatMass, the host's A/B switch to float atomics
-// (DTFE_GPU_FLOAT_MASS=1). Its unit covers the caller's own
+// (DTFE_GPU_FLOAT_MASS=1). Its unit is the run's (fxUnits.massScale, under words 2) or else covers the caller's own
 // deposits too (massExtra): the caller adds the deferred and released tets into these words.
 inline PSGpuPlan psGpuPlan(const size_t subDims[3], bool fVel, bool fDisp, bool fGrad, bool fVolW, bool fCaustic,
                            bool fExact, bool fScal, bool fSGrad, std::vector<float> const& masses, double massExtra,
@@ -299,6 +352,7 @@ inline PSGpuPlan psGpuPlan(const size_t subDims[3], bool fVel, bool fDisp, bool 
     PSGpuPlan p;
     p.fVel = fVel; p.fDisp = fDisp; p.fGrad = fGrad; p.fVolW = fVolW; p.fCaustic = fCaustic; p.fExact = fExact;
     p.fScal = fScal; p.fSGrad = fSGrad;
+    p.words = fxUnits.words;
     size_t const nCell = p.nCell = subDims[0] * subDims[1] * subDims[2];
     p.fDispOwn = fVolW && fDisp;
     bool const sel[PS_FX_N] = { fVel, fDisp, fGrad, fVolW, fExact, p.fDispOwn, false, fScal, fSGrad };
@@ -308,7 +362,8 @@ inline PSGpuPlan psGpuPlan(const size_t subDims[3], bool fVel, bool fDisp, bool 
         p.fxOn[g] = sel[g] && fxUnits.scale[g] > 0.f;
         if (p.fxOn[g]) p.fxMask |= 1u << g;
     }
-    auto gridBytes4 = [&](int g, size_t comps) -> size_t { return sel[g] ? nCell * comps * (p.fxOn[g] ? 8 : 4) : 4; };
+    auto gridBytes4 = [&](int g, size_t comps) -> size_t {
+        return sel[g] ? nCell * comps * (p.fxOn[g] ? (p.words == 2u ? 16 : 8) : 4) : 4; };
     p.momBytes   = gridBytes4(PS_FX_MOM, 3);
     p.m2Bytes    = gridBytes4(PS_FX_M2, 6);
     p.gradBytes  = gridBytes4(PS_FX_GRAD, 9);
@@ -318,6 +373,12 @@ inline PSGpuPlan psGpuPlan(const size_t subDims[3], bool fVel, bool fDisp, bool 
     p.dvBytes    = gridBytes4(PS_FX_DV, 3);
     p.scalBytes  = gridBytes4(PS_FX_SCAL, 1);
     p.sgBytes    = gridBytes4(PS_FX_SG, 3);
+    if (fxUnits.words == 2u && fxUnits.massScale > 0.f)
+    {   // the run's mass unit: the same in every pass, on the CPU and the GPU alike
+        p.massScale = fxUnits.massScale;
+        p.massFixed = !floatMass;
+    }
+    else
     {
         double totalMass = massExtra > 0. ? massExtra : 0.;
         // (a non-finite mass -- bad input, or the DTFE_TEST_NAN_SHARE hook -- is left out of the unit: its shares are
@@ -326,6 +387,10 @@ inline PSGpuPlan psGpuPlan(const size_t subDims[3], bool fVel, bool fDisp, bool 
         if (fxUnits.massTotal > 0.) totalMass = fxUnits.massTotal;   // (a --grid-window pass: the caller's total)
         p.massFixed = !floatMass && psMassFixedScale(totalMass, p.massScale);
     }
+    // (the per-pass path with DTFE_TEST_RUN_UNIT_SHIFT: the pass's own unit 2^shift finer, where that is a
+    // normal float -- src/fixed_units.h's hook; a positive shift can wrap the 64-bit words, a test only)
+    if (p.massFixed && fxUnits.legacyShift != 0)
+        if (float const s = std::ldexp(p.massScale, fxUnits.legacyShift); std::isnormal(s)) p.massScale = s;
     // the dispersion's own normalizer sums exactly the mass grid's shares: with both exact it is not deposited
     // at all (the caller reads the mass words; PSGpuGrids::dispwIsMass), else float atomics
     p.dispwIsMass = p.fDispOwn && p.massFixed && fxUnits.scale[PS_FX_DW] > 0.f;
@@ -334,7 +399,8 @@ inline PSGpuPlan psGpuPlan(const size_t subDims[3], bool fVel, bool fDisp, bool 
     p.sumWFixed = fExact && fxUnits.sumW;
     if (p.sumWFixed) p.fxMask |= PS_FX_SUMW_BIT;
     p.massBytes   = p.massFixed ? 4 : nCell * 4;   // the float grid (Metal buffer 3), else a dummy
-    p.massFxBytes = p.massFixed ? nCell * 8 : 4;   // the fixed-point grid (Metal buffer 21), else a dummy
+    // the fixed-point grid (Metal buffer 21: 16 B per cell under words 2), else a dummy
+    p.massFxBytes = p.massFixed ? nCell * (p.words == 2u ? 16 : 8) : 4;
     return p;
 }
 
@@ -344,9 +410,12 @@ inline void psGpuInitGrids(PSGpuGrids& out, PSGpuPlan const& p, PSFixedUnits con
 {
     size_t const nCell = p.nCell;
     out.dispwIsMass = p.dispwIsMass;
+    out.words = p.words;
     for (int g = 0; g < PS_FX_N; ++g) { out.fx[g].clear(); out.fxScale[g] = p.fxOn[g] ? fxUnits.scale[g] : 0.f; }
+    for (int g = 0; g < PS_FX_N; ++g) out.fxCarry[g].clear();
     out.mass.assign(p.massFixed ? 0 : nCell, 0.f);
     out.massFx.clear();
+    out.massFxCarry.clear();
     out.massScale = p.massFixed ? p.massScale : 0.f;
     out.mom.assign(p.fVel && !p.fxOn[PS_FX_MOM] ? nCell * 3 : 0, 0.f);
     out.m2.assign(p.fDisp && !p.fxOn[PS_FX_M2] ? nCell * 6 : 0, 0.f);
@@ -361,11 +430,14 @@ inline void psGpuInitGrids(PSGpuGrids& out, PSGpuPlan const& p, PSFixedUnits con
     out.sgrad.assign(p.fSGrad && !p.fxOn[PS_FX_SG] ? nCell * 3 : 0, 0.f);
 }
 
-// The result of a call with no tetrahedra (the caller may still add released ones): its fixed-point grids as zeros.
+// The result of a call with no tetrahedra (the caller may still add released ones): its fixed-point grids as zeros
+// (no carry).
 inline void psGpuZeroWords(PSGpuGrids& out, PSGpuPlan const& p)
 {
     if (p.massFixed) out.massFx.assign(p.nCell, 0);
     for (int g = 0; g < PS_FX_N; ++g) if (p.fxOn[g]) out.fx[g].assign(p.nCell * PS_FX_COMPS[g], 0);
+    out.massFxCarry.clear();
+    for (int g = 0; g < PS_FX_N; ++g) out.fxCarry[g].clear();
 }
 
 // The kernels' parameter block of a plan; haveDens / haveScal: the per-tet vertex densities / scalars were handed over.
@@ -401,6 +473,8 @@ inline PSDepositParams psGpuParams(PSGpuPlan const& p, PSFixedUnits const& fxUni
     P.massScale = p.massScale;
     P.fxMask = p.fxMask;               // the moment grids' fixed-point sums (the caller's units)
     for (int g = 0; g < PS_FX_N; ++g) P.fxScale[g] = p.fxOn[g] ? fxUnits.scale[g] : 0.f;
+    P.fxWords = p.words;               // the device words: 0 the 64-bit ones, 2 the run-wide 128-bit limbs
+    P.fxCapBits = p.words == 2u ? fxUnits.capBits : 0u;
     // PS_GPU_DEBUG_NOATOMIC=1: a timing experiment (the atomics' share of the sampled kernel, the counterpart of
     // DTFE_GPU_DEBUG_NOATOMIC) -- the sampled path does all its work but deposits nothing, so the grids come out empty
     P.debugNoAtomic = Env::flag("PS_GPU_DEBUG_NOATOMIC") ? 1u : 0u;

@@ -129,13 +129,15 @@ the T-web and V-web at `LAMBDA_TH` 0.3) and, since 2026-11-09, to the exact cell
 ./scripts/run_ps_dtfe.sh -g 512 -n 2 -m 99                # grid 512^3, the sampled deposit at nSub=2 (the count
                                                           #   selects it), on the GPU
 ./scripts/run_ps_dtfe.sh -m 99                            # the exact conservative deposit (the default) on the GPU
-./scripts/run_ps_dtfe.sh --sampled -m 99                  # the nSub^3 sampled deposit (nSub 3) on the GPU
+./scripts/run_ps_dtfe.sh --sampled -m 99                  # the sampled deposit on the GPU, one point per cell (its
+                                                          #   default: quick, noisy per-cell values; smooth before use)
 ./scripts/run_ps_dtfe.sh --run-mode gentle -s TNG100-3-Dark 99   # the machine stays usable: half the performance
                                                           #   cores, ~50 ms GPU buffers (nice 10 on Linux)
 DTFE_SIM=TNG100-3-Dark ./scripts/run_ps_dtfe.sh 0 50 99   # sim via env
 PARTITION="5 5 5" MAX_CONCURRENT=2 ./scripts/run_ps_dtfe.sh -s TNG300-3-Dark 99   # manual memory plan
-THREADS=4 SUBSAMPLES=1 ./scripts/run_ps_dtfe.sh 99        # cap threads; the sampled deposit at one sample per
-                                                          #   cell (the '_a' files then hold the cell-centre values)
+THREADS=4 SUBSAMPLES=3 ./scripts/run_ps_dtfe.sh 99        # cap threads; the sampled deposit at 3^3 points per cell
+                                                          #   (the count before 2026-11-14: a smoother cell average
+                                                          #   than the default 1, more time)
 DRY_RUN=1 ./scripts/run_ps_dtfe.sh 99                     # print the expanded command, run nothing
 AUTO_TUNE_REPORT=1 ./scripts/run_ps_dtfe.sh 99            # only the auto-tuner's split + predicted peak
 
@@ -153,7 +155,8 @@ PS_VERTEX_MASS=1        # [--ps-vertex-mass]     DEFAULT 1: chart-independent te
                         #                        Set 0 only for true-lattice Lagrangian input.
 PS_VOLUME_WEIGHTED=0    # [--ps-volume-weighted] DEFAULT 1: Eulerian-volume-weighted velocity moments
                         #                        (the dispersion stays mass-weighted)
-DTFE_EXACT_AVERAGE=0    # [--sampled]            the nSub^3 sampled deposit (a SUBSAMPLES count selects it too);
+DTFE_EXACT_AVERAGE=0    # [--sampled]            the nSub^3 sampled deposit, one point per cell unless SUBSAMPLES
+                        #                        is set (a SUBSAMPLES count selects it too);
                         #                        DEFAULT the exact deposit [--exact] (-e; r3d on the CPU, a z-sweep with -m)
 FACE_GRADIENT=0         # [--per-tet-gradient]   the stream average of each stream's own gradient; DEFAULT (empty) the
                         #                        binary's: with the exact deposit and the volume weighting the MEAN flow's
@@ -167,8 +170,10 @@ DTFE_RUN_MODE=gentle    # [--run-mode]           gentle / balanced / performance
                         #                        (performance inside a SLURM or PBS job)
 GPU_SHARE=0.5           # [--gpu-share]          the exact deposit on the GPU: the share of the partitions deposited
                         #                        on the GPU, the rest on the free cores; default auto (the run mode's)
-SUBSAMPLES=2            # [--subsamples]         nSub of the sampled '_a' pass (cost ~ nSub^3); set, it selects
-                        #                        the sampled deposit [--sampled] unless DTFE_EXACT_AVERAGE=1 or -e
+SUBSAMPLES=2            # [--subsamples]         nSub of the sampled '_a' pass (unset: the binary's 1, one point
+                        #                        per cell; more points: a smoother cell average, more time); set,
+                        #                        it selects the sampled deposit [--sampled] unless
+                        #                        DTFE_EXACT_AVERAGE=1 or -e
 SAMPLE_POINTS=plane.bin # [--sample-points]      also point-evaluate this point set
 PTS_VEL_GRAD=1          # [--pts-vel-grad]       + per-point velocity gradient (.pts_velGrad),
                         #                        which is what makes velDiv/shear/vort maps possible
@@ -295,7 +300,8 @@ GRID_SIZE=512 PTS_VEL_GRAD=1 ./scripts/run_ps_pipeline.sh
 ./PS-DTFE snap.hdf5 out ... --ps-halo-release 300  # halo-interior tets -> centroid deposit
 ./PS-DTFE snap.hdf5 out ... --exact                     # exact deposit, the default with an '_a' field (r3d on the
                                                           #   CPU; --gpu: a z-sweep); without '_a' fields it is opt-in
-./PS-DTFE snap.hdf5 out ... --sampled                   # the nSub^3 sampled deposit instead (--subsamples k, default 3)
+./PS-DTFE snap.hdf5 out ... --sampled                   # the nSub^3 sampled deposit instead (--subsamples k, default 1:
+                                                          #   one point per cell, quick, noisy; smooth before use)
 ./PS-DTFE snap.hdf5 out ... --scratch-dir /tmp/dtfe       # out-of-core full-grid accumulators
 ./PS-DTFE snap.hdf5 out ... --auto-tune-report            # the auto-tuner's plan as one line, nothing run
 ./PS-DTFE snap.hdf5 out ... --partition 4 4 4 --resume    # continue a killed partitioned run (both binaries)

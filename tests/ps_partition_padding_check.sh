@@ -17,6 +17,11 @@
 #   P2 '.a_den' per cell within rounding (float 1e-4, double 1e-10, relative, cells above 1e-6 of the peak)
 #   P3 '.a_streams' within rounding (absolute 1e-3: one moved sub-sample is 1/64)
 #   P4 vertex-mass conservation in every run: sum('.a_den') = grid cells (mean density 1) to 1e-6
+# and, single build only, the same four under '--ps-merge fixed-point' (the word merge: the passes' exact words
+# added as integers, one close-out, the single run's too; fix 3 S6), whose split and padding reach no byte:
+#   P1-P3 '.a_den', '.a_streams' and '.a_hidden_streams' of every variant byte-identical to its '--partition 1 1 1'
+#         run's; P2 that run within the rounding above of the default single run (the close-out rounds once)
+#   P4 the vertex-mass total as above
 #
 # Usage:
 #   tests/ps_partition_padding_check.sh [--no-build]
@@ -45,13 +50,15 @@ build_target "${1:-}" PS-DTFE o_ps
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP}" --n "${N}" --box 100 \
     --amplitude-factor 1.8 --crossed-waves >/dev/null
 
-# the sampled deposit ('density_a' would select the exact one): P2 and P3's tolerances are its sub-samples'
+# the sampled deposit at 3 points per cell axis ('density_a' would select the exact one): P2 and P3's tolerances
+# are its sub-samples' (RUN_ENV: assignments the run's environment takes, the word merge's below)
+RUN_ENV=()
 run() {  # $1 = output name, rest = extra options
     local name="$1"; shift
     local out="${TMP}/run_${name}"
     rm -f "${out}".a_den "${out}".a_streams "${out}".a_hidden_streams
-    if ! "${BIN}" "${SNAP}" "${out}" --grid "${GRID}" --periodic --field density_a --sampled --ps-vertex-mass \
-            --input-format 105 --mpc-unit 1 --verbose 1 "$@" > "${out}.log" 2>&1; then
+    if ! env ${RUN_ENV[@]+"${RUN_ENV[@]}"} "${BIN}" "${SNAP}" "${out}" --grid "${GRID}" --periodic --field density_a \
+            --sampled --subsamples 3 --ps-vertex-mass --input-format 105 --mpc-unit 1 --verbose 1 "$@" > "${out}.log" 2>&1; then
         echo "FAIL: run ${name} exited non-zero -- last lines of ${out}.log:"
         tail -n 15 "${out}.log" | sed 's/^/   | /'
         exit 1
@@ -62,11 +69,22 @@ run single
 run p2       --partition 2 2 2
 run p2pad50  --partition 2 2 2 --padding 50
 run p2lag8   --partition 2 2 2 --ps-lagrangian-padding 8
+FX=0
+if ! precision_double; then   # (the double build refuses the option)
+    FX=1
+    # the merge of before and the float knobs off for these, whatever the caller's environment says (0 is off)
+    RUN_ENV=(DTFE_RUN_UNITS_LEGACY=0 DTFE_GPU_FLOAT_MASS=0 DTFE_GPU_FLOAT_MOMENTS=0)
+    run fx_single  --partition 1 1 1 --ps-merge fixed-point
+    run fx_p2      --partition 2 2 2 --ps-merge fixed-point
+    run fx_p2pad50 --partition 2 2 2 --padding 50 --ps-merge fixed-point
+    run fx_p2lag8  --partition 2 2 2 --ps-lagrangian-padding 8 --ps-merge fixed-point
+    RUN_ENV=()
+fi
 
-"${PY}" - "${TMP}" "${GRID}" "${DTFE_TEST_REAL}" <<'PY'
+"${PY}" - "${TMP}" "${GRID}" "${DTFE_TEST_REAL}" "${FX}" <<'PY'
 import sys
 import numpy as np
-tmp, grid, real = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+tmp, grid, real, fx = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4] == "1"
 ncell = grid ** 3
 double = real == "float64"
 den_tol = 1e-10 if double else 1e-4
@@ -103,6 +121,31 @@ for name in ("single", "p2", "p2pad50", "p2lag8"):
         fails.append(f"P2 {name}: {nbad} '.a_den' cells differ by more than {den_tol:.0e} (max {rel.max():.2e})")
     if ds > 1e-3:
         fails.append(f"P3 {name}: '.a_streams' differs by {ds:.2e}")
+
+# the word merge: every variant writes its '--partition 1 1 1' run's bytes (no float merge, one close-out)
+if fx:
+    def raw(name, ext):
+        with open(f"{tmp}/run_{name}{ext}", "rb") as f:
+            return f.read()
+    for name in ("fx_single", "fx_p2", "fx_p2pad50", "fx_p2lag8"):
+        den = load(name, ".a_den")
+        drift = abs(den.sum() - ncell) / ncell
+        print(f"   P4 {name:10s} sum(.a_den) - cells = {den.sum() - ncell:+.3e}  (relative {drift:.1e})")
+        if drift > 1e-6:
+            fails.append(f"P4 {name}: vertex-mass total off by {drift:.1e} of the mass")
+    a, b = ref[".a_den"], load("fx_single", ".a_den")
+    big = np.abs(a) > 1e-6 * np.abs(a).max()
+    rel = np.abs(a - b)[big] / np.abs(a)[big]
+    print(f"   fx_single vs single (the default merge): .a_den max rel {rel.max():.2e}")
+    if int((rel > den_tol).sum()):
+        fails.append(f"P2 fx_single: '.a_den' differs from the single run by more than {den_tol:.0e} (max {rel.max():.2e})")
+    for name in ("fx_p2", "fx_p2pad50", "fx_p2lag8"):
+        diff = [e for e in (".a_den", ".a_streams", ".a_hidden_streams")
+                if raw(name, e) != raw("fx_single", e) or not raw(name, e)]
+        print(f"   {name:10s} vs fx_single (--ps-merge fixed-point): "
+              + (f"DIFFER {' '.join(diff)}" if diff else ".a_den .a_streams .a_hidden_streams byte-identical"))
+        if diff:
+            fails.append(f"P1-P3 {name}: {' '.join(diff)} not byte-identical to the word merge's single run")
 
 print("-" * 60)
 if fails:

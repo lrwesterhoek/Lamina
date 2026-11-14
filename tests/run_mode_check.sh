@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The run modes (docs/cleanup-plan.md P13): '--run-mode gentle|balanced|performance' in both binaries (or the
-# environment's DTFE_RUN_MODE), PS-DTFE's '--gpu-share auto|<fraction>', and the run log's lines that say what was set
-# and why (src/run_mode.h; src/user_options.cc printOptions). On a synthetic 16^3 snapshot of crossed waves, grid 16.
+# environment's DTFE_RUN_MODE), PS-DTFE's '--gpu-share auto|mixed|<fraction>', and the run log's lines that say what
+# was set and why (src/run_mode.h; src/user_options.cc printOptions). On a synthetic 16^3 snapshot of crossed waves,
+# grid 16.
 # The thread budgets expected here are src/run_mode.h runModeCoreBudget recomputed from this machine: N0 = its
 # threads (nproc on Linux, hw.logicalcpu on macOS), perf = its performance cores (hw.perflevel0.logicalcpu on macOS,
 # else none), base = min(N0, perf) where perf is known, else N0; gentle max(1, base/2), balanced
@@ -17,7 +18,8 @@
 #       DTFE_RUN_MODE give M1's line
 #   M4  the flag beats the variable: DTFE_RUN_MODE=gentle with '--run-mode performance' is '(--run-mode performance;'
 #   M5  refused (a non-zero exit, the binary's text): '--run-mode fast', DTFE_RUN_MODE=fast and '--run-mode' twice in
-#       both binaries, PS-DTFE's '--gpu-share 600' and '--gpu-share x', standard DTFE's '--gpu-share 1' (no such option)
+#       both binaries, PS-DTFE's '--gpu-share 600', '--gpu-share x' and '--gpu-share both' (the text names 'auto' and
+#       'mixed'), standard DTFE's '--gpu-share 1' (no such option)
 #   M6  OMP_NUM_THREADS=2 under gentle keeps its count ('2 threads (kept: OMP_NUM_THREADS=2 was given)'), and the PS
 #       plan runs at most 2 partitions at once
 #   M7  gentle with '--max-concurrent G+1' (where G+1 <= N0) raises the budget to G+1 ('(raised: --max-concurrent G+1
@@ -36,7 +38,8 @@
 #       --run-mode performance' to the uninterrupted outputs; its checkpoint's settings key has no 'run-mode' or
 #       'gpu-share' line
 #   M11 '--gpu-share 0.5' without '--gpu': one note ("does not apply to a run without '--gpu'"; a build without the
-#       GPU deposit names 'this CPU-only build' instead) and no key line; '--gpu-share auto' without '--gpu' is silent
+#       GPU deposit names 'this CPU-only build' instead) and no key line; '--gpu-share auto' and '--gpu-share mixed'
+#       without '--gpu' are silent
 # GPU block (a Metal build of the precision's pair; SKIP otherwise):
 #   G1  '--gpu --exact --partition 2 2 2 --max-concurrent 2', gentle against performance: 'GPU buffers up to 50 ms'
 #       against '250 ms', byte-identical grids, no CPU fallback
@@ -45,10 +48,19 @@
 #       the 8 partitions ...', 'gpu-share=500' in the key, no CPU fallback
 #   G3  a 0.5 run killed after 3 partitions: '--resume --gpu-share 1' is refused, naming 'gpu-share=500'; '--resume
 #       --gpu-share auto --run-mode performance' takes the checkpoint's share ("the GPU share 0.50 is the
-#       checkpoint's") and writes the uninterrupted 0.5 run's outputs
+#       checkpoint's") and writes the uninterrupted 0.5 run's outputs; a second such killed run resumed with
+#       '--resume --gpu-share mixed --run-mode balanced' does the same (at 2 threads mixed alone would be 1)
 #   G4  OMP_NUM_THREADS=10, DTFE_AUTO_MINN=1000: '--run-mode performance --gpu-share auto --partition 3 3 3' at
 #       '--max-concurrent' 1, 2 and 4 is 'GPU share 0.60' each time, byte-identical; '--run-mode balanced' is 'GPU share
 #       1 (--gpu-share auto: balanced' with no mixed line (the double build's auto share is 1 in every mode)
+#   G4b '--gpu-share mixed' (auto's model in every mode), G4's set-up at '--max-concurrent 2': under balanced and
+#       gentle (10 threads, kept) 'GPU share 0.60 (--gpu-share mixed: balanced, 10 threads, rho 0.09): 16 of the 27
+#       ...' and the header's 'GPU share : mixed (the GPU and the free cores in every mode, resolved with the plan)';
+#       under performance the same with 'performance', and in all three modes the grids of G4's auto run at
+#       '--max-concurrent 2'; the double build: 'GPU share 1 (--gpu-share mixed: <mode>, the double build: every
+#       partition on the GPU)'. Without OMP_NUM_THREADS (single precision) balanced counts the mode's own threads:
+#       '(--gpu-share mixed: balanced, B threads', at '--max-concurrent 1' and at B+1 (a raise moves no share: the
+#       same grids)
 #   G5  '--gpu-share 0.5' with '--sampled', and with '--partition 1': the 'sampled deposit' and 'one domain' notes
 #   G6  balanced, a watchdog fault at buffer 3 (DTFE_GPU_FAULT_AT=3:timeout) and DTFE_GPU_PACE_RECOVER_SEC=0: the
 #       pace eases back to '50 ms buffers, 8 ms gaps (the run mode's)', and no line of the run names 250 ms
@@ -160,7 +172,7 @@ no_fallback() { ! grep -aqE "$FALLBACK" "$@"; }
 # the D19 texts and the not-applicable note (contract section 7)
 E_MODE="Unknown value 'fast' for '--run-mode'; use 'gentle', 'balanced' or 'performance' (the default)."
 E_ENV="Unknown value 'fast' for DTFE_RUN_MODE; use gentle, balanced or performance (in any case), or leave it unset (or 'auto') for the default."
-e_share() { echo "Unknown value '$1' for '--gpu-share'; use a fraction from 0 to 1 (0.6: 60% of the partitions deposit on the GPU) or 'auto' (the run mode's share)."; }
+e_share() { echo "Unknown value '$1' for '--gpu-share'; use a fraction from 0 to 1 (0.6: 60% of the partitions deposit on the GPU), 'auto' (the run mode's share) or 'mixed' (the GPU and the free cores in every run mode)."; }
 note_of() { echo "note: '--gpu-share $1' does not apply to $2: every partition deposits on $3."; }
 # mixed_line <share> <source> <on the GPU> <to deposit>: the post-plan line of a mixed run (D18 c)
 mixed_line() { echo "PS-DTFE: GPU share $1 ($2): $3 of the $4 partitions to deposit do so on the GPU, the other $(($4 - $3)) on the CPU with r3d clipping (a mixed run's grids differ from an all-GPU run's at float rounding)."; }
@@ -228,7 +240,7 @@ for b in PS STD; do
     [ "$rc" != 0 ] && has "$TMP/M5_${b}_twice.log" "'--run-mode' cannot be specified more than once"
     check "M5 $b: '--run-mode' twice is refused (boost: 'cannot be specified more than once'; exit $rc)" $?
 done
-for v in 600 x; do
+for v in 600 x both; do
     go "$TMP/M5_PS_share$v" "$PS" "${A[@]}" --auto-tune-report --gpu-share "$v"; rc=$?
     [ "$rc" != 0 ] && has "$TMP/M5_PS_share$v.log" "$(e_share "$v")"
     check "M5 PS: '--gpu-share $v' is refused with the --gpu-share text (exit $rc)" $?
@@ -373,6 +385,7 @@ RUN_ENV=(OMP_NUM_THREADS=2 DTFE_TEST_EXIT_AFTER_PARTITIONS=3)
 go "$TMP/M11" "$PS" "${A[@]}" "${PSX[@]}" --gpu-share 0.5; r1=$?
 RUN_ENV=(OMP_NUM_THREADS=2)
 go "$TMP/M11_auto" "$PS" "${A[@]}" "${PSX[@]}" --gpu-share auto; r2=$?
+go "$TMP/M11_mixed" "$PS" "${A[@]}" "${PSX[@]}" --gpu-share mixed --run-mode balanced; r3=$?
 RUN_ENV=()
 NOTE="$(note_of 0.5 "$WHY" "the CPU")"
 KEY="$(key_of "$TMP/M11")"
@@ -382,6 +395,8 @@ KEY="$(key_of "$TMP/M11")"
 check "M11 '--gpu-share 0.5' without --gpu: the note \"$NOTE\" once, and no key line (exit $r1)" $?
 [ "$r2" = 0 ] && ! grep -aqE "does not apply|GPU share" "$TMP/M11_auto.log"
 check "M11 '--gpu-share auto' without --gpu says nothing (exit $r2)" $?
+[ "$r3" = 0 ] && ! grep -aqE "does not apply|GPU share" "$TMP/M11_mixed.log"
+check "M11 '--gpu-share mixed --run-mode balanced' without --gpu says nothing (exit $r3)" $?
 
 echo ">> G: the GPU block"
 if [ "$GPU" != 1 ]; then
@@ -443,6 +458,18 @@ else
     [ "$r2" = 0 ] && has "$TMP/G3.log" "PS-DTFE: --resume: the GPU share 0.50 is the checkpoint's." \
         && same "$TMP/G2_half" "$TMP/G3" && no_fallback "$TMP/G3.log"
     check "G3 '--resume --gpu-share auto --run-mode performance' takes the checkpoint's 0.50: the uninterrupted outputs (exit $r2)" $?
+    # 'mixed' takes the checkpoint's share as 'auto' does (a second killed 0.5 run: the resume above removed the
+    # first one's checkpoint); at 2 threads its model alone would put every partition on the GPU
+    RUN_ENV=(OMP_NUM_THREADS=2 DTFE_TEST_EXIT_AFTER_PARTITIONS=3)
+    go "$TMP/G3m" "$PS" "${A[@]}" "${GX[@]}" --gpu-share 0.5; r1=$?
+    mv "$TMP/G3m.log" "$TMP/G3m.killed.log"
+    [ -n "$(key_of "$TMP/G3m")" ] || no_checkpoint_why "$TMP/G3m.killed.log" "$TMP"
+    RUN_ENV=(OMP_NUM_THREADS=2)
+    go "$TMP/G3m" "$PS" "${A[@]}" "${GX[@]}" --resume --gpu-share mixed --run-mode balanced; r2=$?
+    RUN_ENV=()
+    [ "$r1" = 137 ] && [ "$r2" = 0 ] && has "$TMP/G3m.log" "PS-DTFE: --resume: the GPU share 0.50 is the checkpoint's." \
+        && same "$TMP/G2_half" "$TMP/G3m" && no_fallback "$TMP/G3m.log"
+    check "G3 '--resume --gpu-share mixed --run-mode balanced' takes the checkpoint's 0.50 too: the uninterrupted outputs (killed $r1, exit $r2)" $?
 
     echo ">> G4: --gpu-share auto at OMP_NUM_THREADS=10 (DTFE_AUTO_MINN=1000)"
     RUN_ENV=(OMP_NUM_THREADS=10 DTFE_AUTO_MINN=1000)
@@ -471,9 +498,54 @@ else
         && ! has "$TMP/G4_balanced.log" "$MIXED"
     check "G4 balanced: 'GPU share 1 (--gpu-share auto: balanced', no mixed line (exit $rb)" $?
 
+    echo ">> G4b: --gpu-share mixed, auto's model in every mode (G4's set-up, --max-concurrent 2)"
+    RUN_ENV=(OMP_NUM_THREADS=10 DTFE_AUTO_MINN=1000)
+    for m in balanced gentle performance; do
+        go "$TMP/G4b_$m" "$PS" "${A[@]}" --gpu --exact --partition 3 3 3 --gpu-share mixed --max-concurrent 2 \
+            --run-mode "$m"; eval "r_$m=\$?"
+    done
+    RUN_ENV=()
+    HEAD_MIXED="mixed (the GPU and the free cores in every mode, resolved with the plan)"
+    for m in balanced gentle performance; do
+        eval "r=\$r_$m"
+        if precision_double; then   # (D11 rule 2, as under auto: the double build keeps every partition on the GPU)
+            LINE="PS-DTFE: GPU share 1 (--gpu-share mixed: $m, the double build: every partition on the GPU): every partition deposits on the GPU."
+            [ "$r" = 0 ] && has "$TMP/G4b_$m.log" "$LINE" && ! has "$TMP/G4b_$m.log" "$MIXED"
+        else
+            LINE="$(mixed_line 0.60 "--gpu-share mixed: $m, 10 threads, rho 0.09" 16 27)"
+            [ "$r" = 0 ] && has "$TMP/G4b_$m.log" "$LINE"
+        fi
+        rc=$?
+        SHOW="${LINE%% to deposit*}"; SHOW="${SHOW%%: every partition deposits*}"
+        [ "$rc" = 0 ] && [ "$(share_of "$TMP/G4b_$m.log")" = "$HEAD_MIXED" ] && no_fallback "$TMP/G4b_$m.log"
+        check "G4b $m: '$SHOW', the header's '$HEAD_MIXED' (exit $r)" $?
+        [ "$r" = 0 ] && same "$TMP/G4_mc2" "$TMP/G4b_$m"
+        check "G4b $m: the grids of G4's '--gpu-share auto --run-mode performance --max-concurrent 2' run" $?
+    done
+    # the threads the model counts outside performance are the mode's own: without OMP_NUM_THREADS balanced's B,
+    # also where '--max-concurrent B+1' raises the run's threads (a raise moves no share)
+    if precision_double; then
+        echo "  SKIP G4b own threads: the double build's mixed share is 1 before the threads are counted"
+    else
+        RUN_ENV=(DTFE_AUTO_MINN=1000)
+        go "$TMP/G4b_own" "$PS" "${A[@]}" --gpu --exact --partition 3 3 3 --gpu-share mixed --max-concurrent 1 \
+            --run-mode balanced; r1=$?
+        go "$TMP/G4b_raised" "$PS" "${A[@]}" --gpu --exact --partition 3 3 3 --gpu-share mixed \
+            --max-concurrent "$((B + 1))" --run-mode balanced; r2=$?
+        RUN_ENV=()
+        OWN="(--gpu-share mixed: balanced, $B threads"
+        [ "$r1" = 0 ] && grep -aF -- "PS-DTFE: GPU share " "$TMP/G4b_own.log" | grep -qF -- "$OWN" \
+            && no_fallback "$TMP/G4b_own.log"
+        check "G4b balanced without OMP_NUM_THREADS: '$OWN' (the mode's threads, not N0 = $N0) (exit $r1)" $?
+        [ "$r2" = 0 ] && grep -aF -- "PS-DTFE: GPU share " "$TMP/G4b_raised.log" | grep -qF -- "$OWN" \
+            && same "$TMP/G4b_own" "$TMP/G4b_raised" && no_fallback "$TMP/G4b_raised.log"
+        check "G4b balanced with '--max-concurrent $((B + 1))' (a raise): still '$OWN', the same grids (exit $r2)" $?
+    fi
+
     echo ">> G5: the notes of a --gpu-share that does not apply"
     RUN_ENV=(OMP_NUM_THREADS=2)
-    go "$TMP/G5_sampled" "$PS" "${A[@]}" --gpu --sampled --partition 2 2 2 --max-concurrent 2 --gpu-share 0.5; r1=$?
+    go "$TMP/G5_sampled" "$PS" "${A[@]}" --gpu --sampled --subsamples 3 --partition 2 2 2 --max-concurrent 2 \
+        --gpu-share 0.5; r1=$?
     go "$TMP/G5_one" "$PS" "${A[@]}" --gpu --exact --partition 1 --gpu-share 0.5; r2=$?
     RUN_ENV=()
     [ "$r1" = 0 ] && has "$TMP/G5_sampled.log" "$(note_of 0.5 "the sampled deposit" "the GPU")" \

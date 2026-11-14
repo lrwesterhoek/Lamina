@@ -34,7 +34,10 @@
 #       are exact star sums and the single-cell volumes canonical (src/CGAL_triangulation/triangulation.cpp
 #       vertexDensityStarSums, triangulation_miscellaneous.h canonicalTetVolume). The double build keeps its double
 #       sums: SKIP there
-# About 65 s on the Mac (12 runs of 2-7 s).
+#   G8  '--interlace' (two passes, the second on the particles moved by half a cell, of which only the density is
+#       kept: main.cpp): G1's face run with it takes the face gradient (its header's 'velocity gradient' line) and
+#       writes every output of the run without it byte for byte but '.a_den', which is interlaced
+# About 65 s on the Mac (12 runs of 2-7 s), before G8's interlaced run (TO MEASURE: two passes of G1's run).
 # Usage: tests/dtfe_face_gradient_check.sh [--no-build]   (--no-build is accepted and ignored: nothing is built)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -175,6 +178,17 @@ sys.exit(0 if ok else 1)"; then
 else
     echo "   (G6: not a GPU build)"
 fi
+
+echo ">> --interlace: every grid but the density is the first pass's, the face gradient's among them"
+# G8: G1's face run with '--interlace' -- the second pass, on the particles moved by half a cell, gives the density
+# only (main.cpp)
+run fi OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 DTFE_FACE_CHECK=1 -- --exact --face-gradient --interlace
+d="$(differing f fi)"
+if ! grep -qF "velocity gradient      : from EXACT FACE integrals" "$TMP/fi.log"; then
+    fail "G8 the --interlace run does not take the face gradient (see $TMP/fi.log)"
+elif [ "$d" = " .a_den" ]; then
+    pass "G8 --interlace: every output but '.a_den' byte-identical to the face run without it (divergence, shear)"
+else fail "G8 --interlace: the outputs that differ from the face run without it are '$d', want ' .a_den' alone"; fi
 
 echo ">> refusal: --face-gradient --cic"
 "${DTFE_BIN}" "$SNAP" "$TMP/c" --grid 16 --periodic --field density_a divergence_a --face-gradient --cic > "$TMP/c.log" 2>&1

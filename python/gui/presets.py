@@ -23,34 +23,20 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # the production fields: the drivers' default (runspec.DEFAULT_FIELDS; tests/py_gui_runspec_test.py checks it)
 _PRODUCTION = ["density_a", "velocity_a", "divergence_a", "shear_a"]
 
-# name -> (one-line description, settings). The settings are RunSpec / CustomSpec fields; a
-# preset leaves every field it does not name as it was. 'slice_plane': "largest" = the largest
-# image plane found for the simulation (none: no slice). 'deposit' is the cell average of both estimators (the
-# exact one is the production setting of both since 2026-11-09); 'deposit_dtfe', when given, is the one a
-# standard-DTFE job gets instead (no built-in preset needs it any more; apply_preset still reads it).
+# name -> (one-line description, settings). The settings are RunSpec / CustomSpec fields among PRESET_KEYS; a preset
+# leaves every field it does not name as it was. 'slice_plane': "largest" = the largest image plane found for the
+# simulation (none: no slice). Three built-ins: a first look, the production grids, the production grids for figures.
 BUILTIN_PRESETS: dict[str, tuple[str, dict]] = {
-    "Quick look": ("128³ grid, density and velocity only: about a minute on a laptop-sized "
-                   "snapshot, for checking that everything works",
-                   {"grid": 128, "nsub": 1, "deposit": "sampled", "fields": ["density_a", "velocity_a"],
-                    "vertex_mass": True, "volume_weighted": True, "caustics": False,
+    "Quick look": ("Fast, 128³ grid, density and velocity only: a first look, to check that everything works",
+                   {"grid": 128, "quality": "fast", "fields": ["density_a", "velocity_a"], "caustics": False,
                     "caustic_cusps": False, "slice_plane": ""}),
-    "Standard": ("512³ grid, the production fields (density, velocity, divergence, shear) with the "
-                 "literature-standard weighting",
-                 {"grid": 512, "nsub": 3, "deposit": "exact", "fields": list(_PRODUCTION),
-                  "vertex_mass": True, "volume_weighted": True, "caustics": False,
+    "Standard": ("Exact, 512³ grid, the production fields (density, velocity, divergence, shear)",
+                 {"grid": 512, "quality": "exact", "fields": list(_PRODUCTION), "caustics": False,
                   "caustic_cusps": False, "slice_plane": ""}),
-    "Publication": ("Standard + caustic stratification + a hi-res point-evaluated slice (the "
-                    "largest image plane of the simulation) for figures",
-                    {"grid": 512, "nsub": 3, "deposit": "exact", "fields": list(_PRODUCTION),
-                     "vertex_mass": True, "volume_weighted": True, "caustics": True,
+    "Publication": ("Standard plus the caustic stratification and a hi-res point-evaluated slice on the largest "
+                    "image plane of the simulation, for figures",
+                    {"grid": 512, "quality": "exact", "fields": list(_PRODUCTION), "caustics": True,
                      "caustic_cusps": False, "slice_plane": "largest", "slice_vel_grad": True}),
-    "Exact deposit": ("256³ grid, density and velocity with the exact tetrahedron-cell clipping (the default "
-                      "cell average): noise-free cell values, on the GPU for both estimators (at 512³ on "
-                      "TNG100-3-Dark PS-DTFE takes 1156 s, against 1133 s on every CPU core and 1260 s for the "
-                      "sampled GPU deposit; standard DTFE 439 s against 431 s); in performance a partitioned "
-                      "PS-DTFE run also deposits on the free cores",
-                      {"grid": 256, "deposit": "exact", "fields": ["density_a", "velocity_a"],
-                       "vertex_mass": True, "volume_weighted": True, "slice_plane": ""}),
 }
 
 
@@ -66,9 +52,9 @@ def preset(name: str, user: dict) -> tuple[str, dict] | None:
     return None
 
 
-# (not the machine use, run_mode: it is about this machine now, not about the grids, so a preset leaves it alone)
-PRESET_KEYS = ("grid", "nsub", "deposit", "fields", "gpu", "vertex_mass", "volume_weighted",
-               "caustics", "caustic_cusps", "slice_plane", "slice_vel_grad", "estimator")
+# what a preset sets: the run's choices. Not the machine use (run_mode: about this machine, not about the grids) and
+# not the Custom tab's initial positions (vertex_mass: a description of the input file, as its format and box are)
+PRESET_KEYS = ("grid", "quality", "fields", "caustics", "caustic_cusps", "slice_plane", "slice_vel_grad", "estimator")
 
 
 def capture(spec) -> dict:
@@ -78,14 +64,17 @@ def capture(spec) -> dict:
 
 
 def apply_preset(spec, settings: dict, planes=()) -> list[str]:
-    """Sets the named fields on spec (in place); returns what was changed, for the status line.
-    planes: the simulation's image-plane files, for 'slice_plane': 'largest'."""
+    """Sets the preset's fields (PRESET_KEYS) on spec, in place; returns what was changed, for the status line.
+    planes: the simulation's image-plane files, for 'slice_plane': 'largest'. A user's preset saved before the two
+    quality modes names the cell average, 'deposit' ('sampled' Fast, else Exact; runspec.migrate_quality), and may
+    carry settings the code decides now (nsub, gpu, volume_weighted, vertex_mass, ...): those are left out."""
+    import runspec as _rs       # (here: runspec is the heavier import, and this module stays importable without it)
     changed = []
     known = spec.to_dict()
     if settings.get("estimator", known.get("estimator")) == "dtfe" and "deposit_dtfe" in settings:
-        settings = dict(settings, deposit=settings["deposit_dtfe"])     # standard DTFE: its cell average
-    for k, v in settings.items():
-        if k not in known:
+        settings = dict(settings, deposit=settings["deposit_dtfe"])     # standard DTFE: its own cell average
+    for k, v in _rs.migrate_quality(settings).items():
+        if k not in PRESET_KEYS or k not in known:
             continue
         if k == "slice_plane" and v == "largest":
             v = str(max(planes, key=lambda p: Path(p).stat().st_size)) if planes else ""
@@ -98,42 +87,21 @@ def apply_preset(spec, settings: dict, planes=()) -> list[str]:
 # ---------------------------------------------------------------------- labels
 # option -> (plain-language label, flag). The flag's full description comes from the binary.
 OPTION_TEXT = {
-    "gpu":             ("Use the GPU for the grid deposit", "--gpu"),
-    "gpu_dtfe":        ("Use the GPU for the grid interpolation", "--gpu"),      # (its help in the standard binary)
+    # (the Custom tab's initial positions: perturbed ones take the tetrahedron masses from the particles)
     "vertex_mass":     ("Tetrahedron masses from the particles (needed for TNG initial conditions)",
                         "--ps-vertex-mass"),
-    "volume_weighted": ("Volume-weighted velocities (the literature convention)", "--ps-volume-weighted"),
     "caustics":        ("Mark caustics: folds and how many axes collapsed", "--ps-caustics"),
     "caustic_cusps":   ("Also mark cusps and swallowtails (slower, CPU)", "--ps-caustic-cusps"),
-    "linear_deposit":  ("Linear density inside each tetrahedron (excludes volume weighting)",
-                        "--ps-linear-deposit"),
-    # (its prerequisites, the exact deposit and the volume weighting, are in its What's This (the binary's help) and
-    # in the run checks: naming them here too would make the tick wider than the run tabs' forms)
-    "face_gradient":   ("Gradient of the mean velocity from exact face integrals", "--face-gradient"),
     "sample_points":   ("Also evaluate the fields at these points", "--sample-points"),
     "window":          ("Deposit only this window of the grid", "--grid-window"),
     "halo_release":    ("Release halo interiors above this density (rho/rho_bar; off = never)", "--ps-halo-release"),
-    "stream_density":  ("Each stream's density at a point", "--ps-stream-density"),
     "per_stream":      ("The point values stream by stream (ragged files)", "--ps-per-stream"),
     "per_stream_ids":  ("... with each stream's tetrahedron particle IDs", "--ps-per-stream-ids"),
     "slice_vel_grad":  ("Velocity gradient at each slice point (divergence, shear, vorticity maps)",
                         "--pts-vel-grad"),
-    "pts_conventions": ("Plane conventions", "--ps-point-conventions"),     # the image plane's estimators
-    "exact":           ("Exact: analytic tetrahedron-cell clipping (noise-free; the default)", "--exact"),
-    "parallel_triangulation": ("Parallel triangulation (faster; repeats differ at float rounding)",
-                               "--parallel-triangulation"),
-    "ordered_merge":   ("Merge the partitions in index order (bit-identical repeats; the default)",
-                        "--ps-merge"),
     "run_mode":        ("Machine use", "--run-mode"),     # how hard the run leans on the machine (not in presets)
     "alpha_shape":     ("Alpha shape: drop Lagrangian tetrahedra wider than this many mean particle spacings "
                         "(0 keeps the whole convex hull)", "--ps-alpha-shape"),
-    # the two cell averages: their help is the binaries' '--exact' / '--sampled' text (a binary from before
-    # 2026-11-09 knows '--exact' by its old name, '--exact-average', which flag_help files under both)
-    "sampled":         ("Sampled: nSub³ points per cell", "--sampled"),
-    "sampled_dtfe":    ("Sampled: the Monte-Carlo mean over points in each cell (faster on all CPU cores)",
-                        "--sampled"),
-    "exact_dtfe":      ("Exact: each cell the exact average of the interpolated field (noise-free; the default)",
-                        "--exact"),
     "periodic":        ("The box is periodic (a cosmological simulation)", "--periodic"),
     "scalar":          ("Also interpolate a per-particle value", "--scalar-dataset"),
 }
@@ -143,15 +111,6 @@ def label(key: str) -> str:
     return OPTION_TEXT[key][0]
 
 
-def noted_label(key: str, note: str = "") -> str:
-    """An option's label, or, when this build or run cannot use the option ('note' says why: 'this build has no TBB:
-    ignored'), its name alone with the note: 'Parallel triangulation (this build has no TBB: ignored)'. The label's
-    own explanation in brackets goes, so the tick never gets wider than its form (the forms scroll only vertically)."""
-    if not note:
-        return label(key)
-    return f"{label(key).split(' (')[0]} ({note})"
-
-
 # ---------------------------------------------------------------------- the window's own words
 # One table for the texts several tabs share: sentence case, nouns for groups, verbs for buttons, '…' only where a
 # dialog opens. The option labels above are OPTION_TEXT's; the field names are the Explore tab's (grids.FIELD_LABELS).
@@ -159,13 +118,13 @@ LABELS = {
     # group titles
     "preset": "Start from a preset",
     "estimator": "Estimator",
-    "estimator_grid": "Estimator and grid",     # Grids: the estimator choice, then the grid and its deposit
-    "grid_deposit": "Grid and cell average",    # Custom snapshot and Pipeline (their estimator is chosen elsewhere)
+    "estimator_quality": "Estimator and quality",   # Grids: the estimator, the Quality pair, grid, machine use
+    "quality_grid": "Quality and grid",             # Custom snapshot and Pipeline (the estimator chosen elsewhere)
+    "quality": "Quality",                           # the row of the Quality pair, Exact or Fast
     "fields": "Fields",
-    "ps_options": "Phase-space options",
+    "ps_options": "Phase space",
     "slice": "Hi-res slice (point evaluation)",
-    "resources": "Resources and output",
-    "advanced": "Advanced",
+    "more": "More",                                 # the folded group: output, start over, folders
     # the snapshot lists' quick-selection buttons
     "select_all": "All",
     "select_none": "None",
@@ -178,20 +137,6 @@ LABELS = {
     "delete_preset": "Delete",
     "choose_preset": "choose a preset",
     "setup": "Setup…",
-    # the collapsed groups' summaries
-    "auto_plan": "auto plan",
-    "auto_concurrency": "auto concurrency",
-    "all_off": "all off",
-}
-
-# the expert options of the Advanced groups, as their one-line summary names them
-ADVANCED_SHORT = {
-    "caustic_cusps": "cusps and swallowtails",
-    "linear_deposit": "linear density",
-    "per_stream": "stream by stream",
-    "per_stream_ids": "stream IDs",
-    "render_fixed_range": "fixed density range",
-    "render_force": "re-render",
 }
 
 
