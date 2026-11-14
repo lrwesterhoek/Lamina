@@ -36,6 +36,12 @@
 #     transverse gradients vanish, grad_x matches a central finite difference of '.pts_den'
 #     at x +- eps probe points away from the caustics, the per-point gradient equals the sum
 #     of its per-stream gradients, and serial vs --partition 2 2 2 agree to float rounding.
+#  H) --pts-vel-grad (when the binary supports it and G ran): '.pts_den', '.pts_vel',
+#     '.pts_velDisp' and '.pts_streams' are byte-identical to G's run without a gradient flag;
+#     '.pts_velGrad' holds one 3x3 tensor per point; on the jitter-free pancake every component
+#     but dvx/dx vanishes at the single-stream points, dvx/dx matches a central finite
+#     difference of '.pts_vel' at G's probe points, and serial vs --partition 2 2 2 agree to
+#     float rounding.
 #  I) PACKED RECORDS: the per-point stream records are stored with only the members the options
 #     fill (RecLayout, ps_point_eval.cc); DTFE_PTS_FULL_RECORDS=1 stores every member as before.
 #     Both must give byte-identical outputs -- with no options, and with every per-stream option

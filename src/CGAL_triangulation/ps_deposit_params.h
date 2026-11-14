@@ -62,7 +62,7 @@ inline void psFillTetRecord(float *rec, V const cv[4][3], double const gridLo[3]
 // the order the GPU atomics land in (two runs would differ in the last bits of every velocity, dispersion and
 // gradient cell) and, on the CPU, on the thread count (thread-private float copies summed in thread order).
 // Each share v*w becomes the integer rint(v*w * scale[g]) (scale = 2^k, so the product is
-// exact and both sides round it the same way: psMassFixedShare's rule) and the integers are added -- in any
+// exact and both sides round it the same way: psFixedShareOk's rule) and the integers are added -- in any
 // order, by any number of threads, with the same result. Grid g of this list ([g] = the index into
 // PSDepositParams.fxScale, PSGpuGrids::fx and the CPU's own words):
 //   MOM   sum(wm v_j)             the velocity moment (3 components)
@@ -206,7 +206,13 @@ inline void fixedShareDropped(int const slot, unsigned long long const n = 1)
     if ( fixedShareDropSink ) { fixedShareDropSink[slot] += n; return; }
     fixedShareDrops[slot].fetch_add( n, std::memory_order_relaxed );
 }
-// The guard itself: the share's integer in q, or false (q = 0, counted in 'slot') for a product that has none
+// The guard itself: the share's integer in q, or false (q = 0, counted in 'slot') for a product that has none.
+// One share in fixed-point units: the float share the deposit formed (the float a float sum would add) times the
+// 2^k unit, rounded to nearest even -- the integer rint(share * scale) the kernels add (metal/ps_deposit.metal
+// addMoment, depositMass). The scale is 2^k, so the float product there and the double product here are both exact,
+// and rint gives the same integer: a share adds the same units whichever side deposits it. The CPU deposit
+// (ps_interpolation.cc psFxAdd) adds these into the partition's fixed-point grids -- the GPU's own words when the GPU
+// deposited the partition -- so such a grid is ONE exact integer sum, independent of the order and the thread count.
 inline bool psFixedShareOk(double const product, int const slot, int64_t &q)
 {
     if ( !( std::fabs( product ) < 9223372036854775808.0 ) )   // 2^63; false for a NaN too
@@ -261,24 +267,6 @@ inline bool fixedShareTestNan(double const x, double const y, double const z)
     return h % k == 0;
 }
 
-// One share of a moment grid in fixed-point units: the float product v*w the deposit formed (the float a
-// float sum would add), times the 2^k unit -- exact in double -- rounded to nearest even: the integer rint(v*w *
-// scale) the kernels add (metal/ps_deposit.metal addFixed). psMassFixedShare's rule, for any grid. 'slot' = the
-// grid's PSFxGrid index: a share without an integer (the guard above) adds 0 and is counted there.
-inline int64_t psFixedShare(double share, float scale, int slot)
-{
-    int64_t q;
-    psFixedShareOk( share * double(scale), slot, q );
-    return q;
-}
-// ... in the run-wide 128-bit words, below the share cap 'cap' (the kernels' shareLimbs)
-inline __int128 psFixedShare(double share, float scale, double cap, int slot)
-{
-    __int128 q;
-    psFixedShareOk( share * double(scale), cap, slot, q );
-    return q;
-}
-
 // The parameter block of the PS-DTFE GPU deposit, PSDepositParams (and the exact items' PSExactItemParams): ONE
 // definition in ps_kernel_params.h, shared by the hosts (ps_metal_host.cc, metal/validate_deposit.cpp)
 // and the Metal kernels, to whose source the Makefile prepends it. Its fxScale holds one unit per PSFxGrid.
@@ -318,26 +306,6 @@ inline double psMassFixedMass(int64_t q, float scale)
 inline double psMassFixedValue(uint32_t lo, uint32_t hi, float scale)
 {
     return psMassFixedMass( psMassFixedWord(lo, hi), scale );
-}
-
-// One mass share in fixed-point units: the integer the kernels add, rint(w * massScale) in metal/
-// ps_deposit.metal depositMass. The scale is 2^k, so the float product there and the
-// double product here are both exact, and rint (round to nearest even) gives the same integer: a share adds the
-// same units whichever side deposits it. The CPU deposit (ps_interpolation.cc) adds these into the partition's
-// fixed-point grid -- the GPU's own words when the GPU deposited the partition -- so the mass grid is ONE exact
-// integer sum, independent of the order and the thread count, and is converted to float once.
-inline int64_t psMassFixedShare(double share, float scale)
-{
-    int64_t q;
-    psFixedShareOk( share * double(scale), FX_DROP_MASS, q );   // (the non-finite guard above)
-    return q;
-}
-// ... in the run-wide 128-bit words, below the share cap 'cap'
-inline __int128 psMassFixedShare(double share, float scale, double cap)
-{
-    __int128 q;
-    psFixedShareOk( share * double(scale), cap, FX_DROP_MASS, q );   // (the guard above, at the cap)
-    return q;
 }
 
 // The GPU hosts hand the kernels' (low, high) uint32 word pairs over as int64_t by copying the bytes

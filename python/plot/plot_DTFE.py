@@ -11,7 +11,7 @@ the exact deposit and the volume weighting; else derived from its velocity grid)
 '--ps-gradient stored' for the PS binary's grids as stored (the stream average <grad v> of a run
 without the face gradient, a face-gradient run's mean flow).
 
-    python3 plot/plot_DTFE.py                          # TNG50-4-Dark, full snapshot series
+    python3 plot/plot_DTFE.py --sim TNG50-4-Dark       # full snapshot series
     python3 plot/plot_DTFE.py --snap 99                # single snapshot
     python3 plot/plot_DTFE.py --sim TNG50-3-Dark --snaps 0 17 50 99 --smooth 1
 """

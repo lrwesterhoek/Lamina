@@ -4,7 +4,9 @@ Every script in the repo with its useful flag combinations. All paths are relati
 repository root; quote paths that contain spaces. Scripts that need h5py should be
 run with a python whose h5py works (the shell scripts and tests pick one: `PYTHON`, else the first of `python3`,
 Homebrew's and `/usr/local`'s that imports numpy and h5py).
-The binaries' `--full-help` and each script's `--help` are the reference for every option and default.
+The binaries' `-h` lists in short what a user of the two modes needs, their `--full-help` every option (the developer
+options, for tests and comparisons, in a group of their own); `--full-help` and each script's `--help` are the
+reference for every option and default.
 Both binaries share one name per shared option (`--gpu`, `--exact`, `--sampled`, `--run-mode`, `--no-overlap`, `--full-help`, `--lambda-th`);
 the older spellings are deprecated and still accepted for one release, with a warning.
 
@@ -40,8 +42,11 @@ make DTFE PS-DTFE DIM=2           # the 2D pair: ./DTFE-2d and ./PS-DTFE-2d (own
                                   #   python3 tests/generate_ps_test_data.py --dim 2 --out snap2d.hdf5 --n 96
                                   #   ./PS-DTFE-2d snap2d.hdf5 out2d --grid 192 --periodic --field density tweb
 make PS-DTFE TBB=1                # REQUIRE tbb's parallel CGAL triangulation (the default TBB=auto compiles it in
-                                  #   when tbb is installed, TBB=0 leaves it out); the opt-in is at run time,
-                                  #   --parallel-triangulation (or DTFE_TRIANGULATION_THREADS=N): runs then differ at rounding
+                                  #   when tbb is installed, TBB=0 leaves it out); at run time the binary inserts
+                                  #   a tessellation of at least 1e6 points in parallel when cores are free, and
+                                  #   --parallel-triangulation (or DTFE_TRIANGULATION_THREADS=N, N > 1) forces it at any size;
+                                  #   PS-DTFE's single-precision grids still repeat to the byte (not under
+                                  #   --ps-linear-deposit), its point values and double build move at rounding
 make DTFE PS-DTFE LIBDEFLATE=0    # the tessellation cache with zlib instead of libdeflate (default auto)
 make DTFE BUILD_MODE=debug        # debug symbols, no optimization, sanitizers
 make library                      # shared libDTFE
@@ -184,7 +189,10 @@ PS_CAUSTICS=0           # [--ps-caustics]        DEFAULT 1: '.caustic' fold flag
 PS_CAUSTIC_CUSPS=1      # [--ps-caustic-cusps]   + bit7 A3 cusp AND bit8 A4 swallowtail
                         #                        indicators (needs PS_CAUSTICS=1; opt-in, bit7
                         #                        0.01% false positives, ~1.8x caustic cost)
-PARALLEL_TRIANGULATION=1  # [--parallel-triangulation]  parallel Delaunay insert (runs differ at rounding)
+PARALLEL_TRIANGULATION=1  # [--parallel-triangulation]  the parallel Delaunay insert at any size (default 0:
+                        #                        the binary's rule, from 1e6 points where cores are free); the
+                        #                        single-precision grids repeat to the byte, except under
+                        #                        PS_LINEAR_DEPOSIT=1; point values and the double build move at rounding
 PS_LAGRANGIAN_PADDING=0  # [--ps-lagrangian-padding]  the Eulerian padding rule (default: the binary's 8 spacings)
 TESSELLATION_CACHE=/tmp/dtfe-t  # [--tessellation-cache] reuse the tessellation across runs (created if
                         #                        missing; LOCAL dir, ~0.15 KB/vertex -- deflated)
@@ -328,7 +336,9 @@ mkdir -p /private/tmp/dtfe-tess
     --partition 4 4 4 --tessellation-cache /private/tmp/dtfe-tess   # the query server's split and cache:
                                                   # cached partitions are loaded, those whose occupancy maps
                                                   # never reach the window are skipped
-./PS-DTFE --full-help                              # every option with full descriptions
+./PS-DTFE -h                                       # the short list: what a user of the two modes needs
+./PS-DTFE --full-help                              # every option with full descriptions, in groups; the
+                                                  # developer options (tests, comparisons) in a group of their own
 ```
 
 Common to both: `--grid N [NY NZ]`, `--periodic`, `--input-format 101|105|106|111|112|121|122`,

@@ -111,15 +111,6 @@ std::atomic<long long> psPhaseTotalUs[PS_PH_N];
 std::atomic<long long> psPhaseTotalDeferred{ 0 };
 std::atomic<int>       psPhasePasses{ 0 };
 }
-// The run's phase totals so far (seconds per phase in the order of psPhaseName, the deferred-tet count and the
-// number of passes), for a caller that wants one closing line after a partitioned run's loop.
-void psFieldPhaseTotals(double sec[8], char const* names[8], long long &deferred, int &passes)
-{
-    static_assert( PS_PH_N == 8, "psFieldPhaseTotals hands out eight phases" );
-    for (int k = 0; k < PS_PH_N; ++k) { sec[k] = double( psPhaseTotalUs[k].load() ) * 1e-6; names[k] = psPhaseName[k]; }
-    deferred = psPhaseTotalDeferred.load();
-    passes = psPhasePasses.load();
-}
 
 // The finite cells (3D) / faces (2D) around a vertex, appended to 'out'.
 template <class Tr, class V>
@@ -163,8 +154,8 @@ static inline bool psSpanTouches(long lo, long hi, long n, bool periodic, long s
 }
 // a cell index that marks "counted for the tet's normalization, outside the window: not deposited"
 static size_t const PS_NOT_IN_WINDOW = size_t(-1);
-// the GPU per-tet record (psFillTetRecord), and the fixed-point mass unit and shares (psMassFixedScale,
-// psMassFixedShare) that the CPU deposit uses in every build, GPU or not
+// the GPU per-tet record (psFillTetRecord), and the fixed-point mass unit and the shares' guard (psMassFixedScale,
+// psFixedShareOk) that the CPU deposit uses in every build, GPU or not
 #include "ps_deposit_params.h"
 #include "face_sweep.h"   // --face-gradient: the face sections (psDepositFaces)
 #include "face_sweep_f32.h"   // ... in the canonical float arithmetic (DTFE_FACE_F32, DTFE_GPU_FACES: psFaceF32)
@@ -436,7 +427,7 @@ static inline void psFaceF32Note(MESSAGE::Message &message, bool const facePass,
 
 #if NO_DIM==3
 // --face-gradient: the inputs every face path takes from the host (face_sweep_f32.h: no device recomputes them), for
-// the GPU face kernel's records of DTFE_GPU_FACES=1 (step 3 of the kernel's design; unused until those exist).
+// the GPU face kernel's records of DTFE_GPU_FACES=1 (step 3 of the kernel's design).
 // The tetrahedron's constant velocity gradient as the deposit loop and psFaceWalk form it, operation for operation:
 // geo.posMatInv (Real) times the velocity differences to vertex 0.
 [[maybe_unused]] static inline void psFaceVelGrad(Cell_handle const &cell, PSCellGeometry const &geo,
@@ -3264,8 +3255,8 @@ static inline void psExportStreams(PSPassCtx const &passCtx, PSGridsCtx const &g
         } );
     }
 
-    // Export the caustic orientation bits (0..3, exact in float); OR-merged across partitions
-    // and binarized to the 0/1 fold flag once in DTFE() after the merge.
+    // Export the caustic orientation bits (0..3, exact in float); OR-merged across partitions, and collapsed to
+    // the 0/1 fold flag once, in writeOutputData (input_output.cc), after '.causticClass' is written.
     /* The parity bit 1 (det < 0) is the GEOMETRIC overlap flag.
        orientBits gets its bits only where a tetrahedron DEPOSITS A SAMPLE, so a fold thinner than
        the sub-sample spacing -- every young wall, and the edge of every older one -- sets no
@@ -4517,7 +4508,7 @@ void interpolateGrid_phaseSpace(DT &dt,
     // alike: a float '+=' drops every share below half an ulp of a busy cell's running sum, always downward (1.6e-5
     // of the box mass at TNG50-3-Dark z=0.5, DTFE_MASS_AUDIT=1), and depends on the thread count. So:
     //   - after a GPU deposit the host keeps its words unconverted (PSGpuGrids::massFx), and the released and the
-    //     CPU-deferred tets add rint(share * scale) into them with the GPU's unit (psMassFixedShare);
+    //     CPU-deferred tets add rint(share * scale) into them with the GPU's unit (psFxAdd);
     //   - a CPU deposit starts from zero, with psMassFixedScale's unit for an upper bound of the pass's mass (below),
     //     so no cell overflows;
     //   - the grid is converted to the float density ONCE, after the loop and before the normalization.
@@ -4672,11 +4663,13 @@ void interpolateGrid_phaseSpace(DT &dt,
     double const psHaloRelease = double(userOptions.psHaloRelease);
     size_t nReleased = 0;
 
-    // --exact: analytic per-cell intersection moments instead of nSub^3 sampling.
-    // The exact deposit is the nSub->infinity limit, so nSub is ignored. '.streams' carries
-    // the volume-weighted multiplicity (see exactMult above): a FLOAT, so the partition merge
-    // is NOT bit-exact -- the per-tet volume shares sum in thread order. The raw integer
-    // tet-touch count, which does merge bit-exactly, is exported separately as '.tetTouch'.
+    // --exact: analytic per-cell intersection moments instead of nSub^3 sampling (the nSub->infinity limit).
+    // It ignores nSub where it clips, but a tet left with no piece takes the sampled path below at nSub, and
+    // psSubgridBox rings a partition's sub-grid for nSub > 1 (an exact run's '_a' pass without a count: 3,
+    // user_options.cc kPsExactSliverSubsamples). '.streams' carries the volume-weighted multiplicity (see
+    // exactMult above): a FLOAT, so the partition merge is NOT bit-exact -- the per-tet volume shares sum in
+    // thread order. The raw integer tet-touch count, which does merge bit-exactly, is exported separately as
+    // '.tetTouch'.
     bool const psExact = userOptions.psExactDeposit;
 
     // Count of cells dropped because their Eulerian simplex is non-invertible (see the check below).

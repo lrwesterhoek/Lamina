@@ -77,7 +77,8 @@ jobs:
           DTFE_GUI_PYTHON="$RUNNER_TEMP/gui-venv/bin/python" tests/ci_suite.sh gui
 
       # the double pair against the single pair, then the program-running suites again against the
-      # double pair (DTFE_TEST_PRECISION=double reads their float64 grids; tests/precision.sh)
+      # double pair (DTFE_TEST_PRECISION=double reads their float64 grids; tests/precision.sh), all but
+      # face_sweep_check and interlacing_check, which read no precision
       - name: Test battery (double precision)
         run: tests/ci_suite.sh double
 

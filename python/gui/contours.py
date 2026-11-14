@@ -50,7 +50,6 @@ COARSEST = {"density": 4.4, "": 2.6}
 # default, 40 at the finest; the old stop drew 39). The slice worker's time is about linear in the levels, so the
 # finest costs a layer up to 1 / FINEST times the default, on the worker, never on the window's thread
 FINEST = 0.4
-OLD_STOPS = (-2, 1)         # the level slider's stops before it was continuous (rungs of the ladder: saved states)
 MAX_STREAM_LINES = 12       # the stream count: lines at the even counts, thinned to about this many
 # a plane wider than this is contoured on a block-averaged copy (whole blocks, the last one shorter): a 512^2 slice
 # shown about 700 points wide has cells of 1.4 points, so lines from 2 x 2 blocks lose nothing the eye can follow,
@@ -105,7 +104,7 @@ def factor(detail, field: str = "", compare: bool = False) -> float:
 
 
 def from_stop(stop, field: str = "density") -> int:
-    """The position nearest an old saved stop of the level slider (OLD_STOPS: rungs of the ladder, each 2 or 5 times
+    """The position nearest an old saved stop of the level slider (rungs of the ladder, each 2 or 5 times
     finer or coarser, so about sqrt(10) a rung; -2 exactly 10 times coarser), clamped to the slider's travel."""
     old = 10.0 ** (-float(stop) / 2.0)                  # the old stop's factor on the rule's step
     pos = range(DETAIL_MIN, DETAIL_MAX + 1)

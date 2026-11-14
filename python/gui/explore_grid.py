@@ -145,12 +145,6 @@ def panel_overlay(it: dict, axis: int, n0: float, n1: float) -> dict:
                           0.5 * float(o.length[axis]) / float(o.n))
 
 
-def panel_void_circles(it: dict, axis: int, n0: float, n1: float, radius: str = "r_v") -> list:
-    """A grid panel's void circles in the panel's pixels (void_circles' convention): radius 'r_v' the solid ones
-    (spheres of R_v), any other the dashed ones (the other radius ticked); [] without a catalogue or in 2D."""
-    return panel_overlay(it, axis, n0, n1)["circles" if radius == "r_v" else "dashed"]
-
-
 def _grid_tile(req: dict, items: list, max_tile: int):
     """grid_tiles' tile size T and each shown panel's (item, x0, y0) offset in the picture."""
     sizes = [it["img"].shape[0] for it in items if it is not None]

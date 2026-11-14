@@ -28,7 +28,6 @@
 #include "../env_knobs.h"
 #include "../thread_count.h"   // coresPerTeam: the exact average's CPU threads
 #include "ps_deposit_params.h"   // fixedShareDropped: the run-wide words' guard counts its dropped shares (any build)
-#include <typeinfo>
 #include <stdio.h>
 #include <atomic>
 #include <cstdint>
@@ -62,7 +61,6 @@ int dtfeGpuFallbacksTaken(bool reset)
 // evaluates arbitrary user C++ per sample, which cannot run on the GPU.
 #if defined(DTFE_GPU) && NO_DIM==3 && !defined(MY_SCALAR)
 #define DTFE_GPU_ACTIVE
-#include <cstdint>
 #include <algorithm>
 #include <utility>
 #include "gpu_host.h"
@@ -423,7 +421,7 @@ static inline void avg1Announce(MESSAGE::Message &message, size_t *nGrid, Box &b
             << MESSAGE::printElements( nGrid, NO_DIM, "*" ) << " grid in the region "
             << boxCoordinates.print()
             << ". The volume average is done using Monte Carlo sampling in each of the triangles/tetrahedra of the Delaunay triangulation. "
-            << "There are " << NN << " random sampling points on average in each grid cell of the output fields (the random samples in the Delaunay triangulation's triangles/tetrahedra are proportional to the area/volume of the cell).\n"
+            << "There are " << NN << " quasi-random (Sobol) sampling points on average in each grid cell of the output fields (the samples in the Delaunay triangulation's triangles/tetrahedra are proportional to the area/volume of the cell).\n"
             << "\t Done: " << MESSAGE::Flush;
 }
 

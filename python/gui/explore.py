@@ -39,16 +39,14 @@ from app_widgets import ChoiceRadios, tip_auto  # noqa: E402  (tip_auto: a long 
 # point-query server, explore_voids the void outlines, explore_zoom the zoom, explore_3d the 3D view
 from explore_3d import SHAPE_ITEMS, SHAPE_TIP, View3D, View3DMixin, planes3d  # noqa: E402
 from explore_canvas import ColorBar, ImageCanvas, contour_paths, stroke_layer  # noqa: E402,F401  (re-exported)
-from explore_grid import (GridMixin, grid_differences, grid_dpi, grid_figure, grid_full_pixels,  # noqa: E402,F401
-                          grid_items, grid_suptitle, grid_tile_circles, grid_tile_contours, grid_tile_marks,
-                          grid_tiles, grid_unit, panel_label, panel_names, panel_overlay, panel_void_circles,
-                          quantity, type_tag)
+from explore_grid import (GridMixin, grid_differences, grid_dpi, grid_figure, grid_items,  # noqa: E402,F401
+                          grid_suptitle, grid_tile_circles, grid_tile_contours, grid_tile_marks, grid_tiles,
+                          grid_unit, panel_label)
 from explore_save import SaveMixin  # noqa: E402
 from explore_server import ServerMixin, ServerWorker  # noqa: E402,F401  (re-exported)
 import explore_voids as XV  # noqa: E402  (the void smoothing box, the search's time)
 from explore_voids import VoidsMixin  # noqa: E402
-from explore_zoom import (ExactZoomWorker, ZoomMixin, _fields_bytes, _fmt_duration,  # noqa: E402,F401
-                          load_exact_planes)
+from explore_zoom import ExactZoomWorker, ZoomMixin, load_exact_planes  # noqa: E402,F401
 
 VOID_TOOL = rs.REPO_ROOT / "python" / "tools" / "void_outlines.py"     # the voids of one snapshot, as JSON
 VOID_CACHE_DIR = None        # the helper's catalogue cache: None = the pipeline's own (config.CACHE_DIR); tests pin a temp one

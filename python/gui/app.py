@@ -46,7 +46,7 @@ import presets as P  # noqa: E402
 import results as R  # noqa: E402
 import grids as G  # noqa: E402
 from app_widgets import _checkable, _grow_fields, _scroll  # noqa: E402
-from app_widgets import CheckDelegate, FigureBrowser  # noqa: E402,F401  (re-exported)
+from app_widgets import CheckDelegate  # noqa: E402,F401  (re-exported)
 from app_tabs import RUN_TABS, TabsMixin  # noqa: E402
 from app_specs import SpecsMixin  # noqa: E402
 from app_run import RunMixin  # noqa: E402

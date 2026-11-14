@@ -47,7 +47,6 @@ PS_SCRIPT = REPO_ROOT / "scripts" / "run_ps_dtfe.sh"
 DTFE_SCRIPT = REPO_ROOT / "scripts" / "run_dtfe.sh"
 PIPELINE_SCRIPT = REPO_ROOT / "scripts" / "run_ps_pipeline.sh"
 PLOT_DIR = REPO_ROOT / "python" / "plot"
-ANALYZE = REPO_ROOT / "python" / "analyze.py"
 # FIGURES_ROOT (dtfelib.cli, = config.LOCAL_FIGURES_ROOT): DTFE_FIGURES_ROOT, else python/figures
 LEGACY_FIGURES_ROOT = REPO_ROOT / "python" / "figures"     # an earlier default, saved verbatim in specs
 
@@ -182,8 +181,9 @@ class QualityMode:
     volume_weighted: bool           # PS-DTFE's volume-weighted velocities (the production convention)
     vertex_mass: bool               # tetrahedron masses from the particles: a TNG job's (a Custom job has its own)
     linear_deposit: bool            # PS-DTFE's density-weighted deposit inside each tetrahedron
-    parallel_triangulation: bool    # True: the TBB parallel insertion at any size, forced (two identical runs then
-                                    # differ at float rounding); False: nothing forced, the binary's own rule
+    parallel_triangulation: bool    # True: the TBB parallel insertion at any size, forced (single-precision
+                                    # grids still repeat to the byte; double, the linear deposit and the point
+                                    # values move at rounding); False: nothing forced, the binary's own rule
     ordered_merge: bool             # PS-DTFE's partitions merged in index order, given (PS_MERGE=index-order)
     pts_conventions: str            # the image plane's estimators: the grids' ("grid", the binary's default)
     gpu_share: str = "auto"         # PS-DTFE's '--gpu-share' (GPU_SHARE) of an exact deposit on the GPU in 3D: "auto"
@@ -563,8 +563,9 @@ def advanced_problems(spec) -> list[tuple[str, str]]:
         out.append(("warning", f"Advanced: {ADVANCED_NAME[k]} set to {_value_words(k, adv[k])} is not passed: {why}; "
                                "Automatic applies"))
     if "parallel_triangulation" in adv and "parallel_triangulation" not in refused:
-        out.append(("warning", "parallel triangulation: faster on small sets, but two identical runs then differ at "
-                               "float rounding (the stream counts do not)"))
+        out.append(("warning", "parallel triangulation: two identical runs still write the same single-precision "
+                               "grids to the byte, but a double-precision job, the linear deposit and the point "
+                               "values differ at rounding (the stream counts do not)"))
     budget, ram = job_memory_budget(spec), machine_ram_gb()
     if budget and ram and budget > ram:
         out.append(("warning", f"memory budget {budget:g} GB is more than this machine's {ram:.0f} GB: the run may "
@@ -741,9 +742,6 @@ class RunSpec:
         return grids_gb(self.grid, self.fields if self.estimator == "ps" else dtfe_fields(self.fields),
                         job_precision(self), face=face_route_on(self))
 
-    def runnable(self) -> bool:
-        return not any(level == "error" for level, _ in self.problems())
-
     # ------------------------------------------------------------------ command
     def command(self) -> tuple[list[str], dict[str, str]]:
         """argv of the run script and the environment variables it adds; the quality's settings from mode(), the
@@ -775,9 +773,6 @@ class RunSpec:
             # and the cell average, both ways: run_dtfe.sh's default is the exact one, so a
             # 'sampled' job without this would run exact (-e, like -m, only switches it on)
             env["DTFE_EXACT_AVERAGE"] = "1" if m.deposit == "exact" else "0"
-            # the knobs' older names too, until P6.6 (run_dtfe.sh reads them with a warning; the new names win): a
-            # stray older export in the login shell is overwritten, not left beside the new one
-            env["DTFE_METAL"], env["DTFE_EXACT"] = env["DTFE_GPU"], env["DTFE_EXACT_AVERAGE"]
             # the start-over tick reaches run_dtfe.sh too (it resumes a killed partitioned run by itself,
             # DTFE_RESUME, the knob both drivers read), spelled out both ways: a stray export cannot leak in
             env["DTFE_RESUME"] = "0" if self.start_over else "1"
@@ -802,9 +797,10 @@ class RunSpec:
             return argv + snaps, env
         argv = [str(PS_SCRIPT), "-s", self.sim, "-g", str(self.grid)]
         if m.deposit == "exact":
-            # the exact deposit has no sub-samples: no -n, and the count pinned EMPTY (the driver's own default), so a
-            # SUBSAMPLES exported in the login shell does not reach the driver, which would note on every run that the
-            # exact deposit ignores it
+            # the exact deposit takes no count from the job: no -n, and the count pinned EMPTY (the driver's own
+            # default), so a SUBSAMPLES exported in the login shell does not reach the driver, which would note on every
+            # run that it is ignored. Its older name AVG_SUBSAMPLES is pinned EMPTY too: the driver copies a set older
+            # name onto an empty new one and drops an empty one without a word (config.sh knob; see OLDER_KNOB_NAMES)
             env["SUBSAMPLES"] = env["AVG_SUBSAMPLES"] = ""
         else:
             argv += ["-n", str(m.nsub)]
@@ -898,10 +894,9 @@ def _display_path(a: str) -> str:
 
 def shell(argv: list[str], env: dict[str, str]) -> str:
     """The terminal command for argv + added environment, runnable from the repository root. A knob's older name
-    (OLDER_KNOB_NAMES) beside its new one with the same value is left out: the jobs export both until P6.6 (to
-    overwrite a stray older export the launcher inherits), the command shown and exported names each knob once."""
-    env = {k: v for k, v in env.items() if not (k in OLDER_KNOB_NAMES and env.get(OLDER_KNOB_NAMES[k]) == v)
-           and not (k == "ORDERED_MERGE" and env.get("PS_MERGE") == {"1": "index-order", "0": "completion-order"}.get(v))}
+    (OLDER_KNOB_NAMES) beside its new one with the same value is left out: the command shown and exported names each
+    knob once, by its new name."""
+    env = {k: v for k, v in env.items() if not (k in OLDER_KNOB_NAMES and env.get(OLDER_KNOB_NAMES[k]) == v)}
     return " ".join([f"{k}={_q(v)}" for k, v in env.items()]
                     + [_q(_display_path(argv[0]))] + [_q(_display_path(a)) for a in argv[1:]])
 
@@ -1018,58 +1013,53 @@ def _run_option_problems(spec) -> list[tuple[str, str]]:
 def _run_option_env(spec) -> dict[str, str]:
     """DTFE_MEM_BUDGET_GB (the auto-tuner's budget, an Advanced override: read by the binary itself, through any
     script; unset, the binary's own, the free memory) and TESSELLATION_CACHE (the run scripts' --tessellation-cache
-    hook; TESS_CACHE, its older name, too until P6.6), only when set."""
+    hook), only when set."""
     env = {}
     budget = job_memory_budget(spec)
     if budget > 0:
         env["DTFE_MEM_BUDGET_GB"] = f"{budget:g}"
     if getattr(spec, "tess_cache", ""):
-        env["TESSELLATION_CACHE"] = env["TESS_CACHE"] = str(Path(spec.tess_cache).expanduser())
+        env["TESSELLATION_CACHE"] = str(Path(spec.tess_cache).expanduser())
     return env
 
 
-# the run scripts' knobs under their older names (P6.7, config.sh 'knob'): the launcher exports BOTH spellings until
-# P6.6, the same value, so a stray older export in the login shell (install_gui_app.sh imports every DTFE_*) is
-# overwritten instead of standing beside the new one; the drivers read the new name and warn once per older one
-TESS_CACHE_KEYS = ("TESSELLATION_CACHE", "TESS_CACHE")
-# older name -> new name of every knob the launcher exports both ways (the drivers' config.sh 'knob' / 'knob_merge'
-# lines); ORDERED_MERGE's new name is PS_MERGE, with a value of its own (1 = index-order, 0 = completion-order)
-OLDER_KNOB_NAMES = {"PS_GPU": "DTFE_GPU", "PS_METAL": "DTFE_GPU", "DTFE_METAL": "DTFE_GPU",
-                    "PS_EXACT": "DTFE_EXACT_AVERAGE", "DTFE_EXACT": "DTFE_EXACT_AVERAGE", "PS_RESUME": "DTFE_RESUME",
-                    "AVG_SUBSAMPLES": "SUBSAMPLES", "PS_PARALLEL_TRI": "PARALLEL_TRIANGULATION",
-                    "PTS_CONVENTIONS": "PS_POINT_CONVENTIONS", "TESS_CACHE": "TESSELLATION_CACHE",
-                    "WINDOW": "PLANE_WINDOW", "PY": "PYTHON"}
+# The jobs set each run-script knob under its new name. The drivers still read the older names (P6.7, config.sh
+# 'knob' / 'knob_merge'), each with a warning, and a new name that is set and not empty wins over its older one, so
+# a stray older export in the login shell (install_gui_app.sh imports every DTFE_*) changes no value the driver
+# resolves where a job sets the new name (it earns its warning line). An EMPTY new name lets a set older one through
+# (knob copies it onto the new one), so where a job pins a knob empty and its driver reads an older name for it, the
+# older name is pinned empty too (knob drops an empty one without a word): AVG_SUBSAMPLES beside SUBSAMPLES, a
+# PS-DTFE job at the exact deposit (Grids and Pipeline; the other empty pins, a standard job's SUBSAMPLES and THREADS,
+# FACE_GRADIENT and DTFE_FACE_GRADIENT, have no older name their driver reads). Older name -> new name of that pair;
+# shell() leaves the older one out of the command shown and exported
+OLDER_KNOB_NAMES = {"AVG_SUBSAMPLES": "SUBSAMPLES"}
 
 
 def ps_run_env(spec) -> dict[str, str]:
     """run_ps_dtfe.sh's run switches as a Grids or Pipeline job pins them (spelled out both ways: a stray export
-    cannot leak in), each under its new name and its older one: the device (-m only switches the GPU on), the
-    parallel triangulation and the merge order of its quality (spec.mode()), and the start-over tick. The index order
-    is given explicitly (PS_MERGE=index-order, which keeps the memory gate on under the auto-tuner's speed split, as
-    the launcher's ORDERED_MERGE=1 always did). The machine use (DTFE_RUN_MODE) and the GPU share of the mode
-    (GPU_SHARE: 'auto', the machine use's share of an exact deposit on the GPU, which the driver passes only for that
-    deposit; a Device override's '1' or 'mixed' only where it applies, apply_advanced: the driver passes any other
-    value whatever the run), pinned the same way."""
+    cannot leak in): the device (-m only switches the GPU on), the parallel triangulation and the merge order of its
+    quality (spec.mode()), and the start-over tick. The index order is given explicitly (PS_MERGE=index-order, which
+    keeps the memory gate on under the auto-tuner's speed split). The machine use (DTFE_RUN_MODE) and the GPU share
+    of the mode (GPU_SHARE: 'auto', the machine use's share of an exact deposit on the GPU, which the driver passes
+    only for that deposit; a Device override's '1' or 'mixed' only where it applies, apply_advanced: the driver passes
+    any other value whatever the run), pinned the same way."""
     m = spec.mode()
     on = lambda b: "1" if b else "0"
-    return {"DTFE_GPU": on(m.gpu), "PS_GPU": on(m.gpu), "PS_METAL": on(m.gpu),
-            "PARALLEL_TRIANGULATION": on(m.parallel_triangulation), "PS_PARALLEL_TRI": on(m.parallel_triangulation),
+    return {"DTFE_GPU": on(m.gpu), "PARALLEL_TRIANGULATION": on(m.parallel_triangulation),
             "PS_MERGE": "index-order" if m.ordered_merge else "completion-order",
-            "ORDERED_MERGE": on(m.ordered_merge),       # K1
-            "DTFE_RESUME": on(not spec.start_over), "PS_RESUME": on(not spec.start_over),
-            "DTFE_RUN_MODE": spec.run_mode, "GPU_SHARE": m.gpu_share}
+            "DTFE_RESUME": on(not spec.start_over), "DTFE_RUN_MODE": spec.run_mode, "GPU_SHARE": m.gpu_share}
 
 
 def ps_exact_env(exact: bool) -> dict[str, str]:
     """run_ps_dtfe.sh's deposit knob, spelled out both ways: DTFE_EXACT_AVERAGE (the knob both drivers read; a login
     export of it must not turn the job's choice around, and without the pin a SUBSAMPLES export would make the
-    driver sample) and PS_EXACT, its older name."""
-    return {"DTFE_EXACT_AVERAGE": "1" if exact else "0", "PS_EXACT": "1" if exact else "0"}
+    driver sample)."""
+    return {"DTFE_EXACT_AVERAGE": "1" if exact else "0"}
 
 
 def ps_conventions_env(conv: str) -> dict[str, str]:
-    """The plane conventions for run_ps_dtfe.sh / run_ps_pipeline.sh: PS_POINT_CONVENTIONS and PTS_CONVENTIONS."""
-    return {"PS_POINT_CONVENTIONS": conv, "PTS_CONVENTIONS": conv}
+    """The plane conventions for run_ps_dtfe.sh / run_ps_pipeline.sh: PS_POINT_CONVENTIONS."""
+    return {"PS_POINT_CONVENTIONS": conv}
 
 
 def _root_problems(data_root: str) -> list[tuple[str, str]]:
@@ -1159,10 +1149,9 @@ PLANE_GHOSTING_MIN = 16              # make_image_plane.py: fewer planes across 
 PIPELINE_RENDER_KEYS = ("render", "render_fields", "render_project", "render_smooth", "render_smooth_derivatives",
                         "render_fixed_range", "render_force")
 # what run_ps_pipeline.sh reads itself; everything else in command()'s environment is for run_ps_dtfe.sh
-# (DTFE_GPU is run_ps_dtfe.sh's knob too: the pipeline's memory check hands it on). PLANE_WINDOW and PYTHON with
-# their older names WINDOW and PY (both exported until P6.6)
+# (DTFE_GPU is run_ps_dtfe.sh's knob too: the pipeline's memory check hands it on)
 PIPELINE_ONLY_KEYS = ("SIMS", "SNAPS", "NU", "AXIS", "CENTER", "PLANES", "THICKNESS", "SUPERSAMPLE", "PLANE_WINDOW",
-                      "WINDOW", "GRID_SIZE", "FORCE", "DRY_RUN", "PYTHON", "PY")
+                      "GRID_SIZE", "FORCE", "DRY_RUN", "PYTHON")
 
 
 def face_gradient_applies(spec) -> bool:
@@ -1667,17 +1656,15 @@ INPUT_TYPES = {105: "Gadget HDF5 (.hdf5)", 101: "Gadget binary (type 1/2)",
 
 # the Pipeline, Plots, Data and Custom jobs (each module imports this one: they come in after every name their
 # class bodies read, and before JOB_KINDS names them)
-from runspec_pipeline import PipelineSpec, _window_values  # noqa: E402,F401  (re-exported)
+from runspec_pipeline import PipelineSpec  # noqa: E402,F401  (re-exported)
 from runspec_plot import PlotSpec  # noqa: E402,F401
 from runspec_data import DataSpec, api_key_available, data_snapshots, sim_state, snapshot_state  # noqa: E402,F401
-from runspec_custom import (CustomSpec, demo_spec, hdf5_boxsize, hdf5_has,  # noqa: E402,F401
-                            hdf5_particle_count, hdf5_redshift, snapshot_dim)
+from runspec_custom import CustomSpec, demo_spec, snapshot_dim  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------- job queue
 JOB_KINDS = {"data": DataSpec, "grids": RunSpec, "pipeline": PipelineSpec, "plots": PlotSpec,
              "custom": CustomSpec}
-QUEUE_STATES = ("waiting", "running", "done", "failed", "stopped", "skipped")
 # jobs that hold a triangulation and full grids: never started next to another DTFE run
 HEAVY_KINDS = ("grids", "pipeline", "custom")
 
@@ -1912,15 +1899,17 @@ def tbb_built(precision: str = "single", dim: int = 3) -> bool:
 
 
 # The device of each quality, as the drivers' automatic device picks it (scripts/config.sh gpu_auto_resolve; the
-# binaries do not pick one yet). The sampled PS-DTFE deposit (Fast) pays on the GPU only from about a million
-# particles (GPU_PAYS_FROM: below it the CPU is faster); a run that writes no grid (a slice alone) deposits nothing.
+# binaries do not pick one yet), with one difference: the sampled PS-DTFE deposit (Fast) runs on the CPU below
+# GPU_PAYS_FROM particles (the drivers put it on the GPU at any size). That threshold is the launcher's own older
+# measurement of 256^3 sampled grids, taken before Fast became one point per cell axis, at the then-default count 3,
+# and not re-measured since. A run that writes no grid (a slice alone) deposits nothing.
 # PS-DTFE's exact deposit (Exact) runs on the GPU in every machine use, which leaves the cores to the machine in
 # gentle and balanced; in performance '--gpu-share auto' (the jobs' GPU_SHARE) deposits part of a partitioned run on
 # the free cores (the Advanced Device's GPU keeps it on the GPU, '1', and its CPU + GPU shares it in every machine
 # use, 'mixed': apply_advanced). Standard DTFE's exact cell average (Exact) is a tie between the two (the
 # triangulation and the I/O dominate), so the GPU; its sampled average (Fast) is faster on every CPU core, so the CPU
-# in performance and the GPU in gentle and balanced (their lowered thread budget). The measurements: the drivers'
-# bench notes, not repeated here.
+# in performance and the GPU in gentle and balanced (their lowered thread budget). Standard DTFE's measurements: the
+# drivers' bench notes, not repeated here.
 GPU_PAYS_FROM = 1_000_000
 
 

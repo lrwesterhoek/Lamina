@@ -39,9 +39,12 @@
 #     SIMS) refuses with exit 2 and says so, -d or not, while --help still works and sourcing config.sh exits nothing.
 #     The drivers' shared option loop (config.sh driver_options): a bad option exits 1 with the usage, -h anywhere 0;
 #     the long forms are the letters, --run-mode MODE in both drivers (download_snapshots.sh refuses it).
-#  K) the binaries' own --help lists the phase-space / GPU / point-evaluation / server options the scripts and the
-#     launcher use (--exact, --sampled and --run-mode in both, --gpu-share in PS-DTFE's), and the help texts carry
-#     none of the known misspellings. The
+#  K) the binaries' own help lists the options the scripts and the launcher use: the short help (--help, -h) the two
+#     modes' options (--exact, --sampled, --gpu, --run-mode, --lambda-th, --mpc-unit, --auto-tune-report and --full-help in both;
+#     --ps-merge, --ps-vertex-mass and --ps-volume-weighted in PS-DTFE's), the full help (--full-help) the ones not in
+#     -h (--subsamples, --no-overlap, --sample-points and --serve in both; --gpu-share, --grid-window,
+#     --tessellation-cache, --serve-progress, --ps-per-stream, --ps-point-conventions and --ps-caustics in PS-DTFE's,
+#     --average-method in standard DTFE's), and the help texts carry none of the known misspellings. The
 #     deprecated spellings (--ps-gpu, --exact-average, --ps-exact-deposit, --ps-no-overlap, --lambda_th, --full_help)
 #     are hidden from the help but still accepted, on
 #     the command line and in a --config file: one 'deprecated' warning line each and the same outputs as the
@@ -317,8 +320,9 @@ check "$([ "$(grep -v '^warning: ' "${TMP}/g_pipeline2o.log")" = "$(cat "${TMP}/
          && [ "$(grep -c '^warning: WINDOW is deprecated, use PLANE_WINDOW$' "${TMP}/g_pipeline2o.log")" = 1 ] \
          && [ "$(grep -c '^warning: PS_GPU is deprecated, use DTFE_GPU$' "${TMP}/g_pipeline2o.log")" = 1 ] && echo 0 || echo 1)" \
       "... WINDOW and PS_GPU, the older names, plan the same, with one deprecation line each"
-# run_ps_dtfe.sh's own older knob names (the launcher still exports them): the pipeline resolves them once and hands
-# them on under the new names, so each is warned exactly once however many simulations its driver plans
+# run_ps_dtfe.sh's own older knob names (still read, with a warning; a login shell may export them): the pipeline
+# resolves them once and hands them on under the new names, so each is warned exactly once however many simulations
+# its driver plans
 DRY_RUN=1 DTFE_GPU=0 PS_VOLUME_WEIGHTED=0 PLANES=4 THICKNESS=3 SUPERSAMPLE=2 PLANE_WINDOW="0 50 0 25" CENTER=40 \
     AVG_SUBSAMPLES=2 ORDERED_MERGE=1 PS_RESUME=0 TESS_CACHE="${TMP}/g_tc" PS_PARALLEL_TRI=1 PS_LAG_PADDING=4 \
     LAGRANGIAN_INPUT= SIMS=all DTFE_DATA_ROOT="${FAMROOT}" scripts/run_ps_pipeline.sh >"${TMP}/g_pipeline2k.log" 2>&1 || true
@@ -938,20 +942,30 @@ if [ -x "${DTFE_BIN}" ]; then
 fi
 
 echo ""
-echo "(K) the binaries' --help lists the phase-space, GPU, point-evaluation and server options; no known misspelling."
+echo "(K) the binaries' --help (-h) lists the two modes' options, --full-help the phase-space, GPU-share,"
+echo "    point-evaluation and server options that are not in -h; no known misspelling."
 "${PS_BIN}" --help >"${TMP}/k_help_ps.log" 2>&1 || true
 "${DTFE_BIN}" --help >"${TMP}/k_help_dtfe.log" 2>&1 || true
-for o in gpu exact sampled no-overlap full-help lambda-th grid-window ps-merge subsamples ps-per-stream ps-point-conventions mpc-unit ps-caustics ps-vertex-mass ps-volume-weighted sample-points serve serve-progress tessellation-cache auto-tune-report run-mode gpu-share; do
-    check "$(has "${TMP}/k_help_ps.log" "^ *--${o}( |$)")" "PS-DTFE --help lists --${o}"
+# an entry is boost's line '  --name ...' (two blanks); a wrapped description line that starts with the name (the
+# 80-column wrap indents it further) does not count. The short help (-h): the options a run of the two modes needs
+for o in gpu exact sampled full-help lambda-th ps-merge mpc-unit ps-vertex-mass ps-volume-weighted auto-tune-report run-mode; do
+    check "$(has "${TMP}/k_help_ps.log" "^  --${o}( |$)")" "PS-DTFE --help lists --${o}"
 done
-for o in gpu exact sampled no-overlap full-help lambda-th average-method subsamples mpc-unit sample-points serve auto-tune-report run-mode; do
-    check "$(has "${TMP}/k_help_dtfe.log" "^ *--${o}( |$)")" "DTFE --help lists --${o}"
+for o in gpu exact sampled full-help lambda-th mpc-unit auto-tune-report run-mode; do
+    check "$(has "${TMP}/k_help_dtfe.log" "^  --${o}( |$)")" "DTFE --help lists --${o}"
 done
 "${PS_BIN}" --full-help >"${TMP}/k_full_ps.log" 2>"${TMP}/k_full_ps.err" || true
 "${DTFE_BIN}" --full-help >"${TMP}/k_full_dtfe.log" 2>&1 || true
-check "$([ "$(lacks "${TMP}/k_help_dtfe.log" '^ *--(ps-gpu|ps-per-stream)')" = 0 ] \
+# the options the scripts and the launcher use that are not in -h: in --full-help (whichever of its groups holds them)
+for o in no-overlap grid-window subsamples ps-per-stream ps-point-conventions ps-caustics sample-points serve serve-progress tessellation-cache gpu-share; do
+    check "$(has "${TMP}/k_full_ps.log" "^  --${o}( |$)")" "PS-DTFE --full-help lists --${o}"
+done
+for o in no-overlap average-method subsamples sample-points serve; do
+    check "$(has "${TMP}/k_full_dtfe.log" "^  --${o}( |$)")" "DTFE --full-help lists --${o}"
+done
+check "$([ "$(lacks "${TMP}/k_help_dtfe.log" '^ *--(ps-gpu|ps-per-stream|ps-merge|ps-vertex-mass|ps-volume-weighted|ps-lagrangian-input)')" = 0 ] \
          && [ "$(lacks "${TMP}/k_full_dtfe.log" '^ *--(ps-per-stream|ps-merge|grid-window)')" = 0 ] && echo 0 || echo 1)" \
-      "... and not PS-DTFE's old --ps-gpu, nor its stream options (short and full help; the TBB insert is in both binaries since 2026-11-09)"
+      "... and not PS-DTFE's old --ps-gpu, nor its phase-space options (short and full help; the TBB insert is in both binaries since 2026-11-09)"
 check "$([ "$(lacks "${TMP}/k_help_ps.log" '(^|[^-])--(ps-gpu|exact-average|ps-exact-deposit|ps-no-overlap|lambda_th|full_help|MpcUnit|paddingMpc|regionMpc|partNo|redshiftCone|origin|NGP|CIC|TSC|PCS|SPH|Voronoi|input|output|inputFile|outputFile|method|samples|noTest|density0|randomSample|approxPSD|extensive|options|avg-subsamples|lagrangianInput|ps-lag-padding|per-stream|per-stream-ids|pts-lagrangian|pts-conventions|ps-window|ordered-merge|completion-order-merge|fixed-point-merge)([^-a-zA-Z_]|$)')" = 0 ] \
          && [ "$(lacks "${TMP}/k_full_ps.log" '(^|[^-])--(ps-gpu|exact-average|ps-exact-deposit|ps-no-overlap|lambda_th|full_help|MpcUnit|paddingMpc|regionMpc|partNo|redshiftCone|origin|NGP|CIC|TSC|PCS|SPH|Voronoi|input|output|inputFile|outputFile|method|samples|noTest|density0|randomSample|approxPSD|extensive|options|avg-subsamples|lagrangianInput|ps-lag-padding|per-stream|per-stream-ids|pts-lagrangian|pts-conventions|ps-window|ordered-merge|completion-order-merge|fixed-point-merge)([^-a-zA-Z_]|$)')" = 0 ] \
          && [ "$(lacks "${TMP}/k_full_dtfe.log" '(^|[^-])--(ps-gpu|exact-average|ps-exact-deposit|ps-no-overlap|lambda_th|full_help|MpcUnit|paddingMpc|regionMpc|partNo|redshiftCone|origin|NGP|CIC|TSC|PCS|SPH|Voronoi|input|output|inputFile|outputFile|method|samples|noTest|density0|randomSample|approxPSD|extensive|options|avg-subsamples|lagrangianInput|ps-lag-padding|per-stream|per-stream-ids|pts-lagrangian|pts-conventions|ps-window|ordered-merge|completion-order-merge|fixed-point-merge)([^-a-zA-Z_]|$)')" = 0 ] \
@@ -1748,8 +1762,8 @@ t_pair run_dtfe.sh "TESS_CACHE=${TCD}" "TESSELLATION_CACHE=${TCD}" || t_bad="${t
 t_pair run_ps_dtfe.sh PTS_CONVENTIONS=legacy PS_POINT_CONVENTIONS=legacy SAMPLE_POINTS="${TMP}/t_points.txt" || t_bad="${t_bad} [PTS_CONVENTIONS]"
 check "$([ -z "${t_bad}" ] && echo 0 || echo 1)" \
       "each older knob alone plans the same command as its new name, with one deprecation line (the new name: none)${t_bad:+ -- differ:${t_bad}}"
-# both set to different values: the new one wins, with a warning, and nothing is refused (a stray export or the
-# launcher's older names beside the new ones must not stop a run during the window)
+# both set to different values: the new one wins, with a warning, and nothing is refused (a stray older export beside
+# the new name must not stop a run during the window)
 rc=$(sdrive run_ps_dtfe.sh "${TMP}/t_both.log" DRY_RUN=1 SUBSAMPLES=2 AVG_SUBSAMPLES=4 DTFE_EXACT_AVERAGE=0 PS_EXACT=1)
 check "$([ "${rc}" = 0 ] && sline "${TMP}/t_both.log" | grep -qE -e '--sampled +--subsamples +2 ' && ! sline "${TMP}/t_both.log" | grep -qE -e '--exact( |$)' \
          && grep -aqx 'warning: AVG_SUBSAMPLES is deprecated, use SUBSAMPLES (AVG_SUBSAMPLES=4 is not read: SUBSAMPLES=2 wins)' "${TMP}/t_both.log" \

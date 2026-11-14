@@ -4,7 +4,8 @@
 Renders every tab at each window size, then the Explore tab with "Show in 3D" on (volume, then planes), and prints for
 each scrolled tab the width its form needs against the width it is given (a form wider than its viewport is clipped:
 the scroll bars are off), folded and with every folded group (More) open. The window never remembers
-anything (remember=False: no saved settings are read or written) and the figures go to a temporary folder.
+anything (remember=False: no saved settings are read or written) and the figures go to a temporary folder, which
+is removed at exit.
 
     tests/dev/gui_shots.py <out dir> [--native] [--open] [--fast-dtfe] [--advanced] [--data-root DIR]
                            [--sizes 1500x950,1100x750]
@@ -23,7 +24,9 @@ Needs PySide6 (the launcher's python). The PNGs are named <tab index>_<tab>_<wid
 explore3d_<style>_<width>.png.
 """
 import argparse
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -73,6 +76,7 @@ def main() -> int:
     sizes = [tuple(int(v) for v in s.split("x")) for s in a.sizes.split(",")]
 
     tmp = Path(tempfile.mkdtemp(prefix="gui_shots_"))
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)     # the figures and the synthetic data root
     if not a.native:
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
     os.environ["DTFE_GUI_NO_NOTIFY"] = "1"

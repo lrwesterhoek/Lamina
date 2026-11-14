@@ -470,7 +470,7 @@ class RunRecord:
                      volume_weighted=self.has("--ps-volume-weighted"),
                      caustics=self.has("--ps-caustics"), caustic_cusps=self.has("--ps-caustic-cusps"),
                      parallel_triangulation=self.has("--parallel-triangulation"),
-                     # K1; the default is ON (the staged merge in index order), so only
+                     # the default is ON (the staged merge in index order), so only
                      # a run made with '--ps-merge completion-order' ('--completion-order-merge') turns it off -- an
                      # older binary's run without either flag merged in completion order, but loading its settings
                      # starts the current default
@@ -757,7 +757,6 @@ def scan_runs(root, extra_dirs=()) -> list[RunRecord]:
 
 # ---------------------------------------------------------------------- void catalogues
 VOID_CACHE_TOOL = Path(__file__).resolve().parent / "void_cache.py"
-VOID_STATES = ("cached", "stale", "absent", "error")
 
 
 def void_candidate(rec: RunRecord) -> bool:

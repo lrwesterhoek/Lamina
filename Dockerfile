@@ -4,7 +4,7 @@
 #
 #   docker build -t dtfe .
 #   docker run --rm -v $PWD/data:/data dtfe /opt/dtfe/PS-DTFE /data/snap.hdf5 /data/out \
-#       --grid 128 --periodic --field density --MpcUnit 1
+#       --grid 128 --periodic --field density --mpc-unit 1
 #
 # License: GPL-3.0 (see LICENSE.md) -- this Dockerfile only packages the build.
 
@@ -44,16 +44,13 @@ ARG ARCH_FLAGS="-mtune=generic"
 RUN set -eux; ARCH_FLAGS="$ARCH_FLAGS" tests/ci_suite.sh build
 
 # ---- the test battery must pass for the image to exist ----
-# Every CPU suite against the single pair, again against the double pair, and the 2D suite. The
+# Every CPU suite against the single pair, again against the double pair (all but face_sweep_check
+# and interlacing_check, which read no precision), and the 2D suite. The
 # standard-DTFE regression compares with the reference stored in the repo
 # (tests/reference/regression_periodic.txt): a periodic set without Delaunay ties, so every CGAL
 # builds the same tessellation, compared to 3e-4 relative (tests/run_tests.py says why). A
 # non-periodic reference differs by ~1.6 between macOS and Linux (dummy-point ties at the hull).
-# 'rm -rf tests/tmp' must stay in THIS RUN: files written by a RUN are baked into that layer, and
-# deleting them later only adds a whiteout.
-RUN set -eux; \
-    tests/ci_suite.sh core double 2d; \
-    rm -rf tests/tmp
+RUN set -eux; tests/ci_suite.sh core double 2d
 
 # default entrypoint just documents the two binaries
 CMD ["/bin/sh", "-c", "echo 'DTFE image: binaries at /opt/dtfe/DTFE and /opt/dtfe/PS-DTFE (+ -double, -2d; run with --help for options)'"]

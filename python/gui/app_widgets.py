@@ -197,9 +197,6 @@ class ElidedLabel(QLabel):
         self.setToolTip(text)
         self._elide()
 
-    def full_text(self) -> str:
-        return self._full
-
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._elide()

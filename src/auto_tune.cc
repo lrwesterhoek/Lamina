@@ -241,7 +241,6 @@ inline void autoTimeState(AutoTimeResult const &t, double const gain, MESSAGE::M
             << "\n" << MESSAGE::Flush;
     if ( t.why.empty() )
     {
-        r.timeLoop = t.loop;
         r.timeWall = t.wall;
         r.timeWallMem = t.wallMem;
     }

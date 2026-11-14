@@ -56,9 +56,10 @@ typedef CGAL::Exact_predicates_inexact_constructions_kernel         K;
 typedef CGAL::Triangulation_vertex_base_with_info_3<vertexData, K>  Vb;    // vertex stores a vertexData payload
 
 #ifdef PARALLEL_TRIANGULATION
-// TBB-parallel Delaunay build (opt-in: `make ... TBB=1`). Parallel_tag enables
-// parallel insert_with_info. Fast_location is dropped (sequential point-location
-// hierarchy); harmless since PS-DTFE iterates cells and never locates points.
+// TBB-parallel Delaunay build (PARALLEL_TRIANGULATION: compiled in with TBB=auto, the default, where the tbb
+// library is installed; TBB_STD follows it for the standard binaries). Parallel_tag enables parallel
+// insert_with_info. Fast_location (the sequential point-location hierarchy) is dropped: PS-DTFE iterates cells
+// and locates no points; the standard binaries' point location (sample_eval.h) runs without it.
 #include <CGAL/Triangulation_cell_base_3.h>
 typedef CGAL::Triangulation_data_structure_3<Vb, CGAL::Triangulation_cell_base_3<K>, CGAL::Parallel_tag> Tds;
 typedef CGAL::Delaunay_triangulation_3<K, Tds>                      DT;

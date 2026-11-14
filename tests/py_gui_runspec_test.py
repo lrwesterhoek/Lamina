@@ -194,8 +194,8 @@ def _run_command(tmp, sim):
           and rs.job_summary("grids", dt).endswith(", Fast"), str(dte_cmd[0]))
     # run_dtfe.sh's default is the exact average, and -e only switches it on: the job pins the knob
     check("... the cell average is pinned both ways (DTFE_EXACT_AVERAGE=0 for Fast, 1 for Exact; the older "
-          "name DTFE_EXACT the same, until P6.6)",
-          dt_cmd[1].get("DTFE_EXACT") == "0" and dte_cmd[1].get("DTFE_EXACT") == "1"
+          "name DTFE_EXACT not set: the new name wins in run_dtfe.sh)",
+          "DTFE_EXACT" not in dt_cmd[1] and "DTFE_EXACT" not in dte_cmd[1]
           and dt_cmd[1].get("DTFE_EXACT_AVERAGE") == "0" and dte_cmd[1].get("DTFE_EXACT_AVERAGE") == "1",
           f"{dt_cmd[1]} {dte_cmd[1]}")
     # a job STARTS at Exact, both estimators (both drivers' and the binaries' default since 2026-11-09, the
@@ -512,8 +512,8 @@ def _download_merge(tmp):
                     if "download" in st.label]
     finally:
         os.environ.pop("TNG_API_KEY", None)
-    check("the download step carries PY (the script checks the chunks on disk with the merge's python)",
-          dl_steps and all(st.env.get("PY") == rs.PYTHON for st in dl_steps), str([st.env for st in dl_steps]))
+    check("the download step carries PYTHON (the script checks the chunks on disk with the merge's python)",
+          dl_steps and all(st.env.get("PYTHON") == rs.PYTHON for st in dl_steps), str([st.env for st in dl_steps]))
     os.environ["TNG_API_KEY"] = "k"
     try:
         both = rs.DataSpec(data_root=str(tmp), sim="TNG50-2-Dark", snapshots=[67], download_groupcats=True,
@@ -1105,13 +1105,12 @@ def advanced_settings(tmp: Path):
              a == [ps, "-s", "Toy-64", "-g", "512", "-e", "1", "3"]
              and list(e)[:4] == ["DTFE_DATA_ROOT", "PARTITION", "MAX_CONCURRENT", "DTFE_MEM_BUDGET_GB"]
              and (e["PARTITION"], e["MAX_CONCURRENT"], e["DTFE_MEM_BUDGET_GB"]) == ("4 4 4", "2", "40")
-             and e["DTFE_GPU"] == e["PS_GPU"] == e["PS_METAL"] == "0" and e["GPU_SHARE"] == "auto"
+             and e["DTFE_GPU"] == "0" and e["GPU_SHARE"] == "auto"
              and "PARTITION='4 4 4' MAX_CONCURRENT=2 DTFE_MEM_BUDGET_GB=40" in rs.shell(a, e))
         a, e = run({"nsub": 5, "parallel_triangulation": True, "ordered_merge": False}, quality="fast").command()
         want("Grids PS Fast, samples 5, parallel, completion order", (a, e),
              a == [ps, "-s", "Toy-64", "-g", "512", "-n", "5", "-m", "1", "3"]
-             and e["PARALLEL_TRIANGULATION"] == e["PS_PARALLEL_TRI"] == "1"
-             and e["PS_MERGE"] == "completion-order" and e["ORDERED_MERGE"] == "0")
+             and e["PARALLEL_TRIANGULATION"] == "1" and e["PS_MERGE"] == "completion-order")
         stream = run({"face_gradient": False})
         want("Grids PS Exact, the stream average", stream.command()[1],
              stream.command()[1]["FACE_GRADIENT"] == "0" and stream.grid_gb() < run({}).grid_gb()
@@ -1122,15 +1121,14 @@ def advanced_settings(tmp: Path):
              and e["DTFE_PRECISION"] == "double" and "-m" in a and dbl.grid_gb() == 2 * run({}).grid_gb())
         want("Grids DTFE Exact, CPU", run({"gpu": False}, estimator="dtfe").command(),
              run({"gpu": False}, estimator="dtfe").command()[0] == [dt, "-s", "Toy-64", "-g", "512", "-e", "1", "3"]
-             and run({"gpu": False}, estimator="dtfe").command()[1]["DTFE_GPU"] == "0"
-             and run({"gpu": False}, estimator="dtfe").command()[1]["DTFE_METAL"] == "0")
+             and run({"gpu": False}, estimator="dtfe").command()[1]["DTFE_GPU"] == "0")
         a, e = run({"gpu": True}, estimator="dtfe", quality="fast", run_mode="performance").command()
         want("Grids DTFE Fast, performance, GPU", (a, e),
-             a == [dt, "-s", "Toy-64", "-g", "512", "-m", "1", "3"] and e["DTFE_GPU"] == e["DTFE_METAL"] == "1")
+             a == [dt, "-s", "Toy-64", "-g", "512", "-m", "1", "3"] and e["DTFE_GPU"] == "1")
         p = pipe({"nsub": 2, "partition": 2, "gpu": False}, quality="fast")
         e, chk = p.command()[1], p.check_step("Toy-64", [3, 1], 1024)
         want("Pipeline Fast, samples 2, partitions 2, CPU", (e, chk.argv, chk.env),
-             e["SUBSAMPLES"] == e["AVG_SUBSAMPLES"] == "2" and e["PARTITION"] == "2 2 2" and e["DTFE_GPU"] == "0"
+             e["SUBSAMPLES"] == "2" and e["PARTITION"] == "2 2 2" and e["DTFE_GPU"] == "0"
              and "-m" not in chk.argv and chk.env["PARTITION"] == "2 2 2" and chk.env["AUTO_TUNE_REPORT"] == "1")
         e = pipe({"precision": "double", "max_concurrent": 3}).command()[1]
         want("Pipeline double, concurrency 3", e, e["DTFE_PRECISION"] == "double" and e["MAX_CONCURRENT"] == "3")
@@ -1168,8 +1166,7 @@ def advanced_settings(tmp: Path):
         e, chk = p.command()[1], p.check_step("Toy-64", [1], 1024)
         want("Pipeline, the stream average, budget 24, parallel, completion order", (e, chk.env),
              e["FACE_GRADIENT"] == "0" and e["DTFE_MEM_BUDGET_GB"] == "24"
-             and e["PARALLEL_TRIANGULATION"] == e["PS_PARALLEL_TRI"] == "1"
-             and e["PS_MERGE"] == "completion-order" and e["ORDERED_MERGE"] == "0"
+             and e["PARALLEL_TRIANGULATION"] == "1" and e["PS_MERGE"] == "completion-order"
              and all(chk.env[k] == e[k] for k in ("FACE_GRADIENT", "DTFE_MEM_BUDGET_GB", "PARALLEL_TRIANGULATION",
                                                   "PS_MERGE")))
         s = run({"partition": 3, "max_concurrent": 4, "mem_budget_gb": 32, "precision": "double"}, estimator="dtfe")
@@ -1284,7 +1281,8 @@ def advanced_settings(tmp: Path):
                                            pipe({"gpu": False}), cust({"gpu": True}, dim=2), run({"partition": 2}),
                                            cust({"gpu": False}, quality="fast"), run({"gpu": "mixed"}),
                                            cust({"gpu": "mixed"}, run_mode="gentle"), run({}, run_mode="performance"))]
-    rounding = "parallel triangulation: faster on small sets, but two identical runs then differ at float rounding"
+    rounding = ("parallel triangulation: two identical runs still write the same single-precision grids to the byte, "
+                "but a double-precision job, the linear deposit and the point values differ at rounding")
     swap = "memory budget 100 GB is more than this machine's 64 GB: the run may swap"
     check("the checks list names a job's overrides in one info line ('Advanced: Device: CPU; Partitions: 4'), in one "
           "form for every row ('Name: value'), the budget in GB, a held stream average in the row's own words on a "
@@ -1728,28 +1726,27 @@ def two_quality_modes(tmp: Path):
     # ---- the golden rule, self-contained: the commands and environments of today's default job (Exact) and of
     # today's job with the sampled cell average at the removed controls' defaults (Fast; its count one point per cell
     # axis, the program's default since 2026-11-14), copied from the launcher before the two modes, for a made-up
-    # simulation on a GPU build (Metal) and a CPU-only one
+    # simulation on a GPU build (Metal) and a CPU-only one. Refreshed since for the knobs' older names: the jobs no
+    # longer set a second copy under the older name, except AVG_SUBSAMPLES pinned empty beside an empty SUBSAMPLES
     root = str(tmp / "golden")
     ps_common = {"DTFE_DATA_ROOT": root, "DTFE_FACE_GRADIENT": "", "DTFE_RESUME": "1", "DTFE_RUN_MODE": "balanced",
-                 "FIELDS": "density_a velocity_a divergence_a shear_a", "GPU_SHARE": "auto", "ORDERED_MERGE": "1",
+                 "FIELDS": "density_a velocity_a divergence_a shear_a", "GPU_SHARE": "auto",
                  "OUTPUT_PREFIX": "ps_output", "PARALLEL_TRIANGULATION": "0", "PS_CAUSTICS": "1",
-                 "PS_CAUSTIC_CUSPS": "0", "PS_LINEAR_DEPOSIT": "0", "PS_MERGE": "index-order", "PS_PARALLEL_TRI": "0",
-                 "PS_RESUME": "1", "PS_VERTEX_MASS": "1", "PS_VOLUME_WEIGHTED": "1"}
-    gpu_env = lambda on: {"DTFE_GPU": on, "PS_GPU": on, "PS_METAL": on}                   # noqa: E731
-    ps_exact = dict(ps_common, SUBSAMPLES="", AVG_SUBSAMPLES="", DTFE_EXACT_AVERAGE="1", PS_EXACT="1",
-                    FACE_GRADIENT="1")
-    ps_fast = dict(ps_common, DTFE_EXACT_AVERAGE="0", PS_EXACT="0", FACE_GRADIENT="")
+                 "PS_CAUSTIC_CUSPS": "0", "PS_LINEAR_DEPOSIT": "0", "PS_MERGE": "index-order",
+                 "PS_VERTEX_MASS": "1", "PS_VOLUME_WEIGHTED": "1"}
+    gpu_env = lambda on: {"DTFE_GPU": on}                                                 # noqa: E731
+    ps_exact = dict(ps_common, SUBSAMPLES="", AVG_SUBSAMPLES="", DTFE_EXACT_AVERAGE="1", FACE_GRADIENT="1")
+    ps_fast = dict(ps_common, DTFE_EXACT_AVERAGE="0", FACE_GRADIENT="")
     dt_common = {"DTFE_DATA_ROOT": root, "DTFE_FACE_GRADIENT": "", "DTFE_RESUME": "1", "FACE_GRADIENT": "",
                  "SUBSAMPLES": "", "THREADS": ""}
-    dt_env = lambda q, on, mode: dict(dt_common, DTFE_EXACT=q, DTFE_EXACT_AVERAGE=q,             # noqa: E731
-                                      DTFE_GPU=on, DTFE_METAL=on, DTFE_RUN_MODE=mode)
+    dt_env = lambda q, on, mode: dict(dt_common, DTFE_EXACT_AVERAGE=q, DTFE_GPU=on,             # noqa: E731
+                                      DTFE_RUN_MODE=mode)
     pipe_common = {"AXIS": "z", "GRID_SIZE": "512", "NU": "8192", "PLANES": "1", "SUPERSAMPLE": "1", "SIMS": "Toy-64",
-                   "PTS_VEL_GRAD": "1", "PS_POINT_CONVENTIONS": "grid", "PTS_CONVENTIONS": "grid",
-                   "PYTHON": rs.PYTHON, "PY": rs.PYTHON}
+                   "PTS_VEL_GRAD": "1", "PS_POINT_CONVENTIONS": "grid", "PYTHON": rs.PYTHON}
     pipe_exact = dict(ps_exact, **pipe_common)
     pipe_exact.pop("FIELDS")
     pipe_exact.pop("OUTPUT_PREFIX")
-    pipe_fast = dict(ps_fast, **pipe_common, SUBSAMPLES="1", AVG_SUBSAMPLES="1")
+    pipe_fast = dict(ps_fast, **pipe_common, SUBSAMPLES="1")
     pipe_fast.pop("FIELDS")
     pipe_fast.pop("OUTPUT_PREFIX")
     ps, dt = str(rs.PS_SCRIPT), str(rs.DTFE_SCRIPT)
@@ -1852,7 +1849,7 @@ def two_quality_modes(tmp: Path):
           and env["PS_VERTEX_MASS"] == "0" and env["PS_LINEAR_DEPOSIT"] == "1" and env["PARALLEL_TRIANGULATION"] == "1"
           and env["PS_MERGE"] == "completion-order" and env["FACE_GRADIENT"] == "" and env["DTFE_GPU"] == "1"
           and env["PS_POINT_CONVENTIONS"] == "legacy" and env["DTFE_EXACT_AVERAGE"] == "0"
-          and penv["SUBSAMPLES"] == "5" and penv["PS_GPU"] == "1" and penv["PS_MERGE"] == "completion-order"
+          and penv["SUBSAMPLES"] == "5" and penv["DTFE_GPU"] == "1" and penv["PS_MERGE"] == "completion-order"
           and carg[carg.index("--sampled"):carg.index("--sampled") + 4] == ["--sampled", "--subsamples", "5", "--gpu"]
           and "--ps-volume-weighted" not in carg and "--parallel-triangulation" in carg
           and "--ps-linear-deposit" in carg and carg[carg.index("--ps-merge") + 1] == "completion-order"
@@ -3795,12 +3792,13 @@ def run_options(tmp: Path):
     env1 = web.command()[1]
     check("standard DTFE: the script's own field list by default; the ticks (the T-web) when they differ, without the "
           "phase-space dispersion", "FIELDS" not in env0 and env1.get("FIELDS") == "density_a tweb_a", str(env1))
-    check("... the tessellation cache reaches the run scripts (TESS_CACHE) only when set; no memory budget (the "
-          "binary's own: DTFE_MEM_BUDGET_GB never set)", env1.get("TESS_CACHE") == "/private/tmp/dtfe-tess"
-          and "DTFE_MEM_BUDGET_GB" not in env1 and "DTFE_MEM_BUDGET_GB" not in env0 and "TESS_CACHE" not in env0,
-          str(env1))
+    check("... the tessellation cache reaches the run scripts (TESSELLATION_CACHE) only when set; no memory budget "
+          "(the binary's own: DTFE_MEM_BUDGET_GB never set)", env1.get("TESSELLATION_CACHE") == "/private/tmp/dtfe-tess"
+          and "DTFE_MEM_BUDGET_GB" not in env1 and "DTFE_MEM_BUDGET_GB" not in env0
+          and "TESSELLATION_CACHE" not in env0, str(env1))
     pe = rs.PipelineSpec(data_root=str(tmp), sims=["TNG100-3-Dark"], tess_cache="/private/tmp/t").command()[1]
-    check("... the pipeline too", "DTFE_MEM_BUDGET_GB" not in pe and pe.get("TESS_CACHE") == "/private/tmp/t", str(pe))
+    check("... the pipeline too", "DTFE_MEM_BUDGET_GB" not in pe and pe.get("TESSELLATION_CACHE") == "/private/tmp/t",
+          str(pe))
     icloud = Path.home() / "Library" / "Mobile Documents" / "dtfe-tess"
     probs = rs._run_option_problems(rs.RunSpec(tess_cache=str(icloud), **base))
     check("an iCloud tessellation cache is an error (the binary refuses it)",
@@ -3822,8 +3820,8 @@ def pipeline_options(tmp: Path, sim: Path):
     import subprocess
     print("pipeline options:")
     base = dict(data_root=str(tmp), sims=["TNG100-3-Dark"], nu=64, grid=128, scratch_dir=str(tmp.parent))
-    run_keys = ("PS_EXACT", "AVG_SUBSAMPLES", "PS_GPU", "PS_VERTEX_MASS", "PS_VOLUME_WEIGHTED", "PS_CAUSTICS",
-                "PS_CAUSTIC_CUSPS", "PS_PARALLEL_TRI", "PLANES", "SUPERSAMPLE")
+    run_keys = ("DTFE_EXACT_AVERAGE", "SUBSAMPLES", "DTFE_GPU", "PS_VERTEX_MASS", "PS_VOLUME_WEIGHTED", "PS_CAUSTICS",
+                "PS_CAUSTIC_CUSPS", "PARALLEL_TRIANGULATION", "PLANES", "SUPERSAMPLE")
     env = rs.PipelineSpec(**base).command()[1]
     # the caustic classes are on by default (run_ps_dtfe.sh's default and the production runs'); the exact deposit
     # too (the default since 2026-11-09: no sub-sample count, pinned empty); either deposit's GPU when the PS pair
@@ -3834,7 +3832,7 @@ def pipeline_options(tmp: Path, sim: Path):
           "in); Exact with the count pinned empty, Fast with the quality's nSub",
           [env[k] for k in run_keys] == ["1", "", gpu, "1", "1", "1", "0", "0", "1", "1"]
           and env["SUBSAMPLES"] == "" and [env_s[k] for k in run_keys[:3]] == ["0", "1", gpu]
-          and env_s["SUBSAMPLES"] == "1" and "THICKNESS" not in env and "WINDOW" not in env, f"{env} {env_s}")
+          and env_s["SUBSAMPLES"] == "1" and "THICKNESS" not in env and "PLANE_WINDOW" not in env, f"{env} {env_s}")
     q = rs.PipelineSpec(**base, quality="fast", caustics=True, caustic_cusps=True, planes=16, thickness=3.5,
                         supersample=2, window="10 60 0 25")
     with fake_build("cpu"):
@@ -3843,37 +3841,40 @@ def pipeline_options(tmp: Path, sim: Path):
     with fake_build("gpu"):
         st_gpu = q.check_step("TNG100-3-Dark", [99], 32)
     check("every option switched: the environment follows (Fast on a CPU build: the quality's count, no GPU)",
-          [env[k] for k in run_keys + ("THICKNESS", "WINDOW")]
+          [env[k] for k in run_keys + ("THICKNESS", "PLANE_WINDOW")]
           == ["0", "1", "0", "1", "1", "1", "1", "0", "16", "2", "3.5", "10 60 0 25"]
           and "DTFE_PRECISION" not in env, str(env))
-    # P6.7: each run-script knob under its new name AND its older one (the same value) until P6.6, so a stray older
-    # export in the login shell is overwritten; the new names are the ones the drivers read first
-    pairs = (("DTFE_EXACT_AVERAGE", "PS_EXACT"), ("SUBSAMPLES", "AVG_SUBSAMPLES"), ("DTFE_GPU", "PS_GPU"),
-             ("DTFE_GPU", "PS_METAL"), ("PARALLEL_TRIANGULATION", "PS_PARALLEL_TRI"), ("DTFE_RESUME", "PS_RESUME"),
-             ("PS_POINT_CONVENTIONS", "PTS_CONVENTIONS"), ("PLANE_WINDOW", "WINDOW"), ("PYTHON", "PY"),
-             ("TESSELLATION_CACHE", "TESS_CACHE"))
-    std_pairs = (("DTFE_EXACT_AVERAGE", "DTFE_EXACT"), ("DTFE_GPU", "DTFE_METAL"), ("TESSELLATION_CACHE", "TESS_CACHE"))
-    both = lambda e, pp=pairs: [(n, o) for n, o in pp if (n in e or o in e) and e.get(n) != e.get(o)]   # noqa: E731
+    # P6.7: each run-script knob under its new name only (the drivers read an older name too, with a warning, and a
+    # new name that is set and not empty wins over it); the one older name a job sets is AVG_SUBSAMPLES, pinned EMPTY
+    # beside an empty SUBSAMPLES (the exact deposit), so a stray older export is not copied onto the empty new name
+    older_names = ("DTFE_METAL", "DTFE_EXACT", "AVG_SUBSAMPLES", "TESS_CACHE", "PS_GPU", "PS_METAL", "PS_PARALLEL_TRI",
+                   "ORDERED_MERGE", "PS_RESUME", "PS_EXACT", "PTS_CONVENTIONS", "WINDOW", "PY")
+    stray = lambda e: [k for k in older_names if k in e                                  # noqa: E731
+                       and not (k == "AVG_SUBSAMPLES" and e[k] == "" and e.get("SUBSAMPLES") == "")]
     tq = rs.PipelineSpec(**base, tess_cache="/private/tmp/t", window="10 60 0 25").command()[1]
     with fake_build("gpu"):         # (the GPU in both: Exact for PS-DTFE, Fast for standard DTFE in balanced)
         g_ps = rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99],
                           slice_plane="/x.bin", tess_cache="/private/tmp/t", start_over=True).command()[1]
         g_dt = rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99], estimator="dtfe", quality="fast",
                           tess_cache="/private/tmp/t").command()[1]
-    check("the knobs under their new names and their older ones alike (Pipeline, PS and standard Grids jobs; P6.7)",
-          not both(env) and not both(tq) and not both(g_ps) and not both(g_dt, std_pairs)
+    check("the knobs under their new names only (Pipeline, PS and standard Grids jobs; P6.7): no older name, but "
+          "AVG_SUBSAMPLES pinned empty beside the exact deposit's empty SUBSAMPLES (Grids and Pipeline), not at Fast",
+          not stray(env) and not stray(tq) and not stray(g_ps) and not stray(g_dt)
+          and tq["SUBSAMPLES"] == tq["AVG_SUBSAMPLES"] == "" and g_ps["SUBSAMPLES"] == g_ps["AVG_SUBSAMPLES"] == ""
+          and "AVG_SUBSAMPLES" not in env
           and env["SUBSAMPLES"] == "1" and env["DTFE_EXACT_AVERAGE"] == "0" and env["PLANE_WINDOW"] == "10 60 0 25"
           and env["PYTHON"] == rs.PYTHON and tq["TESSELLATION_CACHE"] == "/private/tmp/t"
           and g_ps["DTFE_EXACT_AVERAGE"] == "1" and g_ps["DTFE_GPU"] == "1" and g_ps["DTFE_RESUME"] == "0"
           and g_ps["PS_POINT_CONVENTIONS"] == "grid" and g_ps["PS_MERGE"] == "index-order"
-          and (g_dt["DTFE_EXACT_AVERAGE"], g_dt["DTFE_EXACT"], g_dt["DTFE_GPU"], g_dt["DTFE_METAL"]) == ("0", "0", "1", "1")
-          and "PS_MERGE" not in g_dt and "PS_EXACT" not in g_dt,
-          f"{both(env)} {both(tq)} {both(g_ps)} {both(g_dt, std_pairs)}")
+          and g_ps["TESSELLATION_CACHE"] == "/private/tmp/t"
+          and (g_dt["DTFE_EXACT_AVERAGE"], g_dt["DTFE_GPU"]) == ("0", "1")
+          and g_dt["TESSELLATION_CACHE"] == "/private/tmp/t" and "PS_MERGE" not in g_dt,
+          f"{stray(env)} {stray(tq)} {stray(g_ps)} {stray(g_dt)}")
     lines = [rs.shell(*job.command()) for job in (rs.PipelineSpec(**base, window="10 60 0 25", tess_cache="/t"),
                                                     rs.PipelineSpec(**base, quality="fast"))] \
         + [rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99], estimator=e, slice_plane="/x.bin",
                       tess_cache="/t").shell_line() for e in ("ps", "dtfe")]
-    older = [k for line in lines for k in list(rs.OLDER_KNOB_NAMES) + ["ORDERED_MERGE"] if f" {k}=" in f" {line}"]
+    older = [k for line in lines for k in older_names if f" {k}=" in f" {line}"]
     check("... the command shown (and exported) names each knob once, by its new name",
           not older and all(" PS_MERGE=" in ln for ln in lines[:3]) and " PLANE_WINDOW=" in lines[0]
           and " PYTHON=" in lines[0], f"{older} {lines}")
@@ -3895,15 +3896,14 @@ def pipeline_options(tmp: Path, sim: Path):
           and ps_argv[ps_argv.index("-n") + 1] == "1",
           f"{st_dt[0].env if st_dt else None} | {g_dt} | {lines[3]} | {exported} | {ps_argv}")
     check("... the merge is the explicit index order in both qualities (PS_MERGE=index-order: the memory gate stays "
-          "on under the speed split); ORDERED_MERGE the same until P6.6",
-          (env["PS_MERGE"], env["ORDERED_MERGE"]) == ("index-order", "1")
-          and [rs.PipelineSpec(**base).command()[1][k] for k in ("PS_MERGE", "ORDERED_MERGE")]
-          == ["index-order", "1"], str(env))
+          "on under the speed split)",
+          env["PS_MERGE"] == "index-order" and rs.PipelineSpec(**base).command()[1]["PS_MERGE"] == "index-order",
+          str(env))
     check("the memory check carries the run options, no -m without the GPU (a CPU build) and -m with it",
           st.argv[1:] == ["-s", "TNG100-3-Dark", "-g", "128", "99"] and "DTFE_PRECISION" not in st.env
-          and st.env["PS_EXACT"] == "0" and st.env["AVG_SUBSAMPLES"] == "1" and st.env["PS_CAUSTICS"] == "1"
-          and st.env["AUTO_TUNE_REPORT"] == "1" and st.env["PS_GPU"] == "0"
-          and st_gpu.argv[1:] == ["-s", "TNG100-3-Dark", "-g", "128", "-m", "99"] and st_gpu.env["PS_GPU"] == "1"
+          and st.env["DTFE_EXACT_AVERAGE"] == "0" and st.env["SUBSAMPLES"] == "1" and st.env["PS_CAUSTICS"] == "1"
+          and st.env["AUTO_TUNE_REPORT"] == "1" and st.env["DTFE_GPU"] == "0"
+          and st_gpu.argv[1:] == ["-s", "TNG100-3-Dark", "-g", "128", "-m", "99"] and st_gpu.env["DTFE_GPU"] == "1"
           and st.env["PTS_VEL_GRAD"] == "1" and not any(k in st.env for k in rs.PIPELINE_ONLY_KEYS),
           f"{st.argv} {st.env} {st_gpu.argv}")
     # 16 planes x 32 x nv x 2^2, nv = round(32 * 25 / 50) = 16 (square pixels over the window's aspect)
@@ -3989,12 +3989,12 @@ def pipeline_options(tmp: Path, sim: Path):
     # the numbers the script receives read back exactly (':g' kept six digits)
     fine = rs.PipelineSpec(**base, window="12.3456789 50 0 50", planes=2, thickness=0.123456789)
     env = fine.command()[1]
-    u0, u1, v0, v1 = (float(v) for v in env["WINDOW"].split())      # as make_image_plane.py stores what it got
+    u0, u1, v0, v1 = (float(v) for v in env["PLANE_WINDOW"].split())    # as make_image_plane.py stores what it got
     side2 = dict(json.loads(good), u0=u0, u1=u1, v0=v0, v1=v1, planes=2, thickness=float(env["THICKNESS"]))
     side.write_text(json.dumps(side2))
-    check("WINDOW/THICKNESS reach the script at full precision, so the sidecar they produce matches the job",
-          env["WINDOW"] == "12.3456789 50 0 50" and env["THICKNESS"] == "0.123456789"
-          and fine.plane_matches("TNG100-3-Dark") is True, f"{env['WINDOW']} {env['THICKNESS']}")
+    check("PLANE_WINDOW/THICKNESS reach the script at full precision, so the sidecar they produce matches the job",
+          env["PLANE_WINDOW"] == "12.3456789 50 0 50" and env["THICKNESS"] == "0.123456789"
+          and fine.plane_matches("TNG100-3-Dark") is True, f"{env['PLANE_WINDOW']} {env['THICKNESS']}")
     side.write_text(good)
     by_build = {}                       # the quality's device: the GPU on a GPU build, the CPU on a CPU-only one
     for kind in ("gpu", "cpu"):
@@ -4004,10 +4004,8 @@ def pipeline_options(tmp: Path, sim: Path):
                               rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99],
                                          estimator="dtfe").command()[1])
     envs = [by_build["gpu"][0], by_build["cpu"][0], by_build["gpu"][1], by_build["cpu"][1], by_build["cpu"][2]]
-    check("the GPU knob is pinned in the environment too (PS_GPU / DTFE_GPU, and their older names PS_METAL / "
-          "DTFE_METAL for one release), not only by -m",
-          [(e.get("PS_GPU"), e.get("PS_METAL")) for e in envs[:4]] == [("1", "1"), ("0", "0"), ("1", "1"), ("0", "0")]
-          and (envs[4].get("DTFE_GPU"), envs[4].get("DTFE_METAL")) == ("0", "0"), str(envs))
+    check("the GPU knob is pinned in the environment too (DTFE_GPU, the name both drivers read), not only by -m",
+          [e.get("DTFE_GPU") for e in envs[:4]] == ["1", "0", "1", "0"] and envs[4].get("DTFE_GPU") == "0", str(envs))
 
     r = rs.PipelineSpec(**base, render_fields="density, velDiv", render_smooth=2.0, render_smooth_derivatives=0.0,
                         render_fixed_range=True, render_force=True, planes=16, render_project="slab")
@@ -4039,7 +4037,7 @@ def pipeline_options(tmp: Path, sim: Path):
           and not any(w in rs.job_summary("pipeline", rs.PipelineSpec(**base, quality=q))
                       for w in (", exact", ", fast") for q in ("exact", "fast")),
           rs.job_summary("pipeline", rs.PipelineSpec(**base, quality="fast")))
-    check("the pipeline's plan line is parsed with and without -m (PS_GPU)",
+    check("the pipeline's plan line is parsed with and without -m (DTFE_GPU)",
           rs.parse_progress("+ env SAMPLE_POINTS=/p.bin PS_VOLUME_WEIGHTED=1 PTS_VEL_GRAD=1 /r/scripts/run_ps_dtfe.sh "
                             "-s S -g 512 -m 50 99\n").get("planned") == 2
           and rs.parse_progress("+ env SAMPLE_POINTS=/p.bin PS_VOLUME_WEIGHTED=0 PTS_VEL_GRAD=1 /r/scripts/run_ps_dtfe.sh "
@@ -4650,13 +4648,13 @@ def ordered_merge_settings():
         pon = rs.PipelineSpec(sims=["TNG50-4"])
         # the index order in both qualities (the staged merge: run_ps_dtfe.sh's and the binary's default), given
         pair = lambda cmd, mode: any(cmd[i:i + 2] == ["--ps-merge", mode] for i in range(len(cmd)))  # noqa: E731
-        check("ordered merge: Grids and Pipeline jobs set ORDERED_MERGE=1 for run_ps_dtfe.sh in both qualities "
+        check("ordered merge: Grids and Pipeline jobs set PS_MERGE=index-order for run_ps_dtfe.sh in both qualities "
               "(spelled out, so a stray export cannot leak in), the Pipeline's memory check too; the Custom tab always "
               "names the merge (PS only): --ps-merge index-order",
-              on.get("ORDERED_MERGE") == "1" and off.get("ORDERED_MERGE") == "1"
-              and pon.command()[1].get("ORDERED_MERGE") == "1"
-              and pon.check_step("TNG50-4", [99], 1024).env.get("ORDERED_MERGE") == "1"
-              and rs.PipelineSpec(sims=["TNG50-4"], quality="fast").command()[1].get("ORDERED_MERGE") == "1"
+              on.get("PS_MERGE") == "index-order" and off.get("PS_MERGE") == "index-order"
+              and pon.command()[1].get("PS_MERGE") == "index-order"
+              and pon.check_step("TNG50-4", [99], 1024).env.get("PS_MERGE") == "index-order"
+              and rs.PipelineSpec(sims=["TNG50-4"], quality="fast").command()[1].get("PS_MERGE") == "index-order"
               and pair(rs.CustomSpec(input_file=str(snap)).command(), "index-order")
               and pair(rs.CustomSpec(input_file=str(snap), quality="fast").command(), "index-order")
               and rs.CustomSpec(input_file=str(snap)).command().count("--ps-merge") == 1
@@ -4766,15 +4764,15 @@ def ordered_merge_settings():
               and hasattr(R, "RESUME_REFUSED") and not R.RESUME_REFUSED.search("this run starts over and replaces it ('--resume' continues it).")
               and not R.RESUME_REFUSED.search("removed when the outputs are written; '--resume' continues a killed "
                                               "run from it)"), str(dg))
-        # the start-over tick: DTFE_RESUME=0 for both drivers (PS_RESUME, run_ps_dtfe.sh's older name, the same until
-        # P6.6), spelled out as 1 otherwise (a stray export cannot leak in)
-        ps_resume = lambda e: (e.get("DTFE_RESUME"), e.get("PS_RESUME"))     # noqa: E731
-        check("start over: Grids and Pipeline jobs set DTFE_RESUME=0 (and PS_RESUME=0 for PS-DTFE) when ticked, 1 "
-              "otherwise; the memory check ignores it",
-              ps_resume(rs.RunSpec(sim="TNG50-4", snapshots=[99], start_over=True).command()[1]) == ("0", "0")
-              and ps_resume(off) == ("1", "1")
-              and ps_resume(rs.PipelineSpec(sims=["TNG50-4"], start_over=True).command()[1]) == ("0", "0")
-              and ps_resume(rs.PipelineSpec(sims=["TNG50-4"]).command()[1]) == ("1", "1")
+        # the start-over tick: DTFE_RESUME=0 for both drivers, spelled out as 1 otherwise (a stray export cannot
+        # leak in)
+        ps_resume = lambda e: e.get("DTFE_RESUME")     # noqa: E731
+        check("start over: Grids and Pipeline jobs set DTFE_RESUME=0 when ticked, 1 otherwise; the memory check "
+              "ignores it",
+              ps_resume(rs.RunSpec(sim="TNG50-4", snapshots=[99], start_over=True).command()[1]) == "0"
+              and ps_resume(off) == "1"
+              and ps_resume(rs.PipelineSpec(sims=["TNG50-4"], start_over=True).command()[1]) == "0"
+              and ps_resume(rs.PipelineSpec(sims=["TNG50-4"]).command()[1]) == "1"
               and rs.RunSpec(estimator="dtfe", sim="TNG50-4", snapshots=[99], start_over=True).command()[1].get("DTFE_RESUME") == "0"
               and rs.RunSpec(estimator="dtfe", sim="TNG50-4", snapshots=[99]).command()[1].get("DTFE_RESUME") == "1"
               and rs.RunSpec(start_over=True).memory_key() == rs.RunSpec().memory_key()
@@ -4867,7 +4865,7 @@ def pts_conventions_flag():
 def pts_conventions_choice():
     """The plane conventions where the launcher makes a phase-space image plane: the grids' in both qualities (a
     setting the two modes removed; the binary's 'legacy' stays for a developer). A Grids job with a slice and a
-    Pipeline job set PTS_CONVENTIONS=grid for run_ps_dtfe.sh / run_ps_pipeline.sh, spelled out both ways; a Custom run
+    Pipeline job set PS_POINT_CONVENTIONS=grid for run_ps_dtfe.sh / run_ps_pipeline.sh, spelled out; a Custom run
     passes nothing (grid is the binary's default); standard DTFE and a run without points get nothing; a saved job's
     choice is dropped; 'Load settings' reads a run's conventions from its log (the Runs tab names a legacy plane) but
     sets none."""
@@ -4881,15 +4879,15 @@ def pts_conventions_choice():
         snap.write_bytes(b"")
         g = lambda **kw: rs.RunSpec(sim="TNG50-4", snapshots=[99], **kw).command()[1]        # noqa: E731
         c = lambda **kw: rs.CustomSpec(input_file=str(snap), **kw).command()                # noqa: E731
-        check("Grids: PTS_CONVENTIONS=grid with a PS slice in both qualities (PS_POINT_CONVENTIONS the same); none "
-              "without a slice or for standard DTFE; Pipeline: always grid (its plane), its memory check too",
-              all(g(slice_plane=str(plane), quality=q).get("PTS_CONVENTIONS") == "grid"
-                  and g(slice_plane=str(plane), quality=q).get("PS_POINT_CONVENTIONS") == "grid"
-                  and rs.PipelineSpec(sims=["TNG50-4"], quality=q).command()[1].get("PTS_CONVENTIONS") == "grid"
+        check("Grids: PS_POINT_CONVENTIONS=grid with a PS slice in both qualities; none without a slice or for "
+              "standard DTFE; Pipeline: always grid (its plane), its memory check too",
+              all(g(slice_plane=str(plane), quality=q).get("PS_POINT_CONVENTIONS") == "grid"
+                  and rs.PipelineSpec(sims=["TNG50-4"], quality=q).command()[1].get("PS_POINT_CONVENTIONS") == "grid"
                   for q in rs.QUALITIES)
-              and "PTS_CONVENTIONS" not in g() and "PTS_CONVENTIONS" not in g(estimator="dtfe", slice_plane=str(plane))
+              and "PS_POINT_CONVENTIONS" not in g()
+              and "PS_POINT_CONVENTIONS" not in g(estimator="dtfe", slice_plane=str(plane))
               and rs.PipelineSpec(sims=["TNG50-4"]).check_step("TNG50-4", [99], 1024).env.get(
-                  "PTS_CONVENTIONS") == "grid")
+                  "PS_POINT_CONVENTIONS") == "grid")
         check("Custom: no '--ps-point-conventions' (the grids' conventions are the binary's default), with or without "
               "points, either quality or estimator",
               not any("--ps-point-conventions" in c(sample_points=str(plane), quality=q, estimator=e)
@@ -4905,7 +4903,8 @@ def pts_conventions_choice():
               not said and not any(hasattr(j, "pts_conventions") for j in old)
               and all(j.mode().pts_conventions == "grid" for j in old)
               and rs.RunSpec.from_dict({"pts_conventions": "legacy", "slice_plane": str(plane),
-                                        "sim": "TNG50-4"}).command()[1].get("PTS_CONVENTIONS") == "grid", str(said))
+                                        "sim": "TNG50-4"}).command()[1].get("PS_POINT_CONVENTIONS") == "grid",
+              str(said))
         log = work / "ps_output.runlog"
         recs = {}
         for name, extra in (("legacy", " --pts-conventions legacy"), ("grid", ""), ("noplane", None)):

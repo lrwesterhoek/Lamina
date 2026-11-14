@@ -470,10 +470,6 @@ class ZoomMixin:
             return int(self._server.n_partitions)
         return 0
 
-    def _exact_partition(self, o, kw: dict, side: dict, cache: Path) -> tuple[tuple | None, dict]:
-        """exact_partition for output 'o' with the query server running now."""
-        return exact_partition(o, kw, side, cache, self._server_partitions(o))
-
     def exact_zoom_plan(self, o, axis: int, index: int, rest, a0, a1, res: int) -> dict:
         """exact_zoom_plan (the module's) for output 'o' with this pane's choices: the snapshot chosen by hand, the
         cache folder, the query server running now."""

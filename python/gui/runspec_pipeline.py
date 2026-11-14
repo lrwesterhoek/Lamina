@@ -264,10 +264,11 @@ class PipelineSpec:
                "PTS_VEL_GRAD": "1" if self.vel_grad else "0",
                "PLANES": str(self.planes), "SUPERSAMPLE": str(self.supersample),
                # the run options, always spelled out (as RunSpec does): a stray knob exported in the
-               # login shell must not leak into a run (each under its new name and its older one until P6.6). The
-               # count only for the sampled deposit; pinned EMPTY for the exact one, which has no sub-samples
+               # login shell must not leak into a run. The count only for the sampled deposit; pinned EMPTY for the
+               # exact one, which takes no count from the job, and its older name AVG_SUBSAMPLES pinned empty beside it
+               # (as RunSpec.command pins it; the comment above runspec.OLDER_KNOB_NAMES says why)
                "SUBSAMPLES": str(m.nsub) if m.deposit != "exact" else "",
-               "AVG_SUBSAMPLES": str(m.nsub) if m.deposit != "exact" else "",
+               **({"AVG_SUBSAMPLES": ""} if m.deposit == "exact" else {}),
                "PS_VERTEX_MASS": "1" if m.vertex_mass else "0",
                "PS_VOLUME_WEIGHTED": "1" if m.volume_weighted else "0",
                "PS_CAUSTICS": "1" if self.caustics else "0",
@@ -285,7 +286,7 @@ class PipelineSpec:
         except ValueError:
             w = None
         if w:
-            env["PLANE_WINDOW"] = env["WINDOW"] = " ".join(_rs._num(v) for v in w)
+            env["PLANE_WINDOW"] = " ".join(_rs._num(v) for v in w)
         if self.center.strip():
             env["CENTER"] = self.center.strip()
         if self.lambda_th != LAMBDA_TH_DEFAULT:
@@ -308,7 +309,7 @@ class PipelineSpec:
             env["FORCE"] = "1"
         if self.plan_only:
             env["DRY_RUN"] = "1"
-        env["PYTHON"] = env["PY"] = _rs.PYTHON     # the figure steps' python (as the download tab passes it; PY its older name)
+        env["PYTHON"] = _rs.PYTHON                 # the figure steps' python (as the download tab passes it)
         return [str(_rs.PIPELINE_SCRIPT)], env
 
     def _render_step(self, sim: str, nu: int, snaps: list[int] | None) -> _rs.Step:

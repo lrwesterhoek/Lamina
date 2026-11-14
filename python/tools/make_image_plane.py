@@ -14,7 +14,7 @@ run with MpcUnit 1000; the synthetic test inputs use --mpc-unit 1).
     python3 tools/make_image_plane.py --sim TNG100-3-Dark --snap 99 \
         --axis z --center 55 --thickness 3 --planes 4 --nu 8192 -o plane_100_99
 
-    python3 tools/make_image_plane.py --combined tests/tmp/ps_regression.hdf5 \
+    python3 tools/make_image_plane.py --combined "${TMPDIR:-/tmp}/dtfe-tests/ps_regression_test/ps_regression.hdf5" \
         --mpc-unit 1 --nu 1024 -o /tmp/plane_test
 
     python3 tools/make_image_plane.py --same-as plane_100_99.json --planes 4 --thickness 3   # exit 0: same

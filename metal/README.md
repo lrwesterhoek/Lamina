@@ -24,7 +24,8 @@ prepended, the PS one with `ps_common.metal.inc` after its parameter blocks; and
 of `DTFE_GPU_FACES=1`, with `fixed_words.metal.inc`, `ps_kernel_params.h`, `ps_common.metal.inc` and
 `src/CGAL_triangulation/face_sweep_f32.h` prepended) and compiled at run time: the standard one once per process, the
 PS one once per word size (`PS_FX_WORDS`, below), the face kernel once, by the first face pass, in the safe math mode
-(*PS-DTFE face kernel*). Dependency: the header-only **metal-cpp**, vendored at `third_party/metal-cpp`.
+(*PS-DTFE face kernel*). Dependency: the header-only **metal-cpp**, vendored at `third_party/metal-cpp`: a trimmed
+copy that keeps only `Foundation/` and `Metal/` (all that `Metal/Metal.hpp` includes), with Apple's README and licence.
 
 Tests (GPU builds; the PS suites use the GPU when the `o_ps/` stamp says metal):
 - `tests/dtfe_metal_check.sh` (builds in the `o/.build_mode` mode, METAL=1 when that is empty): standard DTFE

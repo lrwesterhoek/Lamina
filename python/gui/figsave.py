@@ -30,7 +30,6 @@ import numpy as np
 # format -> (the file dialog's words, the suffixes it owns); vector formats keep their text as text
 FORMATS = {"png": ("PNG image", ("png",)), "pdf": ("PDF, vector", ("pdf",)), "svg": ("SVG, vector", ("svg",)),
            "tiff": ("TIFF image", ("tif", "tiff"))}
-VECTOR = ("pdf", "svg")
 UNITS = (("mpc", "Mpc"), ("mpc_h", "Mpc/h"), ("cells", "cells"))
 MARGINS = (("tight", "Tight crop (as before)"), ("pad", "Tight crop with this padding"),
            ("none", "None: the map fills the file"))

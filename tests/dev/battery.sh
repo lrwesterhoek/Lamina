@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The local battery (macOS, Apple Silicon): CI's stages plus what CI cannot run -- the Metal GPU suites, single and
 # double precision -- and the Python suites under CI's numpy 1.26 / matplotlib 3.6 (Ubuntu 24.04's versions), with
-# no simulation data (DTFE_DATA_ROOT points at an empty folder, as on CI). 32 stages, about 1.5-2 h on 10 cores.
+# no simulation data (DTFE_DATA_ROOT points at an empty folder, as on CI). 30 stages (31 when a libDTFE exists:
+# 'build_lib'), about 1.5-2 h on 10 cores.
 # It builds the three binary pairs first (METAL=1, METAL=1 DOUBLE=1, DIM=2) and runs on this checkout; do not edit
 # the tree while it runs (the summary says if it changed). The last stage, 'deprecation_gate', fails on a
 # 'warning: ... is deprecated' line in the suites' temporary files or in the stage logs written since this battery
@@ -9,6 +10,8 @@
 # spellings (the allow-lists in tests/dev/deprecation_gate.sh). A suite that several stages run (ci_core and then
 # ci_double into the same DTFE_TEST_TMP) clears its folder or rewrites its logs on each run, so the gate sees each
 # suite's last run of the battery; '--only deprecation_gate' alone reads the whole folder and every stage log in it.
+# split_bytes_check, ps_auto_tune_check and ps_scratch_check (their GPU halves too) run only inside ci_core, which
+# stops at its first failing step.
 #
 # Usage: tests/dev/battery.sh <scratch dir> [--ci-python PATH] [--gui-python PATH] [--only NAME,NAME...] [--list]
 #   <scratch dir>   logs (<scratch>/battery/<stage>.log and SUMMARY.txt), the suites' temporary files and the
@@ -17,7 +20,8 @@
 #                   ~/.venvs/dtfe-ci/bin/python); tests/dev/make_ci_venv.sh makes one
 #   --gui-python    python with PySide6 for the 'ci_gui' stage (default $DTFE_GUI_PYTHON, else
 #                   ~/.venvs/dtfe-gui/bin/python)
-#   --only          run only these stages (names as --list prints them)
+#   --only          run only these stages (names as --list prints them; a name --list does not print, such as the
+#                   former split_bytes, auto_tune and scratch, now inside ci_core, selects nothing)
 #   --list          print the stage names and exit
 # Exit 0 when every stage that ran passed and the tree did not change during the run.
 set -uo pipefail
@@ -50,7 +54,7 @@ PY_SUITES="dtfelib:py_dtfelib_test void_core:py_void_core_test profiles:py_profi
 selected() { [ -z "$ONLY" ] || [[ "$ONLY" == *",$1,"* ]]; }
 if [ "$LIST" = 1 ]; then
     for s in build build_d build_2d ci_core ci_double ci_2d ci_gui dtfe_metal gpu_scalar gpu_mass gpu_retry dtfe_gpu_retry \
-             split_bytes auto_tune scratch padding_d gpu_mass_d auto_tune_d gpu_retry_d; do echo "$s"; done
+             padding_d gpu_mass_d auto_tune_d gpu_retry_d; do echo "$s"; done
     for t in $PY_SUITES; do echo "${t%%:*}_np126"; done
     echo deprecation_gate
     exit 0
@@ -114,9 +118,6 @@ run gpu_scalar  tests/gpu_scalar_check.sh --no-build
 run gpu_mass    tests/gpu_mass_check.sh --no-build
 run gpu_retry   tests/gpu_retry_check.sh --no-build
 run dtfe_gpu_retry tests/dtfe_gpu_retry_check.sh --no-build
-run split_bytes tests/split_bytes_check.sh --no-build
-run auto_tune   tests/ps_auto_tune_check.sh --no-build
-run scratch     tests/ps_scratch_check.sh --no-build
 run padding_d   env DTFE_TEST_PRECISION=double tests/ps_partition_padding_check.sh --no-build
 run gpu_mass_d  env DTFE_TEST_PRECISION=double tests/gpu_mass_check.sh --no-build
 run auto_tune_d env DTFE_TEST_PRECISION=double tests/ps_auto_tune_check.sh --no-build

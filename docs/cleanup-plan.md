@@ -1212,7 +1212,8 @@ second pass P6.7 (a-f, below; committed as `d7626b6`; every gate green on 2026-1
 case (`warning: --old is deprecated, use --new`), so stdout and upper-case `WARNING` greps are unaffected; the
 standard binary gets no `--ps-gpu` alias (it never had one); README and `demo/COMMANDS.md` may name an old spelling
 only on a line that says "deprecated"; the help never names them; the launcher still exports `DTFE_METAL`,
-`PS_METAL` and `DTFE_EXACT_AVERAGE` beside the new names for one release. Boost's prefix matching: `--lambda` and
+`PS_METAL` and `DTFE_EXACT_AVERAGE` beside the new names for one release
+(the older copies went in clean-up batch 1; see P6.7e). Boost's prefix matching: `--lambda` and
 `--full` are now ambiguous abbreviations (nothing uses them). For P6.6, remove: the hidden options and their shadow
 members, `deprecatedOptions` and `canonicalCommandToken` (keep the canonicalisation only if old checkpoints matter),
 the `--full_help` fallbacks in `checkFileNameOptions` and `presets.flag_help`, the DEPRECATED tables in `results.py`,
@@ -1307,9 +1308,10 @@ Like every code item, before phase R.
   --ps-point-conventions`) and `--ps-merge MODE` only when `PS_MERGE` is given (a given index-order too). (Reversed
   2026-11-08 by R7: a plain run passes `--ps-merge index-order` again; P6.7f.) So a plain
   driver run no longer passes `--ordered-merge`, and a small run under the tuner's speed split no longer keeps the
-  memory gate unless `PS_MERGE=index-order` is given. The launcher still exports `ORDERED_MERGE=1`, so its runs keep
-  the gate. The pipeline resolves `GRID_SIZE` through config.sh (critique 12), keeps the letters in its
-  run_ps_dtfe.sh call and hands on `DTFE_GPU` / `PS_POINT_CONVENTIONS`. The binaries' refusal and help texts name
+  memory gate unless `PS_MERGE=index-order` is given. The launcher passes `PS_MERGE=index-order` (P6.7e; its
+  `ORDERED_MERGE=1` copy went in clean-up batch 1), so its runs keep the gate. The pipeline resolves `GRID_SIZE`
+  through config.sh (critique 12), keeps the letters in its run_ps_dtfe.sh call and hands on `DTFE_GPU` /
+  `PS_POINT_CONVENTIONS`. The binaries' refusal and help texts name
   `DTFE_RESUME=0` (both drivers), `PS_MERGE=...` and `DTFE_EXACT_AVERAGE=0`. `run_scripts_check` (T) asserts the
   alias matrix.
 - **P6.7d done 2026-11-08 (python CLIs and their launcher emitters).** `dtfelib/cli.py` holds the machinery:
@@ -1349,6 +1351,16 @@ Like every code item, before phase R.
   memory gate stays on under the tuner's speed split, as `ORDERED_MERGE=1` did), unticked `completion-order`. The
   drivers print one `warning: OLD is deprecated` line per older name (about six per PS job, two per standard one);
   the command shown and exported (`runspec.shell`, `OLDER_KNOB_NAMES`) names each knob once, by its new name.
+  **Status, clean-up batch 1 (2026-11-14):** the launcher's second copy is gone. The Grids and Pipeline jobs set
+  each run-script knob under its new name only (`RunSpec.command`'s standard branch, `_run_option_env`,
+  `ps_run_env`, `ps_exact_env`, `ps_conventions_env`, `PipelineSpec.command`; `PIPELINE_ONLY_KEYS` holds the new
+  names only, `TESS_CACHE_KEYS` is gone). The older name kept on purpose is `AVG_SUBSAMPLES`, pinned EMPTY beside
+  the exact deposit's empty `SUBSAMPLES` (Grids and Pipeline): config.sh `knob` copies a set older name onto an
+  empty new one, so the pin keeps a login export out, as before. `OLDER_KNOB_NAMES` and the `shell()` filter keep
+  that pair only; the Data tab's download step sets `PYTHON` alone (its `PY` copy went in the same batch). Every
+  value the drivers resolve is unchanged, stray login exports included (a new name that is set and not empty wins),
+  so no output file moves; the drivers' `warning: OLD is deprecated` lines no longer open a Grids or Pipeline job's
+  log. The drivers' older-name reads stay for P6.6.
   Saved state: `CustomSpec.from_dict` (QSettings, queued jobs, "Load settings" sidecars) runs `migrate_saved`: the
   extra options through `runlog.canonical_command` (standard DTFE: with `-s`/`-m`; PS-DTFE keeps those, they have no
   effect there: `averaging=False`) and `stream_density` `dtfe` -> `linear`; `PlotSpec.from_dict` migrates the
@@ -1516,7 +1528,7 @@ during the window, no conflict exit; the `VAR="${VAR:-...}"` line shape kept for
 | `PS_PARALLEL_TRI`, `PS_LAG_PADDING`, `PTS_CONVENTIONS`, `TESS_CACHE` | `PARALLEL_TRIANGULATION`, `PS_LAGRANGIAN_PADDING`, `PS_POINT_CONVENTIONS`, `TESSELLATION_CACHE` | R9 |
 | `LAGRANGIAN_INPUT` | `PS_LAGRANGIAN_INPUT` | `${OLD+x}`: an explicit empty value still means InitialCoordinates |
 | `DTFE_GRID_SIZE`, `DTFE_PADDING`, `DTFE_SPACE_CHECK` | `GRID_SIZE`, `PADDING`, `SPACE_CHECK` | the pipeline's early `GRID_SIZE` capture goes through the resolver too |
-| `WINDOW`, `PY` | `PLANE_WINDOW` (`make_image_plane.py --plane-window`), `PYTHON` | also `runspec.py` `PIPELINE_ONLY_KEYS`, `install_gui_app.sh` |
+| `WINDOW`, `PY` | `PLANE_WINDOW` (`make_image_plane.py --plane-window`), `PYTHON` | also `runspec.py` `PIPELINE_ONLY_KEYS` (the new names only since clean-up batch 1), `install_gui_app.sh` |
 | (none) | `THREADS` in `run_dtfe.sh` too | `MPC_UNIT` stays a constant |
 | `= "1"` tests | `knob_on` (1/0/true/false/yes/no/on/off) | everywhere at once, incl. `run_ps_pipeline.sh`'s exact test and `gpu_auto_resolve` |
 | long options | `--sim`, `--sim-dir`, `--grid`, `--gpu`, `--exact-average`, `--subsamples` | (Since 2026-11-09 `--exact` and `--sampled`; the drivers' `--exact-average` warns: P12.1 rule 6.) `-m` / `-e` stay; the pipeline keeps the letters in its `run_ps_dtfe.sh` call (`runspec.py` `_PLAN`) |
@@ -1679,11 +1691,10 @@ The final alias tables (P6 and P6.7), all removed together:
 - python: the 20 `deprecated_alias` and the `deprecated_option` calls, the `old_snaps` / `old_snapshots` positionals
   (analyze.py, merge_HDF5.py), the comma splitting in `_ListAction`, the `old=` maps of the `choice_type` calls,
   `DTFE_SIGMA_MPC` in `SMOOTH_MPC_ENV_NAMES`, the command builders' `mean`->`slab` and `_`->`-` value maps;
-- the launcher: the older-name exports (`ps_run_env`, `ps_exact_env`, `ps_conventions_env`, `_run_option_env`'s
-  `TESS_CACHE`, `runspec_pipeline.command`'s `AVG_SUBSAMPLES` / `WINDOW` / `PY`, `runspec_data`'s `PY`, the standard
-  branch's `DTFE_METAL` / `DTFE_EXACT`), the old names in `PIPELINE_ONLY_KEYS`, then `OLDER_KNOB_NAMES` and the
-  `shell()` filter, `runspec_custom`'s acceptance of `dtfe` beside `linear`; keep `migrate_saved` / `migrate_options`
-  (old `.gui.json` sidecars stay on disk);
+- the launcher: the empty `AVG_SUBSAMPLES` pin (`RunSpec.command`,
+  `PipelineSpec.command`), then `OLDER_KNOB_NAMES` and the `shell()` filter (the other older-name exports and the old
+  names in `PIPELINE_ONLY_KEYS` went in clean-up batch 1), `runspec_custom`'s acceptance of `dtfe` beside `linear`;
+  keep `migrate_saved` / `migrate_options` (old `.gui.json` sidecars stay on disk);
 - the tests that exercise the aliases (`flag_spelling_check`, `py_cli_alias_test`'s old half, `run_scripts_check`'s (T)
   matrix and deprecation cases, `ps_resume_check` C8/C15, `dtfe_resume_check` D4) turn into "the old name is refused"
   checks; `docs_drift_check`'s `DEPRECATED` goes, its (F) old-name list then catches any doc still naming one.
@@ -4433,14 +4444,14 @@ not say "(float64)" under Double; the queue's detail pane prints the Advanced in
 
 | key (row) | Grids, PS-DTFE (`run_ps_dtfe.sh`) | Grids, standard (`run_dtfe.sh`) | Pipeline (`run_ps_pipeline.sh`) | Custom (the binary) |
 |---|---|---|---|---|
-| `gpu` (Device) | `-m` and `DTFE_GPU`/`PS_GPU`/`PS_METAL` 1 or 0 | `-m` and `DTFE_GPU`/`DTFE_METAL` | `DTFE_GPU`/`PS_GPU`/`PS_METAL`; `-m` in the memory check | `--gpu` (with `--gpu-share auto` under PS-DTFE Exact) |
-| `nsub` (Samples per cell axis) | `-n N` | none | `SUBSAMPLES=N`, `AVG_SUBSAMPLES=N` | `--sampled --subsamples N` |
+| `gpu` (Device) | `-m` and `DTFE_GPU` 1 or 0 | `-m` and `DTFE_GPU` | `DTFE_GPU`; `-m` in the memory check | `--gpu` (with `--gpu-share auto` under PS-DTFE Exact) |
+| `nsub` (Samples per cell axis) | `-n N` | none | `SUBSAMPLES=N` | `--sampled --subsamples N` |
 | `face_gradient` (Velocity derivatives) | `FACE_GRADIENT=0` (stream average); exact face integrals pass what Automatic passes | none | `FACE_GRADIENT=0` | `--per-tet-gradient` / `--face-gradient` |
 | `partition` | `PARTITION="p p p"` | same | same | `--partition p` per axis |
 | `max_concurrent` | `MAX_CONCURRENT=n` | same | same | `--max-concurrent n` |
 | `mem_budget_gb` (Memory budget) | `DTFE_MEM_BUDGET_GB=v` | same | same | same, in the run's environment |
-| `parallel_triangulation` | `PARALLEL_TRIANGULATION=1`, `PS_PARALLEL_TRI=1` | none | same as PS-DTFE | `--parallel-triangulation` |
-| `ordered_merge` (Merge order) | `PS_MERGE=completion-order`, `ORDERED_MERGE=0` | none | same as PS-DTFE | `--ps-merge completion-order` |
+| `parallel_triangulation` | `PARALLEL_TRIANGULATION=1` | none | same as PS-DTFE | `--parallel-triangulation` |
+| `ordered_merge` (Merge order) | `PS_MERGE=completion-order` | none | same as PS-DTFE | `--ps-merge completion-order` |
 | `precision` | `DTFE_PRECISION=double` | same | same | (its own Precision row: the -double program) |
 
 **Phase C, the finishing round (2026-11-13, the owner: "shouldnt there be a CPU+GPU option as well? ... first fix all
@@ -4569,6 +4580,73 @@ its grids against the CPU walk's in numbers (not measured: the night's two runs 
 performance mode, a run whose budget holds the fourth lane, a larger grid or another machine. The owner decides at
 the clean-up.
 
+**The clean-up, batch 1 (2026-11-14, the owner: "committed, start the clean-up").** Two things only: the texts that
+were wrong, corrected, and the code that nothing used, removed. No grid, point, catalogue or cache file of any run
+changes, and no switch, option, convention, kernel or default went or changed meaning; what reads differently is text
+(the help, the run log's `grid deposit` line after its source, a few messages, the launcher's Checks warning and one
+What's This). A read-only map of the tree came first (wrong texts, unused C++, unused python, the tests; the first
+three checked item by item by a second reader). Corrected (the change log's entry lists it by group): PS-DTFE's "the
+exact deposit ignores the count" (it reads it for a tetrahedron too thin to clip and a partition's sub-grid ring in
+the `_a` pass, and for the run-wide units' share cap: 3 when none is given), the parallel insert called an opt-in
+after which runs differ, the README's counts (the battery's 30 stages, the tune set's 127 configurations) and its
+status lines after the measurement night, and smaller comments, messages and docstrings. Removed: three vendored
+metal-cpp folders (MetalFX, QuartzCore, SingleHeader: 17 files, 4642 lines), dead functions, constants, imports and
+Makefile variables, three battery stages that repeated `ci_core`'s suites (the same script, arguments and binaries;
+`ci_core` stops at its first failing step, so a red earlier step now hides them), the double pass's runs of the two
+suites that read no precision, and the launcher's second copy of each knob under its older name (P6.7e's status). Not
+in the
+batch: the map's owner items (among them the launcher's `GPU_PAYS_FROM` rule, the dated 2026-11-09 timings in the
+help, kdtree2's missing licence text, `Metal/MTL4AccelerationStructure.hpp`), the battery's `padding_d` stage (its
+survivor in `ci_double` also runs with `DTFE_TEST_REQUIRED=1`: the owner's call), and one text not assigned to it,
+the error message that points at `DTFE_RUN_UNITS_LEGACY=1`.
+Left for the kernel batch: two kernel-source comments that still name the removed overloads
+(`metal/dtfe_deposit.metal`, `metal/ps_deposit.metal`). An open point, not checked: the
+`--exact` help now says that the unaveraged and `_a` grids coincide where every tetrahedron clips; a tetrahedron too
+thin to clip is sampled at 1 in the unaveraged pass and at the count in the `_a` pass, and whether that ever moves a
+cell was not checked (`tests/ps_linear_deposit_check.sh` asserts the two equal on its own input). Steps 4 and 5 of the
+streamlining (switches, conventions, the programs' own defaults, the device) wait for the owner's answers, item by
+item. What was checked (scratch line, against the programs of the commit before it): the four builds without a
+warning; 36 runs built by the launcher's Custom job (both estimators, Exact and Fast, 3D single on the device left to
+the launcher, on the CPU and on the GPU, unsplit and split in 2 per axis, 3D double, 2D) with all 485 output files
+byte-identical; the `-h` and `--full-help` texts of the six programs, which differ only in the standard programs'
+`-h` group title and PS-DTFE's `--subsamples` and `--exact` entries; the launcher's commands of 498 jobs, the same
+but for 2322 environment lines of 11 older names (each new name holds the same value in the same job; the 146 empty
+`AVG_SUBSAMPLES` pins stay); the touched suites once (the change log lists them with their counts), none failed.
+Not run: the whole battery, the Linux check, a CPU-only or GCC build, the Docker build, a full-size run. They belong
+to the one test round after the clean-up's batches.
+
+**The clean-up, batch 2: the help (2026-11-14, the owner: "Yes, build it").** Asked "Shall I build the short help as
+the next batch?", the owner said yes. Help text only: no option added, removed or renamed, and no default, parsing
+rule or output byte moved. `-h` is now the short list of what a user of the two modes needs, PS-DTFE 29 option names
+instead of 70 and standard DTFE 26 instead of 57: a usage line and a line on the two modes, then one short entry per
+option with no date or timing, under Input, Grid and fields, Cell average (the two modes), Device and machine use,
+Split, memory and resume, Other estimators and Help. The lines of `--lambda-th`, standard DTFE's `--padding`,
+`--ps-vertex-mass`, `--ps-volume-weighted` and `--run-mode` name both the program's own default and what the drivers
+and the launcher pass (`--field` and `--periodic`, which the drivers also set, name the program's default only). Every
+name that left `-h` stays in `--full-help` (the change log's entry lists them by group), which keeps every option with
+its text byte for byte, only regrouped: Input, Grid and fields, Cell average (the two modes), Device and machine use,
+Split, memory and resume, Region, Points and server, Phase space (PS-DTFE only), Other estimators, Other, Developer
+options and Help. The developer group holds what the two modes set themselves or only tests and comparisons use:
+`--subsamples`, `--face-gradient`, `--per-tet-gradient`, `--no-overlap`, `--parallel-triangulation`,
+`--sequential-triangulation`, `--serve-progress`, `--serve-resident`, `--no-padding-test`, and in PS-DTFE
+`--gpu-share`, `--ps-linear-deposit`, `--ps-stream-density`, `--ps-point-conventions`, `--ps-lagrangian-padding`. Left
+out on purpose: one option table that prints both lists (`shortHelp` stays a second, display-only list, now of 29 / 26
+names, which `tests/docs_drift_check.py` rule G checks against `--full-help`); the dates and timings inside the long
+help texts (a separate change); the plan pointers inside help texts (kept); `--ps-merge` and the seven other-estimator
+lines (kept in `-h`); the programs' own defaults that differ from the launcher's (not changed, five of them named in
+`-h`; they wait with steps 4 and 5). `--full-help`'s `--input-format` text still names a type 102 that the reader
+refuses (kept byte for byte with the rest). Tests: `tests/run_scripts_check.sh` block K checks the 11 PS-DTFE and 5
+standard names that left `-h` in `--full-help` instead (entry lines only); `tests/docs_drift_check.py` rule G also
+requires `-h` to list 20 to 35 option names with no date and no wall time (its S self-test plants each).
+What was checked (scratch line, against the programs of batch 1): the four builds without a warning; the 36 reference
+runs with all 485 output files byte-identical; `--full-help` of the six programs with the same names (62 and 77),
+signatures and, line breaks aside, texts; `-h` with exactly the 26 and 29 names, each with the short letter and
+argument of `--full-help`, no date and no wall time, in 80 and 94 lines (195 and 238 before); every `--full-help`
+option passed once to each program (405 probes), recognised and answering as before; the launcher's commands of 498
+jobs as in batch 1; the suites that read the help with the same pass counts as on batch 1's programs, and docs
+drift, the regressions and the launcher's four (the change log lists them with their counts), none failed. Not run:
+the whole battery, the Linux check, a CPU-only or GCC build, the Docker build, a full-size run.
+
 **Phases A and B, the binaries (to do in the clean-up phase; not built).** The design's steps: A1 one mode with its
 header lines (a quality line, PS-DTFE's conventions line), velocityStd_a taking `--average-method 2` itself; A2 the
 gradient route's switches as developer pins; A3 the float-sum switches out; A4 to A7 the measurements that settle the
@@ -4580,7 +4658,9 @@ time objective), each switch hard-wired or removed after its
 one measurement; B0 the readers
 of the new header lines first; B1 PS-DTFE's volume weighting in the binary; B2 the device and the GPU share chosen by
 the binary (one table instead of the drivers' and the launcher's copies); B3 the drivers passing only the mode; B4 the
-help and the docs; B5 deleting what the owner does not keep (Q3); B6 the alias release (P6.6). So the binaries choose
+help and the docs (its short `-h` and the developer group of `--full-help` done ahead of the rest, in "The clean-up,
+batch 2: the help" above; the one option table that would print both lists was left out); B5 deleting what the
+owner does not keep (Q3); B6 the alias release (P6.6). So the binaries choose
 the device, the share, the volume weighting, the merge order and the plane conventions themselves, and the launcher's
 matching pins in `quality_mode` and its command builders (and the exact zoom's `--gpu`) are then deleted. The
 tetrahedron masses are not among them: the design keeps `--ps-vertex-mass` as a description of the input (perturbed

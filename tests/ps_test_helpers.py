@@ -40,14 +40,6 @@ def require(path):
     sys.exit(f"FAIL: '{path}' not built")
 
 
-def read_grid(path, count=None):
-    """A grid output as float64, read in the build's Real type."""
-    d = np.fromfile(path, dtype=REAL)
-    if count is not None and d.size != count:
-        sys.exit(f"FAIL: {path} holds {d.size} values of {REAL}, expected {count}")
-    return d.astype(np.float64)
-
-
 def make_cmd():
     """Rebuild respecting the current build mode (never downgrade a GPU binary). In double mode: None
     (the suites do not rebuild the double pair)."""

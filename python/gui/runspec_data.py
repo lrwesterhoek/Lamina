@@ -88,8 +88,8 @@ class DataSpec:
         todo = self._todo()
         snaps, gcs = [str(n) for n in todo["snaps"]], [str(n) for n in todo["gcs"]]
         # PYTHON: the download script checks the chunks already on disk with h5py (an incomplete one is fetched
-        # again) -- the same python the merge step runs with (PY, its older name, too until P6.6)
-        env = {"DTFE_DATA_ROOT": str(self.data_root), "PYTHON": _rs.PYTHON, "PY": _rs.PYTHON}
+        # again) -- the same python the merge step runs with
+        env = {"DTFE_DATA_ROOT": str(self.data_root), "PYTHON": _rs.PYTHON}
         dl = [str(_rs.DOWNLOAD_SCRIPT)]
         out = []
         if self.download_snapshots and snaps:

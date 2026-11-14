@@ -3192,16 +3192,15 @@ static void dtfeFinishFields(DTFE_State &state, User_options &userOptions, Quant
         psPointEvalFinalize( state.options );
 
 #ifdef PHASE_SPACE
-    // --ps-caustics: binarize the orientation bits ONLY here, after every partition has been
-    // OR-merged -- a fold straddling a partition boundary gets its two orientations from
-    // different partitions, so binarizing any earlier would lose it. bits==3 (both parities
-    // overlap) -> 1, else 0. Not idempotent (1 -> 0 on a second pass): DTFE() runs once per
-    // invocation for this flag (--interlace is rejected at option parsing).
-    /* The caustic mask is deliberately NOT binarized here. It stays full until writeOutputData,
-       which writes '.causticClass' from it and only then collapses it in place for '.caustic' --
-       one grid instead of two, saving 4 B/cell per Quantities across the post-processing window
-       where peak RSS is set. The write order there is load-bearing. */
-    // '.hidden_streams' bit 1: likewise only now, with '.streams' summed over every partition
+    // --ps-caustics: by now every partition has OR-merged its orientation bits -- a fold straddling a
+    // partition boundary gets its two orientations from different partitions, so collapsing the bits any
+    // earlier would lose it. The mask is deliberately NOT collapsed here: it stays full until writeOutputData
+    // (input_output.cc), which writes '.causticClass' from it and only then collapses it in place to the 0/1
+    // fold flag for '.caustic' (bits==3, both parities overlap -> 1, else 0) -- one grid instead of two, saving
+    // 4 B/cell per Quantities across the post-processing window where peak RSS is set. The write order there is
+    // load-bearing. The collapse is not idempotent (1 -> 0 on a second pass) and runs once per invocation
+    // (--interlace is rejected with this flag at option parsing).
+    // '.hidden_streams' bit 1: only now, after the merge, with '.streams' summed over every partition
     uQuantities->finalizeHiddenStreams();
     aQuantities->finalizeHiddenStreams();
 #endif
@@ -3339,7 +3338,7 @@ void interpolate(vector<Particle_data> *allParticles,
     else if ( userOptions.SPH )
         SPH_interpolation( allParticles, samples, userOptions, aQuantities );
     else
-        throwError( "Unknow interpolation method in function 'interpolate'." );
+        throwError( "Unknown interpolation method in function 'interpolate'." );
 }
 
 

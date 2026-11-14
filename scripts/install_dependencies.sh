@@ -44,7 +44,6 @@ detect_os() {
         if [ -f /etc/os-release ]; then
             . /etc/os-release
             DISTRO=$ID
-            DISTRO_VERSION=$VERSION_ID
             print_info "Detected: $PRETTY_NAME ($ARCH)"
         else
             print_error "Cannot detect Linux distribution"

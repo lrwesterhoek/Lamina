@@ -3,7 +3,7 @@
 Method-, snapshot- and simulation-agnostic: all file naming, grid geometry and
 metadata come from dtfelib.FieldSet.
 
-    python3 plot/plot_cosmic_web.py                       # TNG50-4-Dark snap 99, auto method
+    python3 plot/plot_cosmic_web.py --sim TNG50-4-Dark    # snap 99, auto method
     python3 plot/plot_cosmic_web.py --estimator dtfe
     python3 plot/plot_cosmic_web.py --sim TNG50-3-Dark --snap 50
 

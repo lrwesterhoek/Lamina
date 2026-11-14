@@ -38,7 +38,6 @@
 #include <vector>
 #include <algorithm>
 #include <utility>
-#include <cmath>
 
 #include "define.h"
 #include "particle_data.h"

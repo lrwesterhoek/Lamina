@@ -3,7 +3,7 @@
 Data access goes through dtfelib.FieldSet, so the script is method- (DTFE / PS-DTFE),
 simulation- and snapshot-agnostic. Snapshots without fields on disk are skipped.
 
-    python3 plot/plot_velDiv_den.py                    # all snapshots, TNG50-4-Dark, auto method
+    python3 plot/plot_velDiv_den.py --sim TNG50-4-Dark  # all snapshots, auto method
     python3 plot/plot_velDiv_den.py --estimator dtfe --snap 99
 
 PS-DTFE grids: the divergence is the MEAN FIELD div<v> by default (FieldSet.load('divergence', mean_field=True)),

@@ -207,11 +207,10 @@ def _ambiguous_dim(root: Path, plane: tuple[int, np.dtype], cube: tuple[int, np.
     d_cube = float(np.nanmedian(across_cube)) if np.isfinite(across_cube).any() else 0.0
     d_plane = float(np.nanmedian(across_plane)) if np.isfinite(across_plane).any() else 0.0
     return 2 if d_plane < 0.8 * d_cube else 3
-# maps that are best on a log scale by default / diverging maps / category maps
+# maps that are best on a log scale by default / diverging maps
 LOG_DEFAULT = {"density", "dispersion", "tet_touch"}
 DIVERGING = {"divergence", "vorticity", "gradient", "shear", "tweb_eigenvalues", "vweb_eigenvalues",
              "divergence_streams", "vorticity_streams", "gradient_streams", "shear_streams", "mass_flux_divergence"}
-CATEGORICAL = {"streams", "hidden_streams", "caustic", "caustic_class", "tweb", "vweb"}
 
 
 @dataclass

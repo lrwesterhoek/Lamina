@@ -138,7 +138,7 @@ inline void checkAngles(Real *angles,
                  size_t const size,
                  Real *offset = NULL)
 {
-    if ( size!=2*(NO_DIM-1) ) throwError( "The function 'checkAngles' in 'density_interpolation.cc' must have the 2nd argument = ", 2*(NO_DIM-1), ", but now that argument is ", size, "." );
+    if ( size!=2*(NO_DIM-1) ) throwError( "The function 'checkAngles' in 'triangulation_miscellaneous.h' must have the 2nd argument = ", 2*(NO_DIM-1), ", but now that argument is ", size, "." );
 
     // Wrap psi (azimuth) into [0,360); theta (polar) must already lie in [0,180].
 #if NO_DIM==2

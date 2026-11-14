@@ -86,7 +86,8 @@ SUBSAMPLES="${SUBSAMPLES:-}"    # nSub per axis, nSub^3 sub-points for the sampl
                            # passed only with --sampled); EMPTY (default) = the binary's own 1: one point per cell, at
                            # its centre -- quick, with noisy per-cell values (smooth the grids before use); more
                            # points give a smoother cell average and take more time. Set while DTFE_EXACT_AVERAGE is
-                           # unset (-n k or SUBSAMPLES=k), it selects the sampled deposit; the exact one ignores it
+                           # unset (-n k or SUBSAMPLES=k), it selects the sampled deposit; beside the exact one the
+                           # driver drops it
 MPC_UNIT=1000              # length of 1 Mpc in the input's units (1000 for ckpc/h): a constant, not a knob (TNG only)
 THREADS="${THREADS:-}"     # cap OpenMP threads globally; empty = all cores
 SCRATCH_DIR="${SCRATCH_DIR:-}"  # out-of-core mode (--scratch-dir): back the full-resolution grid
@@ -206,8 +207,9 @@ DTFE_EXACT_AVERAGE="${DTFE_EXACT_AVERAGE:-1}"  # 1 (default) = exact conservativ
                            # in every mode with GPU_SHARE=mixed)
                            # and on the CPU with DTFE_GPU=0 (r3d in double, the reference); TNG100-3-Dark z=0 at
                            # 512^3 (2026-11-09): 1133 s on the CPU, 1156 s on the GPU, against 1260 s for the sampled
-                           # deposit (nSub 3) on the GPU and 1644 s on the CPU. SUBSAMPLES is ignored (the exact
-                           # deposit is the nSub->infinity limit, so '.den' == '.a_den'). 0 = the sampled deposit
+                           # deposit (nSub 3) on the GPU and 1644 s on the CPU. SUBSAMPLES is ignored: the driver
+                           # passes no count beside --exact, and the binary then keeps 3 where the exact deposit
+                           # still reads one (src/user_options.cc kPsExactSliverSubsamples). 0 = the sampled deposit
                            # (--sampled); unset, a SUBSAMPLES count makes it 0 (config.sh average_resolve, the
                            # binary's rule). The same knob, default and rule as run_dtfe.sh's (its exact cell average);
                            # the driver passes --exact or --sampled on every run
@@ -240,10 +242,14 @@ if [ -z "${_caller_vw}" ] && [ "${PS_LINEAR_DEPOSIT}" = "1" ]; then
     PS_VOLUME_WEIGHTED=0
 fi
 knob PARALLEL_TRIANGULATION PS_PARALLEL_TRI
-PARALLEL_TRIANGULATION="${PARALLEL_TRIANGULATION:-0}"  # 1 = build each tessellation's Delaunay triangulation in parallel
+PARALLEL_TRIANGULATION="${PARALLEL_TRIANGULATION:-0}"  # 1 = force the parallel Delaunay insert at any size
                            # (--parallel-triangulation; needs the TBB build, 'make' detects the library).
-                           # Faster on small sets; OFF by default because two identical runs then
-                           # differ at float rounding (stream counts do not). See the binary's help.
+                           # 0 (default) passes nothing: the binary's own rule already inserts in parallel a
+                           # tessellation of at least 1e6 points when cores are free. Where the parallel insert
+                           # runs (forced or by the rule), the single-precision grids repeat to the byte, except
+                           # under PS_LINEAR_DEPOSIT=1; the point values (SAMPLE_POINTS) and the double build
+                           # (DTFE_PRECISION=double) move at rounding between two identical runs. See the binary's
+                           # help.
 knob PS_LAGRANGIAN_PADDING PS_LAG_PADDING
 PS_LAGRANGIAN_PADDING="${PS_LAGRANGIAN_PADDING:-}"   # k = --ps-lagrangian-padding k: pad each Lagrangian partition by k mean particle
                            # spacings. Empty (default) = the binary's default, k = 8: on a 4.1M-particle set at 2^3
@@ -433,7 +439,8 @@ for i in "${SNAPSHOTS[@]}"; do
     [ "${FACE_GRADIENT}" = "1" ] && vw_args+=(--face-gradient)     # (FACE_GRADIENT, see the top)
     [ "${FACE_GRADIENT}" = "0" ] && vw_args+=(--per-tet-gradient)  # the stream average of each stream's own gradient
 
-    # Parallel Delaunay insertion (PARALLEL_TRIANGULATION=1, opt-in -- see the comment at the top).
+    # The parallel Delaunay insert forced at any size (PARALLEL_TRIANGULATION=1; 0 leaves it to the binary's own
+    # rule -- see the comment at the top).
     ptri_args=()
     [ "${PARALLEL_TRIANGULATION}" = "1" ] && ptri_args=(--parallel-triangulation)
     [ "${PS_LINEAR_DEPOSIT}" = "1" ] && ptri_args+=(--ps-linear-deposit)     # (PS_LINEAR_DEPOSIT, see the top)

@@ -197,7 +197,7 @@ the binary is refused with the name of the binary to use.
 |---|---|
 | `build` | builds the single, double and 2D pairs (CPU) |
 | `core` | every CPU suite against `./DTFE` and `./PS-DTFE`, the auto-tune and `--scratch-dir` suites, the dtfelib and void suites, the docs check, `python/selftest.py` |
-| `double` | `tests/ps_double_check.sh`, then the program suites against the double pair |
+| `double` | `tests/ps_double_check.sh`, then the program suites against the double pair, all but `face_sweep_check` and `interlacing_check`, which read no precision |
 | `2d` | `tests/ps_2d_check.sh` (the 2D pair against analytic 2D flows) |
 | `gui` | the launcher's job specifications; the end-to-end window test when `DTFE_GUI_PYTHON` names a Python with PySide6 |
 | `oldpy` | every `.py` parses under Python 3.10 |
@@ -215,7 +215,7 @@ relative; after an intended change of the estimator regenerate it with `python3 
 
 The development tools in `tests/dev/` (not run by CI; macOS):
 
-* `tests/dev/battery.sh <scratch dir>` runs everything above that a Mac can run, in 32 stages (about 1.5-2 h): the three
+* `tests/dev/battery.sh <scratch dir>` runs everything above that a Mac can run, in 30 stages (about 1.5-2 h): the three
   builds, the `core`, `double`, `2d` and `gui` stages, the GPU suites in single and double precision, the Python
   suites under CI's package versions with no simulation data, and `deprecation_gate` (no unexpected 'is deprecated'
   line in the suites' temporary files or in the stages' logs). `tests/dev/make_ci_venv.sh` makes that Python (python
@@ -232,7 +232,7 @@ The development tools in `tests/dev/` (not run by CI; macOS):
   system style). It prints the width each tab's form needs against the width it gets, folded and with its folded
   groups open (`--open`: the shots taken with them open; `--advanced`: the Advanced settings on, their groups
   folded, or open with `--open`).
-* `tests/dev/tune_report_set.sh <binaries> <out file>` writes the auto-tuner's plan for a fixed list of 91
+* `tests/dev/tune_report_set.sh <binaries> <out file>` writes the auto-tuner's plan for a fixed list of 127
   configurations (`--auto-tune-report`, with the machine's RAM simulated), one line each. Diff the sets of two
   builds: only the configurations a change targets may differ.
 
@@ -242,8 +242,18 @@ The development tools in `tests/dev/` (not run by CI; macOS):
 ```bash
 ./DTFE    <input file> <output prefix> [options]      # standard DTFE (Eulerian tessellation)
 ./PS-DTFE <input file> <output prefix> [options]      # phase-space DTFE (Lagrangian tessellation)
-./PS-DTFE --help          # the options in short;  --full-help: every option with its default and caveats
+./PS-DTFE --help          # the options of the two modes, in short;  --full-help: every option in detail
 ```
+`-h` (`--help`) is the short list, one short entry per option: what a user of the two modes needs, 29 option names
+in PS-DTFE and 26 in standard DTFE, under Input, Grid and fields, Cell average (the two modes), Device and machine
+use, Split, memory and resume, Other estimators and Help. The lines of `--lambda-th`, standard DTFE's `--padding`,
+PS-DTFE's `--ps-vertex-mass` and `--ps-volume-weighted`, and `--run-mode` name both the program's own default and
+what the drivers or the launcher pass; the other lines give the program's own default only (the drivers also pass
+`--periodic` and four fields). `--full-help` lists every option with its full text, in groups, and the developer
+options (for tests and comparisons, such as `--subsamples` and `--face-gradient`: the two modes set these
+themselves) in a group of their own. These are command-line options; the environment's developer switches are under
+*Developer switches* below. An option that is not in `-h` works as before.
+
 Both binaries spell a shared option the same way (`--gpu`, `--exact`, `--sampled`, `--run-mode`, `--no-overlap`,
 `--subsamples`, `--mpc-unit`, `--input-format`, ...), in lower-case kebab-case, with a `ps-` prefix exactly for what
 needs phase-space streams, the Lagrangian tessellation or caustics. The older spellings are still accepted for one release (on the
@@ -391,8 +401,12 @@ or removed once its measurement is made. Unset (or not given) none of them chang
 puts the walk after the device call. What the commits of 2026-11-13 added -- behind these switches the word merge
 of `--ps-merge fixed-point` (with its face sums once per face), the time objective, the face kernel and its float
 arithmetic, and, as the default, the face walk beside the GPU deposit with its memory term
-(`DTFE_FACE_WALK_EARLY` below) -- has not been through the full test battery, the Linux check or a 512^3 run with
-that code (the walk's one 512^3 pair ran on 2026-11-12, when it was an opt-in, on the code of that day).
+(`DTFE_FACE_WALK_EARLY` below) -- has not been through the full test battery or the Linux check. The measurement
+night of 2026-11-14 (docs/cleanup-plan.md P14, "The measurement night": TNG100-3-Dark z = 0 at 512^3, balanced
+mode, one run each, on the binaries of that batch) ran two of them: the face walk beside the GPU deposit, the
+default, in the PS-DTFE Exact runs, and the face kernel, alone and with `DTFE_FACE_F32=1` (`DTFE_GPU_FACES` below).
+The word merge and the time objective had no 512^3 run with that code, and the walk's only 512^3 pair, with it and
+without it, ran on 2026-11-12, when it was an opt-in, on the code of that day.
 
 - `DTFE_PS_RUN_UNITS` (PS-DTFE; off by default): 1 makes every pass sum in the run-wide fixed-point units (one unit
   per grid for the whole run, set before the first partition; on the GPU in 128-bit words, on the single build's CPU
@@ -509,9 +523,15 @@ that code (the walk's one 512^3 pair ran on 2026-11-12, when it was an opt-in, o
   record is measured; it does not book the face pass's words on the device (240 B per sub-grid cell, by arithmetic):
   the walk's term, booked by default (`DTFE_FACE_WALK_EARLY` above), is not for them and over-books the passes the
   kernel takes. The checkpoint key names the arithmetic as under `DTFE_FACE_F32` (the same `face-sums=f32` line), so
-  a run under one switch resumes under the other. Whether it
-  is faster: to be measured: the wall time and the GPU holds of a 512^3 face-gradient run on the GPU with the switch and
-  without it. The double and the 2-D builds ignore it with one note line.
+  a run under one switch resumes under the other. Measured
+  once (the measurement night, docs/cleanup-plan.md P14 and D22: TNG100-3-Dark z = 0 at 512^3, balanced mode, one run
+  each): no gain. Its run took 1646.84 s, and 1698.95 s with `DTFE_FACE_F32=1` beside it (the kernel implies that
+  arithmetic: the two runs' files are byte-identical), against 1327.94 s for the same Exact command without the switch
+  (its repeat: the first run, on a plan of 2 partitions at once, took 1603.65 s). The kernel's 216 passes held the
+  device 309.535 s, and with its face records (0.476 GB per lane) the planner fitted 3 partitions at once instead of 4.
+  Both runs ended with exit 1 on a full output disk after their computation, so their face grids were not compared
+  with the CPU walk's in numbers. It stays for now, a clean-up item (P14, "The GPU face kernel stays for now"). The
+  double and the 2-D builds ignore it with one note line.
 
 ## Phase-Space DTFE
 
@@ -626,8 +646,10 @@ exact average of standard DTFE, the exact deposit of PS-DTFE, below). `--sampled
 (standard DTFE: the Monte Carlo average, with `--subsamples` and `--average-method`; PS-DTFE: the sampled deposit on
 nSub^3 sub-points), and so does a sampling count given without `--exact` and without a pin (`--subsamples`; in
 standard DTFE also `--average-method`, on the command line or in a `--config` file). The two flags exclude each other;
-a count beside `--exact` is accepted and ignored. `DTFE_EXACT_AVERAGE=1` or `0` pins the choice for a run that gives
-neither flag (a count does not override it).
+a count beside `--exact` is accepted. Standard DTFE ignores it; PS-DTFE's exact deposit clips, and reads the count
+only for a tetrahedron too thin to clip (sampled at that count) and a partition's sub-grid ring in the `_a` pass, and
+for the run-wide units' share cap (3 when none is given; a given count is kept). `DTFE_EXACT_AVERAGE=1` or `0` pins
+the choice for a run that gives neither flag (a count does not override it).
 Where the exact form does not apply -- `velocityStd_a`, a redshift cone grid, a `MY_SCALAR` build, the other
 interpolation methods (`--ngp`, `--cic`, `--tsc`, `--pcs`, `--sph`, `--voronoi`) -- standard DTFE samples by itself;
 an explicit `--exact` there is refused with an error (a redshift cone grid warns instead, and samples). A PS-DTFE run
@@ -1035,9 +1057,11 @@ name is unset (when both are set the new one wins, and the warning says so):
 | the pipeline's `WINDOW`, `PY` (deprecated) | `PLANE_WINDOW`, `PYTHON` |
 | python's `DTFE_SIGMA_MPC` (deprecated) | `DTFE_SMOOTH_MPC` |
 
-Until they go, the launcher sets every knob under both names (the same value, so a stray older export in its
-environment cannot stand beside a new one): a PS job's log carries about six of these warning lines, a standard one
-two or three; its command line shows each knob once, by its new name. A launcher started from the Finder takes only
+The launcher's jobs set each knob under its new name, so their logs carry none of these warning lines unless the
+login shell exports an older name (the new name wins where the job sets it); a job's command line shows each knob
+once, by its new name. One older name is still set: a PS-DTFE job at the exact deposit pins the older name
+`AVG_SUBSAMPLES` empty beside its empty `SUBSAMPLES` (the drivers drop an empty older name without a word, so a
+login export of it cannot reach them). A launcher started from the Finder takes only
 `DTFE_*`, `PYTHON` (and its older name `PY`), `TNG_API_KEY` and `PATH` from the login shell
 (`scripts/install_gui_app.sh`), so a bare knob exported there (`SUBSAMPLES`, `PS_MERGE`, `THREADS`, ...) does not reach
 its jobs, as before.
@@ -1267,7 +1291,8 @@ The code lives in `python/gui`: `app.py` (the window) with the mixins `app_tabs.
 `app_menus.py`, `app_check.py`, `app_advanced.py` (the Advanced settings) and `app_widgets.py`; `explore.py` with
 `explore_canvas.py`, `explore_grid.py`,
 `explore_save.py`, `explore_server.py`, `explore_voids.py`, `explore_zoom.py` and `explore_3d.py` (its geometry in
-`view3d.py`, no Qt); `runspec.py` (the job specifications
+`view3d.py` and its volume in `volume3d.py`, both without Qt; `volume_gl.py` draws that volume with OpenGL where the
+machine has it), and `contours.py` (the contour lines and their levels, no Qt); `runspec.py` (the job specifications
 and their commands, no Qt) with `runspec_pipeline.py`, `runspec_plot.py`, `runspec_data.py` and `runspec_custom.py`;
 and `grids.py`, `presets.py`, `results.py`, `runs_view.py`, `setup_wizard.py`, `void_cache.py`, `figsave.py`,
 `make_icon.py` (the app icon).

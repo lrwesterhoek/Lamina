@@ -253,7 +253,7 @@ class CustomSpec:
         a phase-space run that does not qualify for the face gradient (or a 2D one), so a 0 exported in the login
         shell cannot turn it to the deposit's own gradient behind the command shown, nor a 1 make the binary refuse a
         sampled run (a route the command names beats the variable anyway)."""
-        env = {k: v for k, v in _rs._run_option_env(self).items() if k not in _rs.TESS_CACHE_KEYS}
+        env = {k: v for k, v in _rs._run_option_env(self).items() if k != "TESSELLATION_CACHE"}
         env["DTFE_FACE_GRADIENT"] = ""
         return env
 

@@ -20,6 +20,8 @@
 #     that is the artefact -- and ~1 WITH it. Measured on a SINGLE-STREAM pancake
 #     (amplitude 0.8, no shell crossing) where the linear statement is exact.
 #  D) CPU vs GPU parity with the flag (GPU builds only).
+#  E) MASS SURVIVES DROPPED TETS: crossed waves drop a few degenerate tets, and with the flag
+#     the grid mean rho/rho_bar is still 1 (a vertex's degree counts only the depositing tets).
 #
 # Usage: tests/ps_vertex_mass_check.sh [--no-build]
 

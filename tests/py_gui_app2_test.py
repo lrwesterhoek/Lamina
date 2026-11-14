@@ -487,10 +487,8 @@ def t_qt(tmp: Path):
         w._read_widgets()
         own = w.custom.command()
         check("the partitions merge in index order on the Grids, Pipeline and Custom jobs, the quality's "
-              "(PS_MERGE=index-order, the older ORDERED_MERGE=1 beside it until P6.6; the Custom tab: '--ps-merge "
-              "index-order', given as the drivers give it)",
-              all(e.get("PS_MERGE") == "index-order" and e.get("ORDERED_MERGE") == "1"
-                  for e in (w.spec.command()[1], w.pipe.command()[1]))
+              "(PS_MERGE=index-order; the Custom tab: '--ps-merge index-order', given as the drivers give it)",
+              all(e.get("PS_MERGE") == "index-order" for e in (w.spec.command()[1], w.pipe.command()[1]))
               and any(own[i:i + 2] == ["--ps-merge", "index-order"] for i in range(len(own)))
               and own.count("--ps-merge") == 1, own)
         # a standard Grids job pins run_dtfe.sh's Monte-Carlo count, thread cap and gradient route empty (the tab holds
@@ -541,7 +539,7 @@ def t_qt(tmp: Path):
               co_env.get("PS_MERGE") == "index-order" and ld_env.get("PS_LINEAR_DEPOSIT") == "0"
               and ld_q == ("exact", "exact") and not set(w.spec.to_dict()) & set(rs.REMOVED_SETTINGS),
               (co_env.get("PS_MERGE"), ld_env.get("PS_LINEAR_DEPOSIT"), ld_q))
-        # the start-over tick (Grids, Pipeline) reaches run_ps_dtfe.sh as DTFE_RESUME=0 (and PS_RESUME); the banner of a
+        # the start-over tick (Grids, Pipeline) reaches run_ps_dtfe.sh as DTFE_RESUME=0; the banner of a
         # refused resume ticks it; its text has no '--'; 'Load settings' leaves it alone (a one-off choice)
         so, pso = getattr(w, "so_check", None), getattr(w, "p_so", None)
         ok = so is not None and pso is not None
@@ -549,8 +547,7 @@ def t_qt(tmp: Path):
             so.setChecked(True)
             pso.setChecked(True)
             w._read_widgets()
-            ticked = (w.spec.command()[1].get("DTFE_RESUME"), w.pipe.command()[1].get("DTFE_RESUME"),
-                      w.spec.command()[1].get("PS_RESUME"), w.pipe.command()[1].get("PS_RESUME"))
+            ticked = (w.spec.command()[1].get("DTFE_RESUME"), w.pipe.command()[1].get("DTFE_RESUME"))
             so.setChecked(False)
             w._read_widgets()
             off = w.spec.command()[1].get("DTFE_RESUME")
@@ -558,7 +555,7 @@ def t_qt(tmp: Path):
             w._banner_action("start_over")
             banner = so.isChecked()
             w._load_run_settings(R.parse_runlog(d / "ps_output.runlog", "TNGQ-1-Dark", 99))
-            ok = (ticked == ("0",) * 4 and off == "1" and banner and so.isChecked()
+            ok = (ticked == ("0",) * 2 and off == "1" and banner and so.isChecked()
                   and "--" not in so.text() + so.toolTip() and "DTFE_RESUME=0" in so.toolTip())
         check("the start-over tick reaches the Grids and Pipeline jobs (DTFE_RESUME=0, else 1), the refused-resume banner "
               "ticks it, no '--' in its text, 'Load settings' leaves it", ok,

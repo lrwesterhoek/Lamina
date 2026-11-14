@@ -108,7 +108,8 @@ struct PSGpuGrids
 // degeneracy cut, where cells are dropped).
 // fExact (--exact) replaces the nSub^3 sampling by the kernels' float32 exact clipping
 // (sweep_moments in metal/exact_clip.metal.inc: a sweep in z, analytic tet-cell volume + order-2 moments); nSub is then
-// ignored. The CPU path stays
+// read only by a tetrahedron whose clip window comes up empty (the sampled path, as on the CPU:
+// ps_kernel_params.h fExact). The CPU path stays
 // the DOUBLE-precision reference -- the GPU exact deposit agrees to float rounding, like
 // every other GPU/CPU field pair.
 // fScal / fSGrad: the scalar field (ONE component, NO_SCALARS=1 builds; the caller declines the GPU

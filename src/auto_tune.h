@@ -314,10 +314,10 @@ struct AutoTuneReport
     // over it (ScratchAlloc::ZeroFillScope): the particles + the read blocks kept + the largest pre-sized grid.
     // 'predicted' is at least this (0: no scratch-backed grid, or Linux, where the scope is a no-op)
     double reservePeak = 0.;
-    // the time objective (DTFE_AUTO_TIME=1, auto_tune.cc): the predicted partition loop and whole run of the plan
-    // taken, and the whole run of the memory objective's plan, in seconds (-1: no prediction -- the switch off, a
-    // configuration it is not calibrated for, or a plan it does not reach)
-    double timeLoop = -1., timeWall = -1., timeWallMem = -1.;
+    // the time objective (DTFE_AUTO_TIME=1, auto_tune.cc): the predicted whole run of the plan taken and of the
+    // memory objective's plan, in seconds (-1: no prediction -- the switch off, a configuration it is not
+    // calibrated for, or a plan it does not reach)
+    double timeWall = -1., timeWallMem = -1.;
     // PS-DTFE with the face walk beside the GPU deposit (auto_tune.h psFaceWalkEarly): the face sums' words one
     // partition holds through its device call, booked beside every lane's hold (in 'predicted'; 0: no such walk)
     double faceWalk = 0.;

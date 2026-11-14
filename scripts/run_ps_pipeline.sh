@@ -183,12 +183,14 @@ run() { echo "+ $*"; [ "${DRY_RUN}" = "1" ] || "$@"; }
 # snapshot stale. val[] / flag[] name the canonical options compared (the merge mode is not: it moves the last float
 # bits only, and older logs carry no merge flag; nor are '--run-mode' and '--gpu-share', for the same reasons). The
 # deposit: '--exact' is compared (older logs: '--exact-average' or '--ps-exact-deposit'), '--sampled' is not (an
-# older sampled run named no flag), and the '--subsamples' count only for the sampled deposit: the exact one ignores
-# it (older drivers passed '--subsamples 3' beside it), and a sampled one without a count runs the binary's own 1,
-# one point per cell (older drivers always named the count). So an older exact log and an older sampled one each
-# compare equal to the command the driver now emits for the same deposit and count (a sampled log naming 3: with
-# SUBSAMPLES=3). A sampled log that names no count is read by its header's 'avg sub-samples (nSub)' line, the count
-# its run took (the caller appends it: a binary from before 2026-11-14 ran such a command at 3, a later one at 1).
+# older sampled run named no flag), and the '--subsamples' count only for the sampled deposit: beside '--exact' the
+# driver passes none, and the binary then keeps 3 where an exact run still reads a count (src/user_options.cc
+# kPsExactSliverSubsamples), the count older drivers passed beside it ('--subsamples 3'); a sampled one without a
+# count runs the binary's own 1, one point per cell (older drivers always named the count). So an older exact log and
+# an older sampled one each compare equal to the command the driver now emits for the same deposit and count (a
+# sampled log naming 3: with SUBSAMPLES=3). A sampled log that names no count is read by its header's
+# 'avg sub-samples (nSub)' line, the count its run took (the caller appends it: a binary from before 2026-11-14 ran
+# such a command at 3, a later one at 1).
 # The velocity gradient's route is compared as named ('--face-gradient',
 # '--per-tet-gradient'); a command naming neither takes the binary's default, so an older log naming neither (the
 # stream average, PS-DTFE's route before D13) compares equal to it: its slice, the pipeline's product, is the same

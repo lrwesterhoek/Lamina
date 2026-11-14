@@ -9,7 +9,7 @@ other downloaded chunked products so their subfiles can be deleted to save space
                        contiguously, so concatenating chunks in order preserves the
                        row(id) = row(known) + (id - SubhaloID[known]) navigation arithmetic)
   --ics                ics.hdf5 (or snap_ics.hdf5)       -> combined_ics.hdf5 (via
-                       convert_ic_units.py -- the PS-DTFE --lagrangianInput file)
+                       convert_ic_units.py -- the PS-DTFE --ps-lagrangian-input file)
 
 UNITS: every combined_* file is h-FREE (ckpc, 1e10 Msun, ckpc km/s), one convention across
 all input data. Converted quantities: snapshot Coordinates, header BoxSize and MassTable;
@@ -48,11 +48,6 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 
 SNAPSHOT_NUMBERS = [0, 4, 17, 33, 50]
-
-NUM_SUBFILES = 4
-
-SINGLE_FILES = [
-]
 
 H_VALUE = 0.6774
 
@@ -330,60 +325,6 @@ def _write_snapshot(output_file, input_files, h_value, datasets_info, box_size_p
         header.attrs["NumPart_Total"] = total_counts
     types = {int(g[-1]) for g in datasets_info}       # a merged type with 0 particles must verify too
     return total_counts, expected, types
-
-
-def convert_single_file(input_path, h_value, datasets_info):
-    input_path = Path(input_path)
-    if not input_path.exists():
-        print(f"\nSkipping {input_path} - file not found")
-        return
-
-    stem = input_path.stem
-    suffix = input_path.suffix
-    prefix = stem.split("_", 1)[1] if "_" in stem else stem
-    output_path = input_path.parent / f"combined_{prefix}{suffix}"
-
-    print(f"\n{'='*60}")
-    print(f"Converting single file: {input_path}")
-    print(f"Output: {output_path}")
-
-    with h5py.File(input_path, 'r') as f_in:
-        box_size = f_in['Header'].attrs.get('BoxSize')
-        box_size_physical = box_size / h_value
-        print(f"  BoxSize: {box_size:.2f} ckpc/h → {box_size_physical:.2f} ckpc")
-
-        with h5py.File(output_path, 'w') as f_out:
-            for group_name in f_in:
-                if group_name not in datasets_info:
-                    f_out.copy(f_in[group_name], group_name)
-
-            f_out["Header"].attrs["BoxSize"] = box_size_physical
-            if "MassTable" in f_out["Header"].attrs:
-                f_out["Header"].attrs["MassTable"] = np.asarray(f_out["Header"].attrs["MassTable"]) / h_value
-            f_out["Header"].attrs["HFreeUnits"] = h_value
-
-            for group_name, dsets in datasets_info.items():
-                if group_name not in f_in:
-                    continue
-                grp = f_out.create_group(group_name)
-
-                for dset_name in dsets:
-                    if dset_name not in f_in[group_name]:
-                        continue
-
-                    data = f_in[group_name][dset_name][...]
-                    n = data.shape[0]
-
-                    if dset_name == "Coordinates":
-                        data = (data / h_value).astype(dsets[dset_name]["dtype"])
-                        print(f"  {group_name}/{dset_name}: {n} particles, divided by h={h_value}")
-                    else:
-                        print(f"  {group_name}/{dset_name}: {n} entries (copied as-is)")
-
-                    grp.create_dataset(dset_name, data=data)
-
-    print(f"  Saved: {output_path}")
-    print('='*60)
 
 
 def _concat_datasets(f_out, out_group, columns, chunk_files, h_value, group_path=None):
@@ -755,13 +696,6 @@ def main():
                 delete_chunks=args.delete_chunks
             ):
                 failed.append(f"snapshot {snapshot_num:03d}")
-
-        for single_file in SINGLE_FILES:
-            convert_single_file(
-                Path(args.data_dir) / single_file,
-                args.hubble,
-                DATASETS_INFO
-            )
 
     if args.groupcats:
         for snapshot_num in snapshots:

@@ -8,7 +8,8 @@
 #   tests/ci_suite.sh build     the single pair, the double pair (DOUBLE=1) and the 2D pair (DIM=2)
 #   tests/ci_suite.sh core      every CPU suite against ./DTFE and ./PS-DTFE
 #   tests/ci_suite.sh double    ps_double_check, then the program-running suites against the double
-#                               pair (DTFE_TEST_PRECISION=double: float64 grids, tests/precision.sh)
+#                               pair (DTFE_TEST_PRECISION=double: float64 grids, tests/precision.sh), all
+#                               but face_sweep_check and interlacing_check, which read no precision
 #   tests/ci_suite.sh 2d        tests/ps_2d_check.sh (the 2D pair against analytic 2D flows)
 #   tests/ci_suite.sh gui       the launcher's job specifications; the end-to-end window test too when
 #                               DTFE_GUI_PYTHON names a Python with PySide6 (QT_QPA_PLATFORM=offscreen)
@@ -39,7 +40,8 @@ stage_build() {
     ./DTFE-2d --version; ./PS-DTFE-2d --version
 }
 
-# the suites that run the programs (also the double pass); the python ones take --no-build
+# the suites that run the programs (also the double pass, but for face_sweep_check and interlacing_check: they
+# read no precision, so a double-pass run would repeat the single pass's); the python ones take --no-build
 # The standard-DTFE regression compares with the STORED reference (tests/reference/regression_periodic.txt, a
 # periodic set without Delaunay ties, to 3e-4 relative: run_tests.py says why); writing a fresh one here would
 # compare nothing. The double pass compares the same reference (the double build sits 2.7e-5 from it).
@@ -48,7 +50,9 @@ run_program_suites() {
     step "standard DTFE Monte-Carlo average (unbiased, split-invariant)"; tests/dtfe_mc_average_check.sh --no-build
     # the face method (docs/cleanup-plan.md P10): its geometry against exact references, then standard DTFE's
     # --face-gradient against the per-tetrahedron gradient
-    step "face sweep geometry (sections, pieces, Gauss on a tessellation)"; tests/face_sweep_check.sh --no-build
+    if [ "${DTFE_TEST_PRECISION:-single}" != double ]; then   # header-only, compiled here with fixed flags
+        step "face sweep geometry (sections, pieces, Gauss on a tessellation)"; tests/face_sweep_check.sh --no-build
+    fi
     step "standard DTFE --face-gradient (== the per-tet gradient; threads, deposits, splits)"; tests/dtfe_face_gradient_check.sh --no-build
     # the run-wide fixed-point units: the exact '_a' grids byte-identical at any split (its CPU half; the GPU's SKIPs)
     step "standard DTFE split independence (run-wide units)"; tests/split_bytes_check.sh --no-build
@@ -90,7 +94,9 @@ run_program_suites() {
     # dtfelib's mean-field velocity derivatives (a PS grid given standard DTFE's grad<v> and V-web), checked
     # against the standard binary's own a_velDiv / a_velGrad / V-web and a PS run; single and double pair alike
     step "mean-field velocity derivatives + V-web"; MPLBACKEND=Agg "$PY" tests/py_meanfield_test.py
-    step "interlacing (unit, 2D + 3D)";         tests/interlacing_check.sh
+    if [ "${DTFE_TEST_PRECISION:-single}" != double ]; then   # its unit in both precisions; end to end ./DTFE, ./PS-DTFE
+        step "interlacing (unit, 2D + 3D)";         tests/interlacing_check.sh
+    fi
     step "composite server split";              tests/serve_split_check.sh --no-build
     step "ordered merge, look-ahead, crash-safe outputs, progress"; tests/ps_runtime_check.sh --no-build
     step "resume of a killed partitioned run";  tests/ps_resume_check.sh --no-build
@@ -218,7 +224,7 @@ stage_gui() {
     step "launcher: memory strip, Running now, void catalogues, run files"; QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-offscreen}" "$gp" tests/py_gui_app2_test.py
 }
 
-[ "$#" -gt 0 ] || { sed -n '2,18p' "$0"; exit 2; }
+[ "$#" -gt 0 ] || { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "${SCRIPT_DIR}/${BASH_SOURCE[0]##*/}"; exit 2; }
 for s in "$@"; do
     case "$s" in
         build|core|double|2d|gui|oldpy|variants) "stage_$s" ;;

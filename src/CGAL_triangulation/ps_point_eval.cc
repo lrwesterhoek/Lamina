@@ -21,7 +21,7 @@
    parsing); the Sample_point mechanism is a separate path.
 
    Per-stream density comes in two variants (--ps-stream-density):
-     'dtfe'      (default) linear interpolation of the Lagrangian-vertex DTFE densities
+     'linear'    (default; 'dtfe' is its deprecated name) linear interpolation of the Lagrangian-vertex DTFE densities
                  inside the tetrahedron -- matches the PhaseSpaceDTFE class of the method
                  authors' reference implementation (github.com/jfeldbrugge/PS-DTFE,
                  Python/density.py). Continuous within a stream, but not mass-conserving.

@@ -63,7 +63,7 @@ skip_or_fail() { if [ "${DTFE_TEST_REQUIRED:-0}" = "1" ]; then echo "FAIL (requi
 for b in ./PS-DTFE-2d ./DTFE-2d; do [ -x "$b" ] || skip_or_fail "$b is not built (make PS-DTFE DTFE DIM=2)"; done
 TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}/ps_2d"
 mkdir -p "$TMP"
-CACHE="${TMPDIR:-/tmp}/dtfe-2d-cache"; rm -rf "$CACHE"; mkdir -p "$CACHE"
+CACHE="$TMP/pan_cache"; rm -rf "$CACHE"; mkdir -p "$CACHE"
 GEN() { "$PY" tests/generate_ps_test_data.py --dim 2 "$@" >/dev/null || { echo "FAIL data gen $*"; exit 1; }; }
 RUN() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL: $* (see $out.log)"; exit 1; }; }
 G=128

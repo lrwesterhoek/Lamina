@@ -421,7 +421,7 @@ def _pipeline_options(qa, w, tmp, sim, seen, tick):
     w.p_quality.button("fast").setChecked(True)          # Fast: the sampled deposit, its count in the environment below
     qa.processEvents()
     check("... Fast is the sampled deposit at its one count (no control for it)", w.pipe.quality == "fast"
-          and w.pipe.mode().deposit == "sampled" and w.pipe.command()[1]["AVG_SUBSAMPLES"] == "1"
+          and w.pipe.mode().deposit == "sampled" and w.pipe.command()[1]["SUBSAMPLES"] == "1"
           and w.p_quality_note.text() == rs.QUALITY_TEXT["ps"]["fast"])
     w.p_ca.setChecked(True)
     w.p_cu.setChecked(True)
@@ -456,7 +456,7 @@ def _pipeline_options(qa, w, tmp, sim, seen, tick):
         return out
     check("the options reach the pipeline's environment, the render step and the estimate",
           w.p_cu.isEnabled() and w.p_thick.isEnabled() and w.p_rproject.isEnabled()
-          and [env[k] for k in ("PS_CAUSTICS", "PS_CAUSTIC_CUSPS", "PS_GPU", "AVG_SUBSAMPLES", "PLANES", "THICKNESS",
+          and [env[k] for k in ("PS_CAUSTICS", "PS_CAUSTIC_CUSPS", "DTFE_GPU", "SUBSAMPLES", "PLANES", "THICKNESS",
                                 "SUPERSAMPLE")] == ["1", "1", "1" if gpu else "0", "1", "16", "3", "2"]
           and _maps(st[1].argv) == ["density", "streams"]
           and st[1].argv[st[1].argv.index("--project") + 1] == "slab" and "--fixed-range" in st[1].argv
@@ -464,7 +464,7 @@ def _pipeline_options(qa, w, tmp, sim, seen, tick):
           f"{env} | {st[1].argv} | {w.estimate.text()}")
     mstep = w.pipe.check_step(SIM, [99], 64)
     check("the memory check of these settings carries them, sized by the planned points, -m on the quality's device",
-          ("-m" in mstep.argv) == gpu and mstep.env["PS_CAUSTICS"] == "1" and mstep.env["AVG_SUBSAMPLES"] == "1"
+          ("-m" in mstep.argv) == gpu and mstep.env["PS_CAUSTICS"] == "1" and mstep.env["SUBSAMPLES"] == "1"
           and mstep.env.get("DTFE_AUTO_PTS_N") == str(16 * 64 * 64 * 4), f"{mstep.argv} {mstep.env}")
     check("at 16 planes the ghosting warning is gone", not any("ghosts" in t for t in texts()), str(texts()))
     w.p_ca.setChecked(False)
@@ -480,8 +480,9 @@ def _pipeline_options(qa, w, tmp, sim, seen, tick):
     penv = w.pipe.command()[1]
     check("Exact: the exact deposit (no sample count), on the GPU when built (its device in every machine use, as on "
           "the Grids tab); the grey lines say what it is and where it runs",
-          w.pipe.quality == "exact" and w.pipe.mode().gpu == rs.gpu_built("ps") and penv["PS_EXACT"] == "1"
-          and penv["AVG_SUBSAMPLES"] == "" and penv["PS_GPU"] == ("1" if rs.gpu_built("ps") else "0")
+          w.pipe.quality == "exact" and w.pipe.mode().gpu == rs.gpu_built("ps") and penv["DTFE_EXACT_AVERAGE"] == "1"
+          and penv["SUBSAMPLES"] == penv["AVG_SUBSAMPLES"] == ""
+          and penv["DTFE_GPU"] == ("1" if rs.gpu_built("ps") else "0")
           and w.p_quality_note.text() == rs.QUALITY_TEXT["ps"]["exact"] and w.p_runs_on.text() == rs.runs_on_text(w.pipe)
           and not any("Fast" in t for t in texts()), str(penv))
     for cb in (w.p_ca, w.p_cu, w.p_rfixed):
@@ -495,7 +496,7 @@ def _pipeline_options(qa, w, tmp, sim, seen, tick):
     qa.processEvents()
     check("back at the earlier options (Fast, on its device: the GPU when built): the same two steps",
           [st.label for st in w.pipe.steps()] == [f"run_ps_pipeline.sh {SIM}", f"plot_pointeval.py {SIM}"]
-          and w.pipe.command()[1]["PS_GPU"] == ("1" if rs.gpu_built("ps") else "0") and w.pipe.planes == 1
+          and w.pipe.command()[1]["DTFE_GPU"] == ("1" if rs.gpu_built("ps") else "0") and w.pipe.planes == 1
           and w.pipe.render_fields == "")
     seen.clear()
     tick.start()
@@ -1324,12 +1325,11 @@ def _polish(qa, w):
                     flags = (("-e" in argv) == (q == "exact")
                              and (("-n" in argv and argv[argv.index("-n") + 1] == "1") == (q == "fast" and e == "ps"))
                              and ("-m" in argv) == job.mode().gpu
-                             and env.get("DTFE_EXACT_AVERAGE" if e == "dtfe" else "PS_EXACT") == ("1" if q == "exact"
-                                                                                                   else "0"))
+                             and env.get("DTFE_EXACT_AVERAGE") == ("1" if q == "exact" else "0"))
                 elif t == "pipeline":
-                    flags = (env["PS_EXACT"] == ("1" if q == "exact" else "0")
-                             and env["AVG_SUBSAMPLES"] == ("" if q == "exact" else "1")
-                             and env["PS_GPU"] == ("1" if job.mode().gpu else "0"))
+                    flags = (env["DTFE_EXACT_AVERAGE"] == ("1" if q == "exact" else "0")
+                             and env["SUBSAMPLES"] == ("" if q == "exact" else "1")
+                             and env["DTFE_GPU"] == ("1" if job.mode().gpu else "0"))
                 else:
                     flags = (("--exact" in argv) == (q == "exact") and ("--sampled" in argv) == (q == "fast")
                              and ("--subsamples" in argv) == (q == "fast" and e == "ps")
@@ -3254,7 +3254,8 @@ def _job_clock(qa, w, tmp, data, demo, root):
     check("the T-web threshold is live only with a web class ticked; it, the tessellation cache and the T-web reach the "
           "standard-DTFE run; no memory budget is passed (the code's: the binary's auto-tuner)",
           not off and lam.isEnabled() and env_.get("LAMBDA_TH") == "0.5" and "DTFE_MEM_BUDGET_GB" not in env_
-          and env_.get("TESS_CACHE") == str(tmp / "tess") and "tweb_a" in env_.get("FIELDS", "").split(), str(env_))
+          and env_.get("TESSELLATION_CACHE") == str(tmp / "tess") and "tweb_a" in env_.get("FIELDS", "").split(),
+          str(env_))
     wo.custom = rs.CustomSpec(input_file=str(demo.input_file), tess_cache=str(tmp / "tess"))
     wo._load_into_widgets()
     last = wo.custom.steps()[-1]

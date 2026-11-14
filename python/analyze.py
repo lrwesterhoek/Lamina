@@ -302,10 +302,9 @@ def export(snaps, out_dir=None, formats=("csv", "hdf5")):
 
 # ---------------------------------------------------------------- cache (list / prune / move the namespaces)
 
-# the code lives in dtfelib.cache; its names stay reachable as analyze.<name> ('analyze.py cache' runs it)
-from dtfelib.cache import (CACHE_SMOOTHING_MPC, NAMESPACE_RE, _dir_size, _human, _pid_alive,  # noqa: E402,F401
-                           FIXED_R_CELLS, cache_inventory, cache_command, _CACHE_USER_SCRIPTS, _DTFE_BINARY, _ps_table,
-                           cache_users, _SF_DATALESS, _st_flags, _evicted, _lstat_size, _same_device, _same_tree,
+# the code lives in dtfelib.cache ('analyze.py cache' runs it); these five stay reachable as analyze.<name> (the
+# command below and the tests use them)
+from dtfelib.cache import (CACHE_SMOOTHING_MPC, cache_command, cache_inventory, cache_users,  # noqa: E402,F401
                            move_cache)
 
 

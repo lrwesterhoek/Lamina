@@ -2,7 +2,7 @@
 
 Method-, snapshot- and simulation-agnostic via the shared dtfelib.FieldSet layer:
 
-    python3 plot/plot_shear_triaxial.py                    # TNG50-4-Dark, full series, auto method
+    python3 plot/plot_shear_triaxial.py --sim TNG50-4-Dark  # full series, auto method
     python3 plot/plot_shear_triaxial.py --estimator dtfe
     python3 plot/plot_shear_triaxial.py --snap 99          # single snapshot only
 

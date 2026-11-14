@@ -94,12 +94,13 @@ else
     info "step 1/6: skipped (--no-deps)"
 fi
 make deps-check
-# optional: the tbb library lets PS-DTFE triangulate in parallel (Makefile TBB=auto detects it)
+# optional: the tbb library lets the 3D binaries (DTFE and PS-DTFE) insert large tessellations in parallel (Makefile
+# TBB=auto detects it)
 TBB_INC="$([ "$UNAME_S" = "Darwin" ] && echo "$(brew --prefix tbb 2>/dev/null)/include" || echo /usr/include)"
 if [ -f "$TBB_INC/tbb/task_arena.h" ] || [ -f "$TBB_INC/oneapi/tbb/task_arena.h" ]; then
-    info "tbb found: PS-DTFE will build its triangulation in parallel (TBB=0 disables)"
+    info "tbb found: the 3D binaries will build large tessellations in parallel (TBB=0 disables)"
 else
-    warn "tbb not found: PS-DTFE triangulates on one core (optional: brew install tbb / apt-get install libtbb-dev)"
+    warn "tbb not found: the binaries triangulate on one core (optional: brew install tbb / apt-get install libtbb-dev)"
 fi
 # optional: libdeflate compresses/decompresses the tessellation cache faster than zlib (Makefile LIBDEFLATE=auto)
 DEFL_INC="$([ "$UNAME_S" = "Darwin" ] && echo "$(brew --prefix libdeflate 2>/dev/null)/include" || echo /usr/include)"
@@ -117,7 +118,7 @@ if [ "$FORCE_CPU" -eq 0 ]; then
         if [ "$(uname -m)" != "arm64" ]; then
             warn "Intel Mac detected: the Metal deposit is only validated on Apple Silicon; building CPU-only."
         else
-            # the Metal host needs Apple's metal-cpp headers, vendored (git-ignored) in third_party/
+            # the Metal host needs Apple's metal-cpp headers, vendored (tracked) in third_party/
             if [ ! -f third_party/metal-cpp/Metal/Metal.hpp ]; then
                 info "third_party/metal-cpp missing -- fetching Apple's metal-cpp headers ..."
                 MCPP_URL="https://developer.apple.com/metal/cpp/files/metal-cpp_macOS15_iOS18.zip"

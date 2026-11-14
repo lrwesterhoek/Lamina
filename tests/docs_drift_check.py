@@ -23,7 +23,8 @@ and the knobs the drivers read must be documented somewhere a user looks.
   G) the binaries' own help (when ./DTFE and ./PS-DTFE are built; a SKIP line otherwise): no visible option name has
      a capital letter or a '_'; no name standard DTFE lists starts with 'ps-' (so every 'ps-' name is PS-only and
      every name both list lacks it); every '-h' name is a '--full-help' name of the same binary (not the other way
-     round: '-h' is the short list by design).
+     round: '-h' is the short list by design); '-h' stays short, 20 to 35 option names, and carries no date
+     (20dd-dd-dd) and no wall time (a number and then 's' or 'ms' as a word).
 Part A's deprecated spellings are the binaries' (deprecatedOptions, the merge switches and standard DTFE's total
 '--samples') and the python CLIs' (dtfelib.cli deprecated_alias calls) whose old name no parser registers any more
 (a per-script old name that another script still uses, '--prefix', '--snap', '--smooth', is not checked).
@@ -205,6 +206,26 @@ def help_style(full, short, standard):
     if standard:
         out += [f"--{n}: 'ps-' in standard DTFE" for n in sorted(full | short) if n.startswith("ps-")]
     out += [f"--{n}: in -h, not in --full-help" for n in sorted(short - full)]
+    return out
+
+
+# the short help's size (option names) and the stale words it must not carry: a date, a wall time
+SHORT_HELP_NAMES = (20, 35)
+DATE_RE = re.compile(r"\b20\d\d-\d\d-\d\d\b")
+WALL_RE = re.compile(r"(?<![\w.^])\d+(?:\.\d+)? (?:s|ms)(?![\w-])")
+
+
+def short_help_shape(text, prog=""):
+    """[problem] of one binary's '-h' text: fewer than 20 or more than 35 option names (help_names), a date
+    (20dd-dd-dd), a wall time ('431 s', '50 ms'). The text is scanned with its whitespace folded to single blanks, so
+    a number and its unit that the 80-column wrap put on two lines are still one wall time. prog: the program's path
+    as the usage line prints it (argv[0]), left out of the scan (a folder name with a date is not the help's)."""
+    lo, hi = SHORT_HELP_NAMES
+    n = len(help_names(text))
+    out = [] if lo <= n <= hi else [f"-h lists {n} option names, not {lo} to {hi}"]
+    flat = " ".join((text.replace(prog, " ") if prog else text).split())
+    out += [f"a date in -h: {d}" for d in DATE_RE.findall(flat)]
+    out += [f"a wall time in -h: {t}" for t in WALL_RE.findall(flat)]
     return out
 
 
@@ -394,22 +415,26 @@ def main():
     in_table = sorted({n for names, _ in rows for n in names if n in olds})
     check(not in_table, "the README knob table names only the new knobs" + (f" -- old: {' '.join(in_table)}" if in_table else ""))
 
-    print("(G) the binaries' help: kebab-case names, 'ps-' only in PS-DTFE, every -h name in --full-help")
+    print("(G) the binaries' help: kebab-case names, 'ps-' only in PS-DTFE, every -h name in --full-help, -h short "
+          "(20 to 35 names) with no date and no wall time")
     import subprocess
     helps = {}
     for b in ("DTFE", "PS-DTFE"):
         exe = ROOT / b
         if not exe.is_file():
             continue
-        helps[b] = tuple(help_names(subprocess.run([str(exe), flag], capture_output=True, text=True).stdout)
-                         for flag in ("--full-help", "-h"))
+        full, short = [subprocess.run([str(exe), flag], capture_output=True, text=True).stdout
+                       for flag in ("--full-help", "-h")]
+        helps[b] = (help_names(full), help_names(short), short_help_shape(short, str(exe)))
     if len(helps) < 2:
         skip("./DTFE and ./PS-DTFE are not both built (make DTFE PS-DTFE): the help rules are not checked")
     else:
-        for b, (full, short) in helps.items():
+        for b, (full, short, shape) in helps.items():
             bad = help_style(full, short, b == "DTFE")
             check(len(full) >= 40 and not bad, f"{b}: {len(full)} --full-help names, {len(short)} -h names, the rules hold"
                   + "".join(f" -- {x}" for x in bad))
+            check(not shape, f"{b}: -h is the short list ({len(short)} option names, {SHORT_HELP_NAMES[0]} to "
+                  f"{SHORT_HELP_NAMES[1]}), with no date and no wall time" + "".join(f" -- {x}" for x in shape))
     print("(S) the checker itself finds planted drift (synthetic)")
     fake = ("x\n| knob (environment) | meaning | default |\n|---|---|---|\n"
             "| `GRID_SIZE` (or `-g`) | cells | 512 (`config.sh`) |\n"
@@ -460,6 +485,27 @@ def main():
     hs = help_style({"grid", "ps-x", "MpcUnit"}, {"grid", "lambda_th"}, True)
     check(len(hs) == 4 and help_names("  -g [ --grid ] arg   x\n  --box arg   y\n        --not-an-entry\n") == {"grid", "box"},
           f"the help rules catch a capital, a '_', a 'ps-' name in standard DTFE and a '-h' name missing from --full-help ({hs})")
+    prog = "/a 2026-01-02 folder/DTFE"            # argv[0] in the usage line: a dated folder is not the help's date
+    entries = "".join(f"  --opt-{i} arg               a line {i}.\n" for i in range(24))
+    clean = (f"Usage: {prog} <input file> <output root> [options]\nTwo modes: --exact and --sampled.\n\nInput:\n"
+             "  -i [ --input-format ] arg   105 Gadget HDF5 (the default) or 101 binary Gadget.\n"
+             "  --padding arg               5 here; the drivers pass 15: 5 is too thin near a face.\n" + entries)
+    dev = "".join(f"  --dev-{i}               a developer option.\n" for i in range(10))
+    shapes = {"clean": short_help_shape(clean, prog), "path": short_help_shape(clean),
+              "long": short_help_shape(clean + dev, prog), "few": short_help_shape("".join(entries.splitlines(True)[:5])),
+              "at19": short_help_shape("".join(entries.splitlines(True)[:19])),
+              "at20": short_help_shape("".join(entries.splitlines(True)[:20])),
+              "at35": short_help_shape(clean + "".join(dev.splitlines(True)[:9]), prog),
+              "date": short_help_shape(clean.replace("a line 3.", "the default since 2026-11-09."), prog),
+              "time": short_help_shape(clean.replace("a line 5.", "it ran in 431\n                              s on the "
+                                                                  "CPU and 75 ms on the GPU."), prog)}
+    check(shapes["clean"] == [] and shapes["path"] == ["a date in -h: 2026-01-02"]
+          and shapes["long"] == ["-h lists 36 option names, not 20 to 35"]
+          and shapes["few"] == ["-h lists 5 option names, not 20 to 35"] and shapes["date"] == ["a date in -h: 2026-11-09"]
+          and shapes["at19"] == ["-h lists 19 option names, not 20 to 35"] and shapes["at20"] == [] and shapes["at35"] == []
+          and shapes["time"] == ["a wall time in -h: 431 s", "a wall time in -h: 75 ms"],
+          f"the short-help guard passes a 26-name -h (its path's date left out, '5 is', '15:' and '101 binary' no times) and "
+          f"catches a 36-name list, a 5-name list, a date and a wall time, one split by the wrap ({shapes})")
 
     print()
     print(f"RESULT: {passed} passed, {failed} failed" + (f", {skipped} skipped" if skipped else ""))

@@ -98,7 +98,6 @@ run() {
     RUN_OUT="$( "${BIN}" "${SNAP}" "${out}" --grid "${grid}" "${COMMON[@]}" "$@" --verbose 3 2>&1 || true )"
 }
 hits()    { echo "${RUN_OUT}" | grep -c "Reused the cached" || true; }
-ignored() { echo "${RUN_OUT}" | grep -c "is ignored for this run" || true; }
 
 echo ""
 echo "(A) first run misses and writes, second run hits"

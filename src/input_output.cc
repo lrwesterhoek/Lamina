@@ -94,7 +94,7 @@ FunctionReadInputData chooseInputDataReadFunction(int const inputFileType)
     else if ( inputFileType==122 )
         return &readBinaryFile_StructuredData;  // structured-data binary reader
     else
-        throwError( "Unknow value for the 'inputFileType' argument in function 'chooseInputDataReadFunction'. The program could not recognize the input data file type." );
+        throwError( "Unknown value for the 'inputFileType' argument in function 'chooseInputDataReadFunction'. The program could not recognize the input data file type." );
     
     return NULL;
 }

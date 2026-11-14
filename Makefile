@@ -17,7 +17,7 @@
 # Linux:
 #   Uses standard system paths (/usr). Install development packages:
 #   sudo apt-get install libgsl-dev libboost-dev libboost-thread-dev libboost-filesystem-dev \
-#       libboost-program-options-dev libcgal-dev libmpfr-dev libhdf5-dev libgmp-dev libtbb-dev
+#       libboost-program-options-dev libcgal-dev libmpfr-dev libhdf5-dev libgmp-dev libtbb-dev libfftw3-dev
 #   or equivalent for your distribution, then run 'make DTFE'
 #
 # CUSTOMIZATION:
@@ -60,13 +60,11 @@ ifeq ($(UNAME_S),Darwin)  # macOS
     SHARED_EXT := .dylib
     EXE_EXT :=
     OBJ_EXT := .o
-    LIB_EXT := .a
 else ifeq ($(UNAME_S),Linux)
     PLATFORM := linux
     SHARED_EXT := .so
     EXE_EXT :=
     OBJ_EXT := .o
-    LIB_EXT := .a
 else
     $(error Unsupported operating system: $(UNAME_S). Only macOS and Linux are supported.)
 endif
@@ -195,11 +193,11 @@ OPTIONS_COMMON += -DNO_SCALARS=1
 
 ############################# Input and output operations default settings ##################################
 #------------------------ set which are the default input and output functions for doing data io
-# default function to read the input data (101-multiple gadget file, 102-single gadget file, 105-HDF5 gadget file, 111-text file, ... see documentation for more options). The input file type can be set during runtime using the option '--input'. This makefile option only sets a default input file in the case none is given via the program options.
+# default function to read the input data (101-multiple gadget file, 102-single gadget file, 105-HDF5 gadget file, 111-text file, ... see documentation for more options). The input file type can be set during runtime using the option '--input-format'. This makefile option only sets a default input file in the case none is given via the program options.
 OPTIONS_COMMON += -DINPUT_FILE_DEFAULT=105
-# default value for the units of the input data (value=what is 1 Mpc in the units of the data - in this example the data is in kpc). You can change this also during runtime using the program option '--MpcUnit'.
+# default value for the units of the input data (value=what is 1 Mpc in the units of the data - in this example the data is in kpc). You can change this also during runtime using the program option '--mpc-unit'.
 OPTIONS_COMMON += -DMPC_UNIT=1000
-# default function to write the output data (101-binary file, 111-text file, ... see documentation for more options). The output file type can be set during runtime using the option '--output'. This makefile option only sets a default output file in the case none is given via the program options.
+# default function to write the output data (101-binary file, 111-text file, ... see documentation for more options). The output file type can be set during runtime using the option '--output-format'. This makefile option only sets a default output file in the case none is given via the program options.
 OPTIONS_COMMON += -DOUTPUT_FILE_DEFAULT=101
 #101 for binary file, 100 my density file
 
@@ -220,7 +218,7 @@ OPTIONS_PS = $(OPTIONS_COMMON) -DPHASE_SPACE
 
 # ---- GPU backend (optional): METAL=1 on macOS/Apple Silicon, the only one. It defines DTFE_GPU / PS_GPU (the
 # guards used by the callers) plus GPU_BACKEND_NAME, links the Metal host object and frameworks, and the binary is
-# run with '--gpu' (standard DTFE) / '--ps-gpu' (PS-DTFE). Without it the build is CPU-only and those flags fall
+# run with '--gpu' (both binaries). Without it the build is CPU-only and the flag falls
 # back to the CPU with a warning. Metal embeds + runtime-compiles the kernels in metal/*.metal. The CUDA/HIP port
 # and its CPU emulation (CUDA=1, HIP=1, CUDAEMU=1) are kept on the branch archive/cuda-hip-2026-11-08, not here:
 # an old command line naming them stops at once rather than building a CPU-only binary under that name.
@@ -240,7 +238,7 @@ PS_GPU_LIBS =
 GPU_BUILD_ARG =
 
 # The GPU kernels deposit tetrahedra into 3D cells: a DIM=2 build is CPU-only whatever backend is
-# asked for (its --gpu / --ps-gpu then fall back with the usual warning).
+# asked for (its --gpu then falls back with the usual warning).
 ifeq ($(DIM),2)
 ifneq ($(GPU_MODE),off)
 $(info >> DIM=2: the GPU kernels are 3D only; this 2D build is CPU-only)
@@ -403,7 +401,6 @@ endif
 # object without a clean.
 COMPILE_FLAGS = $(BASE_CFLAGS) -std=c++17 -Wno-psabi -Wno-cpp -Wno-deprecated-declarations -frounding-math -MMD -MP $(DEBUG_FLAGS) $(EXTRA_FLAGS) $(MACOS_ISYSROOT)
 COMPILE_FLAGS_PS = $(BASE_CFLAGS_PS) -std=c++17 -Wno-psabi -Wno-cpp -Wno-deprecated-declarations -frounding-math -MMD -MP $(DEBUG_FLAGS) $(EXTRA_FLAGS) $(MACOS_ISYSROOT)
-LINK_FLAGS =
 # NOTE: no -lboost_system: Boost.System is header-only since Boost 1.69,
 # and recent Homebrew/Boost do not ship libboost_system ("library not found").
 BASE_LIBS = -lboost_thread -lboost_filesystem -lboost_program_options -lgsl -lgslcblas -lm -lgmp -lmpfr -lfftw3f -lfftw3
@@ -491,11 +488,9 @@ endif
 ifeq ($(PLATFORM),macos)
     COMPILE_FLAGS += -fopenmp=libomp
     COMPILE_FLAGS_PS += -fopenmp=libomp
-    OPENMP_LIB = -lomp
 else ifeq ($(PLATFORM),linux)
     COMPILE_FLAGS += -fopenmp
     COMPILE_FLAGS_PS += -fopenmp
-    OPENMP_LIB = -lgomp
 endif
 
 # Native-CPU tuning: let the compiler vectorise/schedule the interpolation hot loop for
@@ -540,9 +535,9 @@ DTFE_INC = $(INCLUDES)
 
 # Linking
 ifeq ($(findstring -DHDF5,$(OPTIONS)),-DHDF5)
-    DTFE_LIB = $(LIBRARIES) $(BASE_LIBS) $(HDF5_LIBS)   # OpenMP runtime auto-linked by -fopenmp; $(OPENMP_LIB) omitted to avoid duplicate-library warning
+    DTFE_LIB = $(LIBRARIES) $(BASE_LIBS) $(HDF5_LIBS)   # OpenMP runtime auto-linked by -fopenmp; no -lomp / -lgomp (a duplicate-library warning)
 else
-    DTFE_LIB = $(LIBRARIES) $(BASE_LIBS)   # OpenMP runtime auto-linked by -fopenmp; $(OPENMP_LIB) omitted to avoid duplicate-library warning
+    DTFE_LIB = $(LIBRARIES) $(BASE_LIBS)   # OpenMP runtime auto-linked by -fopenmp; no -lomp / -lgomp (a duplicate-library warning)
 endif
 
 
@@ -562,9 +557,7 @@ WEB_FIELDS_SOURCES = web_fields.cc web_fields.h define.h user_options.h quantiti
 DTFE_CC_SOURCES = user_options.cc quantities.cc NGP_interpolation.cc CIC_interpolation.cc TSC_interpolation.cc PCS_interpolation.cc SPH_interpolation.cc interlacing.cc random.cc web_fields.cc auto_tune.cc
 TRIANG_HEADERS = $(addprefix CGAL_triangulation/, triangulation_common.h triangulation_miscellaneous.h field_computation.h sample_eval.h padding_test.h my_function.h CGAL_include_2D.h CGAL_include_3D.h vertexData.h particle_data_traits.h) define.h particle_data.h user_options.h box.h quantities.h Pvector.h message.h math_functions.h miscellaneous.h ps_point_eval.h thread_count.h
 TRIANG_SOURCES = $(addprefix CGAL_triangulation/, triangulation.cpp) $(TRIANG_HEADERS)
-TRIANG_CC_SOURCES = $(addprefix CGAL_triangulation/, unaveraged_interpolation.cc averaged_interpolation_1.cc averaged_interpolation_2.cc ps_interpolation.cc ps_point_eval.cc ps_serve.cc ps_mean_streams.cc)
 
-ALL_FILES = $(DTFE_SOURCES) $(DTFE_CC_SOURCES) $(TRIANG_SOURCES) $(MAIN_SOURCES) kdtree/kdtree2.hpp kdtree/kdtree2.cpp
 LIB_FILES = $(DTFE_SOURCES) $(DTFE_CC_SOURCES) $(TRIANG_SOURCES)
 
 # (every header these include goes with them: message.h reads env_knobs.h, user_options.h run_mode.h and fixed_units.h)

@@ -375,7 +375,7 @@ supersede_snapshot() {
 # saved old log as '<prefix>.runlog' there. Prints one line per move and a summary; a failed move is said and left
 # (the run itself succeeded). Never deletes, never overwrites ('mv -n', checked). Returns 0.
 supersede_extras() {
-    local root="$1" list="$2" marker="$3" oldlog="$4" dir pfx line ino n f now dest moved=0 failed=0
+    local root="$1" list="$2" marker="$3" oldlog="$4" dir pfx line ino n f now dest moved=0
     [ -n "${list}" ] || return 0
     dir="${root%/*}"; pfx="${root##*/}"
     while IFS= read -r line; do
@@ -395,7 +395,7 @@ supersede_extras() {
         fi
         if [ -e "${dest}/${n}" ] || ! mv -n "${f}" "${dest}/${n}" || [ -e "${f}" ]; then
             echo "  Warning: could not move '${n}' into ${dest} (left in place)" >&2
-            failed=$((failed + 1)); continue
+            continue
         fi
         echo "  Superseded: ${n} (an earlier run's; this run did not write it)"
         moved=$((moved + 1))
@@ -552,7 +552,7 @@ average_option() {
 # it), then a SUBSAMPLES count (the environment or -n),
 # which asks for the sampled one, then the default, exact. average_src names which of these decided (the banner says
 # it). With <what> ('cell average', 'deposit'): an exact one asked for beside a count earns one note that the count is
-# ignored (the binaries take the pair the same way). The drivers then pass --exact or --sampled on every run, so the
+# ignored (the drivers pass no count beside --exact). The drivers then pass --exact or --sampled on every run, so the
 # run log says which ran; run_ps_pipeline.sh calls it without <what> (the driver it starts says the note).
 average_resolve() {
     case "${_caller_exact:-}" in [Aa][Uu][Tt][Oo]) _caller_exact="" ;; esac   # no pin (src/env_knobs.h tristate)
@@ -570,7 +570,7 @@ average_resolve() {
         DTFE_EXACT_AVERAGE=1; average_src="the default"
     fi
     if [ -n "${1:-}" ] && [ "${DTFE_EXACT_AVERAGE}" = "1" ] && [ -n "${SUBSAMPLES:-}" ]; then
-        echo "Note: SUBSAMPLES=${SUBSAMPLES} is ignored: ${average_src} asks for the exact $1, which samples nothing (--sampled or DTFE_EXACT_AVERAGE=0 runs the sampled one with it)"
+        echo "Note: SUBSAMPLES=${SUBSAMPLES} is ignored: ${average_src} asks for the exact $1, which the driver runs without a count (--sampled or DTFE_EXACT_AVERAGE=0 runs the sampled one with it)"
     fi
 }
 
