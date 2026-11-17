@@ -15,14 +15,13 @@
 #          --run-mode
 #     -m   run the '_a' interpolation on the GPU (--gpu; same as DTFE_GPU=1). The default (DTFE_GPU unset, 'auto')
 #          is the GPU when the binary was built with one (the Makefile's o/.gpu_mode_metal stamp;
-#          o_d for DTFE_PRECISION=double), else the CPU -- and the CPU for the sampled average in performance, faster
-#          there; DTFE_GPU=0 runs the CPU on a GPU build.
+#          o_d for DTFE_PRECISION=double), else the CPU -- and the CPU for the sampled average in every run mode, as
+#          the binary picks it; DTFE_GPU=0 runs the CPU on a GPU build. The binary is started with the resolved
+#          DTFE_GPU (0 or 1) in its environment, which it reads.
 #     -e   every '_a' cell the EXACT average of the linear interpolant over the cell (--exact). The DEFAULT
 #          (DTFE_EXACT_AVERAGE=1, the production standard: no sampling noise, the mass exact to ~3e-8); -e overrides
 #          an exported DTFE_EXACT_AVERAGE=0 and keeps the exact average beside a SUBSAMPLES count (ignored, said).
-#     --sampled  the Monte-Carlo sample mean instead (the same as DTFE_EXACT_AVERAGE=0). At 512^3 (TNG100-3-Dark
-#          z=0, 2026-11-09) it took 315 s on the CPU and 433 s on the GPU, the exact average with the face
-#          gradient 431 s and 439 s (both measured with every core, as in performance).
+#     --sampled  the Monte-Carlo sample mean instead (the same as DTFE_EXACT_AVERAGE=0).
 #     -n   SUBSAMPLES: k sampling points per axis (k^3 per cell) of the Monte-Carlo mean (--subsamples k, the same
 #          unit as run_ps_dtfe.sh's); passed only when set (the binary's own default otherwise). While
 #          DTFE_EXACT_AVERAGE is unset (and neither -e nor --sampled is given) a count selects the Monte-Carlo mean,
@@ -88,13 +87,13 @@ knob DTFE_GPU DTFE_METAL          # (config.sh knob: the older name read for one
 DTFE_GPU="${DTFE_GPU:-auto}"     # 1 = the '_a' interpolation on the GPU (--gpu), 0 = the CPU; 'auto'
                                  # (default, the drivers' rule) = 1 when the binary is a GPU build (config.sh
                                  # gpu_build_default), resolved below once DTFE_PRECISION has chosen the binary --
-                                 # but 0 for the sampled average in performance, faster on the CPU (config.sh
-                                 # gpu_auto_resolve). The same knob as run_ps_dtfe.sh's
+                                 # but 0 for the sampled average, in every run mode (config.sh gpu_auto_resolve);
+                                 # exported to the binary as resolved. The same knob as run_ps_dtfe.sh's
 _caller_run_mode="${DTFE_RUN_MODE:-}"   # (the caller's own value: config.sh run_mode_resolve reads it after the options)
 DTFE_RUN_MODE="${DTFE_RUN_MODE:-auto}"  # how hard the run may lean on the machine, passed on every run as '--run-mode
                                  # MODE': gentle, balanced or performance (any case); 'auto' (default) = balanced, or
                                  # performance inside a SLURM or PBS job (config.sh run_mode_resolve; --run-mode MODE
-                                 # wins). It also steers DTFE_GPU's 'auto', above. The same knob as run_ps_dtfe.sh's
+                                 # wins). The same knob as run_ps_dtfe.sh's
 knob DTFE_EXACT_AVERAGE DTFE_EXACT
 _caller_exact="${DTFE_EXACT_AVERAGE:-}"   # (the caller's own value: unset, a SUBSAMPLES count selects the sampled mean)
 DTFE_EXACT_AVERAGE="${DTFE_EXACT_AVERAGE:-1}"  # 1 (default, the production standard) = exact cell
@@ -140,8 +139,7 @@ TESSELLATION_CACHE="${TESSELLATION_CACHE:-}"  # a LOCAL folder: reuse the Delaun
                                  # thread sub-box of each partition, one per partition with SAMPLE_POINTS) -- the
                                  # same knob as run_ps_dtfe.sh
 LAMBDA_TH="${LAMBDA_TH:-0.3}"    # eigenvalue threshold of the T-web / V-web classes (--lambda-th), the SAME default as
-                                 # run_ps_dtfe.sh (the binary's own default is 0.0: a run without this flag classifies
-                                 # differently from a scripted one)
+                                 # run_ps_dtfe.sh and the binary's own; passed on every run, so the run log names it
 DTFE_RESUME="${DTFE_RESUME:-1}"  # 1 (default) = resume a killed partitioned run, the same knob as run_ps_dtfe.sh's:
                                  # when the snapshot's checkpoint file exists (<prefix>.runlog.checkpoint/checkpoint
                                  # beside the outputs, or under SCRATCH_DIR; config.sh ps_checkpoint_dir, the same rule
@@ -210,7 +208,11 @@ cd "$REPO_ROOT" || exit 1
 driver_binary DTFE_BIN DTFE "${DTFE_PRECISION}"      # ./DTFE or ./DTFE-double (config.sh)
 gpu_auto_resolve DTFE_GPU "${DTFE_BIN}" dtfe "${DTFE_EXACT_AVERAGE}" "${DTFE_RUN_MODE}"   # DTFE_GPU=auto: the GPU when
                                                       # this binary was built with one, but the CPU for the sampled
-                                                      # average in performance (config.sh)
+                                                      # average (config.sh)
+# the resolved device (0 or 1) into the binary's environment: the binary reads DTFE_GPU (0 = the CPU) and, without
+# it, picks its device itself, so a 0 that stayed a shell variable would leave the banner's CPU to the binary's pick
+# (-m still passes --gpu for 1; the command lines DRY_RUN prints do not show it)
+export DTFE_GPU
 time_wrap_resolve                                     # TIME_WRAP: the optional peak-memory wrapper
 [ -n "${THREADS}" ] && export OMP_NUM_THREADS="${THREADS}"
 keep_awake "${DRY_RUN}"

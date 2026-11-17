@@ -17,8 +17,8 @@ nearest-grid-point. Snapshots without fields on disk yield NaN with a note in en
 
 The velocity-gradient family (vweb, divergence, ...) is the MEAN-FIELD one for both estimators by default
 (mean_field=True): FieldSet.load(name, mean_field=True), i.e. standard DTFE's stored grids, a PS-DTFE
-face-gradient run's stored grids too (FieldSet.face_gradient: the PS binary's default with the exact deposit and
-the volume weighting), and for any other PS-DTFE run the same quantity derived from its velocity grid instead of
+face-gradient run's stored grids too (FieldSet.face_gradient: the PS binary's default with the exact deposit),
+and for any other PS-DTFE run the same quantity derived from its velocity grid instead of
 its stored stream average <grad v> (dtfelib/io.py, the note above FIELDS). That derivation costs a PS output an FFT
 computation per call (seconds to a minute at 512^3): sample every position of a snapshot in ONE sample_fields_at
 call. mean_field=False reads the stored PS grids as they are (the stream average, or a face-gradient run's mean

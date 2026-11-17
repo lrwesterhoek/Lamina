@@ -95,6 +95,8 @@ class ExactZoomWorker(QObject):
                 Path(req["cache_dir"]).mkdir(parents=True, exist_ok=True)
             env = dict(os.environ)
             env.pop("CLICOLOR_FORCE", None)
+            # the device the command names, pinned (rs.gpu_pin_env): a DTFE_GPU from the login shell must not move it
+            env.update(rs.gpu_pin_env(req["cmd"]))
             self.proc = subprocess.Popen(req["cmd"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                          text=True, errors="replace", bufsize=1, env=env)
             if self.cancel_requested:
@@ -223,7 +225,7 @@ def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: 
     import tempfile
     plan = {"cmd": None, "note": "", "root": None, "grid": None, "edges": None, "window": None,
             "ps": False, "cache_dir": None, "partition": None, "sets": {}, "snapshot": None,
-            "lagrangian": None}
+            "lagrangian": None, "mass_weighted_map": False}
     kw = G.server_settings(o, snapshot)
     if kw is None:
         plan["note"] = "no snapshot known for this output (its input file is not beside it)"
@@ -293,12 +295,14 @@ def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: 
         corners = [f"{float(v):.10g}" for pair in window for v in pair]   # Mpc, as --grid-window takes
         cmd += ["--grid-window", *corners, "--field", "density_a", "velocity_a", "dispersion_a", "gradient_a",
                 "--exact", "--ps-caustics"]                         # (Exact, named: the zoom is its cell averages)
-        if side.get("volume_weighted", True):
-            cmd.append("--ps-volume-weighted")
+        # the volume-weighted velocity moments, PS-DTFE's only ones (the flag is accepted and named, as the jobs name
+        # it); an older output whose saved settings say mass-weighted moments gets them too, and the zoom says so
+        cmd.append("--ps-volume-weighted")
+        plan["mass_weighted_map"] = not side.get("volume_weighted", True)
         # the velocity gradient's route as the output's own run took it (its '.a_velDivStreams' marks the mean flow's
         # derivatives from exact face sums, an Exact run's in 3D without the halo release): the zoom's derivatives are
         # then the map's, and an output that stored the stream average (a Fast run's) keeps it
-        cmd.append("--face-gradient" if o.face_gradient and "--ps-volume-weighted" in cmd else "--per-tet-gradient")
+        cmd.append("--face-gradient" if o.face_gradient else "--per-tet-gradient")
         # chart-independent tet masses: as the custom run recorded it, or, for a TNG output (no
         # sidecar: the batch script's default, on, when the converted ICs are the Lagrangian input)
         if (bool(side.get("vertex_mass")) if side else bool(kw.get("lagrangian_input"))):
@@ -309,12 +313,12 @@ def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: 
                 and "--ps-alpha-shape" not in cmd):
             cmd += ["--ps-alpha-shape", f"{float(side['alpha_shape']):g}"]
         # the GPU when built, as an Exact run of a full grid gets (rs.recommended_gpu): a zoom puts large tetrahedra
-        # into one thin slice of fine cells, where the GPU's exact deposit leads (the binaries do not pick a device
-        # yet, so the launcher names it)
+        # into one thin slice of fine cells, where the GPU's exact deposit leads (the launcher names the device, and
+        # the worker pins DTFE_GPU to it, ExactZoomWorker.run)
         if rs.gpu_built("ps", precision, o.dim):
             cmd.append("--gpu")
-        # balanced: the zoom runs beside the launcher, where the binary's own default (performance: every core,
-        # long GPU buffers) would keep the display waiting
+        # balanced, named: the zoom runs beside the launcher (the binary's own default, but inside a batch job it is
+        # performance: every core, long GPU buffers, which would keep the display waiting)
         cmd += ["--run-mode", "balanced"]
         # the query server's tessellations on disk: the same cache folder and split, so a cached
         # partition is loaded instead of rebuilt and one that never reaches the window is skipped;
@@ -335,10 +339,11 @@ def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: 
         if periodic:
             cmd.append("--periodic")
         cmd += list(kw.get("options", []))                          # the custom snapshot's own --box
-        # the padding around the region: the binary's own '--padding 5' leaves wrong values in the
+        # the padding around the region: a thin one (5, an older binary's default) leaves wrong values in the
         # cells near the region's faces (as near a box face: the Delaunay tetrahedra there reach the padded
-        # set's hull); the query server's 15 (dtfelib.estimator.STANDARD_PADDING, run_dtfe.sh's default) unless
-        # the snapshot's own options carry one. Placed before '--region-mpc': its corners are followed by '--field'
+        # set's hull); the query server's 15 (dtfelib.estimator.STANDARD_PADDING, run_dtfe.sh's default and the
+        # binary's own), named unless the snapshot's own options carry one. Placed before '--region-mpc': its
+        # corners are followed by '--field'
         if not any(str(v) in ("--padding", "--padding-mpc", "--paddingMpc") for v in kw.get("options", [])):
             cmd += ["--padding", f"{STANDARD_PADDING:g}"]
         cmd += ["--region-mpc", *corners, "--field", "density_a", "velocity_a", "gradient_a", "--exact"]
@@ -595,7 +600,8 @@ class ZoomMixin:
         a0, a1 = plan["edges"]                          # the region as the run will grid it
         req = {"output": o, "axis": axis, "index": index, "rest": rest, "a0": a0, "a1": a1, "res": res,
                "depth": depth, "exact": True, "cmd": plan["cmd"], "root": plan["root"], "grid": plan["grid"],
-               "cache_dir": plan.get("cache_dir"), "stamp": self._file_stamp(o)}
+               "cache_dir": plan.get("cache_dir"), "stamp": self._file_stamp(o),
+               "mass_weighted_map": bool(plan.get("mass_weighted_map"))}
 
         self._zoom_pending = True
         self._exact_running = True
@@ -772,6 +778,9 @@ class ZoomMixin:
         self._out_form_map.setRowVisible(self.ps_gradient_note, False)
         if fam == "stream" and req.get("ps_gradient") == "mean-field":
             note += " · its velocity derivatives are the stream average (a point evaluation has no mean field)"
+        if z.get("exact") and z.get("mass_weighted_map"):
+            # an older output made with mass-weighted moments: PS-DTFE has only the volume-weighted ones now
+            note += " · the zoom's velocities are volume-weighted, this older output's mass-weighted"
         comp = G.component_suffix(req["component"])
         self.view.colorbar.set(req["cmap"], vrange, G.colourbar_label(label, req), req["log"],
                                levels=self._contour_marks())

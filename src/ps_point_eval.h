@@ -54,7 +54,7 @@ bool psPointEvalActive();
 void psPointEvalInit(User_options &userOptions);
 
 // Sorts each point's accumulated stream records (density descending) and reduces them to the
-// per-point outputs: total density, mass-weighted mean velocity, velocity dispersion tensor,
+// per-point outputs: total density, mean velocity over the streams, velocity dispersion tensor,
 // stream count. Call once, after ALL partitions have been processed.
 void psPointEvalFinalize(User_options const &userOptions);
 

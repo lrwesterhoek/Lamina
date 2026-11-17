@@ -104,8 +104,10 @@ PYEOF
 # method 2's 20 random points per cell (NS), with which S7's golden values are drawn: a total that no '--subsamples k'
 # (k^3) gives, so the method-2 runs name no count and take method 2's own default, 20 (user_options.cc
 # readAveragingOptions; the cone and the user points keep it too). The deprecated total '--samples 20' gave the same
-# 20 draws; it goes with the old spellings (docs/cleanup-plan.md P6.6), the default stays
-C0=(--input-format 105 --mpc-unit 1 --no-padding-test --verbose 1)
+# 20 draws; it goes with the old spellings (docs/cleanup-plan.md P6.6), the default stays. '--padding 5': S7's golden
+# values and the measured bounds below were made at the binary's padding of before (5 mean spacings; 15 since), so
+# every run names it
+C0=(--input-format 105 --mpc-unit 1 --no-padding-test --verbose 1 --padding 5)
 C=("${C0[@]}" --region-mpc 2.5 7.5 2.5 7.5 2.5 7.5)
 CONE=(--grid 4 4 6 --redshift-cone 0.5 2.0 30 150 0 300 --cone-origin 5 5 5)
 # run <name> <program> [args...]: one run on one thread, its log beside it

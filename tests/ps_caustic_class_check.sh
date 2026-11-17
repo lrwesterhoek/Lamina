@@ -11,8 +11,7 @@
 #     cells the fold flag marks. (This is what proves the class bits leave the fold bits alone.)
 #  C) k = 0 in every single-stream cell -- no axis can have collapsed where there is one stream.
 #  D) The mean stream count increases strictly with k: uncollapsed < wall < filament < node.
-#  E) The GPU deposit reproduces BOTH '.caustic' and '.causticClass' byte-for-byte; only the
-#     --ps-linear-deposit combination falls back to the parity-only fold flag, and says so.
+#  E) The GPU deposit reproduces BOTH '.caustic' and '.causticClass' byte-for-byte.
 #  J) The fold flag is the GEOMETRIC overlap of a folded tetrahedron, not a per-sample
 #     hit: on thin young folds it equals dtfelib's (streams > 1 + tol) | (hidden_streams & 1) cell for
 #     cell, is the same for nSub 1, nSub 3 and the exact deposit, and is split- and GPU-invariant.
@@ -440,8 +439,7 @@ PYEOF
 echo ""
 echo "(E) GPU behaviour: BOTH the fold flag and the full stratification must match the CPU exactly"
 echo "    (the double build, whose GPU works on float copies, to 1e-4 of the cells)."
-echo "    The per-tet mask reaches the kernel through the otherwise-unused 'dens' buffer, so only the"
-echo "    --ps-linear-deposit combination (which needs that buffer) falls back to parity."
+echo "    The per-tet mask reaches the kernel through the otherwise-unused 'dens' buffer."
 # GPU grid == CPU grid ($1 = extension): byte for byte in the single build. The double build hands the GPU
 # float copies of its double tetrahedra (ps_double_check D5), so a sample on a face may count differently there:
 # up to 1e-4 of the cells may differ (a cell whose GPU sample counts 2 streams instead of 1 differs in its
@@ -471,16 +469,6 @@ if [ -d o_ps ] && [ ! -f o_ps/.gpu_mode_off ]; then   # a GPU build (the Metal s
         echo "   PASS  GPU '.causticClass' matches the CPU (mask rides in the dens buffer; byte for byte, the double build to 1e-4 of the cells)"
     else
         echo "   FAIL  GPU '.causticClass' differs from the CPU"
-        py_rc=1
-    fi
-    # --ps-linear-deposit needs 'dens' for real densities, so the mask cannot ride along: that
-    # combination must fall back to the parity-only fold flag AND say so.
-    lin="$("${BIN}" "${SNAP}" "${OUT}_gpulin" --grid "${GRID}" --periodic --field density --mpc-unit 1 \
-            --max-concurrent 1 --ps-caustics --ps-linear-deposit --gpu 2>&1 || true)"
-    if grep -q "ps-linear-deposit" <<< "${lin}"; then
-        echo "   PASS  --ps-caustics --ps-linear-deposit --gpu warns that the stratification is CPU-only"
-    else
-        echo "   FAIL  the --ps-linear-deposit GPU combination did not warn"
         py_rc=1
     fi
 else

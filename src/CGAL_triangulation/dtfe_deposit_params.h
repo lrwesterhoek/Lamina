@@ -7,8 +7,8 @@
    MSL. Its static_assert runs in both compilers and pins the layout.
 
    A batch = one sub-domain's tetrahedra. nGrid is its sub-grid; a sample inside the sub-grid is owned by this batch
-   and lands at full-grid cell pos + subOff. With subOff = 0 and fullGrid = nGrid this is the plain single-grid
-   deposit. Positions are relative to a corner the host chooses per tetrahedron and names by its sub-grid cell
+   and lands at full-grid cell pos + subOff. The host always passes subOff = 0 and fullGrid = nGrid, the plain
+   single-grid deposit. Positions are relative to a corner the host chooses per tetrahedron and names by its sub-grid cell
    (buffer 22, 'cells'): the exact average's base cell of the FULL grid (averaged_interpolation_1.cc GridFrame, plan
    P10.8: the same frame in every sub-domain, so the same shares), the Monte-Carlo average's sub-domain lower corner
    (cell 0, so the cell classification is the CPU loop's, bit for bit). Buffer numbers are those of
@@ -33,8 +33,8 @@ struct DTFEDepositParams
     int32_t  subOff[3];      // the sub-grid's origin in the accumulated grid
     uint32_t itemBase;       // item kernel: the first item of this dispatch (items are numbered per batch)
     int32_t  fullGrid[3];    // the accumulated grid's dimensions (flat index = full-grid index)
-    uint32_t debugNoAtomic;  // DTFE_GPU_DEBUG_NOATOMIC, a timing experiment: compute everything, issue fewer or no
-                             // atomics (the grids come out wrong; dtfe_gpu_fixed.h dtfeBatchParams has the levels)
+    uint32_t debugNoAtomic;  // always 0: no switch sets it; kept, and still tested by the kernels, so the kernel
+                             // code stays the same
     float    invDx[3];       // 1/dx: the cell of a sample is floor((base + p) * invDx) in both kernels
     uint32_t tableEntries;   // item kernel: entries of the threadgroup cell table (a power of two; 0 = none)
     int32_t  fScal;          // deposit the scalar, ONE component (per-tet kernel; Metal specializes the item

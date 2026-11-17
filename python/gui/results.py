@@ -59,6 +59,16 @@ _NSUB = re.compile(r"--subsamples (\d+)")             # (canonical: an older log
 _NSUB_HEAD = re.compile(r"^\s*avg sub-samples \(nSub\)\s*:\s*(\d+)", re.M)
 _MERGE = re.compile(r"(?:^|\s)--ps-merge (\S+)")
 _RUN_MODE = re.compile(r"(?:^|\s)--run-mode[ =](\S+)")    # the machine use (a log without it: performance)
+# the run-log header's run-mode line, every run's since the run modes: 'run mode : balanced (--run-mode balanced, the
+# default; ...)', the mode the run took and why (the option, DTFE_RUN_MODE or the binary's default, which is balanced,
+# or performance inside a batch job). Read before the command's '--run-mode' (RunRecord.run_mode)
+_RUN_MODE_HEAD = re.compile(r"^\s*run mode\s+:\s+(gentle|balanced|performance)\b", re.M)
+# the run-log header's device line, where the device matters (standard DTFE's "'_a' interpolation : ..." with an '_a'
+# field, PS-DTFE's 'PS deposit : ...' with one): a value starting with 'CPU' is the CPU ('CPU (DTFE_GPU=0)', 'CPU (the
+# default for the sampled average; ...)'), else one holding ' GPU' the GPU ('Metal GPU (--gpu)', 'Metal GPU (the
+# default; ...)'). A binary that picks its device prints it on the GPU and the CPU alike; an older one printed it only
+# for a command with '--gpu', so a log without it is read by that flag (RunRecord.gpu)
+_DEVICE = re.compile(r"^\s*(?:'_a' interpolation|PS deposit)\s+:\s+(.*)$", re.M)
 # the run-log header's line on the cell average, the run's own word on it: standard DTFE 'volume averaging : EXACT
 # cell-tetrahedron integration ...' or 'SAMPLED (...)', PS-DTFE 'grid deposit : EXACT tetrahedron-cell intersection
 # moments ...' or 'SAMPLED on nSub^3 sub-points (...)'. Binaries since 2026-11-09 print it either way (the exact
@@ -71,6 +81,11 @@ _AVERAGE = re.compile(r"^\s*(?:volume averaging|grid deposit)\s+:\s+(EXACT (?:ce
 # default (docs/cleanup-plan.md D13) has none: its route is the stream average unless the command names
 # '--face-gradient'
 _GRADIENT = re.compile(r"^\s*velocity gradient\s+:\s+(from EXACT FACE)?", re.M)
+# the PS-DTFE run-log header's line on the velocity moments, printed by every PS-DTFE run beside its command line:
+# 'velocity moments : volume-weighted (the dispersion mass-weighted)'. A log of an older binary has none: its moments
+# were volume-weighted only where the command names '--ps-volume-weighted' (dtfelib.io.run_velocity_weighting reads
+# both the same way)
+_MOMENTS = re.compile(r"^\s*velocity moments\s+:\s+(volume-weighted)?", re.M)
 # the binaries' older spellings and their canonical names: dtfelib/runlog.py's permanent table (the binaries accept
 # a subset for one release, src/user_options.cc deprecatedOptions). Every reader of a command line maps them first,
 # so a run log written with either reads the same (RunRecord.has, and every regex below runs on canonical_command's
@@ -260,6 +275,9 @@ class RunRecord:
     header_average: str = ""        # 'exact' | 'sampled': the header's cell-average line (_AVERAGE); '' without one
     header_gradient: str = ""       # 'face' | 'per-tet': the header's velocity-gradient line (_GRADIENT); '' if none
     header_nsub: int | None = None  # the header's count line (_NSUB_HEAD): a sampled PS-DTFE run's; None without one
+    header_moments: str = ""        # 'volume' | 'other': the header's velocity-moments line (_MOMENTS); '' if none
+    header_device: str = ""         # 'cpu' | 'gpu': the header's device line (_DEVICE); '' without one
+    header_run_mode: str = ""       # 'gentle' | 'balanced' | 'performance': the header's run-mode line (_RUN_MODE_HEAD)
     build_rev: str = ""
     build_time: _dt.datetime | None = None
     finished: _dt.datetime | None = None   # the log's modification time = when the run ended
@@ -320,6 +338,15 @@ class RunRecord:
         return self.has("--face-gradient")
 
     @property
+    def volume_weighted(self) -> bool:
+        """PS-DTFE: the run's velocity moments were volume-weighted -- the header's 'velocity moments' line says so
+        when the log has one (every PS-DTFE run prints it: the program always volume-weights them); else the
+        command's '--ps-volume-weighted' (an older binary's run without it holds mass-weighted moments)."""
+        if self.header_moments:
+            return self.header_moments == "volume"
+        return self.has("--ps-volume-weighted")
+
+    @property
     def estimator(self) -> str:
         return "ps" if self.binary.startswith("PS-DTFE") else "dtfe" if self.binary.startswith("DTFE") else ""
 
@@ -362,7 +389,12 @@ class RunRecord:
 
     @property
     def gpu(self) -> bool:
-        return self.has("--gpu")                # PS-DTFE's older '--ps-gpu' too (canonical_flag)
+        """The run's '_a' work ran on the GPU: the header's device line says so when the log has one (a binary that
+        picks its device prints it wherever the device matters, the GPU or the CPU); else the command's '--gpu' (an
+        older binary ran on the GPU only with it; PS-DTFE's older '--ps-gpu' too, canonical_flag)."""
+        if self.header_device:
+            return self.header_device == "gpu"
+        return self.has("--gpu")
 
     @property
     def sliced(self) -> bool:
@@ -414,7 +446,7 @@ class RunRecord:
                 bits.append("face gradient")
             if self.has("--ps-vertex-mass"):
                 bits.append("vertex mass")
-            if self.has("--ps-volume-weighted"):
+            if self.volume_weighted:                  # the header's line, else the command's flag
                 bits.append("volume-weighted")
             if self.has("--ps-caustics"):
                 bits.append("caustics")
@@ -443,8 +475,12 @@ class RunRecord:
 
     @property
     def run_mode(self) -> str:
-        """The machine use the command gave ('--run-mode MODE'), else 'performance': the binaries' default, which an
-        older binary, without the option, ran at too."""
+        """The machine use the run took: the header's 'run mode' line when the log has one (it names the mode however
+        it was chosen: '--run-mode', DTFE_RUN_MODE or the binary's default); else the command's '--run-mode MODE';
+        else 'performance', the default of the older binaries that wrote neither, and of the ones without the
+        option."""
+        if self.header_run_mode:
+            return self.header_run_mode
         m = _RUN_MODE.search(self.canonical)
         return m.group(1) if m else "performance"
 
@@ -467,7 +503,7 @@ class RunRecord:
                      # named no route took the binary's default, which a ticked job asks for where it qualifies
                      face_gradient=not self.has("--per-tet-gradient"),
                      vertex_mass=self.has("--ps-vertex-mass"),
-                     volume_weighted=self.has("--ps-volume-weighted"),
+                     volume_weighted=self.volume_weighted,
                      caustics=self.has("--ps-caustics"), caustic_cusps=self.has("--ps-caustic-cusps"),
                      parallel_triangulation=self.has("--parallel-triangulation"),
                      # the default is ON (the staged merge in index order), so only
@@ -544,7 +580,8 @@ def run_inputs(rec: RunRecord) -> set[Path]:
 # the launcher rescans every 30 s on its GUI thread, and a TNG50 z=0 log is large and on the
 # external disk; an unchanged log is not read again
 _LOG_FIELDS = ("binary", "build_rev", "build_time", "command", "header_average", "header_gradient", "header_nsub",
-               "gpu_retried", "gpu_retries", "gpu_retries_by_cause", "wall_seconds", "peak_rss_gb", "footprint_gb", "ok")
+               "header_moments", "header_device", "header_run_mode", "gpu_retried", "gpu_retries",
+               "gpu_retries_by_cause", "wall_seconds", "peak_rss_gb", "footprint_gb", "ok")
 _LOG_CACHE: dict[str, tuple[int, int, dict]] = {}
 
 
@@ -578,6 +615,18 @@ def _parse_text(rec: RunRecord, text: str):
         k = _NSUB_HEAD.search(text, m.end(), nxt.start() if nxt else len(text))   # the count's line, the same way
         if k:
             rec.header_nsub = int(k.group(1))
+        v = _MOMENTS.search(text, m.end(), nxt.start() if nxt else len(text))     # the moments' line, the same way
+        if v:
+            rec.header_moments = "volume" if v.group(1) else "other"
+        # the device's line, the same way: the LAST one (a picked GPU that met method 2 prints a replacing line)
+        ds = list(_DEVICE.finditer(text, m.end(), nxt.start() if nxt else len(text)))
+        d = ds[-1] if ds else None
+        if d:
+            val = d.group(1).strip()
+            rec.header_device = "cpu" if val.startswith("CPU") else "gpu" if " GPU" in val else ""
+        r = _RUN_MODE_HEAD.search(text, m.end(), nxt.start() if nxt else len(text))   # the run mode's line, too
+        if r:
+            rec.header_run_mode = r.group(1)
     rec.gpu_retried = _GPU_RETRY.search(text) is not None
     tallies = _GPU_RETRIES.findall(text)
     if tallies:                     # the last: a resumed run's log holds each attempt's
@@ -898,7 +947,7 @@ KNOWN_FIXES: tuple[Fix, ...] = (
         "the grid's at z = 20) and its multi-stream velocities are density-weighted means: regenerate it to compare "
         "it with the grids",
         lambda r: r.estimator == "ps" and r.has("--sample-points")
-                  and (r.has("--ps-vertex-mass") or r.has("--ps-volume-weighted"))
+                  and (r.has("--ps-vertex-mass") or r.volume_weighted)
                   and not r.legacy_points),
 )
 
@@ -985,7 +1034,7 @@ def time_estimate(records, *, sim: str, grid: int, estimator: str, gpu: bool,
     count) that count (RunRecord.nsub); None without any (a double-precision run takes about twice as long: it must
     not predict a single one; a gentle run on half the performance cores must not predict a performance one, nor the
     other way round; a Fast run must not predict an Exact one, nor a run at another count a Fast one). 'run_mode'
-    defaults to performance, what a log without '--run-mode' ran at (RunRecord.run_mode).
+    defaults to performance, what a log without a 'run mode' line or '--run-mode' ran at (RunRecord.run_mode).
     A run under a second is one: the binary's SUMMARY prints its wall time in whole seconds ('0s', 0.0 here), and
     a truthiness test would drop such runs as if they had no time (the launcher test's 32^3 run takes 0.5 s)."""
     times = [r.wall_seconds for r in records

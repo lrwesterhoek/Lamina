@@ -36,8 +36,7 @@
 #   vertex masses, volume-weighted
 #   velocity moments, the caustic classes, FIELDS = density, velocity, its divergence and shear (the same set as
 #   run_dtfe.sh's; the gradient, vorticity, dispersion, T-web and V-web through FIELDS), LAMBDA_TH 0.3, and the
-#   binary's velocity-gradient route (FACE_GRADIENT empty: the face gradient, with the exact deposit and the volume
-#   weighting).
+#   binary's velocity-gradient route (FACE_GRADIENT empty: the face gradient, with the exact deposit).
 #   A rerun into a prefix that holds an earlier run's files: once it exits 0, the files it did not write (an image
 #   plane, caustics or a field the new run lacks) are MOVED into <prefix>.superseded/<date_time>/ with the old
 #   run log (config.sh supersede_extras; never deleted), so the folder holds one run's set.
@@ -47,14 +46,18 @@
 #   Run logs, beside the outputs: <prefix>.runlog belongs to the grids on disk, <prefix>.runlog.failed
 #   to the last failed or stopped attempt, <prefix>.runlog.partial to a run still going (or killed outright).
 #   Knobs (environment; each is explained where the script sets it): PARTITION MAX_CONCURRENT SUBSAMPLES THREADS
-#   SCRATCH_DIR SAMPLE_POINTS PTS_VEL_GRAD PS_POINT_CONVENTIONS DTFE_GPU DTFE_RUN_MODE GPU_SHARE DTFE_EXACT_AVERAGE
-#   FACE_GRADIENT PS_VERTEX_MASS PS_VOLUME_WEIGHTED PS_LINEAR_DEPOSIT PS_CAUSTICS PS_CAUSTIC_CUSPS
+#   SCRATCH_DIR SAMPLE_POINTS PTS_VEL_GRAD DTFE_GPU DTFE_RUN_MODE GPU_SHARE DTFE_EXACT_AVERAGE
+#   FACE_GRADIENT PS_VERTEX_MASS PS_CAUSTICS PS_CAUSTIC_CUSPS
 #   PARALLEL_TRIANGULATION PS_LAGRANGIAN_PADDING TESSELLATION_CACHE OUTPUT_PREFIX FIELDS LAMBDA_TH PS_LAGRANGIAN_INPUT
 #   DTFE_PRECISION DRY_RUN AUTO_TUNE_REPORT (1 = only the auto-tuner's memory report per snapshot, nothing computed)
 #   PS_MERGE DTFE_RESUME, and config.sh's GRID_SIZE, PADDING, SPACE_CHECK. A switch is off for 0, false, no or off
 #   and on for any other value (the binaries' rule). DTFE_GPU, DTFE_RUN_MODE, DTFE_EXACT_AVERAGE and DTFE_RESUME are
 #   run_dtfe.sh's knobs too, with the same defaults there (the exact cell average is run_dtfe.sh's, the exact deposit
 #   this one's).
+#   Three knobs keep only their default: PS_POINT_CONVENTIONS (grid), PS_LINEAR_DEPOSIT (0) and PS_VOLUME_WEIGHTED
+#   (1: PS-DTFE always weights its velocity moments by volume, the dispersion by mass). PS_POINT_CONVENTIONS=legacy,
+#   PS_LINEAR_DEPOSIT=1 and PS_VOLUME_WEIGHTED=0 ask for choices PS-DTFE no longer has: each stops the driver (exit 2)
+#   before anything runs, a dry run too.
 #   Older names, read for one release with a warning (the new name wins when both are set): PS_GPU and PS_METAL
 #   (DTFE_GPU), PS_EXACT (DTFE_EXACT_AVERAGE), PS_RESUME (DTFE_RESUME), AVG_SUBSAMPLES (SUBSAMPLES), ORDERED_MERGE and
 #   FIXED_POINT_MERGE (PS_MERGE), PS_PARALLEL_TRI (PARALLEL_TRIANGULATION), PS_LAG_PADDING (PS_LAGRANGIAN_PADDING),
@@ -105,23 +108,21 @@ SAMPLE_POINTS="${SAMPLE_POINTS:-}"  # path to a --sample-points file (e.g. from
                            # this is how the high-resolution figure slices piggyback on a
                            # production grid run (see run_ps_pipeline.sh).
 PTS_VEL_GRAD="${PTS_VEL_GRAD:-0}"   # 1 = with SAMPLE_POINTS, also write '.pts_velGrad'
-                           # (--pts-vel-grad): the density-weighted velocity gradient at each
-                           # sample point (float64 x9). dtfelib.PointPlane derives the
+                           # (--pts-vel-grad): the velocity gradient at each sample point
+                           # (float64 x9, the plain mean over its streams). dtfelib.PointPlane derives the
                            # divergence / shear / vorticity maps from it, so this is what makes
                            # the velocity-derivative fields available to the hi-res figures.
 knob PS_POINT_CONVENTIONS PTS_CONVENTIONS
-PS_POINT_CONVENTIONS="${PS_POINT_CONVENTIONS:-grid}"  # with SAMPLE_POINTS: the points' conventions, the binary's
-                           # --ps-point-conventions. 'grid' (default; the binary's own) = the grids' vertex
-                           # masses (PS_VERTEX_MASS) and volume weighting (PS_VOLUME_WEIGHTED) at the points too;
-                           # 'legacy' = the reference implementation's estimators (rho_bar*V_lag masses, density-
-                           # weighted stream means), which reproduce a plane made with them -- about 0.82 of the grid's
-                           # density contrast at z = 20 (the launcher's Runs tab warns about such planes). Only
-                           # 'legacy' is passed, so a 'grid' run's command line carries no --ps-point-conventions.
+PS_POINT_CONVENTIONS="${PS_POINT_CONVENTIONS:-grid}"  # with SAMPLE_POINTS: the points' conventions. 'grid' (the
+                           # default and the only value; the binary's own) = the grids' vertex masses (PS_VERTEX_MASS)
+                           # and volume weighting at the points too; the command line carries no
+                           # --ps-point-conventions for it. 'legacy', the older conventions, was removed: it stops the
+                           # driver (exit 2, below), as any other value does.
 knob DTFE_GPU PS_GPU PS_METAL
 DTFE_GPU="${DTFE_GPU:-auto}"  # 1 = the deposit on the GPU (--gpu), 0 = the CPU; 'auto' (default: it
                            # follows the build) = 1 when the binary is a GPU build (config.sh gpu_build_default),
                            # resolved below once DTFE_PRECISION has chosen the binary, for both deposits and in
-                           # every run mode (config.sh gpu_auto_resolve).
+                           # every run mode (config.sh gpu_auto_resolve); exported to the binary as resolved.
                            # The same knob as run_dtfe.sh's
 _caller_run_mode="${DTFE_RUN_MODE:-}"   # (the caller's own value: config.sh run_mode_resolve reads it after the options)
 DTFE_RUN_MODE="${DTFE_RUN_MODE:-auto}"  # how hard the run may lean on the machine, passed on every run as '--run-mode
@@ -167,25 +168,20 @@ PS_VERTEX_MASS="${PS_VERTEX_MASS:-1}"  # 1 (default) = chart-independent tet mas
                            # then filter every density mode by 1-D(127)/D(z) (-16.5% at z=20, -3% at z=2;
                            # verified against regular DTFE on TNG50-3). Velocities are unaffected either way.
                            # Set PS_VERTEX_MASS=0 only for true-lattice Lagrangian inputs or A/B comparisons.
-_caller_vw="${PS_VOLUME_WEIGHTED:-}"   # (the caller's own value: an unset one yields to PS_LINEAR_DEPOSIT=1, below)
-PS_VOLUME_WEIGHTED="${PS_VOLUME_WEIGHTED:-1}"  # 1 (default, the production convention, as in
-                           # run_ps_pipeline.sh and the launcher) = volume-weighted velocity moments
-                           # (--ps-volume-weighted): velocity/gradient/div/shear/vort become VOLUME averages per
-                           # cell (the standard-DTFE '_a' convention that -aHf*delta refers to) instead of the
-                           # mass-weighted (momentum-like) means of PS_VOLUME_WEIGHTED=0. The DISPERSION is
-                           # excluded and stays mass-weighted (sigma_ij is an f-weighted CBE moment by definition)
-                           # -- it comes out bit-identical to a mass-weighted run, so this ONE config is the
-                           # literature-standard estimator for every field at once. Works with the CPU and GPU (-m)
-                           # deposits. Not with PS_LINEAR_DEPOSIT=1 (the binary refuses both): left unset, it is 0
-                           # then (said below).
+PS_VOLUME_WEIGHTED="${PS_VOLUME_WEIGHTED:-1}"  # 1 (default, the only value): PS-DTFE weights its velocity
+                           # moments by volume in every run: velocity/gradient/div/shear/vort are VOLUME averages per
+                           # cell (the standard-DTFE '_a' convention that -aHf*delta refers to), and the DISPERSION
+                           # stays mass-weighted (sigma_ij is an f-weighted CBE moment by definition). The driver
+                           # passes --ps-volume-weighted on every run (accepted; PS-DTFE always volume-weights), so
+                           # the run log's command line names the weighting for every reader. The mass-weighted
+                           # moments were removed: 0 stops the driver (exit 2, below)
 PS_CAUSTICS="${PS_CAUSTICS:-1}"      # 1 (default, as the production run of all 27
                            # snapshots: +33% time, +1.2 GB on TNG, every other output unchanged) =
                            # flag fold-caustic cells (--ps-caustics): writes '.caustic'
                            # (0/1 fold flag) and '.causticClass' -- the caustic stratification bitmask
                            # (fold parity, how many principal axes have collapsed, and the umbilic-
                            # degeneracy indicator) -- on the CPU AND the GPU deposit (byte-identical:
-                           # tests/ps_caustic_class_check.sh); the linear deposit on the GPU writes the
-                           # fold parity only (and says so): run that combination on the CPU.
+                           # tests/ps_caustic_class_check.sh).
 PS_CAUSTIC_CUSPS="${PS_CAUSTIC_CUSPS:-0}"  # 1 = also estimate the A3 CUSP (bit 7) and A4
                            # SWALLOWTAIL (bit 8) indicators of '.causticClass'; requires
                            # PS_CAUSTICS=1, CPU deposit. Opt-in: both are finite differences over
@@ -216,11 +212,11 @@ DTFE_EXACT_AVERAGE="${DTFE_EXACT_AVERAGE:-1}"  # 1 (default) = exact conservativ
 FACE_GRADIENT="${FACE_GRADIENT:-}"   # the velocity gradient's route (the divergence, shear, vorticity and V-web are
                            # built on it), as run_dtfe.sh's FACE_GRADIENT. EMPTY (default) = the binary's own
                            # (docs/cleanup-plan.md D13): the face gradient wherever the run qualifies -- the exact
-                           # deposit (the default, on the GPU or the CPU), PS_VOLUME_WEIGHTED=1 (the default), 3D --
+                           # deposit (the default, on the GPU or the CPU), 3D --
                            # and the stream average of each stream's own gradient elsewhere (the run log's 'velocity
                            # gradient' line says which and why); 1 = --face-gradient, asked for explicitly (refused
                            # below with the sampled deposit -- --sampled, DTFE_EXACT_AVERAGE=0 or a SUBSAMPLES count
-                           # alone -- or without the volume weighting); 0 = --per-tet-gradient, the stream average,
+                           # alone); 0 = --per-tet-gradient, the stream average,
                            # the route of the older PS grids made without FACE_GRADIENT=1. The face gradient is the
                            # volume-weighted MEAN velocity's, the quantity standard DTFE stores (conservative, the
                            # caustics' jumps as exact face differences), and the run also writes '.a_velDivStreams'
@@ -233,23 +229,18 @@ FACE_GRADIENT="${FACE_GRADIENT:-}"   # the velocity gradient's route (the diverg
                            # on the CPU.
 
 DATA_DIR=""                # default: sim_dir $SIMULATION (config.sh); override with -d
-PS_LINEAR_DEPOSIT="${PS_LINEAR_DEPOSIT:-0}"  # 1 = --ps-linear-deposit: each tetrahedron's mass spread by the linear
-                                 # density profile inside it (renormalized: mass-conserving); NOT with PS_VOLUME_WEIGHTED=1
-knob_bool PS_LINEAR_DEPOSIT PS_VOLUME_WEIGHTED   # 1 or 0 (config.sh; the caller's own PS_VOLUME_WEIGHTED is _caller_vw)
-# the volume weighting's default (1) yields to an asked-for linear deposit, which the binary refuses beside it
-if [ -z "${_caller_vw}" ] && [ "${PS_LINEAR_DEPOSIT}" = "1" ]; then
-    echo "Note: PS_LINEAR_DEPOSIT=1 weights by density inside each tetrahedron, so the velocity moments stay mass-weighted (PS_VOLUME_WEIGHTED=0)"
-    PS_VOLUME_WEIGHTED=0
-fi
+PS_LINEAR_DEPOSIT="${PS_LINEAR_DEPOSIT:-0}"  # 0 (default, the only value): PS-DTFE spreads each tetrahedron's mass
+                                 # uniformly (the exact or the sampled deposit). The linear deposit was removed:
+                                 # 1 stops the driver (exit 2, below)
+knob_bool PS_LINEAR_DEPOSIT PS_VOLUME_WEIGHTED   # 1 or 0 (config.sh)
 knob PARALLEL_TRIANGULATION PS_PARALLEL_TRI
 PARALLEL_TRIANGULATION="${PARALLEL_TRIANGULATION:-0}"  # 1 = force the parallel Delaunay insert at any size
                            # (--parallel-triangulation; needs the TBB build, 'make' detects the library).
                            # 0 (default) passes nothing: the binary's own rule already inserts in parallel a
                            # tessellation of at least 1e6 points when cores are free. Where the parallel insert
-                           # runs (forced or by the rule), the single-precision grids repeat to the byte, except
-                           # under PS_LINEAR_DEPOSIT=1; the point values (SAMPLE_POINTS) and the double build
-                           # (DTFE_PRECISION=double) move at rounding between two identical runs. See the binary's
-                           # help.
+                           # runs (forced or by the rule), the single-precision grids repeat to the byte; the point
+                           # values (SAMPLE_POINTS) and the double build (DTFE_PRECISION=double) move at rounding
+                           # between two identical runs. See the binary's help.
 knob PS_LAGRANGIAN_PADDING PS_LAG_PADDING
 PS_LAGRANGIAN_PADDING="${PS_LAGRANGIAN_PADDING:-}"   # k = --ps-lagrangian-padding k: pad each Lagrangian partition by k mean particle
                            # spacings. Empty (default) = the binary's default, k = 8: on a 4.1M-particle set at 2^3
@@ -259,9 +250,9 @@ PS_LAGRANGIAN_PADDING="${PS_LAGRANGIAN_PADDING:-}"   # k = --ps-lagrangian-paddi
                            # partition: 7-9x the owned particles per TNG partition), which also reuses partition
                            # tessellation caches written under that rule; any k > 0 rebuilds them once.
 OUTPUT_PREFIX="${OUTPUT_PREFIX:-ps_output}"   # -> <snapdir>/<prefix>.*  Override to keep incompatible runs side by
-                           # side instead of clobbering, e.g. OUTPUT_PREFIX=ps_mw with PS_VOLUME_WEIGHTED=0 for the
-                           # mass-weighted (physical) dispersion next to the default volume-weighted shear/divergence
-                           # set. dtfelib.FieldSet reads the 'ps_output.' prefix, so keep the primary set there.
+                           # side instead of clobbering, e.g. OUTPUT_PREFIX=ps_sampled with --sampled for the sampled
+                           # deposit next to the default exact set. dtfelib.FieldSet reads the 'ps_output.' prefix, so
+                           # keep the primary set there.
 
 usage() { echo "Usage: $0 [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n SUBSAMPLES] [-m] [-e | --sampled] [--run-mode MODE] [snapshot ...]"; }
 
@@ -286,9 +277,21 @@ average_resolve "deposit"   # DTFE_EXACT_AVERAGE 1 or 0: the options, the knob, 
 run_mode_resolve            # DTFE_RUN_MODE: --run-mode, the knob, the default (balanced; performance in a batch job)
 
 snapshot_args "$@"              # positional arguments override the default snapshot list (config.sh)
+# the choices PS-DTFE no longer has: refused before anything runs (a dry run too), as the binary refuses the linear
+# deposit's and the legacy conventions' options (it has no option for the mass-weighted moments: only the driver can
+# refuse PS_VOLUME_WEIGHTED=0)
+if [ "${PS_LINEAR_DEPOSIT}" = "1" ]; then
+    echo "Error: PS_LINEAR_DEPOSIT=1: the linear deposit was removed (PS-DTFE deposits with the exact or the sampled deposit)." >&2
+    exit 2
+fi
+if [ "${PS_VOLUME_WEIGHTED}" = "0" ]; then
+    echo "Error: PS_VOLUME_WEIGHTED=0: the mass-weighted velocity moments were removed (PS-DTFE's velocity moments are volume-weighted)." >&2
+    exit 2
+fi
 case "${PS_POINT_CONVENTIONS}" in
-    grid|legacy) ;;
-    *) echo "Error: PS_POINT_CONVENTIONS must be 'grid' or 'legacy' (got '${PS_POINT_CONVENTIONS}')." >&2; exit 2 ;;
+    grid) ;;
+    legacy) echo "Error: PS_POINT_CONVENTIONS=legacy: the legacy point conventions were removed (point values follow the grid's conventions, 'grid')." >&2; exit 2 ;;
+    *) echo "Error: PS_POINT_CONVENTIONS must be 'grid' (got '${PS_POINT_CONVENTIONS}')." >&2; exit 2 ;;
 esac
 case "${PS_MERGE}" in
     index-order|completion-order|fixed-point) ;;
@@ -305,8 +308,9 @@ data_root_problem "${DATA_DIR}" || exit 2
 # by 1/h via python/tools/convert_ic_units.py). Do NOT reconstruct the grid from ParticleID: TNG IDs
 # are Peano-Hilbert ordered, so id->(ix,iy,iz) is wrong.
 #
-# Used when present but NOT required: PS-DTFE reads Lagrangian positions from the snapshot's own
-# 'InitialCoordinates' when '--ps-lagrangian-input' is omitted. ${VAR-default} not ${VAR:-default}, so
+# Passed when present but NOT required: PS-DTFE reads Lagrangian positions from the snapshot's own
+# 'InitialCoordinates' whenever the snapshot has them (passed file or not), and the file only when it has not.
+# ${VAR-default} not ${VAR:-default}, so
 # an explicitly empty PS_LAGRANGIAN_INPUT= forces the snapshot path even if an IC file sits beside it (and so does
 # an empty LAGRANGIAN_INPUT=, its older name: knob -e counts an empty value as set).
 knob -e PS_LAGRANGIAN_INPUT LAGRANGIAN_INPUT
@@ -342,12 +346,12 @@ PYEOF
 # one point per cell, at its centre, the plain fields' own single sample -- quick, with noisy per-cell values, so
 # smooth the grids before use). More points per cell make the '_a' fields smoother / better resolved at caustics
 # than the plain fields (the same conserved quantity) and take more time.
-# Without the face gradient (FACE_GRADIENT=0, the sampled deposit, PS_VOLUME_WEIGHTED=0) divergence/shear/vorticity
+# Without the face gradient (FACE_GRADIENT=0, the sampled deposit) divergence/shear/vorticity
 # are the stream average, rigorous only in single-stream cells; for multi-stream kinematics use 'dispersion_a' + the
 # stream count, and vweb, classified from that gradient, inherits the same single-stream caveat.
 # tweb = T-web from the TIDAL tensor (FFT Poisson solve of the RAW density grid, in C++); vweb =
 # V-web from the multi-stream velocity shear. LAMBDA_TH is the eigenvalue threshold for BOTH webs
-# (dimensionless; literature ~0.2-0.4; the binary's own default is 0.0).
+# (dimensionless; literature ~0.2-0.4; the binary's own default is 0.3 too).
 # The binary applies NO smoothing anywhere; smoothing is a plot-time choice in plot_PS_DTFE.py.
 LAMBDA_TH="${LAMBDA_TH:-0.3}"
 # The analysis set, the same as run_dtfe.sh's: density, velocity, divergence, shear. The divergence and shear grids
@@ -369,10 +373,13 @@ driver_binary PS_BIN PS-DTFE "${DTFE_PRECISION}"      # ./PS-DTFE or ./PS-DTFE-d
 gpu_auto_resolve DTFE_GPU "${PS_BIN}" ps "${DTFE_EXACT_AVERAGE}" "${DTFE_RUN_MODE}"   # DTFE_GPU=auto: the GPU when
                                                       # this binary was built with one, for both deposits in every
                                                       # run mode (config.sh)
+# the resolved device (0 or 1) into the binary's environment, as run_dtfe.sh: the binary reads DTFE_GPU (0 = the CPU)
+# and, without it, picks its device itself, so a 0 that stayed a shell variable would leave the banner's CPU to the
+# binary's pick (-m still passes --gpu for 1; the command lines DRY_RUN prints do not show it)
+export DTFE_GPU
 if [ "${FACE_GRADIENT}" = "1" ]; then                 # the binary refuses these too, but per snapshot: say it once here
     # (the exact deposit is the default: what conflicts is --sampled, DTFE_EXACT_AVERAGE=0 or a count alone)
     [ "${DTFE_EXACT_AVERAGE}" = "1" ] || { echo "Error: FACE_GRADIENT=1 needs the exact deposit (the default): ${average_src} asks for the sampled one." >&2; exit 2; }
-    [ "${PS_VOLUME_WEIGHTED}" = "1" ] || { echo "Error: FACE_GRADIENT=1 needs the volume-weighted moments (PS_VOLUME_WEIGHTED=1)." >&2; exit 2; }
     # (since 2026-11-09 the face sums also come beside the GPU deposit, from a CPU walk: -m / DTFE_GPU=1 is allowed; D17)
 fi
 
@@ -433,9 +440,9 @@ for i in "${SNAPSHOTS[@]}"; do
     vmass_args=()
     [ "${PS_VERTEX_MASS}" = "1" ] && vmass_args=(--ps-vertex-mass)
 
-    # Volume-weighted velocity moments (PS_VOLUME_WEIGHTED=1); CPU and GPU deposits.
-    vw_args=()
-    [ "${PS_VOLUME_WEIGHTED}" = "1" ] && vw_args=(--ps-volume-weighted)
+    # The volume-weighted velocity moments, PS-DTFE's only ones: --ps-volume-weighted on every run (accepted; PS-DTFE
+    # always volume-weights), so the run log names them and run_ps_pipeline.sh's settings compare equal.
+    vw_args=(--ps-volume-weighted)
     [ "${FACE_GRADIENT}" = "1" ] && vw_args+=(--face-gradient)     # (FACE_GRADIENT, see the top)
     [ "${FACE_GRADIENT}" = "0" ] && vw_args+=(--per-tet-gradient)  # the stream average of each stream's own gradient
 
@@ -443,7 +450,6 @@ for i in "${SNAPSHOTS[@]}"; do
     # rule -- see the comment at the top).
     ptri_args=()
     [ "${PARALLEL_TRIANGULATION}" = "1" ] && ptri_args=(--parallel-triangulation)
-    [ "${PS_LINEAR_DEPOSIT}" = "1" ] && ptri_args+=(--ps-linear-deposit)     # (PS_LINEAR_DEPOSIT, see the top)
     # (PS_LAGRANGIAN_PADDING, see the top; 0 passed too)
     [ -n "${PS_LAGRANGIAN_PADDING}" ] && ptri_args+=(--ps-lagrangian-padding "${PS_LAGRANGIAN_PADDING}")
 
@@ -451,10 +457,10 @@ for i in "${SNAPSHOTS[@]}"; do
     sp_args=()
     [ -n "${SAMPLE_POINTS}" ] && sp_args=(--sample-points "${SAMPLE_POINTS}")
     [ -n "${SAMPLE_POINTS}" ] && [ "${PTS_VEL_GRAD}" = "1" ] && sp_args+=(--pts-vel-grad)
-    [ -n "${SAMPLE_POINTS}" ] && [ "${PS_POINT_CONVENTIONS}" = "legacy" ] && sp_args+=(--ps-point-conventions legacy)
 
-    # Lagrangian positions: the separate IC file when it exists, else the snapshot's own
-    # 'InitialCoordinates'. Skip only when NEITHER is available.
+    # Lagrangian positions: pass the separate IC file when it exists (the binary still uses the snapshot's own
+    # 'InitialCoordinates' when the snapshot has them, and reads the file only when it has not), else rely on
+    # the snapshot's own 'InitialCoordinates'. Skip only when NEITHER is available.
     lag_args=()
     if [ -n "${PS_LAGRANGIAN_INPUT}" ] && [ -f "${PS_LAGRANGIAN_INPUT}" ]; then
         lag_args=(--ps-lagrangian-input "${PS_LAGRANGIAN_INPUT}")

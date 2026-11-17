@@ -28,12 +28,7 @@
      DTFE_AUTO_SPAN     0 = PS-DTFE books a partition's sub-grid as G/n + 40 cells per axis (the model before
                         2026-11-07) instead of each partition's Eulerian span measured on the particles (default 1)
      DTFE_DYNAMIC_CONCURRENCY  0 = PS-DTFE's partition loop runs the plan's number of partitions at once; by default,
-                        over a concurrency the tuner chose, more while the live memory holds them (PartitionMemoryGate)
-     DTFE_AUTO_TIME     1 = the time objective (both binaries, from DTFE_AUTO_MINN particles; off by default): among
-                        the plans the memory model accepts, the one with the smallest predicted partition loop, where
-                        it beats the memory objective's plan by 10% (auto_tune.cc kAutoTimeGain); only where its
-                        constants were calibrated, else the memory objective's plan and the reason
-                        (docs/cleanup-plan.md P8.8, P8.9) */
+                        over a concurrency the tuner chose, more while the live memory holds them (PartitionMemoryGate) */
 
 /* This header is the tuner's interface: the machine queries (RAM, free memory, the budget, the cores), the report,
    the partition memory gate and the entry points. The model itself -- the bytes per cell and per vertex, the
@@ -314,10 +309,6 @@ struct AutoTuneReport
     // over it (ScratchAlloc::ZeroFillScope): the particles + the read blocks kept + the largest pre-sized grid.
     // 'predicted' is at least this (0: no scratch-backed grid, or Linux, where the scope is a no-op)
     double reservePeak = 0.;
-    // the time objective (DTFE_AUTO_TIME=1, auto_tune.cc): the predicted whole run of the plan taken and of the
-    // memory objective's plan, in seconds (-1: no prediction -- the switch off, a configuration it is not
-    // calibrated for, or a plan it does not reach)
-    double timeWall = -1., timeWallMem = -1.;
     // PS-DTFE with the face walk beside the GPU deposit (auto_tune.h psFaceWalkEarly): the face sums' words one
     // partition holds through its device call, booked beside every lane's hold (in 'predicted'; 0: no such walk)
     double faceWalk = 0.;
@@ -325,20 +316,16 @@ struct AutoTuneReport
     {
         if ( not valid ) return "AUTO-TUNE-REPORT unsupported";
         // (the GPU snapshot and the look-ahead are in 'predicted' too, listed so a check can see each term, and so
-        // are the face walk's words where they are booked; the time objective's two keys follow where it predicted.
-        // Each only then, so every other line stays as it was; the parsers read key=value pairs, and over_budget
-        // stays last)
+        // are the face walk's words, only where they are booked, so every other line stays as it was; the parsers
+        // read key=value pairs, and over_budget stays last)
         char walk[64] = "";
         if ( faceWalk > 0. ) snprintf( walk, sizeof(walk), "facewalk_gb=%.3f ", faceWalk/1.e9 );
-        char t[80] = "";
-        if ( timeWall > 0. )
-            snprintf( t, sizeof(t), "time_s=%.0f time_mem_s=%.0f ", timeWall, timeWallMem );
         char b[480];
         snprintf( b, sizeof(b), "AUTO-TUNE-REPORT partition=%d mc=%d predicted_gb=%.2f budget_gb=%.2f "
                   "fixed_gb=%.2f pts_gb=%.3f streams_est=%.3f streams_budget=%.3f snapshot_gb=%.3f lookahead_gb=%.3f "
-                  "%s%sover_budget=%d",
+                  "%sover_budget=%d",
                   partition, maxConcurrent, predicted/1.e9, budget/1.e9, fixed/1.e9, pts/1.e9,
-                  streamsEstimate, streamsBudgeted, gpuSnapshot/1.e9, lookAhead/1.e9, walk, t,
+                  streamsEstimate, streamsBudgeted, gpuSnapshot/1.e9, lookAhead/1.e9, walk,
                   predicted > budget ? 1 : 0 );
         return b;
     }

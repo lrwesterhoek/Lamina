@@ -175,10 +175,10 @@ struct Quantities
 #ifdef PHASE_SPACE
     std::vector<Real>                         stream_count;       // stream multiplicity at each grid point: the sampled deposit's sample-mean, or --exact's analytic volume-weighted (1/V_cell)sum(V_int). A FLOAT under both -- compare against integers with PS_STREAM_TOL, never with ==/> 1 exactly (see below)
     std::vector<Real>                         tet_touch;          // --exact only: raw INTEGER count of tetrahedra with a nonzero intersection with the cell (incl. corner grazes), written as '.tetTouch'. A geometric multiplicity, NOT a stream count -- 'stream_count' carries the volume-weighted (physical) multiplicity under every deposit.
-    std::vector<Real>                         mass_weight;        // per-cell summed moment weight (mass shares, or the EULERIAN-VOLUME shares under --ps-volume-weighted); normalizes velocity/gradient/scalar. Internal to normalizePhaseSpace, never written out
-    // --ps-volume-weighted + dispersion only: the dispersion stays MASS-weighted (sigma_ij is a
+    std::vector<Real>                         mass_weight;        // per-cell summed moment weight (the EULERIAN-VOLUME shares: PS-DTFE's velocity moments are volume-weighted; the mass shares where User_options::psVolumeWeighted is false); normalizes velocity/gradient/scalar. Internal to normalizePhaseSpace, never written out
+    // dispersion only: the dispersion stays MASS-weighted (sigma_ij is a
     // moment of the phase-space distribution f, so it is f- i.e. mass-weighted by definition),
-    // while velocity/gradient go volume-weighted. sigma_ij = <v_i v_j>_m - <v_i>_m <v_j>_m then
+    // while velocity/gradient are volume-weighted. sigma_ij = <v_i v_j>_m - <v_i>_m <v_j>_m then
     // needs its OWN mass-weighted mean and normalizer, since 'velocity' now holds the volume-
     // weighted one. Both are internal to normalizePhaseSpace and never written out.
     std::vector<Real>                         disp_weight;        // sum(m_s)
@@ -358,8 +358,8 @@ struct Quantities
         f( FieldInfo{ "mass_weight", nullptr, SIZE_AT_MERGE, SCALE_WEIGHT, false }, sum, &Q::mass_weight );
         f( FieldInfo{ "disp_weight", nullptr, SIZE_AT_MERGE, SCALE_MASS, false }, sum, &Q::disp_weight );
         f( FieldInfo{ "disp_velocity", nullptr, SIZE_AT_MERGE, SCALE_VEL_M, false }, sum, &Q::disp_velocity );
-        // (the face sums: S's scale is the gradient's -- vmax * dx^2 under '--ps-volume-weighted', which --face-gradient
-        //  requires -- N's the weight's, a cell volume: a covered face area over dx is a few of them)
+        // (the face sums: S's scale is the gradient's -- vmax * dx^2 with the volume-weighted moments of every PS-DTFE
+        //  run -- N's the weight's, a cell volume: a covered face area over dx is a few of them)
         f( FieldInfo{ "face_velocity", nullptr, SIZE_AT_MERGE, SCALE_GRAD_W, false }, sum, &Q::face_velocity );
         f( FieldInfo{ "face_coverage", nullptr, SIZE_AT_MERGE, SCALE_WEIGHT, false }, sum, &Q::face_coverage );
         f( FieldInfo{ "face_momentum", nullptr, SIZE_AT_MERGE, SCALE_GRAD_W, false }, sum, &Q::face_momentum );
@@ -382,9 +382,10 @@ struct Quantities
     void reserveMemory(size_t *gridSize, Field &field, User_options const *psRun = nullptr);
     void addFrom(Quantities const &other); // element-wise accumulate from another Quantities (PS-DTFE partitioning)
 #ifdef PHASE_SPACE
-    // Turn summed density-weighted moments into mass-weighted means (call once, after all
-    // partitions added). When the partitions aliased the weight to the density grid (density
-    // field selected -> no mass_weight was filled), pass weightFromDensityScale =
+    // Turn the summed moments into means (call once, after all partitions added): the velocity family by its
+    // moment weight (the volume shares), the dispersion by its own mass normalizer where disp_weight holds it.
+    // When the partitions aliased the weight to the density grid (density field selected and mass-weighted
+    // moments -> no mass_weight was filled), pass weightFromDensityScale =
     // cellVolume * averageDensity so the per-cell mass is reconstructed from the summed
     // (rho/rho_bar) density; 0 normalizes by the mass_weight grid only.
     // streamsTwins: the regular part's twins of a face pass (psFaceGradientBegin's 'twins')

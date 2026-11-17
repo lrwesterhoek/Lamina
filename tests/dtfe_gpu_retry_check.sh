@@ -29,9 +29,6 @@
 #       1, R2 oom 1, R3 timeout 1, R4 innocent 3, and none for a fault-free run
 #   R7  the escalated pace eases back after a clean stretch (DTFE_GPU_PACE_RECOVER_SEC=0) to the default 250 ms
 #       buffers / 8 ms gaps, grids byte-identical; R3's default 90 s holds it
-#   S1  the opt-in shared full grid (DTFE_GPU_SHARED=1; float sums, no periodic checkpoints): an innocent fault
-#       re-zeroes the batch's owner box and resumes from its start; the grids agree with a fault-free shared run
-#       to 1e-5 of the peak
 #   R8  the image-plane shape of the recipe's dtfe27planes stage: '--sample-points' with
 #       '--exact' under --partition 2 2 2 (one triangulation per partition, DTFE_parallel's single-
 #       triangulation branch) and a 'persist' fault, so every partition's grid falls back to the CPU: the fallback
@@ -70,11 +67,11 @@ run() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL: $(basenam
 # 256 items, which the exact sums need) and a checkpoint every 2 buffers: the fault at buffer 3 then lands after
 # the checkpoint at buffer 2
 export DTFE_GPU_CHUNK=4096 DTFE_GPU_CHECKPOINT_CHUNKS=2
-unset DTFE_GPU_FAULT_AT DTFE_GPU_SHARED DTFE_GPU_FLOAT_GRIDS DTFE_GPU_ITEMS
+unset DTFE_GPU_FAULT_AT DTFE_GPU_FLOAT_GRIDS DTFE_GPU_ITEMS
 C=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a gradient_a --partition 1 1 1)
 ONE=(--max-concurrent 1)                 # one sub-domain: one batch, so 'buffer k' is a buffer of that batch
-# The kernels of E1's item and per-tet runs, E2, R1, R3, R7, S1 and N1 are the Monte-Carlo ones, so those runs pass
-# '--sampled' (the exact average is the default since 2026-11-09; the shared grid serves the sampled average only).
+# The kernels of E1's item and per-tet runs, E2, R1, R3, R7 and N1 are the Monte-Carlo ones, so those runs pass
+# '--sampled' (the exact average is the default).
 # C and P name no mode: the exact runs (E1's x, R2, R4) share C and add '--exact'.
 echo ">> E1: two fault-free runs with different opening chunks (item kernel over 9 sub-domains, per-tet kernel, exact)"
 run "$TMP/a1" env DTFE_GPU_TIMING=1 "${DTFE_BIN}" "$SNAP" "$TMP/a1" "${C[@]}" --gpu --sampled
@@ -101,9 +98,6 @@ echo ">> R7: the same watchdog fault, then the pace recovers after a clean stret
 run "$TMP/p2" env DTFE_GPU_FAULT_AT=9:timeout DTFE_GPU_PACE_RECOVER_SEC=0 "${DTFE_BIN}" "$SNAP" "$TMP/p2" "${P[@]}" --gpu --sampled
 echo ">> R4: --exact, a persistent fault from buffer 3 on: the sub-domain goes to the CPU"
 ALLOW_CPU=1 run "$TMP/y1" env DTFE_GPU_FAULT_AT=3:persist "${DTFE_BIN}" "$SNAP" "$TMP/y1" "${C[@]}" "${ONE[@]}" --gpu --exact
-echo ">> S1: the shared full grid (DTFE_GPU_SHARED=1), without and with an innocent fault at buffer 5"
-run "$TMP/s0" env DTFE_GPU_SHARED=1 "${DTFE_BIN}" "$SNAP" "$TMP/s0" "${C[@]}" --gpu --sampled
-run "$TMP/s1" env DTFE_GPU_SHARED=1 DTFE_GPU_FAULT_AT=5 "${DTFE_BIN}" "$SNAP" "$TMP/s1" "${C[@]}" --gpu --sampled
 echo ">> R8: a --sample-points plane with --exact, a persistent fault: every partition on the threaded CPU average"
 "$PY" - "$TMP/plane.bin" <<'PYEOF' || { echo "FAIL: R8 points"; exit 1; }
 import sys, numpy as np
@@ -200,24 +194,18 @@ for name, want in (("t0", None), ("a1", None), ("t1", (1, 1, 0, 0, 0)), ("e1", (
                    ("p1", (1, 0, 1, 0, 0)), ("y1", (3, 3, 0, 0, 0))):
     got = by_cause(name)
     check("R6", got == want, f"{name}: retries by cause {got} (expected {want})")
-# from the default pace, 250 ms buffers / 8 ms gaps
+# from performance's pace (the suites' run mode: tests/lib.sh), 250 ms buffers / 8 ms gaps
 esc_gap, def_gap = "24", "8"
 L3, L7 = log("p1"), log("p2")
 eased = re.findall(r"pace eased to (\d+) ms buffers, (\d+) ms gaps", L7)
 check("R7", re.search(r"\[watchdog\].*target 62 ms buffers, " + esc_gap + r" ms gaps", L7) is not None
-      and eased[-1:] == [("250", def_gap)] and "(the default)" in L7,
+      and eased[-1:] == [("250", def_gap)] and "(the run mode's)" in L7,
       f"a watchdog fault escalates to 62 ms / {esc_gap} ms and a clean stretch eases it back to {eased[-1:]} "
       f"(expected 250 ms / {def_gap} ms)")
 check("R7", "pace eased" not in L3,
       "with the default 90 s recovery interval the escalation holds through the rest of a short run (R3)")
 ok, detail = same("p0", "p2")
 check("R7", ok, f"grids byte-identical to the run without the fault after the pace recovered ({detail})")
-L = log("s1")
-check("S1", re.search(r"\[innocent victim\] -- resuming from the pass start at thread 0 of", L) is not None
-      and "recovered on the GPU" in L,
-      "shared grid: the fault re-zeroes the batch's owner box and resumes from its start")
-worst = max(peak("s0", "s1", ext) for ext in GRIDS)
-check("S1", worst < 1e-5, f"shared grid: the grids agree with a fault-free shared run to {worst:.1e} of the peak (< 1e-5)")
 L = log("v1")
 nfall, nthr = L.count("using the CPU interpolation"), len(re.findall(r"exact average on 4 CPU threads", L))
 check("R8", nfall == 8 and nthr == 8 and "exact average on" not in log("v0"),

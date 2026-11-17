@@ -240,11 +240,13 @@ sys.exit(1 if bad else 0)
 PYEOF2
 fi
 
-echo ">> --grid-window with --ps-linear-deposit is refused"
+echo ">> the removed --ps-linear-deposit beside --grid-window stops the run with its own message (not the old pair refusal)"
+rm -f "$TMP"/lin.*
 if "$PS_BIN" "$SNAP" "$TMP/lin" --grid $G "${BASE[@]}" --exact --ps-linear-deposit "${WA[@]}" > "$TMP/lin.log" 2>&1; then
     echo "  FAIL: --grid-window + --ps-linear-deposit ran"; exit 1
 else
-    grep -q "ps-linear-deposit" "$TMP/lin.log" && echo "  PASS refused with the reason" || { echo "  FAIL: refused without naming --ps-linear-deposit"; exit 1; }
+    grep -qF -e "$PS_NO_LINEAR_DEPOSIT" "$TMP/lin.log" && [ ! -e "$TMP/lin.den" ] && echo "  PASS refused with the removal message" \
+        || { echo "  FAIL: refused without the removal message, or a grid written (see $TMP/lin.log)"; exit 1; }
 fi
 # the sampled CPU window's class: identical bytes only in the run-wide units of the single build (DTFE_PS_RUN_UNITS=1)
 SCLS=bytes

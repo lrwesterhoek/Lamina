@@ -51,7 +51,8 @@ struct Pipes
     MTL::ComputePipelineState* pso  = nullptr;   // depositFields: one thread per tet
     MTL::ComputePipelineState* psoItems[3] = { nullptr, nullptr, nullptr };   // depositExactItems: one per (tet, cell
                                                                      // block), a pipeline per pass (its kItemsPhase),
-                                                                     // and [2] both passes of --ps-linear-deposit
+                                                                     // and [2] both passes of fLinear (the removed
+                                                                     // linear deposit: the host passes 0)
     std::string                err;
     std::string                errLinear;   // why psoItems[2] is null: its compile failed (the others stand)
     bool                       ready = false;
@@ -127,8 +128,8 @@ void pipesInit(Ctx& c, uint32_t const words, Pipes& p)
             fn = lib->newFunction(NS::String::string(name, NS::UTF8StringEncoding), fcv, &nsErr);
             fcv->release();
         }
-        // Pipeline 2 serves only --ps-linear-deposit: when it fails it stays null and the device still serves every
-        // other run (runItems sends a linear run's partitions to the CPU with this reason).
+        // Pipeline 2 serves only fLinear (the removed linear deposit; the host passes 0): when it fails it stays null
+        // and the device still serves every other run (runItems would send a linear run's partitions to the CPU).
         if (!fn)
         {
             // phase 2 is a specialization of a kernel that phases 0 and 1 found: the compiler's reason, not 'not found'
@@ -328,7 +329,7 @@ PSHostBuffers psHostUploadBuffers(PSHostUploadArgs const& u, ZeroBuf& zeroBuf)
     std::vector<float>().swap(vels);
     MTL::Buffer* bM = c.dev->newBuffer(masses.data(), masses.size() * sizeof(float), MTL::ResourceStorageModeShared);
     std::vector<float>().swap(masses);
-    // per-tet vertex densities (--ps-linear-deposit); dummy when the uniform deposit runs
+    // per-tet vertex densities (fLinear, which the host no longer sets); dummy when the uniform deposit runs
     // 'dens' carries either the per-tet vertex densities (fLinear) or, when fCaustic runs without
     // fLinear, the per-tet caustic mask in slot 0. Either way the buffer is real and its per-chunk
     // offset must be applied -- keyed on the vector being non-empty, not on fLinear.
@@ -1024,9 +1025,9 @@ bool psGpuDepositFields(std::vector<float>& verts,
     {
         // an item clips at most blockCells cells: far cheaper and more uniform than a whole tet.
         // Phase 0 writes only sumW (the grids are still zero), phase 1 only the grids (sumW is read).
-        // --ps-linear-deposit runs both phases on the one pipeline that reads the phase from IP (kItemsPhase 2 in
-        // metal/ps_deposit.metal): its weights come from the clip's first moments, which two pipelines may round
-        // apart, so the summed total would miss the weights deposited by about 1e-8 of a tet's mass
+        // fLinear (the removed linear deposit) runs both phases on the one pipeline that reads the phase from IP
+        // (kItemsPhase 2 in metal/ps_deposit.metal): its weights come from the clip's first moments, which two
+        // pipelines may round apart, so the summed total would miss the weights deposited by about 1e-8 of a tet's mass
         MTL::ComputePipelineState* const pso = pp.psoItems[P.fLinear != 0 ? 2u : phase];
         if (P.fLinear != 0 && !pp.psoItems[2])
         {   // that pipeline did not compile (pipesInit): the caller deposits this partition on the CPU

@@ -17,6 +17,11 @@ from dtfelib import runlog as _runlog
 from dtfelib.estimator import STANDARD_PADDING
 from runspec import CUSTOM_OUT_DEFAULT, LAMBDA_TH_DEFAULT, QUALITY_DEFAULT   # the dataclass defaults
 
+# the choices PS-DTFE no longer has, which it refuses at the start (src/user_options.cc): (option, removed value), the
+# value None for a switch. The Custom tab's checks name each one the extra options give (_extra_removed_choices)
+REMOVED_CHOICES = (("--ps-linear-deposit", None), ("--ps-stream-density", "geometric"),
+                   ("--ps-point-conventions", "legacy"))
+
 
 @dataclass
 class CustomSpec:
@@ -37,7 +42,8 @@ class CustomSpec:
     grid: int = 128
     quality: str = QUALITY_DEFAULT  # "exact" | "fast", see RunSpec: what it implies is quality_mode's (mode())
     fields: list[str] = field(default_factory=lambda: ["density_a", "velocity_a", "dispersion_a"])
-    run_mode: str = "balanced"      # --run-mode, the machine use, see RunSpec (the binary's own default: performance)
+    run_mode: str = "balanced"      # --run-mode, the machine use, see RunSpec (the binary's own default too, but
+                                    # performance inside a batch job)
     vertex_mass: bool = False       # the initial positions: PERTURBED (e.g. TNG's z=127; masses from the particles,
                                     # --ps-vertex-mass) or an unperturbed lattice (False)
     caustics: bool = False
@@ -49,7 +55,7 @@ class CustomSpec:
     output_dir: str = str(CUSTOM_OUT_DEFAULT)
     output_name: str = ""           # "" = the input file's name
     scratch_dir: str = ""
-    lambda_th: float = LAMBDA_TH_DEFAULT   # --lambda-th with a web field (the binary's own default is 0.0)
+    lambda_th: float = LAMBDA_TH_DEFAULT   # --lambda-th with a web field (the binary's own default is 0.3 too)
     tess_cache: str = ""            # --tessellation-cache <folder>; "" = none
     sample_points: str = ""         # --sample-points <file>: the fields at these points too ('.pts_*'); "" = none
     pts_vel_grad: bool = True       # ... with the velocity gradient at each point (--pts-vel-grad)
@@ -118,7 +124,8 @@ class CustomSpec:
         out = self.output_root()
         a = [str(self.binary()), str(Path(self.input_file).expanduser()), str(out),
              "--grid", str(self.grid), "--input-format", str(self.input_type), "--mpc-unit", f"{self.mpc_unit:g}"]
-        # the machine use, always named (the binary's own default is performance: every core, long GPU buffers)
+        # the machine use, always named (the binary's own default is balanced, but performance inside a batch job:
+        # every core, long GPU buffers)
         a += ["--run-mode", self.run_mode]
         if self.periodic:
             a.append("--periodic")
@@ -128,7 +135,7 @@ class CustomSpec:
         if self.scalar_dataset and "scalar_a" not in fields:
             fields.append("scalar_a")
         a += ["--field", *fields]
-        if any(f in _rs.WEB_FIELDS for f in fields):      # the scripts' threshold, not the binary's 0.0
+        if any(f in _rs.WEB_FIELDS for f in fields):      # the scripts' threshold (the binary's own default too), named
             a += ["--lambda-th", f"{self.lambda_th:g}"]
         if self.scalar_dataset:
             a += ["--scalar-dataset", self.scalar_dataset]
@@ -160,8 +167,6 @@ class CustomSpec:
                 a += ["--gpu-share", m.gpu_share]
             if not self.periodic and self.alpha_shape != 3.0:
                 a += ["--ps-alpha-shape", f"{self.alpha_shape:g}"]
-            if m.linear_deposit:
-                a.append("--ps-linear-deposit")
             # the merge order always named, as the drivers' PS_MERGE does (R7, docs/cleanup-plan.md): a GIVEN index
             # order keeps the memory gate on under the auto-tuner's speed split (a run of fewer than 2e6 particles),
             # which the binary's default order alone leaves off. Left to the extra options when they name a merge
@@ -179,9 +184,10 @@ class CustomSpec:
                 a.append("--gpu")
             # the cell average named either way, as above (the sampled one at the binary's own count)
             a.append("--exact" if m.deposit == "exact" else "--sampled")
-            # the padding: the binary's own 5 mean spacings leave wrong values within a few spacings of
-            # a box face (or of the --box region's faces); 15, run_dtfe.sh's and the standard server's value
-            # (dtfelib.estimator.STANDARD_PADDING). PS-DTFE pads in Lagrangian space by its own rules: nothing added
+            # the padding: 15 mean spacings, run_dtfe.sh's, the standard server's (dtfelib.estimator.STANDARD_PADDING)
+            # and the standard binary's own default, named (an older binary's 5 left wrong values within a few
+            # spacings of a box face, or of the --box region's faces). PS-DTFE pads in Lagrangian space by its own
+            # rules: nothing added
             a += ["--padding", f"{STANDARD_PADDING:g}"]
         part, conc = _rs.job_partition(self), _rs.job_concurrency(self)     # the Advanced overrides (both binaries)
         if part > 0:
@@ -198,8 +204,7 @@ class CustomSpec:
                 a.append("--ps-per-stream")
             if ps and self.per_stream_ids:
                 a.append("--ps-per-stream-ids")
-            if ps and m.pts_conventions == "legacy":     # 'grid' is the binary's default: no flag for it
-                a += ["--ps-point-conventions", "legacy"]
+            # (the points' conventions: the grids', the binary's only ones, so no '--ps-point-conventions')
         return a
 
     def _extra_names_merge(self) -> bool:
@@ -225,11 +230,22 @@ class CustomSpec:
                          for n in [_runlog.canonical_flag(t.split("=", 1)[0]).split()[0]]
                          if n in device)
 
-    def _extra_linear_deposit(self) -> bool:
-        """The extra options ask for the linear deposit ('--ps-linear-deposit'), which the program refuses beside the
-        volume-weighted velocities the tab always passes for PS-DTFE."""
-        return any(_runlog.canonical_flag(t.split("=", 1)[0]).split()[0] == "--ps-linear-deposit"
-                   for t in _extra_options(self.extra_args) if t.startswith("--"))
+    def _extra_removed_choices(self) -> list[str]:
+        """The choices PS-DTFE no longer has that the extra options name (REMOVED_CHOICES), in that table's order and
+        spelled as the checks say them: '--ps-linear-deposit', '--ps-stream-density geometric', '--ps-point-conventions
+        legacy'. An option's value is the next token or the one after '='; an older name reads as its canonical one
+        (the run-log readers' table: '--pts-conventions legacy' is '--ps-point-conventions legacy')."""
+        tokens = _extra_options(self.extra_args)
+        found = set()
+        for i, t in enumerate(tokens):
+            if not t.startswith("--"):
+                continue
+            name, eq, value = t.partition("=")
+            name = _runlog.canonical_flag(name).split()[0]
+            if not eq:
+                value = tokens[i + 1] if i + 1 < len(tokens) else ""
+            found |= {(n, v) for n, v in REMOVED_CHOICES if name == n and v in (None, value)}
+        return [n if v is None else f"{n} {v}" for n, v in REMOVED_CHOICES if (n, v) in found]
 
     def memory_key(self) -> str:
         return _rs._memory_key(self, ("output_dir", "output_name", "demo_n", "demo_file", "lambda_th", "tess_cache"))
@@ -252,9 +268,12 @@ class CustomSpec:
         empty (the binary reads that as unset), for both estimators: a standard run names no gradient route, nor does
         a phase-space run that does not qualify for the face gradient (or a 2D one), so a 0 exported in the login
         shell cannot turn it to the deposit's own gradient behind the command shown, nor a 1 make the binary refuse a
-        sampled run (a route the command names beats the variable anyway)."""
+        sampled run (a route the command names beats the variable anyway). And DTFE_GPU pinned to the device the
+        command names (runspec.gpu_pin_env: '1' with '--gpu', the tab's or the extra options', else '0'), so the
+        binary does not pick another device than the one the tab shows."""
         env = {k: v for k, v in _rs._run_option_env(self).items() if k != "TESSELLATION_CACHE"}
         env["DTFE_FACE_GRADIENT"] = ""
+        env.update(_rs.gpu_pin_env(self.command()))
         return env
 
     def steps(self) -> list[_rs.Step]:
@@ -410,10 +429,9 @@ class CustomSpec:
                 if twice:
                     out.append(("error", f"the extra options repeat {', '.join(twice)}, which the tab sets already "
                                          "(the program takes each option once): change it on the tab"))
-                if ps and self._extra_linear_deposit():
-                    out.append(("error", "the extra options' --ps-linear-deposit cannot run beside the "
-                                         "volume-weighted velocities the tab always passes (--ps-volume-weighted): "
-                                         "the program refuses the pair, so take it out"))
+                if ps:          # the choices PS-DTFE no longer has: the program refuses each at the start
+                    out += [("error", f"the extra options' {c} was removed from the program: take it out")
+                            for c in self._extra_removed_choices()]
                 if self._extra_device_flags() == {"--gpu-share"}:
                     out.append(("warning", "the extra options give --gpu-share without --gpu: the run is on the CPU, "
                                            "where no share applies (add --gpu for the GPU)"))

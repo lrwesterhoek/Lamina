@@ -6,8 +6,13 @@
 # every run that names no '--exact' / '--sampled'. A suite that wants the pin exports it after sourcing this file
 # (tests/ps_auto_tune_check.sh, tests/dev/bytecmp.sh).
 unset DTFE_EXACT_AVERAGE
-# The run mode: the binaries' default, performance, is the 2f428bc behaviour; a login export must not steer the runs.
-unset DTFE_RUN_MODE
+# The run mode and the device: the suites' runs were written for the programs' earlier defaults (performance, and the
+# CPU unless '--gpu'), so both are pinned here, which also overrides a login export; the programs read DTFE_RUN_MODE
+# and DTFE_GPU (0 = the CPU) as the drivers do. A suite that tests the defaults unsets them itself, per run
+# (env -u DTFE_RUN_MODE -u DTFE_GPU; with -u SLURM_JOB_ID -u PBS_JOBID where the plain run mode is tested, since
+# inside a batch job its default is performance).
+export DTFE_RUN_MODE=performance
+export DTFE_GPU=0
 
 # A python with numpy and a WORKING h5py: $PYTHON, else the probe in scripts/h5py_python.sh.
 source "$(dirname "${BASH_SOURCE[0]}")/../scripts/h5py_python.sh"
@@ -47,6 +52,12 @@ die_on_failed_run() {
         exit 1
     fi
 }
+
+# The three PS-DTFE choices that were removed: the program stops with these texts (src/user_options.cc, on stdout
+# with the program's other errors). The suites that check a refusal look for them as fixed strings.
+PS_NO_LINEAR_DEPOSIT="'--ps-linear-deposit' was removed: PS-DTFE spreads each tetrahedron's mass uniformly, with '--exact' (the default) or '--sampled'."
+PS_NO_GEOMETRIC="'--ps-stream-density geometric' was removed: the per-stream density at points is the linear interpolation of the vertex densities ('linear')."
+PS_NO_LEGACY_POINTS="'--ps-point-conventions legacy' was removed: point values follow the grid's conventions ('grid')."
 
 # same <a> <b> [pattern]: every output of run a ('<a>.<pattern>', default every '<a>.*') has a byte-identical twin in
 # run b, and there is at least one; the logs, the run logs and the staging files ('.part.<pid>') are not outputs.

@@ -2,11 +2,11 @@
 # PS-DTFE arbitrary-point evaluation (--sample-points) correctness check.
 #
 # What is verified, and why these are the right bounds:
-#  A) UNIFORM box (amp=0: Eulerian == Lagrangian bit-for-bit). The 'geometric' per-stream
-#     density is rho_bar * |det Lag| / |det Eul| = rho_bar EXACTLY, so every point evaluation
-#     must equal rho/rho_bar = 1 to double rounding -- and therefore matches the (exactly
-#     mass-conserving) nSub=1 grid deposit's mean at float level. The 'linear' variant must
-#     match to float32 vertex-density rounding. Velocities are identically zero.
+#  A) UNIFORM box (amp=0: Eulerian == Lagrangian bit-for-bit). Every vertex density is rho_bar
+#     to float32 rounding, so the per-stream density (the linear interpolation of the vertex
+#     densities) gives rho/rho_bar = 1 at every point to that rounding -- and matches the
+#     (exactly mass-conserving) nSub=1 grid deposit's mean at float level. Every point lies in
+#     exactly one stream, and the velocities are identically zero.
 #  B) PANCAKE (amp=1.8, multi-stream): cross-checks against the nSub=1 grid deposit at the
 #     48^3 cell centers.
 #       - stream counts: the deposit's .streams at nSub=1 counts the tetrahedra containing the
@@ -15,17 +15,17 @@
 #       - VELOCITY: at nSub=1 the deposit evaluates each stream's velocity AT the cell centre,
 #         so single-stream cells must match the point evaluation to float32 rounding -- once
 #         '.hidden_streams' cells are excluded: there a sub-cell tetrahedron's centroid deposit
-#         adds its velocity AT ITS CENTROID to the cell's mass-weighted mean. This is
+#         adds its velocity AT ITS CENTROID to the cell's (volume-weighted) mean. This is
 #         the float-level deposit cross-check; the deposit's DENSITY cannot match pointwise
 #         because it deposits mass shares m/N (quantized at tetrahedron scale), so density is
-#         checked in aggregate (mean ratio) and via the exact uniform case (A).
+#         checked in aggregate (mean ratio) and via the uniform case (A, to float32 rounding).
 #       - single-stream points have exactly zero dispersion.
 #  C) PARTITION-SPLIT CONSISTENCY: --partition 2 2 2 vs serial must agree to float rounding
 #     (stream records are collected per tetrahedron and reduced in a deterministically sorted
 #     order, so only float-ULP wrap differences of periodic-image copies remain).
-#  D) Ragged --ps-per-stream layout invariants + estimator consistency (sum of per-stream
-#     densities == total; sorted descending; offsets consistent; 'linear' vs 'geometric' agree
-#     to ~5% in smooth single-stream regions).
+#  D) Ragged --ps-per-stream layout invariants (sum of per-stream densities == total; sorted
+#     descending; offsets consistent), and '--ps-stream-density linear' (the only value; the
+#     option is hidden) named gives the default run's point files byte for byte.
 #  E) Text and binary sample-point inputs give byte-identical outputs.
 #  F) --ps-per-stream-ids (when the binary supports it): adding the flag leaves every existing
 #     output byte-identical; '.pts_stream_ids' has sum(streams) records of 4 ascending
@@ -46,6 +46,8 @@
 #     fill (RecLayout, ps_point_eval.cc); DTFE_PTS_FULL_RECORDS=1 stores every member as before.
 #     Both must give byte-identical outputs -- with no options, and with every per-stream option
 #     on at once across a --partition 2 2 2 merge.
+#  R) '--ps-stream-density geometric' was removed: the program stops with its message and writes
+#     no point file; another value stops it with the one value left ('linear').
 #
 # Usage:
 #   tests/ps_point_eval_check.sh              # build, run, check
@@ -110,22 +112,18 @@ run() {  # $1 = output root, rest = extra args
     die_on_failed_run "$rc" "$log"
 }
 
-echo ">> run 1: uniform box, 'geometric', --ps-per-stream"
-run "${TMP}/ppe_uni_geo" "${SNAP_UNI}" --periodic \
-    --sample-points "${PTS_BIN}" --ps-per-stream --ps-stream-density geometric
-echo ">> run 2: uniform box, 'linear' (default)"
-run "${TMP}/ppe_uni_dtfe" "${SNAP_UNI}" --periodic --sample-points "${PTS_BIN}"
-echo ">> run 3: pancake, serial, 'geometric', --ps-per-stream"
-run "${TMP}/ppe_pan_ser" "${SNAP_PAN}" --periodic \
-    --sample-points "${PTS_BIN}" --ps-per-stream --ps-stream-density geometric
-echo ">> run 4: pancake, --partition 2 2 2, 'geometric', --ps-per-stream"
+echo ">> run 1: uniform box, --ps-per-stream"
+run "${TMP}/ppe_uni" "${SNAP_UNI}" --periodic --sample-points "${PTS_BIN}" --ps-per-stream
+echo ">> run 2: pancake, serial, --ps-per-stream"
+run "${TMP}/ppe_pan_ser" "${SNAP_PAN}" --periodic --sample-points "${PTS_BIN}" --ps-per-stream
+echo ">> run 3: pancake, --partition 2 2 2, --ps-per-stream"
 run "${TMP}/ppe_pan_par" "${SNAP_PAN}" --periodic --partition 2 2 2 \
-    --sample-points "${PTS_BIN}" --ps-per-stream --ps-stream-density geometric
-echo ">> run 5: pancake, serial, 'linear', --ps-per-stream"
-run "${TMP}/ppe_pan_dtfe" "${SNAP_PAN}" --periodic --sample-points "${PTS_BIN}" --ps-per-stream
-echo ">> run 6: pancake, serial, 'geometric', TEXT sample-point input"
-run "${TMP}/ppe_pan_txt" "${SNAP_PAN}" --periodic \
-    --sample-points "${PTS_TXT}" --ps-per-stream --ps-stream-density geometric
+    --sample-points "${PTS_BIN}" --ps-per-stream
+echo ">> run 4: pancake, serial, '--ps-stream-density linear' named, --ps-per-stream"
+run "${TMP}/ppe_pan_lin" "${SNAP_PAN}" --periodic --sample-points "${PTS_BIN}" --ps-per-stream \
+    --ps-stream-density linear
+echo ">> run 5: pancake, serial, TEXT sample-point input"
+run "${TMP}/ppe_pan_txt" "${SNAP_PAN}" --periodic --sample-points "${PTS_TXT}" --ps-per-stream
 
 echo ">> (E) text vs binary sample-point input: outputs must be byte-identical"
 for ext in .pts_den .pts_vel .pts_velDisp .pts_streams .pts_stream_offsets .pts_stream_records; do
@@ -134,18 +132,34 @@ for ext in .pts_den .pts_vel .pts_velDisp .pts_streams .pts_stream_offsets .pts_
 done
 echo "   OK"
 
+# (R) the removed 'geometric' and an unknown value: the run stops at its options, before any point is evaluated
+refused() {  # $1 = output root, $2 = the text it must stop with, rest = extra args: 0 when the run exits non-zero
+             # with that text and writes no point file
+    local out="$1" text="$2"; shift 2
+    rm -f "${out}".*
+    local rc=0
+    "${BIN}" "${SNAP_UNI}" "${out}" --grid "${GRID}" --field density --input-format 105 --mpc-unit 1 --verbose 1 \
+        --periodic --sample-points "${PTS_BIN}" "$@" > "${out}.log" 2>&1 || rc=$?
+    [ "${rc}" -ne 0 ] && grep -qF -e "${text}" "${out}.log" && [ ! -e "${out}.pts_den" ]
+}
+echo ">> (R) '--ps-stream-density geometric' (removed) and an unknown value: refused before anything runs"
+R_GEO=0; R_BAD=0
+if refused "${TMP}/ppe_r_geo" "${PS_NO_GEOMETRIC}" --ps-stream-density geometric; then R_GEO=1; fi
+if refused "${TMP}/ppe_r_bad" "Unknown value 'constant' for '--ps-stream-density'; the only value is 'linear'." \
+        --ps-stream-density constant; then R_BAD=1; fi
+
 # --ps-per-stream-ids section, gated so the script still runs against binaries predating the flag
 # (capture first: 'grep -q' would SIGPIPE the binary and trip pipefail)
 HAVE_IDS=0
 FULL_HELP="$("${BIN}" --full-help 2>/dev/null)" || { echo "FAIL: ${BIN} --full-help exited non-zero"; exit 1; }
 if grep -q -- '--ps-per-stream-ids' <<<"${FULL_HELP}"; then
     HAVE_IDS=1
-    echo ">> run 7: pancake, serial, 'geometric', --ps-per-stream-ids (implies --ps-per-stream)"
+    echo ">> run 6: pancake, serial, --ps-per-stream-ids (implies --ps-per-stream)"
     run "${TMP}/ppe_pan_ids" "${SNAP_PAN}" --periodic \
-        --sample-points "${PTS_BIN}" --ps-per-stream-ids --ps-stream-density geometric
-    echo ">> run 8: pancake, --partition 2 2 2, 'geometric', --ps-per-stream-ids"
+        --sample-points "${PTS_BIN}" --ps-per-stream-ids
+    echo ">> run 7: pancake, --partition 2 2 2, --ps-per-stream-ids"
     run "${TMP}/ppe_pan_ids_par" "${SNAP_PAN}" --periodic --partition 2 2 2 \
-        --sample-points "${PTS_BIN}" --ps-per-stream-ids --ps-stream-density geometric
+        --sample-points "${PTS_BIN}" --ps-per-stream-ids
     echo ">> (F) --ps-per-stream-ids leaves the existing outputs byte-identical"
     for ext in .pts_den .pts_vel .pts_velDisp .pts_streams .pts_stream_offsets .pts_stream_records; do
         cmp -s "${TMP}/ppe_pan_ser${ext}" "${TMP}/ppe_pan_ids${ext}" \
@@ -165,13 +179,13 @@ if grep -q -- '--pts-den-grad' <<<"${FULL_HELP}"; then
     # components must vanish (the Lagrangian lattice is y/z-translation-invariant)
     "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP_PAN0}" --n "${N}" --box "${BOX}" \
         --amplitude-factor 1.8 --jitter-frac 0 >/dev/null
-    echo ">> run 9: jitter-free pancake, serial, 'linear', --ps-per-stream --pts-den-grad"
+    echo ">> run 8: jitter-free pancake, serial, --ps-per-stream --pts-den-grad"
     run "${TMP}/ppe_grad_ser" "${SNAP_PAN0}" --periodic \
         --sample-points "${PTS_BIN}" --ps-per-stream --pts-den-grad
-    echo ">> run 10: jitter-free pancake, --partition 2 2 2, 'linear', --ps-per-stream --pts-den-grad"
+    echo ">> run 9: jitter-free pancake, --partition 2 2 2, --ps-per-stream --pts-den-grad"
     run "${TMP}/ppe_grad_par" "${SNAP_PAN0}" --periodic --partition 2 2 2 \
         --sample-points "${PTS_BIN}" --ps-per-stream --pts-den-grad
-    echo ">> run 11: jitter-free pancake, serial, 'linear', --ps-per-stream (no gradient flag)"
+    echo ">> run 10: jitter-free pancake, serial, --ps-per-stream (no gradient flag)"
     run "${TMP}/ppe_grad_off" "${SNAP_PAN0}" --periodic \
         --sample-points "${PTS_BIN}" --ps-per-stream
     echo ">> (G) --pts-den-grad leaves the existing outputs byte-identical"
@@ -201,7 +215,7 @@ probes[1::2] = pts[cand]; probes[1::2, 0] += eps
 probes.astype(np.float64).tofile(fdbin)
 np.savetxt(fdsel, np.column_stack([cand, np.full(cand.size, eps)]), fmt="%.17g")
 PY
-    echo ">> run 12: jitter-free pancake, serial, FD probe points"
+    echo ">> run 11: jitter-free pancake, serial, FD probe points"
     run "${TMP}/ppe_grad_fd" "${SNAP_PAN0}" --periodic --sample-points "${PTS_FD}"
 else
     [ "${DTFE_TEST_REQUIRED:-0}" = "1" ] && { echo "FAIL (required): this PS-DTFE has no --pts-den-grad" >&2; exit 1; }
@@ -211,10 +225,10 @@ fi
 HAVE_VELGRAD=0
 if grep -q -- '--pts-vel-grad' <<<"${FULL_HELP}" && [ "${HAVE_GRAD}" = "1" ]; then
     HAVE_VELGRAD=1
-    echo ">> run 13: jitter-free pancake, serial, --pts-vel-grad"
+    echo ">> run 12: jitter-free pancake, serial, --pts-vel-grad"
     run "${TMP}/ppe_vgrad_ser" "${SNAP_PAN0}" --periodic \
         --sample-points "${PTS_BIN}" --pts-vel-grad
-    echo ">> run 14: jitter-free pancake, --partition 2 2 2, --pts-vel-grad"
+    echo ">> run 13: jitter-free pancake, --partition 2 2 2, --pts-vel-grad"
     run "${TMP}/ppe_vgrad_par" "${SNAP_PAN0}" --periodic --partition 2 2 2 \
         --sample-points "${PTS_BIN}" --pts-vel-grad
     echo ">> (H) --pts-vel-grad leaves the existing outputs byte-identical"
@@ -247,7 +261,7 @@ else
 fi
 
 echo ">> checking the numbers ..."
-"${PY}" - "${TMP}" "${GRID}" "${HAVE_IDS}" "${HAVE_GRAD}" "${HAVE_VELGRAD}" <<'PY'
+"${PY}" - "${TMP}" "${GRID}" "${HAVE_IDS}" "${HAVE_GRAD}" "${HAVE_VELGRAD}" "${R_GEO}" "${R_BAD}" <<'PY'
 import sys
 import numpy as np
 import os as _os; REAL = np.dtype(_os.environ.get("DTFE_TEST_REAL", "float32"))   # tests/precision.sh
@@ -256,6 +270,7 @@ tmp, grid = sys.argv[1], int(sys.argv[2])
 have_ids = len(sys.argv) > 3 and sys.argv[3] == "1"
 have_grad = len(sys.argv) > 4 and sys.argv[4] == "1"
 have_vgrad = len(sys.argv) > 5 and sys.argv[5] == "1"
+r_geo, r_bad = sys.argv[6] == "1", sys.argv[7] == "1"
 ncell = grid ** 3
 fails = []
 
@@ -278,27 +293,20 @@ def load_ragged(root):
     return off, rec
 
 # ---------- (A) uniform box: exact analytic values ----------
-den, vel, dsp, st = load_pts(f"{tmp}/ppe_uni_geo")
-off, rec = load_ragged(f"{tmp}/ppe_uni_geo")
+den, vel, dsp, st = load_pts(f"{tmp}/ppe_uni")
 check("A1 uniform coverage", st.min() >= 1, f"min streams {st.min()}")
 check("A2 uniform single-stream everywhere", bool((st == 1).all()),
       f"{int((st != 1).sum())} points with a count other than 1 (exact location: must be 0)")
-# every stream's geometric density is rho_bar exactly => den == stream count to double rounding
-check("A3 uniform geometric density exact", np.abs(den - st).max() < 1e-9,
-      f"max|rho/rho_bar - streams| = {np.abs(den - st).max():.3e}")
-check("A4 uniform per-stream densities exact", np.abs(rec[:, 0] - 1).max() < 1e-9,
-      f"max|d_s - 1| = {np.abs(rec[:, 0] - 1).max():.3e}")
 check("A5 uniform velocities zero", np.abs(vel).max() == 0 and np.abs(dsp).max() == 0,
       f"max|v| = {np.abs(vel).max():.3e}, max|sigma| = {np.abs(dsp).max():.3e}")
-# the nSub=1 grid deposit conserves mass exactly -> its mean is 1; point evals are 1 pointwise
-# (the deposit grid is stored as float32, so the mean carries ~1e-5 accumulation rounding)
-gden = np.fromfile(f"{tmp}/ppe_uni_geo.den", dtype=REAL).astype(np.float64)
+# the nSub=1 grid deposit conserves mass exactly -> its mean is 1; point evals are 1 pointwise to
+# float32 rounding (A7) (the deposit grid is stored as float32, so the mean carries ~1e-5 accumulation rounding)
+gden = np.fromfile(f"{tmp}/ppe_uni.den", dtype=REAL).astype(np.float64)
 check("A6 matches deposit mean (float32 level)", abs(gden.mean() - den.mean()) < 1e-4,
       f"|mean(deposit) - mean(points)| = {abs(gden.mean() - den.mean()):.3e}")
-# 'linear' variant: vertex densities are rho_bar to float32 rounding
-den_b, _, _, st_b = load_pts(f"{tmp}/ppe_uni_dtfe")
-check("A7 uniform dtfe density (float32 level)", np.abs(den_b - st_b).max() < 1e-5,
-      f"max|rho/rho_bar - streams| = {np.abs(den_b - st_b).max():.3e}")
+# the per-stream density: vertex densities are rho_bar to float32 rounding
+check("A7 uniform density (float32 level)", np.abs(den - st).max() < 1e-5,
+      f"max|rho/rho_bar - streams| = {np.abs(den - st).max():.3e}")
 
 # ---------- (B) pancake vs the nSub=1 grid deposit ----------
 den, vel, dsp, st = load_pts(f"{tmp}/ppe_pan_ser")
@@ -346,32 +354,29 @@ else:
     check("C5 partition per-stream records (float level)", False,
           f"record counts differ: {reca.shape[0]} vs {recb.shape[0]}")
 
-# ---------- (D) ragged layout + estimator consistency ----------
-for tag, root in [("geometric", f"{tmp}/ppe_pan_ser"), ("dtfe", f"{tmp}/ppe_pan_dtfe")]:
-    den_r, _, _, st_r = load_pts(root)
-    off, rec = load_ragged(root)
-    ok_layout = (off.size == ncell + 1 and off[0] == 0 and off[-1] == rec.shape[0]
-                 and np.all(np.diff(off) == st_r))
-    sums = np.zeros(ncell)
-    nz = np.diff(off) > 0
-    sums[nz] = np.add.reduceat(rec[:, 0], off[:-1][nz])
-    ok_sum = np.abs(sums - den_r).max() < 1e-9
-    ok_sorted = True
-    for i in np.where(st_r > 1)[0]:
-        if np.any(np.diff(rec[off[i]:off[i + 1], 0]) > 0):
-            ok_sorted = False
-            break
-    check(f"D1 [{tag}] ragged layout consistent", ok_layout, "offsets/counts/records")
-    check(f"D2 [{tag}] per-stream sums == total", ok_sum,
-          f"max diff = {np.abs(sums - den_r).max():.3e}")
-    check(f"D3 [{tag}] streams sorted by density desc", ok_sorted, "")
-den_bb, _, _, st_bb = load_pts(f"{tmp}/ppe_pan_dtfe")
-check("D4 variant runs see identical streams", np.all(st == st_bb), "")
-mask = st == 1
-r = den_bb[mask] / np.maximum(den[mask], 1e-12)
-q5, q95 = np.percentile(r, [5, 95])
-check("D5 dtfe vs geometric agree in smooth regions", 0.8 < q5 and q95 < 1.25,
-      f"single-stream b/a ratio 5-95% = [{q5:.3f}, {q95:.3f}], median {np.median(r):.3f}")
+# ---------- (D) ragged layout; the one estimator named ----------
+off, rec = load_ragged(f"{tmp}/ppe_pan_ser")
+ok_layout = (off.size == ncell + 1 and off[0] == 0 and off[-1] == rec.shape[0]
+             and np.all(np.diff(off) == st))
+sums = np.zeros(ncell)
+nz = np.diff(off) > 0
+sums[nz] = np.add.reduceat(rec[:, 0], off[:-1][nz])
+ok_sum = np.abs(sums - den).max() < 1e-9
+ok_sorted = True
+for i in np.where(st > 1)[0]:
+    if np.any(np.diff(rec[off[i]:off[i + 1], 0]) > 0):
+        ok_sorted = False
+        break
+check("D1 ragged layout consistent", ok_layout, "offsets/counts/records")
+check("D2 per-stream sums == total", ok_sum, f"max diff = {np.abs(sums - den).max():.3e}")
+check("D3 streams sorted by density desc", ok_sorted, "")
+# '--ps-stream-density linear' named: the default run's point files, byte for byte (the option reaches the points only)
+import os
+outs = sorted(f[len("ppe_pan_ser"):] for f in os.listdir(tmp) if f.startswith("ppe_pan_ser.pts_"))
+diff = [e for e in outs if not os.path.exists(f"{tmp}/ppe_pan_lin{e}")
+        or open(f"{tmp}/ppe_pan_ser{e}", "rb").read() != open(f"{tmp}/ppe_pan_lin{e}", "rb").read()]
+check("D4 '--ps-stream-density linear' named == the default", len(outs) >= 6 and not diff,
+      f"{len(outs)} point files compared, differ: {diff}")
 
 # ---------- (F) --ps-per-stream-ids: stream identities ----------
 if have_ids:
@@ -461,6 +466,11 @@ if have_vgrad:
     rel = np.abs(fd[ok] - vg[idx[ok], 0, 0]) / scale
     check("H4 dvx/dx matches central FD of .pts_vel", np.median(rel) < 0.02 and np.percentile(rel, 90) < 0.05,
           f"{ok.sum()}/{idx.size} probes, median rel = {np.median(rel):.2e}, p90 = {np.percentile(rel, 90):.2e}")
+
+# ---------- (R) the removed 'geometric' ----------
+check("R1 '--ps-stream-density geometric' stops the run with its message, no point file written", r_geo,
+      f"{tmp}/ppe_r_geo.log")
+check("R2 another value stops it with the one value left ('linear')", r_bad, f"{tmp}/ppe_r_bad.log")
 
 print("-" * 60)
 if fails:

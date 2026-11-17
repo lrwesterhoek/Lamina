@@ -163,7 +163,6 @@ struct User_options
     bool   partitionOn;   // true if the data IS split into several partitions (user- or auto-selected)
     bool   partitionGiven;// true if the user passed '--partition' at all -- including '1 1 1', which asks for ONE triangulation (partitionOn stays false) and must keep the auto-tuner from choosing a split
     std::vector<size_t> partition;// grid along which to split the particle data so the Delaunay triangulation runs on parts (time/memory)
-    std::vector<size_t> subgridOffset; // set by copySubgridInformation(): this sub-grid's origin (cells) in the grid it was split from -- the GPU's shared deposit maps the sub-domain into that grid
     // The run's GRID FRAME, the same in every partition and thread sub-domain (plan P10.8): the full grid's size, this
     // sub-grid's origin in it (cumulative over the partition and the thread levels) and the grid box in double. Set by
     // copySubgridInformation() the first time it splits the grid (from gridSize/boxCoordinates, then the run's);
@@ -197,8 +196,8 @@ struct User_options
     bool   autoTuneReport;  // --auto-tune-report: print the auto-tuner's decision and predicted peak memory as ONE machine-readable line after loading the input, then exit (the GUI's memory check)
     bool   maxConcurrentOn; // true if the user gave --max-concurrent explicitly (0 is both the default and a legal value, so presence must be tracked separately for the auto-tuner)
     // the run mode (run_mode.h; resolveRunMode, applyRunMode): how hard the run may lean on the machine, both binaries
-    RunMode runMode;               // --run-mode gentle|balanced|performance, else DTFE_RUN_MODE (any case), else performance (the binaries' default)
-    std::string runModeSource;     // why the mode is what it is: '--run-mode gentle', '--run-mode gentle from DTFE_RUN_MODE=GENTLE' or '--run-mode performance, the default' (the run log's 'run mode' line)
+    RunMode runMode;               // --run-mode gentle|balanced|performance, else DTFE_RUN_MODE (any case), else the binaries' default: performance inside a batch job (SLURM_JOB_ID or PBS_JOBID set), else balanced
+    std::string runModeSource;     // why the mode is what it is: '--run-mode gentle', '--run-mode gentle from DTFE_RUN_MODE=GENTLE', '--run-mode performance, the default inside a batch job (SLURM_JOB_ID)' or '--run-mode balanced, the default' (the run log's 'run mode' line)
     int    coreBudget;             // the threads the mode allows (applyRunMode; runModeState().coreBudget): N0, the OpenMP default at start-up, or the mode's share of it; 0 before applyRunMode
     int    coreBudgetOwn;          // coreBudget before a '--max-concurrent' raise (applyRunMode): the threads '--gpu-share mixed' counts outside performance (auto_tune.cc autoTuneGpuShare), so that no '--max-concurrent' moves its share; 0 before applyRunMode
     std::string coreBudgetNote;    // why the budget is not the mode's own: 'kept: OMP_NUM_THREADS=<v> was given' or 'raised: --max-concurrent <k> was given'; empty otherwise
@@ -226,7 +225,12 @@ struct User_options
     int    method;        // volume-averaging method (standard DTFE --average-method; 1 in PS-DTFE)
     int    noPoints;      // sample points per grid cell for the average
     bool   noPointsOn;    // true if the user specified the number of sampling points
-    bool   useMetal;      // standard DTFE: run the method-1 '_a' interpolation on the GPU; needs a Metal build (METAL=1, else falls back to the CPU loop with a warning). Set by --gpu.
+    bool   useMetal;      // standard DTFE: run the method-1 '_a' interpolation on the GPU; needs a Metal build (METAL=1, else an asked GPU falls back to the CPU loop with a warning). Set by checkGpuOptions: --gpu, DTFE_GPU, else the program's pick (the exact average where it has a GPU path).
+    std::string deviceSource; // why the device is what it is (checkGpuOptions): '--gpu' (also for the deprecated '--ps-gpu') or 'DTFE_GPU=<value>' when one of them asked for the GPU, 'DTFE_GPU=<value>' when it keeps the CPU, empty where the program picked (and for a library caller that skips readOptions)
+    bool   gpuPicked;     // the PROGRAM picked the GPU (checkGpuOptions: nothing asked, DTFE_GPU not given): it is on only where the GPU path runs, so it never warns; the guards that only a pass can test take the CPU silently for it (ps_interpolation.cc psGpuEligible), and updateEntries turns it off where user-given sampling points take method 2
+    std::string deviceLine;   // the run log's device line after its label (checkGpuOptions; standard DTFE's ''_a' interpolation', PS-DTFE's 'PS deposit'): the device and why, on the GPU and on the CPU alike
+    // the request a warning of an asked GPU names where it named '--gpu': deviceSource ('--gpu' for a library caller that set the member itself)
+    std::string gpuRequest() const { return this->deviceSource.empty() ? std::string( "--gpu" ) : this->deviceSource; }
     bool   exactAverage;  // standard DTFE, the RESOLVED '_a' average (resolveAverageMode; --exact, the default since 2026-11-09, or --sampled): true = compute the '_a' fields by integrating the LINEAR DTFE interpolant exactly over every cell∩tet intersection (CPU: vendored r3d, order-1 moments) instead of Monte-Carlo sampling; --subsamples is ignored. Runs on the GPU too with --gpu (float32 z-sweep with exact Gauss-Legendre quadrature, metal/exact_clip.metal.inc) and in 2D (triangles clipped by hand); runs on the method-1 scatter topology. False in the constructor: a library caller that fills User_options without readOptions keeps the sampled average unless it sets this.
     bool   exactFlag;     // scratch for the --exact switch (both binaries; the deprecated --exact-average and PS-DTFE's --ps-exact-deposit bind it too): resolveAverageMode folds it into exactAverage / psExactDeposit
     bool   sampledFlag;   // scratch for the --sampled switch (both binaries), folded likewise
@@ -245,7 +249,7 @@ struct User_options
     unsigned psStreamsTwins = 0u; // PS-DTFE face gradient (docs/cleanup-plan.md D12): the regular part's twins the
                           // writer asks for, bit 0 'gradient_a', 1 'shear_a', 2 'vorticity_a'; set by DTFE_setup
                           // from the user's '_a' fields, never by an option (Quantities::psFaceGradientBegin)
-    bool   gpuAlias;      // scratch for the backend-neutral --gpu switch (both binaries; PS-DTFE's deprecated --ps-gpu folds into it); OR-ed into useMetal/psUseMetal after parsing (the deprecated --ps-gpu binds it too: foldDeprecatedAliases leaves one of the two entries for po::notify)
+    bool   gpuAlias;      // scratch for the backend-neutral --gpu switch (both binaries; PS-DTFE's deprecated --ps-gpu folds into it); read by checkGpuOptions, where it asks for the GPU before DTFE_GPU and the program's pick (the deprecated --ps-gpu binds it too: foldDeprecatedAliases leaves one of the two entries for po::notify)
     // --sample-points point evaluation, BOTH binaries (see ps_point_eval.h): PS-DTFE reports
     // one stream per folded tetrahedron; the standard binary the Eulerian DTFE interpolant
     // (0/1 coverage). --ps-per-stream/--ps-per-stream-ids parse in both but are rejected in the
@@ -255,17 +259,16 @@ struct User_options
     bool   psPerStream;                // --ps-per-stream (PS-DTFE only): also write every stream's density+velocity per sample point (ragged layout)
     bool   psPerStreamIds;             // --ps-per-stream-ids (PS-DTFE only): also write each stream's identity = its 4 Lagrangian-vertex ParticleIDs, sorted (implies --ps-per-stream)
     bool   psPtsDenGrad;               // --pts-den-grad: also write the 'dtfe'-profile density gradient at each sample point (float64 x3; + ragged per-stream file with --ps-per-stream)
-    bool   psPtsVelGrad;               // --pts-vel-grad: also write the density-weighted mean velocity gradient at each sample point (float64 x9, [d*3+j] = dv_j/dx_d)
-    bool   psPtsScalar;                // --pts-scalar: also interpolate the particles' scalar value (--scalar-dataset) per stream: '.pts_scalar' (density-weighted mean over the streams) + '.pts_stream_scalar' with --ps-per-stream
+    bool   psPtsVelGrad;               // --pts-vel-grad: also write the mean velocity gradient at each sample point (float64 x9, [d*3+j] = dv_j/dx_d; PS-DTFE: the plain mean over the point's streams)
+    bool   psPtsScalar;                // --pts-scalar: also interpolate the particles' scalar value (--scalar-dataset) per stream: '.pts_scalar' (the plain mean over the point's streams) + '.pts_stream_scalar' with --ps-per-stream
     bool   psPtsLagrangian;            // --ps-per-stream-lagrangian (PS-DTFE only): also write each stream's Lagrangian coordinate q(x) -- where the matter at the point started -- to '.pts_stream_lagpos' (float64 x3 per stream; implies --ps-per-stream)
     std::string scalarDataset;         // --scalar-dataset NAME: Gadget HDF5 input reads '/PartTypeN/NAME' (one value per particle, raw) as the scalar field every estimator interpolates (empty = the reader's own scalar, if any)
     bool   psServeProgress;            // --serve-progress: plain stderr progress lines for the build and every request, whatever --verbose says (the launcher's progress bar)
     int    serveResident;              // --serve-resident N: with '--serve --partition', how many partition tessellations stay in memory at once (the rest are reloaded from '--tessellation-cache' on demand); 0 = automatic
-    bool   psStreamDensityGeometric;   // PS-DTFE --ps-stream-density: true = 'geometric' (m_tet/V_eul, matches the mass-conserving deposit), false = 'linear' (vertex-density interpolation, matches the Feldbrugge reference; DEFAULT; 'dtfe' is its deprecated name). Always false in the standard binary.
 #ifdef PHASE_SPACE
     int    psAvgSubsamples; // PS-DTFE --subsamples: linear sub-sample count nSub for the sampled deposit's '_a' fields (nSub^NO_DIM sub-grid per cell; more points, a smoother cell average and more time); 1 = one point per cell, at its centre (the default). The exact deposit ignores it where it clips; an exact run without a count holds 3 here (user_options.cc kPsExactSliverSubsamples: its slivers' sampled fallback).
-    bool   psUseMetal;      // PS-DTFE: run the grid deposit on the GPU; needs a Metal build (METAL=1, else falls back to the CPU deposit with a warning). Set by --gpu.
-    bool   psLinearDeposit;            // PS-DTFE --ps-linear-deposit: weight each tetrahedron's interior samples by the DTFE-interpolated linear density (renormalized per tet, so the deposited total still equals the tet mass EXACTLY) instead of equal shares
+    bool   psUseMetal;      // PS-DTFE: run the grid deposit on the GPU; needs a Metal build (METAL=1, else an asked GPU falls back to the CPU deposit with a warning). Set by checkGpuOptions: --gpu, DTFE_GPU, else the program's pick (an '_a' field with a GPU path).
+    bool   psLinearDeposit;            // PS-DTFE: always false, the uniform deposit ('--ps-linear-deposit' was removed and is refused, user_options.cc refuseRemovedPsOptions; nothing sets it). Kept as a run-time value: the deposit loop still reads it (ps_interpolation.cc), and its linear branches go with that loop's clean-up
     bool   psCausticCusps;      // --ps-caustic-cusps: also estimate the A3 (cusp) indicator, bit 7 of the caustic mask. Opt-in: it costs a neighbour gather per near-fold tetrahedron and, being a finite-difference estimator on an irregular tessellation, carries a measurable false-positive rate (see ps_caustic_class.h)
     bool   psCaustics;                 // PS-DTFE --ps-caustics: record per grid cell whether tetrahedra of BOTH map orientations (sign of det(Ax) = Lagrangian->Eulerian parity, flips at each fold) overlap it; the 0/1 flag is written as '<output>.caustic'. the CPU deposit (2D and 3D builds) and the GPU deposit (3D builds).
     Real   psAlphaShape;               // PS-DTFE --ps-alpha-shape <c>: a NON-periodic run keeps only the tetrahedra whose Lagrangian circumradius is at most c mean particle spacings -- the cloud's alpha shape instead of its convex hull (default 3; 0 = the whole hull)
@@ -273,8 +276,7 @@ struct User_options
     Real   psHaloRelease;              // PS-DTFE --ps-halo-release <D>: during the GRID deposit, a tetrahedron whose geometric stream density rho_geo/rho_bar = V_lag/V_eul exceeds D is deposited monolithically at its Eulerian centroid cell (the sub-sample-spacing fallback path) instead of being rasterized over its bbox. 0 (default) = off. Mass conservation is exact; point evaluation is unaffected.
     bool   psExactDeposit;             // PS-DTFE, the RESOLVED deposit (resolveAverageMode; --exact, the default since 2026-11-09 for a run with an '_a' field, or --sampled; deprecated: --exact-average, --ps-exact-deposit). False in the constructor, like exactAverage. True = replace the nSub^3 sub-sampled grid deposit by EXACT tetrahedron-cell intersection moments (vendored r3d, Powell & Abel 2015, on the CPU; a 2D build clips triangles itself, ps_clip2d.h). CPU (double, reference) and, in a 3D build, GPU (float32 z-sweep, --gpu). The exact deposit ignores nSub where it clips (user_options.cc kPsExactSliverSubsamples says where it still reads it); it IS the nSub->infinity limit, so '.den' == '.a_den' where every tetrahedron clips (the unaveraged pass samples one that does not at 1 point).
     bool   psVertexMass;               // PS-DTFE --ps-vertex-mass: per-tetrahedron mass = sum over its vertices of weight/degree (chart-independent) instead of rho_bar * V_lag. Removes the 1-D(z_ic)/D(z) density-contrast suppression when --ps-lagrangian-input holds PERTURBED IC positions (e.g. TNG z=127) rather than the unperturbed lattice.
-    bool   psVolumeWeighted;           // PS-DTFE --ps-volume-weighted: weight the velocity/gradient/scalar moment deposits (NOT the dispersion -- sigma_ij is an f-weighted CBE moment and stays mass-weighted, bit-identical to a default run) by EULERIAN-VOLUME shares instead of mass shares -> the cell values become volume-weighted means (the standard-DTFE '_a' convention, what linear theory's -aHf delta refers to) instead of mass-weighted (momentum-like) means. Density/streams/caustics unchanged. CPU and GPU deposits (and the exact deposit, --exact); incompatible with --ps-linear-deposit.
-    bool   psPtsLegacyConventions;     // PS-DTFE --ps-point-conventions legacy: the point evaluation keeps rho_bar*V_lag masses and density-weighted stream means whatever --ps-vertex-mass / --ps-volume-weighted say. Default false ('grid'): the points follow those two grid conventions.
+    bool   psVolumeWeighted;           // PS-DTFE: always true (the constructor sets it, and nothing else writes it: '--ps-volume-weighted' is accepted and bound to nothing). The velocity/gradient/scalar moment deposits carry EULERIAN-VOLUME shares -> the cell values are volume-weighted means (the standard-DTFE '_a' convention, what linear theory's -aHf delta refers to); the dispersion stays mass-weighted (sigma_ij is an f-weighted CBE moment, with its own mass-weighted mean and normalizer). Density/streams/caustics carry the mass shares. Kept as a run-time value: the deposit loop and the GPU kernel still read it, and their mass-weighted branches go with that loop's clean-up
 #endif
     Real   averageDensity;// density normalization (computed as the box average if not given)
     size_t randomSeed;    // random seed for the Monte Carlo interpolation
@@ -301,7 +303,7 @@ struct User_options
     Real   MpcValue;      // the value of 1Mpc in input units
     bool   extensive;     // true if scalar fields are extensive (else intensive); matters for TSC/SPH
     bool   approxPSD;     // compute approximate phase-space density f = rho * g (velocity-space DTFE)
-    Real   lambda_th;    // --lambda-th: eigenvalue threshold for T-web/V-web classification (default 0.0)
+    Real   lambda_th;    // --lambda-th: eigenvalue threshold for T-web/V-web classification (default 0.3, the drivers' production value)
     Real   hubbleParam;  // Hubble parameter h for T-web/V-web normalization (-1 = read from header)
     Real   scaleFactor;  // scale factor a of the snapshot (-1 = read from header 'Time'). Gadget velocities are u = v_pec/sqrt(a), so the V-web gradient needs a sqrt(a) to reach peculiar km/s -- without it the eigenvalues are 1/sqrt(a) inflated at high z (4.6x at z=20)
     int    verboseLevel;  // verbose level (see 'message.h')
@@ -348,7 +350,7 @@ struct User_options
     double psBudgetBytes;       // ... the auto-tuner's memory budget (0: none known)
     double psParkRoom;          // what the memory budget leaves beside the auto-tuner's predicted peak with every partition lane whole (budget - predictedWholeLanes): the staged ordered merge parks finished partitions in RAM only within it and spills the rest (DTFE.cpp parkWhere; HUGE_VAL = no budget known)
     double psLookAheadRoom;     // what the memory budget leaves beside the grids, particles and ONE partition (the auto-tuner's budget - fixed - perPartition): the look-ahead runs only when it holds no more (DTFE.cpp; HUGE_VAL = no budget known)
-    bool   psDeferNormalization; // PS-DTFE partition path: keep fields as density-weighted moments (no per-partition normalize) so they sum linearly and normalize once afterwards; correct for multi-stream cells spanning partitions
+    bool   psDeferNormalization; // PS-DTFE partition path: keep fields as weighted moments (no per-partition normalize) so they sum linearly and normalize once afterwards; correct for multi-stream cells spanning partitions
 #endif
 #ifndef PHASE_SPACE
     // the standard partition loop's LOOK-AHEAD (DTFE.cpp: PS-DTFE's look-ahead, for the standard loop)
@@ -397,15 +399,19 @@ private:
                       MESSAGE::Message &showMessage); // the command line and the '--config' file into 'vm'
     void checkFileNameOptions(char *argv[], bool getFileNames, po::options_description &visibleOptions,
                               po::variables_map &vm, MESSAGE::Message &showMessage); // input/output file names, '--help'
+    // (then two static checks of user_options.cc: refuseRemovedPsOptions, PS-DTFE's three removed choices, first
+    // of all the option checks; checkConflictingOptions)
     void readMainOptions(po::variables_map &vm);         // '--grid', '--box', '--input-format', '--periodic'
     void readFieldOptions(po::variables_map &vm);        // '--field'
     void readRegionOptions(po::variables_map &vm);       // '--grid-window', '--region', '--region-mpc'
     void foldDeprecatedAliases(po::variables_map &vm);   // the deprecated spellings onto the canonical options
     void resolveAverageMode(po::variables_map &vm);      // '--exact' / '--sampled': the '_a' average (exactAverage, psExactDeposit)
     void resolveRunMode(po::variables_map &vm);          // '--run-mode' / DTFE_RUN_MODE (runMode) and PS-DTFE's '--gpu-share' as given
-    void checkGpuOptions(po::variables_map &vm);         // '--gpu', the triangulation's insert, the gradient route, '--exact'
+    void checkGpuOptions(po::variables_map &vm);         // the device ('--gpu', DTFE_GPU, the pick), the triangulation's insert, the gradient route, '--exact'
     std::string faceGradientBlocker(po::variables_map const &vm) const;   // why the face gradient is not this run's
                                                                           // default route ("" where it is)
+    bool gpuPathRuns(po::variables_map const &vm) const; // whether this run's '_a' work has a GPU path (the
+                                                         // program's pick of the device, checkGpuOptions)
     void checkDirectoryOptions();                        // '--scratch-dir', '--tessellation-cache'
     void checkPointEvalOptions(po::variables_map &vm);   // '--sample-points', '--serve' and their companions
     void checkPsDepositOptions(po::variables_map &vm);   // PS-DTFE only: caustics, alpha shape, deposit variants

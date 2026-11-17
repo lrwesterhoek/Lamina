@@ -30,9 +30,10 @@
 
    THE UNITS are fixed BEFORE the first merge from GLOBAL quantities only -- never from the partitions that finish
    first, which would make them order-dependent. Per accumulator a natural per-cell scale S (cellMass = the particles'
-   total mass / the grid's cells, cellVol = the grid cell's volume, Sw = the moment weight's scale: cellVol under
-   '--ps-volume-weighted', else cellMass; vmax = the particles' largest |velocity component|, smax = their largest
-   |scalar component|, dx = the smallest cell side; one O(N) pass over the particles):
+   total mass / the grid's cells, cellVol = the grid cell's volume, Sw = the moment weight's scale: cellVol (the
+   velocity moments are volume-weighted: User_options::psVolumeWeighted, true in every run; else cellMass);
+   vmax = the particles' largest |velocity component|, smax = their largest |scalar component|, dx = the smallest
+   cell side; one O(N) pass over the particles):
        density                                  1             (the sub-grid holds rho/rho_bar already)
        mass_weight                              Sw            (the mass shares, or the volume shares)
        disp_weight                              cellMass

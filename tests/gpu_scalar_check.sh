@@ -41,8 +41,8 @@ PYEOF
 G=32
 FIELDS=(--field density_a velocity_a gradient_a scalar_a scalarGradient_a --scalar-dataset Phi)
 # the kernel's gradient is what this suite compares: the deposit's own route (the face gradient is the standard
-# binary's default); the environment switch, which both binaries read (PS-DTFE's runs below are mass-weighted: the
-# stream average either way)
+# binary's default, and PS-DTFE's for its exact run below, whose velocity moments are volume-weighted as in every
+# PS-DTFE run); the environment switch, which both binaries read, keeps the deposit's own gradient in every run
 export DTFE_FACE_GRADIENT=0
 # one domain for both runs: on <= 8 cores the time-aware tuner splits the CPU reference, and a split sampled deposit
 # differs from one domain by ~4e-3, which would fail this suite on Linux

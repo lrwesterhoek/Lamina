@@ -74,33 +74,24 @@ assert_gpu "--gpu (second run)" "$TMP/s_gpu2.log"
 echo ">> single box, per-tetrahedron kernel (DTFE_GPU_ITEMS=0: the A/B reference kernel)"
 DTFE_GPU_ITEMS=0 run gpu-pertet "$TMP/s_gpu0" --sampled --gpu
 assert_gpu "--gpu per-tet kernel" "$TMP/s_gpu0.log"
-# A coarse grid makes most tetrahedra single-cell: the fast path, whose cell index the host
-# shifts into the shared full grid (a 96^3 grid, with hardly any single-cell tetrahedron, would
-# not catch a wrong shift). The shared grid (DTFE_GPU_SHARED=1, off by default: the per-sub-domain
-# grids measured faster) is compared with the default per-call path and the CPU. The shared grid serves the sampled
-# average only (the exact one never takes it), so these runs, and the face runs below, pass '--sampled'.
-echo ">> coarse 32^3 grid: the single-cell fast path through the shared grid"
+# A coarse grid makes most tetrahedra single-cell: the fast path, whose flat cell index the extraction computes in
+# the sub-domain's own grid and, where the run is split, the CPU copy places in the main grid (a 96^3 grid, with hardly any single-cell
+# tetrahedron, would not catch a wrong index). The GPU run is compared with the CPU. These runs, and the face runs
+# below, pass '--sampled' (the Monte-Carlo kernels).
+echo ">> coarse 32^3 grid: the single-cell fast path"
 COARSE=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --field $FIELDS --per-tet-gradient --sampled)   # (the kernel's gradient, as COMMON)
 "${DTFE_BIN}" "$SNAP" "$TMP/c_cpu" "${COARSE[@]}" > "$TMP/c_cpu.log" 2>&1 || { echo "FAIL run coarse cpu"; exit 1; }
-DTFE_GPU_SHARED=1 DTFE_GPU_TIMING=1 "${DTFE_BIN}" "$SNAP" "$TMP/c_gpu" "${COARSE[@]}" --gpu > "$TMP/c_gpu.log" 2>&1 || { echo "FAIL run coarse gpu"; exit 1; }
-assert_gpu "coarse --gpu shared" "$TMP/c_gpu.log"
 "${DTFE_BIN}" "$SNAP" "$TMP/c_gpu1" "${COARSE[@]}" --gpu > "$TMP/c_gpu1.log" 2>&1 || { echo "FAIL run coarse gpu per-call"; exit 1; }
 assert_gpu "coarse --gpu per-call" "$TMP/c_gpu1.log"
-if grep -q "processors will be used\|processors available" "$TMP/c_gpu.log" && ! grep -q "shared grid:" "$TMP/c_gpu.log"; then
-    echo "FAIL: the multi-threaded coarse --gpu run did not use the shared grid"; exit 1
-fi
 
-# The face gradient (the default since 2026-11-09): the deposits skip their per-tetrahedron gradient and the CPU
-# face pass writes it in every run, so through the shared grid the device must NOT add a gradient on top -- it did
-# until that day (a doubled gradient: shared-vs-percall 1.06, caught by the coarse runs above while they were unpinned)
-echo ">> coarse 32^3 grid, the face gradient (the default) through the shared grid"
+# The face gradient (the default): the deposits skip their per-tetrahedron gradient and the CPU face pass writes it
+# in every run, so the GPU run's gradient must be the CPU run's to float order
+echo ">> coarse 32^3 grid, the face gradient (the default)"
 FACE=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --field $FIELDS --sampled)
 "${DTFE_BIN}" "$SNAP" "$TMP/cf_cpu" "${FACE[@]}" > "$TMP/cf_cpu.log" 2>&1 || { echo "FAIL run coarse face cpu"; exit 1; }
-DTFE_GPU_SHARED=1 "${DTFE_BIN}" "$SNAP" "$TMP/cf_gpu" "${FACE[@]}" --gpu > "$TMP/cf_gpu.log" 2>&1 || { echo "FAIL run coarse face gpu shared"; exit 1; }
-assert_gpu "coarse face --gpu shared" "$TMP/cf_gpu.log"
 "${DTFE_BIN}" "$SNAP" "$TMP/cf_gpu1" "${FACE[@]}" --gpu > "$TMP/cf_gpu1.log" 2>&1 || { echo "FAIL run coarse face gpu per-call"; exit 1; }
 assert_gpu "coarse face --gpu per-call" "$TMP/cf_gpu1.log"
-grep -q "face gradient pass" "$TMP/cf_gpu.log" || { echo "FAIL: the coarse face --gpu run did not run the face pass (is the face gradient still the default?)"; exit 1; }
+grep -q "face gradient pass" "$TMP/cf_gpu1.log" || { echo "FAIL: the coarse face --gpu run did not run the face pass (is the face gradient still the default?)"; exit 1; }
 
 echo ">> partitioned (2 2 2)"
 run cpu-part  "$TMP/p_cpu" --partition 2 2 2 --max-concurrent 2 --sampled
@@ -205,26 +196,23 @@ for suf in ("a_den", "a_vel"):                  # the fine region (kpc cells): t
         print("FAIL " + line); ok = False
     else:
         print("PASS " + line)
-# the coarse grid: fast-path cells through the shared grid ('c': the kernel's gradient). 'cf': the face gradient (the
-# default), which the same CPU face pass writes in all three runs, so that grid must agree to float order on both
-# comparisons -- until 2026-11-09 the shared grid added the device's gradient on top of it (shared-vs-percall 1.06)
+# the coarse grid: the GPU run against the CPU run, fast-path cells ('c': the kernel gradient). 'cf': the face
+# gradient (the default), which the same CPU face pass writes in both runs, so that grid must agree to float order
 FACE_GRAD_TOL = 1e-5
 for pre in ("c", "cf"):
     for suf in ("a_den", "a_vel", "a_velGrad"):
         c = np.fromfile(f"{tmp}/{pre}_cpu.{suf}", dtype=REAL)
-        g = np.fromfile(f"{tmp}/{pre}_gpu.{suf}", dtype=REAL)
-        h = np.fromfile(f"{tmp}/{pre}_gpu1.{suf}", dtype=REAL)
+        g = np.fromfile(f"{tmp}/{pre}_gpu1.{suf}", dtype=REAL)
         scale = float(np.max(np.abs(c))) or 1.0
         d = np.abs(c - g)
         face = pre == "cf" and suf == "a_velGrad"
-        peak_tol, repeat_tol = (FACE_GRAD_TOL, FACE_GRAD_TOL) if face else (REL_TOL, REPEAT_TOL)
+        peak_tol = FACE_GRAD_TOL if face else REL_TOL
         meandiff = abs(float(c.mean()) - float(g.mean())) / scale
         peak = float(d.max()) / scale
         frac = float((d > 1e-3 * scale).sum()) / c.size
-        shared = float(np.abs(g - h).max()) / scale
-        line = (f"{pre}.{suf:10s} mean-rel={meandiff:.2e} peak-rel={peak:.2e} frac>1e-3={frac:.2e} shared-vs-percall={shared:.2e}"
-                + (" (the face pass in all three: float order)" if face else ""))
-        if meandiff > MEAN_TOL or peak > peak_tol or frac > FRAC_TOL or shared > repeat_tol:
+        line = (f"{pre}.{suf:10s} mean-rel={meandiff:.2e} peak-rel={peak:.2e} frac>1e-3={frac:.2e}"
+                + (" (the face pass in both: float order)" if face else ""))
+        if meandiff > MEAN_TOL or peak > peak_tol or frac > FRAC_TOL:
             print("FAIL " + line); ok = False
         else:
             print("PASS " + line)

@@ -50,8 +50,8 @@
 //  every split rounds every share alike, and a cap on each share's integer (P.fxCapBits) keeps every cell sum below
 //  2^126 in any order, where no bound per batch exists. They have no float pre-sum (one integer per piece), so the
 //  chunk alignment does not concern them. DTFE_RUN_UNITS_LEGACY=1 keeps them on the 64-bit words of the batch's own
-//  units. DTFE_GPU_FLOAT_GRIDS=1 keeps the float atomics for A/B, as does the opt-in shared full grid
-//  (DTFE_GPU_SHARED=1). Measured cost (0.26M particles at 256^3 on a GPU shared with another
+//  units. DTFE_GPU_FLOAT_GRIDS=1 keeps the float atomics for A/B.
+//  Measured cost (0.26M particles at 256^3 on a GPU shared with another
 //  run, so indicative): the exact-average kernel none; the item kernel 1.6-1.9x for density + velocity
 //  (the integer table holds half the entries and every value takes two atomics), 10-15% with the velocity
 //  gradient, 0-15% for the density alone.
@@ -102,8 +102,8 @@ struct DGrids {
 
 // A share in fixed-point units: rint(v * scale). scale is 2^k, so the float product is exact (barring
 // overflow, which the host's bound rules out) and rint rounds to nearest even -- the integer the host
-// would compute (ps_deposit_params.h psMassFixedShare). The non-finite guard (ps_deposit_params.h
-// psFixedShareOk says why, metal/ps_deposit.metal fixedShareOk is the same test): a product not below 2^63 in
+// would compute (ps_deposit_params.h psFixedShareOk, which also says why the non-finite guard exists). The
+// guard (metal/ps_common.metal.inc fixedShareOk is the same test): a product not below 2^63 in
 // magnitude -- NaN, inf, an overflow -- has no int64 (the conversion is unspecified there); it gives 0, which every
 // add below skips, and is counted in its grid's word of 'bad'. The float's bits are tested (fast math cannot fold
 // an integer compare away): one compare, and a finite in-range share keeps its integer, bit for bit.
@@ -261,7 +261,7 @@ kernel void depositAveraged1(
     device const float*     vels     [[buffer(2)]],   // nTet*12: vertex velocities (dummy when fVel==fGrad==0)
     device const float*     vols     [[buffer(3)]],   // nTet:    tetrahedron volume (CPU value)
     device const uint*      cnts     [[buffer(4)]],   // nTet:    sample count; 0 = single-grid-cell fast path
-    device const uint*      flats    [[buffer(5)]],   // nTet:    FULL-grid flat index for the fast path (the host adds subOff)
+    device const uint*      flats    [[buffer(5)]],   // nTet:    FULL-grid flat index for the fast path (subOff is 0: the grid's own index)
     device const int*       cells    [[buffer(22)]],  // nTet*3:  each tetrahedron's base cell (sub-grid indices; its positions are relative to that cell's corner): 0 under the region frame
     device const float4*    sobol    [[buffer(6)]],   // maxNN: shared Sobol barycentric table (xyz, pad)
     device atomic_float*    denGrid  [[buffer(7)]],

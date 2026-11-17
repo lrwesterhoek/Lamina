@@ -10,7 +10,8 @@
    THE RULE. K_g = N_g - e_g, where the accumulator's natural per-cell scale S_g lies in [2^(e_g - 1), 2^e_g), so S_g
    sits at [2^(N_g - 1), 2^N_g) units. The inputs: the grid's cell sides dx_a (its box over its cells, as the grid
    frame's dxG: user_options.h gridFrame), V_cell, dx_min and the largest cell face A = V_cell / dx_min; rho_bar (the
-   run's mean density), cellMass = rho_bar V_cell, Sw = V_cell under '--ps-volume-weighted', else cellMass; and one
+   run's mean density), cellMass = rho_bar V_cell, Sw = V_cell (PS-DTFE's velocity moments are volume-weighted;
+   fill's volumeWeighted false gives cellMass, which no standard accumulator reads); and one
    serial pass over the particles the run uses (measure): vmax = the largest |velocity component|, smax = the largest
    |scalar component|, M = the total mass, <v^2>_m = sum m |v|^2 / (NO_DIM M) and their count n. The maxima are exact
    and the sums run over one array in one order, so every split gets the same bits.
@@ -258,7 +259,8 @@ struct RunUnits
     }
 
     // The table (the header comment): side = the grid's cell sides, meanDensity = rho_bar, volumeWeighted =
-    // '--ps-volume-weighted', subsamples = PS-DTFE's '--subsamples' (1 in the standard binary)
+    // User_options::psVolumeWeighted (true in every PS-DTFE run; the standard binary passes false), subsamples =
+    // PS-DTFE's '--subsamples' (1 in the standard binary)
     void fill(double const side[NO_DIM], double const meanDensity, bool const volumeWeighted, int const subsamples,
               RunMoments const &m)
     {

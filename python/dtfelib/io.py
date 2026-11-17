@@ -53,18 +53,18 @@ from .runlog import canonical_command   # a run log's older option spellings (th
 # canonical field name -> (file suffix, components, ps_only)
 # The 'a_' averaged prefix is inserted automatically (averaged=True default).
 #
-# PS-DTFE STORES THE MEAN FLOW'S grad<v> BY DEFAULT where the run qualifies (the exact deposit, --ps-volume-weighted,
-# no halo release, 3D; docs/cleanup-plan.md D13, the face gradient): such a run writes '.a_velDivStreams' beside the
+# PS-DTFE STORES THE MEAN FLOW'S grad<v> BY DEFAULT where the run qualifies (the exact deposit, no halo release, 3D;
+# docs/cleanup-plan.md D13, the face gradient): such a run writes '.a_velDivStreams' beside the
 # family, FieldSet.face_gradient is True and load(name, mean_field=True) returns the stored grid. Its unaveraged
 # ('_u') grids carry no marker of their own: their route is the run's, read from its run log (run_face_gradient).
-# What follows holds for a run without it ('--per-tet-gradient', the sampled deposit, mass-weighted moments, the halo
-# release, 2D, and the runs of a binary older than that default).
+# What follows holds for a run without it ('--per-tet-gradient', the sampled deposit, the halo release, 2D, and the
+# runs of an older binary: from before that default, or with mass-weighted moments).
 #
 # THE VELOCITY-GRADIENT FAMILY UNDER PS-DTFE: 'gradient', 'divergence',
 # 'shear', 'vorticity' and the V-web ('vweb', 'vweb_eigenvalues', classified from that gradient with
 # the Hoffman thresholds) hold, in a multi-stream cell, the STREAM AVERAGE OF EACH STREAM'S OWN
-# GRADIENT <grad v> = sum_s w_s grad(v_s) / sum_s w_s (w_s = the stream's Eulerian volume in the cell
-# under --ps-volume-weighted, the production convention, else its mass) -- NOT the gradient of the
+# GRADIENT <grad v> = sum_s w_s grad(v_s) / sum_s w_s (w_s = the stream's Eulerian volume in the cell,
+# PS-DTFE's weighting; its mass in an older run made without --ps-volume-weighted) -- NOT the gradient of the
 # mean velocity grad<v> that standard DTFE (one single-valued field) stores. The two agree in
 # single-stream cells only (deep void interiors agree to <1.5%); in folds they differ in sign and
 # size: the inverted stream inside a wall has a POSITIVE divergence (in 1-D dv/dx = Ddot psi'/(1 +
@@ -126,7 +126,8 @@ _PREFIX = {"ps": "ps_output.", "dtfe": "output."}
 
 # The velocity-gradient family load(..., mean_field=True) serves (fields.MEAN_FIELD_NAMES, kept here too so that
 # importing io never needs scipy), and the V-web threshold of a run whose log does not say it: the run scripts'
-# LAMBDA_TH default (run_dtfe.sh / run_ps_dtfe.sh pass --lambda-th 0.3; the binary's own default is 0).
+# LAMBDA_TH default (run_dtfe.sh / run_ps_dtfe.sh pass --lambda-th 0.3; the binary's own default is 0.3 too, an older
+# binary's was 0, which its T-web report in the log names).
 MEAN_FIELD_NAMES = ("gradient", "divergence", "shear", "vorticity", "vweb", "vweb_eigenvalues")
 DEFAULT_LAMBDA_TH = 0.3
 # The family load(..., stream_average=True) serves: the stream average <grad v> under either gradient route (D12)
@@ -358,24 +359,36 @@ def _load_budget_bytes() -> int:
     return int(frac * _available_ram_bytes())
 
 
+# the PS-DTFE run-log header's line on the velocity moments (src/user_options.cc, printed by every PS-DTFE run beside
+# the command line): 'velocity moments : volume-weighted (the dispersion mass-weighted)'. A log of an older binary
+# has none (python/gui/results.py _MOMENTS reads it the same way)
+_MOMENTS_LINE = r"^\s*velocity moments\s+:\s+volume-weighted"
+
+
 def run_velocity_weighting(method: str, runlog) -> tuple[str, str]:
     """How the velocity grid of a 'method' run whose log is 'runlog' was deposited, and how that is known:
     ('volume' | 'mass', why) (FieldSet.velocity_weighting). A coarser view of it must be the mean a coarser run of
     the SAME deposit gives: the plain block mean of a volume-weighted grid, sum rho v / sum rho of a mass-weighted
-    one. Standard DTFE's cell-averaged velocity is the volume average. A PS-DTFE run says it in its run log (the
-    binary's command line: the header does not record it); without the log the production convention
-    (--ps-volume-weighted, runspec's default, the TNG runlogs) is assumed, and said."""
+    one. Standard DTFE's cell-averaged velocity is the volume average. PS-DTFE volume-weights its velocity moments
+    in every run, and its run log says so in the header line 'velocity moments : volume-weighted'; an older binary
+    printed no such line and volume-weighted only when its command carried '--ps-volume-weighted', so a log with
+    neither is an older run's, mass-weighted. The header line is read first: a log that carries it is never read as
+    mass-weighted for want of the flag. Without the log the volume weighting is assumed, and said."""
     import re
     if method != "ps":
         return "volume", "standard DTFE: the volume average"
     log = Path(runlog)
     try:
-        text = canonical_command(log.read_text(errors="replace"))     # (runlog.py: every spelling, one path)
+        raw = log.read_text(errors="replace")
     except OSError:
-        return "volume", f"no {log.name}: the production convention (--ps-volume-weighted) assumed"
+        return "volume", f"no {log.name}: the volume weighting (PS-DTFE's, --ps-volume-weighted) assumed"
+    if re.search(_MOMENTS_LINE, raw, re.M):
+        return "volume", f"{log.name}: its header line 'velocity moments : volume-weighted'"
+    text = canonical_command(raw)     # (runlog.py: every spelling, one path)
     if re.search(r"(^|\s)--ps-volume-weighted(\s|$)", text, re.M):
         return "volume", f"{log.name}: --ps-volume-weighted"
-    return "mass", f"{log.name}: no --ps-volume-weighted (the binary's mass-weighted default)"
+    return "mass", (f"{log.name}: no --ps-volume-weighted and no 'velocity moments' header line "
+                    "(an older PS-DTFE run, mass-weighted)")
 
 
 def run_lambda_th(runlog) -> float:
@@ -412,7 +425,7 @@ def run_face_gradient(runlog) -> bool:
     unaveraged ('_u') grids, which no file marks: the binary writes the stream average's divergence
     ('.a_velDivStreams', the marker of the '_a' grids) for the '_a' pass only (src/input_output.cc). The route is
     the run's, one for both passes (src/CGAL_triangulation/ps_interpolation.cc fx.face: the run's route, its exact
-    deposit and volume weighting, and a field built on the gradient), so the header's last 'velocity gradient' line
+    deposit and a field built on the gradient), so the header's last 'velocity gradient' line
     names it for the '_u' grids too: 'from EXACT FACE sums' for the face gradient. False without the log or one
     that cannot be read, for a log without that line (a PS-DTFE binary before its face-gradient default,
     docs/cleanup-plan.md D13, printed none: such folders read as before), and where a pass's face sums found no

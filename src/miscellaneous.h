@@ -22,7 +22,7 @@
 
 
 
-/* General-purpose utilities: range/option consistency checks, array min/max, quicksort, and integer roots. */
+/* General-purpose utilities: range/option consistency checks, array max, and integer roots. */
 
 #ifndef MISCELLANEOUS_HEADER
 #define MISCELLANEOUS_HEADER
@@ -89,15 +89,7 @@ void option_dependency(const T &vm,
 
 
 
-// Minimum and maximum values of an array.
-template <typename T, typename T_INT> inline T minimum(T *x, T_INT const size )
-{
-    T temp = x[0];
-    for (T_INT i=1; i<size; ++i)
-        if ( temp>x[i] )
-            temp = x[i];
-    return temp;
-}
+// Maximum value of an array.
 template <typename T, typename T_INT> inline T maximum(T *x, T_INT const size )
 {
     T temp = x[0];
@@ -105,42 +97,6 @@ template <typename T, typename T_INT> inline T maximum(T *x, T_INT const size )
         if ( temp<x[i] )
             temp = x[i];
     return temp;
-}
-
-
-
-
-// In-place quicksort of values[iMin..iMax] in increasing order.
-template <typename T1, typename T2>
-void quicksort( T1 values[], T2 iMin, T2 iMax )
-{
-    if ( iMin>=iMax )
-        return;
-
-    T1 temp = values[iMax]; // pivot
-    T2 i = iMin, i1=iMin, i2=iMax;
-    do
-    {
-        if ( values[i]>temp )   // larger than pivot -> goes right
-        {
-            if ( i==i1 )
-                values[i2] = values[i];
-            --i2;
-            i = i2;
-        }
-        else
-        {
-            if ( i==i2 )
-                values[i1] = values[i];
-            ++i1;
-            i = i1;
-        }
-    } while ( i1!=i2 );
-
-    values[i] = temp;   // pivot lands at the free slot i==i1==i2
-
-    quicksort( values, iMin, i-1);
-    quicksort( values, i+1, iMax);
 }
 
 

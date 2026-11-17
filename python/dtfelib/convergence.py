@@ -88,9 +88,9 @@ def velocity_weighting(products) -> tuple[str, str]:
 
 def block_average_velocity(velocity, density, factor: int, weighting: str = "volume") -> np.ndarray:
     """The coarse cell's velocity from a (N,N,N,3) velocity grid as a coarser run of the same deposit gives it:
-    'volume' (a volume-weighted deposit, the production convention: velocity_weighting) the plain block mean;
-    'mass' the MASS-weighted block mean (sum rho v / sum rho over each block; the plain mean where a block holds
-    no mass)."""
+    'volume' (a volume-weighted deposit: standard DTFE's and PS-DTFE's, velocity_weighting) the plain block mean;
+    'mass' (an older PS-DTFE run made without --ps-volume-weighted) the MASS-weighted block mean (sum rho v / sum rho
+    over each block; the plain mean where a block holds no mass)."""
     if weighting not in VELOCITY_WEIGHTINGS:
         raise ValueError(f"block_average_velocity: weighting must be one of {VELOCITY_WEIGHTINGS}, got {weighting!r}")
     f = int(factor)

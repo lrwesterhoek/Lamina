@@ -100,7 +100,7 @@ GPU=0
 [ -n "$(gpu_backend_of o)" ] && GPU=1
 # what steers a run's sums, from the caller's shell: every case sets its own
 unset DTFE_RUN_UNITS_LEGACY DTFE_TEST_RUN_UNIT_SHIFT DTFE_FACE_CHECK DTFE_FACE_GRADIENT DTFE_TRIANGULATION_THREADS \
-      DTFE_TRIANGULATION_MIN_POINTS DTFE_DEPOSIT_THREADS DTFE_MC_LEGACY DTFE_GPU_FLOAT_GRIDS DTFE_GPU_SHARED \
+      DTFE_TRIANGULATION_MIN_POINTS DTFE_DEPOSIT_THREADS DTFE_MC_LEGACY DTFE_GPU_FLOAT_GRIDS \
       DTFE_GPU_ITEMS DTFE_GPU_FAULT_AT DTFE_GPU_TIMING OMP_NUM_THREADS DTFE_PS_RUN_UNITS
 FAIL=0
 pass() { echo "   PASS  $*"; }
@@ -341,8 +341,8 @@ PY
 # PS-DTFE, under DTFE_PS_RUN_UNITS=1 (exported below; by default its passes take units of their own): its passes sum
 # in the same run-wide units (EST=ps*, BIN="${PS_BIN}", the crossed waves as DATA, their own COMMON; run, differing,
 # expect_same and U1 take them as they are). Each case makes its own runs. The groups of U1 are per flag family:
-# '--ps-volume-weighted' sets the moment weight's unit and '--subsamples' the share cap, so the exact and the sampled
-# runs print two different units lines.
+# '--subsamples' sets the share cap (and the volume-weighted velocity moments, every PS-DTFE run's, the moment
+# weight's unit), so the exact and the sampled runs print two different units lines.
 PS_DATA="$TMP/ps_waves.hdf5"
 if [ ! -x "${PS_BIN}" ]; then
     echo ">> PS-DTFE: SKIP -- ${PS_BIN} is not built"

@@ -193,7 +193,7 @@ OPTIONS_COMMON += -DNO_SCALARS=1
 
 ############################# Input and output operations default settings ##################################
 #------------------------ set which are the default input and output functions for doing data io
-# default function to read the input data (101-multiple gadget file, 102-single gadget file, 105-HDF5 gadget file, 111-text file, ... see documentation for more options). The input file type can be set during runtime using the option '--input-format'. This makefile option only sets a default input file in the case none is given via the program options.
+# default function to read the input data (101-binary gadget snapshot in one file or several, 105-HDF5 gadget file, 111-text file, ... see documentation for more options). The input file type can be set during runtime using the option '--input-format'. This makefile option only sets a default input file in the case none is given via the program options.
 OPTIONS_COMMON += -DINPUT_FILE_DEFAULT=105
 # default value for the units of the input data (value=what is 1 Mpc in the units of the data - in this example the data is in kpc). You can change this also during runtime using the program option '--mpc-unit'.
 OPTIONS_COMMON += -DMPC_UNIT=1000
@@ -285,18 +285,6 @@ dtfe_gpu_mode_check:
 #------------------------ options usefull when using DTFE as a library
 # uncomment the line to get access to a function that returns the Delaunay triangulation of the point set
 OPTIONS_COMMON += -DTRIANGULATION
-
-
-############################# Help menu messages options ##################################
-#------------------------ compiler directive that affect only the help messages when using the '-h / --help' option (it does not affect the program in any other way)- if the option is uncommented, than it will show that set of options in the help menu
-OPTIONS_COMMON += -DFIELD_OPTIONS
-OPTIONS_COMMON += -DREGION_OPTIONS
-OPTIONS_COMMON += -DPARTITION_OPTIONS
-OPTIONS_COMMON += -DPADDING_OPTIONS
-OPTIONS_COMMON += -DAVERAGING_OPTIONS
-OPTIONS_COMMON += -DREDSHIFT_CONE_OPTIONS
-OPTIONS_COMMON += -DADDITIONAL_OPTIONS
-
 
 
 OPTIONS_COMMON += -DBOOST_TIMER_ENABLE_DEPRECATED
@@ -511,10 +499,10 @@ COMPILE_FLAGS_PS += $(ARCH_FLAGS)
 
 # GCC fuses a*b + c into one rounding (FMA) ACROSS statements by default (-ffp-contract=fast)
 # wherever the target has FMA -- every arm64 machine, and x86 under -march=native -- so two code
-# paths written to do the same arithmetic round differently: on Linux arm64 the dispersion of a
-# --ps-volume-weighted run would not be bit-identical to a mass-weighted run's
-# (tests/ps_volume_weighted_check.sh). Clang (the macOS build) only fuses within one
-# expression, which both paths do alike, and is left as it is.
+# paths written to do the same arithmetic round differently, and a value's last bit depends on
+# what the optimizer fused. With -ffp-contract=off a GCC build rounds each product where the
+# source writes it, so its outputs do not depend on what the optimizer fused.
+# Clang (the macOS build) only fuses within one expression, and is left as it is.
 CC_IS_GCC := $(shell $(CC) --version 2>/dev/null | grep -qi 'free software foundation' && echo 1)
 ifeq ($(CC_IS_GCC),1)
     COMPILE_FLAGS    += -ffp-contract=off

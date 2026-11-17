@@ -65,7 +65,7 @@ run_program_suites() {
     step "3D crossed waves";                    "$PY" tests/ps_3d_test.py --no-build
     step "single-stream convergence";           "$PY" tests/ps_convergence_test.py --no-build
     step "PS vs standard DTFE (single stream)"; "$PY" tests/ps_standard_cross_check.py --no-build
-    step "linear/exact deposit";                tests/ps_linear_deposit_check.sh --no-build
+    step "exact and sampled deposit";           tests/ps_deposit_check.sh --no-build
     step "halo release";                        tests/ps_halo_release_check.sh --no-build
     step "vertex mass";                         tests/ps_vertex_mass_check.sh --no-build
     step "volume weighted";                     tests/ps_volume_weighted_check.sh --no-build
@@ -104,6 +104,9 @@ run_program_suites() {
     step "resume of a killed partitioned standard run"; tests/dtfe_resume_check.sh --no-build
     step "old and new flag spellings: one run, one settings key"; tests/flag_spelling_check.sh --no-build
     step "run modes (gentle / balanced / performance, --gpu-share)"; tests/run_mode_check.sh --no-build
+    # the device the programs choose without '--gpu' (DTFE_GPU, the pick), its header and checkpoint key lines, the
+    # header's padding; each case checks the row of the build it runs on (a CPU-only one here, Metal in the battery)
+    step "the programs' defaults: the device, its header and key lines, the padding"; tests/defaults_check.sh --no-build
     step "resume with --sample-points";         tests/ps_resume_points_check.sh --no-build
 }
 

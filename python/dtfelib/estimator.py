@@ -16,6 +16,8 @@ rebuild, no files:
 Every answer is exactly what '--sample-points' would write for the same points (the server
 runs the same code), including the exact, tie-consistent stream counting: a point on a
 shared face, edge or vertex -- e.g. a particle position -- is counted once per stream.
+PS-DTFE weights its velocity moments by volume, so a point's velocity, velocity gradient and
+scalar are the plain means over its streams, and its dispersion stays mass-weighted (PointFields).
 
 Units mirror FieldSet.load / PointPlane: density is rho/rho_bar; velocities (and velocity
 gradients) are converted to peculiar km/s with sqrt(a), the dispersion (a velocity variance)
@@ -45,8 +47,9 @@ import numpy as np
 
 __all__ = ["Estimator", "PointFields", "find_binary", "STANDARD_PADDING"]
 
-# The standard (Eulerian) server's '--padding', in mean particle spacings, when the caller gives none.
-# The binary's own default of 5 is too thin near the box faces: on demo/z0_64 (z = 0) 0.5-0.9% of the points of a
+# The standard (Eulerian) server's '--padding', in mean particle spacings, when the caller gives none (the standard
+# binary's own default is 15 too; it is named so that an older binary, whose default was 5, gets it as well).
+# 5 is too thin near the box faces: on demo/z0_64 (z = 0) 0.5-0.9% of the points of a
 # plane 0.05 Mpc inside a face are off by up to ~4% against padding 30-40, computed from the wrong hull tetrahedra
 # (they still report coverage 1, so nothing flags them), while 10 to 40 agree to float rounding (1e-14;
 # tests/point_exact_serve_check.sh P2). 15 is scripts/run_dtfe.sh's default, complete (no
@@ -59,7 +62,8 @@ _HELLO = b"DTFESRV2"
 _REPLY = b"DTFEPTS1"
 _ERROR = b"DTFEERR1"
 
-# handshake flag bits (ps_point_eval.cc, '--serve' protocol version 2)
+# handshake flag bits (ps_point_eval.cc, '--serve' protocol version 2); bit 6 (_F_GEOMETRIC) stays reserved: it was
+# the geometric per-stream density's, which PS-DTFE no longer has, and nothing reads it
 (_F_PS, _F_PER_STREAM, _F_IDS, _F_DEN_GRAD, _F_VEL_GRAD, _F_CAUSTIC, _F_GEOMETRIC, _F_PERIODIC,
  _F_SCALAR, _F_LAGRANGIAN, _F_COMPOSITE, _F_DIM2) = (1 << i for i in range(12))   # _F_DIM2: a 2D build
 
@@ -97,16 +101,18 @@ class PointFields:
     velocity gradients, 3 particle IDs per stream and 2-component positions.
 
     density     (N,)      rho/rho_bar, summed over streams
-    velocity    (N, 3)    density-weighted mean velocity over streams
-    dispersion  (N, 6)    velocity dispersion tensor, xx xy xz yy yz zz (0 for 1 stream)
+    velocity    (N, 3)    the plain mean velocity over the point's streams: every stream fills the point, so
+                          PS-DTFE's volume weighting gives each the same share (standard DTFE: its one stream)
+    dispersion  (N, 6)    velocity dispersion tensor, xx xy xz yy yz zz (0 for 1 stream): mass-weighted, the
+                          density-weighted second moment about the density-weighted mean velocity
     streams     (N,)      number of streams (tetrahedra) containing the point; the standard
                           binary reports 0/1 coverage
     caustic     (N,)      caustic mask (caustics=True), bits as in '.causticClass'
     density_gradient  (N, 3)       d(rho/rho_bar)/dx_i (density_gradient=True)
-    velocity_gradient (N, 3, 3)    [.., d, j] = dv_j/dx_d, density-weighted stream mean
-                                   (velocity_gradient=True)
+    velocity_gradient (N, 3, 3)    [.., d, j] = dv_j/dx_d, the plain mean over the point's streams, as
+                                   velocity (velocity_gradient=True)
     scalar      (N,)      the particles' scalar value (scalars=True / scalar_dataset=...), the
-                          density-weighted mean over the point's streams; (N, S) for S > 1
+                          plain mean over the point's streams, as velocity; (N, S) for S > 1
     per-stream decomposition (per_stream=True; ragged, point i owns rows
     offsets[i]:offsets[i+1], densest stream first):
     offsets (N+1,), stream_density (R,), stream_velocity (R, 3),
@@ -159,8 +165,9 @@ class Estimator:
     per_stream, per_stream_ids, density_gradient, velocity_gradient, caustics
                        the matching '--sample-points' outputs (--ps-per-stream, --ps-per-stream-ids,
                        --pts-den-grad, --pts-vel-grad, --ps-caustics).
-    stream_density     'dtfe' (default; the binary's '--ps-stream-density linear', also accepted here) or
-                       'geometric' ('--ps-stream-density').
+    stream_density     'dtfe' (default; also spelled 'linear'): the per-stream density is the linear
+                       interpolation of the vertex densities, the binary's '--ps-stream-density linear'.
+                       'geometric' was removed (a ValueError says so).
     scalars            interpolate the particles' scalar value too ('--pts-scalar'); needs a
                        scalar source, normally scalar_dataset.
     scalar_dataset     per-particle HDF5 dataset read as that scalar ('--scalar-dataset', e.g.
@@ -178,12 +185,14 @@ class Estimator:
     max_concurrent     partitions triangulated at once while the composite starts
                        ('--max-concurrent').
     run_mode           '--run-mode': how hard the server leans on the machine, 'gentle', 'balanced' or
-                       'performance'; None (default) keeps the binary's default, performance.
+                       'performance'; None (default) keeps the binary's default: balanced, or performance inside a
+                       batch job (SLURM_JOB_ID or PBS_JOBID set).
     peculiar           convert velocities to peculiar km/s with the snapshot's scale factor
                        (FieldSet convention); False returns the binary's raw units.
     padding            '--padding' in mean particle spacings. None (default): STANDARD_PADDING (15) for the
-                       standard estimator -- the binary's own 5 gives wrong values near the box faces --
-                       and the binary's default for PS-DTFE. A '--padding'/'--padding-mpc' in 'options' wins.
+                       standard estimator -- the standard binary's own default too; an older binary's 5 gives
+                       wrong values near the box faces -- and the binary's default for PS-DTFE. A
+                       '--padding'/'--padding-mpc' in 'options' wins.
     options            extra command-line arguments, passed through verbatim.
     binary             explicit path to the executable (default: find_binary()).
     dim                2 for a 2D snapshot and build (PS-DTFE-2d / DTFE-2d): points are (N, 2), every
@@ -198,6 +207,9 @@ class Estimator:
                        'verbose' says. A launcher follows them for its progress bar and timings.
     log_path           write the server's log to this file instead, at the 'verbose' level (a
                        GUI follows the tessellation build there: '[partitions k/N]' lines).
+    env                environment variables set for the binary on top of this process's own (None, the
+                       default: this process's environment as it is). E.g. {"DTFE_GPU": "0"}: the binaries read
+                       DTFE_GPU, and a launcher pins it so that the shell's export does not reach its server.
     """
 
     def __init__(self, snapshot, *, phase_space: bool = True, periodic: bool = True,
@@ -212,7 +224,7 @@ class Estimator:
                  padding: float | None = None,
                  options=(),
                  binary=None, precision: str = "single", dim: int = 3, verbose: int = 0, log_path=None,
-                 progress: bool = False, _owned_dir=None, _shift=None, _on_spawn=None):
+                 progress: bool = False, env: dict | None = None, _owned_dir=None, _shift=None, _on_spawn=None):
         self._owned_dir = Path(_owned_dir) if _owned_dir else None   # from_arrays' temporary snapshot
         # from_arrays: the server's coordinates = the caller's + _shift (it keeps the box >= 0,
         # because the binary's option parser reads a negative '--box' value as a flag)
@@ -221,13 +233,18 @@ class Estimator:
             raise ValueError(f"dim must be 2 or 3, not {dim!r}")
         self.dim = int(dim)             # confirmed (or corrected) by the server's handshake
         self._closed = True             # until the server is up (close() is then a no-op)
+        # the stream density first, before the snapshot and the binary are looked for: a removed choice is said
+        # whatever else is missing
+        if stream_density == "geometric":
+            raise ValueError("stream_density 'geometric' was removed: the per-stream density is the linear "
+                             "interpolation of the vertex densities ('dtfe', also spelled 'linear')")
+        if stream_density not in ("dtfe", "linear"):
+            raise ValueError(f"stream_density must be 'dtfe' (also spelled 'linear'), not {stream_density!r}")
         self.snapshot = Path(snapshot)
         if not self.snapshot.exists():
             raise FileNotFoundError(f"snapshot not found: {self.snapshot}")
         self.phase_space = bool(phase_space)
         self.binary = Path(binary) if binary else find_binary(self.phase_space, precision, self.dim)
-        if stream_density not in ("dtfe", "linear", "geometric"):
-            raise ValueError("stream_density must be 'dtfe' (= 'linear') or 'geometric'")
         if lagrangian_positions and not self.phase_space:
             raise ValueError("lagrangian_positions needs the phase-space estimator (phase_space=True)")
 
@@ -253,7 +270,7 @@ class Estimator:
         if caustics:
             cmd.append("--ps-caustics")
         if self.phase_space:
-            cmd += ["--ps-stream-density", "linear" if stream_density == "dtfe" else stream_density]
+            cmd += ["--ps-stream-density", "linear"]          # ('dtfe' and 'linear' alike)
         if scalar_dataset:
             cmd += ["--scalar-dataset", str(scalar_dataset)]
             scalars = True
@@ -293,7 +310,9 @@ class Estimator:
                 self._log = None if verbose > 0 else open(self._log_path, "wb")
             self._lock = threading.Lock()
             self._proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                          stderr=self._log)
+                                          stderr=self._log,
+                                          env=None if env is None else {**os.environ,
+                                                                        **{str(k): str(v) for k, v in env.items()}})
         except BaseException:                   # the binary missing, a log that cannot be opened: close() would
             if self._log is not None:           # return early (nothing started), so clean up here
                 self._log.close()
@@ -472,7 +491,7 @@ class Estimator:
         return self(points).density
 
     def velocity(self, points) -> np.ndarray:
-        """Density-weighted mean velocity at the points, (N, dim)."""
+        """The mean velocity at the points, (N, dim): the plain mean over each point's streams (PointFields)."""
         return self(points).velocity
 
     def streams(self, points) -> np.ndarray:

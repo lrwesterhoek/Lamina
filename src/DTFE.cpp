@@ -74,15 +74,6 @@ using namespace std;
 
 #include "interpolations.h"
 
-// --gpu (METAL=1 build of the standard binary): the shared full-grid deposit of DTFE_parallel
-// (the PS binary partitions in Lagrangian space and never comes here; MY_SCALAR runs user C++ per
-// sample, which no kernel can; the kernels are 3D)
-#if defined(DTFE_GPU) && NO_DIM==3 && !defined(MY_SCALAR) && !defined(PHASE_SPACE)
-#define DTFE_GPU_SHARED_ACTIVE
-#include "CGAL_triangulation/gpu_host.h"
-#endif
-
-
 
 
 // Interpolates the fields, splitting the work across OpenMP threads when enabled.
@@ -601,7 +592,7 @@ static void psGpuShareNote(User_options const &u, char const *cause, char const 
 /* THE GPU SHARE ('--gpu-share'; the partition loop's rule of the index, psPartitionedRun): of a partitioned '--gpu'
    run's exact deposits, the per mille that run on the GPU, the others on the CPU at the same time. Resolved before the
    plan, since the tuner books a mixed run's partitions by it (auto_tune.cc). First match wins:
-     1. where it does not apply -- a build without the 3D GPU deposit, a run without '--gpu', the sampled deposit --
+     1. where it does not apply -- a build without the 3D GPU deposit, a run on the CPU, the sampled deposit --
         1000, and a number given is told why ('auto' and 'mixed' are silent);
      2. a number given (or none: the default 1000);
      3. 'auto' or 'mixed' with '--resume': the checkpoint's, from its key's 'gpu-share=' line (none: 1000), as the
@@ -618,7 +609,7 @@ static void psResolveGpuShare(User_options &u, size_t const nParticles)
     if ( not u.psUseMetal or not u.psExactDeposit )
     {
         if ( number )
-            psGpuShareNote( u, not u.psUseMetal ? "a run without '--gpu'" : "the sampled deposit",
+            psGpuShareNote( u, not u.psUseMetal ? "a run on the CPU" : "the sampled deposit",
                             not u.psUseMetal ? "the CPU" : "the GPU" );
         return;
     }
@@ -692,10 +683,10 @@ static void runUnitsSetup(User_options &u, vector<Particle_data> &particles)
     double side[NO_DIM];
     for (int d = 0; d < NO_DIM; ++d)
         side[d] = ( double( u.region.coords[2*d+1] ) - double( u.region.coords[2*d] ) ) / double( u.gridSize[d] );
-    bool volumeWeighted = false;
+    bool volumeWeighted = false;   // the standard binary's (its accumulators do not read the moment weight)
     int subsamples = 1;
 #ifdef PHASE_SPACE
-    volumeWeighted = u.psVolumeWeighted;
+    volumeWeighted = u.psVolumeWeighted;   // true in every PS-DTFE run
     subsamples = u.psAvgSubsamples;
 #endif
     RunMoments const moments = u.psParticlesDeferred ? u.psPresetMoments : RunUnits::measure( particles );
@@ -2376,10 +2367,10 @@ static void psReportLoopEnd(PSLoopCtx &c)
 // the cell volume.
 static Real psCloseOutMoments(DTFE_State &state, Quantities *uQuantities, Quantities *aQuantities)
 {
-    // fields were summed as density-weighted moments; normalize once now so cells drawing
-    // streams from several partitions (multi-stream regions) come out correct. When the
-    // density field is selected the partitions alias the weight to the density grid, so
-    // pass the scale that turns the summed rho/rho_bar back into the per-cell mass.
+    // fields were summed as weighted moments; normalize once now so cells drawing
+    // streams from several partitions (multi-stream regions) come out correct. Where the
+    // partitions aliased the weight to the density grid (no mass_weight: weightIsDensity, which needs mass-weighted
+    // velocity moments), the scale turns the summed rho/rho_bar back into the per-cell mass.
     Real cellVolume = Real(1.);
     for (int d = 0; d < NO_DIM; ++d)
         cellVolume *= (state.options.region[2*d+1] - state.options.region[2*d]) / Real(state.options.gridSize[d]);
@@ -3420,36 +3411,6 @@ static void DTFE_parallelImpl(vector<Particle_data> *allParticles,
     else
         optimalPartitionSplit( *allParticles, userOptions, pGrid, &subgridList, &subgridCoords );
 
-    // --gpu: the sub-domains deposit into ONE full grid on the device (dtfeGpuShared*, see
-    // gpu_host.h) instead of each into a sub-grid of its own -- one accumulator, one read-back,
-    // no per-sub-domain zeroing, and the dispatch controller stays warm from one sub-domain to
-    // the next. The threads' sub-grids then stay zero and the GPU grid is ADDED below.
-    bool gpuShared = false;
-#ifdef DTFE_GPU_SHARED_ACTIVE
-    bool const sharedScalarOk =
-#ifdef SCALAR
-        noScalarComp == 1;   // the kernels carry ONE scalar component (the interpolation declines the GPU otherwise)
-#else
-        true;
-#endif
-    if ( userOptions.useMetal and userOptions.DTFE and userOptions.method==1 and userOptions.aField.selected()
-         and not userOptions.exactAverage and not userOptions.redshiftConeOn and not userOptions.userDefinedSampling
-         and samples.empty() and sharedScalarOk )
-    {
-        size_t const full[3] = { userOptions.gridSize[0], userOptions.gridSize[1], userOptions.gridSize[2] };
-        std::string err;
-        // the gradient only when the deposit supplies it: under --face-gradient (the default) each sub-domain's
-        // face pass writes it (averaged_interpolation_1.cc skips the per-tetrahedron gradient the same way)
-        bool const sharedGrad = userOptions.aField.velocity_gradient
-                                and not ( userOptions.faceGradient and not Env::flag( "DTFE_FACE_CHECK" ) );
-        gpuShared = dtfeGpuSharedBegin( full, userOptions.aField.density, userOptions.aField.velocity,
-                                        sharedGrad, userOptions.aField.scalar,
-                                        userOptions.aField.scalar_gradient, err );
-        if ( not gpuShared and userOptions.verboseLevel>=2 )
-            message << "(GPU: no shared grid, " << err << "; each sub-domain deposits on its own)\n" << MESSAGE::Flush;
-    }
-#endif
-
 
     // the team's concurrency, for the parallel insertion's thread budget (triangulation.cpp divides the cores by it,
     // as in the PS partition loops; without it each of the noProcessors sub-boxes would insert on 6 threads at once)
@@ -3486,57 +3447,6 @@ static void DTFE_parallelImpl(vector<Particle_data> *allParticles,
     }
     message << "Done.\n";
     allParticles->clear();
-
-#ifdef DTFE_GPU_SHARED_ACTIVE
-    if ( gpuShared )
-    {   // add the device's full grid (value*volume sums) into the output, divided by the cell volume
-        // exactly as the per-thread path does; a sub-domain the device handed back is zero here and
-        // its CPU result is already in the main grid
-        const float *gDen = nullptr, *gVel = nullptr, *gGrad = nullptr, *gScal = nullptr, *gSGrad = nullptr;
-        if ( dtfeGpuSharedResult( &gDen, &gVel, &gGrad, &gScal, &gSGrad ) )
-        {
-            Real cellVolume = 1.;
-            for (int d=0; d<NO_DIM; ++d)
-                cellVolume *= (userOptions.region[2*d+1] - userOptions.region[2*d]) / userOptions.gridSize[d];
-            size_t const nCell = userOptions.gridSize[0] * userOptions.gridSize[1] * userOptions.gridSize[2];
-            if ( gDen and aQuantities->density.size()==nCell )
-            {
-                #pragma omp parallel for
-                for (size_t i=0; i<nCell; ++i) aQuantities->density[i] += Real(gDen[i]) / cellVolume;
-            }
-            if ( gVel and aQuantities->velocity.size()==nCell )
-            {
-                #pragma omp parallel for
-                for (size_t i=0; i<nCell; ++i)
-                    for (size_t j=0; j<noVelComp; ++j) aQuantities->velocity[i][j] += Real(gVel[i*3+j]) / cellVolume;
-            }
-            // the gradient: not when the face pass wrote it (--face-gradient, the default since 2026-11-09): each
-            // thread's sub-grid then already holds the face gradient, which copySubgridResultsToMain copied, and the
-            // device's per-tetrahedron gradient (deposited only under DTFE_FACE_CHECK=1 now, see sharedGrad) would be
-            // added on top of it -- a doubled gradient, found by tests/dtfe_metal_check.sh's shared-grid runs
-            if ( gGrad and aQuantities->velocity_gradient.size()==nCell and not userOptions.faceGradient )
-            {
-                #pragma omp parallel for
-                for (size_t i=0; i<nCell; ++i)
-                    for (size_t q=0; q<noGradComp; ++q) aQuantities->velocity_gradient[i][q] += Real(gGrad[i*9+q]) / cellVolume;
-            }
-#ifdef SCALAR
-            if ( gScal and aQuantities->scalar.size()==nCell )
-            {
-                #pragma omp parallel for
-                for (size_t i=0; i<nCell; ++i) aQuantities->scalar[i][0] += Real(gScal[i]) / cellVolume;
-            }
-            if ( gSGrad and aQuantities->scalar_gradient.size()==nCell )
-            {
-                #pragma omp parallel for
-                for (size_t i=0; i<nCell; ++i)
-                    for (int q=0; q<NO_DIM; ++q) aQuantities->scalar_gradient[i][q] += Real(gSGrad[i*3+q]) / cellVolume;
-            }
-#endif
-        }
-        dtfeGpuSharedEnd();
-    }
-#endif
 
 
     // total runtime is the slowest thread's CPU time, since the run finishes only when all threads do

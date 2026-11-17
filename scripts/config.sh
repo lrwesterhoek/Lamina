@@ -667,12 +667,12 @@ driver_binary() {
 # set it) and the run mode (run_mode_resolve), and gpu_auto the note the start banner adds; a knob set to an on or off
 # value is kept as 1 or 0 (knob_gpu) and gpu_auto is empty. On a GPU build (gpu_build_default) 'auto' is the GPU: for
 # PS-DTFE with either deposit in every mode (in performance the drivers' '--gpu-share auto' then deposits part of the
-# partitions on the free cores beside it), for standard DTFE's exact average in every mode (a tie with the CPU at
-# TNG100-3-Dark z=0, 512^3: 439 s on the GPU against 431 s) and for its sampled one in gentle and balanced. The one
-# exception is standard DTFE's sampled average in performance, which runs on the CPU: faster there (315 s against
-# 433 s on the GPU), measured with every core, which only performance gives it. A CPU-only build runs on the CPU.
-# The launcher mirrors this table (python/gui/runspec.py recommended_gpu) -- keep the two in step -- with one
-# difference: it starts a sampled PS-DTFE run below ~1M particles on the CPU (GPU_PAYS_FROM there).
+# partitions on the free cores beside it) and for standard DTFE's exact average in every mode. The one exception is
+# standard DTFE's sampled average, which runs on the CPU in every mode (DTFE_GPU=1 still runs it on the GPU). A
+# CPU-only build runs on the CPU. The binaries pick their device by the same rule when DTFE_GPU is unset, and the
+# drivers export the resolved 0 or 1 to them (run_dtfe.sh, run_ps_dtfe.sh), so the device a banner names is the one
+# the binary runs on. The launcher mirrors this table (python/gui/runspec.py recommended_gpu) -- keep the two in step
+# -- with one difference: it starts a sampled PS-DTFE run below ~1M particles on the CPU (GPU_PAYS_FROM there).
 gpu_auto_resolve() {
     local knob="$1" bin="$2" est="$3" exact="$4" mode="$5" v what="the GPU"
     gpu_auto=""
@@ -684,9 +684,9 @@ gpu_auto_resolve() {
         gpu_auto=" (${knob} unset: ${bin#./} is a CPU-only build; ${knob}=0 or 1 chooses)"
         return 0
     fi
-    if [ "${est}" = "dtfe" ] && [ "${exact}" != "1" ] && [ "${mode}" = "performance" ]; then
+    if [ "${est}" = "dtfe" ] && [ "${exact}" != "1" ]; then
         printf -v "${knob}" '%s' 0
-        gpu_auto=" (${knob} unset: performance: standard DTFE's sampled average is faster on the CPU (315 s against 433 s, TNG100-3-Dark z=0 at 512^3); ${knob}=1 runs it on the GPU)"
+        gpu_auto=" (${knob} unset: standard DTFE's sampled average runs on the CPU; ${knob}=1 runs it on the GPU)"
         return 0
     fi
     if [ "${est}" = "ps" ] && [ "${exact}" = "1" ] && [ "${mode}" = "performance" ]; then

@@ -349,10 +349,10 @@ def make_parser(description: str = "", snap_default: int | None = DEFAULT_SNAP,
 # or linear theory -- plot_velDiv_den, plot_cosmic_web, plot_web_streams, plot_shear_triaxial, plot_DTFE,
 # plot_halo_tracking -- read PS's divergence / shear / vorticity / gradient / V-web as the MEAN FIELD by default,
 # the quantity standard DTFE stores (FieldSet.load(name, mean_field=True)): a face-gradient run's own grids (the
-# PS binary's default with the exact deposit and --ps-volume-weighted, src/user_options.cc '--face-gradient';
+# PS binary's default with the exact deposit, src/user_options.cc '--face-gradient';
 # FieldSet.face_gradient), else the FFT derivatives of the PS velocity grid (dtfelib/fields.py). '--ps-gradient
 # stored' reads the binary's PS grids as they are: the stream average <grad v> of a run without the face gradient
-# ('--per-tet-gradient', the sampled deposit, mass-weighted moments, a binary before that default), and the
+# ('--per-tet-gradient', the sampled deposit, an older binary's run), and the
 # mean-flow grids of a face-gradient run (the same grids the default reads then). Standard-DTFE grids are read as
 # stored either way (they are the mean field).
 PS_GRADIENT_CHOICES = ("mean-field", "stored")
@@ -364,10 +364,10 @@ def add_ps_gradient_arg(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
                         help="PS-DTFE grids only: which velocity-gradient family to use for PS -- 'mean-field' "
                              "(default): the derivatives of the mean velocity, grad<v>, the quantity standard DTFE "
                              "stores: a face-gradient run's own grids (the PS binary's default with the exact "
-                             "deposit and --ps-volume-weighted), else computed by FFT from the PS velocity grid; "
+                             "deposit), else computed by FFT from the PS velocity grid; "
                              "'stored': the binary's PS grids as they are, the stream average <grad v> of each "
                              "stream's own gradient for a run without the face gradient (--per-tet-gradient, the "
-                             "sampled deposit, mass-weighted moments, older runs), the mean-flow grids of a "
+                             "sampled deposit, older runs), the mean-flow grids of a "
                              "face-gradient run. Standard-DTFE grids are always read as stored.")
     return parser
 

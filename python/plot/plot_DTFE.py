@@ -7,7 +7,7 @@ FieldSet auto-detects the on-disk convention). --estimator defaults to
 'dtfe' (this is the standard-DTFE plot script); pass --estimator ps to plot the PS-DTFE
 versions of the same fields -- the divergence and the shear of PS's MEAN flow by default, the
 quantities standard DTFE stores (a face-gradient run's own grids, the PS binary's default with
-the exact deposit and the volume weighting; else derived from its velocity grid),
+the exact deposit; else derived from its velocity grid),
 '--ps-gradient stored' for the PS binary's grids as stored (the stream average <grad v> of a run
 without the face gradient, a face-gradient run's mean flow).
 
@@ -61,8 +61,8 @@ def plot_velocity(velocity_field, slice_dim, box_size, quiver_step,
                   redshift=None, save_path=None, density_field=None):
     """The velocity slice as arrows, each the MEAN velocity of a quiver_step x quiver_step block of cells drawn at the
     block's centre (every cell counts, not every quiver_step-th one). density_field: the block means are
-    density-weighted (a mass-weighted PS velocity grid: FieldSet.velocity_weighting); None: the plain mean (a
-    volume-weighted grid: standard DTFE, PS-DTFE under --ps-volume-weighted)."""
+    density-weighted (an older PS run's mass-weighted velocity grid: FieldSet.velocity_weighting); None: the plain
+    mean (a volume-weighted grid: standard DTFE and PS-DTFE)."""
     X, Y, U, V = extract_velocity_slice(velocity_field, slice_dim)
     U, V = U.T, V.T
     W = None if density_field is None else extract_slice(density_field, slice_dim).T

@@ -29,8 +29,9 @@
     --max-concurrent, --run-mode, --scratch-dir, --tessellation-cache) and '--gpu-share' (as typed, 'auto' and the
     number it resolves to would differ), the input files' size+mtime, the resolved
     '_a' average (exact or sampled) and gradient route (face or per-tet), which an environment pin can change
-    without the command line, the run-wide fixed-point units' rule and test shift (a 'units=' line,
-    fixed_units.h runUnitsKeyLine: DTFE_RUN_UNITS_LEGACY, PS-DTFE's DTFE_PS_RUN_UNITS, DTFE_TEST_RUN_UNIT_SHIFT; under
+    without the command line, the resolved device (a 'device=gpu' or 'device=cpu' line: DTFE_GPU or the program's
+    pick of the device changes it without the command line), the run-wide fixed-point units' rule and test shift
+    (a 'units=' line, fixed_units.h runUnitsKeyLine: DTFE_RUN_UNITS_LEGACY, PS-DTFE's DTFE_PS_RUN_UNITS, DTFE_TEST_RUN_UNIT_SHIFT; under
     PS-DTFE's word merge -- '--ps-merge fixed-point' in the single 3-D build, User_options::psWordMerge -- the same
     line ends with every PS-DTFE accumulator's K, the units its checkpoint's words are in: wordMergeKeyUnits),
     PS-DTFE's merge mode (a 'merge=fixed-point' line: '--ps-merge' itself is left out of the command line above), the
@@ -246,7 +247,7 @@ inline std::string commandKeyLines(std::vector<std::string> const &tokens)
 // the K of every PS-DTFE accumulator in slot order (fixed_units.h RU_PS_MASS .. RU_PS_FACE_P, named as the
 // checkpoint's blobs: quantities.h PSWordGrids::key), appended to the units line. Its checkpoint holds the merged
 // words in these units (ps_fixed_merge.h wordBlobs), which no run of other units can add to; they follow from the
-// grid, the box, the mean density, the particles, '--ps-volume-weighted', '--subsamples' and
+// grid, the box, the mean density, the particles, the moment weight (by volume in PS-DTFE), '--subsamples' and
 // DTFE_TEST_RUN_UNIT_SHIFT, so the key refuses such a resume by name (restoreWords compares them once more,
 // accumulator by accumulator, after the load).
 inline std::string wordMergeKeyUnits(RunUnits const &ru)
@@ -318,6 +319,13 @@ inline std::string settingsKey(User_options const &u)
     k << "average=" << ( u.exactAverage ? "exact" : "sampled" ) << '\n';
 #endif
     k << "gradient=" << ( u.faceGradient ? "face" : "per-tet" ) << '\n';
+    // the resolved device (User_options::checkGpuOptions): DTFE_GPU or the program's pick changes it without changing
+    // the command line. Always written, as the two lines above
+#ifdef PHASE_SPACE
+    k << "device=" << ( u.psUseMetal ? "gpu" : "cpu" ) << '\n';
+#else
+    k << "device=" << ( u.useMetal ? "gpu" : "cpu" ) << '\n';
+#endif
 #ifdef PHASE_SPACE
     // the resolved share of a mixed '--gpu' run (DTFE.cpp psResolveGpuShare): which partitions deposit on the GPU, a
     // rule of their index; an all-GPU run writes no line

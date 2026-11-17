@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Every PS-DTFE grid is an exact, order-independent sum. The MASS grid is a fixed-point sum (GPU and
 # CPU), and so are the moment grids -- velocity, the dispersion's second moment, its own
-# mean and weight under --ps-volume-weighted, the velocity gradient, the moment weight, the scalar and its gradient,
+# mean and weight (PS-DTFE weights the velocity moments by volume and the dispersion by mass), the velocity gradient,
+# the moment weight, the scalar and its gradient,
 # the exact deposit's multiplicity, the released tets' multiplicity: float sums would depend on the order the GPU
 # atomics land in (two runs differ in the last bits of ~30-50% of the cells) and, on the CPU, on the thread count
 # (thread-private copies summed in thread order). Each is a set of integer words in a power-of-two unit, converted to
@@ -11,10 +12,11 @@
 # 32^3 crossed waves (folds everywhere: deferred tets, multi-stream cells, large gradients):
 #   F1  two --gpu runs with different opening chunk sizes (PS_GPU_CHUNK 2000 and 25000: other
 #       atomics share a command buffer, other orders) write byte-identical grids -- every '.a_*' output -- for the
-#       sampled deposit, --ps-volume-weighted, --exact (its items' per-tet weight totals are exact too)
-#       and --ps-halo-release (the host's released tets). GPU builds only.
+#       sampled deposit, '--exact --per-tet-gradient' (its items' per-tet weight totals are exact too; the route flag
+#       keeps the deposit's own gradient words in the pass: a bare exact run takes the face gradient, F6's)
+#       and --ps-halo-release (the host's released tets), each volume-weighted, as every PS-DTFE run. GPU builds only.
 #   F2  the CPU deposit on 1 thread, 6 threads in the copy mode (DTFE_DEPOSIT_SLABS=0: one set of words, atomic
-#       adds) and 6 in the slab mode writes byte-identical grids, for the same four variants. Single build only:
+#       adds) and 6 in the slab mode writes byte-identical grids, for the same three variants. Single build only:
 #       the double build keeps its double CPU sums (agreeing to ~1e-15, not bit for bit), as for the mass.
 #   F3  the float sums (DTFE_GPU_FLOAT_MOMENTS=1, the A/B switch on either backend) agree with the exact ones to
 #       float rounding: peak-relative
@@ -30,6 +32,7 @@
 #       for word: DTFE_DEBUG_FX_BOUNDS=1 prints them in hex, once per walk. The exact deposit with --face-gradient
 #       (the face bounds non-zero), on the whole box and in a --grid-window (the window filter and the mass bound);
 #       the 6-thread walk runs on a team of more than one thread; the grids of 1 and 6 threads byte-identical.
+#       Not under DTFE_PS_RUN_UNITS=1 (a SKIP line): no pass walks its bounds there.
 #       Single build only, as F2.
 # 2D (PS-DTFE-2d, when built): F2's thread independence for the sampled deposit.
 # ~1-2 min (M-series Mac, 10 cores).
@@ -57,8 +60,8 @@ run() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL: $(basenam
             echo "FAIL: $(basename "$out") fell back to the CPU (see $out.log)"; exit 1; fi; return 0; }
 C=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a dispersion_a gradient_a
    --subsamples 2)
-VARIANTS="samp vw ex hr"
-opts() { case "$1" in samp) ;; vw) echo --ps-volume-weighted ;; ex) echo --exact ;;
+VARIANTS="samp ex hr"
+opts() { case "$1" in samp) ;; ex) echo --exact --per-tet-gradient ;;
          hr) echo --ps-halo-release 50 ;; esac; }
 
 echo "============================================================"
@@ -83,7 +86,7 @@ for v in $VARIANTS; do
     fi
 done
 P=(--partition 2 2 2 --max-concurrent 1)
-echo ">> F4: --partition 2 2 2 --max-concurrent 1, --ps-volume-weighted"
+echo ">> F4: --partition 2 2 2 --max-concurrent 1 (with --ps-volume-weighted, as the drivers pass it)"
 if [ "$GPU" = 1 ]; then
     GPUOK=1 run "$TMP/pg1" env PS_GPU_CHUNK=2000 "${PS_BIN}" "$SNAP" "$TMP/pg1" "${C[@]}" "${P[@]}" --ps-volume-weighted --gpu
     GPUOK=1 run "$TMP/pg2" "${PS_BIN}" "$SNAP" "$TMP/pg2" "${C[@]}" "${P[@]}" --ps-volume-weighted --gpu
@@ -102,7 +105,13 @@ if ! precision_double; then
     fi
 fi
 F6=0
-if ! precision_double; then
+# (under PS-DTFE's run-wide units, DTFE_PS_RUN_UNITS=1, every grid's unit comes from the run and no pass walks its
+# bounds: there is no walk to compare, and this suite's pass in the default units checks F6)
+RUN_WIDE=0
+case "$(printf '%s' "${DTFE_PS_RUN_UNITS:-0}" | tr '[:upper:]' '[:lower:]')" in ''|0|false|no|off) ;; *) RUN_WIDE=1 ;; esac
+if ! precision_double && [ "$RUN_WIDE" = 1 ]; then
+    echo "   SKIP  F6 (DTFE_PS_RUN_UNITS is set: under the run-wide units no pass walks its bounds)"
+elif ! precision_double; then
     F6=1
     echo ">> F6: the bound walk's sums (DTFE_DEBUG_FX_BOUNDS=1) at 1, 3 and 6 threads, exact with the face sums"
     FW=(--exact --ps-volume-weighted --face-gradient)
@@ -169,9 +178,9 @@ for v in os.environ["VARIANTS"].split():
         same(f"c1_{v}", f"s6_{v}", f"{v}: CPU 1 thread vs 6 (slab mode)", "F2")
     close(f"c1_{v}", f"cf_{v}", f"{v}: CPU exact vs the float sums (DTFE_GPU_FLOAT_MOMENTS=1)", "F3")
 if gpu:
-    same("pg1", "pg2", "--partition 2 2 2, volume-weighted: two GPU runs", "F4")
+    same("pg1", "pg2", "--partition 2 2 2: two GPU runs", "F4")
 if not double:
-    same("pc1", "pc6", "--partition 2 2 2, volume-weighted: CPU 1 thread vs 6", "F4")
+    same("pc1", "pc6", "--partition 2 2 2: CPU 1 thread vs 6", "F4")
 if os.environ.get("D2") == "1":
     same("d2_1", "d2_6", "2D: CPU 1 thread vs 6 (copy mode)", "F2")
 DROP = re.compile(r"(\d+) share\(s\) of the exact fixed-point sums were not finite.*?\((.*?)\)\.")

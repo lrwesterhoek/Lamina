@@ -487,7 +487,7 @@ static void makeParams(DepositParams& P,int n,float box,int nSub,int periodic){
     // the moment grids as float sums (the kernel's fixed-point moment path, fxMask, is exercised by the
     // binary's suites -- tests/ps_fixed_moments_check.sh; this harness compares the float grids with its CPU reference)
     P.fxMask=0; for(int g=0;g<PS_FX_N;++g) P.fxScale[g]=0.f;
-    P.debugNoAtomic=0;      // every atomic issued (PS_GPU_DEBUG_NOATOMIC is the binaries' timing experiment)
+    P.debugNoAtomic=0;      // every atomic issued (always 0 in the binaries too: no switch sets it)
     // the 64-bit mass words in the call's own unit (run(): psMassFixedScale), as PS-DTFE runs them by default; the
     // run-wide 128-bit words (fxWords 2, DTFE_PS_RUN_UNITS=1) are exercised by the binaries' suites
     // (tests/ps_fixed_moments_check.sh, tests/split_bytes_check.sh)

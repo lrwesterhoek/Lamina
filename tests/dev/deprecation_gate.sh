@@ -72,6 +72,8 @@ allowed() {
             echo "R7: the deprecated merge pair (--ordered-merge --completion-order-merge) is refused" ;;
         ps_fixed_merge_check/bad1.log)
             echo "X5: the deprecated --completion-order-merge beside --fixed-point-merge is refused" ;;
+        ps_point_conventions/r_pts_legacy.log)
+            echo "R2: the removed value under the older spelling, '--pts-conventions legacy', is refused" ;;
         run_scripts/*)
             echo "the old-name cases of the drivers and the launcher" ;;
         *) return 1 ;;

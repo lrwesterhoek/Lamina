@@ -144,7 +144,7 @@ def region_faces(binary):
         gpu = "METAL=1" in mode
     except OSError:
         gpu = False
-    variants = [("sampled", []), ("linear", ["--ps-linear-deposit"])]
+    variants = [("sampled", [])]
     if "--sampled" in helptext:                # the exact deposit ('--exact', listed beside '--sampled')
         variants.append(("exact", ["--exact"]))
     if gpu:

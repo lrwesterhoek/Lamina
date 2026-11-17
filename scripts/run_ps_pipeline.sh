@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # COMPUTE ONLY: for every snapshot of every simulation, regenerate the analysis grids
-# (the production physics: --ps-vertex-mass + per-field --ps-volume-weighted, both defaults) AND point-evaluate a
-# full-box high-resolution image plane of the continuous phase-space field. Both share the
+# (the production physics: --ps-vertex-mass, a default, and PS-DTFE's volume-weighted velocity moments)
+# AND point-evaluate a full-box high-resolution image plane of the continuous phase-space field. Both share the
 # snapshot's single triangulation (run_ps_dtfe.sh SAMPLE_POINTS), so the image planes cost
 # only the point evaluation on top of the grid regen.
 #
@@ -39,10 +39,15 @@
 #   PTS_VEL_GRAD  1 (default) = also evaluate the velocity gradient at every sample point
 #                 (.pts_velGrad), which is what makes the velDiv/velShear/velVort maps
 #                 possible. A snapshot lacking it counts as STALE, so a rerun recomputes it.
-#   PS_POINT_CONVENTIONS  grid (default) | legacy: the image plane's estimators (run_ps_dtfe.sh's knob, the binary's
-#                 --ps-point-conventions): 'grid' = the grids' vertex masses and volume weighting at the points,
-#                 'legacy' = rho_bar*V_lag masses and density-weighted stream means, which reproduce a plane made
-#                 with them. A snapshot whose run log shows the other one is recomputed.
+#   PS_POINT_CONVENTIONS  grid (default, the only value): the image plane's estimators (run_ps_dtfe.sh's knob) are
+#                 the grids' vertex masses and volume weighting at the points. 'legacy', the older conventions, was
+#                 removed: it stops the script (exit 2), as any other value does. A snapshot whose run log shows
+#                 '--ps-point-conventions legacy' (an older plane) is recomputed.
+#   PS_LINEAR_DEPOSIT  0 only (run_ps_dtfe.sh's knob): the linear deposit was removed, so 1 stops the script (exit 2).
+#                 A snapshot whose run log shows '--ps-linear-deposit' (an older run) is recomputed.
+#   PS_VOLUME_WEIGHTED  1 only (default; run_ps_dtfe.sh's knob): PS-DTFE always weights its velocity moments by
+#                 volume (the dispersion by mass), so 0 stops the script (exit 2). A snapshot whose run log lacks
+#                 '--ps-volume-weighted' (an older run, with mass-weighted moments) is recomputed.
 #   PLANES, THICKNESS, SUPERSAMPLE, PLANE_WINDOW
 #                 the plane's geometry, forwarded to make_image_plane.py: PLANES sampling planes
 #                 (default 1 = one crisp cross-section; a handful ghosts, use >= 16 with
@@ -61,7 +66,6 @@
 #   DTFE_RUN_MODE gentle | balanced | performance | auto (default): how hard each run may lean on the machine
 #                 (run_ps_dtfe.sh's --run-mode): auto = balanced, or performance inside a SLURM or PBS job
 #                 (config.sh run_mode_resolve); resolved once here and handed on. It never makes grids stale.
-#   PS_VOLUME_WEIGHTED  1 (default) = volume-weighted velocity moments, the production convention
 #   PYTHON        the python that makes the plane (default: config.sh h5py_python, the first with numpy and h5py)
 # A switch is off for 0, false, no or off and on for any other value (the binaries' rule). Older names, read for
 # one release with a warning (the new name wins when both are set): PS_GPU and PS_METAL (DTFE_GPU), PS_EXACT
@@ -129,6 +133,21 @@ DRY_RUN="${DRY_RUN:-0}"
 PREFIX="${OUTPUT_PREFIX:-ps_output}"
 knob_bool PTS_VEL_GRAD PS_VOLUME_WEIGHTED FORCE DRY_RUN   # 1 or 0 (config.sh); DTFE_GPU: knob_gpu below
 knob_gpu DTFE_GPU
+# the choices PS-DTFE no longer has, refused here before anything runs (a dry run too), in run_ps_dtfe.sh's words:
+# that driver refuses them as well, but its dry run below keeps no stderr and its runs fail per simulation
+if knob_on PS_LINEAR_DEPOSIT; then
+    echo "Error: PS_LINEAR_DEPOSIT=1: the linear deposit was removed (PS-DTFE deposits with the exact or the sampled deposit)." >&2
+    exit 2
+fi
+if [ "${PS_VOLUME_WEIGHTED}" = "0" ]; then
+    echo "Error: PS_VOLUME_WEIGHTED=0: the mass-weighted velocity moments were removed (PS-DTFE's velocity moments are volume-weighted)." >&2
+    exit 2
+fi
+case "${PS_POINT_CONVENTIONS}" in
+    grid) ;;
+    legacy) echo "Error: PS_POINT_CONVENTIONS=legacy: the legacy point conventions were removed (point values follow the grid's conventions, 'grid')." >&2; exit 2 ;;
+    *) echo "Error: PS_POINT_CONVENTIONS must be 'grid' (got '${PS_POINT_CONVENTIONS}')." >&2; exit 2 ;;
+esac
 
 # the plane's geometry, as make_image_plane.py takes it (shared by the generation and the --same-as check)
 plane_args=(--axis "${AXIS}" --nu "${NU}" --planes "${PLANES}" --thickness "${THICKNESS}" --supersample "${SUPERSAMPLE}")
@@ -195,6 +214,10 @@ run() { echo "+ $*"; [ "${DRY_RUN}" = "1" ] || "$@"; }
 # '--per-tet-gradient'); a command naming neither takes the binary's default, so an older log naming neither (the
 # stream average, PS-DTFE's route before D13) compares equal to it: its slice, the pipeline's product, is the same
 # either way (the points do not depend on the route), and FORCE=1 or FACE_GRADIENT=1 recomputes its grids.
+# '--ps-linear-deposit' and '--ps-point-conventions' stay among the compared options although the driver no longer
+# emits them (PS-DTFE dropped the linear deposit and the legacy conventions): an older log that names one is stale.
+# '--ps-volume-weighted' stays compared too: the driver passes it on every run, so an older log without it (an older
+# binary's mass-weighted moments) is stale.
 run_settings() {
     printf '%s\n' "$1" | awk '
         function out(l) { if (l ~ /^--subsamples( |$)/) subs = l; else print l }

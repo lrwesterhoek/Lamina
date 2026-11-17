@@ -29,16 +29,26 @@
 #include <cstring>     // std::strchr, std::strerror
 #include <cmath>       // HUGE_VAL
 #include <cerrno>      // errno (applyRunMode: gentle's nice)
+#include <cstdint>     // UINT32_MAX (gpuPathRuns: the GPU deposits' 2^32-cell cap)
 #include <sys/stat.h>
 #include <sys/resource.h>   // getpriority / setpriority (applyRunMode)
 #ifdef __APPLE__
 #include <sys/sysctl.h>     // hw.perflevel0.logicalcpu (applyRunMode)
 #endif
 #include "user_options.h"
-#include "env_knobs.h"    // DTFE_FACE_GRADIENT (the default gradient route, D13), DTFE_EXACT_AVERAGE (the '_a' average's pin)
+#include "env_knobs.h"    // DTFE_FACE_GRADIENT (the default gradient route, D13), DTFE_EXACT_AVERAGE (the '_a' average's pin), DTFE_GPU (the device's)
 #include "run_mode.h"     // the run mode's process-wide state (applyRunMode)
 
 using namespace std;
+
+// The builds whose '_a' work has a GPU path: the guards the deposits compile their GPU code under
+// (averaged_interpolation_1.cc DTFE_GPU_ACTIVE: standard DTFE's GPU macro, 3D, not MY_SCALAR; ps_interpolation.cc:
+// PS-DTFE's GPU macro, 3D). The program's pick of the device (gpuPathRuns) and the header's device line read it, so
+// a change of either guard belongs here too.
+#if ( defined(PHASE_SPACE) && defined(PS_GPU) && NO_DIM==3 ) \
+    || ( !defined(PHASE_SPACE) && defined(DTFE_GPU) && NO_DIM==3 && !defined(MY_SCALAR) )
+#define GPU_PATH_BUILT
+#endif
 
 
 #ifndef INPUT_FILE_DEFAULT
@@ -79,7 +89,7 @@ User_options::User_options()
     sequentialTriangulation = false;
     autoTuneReport = false;
     maxConcurrentOn = false;  // when neither --partition nor --max-concurrent is given, the auto-tuner picks them (auto_tune.h)
-    runMode = RunMode::Performance;   // resolveRunMode: --run-mode, else DTFE_RUN_MODE, else performance (the binaries' default)
+    runMode = RunMode::Balanced;      // resolveRunMode: --run-mode, else DTFE_RUN_MODE, else the binaries' default (balanced; performance inside a batch job)
     runModeSource = "";
     coreBudget = 0;           // set by applyRunMode (the mode's threads)
     coreBudgetOwn = 0;        // ... and before a '--max-concurrent' raise (autoTuneGpuShare's threads under 'mixed')
@@ -93,15 +103,22 @@ User_options::User_options()
 
     paddingOn = false;
     paddingMpcOn = false;
-    paddingParticles = Real(5.);
+#ifdef PHASE_SPACE
+    paddingParticles = Real(5.);      // PS-DTFE: 5 mean spacings (its periodic Lagrangian copies, the k-spacings rule of its partitions)
+#else
+    paddingParticles = Real(15.);     // standard DTFE: 15 mean spacings, complete in the emptiest voids at z = 0 (5 is not: the '--padding' help)
+#endif
     testPaddedBoundaries = true;
     
     // density options
     method = 1;
     noPoints = 100;
     noPointsOn = false;
-    useMetal = false;     // GPU interpolation off unless --gpu is given (requires a Metal build)
+    useMetal = false;     // the CPU; checkGpuOptions resolves the device ('--gpu', DTFE_GPU, the program's pick), so a library caller that skips readOptions keeps the CPU
     gpuAlias = false;
+    deviceSource = "";
+    gpuPicked = false;
+    deviceLine = "";
     exactAverage = false; // standard DTFE: readOptions resolves the '_a' average (resolveAverageMode: exact by default since 2026-11-09); a library caller that skips readOptions keeps the sampled one
     exactFlag = false;    // --exact
     sampledFlag = false;  // --sampled
@@ -121,11 +138,10 @@ User_options::User_options()
     scalarDataset = "";               // the reader's own scalar (gas temperature etc.), if any
     serveResident = 0;                // composite --serve: resident partitions chosen automatically
     psServeProgress = false;          // --serve-progress
-    psStreamDensityGeometric = false; // default per-stream estimator: 'linear'
 #ifdef PHASE_SPACE
     psAvgSubsamples = 1;  // nSub for PS-DTFE's sampled '_a' deposit: one point per cell (an exact run without a count keeps kPsExactSliverSubsamples: resolveAverageMode)
-    psUseMetal = false;   // GPU deposit off unless --gpu is given (requires a Metal build)
-    psLinearDeposit = false;          // uniform (equal-share) deposit unless --ps-linear-deposit
+    psUseMetal = false;   // the CPU; checkGpuOptions resolves the device, so a library caller that skips readOptions keeps the CPU
+    psLinearDeposit = false;          // the uniform (equal-share) deposit; nothing sets it ('--ps-linear-deposit' was removed: refuseRemovedPsOptions)
     psCaustics = false;
     psCausticCusps = false;   // --ps-caustic-cusps: A3 indicator, opt-in (finite-difference estimator)               // no '.caustic' fold-flag grid unless --ps-caustics
     psHaloRelease = Real(0.);         // 0 = deposit every tetrahedron by bbox rasterization (no release)
@@ -133,8 +149,8 @@ User_options::User_options()
     psLagPadding = Real(8.);          // --ps-lagrangian-padding: partitions padded by 8 mean spacings; 0 = the Eulerian --padding fraction
     psExactDeposit = false;           // resolved by readOptions (resolveAverageMode: the exact deposit by default for a run with an '_a' field); the nSub^3 sub-sampled deposit without it
     psVertexMass = false;             // rho_bar * V_lag tet masses unless --ps-vertex-mass
-    psVolumeWeighted = false;         // mass-weighted (momentum-like) velocity moments unless --ps-volume-weighted
-    psPtsLegacyConventions = false;   // --ps-point-conventions grid: the points follow --ps-vertex-mass / --ps-volume-weighted
+    psVolumeWeighted = true;          // the velocity moments by Eulerian volume, in every run: nothing else sets it
+                                      // ('--ps-volume-weighted' is accepted and bound to nothing, addOptions)
 #endif
     averageDensity = Real(-1.);
 
@@ -152,7 +168,7 @@ User_options::User_options()
     MpcValue = Real(MPC_UNIT);
     extensive = false;
     approxPSD = false;
-    lambda_th = Real(0.);
+    lambda_th = Real(0.3);   // '--lambda-th' (its default_value, which po::notify writes, is the same)
     hubbleParam = Real(-1.);
     scaleFactor = Real(-1.);
     verboseLevel = 3;
@@ -465,24 +481,26 @@ static std::string valueText(po::variable_value const &v)
 // (the options the two modes set themselves, for tests and comparisons); Help. The short help ('-h', shortHelp)
 // shows a few of the same options under the same captions. 'hidden' holds the two positional file names and the
 // deprecated spellings (accepted, folded onto the canonical names by foldDeprecatedAliases, never shown).
+// In PS-DTFE it also holds three removed choices, parsed so that refuseRemovedPsOptions can name them, and
+// '--ps-volume-weighted', accepted and bound to nothing (PS-DTFE's velocity moments are volume-weighted in every run).
 void User_options::addOptions(po::options_description &allOptions,
                               po::options_description &visibleOptions,
                               po::positional_options_description &p)
 {
     po::options_description inputOptions("Input");
     inputOptions.add_options()
-            ("input-format,i", po::value< std::vector<int> >()->multitoken(), "give the type of the input file -- the file itself is the first positional argument (101=gadget multiple file, 102=gadget single file, 105=gadget HDF5 file, see documentation for more options). If present, a 2nd argument gives the data to be read from file (1=positions, 2=weights, 4=masses, ..., 2^n=the n+1 data) - e.g. to read positions, masses and velocities insert 1+2+4=7. If present, a 3rd argument gives the particle species to be read from file (1=1st species, 2=2nd species, ..., 2^n=the n+1 species) - e.g. to read the data of species 2,3 and 4 insert 2+4+8=14.")
+            ("input-format,i", po::value< std::vector<int> >()->multitoken(), "give the type of the input file -- the file itself is the first positional argument (101=binary gadget snapshot in one file or several, 105=gadget HDF5 file, see documentation for more options). If present, a 2nd argument gives the data to be read from file (1=positions, 2=weights (the masses), 4=velocities, ..., 2^n=the n+1 data) - e.g. to read positions, masses and velocities insert 1+2+4=7. If present, a 3rd argument gives the particle species to be read from file (1=1st species, 2=2nd species, ..., 2^n=the n+1 species) - e.g. to read the data of species 2,3 and 4 insert 2+4+8=14.")
             ("mpc-unit", po::value<Real>(&(this->MpcValue)), "specify the value of 1Mpc in units of the input particle position data. [DEFAULT value is the one given in the 'MPC_UNIT' variable in the Makefile.]")
             ("periodic,p", "particle data is in a periodic box with box coordinates given by option '--box' or read from input file.")
             ("box", po::value< std::vector<Real> >()->multitoken(), "the coordinates of the box encompassing all the particles. It needs 6 arguments for 3D (4 for 2D) which give 'x_left', 'x_right', 'y_left', 'y_right', etc... (where 'x_left' is the left box coordinates along x-direction). For example '--box 0 1 0.5 1.5 0 10'.")
 #ifdef PHASE_SPACE
-            ("ps-lagrangian-input", po::value<std::string>(&(this->lagrangianInputFilename)), "specify the HDF5 file containing the Lagrangian (initial condition) positions for PS-DTFE. The file should contain particle coordinates in the same order as the main input file. If not specified, the Lagrangian positions are read from the 'InitialCoordinates' dataset in the main input file.")
-            ("ps-vertex-mass", po::bool_switch(&(this->psVertexMass)), "PS-DTFE only: assign each tetrahedron its CHART-INDEPENDENT mass m_tet = sum over its 4 vertices of (particle mass)/(number of finite tetrahedra incident to that vertex), instead of the default m_tet = rho_bar * V_lag. The default is exact when the Lagrangian positions are the UNPERTURBED lattice, but when '--ps-lagrangian-input' holds evolved IC positions (e.g. TNG's z=127 snapshot) the IC configuration already carries the density contrast delta_ic = D(z_ic)/D(z) * delta(z): tetrahedra in future-overdense regions are pre-compressed and rho_bar*V_lag under-weights them, filtering EVERY density mode by 1 - D(z_ic)/D(z) (measured -16.5\% at z=20, -3\% at z=2 for TNG's z_ic=127; velocity fields are unaffected, but the divergence-density slope steepens by the inverse factor). Splitting each particle's mass equally among its incident tetrahedra makes the mass follow the particles, removing the bias at any z_ic; total mass is conserved exactly, at the cost of small-scale degree noise (per-tet masses vary with the local Delaunay connectivity). CPU, GPU and the exact deposit ('--exact'); '--sample-points' and '--serve' follow it too unless '--ps-point-conventions legacy' (under which a point-evaluated plane keeps the bias this flag removes from the grids). The '--ps-halo-release' kept/released classification stays geometric (V_lag/V_eul), so it is identical with and without this flag.")
+            ("ps-lagrangian-input", po::value<std::string>(&(this->lagrangianInputFilename)), "specify the HDF5 snapshot (one file, or for a snapshot split over several files a name with '%i' for the file number) holding the Lagrangian (initial condition) positions for PS-DTFE. It is read only when the main input file has no 'InitialCoordinates' dataset: a main input file that has one uses its own, whether this option is given or not. The 'Coordinates' of the species read are taken from this file and matched to the main input file's particles by 'ParticleIDs', so their order does not matter; both files must hold the same number of particles of those species, and '--mpc-unit' converts both. Either way the main input must be a Gadget HDF5 snapshot read as type 105: no other reader gives 'InitialCoordinates' or the 'ParticleIDs' the match needs. Without this file and without 'InitialCoordinates' the run stops with an error.")
+            ("ps-vertex-mass", po::bool_switch(&(this->psVertexMass)), "PS-DTFE only: assign each tetrahedron its CHART-INDEPENDENT mass m_tet = sum over its 4 vertices of (particle mass)/(number of finite tetrahedra incident to that vertex), instead of the default m_tet = rho_bar * V_lag. The default is exact when the Lagrangian positions are the UNPERTURBED lattice, but when '--ps-lagrangian-input' holds evolved IC positions (e.g. TNG's z=127 snapshot) the IC configuration already carries the density contrast delta_ic = D(z_ic)/D(z) * delta(z): tetrahedra in future-overdense regions are pre-compressed and rho_bar*V_lag under-weights them, filtering EVERY density mode by 1 - D(z_ic)/D(z) (measured -16.5\% at z=20, -3\% at z=2 for TNG's z_ic=127; velocity fields are unaffected, but the divergence-density slope steepens by the inverse factor). Splitting each particle's mass equally among its incident tetrahedra makes the mass follow the particles, removing the bias at any z_ic; total mass is conserved exactly, at the cost of small-scale degree noise (per-tet masses vary with the local Delaunay connectivity). CPU, GPU and the exact deposit ('--exact'); '--sample-points' and '--serve' follow it too. The '--ps-halo-release' kept/released classification stays geometric (V_lag/V_eul), so it is identical with and without this flag.")
 #endif
             ("padding", po::value< std::vector<Real> >()->multitoken(), "give the size of the padding need to make sure that the Delaunay triangulation fully covers the region of interest. There are two ways to give the padding size:\n"
                     "  1) \t by giving one value which is the average number of particles that will be copied along each face of the region of interest. The actual computation uses all the particle that are within 'padding number' * 'particle grid spacing' distance from the region of interest. For example '--padding 5' will add an average of 5 particles on both the left and right sides for each dimension.\n"
                     "  2) \t by giving the size of the padding for each face of the box of interest. This size is given with respect to the box length along each coordinate (i.e. '-padding 0.1 0.2 0.5 0.5 0.1 0.1' means that box will be padded with '0.1*x box length' on the left of the x-coordinate and by '0.2*x box length' on the right of the x-coordinate, similar for the y and z dimensions).\n"
-                    "DEFAULT: 5 mean particle spacings. Standard DTFE: that is too little for the emptiest voids of a cosmological box: grid cells beyond the tessellation are reported (dummy-point test, '*.badGridPoints*' files), but point values ('--sample-points', '--serve') within a few spacings of a face come from the wrong tetrahedra while their coverage still reads 1 (up to 4% off on demo/z0_64 at z = 0). scripts/run_dtfe.sh, dtfelib's Estimator (standard server) and the launcher's standard exact zoom therefore pass 15, which is complete at z = 0 on TNG50/100/300-3-Dark (10 is not). Each partition and each thread's sub-box of a standard run carries its own padding, so the cost grows with their number. PS-DTFE pads in Lagrangian space by the same fraction of the box (at least 10% of it), and its partitions by '--ps-lagrangian-padding'.")
+                    "DEFAULT: 15 mean particle spacings in standard DTFE, 5 in PS-DTFE. Standard DTFE: 5 is too little for the emptiest voids of a cosmological box: grid cells beyond the tessellation are reported (dummy-point test, '*.badGridPoints*' files), but point values ('--sample-points', '--serve') within a few spacings of a face come from the wrong tetrahedra while their coverage still reads 1 (up to 4% off on demo/z0_64 at z = 0). 15 is complete at z = 0 on TNG50/100/300-3-Dark (10 is not); scripts/run_dtfe.sh, dtfelib's Estimator (standard server) and the launcher's standard exact zoom pass it too. Each partition and each thread's sub-box of a standard run carries its own padding, so the cost grows with their number. PS-DTFE pads in Lagrangian space by the same fraction of the box (at least 10% of it), and its partitions by '--ps-lagrangian-padding'.")
             ("padding-mpc", po::value< std::vector<Real> >()->multitoken(), "give the size of the padding need to make sure that the Delaunay triangulation fully covers the region of interest. Similar to option 'padding' choice '2)' with the difference that the padding size is given in Mpc and not box lengths.")
             ("output-format,o", po::value< int >(&(this->outputFileType)), "give the type of the output file -- the output root is the second positional argument (101=binary file, 111=text file, see documentation for more options).")
             ("reader-options", po::value< std::vector<std::string> >( &(this->additionalOptions) )->multitoken(), "strings for the input readers (the binary reader's mass, value and threshold columns; the Gadget HDF5 reader's HI fraction files), supplied in a very simple way. Each additional option will be stored as a string in 'User_options.additionalOptions' (this variable is a vector of strings).")
@@ -507,13 +525,17 @@ void User_options::addOptions(po::options_description &allOptions,
                     "  velocityStd_a = \tcompute velocity standard deviation inside the sampling cell (NOTE: there is no 'velocityStd' of this option and this option works only with standard DTFE's averaging method 2 '--average-method 2'; PS-DTFE's spread between streams is 'dispersion').\n"
 #ifdef PHASE_SPACE
                     "  dispersion = \t[PS-DTFE only] mass-weighted multi-stream velocity dispersion. Writes the trace sigma^2 = sum(rho_s |v_s-<v>|^2)/sum(rho_s) to '.velDisp' and the full symmetric tensor sigma_ij to '.velDispTensor'. ~0 in single-stream regions (cold void interiors), large in multi-stream regions (walls/filaments). Use 'dispersion_a' for the volume-averaged version.\n"
-                    "  (PS-DTFE: 'gradient' and the 'divergence', 'shear', 'vorticity' and 'vweb' built on it "
-                    "are, by default with the exact deposit and '--ps-volume-weighted' (the drivers' and the "
-                    "launcher's setting), the gradient of the volume-weighted MEAN velocity from exact face sums -- "
+                    "  (PS-DTFE: the velocity moments -- the velocity, the gradient and the fields built on it, the "
+                    "scalars -- are volume-weighted: each stream counts with the Eulerian volume it fills in the "
+                    "cell, so a cell holds the volume average of the field, the standard-DTFE '_a' convention. The "
+                    "dispersion stays mass-weighted: it is a second moment of the phase-space distribution. "
+                    "'gradient' and the 'divergence', 'shear', 'vorticity' and 'vweb' built on it "
+                    "are, by default with the exact deposit, the gradient of the volume-weighted MEAN velocity from "
+                    "exact face sums -- "
                     "the quantity standard DTFE gives (see '--face-gradient'). Otherwise ('--per-tet-gradient', the "
-                    "sampled deposit, mass-weighted moments, '--ps-halo-release', 2D) they are, in a multi-stream "
+                    "sampled deposit, '--ps-halo-release', 2D) they are, in a multi-stream "
                     "cell, the average over the streams of each stream's OWN velocity gradient, weighted like the "
-                    "velocity (see '--ps-volume-weighted'), NOT the gradient of the mean velocity. The two agree in "
+                    "velocity, NOT the gradient of the mean velocity. The two agree in "
                     "single-stream cells; in folds they differ (an inverted stream inside a wall diverges while the "
                     "mean flow converges), so the box mean of that divergence is not 0 and its V-web finds few "
                     "filaments and nodes (TNG100-3-Dark z = 1: 1.78% and 0.005%, against 6.62% and 0.20% for "
@@ -531,10 +553,7 @@ void User_options::addOptions(po::options_description &allOptions,
                     "  vweb = \tV-web cosmic web classification (0=void, 1=wall, 2=filament, 3=node) from velocity shear tensor eigenvalues (use 'vweb_a' for volume averaged). Also outputs eigenvalues.\n"
 #endif
             )
-            ("lambda-th", po::value<Real>(&(this->lambda_th))->default_value(Real(0.)), "eigenvalue threshold for T-web/V-web cosmic web classification. Grid cells with eigenvalues above this threshold are classified as collapsing along that axis. [DEFAULT: 0.0; scripts/run_dtfe.sh and run_ps_dtfe.sh pass 0.3, the production value, so a run without this flag classifies differently from a scripted one]")
-#ifdef PHASE_SPACE
-            ("ps-volume-weighted", po::bool_switch(&(this->psVolumeWeighted)), "PS-DTFE only: weight the VELOCITY MOMENTS (velocity, gradient and its derived divergence/shear/vorticity/vweb, dispersion, scalars) by EULERIAN-VOLUME shares instead of mass shares during the grid deposit. The default mass weighting gives the momentum-like multi-stream mean sum(m_s f_s)/sum(m_s), whose sub-cell density-velocity covariance steepens the velocity-divergence--density relation by a few percent even in single-stream regions; volume weighting gives the volume average of the field over the cell -- the standard-DTFE '_a' convention and the quantity linear theory's -aHf*delta refers to. Each sampled point carries V_eul/n_samples (the exact deposit carries the analytic V_intersection), so single-stream regions reproduce the standard DTFE volume average. With the exact deposit (the default for '_a' fields) the gradient and its derived fields are then by default the gradient of the volume-weighted MEAN velocity from exact face sums ('--face-gradient'; docs/cleanup-plan.md D13). Otherwise ('--per-tet-gradient', the sampled deposit, '--ps-halo-release') in multi-stream cells they are the volume-weighted average of each stream's own gradient, not the gradient of the mean velocity: the box mean of divergence x streams is then the growth rate of the total stream volume, not 0 (see the 'gradient' note under '--field'). The VELOCITY DISPERSION is deliberately EXCLUDED and stays mass-weighted: sigma_ij is a second moment of the phase-space distribution f (rho*sigma_ij = integral f (v-vbar)_i (v-vbar)_j d3v), so it is f- i.e. mass-weighted BY DEFINITION -- that is what makes it the quantity entering the Jeans equations. It therefore carries its own mass-weighted mean and normalizer internally, and comes out bit-identical to a default (mass-weighted) run. So this flag gives the literature-standard estimator for EVERY field at once: volume-weighted velocity statistics (Bernardeau & van de Weygaert's motivation for the Delaunay estimator) plus mass-weighted phase-space moments. The density, stream-count and caustic outputs are unchanged. Works with the CPU, GPU and exact ('--exact') paths (the GPU kernel derives the volume shares from the same per-tet determinant as the CPU, so the float-parity contract carries over); cannot be combined with '--ps-linear-deposit' (which is density weighting inside each tetrahedron, the opposite convention). Point evaluation ('--sample-points', '--serve') follows it too: the per-point velocity, velocity gradient and scalar are then the plain mean over the point's streams, the dispersion stays mass-weighted, unless '--ps-point-conventions legacy'.")
-#endif
+            ("lambda-th", po::value<Real>(&(this->lambda_th))->default_value(Real(0.3), "0.3"), "eigenvalue threshold for T-web/V-web cosmic web classification. Grid cells with eigenvalues above this threshold are classified as collapsing along that axis. [DEFAULT: 0.3, the production value, which scripts/run_dtfe.sh and run_ps_dtfe.sh pass too; '--lambda-th 0' classifies by the eigenvalues' signs alone]")
             ("mean-density", po::value<Real>(&averageDensity), "supply a value to be used to scale the density. If none is supplied, the average density will be used for this task.")
             ("hubble", po::value<Real>(&(this->hubbleParam)), "Hubble parameter h for T-web/V-web normalization (H=100 h km/s/Mpc). If not specified, the value is read from the simulation file header.")
             ("scale-factor", po::value<Real>(&(this->scaleFactor)), "scale factor a of the snapshot, used to convert Gadget u-velocities (u = v_pec/sqrt(a)) to peculiar km/s in the V-web normalization. If not specified, the value is read from the simulation file header ('Time'); pass it explicitly for inputs whose header lacks it.")
@@ -548,11 +567,11 @@ void User_options::addOptions(po::options_description &allOptions,
     po::options_description cellAverageOptions("Cell average (the two modes)");
     cellAverageOptions.add_options()
 #ifdef PHASE_SPACE
-            ("exact", po::bool_switch(&(this->exactFlag)), "PS-DTFE (2D and 3D builds): replace the nSub^3 sub-sampled grid deposit by the EXACT conservative voxelization of Powell & Abel 2015 (vendored r3d library, third_party/r3d; a 2D build clips triangles itself, ps_clip2d.h): every kept tetrahedron is analytically clipped against each grid cell in its bounding box and deposits mass * V_intersection/V_tetrahedron per cell -- no sampling noise, mass conservation to double precision. THE DEFAULT since 2026-11-09 for a run with an '_a' field: such a run deposits exactly unless '--sampled', DTFE_EXACT_AVERAGE=0 (=1 is '--exact'; a flag beats it) or a '--subsamples' count is given, or the method is not PS-DTFE's; a run without '_a' fields keeps the sampled deposit (its grids hold the point values) unless '--exact' is given, which then drives every grid pass. The run log's 'grid deposit' line says which deposit ran and why. The kept-cell classification, periodic minimum-image convention and per-tet renormalization are IDENTICAL to the standard deposit, so '.streams'-defining overlaps, '--ps-halo-release' and '--ps-caustics' compose unchanged. Velocity moments integrate the LINEAR velocity profile exactly (order-1 moments); the dispersion additionally carries each cell-intersection's exact velocity covariance (order-2 moments). With '--ps-linear-deposit' the per-cell mass shares integrate the linear density profile exactly (order-1), renormalized per tetrahedron exactly like the sampled path. Beside '--exact', the count nSub ('--subsamples') reaches only a tetrahedron too thin to clip (sampled at that count) and a partition's sub-grid ring in the '_a' pass, and the run-wide units' share cap: 3 when none is given; a given count is kept. The exact deposit is the nSub->infinity limit, so the unaveraged and '_a' grids coincide where every tetrahedron clips (the unaveraged pass samples one too thin to clip at one point). Runs on the CPU (double precision, the reference: r3d, each tetrahedron clipped once per slab and column of its cells, exact_sweep.h) and on the GPU with '--gpu' (a different exact method: a z-sweep with exact Gauss-Legendre quadrature in float32, metal/exact_clip.metal.inc, agreeing with the CPU to float rounding like every other GPU field). The GPU hands every tetrahedron whose velocity dispersion float32 cannot resolve (a thin tetrahedron with a steep velocity gradient) to the CPU's double deposit, as it does degenerate ones. On TNG100-3-Dark z = 0 at 512^3 (M1 Max, 2026-11-09) the exact deposit ran in 1133 s on the CPU and 1156 s on the GPU, the sampled one (nSub 3) in 1260 s on the GPU and 1644 s on the CPU; scripts/run_ps_dtfe.sh (DTFE_GPU=0 keeps the CPU) and the launcher run the exact deposit on the GPU of a GPU build, in performance together with the free cores ('--gpu-share auto'; '--gpu-share mixed' in every mode). Point evaluation ('--sample-points') is unaffected. (The same name as standard DTFE's exact cell average.)")
-            ("sampled", po::bool_switch(&(this->sampledFlag)), "PS-DTFE: the nSub^3 SUB-SAMPLED grid deposit (nSub^2 in a 2D build; '--subsamples nSub', 1 by default: one point per cell, at its centre -- quick, with noisy per-cell values, so smooth the grids before use; more points per cell give a smoother cell average and take more time) instead of the exact deposit of '--exact' (the reference), the default since 2026-11-09 for a run with an '_a' field. A run deposits sampled by itself when it selects no '_a' field (its grids then hold the point values, nSub = 1, as before), when a '--subsamples' count is given without '--exact', under DTFE_EXACT_AVERAGE=0 (a flag beats it), and with a method other than PS-DTFE's. The sampled deposit is what every PS-DTFE grid holds that was made before 2026-11-09 without asking for the exact one; the face gradient needs the exact one: a sampled run keeps the stream average of each stream's own gradient ('--face-gradient' beside '--sampled' is refused). '--exact' and '--sampled' exclude each other.")
+            ("exact", po::bool_switch(&(this->exactFlag)), "PS-DTFE (2D and 3D builds): replace the nSub^3 sub-sampled grid deposit by the EXACT conservative voxelization of Powell & Abel 2015 (vendored r3d library, third_party/r3d; a 2D build clips triangles itself, ps_clip2d.h): every kept tetrahedron is analytically clipped against each grid cell in its bounding box and deposits mass * V_intersection/V_tetrahedron per cell -- no sampling noise, mass conservation to double precision. THE DEFAULT for a run with an '_a' field: such a run deposits exactly unless '--sampled', DTFE_EXACT_AVERAGE=0 (=1 is '--exact'; a flag beats it) or a '--subsamples' count is given, or the method is not PS-DTFE's; a run without '_a' fields keeps the sampled deposit (its grids hold the point values) unless '--exact' is given, which then drives every grid pass. The run log's 'grid deposit' line says which deposit ran and why. The kept-cell classification, periodic minimum-image convention and per-tet renormalization are IDENTICAL to the standard deposit, so '.streams'-defining overlaps, '--ps-halo-release' and '--ps-caustics' compose unchanged. Velocity moments integrate the LINEAR velocity profile exactly (order-1 moments); the dispersion additionally carries each cell-intersection's exact velocity covariance (order-2 moments). Beside '--exact', the count nSub ('--subsamples') reaches only a tetrahedron too thin to clip (sampled at that count) and a partition's sub-grid ring in the '_a' pass, and the run-wide units' share cap: 3 when none is given; a given count is kept. The exact deposit is the nSub->infinity limit, so the unaveraged and '_a' grids coincide where every tetrahedron clips (the unaveraged pass samples one too thin to clip at one point). Runs on the CPU (double precision, the reference: r3d, each tetrahedron clipped once per slab and column of its cells, exact_sweep.h) and on the GPU with '--gpu' (a different exact method: a z-sweep with exact Gauss-Legendre quadrature in float32, metal/exact_clip.metal.inc, agreeing with the CPU to float rounding like every other GPU field). The GPU hands every tetrahedron whose velocity dispersion float32 cannot resolve (a thin tetrahedron with a steep velocity gradient) to the CPU's double deposit, as it does degenerate ones. scripts/run_ps_dtfe.sh (DTFE_GPU=0 keeps the CPU) and the launcher run the exact deposit on the GPU of a GPU build, in performance together with the free cores ('--gpu-share auto'; '--gpu-share mixed' in every mode). Point evaluation ('--sample-points') is unaffected. (The same name as standard DTFE's exact cell average.)")
+            ("sampled", po::bool_switch(&(this->sampledFlag)), "PS-DTFE: the nSub^3 SUB-SAMPLED grid deposit (nSub^2 in a 2D build; '--subsamples nSub', 1 by default: one point per cell, at its centre -- quick, with noisy per-cell values, so smooth the grids before use; more points per cell give a smoother cell average and take more time) instead of the exact deposit of '--exact' (the reference), the default for a run with an '_a' field. A run deposits sampled by itself when it selects no '_a' field (its grids then hold the point values, nSub = 1, as before), when a '--subsamples' count is given without '--exact', under DTFE_EXACT_AVERAGE=0 (a flag beats it), and with a method other than PS-DTFE's. The older PS-DTFE grids made without asking for the exact one hold the sampled deposit; the face gradient needs the exact one: a sampled run keeps the stream average of each stream's own gradient ('--face-gradient' beside '--sampled' is refused). '--exact' and '--sampled' exclude each other.")
 #else
-            ("exact", po::bool_switch(&(this->exactFlag)), "standard DTFE (2D and 3D builds; 2D clips triangles itself): compute the volume-averaged ('_a') fields by integrating the LINEAR DTFE interpolant EXACTLY over every grid-cell/tetrahedron intersection (vendored r3d library, Powell & Abel 2015) instead of Monte-Carlo sampling. THE DEFAULT since 2026-11-09: a run that passes neither '--exact' nor '--sampled' integrates its '_a' fields exactly, unless DTFE_EXACT_AVERAGE=0 is set (=1 is '--exact'; a flag beats it), a sampling count or method is given ('--subsamples', '-s' or '--average-method', any value: the sampled average), or the exact average does not apply ('velocityStd_a', a '--redshift-cone' grid, a MY_SCALAR build, a method other than DTFE): such a run samples by itself, and the run log's 'volume averaging' line says which average ran and why. Asked for explicitly ('--exact' or DTFE_EXACT_AVERAGE=1) it is refused where it cannot run (MY_SCALAR, another method, 'velocityStd_a', '--average-method 2' or '3'), and on a redshift cone grid it warns and samples. For a linear field the integral over each intersection is its centroid value times its volume, so order-1 moments suffice -- no sampling noise, and on a perfect particle lattice the averaged density is exactly 1 to rounding. Runs on the method-1 per-tetrahedron scatter topology with the same cell classification (the single-grid-cell fast path is exact as well); beside '--exact', '--subsamples' and '-s' are ignored and '--average-method' must be 1. Runs on the GPU with '--gpu', by a different exact method there (a z-sweep with exact Gauss-Legendre quadrature in float32, metal/exact_clip.metal.inc), agreeing with the CPU to float rounding. The CPU clips each tetrahedron once per slab and column of its cells (exact_sweep.h). On TNG100-3-Dark z = 0 at 512^3 (M1 Max, 2026-11-09) the exact average ran in 431 s on the CPU and 439 s on the GPU (with the face gradient), the sampled one in 315 s and 433 s. Its box mean is 1 to ~3e-8 (scripts/run_dtfe.sh passes '--exact' or '--sampled' explicitly). Its deposits form every tetrahedron's geometry in the GRID FRAME -- relative to the corner of the full grid's cell holding its base vertex, the vertices in the hashed order the Monte-Carlo average uses, the gradients in double -- so a '--partition' or thread split does not change what a tetrahedron deposits, and the shares are summed exactly, as integers in one fixed-point unit per grid for the whole run (set before the first batch from the cell volume, the mean density and the particles' largest velocity component; the GPU in 128-bit words, the CPU and the face pass in 64-bit words with an exact carry), each cell rounded to float once: in the single build an all-GPU or an all-CPU run writes the same bytes at any partition split and thread count (tests/split_bytes_check.sh: the 64^3 demo at 1, 2^3 and 3^3 partitions). DTFE_RUN_UNITS_LEGACY=1 keeps the sums of before for one release: a unit per GPU batch (the last bit then differs in ~1e-5 of the cells -- TNG100-3-Dark z = 0 at 512^3, a 3^3 against a 6^3 plan: 1886 of 134 M density cells, one float ulp each) and the CPU's float sums in its walk order (~1e-7 of the rms). (Until 2026-11-09 the frame was the sub-domain's, in float32: where a sub-domain corner lay in a finer binade than the sub-domain's extent the vertices rounded by up to 2e-6 Mpc, and a 3^3 and a 6^3 split of TNG100-3-Dark z = 0 at 512^3 differed by 2.5e-5 of the density rms, up to 7% in single cells; docs/cleanup-plan.md P10.8.) (PS-DTFE's '--exact' is its exact deposit.)")
-            ("sampled", po::bool_switch(&(this->sampledFlag)), "standard DTFE: compute the volume-averaged ('_a') fields by Monte-Carlo SAMPLING ('--average-method', method 1 by default; '--subsamples k', k^3 points per grid cell, k^2 in 2D) instead of the exact integration of '--exact', the default since 2026-11-09. A run samples by itself where the exact average does not apply ('velocityStd_a', which takes '--average-method 2'; a '--redshift-cone' grid or user-given sampling coordinates, which take method 2; a MY_SCALAR build; a method other than DTFE), when '--subsamples', '-s' or '--average-method' is given without '--exact', and under DTFE_EXACT_AVERAGE=0 (a flag beats it). The sampled average is what every '_a' grid holds that was made before 2026-11-09 without asking for the exact one. '--exact' and '--sampled' exclude each other.")
+            ("exact", po::bool_switch(&(this->exactFlag)), "standard DTFE (2D and 3D builds; 2D clips triangles itself): compute the volume-averaged ('_a') fields by integrating the LINEAR DTFE interpolant EXACTLY over every grid-cell/tetrahedron intersection (vendored r3d library, Powell & Abel 2015) instead of Monte-Carlo sampling. THE DEFAULT: a run that passes neither '--exact' nor '--sampled' integrates its '_a' fields exactly, unless DTFE_EXACT_AVERAGE=0 is set (=1 is '--exact'; a flag beats it), a sampling count or method is given ('--subsamples', '-s' or '--average-method', any value: the sampled average), or the exact average does not apply ('velocityStd_a', a '--redshift-cone' grid, a MY_SCALAR build, a method other than DTFE): such a run samples by itself, and the run log's 'volume averaging' line says which average ran and why. Asked for explicitly ('--exact' or DTFE_EXACT_AVERAGE=1) it is refused where it cannot run (MY_SCALAR, another method, 'velocityStd_a', '--average-method 2' or '3'), and on a redshift cone grid it warns and samples. For a linear field the integral over each intersection is its centroid value times its volume, so order-1 moments suffice -- no sampling noise, and on a perfect particle lattice the averaged density is exactly 1 to rounding. Runs on the method-1 per-tetrahedron scatter topology with the same cell classification (the single-grid-cell fast path is exact as well); beside '--exact', '--subsamples' and '-s' are ignored and '--average-method' must be 1. Runs on the GPU with '--gpu', by a different exact method there (a z-sweep with exact Gauss-Legendre quadrature in float32, metal/exact_clip.metal.inc), agreeing with the CPU to float rounding. The CPU clips each tetrahedron once per slab and column of its cells (exact_sweep.h). The exact average's box mean is 1 to ~3e-8 (scripts/run_dtfe.sh passes '--exact' or '--sampled' explicitly). Its deposits form every tetrahedron's geometry in the GRID FRAME -- relative to the corner of the full grid's cell holding its base vertex, the vertices in the hashed order the Monte-Carlo average uses, the gradients in double -- so a '--partition' or thread split does not change what a tetrahedron deposits, and the shares are summed exactly, as integers in one fixed-point unit per grid for the whole run (set before the first batch from the cell volume, the mean density and the particles' largest velocity component; the GPU in 128-bit words, the CPU and the face pass in 64-bit words with an exact carry), each cell rounded to float once: in the single build an all-GPU or an all-CPU run writes the same bytes at any partition split and thread count (tests/split_bytes_check.sh: the 64^3 demo at 1, 2^3 and 3^3 partitions). DTFE_RUN_UNITS_LEGACY=1 keeps the sums of before for one release: a unit per GPU batch (the last bit then differs in ~1e-5 of the cells -- TNG100-3-Dark z = 0 at 512^3, a 3^3 against a 6^3 plan: 1886 of 134 M density cells, one float ulp each) and the CPU's float sums in its walk order (~1e-7 of the rms). (Older binaries formed the frame per sub-domain in float32, so a split moved the bytes: where a sub-domain corner lay in a finer binade than the sub-domain's extent the vertices rounded by up to 2e-6 Mpc, and a 3^3 and a 6^3 split of TNG100-3-Dark z = 0 at 512^3 differed by 2.5e-5 of the density rms, up to 7% in single cells; docs/cleanup-plan.md P10.8.) (PS-DTFE's '--exact' is its exact deposit.)")
+            ("sampled", po::bool_switch(&(this->sampledFlag)), "standard DTFE: compute the volume-averaged ('_a') fields by Monte-Carlo SAMPLING ('--average-method', method 1 by default; '--subsamples k', k^3 points per grid cell, k^2 in 2D) instead of the exact integration of '--exact', the default. A run samples by itself where the exact average does not apply ('velocityStd_a', which takes '--average-method 2'; a '--redshift-cone' grid or user-given sampling coordinates, which take method 2; a MY_SCALAR build; a method other than DTFE), when '--subsamples', '-s' or '--average-method' is given without '--exact', and under DTFE_EXACT_AVERAGE=0 (a flag beats it). The older '_a' grids made without asking for the exact one hold the sampled average (the run log's 'volume averaging' line says which ran). '--exact' and '--sampled' exclude each other.")
 #endif
             ("seed", po::value<size_t>(&(this->randomSeed)), "integer seed of the random generator of standard DTFE's '--average-method 2' (random points in each grid cell), '--particle-fraction' and '--poisson'. The exact average ('--exact', the default), method 1 (the sampled average's default) and method 3 are deterministic and ignore it. Drawn from the clock when not supplied, so two '--average-method 2' runs then differ; method 2 also adds 1000 x the number of the sub-domain (partition or thread), so its realization depends on the split.")
 #ifndef PHASE_SPACE
@@ -567,11 +586,11 @@ void User_options::addOptions(po::options_description &allOptions,
     po::options_description deviceOptions("Device and machine use");
     deviceOptions.add_options()
 #ifdef PHASE_SPACE
-            ("gpu", po::bool_switch(&(this->gpuAlias)), "PS-DTFE: run the grid deposit on the GPU (TNG100-3-Dark z = 0 at 512^3, M1 Max, 2026-11-09: a run with the exact deposit took 1156 s on the GPU and 1133 s on every CPU core, a tie; with the sampled one (nSub 3) 1260 s and 1644 s). Requires a GPU build ('make PS-DTFE METAL=1' on macOS/Apple Silicon); otherwise the option is ignored with a warning and the CPU deposit is used. Results match the CPU deposit to float rounding (atomic summation order): the GPU's mass grid is an exact fixed-point sum (64-bit words in a unit per pass; DTFE_PS_RUN_UNITS=1: 128-bit words in one unit per grid for the whole run), and the stream counts and caustic flags are identical in the single-precision build (the double build's GPU works on float copies of its tetrahedra and may differ in up to 1e-4 of the cells). (Standard DTFE's '--gpu' runs its volume-averaged interpolation on the GPU.)")
+            ("gpu", po::bool_switch(&(this->gpuAlias)), "PS-DTFE: run the grid deposit on the GPU. Requires a GPU build ('make PS-DTFE METAL=1' on macOS/Apple Silicon); otherwise the option is ignored with a warning and the CPU deposit is used. Without it the program picks the device: the GPU for a run with an '_a' field, exact or sampled, wherever its deposit runs there (a 3D GPU build, the PS-DTFE method, a grid -- with '--grid-window' its window -- of at most 2^32 cells, at most one scalar component, no '--ps-caustic-cusps', not '--serve'), else the CPU, without a warning. DTFE_GPU in the environment pins the device: 1 (any value but the off ones) asks for the GPU exactly as this flag does, 0 (false, no, off) keeps the CPU, unset, empty or 'auto' leaves it to the program; the flag beats it. The run log's 'PS deposit' line says which device and why. Results match the CPU deposit to float rounding (atomic summation order): the GPU's mass grid is an exact fixed-point sum (64-bit words in a unit per pass; DTFE_PS_RUN_UNITS=1: 128-bit words in one unit per grid for the whole run), and the stream counts and caustic flags are identical in the single-precision build (the double build's GPU works on float copies of its tetrahedra and may differ in up to 1e-4 of the cells). (Standard DTFE's '--gpu' runs its volume-averaged interpolation on the GPU.)")
 #else
-            ("gpu", po::bool_switch(&(this->gpuAlias)), "standard DTFE: run the volume-averaged ('_a', method 1) grid interpolation on the GPU. Requires a GPU build ('make DTFE METAL=1' on macOS/Apple Silicon); otherwise the option is ignored with a warning and the CPU interpolation is used. With '--sampled' the GPU takes the same samples as the CPU, and its cells match the CPU's to float rounding except in about 0.1-0.2% of them, where a sample within float rounding of a cell face lands in the neighbouring cell and moves both by up to a few percent; the box sums agree to rounding. Its sums are exact fixed-point words, converted to float once, so two GPU runs write byte-identical grids: with '--exact' 128-bit words in one unit per grid for the whole run (the same at every partition and thread split; DTFE_RUN_UNITS_LEGACY=1 keeps the sampled average's words), with '--sampled' 64-bit words in a unit per batch; DTFE_GPU_FLOAT_GRIDS=1 switches to float atomics (two runs then differ in 25-49% of the cells, by up to ~1e-6), and the opt-in shared full grid (DTFE_GPU_SHARED=1) always uses them. A failed command buffer is retried with PS-DTFE's policy, from the batch's last checkpoint (DTFE_GPU_CHECKPOINT_CHUNKS) at a pace set by the cause; after repeated failures the batch runs on the CPU, and the run ends with the 'GPU deposit retries' line. With '--exact' (the default) the GPU agrees with the CPU to float rounding. Unaveraged fields and methods 2/3 always use the CPU. (PS-DTFE's '--gpu' runs its grid deposit on the GPU.)")
+            ("gpu", po::bool_switch(&(this->gpuAlias)), "standard DTFE: run the volume-averaged ('_a', method 1) grid interpolation on the GPU. Requires a GPU build ('make DTFE METAL=1' on macOS/Apple Silicon); otherwise the option is ignored with a warning and the CPU interpolation is used. Without it the program picks the device: the GPU for the exact average ('--exact', the default) wherever it runs there (a 3D GPU build, the DTFE method, '--average-method 1', a regular grid of at most 2^32 cells, at most one scalar component, not '--serve'), the CPU for the sampled average ('--sampled', in every run mode) and everywhere else, without a warning. DTFE_GPU in the environment pins the device: 1 (any value but the off ones) asks for the GPU exactly as this flag does, 0 (false, no, off) keeps the CPU, unset, empty or 'auto' leaves it to the program; the flag beats it. The run log's ''_a' interpolation' line says which device and why. With '--sampled' the GPU takes the same samples as the CPU, and its cells match the CPU's to float rounding except in about 0.1-0.2% of them, where a sample within float rounding of a cell face lands in the neighbouring cell and moves both by up to a few percent; the box sums agree to rounding. Its sums are exact fixed-point words, converted to float once, so two GPU runs write byte-identical grids: with '--exact' 128-bit words in one unit per grid for the whole run (the same at every partition and thread split; DTFE_RUN_UNITS_LEGACY=1 keeps the sampled average's words), with '--sampled' 64-bit words in a unit per batch; DTFE_GPU_FLOAT_GRIDS=1 switches to float atomics (two runs then differ in 25-49% of the cells, by up to ~1e-6). A failed command buffer is retried with PS-DTFE's policy, from the batch's last checkpoint (DTFE_GPU_CHECKPOINT_CHUNKS) at a pace set by the cause; after repeated failures the batch runs on the CPU, and the run ends with the 'GPU deposit retries' line. With '--exact' (the default) the GPU agrees with the CPU to float rounding. Unaveraged fields and methods 2/3 always use the CPU. (PS-DTFE's '--gpu' runs its grid deposit on the GPU.)")
 #endif
-            ("run-mode", po::value<std::string>(), "How hard the run may lean on the machine: performance (the default) uses every core and long GPU buffers; balanced the performance cores less a quarter (6 of an M1 Max's 8+2) and short GPU buffers (~50 ms), so the display never waits on the GPU; gentle half the performance cores (4) and the short buffers, and on Linux a lower priority (nice 10), so the machine stays usable. DTFE_RUN_MODE is the same choice (any case; unset or 'auto' = the default), and the flag beats it. OMP_NUM_THREADS and the DTFE_*_THREADS pins are kept, and a '--max-concurrent' above the mode's threads raises them. The mode changes no PS-DTFE single-precision byte, nor a byte of standard DTFE's single-precision exact '_a' grids; its other CPU grids (the Monte-Carlo average of '--sampled', the '_u' fields, the double build) follow the thread count at float rounding, as with OMP_NUM_THREADS. With '--gpu-share auto', performance also deposits part of a partitioned PS-DTFE '--gpu' run on the free cores; with '--gpu-share mixed' every mode does, at the share of the mode's threads. The drivers and the launcher default to balanced; the run log's 'run mode' line says what was set and why.")
+            ("run-mode", po::value<std::string>(), "How hard the run may lean on the machine: performance uses every core and long GPU buffers; balanced (the default) the performance cores less a quarter and short GPU buffers (~50 ms), so the display never waits on the GPU; gentle half the performance cores and the short buffers, and on Linux a lower priority (nice 10), so the machine stays usable. Inside a batch job (SLURM_JOB_ID or PBS_JOBID set and not empty: the job's cores are the run's) the default is performance. DTFE_RUN_MODE is the same choice (any case; unset or 'auto' = the default), and the flag beats it. OMP_NUM_THREADS and the DTFE_*_THREADS pins are kept, and a '--max-concurrent' above the mode's threads raises them. The mode changes no PS-DTFE single-precision byte, nor a byte of standard DTFE's single-precision exact '_a' grids; its other CPU grids (the Monte-Carlo average of '--sampled', the '_u' fields, the double build) follow the thread count at float rounding, as with OMP_NUM_THREADS. With '--gpu-share auto', performance also deposits part of a partitioned PS-DTFE GPU run on the free cores; with '--gpu-share mixed' every mode does, at the share of the mode's threads. The drivers and the launcher resolve the same default and pass it; the run log's 'run mode' line says what was set and why.")
             ;
     
     
@@ -582,27 +601,27 @@ void User_options::addOptions(po::options_description &allOptions,
              " In PS-DTFE this also drives the OpenMP parallelism: partitions run in parallel (one triangulation per thread), so speedup scales up to the number of partitions. NOTE on memory: each Lagrangian partition writes the WHOLE Eulerian grid, so peak memory ~ (partitions running concurrently) x full grid x number of fields -- choose the partition count from your core budget AND available RAM."
 #endif
              )
-            ("max-concurrent", po::value<int>(&(this->maxConcurrent))->default_value(0), "caps how many Delaunay triangulations are built AT ONCE, to bound peak memory on machines with less RAM (trades CPU cores for memory). Each concurrently-built triangulation is the dominant memory cost, so peak RAM ~ (concurrent triangulations) x per-triangulation size. '0' uses all the threads of the run mode ('--run-mode': every thread in performance, the default). If NOT given, the program AUTO-SELECTS the cap together with the partition split (see '--partition')."
+            ("max-concurrent", po::value<int>(&(this->maxConcurrent))->default_value(0), "caps how many Delaunay triangulations are built AT ONCE, to bound peak memory on machines with less RAM (trades CPU cores for memory). Each concurrently-built triangulation is the dominant memory cost, so peak RAM ~ (concurrent triangulations) x per-triangulation size. '0' uses all the threads of the run mode ('--run-mode': every thread in performance). If NOT given, the program AUTO-SELECTS the cap together with the partition split (see '--partition')."
 #ifdef PHASE_SPACE
              " In PS-DTFE this limits how many Lagrangian partitions run in parallel (e.g. '--partition 4 4 4 --max-concurrent 4' builds at most 4 of the 64 partition triangulations simultaneously). Combine a FINER --partition (smaller per-triangulation size) with a SMALLER --max-concurrent to fit large grids in limited RAM."
 #else
              " In standard DTFE this limits the concurrent spatial sub-triangulations inside the parallel interpolation; combine with --partition for serial, low-memory processing of very large data. The partitions themselves always run one after another; the auto-tuner plans its split with a given value, and with '--sample-points' every partition is a single triangulation, so the cap has no effect there."
 #endif
              )
-            ("scratch-dir", po::value<std::string>(&(this->scratchDir)), "back every allocation of >= 1 GB -- in practice, the full-resolution output grids, which '--partition' can NOT reduce (each partition deposits into the same shared grid) -- with memory-mapped files in this directory instead of RAM. Lets a 64 GB machine run e.g. a 1024^3 grid with the full field set (~146 GB of accumulators) against local disk; results are bit-identical, the kernel pages the grids in and out as needed, and the scratch files are unlinked at creation so they vanish automatically even if the run crashes. The directory must exist on a LOCAL, non-synced volume (e.g. /private/tmp/dtfe-scratch) with enough free space for the grids; iCloud paths are rejected. The 1 GB threshold can be changed with the DTFE_SCRATCH_MIN_GB environment variable. PS-DTFE, partitioned runs: a partition that finishes before its turn in the ordered merge and does not fit in memory is spilled to an unlinked file here (without this option: in the system temporary folder; see '--ps-merge').")
+            ("scratch-dir", po::value<std::string>(&(this->scratchDir)), "back every allocation of >= 1 GB -- in practice, the full-resolution output grids, which '--partition' can NOT reduce (each partition deposits into the same shared grid) -- with memory-mapped files in this directory instead of RAM. Lets a run whose grids exceed the RAM (e.g. a 1024^3 grid with the full field set, ~146 GB of accumulators) run against local disk; results are bit-identical, the kernel pages the grids in and out as needed, and the scratch files are unlinked at creation so they vanish automatically even if the run crashes. The directory must exist on a LOCAL, non-synced volume (e.g. /private/tmp/dtfe-scratch) with enough free space for the grids; iCloud paths are rejected. The 1 GB threshold can be changed with the DTFE_SCRATCH_MIN_GB environment variable. PS-DTFE, partitioned runs: a partition that finishes before its turn in the ordered merge and does not fit in memory is spilled to an unlinked file here (without this option: in the system temporary folder; see '--ps-merge').")
             ("auto-tune-report", po::bool_switch(&(this->autoTuneReport)), "both binaries (in standard DTFE mc is the number of threads each partition uses, the partitions running one after another): read the input, run the memory auto-tuner exactly as a real run would (the same flags, including a given --partition/--max-concurrent), print ONE line -- AUTO-TUNE-REPORT partition=.. mc=.. predicted_gb=.. budget_gb=.. over_budget=0|1 ... -- and exit without computing anything. For checking whether a configuration fits before running it (the GUI does). DTFE_AUTO_PTS_N and DTFE_AUTO_PTS_VEL_GRAD=1 size a --sample-points plane that does not exist yet (both binaries; the standard plan counts a plane's records, one per point). The line also gives pts_gb (the plane), snapshot_gb (the GPU deposit's host copy of its grids, kept to resume a failed command buffer) and lookahead_gb (the next partition's tessellations, prepared during a GPU deposit), each already in predicted_gb.")
 #ifdef PHASE_SPACE
-            ("resume", po::bool_switch(&(this->psResume)), "PS-DTFE, partitioned runs: continue a run that was killed, from its checkpoint. A partitioned run saves its merged grids and the list of merged partitions in '<output>.runlog.checkpoint' (with '--scratch-dir': in the scratch directory, named from the whole output path) after a partition merges, unless the last save took more than 5% of the time since it; the folder is removed once the outputs are in place. '--resume' loads it, skips the partitions it lists and computes the rest; it refuses, naming the differing settings, when the command line (apart from --resume, --ps-merge, --no-overlap, --verbose, --max-concurrent, --run-mode, --gpu-share, --scratch-dir and --tessellation-cache; a deprecated spelling counts as its canonical name), the resolved cell average (exact or sampled) and gradient route (face or per-tetrahedron; both follow the flags, and DTFE_EXACT_AVERAGE and DTFE_FACE_GRADIENT can change them), the build or the binary itself (a rebuilt binary does not resume), the input files or the partition split differ. The resolved GPU share is part of the key; --resume with --gpu-share auto or mixed keeps the checkpoint's. Without '--partition' the checkpoint's split is used. It merges in index order (the default; it overrides a '--ps-merge completion-order', not a fixed-point merge): when the killed run merged in index order too, the grids are byte-identical to an uninterrupted run. DTFE_CHECKPOINT=0 writes no checkpoints; runs with '--interlace' are not checkpointed. A '--sample-points' run is checkpointed too: each merged partition's stream records are saved once as 'points.<i>' beside the checkpoint, and the sample-point file (size + mtime) is part of the key.")
+            ("resume", po::bool_switch(&(this->psResume)), "PS-DTFE, partitioned runs: continue a run that was killed, from its checkpoint. A partitioned run saves its merged grids and the list of merged partitions in '<output>.runlog.checkpoint' (with '--scratch-dir': in the scratch directory, named from the whole output path) after a partition merges, unless the last save took more than 5% of the time since it; the folder is removed once the outputs are in place. '--resume' loads it, skips the partitions it lists and computes the rest; it refuses, naming the differing settings, when the command line (apart from --resume, --ps-merge, --no-overlap, --verbose, --max-concurrent, --run-mode, --gpu-share, --scratch-dir and --tessellation-cache; a deprecated spelling counts as its canonical name), the resolved cell average (exact or sampled) and gradient route (face or per-tetrahedron; both follow the flags, and DTFE_EXACT_AVERAGE and DTFE_FACE_GRADIENT can change them), the resolved device (GPU or CPU: '--gpu', DTFE_GPU or the program's pick), the build or the binary itself (a rebuilt binary does not resume), the input files or the partition split differ. The resolved GPU share is part of the key; --resume with --gpu-share auto or mixed keeps the checkpoint's. Without '--partition' the checkpoint's split is used. It merges in index order (the default; it overrides a '--ps-merge completion-order', not a fixed-point merge): when the killed run merged in index order too, the grids are byte-identical to an uninterrupted run. DTFE_CHECKPOINT=0 writes no checkpoints; runs with '--interlace' are not checkpointed. A '--sample-points' run is checkpointed too: each merged partition's stream records are saved once as 'points.<i>' beside the checkpoint, and the sample-point file (size + mtime) is part of the key.")
             ("ps-merge", po::value<std::string>(), "PS-DTFE, partitioned runs (fixed-point: a one-domain run too): how the partitions' grids are added into the result, one of:\n"
-                    "  index-order = \tadd the partitions' grids into the result in partition INDEX order, whatever order they finish in, so two identical runs give bit-identical grids (the merge's float adds then always happen in the same order; with '--gpu' the deposit's own atomic sums must be order-free too, which every grid of the deposit is: exact 64-bit fixed-point sums -- DTFE_GPU_FLOAT_MOMENTS=1 switches the velocity moments to float atomics, which are not). The ordered merge is STAGED: a partition that finishes before its turn hands its sub-grids to a staging area in memory and its thread takes the next partition, and the partition whose turn it is merges every staged one after it in index order -- so no thread idles behind a slow partition (a finished partition waiting for its turn while holding its thread makes a TNG region's GPU run 35% slower). Staging moves the sub-grids (nothing is allocated) and frees the partition's particles; where the memory gate guards each partition start (an auto-tuned plan with several in flight) a partition is always staged, the gate then admitting the next one only while the free memory holds it; otherwise (a hand-set split) only while the free memory less 4 GB still holds the sub-grids, else it waits for its turn holding its thread. DTFE_MERGE_STAGE_GB=X caps the staged bytes at X GB instead, 0 = never stage. A partition whose sub-grids the memory cannot hold (under the gate: beside one more partition) is SPILLED instead: written to an unlinked file in '--scratch-dir', else in the system temporary folder, freed, and read back at its turn -- the merged grids stay byte-identical; DTFE_MERGE_SPILL=0 switches that off, DTFE_MERGE_SPILL=1 spills every staged partition. The run log's 'ordered merge:' line says how many were staged, how much memory they held and how many were spilled. The memory gate still applies; a partition waits for memory only while a LOWER-numbered one is in flight, so no wait can deadlock. At '--max-concurrent 1' the order is the index order anyway, and the auto-tuner's speed split of a small set always merges in order. Given explicitly, the index order also keeps the partition memory gate on under the auto-tuner's speed split of a small set (which merges in order and otherwise drops the gate).\n"
+                    "  index-order = \tadd the partitions' grids into the result in partition INDEX order, whatever order they finish in, so two identical runs give bit-identical grids (the merge's float adds then always happen in the same order; with '--gpu' the deposit's own atomic sums must be order-free too, which every grid of the deposit is: exact 64-bit fixed-point sums -- DTFE_GPU_FLOAT_MOMENTS=1 switches the velocity moments to float atomics, which are not). The ordered merge is STAGED: a partition that finishes before its turn hands its sub-grids to a staging area in memory and its thread takes the next partition, and the partition whose turn it is merges every staged one after it in index order -- so no thread idles behind a slow partition. Staging moves the sub-grids (nothing is allocated) and frees the partition's particles; where the memory gate guards each partition start (an auto-tuned plan with several in flight) a partition is always staged, the gate then admitting the next one only while the free memory holds it; otherwise (a hand-set split) only while the free memory less 4 GB still holds the sub-grids, else it waits for its turn holding its thread. DTFE_MERGE_STAGE_GB=X caps the staged bytes at X GB instead, 0 = never stage. A partition whose sub-grids the memory cannot hold (under the gate: beside one more partition) is SPILLED instead: written to an unlinked file in '--scratch-dir', else in the system temporary folder, freed, and read back at its turn -- the merged grids stay byte-identical; DTFE_MERGE_SPILL=0 switches that off, DTFE_MERGE_SPILL=1 spills every staged partition. The run log's 'ordered merge:' line says how many were staged, how much memory they held and how many were spilled. The memory gate still applies; a partition waits for memory only while a LOWER-numbered one is in flight, so no wait can deadlock. At '--max-concurrent 1' the order is the index order anyway, and the auto-tuner's speed split of a small set always merges in order. Given explicitly, the index order also keeps the partition memory gate on under the auto-tuner's speed split of a small set (which merges in order and otherwise drops the gate).\n"
                     "  completion-order = \tadd each partition's grids into the result as soon as it finishes, instead of the default ordered merge. With '--max-concurrent' above 1 the float adds then follow the completion order, so two identical runs differ in the last bits (~1e-7 relative in float); it holds no staged sub-grids. '--resume' merges in index order whatever this says, and the auto-tuner's speed split of a small set always does.\n"
                     "  fixed-point = \tadd each partition's sums into the result AS SOON AS IT FINISHES, as exact integers, so that no partition parks in memory or spills to disk waiting for its turn and the merged grids are the same bytes at any --max-concurrent, thread count and completion order. In PS-DTFE's single-precision 3-D build this is THE WORD MERGE: the option switches the run-wide fixed-point units on (one unit per grid for the whole run, from the cell volume, the mean density and the particles' largest velocity component, as DTFE_PS_RUN_UNITS=1 does: 128-bit words on the GPU, a slower deposit), every pass deposits in them on the CPU and the GPU alike and hands its exact sums over unconverted -- per summed grid component and cell a 64-bit word with an exact sparse carry, the stream counts as integers --, the merge adds them as each partition finishes, and ONE close-out after the loop rounds every cell to float once and normalizes. A run without '--partition' (or with '--partition 1 1 1') given the option closes out its own pass's words the same way. So the merged sums do not depend on the split: a run whose partitions all deposit on the CPU, or all on the GPU, writes the same bytes at every '--partition' split, one domain included. A run that mixes the devices ('--gpu-share' below 1, the automatic share of 'auto' in performance or of 'mixed', a GPU pass that falls back to the CPU) merges exactly too, but which device deposits a partition follows the split, so its bytes stay split-dependent. Its grids differ from the default merge's at float rounding. Costs 8 bytes per summed component and cell of the full grids during the loop (4 per stream count, 16 per carried component) where the float grids take 4, and a partition holds its sums as 64-bit words until it is merged (the auto-tuner counts both). Refused with DTFE_GPU_FLOAT_MASS=1 or DTFE_GPU_FLOAT_MOMENTS=1 (float sums have no words), and when a grid's run-wide unit lies outside 2^-120 .. 2^120. DTFE_RUN_UNITS_LEGACY=1, and the 2-D build, keep the merge of before instead: each partition's grids, rounded to float by its pass, become the integers llrint(v * 2^K) in units of the merge's own, fixed before the first merge from global quantities (the mean cell mass, the cell volume, the particles' largest |velocity component|, ...; README: 'Fixed-point merge'), per summed component and cell a 64-bit word plus an 8-bit carry (9 bytes, an exact 72-bit sum), converted to Real once after the loop; its grids differ from the ordered merge's at about 1e-7 relative and still depend on the split, and a value that does not fit its unit (non-finite, or |v * 2^K| >= 2^63), or a possible overflow of a sum (the sum over the merged partitions of each one's largest |integer| reaching 2^71 - 2^63), stops the run with an error naming the accumulator: a wrapped cell could not be repaired. Either way the checkpoint ('--resume') holds the integer words, and a checkpoint of the other merge mode, of the other of these two merges or of other units is refused. Refused in the double build (int64 words cannot carry its 53-bit sums) and with '--grid-window'. The run log's 'fixed-point merge:' line gives the bytes (the merge of before: also per accumulator its unit and its headroom).\n"
                     "DEFAULT: index-order. '--resume' overrides completion-order (it merges in index order) but keeps fixed-point, whose checkpoint holds integer words. Only fixed-point changes a run without '--partition' (the word merge's one close-out). scripts/run_ps_dtfe.sh: PS_MERGE=index-order (its default, passed explicitly), completion-order, fixed-point.")
 #else
-            ("resume", po::bool_switch(&(this->psResume)), "standard DTFE, partitioned runs (PS-DTFE's '--resume', through the same code): continue a run that was killed, from its checkpoint. The partition loop saves the full grids of the partitions finished so far, and their list, in '<output>.runlog.checkpoint' (with '--scratch-dir': in the scratch directory, named from the whole output path) after a partition, unless the last save took more than 5% of the time since it; the folder is removed once the outputs are in place. '--resume' loads it, skips the partitions it lists and computes the rest; it refuses, naming the differing settings, when the command line (apart from --resume, --no-overlap, --verbose, --max-concurrent, --run-mode, --scratch-dir and --tessellation-cache; a deprecated spelling counts as its canonical name), the resolved cell average (exact or sampled) and gradient route (face or per-tetrahedron; both follow the flags, and DTFE_EXACT_AVERAGE and DTFE_FACE_GRADIENT can change them), the build or the binary itself (a rebuilt binary does not resume), the input files or the partition split differ. Without '--partition' the checkpoint's split is used. On the CPU the outputs are byte-identical to an uninterrupted run's at the same thread count ('--max-concurrent', OMP_NUM_THREADS: the threads split each partition into sub-boxes of their own, so another count moves the Monte-Carlo average's grids, the '_u' fields and the double build's, by float rounding where the padding is ample; the single build's exact '_a' grids are the same at any count, their sums being exact in one unit for the whole run); with '--gpu' too (its sums are exact; within float rounding under DTFE_GPU_FLOAT_GRIDS=1). scripts/run_dtfe.sh passes it when a checkpoint exists (DTFE_RESUME=0 starts over). DTFE_CHECKPOINT=0 writes no checkpoints; '--interlace' runs are not checkpointed. A '--sample-points' run is checkpointed too, as in PS-DTFE: each finished partition's point answers are saved once as 'points.<i>' beside the checkpoint, and the sample-point file (size + mtime) is part of the key, so a resumed plane is byte-identical to an uninterrupted one.")
+            ("resume", po::bool_switch(&(this->psResume)), "standard DTFE, partitioned runs (PS-DTFE's '--resume', through the same code): continue a run that was killed, from its checkpoint. The partition loop saves the full grids of the partitions finished so far, and their list, in '<output>.runlog.checkpoint' (with '--scratch-dir': in the scratch directory, named from the whole output path) after a partition, unless the last save took more than 5% of the time since it; the folder is removed once the outputs are in place. '--resume' loads it, skips the partitions it lists and computes the rest; it refuses, naming the differing settings, when the command line (apart from --resume, --no-overlap, --verbose, --max-concurrent, --run-mode, --scratch-dir and --tessellation-cache; a deprecated spelling counts as its canonical name), the resolved cell average (exact or sampled) and gradient route (face or per-tetrahedron; both follow the flags, and DTFE_EXACT_AVERAGE and DTFE_FACE_GRADIENT can change them), the resolved device (GPU or CPU: '--gpu', DTFE_GPU or the program's pick), the build or the binary itself (a rebuilt binary does not resume), the input files or the partition split differ. Without '--partition' the checkpoint's split is used. On the CPU the outputs are byte-identical to an uninterrupted run's at the same thread count ('--max-concurrent', OMP_NUM_THREADS: the threads split each partition into sub-boxes of their own, so another count moves the Monte-Carlo average's grids, the '_u' fields and the double build's, by float rounding where the padding is ample; the single build's exact '_a' grids are the same at any count, their sums being exact in one unit for the whole run); with '--gpu' too (its sums are exact; within float rounding under DTFE_GPU_FLOAT_GRIDS=1). scripts/run_dtfe.sh passes it when a checkpoint exists (DTFE_RESUME=0 starts over). DTFE_CHECKPOINT=0 writes no checkpoints; '--interlace' runs are not checkpointed. A '--sample-points' run is checkpointed too, as in PS-DTFE: each finished partition's point answers are saved once as 'points.<i>' beside the checkpoint, and the sample-point file (size + mtime) is part of the key, so a resumed plane is byte-identical to an uninterrupted one.")
 #endif
             ("partition-index", po::value<int>(&(this->partNo)), "choose to compute the density only for this partition number (from 0 to 'maximum partitions'-1). This options is usefull if you would like to compute the density for a large particle number on several different machines at the same time - need to run the program on each machine independently.")
-            ("tessellation-cache", po::value<std::string>(&(this->tessellationCacheDir)), "reuse the Delaunay tessellation across runs: after it is built (and its vertex densities computed) the whole tessellation is written to this directory, and any later run whose inputs are IDENTICAL loads it instead of rebuilding. Building the tessellation is the dominant fixed cost of a run -- measured 5.1 s triangulation + 2.1 s vertex density out of an 8.8 s run (81%) on 884736 particles -- so re-querying one snapshot with a different '--sample-points' set, grid or field selection gets much cheaper (CGAL's binary structure I/O restores the tessellation ~3.6x faster than re-inserting the points, and the vertex-density pass is skipped entirely). The identity of every input that can change the tessellation or its per-vertex payload (the input files' size and modification time, the box, region, padding, partition, sub-sampling and the compile-time configuration) is stored in the file and compared before it is used, so a stale cache can only ever be a MISS, never a wrong result -- a miss silently rebuilds, and '--verbose 3' names the value that differed. The file is named after that identity, NOT after the output, so a second run writing different outputs reuses it. A PARTITIONED phase-space run caches every partition separately -- one file each, keyed by the partition's own Lagrangian region, since 'partNo' is -1 for all of them. A partitioned STANDARD run caches every tessellation it builds: one file per thread sub-box of each partition (keyed by the sub-box and its partition's region), or one per partition under '--sample-points'; its split follows the '--grid', so another grid is another set of files. COSTS DISK: the file is compressed (deflate), which puts it at about 0.15 KB per tessellation vertex -- 225 MB for 1.5e6 vertices instead of 735 MB raw -- and the Lagrangian padding multiplies the particle count by ~4x. Reading is no slower than an uncompressed cache (the smaller read pays for the inflation); writing costs a couple of seconds more. The run refuses to write (with a warning, without failing) when the volume would not hold it. The directory must exist on a LOCAL, non-synced volume; iCloud paths are rejected.")
+            ("tessellation-cache", po::value<std::string>(&(this->tessellationCacheDir)), "reuse the Delaunay tessellation across runs: after it is built (and its vertex densities computed) the whole tessellation is written to this directory, and any later run whose inputs are IDENTICAL loads it instead of rebuilding. Building the tessellation is the dominant fixed cost of a run, so re-querying one snapshot with a different '--sample-points' set, grid or field selection gets much cheaper (CGAL's binary structure I/O restores the tessellation faster than re-inserting the points, and the vertex-density pass is skipped entirely). The identity of every input that can change the tessellation or its per-vertex payload (the input files' size and modification time, the box, region, padding, partition, sub-sampling and the compile-time configuration) is stored in the file and compared before it is used, so a stale cache can only ever be a MISS, never a wrong result -- a miss silently rebuilds, and '--verbose 3' names the value that differed. The file is named after that identity, NOT after the output, so a second run writing different outputs reuses it. A PARTITIONED phase-space run caches every partition separately -- one file each, keyed by the partition's own Lagrangian region, since 'partNo' is -1 for all of them. A partitioned STANDARD run caches every tessellation it builds: one file per thread sub-box of each partition (keyed by the sub-box and its partition's region), or one per partition under '--sample-points'; its split follows the '--grid', so another grid is another set of files. COSTS DISK: the file is compressed (deflate), which puts it at about 0.15 KB per tessellation vertex -- 225 MB for 1.5e6 vertices instead of 735 MB raw -- and the Lagrangian padding multiplies the particle count by ~4x. Reading is no slower than an uncompressed cache (the smaller read pays for the inflation); writing costs a little more. The run refuses to write (with a warning, without failing) when the volume would not hold it. The directory must exist on a LOCAL, non-synced volume; iCloud paths are rejected.")
             ;
     
     
@@ -613,18 +632,18 @@ void User_options::addOptions(po::options_description &allOptions,
             ("redshift-cone", po::value< std::vector<Real> >()->multitoken(), "specify to interpolate the fields on a redshift cone grid (i.e. on spherical coordinates). Must give 6 arguments in 3D (4 in 2D) which give 'r_min', 'r_max', 'theta_min', 'theta_max', 'psi_min' and 'psi_max' (where 'r' is the distance in Mpc and 'theta' and 'psi' the two angles expressed in degrees). For example '--redshift-cone 1 10 0 90 0 360' gives you a half a sphere shell." )
             ("cone-origin", po::value< std::vector<Real> >( &(this->originPosition) )->multitoken(), "specify the origin of the spherical coordinate system used in option '--redshift-cone'. It gives the x, y and z values of the origin point.")
 #ifdef PHASE_SPACE
-            ("grid-window", po::value< std::vector<Real> >()->multitoken(), "PS-DTFE only (2D and 3D builds): deposit, allocate and write ONLY the grid cells of the full '--grid' that lie inside the given box ('x0 x1 y0 y1 z0 z1' in the OUTPUT coordinates, i.e. Mpc after the '--mpc-unit' conversion; the box is snapped outward to cell edges). The tessellation is the full run's, periodic or not, with or without '--partition', and so is every tetrahedron's normalization, so the window run EQUALS the full run's window cells -- unlike '--box', which changes the grid. The sampled deposit counts every sub-sample of a tetrahedron straddling the window edge (over its whole bounding box) and deposits only the part inside: the full run's cells on the CPU (counts and masks bit for bit, the sums to the last fixed-point unit, a window pass taking the units of the tetrahedra that reach the window, as the GPU does), to float rounding on the GPU. The exact deposit ('--exact') clips ONLY the window's cells and normalizes each tetrahedron by its whole (analytic) weight, which equals the full run's sum over all its pieces to double rounding: the full run's cells to float rounding, at a cost that scales with the window, not with the grid -- the choice for a fine grid, e.g. the launcher's exact zoom (a 4096^3 virtual grid windowed to one slice). Not combinable with '--ps-linear-deposit'. The output grids hold the window's cells only (their header carries the window's box), so a fine look at one region of a large box costs the tessellation plus a small grid: a 4096^3 grid over a 100 Mpc box, windowed to 512^2 cells of one slice, holds 256k cells. With '--tessellation-cache' and '--partition', the cached partition tessellations are loaded instead of rebuilt, and every partition whose occupancy map (written beside its tessellation by a composite '--serve' or an earlier partitioned run) shows that its streams never reach the window is skipped outright -- the launcher's exact zoom of a 94-million-particle box then processes ~12 of 64 partitions. Not combinable with the T-web / V-web classes (they need the full periodic grid), '--region' or '--partition-index'.")
+            ("grid-window", po::value< std::vector<Real> >()->multitoken(), "PS-DTFE only (2D and 3D builds): deposit, allocate and write ONLY the grid cells of the full '--grid' that lie inside the given box ('x0 x1 y0 y1 z0 z1' in the OUTPUT coordinates, i.e. Mpc after the '--mpc-unit' conversion; the box is snapped outward to cell edges). The tessellation is the full run's, periodic or not, with or without '--partition', and so is every tetrahedron's normalization, so the window run EQUALS the full run's window cells -- unlike '--box', which changes the grid. The sampled deposit counts every sub-sample of a tetrahedron straddling the window edge (over its whole bounding box) and deposits only the part inside: the full run's cells on the CPU (counts and masks bit for bit, the sums to the last fixed-point unit, a window pass taking the units of the tetrahedra that reach the window, as the GPU does), to float rounding on the GPU. The exact deposit ('--exact') clips ONLY the window's cells and normalizes each tetrahedron by its whole (analytic) weight, which equals the full run's sum over all its pieces to double rounding: the full run's cells to float rounding, at a cost that scales with the window, not with the grid -- the choice for a fine grid, e.g. the launcher's exact zoom (a 4096^3 virtual grid windowed to one slice). The output grids hold the window's cells only (their header carries the window's box), so a fine look at one region of a large box costs the tessellation plus a small grid: a 4096^3 grid over a 100 Mpc box, windowed to 512^2 cells of one slice, holds 256k cells. With '--tessellation-cache' and '--partition', the cached partition tessellations are loaded instead of rebuilt, and every partition whose occupancy map (written beside its tessellation by a composite '--serve' or an earlier partitioned run) shows that its streams never reach the window is skipped outright -- the launcher's exact zoom of a 94-million-particle box then processes ~12 of 64 partitions. Not combinable with the T-web / V-web classes (they need the full periodic grid), '--region' or '--partition-index'.")
 #endif
             ;
     
     
     po::options_description pointOptions("Points and server");
     pointOptions.add_options()
-            ("sample-points", po::value<std::string>(&(this->psSamplePointsFile)), "evaluate the fields at arbitrary Eulerian points read from the given file, in ADDITION to the regular grid interpolation (pass a small '--grid', e.g. '-g 16', when only point values are wanted). PS-DTFE: the multi-stream phase-space fields, one stream per folded tetrahedron containing the point, deterministic under any '--partition' split. Point location is exact: a point on a shared face, edge or vertex (e.g. a particle position) is counted once per stream, by exact predicates with a symbolic tie-break. Standard DTFE: the plain Eulerian DTFE interpolant -- exactly one containing tetrahedron, '.pts_streams' becomes the 0/1 coverage flag, '.pts_velDisp' is identically 0, and with '--partition' each partition answers the points inside the tetrahedra whose Eulerian centroid lies in its sub-box: one triangulation per partition (no thread sub-boxes, so '--max-concurrent' has no effect), equal to a single triangulation to float rounding; '--partition-index' is refused. Point coordinates are in the box coordinate system (the same units as '--box', i.e. Mpc after the '--mpc-unit' conversion). Accepted formats, auto-detected: a text file with one 'x y z' triplet per line, or a raw binary file of float64 triplets (N x 3, row-major, native/little-endian, no header). Writes '<output>.pts_den' (float64, rho/rho_bar), '.pts_vel' (float64 x3, mean over streams: density-weighted, equal-volume under '--ps-volume-weighted'), '.pts_velDisp' (float64 x6 dispersion tensor, xx xy xz yy yz zz), '.pts_streams' (int32); all CPU-only (multi-threaded; DTFE_PTS_THREADS pins the count), double precision. For repeated queries without rebuilding see '--serve'.")
-            ("pts-den-grad", po::bool_switch(&(this->psPtsDenGrad)), "with '--sample-points', also write the spatial gradient of the total point density to '<output>.pts_denGrad' (float64 x3 per point, d(rho/rho_bar)/dx_i in 1/Mpc). PS-DTFE: the sum over the point's streams of each stream's constant linear 'dtfe' density-profile gradient; with '--ps-per-stream', additionally writes '<output>.pts_stream_dengrad' (float64 x3 per record, same ragged order as '.pts_stream_records'). The gradient always belongs to the 'dtfe' estimator: under '--ps-stream-density geometric' the per-stream density is piecewise constant (zero gradient), so the dtfe-profile gradient (well-defined from the vertex densities) is still what is written; hull cells with the constant volume-ratio density contribute 0. Standard DTFE: the containing tetrahedron's constant DTFE density gradient.")
-            ("pts-vel-grad", po::bool_switch(&(this->psPtsVelGrad)), "with '--sample-points', also write the velocity gradient of the point's multi-stream flow to '<output>.pts_velGrad' (float64 x9 per point, row-major [d*3+j] = d v_j / d x_d in velocity units per Mpc -- the TRANSPOSE of the '.velGrad' grid output, whose [j*3+d] = d v_j / d x_d). PS-DTFE: the density-weighted mean (the plain stream mean under '--ps-volume-weighted' with '--ps-point-conventions grid') over the point's streams of each stream's constant linear-velocity-profile gradient (the pointwise analogue of the grid deposit's own gradient, so the stream average of the gradients, as in the PS grids without the face gradient ('--per-tet-gradient'), not the gradient of the mean velocity; the weight is the same per-stream weight as for '.pts_vel'). Divergence, shear and vorticity follow algebraically from this tensor, so they need no files of their own. Standard DTFE: the containing tetrahedron's constant velocity gradient.")
-            ("pts-scalar", po::bool_switch(&(this->psPtsScalar)), "with '--sample-points' or '--serve', also interpolate the particles' SCALAR value at every point -- any per-particle quantity, read with '--scalar-dataset' (or a reader's own scalar, e.g. the gas temperature). PS-DTFE: each stream carries the linear interpolant of its tetrahedron's vertex values (exactly how the velocity is interpolated; CosmoDTFE's PhaseSpaceEstimator values), '<output>.pts_scalar' holds the density-weighted mean (the plain stream mean under '--ps-volume-weighted' with '--ps-point-conventions grid') over the point's streams and, with '--ps-per-stream', '<output>.pts_stream_scalar' every stream's own value (float64, same ragged order as '.pts_stream_records'). Standard DTFE: the plain linear DTFE interpolant of the scalar.")
-            ("serve", po::bool_switch(&(this->psServe)), "both binaries (2D and 3D builds; the handshake says which): build the tessellation ONCE, keep it in memory and answer point-evaluation requests over stdin/stdout until stdin closes -- the interactive mode behind the Python 'dtfelib.Estimator' (est(points) -> fields), so a notebook can query any set of points repeatedly without rebuilding. Every '--sample-points' output option applies to the answers ('--ps-per-stream', '--ps-per-stream-ids', '--pts-den-grad', '--pts-vel-grad', '--ps-caustics', '--ps-stream-density'); no grid or '.pts_*' file is written. Normal log messages go to stderr; stdout carries only the binary protocol (documented in ps_point_eval.cc). With '--partition' (or when the auto-tuner finds that one triangulation would not fit in memory) the server becomes a COMPOSITE of partition tessellations, the out-of-core analogue of CosmoDTFE's CompositeEstimator: each partition is built once (in parallel, '--max-concurrent'), a coarse map of the Eulerian buckets its tetrahedra cover is kept, and a request visits only the partitions whose map holds one of its points. With '--tessellation-cache' the partitions are written to disk and at most '--serve-resident' of them stay in memory (least recently used ones are dropped and reloaded on demand), so a box far larger than RAM can be queried interactively; a later session whose inputs are unchanged starts without building anything. Answers are bit-identical to '--sample-points' with the same '--partition' (PS-DTFE; the standard server splits on its own 64-per-axis grid and a batch run on its '--grid', so there they agree to float rounding); against an unpartitioned server the stream counts are identical (exact, partition-invariant counting) and the values agree to float rounding (a partition's periodic copies are rounded differently). The standard binary's partitions are Eulerian sub-boxes (a tetrahedron belongs to the one holding its centroid); on a NON-periodic box, points within a few tetrahedra of where the particles' convex hull meets a partition cut can differ slightly more. Cannot be combined with '--sample-points'.")
+            ("sample-points", po::value<std::string>(&(this->psSamplePointsFile)), "evaluate the fields at arbitrary Eulerian points read from the given file, in ADDITION to the regular grid interpolation (pass a small '--grid', e.g. '-g 16', when only point values are wanted). PS-DTFE: the multi-stream phase-space fields, one stream per folded tetrahedron containing the point, deterministic under any '--partition' split. Point location is exact: a point on a shared face, edge or vertex (e.g. a particle position) is counted once per stream, by exact predicates with a symbolic tie-break. Standard DTFE: the plain Eulerian DTFE interpolant -- exactly one containing tetrahedron, '.pts_streams' becomes the 0/1 coverage flag, '.pts_velDisp' is identically 0, and with '--partition' each partition answers the points inside the tetrahedra whose Eulerian centroid lies in its sub-box: one triangulation per partition (no thread sub-boxes, so '--max-concurrent' has no effect), equal to a single triangulation to float rounding; '--partition-index' is refused. Point coordinates are in the box coordinate system (the same units as '--box', i.e. Mpc after the '--mpc-unit' conversion). Accepted formats, auto-detected: a text file with one 'x y z' triplet per line, or a raw binary file of float64 triplets (N x 3, row-major, native/little-endian, no header). Writes '<output>.pts_den' (float64, rho/rho_bar), '.pts_vel' (float64 x3, the plain mean over the streams: equal shares, the grid's volume weighting at a point), '.pts_velDisp' (float64 x6 dispersion tensor, xx xy xz yy yz zz), '.pts_streams' (int32); all CPU-only (multi-threaded; DTFE_PTS_THREADS pins the count), double precision. For repeated queries without rebuilding see '--serve'.")
+            ("pts-den-grad", po::bool_switch(&(this->psPtsDenGrad)), "with '--sample-points', also write the spatial gradient of the total point density to '<output>.pts_denGrad' (float64 x3 per point, d(rho/rho_bar)/dx_i in 1/Mpc). PS-DTFE: the sum over the point's streams of each stream's constant linear 'dtfe' density-profile gradient; with '--ps-per-stream', additionally writes '<output>.pts_stream_dengrad' (float64 x3 per record, same ragged order as '.pts_stream_records'). Hull cells with the constant volume-ratio density contribute 0. Standard DTFE: the containing tetrahedron's constant DTFE density gradient.")
+            ("pts-vel-grad", po::bool_switch(&(this->psPtsVelGrad)), "with '--sample-points', also write the velocity gradient of the point's multi-stream flow to '<output>.pts_velGrad' (float64 x9 per point, row-major [d*3+j] = d v_j / d x_d in velocity units per Mpc -- the TRANSPOSE of the '.velGrad' grid output, whose [j*3+d] = d v_j / d x_d). PS-DTFE: the plain mean over the point's streams of each stream's constant linear-velocity-profile gradient (the pointwise analogue of the grid deposit's own gradient, so the stream average of the gradients, as in the PS grids without the face gradient ('--per-tet-gradient'), not the gradient of the mean velocity; the same equal shares as for '.pts_vel'). Divergence, shear and vorticity follow algebraically from this tensor, so they need no files of their own. Standard DTFE: the containing tetrahedron's constant velocity gradient.")
+            ("pts-scalar", po::bool_switch(&(this->psPtsScalar)), "with '--sample-points' or '--serve', also interpolate the particles' SCALAR value at every point -- any per-particle quantity, read with '--scalar-dataset' (or a reader's own scalar, e.g. the gas temperature). PS-DTFE: each stream carries the linear interpolant of its tetrahedron's vertex values (exactly how the velocity is interpolated; CosmoDTFE's PhaseSpaceEstimator values), '<output>.pts_scalar' holds the plain mean over the point's streams and, with '--ps-per-stream', '<output>.pts_stream_scalar' every stream's own value (float64, same ragged order as '.pts_stream_records'). Standard DTFE: the plain linear DTFE interpolant of the scalar.")
+            ("serve", po::bool_switch(&(this->psServe)), "both binaries (2D and 3D builds; the handshake says which): build the tessellation ONCE, keep it in memory and answer point-evaluation requests over stdin/stdout until stdin closes -- the interactive mode behind the Python 'dtfelib.Estimator' (est(points) -> fields), so a notebook can query any set of points repeatedly without rebuilding. Every '--sample-points' output option applies to the answers ('--ps-per-stream', '--ps-per-stream-ids', '--pts-den-grad', '--pts-vel-grad', '--ps-caustics'); no grid or '.pts_*' file is written. Normal log messages go to stderr; stdout carries only the binary protocol (documented in ps_point_eval.cc). With '--partition' (or when the auto-tuner finds that one triangulation would not fit in memory) the server becomes a COMPOSITE of partition tessellations, the out-of-core analogue of CosmoDTFE's CompositeEstimator: each partition is built once (in parallel, '--max-concurrent'), a coarse map of the Eulerian buckets its tetrahedra cover is kept, and a request visits only the partitions whose map holds one of its points. With '--tessellation-cache' the partitions are written to disk and at most '--serve-resident' of them stay in memory (least recently used ones are dropped and reloaded on demand), so a box far larger than RAM can be queried interactively; a later session whose inputs are unchanged starts without building anything. Answers are bit-identical to '--sample-points' with the same '--partition' (PS-DTFE; the standard server splits on its own 64-per-axis grid and a batch run on its '--grid', so there they agree to float rounding); against an unpartitioned server the stream counts are identical (exact, partition-invariant counting) and the values agree to float rounding (a partition's periodic copies are rounded differently). The standard binary's partitions are Eulerian sub-boxes (a tetrahedron belongs to the one holding its centroid); on a NON-periodic box, points within a few tetrahedra of where the particles' convex hull meets a partition cut can differ slightly more. Cannot be combined with '--sample-points'.")
 #ifdef PHASE_SPACE
             ("ps-per-stream", po::bool_switch(&(this->psPerStream)), "PS-DTFE only: with '--sample-points', additionally write each stream's own density and velocity per point in a ragged layout: '<output>.pts_stream_offsets' (uint64, N+1; point i owns records [off[i], off[i+1])) and '<output>.pts_stream_records' (float64 x4 per record: density, vx, vy, vz; sorted by density, descending).")
             ("ps-per-stream-ids", po::bool_switch(&(this->psPerStreamIds)), "PS-DTFE only: with '--sample-points', also write each stream's identity -- the ParticleIDs of the 4 Lagrangian vertices of its tetrahedron -- to '<output>.pts_stream_ids' (uint64 x4 per record, same ragged order as '.pts_stream_records'; each quadruple sorted ascending, so it is orientation-independent and identical under any '--partition' split). Implies '--ps-per-stream'. Needs an input reader that provides ParticleIDs (Gadget HDF5); otherwise the IDs are written as 0.")
@@ -637,7 +656,7 @@ void User_options::addOptions(po::options_description &allOptions,
     po::options_description phaseSpaceOptions("Phase space");
     phaseSpaceOptions.add_options()
             ("ps-caustics", po::bool_switch(&(this->psCaustics)), "PS-DTFE only (2D and 3D builds): flag fold-caustic grid cells during the grid deposit and write '<output>.caustic' (float32, same N^3 layout as '.streams'; 1 = the cell is overlapped by tetrahedra of BOTH orientations, 0 otherwise). The orientation of a stream is the sign of det(Ax), the parity of the Lagrangian->Eulerian map, which flips at every fold caustic -- so a cell containing both parities is crossed by a fold surface (the caustic skeleton of Feldbrugge & van de Weygaert). The two per-cell orientation bits are merged with a bitwise OR across '--partition' splits, making the output partition- and thread-order invariant (byte-identical for any split, per backend). Computed by both the CPU and GPU deposits (the GPU ORs the bits atomically, so its output is equally order-invariant; CPU-vs-GPU grids can differ only for cells whose float-vs-double determinant sign straddles the degeneracy cut, and in the double build in up to 1e-4 of the cells, where a sample lies within the float rounding of the double vertices). The negative-orientation bit is geometric: every cell a folded (det<0) tetrahedron overlaps, the exact test behind bit 1 of '.hidden_streams', so '.caustic' equals ('.streams' > 1 or '.hidden_streams' bit 1) and does not depend on '--subsamples' or the exact deposit. (A bit set only where a folded tetrahedron deposits a sample misses every fold thinner than the sampling: on TNG100-3-Dark at z = 1 it flags 21.0% of the cells instead of 33.6%; dtfelib's FieldSet.fold_mask() rebuilds the exact flag from grids written that way.) '<output>.causticClass' carries the same two bits plus the collapse multiplicity (bits 2-5), the umbilic indicator (bit 6) and with '--ps-caustic-cusps' bits 7-8; those are recorded at the deposited samples, so they depend on the sampling, a fold cell can show k = 0, and the cusp bits can differ between splits in a few cells. Point evaluation ('--sample-points') is unaffected by this flag.")
-            ("ps-caustic-cusps", po::bool_switch(&(this->psCausticCusps)), "PS-DTFE only, CPU deposit only (2D and 3D builds; 2D sets no swallowtail bit): with '--ps-caustics', additionally estimate the A3 (CUSP) indicator and report it as bit 7 of '.causticClass'. A fold is the surface where the critical eigenvalue lambda_c of the deformation tensor crosses zero; it is an ordinary A2 fold where lambda_c varies at first order along its own null direction, and an A3 cusp where that variation stops (grad(lambda_c) . v_c = 0). Because the deformation tensor is CONSTANT inside a tetrahedron, the gradient does not exist there and is estimated by least squares from the face neighbours -- so this is an INDICATOR at the tessellation's resolution, not a pointwise identification of the A3 stratum. The gradient is fitted over the tetrahedra sharing a VERTEX with each near-fold tetrahedron, DEDUPLICATED and cut to the 64 nearest (the raw ring lists a face neighbour once per shared vertex, and those repeats would both re-weight the fit and fill its size cap, truncating the gather), not just the four sharing a face: four samples barely determine a 3-D gradient, and when they cluster the transverse fit noise reads as tangency. MEASURED on the 1-D Zel'dovich wave, whose caustic is two parallel planes: at A*k = 1.8, which has NO cusps anywhere, the wide stencil flags 0.01% of the fold cells (a four-neighbour stencil flags 7%); at A*k = 1.0, where the fold is exactly tangent (lambda_c = 1 + cos(kq) is stationary at kq = pi), it lights up the tangency plane. OFF by default because the wider stencil costs roughly 1.8x the deposit's caustic pass. The SAME stencil also yields the A4 (SWALLOWTAIL) indicator in bit 8, so this one flag emits both: A4 additionally requires the SECOND directional derivative to vanish, which is tested by fitting a cubic along the null direction and demanding that the expansion of lambda_c start at cubic order. MEASURED on waves with known strata: an exact A4 lights 74.5% of the cusp cells against 0.5% for a pure A3 and 0% for a generic fold -- a factor ~146, so bit 8 RANKS candidates rather than certifying them. Note A4 is codimension 3, i.e. its points are ISOLATED and generically inside no tetrahedron, so bit 8 marks proximity to a swallowtail along the cusp curve, over a band whose width is a fixed fraction of the stencil radius. Bit 8 is NOT a subset of bit 7: near a true swallowtail lambda_c is cubic along the null direction and bit 7's linear fit reads that as a non-zero slope, so it stays off there.")
+            ("ps-caustic-cusps", po::bool_switch(&(this->psCausticCusps)), "PS-DTFE only, CPU deposit only (2D and 3D builds; 2D sets no swallowtail bit): with '--ps-caustics', additionally estimate the A3 (CUSP) indicator and report it as bit 7 of '.causticClass'. A fold is the surface where the critical eigenvalue lambda_c of the deformation tensor crosses zero; it is an ordinary A2 fold where lambda_c varies at first order along its own null direction, and an A3 cusp where that variation stops (grad(lambda_c) . v_c = 0). Because the deformation tensor is CONSTANT inside a tetrahedron, the gradient does not exist there and is estimated by least squares from the face neighbours -- so this is an INDICATOR at the tessellation's resolution, not a pointwise identification of the A3 stratum. The gradient is fitted over the tetrahedra sharing a VERTEX with each near-fold tetrahedron, DEDUPLICATED and cut to the 64 nearest (the raw ring lists a face neighbour once per shared vertex, and those repeats would both re-weight the fit and fill its size cap, truncating the gather), not just the four sharing a face: four samples barely determine a 3-D gradient, and when they cluster the transverse fit noise reads as tangency. MEASURED on the 1-D Zel'dovich wave, whose caustic is two parallel planes: at A*k = 1.8, which has NO cusps anywhere, the wide stencil flags 0.01% of the fold cells (a four-neighbour stencil flags 7%); at A*k = 1.0, where the fold is exactly tangent (lambda_c = 1 + cos(kq) is stationary at kq = pi), it lights up the tangency plane. OFF by default because the wider stencil makes the deposit's caustic pass slower. The SAME stencil also yields the A4 (SWALLOWTAIL) indicator in bit 8, so this one flag emits both: A4 additionally requires the SECOND directional derivative to vanish, which is tested by fitting a cubic along the null direction and demanding that the expansion of lambda_c start at cubic order. MEASURED on waves with known strata: an exact A4 lights 74.5% of the cusp cells against 0.5% for a pure A3 and 0% for a generic fold -- a factor ~146, so bit 8 RANKS candidates rather than certifying them. Note A4 is codimension 3, i.e. its points are ISOLATED and generically inside no tetrahedron, so bit 8 marks proximity to a swallowtail along the cusp curve, over a band whose width is a fixed fraction of the stencil radius. Bit 8 is NOT a subset of bit 7: near a true swallowtail lambda_c is cubic along the null direction and bit 7's linear fit reads that as a non-zero slope, so it stays off there.")
             ("ps-halo-release", po::value<Real>(&(this->psHaloRelease)), "PS-DTFE only: release halo-interior streams from the grid deposit's bbox rasterization. A tetrahedron compressed beyond the given threshold D -- geometric stream density rho_geo = rho_bar*V_lag/V_eul > D, in rho/rho_bar units -- is deposited MONOLITHICALLY at its Eulerian centroid cell (the same mass-conserving fallback used for sub-sample-spacing tetrahedra), with its velocity/dispersion moments carrying the centroid-evaluated velocity. Rationale (Stuecker et al. 2021, arXiv:2109.09760): inside virialized halos the dark-matter sheet is mixed, fold counts explode (millions of streams per cell) and the sheet estimate is not converged anyway -- releasing those tetrahedra cuts the dominant tet-cell overlap cost while conserving mass EXACTLY and leaving single-stream regions (void interiors) bit-identical. Applies to the CPU and GPU deposits (identical kept/released classification, double-precision |det Lag| > D*|det Ax| in both). Point evaluation ('--sample-points') is NOT affected by this flag. Suggested range 100-1000; see the README for measured speed/accuracy trade-offs.")
             ("ps-alpha-shape", po::value<Real>(&(this->psAlphaShape)), "PS-DTFE only, NON-periodic runs: keep only the Lagrangian tetrahedra whose circumradius is at most the given number of mean particle spacings (mean spacing = (V_lagBox/N)^(1/3)) -- the cloud's ALPHA SHAPE instead of its convex hull. Default 3. Interior tetrahedra of lattice-like initial conditions stay below ~0.9 spacings (jittered lattices and TNG100-3 alike), so the cut removes only the boundary: the flat slivers on the hull, which join particles up to a whole cloud face apart and whose stretched Eulerian images put spurious mass and streams across the region, and the tetrahedra that bridge concavities (e.g. particles missing from a cut region). It also makes '--partition' runs agree with a single triangulation: the hull of a nearly flat face is a global object that each partition builds differently, while every tetrahedron within the cut is local (the partitions are padded to at least 4 cuts). Costs the boundary layer beyond the cut (about 0.5% of an isolated 24^3 clump's mass). 0 = keep the whole convex hull (partitioned runs then differ at the hull). Periodic runs have no hull and ignore it.")
             ;
@@ -669,44 +688,41 @@ void User_options::addOptions(po::options_description &allOptions,
     po::options_description developerOptions("Developer options (for tests and comparisons; the two modes set them)");
     developerOptions.add_options()
 #ifdef PHASE_SPACE
-            ("subsamples", po::value<int>(&(this->psAvgSubsamples))->default_value(1), "PS-DTFE: linear sub-sample count nSub (per axis) for the volume-averaged ('_a') fields of the SAMPLED deposit ('--sampled'). Giving it without '--exact' selects the sampled deposit. The exact deposit ('--exact', the default for '_a' fields and the reference) clips instead: it reads the count only for a tetrahedron too thin to clip (sampled at that count) and a partition's sub-grid ring in the '_a' pass, and for the run-wide units' share cap -- 3 when none is given; a given count is kept. A cell's sub-points lie on a regular nSub^3 sub-grid (nSub^2 in a 2D build), at (k + 0.5)/nSub of the cell along each axis; every tetrahedron shares its mass among the sub-points that lie inside it (in equal shares; by the linear density profile under '--ps-linear-deposit'), and one that holds none puts its whole mass in the cell of its centroid, so the mass is conserved at any count. 1 (the default) = ONE point per cell, at its centre -- the deposit a sampled run's unaveraged grids get: quick, with noisy per-cell values, so smooth the grids before use (void catalogues at the usual smoothing come out nearly the same as with the exact deposit; docs/cleanup-plan.md P14). More points per cell give a smoother cell average and take more time.")
+            ("subsamples", po::value<int>(&(this->psAvgSubsamples))->default_value(1), "PS-DTFE: linear sub-sample count nSub (per axis) for the volume-averaged ('_a') fields of the SAMPLED deposit ('--sampled'). Giving it without '--exact' selects the sampled deposit. The exact deposit ('--exact', the default for '_a' fields and the reference) clips instead: it reads the count only for a tetrahedron too thin to clip (sampled at that count) and a partition's sub-grid ring in the '_a' pass, and for the run-wide units' share cap -- 3 when none is given; a given count is kept. A cell's sub-points lie on a regular nSub^3 sub-grid (nSub^2 in a 2D build), at (k + 0.5)/nSub of the cell along each axis; every tetrahedron shares its mass among the sub-points that lie inside it (in equal shares), and one that holds none puts its whole mass in the cell of its centroid, so the mass is conserved at any count. 1 (the default) = ONE point per cell, at its centre -- the deposit a sampled run's unaveraged grids get: quick, with noisy per-cell values, so smooth the grids before use (void catalogues at the usual smoothing come out nearly the same as with the exact deposit; docs/cleanup-plan.md P14). More points per cell give a smoother cell average and take more time.")
 #else
             ("subsamples", po::value<int>(), "standard DTFE: k sampling points per axis, k^3 per grid cell (k^2 in 2D), when the SAMPLED volume average ('--sampled') averages the fields inside each grid cell (e.g. '--subsamples 3': 27 points; the same unit as PS-DTFE's '--subsamples'). Giving it (or the deprecated '-s' total) without '--exact' selects the sampled average; beside '--exact' it is ignored. Method 2 takes k^3 random points, method 3 a regular k^3 grid, method 1 an average of k^3 per grid cell. DEFAULT if not given:\n"
                     "  1st method: \tan average of 100 sample points per grid cell.\n"
                     "  2nd method: \t20 random points per grid cell.\n"
                     "  3rd method: \t27 points per grid cell (k = 3).")
 #endif
-            ("face-gradient", po::bool_switch(&(this->faceGradient)), "both binaries (3D): compute the volume-averaged velocity gradient ('gradient_a' and the 'divergence_a', 'shear_a', 'vorticity_a' and 'vweb_a' built on it) from EXACT FACE INTEGRALS of the interpolant: by Gauss, (1/V) times the integral of v n over a grid cell's six faces is the cell average of grad v. Every grid plane's section through every tetrahedron is clipped to the face squares and integrated exactly (src/CGAL_triangulation/face_sweep.h; docs/cleanup-plan.md P10). THE DEFAULT of both binaries wherever it applies (docs/cleanup-plan.md D13; standard DTFE since 2026-11-09, PS-DTFE since 2026-11-11): '--per-tet-gradient' or DTFE_FACE_GRADIENT=0 keep the deposit's own gradient, this flag or DTFE_FACE_GRADIENT=1 ask for the face route and are refused where it cannot run, and a run where the default does not apply keeps the deposit's own gradient and says why in its header's 'velocity gradient' line. STANDARD DTFE: Its interpolant is linear in each tetrahedron and continuous across them, so this is the per-tetrahedron gradient's exact cell average, the value '--exact' gives, whatever the deposit (Monte Carlo, exact, GPU): the same grids for every deposit and device, formed in double (the deposit's gradient is float32 on the GPU: at TNG100 z = 0 and 512^3 the two differ by 5e-7 of the gradient rms per sub-domain, in 294 of 134 M cells by more than 1e-4), the same definition PS-DTFE's mean-flow gradient uses, and the fluxes close cell by cell. DTFE_FACE_CHECK=1 compares the two routes and prints one 'FACE-CHECK' line per sub-domain. Costs about a tenth of a GPU run's wall; 3D only (the 2D build keeps the deposit's gradient). PS-DTFE (where the run has the exact deposit, '--exact', the default for '_a' fields, '--ps-volume-weighted', the drivers' and the launcher's setting, and no '--ps-halo-release'; the face sums are formed on the CPU, beside the CPU deposit or, since 2026-11-09, the GPU deposit): the gradient of the volume-weighted MEAN velocity of the streams, the quantity standard DTFE stores, with the jumps at the caustics entering as exact flux differences -- instead of the stream average of each stream's own gradient, which is then written beside it: its divergence as '.a_velDivStreams', and for each of 'gradient_a', 'shear_a' and 'vorticity_a' asked its gradient, shear and vorticity as '.a_velGradStreams', '.a_velShearStreams' and '.a_velVortStreams' (the bytes a '--per-tet-gradient' run writes under the plain names; docs/cleanup-plan.md D12). Costs one more walk over the tetrahedra that cross a grid plane and 30 more numbers per cell in the merged grids, which the auto-tuner books (TNG100-3-Dark z = 0 at 512^3 with 4.2 M evaluation points, 2026-11-09: 1454 s against 1156 s on the GPU, 1737 s against 1133 s on the CPU).")
+            ("face-gradient", po::bool_switch(&(this->faceGradient)), "both binaries (3D): compute the volume-averaged velocity gradient ('gradient_a' and the 'divergence_a', 'shear_a', 'vorticity_a' and 'vweb_a' built on it) from EXACT FACE INTEGRALS of the interpolant: by Gauss, (1/V) times the integral of v n over a grid cell's six faces is the cell average of grad v. Every grid plane's section through every tetrahedron is clipped to the face squares and integrated exactly (src/CGAL_triangulation/face_sweep.h; docs/cleanup-plan.md P10). THE DEFAULT of both binaries wherever it applies (docs/cleanup-plan.md D13): '--per-tet-gradient' or DTFE_FACE_GRADIENT=0 keep the deposit's own gradient, this flag or DTFE_FACE_GRADIENT=1 ask for the face route and are refused where it cannot run, and a run where the default does not apply keeps the deposit's own gradient and says why in its header's 'velocity gradient' line. STANDARD DTFE: Its interpolant is linear in each tetrahedron and continuous across them, so this is the per-tetrahedron gradient's exact cell average, the value '--exact' gives, whatever the deposit (Monte Carlo, exact, GPU): the same grids for every deposit and device, formed in double (the deposit's gradient is float32 on the GPU: at TNG100 z = 0 and 512^3 the two differ by 5e-7 of the gradient rms per sub-domain, in 294 of 134 M cells by more than 1e-4), the same definition PS-DTFE's mean-flow gradient uses, and the fluxes close cell by cell. DTFE_FACE_CHECK=1 compares the two routes and prints one 'FACE-CHECK' line per sub-domain. 3D only (the 2D build keeps the deposit's gradient). PS-DTFE (where the run has the exact deposit, '--exact', the default for '_a' fields, and no '--ps-halo-release'; the face sums are formed on the CPU, beside the CPU deposit or the GPU deposit): the gradient of the volume-weighted MEAN velocity of the streams, the quantity standard DTFE stores, with the jumps at the caustics entering as exact flux differences -- instead of the stream average of each stream's own gradient, which is then written beside it: its divergence as '.a_velDivStreams', and for each of 'gradient_a', 'shear_a' and 'vorticity_a' asked its gradient, shear and vorticity as '.a_velGradStreams', '.a_velShearStreams' and '.a_velVortStreams' (the bytes a '--per-tet-gradient' run writes under the plain names; docs/cleanup-plan.md D12). Costs one more walk over the tetrahedra that cross a grid plane and 30 more numbers per cell in the merged grids, which the auto-tuner books.")
 #ifdef PHASE_SPACE
             ("per-tet-gradient", po::bool_switch(&(this->perTetGradient)),
              "PS-DTFE: the velocity gradient and the fields built on it (divergence, shear, vorticity, V-web) as the "
-             "stream average of each stream's own gradient -- the route of every PS-DTFE grid made before 2026-11-11 "
+             "stream average of each stream's own gradient -- the route of the older PS-DTFE grids made "
              "without '--face-gradient' -- instead of the face gradient of the volume-weighted MEAN velocity, the "
-             "default since then wherever it applies (the exact deposit, '--ps-volume-weighted', no "
+             "default wherever it applies (the exact deposit, no "
              "'--ps-halo-release', 3D; docs/cleanup-plan.md D13). Elsewhere a run takes this route by itself, and its "
              "header's 'velocity gradient' line says why. DTFE_FACE_GRADIENT=0 in the environment is the same switch; "
              "the two flags exclude each other.")
 #else
-            ("per-tet-gradient", po::bool_switch(&(this->perTetGradient)), "standard DTFE (3D): the velocity gradient and the fields built on it (divergence, shear, vorticity, V-web) from each tetrahedron's own gradient added up by the deposit -- the route that was the default before 2026-11-09 -- instead of the exact face integrals ('--face-gradient', now the default; docs/cleanup-plan.md D13). The deposit's gradient is float32 on the GPU and differs from the face value by 5e-7 of the gradient rms per sub-domain at 512^3 (294 of 134 M cells by more than 1e-4); it is what the production grids made before 2026-11-09 hold, and the 2D build's only route. DTFE_FACE_GRADIENT=0 in the environment is the same switch (tests/dev/bytecmp.sh pins it, so its reference set keeps comparing); the two flags exclude each other.")
+            ("per-tet-gradient", po::bool_switch(&(this->perTetGradient)), "standard DTFE (3D): the velocity gradient and the fields built on it (divergence, shear, vorticity, V-web) from each tetrahedron's own gradient added up by the deposit, instead of the exact face integrals ('--face-gradient', the default; docs/cleanup-plan.md D13). The deposit's gradient is float32 on the GPU and differs from the face value by 5e-7 of the gradient rms per sub-domain at 512^3 (294 of 134 M cells by more than 1e-4); the older production grids hold it, and it is the 2D build's only route. DTFE_FACE_GRADIENT=0 in the environment is the same switch (tests/dev/bytecmp.sh pins it, so its reference set keeps comparing); the two flags exclude each other.")
 #endif
 #ifdef PHASE_SPACE
             ("no-overlap", po::bool_switch(&(this->psNoOverlap)), "PS-DTFE, partitioned GPU runs at '--max-concurrent 1': switch off the look-ahead that builds the NEXT partition's tessellation (particle selection, Delaunay triangulation, vertex densities) on a CPU thread while the current one deposits on the GPU. The look-ahead changes no output byte (each tessellation is built exactly as without it and the merge stays in index order); it holds one more partition's tessellation in memory, which the memory gate and the auto-tuner count, and it is skipped for a partition when the free memory cannot hold it. (Standard DTFE's '--no-overlap' does the same for its GPU interpolation.)")
 #else
             ("no-overlap", po::bool_switch(&(this->stdNoOverlap)), "standard DTFE, partitioned runs with '--gpu' (the same switch as PS-DTFE's): switch off the look-ahead that prepares the NEXT partition (its particle selection, its thread sub-boxes, their Delaunay triangulations and vertex densities, or their loads from '--tessellation-cache') on CPU threads while the current partition's volume-averaged fields are computed on the GPU. The look-ahead changes no output byte (each sub-box tessellation is built exactly as without it, and every partition still fills its own part of the grids in turn); it holds the next partition's tessellations in memory, which the auto-tuner counts, and it is skipped for a partition when the free memory, less 4 GB, cannot hold them. DTFE_OVERLAP=0 switches it off as well, DTFE_OVERLAP=1 forces it on a CPU run too (the tests' byte-identity check).")
 #endif
-            ("parallel-triangulation", po::bool_switch(&(this->parallelTriangulationForced)), "both binaries, builds with the tbb library (TBB=auto/1; the standard binaries since 2026-11-09): FORCE the parallel insert of the particles into the Delaunay triangulation, whatever the tessellation's size. THE DEFAULT RULE (docs/cleanup-plan.md P11.3, both binaries since 2026-11-09): the parallel insert runs for a tessellation of at least DTFE_TRIANGULATION_MIN_POINTS points (1000000) when more than one core is free for it -- the performance cores (at most six; DTFE_TRIANGULATION_THREADS=N sets the count and also forces the insert) are divided among the tessellations built at once (a partition loop's concurrency, the standard sub-domain team), so with every core busy the insert stays sequential and a run with few tessellations at once gains: TNG100-3-Dark z=0 at 512^3 with one partition in flight triangulated 3.1x faster (675 s -> 218 s summed over 27 partitions) at +4.4 GB per partition in flight (the auto-tuner budgets it); below the threshold the sequential insert is as fast or faster (the demo's 0.26M clustered points built 4.5x slower in parallel). The parallel insert's vertex and cell order differ run to run, so what is summed in that order moves at rounding between two identical runs: the standard Monte-Carlo average's CPU float sums, the point sums (~1e-15), and the double builds' CPU sums (the exact average, the face pass, the vertex densities); unchanged: in the single build, standard DTFE's exact '_a' grids on either device, its face pass and its vertex densities (integer sums in one unit for the whole run), and every grid of the single-precision PS-DTFE, except under '--ps-linear-deposit' (which reads the vertex densities), whose cells are renumbered in a canonical vertex order before any use (docs/cleanup-plan.md D19; DTFE_PS_VERTEX_ORDER_LEGACY=1 keeps CGAL's numbering, under which its velocity moments move by 4e-7 of the rms in 5% of the values). '--sequential-triangulation' keeps the bit-reproducible insert.")
-            ("sequential-triangulation", po::bool_switch(&(this->sequentialTriangulation)), "both binaries: insert the particles one by one, in spatial-sort order -- bit-reproducible run to run, both binaries' only insert before 2026-11-09 -- instead of the default rule (the parallel insert for tessellations of at least DTFE_TRIANGULATION_MIN_POINTS points where cores are free; see '--parallel-triangulation'). DTFE_TRIANGULATION_THREADS=1 is the same switch.")
+            ("parallel-triangulation", po::bool_switch(&(this->parallelTriangulationForced)), "both binaries, builds with the tbb library (TBB=auto/1): FORCE the parallel insert of the particles into the Delaunay triangulation, whatever the tessellation's size. THE DEFAULT RULE (docs/cleanup-plan.md P11.3): the parallel insert runs for a tessellation of at least DTFE_TRIANGULATION_MIN_POINTS points (1000000) when more than one core is free for it -- the performance cores (at most six; DTFE_TRIANGULATION_THREADS=N sets the count and also forces the insert) are divided among the tessellations built at once (a partition loop's concurrency, the standard sub-domain team), so with every core busy the insert stays sequential and a run with few tessellations at once gains. The parallel insert holds about 4.4 GB more per partition in flight on TNG100-3-Dark z = 0 at 512^3 (the auto-tuner budgets it); below the threshold the sequential insert is no slower. The parallel insert's vertex and cell order differ run to run, so what is summed in that order moves at rounding between two identical runs: the standard Monte-Carlo average's CPU float sums, the point sums (~1e-15), and the double builds' CPU sums (the exact average, the face pass, the vertex densities); unchanged: in the single build, standard DTFE's exact '_a' grids on either device, its face pass and its vertex densities (integer sums in one unit for the whole run), and every grid of the single-precision PS-DTFE, whose cells are renumbered in a canonical vertex order before any use (docs/cleanup-plan.md D19; DTFE_PS_VERTEX_ORDER_LEGACY=1 keeps CGAL's numbering, under which its velocity moments move by 4e-7 of the rms in 5% of the values). '--sequential-triangulation' keeps the bit-reproducible insert.")
+            ("sequential-triangulation", po::bool_switch(&(this->sequentialTriangulation)), "both binaries: insert the particles one by one, in spatial-sort order -- bit-reproducible run to run -- instead of the default rule (the parallel insert for tessellations of at least DTFE_TRIANGULATION_MIN_POINTS points where cores are free; see '--parallel-triangulation'). DTFE_TRIANGULATION_THREADS=1 is the same switch.")
             ("serve-progress", po::bool_switch(&(this->psServeProgress)), "with '--serve': write a plain progress line to stderr for every partition the server builds or loads ('[partitions k/N] partition p: built|loaded|cached, V vertices, T s'), for every partition a request visits ('[request k/P] partition p: in memory|loading from the cache') and at the end of every request ('[request done] N points, P of M partitions, L loaded from the cache in T s, T s in all'), whatever '--verbose' says. The launcher's progress bar and zoom timings read them; the protocol on stdout is unchanged.")
             ("serve-resident", po::value<int>(&(this->serveResident))->default_value(0), "with '--serve --partition --tessellation-cache': the maximum number of partition tessellations held in memory at once; the others live in the cache and are reloaded when a request needs them (least recently used first out). 0 (default) = as many as fit in the auto-tune memory budget, at least 1, counting each tessellation (~666 B/vertex) and the cell indexes built (one is built only when it fits). Without '--tessellation-cache' every partition stays resident.")
 #ifdef TEST_PADDING
             ("no-padding-test", "do not test for the efficiency of the padding when computing the Delaunay tessellation. The default is to use dummy particles positioned at the boundary of the extended padded box to test if the Delaunay tessellation fully covers the region of interest (i.e. the unpadded box).")
 #endif
 #ifdef PHASE_SPACE
-            ("gpu-share", po::value<std::string>(), "PS-DTFE, a partitioned GPU run's exact deposit: the share of the partitions deposited on the GPU, the others on the free CPU cores at the same time (chosen by partition index alone, so a rerun repeats it). 1, the default: every partition on the GPU. auto: the run mode's share (performance from its thread count, 0.6 on a 10-core M1 Max, DTFE_GPU_SHARE_RHO tunes the model; gentle and balanced 1). mixed: that model in every run mode, from the mode's threads (balanced 0.75, gentle 0.85 on an M1 Max). A mixed run's grids differ from an all-GPU or all-CPU run at ~1e-6 of their rms, and the mass stays exact. The resolved share is in the checkpoint key; '--resume' with auto or mixed keeps the checkpoint's. It is ignored, with a note for a number, without '--gpu', for the sampled deposit, in a CPU-only build and for one domain.")
-            ("ps-linear-deposit", po::bool_switch(&(this->psLinearDeposit)),"PS-DTFE only: weight each tetrahedron's grid deposit by the DTFE-interpolated LINEAR density profile inside the tetrahedron instead of spreading its mass uniformly over the interior sub-samples. The per-sample weights are RENORMALIZED per tetrahedron so the deposited total still equals the tetrahedron's mass exactly -- mass conservation is unchanged (a deposit that does not conserve each tetrahedron's mass draws square artefacts at caustics). Smoother sub-tetrahedron structure at the cost of reading the vertex densities during the deposit; works with the CPU and all GPU deposits.")
-            ("ps-stream-density", po::value<std::string>()->default_value("linear"), "PS-DTFE only: per-stream density estimator for '--sample-points'. 'linear' (default; 'dtfe' is its deprecated name) = linear interpolation of the Lagrangian-vertex DTFE densities inside each stream's tetrahedron (the PhaseSpaceDTFE class of the reference implementation, github.com/jfeldbrugge/PS-DTFE, without '--ps-vertex-mass' or under '--ps-point-conventions legacy'); 'geometric' = constant per-tetrahedron density m_tet/V_eul = rho_bar*V_lag/V_eul (the density whose mass-conserving rendering the grid deposit produces). The selected estimator also weights the per-point mean velocity and dispersion (only the dispersion under '--ps-volume-weighted' with '--ps-point-conventions grid'). Under '--ps-point-conventions grid' (the default) both follow '--ps-vertex-mass' (the grid's tetrahedron masses) and '--ps-volume-weighted' (equal-volume stream means for the velocity, its gradient and scalars); '--ps-point-conventions legacy' keeps rho_bar*V_lag and density weighting, which on TNG100-3-Dark at z = 20 gives a plane 0.81-0.82 times the grid's contrast (rms 0.211 against 0.280) and a 2-4x smaller multi-stream velocity divergence.")
-            ("ps-point-conventions", po::value<std::string>()->default_value("grid"), "PS-DTFE only: the conventions of '--sample-points' and '--serve'. 'grid' (default) = the run's grid conventions. With '--ps-vertex-mass' both per-stream density estimators carry the grid deposit's tetrahedron masses (sum over the vertices of particle mass / number of depositing tetrahedra at the vertex): each vertex gets c = (the grid's mass of its tetrahedra) / (rho_bar times their Lagrangian volume), the Lagrangian density of those masses; 'dtfe' multiplies the vertex densities by c (giving the grid's mass around the vertex over its Eulerian volume), 'geometric' multiplies V_lag/V_eul of the tetrahedron by the mean c of its vertices (which conserves the grid's mass exactly). Both remove the evolved-IC bias as the grids do; the grid's own per-tetrahedron density is not used at points, because on near-lattice initial conditions it puts a normal mass into near-flat slivers that points almost never hit (a 64^3 point set then averages 0.89). With '--ps-volume-weighted' the per-point velocity, velocity gradient ('--pts-vel-grad') and scalar ('--pts-scalar') are the plain mean over the point's streams (a point lies in every one of its streams: equal volume shares), and the dispersion stays mass-weighted about the mass-weighted mean, as in the grids. Without those two options 'grid' changes nothing. 'legacy' = rho_bar*V_lag masses and density-weighted stream means, whatever the grid options (the reference implementation's PhaseSpaceDTFE). Measured on a synthetic box with initial positions displaced like TNG's at z = 20 (D(z_ic)/D(z) = 0.16, tests/ps_point_conventions_check.sh): a slab of points against the grid's cells (exact deposit) has density-contrast slope 0.97-0.99 with 'grid' and 0.77-0.79 with 'legacy'; on a uniform near-lattice box the 'grid' points carry a noise of 0.04-0.05 (rms of rho/rho_bar), below the vertex-share grid's own 0.056 per cell.")
-            ("ps-lagrangian-padding", po::value<Real>(&(this->psLagPadding)), "PS-DTFE only, '--partition' runs: pad each Lagrangian partition by this many mean particle spacings (and at least 4.2 '--ps-alpha-shape' cuts) instead of the Eulerian '--padding' fraction, which is floored at 0.3 of a partition and makes each TNG partition triangulate 7-9x the particles it owns. A partition's owned tetrahedra, their vertex densities and the '--ps-vertex-mass' degrees reach at most ~6 circumradii (<= 0.9 spacings on lattice-like initial conditions, at every redshift: the tessellation is Lagrangian), so 8 is a safe margin. Default 8 (6x faster and 3.5x less memory than the Eulerian rule on a 4.1M-particle test; the degeneracy cut does not depend on CGAL's vertex labelling, so the grids equal the Eulerian rule's to float rounding, ~3e-15 in the double build). 0 = the Eulerian rule (it also reuses tessellation caches written under that rule).")
+            ("gpu-share", po::value<std::string>(), "PS-DTFE, a partitioned GPU run's exact deposit: the share of the partitions deposited on the GPU, the others on the free CPU cores at the same time (chosen by partition index alone, so a rerun repeats it). 1, the default: every partition on the GPU. auto: the run mode's share (performance from its thread count; DTFE_GPU_SHARE_RHO tunes the model; gentle and balanced 1). mixed: that model in every run mode, from the mode's threads. A mixed run's grids differ from an all-GPU or all-CPU run at ~1e-6 of their rms, and the mass stays exact. The resolved share is in the checkpoint key; '--resume' with auto or mixed keeps the checkpoint's. It is ignored, with a note for a number, on a run on the CPU, for the sampled deposit, in a CPU-only build and for one domain.")
+            ("ps-lagrangian-padding", po::value<Real>(&(this->psLagPadding)), "PS-DTFE only, '--partition' runs: pad each Lagrangian partition by this many mean particle spacings (and at least 4.2 '--ps-alpha-shape' cuts) instead of the Eulerian '--padding' fraction, which is floored at 0.3 of a partition and makes each TNG partition triangulate 7-9x the particles it owns. A partition's owned tetrahedra, their vertex densities and the '--ps-vertex-mass' degrees reach at most ~6 circumradii (<= 0.9 spacings on lattice-like initial conditions, at every redshift: the tessellation is Lagrangian), so 8 is a safe margin. Default 8 (far fewer particles per TNG partition than the Eulerian rule; the degeneracy cut does not depend on CGAL's vertex labelling, so the grids equal the Eulerian rule's to float rounding, ~3e-15 in the double build). 0 = the Eulerian rule (it also reuses tessellation caches written under that rule).")
 #endif
             ;
     
@@ -722,6 +738,19 @@ void User_options::addOptions(po::options_description &allOptions,
     hidden.add_options()
             ("input-file", po::value<std::string>(&(this->inputFilename)), "name of the input position file")
             ("output-file", po::value<std::string>(&(this->outputFilename)), "root name of the output file/files")
+#ifdef PHASE_SPACE
+            // three removed PS-DTFE choices, still parsed so that refuseRemovedPsOptions can name them: the linear
+            // deposit (a switch bound to no member), the geometric stream density ('linear' passes, and its older
+            // name 'dtfe' with its warning) and the legacy point conventions ('grid' passes; '--pts-conventions'
+            // folds onto it)
+            ("ps-linear-deposit", po::bool_switch(), "removed (refused)")
+            ("ps-stream-density", po::value<std::string>()->default_value("linear"), "the per-stream density at points: 'linear' only")
+            ("ps-point-conventions", po::value<std::string>()->default_value("grid"), "the conventions of point values: 'grid' only")
+            // and the volume-weighted velocity moments' switch, accepted without a word and bound to no member:
+            // PS-DTFE always volume-weights them (psVolumeWeighted is true from the constructor on, and no parse
+            // writes it), so a run with the switch and one without give the same bytes
+            ("ps-volume-weighted", po::bool_switch(), "accepted; PS-DTFE always volume-weights its velocity moments")
+#endif
             // the deprecated spellings (deprecatedOptions), each bound to its canonical option's member with no default,
             // folded onto the canonical option by foldDeprecatedAliases
 #ifdef PHASE_SPACE
@@ -777,45 +806,20 @@ void User_options::addOptions(po::options_description &allOptions,
             ;
     
     
-    // every group into 'visibleOptions' ('--full-help') and into 'allOptions' (the parser). The Makefile's seven help
-    // switches choose the groups '--full-help' shows; every build defines all seven, so it shows every group. Input,
-    // Grid and fields and Help are always shown; Cell average, Points and server and Phase space need
-    // AVERAGING_OPTIONS; Device and machine use PARTITION_OPTIONS or AVERAGING_OPTIONS; Split, memory and resume
-    // PARTITION_OPTIONS or ADDITIONAL_OPTIONS; Region REGION_OPTIONS, REDSHIFT_CONE_OPTIONS or (PS-DTFE)
-    // AVERAGING_OPTIONS; Other estimators and Other ADDITIONAL_OPTIONS; Developer options PARTITION_OPTIONS,
-    // AVERAGING_OPTIONS or (with TEST_PADDING) PADDING_OPTIONS. FIELD_OPTIONS shows no group. The switches never
-    // touch 'allOptions': every option parses whatever they say.
+    // every group into 'visibleOptions' ('--full-help') and into 'allOptions' (the parser).
     visibleOptions.add(inputOptions);
     visibleOptions.add(gridFieldOptions);
-#ifdef AVERAGING_OPTIONS
     visibleOptions.add(cellAverageOptions);
-#endif
-#if defined(PARTITION_OPTIONS) || defined(AVERAGING_OPTIONS)
     visibleOptions.add(deviceOptions);
-#endif
-#if defined(PARTITION_OPTIONS) || defined(ADDITIONAL_OPTIONS)
     visibleOptions.add(splitOptions);
-#endif
-#if defined(REGION_OPTIONS) || defined(REDSHIFT_CONE_OPTIONS) || (defined(PHASE_SPACE) && defined(AVERAGING_OPTIONS))
     visibleOptions.add(regionOptions);
-#endif
-#ifdef AVERAGING_OPTIONS
     visibleOptions.add(pointOptions);
-#endif
 #ifdef PHASE_SPACE
-#ifdef AVERAGING_OPTIONS
     visibleOptions.add(phaseSpaceOptions);
 #endif
-#endif
-#ifdef ADDITIONAL_OPTIONS
     visibleOptions.add(estimatorOptions);
-#endif
-#ifdef ADDITIONAL_OPTIONS
     visibleOptions.add(otherOptions);
-#endif
-#if defined(PARTITION_OPTIONS) || defined(AVERAGING_OPTIONS) || (defined(TEST_PADDING) && defined(PADDING_OPTIONS))
     visibleOptions.add(developerOptions);
-#endif
     visibleOptions.add(helpOptions);
     
     
@@ -852,14 +856,14 @@ void User_options::helpInformation( po::options_description &visibleOptions, cha
     exit( EXIT_SUCCESS );
 }
 // Prints the short help ('-h') and exits: the usage line, the two modes, and the options a user of the two modes
-// needs, one short entry each (PS-DTFE 29 names, standard DTFE 26), under the captions of the same-named '--full-help'
+// needs, one short entry each (PS-DTFE 28 names, standard DTFE 26), under the captions of the same-named '--full-help'
 // groups: Input, Grid and fields, Cell average (the two modes), Device and machine use, Split, memory and resume,
 // Other estimators (the seven other estimators' short lines) and Help. Where the two programs' lines differ, a group
 // gives the PS-DTFE lines and the standard ones under '#ifdef PHASE_SPACE'. This is a display-only second list: its
 // declarations bind nothing (the program exits here, before any parse), so each must keep the short letter and the
 // 'arg' (or none) of its real declaration in addOptions, and its name must be a '--full-help' name
-// (tests/docs_drift_check.py rule G checks that). Each group is shown under the same help switches as its
-// '--full-help' namesake, so every name shown here is shown there too. The lines keep boost's own format
+// (tests/docs_drift_check.py rule G checks that). Every group here is a '--full-help' group too, so every name
+// shown here is shown there too. The lines keep boost's own format
 // ('  -g [ --grid ] arg   text') at its default 80 columns: tests/run_scripts_check.sh and tests/docs_drift_check.py
 // (help_names) read this screen in that format, as python/gui/presets.py (parse_help) reads '--full-help'.
 void User_options::shortHelp( char *progName )
@@ -879,7 +883,7 @@ void User_options::shortHelp( char *progName )
             ("mpc-unit", po::value<std::string>(), "1 Mpc in the input's length unit (the build's default: 1000, kpc).")
             ("periodic,p", "the particles fill a periodic box (from --box or the file's header).")
             ("box", po::value<std::string>(), "the box that holds every particle: x_min x_max y_min y_max z_min z_max (4 numbers in 2D; else from the file).")
-            ("padding", po::value<std::string>(), "the particles copied around the region, in mean spacings (5 here; the drivers and the launcher pass 15: 5 is too thin near a face in a void-rich box).")
+            ("padding", po::value<std::string>(), "the particles copied around the region, in mean spacings (15 by default, as the drivers and the launcher pass: 5 is too thin near a face in a void-rich box).")
 #endif
             ;
     po::options_description gridFieldOptions("Grid and fields");
@@ -887,18 +891,17 @@ void User_options::shortHelp( char *progName )
 #ifdef PHASE_SPACE
             ("grid,g", po::value<std::string>(), "grid cells per axis: one number for all axes, or one per axis.")
             ("field,f", po::value<std::string>(), "the fields: density_a (the default), velocity_a, dispersion_a, gradient_a, divergence_a, shear_a, vorticity_a, tweb_a, vweb_a; without '_a': the deposit at one point per cell (exact in an exact run).")
-            ("lambda-th", po::value<std::string>(), "the T-web / V-web eigenvalue threshold (0.0 here; the drivers pass 0.3).")
-            ("ps-volume-weighted", "volume-weighted velocities, the production convention and a condition of the face gradient (off here; the drivers and the launcher pass it).")
+            ("lambda-th", po::value<std::string>(), "the T-web / V-web eigenvalue threshold (0.3 by default, as the drivers pass).")
 #else
             ("grid,g", po::value<std::string>(), "grid cells per axis: one number for every axis, or one per axis.")
             ("field,f", po::value<std::string>(), "the fields: density_a (the default), velocity_a, gradient_a, divergence_a, shear_a, vorticity_a, tweb_a, vweb_a; without '_a': the value at the grid point.")
-            ("lambda-th", po::value<std::string>(), "the T-web / V-web eigenvalue threshold (0.0 here; the drivers pass 0.3).")
+            ("lambda-th", po::value<std::string>(), "the T-web / V-web eigenvalue threshold (0.3 by default, as the drivers pass).")
 #endif
             ;
     po::options_description cellAverageOptions("Cell average (the two modes)");
     cellAverageOptions.add_options()
 #ifdef PHASE_SPACE
-            ("exact", "Exact: each tetrahedron's exact share of every cell (the default for '_a' fields); in 3D with --ps-volume-weighted also the exact face gradient of the mean flow.")
+            ("exact", "Exact: each tetrahedron's exact share of every cell (the default for '_a' fields); in 3D also the exact face gradient of the mean flow.")
             ("sampled", "Fast: the deposit at one point per cell axis, noisy per-cell values (smooth before use); the derivatives are the stream average.")
 #else
             ("exact", "Exact: the exact cell average of the linear interpolant (the default).")
@@ -908,11 +911,11 @@ void User_options::shortHelp( char *progName )
     po::options_description deviceOptions("Device and machine use");
     deviceOptions.add_options()
 #ifdef PHASE_SPACE
-            ("gpu", "the grid deposit on the GPU (a 3D METAL=1 build; else a warning and the CPU).")
+            ("gpu", "the grid deposit on the GPU (a 3D METAL=1 build; else a warning and the CPU). Without it the program picks: the GPU where the deposit runs there, else the CPU; DTFE_GPU=1 is --gpu, DTFE_GPU=0 keeps the CPU.")
 #else
-            ("gpu", "the cell average on the GPU (a 3D METAL=1 build; else a warning and the CPU).")
+            ("gpu", "the cell average on the GPU (a 3D METAL=1 build; else a warning and the CPU). Without it the program picks: the exact average on the GPU where it runs there, the sampled one on the CPU; DTFE_GPU=1 is --gpu, DTFE_GPU=0 keeps the CPU.")
 #endif
-            ("run-mode", po::value<std::string>(), "how hard the run leans on the machine: performance (the default here), balanced (the drivers' and the launcher's, outside a batch job) or gentle; DTFE_RUN_MODE is the same.")
+            ("run-mode", po::value<std::string>(), "how hard the run leans on the machine: balanced (the default; performance inside a batch job: SLURM_JOB_ID or PBS_JOBID set), performance or gentle; DTFE_RUN_MODE is the same.")
             ;
     po::options_description splitOptions("Split, memory and resume");
     splitOptions.add_options()
@@ -950,18 +953,10 @@ void User_options::shortHelp( char *progName )
     po::options_description shortList;   // no caption, boost's default 80 columns: one description column
     shortList.add(inputOptions);
     shortList.add(gridFieldOptions);
-#ifdef AVERAGING_OPTIONS
     shortList.add(cellAverageOptions);
-#endif
-#if defined(PARTITION_OPTIONS) || defined(AVERAGING_OPTIONS)
     shortList.add(deviceOptions);
-#endif
-#if defined(PARTITION_OPTIONS) || defined(ADDITIONAL_OPTIONS)
     shortList.add(splitOptions);
-#endif
-#ifdef ADDITIONAL_OPTIONS
     shortList.add(estimatorOptions);
-#endif
     shortList.add(helpOptions);
     
     MESSAGE::Message message( 3 );
@@ -1026,7 +1021,6 @@ void User_options::printOptions()
     
     std::string inFileType = "unknown";
     if ( this->inputFileType==101 ) inFileType = "Gadget multiple files";
-    else if ( this->inputFileType==102 ) inFileType = "Gadget single file";
     else if ( this->inputFileType==105 ) inFileType = "Gadget HDF5 file/files";
     else if ( this->inputFileType==111 ) inFileType = "text file with positions (first 3 columns and weights in 4th column)";
     
@@ -1145,12 +1139,10 @@ void User_options::printOptions()
             message << "\t random generator seed  : " << this->randomSeed << "\n";
         if ( averageDensity>Real(0.) )
             message << "\t density scaling value  : " << averageDensity << "\n";
-        if ( this->useMetal )
-#ifdef DTFE_GPU
-            message << "\t '_a' interpolation     : " GPU_BACKEND_NAME " GPU (--gpu)\n";
-#else
-            message << "\t '_a' interpolation     : CPU (--gpu given but this binary was built without GPU support; falling back)\n";
-#endif
+        // the device of the '_a' work and why (checkGpuOptions), on the GPU and on the CPU alike (empty only for a
+        // caller that prints without readOptions)
+        if ( not this->deviceLine.empty() )
+            message << "\t '_a' interpolation     : " << this->deviceLine << "\n";
     }
 #endif
     
@@ -1171,38 +1163,35 @@ void User_options::printOptions()
                                       : "each '_a' cell volume-averaged over nSub^" + std::to_string( NO_DIM ) + " = "
                                         + std::to_string( nSubPts ) + " points: more points, a smoother cell average and more time" )
                     << ")\n";
-        if ( this->psUseMetal )
-#ifdef PS_GPU
-            message << "\t PS deposit             : " GPU_BACKEND_NAME " GPU (--gpu)\n";
-#else
-            message << "\t PS deposit             : CPU (--gpu given but this binary was built without GPU support; falling back)\n";
-#endif
+        // the device of the deposit and why (checkGpuOptions), on the GPU and on the CPU alike (empty only for a
+        // caller that prints without readOptions)
+        if ( not this->deviceLine.empty() )
+            message << "\t PS deposit             : " << this->deviceLine << "\n";
     }
+    // with the option only the rule is known here: the read decides, and readInputData says when the file is not read
     if ( not this->lagrangianInputFilename.empty() )
-        message << "\t Lagrangian input file  : " << this->lagrangianInputFilename << "\n";
+        message << "\t Lagrangian positions   : the snapshot's 'InitialCoordinates' when it has them, else '"
+                << this->lagrangianInputFilename << "' (--ps-lagrangian-input, matched by ParticleIDs)\n";
     else
         message << "\t Lagrangian positions   : read from 'InitialCoordinates' dataset in main input file\n";
     if ( this->psServe )
-        message << "\t point evaluation       : interactive server on stdin/stdout (--serve; per-stream density: "
-                << (this->psStreamDensityGeometric ? "geometric" : "linear")
-                << ( not this->psPtsLegacyConventions and this->psVertexMass ? ", vertex-share masses" : "" )
-                << ( not this->psPtsLegacyConventions and this->psVolumeWeighted ? ", volume-weighted stream means" : "" )
+        message << "\t point evaluation       : interactive server on stdin/stdout (--serve; per-stream density: linear"
+                << ( this->psVertexMass ? ", vertex-share masses" : "" )
+                << ( this->psVolumeWeighted ? ", volume-weighted stream means" : "" )
                 << (this->partitionGiven ? ", composite of partition tessellations" : "")
                 << (this->psPtsScalar ? ", scalar values" : "")
                 << (this->psPtsLagrangian ? ", Lagrangian positions" : "") << ")\n";
     if ( not this->psSamplePointsFile.empty() )
         message << "\t point evaluation       : at the sample points in '" << this->psSamplePointsFile
-                << "' (per-stream density: " << (this->psStreamDensityGeometric ? "geometric" : "linear")
-                << ( not this->psPtsLegacyConventions and this->psVertexMass ? ", vertex-share masses" : "" )
-                << ( not this->psPtsLegacyConventions and this->psVolumeWeighted ? ", volume-weighted stream means" : "" )
+                << "' (per-stream density: linear"
+                << ( this->psVertexMass ? ", vertex-share masses" : "" )
+                << ( this->psVolumeWeighted ? ", volume-weighted stream means" : "" )
                 << (this->psPerStream ? ", writing per-stream records" : "")
                 << (this->psPerStreamIds ? " + stream ids" : "")
                 << (this->psPtsDenGrad ? ", writing density gradients" : "")
                 << (this->psPtsVelGrad ? ", writing velocity gradients" : "")
                 << (this->psPtsScalar ? ", writing scalar values" : "")
                 << (this->psPtsLagrangian ? ", writing Lagrangian positions" : "") << ")\n";
-    if ( this->psLinearDeposit )
-        message << "\t grid deposit profile   : linear within each tetrahedron (--ps-linear-deposit; renormalized per tet, mass-conserving)\n";
     if ( this->psCaustics )
         message << "\t caustic flagging       : writing the fold-caustic cell flag to '.caustic' (--ps-caustics)\n";
     if ( not this->periodic )
@@ -1226,6 +1215,10 @@ void User_options::printOptions()
                      : " only for the units' share cap; the unaveraged pass samples a tetrahedron too thin to clip at one point)\n" );
     else if ( this->aField.selected() and this->DTFE and not this->Voronoi and not this->averageModeSource.empty() )
         message << "\t grid deposit           : SAMPLED on nSub^" << NO_DIM << " sub-points (" << this->averageModeSource << ")\n";
+    // the velocity moments' weighting, in every PS-DTFE run: the readers of a run log (python/dtfelib/io.py
+    // run_velocity_weighting, python/gui/results.py) take this line as the record that its grids' velocity moments
+    // are volume-weighted, with or without '--ps-volume-weighted' on the command line
+    message << "\t velocity moments       : volume-weighted (the dispersion mass-weighted)\n";
     // the velocity gradient's route (checkGpuOptions), where a field built on the gradient is computed: the mean flow's
     // from the face sums, or the stream average of each stream's own gradient and why ('.a_velDivStreams' comes with an
     // '_a' field of that family only)
@@ -1256,12 +1249,14 @@ void User_options::printOptions()
     if ( this->aField.selected() and this->DTFE and not this->Voronoi and not this->averageModeSource.empty() )
     {
         if ( this->exactAverage )
-            message << "\t volume averaging       : EXACT cell-tetrahedron integration of the linear interpolant (" << this->averageModeSource << "; r3d, or a z-sweep on the GPU with --gpu; --subsamples ignored)\n";
+            message << "\t volume averaging       : EXACT cell-tetrahedron integration of the linear interpolant (" << this->averageModeSource << ( this->gpuPicked ? "; r3d, or a z-sweep on the GPU; --subsamples ignored)\n" : "; r3d, or a z-sweep on the GPU with --gpu; --subsamples ignored)\n" );
         else
             message << "\t volume averaging       : SAMPLED (" << this->averageModeSource << ")\n";
     }
-    if ( this->faceGradient )
-        message << "\t velocity gradient      : from EXACT FACE integrals of the interpolant (Gauss; the default since 2026-11-09, '--per-tet-gradient' for the deposit's own)\n";
+    if ( this->faceGradient )   // the source is empty only for a library caller that sets faceGradient itself
+        message << "\t velocity gradient      : from EXACT FACE integrals of the interpolant (Gauss; "
+                << ( this->faceGradientSource.empty() ? std::string() : this->faceGradientSource + "; " )
+                << "'--per-tet-gradient' for the deposit's own)\n";
     else if ( this->perTetGradient or this->uField.velocity_gradient or this->uField.selectedVelocityDerivatives()
               or this->aField.velocity_gradient or this->aField.selectedVelocityDerivatives() )
         message << "\t velocity gradient      : each tetrahedron's own, added up by the deposit ("
@@ -1286,7 +1281,7 @@ void User_options::printOptions()
         message << "\t triangulation          : sequential insertion (this build has no parallel insert: TBB=auto/1 or TBB_STD=1 with the tbb library)\n";
 #endif
     // the run mode (resolveRunMode, applyRunMode): what it set and why, on every run -- the threads (an
-    // OMP_NUM_THREADS kept, a '--max-concurrent' that raised them), the GPU buffers of a '--gpu' run, gentle's nice
+    // OMP_NUM_THREADS kept, a '--max-concurrent' that raised them), the GPU buffers of a GPU run, gentle's nice
     {
         RunModeState const &rm = runModeState();
         message << "\t run mode               : " << runModeName( this->runMode ) << " (" << this->runModeSource << "; ";
@@ -1413,6 +1408,33 @@ void User_options::checkFileNameOptions(char *argv[], bool getFileNames, po::opt
 }
 
 
+#ifdef PHASE_SPACE
+// Refuses the three PS-DTFE choices that were removed: '--ps-linear-deposit', '--ps-stream-density geometric' and
+// '--ps-point-conventions legacy' ('--pts-conventions legacy' arrives here under the canonical name, folded with its
+// spelling warning). readOptions runs it first among the option checks, right after the parse, so a removed choice
+// stops the run with its own reason, a missing file name or a later refusal notwithstanding. Two things come before
+// it: a call that asks for the help gets the help, and the parse refuses an older spelling given beside the new one
+// with another value. The accepted values pass without a word: '--ps-stream-density linear' (its older name 'dtfe'
+// keeps its warning, given at the parse) and '--ps-point-conventions grid'. The three options are hidden
+// (addOptions); the member psLinearDeposit stays false.
+static void refuseRemovedPsOptions(po::variables_map const &vm)
+{
+    if ( vm.count( "ps-linear-deposit" ) and vm["ps-linear-deposit"].as<bool>() )   // (false: the switch is absent)
+        throwError( "'--ps-linear-deposit' was removed: PS-DTFE spreads each tetrahedron's mass uniformly, with '--exact' (the default) or '--sampled'." );
+    std::string const density = vm["ps-stream-density"].as<std::string>();
+    if ( density == "geometric" )
+        throwError( "'--ps-stream-density geometric' was removed: the per-stream density at points is the linear interpolation of the vertex densities ('linear')." );
+    if ( density != "linear" and density != "dtfe" )   // 'dtfe': the older name of 'linear'
+        throwError( "Unknown value '", density, "' for '--ps-stream-density'; the only value is 'linear'." );
+    std::string const conventions = vm["ps-point-conventions"].as<std::string>();
+    if ( conventions == "legacy" )
+        throwError( "'--ps-point-conventions legacy' was removed: point values follow the grid's conventions ('grid')." );
+    if ( conventions != "grid" )
+        throwError( "Unknown value '", conventions, "' for '--ps-point-conventions'; the only value is 'grid'." );
+}
+#endif
+
+
 // Refuses mutually exclusive options and options given without the option they depend on.
 static void checkConflictingOptions(po::variables_map &vm)
 {
@@ -1534,10 +1556,6 @@ void User_options::readRegionOptions(po::variables_map &vm)
             throwError( "'--grid-window' cannot be combined with the T-web / V-web classes: they need the full periodic grid." );
         if ( vm.count("region") or vm.count("region-mpc") or vm.count("partition-index") )
             throwError( "'--grid-window' cannot be combined with '--region', '--region-mpc' or '--partition-index'." );
-#ifdef PHASE_SPACE
-        if ( this->psLinearDeposit )
-            throwError( "'--grid-window' cannot be combined with '--ps-linear-deposit': the window's exact deposit normalizes each tetrahedron by its whole weight, and the linear profile's clamped per-cell weights do not sum to it." );
-#endif
     }
     if ( vm.count("region-mpc") )
         this->regionMpcOn = true;
@@ -1725,7 +1743,9 @@ void User_options::resolveAverageMode(po::variables_map &vm)
 
 // The run mode (run_mode.h) into runMode, with the reason the run log's 'run mode' line gives (runModeSource). The
 // first that is given wins: '--run-mode MODE' (exact lower case; boost refuses a second one), DTFE_RUN_MODE (any
-// case; unset, empty or 'auto' is not given), else performance, the binaries' default; any other word is an error.
+// case; unset, empty or 'auto' is not given), else the binaries' default, the drivers' rule (scripts/config.sh
+// run_mode_resolve): performance inside a batch job, where SLURM_JOB_ID or else PBS_JOBID is set and not empty (the
+// job's cores are the run's), else balanced; any other word is an error.
 // PS-DTFE's '--gpu-share' as given: 'auto' (the run mode's share, resolved with the plan), 'mixed' (auto's model in
 // every run mode, so both devices work in gentle and balanced too) or a fraction from 0 to 1, kept in per mille;
 // DTFE.cpp psResolveGpuShare decides where it applies (psGpuShareMille). The levers themselves are set by
@@ -1744,7 +1764,7 @@ void User_options::resolveRunMode(po::variables_map &vm)
     {
         std::string const v = vm["run-mode"].as<std::string>();
         if ( not modeOf( v, this->runMode ) )
-            throwError( "Unknown value '", v, "' for '--run-mode'; use 'gentle', 'balanced' or 'performance' (the default)." );
+            throwError( "Unknown value '", v, "' for '--run-mode'; use 'gentle', 'balanced' (the default) or 'performance'." );
         this->runModeSource = "--run-mode " + v;
     }
     else
@@ -1757,10 +1777,20 @@ void User_options::resolveRunMode(po::variables_map &vm)
                 throwError( "Unknown value '", raw, "' for DTFE_RUN_MODE; use gentle, balanced or performance (in any case), or leave it unset (or 'auto') for the default." );
             this->runModeSource = "--run-mode " + lo + " from DTFE_RUN_MODE=" + raw;
         }
-        else
+        else if ( Env::isSet( "SLURM_JOB_ID" ) )
         {
             this->runMode = RunMode::Performance;
-            this->runModeSource = "--run-mode performance, the default";
+            this->runModeSource = "--run-mode performance, the default inside a batch job (SLURM_JOB_ID)";
+        }
+        else if ( Env::isSet( "PBS_JOBID" ) )
+        {
+            this->runMode = RunMode::Performance;
+            this->runModeSource = "--run-mode performance, the default inside a batch job (PBS_JOBID)";
+        }
+        else
+        {
+            this->runMode = RunMode::Balanced;
+            this->runModeSource = "--run-mode balanced, the default";
         }
     }
 #ifdef PHASE_SPACE
@@ -1806,8 +1836,9 @@ static constexpr bool kPsFaceGradientDefault = true;
 
 // Why the face gradient (the velocity gradient from exact face integrals, docs/cleanup-plan.md P10) is not this run's
 // default route, or "" where it is (D13): it is 3D, on the DTFE interpolant, not in the MY_SCALAR build; PS-DTFE's face
-// sums are integrated beside the exact deposit, give the gradient of the VOLUME-weighted mean velocity and need every
-// tetrahedron's faces (no halo release), and are its default only while kPsFaceGradientDefault says so.
+// sums are integrated beside the exact deposit, give the gradient of the VOLUME-weighted mean velocity (the velocity
+// moments of every PS-DTFE run) and need every tetrahedron's faces (no halo release), and are its default only while
+// kPsFaceGradientDefault says so.
 // checkGpuOptions asks only when neither flag nor DTFE_FACE_GRADIENT decides; the run then keeps the deposit's own
 // gradient, goes on, and its header's 'velocity gradient' line gives this reason.
 std::string User_options::faceGradientBlocker(po::variables_map const &vm) const
@@ -1832,8 +1863,6 @@ std::string User_options::faceGradientBlocker(po::variables_map const &vm) const
             why = "the face gradient needs the exact deposit; this run deposits sampled ("
                   + ( this->averageModeSource.empty() ? std::string( "no '_a' field" ) : this->averageModeSource )
                   + ")";
-        else if ( not this->psVolumeWeighted )
-            why = "the face gradient needs '--ps-volume-weighted'; this run's velocity moments are mass-weighted";
         else if ( this->psHaloRelease > Real(0.) )
             why = "the face gradient cannot run with '--ps-halo-release' (a released tetrahedron has no faces)";
     }
@@ -1842,7 +1871,57 @@ std::string User_options::faceGradientBlocker(po::variables_map const &vm) const
 }
 
 
-// Folds '--gpu' into the Metal member, resolves the triangulation's insert and the gradient route, and checks the
+// Whether this run's '_a' work has a GPU path: what a '--gpu' needs to put it on the GPU without a word, as far as
+// the options tell -- a build with the GPU deposit (GPU_PATH_BUILT, the deposits' own guard); an '_a' field of the
+// (PS-)DTFE method on a regular grid (no '--redshift-cone'; '--serve' deposits no grid: it answers points on the CPU);
+// at most one scalar component (avg1GpuUsable, psGpuEligible) and at most 2^32 grid cells (both guards test a pass's
+// grid, never larger than the full one; a PS-DTFE '--grid-window' pass deposits its window, whose cells are known only
+// once the box is, so there the pass's own guard decides); standard DTFE averaging method 1 (the other methods sample
+// on the CPU: DTFE.cpp gpuDeposit, triangulation.cpp), PS-DTFE no '--ps-caustic-cusps' (its stencil is the CPU
+// deposit's: psGpuEligible). Read at the parse, like faceGradientBlocker, before the other methods' and the cone's
+// members are set (readAdditionalOptions, readRedshiftConeOptions), so from 'vm'. The program picks the GPU only
+// where it holds (checkGpuOptions); what only a pass can test (the Delaunay cells per triangulation, a window's
+// cells) takes the CPU silently for a picked GPU (psGpuEligible), and user-given sampling points, known once the
+// input is read, take method 2 (updateEntries turns a picked GPU off there). Keep it in step with those guards.
+bool User_options::gpuPathRuns(po::variables_map const &vm) const
+{
+#ifdef GPU_PATH_BUILT
+    Field a = this->aField;   // the '_a' fields this build computes (as resolveAverageMode)
+#ifndef VELOCITY
+    a.deselectVelocity();
+#endif
+#ifndef SCALAR
+    a.deselectScalar();
+#endif
+    bool const otherMethod = vm.count("ngp") or vm.count("cic") or vm.count("tsc") or vm.count("pcs") or vm.count("sph")
+                             or vm.count("voronoi");
+    if ( not a.selected() or otherMethod or vm.count("redshift-cone") or this->psServe )
+        return false;
+#ifdef SCALAR
+    if ( ( a.scalar or a.scalar_gradient ) and noScalarComp != 1 )
+        return false;
+#ifdef PHASE_SPACE
+    // (PS-DTFE's unaveraged pass deposits on the same device, and psGpuEligible tests its fields too)
+    if ( ( this->uField.scalar or this->uField.scalar_gradient ) and noScalarComp != 1 )
+        return false;
+#endif
+#endif
+    double cells = this->gridSize.empty() ? 0. : 1.;
+    for ( size_t const n : this->gridSize ) cells *= double( n );
+    bool const gridFits = cells > 0. and cells <= double( UINT32_MAX );
+#ifdef PHASE_SPACE
+    return ( gridFits or this->psWindowOn ) and not this->psCausticCusps;
+#else
+    return gridFits and this->method == 1;
+#endif
+#else
+    (void)vm;
+    return false;
+#endif
+}
+
+
+// Resolves the device into the Metal member, the triangulation's insert and the gradient route, and checks the
 // '--exact' combinations (exactAverage is resolved already: only an explicit '--exact' or DTFE_EXACT_AVERAGE=1 reaches the
 // refusals).
 void User_options::checkGpuOptions(po::variables_map &vm)
@@ -1853,13 +1932,74 @@ void User_options::checkGpuOptions(po::variables_map &vm)
         throwError( "'--parallel-triangulation' and '--sequential-triangulation' exclude each other." );
     if ( this->sequentialTriangulation )
         this->psParallelTriangulation = false;
-    // fold the '--gpu' switch into the internal member (the Metal path reads useMetal / psUseMetal)
-    if ( this->gpuAlias )
+    // THE DEVICE of the '_a' work, into the member the GPU path reads (useMetal / psUseMetal), once, after the average
+    // and the run mode. The first that is given wins: '--gpu' (or the deprecated '--ps-gpu') ASKS for the GPU; DTFE_GPU
+    // (the drivers' name, Env::tristate: 0, false, no or off keeps the CPU, any other value asks for the GPU exactly
+    // as the flag does, unset, empty or 'auto' is not given); else THE PROGRAM PICKS: the GPU where this run's '_a'
+    // work has a GPU path (gpuPathRuns) and, in standard DTFE, the average is the exact one (its sampled average stays
+    // on the CPU in every run mode), the CPU elsewhere. An asked GPU is '--gpu' in every respect: its warnings (they
+    // name deviceSource, gpuRequest) and its fall-back on a build without a GPU path. A picked one is on only where the
+    // GPU path runs, so it meets none of them (gpuPicked: the guards only a pass can test take the CPU silently for
+    // it). deviceLine is the text of the run log's device line (printOptions): the device and why. The launcher reads
+    // it by one rule: a text that starts with 'CPU' is the CPU, else one that holds ' GPU' is the GPU.
     {
+        int const pin = Env::tristate( "DTFE_GPU" );   // 1 = as '--gpu', 0 = the CPU, -1 = unset or auto
+        std::string const pinSource = "DTFE_GPU=" + Env::text( "DTFE_GPU" );
+        bool const canRun = this->gpuPathRuns( vm );
+        bool gpu = false;
+        this->deviceSource = "";
+        this->gpuPicked = false;
+        if ( this->gpuAlias )
+        {
+            gpu = true;
+            this->deviceSource = "--gpu";
+        }
+        else if ( pin == 1 )
+        {
+            gpu = true;
+            this->deviceSource = pinSource;
+        }
+        else if ( pin == 0 )
+            this->deviceSource = pinSource;
+        else
+        {
 #ifdef PHASE_SPACE
-        this->psUseMetal = true;
+            gpu = canRun;
 #else
-        this->useMetal = true;
+            gpu = canRun and this->exactAverage;
+#endif
+            this->gpuPicked = gpu;
+        }
+#ifdef PHASE_SPACE
+        this->psUseMetal = gpu;
+#else
+        this->useMetal = gpu;
+#endif
+#ifdef GPU_PATH_BUILT
+        if ( gpu and not this->gpuPicked )
+            this->deviceLine = std::string( GPU_BACKEND_NAME " GPU (" ) + this->deviceSource + ")";
+        else if ( gpu )
+#ifdef PHASE_SPACE
+            this->deviceLine = GPU_BACKEND_NAME " GPU (the default; DTFE_GPU=0 keeps the run on the CPU)";
+#else
+            this->deviceLine = GPU_BACKEND_NAME " GPU (the default for the exact average; DTFE_GPU=0 keeps the run on the CPU)";
+#endif
+        else if ( not this->deviceSource.empty() )
+            this->deviceLine = "CPU (" + this->deviceSource + ")";
+#ifndef PHASE_SPACE
+        else if ( canRun )
+            this->deviceLine = "CPU (the default for the sampled average; --gpu runs it on the GPU)";
+#endif
+        else
+            this->deviceLine = "CPU (the default: this average has no GPU path)";
+#else
+        // a build without a GPU path: an asked GPU falls back with the deposits' warning, as '--gpu' always has
+        if ( gpu )
+            this->deviceLine = "CPU (" + this->deviceSource + " given but this binary was built without GPU support; falling back)";
+        else if ( not this->deviceSource.empty() )
+            this->deviceLine = "CPU (" + this->deviceSource + ")";
+        else
+            this->deviceLine = "CPU (this binary was built without GPU support)";
 #endif
     }
 
@@ -1970,22 +2110,9 @@ void User_options::checkDirectoryOptions()
 // Checks the point-evaluation options (--sample-points, --serve, companions) and PS-DTFE's --partition-index/--region refusal.
 void User_options::checkPointEvalOptions(po::variables_map &vm)
 {
-    // point evaluation (--sample-points) options, both binaries
+    // point evaluation (--sample-points) options, both binaries (PS-DTFE's '--ps-stream-density' and
+    // '--ps-point-conventions' have one value each now: refuseRemovedPsOptions)
 #ifdef PHASE_SPACE
-    {
-        std::string const variant = vm["ps-stream-density"].as<std::string>();
-        if ( variant == "geometric" )
-            this->psStreamDensityGeometric = true;
-        else if ( variant != "linear" and variant != "dtfe" )   // 'dtfe': the deprecated name of 'linear' (warned)
-            throwError( "Unknown value '", variant, "' for '--ps-stream-density'; use 'linear' or 'geometric'." );
-        // the point evaluation's conventions: the grids' (default) or the legacy ones
-        std::string const conventions = vm["ps-point-conventions"].as<std::string>();
-        if ( conventions == "legacy" )
-            this->psPtsLegacyConventions = true;
-        else if ( conventions != "grid" )
-            throwError( "Unknown value '", conventions, "' for '--ps-point-conventions'; use 'grid' or 'legacy'." );
-    }
-
     // '--partition-index' and '--region' crop the PARTICLES to an Eulerian box (findParticlesInBox -> Box::isParticleInBox
     // reads p.pos), which is sound for standard DTFE, whose tessellation is Eulerian. PS-DTFE triangulates in
     // LAGRANGIAN space, where the tessellation of an Eulerian-selected subset is NOT the subset of the tessellation,
@@ -2052,7 +2179,7 @@ void User_options::checkPointEvalOptions(po::variables_map &vm)
 
 
 #ifdef PHASE_SPACE
-// Checks PS-DTFE's caustic, alpha-shape, Lagrangian-padding, halo-release, volume-weighted and exact-deposit options.
+// Checks PS-DTFE's caustic, alpha-shape, Lagrangian-padding, halo-release, exact-deposit and face-gradient options.
 void User_options::checkPsDepositOptions(po::variables_map &vm)
 {
     // caustic flagging (--ps-caustics) options
@@ -2078,10 +2205,6 @@ void User_options::checkPsDepositOptions(po::variables_map &vm)
     if ( vm.count("ps-halo-release") and this->psHaloRelease <= Real(0.) )
         throwError( "'--ps-halo-release' needs a positive threshold D (geometric stream density in rho/rho_bar units, e.g. '--ps-halo-release 300')." );
 
-    // volume-weighted velocity moments (--ps-volume-weighted) options
-    if ( this->psVolumeWeighted and this->psLinearDeposit )
-        throwError( "'--ps-volume-weighted' (equal volume shares for the velocity moments) cannot be combined with '--ps-linear-deposit' (density-weighted shares inside each tetrahedron); the two prescribe opposite sample weightings." );
-
     // exact conservative deposit (--exact) options: resolved already, the default only with the PS-DTFE method, so
     // only an explicit '--exact' or DTFE_EXACT_AVERAGE=1 reaches the refusal
     if ( this->psExactDeposit )
@@ -2092,16 +2215,14 @@ void User_options::checkPsDepositOptions(po::variables_map &vm)
     }
 
     // the mean-flow gradient from face integrals (--face-gradient, docs/cleanup-plan.md P10.3): the exact deposit (on the
-    // CPU, or on the GPU with the face sums from a CPU walk beside it, D17), the volume-weighted mean (the quotient form
-    // (dS - <v> dN) / sum V_s is that mean's), 3D
+    // CPU, or on the GPU with the face sums from a CPU walk beside it, D17), the volume-weighted mean (every PS-DTFE
+    // run's; the quotient form (dS - <v> dN) / sum V_s is that mean's), 3D
     if ( this->faceGradient )
     {
         if ( NO_DIM != 3 )
             throwError( "'--face-gradient' is 3D only for now (docs/cleanup-plan.md P10); drop it in the 2D build." );
         if ( not this->psExactDeposit )
             throwError( "'--face-gradient' integrates the faces in PS-DTFE's exact deposit: add '--exact' (or drop '--sampled')." );
-        if ( not this->psVolumeWeighted )
-            throwError( "'--face-gradient' gives the gradient of the VOLUME-weighted mean velocity: add '--ps-volume-weighted' (the production convention)." );
         if ( this->psHaloRelease > Real(0.) )
             throwError( "'--face-gradient' cannot be combined with '--ps-halo-release': a released tetrahedron deposits as a point and has no faces." );
     }
@@ -2257,10 +2378,10 @@ void User_options::readAveragingOptions(po::variables_map &vm)
                         " to compute the velocity standard deviation inside the grid cell. Please use the averaging method 2 '--average-method 2' (Monte Carlo sampling inside the grid cell) to compute the velocity standard deviation." );
     }
 #endif
-    if ( this->useMetal and this->method!=1 )
+    if ( this->useMetal and this->method!=1 )   // (an asked GPU only: the program picks it for method 1 alone)
     {
         MESSAGE::Warning warning( this->verboseLevel );
-        warning << "--gpu accelerates only the method-1 ('--average-method 1') volume-averaged interpolation; method " << this->method << " will run on the CPU.\n" << MESSAGE::EndWarning;
+        warning << this->gpuRequest() << " accelerates only the method-1 ('--average-method 1') volume-averaged interpolation; method " << this->method << " will run on the CPU.\n" << MESSAGE::EndWarning;
     }
 #ifndef PHASE_SPACE
     if ( vm.count("subsamples") )
@@ -2557,6 +2678,12 @@ void User_options::readOptions(int argc, char *argv[], bool getFileNames, bool s
     po::variables_map vm;
     MESSAGE::Message showMessage(3);
     this->parseOptions( argc, argv, allOptions, p, vm, showMessage );
+#ifdef PHASE_SPACE
+    // first of the option checks, before the missing-file stop too: a removed choice is refused for itself (a call
+    // that asks for the help gets the help)
+    if ( not vm.count("help") and not vm.count("full-help") )
+        refuseRemovedPsOptions( vm );
+#endif
     this->checkFileNameOptions( argv, getFileNames, visibleOptions, vm, showMessage );
     checkConflictingOptions( vm );
     this->readMainOptions( vm );
@@ -2681,6 +2808,21 @@ void User_options::updateEntries(size_t const noTotalParticles,
             warning << "When computing the volume average of the fields on a redshift cone grid only volume averaging method 2 is available. The program will use volume averaging method '2 - Monte Carlo sampling using random points inside the grid cells' using '"<< noPoints <<"' random samples in each grid cell." << MESSAGE::EndWarning;
         }
     }
+#ifndef PHASE_SPACE
+    // a GPU the program picked (checkGpuOptions) runs method 1 alone: where user-given sampling points or a redshift
+    // cone grid took method 2 above (a cone given on the command line never meets the pick: gpuPathRuns), the pick
+    // takes the CPU without a warning, and the header's device line is replaced as its EXACT line is (an asked GPU
+    // stays as '--gpu' always has: method 2 never reads it)
+    if ( this->gpuPicked and this->method != 1 )
+    {
+        this->useMetal = false;
+        this->gpuPicked = false;
+        this->deviceLine = "CPU (the default: this average has no GPU path)";
+        MESSAGE::Message corrected( verboseLevel );
+        corrected << "\t '_a' interpolation     : CPU (the default: this average has no GPU path; this replaces "
+                  << "the header's GPU line)\n" << MESSAGE::Flush;
+    }
+#endif
     
     
     // check that the option "--partition" is disabled when dealing with redshift cone or used defined sampling coordinates

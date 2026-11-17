@@ -203,7 +203,7 @@ constant uint FX_DROP_MASS = 10u, FX_DROP_SUMW = 11u;   // ps_deposit_params.h F
 
 // One share v of a moment grid (component index 'at' = flat * comps + c): the fixed-point words when its fxMask
 // bit is set -- rint(v * scale), scale = 2^k so the float product is exact, the integer the host adds for the
-// same float (ps_deposit_params.h psFixedShare) -- else a float atomic. fxWords 2: the four limbs in place of the
+// same float (ps_deposit_params.h psFixedShareOk) -- else a float atomic. fxWords 2: the four limbs in place of the
 // two words (fixed_words.metal.inc addShare: below 2^63 units the same integer, as one signed 64-bit add), a share
 // at or above the cap counted.
 static inline void addMoment(device atomic_float* f, device atomic_uint* x, thread const FieldGrids& G, uint g,

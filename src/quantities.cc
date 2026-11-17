@@ -22,7 +22,7 @@
 
 
 /* Quantities member functions: copy/accumulate field results across partitions and (PS-DTFE) turn
-   summed density-weighted moments into mass-weighted means. */
+   the summed weighted moments into means. */
 
 #include <algorithm>
 #include <cmath>
@@ -183,8 +183,9 @@ void Quantities::finalizeHiddenStreams()
 
 
 #ifdef PHASE_SPACE
-// PS-DTFE partition path: partitions accumulate density-weighted moments sum(rho_s f_s) and per-cell
-// mass sum(rho_s); divide once here after all partitions are summed, since averaging is non-linear.
+// PS-DTFE partition path: partitions accumulate weighted moments sum(w_s f_s) and per-cell weights
+// sum(w_s) (the Eulerian-volume shares of the velocity family, the dispersion's own mass shares); divide once
+// here after all partitions are summed, since averaging is non-linear.
 // The weight is either the explicit mass_weight grid, or -- when the density field was selected and
 // the partitions aliased the weight to it -- reconstructed as density * weightFromDensityScale
 // (= density * cellVolume * averageDensity, undoing the rho/rho_bar conversion; saves 4 B/cell).
@@ -195,7 +196,7 @@ void Quantities::normalizePhaseSpace(Field const &field, Real const weightFromDe
     if ( fromDensity and (weightFromDensityScale <= Real(0.) or this->density.empty()) )
     {
         psFaceWordsRelease();   // (the word merge's face sums, if any: no gradient is made from them)
-        return;   // no mass-weighted field was deferred (or nothing to reconstruct it from)
+        return;   // no weighted moment was deferred (or nothing to reconstruct the weight from)
     }
     size_t const n = fromDensity ? this->density.size() : this->mass_weight.size();
     // velocity holds sum(rho v). A dispersion-only VOLUME-WEIGHTED run never allocates it --
@@ -220,7 +221,7 @@ void Quantities::normalizePhaseSpace(Field const &field, Real const weightFromDe
         Real const w = fromDensity ? this->density[i] * weightFromDensityScale : this->mass_weight[i];
         if ( w <= Real(0.) ) continue;
         Real const inv = Real(1.) / w;
-        if ( haveVel )                 this->velocity[i]          *= inv;   // <v> = sum(rho v)/sum(rho)
+        if ( haveVel )                 this->velocity[i]          *= inv;   // <v> = sum(w v)/sum(w)
         if ( field.velocity_gradient ) this->velocity_gradient[i] *= inv;
         if ( face )                    psFaceGradientCell( i );
         if ( field.scalar )            this->scalar[i]            *= inv;
@@ -243,7 +244,7 @@ void Quantities::normalizePhaseSpace(Field const &field, Real const weightFromDe
     }
     } );
 
-    // --ps-volume-weighted + dispersion: the dispersion carries MASS-weighted moments while
+    // the dispersion's own normalizer: the dispersion carries MASS-weighted moments while
     // 'velocity' above was normalized by the VOLUME weight, so it must be closed out with its
     // own mass-weighted mean -- a separate pass over its own normalizer.
     if ( field.velocity_dispersion and not this->disp_weight.empty() )

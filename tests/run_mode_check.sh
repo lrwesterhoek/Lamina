@@ -8,9 +8,18 @@
 # else none), base = min(N0, perf) where perf is known, else N0; gentle max(1, base/2), balanced
 # max(1, base - clamp(round(base/4), 1, 4)), performance N0. The header line checked is
 #   '\t run mode               : <mode> (<source>; <threads>[; GPU buffers up to <250|50> ms][; <priority>])'.
+# Every run that names no mode runs under tests/lib.sh's pin, DTFE_RUN_MODE=performance (the binaries' default of
+# before), and every run under its DTFE_GPU=0 (the CPU unless '--gpu', so no line gains a GPU buffers part); the
+# default cases (M1, M1b, M3) unset the mode's pin per run, and SLURM_JOB_ID and PBS_JOBID are unset for the whole
+# suite (M1b sets them per run).
 # CPU block (every build, both precisions):
-#   M1  no flag, with DTFE_RUN_MODE and OMP_NUM_THREADS unset, both binaries: 'performance (--run-mode performance,
-#       the default; N0 of N0 threads)'
+#   M1  no flag, with DTFE_RUN_MODE, SLURM_JOB_ID, PBS_JOBID and OMP_NUM_THREADS unset, both binaries: 'balanced
+#       (--run-mode balanced, the default; B of N0 threads)'
+#   M1b inside a batch job the default is performance, both binaries: SLURM_JOB_ID=1 reads 'performance (--run-mode
+#       performance, the default inside a batch job (SLURM_JOB_ID); N0 of N0 threads)', PBS_JOBID=1 the same with
+#       '(PBS_JOBID)', both set the SLURM_JOB_ID line; SLURM_JOB_ID and PBS_JOBID set but empty give M1's line;
+#       DTFE_RUN_MODE=gentle beats SLURM_JOB_ID=1 ('--run-mode gentle from DTFE_RUN_MODE=gentle'), and
+#       '--run-mode balanced' beats both
 #   M2  '--run-mode balanced' and '--run-mode gentle', both binaries: 'B of N0 threads' and 'G of N0 threads'; PS-DTFE's
 #       plan of '--partition 3 3 3' (DTFE_RAM_GB=64, DTFE_AUTO_MINN=1000, '--auto-tune-report') runs min(27, the
 #       budget) partitions at once, and its report line still ends with 'over_budget'
@@ -36,16 +45,17 @@
 #       build's CPU sums follow the thread count)
 #   M10 a run killed after 3 partitions under gentle (DTFE_TEST_EXIT_AFTER_PARTITIONS=3) resumes under '--resume
 #       --run-mode performance' to the uninterrupted outputs; its checkpoint's settings key has no 'run-mode' or
-#       'gpu-share' line
-#   M11 '--gpu-share 0.5' without '--gpu': one note ("does not apply to a run without '--gpu'"; a build without the
-#       GPU deposit names 'this CPU-only build' instead) and no key line; '--gpu-share auto' and '--gpu-share mixed'
-#       without '--gpu' are silent
+#       'gpu-share' line, and its device line is 'device=cpu' (DTFE_GPU=0)
+#   M11 '--gpu-share 0.5' on a run on the CPU (no '--gpu', DTFE_GPU=0): one note ("does not apply to a run on the
+#       CPU"; a build without the GPU deposit names 'this CPU-only build' instead) and no key line; '--gpu-share auto'
+#       and '--gpu-share mixed' there are silent
 # GPU block (a Metal build of the precision's pair; SKIP otherwise):
 #   G1  '--gpu --exact --partition 2 2 2 --max-concurrent 2', gentle against performance: 'GPU buffers up to 50 ms'
 #       against '250 ms', byte-identical grids, no CPU fallback
-#   G2  '--gpu-share 1' is the run without the flag (the outputs and the checkpoint key); '--gpu-share 0 --gpu' is the
-#       run without '--gpu'; '--gpu-share 0.5' twice: byte-identical, 'PS-DTFE: GPU share 0.50 (--gpu-share 0.5): 4 of
-#       the 8 partitions ...', 'gpu-share=500' in the key, no CPU fallback
+#   G2  '--gpu-share 1' is the run without the flag (the outputs and the checkpoint key, whose device line is
+#       'device=gpu'); '--gpu-share 0 --gpu' is the run without '--gpu'; '--gpu-share 0.5' twice: byte-identical,
+#       'PS-DTFE: GPU share 0.50 (--gpu-share 0.5): 4 of the 8 partitions ...', 'gpu-share=500' in the key, no CPU
+#       fallback
 #   G3  a 0.5 run killed after 3 partitions: '--resume --gpu-share 1' is refused, naming 'gpu-share=500'; '--resume
 #       --gpu-share auto --run-mode performance' takes the checkpoint's share ("the GPU share 0.50 is the
 #       checkpoint's") and writes the uninterrupted 0.5 run's outputs; a second such killed run resumed with
@@ -91,12 +101,15 @@ STD="$(cd "$(dirname "${DTFE_BIN}")" && pwd)/$(basename "${DTFE_BIN}")"
 TMP="${DTFE_TEST_TMP}/run_mode_check"
 rm -rf "$TMP"; mkdir -p "$TMP"
 TMP="$(cd "$TMP" && pwd -P)"
-# what the cases set themselves: the mode and the thread count (an export from a login shell would steer every run),
-# the GPU retry hooks, what moves the auto share off its formula (the float-sum variants, the mass audit, the
-# model's constant: src/auto_tune.cc autoTuneGpuShare), and what steers the plan and the dynamic concurrency (G8)
-unset DTFE_RUN_MODE OMP_NUM_THREADS OMP_THREAD_LIMIT DTFE_GPU_FAULT_AT DTFE_GPU_PACE_RECOVER_SEC PS_GPU_CHUNK \
+# what the cases set themselves: the thread count (an export from a login shell would steer every run), a batch job's
+# names (a suite run inside one: M1b sets them per run), the GPU retry hooks, what moves the auto share off its
+# formula (the float-sum variants, the mass audit, the model's constant: src/auto_tune.cc autoTuneGpuShare), and what
+# steers the plan and the dynamic concurrency (G8). The mode stays tests/lib.sh's pin, performance, for every run that
+# names none; the default cases unset it per run (UNPIN, the head of their RUN_ENV: env's options come first)
+unset OMP_NUM_THREADS OMP_THREAD_LIMIT SLURM_JOB_ID PBS_JOBID DTFE_GPU_FAULT_AT DTFE_GPU_PACE_RECOVER_SEC PS_GPU_CHUNK \
       DTFE_GPU_CHECKPOINT_CHUNKS DTFE_GPU_FLOAT_MOMENTS DTFE_GPU_FLOAT_MASS DTFE_MASS_AUDIT DTFE_GPU_SHARE_RHO \
       DTFE_DYNAMIC_CONCURRENCY DTFE_MEM_BUDGET_GB DTFE_MEM_FRACTION DTFE_TEST_PLAN_MC DTFE_AUTO_TUNE_DEBUG
+UNPIN=(-u DTFE_RUN_MODE)
 SNAP="$TMP/waves.hdf5"
 "$PY" tests/generate_ps_test_data.py --out "$SNAP" --n 16 --box 100 --crossed-waves --seed 7 >/dev/null \
     || { echo "FAIL data gen"; exit 1; }
@@ -170,7 +183,7 @@ has() { grep -aqF -- "$2" "$1"; }
 FALLBACK='using the CPU deposit|deposit unavailable|ran on the CPU instead|gave up'
 no_fallback() { ! grep -aqE "$FALLBACK" "$@"; }
 # the D19 texts and the not-applicable note (contract section 7)
-E_MODE="Unknown value 'fast' for '--run-mode'; use 'gentle', 'balanced' or 'performance' (the default)."
+E_MODE="Unknown value 'fast' for '--run-mode'; use 'gentle', 'balanced' (the default) or 'performance'."
 E_ENV="Unknown value 'fast' for DTFE_RUN_MODE; use gentle, balanced or performance (in any case), or leave it unset (or 'auto') for the default."
 e_share() { echo "Unknown value '$1' for '--gpu-share'; use a fraction from 0 to 1 (0.6: 60% of the partitions deposit on the GPU), 'auto' (the run mode's share) or 'mixed' (the GPU and the free cores in every run mode)."; }
 note_of() { echo "note: '--gpu-share $1' does not apply to $2: every partition deposits on $3."; }
@@ -179,14 +192,37 @@ mixed_line() { echo "PS-DTFE: GPU share $1 ($2): $3 of the $4 partitions to depo
 MIXED="partitions to deposit do so on the GPU, the other"
 
 A=(--input-format 105 --mpc-unit 1 --periodic --grid 16 --verbose 2 --field density_a velocity_a)
-DEF="--run-mode performance, the default"
+DEF="--run-mode balanced, the default"
+BATCH="--run-mode performance, the default inside a batch job"
 
-echo ">> M1: no flag, DTFE_RUN_MODE and OMP_NUM_THREADS unset"
+echo ">> M1: no flag, DTFE_RUN_MODE (tests/lib.sh's pin), SLURM_JOB_ID, PBS_JOBID and OMP_NUM_THREADS unset"
 for b in PS STD; do
     bin="$PS"; [ "$b" = STD ] && bin="$STD"
-    go "$TMP/M1_$b" "$bin" "${A[@]}" --auto-tune-report; rc=$?
-    [ "$rc" = 0 ] && is_mode "$TMP/M1_$b.log" "$(want performance "$DEF" "$(of_n "$N0")")"
-    check "M1 $b: 'run mode : performance ($DEF; $N0 of $N0 threads)' (exit $rc)" $?
+    RUN_ENV=("${UNPIN[@]}"); go "$TMP/M1_$b" "$bin" "${A[@]}" --auto-tune-report; rc=$?; RUN_ENV=()
+    [ "$rc" = 0 ] && is_mode "$TMP/M1_$b.log" "$(want balanced "$DEF" "$(of_n "$B")")"
+    check "M1 $b: 'run mode : balanced ($DEF; $B of $N0 threads)' (exit $rc)" $?
+done
+
+echo ">> M1b: inside a batch job (SLURM_JOB_ID or PBS_JOBID set and not empty) the default is performance"
+for b in PS STD; do
+    bin="$PS"; [ "$b" = STD ] && bin="$STD"
+    RUN_ENV=("${UNPIN[@]}" SLURM_JOB_ID=1);             go "$TMP/M1b_${b}_slurm" "$bin" "${A[@]}" --auto-tune-report; r1=$?
+    RUN_ENV=("${UNPIN[@]}" PBS_JOBID=1);                go "$TMP/M1b_${b}_pbs" "$bin" "${A[@]}" --auto-tune-report; r2=$?
+    RUN_ENV=("${UNPIN[@]}" SLURM_JOB_ID=1 PBS_JOBID=1); go "$TMP/M1b_${b}_both" "$bin" "${A[@]}" --auto-tune-report; r3=$?
+    RUN_ENV=("${UNPIN[@]}" SLURM_JOB_ID= PBS_JOBID=);   go "$TMP/M1b_${b}_empty" "$bin" "${A[@]}" --auto-tune-report; r4=$?
+    RUN_ENV=(SLURM_JOB_ID=1 DTFE_RUN_MODE=gentle);      go "$TMP/M1b_${b}_env" "$bin" "${A[@]}" --auto-tune-report; r5=$?
+    RUN_ENV=(SLURM_JOB_ID=1 PBS_JOBID=1 DTFE_RUN_MODE=gentle)
+    go "$TMP/M1b_${b}_flag" "$bin" "${A[@]}" --auto-tune-report --run-mode balanced; r6=$?
+    RUN_ENV=()
+    [ "$r1$r2$r3" = 000 ] && is_mode "$TMP/M1b_${b}_slurm.log" "$(want performance "$BATCH (SLURM_JOB_ID)" "$(of_n "$N0")")" \
+        && is_mode "$TMP/M1b_${b}_pbs.log" "$(want performance "$BATCH (PBS_JOBID)" "$(of_n "$N0")")" \
+        && is_mode "$TMP/M1b_${b}_both.log" "$(want performance "$BATCH (SLURM_JOB_ID)" "$(of_n "$N0")")"
+    check "M1b $b: SLURM_JOB_ID=1 and PBS_JOBID=1 are '$BATCH (<name>); $N0 of $N0 threads', both set name SLURM_JOB_ID (exit $r1, $r2, $r3)" $?
+    [ "$r4" = 0 ] && is_mode "$TMP/M1b_${b}_empty.log" "$(want balanced "$DEF" "$(of_n "$B")")"
+    check "M1b $b: SLURM_JOB_ID= and PBS_JOBID= (set, empty) give M1's line (exit $r4)" $?
+    [ "$r5$r6" = 00 ] && is_mode "$TMP/M1b_${b}_env.log" "$(want gentle "--run-mode gentle from DTFE_RUN_MODE=gentle" "$(of_n "$G")")" \
+        && is_mode "$TMP/M1b_${b}_flag.log" "$(want balanced "--run-mode balanced" "$(of_n "$B")")"
+    check "M1b $b: DTFE_RUN_MODE=gentle beats SLURM_JOB_ID=1, and '--run-mode balanced' beats both (exit $r5, $r6)" $?
 done
 
 echo ">> M2: --run-mode balanced and gentle"
@@ -213,8 +249,8 @@ for b in PS STD; do
     RUN_ENV=()
     [ "$r1" = 0 ] && is_mode "$TMP/M3_${b}_up.log" "$(want gentle "--run-mode gentle from DTFE_RUN_MODE=GENTLE" "$(of_n "$G")")"
     check "M3 $b: DTFE_RUN_MODE=GENTLE is '--run-mode gentle from DTFE_RUN_MODE=GENTLE' (exit $r1)" $?
-    [ "$r2$r3" = 00 ] && is_mode "$TMP/M3_${b}_auto.log" "$(want performance "$DEF" "$(of_n "$N0")")" \
-        && is_mode "$TMP/M3_${b}_empty.log" "$(want performance "$DEF" "$(of_n "$N0")")"
+    [ "$r2$r3" = 00 ] && is_mode "$TMP/M3_${b}_auto.log" "$(want balanced "$DEF" "$(of_n "$B")")" \
+        && is_mode "$TMP/M3_${b}_empty.log" "$(want balanced "$DEF" "$(of_n "$B")")"
     check "M3 $b: DTFE_RUN_MODE=auto and DTFE_RUN_MODE= give M1's line (exit $r2, $r3)" $?
 done
 
@@ -327,7 +363,7 @@ if [ "$LINUX" = 1 ]; then
     got="$(mode_of "$TMP/M8_nice15.log")"
     [ "$rc" = 0 ] && case "$got" in *"; nice $N15 kept)") true ;; *) echo "    run mode : '$got'"; false ;; esac
     check "M8 under 'nice -n 15' gentle ends with '; nice $N15 kept)' (exit $rc)" $?
-    no_nice "$TMP/M2_PS_balanced.log" && no_nice "$TMP/M1_PS.log"
+    no_nice "$TMP/M2_PS_balanced.log" && no_nice "$TMP/M4_PS.log"   # (M4: '--run-mode performance')
     check "M8 balanced and performance name no nice" $?
 else
     rc=0
@@ -373,14 +409,14 @@ go "$TMP/M10" "$PS" "${A[@]}" "${PSX[@]}" --resume --run-mode performance; r2=$?
 RUN_ENV=()
 [ "$r1" = 137 ] && [ "$r2" = 0 ] && has "$TMP/M10.log" "--resume: " && same "$TMP/M9a_PS_performance" "$TMP/M10"
 check "M10 killed after 3 partitions (exit $r1), resumed under --run-mode performance (exit $r2): the uninterrupted outputs" $?
-grep -q '^opt ' <<< "$KEY" && ! grep -qE 'run-mode|gpu-share' <<< "$KEY"
-check "M10 the checkpoint's settings key has no 'run-mode' or 'gpu-share' line" $?
+grep -q '^opt ' <<< "$KEY" && ! grep -qE 'run-mode|gpu-share' <<< "$KEY" && grep -qx 'device=cpu' <<< "$KEY"
+check "M10 the checkpoint's settings key has no 'run-mode' or 'gpu-share' line, and 'device=cpu' (DTFE_GPU=0)" $?
 
-echo ">> M11: --gpu-share without --gpu"
+echo ">> M11: --gpu-share on a run on the CPU (no --gpu, DTFE_GPU=0)"
 OBJ=o_ps; precision_double && OBJ=o_ps_d
 GPU=0
 if [ -d "$OBJ" ] && [ ! -f "$OBJ/.gpu_mode_off" ] && [ -n "$(gpu_backend_of "$OBJ")" ]; then GPU=1; fi
-WHY="a run without '--gpu'"; [ "$GPU" = 1 ] || WHY="this CPU-only build"   # the first cause that holds
+WHY="a run on the CPU"; [ "$GPU" = 1 ] || WHY="this CPU-only build"   # the first cause that holds
 RUN_ENV=(OMP_NUM_THREADS=2 DTFE_TEST_EXIT_AFTER_PARTITIONS=3)
 go "$TMP/M11" "$PS" "${A[@]}" "${PSX[@]}" --gpu-share 0.5; r1=$?
 RUN_ENV=(OMP_NUM_THREADS=2)
@@ -424,9 +460,9 @@ else
     [ -n "$k2" ] || no_checkpoint_why "$TMP/G2_k.log" "$TMP"; rm -rf "$TMP"/G2_k.*
     RUN_ENV=()
     [ "$r1$r2" = 00 ] && [ "$r3$r4" = 137137 ] && same "$TMP/G2_none" "$TMP/G2_one" && grep -q '^opt ' <<< "$k1" \
-        && [ "$k1" = "$k2" ] && [ "$(share_of "$TMP/G2_one.log")" = "1 (--gpu-share)" ]
+        && [ "$k1" = "$k2" ] && [ "$(share_of "$TMP/G2_one.log")" = "1 (--gpu-share)" ] && grep -qx 'device=gpu' <<< "$k1"
     rc=$?; [ "$rc" = 0 ] || diff <(echo "$k1") <(echo "$k2") | sed 's/^/      | /'
-    check "G2 '--gpu-share 1' is the run without it: the outputs and the checkpoint key (exit $r1, $r2; killed $r3, $r4)" $rc
+    check "G2 '--gpu-share 1' is the run without it: the outputs and the checkpoint key, 'device=gpu' (exit $r1, $r2; killed $r3, $r4)" $rc
     RUN_ENV=(OMP_NUM_THREADS=2)
     go "$TMP/G2_zero" "$PS" "${A[@]}" "${GX[@]}" --gpu-share 0; r1=$?
     go "$TMP/G2_cpu" "$PS" "${A[@]}" --exact --partition 2 2 2 --max-concurrent 2; r2=$?

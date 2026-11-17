@@ -14,6 +14,11 @@ PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 # outputs are float64; the text outputs most tests read are precision-free
 PRECISION = os.environ.get("DTFE_TEST_PRECISION", "single")
 DTFE_BIN = os.path.join(PROJECT_DIR, "DTFE-double" if PRECISION == "double" else "DTFE")
+# The run mode and the device, as tests/lib.sh pins them for the shell suites: these tests were written for the
+# program's earlier defaults (performance, and the CPU unless '--gpu'). Started by hand, the suite sets them here; a
+# value the caller set (tests/ci_suite.sh exports lib.sh's) is kept.
+os.environ.setdefault("DTFE_RUN_MODE", "performance")
+os.environ.setdefault("DTFE_GPU", "0")
 # DTFE_TEST_REFERENCE_DIR: where the regression reference lives (default tests/reference, which CI uses too:
 # see test_regression). A folder without one gets a reference written from the run, and the
 # regression is then a SKIP, never a pass: it compared nothing (tests/run_tests_check.sh R3)
@@ -151,7 +156,10 @@ def test_uniform_lattice_density(tmpdir):
     outfile = os.path.join(tmpdir, name)
     write_text_input(infile, particles, (0, box_size, 0, box_size, 0, box_size))
 
-    ok, out = run_dtfe(infile, outfile, grid_size=12, input_type=111)
+    # An OPEN box: the lattice's outer cells reach the dummy points beyond the padding, so the mean depends on the
+    # padding (0.47 at 5 mean spacings, 0.35 at 15). The bound below was set at 5, the binary's default then (now
+    # 15), so the run names it.
+    ok, out = run_dtfe(infile, outfile, grid_size=12, input_type=111, extra_args=["--padding", "5"])
     if not ok:
         report(name, False, "DTFE execution failed")
         return
@@ -556,10 +564,11 @@ def test_exact_average_convergence(tmpdir):
 # PERIODIC box of 1000 seeded random points (no exact ties: the Delaunay tessellation is unique, so every correct
 # CGAL builds the same one), the point-sampled density and the --exact cell average (no Monte Carlo: the
 # sampled density_a depends on insertion order -- 25% per cell when the input is shuffled), written as binary
-# floats (the text output keeps 6 digits).
+# floats (the text output keeps 6 digits). The reference was made at the binary's padding of 5 mean spacings, its
+# default then (now 15), so the run names it.
 REGRESSION_REF = "regression_periodic.txt"
 REGRESSION_ARGS = ["-i", "111", "-o", "101", "-g", "12", "-f", "density", "density_a", "--mpc-unit", "1",
-                   "--periodic", "--exact"]
+                   "--periodic", "--exact", "--padding", "5"]
 # Per value |new - ref| <= RTOL * |ref| (every density here is >= 0.35, so no absolute floor is needed). Measured on
 # the Mac, against this reference (max rel over the 2 x 1728 values, two seeds):
 #   the double build (no float rounding at all)       2.7e-5      one thread (another reduction order)   2.5e-5

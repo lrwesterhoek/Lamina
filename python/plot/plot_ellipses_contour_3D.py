@@ -24,8 +24,6 @@ style.apply()
 
 OUTPUT_DIR = config.figures_path('ellipses')
 
-SLICE_DIM = 0
-
 SCALE_FACTOR = 0.5
 USE_NMS = False
 

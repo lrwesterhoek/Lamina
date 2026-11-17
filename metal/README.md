@@ -1,7 +1,8 @@
 # GPU acceleration — the Metal deposit kernels
 
 For whoever builds or maintains the GPU backend. Two things run on the GPU: the PS-DTFE grid **deposit**
-and the standard-DTFE volume-averaged `_a` **interpolation**, both with `--gpu`. Both are data-parallel over
+and the standard-DTFE volume-averaged `_a` **interpolation**, both with `--gpu`, and without it where the program
+picks the GPU (PS-DTFE: a run with an `_a` field; standard DTFE: the exact average; `DTFE_GPU` under *Knobs*). Both are data-parallel over
 the ~10M tetrahedra of a partition and dominate the run time; the Delaunay triangulation (CGAL) and point evaluation
 stay on the CPU. Any failure (no device, compile, allocation, a deposit the retries give up on) falls back to the CPU
 with a warning, as do scalar fields of more than one component.
@@ -29,10 +30,10 @@ copy that keeps only `Foundation/` and `Metal/` (all that `Metal/Metal.hpp` incl
 
 Tests (GPU builds; the PS suites use the GPU when the `o_ps/` stamp says metal):
 - `tests/dtfe_metal_check.sh` (builds in the `o/.build_mode` mode, METAL=1 when that is empty): standard DTFE
-  CPU/GPU parity, a repeated GPU run, the per-tet A/B kernel, the shared grid, the exact average.
+  CPU/GPU parity, a repeated GPU run, the per-tet A/B kernel, the exact average.
 - `tests/gpu_scalar_check.sh` (the scalar fields, both binaries), `tests/gpu_mass_check.sh` (the exact mass grid),
   `tests/gpu_retry_check.sh` and `tests/dtfe_gpu_retry_check.sh` (checkpoints, retries by cause, pace recovery).
-- The PS suites with a `--gpu` part: `ps_linear_deposit_check.sh`, `ps_vertex_mass_check.sh`,
+- The PS suites with a `--gpu` part: `ps_deposit_check.sh`, `ps_vertex_mass_check.sh`,
   `ps_volume_weighted_check.sh`, `ps_halo_release_check.sh`, `ps_hidden_streams_check.sh`, `ps_caustic_class_check.sh`,
   `ps_window_check.sh`, `ps_mass_exact_check.sh`, `ps_fixed_moments_check.sh`, `point_exact_serve_check.sh`,
   `ps_face_gradient_check.sh` (P18: the face kernel), `python3 tests/ps_nonperiodic_test.py`, and `ps_double_check.sh`
@@ -54,7 +55,7 @@ CI builds no GPU backend (its runners are Linux): all of these are local.
 | `metal/exact_clip.metal.inc` | the exact tetrahedron-cell intersection moments (`sweep_moments`, a register-resident z-sweep) and the face-plane cell skip, prepended to both kernel sources |
 | `metal/fixed_words.metal.inc` | the run-wide 128-bit fixed-point words (`addShare`, `addLimbs63`, `shareLimbs`, `addLimbs`, `addLimbsN`: four 32-bit atomic limbs per component; `src/fixed_units.h` holds the units, the caps and the host's words), prepended to both kernel sources after `exact_clip.metal.inc` (and first in front of the face kernel's), and to the kernel harness's source and the offline build (`validate_deposit.cpp`, `build_prototype.sh`) |
 | `metal/validate_deposit.cpp`, `metal/build_prototype.sh` | the kernel harness and its build (offline-compiles `ps_deposit.metallib` (and `ps_face.metallib`, in the face kernel's safe math mode) when Xcode's Metal toolchain is installed, which only the harness loads; git-ignored) |
-| `src/CGAL_triangulation/gpu_host.h` | the host interface the callers see (deposit calls, `PSGpuGrids`, the shared-grid API `dtfeGpuShared*`, `psWindowHull`) and the PS host's plain-C++ steps |
+| `src/CGAL_triangulation/gpu_host.h` | the host interface the callers see (deposit calls, `PSGpuGrids`, `psWindowHull`) and the PS host's plain-C++ steps |
 | `src/CGAL_triangulation/ps_metal_host.cc`, `dtfe_metal_host.cc` | the Metal hosts: device and pipelines, the chunked dispatch controller, retries |
 | `src/CGAL_triangulation/gpu_metal_retry.h` | the two hosts' retry policy (snapshots, causes, pace, fault injection) and its pass loop `gpuRunPass` |
 | `src/CGAL_triangulation/ps_deposit_params.h`, `dtfe_gpu_fixed.h` | the per-tet record (`psFillTetRecord`) and the fixed-point units (`psMassFixedScale`, `psMomentFixedScale`, `PSFixedBounds`: a PS pass's own units, from bounds that run by default and, under `DTFE_PS_RUN_UNITS=1`, only for a grid without a run-wide unit; the host's share guard at the cap, `psFixedShareOk`; the standard grids' units) |
@@ -143,11 +144,7 @@ precomputes volumes, sample counts and single-cell indices with its own helpers,
   piece depositing the interpolant's centroid value and the gradients times its volume, one dispatch. Agrees with the
   CPU to float rounding (density 4e-7, velocity 7e-7, gradient 2e-6 of the peak on the 96^3 test box of
   `dtfe_metal_check.sh`).
-- **Sub-domains.** Each OpenMP sub-domain deposits its own sub-grid, serialized on the one queue. The alternative, one
-  full grid on the device for the whole call (`DTFE_GPU_SHARED=1`, `DTFE_GPU_SHARED_GB` cap), is tested but off: its
-  atomics' footprint on the full grid cost more than the zeroing and read-back it saves (2.1M at 512^3: 12.9 s against
-  10.6 s). It keeps float sums and sampled averages only, so under the exact default it engages only in a run that
-  samples (`--sampled`, or a sampling count).
+- **Sub-domains.** Each OpenMP sub-domain deposits its own sub-grid, serialized on the one queue.
 
 The sampled GPU grid agrees with the CPU's except in 0.1-0.2% of the cells, where a sample within float rounding of a
 cell face lands in the neighbouring cell (`dtfe_metal_check.sh`: means to 1e-5, cells to 5e-2 outside a 1e-3 fraction).
@@ -233,7 +230,7 @@ the remaining differences against the CPU are its float arithmetic (~1e-6 of the
 value (NaN, infinity, beyond 2^63 units; in the 128-bit words, at or above the share cap) is left out and counted,
 and the run warns per grid (`DTFE_TEST_NAN_SHARE`).
 A double build converts the words to double once. The float modes stay for A/B: `DTFE_GPU_FLOAT_MASS=1`,
-`DTFE_GPU_FLOAT_MOMENTS=1`, `DTFE_GPU_FLOAT_GRIDS=1` (and `DTFE_GPU_SHARED=1`),
+`DTFE_GPU_FLOAT_MOMENTS=1`, `DTFE_GPU_FLOAT_GRIDS=1`,
 all run-to-run variable at the ulp level. Each dispersion share
 w·v_i·v_j is a float32 product before the sum, as on the CPU path.
 
@@ -242,8 +239,8 @@ w·v_i·v_j is a float32 product before the sum, as on the CPU path.
 macOS kills command buffers when sustained GPU load starves the display
 (`kIOGPUCommandBufferCallbackErrorImpactingInteractivity`); a pipelined submission was killed even with ~0.1 s
 buffers, serialized submission with small gaps survives. So the hosts submit serialized chunks that adapt toward the
-run mode's target (README *Run mode*): ~0.25 s each in performance, the binaries' default, and ~0.05 s in gentle and
-balanced, the drivers' and the launcher's default (PS start 25 000 tetrahedra, 500 for the exact deposit;
+run mode's target (README *Run mode*): ~0.25 s each in performance, the default inside a batch job (`SLURM_JOB_ID` or
+`PBS_JOBID` set), and ~0.05 s in gentle and balanced, the default elsewhere (PS start 25 000 tetrahedra, 500 for the exact deposit;
 `PS_GPU_CHUNK`, `DTFE_GPU_CHUNK`; the opening chunk scales with the target against a 0.25 s reference, so a 50 ms base
 opens 5x smaller), with an ~8 ms gap in every mode. PS-DTFE's exact deposit caps a buffer's items by the run mode too:
 4M in performance, 500k in gentle and balanced. At 53 ms buffers a probe of the display path was never late by more
@@ -255,8 +252,8 @@ host snapshot of its grids at its start and every ~10 s of GPU work (`DTFE_GPU_C
 drains its queue with an empty buffer, as a killed buffer's atomics can land late; the PS host restores at once). An "innocent
 victim" error (another process hung the GPU) retries at once; a watchdog or memory error makes the process-wide pace
 4x shorter buffers with 3x wider gaps, easing back one notch after 90 s of clean GPU work
-(`DTFE_GPU_PACE_RECOVER_SEC`), never beyond the run mode's base (its line ends `(the default)` at 0.25 s / 8 ms,
-`(the run mode's)` at a shorter base). Three failures of one chunk, sixteen in one deposit or a lost device hand the partition
+(`DTFE_GPU_PACE_RECOVER_SEC`), never beyond the run mode's base (its line then ends
+`(the run mode's)`). Three failures of one chunk, sixteen in one deposit or a lost device hand the partition
 (standard DTFE: the sub-domain) to the CPU. `DTFE_GPU_FAULT_AT=<k>[:innocent|timeout|oom|persist]` makes the k-th buffer fail after it ran (the retry
 suites). Running with the display idle avoids the watchdog. Both hosts run their command buffers through ONE loop,
 `gpuRunPass` in `gpu_metal_retry.h` (`ps_metal_host.cc` `runChunked` per pass, `dtfe_metal_host.cc` `runBatch` per
@@ -289,9 +286,9 @@ the binaries compile, on its `FS_REGISTERS` form and on `metal/ps_face.metallib`
 
 Environment variables, read by the Metal hosts with the rule of the README's *Environment variables of the binaries*
 (an empty value is unset; a switch is off when set to `0`, `false`, `no` or `off`, on otherwise). One name per
-concept in both binaries; the Metal spellings of earlier releases (`*_METAL_*`) are no longer read. Two PS-DTFE knobs
-keep names of their own because standard DTFE's twins mean something else: `PS_GPU_CHUNK` (tetrahedra; standard
-`DTFE_GPU_CHUNK` counts work items) and `PS_GPU_DEBUG_NOATOMIC` (a switch; standard's is a level 1-3).
+concept in both binaries; the Metal spellings of earlier releases (`*_METAL_*`) are no longer read. One PS-DTFE knob
+keeps a name of its own because standard DTFE's twin means something else: `PS_GPU_CHUNK` (tetrahedra; standard
+`DTFE_GPU_CHUNK` counts work items).
 The older names of the renamed ones are deprecated, read for one release (one warning line at start-up) while the
 new name is unset: `PS_EXACT_ITEMS` and `PS_EXACT_ITEM_CELLS` (deprecated: `DTFE_GPU_ITEMS`, `DTFE_GPU_EXACT_CELLS`)
 and `PS_GPU_TIMING`, `PS_GPU_FLOAT_MASS`, `PS_GPU_FLOAT_MOMENTS` (deprecated: `DTFE_GPU_TIMING`, `DTFE_GPU_FLOAT_MASS`,
@@ -299,13 +296,12 @@ and `PS_GPU_TIMING`, `PS_GPU_FLOAT_MASS`, `PS_GPU_FLOAT_MOMENTS` (deprecated: `D
 
 | variable | effect | default |
 |---|---|---|
+| `DTFE_GPU` | both binaries, read with the options (not by the hosts, and not the build's `-DDTFE_GPU` macro): `0` keeps the CPU, `1` asks for the GPU as `--gpu` does (a build without a GPU backend falls back to the CPU with a warning); `--gpu` wins over it. The run log's device line names the device and its source | unset (or `auto`): the program picks -- on a GPU build PS-DTFE the GPU for a run with an `_a` field, standard DTFE the GPU for the exact average and the CPU for the sampled one |
 | `DTFE_GPU_ITEMS` | `0`: standard DTFE runs the per-tet kernel instead of the item kernels, PS-DTFE the one-thread-per-tetrahedron exact deposit (A/B) | on |
 | `DTFE_GPU_ITEM_SAMPLES=n` | samples per work item of the item kernels (4-100000) | 48 |
 | `DTFE_GPU_CACHE_K=2\|4\|8` | slots of the item kernels' per-thread cell cache | 2 |
 | `DTFE_GPU_TABLE` | `0` turns the threadgroup cell table off (evictions go to device atomics) | on |
 | `DTFE_GPU_EXACT_CELLS=n` | cells per item of the exact deposit (`--exact`, both binaries) | 16 |
-| `DTFE_GPU_SHARED` | one shared full grid on the device for the whole call (`--sampled` only, float sums) | off |
-| `DTFE_GPU_SHARED_GB` | the shared grid's cap in GB | 25% of RAM |
 | `DTFE_GPU_CHUNK` | standard DTFE: the opening chunk (the item kernels round it up to a multiple of 256) | 65536 items; per-tet kernel 25088 tetrahedra, exact 8192 items |
 | `PS_GPU_CHUNK` | PS-DTFE: the per-tet kernel's opening chunk in tetrahedra | 25000; exact deposit 500 |
 | `DTFE_GPU_TIMING` | standard DTFE: one line per batch, and the Morton order's cell sharing; PS-DTFE: one line per kernel run, the exact items and the checkpoints, and per partition how long its deposit waited for the GPU and held it, and where its time went: before the hold (device setup, plan, the exact items' bounds and map) and in it (uploads, kernels, pacing gaps, snapshots, leftovers, copy-back, releases) | off |
@@ -317,11 +313,6 @@ and `PS_GPU_TIMING`, `PS_GPU_FLOAT_MASS`, `PS_GPU_FLOAT_MOMENTS` (deprecated: `D
 | `DTFE_GPU_PACE_RECOVER_SEC=s` | clean GPU work after which an escalated pace eases back one notch, toward the run mode's base (0.25 s buffers in performance, 0.05 s in gentle and balanced) | 90 |
 | `DTFE_GPU_SHARE_RHO` | PS-DTFE `--gpu-share auto` in performance and `mixed` in every mode: the GPU's constant rho of the share model 1/(1 + rho (threads - 1.8)) (an M1 Max's GPU; a stronger GPU wants a smaller one), for development | 0.09 |
 
-For testing and debugging only: `DTFE_GPU_DEBUG_NOWRITE` (a timing experiment: every kernel does all its work but
-writes no grid), `DTFE_GPU_DEBUG_NOATOMIC=1|2|3` (timing: 1 issues no atomics in the final reduction, 2 also skips the
-gradient's reduction loop, 3 also the gradient's eviction atomics; the grids come out wrong), its PS-DTFE counterpart
-`PS_GPU_DEBUG_NOATOMIC=1` (timing, the atomics' share of the sampled kernel: every sample is classified and counted
-but none is deposited; the grids come out empty),
-`DTFE_GPU_FAULT_AT=k[:innocent|timeout|oom|persist]` (the k-th buffer fails after it ran, for the retry suites),
+For testing and debugging only: `DTFE_GPU_FAULT_AT=k[:innocent|timeout|oom|persist]` (the k-th buffer fails after it ran, for the retry suites),
 `DTFE_TEST_NAN_SHARE=k` (every k-th share becomes NaN, for the exact sums' guard), and the harness's `BENCH`, `DUMP_PROFILES`, `VALIDATE_FLOAT_MASS` (Build and
 test).

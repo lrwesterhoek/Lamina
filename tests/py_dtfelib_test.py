@@ -764,6 +764,85 @@ def t_outofcore_loading():
         shutil.rmtree(d)
 
 
+def t_estimator_stream_density():
+    """dtfelib.Estimator: stream_density='geometric' (removed from the binary) raises ValueError with the reason before
+    anything starts; 'dtfe' (the default) and 'linear' build the same command as before, '--ps-stream-density linear'.
+    No server starts: subprocess.Popen is stood in for, so no binary is needed."""
+    from dtfelib import estimator as E
+    work = Path(tempfile.mkdtemp(prefix="dtfelib_est_"))
+    try:
+        snap = work / "snap.hdf5"
+        snap.write_bytes(b"")
+        fake = str(work / "PS-DTFE")                # never run
+        try:
+            E.Estimator(snap, binary=fake, stream_density="geometric")
+        except ValueError as e:
+            assert str(e) == ("stream_density 'geometric' was removed: the per-stream density is the linear "
+                              "interpolation of the vertex densities ('dtfe', also spelled 'linear')"), str(e)
+        else:
+            raise AssertionError("stream_density='geometric' was accepted")
+
+        class Started(Exception):
+            pass
+        seen = []
+
+        def popen(cmd, *a, **k):
+            seen.append([str(c) for c in cmd])
+            raise Started()
+        real = E.subprocess.Popen
+        E.subprocess.Popen = popen
+        try:
+            for sd in ("dtfe", "linear"):
+                try:
+                    E.Estimator(snap, binary=fake, stream_density=sd)
+                except Started:
+                    pass
+        finally:
+            E.subprocess.Popen = real
+        want = ["--serve", "--input-format", "105", "--verbose", "0", "--periodic", "--ps-stream-density", "linear"]
+        assert len(seen) == 2 and all(c[:2] == [fake, str(snap)] and c[3:] == want for c in seen), seen
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def t_estimator_env():
+    """dtfelib.Estimator's env: the variables it names reach the binary on top of this process's environment (their
+    values as text), as the launcher pins its query server's DTFE_GPU with it (the binaries read DTFE_GPU and, without
+    it, pick their device themselves); none given, the binary inherits this environment as it is (env=None). The
+    command is the same either way. No server starts: subprocess.Popen is stood in for, so no binary is needed."""
+    from dtfelib import estimator as E
+    work = Path(tempfile.mkdtemp(prefix="dtfelib_est_env_"))
+    try:
+        snap = work / "snap.hdf5"
+        snap.write_bytes(b"")
+        fake = str(work / "PS-DTFE")                # never run
+
+        class Started(Exception):
+            pass
+        seen = []
+
+        def popen(cmd, *a, **k):
+            seen.append(([str(c) for c in cmd], k.get("env")))
+            raise Started()
+        real = E.subprocess.Popen
+        E.subprocess.Popen = popen
+        try:
+            for env in (None, {"DTFE_GPU": 1}):
+                try:
+                    E.Estimator(snap, binary=fake, env=env)
+                except Started:
+                    pass
+        finally:
+            E.subprocess.Popen = real
+        assert len(seen) == 2, seen
+        (c0, e0), (c1, e1) = seen
+        # (the command's third word is the server's own temporary folder, new each time)
+        assert c0[:2] + c0[3:] == c1[:2] + c1[3:] and "--gpu" not in c1, (c0, c1)
+        assert e0 is None and e1 == dict(os.environ, DTFE_GPU="1"), (e0, e1 and e1.get("DTFE_GPU"))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def t_caustic_field_loader():
     """FieldSet loads the 0/1 '.caustic' fold-flag grid written by 'PS-DTFE --ps-caustics'
     (synthetic files; the field is float32 like every grid, so no dtype column is needed)."""
@@ -2426,7 +2505,7 @@ def t_caustic_skeleton():
     fr = sk.fractions(cc, den)
     assert abs(sum(v["volume"] for v in fr["exclusive"].values()) - 1.0) < 1e-12 and abs(sum(v["mass"] for v in fr["exclusive"].values()) - 1.0) < 1e-12
     assert abs(fr["exclusive"]["none"]["volume"] - 1 / n ** 3) < 1e-15 and fr["cumulative"]["sheet"]["mass"] > fr["cumulative"]["sheet"]["volume"]
-    # a parity-only grid (--ps-caustics --ps-linear-deposit --gpu: the fold flag without collapse bits) is refused, alone
+    # a parity-only grid (an older --ps-caustics --ps-linear-deposit --gpu run's: the fold flag without collapse bits) is refused, alone
     # or as one det>0-parity cell in a full deposit; a parity bit WITH a collapse bit is an ordinary deposit.
     # A lone det<0 bit is legitimate (the geometric overlap, in a cell a folded tetrahedron overlaps but
     # no sample reached): read, as class 'none' and not a fold
@@ -2648,8 +2727,9 @@ def t_caustic_crossed_waves():
     then ${TMPDIR:-/tmp}/dtfe-tests): on pcc_out (CPU, no --ps-caustic-cusps) the nested
     cumulative masks, fold within sheet, more streams with every collapsed axis, a JSON-able summary, no cusp bits;
     on pcc_a4 (--ps-caustic-cusps) the cusp and swallowtail fractions are their own bits' and differ; pcc_nocusp
-    reads 'not computed'; the parity-only pcc_out_gpulin is refused. No pcc_out: FileNotFoundError -- a SKIP in the
-    data-backed tier, never a PASS that did not run; an absent sub-fixture is noted and skipped alone."""
+    reads 'not computed' (the parity-only refusal is the synthetic test's: no run writes such a grid any more). No
+    pcc_out: FileNotFoundError -- a SKIP in the data-backed tier, never a PASS that did not run; an absent sub-fixture
+    is noted and skipped alone."""
     import json, os
     from dtfelib import skeleton as sk
     from dtfelib.io import CAUSTIC_CUSP, CAUSTIC_SWALLOWTAIL
@@ -2717,16 +2797,6 @@ def t_caustic_crossed_waves():
             assert sk.skeleton_summary(np.rint(grid(nc, ".causticClass")).astype(np.int32))["cusp_bits_present"] is False
         else:
             print("    (no pcc_nocusp run: its 'not computed' check skipped)")
-        lin = find("pcc_out_gpulin", (".causticClass",))
-        if lin is not None:                 # --ps-caustics --ps-linear-deposit --gpu writes the fold flag alone
-            try:
-                sk.class_masks(np.rint(grid(lin, ".causticClass")).astype(np.int32))
-            except ValueError as e:
-                assert "parity-only" in str(e), e
-            else:
-                raise AssertionError("the parity-only pcc_out_gpulin grid was read as a stratification")
-        else:
-            print("    (no pcc_out_gpulin run (GPU only): the parity-only refusal on a real grid skipped)")
     except KeyError as e:
         raise AssertionError(f"KeyError {e}")
 
@@ -4468,6 +4538,10 @@ def main():
     check("find_critical_points' minimum/maximum box filters slab-threaded == scipy's serial filters bit "
           "for bit at 256^3 (synthetic)", t_threaded_critical_points)
     check("FieldSet caustic loader (synthetic)", t_caustic_field_loader)
+    check("Estimator: stream_density 'geometric' refused with the reason, 'dtfe' and 'linear' the same command "
+          "(synthetic)", t_estimator_stream_density)
+    check("Estimator: env reaches the binary over this environment (DTFE_GPU, as the launcher pins its server), none "
+          "leaves it as it is; the command the same (synthetic)", t_estimator_env)
     check("velocity_single_stream float-streams + hidden-streams mask (synthetic)", t_velocity_single_stream_float_mask)
     check("FieldSet velocity_scale u-units conversion (synthetic)", t_velocity_scale)
     check("run-log reader: the averaging spellings read by the binary, PS-DTFE's kept; the exact average's older "
@@ -4493,7 +4567,7 @@ def main():
     check("groupcat membership + particle ranges", t_groupcat_membership)
     check("environment box frame", t_environment_box)
     check("FieldSet velocity_single_stream (TNG50-4-Dark)", t_velocity_single_stream)
-    check("caustic skeleton on the crossed-waves runs (tests/ps_caustic_class_check.sh's output): nested masks, fold in sheet, streams rise with k; pcc_a4 cusp bits, pcc_nocusp 'not computed', pcc_out_gpulin refused", t_caustic_crossed_waves)
+    check("caustic skeleton on the crossed-waves runs (tests/ps_caustic_class_check.sh's output): nested masks, fold in sheet, streams rise with k; pcc_a4 cusp bits, pcc_nocusp 'not computed'", t_caustic_crossed_waves)
     print("-" * 60)
     return summary()
 

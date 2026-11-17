@@ -31,6 +31,11 @@ from _harness import REPO as ROOT, check_ok as check, setup, summary
 setup("gui_app_figs_", paths=("python/gui",), mpl_agg=False)    # BEFORE runspec is imported
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ["DTFE_GUI_NO_NOTIFY"] = "1"          # no desktop notifications from a test run
+# the program this suite starts itself (the partitioned query server that fills a tessellation cache): the binaries'
+# earlier defaults, as tests/lib.sh pins them for the shell suites (performance, the CPU unless '--gpu'); a caller's
+# own value stays. The launcher's jobs, its zoom and its server pin both themselves
+os.environ.setdefault("DTFE_RUN_MODE", "performance")
+os.environ.setdefault("DTFE_GPU", "0")
 REQUIRED = os.environ.get("DTFE_GUI_TEST_REQUIRED") == "1"
 
 try:
@@ -1497,14 +1502,15 @@ def _machine_use(qa, w, P):
     w.run_mode_combo.setCurrentIndex(w.run_mode_combo.findData("gentle"))
     qa.processEvents()
     gentle = (w.spec.run_mode, w.spec.mode().gpu, w.runs_on_note.text(), rs.shell(*w.spec.command()))
-    cpu = "Runs on: the CPU (chosen for Fast, Performance)" if dt_gpu else "Runs on: the CPU (this build has no GPU)"
+    cpu = lambda mode: (f"Runs on: the CPU (chosen for Fast, {mode})" if dt_gpu      # noqa: E731
+                        else "Runs on: the CPU (this build has no GPU)")
     check("Grids: a new machine use reaches the spec and the command (DTFE_RUN_MODE), and the device follows the "
-          "quality's table: standard DTFE's Fast leaves the GPU in performance (the CPU's there: the grey line says so) "
-          "and comes back to it in gentle (when built)",
-          start[0] == dt_gpu and start[1] == start[2]
-          and perf[:3] == ("performance", False, cpu) and " DTFE_RUN_MODE=performance " in f" {perf[3]} "
+          "quality's table: standard DTFE's Fast runs on the CPU in every machine use (balanced, performance and "
+          "gentle; the grey line says so), with no -m",
+          start[0] is False and start[1] == start[2] == cpu("Balanced")
+          and perf[:3] == ("performance", False, cpu("Performance")) and " DTFE_RUN_MODE=performance " in f" {perf[3]} "
           and (" -m " in f" {perf[3]} ") is False
-          and gentle[:2] == ("gentle", dt_gpu) and gentle[2].startswith("Runs on: the GPU") == dt_gpu
+          and gentle[:3] == ("gentle", False, cpu("Gentle")) and (" -m " in f" {gentle[3]} ") is False
           and " DTFE_RUN_MODE=gentle " in f" {gentle[3]} ", f"{start} {perf[:3]} {gentle[:3]}")
     w.ps_radio.setChecked(True)
     w.quality_pair.button("exact").setChecked(True)
@@ -1580,8 +1586,9 @@ def _custom_snapshot(qa, w, tmp, P):
           and w.custom.run_mode == "gentle" and w.o_run_mode.currentData() == "gentle", w.custom.input_file)
     w.custom = keep_custom
     w._load_into_widgets()
-    # the Custom tab's standard run pads with 15 mean spacings (the binary's own 5 leaves wrong values near the box
-    # faces); PS-DTFE keeps its own padding. The Quality pair stays as it is across an estimator switch
+    # the Custom tab's standard run pads with 15 mean spacings, named (the standard binary's own default too; an older
+    # binary's 5 leaves wrong values near the box faces); PS-DTFE keeps its own padding. The Quality pair stays as it
+    # is across an estimator switch
     w.o_dtfe.setChecked(True)
     qa.processEvents()
     cmd = w.cmd_view.toPlainText()
@@ -2760,8 +2767,9 @@ def _zoom_progress(w, tmp, x, img):
           ok and kw is not None and "resident" not in kw and "partition" not in kw and not hasattr(x, "resident")
           and "resident" not in x.state()
           and not [lab for lab in x.findChildren(QLabel) if "Partitions in memory" in lab.text()], str(kw))
-    check("... and the query server runs in balanced, beside the launcher (run_mode='balanced', D25)",
-          kw is not None and kw.get("run_mode") == "balanced", str(kw))
+    check("... and the query server runs in balanced, beside the launcher (run_mode='balanced', D25), with DTFE_GPU "
+          "pinned to 0, the device of its command (L2: it names no '--gpu'; a login shell's export must not reach it)",
+          kw is not None and kw.get("run_mode") == "balanced" and kw.get("env") == {"DTFE_GPU": "0"}, str(kw))
     x.server_state.setText(E.NO_SNAPSHOT_TEXT)
     x.restore_state({"snapshots": {}, "resident": 3})      # an older state, with the residency it once held
     check("a restore re-judges the server button (its stale 'no snapshot known' goes once the snapshot is known); an "
@@ -2856,7 +2864,7 @@ def _exact_zoom(w, tmp, x, img):
           and cmd[gi + 1 + geo[0]] == str(x.current.n) and all(int(cmd[gi + 1 + a]) >= 64 for a in geo[2])
           and grid_[geo[0]] == 1 and edges is not None, str(cmd))
     check("... which reuses the query server's tessellation cache folder, asks for the progress lines and runs "
-          "balanced (beside the launcher, not the binary's performance)",
+          "balanced, named (beside the launcher: the binary's own default is performance inside a batch job)",
           "--tessellation-cache" in cmd and cmd[cmd.index("--tessellation-cache") + 1] == str(tmp / "tess")
           and "--verbose" in cmd and cmd[cmd.index("--verbose") + 1] == "2"
           and cmd.count("--run-mode") == 1 and cmd[cmd.index("--run-mode") + 1] == "balanced", str(cmd))
@@ -3041,7 +3049,8 @@ def _exact_zoom_partitioned(qa, w, tmp, demo, root, cmd, x, sq):
     geo = x._geometry()
     cmd, root_, grid_, _e = x.exact_zoom_command(x.current, geo[0], geo[1], geo[2], (geo[3][0], geo[4][0]), (geo[3][1], geo[4][1]), 48)
     check("the exact zoom's command: the standard binary on the region, one slice cell thick, the exact average, "
-          "padded by the query server's 15 spacings (the binary's own 5 is too thin at the region's faces)",
+          "padded by the query server's 15 spacings, named (the standard binary's own default too; an older binary's 5 "
+          "is too thin at the region's faces)",
           cmd is not None and cmd[0].endswith("DTFE") and "--region-mpc" in cmd and "--exact" in cmd
           and cmd[cmd.index("--grid") + 1:cmd.index("--grid") + 4].count("1") == 1
           and "--padding" in cmd and cmd[cmd.index("--padding") + 1] == "15"

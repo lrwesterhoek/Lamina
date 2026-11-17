@@ -109,7 +109,8 @@ def block_mean_slice(a, step, weight=None):
     """Block means of a 2D slice over step x step cells (the edge blocks hold the remainder: no cell is dropped), and
     each block's centre in cell units (index + 0.5 for a cell). weight: a slice of the same shape, the WEIGHTED mean
     sum w a / sum w (the plain mean where a block's weights sum to 0) -- the density for a mass-weighted velocity
-    grid (FieldSet.velocity_weighting), so the coarse value is the one a coarser run of the same deposit gives.
+    grid (an older PS-DTFE run's: FieldSet.velocity_weighting), so the coarse value is the one a coarser run of the
+    same deposit gives.
     Returns (mean, centres along axis 0, centres along axis 1)."""
     a = np.asarray(a, dtype=np.float64)
     step = max(int(step), 1)
@@ -252,8 +253,8 @@ def get_cosmology_params(z, H0=67.74, Omega_m0=0.3089, Omega_Lambda0=0.6911):
 # <grad v> (dtfelib/io.py, the note above FIELDS): its divergence has a box mean of +40 km/s/Mpc at TNG100-3-Dark
 # z=1 (standard DTFE: 0, by Gauss) and its V-web finds 1.8% filaments against standard DTFE's 6.6%.
 # The functions below give a PS output the standard quantity -- the derivatives of the velocity GRID
-# itself ('a_vel', the stream-mean velocity: volume-weighted under --ps-volume-weighted, the production convention,
-# else the mass-weighted mean) -- by spectral (FFT) differentiation on the periodic box, in the binary's conventions:
+# itself ('a_vel', the stream-mean velocity: volume-weighted; the mass-weighted mean in an older run made without
+# --ps-volume-weighted) -- by spectral (FFT) differentiation on the periodic box, in the binary's conventions:
 #   gradient          9 components, c = a*3 + b holds dv_a/dx_b (field_computation.h velocityGradient writes
 #                     [j*3+i] = dv_j/dx_i; gui/explore.py reads it so); axis 0 of the grid is x, as the T-web's FFT
 #   divergence        dv_x/dx + dv_y/dy + dv_z/dz

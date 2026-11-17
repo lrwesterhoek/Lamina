@@ -20,6 +20,11 @@ from pathlib import Path
 from _harness import REPO as ROOT, check_ok as check, setup, summary
 
 FIGS_TMP = setup("runspec_figs_", paths=("python/gui",), mpl_agg=False)    # BEFORE runspec is imported
+# the programs this suite starts itself (the rigid rotation, the 64^2 == 16^3 tie): the binaries' earlier defaults, as
+# tests/lib.sh pins them for the shell suites (performance, the CPU unless '--gpu'); a caller's own value stays. The
+# launcher's jobs pin both themselves
+os.environ.setdefault("DTFE_RUN_MODE", "performance")
+os.environ.setdefault("DTFE_GPU", "0")
 
 import runspec as rs  # noqa: E402
 from dtfelib.estimator import STANDARD_PADDING  # noqa: E402
@@ -750,8 +755,8 @@ def gpu_branches(tmp: Path, snap: Path):
                   rs.gpu_built("ps") is built and rs.gpu_built("dtfe") is built
                   and rs.gpu_backend("ps") == ("Metal" if built else ""))
             # a job's device is its quality's: the drivers' automatic device on the build (the run modes' device
-            # table, D21), the GPU but for standard DTFE's Fast in performance and PS-DTFE's Fast on a small file (the
-            # header's particle count: a value read from the data); a saved GPU tick is dropped
+            # table, D21), the GPU but for standard DTFE's Fast in every machine use and PS-DTFE's Fast on a small file
+            # (the header's particle count: a value read from the data); a saved GPU tick is dropped
             small = tmp / "small32.hdf5"
             if not small.is_file():
                 import h5py
@@ -760,7 +765,7 @@ def gpu_branches(tmp: Path, snap: Path):
             dev = lambda spec: spec.mode().gpu                              # noqa: E731
             check(f"a job's device is its quality's, the drivers' automatic one ({built}): PS-DTFE's Exact and Fast "
                   "on the GPU in every machine use (Grids, Pipeline, Custom; a double Custom job as well), standard "
-                  "DTFE's Exact too, its Fast in gentle and balanced but not in performance; a Custom PS-DTFE Fast "
+                  "DTFE's Exact too, its Fast on the CPU in every machine use; a Custom PS-DTFE Fast "
                   "run of 32³ particles on the CPU (its Exact on the GPU), a 2D one never; a saved GPU tick is "
                   "dropped either way",
                   all(dev(rs.RunSpec(run_mode=m)) is built and dev(rs.PipelineSpec(run_mode=m)) is built
@@ -769,9 +774,8 @@ def gpu_branches(tmp: Path, snap: Path):
                       and dev(rs.CustomSpec(run_mode=m)) is built
                       and dev(rs.CustomSpec(quality="fast", run_mode=m)) is built
                       and dev(rs.RunSpec(estimator="dtfe", run_mode=m)) is built
-                      and dev(rs.RunSpec(estimator="dtfe", quality="fast", run_mode=m)) is (built and m != "performance")
-                      and dev(rs.CustomSpec(estimator="dtfe", quality="fast", run_mode=m)) is (built
-                                                                                             and m != "performance")
+                      and dev(rs.RunSpec(estimator="dtfe", quality="fast", run_mode=m)) is False
+                      and dev(rs.CustomSpec(estimator="dtfe", quality="fast", run_mode=m)) is False
                       for m in rs.RUN_MODES)
                   and dev(rs.CustomSpec(precision="double", quality="fast")) is built
                   and dev(rs.CustomSpec(input_file=str(small), quality="fast")) is False
@@ -797,15 +801,15 @@ def _device_checks(tmp: Path, snap: Path):
           not hasattr(rs, "gpu_advice"))
     rec = rs.recommended_gpu
     check("recommended GPU (the drivers' device table): PS-DTFE's exact deposit the GPU in every machine use, its "
-          "sampled one from ~1M particles, standard DTFE the GPU but for its sampled average in performance; "
-          "balanced when not given; all only when built",
+          "sampled one from ~1M particles, standard DTFE the GPU for its exact average and the CPU for its sampled "
+          "one in every machine use; balanced when not given; all only when built",
           all(rec("exact", ["density_a"], n, run_mode=m) == ps_gpu for n in (1000, 10 ** 8, None) for m in modes)
           and rec("sampled", ["density_a"], 32 ** 3) is False
           and rec("sampled", ["density_a"], 19_000_000) == ps_gpu and rec("sampled", ["density_a"], None) == ps_gpu
-          and all(rec(d, ["density_a"], 1e9, "dtfe", run_mode=m) == (dt_gpu and not (d == "sampled"
-                                                                                        and m == "performance"))
+          and all(rec(d, ["density_a"], 1e9, "dtfe", run_mode=m) == (dt_gpu and d == "exact")
                   for d in ("exact", "sampled") for m in modes)
-          and rec("sampled", ["density_a"], 1e9, "dtfe") == dt_gpu)
+          and rec("sampled", ["density_a"], 1e9, "dtfe") is False
+          and rec("exact", ["density_a"], 1e9, "dtfe") == dt_gpu)
     gpu_said = lambda spec: [m for level, m in spec.problems() if level == "warning" and "GPU" in m  # noqa: E731
                              and "METAL" not in m and "cusps" not in m]
     jobs = ([rs.RunSpec(sim="TNG50-4", snapshots=[99], estimator=e, quality=q, grid=512, run_mode=m,
@@ -818,9 +822,9 @@ def _device_checks(tmp: Path, snap: Path):
           str([gpu_said(j) for j in jobs if gpu_said(j)][:3]))
     dts = rs.RunSpec(sim="TNG50-4", snapshots=[99], estimator="dtfe", quality="fast", grid=512,
                      run_mode="performance", data_root=str(tmp))
-    check("... standard DTFE's Fast in performance runs on the CPU (faster there), in balanced on the GPU when built",
+    check("... standard DTFE's Fast runs on the CPU in performance and in balanced (every machine use), built or not",
           dts.mode().gpu is False and "-m" not in dts.command()[0]
-          and rs.RunSpec(estimator="dtfe", quality="fast").mode().gpu is dt_gpu, str(dts.command()[0]))
+          and rs.RunSpec(estimator="dtfe", quality="fast").mode().gpu is False, str(dts.command()[0]))
     dex = rs.RunSpec(sim="TNG50-4", snapshots=[99], estimator="dtfe", grid=256, data_root=str(tmp))
     cex = rs.CustomSpec(input_file=str(snap), estimator="dtfe", grid=256)
     csa = rs.CustomSpec(input_file=str(snap), estimator="dtfe", quality="fast").command()
@@ -832,8 +836,9 @@ def _device_checks(tmp: Path, snap: Path):
           and not any("faster" in m for _, m in dex.problems() + cex.problems()),
           str(cex.problems()))
     # the Custom tab's standard run starts at the exact cell average and pads
-    # with 15 mean spacings (dtfelib.estimator.STANDARD_PADDING, run_dtfe.sh's and the standard server's value) instead
-    # of the binary's 5, which leaves wrong values within a few spacings of a box face; PS-DTFE keeps its own padding
+    # with 15 mean spacings (dtfelib.estimator.STANDARD_PADDING, run_dtfe.sh's and the standard server's value, and the
+    # standard binary's own default), named: an older binary's 5 leaves wrong values within a few spacings of a box
+    # face; PS-DTFE keeps its own padding
     cd0, cd2 = (rs.CustomSpec(input_file=str(snap), estimator="dtfe").command(),
                 rs.CustomSpec(input_file=str(snap), estimator="dtfe", dim=2, quality="fast").command())
     cps = rs.CustomSpec(input_file=str(snap), estimator="ps").command()
@@ -965,12 +970,53 @@ def run_modes(tmp: Path):
     recs = [rec("", 100), rec(" --run-mode gentle", 300), rec(" --run-mode=balanced", 200), rec(" --run-mode performance", 120)]
     kw = dict(sim="S", grid=64, estimator="ps", gpu=False, sliced=False)
     check("run records: the machine use from the logged command ('--run-mode MODE' or '=MODE'; none: performance, the "
-          "binaries' default); a time estimate is per machine use (performance when not given); 'Load settings' "
+          "older binaries' default); a time estimate is per machine use (performance when not given); 'Load settings' "
           "leaves it out",
           [r.run_mode for r in recs] == ["performance", "gentle", "balanced", "performance"]
           and R.time_estimate(recs, **kw) == (110, 2) and R.time_estimate(recs, run_mode="gentle", **kw) == (300, 1)
           and R.time_estimate(recs, run_mode="balanced", **kw) == (200, 1) and "run_mode" not in recs[1].settings(),
           f"{[r.run_mode for r in recs]} {R.time_estimate(recs, **kw)}")
+    # the header's own lines first (L3): a binary that picks its device prints it wherever the device matters
+    # ("'_a' interpolation" / 'PS deposit', the GPU or the CPU: a value starting with 'CPU' is the CPU, else one holding
+    # ' GPU' the GPU) and a 'run mode' line on every run, whatever chose it; a log with neither (an older binary's) is
+    # read by its command as before: '--gpu', else the CPU; '--run-mode', else performance
+    lg = Path(tempfile.mkdtemp(prefix="gui_device_logs_"))     # (a folder of its own: not under the data root)
+    heads = {
+        "pick": ("RUNNING: /x/PS-DTFE in.hdf5 pick --grid 64 --exact --field density_a\n\n"
+                 "\t run mode               : balanced (--run-mode balanced, the default; 7 of 10 threads)\n"
+                 "\t PS deposit             : Metal GPU (the default; DTFE_GPU=0 keeps the run on the CPU)\n"),
+        "pin": ("RUNNING: /x/PS-DTFE in.hdf5 pin --grid 64 --exact --field density_a\n\n"
+                "\t run mode               : performance (--run-mode performance, the default inside a batch job "
+                "(SLURM_JOB_ID); 10 of 10 threads)\n"
+                "\t PS deposit             : CPU (DTFE_GPU=0)\n"),
+        "fell": ("RUNNING: /x/DTFE in.hdf5 fell --grid 64 --run-mode gentle --gpu --exact --field density_a\n\n"
+                 "\t run mode               : gentle (--run-mode gentle; 4 of 10 threads)\n"
+                 "\t '_a' interpolation     : CPU (--gpu given but this binary was built without GPU support; "
+                 "falling back)\n"),
+        "std": ("RUNNING: /x/DTFE in.hdf5 std --grid 64 --sampled --field density_a\n\n"
+                "\t run mode               : gentle (--run-mode gentle from DTFE_RUN_MODE=gentle; 4 of 10 threads)\n"
+                "\t '_a' interpolation     : CPU (the default for the sampled average; --gpu runs it on the GPU)\n"),
+        "asked": ("RUNNING: /x/DTFE in.hdf5 asked --grid 64 --exact --field density_a\n\n"
+                  "\t run mode               : balanced (--run-mode balanced, the default; 7 of 10 threads)\n"
+                  "\t '_a' interpolation     : Metal GPU (DTFE_GPU=1)\n"),
+        "old_gpu": "RUNNING: /x/PS-DTFE in.hdf5 old_gpu --grid 64 --gpu --field density_a\n",
+        "old_mode": "RUNNING: /x/PS-DTFE in.hdf5 old_mode --grid 64 --run-mode gentle --field density_a\n",
+        "old": "RUNNING: /x/PS-DTFE in.hdf5 old --grid 64 --field density_a\n"}
+    head_read = {}
+    try:
+        for name, text in heads.items():
+            _write_log(lg / f"{name}.runlog", text)
+            r = R.parse_runlog(lg / f"{name}.runlog")
+            head_read[name] = (r.gpu, r.run_mode)
+    finally:
+        shutil.rmtree(lg, ignore_errors=True)
+    check("run records: the device and the machine use from the header's lines first (a picked GPU and a batch "
+          "job's performance with no flag on the command; DTFE_GPU=0 and a build without the GPU read as the CPU, "
+          "the latter beside '--gpu'), else from the command (an older log: '--gpu', '--run-mode', none: the CPU, "
+          "performance)",
+          head_read == {"pick": (True, "balanced"), "pin": (False, "performance"), "fell": (False, "gentle"),
+                        "std": (False, "gentle"), "asked": (True, "balanced"), "old_gpu": (True, "performance"),
+                        "old_mode": (False, "gentle"), "old": (False, "performance")}, str(head_read))
     # ... and per quality: a Fast run must not predict an Exact one (the run tabs' and the queue's estimates pass the
     # job's, mode().deposit; the log's own word, RunRecord.exact: the header line, else '--exact' in the command)
     qrecs = [rec(" --exact", 400), rec(" --exact", 500), rec(" --sampled", 90), rec("", 110)]
@@ -1023,16 +1069,20 @@ def runs_on_line(tmp: Path):
                          and words(j) in t and t.startswith("Runs on: the CPU and the GPU together") == both(j)
                          and bool(rs.runs_on_tip(j)) == both(j) for t, j in texts)
                 cpu = [t for t, _ in texts if t.startswith("Runs on: the CPU (")]
-                # (the Grids job of standard DTFE's Fast in performance; the Custom jobs run balanced)
-                ok = ok and sorted(cpu) == ["Runs on: the CPU (chosen for Fast, Balanced, a small snapshot)",
+                # (the Grids jobs of standard DTFE's Fast in every machine use, the Custom one, which runs balanced,
+                # and PS-DTFE's Fast on the small file)
+                ok = ok and sorted(cpu) == ["Runs on: the CPU (chosen for Fast, Balanced)",
+                                            "Runs on: the CPU (chosen for Fast, Balanced)",
+                                            "Runs on: the CPU (chosen for Fast, Balanced, a small snapshot)",
+                                            "Runs on: the CPU (chosen for Fast, Gentle)",
                                             "Runs on: the CPU (chosen for Fast, Performance)"]
             else:
                 ok = all(t == "Runs on: the CPU (this build has no GPU)" and not rs.runs_on_tip(j) for t, j in texts)
             check(f"the 'Runs on' line ({build} build): the GPU exactly where the quality's device is the GPU (PS-DTFE's "
                   "Exact in performance: 'the CPU and the GPU together', the Device row's words, with the precise "
-                  "statement as its tooltip), the CPU for standard DTFE's Fast in performance and PS-DTFE's Fast on a "
-                  "small snapshot, with the quality and machine use it was chosen for; a CPU-only build says so; the "
-                  "2D programs too; no digit or '--'",
+                  "statement as its tooltip), the CPU for standard DTFE's Fast in every machine use and PS-DTFE's Fast "
+                  "on a small snapshot, with the quality and machine use it was chosen for; a CPU-only build says "
+                  "so; the 2D programs too; no digit or '--'",
                   ok and flat == "Runs on: the CPU (the 2D programs have no GPU)"
                   and not any(ch.isdigit() or "--" in t for t, _ in texts for ch in t),
                   str(sorted({t for t, _ in texts})))
@@ -1136,7 +1186,7 @@ def advanced_settings(tmp: Path):
         want("Custom PS Exact, CPU, partitions 4, concurrency 2, budget 40", (c.command(), c.run_env()),
              c.command() == head("PS-DTFE") + ["--exact", "--ps-volume-weighted", "--face-gradient", "--ps-merge",
                                                "index-order", "--partition", "4", "4", "4", "--max-concurrent", "2"]
-             and c.run_env() == {"DTFE_MEM_BUDGET_GB": "40", "DTFE_FACE_GRADIENT": ""}
+             and c.run_env() == {"DTFE_MEM_BUDGET_GB": "40", "DTFE_FACE_GRADIENT": "", "DTFE_GPU": "0"}
              and c.check_step().env == c.run_env())
         c = cust({"partition": 3}, dim=2)
         want("Custom PS 2D, partitions 3", c.command(),
@@ -1156,7 +1206,7 @@ def advanced_settings(tmp: Path):
         want("Custom DTFE Exact, partitions 2, budget 16", (c.command(), c.run_env()),
              c.command() == head("DTFE", f=std_f) + ["--gpu", "--exact", "--padding", "15", "--partition", "2", "2",
                                                      "2"]
-             and c.run_env() == {"DTFE_MEM_BUDGET_GB": "16", "DTFE_FACE_GRADIENT": ""}
+             and c.run_env() == {"DTFE_MEM_BUDGET_GB": "16", "DTFE_FACE_GRADIENT": "", "DTFE_GPU": "1"}
              and cust({"partition": 2}, estimator="dtfe", dim=2).command()[-3:] == ["--partition", "2", "2"])
         c = cust({"face_gradient": False})
         want("Custom PS Exact, the stream average", c.command(),
@@ -1282,7 +1332,7 @@ def advanced_settings(tmp: Path):
                                            cust({"gpu": False}, quality="fast"), run({"gpu": "mixed"}),
                                            cust({"gpu": "mixed"}, run_mode="gentle"), run({}, run_mode="performance"))]
     rounding = ("parallel triangulation: two identical runs still write the same single-precision grids to the byte, "
-                "but a double-precision job, the linear deposit and the point values differ at rounding")
+                "but a double-precision job and the point values differ at rounding")
     swap = "memory budget 100 GB is more than this machine's 64 GB: the run may swap"
     check("the checks list names a job's overrides in one info line ('Advanced: Device: CPU; Partitions: 4'), in one "
           "form for every row ('Name: value'), the budget in GB, a held stream average in the row's own words on a "
@@ -1420,7 +1470,8 @@ def advanced_settings(tmp: Path):
                 for k in rs.ADVANCED_KEYS}
         auto_fast = (rs.automatic_text(run({}, quality="fast"), "nsub"),
                      rs.automatic_text(run({}, quality="fast"), "face_gradient"),
-                     rs.automatic_text(run({}, estimator="dtfe", quality="fast", run_mode="performance"), "gpu"))
+                     rs.automatic_text(run({}, estimator="dtfe", quality="fast", run_mode="performance"), "gpu"),
+                     rs.automatic_text(run({}, estimator="dtfe", quality="fast"), "gpu"))    # (balanced: the CPU too)
     with fake_build("cpu"), double_pair(False):
         cpu_rows, cpu_gpu = rs.advanced_rows(run({})), rs.advanced_choices(run({}), "gpu")
     k = rs.ADVANCED_KEYS
@@ -1446,7 +1497,7 @@ def advanced_settings(tmp: Path):
                        "max_concurrent": "Automatic: the program plans them", "mem_budget_gb": "Automatic: the free memory",
                        "parallel_triangulation": "Automatic: the program's own rule",
                        "ordered_merge": "Automatic: index order", "precision": "Automatic: single"}
-          and auto_fast == ("Automatic: 1", "Automatic: the stream average", "Automatic: the CPU")
+          and auto_fast == ("Automatic: 1", "Automatic: the stream average", "Automatic: the CPU", "Automatic: the CPU")
           and not any(re.search(r"\d", t) for t in list(auto.values()) + list(rs.ADVANCED_ROW.values())),
           str((auto, auto_fast)))
 
@@ -1600,6 +1651,32 @@ def device_cpu_gpu(tmp: Path):
           and not any(errors.values()) and auto_note == "Automatic: the extra options name the device"
           and "--gpu" in plain.command() and after(plain.command(), "--gpu-share") == "auto",
           f"{cmds} {lines} {warned} {errors}")
+    # every program a Custom job starts gets DTFE_GPU pinned to the device its command names (runspec.gpu_pin_env: '1'
+    # with '--gpu', the tab's own or the extra options', or the older '--ps-gpu'; else '0'), in its run, its memory
+    # check and an exported script, a SLURM one too: the binaries read DTFE_GPU, and without it pick a device
+    # themselves, so a login shell's export must not move the one the tab shows
+    with fake_build("gpu"):
+        pins = {e: (s.run_env().get("DTFE_GPU"), s.check_step().env.get("DTFE_GPU")) for e, s in named.items()}
+        own = {name: s.run_env().get("DTFE_GPU") for name, s in (
+            ("PS Exact", cust({})), ("PS Fast", cust({}, quality="fast")), ("PS Exact, CPU", cust({"gpu": False})),
+            ("DTFE Exact", cust({}, estimator="dtfe")), ("DTFE Fast", cust({}, estimator="dtfe", quality="fast")),
+            ("2D", cust({}, dim=2)))}
+        exports = [rs.export_script(cust(adv).steps(), "t", **kw) for adv in ({}, {"gpu": False})
+                   for kw in ({}, {"slurm": {"job_name": "x"}})]
+    with fake_build("cpu"):
+        cpu_pin = cust({}).run_env().get("DTFE_GPU")
+    direct = [rs.gpu_pin_env(["PS-DTFE", "in", "out"] + a)["DTFE_GPU"]
+              for a in (["--gpu"], ["--ps-gpu"], ["--gpu-share", "0.5"], ["--gpu-share=0.5"], [])]
+    check("L2: a Custom job pins DTFE_GPU to its command's device in its run and its memory check ('1' with '--gpu', "
+          "the tab's own, the extra options' or the older '--ps-gpu'; '0' else: the CPU override, standard DTFE's "
+          "Fast, 2D, a GPU share alone, a CPU-only build), and the exported scripts (plain and SLURM) carry it",
+          pins == {"--gpu": ("1", "1"), "--ps-gpu --gpu-share=0.5": ("1", "1"), "--gpu-share mixed": ("0", "0")}
+          and own == {"PS Exact": "1", "PS Fast": "1", "PS Exact, CPU": "0", "DTFE Exact": "1", "DTFE Fast": "0",
+                      "2D": "0"}
+          and cpu_pin == "0" and direct == ["1", "1", "0", "0", "0"]
+          and [" DTFE_GPU=1 " in f" {x} " for x in exports] == [True, True, False, False]
+          and [" DTFE_GPU=0 " in f" {x} " for x in exports] == [False, False, True, True],
+          f"{pins} {own} {cpu_pin} {direct}")
     # ... but standard DTFE has no '--gpu-share': there it names no device, it is an error (the program refuses it)
     with fake_build("gpu"):
         std_share = cust({}, estimator="dtfe", extra_args="--gpu-share 0.5")
@@ -1619,8 +1696,8 @@ def device_cpu_gpu(tmp: Path):
 def finishing_round(tmp: Path):
     """The launcher's open points closed in the finishing round (2026-11-13): a refused Advanced setting leaves the
     memory key alone; a queue entry saved before the two modes gets a title in their words; the Custom tab's extra
-    '--ps-linear-deposit' is an error (the tab always passes the volume-weighted velocities, which the program refuses
-    beside it); the parallel insertion is not offered without TBB, its Automatic note says so; the full-resolution
+    options that name a removed PS-DTFE choice are an error each (the program refuses them at the start); the
+    parallel insertion is not offered without TBB, its Automatic note says so; the full-resolution
     grids are the most a run holds at once (a face run's face sums are gone before the derived fields and the web
     classes are made), so a 512^3 PS-DTFE job with the default fields and the web classes needs no scratch folder."""
     print("launcher: the finishing round's open points:")
@@ -1647,14 +1724,37 @@ def finishing_round(tmp: Path):
           q_old.title == rs.job_summary("grids", q_old.build()) and q_old.title.endswith(", Fast")
           and "nSub" not in q_old.title and q_new.title == "kept as saved", q_old.title)
     inp = str(tmp / "fin_in" / "toy.hdf5")
-    lin = [m for lvl, m in rs.CustomSpec(input_file=inp, extra_args="--ps-linear-deposit").problems()
-           if lvl == "error" and "--ps-linear-deposit" in m]
-    lin_std = [m for lvl, m in rs.CustomSpec(input_file=inp, estimator="dtfe",
-                                             extra_args="--ps-linear-deposit").problems() if "volume-weighted" in m]
-    check("Custom: '--ps-linear-deposit' among the extra options is an error in the checks (the tab always passes "
-          "'--ps-volume-weighted' for PS-DTFE, and the program refuses the pair at the start); not for standard DTFE",
-          len(lin) == 1 and "--ps-volume-weighted" in lin[0] and not lin_std
-          and "--ps-volume-weighted" in rs.CustomSpec(input_file=inp).command(), str(lin))
+    # the three PS-DTFE choices that were removed: each named among the extra options is one error line in the checks
+    # (the program refuses it at the start); the accepted values are none, and the command keeps the extra options
+    removed = {"--ps-linear-deposit": "--ps-linear-deposit",
+               "--ps-stream-density geometric": "--ps-stream-density geometric",
+               "--ps-point-conventions legacy": "--ps-point-conventions legacy",
+               "--pts-conventions legacy": "--ps-point-conventions legacy",
+               "--ps-stream-density=geometric": "--ps-stream-density geometric",
+               "--ps-point-conventions=legacy": "--ps-point-conventions legacy"}
+    gone = {extra: [m for lvl, m in rs.CustomSpec(input_file=inp, extra_args=extra).problems()
+                    if lvl == "error" and "removed" in m] for extra in removed}
+    bad = {extra: got for extra, got in gone.items()
+           if got != [f"the extra options' {removed[extra]} was removed from the program: take it out"]}
+    kept = [m for lvl, m in rs.CustomSpec(input_file=inp, extra_args="--ps-stream-density linear "
+                                                                      "--ps-point-conventions grid").problems()
+            if "removed" in m]
+    all3 = [m for lvl, m in rs.CustomSpec(input_file=inp, extra_args="--ps-point-conventions legacy "
+                                          "--ps-stream-density geometric --ps-linear-deposit").problems()
+            if lvl == "error" and "removed" in m]
+    std = [m for lvl, m in rs.CustomSpec(input_file=inp, estimator="dtfe", extra_args="--ps-linear-deposit").problems()
+           if "removed" in m]
+    cmd = rs.CustomSpec(input_file=inp, extra_args="--ps-linear-deposit").command()
+    check("Custom: a removed choice among the extra options ('--ps-linear-deposit', '--ps-stream-density geometric', "
+          "'--ps-point-conventions legacy', also as '--pts-conventions legacy' and with '=') is one error line each in "
+          "the checks, all three in the table's order; 'linear' and 'grid' are none, nor is a standard-DTFE job's "
+          "'--ps-linear-deposit'; the command still carries the extra options and the volume weighting",
+          not bad and not kept and not std
+          and all3 == [f"the extra options' {c} was removed from the program: take it out"
+                       for c in ("--ps-linear-deposit", "--ps-stream-density geometric",
+                                 "--ps-point-conventions legacy")]
+          and "--ps-linear-deposit" in cmd and "--ps-volume-weighted" in cmd,
+          f"{bad} {kept} {std} {all3}")
     with fake_stamps(lambda est, prec, dim: [".gpu_mode_metal" if dim == 3 else ".gpu_mode_off"]):   # no TBB
         no_tbb = (rs.advanced_choices(run({}), "parallel_triangulation"),
                   rs.automatic_text(run({}), "parallel_triangulation"),
@@ -1727,7 +1827,9 @@ def two_quality_modes(tmp: Path):
     # today's job with the sampled cell average at the removed controls' defaults (Fast; its count one point per cell
     # axis, the program's default since 2026-11-14), copied from the launcher before the two modes, for a made-up
     # simulation on a GPU build (Metal) and a CPU-only one. Refreshed since for the knobs' older names: the jobs no
-    # longer set a second copy under the older name, except AVG_SUBSAMPLES pinned empty beside an empty SUBSAMPLES
+    # longer set a second copy under the older name, except AVG_SUBSAMPLES pinned empty beside an empty SUBSAMPLES;
+    # and for the programs that pick their device: standard DTFE's Fast on the CPU in every machine use (the drivers'
+    # rule too), a Custom job's DTFE_GPU pinned to the device its command names
     root = str(tmp / "golden")
     ps_common = {"DTFE_DATA_ROOT": root, "DTFE_FACE_GRADIENT": "", "DTFE_RESUME": "1", "DTFE_RUN_MODE": "balanced",
                  "FIELDS": "density_a velocity_a divergence_a shear_a", "GPU_SHARE": "auto",
@@ -1772,7 +1874,7 @@ def two_quality_modes(tmp: Path):
                 "Grids DTFE Exact": (run(estimator="dtfe"), ([dt, "-s", "Toy-64", "-g", "512", *m, "-e", "1", "3"],
                                                              dt_env("1", on, "balanced"))),
                 "Grids DTFE Fast": (run(estimator="dtfe", quality="fast"),
-                                    ([dt, "-s", "Toy-64", "-g", "512", *m, "1", "3"], dt_env("0", on, "balanced"))),
+                                    ([dt, "-s", "Toy-64", "-g", "512", "1", "3"], dt_env("0", "0", "balanced"))),
                 "Grids DTFE Fast, performance": (run(estimator="dtfe", quality="fast", run_mode="performance"),
                                                  ([dt, "-s", "Toy-64", "-g", "512", "1", "3"],
                                                   dt_env("0", "0", "performance"))),
@@ -1781,11 +1883,11 @@ def two_quality_modes(tmp: Path):
                 "Custom PS Exact": ((cust().command(), cust().run_env()),
                                     (custom_head("PS-DTFE") + ["--exact", *g, "--ps-volume-weighted", "--face-gradient"]
                                      + (["--gpu-share", "auto"] if g else []) + ["--ps-merge", "index-order"],
-                                     {"DTFE_FACE_GRADIENT": ""})),
+                                     {"DTFE_FACE_GRADIENT": "", "DTFE_GPU": on})),
                 "Custom PS Fast": ((cust(quality="fast").command(), cust(quality="fast").run_env()),
                                    (custom_head("PS-DTFE") + ["--sampled", "--subsamples", "1", *g,
                                                               "--ps-volume-weighted", "--ps-merge", "index-order"],
-                                    {"DTFE_FACE_GRADIENT": ""})),
+                                    {"DTFE_FACE_GRADIENT": "", "DTFE_GPU": on})),
                 "Custom DTFE Exact, performance": (
                     (cust(estimator="dtfe", run_mode="performance").command(), {"DTFE_FACE_GRADIENT": ""}),
                     (custom_head("DTFE", "performance", std_f) + [*g, "--exact", "--padding", "15"],
@@ -1794,10 +1896,11 @@ def two_quality_modes(tmp: Path):
                     (cust(estimator="dtfe", quality="fast", run_mode="performance").command(),
                      cust(estimator="dtfe", quality="fast", run_mode="performance").run_env()),
                     (custom_head("DTFE", "performance", std_f) + ["--sampled", "--padding", "15"],
-                     {"DTFE_FACE_GRADIENT": ""})),
+                     {"DTFE_FACE_GRADIENT": "", "DTFE_GPU": "0"})),
                 "Custom PS 2D Exact": ((cust(dim=2).command(), cust(dim=2).run_env()),
                                        (custom_head("PS-DTFE-2d") + ["--exact", "--ps-volume-weighted", "--ps-merge",
-                                                                     "index-order"], {"DTFE_FACE_GRADIENT": ""})),
+                                                                     "index-order"],
+                                        {"DTFE_FACE_GRADIENT": "", "DTFE_GPU": "0"})),
             }
         bad_cases += [f"{kind} build, {name}: {got} != {want}" for name, (got, want) in cases.items()
                       if (list(got[0]), dict(got[1])) != want]
@@ -1828,9 +1931,12 @@ def two_quality_modes(tmp: Path):
           not leaks and '"sampled" if quality == "fast" else "exact"' in mode_src
           and all("mode()" in inspect.getsource(f) for f in (rs.RunSpec.command, rs.PipelineSpec.command,
                                                              rs.CustomSpec._own_command, rs.ps_run_env)), str(leaks))
-    stub = rs.QualityMode(deposit="sampled", nsub=5, gpu=True, face_gradient=True, volume_weighted=False,
-                          vertex_mass=False, linear_deposit=True, parallel_triangulation=True, ordered_merge=False,
-                          pts_conventions="legacy")
+    # (the stand-in changes only the settings PS-DTFE still has: the linear deposit and the legacy plane conventions
+    # were removed from it, and the jobs keep their pins PS_LINEAR_DEPOSIT=0 and PS_POINT_CONVENTIONS=grid)
+    import dataclasses
+    stub = dataclasses.replace(rs.quality_mode("exact"), deposit="sampled", nsub=5, gpu=True, face_gradient=True,
+                               vertex_mass=False, parallel_triangulation=True,
+                               ordered_merge=False)
     real = rs.quality_mode
     rs.quality_mode = lambda *a, **k: stub
     try:
@@ -1841,19 +1947,20 @@ def two_quality_modes(tmp: Path):
         dargv = rs.RunSpec(data_root=root, sim="Toy-64", snapshots=[1], estimator="dtfe").command()[0]
     finally:
         rs.quality_mode = real
-    check("... and changing quality_mode alone changes every job: a stand-in mode (sampled at 5, the GPU, no volume "
-          "weighting, the linear deposit, the parallel insertion, the completion-order merge, legacy planes) reaches "
-          "the Grids, Pipeline and Custom commands and environments of an 'exact' job; a Custom job's initial "
-          "positions stay its own",
-          argv[-4:] == ["-n", "5", "-m", "1"] and "-e" not in argv and env["PS_VOLUME_WEIGHTED"] == "0"
-          and env["PS_VERTEX_MASS"] == "0" and env["PS_LINEAR_DEPOSIT"] == "1" and env["PARALLEL_TRIANGULATION"] == "1"
+    check("... and changing quality_mode alone changes every job: a stand-in mode (sampled at 5, the GPU, the "
+          "parallel insertion, the completion-order merge) reaches the Grids, Pipeline and Custom "
+          "commands and environments of an 'exact' job, which keep the pins PS_LINEAR_DEPOSIT=0, "
+          "PS_VOLUME_WEIGHTED=1 and PS_POINT_CONVENTIONS=grid and pass no removed choice; a Custom job's initial positions stay its own",
+          argv[-4:] == ["-n", "5", "-m", "1"] and "-e" not in argv and env["PS_VOLUME_WEIGHTED"] == "1"
+          and env["PS_VERTEX_MASS"] == "0" and env["PS_LINEAR_DEPOSIT"] == "0" and env["PARALLEL_TRIANGULATION"] == "1"
           and env["PS_MERGE"] == "completion-order" and env["FACE_GRADIENT"] == "" and env["DTFE_GPU"] == "1"
-          and env["PS_POINT_CONVENTIONS"] == "legacy" and env["DTFE_EXACT_AVERAGE"] == "0"
+          and env["PS_POINT_CONVENTIONS"] == "grid" and env["DTFE_EXACT_AVERAGE"] == "0"
           and penv["SUBSAMPLES"] == "5" and penv["DTFE_GPU"] == "1" and penv["PS_MERGE"] == "completion-order"
+          and penv["PS_LINEAR_DEPOSIT"] == "0" and penv["PS_POINT_CONVENTIONS"] == "grid"
           and carg[carg.index("--sampled"):carg.index("--sampled") + 4] == ["--sampled", "--subsamples", "5", "--gpu"]
-          and "--ps-volume-weighted" not in carg and "--parallel-triangulation" in carg
-          and "--ps-linear-deposit" in carg and carg[carg.index("--ps-merge") + 1] == "completion-order"
-          and carg[carg.index("--ps-point-conventions") + 1] == "legacy" and "--gpu-share" not in carg
+          and "--ps-volume-weighted" in carg and "--parallel-triangulation" in carg
+          and "--ps-linear-deposit" not in carg and carg[carg.index("--ps-merge") + 1] == "completion-order"
+          and "--ps-point-conventions" not in carg and "--gpu-share" not in carg
           and "--ps-vertex-mass" not in carg and "--ps-vertex-mass" in cvm
           and dargv == [str(rs.DTFE_SCRIPT), "-s", "Toy-64", "-g", "512", "-m", "1"],
           f"{argv} {env} {carg}")
@@ -1933,11 +2040,12 @@ def driver_device_table():
                         procs[(stamp, est, dep, mode)] = subprocess.Popen(
                             [str(repo / "scripts" / script), "-s", "SIM", "-g", "16", "99"], env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        wrong = []
+        wrong, plans = [], {}
         for (stamp, est, dep, mode), p in procs.items():
             out, _ = p.communicate(timeout=120)
             line = next((ln for ln in out.splitlines() if _re.match(r"^ +\./(PS-)?DTFE\s", ln)), None)
             planned = None if line is None else bool(_re.search(r"\s--(ps-)?gpu(\s|$)", line))
+            plans[(stamp, est, dep, mode)] = planned
             rs._objdir = (lambda estimator, precision="single", dim=3, repo=base / stamp:
                           repo / real(estimator, precision, dim).name)
             quality = "exact" if dep == "exact" else "fast"
@@ -1948,6 +2056,12 @@ def driver_device_table():
                              + ("" if line else f": {out.strip().splitlines()[-1:] or ''}") + f"), launcher {gui}")
         check("a job's device (its quality's) and the recommended GPU are the drivers' DRY_RUN device for every "
               "estimator, deposit, machine use and stamp (metal, off, none)", not wrong, "; ".join(wrong[:4]))
+        # (the two copies agreeing is not enough: the rule itself, on a GPU build)
+        std = {(dep, mode): plans.get(("metal", "dtfe", dep, mode))
+               for dep in ("exact", "sampled") for mode in rs.RUN_MODES}
+        check("... on a GPU build the drivers plan standard DTFE's exact average on the GPU and its sampled one on the "
+              "CPU, in every machine use",
+              std == {(dep, mode): dep == "exact" for dep in ("exact", "sampled") for mode in rs.RUN_MODES}, str(std))
     finally:
         rs._objdir = real
         for p in procs.values():
@@ -2221,9 +2335,13 @@ def _custom_snapshot(tmp, np, P):
                 with fake_build(kind):
                     emitted |= {a for a in spec.command() if a.startswith("--")}
         known = set(ps_help) | set(dt_help)
-        unknown = sorted(emitted - known)
-        check("every binary flag a custom-snapshot command can emit exists in the binaries' help",
-              not unknown, str(unknown))
+        # ('--ps-volume-weighted' apart: PS-DTFE accepts it and lists it in no help, and every PS-DTFE command of the
+        # launcher carries it)
+        unknown = sorted(emitted - known - {"--ps-volume-weighted"})
+        check("every binary flag a custom-snapshot command can emit exists in the binaries' help; "
+              "'--ps-volume-weighted', accepted and not listed there, is on the PS-DTFE commands",
+              not unknown and "--ps-volume-weighted" in emitted and "--ps-volume-weighted" not in known,
+              str(unknown))
         script = (ROOT / "scripts" / "run_ps_dtfe.sh").read_text()
         knobs = set(_re.findall(r'^([A-Z_]+)="\$\{\1:-', script, _re.M))
         # a knob's older names, read for one release through config.sh's resolver (P6.7):
@@ -2678,7 +2796,7 @@ def _presets_help(sim, P, R):
     real = P.flag_help("PS-DTFE")
     if real:
         check("the binary's own --full_help: every production flag has a description",
-              all(real.get(f) for f in ("--ps-vertex-mass", "--ps-volume-weighted", "--ps-caustics", "--grid",
+              all(real.get(f) for f in ("--ps-vertex-mass", "--ps-caustics", "--grid",
                                         "--serve", "--ps-per-stream-lagrangian", "--pts-scalar")), str({k: bool(v) for k, v in real.items()}))
     else:
         print("   SKIP  flag_help (PS-DTFE not built)")
@@ -3852,7 +3970,7 @@ def pipeline_options(tmp: Path, sim: Path):
     stray = lambda e: [k for k in older_names if k in e                                  # noqa: E731
                        and not (k == "AVG_SUBSAMPLES" and e[k] == "" and e.get("SUBSAMPLES") == "")]
     tq = rs.PipelineSpec(**base, tess_cache="/private/tmp/t", window="10 60 0 25").command()[1]
-    with fake_build("gpu"):         # (the GPU in both: Exact for PS-DTFE, Fast for standard DTFE in balanced)
+    with fake_build("gpu"):         # (PS-DTFE's Exact on the GPU; standard DTFE's Fast on the CPU in every machine use)
         g_ps = rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99],
                           slice_plane="/x.bin", tess_cache="/private/tmp/t", start_over=True).command()[1]
         g_dt = rs.RunSpec(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[99], estimator="dtfe", quality="fast",
@@ -3867,7 +3985,7 @@ def pipeline_options(tmp: Path, sim: Path):
           and g_ps["DTFE_EXACT_AVERAGE"] == "1" and g_ps["DTFE_GPU"] == "1" and g_ps["DTFE_RESUME"] == "0"
           and g_ps["PS_POINT_CONVENTIONS"] == "grid" and g_ps["PS_MERGE"] == "index-order"
           and g_ps["TESSELLATION_CACHE"] == "/private/tmp/t"
-          and (g_dt["DTFE_EXACT_AVERAGE"], g_dt["DTFE_GPU"]) == ("0", "1")
+          and (g_dt["DTFE_EXACT_AVERAGE"], g_dt["DTFE_GPU"]) == ("0", "0")
           and g_dt["TESSELLATION_CACHE"] == "/private/tmp/t" and "PS_MERGE" not in g_dt,
           f"{stray(env)} {stray(tq)} {stray(g_ps)} {stray(g_dt)}")
     lines = [rs.shell(*job.command()) for job in (rs.PipelineSpec(**base, window="10 60 0 25", tess_cache="/t"),
@@ -4512,6 +4630,22 @@ def run_log_contract():
               and all(k in rs.RunSpec.__dataclass_fields__ or k in rs.REMOVED_SETTINGS
                       for k in rs.migrate_quality(fg.settings())),
               f"{fg.settings()} {fg.options_text()!r} {fh.header_gradient!r} {again.header_gradient!r}")
+        # the volume weighting in 'Load settings' and the Options column: the header's 'velocity moments' line (every
+        # PS-DTFE run prints it, with or without '--ps-volume-weighted' on its command), else the flag (an older log);
+        # an older log with neither is a mass-weighted run: the box off, no such label
+        _write_log(d / "vh.runlog", "RUNNING: /x/PS-DTFE in.hdf5 vh --grid 64\n\n"
+                   "\t velocity moments       : volume-weighted (the dispersion mass-weighted)\n")
+        _write_log(d / "vf.runlog", "RUNNING: /x/PS-DTFE in.hdf5 vf --grid 64 --ps-volume-weighted\n")
+        vh, vf = R.parse_runlog(d / "vh.runlog"), R.parse_runlog(d / "vf.runlog")
+        check("settings(): the volume weighting from the header's 'velocity moments' line (no flag on the command) and "
+              "from '--ps-volume-weighted' (an older log): the box on, 'volume-weighted' in the Options column; an older "
+              "log with neither: the box off, no such label",
+              vh.settings().get("volume_weighted") is True and vf.settings().get("volume_weighted") is True
+              and std.settings().get("volume_weighted") is False
+              and "volume-weighted" in vh.options_text() and "volume-weighted" in vf.options_text()
+              and "volume-weighted" not in std.options_text(),
+              f"{vh.settings().get('volume_weighted')} {vf.settings().get('volume_weighted')} "
+              f"{std.settings().get('volume_weighted')} {vh.options_text()!r} {std.options_text()!r}")
         # a standard-DTFE run's cell average reaches 'Load settings' both ways
         _write_log(d / "dx.runlog", "RUNNING: /x/DTFE in.hdf5 dx --grid 64 --periodic --exact-average --padding 15\n")
         _write_log(d / "dm.runlog", "RUNNING: /x/DTFE in.hdf5 dm --grid 64 --periodic --padding 15\n")
@@ -4864,7 +4998,7 @@ def pts_conventions_flag():
 
 def pts_conventions_choice():
     """The plane conventions where the launcher makes a phase-space image plane: the grids' in both qualities (a
-    setting the two modes removed; the binary's 'legacy' stays for a developer). A Grids job with a slice and a
+    setting the two modes removed; the binary's 'legacy' was removed too). A Grids job with a slice and a
     Pipeline job set PS_POINT_CONVENTIONS=grid for run_ps_dtfe.sh / run_ps_pipeline.sh, spelled out; a Custom run
     passes nothing (grid is the binary's default); standard DTFE and a run without points get nothing; a saved job's
     choice is dropped; 'Load settings' reads a run's conventions from its log (the Runs tab names a legacy plane) but

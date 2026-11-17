@@ -15,6 +15,12 @@ PRECISION = os.environ.get("DTFE_TEST_PRECISION", "single")
 DOUBLE = PRECISION == "double"
 REAL = np.dtype(np.float64 if DOUBLE else np.float32)    # the dtype of every grid output
 
+# The run mode and the device, as tests/lib.sh pins them for the shell suites: these suites' runs were written for the
+# programs' earlier defaults (performance, and the CPU unless '--gpu'). A suite started by hand gets them here, at
+# import; a value the caller set (tests/ci_suite.sh exports lib.sh's) is kept.
+os.environ.setdefault("DTFE_RUN_MODE", "performance")
+os.environ.setdefault("DTFE_GPU", "0")
+
 
 def binary(name="PS-DTFE"):
     """The binary a suite runs: './PS-DTFE' or './PS-DTFE-double' (likewise DTFE)."""

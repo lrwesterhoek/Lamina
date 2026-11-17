@@ -17,6 +17,10 @@
 # three checks run on a 2D pancake with PS-DTFE-2d and DTFE-2d when they are built (single precision), and
 #  D) on 2D crossed waves (a large xy cross term) the eigenvalues equal an independent numpy FFT solve of
 #     the same density grid (full axis: Nyquist negative; half axis: positive).
+#  L) the threshold's default, 0.3 (the production value): a 3D run without '--lambda-th' writes every output of
+#     the same run with '--lambda-th 0.3' byte for byte, and its classes differ from those of '--lambda-th 0' (on
+#     this pancake some cells lie between the two thresholds), both binaries (standard DTFE with STD=1), one
+#     triangulation ('--partition 1'); a SKIP line when TH is not 0.3.
 #
 # Usage: tests/tweb_check.sh [--no-build]
 #   GRID=1300 STD=0 STRICT=0 PS_ARGS="--subsamples 1" EXTRA="--scratch-dir /path" TWEB_TMP=/path \
@@ -59,13 +63,17 @@ echo ">> generating an unjittered 1D pancake (single-stream) ..."
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP}" --n "${N}" --box "${BOX}" \
     --amplitude-factor 0.8 --jitter-frac 0 >/dev/null
 
-run() {  # $1 = binary, $2 = output root, rest = this binary's own flags (RUN_SNAP / RUN_GRID: the 2D run)
+run() {  # $1 = binary, $2 = output root, rest = this binary's own flags (RUN_SNAP / RUN_GRID: the 2D run; RUN_TH:
+         # the threshold's words instead of '--lambda-th TH', set and empty for none, the binary's default: L)
     local bin="$1" out="$2"; shift 2
+    local th=(--lambda-th "${TH}")
+    # shellcheck disable=SC2206
+    [ -n "${RUN_TH+set}" ] && th=(${RUN_TH})
     rm -f "${out}".* "${out}"_*
     set +e
     # shellcheck disable=SC2086
     "${bin}" "${RUN_SNAP:-${SNAP}}" "${out}" --grid "${RUN_GRID:-${GRID}}" --periodic --input-format 105 --mpc-unit 1 \
-        --field density tweb --lambda-th "${TH}" --verbose 1 "$@" ${EXTRA} > "${out}.log" 2>&1
+        --field density tweb ${th[@]+"${th[@]}"} --verbose 1 "$@" ${EXTRA} > "${out}.log" 2>&1
     local rc=$?
     set -e
     if [ "$rc" -ne 0 ]; then
@@ -103,8 +111,30 @@ else
     else echo "   SKIP  2D (no ${PS_BIN}-2d / ${DTFE_BIN}-2d: make DTFE PS-DTFE DIM=2)"; fi
 fi
 
+# L) the threshold's default against '--lambda-th 0.3' and '--lambda-th 0': three runs per binary, each one
+# triangulation, so that the two compared runs make the same plan; the results go to the python checks below as
+# '<1 or 0>|<text>' lines
+LCHK=()
+if [ "${TH}" = "0.3" ]; then
+    echo ">> L: no '--lambda-th' (the default) against '--lambda-th 0.3' and '--lambda-th 0' ..."
+    for b in ps std; do
+        if [ "${b}" = ps ]; then bin="${PS_BIN}"; read -r -a largs <<< "${PS_ARGS}"; name=PS-DTFE
+        else [ "${STD}" = "1" ] || continue; bin="${DTFE_BIN}"; largs=(); name="standard DTFE"; fi
+        RUN_TH="--lambda-th 0.3" run "${bin}" "${TMP}/twebL_${b}_th3" ${largs[@]+"${largs[@]}"} --partition 1
+        RUN_TH= run "${bin}" "${TMP}/twebL_${b}_def" ${largs[@]+"${largs[@]}"} --partition 1
+        RUN_TH="--lambda-th 0" run "${bin}" "${TMP}/twebL_${b}_th0" ${largs[@]+"${largs[@]}"} --partition 1
+        if same "${TMP}/twebL_${b}_th3" "${TMP}/twebL_${b}_def"; then r=1; else r=0; fi
+        LCHK+=("${r}|L ${name}: the run without '--lambda-th' writes every output of '--lambda-th 0.3' byte for byte")
+        if [ -s "${TMP}/twebL_${b}_def.tweb" ] && [ -s "${TMP}/twebL_${b}_th0.tweb" ] \
+            && ! cmp -s "${TMP}/twebL_${b}_def.tweb" "${TMP}/twebL_${b}_th0.tweb"; then r=1; else r=0; fi
+        LCHK+=("${r}|L ${name}: its classes differ from those of '--lambda-th 0' (the default is not 0)")
+    done
+else
+    echo "   SKIP  L (TH=${TH}: the default threshold is checked at TH=0.3)"
+fi
+
 echo ">> checking the numbers ..."
-"${PY}" - "${TMP}" "${GRID}" "${TH}" "${STD}" "${STRICT}" "${DO2D}" "${GRID2}" <<'PYEOF'
+"${PY}" - "${TMP}" "${GRID}" "${TH}" "${STD}" "${STRICT}" "${DO2D}" "${GRID2}" ${LCHK[@]+"${LCHK[@]}"} <<'PYEOF'
 import os, sys
 import numpy as np
 tmp, g3, th, std, strict = sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), sys.argv[4] == "1", sys.argv[5] == "1"
@@ -116,6 +146,10 @@ def check(ok, msg):
     print(f"   {'OK  ' if ok else 'FAIL'} {msg}")
     if not ok:
         fails.append(msg)
+
+for a in sys.argv[8:]:                                # L, from the runs above
+    ok, msg = a.split("|", 1)
+    check(ok == "1", msg)
 
 def grids(pre, g, dim):
     den = np.memmap(pre + ".den", dtype=real, mode="r")

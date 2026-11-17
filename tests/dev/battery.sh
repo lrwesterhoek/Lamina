@@ -27,8 +27,11 @@
 set -uo pipefail
 unset DTFE_EXACT_AVERAGE   # the '_a' average's pin: an export from the caller's shell would steer every stage's runs
 unset DTFE_FACE_GRADIENT  # the gradient route's pin: both binaries read it, so an export would steer every PS stage too
-# the run mode: the binaries' default, performance, is the 2f428bc behaviour; a login export must not steer the runs
-unset DTFE_RUN_MODE
+# the run mode and the device, as tests/lib.sh pins them for the suites that source it: the suites' runs were written
+# for the programs' earlier defaults (performance, and the CPU unless '--gpu'); exported here, they reach the direct
+# python runs below too, and a login export does not steer the runs. A suite that tests the defaults unsets them itself
+export DTFE_RUN_MODE=performance
+export DTFE_GPU=0
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "${BASH_SOURCE[0]}"; exit 2; }
 

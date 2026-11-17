@@ -1357,7 +1357,6 @@ def voids_ellipsoids_gui():
     import explore as E
     import explore_voids as XV
     import runspec as rs
-    import view3d as V
     print("voids as ellipsoids (window)")
     qa = QApplication.instance() or QApplication([])
     data = TMP / "data"
@@ -2075,7 +2074,7 @@ def view3d_gui():
               and view.streams.isVisible() and not v3.isVisible() and "3D" not in view.title.text()
               and x.view3d_toggle.text() == "Show in 3D")
         # ---- the Sizes range: the same voids on the map, the grid's panels, the saves and the 3D view
-        r_v, r_eff = res["_r_v"], res["_r_eff"]
+        r_v = res["_r_v"]
         x.void_rmax.setValue(float(np.mean(sorted(r_v[rows])[:2])))     # between the two smallest R_v
         qa.processEvents()
         hi_r = x.void_rmax.value()
@@ -3351,7 +3350,6 @@ def gl_child():
     r.forget_cube()
     # the contour shells (the Contours tick): narrow bands in the table, below the shown range -- the GPU's picture
     # of them is QPainter's (both colour a cell by its level and then blend), orthographic and with the eye inside
-    import contours as CT
     vals = np.ascontiguousarray(_gl_field(40, False)[:32, :36, :26])
     lo, hi = np.zeros(3), np.array([32.0, 36.0, 26.0])
     prep3 = VOL.prepare({"values": vals, "lo": lo, "hi": hi, "cells": vals.shape, "key": None}, True)
@@ -4224,8 +4222,9 @@ def face_outputs(d: Path) -> Path:
 
 def face_gradient_zoom():
     """9. the exact zoom of a phase-space output takes the output's own velocity-gradient route: '--face-gradient' for
-    a face-gradient output (its '.a_velDivStreams'), '--per-tet-gradient' for one without it -- the plan only (a
-    stand-in for the binary, nothing run)."""
+    a face-gradient output (its '.a_velDivStreams'), '--per-tet-gradient' for one without it; every zoom is
+    volume-weighted (PS-DTFE's only velocity moments), an older output saved with mass-weighted moments too -- the
+    plan only (a stand-in for the binary, nothing run)."""
     try:
         from PySide6.QtWidgets import QApplication
     except ImportError as e:
@@ -4238,7 +4237,18 @@ def face_gradient_zoom():
     if not (face / "ps_face.a_velDivStreams").is_file():
         face = face_outputs(mean_field_data(TMP / "mf data"))
     box = ((0.0, 0.0, 0.0), (MF_BOX, MF_BOX, MF_BOX))
+    # an older custom output whose saved settings say mass-weighted moments ('volume_weighted': false; a face-gradient
+    # output's files, in a folder of its own): PS-DTFE has only the volume-weighted ones, so its zoom takes them, and
+    # the face route
+    mw = TMP / "mf massw"
+    mw.mkdir(exist_ok=True)
+    shutil.copy(face / "combined_050.hdf5", mw / "combined_050.hdf5")
+    for p in face.glob("ps_face.a_*"):
+        shutil.copy(p, mw / p.name.replace("ps_face", "ps_mw", 1))
+    (mw / "ps_mw.gui.json").write_text(json.dumps({"estimator": "ps", "input_file": str(mw / "combined_050.hdf5"),
+                                                   "periodic": True, "volume_weighted": False}))
     outs = {p: G.OutputSet(face / p, box=box, redshift=MF_Z) for p in ("ps_face", "ps_plain")}
+    outs["ps_mw"] = G.OutputSet(mw / "ps_mw", box=box, redshift=MF_Z)
     fake = face / "PS-DTFE-standin"
     fake.write_text("")
     real_name, plans = XZ.rs.binary_name, {}
@@ -4254,10 +4264,41 @@ def face_gradient_zoom():
     cmds = {p: plan.get("cmd") or [] for p, plan in plans.items()}
     routes = {p: [a for a in c if a in ("--face-gradient", "--per-tet-gradient")] for p, c in cmds.items()}
     check("9. the exact zoom takes the output's own route: '--face-gradient' for a face-gradient output, "
-          "'--per-tet-gradient' for one without the marker (both exact and volume-weighted)",
-          routes == {"ps_face": ["--face-gradient"], "ps_plain": ["--per-tet-gradient"]}
-          and all("--exact" in c and "--ps-volume-weighted" in c for c in cmds.values()),
+          "'--per-tet-gradient' for one without the marker (both exact and volume-weighted); an older output saved "
+          "with mass-weighted moments: volume-weighted and its face route too",
+          routes == {"ps_face": ["--face-gradient"], "ps_plain": ["--per-tet-gradient"], "ps_mw": ["--face-gradient"]}
+          and all("--exact" in c and c.count("--ps-volume-weighted") == 1 for c in cmds.values()),
           f"{routes} {[plan.get('note') for plan in plans.values()]}")
+    # the run itself (L2): the worker starts the program with DTFE_GPU pinned to the device its command names
+    # (runspec.gpu_pin_env: '1' with '--gpu', else '0'), over the launcher's own environment, where a login shell's
+    # export lands; a stand-in for subprocess.Popen records the environment and starts nothing (the worker then
+    # reports a failure). Its 'root' has a parent of its own, which the worker removes at the end
+    import subprocess as _sp
+
+    class _NotStarted(Exception):
+        pass
+    seen_env, real_popen, was = [], _sp.Popen, os.environ.get("DTFE_GPU")
+
+    def popen(cmd, *a, **k):
+        seen_env.append((k.get("env") or {}).get("DTFE_GPU"))
+        raise _NotStarted("not started")
+    failed = []
+    try:
+        _sp.Popen = popen
+        for cmd, shell_value in ((["PS-DTFE", "in.hdf5", "out", "--gpu"], "0"), (["PS-DTFE", "in.hdf5", "out"], "1")):
+            os.environ["DTFE_GPU"] = shell_value
+            worker = XZ.ExactZoomWorker()
+            worker.failed.connect(lambda msg: failed.append(msg))
+            worker.run({"cmd": cmd, "root": str(TMP / "zoom pin parent" / "zoom"), "grid": (16, 16, 1)})
+    finally:
+        _sp.Popen = real_popen
+        if was is None:
+            os.environ.pop("DTFE_GPU", None)
+        else:
+            os.environ["DTFE_GPU"] = was
+    check("9. the exact zoom's run: DTFE_GPU pinned to its command's device ('1' with '--gpu', '0' without), whatever "
+          "DTFE_GPU the launcher's own environment holds (L2)",
+          seen_env == ["1", "0"] and failed == ["not started", "not started"], f"{seen_env} {failed}")
 
 
 def mean_field_gui():

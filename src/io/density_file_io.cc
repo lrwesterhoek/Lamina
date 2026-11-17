@@ -212,7 +212,7 @@ struct Density_header
         std::string filename = gadgetHeader.filename( userOptions.inputFilename, 0, false );
         if ( not bfs::exists(filename) ) return;    // file could not be found
 
-        if ( userOptions.inputFileType==101 or userOptions.inputFileType==102 )
+        if ( userOptions.inputFileType==101 )
         {
             std::fstream inputFile;
             openInputBinaryFile( inputFile, filename );

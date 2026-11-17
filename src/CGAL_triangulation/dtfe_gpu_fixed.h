@@ -6,7 +6,7 @@
    converts a cell back). Why the grids are integer sums, and how the kernels keep them independent of the order
    their atomics land in: metal/dtfe_deposit.metal's header.
    Below batchFixedScales: the other host-side steps that need no Metal type (the knobs, a batch's parameter block
-   and item map, the timing line, the shared grid's checks). */
+   and item map, the timing line). */
 #ifndef DTFE_GPU_FIXED_H
 #define DTFE_GPU_FIXED_H
 
@@ -126,7 +126,6 @@ struct DTFEGpuKnobs
     bool     useItems    = true;
     uint32_t itemSamples = 48;
     int      cacheK      = 2;
-    bool     noWrite     = false;   // DTFE_GPU_DEBUG_NOWRITE: timing experiment, all the work, no atomics
     bool     floatGrids  = false;   // DTFE_GPU_FLOAT_GRIDS=1: float atomics (A/B)
 };
 
@@ -138,17 +137,16 @@ inline DTFEGpuKnobs dtfeGpuKnobs(bool itemsOk)
     k.useItems = k.useItems && Env::flag("DTFE_GPU_ITEMS", true);
     if (long const v = Env::integer("DTFE_GPU_ITEM_SAMPLES", 0); v >= 4 && v <= 100000) k.itemSamples = uint32_t(v);
     if (long const v = Env::integer("DTFE_GPU_CACHE_K", 2); v == 4 || v == 8) k.cacheK = int(v);
-    k.noWrite = Env::flag("DTFE_GPU_DEBUG_NOWRITE");
     k.floatGrids = Env::flag({"DTFE_GPU_FLOAT_GRIDS"});
     return k;
 }
 
 
 // ---------------------------------------------------------------- one sub-domain's batch
-// The batch's parameter block, in either host's DepositParams (zeroed by the host; the fields named here are
-// the same in both): the exact sums' mode and units, before the upload consumes the batch's values -- the
-// shared full grid (allowFixed false) and DTFE_GPU_FLOAT_GRIDS=1 keep the float atomics --, the grids' geometry,
-// the field flags (all off under DTFE_GPU_DEBUG_NOWRITE) and the item length.
+// The batch's parameter block, in the host's DepositParams (zeroed by the host; the fields named here are
+// the same in both): the exact sums' mode and units, before the upload consumes the batch's values --
+// DTFE_GPU_FLOAT_GRIDS=1 keeps the float atomics --, the grids' geometry, the field flags and the item length
+// (debugNoAtomic is not set here: it keeps the host's zero).
 //   The exact sums. An EXACT batch (--exact) sums in the run-wide 128-bit words (P.fixedSum = 2): every grid in the
 // run's unit 2^-units.K[g] and below its share cap (fixed_units.h RunUnits: one unit per grid for the whole run, from
 // global quantities, so every partition and thread split rounds every share alike; no bound pass runs). A grid
@@ -158,22 +156,20 @@ inline DTFEGpuKnobs dtfeGpuKnobs(bool itemsOk)
 // in the 64-bit words in units from the batch's own bound (P.fixedSum = 1), or in float atomics (0) when a bound is
 // not finite. DTFE_TEST_RUN_UNIT_SHIFT=n makes the run-wide units 2^n finer (RunUnits::fill) and, under
 // DTFE_RUN_UNITS_LEGACY=1 only, the batch's own units too, so a split test can show that the per-batch units fail it.
-// DTFE_GPU_DEBUG_NOATOMIC: 1 = no atomics in the final reduction; 2 = also skip the gradient's reduction loop;
-// 3 = also the gradient's eviction atomics (timing experiments only). Returns the exact kernel's item, a block
-// of cells of the tetrahedron's window (DTFE_GPU_EXACT_CELLS, default 16), which is then P.itemSamples.
+// Returns the exact kernel's item, a block of cells of the tetrahedron's window (DTFE_GPU_EXACT_CELLS, default 16),
+// which is then P.itemSamples.
 template <class Params>
 inline uint32_t dtfeBatchParams(Params& P, DTFEGpuKnobs const& k, const std::vector<float>& verts,
                                 const std::vector<float>& dens, const std::vector<float>& vels,
                                 const std::vector<float>& scal, const std::vector<float>& vols, const double dx[3],
                                 const size_t nGrid[3], const size_t subOff[3], const size_t fullGrid[3], bool fDen,
-                                bool fVel, bool fGrad, bool fScal, bool fSGrad, bool exact, bool allowFixed,
-                                DTFEGpuRunUnits const& units)
+                                bool fVel, bool fGrad, bool fScal, bool fSGrad, bool exact, DTFEGpuRunUnits const& units)
 {
     P.fixedSum = 0;
     for (int g = 0; g < 5; ++g) P.fxScale[g] = 1.f;
     for (int g = 0; g < 5; ++g) P.fxCapBits[g] = 0u;
     bool const runWide = exact && units.on && !runUnitsLegacy();
-    if (allowFixed && !k.floatGrids && !k.noWrite && runWide)
+    if (!k.floatGrids && runWide)
     {   // the run-wide 128-bit words; a grid without a run-wide unit takes the batch's own (none: no bound pass)
         bool const on[5] = { fDen, fVel, fGrad, fScal, fSGrad };
         bool own[5];
@@ -191,7 +187,7 @@ inline uint32_t dtfeBatchParams(Params& P, DTFEGpuKnobs const& k, const std::vec
             }
         }
     }
-    else if (allowFixed && !k.floatGrids && !k.noWrite)
+    else if (!k.floatGrids)
     {
         P.fixedSum = batchFixedScales(verts, dens, vels, scal, vols, fDen, fVel, fGrad, fScal, fSGrad, P.fxScale) ? 1u : 0u;
         // the test hook on the per-batch units (DTFE_RUN_UNITS_LEGACY=1 only; unset: the per-batch units unchanged,
@@ -213,9 +209,6 @@ inline uint32_t dtfeBatchParams(Params& P, DTFEGpuKnobs const& k, const std::vec
     P.fGrad = fGrad ? 1 : 0;
     P.fScal = fScal ? 1 : 0;
     P.fSGrad = fSGrad ? 1 : 0;
-    if (k.noWrite) P.fDen = P.fVel = P.fGrad = P.fScal = P.fSGrad = 0;
-    long const noAtomic = Env::integer("DTFE_GPU_DEBUG_NOATOMIC", 0);   // 1, 2, 3: fewer atomics; 0: all
-    P.debugNoAtomic = noAtomic > 0 ? uint32_t(noAtomic) : 0u;
     P.itemSamples = k.itemSamples;
     uint32_t exactCells = 16;
     if (exact)
@@ -224,23 +217,6 @@ inline uint32_t dtfeBatchParams(Params& P, DTFEGpuKnobs const& k, const std::vec
         P.itemSamples = exactCells;
     }
     return exactCells;
-}
-
-// The fast path's flat indices arrive in the SUB-grid; the kernels deposit into the accumulated grid, so they
-// are shifted to full-grid indices here (the sampled path adds subOff on the device).
-inline void dtfeShiftFlats(std::vector<uint32_t> const& cnts, std::vector<uint32_t>& flats, const size_t nGrid[3],
-                           const size_t subOff[3], const size_t fullGrid[3])
-{
-    bool const shifted = subOff[0] || subOff[1] || subOff[2] || fullGrid[0] != nGrid[0]
-                      || fullGrid[1] != nGrid[1] || fullGrid[2] != nGrid[2];
-    if (shifted)
-        for (size_t t = 0; t < cnts.size(); ++t)
-        {
-            if (cnts[t] != 0) continue;
-            size_t const f = flats[t];
-            size_t const k = f % nGrid[2], j = (f / nGrid[2]) % nGrid[1], i = f / (nGrid[2] * nGrid[1]);
-            flats[t] = uint32_t(((i + subOff[0]) * fullGrid[1] + (j + subOff[1])) * fullGrid[2] + (k + subOff[2]));
-        }
 }
 
 // The item map (see the kernel's itemOf): itemStart[t] = first item of tetrahedron t (nTet+1 entries) and, per
@@ -323,52 +299,17 @@ inline void dtfeGpuInitGrids(DTFEGpuGrids& out, size_t nCell, bool fDen, bool fV
     out.scalar_grad.assign(fSGrad ? nCell * 3 : 0, 0.f);
 }
 
-// The batch's timing line (DTFE_GPU_TIMING), from either host's Batch and Stats; sinceBegin >= 0
-// (the shared grid) adds when the batch was ready and how long it waited for the device.
+// The batch's timing line (DTFE_GPU_TIMING), from the host's Batch and Stats.
 template <class Batch, class Stats>
-inline void dtfeLogBatch(const char* backend, const Batch& b, const Stats& st, double waitSec, double runSec,
-                         double sinceBegin)
+inline void dtfeLogBatch(const char* backend, const Batch& b, const Stats& st, double runSec)
 {
     std::fprintf(stderr, "DTFE %s timing: %s kernel, %zu tetrahedra (%zu single-cell), %zu items of <= %u %s, "
-                         "%zu samples, table %u, %s sums, %d chunks, %d retries, %.2f s (%.0f M samples/s)%s",
+                         "%zu samples, table %u, %s sums, %d chunks, %d retries, %.2f s (%.0f M samples/s)\n",
             backend,
             b.exact ? "exact" : b.k.useItems ? (b.k.cacheK == 8 ? "item/K8" : b.k.cacheK == 2 ? "item/K2" : "item/K4") : "per-tet",
             b.nTet, b.nSingle, b.k.useItems ? b.nItems : size_t(0), b.P.itemSamples, b.exact ? "cells" : "samples", b.nSamples, b.P.tableEntries,
             b.P.fixedSum == 2u ? "run-wide 128-bit fixed-point" : b.P.fixedSum ? "fixed-point" : "float",
-            st.chunks, st.retries, runSec, runSec > 0 ? b.nSamples / runSec / 1e6 : 0.0,
-            sinceBegin >= 0 ? "" : "\n");
-    if (sinceBegin >= 0)
-        std::fprintf(stderr, "; shared grid: batch ready %.2f s after begin, waited %.2f s for the device\n",
-                     sinceBegin, waitSec);
-}
-
-
-// ---------------------------------------------------------------- the shared accumulator
-// OPT-IN (DTFE_GPU_SHARED=1): false (err set) otherwise. dtfe_metal_host.cc dtfeGpuSharedBegin has the measurement.
-inline bool dtfeSharedOptedIn(std::string& err)
-{
-    if (!Env::flag("DTFE_GPU_SHARED"))
-    {
-        err = "off by default (DTFE_GPU_SHARED=1 turns it on; the per-sub-domain grids measured faster)";
-        return false;
-    }
-    return true;
-}
-
-// The full grids' footprint against capGb, the host's cap (DTFE_GPU_SHARED_GB overrides): false (err set) over it.
-inline bool dtfeSharedGridFits(size_t nCell, bool fDen, bool fVel, bool fGrad, bool fScal, bool fSGrad, double capGb,
-                               std::string& err)
-{
-    if (double const v = Env::real("DTFE_GPU_SHARED_GB", 0.); v > 0) capGb = v;
-    double const needGb = double(nCell) * ((fDen ? 4 : 0) + (fVel ? 12 : 0) + (fGrad ? 36 : 0) + (fScal ? 4 : 0) + (fSGrad ? 12 : 0)) / 1e9;
-    if (needGb > capGb)
-    {
-        char buf[200];
-        std::snprintf(buf, sizeof(buf), "the shared GPU grid would take %.1f GB, over the %.1f GB cap", needGb, capGb);
-        err = buf;
-        return false;
-    }
-    return true;
+            st.chunks, st.retries, runSec, runSec > 0 ? b.nSamples / runSec / 1e6 : 0.0);
 }
 
 #endif

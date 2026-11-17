@@ -2150,10 +2150,6 @@ class View3DMixin:
                   else f"void {k} · no ellipsoid (its centre)" for j, k in enumerate(rows)]
         return M, reach, labels
 
-    def _3d_shape_changed(self, *_):
-        self._3d_voids()
-        self._void_count_note()                     # the Sizes range now counts by the shape's radius
-
     def _3d_fill_list(self, res):
         """The void menu: the voids drawn, the largest first by the drawn shape's radius (R_v, or the ellipsoids'
         R_eff)."""

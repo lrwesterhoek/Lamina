@@ -102,9 +102,6 @@ def plot_scalar_log(field, slice_dim, box_size, title, cbar_label, redshift=None
                     label=cbar_label, title=_title(title, redshift), path=save_path)
 
 
-WEB_CLASS_NAMES = ['void', 'wall', 'filament', 'node']      # (the web COLOURS are figures.WEB_COLORS: one definition)
-
-
 def plot_web_eigenvalues(eig_field, slice_dim, box_size, title, redshift=None, save_path=None):
     """Triptych of the (descending-sorted) eigenvalue maps: the house rule for a signed field
     (figures.norm_signed_log at the field's linthresh), the same as plot_cosmic_web's triptych."""

@@ -31,7 +31,7 @@ bool buildTessellation(std::vector<Particle_data> *p, User_options &userOptions,
        char[8]  "DTFESRV2"
        uint32   flags: bit0 PS-DTFE build, bit1 --ps-per-stream, bit2 --ps-per-stream-ids,
                        bit3 --pts-den-grad, bit4 --pts-vel-grad, bit5 --ps-caustics,
-                       bit6 --ps-stream-density geometric, bit7 periodic,
+                       bit6 reserved (always 0; it was the removed geometric stream density), bit7 periodic,
                        bit8 --pts-scalar, bit9 --ps-per-stream-lagrangian, bit10 composite (partitioned)
        uint32   S           scalar components per value (--pts-scalar; 0 otherwise)
        uint64   tessellation vertex count (a composite: summed over its partitions)
@@ -358,7 +358,7 @@ static void serveHandshake(uint64_t const nVert, uint32_t const nPartitions, uin
     if ( g_pe.ctx.ptsDenGrad )    flags |= 1u << 3;
     if ( g_pe.ctx.ptsVelGrad )    flags |= 1u << 4;
     if ( g_pe.ctx.psCaustics )    flags |= 1u << 5;
-    if ( g_pe.ctx.useGeometric )  flags |= 1u << 6;
+    // bit 6 stays reserved (always 0), so the other bits keep their places
     if ( g_pe.ctx.periodic )      flags |= 1u << 7;
     if ( g_pe.ctx.ptsScalar )     flags |= 1u << 8;
     if ( g_pe.ctx.ptsLagrangian ) flags |= 1u << 9;
@@ -513,7 +513,7 @@ template <typename Evaluate>
     int const bucketFloor = int( std::pow( double(nCells) / 16., 1. / double(NO_DIM) ) );
     std::vector<Cell_handle> candidates;
 #ifdef PHASE_SPACE
-    // --ps-vertex-mass under the grid conventions: the vertex degrees and star volumes, once for every request
+    // --ps-vertex-mass (the grid's conventions): the vertex degrees and star volumes, once for every request
     if ( g_pe.ctx.vertexMass )
         prepareVertexMass( dt, userOptions );
 #endif

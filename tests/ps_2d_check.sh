@@ -20,7 +20,7 @@
 #      stream one; the collapse multiplicity is k = 1 inside the pancake and k = 0 outside
 #   S  --partition 2 2 == one triangulation (streams identical; density identical to float rounding
 #      but in the few caustic cells where a copy's float rounding flips a flat triangle's drop);
-#      --ps-vertex-mass, --ps-volume-weighted, --ps-halo-release, --ps-linear-deposit conserve mass;
+#      --ps-vertex-mass, --ps-volume-weighted, --ps-halo-release conserve mass;
 #      a non-periodic clump conserves mass and covers its interior; the tessellation cache hits and
 #      reproduces the run bit for bit; --gpu on the 2D build (no GPU backend in DIM=2) runs every
 #      partition on the CPU, exits 0 and says how many passes fell back
@@ -47,6 +47,9 @@
 #   EA the standard DTFE-2d's --exact (triangles clipped by ps_clip2d.h):
 #      density 1 to float rounding on a perfect lattice (the sampled average is off by percents), mass
 #      conserved on a pancake, and the sampled average agrees with it to its own noise
+#   DV the device line of both 2D programs' headers: 'CPU (this binary was built without GPU support)' with DTFE_GPU
+#      unset (the program picks; a 2D build has no GPU path) and no GPU warning, 'CPU (DTFE_GPU=0)' under
+#      tests/lib.sh's pin (every other run here)
 # Usage: tests/ps_2d_check.sh [--no-build]
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,7 +82,6 @@ RUN "$TMP/pan_p1"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_p1"  "${COMMON[@]}" --
 RUN "$TMP/pan_p2"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_p2"  "${COMMON[@]}" --field density_a --subsamples 2 --partition 2 2 --max-concurrent 1
 RUN "$TMP/pan_vm"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_vm"  "${COMMON[@]}" --field density_a velocity_a --ps-vertex-mass --ps-volume-weighted --sampled --subsamples 3
 RUN "$TMP/pan_hr"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_hr"  "${COMMON[@]}" --field density_a --ps-halo-release 2 --sampled --subsamples 3
-RUN "$TMP/pan_lin" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_lin" "${COMMON[@]}" --field density_a --ps-linear-deposit --sampled --subsamples 3
 RUN "$TMP/pan_c1"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_c1"  "${COMMON[@]}" --field density_a --tessellation-cache "$CACHE"
 RUN "$TMP/pan_c2"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_c2"  "${COMMON[@]}" --field density_a --tessellation-cache "$CACHE"
 # --gpu where no GPU can run: the deposit falls back pass by pass, on any thread -- the run counts every
@@ -153,6 +155,10 @@ for pair in "./DTFE-2d dim3 3" "./PS-DTFE-2d dim3 3" "./DTFE pan 2" "./PS-DTFE p
     grep -q "holds $3 coordinates per particle, but this binary is built for" "$TMP/dim_$(basename "$1").log" && said=1 || said=0
     echo "$(basename "$1") $rc $said" >> "$TMP/dimcheck.txt"
 done
+# the device with nothing given (DTFE_GPU unset: the program picks; every other run here has tests/lib.sh's DTFE_GPU=0)
+echo ">> the device line with DTFE_GPU unset"
+RUN "$TMP/dv_ps"  env -u DTFE_GPU ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/dv_ps"  --grid 32 --periodic --mpc-unit 1 --verbose 2 --field density_a
+RUN "$TMP/dv_std" env -u DTFE_GPU ./DTFE-2d    "$TMP/pan.hdf5" "$TMP/dv_std" --grid 32 --periodic --mpc-unit 1 --verbose 2 --field density_a
 "$PY" - "$TMP" "$G" "$ROOT" <<'PYEOF'
 import numpy as np, sys
 from pathlib import Path
@@ -268,8 +274,7 @@ diff = np.abs(a - b) / np.abs(a).max() > 1e-5
 check("S partition 2 2 == 1 1", np.array_equal(grid("pan_p1", "a_streams"), grid("pan_p2", "a_streams"))
       and diff.mean() < 1e-3 and caustic[np.where(diff)[0]].all(),
       f"streams identical; density differs beyond float rounding in {int(diff.sum())} cells, all on caustic columns")
-for name, what, tol in (("pan_vm", "vertex mass + volume weighted", 1e-6), ("pan_hr", "halo release D=2", 1e-3),
-                        ("pan_lin", "linear deposit", 1e-3)):
+for name, what, tol in (("pan_vm", "vertex mass + volume weighted", 1e-6), ("pan_hr", "halo release D=2", 1e-3)):
     d = grid(name, "a_den"); check(f"S {what}", abs(d.mean() - 1) < tol, f"mean density {d.mean():.7f} (to {tol:g})")
 cl = grid("clump", "den")
 spacing = 0.6 * L / 64; area = (0.6 * L - spacing) ** 2
@@ -408,6 +413,18 @@ for line in (tmp / "dimcheck.txt").read_text().split("\n"):
     if line.strip():
         b, rc, said = line.split()
         check(f"DM {b} refuses the other dimension", rc != "0" and said == "1", f"exit {rc}, message {'given' if said == '1' else 'MISSING'}")
+
+# DV: the 2D builds have no GPU path: with nothing given the header's device line says so, and under tests/lib.sh's
+# DTFE_GPU=0 (the other runs) it names the pin; neither warns about the GPU
+import re
+def device(name):
+    lines = re.findall(r"^\s*(?:'_a' interpolation|PS deposit) *: (.*)$", (tmp / f"{name}.log").read_text(errors="replace"), re.M)
+    return lines[-1] if lines else None
+for b, nothing, pinned in (("PS-DTFE-2d", "dv_ps", "pan_s"), ("DTFE-2d", "dv_std", "std")):
+    got, pin = device(nothing), device(pinned)
+    warned = "requested but this binary was built without GPU support" in (tmp / f"{nothing}.log").read_text(errors="replace")
+    check(f"DV {b} device line", got == "CPU (this binary was built without GPU support)" and pin == "CPU (DTFE_GPU=0)"
+          and not warned, f"nothing given: '{got}', DTFE_GPU=0: '{pin}'{', a GPU warning' if warned else ''}")
 
 # D: the standard 2D build
 sd = np.fromfile(tmp / "std.a_den", np.float32)

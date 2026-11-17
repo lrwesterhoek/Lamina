@@ -94,9 +94,11 @@ def t_frame_and_blocks():
 
 
 def t_velocity_weighting():
-    """The coarse velocity follows the run's deposit. 'volume' (the production PS-DTFE convention and
-    standard DTFE) is the plain block mean, not sum rho v / sum rho; velocity_weighting reads it from the run log's
-    command line (--ps-volume-weighted), 'mass' without it, 'volume' (said) without a log and for standard DTFE."""
+    """The coarse velocity follows the run's deposit. 'volume' (PS-DTFE's in every run, and standard DTFE's) is the
+    plain block mean, not sum rho v / sum rho; velocity_weighting reads it from the run log: its header line
+    'velocity moments : volume-weighted' (every PS-DTFE run prints it), else '--ps-volume-weighted' on its command
+    line, else 'mass' (an older run's log with neither: the reason says so, not 'the default'); a log with the
+    header line is never mass-weighted for want of the flag; 'volume' (said) without a log and for standard DTFE."""
     from types import SimpleNamespace
     from dtfelib import convergence as cv
     rng = np.random.default_rng(3)
@@ -114,12 +116,23 @@ def t_velocity_weighting():
     prod = SimpleNamespace(fs=SimpleNamespace(method="ps", snapdir=d, prefix="ps_mw."))
     w, why = cv.velocity_weighting(prod)
     assert w == "volume" and "assumed" in why, (w, why)
+    # the header line every PS-DTFE run prints (src/user_options.cc), here without the flag on the command line
+    header = "\t velocity moments       : volume-weighted (the dispersion mass-weighted)\n"
+    (d / "ps_mw.runlog").write_text("RUNNING: ./PS-DTFE in out --grid 64 --ps-vertex-mass --periodic\n\n" + header)
+    w, why = cv.velocity_weighting(prod)
+    assert w == "volume" and "velocity moments" in why, (w, why)
+    (d / "ps_mw.runlog").write_text("RUNNING: ./PS-DTFE in out --grid 64 --ps-vertex-mass --ps-volume-weighted "
+                                    "--periodic\n\n" + header)
+    assert cv.velocity_weighting(prod)[0] == "volume"
+    # an older binary's log (no header line): the flag decides
     (d / "ps_mw.runlog").write_text("RUNNING ./PS-DTFE in out --grid 64 --ps-vertex-mass --ps-volume-weighted "
                                     "--periodic\n")
-    assert cv.velocity_weighting(prod)[0] == "volume"
+    w, why = cv.velocity_weighting(prod)
+    assert w == "volume" and "--ps-volume-weighted" in why, (w, why)
     (d / "ps_mw.runlog").write_text("RUNNING ./PS-DTFE in out --grid 64 --ps-vertex-mass --periodic\n"
                                     "PS_VOLUME_WEIGHTED=1 is not the flag; --ps-volume-weightedness neither\n")
-    assert cv.velocity_weighting(prod)[0] == "mass", cv.velocity_weighting(prod)
+    w, why = cv.velocity_weighting(prod)
+    assert w == "mass" and "older" in why and "default" not in why, (w, why)
     assert cv.velocity_weighting(SimpleNamespace(fs=SimpleNamespace(method="dtfe", snapdir=d, prefix="output.")))[0] \
         == "volume"
 
@@ -371,7 +384,8 @@ def main():
     print("synthetic:")
     check("convergence: frame() sets and restores config; block means (scalar, mass-weighted velocity)",
           t_frame_and_blocks)
-    check("convergence: the coarse velocity follows the run's weighting (volume = plain block mean; from the run log)",
+    check("convergence: the coarse velocity follows the run's weighting (volume = plain block mean; from the run log: "
+          "its header line, else the flag, else an older run's mass weighting)",
           t_velocity_weighting)
     check("plot_DTFE: quiver arrows are block means (every cell; remainder blocks; mass-weighted on request)",
           t_quiver_block_mean)

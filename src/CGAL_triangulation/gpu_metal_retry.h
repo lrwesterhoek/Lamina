@@ -76,7 +76,7 @@ int gpuRetryCause(GpuFault f, long code, std::string const& desc)
 // escalates nor resets the clean count. Guarded by the host's ctxMutex (only touched inside psGpuDepositFields,
 // or dtfe_metal_host.cc's runBatch, whose callers hold it). The pass loop (gpuRunPass, below) steps it with
 // onFault / onClean.
-double const GPU_PACE_TARGET0 = 0.25;   // the default pace (performance's base, the binaries' default run mode)
+double const GPU_PACE_TARGET0 = 0.25;   // the default pace (performance's base; the state of a caller that skips readOptions)
 useconds_t const GPU_PACE_GAP0 = 8000;
 struct GpuPace
 {
@@ -252,7 +252,7 @@ struct GpuPassSpec
     size_t                     nThreads = 0, minChunk = 1, maxChunk = 1;
     size_t                   (*align)(size_t) = gpuChunkAsIs;   // a chunk size as the kernel needs it
     bool                       ckOn = false;     // a pass-start snapshot is held (without one the first failure gives up)
-    bool                       periodic = true;  // periodic checkpoints too (off for the shared grid: a 2 GB copy)
+    bool                       periodic = true;  // periodic checkpoints too (off for the PS face pass: it restarts from zero)
     std::vector<MTL::Buffer*> const* ckBufs = nullptr;   // the buffers a periodic checkpoint copies ...
     std::vector<bool>          ckMask;           // ... but those known zero (GpuSnapshot::take)
     long                       ckChunks = -1;    // DTFE_GPU_CHECKPOINT_CHUNKS (-1: every ~10 s of GPU work)
@@ -271,8 +271,8 @@ struct GpuPassSpec
 // innocent victim, it escalates the pace and shrinks the chunk, then restores and continues from the snapshot.
 // The host supplies:
 //   encode(enc, start, n)   binds the chunk [start, start + n) (and fills its parameter block)
-//   restore() -> size_t     puts the grids back as the held snapshot has them (the shared grid: its box to zero)
-//                           and returns the first thread to redo
+//   restore() -> size_t     puts the grids back as the held snapshot has them and returns the first thread to
+//                           redo
 //   escalate()              the host's own part of an escalation, after the chunk shrank
 template <class Encode, class Restore, class Escalate>
 bool gpuRunPass(GpuPassSpec& p, GpuRetryRun& run, size_t& chunk, Encode&& encode, Restore&& restore,
@@ -373,10 +373,8 @@ bool gpuRunPass(GpuPassSpec& p, GpuRetryRun& run, size_t& chunk, Encode&& encode
         }
         double clean = 0.;
         if (pace.onClean(el, p.paceRecoverSec, clean))   // an escalated pace stepped back after a clean stretch
-        {   // a step that reached the base names it: the 0.25 s / 8 ms default, or a run mode's lower base
-            char const* const atBase = pace.targetSec >= GPU_PACE_TARGET0 && pace.gapUs <= GPU_PACE_GAP0 ? " (the default)"
-                                     : pace.targetSec >= pace.target0 && pace.gapUs <= pace.gap0 ? " (the run mode's)"
-                                     : "";
+        {   // a step that reached the run mode's base (target0, gap0) says so
+            char const* const atBase = pace.targetSec >= pace.target0 && pace.gapUs <= pace.gap0 ? " (the run mode's)" : "";
             fprintf(stderr, "%s: %.0f s of GPU work without a fault -- pace eased to %.0f ms "
                             "buffers, %.0f ms gaps%s\n", p.tag, clean, pace.targetSec * 1e3, pace.gapUs / 1e3, atBase);
         }

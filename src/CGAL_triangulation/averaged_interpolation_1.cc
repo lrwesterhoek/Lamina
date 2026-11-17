@@ -58,7 +58,8 @@ int dtfeGpuFallbacksTaken(bool reset)
 #endif
 
 // GPU deposit (METAL=1 build, 3D only); the CPU loop below remains the fallback. MY_SCALAR
-// evaluates arbitrary user C++ per sample, which cannot run on the GPU.
+// evaluates arbitrary user C++ per sample, which cannot run on the GPU. (The program's pick of the device reads the
+// same builds: user_options.cc GPU_PATH_BUILT, and the run-time conditions of avg1GpuUsable: gpuPathRuns.)
 #if defined(DTFE_GPU) && NO_DIM==3 && !defined(MY_SCALAR)
 #define DTFE_GPU_ACTIVE
 #include <algorithm>
@@ -489,9 +490,9 @@ struct Avg1GpuCtx
 
 // Orders the tetrahedra along a Morton curve of their base cell before dispatch, so the
 // threads running together deposit into neighbouring cells: the deposit is bound by its
-// atomics, and random cells across a 2 GB grid cost 3x the throughput of local ones (TLB
-// and cache reach), measured on the shared full grid of a 512^3 run. No cost sort (by
-// sample count, so that a chunk's threads are uniformly sized) is needed: the
+// atomics, and scattered cells cost far more of its throughput than local ones (TLB and
+// cache reach). No cost sort (by sample count, so that a chunk's threads are uniformly
+// sized) is needed: the
 // work items bound every thread to itemSamples samples (the per-tet A/B kernel,
 // DTFE_GPU_ITEMS=0, pays for that with its imbalance). The permutation is applied one
 // array at a time so only a single extra copy is alive at once.
@@ -576,8 +577,8 @@ static inline void avg1MortonOrder(Avg1GpuCtx &c)
     }
 }
 
-// Deposits the extracted tetrahedra on the GPU: into the shared full grid of a DTFE_parallel call, else into a grid
-// of its own that is copied into the output. False: the CPU loop interpolates this pass.
+// Deposits the extracted tetrahedra on the GPU into a grid of its own that is copied into the output. False: the CPU
+// loop interpolates this pass.
 static inline bool avg1GpuDispatch(Avg1GpuCtx &c, Avg1Grids const &grids, std::vector<Real> &quasiRandomNumbers_buf)
 {
     User_options &userOptions = c.userOptions;
@@ -602,36 +603,11 @@ static inline bool avg1GpuDispatch(Avg1GpuCtx &c, Avg1Grids const &grids, std::v
     std::string metalErr;
     message << gpuBackendName() << " GPU (" << gpuDeviceName() << ", " << nTetsDeposited << " tetrahedra) ... " << MESSAGE::Flush;
 
-    // The shared full grid of this DTFE_parallel call (dtfeGpuSharedBegin in DTFE.cpp): this
-    // sub-domain's samples land at full-grid cells subgridOffset + cell, and the main thread adds
-    // the grid into the output afterwards -- so this thread's own sub-grid stays ZERO. A batch the
-    // device hands back (allocation, watchdog) leaves its owner box zeroed and falls through to the
-    // per-call path below, then to the CPU loop.
-    bool sharedDone = false, sharedFailed = false;
-    if ( dtfeGpuSharedActive() and userOptions.subgridOffset.size()==size_t(NO_DIM) )
-    {
-        size_t subOff[3] = { userOptions.subgridOffset[0], userOptions.subgridOffset[1], userOptions.subgridOffset[2] };
-        if ( dtfeGpuSharedDeposit( tetVerts, tetDens, tetVels, tetScal, tetVols, tetCnts, tetFlats, tetCells,
-                                   sobolTable, dxv, nGrid, subOff, metalErr ) )
-            sharedDone = true;
-        else if ( not tetCnts.empty() )     // the arrays survive only when the upload itself failed
-        {
-            MESSAGE::Warning warning( userOptions.verboseLevel );
-            warning << "DTFE " << gpuBackendName() << " shared grid handed this sub-domain back (" << metalErr << "); depositing it on its own.\n" << MESSAGE::EndWarning;
-        }
-        else if ( nTetsDeposited > 0 )
-        {   // consumed by the upload but the dispatch failed: nothing left for the per-call path
-            MESSAGE::Warning warning( userOptions.verboseLevel );
-            warning << "DTFE " << gpuBackendName() << " shared grid failed for this sub-domain (" << metalErr << "); using the CPU interpolation.\n" << MESSAGE::EndWarning;
-            ++dtfeGpuFallbacks;
-            sharedFailed = true;
-        }
-    }
-    // The per-call path. A deposit that fails AFTER its upload consumed the arrays (the retry policy gave up)
-    // warns too, so a runtime fallback to the CPU loop below is never silent -- the suites' 'using the CPU
-    // interpolation' check relies on it.
+    // The deposit into a grid of its own (the host's per-call path). A deposit that fails AFTER its upload consumed
+    // the arrays (the retry policy gave up) warns too, so a runtime fallback to the CPU loop below is never silent --
+    // the suites' 'using the CPU interpolation' check relies on it.
     bool perCallOk = false, perCallFailed = false;
-    if ( not sharedDone and not sharedFailed and not tetCnts.empty() )
+    if ( not tetCnts.empty() )
     {
         // the run-wide units of the five grids (fixed_units.h RunUnits, set before any split: DTFE.cpp
         // runUnitsSetup), which an exact batch sums in (dtfe_gpu_fixed.h dtfeBatchParams)
@@ -651,9 +627,7 @@ static inline bool avg1GpuDispatch(Avg1GpuCtx &c, Avg1Grids const &grids, std::v
                                              gpuOut, metalErr );
         perCallFailed = not perCallOk;
     }
-    if ( sharedDone )
-        metalDeposited = true;
-    else if ( perCallOk )
+    if ( perCallOk )
     {
         for (size_t i=0; i<gridSize; ++i)
         {
@@ -684,10 +658,12 @@ static inline bool avg1GpuDispatch(Avg1GpuCtx &c, Avg1Grids const &grids, std::v
     return metalDeposited;
 }
 #else
-// Warns once that --gpu needs a GPU build of this binary; the pass runs on the CPU.
+// Warns once that an asked GPU ('--gpu' or DTFE_GPU: gpuRequest) needs a GPU build of this binary; the pass runs on
+// the CPU. (The program never picks the GPU in such a build: user_options.cc GPU_PATH_BUILT names this guard's builds;
+// MY_SCALAR, a source switch it cannot see, is the exception, and a picked GPU takes the CPU without a word here.)
 static inline void avg1NoGpuWarning(User_options &userOptions)
 {
-    if ( userOptions.useMetal )
+    if ( userOptions.useMetal and not userOptions.gpuPicked )
     {
 #ifndef PHASE_SPACE
         ++dtfeGpuFallbacks;
@@ -697,7 +673,7 @@ static inline void avg1NoGpuWarning(User_options &userOptions)
         {
             warned = true;
             MESSAGE::Warning warning( userOptions.verboseLevel );
-            warning << "--gpu requested but this binary was built without GPU support (rebuild with METAL=1 on a Mac; or NO_DIM!=3 / MY_SCALAR); using the CPU interpolation.\n" << MESSAGE::EndWarning;
+            warning << userOptions.gpuRequest() << " requested but this binary was built without GPU support (rebuild with METAL=1 on a Mac; or NO_DIM!=3 / MY_SCALAR); using the CPU interpolation.\n" << MESSAGE::EndWarning;
         }
     }
 }

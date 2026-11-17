@@ -468,7 +468,7 @@ class TabsMixin:
         row = QHBoxLayout()                 # the T-web / V-web eigenvalue threshold: only with a web class ticked
         lam = QDoubleSpinBox(minimum=0.0, maximum=10.0, decimals=2, singleStep=0.05, value=rs.LAMBDA_TH_DEFAULT)
         tip(lam, "λ_th of the T-web / V-web classes: an eigenvalue above it counts as collapsing.\n"
-                 "0.3 is the scripts' default; the binary alone would use 0.",
+                 "0.3 is the default of the scripts and of the programs themselves.",
             "A void has no eigenvalue above λ_th, a wall one, a filament two, a node three.")
         lam.valueChanged.connect(self._changed)
         row.addWidget(QLabel("T-web / V-web threshold λ_th"))

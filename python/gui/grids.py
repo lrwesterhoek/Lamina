@@ -81,7 +81,7 @@ FIELD_HELP = {
 }
 # The velocity derivatives (dtfelib.io.MEAN_FIELD_NAMES). Standard DTFE stores them as the derivatives of
 # its one velocity field, the mean field grad<v>; so does a PS-DTFE run with the face gradient (its default with the
-# exact deposit and the volume weighting, docs/cleanup-plan.md D13; OutputSet.face_gradient). A PS-DTFE run without it
+# exact deposit, docs/cleanup-plan.md D13; OutputSet.face_gradient). A PS-DTFE run without it
 # stores, in a multi-stream cell, the stream average of each stream's own gradient <grad v> (dtfelib/io.py, the note
 # above FIELDS: a divergence whose box mean is not 0, a V-web with almost no filaments) -- so a map of such a PS
 # divergence beside a standard one compares two quantities. Explore shows that phase-space output's as either
@@ -586,8 +586,8 @@ class OutputSet:
 
     @property
     def face_gradient(self) -> bool:
-        """A phase-space output whose run took the face gradient (PS-DTFE's default with the exact deposit and the
-        volume weighting, docs/cleanup-plan.md D13, or '--face-gradient'): its stored velocity derivatives ARE the
+        """A phase-space output whose run took the face gradient (PS-DTFE's default with the exact deposit,
+        docs/cleanup-plan.md D13, or '--face-gradient'): its stored velocity derivatives ARE the
         mean field grad<v>, from exact face sums. The marker is the stream average's divergence the run writes beside
         them ('.a_velDivStreams'), as dtfelib's FieldSet.face_gradient reads it."""
         return estimator_label(self) == "PS-DTFE" and "divergence_streams" in self.files

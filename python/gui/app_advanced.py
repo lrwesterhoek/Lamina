@@ -58,8 +58,8 @@ ADVANCED_TIP = {
     "parallel_triangulation": ("On: the parallel insert of the particles into the triangulation, at any size.\n"
                                "Automatic: the program's own rule, the parallel insert for large tessellations only.",
                                "Two identical runs with the parallel insert still write the same single-precision "
-                               "grids to the byte; a double-precision job, the linear deposit and the point values "
-                               "differ at rounding (the stream counts do not). It needs a build with TBB."),
+                               "grids to the byte; a double-precision job and the point values differ at rounding "
+                               "(the stream counts do not). It needs a build with TBB."),
     "ordered_merge": ("How the partitions' grids are added into the result. Automatic: in index order, so two\n"
                       "identical runs give bit-identical grids; Completion order: as each partition finishes.",
                       "Completion order keeps no staged sub-grids; with more than one concurrent triangulation two "

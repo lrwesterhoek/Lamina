@@ -19,7 +19,9 @@ import grids as G
 
 class ServerWorker(QObject):
     """A dtfelib.Estimator living on its own thread: start (the tessellation build, possibly long),
-    query (milliseconds for a few points), stop. Cancel kills a build in progress."""
+    query (milliseconds for a few points), stop. Cancel kills a build in progress. A phase-space server's point
+    velocities, velocity gradients and scalars are the plain means over the point's streams (PS-DTFE's volume
+    weighting), its dispersion the mass-weighted one (dtfelib.estimator.PointFields)."""
     started = Signal(str, object)       # (description, the server's region (3, 2) in Mpc)
     answered = Signal(object, object)   # (points, PointFields)
     zoomed = Signal(object, object)     # (zoom request, PointFields on its plane of points)
@@ -129,9 +131,12 @@ class ServerMixin:
             return None
         cache = Path(self.cache_edit.text().strip() or _ex.default_cache_dir(str(o.dir))).expanduser()
         ps = bool(kw.get("phase_space", True))   # the standard binary has no streams: it refuses --per-stream
-        # run_mode balanced: the server runs beside the launcher, as the exact zoom does (explore_zoom.py)
+        # run_mode balanced: the server runs beside the launcher, as the exact zoom does (explore_zoom.py). DTFE_GPU
+        # pinned to 0, the device of its command (it names no '--gpu': the server evaluates points and deposits
+        # nothing), as every program the launcher starts gets its pin (runspec.gpu_pin_env)
         kw.update(per_stream=ps, lagrangian_positions=ps, caustics=ps, velocity_gradient=True,
-                  tessellation_cache=str(cache), verbose=1, progress=True, run_mode="balanced")
+                  tessellation_cache=str(cache), verbose=1, progress=True, run_mode="balanced",
+                  env={"DTFE_GPU": "0"})
         if self.server_partition:
             kw["partition"] = int(self.server_partition)
         # (how many partitions a composite server keeps in memory is the binary's: it fits them to the free memory)

@@ -19,8 +19,10 @@
 #   P6  '--grid-window' (one z cell across the box): the full run's z = 16 slice, byte-identical in the single build
 #       (the double build shows the window's own fixed-point unit: within 1e-9 of the rms, measured 2e-11)
 #   P7  refusals at option parsing (exit 1): with '--sampled' (the exact deposit is the default for these '_a' fields,
-#       so only the sampled one asked for conflicts), without '--ps-volume-weighted'; both route flags at once
-#       ('--face-gradient --per-tet-gradient'); DTFE_FACE_GRADIENT=1 beside '--sampled' (read as the flag)
+#       so only the sampled one asked for conflicts); both route flags at once ('--face-gradient --per-tet-gradient');
+#       DTFE_FACE_GRADIENT=1 beside '--sampled' (read as the flag). And no refusal for want of '--ps-volume-weighted'
+#       (PS-DTFE's velocity moments are volume-weighted in every run): '--exact --face-gradient' without it runs the
+#       face gradient and writes the files of the same run with it byte for byte
 #   P11 (a GPU build) '--gpu': the GPU exact deposit with the face sums from the CPU walk beside it (docs/cleanup-plan.md
 #       D17): the mean flow's divergence and the mass flux divergence byte-identical to the CPU run's (the same face
 #       words, the same units), the density within the GPU deposit's float tolerance, the stream average within 5e-2
@@ -47,12 +49,13 @@
 #       section would leave the mass flux divergence off by the whole outflow through that face). A failure names
 #       the count, or the field, its deviation and the x layers
 #   P14 the default (docs/cleanup-plan.md D13; read from the run's header, so the check follows
-#       src/user_options.cc kPsFaceGradientDefault): a qualifying run without a flag (--exact --ps-volume-weighted)
-#       writes the face run's files byte for byte; DTFE_FACE_GRADIENT=0 writes the '--per-tet-gradient' run's; the
-#       face run differs from that one only in the gradient family and its extra files ('.a_massFluxDiv',
-#       '.a_velDivStreams' and P15's '.a_velGradStreams', '.a_velShearStreams', '.a_velVortStreams'); a run that does
-#       not qualify (the sampled deposit, mass-weighted moments, the halo release) exits 0, keeps the stream average
-#       and names the cause in its 'velocity gradient' line
+#       src/user_options.cc kPsFaceGradientDefault): a qualifying run without a route flag (--exact
+#       --ps-volume-weighted) writes the face run's files byte for byte, and so does the bare '--exact' run (no
+#       '--ps-volume-weighted' either: it qualifies alike), its header's 'velocity gradient' line the same;
+#       DTFE_FACE_GRADIENT=0 writes the '--per-tet-gradient' run's; the face run differs from that one only in the
+#       gradient family and its extra files ('.a_massFluxDiv', '.a_velDivStreams' and P15's '.a_velGradStreams',
+#       '.a_velShearStreams', '.a_velVortStreams'); a run that does not qualify (the sampled deposit, the halo release)
+#       exits 0, keeps the stream average and names the cause in its 'velocity gradient' line
 #   P15 the regular part's twins (docs/cleanup-plan.md D12): '.a_velGradStreams', '.a_velShearStreams' and
 #       '.a_velVortStreams' are byte-identical to the '.a_velGrad', '.a_velShear', '.a_velVort' of a
 #       '--per-tet-gradient' run (one stream and three); a 'shear_a'-only run makes the shear twin alone (the bytes of
@@ -434,11 +437,11 @@ refuse() {   # refuse <what> <expected message part> [args ...]
     else fail "P7 $what: exit $rc (see $TMP/r.log)"; fi
 }
 refuse "with --sampled" "add '--exact' (or drop '--sampled')" --sampled --ps-volume-weighted --face-gradient
-refuse "without --ps-volume-weighted" "add '--ps-volume-weighted'" --exact --face-gradient
 refuse "both route flags" "exclude each other" --exact --ps-volume-weighted --face-gradient --per-tet-gradient
 export DTFE_FACE_GRADIENT=1
 refuse "DTFE_FACE_GRADIENT=1 with --sampled" "add '--exact' (or drop '--sampled')" --sampled --ps-volume-weighted
 unset DTFE_FACE_GRADIENT
+# (no refusal for want of '--ps-volume-weighted': P7's run without it is checked with P14's, below)
 
 echo ">> the default (D13): the face gradient where the run qualifies, else the stream average and why"
 run d2.0 pan_2.0 OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 -- --ps-volume-weighted
@@ -460,6 +463,17 @@ if sameset "$dref" d2.0; then pass "P14 a qualifying run without a flag writes t
 else fail "P14 a qualifying run without a flag differs from the $dref run (see $TMP/d2.0.log)"; fi
 if sameset b2.0 e2.0; then pass "P14 DTFE_FACE_GRADIENT=0 is '--per-tet-gradient' byte for byte"
 else fail "P14 DTFE_FACE_GRADIENT=0 differs from '--per-tet-gradient' (see $TMP/e2.0.log)"; fi
+# PS-DTFE volume-weights its velocity moments in every run: without '--ps-volume-weighted' an explicit '--face-gradient'
+# is not refused (P7), and the bare exact run qualifies for the default route as the run with the flag does (P14)
+gline() { grep -F "velocity gradient      :" "$TMP/$1.log" | head -1; }
+run fn2.0 pan_2.0 OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 -- --face-gradient
+if sameset f2.0 fn2.0 && grep -qF "velocity gradient      : from EXACT FACE sums" "$TMP/fn2.0.log"; then
+    pass "P7 '--face-gradient' without --ps-volume-weighted runs the face gradient: the files of the run with it byte for byte"
+else fail "P7 '--face-gradient' without --ps-volume-weighted differs from the run with it (see $TMP/fn2.0.log)"; fi
+run n2.0 pan_2.0 OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 --
+if sameset d2.0 n2.0 && [ -n "$(gline d2.0)" ] && [ "$(gline d2.0)" = "$(gline n2.0)" ]; then
+    pass "P14 the bare exact run (no route flag, no --ps-volume-weighted) takes the default route of the run with the flag: its files byte for byte, the same 'velocity gradient' line"
+else fail "P14 the bare exact run differs from the run with --ps-volume-weighted (see $TMP/n2.0.log)"; fi
 p14c=1
 for f in "$TMP"/b2.0.*; do
     case "$f" in *.log|*.runlog*|*.a_velGrad|*.a_velDiv|*.a_velShear|*.a_velVort) continue ;; esac
@@ -490,14 +504,12 @@ noface() {   # noface <what> <expected reason part> [args ...]: exit 0, the stre
     else fail "P14 $what: exit $rc or no reason line (see $o.log)"; fi
 }
 noface "the sampled deposit" "needs the exact deposit" --sampled --subsamples 3 --ps-volume-weighted
-noface "mass-weighted moments" "needs '--ps-volume-weighted'" --exact
 noface "the halo release" "cannot run with '--ps-halo-release'" --exact --ps-volume-weighted --ps-halo-release 2
 
 echo ">> --interlace: every grid but the density is the first pass's, the face gradient's family among them"
 # P19: the default run above (d2.0) with '--interlace' -- the second pass, on the particles moved by half a cell,
 # gives the density only (main.cpp); the face sums, their normalization and the face outputs are the first pass's
 run i2.0 pan_2.0 OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 -- --ps-volume-weighted --interlace
-gline() { grep -F "velocity gradient      :" "$TMP/$1.log" | head -1; }
 p19=1
 for f in "$TMP"/d2.0.*; do
     case "$f" in *.log|*.runlog*) continue ;; esac

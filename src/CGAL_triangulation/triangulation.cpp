@@ -523,10 +523,10 @@ static void insertSequential(DT *dt, vector<Particle_data> *p, MESSAGE::Message 
 // average, the face pass, the vertex densities); unchanged: in the single build, standard DTFE's exact '_a' grids on
 // either device, its face pass and its vertex densities (integer sums in one unit for the whole run,
 // src/fixed_units.h: vertexDensityStarSums below, with the single-cell volumes of canonicalTetVolume, which do not
-// follow CGAL's labelling; tests/split_bytes_check.sh S4), and every grid of the single-precision PS-DTFE, except
-// under '--ps-linear-deposit' (which reads the vertex densities), whose cells are renumbered in a canonical vertex
-// order before any use (ps_vertex_order.h, D19). Under DTFE_PS_VERTEX_ORDER_LEGACY=1 (CGAL's numbering) its velocity
-// moments move by 4e-7 of the rms in 5% of the values (tests/dev/bytecmp.sh with DTFE_TRIANGULATION_THREADS=6).
+// follow CGAL's labelling; tests/split_bytes_check.sh S4), and every grid of the single-precision PS-DTFE, whose
+// cells are renumbered in a canonical vertex order before any use (ps_vertex_order.h, D19). Under
+// DTFE_PS_VERTEX_ORDER_LEGACY=1 (CGAL's numbering) its velocity moments move by 4e-7 of the rms in 5% of the values
+// (tests/dev/bytecmp.sh with DTFE_TRIANGULATION_THREADS=6).
 // '--sequential-triangulation' (or DTFE_TRIANGULATION_THREADS=1) keeps the sequential insert, reproducible bit for
 // bit; the test suites' inputs are far below the threshold, so they compare sequential builds. The parallel insert
 // sorts and inserts a COPY of the points (CGAL keeps a second one), so the particles are freed as soon as that copy

@@ -146,12 +146,12 @@ for name, want in (("t0", None), ("t1", (1, 1, 0, 0, 0)), ("e1", (1, 0, 0, 1, 0)
                    ("p1", (1, 0, 1, 0, 0)), ("x1", (3, 3, 0, 0, 0))):
     got = by_cause(name)
     check("R6", got == want, f"{name}: retries by cause {got} (expected {want})")
-# from the default pace, 250 ms buffers / 8 ms gaps
+# from performance's pace (the suites' run mode: tests/lib.sh), 250 ms buffers / 8 ms gaps
 esc_gap, def_gap = "24", "8"
 L3, L7 = log("p1"), log("p2")
 eased = re.findall(r"pace eased to (\d+) ms buffers, (\d+) ms gaps", L7)
 check("R7", re.search(r"\[watchdog\].*target 62 ms buffers, " + esc_gap + r" ms gaps", L7) is not None
-      and eased[-1:] == [("250", def_gap)] and "(the default)" in L7,
+      and eased[-1:] == [("250", def_gap)] and "(the run mode's)" in L7,
       f"a watchdog fault escalates to 62 ms / {esc_gap} ms and a clean stretch eases it back to {eased[-1:]} "
       f"(expected 250 ms / {def_gap} ms)")
 check("R7", "pace eased" not in L3,

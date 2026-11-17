@@ -1,4 +1,404 @@
 UNRELEASED (since 1.0.0)
+- The test round of the switch batch (2026-11-16, on the owner's word of that day), on the tree of the entries
+  below: the help batch's second part, the switch batch's parts 1 to 4 and the test fix (docs/cleanup-plan.md P14,
+  "The test round of 2026-11-16"). One code change came out of it: three unused names in
+  tests/py_gui_explore_test.py (two imports, one variable; older than this batch), which the lint stage reports.
+  * The Mac battery: 31 of 31 stages in 63 minutes (the core stage 2033 s, the double stage 1004 s).
+  * Full size, TNG100-3-Dark z = 0 at 512^3, the four commands of the measurement night of 2026-11-14 word for
+    word, each set against the night's hash list: PS-DTFE Exact 28 files, PS-DTFE Fast 22, standard DTFE Exact on
+    the GPU 10, standard DTFE Fast on the CPU 10 -- every file identical. Wall times at the night's plan: PS-DTFE
+    Exact 1361.81 s (the night 1327.94), PS-DTFE Fast 545.37 s (552.77), standard Exact 457.13 s (450.64), standard
+    Fast 427.43, 434.69 and 437.75 s (407.73). The same day, with identical bytes: the night's own programs took
+    1355.81 s (PS-DTFE Exact) and 423.42 s (standard Fast), the programs after the help batch 1365.49 s and those
+    after part 3 1353.30 s (PS-DTFE Exact). So a daytime run is 2 to 4% slower than the night's. For PS-DTFE Exact
+    no program of this batch is slower than its predecessor beyond that. For standard Fast it is not established
+    either way: the part-4 program's three runs are 1 to 3% above the one run of the night's program (CPU time
+    1769 to 1789 s against 1761 s); to be timed on an idle machine.
+  * Two things to know about such timings. One run of the part-4 program took 1517.34 s (PS-DTFE Exact, the
+    night's plan, identical bytes) and its repeat 1361.81 s: a single daytime run can be 12% off, so a difference
+    needs a repeat. And the plan follows the free memory at the start: with 37 GB free the same command ran one
+    partition at a time on a 29.5 GB budget and took 2214.30 s (identical bytes; its peak 31.31 GB against 28.46 GB
+    predicted, above that budget).
+  * The plain commands at full size: for all four, the plan of the command without '--gpu', '--run-mode',
+    '--lambda-th' (standard DTFE: also without '--padding') equals the named command's ('--auto-tune-report'; the
+    budget figures apart, which follow the free memory of the moment), and the device line reads as designed: the
+    GPU for PS-DTFE and for standard DTFE's exact average, the CPU for its sampled one.
+  * Linux (Ubuntu 24.04 in a VM, GCC, no GPU), on the commit file set: the build, the core stage (63 steps), the
+    double stage (45), the 2D stage, the build variants and the old-python parse all passed; the new defaults suite
+    24 checks (2 skipped: they need a GPU path) in both precisions. The lint stage (ruff, rules F) failed on the
+    three unused names; after their removal it passes, and the Explore suite passes as before (389).
+  Not run: a GCC build on the Mac, the Docker build. Nothing was pushed, so GitHub's CI has not seen this tree
+  (it watches the branches master and Phase-Space, not GPU).
+- Clean-up, the switch batch, fourth part: the programs' own defaults, and the program picks its device
+  (2026-11-16, on the scratch line; the owner's answers of 2026-11-14, "Yes, before the test round" and "Standard
+  Fast on the CPU", and his "Yes, build part 4" of 2026-11-16; docs/cleanup-plan.md P14, "The clean-up, the switch
+  batch, fourth part"). A run started by hand with few options now takes the launcher's Exact settings where the
+  owner decided so. This is the first of two stages: the drivers and the launcher still name everything they named
+  before, so their commands and outputs do not change, with one exception by the owner's decision: standard DTFE's
+  sampled (Fast) jobs at the automatic device run on the CPU in every machine use. What a user sees:
+  * '--lambda-th' is 0.3 without the option (0 before), in all six programs. A run with a T-web or V-web field and
+    no '--lambda-th' writes other class files.
+  * Standard DTFE's '--padding' is 15 mean particle spacings without the option (5 before); PS-DTFE keeps 5. The
+    gate's periodic 24^3 pancake gives the same bytes at 5 and 15. A run in an open box changes near the hull of
+    the particles: the 6^3 lattice of tests/run_tests.py has a mean density of 0.47 at 5 and 0.35 at 15, and the
+    partitioned open-box runs of tests/dtfe_point_eval_check.sh agree with the single triangulation at every one
+    of 10496 points (27 and 28 differed at 5).
+  * The run mode without '--run-mode' and DTFE_RUN_MODE is balanced (performance before). Inside a batch job
+    (SLURM_JOB_ID or PBS_JOBID set and not empty) it is performance. The order: '--run-mode', DTFE_RUN_MODE, the
+    batch job, balanced. The run log's 'run mode' line names the source: "--run-mode balanced, the default" or
+    "--run-mode performance, the default inside a batch job (SLURM_JOB_ID)". On the 10-core Mac a plain run takes 6
+    threads (10 before).
+  * The device. '--gpu' asks for the GPU as before. The programs now read DTFE_GPU, the drivers' name: 0, false, no
+    or off keeps the CPU; any other value asks for the GPU exactly as '--gpu' does; unset, empty or 'auto' is not
+    given. '--gpu' beats DTFE_GPU=0. With neither the program picks: on a GPU build PS-DTFE deposits a run with an
+    '_a' field on the GPU (the exact and the sampled deposit, any particle count), standard DTFE runs its exact
+    average on the GPU, and standard DTFE's sampled average stays on the CPU. What has no GPU path stays on the CPU
+    too: the other averaging methods, a redshift cone, '--serve', '--ps-caustic-cusps', a scalar field of more than
+    one component, a grid above 2^32 cells, a PS-DTFE run without an '_a' field. A device the program picked prints
+    no warning.
+  * Every run with an '_a' field of the DTFE method prints its device and the reason in the header (before: only
+    with '--gpu'). The label is "'_a' interpolation     :" (standard DTFE) or "PS deposit             :"
+    (PS-DTFE); the texts are "Metal GPU (--gpu)", "Metal GPU (DTFE_GPU=1)", "Metal GPU (the default; DTFE_GPU=0
+    keeps the run on the CPU)" (PS-DTFE), "Metal GPU (the default for the exact average; DTFE_GPU=0 keeps the run
+    on the CPU)" (standard DTFE), "CPU (DTFE_GPU=0)", "CPU (the default for the sampled average; --gpu runs it on
+    the GPU)", "CPU (the default: this average has no GPU path)", "CPU (this binary was built without GPU
+    support)", and for an asked GPU on such a build "CPU (--gpu given but this binary was built without GPU
+    support; falling back)" (or with DTFE_GPU=1 in place of --gpu). A reader's rule: the text starts with 'CPU', or
+    it holds ' GPU'. The standard header's EXACT line drops its "with --gpu" on a run whose GPU the program picked.
+  * Resume: the checkpoint's key has a new line after 'gradient=', 'device=gpu' or 'device=cpu'. A run killed on
+    one device is not resumed on the other; the refusal names the line.
+  * '--gpu-share' keeps its default of 1 (the drivers and the launcher pass 'auto'). Its note on a CPU run now reads
+    "does not apply to a run on the CPU".
+  * The GPU pace line after a recovery ends "(the run mode's)" at the base in every mode; at performance's 250 ms it
+    ended "(the default)".
+  * Help: '-h' and '--full-help' say all of this in the entries of --gpu, --run-mode, --padding, --lambda-th,
+    --resume, --max-concurrent and (PS-DTFE) --gpu-share; '--full-help' shows '--lambda-th arg (=0.3)'. No option
+    is added or removed (26 and 28 names in '-h', 62 and 73 in '--full-help').
+  * Drivers: with DTFE_GPU unset, standard DTFE's sampled average resolves to the CPU in every run mode (before:
+    in performance only), and the banner says "(DTFE_GPU unset: standard DTFE's sampled average runs on the CPU;
+    DTFE_GPU=1 runs it on the GPU)". Both drivers export the resolved DTFE_GPU (0 or 1) to the program, next to the
+    '--gpu' they pass. Every other command line is as before, so the pipeline's freshness test sees no change.
+  * Launcher: standard DTFE Fast at the automatic device runs on the CPU in every machine use ("Runs on: the CPU
+    (chosen for Fast, Balanced)"); PS-DTFE Fast keeps its rule (the CPU below a million particles). Every program
+    the launcher starts gets DTFE_GPU pinned to its command ('1' with '--gpu', else '0'): Grids, Pipeline, Custom
+    and its memory check, the exact zoom, the Explore query server, an exported script. So an export of DTFE_GPU
+    in the login shell cannot move a launcher job. The Runs tab reads a log's device and run mode from the header
+    lines first, then from the command. dtfelib.Estimator has a new keyword 'env' (variables set for the server on
+    top of the caller's environment); its command is unchanged, and its server never takes the GPU by the pick.
+  Limits, told to the owner: (1) a plain PS-DTFE Fast run takes the GPU at any size; the launcher's small-snapshot
+  rule is not in the program. (2) The pick tests the full grid against 2^32 cells, so a plain run on a larger grid
+  stays on the CPU where '--gpu' with a fine enough split would deposit on the GPU; to close before the drivers'
+  and the launcher's copies of the device table are deleted (the second stage, not built). (3) What only the run
+  can find (no usable Metal device, a kernel or buffer failure) still prints the fall-back lines "asked for the
+  GPU" for a picked GPU; a PS-DTFE triangulation or window above 2^32 cells takes the CPU without a line while the
+  header says GPU. (4) DTFE_GPU=1 with '--serve' prints the GPU line although a server deposits nothing; its
+  answers are the CPU's bytes (3000 points, both programs). (5) DTFE_GPU exported in a shell now reaches every
+  program started by hand from it, and dtfelib.Estimator's server unless 'env' pins it. (6) On a build without a
+  GPU, DTFE_GPU=0 prints "CPU (DTFE_GPU=0)", not the "built without" text. (7) The GPU-limit warnings name '--gpu'
+  also when DTFE_GPU=1 asked.
+  Tests: tests/lib.sh and tests/dev/battery.sh export DTFE_RUN_MODE=performance and DTFE_GPU=0 (the python suites
+  set them as defaults), because the suites were written for the earlier defaults; a suite that tests a default
+  unsets them per run. No stored figure was replaced: the four expectations made at the earlier padding name
+  '--padding 5' (the stored regression of tests/run_tests.py and its open-box lattice, dtfe_sampling_check's runs,
+  ps_auto_tune_check R). New suite tests/defaults_check.sh, 26 checks in each precision, in the program stage of
+  tests/ci_suite.sh: every device row a build can show, a picked GPU against '--gpu' byte for byte, DTFE_GPU on,
+  off and against the flag, no line without an '_a' field, the header's padding, the key's device line and the
+  refused resume across devices. run_mode_check 74 (68): the default, the batch rule and its order, the key.
+  tweb_check 19 (15): no '--lambda-th' == 0.3 byte for byte, and other classes than 0. point_exact_serve_check 27
+  (26): no '--padding' == 15 at demo/z0_64's 80000 points, and not 5 (685 points differ). ps_2d_check 48 (46): the
+  2D programs' device line. run_scripts_check 443 (442): the drivers' rule in every run mode, the exported
+  DTFE_GPU of nine stand-in runs. The launcher's job-specification suite 473 (470), its window suite 396, Explore
+  389 (388), py_dtfelib one more (Estimator's 'env').
+  Checks (scratch line, against the programs of the third part): the four builds and a build of both programs
+  without a GPU backend, without a warning. The launcher's 36 reference jobs with their environment: 32 give the
+  reference's output files byte for byte; the four standard Fast jobs at the automatic device lose '--gpu', and
+  the two single-precision ones give the files of the reference's CPU jobs. 59 runs of the new programs with few
+  options, each against the old program with everything named ('--run-mode', '--gpu' or not, '--lambda-th 0.3',
+  '--padding 15'): 392 files, none different (one case, the random-point average, only with '--seed' named: its
+  seed is the clock's second); on the build without a GPU 10 runs, 73 files, none different. The planner's 127
+  reference plans: those of the old programs when tests/dev/tune_report_set.sh (not edited) is called with
+  DTFE_GPU=0; called plainly, 61 plans move, because the program plans the GPU it picks (the script pins the
+  threads, so the run mode moves none). tests/dev/bytecmp.sh (not edited): against the old programs with
+  '--lambda-th 0.3' and '--padding 15' added, 261 files, 0 different; against the old programs as they are, 85
+  differ by design (the web classes, standard DTFE's padding). The 393 option probes: as before. The launcher's
+  commands: every job's environment gains DTFE_GPU, and 38 standard Fast commands lose '--gpu' or '-m'; nothing
+  else moved. Suites, once, on the built tree: the 16 that were edited or added, in double precision where they
+  have a pair, and the resume, flag-spelling, GPU, planner, point and cross-check suites that the key, the device
+  or a plain standard run reaches (34 runs), the 2D stage, the launcher stage, docs drift 39, the deprecation
+  gate. Two things failed first and were corrected: a launcher tip of three lines, and the lattice test named
+  above. Then the nine other suites whose scripts start the standard program (interlacing, the Monte-Carlo
+  average, the standard face gradient, the split independence, and five PS-DTFE suites): none failed. On the build
+  without a GPU: the new suite 24 checks (2 skipped: they need a GPU path) and run_mode_check 43. Not run: the
+  whole core and double stages, the battery, the Linux check, a GCC build, the Docker build, a full-size run.
+- Test fix: tests/ps_fixed_moments_check.sh skips its check F6 under DTFE_PS_RUN_UNITS=1 (2026-11-16, on the
+  scratch line). F6 compares the bound walk's sums at 1, 3 and 6 threads from the lines DTFE_DEBUG_FX_BOUNDS=1
+  prints. Under PS-DTFE's run-wide units every grid's unit comes from the run and no pass walks its bounds, so the
+  program prints no such line, and F6 has failed in that pass of the suite since it was added (2026-11-13): the
+  programs of before this batch fail it the same way. tests/ci_suite.sh's core stage runs the suite a second time
+  with DTFE_PS_RUN_UNITS=1 and stops at the first failing suite, so the battery's core stage stopped there. The pass
+  now prints a SKIP line for F6; the suite's first pass, in the default units, checks it as before. Checked: the
+  default pass 33 checks, the run-wide pass 23 and the SKIP line, the double pass 10, none failed. No program code
+  changes.
+- Clean-up, the switch batch, third part: PS-DTFE's velocity moments are volume-weighted in every run (2026-11-16,
+  on the scratch line; the owner's answer of 2026-11-14, "Remove old conventions"; docs/cleanup-plan.md P14, "The
+  clean-up, the switch batch, third part"; README.md, 'Phase-Space DTFE', "Velocity moments"). The mass-weighted
+  velocity moments, which a PS-DTFE run without '--ps-volume-weighted' gave, are gone. Every run weights the
+  velocity, its gradient and the fields built on it, and the scalars by Eulerian-volume shares; the dispersion stays
+  mass-weighted. A run that passes the flag (every run of the drivers and the launcher) keeps every output byte and
+  its plan. A run without the flag now gives the bytes of the same run with it. What a user sees:
+  * '--ps-volume-weighted' is accepted and changes nothing. It is no longer listed in '-h' or '--full-help'
+    (PS-DTFE's '-h' has 28 names, '--full-help' 73). The drivers and the launcher keep passing it, so the command
+    line in a run log still names the weighting.
+  * Every PS-DTFE run log that has the 'RUNNING:' line (verbosity 2 and up) has a new header line,
+    "velocity moments       : volume-weighted (the dispersion mass-weighted)".
+  * A run without the flag changes in three ways. Its velocity-family grids ('.vel', '.velGrad', '.velDiv',
+    '.velShear', '.velVort', the V-web, the scalars) are volume-weighted: other values in multi-stream cells. In 3D
+    with the exact deposit (no '--ps-halo-release', no '--per-tet-gradient', no DTFE_FACE_GRADIENT=0) it takes the
+    face gradient, as the run with the flag did, and writes the face route's files ('.a_velDivStreams',
+    '.a_massFluxDiv', and the '...Streams' files of the fields asked for). The two messages that asked for the flag
+    are gone ("'--face-gradient' gives the gradient of the VOLUME-weighted mean velocity: add
+    '--ps-volume-weighted' ..." and the header's reason "the face gradient needs '--ps-volume-weighted' ...").
+  * Points: '.pts_vel', '.pts_velGrad' and '.pts_scalar' are the plain mean over a point's streams in every run.
+    dtfelib.Estimator and the launcher's Explore query server never passed the flag, so their PS-DTFE velocities
+    at multi-stream points change from the density-weighted mean to the plain mean, which is what the production
+    grids hold.
+  * The drivers stop with exit 2 before anything runs, a dry run included, for PS_VOLUME_WEIGHTED=0 (also 'off',
+    'false', 'no'): "Error: PS_VOLUME_WEIGHTED=0: the mass-weighted velocity moments were removed (PS-DTFE's
+    velocity moments are volume-weighted)." PS_VOLUME_WEIGHTED=1 and an unset one give the command of before. The
+    error "FACE_GRADIENT=1 needs the volume-weighted moments" is gone with its condition.
+  * Readers of run logs (dtfelib's io.run_velocity_weighting, the launcher's Runs tab) take the header line first,
+    then the flag on the command line; a log with neither is an older run with mass-weighted moments. The
+    pipeline's freshness test still compares the flag, so an older log without it is recomputed.
+  * Launcher: every job's command and environment is as before. Explore's exact zoom always passes the flag: the
+    zoom of an older output that was saved with mass-weighted moments is volume-weighted, and its state line says
+    so (" · the zoom's velocities are volume-weighted, this older output's mass-weighted").
+  * Memory: a run without the flag is planned as the run with it and holds the moment weight's own grid. The 64^3
+    crossed waves on a 768^3 grid in one domain (density_a velocity_a, sampled at one point) are predicted at 27.93
+    GB (24.30 before) and measure 26.56 GB (22.94 with the program of before); in double precision 30.07 GB
+    predicted (26.45) and 28.51 GB measured (24.89).
+  * Resume: the checkpoint's key keeps the flag as typed, so a run killed with the flag resumes with the flag. A
+    checkpoint of an older program is never resumed (the key holds the program's revision and link time).
+  * tests/dev/bytecmp.sh (not edited): against reference programs older than this part, its PS-DTFE runs without
+    the flag differ in the velocity family by design. With '--ps-volume-weighted' added to the older programs'
+    commands it reports 261 files, 0 different.
+  Code: the member is true from the constructor on and the switch is bound to nothing; the two refusals and one
+  block that could no longer run (the in-loop mass-weighted close-out of the dispersion) are deleted. The deposit's
+  inner loop, the kernels and their parameter blocks are untouched: the weighting's branches stay there on a member
+  that is always true, for a later change with a timing pair.
+  Tests: ps_volume_weighted_check is rewritten (12 checks, 15 before): the flag changes no byte of any grid or
+  point file, the header line at every verbosity, the GPU against the CPU. ps_point_conventions_check 13 (16): the
+  point velocity is the plain stream mean and the point dispersion the density-weighted second moment.
+  ps_face_gradient_check 83, two checks rewritten (a run without the flag gives the files of the run with it).
+  run_scripts_check 442 (436): the drivers' refusal, the hidden flag, the pipeline's freshness test on a log
+  without the flag. ps_fixed_moments_check 33 (38) and ps_slab_deposit_check 11 (12) lose a case that became a
+  duplicate. ps_auto_tune_check 100, as before: the lone GPU lane books 34 B/cell (30: the moment weight's grid),
+  and the stored peak of the 768^3 run is the new measurement. The launcher's job-specification suite 470 (469).
+  Checks (scratch line, against the programs of the second part and of the entries below): the four builds, and a
+  CPU-only build of both programs and the library, without a warning. The 36 reference runs, all with the flag: all
+  485 output files byte-identical, no fallback line in a log (one split PS-DTFE run's log with 4 phase lines
+  against 2: the first part's entry). 29 runs without the flag (exact and sampled, the GPU, 2x2x2, the fixed-point
+  merge, the halo release, '--per-tet-gradient', dispersion only, density only, points, double precision, 2D), each
+  against the old program with the flag added and the new one with it: 336 files, none different. Point files and
+  the GPU caustic deposit, 25 runs: 150 point files, none different. The planner's 127 reference plans: those of the
+  old programs with the flag added; against the old programs as they were, the 18 plans of runs without the flag
+  differ. The 60 refusal cases of the second part: none wrong. The launcher's commands of 498 jobs: as before.
+  '-h' of the three standard programs: byte for byte as before; their '--full-help' differs in the text of 4 entries
+  (--face-gradient, --sample-points, --pts-vel-grad, --pts-scalar), PS-DTFE's in 6 (those, --field,
+  --per-tet-gradient), and PS-DTFE's '-h' in '--exact'. The 396 option probes: as before but for '--face-gradient'
+  alone on PS-DTFE and PS-DTFE-double (no refusal any more). Suites: the core stage of tests/ci_suite.sh (62 steps)
+  and its 2D stage, before and after; its double stage (44 steps) after; the GPU suites (dtfe_metal 24, gpu_scalar
+  21, gpu_mass 8, gpu_retry 40, dtfe_gpu_retry 40) and the battery's four double stages, before and after; the
+  launcher's four (470, 396, 388, 82), docs drift 39 and the deprecation gate, after. None failed but two: the
+  planner suite's stored peak, corrected as said above, and a check that fails without this batch too (the entry
+  "Test fix"). Not run: the battery as one run with its numpy 1.26 stages, the Linux check, a GCC build, the
+  Docker build, a full-size run.
+- Clean-up, the switch batch, second part: three older PS-DTFE choices are removed and refused (2026-11-15, on the
+  scratch line; the owner's answer of 2026-11-14, "Remove old conventions"; docs/cleanup-plan.md P14, "The clean-up,
+  the switch batch, second part"; README.md, 'Phase-Space DTFE'). PS-DTFE no longer has the linear-profile deposit
+  ('--ps-linear-deposit'), the geometric stream density at points ('--ps-stream-density geometric') or the legacy
+  point conventions ('--ps-point-conventions legacy', also as '--pts-conventions legacy'). No output byte of a run
+  that used none of the three moves. What a user sees:
+  * The program stops before anything runs, with one of
+      '--ps-linear-deposit' was removed: PS-DTFE spreads each tetrahedron's mass uniformly, with '--exact' (the
+      default) or '--sampled'.
+      '--ps-stream-density geometric' was removed: the per-stream density at points is the linear interpolation of
+      the vertex densities ('linear').
+      '--ps-point-conventions legacy' was removed: point values follow the grid's conventions ('grid').
+    (and "Unknown value '<v>' for '--ps-stream-density'; the only value is 'linear'." or "... for
+    '--ps-point-conventions'; the only value is 'grid'." for another value). The refusal comes before every other
+    check, a missing output file included; a call that asks for the help gets the help. The three options are no
+    longer listed in '--full-help'; their kept values ('linear', its older name 'dtfe' with its warning, 'grid')
+    still parse and change nothing.
+  * The drivers stop with exit 2 before anything runs, a dry run included: PS_LINEAR_DEPOSIT=1 ("Error:
+    PS_LINEAR_DEPOSIT=1: the linear deposit was removed (PS-DTFE deposits with the exact or the sampled deposit).")
+    and PS_POINT_CONVENTIONS=legacy, also as PTS_CONVENTIONS=legacy ("Error: PS_POINT_CONVENTIONS=legacy: the legacy
+    point conventions were removed (point values follow the grid's conventions, 'grid')."); another value of
+    PS_POINT_CONVENTIONS gets "Error: PS_POINT_CONVENTIONS must be 'grid' (got '<v>').", now in run_ps_pipeline.sh
+    too. PS_LINEAR_DEPOSIT=0 and PS_POINT_CONVENTIONS=grid, the launcher's pins, give the command of a run without
+    them. New behaviour to know: run_ps_dtfe.sh used to accept PS_POINT_CONVENTIONS=legacy in a run without points
+    and ignore it; it now stops there too.
+  * dtfelib.Estimator(stream_density='geometric') raises ValueError with the reason; 'dtfe' and 'linear' build the
+    command of before.
+  * Launcher: the Custom tab's checks name each removed choice among the extra options as an error ("the extra
+    options' --ps-linear-deposit was removed from the program: take it out", the same for '--ps-stream-density
+    geometric' and '--ps-point-conventions legacy' in either spelling). Every job's command and environment is as
+    before.
+  * Readers of older run logs and outputs are unchanged: a run log with one of the three choices is still read,
+    labelled and found stale by the pipeline's freshness test.
+  Code: outside the deposit's inner loop and the kernels the three choices' code is gone (the option parsing, the
+  linear deposit's run-log line and its pieces in the GPU extraction, the geometric density's sort key and the
+  legacy branch of the point evaluation, the server handshake's flag, whose bit stays reserved). The inner loop
+  (depositLoop, psCountBeyondGrid), the kernels and their parameter blocks are untouched: the linear deposit's
+  branches stay there behind a member that is always false, for a later change with a timing pair.
+  Tests: tests/ps_linear_deposit_check.sh becomes tests/ps_deposit_check.sh (the exact deposit's checks kept, the
+  linear ones gone: 17 checks, 31 before; one new, the refusal); ps_point_eval_check 36 (40: the geometric halves
+  gone, two refusal checks new); ps_point_conventions_check 16 (20: the legacy halves gone, three refusal checks
+  new, and the control that the test box carries the initial-conditions bias now a run without '--ps-vertex-mass');
+  ps_caustic_class_check 45 (46), ps_2d_check 46 (47) and ps_slab_deposit_check 12 (13) lose their linear case;
+  run_scripts_check 436 (434); py_dtfelib_test 52 (51); the launcher's job-specification suite 469, as before, one
+  check rewritten.
+  Checks (scratch line, against the programs of the first part and of the entry below): the four builds, and a
+  CPU-only build of both programs and the library, without a warning. The 36 reference runs: all 485 output files
+  byte-identical, no fallback line in a log (one split PS-DTFE run's log again with 4 phase lines against 2: the
+  first part's entry). Point evaluation and the GPU caustic deposit, old programs against new, 25 runs (one domain
+  and 2x2x2, with and without '--ps-vertex-mass' and '--ps-volume-weighted', sampled and exact, GPU, double
+  precision, 2D, standard DTFE's points): every output file byte-identical, 150 point files among them. The refusals:
+  60 cases on the three PS-DTFE programs (each choice alone and beside '--exact', '--sampled', '--gpu',
+  '--grid-window', '--partition', without an output file, beside the help), none wrong; the CPU-only program
+  refuses the same way. '-h' of the six programs: byte for byte as before. '--full-help': PS-DTFE lists 74 names (77
+  before: the three gone) and differs in the text of 16 entries, standard DTFE in 5 (--parallel-triangulation,
+  --pts-den-grad, --pts-vel-grad, --pts-scalar, --serve): each lost a clause that named a removed choice. The 405
+  option probes: as before but for '--ps-linear-deposit' on the three PS-DTFE programs (the refusal). The launcher's
+  commands of 498 jobs and the planner's 127 reference plans: as before. Suites on the new programs, none failed:
+  those above, in double precision ps_deposit_check, ps_point_eval_check and ps_point_conventions_check, and
+  ps_volume_weighted_check 15, ps_window_check 249, point_exact_serve_check 26, flag_spelling_check 80, the
+  non-periodic suite, docs drift 39, the deprecation gate, the launcher's four (469, 396, 388, 82). Not run: the
+  whole battery, the Linux check, a GCC build, the Docker build, a full-size run.
+- Clean-up, the switch batch, first part: three unused switches, dead code, two run-log lines (2026-11-15, on the
+  scratch line; the owner's answers of 2026-11-14 to the clean-up's questions: the time objective, the shared GPU
+  grid and the GPU timing experiments go, "Remove dead leftovers", "Fix two run-log lines"; docs/cleanup-plan.md P14,
+  "The clean-up, the switch batch, first part"). No option is added, removed or renamed, no default changes and no
+  output byte of any run moves; five texts change (below). Removed:
+  * The planner's time objective: DTFE_AUTO_TIME with its hooks DTFE_AUTO_TIME_GAIN, DTFE_AUTO_T_STD_PART and
+    DTFE_AUTO_T_PS_PART, the report line's time_s and time_mem_s keys and the 'AUTO-TUNE: time objective' line (built
+    on 2026-11-13 behind the switch; no run with the switch on was ever recorded). The plans are the memory
+    objective's, as they were without the switch.
+  * Standard DTFE's shared GPU grid: DTFE_GPU_SHARED and DTFE_GPU_SHARED_GB (one full grid on the device for the
+    whole call; opt-in, set by no driver). Every sub-domain deposits into its own sub-grid, as it did by default.
+  * The GPU timing experiments DTFE_GPU_DEBUG_NOWRITE, DTFE_GPU_DEBUG_NOATOMIC and PS_GPU_DEBUG_NOATOMIC (kernels
+    that did their work but left out the writes or the atomics, for a timing; their grids came out wrong or empty).
+  The nine names are no longer read: a variable that is still set is ignored without a word (none was in a help
+  text). The kernel sources change in comments only: the fields these switches set stay in the kernels' parameter
+  blocks, always 0, until a kernel change that can be timed.
+  * Dead code: the Makefiles' seven help macros (FIELD_OPTIONS, REGION_OPTIONS, PARTITION_OPTIONS, PADDING_OPTIONS,
+    AVERAGING_OPTIONS, REDSHIFT_CONE_OPTIONS, ADDITIONAL_OPTIONS: every build defined all seven) with their #if lines
+    around the help groups; minimum() and quicksort() of src/miscellaneous.h; the two branches for input type 102,
+    which no reader takes; User_options::subgridOffset, written and never read; four unused names in the python tree
+    (explore_3d's _3d_shape_changed, volume_gl's GL_R8UI, plot_PS_DTFE's WEB_CLASS_NAMES, plot_ellipses_contour_3D's
+    SLICE_DIM); the two screenshots under demo/, which nothing refers to.
+  The five texts:
+  * Run log, PS-DTFE with '--ps-lagrangian-input': the header line 'Lagrangian input file : <file>' read as if the
+    file were used. It now states the rule ("Lagrangian positions : the snapshot's 'InitialCoordinates' when it has
+    them, else '<file>' (--ps-lagrangian-input, matched by ParticleIDs)"), and after the read one more line says so
+    when the file was not read ("Lagrangian positions: the snapshot's 'InitialCoordinates'; '<file>'
+    (--ps-lagrangian-input) was not read").
+  * Run log, the 'velocity gradient' line under the face gradient: the date is gone; in its place the line names
+    where the setting came from (the default where it applies, '--face-gradient' or DTFE_FACE_GRADIENT=1).
+  * Run log: the input label 'Gadget single file' of type 102 goes with the type.
+  * Standard DTFE at '--verbose 2' or more, a split sampled GPU run: the line '(GPU: no shared grid, ...; each
+    sub-domain deposits on its own)' goes with the shared grid.
+  * '--full-help' of the three standard programs, '--gpu': without the clause on the shared full grid.
+  README.md and metal/README.md lose what they said about the removed switches. This closes the three points the
+  entry below left (type 102's branches and the two run-log lines).
+  Timing, not measured: a split sampled GPU run of standard DTFE now sets the device up in its first sub-domain's
+  call, no longer before the sub-domains start.
+  Tests: the time objective's sections (N of tests/dtfe_auto_tune_check.sh, AA of tests/ps_auto_tune_check.sh) and
+  the shared grid's cases (S1 of tests/dtfe_gpu_retry_check.sh, the shared-grid runs of tests/dtfe_metal_check.sh) go
+  with the code. N4 and AA3, which test the memory model at a budget between two plans, stay as one check each (G
+  and AA). tests/run_scripts_check.sh gains two checks, of the two Lagrangian lines.
+  Checks (scratch line, against the programs of the entry below; the scratch area was lost in a restart of the test
+  machine on 2026-11-15 and rebuilt, and the rebuilt reference programs reproduce the 521 hash lines saved before
+  it): the four builds, and a CPU-only build of both programs and the library, without a warning. The 36 reference
+  runs: all 485 output files byte-identical, no fallback line in a log, the GPU lines counted as in the reference's
+  logs except in one split PS-DTFE run (4 phase lines against 2; the same new programs gave 2 in six more runs of
+  that command, as the old ones did, with the same output bytes each time). Four more standard GPU runs with the
+  deposit's own gradient (sampled and exact, one domain and 2x2x2), old programs against new: the same bytes. '-h' of
+  the six programs: byte for byte as before. '--full-help': unchanged in the three PS-DTFE programs; in the three
+  standard programs only the '--gpu' entry differs. The 405 option probes, the launcher's commands of 498 jobs and
+  the planner's 127 reference plans: as before. Suites on the new programs, none failed: dtfe_auto_tune_check 33
+  checks (39 before: N1-N3 and N5-N7 gone), ps_auto_tune_check 100 (111 before: the eleven of AA1, AA2 and AA4-AA7
+  gone), dtfe_gpu_retry_check 40 (42 before: S1's two), run_scripts_check 434 (432 before: the two new); with the
+  counts of before dtfe_metal_check 24, split_bytes_check 81, gpu_scalar_check 21, gpu_mass_check 8, gpu_retry_check
+  40, ps_fixed_moments_check 38, run_mode_check 68, dtfe_face_gradient_check 14, ps_face_gradient_check 83,
+  face_sweep_check 16, flag_spelling_check 80, ps_resume_check 30, dtfe_resume_check 45, run_tests_check 16; in
+  double precision dtfe_auto_tune_check 29, ps_auto_tune_check 80 and dtfe_metal_check 24; docs drift 39, the
+  regressions 22 of 22, the launcher's four (469, 396, 388, 82). The new test scripts on the old programs:
+  run_scripts_check fails on its two new checks and on nothing else. Two things the checks do not show: the two kept
+  budget checks (G and AA) skip on the test machine, as N4 and AA3 did before the change (no budget lies between the
+  two plans they compare), so they test nothing there; and the demo program under demo/examples does not compile on
+  the test machine, with or without this change (its Makefile passes the compiler no SDK path, and the compiler then
+  finds no system headers; with the path given by hand it compiles and links against this library). Not run: the
+  whole battery, the Linux check, a GCC build, the Docker build, a full-size run.
+- Clean-up, batch 2, second part: dates, timings and machine names out of the help (2026-11-14, on the scratch line;
+  docs/cleanup-plan.md P14, "The clean-up, batch 2, second part"). The owner's "Yes, build it" named the short help
+  (the entry below). This part is item D3 of the clean-up's decisions list of 2026-11-14 (group D, the help, whose
+  D1 and D2 the entry below built; not the D3 of docs/cleanup-plan.md's decision table), kept as a commit of its own
+  so that it can be left out (and with it the corrections below, which D3 does not name). Text only (help strings,
+  comments, documents): no option is added, removed or renamed, and no default, parsing rule or output byte of any
+  run changes. What a user sees:
+  * The long texts of '--full-help' (both binaries, every build) and the header that run_dtfe.sh prints for '-h' no
+    longer carry calendar dates, the wall times and speed ratios measured on one machine, or machine names (the run
+    mode's '~50 ms' stays: it is a setting). What a date said about older grids stays as a sentence without the
+    date: the older '_a' grids made without asking for the exact one hold the sampled average (standard DTFE) or the
+    sampled deposit (PS-DTFE); the older grids hold the deposit's own per-tetrahedron gradient (standard DTFE) or
+    the stream average of each stream's own gradient (PS-DTFE); older binaries formed the standard exact average's
+    frame per sub-domain in float32 (with what that moved).
+  * The dates and timings themselves stay in README.md and in this change log. README.md, 'Field evaluation
+    methods': the exact default of both binaries since 2026-11-09 ('Exact or sampled', 'Exact average', 'Exact
+    deposit'), the sampled deposit and the Monte Carlo average as the defaults before 2026-11-09 (the Monte Carlo
+    sentence new here), the face gradient's default (standard DTFE since 2026-11-09, PS-DTFE since 2026-11-11) and
+    its cost of 2026-11-09, the exact deposit's bench of 2026-11-09; the driver knob table's FACE_GRADIENT row (the
+    route of PS grids made before 2026-11-11); the '--parallel-triangulation' row under 'Phase-Space DTFE' (new
+    here: the default rule and the tbb library in the standard binaries since 2026-11-09, the sequential insert
+    before, from 1.0.0 on). This change log, the entries of 2026-11-09: the exact average as the default ('--exact'
+    and '--sampled' choose ...), the bench ('MEASURED 2026-11-09', the standard DTFE numbers among them), the
+    standard face gradient as the default (the route of every standard grid made before that date), PS-DTFE's
+    '--face-gradient' with '--gpu', the parallel (TBB) insertion, the grid frame (the frame of before); and of
+    2026-11-11, PS-DTFE's face gradient as the default.
+  * Three measurements that no document carried in full (the help gave them undated; code comments hold some) are
+    kept here: '--ps-merge index-order' (a finished partition waiting for its turn while holding its thread makes a
+    TNG region's GPU run 35% slower); '--tessellation-cache' (5.1 s of triangulation and 2.1 s of vertex density in
+    an 8.8 s run on 884736 particles; the cache restores the tessellation ~3.6x faster than re-inserting the points;
+    writing costs a couple of seconds more than an uncompressed cache); '--ps-lagrangian-padding' (the default 8 ran
+    6x faster and in 3.5x less memory than the Eulerian rule on a 4.1M-particle test).
+  Corrected, texts that were wrong:
+  * '--input-format' (and a Makefile comment) named a type 102 that no reader takes; 101 reads binary Gadget, one
+    file or several.
+  * '--input-format' called the data block of value 4 the masses: it is the velocities (2, the weights, are the
+    masses).
+  * '--ps-lagrangian-input' said the file holds the particles in the main file's order and is used when given: it is
+    read only when the snapshot has no 'InitialCoordinates', and matched by 'ParticleIDs'; the main input must be
+    read as type 105 either way.
+  * run_ps_dtfe.sh's two comments on the Lagrangian positions: the binary still prefers the snapshot's own
+    'InitialCoordinates' to the IC file the driver passes.
+  Not changed: no option, default, parsing rule or output byte; the short help ('-h' of the six programs); the
+  pointers to docs/cleanup-plan.md inside the help texts (the plan stays in the tree for now, the owner's word; D3
+  had proposed taking the pointers out of the help: not done). This part does two of the things the first part's
+  entry below left out: the dates and timings inside the long help texts (left out on purpose) and the
+  '--input-format' text's type 102 (kept there with the rest). Found on the way and left, because they are code or
+  run output: the dead branches that still name type 102 (the run log's input label in src/user_options.cc and a
+  test in src/io/density_file_io.cc); the run log's 'Lagrangian input file' line, printed whenever the option is
+  given, also when the snapshot's own dataset is used; the run log's 'velocity gradient' line, which carries a date.
+  Checks (scratch line, against the programs of the first part): the four builds without a warning. The 36 reference
+  runs: all 485 output files byte-identical. '-h' of the six programs: byte for byte as in the first part.
+  '--full-help': the same names, short letters, arguments and defaults; the text differs in 10 entries of standard
+  DTFE (--exact, --sampled, --face-gradient, --per-tet-gradient, --input-format, --parallel-triangulation,
+  --sequential-triangulation, --run-mode, --scratch-dir, --tessellation-cache) and in 16 of PS-DTFE (those and
+  --gpu, --gpu-share, --ps-merge, --ps-caustic-cusps, --ps-lagrangian-input, --ps-lagrangian-padding); no calendar
+  date is left in it, and the one number with a time unit is the run mode's '~50 ms'. Every '--full-help' option
+  passed once to each program (405 probes): recognised and answering as before. The launcher's commands of 498 jobs:
+  as before. The suites of the first part's entry once more, with the same pass counts, none failed. Not run: the
+  whole battery, the Linux check, a CPU-only or GCC build, the Docker build, a full-size run.
 - Clean-up, batch 2: a short '-h', developer options in a group of their own (2026-11-14, on the scratch line; the
   owner, asked "Shall I build the short help as the next batch?": "Yes, build it"; docs/cleanup-plan.md P14, "The
   clean-up, batch 2: the help"; README.md, 'Running the binaries'). Help text only: no option is added, removed or

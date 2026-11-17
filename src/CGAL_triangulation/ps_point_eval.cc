@@ -4,36 +4,32 @@
    instead of (only) on a regular grid. The triangulation is built in Lagrangian space;
    every Delaunay cell maps to a (possibly folded) Eulerian tetrahedron, and a query point
    receives one stream per tetrahedron that contains it. Per point we report the total
-   density, the density-weighted mean velocity, the velocity dispersion tensor and the
+   density, the mean velocity over the streams, the velocity dispersion tensor and the
    stream count; --ps-per-stream additionally records every stream's own density and velocity,
    and --ps-per-stream-ids each stream's identity (the sorted Lagrangian-vertex ParticleIDs).
    --pts-den-grad adds the density gradient: per stream the constant gradient of the linear
-   'dtfe' profile (regardless of --ps-stream-density -- the geometric density is piecewise
-   constant, so the dtfe-profile gradient is the only well-defined one), per point the sum
-   over its streams.
+   'dtfe' profile, per point the sum over its streams.
 
    Standard DTFE (no PHASE_SPACE): the same interface and .pts_* file formats over the
    EULERIAN tessellation -- exactly one containing tetrahedron per point, so the stream
    count is the 0/1 coverage flag, the density is the plain linear DTFE interpolant and the
    dispersion is identically 0. The context, bucket index, reduction and writers below are
    shared verbatim; only the per-triangulation worker differs (interpolatePoints_standard).
-   --ps-per-stream/--ps-per-stream-ids and --ps-stream-density are PS-only (rejected at option
-   parsing); the Sample_point mechanism is a separate path.
+   --ps-per-stream/--ps-per-stream-ids are PS-only (rejected at option parsing); the
+   Sample_point mechanism is a separate path.
 
-   Per-stream density comes in two variants (--ps-stream-density):
-     'linear'    (default; 'dtfe' is its deprecated name) linear interpolation of the Lagrangian-vertex DTFE densities
-                 inside the tetrahedron -- matches the PhaseSpaceDTFE class of the method
-                 authors' reference implementation (github.com/jfeldbrugge/PS-DTFE,
-                 Python/density.py). Continuous within a stream, but not mass-conserving.
-     'geometric' the constant per-tetrahedron density m_tet / V_eul (= rho_bar V_lag/V_eul)
-                 -- the density whose cell-averaged, quantized rendering the mass-conserving
-                 grid deposit produces. Discontinuous across tetrahedra, conserves mass.
-   Both follow the run's grid conventions ('--ps-point-conventions grid', the default):
-   under --ps-vertex-mass they carry the grid's tetrahedron masses through a per-vertex mass-model
-   ratio, under --ps-volume-weighted the per-point velocity, its gradient and the scalar are
-   equal-volume stream means (see 'The grid deposit's conventions at the points' below);
-   '--ps-point-conventions legacy' keeps rho_bar V_lag and density weighting. A partitioned run's stream
-   records are checkpointed per partition for '--resume' ('--resume with --sample-points' below).
+   The per-stream density ('linear', the value of PS-DTFE's one-value '--ps-stream-density'; 'dtfe'
+   is its older name and the name used below) is the linear interpolation of the Lagrangian-vertex
+   DTFE densities inside the tetrahedron -- the PhaseSpaceDTFE class of the method authors'
+   reference implementation (github.com/jfeldbrugge/PS-DTFE, Python/density.py). Continuous within
+   a stream, but not mass-conserving. Each stream record also keeps the tetrahedron's constant
+   density rho_bar V_lag/V_eul (denGeo): the density of a non-periodic hull cell, whose vertex
+   densities are undefined, and the second key of the streams' sort. The points follow the run's
+   grid conventions: under --ps-vertex-mass the densities carry the grid's tetrahedron masses
+   through a per-vertex mass-model ratio, and as the grid's velocity moments are volume-weighted the
+   per-point velocity, its gradient and the scalar are equal-volume stream means, the dispersion
+   density-weighted (see 'The grid deposit's conventions at the points' below). A partitioned run's
+   stream records are checkpointed per partition for '--resume' ('--resume with --sample-points' below).
 
    The candidate search buckets the (static, read-only) QUERY POINTS on a uniform grid and
    streams the partition's tetrahedra through it: each kept tetrahedron looks up only the
@@ -384,12 +380,13 @@ void psPointEvalInit(User_options &userOptions)
     g_pe.ctx.ptsLagrangian = userOptions.psPtsLagrangian;
 #endif
     g_pe.ctx.ptsScalar    = userOptions.psPtsScalar;
-    g_pe.ctx.useGeometric = userOptions.psStreamDensityGeometric;
     g_pe.ctx.periodic     = userOptions.periodic;
 #ifdef PHASE_SPACE
-    // the grid deposit's mass model and velocity weighting, unless '--ps-point-conventions legacy'
-    g_pe.ctx.vertexMass     = userOptions.psVertexMass and not userOptions.psPtsLegacyConventions;
-    g_pe.ctx.volumeWeighted = userOptions.psVolumeWeighted and not userOptions.psPtsLegacyConventions;
+    // the grid deposit's mass model and velocity weighting: the points follow the grid's conventions (the
+    // velocity moments are volume-weighted in every PS-DTFE run; the standard binary keeps the density-weighted
+    // reduction, with its one stream per point)
+    g_pe.ctx.vertexMass     = userOptions.psVertexMass;
+    g_pe.ctx.volumeWeighted = userOptions.psVolumeWeighted;
     g_pe.ctx.rhoBar       = double( userOptions.averageDensity );   // PS vertex densities are physical
 #else
     g_pe.ctx.rhoBar       = 1.;   // standard vertexDensity() already normalizes by averageDensity
@@ -432,7 +429,7 @@ void psPointEvalInit(User_options &userOptions)
             << " point evaluation at " << MESSAGE::cMagenta() << g_pe.ctx.nPoints << MESSAGE::cReset()
             << " sample points from '" << MESSAGE::cBlue() << userOptions.psSamplePointsFile
             << MESSAGE::cReset() << "' (per-stream density: "
-            << MESSAGE::cMagenta() << (g_pe.ctx.useGeometric ? "geometric" : "dtfe") << MESSAGE::cReset()
+            << MESSAGE::cMagenta() << "dtfe" << MESSAGE::cReset()
             << (g_pe.ctx.vertexMass ? " with the grids' vertex-share masses" : "")
             << (g_pe.ctx.volumeWeighted ? ", volume-weighted stream means" : "")
             << (g_pe.ctx.perStream ? ", writing per-stream records" : "")
@@ -645,7 +642,7 @@ void interpolatePoints_phaseSpace(DT &dt, User_options &userOptions)
 
     Box boxCoordinates = userOptions.region;
     double const avgDens = double( userOptions.averageDensity );
-    // --ps-vertex-mass under the grid conventions: the vertices' mass-model ratios. A server ran the pass when it
+    // --ps-vertex-mass (the grid's conventions): the vertices' mass-model ratios. A server ran the pass when it
     // built or loaded the tessellation (a request must not repeat a whole-tessellation pass); a batch partition
     // runs it when its walk first meets a tetrahedron with query points in reach, so the many partitions a plane
     // never reaches skip it. The pass runs once and alone (call_once); the walk reads no field it writes before.
@@ -679,7 +676,8 @@ void interpolatePoints_phaseSpace(DT &dt, User_options &userOptions)
         double inv[NO_DIM][NO_DIM];
         if ( not inverseNd(Ax, inv) ) { return; }
 
-        // 'geometric' density: rho_bar * V_lag / V_eul (= m_tet * d! / |det Ax|), constant per tet
+        // the tetrahedron's constant density rho_bar * V_lag / V_eul (= m_tet * d! / |det Ax|): a hull
+        // cell's density (below) and the second key of the streams' sort (finalizeLoadPoint)
         double denGeo;
         // --ps-caustics: the same per-tetrahedron mask the grid deposit accumulates (fold parity
         // plus the collapse multiplicity from the constant deformation tensor), carried per stream
@@ -691,7 +689,7 @@ void interpolatePoints_phaseSpace(DT &dt, User_options &userOptions)
                 for (int i = 0; i < NO_DIM; ++i)
                     Lag[v][i] = double(cell->vertex(v+1)->point()[i]) - double(cell->vertex(0)->point()[i]);
             denGeo = avgDens * std::fabs(determinant(Lag)) / cellAbsDet;
-            // --ps-vertex-mass under the grid conventions: times the mean mass-model ratio of the vertices (above)
+            // --ps-vertex-mass (the grid's conventions): times the mean mass-model ratio of the vertices (above)
             if ( vertexMass )
             {
                 double c = 0.;
@@ -763,7 +761,7 @@ void interpolatePoints_phaseSpace(DT &dt, User_options &userOptions)
         {
             // constant 'dtfe' gradient of this stream: rho(p) = rho_0 + grad . (p - x_0) with
             // bary = (Ax^-1)^T rel  =>  grad_i = sum_v inv[i][v] (rho_{v+1} - rho_0) -- the same
-            // affine convention as the linear deposit's denGrad (ps_interpolation.cc). Hull
+            // affine convention as the velocity gradient below. Hull
             // cells (volume-ratio density) have a constant profile: gradient stays 0.
             for (int i = 0; i < NO_DIM; ++i)
                 for (int v = 0; v < NO_DIM; ++v)
@@ -860,8 +858,8 @@ void interpolatePoints_phaseSpace(DT &dt, User_options &userOptions)
      (b) --periodic pads the box with particle COPIES, so a boundary tetrahedron appears as
          several images: exactly ONE is kept (Eulerian centroid inside the primary box) --
          the standard-build analogue of the PS Lagrangian-centroid partition ownership;
-     (c) there is no geometric (V_lag/V_eul) density variant: denGeo aliases the 'dtfe'
-         value, so the shared sort/reduction machinery behaves identically. */
+     (c) there is no Lagrangian volume, so no V_lag/V_eul density: denGeo aliases the 'dtfe'
+         value, so the shared sort behaves identically. */
 
 // (standardCell, the per-cell filter it shares with the composite server: ps_point_eval_detail.h)
 void interpolatePoints_standardOwn(DT &dt, User_options &userOptions, OwnBox const &own)
@@ -951,7 +949,7 @@ void interpolatePoints_standardOwn(DT &dt, User_options &userOptions, OwnBox con
                 for (int v = 0; v < NO_DIM; ++v)
                     dd += bary[v] * (rho[v+1] - rho[0]);
                 rec.denDtfe = (dd > 0.) ? dd : 0.;   // a point ON a face can graze negative by rounding
-                rec.denGeo  = rec.denDtfe;           // no geometric variant on the Eulerian tessellation
+                rec.denGeo  = rec.denDtfe;           // no V_lag/V_eul density on the Eulerian tessellation
                 for (size_t j = 0; j < noVelComp; ++j)
                 {
                     double vv = vel[0][j];
@@ -1020,17 +1018,14 @@ static void finalizeGroupRecords(size_t const N, size_t const E, std::vector<uin
 
 // Finalize, phase 2: point i's records, unpacked into recs (the buffer is reused) and sorted into the strict order.
 static void finalizeLoadPoint(size_t const i, std::vector<uint64_t> const &first, std::vector<uint64_t> const &where,
-                              size_t const E, bool const geo, std::vector<StreamRec> &recs)
+                              size_t const E, std::vector<StreamRec> &recs)
 {
-    // strict total order (selected density descending, full tie-break) -> the outputs are
-    // deterministic and independent of the partition split and thread completion order
-    auto recLess = [geo](StreamRec const &a, StreamRec const &b) -> bool
+    // strict total order (the 'dtfe' density descending, then denGeo, then the full tie-break) -> the
+    // outputs are deterministic and independent of the partition split and thread completion order
+    auto recLess = [](StreamRec const &a, StreamRec const &b) -> bool
     {
-        double const a1 = geo ? a.denGeo : a.denDtfe;
-        double const b1 = geo ? b.denGeo : b.denDtfe;
-        if (a1 != b1) return a1 > b1;
-        if (a.denGeo  != b.denGeo)  return a.denGeo  > b.denGeo;
         if (a.denDtfe != b.denDtfe) return a.denDtfe > b.denDtfe;
+        if (a.denGeo  != b.denGeo)  return a.denGeo  > b.denGeo;
         for (size_t j = 0; j < noVelComp; ++j)
             if (a.vel[j] != b.vel[j]) return a.vel[j] < b.vel[j];
         for (int i = 0; i < NO_DIM; ++i)        // all 0 unless --pts-den-grad
@@ -1059,7 +1054,7 @@ static void finalizeLoadPoint(size_t const i, std::vector<uint64_t> const &first
 
 // Finalize, phase 3: point i's outputs from its sorted records -- the stream count, the caustic mask (OR of the
 // streams' masks), the moments and the per-stream records.
-static void finalizeReducePoint(size_t const i, std::vector<StreamRec> &recs, bool const geo, double const invRhoBar,
+static void finalizeReducePoint(size_t const i, std::vector<StreamRec> &recs, double const invRhoBar,
                                 FinalizeCounts &counts)
 {
 #ifndef PHASE_SPACE
@@ -1091,13 +1086,13 @@ static void finalizeReducePoint(size_t const i, std::vector<StreamRec> &recs, bo
     if (nS > counts.maxStreams) counts.maxStreams = nS;
 
     // moments in sorted order (the psDeferNormalization pattern: sums are linear across
-    // partitions; the density-weighted means/dispersion are formed exactly once, here)
+    // partitions; the means and the dispersion are formed exactly once, here)
     double W = 0., mom1[noVelComp] = {0.}, mom2[noDispComp] = {0.};
     double momG[NO_DIM*NO_DIM] = {0.};
     double momS[noScalarComp] = {0.};
     for (size_t s = 0; s < nS; ++s)
     {
-        double const den = geo ? recs[s].denGeo : recs[s].denDtfe;
+        double const den = recs[s].denDtfe;
         W += den;
         for (size_t j = 0; j < noVelComp; ++j)
             mom1[j] += den * recs[s].vel[j];
@@ -1126,11 +1121,11 @@ static void finalizeReducePoint(size_t const i, std::vector<StreamRec> &recs, bo
     }
     if ( g_pe.ctx.volumeWeighted and nS > 0 )
     {
-        // --ps-volume-weighted under the grid conventions: the grid weights each stream's
+        // PS-DTFE (the grid's conventions): the grid weights each stream's
         // velocity, gradient and scalar by the Eulerian volume it fills in the cell, and at a point every one
         // of its streams fills the point -- equal shares, so the plain mean over the streams (the sorted
         // order, as above). The DISPERSION stays what the grid keeps it: the mass-weighted second moment about
-        // the mass-weighted mean (the f-weighted CBE moment; see '--ps-volume-weighted').
+        // the mass-weighted mean (the f-weighted CBE moment; see the 'dispersion' field).
         double const invN = 1. / double( nS );
         double sum1[noVelComp] = {0.}, sumG[NO_DIM*NO_DIM] = {0.}, sumS[noScalarComp] = {0.};
         for (size_t s = 0; s < nS; ++s)
@@ -1202,7 +1197,7 @@ static void finalizeReducePoint(size_t const i, std::vector<StreamRec> &recs, bo
     {
         for (size_t s = 0; s < nS; ++s)
         {
-            g_pe.ctx.outRecords.push_back( (geo ? recs[s].denGeo : recs[s].denDtfe) * invRhoBar );
+            g_pe.ctx.outRecords.push_back( recs[s].denDtfe * invRhoBar );
             for (size_t j = 0; j < noVelComp; ++j)
                 g_pe.ctx.outRecords.push_back( recs[s].vel[j] );
             if ( g_pe.ctx.perStreamIds )
@@ -1265,7 +1260,6 @@ void psPointEvalFinalize(User_options const &userOptions)
         return;
 
     size_t const N = g_pe.ctx.nPoints;
-    bool const geo = g_pe.ctx.useGeometric;
     double const invRhoBar = g_pe.ctx.rhoBar > 0. ? 1. / g_pe.ctx.rhoBar : 1.;
 
     // the outputs, the records grouped by point (phase 1), the per-stream outputs -- in this order (the peak memory)
@@ -1308,8 +1302,8 @@ void psPointEvalFinalize(User_options const &userOptions)
     std::vector<StreamRec> recs;            // one point's records, unpacked (the buffer is reused)
     for (size_t i = 0; i < N; ++i)
     {
-        finalizeLoadPoint( i, first, where, E, geo, recs );
-        finalizeReducePoint( i, recs, geo, invRhoBar, counts );
+        finalizeLoadPoint( i, first, where, E, recs );
+        finalizeReducePoint( i, recs, invRhoBar, counts );
     }
     std::vector< std::vector<unsigned char> >().swap( g_pe.ctx.recBlocks );
     std::vector<int>().swap( g_pe.ctx.recBlockPart );

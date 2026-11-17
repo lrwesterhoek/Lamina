@@ -2,11 +2,11 @@
    DTFE_RUN_MODE; User_options::resolveRunMode and applyRunMode set it at the end of readOptions, before any thread
    exists). The mode sets the thread budget, the GPU deposit's buffer target and PS-DTFE's exact item cap; the thread
    helpers below return exactly today's value unless the mode LOWERED the budget (budgetLowered), so performance (the
-   binaries' default) and every run with OMP_NUM_THREADS given keep today's thread counts. The state is ONE object
-   across all translation units, through the inline function's static; its defaults are performance's values, so the
-   library and any caller that skips readOptions run as today. runModeCoreBudget is the budget's formula, a pure
-   function (tests/run_mode_check.sh recomputes it). Plain C++17 with no other header of the project, so any
-   translation unit can include it. */
+   binaries' default inside a batch job; balanced elsewhere) and every run with OMP_NUM_THREADS given keep today's
+   thread counts. The state is ONE object across all translation units, through the inline function's static; its
+   defaults are performance's values, so the library and any caller that skips readOptions run as today.
+   runModeCoreBudget is the budget's formula, a pure function (tests/run_mode_check.sh recomputes it). Plain C++17
+   with no other header of the project, so any translation unit can include it. */
 #ifndef DTFE_RUN_MODE_H
 #define DTFE_RUN_MODE_H
 

@@ -9,8 +9,9 @@
 # The suite runs the word merge's cases. With DTFE_RUN_UNITS_LEGACY=1 exported by the caller it runs every case on the
 # merge of before instead, with the expectations it had before the word merge (the 9-B lines below). The double build
 # refuses the option (X5 only).
-#   X1  the CPU deposit, two field sets (the moments with a scalar, sampled; and volume-weighted + exact deposit +
-#       caustics, which fill mass_weight, disp_weight, disp_velocity, tet_touch and the OR-merged caustic mask):
+#   X1  the CPU deposit, two field sets (the moments with a scalar, sampled; and the exact deposit with caustics,
+#       which fills tet_touch and the OR-merged caustic mask; both, volume-weighted as every PS-DTFE run, fill
+#       mass_weight, disp_weight and disp_velocity):
 #       --max-concurrent 1, 2 and 4, and 4 with partition 0 held back 2 s (DTFE_TEST_DELAY_PARTITION=0:2: another
 #       completion order) -- every output byte-identical among them; the run log says the merge mode, prints its
 #       'fixed-point merge:' line and no 'ordered merge:' line. Word merge: the parse-time line, the setup line, the

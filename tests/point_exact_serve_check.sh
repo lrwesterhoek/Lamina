@@ -58,7 +58,8 @@
 #       L1  every stream satisfies x - q(x) = v/100 (Zel'dovich: v = 100 s, and x, q, v are
 #           interpolated with the same barycentric weights) to float rounding.
 #       L2  a periodic per-particle scalar f(q) (--scalar-dataset) comes back within the linear-
-#           interpolation bound; the point value is the density-weighted stream mean.
+#           interpolation bound; the point value is the plain mean over the streams (PS-DTFE's volume-weighted
+#           stream mean: every stream fills the point).
 #  A) Estimator.from_arrays: numpy arrays in, bit-identical to the snapshot-file server (PS);
 #     a non-periodic standard cloud with negative coordinates reproduces a linear field.
 #  T) the tessellation cache keys on --periodic: a non-periodic run never loads the cache a
@@ -66,10 +67,11 @@
 #  P) THE STANDARD SERVER'S PADDING: dtfelib.Estimator passes '--padding 15' to the standard binary
 #     (dtfelib.estimator.STANDARD_PADDING, run_dtfe.sh's value) unless the caller gives one; the phase-space server
 #     keeps the binary's own. On demo/z0_64 (z = 0), at two 200^2-point planes 0.05 Mpc inside the box faces, the
-#     default server is bit-identical to '--sample-points --padding 15' and within 1e-10 of '--padding 30', while the
-#     binary's default 5 is off by up to ~4% at several hundred points -- with coverage 1 everywhere, so nothing
-#     flagged it. (The standard references of S and V5 run at '--padding 15' for the same reason.) SKIP P2 without
-#     the demo file.
+#     default server is bit-identical to '--sample-points --padding 15' and within 1e-10 of '--padding 30', while
+#     '--padding 5' (the standard binary's default before it became 15) is off by up to ~4% at several hundred
+#     points -- with coverage 1 everywhere, so nothing flagged it (P2). (The standard references of S and V5 run at
+#     '--padding 15' for the same reason.) P3: a run without '--padding' says 15 in its header and answers those
+#     points as '--padding 15' does, bit for bit. SKIP P2 and P3 without the demo file.
 #
 # Usage:
 #   tests/point_exact_serve_check.sh              # build, run, check
@@ -318,12 +320,16 @@ if _os.path.isfile(demo):
     Y, Z = np.meshgrid(u, u, indexing="ij")
     F = np.concatenate([np.stack([np.full(Y.size, x), Y.ravel(), Z.ravel()], 1) for x in (0.05, 99.95)])
     F.tofile(f"{tmp}/pxs_faces.bin")
-    ref = {}
-    for pad in (5, 15, 30):
-        r = subprocess.run([STBIN, demo, f"{tmp}/pxs_face_p{pad}", "--grid", "8", "--periodic", "--field", "density",
-                            "--input-format", "101", "--sample-points", f"{tmp}/pxs_faces.bin", "--padding", str(pad)],
-                           capture_output=True, text=True)
-        ref[pad] = pts(f"pxs_face_p{pad}", "den") if r.returncode == 0 else None
+    ref, said = {}, {}
+    import re as _re
+    for pad in (None, 5, 15, 30):   # None: no '--padding', the binary's own default (P3)
+        tag = "def" if pad is None else pad
+        r = subprocess.run([STBIN, demo, f"{tmp}/pxs_face_p{tag}", "--grid", "8", "--periodic", "--field", "density",
+                            "--input-format", "101", "--sample-points", f"{tmp}/pxs_faces.bin"]
+                           + ([] if pad is None else ["--padding", str(pad)]), capture_output=True, text=True)
+        ref[pad] = pts(f"pxs_face_p{tag}", "den") if r.returncode == 0 else None
+        m = _re.search(r"number padding particles: *([0-9.]+)", r.stdout + r.stderr)
+        said[pad] = m.group(1) if m else None   # the header's padding
     with Estimator(demo, phase_space=False, input_type=101) as est:
         got = est(F)
     if any(v is None for v in ref.values()):
@@ -335,10 +341,18 @@ if _os.path.isfile(demo):
               and got.streams.min() == 1 and float(off5.max()) > 1e-3)
         check("P2", ok, f"demo/z0_64 face planes: the default server == --padding 15 bit for bit "
               f"({np.array_equal(got.density, ref[15])}), max rel {float(rel(got.density, ref[30]).max()):.1e} from "
-              f"--padding 30; the binary's 5: {int((off5 > 1e-6).sum())} of {F.shape[0]} points off by up to "
+              f"--padding 30; '--padding 5': {int((off5 > 1e-6).sum())} of {F.shape[0]} points off by up to "
               f"{100 * float(off5.max()):.1f}%, coverage still {got.streams.min()}..{got.streams.max()}")
+        # P3: the standard binary's own padding is 15 (the server's): a run without '--padding' says so in its header
+        # and answers the face points of '--padding 15' bit for bit, which '--padding 5' moves (P2's off5)
+        ok = (said[None] == "15" and said[5] == "5" and np.array_equal(ref[None], ref[15])
+              and not np.array_equal(ref[None], ref[5]) and float(off5.max()) > 1e-3)
+        check("P3", ok, f"demo/z0_64 face planes, no '--padding': the header's 'number padding particles: "
+              f"{said[None]}' (15; '--padding 5' says {said[5]}), the points of '--padding 15' bit for bit "
+              f"({np.array_equal(ref[None], ref[15])}), not those of '--padding 5' (off by up to "
+              f"{100 * float(off5.max()):.1f}%)")
 else:
-    print("   SKIP P2 (demo/z0_64.gadget is not here)")
+    print("   SKIP P2, P3 (demo/z0_64.gadget is not here)")
 
 # ---------------- C: the composite server
 kw = dict(mpc_unit=1, per_stream=True, per_stream_ids=True, lagrangian_positions=True,
@@ -462,11 +476,13 @@ e2 = float(np.abs(comp.stream_scalar - (np.sin(2*np.pi*qq[:, 0]/L) + 0.5*np.cos(
 h = L / float(sys.argv[7])
 bound = 1.5 * (h*np.sqrt(3))**2 / 8 * (2*np.pi/L)**2
 seg = np.repeat(np.arange(len(P)), counts)
+mean = np.bincount(seg, comp.stream_scalar, len(P)) / counts
 w = comp.stream_density
-mean = np.bincount(seg, w*comp.stream_scalar, len(P)) / np.bincount(seg, w, len(P))
+wmean = np.bincount(seg, w*comp.stream_scalar, len(P)) / np.bincount(seg, w, len(P))
 check("L2", e2 < bound and np.allclose(comp.scalar, mean, rtol=1e-12, atol=1e-12),
       f"per-stream scalar vs f(q): max error {e2:.2g} (linear-interpolation bound {bound:.2g}); point "
-      f"value = density-weighted stream mean")
+      f"value = the plain mean over the streams ({int((counts > 1).sum())} multi-stream points, where the "
+      f"density-weighted mean is up to {float(np.abs(wmean - mean).max()):.2g} away)")
 
 # ---------------- A: Estimator.from_arrays
 with h5py.File(snap) as fh:

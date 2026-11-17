@@ -96,13 +96,16 @@ struct PSGpuGrids
 // fVel = velocity moments needed (velocity or dispersion selected), fDisp = second moments
 // (dispersion), fGrad = velocity-gradient moments; unselected grids are neither allocated on
 // the device (4-byte dummies) nor on the host. 'vels' may be EMPTY when all three are off.
-// fLinear (--ps-linear-deposit) weights the interior samples by the linear density built
-// from the per-tet vertex densities in 'dens' (nTet*4; may be EMPTY when fLinear is off),
-// renormalized per tet so the deposited total still equals the tet mass exactly.
-// fVolW (--ps-volume-weighted) switches the mom/m2/grad moment weights to equal Eulerian-
-// volume shares (|det|/6 per tet, computed in-kernel) and fills out.momw with their
-// normalizer; the mass grid is unaffected. Mutually exclusive with fLinear (rejected at
-// option parsing). fCaustic (--ps-caustics) ORs each tet's orientation bits (1 = det>0,
+// fLinear (the linear deposit, removed from the options: the host passes false) weights the
+// interior samples by the linear density built from the per-tet vertex densities in 'dens'
+// (nTet*4; may be EMPTY when fLinear is off), renormalized per tet so the deposited total still
+// equals the tet mass exactly.
+// fVolW (the volume-weighted velocity moments: the host passes true, as PS-DTFE always
+// volume-weights them) switches the mom/grad/scalar moment weights to equal Eulerian-volume
+// shares (|det|/6 per tet, computed in-kernel) and fills out.momw with their normalizer; the
+// mass grid and the dispersion's second moment m2 keep the mass shares (with fDisp the
+// dispersion gets its own mass-weighted mean and normalizer, dispvel and dispw).
+// fCaustic (--ps-caustics) ORs each tet's orientation bits (1 = det>0,
 // 2 = det<0) into out.caustic at every deposited sample -- OR is order-invariant, so the
 // result matches the CPU deposit's bits (float-vs-double det sign only differs below the
 // degeneracy cut, where cells are dropped).
@@ -252,33 +255,6 @@ bool dtfeGpuDepositAveraged1(std::vector<float>& verts,      // nTet*12: 4 verti
                              bool fDen, bool fVel, bool fGrad, bool fScal, bool fSGrad, bool exact,
                              DTFEGpuRunUnits const& units,   // the run-wide units (exact batches)
                              DTFEGpuGrids& out, std::string& err);
-
-// ---- shared accumulator: the sub-domains of one DTFE_parallel call deposit into ONE full grid.
-// Begin (main thread, before the parallel region) allocates and zeroes the full grids on the
-// GPU -- false when memory would not allow it or there is no device, and then every thread
-// takes the per-call path above. Each thread then extracts its tetrahedra exactly
-// as for dtfeGpuDepositAveraged1 (positions and fast-path flat indices relative to ITS
-// sub-grid) and hands them over with the sub-grid's origin 'subOff' in the full grid; the
-// deposit of samples inside the sub-grid lands at full-grid cells subOff + cell, so every
-// cell has one owner and the batches never overlap. Dispatches are serialized on the device
-// queue (the chunk controller stays warm across batches); uploads run concurrently. A failed
-// batch leaves its owner box zeroed and returns false: the caller deposits that sub-domain on
-// the CPU (or via the per-call path) into its own sub-grid, and the final merge ADDS the GPU
-// grids into the main grid -- a cell is non-zero in exactly one of the two.
-// Result gives read pointers (accumulated value*volume, full-grid layout; a pointer is null for
-// a field not requested) that stay valid until End; End frees the GPU grids. The shared grid keeps the float
-// atomic sums (its one unit would have to suit every batch, which no batch's bound sets), and a
-// failed buffer restarts its batch from the zeroed owner box, without periodic checkpoints.
-bool dtfeGpuSharedBegin(const size_t fullGrid[3], bool fDen, bool fVel, bool fGrad, bool fScal, bool fSGrad, std::string& err);
-bool dtfeGpuSharedActive();
-bool dtfeGpuSharedDeposit(std::vector<float>& verts, std::vector<float>& dens, std::vector<float>& vels,
-                          std::vector<float>& scal,
-                          std::vector<float>& vols, std::vector<uint32_t>& cnts, std::vector<uint32_t>& flats,
-                          std::vector<int32_t>& cells,
-                          const std::vector<float>& sobol, const double dx[3], const size_t nGrid[3],
-                          const size_t subOff[3], std::string& err);
-bool dtfeGpuSharedResult(const float** den, const float** vel, const float** grad, const float** scal, const float** sgrad);
-void dtfeGpuSharedEnd();
 
 // --grid-window, the exact deposit (CPU loop and the PS GPU host's item bounds; the kernel carries a twin):
 // the contiguous hull, in RAW (unwrapped) cell indices, of the part of a tetrahedron's span [lo, hi)
@@ -476,9 +452,6 @@ inline PSDepositParams psGpuParams(PSGpuPlan const& p, PSFixedUnits const& fxUni
     for (int g = 0; g < PS_FX_N; ++g) P.fxScale[g] = p.fxOn[g] ? fxUnits.scale[g] : 0.f;
     P.fxWords = p.words;               // the device words: 0 the 64-bit ones, 2 the run-wide 128-bit limbs
     P.fxCapBits = p.words == 2u ? fxUnits.capBits : 0u;
-    // PS_GPU_DEBUG_NOATOMIC=1: a timing experiment (the atomics' share of the sampled kernel, the counterpart of
-    // DTFE_GPU_DEBUG_NOATOMIC) -- the sampled path does all its work but deposits nothing, so the grids come out empty
-    P.debugNoAtomic = Env::flag("PS_GPU_DEBUG_NOATOMIC") ? 1u : 0u;
     return P;
 }
 

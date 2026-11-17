@@ -104,8 +104,8 @@ PS_FIELDS = [
 DEFAULT_FIELDS = ["density_a", "velocity_a", "divergence_a", "shear_a"]
 PS_DEFAULT_FIELDS = list(DEFAULT_FIELDS)
 WEB_FIELDS = ("tweb_a", "vweb_a")        # the cosmic-web classes: the only consumers of lambda_th
-LAMBDA_TH_DEFAULT = 0.3                  # run_ps_dtfe.sh / run_dtfe.sh LAMBDA_TH (the binary alone: 0.0, so a Custom
-                                         # run without it would classify differently from a scripted one)
+LAMBDA_TH_DEFAULT = 0.3                  # run_ps_dtfe.sh / run_dtfe.sh LAMBDA_TH, and the binaries' own default (a
+                                         # Custom run with a web field names it all the same)
 # run_dtfe.sh's FIELDS default: the same set (it has no PS-only field, so dtfe_fields() keeps it whole)
 DTFE_DEFAULT_FIELDS = list(DEFAULT_FIELDS)
 # what the standard binary computes (no dispersion: PS only)
@@ -178,14 +178,17 @@ class QualityMode:
     nsub: int                       # the sampled PS-DTFE deposit's points per cell axis (standard DTFE: the binary's)
     gpu: bool                       # the device: the drivers' automatic one (recommended_gpu) on a GPU build
     face_gradient: bool             # PS-DTFE: the face gradient wherever the job qualifies (face_gradient_env)
-    volume_weighted: bool           # PS-DTFE's volume-weighted velocities (the production convention)
+    volume_weighted: bool           # always True: PS-DTFE always volume-weights its velocity moments; kept for the
+                                    # job's pin PS_VOLUME_WEIGHTED=1 and the Custom tab's '--ps-volume-weighted'
     vertex_mass: bool               # tetrahedron masses from the particles: a TNG job's (a Custom job has its own)
-    linear_deposit: bool            # PS-DTFE's density-weighted deposit inside each tetrahedron
+    linear_deposit: bool            # always False: PS-DTFE no longer has the linear deposit; kept for the job's
+                                    # pin PS_LINEAR_DEPOSIT=0 (a stray login export cannot reach the driver)
     parallel_triangulation: bool    # True: the TBB parallel insertion at any size, forced (single-precision
-                                    # grids still repeat to the byte; double, the linear deposit and the point
-                                    # values move at rounding); False: nothing forced, the binary's own rule
+                                    # grids still repeat to the byte; double and the point values move at
+                                    # rounding); False: nothing forced, the binary's own rule
     ordered_merge: bool             # PS-DTFE's partitions merged in index order, given (PS_MERGE=index-order)
-    pts_conventions: str            # the image plane's estimators: the grids' ("grid", the binary's default)
+    pts_conventions: str            # the image plane's estimators: always the grids' ("grid", the binary's only
+                                    # ones), kept for the pin PS_POINT_CONVENTIONS=grid
     gpu_share: str = "auto"         # PS-DTFE's '--gpu-share' (GPU_SHARE) of an exact deposit on the GPU in 3D: "auto"
                                     # (the machine use's share: only performance mixes), "1" (every partition on
                                     # the GPU: a Device GPU override) or "mixed" (both devices in every machine use:
@@ -199,7 +202,7 @@ def quality_mode(quality: str, estimator: str = "ps", fields=DEFAULT_FIELDS, n_p
     the job qualifies; standard DTFE's exact cell average). Fast: the sampled one, at one point per cell axis for
     PS-DTFE (the program's default: quick, with noisy per-cell values; standard DTFE: the binary's own count). Both:
     the device the drivers would pick (the GPU on a GPU build, by recommended_gpu: standard DTFE's sampled average on
-    the CPU in performance, PS-DTFE's sampled deposit on the CPU below GPU_PAYS_FROM particles) with the machine use's
+    the CPU always, PS-DTFE's sampled deposit on the CPU below GPU_PAYS_FROM particles) with the machine use's
     GPU share ('auto'), the volume weighting, the vertex masses of a TNG job, no forced parallel insertion (the
     binary's own rule), the index order merge and the grids' plane conventions. Nothing at all is passed for the
     partition, the concurrency and the memory budget (the binary's auto-tuner) nor for a TNG job's precision
@@ -223,8 +226,9 @@ def quality_mode(quality: str, estimator: str = "ps", fields=DEFAULT_FIELDS, n_p
 # below are the ONE place that says which override a job passes and why another is not passed (_refusal); each job's
 # mode() applies them (apply_advanced), and every command and environment builder, the memory estimate, the checks
 # and the 'Runs on' line read that and the four accessors (job_partition, job_concurrency, job_memory_budget,
-# job_precision), so "the binary decides this itself" stays a deletion here. Not brought back on purpose: the plane
-# conventions, the volume weighting, the linear deposit, the stream density, the vertex masses of a TNG job.
+# job_precision), so "the binary decides this itself" stays a deletion here. Not brought back on purpose: the volume
+# weighting, the vertex masses of a TNG job; nor the plane conventions, the linear deposit and the stream density,
+# whose other choices PS-DTFE no longer has.
 ADVANCED_KEYS = ("gpu", "nsub", "face_gradient", "partition", "max_concurrent", "mem_budget_gb",
                  "parallel_triangulation", "ordered_merge", "precision")
 # the keys QualityMode holds (apply_advanced puts a passed one there); the other four have the accessors
@@ -564,8 +568,8 @@ def advanced_problems(spec) -> list[tuple[str, str]]:
                                "Automatic applies"))
     if "parallel_triangulation" in adv and "parallel_triangulation" not in refused:
         out.append(("warning", "parallel triangulation: two identical runs still write the same single-precision "
-                               "grids to the byte, but a double-precision job, the linear deposit and the point "
-                               "values differ at rounding (the stream counts do not)"))
+                               "grids to the byte, but a double-precision job and the point values differ at "
+                               "rounding (the stream counts do not)"))
     budget, ram = job_memory_budget(spec), machine_ram_gb()
     if budget and ram and budget > ram:
         out.append(("warning", f"memory budget {budget:g} GB is more than this machine's {ram:.0f} GB: the run may "
@@ -599,7 +603,8 @@ def runs_on_text(spec) -> str:
                f"{spec.run_mode.capitalize()}")
         small = ", a small snapshot" if est == "ps" else ""
     if not m.gpu:
-        # (the sampled PS-DTFE deposit leaves the GPU only for a small snapshot, recommended_gpu)
+        # (the sampled PS-DTFE deposit leaves the GPU only for a small snapshot; standard DTFE's sampled average
+        # always does, recommended_gpu)
         return f"Runs on: the CPU ({why}{small})"
     if job_mixes(spec, m):
         return f"Runs on: the CPU and the GPU together ({why})"
@@ -1023,6 +1028,17 @@ def _run_option_env(spec) -> dict[str, str]:
     return env
 
 
+def gpu_pin_env(argv) -> dict[str, str]:
+    """DTFE_GPU for a program the launcher starts itself (a Custom job, the exact zoom): '1' when its command carries
+    '--gpu' (or its older '--ps-gpu', read through the run-log readers' table), else '0'. The binaries read DTFE_GPU
+    (0 = the CPU; unset, they pick their device themselves), and install_gui_app.sh imports every DTFE_* from the
+    login shell, so the pin keeps the device the launcher shows whatever the shell exports. The Grids and Pipeline
+    jobs pin it for the drivers (RunSpec.command, ps_run_env), which hand it on to the binary."""
+    from dtfelib.runlog import canonical_flag
+    gpu = any(canonical_flag(str(a).split("=", 1)[0]).split()[0] == "--gpu" for a in argv if str(a).startswith("--"))
+    return {"DTFE_GPU": "1" if gpu else "0"}
+
+
 # The jobs set each run-script knob under its new name. The drivers still read the older names (P6.7, config.sh
 # 'knob' / 'knob_merge'), each with a warning, and a new name that is set and not empty wins over its older one, so
 # a stray older export in the login shell (install_gui_app.sh imports every DTFE_*) changes no value the driver
@@ -1156,10 +1172,10 @@ PIPELINE_ONLY_KEYS = ("SIMS", "SNAPS", "NU", "AXIS", "CENTER", "PLANES", "THICKN
 
 def face_gradient_applies(spec) -> bool:
     """Does this PS-DTFE job qualify for the face gradient (duck-typed: Grids, Pipeline and Custom jobs)? The binary's
-    rule (src/user_options.cc faceGradientBlocker) on its quality's settings (spec.mode()): the exact deposit, the
-    volume-weighted velocities, no halo release, 3D."""
+    rule (src/user_options.cc faceGradientBlocker) on its quality's settings (spec.mode()): the exact deposit, no halo
+    release, 3D."""
     m = spec.mode()
-    return (m.deposit == "exact" and m.volume_weighted
+    return (m.deposit == "exact"
             and not getattr(spec, "halo_release", 0.0) > 0 and getattr(spec, "dim", 3) == 3)
 
 
@@ -1261,7 +1277,8 @@ DIMS = (3, 2)
 DIM_TEXT = {3: "3D", 2: "2D: a snapshot in a plane (two-column coordinates; the 2D programs, CPU only)"}
 
 # The machine use: how hard a run may lean on the machine (both binaries' '--run-mode', the drivers' DTFE_RUN_MODE).
-# Balanced is the drivers' and the launcher's default; the binaries' own is performance (a SLURM export runs it).
+# Balanced is the drivers', the launcher's and the binaries' default; performance is the default inside a batch job
+# (SLURM_JOB_ID or PBS_JOBID set), and a SLURM export names it.
 # Each mode's menu text and its item tip (at most two lines).
 RUN_MODES = ("gentle", "balanced", "performance")
 RUN_MODE_TEXT = {
@@ -1273,7 +1290,7 @@ RUN_MODE_TEXT = {
                  "the display never waits on the GPU."),
     "performance": ("Performance: the fastest run",
                     "Every core and long GPU buffers; an Exact phase-space run split into partitions\n"
-                    "also deposits on the free cores. The binaries' default, and a cluster job's."),
+                    "also deposits on the free cores. The programs' default inside a batch job."),
 }
 
 
@@ -1899,7 +1916,8 @@ def tbb_built(precision: str = "single", dim: int = 3) -> bool:
 
 
 # The device of each quality, as the drivers' automatic device picks it (scripts/config.sh gpu_auto_resolve; the
-# binaries do not pick one yet), with one difference: the sampled PS-DTFE deposit (Fast) runs on the CPU below
+# binaries pick by the same rule when DTFE_GPU is unset, but every program the launcher starts gets DTFE_GPU pinned to
+# the device it shows), with one difference: the sampled PS-DTFE deposit (Fast) runs on the CPU below
 # GPU_PAYS_FROM particles (the drivers put it on the GPU at any size). That threshold is the launcher's own older
 # measurement of 256^3 sampled grids, taken before Fast became one point per cell axis, at the then-default count 3,
 # and not re-measured since. A run that writes no grid (a slice alone) deposits nothing.
@@ -1907,9 +1925,8 @@ def tbb_built(precision: str = "single", dim: int = 3) -> bool:
 # gentle and balanced; in performance '--gpu-share auto' (the jobs' GPU_SHARE) deposits part of a partitioned run on
 # the free cores (the Advanced Device's GPU keeps it on the GPU, '1', and its CPU + GPU shares it in every machine
 # use, 'mixed': apply_advanced). Standard DTFE's exact cell average (Exact) is a tie between the two (the
-# triangulation and the I/O dominate), so the GPU; its sampled average (Fast) is faster on every CPU core, so the CPU
-# in performance and the GPU in gentle and balanced (their lowered thread budget). Standard DTFE's measurements: the
-# drivers' bench notes, not repeated here.
+# triangulation and the I/O dominate), so the GPU; its sampled average (Fast) runs on the CPU in every machine use, as
+# the drivers and the binaries put it. Standard DTFE's measurements: the drivers' bench notes, not repeated here.
 GPU_PAYS_FROM = 1_000_000
 
 
@@ -1918,13 +1935,14 @@ def recommended_gpu(deposit: str, fields, n_particles, estimator: str = "ps", pr
     """The device a job of this cell average runs on in the machine use 'run_mode' (the GPU built; quality_mode's):
     the drivers' automatic device (scripts/config.sh gpu_auto_resolve; the note above GPU_PAYS_FROM says why).
     PS-DTFE's exact deposit: the GPU in every machine use (in performance the drivers' '--gpu-share auto' adds the
-    free cores). Standard DTFE: the GPU, except its sampled average in performance. PS-DTFE's sampled deposit: the GPU
-    from GPU_PAYS_FROM particles. A double build hands the GPU float copies of its tetrahedra: the deposit's sums are
-    single precision, everything else double. A 2D job: never (the 2D programs are CPU-only)."""
+    free cores). Standard DTFE: the GPU for its exact average, the CPU for its sampled one (in every machine use).
+    PS-DTFE's sampled deposit: the GPU from GPU_PAYS_FROM particles. A double build hands the GPU float copies of its
+    tetrahedra: the deposit's sums are single precision, everything else double. A 2D job: never (the 2D programs are
+    CPU-only)."""
     if not gpu_built(estimator, precision, dim):
         return False
     if estimator != "ps":
-        return not (deposit == "sampled" and run_mode == "performance")
+        return deposit != "sampled"
     if deposit == "exact":
         return True
     return bool(fields) and (n_particles is None or n_particles >= GPU_PAYS_FROM)

@@ -191,6 +191,14 @@ void readInputData(std::vector<Particle_data> *p,
         for (size_t i=0; i<noParticles2*NO_DIM; ++i)
             lagPos[i] /= userOptions->MpcValue;
     }
+    // the snapshot's dataset was used although an IC file was named (the header names it): say that the file was not
+    // read. Its own test, not the rescale's: it prints under any '--mpc-unit'.
+    if ( readData._lagrangianPositionPopulated and not userOptions->lagrangianInputFilename.empty() )
+    {
+        MESSAGE::Message message( userOptions->verboseLevel );
+        message << "\t Lagrangian positions: the snapshot's 'InitialCoordinates'; '" << userOptions->lagrangianInputFilename
+                << "' (--ps-lagrangian-input) was not read\n" << MESSAGE::Flush;
+    }
 
     // otherwise read from a separate IC file, matching by particle ID
     if ( not readData._lagrangianPositionPopulated )

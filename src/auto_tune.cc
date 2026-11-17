@@ -122,130 +122,6 @@ constexpr int kPSLaneShareMaxGpu = 4;
 // by default). The lane share books them (laneShareCover); with every lane booked whole that booking hid them
 constexpr double kPSScratchRamGrids = 3.8;
 
-// ---- The time objective's constants (DTFE_AUTO_TIME=1; docs/cleanup-plan.md P8.8 and P8.9 step 2) ---------------
-// Among the plans the memory model accepts, the one with the smallest predicted partition loop. Per-unit costs on the
-// development machine (Apple M1 Max, 10 cores), read from the phase totals of the TNG100-3-Dark z = 0 runs of
-// 2026-11-09 to 12 at 512^3 (9.42e7 particles, the exact deposit; P8.8's calibration record names the runs of each
-// constant); only the constants marked FITTED were fitted to measured loops. One particle count and one grid: beyond
-// them every constant is an ESTIMATE, and nothing was verified with the switch on.
-// A plan other than the memory objective's is taken only below this share of that plan's predicted loop: repeats of
-// one plan spread 5-9% across builds and nights (standard 3^3 x 10 threads: 389-464 s over 8 runs), so less is no
-// finding
-constexpr double kAutoTimeGain = 0.90;
-// ... the grids the constants are taken to hold for, an ESTIMATE (the runs are 512^3 = 1.34e8 cells; the one 1024^3
-// record has a serial merge of 21.7% of its loop, which no term models): a larger grid keeps the memory objective's
-// plan
-constexpr double kAutoTimeMaxCells = 2.0e8;
-// ... a build where its tessellation inserts in parallel with kAutoTimeParInsertThreads threads or more, relative to
-// the sequential build: (1 - 0.882) + 0.882 x 218/675 (P11.6's pair: triangulation 675 -> 218 s summed at 10 threads,
-// the triangulation being 0.882 of a build in the standard runs). With fewer threads a build is costed sequential: no
-// run measures it, and the model must not prefer a plan for a speed-up no run has shown
-constexpr double kAutoTimeParInsert = 0.403;
-constexpr int kAutoTimeParInsertThreads = 10;
-#ifndef PHASE_SPACE
-// standard DTFE: a partition's build (triangulation, dummy points, vertex densities) is its slowest thread sub-box's,
-// this many seconds per padded vertex at one busy thread, times (1 + kStdTimeContention x (busy - 1)) where 'busy'
-// threads build at once (the team; twice the team where the look-ahead builds beside the deposit). From the phase
-// totals over the runs' own padded counts: 4.750 us at 9 (the nine team-9 runs) and 4.119 us at 6 (the two team-6
-// ones)
-constexpr double kStdTimeVertex = 3.067e-6;
-constexpr double kStdTimeContention = 0.0686;
-// ... its '_a' deposit (the GPU deposit with the face pass) per cell of the partition's grid: a part the team does
-// not shorten and a part it divides, through 3.498 us at one tessellation (c_std_p3_mc1) and 0.854 us at a team of 9
-// (the nine runs' mean); a team of 6 then predicts 1.020 us, measured 1.053
-constexpr double kStdTimeDepositSerial = 0.524e-6;
-constexpr double kStdTimeDepositTeam = 2.974e-6;
-// ... per partition (merge, checkpoints, scheduling): FITTED to the eight 3^3 x 10-thread loops without the
-// look-ahead (the model's loops then -9.1 to +8.4% of the measured ones)
-constexpr double kStdTimePartition = 0.761;
-// ... and the run outside the loop (read, T-web, write): 56.6 s, the mean of 14 runs, at the calibration size only
-constexpr double kStdTimeFixed = 56.6;
-#else
-// PS-DTFE: c partitions in flight ('lanes'), each doing its CPU work and queueing for the one GPU (its hold), a
-// closed queue solved by mean value analysis (AutoTunePSPlanner::loopSeconds). One row per calibration class (each
-// run exact with 1.68e7 sample points; all 6^3 but one 5^3): per padded vertex the lane's triangulation, vertex
-// densities and canonical order; per sample point its evaluation; per particle the lane's deposit set-up, extraction
-// walk, cost sort, deferred tetrahedra, copy-back and normalization; per particle the team-parallel CPU deposit in
-// core-seconds (face walks, r3d deposits: a lane runs it on cores / c threads, so it grows with c); per particle the
-// GPU hold (times the GPU share in a mixed run); per partition the merge's thread hold; the class's wall factor
-// (FITTED: its training runs' mean of measured over predicted loop); and the run outside the loop (at the
-// calibration size only). The training runs: GPU ps_exact_gpu_pts, ps_gpu_cap; GPU with face sums c_ps_l_face (its
-// hold), off, s5d_ref, sp4l, spl; GPU under balanced or gentle ps_bal, ps_gentle (their holds), bal6; mixed
-// c_ps_perf, ps_perf_mc6, ps_hyb600_mc6, ctl_ps_hyb600_mc6_old; CPU c_ps_cpu, ps_exact_cpu_pts
-struct PSTimeClass { char const *name; double vertex, point, lane, team, hold, partition, wall, fixed; };
-constexpr PSTimeClass kPSTime[] = {
-    { "GPU",                     3.695e-6, 10.75e-6, 7.810e-6,  0.,       10.72e-6, 0.023, 0.971,  88.3 },
-    { "GPU with face sums",      3.936e-6, 10.85e-6, 8.118e-6, 32.15e-6, 10.52e-6, 1.151, 0.972, 126.6 },
-    { "GPU, balanced or gentle", 3.746e-6, 17.49e-6, 7.962e-6,  0.,       14.10e-6, 0.017, 0.979,  88.3 },
-    { "mixed",                   4.772e-6, 21.22e-6, 7.447e-6, 13.75e-6, 10.38e-6, 0.165, 0.935,  88.3 },
-    { "CPU",                     4.590e-6, 20.03e-6, 3.121e-6, 74.45e-6,  0.,      0.078, 1.104,  88.3 },
-};
-enum : int { kPSTimeGpu = 0, kPSTimeGpuFace = 1, kPSTimeGpuGentler = 2, kPSTimeMixed = 3, kPSTimeCpu = 4 };
-// ... the mixed class's team work is (1 - share) / (1 - this) of its fit's: the CPU's share of the partitions
-constexpr double kPSTimeMixedShareRef = 0.6;
-// ... the GPU shares the mixed class was measured at, per mille
-constexpr long kPSTimeMixedShareLo = 500, kPSTimeMixedShareHi = 700;
-#endif
-
-// The time objective's band (kAutoTimeGain; DTFE_AUTO_TIME_GAIN for tests: 0 never leaves the memory objective's
-// plan, 1 takes any predicted gain)
-inline double autoTimeGain()
-{
-    if ( not Env::isSet( "DTFE_AUTO_TIME_GAIN" ) ) return kAutoTimeGain;
-    return std::clamp( Env::real( "DTFE_AUTO_TIME_GAIN", kAutoTimeGain ), 0., 1. );
-}
-
-// ... a test's seconds per partition in place of a model's (DTFE_AUTO_T_STD_PART, DTFE_AUTO_T_PS_PART: a large value
-// makes the fewest partitions the fastest plan), else the model's
-inline double autoTimePartition(Env::Name const knob, double const model)
-{
-    double const v = Env::real( knob, -1. );
-    return v > 0. ? v : model;
-}
-
-/* What the time objective found for one plan (both planners fill it, autoTimeState states it): the prediction of the
-   plan taken and of the memory objective's, the fastest other plan the memory model accepts, or why it made none. */
-struct AutoTimeResult
-{
-    std::string why;                  // the configuration the constants do not hold for (empty: a prediction made)
-    std::string given;                // what the user fixed, where nothing was left to compare (empty: a search ran)
-    double loop = -1., wall = -1.;    // the plan taken: its partition loop and whole run, seconds
-    double loopMem = -1., wallMem = -1.;   // ... the memory objective's plan
-    std::string memPlan;              // ... as options
-    double loopAlt = -1.;             // the fastest other plan the memory model accepts (-1: none)
-    std::string altPlan;              // ... as options
-    bool taken = false;               // that plan replaced the memory objective's
-};
-
-// ... the AUTO-TUNE line that states it and the report's time keys (auto_tune.h line(): time_s, time_mem_s)
-inline void autoTimeState(AutoTimeResult const &t, double const gain, MESSAGE::Message &message, AutoTuneReport &r)
-{
-    char buf[512];
-    if ( not t.why.empty() )
-        snprintf( buf, sizeof(buf), "not calibrated for %s; the memory objective's plan.", t.why.c_str() );
-    else if ( t.taken )
-        snprintf( buf, sizeof(buf), "this plan predicts ~%.0f s for the partition loop (~%.0f s in all) against "
-                  "~%.0f s (~%.0f s) for the memory objective's %s.", t.loop, t.wall, t.loopMem, t.wallMem,
-                  t.memPlan.c_str() );
-    else if ( not t.given.empty() )
-        snprintf( buf, sizeof(buf), "this plan predicts ~%.0f s for the partition loop (~%.0f s in all); %s, so it "
-                  "is only predicted.", t.loop, t.wall, t.given.c_str() );
-    else if ( t.loopAlt >= 0. )
-        snprintf( buf, sizeof(buf), "this plan predicts ~%.0f s for the partition loop (~%.0f s in all); the fastest "
-                  "other plan the memory model accepts, %s, predicts ~%.0f s, not below %.2f x this one's.", t.loop,
-                  t.wall, t.altPlan.c_str(), t.loopAlt, gain );
-    else
-        snprintf( buf, sizeof(buf), "this plan predicts ~%.0f s for the partition loop (~%.0f s in all); the memory "
-                  "model accepts no other plan.", t.loop, t.wall );
-    message << MESSAGE::cBold() << "AUTO-TUNE:" << MESSAGE::cReset() << " time objective (DTFE_AUTO_TIME): " << buf
-            << "\n" << MESSAGE::Flush;
-    if ( t.why.empty() )
-    {
-        r.timeWall = t.wall;
-        r.timeWallMem = t.wallMem;
-    }
-}
-
 // Full-grid bytes per cell for one field selection, for ONE of the two phases:
 //
 //   phase 0 = DEPOSIT. What is resident while the partition triangulations run, i.e. the term
@@ -366,7 +242,7 @@ inline bool autoTuneSamplePointBounds(std::string const &file, double const boxL
 struct AutoTunePS
 {
     bool phaseSpace   = false;
-    bool volumeWeighted = false;   // --ps-volume-weighted
+    bool volumeWeighted = false;   // User_options::psVolumeWeighted (true in every PS-DTFE run)
     bool exactDeposit = false;     // the exact deposit (--exact; resolved by readOptions, the default with an '_a' field)
     bool caustics     = false;     // --ps-caustics
     bool haloRelease  = false;     // --ps-halo-release (sampled deposit: the released-tet multiplicity grid)
@@ -690,11 +566,11 @@ inline double autoTuneBytesPerCell(Field &f, AutoTunePS const &ps, int const pha
                                 or f.velocity_divergence or f.velocity_shear or f.velocity_vorticity
                                 or f.velocity_vweb or f.scalar or f.scalar_gradient;
         // ps_interpolation.cc: weightIsDensity = needWeight && field.density && !psVolWeighted.
-        // --ps-volume-weighted therefore BREAKS the aliasing: the weight carries Eulerian-volume
+        // The volume weighting (every PS-DTFE run) therefore BREAKS the aliasing: the weight carries Eulerian-volume
         // shares, which are not the density's mass sums, so it needs its own grid even when
-        // density is selected. That is the production default, not a corner case.
+        // density is selected.
         if ( needWeight and not (densityGrid and not ps.volumeWeighted) ) b += R;   // mass_weight
-        // dispersion stays MASS-weighted under --ps-volume-weighted, so it carries its OWN
+        // dispersion stays MASS-weighted beside the volume-weighted velocity, so it carries its OWN
         // mean+normalizer (ps_interpolation.cc: dispNeedsOwnWeight)
         if ( ps.volumeWeighted and f.velocity_dispersion ) b += R + 3.*R;           // disp_weight + disp_velocity
     }
@@ -1291,12 +1167,8 @@ namespace {
 // of the partition that needs the most, which may be any partition's turn to be prepared ahead)
 // (+ bytesNoAhead: the busiest partition's bytes where no look-ahead runs after all -- a budget that switches it off,
 // reportSplit -- with a lone tessellation's TBB copies, which kStdLookAheadFactor holds while the look-ahead runs)
-// (+ the time objective's inputs, per partition: its slowest sub-box's padded vertices, whether that one inserts in
-// parallel, its grid cells and its team: AutoTuneStdPlanner::loopSeconds)
 struct StdPlan { double bytes = 0., vertices = 0., snapshot = 0., aheadMax = 0., bytesNoAhead = 0.; int part = -1;
-                 size_t parts = 1; std::vector<double> perThread;
-                 std::vector<double> partSlowest, partCells; std::vector<int> partTeam;
-                 std::vector<char> partInsert; };
+                 size_t parts = 1; std::vector<double> perThread; };
 
 // DTFE_parallel's team at up to t threads: the largest 2^a 3^b <= t (subpartition.h parallelGrid; its grid-shape step
 // leaves fewer only on a grid too small to split)
@@ -1347,8 +1219,6 @@ struct AutoTuneStdInputs
     double origin[NO_DIM] = {};      // the grid's lower corner
     double dxGrid[NO_DIM] = {};      // ... and its cell size
     std::vector<size_t> userSplit;   // the user's --partition (all 1 when the tuner chooses)
-    double minN = 0.;                // the particle count from which the time objective plans (kAutoMinN)
-    bool timeOn = false;             // DTFE_AUTO_TIME=1: the time objective (timeChoose)
 };
 
 /* The standard-DTFE plan once its inputs are known (autoTunePartitioning): the memoised plan of a split (planOf) and
@@ -1410,13 +1280,6 @@ struct AutoTuneStdPlanner : AutoTuneStdInputs
                        + ( aheadHolds ? 0. : copies );
             plan.bytesNoAhead = plan.bytes + ( aheadHolds ? copies : 0. );
             plan.part = 0;
-            if ( timeOn )   // the time objective's inputs (DTFE_AUTO_TIME=1 only): every partition the same
-            {
-                plan.partSlowest.assign( plan.parts, plan.vertices / double( team ) );
-                plan.partCells.assign( plan.parts, gridTotal / nParts );
-                plan.partTeam.assign( plan.parts, int( team ) );
-                plan.partInsert.assign( plan.parts, char( copies > 0. ? 1 : 0 ) );
-            }
             plan.snapshot = ( snapWordFactor + deviceWordGrowth ) * bGpuCell * gridTotal / nParts / double( team );
             double fPart = 1.;
             for (int d=0; d<NO_DIM; ++d) fPart *= 1. + 2.*padFrac[d]*double(partsP[d]);
@@ -1487,18 +1350,6 @@ struct AutoTuneStdPlanner : AutoTuneStdInputs
                 if ( nParts > 1. )
                     plan.aheadMax = std::max( plan.aheadMax, vertices * perVertex + partPadded * partBytes );
                 plan.bytesNoAhead = std::max( plan.bytesNoAhead, bytes + aloneCopies );
-                // the time objective's inputs (DTFE_AUTO_TIME=1 only): this partition's slowest sub-box (the team
-                // waits for it), whether it inserts in parallel, its cells and its team
-                if ( timeOn )
-                {
-                    double const slowest = perThread.empty()
-                                           ? 0. : *std::max_element( perThread.begin(), perThread.end() );
-                    bool const insert = autoTuneParallelInsert( u, slowest, int( nThreads ) );
-                    plan.partSlowest.push_back( slowest );
-                    plan.partInsert.push_back( char( insert ? 1 : 0 ) );
-                    plan.partCells.push_back( cells );
-                    plan.partTeam.push_back( int( nThreads ) );
-                }
                 if ( bytes > plan.bytes )
                 {
                     plan.bytes = bytes;
@@ -1556,73 +1407,8 @@ struct AutoTuneStdPlanner : AutoTuneStdInputs
         return T;
     }
 
-    /* THE TIME OBJECTIVE (DTFE_AUTO_TIME=1; docs/cleanup-plan.md P8.9 step 2 with P8.8's model): the partition loop
-       of a plan in seconds, from the per-unit costs kStdTime*. The partitions run one after another; each builds its
-       sub-boxes on its team -- the slowest sub-box sets the build -- and then deposits; with the look-ahead the next
-       partition's build runs beside this one's deposit, so a partition takes the larger of the two, and both teams
-       contend for the cores. A tessellation that inserts in parallel with kAutoTimeParInsertThreads threads or more
-       builds in kAutoTimeParInsert of the time. */
-    // whether the plan (P, T) runs the look-ahead: reportSplit's test, and not banned by DTFE_OVERLAP=0 (which the
-    // run reads, DTFE.cpp, and reportSplit does not)
-    bool aheadOn(int const P, int const T) const
-    {
-        StdPlan const &pl = planOf( P, T );
-        return lookAheadPossible and pl.parts > 1 and Env::tristate( "DTFE_OVERLAP" ) != 0
-               and stdPeak( pl.bytes + pl.snapshot + kStdLookAheadFactor * pl.aheadMax ) <= budget;
-    }
-    double loopSeconds(int const P, int const T) const
-    {
-        StdPlan const &pl = planOf( P, T );
-        bool const ahead = aheadOn( P, T );
-        double const perPartition = autoTimePartition( "DTFE_AUTO_T_STD_PART", kStdTimePartition );
-        int const hardware = dtfeHardwareThreads();
-        size_t const n = pl.partSlowest.size();
-        auto const build = [&](size_t const i) -> double {     // partition i's build (0 past the last one)
-            if ( i >= n ) return 0.;
-            int const team = std::max( 1, pl.partTeam[i] );
-            double const busy = ahead ? 2. * double( team ) : double( team );
-            double const insert = ( pl.partInsert[i] != 0 and hardware / team >= kAutoTimeParInsertThreads )
-                                  ? kAutoTimeParInsert : 1.;
-            return kStdTimeVertex * ( 1. + kStdTimeContention * ( busy - 1. ) ) * pl.partSlowest[i] * insert; };
-        auto const deposit = [&](size_t const i) -> double {
-            return ( kStdTimeDepositSerial + kStdTimeDepositTeam / double( std::max( 1, pl.partTeam[i] ) ) )
-                   * pl.partCells[i]; };
-        double t = ahead ? build( 0 ) : 0.;
-        for (size_t i = 0; i < n; ++i)
-            t += ( ahead ? std::max( build( i + 1 ), deposit( i ) ) : build( i ) + deposit( i ) ) + perPartition;
-        return t;
-    }
-    // the plan (P, T) as the options that give it, and its look-ahead (the time objective's lines)
-    std::string planText(int const P, int const T) const
-    {
-        std::string s = "--partition";
-        for (int d=0; d<NO_DIM; ++d) s += " " + std::to_string( autoPart ? size_t( P ) : userSplit[size_t(d)] );
-        return s + ", " + std::to_string( T ) + " thread(s), look-ahead " + ( aheadOn( P, T ) ? "on" : "off" );
-    }
-    // the configurations the constants were calibrated on (P8.8's record); 'why' names the first one that is not
-    bool timeCalibrated(std::string &why) const
-    {
-        char b[96];
-        if ( NO_DIM != 3 ) why = "the 2-D build";
-        else if ( sizeof(Real) != 4 ) why = "the double build";
-        else if ( not metalActive ) why = "the CPU deposit";
-        else if ( not ( u.DTFE and u.method == 1 ) ) why = "a deposit other than the volume average";
-        else if ( not u.exactAverage ) why = "the sampled average";
-        else if ( oneTessellation ) why = "--sample-points (one tessellation per partition)";
-        else if ( faceCell <= 0. ) why = "fields without the face pass";
-        else if ( Env::flag( { "DTFE_GPU_FLOAT_GRIDS" } ) ) why = "DTFE_GPU_FLOAT_GRIDS=1";
-        else if ( gridTotal > kAutoTimeMaxCells )
-        {
-            snprintf( b, sizeof(b), "a grid of %.3g cells (calibrated up to %.3g)", gridTotal, kAutoTimeMaxCells );
-            why = b;
-        }
-        return why.empty();
-    }
-
     AutoTuneReport chooseSplit() const;
-    AutoTuneReport reportSplit(int const bestP, int const chosenT, bool const nothingFits,
-                               bool const teamFixed = false) const;
-    AutoTuneReport timeChoose(int const bestP, int const bestT, bool const nothingFits) const;
+    AutoTuneReport reportSplit(int const bestP, int const chosenT, bool const nothingFits) const;
 };
 
 // Searches the splits for the coarsest one that fits with the most threads (or, when none fits, the least demanding).
@@ -1671,23 +1457,17 @@ inline AutoTuneReport AutoTuneStdPlanner::chooseSplit() const
         bestP = leastP;
         bestT = tLeast;
     }
-    // the time objective (DTFE_AUTO_TIME=1): where the memory objective found a plan that fits, or the plan is given
-    // in full (then it is predicted, never changed)
-    if ( timeOn and N >= minN and ( not nothingFits or not ( autoPart or autoConc ) ) )
-        return timeChoose( bestP, bestT, nothingFits );
     return reportSplit( bestP, bestT, nothingFits );
 }
 
 // Fills the report of the chosen split, keeps the look-ahead with a smaller team under '--run-mode balanced'
-// (lookAheadTeam; not for a team the time objective chose, 'teamFixed') or turns off a look-ahead that does not fit,
-// and states the choice.
-inline AutoTuneReport AutoTuneStdPlanner::reportSplit(int const bestP, int const chosenT, bool const nothingFits,
-                                                      bool const teamFixed) const
+// (lookAheadTeam) or turns off a look-ahead that does not fit, and states the choice.
+inline AutoTuneReport AutoTuneStdPlanner::reportSplit(int const bestP, int const chosenT, bool const nothingFits) const
 {
     char buf[512];
     // the team: the chosen one, or under balanced a smaller one that keeps the look-ahead
     bool teamTried = false;
-    int const bestT = ( nothingFits or teamFixed ) ? chosenT : lookAheadTeam( bestP, chosenT, teamTried );
+    int const bestT = nothingFits ? chosenT : lookAheadTeam( bestP, chosenT, teamTried );
     /* The report: the same line PS prints, so the
        launcher's 'Check memory', run_dtfe.sh AUTO_TUNE_REPORT=1 and the SUMMARY's predicted-vs-measured line work for
        standard runs too. mc = the threads of a partition (its concurrent sub-triangulations); the partitions run one
@@ -1791,78 +1571,6 @@ inline AutoTuneReport AutoTuneStdPlanner::reportSplit(int const bestP, int const
         warning << ".\n" << MESSAGE::EndWarning;
     }
     return report;
-}
-
-// The time objective (DTFE_AUTO_TIME=1; P8.9 step 2): the memory objective's plan -- bestP with reportSplit's team --
-// gives way to the fastest plan the memory model accepts (chooseSplit's test, at every split it searches and every
-// team up to its threads, each with the look-ahead where reportSplit would keep it) where that predicts less than
-// kAutoTimeGain of its loop. The plan taken is stated as reportSplit states every plan, then the time line. A plan
-// given in full is predicted and kept; a configuration the constants do not hold for keeps the memory objective's
-// plan.
-inline AutoTuneReport AutoTuneStdPlanner::timeChoose(int const bestP, int const bestT, bool const nothingFits) const
-{
-    AutoTimeResult t;
-    double const gain = autoTimeGain();
-    if ( not timeCalibrated( t.why ) )
-    {
-        reportSplit( bestP, bestT, nothingFits );
-        autoTimeState( t, gain, message, report );
-        return report;
-    }
-    bool const debug = Env::flag( "DTFE_AUTO_TUNE_DEBUG" );
-    // the memory objective's plan: the team reportSplit runs it with (the same call; it prints nothing)
-    bool tried = false;
-    int const memT = nothingFits ? bestT : lookAheadTeam( bestP, bestT, tried );
-    t.loopMem = loopSeconds( bestP, memT );
-    t.memPlan = planText( bestP, memT );
-    if ( debug )
-        std::fprintf( stderr, "AUTO-TUNE-DEBUG time: the memory objective's plan, %s: %.1f s\n", t.memPlan.c_str(),
-                      t.loopMem );
-    int altP = bestP, altT = memT;
-    if ( autoPart or autoConc )
-    {
-        // chooseSplit's splits and threads, and below the threads every team DTFE_parallel forms (2^a 3^b, down to
-        // one tessellation) where the tuner chooses them; the thread counts between the largest team and the threads
-        // give the same plan as the threads
-        int const pLo = autoPart ? 1 : int(userSplit[0]);
-        int const pHi = autoPart ? 6 : int(userSplit[0]);
-        int const userT = u.maxConcurrent > 0 ? std::min( u.maxConcurrent, cores ) : cores;
-        int const tMax = autoConc ? cores : userT;
-        std::vector<int> teams( 1, tMax );
-        if ( autoConc )
-            for (int k = stdTeamSize( tMax ) - 1; k >= 1; --k)
-                if ( stdTeamSize( k ) == k ) teams.push_back( k );
-        for (int P = pLo; P <= pHi; ++P)
-            for (int const T : teams)
-            {
-                StdPlan const &pl = planOf( P, T );
-                if ( ( P == bestP and T == memT ) or stdPeak( pl.bytes + pl.snapshot ) > budget )
-                    continue;   // the memory objective's own plan, or one the memory model does not accept
-                double const s = loopSeconds( P, T );
-                if ( debug )
-                    std::fprintf( stderr, "AUTO-TUNE-DEBUG time: %s: %.1f s\n", planText( P, T ).c_str(), s );
-                if ( t.loopAlt < 0. or s < t.loopAlt )   // (the first in this order wins a tie)
-                {
-                    t.loopAlt = s;
-                    altP = P;
-                    altT = T;
-                }
-            }
-        if ( t.loopAlt >= 0. )
-            t.altPlan = planText( altP, altT );
-        t.taken = t.loopAlt >= 0. and t.loopAlt < gain * t.loopMem;
-    }
-    else
-        t.given = "--partition and --max-concurrent are given";
-    if ( t.taken )
-        reportSplit( altP, altT, false, true );
-    else
-        reportSplit( bestP, bestT, nothingFits );
-    t.loop = t.taken ? t.loopAlt : t.loopMem;
-    t.wall = t.loop + kStdTimeFixed;
-    t.wallMem = t.loopMem + kStdTimeFixed;
-    autoTimeState( t, gain, message, report );
-    return report;   // (reportSplit filled it; the time keys are now in it too)
 }
 
 }  // namespace
@@ -2248,7 +1956,6 @@ struct AutoTunePSInputs
     bool userPartitionOn = false;    // a user's split that runs the partition path ('--partition 1 2 2' too)
     bool autoConc = false;           // --max-concurrent left to the tuner
     double minN = 0.;                // the particle count from which a split is chosen for memory (kAutoMinN)
-    bool timeOn = false;             // DTFE_AUTO_TIME=1: the time objective (memorySplit, timeObjective)
     double N = 0.;                   // the particles
     double ramBytes = 0.;            // physical RAM
     std::string budgetWhy;           // how the memory budget was set (the AUTO-TUNE line)
@@ -3031,93 +2738,6 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         return raised;
     }
 
-    /* THE TIME OBJECTIVE (DTFE_AUTO_TIME=1; docs/cleanup-plan.md P8.8): the partition loop of the split n with c
-       partitions in flight, in seconds. c lanes, each doing a partition's CPU work Z (triangulation, point
-       evaluation, the deposit's lane phases, its share of the team-parallel CPU deposit, the merge's hold) and
-       queueing for the one GPU for S seconds a partition: a closed queue, solved by mean value analysis for its
-       throughput X (partitions a second); on the CPU there is no queue. The class's row of kPSTime gives the
-       per-unit costs (timeClass). */
-    double loopSeconds(int const k, int const n, int const c) const
-    {
-        PSTimeClass const &K = kPSTime[k];
-        double const P = partsOf( n );
-        int const lanes = std::max( 1, int( std::min( double( c ), P ) ) );
-        double const share = not metalActive ? 0. : mixed ? double( u.psGpuShareMille ) / 1000. : 1.;
-        double const teamScale = ( k == kPSTimeMixed ) ? ( 1. - share ) / ( 1. - kPSTimeMixedShareRef ) : 1.;
-        double const perPartition = autoTimePartition( "DTFE_AUTO_T_PS_PART", K.partition );
-        double const insert = ( parInsertBytes( n, lanes ) > 0.
-                                and dtfeHardwareThreads() / lanes >= kAutoTimeParInsertThreads )
-                              ? kAutoTimeParInsert : 1.;
-        double const Z = ( K.vertex * padFactorOf( n ) * N * insert + K.point * double( nPts ) + K.lane * N
-                           + K.team * N * double( lanes ) / double( std::max( 1, cores ) ) * teamScale
-                           + perPartition * P ) / P;
-        double const S = share * K.hold * N / P;
-        if ( S <= 0. )
-            return K.wall * P * Z / double( lanes );
-        double Q = 0., X = 0.;   // the GPU queue's mean length and the throughput, one lane added at a time
-        for (int j = 1; j <= lanes; ++j)
-        {
-            double const R = S * ( 1. + Q );   // a partition's time at the GPU: its hold and the ones queued before
-            X = double( j ) / ( R + Z );
-            Q = X * R;
-        }
-        return X > 0. ? K.wall * P / X : 0.;
-    }
-    // the calibration class of this run (kPSTime's row), or -1 with 'why': the first configuration the constants do
-    // not hold for (P8.8's record)
-    int timeClass(std::string &why) const
-    {
-        char b[96];
-        bool const perf = u.runMode == RunMode::Performance;
-        bool const face = faceR > 0.;
-        if ( NO_DIM != 3 ) why = "the 2-D build";
-        else if ( sizeof(Real) != 4 ) why = "the double build";
-        else if ( not psExact ) why = "the sampled deposit";
-        else if ( nPts == 0 ) why = "a run without --sample-points";
-        else if ( u.psWindowOn ) why = "--grid-window";
-        else if ( not runUnitsLegacy() ) why = "DTFE_PS_RUN_UNITS=1";
-        else if ( faceKernel ) why = "the GPU face kernel (DTFE_GPU_FACES=1)";   // (no CPU face walk to time)
-        // (the walk's default; the constants were measured with the walk after the deposit. The memory term earlyFace
-        // tests this and the pass's own further conditions: no NaN test hook, the face units from the bounds)
-        else if ( face and metalActive and psFaceWalkEarly() )
-            why = "the face walk beside the GPU deposit (the time constants were measured with the walk after it)";
-        else if ( not momFx or Env::flag( "DTFE_GPU_FLOAT_MASS" ) or Env::flag( "DTFE_MASS_AUDIT" ) )
-            why = "a float-sum or audit knob (DTFE_GPU_FLOAT_MOMENTS, DTFE_GPU_FLOAT_MASS, DTFE_MASS_AUDIT)";
-        else if ( gridTotal > kAutoTimeMaxCells )
-        {
-            snprintf( b, sizeof(b), "a grid of %.3g cells (calibrated up to %.3g)", gridTotal, kAutoTimeMaxCells );
-            why = b;
-        }
-        else if ( not metalActive )
-        {
-            if ( face ) why = "the face sums on the CPU";
-            else if ( not perf ) why = "the CPU deposit under --run-mode balanced or gentle";
-            else return kPSTimeCpu;
-        }
-        else if ( mixed )
-        {
-            if ( face ) why = "the face sums in a mixed run";
-            else if ( not perf ) why = "a mixed run under --run-mode balanced or gentle";
-            else if ( u.psGpuShareMille < kPSTimeMixedShareLo or u.psGpuShareMille > kPSTimeMixedShareHi )
-            {
-                snprintf( b, sizeof(b), "a mixed run's GPU share %.2f (calibrated 0.50 to 0.70)",
-                          double( u.psGpuShareMille ) / 1000. );
-                why = b;
-            }
-            else return kPSTimeMixed;
-        }
-        else if ( perf ) return face ? kPSTimeGpuFace : kPSTimeGpu;
-        else if ( face ) why = "the face sums under --run-mode balanced or gentle";
-        else return kPSTimeGpuGentler;
-        return -1;
-    }
-    // the plan (n, c) as the options that give it (the time objective's lines)
-    std::string planText(int const n, int const c) const
-    {
-        std::string s = "--partition";
-        for (int d=0; d<NO_DIM; ++d) s += " " + std::to_string( isUserSplit( n ) ? userK[d] : n );
-        return s + " --max-concurrent " + std::to_string( c );
-    }
     // The over-budget warnings' way out of the face gradient (docs/cleanup-plan.md D13): where a pass makes the face
     // sums, what that route adds to the full-resolution grids per cell -- bCell less the same fields' without it --
     // and the switches that leave it out; "" where no pass makes them. Text only: no plan reads it.
@@ -3143,8 +2763,6 @@ struct AutoTunePSPlanner : AutoTunePSInputs
     std::optional<AutoTuneReport> smallSetCase(int const userC, int const userN, int const nGpuMin) const;
     std::optional<AutoTuneReport> overBudgetCase(int const userC, int const nGpuMin, bool const overBudget) const;
     AutoTuneReport memorySplit(int const userC, int const nGpuMin) const;
-    void timeObjective(int &bestN, int &bestC, int const userC, int const targetC, int const nLo, int const nHi,
-                       AutoTimeResult &t) const;
 };
 
 // Chooses the split and the concurrency: the GPU's sub-grid cap, then the first case that decides -- the irreducible
@@ -3158,12 +2776,13 @@ inline AutoTuneReport AutoTunePSPlanner::choose() const
     // (1626^3 unsplit) falls back to the CPU deposit (ps_interpolation.cc, averaged_interpolation_1.cc).
     // With the GPU on, every split chosen below keeps the sub-grid under that cap -- the same crop +
     // slop estimate as partitionBytes() -- so a very fine grid keeps its GPU deposit; a user's own
-    // split that does not is told which one would.
+    // split that does not is told which one would (where the GPU was asked for: one the program picked
+    // itself takes the CPU there without a word, as its pass does: psGpuEligible).
     double const gpuCellCap = kGpuCellCap;            // UINT32_MAX
     int nGpuMin = 1;
     if ( metalActive )
         while ( nGpuMin < 64 and gpuSubCells(nGpuMin) > gpuCellCap ) ++nGpuMin;
-    if ( metalActive and not autoPart and gpuSubCells(userN) > gpuCellCap )
+    if ( metalActive and not autoPart and not u.gpuPicked and gpuSubCells(userN) > gpuCellCap )
     {
         MESSAGE::Warning warning( u.verboseLevel );
         warning << "AUTO-TUNE: with --partition " << userN << " each partition's sub-grid holds ~" << gpuSubCells(userN)
@@ -3402,7 +3021,6 @@ inline AutoTuneReport AutoTunePSPlanner::memorySplit(int const userC, int const 
         if ( c >= std::min(targetC, n*n*n) )
             break;      // memory is not the binding constraint; smallest such n wins (fewest seams)
     }
-    bool const noneFits = ( bestC < 1 );   // (the time objective then has no plan to start from)
     if ( bestC < 1 )
     {
         // 'fixed' fits (checked above), so this is the triangulation genuinely not fitting in
@@ -3422,13 +3040,6 @@ inline AutoTuneReport AutoTunePSPlanner::memorySplit(int const userC, int const 
     }
     else if ( autoConc and laneShareOn( bestN ) )
         bestC = shareRaise( bestN, bestC, targetC );   // the lane share (finishReport): more in flight, up to its cap
-
-    // the time objective (DTFE_AUTO_TIME=1): the fastest plan the memory model accepts in place of this one, where it
-    // predicts less than kAutoTimeGain of its loop (timeObjective); with the switch off nothing here runs
-    bool const timeHere = timeOn and N >= minN and not ( autoPart and noneFits );
-    AutoTimeResult timed;
-    if ( timeHere )
-        timeObjective( bestN, bestC, userC, targetC, nLo, nHi, timed );
 
     if ( autoPart )
     {
@@ -3464,71 +3075,7 @@ inline AutoTuneReport AutoTunePSPlanner::memorySplit(int const userC, int const 
     message << "\n" << MESSAGE::cBold() << "AUTO-TUNE:" << MESSAGE::cReset() << " " << buf << fxNote
             << autoTuneOverrideNote( autoPart, autoConc ) << "\n           memory budget: "
             << budgetWhy << "\n" << MESSAGE::Flush;
-    if ( not timeHere )
-        return decided;
-    autoTimeState( timed, autoTimeGain(), message, report );
-    return report;   // (finishReport filled it, 'decided' is its copy; the time keys are now in it too)
-}
-
-// The time objective (DTFE_AUTO_TIME=1; docs/cleanup-plan.md P8.8): the memory objective's plan (bestN, bestC) gives
-// way to the split whose predicted partition loop is the smallest of those the memory model accepts -- each split of
-// memorySplit's search at the count that search gives it (countAt), raised by the lane share as the chosen split's is
-// (shareRaise), or at the user's count where the memory model holds that many -- where it predicts less than
-// kAutoTimeGain of the memory objective's loop. One count per split: the queue's throughput does not fall as lanes
-// are added. A user's split is predicted and kept; a configuration the constants do not hold for keeps the memory
-// objective's plan. 't' says what it found (autoTimeState states it).
-inline void AutoTunePSPlanner::timeObjective(int &bestN, int &bestC, int const userC, int const targetC,
-                                             int const nLo, int const nHi, AutoTimeResult &t) const
-{
-    if ( partsOf( bestN ) <= 1. )
-    {
-        t.why = "one domain";
-        return;
-    }
-    int const k = timeClass( t.why );
-    if ( k < 0 ) return;
-    bool const debug = Env::flag( "DTFE_AUTO_TUNE_DEBUG" );
-    auto const lanes = [&](int const c) { return autoConc ? c : userC; };   // the count the run will use
-    t.loopMem = loopSeconds( k, bestN, lanes( bestC ) );
-    t.memPlan = planText( bestN, lanes( bestC ) );
-    if ( debug )
-        std::fprintf( stderr, "AUTO-TUNE-DEBUG time: class '%s'; the memory objective's plan, %s: %.1f s\n",
-                      kPSTime[k].name, t.memPlan.c_str(), t.loopMem );
-    int altN = bestN, altC = bestC;
-    if ( autoPart )
-    {
-        for (int n = nLo; n <= nHi; ++n)
-        {
-            if ( n == bestN ) continue;   // the memory objective's own plan
-            int c = countAt( n, targetC );
-            if ( c < 1 ) continue;        // not even one partition of this split fits
-            if ( laneShareOn( n ) ) c = shareRaise( n, c, targetC );
-            if ( not autoConc and c < std::min( userC, int( partsOf( n ) ) ) )
-                continue;                 // the memory model does not hold the user's count at this split
-            double const s = loopSeconds( k, n, lanes( c ) );
-            if ( debug )
-                std::fprintf( stderr, "AUTO-TUNE-DEBUG time: %s: %.1f s\n", planText( n, lanes( c ) ).c_str(), s );
-            if ( t.loopAlt < 0. or s < t.loopAlt )   // (the coarsest wins a tie)
-            {
-                t.loopAlt = s;
-                altN = n;
-                altC = c;
-            }
-        }
-        if ( t.loopAlt >= 0. )
-            t.altPlan = planText( altN, lanes( altC ) );
-        t.taken = t.loopAlt >= 0. and t.loopAlt < autoTimeGain() * t.loopMem;
-        if ( t.taken )
-        {
-            bestN = altN;
-            bestC = altC;
-        }
-    }
-    else
-        t.given = "--partition is given";
-    t.loop = t.taken ? t.loopAlt : t.loopMem;
-    t.wall = t.loop + kPSTime[k].fixed;
-    t.wallMem = t.loopMem + kPSTime[k].fixed;
+    return decided;
 }
 
 }  // namespace
@@ -3630,8 +3177,6 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     double minN = kAutoMinN;
     if ( double const v = Env::real( "DTFE_AUTO_MINN", 0. ); v > 0. )
         minN = v;
-    // the time objective (docs/cleanup-plan.md P8.8, P8.9 step 2): an opt-in; off, the planners run as before it
-    bool const timeOn = Env::flag( "DTFE_AUTO_TIME" );
 
     double const N = double(nParticles);
     double const ramBytes = autoTunePhysicalRAM();
@@ -3882,7 +3427,6 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     in.userPartitionOn = userPartitionOn;
     in.autoConc        = autoConc;
     in.minN            = minN;
-    in.timeOn          = timeOn;
     in.N               = N;
     in.ramBytes        = ramBytes;
     in.budgetWhy       = budgetWhy;
@@ -4119,11 +3663,10 @@ AutoTuneReport autoTunePartitioning(User_options &u,
        outside 2^-120 .. 2^120. Only where the CPU deposits the '_a' grids. A GPU run's sub-domain that falls back to
        the CPU loop needs no term: its words are allocated after its GPU attempt has released the extracted arrays,
        the device grids and their host copy (avg1GpuDispatch, dtfeGpuDepositAveraged1), which planOf books for every
-       sub-domain cell at 2 x bGpuCell, 8 B per component of grids that include every grid the words are for (the
-       opt-in shared grid of DTFE_GPU_SHARED=1 stays allocated meanwhile). The gradient is deposited only where the
-       face pass does not supply it (the face default without DTFE_FACE_CHECK=1 skips it). None in the double build,
-       the MY_SCALAR build or under DTFE_RUN_UNITS_LEGACY=1 (the Real sums): there the term adds 0. and the plans
-       stay the Real sums' to the bit. */
+       sub-domain cell at 2 x bGpuCell, 8 B per component of grids that include every grid the words are for. The
+       gradient is deposited only where the face pass does not supply it (the face default without DTFE_FACE_CHECK=1
+       skips it). None in the double build, the MY_SCALAR build or under DTFE_RUN_UNITS_LEGACY=1 (the Real sums):
+       there the term adds 0. and the plans stay the Real sums' to the bit. */
 #ifndef MY_SCALAR
     bool const cpuWords = not metalActive and u.DTFE and u.method == 1 and u.exactAverage and sizeof(Real) == 4
                           and not runUnitsLegacy() and u.aField.selected();
@@ -4161,8 +3704,6 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     in.countSec          = countSec;
     in.oneTessellation   = oneTessellation;
     in.userSplit         = userSplit;
-    in.minN              = minN;
-    in.timeOn            = timeOn;
     User_options pgOptions = u;                     // parallelGrid reads the partition's own grid from it
     pgOptions.verboseLevel = 0;                     // (and would say so for every plan)
     AutoTuneStdPlanner const planner{ in, u, report, message, dens, {}, std::move( pgOptions ) };

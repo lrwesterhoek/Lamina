@@ -88,8 +88,8 @@ struct PSDepositParams
     // 0 = every moment grid a float sum (DTFE_GPU_FLOAT_MOMENTS=1 on the host).
     uint32_t fxMask;
     float    fxScale[9];   // [g], g = PS_FX_MOM ... PS_FX_SG: the PS_FX_N grids (PS_FX_DW unused)
-    // PS_GPU_DEBUG_NOATOMIC (a timing experiment, the atomics' share of the sampled kernel): 1 = the sampled path
-    // classifies and counts every sample as always but deposits none -- no grid atomics, the grids stay zero
+    // Always 0: no switch sets it (the host's memset, gpu_host.h psGpuParams). Kept, and still tested by the
+    // sampled path, so the kernel code stays the same.
     uint32_t debugNoAtomic;
     // The words of the mass grid (buffer 21) and of every fxMask grid (buffers 22..29). 0 = 64-bit words, two uint
     // per component (the default, or a run without its units: the units of the pass). 2 = the run-wide 128-bit words

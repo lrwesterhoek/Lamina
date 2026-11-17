@@ -716,11 +716,9 @@ void copySubgridInformation(User_options *userOptions,
 		for (int i=0; i<2*NO_DIM; ++i)
 			userOptions->fullGridBox[i] = double( userOptions->boxCoordinates[i] );
 	}
-	userOptions->subgridOffset.assign( NO_DIM, 0 );
 	for (int i=0; i<NO_DIM; ++i)
 	{
 		userOptions->gridSize[i] = subgridList[userOptions->partNo][2*i+1] - subgridList[userOptions->partNo][2*i];
-		userOptions->subgridOffset[i] = subgridList[userOptions->partNo][2*i];
 		userOptions->fullGridOffset[i] += long( subgridList[userOptions->partNo][2*i] );
 	}
 	userOptions->region = subgridCoords[userOptions->partNo];

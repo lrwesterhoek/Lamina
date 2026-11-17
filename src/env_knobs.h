@@ -3,9 +3,11 @@
    - an EMPTY value is the same as an unset one (for every kind of value);
    - a flag is off when set to 0, false, no or off (in any case) and on when set to anything else (flag(n, true): a
      switch that is on by default, which only those values turn off);
-   - a tristate (a switch with an automatic default: DTFE_FACE_GRADIENT, the velocity gradient's route, and
-     DTFE_EXACT_AVERAGE, a pin of the '_a' average, --exact or --sampled; both binaries read both, and the flags beat
-     them) is -1 while unset or set to auto, else the flag;
+   - a tristate (a switch with an automatic default: DTFE_FACE_GRADIENT, the velocity gradient's route,
+     DTFE_EXACT_AVERAGE, a pin of the '_a' average, --exact or --sampled, and DTFE_GPU, a pin of the device, 1 as
+     --gpu and 0 the CPU -- the drivers' name; the compile-time macro of that name is another thing, and a string
+     literal is not expanded; both binaries read all three, and the flags beat them) is -1 while unset or set to
+     auto, else the flag;
    - a number is the value read by std::atol / std::atof; the caller checks its range and keeps its default otherwise;
    - a Name may carry an ALIAS, read only when the name itself is unset: a renamed knob kept for a release. The
      renamed ones are listed once, in 'renamed' below (docs/cleanup-plan.md P6.7: one DTFE_ name per concept in both
@@ -13,9 +15,8 @@
      main() names each old one that is set, once, at start-up (warnRenamed: never from a read, which may happen on a
      worker thread in the middle of a log). An INVERTED alias is the opposite switch (DTFE_NO_PROGRESS=1 is
      DTFE_PROGRESS=0): only flag() reads it. The GPU knobs' Metal spellings (PS_METAL_CHUNK for PS_GPU_CHUNK, ...)
-     were dropped once the backend-neutral names had shipped. PS_GPU_CHUNK and PS_GPU_DEBUG_NOATOMIC keep their own
-     names: standard DTFE's DTFE_GPU_CHUNK counts work items, not tetrahedra, and its DTFE_GPU_DEBUG_NOATOMIC is a
-     level 1-3, not a switch.
+     were dropped once the backend-neutral names had shipped. PS_GPU_CHUNK keeps its own name: standard DTFE's
+     DTFE_GPU_CHUNK counts work items, not tetrahedra.
    Plain C++17 with no other header of the project, so any translation unit can include it. */
 #ifndef DTFE_ENV_KNOBS_H
 #define DTFE_ENV_KNOBS_H

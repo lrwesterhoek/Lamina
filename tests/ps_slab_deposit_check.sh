@@ -8,9 +8,11 @@
 # single-threaded loop gives them, so the outputs must be BYTE-IDENTICAL to DTFE_DEPOSIT_THREADS=1,
 # whatever the thread or slab count. On test-sized grids the copies always fit, so the suite forces
 # the mode (DTFE_DEPOSIT_SLABS=1) and compares every output file with cmp, for every deposit variant:
-# sampled (nSub 1 and 3), linear, exact, vertex mass, volume weighted, caustics, halo release, a
-# non-periodic box, a --grid-window, --partition 2 2 2 (periodic sub-grids that wrap), and a few slabs
-# that each hold many tetrahedra (DTFE_DEPOSIT_NSLABS=3) next to many thin ones. The 2D build too.
+# sampled (nSub 1 and 3), exact (its gradient on the route the binary's default gives it), vertex mass,
+# caustics, halo release, a non-periodic box, a --grid-window, --partition 2 2 2 (periodic sub-grids that
+# wrap), and a few slabs that each hold many tetrahedra (DTFE_DEPOSIT_NSLABS=3) next to many thin ones --
+# every variant with PS-DTFE's volume-weighted velocity moments and mass-weighted dispersion (every run's,
+# with or without '--ps-volume-weighted'). The 2D build too.
 #
 # Usage: tests/ps_slab_deposit_check.sh [--no-build]
 
@@ -78,10 +80,8 @@ FIELDS=( --field density velocity dispersion divergence shear )
 echo ">> serial vs slab runs ..."
 case_ sampled_nsub1   "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --subsamples 1
 case_ sampled_nsub3   "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --subsamples 3
-case_ linear          "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --ps-linear-deposit
 case_ exact           "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --exact
 case_ vertex_mass     "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --ps-vertex-mass
-case_ volume_weighted "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --ps-volume-weighted
 case_ caustics        "${BIN}" "${SNAP}"    --periodic --field density --ps-caustics
 case_ halo_release    "${BIN}" "${SNAP}"    --periodic "${FIELDS[@]}" --ps-halo-release 2
 case_ nonperiodic     "${BIN}" "${SNAP_NP}" --field density velocity

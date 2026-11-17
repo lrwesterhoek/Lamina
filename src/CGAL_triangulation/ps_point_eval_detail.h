@@ -67,11 +67,11 @@ namespace psPointEvalDetail {
 
 using namespace psExactInside;
 
-// One stream (containing tetrahedron) at a query point. Both density variants are kept so
-// the estimator choice only affects the reduction, never the collected geometry.
+// One stream (containing tetrahedron) at a query point. Both densities are kept: the reduction and the
+// per-stream records take denDtfe; denGeo is a hull cell's density and the second key of the streams' sort.
 struct StreamRec
 {
-    double denGeo;              // 'geometric': rho_bar * V_lag / V_eul, constant per tet
+    double denGeo;              // rho_bar * V_lag / V_eul, constant per tet (the standard binary: = denDtfe)
     double denDtfe;             // 'dtfe': vertex densities linearly interpolated at the point
     double vel[noVelComp];      // velocity linearly interpolated at the point
     double grad[NO_DIM];        // constant 'dtfe' density-profile gradient of the tet (--pts-den-grad; 0 otherwise)
@@ -159,11 +159,11 @@ struct Context
     bool   psCaustics = false;      // --ps-caustics: also emit the per-point caustic mask
     bool   ptsScalar = false;       // --pts-scalar: also interpolate the vertex scalars per stream
     bool   ptsLagrangian = false;   // --ps-per-stream-lagrangian (PS): also record each stream's Lagrangian coordinate
-    bool   useGeometric = false;    // variant used for totals, weights and per-stream output
-    // the grid deposit's conventions, followed by the points ('--ps-point-conventions grid', the
-    // default; 'legacy' clears both): see the notes at interpolatePoints_phaseSpace and psPointEvalFinalize
+    // the grid deposit's conventions, which the points follow: see the notes at interpolatePoints_phaseSpace
+    // and psPointEvalFinalize
     bool   vertexMass = false;      // --ps-vertex-mass: the grid's tetrahedron masses in both per-stream densities
-    bool   volumeWeighted = false;  // --ps-volume-weighted: equal-volume stream means (velocity, its gradient, scalars)
+    bool   volumeWeighted = false;  // equal-volume stream means (velocity, its gradient, scalars): every PS-DTFE run
+                                    // (User_options::psVolumeWeighted); false in the standard binary
     bool   periodic = false;
     double rhoBar = 1.;             // output densities are rho/rhoBar (grid convention)
     double boxLo[NO_DIM], boxLen[NO_DIM];
@@ -216,7 +216,7 @@ struct Context
     std::vector<double>   outVelGrad;    // 9N (only with --pts-vel-grad)
     std::vector<double>   outRecGrad;    // 3 per stream (only with --pts-den-grad + --ps-per-stream)
     std::vector<int32_t>  outCaustic;    // N (only with --ps-caustics): OR of the containing tetrahedra's masks
-    std::vector<double>   outScalar;     // noScalarComp per point (only with --pts-scalar): density-weighted mean over the streams
+    std::vector<double>   outScalar;     // noScalarComp per point (only with --pts-scalar): mean over the streams (equal-volume in PS-DTFE)
     std::vector<double>   outRecScalar;  // noScalarComp per stream (--pts-scalar + --ps-per-stream)
     std::vector<double>   outRecLag;     // 3 per stream (only with --ps-per-stream-lagrangian)
 };
@@ -270,16 +270,16 @@ inline void forEachBucketIn(int const lo[NO_DIM], int const hi[NO_DIM], int cons
 
 namespace psPointEvalDetail {
 
-/* The grid deposit's conventions at the points ('--ps-point-conventions grid', the default).
+/* The grid deposit's conventions at the points.
 
    Without them the planes and grids of the same run measure different things: the grids use --ps-vertex-mass
-   (tetrahedron masses from the particles, m_tet = sum_v m_v/deg_v) and --ps-volume-weighted (volume-weighted
-   velocity moments), the planes rho_bar*V_lag masses and density-weighted stream means. With TNG's evolved
+   (tetrahedron masses from the particles, m_tet = sum_v m_v/deg_v) and volume-weighted velocity moments (every
+   PS-DTFE run), plain points would take rho_bar*V_lag masses and density-weighted stream means. With TNG's evolved
    z = 127 positions as the Lagrangian input rho_bar*V_lag carries the initial contrast, so every density mode of
    a plane comes out filtered by 1 - D(z_ic)/D(z): at z = 20 a 4096^2 plane's contrast is 0.81-0.82 times the
    grid's (rms 0.211 against 0.280), and its multi-stream velocity divergence 2-4x smaller.
 
-   Under --ps-vertex-mass both point estimators carry the grid's tetrahedron masses, through ONE number per
+   Under --ps-vertex-mass the point densities carry the grid's tetrahedron masses, through ONE number per
    vertex: the ratio of the two mass models over the vertex's star of depositing tetrahedra,
 
        c_v = sum_{t in star(v)} m_tet / sum_{t in star(v)} rho_bar V_lag(t)      (the grid's / rho_bar V_lag),
@@ -289,8 +289,9 @@ namespace psPointEvalDetail {
      'dtfe'       rho_v -> rho_v c_v: the vertex density rho_bar V_lag(star)/V_eul(star) becomes
                   M(star)/V_eul(star), the grid's mass around v over its Eulerian volume (exactly so where
                   no cell of the star is dropped: vertexDensity sums every cell, c_v the depositing ones);
-     'geometric'  rho_tet -> rho_tet <c_v>, the mean over the tetrahedron's vertices: (V_lag/V_eul)(t) times the
-                  local Lagrangian density. Over the depositing cells this conserves the grid's mass exactly,
+     denGeo       rho_tet -> rho_tet <c_v>, the mean over the tetrahedron's vertices: (V_lag/V_eul)(t) times the
+                  local Lagrangian density (a hull cell's density, and the sort's second key). Over the
+                  depositing cells this conserves the grid's mass exactly,
                   sum_t V_lag(t) <c_v> rho_bar = sum_v M(star_v)/(d+1) = sum_t m_tet.
    With the default masses c_v = 1 and both are the plain estimators. Why not m_tet/V_eul(t) itself, the grid's own
    per-tetrahedron density: near-lattice initial conditions (TNG's) tile with near-flat slivers whose equal vertex
@@ -299,10 +300,9 @@ namespace psPointEvalDetail {
    came out 0.89 instead of 1. And not standard DTFE's (d+1) m_v/V_eul(star) either: on a near-lattice the star
    volumes vary with the tetrahedralization, which M(star) averages over the star (a scipy prototype on a uniform
    24^3 lattice, jitter 0.01: vertex std 0.19 against 0.08). The non-periodic hull cells keep their constant density,
-   corrected the same way; the density gradient (--pts-den-grad) belongs to the corrected 'dtfe' profile. Under
-   --ps-volume-weighted the per-point velocity, its gradient and the scalar are equal-weight stream means
-   (psPointEvalFinalize). '--ps-point-conventions legacy' keeps the plain estimators; without the two grid options both
-   choices run the same code, byte for byte.
+   corrected the same way; the density gradient (--pts-den-grad) belongs to the corrected 'dtfe' profile. The
+   per-point velocity, its gradient and the scalar are equal-weight stream means, as the grid's velocity moments
+   are volume-weighted (psPointEvalFinalize). Without --ps-vertex-mass the points take the plain densities.
 
    c_v is computed by prepareVertexMass over the whole tessellation (the batch worker per partition, before the
    grid deposit, which recounts its degrees after a reset; a server once per tessellation it builds or loads) and

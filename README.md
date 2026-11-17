@@ -24,7 +24,7 @@ interpolate any quantity known at a set of points onto a grid or at other points
 
 The [user guide](docs/DTFE_user_guide.pdf) of the DTFE public software documents the original program and its paper,
 [Cautun & van de Weygaert (2011), arXiv:1105.0370](https://arxiv.org/abs/1105.0370), the method; this README and
-each program's `--full-help` document the rest. A test dataset and analysis of the code output is given in the [demo directory](demo): `./DTFE demo/z0_64.gadget out --grid 64 --field density --periodic --padding 12` works out of the box (the box is periodic, and its voids are wider than the default padding of 5 particle spacings: with it about 1% of the cells would lie outside the tessellation, which the run reports). [demo/COMMANDS.md](demo/COMMANDS.md) is a cheat sheet of every script and binary with its useful flag combinations.
+each program's `--full-help` document the rest. A test dataset and analysis of the code output is given in the [demo directory](demo): `./DTFE demo/z0_64.gadget out --grid 64 --field density --periodic --padding 12` works out of the box (the box is periodic, and its voids are wider than 5 particle spacings: at `--padding 5` about 1% of the cells would lie outside the tessellation, which the run reports; standard DTFE's default padding is 15, PS-DTFE's 5). [demo/COMMANDS.md](demo/COMMANDS.md) is a cheat sheet of every script and binary with its useful flag combinations.
 
 ## The DTFE method
 The Delaunay Tessellation Field Estimator (DTFE) method represents the natural way of going from discrete samples/measurements to values on a periodic grid and it is especially suitable for astronomical data due to the following reasons:
@@ -146,7 +146,7 @@ Build variables (combine them on one `make` line):
 
 | variable | effect |
 |---|---|
-| `METAL=1` | Apple Silicon: the standard binary's `_a` interpolation and the PS-DTFE deposit on the GPU (`--gpu` in both), with a CPU fallback |
+| `METAL=1` | Apple Silicon: the standard binary's `_a` interpolation and the PS-DTFE deposit on the GPU (`--gpu` in both; without it the binary picks the device, and `DTFE_GPU=0` keeps the CPU), with a CPU fallback |
 | `DOUBLE=1` | the double-precision pair `DTFE-double` / `PS-DTFE-double` (see Precision) |
 | `DIM=2` | the 2D pair `DTFE-2d` / `PS-DTFE-2d` (`-2d-double` with `DOUBLE=1`); CPU only |
 | `TBB=auto` / `1` / `0` | the parallel Delaunay insert of both binaries (the default for tessellations of a million points or more where cores are free; `--parallel-triangulation` / `--sequential-triangulation`; `TBB_STD` sets the standard pair apart): when found / required / left out |
@@ -244,11 +244,12 @@ The development tools in `tests/dev/` (not run by CI; macOS):
 ./PS-DTFE <input file> <output prefix> [options]      # phase-space DTFE (Lagrangian tessellation)
 ./PS-DTFE --help          # the options of the two modes, in short;  --full-help: every option in detail
 ```
-`-h` (`--help`) is the short list, one short entry per option: what a user of the two modes needs, 29 option names
+`-h` (`--help`) is the short list, one short entry per option: what a user of the two modes needs, 28 option names
 in PS-DTFE and 26 in standard DTFE, under Input, Grid and fields, Cell average (the two modes), Device and machine
-use, Split, memory and resume, Other estimators and Help. The lines of `--lambda-th`, standard DTFE's `--padding`,
-PS-DTFE's `--ps-vertex-mass` and `--ps-volume-weighted`, and `--run-mode` name both the program's own default and
-what the drivers or the launcher pass; the other lines give the program's own default only (the drivers also pass
+use, Split, memory and resume, Other estimators and Help. The line of
+PS-DTFE's `--ps-vertex-mass` names both the program's own default (off) and
+what the drivers or the launcher pass; the other lines give the program's own default, which for `--lambda-th`,
+standard DTFE's `--padding` and `--run-mode` is also what the drivers and the launcher pass by default (the drivers also pass
 `--periodic` and four fields). `--full-help` lists every option with its full text, in groups, and the developer
 options (for tests and comparisons, such as `--subsamples` and `--face-gradient`: the two modes set these
 themselves) in a group of their own. These are command-line options; the environment's developer switches are under
@@ -264,7 +265,7 @@ The `--full-help` texts are the reference for every option; [demo/COMMANDS.md](d
 command lines. The most used: `--grid N [NY NZ]`, `--periodic`, `--field ...`, `--input-format 101|105|106|111|112|121|122`
 (binary Gadget, Gadget HDF5 (default), its HI data, text `x y z w`, text positions, two raw binary layouts),
 `--mpc-unit` (input length units per Mpc; default 1000, i.e. kpc), `--box`, `--region` / `--region-mpc` (a zoom),
-`--padding` (default 5 mean particle spacings), `--partition X Y Z`, `--max-concurrent N`, `--verbose 0..3`,
+`--padding` (default 15 mean particle spacings in standard DTFE, 5 in PS-DTFE), `--partition X Y Z`, `--max-concurrent N`, `--verbose 0..3`,
 `--config file` (options from a file).
 
 **Outputs.** Each field is written as `<prefix>.<name>` (the cell-centre value) or `<prefix>.a_<name>` (the `_a`
@@ -281,11 +282,11 @@ cell average): raw float32 (float64 in a double build), N^3 cells in C order tim
 | `scalar`, `scalarGradient` | `.scalar`, `.scalarGrad` | the scalar dataset and its gradient |
 | every grid pass (PS-DTFE) | `.streams` / `.a_streams`, `.hidden_streams` / `.a_hidden_streams` | stream count; bitmask of streams the count misses |
 | the exact deposit (PS-DTFE `--exact`, the default with an `_a` field) | `.tetTouch` | tetrahedra touching the cell (not a stream count) |
-| the face gradient (PS-DTFE: the default with the exact deposit and `--ps-volume-weighted`, or `--face-gradient`) | `.a_velDivStreams`, `.a_massFluxDiv`; `.a_velGradStreams` / `.a_velShearStreams` / `.a_velVortStreams` with `gradient_a` / `shear_a` / `vorticity_a` | the stream average's divergence, and its gradient, shear and vorticity where the mean flow's are written (the velocity-gradient family is then the mean flow's); the mass flux divergence div(Σ ρ_s v_s) |
+| the face gradient (PS-DTFE: the default with the exact deposit, or `--face-gradient`) | `.a_velDivStreams`, `.a_massFluxDiv`; `.a_velGradStreams` / `.a_velShearStreams` / `.a_velVortStreams` with `gradient_a` / `shear_a` / `vorticity_a` | the stream average's divergence, and its gradient, shear and vorticity where the mean flow's are written (the velocity-gradient family is then the mean flow's); the mass flux divergence div(Σ ρ_s v_s) |
 | `--ps-caustics` | `.caustic`, `.causticClass` | fold flag; caustic bitmask (one file, no `a_` twin) |
 | `--sample-points` | `.pts_den`, `.pts_vel`, `.pts_streams`, ... | one record per point (`.pts_den` float64 rho/rho_bar) |
 
-The T-web needs a periodic box; both web classes take `--lambda-th` (binary default 0; the run scripts pass 0.3).
+The T-web needs a periodic box; both web classes take `--lambda-th` (default 0.3, which the run scripts pass too).
 Standard DTFE also writes `*.badGridPoints*` files when the padding left cells outside the tessellation. While a run
 goes it keeps `<prefix>.runlog.progress` (a JSON file: phase, partitions done, ETA, memory, GPU retries;
 `DTFE_PROGRESS=0` switches it off). Every output is written as `<file>.part.<pid>` and the set is renamed into
@@ -355,12 +356,14 @@ one release when the new one is unset, with one `warning: OLD is deprecated, use
 | `DTFE_SERVE_BUDGET_GB` | composite `--serve`: the memory for the resident partitions, in GB | the auto-tuner's budget |
 | `DTFE_EXACT_AVERAGE` | both binaries: pins the `_a` cell average, `1` (on) as `--exact`, `0` (off) as `--sampled`; a flag on the command line wins, and the run log's header names the source | unset (or `auto`): no pin -- a sampling count or method selects the sampled average, else exact where it applies (Field evaluation methods) |
 | `DTFE_FACE_GRADIENT` | both binaries: the velocity gradient's route, `0` (off) as `--per-tet-gradient`, `1` (on) as `--face-gradient` (refused where the face gradient cannot run); a flag on the command line wins, and the run log's `velocity gradient` line names the source | unset (or `auto`): the face gradient where it applies (*Face gradient*) |
-| `DTFE_RUN_MODE` | both binaries: the run mode, as `--run-mode` (`gentle`, `balanced` or `performance`, in any case; *Run mode* under *Memory, partitions and long runs*); an empty value or `auto` is unset, any other word an error, a flag on the command line wins, and the run log's `run mode` line names the source | unset: performance |
+| `DTFE_RUN_MODE` | both binaries: the run mode, as `--run-mode` (`gentle`, `balanced` or `performance`, in any case; *Run mode* under *Memory, partitions and long runs*); an empty value or `auto` is unset, any other word an error, a flag on the command line wins, and the run log's `run mode` line names the source | unset: performance inside a batch job (`SLURM_JOB_ID` or `PBS_JOBID` set and not empty), else balanced |
+| `DTFE_GPU` | both binaries: the device of PS-DTFE's grid deposit and of standard DTFE's `_a` cell average, `0` (off) the CPU, `1` (on) the GPU as `--gpu` asks for it (a build without a GPU backend falls back to the CPU with a warning); `--gpu` on the command line wins, so `--gpu` with `DTFE_GPU=0` runs on the GPU. The run log's device line (standard DTFE's `'_a' interpolation`, PS-DTFE's `PS deposit`) names the device and its source. The drivers and the launcher set it on every run | unset (or `auto`): the program picks, the GPU on a GPU build where this run's `_a` work has a GPU path -- PS-DTFE's deposit of an `_a` field (exact or sampled), standard DTFE's exact average -- else the CPU: standard DTFE's sampled average stays on the CPU |
 | `DTFE_GPU_SHARE_RHO` | PS-DTFE, for development: the constant of the share model of `--gpu-share auto` (in performance) and `mixed` (in every mode), 1/(1 + rho (threads - 1.8)) (a stronger GPU than an M1 Max's wants a smaller one) | 0.09 |
 | `DTFE_MC_LEGACY` | standard DTFE `--average-method 1`: the uncentred CGAL-order Monte-Carlo realization (A/B) | off |
 | `DTFE_RUN_UNITS_LEGACY` | standard DTFE, for one release: the sums of before the run-wide fixed-point units (one fixed-point unit per GPU batch in 64-bit device words, the CPU exact average's float sums, the face pass's double sums, the vertex densities' double sums and CGAL's single-cell volumes), for A/B comparisons. It restores the sums, not the planner's memory model (the 8 B per vertex of the exact star sums stay booked), so pin the split with `--partition` to compare bytes. The checkpoint key names it, so a resume across it is refused, and a tessellation cache of the exact star sums is not read under it (and back). PS-DTFE's passes sum in units of their own without it; there it beats `DTFE_PS_RUN_UNITS=1` and `--ps-merge fixed-point`, which then keeps its merge of before (each partition's rounded grids; *Developer switches* below) | off |
 | `DTFE_PS_VERTEX_ORDER_LEGACY` | PS-DTFE: the cells keep CGAL's vertex numbering instead of the canonical order, and `--ps-caustic-cusps` keeps its stencil's address order -- the outputs of the binaries before the order (A/B); the grids then follow the insertion order, so two runs with the parallel insert differ (in the last bits in most cells, by far more in a few cells at caustics); a tessellation loaded from a cache file keeps the file's numbering; a partition checkpoint's settings key names the switch (`vertex-order=legacy`), so `--resume` across it is refused | off |
 | `DTFE_MASS_AUDIT` | PS-DTFE: 1 prints each pass's mass bookkeeping, 2 adds the per-particle closure (one domain) | 0 |
+| `SLURM_JOB_ID`, `PBS_JOBID` | set and not empty (the run is inside a batch job): the run mode's default is `performance` instead of `balanced`; `--run-mode` and `DTFE_RUN_MODE` win, and the `run mode` line names the variable | unset |
 | `TMPDIR` | the rescue folder and the merge spills without `--scratch-dir` | `/tmp` |
 | `NO_COLOR` | no colours, for any non-empty value (the no-color.org convention, so `0` too) | colours on a terminal only |
 | `CLICOLOR_FORCE` | a switch: colours also through a pipe | off |
@@ -388,9 +391,8 @@ line per side on stderr), `DTFE_PTS_FULL_RECORDS` (keeps every point record memb
 `DTFE_TESSELLATION_CACHE_FINGERPRINT` (prints a loaded tessellation's structure fingerprint),
 `DTFE_TESSELLATION_CACHE_LEGACY` (writes the single-stream cache format), `DTFE_TESSELLATION_CACHE_ZLIB` (zlib instead
 of libdeflate) and `DTFE_TESSELLATION_CACHE_CGAL_IO`
-(CGAL's own tessellation reader and writer), the last two for comparisons. The GPU's debugging knobs, among them the
-timing experiments `DTFE_GPU_DEBUG_NOATOMIC` and `PS_GPU_DEBUG_NOATOMIC` (no grid atomics: the grids come out wrong),
-are with the other GPU knobs in metal/README.md, *Knobs*.
+(CGAL's own tessellation reader and writer), the last two for comparisons. The GPU's debugging knobs are with the
+other GPU knobs in metal/README.md, *Knobs*.
 
 #### Developer switches
 
@@ -399,13 +401,13 @@ Switches for the measurements of the 2026-11 round, not user options: each estim
 or removed once its measurement is made. Unset (or not given) none of them changes a run: unset,
 `DTFE_FACE_WALK_EARLY` leaves the face walk beside the GPU deposit on, the default since 2026-11-13, and its `=0`
 puts the walk after the device call. What the commits of 2026-11-13 added -- behind these switches the word merge
-of `--ps-merge fixed-point` (with its face sums once per face), the time objective, the face kernel and its float
-arithmetic, and, as the default, the face walk beside the GPU deposit with its memory term
-(`DTFE_FACE_WALK_EARLY` below) -- has not been through the full test battery or the Linux check. The measurement
+of `--ps-merge fixed-point` (with its face sums once per face), the face kernel and its float arithmetic, and, as
+the default, the face walk beside the GPU deposit with its memory term (`DTFE_FACE_WALK_EARLY` below) -- has not
+been through the full test battery or the Linux check. The measurement
 night of 2026-11-14 (docs/cleanup-plan.md P14, "The measurement night": TNG100-3-Dark z = 0 at 512^3, balanced
 mode, one run each, on the binaries of that batch) ran two of them: the face walk beside the GPU deposit, the
 default, in the PS-DTFE Exact runs, and the face kernel, alone and with `DTFE_FACE_F32=1` (`DTFE_GPU_FACES` below).
-The word merge and the time objective had no 512^3 run with that code, and the walk's only 512^3 pair, with it and
+The word merge had no 512^3 run with that code, and the walk's only 512^3 pair, with it and
 without it, ran on 2026-11-12, when it was an opt-in, on the code of that day.
 
 - `DTFE_PS_RUN_UNITS` (PS-DTFE; off by default): 1 makes every pass sum in the run-wide fixed-point units (one unit
@@ -447,35 +449,6 @@ without it, ran on 2026-11-12, when it was an opt-in, on the code of that day.
   rounded grids into exact 72-bit integer grids, 9 B per cell, about 1e-7 of each grid's peak from the ordered merge
   and still split-dependent; there an overflow stops the run. Not in the double build, nor with `--grid-window`. The
   run log's `fixed-point merge:` line gives the bytes.
-- `DTFE_AUTO_TIME` (both binaries, from `DTFE_AUTO_MINN` particles; off by default): 1 = the auto-tuner's time
-  objective. Among the plans its memory model accepts it takes the one with the smallest predicted partition loop,
-  where that predicts less than 0.90 of the memory plan's loop (`kAutoTimeGain` in `src/auto_tune.cc`: below the noise
-  of repeated runs a plan is kept), and states what it found in an `AUTO-TUNE: time objective (DTFE_AUTO_TIME)` line
-  (both predictions where it leaves the memory plan); where it predicted, the `--auto-tune-report` line gains `time_s`
-  and `time_mem_s` (the predicted whole runs of the plan taken and of the memory plan) before `over_budget`. A plan
-  the user fixes is only predicted (standard DTFE: `--partition` and `--max-concurrent` given; PS-DTFE: `--partition`
-  given). Its constants come from TNG100-3-Dark z = 0 runs at 512^3 on one machine, so it predicts only inside them
-  and elsewhere keeps the memory plan, naming the reason: both binaries need the 3-D single build and a grid of at
-  most 2e8 cells; standard DTFE the GPU and the exact volume average of the DTFE method with the face pass, without
-  `--sample-points` or `DTFE_GPU_FLOAT_GRIDS=1`; PS-DTFE more than one partition, the exact deposit with
-  `--sample-points`, no `--grid-window` and the per-pass units (not `DTFE_PS_RUN_UNITS=1`, nor
-  `--ps-merge fixed-point`, though the reason then names the first), on a GPU face pass neither the GPU face kernel
-  (`DTFE_GPU_FACES=1`) nor the face walk beside the deposit (the constants were measured with the walk after the
-  device call), no float-sum or audit knob, the face sums only in an all-GPU performance run, a CPU or a mixed run
-  only in performance, a mixed one at a GPU share of 0.5 to 0.7. With the walk beside the deposit the default since
-  2026-11-13 (`DTFE_FACE_WALK_EARLY` below), every single-precision GPU face run is outside the calibrated classes
-  (where no earlier reason applies, "not calibrated for the face walk beside the GPU deposit": the memory plan,
-  said, without time keys) unless
-  `DTFE_FACE_WALK_EARLY=0` puts the walk after the device call, until the class's constants (`kPSTimeGpuFace` in
-  `src/auto_tune.cc`) are measured again with the walk beside the deposit (to be measured: `kPSTimeGpuFace` refitted from
-  512^3 runs of the GPU face command with the walk beside the deposit, the default). `DTFE_FACE_F32=1` alone is not
-  told apart: its CPU face walk in the kernel's float arithmetic keeps the default arithmetic's class. Not verified
-  with the switch on, at any size (to be measured: the predicted against the measured partition loop of full-size runs with
-  the switch on). Tests: N of `tests/dtfe_auto_tune_check.sh`, AA of `tests/ps_auto_tune_check.sh`.
-- `DTFE_AUTO_TIME_GAIN`, `DTFE_AUTO_T_STD_PART`, `DTFE_AUTO_T_PS_PART` (the time objective's tests): its band, 0 to 1
-  (0 never leaves the memory plan, 1 takes any predicted gain; 0.90 when unset), and the seconds per partition of
-  standard DTFE's and of PS-DTFE's model in place of the model's own (a large value makes the fewest partitions the
-  fastest plan).
 - `DTFE_FACE_WALK_EARLY` (PS-DTFE on the GPU, single precision; on by default since 2026-11-13): the face walk beside
   the GPU deposit is the default, `=0` the developer's off switch, kept to measure the walk after the device call
   against it once more, and `=1` means what the default means; not a user option. A `--face-gradient` pass that
@@ -506,7 +479,7 @@ without it, ran on 2026-11-12, when it was an opt-in, on the code of that day.
   run's, `tests/ps_face_gradient_check.sh` P17); every other output is the same byte for byte. The checkpoint key
   names it (`face-sums=f32`), so a resume across it is refused. The double and the 2-D builds ignore it with one note
   line.
-- `DTFE_GPU_FACES` (PS-DTFE, the single-precision 3-D build, `--face-gradient` with `--gpu`; 0 by default, `auto` 0
+- `DTFE_GPU_FACES` (PS-DTFE, the single-precision 3-D build, `--face-gradient` on the GPU; 0 by default, `auto` 0
   too): 1 makes each GPU pass's face sums with the GPU face kernel (`metal/ps_face.metal`; *PS-DTFE face kernel* in
   metal/README.md) in the device's hold after the pass's deposit, instead of the CPU face walk, and forms every face
   sum the CPU makes in the same run (a pass the kernel does not take or gives up on, a CPU-deposited partition, the
@@ -556,16 +529,29 @@ The options that shape the result (the drivers' production settings are marked):
 
 | option | what it does |
 |---|---|
-| `--gpu` | the deposit on the GPU (needs a GPU build; otherwise ignored with a warning); every grid field, the sampled and the exact deposit |
+| `--gpu` | the deposit on the GPU (needs a GPU build; otherwise ignored with a warning); every grid field, the sampled and the exact deposit. Without it a GPU build deposits a run with an `_a` field on the GPU too (`DTFE_GPU=0` keeps the CPU) |
 | `--ps-vertex-mass` (production) | each particle's mass shared over its tetrahedra: chart-independent masses, removing the bias rho_bar V_lag carries when TNG's z = 127 positions are the Lagrangian input |
-| `--ps-volume-weighted` (production) | velocity moments weighted by Eulerian volume, the standard-DTFE convention; the dispersion stays mass-weighted |
 | `--ps-caustics` (production) | the fold flag `.caustic` and the bitmask `.causticClass` |
 | `--ps-caustic-cusps` | with `--ps-caustics`: the cusp (bit 7) and swallowtail (bit 8) indicators; about 1.8x the caustic pass |
 | `--ps-halo-release D` | tetrahedra with a stream density above D (rho/rho_bar) are deposited whole at their centroid cell: the mixed halo interiors (Stücker et al. 2021) |
-| `--exact` (production: the exact deposit, the default) or `--sampled`, `--ps-linear-deposit`, `--grid-window` | see Field evaluation methods |
+| `--exact` (production: the exact deposit, the default) or `--sampled`, `--grid-window` | see Field evaluation methods |
 | `--ps-alpha-shape` | non-periodic clouds: keep tetrahedra with Lagrangian circumradius up to this many mean spacings (default 3; 0 = the convex hull) |
 | `--ps-lagrangian-padding` | the padding of each Lagrangian partition in mean spacings (default 8; 0 = the Eulerian `--padding` rule, under which a TNG partition triangulates 7-9x the particles it owns) |
-| `--parallel-triangulation` | force the parallel Delaunay insert (TBB builds) for every tessellation; the default rule applies it to tessellations of at least a million points where more than one core is free (3.1x on the triangulation of TNG100 at 512^3 with one partition in flight; nothing at the auto plan's concurrency). Two identical runs then differ at rounding in what is summed in walk order (standard DTFE's sampled average on the CPU, the double builds' CPU sums); the single build's exact `_a` grids, face pass and vertex densities of standard DTFE repeat to the byte (integer sums in one unit for the whole run), and so do the single-precision PS-DTFE grids (its cells are renumbered in a canonical vertex order, docs/cleanup-plan.md D19), except under `--ps-linear-deposit`, which reads the vertex densities; `--sequential-triangulation` keeps the bit-reproducible insert |
+| `--parallel-triangulation` | force the parallel Delaunay insert (TBB builds) for every tessellation; the default rule applies it to tessellations of at least a million points where more than one core is free (3.1x on the triangulation of TNG100 at 512^3 with one partition in flight; nothing at the auto plan's concurrency). Two identical runs then differ at rounding in what is summed in walk order (standard DTFE's sampled average on the CPU, the double builds' CPU sums); the single build's exact `_a` grids, face pass and vertex densities of standard DTFE repeat to the byte (integer sums in one unit for the whole run), and so do the single-precision PS-DTFE grids (its cells are renumbered in a canonical vertex order, docs/cleanup-plan.md D19); `--sequential-triangulation` keeps the bit-reproducible insert. The default rule and the tbb library in the standard binaries date from 2026-11-09 (docs/cleanup-plan.md P11.3); before, from 1.0.0 on, the standard binaries inserted sequentially, and PS-DTFE did unless asked for the parallel insert (`--parallel-triangulation`) |
+
+PS-DTFE no longer has the linear-profile deposit (`--ps-linear-deposit`), the geometric stream density at points
+(`--ps-stream-density geometric`) or the legacy point conventions (`--ps-point-conventions legacy`). Given one, the
+program stops with a message; the drivers (`run_ps_dtfe.sh`, `run_ps_pipeline.sh`) do the same for
+`PS_LINEAR_DEPOSIT=1` or `PS_POINT_CONVENTIONS=legacy`.
+
+**Velocity moments.** PS-DTFE weights its velocity moments (the velocity, its gradient and the fields built on it, the
+scalars) by Eulerian-volume shares in every run, the standard-DTFE convention; the dispersion stays mass-weighted (a
+second moment of the distribution function). The run log's header says so in its `velocity moments` line.
+`--ps-volume-weighted` (not listed in the help), which the drivers and the launcher pass, and the drivers'
+`PS_VOLUME_WEIGHTED=1` are accepted and change nothing: PS-DTFE always volume-weights. `PS_VOLUME_WEIGHTED=0` stops
+both drivers with a message.
+Grids that an older PS-DTFE made without the flag hold mass-weighted moments: their run log has neither the
+`velocity moments` line nor the flag on its command line.
 
 **Streams and hidden streams.** The stream count is measured at the sub-samples of each cell, so it cannot see a fold
 thinner than the sampling. `.hidden_streams` bit 1 (value 1) marks exactly the cells a folded tetrahedron overlaps
@@ -586,12 +572,12 @@ Grids whose `.caustic` holds the older per-sample flag (it marked 21.0% of the c
 
 **Velocity gradients in multi-stream cells.** Standard DTFE's gradient, and the divergence, shear, vorticity and V-web
 built on it, is ∇⟨v⟩, the gradient of the mean velocity. PS-DTFE stores the same quantity by default since 2026-11-11
-wherever the run qualifies -- the exact deposit (the default for `_a` fields), `--ps-volume-weighted` (the drivers' and
-the launcher's setting), no halo release, 3D: the face gradient of the volume-weighted mean velocity (*Face gradient*
-below), with the stream average's divergence beside it in `.a_velDivStreams`. Elsewhere (`--per-tet-gradient`, the
-sampled deposit, mass-weighted moments, `--ps-halo-release`, 2D, and every PS grid made before that date without
-`--face-gradient`) it stores ⟨∇v⟩, the average over the streams of each stream's own gradient, and the run log's
-`velocity gradient` line says why. The two agree in single-stream cells and differ in folds (an inverted stream inside
+wherever the run qualifies -- the exact deposit (the default for `_a` fields), no halo release, 3D: the face gradient
+of the volume-weighted mean velocity (*Face gradient* below), with the stream average's divergence beside it in
+`.a_velDivStreams`. Elsewhere (`--per-tet-gradient`, the sampled deposit, `--ps-halo-release`, 2D, the older grids
+with mass-weighted moments, and every PS grid made before that date without `--face-gradient`) it stores ⟨∇v⟩, the
+average over the streams of each stream's own gradient, and the run log's `velocity gradient` line says why. The two
+agree in single-stream cells and differ in folds (an inverted stream inside
 a wall diverges while the mean flow converges), so the box mean of the ⟨∇v⟩ divergence is not zero and its V-web finds
 few filaments and nodes. `FieldSet.load(name, mean_field=True)` returns ∇⟨v⟩ for a PS grid: the stored grid of a
 face-gradient run (`FieldSet.face_gradient`, marked by `.a_velDivStreams`), else FFT derivatives of `.a_vel` with the
@@ -659,14 +645,17 @@ without an `_a` field runs as before unless `--exact` is given. The run log's he
 * **Monte Carlo average** (standard DTFE `--sampled`, with `--average-method 1`, the sampled average's default;
   `--subsamples k`, k^3 points per cell, default an average of 100 per cell). A tetrahedron is sampled at the first n points of a shared Sobol table, centred on its centroid and in a
   vertex order hashed from its positions, so the average is unbiased (the demo's box mean 1.00002) and the
-  realization does not depend on `--partition`, the thread count or the padding (cells agree to 4-6e-6). `DTFE_MC_LEGACY=1` selects the
+  realization does not depend on `--partition`, the thread count or the padding (cells agree to 4-6e-6). It runs on
+  the CPU unless `--gpu` or `DTFE_GPU=1` asks for the GPU. `DTFE_MC_LEGACY=1` selects the
   uncentred CGAL-order average, which loses 0.17-0.29% of the mass at z <= 2. `--seed` seeds method 2 (`--average-method 2`, random
   points per cell; the only standard-DTFE path that computes `velocityStd_a`, which every other method and an
   explicit `--exact` reject with an error), `--particle-fraction` and `--poisson`.
+  The Monte Carlo average was the default before 2026-11-09: the `_a` grids made before then without asking for the
+  exact average hold it (the run log's `volume averaging` line says which ran).
 * **Exact average** (`--exact`, standard DTFE; the default since 2026-11-09) integrates the linear interpolant over
   every cell/tetrahedron intersection: no sampling noise, box mean 1 to 3e-8 on TNG100-3-Dark. The CPU clips with the
   vendored [r3d](third_party/r3d/README.md) library (Powell & Abel 2015), each tetrahedron once per slab and column of
-  its cells; with `--gpu` the GPU integrates the same intersections by a z-sweep with exact Gauss-Legendre quadrature
+  its cells; the GPU (the default on a GPU build, or `--gpu`) integrates the same intersections by a z-sweep with exact Gauss-Legendre quadrature
   ([metal/README.md](metal/README.md)), equal to float rounding. In the single build both sum their shares exactly, as
   integers in one fixed-point unit per grid for the whole run (the CPU in 64-bit words with an exact carry, the GPU in
   128-bit words), so a cell depends neither on the order nor on the partition and thread split of the work
@@ -685,7 +674,7 @@ without an `_a` field runs as before unless `--exact` is given. The run log's he
   fixed-point unit for the whole run (single build), so the grids are the same at any partition split and thread
   count; the 2D build keeps the deposit's own. PS-DTFE (with the exact deposit, on the CPU or -- the face sums then
   from a CPU walk, which the single-precision build runs by default while the device deposits -- the GPU,
-  `--ps-volume-weighted` and no `--ps-halo-release`): the gradient of the volume-weighted MEAN velocity, the quantity
+  and no `--ps-halo-release`): the gradient of the volume-weighted MEAN velocity, the quantity
   standard DTFE stores, as the difference of the face-averaged mean velocities -- conservative (a periodic box's
   mean divergence is 0), with the caustics' jumps as exact face differences -- where `--per-tet-gradient` stores the
   stream average of each stream's own gradient (the
@@ -718,14 +707,12 @@ without an `_a` field runs as before unless `--exact` is given. The run log's he
   1327.94 s, and 3 points per cell axis 2371.19 s; its density differs from the exact one per cell by a median 0.271 (relative),
   after a Gaussian smoothing over 10 cells by 2.67e-04, and the void catalogue at that smoothing has 497 minima
   against 495, 82 against 83 in the distinct sample (docs/cleanup-plan.md P14, "The measurement night").
-  `--ps-linear-deposit` weights the sub-samples by the linear density profile instead (still mass-conserving; not
-  with `--ps-volume-weighted`).
 * **Exact deposit** (`--exact`, PS-DTFE; the default since 2026-11-09 for a run with an `_a` field): each stream is
   integrated analytically over every grid cell (CPU: r3d clipping; GPU: the z-sweep). On TNG100-3-Dark z = 0 at
   512^3 (Apple M1 Max, a sample-point plane evaluated in the same run, 2026-11-09) it takes 1133 s on the CPU and
   1156 s on the GPU, against 1260 s for the sampled deposit at nSub 3 on the GPU and 1644 s on the CPU. The
-  drivers' `DTFE_GPU=auto` and the
-  launcher run it on the GPU of a GPU build, in performance together with the free cores (`--gpu-share auto`);
+  binary by itself runs it on the GPU of a GPU build for a run with an `_a` field, every partition there (`--gpu-share` 1); the drivers' `DTFE_GPU=auto` and the
+  launcher do too, in performance together with the free cores (`--gpu-share auto`);
   `GPU_SHARE=mixed` and the launcher's Advanced Device "CPU + GPU" (`--gpu-share mixed`) add the free cores in every
   run mode; `DTFE_GPU=0` keeps the CPU. The GPU hands the tetrahedra whose dispersion
   float32 cannot resolve to the CPU's double deposit (20.6M of them on TNG100-3-Dark z = 0 at 512^3).
@@ -736,8 +723,7 @@ without an `_a` field runs as before unless `--exact` is given. The run log's he
   the full run's fixed-point units; the exact deposit's to float rounding).
   The cost follows the window, not the grid: the launcher's exact zoom is a window of a fine virtual grid. With
   `--partition` and `--tessellation-cache` it loads the cached partitions, skips those whose streams never reach the
-  window, and reads no snapshot when every partition is cached. Not with the T-web/V-web, `--region`, `--partition-index` or
-  `--ps-linear-deposit`.
+  window, and reads no snapshot when every partition is cached. Not with the T-web/V-web, `--region` or `--partition-index`.
 
 ### Point evaluation
 
@@ -749,15 +735,16 @@ coverage), and with options `.pts_velGrad` (`--pts-vel-grad`), the density gradi
 (`--pts-scalar --scalar-dataset NAME`). Point location
 is exact: a point on a shared face, edge or vertex is counted once per stream, also across the periodic boundary and
 under any `--partition` split (each partition answers the points in the tetrahedra whose centroid it owns, so the
-values equal one triangulation's to rounding). `--ps-stream-density linear|geometric` picks the per-stream estimator (`dtfe` is the older name of `linear`).
+values equal one triangulation's to rounding). A stream's density at a point is the linear interpolation of its
+tetrahedron's vertex densities. In PS-DTFE the point's velocity, velocity gradient and scalar are the plain mean over
+its streams (the grids' volume weighting at a point), and its dispersion is the density-weighted second moment about
+the density-weighted mean velocity.
 Point evaluation runs on the CPU (double precision, all cores; `DTFE_PTS_THREADS`).
 
-**Image planes follow the grids' conventions** (`--ps-point-conventions grid`, the default): a PS plane takes the run's
-`--ps-vertex-mass` and `--ps-volume-weighted`, so its density contrast matches the grid's (slope 0.97-0.99 against the
-exact-deposit grid on a TNG-like synthetic box). `--ps-point-conventions legacy` keeps the reference implementation's
-estimators; planes made with them hold 0.81-0.82 of the grid's density contrast at z = 20 and the launcher's Runs tab
-marks them. The T-web and V-web of a plane are sampled from the grid at the points
-(`dtfelib.io.PointPlane.sample_grid_field`).
+**Image planes follow the grids' conventions**: a PS plane takes the run's `--ps-vertex-mass`, so its density
+contrast matches the grid's (slope 0.97-0.99 against the exact-deposit grid on a TNG-like synthetic box), and its
+velocities are volume-weighted as the grids' are. The launcher's Runs tab marks the planes that older runs made with
+the legacy conventions. The T-web and V-web of a plane are sampled from the grid at the points (`dtfelib.io.PointPlane.sample_grid_field`).
 
 ### Interactive point evaluation
 
@@ -807,9 +794,10 @@ the launcher's Check memory). A run with a prediction ends its SUMMARY with the 
 **Run mode.** `--run-mode gentle|balanced|performance` (both binaries, every build; `DTFE_RUN_MODE`, in any case, is
 the same choice, and the flag wins) sets how hard a run leans on the machine: `performance` takes every core and long
 GPU buffers, `balanced` most of the performance cores and short buffers, so the display never waits on the GPU, and
-`gentle` half of them, so the machine stays usable beside the run. The binaries default to `performance`, the
-behaviour of earlier releases; the drivers and the launcher default to `balanced` (`performance` inside a SLURM or PBS
-job and in the launcher's SLURM scripts) and pass the mode on every run. A mode fills in only what was not given: a
+`gentle` half of them, so the machine stays usable beside the run. The binaries, the drivers and the launcher default
+to `balanced`, and to `performance` inside a batch job (`SLURM_JOB_ID` or `PBS_JOBID` set and not empty; the
+launcher's SLURM scripts name it); `--run-mode` comes first, then `DTFE_RUN_MODE`, then this default. The binaries
+defaulted to `performance` before. The drivers and the launcher pass the mode on every run. A mode fills in only what was not given: a
 non-empty `OMP_NUM_THREADS` keeps its thread count, the `DTFE_*_THREADS` pins keep their teams, a `--max-concurrent`
 above the mode's threads raises them to it, and `--partition`, `DTFE_GPU` and `--gpu-share` stay as given; the memory
 budget, the estimator, the fields and the merge are not the mode's. The run log's header line `run mode : <mode>
@@ -827,10 +815,10 @@ PS-DTFE single-precision byte, nor a byte of standard DTFE's single-precision ex
 | PS-DTFE exact deposit: items per GPU buffer | 500k | 500k | 4M |
 | `--gpu-share auto` (PS-DTFE) | 1 | 1 | from the threads: 0.6 at 10, 0.65 at 8, 0.85 at 4 |
 | `--gpu-share mixed` (PS-DTFE) | from the mode's threads: 0.85 at 4 | from the mode's threads: 0.75 at 6 | as `auto` |
-| the device the drivers and the launcher pick on a GPU build (except that the launcher runs PS-DTFE's sampled deposit below a million particles on the CPU) | the GPU | the GPU | the GPU; standard DTFE's sampled average the CPU |
+| the device the drivers and the launcher pick on a GPU build (except that the launcher runs PS-DTFE's sampled deposit below a million particles on the CPU) | the GPU; standard DTFE's sampled average the CPU | the GPU; standard DTFE's sampled average the CPU | the GPU; standard DTFE's sampled average the CPU |
 
 The items per buffer change no byte. `--gpu-share auto|mixed|<fraction>` (PS-DTFE, the exact deposit of a
-partitioned `--gpu` run) deposits that share of the partitions on the GPU and the others on the free CPU cores at the
+partitioned run on the GPU) deposits that share of the partitions on the GPU and the others on the free CPU cores at the
 same time, chosen by the partition index alone, so a rerun repeats it. The binary's default is 1, every partition on
 the GPU;
 `auto` is the run mode's share: in performance 1/(1 + 0.09 (threads - 1.8)) in steps of 0.05, between 0.5 and 1
@@ -842,7 +830,7 @@ balanced too), with the same exceptions. The drivers (`GPU_SHARE`, default `auto
 and the launcher's Advanced Device "CPU + GPU" pass `mixed`, and its Device "GPU" passes 1. A mixed run's grids
 differ from an all-GPU or an all-CPU run's at float rounding, and the mass stays exact. The resolved share is in the
 checkpoint key (a `gpu-share=` line, only below 1), and `--resume` with `auto` or `mixed` keeps the checkpoint's. A
-number is ignored, with a note, without `--gpu`, for the sampled deposit, in a CPU-only build and for one domain
+number is ignored, with a note, on a run on the CPU, for the sampled deposit, in a CPU-only build and for one domain
 (`auto` and `mixed` say nothing there). The run log's `PS-DTFE: GPU share <share> (<source>): ...` line says how many
 partitions deposit on each device, and a mixed plan's AUTO-TUNE line ends `GPU deposit with the free cores (GPU share
 <share>)`.
@@ -879,11 +867,12 @@ predicted). Standard DTFE's look-ahead is booked at 1.275 times its count: gentl
 balanced's 6-thread plan, which peaked at the budget's edge with it, now runs without it (33.7 GB predicted). Neither
 new plan has been timed.
 
-**Padding.** Every partition (and in standard DTFE every thread's sub-box) carries its own padding. The binary's
-default of 5 mean spacings is too short for the emptiest voids at z = 0: `run_dtfe.sh`, dtfelib's standard server and
-the launcher pass 15, complete at z = 0 on TNG50/100/300-3-Dark (10 is not). An incomplete padding leaves
+**Padding.** Every partition (and in standard DTFE every thread's sub-box) carries its own padding. Standard DTFE's
+default is 15 mean spacings, which `run_dtfe.sh`, dtfelib's standard server and the launcher pass too: complete at
+z = 0 on TNG50/100/300-3-Dark (10 is not, and 5, the default before, is too short for the emptiest voids at z = 0). An incomplete padding leaves
 `*.badGridPoints*` files, never silently wrong cells (point values within a few spacings of a face can be off, though:
-up to 4% at padding 5). PS-DTFE partitions are padded in Lagrangian space by `--ps-lagrangian-padding` (default 8).
+up to 4% at padding 5). PS-DTFE partitions are padded in Lagrangian space by `--ps-lagrangian-padding` (default 8);
+PS-DTFE's own `--padding` default stays 5.
 
 **Partition merge (PS-DTFE).** By default the partitions' grids are added in partition index order whatever order they
 finish in (`--ps-merge index-order`, the staged merge), so two identical runs give bit-identical grids. The partitions also
@@ -904,19 +893,20 @@ and refuses when the build, the inputs, the split or the command line changed (`
 `--run-mode`, `--scratch-dir`, `--tessellation-cache` and the overlap and merge-order flags may change, `--gpu-share`
 (PS-DTFE) while the share it resolves to stays the same: *Run mode* above; `--ps-merge fixed-point` is given, or not,
 as in the killed run, *Developer switches*). A resumed PS run merged in
-index order, and a resumed standard CPU or `--gpu` run at the same thread count, are byte-identical to an uninterrupted
+index order, and a resumed standard CPU or GPU run at the same thread count, are byte-identical to an uninterrupted
 one; `--sample-points` runs resume too. The drivers resume by themselves (`DTFE_RESUME=0` starts over, in both);
 `DTFE_CHECKPOINT=0` writes no checkpoints; `--interlace` runs are not checkpointed. Two limits: a standard run that
 draws random numbers (`--average-method 2`, `--particle-fraction`) without `--seed` is seeded from the clock, and the
 seed is not in the checkpoint's settings key, so its resumed run cannot match any one uninterrupted run byte for byte
-(give `--seed` for that); and the key holds each option as given, so a PS run that passed `--ps-stream-density linear`
-(or the deprecated `dtfe`) explicitly does not resume under a command that leaves the option out, though both mean
-the default: give it the same way both times. The old spellings of an option resume under the new ones (one key).
-The key also holds the average and the gradient route the run resolved to (`average=exact|sampled`,
-`gradient=face|per-tet`), so an environment pin (`DTFE_EXACT_AVERAGE`, `DTFE_FACE_GRADIENT`) is part of it; a
-checkpoint written before these two lines existed (2026-11-09) does not match any more.
+(give `--seed` for that); and the key holds each option as given, so a run that named an option at its default value
+(or `--ps-volume-weighted`) does not resume under a command that leaves the option out, though both mean the same:
+give it the same way both times. The old spellings of an option resume under the new ones (one key).
+The key also holds the average, the gradient route and the device the run resolved to (`average=exact|sampled`,
+`gradient=face|per-tet`, `device=gpu|cpu`), so an environment pin (`DTFE_EXACT_AVERAGE`, `DTFE_FACE_GRADIENT`,
+`DTFE_GPU`) and the program's own pick of the device are part of it; a checkpoint written before the first two
+lines existed (2026-11-09), or before the `device=` line, does not match any more.
 
-**Look-ahead.** A partitioned standard `--gpu` run triangulates the next partition while the GPU works on the current
+**Look-ahead.** A partitioned standard run on the GPU triangulates the next partition while the GPU works on the current
 one (`--no-overlap` switches it off); PS-DTFE does the same at `--max-concurrent 1` only (`--no-overlap` too). The
 outputs are byte-identical either way.
 
@@ -924,11 +914,11 @@ outputs are byte-identical either way.
 grids every ~10 s of GPU work (`DTFE_GPU_CHECKPOINT_CHUNKS`). A killed buffer (the display watchdog, another program's
 GPU hang, out of memory) restores the last snapshot and retries by cause; a watchdog or memory error slows the pace,
 which eases back after a clean stretch (`DTFE_GPU_PACE_RECOVER_SEC`) to the run mode's base: ~250 ms buffers in
-performance, ~50 ms in gentle and balanced, 8 ms gaps in every mode (the `pace eased` line then ends `(the default)`
-or `(the run mode's)`). Three failures of one chunk, sixteen in a deposit
+performance, ~50 ms in gentle and balanced, 8 ms gaps in every mode (the `pace eased` line then ends
+`(the run mode's)`). Three failures of one chunk, sixteen in a deposit
 or a lost device send that partition (standard DTFE: that sub-domain) to the CPU. The run log ends with
 `GPU deposit retries: N (innocent a, timeout b, oom c, other d)`. `DTFE_GPU_FAULT_AT=<k>[:innocent|timeout|oom|persist]`
-is the test hook. Standard DTFE's GPU `_a` grids are exact fixed-point sums, so two `--gpu` runs are byte-identical:
+is the test hook. Standard DTFE's GPU `_a` grids are exact fixed-point sums, so two GPU runs are byte-identical:
 the exact average's in 128-bit words of one unit per grid for the whole run (in the single build the same at any
 partition split and thread count; `DTFE_RUN_UNITS_LEGACY=1`: 64-bit words of a unit per batch), the sampled average's
 in 64-bit words of a unit per batch (`DTFE_GPU_FLOAT_GRIDS=1`: float atomics, for comparison).
@@ -950,13 +940,13 @@ rebuilt once rather than read.
 | | standard DTFE (`./DTFE`) | PS-DTFE (`./PS-DTFE`) |
 |---|---|---|
 | Density | DTFE density at each particle, interpolated linearly | sum over the streams of tetrahedron mass over Eulerian volume |
-| Velocity | volume average of the single-valued interpolant | mean over the streams (by volume under `--ps-volume-weighted`); dispersion by mass |
-| Velocity derivatives | ∇⟨v⟩ | ∇⟨v⟩ from exact face sums with the exact deposit and `--ps-volume-weighted` (the default there), with ⟨∇v⟩ beside it (`*Streams`); else ⟨∇v⟩ (dtfelib: `mean_field=True` gives ∇⟨v⟩, `stream_average=True` ⟨∇v⟩) |
+| Velocity | volume average of the single-valued interpolant | mean over the streams, by volume; dispersion by mass |
+| Velocity derivatives | ∇⟨v⟩ | ∇⟨v⟩ from exact face sums with the exact deposit (the default there), with ⟨∇v⟩ beside it (`*Streams`); else ⟨∇v⟩ (dtfelib: `mean_field=True` gives ∇⟨v⟩, `stream_average=True` ⟨∇v⟩) |
 | Cell average | exact (`--exact`, the default) or Monte Carlo (`--sampled`) | the exact deposit (`--exact`, the default) or sampled on nSub^3 (`--sampled`, nSub = 1 by default: one point per cell) |
-| GPU | `--gpu`: the `_a` averages | `--gpu`: every grid field, sampled and exact |
+| GPU | `--gpu`: the `_a` averages (without it: the exact average on a GPU build) | `--gpu`: every grid field, sampled and exact (without it: a run with an `_a` field on a GPU build) |
 | Run-to-run identical | yes (exact average and face pass: exact sums, in the single build the same at any partition split and thread count; sampled average: exact GPU sums, the CPU at a fixed thread count) | yes (exact sums, index-order merge) |
 | `--max-concurrent` | threads per partition | partitions in flight |
-| Padding | 15 spacings (drivers, dtfelib, launcher) | `--ps-lagrangian-padding 8` |
+| Padding | 15 spacings (the default; the drivers, dtfelib and the launcher pass it too) | `--ps-lagrangian-padding 8` |
 | Points | the interpolant; `.pts_streams` = 0/1 coverage | every stream (`--ps-per-stream`) |
 | Streams, dispersion, caustics | none | yes |
 
@@ -1015,7 +1005,7 @@ is unset or the data disk is missing, and skips a snapshot whose folder is not w
 | `DTFE_SMOOTH_MPC` | the void catalogue's smoothing in Mpc, the same in every box (for the void scripts and `analyze.py export`) | unset: 10 cells |
 | `GRID_SIZE` (or `-g`) | cells per axis of the grids | 512 (`config.sh`; the production grids of both estimators) |
 | `PADDING` | the padding of each partition (and in standard DTFE of each thread's sub-box) in mean particle spacings | standard DTFE 15 (`run_dtfe.sh`), PS-DTFE 50 (`config.sh`; it matters only for an unsplit tessellation or `PS_LAGRANGIAN_PADDING=0`) |
-| `DTFE_GPU` (`-m`, `--gpu`) | the deposit / interpolation on the GPU (1) or the CPU (0), both drivers | `auto` (by the run mode: the GPU when the binary was built with one, except standard DTFE's sampled average in performance, which runs faster on the CPU; else the CPU) |
+| `DTFE_GPU` (`-m`, `--gpu`) | the deposit / interpolation on the GPU (1) or the CPU (0), both drivers; each exports the resolved value to the binary, which reads it too | `auto` (the GPU when the binary was built with one, except standard DTFE's sampled average, which runs on the CPU in every run mode; else the CPU) |
 | `DTFE_RUN_MODE` (`--run-mode`) | how hard a run leans on the machine (*Run mode* under *Memory, partitions and long runs*): `gentle`, `balanced` or `performance`, passed as `--run-mode` on every run, both drivers and the pipeline | `auto` (balanced, or performance inside a SLURM or PBS job) |
 | `GPU_SHARE` (`--gpu-share`) | PS-DTFE: the share of a partitioned GPU run's partitions that deposit on the GPU, the others on the free cores at the same time; passed with the exact deposit on the GPU, and whenever it is not `auto` (so that the binary's note on a number shows); `mixed` = the free cores take part in every run mode | `auto` (the run mode's share) |
 | `DTFE_EXACT_AVERAGE` (`-e`, `--exact`, `--sampled`) | 1 = the exact average (`--exact`: PS-DTFE's exact deposit, standard DTFE's exact cell averages), 0 = the sampled one (`--sampled`: PS-DTFE's nSub^3 deposit, standard DTFE's Monte-Carlo cell mean); the drivers pass one of the two flags on every run | exact in both drivers; while it is unset a `SUBSAMPLES` count selects sampled (`-e` or an explicit 1 beside the count stays exact) |
@@ -1023,10 +1013,10 @@ is unset or the data disk is missing, and skips a snapshot whose folder is not w
 | `PARTITION`, `MAX_CONCURRENT` | the split of the box and how many parts run at once | auto-tuned |
 | `SCRATCH_DIR` | the full grids as files outside RAM (large runs) | off |
 | `FIELDS`, `OUTPUT_PREFIX`, `LAMBDA_TH` | the fields, the files' prefix, the web threshold | density, velocity, divergence, shear in both drivers (the gradient, vorticity, dispersion, T-web and V-web on request), `ps_output` (standard DTFE `output`; a `ps_*` prefix refused there), 0.3 |
-| `PS_VERTEX_MASS`, `PS_VOLUME_WEIGHTED`, `PS_CAUSTICS` | PS-DTFE: vertex masses; volume-weighted velocity moments; the caustic classes | 1, 1, 1 |
-| `FACE_GRADIENT` | the velocity gradient's route (see Face gradient above), the same knob in both drivers: empty = the binary's default (the face gradient where the run qualifies -- PS-DTFE: the exact deposit and `PS_VOLUME_WEIGHTED=1`, both the default; the run log says which route ran and why; a face run writes the stream average beside the mean flow's: `.a_velDivStreams`, and `.a_velGradStreams` / `.a_velShearStreams` / `.a_velVortStreams` for the gradient, shear and vorticity asked), 1 = `--face-gradient` (run_ps_dtfe.sh refuses it with the sampled deposit -- `--sampled`, `DTFE_EXACT_AVERAGE=0` or a lone `SUBSAMPLES` count -- or without `PS_VOLUME_WEIGHTED=1`), 0 = `--per-tet-gradient` (PS-DTFE: the stream average of each stream's own gradient, the route of PS grids made before 2026-11-11; standard DTFE: the deposit's own) | empty |
+| `PS_VERTEX_MASS`, `PS_VOLUME_WEIGHTED`, `PS_CAUSTICS` | PS-DTFE: vertex masses; volume-weighted velocity moments (PS-DTFE always volume-weights: 1 passes the accepted `--ps-volume-weighted`, 0 stops both drivers); the caustic classes | 1, 1, 1 |
+| `FACE_GRADIENT` | the velocity gradient's route (see Face gradient above), the same knob in both drivers: empty = the binary's default (the face gradient where the run qualifies -- PS-DTFE: the exact deposit, the default; the run log says which route ran and why; a face run writes the stream average beside the mean flow's: `.a_velDivStreams`, and `.a_velGradStreams` / `.a_velShearStreams` / `.a_velVortStreams` for the gradient, shear and vorticity asked), 1 = `--face-gradient` (run_ps_dtfe.sh refuses it with the sampled deposit: `--sampled`, `DTFE_EXACT_AVERAGE=0` or a lone `SUBSAMPLES` count), 0 = `--per-tet-gradient` (PS-DTFE: the stream average of each stream's own gradient, the route of PS grids made before 2026-11-11; standard DTFE: the deposit's own) | empty |
 | `SAMPLE_POINTS`, `PTS_VEL_GRAD` | a `--sample-points` file evaluated in the same run; with velocity gradients | off, 0 |
-| `PS_POINT_CONVENTIONS` | PS-DTFE planes: `grid` (the grids' conventions) or `legacy` (`--ps-point-conventions legacy`) | `grid` |
+| `PS_POINT_CONVENTIONS` | PS-DTFE planes: the grids' conventions, `grid` (the only value) | `grid` |
 | `TESSELLATION_CACHE` | a `--tessellation-cache` folder | off |
 | `DTFE_PRECISION` | `double` runs the double-precision pair | `single` |
 | `PS_MERGE` | PS-DTFE: `index-order` (bit-reproducible; given, it keeps the memory gate on under the auto-tuner's speed split), `completion-order` (as they finish), `fixed-point` (a developer switch, *Developer switches*; not with `DTFE_PRECISION=double`): `--ps-merge MODE` | `index-order` (passed explicitly: the memory gate stays on under the speed split) |
@@ -1035,7 +1025,7 @@ is unset or the data disk is missing, and skips a snapshot whose folder is not w
 | `DRY_RUN` | 1 = print the commands, run nothing | 0 |
 | `SPACE_CHECK` | 0 = skip the drivers' free-space check | 1 |
 
-The rest (`THREADS`, `PS_LINEAR_DEPOSIT`, `PS_CAUSTIC_CUSPS`, `PARALLEL_TRIANGULATION`, `PS_LAGRANGIAN_PADDING`,
+The rest (`THREADS`, `PS_CAUSTIC_CUSPS`, `PARALLEL_TRIANGULATION`, `PS_LAGRANGIAN_PADDING`,
 `PS_LAGRANGIAN_INPUT`, and the pipeline's `SIMS`, `SNAPS`, `NU`, `AXIS`, `CENTER`, `PLANES`, `THICKNESS`, `SUPERSAMPLE`,
 `PLANE_WINDOW`, `FORCE`) is listed in each script's `--help`. A switch is off for `0`, `false`, `no` or `off` and on
 for any other value (the binaries' rule). A knob's name is its flag's (`--face-gradient`, `FACE_GRADIENT`), except
@@ -1141,9 +1131,9 @@ hands to every job as `DTFE_DATA_ROOT`; it starts without one), building the pro
   built, or while the job asks for it; 2D files run on the 2D binaries. Its *Extra options* line (under *More*, for
   experts) passes any program option the tab has no control for (typed as on a command line, after the tab's own).
   Extra options that name the device (`--gpu`, and for PS-DTFE `--gpu-share`) set it alone: the tab then adds neither,
-  and its "Runs on" line says the extra options set it; `--gpu-share` on a standard-DTFE job and `--ps-linear-deposit`
-  there are errors (standard DTFE has no GPU share; the tab always passes the volume-weighted velocities, which the
-  program refuses beside the linear deposit).
+  and its "Runs on" line says the extra options set it; `--gpu-share` on a standard-DTFE job is an error (standard
+  DTFE has no GPU share), and so is, on a PS-DTFE job, each choice PS-DTFE no longer has (the linear deposit, the
+  geometric stream density, the legacy point conventions in either spelling: *Phase-Space DTFE*).
 - **Pipeline**: `run_ps_pipeline.sh` for the chosen simulations, with the plane's geometry and the render options.
 - **Plots**: the scripts of `python/plot` and `analyze.py`, each with its own options.
 - **Explore**: maps of any run's grids (a slice read from disk), field, component, axis, scale and smoothing; a query
@@ -1179,7 +1169,9 @@ hands to every job as `DTFE_DATA_ROOT`; it starts without one), building the pro
   smoothed once per output; a slice smoothed in 2D is another field. A new σ is searched when the value is
   committed (Return, or leaving the box); the row says how long the search should take, and one estimated over two
   minutes asks first.
-  How many partitions a query server keeps in memory is the binary's choice.
+  How many partitions a query server keeps in memory is the binary's choice. The query server's PS velocities are
+  volume-weighted (the plain mean over a point's streams), and so are an exact zoom's velocity moments, also over an
+  older output whose moments are mass-weighted.
   PS velocity derivatives are shown as the mean field ∇⟨v⟩ by default (the stored grids of an output with the face
   gradient: an Exact run's in 3D without the halo release; else computed from the velocity; *PS derivatives* switches
   to the stored grids, the stream average ⟨∇v⟩ of a Fast run, and an exact zoom takes the output's own route). An
@@ -1210,8 +1202,8 @@ smoothing come out nearly the same), the derivatives the stream average. Standar
 average. Standard DTFE Fast: a Monte-Carlo
 mean of the cell, the derivatives stay exact (both standard modes take them from exact face integrals, in 3D). The
 choice stays when the estimator changes. Everything else these two choices used to need a control for the launcher
-sets itself, as the drivers would (the device and the GPU share, the sub-samples, the volume weighting, the
-velocity-gradient route, the merge order, no linear deposit, the plane conventions; the device differs only for
+sets itself, as the drivers would (the device and the GPU share, the sub-samples, the
+velocity-gradient route, the merge order, the plane conventions; the device differs only for
 PS-DTFE's Fast below a million particles, which the launcher runs on the CPU), or leaves to the binary (its rule for
 the parallel insert, which no job forces, and the auto-tuner's split, concurrency and memory budget; the Advanced
 settings below can set each of these); the Checks list says what a choice leaves out (Fast: the stream-average
@@ -1219,7 +1211,7 @@ derivatives, caustic classes per sample point; Exact with the halo release or in
 no mass-flux divergence). **Machine use** (Gentle / Balanced / Performance: `--run-mode`, *Run mode* above; Balanced
 by default) sits under the grid, with a grey line saying where the run goes ("Runs on: the GPU (chosen for Exact,
 Balanced)"; "the CPU and the GPU together" for PS-DTFE's Exact under Performance, whose run split into partitions
-deposits some of them on the free cores, as its tooltip says; the CPU for standard DTFE's Fast under Performance and
+deposits some of them on the free cores, as its tooltip says; the CPU for standard DTFE's Fast in every machine use and
 for PS-DTFE's Fast on a small snapshot); a generated SLURM script runs Performance (the choice is for this machine).
 The time estimate (the Grids tab, the queue, the cluster-script dialog) is the median of comparable earlier runs of
 the same quality only (for PS-DTFE's Fast, at the same samples per cell axis too). The labels follow the option
@@ -1253,8 +1245,7 @@ the Grids job's settings back to Automatic (a run log does not say which of its 
 sampled PS-DTFE run's count where Fast takes another (a run at 3 samples per cell axis, as Fast ran before
 2026-11-14, or at a count of its own): that count becomes the job's *Samples per cell axis*, which switches the
 Advanced settings on, so the loaded job is that run (a custom run's settings load the same way); presets hold none.
-Not offered: the volume weighting, the linear deposit, the plane conventions, the stream density, a TNG job's
-tetrahedron masses, Explore's partitions in memory and the developer switches.
+Not offered: a TNG job's tetrahedron masses, Explore's partitions in memory and the developer switches.
 
 **Presets**: three built in, *Quick look* (Fast, 128³, density and velocity), *Standard* (Exact, 512³, the
 production fields) and *Publication* (Standard plus the caustics and a hi-res slice on the largest image plane), and
@@ -1269,9 +1260,10 @@ tab job or queued job predates them; a preset of yours named like a former built
 job the Phase space group and the Custom tab's Initial positions row are hidden. Saved settings written with older
 option names (the Custom tab's extra options, a plot's criterion or panel projection) load under the new ones.
 
-Until the binaries choose them, the launcher still names some of these settings itself, as before the two choices: the
-device it picked and, for PS-DTFE's exact deposit on the GPU, the GPU share `auto` (an Advanced Device GPU: `1`; CPU +
-GPU: `mixed`), the volume weighting (`PS_VOLUME_WEIGHTED=1`, `--ps-volume-weighted`), a TNG job's vertex masses
+The launcher still names some of these settings itself, as before the two choices, also where the binaries now
+choose them: the device it picked and, for PS-DTFE's exact deposit on the GPU, the GPU share `auto` (an Advanced Device GPU: `1`; CPU +
+GPU: `mixed`), the volume weighting, which PS-DTFE always takes (`PS_VOLUME_WEIGHTED=1` and
+`--ps-volume-weighted`, also on the exact zoom: accepted, they change nothing), a TNG job's vertex masses
 (`PS_VERTEX_MASS=1`), Fast's one point per cell axis (the program's own default, named: `-n 1`, on the Pipeline
 tab `SUBSAMPLES=1`, on the Custom tab `--sampled --subsamples 1`) and, with a slice, the grids' plane conventions;
 the exact zoom names `--gpu` on a GPU build. The PS-DTFE jobs name the partitions' merge, index order (`PS_MERGE=index-order` on the
@@ -1282,6 +1274,9 @@ names no route, and the binary keeps the stream average. A standard-DTFE Grids j
 `DTFE_FACE_GRADIENT` empty (the binary's own route, the face gradient); every other job of the three run tabs (a
 standard Custom run and every PS-DTFE job, their memory checks included) pins `DTFE_FACE_GRADIENT` empty, so a value
 exported in the login shell can neither change a job's route behind its command nor make the binary refuse a Fast job.
+Likewise every program a job starts (the Custom tab's included, also where its extra options name the device, the
+exact zoom, the Explore query server and a generated SLURM script) gets `DTFE_GPU` pinned, `1` when its command
+carries `--gpu`, else `0`, so it runs on the device the tab shows whatever the login shell exports.
 The grid estimate of the Grids and Custom tabs and the Pipeline's memory warning count, for a PS-DTFE job that takes
 the face gradient with a field built on the gradient, its face sums (30 numbers per cell), its `.a_velDivStreams` and
 `.a_massFluxDiv`, the stream average's twins of the fields asked and the mean velocity the face gradient deposits

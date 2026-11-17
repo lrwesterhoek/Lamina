@@ -22,10 +22,10 @@
  * waves (streams {1,3,9} in the separable fractions): tests/ps_2d_check.sh. CGAL's 2D binary
  * triangulation I/O does not read back (tessellation_cache.h uses its ASCII mode in 2D).
  * Supported in 2D: the sampled and exact deposits, streams, the hidden-stream flags, velocity /
- * dispersion / gradient moments, --ps-vertex-mass, --ps-volume-weighted, --ps-halo-release,
+ * dispersion / gradient moments (volume-weighted, the dispersion mass-weighted), --ps-vertex-mass, --ps-halo-release,
  * --ps-caustics (parity + collapse multiplicity k = 0..2), --partition, periodic and non-periodic
  * boxes, the tessellation cache. 3D only: the GPU deposit, point evaluation
- * (--sample-points, --serve), --grid-window, --ps-caustic-cusps and --ps-linear-deposit's GPU path.
+ * (--sample-points, --serve), --grid-window and --ps-caustic-cusps.
  */
 
 #include "triangulation_common.h"
@@ -1542,8 +1542,8 @@ struct PSFxState
         for (PSFxWords *const p : { &faceS, &faceN, &faceP }) p->release();
     }
     // a wide pass: whether its units need the pass's bounds -- some grid it may sum has no run-wide unit (the moment
-    // grids it selects, MOMW for the GPU's volume shares under --ps-volume-weighted, the mass grid, the face sums),
-    // or DTFE_DEBUG_FX_BOUNDS checks the GPU extraction's bounds of a pass with face sums
+    // grids it selects, MOMW for the GPU's volume shares (psVolWeighted, true in every run), the mass grid, the face
+    // sums), or DTFE_DEBUG_FX_BOUNDS checks the GPU extraction's bounds of a pass with face sums
     bool boundsNeeded() const
     {
         RunUnits const &ru = userOptions.runUnits;
@@ -2198,6 +2198,10 @@ static inline void psAllocMoments(PSPassCtx const &passCtx, bool const haveVel, 
 
 #if defined(PS_GPU) && NO_DIM==3
 // Clears tryMetal (with a warning) for a pass the GPU cannot deposit: cusps, a multi-component scalar, 2^32 cells.
+// The program's pick of the device (User_options::gpuPathRuns, user_options.cc GPU_PATH_BUILT for this guard's
+// builds) never picks the GPU where the options already tell (cusps, the scalar, a grid above 2^32 cells); what only
+// the pass can tell (the triangulation's cells, a '--grid-window' pass's sub-grid) takes the CPU silently for a picked
+// GPU (gpuPicked): a warning and a fall-back count are an asked GPU's.
 static inline void psGpuEligible(PSPassCtx const &passCtx, size_t const subTotal, bool &tryMetal)
 {
     User_options &userOptions = passCtx.userOptions;
@@ -2215,7 +2219,7 @@ static inline void psGpuEligible(PSPassCtx const &passCtx, size_t const subTotal
         {
             MESSAGE::Warning warning( userOptions.verboseLevel );
             warning << "--ps-caustic-cusps needs the CPU deposit (its stencil gathers the triangulation's neighbours); "
-                    << "--gpu is not used for the deposit of this run.\n" << MESSAGE::EndWarning;
+                    << userOptions.gpuRequest() << " is not used for the deposit of this run.\n" << MESSAGE::EndWarning;
         }
         tryMetal = false;
     }
@@ -2235,6 +2239,8 @@ static inline void psGpuEligible(PSPassCtx const &passCtx, size_t const subTotal
     // checked on subTotal, the only quantity that knows about the wrap-to-full-axis case above:
     // the cap is on the PARTITION's sub-box, so a finer --partition can bring a big grid back
     // under it. Uniform across field selections -- the moment offsets are already 64-bit.
+    if ( tryMetal and noTotalCells > size_t(UINT32_MAX) and userOptions.gpuPicked )
+        tryMetal = false;   // (a picked GPU: the CPU, silently)
     if ( tryMetal and noTotalCells > size_t(UINT32_MAX) )
     {   // the deferred tets are mapped back to their cells through 32-bit finite-cell ordinals
         MESSAGE::Warning warning( userOptions.verboseLevel );
@@ -2244,6 +2250,8 @@ static inline void psGpuEligible(PSPassCtx const &passCtx, size_t const subTotal
         tryMetal = false;
         ++psGpuFallbacks;
     }
+    if ( tryMetal and subTotal > size_t(UINT32_MAX) and userOptions.gpuPicked )
+        tryMetal = false;   // (a picked GPU: the CPU, silently)
     if ( tryMetal and subTotal > size_t(UINT32_MAX) )
     {
         MESSAGE::Warning warning( userOptions.verboseLevel );
@@ -2969,11 +2977,9 @@ static inline void psFixedToReal(PSPassCtx const &passCtx, PSGridsCtx const &gri
         }
         massFx.release();
         massFxOn = false;
-        // --ps-volume-weighted: the dispersion's own mass normalizer (dispWeight) sums the very shares this grid
-        // sums, at the same sites (the GPU's dispw likewise), so it takes the exact sums too. The default run's
-        // dispersion is normalized by this grid (weightIsDensity), and the volume-weighted one then stays the
-        // same mass-weighted arithmetic bit for bit (tests/ps_volume_weighted_check.sh B) -- a float sum in
-        // dispWeight would part from it at the last bit.
+        // The dispersion's own mass normalizer (dispWeight) sums the very shares this grid sums, at the same
+        // sites (the GPU's dispw likewise), so it takes these exact sums too (a float sum of its own would part
+        // from them at the last bit).
         // (dispWeight is not even accumulated then -- it may be EMPTY here: dwOffL in the loop)
         if ( dispNeedsOwnWeight )
             dispWeight = quantities->density;
@@ -3043,30 +3049,16 @@ static inline void psNormalizeMoments(PSPassCtx const &passCtx, PSGridsCtx const
                     if (field.scalar)            quantities->scalar[i]            *= inv;
                     if (field.scalar_gradient)   quantities->scalar_gradient[i]   *= inv;
 #endif
-                    if (field.velocity_dispersion && !dispNeedsOwnWeight)
-                    {
-                        // sigma_ij = <v_i v_j> - <v_i><v_j>; quantities->velocity is now <v>.
-                        // (Under --ps-volume-weighted the dispersion has its OWN mass-weighted
-                        //  mean/normalizer and is closed out in the separate pass below.)
-                        Pvector<Real,noVelComp> const &vbar = quantities->velocity[i];
-                        size_t c = 0;
-                        for (int a = 0; a < NO_DIM; ++a)
-                            for (int b = a; b < NO_DIM; ++b)
-                            {
-                                Real s = quantities->velocity_dispersion[i][c] * inv - vbar[a]*vbar[b];
-                                if (a == b and s < Real(0.)) s = Real(0.);   // variance: clamp FP-noise negatives
-                                quantities->velocity_dispersion[i][c] = s;
-                                ++c;
-                            }
-                    }
+                    // (the dispersion is closed out in its own pass below: it is mass-weighted, against its own
+                    //  mean and normalizer, while 'velocity' here is the volume-weighted mean)
                 }
             }
             if ( face ) quantities->psFaceGradientEnd();
         }
 
-        // --ps-volume-weighted, serial path: close out the MASS-weighted dispersion against its
-        // own mean/normalizer (the loop above normalized 'velocity' by the VOLUME weight, so it
-        // is not the right mean here). Mirrors normalizePhaseSpace's second pass.
+        // serial path: close out the MASS-weighted dispersion against its own mean/normalizer (the loop above
+        // normalized 'velocity' by the VOLUME weight, so it is not the right mean here). Mirrors
+        // normalizePhaseSpace's second pass.
         if ( !deferNorm && dispNeedsOwnWeight )
             for (size_t i = 0; i < totalGrid; ++i)
             {
@@ -3388,7 +3380,7 @@ struct PSGpuCtx
     psExactInside::Frame const &exactFrame;
     double const (&gridLenD)[NO_DIM];
     size_t psKeptCells, subTotal;
-    bool degreesLazy, psVertexMass, massAudit, psLinear, psVolWeighted, fxGpuWanted;
+    bool degreesLazy, psVertexMass, massAudit, psVolWeighted, fxGpuWanted;
     double psHaloRelease;
     Real cellVolume;
     size_t &nReleased, &nDegenerateInverse;
@@ -3551,7 +3543,7 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
     double const (&gridLenD)[NO_DIM] = ctx.gridLenD;
     size_t const psKeptCells = ctx.psKeptCells, subTotal = ctx.subTotal;
     bool const degreesLazy = ctx.degreesLazy, psVertexMass = ctx.psVertexMass, massAudit = ctx.massAudit;
-    bool const psLinear = ctx.psLinear, psVolWeighted = ctx.psVolWeighted, fxGpuWanted = ctx.fxGpuWanted;
+    bool const psVolWeighted = ctx.psVolWeighted, fxGpuWanted = ctx.fxGpuWanted;
     double const psHaloRelease = ctx.psHaloRelease;
     Real const cellVolume = ctx.cellVolume;
     size_t &nReleased = ctx.nReleased, &nDegenerateInverse = ctx.nDegenerateInverse;
@@ -3609,14 +3601,14 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
         if ( needsScalArrays )
             tetScal.reserve( psKeptCells*4 );
         tetMasses.reserve( psKeptCells );
-        if ( psLinear or psCaustics )
+        if ( psCaustics )
             tetDens.reserve( psKeptCells*4 );
         // --ps-halo-release: released tets never reach the GPU arrays; their single-cell
         // centroid deposits (same arithmetic as the CPU fallback) are collected here and
         // applied on the host AFTER the GPU grids are copied back (the copy ASSIGNS, so
         // these are the only further accumulations). Discarded if the GPU dispatch fails --
-        // the CPU loop then re-handles every cell. momw = the moment weight (V_eul under
-        // --ps-volume-weighted, else the mass); orient = the caustic orientation bits.
+        // the CPU loop then re-handles every cell. momw = the moment weight (V_eul: psVolWeighted, true in
+        // every run; the mass where it is false); orient = the caustic orientation bits.
         struct ReleasedTet { size_t flat; Real mass; Real momw; Real volFrac; PSCausticClass::CausticMask orient; Real vel[noVelComp]; Real grad[noGradComp]; Real scal; Real sgrad[NO_DIM]; };
         std::vector<ReleasedTet> releasedTets;
         // per GPU tet, its finite-cell ordinal (kept in lockstep through the cost sort): maps the
@@ -3727,7 +3719,6 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
             if ( !psFilterCell(cell, userOptions, boxCoordinates, true, &nDegenerateInverse, geo, false,
                                [&](Real const (&ep)[NO_DIM+1][NO_DIM]) { return windowMode && !windowTouched(ep); }) ) continue;
             markFlipped(geo, flippedFlag);     // '.hidden_streams' bit 1: geometric, so the host does it for the GPU path
-            bool const hadBadVertex = geo.useVolumeRatioDensity;
             Real (&ep)[NO_DIM+1][NO_DIM] = geo.eulerPos;
             double Lag[NO_DIM][NO_DIM];
             for (int v=0;v<NO_DIM;++v) for (int i=0;i<NO_DIM;++i) Lag[v][i]=double(cell->vertex(v+1)->point()[i])-double(cell->vertex(0)->point()[i]);
@@ -3828,20 +3819,11 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
             if (needsScalArrays)
                 for (int v=0;v<=NO_DIM;++v) tetScal.push_back(float(cell->vertex(v)->info().myScalar()[0]));
 #endif
-            if (psLinear)
-            {
-                // hull cells (non-periodic volume-ratio density) have a constant profile:
-                // pass equal weights, which reduces to the uniform deposit for that tet
-                if (hadBadVertex)
-                    for (int v=0;v<=NO_DIM;++v) tetDens.push_back(1.f);
-                else
-                    for (int v=0;v<=NO_DIM;++v) tetDens.push_back(float(cell->vertex(v)->info().density()));
-            }
             tetMasses.push_back(tm);
             tetOrd.push_back(cellOrd);
-            // --ps-caustics without --ps-linear-deposit: the otherwise-unused 'dens' slots carry the
+            // --ps-caustics: the 'dens' slots, which carry no density (the host passes fLinear = 0), hold the
             // caustic mask (slot 0) so the kernel gets the full stratification, not just the parity.
-            if ( psCaustics and not psLinear )
+            if ( psCaustics )
             {
                 tetDens.push_back( float(tetBits) );
                 for (int v=1; v<=NO_DIM; ++v) tetDens.push_back( 0.f );
@@ -4043,10 +4025,11 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
             earlyFace.start( passCtx, fx, ctx.psVertexMass, psDepositThreads() );
             if ( !earlyFace.started ) fx.faceRelease();
         }
-        // (the GPU call's wall time includes any wait for the device: concurrent partitions queue on it)
+        // (the GPU call's wall time includes any wait for the device: concurrent partitions queue on it;
+        // fLinear is false: the linear deposit was removed, and the kernel keeps its uniform path)
         bool gpuOk = psGpuDepositFields(tetVerts, tetVels, tetMasses, tetDens, tetScal, bl, dxv,
                                   nGrid, subOrigin, subDims, nSub,
-                                  userOptions.periodic, fVel, fDisp, fGrad, psLinear,
+                                  userOptions.periodic, fVel, fDisp, fGrad, false,
                                   psVolWeighted, psCaustics, psExact, fScal, fSGrad, windowMode, hostMass, fxUnits,
                                   gpuOut, deferredTets, metalErr, faceJobOn ? &faceJob : nullptr);
         // A host that chose the fixed-point unit hands back the words and leaves its float grid empty, so words
@@ -4168,11 +4151,11 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
             // as it is (the single build; the deferred and released tets are added into it, and it is converted after
             // the CPU loop, like the mass); otherwise its Real grid is set here, cell by cell, from the GPU's floats,
             // or (the double build) from its words converted to double. The moment normalizer MOMW is the GPU's
-            // volume-share grid under --ps-volume-weighted, else (no density selected) the mass words themselves;
+            // volume-share grid (psVolWeighted, true in every run; where it is false, the mass words themselves);
             // the dispersion's normalizer DW is the mass grid when the kernel skipped it (dispwIsMass) -- and once
             // the mass grid is this pass's own exact words (massFxOn) DW is not accumulated at all: it becomes the
             // density after the loop (see massFx). MOMW and DW never both take the mass words (DW needs
-            // --ps-volume-weighted, MOMW then the volume shares).
+            // psVolWeighted, MOMW then the volume shares).
             std::vector<float> const *const gpuFloat[PS_FX_N] = { &gpuOut.mom, &gpuOut.m2, &gpuOut.grad, &gpuOut.momw,
                 &gpuOut.streamvol, &gpuOut.dispvel, &gpuOut.dispw, &gpuOut.scal, &gpuOut.sgrad };
             bool const momwIsMass = !psVolWeighted, dwIsMass = gpuOut.dispwIsMass;
@@ -4237,7 +4220,7 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
             for (size_t i = 0; i < totalGrid; ++i)
             {
                 if (field.density && !massFxOn) quantities->density[i] = Real( gpuMass(i) );
-                // moment normalizer: the volume-share sum under --ps-volume-weighted, else the mass (in the
+                // moment normalizer: the volume-share sum (the mass where psVolWeighted is false; in the
                 // single build the exact words' value, rounded once)
                 if (fxFill[PS_FX_MOMW]) massWeight[i] = Real( gpuVal(PS_FX_MOMW, i) );
                 if (fxFill[PS_FX_MOM])
@@ -4262,26 +4245,12 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
                 if ( gpuOut.streams[i] >> 31 ) subSampleMassFlag[i] = 1;
                 if (fxFill[PS_FX_SV])
                     exactMult[i] = Real( gpuVal(PS_FX_SV, i) );   // exact cell-mean multiplicity
-                // The kernel accumulates the two PARITY bits only, so a GPU deposit reproduces the
-                // fold flag EXACTLY (asserted by ps_caustic_class_check.sh) but not the
-                // stratification bits -- see the warning below.
-                // With the mask riding in 'dens' the kernel ORs the host-built bits verbatim, so the
-                // full stratification survives; under --ps-linear-deposit only the parity does.
+                // The mask rides in 'dens' and the kernel ORs the host-built bits verbatim, so a GPU
+                // deposit gives the fold flag EXACTLY (asserted by ps_caustic_class_check.sh) and the
+                // stratification bits the GPU carries (BITS_GPU_MAX).
                 if (psCaustics)
                     orientBits[i] = (PSCausticClass::CausticMask)
-                        ( gpuOut.caustic[i]
-                          & (psLinear ? (unsigned)(PSCausticClass::BIT_PARITY_POS
-                                                   | PSCausticClass::BIT_PARITY_NEG)
-                                      : (unsigned)PSCausticClass::BITS_GPU_MAX) );
-            }
-            if (psCaustics and psLinear)
-            {
-                MESSAGE::Warning warning( userOptions.verboseLevel );
-                warning << "--ps-caustics with --ps-linear-deposit on the GPU produces the fold flag "
-                           "('.caustic') only: the per-tet caustic mask travels in the 'dens' buffer, "
-                           "which --ps-linear-deposit needs for the vertex densities. The stratification "
-                           "('.causticClass') comes from the CPU deposit -- drop '--gpu' for it.\n"
-                        << MESSAGE::EndWarning;
+                        ( gpuOut.caustic[i] & (unsigned)PSCausticClass::BITS_GPU_MAX );
             }
             if ( massAudit )
             {
@@ -4764,9 +4733,10 @@ void interpolateGrid_phaseSpace(DT &dt,
     // grid index and Eulerian offset (rel = samplePos - vertex0) of every in-simplex sample point.
     std::vector<size_t> insideFlat;
     std::vector<Real>   insideRel;   // insideFlat.size() * NO_DIM, row-major per sample
-    // --ps-linear-deposit: per-sample weight = the DTFE-interpolated linear density at the sample
-    // (clamped >= 0); PASS 2 renormalizes the weights to the tet mass, so the deposited total
-    // still equals tetMass exactly and mass conservation is untouched.
+    // The linear deposit (per-sample weight = the DTFE-interpolated linear density, renormalized per
+    // tetrahedron) was removed: '--ps-linear-deposit' is refused (user_options.cc), so this run-time
+    // value is always false. The loop below still reads it; its linear branches, and insideW, go with
+    // the loop's clean-up.
     bool const psLinear = userOptions.psLinearDeposit;
     std::vector<Real>   insideW;
     // --exact per-tet scratch: 10 order-2 moments and the mass weight per hit cell
@@ -4790,7 +4760,7 @@ void interpolateGrid_phaseSpace(DT &dt,
                                dispNeedsOwnWeight, deferNorm, psExact, psCaustics };
 #if defined(PS_GPU) && NO_DIM==3
     PSGpuCtx const gpuCtx{ passCtx, gridsCtx, fx, exactFrame, gridLenD, psKeptCells, subTotal, degreesLazy, psVertexMass,
-                           massAudit, psLinear, psVolWeighted, fxGpuWanted, psHaloRelease, cellVolume, nReleased,
+                           massAudit, psVolWeighted, fxGpuWanted, psHaloRelease, cellVolume, nReleased,
                            nDegenerateInverse, metalDeposited, deferredOrd };
     psGpuExtractAndDeposit( gpuCtx, audit, lap, gridSum );
 #endif // PS_GPU
@@ -4810,7 +4780,7 @@ void interpolateGrid_phaseSpace(DT &dt,
         {
             warned = true;
             MESSAGE::Warning warning( userOptions.verboseLevel );
-            warning << "--gpu requested but this binary was built without GPU support (rebuild with METAL=1 on a Mac; or NO_DIM!=3); using the CPU deposit.\n" << MESSAGE::EndWarning;
+            warning << userOptions.gpuRequest() << " requested but this binary was built without GPU support (rebuild with METAL=1 on a Mac; or NO_DIM!=3); using the CPU deposit.\n" << MESSAGE::EndWarning;
         }
     }
 #endif // PS_GPU
@@ -6185,9 +6155,10 @@ void interpolateGrid_phaseSpace(DT &dt,
 
     psPassMessages( passCtx, nDegenerateInverse, nReleased );
 
-    // turn density-weighted moments into mass-weighted means sum(rho_s f_s)/sum(rho_s). Serial: here,
-    // BEFORE the density grid is converted to rho/rho_bar (it doubles as the weight when the density
-    // field is selected -- see weightIsDensity above). deferNorm: hand un-normalized moments to the
+    // turn the summed moments into means: the velocity family's sum(V_s f_s)/sum(V_s) by the Eulerian-volume
+    // shares, the dispersion's against its own mass normalizer. Serial: here, BEFORE the density grid is
+    // converted to rho/rho_bar (the mass weight aliases it only under weightIsDensity, which needs
+    // psVolWeighted false: see above). deferNorm: hand un-normalized moments to the
     // caller, which sums across partitions and normalizes once (the only order correct for cells
     // spanning partitions); the weight travels as mass_weight, or is reconstructed from the summed
     // density by normalizePhaseSpace when it aliases the density grid.

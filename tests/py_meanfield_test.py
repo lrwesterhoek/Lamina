@@ -45,6 +45,10 @@ import numpy as np
 from _harness import REPO, Skip, check as _check, setup, summary
 
 setup("meanfield_figs_", paths=("python",), mpl_agg=False)
+# the binary checks run DTFE and PS-DTFE themselves: at the binaries' earlier defaults, as tests/lib.sh pins them for
+# the shell suites (performance, the CPU unless '--gpu'); a caller's own value stays
+os.environ.setdefault("DTFE_RUN_MODE", "performance")
+os.environ.setdefault("DTFE_GPU", "0")
 
 
 def check(name, fn):
