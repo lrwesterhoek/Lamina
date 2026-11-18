@@ -9,14 +9,12 @@
 #       some, and removes '<output>.runlog.checkpoint' once its outputs are in place; its 'merge time:' line counts
 #       the 27 partitions copied into the full grids, with the seconds of the copies and checkpoints (>= 0)
 #   D2  a run killed after 10 partitions (DTFE_TEST_EXIT_AFTER_PARTITIONS=10: a SIGKILL right after a checkpoint)
-#       exits 137, writes no output, and leaves a checkpoint listing exactly 10 of 27 (the loop is serial); it spells
-#       the deprecated '--lambda_th', and its log carries the warning
+#       exits 137, writes no output, and leaves a checkpoint listing exactly 10 of 27 (the loop is serial)
 #   D3  '--resume' with a changed setting ('--grid') refuses, names the differing line and DTFE_RESUME=0 (the
 #       launcher's results.py RESUME_REFUSED keys on "'--resume' refused"), keeps the checkpoint
 #   D4  '--resume' continues and is killed again after 3 more partitions: its progress sidecar counts the restored
 #       ones as done (done 12 of 27 -- the 3rd computed one died in its checkpoint write, before its progress line);
-#       a second '--resume' (with '--tessellation-cache', which the key leaves out, and the canonical '--lambda-th'
-#       where the killed runs (D2, D4a) had the deprecated '--lambda_th': one settings key) computes the last 14 only
+#       a second '--resume' (with '--tessellation-cache', which the key leaves out) computes the last 14 only
 #       (its 'merge time:' line counts 14), every
 #       output -- the T-web and V-web included -- byte-identical to the reference, the checkpoint removed, a dead
 #       writer's temp file cleaned up
@@ -38,7 +36,7 @@
 #       file, do not
 #   D12 GPU builds only (a GPU stamp in o/ or o_d/; SKIP otherwise): a killed '--gpu --exact' run (the
 #       production standard) resumes; '.den' (CPU) byte-identical, and the '_a' grids too (the GPU's exact fixed-point
-#       sums; within 1e-5 of their peak when DTFE_GPU_FLOAT_GRIDS=1)
+#       sums)
 #   D13 a '--sample-points --pts-vel-grad' plane (64^2 points across the box, the shape of the
 #       dtfe27planes runs) with the same split: the uninterrupted run checkpoints its point answers too and removes the
 #       checkpoint; killed after 10 partitions it leaves exactly one 'points.<i>' file per merged partition; a resume
@@ -54,12 +52,15 @@
 #       per partition), a cold and a warm '--tessellation-cache' (the warm run loads every sub-domain: the cache
 #       folder is left untouched), a machine without the free memory for it (the look-ahead pauses), and on GPU builds D12's '--gpu --exact' reference against '--no-overlap'
 #       and a '--gpu --sampled' (Monte-Carlo average) pair with and without it
-#   D15 the run-wide fixed-point units' line of the settings key (src/fixed_units.h runUnitsKeyLine: the environment
-#       switches them without the command line): a run killed under DTFE_RUN_UNITS_LEGACY=1 is not resumed without
-#       it, nor under it with another DTFE_TEST_RUN_UNIT_SHIFT; each refusal names the 'units=' lines that differ,
-#       and the checkpoint is kept
-# The CPU runs name no averaging mode, so their '_a' fields take the default, the exact average (since 2026-11-09):
-# every check here holds one run's outputs against another's of the same split, byte for byte, which the exact CPU
+#   D15 the run-wide fixed-point units' line of the settings key (src/fixed_units.h runUnitsKeyLine: the test shift
+#       changes the units without the command line): a run killed at the default units is not resumed under
+#       DTFE_TEST_RUN_UNIT_SHIFT=-20; the refusal names the 'units=' lines that differ, and the checkpoint is kept
+#   D16 the seeded Monte-Carlo average ('--average-method 2 --subsamples 3 --seed 11'; random points, from the clock
+#       without a seed) on a 24^3 grid split 2 2 2 (--periodic --padding 5, two threads, --max-concurrent 2), '--field
+#       density density_a velocity_a': killed after 3 of its 8 partitions and resumed, every output byte-identical to
+#       the uninterrupted run, the checkpoint removed
+# The CPU runs but D16's name no averaging mode, so their '_a' fields take the default, the exact average: every
+# check here holds one run's outputs against another's of the same split, byte for byte, which the exact CPU
 # average gives as the Monte-Carlo one does (its sums do not depend on the deposit's thread count).
 # About a minute on the Mac (about 30 runs of 2-4 s).
 # Usage: tests/dtfe_resume_check.sh [--no-build]   (--no-build is accepted and ignored: the binaries are used as built)
@@ -76,29 +77,12 @@ SNAP="$ROOT/demo/z0_64.gadget"
 TMP="${DTFE_TEST_TMP}/dtfe_resume_check"
 rm -rf "$TMP"; mkdir -p "$TMP"
 TMP="$(cd "$TMP" && pwd -P)"
-OBJ=o; precision_double && OBJ=o_d
-PASS=0; FAILS=0
-check() { if [ "$2" = 0 ]; then PASS=$((PASS+1)); echo "  PASS $1"; else FAILS=$((FAILS+1)); echo "  FAIL $1"; fi; }
-# same <a> <b>: every output of run a has a byte-identical twin in run b (and there is at least one); the logs, the
-# run's bookkeeping and the padding test's per-thread '.badGridPoints<n>' (written in place, last partition wins)
-# are not outputs
-same() {
-    local n=0 f
-    for f in "$1".*; do
-        case "$f" in *.log|*.runlog*|*.part.*|*.badGridPoints*) continue ;; esac
-        cmp -s "$f" "$2${f#"$1"}" || { echo "    differs: ${f#"$1"}"; return 1; }
-        n=$((n+1))
-    done
-    [ "$n" -gt 0 ]
-}
-# merged_count <checkpoint folder>: tests/lib.sh
+OBJ="$DTFE_OBJ"
+# check / check_result, same, merged_count, points_list, merged_list: tests/lib.sh
 C=(--grid 40 --periodic --padding 5 --field density velocity density_a velocity_a gradient_a tweb_a vweb_a
    --lambda-th 0.3 --verbose 2 --partition 3 3 3)
 RUN=(env OMP_NUM_THREADS=2 "$BIN" "$SNAP")
 MC=(--max-concurrent 2)
-# D2 and D4a only: the killed runs spell the threshold the deprecated way, so the checkpoint is written under the old
-# spelling and the final resume (the canonical one) must find the same settings key
-C_OLD=("${C[@]/#--lambda-th/--lambda_th}")
 
 echo ">> D1: the uninterrupted reference (27 partitions)"
 # (into files first: under pipefail a 'grep -q' that stops reading early fails the pipe with the binary's SIGPIPE)
@@ -118,13 +102,12 @@ read -r mtn mta mtc <<< "$(mtime "$TMP/ref.log")"
 check "D1 the 'merge time:' line: ${mtn:-?} of 27 partitions copied in ${mta:-?} s (checkpoints ${mtc:-?} s)" $?
 
 echo ">> D2: killed after 10 partitions"
-DTFE_TEST_EXIT_AFTER_PARTITIONS=10 "${RUN[@]}" "$TMP/k" "${C_OLD[@]}" "${MC[@]}" > "$TMP/k1.log" 2>&1; rc=$?
+DTFE_TEST_EXIT_AFTER_PARTITIONS=10 "${RUN[@]}" "$TMP/k" "${C[@]}" "${MC[@]}" > "$TMP/k1.log" 2>&1; rc=$?
 CK="$TMP/k.runlog.checkpoint"
 n="$(merged_count "$CK" 2>/dev/null || echo 0)"
 [ "$rc" = 137 ] && [ ! -e "$TMP/k.den" ] && [ ! -e "$TMP/k.a_den" ] && [ -s "$CK/checkpoint" ] && [ "${n:-0}" = 10 ] \
-    && [ "$(head -1 "$CK/checkpoint")" = "DTFE-CHECKPOINT 1" ] \
-    && grep -q "^warning: --lambda_th is deprecated, use --lambda-th$" "$TMP/k1.log"
-check "D2 exit $rc (137 = SIGKILL), no outputs, a standard checkpoint of ${n:-?} of 27 partitions (10 expected), the '--lambda_th' warning" $?
+    && [ "$(head -1 "$CK/checkpoint")" = "DTFE-CHECKPOINT 1" ]
+check "D2 exit $rc (137 = SIGKILL), no outputs, a standard checkpoint of ${n:-?} of 27 partitions (10 expected)" $?
 
 echo ">> D3: --resume with another --grid refuses"
 "${RUN[@]}" "$TMP/k" "${C[@]/40/32}" "${MC[@]}" --resume > "$TMP/k3.log" 2>&1; rc=$?
@@ -133,7 +116,7 @@ echo ">> D3: --resume with another --grid refuses"
 check "D3 refused, naming the differing line and DTFE_RESUME=0; the checkpoint is kept" $?
 
 echo ">> D4: --resume, killed again after 3 more, then resumed to the end"
-DTFE_TEST_EXIT_AFTER_PARTITIONS=3 "${RUN[@]}" "$TMP/k" "${C_OLD[@]}" "${MC[@]}" --resume > "$TMP/k4a.log" 2>&1; rc=$?
+DTFE_TEST_EXIT_AFTER_PARTITIONS=3 "${RUN[@]}" "$TMP/k" "${C[@]}" "${MC[@]}" --resume > "$TMP/k4a.log" 2>&1; rc=$?
 n2="$(merged_count "$CK" 2>/dev/null || echo 0)"
 side="$(cat "$TMP/k.runlog.progress" 2>/dev/null)"
 [ "$rc" = 137 ] && grep -q -- "DTFE: --resume: 10 of 27 partitions are already in the checkpoint" "$TMP/k4a.log" \
@@ -154,10 +137,9 @@ echo torn > "$CK/checkpoint.tmp.$DEAD"
 mkdir -p "$TMP/tc"
 "${RUN[@]}" "$TMP/k" "${C[@]}" "${MC[@]}" --resume --tessellation-cache "$TMP/tc" > "$TMP/k4b.log" 2>&1; rc=$?
 [ "$rc" = 0 ] && grep -q -- "--resume: 13 of 27 partitions are already in the checkpoint" "$TMP/k4b.log" \
-    && grep -q "^warning: --lambda_th is deprecated, use --lambda-th$" "$TMP/k4a.log" && ! grep -q "deprecated" "$TMP/k4b.log" \
     && [ "$(grep -c '<<< Interpolating the fields for partition' "$TMP/k4b.log")" = 14 ] \
     && grep -q "partitions 27/27" "$TMP/k4b.log"
-check "D4 the second resume ('--lambda-th' for the killed runs' '--lambda_th') computed only the 14 partitions the checkpoint lacked (exit $rc)" $?
+check "D4 the second resume computed only the 14 partitions the checkpoint lacked (exit $rc)" $?
 mtr="$(mtime "$TMP/k4b.log" | awk '{print $1}')"
 [ "${mtr:-0}" = 14 ]; check "D4 ... and its 'merge time:' line counts those ${mtr:-?} (14)" $?
 same "$TMP/ref" "$TMP/k"; check "D4 every output (T-web and V-web included) byte-identical to the uninterrupted run" $?
@@ -319,15 +301,10 @@ for e in ("a_den", "a_vel", "a_velGrad"):
 sys.exit(0 if worst < 1e-5 else 1)
 PYEOF
     check "D12 the '_a' grids within 1e-5 of their peak" $?
-    # the exact GPU sums: a resumed GPU run is byte-identical as a CPU one is, unless the float atomics
-    # are asked back
-    if [ "${DTFE_GPU_FLOAT_GRIDS:-0}" = 1 ]; then
-        echo "  SKIP D12 byte identity: the float atomics were asked for"
-    else
-        cmp -s "$TMP/gref.a_den" "$TMP/g.a_den" && cmp -s "$TMP/gref.a_vel" "$TMP/g.a_vel" \
-            && cmp -s "$TMP/gref.a_velGrad" "$TMP/g.a_velGrad"
-        check "D12 the '_a' grids byte-identical (exact GPU sums)" $?
-    fi
+    # the exact GPU sums: a resumed GPU run is byte-identical as a CPU one is
+    cmp -s "$TMP/gref.a_den" "$TMP/g.a_den" && cmp -s "$TMP/gref.a_vel" "$TMP/g.a_vel" \
+        && cmp -s "$TMP/gref.a_velGrad" "$TMP/g.a_velGrad"
+    check "D12 the '_a' grids byte-identical (exact GPU sums)" $?
 fi
 
 echo ">> D13: a killed --sample-points plane resumes (its point answers checkpointed per partition)"
@@ -340,8 +317,6 @@ np.stack([X.ravel(), Y.ravel(), np.full(X.size, 50.3)], 1).astype(np.float64).to
 np.stack([X.ravel(), Y.ravel(), np.full(X.size, 31.7)], 1).astype(np.float64).tofile(f"{tmp}/plane_other.bin")
 PYEOF
 P=("${C[@]}" "${MC[@]}" --sample-points "$TMP/plane.bin" --pts-vel-grad)
-points_list() { ls "$1" 2>/dev/null | sed -n 's/^points\.\([0-9]*\)$/\1/p' | sort -n | tr '\n' ' '; }
-merged_list() { grep -a -m1 '^merged ' "$1/checkpoint" | awk '{print $2}' | fold -w1 | grep -n 1 | cut -d: -f1 | awk '{print $1-1}' | tr '\n' ' '; }
 "${RUN[@]}" "$TMP/pref" "${P[@]}" > "$TMP/pref.log" 2>&1 || { echo "FAIL: pref (see $TMP/pref.log)"; exit 1; }
 grep -q "DTFE: checkpoints of the merged grids go to '$TMP/pref.runlog.checkpoint'" "$TMP/pref.log" \
     && grep -q "with the '--sample-points' stream records of every merged partition" "$TMP/pref.log" \
@@ -405,41 +380,44 @@ if [ "$GPU" = 1 ]; then
     grep -q "look-ahead on: .* on the GPU" "$TMP/gref.log" && ! grep -q "look-ahead on" "$TMP/gn.log" \
         && ! grep -q "using the CPU interpolation" "$TMP/gref.log" "$TMP/gn.log"
     check "D14 --gpu: the look-ahead is on by default (D12's reference) and off with --no-overlap" $?
-    if [ "${DTFE_GPU_FLOAT_GRIDS:-0}" = 1 ]; then
-        echo "  SKIP D14 GPU byte identity: the float atomics were asked for"
-    else
-        same "$TMP/gref" "$TMP/gn"; check "D14 --gpu --exact with and without the look-ahead: every output byte-identical" $?
-        # the GPU's Monte-Carlo average ('--sampled'; the production default until 2026-11-09) too, the look-ahead made
-        # to run (DTFE_FREE_GB)
-        env OMP_NUM_THREADS=2 DTFE_FREE_GB=1000 "$BIN" "$SNAP" "$TMP/gm" "${C[@]}" "${MC[@]}" --gpu --sampled > "$TMP/gm.log" 2>&1 \
-            || { echo "FAIL: gm (see $TMP/gm.log)"; exit 1; }
-        env OMP_NUM_THREADS=2 DTFE_FREE_GB=1000 "$BIN" "$SNAP" "$TMP/gmn" "${C[@]}" "${MC[@]}" --gpu --sampled --no-overlap \
-            > "$TMP/gmn.log" 2>&1 || { echo "FAIL: gmn (see $TMP/gmn.log)"; exit 1; }
-        [ "$(grep -c 'look-ahead: partition [0-9]* prepared' "$TMP/gm.log")" = 26 ] && ! grep -q "look-ahead on" "$TMP/gmn.log" \
-            && ! grep -q "using the CPU interpolation" "$TMP/gm.log" "$TMP/gmn.log" && same "$TMP/gm" "$TMP/gmn"
-        check "D14 --gpu (Monte-Carlo average) with the look-ahead for partitions 2..27 and without it: every output byte-identical" $?
-    fi
+    same "$TMP/gref" "$TMP/gn"; check "D14 --gpu --exact with and without the look-ahead: every output byte-identical" $?
+    # the GPU's Monte-Carlo average ('--sampled'; the production default until 2026-11-09) too, the look-ahead made
+    # to run (DTFE_FREE_GB)
+    env OMP_NUM_THREADS=2 DTFE_FREE_GB=1000 "$BIN" "$SNAP" "$TMP/gm" "${C[@]}" "${MC[@]}" --gpu --sampled > "$TMP/gm.log" 2>&1 \
+        || { echo "FAIL: gm (see $TMP/gm.log)"; exit 1; }
+    env OMP_NUM_THREADS=2 DTFE_FREE_GB=1000 "$BIN" "$SNAP" "$TMP/gmn" "${C[@]}" "${MC[@]}" --gpu --sampled --no-overlap \
+        > "$TMP/gmn.log" 2>&1 || { echo "FAIL: gmn (see $TMP/gmn.log)"; exit 1; }
+    [ "$(grep -c 'look-ahead: partition [0-9]* prepared' "$TMP/gm.log")" = 26 ] && ! grep -q "look-ahead on" "$TMP/gmn.log" \
+        && ! grep -q "using the CPU interpolation" "$TMP/gm.log" "$TMP/gmn.log" && same "$TMP/gm" "$TMP/gmn"
+    check "D14 --gpu (Monte-Carlo average) with the look-ahead for partitions 2..27 and without it: every output byte-identical" $?
 else
     echo "  SKIP D14 GPU: $OBJ carries no GPU stamp"
 fi
 
-echo ">> D15: a resume across DTFE_RUN_UNITS_LEGACY or DTFE_TEST_RUN_UNIT_SHIFT is refused (the 'units=' key line)"
-unset DTFE_RUN_UNITS_LEGACY DTFE_TEST_RUN_UNIT_SHIFT   # (the caller's shell: the runs below set their own)
-DTFE_RUN_UNITS_LEGACY=1 DTFE_TEST_EXIT_AFTER_PARTITIONS=3 "${RUN[@]}" "$TMP/ul" "${C[@]}" "${MC[@]}" \
-    > "$TMP/ul1.log" 2>&1; rc1=$?
-"${RUN[@]}" "$TMP/ul" "${C[@]}" "${MC[@]}" --resume > "$TMP/ul2.log" 2>&1; rc2=$?
-DTFE_RUN_UNITS_LEGACY=1 DTFE_TEST_RUN_UNIT_SHIFT=-20 "${RUN[@]}" "$TMP/ul" "${C[@]}" "${MC[@]}" --resume \
-    > "$TMP/ul3.log" 2>&1; rc3=$?
+echo ">> D15: a resume across DTFE_TEST_RUN_UNIT_SHIFT is refused (the 'units=' key line)"
+unset DTFE_TEST_RUN_UNIT_SHIFT   # (the caller's shell: the runs below set their own)
+DTFE_TEST_EXIT_AFTER_PARTITIONS=3 "${RUN[@]}" "$TMP/ul" "${C[@]}" "${MC[@]}" > "$TMP/ul1.log" 2>&1; rc1=$?
+DTFE_TEST_RUN_UNIT_SHIFT=-20 "${RUN[@]}" "$TMP/ul" "${C[@]}" "${MC[@]}" --resume > "$TMP/ul2.log" 2>&1; rc2=$?
 [ "$rc1" = 137 ] && [ "$(merged_count "$TMP/ul.runlog.checkpoint" 2>/dev/null)" = 3 ] \
     && [ "$rc2" != 0 ] && grep -q "'--resume' refused" "$TMP/ul2.log" \
-    && grep -qF "checkpoint: units=legacy N=48/61/72 shift=0" "$TMP/ul2.log" \
-    && grep -qF "this run  : units=run-wide N=48/61/72 shift=0" "$TMP/ul2.log" \
-    && [ "$rc3" != 0 ] && grep -qF "this run  : units=legacy N=48/61/72 shift=-20" "$TMP/ul3.log" \
+    && grep -qF "checkpoint: units=run-wide N=48/61/72 shift=0" "$TMP/ul2.log" \
+    && grep -qF "this run  : units=run-wide N=48/61/72 shift=-20" "$TMP/ul2.log" \
     && [ -s "$TMP/ul.runlog.checkpoint/checkpoint" ] && [ ! -e "$TMP/ul.den" ]
-check "D15 killed under DTFE_RUN_UNITS_LEGACY=1 (exit $rc1); resumed without it (exit $rc2) and under another \
-shift (exit $rc3): both refused, naming the 'units=' lines; the checkpoint kept" $?
+check "D15 killed at the default units (exit $rc1); resumed under DTFE_TEST_RUN_UNIT_SHIFT=-20 (exit $rc2): refused, \
+naming the 'units=' lines; the checkpoint kept" $?
 rm -rf "$TMP/ul.runlog.checkpoint"
 
-echo "RESULT: $PASS passed, $FAILS failed"
-[ "$FAILS" = 0 ] || exit 1
-exit 0
+echo ">> D16: the seeded Monte-Carlo average ('--average-method 2'), killed and resumed"
+# method 2 adds 1000 x the sub-domain number to the seed, so every run here keeps the split and the thread count
+M2=(--grid 24 --periodic --padding 5 --field density density_a velocity_a --lambda-th 0.3 --partition 2 2 2
+    --average-method 2 --subsamples 3 --seed 11)
+"${RUN[@]}" "$TMP/mref" "${M2[@]}" "${MC[@]}" > "$TMP/mref.log" 2>&1 || { echo "FAIL: mref (see $TMP/mref.log)"; exit 1; }
+DTFE_TEST_EXIT_AFTER_PARTITIONS=3 "${RUN[@]}" "$TMP/m" "${M2[@]}" "${MC[@]}" > "$TMP/m1.log" 2>&1; rc1=$?
+n="$(merged_count "$TMP/m.runlog.checkpoint" 2>/dev/null || echo 0)"
+"${RUN[@]}" "$TMP/m" "${M2[@]}" "${MC[@]}" --resume > "$TMP/m2.log" 2>&1; rc2=$?
+[ "$rc1" = 137 ] && [ "${n:-0}" = 3 ] && [ "$rc2" = 0 ] \
+    && grep -q -- "--resume: 3 of 8 partitions are already in the checkpoint" "$TMP/m2.log" \
+    && [ ! -e "$TMP/m.runlog.checkpoint" ] && same "$TMP/mref" "$TMP/m"
+check "D16 killed after ${n:-?} of 8 partitions (exit $rc1), resumed (exit $rc2): every output byte-identical to the uninterrupted run, the checkpoint removed" $?
+
+check_result

@@ -68,17 +68,20 @@ inline void psFillTetRecord(float *rec, V const cv[4][3], double const gridLo[3]
 //   MOM   sum(wm v_j)             the velocity moment (3 components)
 //   M2    sum(w v_i v_j)          the dispersion's second moment (6, upper triangle)
 //   GRAD  sum(wm dv_i/dx_j)       the velocity-gradient moment (9)
-//   MOMW  sum(wm)                 the moment normalizer: the volume shares under --ps-volume-weighted, else (CPU,
-//                                 no density selected) the mass shares
+//   MOMW  sum(wm)                 the moment normalizer: the volume shares (PS-DTFE's velocity moments are
+//                                 volume-weighted); with User_options::psVolumeWeighted false (CPU, no density
+//                                 selected) the mass shares
 //   SV    sum(V_int)/V_cell       the exact deposit's cell-mean multiplicity (1)
-//   DV    sum(w v_j)              the dispersion's own mass-weighted mean under --ps-volume-weighted (3)
+//   DV    sum(w v_j)              the dispersion's own mass-weighted mean (3), as PS-DTFE's velocity moments are
+//                                 volume-weighted
 //   DW    sum(w)                  its normalizer (1). On the GPU it is NOT deposited when the mass grid is fixed:
 //                                 it sums the very shares the mass grid sums, so the caller takes the mass words
 //   SCAL  sum(wm s)               the scalar moment (one component)
 //   SG    sum(wm ds/dx_i)         the scalar-gradient moment (3)
 //   RM    sum(V_tet)/V_cell       --ps-halo-release on the sampled deposit: the released tets' multiplicity (CPU
 //                                 accumulator only; the GPU never sees a released tet)
-// w = the mass share, wm = the moment weight (w, or the Eulerian-volume share under --ps-volume-weighted).
+// w = the mass share, wm = the moment weight: the Eulerian-volume share (PS-DTFE's velocity moments are
+// volume-weighted), or w where User_options::psVolumeWeighted is false.
 enum PSFxGrid { PS_FX_MOM = 0, PS_FX_M2, PS_FX_GRAD, PS_FX_MOMW, PS_FX_SV, PS_FX_DV, PS_FX_DW, PS_FX_SCAL, PS_FX_SG,
                 PS_FX_N,                 // the grids a GPU deposit can hold as words (PSDepositParams.fxScale)
                 PS_FX_RM = PS_FX_N,      // + the CPU-only one
@@ -107,11 +110,12 @@ inline bool psMomentFixedScale(double bound, float &scale)
 }
 
 // The bounds B[g] of one pass, summed tetrahedron by tetrahedron. w = the tet's mass (its shares
-// add up to it), V = its Eulerian volume |det|/NO_DIM!, wm = V under --ps-volume-weighted else w; vMax = the
-// largest |velocity component| at its vertices (a sample, a piece's centroid or the centroid fallback lies in
-// the tet, where the linear profile is a convex combination of the vertex values; the exact deposit's second
-// moment <v_a v_b> over a piece is bounded by vMax^2 likewise), gMax = the largest |dv_i/dx_j| of its constant
-// gradient, sMax / sgMax the same for the scalar; cellVol = the grid cell's volume.
+// add up to it), V = its Eulerian volume |det|/NO_DIM!, wm = V (PS-DTFE's velocity moments are volume-weighted);
+// vMax = the largest |velocity component| at its vertices (a sample, a piece's centroid or the centroid fallback
+// lies in the tet, where the linear profile is a convex
+// combination of the vertex values; the exact deposit's second moment <v_a v_b> over a piece is bounded by vMax^2
+// likewise), gMax = the largest |dv_i/dx_j| of its constant gradient, sMax / sgMax the same for the scalar;
+// cellVol = the grid cell's volume.
 struct PSFixedBounds
 {
     double B[PS_FX_CPU_N] = {};
@@ -143,24 +147,16 @@ struct PSFixedBounds
 
 // The units a pass's caller hands the GPU host: scale[g] > 0 = grid g as a fixed-point sum in units
 // of 1/scale[g] (the host still deposits only the grids its flags select), 0 = float atomics
-// (DTFE_GPU_FLOAT_MOMENTS=1, or a bound without a unit); sumW = the exact items' per-tet
-// weight totals as fixed-point sums as well. The plain struct of the run's units for the GPU host (gpu_host.h stays
-// free of the DTFE headers): words 2 = the run-wide 128-bit device words, each grid's scale and the mass unit the
-// run's (src/fixed_units.h RunUnits) where it has one, else the pass's own.
+// (a bound without a unit); sumW = the exact items' per-tet
+// weight totals as fixed-point sums as well. A plain struct, so that gpu_host.h stays free of the DTFE headers.
 struct PSFixedUnits
 {
     float scale[PS_FX_N] = {};
     bool  sumW = false;
     // the total the mass grid's unit is taken from (psMassFixedScale) when > 0 (a --grid-window pass, so
     // that the GPU and the CPU window deposits take the same unit -- ps_interpolation.cc fxBoundWalk); 0 = the host's
-    // own sum of the masses it is handed plus massExtra. Under words 2 only while the mass has no run-wide unit.
+    // own sum of the masses it is handed plus massExtra.
     double massTotal = 0.;
-    uint32_t words = 0;         // PSDepositParams.fxWords: 0 = 64-bit device words, 2 = the run-wide 128-bit words
-    float    massScale = 0.f;   // words 2: the mass unit 2^K (RunUnits); 0 = taken from the masses, as above
-    uint32_t capBits = 0;       // words 2: PSDepositParams.fxCapBits (RunUnits::capBits)
-    // the per-pass path with DTFE_TEST_RUN_UNIT_SHIFT=n: the mass unit the host takes from the masses, 2^n
-    // finer (src/fixed_units.h's test hook on the per-pass units); 0 otherwise
-    int      legacyShift = 0;
 };
 
 // The non-finite guard of the fixed-point shares. rint(share * scale) -> int64 is UNSPECIFIED for a

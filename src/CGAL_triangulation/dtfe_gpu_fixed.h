@@ -21,9 +21,8 @@
 #include "gpu_host.h"            // DTFEGpuGrids, DTFEGpuRunUnits
 #include "ps_deposit_params.h"
 #include "../env_knobs.h"
-#include "../fixed_units.h"      // runUnitsLegacy, runUnitShift: the run-wide units' switch and test hook
 
-// The per-batch units (a sampled batch's 64-bit grids, every batch's under DTFE_RUN_UNITS_LEGACY=1, and an exact
+// The per-batch units (a sampled batch's 64-bit grids, an exact batch's of a run without the units, and an exact
 // batch's grid without a run-wide unit: dtfeBatchParams; the kernel's header says why the grids are integer sums):
 // grid g holds integers in units of 1/scale[g], scale = 2^k, set per BATCH from a bound B of the sum of |share| over
 // everything the batch can deposit -- no cell, holding part of that sum, can exceed it. psMassFixedScale (the PS mass
@@ -115,18 +114,13 @@ inline bool batchFixedScales(const std::vector<float>& verts, const std::vector<
 // maxNN = 10000 on fine grids, which makes the per-tet kernel's chunks wildly non-uniform and
 // trips the GPU watchdog -- and the kernel's per-thread cell cache turns hundreds of per-sample
 // atomics into one set per distinct cell (see the kernel header). DTFE_GPU_ITEMS=0 runs the
-// per-tet kernel for A/B comparisons.
-// DTFE_GPU_ITEM_SAMPLES=<n> sets the run length and DTFE_GPU_CACHE_K=2|4|8 the cell cache.
-// Measured on 2.1M particles at 512^3 (the largest sub-domain, 2.0 G samples; the per-tet kernel
-// takes 45 s with watchdog retries): K=2 at items 8/16/32/48/64 = 2.85/2.35/2.05/1.97/1.95 s (K=4 at
-// 32: 2.05 s), density only 0.9 s, no atomics at all 1.8 s -- the kernel is compute/occupancy-bound
-// at ~1.1 G samples/s, ~2.3 G for density.
+// per-tet kernel for A/B comparisons. An item runs at most itemSamples = 48 samples; the cell cache
+// has 2 slots (the kernel depositAveraged1Items2). Longer items ran faster up to about 48 samples and
+// gained little beyond, and dropping the atomics altogether saved little: the kernel is compute/occupancy-bound.
 struct DTFEGpuKnobs
 {
     bool     useItems    = true;
-    uint32_t itemSamples = 48;
-    int      cacheK      = 2;
-    bool     floatGrids  = false;   // DTFE_GPU_FLOAT_GRIDS=1: float atomics (A/B)
+    uint32_t itemSamples = 48;   // samples per work item
 };
 
 // The knobs from the environment; itemsOk: the host can run the item kernels at all.
@@ -135,29 +129,24 @@ inline DTFEGpuKnobs dtfeGpuKnobs(bool itemsOk)
     DTFEGpuKnobs k;
     k.useItems = itemsOk;
     k.useItems = k.useItems && Env::flag("DTFE_GPU_ITEMS", true);
-    if (long const v = Env::integer("DTFE_GPU_ITEM_SAMPLES", 0); v >= 4 && v <= 100000) k.itemSamples = uint32_t(v);
-    if (long const v = Env::integer("DTFE_GPU_CACHE_K", 2); v == 4 || v == 8) k.cacheK = int(v);
-    k.floatGrids = Env::flag({"DTFE_GPU_FLOAT_GRIDS"});
     return k;
 }
 
 
 // ---------------------------------------------------------------- one sub-domain's batch
 // The batch's parameter block, in the host's DepositParams (zeroed by the host; the fields named here are
-// the same in both): the exact sums' mode and units, before the upload consumes the batch's values --
-// DTFE_GPU_FLOAT_GRIDS=1 keeps the float atomics --, the grids' geometry, the field flags and the item length
-// (debugNoAtomic is not set here: it keeps the host's zero).
+// the same in both): the exact sums' mode and units, before the upload consumes the batch's values, the grids'
+// geometry, the field flags and the item length.
 //   The exact sums. An EXACT batch (--exact) sums in the run-wide 128-bit words (P.fixedSum = 2): every grid in the
 // run's unit 2^-units.K[g] and below its share cap (fixed_units.h RunUnits: one unit per grid for the whole run, from
 // global quantities, so every partition and thread split rounds every share alike; no bound pass runs). A grid
 // without a run-wide unit (units.has false: its K outside [-120, 120], or a scalar grid of
 // '--approx-phase-space-density') takes this batch's own unit (batchFixedScales) in the same words, which hold either.
-// A SAMPLED batch, and every batch under DTFE_RUN_UNITS_LEGACY=1 or of a run without the units (units.on false), sums
-// in the 64-bit words in units from the batch's own bound (P.fixedSum = 1), or in float atomics (0) when a bound is
-// not finite. DTFE_TEST_RUN_UNIT_SHIFT=n makes the run-wide units 2^n finer (RunUnits::fill) and, under
-// DTFE_RUN_UNITS_LEGACY=1 only, the batch's own units too, so a split test can show that the per-batch units fail it.
-// Returns the exact kernel's item, a block of cells of the tetrahedron's window (DTFE_GPU_EXACT_CELLS, default 16),
-// which is then P.itemSamples.
+// A SAMPLED batch, and every batch of a run without the units (units.on false), sums in the 64-bit words in units
+// from the batch's own bound (P.fixedSum = 1), or in float atomics (0) when a bound is not finite.
+// DTFE_TEST_RUN_UNIT_SHIFT=n makes the run-wide units 2^n finer (RunUnits::fill); the batch's own units take no shift.
+// Returns the exact kernel's item, a block of exactCells = 16 cells of the tetrahedron's window, which is then
+// P.itemSamples.
 template <class Params>
 inline uint32_t dtfeBatchParams(Params& P, DTFEGpuKnobs const& k, const std::vector<float>& verts,
                                 const std::vector<float>& dens, const std::vector<float>& vels,
@@ -168,8 +157,8 @@ inline uint32_t dtfeBatchParams(Params& P, DTFEGpuKnobs const& k, const std::vec
     P.fixedSum = 0;
     for (int g = 0; g < 5; ++g) P.fxScale[g] = 1.f;
     for (int g = 0; g < 5; ++g) P.fxCapBits[g] = 0u;
-    bool const runWide = exact && units.on && !runUnitsLegacy();
-    if (!k.floatGrids && runWide)
+    bool const runWide = exact && units.on;
+    if (runWide)
     {   // the run-wide 128-bit words; a grid without a run-wide unit takes the batch's own (none: no bound pass)
         bool const on[5] = { fDen, fVel, fGrad, fScal, fSGrad };
         bool own[5];
@@ -187,15 +176,8 @@ inline uint32_t dtfeBatchParams(Params& P, DTFEGpuKnobs const& k, const std::vec
             }
         }
     }
-    else if (!k.floatGrids)
-    {
+    else
         P.fixedSum = batchFixedScales(verts, dens, vels, scal, vols, fDen, fVel, fGrad, fScal, fSGrad, P.fxScale) ? 1u : 0u;
-        // the test hook on the per-batch units (DTFE_RUN_UNITS_LEGACY=1 only; unset: the per-batch units unchanged,
-        // bit for bit)
-        if (P.fixedSum != 0u && runUnitsLegacy() && runUnitShift() != 0)
-            for (int g = 0; g < 5; ++g)
-                if (float const s = std::ldexp(P.fxScale[g], runUnitShift()); std::isnormal(s)) P.fxScale[g] = s;
-    }
     for (int d = 0; d < 3; ++d)
     {
         P.dx[d]       = float(dx[d]);
@@ -210,12 +192,8 @@ inline uint32_t dtfeBatchParams(Params& P, DTFEGpuKnobs const& k, const std::vec
     P.fScal = fScal ? 1 : 0;
     P.fSGrad = fSGrad ? 1 : 0;
     P.itemSamples = k.itemSamples;
-    uint32_t exactCells = 16;
-    if (exact)
-    {
-        if (long const v = Env::integer("DTFE_GPU_EXACT_CELLS", 0); v > 0) exactCells = uint32_t(v);
-        P.itemSamples = exactCells;
-    }
+    constexpr uint32_t exactCells = 16;   // cells per item of the exact kernel
+    if (exact) P.itemSamples = exactCells;
     return exactCells;
 }
 
@@ -306,7 +284,7 @@ inline void dtfeLogBatch(const char* backend, const Batch& b, const Stats& st, d
     std::fprintf(stderr, "DTFE %s timing: %s kernel, %zu tetrahedra (%zu single-cell), %zu items of <= %u %s, "
                          "%zu samples, table %u, %s sums, %d chunks, %d retries, %.2f s (%.0f M samples/s)\n",
             backend,
-            b.exact ? "exact" : b.k.useItems ? (b.k.cacheK == 8 ? "item/K8" : b.k.cacheK == 2 ? "item/K2" : "item/K4") : "per-tet",
+            b.exact ? "exact" : b.k.useItems ? "item/K2" : "per-tet",
             b.nTet, b.nSingle, b.k.useItems ? b.nItems : size_t(0), b.P.itemSamples, b.exact ? "cells" : "samples", b.nSamples, b.P.tableEntries,
             b.P.fixedSum == 2u ? "run-wide 128-bit fixed-point" : b.P.fixedSum ? "fixed-point" : "float",
             st.chunks, st.retries, runSec, runSec > 0 ? b.nSamples / runSec / 1e6 : 0.0);

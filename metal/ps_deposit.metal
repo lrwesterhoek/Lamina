@@ -188,8 +188,7 @@ struct FieldGrids {
 };
 
 // The non-finite guard of a fixed-point share (fixedShareOk) and the 64-bit words' add (addFixedQ): in
-// metal/ps_common.metal.inc, which the Makefile prepends to this source and to the face kernel's
-// (metal/ps_face.metal). The guard's counters, one word per slot:
+// metal/ps_common.metal.inc, which the Makefile prepends to this source. The guard's counters, one word per slot:
 constant uint FX_DROP_MASS = 10u, FX_DROP_SUMW = 11u;   // ps_deposit_params.h FixedShareSlot (keep in step)
 
 // The word size is a compile-time constant: the host compiles one library per size, with "#define PS_FX_WORDS 0"
@@ -1239,15 +1238,14 @@ kernel void depositFields(
 // past the per-tet totals -- every one of the 31 buffer slots is taken here, so they ride in that buffer's tail
 typedef PSExactItemParams ExactItemParams;
 
-// An item's (tet, block) from the items' map: psItemOf in metal/ps_common.metal.inc (prepended; the face kernel
-// reads its own items' map with it too).
+// An item's (tet, block) from the items' map: psItemOf in metal/ps_common.metal.inc (prepended).
 
 // The pass a depositExactItems pipeline runs (== ExactItemParams.phase): the host builds one pipeline per value,
 // so the summing pass carries none of the deposit's registers (an M1 Max then fits 512 threads per threadgroup
 // instead of 384: phase 0 ran 12-23% faster, the deposit up to 8%).
 // 2 = both passes in ONE pipeline, the pass read from ExactItemParams.phase at run time: the host takes it under
 // --ps-linear-deposit (P.fLinear). That weight is built from the clip's first moments, and two pipelines may contract
-// them differently under fast math (docs/cleanup-plan.md P4.4: about 17% of the pieces, by up to 3.7e-8 of a cell),
+// them differently under fast math (about 17% of the pieces, by up to 3.7e-8 of a cell),
 // so phase 0's total missed the weights phase 1 deposits and a tet deposited m (sum w1 / sum w0), about 1e-8 off its
 // mass. In one pipeline both passes run the same compiled clip (order 2, the deposit's), so both form the same
 // weights; the total carries only the per-item float sum's rounding (phase 0 sums an item's weights in float and

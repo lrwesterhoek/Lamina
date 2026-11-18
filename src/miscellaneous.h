@@ -22,7 +22,7 @@
 
 
 
-/* General-purpose utilities: range/option consistency checks, array max, and integer roots. */
+/* General-purpose utilities: range/option consistency checks and array max. */
 
 #ifndef MISCELLANEOUS_HEADER
 #define MISCELLANEOUS_HEADER
@@ -97,34 +97,6 @@ template <typename T, typename T_INT> inline T maximum(T *x, T_INT const size )
         if ( temp<x[i] )
             temp = x[i];
     return temp;
-}
-
-
-// Integer rootPower-th root of input: returns result if input==result^rootPower, else terminates.
-template <typename T>
-T rootN(T const input,
-        T const rootPower)
-{
-    lowerBoundCheck( input, 1, "'input' in function 'rootN'" );
-    lowerBoundCheck( rootPower, 0, "'rootPower' in function 'rootN'" );
-
-    T result;
-    double temp = pow( input-1., 1./rootPower ); // root of input-1 to stay just below the integer we seek (pow rounding)
-    result = T( temp ) + 1;	// integer part + 1
-
-
-    // check that indeed input = result^rootPower
-    T temp2 = 1;
-    for (T i=0; i<rootPower; ++i)
-        temp2 *= result;
-    if (temp2==input)
-        return result;
-    else
-    {
-        MESSAGE::Error error;
-        error << "The first argument of the function 'rootN' is " << input << " which cannot be written as " << result << "^" << rootPower << "=" << temp <<"." << MESSAGE::EndError;
-    }
-    return T(0.);
 }
 
 #endif

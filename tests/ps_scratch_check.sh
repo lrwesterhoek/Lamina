@@ -58,10 +58,10 @@ echo ">> generating test snapshot ..."
     --amplitude-factor 1.8 >/dev/null
 
 FAILS=0
-check() { if [ "$2" -eq 1 ]; then echo "   OK   $1"; else echo "   FAIL $1"; FAILS=$((FAILS+1)); fi; }
+# check_ok <label> <1 = ok> (it counts a failure in FAILS): tests/lib.sh
 
 BASEARGS=(--grid 128 --field density_a velocity_a dispersion_a --input-format 105 --mpc-unit 1
-          --verbose 2 --periodic --subsamples 1 --ps-volume-weighted)
+          --verbose 2 --periodic --subsamples 1)
 
 compare_outputs() {  # $1 = ref root, $2 = scratch root, $3 = label
     local allsame=1
@@ -70,7 +70,7 @@ compare_outputs() {  # $1 = ref root, $2 = scratch root, $3 = label
         [ "${e}" = ".log" ] && continue
         cmp -s "${f}" "$2${e}" || { allsame=0; echo "        differs: ${e}"; }
     done
-    check "$3 outputs bit-identical to the in-RAM run" "${allsame}"
+    check_ok "$3 outputs bit-identical to the in-RAM run" "${allsame}"
 }
 
 # ---------- (A) partitioned (deterministic mc=1) and unpartitioned bit-identity ----------
@@ -79,14 +79,14 @@ echo ">> A: bit-identity, partitioned (mc=1) + unpartitioned"
     > "${TMP}/scr_p_ref.log" 2>&1
 DTFE_SCRATCH_MIN_GB=0.0001 "${BIN}" "${SNAP}" "${TMP}/scr_p_mm" "${BASEARGS[@]}" \
     --partition 2 2 2 --max-concurrent 1 --scratch-dir "${SC}" > "${TMP}/scr_p_mm.log" 2>&1 \
-    && check "A scratch partitioned run exits 0" 1 || check "A scratch partitioned run exits 0" 0
+    && check_ok "A scratch partitioned run exits 0" 1 || check_ok "A scratch partitioned run exits 0" 0
 compare_outputs "${TMP}/scr_p_ref" "${TMP}/scr_p_mm" "A partitioned"
 
 "${BIN}" "${SNAP}" "${TMP}/scr_u_ref" "${BASEARGS[@]}" > "${TMP}/scr_u_ref.log" 2>&1
 DTFE_SCRATCH_MIN_GB=0.0001 "${BIN}" "${SNAP}" "${TMP}/scr_u_mm" "${BASEARGS[@]}" \
     --scratch-dir "${SC}" > "${TMP}/scr_u_mm.log" 2>&1
 compare_outputs "${TMP}/scr_u_ref" "${TMP}/scr_u_mm" "A unpartitioned"
-if grep -q "SCRATCH:" "${TMP}/scr_p_mm.log"; then check "A arming banner printed" 1; else check "A arming banner printed" 0; fi
+if grep -q "SCRATCH:" "${TMP}/scr_p_mm.log"; then check_ok "A arming banner printed" 1; else check_ok "A arming banner printed" 0; fi
 # the zero-fill route (ScratchAlloc::ZeroFillScope, scratch_alloc.h): on macOS psReserveGrids zero-fills every grid
 # in anonymous memory and moves it onto its scratch file unwritten. A silently disabled scope would leave the outputs
 # identical (the plain route writes the same zeros through the file: a write-back stall, not a wrong value), so the
@@ -95,10 +95,10 @@ if grep -q "SCRATCH:" "${TMP}/scr_p_mm.log"; then check "A arming banner printed
 # unpartitioned run reserves its grids elsewhere (reserveMemory) and prints no count.
 NZF="$(sed -n 's/^SCRATCH: .*; \([0-9][0-9]*\) zero-filled in memory.*/\1/p' "${TMP}/scr_p_mm.log" | head -1)"
 if [ "$(uname -s)" = Darwin ]; then
-    check "A ${NZF:-no} grid(s) zero-filled in memory and moved onto their scratch file (the zero-fill route)" \
+    check_ok "A ${NZF:-no} grid(s) zero-filled in memory and moved onto their scratch file (the zero-fill route)" \
         $([ "${NZF:-0}" -gt 0 ] && echo 1 || echo 0)
 else
-    check "A the zero-fill route is off here (macOS only): ${NZF:-no} grid(s) moved, the count printed" \
+    check_ok "A the zero-fill route is off here (macOS only): ${NZF:-no} grid(s) moved, the count printed" \
         $([ "${NZF:-x}" = 0 ] && echo 1 || echo 0)
 fi
 
@@ -115,7 +115,7 @@ if [ "${GPU_BUILT}" -eq 1 ]; then
     # a CPU fallback in one run of the pair (GPU contention) breaks the identity for another reason: say so
     if grep -q "using the CPU deposit\|deposit unavailable\|ran on the CPU instead" "${TMP}/scr_g_ref.log" "${TMP}/scr_g_mm.log"; then
         echo "        (a GPU run fell back to the CPU: see ${TMP}/scr_g_ref.log / scr_g_mm.log)"
-        check "B GPU runs stayed on the GPU" 0
+        check_ok "B GPU runs stayed on the GPU" 0
     else
         compare_outputs "${TMP}/scr_g_ref" "${TMP}/scr_g_mm" "B GPU scratch run:"
     fi
@@ -131,14 +131,14 @@ fi
 echo ">> S: the ordered merge's spill to the scratch folder (4 in flight, mmap'ed sub-grids)"
 DTFE_MERGE_SPILL=1 DTFE_TEST_DELAY_PARTITION=0:2 DTFE_SCRATCH_MIN_GB=0.0001 OMP_NUM_THREADS=4 "${BIN}" "${SNAP}" \
     "${TMP}/scr_s_mm" "${BASEARGS[@]}" --partition 2 2 2 --max-concurrent 4 --scratch-dir "${SC}" \
-    > "${TMP}/scr_s_mm.log" 2>&1 && check "S spilling scratch run exits 0" 1 || check "S spilling scratch run exits 0" 0
+    > "${TMP}/scr_s_mm.log" 2>&1 && check_ok "S spilling scratch run exits 0" 1 || check_ok "S spilling scratch run exits 0" 0
 NSP="$(sed -n 's/.*ordered merge: .* \([0-9]*\) spilled to disk.*/\1/p' "${TMP}/scr_s_mm.log")"
-check "S ${NSP:-no} partition(s) spilled to the scratch folder" $([ "${NSP:-0}" -gt 0 ] && echo 1 || echo 0)
+check_ok "S ${NSP:-no} partition(s) spilled to the scratch folder" $([ "${NSP:-0}" -gt 0 ] && echo 1 || echo 0)
 compare_outputs "${TMP}/scr_p_ref" "${TMP}/scr_s_mm" "S spilled"
 
 # ---------- (C) nothing left behind ----------
 NLEFT=$(ls "${SC}" 2>/dev/null | wc -l | tr -d ' ')
-check "C scratch dir empty after runs (unlink-at-creation)" $([ "${NLEFT}" -eq 0 ] && echo 1 || echo 0)
+check_ok "C scratch dir empty after runs (unlink-at-creation)" $([ "${NLEFT}" -eq 0 ] && echo 1 || echo 0)
 
 # ---------- (D) guards ----------
 echo ">> D: path guards"
@@ -150,9 +150,9 @@ RC_ICLOUD=$?
 "${BIN}" "${SNAP}" "${TMP}/scr_y" "${BASEARGS[@]}" --scratch-dir /nonexistent/dtfe/path > "${TMP}/scr_y.log" 2>&1
 RC_NODIR=$?
 set -e
-check "D iCloud path rejected (nonzero exit)" $([ "${RC_ICLOUD}" -ne 0 ] && echo 1 || echo 0)
-if grep -q "iCloud" "${TMP}/scr_x.log"; then check "D iCloud rejection names the reason" 1; else check "D iCloud rejection names the reason" 0; fi
-check "D nonexistent dir rejected (nonzero exit)" $([ "${RC_NODIR}" -ne 0 ] && echo 1 || echo 0)
+check_ok "D iCloud path rejected (nonzero exit)" $([ "${RC_ICLOUD}" -ne 0 ] && echo 1 || echo 0)
+if grep -q "iCloud" "${TMP}/scr_x.log"; then check_ok "D iCloud rejection names the reason" 1; else check_ok "D iCloud rejection names the reason" 0; fi
+check_ok "D nonexistent dir rejected (nonzero exit)" $([ "${RC_NODIR}" -ne 0 ] && echo 1 || echo 0)
 
 echo "------------------------------------------------------------"
 if [ "${FAILS}" -gt 0 ]; then

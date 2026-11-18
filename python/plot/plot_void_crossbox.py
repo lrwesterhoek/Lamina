@@ -53,7 +53,7 @@ import matplotlib.pyplot as plt
 
 import config
 from dtfelib import figures as style
-from dtfelib.cli import add_out_arg, new_parser, add_estimator_arg, deprecated_alias, SMOOTH_MPC_ENV_NAMES
+from dtfelib.cli import add_out_arg, new_parser, add_estimator_arg, SMOOTH_MPC_ENV
 
 DEFAULT_SIGMA_MPC = config.CROSSBOX_SMOOTHING_MPC   # 2.1625 = 10.0002 cells of TNG100-3-Dark (110.7 Mpc / 512;
                                       # production 10 cells = 2.16245 Mpc): the first comparison's, kept so its
@@ -223,7 +223,6 @@ def worker_main(argv):
     p.add_argument("--data-root", type=Path, default=None)
     p.add_argument("--smooth-mpc", type=float, required=True)
     p.add_argument("--redshifts", dest="z", type=float, nargs="+", default=list(DEFAULT_Z))
-    deprecated_alias(p, "--z", "--redshifts")
     p.add_argument("--rv-range", type=float, nargs=2, default=list(DEFAULT_RV_RANGE))
     p.add_argument("--points", type=int, default=None)
     p.add_argument("--n-boot", type=int, default=200)
@@ -248,8 +247,7 @@ def run_worker(sim, args, path) -> int:
         if val is not None:
             cmd += [flag, str(val)]
     env = dict(os.environ, DTFE_SIM=sim)
-    for name in SMOOTH_MPC_ENV_NAMES:             # the sigma is --smooth-mpc's, whatever the shell exports
-        env.pop(name, None)
+    env.pop(SMOOTH_MPC_ENV, None)                 # the sigma is --smooth-mpc's, whatever the shell exports
     print(f"\n=== {sim}")
     return subprocess.call(cmd, env=env)
 
@@ -461,7 +459,6 @@ def main(argv=None):
                         "just above its production 10 cells = 2.16245 Mpc)")
     p.add_argument("--redshifts", dest="z", type=float, nargs="+", default=list(DEFAULT_Z), metavar="Z",
                    help="the redshifts of the bottom row, one figure each (default 0 0.5 1)")
-    deprecated_alias(p, "--z", "--redshifts")
     p.add_argument("--rv-range", type=float, nargs=2, default=list(DEFAULT_RV_RANGE), metavar=("LO", "HI"),
                    help="the stacks' common R_v range in smoothing lengths (default 2.5 5)")
     p.add_argument("--points", type=int, default=None, help="points per profile shell (default profiles.DEFAULT_M)")

@@ -31,7 +31,6 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/config.sh"
-knob PYTHON PY     # the python with h5py (PY, its older name, read for one release with a warning; config.sh knob)
 
 # ---- Defaults (override with flags / positional args) ---------------------
 # API key resolution: -k flag > TNG_API_KEY env > ~/.tng_api_key file. The key file lives
@@ -124,7 +123,7 @@ fetched_none() {            # <dir> <glob>
 }
 
 # Fetch every chunk a product's listing names. The API's listing links its chunks over plain http://
-# (seen 2026-11-05, every simulation), which a recursive '--https-only' crawl skips -- it fetched nothing.
+# (every simulation), which a recursive '--https-only' crawl skips -- it fetched nothing.
 # So read the JSON listing, upgrade each link to https (the key header never travels over plain http;
 # the API redirects each chunk to a tokenized https data host), and fetch exactly those links.
 fetch_listing() {           # <listing URL, no query> <dest dir>  -> 1 when the listing or a chunk failed
@@ -132,7 +131,7 @@ fetch_listing() {           # <listing URL, no query> <dest dir>  -> 1 when the 
     listing="$(wget -q -O - --https-only --header="API-Key: ${API_KEY}" "$1?format=json")" || return 1
     urls="$(printf '%s\n' "${listing}" | grep -o '"https\{0,1\}://[^"]*\.hdf5"' | tr -d '"' | sed 's|^http://|https://|')"
     [ -n "${urls}" ] || return 0            # nothing listed: fetched_none names it
-    # The data host now and then answers one chunk with a 403 that a rerun does not get (2026-11-05):
+    # The data host now and then answers one chunk with a 403 that a rerun does not get:
     # try the list up to three times; -nc skips the chunks already here.
     local try
     for try in 1 2 3; do

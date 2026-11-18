@@ -41,7 +41,7 @@ namespace
     // SIGSEGV at exit), so the lock is a statically initialized pthread mutex (plain data, never dies).
     //
     // The delete path takes no lock for ordinary heap pointers: every delete in the process runs through here, and a
-    // global lock serialized concurrent partitions (19x slower PS vertex-density pass at --max-concurrent 5). Each
+    // global lock would serialize concurrent partitions. Each
     // slot's pointer is an atomic published with release ordering BEFORE the mapping is handed out; freeImpl rules a
     // pointer out lock-free (outside [g_lo, g_hi), the span of every mapping ever made, it cannot be ours; else a scan
     // of the slots ever used finds it or not). A pointer being deleted was returned by operator new earlier

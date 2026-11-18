@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
-# PS-DTFE point evaluation in the grids' conventions (the only conventions; '--ps-point-conventions grid' names them).
+# PS-DTFE point evaluation in the grids' conventions.
 #
 # The points follow the run's grid conventions (ps_point_eval.cc, 'The grid deposit's conventions at the points'):
 # its mass model (--ps-vertex-mass) and PS-DTFE's velocity moments, volume-weighted in every run (the dispersion
-# mass-weighted; '--ps-volume-weighted' is accepted and changes nothing): with evolved (z = 127) initial positions as
-# the Lagrangian input, the rho_bar*V_lag tetrahedron masses of a run without --ps-vertex-mass put a plane's density
-# contrast (and that run's grid's) at ~0.8 of the true one at z = 20. Verified here, on synthetic boxes:
-#  A) THE NAME: '--ps-point-conventions grid' (a hidden option) gives byte-identical outputs to a run without it,
-#     with --ps-vertex-mass (and the accepted --ps-volume-weighted), on multi-stream crossed waves.
+# mass-weighted): with evolved (z = 127) initial positions as the Lagrangian input, the rho_bar*V_lag tetrahedron
+# masses of a run without --ps-vertex-mass put a plane's density contrast (and that run's grid's) at ~0.8 of the true
+# one at z = 20. Verified here, on synthetic boxes:
 #  B) THE IC BIAS: single-stream crossed waves whose InitialCoordinates are displaced towards the final positions
-#     by alpha = 0.1645 (TNG's D(z=127)/D(z=20)), --ps-vertex-mass --ps-volume-weighted --exact, a slab
+#     by alpha = 0.1645 (TNG's D(z=127)/D(z=20)), --ps-vertex-mass --exact, a slab
 #     of four sub-planes through one cell layer: the plane's cell blocks against the grid's cells (and against the
 #     analytic cell averages) have slope ~1, and the perturbed-IC plane equals the true-IC plane to ~1%. The control:
 #     the same plane from a run without --ps-vertex-mass has slope ~1-alpha (the box does carry the bias). The exact
@@ -18,18 +16,15 @@
 #  C) MASS AND NOISE on a uniform near-lattice box (jitter 0.01, TNG-like initial conditions): random points
 #     average to rho_bar, and the point noise stays below the vertex-share grid's own (the per-tetrahedron
 #     m_tet/V_eul -- the grid's density -- puts a normal mass into near-flat slivers no point hits: a mean of 0.89).
-#  D) THE WEIGHTS at the points, recomputed from the per-stream records of ONE run (a pancake, --ps-per-stream,
-#     without '--ps-volume-weighted'): '.pts_vel' is the plain mean of the stream velocities (the volume weighting:
-#     every stream fills the point) and '.pts_velDisp' the density-weighted second moment about the density-weighted
-#     mean velocity (the dispersion stays mass-weighted, as in the grids), 0 at a single-stream point; on this plane
-#     the density-weighted mean velocity is another value at the multi-stream points (the weighting is seen).
-#     (That '--ps-volume-weighted' changes no point file is tests/ps_volume_weighted_check.sh A.)
+#  D) THE WEIGHTS at the points, recomputed from the per-stream records of ONE run (a pancake, --ps-per-stream):
+#     '.pts_vel' is the plain mean of the stream velocities (the volume weighting: every stream fills the point)
+#     and '.pts_velDisp' the density-weighted second moment about the density-weighted mean velocity (the
+#     dispersion stays mass-weighted, as in the grids), 0 at a single-stream point; on this plane the
+#     density-weighted mean velocity is another value at the multi-stream points (the weighting is seen).
 #  E) PARTITIONS: --partition 2 2 2 equals the single run to float rounding with --ps-vertex-mass (the vertex
 #     ratios need the partition's 2-ring, inside its padding).
-#  F) --serve (dtfelib.Estimator with --ps-vertex-mass alone: it passes no '--ps-volume-weighted'): bit-identical to
-#     the --sample-points run with --ps-vertex-mass --ps-volume-weighted.
-#  R) '--ps-point-conventions legacy' was removed: the program stops with its message and writes no point file, under
-#     the older spelling '--pts-conventions legacy' too; another value stops it with the one value left ('grid').
+#  F) --serve (dtfelib.Estimator with --ps-vertex-mass): bit-identical to the --sample-points run with
+#     --ps-vertex-mass.
 # Usage: tests/ps_point_conventions_check.sh [--no-build]
 
 set -euo pipefail
@@ -50,11 +45,6 @@ echo "============================================================"
 
 build_target "${1:-}" PS-DTFE o_ps
 [ -x "${BIN}" ] || { echo "FAIL: ${BIN} not built"; exit 1; }
-FULL_HELP="$("${BIN}" --full-help 2>/dev/null)" || { echo "FAIL: ${BIN} --full-help exited non-zero"; exit 1; }
-# the option is hidden (parsed, not listed in --full-help): a binary that knows it prints the same help with it given,
-# one that does not refuses the unknown option
-[ "$("${BIN}" --ps-point-conventions grid --full-help 2>/dev/null || true)" = "${FULL_HELP}" ] \
-    || skip_or_fail "this PS-DTFE has no --ps-point-conventions."
 
 echo ">> test data ..."
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${TMP}/in_lin.hdf5" --n "${N}" --box "${BOX}" \
@@ -104,32 +94,27 @@ run() {  # $1 = output root, $2 = snapshot, rest = flags
         exit 1
     fi
 }
-VMW=(--ps-vertex-mass --ps-volume-weighted)
+VMW=(--ps-vertex-mass)
 PE=(--ps-per-stream --pts-vel-grad --pts-den-grad)
 
-echo ">> A: '--ps-point-conventions grid' named (multi-stream crossed waves, --partition 2 2 2)"
-AF=(--field density_a velocity_a dispersion_a --sample-points "${TMP}/in_plane.bin" "${PE[@]}"
-    --partition 2 2 2 --max-concurrent 2 --ps-merge index-order)
-run "${TMP}/a_on_grid"    "${TMP}/in_crw.hdf5" "${AF[@]}" "${VMW[@]}"
-run "${TMP}/a_on_named"   "${TMP}/in_crw.hdf5" "${AF[@]}" "${VMW[@]}" --ps-point-conventions grid
 echo ">> B: perturbed-IC slab (exact deposit); the sampled deposit for comparison"
 run "${TMP}/b_linear_grid" "${TMP}/in_pic.hdf5" --field density_a "${VMW[@]}" --exact \
-    --sample-points "${TMP}/in_slab.bin" --ps-stream-density linear
+    --sample-points "${TMP}/in_slab.bin"
 run "${TMP}/b_linear_true" "${TMP}/in_lin.hdf5" --field density_a --exact \
-    --sample-points "${TMP}/in_slab.bin" --ps-stream-density linear
+    --sample-points "${TMP}/in_slab.bin"
 # the control: the same plane without --ps-vertex-mass (rho_bar*V_lag masses at the points) carries the IC bias
-run "${TMP}/b_linear_nomass" "${TMP}/in_pic.hdf5" --field density_a --ps-volume-weighted --exact \
-    --sample-points "${TMP}/in_slab.bin" --ps-stream-density linear
+run "${TMP}/b_linear_nomass" "${TMP}/in_pic.hdf5" --field density_a --exact \
+    --sample-points "${TMP}/in_slab.bin"
 # the comparison is the nSub = 3 sampled deposit ('--sampled --subsamples 3': 'density_a' alone selects the exact
 # one, and '--sampled' alone takes 1 point per cell axis)
 run "${TMP}/b_sampled_grid"   "${TMP}/in_pic.hdf5" --field density_a "${VMW[@]}" --sampled --subsamples 3 \
     --sample-points "${TMP}/in_slab.bin"
 echo ">> C: uniform near-lattice box"
 run "${TMP}/c_linear_full" "${TMP}/in_uni.hdf5" --field density_a "${VMW[@]}" --exact \
-    --sample-points "${TMP}/in_full.bin" --ps-stream-density linear
+    --sample-points "${TMP}/in_full.bin"
 run "${TMP}/c_linear_rand" "${TMP}/in_uni.hdf5" --field density_a "${VMW[@]}" \
-    --sample-points "${TMP}/in_rand.bin" --ps-stream-density linear
-echo ">> D: the weights at the points (a pancake: single- and three-stream points, --ps-per-stream, no flag)"
+    --sample-points "${TMP}/in_rand.bin"
+echo ">> D: the weights at the points (a pancake: single- and three-stream points, --ps-per-stream)"
 DF=(--field density_a --sample-points "${TMP}/in_plane.bin" "${PE[@]}")
 run "${TMP}/d_grid"      "${TMP}/in_pan.hdf5" "${DF[@]}"
 # (F's reference: the crossed waves with the vertex masses)
@@ -137,32 +122,14 @@ run "${TMP}/d_both_grid" "${TMP}/in_crw.hdf5" "${DF[@]}" "${VMW[@]}"
 echo ">> E: --partition 2 2 2 vs one triangulation (--ps-vertex-mass)"
 run "${TMP}/e_single" "${TMP}/in_crw.hdf5" "${DF[@]}" "${VMW[@]}"
 run "${TMP}/e_part"   "${TMP}/in_crw.hdf5" "${DF[@]}" "${VMW[@]}" --partition 2 2 2 --max-concurrent 2
-echo ">> R: '--ps-point-conventions legacy' (removed), its older spelling, an unknown value: refused before anything runs"
-refused() {  # $1 = output root, $2 = the text it must stop with, rest = flags: 0 when the run exits non-zero with that
-             # text and writes no point file
-    local out="$1" text="$2"; shift 2
-    rm -f "${out}".*
-    local rc=0
-    OMP_NUM_THREADS=2 "${BIN}" "${TMP}/in_pan.hdf5" "${out}" --grid "${GRID}" --periodic --input-format 105 --mpc-unit 1 \
-        --verbose 1 --field density_a --sample-points "${TMP}/in_plane.bin" "$@" > "${out}.log" 2>&1 || rc=$?
-    [ "${rc}" -ne 0 ] && grep -qF -e "${text}" "${out}.log" && [ ! -e "${out}.pts_den" ]
-}
-R_LEG=0; R_OLD=0; R_BAD=0
-if refused "${TMP}/r_legacy" "${PS_NO_LEGACY_POINTS}" --ps-point-conventions legacy; then R_LEG=1; fi
-# (the older spelling: the program says once that it is the older name, then refuses the value;
-# tests/dev/deprecation_gate.sh allows that line in this log)
-if refused "${TMP}/r_pts_legacy" "${PS_NO_LEGACY_POINTS}" --pts-conventions legacy; then R_OLD=1; fi
-if refused "${TMP}/r_bad" "Unknown value 'old' for '--ps-point-conventions'; the only value is 'grid'." \
-        --ps-point-conventions old; then R_BAD=1; fi
 
 echo ">> checks"
 PYTHONPATH="${ROOT}/python${PYTHONPATH:+:${PYTHONPATH}}" \
-"${PY}" - "${TMP}" "${GRID}" "${ALPHA}" "${AMP}" "${BOX}" "${BIN}" "${R_LEG}" "${R_OLD}" "${R_BAD}" <<'PY'
+"${PY}" - "${TMP}" "${GRID}" "${ALPHA}" "${AMP}" "${BOX}" "${BIN}" <<'PY'
 import os, sys
 import numpy as np
 REAL = np.dtype(os.environ.get("DTFE_TEST_REAL", "float32"))   # tests/precision.sh
 tmp, g, alpha, amp, box, binary = sys.argv[1], int(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4]), float(sys.argv[5]), sys.argv[6]
-r_leg, r_old, r_bad = (a == "1" for a in sys.argv[7:10])
 fails = []
 
 def check(tag, ok, msg):
@@ -172,20 +139,6 @@ def check(tag, ok, msg):
 
 def pts(root, ext, dtype=np.float64):
     return np.fromfile(f"{tmp}/{root}.pts_{ext}", dtype=dtype)
-
-def outputs(root):
-    return sorted(f[len(root) + 1:] for f in os.listdir(tmp)
-                  if f.startswith(root + ".") and not f.endswith((".log", ".runlog")) and ".runlog" not in f)
-
-def same_files(r1, r2, select):
-    names = [e for e in outputs(r1) if select(e)]
-    diff = [e for e in names if open(f"{tmp}/{r1}.{e}", "rb").read() != open(f"{tmp}/{r2}.{e}", "rb").read()]
-    return names, diff
-
-# ---- A
-names, diff = same_files("a_on_grid", "a_on_named", lambda e: True)
-check("A1", len(names) > 10 and not diff, f"--ps-vertex-mass --ps-volume-weighted: '--ps-point-conventions grid' named "
-      f"and not named byte-identical in all {len(names)} outputs (differ: {diff})")
 
 # ---- B
 def slope(a, b):
@@ -290,7 +243,6 @@ check("E1", same_s and worst < tol, f"--partition 2 2 2 vs one triangulation: st
 from dtfelib import Estimator
 P = np.fromfile(f"{tmp}/in_plane.bin").reshape(-1, 3)
 prec = "double" if REAL == np.float64 else "single"
-# (the Estimator passes no '--ps-volume-weighted': its stream means are the volume-weighted ones of the run with it)
 with Estimator(f"{tmp}/in_crw.hdf5", mpc_unit=1, per_stream=True, density_gradient=True, velocity_gradient=True,
                binary=os.path.abspath(binary), precision=prec, options=["--ps-vertex-mass"]) as est:
     f = est(P)
@@ -303,13 +255,8 @@ with Estimator(f"{tmp}/in_crw.hdf5", mpc_unit=1, per_stream=True, density_gradie
                              pts("d_both_grid", "stream_records")))
     g2 = est(P[::397])          # a small request: the server's cell index, the same vertex ratios
     ok2 = np.array_equal(g2.density, f.density[::397]) and np.array_equal(g2.velocity, f.velocity[::397])
-check("F1", ok and ok2, "--serve with --ps-vertex-mass alone: bit-identical to --sample-points with --ps-vertex-mass "
-      "--ps-volume-weighted (full walk and a small request)")
-
-# ---- R
-check("R1", r_leg, f"'--ps-point-conventions legacy' stops the run with its message, no point file ({tmp}/r_legacy.log)")
-check("R2", r_old, f"... so does the older spelling '--pts-conventions legacy' ({tmp}/r_pts_legacy.log)")
-check("R3", r_bad, f"... and another value, with the one value left ('grid') ({tmp}/r_bad.log)")
+check("F1", ok and ok2, "--serve with --ps-vertex-mass: bit-identical to --sample-points with --ps-vertex-mass "
+      "(full walk and a small request)")
 
 print("-" * 60)
 if fails:

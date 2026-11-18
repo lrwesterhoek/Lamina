@@ -85,8 +85,8 @@ struct StreamRec
 // The STORED form of a StreamRec: only the members this run's options fill. The core (both
 // densities, the velocity, the caustic mask) always; the density gradient, velocity gradient and
 // vertex IDs only with --pts-den-grad / --pts-vel-grad / --ps-per-stream-ids. The records ARE the
-// memory of a large --sample-points run (an 8192^2 plane x ~4 streams at z=0 held ~48 GB of
-// 176-B StreamRecs), and packed they take 42 B without those options, 114 B with --pts-vel-grad.
+// memory of a large --sample-points run, and packed they take 42 B without those options, 114 B
+// with --pts-vel-grad.
 // unpack() zeroes the members that were not stored -- exactly what the record builders put there
 // when the option is off -- so finalize() sorts and reduces the SAME records: bit-identical output.
 struct RecLayout
@@ -159,16 +159,16 @@ struct Context
     bool   psCaustics = false;      // --ps-caustics: also emit the per-point caustic mask
     bool   ptsScalar = false;       // --pts-scalar: also interpolate the vertex scalars per stream
     bool   ptsLagrangian = false;   // --ps-per-stream-lagrangian (PS): also record each stream's Lagrangian coordinate
-    // the grid deposit's conventions, which the points follow: see the notes at interpolatePoints_phaseSpace
-    // and psPointEvalFinalize
+    // the grid deposit's conventions, which the points follow: see 'The grid deposit's conventions at the
+    // points' below
     bool   vertexMass = false;      // --ps-vertex-mass: the grid's tetrahedron masses in both per-stream densities
     bool   volumeWeighted = false;  // equal-volume stream means (velocity, its gradient, scalars): every PS-DTFE run
-                                    // (User_options::psVolumeWeighted); false in the standard binary
+                                    // (psPointEvalInit sets it); false in the standard binary
     bool   periodic = false;
     double rhoBar = 1.;             // output densities are rho/rhoBar (grid convention)
     double boxLo[NO_DIM], boxLen[NO_DIM];
 
-    // exact containment (see the file header): the canonical-image frame (ps_exact_inside.h)
+    // exact containment: the canonical-image frame (ps_exact_inside.h, whose header says why)
     Frame  canon;
 
     // Standard binary: which tetrahedra this triangulation OWNS -- those whose Eulerian centroid
@@ -194,8 +194,8 @@ struct Context
     // An entry is the uint32 point index followed by the PACKED record (RecLayout: only the
     // members the options fill); finalize() groups the entries by point with a counting sort.
     // A worker holds one block at most: one std::vector per point (a heap block each), with every
-    // worker holding its partition's hits UNPACKED (~200 B each) until one merge at the end, would
-    // peak at 28 GB for 16.8M points at 2.1M particles.
+    // worker holding its partition's hits UNPACKED until one merge at the end, would take several
+    // times the memory.
     std::vector< std::vector<unsigned char> > recBlocks;
     // the partition each block's records belong to (psPointEvalSetPartition; -1 outside a partition loop), one
     // per block: a worker's sink serves one triangulation, so a block never mixes partitions. The '--resume'
@@ -238,7 +238,7 @@ void setQueryPoints(std::vector<double> &&pts, int const bucketFloor);
 void bucketQueryPoints(int const bucketFloor);
 
 // The flat index of every bucket of [lo, hi] per axis (inclusive; n[d] buckets on axis d, periodic indices
-// wrapped), the last axis fastest: the order of the nested 3D loops it replaced, in any NO_DIM.
+// wrapped), the last axis fastest, in any NO_DIM.
 template <class F>
 inline void forEachBucketIn(int const lo[NO_DIM], int const hi[NO_DIM], int const n[NO_DIM], bool const periodic,
                             F const &f)
@@ -276,8 +276,7 @@ namespace psPointEvalDetail {
    (tetrahedron masses from the particles, m_tet = sum_v m_v/deg_v) and volume-weighted velocity moments (every
    PS-DTFE run), plain points would take rho_bar*V_lag masses and density-weighted stream means. With TNG's evolved
    z = 127 positions as the Lagrangian input rho_bar*V_lag carries the initial contrast, so every density mode of
-   a plane comes out filtered by 1 - D(z_ic)/D(z): at z = 20 a 4096^2 plane's contrast is 0.81-0.82 times the
-   grid's (rms 0.211 against 0.280), and its multi-stream velocity divergence 2-4x smaller.
+   a plane comes out filtered by 1 - D(z_ic)/D(z).
 
    Under --ps-vertex-mass the point densities carry the grid's tetrahedron masses, through ONE number per
    vertex: the ratio of the two mass models over the vertex's star of depositing tetrahedra,
@@ -296,10 +295,9 @@ namespace psPointEvalDetail {
    With the default masses c_v = 1 and both are the plain estimators. Why not m_tet/V_eul(t) itself, the grid's own
    per-tetrahedron density: near-lattice initial conditions (TNG's) tile with near-flat slivers whose equal vertex
    shares give them a normal mass in almost no volume -- a cell average of the grid holds that mass, a POINT is
-   almost never inside such a sliver: on a 32^3 crossed-wave box (jitter 0.05) a 64^3 point set's mean density
-   came out 0.89 instead of 1. And not standard DTFE's (d+1) m_v/V_eul(star) either: on a near-lattice the star
-   volumes vary with the tetrahedralization, which M(star) averages over the star (a scipy prototype on a uniform
-   24^3 lattice, jitter 0.01: vertex std 0.19 against 0.08). The non-periodic hull cells keep their constant density,
+   almost never inside such a sliver, so a point set's mean density comes out below 1. And not standard DTFE's
+   (d+1) m_v/V_eul(star) either: on a near-lattice the star volumes vary with the tetrahedralization, which
+   M(star) averages over the star. The non-periodic hull cells keep their constant density,
    corrected the same way; the density gradient (--pts-den-grad) belongs to the corrected 'dtfe' profile. The
    per-point velocity, its gradient and the scalar are equal-weight stream means, as the grid's velocity moments
    are volume-weighted (psPointEvalFinalize). Without --ps-vertex-mass the points take the plain densities.

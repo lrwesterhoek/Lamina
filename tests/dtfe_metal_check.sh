@@ -23,7 +23,7 @@ cd "$ROOT" || exit 1
 source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double pair (built by make ... DOUBLE=1)
 
 
-TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}/metal_check"
+TMP="${DTFE_TEST_TMP}/metal_check"
 mkdir -p "$TMP"
 
 # this test REQUIRES a GPU build: reuse the current mode if it is a GPU one, else default

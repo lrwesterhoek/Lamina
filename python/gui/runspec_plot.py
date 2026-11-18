@@ -120,9 +120,7 @@ class PlotSpec:
                 a += ["--rv-range", *(f"{v:g}" for v in r)]
         elif key == "voidenv":
             if self.opt(key, "criterion") != _rs.ENV_CRITERIA[0]:
-                # the script spells it density-raw (classify's internal name density_raw: an older saved value,
-                # which from_dict migrates; the map goes in P6.6)
-                a += ["--criterion", str(self.opt(key, "criterion")).replace("_", "-")]
+                a += ["--criterion", str(self.opt(key, "criterion"))]
             num("factor", "--factor", _rs.ENV_FACTOR)
             if self.opt(key, "r_v_definition") != "crossing":
                 a += ["--rv-definition", str(self.opt(key, "r_v_definition"))]
@@ -219,8 +217,8 @@ class PlotSpec:
                     panels = _rs.words(self.opt(key, "panels"))
                     if panels and panels != ["density", "sheet", "streams"]:
                         a += ["--panels", *panels]
-                    if self.opt(key, "project") != "plane":         # 'mean', slab's older name (from_dict migrates it)
-                        a += ["--project", "slab" if self.opt(key, "project") == "mean" else str(self.opt(key, "project"))]
+                    if self.opt(key, "project") != "plane":
+                        a += ["--project", str(self.opt(key, "project"))]
                     for opt_key, flag in (("vmin", "--vmin"), ("vmax", "--vmax")):
                         if float(self.opt(key, opt_key)) > 0:
                             a += [flag, f"{float(self.opt(key, opt_key)):g}"]
@@ -410,19 +408,4 @@ class PlotSpec:
     def from_dict(cls, d: dict) -> "PlotSpec":
         known = {k: v for k, v in _rs._current_figures_root(d).items() if k in cls.__dataclass_fields__}
         known["sets"] = [k for k in known.get("sets", []) if k in _rs.FIGURE_SET]
-        if isinstance(known.get("options"), dict):
-            known["options"] = migrate_options(known["options"])
         return cls(**known)
-
-
-def migrate_options(options: dict) -> dict:
-    """Saved figure-set options with the scripts' P6.7 value spellings (idempotent): the environment criterion
-    'density_raw' -> 'density-raw' (and density_smoothed), the panels' projection 'mean' -> 'slab'."""
-    out = {k: (dict(v) if isinstance(v, dict) else v) for k, v in options.items()}
-    env = out.get("voidenv")
-    if isinstance(env, dict) and isinstance(env.get("criterion"), str):
-        env["criterion"] = env["criterion"].replace("_", "-")
-    panels = out.get("panels")
-    if isinstance(panels, dict) and panels.get("project") == "mean":
-        panels["project"] = "slab"
-    return out

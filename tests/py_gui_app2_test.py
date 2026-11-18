@@ -58,7 +58,9 @@ def snapdir(tmp: Path, sim: str = "TNGX-1-Dark", snap: int = 99) -> Path:
     return d
 
 
+# (with the header's 'run mode' line: a log without it is an older version's, whose settings the launcher does not read)
 LOG_OK = ("Build: PS-DTFE abc123 (built 2026-10-10T12:00:00Z)\nRUNNING: ./PS-DTFE in.hdf5 {root} --grid 8 --periodic\n"
+          "\t run mode               : performance (--run-mode performance; 10 of 10 threads)\n"
           "SUMMARY\n  total wall time : 1m 2s\n  peak memory (RSS) : 1.5 GB\n")
 
 
@@ -415,8 +417,9 @@ def t_qt(tmp: Path):
         rb.void_states.get(str(r.path), ("",))[0] == "stale" for r in rb._rows))
     # a killed run with its checkpoint directory shows 'resumable' in the Status column
     dk = snapdir(tmp, sim="TNGK-1-Dark", snap=99)
-    (dk / "ps_output.runlog.partial").write_text(f"RUNNING: ./PS-DTFE in.hdf5 {dk / 'ps_output'} --grid 8 "
-                                                 "--partition 2 2 2\n")
+    (dk / "ps_output.runlog.partial").write_text(
+        f"RUNNING: ./PS-DTFE in.hdf5 {dk / 'ps_output'} --grid 8 --partition 2 2 2\n"
+        "\t run mode               : performance (--run-mode performance; 10 of 10 threads)\n")
     (dk / "ps_output.runlog.checkpoint").mkdir()
     rb.filter.setText("")
     rb.reload()
@@ -522,23 +525,21 @@ def t_qt(tmp: Path):
               and sampled_cmd[1].get("DTFE_FACE_GRADIENT") == "" == exact_cmd[1].get("DTFE_FACE_GRADIENT"),
               ({k: std_env.get(k) for k in ("SUBSAMPLES", "THREADS", "FACE_GRADIENT", "DTFE_FACE_GRADIENT")},
                w.spec.estimator, sampled_cmd, exact_cmd))
-        # 'Load settings' of a run made with the completion-order merge or the linear deposit (settings the two modes
-        # replaced): the job takes the quality's (index order, no linear deposit) and its cell average is the
-        # Quality; nothing of the removed controls is kept behind it
-        (d / "co.runlog").write_text(LOG_OK.format(root=d / "co").replace("--periodic", "--periodic --completion-order-merge"))
+        # 'Load settings' of a run made with the completion-order merge (an Advanced row, which a log never sets): the
+        # job takes the quality's (index order); of an exact run: its cell average is the Quality; no Advanced
+        # setting is kept behind either
+        (d / "co.runlog").write_text(LOG_OK.format(root=d / "co").replace("--periodic",
+                                                                          "--periodic --ps-merge completion-order"))
         w._load_run_settings(R.parse_runlog(d / "co.runlog", "TNGQ-1-Dark", 99))
-        co_env = w.spec.command()[1]
-        ld_log = LOG_OK.format(root=d / "ld").replace("--periodic", "--periodic --ps-linear-deposit --exact")
-        (d / "ld.runlog").write_text(ld_log)
-        w._load_run_settings(R.parse_runlog(d / "ld.runlog", "TNGQ-1-Dark", 99))
-        ld_env, ld_q = w.spec.command()[1], (w.spec.quality, w.quality_pair.value())
+        co_env, co_adv = w.spec.command()[1], dict(w.spec.advanced)
+        (d / "ex.runlog").write_text(LOG_OK.format(root=d / "ex").replace("--periodic", "--periodic --exact"))
+        w._load_run_settings(R.parse_runlog(d / "ex.runlog", "TNGQ-1-Dark", 99))
+        ex_q, ex_adv = (w.spec.quality, w.quality_pair.value()), dict(w.spec.advanced)
         w._load_run_settings(R.parse_runlog(d / "ps_output.runlog", "TNGQ-1-Dark", 99))
-        check("'Load settings' of a run made with the completion-order merge or the linear deposit: the job takes the "
-              "quality's (PS_MERGE=index-order, PS_LINEAR_DEPOSIT=0), an exact run's cell average is Exact, and no "
-              "setting of the removed controls is kept",
-              co_env.get("PS_MERGE") == "index-order" and ld_env.get("PS_LINEAR_DEPOSIT") == "0"
-              and ld_q == ("exact", "exact") and not set(w.spec.to_dict()) & set(rs.REMOVED_SETTINGS),
-              (co_env.get("PS_MERGE"), ld_env.get("PS_LINEAR_DEPOSIT"), ld_q))
+        check("'Load settings' of a run made with the completion-order merge: the job takes the quality's "
+              "(PS_MERGE=index-order); an exact run's cell average is Exact; no Advanced setting is kept",
+              co_env.get("PS_MERGE") == "index-order" and ex_q == ("exact", "exact") and not co_adv and not ex_adv,
+              (co_env.get("PS_MERGE"), ex_q, co_adv, ex_adv))
         # the start-over tick (Grids, Pipeline) reaches run_ps_dtfe.sh as DTFE_RESUME=0; the banner of a
         # refused resume ticks it; its text has no '--'; 'Load settings' leaves it alone (a one-off choice)
         so, pso = getattr(w, "so_check", None), getattr(w, "p_so", None)
@@ -562,6 +563,7 @@ def t_qt(tmp: Path):
               (getattr(w.spec, "start_over", None), getattr(w.pipe, "start_over", None)))
         t_qt_void_options(w)
         t_qt_gpu_retries(tmp)
+        t_qt_older_load(tmp, w)
         t_qt_advanced(tmp, spin)
     finally:
         w._machine_timer.stop()
@@ -649,6 +651,49 @@ def t_qt_gpu_retries(tmp: Path):
     check("Runs tab: GPU retries per cause in 'Running now' (sidecar) and a finished run's status and details (log)",
           state == "running, 3 GPU retries (innocent 2, oom 1)" and status.endswith("2 GPU retries (timeout 2)")
           and "2 GPU retries (timeout 2)" in detail, (state, status, detail[-400:]))
+
+
+def t_qt_older_load(tmp: Path, w):
+    """'Load settings' needs a log whose settings the launcher reads: the Runs tab offers it for a current log (the
+    header's 'run mode' line), not for an older version's (a command without that line; a custom run's with its
+    settings sidecar too) nor for a log without any command; for those the window's load returns at once, says why
+    on the status line and leaves every job as it was."""
+    import runs_view as RV
+    root = tmp / "older_root"
+    older = "".join(ln for ln in LOG_OK.splitlines(True) if "run mode" not in ln)
+    for sim, text in (("TNGC-1-Dark", LOG_OK), ("TNGO-1-Dark", older),
+                      ("TNGN-1-Dark", "Build: PS-DTFE abc123 (built 2026-10-10T12:00:00Z)\nSUMMARY\n"
+                                      "  total wall time : 1m 2s\n")):
+        d = snapdir(root, sim=sim, snap=99)
+        (d / "ps_output.runlog").write_text(text.format(root=d / "ps_output"))
+    side_dir = root / "custom_older"
+    side_dir.mkdir()
+    (side_dir / "out.runlog").write_text(older.format(root=side_dir / "out"))
+    ran = rs.CustomSpec(input_file=str(side_dir / "in.hdf5"), output_dir=str(side_dir), output_name="out")
+    (side_dir / "out.gui.json").write_text(json.dumps(ran.to_dict()))
+    rb = RV.RunsBrowser(lambda: str(root), lambda: [str(side_dir)], sys.executable)
+    rb.reload()
+    offered = {}
+    for k, r in enumerate(rb._rows):
+        rb.table.selectRow(k)
+        offered[r.sim or "custom"] = (rb.b_load.isEnabled(), rb.table.item(k, RV.COLUMNS.index("Options")).text())
+    check("Runs tab: 'Load settings' offered for a current log only, not for an older version's (TNG or custom with "
+          "its sidecar: 'older version' in the Options column) nor for a log without any command (no options)",
+          offered.get("TNGC-1-Dark", (False, ""))[0] and offered.get("TNGC-1-Dark")[1] not in ("", "older version")
+          and offered.get("TNGO-1-Dark") == (False, "older version")
+          and offered.get("custom") == (False, "older version")
+          and offered.get("TNGN-1-Dark") == (False, ""), offered)
+    recs = {r.sim or "custom": r for r in rb._rows}
+    before = (w.spec.to_dict(), w.custom.to_dict(), w.tabs.currentIndex())
+    said = []
+    for key in ("TNGO-1-Dark", "custom", "TNGN-1-Dark"):
+        w._load_run_settings(recs[key])
+        said.append(w.status.text())
+    check("... and the window's load of each returns at once with its status line, every job as it was",
+          said == ["ps_output: made by an older version of the programs, whose settings are not read here",
+                   "out: made by an older version of the programs, whose settings are not read here",
+                   "ps_output: its log holds no command, so there are no settings to load"]
+          and (w.spec.to_dict(), w.custom.to_dict(), w.tabs.currentIndex()) == before, said)
 
 
 def t_qt_advanced(tmp: Path, spin):
@@ -758,7 +803,7 @@ def t_qt_advanced(tmp: Path, spin):
                 ok = (first == rs.AUTOMATIC and r.value() is None
                       and (c.value() == c.minimum() if r.is_number else c.currentIndex() == 0)
                       and g[t].form.labelForField(r).text() == rs.ADVANCED_ROW[k]
-                      and r.note.text() == rs.automatic_text(spec, k)
+                      and r.note.text() == rs.automatic_text(spec, k, w.mem_results)
                       and (r.is_number or items == [x for _, x in rs.advanced_choices(spec, k)]))
                 if not ok:
                     bad.append((t, k, first, items, r.note.text()))
@@ -838,11 +883,10 @@ def t_qt_advanced(tmp: Path, spin):
               and "ℹ  Advanced: Partitions: 4" in checks and g["grids"].summary_text() == "Partitions: 4"
               and g["custom"].summary_text() == "Concurrent triangulations: 2", (checks, g["grids"].summary_text()))
 
-        # the Device row: CPU on a GPU build moves the run and the 'Runs on' line says why (a GPU build faked: the
-        # device's stamp too, which Automatic's device reads, so a CPU-only build checks the same)
-        built, backend = rs.gpu_built, rs.gpu_build_default
+        # the Device row: CPU on a GPU build moves the run and the 'Runs on' line says why (a GPU build faked, so a
+        # CPU-only build checks the same)
+        built = rs.gpu_built
         rs.gpu_built = lambda *a, **k: True
-        rs.gpu_build_default = lambda *a, **k: True
         try:
             w.refresh()
             dev = w.adv_rows["grids"]["gpu"]
@@ -875,7 +919,7 @@ def t_qt_advanced(tmp: Path, spin):
             w.run_mode_combo.setCurrentIndex(w.run_mode_combo.findData("balanced"))
             spin(20)
         finally:
-            rs.gpu_built, rs.gpu_build_default = built, backend
+            rs.gpu_built = built
             w.refresh()
         check("the Device row (a GPU build): Automatic, CPU, GPU, CPU + GPU; CPU takes the run off the GPU and the "
               "'Runs on' line ends '(set in Advanced)'; back on Automatic it is gone",
@@ -885,13 +929,13 @@ def t_qt_advanced(tmp: Path, spin):
         check("... CPU + GPU: 'the CPU and the GPU together (set in Advanced)' with the precise statement as the "
               "line's tooltip, GPU_SHARE=mixed in the run and its memory check, 'Device: CPU + GPU' under 'Runs on'; "
               "GPU under Performance: every partition on the GPU (GPU_SHARE=1), the line says the GPU; on Automatic "
-              "in Performance the row's note and the line both say the job shares (GPU_SHARE=auto); under Fast CPU + "
-              "GPU is not passed, the note and the Checks say why",
+              "in Performance the row's note and the line both say the program picks (no tooltip before a memory "
+              "check; GPU_SHARE=auto); under Fast CPU + GPU is not passed, the note and the Checks say why",
               both == ("mixed", "Runs on: the CPU and the GPU together (set in Advanced)", rs.RUNS_ON_MIXED_TIP, "",
                        "mixed", "mixed", "Advanced: Device: CPU + GPU; Partitions: 4")
               and whole == (True, "Runs on: the GPU (set in Advanced)", "", "", "1")
-              and auto_perf == ("Runs on: the CPU and the GPU together (chosen for Exact, Performance)",
-                                "Automatic: CPU + GPU", True, "auto")
+              and auto_perf == ("Runs on: the device the program picks ('Check memory' names it)",
+                                "Automatic: the program picks", False, "auto")
               and fast[0] == "Not passed: only the Exact deposit can be shared" and fast[1] == "auto"
               and len(fast[2]) == 1 and fast[2][0].startswith("⚠  Advanced: Device set to CPU + GPU is not passed"),
               (both, whole, auto_perf, fast))
@@ -1159,24 +1203,6 @@ def t_qt_advanced(tmp: Path, spin):
                           "Advanced settings on: the loaded job has 1 setting in the Advanced group",
                           "Advanced: Concurrent triangulations: 2"),
           (first, kept_on, again, reopened, kept_off, started))
-
-    # at the start, the two-mode note (a queue saved before the two modes) must not hide that a remembered job with
-    # an Advanced setting switched them on
-    ini3 = str(tmp / "advanced-modes-note.ini")
-    st3 = QSettings(ini3, QSettings.IniFormat)
-    st3.setValue("pipeline", json.dumps(rs.PipelineSpec(advanced={"max_concurrent": 2}).to_dict()))
-    old_spec = {k: v for k, v in rs.RunSpec().to_dict().items() if k != "quality"}
-    st3.setValue("queue", json.dumps([{"kind": "grids", "spec": dict(old_spec, deposit="sampled"), "title": "older"}]))
-    st3.sync()
-    w4 = A.MainWindow(remember=True, settings=QSettings(ini3, QSettings.IniFormat))
-    both = (w4.advanced_on, w4.status.text(), [j.title for j in w4.queue])
-    w4._machine_timer.stop()
-    w4.close()
-    check("at the start, the two-mode note does not hide 'Advanced settings on' (a remembered job with a setting "
-          "beside a queue saved before the two modes): the status line says both; the old entry's title is made "
-          "again in the two modes' words",
-          both[:2] == (True, rs.MODES_NOTE + "; Advanced settings on") and both[2] != ["older"]
-          and both[2][0].endswith(", Fast"), both)
 
 
 def main() -> int:

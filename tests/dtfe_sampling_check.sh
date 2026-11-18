@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Golden and analytic checks of the standard binary's sampling variants that no other suite runs: the volume
-# averages '--average-method 2' (random points in each grid cell, seeded) and '--average-method 3' (equidistant points), the
-# redshift-cone grid ('--redshift-cone', unaveraged and averaged), the regular grid's point values, and user-given
+# average '--average-method 2' (random points in each grid cell, seeded), the redshift-cone grid ('--redshift-cone',
+# unaveraged and averaged), the regular grid's point values, and user-given
 # sampling points (unaveraged and averaged; only the library API reaches them: tests/dtfe_user_sampling.cpp, built
 # against libDTFE when 'make library' has made one): averaged_interpolation_2.cc, unaveraged_interpolation.cc and
 # the sample_eval.h they share, so that a change to them is held to these numbers.
@@ -15,8 +15,6 @@
 # and more threads split a regular grid into sub-domains.
 #   S1  the regular grid's point values: velocity = A x + b and gradient = A at the cell centres; density = the
 #       '--sample-points' evaluation at the same points (exact point location, another code path)
-#   S2  method 3, 3^3 equidistant points: density_a = the mean of the 27 point values, i.e. of the 3x finer grid's
-#       '.den' over each cell; velocity_a = A x_c + b (the points are symmetric about the centre); gradient_a = A
 #   S3  method 2, 20 random points: gradient_a = A; the samples' mean position, A^-1 (velocity_a - b), lies inside
 #       its own cell and scatters about the centre by dx / sqrt(12 x 20) per axis (within 40%); density_a against
 #       '--exact' (Monte-Carlo noise only: rms 0.082 of the mean, 0.04-0.16 accepted); velocityStd_a's mean
@@ -44,9 +42,13 @@
 #   S9  user points outside the region (libDTFE): one before and two after the 64 points; the outputs keep one entry
 #       per sample, 0 at the outside ones, and the 64 others equal the plain run's bit for bit (point values and
 #       method 2: an outside sample neither locates nor draws)
+#   S10 the options no other run spells: the files named by '--input-file' and '--output-file', '--output-format 101',
+#       '--scalars-extensive' (read by the SPH scalar path; this run has no scalar field), '--sph 32' and
+#       '--particle-fraction 0.5 --seed 11', on an 8^3 grid without a region, '--field density': exit 0, and SPH's
+#       cell values in '.a_den' (8^3 finite values, some above 0; no '.den'). Every build has these options
 # The user-sampling part (S6, S7's user values, S9) needs libDTFE (single precision): without it, or in the double pass,
 # it is a SKIP line and the rest still runs; '--require-library' makes a missing library a failure.
-# About 4 s on the Mac (nine runs of 4096 particles), plus ~10 s to build the user-sampling driver the first time.
+# About 4 s on the Mac (eight runs of 4096 particles), plus ~10 s to build the user-sampling driver the first time.
 # Usage: tests/dtfe_sampling_check.sh [--no-build] [--require-library] [--update-reference]
 #   --no-build           accepted and ignored: nothing of the binaries is built (the driver is, when it is stale)
 #   --update-reference   rewrite tests/reference/sampling_golden.txt from this run (single precision, with libDTFE)
@@ -103,8 +105,7 @@ PYEOF
 
 # method 2's 20 random points per cell (NS), with which S7's golden values are drawn: a total that no '--subsamples k'
 # (k^3) gives, so the method-2 runs name no count and take method 2's own default, 20 (user_options.cc
-# readAveragingOptions; the cone and the user points keep it too). The deprecated total '--samples 20' gave the same
-# 20 draws; it goes with the old spellings (docs/cleanup-plan.md P6.6), the default stays. '--padding 5': S7's golden
+# readAveragingOptions; the cone and the user points keep it too). '--padding 5': S7's golden
 # values and the measured bounds below were made at the binary's padding of before (5 mean spacings; 15 since), so
 # every run names it
 C0=(--input-format 105 --mpc-unit 1 --no-padding-test --verbose 1 --padding 5)
@@ -122,13 +123,11 @@ runx() {
     OMP_NUM_THREADS=1 "$prog" "$snap" "$TMP/$name" "${C0[@]}" "$@" > "$TMP/$name.log" 2>&1 \
         || { echo "FAIL: run $name (see $TMP/$name.log)"; tail -5 "$TMP/$name.log"; exit 1; }
 }
-echo ">> the regular grid (point values + '--sample-points'), method 2, method 3, the 3x finer grid, --exact"
+echo ">> the regular grid (point values + '--sample-points'), method 2, --exact"
 # (an '--average-method' or a sample count selects the sampled average by itself: the exact one is the default since
-# 2026-11-09, and the method-2 / method-3 runs here need no '--sampled')
+# 2026-11-09, and the method-2 runs here need no '--sampled')
 run u "${DTFE_BIN}" --grid 8 --field density velocity gradient density_a velocity_a gradient_a velocityStd_a \
     --average-method 2 --seed "$SEED" --sample-points "$TMP/pts.txt"
-run m3 "${DTFE_BIN}" --grid 8 --field density_a velocity_a gradient_a --average-method 3 --subsamples 3
-run f "${DTFE_BIN}" --grid 24 --field density
 run x "${DTFE_BIN}" --grid 8 --field density_a --exact
 echo ">> the redshift cone (point values and method 2)"
 run c "${DTFE_BIN}" "${CONE[@]}" --field density velocity gradient density_a velocity_a gradient_a --average-method 2 --seed "$SEED"
@@ -137,6 +136,12 @@ runx c2 "$TMP/snap.hdf5" "${DTFE_BIN}" --region-mpc 0 10 0 10 0 10 --grid 4 4 6 
     --field density velocity gradient --sample-points "$TMP/c2pts.txt"
 runx g2 "$TMP/slab.hdf5" "${DTFE_BIN}" --region-mpc 2.5 7.5 2.5 7.5 0 10 --grid 8 8 16 --field density velocity gradient \
     --sample-points "$TMP/g2pts.txt"
+echo ">> the files named by option, the binary output format, SPH on a random half of the particles"
+# S10: the two file names by their options ('--input-file', '--output-file': the positional arguments' own names), so
+# not through run / runx
+OMP_NUM_THREADS=1 "${DTFE_BIN}" --input-file "$TMP/snap.hdf5" --output-file "$TMP/sph" "${C0[@]}" --grid 8 --field density \
+    --output-format 101 --scalars-extensive --sph 32 --particle-fraction 0.5 --seed 11 > "$TMP/sph.log" 2>&1 \
+    || { echo "FAIL: run sph (see $TMP/sph.log)"; tail -5 "$TMP/sph.log"; exit 1; }
 
 # user sampling: the driver against libDTFE (single precision only: the library is built single)
 USER_OK=0; USER_WHY=""
@@ -199,7 +204,7 @@ cone_x = cone_centres()
 nc = cone_x.shape[0]
 us = user_samples()
 # measured on the Mac (single; the double build is closer): velocities 8e-8, gradients 8e-6 (a thin tetrahedron's
-# rounding), densities against the point evaluation 2e-6 and method 3 against the finer grid 5e-6
+# rounding), densities against the point evaluation 2e-6
 TOL_V, TOL_G, TOL_D = 1e-6, 1e-4, 2e-5    # relative to the largest |v|, to max|A|, per value
 
 def vel_check(tag, what, v, x):
@@ -228,14 +233,6 @@ def mean_check(tag, what, va, centre, half, spread=None):
 vel_check("S1", "grid points", rd("u", "vel", 3), xc)
 grad_check("S1", "grid points", rd("u", "velGrad", 9))
 den_check("S1", "grid points", rd("u", "den"), pts_den[:ng])
-# S2 method 3
-fine = rd("f", "den").reshape(3 * GRID, 3 * GRID, 3 * GRID)
-block = fine.reshape(GRID, 3, GRID, 3, GRID, 3).mean(axis=(1, 3, 5)).ravel()
-m3 = rd("m3", "a_den")
-rel = np.abs(m3 - block) / np.abs(block)
-check("S2", float(rel.max()) < TOL_D, f"method 3: density_a = the 3x finer grid's mean over each cell to {rel.max():.1e} (< {TOL_D:.0e})")
-vel_check("S2", "method 3", rd("m3", "a_vel", 3), xc)
-grad_check("S2", "method 3", rd("m3", "a_velGrad", 9))
 # S3 method 2
 grad_check("S3", "method 2", rd("u", "a_velGrad", 9))
 mean_check("S3", "method 2", rd("u", "a_vel", 3), xc, dx / 2, dx / np.sqrt(12 * NS))
@@ -293,6 +290,14 @@ if user_ok:
         ok = a.shape[0] == ref.shape[0] + 3 and bool((a[[0, -2, -1]] == 0).all()) and bool((a[1:-2] == ref).all())
         check("S9", ok, f"user points outside the region, .{ext}: {a.shape[0]} entries for {ref.shape[0] + 3} samples, "
                         f"0 at the 3 outside ones, the others = the plain run bit for bit")
+# S10 the files named by option, SPH on a random half: SPH writes cell values only, so 'density' is its '.a_den'
+sph = os.path.join(tmp, "sph.a_den")
+s10_ok = os.path.exists(sph) and os.path.getsize(sph) == 8 ** 3 * REAL.itemsize \
+    and not os.path.exists(os.path.join(tmp, "sph.den"))
+s10 = rd("sph", "a_den") if s10_ok else np.zeros(0)
+check("S10", s10_ok and bool(np.isfinite(s10).all()) and float(s10.max()) > 0,
+      f"'--input-file --output-file --output-format 101 --scalars-extensive --sph 32 --particle-fraction 0.5 --seed 11': "
+      f"'.a_den' of {s10.size} cells (8^3), finite, largest {float(s10.max()) if s10.size else 0.:.3g} (> 0), no '.den'")
 # S7 the golden realizations
 golden = {"cone_density_a": rd("c", "a_den"), "cone_velocity_a": rd("c", "a_vel")}   # (gradient_a = A: S5, S6)
 if user_ok:

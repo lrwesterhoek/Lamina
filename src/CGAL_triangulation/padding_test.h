@@ -32,6 +32,7 @@
 #ifdef TEST_PADDING
 /* Padding-efficiency tests: flag grid cells whose interpolation is unreliable because the
    Delaunay tessellation is incomplete (their cell has dummy vertices/neighbors). */
+#include <cstdio>
 #include <fstream>
 
 

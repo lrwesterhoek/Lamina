@@ -53,7 +53,6 @@ void interpolateGrid(DT &dt,
             << "\t Done:   " << MESSAGE::Flush;
 
 
-    // reserve output fields (zero-filled if the triangulation is undefined)
     size_t reserveSize = 1;
     for (size_t i=0; i<NO_DIM; ++i)
         reserveSize *= nGrid[i];
@@ -103,7 +102,6 @@ void interpolateRedshiftCone(DT &dt,
             << "\t Done:   " << MESSAGE::Flush;
 
 
-    // reserve output fields (zero-filled if the triangulation is undefined)
     size_t reserveSize = 1;
     for (size_t i=0; i<NO_DIM; ++i)
         reserveSize *= nGrid[i];
@@ -142,7 +140,6 @@ void interpolateUserSampling(DT &dt,
             << "\t Done:   " << MESSAGE::Flush;
 
 
-    // reserve output fields (zero-filled if the triangulation is undefined)
     if ( not out.reserve( samples.size(), dt ) ) return;     // no interpolation possible without cells
 
 

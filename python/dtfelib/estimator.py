@@ -159,15 +159,14 @@ class Estimator:
     snapshot           Gadget snapshot the binary reads (HDF5 by default, input_type=105).
     phase_space        True: PS-DTFE (multi-stream fields; needs Lagrangian positions, from the
                        snapshot's 'InitialCoordinates' or lagrangian_input). False: standard DTFE.
+                       lagrangian_input ('--ps-lagrangian-input') needs input_type 105: only the HDF5
+                       Gadget reader gives the particle IDs the Lagrangian positions are matched by.
     periodic           periodic box (default True).
     mpc_unit           '--mpc-unit' (length of 1 Mpc in input units); None keeps the binary's
                        default (1000, for ckpc/h snapshots).
     per_stream, per_stream_ids, density_gradient, velocity_gradient, caustics
                        the matching '--sample-points' outputs (--ps-per-stream, --ps-per-stream-ids,
                        --pts-den-grad, --pts-vel-grad, --ps-caustics).
-    stream_density     'dtfe' (default; also spelled 'linear'): the per-stream density is the linear
-                       interpolation of the vertex densities, the binary's '--ps-stream-density linear'.
-                       'geometric' was removed (a ValueError says so).
     scalars            interpolate the particles' scalar value too ('--pts-scalar'); needs a
                        scalar source, normally scalar_dataset.
     scalar_dataset     per-particle HDF5 dataset read as that scalar ('--scalar-dataset', e.g.
@@ -216,7 +215,7 @@ class Estimator:
                  mpc_unit: float | None = None, input_type: int = 105,
                  lagrangian_input=None, per_stream: bool = False, per_stream_ids: bool = False,
                  density_gradient: bool = False, velocity_gradient: bool = False,
-                 caustics: bool = False, stream_density: str = "dtfe",
+                 caustics: bool = False,
                  scalars: bool = False, scalar_dataset: str | None = None,
                  lagrangian_positions: bool = False,
                  tessellation_cache=None, partition=None, resident: int | None = None,
@@ -233,13 +232,6 @@ class Estimator:
             raise ValueError(f"dim must be 2 or 3, not {dim!r}")
         self.dim = int(dim)             # confirmed (or corrected) by the server's handshake
         self._closed = True             # until the server is up (close() is then a no-op)
-        # the stream density first, before the snapshot and the binary are looked for: a removed choice is said
-        # whatever else is missing
-        if stream_density == "geometric":
-            raise ValueError("stream_density 'geometric' was removed: the per-stream density is the linear "
-                             "interpolation of the vertex densities ('dtfe', also spelled 'linear')")
-        if stream_density not in ("dtfe", "linear"):
-            raise ValueError(f"stream_density must be 'dtfe' (also spelled 'linear'), not {stream_density!r}")
         self.snapshot = Path(snapshot)
         if not self.snapshot.exists():
             raise FileNotFoundError(f"snapshot not found: {self.snapshot}")
@@ -269,8 +261,6 @@ class Estimator:
             cmd.append("--pts-vel-grad")
         if caustics:
             cmd.append("--ps-caustics")
-        if self.phase_space:
-            cmd += ["--ps-stream-density", "linear"]          # ('dtfe' and 'linear' alike)
         if scalar_dataset:
             cmd += ["--scalar-dataset", str(scalar_dataset)]
             scalars = True
@@ -295,7 +285,7 @@ class Estimator:
         options = [str(o) for o in options]
         if padding is None and not self.phase_space:
             padding = STANDARD_PADDING
-        if padding is not None and not any(o in ("--padding", "--padding-mpc", "--paddingMpc") for o in options):
+        if padding is not None and not any(o in ("--padding", "--padding-mpc") for o in options):
             cmd += ["--padding", f"{float(padding):g}"]
         cmd += options
         self.command = cmd
@@ -591,7 +581,7 @@ class Estimator:
         that the server reads (deleted again by close()), so every option of the constructor applies.
 
         positions   (N, 3) Eulerian positions, in Mpc (any consistent length unit: the box and
-                    the query points use the same one; MpcUnit is 1). (N, 2) builds a 2D Estimator
+                    the query points use the same one; --mpc-unit is 1). (N, 2) builds a 2D Estimator
                     (the DIM=2 binaries), with every array below 2-component too
         velocities  (N, 3), returned as given (no scale-factor conversion); default zeros
         masses      scalar or (N,); default 1 per particle. Densities come out as rho/rho_bar,

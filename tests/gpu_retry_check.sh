@@ -9,8 +9,7 @@
 #   R1  one-thread-per-tet deposit, an 'innocent victim' fault at buffer 3: the run stays on the GPU, logs
 #       the resume from the checkpoint at the same pace, its '.a_den' (the exact fixed-point mass grid) is
 #       byte-identical to a run without the fault, '.a_streams' identical, and so is '.a_vel': the moment
-#       grids are exact fixed-point sums too. DTFE_GPU_FLOAT_MOMENTS=1 in the environment selects the float sums
-#       (4e-7 apart run to run) and a tolerance of 1e-6 of the peak
+#       grids are exact fixed-point sums too
 #   R2  --exact (the items passes + leftovers), an 'oom' fault: same assertions, and the pace
 #       escalates (shorter buffers) as a resource error should; its '.a_streams' (the exact multiplicity) is a
 #       fixed-point sum as well: identical
@@ -30,9 +29,6 @@
 #       90 s, a ~1 s run) keeps the escalation for the rest of its deposits. The pace is process-wide, so the
 #       later partitions start from the eased pace -- inferred from the log line, not observed with a second
 #       injected fault.
-#   R8  the run-wide units' device words (DTFE_PS_RUN_UNITS=1: 128-bit words on the device and in the host's
-#       snapshot, where the default's passes hold 64-bit words): R1's and R2's faults once more under that switch,
-#       with R1's and R2's assertions, and each run's log holds the units line of the run-wide path
 # GPU builds only (METAL=1): skipped (exit 0) otherwise, a local GPU suite like tests/gpu_mass_check.sh (not in
 # tests/ci_suite.sh). ~20 s on Metal (M1 Max).
 # Usage: tests/gpu_retry_check.sh [--no-build]   (--no-build is accepted and ignored)
@@ -43,9 +39,9 @@ cd "$ROOT" || exit 1
 source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double pair
 precision_require "${PS_BIN}"
 [ -x "${PS_BIN}" ] || { echo "FAIL: ${PS_BIN} is not built"; exit 1; }
-OBJ=o_ps; precision_double && OBJ=o_ps_d
+OBJ="$PS_OBJ"
 require_gpu_backend "$OBJ"                                # SKIP without a Metal build (tests/lib.sh)
-TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}/gpu_retry_check"
+TMP="${DTFE_TEST_TMP}/gpu_retry_check"
 mkdir -p "$TMP"
 SNAP="$TMP/waves.hdf5"
 [ -f "$SNAP" ] || "$PY" tests/generate_ps_test_data.py --out "$SNAP" --n 48 --box 100 --amplitude-factor 1.8 \
@@ -75,12 +71,6 @@ echo ">> R7: the same watchdog fault, then the pace recovers after a clean stret
 run "$TMP/p2" env DTFE_GPU_FAULT_AT=9:timeout DTFE_GPU_PACE_RECOVER_SEC=0 "${PS_BIN}" "$SNAP" "$TMP/p2" "${C[@]}" "${P[@]}"
 echo ">> R4: a persistent fault from buffer 3 on: the partition goes to the CPU"
 ALLOW_CPU=1 run "$TMP/x1" env DTFE_GPU_FAULT_AT=3:persist "${PS_BIN}" "$SNAP" "$TMP/x1" "${C[@]}"
-echo ">> R8: R1's and R2's faults on the run-wide units' 128-bit device words (DTFE_PS_RUN_UNITS=1)"
-W8=(env -u DTFE_RUN_UNITS_LEGACY DTFE_PS_RUN_UNITS=1)
-run "$TMP/w0" "${W8[@]}" "${PS_BIN}" "$SNAP" "$TMP/w0" "${C[@]}"
-run "$TMP/w1" "${W8[@]}" DTFE_GPU_FAULT_AT=3 "${PS_BIN}" "$SNAP" "$TMP/w1" "${C[@]}"
-run "$TMP/we0" "${W8[@]}" "${PS_BIN}" "$SNAP" "$TMP/we0" "${C[@]}" --exact
-run "$TMP/we1" "${W8[@]}" DTFE_GPU_FAULT_AT=3:oom "${PS_BIN}" "$SNAP" "$TMP/we1" "${C[@]}" --exact
 "$PY" - "$TMP" <<'PYEOF'
 import numpy as np, re, sys
 import os as _os; REAL = np.dtype(_os.environ.get("DTFE_TEST_REAL", "float32"))   # tests/precision.sh
@@ -100,9 +90,7 @@ def failed_buffers(text):
 for tag, ref, run, what, cause, pace in (
         ("R1", "t0", "t1", "per-tet deposit", "innocent victim", "250 ms"),
         ("R2", "e0", "e1", "--exact", "resource", "62 ms"),
-        ("R3", "p0", "p1", "--partition 2 2 2", "watchdog", None),
-        ("R8", "w0", "w1", "per-tet deposit, run-wide units", "innocent victim", "250 ms"),
-        ("R8", "we0", "we1", "--exact, run-wide units", "resource", "62 ms")):
+        ("R3", "p0", "p1", "--partition 2 2 2", "watchdog", None)):
     L = log(run)
     resumed = re.search(r"\[" + cause + r"\] -- resuming from the (checkpoint|pass start) at thread", L)
     check(tag, resumed is not None and "recovered on the GPU" in L,
@@ -114,22 +102,12 @@ for tag, ref, run, what, cause, pace in (
     x, y = (tmp / f"{ref}.a_den").read_bytes(), (tmp / f"{run}.a_den").read_bytes()
     check(tag, len(x) > 0 and x == y, f"{what}: '.a_den' byte-identical to the run without the fault ({len(x)} bytes)")
     # the stream count is an integer atomic, and the velocity moment and the exact deposit's
-    # multiplicity are exact fixed-point sums: all identical (the float sums of DTFE_GPU_FLOAT_MOMENTS=1
-    # only to 1e-6 of the peak -- they differ run to run by ~3e-7)
-    floatMoments = any(_os.environ.get(k, "0") not in ("", "0") for k in ("DTFE_GPU_FLOAT_MOMENTS", "PS_GPU_FLOAT_MOMENTS"))   # (the old name: deprecated, still read)
-    for ext, exact in (("a_streams", not (floatMoments and what.startswith("--exact"))), ("a_vel", not floatMoments)):
+    # multiplicity are exact fixed-point sums: all identical
+    for ext in ("a_streams", "a_vel"):
         a, b = rd(ref, ext), rd(run, ext)
-        if exact:
-            check(tag, np.array_equal(a, b), f"{what}: '.{ext}' identical")
-            continue
-        peak = float(np.abs(a - b).max() / max(np.abs(a).max(), 1e-300))
-        check(tag, a.size == b.size and peak < 1e-6, f"{what}: '.{ext}' peak-rel {peak:.1e} (< 1e-6)")
+        check(tag, np.array_equal(a, b), f"{what}: '.{ext}' identical")
 check("R1", "resuming from the checkpoint at thread" in log("t1"),
       "the retry starts from a periodic checkpoint, not from the pass start")
-for name in ("w0", "w1", "we0", "we1"):
-    L = log(name)
-    check("R8", "fixed-point units (run-wide): cell volume" in L and "units of their own" not in L,
-          f"{name}: summed in the run-wide units (its units line, without the per-pass note)")
 L = log("x1")
 check("R4", "3 failures of the same chunk" in L and "gave up" in L
       and re.search(r"using the CPU deposit|deposit unavailable|ran on the CPU instead", L) is not None,

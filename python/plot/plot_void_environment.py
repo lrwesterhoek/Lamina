@@ -60,12 +60,10 @@ from dtfelib import voids as V
 from dtfelib import figures as style
 from dtfelib import cli
 
-# --criterion's spellings at the command line (R6: words joined by '-') against classify.CRITERIA's names, which stay
-# what they are inside: the npz keys (f_vic_<c>, agree_<a>__<b>, the stored 'criterion') and the figure tags (critique
-# 22). The underscore spelling of before is read with a warning for one release.
+# --criterion's spellings at the command line (words joined by '-') against classify.CRITERIA's names, which stay
+# what they are inside: the npz keys (f_vic_<c>, agree_<a>__<b>, the stored 'criterion') and the figure tags.
 CRITERION_ARGS = tuple(c.replace("_", "-") for c in classify.CRITERIA)
 criterion_arg = cli.choice_type("--criterion", CRITERION_ARGS,
-                                old={c: c.replace("_", "-") for c in classify.CRITERIA if "_" in c},
                                 internal={c.replace("_", "-"): c for c in classify.CRITERIA})
 
 FOLDER = "void_environment"

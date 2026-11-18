@@ -400,7 +400,7 @@ class MenusMixin:
 
     def start_demo(self):
         """The demo (runspec.demo_spec): generate, run, then open it in Explore."""
-        demo = rs.demo_spec()               # (Exact, on its quality's device: CustomSpec.mode())
+        demo = rs.demo_spec()               # (Exact; the program picks its device)
         self.custom = demo
         self._load_into_widgets()
         self.tabs.setCurrentIndex(_app.OWN)

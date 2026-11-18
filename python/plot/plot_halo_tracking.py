@@ -40,7 +40,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
-from dtfelib import make_parser, use_data_root, add_ps_gradient_arg, mean_field_wanted, deprecated_alias
+from dtfelib import make_parser, use_data_root, add_ps_gradient_arg, mean_field_wanted
 from dtfelib.trees import TreeSet
 from dtfelib import groupcat as gc
 from dtfelib import environment as env
@@ -243,10 +243,8 @@ def main():
     def extra(p):
         p.add_argument("--subhalos", dest="subhalo", type=int, nargs="+", metavar="ID",
                        help="SubfindID(s) at --start-snap to track (default: the --n-halos most massive centrals)")
-        deprecated_alias(p, "--subhalo", "--subhalos")
         p.add_argument("--n-halos", dest="top", type=int, default=5, metavar="N",
                        help="if --subhalos is not given: track the N most massive centrals (default 5)")
-        deprecated_alias(p, "--top", "--n-halos")
         p.add_argument("--min-ratio", type=float, default=0.1,
                        help="minimum secondary/main mass ratio for a merger tick (default 0.1)")
         p.add_argument("--no-environment", action="store_true",

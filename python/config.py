@@ -98,14 +98,13 @@ def footprint_for(sigma_cells):
     return max(3, 2 * int(round((1.1 * float(sigma_cells) - 1.0) / 2.0)) + 1)
 
 
-# A smoothing length FIXED IN Mpc: DTFE_SMOOTH_MPC=2.16 (DTFE_SIGMA_MPC, its older name, read for one release with a
-# warning: dtfelib.cli.smooth_mpc_env) smooths every box at the same physical scale --
-# 10 cells is 1.0 / 2.2 / 5.9 Mpc in TNG50 / 100 / 300, so their 10-cell catalogues are different voids -- and the
-# footprint follows it (footprint_for). Here, at import, so every module-level copy follows; the void scripts'
-# --smooth-mpc does the same at run time (dtfelib.pipeline.set_smoothing). FOR THE VOID SCRIPTS AND 'analyze.py export'
-# (which tag their outputs): analyze.py compute/plot/all refuse to run under it (the core figures are saved under
-# their production names). The cells are rounded to 1e-9, so 10 x CELL_SIZE gives exactly 10.0 cells, footprint 11
-# and the production caches.
+# A smoothing length FIXED IN Mpc: DTFE_SMOOTH_MPC=2.16 (dtfelib.cli.smooth_mpc_env) smooths every box at the same
+# physical scale -- 10 cells is 1.0 / 2.2 / 5.9 Mpc in TNG50 / 100 / 300, so their 10-cell catalogues are different
+# voids -- and the footprint follows it (footprint_for). Here, at import, so every module-level copy follows; the
+# void scripts' --smooth-mpc does the same at run time (dtfelib.pipeline.set_smoothing). FOR THE VOID SCRIPTS AND
+# 'analyze.py export' (which tag their outputs): analyze.py compute/plot/all refuse to run under it (the core
+# figures are saved under their production names). The cells are rounded to 1e-9, so 10 x CELL_SIZE gives exactly
+# 10.0 cells, footprint 11 and the production caches.
 _SMOOTH_MPC_ENV = smooth_mpc_env()
 if _SMOOTH_MPC_ENV:
     SMOOTHING_SIGMA_CELLS = round(float(_SMOOTH_MPC_ENV)

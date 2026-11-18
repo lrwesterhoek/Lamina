@@ -1,6 +1,5 @@
-/* The run's PHASE TOTALS (docs/cleanup-plan.md P11.2): the seconds every timed computation stage took, summed over
-   all threads and sub-domains of the process, by the stage's label -- the figures the device rule of P11.4 and the
-   sub-domain pipeline of P11.6 are planned from. printComputationTime (CGAL_triangulation/triangulation_miscellaneous.h)
+/* The run's PHASE TOTALS: the seconds every timed computation stage took, summed over all threads and sub-domains
+   of the process, by the stage's label. printComputationTime (CGAL_triangulation/triangulation_miscellaneous.h)
    adds every stage it times, whatever the verbosity (the sub-domain threads print nothing), and phaseTotalsReport
    prints one line per stage at the end of a run (DTFE.cpp dtfeFinishFields), for both binaries. The sums are wall
    seconds of the stages, so with concurrent sub-domains they exceed the run's wall time: a stage's share of the

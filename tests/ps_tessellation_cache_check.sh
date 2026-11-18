@@ -28,7 +28,8 @@
 #     region the sub-domain's full box), a warm run that loads them all (the folder left untouched) and outputs
 #     byte-identical to the uncached run; under '--sample-points' one file per partition (keyed by the partition's own
 #     'region='), byte-identical too.
-#  H) New files carry the CHUNKED body; single-stream files still load; the converter rewrites them.
+#  H) New files carry the CHUNKED body and say 'format=3'; a file of format 2 (a new file with its format line
+#     rewritten) is a MISS, and the run rebuilds it: rewritten as format 3, outputs bit-identical, then hit.
 #  I) The block-wise triangulation reader builds exactly CGAL's triangulation (structure hashes),
 #     and the block-wise writer writes exactly CGAL's bytes.
 #  J) A symlinked or relative name of the input hits the cache its absolute name wrote (canonical keys).
@@ -36,9 +37,9 @@
 #  L) Two runs writing one cache folder at the same moment both succeed and leave a whole cache and no temp
 #     file: each writer has its own '<file>.part.<pid>' / '<map>.occ.tmp.<pid>'.
 #  M) A save removes the temp files of DEAD writers of that file and keeps a live writer's.
-#  N) A file in CGAL's vertex numbering (written under DTFE_PS_VERTEX_ORDER_LEGACY=1, as by every binary without the
-#     canonical order of src/CGAL_triangulation/ps_vertex_order.h) is renumbered on load: the hit's grids equal the
-#     uncached run's byte for byte and its log names the cells renumbered; a canonical file's load renumbers none.
+#  N) A PS-DTFE file holds the canonical vertex order of src/CGAL_triangulation/ps_vertex_order.h (the cells are
+#     renumbered after the insert, before the save): a run that loads it renumbers no cell and writes the uncached
+#     run's grids byte for byte.
 #  A2) The body is DEFLATED while magic/version/descriptor stay plaintext, so a staleness check
 #     needs no inflation. Compression takes 735 MB down to 225 MB per 1.5e6 vertices at zlib
 #     level 1 -- level 6 saves a further 5% but costs 24 s more on every write.
@@ -55,7 +56,7 @@ source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double
 N="${N:-24}"; GRID="${GRID:-48}"; BOX="${BOX:-100.0}"
 BIN="${PS_BIN}"
 precision_require "${BIN}"
-TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}"; mkdir -p "${TMP}"
+TMP="${DTFE_TEST_TMP}"
 SNAP="${TMP}/ptc_input.hdf5"
 # The cache must live on a LOCAL volume -- the binary rejects iCloud Drive, where a repository may sit.
 # ${TMPDIR:-/tmp} keeps this working on Linux CI, where /private/tmp does not exist and the binary
@@ -89,7 +90,7 @@ COMMON=(--periodic --field density velocity --mpc-unit 1 --max-concurrent 1 --sa
 
 fails=0
 note() { echo "   $1"; }
-check() { if [ "$1" = "1" ]; then echo "   PASS  $2"; else echo "   FAIL  $2"; fails=$((fails+1)); fi; }
+# check_yes <1 = pass> <text> (it counts a failure in fails): tests/lib.sh
 
 # run <outroot> <grid> <extra args...>; captures stdout in RUN_OUT. A non-zero exit must not kill
 # the script under 'set -e' -- the checks below report it as a failure instead.
@@ -103,11 +104,11 @@ echo ""
 echo "(A) first run misses and writes, second run hits"
 run "${TMP}/ptc_out_nocache" "${GRID}"                                   # reference, no cache
 run "${TMP}/ptc_out_write" "${GRID}" --tessellation-cache "${CACHE}"
-check "$([ "$(hits)" = "0" ] && echo 1 || echo 0)" "first cached run is a MISS"
+check_yes "$([ "$(hits)" = "0" ] && echo 1 || echo 0)" "first cached run is a MISS"
 nfiles=$(ls -1 "${CACHE}"/*.tess 2>/dev/null | wc -l | tr -d ' ')
-check "$([ "${nfiles}" = "1" ] && echo 1 || echo 0)" "exactly one cache file written (got ${nfiles})"
+check_yes "$([ "${nfiles}" = "1" ] && echo 1 || echo 0)" "exactly one cache file written (got ${nfiles})"
 run "${TMP}/ptc_out_hit" "${GRID}" --tessellation-cache "${CACHE}"
-check "$([ "$(hits)" -ge "1" ] && echo 1 || echo 0)" "second run HITS (different output root)"
+check_yes "$([ "$(hits)" -ge "1" ] && echo 1 || echo 0)" "second run HITS (different output root)"
 
 echo ""
 echo "(A2) the file is compressed, with a PLAINTEXT header"
@@ -117,20 +118,20 @@ echo "(A2) the file is compressed, with a PLAINTEXT header"
 tessfile=$(ls -1 "${CACHE}"/*.tess 2>/dev/null | head -1)
 if [ -n "${tessfile}" ]; then
     head -c 8 "${tessfile}" | grep -q "DTFETESS" \
-        && check 1 "header starts with the plaintext magic" \
-        || check 0 "header starts with the plaintext magic"
+        && check_yes 1 "header starts with the plaintext magic" \
+        || check_yes 0 "header starts with the plaintext magic"
     # the gzip magic (1f 8b) must appear AFTER the header, not at byte 0
     zoff=$("${PY}" -c "
 import sys
 d = open(sys.argv[1], 'rb').read(65536)
 sys.stdout.write(str(d.find(b'\x1f\x8b')))
 " "${tessfile}")
-    check "$([ "${zoff}" -gt "8" ] && echo 1 || echo 0)" "deflated body begins after the header (gzip magic at byte ${zoff})"
+    check_yes "$([ "${zoff}" -gt "8" ] && echo 1 || echo 0)" "deflated body begins after the header (gzip magic at byte ${zoff})"
     grep -aq "format=" "${tessfile}" \
-        && check 1 "descriptor is readable without inflating" \
-        || check 0 "descriptor is readable without inflating"
+        && check_yes 1 "descriptor is readable without inflating" \
+        || check_yes 0 "descriptor is readable without inflating"
 else
-    check 0 "a cache file exists to inspect"
+    check_yes 0 "a cache file exists to inspect"
 fi
 
 echo ""
@@ -139,24 +140,24 @@ for f in "${TMP}"/ptc_out_nocache.*; do
     ext="${f##*ptc_out_nocache}"
     g="${TMP}/ptc_out_hit${ext}"
     if [ -f "${g}" ] && cmp -s "${f}" "${g}"; then
-        check 1 "bit-identical ${ext}"
+        check_yes 1 "bit-identical ${ext}"
     else
-        check 0 "bit-identical ${ext}"
+        check_yes 0 "bit-identical ${ext}"
     fi
 done
 
 echo ""
 echo "(C) the grid is not part of the tessellation: a different grid still hits"
 run "${TMP}/ptc_out_grid" "$((GRID*2))" --tessellation-cache "${CACHE}"
-check "$([ "$(hits)" -ge "1" ] && echo 1 || echo 0)" "different --grid still HITS"
+check_yes "$([ "$(hits)" -ge "1" ] && echo 1 || echo 0)" "different --grid still HITS"
 
 echo ""
 echo "(D) staleness is detected"
 run "${TMP}/ptc_out_dens" "${GRID}" --tessellation-cache "${CACHE}" --mean-density 2.5
-check "$([ "$(hits)" = "0" ] && echo 1 || echo 0)" "changed --mean-density MISSES"
+check_yes "$([ "$(hits)" = "0" ] && echo 1 || echo 0)" "changed --mean-density MISSES"
 touch "${SNAP}"
 run "${TMP}/ptc_out_touched" "${GRID}" --tessellation-cache "${CACHE}"
-check "$([ "$(hits)" = "0" ] && echo 1 || echo 0)" "touched input file MISSES"
+check_yes "$([ "$(hits)" = "0" ] && echo 1 || echo 0)" "touched input file MISSES"
 
 echo ""
 echo "(E) a multi-partition run caches EACH partition separately"
@@ -166,26 +167,26 @@ echo "(E) a multi-partition run caches EACH partition separately"
 PCACHE="${CACHE}-part"; rm -rf "${PCACHE}"; mkdir -p "${PCACHE}"
 run "${TMP}/ptc_part_cold" "${GRID}" --tessellation-cache "${PCACHE}" --partition 2 2 2
 nfiles=$(ls -1 "${PCACHE}"/*.tess 2>/dev/null | wc -l | tr -d ' ')
-check "$([ "$(hits)" = "0" ] && echo 1 || echo 0)" "cold partitioned run is all misses"
-check "$([ "${nfiles}" = "8" ] && echo 1 || echo 0)" "one cache file per partition (got ${nfiles}, want 8)"
+check_yes "$([ "$(hits)" = "0" ] && echo 1 || echo 0)" "cold partitioned run is all misses"
+check_yes "$([ "${nfiles}" = "8" ] && echo 1 || echo 0)" "one cache file per partition (got ${nfiles}, want 8)"
 run "${TMP}/ptc_part_warm" "${GRID}" --tessellation-cache "${PCACHE}" --partition 2 2 2
-check "$([ "$(hits)" = "8" ] && echo 1 || echo 0)" "warm partitioned run hits all 8 partitions"
+check_yes "$([ "$(hits)" = "8" ] && echo 1 || echo 0)" "warm partitioned run hits all 8 partitions"
 # the partitions must NOT all be the same tessellation
 ndistinct=$(echo "${RUN_OUT}" | grep -oE "Reused the cached tessellation \([0-9]+" | grep -oE "[0-9]+$" | sort -u | wc -l | tr -d ' ')
-check "$([ "${ndistinct}" -ge "2" ] && echo 1 || echo 0)" "partitions restored DIFFERENT tessellations (${ndistinct} distinct vertex counts)"
+check_yes "$([ "${ndistinct}" -ge "2" ] && echo 1 || echo 0)" "partitions restored DIFFERENT tessellations (${ndistinct} distinct vertex counts)"
 # E2: the default padding is k = 8 spacings and its descriptor says so; an Eulerian-padded cache
 # (no 'lagPadding' line: what '--ps-lagrangian-padding 0' writes, and every older partition cache)
 # must MISS in a default run, and '--ps-lagrangian-padding 0' must still find it
 ndesc=$( { grep -l -a "lagPadding=8" "${PCACHE}"/*.tess 2>/dev/null || true; } | wc -l | tr -d ' ')
-check "$([ "${ndesc}" = "8" ] && echo 1 || echo 0)" "E2 every default partition records 'lagPadding=8' in its descriptor (got ${ndesc} of 8)"
+check_yes "$([ "${ndesc}" = "8" ] && echo 1 || echo 0)" "E2 every default partition records 'lagPadding=8' in its descriptor (got ${ndesc} of 8)"
 LCACHE2="${CACHE}-lagpad"; rm -rf "${LCACHE2}"; mkdir -p "${LCACHE2}"
 run "${TMP}/ptc_lagpad0_cold" "${GRID}" --tessellation-cache "${LCACHE2}" --partition 2 2 2 --ps-lagrangian-padding 0
 nold=$( { grep -L -a "lagPadding=" "${LCACHE2}"/*.tess 2>/dev/null || true; } | wc -l | tr -d ' ')   # grep -L exits 1 (pipefail)
-check "$([ "$(hits)" = "0" ] && [ "${nold}" = "8" ] && echo 1 || echo 0)" "E2 '--ps-lagrangian-padding 0' writes 8 Eulerian-padded partitions with no 'lagPadding' line (got ${nold})"
+check_yes "$([ "$(hits)" = "0" ] && [ "${nold}" = "8" ] && echo 1 || echo 0)" "E2 '--ps-lagrangian-padding 0' writes 8 Eulerian-padded partitions with no 'lagPadding' line (got ${nold})"
 run "${TMP}/ptc_lagpad_dflt" "${GRID}" --tessellation-cache "${LCACHE2}" --partition 2 2 2
-check "$([ "$(hits)" = "0" ] && echo 1 || echo 0)" "E2 a default run misses the caches of the Eulerian padding (they rebuild once)"
+check_yes "$([ "$(hits)" = "0" ] && echo 1 || echo 0)" "E2 a default run misses the caches of the Eulerian padding (they rebuild once)"
 run "${TMP}/ptc_lagpad0_warm" "${GRID}" --tessellation-cache "${LCACHE2}" --partition 2 2 2 --ps-lagrangian-padding 0
-check "$([ "$(hits)" = "8" ] && echo 1 || echo 0)" "E2 '--ps-lagrangian-padding 0' (the way back) hits its 8 Eulerian partitions"
+check_yes "$([ "$(hits)" = "8" ] && echo 1 || echo 0)" "E2 '--ps-lagrangian-padding 0' (the way back) hits its 8 Eulerian partitions"
 rm -rf "${LCACHE2}"
 
 echo ""
@@ -195,7 +196,7 @@ pf=0
 for f in "${TMP}"/ptc_part_ref.*; do
     ext="${f##*ptc_part_ref}"
     g="${TMP}/ptc_part_warm${ext}"
-    if [ -f "${g}" ] && cmp -s "${f}" "${g}"; then check 1 "bit-identical ${ext}"; else check 0 "bit-identical ${ext}"; pf=1; fi
+    if [ -f "${g}" ] && cmp -s "${f}" "${g}"; then check_yes 1 "bit-identical ${ext}"; else check_yes 0 "bit-identical ${ext}"; pf=1; fi
 done
 
 echo ""
@@ -209,17 +210,17 @@ if [ -x "${DTFE_BIN}" ]; then
     "${DTFE_BIN}" "${SNAP}" "${TMP}/ptc_std_cold" --grid "${GRID}" --periodic --field density \
            --mpc-unit 1 --tessellation-cache "${SCACHE}" >/dev/null 2>&1 || true
     n_cold=$(ls -1 "${SCACHE}"/*.tess 2>/dev/null | wc -l | tr -d ' ')
-    check "$([ "${n_cold}" -ge "2" ] && echo 1 || echo 0)" "standard binary wrote one file per sub-domain (${n_cold})"
+    check_yes "$([ "${n_cold}" -ge "2" ] && echo 1 || echo 0)" "standard binary wrote one file per sub-domain (${n_cold})"
     "${DTFE_BIN}" "${SNAP}" "${TMP}/ptc_std_warm" --grid "${GRID}" --periodic --field density \
            --mpc-unit 1 --tessellation-cache "${SCACHE}" >/dev/null 2>&1 || true
     n_warm=$(ls -1 "${SCACHE}"/*.tess 2>/dev/null | wc -l | tr -d ' ')
-    check "$([ "${n_warm}" = "${n_cold}" ] && echo 1 || echo 0)" "warm run added no files (${n_warm} == ${n_cold}) => every sub-domain hit"
+    check_yes "$([ "${n_warm}" = "${n_cold}" ] && echo 1 || echo 0)" "warm run added no files (${n_warm} == ${n_cold}) => every sub-domain hit"
     # '.den' is the deterministic unaveraged deposit. ('.a_den' would NOT do here: its Monte-Carlo
     # seed is std::rand() unless --seed is given, so it differs between two UNCACHED runs as well.)
     if cmp -s "${TMP}/ptc_std_cold.den" "${TMP}/ptc_std_warm.den"; then
-        check 1 "standard '.den' is bit-identical across the cache"
+        check_yes 1 "standard '.den' is bit-identical across the cache"
     else
-        check 0 "standard '.den' is bit-identical across the cache"
+        check_yes 0 "standard '.den' is bit-identical across the cache"
     fi
     rm -rf "${SCACHE}"
 else
@@ -252,12 +253,12 @@ if [ -x "${DTFE_BIN}" ]; then
     srun "${TMP}/ptc_sp_cold" "${SP[@]}" --tessellation-cache "${PSCACHE}"
     n_cold=$(ls -1 "${PSCACHE}"/*.tess 2>/dev/null | wc -l | tr -d ' ')
     n_named=$(for f in "${PSCACHE}"/*.tess; do grep -a -m1 '^box=' "$f"; done 2>/dev/null | sort -u | wc -l | tr -d ' ')
-    check "$([ "${n_cold}" = "16" ] && [ "${n_named}" = "8" ] && echo 1 || echo 0)" \
+    check_yes "$([ "${n_cold}" = "16" ] && [ "${n_named}" = "8" ] && echo 1 || echo 0)" \
           "G2 2x2x2 partitions x 2 threads: 16 sub-domain files (${n_cold}), naming the 8 partitions' regions (${n_named})"
     before="$(ls -li "${PSCACHE}")"
     srun "${TMP}/ptc_sp_warm" "${SP[@]}" --tessellation-cache "${PSCACHE}"
-    check "$([ "${before}" = "$(ls -li "${PSCACHE}")" ] && echo 1 || echo 0)" "G2 the warm run loaded every sub-domain (no file rewritten)"
-    check "$(sameout "${TMP}/ptc_sp_ref" "${TMP}/ptc_sp_cold" && sameout "${TMP}/ptc_sp_ref" "${TMP}/ptc_sp_warm" && echo 1 || echo 0)" \
+    check_yes "$([ "${before}" = "$(ls -li "${PSCACHE}")" ] && echo 1 || echo 0)" "G2 the warm run loaded every sub-domain (no file rewritten)"
+    check_yes "$(sameout "${TMP}/ptc_sp_ref" "${TMP}/ptc_sp_cold" && sameout "${TMP}/ptc_sp_ref" "${TMP}/ptc_sp_warm" && echo 1 || echo 0)" \
           "G2 the cold and the warm cached run: every output byte-identical to the uncached run"
     rm -rf "${PSCACHE}"; mkdir -p "${PSCACHE}"
     SPP=("${SP[@]}" --sample-points "${POINTS}")
@@ -267,9 +268,9 @@ if [ -x "${DTFE_BIN}" ]; then
     n_named=$(for f in "${PSCACHE}"/*.tess; do grep -a -m1 '^region=' "$f"; done 2>/dev/null | sort -u | wc -l | tr -d ' ')
     before="$(ls -li "${PSCACHE}")"
     srun "${TMP}/ptc_spp_warm" "${SPP[@]}" --tessellation-cache "${PSCACHE}"
-    check "$([ "${n_cold}" = "8" ] && [ "${n_named}" = "8" ] && [ "${before}" = "$(ls -li "${PSCACHE}")" ] && echo 1 || echo 0)" \
+    check_yes "$([ "${n_cold}" = "8" ] && [ "${n_named}" = "8" ] && [ "${before}" = "$(ls -li "${PSCACHE}")" ] && echo 1 || echo 0)" \
           "G2 --sample-points: one file per partition (${n_cold} of 8, keyed by its own region), all loaded by the warm run"
-    check "$(sameout "${TMP}/ptc_spp_ref" "${TMP}/ptc_spp_warm" && [ -s "${TMP}/ptc_spp_warm.pts_den" ] && echo 1 || echo 0)" \
+    check_yes "$(sameout "${TMP}/ptc_spp_ref" "${TMP}/ptc_spp_warm" && [ -s "${TMP}/ptc_spp_warm.pts_den" ] && echo 1 || echo 0)" \
           "G2 --sample-points: the warm cached run's outputs (.pts_* and grids) byte-identical to the uncached run"
     rm -rf "${PSCACHE}" "${TMP}"/ptc_sp_* "${TMP}"/ptc_spp_*
 else
@@ -277,27 +278,61 @@ else
 fi
 
 echo ""
-echo "(H) the CHUNKED body (parallel inflate), the single-stream format before it, and the converter"
+echo "(H) the CHUNKED body (parallel inflate), format 3, and a file of format 2"
 tessfile=$(ls -1 "${CACHE}"/*.tess 2>/dev/null | head -1)
 chunked=$("${PY}" -c "
 import struct, sys
 f = open(sys.argv[1], 'rb'); f.read(8); (n,) = struct.unpack('<I', f.read(4)); f.read(n)
 sys.stdout.write('1' if f.read(8) == b'DTFECHK1' else '0')
 " "${tessfile}")
-check "${chunked}" "a new cache file carries the chunked body (marker after the descriptor)"
-LCACHE="${CACHE}-legacy"; rm -rf "${LCACHE}"; mkdir -p "${LCACHE}"
-export DTFE_TESSELLATION_CACHE_LEGACY=1
-run "${TMP}/ptc_legacy_write" "${GRID}" --tessellation-cache "${LCACHE}"
-unset DTFE_TESSELLATION_CACHE_LEGACY
-run "${TMP}/ptc_legacy_hit" "${GRID}" --tessellation-cache "${LCACHE}"
-check "$([ "$(hits)" -ge 1 ] && echo 1 || echo 0)" "a single-stream (older) cache file still loads"
-cmp -s "${TMP}/ptc_out_nocache.den" "${TMP}/ptc_legacy_hit.den" && check 1 "... bit-identically" || check 0 "... bit-identically"
-"${PY}" "${ROOT}/python/tools/upgrade_tess_cache.py" "${LCACHE}" -j 2 > "${TMP}/ptc_upgrade.log" 2>&1
-check "$([ $? -eq 0 ] && grep -q '^converted' "${TMP}/ptc_upgrade.log" && echo 1 || echo 0)" "the converter rewrites the older file as chunks"
-run "${TMP}/ptc_conv_hit" "${GRID}" --tessellation-cache "${LCACHE}"
-[ "$(hits)" -ge 1 ] && cmp -s "${TMP}/ptc_out_nocache.den" "${TMP}/ptc_conv_hit.den" \
-    && check 1 "the converted file loads, bit-identically" || check 0 "the converted file loads, bit-identically"
-rm -rf "${LCACHE}"
+check_yes "${chunked}" "a new cache file carries the chunked body (marker after the descriptor)"
+# fmt_of <file>: the value of the 'format=' line of its plaintext descriptor (empty without one)
+fmt_of() {
+    "${PY}" - "$1" <<'PYEOF'
+import struct, sys
+f = open(sys.argv[1], "rb"); f.read(8); (n,) = struct.unpack("<I", f.read(4))
+for line in f.read(n).split(b"\n"):
+    if line.startswith(b"format="):
+        sys.stdout.write(line[7:].decode("ascii", "replace")); break
+PYEOF
+}
+# set_fmt <file> <from> <to>: rewrites the descriptor's 'format=<from>' line as 'format=<to>' in place (one digit for
+# another: the descriptor's length and the file's name stay); fails when there is no such line
+set_fmt() {
+    "${PY}" - "$1" "$2" "$3" <<'PYEOF'
+import struct, sys
+path, old, new = sys.argv[1], ("format=" + sys.argv[2]).encode(), ("format=" + sys.argv[3]).encode()
+with open(path, "r+b") as f:
+    f.read(8); (n,) = struct.unpack("<I", f.read(4)); lines = f.read(n).split(b"\n")
+    if len(old) != len(new) or old not in lines:
+        sys.exit(1)
+    lines[lines.index(old)] = new
+    f.seek(12); f.write(b"\n".join(lines))
+PYEOF
+}
+FCACHE="${CACHE}-format"; rm -rf "${FCACHE}"; mkdir -p "${FCACHE}"
+run "${TMP}/ptc_fmt_cold" "${GRID}" --tessellation-cache "${FCACHE}"
+ffile=$(ls -1 "${FCACHE}"/*.tess 2>/dev/null | head -1 || true)
+fcur=""; [ -n "${ffile}" ] && fcur="$(fmt_of "${ffile}" || true)"
+check_yes "$([ "${fcur}" = 3 ] && echo 1 || echo 0)" "a new cache file is of format 3 (its descriptor: 'format=${fcur:-?}')"
+if [ -n "${ffile}" ] && set_fmt "${ffile}" 3 2; then
+    run "${TMP}/ptc_fmt_miss" "${GRID}" --tessellation-cache "${FCACHE}"
+    check_yes "$([ "$(hits)" = "0" ] && echo 1 || echo 0)" \
+          "a file of format 2 (the new file, its format line rewritten; the same name) is a MISS"
+    nf=$(ls -1 "${FCACHE}"/*.tess 2>/dev/null | wc -l | tr -d ' ' || true)
+    check_yes "$([ "$(fmt_of "${ffile}")" = 3 ] && [ "${nf}" = "1" ] && echo 1 || echo 0)" \
+          "... and is rebuilt: the run rewrites it as format 3 (${nf} file in the folder)"
+    same=1
+    for f in "${TMP}"/ptc_out_nocache.*; do
+        ext="${f##*ptc_out_nocache}"; cmp -s "${f}" "${TMP}/ptc_fmt_miss${ext}" || same=0
+    done
+    check_yes "${same}" "... and that run reproduces the uncached run bit-for-bit"
+    run "${TMP}/ptc_fmt_hit" "${GRID}" --tessellation-cache "${FCACHE}"
+    check_yes "$([ "$(hits)" -ge "1" ] && echo 1 || echo 0)" "... and the next run hits the rebuilt file"
+else
+    check_yes 0 "a new cache file with a 'format=3' line to rewrite as format 2"
+fi
+rm -rf "${FCACHE}"
 
 echo ""
 echo "(I) the block-wise reader and writer: exactly CGAL's triangulation, exactly CGAL's bytes"
@@ -318,16 +353,16 @@ for which in single part; do
     run "${TMP}/ptc_rd_block_${which}" "${GRID}" --tessellation-cache "${dir}" ${extra[@]+"${extra[@]}"}
     fp_block="$(fprints)"; h_block=$(hits)
     nfp=$(echo "${fp_block}" | grep -c . || true)
-    check "$([ "${h_cgal}" -ge 1 ] && [ "${h_cgal}" = "${h_block}" ] && [ "${nfp}" = "${h_block}" ] && echo 1 || echo 0)" \
+    check_yes "$([ "${h_cgal}" -ge 1 ] && [ "${h_cgal}" = "${h_block}" ] && [ "${nfp}" = "${h_block}" ] && echo 1 || echo 0)" \
           "${which}: both readers hit (${h_cgal} / ${h_block}) and fingerprint every load (${nfp})"
-    check "$([ -n "${fp_block}" ] && [ "${fp_cgal}" = "${fp_block}" ] && echo 1 || echo 0)" \
+    check_yes "$([ -n "${fp_block}" ] && [ "${fp_cgal}" = "${fp_block}" ] && echo 1 || echo 0)" \
           "${which}: identical structure fingerprints"
     same=1
     for f in "${TMP}"/ptc_rd_cgal_${which}.*; do
         ext="${f##*ptc_rd_cgal_${which}}"
         cmp -s "${f}" "${TMP}/ptc_rd_block_${which}${ext}" || same=0
     done
-    check "${same}" "${which}: bit-identical outputs, sample points included"
+    check_yes "${same}" "${which}: bit-identical outputs, sample points included"
 done
 if [ -x "${DTFE_BIN}" ]; then
     SCACHE="${CACHE}-std"; rm -rf "${SCACHE}"; mkdir -p "${SCACHE}"
@@ -345,7 +380,7 @@ if [ -x "${DTFE_BIN}" ]; then
     fp_cgal="$(grep "^TESS_FINGERPRINT" "${TMP}/ptc_std_rd1.log" | sort || true)"
     fp_block="$(grep "^TESS_FINGERPRINT" "${TMP}/ptc_std_rd2.log" | sort || true)"
     same_fp=$([ -n "${fp_block}" ] && [ "${fp_cgal}" = "${fp_block}" ] && echo 1 || echo 0)
-    check "${same_fp}" "standard binary: identical structure fingerprints ($(echo "${fp_block}" | grep -c . || true) sub-domains)"
+    check_yes "${same_fp}" "standard binary: identical structure fingerprints ($(echo "${fp_block}" | grep -c . || true) sub-domains)"
     if [ "${same_fp}" = 0 ]; then
         echo "      CGAL's reader (<, ${TMP}/ptc_std_rd1.log) vs the block reader (>, ${TMP}/ptc_std_rd2.log):"
         diff <(printf '%s\n' "${fp_cgal}") <(printf '%s\n' "${fp_block}") | grep '^[<>]' | head -n 20 | sed 's/^/      | /' || true
@@ -353,14 +388,14 @@ if [ -x "${DTFE_BIN}" ]; then
             grep -iE 'cache|hit' "${TMP}/ptc_std_rd${n}.log" | grep -v '^RUNNING:' | sed "s/^/      rd${n} | /" || true
         done
     fi
-    cmp -s "${TMP}/ptc_std_rd1.den" "${TMP}/ptc_std_rd2.den" && check 1 "standard binary: bit-identical '.den'" \
-                                                            || check 0 "standard binary: bit-identical '.den'"
+    cmp -s "${TMP}/ptc_std_rd1.den" "${TMP}/ptc_std_rd2.den" && check_yes 1 "standard binary: bit-identical '.den'" \
+                                                            || check_yes 0 "standard binary: bit-identical '.den'"
     SCACHE2="${CACHE}-std2"; rm -rf "${SCACHE2}"; mkdir -p "${SCACHE2}"
     DTFE_TESSELLATION_CACHE_CGAL_IO=1 "${DTFE_BIN}" "${SNAP}" "${TMP}/ptc_std_wr" --grid "${GRID}" --periodic --field density \
            --mpc-unit 1 --tessellation-cache "${SCACHE2}" >/dev/null 2>&1 || true
     same=1; nw=0
     for f in "${SCACHE2}"/*.tess; do nw=$((nw+1)); cmp -s "${f}" "${SCACHE}/$(basename "${f}")" || same=0; done
-    check "$([ "${nw}" -ge 2 ] && [ "${same}" = 1 ] && echo 1 || echo 0)" "standard binary: the block writer's ${nw} sub-domain files are byte-identical to CGAL's"
+    check_yes "$([ "${nw}" -ge 2 ] && [ "${same}" = 1 ] && echo 1 || echo 0)" "standard binary: the block writer's ${nw} sub-domain files are byte-identical to CGAL's"
     rm -rf "${SCACHE}" "${SCACHE2}"
 fi
 unset DTFE_TESSELLATION_CACHE_FINGERPRINT
@@ -378,7 +413,7 @@ for which in single part; do
         nw=$((nw+1))
         cmp -s "${f}" "${WB}/$(basename "${f}")" || same=0
     done
-    check "$([ "${nw}" -ge 1 ] && [ "${same}" = 1 ] && echo 1 || echo 0)" "${which}: the block writer's ${nw} cache file(s) are byte-identical to CGAL's"
+    check_yes "$([ "${nw}" -ge 1 ] && [ "${same}" = 1 ] && echo 1 || echo 0)" "${which}: the block writer's ${nw} cache file(s) are byte-identical to CGAL's"
     rm -rf "${WA}" "${WB}"
 done
 
@@ -390,19 +425,19 @@ LINKDIR="${TMP}_link"; rm -f "${LINKDIR}"; ln -s "${TMP}" "${LINKDIR}"
 nbefore=$(ls -1 "${CACHE}"/*.tess 2>/dev/null | wc -l | tr -d ' ')
 RUN_OUT="$( "${BIN}" "${LINKDIR}/$(basename "${SNAP}")" "${TMP}/ptc_sym" --grid "${GRID}" "${COMMON[@]}" \
             --tessellation-cache "${CACHE}" --verbose 3 2>&1 || true )"
-check "$([ "$(hits)" -ge 1 ] && echo 1 || echo 0)" "a path through a symlinked folder HITS"
+check_yes "$([ "$(hits)" -ge 1 ] && echo 1 || echo 0)" "a path through a symlinked folder HITS"
 ABSBIN="$(pwd)/${PS_BIN#./}"
 RUN_OUT="$( cd "${TMP}" && "${ABSBIN}" "$(basename "${SNAP}")" "${TMP}/ptc_rel" --grid "${GRID}" "${COMMON[@]}" \
             --tessellation-cache "${CACHE}" --verbose 3 2>&1 || true )"
-check "$([ "$(hits)" -ge 1 ] && echo 1 || echo 0)" "a relative path HITS"
+check_yes "$([ "$(hits)" -ge 1 ] && echo 1 || echo 0)" "a relative path HITS"
 same=1
 for f in "${TMP}"/ptc_out_hit.*; do
     ext="${f##*ptc_out_hit}"
     for g in "${TMP}/ptc_sym${ext}" "${TMP}/ptc_rel${ext}"; do cmp -s "${f}" "${g}" || same=0; done
 done
-check "${same}" "... both bit-identical to the absolute-path hit"
+check_yes "${same}" "... both bit-identical to the absolute-path hit"
 nafter=$(ls -1 "${CACHE}"/*.tess 2>/dev/null | wc -l | tr -d ' ')
-check "$([ "${nafter}" = "${nbefore}" ] && echo 1 || echo 0)" "and no new cache file was written (${nbefore} -> ${nafter})"
+check_yes "$([ "${nafter}" = "${nbefore}" ] && echo 1 || echo 0)" "and no new cache file was written (${nbefore} -> ${nafter})"
 rm -f "${LINKDIR}"
 
 echo ""
@@ -422,7 +457,7 @@ if grep -q "read with libdeflate" <<< "${RUN_OUT}"; then
         for f in "${TMP}"/ptc_out_nocache.*; do
             ext="${f##*ptc_out_nocache}"; cmp -s "${f}" "${TMP}/ptc_codec_r_${w}${ext}" || same=0
         done
-        check "$([ "$(hits)" -ge 1 ] && [ "${reader}" != "${w}" ] && [ "${same}" = 1 ] && echo 1 || echo 0)" \
+        check_yes "$([ "$(hits)" -ge 1 ] && [ "${reader}" != "${w}" ] && [ "${same}" = 1 ] && echo 1 || echo 0)" \
               "written with ${w}, read with ${reader}: a hit, bit-identical to the uncached run"
         rm -rf "${KC}"
     done
@@ -444,22 +479,22 @@ CARGS=(--grid "${GRID}" "${COMMON[@]}" --partition 2 2 2 --tessellation-cache "$
 "${BIN}" "${SNAP}" "${TMP}/ptc_conc2" "${CARGS[@]}" > "${TMP}/ptc_conc2.log" 2>&1 & pid2=$!
 rc1=0; wait "${pid1}" || rc1=$?
 rc2=0; wait "${pid2}" || rc2=$?
-check "$([ "${rc1}" = "0" ] && [ "${rc2}" = "0" ] && echo 1 || echo 0)" "both concurrent runs exit 0 (${rc1}, ${rc2})"
+check_yes "$([ "${rc1}" = "0" ] && [ "${rc2}" = "0" ] && echo 1 || echo 0)" "both concurrent runs exit 0 (${rc1}, ${rc2})"
 ntess=$(ls -1 "${CC}"/*.tess 2>/dev/null | wc -l | tr -d ' ')
 nocc=$(ls -1 "${CC}"/*.occ 2>/dev/null | wc -l | tr -d ' ')
 ntmp=$(find "${CC}" -name '*.part*' -o -name '*.tmp*' | wc -l | tr -d ' ')
-check "$([ "${ntess}" = "8" ] && [ "${nocc}" = "8" ] && [ "${ntmp}" = "0" ] && echo 1 || echo 0)" \
+check_yes "$([ "${ntess}" = "8" ] && [ "${nocc}" = "8" ] && [ "${ntmp}" = "0" ] && echo 1 || echo 0)" \
       "8 cache files and 8 occupancy maps, no '.part.<pid>' or '.occ.tmp.<pid>' left (${ntess}, ${nocc}, ${ntmp})"
 same=1
 for f in "${TMP}"/ptc_part_ref.*; do
     ext="${f##*ptc_part_ref}"
     for g in "${TMP}/ptc_conc1${ext}" "${TMP}/ptc_conc2${ext}"; do cmp -s "${f}" "${g}" || same=0; done
 done
-check "${same}" "... both bit-identical to the uncached run"
+check_yes "${same}" "... both bit-identical to the uncached run"
 run "${TMP}/ptc_conc3" "${GRID}" --tessellation-cache "${CC}" --partition 2 2 2
 same=1
 for f in "${TMP}"/ptc_part_ref.*; do ext="${f##*ptc_part_ref}"; cmp -s "${f}" "${TMP}/ptc_conc3${ext}" || same=0; done
-check "$([ "$(hits)" = "8" ] && [ "${same}" = 1 ] && echo 1 || echo 0)" "a third run hits all 8 partitions ($(hits)) and reproduces the uncached run bit-for-bit"
+check_yes "$([ "$(hits)" = "8" ] && [ "${same}" = 1 ] && echo 1 || echo 0)" "a third run hits all 8 partitions ($(hits)) and reproduces the uncached run bit-for-bit"
 
 echo ""
 echo "(M) a DEAD writer's temp file is removed by the next save of that file; a live writer's is kept"
@@ -477,36 +512,31 @@ if [ -n "${victim}" ] && [ -n "${other}" ]; then
     rm -f "${victim}"                                       # its partition misses, so it is saved again
     run "${TMP}/ptc_stale" "${GRID}" --tessellation-cache "${CC}" --partition 2 2 2
     kill "${live}" 2>/dev/null || true; wait "${live}" 2>/dev/null || true
-    check "$([ "$(hits)" = "7" ] && [ -f "${victim}" ] && echo 1 || echo 0)" "the deleted partition misses and is saved again (hits $(hits) of 8)"
-    check "$([ ! -e "${victim}.part.${dead}" ] && echo 1 || echo 0)" "... the dead writer's '.part.${dead}' beside it is removed"
-    check "$([ -f "${victim}.part.${live}" ] && echo 1 || echo 0)" "... a live writer's '.part.${live}' is kept"
-    check "$([ -f "${victim}.part" ] && [ -f "${other}.part.${dead}" ] && echo 1 || echo 0)" \
+    check_yes "$([ "$(hits)" = "7" ] && [ -f "${victim}" ] && echo 1 || echo 0)" "the deleted partition misses and is saved again (hits $(hits) of 8)"
+    check_yes "$([ ! -e "${victim}.part.${dead}" ] && echo 1 || echo 0)" "... the dead writer's '.part.${dead}' beside it is removed"
+    check_yes "$([ -f "${victim}.part.${live}" ] && echo 1 || echo 0)" "... a live writer's '.part.${live}' is kept"
+    check_yes "$([ -f "${victim}.part" ] && [ -f "${other}.part.${dead}" ] && echo 1 || echo 0)" \
           "... the old shared '.part' and another cache file's temp file are left alone"
     same=1
     for f in "${TMP}"/ptc_part_ref.*; do ext="${f##*ptc_part_ref}"; cmp -s "${f}" "${TMP}/ptc_stale${ext}" || same=0; done
-    check "${same}" "... and the run reproduces the uncached run bit-for-bit"
+    check_yes "${same}" "... and the run reproduces the uncached run bit-for-bit"
 else
-    check 0 "the concurrent runs left two cache files to plant temp files beside"
+    check_yes 0 "the concurrent runs left two cache files to plant temp files beside"
 fi
 rm -rf "${CC}"
 
 echo ""
-echo "(N) a file in CGAL's vertex numbering is renumbered on load (the canonical vertex order, D19)"
-# PS-DTFE renumbers every cell in a canonical vertex order after the insert and after a cache load. A file written
-# under DTFE_PS_VERTEX_ORDER_LEGACY=1 holds CGAL's numbering, as every file of a binary without the order does: a
-# run without the switch that loads it renumbers its cells and writes the uncached run's grids byte for byte. No
-# '--sample-points' here: its 'linear' density reads the cached vertex densities, which such a writer forms in CGAL's
-# frames (they may differ in the last bit).
-OCACHE="${CACHE}-order"; rm -rf "${OCACHE}" "${OCACHE}2"; mkdir -p "${OCACHE}" "${OCACHE}2"
+echo "(N) a cache file holds the canonical vertex order: its load renumbers no cell"
+# PS-DTFE renumbers every cell in a canonical vertex order after the insert, before the vertex densities and the save,
+# so a cache file holds that order and a load runs no pass of its own: the hit writes the uncached run's grids byte
+# for byte.
+OCACHE="${CACHE}-order"; rm -rf "${OCACHE}"; mkdir -p "${OCACHE}"
 ORD=(--grid "${GRID}" --periodic --partition 1 --max-concurrent 1 --mpc-unit 1 --verbose 3
      --field density velocity density_a velocity_a)
-run_ord() {   # run_ord <outroot> [VAR=value ...] -- <extra args...>; the log beside the outputs
+run_ord() {   # run_ord <outroot> <extra args...>; the log beside the outputs
     local out="$1"; shift
-    local envs=()
-    while [ $# -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
-    [ $# -gt 0 ] && shift
     rm -f "${out}".*
-    env ${envs[@]+"${envs[@]}"} "${BIN}" "${SNAP}" "${out}" "${ORD[@]}" "$@" > "${out}.log" 2>&1 || true
+    "${BIN}" "${SNAP}" "${out}" "${ORD[@]}" "$@" > "${out}.log" 2>&1 || true
 }
 # the count of '(the canonical vertex order renumbered N cells)' in a log (--verbose 3), empty when there is none
 renumbered() {
@@ -521,24 +551,23 @@ grids_same() {   # every output of run a (not its log) byte-identical in run b, 
     done
     [ "${n}" -gt 0 ]
 }
-run_ord "${TMP}/ptc_ord_ref" --
-run_ord "${TMP}/ptc_ord_w" DTFE_PS_VERTEX_ORDER_LEGACY=1 -- --tessellation-cache "${OCACHE}"
-run_ord "${TMP}/ptc_ord_hit" -- --tessellation-cache "${OCACHE}"
+run_ord "${TMP}/ptc_ord_ref"
+run_ord "${TMP}/ptc_ord_w" --tessellation-cache "${OCACHE}"
+run_ord "${TMP}/ptc_ord_hit" --tessellation-cache "${OCACHE}"
 nl=$(grep -c "Reused the cached" "${TMP}/ptc_ord_hit.log" || true)
-rw="$(renumbered "${TMP}/ptc_ord_w.log")"; rh="$(renumbered "${TMP}/ptc_ord_hit.log")"
-check "$(grep -qF "DTFE_PS_VERTEX_ORDER_LEGACY=1" "${TMP}/ptc_ord_w.log" && [ -z "${rw}" ] && echo 1 || echo 0)" \
-      "the writer under DTFE_PS_VERTEX_ORDER_LEGACY=1 says so and renumbers nothing"
-check "$([ "${nl}" -ge 1 ] && [ -n "${rh}" ] && [ "${rh}" -gt 0 ] && echo 1 || echo 0)" \
-      "a run without the switch loads that file (${nl} hit) and renumbers ${rh:-no} cells"
-check "$(grids_same "${TMP}/ptc_ord_ref" "${TMP}/ptc_ord_hit" && echo 1 || echo 0)" \
-      "... and writes the uncached run's grids byte for byte"
-run_ord "${TMP}/ptc_ord_w2" -- --tessellation-cache "${OCACHE}2"
-run_ord "${TMP}/ptc_ord_hit2" -- --tessellation-cache "${OCACHE}2"
-nl=$(grep -c "Reused the cached" "${TMP}/ptc_ord_hit2.log" || true)
-rh="$(renumbered "${TMP}/ptc_ord_hit2.log")"
-ok=0; [ "${nl}" -ge 1 ] && [ "${rh}" = 0 ] && grids_same "${TMP}/ptc_ord_ref" "${TMP}/ptc_ord_hit2" && ok=1
-check "${ok}" "a canonical file loads (${nl} hit) with ${rh:-no} cells renumbered, the grids byte for byte"
-rm -rf "${OCACHE}" "${OCACHE}2"
+rh="$(renumbered "${TMP}/ptc_ord_hit.log")"
+ok=0
+if [ "${nl}" -ge 1 ] && { [ -z "${rh}" ] || [ "${rh}" = 0 ]; } && grids_same "${TMP}/ptc_ord_ref" "${TMP}/ptc_ord_hit"; then
+    ok=1
+fi
+check_yes "${ok}" "a cache file loads (${nl} hit) with ${rh:-no} cells renumbered, the grids byte for byte"
+rw="$(renumbered "${TMP}/ptc_ord_w.log")"
+lo="$({ grep -n 'canonical vertex order)' "${TMP}/ptc_ord_w.log" | head -1 | cut -d: -f1; } || true)"
+ls="$({ grep -n 'tessellation save (--tessellation-cache)' "${TMP}/ptc_ord_w.log" | head -1 | cut -d: -f1; } || true)"
+ok=0
+if [ -n "${rw}" ] && [ -n "${lo}" ] && [ -n "${ls}" ] && [ "${lo}" -lt "${ls}" ]; then ok=1; fi
+check_yes "${ok}" "the run that writes the cache orders its cells (${rw:-no line} renumbered) before it saves (log lines ${lo:-?} < ${ls:-?})"
+rm -rf "${OCACHE}"
 
 echo ""
 echo "------------------------------------------------------------"

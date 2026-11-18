@@ -113,7 +113,7 @@ class RunMixin:
                                    "Every DTFE / PS-DTFE run on this machine, wherever it was started (a terminal, "
                                    "nohup, this launcher): progress, ETA, memory")
         self.results.setTabToolTip(self.results.indexOf(self.runs),
-                                   "Every run on disk: settings, time, memory, size, and outputs made before a fix")
+                                   "Every run on disk: settings, time, memory, size, and outputs to look at before use")
         self.results.currentChanged.connect(self._results_tab_changed)
         self.results.setCornerWidget(self._build_log_find(), Qt.TopRightCorner)
         v.addWidget(self.results, 1)

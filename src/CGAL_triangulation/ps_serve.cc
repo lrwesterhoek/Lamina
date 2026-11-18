@@ -10,9 +10,6 @@
 #include "../auto_tune.h"       // composite --serve: the memory budget that sizes the resident set
 #include "../env_knobs.h"
 #include "../run_mode.h"        // dtfeHardwareThreads: the run mode's thread budget (the loaders)
-#ifdef PHASE_SPACE
-#include "ps_vertex_order.h"    // composite --serve: the canonical vertex order of a tessellation it loads itself
-#endif
 
 
 // '--tessellation-cache' load or build of a tessellation plus its vertex densities (triangulation.cpp,
@@ -104,15 +101,14 @@ struct ServeIndex
 
 static const int OCC_N = 64;                 // occupancy buckets per axis (32 KB per partition)
 // A partition's cell index is built only once the partition has answered this many requests by
-// walking its cells while in memory. Measured on TNG100-3-Dark's 14.3M-vertex partitions: the index
-// takes 18-22 s to build, a walk for a 512^2 zoom (or a click) 1.1-1.4 s, a request through the index
-// 0.2-0.9 s -- so building it on the first request would make the first zoom or click in a region 3-15x
-// slower, and a partition evicted again (a region needing more partitions than fit) would rebuild it every time.
+// walking its cells while in memory. Fitted on TNG100-3-Dark's partitions, where building the index costs
+// about 15 walks and a request through it a fraction of one: building it on the first request would make the
+// first zoom or click in a region several times slower, and a partition evicted again (a region needing more
+// partitions than fit) would rebuild it every time.
 static const uint64_t INDEX_AFTER_WALKS = 8;
-// Memory of a resident partition, for the automatic resident set: its tessellation per vertex (the
-// server's RSS with 8 resident 3.65M-vertex partitions: 664 B/vertex; the same figures as
-// auto_tune.h autoTuneServe) and, before one is built, its cell index per vertex (the index's own
-// arrays are counted once it exists).
+// Memory of a resident partition, for the automatic resident set: its tessellation per vertex (fitted
+// on the server's RSS with 8 resident partitions; the same figures as auto_tune.h autoTuneServe) and,
+// before one is built, its cell index per vertex (the index's own arrays are counted once it exists).
 #ifdef PHASE_SPACE
 static const double SERVE_TRI_BYTES_PER_VERTEX = 666.;
 #else
@@ -438,9 +434,7 @@ template <typename Evaluate>
             continue;
         }
 
-        bool useIndex = n * 64 < uint64_t(indexCells);
-        if ( int const forced = Env::tristate( "DTFE_SERVE_INDEX" ); forced >= 0 )   // 0 / 1: force the walk / the cell index
-            useIndex = forced == 1;
+        bool const useIndex = n * 64 < uint64_t(indexCells);
         setQueryPoints( std::move(pts), useIndex ? 1 : bucketFloor );
         std::string const failure = evaluate( useIndex );
         g_pe.cellList = nullptr;
@@ -779,7 +773,6 @@ static bool ensureResident(size_t const p, double &loadSeconds)
     std::unique_ptr<DT> dt( new DT );
     if ( not TessellationCache::tryLoad( *dt, P.opts ) ) return false;
 #ifdef PHASE_SPACE
-    psVertexOrderQuiet( *dt );   // a file written without the canonical order holds CGAL's numbering
     if ( g_pe.ctx.vertexMass )   // the grid conventions' vertex-mass pass, once per load (not per request)
         prepareVertexMass( *dt, P.opts );
 #endif
@@ -843,12 +836,7 @@ void psServeCompositeAddPartition(int const index, User_options &partOptions,
         bool have = caching and TessellationCache::headerMatches( P.opts )
                     and TessellationCache::tryLoad( *dt, P.opts );
         if ( have )
-        {
             how = "loaded";
-#ifdef PHASE_SPACE
-            psVertexOrderQuiet( *dt );   // a file written without the canonical order holds CGAL's numbering
-#endif
-        }
         else
         {
             std::vector<Particle_data> particles;
@@ -907,8 +895,8 @@ static void compositeResidentSet(User_options const &userOptions, size_t const n
     // which cached partitions may be in memory at once: --serve-resident N of them, else as many as
     // fit in the auto-tune memory budget -- their tessellations (SERVE_TRI_BYTES_PER_VERTEX) plus the
     // cell indexes that exist (built only when they fit too, see the request loop). Counting an index
-    // for every partition (850 B/vertex) would keep TNG100-3-Dark's server at 3 resident
-    // 14.3M-vertex partitions where 4 fit, so a zoom needing 4 would reload one every time.
+    // for every partition would keep fewer partitions resident than fit, so a zoom needing one more
+    // would reload one every time.
     // DTFE_SERVE_BUDGET_GB overrides the budget (tests).
     g_serve.comp.byBytes = false;
     if ( userOptions.serveResident > 0 )
@@ -973,7 +961,7 @@ struct CompositeLoads
 // PARALLEL LOADS: the needed partitions that are not in memory are read back from the cache by
 // background threads -- as many as fit under the resident cap once the partitions this request
 // does not need are dropped -- while the resident ones are evaluated. A load (inflate + CGAL
-// deserialization, ~8 s for a 6M-vertex TNG100-3 partition) is independent of every other, so
+// deserialization, seconds for a large partition) is independent of every other, so
 // k loads take about one load's time on k cores. The evaluation ORDER does not depend on the
 // loads (resident first, then the others in 'need' order), so no answer does. Partitions beyond the
 // cap are loaded one at a time afterwards (compositeEvaluatePartition: ensureResident).
@@ -1031,9 +1019,6 @@ static void compositeStartLoads(std::vector<size_t> const &need, size_t const nP
                     auto const t0 = std::chrono::steady_clock::now();
                     std::unique_ptr<DT> dt( new DT );
                     bool const ok = TessellationCache::tryLoad( *dt, g_serve.comp.parts[L.toLoad[i]].opts );
-#ifdef PHASE_SPACE
-                    if ( ok ) psVertexOrderQuiet( *dt );   // (each loader renumbers its own tessellation)
-#endif
                     double const sec = std::chrono::duration<double>( std::chrono::steady_clock::now() - t0 ).count();
                     std::lock_guard<std::mutex> lk( L.preMutex );
                     L.pre[i].dt = std::move( dt );
@@ -1078,13 +1063,12 @@ static std::string compositeEvaluatePartition(size_t const p, size_t const k, si
     }
     g_pe.cellList = nullptr;
     // the index for a small request only once this partition has earned it (INDEX_AFTER_WALKS),
-    // or when it exists already; else the walk (DTFE_SERVE_INDEX=1 forces the index)
-    bool const forceIndex = Env::tristate( "DTFE_SERVE_INDEX" ) == 1;
+    // or when it exists already; else the walk
     // ... and, under the automatic resident set, only when the index fits next to the resident
     // partitions WITHOUT evicting one (a reload costs more than the index saves); else walk
-    bool const indexFits = P.index or forceIndex or not g_serve.comp.byBytes or not P.cached
+    bool const indexFits = P.index or not g_serve.comp.byBytes or not P.cached
         or residentBytes() + g_serve.comp.indexPerVertex * double( std::max<uint64_t>( P.nVertices, 1 ) ) <= g_serve.comp.budgetBytes;
-    bool const partIndex = useIndex and indexFits and ( P.index or P.walks >= INDEX_AFTER_WALKS or forceIndex );
+    bool const partIndex = useIndex and indexFits and ( P.index or P.walks >= INDEX_AFTER_WALKS );
     if ( useIndex and not indexFits and P.walks >= INDEX_AFTER_WALKS )
         serveProgress( "[request %zu/%zu] partition %zu: its cell index would not fit in memory, walking\n",
                        k, nNeed, p );

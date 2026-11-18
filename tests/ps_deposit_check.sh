@@ -11,8 +11,9 @@
 #  B) (GPU builds) the GPU exact deposit's item passes run on its two pipelines ('depositExactItems'; DTFE_GPU_TIMING
 #     names them), and they conserve mass to the float rounding of their shares: DTFE_MASS_AUDIT's
 #     'handed-deferred-fixed' within 1e-7 of the mass handed to the GPU, in every pass.
-#  C) '--ps-linear-deposit' was removed: the program stops with its message and writes no grid, alone and (GPU
-#     builds) beside '--exact --gpu'.
+#  C) '--ps-lagrangian-input' with an input type other than 105 (a binary Gadget snapshot, demo/z0_64.gadget, read as
+#     type 101) stops the program with its message and writes no grid: only the HDF5 Gadget reader gives the particle
+#     IDs the Lagrangian positions are matched by.
 #
 # Usage: tests/ps_deposit_check.sh [--no-build]
 
@@ -26,7 +27,7 @@ source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double
 N="${N:-24}"; GRID="${GRID:-48}"; BOX="${BOX:-100.0}"
 BIN="${PS_BIN}"
 precision_require "${BIN}"
-TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}"; mkdir -p "${TMP}"
+TMP="${DTFE_TEST_TMP}"
 SNAP_PAN="${TMP}/pdep_input_pancake.hdf5"
 
 echo "============================================================"
@@ -100,32 +101,31 @@ else
     echo ">> runs 7-9 skipped (CPU-only build: no exact-deposit GPU parity to check)"
 fi
 
-# C: the removed '--ps-linear-deposit' stops the run before anything is deposited, with its own message (the program
-# checks the removed options first, so another option beside it changes nothing)
-refused() {  # $1 = output root, rest = extra flags: 0 when the run exits non-zero with the message and writes no grid
-    local out="$1"; shift
-    rm -f "${out}".*
-    local rc=0
-    "${BIN}" "${SNAP_PAN}" "${out}" --grid "${GRID}" --field density velocity density_a \
-        --input-format 105 --mpc-unit 1 --verbose 1 --periodic "$@" > "${out}.log" 2>&1 || rc=$?
-    [ "${rc}" -ne 0 ] && grep -qF -e "${PS_NO_LINEAR_DEPOSIT}" "${out}.log" && [ ! -e "${out}.den" ] && [ ! -e "${out}.a_den" ]
+echo ">> C: '--ps-lagrangian-input' on a binary Gadget snapshot, named ('--input-format 101') and found (refused: no particle IDs)"
+PS_LAGRANGIAN_ONLY_105="'--ps-lagrangian-input' needs an HDF5 Gadget snapshot ('--input-format 105'): only that reader"
+PS_LAGRANGIAN_ONLY_105="${PS_LAGRANGIAN_ONLY_105} gives the particle IDs the Lagrangian positions are matched by."
+[ -f "${ROOT}/demo/z0_64.gadget" ] || { echo "FAIL: demo/z0_64.gadget is missing"; exit 1; }
+LAG_RC=""
+lag_refused() {  # $1 = run tag, rest = the input type's option (none: the reader finds the binary type in the file)
+    local tag="$1" rc=0; shift
+    rm -f "${TMP}/${tag}".*
+    "${BIN}" "${ROOT}/demo/z0_64.gadget" "${TMP}/${tag}" --grid "${GRID}" --field density_a "$@" \
+        --ps-lagrangian-input "${SNAP_PAN}" --verbose 1 > "${TMP}/${tag}.log" 2>&1 || rc=$?
+    LAG_RC="${LAG_RC}${LAG_RC:+ and }${rc}"
+    [ "${rc}" -ne 0 ] && grep -qF -e "${PS_LAGRANGIAN_ONLY_105}" "${TMP}/${tag}.log" && [ ! -e "${TMP}/${tag}.a_den" ]
 }
-echo ">> C: '--ps-linear-deposit' (removed), alone and on a GPU build beside --exact --gpu"
-REFUSED=1; REFUSED_RUNS="${TMP}/pdep_rl.log"
-refused "${TMP}/pdep_rl" --ps-linear-deposit || REFUSED=0
-if [ "${GPU_BUILT}" -eq 1 ]; then
-    REFUSED_RUNS="${REFUSED_RUNS} ${TMP}/pdep_rlg.log"
-    refused "${TMP}/pdep_rlg" --exact --gpu --ps-linear-deposit || REFUSED=0
-fi
+LAG_REFUSED=1
+lag_refused pdep_lag --input-format 101 || LAG_REFUSED=0
+lag_refused pdep_lags || LAG_REFUSED=0
 
 echo ">> checking the numbers ..."
-"${PY}" - "${TMP}" "${GRID}" "${GPU_BUILT}" "${REFUSED}" "${REFUSED_RUNS}" <<'PY'
+"${PY}" - "${TMP}" "${GRID}" "${GPU_BUILT}" "${LAG_REFUSED}" "${LAG_RC}" <<'PY'
 import sys
 import numpy as np
 import os as _os; REAL = np.dtype(_os.environ.get("DTFE_TEST_REAL", "float32"))   # tests/precision.sh
 
 tmp, grid, gpu = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-refused, refused_runs = int(sys.argv[4]), sys.argv[5]
+lag_refused, lag_rc = int(sys.argv[4]), sys.argv[5]
 ncell = grid ** 3
 fails = []
 
@@ -243,9 +243,9 @@ if gpu:
 else:
     print("   SKIP A exact GPU parity, B (CPU-only build)")
 
-# ---------- (C) the removed '--ps-linear-deposit' ----------
-check("C '--ps-linear-deposit' stops the run with its message, no grid written", refused == 1,
-      f"alone{' and beside --exact --gpu' if gpu else ''} (logs: {refused_runs})")
+# ---------- (C) a Lagrangian input needs the HDF5 reader ----------
+check("C '--ps-lagrangian-input' on a binary Gadget snapshot stops the run with its message, no grid written",
+      lag_refused == 1, f"the type named and found in the file: exit {lag_rc} (logs: {tmp}/pdep_lag.log, pdep_lags.log)")
 
 print("-" * 60)
 if fails:

@@ -45,7 +45,7 @@ GRADIENT_QUALIFIER = {"mean": "mean field ∇⟨v⟩", "stream": "stream average
 # the fields worth a map, in menu order, with their labels. A face-gradient run writes the stream average of each
 # stream's own gradient beside its mean-flow family (src/input_output.cc: '.a_velDivStreams' always, and
 # '.a_velGradStreams', '.a_velShearStreams', '.a_velVortStreams' where 'gradient_a', 'shear_a', 'vorticity_a' are
-# written; docs/cleanup-plan.md D12), and the mass flux divergence ('.a_massFluxDiv'): listed after the family, the
+# written), and the mass flux divergence ('.a_massFluxDiv'): listed after the family, the
 # twins named as the stream average a map of the family's own grid says (field_label)
 FIELD_LABELS = {
     "density": "density ρ/ρ̄", "streams": "stream count", "hidden_streams": "hidden streams",
@@ -81,7 +81,7 @@ FIELD_HELP = {
 }
 # The velocity derivatives (dtfelib.io.MEAN_FIELD_NAMES). Standard DTFE stores them as the derivatives of
 # its one velocity field, the mean field grad<v>; so does a PS-DTFE run with the face gradient (its default with the
-# exact deposit, docs/cleanup-plan.md D13; OutputSet.face_gradient). A PS-DTFE run without it
+# exact deposit; OutputSet.face_gradient). A PS-DTFE run without it
 # stores, in a multi-stream cell, the stream average of each stream's own gradient <grad v> (dtfelib/io.py, the note
 # above FIELDS: a divergence whose box mean is not 0, a V-web with almost no filaments) -- so a map of such a PS
 # divergence beside a standard one compares two quantities. Explore shows that phase-space output's as either
@@ -587,7 +587,7 @@ class OutputSet:
     @property
     def face_gradient(self) -> bool:
         """A phase-space output whose run took the face gradient (PS-DTFE's default with the exact deposit,
-        docs/cleanup-plan.md D13, or '--face-gradient'): its stored velocity derivatives ARE the
+        or '--face-gradient'): its stored velocity derivatives ARE the
         mean field grad<v>, from exact face sums. The marker is the stream average's divergence the run writes beside
         them ('.a_velDivStreams'), as dtfelib's FieldSet.face_gradient reads it."""
         return estimator_label(self) == "PS-DTFE" and "divergence_streams" in self.files
@@ -1762,6 +1762,7 @@ def server_cost(snapshot, phase_space: bool = True, ram_bytes: int | None = None
 # descriptor (tessellation_cache.h makeDescriptor), and beside it '<that>.occ' holds the partition's
 # 64^3 occupancy map -- the buckets of the box its streams reach (ps_point_eval.cc).
 _TESS_MAGIC = b"DTFETESS"
+_TESS_FORMAT = "3"          # the descriptor's 'format=' line: tessellation_cache.h FORMAT_VERSION
 _OCC_MAGIC = b"DTFEOCC1"
 OCC_N = 64
 
@@ -1810,9 +1811,10 @@ def cached_partition_sets(cache_dir, snapshot, lagrangian=None, periodic: bool |
     """This snapshot's partition tessellations in a tessellation cache, by partition triple (nx, ny, nz)
     (a pair for a 2D run):
     a list of {'tess', 'occ' (Path or None), 'bytes', 'region' (6 floats), 'periodic'} per cached
-    partition. Matched on the descriptor's input line (path and size:mtime stamp), the Lagrangian file
-    and the periodicity -- only to choose a split and estimate a run: the binary itself compares the
-    whole descriptor before it uses a file."""
+    partition. Matched on the descriptor's format line (_TESS_FORMAT: a file of another format is a miss
+    the binary rebuilds), its input line (path and size:mtime stamp), the Lagrangian file and the
+    periodicity -- only to choose a split and estimate a run: the binary itself compares the whole
+    descriptor before it uses a file."""
     sets: dict = {}
     d = Path(cache_dir).expanduser() if cache_dir else None
     if d is None or not d.is_dir():
@@ -1822,12 +1824,13 @@ def cached_partition_sets(cache_dir, snapshot, lagrangian=None, periodic: bool |
         try:
             with open(tess, "rb") as f:
                 desc = _read_descriptor(f, _TESS_MAGIC)
+                marker = f.read(8) if desc else b""
         except OSError:
             continue
-        if not desc:
+        if not desc or marker != b"DTFECHK1":       # (the body's marker: the binary's headerMatches tests it too)
             continue
         fl = _descriptor_fields(desc)
-        if fl.get("input") != want_input:
+        if fl.get("format") != _TESS_FORMAT or fl.get("input") != want_input:
             continue
         if lagrangian and not fl.get("lagrange", "").startswith(f"{_canonical(lagrangian)} "):
             continue
@@ -1850,17 +1853,6 @@ def cached_partition_sets(cache_dir, snapshot, lagrangian=None, periodic: bool |
         sets.setdefault(nums, []).append({"tess": tess, "occ": occ if occ.is_file() else None,
                                           "bytes": tess.stat().st_size, "region": region, "periodic": per})
     return sets
-
-
-def tess_chunked(path) -> bool:
-    """A cached tessellation written with the chunked body (inflated on several threads)."""
-    try:
-        with open(path, "rb") as f:
-            if _read_descriptor(f, _TESS_MAGIC) is None:
-                return False
-            return f.read(8) == b"DTFECHK1"
-    except OSError:
-        return False
 
 
 def globals_recorded(cache_dir, snapshot, lagrangian=None) -> bool:

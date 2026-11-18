@@ -1,11 +1,11 @@
 /* The face sweep: exact integrals of a linear field over the grid's FACES, for the face method of the velocity
-   gradient (docs/cleanup-plan.md P10; '--face-gradient').
+   gradient ('--face-gradient').
 
    By Gauss, the average over a grid cell of the gradient of a field v is (1/V) times the integral of v n over the
    cell's six faces. For standard DTFE's interpolant -- linear in every tetrahedron and continuous across them --
-   that is exactly the cell average of the per-tetrahedron gradient the deposit adds up today; for PS-DTFE, where
+   that is exactly the cell average of the per-tetrahedron gradient the deposit adds up; for PS-DTFE, where
    the streams overlap and the mean velocity jumps at the caustics, it is the finite-volume gradient of the
-   cell-averaged mean flow (P10.3). Both need the same geometry, here:
+   cell-averaged mean flow. Both need the same geometry, here:
 
    - section(): the plane x_axis = c cuts a tetrahedron in a convex polygon (a triangle or a quadrilateral), given in
      the plane's own coordinates (u, w), the other two axes in increasing order (x: (y, z), y: (x, z), z: (x, y)).

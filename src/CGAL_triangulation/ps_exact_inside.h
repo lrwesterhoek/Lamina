@@ -49,7 +49,7 @@ struct Frame
     {
         periodic = userOptions.periodic;
         // the box length is formed with the SAME Real expression as every periodic-copy
-        // generator (DTFE.cpp eulerLen/eulerLenArr, subpartition.h findParticlesInBox)
+        // generator (DTFE.cpp eulerLen, subpartition.h findParticlesInBox)
         double scale = 0.;
         for (int d = 0; d < NO_DIM; ++d)
         {

@@ -20,7 +20,7 @@
 #      stream one; the collapse multiplicity is k = 1 inside the pancake and k = 0 outside
 #   S  --partition 2 2 == one triangulation (streams identical; density identical to float rounding
 #      but in the few caustic cells where a copy's float rounding flips a flat triangle's drop);
-#      --ps-vertex-mass, --ps-volume-weighted, --ps-halo-release conserve mass;
+#      --ps-vertex-mass and --ps-halo-release conserve mass;
 #      a non-periodic clump conserves mass and covers its interior; the tessellation cache hits and
 #      reproduces the run bit for bit; --gpu on the 2D build (no GPU backend in DIM=2) runs every
 #      partition on the CPU, exits 0 and says how many passes fell back
@@ -44,6 +44,10 @@
 #      centre values (with origin x for y the samples would average another cell)
 #   DM a 3-column snapshot through DTFE-2d / PS-DTFE-2d (and a 2-column one through DTFE / PS-DTFE, when built)
 #      is refused with a message naming the binaries to use (not a segfault or a garbage grid at exit 0)
+#   RS the standard DTFE-2d's seeded Monte-Carlo average ('--average-method 2 --subsamples 3 --seed 11'), '--partition
+#      2 2 --max-concurrent 2' on two threads, crossed waves, grid 48: killed after 2 of its 4 partitions
+#      (DTFE_TEST_EXIT_AFTER_PARTITIONS, exit 137, 2 in the checkpoint) and resumed with '--resume': every output the
+#      uninterrupted run's bytes, the checkpoint removed
 #   EA the standard DTFE-2d's --exact (triangles clipped by ps_clip2d.h):
 #      density 1 to float rounding on a perfect lattice (the sampled average is off by percents), mass
 #      conserved on a pancake, and the sampled average agrees with it to its own noise
@@ -61,8 +65,7 @@ if [ "${1:-}" != "--no-build" ]; then
     make PS-DTFE DTFE DIM=2 -j4 >/dev/null || { echo "FAIL: the 2D build"; exit 1; }
 fi
 # (this suite does not source precision.sh: the 2D pair is its own) a missing pair is a skip, or a failure when
-# the stage requires it (DTFE_TEST_REQUIRED=1, ci_suite.sh's 2d stage after building it)
-skip_or_fail() { if [ "${DTFE_TEST_REQUIRED:-0}" = "1" ]; then echo "FAIL (required): $*" >&2; exit 1; fi; echo "SKIP: $*"; exit 0; }
+# the stage requires it (DTFE_TEST_REQUIRED=1, ci_suite.sh's 2d stage after building it): skip_or_fail, tests/lib.sh
 for b in ./PS-DTFE-2d ./DTFE-2d; do [ -x "$b" ] || skip_or_fail "$b is not built (make PS-DTFE DTFE DIM=2)"; done
 TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}/ps_2d"
 mkdir -p "$TMP"
@@ -80,7 +83,7 @@ RUN "$TMP/pan_s12" ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_s12" "${COMMON[@]}" --
 RUN "$TMP/pan_x"   ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_x"   "${COMMON[@]}" --field density_a velocity_a dispersion_a --exact --ps-caustics
 RUN "$TMP/pan_p1"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_p1"  "${COMMON[@]}" --field density_a --subsamples 2 --partition 1 1 --max-concurrent 1
 RUN "$TMP/pan_p2"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_p2"  "${COMMON[@]}" --field density_a --subsamples 2 --partition 2 2 --max-concurrent 1
-RUN "$TMP/pan_vm"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_vm"  "${COMMON[@]}" --field density_a velocity_a --ps-vertex-mass --ps-volume-weighted --sampled --subsamples 3
+RUN "$TMP/pan_vm"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_vm"  "${COMMON[@]}" --field density_a velocity_a --ps-vertex-mass --sampled --subsamples 3
 RUN "$TMP/pan_hr"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_hr"  "${COMMON[@]}" --field density_a --ps-halo-release 2 --sampled --subsamples 3
 RUN "$TMP/pan_c1"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_c1"  "${COMMON[@]}" --field density_a --tessellation-cache "$CACHE"
 RUN "$TMP/pan_c2"  ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/pan_c2"  "${COMMON[@]}" --field density_a --tessellation-cache "$CACHE"
@@ -155,6 +158,24 @@ for pair in "./DTFE-2d dim3 3" "./PS-DTFE-2d dim3 3" "./DTFE pan 2" "./PS-DTFE p
     grep -q "holds $3 coordinates per particle, but this binary is built for" "$TMP/dim_$(basename "$1").log" && said=1 || said=0
     echo "$(basename "$1") $rc $said" >> "$TMP/dimcheck.txt"
 done
+# the standard 2D build's seeded Monte-Carlo average split 2 x 2 (two threads on every run: method 2 adds 1000 x the
+# sub-domain number to its seed), killed after 2 of its 4 partitions and resumed; a stale checkpoint or output of an
+# earlier pass of the suite would stand in for this one's, so they go first
+echo ">> DTFE-2d '--average-method 2 --seed 11', --partition 2 2: killed after 2 partitions, resumed"
+RS=(--input-format 105 --mpc-unit 1 --periodic --grid 48 --partition 2 2 --max-concurrent 2 --average-method 2
+    --subsamples 3 --seed 11 --field density_a velocity_a)
+rm -rf "$TMP"/rs_ref.* "$TMP"/rs.*
+RUN "$TMP/rs_ref" env OMP_NUM_THREADS=2 ./DTFE-2d "$TMP/crw.hdf5" "$TMP/rs_ref" "${RS[@]}"
+# (the shell's own 'Killed: 9' line is not output)
+{ env OMP_NUM_THREADS=2 DTFE_TEST_EXIT_AFTER_PARTITIONS=2 ./DTFE-2d "$TMP/crw.hdf5" "$TMP/rs" "${RS[@]}" \
+    > "$TMP/rs_killed.log" 2>&1; } 2>/dev/null
+rk=$?
+nk="$(merged_count "$TMP/rs.runlog.checkpoint" 2>/dev/null)"
+env OMP_NUM_THREADS=2 ./DTFE-2d "$TMP/crw.hdf5" "$TMP/rs" "${RS[@]}" --resume > "$TMP/rs.log" 2>&1
+rr=$?
+rs_said=0; grep -q -- "--resume: 2 of " "$TMP/rs.log" && rs_said=1
+rs_same=0; [ ! -e "$TMP/rs.runlog.checkpoint" ] && same "$TMP/rs_ref" "$TMP/rs" && rs_same=1
+echo "$rk ${nk:-0} $rr $rs_said $rs_same" > "$TMP/rscheck.txt"
 # the device with nothing given (DTFE_GPU unset: the program picks; every other run here has tests/lib.sh's DTFE_GPU=0)
 echo ">> the device line with DTFE_GPU unset"
 RUN "$TMP/dv_ps"  env -u DTFE_GPU ./PS-DTFE-2d "$TMP/pan.hdf5" "$TMP/dv_ps"  --grid 32 --periodic --mpc-unit 1 --verbose 2 --field density_a
@@ -274,7 +295,7 @@ diff = np.abs(a - b) / np.abs(a).max() > 1e-5
 check("S partition 2 2 == 1 1", np.array_equal(grid("pan_p1", "a_streams"), grid("pan_p2", "a_streams"))
       and diff.mean() < 1e-3 and caustic[np.where(diff)[0]].all(),
       f"streams identical; density differs beyond float rounding in {int(diff.sum())} cells, all on caustic columns")
-for name, what, tol in (("pan_vm", "vertex mass + volume weighted", 1e-6), ("pan_hr", "halo release D=2", 1e-3)):
+for name, what, tol in (("pan_vm", "vertex mass", 1e-6), ("pan_hr", "halo release D=2", 1e-3)):
     d = grid(name, "a_den"); check(f"S {what}", abs(d.mean() - 1) < tol, f"mean density {d.mean():.7f} (to {tol:g})")
 cl = grid("clump", "den")
 spacing = 0.6 * L / 64; area = (0.6 * L - spacing) ** 2
@@ -286,7 +307,7 @@ log2 = (tmp / "pan_c2.log").read_text()
 same = all((tmp / f"pan_c1.{e}").read_bytes() == (tmp / f"pan_c2.{e}").read_bytes() for e in ("a_den", "a_streams"))
 check("S tessellation cache", "Reused the cached tessellation" in log2 and same, "the second run hits and its grids are identical")
 gfb = (tmp / "pan_gfb.log").read_text(errors="replace")
-check("S --gpu fallback counted", "4 partition deposit pass(es) asked for the GPU and ran on the CPU instead" in gfb,
+check("S --gpu fallback counted", "4 partition deposit pass(es) were meant for the GPU and ran on the CPU instead" in gfb,
       "a --gpu run with --partition 2 2 on the CPU-only 2D build says '4 partition deposit pass(es) ... ran on the CPU'")
 
 # PE: point evaluation
@@ -413,6 +434,14 @@ for line in (tmp / "dimcheck.txt").read_text().split("\n"):
     if line.strip():
         b, rc, said = line.split()
         check(f"DM {b} refuses the other dimension", rc != "0" and said == "1", f"exit {rc}, message {'given' if said == '1' else 'MISSING'}")
+
+# RS: the standard 2D build's seeded Monte-Carlo average split 2 x 2, killed after 2 of its 4 partitions and resumed
+rs_rk, rs_nk, rs_rr, rs_said, rs_same = (tmp / "rscheck.txt").read_text().split()
+check("RS DTFE-2d '--average-method 2' killed and resumed",
+      rs_rk == "137" and rs_nk == "2" and rs_rr == "0" and rs_said == "1" and rs_same == "1",
+      f"killed after 2 partitions (exit {rs_rk}, {rs_nk} of 4 in its checkpoint), resumed (exit {rs_rr}, "
+      f"'--resume: 2 of' said: {rs_said == '1'}); every output the uninterrupted run's bytes, the checkpoint removed: "
+      f"{rs_same == '1'}")
 
 # DV: the 2D builds have no GPU path: with nothing given the header's device line says so, and under tests/lib.sh's
 # DTFE_GPU=0 (the other runs) it names the pin; neither warns about the GPU

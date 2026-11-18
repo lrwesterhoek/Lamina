@@ -44,7 +44,7 @@ import matplotlib.pyplot as plt
 
 import config
 from dtfelib import pipeline, catalog, profiles, convergence as cv
-from dtfelib import make_parser, use_data_root, snapshot_ladder, add_out_arg, deprecated_alias
+from dtfelib import make_parser, use_data_root, snapshot_ladder, add_out_arg
 from dtfelib import figures as style
 from dtfelib import groupcat as gc
 
@@ -383,7 +383,6 @@ def main(argv=None):
     p = make_parser("Resolution (grid, particle mass) and estimator convergence of the void statistics.")
     p.add_argument("--redshifts", dest="z", type=float, nargs="+", default=list(DEFAULT_Z), metavar="Z",
                    help="the redshifts (default 0 1)")
-    deprecated_alias(p, "--z", "--redshifts")
     p.add_argument("--factors", type=int, nargs="+", default=list(cv.DEFAULT_FACTORS),
                    help="block-averaging factors of the grid (default 2 4: 512 -> 256, 128 cells)")
     p.add_argument("--match-sigma", type=float, default=cv.DEFAULT_MATCH_SIGMA,

@@ -121,6 +121,17 @@ PYEOF
     else
         echo "   FAIL  non-periodic --interlace: not the expected refusal ($E2E/np.log)"; fails=$((fails+1))
     fi
+    # PS-DTFE takes no region, so there a non-periodic '--interlace' is refused with its own text
+    if [ -f "$E2E/pan.hdf5" ]; then
+        if ./PS-DTFE "$E2E/pan.hdf5" "$E2E/np_ps" --grid 16 --mpc-unit 1 --field density_a --partition 1 1 1 --interlace \
+               > "$E2E/np_ps.log" 2>&1; then
+            echo "   FAIL  PS-DTFE: a non-periodic --interlace run is not refused"; fails=$((fails+1))
+        elif grep -q "'--interlace' needs '--periodic' in PS-DTFE" "$E2E/np_ps.log"; then
+            echo "   PASS  PS-DTFE: a non-periodic --interlace run is refused before the first pass"
+        else
+            echo "   FAIL  PS-DTFE non-periodic --interlace: not the expected refusal ($E2E/np_ps.log)"; fails=$((fails+1))
+        fi
+    fi
 fi
 echo "------------------------------------------------------------"
 if [ "$fails" -gt 0 ]; then echo "RESULT: FAIL ($fails)"; exit 1; fi

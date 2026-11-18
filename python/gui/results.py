@@ -4,10 +4,13 @@ its time estimates and its failure advice. Pure Python (no Qt): tests/py_gui_run
   scan_runs(root, extra_dirs)   every '<prefix>.runlog' under the data root (per-family layout)
                                 and under the custom-snapshot output directories -> RunRecord, with
                                 a later failed, killed or running attempt ('.runlog.failed/.partial')
-  stale_reasons(record)         which KNOWN_FIXES (output-changing fixes of the binary) the run
-                                predates, judged by the binary's build stamp ('Build:' line) or,
-                                without one, by the date the run finished; and the attempt after it
+  stale_reasons(record)         what to know before using a run's outputs: an older version of the
+                                programs made them (RunRecord.older), they show a known problem
+                                (stream counts, no tetrahedron masses), the attempt after the run
                                 (attempt_note)
+  older_log(path)               run_ps_pipeline.sh's test of a run log, on its head (the Pipeline
+                                tab's prediction of what the script recomputes)
+  read_device(text, ...)        the device a run's header names (a run log's, a memory check's)
   time_estimate(records, ...)   the median wall time of comparable earlier runs
   diagnose(log, exit_codes)     plain-language causes and fixes for a failed job
   void_status(records, root)    whether each run's void catalogue is cached, stale or absent (void_cache.py)
@@ -38,11 +41,6 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-_PYTHON = Path(__file__).resolve().parent.parent           # python/: dtfelib (stdlib-only runlog)
-if str(_PYTHON) not in sys.path:
-    sys.path.insert(0, str(_PYTHON))
-from dtfelib import runlog as _runlog  # noqa: E402  (the run-log readers' permanent old-to-new table)
-
 # ---------------------------------------------------------------------- run records
 _BUILD = re.compile(r"^Build: (\S+) (\S+) \(built ([0-9T:\-]+Z?)\)", re.M)
 _RUNNING = re.compile(r"^RUNNING: (.*)$", re.M)
@@ -52,19 +50,19 @@ _FOOTPRINT = re.compile(r"^\s*(\d+)\s+peak memory footprint", re.M)
 _GRID = re.compile(r"--grid (\d+)")
 _PARTITION = re.compile(r"--partition (\d+) (\d+)(?: (\d+))?")    # a 2D run's split has two numbers
 _CONC = re.compile(r"--max-concurrent (\d+)")
-_NSUB = re.compile(r"--subsamples (\d+)")             # (canonical: an older log's '--avg-subsamples' reads so)
+_NSUB = re.compile(r"--subsamples (\d+)")
 # the PS-DTFE run-log header's count line, 'avg sub-samples (nSub) : N', printed by every sampled run with an '_a' field
 # (src/user_options.cc): the count of a run whose command names none (the drivers pass '--subsamples' only when
 # SUBSAMPLES is set), which took the binary's default -- 3 points per cell axis before Fast became one
 _NSUB_HEAD = re.compile(r"^\s*avg sub-samples \(nSub\)\s*:\s*(\d+)", re.M)
-_MERGE = re.compile(r"(?:^|\s)--ps-merge (\S+)")
-_RUN_MODE = re.compile(r"(?:^|\s)--run-mode[ =](\S+)")    # the machine use (a log without it: performance)
+_MERGE = re.compile(r"(?:^|\s)--ps-merge[ =](\S+)")
 # the run-log header's run-mode line, every run's since the run modes: 'run mode : balanced (--run-mode balanced, the
 # default; ...)', the mode the run took and why (the option, DTFE_RUN_MODE or the binary's default, which is balanced,
-# or performance inside a batch job). Read before the command's '--run-mode' (RunRecord.run_mode)
+# or performance inside a batch job): RunRecord.run_mode. A log without it is an older version's (RunRecord.older,
+# for a log with a command; older_log, the pipeline's test)
 _RUN_MODE_HEAD = re.compile(r"^\s*run mode\s+:\s+(gentle|balanced|performance)\b", re.M)
 # the run-log header's device line, where the device matters (standard DTFE's "'_a' interpolation : ..." with an '_a'
-# field, PS-DTFE's 'PS deposit : ...' with one): a value starting with 'CPU' is the CPU ('CPU (DTFE_GPU=0)', 'CPU (the
+# field, PS-DTFE's 'PS deposit : ...' with any): a value starting with 'CPU' is the CPU ('CPU (DTFE_GPU=0)', 'CPU (the
 # default for the sampled average; ...)'), else one holding ' GPU' the GPU ('Metal GPU (--gpu)', 'Metal GPU (the
 # default; ...)'). A binary that picks its device prints it on the GPU and the CPU alike; an older one printed it only
 # for a command with '--gpu', so a log without it is read by that flag (RunRecord.gpu)
@@ -78,7 +76,7 @@ _AVERAGE = re.compile(r"^\s*(?:volume averaging|grid deposit)\s+:\s+(EXACT (?:ce
 # the run-log header's line on the velocity gradient's route (both binaries, where a field built on the gradient is
 # computed): 'velocity gradient : from EXACT FACE ...' for the face gradient, any other text for the deposit's own
 # (PS-DTFE: the stream average of each stream's own gradient). A PS-DTFE log of a binary older than its face-gradient
-# default (docs/cleanup-plan.md D13) has none: its route is the stream average unless the command names
+# default has none: its route is the stream average unless the command names
 # '--face-gradient'
 _GRADIENT = re.compile(r"^\s*velocity gradient\s+:\s+(from EXACT FACE)?", re.M)
 # the PS-DTFE run-log header's line on the velocity moments, printed by every PS-DTFE run beside its command line:
@@ -86,16 +84,7 @@ _GRADIENT = re.compile(r"^\s*velocity gradient\s+:\s+(from EXACT FACE)?", re.M)
 # were volume-weighted only where the command names '--ps-volume-weighted' (dtfelib.io.run_velocity_weighting reads
 # both the same way)
 _MOMENTS = re.compile(r"^\s*velocity moments\s+:\s+(volume-weighted)?", re.M)
-# the binaries' older spellings and their canonical names: dtfelib/runlog.py's permanent table (the binaries accept
-# a subset for one release, src/user_options.cc deprecatedOptions). Every reader of a command line maps them first,
-# so a run log written with either reads the same (RunRecord.has, and every regex below runs on canonical_command's
-# text). Re-exported here for the launcher (presets.flag_help, the Custom tab's repeat check).
-DEPRECATED_FLAGS = _runlog.RENAMES
-canonical_flag = _runlog.canonical_flag
-canonical_command = _runlog.canonical_command
 _FIELDS = re.compile(r"--field ((?:(?!--)\S+\s*)+)")
-# the GPU deposit restarted after a watchdog kill: DTFE says 'the deposit', PS-DTFE 'the partition deposit'
-_GPU_RETRY = re.compile(r"retrying the (?:partition )?deposit from scratch")
 # the run log's closing tally (contract G1), printed when N > 0
 _GPU_RETRIES = re.compile(r"^GPU deposit retries: (\d+) \(innocent (\d+), timeout (\d+), oom (\d+), other (\d+)\)", re.M)
 GPU_RETRY_CAUSES = ("innocent", "timeout", "oom", "other")
@@ -281,7 +270,6 @@ class RunRecord:
     build_rev: str = ""
     build_time: _dt.datetime | None = None
     finished: _dt.datetime | None = None   # the log's modification time = when the run ended
-    gpu_retried: bool = False       # the GPU deposit was restarted after a watchdog kill (the log says so)
     gpu_retries: int = 0            # the log's 'GPU deposit retries: N (...)' line (G1): N, and per cause
     gpu_retries_by_cause: dict = field(default_factory=dict)
     wall_seconds: float | None = None
@@ -289,7 +277,6 @@ class RunRecord:
     footprint_gb: float | None = None
     ok: bool = False                # reached the binary's summary without an ERROR block
     outputs: list[Path] = field(default_factory=list)
-    redshift: float | None = None
     # a later run under this name that left no log of record (scan_runs, the run-log contract):
     # 'failed' ('<prefix>.runlog.failed'), 'running' or 'killed' ('<prefix>.runlog.partial' with or without a
     # live process naming it; 'partial' when ps cannot say), 'resumable' (failed or killed, with its checkpoint
@@ -304,25 +291,27 @@ class RunRecord:
     attempt_rewrote: int = 0        # outputs modified after this log was: the attempt rewrote them
     progress: dict | None = None    # the binary's progress sidecar of a run going (C1, read_progress)
 
-    # -- the settings the RUNNING line shows (in canonical spellings: an old log's '--ps-gpu' is '--gpu' here)
+    # -- the settings the RUNNING line shows, read as written
     @property
-    def canonical(self) -> str:
-        # the dimension from the Build line's binary name (the '--samples N' -> '--subsamples k' transform needs it),
-        # else from the command's own first word
-        return canonical_command(self.command, self.dim if self.binary else None)
+    def older(self) -> bool:
+        """A log of an older version of the programs: it has a RUNNING line and no header 'run mode' line (every
+        run's since the run modes prints one, and every log the drivers and the launcher wrote since then spells its
+        options in the current names). Its settings are not read: it is listed with its name, time, outcome and
+        files, its settings read 'older version' (options_text), 'Load settings' is not offered for it (settings()
+        gives nothing), time_estimate leaves it out and stale_reasons says to recompute it. A log without any
+        command (a run that died before the program printed its header) is not one: it has no settings to read."""
+        return bool(self.command) and not self.header_run_mode
 
     def has(self, flag: str) -> bool:
-        """The command carries the option 'flag' (either spelling of a renamed one; an old merge switch is the
-        '--ps-merge' mode it stands for: has('--ordered-merge') == has('--ps-merge index-order'))."""
-        return re.search(rf"(^|\s){re.escape(canonical_flag(flag))}(\s|$)", self.canonical) is not None
+        """The command carries the option 'flag', as written."""
+        return re.search(rf"(^|\s){re.escape(flag)}(\s|$)", self.command) is not None
 
     @property
     def exact(self) -> bool:
         """The run's cell averages were exact (standard DTFE's '_a' fields; PS-DTFE's grid deposit): the header's line
         says so when the log has one (a binary since 2026-11-09 prints it either way, and resolves a command without a
-        flag to its exact default); else the command, '--exact' (read in canonical spelling: '--exact-average' and
-        '--ps-exact-deposit' too) against '--sampled' or nothing -- an older log without either was sampled, the
-        default until then."""
+        flag to its exact default); else the command, '--exact' against '--sampled' or nothing -- an older log without
+        either was sampled, the default until then."""
         if self.header_average:
             return self.header_average == "exact"
         return self.has("--exact")
@@ -331,7 +320,7 @@ class RunRecord:
     def face_gradient(self) -> bool:
         """PS-DTFE: the run's velocity-gradient family is the mean flow's, from exact face sums -- the header's line
         says so when the log has one (the binary prints it where a field built on the gradient is computed, and
-        resolves a command without a route flag to its default, D13); else the command's '--face-gradient' (an older
+        resolves a command without a route flag to its default); else the command's '--face-gradient' (an older
         binary's run without it holds the stream average, that binary's only default)."""
         if self.header_gradient:
             return self.header_gradient == "face"
@@ -362,36 +351,36 @@ class RunRecord:
 
     @property
     def grid(self) -> int | None:
-        m = _GRID.search(self.canonical)
+        m = _GRID.search(self.command)
         return int(m.group(1)) if m else None
 
     @property
     def partitions(self) -> int:
-        m = _PARTITION.search(self.canonical)
+        m = _PARTITION.search(self.command)
         return math.prod(int(g) for g in m.groups() if g) if m else 1
 
     @property
     def partition(self) -> int:
-        m = _PARTITION.search(self.canonical)
+        m = _PARTITION.search(self.command)
         return int(m.group(1)) if m else 0
 
     @property
     def max_concurrent(self) -> int:
-        m = _CONC.search(self.canonical)
+        m = _CONC.search(self.command)
         return int(m.group(1)) if m else 0
 
     @property
     def nsub(self) -> int | None:
         """The sampled deposit's points per cell axis: the command's '--subsamples k', else the header's count line
         (a PS-DTFE run whose command names none: the binary's default then), else None."""
-        m = _NSUB.search(self.canonical)
+        m = _NSUB.search(self.command)
         return int(m.group(1)) if m else self.header_nsub
 
     @property
     def gpu(self) -> bool:
-        """The run's '_a' work ran on the GPU: the header's device line says so when the log has one (a binary that
+        """The run's grid work ran on the GPU: the header's device line says so when the log has one (a binary that
         picks its device prints it wherever the device matters, the GPU or the CPU); else the command's '--gpu' (an
-        older binary ran on the GPU only with it; PS-DTFE's older '--ps-gpu' too, canonical_flag)."""
+        older binary ran on the GPU only with it)."""
         if self.header_device:
             return self.header_device == "gpu"
         return self.has("--gpu")
@@ -402,13 +391,8 @@ class RunRecord:
 
     @property
     def fields(self) -> list[str]:
-        m = _FIELDS.search(self.canonical)
+        m = _FIELDS.search(self.command)
         return m.group(1).split() if m else []
-
-    @property
-    def when(self) -> _dt.datetime | None:
-        """The binary's build time if the log names it, else when the run finished."""
-        return self.build_time or self.finished
 
     def checkpoint_dir(self) -> Path:
         """Where a killed partitioned run of this output keeps its checkpoint (K2; under '--scratch-dir' it lives
@@ -432,16 +416,20 @@ class RunRecord:
         return total
 
     def options_text(self) -> str:
+        """The run's settings in a few words (the Runs browser's Options column, its details and its filter); an
+        older version's log (older): 'older version', its settings not read; a log without any command: ''."""
+        if not self.command:
+            return ""
+        if self.older:
+            return "older version"
         bits = []
         if self.estimator in ("ps", "dtfe"):
             # the quality, in the launcher's words: Exact (the exact cell averages: the header's line, else
-            # '--exact' or an older name of it) or Fast (the sampled ones)
+            # '--exact') or Fast (the sampled ones)
             bits.append("Exact" if self.exact else "Fast")
         if self.estimator == "ps":
             if not self.exact and self.nsub:          # Fast runs at two counts must differ here
                 bits.append(f"{self.nsub} sample{'s' if self.nsub != 1 else ''} per cell axis")
-            if self.has("--ps-linear-deposit"):       # the two deposit variants of one snapshot must differ here
-                bits.append("linear deposit")
             if self.face_gradient:                    # the mean flow's gradient: the same snapshot, another divergence
                 bits.append("face gradient")
             if self.has("--ps-vertex-mass"):
@@ -450,7 +438,7 @@ class RunRecord:
                 bits.append("volume-weighted")
             if self.has("--ps-caustics"):
                 bits.append("caustics")
-            if self.merge == "index-order":           # '--ordered-merge' in older logs
+            if self.merge == "index-order":
                 bits.append("ordered merge")
             elif self.merge == "completion-order":    # opt-in (the default is the ordered merge)
                 bits.append("completion-order merge")
@@ -463,42 +451,33 @@ class RunRecord:
         if self.dim == 2:
             bits.append("2D")
         if self.sliced:
-            bits.append("slice" + (" (legacy conventions)" if self.legacy_points else ""))
+            bits.append("slice")
         return ", ".join(bits)
 
     @property
     def merge(self) -> str:
-        """The PS-DTFE merge mode the command GAVE ('--ps-merge MODE'; an older log's '--ordered-merge',
-        '--completion-order-merge' or '--fixed-point-merge'), '' when it gave none (the default, index order)."""
-        m = _MERGE.search(self.canonical)
+        """The PS-DTFE merge mode the command GAVE ('--ps-merge MODE'), '' when it gave none (the default, index
+        order)."""
+        m = _MERGE.search(self.command)
         return m.group(1) if m else ""
 
     @property
     def run_mode(self) -> str:
-        """The machine use the run took: the header's 'run mode' line when the log has one (it names the mode however
-        it was chosen: '--run-mode', DTFE_RUN_MODE or the binary's default); else the command's '--run-mode MODE';
-        else 'performance', the default of the older binaries that wrote neither, and of the ones without the
-        option."""
-        if self.header_run_mode:
-            return self.header_run_mode
-        m = _RUN_MODE.search(self.canonical)
-        return m.group(1) if m else "performance"
-
-    @property
-    def legacy_points(self) -> bool:
-        """A phase-space plane asked for in the legacy conventions ('--ps-point-conventions legacy';
-        '--pts-conventions' in older logs)."""
-        return re.search(r"(^|\s)--ps-point-conventions\s+legacy(\s|$)", self.canonical) is not None
+        """The machine use the run took: the header's 'run mode' line (it names the mode however it was chosen:
+        '--run-mode', DTFE_RUN_MODE or the binary's default); else 'performance' (a log without the line is an older
+        version's or holds no command: neither has settings that are read)."""
+        return self.header_run_mode or "performance"
 
     def settings(self) -> dict:
-        """The Grids-tab (RunSpec) settings this run used, as far as its command shows them."""
+        """The Grids-tab (RunSpec) settings this run used, as far as its command shows them; the quality is the cell
+        average's (Exact or Fast). Nothing for an older version's log (older), nor for a log without any command."""
+        if not self.command or self.older:
+            return {}
         d = {"estimator": self.estimator or "ps", "gpu": self.gpu, "precision": self.precision}
         if self.grid:
             d["grid"] = self.grid
         if self.estimator == "ps":
-            d.update(deposit="exact" if self.exact else "sampled",
-                     # always set: 'Load settings' must also turn the box OFF for a standard-deposit run
-                     linear_deposit=self.has("--ps-linear-deposit"),
+            d.update(quality="exact" if self.exact else "fast",
                      # the tick: off only where the run named the stream average ('--per-tet-gradient'); a run that
                      # named no route took the binary's default, which a ticked job asks for where it qualifies
                      face_gradient=not self.has("--per-tet-gradient"),
@@ -506,23 +485,20 @@ class RunRecord:
                      volume_weighted=self.volume_weighted,
                      caustics=self.has("--ps-caustics"), caustic_cusps=self.has("--ps-caustic-cusps"),
                      parallel_triangulation=self.has("--parallel-triangulation"),
-                     # the default is ON (the staged merge in index order), so only
-                     # a run made with '--ps-merge completion-order' ('--completion-order-merge') turns it off -- an
-                     # older binary's run without either flag merged in completion order, but loading its settings
-                     # starts the current default
+                     # the default is ON (the staged merge in index order), so only a run made with '--ps-merge
+                     # completion-order' turns it off -- an older binary's run without the flag merged in completion
+                     # order, but loading its settings starts the current default
                      ordered_merge=self.merge != "completion-order",
                      output_prefix=self.prefix or "ps_output")
-            m = re.search(r"(?:^|\s)--ps-alpha-shape\s+([0-9.]+)", self.canonical)
+            m = re.search(r"(?:^|\s)--ps-alpha-shape\s+([0-9.]+)", self.command)
             if m:
                 d["alpha_shape"] = float(m.group(1))
-            if self.sliced:                 # the plane's conventions: 'legacy' only when the log says it
-                d["pts_conventions"] = "legacy" if self.legacy_points else "grid"
             if self.nsub:
                 d["nsub"] = self.nsub
             if self.fields:
                 d["fields"] = self.fields
         elif self.estimator == "dtfe":      # its cell average, both ways (else the Grids tab's choice would stay)
-            d["deposit"] = "exact" if self.exact else "sampled"
+            d["quality"] = "exact" if self.exact else "fast"
         return d
 
 
@@ -553,9 +529,7 @@ def run_inputs(rec: RunRecord) -> set[Path]:
         words = rec.command.split()
     # the log prints the command UNQUOTED: a path with a space (anything under iCloud's 'Mobile Documents') splits
     # above, so the file options' values are also read up to the next ' --', and the sidecar names the rest
-    # (the raw command: every spelling of the file options, '--lagrangianInput' in older logs)
-    for m in re.finditer(r"--(?:sample-points|ps-lagrangian-input|lagrangianInput|scalar-file)\s+(.+?)(?=\s--|$)",
-                         rec.command):
+    for m in re.finditer(r"--(?:sample-points|ps-lagrangian-input|scalar-file)\s+(.+?)(?=\s--|$)", rec.command):
         words.append(m.group(1).strip())
     side = Path(str(rec.path.parent / rec.prefix) + ".gui.json")
     try:
@@ -580,9 +554,21 @@ def run_inputs(rec: RunRecord) -> set[Path]:
 # the launcher rescans every 30 s on its GUI thread, and a TNG50 z=0 log is large and on the
 # external disk; an unchanged log is not read again
 _LOG_FIELDS = ("binary", "build_rev", "build_time", "command", "header_average", "header_gradient", "header_nsub",
-               "header_moments", "header_device", "header_run_mode", "gpu_retried", "gpu_retries",
-               "gpu_retries_by_cause", "wall_seconds", "peak_rss_gb", "footprint_gb", "ok")
+               "header_moments", "header_device", "header_run_mode", "gpu_retries", "gpu_retries_by_cause",
+               "wall_seconds", "peak_rss_gb", "footprint_gb", "ok")
 _LOG_CACHE: dict[str, tuple[int, int, dict]] = {}
+
+
+def read_device(text: str, pos: int = 0, endpos: int | None = None) -> str:
+    """The device a run's header names (_DEVICE) in text[pos:endpos] (one run's output: from its RUNNING line to the
+    next): 'cpu', 'gpu', or '' without a device line. The LAST such line counts (a picked GPU that met method 2 prints
+    a replacing line). Read for a run log (RunRecord.header_device) and for a memory check's reports
+    (runspec.parse_reports)."""
+    ds = list(_DEVICE.finditer(text, pos, len(text) if endpos is None else endpos))
+    if not ds:
+        return ""
+    val = ds[-1].group(1).strip()
+    return "cpu" if val.startswith("CPU") else "gpu" if " GPU" in val else ""
 
 
 def _parse_text(rec: RunRecord, text: str):
@@ -618,21 +604,13 @@ def _parse_text(rec: RunRecord, text: str):
         v = _MOMENTS.search(text, m.end(), nxt.start() if nxt else len(text))     # the moments' line, the same way
         if v:
             rec.header_moments = "volume" if v.group(1) else "other"
-        # the device's line, the same way: the LAST one (a picked GPU that met method 2 prints a replacing line)
-        ds = list(_DEVICE.finditer(text, m.end(), nxt.start() if nxt else len(text)))
-        d = ds[-1] if ds else None
-        if d:
-            val = d.group(1).strip()
-            rec.header_device = "cpu" if val.startswith("CPU") else "gpu" if " GPU" in val else ""
+        rec.header_device = read_device(text, m.end(), nxt.start() if nxt else len(text))   # the device's line too
         r = _RUN_MODE_HEAD.search(text, m.end(), nxt.start() if nxt else len(text))   # the run mode's line, too
         if r:
             rec.header_run_mode = r.group(1)
-    rec.gpu_retried = _GPU_RETRY.search(text) is not None
     tallies = _GPU_RETRIES.findall(text)
     if tallies:                     # the last: a resumed run's log holds each attempt's
         n = [int(x) for x in tallies[-1]]
-        # display only: gpu_retried stays the from-scratch restart message (the dtfe-gpu-retry Fix keys on it;
-        # a chunk restore the tally also counts is byte-identical)
         rec.gpu_retries, rec.gpu_retries_by_cause = n[0], dict(zip(GPU_RETRY_CAUSES, n[1:]))
     m = _WALL.search(text)
     rec.wall_seconds = parse_duration(m.group(1)) if m else None
@@ -668,27 +646,26 @@ def parse_runlog(path: Path, sim: str = "", snap: int | None = None) -> RunRecor
     return rec
 
 
-_Z: dict[str, float | None] = {}
+_OLDER_CACHE: dict[str, tuple[int, int, bool]] = {}
 
 
-def _redshift_of(snapdir: Path) -> float | None:
-    """The snapshot's redshift from its combined file's header (cached per file and mtime)."""
-    files = sorted(Path(snapdir).glob("combined_[0-9][0-9][0-9].hdf5"))
-    if not files:
-        return None
-    f = files[0]
+def older_log(path, nbytes: int = 65536) -> bool:
+    """run_ps_pipeline.sh's test of the run log at 'path' (the script's older_log), on the log's head, where the
+    header is: no header 'run mode' line, so an older version of the programs wrote it and the script recomputes its
+    snapshot. The Pipeline tab predicts that with it (runspec_pipeline.PipelineSpec.stale); the verdict is kept per
+    log by its (size, mtime_ns), as parse_runlog keeps its reads. False for a missing log (the script judges a
+    snapshot without a run log by the file times) and for one that cannot be read (the script recomputes that one)."""
     try:
-        key = f"{f}:{f.stat().st_mtime_ns}"
+        st = Path(path).stat()
+        hit = _OLDER_CACHE.get(str(path))
+        if hit is not None and hit[:2] == (st.st_size, st.st_mtime_ns):
+            return hit[2]
+        with open(path, "rb") as fh:
+            older = _RUN_MODE_HEAD.search(fh.read(nbytes).decode(errors="replace")) is None
     except OSError:
-        return None
-    if key not in _Z:
-        try:
-            import h5py
-            with h5py.File(f, "r") as h:
-                _Z[key] = float(h["Header"].attrs["Redshift"])
-        except Exception:
-            _Z[key] = None
-    return _Z[key]
+        return False
+    _OLDER_CACHE[str(path)] = (st.st_size, st.st_mtime_ns, older)
+    return older
 
 
 def _snap_of(snapdir: Path) -> int | None:
@@ -779,11 +756,8 @@ def scan_runs(root, extra_dirs=()) -> list[RunRecord]:
                 add(log)
     for logs, sim, snap in groups.values():
         rec = _read_run(logs, sim, snap)
-        if rec is None:
-            continue
-        if sim:
-            rec.redshift = _redshift_of(rec.path.parent)
-        out.append(rec)
+        if rec is not None:
+            out.append(rec)
     partial = [r for r in out if r.attempt == "partial"]
     live = _live_roots([str(r.path.parent / r.prefix) for r in partial]) if partial else set()
     for r in partial:
@@ -840,116 +814,10 @@ def void_status(records, data_root, python: str | None = None, timeout: float = 
     return out
 
 
-# ---------------------------------------------------------------------- known output-changing fixes
-@dataclass(frozen=True)
-class Fix:
-    key: str
-    fixed: str                      # ISO local time: outputs made (built) before this are affected
-    level: str                      # error (wrong) | warning (biased) | info
-    message: str
-    applies: object                 # RunRecord -> bool: the run is of the affected kind
-
-
+# ---------------------------------------------------------------------- what to know before using a run's outputs
 def _any_output(rec: RunRecord, *suffixes) -> bool:
     names = {p.name[len(rec.prefix) + 1:] for p in rec.outputs}
     return any(s in names for s in suffixes)
-
-
-_NUMBER = r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?"
-
-
-def _box_axes_differ(rec: RunRecord, origin: bool = True) -> bool:
-    """The run's '--box' (min, max per axis) has axes of different lengths, or (origin) different minima: the
-    boxes on which the [i%2] axis indexing of the fractional region and padding mattered. No
-    '--box': the snapshot's own box, cubic from the origin for every input the pipeline writes."""
-    m = re.search(rf"(?:^|\s)--box((?:\s+{_NUMBER}(?=\s|$))+)", rec.command)
-    if not m:
-        return False
-    v = [float(x) for x in m.group(1).split()]
-    lo, hi = v[0::2], v[1::2]
-    lengths = [b - a for a, b in zip(lo, hi)]
-    close = lambda xs: max(xs) - min(xs) <= 1e-6 * max(1.0, max(abs(x) for x in xs))   # noqa: E731
-    return len(lengths) >= 2 and (not close(lengths) or (origin and not close(lo)))
-
-
-KNOWN_FIXES: tuple[Fix, ...] = (
-    Fix("gpu-partition-wrap", "2026-09-29T03:00", "error",
-        "periodic runs split into partitions on the GPU skipped the wrapped part of every "
-        "partition's sub-grid (most cells went to centroid fallbacks; fixed 2026-09-29): regenerate",
-        lambda r: r.estimator == "ps" and r.gpu and r.partitions > 1),
-    Fix("vweb-sqrt-a", "2026-07-18T00:00", "warning",
-        "V-web eigenvalues carried an extra 1/sqrt(a) at z > 0 (fixed 2026-07-18)",
-        lambda r: _any_output(r, "velVweb", "a_velVweb") and (r.redshift or 1.0) > 0.01),
-    Fix("caustic-d4", "2026-07-28T00:00", "info",
-        "caustic-class bit 6 (the D4 indicator) was near-vacuous (fixed 2026-07-28)",
-        lambda r: _any_output(r, "causticClass")),
-    Fix("cache-periodic", "2026-09-30T12:00", "info",
-        "a standard-DTFE run with a tessellation cache could load the tessellation of the other "
-        "periodicity (fixed 2026-09-30)",
-        lambda r: r.estimator == "dtfe" and r.has("--tessellation-cache")),
-    # the old flag is the file '.unresolved' (renamed '.hidden_streams' when it became exact)
-    Fix("hidden-streams", "2026-09-30T15:30", "warning",      # (local time, like the build stamps)
-        "made before the exact hidden-streams flag (2026-09-30): single-stream masks drop cells "
-        "that only hold a small tetrahedron of their own stream, and keep cells crossed by walls "
-        "thinner than the sampling. Regenerate before quoting single-stream statistics",
-        lambda r: r.estimator == "ps" and _any_output(r, "unresolved", "a_unresolved")),
-    Fix("region-faces", "2026-09-30T20:57", "warning",
-        "a non-periodic region cut from a larger cloud: tetrahedra crossing the region's face gave "
-        "their whole mass to the part inside, so face cells read up to 3x too dense and tetrahedra spanning "
-        "many cells biased the interior too (fixed 2026-09-30): regenerate",
-        lambda r: r.estimator == "ps" and not r.has("--periodic") and r.has("--box")),
-    Fix("dtfe-gpu-retry", "2026-10-01T15:43", "warning",
-        "a standard-DTFE GPU run whose deposit was restarted after the GPU watchdog killed a pass: the "
-        "killed pass's atomics could still land after the grids were re-zeroed, a whole extra sample in "
-        "sparse cells (up to 2% of the velocity peak; fixed 2026-10-01, and the new kernel never "
-        "restarts): regenerate",
-        lambda r: r.estimator == "dtfe" and r.gpu and r.gpu_retried),
-    Fix("alpha-shape", "2026-09-30T21:15", "warning",
-        "a non-periodic run: the flat slivers on the cloud's convex hull (particles a whole face apart) "
-        "put spurious mass and streams across the grid, and differed between partitions, so split and "
-        "auto-tuned runs disagreed with one triangulation at the partition seams. The Lagrangian domain "
-        "is now the cloud's alpha shape (fixed 2026-09-30): regenerate",
-        lambda r: r.estimator == "ps" and not r.has("--periodic")),
-    Fix("interlace-phase", "2026-10-02T23:30", "error",
-        "an interlaced grid: the half-cell phase correction used the raw FFT index, so every Fourier mode "
-        "negative along exactly one axis was shifted the wrong way (a band-limited field came back 31% "
-        "off; fixed 2026-10-02): regenerate",
-        lambda r: r.has("--interlace")),
-    # the fixes in src/main.cpp, user_options.cc and grid_deposit_engine.h; 23:00 local is
-    # after their build, so a grid built before it predates them
-    Fix("interlace-pass2", "2026-10-11T23:00", "error",
-        "an interlaced grid without a region: the second pass gridded the same cells, so the output was the "
-        "first pass low-passed and moved half a cell, not de-aliased (fixed 2026-10-11): regenerate",
-        lambda r: r.has("--interlace") and not (r.has("--region") or r.has("--region-mpc"))),
-    Fix("pcs-deposit", "2026-10-11T23:00", "error",
-        "a PCS grid: no padding (mass lost at the box faces and partition seams) and the deposit moved half a "
-        "cell (fixed 2026-10-11): regenerate",
-        lambda r: r.has("--pcs")),
-    Fix("cic-faces", "2026-10-11T23:00", "warning",
-        "a CIC grid: the cells at the box faces and partition seams extrapolated their weights (up to 28% off "
-        "at 32^3; fixed 2026-10-11): regenerate",
-        lambda r: r.has("--cic")),
-    Fix("region-axes", "2026-10-11T23:00", "error",
-        "a fractional region on a box whose axes differ in length or origin: each region entry took the box "
-        "of the wrong axis (the x and y lengths for y and z), so the grid covers another region than asked "
-        "(fixed 2026-10-11): regenerate",
-        lambda r: r.has("--region") and _box_axes_differ(r)),
-    Fix("padding-axes", "2026-10-11T23:00", "warning",
-        "a fractional padding on a box whose axes differ in length: the y and z padding took the x and y "
-        "lengths, so a face could get less padding than asked (fixed 2026-10-11): regenerate",
-        lambda r: r.has("--padding") and _box_axes_differ(r, origin=False)),
-    # the plane's grid conventions: a phase-space image plane takes the grids' vertex masses and
-    # volume weighting ('--pts-conventions grid', the default). 20:00 local lies between the last build without
-    # them (15:21) and any build with them; '--pts-conventions legacy' keeps the earlier estimators on purpose
-    Fix("pts-grid-conventions", "2026-10-13T20:00", "warning",
-        "an image plane made before the plane followed the grids' vertex masses and volume weighting (2026-10-13): "
-        "its density misses part of the contrast the grids gained from the evolved initial positions (about 0.82 of "
-        "the grid's at z = 20) and its multi-stream velocities are density-weighted means: regenerate it to compare "
-        "it with the grids",
-        lambda r: r.estimator == "ps" and r.has("--sample-points")
-                  and (r.has("--ps-vertex-mass") or r.volume_weighted)
-                  and not r.legacy_points),
-)
 
 
 # the launcher's start-over control, as the notes name it (no '--': launcher text)
@@ -997,19 +865,16 @@ def attempt_note(rec: RunRecord) -> tuple[str, str] | None:
 
 
 def stale_reasons(rec: RunRecord) -> list[tuple[str, str]]:
-    """(level, message) for every known fix this run predates, plus problems its outputs show and the attempt
-    after its log (attempt_note: a failed, killed or running re-run under its name)."""
+    """(level, message) for what to know before using this run's outputs: the attempt after its log (attempt_note:
+    a failed, killed or running re-run under its name), an older version of the programs made them
+    (RunRecord.older), and problems its outputs show."""
     out: list[tuple[str, str]] = []
     note = attempt_note(rec)
     if note is not None:
         out.append(note)
-    when = rec.when
-    for fx in KNOWN_FIXES:
-        if when is None or not fx.applies(rec):
-            continue
-        if when < _dt.datetime.fromisoformat(fx.fixed):
-            how = "" if rec.build_time else " (judged by the run date: this log has no build stamp)"
-            out.append((fx.level, fx.message + how))
+    if rec.older:
+        out.append(("warning", "made by an older version of the programs: its settings are not read here, and fixes "
+                               "made since may apply to it; recompute it before use"))
     # file-based: '.streams' without '.hidden_streams' (or its old name '.unresolved') predates the
     # stream-count fix
     if rec.estimator == "ps" and _any_output(rec, "streams", "a_streams") \
@@ -1017,6 +882,7 @@ def stale_reasons(rec: RunRecord) -> list[tuple[str, str]]:
         out.append(("warning", "the stream counts still include centroid-fallback tetrahedra (+1 each; "
                                "fixed 2026-09-28): stream fractions are inflated, so regenerate "
                                "before quoting them"))
+    # '--ps-vertex-mass' was never renamed, so this reads an older version's log too
     if rec.estimator == "ps" and rec.sim.startswith("TNG") and rec.command and not rec.has("--ps-vertex-mass"):
         out.append(("warning", "made without tetrahedron masses from the particles: with TNG's z=127 "
                                "initial positions the density contrast is suppressed by 1 - D(127)/D(z)"))
@@ -1024,22 +890,24 @@ def stale_reasons(rec: RunRecord) -> list[tuple[str, str]]:
 
 
 # ---------------------------------------------------------------------- time estimates
-def time_estimate(records, *, sim: str, grid: int, estimator: str, gpu: bool,
+def time_estimate(records, *, sim: str, grid: int, estimator: str, gpu: bool | None,
                   sliced: bool, precision: str = "single", dim: int = 3,
                   run_mode: str = "performance", exact: bool | None = None,
                   nsub: int | None = None) -> tuple[float, int] | None:
     """(median seconds per snapshot, number of runs) of successful earlier runs with the same
-    simulation, grid, estimator, GPU use, slice/no slice, precision, dimension, machine use and, when 'exact' is
-    given, quality (RunRecord.exact: Exact True, Fast False), and when 'nsub' is given (a sampled PS-DTFE job's
-    count) that count (RunRecord.nsub); None without any (a double-precision run takes about twice as long: it must
-    not predict a single one; a gentle run on half the performance cores must not predict a performance one, nor the
-    other way round; a Fast run must not predict an Exact one, nor a run at another count a Fast one). 'run_mode'
-    defaults to performance, what a log without a 'run mode' line or '--run-mode' ran at (RunRecord.run_mode).
+    simulation, grid, estimator, GPU use (RunRecord.gpu; 'gpu' None, a job on Automatic: runs on either device, as
+    the program picks the same device for the same settings on the same build), slice/no slice, precision,
+    dimension, machine use and, when 'exact' is given, quality (RunRecord.exact: Exact True, Fast False), and when
+    'nsub' is given (a sampled PS-DTFE job's count) that count (RunRecord.nsub); None without any (a
+    double-precision run takes about twice as long: it must not predict a single one; a gentle run on half the
+    performance cores must not predict a performance one, nor the other way round; a Fast run must not predict an
+    Exact one, nor a run at another count a Fast one). 'run_mode' defaults to performance. An older version's log
+    (RunRecord.older) is left out: its settings are not read.
     A run under a second is one: the binary's SUMMARY prints its wall time in whole seconds ('0s', 0.0 here), and
     a truthiness test would drop such runs as if they had no time (the launcher test's 32^3 run takes 0.5 s)."""
     times = [r.wall_seconds for r in records
-             if r.ok and r.wall_seconds is not None and r.sim == sim and r.grid == grid
-             and r.estimator == estimator and r.gpu == gpu and r.sliced == sliced
+             if r.ok and not r.older and r.wall_seconds is not None and r.sim == sim and r.grid == grid
+             and r.estimator == estimator and (gpu is None or r.gpu == gpu) and r.sliced == sliced
              and r.precision == precision and r.dim == dim and r.run_mode == run_mode
              and (exact is None or r.exact == exact) and (nsub is None or r.nsub == nsub)]
     return (statistics.median(times), len(times)) if times else None
@@ -1078,10 +946,13 @@ def diagnose(log: str, exit_codes=()) -> list[Diagnosis]:
                              "PS-DTFE needs each particle's initial (Lagrangian) position: download "
                              "and convert the initial conditions (Data tab), or use a snapshot that "
                              "stores 'InitialCoordinates'.", "open_data"))
-    if "unrecognised option" in tail or "unrecognized option" in tail:
-        out.append(Diagnosis("The binary is older than the scripts",
-                             "An option was not recognised: rebuild the binaries (make DTFE PS-DTFE).",
-                             "build"))
+    # boost's errors for a name the program does not know ("unrecognised option '--foo'") and for an abbreviation
+    # of several ("option '--input' is ambiguous and matches '--input-file', and '--input-format'")
+    if re.search(r"unrecogni[sz]ed option|option '[^'\n]*' is ambiguous", tail):
+        out.append(Diagnosis("An option was not recognised",
+                             "The program has no option of that name: a removed or misspelled name (its --full-help "
+                             "lists every option), or binaries older than the scripts (rebuild them: make DTFE "
+                             "PS-DTFE).", "build"))
     if "points into iCloud" in tail or "iCloud Drive" in tail:
         out.append(Diagnosis("iCloud path refused",
                              "Scratch and cache directories must be on a local disk, not iCloud Drive "

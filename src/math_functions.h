@@ -34,7 +34,7 @@
 // a pure shape measure in [0,1] (1 for orthogonal rows), so the test is independent of the length
 // unit and of the simplex's size. An ABSOLUTE |det| < 1e-6, in (length unit)^3, would declare every
 // well-shaped tetrahedron with edges below ~0.01 Mpc singular: the PS-DTFE deposit would DROP it
-// (22.6% of the mass lost on a 1 Mpc box at 48^3, i.e. TNG50-1 resolution) and the standard binary
+// (much of the mass at TNG50-1 resolution) and the standard binary
 // would interpolate a constant field (zero gradient) inside it.
 #define REAL_PRECISSION 1.e-6
 
@@ -146,7 +146,7 @@ inline bool adjugateInverse(double const m[][NO_DIM], T inv[][NO_DIM], double &d
 
 // Matrix inverse: closed-form for 2x2/3x3 (adjugateInverse), Gauss-Jordan otherwise; zero result if
 // (near-)singular (isRelativelySingular). The result type T is Real (matrixInverse: the grids' deposits) or double
-// (matrixInverseDouble: the exact-average deposits' gradients, plan P10.8, formed in double and narrowed once at the
+// (matrixInverseDouble: the exact-average deposits' gradients, formed in double and narrowed once at the
 // end so that they do not follow the float rounding of the vertex labelling).
 template <typename T>
 inline void matrixInverseT(double matrix[][NO_DIM],

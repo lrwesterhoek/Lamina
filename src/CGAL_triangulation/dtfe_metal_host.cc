@@ -79,16 +79,14 @@ struct Ctx
     MTL::Library*              lib  = nullptr;
     MTL::ComputePipelineState* pso  = nullptr;        // depositAveraged1: one thread per tetrahedron
     MTL::ComputePipelineState* psoExact = nullptr;    // depositExactAverage: one thread per (tet, cell block)
-    // depositAveraged1Items{2,4,8}: one thread per (tet, sample run) with a 2/4/8-slot cell cache,
+    // depositAveraged1Items2: one thread per (tet, sample run) with a 2-slot cell cache,
     // specialized per field set (function constants FC_DEN/FC_VEL/FC_GRAD/FC_SCAL/FC_SGRAD) and on the
-    // exact sums (FC_FIXED, mask bit 32): index [K slot][mask]
-    MTL::ComputePipelineState* psoItems[3][64] = {{nullptr}};
+    // exact sums (FC_FIXED, mask bit 32): index [mask]
+    MTL::ComputePipelineState* psoItems[64] = {nullptr};
     bool                       itemsOk = false;
     std::string                err;
     bool                       ready = false;
 };
-
-int kSlot(int cacheK) { return cacheK == 2 ? 0 : cacheK == 8 ? 2 : 1; }
 
 std::mutex& ctxMutex() { static std::mutex m; return m; }
 // DTFE_GPU_TIMING=1: one line per batch
@@ -139,19 +137,17 @@ Ctx& ctx()
     return c;
 }
 
-// The item pipeline for a cache size and field set, built on first use (thread-safe). Null when it
+// The item pipeline for a field set, built on first use (thread-safe). Null when it
 // cannot be built: the caller falls back to the per-tet kernel.
-MTL::ComputePipelineState* itemPso(Ctx& c, int cacheK, bool fDen, bool fVel, bool fGrad, bool fScal, bool fSGrad,
-                                   bool fFixed)
+MTL::ComputePipelineState* itemPso(Ctx& c, bool fDen, bool fVel, bool fGrad, bool fScal, bool fSGrad, bool fFixed)
 {
     static std::mutex psoMutex;              // uploads (and so first uses) run concurrently
     std::lock_guard<std::mutex> lock(psoMutex);
-    int const ks = kSlot(cacheK), mask = (fDen ? 1 : 0) | (fVel ? 2 : 0) | (fGrad ? 4 : 0) | (fScal ? 8 : 0) | (fSGrad ? 16 : 0)
-                                         | (fFixed ? 32 : 0);
-    if (c.psoItems[ks][mask]) return c.psoItems[ks][mask];
+    int const mask = (fDen ? 1 : 0) | (fVel ? 2 : 0) | (fGrad ? 4 : 0) | (fScal ? 8 : 0) | (fSGrad ? 16 : 0)
+                   | (fFixed ? 32 : 0);
+    if (c.psoItems[mask]) return c.psoItems[mask];
     if (!c.itemsOk || !c.lib) return nullptr;
-    char name[64];
-    snprintf(name, sizeof(name), "depositAveraged1Items%d", cacheK == 2 ? 2 : cacheK == 8 ? 8 : 4);
+    char const* const name = "depositAveraged1Items2";
     MTL::FunctionConstantValues* fc = MTL::FunctionConstantValues::alloc()->init();
     bool d = fDen, v = fVel, g = fGrad, s = fScal, sg = fSGrad, fx = fFixed;
     fc->setConstantValue(&d, MTL::DataTypeBool, NS::UInteger(0));
@@ -182,7 +178,7 @@ MTL::ComputePipelineState* itemPso(Ctx& c, int cacheK, bool fDen, bool fVel, boo
         fprintf(stderr, "DTFE Metal pipeline %s (den %d vel %d grad %d scal %d sgrad %d fixed %d): max threads per threadgroup %lu (per-tet kernel %lu)\n",
                 name, int(d), int(v), int(g), int(s), int(sg), int(fx), (unsigned long)pso->maxTotalThreadsPerThreadgroup(),
                 (unsigned long)c.pso->maxTotalThreadsPerThreadgroup());
-    c.psoItems[ks][mask] = pso;
+    c.psoItems[mask] = pso;
     return pso;
 }
 
@@ -205,13 +201,12 @@ struct Grids
     size_t nCell() const { return full[0] * full[1] * full[2]; }
     size_t compBytes() const { return words == 2u ? 16 : words == 1u ? 8 : 4; }
     std::vector<MTL::Buffer*> buffers() const { return { den, vel, grad, scal, sgrad }; }
-    // gpuZero: zero the buffers with ONE blit on the device (the per-call path allocates under the device mutex,
-    // where a CPU memset of a 512^3 sub-domain's exact words -- up to 3.2 GB in the 128-bit words -- would idle the
-    // GPU); a failed blit falls back to the memset. A grid longer than the device's largest buffer
+    // The buffers are zeroed with ONE blit on the device (the per-call path allocates under the device mutex, where a
+    // CPU memset of a 512^3 sub-domain's exact words -- up to 3.2 GB in the 128-bit words -- would idle the GPU); a
+    // failed blit falls back to a memset. A grid longer than the device's largest buffer
     // (maxBufferLength: the 128-bit words of a large sub-domain's velocity gradient can reach it) is not asked for:
     // err names it, and the caller's sub-domain goes to the CPU as on any failed allocation.
-    bool alloc(Ctx& c, const size_t fullGrid[3], bool d, bool v, bool g, bool s, bool sg, uint32_t wordsMode = 0u,
-               bool gpuZero = false)
+    bool alloc(Ctx& c, const size_t fullGrid[3], bool d, bool v, bool g, bool s, bool sg, uint32_t wordsMode)
     {
         for (int i = 0; i < 3; ++i) full[i] = fullGrid[i];
         fDen = d; fVel = v; fGrad = g; fScal = s; fSGrad = sg;
@@ -233,7 +228,6 @@ struct Grids
                 return nullptr;
             }
             MTL::Buffer* b = c.dev->newBuffer(bytes, MTL::ResourceStorageModeShared);
-            if (b && !gpuZero) std::memset(b->contents(), 0, bytes);
             return b;
         };
         den  = newBuf(fDen  ? nCell() * cb     : 4, "density");
@@ -242,7 +236,7 @@ struct Grids
         scal = newBuf(fScal ? nCell() * cb     : 4, "scalar");
         sgrad = newBuf(fSGrad ? nCell() * cb * 3 : 4, "scalar gradient");
         bool const ok = den && vel && grad && scal && sgrad;
-        if (ok && gpuZero)
+        if (ok)
         {
             MTL::CommandBuffer* cbuf = c.q->commandBuffer();
             MTL::BlitCommandEncoder* blit = cbuf->blitCommandEncoder();
@@ -296,7 +290,7 @@ bool uploadBatch(Ctx& c, std::vector<float>& verts, std::vector<float>& dens, st
     uint32_t const exactCells = dtfeBatchParams(P, b.k, verts, dens, vels, scal, vols, dx, nGrid, subOff, fullGrid,
                                                 fDen, fVel, fGrad, fScal, fSGrad, exact, units);
     if (exact) b.k.useItems = true;    // the exact kernel is an item kernel (cell blocks), always
-    else if (b.k.useItems && !itemPso(c, b.k.cacheK, fDen, fVel, fGrad, fScal, fSGrad, P.fixedSum != 0))
+    else if (b.k.useItems && !itemPso(c, fDen, fVel, fGrad, fScal, fSGrad, P.fixedSum != 0))
         b.k.useItems = false;      // (built here, before the upload, so a failure falls back cleanly)
     b.needVel = fVel || fGrad;
     b.needScal = fScal || fSGrad;
@@ -351,11 +345,8 @@ struct Stats { int chunks = 0, retries = 0; };
 // snapshot and continues from there.
 //   - the snapshot: the per-call grids (all zero at the start: no copy) and a checkpoint every ~10 s of GPU work
 //     (DTFE_GPU_CHECKPOINT_CHUNKS=<n> buffers);
-//   - the cause (gpu_metal_retry.h GpuFault): an innocent victim retries at once at the same pace; a watchdog
-//     kill, out of memory or another resource error escalates the process-wide pace (4x shorter buffers, wider
-//     gaps) and lets the system settle; a fatal error, 3 failures of the same chunk or 16 in the batch hand the
-//     sub-domain to the CPU (the caller); the pace eases back after DTFE_GPU_PACE_RECOVER_SEC (90 s) of clean GPU
-//     work;
+//   - the cause (gpu_metal_retry.h GpuFault, GpuPace and gpuRunPass say how) decides the retry, the pace and when
+//     the sub-domain goes to the CPU (the caller);
 //   - every failed buffer counts into the run's retry counters by cause (countGpuRetry).
 // Work items are uniform (<= itemSamples samples each), so their chunks can be larger and the controller never
 // meets a 100x jump in per-thread work; the per-tet kernel keeps more cautious sizes. Every chunk
@@ -378,7 +369,7 @@ bool runBatch(Ctx& c, Batch& b, Grids& g, Stats& st, std::string& err)
         firstChunk = std::max(size_t(double(firstChunk) * pace.targetSec / GPU_PACE_TARGET0), MIN_CHUNK);
 
     MTL::ComputePipelineState* pso = exact ? c.psoExact
-                                   : useItems ? itemPso(c, b.k.cacheK, b.P.fDen != 0, b.P.fVel != 0, b.P.fGrad != 0,
+                                   : useItems ? itemPso(c, b.P.fDen != 0, b.P.fVel != 0, b.P.fGrad != 0,
                                                         b.P.fScal != 0, b.P.fSGrad != 0, b.P.fixedSum != 0) : c.pso;
     if (!pso)
     {   // the specialized item kernel is unavailable: the per-tet kernel needs the per-tet item count
@@ -390,7 +381,7 @@ bool runBatch(Ctx& c, Batch& b, Grids& g, Stats& st, std::string& err)
     if (nThreads == 0) return true;
     // the threadgroup cell table: as many power-of-two entries as fit the 32 KB threadgroup memory
     // (keys 4 B + 4 or 13 values per entry, floats or -- the exact sums -- two-word integers, next to the other
-    // mode's 16-byte dummy); DTFE_GPU_TABLE=0 turns it off (evictions go straight to the device)
+    // mode's 16-byte dummy); none where fewer than 64 entries fit (evictions go straight to the device)
     uint32_t tableEntries = 0;
     size_t keyBytes = 16, valBytes = 16, valXBytes = 16;
     bool const fixedSum = b.P.fixedSum != 0;
@@ -403,7 +394,6 @@ bool runBatch(Ctx& c, Batch& b, Grids& g, Stats& st, std::string& err)
         uint32_t e = 1;
         while (size_t(e * 2) * (4 + stride * valueBytes) <= budget) e *= 2;
         if (size_t(e) * (4 + stride * valueBytes) > budget) e = 0;
-        if (!Env::flag("DTFE_GPU_TABLE", true)) e = 0;
         tableEntries = e >= 64 ? e : 0;
         if (tableEntries)
         {
@@ -436,8 +426,7 @@ bool runBatch(Ctx& c, Batch& b, Grids& g, Stats& st, std::string& err)
     bool const ckOn = snap.take(gridBufs, std::vector<bool>(gridBufs.size(), true), 0);
     int nFailed = 0, nResumedCk = 0;   // failed buffers of this batch, and how many resumed from a periodic checkpoint
     // an empty command buffer completes only after everything queued before it: drained before a restore, as the
-    // atomics of a killed buffer can land after it otherwise (per-tet runs at 512^3: whole samples in void
-    // cells, 2e-2 of max|v|)
+    // atomics of a killed buffer can land after it otherwise (seen as stray whole samples in void cells)
     auto drainQueue = [&]() {
         MTL::CommandBuffer* drain = c.q->commandBuffer();
         drain->commit();
@@ -586,7 +575,7 @@ bool dtfeGpuDepositAveraged1(std::vector<float>& verts,
         // exact sums' words are 8 B per component (a sampled batch) or 16 B (an exact batch's run-wide words) --
         // a 512^3 run with the velocity gradient would wait on ~1.6 GB (3.2 GB) per sub-domain. So one batch's at a
         // time (and the one being converted below), zeroed on the GPU.
-        if (!g.alloc(c, nGrid, fDen, fVel, fGrad, fScal, fSGrad, b.P.fixedSum, true))
+        if (!g.alloc(c, nGrid, fDen, fVel, fGrad, fScal, fSGrad, b.P.fixedSum))
         {
             err = g.err.empty() ? "Metal buffer allocation failed (out of GPU-visible memory?)" : g.err;
             ok = false;

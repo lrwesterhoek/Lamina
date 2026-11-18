@@ -13,9 +13,6 @@
 #       mass released to host-side centroid deposits) and CPU. Float adds give +1.9e-4 (GPU), +1.4e-4 (GPU,
 #       released) and -1.4e-5 (CPU) here. The 2^3-partition runs to 2.5e-7 in single precision: the
 #       merge of 8 float partition grids rounds by an ulp (1.19e-7 at 1), deterministically so in index order.
-#       Under '--ps-merge fixed-point' (the word merge, single build only: the passes' exact words added as
-#       integers, one close-out, a one-domain run's too) the 2^3 run writes the one-domain run's bytes, every
-#       output, on the CPU and on the GPU, and both box means hold to 1e-7
 #   X2  heavy accumulation, CPU: a 64^3 pancake on a 4^3 grid (nSub 4, --ps-vertex-mass, so the tets carry exactly
 #       the particles' mass): 1.8e6 tetrahedra into 64 cells. Box mean = 1 to 1e-7 (the float sums: +2.3e-5 on one
 #       thread, -1.6e-6 on ten).
@@ -29,8 +26,6 @@
 #       'gained/shares-1' = 0 (the CPU's shares all reached the grid; the double build's sums of 1.8e6 shares
 #       round: < 1e-9 there) and 'grid/tets-1' below 1e-7 (one float rounding per cell, <= 6e-8). A binary
 #       without the audit skips this check (the others still fail it).
-#   X5  DTFE_GPU_FLOAT_MASS=1 (single build) selects the float grid, on the CPU too, for A/B comparisons:
-#       X1's CPU run then writes a different '.a_den' (its mean is reported).
 #   X6  the audit only observes: every run above sets DTFE_MASS_AUDIT=1, so X1's 4-thread GPU run and X2's copy-mode
 #       run are repeated with DTFE_MASS_AUDIT=0 (the production path) and must write the same '.a_den'.
 #   X7  the copy mode shares its counts and flags: the int stream count, the two hidden-stream flags and the
@@ -55,13 +50,13 @@ if [ "${1:-}" != "--no-build" ] && ! precision_double; then
     make PS-DTFE $(cat o_ps/.build_mode 2>/dev/null || true) >/dev/null || { echo "FAIL: build"; exit 1; }
 fi
 [ -x "${PS_BIN}" ] || { echo "FAIL: ${PS_BIN} is not built"; exit 1; }
-OBJ=o_ps; precision_double && OBJ=o_ps_d
+OBJ="$PS_OBJ"
 GPU=0                                                     # any one GPU backend stamp will do (gpu_mass_check.sh)
 if [ -d "$OBJ" ] && [ ! -f "$OBJ/.gpu_mode_off" ]; then
     [ -n "$(gpu_backend_of "$OBJ")" ] && GPU=1
 fi
 TMP="${DTFE_TEST_TMP}/ps_mass_exact_check"
-mkdir -p "$TMP"
+rm -rf "$TMP"; mkdir -p "$TMP"   # (X4 reads every log in the folder: none of an earlier run)
 LAT="$TMP/lattice32.hdf5"; PAN="$TMP/pancake64.hdf5"; CW="$TMP/crossed32.hdf5"
 "$PY" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "$LAT" --n 32 --amplitude-factor 0.5 --jitter-frac 0 >/dev/null \
     || { echo "FAIL data gen"; exit 1; }
@@ -93,17 +88,9 @@ run() {
 }
 L=(--grid 2 --subsamples 16)
 P=(--grid 4 --subsamples 4 --ps-vertex-mass --partition 1 1 1)
-# the word merge's runs (single build): the merge of before and the float knobs switched off for them, whatever the
-# caller's environment says (the binaries read 0 as off)
-FXENV=(DTFE_RUN_UNITS_LEGACY=0 DTFE_GPU_FLOAT_MASS=0 DTFE_GPU_FLOAT_MOMENTS=0)
 echo ">> X1 lattice (deferral-heavy), CPU"
 run lat_cpu_p1 "$LAT" -- "${L[@]}" --partition 1 1 1
 run lat_cpu_p2 "$LAT" -- "${L[@]}" --partition 2 2 2
-if ! precision_double; then
-    echo ">> X1 lattice, CPU, --ps-merge fixed-point (the word merge): one domain and 2^3"
-    run lat_cpu_fx1 "$LAT" "${FXENV[@]}" -- "${L[@]}" --partition 1 1 1 --ps-merge fixed-point
-    run lat_cpu_fx2 "$LAT" "${FXENV[@]}" -- "${L[@]}" --partition 2 2 2 --ps-merge fixed-point
-fi
 if [ "$GPU" = 1 ]; then
     echo ">> X1 lattice, GPU (and its deferred tets on 1 and 4 CPU threads: X3)"
     run lat_gpu_p1 "$LAT" DTFE_DEPOSIT_THREADS=4 -- "${L[@]}" --partition 1 1 1 --gpu
@@ -111,10 +98,6 @@ if [ "$GPU" = 1 ]; then
     run lat_gpu_p2 "$LAT" -- "${L[@]}" --partition 2 2 2 --gpu
     run lat_gpu_rel "$LAT" -- "${L[@]}" --partition 1 1 1 --gpu --ps-halo-release 1.2
     run lat_gpu_p1_na "$LAT" DTFE_DEPOSIT_THREADS=4 DTFE_MASS_AUDIT=0 -- "${L[@]}" --partition 1 1 1 --gpu
-    if ! precision_double; then
-        run lat_gpu_fx1 "$LAT" "${FXENV[@]}" -- "${L[@]}" --partition 1 1 1 --gpu --ps-merge fixed-point
-        run lat_gpu_fx2 "$LAT" "${FXENV[@]}" -- "${L[@]}" --partition 2 2 2 --gpu --ps-merge fixed-point
-    fi
 fi
 echo ">> X2/X3 pancake (heavy accumulation), CPU on 1 thread, 4 (copy mode) and 4 (slab mode)"
 run pan_t1 "$PAN" DTFE_DEPOSIT_THREADS=1 -- "${P[@]}"
@@ -126,10 +109,6 @@ for t in 1 4 10; do
     run "cw_t$t" "$CW" DTFE_DEPOSIT_THREADS=$t DTFE_DEPOSIT_SLABS=0 DTFE_MASS_AUDIT=0 -- \
         --grid 64 --subsamples 2 --ps-caustics --partition 1 1 1
 done
-if ! precision_double; then
-    echo ">> X5 DTFE_GPU_FLOAT_MASS=1 (the float grid, for A/B)"
-    run lat_cpu_float "$LAT" DTFE_GPU_FLOAT_MASS=1 -- "${L[@]}" --partition 1 1 1
-fi
 
 "$PY" - "$TMP" "$GPU" "${DTFE_TEST_PRECISION}" <<'PYEOF'
 import re, sys
@@ -163,23 +142,9 @@ def same(a, b, what, tag="X3"):
         check(tag, rel < 1e-12, f"{what}: '.a_den' agrees to {rel:.1e} of the peak (< 1e-12, double build)")
     else:
         check(tag, len(x) > 0 and x == y, f"{what}: '.a_den' byte-identical ({len(x)} bytes)")
-# every output of run a byte-identical to run b's, and the same set of files (the logs are not outputs)
-def outputs(tag):
-    return sorted(p.name[len(tag):] for p in tmp.glob(f"{tag}.*") if p.suffix != ".log")
-def same_all(a, b, what, tag="X1"):
-    ea, eb = outputs(a), outputs(b)
-    bad = [e for e in ea if not (tmp / f"{b}{e}").exists()
-           or (tmp / f"{a}{e}").read_bytes() != (tmp / f"{b}{e}").read_bytes()]
-    check(tag, bool(ea) and ea == eb and not bad, f"{what}: every output byte-identical ({len(ea)} files"
-          + (f"; DIFFER {' '.join(bad)}" if bad else "") + (f"; file sets {ea} / {eb}" if ea != eb else "") + ")")
 
 mean_ok("lat_cpu_p1", "lattice, CPU, one domain")
 mean_ok("lat_cpu_p2", "lattice, CPU, 2^3 partitions", TOL_SPLIT)
-if not double:
-    # the word merge adds the partitions' exact words and closes out once: no merge rounding, the one domain's bytes
-    mean_ok("lat_cpu_fx1", "lattice, CPU, --ps-merge fixed-point, one domain")
-    mean_ok("lat_cpu_fx2", "lattice, CPU, --ps-merge fixed-point, 2^3 partitions")
-    same_all("lat_cpu_fx1", "lat_cpu_fx2", "lattice, CPU, --ps-merge fixed-point: 2^3 partitions against one domain")
 if gpu:
     log = (tmp / "lat_gpu_p1.log").read_text()
     m = re.search(r"GPU deposit \(.*?\), (\d+) tetrahedra \((\d+) with a sample on a face", log)
@@ -201,10 +166,6 @@ if gpu:
     check("X3", t1 == 1 and t4 is not None and t4 > 1 and slab4, f"the deferred tets ran on {t1} thread(s) and on {t4} "
           f"({'slab mode' if slab4 else 'NOT slab mode'}); want 1, and more than 1 in slab mode")
     same("lat_gpu_p1_na", "lat_gpu_p1", "lattice, GPU, DTFE_MASS_AUDIT=0 vs 1", "X6")
-    if not double:
-        mean_ok("lat_gpu_fx1", "lattice, GPU, --ps-merge fixed-point, one domain")
-        mean_ok("lat_gpu_fx2", "lattice, GPU, --ps-merge fixed-point, 2^3 partitions")
-        same_all("lat_gpu_fx1", "lat_gpu_fx2", "lattice, GPU, --ps-merge fixed-point: 2^3 partitions against one domain")
 else:
     print("  SKIP X1/X3 GPU halves: no GPU build")
 mean_ok("pan_t1", "pancake, CPU, 1 thread")
@@ -247,7 +208,6 @@ for t in (4, 10):
 num = r"([-+]?(?:nan|inf|[0-9.]+(?:[eE][-+]?[0-9]+)?))"
 rows, cut = [], []
 for f in sorted(tmp.glob("*.log")):
-    if f.stem == "lat_cpu_float": continue
     for l in f.read_text().splitlines():
         if not l.startswith("PS mass audit: partition"): continue
         g, v = re.search(r"gained/shares-1 " + num, l), re.search(r"grid/tets-1 " + num, l)
@@ -265,10 +225,6 @@ if rows:
     check("X4", abs(wt[1]) < 1e-7, f"DTFE_MASS_AUDIT: grid/tets-1 worst {wt[1]:+.1e} ({wt[0]}; |.| < 1e-7)")
 elif not cut:
     print("  SKIP X4: this binary prints no DTFE_MASS_AUDIT lines")
-if not double:
-    a, b = (tmp / "lat_cpu_float.a_den").read_bytes(), (tmp / "lat_cpu_p1.a_den").read_bytes()
-    check("X5", len(a) == len(b) and a != b, f"DTFE_GPU_FLOAT_MASS=1 writes the float grid (box mean - 1 = "
-          f"{den('lat_cpu_float').mean() - 1.0:+.2e}, the fixed-point grid {den('lat_cpu_p1').mean() - 1.0:+.2e})")
 print("RESULT:", "PASS  (the mass grid is exact and thread-independent on the CPU, and after a GPU deposit)"
       if not fails else f"FAIL ({fails} check(s))")
 sys.exit(1 if fails else 0)

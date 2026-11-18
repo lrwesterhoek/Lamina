@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The run modes (docs/cleanup-plan.md P13): '--run-mode gentle|balanced|performance' in both binaries (or the
+# The run modes: '--run-mode gentle|balanced|performance' in both binaries (or the
 # environment's DTFE_RUN_MODE), PS-DTFE's '--gpu-share auto|mixed|<fraction>', and the run log's lines that say what
 # was set and why (src/run_mode.h; src/user_options.cc printOptions). On a synthetic 16^3 snapshot of crossed waves,
 # grid 16.
@@ -103,18 +103,17 @@ rm -rf "$TMP"; mkdir -p "$TMP"
 TMP="$(cd "$TMP" && pwd -P)"
 # what the cases set themselves: the thread count (an export from a login shell would steer every run), a batch job's
 # names (a suite run inside one: M1b sets them per run), the GPU retry hooks, what moves the auto share off its
-# formula (the float-sum variants, the mass audit, the model's constant: src/auto_tune.cc autoTuneGpuShare), and what
+# formula (the mass audit: src/auto_tune.cc autoTuneGpuShare), and what
 # steers the plan and the dynamic concurrency (G8). The mode stays tests/lib.sh's pin, performance, for every run that
 # names none; the default cases unset it per run (UNPIN, the head of their RUN_ENV: env's options come first)
 unset OMP_NUM_THREADS OMP_THREAD_LIMIT SLURM_JOB_ID PBS_JOBID DTFE_GPU_FAULT_AT DTFE_GPU_PACE_RECOVER_SEC PS_GPU_CHUNK \
-      DTFE_GPU_CHECKPOINT_CHUNKS DTFE_GPU_FLOAT_MOMENTS DTFE_GPU_FLOAT_MASS DTFE_MASS_AUDIT DTFE_GPU_SHARE_RHO \
-      DTFE_DYNAMIC_CONCURRENCY DTFE_MEM_BUDGET_GB DTFE_MEM_FRACTION DTFE_TEST_PLAN_MC DTFE_AUTO_TUNE_DEBUG
+      DTFE_GPU_CHECKPOINT_CHUNKS DTFE_MASS_AUDIT \
+      DTFE_MEM_BUDGET_GB DTFE_MEM_FRACTION DTFE_TEST_PLAN_MC DTFE_AUTO_TUNE_DEBUG
 UNPIN=(-u DTFE_RUN_MODE)
 SNAP="$TMP/waves.hdf5"
 "$PY" tests/generate_ps_test_data.py --out "$SNAP" --n 16 --box 100 --crossed-waves --seed 7 >/dev/null \
     || { echo "FAIL data gen"; exit 1; }
-PASS=0; FAILS=0
-check() { if [ "$2" = 0 ]; then PASS=$((PASS+1)); echo "  PASS $1"; else FAILS=$((FAILS+1)); echo "  FAIL $1"; fi; }
+# check / check_result, has, mode_of, share_of, key_of: tests/lib.sh
 
 # ---- the machine, and the budgets the formula gives it
 case "$(uname -s)" in
@@ -155,9 +154,6 @@ go() {
     local out="$1" bin="$2"; shift 2
     { env ${RUN_ENV[@]+"${RUN_ENV[@]}"} ${RUN_WRAP[@]+"${RUN_WRAP[@]}"} "$bin" "$SNAP" "$out" "$@" > "$out.log" 2>&1; } 2>/dev/null
 }
-# mode_of <log>: the value of the header's 'run mode' line; share_of <log>: of its 'GPU share' line (D18 a, b)
-mode_of()  { LC_ALL=C sed -n 's/^[[:space:]]*run mode *: //p' "$1" | head -n 1; }
-share_of() { LC_ALL=C sed -n 's/^[[:space:]]*GPU share *: //p' "$1" | head -n 1; }
 # no_nice <log>: the log has a 'run mode' line and it names no nice (a missing line fails: M8 must see one)
 no_nice()  { local m; m="$(mode_of "$1" 2>/dev/null)"; [ -n "$m" ] && case "$m" in *nice*) false ;; *) true ;; esac; }
 # want <mode> <source> <threads> [<GPU part>]: the value the 'run mode' line should have (gentle adds the priority
@@ -176,18 +172,14 @@ is_mode() {
 }
 # mc_of <log>: the concurrency of its AUTO-TUNE-REPORT line
 mc_of() { LC_ALL=C sed -n 's/^AUTO-TUNE-REPORT partition=[0-9]* mc=\([0-9]*\) .*/\1/p' "$1" | head -n 1; }
-# key_of <output>: the settings key block of its checkpoint (the header is text; the grids follow it)
-key_of() { LC_ALL=C sed -n '/^key-begin$/,/^key-end$/p;/^header-end$/q' "$1.runlog.checkpoint/checkpoint" 2>/dev/null; }
-# has <log> <text>: the literal text is in the log
-has() { grep -aqF -- "$2" "$1"; }
 FALLBACK='using the CPU deposit|deposit unavailable|ran on the CPU instead|gave up'
 no_fallback() { ! grep -aqE "$FALLBACK" "$@"; }
-# the D19 texts and the not-applicable note (contract section 7)
+# the error texts and the not-applicable note
 E_MODE="Unknown value 'fast' for '--run-mode'; use 'gentle', 'balanced' (the default) or 'performance'."
 E_ENV="Unknown value 'fast' for DTFE_RUN_MODE; use gentle, balanced or performance (in any case), or leave it unset (or 'auto') for the default."
 e_share() { echo "Unknown value '$1' for '--gpu-share'; use a fraction from 0 to 1 (0.6: 60% of the partitions deposit on the GPU), 'auto' (the run mode's share) or 'mixed' (the GPU and the free cores in every run mode)."; }
 note_of() { echo "note: '--gpu-share $1' does not apply to $2: every partition deposits on $3."; }
-# mixed_line <share> <source> <on the GPU> <to deposit>: the post-plan line of a mixed run (D18 c)
+# mixed_line <share> <source> <on the GPU> <to deposit>: the post-plan line of a mixed run
 mixed_line() { echo "PS-DTFE: GPU share $1 ($2): $3 of the $4 partitions to deposit do so on the GPU, the other $(($4 - $3)) on the CPU with r3d clipping (a mixed run's grids differ from an all-GPU run's at float rounding)."; }
 MIXED="partitions to deposit do so on the GPU, the other"
 
@@ -413,7 +405,7 @@ grep -q '^opt ' <<< "$KEY" && ! grep -qE 'run-mode|gpu-share' <<< "$KEY" && grep
 check "M10 the checkpoint's settings key has no 'run-mode' or 'gpu-share' line, and 'device=cpu' (DTFE_GPU=0)" $?
 
 echo ">> M11: --gpu-share on a run on the CPU (no --gpu, DTFE_GPU=0)"
-OBJ=o_ps; precision_double && OBJ=o_ps_d
+OBJ="$PS_OBJ"
 GPU=0
 if [ -d "$OBJ" ] && [ ! -f "$OBJ/.gpu_mode_off" ] && [ -n "$(gpu_backend_of "$OBJ")" ]; then GPU=1; fi
 WHY="a run on the CPU"; [ "$GPU" = 1 ] || WHY="this CPU-only build"   # the first cause that holds
@@ -515,7 +507,7 @@ else
     done
     go "$TMP/G4_balanced" "$PS" "${A[@]}" "${G4[@]}" --max-concurrent 2 --run-mode balanced; rb=$?
     RUN_ENV=()
-    if precision_double; then   # D11 rule 2: the double build's auto share is 1 in every mode
+    if precision_double; then   # the double build's auto share is 1 in every mode
         PRE="PS-DTFE: GPU share 1 (--gpu-share auto: "; SUF="): every partition deposits on the GPU."
     else
         PRE="PS-DTFE: GPU share 0.60 (--gpu-share auto: "
@@ -544,7 +536,7 @@ else
     HEAD_MIXED="mixed (the GPU and the free cores in every mode, resolved with the plan)"
     for m in balanced gentle performance; do
         eval "r=\$r_$m"
-        if precision_double; then   # (D11 rule 2, as under auto: the double build keeps every partition on the GPU)
+        if precision_double; then   # (as under auto: the double build keeps every partition on the GPU)
             LINE="PS-DTFE: GPU share 1 (--gpu-share mixed: $m, the double build: every partition on the GPU): every partition deposits on the GPU."
             [ "$r" = 0 ] && has "$TMP/G4b_$m.log" "$LINE" && ! has "$TMP/G4b_$m.log" "$MIXED"
         else
@@ -607,7 +599,7 @@ else
     RUN_ENV=()
     tune_of() { grep -a '^AUTO-TUNE: .* -> --partition' "$1" | head -n 1; }
     TAG="GPU deposit with the free cores (GPU share 0.60)"
-    if precision_double; then   # (D11 rule 2: not mixed)
+    if precision_double; then   # (the double build: not mixed)
         TAG=", GPU deposit"
         tune_of "$TMP/G7_performance.log" | grep -qF -- "$TAG" && ! tune_of "$TMP/G7_performance.log" | grep -q "GPU share"
     else
@@ -690,5 +682,4 @@ else
 fi
 
 echo ""
-echo "RESULT: $PASS passed, $FAILS failed"
-[ "$FAILS" = 0 ]
+check_result

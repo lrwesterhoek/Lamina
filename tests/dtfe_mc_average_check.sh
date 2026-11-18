@@ -5,36 +5,37 @@
 # vertex(0) into every tetrahedron is neither: the prefix does not average to the centroid and CGAL's vertex
 # slots follow density, so such '_a' grids lose 0.17-0.29% of their mass, and the realization changes by ~10-23%
 # rms per cell with the thread count or the partitioning. So the vertices are ordered by a hash of the cell's
-# vertex set and every sample is centred (averaged_interpolation_1.cc: the comment above 'mcLegacy'). Asserted on
+# vertex set and every sample is centred (averaged_interpolation_1.cc interpolateGrid_averaged_1: the comment on the
+# vertex order and the centring). Asserted on
 # demo/z0_64.gadget (262144 particles, z=0, tracked in the repo) at 64^3, --periodic --padding 12, density_a velocity_a:
 #   A1  box mean of '.a_den' within 1e-4 of 1 (measured +2.0e-5; double build +1.4e-5), and with '--subsamples 2'
 #       (8 points per cell: a tetrahedron under a sixth of a grid cell takes the minimum count, 8/6 + 1 = 2 in
 #       integer division, the shortest Sobol prefix; measured +2.4e-5, double build -1.3e-5). The bound holds for
 #       any count: the centred samples give every tetrahedron its exact mass and deposit it inside it
-#       (averaged_interpolation_1.cc, the comment above 'mcLegacy'). The vertex(0) realization (DTFE_MC_LEGACY=1,
-#       kept for A/B) must FAIL the same bound (measured -3.35e-3), so the check is known to see the bias
-#   A2  the per-cell noise against --exact, rms(a - exact) / <exact>, is no larger than the vertex(0)
-#       realization's and below 0.07 (measured 0.0625 against 0.0826, both builds)
+#       (averaged_interpolation_1.cc interpolateGrid_averaged_1, the same comment)
+#   A2  the per-cell noise against --exact, rms(a - exact) / <exact>, is below 0.07 (measured 0.0625, both builds)
 #   A3  split invariance: --partition 2 2 2 --max-concurrent 1, OMP_NUM_THREADS=1 and --padding 20 against
 #       the default run: the cells agree to float summation order (measured 6e-6 relative), except where a
 #       sample lies EXACTLY on a cell face, which the region frames of two splits may round to different sides
 #       (the demo's float-kpc positions and the dyadic Sobol samples put one there in the double build: two
 #       cells 3e-3 apart); at most 1e-4 of the cells may differ by more than 1e-4, and the box sums agree to
-#       1e-6. The vertex(0) realization differs in all cells, by 10% rms between one and ten threads
+#       1e-6
 #   A4  the momentum: the box sum of '.a_vel' agrees with --exact's to 1e-4 of sum|v| (measured 1.2e-5)
 #   A5  GPU builds only (a GPU stamp in o/ or o_d/; SKIP otherwise, so CI's CPU-only build runs A1-A4): --gpu
 #       keeps the box mean within 1e-4 of 1 and matches the CPU grid like tests/dtfe_metal_check.sh (means
 #       to 1e-5 of the peak, at most 1e-3 of the cells more than 1e-3 apart: a sample on a cell face)
 #   A6  'velocityStd_a' only with '--average-method 2': method 1 (the default; with no flag a 'velocityStd_a' run is
-#       sampled, since the exact average cannot compute it), --exact, method 3 and --cic stop
+#       sampled, since the exact average cannot compute it), --exact and --cic stop
 #       at option parsing with exit 1 and their error (method 1's: 'You cannot use the averaging method 1 ...'),
 #       rather than leaving the grid empty and segfaulting in the sub-domain merge; '--average-method 2' writes a finite,
 #       non-negative '.a_velStd'
 #   A7  'dispersion' and 'dispersion_a' (PS-DTFE fields) stop at option parsing with exit 1 and the error that names
 #       PS-DTFE, in this binary and in ./DTFE-2d when it is built (not after the triangulation with an internal
 #       size error in 3D and a segfault in 2D)
+#   A8  '--average-method 3' (the methods are 1 and 2) stops at option parsing with exit 1 and the error of a bad
+#       method value, which names 1 and 2, and writes no grid, in this binary and in ./DTFE-2d when it is built
 # --exact itself does not sample (tests/run_tests.py's stored
-# regression covers it). About 20 s on the Mac (7 runs of 2-3 s, and A6's and A7's short ones).
+# regression covers it). About 20 s on the Mac (6 runs of 2-3 s, and A6's, A7's and A8's short ones).
 # Usage: tests/dtfe_mc_average_check.sh [--no-build]   (--no-build is accepted and ignored: nothing is built)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,7 +48,7 @@ SNAP="demo/z0_64.gadget"
 [ -f "$SNAP" ] || { echo "FAIL: $SNAP is missing (it is tracked in the repository)"; exit 1; }
 TMP="${DTFE_TEST_TMP}/dtfe_mc_average_check"
 mkdir -p "$TMP"
-OBJ=o; precision_double && OBJ=o_d
+OBJ="$DTFE_OBJ"
 GPU=0
 [ -n "$(gpu_backend_of "$OBJ")" ] && GPU=1
 
@@ -63,15 +64,12 @@ run() {
     env ${envs[@]+"${envs[@]}"} "${DTFE_BIN}" "$SNAP" "$TMP/$name" "${C[@]}" ${pad[@]+"${pad[@]}"} "$@" > "$TMP/$name.log" 2>&1 \
         || { echo "FAIL: run $name (see $TMP/$name.log)"; exit 1; }
 }
-echo ">> demo/z0_64.gadget at 64^3: the Monte-Carlo average, the legacy one (DTFE_MC_LEGACY=1), --exact"
+echo ">> demo/z0_64.gadget at 64^3: the Monte-Carlo average, --exact"
 run n -- --sampled
-run l DTFE_MC_LEGACY=1 -- --sampled
 run e -- --exact
 echo ">> --subsamples 2; --partition 2 2 2; one thread; --padding 20"
 # a low count, 2^3 = 8 points per cell (the default is 100): every tetrahedron under a sixth of a grid cell takes the
-# minimum count, 2, the shortest Sobol prefix; a count selects the sampled average by itself. (It replaces the
-# deprecated total '--samples 20', minimum count 4, which no '--subsamples k' gives and which goes with the old
-# spellings: docs/cleanup-plan.md P6.6)
+# minimum count, 2, the shortest Sobol prefix; a count selects the sampled average by itself
 run s -- --subsamples 2
 run p -- --sampled --partition 2 2 2 --max-concurrent 1
 run t OMP_NUM_THREADS=1 -- --sampled
@@ -84,11 +82,11 @@ if [ "$GPU" = "1" ]; then
 else
     echo ">> A5 SKIP: $OBJ carries no GPU stamp (a METAL=1 build runs it)"
 fi
-echo ">> A6: 'velocityStd_a' with methods 1 and 3, --exact and --cic (rejected), and with --average-method 2"
+echo ">> A6: 'velocityStd_a' with method 1, --exact and --cic (rejected), and with --average-method 2"
 V=(--grid 16 --periodic --padding 12 --field density_a velocityStd_a)
 A6=""
 for c in "m1||You cannot use the averaging method 1 " "exact|--exact|'--exact' cannot compute 'velocityStd_a'" \
-         "m3|--average-method 3|You cannot use the averaging method 3 " "cic|--cic|is not available with NGP/CIC/TSC/PCS/SPH/Voronoi"; do
+         "cic|--cic|is not available with NGP/CIC/TSC/PCS/SPH/Voronoi"; do
     IFS='|' read -r tag extra text <<< "$c"
     # shellcheck disable=SC2086   # $extra: none or one option with its value
     "${DTFE_BIN}" "$SNAP" "$TMP/v_$tag" "${V[@]}" $extra > "$TMP/v_$tag.log" 2>&1
@@ -110,8 +108,20 @@ for b in "${DISP_BINS[@]}"; do
         A7="$A7 $tag:$rc:$said"
     done
 done
+echo ">> A8: '--average-method 3' (rejected: the methods are 1 and 2)"
+A8=""
+for b in "${DISP_BINS[@]}"; do   # (the error comes before the snapshot is read, as in A7)
+    rm -f "$TMP"/m3.*
+    "$b" "$SNAP" "$TMP/m3" --grid 16 --periodic --padding 12 --field density_a --average-method 3 > "$TMP/m3.log" 2>&1
+    rc=$?
+    said=0
+    grep -qF -- "'--average-method' can have only 2 values (1 or 2)" "$TMP/m3.log" \
+        && grep -qF -- "has the value 3, but it should be between 1 to 2" "$TMP/m3.log" && said=1
+    grid=0; [ -e "$TMP/m3.a_den" ] && grid=1
+    A8="$A8 $(basename "$b"):$rc:$said:$grid"
+done
 
-"$PY" - "$TMP" "$GPU" "$A6" "$A7" <<'PYEOF'
+"$PY" - "$TMP" "$GPU" "$A6" "$A7" "$A8" <<'PYEOF'
 import numpy as np, os, sys
 REAL = np.dtype(os.environ.get("DTFE_TEST_REAL", "float32"))   # tests/precision.sh
 tmp, gpu = sys.argv[1], sys.argv[2] == "1"
@@ -122,17 +132,15 @@ def check(tag, ok, msg):
     print(f"  {'PASS' if ok else 'FAIL'} {tag} {msg}")
 def rd(name, ext="a_den"):
     return np.fromfile(os.path.join(tmp, f"{name}.{ext}"), dtype=REAL).astype(np.float64)
-n, l, e, s = rd("n"), rd("l"), rd("e"), rd("s")
-if not (n.size == l.size == e.size == s.size == 64 ** 3):
-    print(f"FAIL: grid sizes {n.size}, {l.size}, {e.size}, {s.size} (not 64^3)"); sys.exit(1)
+n, e, s = rd("n"), rd("e"), rd("s")
+if not (n.size == e.size == s.size == 64 ** 3):
+    print(f"FAIL: grid sizes {n.size}, {e.size}, {s.size} (not 64^3)"); sys.exit(1)
 MEAN_TOL = 1e-4
-dn, dl, ds = n.mean() - 1, l.mean() - 1, s.mean() - 1
-check("A1", abs(dn) < MEAN_TOL and abs(ds) < MEAN_TOL and abs(dl) > MEAN_TOL,
-      f"box mean - 1: {dn:+.2e} (default), {ds:+.2e} (--subsamples 2), both < {MEAN_TOL:.0e}; the old realization "
-      f"{dl:+.2e} fails it, as it must (exact {e.mean() - 1:+.1e})")
+dn, ds = n.mean() - 1, s.mean() - 1
+check("A1", abs(dn) < MEAN_TOL and abs(ds) < MEAN_TOL,
+      f"box mean - 1: {dn:+.2e} (default), {ds:+.2e} (--subsamples 2), both < {MEAN_TOL:.0e} (exact {e.mean() - 1:+.1e})")
 rn = float(np.sqrt(((n - e) ** 2).mean()) / e.mean())
-rl = float(np.sqrt(((l - e) ** 2).mean()) / e.mean())
-check("A2", rn <= rl and rn < 0.07, f"rms(a - exact)/<exact>: {rn:.4f} (old realization {rl:.4f}; < 0.07)")
+check("A2", rn < 0.07, f"rms(a - exact)/<exact>: {rn:.4f} (< 0.07)")
 worst = []
 for name, what in (("p", "--partition 2 2 2"), ("t", "OMP_NUM_THREADS=1"), ("d", "--padding 20")):
     x = rd(name)
@@ -159,7 +167,7 @@ rejected = [c.split(":") for c in sys.argv[3].split()]
 good = [tag for tag, rc, said in rejected if rc == "1" and said == "1"]
 bad = [f"{tag} (exit {rc}{'' if said == '1' else ', no error text'})" for tag, rc, said in rejected if tag not in good]
 std = rd("v_m2", "a_velStd")
-check("A6", len(good) == 4 and std.size == 16 ** 3 and np.isfinite(std).all() and (std >= 0).all() and std.mean() > 0,
+check("A6", len(good) == 3 and std.size == 16 ** 3 and np.isfinite(std).all() and (std >= 0).all() and std.mean() > 0,
       f"velocityStd_a rejected with exit 1 and its error by {', '.join(good) or 'none'}"
       f"{'; NOT by ' + ', '.join(bad) if bad else ''}; --average-method 2 writes {std.size} finite cells >= 0 (mean {std.mean():.3g})")
 disp = [c.split(":") for c in sys.argv[4].split()]
@@ -169,6 +177,13 @@ check("A7", len(disp) >= 2 and not bad,
       f"dispersion fields rejected with exit 1 and the PS-DTFE error by {', '.join(good) or 'none'}"
       f"{'; NOT by ' + ', '.join(bad) if bad else ''}"
       f"{'' if any(t.startswith('DTFE-2d/') for t, _, _ in disp) else ' (./DTFE-2d not built: 3D only)'}")
+m3 = [c.split(":") for c in sys.argv[5].split()]
+good = [tag for tag, rc, said, grid in m3 if rc == "1" and said == "1" and grid == "0"]
+bad = [f"{tag} (exit {rc}{'' if said == '1' else ', no error text'}{'' if grid == '0' else ', a grid written'})"
+       for tag, rc, said, grid in m3 if tag not in good]
+check("A8", len(m3) >= 1 and not bad,
+      f"'--average-method 3' stops at option parsing with exit 1, the error naming methods 1 and 2 and no grid in "
+      f"{', '.join(good) or 'none'}{'; NOT in ' + ', '.join(bad) if bad else ''}")
 print("RESULT:", "PASS  (the Monte-Carlo '_a' average conserves the mass and does not depend on the split)"
       if not fails else f"FAIL ({fails} check(s))")
 sys.exit(1 if fails else 0)

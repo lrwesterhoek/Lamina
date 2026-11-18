@@ -2,10 +2,9 @@
 
    The Makefile recompiles this file on EVERY link with the current git revision
    ('git describe --always --dirty') and the UTC link time, so every run's log names the exact
-   code that produced its outputs. That is what lets a results browser tell a grid made before
-   an output-changing fix from one made after it (the run date alone cannot: a stale binary can
-   run long after the fix landed). Outside a git checkout, or when the defines are missing, the
-   fields read 'unknown'. */
+   code that produced its outputs (the run date alone cannot: a stale binary can run long after
+   the code changed). Outside a git checkout, or when the defines are missing, the fields read
+   'unknown'. */
 
 #ifndef DTFE_BUILD_REV
 #define DTFE_BUILD_REV "unknown"

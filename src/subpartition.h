@@ -264,8 +264,8 @@ inline bool selectionRunsParallel(size_t const N)
    the vector that calling insertParticlesInBox( p, output, boxes[k], offsets[k] ) for k = 0, 1, ... in turn
    produces, byte for byte (same particles, same order, same 'pos - offset' arithmetic) -- the spatial sort and
    the CGAL insertion downstream see the same input. A serial periodic selection scans all N particles once per
-   periodic offset (Box::isBoxOverlaping is true for practically every pair, so all 27 offsets): ~2 s per
-   partition at 9.4e7 particles with the other cores idle. So: (1) offsets whose box cannot hold a particle are dropped EXACTLY, against the particles' own bounding box
+   periodic offset (Box::isBoxOverlaping is true for practically every pair, so all 27 offsets), with the other
+   cores idle. So: (1) offsets whose box cannot hold a particle are dropped EXACTLY, against the particles' own bounding box
    (closed intervals, the test isParticleInBox makes; a NaN coordinate -- which every box test passes -- keeps
    all boxes); (2) one count pass and one fill pass over contiguous chunks, the fill writing straight into its
    final slot (prefix sums over box-major, chunk-minor counts), so the order never depends on the threads and

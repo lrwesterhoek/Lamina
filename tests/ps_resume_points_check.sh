@@ -2,7 +2,7 @@
 # Resume of a killed partitioned PS-DTFE run WITH '--sample-points' (src/partition_checkpoint.h 'POINTS',
 # ps_point_eval.cc '--resume with --sample-points'). On a synthetic
 # crossed-wave snapshot split into 64 partitions, with a plane of points and every per-point option the production
-# runs use (--ps-per-stream --pts-vel-grad --ps-caustics, --ps-vertex-mass --ps-volume-weighted):
+# runs use (--ps-per-stream --pts-vel-grad --ps-caustics, --ps-vertex-mass):
 #   R1  an uninterrupted '--ps-merge index-order' run (the reference) checkpoints its point records too and removes the
 #       checkpoint once the outputs are in place
 #   R2  a run killed after 20 partitions (DTFE_TEST_EXIT_AFTER_PARTITIONS) leaves a manifest of >= 20 merged
@@ -21,10 +21,6 @@
 #       while k deposits) tags the records with the right partition: killed and resumed, byte-identical
 #   R10 '--scratch-dir': the 'points.<i>' files go to the scratch folder with the checkpoint (config.sh
 #       ps_checkpoint_dir's name), and the resume from there is byte-identical
-#   R11 the word merge ('--ps-merge fixed-point', single build; fix 3 S6): a run killed after 20 partitions resumes
-#       with the option at another --max-concurrent: every output byte-identical to the uninterrupted word-merge
-#       run, and the '.pts_*' files to R1's too (the point records do not go through the grids' merge); the double
-#       build refuses the option: SKIP
 #   R9  GPU builds only: a killed '--gpu' run resumes to the same points (the point evaluation is CPU work)
 # Usage: tests/ps_resume_points_check.sh [--no-build]   (--no-build is accepted and ignored: the binaries are used as built)
 set -uo pipefail
@@ -49,16 +45,10 @@ X, Y = np.meshgrid(c, c, indexing="ij")
 np.stack([X.ravel(), Y.ravel(), np.full(X.size, 50.3)], 1).astype(np.float64).tofile(f"{tmp}/plane.bin")
 np.stack([X.ravel(), Y.ravel(), np.full(X.size, 31.7)], 1).astype(np.float64).tofile(f"{tmp}/plane_other.bin")
 PYEOF
-PASS=0; FAILS=0
-check() { if [ "$2" = 0 ]; then PASS=$((PASS+1)); echo "  PASS $1"; else FAILS=$((FAILS+1)); echo "  FAIL $1"; fi; }
-# same <a> <b> [pattern], merged_count <checkpoint folder>: tests/lib.sh
-merged_bits() { grep -a -m1 '^merged ' "$1/checkpoint" | awk '{print $2}'; }
-# the 'points.<i>' files of a checkpoint folder, as a sorted list of i
-points_list() { ls "$1" 2>/dev/null | sed -n 's/^points\.\([0-9]*\)$/\1/p' | sort -n | tr '\n' ' '; }
-merged_list() { merged_bits "$1" | fold -w1 | grep -n 1 | cut -d: -f1 | awk '{print $1-1}' | tr '\n' ' '; }
+# check / check_result, same <a> <b> [pattern], merged_count, points_list, merged_list: tests/lib.sh
 C=(--grid 48 --periodic --input-format 105 --mpc-unit 1 --field density velocity density_a velocity_a dispersion_a
    --partition 4 4 4 --sample-points "$TMP/plane.bin" --ps-per-stream --pts-vel-grad --ps-caustics
-   --ps-vertex-mass --ps-volume-weighted --verbose 2)
+   --ps-vertex-mass --verbose 2)
 
 echo ">> R1: the uninterrupted --ps-merge index-order reference (64 partitions, --max-concurrent 4)"
 OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/ref" "${C[@]}" --max-concurrent 4 --ps-merge index-order > "$TMP/ref.log" 2>&1 \
@@ -157,29 +147,8 @@ OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/s" "${C[@]}" --max-concurrent 4 --scratch
 [ "$ok1" = 0 ] && [ "$rc2" = 0 ] && [ ! -e "$SCK" ] && same "$TMP/ref" "$TMP/s"
 check "R10 the points.<i> files beside the checkpoint in the scratch folder ($(basename "$SCK")); resumed byte-identical" $?
 
-echo ">> R11: the word merge (--ps-merge fixed-point): killed after 20 partitions, resumed"
-if precision_double; then
-    echo "  SKIP R11: the double build refuses '--ps-merge fixed-point'"
-else
-    # the run-wide units come with the option itself; the switches and hooks that would steer them, off
-    WE=(env -u DTFE_RUN_UNITS_LEGACY -u DTFE_PS_RUN_UNITS -u DTFE_TEST_RUN_UNIT_SHIFT -u DTFE_GPU_FLOAT_MASS
-        -u DTFE_GPU_FLOAT_MOMENTS OMP_NUM_THREADS=4)
-    "${WE[@]}" "$BIN" "$SNAP" "$TMP/wref" "${C[@]}" --max-concurrent 4 --ps-merge fixed-point > "$TMP/wref.log" 2>&1 \
-        || { echo "FAIL: wref (see $TMP/wref.log)"; exit 1; }
-    "${WE[@]}" DTFE_TEST_EXIT_AFTER_PARTITIONS=20 "$BIN" "$SNAP" "$TMP/w" "${C[@]}" --max-concurrent 4 \
-        --ps-merge fixed-point > "$TMP/w1.log" 2>&1; rc1=$?
-    nw="$(merged_count "$TMP/w.runlog.checkpoint" 2>/dev/null || echo 0)"
-    "${WE[@]}" "$BIN" "$SNAP" "$TMP/w" "${C[@]}" --max-concurrent 2 --ps-merge fixed-point --resume \
-        > "$TMP/w2.log" 2>&1; rc2=$?
-    [ "$rc1" = 137 ] && [ "${nw:-0}" -ge 20 ] && [ "$rc2" = 0 ] && grep -q "stream records were read back" "$TMP/w2.log" \
-        && grep -qF "words added to the checkpoint's as it finishes" "$TMP/w2.log" && [ ! -e "$TMP/w.runlog.checkpoint" ]
-    check "R11 killed after ${nw:-?} partitions (exit $rc1), resumed at --max-concurrent 2 (exit $rc2) from the words and the records" $?
-    same "$TMP/wref" "$TMP/w" && same "$TMP/ref" "$TMP/w" 'pts_*'
-    check "R11 every output byte-identical to the uninterrupted word-merge run, the .pts_* files to R1's" $?
-fi
-
 echo ">> R9: a killed --gpu run"
-OBJ=o_ps; precision_double && OBJ=o_ps_d
+OBJ="$PS_OBJ"
 if [ ! -d "$OBJ" ] || [ -f "$OBJ/.gpu_mode_off" ] || [ ! -f "$OBJ/.gpu_mode_metal" ]; then
     echo "  SKIP R9: $OBJ is not a Metal GPU build"
 else
@@ -192,6 +161,4 @@ else
     check "R9 killed after 12 GPU partitions and resumed: every .pts_* byte-identical (to the CPU run's too)" $?
 fi
 
-echo "RESULT: $PASS passed, $FAILS failed"
-[ "$FAILS" = 0 ] || exit 1
-exit 0
+check_result

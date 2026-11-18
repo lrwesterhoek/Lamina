@@ -1,17 +1,15 @@
 /* On-disk cache of the Delaunay tessellation and its per-vertex payload ('--tessellation-cache').
  *
- * PROBLEM: building the tessellation is the dominant fixed cost of a run and it is repeated in
- * full every time. Measured on a 96^3-particle (884736) crossed-wave snapshot, PS-DTFE, grid 16
- * so the deposit is negligible: triangulation 5.08 s + vertex density 2.06 s = 7.13 s of an
- * 8.81 s run (81%; the HDF5 read is only ~0.8 s). Re-querying the same snapshot with a different
- * '--sample-points' set, a different grid, or different field flags pays all 7.13 s again --
+ * PROBLEM: building the tessellation and its vertex densities is the dominant fixed cost of a run,
+ * and it is repeated in full every time. Re-querying the same snapshot with a different
+ * '--sample-points' set, a different grid, or different field flags pays all of it again --
  * which is most of the cost of the iterative point-evaluation figure workflow.
  *
  * MECHANISM: after the tessellation is built AND its vertex densities computed, the whole thing
  * is written to '<dir>/<stem>.tess'; a later run whose inputs are identical loads it instead of
  * rebuilding. The structure travels through CGAL's own binary stream operators (which rebuild the
- * TDS adjacencies directly rather than re-inserting points -- measured 3.56x faster than the
- * spatial_sort+insert path at 1.5e6 vertices), followed by the vertexData payload as flat arrays
+ * TDS adjacencies directly rather than re-inserting points -- several times faster than the
+ * spatial_sort+insert path), followed by the vertexData payload as flat arrays
  * in finite-vertex-iteration order. Nothing downstream changes: both PS consumers (the grid
  * deposit in ps_interpolation.cc and the point evaluation in ps_point_eval.cc) only ever iterate
  * finite cells and vertices, so a loaded tessellation is indistinguishable from a built one.
@@ -23,11 +21,11 @@
  * -- including a different NO_DIM, Real width or PHASE_SPACE/VELOCITY/SCALAR build -- is a miss,
  * and a miss simply rebuilds. The cache is never consulted unless the user passes the flag.
  *
- * COST: the body is DEFLATED, which brings 1.5e6 vertices from 735 MB to 225 MB -- about 0.15 KB
- * per vertex, and the Lagrangian padding multiplies particle counts by ~4x. Reading is no slower
- * (the smaller read pays for the inflation); WRITING costs ~2.6 s more than an uncompressed save at
- * this size, which is why the level is 1 and not 6 (see DEFLATE_LEVEL). The caller still checks free
- * space and declines to write rather than filling the volume.
+ * COST: the body is DEFLATED, to about 0.15 KB per vertex (BYTES_PER_VERTEX), and the Lagrangian
+ * padding multiplies particle counts by ~4x. Reading is no slower (the smaller read pays for the
+ * inflation); WRITING costs more than an uncompressed save, which is why the level is 1 and not 6
+ * (see DEFLATE_LEVEL). The caller still checks free space and declines to write rather than filling
+ * the volume.
  */
 
 #ifndef TESSELLATION_CACHE_HEADER
@@ -77,8 +75,10 @@
 namespace TessellationCache
 {
 
-// bumped whenever the on-disk layout changes, so old files miss instead of misreading
-static const uint32_t FORMAT_VERSION = 2;   // 2 = deflated body (v1 files simply miss)
+// bumped whenever the on-disk layout changes, so old files miss instead of misreading: the descriptor's first line
+// names it, and the file's name is the descriptor's hash (cachePath)
+// 3 = the chunked deflated body only, a PS-DTFE file's cells in the canonical vertex order (older files simply miss)
+static const uint32_t FORMAT_VERSION = 3;
 static const char     MAGIC[8]       = { 'D','T','F','E','T','E','S','S' };
 
 /* Measured bytes per tessellation vertex, for the free-space check. The body is deflated, which
@@ -87,174 +87,46 @@ static const char     MAGIC[8]       = { 'D','T','F','E','T','E','S','S' };
    marginal case, while under-estimating fills the volume. */
 static const double BYTES_PER_VERTEX = 176.;
 
-/* zlib level 1, chosen on the WRITE cost. All three axes measured on the 884736-particle snapshot
-   (grid 48, density+velocity; the uncached run is 8.77 s):
-                     file     write     hit
-     level 6         214 MB   39.8 s    3.41 s
-     level 1         225 MB   15.4 s    3.43 s
-   Level 6 buys 5% of file size for 24 extra seconds on every cache WRITE -- it would make the first
-   run nearly 5x the uncached one, which defeats the point of a cache people are meant to leave on.
-   Level 1 costs ~2.6 s over an uncompressed save and reads just as fast. (Judging this on size and
-   inflate time alone picks the wrong level: those two axes both favour 6 and neither of them is the
+/* zlib level 1, chosen on the WRITE cost. Level 6 buys a few percent of file size for a write more than
+   twice as long on every cache WRITE -- it would make the first run several times the uncached one, which
+   defeats the point of a cache people are meant to leave on. Level 1 reads just as fast. (Judging this on
+   size and inflate time alone picks the wrong level: those two axes both favour 6 and neither of them is the
    one that hurts.) */
 static const int    DEFLATE_LEVEL    = 1;
-static const size_t ZBUF             = 256u * 1024u;
 
 
-/* ---------------------------------------------------------------- deflate/inflate stream buffers
-   The tessellation body goes through zlib rather than straight to the file. Compression pays twice:
-   the file shrinks ~3.4x, and because the read is I/O-bound the HIT gets no slower -- inflating
-   214 MB measured 0.86 s against 1.26 s to read the uncompressed 735 MB.
-   These are streambufs, not a compress-the-whole-buffer helper, because a whole-file buffer would
-   double peak memory exactly on the large runs the cache is for (a 2e7-particle snapshot caches
-   tens of GB). Both work in fixed ZBUF chunks, so memory is flat regardless of tessellation size.
-   The HEADER stays uncompressed: a staleness check then costs one small read and no inflation. */
-class DeflateBuf : public std::streambuf
-{
-public:
-    explicit DeflateBuf(std::ostream &sink) : sink_(sink), in_(ZBUF), out_(ZBUF), ok_(true)
-    {
-        std::memset(&z_, 0, sizeof z_);
-        // 15+16 = gzip wrapper, so a cache file is also readable with gunzip when debugging
-        ok_ = deflateInit2(&z_, DEFLATE_LEVEL, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) == Z_OK;
-        setp(in_.data(), in_.data() + in_.size());
-    }
-    ~DeflateBuf() override { finish(); if (ok_) deflateEnd(&z_); }
-
-    // Flushes the put area and terminates the deflate stream. Safe to call twice.
-    bool finish()
-    {
-        if (!ok_ || done_) return ok_;
-        if (!pump(Z_NO_FLUSH)) return false;
-        done_ = true;
-        return pump(Z_FINISH);
-    }
-    bool good() const { return ok_; }
-
-protected:
-    int overflow(int c) override
-    {
-        if (!pump(Z_NO_FLUSH)) return traits_type::eof();
-        if (c != traits_type::eof())
-        {
-            *pptr() = traits_type::to_char_type(c);
-            pbump(1);
-        }
-        return c;
-    }
-    int sync() override { return pump(Z_NO_FLUSH) ? 0 : -1; }
-
-private:
-    // Hands the put area to zlib and writes every full output block to the sink.
-    bool pump(int flush)
-    {
-        if (!ok_) return false;
-        z_.next_in  = reinterpret_cast<Bytef*>(pbase());
-        z_.avail_in = uInt(pptr() - pbase());
-        do {
-            z_.next_out  = reinterpret_cast<Bytef*>(out_.data());
-            z_.avail_out = uInt(out_.size());
-            int const rc = deflate(&z_, flush);
-            if (rc == Z_STREAM_ERROR) { ok_ = false; return false; }
-            std::streamsize const n = std::streamsize(out_.size() - z_.avail_out);
-            if (n > 0) sink_.write(out_.data(), n);
-            if (!sink_) { ok_ = false; return false; }
-        } while (z_.avail_out == 0 || (flush == Z_FINISH && z_.avail_in > 0));
-        setp(in_.data(), in_.data() + in_.size());
-        return true;
-    }
-
-    std::ostream      &sink_;
-    std::vector<char>  in_, out_;
-    z_stream           z_{};
-    bool               ok_;
-    bool               done_ = false;
-};
-
-
-class InflateBuf : public std::streambuf
-{
-public:
-    explicit InflateBuf(std::istream &src) : src_(src), in_(ZBUF), out_(ZBUF), ok_(true)
-    {
-        std::memset(&z_, 0, sizeof z_);
-        ok_ = inflateInit2(&z_, 15 + 16) == Z_OK;      // gzip wrapper, matching DeflateBuf
-        setg(out_.data(), out_.data(), out_.data());
-    }
-    ~InflateBuf() override { if (ok_) inflateEnd(&z_); }
-    bool good() const { return ok_; }
-
-protected:
-    int underflow() override
-    {
-        if (!ok_ || eos_) return traits_type::eof();
-        for (;;)
-        {
-            if (z_.avail_in == 0)
-            {
-                src_.read(in_.data(), std::streamsize(in_.size()));
-                z_.avail_in = uInt(src_.gcount());
-                z_.next_in  = reinterpret_cast<Bytef*>(in_.data());
-                if (z_.avail_in == 0) { eos_ = true; return traits_type::eof(); }
-            }
-            z_.next_out  = reinterpret_cast<Bytef*>(out_.data());
-            z_.avail_out = uInt(out_.size());
-            int const rc = inflate(&z_, Z_NO_FLUSH);
-            if (rc != Z_OK && rc != Z_STREAM_END) { ok_ = false; return traits_type::eof(); }
-            size_t const n = out_.size() - z_.avail_out;
-            if (n > 0)
-            {
-                setg(out_.data(), out_.data(), out_.data() + n);
-                return traits_type::to_int_type(*gptr());
-            }
-            if (rc == Z_STREAM_END) { eos_ = true; return traits_type::eof(); }
-        }
-    }
-
-private:
-    std::istream      &src_;
-    std::vector<char>  in_, out_;
-    z_stream           z_{};
-    bool               ok_;
-    bool               eos_ = false;
-};
-
-
-/* The CHUNKED body (single-stream files still load). Loading a cached
-   partition is inflate + CGAL deserialization, and one zlib stream inflates on one core: ~3 s of the
-   8.4 s a 6M-vertex TNG100-3 partition takes. The body is therefore written as independent gzip
-   members of CHUNK_BYTES each (compressed in parallel on the write, which also shortens it), followed
-   by an index of their sizes in a footer; a load inflates members AHEAD on a few threads into a bounded
-   window while the parser drains them in order. Layout after the plaintext header (magic, length,
-   descriptor -- as in a single-stream file, so header checks, occupancy maps and '.tess' names are shared):
+/* The CHUNKED body. The tessellation body goes through zlib rather than straight to the file: the file shrinks
+   several times, and because the read is I/O-bound the HIT gets no slower. The HEADER stays uncompressed: a staleness
+   check then costs one small read and no inflation. Loading a cached partition is inflate + CGAL deserialization, and
+   one zlib stream inflates on one core, a large share of the load. The body is therefore
+   written as independent gzip members of CHUNK_BYTES each (compressed in parallel on the write, which also shortens
+   it), followed by an index of their sizes in a footer; a load inflates members AHEAD on a few threads into a bounded
+   window while the parser drains them in order. Layout after the plaintext header (magic, length, descriptor --
+   shared by the header checks, the occupancy maps and the '.tess' names):
        CHUNK_MARKER (8 bytes)   member_0 ... member_{n-1}   (each a complete gzip member)
        index: uint64 n, then n x (uint64 compressed size, uint64 uncompressed size)
        footer: uint64 index offset (from the file start), CHUNK_FOOTER (8 bytes)
-   The members concatenate to a valid multi-member gzip file. DTFE_TESSELLATION_CACHE_LEGACY=1 writes the
-   single stream (tests); python/tools/upgrade_tess_cache.py converts single-stream files, byte for byte. */
+   The members concatenate to a valid multi-member gzip file. */
 static const char   CHUNK_MARKER[8] = { 'D','T','F','E','C','H','K','1' };
 static const char   CHUNK_FOOTER[8] = { 'D','T','F','E','C','H','K','E' };
 static const size_t CHUNK_BYTES     = size_t(16) << 20;
 
 inline std::atomic<int> &activeLoads() { static std::atomic<int> n{ 0 }; return n; }
 
-// threads for one load's or save's chunks: a few, fewer while other loads run (the composite server
-// loads up to 8 partitions at once); DTFE_TESSELLATION_CACHE_THREADS pins it
+// threads for one load's or save's chunks: a few (at most 4, half the hardware threads), fewer while other loads run
+// (the composite server loads up to 8 partitions at once)
 inline size_t chunkThreads()
 {
-    if ( long const v = Env::integer( "DTFE_TESSELLATION_CACHE_THREADS", 0 ); v > 0 )
-        return size_t( v );
     unsigned const hw = unsigned( dtfeHardwareThreads() );
     int const others = std::max( 0, activeLoads().load() - 1 );
     return std::max<size_t>( 1, std::min<size_t>( 4, size_t(hw) / size_t(1 + others) / 2 ) );
 }
 
 /* libdeflate (Makefile: compiled in when installed, LIBDEFLATE=0 forces zlib): the chunks are whole
-   buffers of known size, exactly what its one-shot API wants. Measured on a 3.65M-vertex partition
-   (1.9 GB of body in 114 chunks): compression at level 1 2.4x faster than zlib and 3% smaller;
-   decompression 1.13x faster than macOS's own zlib (Apple tunes it for its chips), more against
-   stock zlib. The members stay plain gzip (libdeflate checks the CRC itself), so every build reads
-   every cache. DTFE_TESSELLATION_CACHE_ZLIB=1 uses zlib for both directions (for comparisons). */
+   buffers of known size, exactly what its one-shot API wants. Its level-1 compression is faster than zlib's
+   and slightly smaller; its decompression gains little over macOS's own zlib (Apple tunes it for its chips),
+   more against stock zlib. The members stay plain gzip (libdeflate checks the CRC itself), so every build
+   reads every cache. DTFE_TESSELLATION_CACHE_ZLIB=1 uses zlib for both directions (for comparisons). */
 inline bool useLibdeflate()
 {
 #ifdef DTFE_HAVE_LIBDEFLATE
@@ -483,15 +355,15 @@ private:
     bool ok_ = true;
 };
 
-// After the descriptor: a chunked body's member table (offsets from the file start), or false for a
-// single-stream body (the stream is then left at the start of the body).
+// After the descriptor: the chunked body's member table (offsets from the file start), or false for a body without
+// the chunk marker or with a broken footer or index (a damaged file).
 inline bool readChunkIndex(std::istream &is, std::vector<uint64_t> &off, std::vector<uint64_t> &csize,
                            std::vector<uint64_t> &usize)
 {
     std::streampos const body = is.tellg();
     char marker[8] = {0};
     is.read( marker, 8 );
-    if ( not is or std::memcmp( marker, CHUNK_MARKER, 8 ) != 0 ) { is.clear(); is.seekg( body ); return false; }
+    if ( not is or std::memcmp( marker, CHUNK_MARKER, 8 ) != 0 ) return false;
     uint64_t const dataStart = uint64_t( body ) + 8;
     is.seekg( -16, std::ios::end );
     uint64_t indexOffset = 0;
@@ -595,7 +467,7 @@ inline std::string makeDescriptor(User_options const &userOptions)
     // anything that changes WHICH particles are triangulated, or their coordinates. The random
     // SEED belongs here only when '--particle-fraction' is on, because that is the one case where it
     // decides which particles enter the triangulation (random.cc); otherwise it merely seeds the
-    // method-2/3 Monte-Carlo interpolation, which runs after the cached stages -- and since an
+    // method-2 Monte-Carlo interpolation, which runs after the cached stages -- and since an
     // unspecified '--seed' is std::rand() per run, including it unconditionally would make every
     // lookup a miss.
     d << "randomSample=" << userOptions.randomSample << '\n';
@@ -610,8 +482,8 @@ inline std::string makeDescriptor(User_options const &userOptions)
     d << "density0=" << userOptions.averageDensity << '\n';
 #ifndef PHASE_SPACE
     // ... and summed exactly (triangulation.cpp vertexDensityStarSums, in the run-wide unit 2^-K) or in double, which
-    // can differ in the last bit. Written only for the exact sums, so the double sums' caches (DTFE_RUN_UNITS_LEGACY=1,
-    // the double build) keep the descriptor they have without it
+    // can differ in the last bit. Written only for the exact sums, so the double sums' caches (the double build) keep
+    // the descriptor they have without it
     if ( userOptions.runUnits.starSums( double( userOptions.averageDensity ) ) )
         d << "starSums=run-wide K=" << userOptions.runUnits.K[RU_VERTEX_VOLUME] << '\n';
 #endif
@@ -1060,9 +932,10 @@ inline bool readPayload(std::istream &is, DT &dt)
 
 /* ---------------------------------------------------------------- the two entry points */
 
-// True when this partition's cache file exists and was written for exactly these inputs: the
-// header check of tryLoad, without reading (or inflating) the body. The composite '--serve'
-// startup uses it to register a partition without loading its tessellation.
+// True when this partition's cache file exists and was written for exactly these inputs in this format (the
+// descriptor's 'format=' line, FORMAT_VERSION, and the chunked body's marker after it -- the tests of the tuner's
+// scan, auto_tune.cc cachedServeSplits): the header check of tryLoad, without reading (or inflating) the body. The
+// composite '--serve' startup uses it to register a partition without loading its tessellation.
 inline bool headerMatches(User_options const &userOptions)
 {
     if ( userOptions.tessellationCacheDir.empty() or not usable( userOptions ) ) return false;
@@ -1076,15 +949,18 @@ inline bool headerMatches(User_options const &userOptions)
     if ( !is or len == 0 or len > (1u<<20) ) return false;
     std::string stored( static_cast<size_t>(len), '\0' );
     is.read( &stored[0], std::streamsize(len) );
-    return is and stored == makeDescriptor( userOptions );
+    if ( !is or stored != makeDescriptor( userOptions ) ) return false;
+    char marker[8] = {0};
+    is.read( marker, 8 );
+    return is and std::memcmp( marker, CHUNK_MARKER, 8 ) == 0;
 }
 
 
 // Loads the tessellation for this partition into 'dt'. Returns false (a miss) whenever the file is
 // absent, unreadable, or was written for different inputs -- the caller then builds as usual.
-// The cells keep the file's vertex numbering. PS-DTFE: every caller then renumbers them in the canonical
-// vertex order (ps_vertex_order.h; buildTessellation, the composite server's loads), since a file written
-// without that order holds CGAL's numbering.
+// The cells keep the file's vertex numbering (both the block reader and CGAL's set every cell's vertex and
+// neighbour slots in the order the writer wrote them). PS-DTFE: a file of this format holds the canonical vertex
+// order (ps_vertex_order.h; buildTessellation saves after its pass), so a loaded tessellation needs no pass.
 inline bool tryLoad(DT &dt, User_options const &userOptions)
 {
     if ( userOptions.tessellationCacheDir.empty() ) return false;
@@ -1124,24 +1000,14 @@ inline bool tryLoad(DT &dt, User_options const &userOptions)
         return false;   // stale: rebuild
     }
 
-    // Everything past the header is deflated: chunked (inflated ahead on a few threads) or one
-    // stream (single-stream files); either way the tessellation and payload are parsed from the stream.
+    // Everything past the header is the chunked body (inflated ahead on a few threads); the tessellation and payload
+    // are parsed from its stream.
     struct LoadCount { LoadCount() { ++activeLoads(); } ~LoadCount() { --activeLoads(); } } loadCount;
     std::vector<uint64_t> off, csize, usize;
-    bool const chunked = readChunkIndex( is, off, csize, usize );
-    if ( not chunked and is.fail() ) return false;           // a chunk marker with a broken footer/index
-    std::unique_ptr<std::streambuf> zbufp;
-    if ( chunked )
-    {
-        is.close();
-        zbufp.reset( new ChunkInflateBuf( path, std::move( off ), std::move( csize ), std::move( usize ) ) );
-    }
-    else
-    {
-        InflateBuf *ib = new InflateBuf( is );
-        zbufp.reset( ib );
-        if ( not ib->good() ) return false;
-    }
+    if ( not readChunkIndex( is, off, csize, usize ) ) return false;   // no chunk marker, or a broken footer/index
+    is.close();
+    std::unique_ptr<std::streambuf> zbufp( new ChunkInflateBuf( path, std::move( off ), std::move( csize ),
+                                                                std::move( usize ) ) );
     std::istream zin( zbufp.get() );
     CGAL::IO::set_binary_mode( zin );
     dt.clear();
@@ -1251,38 +1117,11 @@ inline void save(DT &dt, User_options const &userOptions)
         os.write( desc.data(), std::streamsize(desc.size()) );
 
         // The header above stays uncompressed so a staleness check costs one small read; the
-        // tessellation and payload go through zlib in independent chunks (ChunkDeflateBuf), or as
-        // one stream under DTFE_TESSELLATION_CACHE_LEGACY=1 (the single-stream format, for tests)
-        bool const legacy = Env::flag( "DTFE_TESSELLATION_CACHE_LEGACY" );
-        if ( not legacy )
+        // tessellation and payload go through zlib in independent chunks (ChunkDeflateBuf, in a scope of its
+        // own: the buffer is gone before the file's state is checked below)
+        os.write( CHUNK_MARKER, 8 );
         {
-            os.write( CHUNK_MARKER, 8 );
             ChunkDeflateBuf zbuf( os );
-            std::ostream zout( &zbuf );
-            CGAL::IO::set_binary_mode( zout );
-            writeTriangulation( zout, dt );
-            writePayload( zout, dt );
-            zout.flush();
-            if ( not zbuf.finish() or not zout )
-            {
-                warning << "--tessellation-cache: compressing '" << tmp << "' failed; continuing.\n"
-                        << MESSAGE::EndWarning;
-                os.close();
-                ::remove( tmp.c_str() );
-                return;
-            }
-        }
-        else
-        {
-            DeflateBuf zbuf( os );
-            if ( not zbuf.good() )
-            {
-                warning << "--tessellation-cache: could not start the compressor; continuing without caching.\n"
-                        << MESSAGE::EndWarning;
-                os.close();
-                ::remove( tmp.c_str() );
-                return;
-            }
             std::ostream zout( &zbuf );
             CGAL::IO::set_binary_mode( zout );
             writeTriangulation( zout, dt );

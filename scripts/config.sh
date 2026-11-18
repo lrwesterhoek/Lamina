@@ -10,77 +10,11 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/h5py_python.sh"   # h5py_python: the python with numpy and h5py
 
-# ---- the knobs' names and values (docs/cleanup-plan.md P6.7) -------------------------------------------------
-# One name per knob in both drivers; a renamed knob's older names are still read for one release (P6.6 drops them).
+# ---- the knobs' values ---------------------------------------------------------------------------------------
 # An EMPTY value is the same as an unset one, and a switch is off for 0, false, no or off (any case) and on for
 # anything else -- the binaries' own rule (src/env_knobs.h), so PS_CAUSTICS=true is on, as DTFE_PROGRESS=true is.
-#
-# knob [-e] NEW OLD...: NEW keeps its value when it is set; otherwise the first OLD that is set is copied onto NEW
-# (exported when the OLD was). Every OLD that is set earns one stderr line 'warning: OLD is deprecated, use NEW'
-# (saying that NEW wins when both are set to different values: no refusal during the window, a stray export must
-# not stop a run), and is unset afterwards, so a driver started from here (run_ps_pipeline.sh -> run_ps_dtfe.sh)
-# sees the new name only and does not warn again. -e: an EMPTY value counts as set (PS_LAGRANGIAN_INPUT, whose
-# empty value means "the snapshot's own InitialCoordinates"). Call it BEFORE the knob's 'VAR="${VAR:-default}"'
-# line, which stays the one place a default is given (tests/docs_drift_check.py and py_gui_runspec_test.py read
-# those lines, and the knob lines for the older names).
-knob() {
-    local keep_empty=0 new old v
-    if [ "$1" = "-e" ]; then keep_empty=1; shift; fi
-    new="$1"; shift
-    for old in "$@"; do
-        if [ "${keep_empty}" = "1" ]; then
-            [ -n "${!old+x}" ] || continue
-        elif [ -z "${!old:-}" ]; then
-            unset "${old}"; continue
-        fi
-        v="${!old}"
-        if { [ "${keep_empty}" = "1" ] && [ -n "${!new+x}" ]; } || { [ "${keep_empty}" = "0" ] && [ -n "${!new:-}" ]; }; then
-            if [ "${!new}" = "${v}" ]; then
-                echo "warning: ${old} is deprecated, use ${new}" >&2
-            else
-                echo "warning: ${old} is deprecated, use ${new} (${old}=${v} is not read: ${new}=${!new} wins)" >&2
-            fi
-        else
-            printf -v "${new}" '%s' "${v}"
-            case "$(declare -p "${old}" 2>/dev/null)" in "declare -x"*) export "${new}" ;; esac
-            echo "warning: ${old} is deprecated, use ${new}" >&2
-        fi
-        unset "${old}"
-    done
-}
-
-# knob_merge PS_MERGE ORDERED_MERGE FIXED_POINT_MERGE: run_ps_dtfe.sh's merge mode (PS_MERGE = index-order |
-# completion-order | fixed-point; empty = not given, the driver's default index-order) from the older pair of switches,
-# converted as the binary converts its old flags: FIXED_POINT_MERGE on is fixed-point (whatever ORDERED_MERGE says, as
-# before), else ORDERED_MERGE on is index-order and off completion-order; FIXED_POINT_MERGE=0 alone gives nothing. A
-# warning per old name set, PS_MERGE winning when it is set too, and the old names unset, as knob does.
-knob_merge() {
-    local new="$1" ordered="$2" fixed="$3" v="" m old exp=0
-    if [ -n "${!fixed:-}" ] && knob_on "${fixed}"; then v=fixed-point
-    elif [ -n "${!ordered:-}" ]; then
-        if knob_on "${ordered}"; then v=index-order; else v=completion-order; fi
-    fi
-    for old in "${ordered}" "${fixed}"; do
-        [ -n "${!old:-}" ] || { unset "${old}"; continue; }
-        case "$(declare -p "${old}" 2>/dev/null)" in "declare -x"*) exp=1 ;; esac
-        m=""                                         # what this name alone says
-        if [ "${old}" = "${fixed}" ]; then knob_on "${old}" && m=fixed-point
-        elif knob_on "${old}"; then m=index-order; else m=completion-order; fi
-        if [ -n "${!new:-}" ] && [ -n "${m}" ] && [ "${!new}" != "${m}" ]; then
-            echo "warning: ${old} is deprecated, use ${new}${m:+=${m}} (${old}=${!old} is not read: ${new}=${!new} wins)" >&2
-        elif [ -z "${!new:-}" ] && [ -n "${m}" ] && [ "${m}" != "${v}" ]; then
-            echo "warning: ${old} is deprecated, use ${new}=${m} (${old}=${!old} is not read: ${fixed}=${!fixed} wins)" >&2
-        else
-            echo "warning: ${old} is deprecated, use ${new}${m:+=${m}}" >&2
-        fi
-        unset "${old}"
-    done
-    if [ -z "${!new:-}" ] && [ -n "${v}" ]; then
-        printf -v "${new}" '%s' "${v}"
-        [ "${exp}" = "1" ] && export "${new}"
-    fi
-    return 0
-}
+# A knob with a default gives it on one 'VAR="${VAR:-default}"' line (tests/docs_drift_check.py and
+# py_gui_runspec_test.py read those lines).
 
 # knob_on NAME: status 0 when the switch NAME is on (set, not empty, and not 0/false/no/off).
 knob_on() {
@@ -91,34 +25,13 @@ knob_on() {
 }
 
 # knob_bool NAME...: each switch normalised in place to 1 or 0 (knob_on's rule; an empty one is left empty), so the
-# driver's own tests, banners and the knobs it hands on read one spelling. knob_gpu NAME: the same for a switch that
-# also takes 'auto' (any case; empty is auto too).
+# driver's own tests, banners and the knobs it hands on read one spelling.
 knob_bool() {
     local k
     for k in "$@"; do
         [ -n "${!k:-}" ] || continue
         if knob_on "${k}"; then printf -v "${k}" '%s' 1; else printf -v "${k}" '%s' 0; fi
     done
-}
-knob_gpu() {
-    case "${!1:-}" in
-        ""|[Aa][Uu][Tt][Oo]) printf -v "$1" '%s' auto ;;
-        *) knob_bool "$1" ;;
-    esac
-}
-
-# knob_run_mode: DTFE_RUN_MODE, the drivers' run mode, normalised in place to lower case (tr: bash 3.2 has no ${v,,});
-# empty is auto. gentle, balanced, performance and auto are kept; any other value stops the driver, exit 2 (as an
-# unknown PS_MERGE does). run_mode_resolve calls it on the caller's own value.
-knob_run_mode() {
-    local v
-    v="$(printf '%s' "${DTFE_RUN_MODE:-}" | tr '[:upper:]' '[:lower:]')"
-    case "${v}" in
-        "") v=auto ;;
-        gentle|balanced|performance|auto) ;;
-        *) echo "Error: DTFE_RUN_MODE must be 'gentle', 'balanced', 'performance' or 'auto' (got '${DTFE_RUN_MODE}')." >&2; exit 2 ;;
-    esac
-    DTFE_RUN_MODE="${v}"
 }
 
 # Root of the simulation data, the folder that holds the simulations. Two layouts are recognised (see sim_dir):
@@ -171,17 +84,13 @@ SNAPSHOTS=(99)
 # scripts' default; run_dtfe.sh has its own, 15 (complete at z = 0 on TNG50/100/300; see there).
 # GRID_SIZE 512: the production grids of both estimators (run_ps_pipeline.sh's and the launcher's default too)
 # are 512^3; 1024 would make a bare driver run a grid 8x the production one (~14 GB per field set, a scratch dir
-# needed) that nothing downstream reads. DTFE_GRID_SIZE and DTFE_PADDING, their older second names, are read for one
-# release. CALLER_GRID_SIZE / CALLER_PADDING: what the caller set (empty: nothing), for a script with a default of its
-# own (run_dtfe.sh's padding 15).
-knob GRID_SIZE DTFE_GRID_SIZE
-knob PADDING DTFE_PADDING
+# needed) that nothing downstream reads. CALLER_GRID_SIZE / CALLER_PADDING: what the caller set (empty: nothing), for
+# a script with a default of its own (run_dtfe.sh's padding 15).
 CALLER_GRID_SIZE="${GRID_SIZE:-}"
 CALLER_PADDING="${PADDING:-}"
 GRID_SIZE="${GRID_SIZE:-512}"
 PADDING="${PADDING:-50}"
-# SPACE_CHECK=0 skips the free-space half of the preflight (output_space_problem); DTFE_SPACE_CHECK, its older name
-knob SPACE_CHECK DTFE_SPACE_CHECK
+# SPACE_CHECK=0 skips the free-space half of the preflight (output_space_problem)
 SPACE_CHECK="${SPACE_CHECK:-1}"
 knob_bool SPACE_CHECK
 
@@ -246,7 +155,7 @@ output_space_problem() {
     return 0
 }
 
-# The single-instance lock (shared contract C1): '<prefix>.runlog.lock' is a DIRECTORY made with mkdir
+# The single-instance lock: '<prefix>.runlog.lock' is a DIRECTORY made with mkdir
 # (atomic on every filesystem; macOS has no flock(1)) holding 'pid', the driver's pid, for as long as a
 # driver runs that snapshot into that prefix (two drivers on the same snapshot side by side both get
 # SIGKILLed for memory). A lock whose pid is gone, or now
@@ -313,27 +222,6 @@ run_lock_release() {
     [ -n "$1" ] && [ -d "$1" ] || return 0
     [ "$(cat "$1/pid" 2>/dev/null)" = "$$" ] && rm -rf "$1"
     return 0
-}
-
-# gpu_build_default <repo root> <binary>: 1 when the Makefile built <binary> (./DTFE, ./DTFE-double, ./PS-DTFE,
-# ./PS-DTFE-double) with a GPU backend, else 0 -- the drivers' default for DTFE_GPU ('auto': every
-# production grid runs on the GPU, so a driver run without -m does too). The answer is the stamp the
-# Makefile's mode check leaves in the pair's object folder (o, o_d, o_ps, o_ps_d): '.gpu_mode_metal' (a CPU-only
-# build leaves '.gpu_mode_off'). The binary itself cannot be asked: '--help' lists --gpu in every build and
-# '--version' names no backend. No object folder (binaries copied without their build) = 0. A stale stamp (a binary put
-# back by install_lib.sh after a failed rebuild in another mode) costs nothing: '--gpu' on a CPU build falls back to
-# the CPU with a warning, and the CPU on a GPU build is slower, not different.
-gpu_build_default() {
-    local root="$1" obj
-    case "${2##*/}" in
-        DTFE) obj=o ;;
-        DTFE-double) obj=o_d ;;
-        PS-DTFE) obj=o_ps ;;
-        PS-DTFE-double) obj=o_ps_d ;;
-        *) echo 0; return 0 ;;
-    esac
-    [ -e "${root}/${obj}/.gpu_mode_metal" ] && { echo 1; return 0; }
-    echo 0
 }
 
 # ---- a rerun's left-over files -------------------------------------------------------------------------------
@@ -480,8 +368,7 @@ driver_options() {
 #   --subsamples K -> -n K, --run-mode M -> -R M, --help -> -h; download_snapshots.sh's --groupcats -> -c, --trees -> -t,
 #   --ics -> -i, --api-key K -> -k K (merge_HDF5.py's names for the same products); '--grid=N' -> '-gN'. -S and -R only
 #   carry --sampled and --run-mode to getopts (the usage lines do not offer the letters: the sampled average and the
-#   run mode are asked for by name). --exact-average, the older name of --exact, is still read for one release, with
-#   one 'warning: --exact-average is deprecated, use --exact' line (the binaries' wording).
+#   run mode are asked for by name).
 # Only up to the first argument that is not an option (or '--'), as getopts reads them, and a letter's value is never
 # translated (-s --gpu names a simulation '--gpu'). A long option whose letter the script lacks, or an unknown one,
 # prints the usage and exits 1, as an unknown letter does.
@@ -498,7 +385,7 @@ driver_long_options() {
                 case "${t}" in *=*) val="${t#*=}" ;; esac
                 case "${name}" in
                     --sim) letter=s ;; --sim-dir) letter=d ;; --grid) letter=g ;; --gpu) letter=m ;;
-                    --exact|--exact-average) letter=e ;; --sampled) letter=S ;; --subsamples) letter=n ;; --help) letter=h ;;
+                    --exact) letter=e ;; --sampled) letter=S ;; --subsamples) letter=n ;; --help) letter=h ;;
                     --run-mode) letter=R ;;
                     --groupcats) letter=c ;; --trees) letter=t ;; --ics) letter=i ;; --api-key) letter=k ;;
                     *) letter="" ;;
@@ -516,9 +403,6 @@ driver_long_options() {
                     *)
                         if [ "${t}" != "${name}" ]; then
                             echo "Error: option '${name}' takes no value." >&2; usage; exit 1
-                        fi
-                        if [ "${name}" = "--exact-average" ]; then
-                            echo "warning: --exact-average is deprecated, use --exact" >&2
                         fi
                         _drv_args+=("-${letter}") ;;
                 esac ;;
@@ -545,8 +429,8 @@ average_option() {
     fi
 }
 
-# average_resolve [what]: DTFE_EXACT_AVERAGE, the knob both drivers read, as 1 or 0 by the binaries' own rule (since
-# 2026-11-09 the exact cell average / deposit is the default and the sampled one an option): -e or --sampled first
+# average_resolve [what]: DTFE_EXACT_AVERAGE, the knob both drivers read, as 1 or 0 by the binaries' own rule (the
+# exact cell average / deposit is the default and the sampled one an option): -e or --sampled first
 # (average_option; the two together are refused), then DTFE_EXACT_AVERAGE when the caller set it (_caller_exact, its
 # value before the driver filled in the default; empty is unset, and so is 'auto' in any case, as the binaries read
 # it), then a SUBSAMPLES count (the environment or -n),
@@ -574,42 +458,36 @@ average_resolve() {
     fi
 }
 
-# run_mode_option <mode>: a driver's --run-mode MODE (-R, see driver_long_options): gentle, balanced, performance or
-# auto, in lower case as the binaries take them, kept in _run_mode_flag for run_mode_resolve; another word prints the
-# usage and exits 1.
+# run_mode_option <mode>: a driver's --run-mode MODE (-R, see driver_long_options), passed on to the binary as given:
+# run_mode_args=(--run-mode MODE), the last one given (the binary checks the word: gentle, balanced or performance).
+# 'auto' chooses nothing (run_mode_args empty), as when the option is not given: the binary then reads DTFE_RUN_MODE
+# as the caller set it, else takes its default (balanced; performance inside a SLURM or PBS job).
 run_mode_option() {
-    case "$1" in
-        gentle|balanced|performance|auto) _run_mode_flag="$1" ;;
-        *) echo "Error: --run-mode must be 'gentle', 'balanced', 'performance' or 'auto' (got '$1')." >&2; usage; exit 1 ;;
-    esac
+    if [ "$1" = "auto" ]; then run_mode_args=(); else run_mode_args=(--run-mode "$1"); fi
 }
 
-# run_mode_resolve: DTFE_RUN_MODE, the run mode the drivers pass on every run as '--run-mode MODE' (how hard the run
-# may lean on the machine: gentle, balanced or performance; the binaries' '--full-help --run-mode' says what each sets),
-# so the run log says which ran. --run-mode first (run_mode_option), then DTFE_RUN_MODE when the caller set it
-# (_caller_run_mode, its value before the driver filled in the default; any case, knob_run_mode), then the default;
-# 'auto' in either place chooses nothing and passes on to the next (as the binaries read DTFE_RUN_MODE=auto). The
-# default is performance inside a batch job (SLURM_JOB_ID or PBS_JOBID set: the job's cores are the run's), else
-# balanced (most of the machine, and the display never waits on the GPU). A mode given with --run-mode is the one
-# read: DTFE_RUN_MODE is not checked then, as in the binaries. run_mode_src names what decided (the banner says it).
-# run_ps_pipeline.sh resolves it once and hands the word on as DTFE_RUN_MODE.
-run_mode_resolve() {
-    run_mode_src=""
-    if [ -n "${_run_mode_flag:-}" ] && [ "${_run_mode_flag}" != "auto" ]; then
-        DTFE_RUN_MODE="${_run_mode_flag}"; run_mode_src="--run-mode"
+# device_given, run_mode_given: a driver's banner words for the device and the run mode, what the driver was GIVEN
+# (the binary resolves both; its run log's device and 'run mode' lines say what ran and why).
+# device_given: 'the GPU (-m)' after -m (_gpu_flag; -m exports DTFE_GPU=1, so it wins over the caller's value), else
+# 'DTFE_GPU=<value>' when DTFE_GPU is set and not empty, else "the program's pick".
+# run_mode_given: '--run-mode MODE' when the option named a mode (run_mode_args), else 'DTFE_RUN_MODE=<value>' when
+# that is set and not empty, else "the program's default".
+device_given() {
+    if [ -n "${_gpu_flag:-}" ]; then
+        printf '%s\n' "the GPU (-m)"
+    elif [ -n "${DTFE_GPU:-}" ]; then
+        printf '%s\n' "DTFE_GPU=${DTFE_GPU}"
     else
-        DTFE_RUN_MODE="${_caller_run_mode:-}"
-        knob_run_mode                                   # lower case, empty = auto; another word: exit 2
-        [ "${DTFE_RUN_MODE}" = "auto" ] || run_mode_src="DTFE_RUN_MODE=${_caller_run_mode}"
+        printf '%s\n' "the program's pick"
     fi
-    if [ "${DTFE_RUN_MODE}" = "auto" ]; then
-        if [ -n "${SLURM_JOB_ID:-}" ]; then
-            DTFE_RUN_MODE=performance; run_mode_src="the default inside a batch job (SLURM_JOB_ID)"
-        elif [ -n "${PBS_JOBID:-}" ]; then
-            DTFE_RUN_MODE=performance; run_mode_src="the default inside a batch job (PBS_JOBID)"
-        else
-            DTFE_RUN_MODE=balanced; run_mode_src="the default"
-        fi
+}
+run_mode_given() {
+    if [ -n "${run_mode_args[*]+x}" ]; then
+        printf '%s\n' "${run_mode_args[*]}"
+    elif [ -n "${DTFE_RUN_MODE:-}" ]; then
+        printf '%s\n' "DTFE_RUN_MODE=${DTFE_RUN_MODE}"
+    else
+        printf '%s\n' "the program's default"
     fi
 }
 
@@ -660,40 +538,6 @@ driver_binary() {
         fi
         exit 1
     fi
-}
-
-# gpu_auto_resolve <knob> <binary> <ps|dtfe> <exact 1|0> <mode>: the GPU knob (DTFE_GPU) left at 'auto' (or empty)
-# becomes the device the drivers choose for <binary>'s estimator, its deposit (DTFE_EXACT_AVERAGE, as average_resolve
-# set it) and the run mode (run_mode_resolve), and gpu_auto the note the start banner adds; a knob set to an on or off
-# value is kept as 1 or 0 (knob_gpu) and gpu_auto is empty. On a GPU build (gpu_build_default) 'auto' is the GPU: for
-# PS-DTFE with either deposit in every mode (in performance the drivers' '--gpu-share auto' then deposits part of the
-# partitions on the free cores beside it) and for standard DTFE's exact average in every mode. The one exception is
-# standard DTFE's sampled average, which runs on the CPU in every mode (DTFE_GPU=1 still runs it on the GPU). A
-# CPU-only build runs on the CPU. The binaries pick their device by the same rule when DTFE_GPU is unset, and the
-# drivers export the resolved 0 or 1 to them (run_dtfe.sh, run_ps_dtfe.sh), so the device a banner names is the one
-# the binary runs on. The launcher mirrors this table (python/gui/runspec.py recommended_gpu) -- keep the two in step
-# -- with one difference: it starts a sampled PS-DTFE run below ~1M particles on the CPU (GPU_PAYS_FROM there).
-gpu_auto_resolve() {
-    local knob="$1" bin="$2" est="$3" exact="$4" mode="$5" v what="the GPU"
-    gpu_auto=""
-    knob_gpu "${knob}"
-    [ "${!knob}" = "auto" ] || return 0
-    v="$(gpu_build_default "${REPO_ROOT}" "${bin}")"
-    if [ "${v}" != "1" ]; then
-        printf -v "${knob}" '%s' 0
-        gpu_auto=" (${knob} unset: ${bin#./} is a CPU-only build; ${knob}=0 or 1 chooses)"
-        return 0
-    fi
-    if [ "${est}" = "dtfe" ] && [ "${exact}" != "1" ]; then
-        printf -v "${knob}" '%s' 0
-        gpu_auto=" (${knob} unset: standard DTFE's sampled average runs on the CPU; ${knob}=1 runs it on the GPU)"
-        return 0
-    fi
-    if [ "${est}" = "ps" ] && [ "${exact}" = "1" ] && [ "${mode}" = "performance" ]; then
-        what="the exact deposit on the GPU and the free cores (--gpu-share auto)"
-    fi
-    printf -v "${knob}" '%s' 1
-    gpu_auto=" (${knob} unset: ${bin#./} is a GPU build; ${mode}: ${what}; ${knob}=0 or 1 chooses)"
 }
 
 # time_wrap_resolve: TIME_WRAP, the peak-memory wrapper put in front of the binary, resolved once and OPTIONAL:

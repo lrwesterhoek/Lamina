@@ -55,14 +55,12 @@ def summarize(name, a, b, mask=None, unit=""):
 
 
 def main() -> int:
-    from dtfelib.cli import add_sim_arg, new_parser, deprecated_alias
+    from dtfelib.cli import add_sim_arg, new_parser
     p = new_parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     add_sim_arg(p)                                  # required unless DTFE_SIM names it
     p.add_argument("--snap", type=int, required=True)
     p.add_argument("--prefix-a", default="ps_sampled", help="reference prefix (default ps_sampled)")
     p.add_argument("--prefix-b", default="ps_output", help="candidate prefix (default ps_output)")
-    deprecated_alias(p, "--a", "--prefix-a")
-    deprecated_alias(p, "--b", "--prefix-b")
     p.add_argument("--void-cut", type=float, default=0.2,
                    help="rho/rho_bar below this counts as void interior (default 0.2)")
     args = p.parse_args()

@@ -5,13 +5,10 @@
 #   M1  two identical --gpu runs write byte-identical '.a_den', on one domain and with --partition 2 2 2
 #       --max-concurrent 1 (the float grid differs run to run), and byte-identical '.a_vel'
 #       too: the moment grids are exact fixed-point sums as well (tests/ps_fixed_moments_check.sh covers every
-#       grid; DTFE_GPU_FLOAT_MOMENTS=1 selects their float sums, and this check then skips '.a_vel').
-#       One partition at a time: concurrent partitions merged in completion order ('--ps-merge completion-order';
-#       index order is the default) give float sums that differ in the last bit from run to run on the CPU as
-#       well (--max-concurrent 4: 259 of 32^3 cells at 1e-16 in the double build), which is not the deposit's
-#       doing; the pin keeps the check independent of the merge
-#   M2  DTFE_GPU_FLOAT_MASS=1 (the float grid, kept for A/B) still runs and agrees with the default to 1e-5
-#       of the peak
+#       grid). One partition at a time: concurrent partitions merged in completion order ('--ps-merge
+#       completion-order'; index order is the default) give float sums that differ in the last bit from run to run
+#       on the CPU as well (--max-concurrent 4: 259 of 32^3 cells at 1e-16 in the double build), which is not the
+#       deposit's doing; the pin keeps the check independent of the merge
 #   M3  heavy accumulation (a 128^3 pancake on a 2^3 grid, nSub 1: 1.47e7 tetrahedra, ~1.8e6 deposits per
 #       cell): the GPU box mean equals the CPU's to 3e-6 (measured 8.7e-7 against the single-precision CPU,
 #       1.5e-8 against the double one; the float grid gives 7.8e-6 on the same case, so it would fail here)
@@ -31,9 +28,9 @@ cd "$ROOT" || exit 1
 source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double pair
 precision_require "${PS_BIN}"
 [ -x "${PS_BIN}" ] || { echo "FAIL: ${PS_BIN} is not built"; exit 1; }
-OBJ=o_ps; precision_double && OBJ=o_ps_d
+OBJ="$PS_OBJ"
 require_gpu_backend "$OBJ"                                # SKIP without a Metal build (tests/lib.sh)
-TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}/gpu_mass_check"
+TMP="${DTFE_TEST_TMP}/gpu_mass_check"
 mkdir -p "$TMP"
 SNAP="$TMP/waves.hdf5"; PAN="$TMP/pancake128.hdf5"; DEF="$TMP/waves_deferred.hdf5"
 [ -f "$SNAP" ] || "$PY" tests/generate_ps_test_data.py --out "$SNAP" --n 48 --box 100 --amplitude-factor 1.8 \
@@ -48,13 +45,12 @@ run() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL: $(basenam
             && { echo "FAIL: $(basename "$out") fell back to the CPU (see $out.log)"; exit 1; }; return 0; }
 C=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a --subsamples 2 --gpu)
 P=(--partition 2 2 2 --max-concurrent 1)
-echo ">> M1/M2: --gpu twice (one domain, 2 x 2 x 2 partitions), and once with DTFE_GPU_FLOAT_MASS=1"
+echo ">> M1: --gpu twice (one domain, 2 x 2 x 2 partitions)"
 run "$TMP/s1" "${PS_BIN}" "$SNAP" "$TMP/s1" "${C[@]}"
 grep -q " GPU deposit (" "$TMP/s1.log" || { echo "FAIL: s1 did not run the GPU deposit (see $TMP/s1.log)"; exit 1; }
 run "$TMP/s2" "${PS_BIN}" "$SNAP" "$TMP/s2" "${C[@]}"
 run "$TMP/p1" "${PS_BIN}" "$SNAP" "$TMP/p1" "${C[@]}" "${P[@]}"
 run "$TMP/p2" "${PS_BIN}" "$SNAP" "$TMP/p2" "${C[@]}" "${P[@]}"
-run "$TMP/f1" env DTFE_GPU_FLOAT_MASS=1 "${PS_BIN}" "$SNAP" "$TMP/f1" "${C[@]}"
 echo ">> M3: heavy accumulation, 128^3 pancake on a 2^3 grid, CPU and GPU"
 H=(--grid 2 --periodic --mpc-unit 1 --verbose 2 --field density_a --subsamples 1 --partition 1 1 1)
 run "$TMP/h_cpu" "${PS_BIN}" "$PAN" "$TMP/h_cpu" "${H[@]}"
@@ -76,14 +72,10 @@ def check(tag, ok, msg):
     print(f"  {'PASS' if ok else 'FAIL'} {tag} {msg}")
 def rd(name):
     return np.fromfile(tmp / f"{name}.a_den", dtype=REAL).astype(np.float64)
-floatMoments = any(_os.environ.get(k, "0") not in ("", "0") for k in ("DTFE_GPU_FLOAT_MOMENTS", "PS_GPU_FLOAT_MOMENTS"))   # (the old name: deprecated, still read)
 for a, b, what in (("s1", "s2", "one domain"), ("p1", "p2", "--partition 2 2 2 --max-concurrent 1")):
-    for ext in ("a_den",) + (() if floatMoments else ("a_vel",)):
+    for ext in ("a_den", "a_vel"):
         x, y = (tmp / f"{a}.{ext}").read_bytes(), (tmp / f"{b}.{ext}").read_bytes()
         check("M1", len(x) > 0 and x == y, f"two --gpu runs ({what}): '.{ext}' byte-identical ({len(x)} bytes)")
-s, f = rd("s1"), rd("f1")
-peak = float(np.abs(s - f).max() / np.abs(s).max())
-check("M2", s.size == f.size and peak < 1e-5, f"DTFE_GPU_FLOAT_MASS=1 against the fixed-point grid: peak-rel {peak:.1e} (< 1e-5)")
 import re
 s1log, p1log = (tmp / "s1.log").read_text(), (tmp / "p1.log").read_text()
 ph = re.search(r"field interpolation phases: .*?extraction walk [0-9.]+ s, cost sort [0-9.]+ s, GPU deposit [0-9.]+ s"
@@ -105,7 +97,7 @@ check("M5", m1 is not None and m2 is not None and int(m1.group(1)) >= 2048 and m
 c, g = rd("h_cpu"), rd("h_gpu")
 rel = abs(float(g.mean()) / float(c.mean()) - 1)
 check("M3", c.size == 8 and rel < 3e-6, f"heavy accumulation: GPU box mean {g.mean():.9f}, CPU {c.mean():.9f}, |ratio - 1| {rel:.1e} (< 3e-6)")
-print("RESULT:", "PASS  (the GPU mass grid is reproducible run to run, the float A/B grid agrees, and a heavy "
-      "accumulation keeps the CPU's box mean)" if not fails else f"FAIL ({fails} check(s))")
+print("RESULT:", "PASS  (the GPU mass grid is reproducible run to run, and a heavy accumulation keeps the CPU's "
+      "box mean)" if not fails else f"FAIL ({fails} check(s))")
 sys.exit(1 if fails else 0)
 PYEOF

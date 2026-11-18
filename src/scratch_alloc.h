@@ -43,16 +43,16 @@ namespace ScratchAlloc
     long scratchTotalAllocs();
 
     // ZERO FILLS. std::vector zero-fills what it allocates, and on a scratch mapping those zeros are WRITES: every
-    // page of a fresh, all-zero file turns dirty and goes back to the disk (a 1536^3 run's 290 GB of accumulators
-    // stalled for half an hour on a USB disk, the machine swapping, before any work). Open a ZeroFillScope around
+    // page of a fresh, all-zero file turns dirty and goes back to the disk before any work is done (a large run
+    // stalls on a slow disk, the machine swapping). Open a ZeroFillScope around
     // a fill of ZEROS into a block nothing else writes to before the scope ends -- assign(n, 0), or resize(n, 0) of
     // an EMPTY vector -- and a scratch mapping made in this thread meanwhile is handed out as anonymous memory
     // (zero pages cost next to nothing there) and moved onto its never-written scratch file when the scope ends:
     // the same zeros, nothing written. Thread-local; a no-op where scratch is not armed, and in libDTFE (stub).
     // macOS only: elsewhere a no-op too. The macOS memory compressor keeps those zero pages for next to nothing;
     // Linux keeps every one resident until the remap, the largest grid at once -- the memory --scratch-dir is there
-    // to save (measured, Ubuntu 24.04 in a 2 GB container: a 3.1 GB grid was OOM-killed inside the scope; without
-    // it, its zeros go through the file's page cache, which the kernel writes back and frees).
+    // to save (a grid larger than the memory is OOM-killed inside the scope; without it, its zeros go through the
+    // file's page cache, which the kernel writes back and frees).
     class ZeroFillScope
     {
     public:

@@ -22,7 +22,7 @@
 
 
 /* Volume-averaged grid interpolation, method 2 (= MC sample points chosen inside the
-   grid cell). Method 3 (equidistant sampling) is at the end of the file. */
+   grid cell). */
 #include "triangulation_common.h"
 #include "sample_eval.h"
 
@@ -52,7 +52,6 @@ void interpolateGrid_averaged_2(DT &dt,
             << "\t Done: " << MESSAGE::Flush;
 
 
-    // reserve output fields (zero-filled if the triangulation is undefined)
     size_t reserveSize = 1;
     for (size_t i=0; i<NO_DIM; ++i)
         reserveSize *= nGrid[i];
@@ -125,7 +124,6 @@ void interpolateRedshiftCone_averaged_2(DT &dt,
             << "\t Done:   " << MESSAGE::Flush;
 
 
-    // reserve output fields (zero-filled if the triangulation is undefined)
     size_t reserveSize = 1;
     for (size_t i=0; i<NO_DIM; ++i)
         reserveSize *= nGrid[i];
@@ -185,7 +183,6 @@ void interpolateUserSampling_averaged_2(DT &dt,
             << "\t Done:   " << MESSAGE::Flush;
 
 
-    // reserve output fields (zero-filled if the triangulation is undefined)
     if ( not out.reserve( samples.size(), dt ) ) return;     // no interpolation possible without cells
 
 
@@ -224,87 +221,3 @@ void interpolateUserSampling_averaged_2(DT &dt,
     } );
     padding.write( out.field, userOptions );  // report samples whose values may be wrong (incomplete tessellation)
 }
-
-
-
-
-// Volume-averaged grid interpolation (method 3): averages the field over NN equidistant (not random)
-// points laid out on a regular sub-grid inside each grid cell.
-void interpolateGrid_averaged_3(DT &dt,
-                                User_options &userOptions,
-                                Quantities *quantities)
-{
-    size_t *nGrid = &(userOptions.gridSize[0]); // grid size along each axis
-    int const NN = userOptions.noPoints;        // equidistant samples per grid cell
-    int const n = rootN( NN, NO_DIM );          // equidistant samples along each axis
-    Box boxCoordinates = userOptions.region;    // box region of interest
-    vector<Real> boxLength;                     // box size along each direction
-    for (size_t i=0; i<NO_DIM; ++i)
-        boxLength.push_back( boxCoordinates[2*i+1]-boxCoordinates[2*i] );
-
-    SampleOutputs out( userOptions.aField, quantities );   // output field vectors (no velocity_std)
-
-
-    MESSAGE::Message message( userOptions.verboseLevel );
-    message << "\nComputing interpolation of the fields volume averaged over the sampling cell on a regular "
-            << MESSAGE::printElements( nGrid, NO_DIM, "*" ) << " grid in the region "
-            << boxCoordinates.print()
-            << ". The volume average is done using " << NN << " equidistant sampling points in each grid cell.\n"
-            << "\t Done: " << MESSAGE::Flush;
-
-
-    // reserve output fields (zero-filled if the triangulation is undefined)
-    size_t reserveSize = 1;
-    for (size_t i=0; i<NO_DIM; ++i)
-        reserveSize *= nGrid[i];
-    if ( not out.reserve( reserveSize, dt ) ) return;     // no interpolation possible without cells
-
-
-    Real dx[NO_DIM];        // grid spacing along each axis
-    for (size_t i=0; i<NO_DIM; ++i)
-        dx[i] = boxLength[i] / nGrid[i];
-
-
-    // equidistant sample offsets relative to the grid-cell center
-    std::vector<Real> samplePosition_buf(NN * NO_DIM);
-    Real (*samplePosition)[NO_DIM] = reinterpret_cast<Real(*)[NO_DIM]>(samplePosition_buf.data());
-    for (int i1=0; i1<n; ++i1)
-        for (int i2=0; i2<n; ++i2)
-#if NO_DIM==2
-        {
-            int index = i1*n + i2;
-#endif
-#if NO_DIM==3
-            for (int i3=0; i3<n; ++i3)
-            {
-                int index = i1*n*n + i2*n + i3;
-                samplePosition[index][2] = (i3+0.5)*dx[2]/n - dx[2]/2.;
-#endif
-                samplePosition[index][0] = (i1+0.5)*dx[0]/n - dx[0]/2.;
-                samplePosition[index][1] = (i2+0.5)*dx[1]/n - dx[1]/2.;
-            }
-
-
-    PaddingReport padding;
-    Cell_handle previous;   // the cell centre's Delaunay cell: every sample's walk starts there
-    forEachGridCell( boxCoordinates, dx, nGrid, message, [&](Real const *c, size_t i, size_t j, size_t k)
-    {
-#if NO_DIM==2
-        previous = locateCell( dt, Point(c[0],c[1]), previous );
-#elif NO_DIM==3
-        previous = locateCell( dt, Point(c[0],c[1],c[2]), previous );
-#endif
-        // loop over the equidistant sample points in this grid cell
-        averageOverSamples( dt, out, padding, previous, NN, [&](int w, Point &samplePoint)
-        {
-#if NO_DIM==2
-            samplePoint = Point( c[0] + samplePosition[w][0], c[1] + samplePosition[w][1] );
-#elif NO_DIM==3
-            samplePoint = Point( c[0] + samplePosition[w][0], c[1] + samplePosition[w][1], c[2] + samplePosition[w][2] );
-#endif
-        }, gridCellIndex( i,j,k, nGrid ) );
-    } );
-    padding.write( out.field, userOptions );  // report cells whose values may be wrong (incomplete tessellation)
-}
-
-

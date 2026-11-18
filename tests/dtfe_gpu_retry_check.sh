@@ -12,9 +12,8 @@
 #   E1  exact sums: two fault-free runs with different opening chunks (4096 and 65536 work items) write
 #       byte-identical '.a_den', '.a_vel', '.a_velGrad' -- the item kernel over 9 sub-domains whose batches race
 #       for the device, the per-tetrahedron kernel (DTFE_GPU_ITEMS=0), and --exact
-#   E2  DTFE_GPU_FLOAT_GRIDS=1 (the float atomics, kept for A/B) runs the float sums
-#       and agrees with the default to 1e-5 of the peak; the default agrees with the CPU's box mean to 1e-5 of
-#       the peak (tests/dtfe_metal_check.sh is the full CPU parity suite)
+#   E2  the default agrees with the CPU's box mean to 1e-5 of the peak (tests/dtfe_metal_check.sh is the full CPU
+#       parity suite)
 #   R1  the item kernel in one batch (--max-concurrent 1), an 'innocent victim' fault at buffer 3: the batch
 #       resumes from the checkpoint at the same pace (250 ms) and its three grids are byte-identical to E1's
 #       fault-free one-batch run
@@ -50,9 +49,9 @@ cd "$ROOT" || exit 1
 source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double pair
 precision_require "${DTFE_BIN}"
 [ -x "${DTFE_BIN}" ] || { echo "FAIL: ${DTFE_BIN} is not built"; exit 1; }
-OBJ=o; precision_double && OBJ=o_d
+OBJ="$DTFE_OBJ"
 require_gpu_backend "$OBJ"                                # SKIP without a Metal build (tests/lib.sh)
-TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}/dtfe_gpu_retry_check"
+TMP="${DTFE_TEST_TMP}/dtfe_gpu_retry_check"
 mkdir -p "$TMP"
 SNAP="$TMP/waves.hdf5"
 [ -f "$SNAP" ] || "$PY" tests/generate_ps_test_data.py --out "$SNAP" --n 48 --box 100 --amplitude-factor 1.8 \
@@ -67,11 +66,11 @@ run() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL: $(basenam
 # 256 items, which the exact sums need) and a checkpoint every 2 buffers: the fault at buffer 3 then lands after
 # the checkpoint at buffer 2
 export DTFE_GPU_CHUNK=4096 DTFE_GPU_CHECKPOINT_CHUNKS=2
-unset DTFE_GPU_FAULT_AT DTFE_GPU_FLOAT_GRIDS DTFE_GPU_ITEMS
+unset DTFE_GPU_FAULT_AT DTFE_GPU_ITEMS
 C=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a gradient_a --partition 1 1 1)
 ONE=(--max-concurrent 1)                 # one sub-domain: one batch, so 'buffer k' is a buffer of that batch
-# The kernels of E1's item and per-tet runs, E2, R1, R3, R7 and N1 are the Monte-Carlo ones, so those runs pass
-# '--sampled' (the exact average is the default).
+# The kernels of E1's item and per-tet runs, R1, R3, R7 and N1 are the Monte-Carlo ones, so those runs and E2's CPU
+# run pass '--sampled' (the exact average is the default).
 # C and P name no mode: the exact runs (E1's x, R2, R4) share C and add '--exact'.
 echo ">> E1: two fault-free runs with different opening chunks (item kernel over 9 sub-domains, per-tet kernel, exact)"
 run "$TMP/a1" env DTFE_GPU_TIMING=1 "${DTFE_BIN}" "$SNAP" "$TMP/a1" "${C[@]}" --gpu --sampled
@@ -80,9 +79,7 @@ run "$TMP/k1" env DTFE_GPU_ITEMS=0 "${DTFE_BIN}" "$SNAP" "$TMP/k1" "${C[@]}" --g
 run "$TMP/k2" env DTFE_GPU_ITEMS=0 DTFE_GPU_CHUNK=25088 "${DTFE_BIN}" "$SNAP" "$TMP/k2" "${C[@]}" --gpu --sampled
 run "$TMP/x1" env DTFE_GPU_TIMING=1 "${DTFE_BIN}" "$SNAP" "$TMP/x1" "${C[@]}" --gpu --exact
 run "$TMP/x2" env DTFE_GPU_CHUNK=1024 "${DTFE_BIN}" "$SNAP" "$TMP/x2" "${C[@]}" --gpu --exact
-echo ">> E2: the float sums (A/B) and the CPU"
-run "$TMP/f1" env DTFE_GPU_FLOAT_GRIDS=1 DTFE_GPU_TIMING=1 \
-    "${DTFE_BIN}" "$SNAP" "$TMP/f1" "${C[@]}" --gpu --sampled
+echo ">> E2: the CPU"
 "${DTFE_BIN}" "$SNAP" "$TMP/c1" "${C[@]}" --sampled > "$TMP/c1.log" 2>&1 || { echo "FAIL: the CPU run (see $TMP/c1.log)"; exit 1; }
 echo ">> R1: one batch, without and with an innocent-victim fault at buffer 3"
 run "$TMP/t0" "${DTFE_BIN}" "$SNAP" "$TMP/t0" "${C[@]}" "${ONE[@]}" --gpu --sampled
@@ -155,12 +152,6 @@ L = log("x1")
 nx, nw = len(re.findall(r"DTFE Metal timing: exact kernel", L)), L.count("run-wide 128-bit fixed-point sums")
 check("N2", nx > 0 and nw == nx,
       f"--exact sums in the run-wide 128-bit words: {nw} of {nx} batch timing lines of x1 say so")
-L = log("f1")
-check("E2", "float sums" in L and "fixed-point sums" not in L,
-      "DTFE_GPU_FLOAT_GRIDS=1 runs the float atomics (the timing lines say 'float sums')")
-for ext in GRIDS:
-    p = peak("a1", "f1", ext)
-    check("E2", p < 1e-5, f"float sums against the exact ones: '.{ext}' peak-rel {p:.1e} (< 1e-5)")
 for ext in ("a_den", "a_vel"):
     c, g = rd("c1", ext), rd("a1", ext)
     m = abs(float(c.mean()) - float(g.mean())) / max(float(np.abs(c).max()), 1e-300)
@@ -184,7 +175,7 @@ check("R1", "resuming from the checkpoint at thread" in log("t1"),
       "the retry starts from a periodic checkpoint, not from the batch's start")
 L = log("y1")
 check("R4", "3 failures of the same chunk" in L and "gave up" in L and "using the CPU interpolation" in L
-      and "1 sub-domain deposit(s) asked for the GPU and ran on the CPU instead" in L,
+      and "1 sub-domain deposit(s) were meant for the GPU and ran on the CPU instead" in L,
       "persistent fault: 3 failures of the same chunk, the CPU interpolation, and the run's count of such sub-domains")
 p = peak("e0", "y1", "a_den")
 check("R4", p < 1e-4, f"persistent fault: the CPU's '.a_den' agrees with the GPU's to {p:.1e} of the peak (< 1e-4)")

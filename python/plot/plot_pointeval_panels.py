@@ -8,9 +8,6 @@ the continuous piecewise-linear field, the maps are grid-free: resolution is set
 pixel count of the plane file, limited only by the tessellation itself.
 
     python3 plot/plot_pointeval_panels.py --root <PS-DTFE output root> --plane plane_100_99.json
-
-The old spellings --prefix (now --root: a full output root, not a bare prefix), --output, a comma-joined --panels
-and --project mean (now slab) are read with a warning for one release.
 """
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
@@ -24,7 +21,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import BoundaryNorm, ListedColormap, LogNorm
 
-from dtfelib.cli import new_parser, add_out_arg, add_list_arg, deprecated_alias, choice_type
+from dtfelib.cli import new_parser, add_out_arg, add_list_arg
 
 PANELS = ("density", "sheet", "streams")
 
@@ -42,7 +39,7 @@ def load_planes(prefix: Path, side: dict):
     if den.size != n or streams.size != n:
         raise SystemExit(f"{prefix}.pts_* hold {den.size}/{streams.size} points, but the "
                          f"sidecar describes {n} ({shape}{f', {k}x{k} sub-samples per pixel' if k > 1 else ''}); "
-                         f"wrong --plane or --prefix?")
+                         f"wrong --plane or --root?")
     den, streams = den.reshape(shape), streams.reshape(shape)
     if k > 1:
         den = den.reshape(planes, nv, k, nu, k).mean(axis=(2, 4))
@@ -64,13 +61,11 @@ def main() -> None:
     p = new_parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--root", dest="prefix", required=True, type=Path,
                    help="output root passed to the binary (reads <root>.pts_den/.pts_streams)")
-    deprecated_alias(p, "--prefix", "--root")
     p.add_argument("--plane", required=True, type=Path, help="sidecar JSON from tools/make_image_plane.py")
     add_out_arg(p, help="image path (default <root>_pointeval_panels.png)", metavar="PNG")
     add_list_arg(p, "--panels", default=list(PANELS), metavar="PANEL",
                  help=f"space-separated, from {' '.join(PANELS)} (default all three)")
-    p.add_argument("--project", type=choice_type("--project", ("plane", "slab"), old={"mean": "slab"}),
-                   default="plane", metavar="{plane,slab}",
+    p.add_argument("--project", choices=("plane", "slab"), default="plane",
                    help="density panels: 'plane' (default) = the central plane, a crisp "
                         "cross-section of the continuous field; 'slab' = average over all "
                         "sampled planes -- a smooth projection ONLY with many planes "

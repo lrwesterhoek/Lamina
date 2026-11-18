@@ -21,7 +21,7 @@ precision_require "${BIN}"
 if [ "${1:-}" != "--no-build" ] && ! precision_double; then
     make PS-DTFE $(cat o_ps/.build_mode 2>/dev/null || true) >/dev/null
 fi
-TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}/serve_split"; rm -rf "$TMP"; mkdir -p "$TMP"
+TMP="${DTFE_TEST_TMP}/serve_split"; rm -rf "$TMP"; mkdir -p "$TMP"
 echo "============================================================"
 echo " composite server split check"
 echo "============================================================"
@@ -41,31 +41,31 @@ serve() {  # serve <cache>: the auto split of a.hdf5's server; prints "<n> <reas
     echo "$n|$why|$(grep -a -c 'built,' "$TMP/srv.log")"
 }
 fails=0
-check() { if [ "$1" = "1" ]; then echo "   PASS  $2"; else echo "   FAIL  $2"; fails=$((fails+1)); fi; }
+# check_yes <1 = pass> <text> (it counts a failure in fails): tests/lib.sh
 
 mkdir -p "$TMP/c_empty"
 IFS='|' read -r nA whyA builtA <<<"$(serve "$TMP/c_empty")"
-check "$([ "${nA:-0}" -ge 3 ] && [[ "$whyA" == nothing\ cached* ]] && echo 1)" \
+check_yes "$([ "${nA:-0}" -ge 3 ] && [[ "$whyA" == nothing\ cached* ]] && echo 1)" \
       "A nothing cached: a split of ${nA}^3 (${whyA}), ${builtA} partitions built"
 
 mkdir -p "$TMP/c_same"; seed "$TMP/c_same" "$TMP/a.hdf5" 3
 IFS='|' read -r nB whyB builtB <<<"$(serve "$TMP/c_same")"
-check "$([ "$nB" = 3 ] && [ "$builtB" = 0 ] && [[ "$whyB" == *fully\ in\ the\ tessellation\ cache* ]] && echo 1)" \
+check_yes "$([ "$nB" = 3 ] && [ "$builtB" = 0 ] && [[ "$whyB" == *fully\ in\ the\ tessellation\ cache* ]] && echo 1)" \
       "B this snapshot's 3^3 set cached: reused (${nB}^3, ${builtB} partitions built)"
 
 mkdir -p "$TMP/c_other"; seed "$TMP/c_other" "$TMP/b.hdf5" 3
 IFS='|' read -r nC whyC builtC <<<"$(serve "$TMP/c_other")"
-check "$([ "$nC" = "$nA" ] && [[ "$whyC" == nothing\ cached* ]] && echo 1)" \
+check_yes "$([ "$nC" = "$nA" ] && [[ "$whyC" == nothing\ cached* ]] && echo 1)" \
       "C another snapshot's 3^3 set: ignored (${nC}^3, ${whyC})"
 
 mkdir -p "$TMP/c_coarse"; seed "$TMP/c_coarse" "$TMP/a.hdf5" 2
 IFS='|' read -r nD whyD builtD <<<"$(serve "$TMP/c_coarse")"
-check "$([ "$nD" = "$nA" ] && [[ "$whyD" == *too\ coarse* ]] && echo 1)" \
+check_yes "$([ "$nD" = "$nA" ] && [[ "$whyD" == *too\ coarse* ]] && echo 1)" \
       "D this snapshot's 2^3 set, too coarse for the budget: not reused (${nD}^3, ${whyD})"
 
 mkdir -p "$TMP/c_pad0"; seed "$TMP/c_pad0" "$TMP/a.hdf5" 3 --ps-lagrangian-padding 0
 IFS='|' read -r nE whyE builtE <<<"$(serve "$TMP/c_pad0")"
-check "$([ "$nE" = "$nA" ] && [[ "$whyE" == nothing\ cached* ]] && echo 1)" \
+check_yes "$([ "$nE" = "$nA" ] && [[ "$whyE" == nothing\ cached* ]] && echo 1)" \
       "E this snapshot's 3^3 set under the Eulerian padding ('--ps-lagrangian-padding 0'): ignored (${nE}^3, ${whyE})"
 
 echo "------------------------------------------------------------"

@@ -268,7 +268,7 @@ def t_caustic_script_null_text():
     b = types.SimpleNamespace(**dict(vars(a), null_draws=10, null_seed=2, min_component=500, min_component_mass=1e-4,
                                    sheet_min_density=1.0))
     assert pcs.skeleton_tag(b, "ps_output.", "0.8,0.9,1.0,1.1,1.2") == "_null10_seed2_min500_minm0.0001_dens1"
-    c = types.SimpleNamespace(**dict(vars(b), voids=False))                  # the void options count only with --voids
+    c = types.SimpleNamespace(**dict(vars(b), voids=False))                  # the void options count only with --per-void
     assert pcs.skeleton_tag(c, "ps_output.", "0.8,0.9,1.0,1.1,1.2") == ""
 
 

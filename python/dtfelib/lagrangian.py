@@ -13,7 +13,7 @@ are found again, by ParticleID, at the next, and the voids that hold them there 
     (lk,), _ = L.link_stream([a], L.combined_path(sim, 67), *L.void_spheres(cat67, 512, pool, r_cells),
                              n_sample=rows67.size)                # the same link, b never held (big boxes)
 
-DEFINITIONS (the shared contract C6; each threshold is a module constant below):
+DEFINITIONS (each threshold is a module constant below):
   * the voids FOLLOWED (the progenitors, and the only voids a chain continues through) are the DISTINCT
     well-resolved voids with a measured radius R_v (catalog.distinct_mask, the profile / abundance sample):
     neighbouring minima of one void are not linked as voids of their own;
@@ -39,7 +39,7 @@ DEFINITIONS (the shared contract C6; each threshold is a module constant below):
   member pairs are 1.2-1.8x the particles), so two overlapping progenitors that share their matter both pass 50% to
   one descendant: MERGE is over-counted there against a partition of the matter. EXCLUSIVE members
   (void_members(..., exclusive=True); plot_void_fate.py --exclusive) give each particle to the sphere whose centre is
-  nearest in units of its R_v: a partition, not C6's literal definition, so it is an option. Of the pool, a particle
+  nearest in units of its R_v: a partition, not the literal definition, so it is an option. Of the pool, a particle
   inside any followed sphere goes to a followed void (so the progenitors' members are the same as without the pool);
   only the matter outside every followed sphere is shared out among the other minima.
 
@@ -105,7 +105,7 @@ FATE_MAX_SIGMA = 15.0
 # pieces (all pairs of the chunk without 'exclusive') -- so the count is capped by the memory the other programs
 # leave (_available_bytes) at the start of each pass: DTFE_FATE_WORKERS overrides (1 = serial).
 FATE_WORKERS_MAX = 4
-_WORKER_BYTES_PER_PARTICLE = {True: 160, False: 400}    # exclusive / C6 members, per particle of a CHUNK
+_WORKER_BYTES_PER_PARTICLE = {True: 160, False: 400}    # exclusive / overlapping members, per particle of a CHUNK
 
 
 def _available_bytes():
@@ -304,7 +304,7 @@ class _PairCollector:
 
 
 def void_members(particles, centres, radii, exclusive: bool = False, n_sample: int | None = None) -> MemberSet:
-    """Members (C6: within R_v of the centre, periodic) of every sphere, from an iterable of (ids, frac) chunks --
+    """Members (within R_v of the centre, periodic) of every sphere, from an iterable of (ids, frac) chunks --
     iter_particles(path), or a single in-memory (ids, frac) pair in a list. exclusive: a particle
     inside several spheres belongs only to the one whose centre is nearest in units of its R_v -- a partition of
     the matter, so overlapping progenitors cannot both pass 50% of the same particles (EXCLUSIVE below). 'n_sample':
@@ -328,9 +328,9 @@ def void_members(particles, centres, radii, exclusive: bool = False, n_sample: i
 def _chunk_pairs(particles, centres, radii, exclusive: bool, n_s: int, with_index: bool = False, workers=None,
                  post=None):
     """Per chunk of 'particles' (a path or an iterable of (ids, frac)): ([ids pieces], [void pieces], particles in
-    the chunk) -- the member pairs of the chunk's particles (C6, or the 'exclusive' partition with void_members' n_s
-    rule), in the order void_members gathers them: one piece per sphere in sphere order (exclusive: one
-    piece, by id). Shared by void_members and the streamed link, so both see the same pairs.
+    the chunk) -- the member pairs of the chunk's particles (the module's DEFINITIONS, or the 'exclusive' partition
+    with void_members' n_s rule), in the order void_members gathers them: one piece per sphere in sphere order
+    (exclusive: one piece, by id). Shared by void_members and the streamed link, so both see the same pairs.
     with_index: also ([chunk-local particle index pieces], the chunk's ids), so the streamed link looks every
     PARTICLE up once instead of every pair (~7 pairs per particle in TNG100's pool).
     workers: chunks made at once in threads (None: fate_workers(exclusive)), handed out in chunk order,
@@ -609,7 +609,7 @@ def _top_two(prog, desc, f, k_a):
 
 
 def classify(lk: Link, survive_frac: float = SURVIVE_FRAC, split_frac: float = SPLIT_FRAC) -> dict:
-    """Per progenitor (C6, over the whole descendant pool): 'cls' (code into CLASSES), 'desc' (main descendant pool
+    """Per progenitor (over the whole descendant pool): 'cls' (code into CLASSES), 'desc' (main descendant pool
     index, -1 if none: the followed void with the largest share when that share is >= survive_frac, else the pool
     void with the largest share, also for a split), 'in_sample' (that descendant is followed: its pool index is its
     sample index at the later snapshot), 'f_desc' (its share), 'f_max' and 'f_second' (the two largest shared

@@ -1,27 +1,25 @@
 #!/bin/bash
 # --grid-window: a window run EQUALS the full run's window cells. Periodic crossed waves, full run at
 # grid 64 vs window runs of a sub-box -- one straddling the periodic seam -- for the sampled deposit
-# (nSub 2), the exact deposit, --ps-vertex-mass --ps-volume-weighted --ps-caustics, --ps-halo-release, and a
+# (nSub 2), the exact deposit, --ps-vertex-mass --ps-caustics, --ps-halo-release, and a
 # --partition 2 2 2 split (held to the partitioned full run: partitions differ from the single
 # triangulation by summation order). Then the launcher's zoom shape: an anisotropic 256x256x16 grid
 # windowed to one coarse slice, exact deposit, with the wall times of both runs.
 # Contracts: the SAMPLED deposit counts a straddling tet's samples over its whole bounding box, so the CPU window has
-# the full run's values. By default a window pass takes ITS OWN fixed-point units (from the tets that reach the
-# window, the same on the GPU and the CPU: ps_interpolation.cc fxBoundWalk), so a share below ~2^-38 of the bound can
-# round to another last unit than in the full run (peak-relative < 1e-8; measured 1e-10, in the velocity gradient
-# only, on these waves); the double build's CPU deposit sums in doubles. In both the sampled CPU window is held to
-# peak-relative 1e-8 (its counts and masks still identical bytes). Under DTFE_PS_RUN_UNITS=1 (the single build) the
-# bytes are identical in every grid: a window run then sums in the full run's fixed-point units (src/fixed_units.h
-# RunUnits, one unit per grid for the whole run; a run started from a cached globals record, version 2, takes the full
-# run's moments from it), so every share rounds to the same integer as in the full run. The EXACT deposit clips only
-# the window's cells and normalizes each tet by the larger of its pieces' summed weight and its whole weight, the full
-# run by the summed weight, so its moments agree to float rounding (the counts, masks and multiplicity are still
-# identical bytes); the GPU takes the usual parity class. The cache's globals record is version 2 ('globals=2', with
-# the moments of the run-wide units), and under DTFE_PS_RUN_UNITS=1 a cached window run prints the same 'fixed-point
-# units (run-wide):' line as the uncached one (by default its 'none' line: its passes take units of their own).
+# the full run's values. A window pass takes ITS OWN fixed-point units (from the tets that reach the window, the same
+# on the GPU and the CPU: ps_interpolation.cc fxBoundWalk), so a share below ~2^-38 of the bound can round to another
+# last unit than in the full run (peak-relative < 1e-8; measured 1e-10, in the velocity gradient only, on these
+# waves); the double build's CPU deposit sums in doubles. In both the sampled CPU window is held to peak-relative
+# 1e-8 (its counts and masks still identical bytes). The EXACT deposit clips only the window's cells and normalizes
+# each tet by the larger of its pieces' summed weight and its whole weight, the full run by the summed weight, so its
+# moments agree to float rounding (the counts, masks and multiplicity are still identical bytes); the GPU takes the
+# usual parity class. The cache's globals record is version 2 ('globals=2'), and neither a cached nor an uncached
+# window run prints a 'fixed-point units (run-wide):' line (PS-DTFE's passes take units of their own).
 # GPU builds: a GPU window and the CPU window of the same pass (--partition 2 2 2, --verbose 3) take the same
 # fixed-point units -- their 'fixed-point units' lines, one per pass, are equal -- and their grids agree to the GPU
-# parity class (the kernels form their shares in float). With
+# parity class (the kernels form their shares in float). A window run split 2x2x2 ('--max-concurrent 2', two threads,
+# '--exact', density_a velocity_a) killed after 2 partitions (DTFE_TEST_EXIT_AFTER_PARTITIONS) and resumed with
+# '--resume' writes the uninterrupted window run's bytes. With
 # '--tessellation-cache', a window run skips the partitions whose occupancy maps (written by a composite server or by an
 # earlier batch run) never reach the window: identical bytes to the uncached run, the skip count reported. The units
 # comparison runs in the single build only (the double build's CPU sums are doubles). --no-build is accepted and
@@ -33,11 +31,9 @@ cd "$ROOT" || exit 1
 source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double pair
 precision_require "$PS_BIN"
 [ -x "$PS_BIN" ] || { echo "FAIL: $PS_BIN is not built"; exit 1; }
-# PS-DTFE sums in the run-wide units only with DTFE_PS_RUN_UNITS=1 (and not under DTFE_RUN_UNITS_LEGACY=1)
-ps_units_wide() { [ "${DTFE_PS_RUN_UNITS:-0}" != "0" ] && [ "${DTFE_RUN_UNITS_LEGACY:-0}" = "0" ]; }
-OBJ_PS=o_ps; precision_double && OBJ_PS=o_ps_d     # the build whose GPU mode counts
+OBJ_PS="$PS_OBJ"     # the build whose GPU mode counts
 GPU=0; [ -d $OBJ_PS ] && [ ! -f $OBJ_PS/.gpu_mode_off ] && ls $OBJ_PS/.gpu_mode_* >/dev/null 2>&1 && GPU=1
-TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}/window_check"
+TMP="${DTFE_TEST_TMP}/window_check"
 mkdir -p "$TMP"
 SNAP="$TMP/waves.hdf5"
 [ -f "$SNAP" ] || "$PY" tests/generate_ps_test_data.py --out "$SNAP" --n 32 --box 100 --seed 9 --crossed-waves >/dev/null || { echo "FAIL data gen"; exit 1; }
@@ -58,8 +54,8 @@ for mode in sampled exact; do
     run "$TMP/${mode}_seam"     "$PS_BIN" "$SNAP" "$TMP/${mode}_seam"     --grid $G "${BASE[@]}" "${EXTRA[@]}" "${WB[@]}"
     run "$TMP/${mode}_fullpart" "$PS_BIN" "$SNAP" "$TMP/${mode}_fullpart" --grid $G "${BASE[@]}" "${EXTRA[@]}" --partition 2 2 2
     run "$TMP/${mode}_part"     "$PS_BIN" "$SNAP" "$TMP/${mode}_part"     --grid $G "${BASE[@]}" "${EXTRA[@]}" --partition 2 2 2 "${WA[@]}"
-    run "$TMP/${mode}_fullvm"   "$PS_BIN" "$SNAP" "$TMP/${mode}_fullvm"   --grid $G "${BASE[@]}" "${EXTRA[@]}" --ps-vertex-mass --ps-volume-weighted
-    run "$TMP/${mode}_winvm"    "$PS_BIN" "$SNAP" "$TMP/${mode}_winvm"    --grid $G "${BASE[@]}" "${EXTRA[@]}" --ps-vertex-mass --ps-volume-weighted "${WA[@]}"
+    run "$TMP/${mode}_fullvm"   "$PS_BIN" "$SNAP" "$TMP/${mode}_fullvm"   --grid $G "${BASE[@]}" "${EXTRA[@]}" --ps-vertex-mass
+    run "$TMP/${mode}_winvm"    "$PS_BIN" "$SNAP" "$TMP/${mode}_winvm"    --grid $G "${BASE[@]}" "${EXTRA[@]}" --ps-vertex-mass "${WA[@]}"
     # --ps-halo-release with a window: a released tetrahedron deposits whole at its centroid cell,
     # which the window keeps or drops like any cell (D=2 releases plenty on these waves)
     run "$TMP/${mode}_fullhr"   "$PS_BIN" "$SNAP" "$TMP/${mode}_fullhr"   --grid $G "${BASE[@]}" "${EXTRA[@]}" --ps-halo-release 2
@@ -75,13 +71,33 @@ for mode in sampled exact; do
         # --ps-vertex-mass on the GPU computes the vertex degrees lazily for the window's tetrahedra:
         # the self-check compares every one with the full pass
         DTFE_DEBUG_DEGREES=1 "$PS_BIN" "$SNAP" "$TMP/${mode}_degchk" --grid $G "${BASE[@]}" "${EXTRA[@]}" "${WA[@]}" \
-            --gpu --ps-vertex-mass --ps-volume-weighted > "$TMP/${mode}_degchk.log" 2>&1 \
+            --gpu --ps-vertex-mass > "$TMP/${mode}_degchk.log" 2>&1 \
             || { echo "FAIL: the lazy-degree self-check failed (see $TMP/${mode}_degchk.log)"; exit 1; }
         nchk=$(grep -c "differ" "$TMP/${mode}_degchk.log"); nbad=$(grep "differ" "$TMP/${mode}_degchk.log" | grep -vc ", 0 differ")
         [ "$nchk" -ge 1 ] && [ "$nbad" = 0 ] && echo "  PASS $mode: the GPU window's lazy vertex degrees equal the full pass ($nchk checks)" \
             || { echo "  FAIL $mode: lazy vertex degrees ($nchk checks, $nbad differ)"; exit 1; }
     fi
 done
+echo ">> a window run split 2x2x2 (--max-concurrent 2, two threads, exact deposit): killed after 2 partitions, resumed"
+# its own options ('--max-concurrent 2' in place of BASE's 1); a stale checkpoint or output of an earlier pass of the
+# suite would stand in for this one's, so they go first
+RW=(--input-format 105 --mpc-unit 1 --periodic --grid $G --partition 2 2 2 --max-concurrent 2 --exact "${WA[@]}"
+    --field density_a velocity_a)
+rm -rf "$TMP"/winres_ref.* "$TMP"/winres.*
+run "$TMP/winres_ref" env OMP_NUM_THREADS=2 "$PS_BIN" "$SNAP" "$TMP/winres_ref" "${RW[@]}"
+# (the shell's own 'Killed: 9' line is not output)
+{ env OMP_NUM_THREADS=2 DTFE_TEST_EXIT_AFTER_PARTITIONS=2 "$PS_BIN" "$SNAP" "$TMP/winres" "${RW[@]}" \
+    > "$TMP/winres_killed.log" 2>&1; } 2>/dev/null
+rk=$?
+nk="$(merged_count "$TMP/winres.runlog.checkpoint" 2>/dev/null)"
+[ "$rk" = 137 ] && [ "${nk:-0}" = 2 ] && [ ! -e "$TMP/winres.a_den" ] \
+    && echo "  PASS the window run killed after 2 partitions (exit $rk) left a checkpoint of 2 of 8 and no output" \
+    || { echo "  FAIL the killed window run: exit $rk, ${nk:-no} merged partitions in its checkpoint (see $TMP/winres_killed.log)"; exit 1; }
+run "$TMP/winres" env OMP_NUM_THREADS=2 "$PS_BIN" "$SNAP" "$TMP/winres" "${RW[@]}" --resume
+grep -q -- "--resume: 2 of " "$TMP/winres.log" && [ ! -e "$TMP/winres.runlog.checkpoint" ] \
+    && same "$TMP/winres_ref" "$TMP/winres" \
+    && echo "  PASS '--resume' read the 2 partitions back: every output the uninterrupted window run's bytes, the checkpoint removed" \
+    || { echo "  FAIL the resumed window run differs from the uninterrupted one (see $TMP/winres.log)"; exit 1; }
 echo ">> the launcher's zoom shape: grid 256x256x16, exact deposit, window = cells [64,192)x[64,192)x[8,9) (one coarse slice)"
 run "$TMP/zoom_full" "$PS_BIN" "$SNAP" "$TMP/zoom_full" --grid 256 256 16 "${BASE[@]}" --exact
 run "$TMP/zoom_win"  "$PS_BIN" "$SNAP" "$TMP/zoom_win"  --grid 256 256 16 "${BASE[@]}" --exact --grid-window 25 75 25 75 50 56.25
@@ -92,7 +108,7 @@ if [ $GPU = 1 ]; then
     # sums (no units to compare)
     precision_double && echo ">> GPU vs CPU window units: SKIP (the double build's CPU sums are doubles)"
     precision_double || echo ">> GPU vs CPU window: the same fixed-point units per pass (--partition 2 2 2, --verbose 3)"
-    precision_double || for v in "sampled:--subsamples 2" "exact:--exact --ps-vertex-mass --ps-volume-weighted" "hr:--ps-halo-release 2"; do
+    precision_double || for v in "sampled:--subsamples 2" "exact:--exact --ps-vertex-mass" "hr:--ps-halo-release 2"; do
         tag="${v%%:*}"; read -r -a O <<< "${v#*:}"
         for dev in cpu gpu; do
             D=(); [ $dev = gpu ] && D=(--gpu)
@@ -124,9 +140,9 @@ ng=$(ls "$CACHE"/globals_*.txt 2>/dev/null | wc -l | tr -d ' ')
 [ "$ng" = 1 ] && echo "  PASS ... and the snapshot's globals record (particle count, mean density, initial-position box)" \
     || { echo "  FAIL the server left $ng globals records"; exit 1; }
 gv=$(head -1 "$(ls "$CACHE"/globals_*.txt | head -1)")
-[ "$gv" = "globals=2" ] && echo "  PASS ... version 2 (the moments of the run-wide fixed-point units)" \
+[ "$gv" = "globals=2" ] && echo "  PASS ... version 2 ('globals=2')" \
     || { echo "  FAIL the globals record starts '$gv', not 'globals=2'"; exit 1; }
-# the run-wide units line of a run: one line, or empty
+# a run's run-wide units line: one line, or empty (PS-DTFE prints none)
 runits() { grep -a -o 'fixed-point units (run-wide): .*' "$1" | head -1; }
 PART=(--partition 2 2 2)
 # (the log line names the option by its canonical name, '--grid-window:', whichever spelling the run used)
@@ -145,16 +161,10 @@ for mode in sampled exact; do
         grep -q "Reused the cached tessellation" "$TMP/${mode}_${w}_cached.log" && echo "  PASS $mode window $w: the processed partitions were loaded from the cache" \
             || { echo "  FAIL $mode window $w: no cache hit"; exit 1; }
         uc=$(runits "$TMP/${mode}_${w}_cached.log"); un=$(runits "$TMP/${mode}_${w}_nocache.log")
-        if ! ps_units_wide; then   # (the default: each pass its own units)
-            if [ "${uc#*none}" != "$uc" ]; then
-                echo "  PASS $mode window $w: on the per-pass units the run started from the record sets none"
-            else
-                echo "  FAIL $mode window $w: on the per-pass units the cached units line is '$uc'"; exit 1
-            fi
-        elif [ -n "$un" ] && [ "$uc" = "$un" ] && [ "${un#*cell volume}" != "$un" ]; then
-            echo "  PASS $mode window $w: the run started from the record takes the uncached run's units"
+        if [ -z "$uc" ] && [ -z "$un" ]; then   # (each pass takes its own units)
+            echo "  PASS $mode window $w: neither the run started from the record nor the uncached one prints a run-wide units line"
         else
-            echo "  FAIL $mode window $w: the units lines differ (cached: '$uc'; uncached: '$un')"; exit 1
+            echo "  FAIL $mode window $w: a run-wide units line (cached: '$uc'; uncached: '$un')"; exit 1
         fi
         for f in den vel velDisp velDispTensor velGrad streams hidden_streams caustic causticClass; do
             cmp -s "$TMP/${mode}_${w}_nocache.$f" "$TMP/${mode}_${w}_cached.$f" || { echo "  FAIL $mode window $w: .$f differs between the cached (skipping) run and the uncached one"; exit 1; }
@@ -175,15 +185,15 @@ for f in den vel velDisp streams caustic; do
     cmp -s "$TMP/sampled_A_nocache.$f" "$TMP/batch2.$f" || { echo "  FAIL .$f differs after skipping by the batch maps"; exit 1; }
 done
 echo "  PASS ... with identical grids"
-# the launcher's own flags: vertex masses (per partition, from its padded tessellation) and volume weights --
+# the launcher's vertex masses (per partition, from its padded tessellation) beside the volume-weighted moments --
 # skipping a partition must not touch them either
-VM=(--exact --ps-vertex-mass --ps-volume-weighted "${PART[@]}" "${WA[@]}")
+VM=(--exact --ps-vertex-mass "${PART[@]}" "${WA[@]}")
 run "$TMP/vm_nocache" "$PS_BIN" "$SNAP" "$TMP/vm_nocache" --grid $G "${BASE[@]}" "${VM[@]}"
 run "$TMP/vm_cached"  "$PS_BIN" "$SNAP" "$TMP/vm_cached"  --grid $G "${BASE[@]}" "${VM[@]}" --tessellation-cache "$CACHE"
 for f in den vel velDisp streams hidden_streams caustic; do
     cmp -s "$TMP/vm_nocache.$f" "$TMP/vm_cached.$f" || { echo "  FAIL .$f differs with vertex masses + volume weights when partitions are skipped"; exit 1; }
 done
-echo "  PASS with --ps-vertex-mass --ps-volume-weighted: $(skipped "$TMP/vm_cached.log") skipped, identical grids"
+echo "  PASS with --ps-vertex-mass: $(skipped "$TMP/vm_cached.log") skipped, identical grids"
 # the globals record without the tessellations: the run starts without the particles, finds the needed
 # partitions missing, reads them after all and rebuilds those partitions -- the same bytes
 LATE="$CACHE_ROOT/late"; mkdir -p "$LATE"; cp "$CACHE"/globals_*.txt "$CACHE"/*.occ "$LATE"/
@@ -240,22 +250,11 @@ sys.exit(1 if bad else 0)
 PYEOF2
 fi
 
-echo ">> the removed --ps-linear-deposit beside --grid-window stops the run with its own message (not the old pair refusal)"
-rm -f "$TMP"/lin.*
-if "$PS_BIN" "$SNAP" "$TMP/lin" --grid $G "${BASE[@]}" --exact --ps-linear-deposit "${WA[@]}" > "$TMP/lin.log" 2>&1; then
-    echo "  FAIL: --grid-window + --ps-linear-deposit ran"; exit 1
-else
-    grep -qF -e "$PS_NO_LINEAR_DEPOSIT" "$TMP/lin.log" && [ ! -e "$TMP/lin.den" ] && echo "  PASS refused with the removal message" \
-        || { echo "  FAIL: refused without the removal message, or a grid written (see $TMP/lin.log)"; exit 1; }
-fi
-# the sampled CPU window's class: identical bytes only in the run-wide units of the single build (DTFE_PS_RUN_UNITS=1)
-SCLS=bytes
-{ precision_double || ! ps_units_wide; } && SCLS=window
-"$PY" - "$TMP" "$G" "$GPU" "$SCLS" <<'PYEOF'
+"$PY" - "$TMP" "$G" "$GPU" <<'PYEOF'
 import numpy as np, sys
 import os as _os; REAL = np.dtype(_os.environ.get("DTFE_TEST_REAL", "float32"))   # tests/precision.sh
 from pathlib import Path
-tmp = Path(sys.argv[1]); G = int(sys.argv[2]); gpu = sys.argv[3] == "1"; sampledCls = sys.argv[4]
+tmp = Path(sys.argv[1]); G = int(sys.argv[2]); gpu = sys.argv[3] == "1"
 fails = 0
 FIELDS = (("den", 1), ("vel", 3), ("velDisp", 1), ("velDispTensor", 6), ("velGrad", 9), ("streams", 1),
           ("hidden_streams", 1), ("caustic", 1), ("causticClass", 1))
@@ -272,10 +271,8 @@ def window_of(full, lo, dims):
     idx = [np.arange(lo[d], lo[d] + dims[d]) % full.shape[d] for d in range(3)]
     return full[np.ix_(*idx)]
 def compare(tag, fullp, winp, lo, dims, shape, cls):
-    """cls: 'bytes' (identical; the sampled CPU window in the run-wide units, DTFE_PS_RUN_UNITS=1), 'window' (the
-    sampled CPU window by default or in the double build: counts and masks identical, summed grids to the rounding of
-    the pass's own units or of the double sums), 'tight' (exact CPU: moments to float rounding), 'gpu' (the parity
-    class)"""
+    """cls: 'window' (the sampled CPU window: counts and masks identical, summed grids to the rounding of the pass's
+    own units or of the double sums), 'tight' (exact CPU: moments to float rounding), 'gpu' (the parity class)"""
     global fails
     fields = FIELDS + ((("tetTouch", 1),) if "exact" in tag or "zoom" in tag else ())
     for name, nc in fields:
@@ -286,7 +283,7 @@ def compare(tag, fullp, winp, lo, dims, shape, cls):
         a = window_of(full, lo, dims)
         if cls == "gpu" and name == "tetTouch":
             continue            # the raw tet-touch count: a float clip can find or lose a sliver piece
-        if cls == "bytes" or (name in EXACT_ONLY and not (cls == "gpu" and name == "streams")):
+        if name in EXACT_ONLY and not (cls == "gpu" and name == "streams"):
             ok = np.array_equal(a, b)
             print(f"  {'PASS' if ok else 'FAIL'} {tag} {name:15s} identical bytes" + ("" if ok else f" (max |diff| {np.abs(a-b).max():.3e})"))
         else:
@@ -302,7 +299,7 @@ def compare(tag, fullp, winp, lo, dims, shape, cls):
         fails += not ok
 LO, DIMS, SHAPE = (8, 40, 30), (16, 12, 1), (G, G, G)
 SEAM = (56, 40, 30)
-for mode, cls in (("sampled", sampledCls), ("exact", "tight")):
+for mode, cls in (("sampled", "window"), ("exact", "tight")):
     compare(f"{mode} window == full",                        f"{mode}_full",     f"{mode}_win",   LO,   DIMS, SHAPE, cls)
     compare(f"{mode} seam window == full (wrapped cells)",   f"{mode}_full",     f"{mode}_seam",  SEAM, DIMS, SHAPE, cls)
     compare(f"{mode} window, partition 2 2 2 == full, partition 2 2 2", f"{mode}_fullpart", f"{mode}_part", LO, DIMS, SHAPE, cls)

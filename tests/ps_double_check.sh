@@ -23,12 +23,7 @@ ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$ROOT" || exit 1
 source "${SCRIPT_DIR}/lib.sh"   # PY: the python with numpy and h5py
 # a pair missing is a SKIP, or a FAILURE under DTFE_TEST_REQUIRED=1, which ci_suite.sh's double stage sets after
-# building both pairs. precision.sh's skip_or_fail, inlined: sourcing
-# precision.sh would announce one precision for a suite that runs both.
-skip_or_fail() {
-    if [ "${DTFE_TEST_REQUIRED:-0}" = "1" ]; then echo "FAIL (required): $*" >&2; exit 1; fi
-    echo "SKIP: $*"; exit 0
-}
+# building both pairs (skip_or_fail, tests/lib.sh; no precision.sh: this suite runs both precisions)
 for b in DTFE PS-DTFE DTFE-double PS-DTFE-double; do
     [ -x "./$b" ] || skip_or_fail "./$b is not built (make DTFE PS-DTFE DOUBLE=1 builds the double pair)"
 done

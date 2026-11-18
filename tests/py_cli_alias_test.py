@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""The python CLIs' renamed options (P6.7d): every old spelling gives the same parsed arguments as the new one, with
-its warnings on stderr ('warning: <old> is deprecated, use <new>', never on stdout) and none for the new spelling;
-no option is guessed from an abbreviation (allow_abbrev=False); the smoothing variable DTFE_SMOOTH_MPC and its older
-name DTFE_SIGMA_MPC.
+"""The python CLIs' option names: each script's command line in the current names parses to the values given
+(one argv per script, CURRENT; make_image_plane.py's --plane-window also as its --same-as reads it); no option is
+guessed from an abbreviation (allow_abbrev=False); the smoothing variable DTFE_SMOOTH_MPC fixes the void smoothing
+in Mpc.
 
 Each script runs in a fresh interpreter, its parser stopped right after parse_args (argparse patched to raise with
-the Namespace): nothing is read or written, no data is needed.
+the Namespace): nothing is read or written, no data is needed (make_image_plane.py --same-as reads a sidecar this
+test writes, nothing else).
 
 Usage:  python3 tests/py_cli_alias_test.py            (exit 0 = pass)
 """
@@ -15,7 +16,6 @@ import os
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
 
 from _harness import REPO, check, summary
 
@@ -23,7 +23,7 @@ PY = REPO / "python"
 SIM = "TNG100-3-Dark"
 
 # the driver run in each child: argparse.ArgumentParser.parse_args raises with the Namespace, so main() stops there;
-# each case runs the script afresh (runpy, as __main__) with dtfelib.cli's warned-once set cleared
+# each case runs the script afresh (runpy, as __main__)
 DRIVER = r'''
 import argparse, contextlib, io, json, os, runpy, sys
 script, cases = sys.argv[1], json.loads(sys.argv[2])
@@ -36,8 +36,6 @@ def grab(self, args=None, namespace=None):
 argparse.ArgumentParser.parse_args = grab
 out = []
 for argv in cases:
-    import dtfelib.cli as cli
-    cli._WARNED.clear()
     err, std, ns, code = io.StringIO(), io.StringIO(), None, None
     sys.argv = [script] + argv
     try:
@@ -57,8 +55,7 @@ def parse(script: str, *cases: list) -> list[dict]:
     """[{'ns', 'stderr', 'stdout', 'code'}] for each argv of 'cases', parsed by python/<script> in one child."""
     with tempfile.TemporaryDirectory() as tmp:
         env = dict(os.environ, DTFE_SIM=SIM, DTFE_DATA_ROOT=tmp, MPLBACKEND="Agg", DTFE_FIGURES_ROOT=tmp)
-        for name in ("DTFE_SMOOTH_MPC", "DTFE_SIGMA_MPC"):
-            env.pop(name, None)
+        env.pop("DTFE_SMOOTH_MPC", None)
         r = subprocess.run([sys.executable, "-c", DRIVER, str(PY / script), json.dumps([list(c) for c in cases])],
                            capture_output=True, text=True, env=env, cwd=str(PY), timeout=300)
     line = next((l for l in r.stdout.splitlines() if l.startswith("@@")), None)
@@ -66,130 +63,81 @@ def parse(script: str, *cases: list) -> list[dict]:
     return json.loads(line[2:])
 
 
-def warnings(text: str) -> list[str]:
-    return [l for l in text.splitlines() if l.startswith("warning: ") and " is deprecated, use " in l]
+# one command line per script in the current names, and the values its parser must give (the Namespace's names: an
+# option's dest where it differs, '--estimator' -> method, '--root' -> prefix, '--maps' -> fields, ...; a Path as
+# its text). plot_void_crossbox.py has two parsers: the figure's and its per-box worker's ('--worker')
+CURRENT = {
+    "plot/plot_DTFE.py": [(["--sim", SIM, "--snap", "50", "--estimator", "ps"],
+                           {"sim": SIM, "snap": 50, "method": "ps"})],
+    "plot/plot_halo_tracking.py": [(["--sim", SIM, "--start-snap", "50", "--subhalos", "1", "2", "--n-halos", "3",
+                                     "--estimator", "dtfe"],
+                                    {"snap": 50, "subhalo": [1, 2], "top": 3, "method": "dtfe"})],
+    "plot/plot_void_tracking.py": [(["--sim", SIM, "--start-snap", "50"], {"snap": 50})],
+    "plot/plot_pk_compare.py": [(["--sim", SIM, "--n-bins", "12", "--out", "/x", "--snaps", "1", "2"],
+                                 {"nbins": 12, "out": "/x", "snaps": [1, 2]})],
+    "plot/plot_void_population.py": [(["--sim", SIM, "--size-rv-definition", "ridge"], {"size_rv": "ridge"})],
+    "plot/plot_caustic_skeleton.py": [(["--sim", SIM, "--per-void"], {"voids": True})],
+    "plot/plot_void_environment.py": [(["--sim", SIM, "--criterion", "density-raw", "--rv-definition", "delta08"],
+                                       {"criterion": "density_raw", "r_v_definition": "delta08"})],
+    "plot/plot_void_profile_evolution.py": [(["--sim", SIM, "--rv-range", "2", "4", "--edges", "0", "10", "20"],
+                                             {"rv_range": [2.0, 4.0], "edges": [0.0, 10.0, 20.0]})],
+    "plot/plot_void_profiles.py": [(["--sim", SIM, "--edges", "0", "4", "30"], {"edges": [0.0, 4.0, 30.0]})],
+    "plot/plot_void_convergence.py": [(["--sim", SIM, "--redshifts", "0", "1"], {"z": [0.0, 1.0]})],
+    "plot/plot_void_crossbox.py": [(["--sims", "A", "B", "--estimator", "dtfe", "--redshifts", "0", "1"],
+                                    {"sims": ["A", "B"], "method": "dtfe", "z": [0.0, 1.0]}),
+                                   (["--worker", "/x.npz", "--sim", "A", "--estimator", "dtfe", "--smooth-mpc", "2",
+                                     "--redshifts", "0"],
+                                    {"worker": "/x.npz", "sim": "A", "method": "dtfe", "smooth_mpc": 2.0,
+                                     "z": [0.0]})],
+    "plot/plot_pointeval.py": [(["--sims", "A", "B", "--snaps", "4", "99", "--maps", "density", "velDiv",
+                                 "--estimator", "dtfe", "--smooth-px", "2", "--smooth-derivatives-px", "0"],
+                                {"sims": ["A", "B"], "snaps": [4, 99], "fields": ["density", "velDiv"],
+                                 "method": "dtfe", "smooth": 2.0, "smooth_derivatives": 0.0})],
+    "plot/plot_pointeval_panels.py": [(["--root", "/r", "--plane", "/p.json", "--out", "/o.png", "--panels",
+                                        "density", "sheet", "--project", "slab"],
+                                       {"prefix": "/r", "plane": "/p.json", "out": "/o.png",
+                                        "panels": ["density", "sheet"], "project": "slab"})],
+    "tools/void_outlines.py": [(["--sim", SIM, "--snap", "99", "--estimator", "ps", "--smooth-mpc", "2"],
+                                {"snap": 99, "method": "ps", "smooth_mpc": 2.0})],
+    "tools/compare_deposits.py": [(["--sim", SIM, "--snap", "99", "--prefix-a", "x", "--prefix-b", "y"],
+                                   {"snap": 99, "prefix_a": "x", "prefix_b": "y"})],
+    "gui/void_cache.py": [(["build", "--sim", SIM, "--snap", "99", "--estimator", "dtfe"],
+                           {"mode": "build", "sim": SIM, "snap": 99, "method": "dtfe"})],
+    "tools/merge_HDF5.py": [(["--sim-dir", "/d", "--snaps", "8", "17"], {"data_dir": "/d", "snaps": [8, 17]})],
+    "tools/make_image_plane.py": [(["--same-as", "x.json", "--plane-window", "0", "50", "0", "25", "--out", "s"],
+                                   {"same_as": "x.json", "plane_window": [0.0, 50.0, 0.0, 25.0], "out": "s"})],
+    "analyze.py": [(["export", "--snaps", "099", "050", "--out", "/o", "--sim", SIM],
+                    {"mode": "export", "snaps": ["099", "050"], "out": "/o", "sim": SIM})],
+}
 
 
-def same(script: str, old: list, new: list, olds: tuple, normalize=None):
-    """old and new parse to the same Namespace (after 'normalize', for a script that merges an option after
-    parse_args); old warns once for each name in 'olds' (and on stderr only), new not at all."""
-    o, n = parse(script, old, new)
-    assert o["ns"] is not None and n["ns"] is not None, f"{script}: not parsed: {o} {n}"
-    on, nn = (normalize(dict(o["ns"])), normalize(dict(n["ns"]))) if normalize else (o["ns"], n["ns"])
-    assert on == nn, f"{script}: {on} != {nn}"
-    w = warnings(o["stderr"])
-    assert not warnings(n["stderr"]), f"{script}: the new spelling warned: {n['stderr']}"
-    assert "deprecated" not in o["stdout"], f"{script}: a warning on stdout: {o['stdout']}"
-    missing = [x for x in olds if not any(f"warning: {x} is deprecated" in l for l in w)]
-    assert not missing and len(w) == len(set(w)), f"{script}: warnings {w}, missing {missing}"
+def t_current(script):
+    """One script's command lines of CURRENT parse to the values given."""
+    cases = CURRENT[script]
+    for (argv, want), r in zip(cases, parse(script, *[argv for argv, _ in cases])):
+        assert r["ns"] is not None, f"{script} {argv}: not parsed ({r['code']}): {r['stderr'][-400:]}"
+        got = {k: r["ns"].get(k) for k in want}
+        assert got == want, f"{script} {argv}: {got} != {want}"
 
 
-def t_make_parser():
-    # every make_parser script: --method -> --estimator (dest 'method', FieldSet's keyword)
-    same("plot/plot_DTFE.py", ["--sim", SIM, "--method", "ps"], ["--sim", SIM, "--estimator", "ps"], ("--method",))
-
-
-def t_tracking():
-    same("plot/plot_halo_tracking.py",
-         ["--sim", SIM, "--snap", "50", "--subhalo", "1", "2", "--top", "3", "--method", "dtfe"],
-         ["--sim", SIM, "--start-snap", "50", "--subhalos", "1", "2", "--n-halos", "3", "--estimator", "dtfe"],
-         ("--snap", "--subhalo", "--top", "--method"))
-    same("plot/plot_halo_tracking.py", ["--sim", SIM, "--top", "7"], ["--sim", SIM, "--n-halos", "7"], ("--top",))
-    same("plot/plot_void_tracking.py", ["--sim", SIM, "--snap", "50"], ["--sim", SIM, "--start-snap", "50"],
-         ("--snap",))
-
-
-def t_void_scripts():
-    same("plot/plot_pk_compare.py", ["--sim", SIM, "--nbins", "12", "--output", "/x", "--snaps", "1,2"],
-         ["--sim", SIM, "--n-bins", "12", "--out", "/x", "--snaps", "1", "2"],
-         ("--nbins", "--output", "a comma-separated --snaps"))
-    same("plot/plot_void_population.py", ["--sim", SIM, "--size-rv", "ridge"],
-         ["--sim", SIM, "--size-rv-definition", "ridge"], ("--size-rv",))
-    same("plot/plot_caustic_skeleton.py", ["--sim", SIM, "--voids"], ["--sim", SIM, "--per-void"], ("--voids",))
-    o, n = parse("plot/plot_void_environment.py",
-                 ["--sim", SIM, "--criterion", "density_raw", "--r-v-definition", "delta08"],
-                 ["--sim", SIM, "--criterion", "density-raw", "--rv-definition", "delta08"])
-    assert o["ns"] == n["ns"] and n["ns"]["criterion"] == "density_raw" and n["ns"]["r_v_definition"] == "delta08", \
-        (o, n)      # the internal name stays (npz keys, figure tags)
-    w = warnings(o["stderr"])
-    assert any("--criterion density_raw is deprecated, use --criterion density-raw" in l for l in w) \
-        and any("--r-v-definition is deprecated" in l for l in w) and not warnings(n["stderr"]), (w, n["stderr"])
-    same("plot/plot_void_profile_evolution.py", ["--sim", SIM, "--rv-range", "2,4", "--edges", "0,10,20"],
-         ["--sim", SIM, "--rv-range", "2", "4", "--edges", "0", "10", "20"],
-         ("a comma-separated --rv-range", "a comma-separated --edges"))
-    same("plot/plot_void_profiles.py", ["--sim", SIM, "--edges", "0,4,30"], ["--sim", SIM, "--edges", "0", "4", "30"],
-         ("a comma-separated --edges",))
-    same("plot/plot_void_convergence.py", ["--sim", SIM, "--z", "0", "1"], ["--sim", SIM, "--redshifts", "0", "1"],
-         ("--z",))
-    same("plot/plot_void_crossbox.py", ["--sims", "A", "B", "--method", "dtfe", "--z", "0", "1"],
-         ["--sims", "A", "B", "--estimator", "dtfe", "--redshifts", "0", "1"], ("--method", "--z"))
-    same("plot/plot_void_crossbox.py",
-         ["--worker", "/x.npz", "--sim", "A", "--method", "dtfe", "--smooth-mpc", "2", "--z", "0"],
-         ["--worker", "/x.npz", "--sim", "A", "--estimator", "dtfe", "--smooth-mpc", "2", "--redshifts", "0"],
-         ("--method", "--z"))
-
-
-def t_pointeval():
-    same("plot/plot_pointeval.py",
-         ["--sims", "A,B", "--snaps", "4,99", "--fields", "density,velDiv", "--method", "dtfe", "--smooth", "2",
-          "--smooth-derivatives", "0"],
-         ["--sims", "A", "B", "--snaps", "4", "99", "--maps", "density", "velDiv", "--estimator", "dtfe",
-          "--smooth-px", "2", "--smooth-derivatives-px", "0"],
-         ("a comma-separated --sims", "a comma-separated --snaps", "--fields", "--method", "--smooth",
-          "--smooth-derivatives"))
-    # the old --prefix alone satisfies the required --root
-    same("plot/plot_pointeval_panels.py",
-         ["--prefix", "/r", "--plane", "/p.json", "--output", "/o.png", "--panels", "density,sheet", "--project", "mean"],
-         ["--root", "/r", "--plane", "/p.json", "--out", "/o.png", "--panels", "density", "sheet", "--project", "slab"],
-         ("--prefix", "--output", "a comma-separated --panels", "--project mean"))
-    r = parse("plot/plot_pointeval_panels.py", ["--plane", "/p.json"], ["--root", "/r", "--prefix", "/r", "--plane", "/p"])
-    assert r[0]["code"] == 2 and "--root" in r[0]["stderr"] and "--prefix" not in r[0]["stderr"].split("required")[-1], r[0]
-    assert r[1]["code"] == 2 and "not allowed with" in r[1]["stderr"], r[1]     # the two spellings at once
-
-
-def t_tools():
-    same("tools/void_outlines.py", ["--sim", SIM, "--snap", "99", "--method", "ps", "--sigma-mpc", "2"],
-         ["--sim", SIM, "--snap", "99", "--estimator", "ps", "--smooth-mpc", "2"], ("--method", "--sigma-mpc"))
-    same("tools/compare_deposits.py", ["--sim", SIM, "--snap", "99", "--a", "x", "--b", "y"],
-         ["--sim", SIM, "--snap", "99", "--prefix-a", "x", "--prefix-b", "y"], ("--a", "--b"))
-    same("gui/void_cache.py", ["build", "--sim", SIM, "--snap", "99", "--method", "dtfe"],
-         ["build", "--sim", SIM, "--snap", "99", "--estimator", "dtfe"], ("--method",))
-
-    def merged(ns):         # main() merges the positional snapshot numbers of before into --snaps
-        ns["snaps"] = (ns.get("snaps") or []) + ns.pop("old_snapshots")
-        return ns
-    same("tools/merge_HDF5.py", ["--data-dir", "/d", "8", "17"], ["--sim-dir", "/d", "--snaps", "8", "17"],
-         ("--data-dir",), normalize=merged)
-
-    def window(ns):         # main() spreads --plane-window over the four of before
-        if ns.get("plane_window"):
-            ns.update(zip(("u0", "u1", "v0", "v1"), ns["plane_window"]))
-        ns.pop("plane_window", None)
-        return ns
-    same("tools/make_image_plane.py",
-         ["--same-as", "x.json", "--u0", "0", "--u1", "50", "--v0", "0", "--v1", "25", "--output", "s"],
-         ["--same-as", "x.json", "--plane-window", "0", "50", "0", "25", "--out", "s"],
-         ("--u0", "--u1", "--v0", "--v1", "--output"), normalize=window)
-
-    def snaps(ns):
-        ns["snaps"] = list(ns.get("snaps") or []) + ns.pop("old_snaps")
-        return ns
-    same("analyze.py", ["export", "099", "050", "--output", "/o", "--sim", SIM],
-         ["export", "--snaps", "099", "050", "--out", "/o", "--sim", SIM], ("--output",), normalize=snaps)
-
-
-def t_positional_warnings():
-    """The positional snapshots of before (merge_HDF5.py, analyze.py) warn once, after parse_args."""
+def t_plane_window_spread():
+    """make_image_plane.py --plane-window U0 U1 V0 V1 is the plane's u0, u1, v0, v1: --same-as finds a sidecar with
+    that window the same (exit 0) and one with the two ranges swapped different (exit 3)."""
+    tool = PY / "tools" / "make_image_plane.py"
     with tempfile.TemporaryDirectory() as tmp:
-        r = subprocess.run([sys.executable, str(PY / "tools" / "merge_HDF5.py"), "-d", str(Path(tmp) / "none"),
-                            "--trees", "5"], capture_output=True, text=True, timeout=120)
-    assert "warning: a positional snapshot number is deprecated, use --snaps 5" in r.stderr, r.stderr[-500:]
-    assert "deprecated" not in r.stdout, r.stdout[-300:]
+        codes = []
+        for u1, v1 in ((50.0, 25.0), (25.0, 50.0)):
+            side = os.path.join(tmp, f"side_{u1:g}.json")
+            with open(side, "w") as f:
+                json.dump({"box": 100.0, "planes": 1, "u0": 0.0, "u1": u1, "v0": 0.0, "v1": v1}, f)
+            r = subprocess.run([sys.executable, str(tool), "--same-as", side, "--plane-window", "0", "50", "0", "25"],
+                               capture_output=True, text=True, cwd=str(PY), timeout=120)
+            codes.append((r.returncode, r.stdout.strip()))
+    assert codes == [(0, "same"), (3, "differs")], codes
 
 
 def t_no_abbreviation():
-    """allow_abbrev=False everywhere: a prefix of an option is an error, not a guess (an old name that is a prefix
-    of a new one -- --size-rv, --smooth, --subhalo -- is an exact match of its alias, never a guess)."""
+    """allow_abbrev=False everywhere: a prefix of an option is an error, not a guess."""
     cases = {"plot/plot_pk_compare.py": ["--sim", SIM, "--n-bin", "3"],
              "plot/plot_pointeval.py": ["--sims", "A", "--smooth-p", "1"],
              "plot/plot_halo_tracking.py": ["--sim", SIM, "--start", "50"],
@@ -202,41 +150,30 @@ def t_no_abbreviation():
 
 
 def t_smooth_mpc_env():
-    """DTFE_SMOOTH_MPC fixes the void smoothing in Mpc; DTFE_SIGMA_MPC, its older name, the same with one warning;
-    both set: the new one wins and the old one is said not to be read."""
+    """DTFE_SMOOTH_MPC fixes the void smoothing in Mpc: config's smoothing differs from the production one under
+    it."""
     probe = "import config; print(config.SMOOTHING_SIGMA_CELLS, config.FOOTPRINT_SIZE)"
 
     def run(**env):
-        e = {k: v for k, v in os.environ.items() if k not in ("DTFE_SMOOTH_MPC", "DTFE_SIGMA_MPC")}
+        e = {k: v for k, v in os.environ.items() if k != "DTFE_SMOOTH_MPC"}
         e.update(env, DTFE_SIM=SIM)
         r = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, cwd=str(PY), env=e,
                            timeout=120)
         assert r.returncode == 0, r.stderr[-500:]
-        return r.stdout.strip(), warnings(r.stderr)
-    plain, new, old, both = run(), run(DTFE_SMOOTH_MPC="5.0"), run(DTFE_SIGMA_MPC="5.0"), \
-        run(DTFE_SMOOTH_MPC="5.0", DTFE_SIGMA_MPC="3.0")
-    assert new[0] == old[0] == both[0] != plain[0], (plain, new, old, both)
-    assert not new[1] and not plain[1], (plain, new)
-    assert old[1] == ["warning: DTFE_SIGMA_MPC is deprecated, use DTFE_SMOOTH_MPC"], old
-    assert len(both[1]) == 1 and "DTFE_SIGMA_MPC=3.0 is not read: DTFE_SMOOTH_MPC=5.0 wins" in both[1][0], both
-    sys.path.insert(0, str(PY))
-    from dtfelib.cli import SMOOTH_MPC_ENV_NAMES
-    assert SMOOTH_MPC_ENV_NAMES == ("DTFE_SMOOTH_MPC", "DTFE_SIGMA_MPC"), SMOOTH_MPC_ENV_NAMES
+        return r.stdout.strip()
+    plain, new = run(), run(DTFE_SMOOTH_MPC="5.0")
+    assert new != plain, (plain, new)
 
 
 def main():
-    print("python CLI spellings")
-    check("make_parser: --method is --estimator (args.method), one warning", t_make_parser)
-    check("tracking: --snap -> --start-snap, --subhalo -> --subhalos, --top -> --n-halos", t_tracking)
-    check("void scripts: --nbins, --output, comma lists, --size-rv, --voids, --criterion's values, --r-v-definition, "
-          "--z", t_void_scripts)
-    check("plot_pointeval(_panels): --fields -> --maps, --smooth(-derivatives) -> -px, --prefix -> --root (a required "
-          "pair), --project mean -> slab, comma lists", t_pointeval)
-    check("tools and the launcher's helpers: --sigma-mpc, --a/--b, --data-dir, --u0..--v1 -> --plane-window, "
-          "analyze.py's --snaps", t_tools)
-    check("the positional snapshots of before warn once", t_positional_warnings)
+    print("python CLI option names")
+    for script in CURRENT:
+        names = " ".join(dict.fromkeys(a for argv, _ in CURRENT[script] for a in argv if a.startswith("--")))
+        check(f"{script}: {names} parse to the values given", lambda s=script: t_current(s))
+    check("make_image_plane.py: --plane-window U0 U1 V0 V1 is the plane's u0, u1, v0, v1 (--same-as)",
+          t_plane_window_spread)
     check("no abbreviation is guessed (allow_abbrev=False)", t_no_abbreviation)
-    check("DTFE_SMOOTH_MPC, and DTFE_SIGMA_MPC with one warning (the new name wins)", t_smooth_mpc_env)
+    check("DTFE_SMOOTH_MPC fixes the void smoothing in Mpc", t_smooth_mpc_env)
     return summary(blank_line=True, show_zero_skips=False)
 
 

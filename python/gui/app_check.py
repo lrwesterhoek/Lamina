@@ -108,12 +108,16 @@ class CheckMixin:
         mc["buf"] += bytes(proc.readAllStandardOutput()).decode(errors="replace")
         sim, nu, snaps = mc["current"]
         reports = rs.parse_reports(mc["buf"])
+        # each record keeps the build it was taken under: under another one its device counts for nothing
+        # (rs.reported_device)
+        built = rs.job_gpu_built(mc["spec"])
         results = self.mem_results[mc["key"]]
         over = []
         for n in snaps:
             r = reports.get(n)
             if r is None:
                 continue
+            r["gpu_built"] = built
             results[(sim, n, nu)] = r
             if r.get("over_budget"):
                 over.append(n)

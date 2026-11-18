@@ -48,7 +48,7 @@ stage_build() {
 run_program_suites() {
     step "standard DTFE regression (stored reference)"; env -u DTFE_TEST_REFERENCE_DIR "$PY" tests/run_tests.py
     step "standard DTFE Monte-Carlo average (unbiased, split-invariant)"; tests/dtfe_mc_average_check.sh --no-build
-    # the face method (docs/cleanup-plan.md P10): its geometry against exact references, then standard DTFE's
+    # the face method: its geometry against exact references, then standard DTFE's
     # --face-gradient against the per-tetrahedron gradient
     if [ "${DTFE_TEST_PRECISION:-single}" != double ]; then   # header-only, compiled here with fixed flags
         step "face sweep geometry (sections, pieces, Gauss on a tessellation)"; tests/face_sweep_check.sh --no-build
@@ -57,9 +57,9 @@ run_program_suites() {
     # the run-wide fixed-point units: the exact '_a' grids byte-identical at any split (its CPU half; the GPU's SKIPs)
     step "standard DTFE split independence (run-wide units)"; tests/split_bytes_check.sh --no-build
     step "PS-DTFE --face-gradient (the mean flow: conservative, pancake folds, splits, window, dtfelib)"; tests/ps_face_gradient_check.sh --no-build
-    # methods 2 and 3, the redshift cone and the grid's point values: closed forms, other code paths and stored
+    # method 2, the redshift cone and the grid's point values: closed forms, other code paths and stored
     # golden values (the user-sampling part needs libDTFE: a SKIP line here, run by the variants stage)
-    step "standard DTFE sampling variants (methods 2, 3, redshift cone; golden)"; tests/dtfe_sampling_check.sh --no-build
+    step "standard DTFE sampling variants (method 2, redshift cone; golden)"; tests/dtfe_sampling_check.sh --no-build
     step "PS-DTFE smoke test";                  tests/ps_smoke_test.sh --no-build
     step "PS-DTFE regression (analytic pancake)"; "$PY" tests/ps_regression_test.py --no-build
     step "3D crossed waves";                    "$PY" tests/ps_3d_test.py --no-build
@@ -71,13 +71,11 @@ run_program_suites() {
     step "volume weighted";                     tests/ps_volume_weighted_check.sh --no-build
     step "parallel == serial";                  tests/ps_parallel_check.sh --no-build
     step "partition / padding independence";     tests/ps_partition_padding_check.sh --no-build
+    step "a split run against the one domain (every output grid)"; tests/ps_split_merge_check.sh --no-build
     step "periodic seam (exact periodic copies)"; tests/ps_periodic_seam_check.sh --no-build
     step "slab-mode deposit == serial";         tests/ps_slab_deposit_check.sh --no-build
     step "exact mass grid (CPU fixed point)";   tests/ps_mass_exact_check.sh --no-build
     step "exact moment grids (fixed point; thread-count independent)"; tests/ps_fixed_moments_check.sh --no-build
-    # PS-DTFE's switch for the run-wide units (its default is a unit per pass): the same suite on the 128-bit words
-    step "exact moment grids (PS-DTFE in the run-wide units)"
-    DTFE_PS_RUN_UNITS=1 tests/ps_fixed_moments_check.sh --no-build
     step "caustic stratification";              tests/ps_caustic_class_check.sh --no-build
     step "tessellation cache";                  tests/ps_tessellation_cache_check.sh --no-build
     step "PS point evaluation";                 tests/ps_point_eval_check.sh --no-build
@@ -86,8 +84,6 @@ run_program_suites() {
     step "exact point location + --serve";      tests/point_exact_serve_check.sh --no-build
     step "exact hidden-streams flag";           tests/ps_hidden_streams_check.sh --no-build
     step "window == full run";                  tests/ps_window_check.sh --no-build
-    step "window == full run (PS-DTFE in the run-wide units)"
-    DTFE_PS_RUN_UNITS=1 tests/ps_window_check.sh --no-build
     step "non-periodic suite";                  "$PY" tests/ps_nonperiodic_test.py --no-build
     step "batch drivers";                       tests/run_scripts_check.sh --no-build
     step "T-web (tidal tensor)";                tests/tweb_check.sh --no-build
@@ -100,13 +96,12 @@ run_program_suites() {
     step "composite server split";              tests/serve_split_check.sh --no-build
     step "ordered merge, look-ahead, crash-safe outputs, progress"; tests/ps_runtime_check.sh --no-build
     step "resume of a killed partitioned run";  tests/ps_resume_check.sh --no-build
-    step "--ps-merge fixed-point (order-free integer merge)"; tests/ps_fixed_merge_check.sh --no-build
     step "resume of a killed partitioned standard run"; tests/dtfe_resume_check.sh --no-build
-    step "old and new flag spellings: one run, one settings key"; tests/flag_spelling_check.sh --no-build
     step "run modes (gentle / balanced / performance, --gpu-share)"; tests/run_mode_check.sh --no-build
     # the device the programs choose without '--gpu' (DTFE_GPU, the pick), its header and checkpoint key lines, the
-    # header's padding; each case checks the row of the build it runs on (a CPU-only one here, Metal in the battery)
-    step "the programs' defaults: the device, its header and key lines, the padding"; tests/defaults_check.sh --no-build
+    # header's padding; each case checks the row of the build it runs on (a CPU-only one here, Metal in the battery);
+    # the '_a' average without a flag (DTFE_EXACT_AVERAGE, a count) and its header line
+    step "the programs' defaults: the device, its header and key lines, the padding, the '_a' average"; tests/defaults_check.sh --no-build
     step "resume with --sample-points";         tests/ps_resume_points_check.sh --no-build
 }
 
@@ -169,7 +164,7 @@ stage_core() {
     step "void convergence: grid, mass, estimator"; MPLBACKEND=Agg "$PY" tests/py_convergence_test.py
     step "size function on the raw density";    MPLBACKEND=Agg "$PY" tests/py_size_function_test.py
     step "void-in-cloud criteria";               MPLBACKEND=Agg "$PY" tests/py_vic_test.py
-    step "python CLI spellings: old names as warned aliases, no abbreviations"; MPLBACKEND=Agg "$PY" tests/py_cli_alias_test.py
+    step "python CLIs: each script's options parse, none guessed from an abbreviation; DTFE_SMOOTH_MPC"; MPLBACKEND=Agg "$PY" tests/py_cli_alias_test.py
     # what the README tells a user to type exists in the code, and the drivers' knobs are documented
     step "docs drift (README / COMMANDS.md against the code)"; "$PY" tests/docs_drift_check.py
     # the python analysis stack end to end on a synthetic two-snapshot set (pins its own temp folders)

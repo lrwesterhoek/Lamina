@@ -16,8 +16,6 @@ import re
 import subprocess
 from pathlib import Path
 
-from results import canonical_flag as _canonical_flag   # a binary's older option names (pure Python, no Qt)
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # the production fields: the drivers' default (runspec.DEFAULT_FIELDS; tests/py_gui_runspec_test.py checks it)
@@ -65,15 +63,11 @@ def capture(spec) -> dict:
 
 def apply_preset(spec, settings: dict, planes=()) -> list[str]:
     """Sets the preset's fields (PRESET_KEYS) on spec, in place; returns what was changed, for the status line.
-    planes: the simulation's image-plane files, for 'slice_plane': 'largest'. A user's preset saved before the two
-    quality modes names the cell average, 'deposit' ('sampled' Fast, else Exact; runspec.migrate_quality), and may
-    carry settings the code decides now (nsub, gpu, volume_weighted, vertex_mass, ...): those are left out."""
-    import runspec as _rs       # (here: runspec is the heavier import, and this module stays importable without it)
+    planes: the simulation's image-plane files, for 'slice_plane': 'largest'. A setting outside PRESET_KEYS (or one
+    the job does not have) is left out."""
     changed = []
     known = spec.to_dict()
-    if settings.get("estimator", known.get("estimator")) == "dtfe" and "deposit_dtfe" in settings:
-        settings = dict(settings, deposit=settings["deposit_dtfe"])     # standard DTFE: its own cell average
-    for k, v in _rs.migrate_quality(settings).items():
+    for k, v in settings.items():
         if k not in PRESET_KEYS or k not in known:
             continue
         if k == "slice_plane" and v == "largest":
@@ -173,29 +167,18 @@ def parse_help(text: str) -> dict[str, str]:
 
 def flag_help(binary: str = "PS-DTFE") -> dict[str, str]:
     """The binary's '--full-help', parsed (cached per binary and modification time); {} when the
-    binary is not built. A binary built before the option names were unified knows only '--full_help' (and lists
-    '--ps-gpu', '--ps-exact-deposit' and '--ps-no-overlap' as its own): asked that way when '--full-help' prints
-    nothing, its old names read as the canonical ones too (results.canonical_flag)."""
+    binary is not built."""
     exe = REPO_ROOT / binary
     try:
         key = f"{exe}:{exe.stat().st_mtime_ns}"
     except OSError:
         return {}
     if key not in _HELP_CACHE:
-        parsed: dict[str, str] = {}
         try:
-            for opt in ("--full-help", "--full_help"):     # (an older binary refuses the first on stdout)
-                parsed = parse_help(subprocess.run([str(exe), opt], capture_output=True, text=True,
-                                                   timeout=20, cwd=str(REPO_ROOT)).stdout)
-                if parsed:
-                    break
+            _HELP_CACHE[key] = parse_help(subprocess.run([str(exe), "--full-help"], capture_output=True, text=True,
+                                                         timeout=20, cwd=str(REPO_ROOT)).stdout)
         except (OSError, subprocess.TimeoutExpired):
-            parsed = {}
-        # each entry under the binary's own name AND its canonical one (results.canonical_flag, the readers' permanent
-        # table): a launcher that emits an older name still finds it, and so does a reader of the new one
-        _HELP_CACHE[key] = dict(parsed)
-        for k, v in parsed.items():
-            _HELP_CACHE[key].setdefault(_canonical_flag(k), v)
+            _HELP_CACHE[key] = {}
     return _HELP_CACHE[key]
 
 

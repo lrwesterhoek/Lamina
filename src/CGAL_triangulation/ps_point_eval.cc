@@ -18,8 +18,7 @@
    --ps-per-stream/--ps-per-stream-ids are PS-only (rejected at option parsing); the
    Sample_point mechanism is a separate path.
 
-   The per-stream density ('linear', the value of PS-DTFE's one-value '--ps-stream-density'; 'dtfe'
-   is its older name and the name used below) is the linear interpolation of the Lagrangian-vertex
+   The per-stream density (the 'dtfe' profile below) is the linear interpolation of the Lagrangian-vertex
    DTFE densities inside the tetrahedron -- the PhaseSpaceDTFE class of the method authors'
    reference implementation (github.com/jfeldbrugge/PS-DTFE, Python/density.py). Continuous within
    a stream, but not mass-conserving. Each stream record also keeps the tetrahedron's constant
@@ -28,7 +27,7 @@
    grid conventions: under --ps-vertex-mass the densities carry the grid's tetrahedron masses
    through a per-vertex mass-model ratio, and as the grid's velocity moments are volume-weighted the
    per-point velocity, its gradient and the scalar are equal-volume stream means, the dispersion
-   density-weighted (see 'The grid deposit's conventions at the points' below). A partitioned run's
+   density-weighted (see 'The grid deposit's conventions at the points', ps_point_eval_detail.h). A partitioned run's
    stream records are checkpointed per partition for '--resume' ('--resume with --sample-points' below).
 
    The candidate search buckets the (static, read-only) QUERY POINTS on a uniform grid and
@@ -49,16 +48,10 @@
    ps_exact_inside.h, which the CPU grid deposit shares for its sub-samples): a point is counted by
    exactly one tetrahedron of every stream, including points ON a shared face, edge or
    vertex -- e.g. a query at a particle position, which a tolerance-based test counts once
-   per incident tetrahedron (~25 fake streams). Two ingredients make that possible:
-     * every periodic image of a particle is mapped to one canonical coordinate
-       (canonicalCoord), so tetrahedra sharing a face see bit-identical vertices even when
-       one holds the original particle and the other its (float-shifted) periodic copy;
-     * the decision uses exact orientation predicates (CGAL, filtered) with a symbolic
-       perturbation of the query point (simulation of simplicity) that breaks every tie
-       the same way in all tetrahedra.
-   A cheap double-precision classification decides every point that is not within a
-   rigorous per-tetrahedron uncertainty band of a face; only the band goes to the exact
-   predicates, so the common path costs what a tolerance test would.
+   per incident tetrahedron (~25 fake streams). How (canonical periodic images, exact predicates with
+   simulation of simplicity, three tiers): the header of ps_exact_inside.h. Only the points within a
+   rigorous per-tetrahedron band of a face reach the exact predicates, so the common path costs what a
+   tolerance test would.
 
    Each triangulation's cells are processed by a small thread pool (pointEvalThreads): all
    cores for a single-triangulation run, cores / concurrent partitions inside the
@@ -386,7 +379,7 @@ void psPointEvalInit(User_options &userOptions)
     // velocity moments are volume-weighted in every PS-DTFE run; the standard binary keeps the density-weighted
     // reduction, with its one stream per point)
     g_pe.ctx.vertexMass     = userOptions.psVertexMass;
-    g_pe.ctx.volumeWeighted = userOptions.psVolumeWeighted;
+    g_pe.ctx.volumeWeighted = true;
     g_pe.ctx.rhoBar       = double( userOptions.averageDensity );   // PS vertex densities are physical
 #else
     g_pe.ctx.rhoBar       = 1.;   // standard vertexDensity() already normalizes by averageDensity
@@ -584,10 +577,8 @@ void setQueryRecords()
     g_pe.ctx.finalized = false;
 }
 
-// True when any query point lies in the bucket range [bLo, bHi] (periodic ranges wrap). The
-// cheap test that lets a tetrahedron with no point anywhere near it skip all per-tet work.
 // The buckets of a range [bLo, bHi] per axis (inclusive), in NO_DIM dimensions: the last axis runs
-// fastest -- the order of the nested 3D loops these replaced -- and a periodic index wraps.
+// fastest, and a periodic index wraps.
 inline bool firstBucket(int bc[NO_DIM], int const bLo[NO_DIM], int const bHi[NO_DIM])
 {
     for (int d = 0; d < NO_DIM; ++d)
@@ -615,6 +606,8 @@ inline size_t bucketIndex(int const bc[NO_DIM])
 }
 
 
+// True when any query point lies in the bucket range [bLo, bHi] (periodic ranges wrap). The
+// cheap test that lets a tetrahedron with no point anywhere near it skip all per-tet work.
 inline bool anyPointInBuckets(int const bLo[NO_DIM], int const bHi[NO_DIM])
 {
     int bc[NO_DIM];
@@ -712,7 +705,7 @@ void interpolatePoints_phaseSpace(DT &dt, User_options &userOptions)
             for (size_t j = 0; j < noVelComp; ++j)
                 vel[v][j] = double( cell->vertex(v)->info().velocity(j) );
         }
-        // the 'dtfe' vertex densities with the grid's masses: rho_v c_v = M(star)/V_eul(star) (the note above)
+        // the 'dtfe' vertex densities with the grid's masses: rho_v c_v = M(star)/V_eul(star) (prepareVertexMass)
         if ( vertexMass )
             for (int v = 0; v <= NO_DIM; ++v)
                 rho[v] *= cell->vertex(v)->info().volumeAccumulator();
@@ -775,9 +768,8 @@ void interpolatePoints_phaseSpace(DT &dt, User_options &userOptions)
             // (vel_{v+1,j} - vel_{0,j}), same affine convention as the density gradient and
             // the same matrix as the grid deposit's velGrad (ps_interpolation.cc
             // matrixMultiplication(posMatInv, dvel)), stored TRANSPOSED: the grid writes it
-            // [j*3+d] (field_computation.h velocityGradient), a point [d*3+j] (measured on a rigid
-            // rotation). The velocity profile is linear on every
-            // kept cell -- hull cells included -- so there is no volume-ratio gate here.
+            // [j*3+d] (field_computation.h velocityGradient), a point [d*3+j]. The velocity profile is linear on
+            // every kept cell -- hull cells included -- so there is no volume-ratio gate here.
             for (int d = 0; d < NO_DIM; ++d)
                 for (size_t j = 0; j < noVelComp; ++j)
                     for (int v = 0; v < NO_DIM; ++v)
@@ -1233,8 +1225,7 @@ static void finalizeReport(User_options const &userOptions, size_t const N, Fina
     // none on a periodic box, means that a tetrahedron was OWNED twice or not at all: by partitions (or a composite
     // server's) whose padding does not reproduce the tessellation near their faces, or -- the same in a single run --
     // by the two images of a tetrahedron across a periodic box face, whose centroids come from periodic copies that
-    // the box shift rounds (measured on a box at 131020-131120 Mpc: 6 doubles and 15 holes in 17600 points, the
-    // partitioned run identical; on a box starting at 0 the -L copies are exact and the +L ones round at ~ulp(L)).
+    // the box shift rounds (on a box starting at 0 the -L copies are exact and the +L ones round at ~ulp(L)).
     bool const holes = g_pe.ctx.periodic and counts.covered < N;
     if ( counts.overlapped > 0 or holes )
     {
@@ -1344,7 +1335,7 @@ void psPointEvalWriteOutputs(User_options const &userOptions)
     };
 
     message << "\n" << MESSAGE::cBold() << PTS_MSG_BINARY << MESSAGE::cReset()
-            << " writing the point-evaluation outputs (raw binary, see README):\n" << MESSAGE::Flush;
+            << " writing the point-evaluation outputs (raw binary):\n" << MESSAGE::Flush;
     writeRaw( ".pts_den",     g_pe.ctx.outDen.data(),     g_pe.ctx.outDen.size()     * sizeof(double),
               "point densities (float64, rho/rho_bar)" );
     writeRaw( ".pts_vel",     g_pe.ctx.outVel.data(),     g_pe.ctx.outVel.size()     * sizeof(double),
@@ -1406,8 +1397,8 @@ void psPointEvalWriteOutputs(User_options const &userOptions)
 
 /* ---- '--resume' with '--sample-points' ---------------------------------------------------------------------
 
-   The planes are made by the grid runs themselves, so without checkpoints a killed run (TNG50-3-Dark z = 0:
-   2.5 h, partitions 5-10 in flight) would restart from zero. The point evaluation's only accumulators are the
+   The planes are made by the grid runs themselves, so without checkpoints a killed run (hours, several
+   partitions in flight) would restart from zero. The point evaluation's only accumulators are the
    stream records, and each record belongs to the one partition that owns its tetrahedron; one pool filled by
    every partition in flight could not say which records go with the partitions a checkpoint lists, so every
    block carries its partition (a sink serves one triangulation, so a block never mixes two), and a checkpoint
@@ -1421,8 +1412,7 @@ void psPointEvalWriteOutputs(User_options const &userOptions)
    back into the store and skips those partitions. psPointEvalFinalize sorts each point's records into a strict
    order before any sum, so it does not matter which records were read back and which computed: the '.pts_*'
    outputs are byte-identical to an uninterrupted run's (tests/ps_resume_points_check.sh). The files hold the
-   bytes the run keeps in memory anyway, once: a 4096^2 plane with --pts-vel-grad at z = 0 (~4 streams per point,
-   118 B per entry) writes ~8 GB over the whole run, inside the checkpoint's 5% time throttle and room rule.
+   bytes the run keeps in memory anyway, once, inside the checkpoint's 5% time throttle and room rule.
    The STANDARD binary's partition loop tags its records the same way (DTFE.cpp; one record per
    point there, from the partition owning its tetrahedron), so a standard '--sample-points --partition' run is
    checkpointed and resumed by the same files ('DTFE-PS-POINTS 1' names the format, shared by both binaries; the

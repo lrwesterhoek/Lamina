@@ -29,13 +29,14 @@ ADVANCED_INTRO = ("For tests and special cases. Automatic lets the code choose, 
 # programs' own help; no measured number
 ADVANCED_TIP = {
     "gpu": ("CPU, GPU, or CPU + GPU (PS-DTFE Exact: a split run's partitions shared between the two).\n"
-            "Automatic: the device the Quality and the Machine use pick for this job.",
-            "Where the grid deposit (PS-DTFE) or the grid interpolation (standard DTFE) runs. GPU: every partition "
-            "on the GPU, in every Machine use. CPU + GPU: a PS-DTFE Exact run split into partitions deposits some of "
-            "them on the CPU cores and the others on the GPU at the same time, at the program's own share for this "
-            "machine, in every Machine use (Automatic does so under Performance only); a small or unsplit run, or "
-            "a Machine use that leaves too few cores beside the GPU, deposits on the GPU alone, and the program's "
-            "log says which. The GPU is a choice only when the "
+            "Automatic: the program picks the device; 'Check memory' names its pick.",
+            "Where the grid deposit (PS-DTFE) or the grid interpolation (standard DTFE) runs. Automatic: the program "
+            "picks the device for the run; its memory check and its log say which. GPU: every partition on the GPU, "
+            "in every Machine use. CPU + GPU: a PS-DTFE Exact run split into partitions deposits some of them on the "
+            "CPU cores and the others on the GPU at the same time, at the program's own share for this machine, in "
+            "every Machine use (on Automatic, a run the program puts on the GPU does so under Performance only); a "
+            "small or unsplit run, or a Machine use that leaves too few cores beside the GPU, deposits on the GPU "
+            "alone, and the program's log says which. The GPU is a choice only when the "
             f"program this job runs is a GPU build ({rs.GPU_BUILD_HINT}); CPU + GPU only for PS-DTFE in single "
             "precision; the 2D programs run on the CPU."),
     "nsub": ("Fast only: the sampled deposit's points per cell axis (nSub³ points per cell).\n"
@@ -227,8 +228,10 @@ class AdvancedMixin:
     def _sync_advanced_tab(self, tab: str):
         """A tab's rows after a change of its job: shown where the job takes the setting (runspec.advanced_rows) or
         while it holds a value (so it can be set back); each row's choices and value; its grey note -- on Automatic
-        what Automatic gives now, else why the value is not passed, if it is not. The samples row is greyed under
-        Exact (it uses none) unless it holds a value. Then the grey 'Advanced: ...' line and the summary."""
+        what Automatic gives now (the device: the CPU on a build without the GPU, else the program's pick, named once
+        a memory check of these settings reported it, self.mem_results), else why the value is not passed, if it is
+        not. The samples row is greyed under Exact (it uses none) unless it holds a value. Then the grey
+        'Advanced: ...' line and the summary."""
         spec = self._tab_spec(tab)
         g, rows, line = self.adv_boxes[tab], self.adv_rows[tab], self.adv_lines[tab]
         adv = rs.job_advanced(spec)
@@ -248,7 +251,7 @@ class AdvancedMixin:
                     choices.append((adv[key], rs.advanced_value_text(key, adv[key])))     # (not on offer here)
                 row.set_choices(choices)
             row.set_value(adv.get(key))
-            row.set_note(rs.automatic_text(spec, key) if key not in adv
+            row.set_note(rs.automatic_text(spec, key, self.mem_results) if key not in adv
                          else f"Not passed: {refused[key]}" if key in refused else "")
             row.setEnabled(not (key == "nsub" and exact and key not in adv))
         text = rs.advanced_text(spec)

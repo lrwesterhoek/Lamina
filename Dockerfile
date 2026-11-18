@@ -50,7 +50,8 @@ RUN set -eux; ARCH_FLAGS="$ARCH_FLAGS" tests/ci_suite.sh build
 # (tests/reference/regression_periodic.txt): a periodic set without Delaunay ties, so every CGAL
 # builds the same tessellation, compared to 3e-4 relative (tests/run_tests.py says why). A
 # non-periodic reference differs by ~1.6 between macOS and Linux (dummy-point ties at the hull).
-RUN set -eux; tests/ci_suite.sh core double 2d
+# The suites' grids under /tmp go in the same step, so no layer of the image holds them.
+RUN set -eux; tests/ci_suite.sh core double 2d; rm -rf /tmp/dtfe*
 
 # default entrypoint just documents the two binaries
 CMD ["/bin/sh", "-c", "echo 'DTFE image: binaries at /opt/dtfe/DTFE and /opt/dtfe/PS-DTFE (+ -double, -2d; run with --help for options)'"]

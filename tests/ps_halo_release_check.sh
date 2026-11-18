@@ -37,7 +37,7 @@ source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double
 N="${N:-32}"; GRID="${GRID:-64}"; BOX="${BOX:-100.0}"; D="${D:-2}"
 BIN="${PS_BIN}"
 precision_require "${BIN}"
-TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}"; mkdir -p "${TMP}"
+TMP="${DTFE_TEST_TMP}"
 SNAP_PAN="${TMP}/phr_input_pancake.hdf5"
 SNAP_CRW="${TMP}/phr_input_crossed.hdf5"
 NPROC="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
@@ -53,7 +53,7 @@ GPU_BUILT=0
 
 # capture FIRST -- piping the binary straight into grep -q would SIGPIPE it under pipefail
 # a help that fails is a broken binary, not a missing feature; a missing feature fails under DTFE_TEST_REQUIRED=1
-# (skip_or_fail, tests/precision.sh)
+# (skip_or_fail, tests/lib.sh)
 FULL_HELP="$("${BIN}" --full-help 2>/dev/null)" || { echo "FAIL: ${BIN} --full-help exited non-zero"; exit 1; }
 if ! grep -q -- '--ps-halo-release' <<<"${FULL_HELP}"; then
     skip_or_fail "this PS-DTFE has no --ps-halo-release support."

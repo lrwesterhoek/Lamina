@@ -8,55 +8,18 @@
      --gpu and 0 the CPU -- the drivers' name; the compile-time macro of that name is another thing, and a string
      literal is not expanded; both binaries read all three, and the flags beat them) is -1 while unset or set to
      auto, else the flag;
-   - a number is the value read by std::atol / std::atof; the caller checks its range and keeps its default otherwise;
-   - a Name may carry an ALIAS, read only when the name itself is unset: a renamed knob kept for a release. The
-     renamed ones are listed once, in 'renamed' below (docs/cleanup-plan.md P6.7: one DTFE_ name per concept in both
-     binaries), and a Name built from the new name finds its old one there, so a read site names only the new one;
-     main() names each old one that is set, once, at start-up (warnRenamed: never from a read, which may happen on a
-     worker thread in the middle of a log). An INVERTED alias is the opposite switch (DTFE_NO_PROGRESS=1 is
-     DTFE_PROGRESS=0): only flag() reads it. The GPU knobs' Metal spellings (PS_METAL_CHUNK for PS_GPU_CHUNK, ...)
-     were dropped once the backend-neutral names had shipped. PS_GPU_CHUNK keeps its own name: standard DTFE's
-     DTFE_GPU_CHUNK counts work items, not tetrahedra.
-   Plain C++17 with no other header of the project, so any translation unit can include it. */
+   - a number is the value read by std::atol / std::atof; the caller checks its range and keeps its default otherwise.
+   Each variable has one name; PS_GPU_CHUNK and standard DTFE's DTFE_GPU_CHUNK are two variables (one counts
+   tetrahedra, the other work items). Plain C++17 with no other header of the project, so any translation unit can
+   include it. */
 #ifndef DTFE_ENV_KNOBS_H
 #define DTFE_ENV_KNOBS_H
 
-#include <cstdio>
 #include <cstdlib>
-#include <cstring>
-#include <initializer_list>
 #include <string>
 
 namespace Env
 {
-
-// the renamed variables (P6.7), each read under its old name for one release when the new one is unset; both
-// binaries read every row (one name per concept), so an old PS-only name now reaches standard DTFE's twin too
-struct Renamed
-{
-    char const *name;    // the new name
-    char const *old;     // the deprecated one
-    bool inverted;       // the old one is the opposite switch
-};
-static constexpr Renamed renamed[] = {
-    { "DTFE_OVERLAP",                       "DTFE_PS_OVERLAP",          false },
-    { "DTFE_CHECKPOINT",                    "DTFE_PS_CHECKPOINT",       false },
-    { "DTFE_GPU_TIMING",                    "PS_GPU_TIMING",            false },
-    { "DTFE_GPU_FLOAT_MASS",                "PS_GPU_FLOAT_MASS",        false },
-    { "DTFE_GPU_FLOAT_MOMENTS",             "PS_GPU_FLOAT_MOMENTS",     false },
-    { "DTFE_MASS_AUDIT",                    "PS_MASS_AUDIT",            false },
-    { "DTFE_DEBUG_DEGREES",                 "PS_DEBUG_DEGREES",         false },
-    { "DTFE_GPU_EXACT_CELLS",               "PS_EXACT_ITEM_CELLS",      false },
-    { "DTFE_GPU_ITEMS",                     "PS_EXACT_ITEMS",           false },
-    { "DTFE_TRIANGULATION_THREADS",         "DTFE_TBB_THREADS",         false },
-    { "DTFE_AUTO_PTS_VEL_GRAD",             "DTFE_AUTO_PTS_VELGRAD",    false },
-    { "DTFE_TESSELLATION_CACHE_THREADS",    "DTFE_TESS_CACHE_THREADS",  false },
-    { "DTFE_TESSELLATION_CACHE_ZLIB",       "DTFE_TESS_CACHE_ZLIB",     false },
-    { "DTFE_TESSELLATION_CACHE_CGAL_IO",    "DTFE_TESS_CACHE_CGAL_IO",  false },
-    { "DTFE_TESSELLATION_CACHE_FINGERPRINT", "DTFE_TESS_CACHE_FINGERPRINT", false },
-    { "DTFE_TESSELLATION_CACHE_LEGACY",     "DTFE_TESS_CACHE_LEGACY",   false },
-    { "DTFE_PROGRESS",                      "DTFE_NO_PROGRESS",         true },
-};
 
 // a set, non-empty value of one variable, else nullptr
 inline char const *own(char const *k)
@@ -66,32 +29,15 @@ inline char const *own(char const *k)
     return v != nullptr and v[0] != '\0' ? v : nullptr;
 }
 
-// the row of 'renamed' whose new name is n, else nullptr
-inline Renamed const *renamedRow(char const *n)
-{
-    if ( n != nullptr )
-        for (Renamed const &r : renamed)
-            if ( std::strcmp( r.name, n ) == 0 ) return &r;
-    return nullptr;
-}
-
-// a variable's name and the alias read when the name is unset (nullptr: none; a renamed one's old name by default)
+// a variable's name, made from a 'char const *': a read site passes "DTFE_GPU" or {"DTFE_GPU"}
 struct Name
 {
     char const *name;
-    char const *alias;
-    bool inverted;       // the alias is the opposite switch (read by flag() only)
-    Name(char const *n, char const *a = nullptr)
-        : name( n ), alias( a != nullptr ? a : renamedRow( n ) != nullptr ? renamedRow( n )->old : nullptr ),
-          inverted( a == nullptr and renamedRow( n ) != nullptr and renamedRow( n )->inverted ) {}
+    Name(char const *n) : name( n ) {}
 };
 
-// the value: of the name, else of the alias (not an inverted one); nullptr when neither is set to a non-empty value
-inline char const *value(Name const n)
-{
-    if ( char const *v = own( n.name ) ) return v;
-    return n.inverted ? nullptr : own( n.alias );
-}
+// the value; nullptr when it is not set to a non-empty value
+inline char const *value(Name const n) { return own( n.name ); }
 
 inline bool isSet(Name const n) { return value( n ) != nullptr; }
 
@@ -111,21 +57,8 @@ inline bool offValue(char const *v)
     return s == "0" or s == "false" or s == "no" or s == "off";
 }
 
-// one stderr line per deprecated name that is set ('warning: PS_GPU_TIMING is deprecated, use DTFE_GPU_TIMING'),
-// for main() to call once at start-up; an inverted one names the new switch's value that means the same
-// (DTFE_NO_PROGRESS=1: 'use DTFE_PROGRESS=0'; DTFE_NO_PROGRESS=0: 'use DTFE_PROGRESS=1')
-inline void warnRenamed()
-{
-    for (Renamed const &r : renamed)
-        if ( char const *v = own( r.old ) )
-            std::fprintf( stderr, "warning: %s is deprecated, use %s%s\n", r.old, r.name,
-                          not r.inverted ? "" : offValue( v ) ? "=1" : "=0" );
-}
-
 inline bool flag(Name const n, bool const def = false)
 {
-    if ( n.inverted and own( n.name ) == nullptr )
-        if ( char const *v = own( n.alias ) ) return offValue( v );   // DTFE_NO_PROGRESS=1: DTFE_PROGRESS off
     char const *v = value( n );
     return v == nullptr ? def : not offValue( v );
 }

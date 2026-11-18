@@ -130,7 +130,7 @@ def t_velocity_weighting():
     w, why = cv.velocity_weighting(prod)
     assert w == "volume" and "--ps-volume-weighted" in why, (w, why)
     (d / "ps_mw.runlog").write_text("RUNNING ./PS-DTFE in out --grid 64 --ps-vertex-mass --periodic\n"
-                                    "PS_VOLUME_WEIGHTED=1 is not the flag; --ps-volume-weightedness neither\n")
+                                    "--ps-volume-weightedness is not the flag\n")
     w, why = cv.velocity_weighting(prod)
     assert w == "mass" and "older" in why and "default" not in why, (w, why)
     assert cv.velocity_weighting(SimpleNamespace(fs=SimpleNamespace(method="dtfe", snapdir=d, prefix="output.")))[0] \
@@ -397,7 +397,7 @@ def main():
     check("plot_void_convergence: crossbox products read (b), none said; no DTFE grids -> (c) not drawn",
           t_crossbox_and_missing)
     check("plot_void_convergence: a --prefix run's names and row (c) carry its grid set", t_prefix_set)
-    check("plot_void_convergence: --help lists the options (launcher contract K4)", t_cli)
+    check("plot_void_convergence: --help lists the options (the launcher's contract)", t_cli)
     print("data-backed:")
     check("TNG100-3-Dark z=0: 256^3 block-mean catalogue against the native one", t_tng100_grid)
     print("-" * 60)

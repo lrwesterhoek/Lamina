@@ -19,7 +19,8 @@
 # AND the settings in its <prefix>.runlog match this run's (grid, sub-samples, padding, lambda-th,
 # precision, the deposit options, and every requested field among its fields; not the GPU/CPU
 # choice, the run mode, the GPU share, the split or the build).
-# A snapshot without a run log is judged by the file times alone (said per snapshot).
+# A snapshot whose run log has no header 'run mode' line (an older version of the programs wrote it) is recomputed;
+# one without a run log is judged by the file times alone (said per snapshot).
 # Interrupted batches continue where they stopped. FORCE=1 recomputes everything.
 #
 # Env knobs:
@@ -39,42 +40,30 @@
 #   PTS_VEL_GRAD  1 (default) = also evaluate the velocity gradient at every sample point
 #                 (.pts_velGrad), which is what makes the velDiv/velShear/velVort maps
 #                 possible. A snapshot lacking it counts as STALE, so a rerun recomputes it.
-#   PS_POINT_CONVENTIONS  grid (default, the only value): the image plane's estimators (run_ps_dtfe.sh's knob) are
-#                 the grids' vertex masses and volume weighting at the points. 'legacy', the older conventions, was
-#                 removed: it stops the script (exit 2), as any other value does. A snapshot whose run log shows
-#                 '--ps-point-conventions legacy' (an older plane) is recomputed.
-#   PS_LINEAR_DEPOSIT  0 only (run_ps_dtfe.sh's knob): the linear deposit was removed, so 1 stops the script (exit 2).
-#                 A snapshot whose run log shows '--ps-linear-deposit' (an older run) is recomputed.
-#   PS_VOLUME_WEIGHTED  1 only (default; run_ps_dtfe.sh's knob): PS-DTFE always weights its velocity moments by
-#                 volume (the dispersion by mass), so 0 stops the script (exit 2). A snapshot whose run log lacks
-#                 '--ps-volume-weighted' (an older run, with mass-weighted moments) is recomputed.
 #   PLANES, THICKNESS, SUPERSAMPLE, PLANE_WINDOW
 #                 the plane's geometry, forwarded to make_image_plane.py: PLANES sampling planes
 #                 (default 1 = one crisp cross-section; a handful ghosts, use >= 16 with
 #                 plot_pointeval.py --project slab) across a slab of THICKNESS Mpc (default 2), KxK sub-samples per pixel
 #                 averaged into pixel-area means (default 1), and "u0 u1 v0 v1" in Mpc to image
 #                 only that part of the plane (default: the whole box).
-#   DTFE_GPU      1 = the deposit on the GPU (run_ps_dtfe.sh -m), 0 = the CPU; unset (auto) = the GPU when the
-#                 PS binary was built with one, as run_ps_dtfe.sh decides
-#                 (config.sh gpu_auto_resolve: PS-DTFE, or PS-DTFE-double with DTFE_PRECISION=double),
-#                 for both deposits and in every run mode
+#   DTFE_GPU      1 = the deposit on the GPU, 0 = the CPU; unset (or auto) = the binary's pick: the GPU of a GPU
+#                 build, for every field and either deposit (PS_CAUSTIC_CUSPS=1: the CPU). Read by the PS binary
+#                 itself, which every run_ps_dtfe.sh run starts with the caller's value
 #   DTFE_EXACT_AVERAGE  1 (default) = the exact deposit (--exact), 0 = the sampled one (--sampled); unset, a
 #                 SUBSAMPLES count selects the sampled one (run_ps_dtfe.sh's rule, config.sh average_resolve).
-#                 A run log of an older sampled run names no deposit flag: its grids are stale for the exact
-#                 default and current for a sampled pipeline run with the same count (SUBSAMPLES=3 for a log
+#                 A run log that does not name '--exact' is read as a sampled run's: its grids are stale for the
+#                 exact default and current for a sampled pipeline run with the same count (SUBSAMPLES=3 for a log
 #                 that names 3; no count is the binary's 1, one point per cell).
-#   DTFE_RUN_MODE gentle | balanced | performance | auto (default): how hard each run may lean on the machine
-#                 (run_ps_dtfe.sh's --run-mode): auto = balanced, or performance inside a SLURM or PBS job
-#                 (config.sh run_mode_resolve); resolved once here and handed on. It never makes grids stale.
+#   DTFE_RUN_MODE gentle | balanced | performance (any case): how hard each run may lean on the machine (the
+#                 binary's --run-mode); unset (or auto) = the binary's default, balanced, or performance inside a
+#                 SLURM or PBS job. Read by the PS binary itself, as DTFE_GPU: another word stops each run there
+#                 (after the plane is made); nothing runs as another mode. It never makes grids stale.
 #   PYTHON        the python that makes the plane (default: config.sh h5py_python, the first with numpy and h5py)
-# A switch is off for 0, false, no or off and on for any other value (the binaries' rule). Older names, read for
-# one release with a warning (the new name wins when both are set): PS_GPU and PS_METAL (DTFE_GPU), PS_EXACT
-# (DTFE_EXACT_AVERAGE), PTS_CONVENTIONS (PS_POINT_CONVENTIONS), WINDOW (PLANE_WINDOW), PY (PYTHON), DTFE_GRID_SIZE.
+# A switch is off for 0, false, no or off and on for any other value (the binaries' rule).
 # The other run options reach run_ps_dtfe.sh through the environment exactly as from a terminal:
 # SUBSAMPLES, PS_VERTEX_MASS, PS_CAUSTICS, PS_CAUSTIC_CUSPS, PARALLEL_TRIANGULATION,
 # PARTITION, MAX_CONCURRENT, SCRATCH_DIR, TESSELLATION_CACHE, DTFE_PRECISION, OUTPUT_PREFIX, LAMBDA_TH,
-# THREADS, PS_MERGE, DTFE_RESUME, GPU_SHARE (see its header for each, and the older names it still reads). The GUI's
-# Pipeline tab sets all of them.
+# THREADS, PS_MERGE, DTFE_RESUME, GPU_SHARE (see its header for each). The GUI's Pipeline tab sets all of them.
 # Snapshots are auto-discovered (snapdir_*/combined_NNN.hdf5). The plane file is generated
 # once per simulation (box size is constant across its snapshots) and reused -- as long as its
 # sidecar has the requested geometry (make_image_plane.py --same-as, exit 3 = differs); otherwise it
@@ -96,57 +85,28 @@ case "${1:-}" in
     "") ;;
     *) echo "Error: run_ps_pipeline.sh takes no arguments (its knobs are environment variables; --help lists them)" >&2; exit 2 ;;
 esac
-source "${SCRIPT_DIR}/config.sh"    # (GRID_SIZE, and DTFE_GRID_SIZE, its older name, through config.sh's knob)
+source "${SCRIPT_DIR}/config.sh"    # (CALLER_GRID_SIZE, the caller's GRID_SIZE, is read below)
 require_data_root                    # before SIMS=all looks for simulations under it
 
-knob PYTHON PY                       # (config.sh knob: the older name read for one release, with a warning)
 PYTHON="${PYTHON:-$(h5py_python)}"   # the launcher passes its own (config.sh h5py_python otherwise)
 NU="${NU:-8192}"
 AXIS="${AXIS:-z}"
 CENTER="${CENTER:-}"
 GRID_SIZE="${CALLER_GRID_SIZE:-512}"   # 512^3 analysis grids by default (figures don't depend on it)
 PTS_VEL_GRAD="${PTS_VEL_GRAD:-1}"
-knob PS_POINT_CONVENTIONS PTS_CONVENTIONS
-PS_POINT_CONVENTIONS="${PS_POINT_CONVENTIONS:-grid}"
 PLANES="${PLANES:-1}"
 THICKNESS="${THICKNESS:-2}"
 SUPERSAMPLE="${SUPERSAMPLE:-1}"
-knob PLANE_WINDOW WINDOW
 PLANE_WINDOW="${PLANE_WINDOW:-}"
-knob DTFE_GPU PS_GPU PS_METAL
-DTFE_GPU="${DTFE_GPU:-auto}"         # auto: resolved below, as run_ps_dtfe.sh resolves its DTFE_GPU
-_caller_run_mode="${DTFE_RUN_MODE:-}"   # (the caller's own value: run_mode_resolve, below)
-DTFE_RUN_MODE="${DTFE_RUN_MODE:-auto}"  # auto: resolved below, as run_ps_dtfe.sh resolves its DTFE_RUN_MODE
-knob DTFE_EXACT_AVERAGE PS_EXACT     # (run_ps_dtfe.sh's own knob: resolved below by its rule and handed on)
-# run_ps_dtfe.sh's other knobs with older names, resolved here once (exported under the new name when the old one
-# was), so the driver does not warn again for every simulation
-knob SUBSAMPLES AVG_SUBSAMPLES
-knob_merge PS_MERGE ORDERED_MERGE FIXED_POINT_MERGE
-knob DTFE_RESUME PS_RESUME
-knob TESSELLATION_CACHE TESS_CACHE
-knob PARALLEL_TRIANGULATION PS_PARALLEL_TRI
-knob PS_LAGRANGIAN_PADDING PS_LAG_PADDING
-knob -e PS_LAGRANGIAN_INPUT LAGRANGIAN_INPUT
-PS_VOLUME_WEIGHTED="${PS_VOLUME_WEIGHTED:-1}"
 FORCE="${FORCE:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 PREFIX="${OUTPUT_PREFIX:-ps_output}"
-knob_bool PTS_VEL_GRAD PS_VOLUME_WEIGHTED FORCE DRY_RUN   # 1 or 0 (config.sh); DTFE_GPU: knob_gpu below
-knob_gpu DTFE_GPU
-# the choices PS-DTFE no longer has, refused here before anything runs (a dry run too), in run_ps_dtfe.sh's words:
-# that driver refuses them as well, but its dry run below keeps no stderr and its runs fail per simulation
-if knob_on PS_LINEAR_DEPOSIT; then
-    echo "Error: PS_LINEAR_DEPOSIT=1: the linear deposit was removed (PS-DTFE deposits with the exact or the sampled deposit)." >&2
-    exit 2
-fi
-if [ "${PS_VOLUME_WEIGHTED}" = "0" ]; then
-    echo "Error: PS_VOLUME_WEIGHTED=0: the mass-weighted velocity moments were removed (PS-DTFE's velocity moments are volume-weighted)." >&2
-    exit 2
-fi
-case "${PS_POINT_CONVENTIONS}" in
-    grid) ;;
-    legacy) echo "Error: PS_POINT_CONVENTIONS=legacy: the legacy point conventions were removed (point values follow the grid's conventions, 'grid')." >&2; exit 2 ;;
-    *) echo "Error: PS_POINT_CONVENTIONS must be 'grid' (got '${PS_POINT_CONVENTIONS}')." >&2; exit 2 ;;
+knob_bool PTS_VEL_GRAD FORCE DRY_RUN   # 1 or 0 (config.sh)
+# PS_MERGE's value, refused here before anything runs (a dry run too), in run_ps_dtfe.sh's words: that driver
+# refuses it as well, but its dry run below keeps no stderr and its runs fail per simulation
+case "${PS_MERGE:-}" in
+    ''|index-order|completion-order) ;;
+    *) echo "Error: PS_MERGE must be 'index-order' or 'completion-order' (got '${PS_MERGE}')." >&2; exit 2 ;;
 esac
 
 # the plane's geometry, as make_image_plane.py takes it (shared by the generation and the --same-as check)
@@ -161,18 +121,9 @@ if [ -n "${PLANE_WINDOW}" ]; then
 fi
 # The deposit run_ps_dtfe.sh will run, by its own rule (config.sh average_resolve): DTFE_EXACT_AVERAGE when given
 # (true is 1 there too), else the sampled one when SUBSAMPLES is set, else the exact one, the default. Handed on as
-# DTFE_EXACT_AVERAGE (env_args below), so the GPU choice here and the deposit there cannot disagree.
+# DTFE_EXACT_AVERAGE (env_args below), so the deposit the banner names is the one run_ps_dtfe.sh runs.
 _caller_exact="${DTFE_EXACT_AVERAGE:-}"
 average_resolve
-# The run mode, by run_ps_dtfe.sh's rule too (config.sh run_mode_resolve): DTFE_RUN_MODE when given, else balanced, or
-# performance inside a SLURM or PBS job. Resolved once and handed on as DTFE_RUN_MODE (env_args below).
-run_mode_resolve
-# DTFE_GPU=auto (the default): the drivers' device for the deposit and the run mode (config.sh gpu_auto_resolve, the
-# rule run_ps_dtfe.sh applies; DTFE_PRECISION picks the binary there too): the GPU when the binary run_ps_dtfe.sh will
-# run was built with one, so a CPU-only build is not asked for the GPU (and a fallback warning) on every snapshot.
-case "${DTFE_PRECISION:-single}" in double) ps_bin="PS-DTFE-double" ;; *) ps_bin="PS-DTFE" ;; esac
-gpu_auto_resolve DTFE_GPU "${ps_bin}" ps "${DTFE_EXACT_AVERAGE}" "${DTFE_RUN_MODE}"
-gpu_args=(); [ "${DTFE_GPU}" = "1" ] && gpu_args=(-m)
 
 if [ -z "${SIMS:-}" ]; then
     echo "Error: no simulation given: set SIMS to the simulations to process (e.g. SIMS=\"TNG100-3-Dark\"), or SIMS=all" \
@@ -187,78 +138,58 @@ if [ "${SIMS}" = "all" ]; then
     done
 fi
 echo "Simulations:${SIMS}"
-echo "Slice: axis ${AXIS}, ${NU} px, centre ${CENTER:-box/2}, planes ${PLANES}$([ "${PLANES}" != "1" ] && echo " over ${THICKNESS} Mpc"), ${SUPERSAMPLE}x${SUPERSAMPLE} sub-samples${PLANE_WINDOW:+, window ${PLANE_WINDOW}}   Grid: ${GRID_SIZE}^3   GPU: ${DTFE_GPU}${gpu_auto}   deposit: $([ "${DTFE_EXACT_AVERAGE}" = "1" ] && echo exact || echo sampled) (${average_src})   vel-grad: ${PTS_VEL_GRAD}   force: ${FORCE}"
-echo "Run mode: ${DTFE_RUN_MODE} (${run_mode_src})"
+echo "Slice: axis ${AXIS}, ${NU} px, centre ${CENTER:-box/2}, planes ${PLANES}$([ "${PLANES}" != "1" ] && echo " over ${THICKNESS} Mpc"), ${SUPERSAMPLE}x${SUPERSAMPLE} sub-samples${PLANE_WINDOW:+, window ${PLANE_WINDOW}}   Grid: ${GRID_SIZE}^3   GPU: $(device_given)   deposit: $([ "${DTFE_EXACT_AVERAGE}" = "1" ] && echo exact || echo sampled) (${average_src})   vel-grad: ${PTS_VEL_GRAD}   force: ${FORCE}"
+echo "Run mode: $(run_mode_given)"   # (GPU: and Run mode: as given, config.sh device_given; each run log says what ran)
 
 run() { echo "+ $*"; [ "${DRY_RUN}" = "1" ] || "$@"; }
 
 # run_settings <command line>: the options of a run_ps_dtfe.sh command that change its grids, one per line,
 # sorted -- from the RUNNING: line a run log starts with, or from a DRY_RUN=1 'would run' line (its %q
-# quoting only touches the paths, which are not compared). The binary's name carries the precision. Each option
-# is read in its canonical spelling first: old[] (renamed options) and sw[] (the merge switches, one --ps-merge
-# mode) are python/dtfelib/runlog.py's permanent table (RENAMES, SWITCHES; tests/docs_drift_check.py keeps the two
-# equal), so a log written with '--ps-exact-deposit --lambda_th 0.3 --avg-subsamples 3' has the settings of
-# '--exact --lambda-th 0.3 --subsamples 3', and a driver that emits the new names does not find every older
-# snapshot stale. val[] / flag[] name the canonical options compared (the merge mode is not: it moves the last float
-# bits only, and older logs carry no merge flag; nor are '--run-mode' and '--gpu-share', for the same reasons). The
-# deposit: '--exact' is compared (older logs: '--exact-average' or '--ps-exact-deposit'), '--sampled' is not (an
-# older sampled run named no flag), and the '--subsamples' count only for the sampled deposit: beside '--exact' the
-# driver passes none, and the binary then keeps 3 where an exact run still reads a count (src/user_options.cc
-# kPsExactSliverSubsamples), the count older drivers passed beside it ('--subsamples 3'); a sampled one without a
-# count runs the binary's own 1, one point per cell (older drivers always named the count). So an older exact log and
-# an older sampled one each compare equal to the command the driver now emits for the same deposit and count (a
-# sampled log naming 3: with SUBSAMPLES=3). A sampled log that names no count is read by its header's
-# 'avg sub-samples (nSub)' line, the count its run took (the caller appends it: a binary from before 2026-11-14 ran
-# such a command at 3, a later one at 1).
-# The velocity gradient's route is compared as named ('--face-gradient',
-# '--per-tet-gradient'); a command naming neither takes the binary's default, so an older log naming neither (the
-# stream average, PS-DTFE's route before D13) compares equal to it: its slice, the pipeline's product, is the same
-# either way (the points do not depend on the route), and FORCE=1 or FACE_GRADIENT=1 recomputes its grids.
-# '--ps-linear-deposit' and '--ps-point-conventions' stay among the compared options although the driver no longer
-# emits them (PS-DTFE dropped the linear deposit and the legacy conventions): an older log that names one is stale.
-# '--ps-volume-weighted' stays compared too: the driver passes it on every run, so an older log without it (an older
-# binary's mass-weighted moments) is stale.
+# quoting only touches the paths, which are not compared). The binary's name carries the precision. val[] / flag[]
+# name the options compared, in their current names (a run log without the header's 'run mode' line, an older
+# version's, is recomputed before its command gets here: older_log). The merge mode is not compared (it moves the
+# last float bits only), nor are '--run-mode' and '--gpu-share', for the same reason. The deposit: '--exact' is
+# compared, '--sampled' is not compared (the drivers pass '--exact' or '--sampled' on every run, so a log without
+# '--exact' is read as a sampled run's), and the '--subsamples' count only for the sampled deposit: beside
+# '--exact' the driver passes none (the binary keeps its own count there, src/user_options.cc
+# kPsExactSliverSubsamples); a sampled command without a count runs the binary's own 1, one point per cell, and
+# reads as '--subsamples 1'. The caller appends a log's header count ('avg sub-samples (nSub)', the count its run
+# took) after its command; the last count read is the one compared.
+# The velocity gradient's route is compared as named ('--face-gradient', '--per-tet-gradient'); a command naming
+# neither takes the binary's default, whichever route that is: the slice, the pipeline's product, does not depend on
+# the route, and FORCE=1 or FACE_GRADIENT=1 recomputes the grids.
 run_settings() {
     printf '%s\n' "$1" | awk '
         function out(l) { if (l ~ /^--subsamples( |$)/) subs = l; else print l }
-        BEGIN { split("--grid --padding --subsamples --field --lambda-th --ps-point-conventions " \
+        BEGIN { split("--grid --padding --subsamples --field --lambda-th " \
                       "--ps-lagrangian-padding --ps-alpha-shape --ps-halo-release", v); for (i in v) val[v[i]] = 1
-                split("--periodic --ps-vertex-mass --ps-volume-weighted --exact --ps-linear-deposit " \
+                split("--periodic --ps-vertex-mass --exact " \
                       "--ps-caustics --ps-caustic-cusps --pts-vel-grad --face-gradient --per-tet-gradient", b)
-                for (i in b) flag[b[i]] = 1
-                old["--ps-gpu"] = "--gpu"; old["--exact-average"] = "--exact"; old["--ps-exact-deposit"] = "--exact"
-                old["--ps-no-overlap"] = "--no-overlap"
-                old["--full_help"] = "--full-help"; old["--lambda_th"] = "--lambda-th"; old["--MpcUnit"] = "--mpc-unit"
-                old["--paddingMpc"] = "--padding-mpc"; old["--regionMpc"] = "--region-mpc"; old["--partNo"] = "--partition-index"
-                old["--redshiftCone"] = "--redshift-cone"; old["--origin"] = "--cone-origin"; old["--NGP"] = "--ngp"
-                old["--CIC"] = "--cic"; old["--TSC"] = "--tsc"; old["--PCS"] = "--pcs"; old["--SPH"] = "--sph"
-                old["--Voronoi"] = "--voronoi"; old["--inputFile"] = "--input-file"; old["--outputFile"] = "--output-file"
-                old["--input"] = "--input-format"; old["--output"] = "--output-format"; old["--method"] = "--average-method"
-                old["--noTest"] = "--no-padding-test"; old["--density0"] = "--mean-density"
-                old["--randomSample"] = "--particle-fraction"; old["--approxPSD"] = "--approx-phase-space-density"
-                old["--extensive"] = "--scalars-extensive"; old["--options"] = "--reader-options"
-                old["--avg-subsamples"] = "--subsamples"; old["--lagrangianInput"] = "--ps-lagrangian-input"
-                old["--ps-lag-padding"] = "--ps-lagrangian-padding"; old["--per-stream"] = "--ps-per-stream"
-                old["--per-stream-ids"] = "--ps-per-stream-ids"; old["--pts-lagrangian"] = "--ps-per-stream-lagrangian"
-                old["--pts-conventions"] = "--ps-point-conventions"; old["--ps-window"] = "--grid-window"
-                sw["--ordered-merge"] = "--ps-merge index-order"; sw["--completion-order-merge"] = "--ps-merge completion-order"
-                sw["--fixed-point-merge"] = "--ps-merge fixed-point" }
+                for (i in b) flag[b[i]] = 1 }
         { i = 1; if ($1 == "RUNNING:") i = 2
           bin = $i; sub(/.*\//, "", bin); print "binary " bin
           cur = ""; line = ""; subs = ""; exact = 0
           for (i = i + 1; i <= NF; i++) {
-              t = $i; sv = ""
+              t = $i
               if (t ~ /^--/) {
-                  if (t in old) t = old[t]
-                  else if (t in sw) { split(sw[t], p, " "); t = p[1]; sv = p[2] }
                   if (line != "") out(line)
                   line = ""; cur = ""
-                  if (t in val) { if (sv != "") line = t " " sv; else { cur = t; line = t } }
+                  if (t in val) { cur = t; line = t }
                   else if (t in flag) { print t; if (t == "--exact") exact = 1 }
               } else if (cur != "") line = line " " t
           }
           if (line != "") out(line)
           if (!exact) { if (subs == "") subs = "--subsamples 1"; print subs } }' | sort
+}
+
+# older_log <run log>: the log has no header 'run mode' line ('\t run mode               : balanced (...)',
+# src/user_options.cc): blanks, 'run mode', blanks, ':', blanks and the mode (the launcher's Pipeline tab predicts
+# with the same test: python/gui/results.py, older_log). The programs print it on every run; a log without it was
+# written by an older version of the programs, whose command may spell its options in names run_settings does not
+# read.
+older_log() {
+    local pat='^[[:blank:]]*run mode[[:blank:]]+:[[:blank:]]+(gentle|balanced|performance)([^[:alnum:]_]|$)'
+    ! grep -a -q -E -e "${pat}" "$1"
 }
 
 # same_settings <have> <want> (run_settings outputs): equal, except that the grids on disk may carry MORE
@@ -348,13 +279,9 @@ print(int(s.get("planes", 1)) * int(s["nv"]) * int(s["nu"]) * int(s.get("supersa
     fi
 
     # ---- grids + point evaluation, one triangulation per snapshot ------------------------
-    # run_ps_dtfe.sh's DTFE_GPU follows this one: -m only switches the GPU ON, an exported DTFE_GPU=1 would otherwise
-    # leak in (an older PS_GPU / PS_METAL was read above and unset: the driver sees the new name only); its deposit
-    # (DTFE_EXACT_AVERAGE) and run mode (DTFE_RUN_MODE), resolved above, too, so the GPU choice was made for the
-    # deposit and the mode it runs
-    env_args=(SAMPLE_POINTS="${plane}.bin" PS_VOLUME_WEIGHTED="${PS_VOLUME_WEIGHTED}" PTS_VEL_GRAD="${PTS_VEL_GRAD}"
-              PS_POINT_CONVENTIONS="${PS_POINT_CONVENTIONS}" DTFE_GPU="${DTFE_GPU}" DTFE_EXACT_AVERAGE="${DTFE_EXACT_AVERAGE}"
-              DTFE_RUN_MODE="${DTFE_RUN_MODE}")
+    # run_ps_dtfe.sh's deposit (DTFE_EXACT_AVERAGE) is the one resolved above; DTFE_GPU, DTFE_RUN_MODE and the other
+    # run options reach it, and its binary, in the environment as the caller set them
+    env_args=(SAMPLE_POINTS="${plane}.bin" PTS_VEL_GRAD="${PTS_VEL_GRAD}" DTFE_EXACT_AVERAGE="${DTFE_EXACT_AVERAGE}")
     [ -n "${FIELDS:-}" ] && env_args+=(FIELDS="${FIELDS}")
     # The settings this batch would run each snapshot with, asked from run_ps_dtfe.sh itself (DRY_RUN=1: reads,
     # runs and writes nothing), so the comparison below cannot drift from what it runs (file times alone would
@@ -362,12 +289,13 @@ print(int(s.get("planes", 1)) * int(s["nv"]) * int(s["nu"]) * int(s.get("supersa
     planned=""
     if [ "${FORCE}" != "1" ] && [ "${plane_new}" != "1" ]; then
         planned="$(env "${env_args[@]}" DRY_RUN=1 "${SCRIPT_DIR}/run_ps_dtfe.sh" -s "${sim}" -g "${GRID_SIZE}" \
-                       ${gpu_args[@]+"${gpu_args[@]}"} "${snaps[@]}" 2>/dev/null \
+                       "${snaps[@]}" 2>/dev/null \
                    | awk '/^Processing snapshot / { s = $3; sub(/\.+$/, "", s) }
                           /DRY RUN -- would run:/ { want = 1; next }
                           want { sub(/^ +/, ""); print s "\t" $0; want = 0 }')"
     fi
-    # resume: only snapshots whose slice is missing, older than its inputs, or made with other settings are computed
+    # resume: only snapshots whose slice is missing, older than its inputs, made by an older version of the programs
+    # (a run log without the header's 'run mode' line) or made with other settings are computed
     compute=()
     for n in "${snaps[@]}"; do
         sd="${simdir}/snapdir_$(printf "%03d" "$n")"
@@ -389,6 +317,9 @@ print(int(s.get("planes", 1)) * int(s["nv"]) * int(s["nu"]) * int(s.get("supersa
             want="$(printf '%s\n' "${planned}" | awk -F '\t' -v s="$(printf "%03d" "$n")" '$1 == s { print $2; exit }')"
             if [ ! -f "${rl}" ]; then
                 echo "-- snap ${n}: ${PREFIX}.pts_den up to date by file times (no ${PREFIX}.runlog to compare the settings with), skipping compute"
+            elif older_log "${rl}"; then
+                echo "-- snap ${n}: ${PREFIX}.runlog was written by an older version of the programs, recomputing"
+                compute+=("$n")
             elif [ -z "${want}" ]; then
                 echo "-- snap ${n}: ${PREFIX}.pts_den up to date by file times (this run's settings could not be worked out: run_ps_dtfe.sh's dry run failed), skipping compute"
             else
@@ -411,7 +342,7 @@ print(int(s.get("planes", 1)) * int(s["nv"]) * int(s["nu"]) * int(s.get("supersa
     done
     if [ ${#compute[@]} -gt 0 ]; then
         run env "${env_args[@]}" \
-            "${SCRIPT_DIR}/run_ps_dtfe.sh" -s "${sim}" -g "${GRID_SIZE}" ${gpu_args[@]+"${gpu_args[@]}"} "${compute[@]}" \
+            "${SCRIPT_DIR}/run_ps_dtfe.sh" -s "${sim}" -g "${GRID_SIZE}" "${compute[@]}" \
             || { echo "!! ${sim}: run_ps_dtfe.sh reported failure (continuing with the next simulation)"; overall_rc=1; }
     else
         echo "-- ${sim}: all snapshots up to date"

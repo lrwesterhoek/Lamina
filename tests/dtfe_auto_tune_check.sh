@@ -29,18 +29,18 @@
 #     check -- the plan, the threads' particle counts, a byte identity -- holds under either average.
 #  F) the tuner only chooses: an auto-tuned run is byte-identical to the same split given by hand.
 #  G) on a simulated small machine the tuner picks a split its counted model says fits (over_budget=0) and names the
-#     busiest partition's vertex count in its AUTO-TUNE line. On GPU builds (single precision), at a budget that holds
-#     3^3 x 10 threads and 2^3 x 2 but not 2^3 x 10, the plan is 3^3 x 10: the most threads, at the coarsest split
-#     that holds them.
+#     busiest partition's vertex count in its AUTO-TUNE line. On GPU builds (single precision), on 128^3 particles, at
+#     a budget that holds 3^3 x 10 threads and 2^3 x 2 but not 2^3 x 10, the plan is 3^3 x 10: the most threads, at
+#     the coarsest split that holds them. No such budget (a gap under 0.1 GB between the plans) is a failure.
 #  H) the 2D build (DTFE-2d, when built): a valid report from the counted model, counts within 15% of the run's.
 #  I) the plan's further terms, each a field of the report line: I1 a '--sample-points' plane's records
 #     (pts_gb: 326 B per point with --pts-vel-grad, one record per point, in fixed_gb too; DTFE_AUTO_PTS_N sizes a plane
 #     that is not on disk); on GPU builds I2 the GPU deposit's host snapshot of its grids and the growth of its device
 #     words (snapshot_gb: the exact average's run-wide 128-bit words, 16 B per 4-B component, plus 8 B more per
-#     component for each of two batches' device words = 8x the float grids' under DTFE_GPU_FLOAT_GRIDS=1; the 64-bit
-#     words of DTFE_RUN_UNITS_LEGACY=1 2x; none on the CPU), I3 the partition loop's look-ahead (lookahead_gb, in
-#     predicted_gb; none with --no-overlap or on one domain) and I4 a budget that holds the plan but not its
-#     look-ahead: the look-ahead is switched off for the run (said, lookahead_gb=0, over_budget=0).
+#     component for each of two batches' device words, against its measured figure; none on the CPU), I3 the
+#     partition loop's look-ahead (lookahead_gb, in predicted_gb; none with --no-overlap or on one domain) and I4 a
+#     budget that holds the plan but not its look-ahead: the look-ahead is switched off for the run (said,
+#     lookahead_gb=0, over_budget=0).
 #  J) a team whose sub-domains each insert in parallel (TBB builds, 4 threads or more) books the insert's copies:
 #     at '--max-concurrent 2' a forced '--parallel-triangulation' adds 800 B per padded vertex of the busiest
 #     partition, and so does one tessellation ('--max-concurrent 1') where no look-ahead is booked (as on the CPU).
@@ -51,22 +51,21 @@
 #     look-ahead off books them in the partition again (predicted as with '--no-overlap').
 #  L) '--run-mode balanced' (GPU builds): at a budget that holds 10 threads (a team of 9) but not their look-ahead,
 #     and a team of 8 with its own, the plan keeps the look-ahead with 8 threads (said; the '--max-concurrent 8'
-#     plan); performance, gentle and balanced with DTFE_LOOKAHEAD_TEAM=0 plan 10 threads without it.
+#     plan); performance and gentle plan 10 threads without it.
 #  M) the uniform count (DTFE_TEST_TUNE_UNIFORM=1: the plan of a call without the particles) plans the team the run
 #     forms: '--max-concurrent 5' is DTFE_parallel's team of 4 (2 x 2 x 1 sub-boxes, each padded on its own faces),
 #     the same report as '--max-concurrent 4' but its mc, and that team's padded vertices.
 #  O) the CPU exact average's run-wide words are booked for the grids the loop gives words, the ones with a run-wide
 #     unit (single build): one domain at 256^3 with density_a, scalar_a and scalarGradient_a (a scalar dataset in a
-#     copy of the snapshot), each plan against its DTFE_RUN_UNITS_LEGACY=1 twin (no words): 40 B per cell (0.671 GB)
-#     where every grid has a unit, 8 B per cell (0.134 GB, the density alone) under '--approx-phase-space-density',
-#     whose scalar grids keep their Real sums (DTFE.cpp runUnitsSetup). The forced unaveraged scalar is in both twins.
+#     copy of the snapshot), each plan against its measured figure: 40 B per cell (0.671 GB) of words where every
+#     grid has a unit, 8 B per cell (0.134 GB, the density alone) under '--approx-phase-space-density', whose scalar
+#     grids keep their Real sums (DTFE.cpp runUnitsSetup).
 #
 # Usage: tests/dtfe_auto_tune_check.sh [--no-build]     (DTFE_TEST_TMP, DTFE_TEST_PRECISION=double as the others)
 
 set -euo pipefail
-unset DTFE_TRIANGULATION_THREADS DTFE_TBB_THREADS   # the insert's own switch moves the plans: the suite sets none
-unset DTFE_LOOKAHEAD_TEAM DTFE_TEST_TUNE_UNIFORM    # (L and M set them where they check them)
-unset DTFE_RUN_UNITS_LEGACY   # (I2 and O set it on their twins: an inherited one would make both twins the same)
+unset DTFE_TRIANGULATION_THREADS   # the insert's own switch moves the plans: the suite sets none
+unset DTFE_TEST_TUNE_UNIFORM    # (M sets it where it checks it)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -99,12 +98,7 @@ echo ">> generating the clustered test snapshot ..."
     --amplitude-factor 3.0 >/dev/null
 
 FAILS=0
-check() {  # $1 = name, $2 = 0/1 ok
-    if [ "$2" -eq 1 ]; then echo "   OK   $1"; else echo "   FAIL $1"; FAILS=$((FAILS+1)); fi
-}
-agrep() {  # set-e-safe grep assertion (ERE): $1 = check name, $2 = pattern, $3 = file
-    if grep -Eq -- "$2" "$3"; then check "$1" 1; else check "$1" 0; fi
-}
+# check_ok <label> <1 = ok> (it counts a failure in FAILS), agrep <label> <pattern> <file>: tests/lib.sh
 COMMON=(--periodic --input-format 105 --mpc-unit 1 --padding 10)
 REPORT_RE='^AUTO-TUNE-REPORT partition=[0-9]+ mc=[0-9]+ predicted_gb=[0-9.]+ budget_gb=[0-9.]+ fixed_gb=[0-9.]+ .*over_budget=[01]$'
 field() { sed -n "s/^AUTO-TUNE-REPORT .* $1=\([0-9.]*\) .*/\1/p; s/^AUTO-TUNE-REPORT .* $1=\([0-9.]*\)$/\1/p" "$2" | head -1; }
@@ -114,10 +108,10 @@ echo ">> A: --auto-tune-report on the standard binary"
 rm -f "${TMP}"/da_a.*
 rc=0; env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/da_a" --grid 64 "${COMMON[@]}" --field density_a velocity_a \
     --auto-tune-report > "${TMP}/da_a_log.txt" 2>&1 || rc=$?
-check "A exits 0 (${rc})" "$([ "${rc}" = "0" ] && echo 1 || echo 0)"
-check "A prints exactly one valid report line (not 'unsupported')" \
+check_ok "A exits 0 (${rc})" "$([ "${rc}" = "0" ] && echo 1 || echo 0)"
+check_ok "A prints exactly one valid report line (not 'unsupported')" \
       "$([ "$(grep -cE "${REPORT_RE}" "${TMP}/da_a_log.txt")" = "1" ] && ! grep -q 'unsupported' "${TMP}/da_a_log.txt" && echo 1 || echo 0)"
-check "A nothing is written next to the output root" "$([ -z "$(ls "${TMP}" | grep '^da_a\.')" ] && echo 1 || echo 0)"
+check_ok "A nothing is written next to the output root" "$([ -z "$(ls "${TMP}" | grep '^da_a\.')" ] && echo 1 || echo 0)"
 env DTFE_RAM_GB=64 "${BIN}" "${SNAP}" "${TMP}/da_a" --grid 64 "${COMMON[@]}" --field density_a \
     --partition 2 2 2 --max-concurrent 3 --auto-tune-report > "${TMP}/da_a2_log.txt" 2>&1 || true
 agrep "A a hand-set split and thread count are reported as given" "^AUTO-TUNE-REPORT partition=2 mc=3 " "${TMP}/da_a2_log.txt"
@@ -160,9 +154,9 @@ for cfg in "b3|3 3 3|8" "b4|4 4 4|4"; do
     tag="${cfg%%|*}"; rest="${cfg#*|}"; split="${rest%%|*}"; mc="${rest##*|}"
     out="$(compare_counts "${tag}" "${split}" "${mc}")"
     printf '%s\n' "${out}" | grep '^   \.\.\.\.' || true
-    check "B ${split// /x} x ${mc}: the busiest partition and its padded vertices (sum and per thread) within 10% of the run's" \
+    check_ok "B ${split// /x} x ${mc}: the busiest partition and its padded vertices (sum and per thread) within 10% of the run's" \
           "$(grep -q '^OKB 1' <<< "${out}" && echo 1 || echo 0)"
-    check "C ... and the run's busiest partition holds >= 1.5x the box-average count the old model used" \
+    check_ok "C ... and the run's busiest partition holds >= 1.5x the box-average count the old model used" \
           "$(grep -q 'OKC 1' <<< "${out}" && echo 1 || echo 0)"
 done
 rm -f "${TMP}"/da_b*.a_den "${TMP}"/da_b*badGridPoints*
@@ -192,11 +186,11 @@ PYEOF
     rm -f "${TMP}/da_${tag}".a_* "${TMP}/da_${tag}"*badGridPoints*
 }
 out="$(run_e e_cpu --sampled)"; printf '%s\n' "${out}" | grep '^   \.\.\.\.' || true
-check "E the SUMMARY of an auto-tuned standard run carries the 'memory model' line" "$(grep -q NOLINE <<< "${out}" && echo 0 || echo 1)"
-check "E CPU, sampled average: measured <= 1.35x predicted" "$(grep -q 'OKE 1' <<< "${out}" && echo 1 || echo 0)"
+check_ok "E the SUMMARY of an auto-tuned standard run carries the 'memory model' line" "$(grep -q NOLINE <<< "${out}" && echo 0 || echo 1)"
+check_ok "E CPU, sampled average: measured <= 1.35x predicted" "$(grep -q 'OKE 1' <<< "${out}" && echo 1 || echo 0)"
 if [ "${GPU}" = 1 ]; then
     out="$(run_e e_gpu --gpu --exact)"; printf '%s\n' "${out}" | grep '^   \.\.\.\.' || true
-    check "E GPU, exact average: measured <= 1.35x predicted" "$(grep -q 'OKE 1' <<< "${out}" && echo 1 || echo 0)"
+    check_ok "E GPU, exact average: measured <= 1.35x predicted" "$(grep -q 'OKE 1' <<< "${out}" && echo 1 || echo 0)"
 else
     echo "   SKIP  E GPU (this build has no GPU backend)"
 fi
@@ -209,11 +203,11 @@ fsplit="$(sed -n 's/.*AUTO-TUNE: .* -> --partition \([0-9 ]*\), \([0-9]*\) threa
 if [ -n "${fsplit}" ]; then
     "${BIN}" "${SNAP}" "${TMP}/da_f_hand" --grid 48 "${COMMON[@]}" --field density_a velocity_a --partition ${fsplit%%|*} \
         --max-concurrent "${fsplit##*|}" > "${TMP}/da_f_hand.txt" 2>&1 || true
-    check "F the tuner's split (${fsplit%%|*}, ${fsplit##*|} threads) given by hand: byte-identical .a_den and .a_vel" \
+    check_ok "F the tuner's split (${fsplit%%|*}, ${fsplit##*|} threads) given by hand: byte-identical .a_den and .a_vel" \
           "$([ -s "${TMP}/da_f_auto.a_den" ] && cmp -s "${TMP}/da_f_auto.a_den" "${TMP}/da_f_hand.a_den" \
              && cmp -s "${TMP}/da_f_auto.a_vel" "${TMP}/da_f_hand.a_vel" && echo 1 || echo 0)"
 else
-    check "F the tuner chose a split on a simulated 1.2 GB machine (no AUTO-TUNE line)" 0
+    check_ok "F the tuner chose a split on a simulated 1.2 GB machine (no AUTO-TUNE line)" 0
 fi
 rm -f "${TMP}"/da_f_*.a_* "${TMP}"/da_f_*badGridPoints*
 
@@ -224,28 +218,35 @@ env DTFE_RAM_GB=1.2 "${BIN}" "${SNAP}" "${TMP}/da_g" --grid 96 "${COMMON[@]}" --
 agrep "G the plan fits its budget (over_budget=0) with a split" "^AUTO-TUNE-REPORT partition=[2-6] mc=[0-9]+ .*over_budget=0$" "${TMP}/da_g.txt"
 agrep "G ... and the AUTO-TUNE line names the busiest partition's padded vertices" \
       "AUTO-TUNE: .*the busiest partition triangulates ~[0-9.]+ M padded vertices at once" "${TMP}/da_g.txt"
-# a budget 0.02 GB above the larger of 2^3 x 2 and 3^3 x 10 threads and at least 0.02 GB below 2^3 x 10 (the budget is
-# 60% of DTFE_RAM_GB): 2^3 fits with fewer threads, 3^3 with all 10. Without the look-ahead (its switch-off would move
-# the bookings): the plans' predictions given by hand are chooseSplit's own test quantity
+# A budget between two plans, on 128^3 particles of their own: on the suite's 64^3 the padding of 10 spacings outweighs
+# a partition's own particles, and at 10 threads the finer split books more than the coarser one. The plans are given
+# by hand, without the look-ahead (its switch-off would move the bookings): their predictions are chooseSplit's own
+# test quantity. The budget lies half way between the larger of 2^3 x 2 and 3^3 x 10 threads and 2^3 x 10 (it is 60%
+# of DTFE_RAM_GB), so 2^3 fits with fewer threads and 3^3 with all 10; a gap under 0.1 GB fails, so that a planner
+# change that closes it is seen. The machine's own core count books nothing here (the threads are OMP_NUM_THREADS's,
+# above): there are no sample points, and no tessellation of these plans reaches the parallel insert's 1e6 points.
 if [ "${GPU}" = 1 ] && ! precision_double; then
-    GR=("${SNAP}" "${TMP}/da_g2" --grid 48 "${COMMON[@]}" --field density_a velocity_a gradient_a --auto-tune-report
+    SNAPG="${TMP}/dat_crossed128_g.hdf5"
+    "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAPG}" --n 128 --box "${BOX}" --crossed-waves \
+        --amplitude-factor 3.0 >/dev/null
+    GR=("${SNAPG}" "${TMP}/da_g2" --grid 48 "${COMMON[@]}" --field density_a velocity_a gradient_a --auto-tune-report
         --gpu --exact --face-gradient --no-overlap)
     env DTFE_RAM_GB=64 "${BIN}" "${GR[@]}" --partition 2 2 2 --max-concurrent 2 > "${TMP}/da_g2_q22.txt" 2>&1 || true
     env DTFE_RAM_GB=64 "${BIN}" "${GR[@]}" --partition 2 2 2 --max-concurrent 10 > "${TMP}/da_g2_q210.txt" 2>&1 || true
     env DTFE_RAM_GB=64 "${BIN}" "${GR[@]}" --partition 3 3 3 --max-concurrent 10 > "${TMP}/da_g2_q310.txt" 2>&1 || true
     q22="$(field predicted_gb "${TMP}/da_g2_q22.txt")"; q210="$(field predicted_gb "${TMP}/da_g2_q210.txt")"
     q310="$(field predicted_gb "${TMP}/da_g2_q310.txt")"
-    gr="$(awk -v a="${q22:-0}" -v b="${q210:-0}" -v c="${q310:-0}" 'BEGIN{m = (a > c ? a : c) + 0.02;
-        if (a > 0 && c > 0 && m + 0.02 < b) printf "%.4f", m / 0.6}')"
+    gr="$(awk -v a="${q22:-0}" -v b="${q210:-0}" -v c="${q310:-0}" 'BEGIN{m = (a > c ? a : c);
+        if (a > 0 && c > 0 && b - m >= 0.1) printf "%.4f", (m + b) / 2 / 0.6}')"
     if [ -n "${gr}" ]; then
         gbud="$(awk -v r="${gr}" 'BEGIN{printf "%.2f", 0.6*r}')"
         env DTFE_RAM_GB="${gr}" "${BIN}" "${GR[@]}" > "${TMP}/da_g2_m.txt" 2>&1 || true
-        check "G a budget of ${gbud} GB (2^3 x 2: ${q22} GB, 3^3 x 10: ${q310} GB, 2^3 x 10: ${q210} GB): the plan is 3^3 x 10 threads, the most threads at the coarsest split that holds them" \
-              "$(grep -Eq '^AUTO-TUNE-REPORT partition=3 mc=10 ' "${TMP}/da_g2_m.txt" && echo 1 || echo 0)"
+        check_ok "G a budget of ${gbud} GB (2^3 x 2: ${q22} GB, 3^3 x 10: ${q310} GB, 2^3 x 10: ${q210} GB): the plan is 3^3 x 10 threads within it, the most threads at the coarsest split that holds them" \
+              "$(grep -Eq '^AUTO-TUNE-REPORT partition=3 mc=10 .*over_budget=0$' "${TMP}/da_g2_m.txt" && echo 1 || echo 0)"
     else
-        echo "   SKIP  G at a budget between two plans (no budget between 2^3 x 2 / 3^3 x 10 threads, ${q22:-?} / ${q310:-?} GB, and 2^3 x 10, ${q210:-?} GB)"
+        check_ok "G a budget between two plans: 2^3 x 2 and 3^3 x 10 threads (${q22:-?} / ${q310:-?} GB) at least 0.1 GB below 2^3 x 10 (${q210:-?} GB)" 0
     fi
-    rm -f "${TMP}"/da_g2_*
+    rm -f "${TMP}"/da_g2_* "${SNAPG}"
 else
     echo "   SKIP  G at a budget between two plans (a build without the GPU backend, or the double build)"
 fi
@@ -262,7 +263,7 @@ if [ -x "${BIN2D}" ]; then
     "${BIN2D}" "${SNAP2D}" "${TMP}/da_h" --grid 128 "${COMMON[@]}" --field density_a --partition 3 3 --max-concurrent 4 \
         --verbose 2 > "${TMP}/da_h_run.txt" 2>&1 || true
     agrep "H a valid 2D report" "${REPORT_RE}" "${TMP}/da_h_rep.txt"
-    check "H the counted busiest partition within 15% of the 2D run's" "$("${PY}" - "${TMP}/da_h_rep.txt" "${TMP}/da_h_run.txt" <<'PYEOF'
+    check_ok "H the counted busiest partition within 15% of the 2D run's" "$("${PY}" - "${TMP}/da_h_rep.txt" "${TMP}/da_h_run.txt" <<'PYEOF'
 import re, sys
 rep, run = open(sys.argv[1], errors="replace").read(), open(sys.argv[2], errors="replace").read()
 m = re.search(r"busiest partition \d+ of \d+: (\d+) padded vertices", rep)
@@ -292,32 +293,27 @@ env DTFE_RAM_GB=64 DTFE_AUTO_PTS_N=4194304 DTFE_AUTO_PTS_VEL_GRAD=1 "${BIN}" "${
 p1="$(field pts_gb "${TMP}/da_i1.txt")"; f0="$(field fixed_gb "${TMP}/da_i0.txt")"; f1="$(field fixed_gb "${TMP}/da_i1.txt")"
 ok="$(awk -v p="${p1:-0}" -v a="${f0:-0}" -v b="${f1:-0}" 'BEGIN{print (p > 1.362 && p < 1.372 && b - a > p - 0.02 && b - a < p + 0.02) ? 1 : 0}')"
 grep -q 'streams_budget=1.000 ' "${TMP}/da_i1.txt" || ok=0
-check "I1 a 2048^2 plane with --pts-vel-grad: pts_gb ${p1:-?} (4194304 x 326 B = 1.367), in fixed_gb (${f0:-?} -> ${f1:-?}), one record per point" "${ok}"
+check_ok "I1 a 2048^2 plane with --pts-vel-grad: pts_gb ${p1:-?} (4194304 x 326 B = 1.367), in fixed_gb (${f0:-?} -> ${f1:-?}), one record per point" "${ok}"
 s0="$(field snapshot_gb "${TMP}/da_i0.txt")"; l0="$(field lookahead_gb "${TMP}/da_i0.txt")"
-check "I2/I3 a CPU run counts no GPU snapshot and no look-ahead (${s0:-?}, ${l0:-?})" \
+check_ok "I2/I3 a CPU run counts no GPU snapshot and no look-ahead (${s0:-?}, ${l0:-?})" \
       "$([ "${s0}" = "0.000" ] && [ "${l0}" = "0.000" ] && echo 1 || echo 0)"
 if [ "${GPU}" = 1 ]; then
     env DTFE_RAM_GB=64 "${BIN}" "${IR[@]}" --max-concurrent 2 --gpu > "${TMP}/da_i2.txt" 2>&1 || true
-    env DTFE_RAM_GB=64 DTFE_GPU_FLOAT_GRIDS=1 "${BIN}" "${IR[@]}" --max-concurrent 2 --gpu \
-        > "${TMP}/da_i3.txt" 2>&1 || true
     env DTFE_RAM_GB=64 "${BIN}" "${IR[@]}" --max-concurrent 2 --gpu --no-overlap > "${TMP}/da_i4.txt" 2>&1 || true
-    env DTFE_RAM_GB=64 DTFE_RUN_UNITS_LEGACY=1 "${BIN}" "${IR[@]}" --max-concurrent 2 --gpu \
-        > "${TMP}/da_i6.txt" 2>&1 || true
+    env DTFE_RAM_GB=64 "${BIN}" "${IR[@]}" --max-concurrent 2 --gpu --sampled > "${TMP}/da_i3.txt" 2>&1 || true
     s2="$(field snapshot_gb "${TMP}/da_i2.txt")"; s3="$(field snapshot_gb "${TMP}/da_i3.txt")"
-    s6="$(field snapshot_gb "${TMP}/da_i6.txt")"
-    # (the GB carry three decimals: the float grids' ~0.02 GB leaves the ratios a few per cent of play)
-    check "I2 --gpu: snapshot + device words of the largest sub-grid ${s2:-?} GB = 8x the float grids (${s3:-?} GB), \
-2x under DTFE_RUN_UNITS_LEGACY=1 (${s6:-?} GB)" \
-          "$(awk -v a="${s2:-0}" -v b="${s3:-0}" -v c="${s6:-0}" \
-             'BEGIN{print (a > 0.02 && b > 0. && a / b > 7.7 && a / b < 8.3 && c / b > 1.95 && c / b < 2.05) ? 1 : 0}')"
+    # the exact average's run-wide 128-bit words: 4 B of snapshot and 4 B of device growth per 4 B grid component;
+    # the sampled average's 64-bit words: 2 B and none (the GB carry three decimals: a few per cent of play)
+    check_ok "I2 --gpu: snapshot + device words of the largest sub-grid ${s2:-?} GB = 4x the sampled average's (${s3:-?} GB)" \
+          "$(awk -v a="${s2:-0}" -v b="${s3:-0}" 'BEGIN{print (a > 0.02 && b > 0. && a / b > 3.85 && a / b < 4.15) ? 1 : 0}')"
     l2="$(field lookahead_gb "${TMP}/da_i2.txt")"; l4="$(field lookahead_gb "${TMP}/da_i4.txt")"
     q2="$(field predicted_gb "${TMP}/da_i2.txt")"; q4="$(field predicted_gb "${TMP}/da_i4.txt")"
-    check "I3 --gpu over 8 partitions: the look-ahead (${l2:-?} GB) is in predicted_gb (${q4:-?} -> ${q2:-?}); none with --no-overlap (${l4:-?})" \
+    check_ok "I3 --gpu over 8 partitions: the look-ahead (${l2:-?} GB) is in predicted_gb (${q4:-?} -> ${q2:-?}); none with --no-overlap (${l4:-?})" \
           "$(awk -v l="${l2:-0}" -v m="${l4:-1}" -v a="${q4:-0}" -v b="${q2:-0}" 'BEGIN{d = b - a - l; print (l > 0.01 && m == 0 && d > -0.011 && d < 0.011) ? 1 : 0}')"
     # a budget between the plan without the look-ahead and the plan with it (the budget is 60% of DTFE_RAM_GB)
     ram="$(awk -v a="${q4:-0}" -v l="${l2:-0}" 'BEGIN{printf "%.4f", (a + l / 2.) / 0.6}')"
     env DTFE_RAM_GB="${ram}" "${BIN}" "${IR[@]}" --max-concurrent 2 --gpu > "${TMP}/da_i5.txt" 2>&1 || true
-    check "I4 a budget that holds the plan (${q4:-?} GB) but not its look-ahead: switched off, said, over_budget=0" \
+    check_ok "I4 a budget that holds the plan (${q4:-?} GB) but not its look-ahead: switched off, said, over_budget=0" \
           "$(grep -q 'look-ahead off for this run' "${TMP}/da_i5.txt" && grep -Eq 'lookahead_gb=0.000 over_budget=0$' "${TMP}/da_i5.txt" \
              && echo 1 || echo 0)"
 else
@@ -344,9 +340,9 @@ if grep -aq "parallel, TBB" "${BIN}" && [ "${NCPU}" -ge 4 ]; then
     u2="$(busiest "${TMP}/da_j2.txt")"; f2="$(busiest "${TMP}/da_j2f.txt")"
     a1="$(field predicted_gb "${TMP}/da_j1.txt")"; b1="$(field predicted_gb "${TMP}/da_j1f.txt")"
     a2="$(field predicted_gb "${TMP}/da_j2.txt")"; b2="$(field predicted_gb "${TMP}/da_j2f.txt")"
-    check "J a team of 2 books the forced insert's copies (${a2:-?} -> ${b2:-?} GB: 800 B x ${u2:-?} to ${f2:-?} padded vertices)" \
+    check_ok "J a team of 2 books the forced insert's copies (${a2:-?} -> ${b2:-?} GB: 800 B x ${u2:-?} to ${f2:-?} padded vertices)" \
           "$(rise "${a2}" "${b2}" "${u2}" "${f2}")"
-    check "J one tessellation without a look-ahead books them too (${a1:-?} -> ${b1:-?} GB: 800 B x ${u1:-?} to ${f1:-?})" \
+    check_ok "J one tessellation without a look-ahead books them too (${a1:-?} -> ${b1:-?} GB: 800 B x ${u1:-?} to ${f1:-?})" \
           "$(rise "${a1}" "${b1}" "${u1}" "${f1}")"
     rm -f "${TMP}"/da_j*
 else
@@ -375,14 +371,14 @@ if [ "${GPU}" = 1 ] && grep -aq "parallel, TBB" "${BIN}" && [ "${NCPU}" -ge 4 ];
         k_rep on2 "${kr}" --max-concurrent 2
         k_rep off2 "${kr}" --max-concurrent 2 --parallel-triangulation
         o2="$(field lookahead_gb "${TMP}/da_k_on2.txt")"; p2="$(field predicted_gb "${TMP}/da_k_off2.txt")"
-        check "K1 a budget of $(awk -v r="${kr}" 'BEGIN{printf "%.2f", 0.6*r}') GB holds a team of 2 with its look-ahead (${q2:-?} + ${l2:-?} GB) and with the forced insert's copies (${b2:-?} GB), not with both: switched off (said, predicted ${p2:-?} GB, lookahead_gb=0, over_budget=0); kept without them (lookahead_gb ${o2:-?})" \
+        check_ok "K1 a budget of $(awk -v r="${kr}" 'BEGIN{printf "%.2f", 0.6*r}') GB holds a team of 2 with its look-ahead (${q2:-?} + ${l2:-?} GB) and with the forced insert's copies (${b2:-?} GB), not with both: switched off (said, predicted ${p2:-?} GB, lookahead_gb=0, over_budget=0); kept without them (lookahead_gb ${o2:-?})" \
               "$(grep -q 'look-ahead off for this run' "${TMP}/da_k_off2.txt" \
                  && grep -Eq 'lookahead_gb=0.000 over_budget=0$' "${TMP}/da_k_off2.txt" \
                  && ! grep -q 'look-ahead off' "${TMP}/da_k_on2.txt" && grep -Eq 'over_budget=0$' "${TMP}/da_k_on2.txt" \
                  && awk -v o="${o2:-0}" -v l="${l2:-x}" -v p="${p2:-0}" -v b="${b2:-0}" \
                         'BEGIN{d = p - b; exit !(o == l && d > -0.011 && d < 0.011)}' && echo 1 || echo 0)"
     else
-        check "K1 the budget between the bookings (not formed from ${q2:-none}, ${b2:-none}, ${l2:-none} GB)" 0
+        check_ok "K1 the budget between the bookings (not formed from ${q2:-none}, ${b2:-none}, ${l2:-none} GB)" 0
     fi
     # K2, one tessellation: the look-ahead's factor holds its copies, so the forced insert books none while the
     # look-ahead runs; a budget half a look-ahead above the plan switches it off, and the partition books them again:
@@ -397,14 +393,14 @@ if [ "${GPU}" = 1 ] && grep -aq "parallel, TBB" "${BIN}" && [ "${NCPU}" -ge 4 ];
         k_rep off1 "${kr}" --max-concurrent 1 --parallel-triangulation
         k_rep seq1 "${kr}" --max-concurrent 1
         p1="$(field predicted_gb "${TMP}/da_k_off1.txt")"; s1="$(field predicted_gb "${TMP}/da_k_seq1.txt")"
-        check "K2 one tessellation, a budget of $(awk -v r="${kr}" 'BEGIN{printf "%.2f", 0.6*r}') GB (half its look-ahead of ${l1:-?} GB above the plan): switched off, the forced insert's copies booked again (${p1:-?} = ${b1:-?} GB), none without the flag (${s1:-?} = ${q1:-?} GB)" \
+        check_ok "K2 one tessellation, a budget of $(awk -v r="${kr}" 'BEGIN{printf "%.2f", 0.6*r}') GB (half its look-ahead of ${l1:-?} GB above the plan): switched off, the forced insert's copies booked again (${p1:-?} = ${b1:-?} GB), none without the flag (${s1:-?} = ${q1:-?} GB)" \
               "$(grep -q 'look-ahead off for this run' "${TMP}/da_k_off1.txt" && grep -q 'look-ahead off for this run' "${TMP}/da_k_seq1.txt" \
                  && grep -Eq 'lookahead_gb=0.000 over_budget=[01]$' "${TMP}/da_k_off1.txt" \
                  && awk -v p="${p1:-0}" -v b="${b1:-x}" -v s="${s1:-0}" -v q="${q1:-x}" \
                         'BEGIN{d = p - b; e = s - q; exit !(d > -0.011 && d < 0.011 && e > -0.011 && e < 0.011)}' \
                  && echo 1 || echo 0)"
     else
-        check "K2 the budget under the look-ahead (not formed from ${q1:-none}, ${b1:-none}, ${l1:-none} GB)" 0
+        check_ok "K2 the budget under the look-ahead (not formed from ${q1:-none}, ${b1:-none}, ${l1:-none} GB)" 0
     fi
     rm -f "${TMP}"/da_k*
 else
@@ -428,25 +424,23 @@ if [ "${GPU}" = 1 ]; then
         env DTFE_RAM_GB="${lr}" "${BIN}" "${LR[@]}" > "${TMP}/da_lp.txt" 2>&1 || true
         env DTFE_RAM_GB="${lr}" "${BIN}" "${LR[@]}" --run-mode gentle > "${TMP}/da_lg.txt" 2>&1 || true
         env DTFE_RAM_GB="${lr}" "${BIN}" "${LR[@]}" --run-mode balanced > "${TMP}/da_lb.txt" 2>&1 || true
-        env DTFE_RAM_GB="${lr}" DTFE_LOOKAHEAD_TEAM=0 "${BIN}" "${LR[@]}" --run-mode balanced > "${TMP}/da_lb0.txt" 2>&1 || true
         lbud="$(awk -v r="${lr}" 'BEGIN{printf "%.2f", 0.6*r}')"
         rp="$(grep -E "${REPORT_RE}" "${TMP}/da_lp.txt" | head -1 || true)"
         mb="$(sed -n 's/^AUTO-TUNE-REPORT partition=[0-9]* mc=\([0-9]*\) .*/\1/p' "${TMP}/da_lb.txt" | head -1)"
         pb="$(field predicted_gb "${TMP}/da_lb.txt")"; lb="$(field lookahead_gb "${TMP}/da_lb.txt")"
-        check "L1 performance at a budget of ${lbud} GB (10 threads with their look-ahead ${a10:-?} GB, 8 with theirs ${a8:-?} GB): 10 threads, the look-ahead off (said)" \
+        check_ok "L1 performance at a budget of ${lbud} GB (10 threads with their look-ahead ${a10:-?} GB, 8 with theirs ${a8:-?} GB): 10 threads, the look-ahead off (said)" \
               "$(grep -Eq '^AUTO-TUNE-REPORT partition=2 mc=10 .*lookahead_gb=0.000 over_budget=0$' "${TMP}/da_lp.txt" \
                  && grep -q 'look-ahead off for this run' "${TMP}/da_lp.txt" && echo 1 || echo 0)"
-        check "L2 balanced: 8 threads keep the look-ahead (mc=${mb:-?}, lookahead_gb ${lb:-?} = ${l8:-?}, predicted ${pb:-?} = ${a8:-?} GB, over_budget=0), said" \
+        check_ok "L2 balanced: 8 threads keep the look-ahead (mc=${mb:-?}, lookahead_gb ${lb:-?} = ${l8:-?}, predicted ${pb:-?} = ${a8:-?} GB, over_budget=0), said" \
               "$([ "${mb:-}" = 8 ] && [ "${lb:-x}" = "${l8:-y}" ] && [ "${pb:-x}" = "${a8:-y}" ] \
                  && grep -q 'look-ahead kept for this run with 8 threads per partition instead of 10' "${TMP}/da_lb.txt" \
                  && grep -Eq '^AUTO-TUNE-REPORT .*over_budget=0$' "${TMP}/da_lb.txt" && ! grep -q 'look-ahead off' "${TMP}/da_lb.txt" \
                  && echo 1 || echo 0)"
-        check "L3 balanced with DTFE_LOOKAHEAD_TEAM=0, and gentle, plan as performance does (the same report line)" \
-              "$([ -n "${rp}" ] && [ "$(grep -E "${REPORT_RE}" "${TMP}/da_lb0.txt" | head -1 || true)" = "${rp}" ] \
-                 && [ "$(grep -E "${REPORT_RE}" "${TMP}/da_lg.txt" | head -1 || true)" = "${rp}" ] \
-                 && ! grep -q 'look-ahead kept' "${TMP}/da_lb0.txt" "${TMP}/da_lg.txt" && echo 1 || echo 0)"
+        check_ok "L3 gentle plans as performance does (the same report line)" \
+              "$([ -n "${rp}" ] && [ "$(grep -E "${REPORT_RE}" "${TMP}/da_lg.txt" | head -1 || true)" = "${rp}" ] \
+                 && ! grep -q 'look-ahead kept' "${TMP}/da_lg.txt" && echo 1 || echo 0)"
     else
-        check "L the budget between the two teams (not formed from ${a10:-none}, ${a8:-none}, ${l10:-none} GB)" 0
+        check_ok "L the budget between the two teams (not formed from ${a10:-none}, ${a8:-none}, ${l10:-none} GB)" 0
     fi
     rm -f "${TMP}"/da_l*
 else
@@ -464,13 +458,13 @@ for t in 4 5; do
 done
 m4="$(grep -E "${REPORT_RE}" "${TMP}/da_m4.txt" | head -1 | sed 's/ mc=[0-9]* / /' || true)"
 m5="$(grep -E "${REPORT_RE}" "${TMP}/da_m5.txt" | head -1 | sed 's/ mc=[0-9]* / /' || true)"
-check "M1 the uniform count (DTFE_TEST_TUNE_UNIFORM=1) plans '--max-concurrent 5' as the team of 4 it runs: the report of '--max-concurrent 4' but its mc" \
+check_ok "M1 the uniform count (DTFE_TEST_TUNE_UNIFORM=1) plans '--max-concurrent 5' as the team of 4 it runs: the report of '--max-concurrent 4' but its mc" \
       "$(grep -q '^AUTO-TUNE-DEBUG standard: uniform' "${TMP}/da_m5.txt" && [ -n "${m4}" ] && [ "${m4}" = "${m5}" ] && echo 1 || echo 0)"
 # 64^3 particles over 2^3 partitions, each of the 2 x 2 x 1 sub-boxes padded by 10 spacings of 64 per side:
 # N^3/8 x (1 + 2 x 10/N x 2 x 2)^2 x (1 + 2 x 10/N x 2): 269568 at N=64 (the isotropic 4^(1/3) of before: 259067)
 vm="$(sed -n 's/^AUTO-TUNE-DEBUG standard: uniform .* busiest partition [0-9]* of [0-9]*: \([0-9]*\) padded vertices.*/\1/p' "${TMP}/da_m4.txt" | head -1)"
 ve="$(awk -v n="${N}" 'BEGIN{printf "%.0f", n*n*n/8 * (1 + 80/n)^2 * (1 + 40/n)}')"
-check "M2 ... and pads each of the team's 2 x 2 x 1 sub-boxes on its own faces: ${vm:-?} padded vertices (${ve})" \
+check_ok "M2 ... and pads each of the team's 2 x 2 x 1 sub-boxes on its own faces: ${vm:-?} padded vertices (${ve})" \
       "$(awk -v v="${vm:-0}" -v e="${ve}" 'BEGIN{exit !(v > e*0.995 && v < e*1.005)}' && echo 1 || echo 0)"
 rm -f "${TMP}"/da_m*
 
@@ -489,30 +483,31 @@ with h5py.File(sys.argv[1], "a") as f:
     p["Phi"] = (np.sin(2.0 * np.pi * x[:, 0] / 100.0) + 0.3 * x[:, 2] / 100.0).astype(np.float32)
 PYEOF
     NR=("${SNAPN}" "${TMP}/da_n" --grid 256 "${COMMON[@]}" --field density_a scalar_a scalarGradient_a
-        --scalar-dataset Phi --exact --partition 1 1 1 --max-concurrent 1 --auto-tune-report)
+        --scalar-dataset Phi --partition 1 1 1 --max-concurrent 1 --auto-tune-report)
     on_top() {  # the busiest partition's GB on top of 'fixed' (the AUTO-TUNE-DEBUG line): one domain's own bytes
         sed -n 's/^AUTO-TUNE-DEBUG standard: .* padded vertices, \([0-9.]*\) GB on top of .*/\1/p' "$1" | head -1
     }
     for a in plain approx; do
         na=()
         if [ "${a}" = approx ]; then na=(--approx-phase-space-density); fi
-        env DTFE_RAM_GB=64 DTFE_AUTO_TUNE_DEBUG=1 "${BIN}" "${NR[@]}" ${na[@]+"${na[@]}"} \
+        env DTFE_RAM_GB=64 DTFE_AUTO_TUNE_DEBUG=1 "${BIN}" "${NR[@]}" --exact ${na[@]+"${na[@]}"} \
             > "${TMP}/da_n_${a}.txt" 2>&1 || true
-        env DTFE_RAM_GB=64 DTFE_AUTO_TUNE_DEBUG=1 DTFE_RUN_UNITS_LEGACY=1 "${BIN}" "${NR[@]}" ${na[@]+"${na[@]}"} \
-            > "${TMP}/da_n_${a}_legacy.txt" 2>&1 || true
+        env DTFE_RAM_GB=64 DTFE_AUTO_TUNE_DEBUG=1 "${BIN}" "${NR[@]}" --sampled ${na[@]+"${na[@]}"} \
+            > "${TMP}/da_n_${a}_sampled.txt" 2>&1 || true
     done
-    n1="$(on_top "${TMP}/da_n_plain.txt")"; n1l="$(on_top "${TMP}/da_n_plain_legacy.txt")"
-    n2="$(on_top "${TMP}/da_n_approx.txt")"; n2l="$(on_top "${TMP}/da_n_approx_legacy.txt")"
-    # 256^3 cells x 8 B per component: density 1 + scalar 1 + its gradient 3 = 40 B (0.671 GB); the density alone 8 B
-    # (0.134 GB). The GB carry three decimals, so each difference is good to 0.001.
-    nd() {  # nd <with words> <legacy twin> <lo> <hi>: 1 when both are numbers and their difference lies in (lo, hi)
+    n1="$(on_top "${TMP}/da_n_plain.txt")"; n1s="$(on_top "${TMP}/da_n_plain_sampled.txt")"
+    n2="$(on_top "${TMP}/da_n_approx.txt")"; n2s="$(on_top "${TMP}/da_n_approx_sampled.txt")"
+    # 256^3 cells x 8 B per component of words: density 1 + scalar 1 + its gradient 3 = 40 B (0.671 GB); the density
+    # alone 8 B (0.134 GB). The sampled average sums no words on the CPU, so each difference is the words' bytes
+    # (the GB carry three decimals, so it is good to 0.001).
+    nd() {  # nd <exact> <sampled twin> <lo> <hi>: 1 when both are numbers and their difference lies in (lo, hi)
         awk -v a="${1:-x}" -v b="${2:-x}" -v lo="$3" -v hi="$4" \
             'BEGIN{d = a - b; print (a != "x" && b != "x" && d > lo && d < hi) ? 1 : 0}'
     }
-    check "O1 the words of density_a, scalar_a and scalarGradient_a, 40 B per cell: ${n1:-?} - ${n1l:-?} GB = 0.671" \
-          "$(nd "${n1}" "${n1l}" 0.665 0.677)"
-    check "O2 under --approx-phase-space-density the density's alone, 8 B per cell: ${n2:-?} - ${n2l:-?} GB = 0.134" \
-          "$(nd "${n2}" "${n2l}" 0.128 0.140)"
+    check_ok "O1 the words of density_a, scalar_a and scalarGradient_a, 40 B per cell: ${n1:-?} - ${n1s:-?} GB = 0.671" \
+          "$(nd "${n1}" "${n1s}" 0.665 0.677)"
+    check_ok "O2 under --approx-phase-space-density the density's alone, 8 B per cell: ${n2:-?} - ${n2s:-?} GB = 0.134" \
+          "$(nd "${n2}" "${n2s}" 0.128 0.140)"
     rm -f "${SNAPN}" "${TMP}"/da_n*
 fi
 

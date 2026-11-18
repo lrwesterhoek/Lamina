@@ -9,12 +9,12 @@
 # block assignment, so it must keep the static rule). So must a slab team of 4 (DTFE_DEPOSIT_SLABS=1
 # DTFE_DEPOSIT_THREADS=4): a static team, counted in the core pool (thread_count.h CorePool::Hold), beside the
 # other partitions' pooled loops.
-# Then D19 (docs/cleanup-plan.md): the parallel insert (DTFE_TRIANGULATION_THREADS=4, forced at this size) against
+# Then the parallel insert (DTFE_TRIANGULATION_THREADS=4, forced at this size) against
 # the sequential one ('--sequential-triangulation') must write the same bytes -- the cells' canonical vertex order
 # (src/CGAL_triangulation/ps_vertex_order.h) -- for the exact deposit with the face gradient and the caustics, the
 # sampled deposit with the vertex mass on partitions, an exact lattice, the cusp stencil on that lattice and, on a
 # Metal build, the GPU, with the same fixed-point units; single build only, and only where the build has the
-# parallel insert (else SKIP). A run under DTFE_PS_VERTEX_ORDER_LEGACY=1 says so in its log and renumbers nothing.
+# parallel insert (else SKIP).
 #
 # Usage:
 #   tests/ps_parallel_check.sh                 # build, run x2, compare
@@ -34,7 +34,7 @@ N="${N:-32}"; GRID="${GRID:-64}"; BOX="${BOX:-100.0}"; AMP="${AMP:-1.8}"
 PARTITION="${PARTITION:-2 2 2}"   # Lagrangian partition grid; parallelism is over these
 BIN="${PS_BIN}"
 precision_require "${BIN}"
-TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}"; mkdir -p "${TMP}"
+TMP="${DTFE_TEST_TMP}"
 # Input name must NOT share a prefix with the output roots (ps_serial/ps_par),
 # or the per-run 'rm -f <root>.*' would delete it.
 SNAP="${TMP}/ps_pcheck_input.hdf5"
@@ -168,7 +168,7 @@ fi
 [ "${team_fail}" = 0 ] || { echo "RESULT: FAIL (the deposit's team)"; exit 1; }
 echo "   PASS: the grids agree across the four team rules ($(precision_double && echo "double build: .streams, the slab team every grid" || echo "every grid byte for byte"))"
 
-echo ">> D19: the parallel insert against the sequential one, byte for byte (the canonical vertex order)"
+echo ">> the parallel insert against the sequential one, byte for byte (the canonical vertex order)"
 # src/CGAL_triangulation/ps_vertex_order.h renumbers every cell in a canonical vertex order, so each tetrahedron's
 # arithmetic does not depend on CGAL's numbering, and every grid of the single build is an order-free fixed-point
 # sum: a tessellation inserted in parallel (another cell order, another numbering) must give the sequential run's
@@ -179,14 +179,13 @@ echo ">> D19: the parallel insert against the sequential one, byte for byte (the
 # (--jitter-frac 0: CGAL's symbolic perturbation must give the same tetrahedra in any insertion order); the cusp
 # stencil of '--ps-caustic-cusps' on that lattice (its distance ties take the strict order); the GPU's exact deposit
 # on a Metal build. The fixed-point units lines (--verbose 3) are compared too, so a unit that moved would be named.
-# A build without the parallel insert has one order only (SKIP). The double build sums in walk order (SKIP). Under
-# DTFE_PS_VERTEX_ORDER_LEGACY=1 (CGAL's numbering) the pair should differ: reported, not a gate.
+# A build without the parallel insert has one order only (SKIP). The double build sums in walk order (SKIP).
 order_fail=0
 if precision_double; then
     echo "   SKIP: the double build sums in walk order (its private copies, its serial adds)"
 else
     # (DTFE_EXACT_AVERAGE and DTFE_OVERLAP from a login shell would change the deposit or silence a look-ahead build)
-    unset DTFE_TRIANGULATION_THREADS DTFE_TBB_THREADS DTFE_PS_VERTEX_ORDER_LEGACY DTFE_EXACT_AVERAGE DTFE_OVERLAP
+    unset DTFE_TRIANGULATION_THREADS DTFE_EXACT_AVERAGE DTFE_OVERLAP
     LAT="${TMP}/ps_order_lattice.hdf5"
     "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${LAT}" --n "${N}" --box "${BOX}" \
         --amplitude-factor "${AMP}" --jitter-frac 0 >/dev/null
@@ -236,7 +235,7 @@ else
     }
     RENUM="(the canonical vertex order renumbered "
     EX=(--grid "${GRID}" --partition 1 --exact --field density_a velocity_a gradient_a divergence_a shear_a
-        vorticity_a dispersion_a --ps-caustics --ps-volume-weighted --face-gradient)
+        vorticity_a dispersion_a --ps-caustics --face-gradient)
     run_order "${TMP}/ps_ord_par" "${SNAP}" parallel -- "${EX[@]}"
     if ! grep -qF "(parallel, TBB, " "${TMP}/ps_ord_par.log"; then
         echo "   SKIP: no '(parallel, TBB, N threads)' line (a build without the parallel insert, or one thread:"
@@ -278,18 +277,6 @@ else
             fi
         else
             echo "   SKIP the GPU pair: o_ps is not a Metal build"
-        fi
-        run_order "${TMP}/ps_ord_xseq" "${SNAP}" sequential DTFE_PS_VERTEX_ORDER_LEGACY=1 -- "${EX[@]}"
-        run_order "${TMP}/ps_ord_xpar" "${SNAP}" parallel DTFE_PS_VERTEX_ORDER_LEGACY=1 -- "${EX[@]}"
-        grep -qF "DTFE_PS_VERTEX_ORDER_LEGACY=1" "${TMP}/ps_ord_xseq.log" \
-            || { echo "   FAIL: a run under DTFE_PS_VERTEX_ORDER_LEGACY=1 should say so in its log"; order_fail=1; }
-        if grep -qF "${RENUM}" "${TMP}/ps_ord_xseq.log"; then
-            echo "   FAIL: a run under DTFE_PS_VERTEX_ORDER_LEGACY=1 renumbered its cells"; order_fail=1
-        fi
-        if order_same "${TMP}/ps_ord_xseq" "${TMP}/ps_ord_xpar" "CGAL's numbering" >/dev/null; then
-            echo "   NOTE: under CGAL's numbering the two inserts agreed too: this case does not exercise the numbering"
-        else
-            echo "   (control) under CGAL's numbering (DTFE_PS_VERTEX_ORDER_LEGACY=1) the two inserts differ"
         fi
     fi
     [ "${order_fail}" = 0 ] \

@@ -26,6 +26,7 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <cstdio>
 #include <cstdlib>
 #include <cmath>
 #include <cstdint>
@@ -152,6 +153,13 @@ void readInputData(std::vector<Particle_data> *p,
 
     int const inputFileType = sniffGadgetBinaryInput( filename, userOptions->inputFileType,
                                                       userOptions->verboseLevel );
+#ifdef PHASE_SPACE
+    // the match by 'ParticleIDs' needs the IDs, which only the HDF5 Gadget reader fills (the type as read, after the
+    // binary Gadget file's redirect above)
+    if ( inputFileType != 105 and not userOptions->lagrangianInputFilename.empty() )
+        throwError( "'--ps-lagrangian-input' needs an HDF5 Gadget snapshot ('--input-format 105'): only that reader ",
+                    "gives the particle IDs the Lagrangian positions are matched by." );
+#endif
     FunctionReadInputData functionReadInputData = chooseInputDataReadFunction( inputFileType );
     (*functionReadInputData)( filename, &readData, userOptions );
 
@@ -306,7 +314,7 @@ void readInputData(std::vector<Particle_data> *p,
                     lagByID[slot * NO_DIM + d] = lagCoords[i * NO_DIM + d];
             }
             // the raw chunk arrays are dead once the by-ID table exists; free them before the
-            // matching loop (20 B/particle transient, ~5 GB at TNG300-3 scale)
+            // matching loop (20 B/particle transient)
             std::vector<float>().swap(lagCoords);
             std::vector<uint64_t>().swap(lagIDs);
 
@@ -525,7 +533,7 @@ void writeOutputData(Quantities &uQuantities,
     if ( not aQuantities.velocity_divergence_streams.empty() )
         output.write( aQuantities.velocity_divergence_streams, userOptions.outputFilename + ".a_velDivStreams",
                       "stream-averaged velocity divergence (--face-gradient: the streams' own; the mean flow's is '.a_velDiv')", userOptions );
-    // ... and its gradient, shear and vorticity, where the run writes the mean flow's (docs/cleanup-plan.md D12)
+    // ... and its gradient, shear and vorticity, where the run writes the mean flow's
     if ( not aQuantities.velocity_gradient_streams.empty() )
         output.write( aQuantities.velocity_gradient_streams, userOptions.outputFilename + ".a_velGradStreams",
                       "stream-averaged velocity gradient (--face-gradient: the streams' own; the mean flow's is "

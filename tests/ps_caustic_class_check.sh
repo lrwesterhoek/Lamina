@@ -28,7 +28,7 @@ source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double
 N="${N:-32}"; GRID="${GRID:-48}"; BOX="${BOX:-100.0}"
 BIN="${PS_BIN}"
 precision_require "${BIN}"
-TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}"; mkdir -p "${TMP}"
+TMP="${DTFE_TEST_TMP}"
 SNAP="${TMP}/pcc_input.hdf5"
 OUT="${TMP}/pcc_out"
 

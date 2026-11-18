@@ -14,13 +14,17 @@
 
 name: ci
 
-# The working branch is Phase-Space, so the workflow runs on it as well as on master and pull
-# requests. workflow_dispatch adds a manual "Run workflow" button.
+# The workflow runs on a push to any branch (not on a tag) and on pull requests. workflow_dispatch adds a manual
+# "Run workflow" button. A newer run of the same branch or pull request cancels the older one, except on master.
 on:
   push:
-    branches: [master, Phase-Space]
+    branches: ['**']
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 jobs:
   build-and-test:

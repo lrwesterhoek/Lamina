@@ -78,10 +78,9 @@ enum
 /* D4 (umbilic) thresholds. A D4 point is where two eigenvalues of J vanish TOGETHER, so the test
  * has two halves and needs both: the pair must coincide, and it must sit at zero.
  *
- * Coincidence alone is near-vacuous -- any locally isotropic patch satisfies it. Measured without
- * the zero-band: 97.6% of all touched cells on a weak wave (A*k = 0.15) that has no caustic
- * anywhere, and on crossed waves two thirds of the flagged cells lay on no fold, which an umbilic
- * cannot do.
+ * Coincidence alone is near-vacuous -- any locally isotropic patch satisfies it. Without the
+ * zero-band it flags most touched cells of a weak wave that has no caustic anywhere, and on crossed
+ * waves cells that lie on no fold, which an umbilic cannot do.
  *
  * Both tolerances are relative to the tetrahedron's eigenvalue SPREAD, not to the pair's own
  * magnitudes: |l_i - l_j| <= tol*(|l_i| + |l_j|) becomes unsatisfiable exactly where D4 lives. */
@@ -107,8 +106,6 @@ static const double CUSP_REL_TOL = 0.15;
  *
  * A4 asks for one more derivative to vanish than A3: D1 = 0 AND D2 = 0. The test is NOT "each
  * derivative is small" -- derivatives of different order have different units and no common scale.
- * (An earlier attempt comparing each Dn against its own |dlambda|/|dq|^n yardstick separated a true
- * A4 from a pure A3 by only a factor 5.)
  *
  * What is actually being asked is that the Taylor series of lambda_c along v_c START at cubic order,
  * i.e. that the cubic term dominate over the stencil. With h the stencil radius the contributions
@@ -122,14 +119,9 @@ static const double CUSP_REL_TOL = 0.15;
  * vanishes too). Note it is UNTUNED: none of the three analytic waves exercises it, and sweeping it
  * from 0.15 to 0.90 moves the counts by at most one cell.
  *
- * MEASURED on the three 1-D waves, A4-flagged cells as a fraction of A3-flagged (32^3 particles,
- * 48^3 grid), with the deduplicated nearest-64 stencil of ps_interpolation.cc:
- *
- *     A*k = 1.8, a generic A2 fold                          0 of 7 cells        0.00%
- *     A*k = 1.0, an exact A3 (D2 = k^2 != 0)                10 of 1972 cells    0.51%   <- floor
- *     three-harmonic, an exact A4 (D1 = D2 = 0, D3 != 0)    1473 of 1976 cells 74.54%   <- signal
- *
- * a factor ~146 of separation. TERM_TOL 0.35 holds the floor but drops the signal to 15%; 0.65 buys
+ * TERM_TOL is calibrated on the three 1-D waves (A4-flagged cells as a fraction of A3-flagged, with the
+ * deduplicated nearest-64 stencil of ps_interpolation.cc): none on a generic A2 fold, a 0.51% floor on an
+ * exact A3, a 74.5% signal on an exact A4. 0.35 holds the floor but drops the signal to 15%; 0.65 buys
  * signal for a 0.66% floor. The signal can exceed 100% at large TERM_TOL because bit 8 is not a
  * subset of bit 7 -- see foldDerivatives.
  *
@@ -485,9 +477,9 @@ inline bool cuspIndicator(TetDeformation const &self,
        fitted gradient. |g| is the wrong reference: on an irregular tessellation the transverse
        components of g absorb fit noise, so a tetrahedron whose neighbours barely differ along v_c
        -- a set of neighbours clustered in one slab, say -- gets a small |g.v_c| next to a
-       noise-inflated |g| and looks like a cusp. Measured on the 1-D Zel'dovich wave at A*k = 1.8,
-       where theory says the fold is generic and there are NO cusps, that mistake flagged 15% of
-       the fold cells. The largest observed slope |dlambda|/|dq| is a direct, noise-free scale. */
+       noise-inflated |g| and looks like a cusp: on the 1-D Zel'dovich wave at A*k = 1.8, where
+       theory says the fold is generic and there are NO cusps, that mistake marks fold cells as cusps.
+       The largest observed slope |dlambda|/|dq| is a direct, noise-free scale. */
     double slope = 0.;
     for (int k=0; k<n; ++k)
     {
@@ -500,8 +492,8 @@ inline bool cuspIndicator(TetDeformation const &self,
        at A*k = 1 folds at kq = pi, where lambda_c = 1 + cos(kq) has a quadratic minimum) -- but
        ONLY when the tetrahedron is also essentially ON the fold. On a regular lattice plenty of
        tetrahedra have neighbours whose critical eigenvalues happen to coincide while lambda_c
-       itself is far from zero; accepting those flagged 15% of the fold cells of the A*k = 1.8 wave,
-       which theory says has no cusps at all. FOLD_BAND is deliberately generous so the gradient can
+       itself is far from zero; accepting them marks cusps on fold cells of the A*k = 1.8 wave,
+       which theory says has none at all. FOLD_BAND is deliberately generous so the gradient can
        be measured on the approach to a fold; this branch, having no gradient to lean on, demands
        the much stricter statement that lambda_c has actually reached zero. */
     if ( gn <= 0. ) return std::fabs(self.critical) <= 0.02 * self.spread;

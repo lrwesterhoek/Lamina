@@ -24,7 +24,7 @@ os.environ.setdefault("DTFE_GPU", "0")
 # regression is then a SKIP, never a pass: it compared nothing (tests/run_tests_check.sh R3)
 REFERENCE_DIR = os.environ.get("DTFE_TEST_REFERENCE_DIR") or os.path.join(SCRIPT_DIR, "reference")
 # DTFE_TEST_REQUIRED=1 (ci_suite.sh's double stage, after building the pair): a missing binary or
-# feature is a FAILURE, as with tests/precision.sh's skip_or_fail -- a green stage that ran no
+# feature is a FAILURE, as with tests/lib.sh's skip_or_fail -- a green stage that ran no
 # assertion is worth nothing
 REQUIRED = os.environ.get("DTFE_TEST_REQUIRED") == "1"
 
@@ -479,8 +479,8 @@ def _has_flag(name, flag):
     return True
 
 
-# The gate of the two exact-average tests: '--sampled', the switch that came with '--exact' on 2026-11-09. Not
-# '--exact' itself: an older binary's help has it inside '--exact-average' (a substring test finds it there).
+# The gate of the two exact-average tests: '--sampled', the switch that comes with '--exact'. Not '--exact' itself:
+# the gate is a substring test, which a longer option name starting with '--exact' would pass too.
 EXACT_GATE = "--sampled"
 
 
@@ -825,7 +825,7 @@ def test_mass_assignment_periodic_faces(tmpdir):
     infile = os.path.join(tmpdir, f"{name}.txt")
     write_text_input(infile, _offset_lattice(16, 16, 32, lx, lx, lz), (0, lx, 0, lx, 0, lz))
     try:
-        for method in ("CIC", "TSC", "PCS"):
+        for method in ("cic", "tsc", "pcs"):
             outfile = os.path.join(tmpdir, f"{name}_{method}")
             ok, output = _run_raw(["-i", "111", "-o", "101", "-g", "16", "16", "16", "-f", "density",
                                    "--mpc-unit", "1", "--periodic", f"--{method}"], infile, outfile)
@@ -853,7 +853,7 @@ def test_mass_assignment_thin_partitions(tmpdir):
     write_text_input(infile, _offset_lattice(8, 8, 8, 100.0, 100.0, 100.0), (0, 100, 0, 100, 0, 100))
     env = dict(os.environ, OMP_NUM_THREADS="1")
     try:
-        for method in ("CIC", "TSC", "PCS"):
+        for method in ("cic", "tsc", "pcs"):
             outfile = os.path.join(tmpdir, f"{name}_{method}")
             cmd = [DTFE_BIN, infile, outfile, "-i", "111", "-o", "101", "-g", "8", "-f", "density",
                    "--mpc-unit", "1", "--periodic", f"--{method}", "--partition", "1", "4", "4"]
@@ -885,7 +885,7 @@ def test_partition_split_never_empty(tmpdir):
     try:
         for infile, label, splits in ((lat, "lattice", (["1", "5", "5"], ["1", "8", "8"])),
                                       (squeezed, "first-slab cloud", (["4", "1", "1"],))):
-            for method in ("TSC", "CIC", "PCS"):
+            for method in ("tsc", "cic", "pcs"):
                 ref = None
                 for part in [None] + list(splits):
                     tag = "single" if part is None else "_".join(part)
@@ -926,7 +926,7 @@ def test_mass_assignment_centroid(tmpdir):
     infile = os.path.join(tmpdir, f"{name}.txt")
     write_text_input(infile, parts, (0, box, 0, box, 0, box))
     try:
-        for method in ("CIC", "TSC", "PCS"):
+        for method in ("cic", "tsc", "pcs"):
             outfile = os.path.join(tmpdir, f"{name}_{method}")
             ok, output = _run_raw(["-i", "111", "-o", "101", "-g", str(n), "-f", "density", "--mpc-unit", "1",
                                    "--periodic", f"--{method}"], infile, outfile)

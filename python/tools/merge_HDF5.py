@@ -35,7 +35,6 @@ Usage:
     python3 merge_HDF5.py -d DIR --trees --ics --delete-chunks
 """
 
-import argparse
 import os
 import subprocess
 import sys
@@ -589,60 +588,15 @@ def convert_ics(base_dir, delete_chunks=False):
     return verified
 
 
-def fix_units(base_dir):
-    """Upgrade PRE-CONVERSION combined files in place to the uniform h-free convention.
-
-    Old combined_NNN.hdf5 / combined_ics.hdf5 already stored h-free Coordinates and BoxSize
-    but copied the raw TNG MassTable (1e10 Msun/h) and carry no marker; their snapshot chunks
-    are often deleted, so this fixes the header attributes in place (MassTable /= h,
-    HFreeUnits set) instead of re-merging. Idempotent: marked files are skipped. Old merged
-    groupcats/trees without markers store raw COLUMNS, so those are reported for a re-merge
-    from their (still downloadable) chunks rather than rewritten blind."""
-    base = Path(base_dir)
-    fixed = skipped = 0
-    targets = sorted(base.glob("snapdir_*/combined_*.hdf5"))
-    targets += [p for p in (base / "combined_ics.hdf5",) if p.exists()]
-    print(f"\n{'='*60}")
-    print(f"fix-units: {base}")
-    for path in targets:
-        with h5py.File(path, "r+") as f:
-            attrs = f["Header"].attrs
-            if "HFreeUnits" in attrs:
-                skipped += 1
-                continue
-            h_value = float(attrs["HubbleParam"])
-            if "MassTable" in attrs:
-                attrs["MassTable"] = np.asarray(attrs["MassTable"]) / h_value
-            attrs["HFreeUnits"] = h_value
-            fixed += 1
-            print(f"  fixed {path.relative_to(base)}  (MassTable -> 1e10 Msun, marker set)")
-    for path in sorted(base.glob("groups_*/combined_fof_subhalo_tab_*.hdf5")):
-        with h5py.File(path, "r") as f:
-            if "HFreeUnits" not in f["Header"].attrs:
-                print(f"  WARNING: {path.relative_to(base)} predates the units unification "
-                      f"(raw columns) -- delete it and re-merge with --groupcats")
-    for sub in ("Merger Trees", "postprocessing/trees/SubLink"):
-        path = base / sub / "combined_tree_extended.hdf5"
-        if path.exists():
-            with h5py.File(path, "r") as f:
-                if "HFreeUnits" not in f.attrs:
-                    print(f"  WARNING: {path.relative_to(base)} predates the units unification "
-                          f"(raw columns) -- delete it and re-merge with --trees")
-    print(f"  {fixed} file(s) upgraded, {skipped} already h-free")
-    print('='*60)
-
-
 def main():
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))     # python/: dtfelib
-    from dtfelib.cli import new_parser, deprecated_alias, add_list_arg, warn_deprecated
+    from dtfelib.cli import new_parser, add_list_arg
     ap = new_parser(description=__doc__.splitlines()[0])
-    ap.add_argument("old_snapshots", type=int, nargs="*", metavar="snapshot", help=argparse.SUPPRESS)  # now --snaps
     add_list_arg(ap, "--snaps", kind=int, default=None, metavar="N",
                  help=f"snapshot numbers to merge, space-separated (default: {' '.join(map(str, SNAPSHOT_NUMBERS))})")
     ap.add_argument("-d", "--sim-dir", dest="data_dir", required=True, metavar="DIR",
                     help="the simulation's directory holding snapdir_NNN/, e.g. '~/IllustrisTNG/TNG100/TNG100-3-Dark' "
                          "(required: there is no default simulation; not the data root, the folder of simulations)")
-    deprecated_alias(ap, "--data-dir", "--sim-dir")
     ap.add_argument("-n", "--num-subfiles", type=int, default=None,
                     help="chunk files per snapshot (default: auto-detected by globbing)")
     ap.add_argument("--hubble", type=float, default=H_VALUE,
@@ -655,18 +609,12 @@ def main():
                     help="merge the SubLink tree_extended chunks (whole simulation)")
     ap.add_argument("--ics", action="store_true",
                     help="convert ics.hdf5 -> combined_ics.hdf5 (whole simulation)")
-    ap.add_argument("--fix-units", action="store_true",
-                    help="upgrade PRE-CONVERSION combined snapshot/ICs files in place to the "
-                         "h-free convention (MassTable /h + HFreeUnits marker); idempotent")
     ap.add_argument("--delete-chunks", action="store_true",
                     help="delete the source chunk files after a VERIFIED merge")
     args = ap.parse_args()
-    if args.old_snapshots:              # the positional snapshot numbers of before: --snaps (one release)
-        warn_deprecated("a positional snapshot number", f"--snaps {' '.join(map(str, args.old_snapshots))}")
-        args.snaps = list(args.snaps or []) + list(args.old_snapshots)
     snapshots = args.snaps if args.snaps else SNAPSHOT_NUMBERS
-    other_modes = args.groupcats or args.trees or args.ics or args.fix_units
-    do_snapshots = ((not other_modes) or args.snapshots_too) and not args.fix_units
+    other_modes = args.groupcats or args.trees or args.ics
+    do_snapshots = (not other_modes) or args.snapshots_too
 
     print("\nHDF5 Snapshot Merger")
     print(f"Base directory: {args.data_dir}")
@@ -707,8 +655,6 @@ def main():
     if args.ics:
         if not convert_ics(args.data_dir, delete_chunks=args.delete_chunks):
             failed.append("initial conditions")
-    if args.fix_units:
-        fix_units(args.data_dir)
 
     if failed:                  # the launcher and shell chains see a failed step, not a quiet 'Done!'
         print(f"\nDone, with problems: no combined file for {', '.join(failed)}.")

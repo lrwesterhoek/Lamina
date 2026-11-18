@@ -13,7 +13,7 @@
 # The app only starts scripts/gui.sh of THIS repository, so it needs the GUI's PySide6 environment
 # (scripts/install.sh sets it up) and must be re-made if the repository moves. Apps started from
 # Finder get a bare PATH, so the launcher reads PATH and the DTFE settings (DTFE_*, TNG_API_KEY,
-# PY, PYTHON) from the user's login shell, as a Terminal window would have them: the GUI then runs
+# PYTHON) from the user's login shell, as a Terminal window would have them: the GUI then runs
 # the same python3, wget and data root as the terminal. Its output goes to
 # ~/Library/Logs/Lamina.log. Re-running replaces the app it made before (and only that), and takes away an app it
 # made under the name "DTFE Launcher" (the same bundle identifiers).
@@ -213,7 +213,7 @@ for _ in $(seq 150); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
 kill "$pid" 2>/dev/null
 while IFS= read -r line; do
     case "$line" in
-        PATH=*|DTFE_*=*|TNG_API_KEY=*|PY=*|PYTHON=*) export "$line" ;;
+        PATH=*|DTFE_*=*|TNG_API_KEY=*|PYTHON=*) export "$line" ;;
     esac
 done < "$ENVFILE"
 rm -f "$ENVFILE"

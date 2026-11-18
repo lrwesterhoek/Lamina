@@ -13,11 +13,9 @@
 #                 [--run-mode MODE] [snapshot ...]
 #     long forms: --sim-dir, --sim, --grid, --subsamples, --gpu, --exact (the same as the letters); --sampled,
 #          --run-mode
-#     -m   run the '_a' interpolation on the GPU (--gpu; same as DTFE_GPU=1). The default (DTFE_GPU unset, 'auto')
-#          is the GPU when the binary was built with one (the Makefile's o/.gpu_mode_metal stamp;
-#          o_d for DTFE_PRECISION=double), else the CPU -- and the CPU for the sampled average in every run mode, as
-#          the binary picks it; DTFE_GPU=0 runs the CPU on a GPU build. The binary is started with the resolved
-#          DTFE_GPU (0 or 1) in its environment, which it reads.
+#     -m   run the '_a' interpolation on the GPU: the binary is started with DTFE_GPU=1, which asks for the GPU as
+#          its '--gpu' does. Without -m the binary reads DTFE_GPU as the caller set it (0 the CPU, 1 the GPU); unset
+#          (or auto) the binary picks: the GPU of a GPU build for the exact average of an '_a' field, else the CPU.
 #     -e   every '_a' cell the EXACT average of the linear interpolant over the cell (--exact). The DEFAULT
 #          (DTFE_EXACT_AVERAGE=1, the production standard: no sampling noise, the mass exact to ~3e-8); -e overrides
 #          an exported DTFE_EXACT_AVERAGE=0 and keeps the exact average beside a SUBSAMPLES count (ignored, said).
@@ -26,21 +24,18 @@
 #          unit as run_ps_dtfe.sh's); passed only when set (the binary's own default otherwise). While
 #          DTFE_EXACT_AVERAGE is unset (and neither -e nor --sampled is given) a count selects the Monte-Carlo mean,
 #          as the binary does; beside -e or DTFE_EXACT_AVERAGE=1 it is ignored.
-#     --run-mode MODE  how hard the run may lean on the machine (DTFE_RUN_MODE the same; the option wins): gentle (half
-#          the performance cores, short GPU buffers, on Linux nice 10), balanced (the performance cores less a quarter,
-#          short GPU buffers) or performance (every core, long GPU buffers); auto = balanced, performance in a batch job.
-#     --exact-average, the older name of --exact, is still read for one release (with a warning).
-#     The drivers' letters are their own: -m is the GPU and -s the simulation here (the binaries' -m and -s, the
-#          averaging method and a total sample count, are deprecated: --average-method, --subsamples).
-#   Production defaults: GRID_SIZE 512 (config.sh), padding 15, the GPU when built, the exact cell
+#     --run-mode MODE  how hard the run may lean on the machine, passed to the binary as given: gentle (half the
+#          performance cores, short GPU buffers, on Linux nice 10), balanced (the performance cores less a quarter,
+#          short GPU buffers) or performance (every core, long GPU buffers); auto passes nothing. Without a mode the
+#          binary reads DTFE_RUN_MODE (the same words, in any case), else takes balanced, performance in a batch job.
+#     The drivers' letters are their own: -m is the GPU and -s the simulation here.
+#   Production defaults: GRID_SIZE 512 (config.sh), padding 15, the binary's device pick, the exact cell
 #   average, FIELDS = density, velocity, its divergence and shear (the analysis set, the same as run_ps_dtfe.sh's;
 #   the gradient, vorticity, T-web and V-web stay available through FIELDS), LAMBDA_TH 0.3.
-#   Knobs (environment; each is explained where the script sets it): PARTITION MAX_CONCURRENT DTFE_GPU DTFE_RUN_MODE
+#   Knobs (environment; each is explained where the script reads it): PARTITION MAX_CONCURRENT DTFE_GPU DTFE_RUN_MODE
 #   DTFE_EXACT_AVERAGE SUBSAMPLES THREADS FACE_GRADIENT SCRATCH_DIR SAMPLE_POINTS PTS_VEL_GRAD TESSELLATION_CACHE
 #   LAMBDA_TH DTFE_RESUME OUTPUT_PREFIX FIELDS DTFE_PRECISION DRY_RUN AUTO_TUNE_REPORT, and config.sh's GRID_SIZE,
 #   PADDING, SPACE_CHECK. A switch is off for 0, false, no or off and on for any other value (the binaries' rule).
-#   Older names, read for one release with a warning (the new name wins when both are set): DTFE_METAL (DTFE_GPU),
-#   DTFE_EXACT (DTFE_EXACT_AVERAGE), TESS_CACHE (TESSELLATION_CACHE), DTFE_PADDING, DTFE_GRID_SIZE, DTFE_SPACE_CHECK.
 #   OUTPUT_PREFIX (default 'output'): the files are <snapdir>/<prefix>.*; another prefix keeps a variant beside
 #   the default set (dtfelib reads 'output.' for standard DTFE). A 'ps_*' prefix is refused: that is PS-DTFE's
 #   naming (an OUTPUT_PREFIX exported for run_ps_dtfe.sh would otherwise overwrite the phase-space grids).
@@ -72,8 +67,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"   # the binaries and Makefile live o
 # is 15, not config.sh's 50 (which stays the PS-DTFE scripts' value). 15 is complete -- no '*.badGridPoints*' file --
 # on the z = 0 snapshots of TNG50/100/300-3-Dark, the hardest case (the emptiest voids give the largest Delaunay
 # circumspheres at the partition edges), and 22-29% faster than 20 there; 10 is not complete at z = 0, and 50 costs
-# 33x the vertices. A PADDING from the caller (or DTFE_PADDING, its older name) still wins: config.sh keeps what the
-# caller set in CALLER_PADDING before it fills PADDING with its own default.
+# 33x the vertices. A PADDING from the caller still wins: config.sh keeps what the caller set in CALLER_PADDING before
+# it fills PADDING with its own default.
 source "${SCRIPT_DIR}/config.sh"
 PADDING="${CALLER_PADDING:-15}"
 
@@ -83,18 +78,11 @@ PARTITION="${PARTITION:-}"       # EMPTY (default) = the binary AUTO-TUNES the s
                                  # it prints). Set to override, e.g. PARTITION="2 2 2".
 MAX_CONCURRENT="${MAX_CONCURRENT:-}"  # cap on concurrent triangulations to bound peak RAM (0 = all cores).
                                  # EMPTY (default) = auto-tuned together with the partition split.
-knob DTFE_GPU DTFE_METAL          # (config.sh knob: the older name read for one release, with a warning)
-DTFE_GPU="${DTFE_GPU:-auto}"     # 1 = the '_a' interpolation on the GPU (--gpu), 0 = the CPU; 'auto'
-                                 # (default, the drivers' rule) = 1 when the binary is a GPU build (config.sh
-                                 # gpu_build_default), resolved below once DTFE_PRECISION has chosen the binary --
-                                 # but 0 for the sampled average, in every run mode (config.sh gpu_auto_resolve);
-                                 # exported to the binary as resolved. The same knob as run_ps_dtfe.sh's
-_caller_run_mode="${DTFE_RUN_MODE:-}"   # (the caller's own value: config.sh run_mode_resolve reads it after the options)
-DTFE_RUN_MODE="${DTFE_RUN_MODE:-auto}"  # how hard the run may lean on the machine, passed on every run as '--run-mode
-                                 # MODE': gentle, balanced or performance (any case); 'auto' (default) = balanced, or
-                                 # performance inside a SLURM or PBS job (config.sh run_mode_resolve; --run-mode MODE
-                                 # wins). The same knob as run_ps_dtfe.sh's
-knob DTFE_EXACT_AVERAGE DTFE_EXACT
+# DTFE_GPU (1 = the '_a' interpolation on the GPU, 0 = the CPU; unset or auto = the binary's pick) and DTFE_RUN_MODE
+# (how hard the run may lean on the machine: gentle, balanced or performance, in any case; unset or auto = the
+# binary's default, balanced or, inside a SLURM or PBS job, performance) reach the binary in its environment as the
+# caller set them, and it reads them by its own rule; -m sets DTFE_GPU=1, and --run-mode MODE wins over
+# DTFE_RUN_MODE. The same knobs as run_ps_dtfe.sh's.
 _caller_exact="${DTFE_EXACT_AVERAGE:-}"   # (the caller's own value: unset, a SUBSAMPLES count selects the sampled mean)
 DTFE_EXACT_AVERAGE="${DTFE_EXACT_AVERAGE:-1}"  # 1 (default, the production standard) = exact cell
                                  # averages (--exact: no sampling noise, mass exact to ~3e-8); 0 = the Monte-Carlo
@@ -107,17 +95,17 @@ SUBSAMPLES="${SUBSAMPLES:-}"     # k = --subsamples k: k points per axis, k^3 pe
                                  # as run_ps_dtfe.sh's SUBSAMPLES; -n k sets it
 THREADS="${THREADS:-}"           # cap OpenMP threads globally (OMP_NUM_THREADS); empty = all cores (as run_ps_dtfe.sh)
 FACE_GRADIENT="${FACE_GRADIENT:-}"   # the velocity gradient's route (and the divergence and shear built on it). EMPTY
-                                 # (default) = the binary's own: since 2026-11-09 the exact face integrals of the
-                                 # interpolant (Gauss; docs/cleanup-plan.md D13), in double, the same for every
+                                 # (default) = the binary's own: the exact face integrals of the
+                                 # interpolant (Gauss), in double, the same for every
                                  # deposit and device; 1 = --face-gradient (the same, asked explicitly); 0 =
                                  # --per-tet-gradient, the deposit's own per-tetrahedron gradient (float32 on the
-                                 # GPU; the route of the production grids made before 2026-11-09). 3D only.
+                                 # GPU; the route of the production grids made before that default). 3D only.
                                  # run_ps_dtfe.sh's FACE_GRADIENT is the same knob with the same default (PS-DTFE:
                                  # the mean flow's gradient where the run qualifies)
 DRY_RUN="${DRY_RUN:-0}"          # 1 = print the commands and paths, run nothing
 AUTO_TUNE_REPORT="${AUTO_TUNE_REPORT:-0}"  # 1 = only ASK the binary's auto-tuner what this run would need
                                  # (--auto-tune-report): per snapshot one line
-                                 #   AUTO-TUNE-REPORT snap=NNN partition=.. mc=.. predicted_gb=.. budget_gb=.. over_budget=0|1 ...
+                                 #   AUTO-TUNE-REPORT snap=NNN partition=.. mc=.. predicted_gb=.. budget_gb=.. ... over_budget=0|1
                                  # after reading the input; nothing is computed or written (the snapshot's .runlog,
                                  # lock and space check are left alone). The launcher's memory check uses it.
 DTFE_PRECISION="${DTFE_PRECISION:-single}"  # double = the double-precision binary ./DTFE-double ('make DTFE DOUBLE=1'):
@@ -133,7 +121,6 @@ SAMPLE_POINTS="${SAMPLE_POINTS:-}"  # a --sample-points file: the standard DTFE 
                                  # run without points to float rounding (the dummy-point padding test is off). A killed
                                  # one resumes (DTFE_RESUME), its finished partitions' points kept
 PTS_VEL_GRAD="${PTS_VEL_GRAD:-0}"   # 1 = with SAMPLE_POINTS, also the velocity gradient at each point
-knob TESSELLATION_CACHE TESS_CACHE
 TESSELLATION_CACHE="${TESSELLATION_CACHE:-}"  # a LOCAL folder: reuse the Delaunay tessellation of an identical earlier run
                                  # (--tessellation-cache; created if missing; a partitioned run caches one file per
                                  # thread sub-box of each partition, one per partition with SAMPLE_POINTS) -- the
@@ -188,15 +175,15 @@ own_option() {   # <letter>: this driver's own options; -d, -s, -h and the data 
     case "$1" in
         g) GRID_SIZE="${OPTARG}" ;;
         n) SUBSAMPLES="${OPTARG}" ;;
-        m) DTFE_GPU=1 ;;
+        m) _gpu_flag=1; export DTFE_GPU=1 ;;   # the binary reads it (config.sh device_given names it)
         e|S) average_option "$1" ;;      # -e / --exact, --sampled (config.sh: S only carries the long form)
         R) run_mode_option "${OPTARG}" ;;   # --run-mode MODE (config.sh: R only carries the long form)
     esac
 }
+run_mode_args=()                 # --run-mode MODE as given (config.sh run_mode_option); empty: the binary decides
 driver_options "g:n:meSR:" own_option "$@"   # then the data root (unless -d) and the simulation are required
 shift $((OPTIND - 1))
 average_resolve "cell average"   # DTFE_EXACT_AVERAGE 1 or 0: the options, the knob, a SUBSAMPLES count, the default
-run_mode_resolve                 # DTFE_RUN_MODE: --run-mode, the knob, the default (balanced; performance in a batch job)
 
 snapshot_args "$@"              # positional arguments override the default snapshot list (config.sh)
 
@@ -206,13 +193,6 @@ data_root_problem "${DATA_DIR}" || exit 2     # preflight: the data disk unmount
 cd "$REPO_ROOT" || exit 1
 
 driver_binary DTFE_BIN DTFE "${DTFE_PRECISION}"      # ./DTFE or ./DTFE-double (config.sh)
-gpu_auto_resolve DTFE_GPU "${DTFE_BIN}" dtfe "${DTFE_EXACT_AVERAGE}" "${DTFE_RUN_MODE}"   # DTFE_GPU=auto: the GPU when
-                                                      # this binary was built with one, but the CPU for the sampled
-                                                      # average (config.sh)
-# the resolved device (0 or 1) into the binary's environment: the binary reads DTFE_GPU (0 = the CPU) and, without
-# it, picks its device itself, so a 0 that stayed a shell variable would leave the banner's CPU to the binary's pick
-# (-m still passes --gpu for 1; the command lines DRY_RUN prints do not show it)
-export DTFE_GPU
 time_wrap_resolve                                     # TIME_WRAP: the optional peak-memory wrapper
 [ -n "${THREADS}" ] && export OMP_NUM_THREADS="${THREADS}"
 keep_awake "${DRY_RUN}"
@@ -228,8 +208,8 @@ if [ "${DTFE_EXACT_AVERAGE}" = "1" ]; then
 else
     echo "Cell averages: sampled, Monte-Carlo sample means (--sampled${SUBSAMPLES:+ --subsamples ${SUBSAMPLES}}; ${average_src})"
 fi
-echo "'_a' interpolation: $([ "${DTFE_GPU}" = "1" ] && echo "GPU (--gpu)" || echo "CPU")${gpu_auto}"
-echo "Run mode: ${DTFE_RUN_MODE} (${run_mode_src}${OMP_NUM_THREADS:+; OMP_NUM_THREADS=${OMP_NUM_THREADS} keeps its thread count})"
+echo "'_a' interpolation: $(device_given)"      # what the driver was given (config.sh); the run log says what ran
+echo "Run mode: $(run_mode_given)${OMP_NUM_THREADS:+ (OMP_NUM_THREADS=${OMP_NUM_THREADS} keeps its thread count)}"
 [ -n "${SCRATCH_DIR}" ] && echo "Scratch directory: ${SCRATCH_DIR} (grids out of core)"
 echo ""
 
@@ -242,9 +222,6 @@ for i in "${SNAPSHOTS[@]}"; do
         continue
     fi
 
-    # GPU interpolation toggle (-m / DTFE_GPU=1); ignored with a warning on non-GPU builds.
-    metal_args=()
-    [ "${DTFE_GPU}" = "1" ] && metal_args=(--gpu)
     # the cell average, named both ways (the run log then says which ran); the count only for the sampled one
     exact_args=(--exact)
     if [ "${DTFE_EXACT_AVERAGE}" != "1" ]; then
@@ -252,14 +229,14 @@ for i in "${SNAPSHOTS[@]}"; do
         [ -n "${SUBSAMPLES}" ] && exact_args+=(--subsamples "${SUBSAMPLES}")   # (SUBSAMPLES, see the top: only when set)
     fi
     [ "${FACE_GRADIENT}" = "1" ] && exact_args+=(--face-gradient)     # (FACE_GRADIENT, see the top)
-    [ "${FACE_GRADIENT}" = "0" ] && exact_args+=(--per-tet-gradient)  # the deposit's own gradient (the route before 2026-11-09)
+    [ "${FACE_GRADIENT}" = "0" ] && exact_args+=(--per-tet-gradient)  # the deposit's own gradient (the older default)
 
     # pass --partition/--max-concurrent only when set; otherwise the binary auto-tunes them
     part_args=()
     [ -n "${PARTITION}" ] && part_args+=(--partition ${PARTITION})
     [ -n "${MAX_CONCURRENT}" ] && part_args+=(--max-concurrent "${MAX_CONCURRENT}")
-    # the run mode, on every run (DTFE_RUN_MODE, see the top: the run log then says which ran and why)
-    part_args+=(--run-mode "${DTFE_RUN_MODE}")
+    # the run mode only when --run-mode named one (DTFE_RUN_MODE, see the top, reaches the binary otherwise)
+    part_args+=(${run_mode_args[@]+"${run_mode_args[@]}"})
     scratch_args=()
     [ -n "${SCRATCH_DIR}" ] && scratch_args=(--scratch-dir "${SCRATCH_DIR}")
     sp_args=()
@@ -295,7 +272,6 @@ for i in "${SNAPSHOTS[@]}"; do
         ${scratch_args[@]+"${scratch_args[@]}"}
         ${tess_args[@]+"${tess_args[@]}"}
         ${sp_args[@]+"${sp_args[@]}"}
-        ${metal_args[@]+"${metal_args[@]}"}
         ${exact_args[@]+"${exact_args[@]}"}
         ${report_args[@]+"${report_args[@]}"}
         ${resume_args[@]+"${resume_args[@]}"})

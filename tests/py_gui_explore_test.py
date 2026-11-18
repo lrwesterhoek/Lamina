@@ -4031,7 +4031,7 @@ def mean_field_data(data: Path) -> Path:
     (300.0 * rng.normal(size=(n, n, n, 3))).astype(np.float32).tofile(str(d / "ps_output.a_vel"))
     for _name, sfx, c in MF_STORED:
         rng.normal(size=(n, n, n) + ((c,) if c > 1 else ())).astype(np.float32).tofile(str(d / f"ps_output.a_{sfx}"))
-    (d / "ps_output.runlog").write_text("RUNNING: ./PS-DTFE in out --grid 32 --periodic --lambda_th 0.2\n")
+    (d / "ps_output.runlog").write_text("RUNNING: ./PS-DTFE in out --grid 32 --periodic --lambda-th 0.2\n")
     (1.0 + 0.1 * rng.normal(size=(n, n, n))).astype(np.float32).tofile(str(d / "output.a_den"))
     rng.normal(size=(n, n, n, 3)).astype(np.float32).tofile(str(d / "output.a_vel"))
     rng.normal(size=(n, n, n)).astype(np.float32).tofile(str(d / "output.a_velDiv"))
@@ -4113,10 +4113,10 @@ def mean_field_pure():
           lab == ("velocity divergence (mean field ∇⟨v⟩)", "velocity divergence (stream average ⟨∇v⟩)",
                   "velocity divergence", "velocity divergence (mean field ∇⟨v⟩)", "density ρ/ρ̄")
           and not any("--" in t for t in lab), str(lab))
-    # a face-gradient output (PS-DTFE's default with the exact deposit and the volume weighting, docs/cleanup-plan.md
-    # D13): its run writes the stream average's divergence beside the family ('.a_velDivStreams'), whose stored grids
-    # are then the mean field itself -- shown as stored with either choice, and labelled the mean field. The same
-    # grids without the marker keep both families
+    # a face-gradient output (PS-DTFE's default with the exact deposit and the volume weighting): its run writes the
+    # stream average's divergence beside the family ('.a_velDivStreams'), whose stored grids are then the mean field
+    # itself -- shown as stored with either choice, and labelled the mean field. The same grids without the marker
+    # keep both families
     face = face_outputs(d)
     face_o, plain_o = (G.OutputSet(face / p, box=ps_o.box, redshift=ps_o.redshift) for p in ("ps_face", "ps_plain"))
     stored_face = face_o.slice("divergence", 2, 9, "value", "stored")
@@ -4134,7 +4134,7 @@ def mean_field_pure():
           and FieldSet(face, method="ps", prefix="ps_face").face_gradient
           and not FieldSet(face, method="ps", prefix="ps_plain").face_gradient,
           f"{face_o.face_gradient} {plain_o.face_gradient} {face_o.gradient_family('shear', 'stored')}")
-    # the stream average's twins a face-gradient run writes beside its family ('*Streams', docs/cleanup-plan.md D12)
+    # the stream average's twins a face-gradient run writes beside its family ('*Streams')
     # and its mass flux divergence are Explore fields: listed after the family, named the stream average, on a
     # diverging scale, the vorticity's shown as the curl as the vorticity's is (here byte copies of the family's
     # grids, so every component of a twin's map equals the family's)
@@ -4264,15 +4264,17 @@ def face_gradient_zoom():
     cmds = {p: plan.get("cmd") or [] for p, plan in plans.items()}
     routes = {p: [a for a in c if a in ("--face-gradient", "--per-tet-gradient")] for p, c in cmds.items()}
     check("9. the exact zoom takes the output's own route: '--face-gradient' for a face-gradient output, "
-          "'--per-tet-gradient' for one without the marker (both exact and volume-weighted); an older output saved "
-          "with mass-weighted moments: volume-weighted and its face route too",
+          "'--per-tet-gradient' for one without the marker (both exact, neither naming a device: the program picks); "
+          "an older output saved with mass-weighted moments: its face route too, and its plan marks the map as "
+          "mass-weighted (the zoom's note)",
           routes == {"ps_face": ["--face-gradient"], "ps_plain": ["--per-tet-gradient"], "ps_mw": ["--face-gradient"]}
-          and all("--exact" in c and c.count("--ps-volume-weighted") == 1 for c in cmds.values()),
+          and all("--exact" in c for c in cmds.values()) and not any("--gpu" in c for c in cmds.values())
+          and [p for p, plan in plans.items() if plan.get("mass_weighted_map")] == ["ps_mw"],
           f"{routes} {[plan.get('note') for plan in plans.values()]}")
-    # the run itself (L2): the worker starts the program with DTFE_GPU pinned to the device its command names
-    # (runspec.gpu_pin_env: '1' with '--gpu', else '0'), over the launcher's own environment, where a login shell's
-    # export lands; a stand-in for subprocess.Popen records the environment and starts nothing (the worker then
-    # reports a failure). Its 'root' has a parent of its own, which the worker removes at the end
+    # the run itself (L2): the worker starts the program with DTFE_GPU pinned to auto (runspec.gpu_pin_env(None): the
+    # program picks its device), over the launcher's own environment, where a login shell's export lands; a stand-in
+    # for subprocess.Popen records the environment and starts nothing (the worker then reports a failure). Its 'root'
+    # has a parent of its own, which the worker removes at the end
     import subprocess as _sp
 
     class _NotStarted(Exception):
@@ -4285,7 +4287,7 @@ def face_gradient_zoom():
     failed = []
     try:
         _sp.Popen = popen
-        for cmd, shell_value in ((["PS-DTFE", "in.hdf5", "out", "--gpu"], "0"), (["PS-DTFE", "in.hdf5", "out"], "1")):
+        for cmd, shell_value in ((["PS-DTFE", "in.hdf5", "out"], "0"), (["PS-DTFE", "in.hdf5", "out"], "1")):
             os.environ["DTFE_GPU"] = shell_value
             worker = XZ.ExactZoomWorker()
             worker.failed.connect(lambda msg: failed.append(msg))
@@ -4296,9 +4298,9 @@ def face_gradient_zoom():
             os.environ.pop("DTFE_GPU", None)
         else:
             os.environ["DTFE_GPU"] = was
-    check("9. the exact zoom's run: DTFE_GPU pinned to its command's device ('1' with '--gpu', '0' without), whatever "
-          "DTFE_GPU the launcher's own environment holds (L2)",
-          seen_env == ["1", "0"] and failed == ["not started", "not started"], f"{seen_env} {failed}")
+    check("9. the exact zoom's run: DTFE_GPU pinned to auto (the program picks), whatever DTFE_GPU the launcher's own "
+          "environment holds (L2)",
+          seen_env == ["auto", "auto"] and failed == ["not started", "not started"], f"{seen_env} {failed}")
 
 
 def mean_field_gui():

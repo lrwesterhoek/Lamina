@@ -1,34 +1,33 @@
 #!/usr/bin/env python3
-"""Docs-drift check: what README.md and demo/COMMANDS.md tell a user to type must exist in the code,
-and the knobs the drivers read must be documented somewhere a user looks.
+"""Docs-drift check: what the documents (DOCS: README.md, the guides and the timings page in docs/,
+demo/COMMANDS.md, metal/README.md) tell a user to type must exist in the code, and the knobs the drivers read must
+be documented somewhere a user looks.
 
-  A) every '--flag' in README.md / demo/COMMANDS.md is an option of the binaries (src/user_options.cc's
-     program_options names), of a script (scripts/*.sh) or of a python tool or test (argparse); and none is a
-     DEPRECATED spelling (user_options.cc deprecatedOptions: hidden, accepted for one release), except on a line
-     that says 'deprecated' (a note naming the old spelling);
-  B) every DTFE_* name in them is read somewhere in the code;
-  C) the README knob table: each knob it names is a knob of scripts/config.sh / run_ps_dtfe.sh / run_dtfe.sh (or
-     an environment variable the code reads), and where the table gives a plain value as the default it equals
-     the scripts' 'VAR="${VAR:-default}"';
+  A) every '--flag' in the documents is DECLARED: an entry of the binaries'
+     option table (src/user_options.cc), a script's case arm (scripts/*.sh), a python parser's option (an
+     add_argument / add_list_arg / add_*_arg call, make_parser's snap_option, a test of sys.argv), or one a test
+     declares the same way for its own command line. A comment, a help text, a log reader or a command that
+     passes the flag to a program is no evidence; FOREIGN names the flags of other programs the documents quote;
+  B) every DTFE_* name in them is READ by the code (src/, scripts/, python/, the Makefile) or by a test itself: a
+     script's '${NAME' or '$NAME', the Makefile's '$(NAME)', a python os.environ / getenv read, a C++ Env:: or
+     getenv read or macro test (env_reads); a comment, an 'unset', a pop, an assignment or a string that only
+     names the variable is no read;
+  C) the knob table of docs/user-guide.md (KNOB_DOC): each knob it names is read by the code (B's reads), and
+     where the table gives a plain value as the default it equals the scripts' 'VAR="${VAR:-default}"'
+     (scripts/config.sh / run_ps_dtfe.sh / run_dtfe.sh);
   D) the other way round: every knob of the drivers and the pipeline, and every DTFE_* variable that
-     scripts/config.sh or python/config.py reads, is named in README.md, demo/COMMANDS.md or a script's --help
+     scripts/config.sh or python/config.py reads, is named in one of the documents or in a script's --help
      header (the comment block a script's --help prints);
-  E) the run-log readers' permanent old-to-new table (python/dtfelib/runlog.py RENAMES / SWITCHES) is the one
-     python/gui/results.py re-exports and scripts/run_ps_pipeline.sh's run_settings carries (its old[] / sw[]
-     maps), and it holds every row the binaries accept as a deprecated alias (user_options.cc deprecatedOptions;
-     PS-DTFE's merge switches, deprecatedSwitches, are runlog.py's SWITCHES);
-  F) the renamed knobs (the binaries' env_knobs.h Env::renamed, the drivers' 'knob NEW OLD...' / 'knob_merge' lines,
-     python's DTFE_SIGMA_MPC) appear in the docs (README.md, demo/COMMANDS.md, metal/README.md) under an old name only
-     on a line that says 'deprecated' or 'old(er) name', and the README knob table names none of them;
+  E) every variable the documents set as 'NAME=value' (a knob, an environment or a make variable) is read by
+     the code or a test (B's reads), except a shell variable a document sets and expands itself ('$NAME');
+  F) every document of DOCS that lies in a folder .dockerignore leaves out of the Docker image has its own
+     '!<document>' line there: the image's test stage runs this check, and a document it cannot read fails it;
   G) the binaries' own help (when ./DTFE and ./PS-DTFE are built; a SKIP line otherwise): no visible option name has
      a capital letter or a '_'; no name standard DTFE lists starts with 'ps-' (so every 'ps-' name is PS-only and
      every name both list lacks it); every '-h' name is a '--full-help' name of the same binary (not the other way
      round: '-h' is the short list by design); '-h' stays short, 20 to 35 option names, and carries no date
      (20dd-dd-dd) and no wall time (a number and then 's' or 'ms' as a word).
-Part A's deprecated spellings are the binaries' (deprecatedOptions, the merge switches and standard DTFE's total
-'--samples') and the python CLIs' (dtfelib.cli deprecated_alias calls) whose old name no parser registers any more
-(a per-script old name that another script still uses, '--prefix', '--snap', '--smooth', is not checked).
-The synthetic half (S) feeds the same functions a made-up README with known drift, so a checker that stopped
+The synthetic half (S) feeds the same functions a made-up document with known drift, so a checker that stopped
 finding anything fails too. Standard library only (runs under any python3 >= 3.10, no numpy).
 
     python3 tests/docs_drift_check.py
@@ -39,45 +38,29 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DOCS = ("README.md", "demo/COMMANDS.md", "metal/README.md")
-DRIVERS = ("scripts/config.sh", "scripts/run_ps_dtfe.sh", "scripts/run_dtfe.sh")   # the README table's defaults
+# RELEASE_NOTES.md is left out on purpose: it names the removed options, variables and knobs (its table of old and
+# new names, its Removed list, the examples of old settings), which rules A, B and E would fail by design
+DOCS = ("README.md", "docs/user-guide.md", "docs/launcher-and-analysis.md", "docs/developer-guide.md",
+        "docs/timings.md", "demo/COMMANDS.md", "metal/README.md")
+KNOB_DOC = "docs/user-guide.md"                     # the document that holds the drivers' knob table (rule C)
+DRIVERS = ("scripts/config.sh", "scripts/run_ps_dtfe.sh", "scripts/run_dtfe.sh")   # the knob table's defaults
 KNOB_SCRIPTS = DRIVERS + ("scripts/run_ps_pipeline.sh",)
 SKIP_PARTS = {"tmp", "cache", "__pycache__", "figures", "reference"}
-RUNLOG = "python/dtfelib/runlog.py"     # the readers' table: its new names are no evidence that an option exists
-PIPELINE = "scripts/run_ps_pipeline.sh"
-TABLE_ROW = re.compile(r'(old|sw)\["(--[\w-]+)"\] = "(--[\w-]+(?: [\w-]+)?)"')   # run_settings' copy of it
+CODE = ("src/**/*.cc", "src/**/*.cpp", "src/**/*.h", "src/**/*.hpp", "src/**/*.metal", "scripts/*.sh",
+        "python/**/*.py", "Makefile", "metal/**/*.cpp")
+TESTS = ("tests/**/*.py", "tests/**/*.sh")
 
-# a flag: '--' right after a non-word character and right before a letter. The README uses ' -- ' as a dash
-# everywhere, so the letter after the dashes is what tells a flag from punctuation.
+# a flag: '--' right after a non-word character and right before a letter. A document may use ' -- ' as a dash,
+# so the letter after the dashes is what tells a flag from punctuation.
 FLAG_RE = re.compile(r"(?<![\w-])--[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]")
 DTFE_RE = re.compile(r"\bDTFE_[A-Z0-9_]*[A-Z0-9]\b")
-# the binaries' deprecated spellings and their canonical names (src/user_options.cc deprecatedOptions), the
-# names the docs may give only on a 'deprecated' line; the readers' permanent table (python/dtfelib/runlog.py,
-# re-exported by python/gui/results.py, copied into scripts/run_ps_pipeline.sh run_settings) is a superset (E)
-DEPRECATED = {"--ps-gpu": "--gpu", "--ps-exact-deposit": "--exact", "--ps-no-overlap": "--no-overlap",
-              # 2026-11-09: '--exact' / '--sampled', the exact average the default (both binaries)
-              "--exact-average": "--exact",
-              "--full_help": "--full-help", "--lambda_th": "--lambda-th",
-              # P6.7 (the binaries' second pass; PS-DTFE's merge switches are deprecatedSwitches, the readers' SWITCHES)
-              "--avg-subsamples": "--subsamples", "--lagrangianInput": "--ps-lagrangian-input",
-              "--ps-lag-padding": "--ps-lagrangian-padding", "--per-stream": "--ps-per-stream",
-              "--per-stream-ids": "--ps-per-stream-ids", "--pts-lagrangian": "--ps-per-stream-lagrangian",
-              "--pts-conventions": "--ps-point-conventions", "--ps-window": "--grid-window",
-              "--method": "--average-method", "--approxPSD": "--approx-phase-space-density",
-              "--input": "--input-format", "--output": "--output-format", "--inputFile": "--input-file",
-              "--outputFile": "--output-file", "--MpcUnit": "--mpc-unit", "--regionMpc": "--region-mpc",
-              "--partNo": "--partition-index", "--paddingMpc": "--padding-mpc", "--noTest": "--no-padding-test",
-              "--density0": "--mean-density", "--redshiftCone": "--redshift-cone", "--origin": "--cone-origin",
-              "--NGP": "--ngp", "--CIC": "--cic", "--TSC": "--tsc", "--PCS": "--pcs", "--SPH": "--sph",
-              "--Voronoi": "--voronoi", "--extensive": "--scalars-extensive", "--randomSample": "--particle-fraction",
-              "--options": "--reader-options"}
 
-# flags of other programs the docs quote (none at present), and the one binary option kept in camelCase on purpose: its
-# 'redshiftSpace=' line is in every tessellation cache and globals record (docs/cleanup-plan.md P6.7)
-FOREIGN: set[str] = set()
+# flags of other programs the docs quote (xcode-select's, python -m venv's), and the one binary option kept in camelCase
+# on purpose: its 'redshiftSpace=' line is in every tessellation cache and globals record, whose text a later run
+# compares verbatim
+FOREIGN = {"--install", "--system-site-packages"}
 KEPT_CAMEL = {"redshiftSpace"}
-# a doc line allowed to name an old spelling (a deprecation note): it says so
-OLD_LINE = re.compile(r"deprecated|\bold(?:er)? names?\b", re.I)
+CPP = (".cc", ".cpp", ".h", ".hpp", ".metal")
 
 passed = failed = skipped = 0
 
@@ -103,94 +86,126 @@ def read(rel):
     return p.read_text(errors="replace") if p.exists() else ""
 
 
-def code_files():
-    pats = ["src/**/*.cc", "src/**/*.cpp", "src/**/*.h", "src/**/*.hpp", "src/**/*.metal",
-            "scripts/*.sh", "python/**/*.py", "tests/**/*.py", "tests/**/*.sh", "Makefile", "metal/**/*.cpp"]
-    seen = set()
-    for pat in pats:
+def source_texts(patterns):
+    """[(path relative to the repository, text)] of the files the glob patterns name (CODE or TESTS), this file and
+    the folders of SKIP_PARTS left out."""
+    seen, out = set(), []
+    for pat in patterns:
         for f in sorted(ROOT.glob(pat)):
-            if (f in seen or SKIP_PARTS & set(f.relative_to(ROOT).parts) or f.name == Path(__file__).name
-                    or str(f.relative_to(ROOT)) == RUNLOG):
+            if f in seen or SKIP_PARTS & set(f.relative_to(ROOT).parts) or f.name == Path(__file__).name:
                 continue
             seen.add(f)
-            yield f
+            out.append((str(f.relative_to(ROOT)), f.read_text(errors="replace")))
+    return out
 
 
-def code_flags(texts):
-    """Every option name the code defines: literal '--x' strings (scripts, argparse) plus the program_options
-    names of the binaries, which are declared without dashes: ("grid", ...) or ("config,c", ...)."""
+def code_lines(name, text):
+    """'text' without its comments, which are never evidence: whole comment lines ('#' in a script, python or the
+    Makefile; '//', '/*' or '*' in C++ and Metal) and a script's or python's comment after code (' # ...')."""
+    if name.endswith(CPP):
+        return re.sub(r"^\s*(?://|/\*|\*).*$", "", text, flags=re.M)
+    text = re.sub(r"^\s*#.*$", "", text, flags=re.M)
+    return re.sub(r"[ \t]#(?![!{])[^\n]*", "", text) if name.endswith((".sh", ".py")) else text
+
+
+# a script's case arm: words separated by '|' and closed by ')' -- '--grid)', '-h|--help)'
+ARM_RE = re.compile(r"(?:^|(?<=\s))([^\s|()]+(?:\|[^\s|()]+)*)\)", re.M)
+
+
+def shell_arms(code):
+    """The '--' names of a script's case arms: a pattern closed by ')' that follows ';;' or 'in' (the arm before it,
+    or 'case ... in') on its line or the lines before. The closing line of an array ('exact_args=(--exact)', a list
+    ended on a line of its own) or of a command ('$(cmd --x)') is no arm."""
+    out = set()
+    for m in ARM_RE.finditer(code):
+        names = [w for w in m.group(1).split("|") if re.fullmatch(r"--[A-Za-z][\w-]*", w)]
+        before = code[:m.start()].rstrip()
+        if names and (before.endswith((";;", ";&")) or re.search(r"(?:^|\s)in$", before)):
+            out.update(names)
+    return out
+
+
+def declared_flags(texts):
+    """Every option name the code DECLARES: an entry of the binaries' option table (src/user_options.cc, a line
+    '("grid,g", ...)': the names have no dashes there), a script's case arm (shell_arms), a python parser's names
+    (the literal names before the first keyword of an add_argument / add_list_arg / add_*_arg call, make_parser's
+    snap_option) and a python test of its own command line ('"--smoke" in sys.argv'). A comment, a help text, a log
+    reader, a test of a command built for a program ('"--gpu" in argv') or a command that passes the flag to a
+    program declares nothing."""
     flags = set()
     for name, text in texts:
-        if name == PIPELINE:            # run_settings' copy of the readers' table: as RUNLOG, no evidence
-            text = "\n".join(ln for ln in text.splitlines() if not TABLE_ROW.search(ln))
-        flags.update(FLAG_RE.findall(text))
-        if name.endswith(("user_options.cc", "user_options.h")):
-            flags.update("--" + m for m in re.findall(r'\(\s*"([A-Za-z][\w-]*)(?:,\w)?"\s*,', text))
+        code = code_lines(name, text)
+        if name.endswith("user_options.cc"):
+            flags.update("--" + m for m in re.findall(r'^\s*\(\s*"([A-Za-z][\w-]*)(?:,\w)?"\s*,', code, re.M))
+        elif name.endswith(".sh"):
+            flags |= shell_arms(code)
+        elif name.endswith(".py"):
+            q = r"""["'](--[A-Za-z][\w-]*)["']"""
+            for m in re.finditer(r"\badd_(?:argument|\w+_arg)\(([^=)]*)", code):
+                flags.update(re.findall(q, m.group(1)))
+            flags.update(re.findall(r"\bsnap_option\s*(?::\s*str\s*)?=\s*" + q, code))
+            flags.update(re.findall(q + r"\s+(?:not\s+)?in\s+sys\.argv\b", code))
     return flags
 
 
-def deprecated_uses(text, table=None):
-    """[(old, canonical, line number)] of every deprecated spelling (table: {old: canonical}, DEPRECATED by default)
-    in a document, outside a line that says 'deprecated' (where naming the old spelling is the point)."""
-    table = DEPRECATED if table is None else table
-    out = []
-    for i, ln in enumerate(text.splitlines(), 1):
-        if "deprecated" in ln.lower():
-            continue
-        out += [(f, table[f], i) for f in FLAG_RE.findall(ln) if f in table]
-    return out
-
-
-def cpp_switches(src):
-    """{'--old': ('--canonical', 'value')} of user_options.cc's deprecatedSwitches table (PS-DTFE's merge switches)."""
-    t = src[src.find("deprecatedSwitches[] = {"):]
-    t = t[:t.find("};")]
-    return {"--" + a: ("--" + b, v) for a, b, v in re.findall(r'\{ "([\w-]+)", +"([\w-]+)", +"([\w-]+)" \}', t)}
-
-
-def python_deprecated(texts):
-    """{'--old': '--new'} of the python CLIs' deprecated_alias(parser, "--old", "--new") calls whose old name no parser
-    registers as an option of its own (add_argument("--old") / add_arg("--old") anywhere): an old spelling everywhere."""
-    calls, registered = {}, set()
+def env_reads(texts):
+    """The variables the code READS: a script's expansion ('${NAME', '$NAME'), the Makefile's ('$(NAME)', '${NAME}',
+    'ifdef NAME'), a python os.environ / getenv read, a C++ or Metal Env:: or getenv read and a macro test ('#ifdef
+    NAME', 'defined(NAME)'). A read may go through a constant that holds the name (python 'NAME_ENV = "DTFE_X"',
+    C++ 'char const *const OFF = "DTFE_X"') or, in C++, a function that hands its 'char const *' parameter to an
+    Env:: read. A comment, an 'unset', a pop, an assignment or a string that only names the variable is no read."""
+    names, consts, via_const, wrappers, calls = set(), {}, set(), set(), []
+    q = r"""["']([A-Za-z_]\w*)["']"""
     for name, text in texts:
-        if not name.startswith("python/"):
-            continue
-        calls.update(re.findall(r'deprecated_alias\(\s*\w+\s*,\s*"(--[\w-]+)"\s*,\s*"(--[\w-]+)"', text))
-        for m in re.finditer(r'add_argument\(([^)]*)', text):
-            registered.update(re.findall(r'"(--[\w-]+)"', m.group(1).split("=", 1)[0]))
-    return {o: n for o, n in calls.items() if o not in registered}
+        code = code_lines(name, text)
+        if name.endswith(".sh"):
+            names.update(re.findall(r"\$\{?([A-Za-z_]\w*)", code))
+        elif name.endswith(".py"):
+            names.update(re.findall(r"\benviron\.get\(\s*" + q, code))
+            names.update(re.findall(r"\benviron\[\s*" + q + r"\s*\](?!\s*=(?!=))", code))
+            names.update(re.findall(r"\bgetenv\(\s*" + q, code))
+            names.update(re.findall(q + r"\s+(?:not\s+)?in\s+(?:os\.)?environ\b", code))
+            consts.update(re.findall(r"^([A-Z][A-Z0-9_]*)\s*=\s*" + q + r"\s*$", code, re.M))
+            via_const.update(re.findall(r"\b(?:environ|env)(?:\.get\(|\[)\s*([A-Z][A-Z0-9_]*)\b(?!\s*\]\s*=(?!=))",
+                                        code))
+        elif name.endswith(CPP):
+            names.update(re.findall(r"""\b(?:Env::\w+|getenv)\(\s*\{?\s*"([A-Za-z_]\w*)\"""", code))
+            names.update(re.findall(r"^\s*#\s*ifn?def\s+(\w+)", code, re.M))
+            names.update(re.findall(r"\bdefined\s*\(\s*(\w+)\s*\)", code))
+            consts.update(re.findall(r"""\b(\w+)\s*=\s*"([A-Za-z_]\w*)"\s*;""", code))
+            via_const.update(re.findall(r"\bEnv::\w+\(\s*([A-Za-z_]\w*)\b", code))
+            for m in re.finditer(r"\b(\w+)\s*\(\s*char\s+const\s*\*\s*(\w+)\s*\)\s*\{", code):
+                if re.search(r"\bEnv::\w+\(\s*" + m.group(2) + r"\b", code[m.end():m.end() + 800]):
+                    wrappers.add(m.group(1))
+            calls += re.findall(r"""\b(\w+)\(\s*"([A-Za-z_]\w*)\"""", code)
+        else:                                       # the Makefile
+            names.update(re.findall(r"\$[({]([A-Za-z_]\w*)[)}:]", code))
+            names.update(re.findall(r"^\s*ifn?def\s+(\w+)", code, re.M))
+    return names | {consts[c] for c in via_const if c in consts} | {v for f, v in calls if f in wrappers}
 
 
-def knob_renames(texts):
-    """{old knob: new knob}: env_knobs.h's Env::renamed rows (the binaries), every 'knob [-e] NEW OLD...' and
-    'knob_merge NEW OLD...' line of scripts/*.sh (the drivers), python's smoothing-length alias (DTFE_SIGMA_MPC)."""
-    out = {}
-    for name, text in texts:
-        if name == "src/env_knobs.h":
-            t = text[text.find("renamed[] = {"):]
-            out.update({o: n for n, o in re.findall(r'\{ "([A-Z0-9_]+)", +"([A-Z0-9_]+)", +(?:true|false) \}', t[:t.find("};")])})
-        elif name.startswith("scripts/") and name.endswith(".sh"):
-            for new, olds in re.findall(r'^\s*knob(?:_merge)?[ \t]+(?:-e[ \t]+)?([A-Z][A-Z0-9_]*)((?:[ \t]+[A-Z][A-Z0-9_]*)+)', text, re.M):
-                out.update({o: new for o in olds.split()})
-        elif name == "python/dtfelib/cli.py":
-            m = re.search(r'^SMOOTH_MPC_ENV_NAMES = \(SMOOTH_MPC_ENV, "([A-Z0-9_]+)"\)', text, re.M)
-            if m:
-                out[m.group(1)] = "DTFE_SMOOTH_MPC"
-    return out
+def assigned_knobs(text):
+    """The variables a document sets as 'NAME=value' (a knob, an environment or a make variable), but those it
+    expands itself ('$NAME', '${NAME}': its own shell variables, set for the commands after them)."""
+    own = set(re.findall(r"\$\{?([A-Za-z_]\w*)", text))
+    return {n for n in re.findall(r"(?<![\w$-])([A-Z][A-Z0-9_]+)=(?!=)", text) if n not in own}
 
 
-def old_knob_uses(text, olds):
-    """[(old, new, line number)] of every old knob name in a document outside a line that says 'deprecated' or
-    'old(er) name' (an upper-case word, not inside a longer name: 'PS_GPU' in 'DTFE_PS_GPU_X' is not one)."""
-    if not olds:
-        return []
-    pat = re.compile(r"(?<![\w$])(" + "|".join(sorted(map(re.escape, olds), key=len, reverse=True)) + r")(?![\w])")
-    out = []
-    for i, ln in enumerate(text.splitlines(), 1):
-        if OLD_LINE.search(ln):
-            continue
-        out += [(o, olds[o], i) for o in pat.findall(ln)]
-    return out
+def unknown_flags(text, flags):
+    """The '--flags' of a document that no declaration names (FOREIGN aside), sorted."""
+    return sorted(f for f in set(FLAG_RE.findall(text)) if f not in flags and f not in FOREIGN)
+
+
+def unread(names, reads):
+    """Of these variable names, the ones no code reads, sorted."""
+    return sorted(n for n in set(names) if n not in reads)
+
+
+def docker_missing(docs, ignore):
+    """Of these documents, the ones a .dockerignore text leaves out of the image: the document's top folder has
+    a line of its own ('docs/') and the document has no '!<document>' line."""
+    lines = {line.strip() for line in ignore.splitlines()}
+    return sorted(d for d in docs if "/" in d and d.split("/")[0] + "/" in lines and "!" + d not in lines)
 
 
 def help_names(text):
@@ -229,55 +244,15 @@ def short_help_shape(text, prog=""):
     return out
 
 
-def load_runlog(path=None):
-    """python/dtfelib/runlog.py as a module, by its path (stdlib only; not through the dtfelib package, whose
-    __init__ needs numpy)."""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("_runlog_table", path or ROOT / RUNLOG)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def reader_table_drift(renames, switches, pipeline_text, results_text, binary_table):
-    """[problem] between the readers' table (RENAMES {old: new}, SWITCHES {old: (option, value)}), run_settings'
-    old[] / sw[] maps, results.py (it must re-export the table, not hold one of its own) and the binaries'
-    deprecated aliases (each a row of RENAMES with the same canonical name)."""
-    out = []
-    awk = {k: v for kind, k, v in TABLE_ROW.findall(pipeline_text) if kind == "old"}
-    sw = {k: tuple(v.split()) for kind, k, v in TABLE_ROW.findall(pipeline_text) if kind == "sw"}
-    for k in sorted(set(renames) | set(awk)):
-        if renames.get(k) != awk.get(k):
-            out.append(f"run_settings old[{k}] = {awk.get(k)}, runlog.py {renames.get(k)}")
-    for k in sorted(set(switches) | set(sw)):
-        if tuple(switches.get(k, ())) != sw.get(k, ()):
-            out.append(f"run_settings sw[{k}] = {sw.get(k)}, runlog.py {switches.get(k)}")
-    if not re.search(r"^from dtfelib import runlog as (\w+)", results_text, re.M) \
-            or not re.search(r"^DEPRECATED_FLAGS = _runlog\.RENAMES$", results_text, re.M):
-        out.append("results.py does not re-export runlog.py's table (DEPRECATED_FLAGS = _runlog.RENAMES)")
-    if re.search(r"^DEPRECATED_FLAGS = \{", results_text, re.M):
-        out.append("results.py holds a table of its own")
-    for k, v in sorted(binary_table.items()):
-        if renames.get(k) != v:
-            out.append(f"the binaries alias {k} -> {v}, runlog.py says {renames.get(k)}")
-    return out
-
-
 def script_defaults(text):
-    """{VAR: default} of every 'VAR="${VAR:-default}"' line; a nested '${A:-${B:-v}}' resolves to v."""
+    """{VAR: default} of every 'VAR="${VAR:-default}"' line."""
     out = {}
     for m in re.finditer(r'^\s*([A-Z][A-Z0-9_]*)="\$\{\1:?-', text, re.M):
         i, depth = m.end(), 1
         while i < len(text) and depth:            # the matching brace of '${VAR:-'
             depth += {"{": 1, "}": -1}.get(text[i], 0)
             i += 1
-        val = text[m.end():i - 1]
-        while True:
-            n = re.fullmatch(r"\$\{[A-Z][A-Z0-9_]*:?-(.*)\}", val, re.S)
-            if not n:
-                break
-            val = n.group(1)
-        out.setdefault(m.group(1), val)
+        out.setdefault(m.group(1), text[m.end():i - 1])
     return out
 
 
@@ -292,10 +267,10 @@ def help_header(text):
     return "\n".join(out)
 
 
-def knob_table(readme):
-    """[(knob names, default cell)] of the README table whose header starts '| knob (environment)'."""
+def knob_table(doc):
+    """[(knob names, default cell)] of the document's table whose header starts '| knob (environment)'."""
     rows, on = [], False
-    for ln in readme.splitlines():
+    for ln in doc.splitlines():
         if ln.startswith("| knob (environment)"):
             on = True
             continue
@@ -334,57 +309,46 @@ def default_drift(rows, defaults):
 
 
 def main():
-    texts = [(str(f.relative_to(ROOT)), f.read_text(errors="replace")) for f in code_files()]
-    code = "\n".join(t for _, t in texts)
-    flags = code_flags(texts)
+    texts, tests = source_texts(CODE), source_texts(TESTS)
+    flags = declared_flags(texts + tests)
+    reads, test_reads = env_reads(texts), env_reads(tests)
     docs = {d: read(d) for d in DOCS}
     headers = "\n".join(help_header(read(str(f.relative_to(ROOT)))) for f in sorted((ROOT / "scripts").glob("*.sh")))
     documented = "\n".join(docs.values()) + "\n" + headers
 
-    src = read("src/user_options.cc")
-    old_table = dict(DEPRECATED)
-    old_table.update({k: " ".join(v) for k, v in cpp_switches(src).items()})
-    old_table["--samples"] = "--subsamples"         # standard DTFE's total ('-s' too: no '--' to match)
-    py_old = python_deprecated(texts)
-    old_table.update({k: v for k, v in py_old.items() if k not in old_table})
-    print("(A) every --flag in the docs is an option the code defines")
+    print("(A) every --flag in the docs is an option the code declares")
     for d, text in docs.items():
-        miss = sorted(f for f in set(FLAG_RE.findall(text)) if f not in flags and f not in FOREIGN)
+        miss = unknown_flags(text, flags)
         check(not miss and text, f"{d}: {len(set(FLAG_RE.findall(text)))} flags, none unknown"
               + (f" -- unknown: {' '.join(miss)}" if miss else ""))
-        old = deprecated_uses(text, old_table)
-        check(not old, f"{d}: no deprecated spelling (the binaries' and the python CLIs')"
-              + "".join(f" -- line {i}: {o} (use {c})" for o, c, i in old))
 
     print("(B) every DTFE_* name in the docs is read by the code")
     for d, text in docs.items():
         names = set(DTFE_RE.findall(text))
-        miss = sorted(n for n in names if not re.search(r"\b" + n + r"\b", code))
-        check(not miss, f"{d}: {len(names)} DTFE_* names, all in the code" + (f" -- missing: {' '.join(miss)}" if miss else ""))
+        miss = unread(names, reads | test_reads)
+        check(not miss, f"{d}: {len(names)} DTFE_* names, all read"
+              + (f" -- not read: {' '.join(miss)}" if miss else ""))
 
-    print("(C) the README knob table against the drivers")
+    print(f"(C) the knob table of {KNOB_DOC} against the drivers")
     defaults = {}
     for s in DRIVERS:
         for k, v in script_defaults(read(s)).items():
             defaults.setdefault(k, v)
-    rows = knob_table(docs["README.md"])
+    rows = knob_table(docs[KNOB_DOC])
     check(len(rows) >= 8, f"the knob table is found ({len(rows)} rows)")
-    knobs_in_code = set(defaults)
-    for s in KNOB_SCRIPTS:
-        knobs_in_code |= set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)", read(s)))
-    unknown = sorted({n for names, _ in rows for n in names
-                      if n not in knobs_in_code and not re.search(r"\b" + n + r"\b", code)})
-    check(not unknown, "every knob the table names is read by the code" + (f" -- unknown: {' '.join(unknown)}" if unknown else ""))
+    unknown = unread([n for names, _ in rows for n in names], reads)
+    check(not unknown, "every knob the table names is read by the code"
+          + (f" -- not read: {' '.join(unknown)}" if unknown else ""))
     drift = default_drift(rows, defaults)
     check(not drift, "every plain default in the table equals the scripts' default"
-          + "".join(f" -- {k}: README {d}, scripts {w}" for k, d, w in drift))
+          + "".join(f" -- {k}: {KNOB_DOC} {d}, scripts {w}" for k, d, w in drift))
 
     print("(D) every driver knob and configuration variable is documented")
     knobs = set()
     for s in KNOB_SCRIPTS:
         knobs |= set(script_defaults(read(s)))
     miss = sorted(k for k in knobs if not re.search(r"\b" + k + r"\b", documented))
-    check(not miss, f"{len(knobs)} driver knobs, each in the README, COMMANDS.md or a script's --help"
+    check(not miss, f"{len(knobs)} driver knobs, each in a document or a script's --help"
           + (f" -- undocumented: {' '.join(miss)}" if miss else ""))
     env = set(re.findall(r"\$\{(DTFE_[A-Z0-9_]+)", read("scripts/config.sh")))
     env |= set(re.findall(r"""(?:environ(?:\.get)?\(|environ\[|getenv\()\s*["'](DTFE_[A-Z0-9_]+)""", read("python/config.py")))
@@ -392,28 +356,17 @@ def main():
     check(not miss, f"{len(env)} DTFE_* variables of scripts/config.sh and python/config.py, each documented"
           + (f" -- undocumented: {' '.join(miss)}" if miss else ""))
 
-    print("(E) the run-log readers' table: runlog.py = results.py = run_settings, and the binaries' aliases in it")
-    rl = load_runlog()
-    src = read("src/user_options.cc")
-    table = src[src.find("deprecatedOptions[] = {"):]
-    cpp = {"--" + a: "--" + b for a, b in re.findall(r'\{ "([\w-]+)", +"([\w-]+)" \}', table[:table.find("};")])}
-    drift = reader_table_drift(rl.RENAMES, rl.SWITCHES, read(PIPELINE), read("python/gui/results.py"), cpp)
-    check(not drift and len(rl.RENAMES) >= 36, f"{len(rl.RENAMES)} renames and {len(rl.SWITCHES)} switches, one table"
-          + "".join(f" -- {d}" for d in drift))
-    check(all(rl.RENAMES.get(k) == v for k, v in DEPRECATED.items()), "the docs' deprecated names are rows of it")
-    sw = cpp_switches(src)
-    check(len(sw) == 3 and sw == {k: tuple(v) for k, v in rl.SWITCHES.items()},
-          f"the binaries' merge switches (deprecatedSwitches) are runlog.py's SWITCHES ({sw})")
-
-    print("(F) the renamed knobs: in the docs only on a 'deprecated' / 'old name' line, never in the README knob table")
-    olds = knob_renames(texts)
-    check(len(olds) >= 30, f"{len(olds)} old knob names found (env_knobs.h, the drivers' knob lines, python)")
+    print("(E) every NAME=value the docs set is read by the code")
     for d, text in docs.items():
-        bad = old_knob_uses(text, olds)
-        check(not bad, f"{d}: no old knob name outside a deprecation note"
-              + "".join(f" -- line {i}: {o} (use {n})" for o, n, i in bad))
-    in_table = sorted({n for names, _ in rows for n in names if n in olds})
-    check(not in_table, "the README knob table names only the new knobs" + (f" -- old: {' '.join(in_table)}" if in_table else ""))
+        names = assigned_knobs(text)
+        miss = unread(names, reads | test_reads)
+        check(not miss, f"{d}: {len(names)} variables set as NAME=value, all read"
+              + (f" -- not read: {' '.join(miss)}" if miss else ""))
+
+    print("(F) the Docker image holds every document this check reads")
+    miss = docker_missing(DOCS, read(".dockerignore"))
+    check(not miss, ".dockerignore: every document of a folder it leaves out has its '!' line"
+          + (f" -- no line for: {' '.join(miss)}" if miss else ""))
 
     print("(G) the binaries' help: kebab-case names, 'ps-' only in PS-DTFE, every -h name in --full-help, -h short "
           "(20 to 35 names) with no date and no wall time")
@@ -440,49 +393,61 @@ def main():
             "| `GRID_SIZE` (or `-g`) | cells | 512 (`config.sh`) |\n"
             "| `FIELDS`, `OUTPUT_PREFIX`, `LAMBDA_TH` | f | the production set, `ps_out`, 0.3 |\n"
             "| `PARTITION` | split | auto-tuned |\n\nafter\n")
-    sd = script_defaults('GRID_SIZE="${GRID_SIZE:-${DTFE_GRID_SIZE:-1024}}"\nOUTPUT_PREFIX="${OUTPUT_PREFIX:-ps_output}"   # c\n'
+    sd = script_defaults('GRID_SIZE="${GRID_SIZE:-1024}"\nOUTPUT_PREFIX="${OUTPUT_PREFIX:-ps_output}"   # c\n'
                          'LAMBDA_TH="${LAMBDA_TH:-0.3}"\nPARTITION="${PARTITION:-}"\nFIELDS="${FIELDS:-a b}"\n')
     check(sd == {"GRID_SIZE": "1024", "OUTPUT_PREFIX": "ps_output", "LAMBDA_TH": "0.3", "PARTITION": "", "FIELDS": "a b"},
-          f"script_defaults resolves nested and commented defaults ({sd})")
+          f"script_defaults reads plain, commented and empty defaults ({sd})")
     got = sorted(default_drift(knob_table(fake), sd))
     check(got == [("GRID_SIZE", "512", "1024"), ("OUTPUT_PREFIX", "ps_out", "ps_output")],
           f"a wrong number and a wrong backticked value are caught, prose and lists are not compared ({got})")
-    check(FLAG_RE.findall("a -- b --grid 8 (--ps-gpu) x--y ---z") == ["--grid", "--ps-gpu"],
-          "the flag pattern takes '--grid' and '(--ps-gpu)', not the ' -- ' dash or 'x--y'")
-    check(code_flags([("src/user_options.cc", '("config,c", po::value)\n("NGP", "nearest")')]) >= {"--config", "--NGP"},
-          "program_options names count as the binaries' flags")
-    got = deprecated_uses("run it with --ps-gpu --grid 64\n--lambda_th 0.3 (deprecated: --lambda-th)\n`--full_help`\n")
-    check(got == [("--ps-gpu", "--gpu", 1), ("--full_help", "--full-help", 3)],
-          f"a deprecated spelling is caught, except on a line that says so ({got})")
-    src = read("src/user_options.cc")
-    table = src[src.find("deprecatedOptions[] = {"):]
-    cpp = {"--" + a: "--" + b for a, b in re.findall(r'\{ "([\w-]+)", +"([\w-]+)" \}', table[:table.find("};")])}
-    check(cpp == DEPRECATED, f"the deprecated table is the binaries' own (user_options.cc deprecatedOptions: {cpp})")
-    good_pipe = 'old["--MpcUnit"] = "--mpc-unit"; old["--ps-gpu"] = "--gpu"\nsw["--ordered-merge"] = "--ps-merge index-order"\n'
-    good_res = "from dtfelib import runlog as _runlog\nDEPRECATED_FLAGS = _runlog.RENAMES\n"
-    ren, swi = {"--MpcUnit": "--mpc-unit", "--ps-gpu": "--gpu"}, {"--ordered-merge": ("--ps-merge", "index-order")}
-    ok = reader_table_drift(ren, swi, good_pipe, good_res, {"--ps-gpu": "--gpu"})
-    bad = reader_table_drift(dict(ren, **{"--NGP": "--ngp"}), swi, good_pipe.replace("index-order", "fixed-point"),
-                             good_res + 'DEPRECATED_FLAGS = {"--a": "--b"}\n', {"--ps-window": "--window"})
-    check(not ok and len(bad) == 4, f"the readers' table check passes equal copies and catches a missing pipeline row, a "
-          f"changed switch, a table of results.py's own and a binary alias it lacks ({ok} {bad})")
-
-    got = deprecated_uses("--ordered-merge here\n--samples 20 (deprecated)\n", {"--ordered-merge": "--ps-merge index-order",
-                                                                              "--samples": "--subsamples"})
-    check(got == [("--ordered-merge", "--ps-merge index-order", 1)], f"a second table (the switches) is checked too ({got})")
-    got = python_deprecated([("python/a.py", 'deprecated_alias(p, "--z", "--redshifts")\ndeprecated_alias(p, "--prefix", "--root")'),
-                             ("python/b.py", 'p.add_argument("--prefix", default="x")')])
-    check(got == {"--z": "--redshifts"}, f"a python old name another parser still registers is not an old spelling ({got})")
-    kr = knob_renames([("src/env_knobs.h", 'renamed[] = {\n    { "DTFE_OVERLAP", "DTFE_PS_OVERLAP", false },\n};'),
-                       ("scripts/x.sh", "knob DTFE_GPU PS_GPU PS_METAL   # c\nknob -e PS_LAGRANGIAN_INPUT LAGRANGIAN_INPUT\n"
-                                        "knob_merge PS_MERGE ORDERED_MERGE FIXED_POINT_MERGE\nknob_bool A B\n")])
-    check(kr == {"DTFE_PS_OVERLAP": "DTFE_OVERLAP", "PS_GPU": "DTFE_GPU", "PS_METAL": "DTFE_GPU",
-                 "LAGRANGIAN_INPUT": "PS_LAGRANGIAN_INPUT", "ORDERED_MERGE": "PS_MERGE", "FIXED_POINT_MERGE": "PS_MERGE"},
-          f"the old knob names come from env_knobs.h and the drivers' knob lines, not knob_bool ({kr})")
-    got = old_knob_uses("set PS_GPU=1\nPS_GPU (the older name) works\nDTFE_PS_GPU_X and $PS_GPU\n`PS_METAL`, deprecated\n",
-                        {"PS_GPU": "DTFE_GPU", "PS_METAL": "DTFE_GPU"})
-    check(got == [("PS_GPU", "DTFE_GPU", 1)], f"an old knob is caught outside a deprecation note only ({got})")
-    hs = help_style({"grid", "ps-x", "MpcUnit"}, {"grid", "lambda_th"}, True)
+    got = docker_missing(("README.md", "docs/a.md", "docs/b.md", "demo/c.md", "metal/d.md"),
+                         "# c\ndocs/\n!docs/a.md\ndemo/\n!demo/x.gadget\n")
+    check(got == ["demo/c.md", "docs/b.md"],
+          f"a document of a folder .dockerignore leaves out, without its '!' line, is caught ({got})")
+    check(FLAG_RE.findall("a -- b --grid 8 (--gpu) x--y ---z") == ["--grid", "--gpu"],
+          "the flag pattern takes '--grid' and '(--gpu)', not the ' -- ' dash or 'x--y'")
+    # (A) a removed option that only a comment, a message, a log reader, an array or a command still names is unknown
+    decl = declared_flags([
+        ("src/user_options.cc", '    ("config,c", po::value)\n    ("ngp", "nearest")\n'
+                                '    // --gone-option was another name\n    warning << "--gone-option is not read";\n'),
+        ("scripts/a.sh", 'case "$1" in\n    -h|--help) usage ;;\n    --sim) s=1 ;; --sim-dir) d=1 ;;\n'
+                         '    # --gone-option) a comment\nesac\nargs=(--array-word)\nlist=(\n    a\n    --list-end)\n'
+                         'x="$(tool --command-word)"\n./PS-DTFE in out --passed-word\n'),
+        ("python/b.py", 'p.add_argument("-o", "--out", help="not --help-word")\nadd_list_arg(p, "--maps", dest="m")\n'
+                        'make_parser(snap_option="--start-snap")\nif "--smoke" in sys.argv:\n    pass\n'
+                        'old = rec.has("--gone-option")   # a log reader\nrun([b, "--grid", "8"])\n'
+                        'built = "--built-word" in argv\n')])
+    doc = "Type `--gone-option`, --ngp, --sim-dir, --maps or --start-snap.\n"
+    check(decl == {"--config", "--ngp", "--help", "--sim", "--sim-dir", "--out", "--maps", "--start-snap", "--smoke"}
+          and unknown_flags(doc, decl) == ["--gone-option"],
+          f"(A) declarations only: option table entries, case arms (two on a line too), parser calls, snap_option, a "
+          f"sys.argv test; a comment, a message, a log reader, an array, a command, a built command's test or a help "
+          f"text is none, so a document naming a removed option fails ({sorted(decl)} {unknown_flags(doc, decl)})")
+    # (B, C, E) a variable that only a comment, an 'unset', a pop, an assignment or a help text names is not read
+    reads = env_reads([
+        ("scripts/a.sh", 'g="${GRID_KNOB:-512}"\n[ "$DTFE_READ_A" = 1 ]\n# ${DTFE_GONE_A} ${GONE_KNOB}\n'
+                         'unset DTFE_GONE_B\n'),
+        ("python/b.py", 'os.environ.get("DTFE_READ_B")\nNAME_ENV = "DTFE_READ_C"\nv = env.get(NAME_ENV, "")\n'
+                        'env.pop("DTFE_GONE_C", None)\nos.environ["DTFE_GONE_D"] = "1"\nh = "set DTFE_GONE_E"\n'),
+        ("src/c.h", 'bool a = Env::flag( "DTFE_READ_D" );\nstatic char const *const OFF = "DTFE_READ_E";\n'
+                    'bool off = not Env::flag( OFF, true );\n'
+                    'inline long team(char const *env) { return Env::integer( env, 0 ); }\n'
+                    'long n = team( "DTFE_READ_F" );\n// Env::flag( "DTFE_GONE_F" )\n#ifndef MACRO_READ\n#endif\n'),
+        ("Makefile", 'ifeq ($(MAKE_READ),1)\nendif\n# $(MAKE_GONE)\n')])
+    want = {"GRID_KNOB", "DTFE_READ_A", "DTFE_READ_B", "DTFE_READ_C", "DTFE_READ_D", "DTFE_READ_E", "DTFE_READ_F",
+            "MACRO_READ", "MAKE_READ"}
+    doc = ("Set DTFE_GONE_A=1 or DTFE_READ_A=1: `GONE_KNOB=1 GRID_KNOB=8 ./scripts/run_ps_dtfe.sh`, make MAKE_READ=1.\n"
+           "SIMDIR=/data/sim\nls $SIMDIR\n")
+    gone_knobs = unread([n for names, _ in knob_table(fake.replace("`PARTITION`", "`GONE_KNOB`")) for n in names],
+                        reads | {"FIELDS", "OUTPUT_PREFIX", "LAMBDA_TH", "GRID_SIZE"})
+    check(want <= reads and not [n for n in reads if "GONE" in n]
+          and unread(DTFE_RE.findall(doc), reads) == ["DTFE_GONE_A"]
+          and unread(assigned_knobs(doc), reads) == ["DTFE_GONE_A", "GONE_KNOB"] and gone_knobs == ["GONE_KNOB"],
+          f"(B, C, E) reads only: expansions, os.environ and Env:: reads (through a constant or a wrapper too), macro "
+          f"and make tests; a comment, an 'unset', a pop, an assignment or a string is none, so a document or the "
+          f"knob table naming a variable nothing reads fails, and a document's own shell variable is left out "
+          f"({sorted(want - reads)} {unread(assigned_knobs(doc), reads)} {gone_knobs})")
+    hs = help_style({"grid", "ps-x", "BoxSize"}, {"grid", "max_grid"}, True)
     check(len(hs) == 4 and help_names("  -g [ --grid ] arg   x\n  --box arg   y\n        --not-an-entry\n") == {"grid", "box"},
           f"the help rules catch a capital, a '_', a 'ps-' name in standard DTFE and a '-h' name missing from --full-help ({hs})")
     prog = "/a 2026-01-02 folder/DTFE"            # argv[0] in the usage line: a dated folder is not the help's date

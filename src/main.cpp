@@ -34,7 +34,6 @@
 #include "ps_point_eval.h"
 #include "ps_globals_record.h"
 #include "run_progress.h"     // '<output>.runlog.progress'
-#include "env_knobs.h"       // Env::warnRenamed
 #include "output_staging.h"   // '<file>.part.<pid>' + rename, rescue folder
 
 using namespace std;
@@ -81,10 +80,6 @@ int main( int argc, char *argv[] )
             return 0;
         }
 
-    // the environment variables renamed for one flag scheme (env_knobs.h 'renamed'): one line per old name that is
-    // set, here, before any thread starts (a read deep in the run, on a worker thread, must not print mid-log)
-    Env::warnRenamed();
-
     // --serve speaks a binary protocol on stdout: divert all logging to stderr before the
     // first line is printed (option parsing already prints)
     for (int i = 1; i < argc; ++i)
@@ -93,8 +88,8 @@ int main( int argc, char *argv[] )
     User_options userOptions;		// program options plus program-wide constants
     userOptions.readOptions( argc, argv );
 
-    // one parseable provenance line per run: the results browser (python/gui) reads it back from the
-    // runlog to tell outputs made before an output-changing fix from those made after it
+    // one parseable provenance line per run: the binary, its git revision and its link time, so the run log
+    // names the exact code that made the outputs
     {
         MESSAGE::Message build( userOptions.verboseLevel );
         build << "Build: " << BINARY_NAME << " " << dtfeBuildRevision() << " (built " << dtfeBuildTime()
@@ -146,7 +141,6 @@ int main( int argc, char *argv[] )
             if ( userOptions.scaleFactor < Real(0.) ) userOptions.scaleFactor = Real( rec.scaleFactor );
             userOptions.averageDensity = Real( rec.averageDensity );
             userOptions.psPresetN = rec.n;
-            userOptions.psPresetMoments = { rec.totalMass, rec.vmax, rec.smax, rec.v2m, rec.n };
             userOptions.psParticlesDeferred = true;
             particlesDeferred = true;
             MESSAGE::Message message( userOptions.verboseLevel );
@@ -173,8 +167,13 @@ int main( int argc, char *argv[] )
         // without '--periodic' the second pass grids the region moved by half a cell (below): without a region
         // that leaves the data box, so refuse before the first pass rather than after it
         if ( !userOptions.periodic and !userOptions.regionOn )
+#ifdef PHASE_SPACE
+            throwError( "'--interlace' needs '--periodic' in PS-DTFE: without it the second pass grids a region moved "
+                        "by half a cell, and PS-DTFE takes no '--region' or '--region-mpc'." );
+#else
             throwError( "'--interlace' without '--periodic' needs a '--region' or '--region-mpc' at least half a cell "
                         "inside the data box: the second pass grids that region moved by half a cell." );
+#endif
         if ( !userOptions.periodic )
         {
             MESSAGE::Warning warning( userOptions.verboseLevel );

@@ -1,8 +1,7 @@
 //  The PS-DTFE kernels' shared pieces: the non-finite guard of a fixed-point share (fixedShareOk), the 64-bit words'
 //  add (addFixedQ) and the reader of an items' map (psItemOf). Prepended by the Makefile after ps_kernel_params.h
-//  (psItemOf reads PS_ITEM_BLOCK_SHIFT) to metal/ps_deposit.metal and to metal/ps_face.metal, so both kernels add and
-//  decode alike (metal/validate_deposit.cpp and metal/build_prototype.sh do the same). Moved here unchanged from
-//  ps_deposit.metal for the face kernel (docs/cleanup-plan.md P11, the GPU kernel for the face sweep, step 3).
+//  (psItemOf reads PS_ITEM_BLOCK_SHIFT) to metal/ps_deposit.metal (metal/validate_deposit.cpp and
+//  metal/build_prototype.sh do the same).
 #include <metal_stdlib>
 using namespace metal;
 

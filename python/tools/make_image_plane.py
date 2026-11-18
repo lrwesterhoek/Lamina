@@ -9,7 +9,7 @@ snapshot metadata so plot/plot_pointeval_panels.py is self-configuring.
 
 Coordinates are in the box coordinate system the binary sees: header lengths divided
 by '--mpc-unit' (h-free Mpc for the merged TNG snapshots, which store h-free ckpc and
-run with MpcUnit 1000; the synthetic test inputs use --mpc-unit 1).
+run with --mpc-unit 1000; the synthetic test inputs use --mpc-unit 1).
 
     python3 tools/make_image_plane.py --sim TNG100-3-Dark --snap 99 \
         --axis z --center 55 --thickness 3 --planes 4 --nu 8192 -o plane_100_99
@@ -61,7 +61,7 @@ def read_header(combined: Path, mpc_unit: float) -> dict:
 
 
 def main() -> None:
-    from dtfelib.cli import new_parser, add_out_arg, deprecated_option, require_sim, NoSimulation
+    from dtfelib.cli import new_parser, add_out_arg, require_sim, NoSimulation
     p = new_parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     src = p.add_mutually_exclusive_group()          # required, except with --same-as
     src.add_argument("--sim", help="simulation name (under DTFE_DATA_ROOT); needs --snap")
@@ -93,8 +93,6 @@ def main() -> None:
     p.add_argument("--plane-window", type=float, nargs=4, default=None, metavar=("U0", "U1", "V0", "V1"),
                    help="the image's extent in box units: horizontal U0..U1, vertical V0..V1 (default the whole box, "
                         "0..box on both axes); the pipeline's PLANE_WINDOW")
-    for name, what in (("--u0", "U0"), ("--u1", "U1"), ("--v0", "V0"), ("--v1", "V1")):     # its four values, before
-        deprecated_option(p, name, type=float, use=f"--plane-window U0 U1 V0 V1 (here {what})")
     add_out_arg(p, type=str, metavar="STEM", help="output stem: writes <stem>.bin + <stem>.json")
     p.add_argument("--same-as", type=Path, metavar="SIDECAR.json",
                    help="write nothing: compare the requested geometry (--center/--planes/--thickness/"
@@ -102,20 +100,15 @@ def main() -> None:
                         "sidecar and exit 0 when it is the same, 3 when it differs or cannot be read "
                         "(other statuses: the tool failed, e.g. invalid input)")
     args = p.parse_args()
-    if args.plane_window is not None:
-        if any(getattr(args, k) is not None for k in ("u0", "u1", "v0", "v1")):
-            p.error("give the extent once: --plane-window U0 U1 V0 V1, not beside --u0/--u1/--v0/--v1")
-        args.u0, args.u1, args.v0, args.v1 = args.plane_window
 
     if args.supersample < 1:
         sys.exit("--supersample must be >= 1")
     if args.thickness <= 0 or args.planes < 1 or args.nu < 2:
         sys.exit("non-positive thickness, or degenerate planes/nu")
 
-    window = (args.u0, args.u1, args.v0, args.v1)
-    if any(v is not None for v in window):
-        u0, u1, v0, v1 = (0.0 if window[0] is None else window[0]), window[1], (0.0 if window[2] is None else window[2]), window[3]
-        if (u1 is not None and u1 <= u0) or (v1 is not None and v1 <= v0) or min(u0, v0) < 0:
+    if args.plane_window is not None:
+        u0, u1, v0, v1 = args.plane_window
+        if u1 <= u0 or v1 <= v0 or min(u0, v0) < 0:
             sys.exit("empty image extent (u1<=u0 or v1<=v0) or a negative start")
     if args.same_as is not None:
         from dtfelib.io import plane_geometry_matches
@@ -125,7 +118,7 @@ def main() -> None:
             print(f"differs: cannot read {args.same_as} ({e})")
             sys.exit(SAME_AS_DIFFERS)
         same = plane_geometry_matches(side, center=args.center, planes=args.planes, thickness=args.thickness,
-                                      supersample=args.supersample, window=window)
+                                      supersample=args.supersample, window=args.plane_window)
         print("same" if same else "differs")
         sys.exit(0 if same else SAME_AS_DIFFERS)
     # not add_sim_arg: its DTFE_SIM default would shadow an explicit --combined (the pipeline exports DTFE_SIM), so
@@ -169,10 +162,7 @@ def main() -> None:
 def write_plane(combined, meta, box, axis, args, stem):
     w_axis = AXES[axis]
     u_axis, v_axis = (w_axis + 1) % 3, (w_axis + 2) % 3   # cyclic: z -> (x, y)
-    u0 = 0.0 if args.u0 is None else args.u0
-    u1 = box if args.u1 is None else args.u1
-    v0 = 0.0 if args.v0 is None else args.v0
-    v1 = box if args.v1 is None else args.v1
+    u0, u1, v0, v1 = (0.0, box, 0.0, box) if args.plane_window is None else args.plane_window
     center = 0.5 * box if args.center is None else args.center
     if not (u1 > u0 and v1 > v0):
         sys.exit("empty image extent (u1<=u0 or v1<=v0)")

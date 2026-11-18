@@ -1,13 +1,12 @@
 /* The PS-DTFE GPU kernels' parameter blocks: ONE definition for the hosts and the Metal kernels.
    The hosts (ps_metal_host.cc, metal/validate_deposit.cpp) include it through ps_deposit_params.h
    (PSDepositParams); the Makefile PREPENDS this file to metal/ps_deposit.metal, after exact_clip.metal.inc and
-   fixed_words.metal.inc, and to metal/ps_face.metal (the face kernel), after fixed_words.metal.inc, when it embeds
-   the kernel sources (metal/validate_deposit.cpp and metal/build_prototype.sh do the same), and the kernels name the
-   blocks DepositParams, ExactItemParams and FaceParams. So the struct the kernels read cannot drift from the one the
-   hosts fill. The file is plain C++ that is also valid MSL: fixed-width scalar types (MSL has int32_t and
-   uint32_t), arrays and no vector types (a float3 would be padded to 16 bytes), no includes under MSL. Its
-   static_asserts run in both compilers and pin the layout the field offsets below imply.
-   Each field's buffer numbers are those of metal/ps_deposit.metal (PSFaceParams: metal/ps_face.metal). */
+   fixed_words.metal.inc, when it embeds the kernel source (metal/validate_deposit.cpp and metal/build_prototype.sh
+   do the same), and the kernels name the blocks DepositParams and ExactItemParams. So the struct the kernels read
+   cannot drift from the one the hosts fill. The file is plain C++ that is also valid MSL: fixed-width scalar types
+   (MSL has int32_t and uint32_t), arrays and no vector types (a float3 would be padded to 16 bytes), no includes
+   under MSL. Its static_asserts run in both compilers and pin the layout the field offsets below imply.
+   Each field's buffer numbers are those of metal/ps_deposit.metal. */
 #ifndef PS_KERNEL_PARAMS_H
 #define PS_KERNEL_PARAMS_H
 
@@ -125,69 +124,5 @@ static_assert(sizeof(PSExactItemParams) == 24, "PSExactItemParams: six 32-bit wo
 // The exact items' map (gpu_host.h psBuildExactItemMap; the kernels' psItemOf): one block-table entry per
 // 2^PS_ITEM_BLOCK_SHIFT items, as the standard-DTFE kernel's ITEM_BLOCK_SHIFT
 #define PS_ITEM_BLOCK_SHIFT 5
-
-// ---- The GPU face kernel (DTFE_GPU_FACES=1; metal/ps_face.metal faceSweepItems; docs/cleanup-plan.md P11, the GPU
-// kernel for the face sweep, step 3): --face-gradient's face sums in face_sweep_f32.h's canonical float arithmetic,
-// one thread per item = (record, axis, plane).
-// The face record of one kept tetrahedron (the face walk's set: ps_interpolation.cc psFaceWalk's filter), built by
-// the host: PS_FACE_REC_FLOATS floats, 112 B, in the order the walk visits the tetrahedra:
-//   [E .. E+11]      eulerPos[v][d] at E + 3v + d: the wrapped Eulerian vertices psDepositFaces takes (Real = float)
-//   [VG .. VG+8]     the velocity gradient vG[i][j] = d v_j / d x_i at VG + 3i + j, as the walk forms it
-//   [V0 .. V0+2]     the velocity of vertex 0
-//   [RHO]            the density rho / rho_bar, the walk's double expression rounded once to float
-//   [COUNT .. +2]    the planes the tetrahedron owns per axis, fsPlanes' counts, as uint bits (as_type<uint> on the
-//                    device; a memcpy of the uint32_t on the host). Their sum is the record's items in the items'
-//                    map (gpu_host.h psBuildExactItemMap with blockCells 1); the kernel counts the planes of its
-//                    item's axis again and adds nothing where they differ (PS_FACE_CNT_MISMATCH)
-// (The design's record had 26 floats, the three counts packed in bytes: a plane count can pass 255 for a stretched
-// void tetrahedron on a fine grid, so each count has a word, and 28 floats are seven 16-byte loads.)
-#define PS_FACE_REC_E      0
-#define PS_FACE_REC_VG     12
-#define PS_FACE_REC_V0     21
-#define PS_FACE_REC_RHO    24
-#define PS_FACE_REC_COUNT  25
-#define PS_FACE_REC_FLOATS 28
-
-// The face kernel's counters (Metal buffer 5: PS_FACE_CNT_WORDS uint, the host zeroes them before each command
-// buffer and adds them up after one that succeeded): the shares the non-finite guard (or, under fxWords 2, the share
-// cap) dropped, per accumulator -- they join ps_deposit_params.h's FX_DROP_FACE_S / N / P, in that order -- and the
-// items that added nothing because the device's plane count differed from the record's, or the library's word size
-// from fxWords: a mismatch means the words are not the CPU's, so the host must not keep them
-#define PS_FACE_CNT_S        0
-#define PS_FACE_CNT_N        1
-#define PS_FACE_CNT_P        2
-#define PS_FACE_CNT_MISMATCH 3
-#define PS_FACE_CNT_WORDS    4
-
-// faceSweepItems' parameters (Metal buffer 6, set per command buffer: itemBase and nItems change per chunk). The grid
-// is the one the CPU's face walk hands psDepositFaces: lo = the region's lower corner (boxL[2d]), h = the spacing,
-// ih = 1.f / h formed ON THE HOST in float (the kernel forms no reciprocal; psDepositFaces' canonical branch forms
-// the same float), nGrid, the pass's sub-grid (subOrigin, subDims: a window's box under --grid-window) and the wrap.
-// scale[0..2] = the units 2^K of the face words S, N, P (fx.faceS / faceN / faceP.scale); capBits[0..2] = the share
-// caps' float bits under fxWords 2 (RunUnits::capBits of RU_PS_FACE_S / N / P), 0 under fxWords 0; fxWords = the
-// library's PS_FX_WORDS (0: two uint per int64 word, 2: four limbs), checked by the kernel; nRec = the records of the
-// items' map; itemBase = the chunk's first item, nItems = the chunk's items (thread k runs item itemBase + k).
-struct PSFaceParams
-{
-    float    lo[3];
-    float    h[3];
-    float    ih[3];
-    int32_t  nGrid[3];
-    int32_t  subOrigin[3];
-    int32_t  subDims[3];
-    int32_t  periodic;     // 0 / 1
-    float    scale[3];
-    uint32_t capBits[3];
-    uint32_t fxWords;
-    uint32_t nRec;
-    uint32_t itemBase;
-    uint32_t nItems;
-};
-static_assert(sizeof(PSFaceParams) == 29 * 4, "PSFaceParams: 29 four-byte fields, no padding (host == kernel)");
-
-// The device probe of the face library's arithmetic (metal/ps_face.metal faceProbe, the kernel's design K11): per
-// case PS_FACE_PROBE_IN floats in (a, b, c, d) and PS_FACE_PROBE_OUT uint out (float bits; ps_face.metal lists them)
-#define PS_FACE_PROBE_IN  4
-#define PS_FACE_PROBE_OUT 14
 
 #endif

@@ -9,13 +9,17 @@
 # (.pts_*) have the same fixed types in both builds. So a suite reads grids with the dtype exported
 # here (DTFE_TEST_REAL, numpy's name) and leaves its .pts_* reads alone. In double mode a suite never
 # rebuilds (the pair is built by 'make ... DOUBLE=1'), and skips when the pair is missing.
-# tests/lib.sh: PY (a python with a working h5py) and the helpers several suites share.
+# PS_BIN / DTFE_BIN name the pair, PS_OBJ / DTFE_OBJ its object folders (whose '.gpu_mode_*' stamp says whether the
+# build has a GPU path).
+# tests/lib.sh: PY (a python with a working h5py) and the helpers several suites share (skip_or_fail among them).
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 case "${DTFE_TEST_PRECISION:-single}" in
     double)
-        PS_BIN=./PS-DTFE-double; DTFE_BIN=./DTFE-double; REAL_BYTES=8; export DTFE_TEST_REAL=float64 ;;
+        PS_BIN=./PS-DTFE-double; DTFE_BIN=./DTFE-double; PS_OBJ=o_ps_d; DTFE_OBJ=o_d
+        REAL_BYTES=8; export DTFE_TEST_REAL=float64 ;;
     single)
-        PS_BIN=./PS-DTFE; DTFE_BIN=./DTFE; REAL_BYTES=4; export DTFE_TEST_REAL=float32 ;;
+        PS_BIN=./PS-DTFE; DTFE_BIN=./DTFE; PS_OBJ=o_ps; DTFE_OBJ=o
+        REAL_BYTES=4; export DTFE_TEST_REAL=float32 ;;
     *)
         echo "DTFE_TEST_PRECISION must be 'single' or 'double' (got '${DTFE_TEST_PRECISION}')" >&2; exit 2 ;;
 esac
@@ -24,13 +28,6 @@ export DTFE_TEST_PRECISION="${DTFE_TEST_PRECISION:-single}"
 # upload GBs of throwaway grids). DTFE_TEST_TMP overrides.
 export DTFE_TEST_TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}"
 mkdir -p "${DTFE_TEST_TMP}"
-# A suite that cannot run (a binary or a feature missing) exits 0 with a SKIP line -- unless the stage says the
-# thing MUST be there (DTFE_TEST_REQUIRED=1, as ci_suite.sh's double and 2d stages do after building it), in
-# which case the skip is a FAILURE: a green CI that ran no assertion is worth nothing.
-skip_or_fail() {
-    if [ "${DTFE_TEST_REQUIRED:-0}" = "1" ]; then echo "FAIL (required): $*" >&2; exit 1; fi
-    echo "SKIP: $*"; exit 0
-}
 echo ">> precision: ${DTFE_TEST_PRECISION} (${PS_BIN}, ${DTFE_BIN}; grid outputs ${DTFE_TEST_REAL})"
 # true in double mode: the suites skip their own build step
 precision_double() { [ "${DTFE_TEST_PRECISION}" = "double" ]; }

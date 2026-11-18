@@ -44,7 +44,7 @@ source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double
 N="${N:-24}"; GRID="${GRID:-48}"; BOX="${BOX:-100.0}"
 BIN="${DTFE_BIN}"; PSBIN="${PS_BIN}"
 precision_require "${BIN}" "${PSBIN}"
-TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}"; mkdir -p "${TMP}"
+TMP="${DTFE_TEST_TMP}"
 SNAP_UNI="${TMP}/dpe_input_uniform.hdf5"
 SNAP_PAN="${TMP}/dpe_input_pancake.hdf5"
 SNAP_PAN0="${TMP}/dpe_input_pancake0.hdf5"
@@ -62,7 +62,7 @@ build_target "${1:-}" DTFE o
 
 # capture FIRST -- piping the binary straight into grep -q would SIGPIPE it under pipefail
 # a help that fails is a broken binary, not a missing feature; a missing feature fails under DTFE_TEST_REQUIRED=1
-# (skip_or_fail, tests/precision.sh)
+# (skip_or_fail, tests/lib.sh)
 FULL_HELP="$("${BIN}" --full-help 2>/dev/null)" || { echo "FAIL: ${BIN} --full-help exited non-zero"; exit 1; }
 if ! grep -q -- '--sample-points' <<<"${FULL_HELP}"; then
     skip_or_fail "this DTFE has no --sample-points support."
@@ -239,7 +239,7 @@ grep -q "covered by none, although the box is periodic" "${TMP}/dpe_x_low.log" \
     && grep -q "the partitions' '--padding' is too small" "${TMP}/dpe_x_low.log" \
     || { echo "FAIL: a too small partition padding was not reported (see ${TMP}/dpe_x_low.log)"; exit 1; }
 echo "   OK"
-OBJ=o; precision_double && OBJ=o_d
+OBJ="$DTFE_OBJ"
 GPU=0
 [ -n "$(gpu_backend_of "${OBJ}")" ] && GPU=1
 if [ "${GPU}" = "1" ]; then

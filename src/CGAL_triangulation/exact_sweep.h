@@ -1,13 +1,13 @@
 /* The CPU exact deposits' tetrahedron-cell clipping, done once per slab and column instead of once
    per cell: '--exact' in both binaries (ps_interpolation.cc and averaged_interpolation_1.cc).
 
-   Both used to clip the whole tetrahedron against the six planes of EVERY cell of its bounding box
+   A per-cell clip cuts the whole tetrahedron by the six planes of EVERY cell of its bounding box
    (r3d_clip(&piece, planes, 6), planes in the order x-lo, x-hi, y-lo, y-hi, z-lo, z-hi). r3d_clip
    applies its planes one at a time, each to the polyhedron the previous ones left, so that clip is
    the tetrahedron clipped by the cell's two x planes (its SLAB), that polyhedron clipped by the two y
    planes (its COLUMN), and that one clipped by the two z planes. sweep() keeps the slab and the column
    and reuses them for every cell they hold: each cell's piece comes from the same r3d_clip calls on the
-   same vertices as before, so its moments are bit-identical. The work per cell drops from six planes
+   same vertices as in the per-cell clip, so its moments are bit-identical. The work per cell drops from six planes
    on the tetrahedron to two on the column, and the cells, columns and slabs outside their parent
    piece's extent are skipped without clipping (Powell & Abel 2015 voxelize by splitting along the grid
    planes, which is cheaper still but interpolates each vertex through a different chain of planes:
@@ -69,7 +69,7 @@ inline bool clipAxis( r3d_poly &dst, r3d_poly const &src, int const axis, double
 }
 
 // r3d_reduce at polyorder 1 or 2 (moments [1, x, y, z] or [1, x, y, z, xx, xy, xz, yy, yz, zz]),
-// unrolled: half the CPU deposit's time went into r3d_reduce's general-order recursion, which per
+// unrolled: much of the CPU deposit's time would go into r3d_reduce's general-order recursion, which per
 // triangle loops over its trinomial pyramid in small run-time-indexed arrays. This is that recursion
 // written out for the two orders, with every floating-point operation r3d does, in its order and
 // grouping -- the same face walk, a += b*c where r3d has one (accumulators starting from 0), the same
@@ -180,7 +180,7 @@ inline void reduce( r3d_poly &poly, r3d_real *moments )
 #endif
 }
 
-// Every cell of the window [cLo, cHi) whose piece of 'tet' is not empty, in gi-gj-gk order (the old
+// Every cell of the window [cLo, cHi) whose piece of 'tet' is not empty, in gi-gj-gk order (a per-cell
 // triple loop's order, so the callers' sums add in the same order).
 //   bounds(axis, idx, lo, hi): the cell planes along an axis in the tetrahedron's frame (the caller's
 //                              per-cell expressions: they must not depend on the other two indices)

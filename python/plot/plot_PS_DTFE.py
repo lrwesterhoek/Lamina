@@ -135,7 +135,7 @@ def main():
         pointeval.render_fields(fs, out_base, label=label)     # BEFORE the house style: plot_pointeval.py draws these too
     if args.pointeval_only:
         return
-    style.apply()                                   # the house style for the grid maps (serif, SHOW_TITLES, DPI): survey item 11
+    style.apply()                                   # the house style for the grid maps (serif, SHOW_TITLES, DPI)
 
     fields = {}
 

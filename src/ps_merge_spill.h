@@ -1,7 +1,7 @@
 /* The SPILL of the staged ordered merge (PS-DTFE partition loop, DTFE.cpp).
 
    A partition that finishes before its turn in the ordered merge parks its two sub-grid Quantities until the
-   partitions before it have merged. Parked in RAM they reach 16 GB on TNG100. A
+   partitions before it have merged. Parked in RAM they can outgrow the machine's memory. A
    SPILLED partition writes its accumulators to ONE unlinked file instead and frees them; at its turn they are read
    back into the very Quantities they came from and merged by the same addFromSubgrid as an in-memory one, so the
    merged grids are byte-identical whichever way a partition waited (the file holds the raw bytes, no conversion).
@@ -47,8 +47,8 @@ namespace PSMergeSpill
 
 // where the spill files go: '--scratch-dir' when set (validated at option parsing: local, existing), else the
 // system temporary folder ($TMPDIR, else /tmp). 'why' says why a folder cannot be used ("" = usable). Why a
-// default at all: without one a partition that does not fit in memory waits for its turn holding its thread (up
-// to 35% of the run), or (under the memory gate) stays in RAM, where macOS swaps it to the same internal disk
+// default at all: without one a partition that does not fit in memory waits for its turn holding its thread,
+// or (under the memory gate) stays in RAM, where macOS swaps it to the same internal disk
 // anyway -- page by page and unasked. A spill writes it once, sequentially, and frees it for sure.
 // The disk room is checked before every spill (room()); a Linux tmpfs default is refused (it IS memory).
 inline std::string folder(std::string const &scratchDir, std::string &why)

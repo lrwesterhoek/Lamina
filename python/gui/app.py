@@ -15,8 +15,9 @@ Each job shows the exact terminal commands it stands for (and exports them as a 
 SLURM job), checks the combinations the scripts reject, and runs the commands one after another
 with live progress -- now, or as a job in the queue, which runs its jobs in sequence (and waits
 for other DTFE runs on the machine). The figures a run writes appear in the Figures browser, and
-every run on disk in the Runs browser (runs_view.py), which also flags outputs made before an
-output-changing fix. A GUI run is always one you could have typed. First launch: setup_wizard.py.
+every run on disk in the Runs browser (runs_view.py), which also flags outputs to look at before
+use (an older version of the programs made them, a later attempt rewrote them, ...). A GUI run
+is always one you could have typed. First launch: setup_wizard.py.
 View > Advanced Settings (off by default) adds an Advanced group to the run tabs: settings the code
 otherwise chooses, each on Automatic until changed (app_advanced.py).
 
@@ -137,28 +138,12 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, Advanc
         self._start_polls()
 
     def _restore_specs(self, spec, pipeline, plots, data, custom):
-        """The five jobs: as given, else as the last session left them (remembered), else fresh; then the one-time
-        moves of an older launcher's saved starts."""
+        """The five jobs: as given, else as the last session left them (remembered), else fresh."""
         self.spec = spec or self._restore("spec", rs.RunSpec)
         self.pipe = pipeline or self._restore("pipeline", rs.PipelineSpec)
         self.plots = plots or self._restore("plots", rs.PlotSpec)
         self.data = data or self._restore("data", rs.DataSpec)
         self.custom = custom or self._restore("custom", rs.CustomSpec)
-        # a state saved before the two quality modes -- a tab's job or a queued one -- loads through each job's
-        # from_dict (its deposit becomes the quality, the settings the modes replaced are dropped:
-        # rs.migrate_quality), said once on the status line (the queue is then saved back: _start_tabs)
-        self._modes_note = any(rs.predates_modes(d) for d in [self._restore_json(key, {}) for key in
-                                                               ("spec", "pipeline", "custom")]
-                               + list(self._restore_json("queue", [])))
-        # standard DTFE's production cell average is the exact one (Exact, rs.QUALITY_DEFAULT). A state saved by an
-        # older launcher holds its start, 'sampled' (now Fast), for a standard-DTFE Grids or Custom job (the
-        # Monte-Carlo average, never really chosen: it was the only start): moved to Exact ONCE; Fast stays
-        # selectable, and a later choice of it is kept
-        if self.remember and not self._restore_json("dtfe_exact_start", False):
-            for sp, given in ((self.spec, spec), (self.custom, custom)):
-                if given is None and sp.estimator == "dtfe" and sp.quality == "fast":
-                    sp.quality = rs.QUALITY_DEFAULT
-            self.settings.setValue("dtfe_exact_start", json.dumps(True))
 
     def _init_state(self):
         """The window's state outside its widgets: the remembered lists, the job and queue in progress, the checks."""
@@ -304,11 +289,6 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, Advanc
         self._fill_snaps()
         self._refresh_queue()
         self.refresh()
-        if self._modes_note:
-            # (a remembered job that switched the Advanced settings on said so already: the note keeps that said,
-            # short, as the status label sits in the run panel's button row)
-            self.status_message(rs.MODES_NOTE + ("; Advanced settings on" if self._advanced_loaded else ""))
-            self._save_queue()          # the queued jobs as they now are (_save writes no queue): the note comes once
 
     def _start_polls(self):
         """The idle re-check every few seconds (jobs started or finished in a terminal, an external disk plugged in
@@ -806,13 +786,21 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, Advanc
         """The Runs browser's 'Load settings': a TNG run's options into the Grids tab; a custom-snapshot run's
         (its settings sidecar, with the Advanced settings it ran with: they turn the switch on) into the Custom
         tab. Either way a sampled PS-DTFE run's count where Fast takes another is the job's Advanced Samples
-        (rs.keep_run_count)."""
+        (rs.keep_run_count). Nothing for a log without any command, nor for an older version's (RunRecord.older:
+        its settings are not read); the browser does not offer it for either, the status line says why."""
+        if not rec.command:
+            self.status_message(f"{rec.prefix}: its log holds no command, so there are no settings to load")
+            return
+        if rec.older:
+            self.status_message(f"{rec.prefix}: made by an older version of the programs, whose settings are not "
+                                "read here")
+            return
         if not rec.sim:
             side = R.custom_settings(rec)
             if side is None:
                 self.status_message(f"{rec.prefix}: no settings file beside its log (made before 2026-09-30?)")
                 return
-            # the tab's machine use stays (it is about this machine now, not about the run: D22)
+            # the tab's machine use stays (it is about this machine now, not about the run)
             had = rs.job_advanced(self.custom)
             self.custom = rs.CustomSpec.from_dict(dict(side, run_mode=self.custom.run_mode))
             rs.keep_run_count(self.custom, rec)     # (the sidecar holds no count; its log's command does)
@@ -827,7 +815,7 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, Advanc
                                    else "; the Advanced settings are the run's" if had and now and had != now
                                    else "; the Advanced settings are back to Automatic" if had and not now else ""))
             return
-        for k, v in rs.migrate_quality(rec.settings()).items():     # the log's cell average is the quality
+        for k, v in rec.settings().items():     # (its 'quality': the log's cell average)
             if k in rs.RunSpec.__dataclass_fields__:
                 setattr(self.spec, k, list(v) if isinstance(v, list) else v)
         # a run log names no Advanced settings (its flags are the run's, whoever chose them): the loaded job is the

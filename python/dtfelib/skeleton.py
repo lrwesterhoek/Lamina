@@ -63,13 +63,14 @@ def class_masks(caustic_class, fold=None) -> dict:
     cc = np.rint(np.asarray(caustic_class)).astype(np.int64)
     kmax = caustic_collapse_max(cc)
     # every deposited SAMPLE sets a parity bit TOGETHER with one collapse bit; a cell with the det>0 parity bit and
-    # no collapse bit comes from a parity-only grid (--ps-caustics with --ps-linear-deposit --gpu writes the fold
-    # flag alone), which would read as 99.96% 'none'. Bit 0 only: the det<0 bit is
+    # no collapse bit comes from a parity-only grid (an older binary's --ps-caustics --ps-linear-deposit --gpu run
+    # wrote the fold flag alone), which would read as 99.96% 'none'. Bit 0 only: the det<0 bit is
     # the geometric overlap, legitimately alone in a cell a folded tetrahedron overlaps but no sample
     # reached (a coverage hole); a parity-only grid carries bit 0 in every deposited cell, so it is still refused.
     if np.any(((cc & CAUSTIC_PARITY_POS) != 0) & (kmax == -1)):
-        raise ValueError("parity-only caustic_class grid (fold bits without collapse bits: a --ps-caustics "
-                         "--ps-linear-deposit --gpu run); the stratification needs the CPU or the GPU's full deposit")
+        raise ValueError("parity-only caustic_class grid (fold bits without collapse bits: an older binary's "
+                         "--ps-caustics --ps-linear-deposit --gpu run); the stratification needs the CPU or the GPU's "
+                         "full deposit")
     if fold is None:
         fold = caustic_is_fold(cc)
     else:
@@ -276,7 +277,7 @@ def _median(a):
 
 
 def sphere_metrics(masks, centers_cells, r_cells, n_grid: int, shells, cutout_cells: int) -> dict:
-    """The per-sphere wall metrics of plot_caustic_skeleton's --voids for spheres at integer cells 'centers_cells'
+    """The per-sphere wall metrics of plot_caustic_skeleton's --per-void for spheres at integer cells 'centers_cells'
     (n, 3), centred on the cells' centres, of radii 'r_cells' (n,): {'fold', 'sheet' (shell fractions), 'dist_r'
     (nearest-sheet distance / r, NaN beyond the cut-out), 'bounded'}."""
     c = np.asarray(centers_cells, dtype=np.int64).reshape(-1, 3)

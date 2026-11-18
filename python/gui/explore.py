@@ -138,7 +138,7 @@ ZOOM_POINT_TIP = ("The query server evaluates the dragged region again, point by
                   "first.")
 ZOOM_EXACT_TIP = ("Runs DTFE / PS-DTFE again on the dragged region, one slice cell thick: every cell the exact "
                   "average over its volume (mass is conserved), on a grid of that many cells across. A whole run, so "
-                  "slower, and no server needed; the GPU is used when the program has it. A phase-space run "
+                  "slower, and no server needed; the program picks its device. A phase-space run "
                   "tessellates the whole box as the original run did (periodic or not) and deposits only into the "
                   "region, so the zoom shows exactly what a full run at that resolution would show there. It reuses "
                   "the query server's tessellations on disk and skips the partitions whose streams never reach the "
@@ -324,22 +324,22 @@ class SliceWorker(QObject):
 
 # ==================================================================== canvas
 
-# the finest virtual full grid an exact zoom of a phase-space run asks for along an axis (--ps-window
+# the finest virtual full grid an exact zoom of a phase-space run asks for along an axis (--grid-window
 # allocates the window only; the grid just sets the cell size)
 WINDOW_GRID_MAX = 1 << 20
 
 # The time an exact zoom of a phase-space run will take, from measured rates (TNG100-3-Dark,
 # 94M particles, from an external SSD, M1 Max): reading snapshot + initial conditions 16 s for 6.0 GB
 # (skipped when the snapshot's globals are recorded and every needed partition is cached); per BUILT
-# partition 3 s selecting its particles (all 94M scanned; a cached one skips it); 8.4 s loading a
-# cached single-stream 6.0M-vertex tessellation (a 0.88 GB file) -- a chunked file loads 1.68x faster
-# (measured 1.53 -> 0.91 s on the synthetic 2.1M-particle partitions); ~1.6 s for its exact deposit; building one
-# from scratch 26 s per 7M vertices (the production run) plus writing it to the cache. The binary runs
-# several partitions at a time (its auto-tuner, from the free memory): the estimate assumes EST_CONCURRENCY.
+# partition 3 s selecting its particles (all 94M scanned; a cached one skips it); loading a cached
+# 6.0M-vertex tessellation (a 0.88 GB file) at EST_LOAD_BPS: 8.4 s inflated on one thread, and the cache's
+# chunks, inflated on several, load 1.68x faster (measured 1.53 -> 0.91 s on the synthetic 2.1M-particle
+# partitions); ~1.6 s for its exact deposit; building one from scratch 26 s per 7M vertices (the production
+# run) plus writing it to the cache. The binary runs several partitions at a time (its auto-tuner, from the
+# free memory): the estimate assumes EST_CONCURRENCY.
 EST_READ_BPS = 3.8e8
 EST_SELECT_S_PER_PARTICLE = 3.2e-8
-EST_LOAD_BPS = 1.05e8
-EST_CHUNKED_LOAD_SPEEDUP = 1.68
+EST_LOAD_BPS = 1.05e8 * 1.68
 EST_DEPOSIT_S_PER_VERTEX = 2.7e-7
 EST_BUILD_S_PER_VERTEX = 3.7e-6
 EST_SAVE_BPS = 1.5e8

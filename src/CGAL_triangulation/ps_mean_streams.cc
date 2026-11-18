@@ -17,11 +17,9 @@
 // tetrahedra. That ratio is estimated on up to 256 random Lagrangian patches of 20 mean spacings
 // on a side: Delaunay-triangulate each patch's Lagrangian positions (the tessellation PS-DTFE
 // itself uses), keep the tetrahedra whose Lagrangian centroid lies 3 spacings inside the patch
-// (hull tetrahedra are artefacts of the cut), and sum both volumes. MEASURED against the
-// '.pts_streams' of a full-box 8192^2 plane, TNG100-3-Dark: estimated 1.00/0.99/1.13/1.6/2.3/
-// 3.4-3.9 vs measured 1.00/1.02/1.21/2.30/2.65/4.25 at z = 20/5/2/1/0.5/0; the rest of the gap
-// is the PLANE, not the estimate (16 strips of the z=0 plane range 1.45 .. 22.8), which is why
-// the tuner budgets twice the multi-stream excess.
+// (hull tetrahedra are artefacts of the cut), and sum both volumes. A real plane's '.pts_streams'
+// can still differ from it, mostly because the plane's own count differs from the box mean (its strips
+// vary widely), which is why the tuner books the multi-stream excess with a margin (autoTunePSPointStreams).
 // ======================================================================================
 #if NO_DIM == 3 && defined(PHASE_SPACE)      // Lagrangian positions exist only in the PS build
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
@@ -43,9 +41,9 @@ double psEstimateMeanStreams(std::vector<Particle_data> const &particles, double
     if ( N < 2000 or N > size_t(4294967295u) ) return -1.;
     // The Lagrangian domain the patches tile. Periodic: the box. Non-periodic: the particles' OWN
     // Lagrangian bounding box -- the output region ('--box') can be smaller than the cloud, and
-    // wrapping initial positions into it folded particles from far apart into one patch, whose
-    // Delaunay tetrahedra then spanned the whole cloud in Eulerian space: 8.1 million "streams"
-    // per point on a TNG100-3 Lagrangian sub-cube with a 31 Mpc region (true mean ~1-2).
+    // wrapping initial positions into it would fold particles from far apart into one patch, whose
+    // Delaunay tetrahedra would then span the whole cloud in Eulerian space (millions of "streams"
+    // per point).
     double boxLo[3], boxLen[3];
     for (int d=0; d<3; ++d) { boxLo[d] = boxLoIn[d]; boxLen[d] = boxLenIn[d]; }
     if ( not periodic )
@@ -161,7 +159,7 @@ double psEstimateMeanStreams(std::vector<Particle_data> const &particles, double
             continue;
         }
         // with a region the counted tetrahedra must TILE the Lagrangian space (a patch shrunk by its margin would
-        // count a slab that falls in the margins as empty: 0.7 instead of 1 stream on a 1-D pancake), so a patch
+        // count a slab that falls in the margins as empty), so a patch
         // counts the tetrahedra with their centroid in its WHOLE cell and also holds the particles within the
         // margin around it -- a particle near a cell face belongs to up to 8 patches
         int gs[3][2], ng[3];

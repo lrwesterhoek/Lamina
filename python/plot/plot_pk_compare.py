@@ -38,7 +38,7 @@ import matplotlib.pyplot as plt
 
 from scipy.stats import chi2
 
-from dtfelib import make_parser, FieldSet, snapdir_path, spectra, add_snaps_arg, add_out_arg, deprecated_alias
+from dtfelib import make_parser, FieldSet, snapdir_path, spectra, add_snaps_arg, add_out_arg
 from dtfelib import figures as style
 
 OUTPUT_DIR = Path(config.figures_path("power_spectrum"))
@@ -190,7 +190,6 @@ def main():
                         help=f"the early snapshot whose growth-scaled P(k) is the same-realisation reference panel "
                              f"(default {DEFAULT_REF_SNAP}; -1 = no panel); another value tags the files '_ref<S>' / '_noref'")
     add_out_arg(parser, f"{OUTPUT_DIR}/<sim>")
-    deprecated_alias(parser, "--nbins", "--n-bins")
     args = parser.parse_args()
     style.apply()
     out_dir = Path(args.out).expanduser() if args.out else OUTPUT_DIR / args.sim

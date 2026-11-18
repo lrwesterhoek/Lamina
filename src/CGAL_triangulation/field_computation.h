@@ -143,11 +143,11 @@ inline Pvector<Real,noScalarGradComp> scalarGradient(Real sGrad[][noScalarComp])
 
 
 
-// The gradients in DOUBLE, for the exact-average deposits (averaged_interpolation_1.cc, plan P10.8): the vertex
+// The gradients in DOUBLE, for the exact-average deposits (averaged_interpolation_1.cc GridFrame): the vertex
 // differences are exact in double for float data, the inverse is matrixInverseDouble's, and the products are rounded
 // once where the caller narrows them, so the result does not follow the float rounding of CGAL's vertex labelling
-// (which differs between the triangulations of two splits: at TNG100 z = 0 the float gradients of the same
-// tetrahedra differed by 2.7e-5 of their rms between a 3^3 and a 6^3 plan, up to 7.6e-3 in flat ones).
+// (which differs between the triangulations of two splits, and moves the float gradients of the same tetrahedra
+// most in flat ones).
 template <typename Cell>
 inline void densityGradDouble(Cell &cell,
                               double posMatrixInverse[][NO_DIM],

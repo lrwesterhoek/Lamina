@@ -9,7 +9,7 @@
     python3 analyze.py cache [--prune [--yes]]        # the cache namespaces, sizes, and which no current setting reaches
 
 The simulation is --sim NAME or DTFE_SIM (there is no default), the data root --data-root or DTFE_DATA_ROOT; the
-snapshots are --snaps (the positional snapshot ids of before are still read, with a warning, for one release).
+snapshots are --snaps.
 
 Phase 1 does the expensive 512^3 work once per snapshot into python/cache/<param-hash>/;
 phase 2 reads the cache. Changing sigma/footprint/criterion in config.py changes the hash
@@ -57,18 +57,7 @@ def _early_env(argv) -> None:
 if __name__ == "__main__":
     _early_env(sys.argv[1:])
 import config                                                       # noqa: E402
-from dtfelib.cli import (SMOOTH_MPC_ENV, SMOOTH_MPC_ENV_NAMES, new_parser, add_out_arg,  # noqa: E402
-                         add_list_arg, warn_deprecated)
-
-
-def _smooth_env_name() -> str:
-    """The smoothing variable the environment set (DTFE_SMOOTH_MPC, else its older name), for the refusal text."""
-    return next((n for n in SMOOTH_MPC_ENV_NAMES if os.environ.get(n)), SMOOTH_MPC_ENV)
-
-
-def _smooth_env_text() -> str:
-    name = _smooth_env_name()
-    return f"{name}={os.environ.get(name, '')!r}"
+from dtfelib.cli import SMOOTH_MPC_ENV, new_parser, add_out_arg, add_list_arg  # noqa: E402
 
 # Core figure set only: the tracking scripts (plot_PS_DTFE, plot_cosmic_web,
 # plot_halo_tracking, plot_void_tracking, plot_void_population)
@@ -338,7 +327,6 @@ def main():
     parser = new_parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('mode', nargs='?', default='all',
                         choices=['check', 'compute', 'plot', 'all', 'export', 'voids', 'cache'])
-    parser.add_argument('old_snaps', nargs='*', metavar='snap', help=argparse.SUPPRESS)   # P6.7: now --snaps
     parser.add_argument('--sim', default=None,
                         help="the simulation (default DTFE_SIM; one of the two is needed, except for 'cache')")
     parser.add_argument('--data-root', default=None,
@@ -363,9 +351,6 @@ def main():
     parser.add_argument('--keep-cells', type=float, nargs='*', default=[], metavar='CELLS',
                         help="'cache': more smoothings in cells (footprint 11) to count as current")
     args = parser.parse_args()
-    if args.old_snaps:                  # the positional snapshots of before: --snaps (one release)
-        warn_deprecated("a positional snapshot", f"--snaps {' '.join(args.old_snaps)}")
-        args.snaps = list(args.snaps) + list(args.old_snaps)
     if args.mode != 'cache' and not config.SIMULATION:      # the cache modes span every simulation
         parser.error("no simulation given: pass --sim NAME or set DTFE_SIM=NAME (e.g. python3 analyze.py "
                      f"{args.mode} --sim TNG100-3-Dark); there is no default simulation")
@@ -426,9 +411,9 @@ def main():
         # DTFE_SMOOTH_MPC would overwrite them with another smoothing's figures and void_shape_table.txt (the same
         # test as smoothing_tag()'s smoothing part)
         sys.exit(f"refused: the smoothing is {config.SMOOTHING_SIGMA_CELLS:g} cells / footprint {config.FOOTPRINT_SIZE} "
-                 f"({_smooth_env_text()}), not the production "
+                 f"({SMOOTH_MPC_ENV}={os.environ.get(SMOOTH_MPC_ENV, '')!r}), not the production "
                  f"{config.PRODUCTION_SMOOTHING}: '{args.mode}' writes the core figures under their production names. "
-                 f"Unset {_smooth_env_name()}; it is for the void scripts and 'export' (both tag their outputs).")
+                 f"Unset {SMOOTH_MPC_ENV}; it is for the void scripts and 'export' (both tag their outputs).")
     if args.mode == 'compute':
         compute(args.snaps)
         return

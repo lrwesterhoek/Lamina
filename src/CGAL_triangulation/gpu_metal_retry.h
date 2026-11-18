@@ -1,8 +1,8 @@
 /* The Metal GPU hosts' chunk-level checkpoints and cause-aware retry policy, shared by ps_metal_host.cc and the
    standard-DTFE host, dtfe_metal_host.cc, so both run the SAME policy.
 
-   Without checkpoints a failed command buffer would redo the WHOLE deposit (a PS partition: up to ~2000 s per
-   TNG50 partition; a standard-DTFE sub-domain batch: the whole batch). So every pass keeps a snapshot of the
+   Without checkpoints a failed command buffer would redo the WHOLE deposit (a PS partition: up to tens of minutes
+   on a large snapshot; a standard-DTFE sub-domain batch: the whole batch). So every pass keeps a snapshot of the
    buffers its kernel writes (the accumulator grids; PS also the exact items' sumW and the
    per-tet masses the kernel negates when it defers a tet), taken at the pass's start and every
    DTFE_GPU_CHECKPOINT_CHUNKS chunks; a failed buffer (which may have deposited part or all of its atomics)
@@ -67,7 +67,7 @@ int gpuRetryCause(GpuFault f, long code, std::string const& desc)
 // a machine whose display load killed one partition's buffers will kill the next one's at the same pace.
 // But not for the rest of the PROCESS: one 'Impacting Interactivity' fault -- a moment of display
 // use -- would then slow every later partition (72% GPU duty after one escalation, 29% after two: hours
-// on an 8 h TNG50 run). So the pace
+// on a long run). So the pace
 // steps back one notch -- the inverse of one escalation, buffers x4 and gaps /3, toward the run mode's base (gpuPace
 // below: 0.25 s / 8 ms in performance, 0.05 s / 8 ms in gentle and balanced) -- after
 // every DTFE_GPU_PACE_RECOVER_SEC (default 90) seconds of GPU work (buffers + gaps) without a fault of ours;
@@ -252,7 +252,6 @@ struct GpuPassSpec
     size_t                     nThreads = 0, minChunk = 1, maxChunk = 1;
     size_t                   (*align)(size_t) = gpuChunkAsIs;   // a chunk size as the kernel needs it
     bool                       ckOn = false;     // a pass-start snapshot is held (without one the first failure gives up)
-    bool                       periodic = true;  // periodic checkpoints too (off for the PS face pass: it restarts from zero)
     std::vector<MTL::Buffer*> const* ckBufs = nullptr;   // the buffers a periodic checkpoint copies ...
     std::vector<bool>          ckMask;           // ... but those known zero (GpuSnapshot::take)
     long                       ckChunks = -1;    // DTFE_GPU_CHECKPOINT_CHUNKS (-1: every ~10 s of GPU work)
@@ -379,7 +378,7 @@ bool gpuRunPass(GpuPassSpec& p, GpuRetryRun& run, size_t& chunk, Encode&& encode
                             "buffers, %.0f ms gaps%s\n", p.tag, clean, pace.targetSec * 1e3, pace.gapUs / 1e3, atBase);
         }
         long const every = p.ckChunks >= 0 ? p.ckChunks : std::max(1L, long(std::lround(10.0 / pace.targetSec)));
-        if (p.periodic && p.ckOn && every > 0 && long(sinceCk) >= every && start < p.nThreads)
+        if (p.ckOn && every > 0 && long(sinceCk) >= every && start < p.nThreads)
         {   // the queue is drained (waitUntilCompleted above): the buffers hold exactly [0, start)
             if (run.snap.take(*p.ckBufs, p.ckMask, start))
             { ++run.snap.taken; ckPeriodic = true; sinceCk = 0; std::memcpy(badCk, run.badRun, sizeof badCk); }

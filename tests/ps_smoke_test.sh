@@ -23,7 +23,7 @@ GRID="${GRID:-64}"           # output grid per side (GRID^3)
 BOX="${BOX:-100.0}"          # box size in Mpc
 AMP="${AMP:-1.8}"            # Zel'dovich amplitude factor (>1 => shell crossing)
 BIN="${BIN:-${PS_BIN}}"
-TMP_DIR="${TMP_DIR:-${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}}"
+TMP_DIR="${TMP_DIR:-${DTFE_TEST_TMP}}"
 INPUT_H5="${TMP_DIR}/ps_zeldovich.hdf5"
 OUT_ROOT="${TMP_DIR}/ps_out"
 

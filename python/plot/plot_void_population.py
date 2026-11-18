@@ -85,13 +85,13 @@ from matplotlib.ticker import FormatStrFormatter
 
 import config
 from dtfelib import pipeline, catalog, theory, raw_radius
-from dtfelib import make_parser, use_data_root, snapshot_ladder, deprecated_alias
+from dtfelib import make_parser, use_data_root, snapshot_ladder
 from dtfelib import figures as style
 from dtfelib import groupcat as gc
 
 FIGURE_ROOT = Path(config.figures_path("void_population"))
 PCT = (16, 50, 84)   # band percentiles
-SIZE_FUNCTION_RV = "delta08"     # the R_v definition of the size function (catalog.R_V_DEFINITIONS, contract C3): the
+SIZE_FUNCTION_RV = "delta08"     # the R_v definition of the size function (catalog.R_V_DEFINITIONS): the
                                  # theory's radius is where the enclosed contrast reaches DELTA_V_NONLINEAR = -0.8
 RAW_RV = "delta08raw"            # the enclosed -0.8 radius on the RAW density about the same centres (dtfelib.raw_radius):
                                  # not a catalogue key, measured here (cached beside the catalogue)
@@ -193,7 +193,7 @@ FIXED_R_CONSISTENT = 2.0                 # 'consistent with Vdn': |ratio - 1| wi
 
 
 def r_v_definition(cat, definition="crossing"):
-    """(R_v in Mpc per catalogue row, the definition used): catalog.r_v_mpc under 'definition' (contract C3). A
+    """(R_v in Mpc per catalogue row, the definition used): catalog.r_v_mpc under 'definition'. A
     catalogue without that key, or a catalog module without the definitions, gives 'crossing' (the standard R_v)
     instead; the caller says so. A catalogue WITH the key keeps it even when every row is NaN: at high z no minimum
     of the smoothed field is as empty as -0.8, so there are no such voids, which is a result, not a missing key."""
@@ -307,9 +307,9 @@ def size_function_figure(stats, panel, ztab, box, args, methods, path) -> dict:
     radii = np.geomspace(0.3 * sig, 30.0 * sig, 40)
     fine = np.geomspace(0.3 * sig, 30.0 * sig, 200)
     defs = sorted({stats[s]["rv_sf_definition"] for s in panel})
-    if args.size_rv not in defs:                   # contract C3: said, not silent, until the catalogues carry it
+    if args.size_rv not in defs:                   # said, not silent, until the catalogues carry it
         print(f"  size function: R_v definition {args.size_rv!r} is not in these catalogues: using "
-              f"{'/'.join(defs) or 'crossing'} (rebuild them once void-core's R_v definitions are in)")
+              f"{'/'.join(defs) or 'crossing'} (rebuild the void catalogues so they carry every R_v definition)")
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.6))
     colors = plt.cm.viridis(np.linspace(0.1, 0.9, max(len(panel), 1)))
     out = {"size_function_rv": "/".join(defs) or args.size_rv, "size_function_model": SIZE_FUNCTION_MODEL,
@@ -959,7 +959,6 @@ def build_parser():
                              "contrast of the smoothed field reaches -0.8, the theory's radius; crossing while a "
                              "catalogue lacks it; delta08raw: the same on the raw density about the same centres, "
                              "measured and cached on first use)")
-    deprecated_alias(parser, "--size-rv", "--size-rv-definition")
     parser.add_argument("--size-smooth", type=float, default=SIZE_SMOOTH_CELLS, metavar="CELLS",
                         help=f"the size function's own catalogue smoothing in cells (default {SIZE_SMOOTH_CELLS:g}: at "
                              "the production 10 cells the delta08 radius is below sigma and mostly undefined); 0 = "

@@ -35,7 +35,7 @@ source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double
 N="${N:-24}"; GRID="${GRID:-48}"; BOX="${BOX:-100.0}"; ALPHA="${ALPHA:-0.1645}"
 BIN="${PS_BIN}"
 precision_require "${BIN}"
-TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}"; mkdir -p "${TMP}"
+TMP="${DTFE_TEST_TMP}"
 SNAP_UNI="${TMP}/pvm_input_uniform.hdf5"
 SNAP_PAN="${TMP}/pvm_input_pancake.hdf5"
 SNAP_LIN="${TMP}/pvm_input_linear.hdf5"       # single-stream pancake (true ICs)
@@ -51,7 +51,7 @@ GPU_BUILT=0
 [ -f o_ps/.gpu_mode_off ] || GPU_BUILT=1
 # capture FIRST -- piping the binary straight into grep -q would SIGPIPE it under pipefail
 # a help that fails is a broken binary, not a missing feature; a missing feature fails under DTFE_TEST_REQUIRED=1
-# (skip_or_fail, tests/precision.sh)
+# (skip_or_fail, tests/lib.sh)
 FULL_HELP="$("${BIN}" --full-help 2>/dev/null)" || { echo "FAIL: ${BIN} --full-help exited non-zero"; exit 1; }
 if ! grep -q -- '--ps-vertex-mass' <<<"${FULL_HELP}"; then
     skip_or_fail "this PS-DTFE has no --ps-vertex-mass support."

@@ -56,7 +56,7 @@ extern std::atomic<int> psGpuRetriesByCause[4];   // innocent, timeout, oom, oth
 // sub-domain to the CPU), defined in averaged_interpolation_1.cc -- zero in a CPU-only build
 extern std::atomic<int> dtfeGpuRetries;
 extern std::atomic<int> dtfeGpuRetriesByCause[4];   // innocent, timeout, oom, other
-// the sub-domain deposits since the last reset that asked for the GPU (--gpu) and ran on the CPU instead
+// the sub-domain deposits since the last reset that were meant for the GPU (asked or picked) and ran on the CPU instead
 int dtfeGpuFallbacksTaken(bool reset = false);
 #endif
 
@@ -140,7 +140,7 @@ inline double runProgressPredicted()
 }
 
 // the peak so far when the post-processing begins (DTFE.cpp): the SUMMARY prints it beside the run's peak, so a
-// log says which phase set the peak (the auto-tuner books both: plan P8.9). Read once, at that moment.
+// log says which phase set the peak (the auto-tuner books both). Read once, at that moment.
 inline void runProgressNoteLoopPeak()
 {
     double const peak = runProgressPeak();
@@ -227,7 +227,7 @@ inline void runProgressInit(User_options const &u)
     RunProgress &p = runProgressState();   // constructed BEFORE the handler is registered, so destroyed after it runs
     std::lock_guard<std::mutex> lock( p.m );
     p.on = not u.outputFilename.empty() and not u.psServe and not u.autoTuneReport
-           and Env::flag( "DTFE_PROGRESS", true );   // DTFE_PROGRESS=0 (the old DTFE_NO_PROGRESS=1) writes none
+           and Env::flag( "DTFE_PROGRESS", true );   // DTFE_PROGRESS=0 writes none
     p.path = u.outputFilename + ".runlog.progress";
     p.start = std::chrono::steady_clock::now();
     static bool registered = false;

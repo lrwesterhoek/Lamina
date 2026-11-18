@@ -2,7 +2,7 @@
 #define SAMPLE_EVAL_HEADER
 
 /* The per-sample machinery of the sampling interpolations: the point values of unaveraged_interpolation.cc (regular
-   grid, redshift cone, user points) and the cell averages of averaged_interpolation_2.cc (methods 2 and 3). Each of
+   grid, redshift cone, user points) and the cell averages of averaged_interpolation_2.cc (method 2). Each of
    those functions is a traversal (which centres, in which order) and a sample source; locating a point, the zero
    record outside the hull, the cell's inverse matrix, the field block and the padding report are written here once.
    Everything is inline and keeps no state between calls: the functions run inside the OpenMP sub-domain threads.
@@ -311,8 +311,8 @@ struct CellSums
 
 // One cell average over NN samples, sample w placed by 'sampleAt(w, samplePoint)' (absolute coordinates). Every
 // sample's walk starts at 'centreCell', the cell of the sampling cell's centre, which the loop never updates: a
-// sample on a face or an edge resolves to the same cell as before. The padding flags of all samples, those outside
-// the hull included, mark entry 'index' of the report.
+// sample on a face or an edge resolves to a cell that does not depend on the samples before it. The padding flags
+// of all samples, those outside the hull included, mark entry 'index' of the report.
 template <class SampleAt>
 SAMPLE_EVAL_INLINE void averageOverSamples(DT &dt,
                                SampleOutputs &out,

@@ -86,7 +86,7 @@ cd "${ROOT}"
 source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double pair
 
 N="${N:-32}"; GRID="${GRID:-64}"; BOX=100.0
-TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}"; mkdir -p "${TMP}"
+TMP="${DTFE_TEST_TMP}"
 # tessellation caches must live on a LOCAL, non-synced volume (the binary refuses iCloud Drive)
 TESS_BASE="$(mktemp -d "${TMPDIR:-/tmp}/dtfe-pxs-tess.XXXXXX")"
 trap 'rm -rf "${TESS_BASE}"' EXIT
@@ -149,7 +149,7 @@ run "${DTFE_BIN}"    "${TMP}/pxs_st_p"    --sample-points "${PARTS}"   --padding
 RUN_GRID="${GRID}" run "${PS_BIN}" "${TMP}/pxs_dep"    --partition 1 1 1
 RUN_GRID="${GRID}" run "${PS_BIN}" "${TMP}/pxs_dep_P2" --partition 2 2 2
 GPU_BUILT=0
-OBJ_PS=o_ps; precision_double && OBJ_PS=o_ps_d
+OBJ_PS="$PS_OBJ"
 [ -f ${OBJ_PS}/.gpu_mode_off ] || GPU_BUILT=1
 if [ "${GPU_BUILT}" -eq 1 ]; then
     RUN_GRID="${GRID}" run "${PS_BIN}" "${TMP}/pxs_dep_gpu"    --partition 1 1 1 --gpu

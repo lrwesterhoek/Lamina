@@ -19,8 +19,7 @@ for runs with PTS_VEL_GRAD=1 -- velDiv, velShear, velVort (plus denGradMag with
     python3 plot/plot_pointeval.py --sims all --maps density velDiv --force
     python3 plot/plot_pointeval.py --sims all --estimator dtfe   # the standard-DTFE slice (output.pts_*)
 
-The lists are space-separated (a comma-joined one is still split, with a warning, for one release); the old
-spellings --method, --fields, --smooth and --smooth-derivatives are read with a warning too.
+The lists are space-separated.
 """
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
@@ -34,7 +33,7 @@ matplotlib.use("Agg")
 import config
 from dtfelib import pointeval
 from dtfelib.cli import NoDataRoot, find_sims, require_data_root, sim_dir, snapdir_path, snapshot_ladder
-from dtfelib.cli import new_parser, add_list_arg, add_estimator_arg, deprecated_alias
+from dtfelib.cli import new_parser, add_list_arg, add_estimator_arg
 from dtfelib.io import FieldSet
 
 
@@ -57,7 +56,6 @@ def main() -> int:
                  help="snapshot numbers, space-separated (default: all present)")
     add_list_arg(p, "--maps", dest="fields", default=None, metavar="MAP",
                  help=f"the maps to draw, space-separated, from {' '.join(pointeval.STYLES)} (default: all available)")
-    deprecated_alias(p, "--fields", "--maps")
     add_estimator_arg(p, help="whose slice to render: PS-DTFE (ps_output.pts_*), standard DTFE (output.pts_*, a "
                               "run_dtfe.sh SAMPLE_POINTS run), or auto = the slice on disk, PS-DTFE first")
     p.add_argument("--prefix", default=None,
@@ -88,8 +86,6 @@ def main() -> int:
                    help="use the grid maps' fixed 1e-1..1e4 density range for side-by-side "
                         "comparison with them. Default is a percentile stretch: the fixed "
                         "range clips ~26%% of a z=0 point-eval image to the darkest colour")
-    deprecated_alias(p, "--smooth", "--smooth-px")
-    deprecated_alias(p, "--smooth-derivatives", "--smooth-derivatives-px")
     args = p.parse_args()
     try:
         args.data_root = require_data_root(args.data_root)

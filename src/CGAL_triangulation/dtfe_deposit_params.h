@@ -9,8 +9,8 @@
    A batch = one sub-domain's tetrahedra. nGrid is its sub-grid; a sample inside the sub-grid is owned by this batch
    and lands at full-grid cell pos + subOff. The host always passes subOff = 0 and fullGrid = nGrid, the plain
    single-grid deposit. Positions are relative to a corner the host chooses per tetrahedron and names by its sub-grid cell
-   (buffer 22, 'cells'): the exact average's base cell of the FULL grid (averaged_interpolation_1.cc GridFrame, plan
-   P10.8: the same frame in every sub-domain, so the same shares), the Monte-Carlo average's sub-domain lower corner
+   (buffer 22, 'cells'): the exact average's base cell of the FULL grid (averaged_interpolation_1.cc GridFrame:
+   the same frame in every sub-domain, so the same shares), the Monte-Carlo average's sub-domain lower corner
    (cell 0, so the cell classification is the CPU loop's, bit for bit). Buffer numbers are those of
    metal/dtfe_deposit.metal. */
 #ifndef DTFE_DEPOSIT_PARAMS_H
@@ -33,8 +33,6 @@ struct DTFEDepositParams
     int32_t  subOff[3];      // the sub-grid's origin in the accumulated grid
     uint32_t itemBase;       // item kernel: the first item of this dispatch (items are numbered per batch)
     int32_t  fullGrid[3];    // the accumulated grid's dimensions (flat index = full-grid index)
-    uint32_t debugNoAtomic;  // always 0: no switch sets it; kept, and still tested by the kernels, so the kernel
-                             // code stays the same
     float    invDx[3];       // 1/dx: the cell of a sample is floor((base + p) * invDx) in both kernels
     uint32_t tableEntries;   // item kernel: entries of the threadgroup cell table (a power of two; 0 = none)
     int32_t  fScal;          // deposit the scalar, ONE component (per-tet kernel; Metal specializes the item
@@ -48,7 +46,7 @@ struct DTFEDepositParams
     float    fxScale[5];     // 2^k per grid: [0] density, [1] velocity, [2] velocity gradient, [3] scalar, [4] its gradient
     uint32_t fxCapBits[5];   // fixedSum 2: the float bits of each grid's share cap (fixed_words.metal.inc shareLimbs)
 };
-static_assert(sizeof(DTFEDepositParams) == 37 * 4,
-              "DTFEDepositParams: 37 four-byte fields, no padding (host == kernel)");
+static_assert(sizeof(DTFEDepositParams) == 36 * 4,
+              "DTFEDepositParams: 36 four-byte fields, no padding (host == kernel)");
 
 #endif

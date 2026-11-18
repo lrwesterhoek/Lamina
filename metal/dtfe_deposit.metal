@@ -28,7 +28,7 @@
 //  CPU with the CPU loop's own helpers, so both paths use the same classification and
 //  sample counts; the shared Sobol table gives them the same barycentric coordinates.
 //  Remaining CPU/GPU differences are float rounding (double vertex differences on the
-//  CPU) and, with DTFE_GPU_FLOAT_GRIDS=1 only, atomic summation order.
+//  CPU) and, in a batch that sums in float atomics (P.fixedSum 0, below), atomic summation order.
 //
 //  Exact sums. The grids are FIXED-POINT sums by default (DepositParams.fixedSum; a sampled batch's in 64-bit words,
 //  the phase-space mass grid's scheme, metal/ps_deposit.metal depositMass): every share becomes the
@@ -49,8 +49,10 @@
 //  (src/fixed_units.h RunUnits): a batch's unit then no longer depends on which tetrahedra the split put in it, so
 //  every split rounds every share alike, and a cap on each share's integer (P.fxCapBits) keeps every cell sum below
 //  2^126 in any order, where no bound per batch exists. They have no float pre-sum (one integer per piece), so the
-//  chunk alignment does not concern them. DTFE_RUN_UNITS_LEGACY=1 keeps them on the 64-bit words of the batch's own
-//  units. DTFE_GPU_FLOAT_GRIDS=1 keeps the float atomics for A/B.
+//  chunk alignment does not concern them. An exact batch without the run-wide units (RunUnits not filled, as for a
+//  library caller that skips DTFE_setup's runUnitsSetup) sums in the 64-bit words of the batch's own units, as a
+//  sampled batch does; a batch whose own bound is not finite sums in float atomics (P.fixedSum 0; dtfe_gpu_fixed.h
+//  dtfeBatchParams).
 //  Measured cost (0.26M particles at 256^3 on a GPU shared with another
 //  run, so indicative): the exact-average kernel none; the item kernel 1.6-1.9x for density + velocity
 //  (the integer table holds half the entries and every value takes two atomics), 10-15% with the velocity
@@ -66,8 +68,8 @@ using namespace metal;
 
 // Which fields the item kernels deposit, fixed when the pipeline is built (the host makes one
 // pipeline per field set): the compiler drops the velocity and gradient code and their registers
-// from a density-only pipeline, and the item kernels are register-bound (K=4: 640 threads per
-// threadgroup, K=2: 832, against the 1024 of a lean kernel), so this buys occupancy.
+// from a density-only pipeline, and the item kernel is register-bound (832 threads per threadgroup
+// with its K = 2 cache slots, against the 1024 of a lean kernel), so this buys occupancy.
 constant bool FC_DEN  [[function_constant(0)]];
 constant bool FC_VEL  [[function_constant(1)]];
 constant bool FC_GRAD [[function_constant(2)]];
@@ -424,13 +426,13 @@ static inline void flushSlot(thread const DGrids& G, constant DepositParams& P,
     }
     if (FC_SCAL)
         addScal(G, P, FC_FIXED, f, sc * factor);
-    if (P.fGrad && P.debugNoAtomic < 3u) {
+    if (P.fGrad) {
         float const w = cnt * factor;
         for (int j = 0; j < 3; ++j)
             for (int i = 0; i < 3; ++i)
                 addGrad(G, P, FC_FIXED, f*9ul+ulong(j*3+i), vG[i][j] * w);
     }
-    if (FC_SGRAD && P.debugNoAtomic < 3u) {
+    if (FC_SGRAD) {
         float const w = cnt * factor;
         for (int i = 0; i < 3; ++i)
             addSG(G, P, FC_FIXED, f*3ul+ulong(i), sG[i] * w);
@@ -541,10 +543,10 @@ static inline bool tableAdd(threadgroup atomic_uint* tKeys, threadgroup atomic_f
     return false;
 }
 
-// The item kernel's body, templated on the cache size (the kernels below instantiate it: a
-// function constant cannot size an array). Fewer slots = fewer registers = more threads in
-// flight; more slots = fewer flushes for tetrahedra spanning many cells. Measured on 2.1M
-// particles at 512^3 -- see the host for the default.
+// The item kernel's body, templated on the cache size K (the kernel below instantiates it with K = 2:
+// a function constant cannot size an array). Fewer slots = fewer registers = more threads in
+// flight; more slots = fewer flushes for tetrahedra spanning many cells (metal/README.md, the item
+// kernel, says why 2).
 template <int K>
 static inline void depositItem(
     device const float*     verts, device const float* dens, device const float* vels,
@@ -726,7 +728,7 @@ static inline void depositItem(
                 sz = simd_sum(m ? zW : 0.0f);
             }
             float const ss = FC_SCAL ? simd_sum(m ? cW : 0.0f) : 0.0f;
-            if (lane == leader && !P.debugNoAtomic) {
+            if (lane == leader) {
                 ulong const f = ulong(leaderKey);
                 if (FC_DEN)
                     addDen(G, P, FC_FIXED, f, sd);
@@ -738,7 +740,7 @@ static inline void depositItem(
                 if (FC_SCAL)
                     addScal(G, P, FC_FIXED, f, ss);
             }
-            if ((FC_GRAD || FC_SGRAD) && P.debugNoAtomic < 2u) {
+            if (FC_GRAD || FC_SGRAD) {
                 // The gradient is a per-TETRAHEDRON constant times the cell weight, so it is reduced per
                 // (cell, tetrahedron): one weight sum per tetrahedron sharing the cell (usually one or
                 // two in a SIMD group) instead of nine component sums, and no nine-float array alive.
@@ -748,7 +750,7 @@ static inline void depositItem(
                     bool const mt = mg && tid == leaderTet;
                     uint const leaderG = simd_min(mt ? lane : 32u);
                     float const sw = simd_sum(mt ? gW : 0.0f);
-                    if (lane == leaderG && !P.debugNoAtomic) {
+                    if (lane == leaderG) {
                         ulong const f = ulong(leaderKey);
                         if (FC_GRAD)
                             for (int j = 0; j < 3; ++j)
@@ -777,14 +779,13 @@ static inline void flushWords(device atomic_uint* g, ulong at, threadgroup atomi
 // integer to integer, under FC_FIXED).
 static inline void tableFlush(threadgroup atomic_uint* tKeys, threadgroup atomic_float* tVals,
                               threadgroup atomic_uint* tValsX, uint E, uint ltid, uint tgSize,
-                              thread const DGrids& G, constant DepositParams& P)
+                              thread const DGrids& G)
 {
     for (uint e = ltid; e < E; e += tgSize) {
         uint const key = atomic_load_explicit(&tKeys[e], memory_order_relaxed);
         if (key == TABLE_EMPTY) continue;
         ulong const f = ulong(key);
         uint const base = e * tableStride();
-        if (P.debugNoAtomic) continue;
         if (FC_FIXED) {
             if (FC_DEN)
                 flushWords(G.denX, f, tValsX, base + 0u);
@@ -867,12 +868,10 @@ kernel void NAME(                                                               
                        P, itemOf(itemStart, blockTet, P.nTetTotal, P.itemBase + iid), lane, \
                        tKeys, tVals, tValsX);                                               \
     threadgroup_barrier(mem_flags::mem_threadgroup);                                        \
-    tableFlush(tKeys, tVals, tValsX, E, ltid, tgSize, G, P);                                \
+    tableFlush(tKeys, tVals, tValsX, E, ltid, tgSize, G);                                   \
 }
 
 DTFE_ITEM_KERNEL(depositAveraged1Items2, 2)
-DTFE_ITEM_KERNEL(depositAveraged1Items4, 4)
-DTFE_ITEM_KERNEL(depositAveraged1Items8, 8)
 
 
 // ---------------------------------------------------------------------------------------

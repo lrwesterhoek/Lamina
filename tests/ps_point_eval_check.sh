@@ -24,8 +24,7 @@
 #     (stream records are collected per tetrahedron and reduced in a deterministically sorted
 #     order, so only float-ULP wrap differences of periodic-image copies remain).
 #  D) Ragged --ps-per-stream layout invariants (sum of per-stream densities == total; sorted
-#     descending; offsets consistent), and '--ps-stream-density linear' (the only value; the
-#     option is hidden) named gives the default run's point files byte for byte.
+#     descending; offsets consistent).
 #  E) Text and binary sample-point inputs give byte-identical outputs.
 #  F) --ps-per-stream-ids (when the binary supports it): adding the flag leaves every existing
 #     output byte-identical; '.pts_stream_ids' has sum(streams) records of 4 ascending
@@ -46,8 +45,6 @@
 #     fill (RecLayout, ps_point_eval.cc); DTFE_PTS_FULL_RECORDS=1 stores every member as before.
 #     Both must give byte-identical outputs -- with no options, and with every per-stream option
 #     on at once across a --partition 2 2 2 merge.
-#  R) '--ps-stream-density geometric' was removed: the program stops with its message and writes
-#     no point file; another value stops it with the one value left ('linear').
 #
 # Usage:
 #   tests/ps_point_eval_check.sh              # build, run, check
@@ -65,7 +62,7 @@ source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double
 N="${N:-24}"; GRID="${GRID:-48}"; BOX="${BOX:-100.0}"
 BIN="${PS_BIN}"
 precision_require "${BIN}"
-TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}"; mkdir -p "${TMP}"
+TMP="${DTFE_TEST_TMP}"
 # input/point file names must NOT share a prefix with the output roots (rm -f "<root>".*)
 SNAP_UNI="${TMP}/ppe_input_uniform.hdf5"
 SNAP_PAN="${TMP}/ppe_input_pancake.hdf5"
@@ -119,10 +116,7 @@ run "${TMP}/ppe_pan_ser" "${SNAP_PAN}" --periodic --sample-points "${PTS_BIN}" -
 echo ">> run 3: pancake, --partition 2 2 2, --ps-per-stream"
 run "${TMP}/ppe_pan_par" "${SNAP_PAN}" --periodic --partition 2 2 2 \
     --sample-points "${PTS_BIN}" --ps-per-stream
-echo ">> run 4: pancake, serial, '--ps-stream-density linear' named, --ps-per-stream"
-run "${TMP}/ppe_pan_lin" "${SNAP_PAN}" --periodic --sample-points "${PTS_BIN}" --ps-per-stream \
-    --ps-stream-density linear
-echo ">> run 5: pancake, serial, TEXT sample-point input"
+echo ">> run 4: pancake, serial, TEXT sample-point input"
 run "${TMP}/ppe_pan_txt" "${SNAP_PAN}" --periodic --sample-points "${PTS_TXT}" --ps-per-stream
 
 echo ">> (E) text vs binary sample-point input: outputs must be byte-identical"
@@ -132,32 +126,16 @@ for ext in .pts_den .pts_vel .pts_velDisp .pts_streams .pts_stream_offsets .pts_
 done
 echo "   OK"
 
-# (R) the removed 'geometric' and an unknown value: the run stops at its options, before any point is evaluated
-refused() {  # $1 = output root, $2 = the text it must stop with, rest = extra args: 0 when the run exits non-zero
-             # with that text and writes no point file
-    local out="$1" text="$2"; shift 2
-    rm -f "${out}".*
-    local rc=0
-    "${BIN}" "${SNAP_UNI}" "${out}" --grid "${GRID}" --field density --input-format 105 --mpc-unit 1 --verbose 1 \
-        --periodic --sample-points "${PTS_BIN}" "$@" > "${out}.log" 2>&1 || rc=$?
-    [ "${rc}" -ne 0 ] && grep -qF -e "${text}" "${out}.log" && [ ! -e "${out}.pts_den" ]
-}
-echo ">> (R) '--ps-stream-density geometric' (removed) and an unknown value: refused before anything runs"
-R_GEO=0; R_BAD=0
-if refused "${TMP}/ppe_r_geo" "${PS_NO_GEOMETRIC}" --ps-stream-density geometric; then R_GEO=1; fi
-if refused "${TMP}/ppe_r_bad" "Unknown value 'constant' for '--ps-stream-density'; the only value is 'linear'." \
-        --ps-stream-density constant; then R_BAD=1; fi
-
 # --ps-per-stream-ids section, gated so the script still runs against binaries predating the flag
 # (capture first: 'grep -q' would SIGPIPE the binary and trip pipefail)
 HAVE_IDS=0
 FULL_HELP="$("${BIN}" --full-help 2>/dev/null)" || { echo "FAIL: ${BIN} --full-help exited non-zero"; exit 1; }
 if grep -q -- '--ps-per-stream-ids' <<<"${FULL_HELP}"; then
     HAVE_IDS=1
-    echo ">> run 6: pancake, serial, --ps-per-stream-ids (implies --ps-per-stream)"
+    echo ">> run 5: pancake, serial, --ps-per-stream-ids (implies --ps-per-stream)"
     run "${TMP}/ppe_pan_ids" "${SNAP_PAN}" --periodic \
         --sample-points "${PTS_BIN}" --ps-per-stream-ids
-    echo ">> run 7: pancake, --partition 2 2 2, --ps-per-stream-ids"
+    echo ">> run 6: pancake, --partition 2 2 2, --ps-per-stream-ids"
     run "${TMP}/ppe_pan_ids_par" "${SNAP_PAN}" --periodic --partition 2 2 2 \
         --sample-points "${PTS_BIN}" --ps-per-stream-ids
     echo ">> (F) --ps-per-stream-ids leaves the existing outputs byte-identical"
@@ -179,13 +157,13 @@ if grep -q -- '--pts-den-grad' <<<"${FULL_HELP}"; then
     # components must vanish (the Lagrangian lattice is y/z-translation-invariant)
     "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP_PAN0}" --n "${N}" --box "${BOX}" \
         --amplitude-factor 1.8 --jitter-frac 0 >/dev/null
-    echo ">> run 8: jitter-free pancake, serial, --ps-per-stream --pts-den-grad"
+    echo ">> run 7: jitter-free pancake, serial, --ps-per-stream --pts-den-grad"
     run "${TMP}/ppe_grad_ser" "${SNAP_PAN0}" --periodic \
         --sample-points "${PTS_BIN}" --ps-per-stream --pts-den-grad
-    echo ">> run 9: jitter-free pancake, --partition 2 2 2, --ps-per-stream --pts-den-grad"
+    echo ">> run 8: jitter-free pancake, --partition 2 2 2, --ps-per-stream --pts-den-grad"
     run "${TMP}/ppe_grad_par" "${SNAP_PAN0}" --periodic --partition 2 2 2 \
         --sample-points "${PTS_BIN}" --ps-per-stream --pts-den-grad
-    echo ">> run 10: jitter-free pancake, serial, --ps-per-stream (no gradient flag)"
+    echo ">> run 9: jitter-free pancake, serial, --ps-per-stream (no gradient flag)"
     run "${TMP}/ppe_grad_off" "${SNAP_PAN0}" --periodic \
         --sample-points "${PTS_BIN}" --ps-per-stream
     echo ">> (G) --pts-den-grad leaves the existing outputs byte-identical"
@@ -215,7 +193,7 @@ probes[1::2] = pts[cand]; probes[1::2, 0] += eps
 probes.astype(np.float64).tofile(fdbin)
 np.savetxt(fdsel, np.column_stack([cand, np.full(cand.size, eps)]), fmt="%.17g")
 PY
-    echo ">> run 11: jitter-free pancake, serial, FD probe points"
+    echo ">> run 10: jitter-free pancake, serial, FD probe points"
     run "${TMP}/ppe_grad_fd" "${SNAP_PAN0}" --periodic --sample-points "${PTS_FD}"
 else
     [ "${DTFE_TEST_REQUIRED:-0}" = "1" ] && { echo "FAIL (required): this PS-DTFE has no --pts-den-grad" >&2; exit 1; }
@@ -225,10 +203,10 @@ fi
 HAVE_VELGRAD=0
 if grep -q -- '--pts-vel-grad' <<<"${FULL_HELP}" && [ "${HAVE_GRAD}" = "1" ]; then
     HAVE_VELGRAD=1
-    echo ">> run 12: jitter-free pancake, serial, --pts-vel-grad"
+    echo ">> run 11: jitter-free pancake, serial, --pts-vel-grad"
     run "${TMP}/ppe_vgrad_ser" "${SNAP_PAN0}" --periodic \
         --sample-points "${PTS_BIN}" --pts-vel-grad
-    echo ">> run 13: jitter-free pancake, --partition 2 2 2, --pts-vel-grad"
+    echo ">> run 12: jitter-free pancake, --partition 2 2 2, --pts-vel-grad"
     run "${TMP}/ppe_vgrad_par" "${SNAP_PAN0}" --periodic --partition 2 2 2 \
         --sample-points "${PTS_BIN}" --pts-vel-grad
     echo ">> (H) --pts-vel-grad leaves the existing outputs byte-identical"
@@ -261,7 +239,7 @@ else
 fi
 
 echo ">> checking the numbers ..."
-"${PY}" - "${TMP}" "${GRID}" "${HAVE_IDS}" "${HAVE_GRAD}" "${HAVE_VELGRAD}" "${R_GEO}" "${R_BAD}" <<'PY'
+"${PY}" - "${TMP}" "${GRID}" "${HAVE_IDS}" "${HAVE_GRAD}" "${HAVE_VELGRAD}" <<'PY'
 import sys
 import numpy as np
 import os as _os; REAL = np.dtype(_os.environ.get("DTFE_TEST_REAL", "float32"))   # tests/precision.sh
@@ -270,7 +248,6 @@ tmp, grid = sys.argv[1], int(sys.argv[2])
 have_ids = len(sys.argv) > 3 and sys.argv[3] == "1"
 have_grad = len(sys.argv) > 4 and sys.argv[4] == "1"
 have_vgrad = len(sys.argv) > 5 and sys.argv[5] == "1"
-r_geo, r_bad = sys.argv[6] == "1", sys.argv[7] == "1"
 ncell = grid ** 3
 fails = []
 
@@ -370,13 +347,6 @@ for i in np.where(st > 1)[0]:
 check("D1 ragged layout consistent", ok_layout, "offsets/counts/records")
 check("D2 per-stream sums == total", ok_sum, f"max diff = {np.abs(sums - den).max():.3e}")
 check("D3 streams sorted by density desc", ok_sorted, "")
-# '--ps-stream-density linear' named: the default run's point files, byte for byte (the option reaches the points only)
-import os
-outs = sorted(f[len("ppe_pan_ser"):] for f in os.listdir(tmp) if f.startswith("ppe_pan_ser.pts_"))
-diff = [e for e in outs if not os.path.exists(f"{tmp}/ppe_pan_lin{e}")
-        or open(f"{tmp}/ppe_pan_ser{e}", "rb").read() != open(f"{tmp}/ppe_pan_lin{e}", "rb").read()]
-check("D4 '--ps-stream-density linear' named == the default", len(outs) >= 6 and not diff,
-      f"{len(outs)} point files compared, differ: {diff}")
 
 # ---------- (F) --ps-per-stream-ids: stream identities ----------
 if have_ids:
@@ -466,11 +436,6 @@ if have_vgrad:
     rel = np.abs(fd[ok] - vg[idx[ok], 0, 0]) / scale
     check("H4 dvx/dx matches central FD of .pts_vel", np.median(rel) < 0.02 and np.percentile(rel, 90) < 0.05,
           f"{ok.sum()}/{idx.size} probes, median rel = {np.median(rel):.2e}, p90 = {np.percentile(rel, 90):.2e}")
-
-# ---------- (R) the removed 'geometric' ----------
-check("R1 '--ps-stream-density geometric' stops the run with its message, no point file written", r_geo,
-      f"{tmp}/ppe_r_geo.log")
-check("R2 another value stops it with the one value left ('linear')", r_bad, f"{tmp}/ppe_r_bad.log")
 
 print("-" * 60)
 if fails:

@@ -46,7 +46,6 @@ void interpolateRedshiftCone(DT &dt, User_options &userOptions, Quantities *quan
 void interpolateUserSampling(DT &dt, vector<Sample_point> &samples, User_options &userOptions, Quantities *quantities);
 void interpolateGrid_averaged_1(DT &dt, User_options &userOptions, Quantities *quantities);
 void interpolateGrid_averaged_2(DT &dt, User_options &userOptions, Quantities *quantities);
-void interpolateGrid_averaged_3(DT &dt, User_options &userOptions, Quantities *quantities);
 void interpolateRedshiftCone_averaged_2(DT &dt, User_options &userOptions, Quantities *quantities);
 void interpolateUserSampling_averaged_2(DT &dt, vector<Sample_point> &samples, User_options &userOptions, Quantities *quantities);
 #ifdef PHASE_SPACE
@@ -60,7 +59,7 @@ void interpolateGrid_phaseSpace(DT &dt, User_options &userOptions, Quantities *q
 #include "tessellation_cache.h"   // '--tessellation-cache': reuse the tessellation across runs
 #include "../env_knobs.h"
 #ifdef PHASE_SPACE
-#include "ps_vertex_order.h"      // psVertexOrderPass: the canonical vertex order of the cells (D19)
+#include "ps_vertex_order.h"      // psVertexOrderPass: the canonical vertex order of the cells
 #endif
 #ifdef PHASE_SPACE
 void interpolatePoints_phaseSpace(DT &dt, User_options &userOptions);   // ps_point_eval.cc
@@ -109,11 +108,7 @@ bool buildTessellation(vector<Particle_data> *p,
                     << "): triangulation and vertex-density passes skipped.\n" << MESSAGE::Flush;
             // only NOW are the particles redundant -- on a miss they are the triangulation's input
             vector<Particle_data>().swap(*p);
-#ifdef PHASE_SPACE
-            // a file written without the canonical order (by a binary before it, or under
-            // DTFE_PS_VERTEX_ORDER_LEGACY=1) holds CGAL's numbering; on a canonical file the pass changes nothing
-            psVertexOrderPass( dt, userOptions );
-#endif
+            // (PS-DTFE: the file holds the canonical vertex order -- the save below follows psVertexOrderPass)
         }
     }
 
@@ -129,7 +124,7 @@ bool buildTessellation(vector<Particle_data> *p,
     if ( not tessellationLoaded )
     {
     t.start();
-    delaunayTriangulation( &dt, p, userOptions.verboseLevel,   // (both binaries since 2026-11-09, plan P11.3)
+    delaunayTriangulation( &dt, p, userOptions.verboseLevel,
                            userOptions.psParallelTriangulation || Env::isSet( "DTFE_TRIANGULATION_THREADS" ),
                            userOptions.parallelTriangulationForced || Env::isSet( "DTFE_TRIANGULATION_THREADS" ) );
     printComputationTime( &t, &userOptions, "triangulation" );
@@ -175,9 +170,7 @@ void DTFE_interpolation(vector<Particle_data> *p,
                         Quantities *aQuantities,
                         DT &dt)
 {
-    intervalCheck( userOptions.method, 1, 3, "'userOptions.method' in function 'DTFE_interpolation' must have values from 1 to 3");
-    if ( userOptions.method==3 )
-        rootN( userOptions.noPoints, NO_DIM );
+    intervalCheck( userOptions.method, 1, 2, "'userOptions.method' in function 'DTFE_interpolation' must have values from 1 to 2");
 
 
     Timer t;
@@ -348,8 +341,6 @@ void DTFE_interpolation(vector<Particle_data> *p,
                 interpolateGrid_averaged_1( dt, userOptions, aQuantities );
             else if ( userOptions.method==2 )
                 interpolateGrid_averaged_2( dt, userOptions, aQuantities );
-            else if ( userOptions.method==3 )
-                interpolateGrid_averaged_3( dt, userOptions, aQuantities );
             else throwError( "Unknown averaging method '", userOptions.method, "' when volume averaging the fields on a regular grid." );
         }
         else if ( userOptions.redshiftConeOn and not userOptions.userDefinedSampling )  // interpolate on a redshift cone grid
@@ -380,7 +371,7 @@ void DTFE_interpolation(vector<Particle_data> *p,
 #ifdef PHASE_SPACE
     // dt is owned here, so the last PS grid pass may clear it right after its deposit --
     // that frees the triangulation (~650 B/vertex) during the stats/merge phase instead of
-    // holding it until this scope ends (~5 GB per concurrent partition at production scale)
+    // holding it until this scope ends
     userOptions.psMayClearDT = true;
 #endif
     DTFE_interpolation( p, samples, userOptions, uQuantities, aQuantities, dt );
@@ -443,8 +434,8 @@ void dtfeInterpolatePrebuilt(std::shared_ptr<void> &tessellation, vector<Sample_
 // left to finish (DTFE.cpp sets both before the loop; each partition counts itself off when done).
 // The parallel insertion below shares the cores among min(concurrency, remaining) builds: a
 // PLANNED bound, not a live count of the builds already running -- the first partition to reach
-// its insert would otherwise see only itself and take every core on top of the other nine
-// sequential inserts (measured: the TNG region's 27-partition run slows from 137 to 158 s).
+// its insert would otherwise see only itself and take every core on top of the other builds'
+// sequential inserts, which slows the whole run.
 // PS-DTFE counts only the concurrency where it leaves a build fewer than 2 cores (delaunayTriangulation, below).
 std::atomic<int> dtfeTriangulationConcurrency{0};
 std::atomic<int> dtfeTriangulationsRemaining{0};
@@ -453,9 +444,8 @@ std::atomic<int> dtfePartitionsInFlight{0};   // (thread_count.h: the dynamic PS
 #if defined(PARALLEL_TRIANGULATION) && NO_DIM==3
 // The cores the parallel insertion may use: the PERFORMANCE cores only, at most six. CGAL's
 // parallel insert is lock-coupled, so a thread on an efficiency core stalls the others, and more
-// threads mostly add lock contention. Measured on a 0.26M-particle box (8 performance + 2
-// efficiency cores; sequential insert 1.41 s): 10 threads 1.0-3.0 s and once 6.5 s, 8 threads
-// 0.45-0.85 s, 6 threads 0.51-0.63 s, 4 threads 0.52-0.53 s. DTFE_TRIANGULATION_THREADS overrides the cap.
+// threads mostly add lock contention (on 8 performance + 2 efficiency cores, 4 to 6 threads were about as
+// fast as 8 and steadier, 10 slower and erratic). DTFE_TRIANGULATION_THREADS overrides the cap.
 static int parallelInsertCores()
 {
     if ( long const v = Env::integer( "DTFE_TRIANGULATION_THREADS", 0 ); v > 0 )
@@ -511,9 +501,9 @@ static void insertSequential(DT *dt, vector<Particle_data> *p, MESSAGE::Message 
 }
 
 // Inserts every particle into the Delaunay triangulation. A PARALLEL_TRIANGULATION build (TBB=auto/1 for PS-DTFE,
-// TBB_STD likewise for the standard binaries since 2026-11-09, plan P11.3) inserts in parallel with CGAL's lock grid
-// by the default rule of both binaries (2026-11-09, plan P11.3) -- a tessellation of at least
-// DTFE_TRIANGULATION_MIN_POINTS points (1000000) when more than one core is free for it -- or forced by
+// TBB_STD likewise for the standard binaries) inserts in parallel with CGAL's lock grid
+// by the default rule of both binaries -- a tessellation of at least
+// 1000000 points (minPoints below) when more than one core is free for it -- or forced by
 // '--parallel-triangulation' / DTFE_TRIANGULATION_THREADS=N at any size: the cores are shared among the
 // tessellations being built at the same time (the partition loops, the standard sub-domain team:
 // ConcurrentTriangulationPlan), and capped by OMP_NUM_THREADS; a run mode's lowered thread budget (run_mode.h) caps
@@ -524,18 +514,14 @@ static void insertSequential(DT *dt, vector<Particle_data> *p, MESSAGE::Message 
 // either device, its face pass and its vertex densities (integer sums in one unit for the whole run,
 // src/fixed_units.h: vertexDensityStarSums below, with the single-cell volumes of canonicalTetVolume, which do not
 // follow CGAL's labelling; tests/split_bytes_check.sh S4), and every grid of the single-precision PS-DTFE, whose
-// cells are renumbered in a canonical vertex order before any use (ps_vertex_order.h, D19). Under
-// DTFE_PS_VERTEX_ORDER_LEGACY=1 (CGAL's numbering) its velocity moments move by 4e-7 of the rms in 5% of the values
-// (tests/dev/bytecmp.sh with DTFE_TRIANGULATION_THREADS=6).
+// cells are renumbered in a canonical vertex order before any use (ps_vertex_order.h).
 // '--sequential-triangulation' (or DTFE_TRIANGULATION_THREADS=1) keeps the sequential insert, reproducible bit for
 // bit; the test suites' inputs are far below the threshold, so they compare sequential builds. The parallel insert
 // sorts and inserts a COPY of the points (CGAL keeps a second one), so the particles are freed as soon as that copy
-// exists; auto_tune.h budgets the difference. Measured: PS-DTFE's near-lattice Lagrangian points build 2x faster on
-// ten cores (0.26M particles: 1.44 s -> 0.74 s); the standard binary's clustered Eulerian points built 4.5x SLOWER
-// on the demo (0.26M: 1.05 s -> 4.7 s) but 3.1x FASTER at TNG100 z = 0 (512^3, one partition of ~5M padded points in
-// flight, 6 threads: 675 s -> 218 s summed over 27 partitions, +4.4 GB in flight), hence the threshold; at the auto
-// plan's concurrency (9-10 tessellations at once) the budget is one thread and nothing changes (435 s both ways, the
-// GPU exact grids byte-identical).
+// exists; auto_tune.h budgets the difference. PS-DTFE's near-lattice Lagrangian points build faster in parallel,
+// also on a small set; the standard binary's clustered Eulerian points build several times SLOWER in parallel on a
+// small set but several times FASTER on a large one, hence the threshold. At a partition loop's full concurrency
+// the budget is one thread and nothing changes.
 void delaunayTriangulation(DT *dt,
                            vector<Particle_data> *p,
                            int const verboseLevel,
@@ -547,8 +533,8 @@ void delaunayTriangulation(DT *dt,
 #if defined(PARALLEL_TRIANGULATION) && NO_DIM==3
     int threads = parallelAllowed ? parallelInsertCores() : 1;
     // A count given with DTFE_TRIANGULATION_THREADS is an explicit lever: like OMP_NUM_THREADS and '--max-concurrent'
-    // (user_options.cc applyRunMode) it beats a run mode's lowered thread budget, and keeps the caps it had before the
-    // modes -- the OpenMP default at start-up (OMP_NUM_THREADS, or the machine's threads) and the hardware threads
+    // (user_options.cc applyRunMode) it beats a run mode's lowered thread budget, and keeps the caps it has without a
+    // mode -- the OpenMP default at start-up (OMP_NUM_THREADS, or the machine's threads) and the hardware threads
     // shared among the builds. The rule's own count follows the mode.
     RunModeState const &mode = runModeState();
     bool const pinnedOverMode = mode.budgetLowered && Env::integer( "DTFE_TRIANGULATION_THREADS", 0 ) > 0;
@@ -559,8 +545,8 @@ void delaunayTriangulation(DT *dt,
     // among the builds left -- in PS-DTFE only where the concurrency the loop runs with (the plan's, or the dynamic
     // concurrency's larger one) leaves each build 2 or more: the auto-tuner books the insert's copies per count in
     // flight (auto_tune.cc parInsertBytes), so an insert that is sequential at that concurrency stays sequential to the
-    // loop's end instead of adding copies the plan has no room for. (Standard DTFE: unchanged; a team's builds start
-    // together.)
+    // loop's end instead of adding copies the plan has no room for. (Standard DTFE always shares among the builds left:
+    // a team's builds start together.)
     int const concurrency = dtfeTriangulationConcurrency.load();
     int const hardware = pinnedOverMode ? std::max( 1, int( std::thread::hardware_concurrency() ) ) : dtfeHardwareThreads();
 #ifdef PHASE_SPACE
@@ -573,7 +559,7 @@ void delaunayTriangulation(DT *dt,
     // the size threshold of the default rule (see above): below it the sequential insert is as fast or faster
     if ( threads > 1 && !parallelForced )
     {
-        long const minPoints = Env::integer( "DTFE_TRIANGULATION_MIN_POINTS", 1000000L );
+        constexpr long minPoints = User_options::parallelInsertMinPoints;
         if ( long(p->size()) < minPoints )
         {
             message << "\n(the parallel insert is for tessellations of at least " << minPoints << " points; this one has "
@@ -767,11 +753,11 @@ static void vertexDensityStarSums(DT &dt, User_options &userOptions, Real const 
 // incident Delaunay cells. PS-DTFE: avgDensity * V_Lagrangian / V_Eulerian for the incident cells.
 // The sums run over the CELLS, each adding its volume to its NO_DIM+1 vertices in double, instead of
 // over every vertex's incident cells -- a CGAL adjacency walk that recomputes each cell's volume
-// NO_DIM+1 times (0.63 s vs ~0.1 s for 0.26M particles, a fifth of the whole run).
+// NO_DIM+1 times, several times slower.
 // Convex-hull vertices (an incident infinite cell: density undefined) are marked first, from the
 // infinite cells, and stay out of the sums. A vertex sum runs in cell order and in double -- but for
 // the standard binary's exact star sums (vertexDensityStarSums), which RunUnits::starSums selects
-// (not under DTFE_RUN_UNITS_LEGACY=1, nor in the double build or PS-DTFE).
+// (not in the double build or PS-DTFE).
 void vertexDensity(DT & dt,
                   User_options &userOptions)
 {

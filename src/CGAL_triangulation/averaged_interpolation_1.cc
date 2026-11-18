@@ -45,9 +45,9 @@
 // ps_interpolation.cc): the failed GPU command buffers of the run by cause -- [0] innocent victim,
 // [1] timeout (a watchdog kill), [2] out of memory, [3] any other; they sum to dtfeGpuRetries -- counted by the
 // GPU host (dtfe_metal_host.cc), read by run_progress.h for the progress sidecar's gpu_retries /
-// gpu_retries_by_cause and DTFE.cpp's closing 'GPU deposit retries:' line; and the sub-domain deposits that asked
-// for the GPU and ran on the CPU instead (DTFE.cpp's closing warning: the threads other than the master print
-// their reason only as a warning line of their own). Defined in every standard build, GPU or not.
+// gpu_retries_by_cause and DTFE.cpp's closing 'GPU deposit retries:' line; and the sub-domain deposits that were
+// meant for the GPU, asked or picked, and ran on the CPU instead (DTFE.cpp's closing warning: the threads other than
+// the master print their reason only as a warning line of their own). Defined in every standard build, GPU or not.
 std::atomic<int> dtfeGpuRetries{ 0 };
 std::atomic<int> dtfeGpuRetriesByCause[4] = { { 0 }, { 0 }, { 0 }, { 0 } };
 static std::atomic<int> dtfeGpuFallbacks{ 0 };
@@ -59,7 +59,7 @@ int dtfeGpuFallbacksTaken(bool reset)
 
 // GPU deposit (METAL=1 build, 3D only); the CPU loop below remains the fallback. MY_SCALAR
 // evaluates arbitrary user C++ per sample, which cannot run on the GPU. (The program's pick of the device reads the
-// same builds: user_options.cc GPU_PATH_BUILT, and the run-time conditions of avg1GpuUsable: gpuPathRuns.)
+// same builds: user_options.cc GPU_PATH_BUILT, and avg1GpuUsable's conditions but its cell count: gpuPathRuns.)
 #if defined(DTFE_GPU) && NO_DIM==3 && !defined(MY_SCALAR)
 #define DTFE_GPU_ACTIVE
 #include <algorithm>
@@ -140,7 +140,7 @@ inline uint64_t mcMix(uint64_t z)
 // is a property of the vertex, not of the triangulation that holds it. The coordinates are hashed as FLOATS:
 // the single and the double build then share the realization (a kpc snapshot scaled to Mpc gives float- and
 // double-rounded coordinates whose double bit patterns differ in every vertex, which would make the two builds'
-// grids differ by 8% rms per cell; the float patterns agree but for rare double roundings). Two vertices of one
+// grids differ in every cell; the float patterns agree but for rare double roundings). Two vertices of one
 // cell that round to the same float hash alike and are ordered by their exact coordinates (mcVertexOrder).
 inline uint64_t mcVertexHash(Vertex_handle const &v)
 {
@@ -154,25 +154,20 @@ inline uint64_t mcVertexHash(Vertex_handle const &v)
     return h;
 }
 
-// The vertex order of the deposits, the Monte-Carlo and the exact average alike. 'legacy' keeps CGAL's own order
-// (vertex(0) as the base), which DTFE_MC_LEGACY=1 selects for both (A/B). Otherwise the
-// NO_DIM+1 vertices are sorted by a key that depends only on the cell's own vertex SET: each vertex's
+// The vertex order of the deposits, the Monte-Carlo and the exact average alike: the NO_DIM+1 vertices are sorted
+// by a key that depends only on the cell's own vertex SET: each vertex's
 // coordinate hash mixed with the (order-free) sum of the cell's hashes, ties (never seen; 64-bit keys) broken
 // by the coordinates.
 //   Why: the fixed Sobol prefix of n samples does not average to the centroid (barycentric slot means
 //   0.160/0.262/0.275/0.302 at n = 17, the minimum count), so each slot carries a fixed weight error, and
-//   CGAL's labelling correlates with density (slot densities 1.023/1.012/1.006/0.959 at TNG100 z=1). The
-//   product is a systematic mass loss of 0.17-0.29% in an '_a' grid. A pseudo-random,
+//   CGAL's labelling correlates with density. The product is a systematic mass loss in an '_a' grid. A pseudo-random,
 //   order-free slot assignment decorrelates the slots from the density AND makes the realization of each
 //   tetrahedron independent of the insertion order, the thread count and the partition split.
-inline McCell mcVertexOrder(Finite_cells_iterator &cell,
-                            bool const legacy)
+inline McCell mcVertexOrder(Finite_cells_iterator &cell)
 {
     McCell c;
     for (int i=0; i<NO_DIM+1; ++i)
         c.v[i] = cell->vertex(i);
-    if ( legacy )
-        return c;
     uint64_t hv[NO_DIM+1], sum = 0;
     for (int i=0; i<NO_DIM+1; ++i)
     {
@@ -259,15 +254,14 @@ int checkCellPosition(Cell &cell,
     return MULTIPLE_GRID_CELLS;
 }
 
-/* The exact average's GRID FRAME (plan P10.8). Its deposits -- the CPU's r3d / ps_clip2d clipping, the GPU kernel
+/* The exact average's GRID FRAME. Its deposits -- the CPU's r3d / ps_clip2d clipping, the GPU kernel
    and the face pass -- form a tetrahedron's geometry relative to the corner of the FULL grid's cell holding its base
    vertex: origin + g * dxG in double, with g the cell's global index (user_options.h gridFrame: the run's grid box and
    full grid, this sub-grid's origin in it). The vertices relative to that corner are exact in double and narrow to a
    float whose rounding does not depend on the sub-domain, and the cells are named by their global index minus the
    sub-grid's origin, so every sub-domain computes the same shares for the same tetrahedron. (The sub-domain frame,
-   checkCellPosition's, rounded the GPU deposit's float vertices by up to 2^-24 of the sub-domain's extent: 1.9e-6 Mpc,
-   a strip of cells off by up to 1e-2 of the gradient's rms in TNG100's 3^3 plan, the P10 status. The Monte-Carlo
-   average keeps that frame and its bytes.) */
+   checkCellPosition's, rounds float vertices by up to 2^-24 of the sub-domain's extent, so a strip of cells would
+   differ between splits. The Monte-Carlo average keeps that frame and its bytes.) */
 struct GridFrame
 {
     double origin[NO_DIM], dxG[NO_DIM];
@@ -447,7 +441,10 @@ static inline void avg1ZeroGrids(User_options &userOptions, Field &field, size_t
 }
 
 #ifdef DTFE_GPU_ACTIVE
-// Whether this pass may use the GPU deposit: --gpu, at most one scalar component and at most 2^32 grid cells.
+// Whether this pass may use the GPU deposit: the GPU (useMetal), at most one scalar component and fewer than 2^32
+// grid cells -- of the pass's own grid (a thread's sub-domain, a partition, one domain), which the program's pick
+// does not test: such a pass takes the CPU with the warning and a counted fall-back, for a picked GPU as for an asked
+// one (as psGpuEligible).
 static inline bool avg1GpuUsable(User_options &userOptions, Field &field, size_t const gridSize)
 {
     bool tryMetal = userOptions.useMetal;   // (--exact runs on the GPU too: depositExactAverage)
@@ -455,16 +452,17 @@ static inline bool avg1GpuUsable(User_options &userOptions, Field &field, size_t
     if ( tryMetal and (field.scalar or field.scalar_gradient) and noScalarComp != 1 )
     {
         MESSAGE::Warning warning( userOptions.verboseLevel );
-        warning << "--gpu supports ONE scalar component (this build has NO_SCALARS=" << noScalarComp << "); using the CPU interpolation for this pass.\n" << MESSAGE::EndWarning;
+        warning << "the GPU interpolation supports ONE scalar component (this build has NO_SCALARS=" << noScalarComp << "); using the CPU interpolation for this pass.\n" << MESSAGE::EndWarning;
         tryMetal = false;
         ++dtfeGpuFallbacks;
     }
 #endif
-    // the single-cell fast path ships 32-bit flat grid indices to the GPU
-    if ( tryMetal and gridSize > size_t(UINT32_MAX) )
+    // the single-cell fast path ships 32-bit flat grid indices to the GPU: the cap is gpuCellCap (gpu_host.h: 2^32
+    // cells; the test hook DTFE_TEST_GPU_CELL_CAP lowers it)
+    if ( tryMetal and gridSize >= gpuCellCap() )
     {
         MESSAGE::Warning warning( userOptions.verboseLevel );
-        warning << "--gpu does not support more than 2^32 grid cells; using the CPU interpolation.\n" << MESSAGE::EndWarning;
+        warning << "the GPU interpolation does not support 2^32 or more grid cells in one pass; using the CPU interpolation.\n" << MESSAGE::EndWarning;
         tryMetal = false;
         ++dtfeGpuFallbacks;
     }
@@ -478,7 +476,6 @@ struct Avg1GpuCtx
     User_options &userOptions;
     MESSAGE::Message &message;
     size_t *nGrid;
-    Real (&dx)[NO_DIM];
     size_t gridSize;
     bool exactAvg, fDen, fVel, fGrad, fScal, fSGrad, needVel, needScal;
     int mortonShift;
@@ -710,18 +707,18 @@ static inline void avg1Normalize(Field &field, Avg1Grids const &grids, Real cons
 
 // Whether this pass's CPU sums -- the exact average's and the face pass's -- take the run-wide fixed-point words
 // (fixed_units.h): the single build (a double build's CPU sums stay double: the words resolve 2^-48 of a grid's
-// natural cell scale, coarser than a double), the units set (DTFE.cpp runUnitsSetup, for every run with a grid; a
-// library caller that fills the options without DTFE_setup keeps the Real sums), not DTFE_RUN_UNITS_LEGACY=1.
+// natural cell scale, coarser than a double) and the units set (DTFE.cpp runUnitsSetup, for every run with a grid
+// of the standard binary; a library caller that fills the options without DTFE_setup keeps the Real sums).
 static inline bool avg1RunWords(User_options const &userOptions)
 {
-    return sizeof(Real) == 4 and userOptions.runUnits.filled and not runUnitsLegacy();
+    return sizeof(Real) == 4 and userOptions.runUnits.filled;
 }
 
 // The exact average's run-wide words on the CPU (fixed_units.h: one unit per grid for the whole run, from global
 // quantities, set before any split): an FxWords per grid the CPU loop deposits, in the order of the standard grids'
 // run-wide slots RU_DENSITY .. RU_SCALAR_GRADIENT -- also the guard's drop slots (DTFE.cpp fixedShareDropsReact) --
 // each with its unit 2^K and share cap, and each thread's carry list per grid. A grid without words (on false) sums
-// in Real; so does every grid of the Monte-Carlo average, of the double build and under DTFE_RUN_UNITS_LEGACY=1.
+// in Real; so does every grid of the Monte-Carlo average and of the double build.
 // Every add is OWNED: thread th adds only to the cells of its own x planes (Avg1CpuCtx::owns: the r3d sweep skips the
 // other threads' planes, the 2D clip loop and the single-cell path test them), so no two threads write one word and
 // fxAddOwned's plain add suffices; its crossings of the int64 range go to the thread's own list, which fxCarryFinish
@@ -764,8 +761,8 @@ static void avg1WordsToGrid(FxWords const &f, std::vector< Pvector<Real,n> > &gr
 
 // The CPU loop's run-wide inputs (interpolateGrid_averaged_1 sets them once; its threads share them): the fields and
 // their grids, the grid geometry, the Monte-Carlo average's Sobol table, and the threads' x-plane slabs. The
-// helpers below bind its members by REFERENCE ('* const &'), so their loops read them from memory as the lambda's
-// captures did: copies kept in registers made the Monte-Carlo sample loop ~4% slower (register spills).
+// helpers below bind its members by REFERENCE ('* const &'), so their loops read them from memory: copies kept in
+// registers made the Monte-Carlo sample loop slower (register spills).
 struct Avg1CpuCtx
 {
     Field const      &field;
@@ -773,7 +770,7 @@ struct Avg1CpuCtx
     size_t           *nGrid;
     Real             *dx;
     Real            (*quasiRandomNumbers)[NO_DIM];
-    bool              centreMC;       // the Monte-Carlo samples are centred (see mcLegacy)
+    bool              centreMC;       // the Monte-Carlo samples are centred (interpolateGrid_averaged_1's centreMC)
     int               nT, slabW;      // threads, and the width of the x-plane slabs they deal out
     Avg1Words        *words;          // the exact average's run-wide words (null: every grid sums in Real)
     // does thread th deposit into x plane gi? (the slabs of slabW planes go to the threads in turn)
@@ -825,7 +822,7 @@ static inline void avg1SingleCell(Avg1CpuCtx const &C, McCell &mc, Real posMatri
     if ( dummy.dummyVertices ) updateDummyGridCells( index, dummy.incompleteCells );
 #endif
 }
-// The same for the exact average (plan P10.8): its gradients in double (posInvD, matrixInverseDouble's), each share
+// The same for the exact average: its gradients in double (posInvD, matrixInverseDouble's), each share
 // narrowed once, then added by thread th into the run-wide words (Avg1Words) or, without them, into the Real grid.
 static inline void avg1SingleCellExact(Avg1CpuCtx const &C, int const th, McCell &mc, double posInvD[][NO_DIM],
                                        Real const cellVolume, size_t const index, Avg1Dummy const &dummy)
@@ -904,7 +901,7 @@ static inline void avg1SingleCellExact(Avg1CpuCtx const &C, int const th, McCell
 // ----- exact volume average (--exact): analytic cell∩tet integration -----
 // The interpolant is LINEAR inside the tet, so its integral over each intersection
 // piece is the centroid value times the piece volume -- order-1 r3d moments suffice
-// (Powell & Abel 2015). The geometry is the grid frame's (GridFrame / TetFrame, plan P10.8): the tet in its vertex-0
+// (Powell & Abel 2015). The geometry is the grid frame's (GridFrame / TetFrame): the tet in its vertex-0
 // frame (vertexMatrix, exact double differences), the cells as offsets from its base cell, whose corner its base
 // position is relative to -- the same arithmetic in every sub-domain. The gradients and the values are formed in
 // double (posInvD: matrixInverseDouble) and each share is narrowed once, then added into the run-wide words
@@ -1203,7 +1200,7 @@ static inline void avg1ExactTet(Avg1CpuCtx const &C, int const th, McCell &mc, d
 
 // A cell over several grid cells, Monte-Carlo sampled: its first noRandomPoints Sobol samples, each deposited in its
 // own grid cell with an equal share of the cell's volume. A sample at p (relative to the base) is EVALUATED at
-// p + delta (the centring, see mcLegacy in interpolateGrid_averaged_1; zero without it). randomPoints is the calling
+// p + delta (the centring, see centreMC in interpolateGrid_averaged_1; zero without it). randomPoints is the calling
 // thread's sample buffer, grown to the largest count so far and reused: no heap block per cell.
 // Slabs (the threaded CPU loop, C.nT > 1): thread th deposits only the samples whose x plane is one of its slabs. It
 // finds them first, from the samples' positions alone (own: its per-sample flags, reused like randomPoints), and only
@@ -1309,14 +1306,14 @@ static inline void avg1McTet(Avg1CpuCtx const &C, McCell &mc, double vertexMatri
 }
 
 #if NO_DIM==3 && defined(VELOCITY) && !defined(MY_SCALAR)
-/* '--face-gradient' (docs/cleanup-plan.md P10.2): the cell average of the velocity gradient from the FACES. By Gauss,
+/* '--face-gradient': the cell average of the velocity gradient from the FACES. By Gauss,
    (1/V) times the integral of v n over a grid cell's six faces is the cell average of grad v; the DTFE interpolant is
    linear in every tetrahedron and continuous across them, so that is the per-tetrahedron gradient's cell average the
    deposit adds up -- reached here by a second, independent route (face_sweep.h: every grid plane's section through
    every tetrahedron, clipped to the face squares; a face piece's integral is its centroid value times its area, added
    to the cell below the plane and subtracted from the cell above). It is exact whatever the '_a' deposit was (the
-   exact average, Monte Carlo, the GPU), and the same machinery gives PS-DTFE its mean-flow gradient (P10.3). Its
-   geometry is the grid frame's (GridFrame, plan P10.8): the planes' sides are decided on absolute double positions
+   exact average, Monte Carlo, the GPU), and the same machinery gives PS-DTFE its mean-flow gradient. Its
+   geometry is the grid frame's (GridFrame): the planes' sides are decided on absolute double positions
    against planes named by their global index, and the gradient is formed in double from the hashed vertex order, so
    the result is the same in every split.
    The sums: gridSize x 9 components, the integral of grad v over each cell in velocityGradient()'s layout ([j*3+i]
@@ -1335,7 +1332,7 @@ static inline void avg1McTet(Avg1CpuCtx const &C, McCell &mc, double vertexMatri
    gradient (0) does not see -- the DTFE_FACE_CHECK comparison skips them. */
 static int const AVG1_FACE_DROP_SLOT = 5;   // the guard's slot of the face pass (0..4: the deposits' grids; DTFE.cpp)
 static void avg1FacePass( DT &dt, GridFrame const &F, Bbox &fullBox, size_t *nGrid, int const nT,
-                          int const slabW, bool const legacyOrder, std::vector<double> &acc,
+                          int const slabW, std::vector<double> &acc,
                           std::vector<unsigned char> *degenerate, FxWords *words, double const wordCap )
 {
     size_t const gridSize = nGrid[0]*nGrid[1]*nGrid[2];
@@ -1358,7 +1355,7 @@ static void avg1FacePass( DT &dt, GridFrame const &F, Bbox &fullBox, size_t *nGr
         {
             if ( cellOutsideRegion( dt, itC, fullBox ) )
                 continue;
-            McCell mc = mcVertexOrder( itC, legacyOrder );   // the deposits' vertex order (hashed; CGAL's under DTFE_MC_LEGACY=1), base = vertex 0
+            McCell mc = mcVertexOrder( itC );   // the deposits' vertex order (hashed), base = vertex 0
             double vertexMatrix[NO_DIM][NO_DIM];
             for (int v = 0; v < NO_DIM; ++v)
                 for (int d = 0; d < NO_DIM; ++d)
@@ -1404,7 +1401,7 @@ static void avg1FacePass( DT &dt, GridFrame const &F, Bbox &fullBox, size_t *nGr
                 for (int gi = a; gi < b and not mine; ++gi) mine = owns( th, gi );
                 if ( not mine ) continue;
             }
-            // the gradient in double, from the double inverse (plan P10.8: not the float rounding of the labelling)
+            // the gradient in double, from the double inverse (not the float rounding of the labelling)
             double posInv[NO_DIM][NO_DIM];
             matrixInverseDouble( vertexMatrix, posInv );
             double velGrad[NO_DIM][noVelComp];
@@ -1529,7 +1526,7 @@ void interpolateGrid_averaged_1(DT &dt,
 #elif NO_DIM==3
     Bbox fullBox( boxCoordinates[0], boxCoordinates[2], boxCoordinates[4], boxCoordinates[1], boxCoordinates[3], boxCoordinates[5] );
 #endif
-    // The exact average's grid frame (GridFrame, plan P10.8) and its prefilter box: the region widened by 1e-6 of its
+    // The exact average's grid frame (GridFrame) and its prefilter box: the region widened by 1e-6 of its
     // length on each side, so that a tetrahedron reaching into the region's first or last cell by less than the float
     // rounding of the region's corner is not dropped before the frame's integer cells decide (a tetrahedron outside
     // the sub-grid deposits nothing).
@@ -1587,7 +1584,7 @@ void interpolateGrid_averaged_1(DT &dt,
         return;
     }
 #if NO_DIM==3 && defined(VELOCITY) && !defined(MY_SCALAR)
-    // --face-gradient (the default since 2026-11-09): the face pass at the end supplies the velocity gradient and
+    // --face-gradient (the default): the face pass at the end supplies the velocity gradient and
     // overwrites the deposit's, so the deposits -- the CPU loops and the GPU kernels, which read this 'field' --
     // skip their per-tetrahedron gradient (9 of the 13 components of a velocity run; the gradient's share of
     // the deposit). DTFE_FACE_CHECK=1 keeps it: the check compares the two. The grids were zeroed above with
@@ -1602,7 +1599,7 @@ void interpolateGrid_averaged_1(DT &dt,
     for (size_t i=0; i<NO_DIM; ++i)
         dx[i] = boxLength[i] / nGrid[i];
     Real gridCellVolume = (NO_DIM==2) ? (dx[0]*dx[1]) : (dx[0]*dx[1]*dx[2]);
-    if ( exactAvg )   // the grid frame's cell volume: the same in every sub-domain (plan P10.8)
+    if ( exactAvg )   // the grid frame's cell volume: the same in every sub-domain
     {
         double v = 1.;
         for (int d=0; d<NO_DIM; ++d) v *= frame.dxG[d];
@@ -1615,7 +1612,7 @@ void interpolateGrid_averaged_1(DT &dt,
 
 
     // The Monte-Carlo average: every tetrahedron maps the first n entries of ONE shared Sobol table into itself.
-    // Mapped from CGAL's vertex(0) that is a BIAS (0.17-0.29% of an '_a' grid's mass; mcVertexOrder's comment says
+    // Mapped from CGAL's vertex(0) that is a BIAS (a loss of an '_a' grid's mass; mcVertexOrder's comment says
     // why), so the CPU loop and the GPU extraction both apply two measures:
     //   - vertex order: mcVertexOrder() sorts the vertices by a hash of the cell's vertex SET, so the slots carry no
     //     density correlation and are the same in every partition / thread / padding split (the grids agree to float
@@ -1626,18 +1623,10 @@ void interpolateGrid_averaged_1(DT &dt,
     //     sampled. The shifted weights lambda_ij + c_j stay >= 0 for n <= 34; beyond, the most negative is -0.013
     //     (n = 88), which gives a negative sample only at a 70x density contrast across one tetrahedron.
     // tests/dtfe_mc_average_check.sh checks the mass, the momentum and the split invariance. --exact takes
-    // the same vertex order (plan P10.8): its per-tetrahedron gradient is formed from vertex 0, in float on the GPU,
-    // and CGAL's order -- which differs between the triangulations of two splits -- moved the exact grids by 2.7e-5
-    // of their rms between a 3^3 and a 6^3 plan (the P10 status). DTFE_MC_LEGACY=1 selects CGAL's order for both
-    // (and the uncentred Monte-Carlo realization: A/B, and to reproduce grids made with it).
-    bool const mcLegacy = Env::flag( "DTFE_MC_LEGACY" );
-    bool const legacyOrder = mcLegacy;
-    bool const centreMC = not exactAvg and not mcLegacy;
-    if ( mcLegacy and not exactAvg )
-    {
-        MESSAGE::Warning warning( userOptions.verboseLevel );
-        warning << "DTFE_MC_LEGACY=1: the Monte-Carlo '_a' average uses the uncentred CGAL-order realization (vertex(0) as the base), which loses ~0.2-0.3% of the mass and depends on the partition/thread split.\n" << MESSAGE::EndWarning;
-    }
+    // the same vertex order: its per-tetrahedron gradient is formed from vertex 0, in float on the GPU, and CGAL's
+    // order differs between the triangulations of two splits, so it would move the exact grids from split to split.
+    // Only the Monte-Carlo average is centred (centreMC).
+    bool const centreMC = not exactAvg;
     // samples in a multi-cell tetrahedron: proportional to its volume, at least minNN and at most maxNN
     auto sampleCount = [&](Real const cellVolume) -> size_t {
         size_t const tempInt = size_t(NN*cellVolume/gridCellVolume) + 1;
@@ -1691,8 +1680,7 @@ void interpolateGrid_averaged_1(DT &dt,
         size_t const nKept = dt.number_of_finite_cells();
         // the single-cell share's volume (the exact kernel reads a tetrahedron's volume only there):
         // canonicalTetVolume, the same whatever CGAL's labelling of the cell, where the CPU's exact sums take the
-        // run-wide words too (avg1RunWords: the single build, not DTFE_RUN_UNITS_LEGACY=1); CGAL's otherwise, and for
-        // the sample count
+        // run-wide words too (avg1RunWords: the single build); CGAL's otherwise, and for the sample count
         bool const canonicalVolumes = exactAvg and avg1RunWords( userOptions );
 
         std::vector<float>    tetVerts, tetDens, tetVels, tetScal, tetVols;
@@ -1729,16 +1717,16 @@ void interpolateGrid_averaged_1(DT &dt,
             if ( cellOutsideRegion(dt, itC, depositBox) )
                 continue;
 
-            // the CPU loop's vertex order (mcVertexOrder: the hashed order; DTFE_MC_LEGACY=1 keeps CGAL's); the
-            // kernels take vertex 0 as the base, in the order given
-            McCell mc = mcVertexOrder( itC, legacyOrder );
+            // the CPU loop's vertex order (mcVertexOrder: the hashed order); the kernels take vertex 0 as the base,
+            // in the order given
+            McCell mc = mcVertexOrder( itC );
             double vertexMatrix[NO_DIM][NO_DIM];
             int baseGridCell[NO_DIM];
             Real basePosition[NO_DIM];
             TetFrame tf{};
             bool single;
             if ( exactAvg )
-            {   // the grid frame (plan P10.8): the base cell's corner is this tetrahedron's origin
+            {   // the grid frame: the base cell's corner is this tetrahedron's origin
                 tf = tetFrame( mc, frame, vertexMatrix );
                 single = tf.single;
                 for (int d=0; d<NO_DIM; ++d)
@@ -1773,7 +1761,7 @@ void interpolateGrid_averaged_1(DT &dt,
                 return c; };
 
             // vertex positions: the exact average's relative to its base cell's corner (tetFrame, in double, so the
-            // narrowed floats are the same in every sub-domain, plan P10.8), with that cell beside them; the Monte-Carlo
+            // narrowed floats are the same in every sub-domain), with that cell beside them; the Monte-Carlo
             // average's relative to the region's lower corner (subtracted in double, so the narrowed floats match the
             // CPU's Real basePosition exactly), cell 0
             for (int v=0; v<NO_DIM+1; ++v)
@@ -1858,7 +1846,7 @@ void interpolateGrid_averaged_1(DT &dt,
 #endif
         }
 
-        Avg1GpuCtx gpu{ userOptions, message, nGrid, dx, gridSize, exactAvg, fDen, fVel, fGrad, fScal, fSGrad, needVel,
+        Avg1GpuCtx gpu{ userOptions, message, nGrid, gridSize, exactAvg, fDen, fVel, fGrad, fScal, fSGrad, needVel,
                         needScal, mortonShift, tetVerts, tetDens, tetVels, tetScal, tetVols, tetCnts, tetFlats, tetKeys,
                         tetCells, { exactAvg ? frame.dxG[0] : double(dx[0]), exactAvg ? frame.dxG[1] : double(dx[1]),
                                     exactAvg ? frame.dxG[2] : double(dx[2]) } };
@@ -1935,8 +1923,7 @@ void interpolateGrid_averaged_1(DT &dt,
             MESSAGE::Error error;
             error << "The exact average's run-wide fixed-point sums take fewer than 2^32 Delaunay cells per sub-domain "
                   << "(src/fixed_units.h, the share cap), and this sub-domain's tessellation has " << nTess
-                  << ". Split the run into more partitions ('--partition'), or set DTFE_RUN_UNITS_LEGACY=1 for the "
-                  << "float sums." << MESSAGE::EndError;
+                  << ". Split the run into more partitions ('--partition')." << MESSAGE::EndError;
         }
     }
 #endif
@@ -1998,11 +1985,11 @@ void interpolateGrid_averaged_1(DT &dt,
 #endif
 
 
-        McCell mc = mcVertexOrder( itC, legacyOrder );   // vertex order (base = mc.v[0]): the hashed one; CGAL's under DTFE_MC_LEGACY=1
+        McCell mc = mcVertexOrder( itC );   // vertex order (base = mc.v[0]): the hashed one
         double vertexMatrix[NO_DIM][NO_DIM]; // vertex differences of the Delaunay cell
         int baseGridCell[NO_DIM];  // grid cell containing the base point
         Real basePosition[NO_DIM]; // base point position relative to the box's lower-left corner (the Monte-Carlo average)
-        TetFrame tf{};             // the exact average's frame (plan P10.8): the base cell and the position in it
+        TetFrame tf{};             // the exact average's frame: the base cell and the position in it
         bool single;
         if ( exactAvg )
         {
@@ -2062,7 +2049,7 @@ void interpolateGrid_averaged_1(DT &dt,
 
         Real cellVolume = volume( dt, itC );
 #ifndef MY_SCALAR
-        // --exact: the inverse and the gradients in double (plan P10.8) and the grid frame's windows. A cell
+        // --exact: the inverse and the gradients in double and the grid frame's windows. A cell
         // inside one grid cell adds its centroid value times its volume (exact for the linear interpolant); the others
         // the analytic cell∩tet (3D r3d) / cell∩triangle (2D ps_clip2d) integration.
         if ( exactAvg )
@@ -2097,7 +2084,7 @@ void interpolateGrid_averaged_1(DT &dt,
 
         // cell spans multiple grid cells -> MC-sample inside it
         size_t const noRandomPoints = sampleCount( cellVolume );
-        // centring (see mcLegacy above): a sample at p (relative to the base) is DEPOSITED in p's grid cell
+        // centring (see centreMC above): a sample at p (relative to the base) is DEPOSITED in p's grid cell
         // but EVALUATED at p + delta, delta = sum_j c_j (v_j - v_0) = centroid - mean of the n samples, so
         // the n values of a linear field sum to n f(centroid)
         Real delta[NO_DIM] = {};
@@ -2176,14 +2163,14 @@ void interpolateGrid_averaged_1(DT &dt,
         std::vector<double> acc;
         std::vector<unsigned char> degen;
         // the run-wide words at the face unit (fixed_units.h RU_FACE), whatever the deposit -- exact, Monte-Carlo or
-        // GPU -- so every route gives the same face gradient (avg1RunWords: the single build, not
-        // DTFE_RUN_UNITS_LEGACY=1); otherwise the double sums
+        // GPU -- so every route gives the same face gradient (avg1RunWords: the single build); otherwise the double
+        // sums
         RunUnits const &ru = userOptions.runUnits;
         bool const faceOnWords = avg1RunWords( userOptions ) and ru.has( RU_FACE );
         FxWords faceWords;
         faceWords.K = ru.K[RU_FACE];
         Timer tFace; tFace.start();
-        avg1FacePass( dt, frame, fullBoxExact, nGrid, nTf, slabWf, legacyOrder, acc, check ? &degen : nullptr,
+        avg1FacePass( dt, frame, fullBoxExact, nGrid, nTf, slabWf, acc, check ? &degen : nullptr,
                       faceOnWords ? &faceWords : nullptr, ru.cap( RU_FACE ) );
         printComputationTime( &tFace, &userOptions, "face gradient pass (--face-gradient)" );   // (phase_totals.h)
         // component i's integral in double: from the words (their exact integer, rounded once), or the double sum

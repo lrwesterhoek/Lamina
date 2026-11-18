@@ -6,10 +6,8 @@
 # the exact deposit's multiplicity, the released tets' multiplicity: float sums would depend on the order the GPU
 # atomics land in (two runs differ in the last bits of ~30-50% of the cells) and, on the CPU, on the thread count
 # (thread-private copies summed in thread order). Each is a set of integer words in a power-of-two unit, converted to
-# float once: by default int64 words in a unit from a bound of everything the pass deposits (ps_deposit_params.h
-# PSFxGrid), or under DTFE_PS_RUN_UNITS=1 the run-wide unit of the run log's 'fixed-point units (run-wide):' line
-# (src/fixed_units.h: 128-bit words on the GPU, an int64 plus an exact carry per component on the host). Asserted on
-# 32^3 crossed waves (folds everywhere: deferred tets, multi-stream cells, large gradients):
+# float once: int64 words in a unit from a bound of everything the pass deposits (ps_deposit_params.h PSFxGrid).
+# Asserted on 32^3 crossed waves (folds everywhere: deferred tets, multi-stream cells, large gradients):
 #   F1  two --gpu runs with different opening chunk sizes (PS_GPU_CHUNK 2000 and 25000: other
 #       atomics share a command buffer, other orders) write byte-identical grids -- every '.a_*' output -- for the
 #       sampled deposit, '--exact --per-tet-gradient' (its items' per-tet weight totals are exact too; the route flag
@@ -18,9 +16,6 @@
 #   F2  the CPU deposit on 1 thread, 6 threads in the copy mode (DTFE_DEPOSIT_SLABS=0: one set of words, atomic
 #       adds) and 6 in the slab mode writes byte-identical grids, for the same three variants. Single build only:
 #       the double build keeps its double CPU sums (agreeing to ~1e-15, not bit for bit), as for the mass.
-#   F3  the float sums (DTFE_GPU_FLOAT_MOMENTS=1, the A/B switch on either backend) agree with the exact ones to
-#       float rounding: peak-relative
-#       difference below 1e-5 per grid, GPU and CPU (a sum of the same float shares, in another order)
 #   F4  --partition 2 2 2 --max-concurrent 1 (partitions merge in index order): two GPU runs byte-identical, and
 #       1 vs 6 CPU threads byte-identical (single build) -- the whole run, not only one partition's sub-grid
 #   F5  the non-finite guard (ps_deposit_params.h psFixedShareOk): DTFE_TEST_NAN_SHARE=50 gives about one
@@ -32,7 +27,6 @@
 #       for word: DTFE_DEBUG_FX_BOUNDS=1 prints them in hex, once per walk. The exact deposit with --face-gradient
 #       (the face bounds non-zero), on the whole box and in a --grid-window (the window filter and the mass bound);
 #       the 6-thread walk runs on a team of more than one thread; the grids of 1 and 6 threads byte-identical.
-#       Not under DTFE_PS_RUN_UNITS=1 (a SKIP line): no pass walks its bounds there.
 #       Single build only, as F2.
 # 2D (PS-DTFE-2d, when built): F2's thread independence for the sampled deposit.
 # ~1-2 min (M-series Mac, 10 cores).
@@ -44,7 +38,7 @@ cd "$ROOT" || exit 1
 source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double pair
 precision_require "${PS_BIN}"
 [ -x "${PS_BIN}" ] || { echo "FAIL: ${PS_BIN} is not built"; exit 1; }
-OBJ=o_ps; precision_double && OBJ=o_ps_d
+OBJ="$PS_OBJ"
 GPU=0                                                     # any one GPU backend stamp will do (gpu_mass_check.sh)
 if [ -d "$OBJ" ] && [ ! -f "$OBJ/.gpu_mode_off" ]; then
     [ -n "$(gpu_backend_of "$OBJ")" ] && GPU=1
@@ -68,7 +62,7 @@ echo "============================================================"
 echo " PS-DTFE exact moment grids (${PS_BIN}; GPU: $([ $GPU = 1 ] && echo yes || echo 'no GPU build: F1 SKIP'))"
 echo "============================================================"
 t0=$SECONDS
-unset DTFE_GPU_FLOAT_MOMENTS PS_GPU_FLOAT_MOMENTS PS_GPU_CHUNK   # (PS_GPU_FLOAT_MOMENTS: the deprecated name, still read)
+unset PS_GPU_CHUNK
 for v in $VARIANTS; do
     # shellcheck disable=SC2046
     O=($(opts "$v"))
@@ -76,24 +70,22 @@ for v in $VARIANTS; do
     if [ "$GPU" = 1 ]; then
         GPUOK=1 run "$TMP/g1_$v" env PS_GPU_CHUNK=2000 "${PS_BIN}" "$SNAP" "$TMP/g1_$v" "${C[@]}" ${O[@]+"${O[@]}"} --gpu
         GPUOK=1 run "$TMP/g2_$v" env PS_GPU_CHUNK=25000 "${PS_BIN}" "$SNAP" "$TMP/g2_$v" "${C[@]}" ${O[@]+"${O[@]}"} --gpu
-        GPUOK=1 run "$TMP/gf_$v" env DTFE_GPU_FLOAT_MOMENTS=1 "${PS_BIN}" "$SNAP" "$TMP/gf_$v" "${C[@]}" ${O[@]+"${O[@]}"} --gpu
     fi
     run "$TMP/c1_$v" env DTFE_DEPOSIT_THREADS=1 "${PS_BIN}" "$SNAP" "$TMP/c1_$v" "${C[@]}" ${O[@]+"${O[@]}"}
-    run "$TMP/cf_$v" env DTFE_DEPOSIT_THREADS=1 DTFE_GPU_FLOAT_MOMENTS=1 "${PS_BIN}" "$SNAP" "$TMP/cf_$v" "${C[@]}" ${O[@]+"${O[@]}"}
     if ! precision_double; then
         run "$TMP/c6_$v" env DTFE_DEPOSIT_THREADS=6 DTFE_DEPOSIT_SLABS=0 "${PS_BIN}" "$SNAP" "$TMP/c6_$v" "${C[@]}" ${O[@]+"${O[@]}"}
         run "$TMP/s6_$v" env DTFE_DEPOSIT_THREADS=6 DTFE_DEPOSIT_SLABS=1 "${PS_BIN}" "$SNAP" "$TMP/s6_$v" "${C[@]}" ${O[@]+"${O[@]}"}
     fi
 done
 P=(--partition 2 2 2 --max-concurrent 1)
-echo ">> F4: --partition 2 2 2 --max-concurrent 1 (with --ps-volume-weighted, as the drivers pass it)"
+echo ">> F4: --partition 2 2 2 --max-concurrent 1"
 if [ "$GPU" = 1 ]; then
-    GPUOK=1 run "$TMP/pg1" env PS_GPU_CHUNK=2000 "${PS_BIN}" "$SNAP" "$TMP/pg1" "${C[@]}" "${P[@]}" --ps-volume-weighted --gpu
-    GPUOK=1 run "$TMP/pg2" "${PS_BIN}" "$SNAP" "$TMP/pg2" "${C[@]}" "${P[@]}" --ps-volume-weighted --gpu
+    GPUOK=1 run "$TMP/pg1" env PS_GPU_CHUNK=2000 "${PS_BIN}" "$SNAP" "$TMP/pg1" "${C[@]}" "${P[@]}" --gpu
+    GPUOK=1 run "$TMP/pg2" "${PS_BIN}" "$SNAP" "$TMP/pg2" "${C[@]}" "${P[@]}" --gpu
 fi
 if ! precision_double; then
-    run "$TMP/pc1" env DTFE_DEPOSIT_THREADS=1 "${PS_BIN}" "$SNAP" "$TMP/pc1" "${C[@]}" "${P[@]}" --ps-volume-weighted
-    run "$TMP/pc6" env DTFE_DEPOSIT_THREADS=6 DTFE_DEPOSIT_SLABS=0 "${PS_BIN}" "$SNAP" "$TMP/pc6" "${C[@]}" "${P[@]}" --ps-volume-weighted
+    run "$TMP/pc1" env DTFE_DEPOSIT_THREADS=1 "${PS_BIN}" "$SNAP" "$TMP/pc1" "${C[@]}" "${P[@]}"
+    run "$TMP/pc6" env DTFE_DEPOSIT_THREADS=6 DTFE_DEPOSIT_SLABS=0 "${PS_BIN}" "$SNAP" "$TMP/pc6" "${C[@]}" "${P[@]}"
 fi
 N5=0
 if ! precision_double; then
@@ -105,16 +97,10 @@ if ! precision_double; then
     fi
 fi
 F6=0
-# (under PS-DTFE's run-wide units, DTFE_PS_RUN_UNITS=1, every grid's unit comes from the run and no pass walks its
-# bounds: there is no walk to compare, and this suite's pass in the default units checks F6)
-RUN_WIDE=0
-case "$(printf '%s' "${DTFE_PS_RUN_UNITS:-0}" | tr '[:upper:]' '[:lower:]')" in ''|0|false|no|off) ;; *) RUN_WIDE=1 ;; esac
-if ! precision_double && [ "$RUN_WIDE" = 1 ]; then
-    echo "   SKIP  F6 (DTFE_PS_RUN_UNITS is set: under the run-wide units no pass walks its bounds)"
-elif ! precision_double; then
+if ! precision_double; then
     F6=1
     echo ">> F6: the bound walk's sums (DTFE_DEBUG_FX_BOUNDS=1) at 1, 3 and 6 threads, exact with the face sums"
-    FW=(--exact --ps-volume-weighted --face-gradient)
+    FW=(--exact --face-gradient)
     WIN=(--grid-window 0.01 99.99 0.01 99.99 50.1 53.0)
     for t in 1 3 6; do
         run "$TMP/w$t" env DTFE_DEPOSIT_THREADS=$t DTFE_DEPOSIT_SLABS=0 DTFE_DEBUG_FX_BOUNDS=1 \
@@ -146,8 +132,10 @@ tmp = Path(sys.argv[1]); fails = 0
 REAL = np.dtype(os.environ.get("DTFE_TEST_REAL", "float32"))   # tests/precision.sh
 double = os.environ.get("DTFE_TEST_PRECISION") == "double"
 gpu = os.environ.get("GPU") == "1"
+nchecks = 0
 def check(tag, ok, msg):
-    global fails
+    global fails, nchecks
+    nchecks += 1
     fails += not ok
     print(f"  {'PASS' if ok else 'FAIL'} {tag} {msg}")
 def grids(name):
@@ -160,23 +148,12 @@ def same(a, b, what, tag):
         return
     diff = [e for e in ea if (tmp / f"{a}.{e}").read_bytes() != (tmp / f"{b}.{e}").read_bytes()]
     check(tag, not diff, f"{what}: {len(ea)} grids byte-identical" + (f" -- DIFFER: {diff}" if diff else ""))
-def close(a, b, what, tag, tol=1e-5):
-    worst, wname = 0., ""
-    for e in grids(a):
-        if not e.startswith("a_") or e in ("a_streams", "a_hidden_streams"): continue
-        x = np.fromfile(tmp / f"{a}.{e}", dtype=REAL).astype(np.float64)
-        y = np.fromfile(tmp / f"{b}.{e}", dtype=REAL).astype(np.float64)
-        r = float(np.abs(x - y).max() / max(np.abs(x).max(), 1e-300))
-        if r > worst: worst, wname = r, e
-    check(tag, worst < tol, f"{what}: worst grid {wname or '-'} peak-rel {worst:.1e} (< {tol:g})")
 for v in os.environ["VARIANTS"].split():
     if gpu:
         same(f"g1_{v}", f"g2_{v}", f"{v}: two GPU runs (chunks 2000 / 25000)", "F1")
-        close(f"g1_{v}", f"gf_{v}", f"{v}: GPU exact vs the float sums (DTFE_GPU_FLOAT_MOMENTS=1)", "F3")
     if not double:
         same(f"c1_{v}", f"c6_{v}", f"{v}: CPU 1 thread vs 6 (copy mode)", "F2")
         same(f"c1_{v}", f"s6_{v}", f"{v}: CPU 1 thread vs 6 (slab mode)", "F2")
-    close(f"c1_{v}", f"cf_{v}", f"{v}: CPU exact vs the float sums (DTFE_GPU_FLOAT_MOMENTS=1)", "F3")
 if gpu:
     same("pg1", "pg2", "--partition 2 2 2: two GPU runs", "F4")
 if not double:
@@ -214,8 +191,11 @@ if os.environ.get("F6") == "1":
         face = [float.fromhex(v) for v in first[0][1].split()[-3:]]
         check("F6", all(v > 0. for v in face), f"{what}: the face bounds are summed ({first[0][1].split()[-3:]})")
         same(runs[0], runs[-1], f"{what}: exact with the face sums, 1 thread vs {runs[-1].lstrip('w')}", "F6")
-print("RESULT:", "PASS  (every grid of a pass is an exact sum: run- and thread-count independent)"
-      if not fails else f"FAIL ({fails} check(s))")
+if not nchecks:   # the double build without a GPU: F1 and F4 need a GPU, the other checks the single build
+    print("RESULT: PASS  (the runs completed; this build has no check of its own: the double build without a GPU)")
+else:
+    print("RESULT:", "PASS  (every grid of a pass is an exact sum: run- and thread-count independent)"
+          if not fails else f"FAIL ({fails} check(s))")
 sys.exit(1 if fails else 0)
 PYEOF
 rc=$?

@@ -11,8 +11,8 @@
 # sampled (nSub 1 and 3), exact (its gradient on the route the binary's default gives it), vertex mass,
 # caustics, halo release, a non-periodic box, a --grid-window, --partition 2 2 2 (periodic sub-grids that
 # wrap), and a few slabs that each hold many tetrahedra (DTFE_DEPOSIT_NSLABS=3) next to many thin ones --
-# every variant with PS-DTFE's volume-weighted velocity moments and mass-weighted dispersion (every run's,
-# with or without '--ps-volume-weighted'). The 2D build too.
+# every variant with PS-DTFE's volume-weighted velocity moments and mass-weighted dispersion. The 2D build
+# too.
 #
 # Usage: tests/ps_slab_deposit_check.sh [--no-build]
 
@@ -26,7 +26,7 @@ source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double
 N="${N:-20}"; GRID="${GRID:-40}"; BOX="${BOX:-100.0}"
 BIN="${PS_BIN}"
 precision_require "${BIN}"
-TMP="${DTFE_TEST_TMP:-${TMPDIR:-/tmp}/dtfe-tests}"; mkdir -p "${TMP}"
+TMP="${DTFE_TEST_TMP}"
 SNAP="${TMP}/psl_crossed.hdf5"
 SNAP_NP="${TMP}/psl_clump.hdf5"
 SNAP_2D="${TMP}/psl_2d.hdf5"
@@ -46,7 +46,7 @@ echo ">> generating test snapshots ..."
     --margin-frac 0.2 --jitter-frac 0.02 >/dev/null
 
 fails=0
-check() { if [ "$1" = "1" ]; then echo "   PASS  $2"; else echo "   FAIL  $2"; fails=$((fails+1)); fi; }
+# check_yes <1 = pass> <text> (it counts a failure in fails): tests/lib.sh
 
 # case <name> <binary> <snapshot> <extra args...>: serial vs forced slab mode, every output file cmp'ed
 case_() {
@@ -59,10 +59,10 @@ case_() {
     env DTFE_DEPOSIT_SLABS=1 ${NSLABS:+DTFE_DEPOSIT_NSLABS=${NSLABS}} "${bin}" "${snap}" "${b}" "${common[@]}" > "${b}.log" 2>&1; local rb=$?
     set -e
     if [ "$ra" -ne 0 ] || [ "$rb" -ne 0 ]; then
-        check 0 "${name}: both runs exit 0 (serial $ra, slab $rb; ${a}.log / ${b}.log)"; return
+        check_yes 0 "${name}: both runs exit 0 (serial $ra, slab $rb; ${a}.log / ${b}.log)"; return
     fi
     if ! grep -q "SLAB mode" "${b}.log"; then
-        check 0 "${name}: the forced run used slab mode (no 'SLAB mode' line in ${b}.log)"; return
+        check_yes 0 "${name}: the forced run used slab mode (no 'SLAB mode' line in ${b}.log)"; return
     fi
     local files=0 differ=""
     for f in "${a}".*; do
@@ -72,7 +72,7 @@ case_() {
         cmp -s "${f}" "${b}${ext}" || differ="${differ} ${ext}"
     done
     local slabs; slabs="$(grep -o 'over [0-9]* slabs' "${b}.log" | head -1)"
-    check "$([ "${files}" -gt 0 ] && [ -z "${differ}" ] && echo 1 || echo 0)" \
+    check_yes "$([ "${files}" -gt 0 ] && [ -z "${differ}" ] && echo 1 || echo 0)" \
           "${name}: ${files} output files byte-identical to the single-threaded deposit (${slabs})${differ:+ -- DIFFER:${differ}}"
 }
 

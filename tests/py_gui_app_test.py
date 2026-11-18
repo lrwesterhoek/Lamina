@@ -58,6 +58,9 @@ import runspec as rs  # noqa: E402
 SIM = "GUITEST-1-Dark"
 DL_SIM = "GUIDL-1-Dark"
 SECRET = "gui-test-secret-key-0123"
+# the grey 'Runs on' line of a job on Automatic before a memory check of its settings, and on a build without the GPU
+RUNS_ON_PICKS = "Runs on: the device the program picks ('Check memory' names it)"
+RUNS_ON_NO_GPU = "Runs on: the CPU (this build has no GPU)"
 
 # Stands in for wget, as scripts/download_snapshots.sh calls it (never touches the network):
 #  - '-O - <listing>?format=json' prints the product's JSON listing, one link per fixture chunk of the
@@ -167,7 +170,7 @@ def main():
                         "--box", "100.0"], check=True, capture_output=True)
         shutil.copy(sim / "snapdir_099" / "combined_099.hdf5", sim / "snapdir_050" / "combined_050.hdf5")
 
-        # (Exact, the default: its device and split the code's, as for any job: runspec.quality_mode)
+        # (Exact, the default: its device and split the program's, as for any job on Automatic)
         spec = rs.RunSpec(data_root=str(data), sim=SIM, snapshots=[50, 99], grid=32, output_prefix="ps_gui")
         pipe = rs.PipelineSpec(sims=[SIM], nu=64, grid=32, figures_root=str(tmp / "figs"))
         w = A.MainWindow(spec, remember=False, pipeline=pipe, plots=rs.PlotSpec(sets=[]))
@@ -228,8 +231,9 @@ def _window(qa, w, spec):
 def _form_widths(qa, w):
     """Every tab's form fits its pane (the forms scroll only vertically: a wider one was cut off at the right edge,
     the preset row's Delete button with it): folded, and with every group open on a build without the GPU (whose note
-    is in the grey 'Runs on' line) and with the longest 'Runs on' line (PS-DTFE's Exact in performance), the Custom
-    tab in 2D too. And the Pipeline tab's quality, grid and machine use have a group of their own."""
+    is in the grey 'Runs on' line) and with the longest 'Runs on' line (a Custom job whose extra options give a GPU
+    share, after a memory check that reported the GPU), the Custom tab in 2D too. And the Pipeline tab's quality,
+    grid and machine use have a group of their own."""
     print("form widths:")
     from PySide6.QtCore import QPoint, QRect
     from PySide6.QtWidgets import QScrollArea
@@ -255,7 +259,7 @@ def _form_widths(qa, w):
     check("every tab's form fits its pane at 1100 px (no right edge cut off; the Machine use selector sized like the "
           "precision menu)", not wide and sized, "; ".join(wide))
     groups = w.findChildren(Collapsible)
-    was_open, built = [g.is_open() for g in groups], rs.gpu_built
+    was_open, built, key = [g.is_open() for g in groups], rs.gpu_built, None
     rs.gpu_built = lambda *a, **k: False
     try:
         for g in groups:
@@ -271,21 +275,32 @@ def _form_widths(qa, w):
         wide += too_wide([A.OWN], "open, 2D: ")
         w.o_dim.setCurrentIndex(w.o_dim.findData(3))
         rs.gpu_built = built
-        w.run_mode_combo.setCurrentIndex(w.run_mode_combo.findData("performance"))
+        # the longest line: a Custom job whose extra options give a GPU share, after a memory check of these settings
+        # that reported the GPU (in the window's memory only, its record with the build, as app_check stores it)
+        w.o_extra.setText("--gpu-share mixed")
+        w.o_extra.editingFinished.emit()
         qa.processEvents()
-        longest = w.runs_on_note.text()
-        wide += too_wide([A.GRIDS], "open, performance: ")
-        w.run_mode_combo.setCurrentIndex(w.run_mode_combo.findData("balanced"))
+        key = w.custom.memory_key()
+        w.mem_results[key] = {("x", 0, None): {"predicted_gb": 1.0, "device": "gpu",
+                                               "gpu_built": rs.job_gpu_built(w.custom)}}
+        w.refresh()
+        longest = w.o_runs_on.text()
+        wide += too_wide([A.OWN], "open, the longest line: ")
+        w.mem_results.pop(key, None)
     finally:
         rs.gpu_built = built
+        w.mem_results.pop(key, None)
+        w.o_extra.setText("")
+        w.o_extra.editingFinished.emit()
         for g, on in zip(groups, was_open):
             g.set_open(on)
         w.refresh()
         qa.processEvents()
     check("... and with every group open on a build without the GPU (the grey 'Runs on' lines say so), with the "
-          "longest 'Runs on' line (PS-DTFE's Exact in performance, when built), the Custom tab in 2D too",
-          groups and noted and flat and not wide and w.custom.dim == 3 and w.spec.run_mode == "balanced"
-          and ("the CPU and the GPU together" in longest) == rs.gpu_built("ps"),
+          "longest 'Runs on' line (a Custom job whose extra options give a GPU share, after a memory check that "
+          "reported the GPU, on a GPU build), the Custom tab in 2D too",
+          groups and noted and flat and not wide and w.custom.dim == 3 and w.custom.extra_args == ""
+          and ("(as the memory check reported, with their GPU share)" in longest) == rs.gpu_built("ps"),
           "; ".join(wide) or f"{len(groups)} groups, notes {noted}, 2D {flat}, {longest!r}")
     w.tabs.setCurrentIndex(A.TAB_NAMES.index("pipeline"))
     qa.processEvents()
@@ -416,9 +431,9 @@ def _pipeline_options(qa, w, tmp, sim, seen, tick):
     """The Pipeline tab's options in its environment, render step, estimate and memory check; a real run."""
     print("pipeline options:")
     # the caustic classes are on by default (run_ps_dtfe.sh's default, the production runs'), so the
-    # cusps box is enabled (unticked) from the start; Exact (the default), on the GPU when the pair has one
+    # cusps box is enabled (unticked) from the start; Exact (the default), the device the program's
     check("the run options show the scripts' defaults; cusps wait for caustics, the slab and projection for planes",
-          w.p_quality.value() == "exact" and w.pipe.quality == "exact" and w.pipe.mode().gpu == rs.gpu_built("ps")
+          w.p_quality.value() == "exact" and w.pipe.quality == "exact" and w.pipe.mode().gpu is None
           and w.p_ca.isChecked()
           and w.p_cu.isEnabled() and not w.p_cu.isChecked() and w.p_planes.value() == 1
           and not w.p_thick.isEnabled() and w.p_super.value() == 1 and not w.p_rproject.isEnabled()
@@ -433,9 +448,9 @@ def _pipeline_options(qa, w, tmp, sim, seen, tick):
     w.p_planes.setValue(4)
     qa.processEvents()
     texts = lambda: [w.checks.item(i).text() for i in range(w.checks.count())]  # noqa: E731
-    gpu = w.pipe.mode().gpu                              # (the quality's device: the GPU when built)
-    check("a handful of planes warns of ghosting; cusps warn only on a GPU run (they are a CPU-deposit pass)",
-          any("ghosts" in t for t in texts()) and any("cusps" in t for t in texts()) == gpu, str(texts()))
+    check("a handful of planes warns of ghosting; cusps do not warn on Automatic (only a Device GPU set in Advanced "
+          "does: they are a CPU-deposit pass)",
+          any("ghosts" in t for t in texts()) and not any("cusps" in t for t in texts()), str(texts()))
     check("the Checks list says what Fast leaves out: the stream-average derivatives (the production fields hold "
           "divergence and shear), the caustic classes per sample point",
           "ℹ  Fast: PS-DTFE's velocity derivatives are the stream average" in texts()
@@ -462,14 +477,16 @@ def _pipeline_options(qa, w, tmp, sim, seen, tick):
     check("the options reach the pipeline's environment, the render step and the estimate",
           w.p_cu.isEnabled() and w.p_thick.isEnabled() and w.p_rproject.isEnabled()
           and [env[k] for k in ("PS_CAUSTICS", "PS_CAUSTIC_CUSPS", "DTFE_GPU", "SUBSAMPLES", "PLANES", "THICKNESS",
-                                "SUPERSAMPLE")] == ["1", "1", "1" if gpu else "0", "1", "16", "3", "2"]
+                                "SUPERSAMPLE")] == ["1", "1", "auto", "1", "16", "3", "2"]
           and _maps(st[1].argv) == ["density", "streams"]
           and st[1].argv[st[1].argv.index("--project") + 1] == "slab" and "--fixed-range" in st[1].argv
           and "× 16 planes" in w.estimate.text() and f"{16 * 64 * 64 * 4 / 1e6:.1f}M points" in w.estimate.text(),
           f"{env} | {st[1].argv} | {w.estimate.text()}")
     mstep = w.pipe.check_step(SIM, [99], 64)
-    check("the memory check of these settings carries them, sized by the planned points, -m on the quality's device",
-          ("-m" in mstep.argv) == gpu and mstep.env["PS_CAUSTICS"] == "1" and mstep.env["SUBSAMPLES"] == "1"
+    check("the memory check of these settings carries them, sized by the planned points, no -m (the program picks the "
+          "device)",
+          "-m" not in mstep.argv and mstep.env["DTFE_GPU"] == "auto" and mstep.env["PS_CAUSTICS"] == "1"
+          and mstep.env["SUBSAMPLES"] == "1"
           and mstep.env.get("DTFE_AUTO_PTS_N") == str(16 * 64 * 64 * 4), f"{mstep.argv} {mstep.env}")
     check("at 16 planes the ghosting warning is gone", not any("ghosts" in t for t in texts()), str(texts()))
     w.p_ca.setChecked(False)
@@ -483,12 +500,12 @@ def _pipeline_options(qa, w, tmp, sim, seen, tick):
     w.p_quality.button("exact").setChecked(True)
     qa.processEvents()
     penv = w.pipe.command()[1]
-    check("Exact: the exact deposit (no sample count), on the GPU when built (its device in every machine use, as on "
-          "the Grids tab); the grey lines say what it is and where it runs",
-          w.pipe.quality == "exact" and w.pipe.mode().gpu == rs.gpu_built("ps") and penv["DTFE_EXACT_AVERAGE"] == "1"
-          and penv["SUBSAMPLES"] == penv["AVG_SUBSAMPLES"] == ""
-          and penv["DTFE_GPU"] == ("1" if rs.gpu_built("ps") else "0")
-          and w.p_quality_note.text() == rs.QUALITY_TEXT["ps"]["exact"] and w.p_runs_on.text() == rs.runs_on_text(w.pipe)
+    check("Exact: the exact deposit (no sample count), the device the program's (DTFE_GPU=auto); the grey lines say "
+          "what it is and where it runs",
+          w.pipe.quality == "exact" and w.pipe.mode().gpu is None and penv["DTFE_EXACT_AVERAGE"] == "1"
+          and penv["SUBSAMPLES"] == "" and penv["DTFE_GPU"] == "auto"
+          and w.p_quality_note.text() == rs.QUALITY_TEXT["ps"]["exact"]
+          and w.p_runs_on.text() == rs.runs_on_text(w.pipe, w.mem_results)
           and not any("Fast" in t for t in texts()), str(penv))
     for cb in (w.p_ca, w.p_cu, w.p_rfixed):
         cb.setChecked(False)
@@ -499,9 +516,9 @@ def _pipeline_options(qa, w, tmp, sim, seen, tick):
     w.p_rfields.editingFinished.emit()
     w.p_rproject.setCurrentIndex(0)
     qa.processEvents()
-    check("back at the earlier options (Fast, on its device: the GPU when built): the same two steps",
+    check("back at the earlier options (Fast, the program's device): the same two steps",
           [st.label for st in w.pipe.steps()] == [f"run_ps_pipeline.sh {SIM}", f"plot_pointeval.py {SIM}"]
-          and w.pipe.command()[1]["DTFE_GPU"] == ("1" if rs.gpu_built("ps") else "0") and w.pipe.planes == 1
+          and w.pipe.command()[1]["DTFE_GPU"] == "auto" and w.pipe.planes == 1
           and w.pipe.render_fields == "")
     seen.clear()
     tick.start()
@@ -642,6 +659,14 @@ def _memory_check(qa, w, sim):
     check("... from the binary's own report (partition, concurrency, prediction, budget)",
           {(SIM, 50, None), (SIM, 99, None)} <= set(res) and all("predicted_gb" in r and "budget_gb" in r
                                                                   for r in res.values()), str(res))
+    rep = rs.reported_device(w.spec, w.mem_results)       # (the check names the device, not a share)
+    check("... each report names the device the program picked (its header's device line), and the grey 'Runs on' "
+          "line says it (a build without the GPU says so instead)",
+          rep in ("cpu", "gpu") and all(r.get("device") == rep for r in res.values())
+          and w.runs_on_note.text() == rs.runs_on_text(w.spec, w.mem_results)
+          and w.runs_on_note.text() == (f"Runs on: the {rep.upper()} (as the memory check reported)"
+                                        if rs.gpu_built("ps") else RUNS_ON_NO_GPU),
+          f"{rep} {w.runs_on_note.text()}")
     os.environ["DTFE_MEM_BUDGET_GB"] = "0.0001"             # a machine far too small
     w.mem_action.trigger()                                    # this time from the menu
     check("Run > Check Memory starts the same check (the menu item then cancels it)",
@@ -899,110 +924,34 @@ def _queue(qa, w, tmp, data, repo_figs, sim):
           str([(j.kind, j.state) for j in w3.queue]))
     w2.close()
     w3.close()
-    # a state saved before the two quality modes (an older launcher's settings): each job's cell average becomes its
-    # Quality ('sampled' Fast, else Exact), every other setting the modes replaced is dropped (nothing hidden is kept:
-    # saved back without them), and the status line says so once. An older launcher's standard-DTFE start, 'sampled',
-    # opens at Exact once (Grids and Custom tabs); a PS-DTFE job keeps its Fast; Fast chosen afterwards survives the
-    # next restart, without the note
+    # a saved state whose jobs (the tabs' and a queued one) hold a key the launcher does not know and lack one it
+    # knows: each job loads with the default for it (the quality: Exact), without an error, and is saved back without
+    # the unknown key
     import json as _json
-    old = lambda job: {k: v for k, v in job.to_dict().items() if k != "quality"}           # noqa: E731
-    removed = {"nsub": 2, "gpu": True, "face_gradient": False, "volume_weighted": False, "linear_deposit": False,
-               "ordered_merge": False, "parallel_triangulation": True, "partition": 2, "max_concurrent": 3,
-               "mem_budget_gb": 40.0, "pts_conventions": "legacy"}
+    odd = lambda job: dict({k: v for k, v in job.to_dict().items() if k != "quality"}, no_such_setting=1)  # noqa: E731
     ini = str(tmp / "gui_mig.ini")
     mig = QSettings(ini, QSettings.IniFormat)
-    mig.setValue("spec", _json.dumps(dict(old(rs.RunSpec(data_root=str(data), estimator="dtfe")), deposit="sampled",
-                                          precision="double", vertex_mass=False, **removed)))
-    mig.setValue("pipeline", _json.dumps(dict(old(rs.PipelineSpec()), deposit="sampled", precision="double",
-                                              vertex_mass=False, **removed)))
-    mig.setValue("custom", _json.dumps(dict(old(rs.CustomSpec(estimator="ps")), deposit="sampled",
-                                            stream_density="geometric", **removed)))
-    # ... a queued job and a preset of the user's from then too
+    mig.setValue("spec", _json.dumps(odd(rs.RunSpec(data_root=str(data), estimator="dtfe"))))
+    mig.setValue("pipeline", _json.dumps(odd(rs.PipelineSpec())))
+    mig.setValue("custom", _json.dumps(odd(rs.CustomSpec(estimator="ps"))))
     queued = rs.QueuedJob.of("grids", rs.RunSpec(data_root=str(data), sim=SIM, snapshots=[99])).to_dict()
-    queued["spec"] = dict(old(rs.RunSpec(data_root=str(data), sim=SIM, snapshots=[99])), deposit="sampled", **removed)
+    queued["spec"] = odd(rs.RunSpec(data_root=str(data), sim=SIM, snapshots=[99]))
     mig.setValue("queue", _json.dumps([queued]))
-    # (and one under the name of a built-in that went, "Exact deposit": hidden behind the built-in until now, the
-    # user's own from now on)
-    mig.setValue("presets", _json.dumps({"older": {"grid": 256, "deposit": "sampled", "nsub": 1, "gpu": False,
-                                                   "volume_weighted": False, "vertex_mass": False},
-                                         "Exact deposit": {"grid": 192, "deposit": "exact", "gpu": True,
-                                                           "fields": ["density_a", "velocity_a"], "vertex_mass": True,
-                                                           "volume_weighted": True}}))
     mig.sync()
     wm = A.MainWindow(remember=True, settings=QSettings(ini, QSettings.IniFormat))
-    moved = (wm.spec.quality, wm.pipe.quality, wm.custom.quality, wm.quality_pair.value(), wm.p_quality.value(),
-             wm.o_quality.value())
-    note = wm.status.text()
+    loaded = (wm.spec.quality, wm.pipe.quality, wm.custom.quality, wm.quality_pair.value(), wm.p_quality.value(),
+              wm.o_quality.value())
+    qjob = wm.queue[0] if wm.queue else None
     wm._save()
     saved = {k: _json.loads(QSettings(ini, QSettings.IniFormat).value(k)) for k in ("spec", "pipeline", "custom")}
-    kept = {k: sorted(set(v) & set(rs.REMOVED_SETTINGS)) for k, v in saved.items()}
-    qjob = wm.queue[0] if wm.queue else None
-    combo = wm._preset_grids[0]
-    combo.setCurrentIndex(combo.findData("older"))
-    wm._apply_preset("grids")
-    qa.processEvents()
-    check("... a queued job and a user preset saved then load too: the queued job at Fast with nothing removed left "
-          "(its command builds), the preset applied through the tab sets the grid and Fast and nothing else",
-          qjob is not None and qjob.spec.get("quality") == "fast" and not set(qjob.spec) & set(rs.REMOVED_SETTINGS)
-          and qjob.build().command()[0][0].endswith("run_ps_dtfe.sh")
-          and wm.spec.grid == 256 and wm.spec.quality == "fast" and wm.quality_pair.value() == "fast"
-          and not set(wm.spec.to_dict()) & set(rs.REMOVED_SETTINGS),
-          f"{qjob and qjob.spec} {wm.spec.grid} {wm.spec.quality}")
-    wm.quality_pair.button("fast").setChecked(True)
-    qa.processEvents()
     wm.close()
-    wk = A.MainWindow(remember=True, settings=QSettings(ini, QSettings.IniFormat))
-    check("an older launcher's saved jobs load without an error into the two modes: the cell average is the Quality "
-          "(a standard-DTFE 'sampled' start moved to Exact once; PS-DTFE's sampled Pipeline and Custom jobs Fast), the "
-          "Quality pairs show it, the status line says so once, and the settings the modes replaced are gone from the "
-          "saved jobs (a Custom job keeps its precision and initial positions)",
-          moved == ("exact", "fast", "fast", "exact", "fast", "fast") and note == rs.MODES_NOTE
-          and kept == {"spec": [], "pipeline": [], "custom": ["precision", "vertex_mass"]}
-          and all(v.get("quality") in rs.QUALITIES for v in saved.values()), f"{moved} {note!r} {kept}")
-    check("... Fast chosen afterwards for the standard-DTFE Grids job survives the next restart, without the note",
-          wk.spec.estimator == "dtfe" and wk.spec.quality == "fast" and wk.quality_pair.value() == "fast"
-          and wk.custom.quality == "fast" and wk.status.text() != rs.MODES_NOTE, f"{wk.spec.quality} {wk.status.text()!r}")
-    # the user's "Exact deposit" (a built-in's name until the three built-ins): listed after the built-ins, its own
-    # (Delete enabled), and applied on the Custom tab it lands on Exact with its grid and fields, the job's initial
-    # positions untouched (an input description, not a preset's)
-    gc = wk._preset_grids[0]
-    names = [gc.itemData(i) for i in range(1, gc.count())]
-    cc = wk._preset_custom[0]
-    init0 = (wk.custom.vertex_mass, wk.o_init_pos.value())
-    cc.setCurrentIndex(cc.findData("Exact deposit"))
-    wk._apply_preset("custom")
-    qa.processEvents()
-    about = wk._preset_custom[2].text()
-    check("... a user preset under a dropped built-in's name ('Exact deposit') is not lost: offered after the three "
-          "built-ins as the user's own (Delete enabled), it applies through the Custom tab at Exact with its grid "
-          "and fields; the initial positions stay",
-          names[:3] == ["Quick look", "Standard", "Publication"] and set(names[3:]) == {"older", "Exact deposit"}
-          and wk._preset_custom[1].isEnabled() and about == "your own preset"
-          and wk.custom.quality == "exact" and wk.o_quality.value() == "exact" and wk.custom.grid == 192
-          and wk.custom.fields == ["density_a", "velocity_a"]
-          and (wk.custom.vertex_mass, wk.o_init_pos.value()) == init0, f"{names} {about!r} {wk.custom.to_dict()}")
-    wk.close()
-    # an older queue alone (the tabs' jobs saved in the two modes already) brings the note too, once: the queue is
-    # saved back as it now is when the note is shown (_save writes no queue), so the next start says nothing
-    ini_q = str(tmp / "gui_mig_queue.ini")
-    mq = QSettings(ini_q, QSettings.IniFormat)
-    for key, job in (("spec", rs.RunSpec(data_root=str(data))), ("pipeline", rs.PipelineSpec()),
-                     ("custom", rs.CustomSpec())):
-        mq.setValue(key, _json.dumps(job.to_dict()))
-    mq.setValue("queue", _json.dumps([queued]))
-    mq.sync()
-    wq = A.MainWindow(remember=True, settings=QSettings(ini_q, QSettings.IniFormat))
-    note_q = wq.status.text()
-    back = _json.loads(QSettings(ini_q, QSettings.IniFormat).value("queue"))
-    wq.close()
-    wq2 = A.MainWindow(remember=True, settings=QSettings(ini_q, QSettings.IniFormat))
-    note_q2 = wq2.status.text()
-    wq2.close()
-    check("... a queue saved before the two modes, beside tab jobs saved in them, brings the note once: the queued "
-          "job is saved back at Fast with nothing removed left, and the next start says nothing",
-          note_q == rs.MODES_NOTE and note_q2 != rs.MODES_NOTE and isinstance(back, list) and len(back) == 1
-          and back[0]["spec"].get("quality") == "fast" and not set(back[0]["spec"]) & set(rs.REMOVED_SETTINGS),
-          f"{note_q!r} {note_q2!r} {back}")
+    check("a remembered state's jobs (the tabs' and a queued one): an unknown key is dropped (saved back without it) "
+          "and a missing one takes its default (Exact, the Quality pairs too), without an error; the queued job's "
+          "command builds",
+          loaded == ("exact",) * 6 and qjob is not None and "no_such_setting" not in qjob.spec
+          and qjob.build().command()[0][0].endswith("run_ps_dtfe.sh")
+          and not any("no_such_setting" in v for v in saved.values())
+          and all(v.get("quality") == "exact" for v in saved.values()), f"{loaded} {qjob and qjob.spec} {saved}")
 
 
 def _stop(qa, w):
@@ -1300,7 +1249,8 @@ def _polish(qa, w):
           and w.o_more_group.isAncestorOf(w.o_extra))
     # the Quality pair on each run tab: switching it changes the grey line (the estimator's text) and the job only in
     # its quality, and the command exactly as the golden rule says: Exact today's default job (the exact cell
-    # average), Fast today's sampled job (PS-DTFE at one point per cell axis), the device the quality's
+    # average), Fast today's sampled job (PS-DTFE at one point per cell axis), no device flag and DTFE_GPU=auto (the
+    # program picks)
     keep = [type(j).from_dict(j.to_dict()) for j in (w.spec, w.pipe, w.custom)]
     w.custom = rs.CustomSpec(input_file=str(ROOT / "README.md"), input_type=111)       # (a text file: never read)
     w._load_into_widgets()
@@ -1329,16 +1279,16 @@ def _polish(qa, w):
                 if t == "grids":
                     flags = (("-e" in argv) == (q == "exact")
                              and (("-n" in argv and argv[argv.index("-n") + 1] == "1") == (q == "fast" and e == "ps"))
-                             and ("-m" in argv) == job.mode().gpu
+                             and "-m" not in argv and env.get("DTFE_GPU") == "auto"
                              and env.get("DTFE_EXACT_AVERAGE") == ("1" if q == "exact" else "0"))
                 elif t == "pipeline":
                     flags = (env["DTFE_EXACT_AVERAGE"] == ("1" if q == "exact" else "0")
                              and env["SUBSAMPLES"] == ("" if q == "exact" else "1")
-                             and env["DTFE_GPU"] == ("1" if job.mode().gpu else "0"))
+                             and env["DTFE_GPU"] == "auto")
                 else:
                     flags = (("--exact" in argv) == (q == "exact") and ("--sampled" in argv) == (q == "fast")
                              and ("--subsamples" in argv) == (q == "fast" and e == "ps")
-                             and ("--gpu" in argv) == job.mode().gpu)
+                             and "--gpu" not in argv and env.get("DTFE_GPU") == "auto")
                 line = w._shared(t, "quality_note").text() == rs.QUALITY_TEXT[e][q]
                 got.append((t, e, q, same, flags, line))
                 if not (same and flags and line):
@@ -1350,7 +1300,8 @@ def _polish(qa, w):
     qa.processEvents()
     check("switching the Quality pair (Grids and Custom: both estimators; Pipeline: PS-DTFE) changes only the job's "
           "quality, the grey line to the estimator's text, and the command as the mode says: Exact -e / --exact, "
-          "Fast the sampled average (PS-DTFE: -n 1 / --subsamples 1), the device the quality's",
+          "Fast the sampled average (PS-DTFE: -n 1 / --subsamples 1), no device flag and DTFE_GPU=auto (the program "
+          "picks)",
           len(got) == 10 and not bad, str(bad[:2]))
     # the controls the two modes replaced are gone: no widget, label or window attribute of theirs is left
     old_names = ["deposit_combo", "o_deposit", "p_deposit", "nsub_spin", "o_nsub", "p_nsub", "gpu_check", "o_gpu",
@@ -1416,11 +1367,12 @@ def _presets(qa, w, P):
     check("'Quick look' sets 128^3 and density + velocity in the form and the command",
           w.spec.grid == 128 and w.spec.fields == ["density_a", "velocity_a"] and w.grid_combo.currentText() == "128"
           and "-g 128" in w.cmd_view.toPlainText() and w._preset_grids[2].text() != "")
-    check("... and its quality, Fast, on the Quality pair (the preset's cell average); the device is the quality's "
-          "(an unknown TNG-layout count: the GPU when built), the grey line says so",
+    check("... and its quality, Fast, on the Quality pair (the preset's cell average); the device is the program's "
+          "pick, the grey line says so",
           w.spec.quality == "fast" and w.quality_pair.value() == "fast"
-          and w.spec.mode().gpu == rs.gpu_built("ps") and w.runs_on_note.text() == rs.runs_on_text(w.spec)
-          and w.runs_on_note.text().startswith("Runs on: the GPU") == rs.gpu_built("ps"), w.runs_on_note.text())
+          and w.spec.mode().gpu is None and w.runs_on_note.text() == rs.runs_on_text(w.spec, w.mem_results)
+          and w.runs_on_note.text() == (RUNS_ON_PICKS if rs.gpu_built("ps") else RUNS_ON_NO_GPU),
+          w.runs_on_note.text())
     # standard DTFE: the same pair is its cell average (run_dtfe.sh -e = the exact one), with its own grey line; the
     # choice stays as it is across an estimator switch (Exact and Fast mean the same for both)
     def dtfe_e(text):
@@ -1495,33 +1447,29 @@ def _machine_use(qa, w, P):
     w.dtfe_radio.setChecked(True)
     w.quality_pair.button("fast").setChecked(True)             # standard DTFE's Fast: the Monte-Carlo average
     qa.processEvents()
-    start = (w.spec.mode().gpu, w.runs_on_note.text(), rs.runs_on_text(w.spec))
+    start = (w.spec.mode().gpu, w.runs_on_note.text(), rs.runs_on_text(w.spec, w.mem_results))
     w.run_mode_combo.setCurrentIndex(w.run_mode_combo.findData("performance"))
     qa.processEvents()
     perf = (w.spec.run_mode, w.spec.mode().gpu, w.runs_on_note.text(), rs.shell(*w.spec.command()))
     w.run_mode_combo.setCurrentIndex(w.run_mode_combo.findData("gentle"))
     qa.processEvents()
     gentle = (w.spec.run_mode, w.spec.mode().gpu, w.runs_on_note.text(), rs.shell(*w.spec.command()))
-    cpu = lambda mode: (f"Runs on: the CPU (chosen for Fast, {mode})" if dt_gpu      # noqa: E731
-                        else "Runs on: the CPU (this build has no GPU)")
-    check("Grids: a new machine use reaches the spec and the command (DTFE_RUN_MODE), and the device follows the "
-          "quality's table: standard DTFE's Fast runs on the CPU in every machine use (balanced, performance and "
-          "gentle; the grey line says so), with no -m",
-          start[0] is False and start[1] == start[2] == cpu("Balanced")
-          and perf[:3] == ("performance", False, cpu("Performance")) and " DTFE_RUN_MODE=performance " in f" {perf[3]} "
+    auto = lambda built: RUNS_ON_PICKS if built else RUNS_ON_NO_GPU      # noqa: E731
+    check("Grids: a new machine use reaches the spec and the command (DTFE_RUN_MODE); standard DTFE's Fast names no "
+          "device in any machine use (no -m; the grey line says the program picks)",
+          start[0] is None and start[1] == start[2] == auto(dt_gpu)
+          and perf[:3] == ("performance", None, auto(dt_gpu)) and " DTFE_RUN_MODE=performance " in f" {perf[3]} "
           and (" -m " in f" {perf[3]} ") is False
-          and gentle[:3] == ("gentle", False, cpu("Gentle")) and (" -m " in f" {gentle[3]} ") is False
+          and gentle[:3] == ("gentle", None, auto(dt_gpu)) and (" -m " in f" {gentle[3]} ") is False
           and " DTFE_RUN_MODE=gentle " in f" {gentle[3]} ", f"{start} {perf[:3]} {gentle[:3]}")
     w.ps_radio.setChecked(True)
     w.quality_pair.button("exact").setChecked(True)
     w.run_mode_combo.setCurrentIndex(w.run_mode_combo.findData("performance"))
     qa.processEvents()
     mixed = (w.spec.mode().gpu, w.runs_on_note.text(), rs.shell(*w.spec.command()), w.runs_on_note.toolTip())
-    check("PS-DTFE's Exact in performance: on the GPU (when built), the grey line saying 'the CPU and the GPU "
-          "together' (the Advanced Device row's words) with the precise statement as its tooltip; its job passes "
-          "GPU_SHARE=auto and DTFE_RUN_MODE=performance",
-          mixed[0] == ps_gpu and mixed[1].startswith("Runs on: the CPU and the GPU together") == ps_gpu
-          and (mixed[3] == rs.RUNS_ON_MIXED_TIP) == ps_gpu
+    check("PS-DTFE's Exact in performance: the program picks the device (the grey line says so, no tooltip before a "
+          "memory check); its job passes GPU_SHARE=auto and DTFE_RUN_MODE=performance",
+          mixed[0] is None and mixed[1] == auto(ps_gpu) and mixed[3] == ""
           and " GPU_SHARE=auto " in f" {mixed[2]} " and " DTFE_RUN_MODE=performance " in f" {mixed[2]} ", str(mixed[:2]))
     w.o_run_mode.setCurrentIndex(w.o_run_mode.findData("gentle"))
     w.p_run_mode.setCurrentIndex(w.p_run_mode.findData("performance"))
@@ -1531,7 +1479,8 @@ def _machine_use(qa, w, P):
           "pipeline's environment (DTFE_RUN_MODE, GPU_SHARE=auto); their grey lines follow",
           w.custom.run_mode == "gentle" and own[own.index("--run-mode") + 1] == "gentle"
           and w.pipe.run_mode == "performance" and penv["DTFE_RUN_MODE"] == "performance" and penv["GPU_SHARE"] == "auto"
-          and w.o_runs_on.text() == rs.runs_on_text(w.custom) and w.p_runs_on.text() == rs.runs_on_text(w.pipe),
+          and w.o_runs_on.text() == rs.runs_on_text(w.custom, w.mem_results)
+          and w.p_runs_on.text() == rs.runs_on_text(w.pipe, w.mem_results),
           f"{own} {penv}")
     combo = w._preset_grids[0]
     combo.setCurrentIndex(combo.findData("Quick look"))
@@ -1553,7 +1502,7 @@ def _machine_use(qa, w, P):
 
 def _custom_snapshot(qa, w, tmp, P):
     """The Custom snapshot tab: the demo run, its settings, the Quality pair across the estimators, padding, alpha
-    shape, the file's device and memory check."""
+    shape, the grey 'Runs on' line and the memory check."""
     print("custom snapshot:")
     demo = rs.demo_spec(tmp / "demo")
     w.custom = demo
@@ -1596,8 +1545,7 @@ def _custom_snapshot(qa, w, tmp, P):
           "--exact and '--padding 15'; the PS-only Phase space group and Initial positions row are hidden",
           w.custom.estimator == "dtfe" and w.custom.quality == "exact" and w.o_quality.value() == "exact"
           and w.o_quality_note.text() == rs.QUALITY_TEXT["dtfe"]["exact"]
-          and "--exact" in cmd.split() and "--padding 15" in cmd
-          and not {"--exact-average", "--ps-exact-deposit", "--sampled"} & set(cmd.split())
+          and "--exact" in cmd.split() and "--padding 15" in cmd and "--sampled" not in cmd.split()
           and w.o_ps_group.isHidden() and not w.o_snap_form.isRowVisible(w.o_init_pos), cmd)
     w.o_ps.setChecked(True)
     qa.processEvents()
@@ -1634,25 +1582,24 @@ def _custom_snapshot(qa, w, tmp, P):
     w.o_file.setText(str(demo.input_file))
     w._own_file_changed()
     qa.processEvents()
-    small = ("Runs on: the CPU (chosen for Fast, Balanced, a small snapshot)" if rs.gpu_built("ps")
-             else "Runs on: the CPU (this build has no GPU)")
-    check("Fast on a chosen file: its particle count picks the device (32³: the CPU), the grey line says so",
-          w.custom.quality == "fast" and w.custom.run_mode == "balanced" and not w.custom.mode().gpu
-          and w.o_runs_on.text() == small and "--gpu" not in w.custom.command(), w.o_runs_on.text())
+    auto = RUNS_ON_PICKS if rs.gpu_built("ps") else RUNS_ON_NO_GPU
+    check("Fast on a chosen file: the program picks the device (no '--gpu'), the grey line says so",
+          w.custom.quality == "fast" and w.custom.run_mode == "balanced" and w.custom.mode().gpu is None
+          and w.o_runs_on.text() == auto and "--gpu" not in w.custom.command(), w.o_runs_on.text())
     combo = w._preset_custom[0]
     combo.setCurrentIndex(combo.findData("Quick look"))
     w._apply_preset("custom")
     qa.processEvents()
-    check("a preset on the custom target: Quick look is Fast, its device the file's (the CPU)",
-          w.custom.grid == 128 and w.custom.quality == "fast" and not w.custom.mode().gpu)
+    check("a preset on the custom target: Quick look is Fast, the device the program's",
+          w.custom.grid == 128 and w.custom.quality == "fast" and w.custom.mode().gpu is None)
     init0 = (w.custom.vertex_mass, w.o_init_pos.value())
     combo.setCurrentIndex(combo.findData("Standard"))
     w._apply_preset("custom")
     qa.processEvents()
-    check("... and Standard is Exact: PS-DTFE's exact deposit on the GPU (when built), the pair and the grey lines "
+    check("... and Standard is Exact: PS-DTFE's exact deposit, the device the program's; the pair and the grey lines "
           "follow",
-          w.custom.quality == "exact" and w.o_quality.value() == "exact" and w.custom.mode().gpu == rs.gpu_built("ps")
-          and w.o_runs_on.text().startswith("Runs on: the GPU") == rs.gpu_built("ps")
+          w.custom.quality == "exact" and w.o_quality.value() == "exact" and w.custom.mode().gpu is None
+          and w.o_runs_on.text() == auto
           and w.o_quality_note.text() == rs.QUALITY_TEXT["ps"]["exact"], w.o_runs_on.text())
     for name in ("Quick look", "Standard", "Publication"):
         combo.setCurrentIndex(combo.findData(name))
@@ -2768,8 +2715,8 @@ def _zoom_progress(w, tmp, x, img):
           and "resident" not in x.state()
           and not [lab for lab in x.findChildren(QLabel) if "Partitions in memory" in lab.text()], str(kw))
     check("... and the query server runs in balanced, beside the launcher (run_mode='balanced', D25), with DTFE_GPU "
-          "pinned to 0, the device of its command (L2: it names no '--gpu'; a login shell's export must not reach it)",
-          kw is not None and kw.get("run_mode") == "balanced" and kw.get("env") == {"DTFE_GPU": "0"}, str(kw))
+          "pinned to auto (L2: the program picks, and a login shell's export must not reach it)",
+          kw is not None and kw.get("run_mode") == "balanced" and kw.get("env") == {"DTFE_GPU": "auto"}, str(kw))
     x.server_state.setText(E.NO_SNAPSHOT_TEXT)
     x.restore_state({"snapshots": {}, "resident": 3})      # an older state, with the residency it once held
     check("a restore re-judges the server button (its stale 'no snapshot known' goes once the snapshot is known); an "
@@ -3094,7 +3041,7 @@ def _exact_zoom_partitioned(qa, w, tmp, demo, root, cmd, x, sq):
     cmd, _r, _g, _e = x.exact_zoom_command(x.current, geo[0], geo[1], geo[2], (geo[3][0], geo[4][0]), (geo[3][1], geo[4][1]), 64)
     check("the exact zoom's command for a non-periodic phase-space run: PS-DTFE on the whole cloud, a window, the exact deposit",
           ok and cmd is not None and cmd[0].endswith("PS-DTFE") and "--grid-window" in cmd and "--exact" in cmd
-          and "--periodic" not in cmd and "--box" not in cmd and "--ps-volume-weighted" in cmd, str(cmd))
+          and "--periodic" not in cmd and "--box" not in cmd, str(cmd))
     img = w.explore_view.canvas._img
     x.zoom_res.setValue(64)
     sq = (img.height() // 4, img.width() // 4, img.height() // 2 - 1, img.width() // 2 - 1)   # 8 of 32 cells

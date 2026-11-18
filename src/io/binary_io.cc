@@ -39,8 +39,8 @@ void readBinaryFile(std::string filename,
     openInputBinaryFile( inputFile, filename );
 
 
-    // read the number of particles and the box coordinates (the whole 2*NO_DIM-float box,
-    // not just its first value -- a short read here also misaligned every block after it)
+    // read the number of particles and the box coordinates (the whole 2*NO_DIM-float box:
+    // a short read here would misalign every block after it)
     int noParticles;
     float boxCoordinates[2*NO_DIM];
     inputFile.read( reinterpret_cast<char *>(&noParticles), sizeof(noParticles) );

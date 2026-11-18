@@ -106,7 +106,7 @@ def _finite_or_none(x):
 
 def r_v_definitions(cat) -> dict:
     """{definition: R_v in Mpc} for every R_v definition the catalogue HAS ('crossing' always, the first up-crossing of
-    the mean; 'delta08' and 'ridge' only once catalog.R_V_DEFINITIONS exists and the cache holds them, contract C3):
+    the mean; 'delta08' and 'ridge' only once catalog.R_V_DEFINITIONS exists and the cache holds them):
     a definition that is NaN everywhere (the key absent from an older cache) is left out, not shown as 'none'."""
     import numpy as np
     from dtfelib import catalog
@@ -222,7 +222,7 @@ def outlines(sim, snap, prefix=None, data_root=None, method="auto", sigma_mpc=No
 
 
 def main(argv=None):
-    from dtfelib.cli import add_sim_arg, new_parser, add_estimator_arg, deprecated_alias
+    from dtfelib.cli import add_sim_arg, new_parser, add_estimator_arg
     p = new_parser(description=__doc__.split("\n\n")[0])
     add_sim_arg(p)                                  # required unless DTFE_SIM names it
     p.add_argument("--snap", type=int, required=True)
@@ -232,7 +232,6 @@ def main(argv=None):
     p.add_argument("--cache-dir", type=Path, default=None, help="the catalogue cache (default config.CACHE_DIR)")
     p.add_argument("--smooth-mpc", type=float, default=0.0, metavar="MPC",
                    help="the smoothing in Mpc (default 0: the production smoothing and its catalogue)")
-    deprecated_alias(p, "--sigma-mpc", "--smooth-mpc")
     p.add_argument("--csv", type=Path, default=None, help="also write the table of all voids (write_csv) here")
     a = p.parse_args(argv)
     name_simulation(a.sim)

@@ -40,6 +40,21 @@ else
     OPENMP_FLAG = -fopenmp
 endif
 
+# macOS SDK pinning, the root Makefile's: after an OS or Command-Line-Tools update the Homebrew clang can derive an
+# SDK that does not exist and then fails on the C/C++ standard headers. An SDK that exists is passed as -isysroot.
+# Empty on Linux. Override with MACOS_SDK_OVERRIDE.
+MACOS_ISYSROOT =
+ifeq ($(UNAME_S),Darwin)
+    MACOS_SDK := $(or $(MACOS_SDK_OVERRIDE),$(shell s=$$(xcrun --show-sdk-path 2>/dev/null); \
+        if [ -z "$$s" ] || [ ! -d "$$s" ]; then \
+            s=$$(ls -d /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX*.sdk /Library/Developer/CommandLineTools/SDKs/MacOSX*.sdk 2>/dev/null | sort -V | tail -1); \
+        fi; \
+        [ -n "$$s" ] && [ -d "$$s" ] && printf '%s' "$$s"))
+    ifneq ($(strip $(MACOS_SDK)),)
+        MACOS_ISYSROOT := -isysroot $(MACOS_SDK)
+    endif
+endif
+
 # ---- MUST match the root Makefile's OPTIONS_COMMON ----
 OPTIONS  = -DNO_DIM=3
 OPTIONS += -DVELOCITY
@@ -60,7 +75,7 @@ INCLUDES  = -I $(GSL_PATH)/include -I $(BOOST_PATH)/include -I $(CGAL_PATH)/incl
 LIBRARIES = -L$(GSL_PATH)/lib -L$(BOOST_PATH)/lib -L$(CGAL_PATH)/lib \
             -L$(GMP_PATH)/lib -L$(MPFR_PATH)/lib
 
-COMPILE_FLAGS = -O3 -std=c++17 -frounding-math -Wno-deprecated-declarations $(OPENMP_FLAG) -DNDEBUG $(OPTIONS)
+COMPILE_FLAGS = -O3 -std=c++17 -frounding-math -Wno-deprecated-declarations $(OPENMP_FLAG) -DNDEBUG $(OPTIONS) $(MACOS_ISYSROOT)
 LIBS = -L$(ROOT) -lDTFE $(LIBRARIES) -lboost_thread -lboost_filesystem -lboost_program_options \
        -lgsl -lgslcblas -lm -lgmp -lmpfr
 

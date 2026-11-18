@@ -32,8 +32,8 @@ own r_v_settings record -- and once for the descendant pool: lagrangian.LINK_VER
 taken at plot
 time, so a changed lagrangian.SURVIVE_FRAC / SPLIT_FRAC needs no particle read. Those names are PS-DTFE's default
 grids; another estimator or --prefix adds '_<method>' / '_<prefix>', --exclusive '_exclusive' (each particle in one
-void only: the nearest centre in R_v units; the default follows C6, overlapping spheres share particles), a
-non-default smoothing writes into its own folder.
+void only: the nearest centre in R_v units; the default follows lagrangian's DEFINITIONS, overlapping spheres share
+particles), a non-default smoothing writes into its own folder.
 
 Examples:
   python3 python/plot/plot_void_fate.py --sim TNG50-3-Dark

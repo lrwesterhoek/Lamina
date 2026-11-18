@@ -48,13 +48,11 @@ from pathlib import Path
 
 import numpy as np
 
-from .runlog import canonical_command   # a run log's older option spellings (the permanent table)
-
 # canonical field name -> (file suffix, components, ps_only)
 # The 'a_' averaged prefix is inserted automatically (averaged=True default).
 #
 # PS-DTFE STORES THE MEAN FLOW'S grad<v> BY DEFAULT where the run qualifies (the exact deposit, no halo release, 3D;
-# docs/cleanup-plan.md D13, the face gradient): such a run writes '.a_velDivStreams' beside the
+# the face gradient): such a run writes '.a_velDivStreams' beside the
 # family, FieldSet.face_gradient is True and load(name, mean_field=True) returns the stored grid. Its unaveraged
 # ('_u') grids carry no marker of their own: their route is the run's, read from its run log (run_face_gradient).
 # What follows holds for a run without it ('--per-tet-gradient', the sampled deposit, the halo release, 2D, and the
@@ -108,17 +106,17 @@ FIELDS = {
     "tweb_eigenvalues":  ("twebEig",       3, False),
     "vweb":              ("velVweb",       1, False),   # PS: from grad<v> (face gradient) or <grad v> (see FIELDS)
     "vweb_eigenvalues":  ("velVwebEig",    3, False),   # PS: from grad<v> (face gradient) or <grad v> (see FIELDS)
-    # the face gradient (PS: its default where the run qualifies, docs/cleanup-plan.md D13, or --face-gradient; P10.3):
+    # the face gradient (PS: its default where the run qualifies, or --face-gradient):
     # the run's velocity-gradient family above is then the MEAN flow's grad<v> (from exact face sums), and this one
     # holds the divergence of the stream average <grad v>, the family of a run without it; these three its gradient,
-    # shear and vorticity, each where the run wrote the mean flow's (docs/cleanup-plan.md D12: the bytes a
+    # shear and vorticity, each where the run wrote the mean flow's (the bytes a
     # '--per-tet-gradient' run writes as 'gradient', 'shear', 'vorticity'). load(name, stream_average=True) reads them
     "divergence_streams": ("velDivStreams", 1, True),
     "gradient_streams":   ("velGradStreams", 9, True),
     "shear_streams":      ("velShearStreams", 5, True),
     "vorticity_streams":  ("velVortStreams", 3, True),
     # ... and the mass flux divergence div(sum_s rho_s v_s) (rho/rho_bar times velocity per Mpc) from exact face momentum
-    # sums: by continuity -a d(1+delta)/dt, the rate a region gains or loses mass, caustic sheets included (P10.4)
+    # sums: by continuity -a d(1+delta)/dt, the rate a region gains or loses mass, caustic sheets included
     "mass_flux_divergence": ("massFluxDiv", 1, True),
 }
 
@@ -130,7 +128,7 @@ _PREFIX = {"ps": "ps_output.", "dtfe": "output."}
 # binary's was 0, which its T-web report in the log names).
 MEAN_FIELD_NAMES = ("gradient", "divergence", "shear", "vorticity", "vweb", "vweb_eigenvalues")
 DEFAULT_LAMBDA_TH = 0.3
-# The family load(..., stream_average=True) serves: the stream average <grad v> under either gradient route (D12)
+# The family load(..., stream_average=True) serves: the stream average <grad v> under either gradient route
 STREAM_AVERAGE_NAMES = ("gradient", "divergence", "shear", "vorticity")
 
 # Fields the binary writes ONCE, with no 'a_' (averaged) counterpart: the deposit produces a
@@ -381,11 +379,10 @@ def run_velocity_weighting(method: str, runlog) -> tuple[str, str]:
     try:
         raw = log.read_text(errors="replace")
     except OSError:
-        return "volume", f"no {log.name}: the volume weighting (PS-DTFE's, --ps-volume-weighted) assumed"
+        return "volume", f"no {log.name}: the volume weighting (PS-DTFE's) assumed"
     if re.search(_MOMENTS_LINE, raw, re.M):
         return "volume", f"{log.name}: its header line 'velocity moments : volume-weighted'"
-    text = canonical_command(raw)     # (runlog.py: every spelling, one path)
-    if re.search(r"(^|\s)--ps-volume-weighted(\s|$)", text, re.M):
+    if re.search(r"(^|\s)--ps-volume-weighted(\s|$)", raw, re.M):
         return "volume", f"{log.name}: --ps-volume-weighted"
     return "mass", (f"{log.name}: no --ps-volume-weighted and no 'velocity moments' header line "
                     "(an older PS-DTFE run, mass-weighted)")
@@ -393,17 +390,16 @@ def run_velocity_weighting(method: str, runlog) -> tuple[str, str]:
 
 def run_lambda_th(runlog) -> float:
     """The web threshold of the run whose log is 'runlog' (FieldSet.lambda_th; the launcher's Explore reads its
-    outputs' logs with it): the last '--lambda-th X' in it (the binary's command line on the 'RUNNING:'
-    line run_dtfe.sh / run_ps_dtfe.sh write; '--lambda_th', its deprecated spelling, in older logs), else the binary's
-    own T-web report '(lambda_th = X)', else DEFAULT_LAMBDA_TH (0.3, the run scripts' default; also for a log that
-    cannot be read)."""
+    outputs' logs with it): the last '--lambda-th X' in it, as written (the binary's command line on the 'RUNNING:'
+    line run_dtfe.sh / run_ps_dtfe.sh write), else the binary's own T-web report '(lambda_th = X)', else
+    DEFAULT_LAMBDA_TH (0.3, the run scripts' default; also for a log that cannot be read)."""
     import re
     try:
         text = Path(runlog).read_text(errors="replace")
     except OSError:
         return DEFAULT_LAMBDA_TH
-    # the option in its canonical spelling (runlog.py maps '--lambda_th'); the report's 'lambda_th =' is not an option
-    found = (re.findall(r"--lambda-th[ =]+([-+0-9.eE]+)", canonical_command(text))
+    # the option first; the report's 'lambda_th =' is not an option
+    found = (re.findall(r"--lambda-th[ =]+([-+0-9.eE]+)", text)
              or re.findall(r"lambda_th = ([-+0-9.eE]+)", text))
     try:
         return float(found[-1]) if found else DEFAULT_LAMBDA_TH
@@ -427,8 +423,8 @@ def run_face_gradient(runlog) -> bool:
     the run's, one for both passes (src/CGAL_triangulation/ps_interpolation.cc fx.face: the run's route, its exact
     deposit and a field built on the gradient), so the header's last 'velocity gradient' line
     names it for the '_u' grids too: 'from EXACT FACE sums' for the face gradient. False without the log or one
-    that cannot be read, for a log without that line (a PS-DTFE binary before its face-gradient default,
-    docs/cleanup-plan.md D13, printed none: such folders read as before), and where a pass's face sums found no
+    that cannot be read, for a log without that line (a PS-DTFE binary before its face-gradient default
+    printed none), and where a pass's face sums found no
     fixed-point unit (that pass kept the stream average and the warning does not say which; with False
     load(name, mean_field=True) still gives the mean flow, from the velocity grid)."""
     import re
@@ -530,11 +526,11 @@ class FieldSet:
     @property
     def face_gradient(self) -> bool:
         """Did this PS run store the MEAN flow's velocity derivatives itself (the face gradient, exact face sums:
-        PS-DTFE's default where the run qualifies, docs/cleanup-plan.md D13, or '--face-gradient')? Its marker is the
+        PS-DTFE's default where the run qualifies, or '--face-gradient')? Its marker is the
         stream-average divergence it writes beside them ('.a_velDivStreams'). The unaveraged grids (averaged=False)
         have no marker on disk (the binary writes it for the '_a' pass only): there the run log's route decides,
         one route for both passes (run_face_gradient; a log of a binary before the PS-DTFE face default names none,
-        so such a folder reads as before: False). Standard DTFE: False (its stored derivatives are the mean flow's
+        so such a folder reads False). Standard DTFE: False (its stored derivatives are the mean flow's
         anyway)."""
         if self.method != "ps":
             return False
@@ -695,8 +691,8 @@ class FieldSet:
                             "'--per-tet-gradient' run stores it under the plain name")
                     raise FileNotFoundError(
                         f"{self._field_path(name)}: this face-gradient run wrote no stream average of {plain!r}; it is "
-                        f"written beside the mean flow's when {plain + '_a'!r} is asked (a binary before "
-                        "docs/cleanup-plan.md D12 wrote the divergence alone, 'divergence_streams')")
+                        f"written beside the mean flow's when {plain + '_a'!r} is asked (an older binary "
+                        "wrote the divergence alone, 'divergence_streams')")
         if mean_field:
             if name not in MEAN_FIELD_NAMES:
                 raise ValueError(f"mean_field=True serves the velocity-gradient family {', '.join(MEAN_FIELD_NAMES)}; "
@@ -887,7 +883,7 @@ class FieldSet:
         guess = "mean" if abs(np.log10(max(m, 1e-30))) < abs(np.log10(max(ratio, 1e-30))) else "physical"
         print(f"[dtfelib] WARNING: {self.snapdir.name}: density grid mean {m:.3e} matches neither "
               f"rho/rho_bar (~1) nor the physical mean ({self.meta.rho_bar:.3e}); this looks like a "
-              f"stale pre-2026-06-17 output -- absolute values are unreliable, regenerate with the "
+              f"stale output of an older binary -- absolute values are unreliable, regenerate with the "
               f"current binary. Proceeding as units='{guess}'.")
         return guess
 
@@ -1037,7 +1033,6 @@ class PointPlane:
                  project: str = "plane"):
         import json
         self.prefix = Path(prefix)
-        self._plane_json = Path(plane_json)         # sample_grid_field() reads the '.bin' beside it
         self.side = json.loads(Path(plane_json).read_text())
         self.nu, self.nv = int(self.side["nu"]), int(self.side["nv"])
         self.planes = int(self.side["planes"])
@@ -1112,42 +1107,6 @@ class PointPlane:
             arr = arr.reshape((self.nv, k, self.nu, k) + tail).mean(axis=(1, 3))
         s = self._scale(exp)
         return arr if s == 1.0 else arr * s
-
-    def sample_grid_field(self, grid, plane_bin=None, mode="trilinear"):
-        """Sample a full-box grid field at this plane's sample points, in the plane's shape.
-
-        This is how the T-web and V-web reach a point-evaluated plane. Neither is a local
-        quantity that point evaluation could produce on its own: the T-web comes from the tidal
-        tensor, i.e. a GLOBAL FFT Poisson solve over the density grid, and the V-web from the
-        velocity shear tensor under a specific normalisation (-sqrt(a)/(2*100h), applied by the
-        binary). Rather than re-deriving either -- and risking a classification that disagrees
-        with the grid's -- the certified grid is sampled at the very positions the plane was
-        evaluated at, read back from the plane's own '.bin'.
-
-        Pass mode='ngp' for categorical grids (tweb/vweb labels must never be interpolated).
-        """
-        from .environment import sample_grid
-
-        if plane_bin is None:
-            plane_bin = str(self._plane_json).replace(".json", ".bin")
-        pts = np.fromfile(str(plane_bin), dtype=np.float64).reshape(-1, 3)
-        frac = (pts / float(self.side["box"])) % 1.0
-        vals = sample_grid(np.asarray(grid), frac, mode=mode)
-
-        k = self.supersample
-        comps = 1 if vals.ndim == 1 else vals.shape[-1]
-        shape = (self.planes, self.nv * k, self.nu * k) + ((comps,) if comps > 1 else ())
-        arr = vals.reshape(shape)
-        if mode == "ngp":       # labels: take the central plane / sub-sample, never a mean
-            arr = arr[self.planes // 2]
-            if k > 1:
-                arr = arr[k // 2::k, k // 2::k]
-            return arr
-        arr = arr.mean(axis=0) if self.project == "slab" else arr[self.planes // 2]
-        if k > 1:
-            tail = (comps,) if comps > 1 else ()
-            arr = arr.reshape((self.nv, k, self.nu, k) + tail).mean(axis=(1, 3))
-        return arr
 
     def available(self):
         base = [n for n, (ext, _, _) in self._PTS_FIELDS.items()

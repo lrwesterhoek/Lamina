@@ -15,7 +15,7 @@ a PS output the standard quantity, from its velocity grid, in the binary's conve
     against numpy (random, isotropic, the pancake's {d, 0, 0}); the spectra plan (one alive for the divergence, two
     for the V-web, three for the shear) and memmap input; FieldSet: PS mean_field == the analytic grid times sqrt(a),
     standard DTFE's mean_field=True byte-identical to its stored grid, has() needs the velocity grid for PS, the
-    run log's --lambda-th (an older log's --lambda_th too), the refusals (a non-gradient name, the memory gate); the figure scripts' default
+    run log's --lambda-th, the refusals (a non-gradient name, the memory gate); the figure scripts' default
     (plot_web_streams' table source and names, plot_cosmic_web and plot_shear_triaxial's report). The
     one-plane entry point the launcher's Explore uses, mean_field_plane: np.take of the cube's result to float
     rounding for all six names, every axis, planes at the box faces and on a slab boundary, random (not band-limited)
@@ -25,7 +25,7 @@ a PS output the standard quantity, from its velocity grid, in the binary's conve
     32^3 and 64^3: the mean field of its OWN a_vel reproduces its a_velDiv (correlation >= 0.99), every gradient,
     shear and vorticity component (>= 0.97), its V-web labels (>= 95% of the cells), and our V-web normalisation +
     Cardano applied to its stored gradient give its stored eigenvalues and labels exactly. Through PS-DTFE
-    (--ps-volume-weighted, shell-crossed): the stored divergence has a positive box mean, the mean-field one none,
+    (volume-weighted moments, shell-crossed): the stored divergence has a positive box mean, the mean-field one none,
     and the mean-field V-web's filament fraction lies closer to standard DTFE's than the stored PS V-web's.
     DTFE_TEST_PRECISION=double runs the -double pair (float64 grids, float64 results).
 
@@ -269,8 +269,8 @@ def t_fieldset_api():
         assert ps.has("vweb", mean_field=True) and not ps.has("vweb") and not dt.has("vweb", mean_field=True), "has()"
         # lambda_th: the run log's, else the run scripts' default; the V-web is classified with it
         assert ps.lambda_th == DEFAULT_LAMBDA_TH == 0.3, ps.lambda_th
-        # an older log's spelling (deprecated --lambda_th; the run-log reader maps it)
-        (d / "ps_output.runlog").write_text("RUNNING: ./PS-DTFE in out --grid 16 --periodic --lambda_th 0.05 --field vweb_a\n")
+        # the log's own threshold, its command's '--lambda-th'
+        (d / "ps_output.runlog").write_text("RUNNING: ./PS-DTFE in out --grid 16 --periodic --lambda-th 0.05 --field vweb_a\n")
         assert ps.lambda_th == 0.05, ps.lambda_th
         both = ps.mean_field(("vweb", "vweb_eigenvalues"))
         assert np.array_equal(both["vweb"], fields.classify_web(both["vweb_eigenvalues"], 0.05))
@@ -481,7 +481,7 @@ def t_binary_ps():
     d.mkdir(parents=True)
     _zeldovich_snapshot(d / "combined_050.hdf5", amp=1.2, rot=0.0)           # shell-crossed: ~4% multi-stream cells
     common = ["--grid", 64, "--periodic", "--input-format", 105, "--padding", 15, "--lambda-th", 0.3, "--verbose", 1]
-    _run_bin([ps_bin, d / "combined_050.hdf5", d / "ps_output", *common, "--subsamples", 3, "--ps-volume-weighted",
+    _run_bin([ps_bin, d / "combined_050.hdf5", d / "ps_output", *common, "--subsamples", 3,
               "--field", "density_a", "velocity_a", "divergence_a", "vweb_a"], d / "ps_output.runlog")
     _run_bin([dtfe_bin, d / "combined_050.hdf5", d / "output", *common, "--exact",
               "--field", "density_a", "velocity_a", "divergence_a", "vweb_a"], d / "output.runlog")

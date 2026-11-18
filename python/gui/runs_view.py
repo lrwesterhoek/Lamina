@@ -1,12 +1,12 @@
 """The GUI's Runs browser: every output set on disk, read back from its run log (results.py).
 
 One row per run -- simulation, snapshot, output name, grid, options, when, how long, peak memory,
-size on disk -- and a status that names every known output-changing fix the run predates (by
-the binary's build stamp, else the run date). Actions: open the log, load the run's settings into
-the Grids tab (re-run with the same settings), open it in Explore, show it in Finder, move its
-outputs to the Trash (never a hard delete), and build the run's void catalogue as a queue job; the
-'Voids' column says whether that catalogue is cached, stale (the grid was rewritten after it) or absent, read in a
-background thread (results.void_status).
+size on disk -- and a status that flags outputs to look at before use (results.stale_reasons: an
+older version of the programs made them, a later attempt rewrote them, ...). Actions: open the log,
+load the run's settings into the Grids tab (re-run with the same settings), open it in Explore, show
+it in Finder, move its outputs to the Trash (never a hard delete), and build the run's void
+catalogue as a queue job; the 'Voids' column says whether that catalogue is cached, stale (the grid
+was rewritten after it) or absent, read in a background thread (results.void_status).
 
 RunningNow: the runs going on this machine wherever they were started (nohup, a terminal script,
 this launcher), from the processes' command lines and their progress sidecars (runspec.running_now), with a Stop.
@@ -164,10 +164,9 @@ class RunsBrowser(QWidget):
         for k, r in enumerate(rows):
             stale = R.stale_reasons(r)
             n_stale += bool(stale)
-            worst = next((lv for lv in ("error", "warning", "info") if any(s[0] == lv for s in stale)), None)
+            worst = next((lv for lv in ("warning", "info") if any(s[0] == lv for s in stale)), None)
             status = ("✖ failed" if not r.ok else
-                      {"error": "✖ wrong: regenerate", "warning": "⚠ stale", "info": "ℹ note"}[worst] if worst
-                      else "✔ ok")
+                      {"warning": "⚠ stale", "info": "ℹ note"}[worst] if worst else "✔ ok")
             if r.attempt == "running" and r.progress:          # C1: a run going under this name, with its sidecar
                 status = "▶ " + (R.progress_text(r.progress) or "running")
             elif r.attempt == "resumable":                     # K2: killed with its checkpoint kept
@@ -220,7 +219,10 @@ class RunsBrowser(QWidget):
             self.detail.setPlainText("Every run with a log on disk: TNG runs under the data root and custom-snapshot "
                                      "runs in their output folders. Select one for its details.")
             return
-        self.b_load.setEnabled((bool(r.sim) and r.estimator in ("ps", "dtfe")) or R.custom_settings(r) is not None)
+        # (not for a log without any command, nor for an older version's: its settings are not read, RunRecord.older;
+        # the Runs menu's Load Settings follows this button)
+        self.b_load.setEnabled(bool(r.command) and not r.older and ((bool(r.sim) and r.estimator in ("ps", "dtfe"))
+                                                                    or R.custom_settings(r) is not None))
         self.b_explore.setEnabled(any(p.name.endswith((".a_den", ".den")) for p in r.outputs))
         self.b_voids.setEnabled(R.void_candidate(r))
         lines = [str(r.path), ""]
@@ -228,7 +230,7 @@ class RunsBrowser(QWidget):
         if not r.ok:
             lines.append("✖ this run did not finish (no summary, or an ERROR block in its log)")
         for lv, m in stale:
-            lines.append({"error": "✖ ", "warning": "⚠ ", "info": "ℹ "}[lv] + m)
+            lines.append({"warning": "⚠ ", "info": "ℹ "}[lv] + m)
         if stale or not r.ok:
             lines.append("")
         build = f"{r.binary} {r.build_rev}, built {r.build_time:%Y-%m-%d %H:%M}" if r.build_time else \
@@ -238,11 +240,10 @@ class RunsBrowser(QWidget):
                   f"wall      {R.format_duration(r.wall_seconds)}    peak memory {_gb(r.footprint_gb)} footprint, "
                   f"{_gb(r.peak_rss_gb)} resident",
                   f"outputs   {len(r.outputs)} files, {r.size_bytes / 1e9:.2f} GB",
-                  f"settings  {r.options_text() or '—'}" + (f", {r.grid}{'²' if r.dim == 2 else '³'} grid" if r.grid else "")]
+                  f"settings  {r.options_text() or '—'}"
+                  + (f", {r.grid}{'²' if r.dim == 2 else '³'} grid" if r.grid and not r.older else "")]
         if r.gpu_retries:           # the log's closing tally (G1)
             lines.append(f"retries   {R.retries_text(r.gpu_retries, r.gpu_retries_by_cause)} of the deposit")
-        elif r.gpu_retried:
-            lines.append("retries   the GPU deposit was restarted (this log has no per-cause tally)")
         vstate, vwhy = self.void_states.get(str(r.path), ("", ""))
         if vstate:
             lines.append(f"voids     {vstate}" + (f" ({vwhy})" if vwhy else ""))

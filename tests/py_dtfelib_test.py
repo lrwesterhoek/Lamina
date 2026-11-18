@@ -547,28 +547,37 @@ def t_series_driver():
     assert snapshot_series(Namespace(snap=98)) == [("098", None)]
 
 
-def t_runlog_averaging_by_binary():
-    """dtfelib.runlog.canonical_command reads the averaging rule from the binary, as it reads the dimension: a
-    PS-DTFE log's '-s N' / '-m M' (no effect there, dropped from its checkpoint key) stay as they are, a standard
-    log's '-s 27' is '--subsamples 3'; '--samples 27 --subsamples 3' (accepted, they agree) reads as one
-    '--subsamples 3' (docs/cleanup-plan.md P6.7, review R2/R3)."""
-    from dtfelib import runlog
-    cc = runlog.canonical_command
-    ps = cc("./PS-DTFE i o -s 8 -m 2 --grid 8")
-    assert "--subsamples" not in ps and "--average-method" not in ps, ps
-    assert cc("RUNNING: /x/PS-DTFE-2d-double i o --samples 9") == "RUNNING: /x/PS-DTFE-2d-double i o --samples 9"
-    assert cc("note\nRUNNING: ./PS-DTFE i o -s 27\n").endswith("-s 27\n")       # a whole log: its RUNNING line's binary
-    assert cc("./DTFE i o -s 27 --grid 8") == "./DTFE i o --subsamples 3 --grid 8"
-    assert cc("./DTFE i o --samples 27 --subsamples 3 --grid 8") == "./DTFE i o --subsamples 3 --grid 8"
-    assert cc("./DTFE i o --samples 20 --subsamples 3") == "./DTFE i o --samples 20 --subsamples 3"
-    assert cc("./PS-DTFE i o -s 27", averaging=True) == "./PS-DTFE i o --subsamples 3"      # explicit wins
-    assert cc("-m 2 -s 27", averaging=False) == "-m 2 -s 27"
-    # the exact average's older names (2026-11-09: '--exact', the default; PS-DTFE's '--ps-exact-deposit' maps to
-    # it directly), and nothing else named like it
-    assert cc("./PS-DTFE i o --ps-exact-deposit --grid 8") == "./PS-DTFE i o --exact --grid 8"
-    assert cc("./DTFE i o --exact-average --grid 8") == "./DTFE i o --exact --grid 8"
-    assert cc("./DTFE i o --exact --sampled /a/--exact-average") == "./DTFE i o --exact --sampled /a/--exact-average"
-    assert runlog.canonical_flag("--exact-average") == runlog.canonical_flag("--ps-exact-deposit") == "--exact"
+def t_runlog_readers():
+    """dtfelib.io's three run-log readers (run_lambda_th, run_velocity_weighting, run_face_gradient) read a log as
+    written: (1) a log in current names, its command line and the header lines a PS-DTFE run prints: the threshold
+    of '--lambda-th', the weighting and the gradient's route of the header lines; (2) the header lines and the
+    binary's T-web report alone: the report's '(lambda_th = X)', the header lines; (3) a production-style log, a
+    driver's command line with '--ps-volume-weighted' and no header line: volume-weighted by that flag, the threshold
+    of its command, no face gradient. Without a log: the defaults."""
+    from dtfelib.io import DEFAULT_LAMBDA_TH, run_face_gradient, run_lambda_th, run_velocity_weighting
+    moments = "\t velocity moments       : volume-weighted (the dispersion mass-weighted)\n"
+    face = "\t velocity gradient      : from EXACT FACE sums, the gradient of the volume-weighted MEAN velocity\n"
+    stream = "\t velocity gradient      : the stream average of each stream's own gradient (--per-tet-gradient)\n"
+    logs = {"current": ("RUNNING: /x/PS-DTFE in out --grid 64 --periodic --field density_a vweb_a --lambda-th 0.2 "
+                        "--exact --face-gradient\n" + moments + face),
+            "headers": moments + stream + "... the T-web from the tidal tensor of the density (lambda_th = 0.25) ...\n",
+            "production": ("RUNNING: ./PS-DTFE in out --grid 512 --padding 50 --periodic --ps-merge index-order "
+                           "--input-format 105 --mpc-unit 1000 --field density_a velocity_a divergence_a shear_a "
+                           "--lambda-th 0.3 --exact --ps-vertex-mass --ps-volume-weighted --ps-caustics\n")}
+    root = Path(tempfile.mkdtemp(prefix="dtfe_runlog_"))
+    try:
+        got = {}
+        for key, text in [*logs.items(), ("no log", None)]:
+            log = root / f"{key.replace(' ', '_')}.runlog"
+            if text is not None:
+                log.write_text(text)
+            got[key] = (run_lambda_th(log), run_velocity_weighting("ps", log)[0], run_face_gradient(log))
+        want = {"current": (0.2, "volume", True), "headers": (0.25, "volume", False),
+                "production": (0.3, "volume", False), "no log": (DEFAULT_LAMBDA_TH, "volume", False)}
+        assert got == want, got
+        assert run_velocity_weighting("ps", root / "production.runlog")[1].endswith(": --ps-volume-weighted")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def t_face_gradient_unaveraged():
@@ -764,23 +773,16 @@ def t_outofcore_loading():
         shutil.rmtree(d)
 
 
-def t_estimator_stream_density():
-    """dtfelib.Estimator: stream_density='geometric' (removed from the binary) raises ValueError with the reason before
-    anything starts; 'dtfe' (the default) and 'linear' build the same command as before, '--ps-stream-density linear'.
-    No server starts: subprocess.Popen is stood in for, so no binary is needed."""
+def t_estimator_command():
+    """dtfelib.Estimator's server command for a phase-space snapshot with the defaults: the binary, the snapshot, its
+    output root, then '--serve', the input format, '--verbose 0' and '--periodic', nothing more (the per-stream
+    density is the binary's own). No server starts: subprocess.Popen is stood in for, so no binary is needed."""
     from dtfelib import estimator as E
     work = Path(tempfile.mkdtemp(prefix="dtfelib_est_"))
     try:
         snap = work / "snap.hdf5"
         snap.write_bytes(b"")
         fake = str(work / "PS-DTFE")                # never run
-        try:
-            E.Estimator(snap, binary=fake, stream_density="geometric")
-        except ValueError as e:
-            assert str(e) == ("stream_density 'geometric' was removed: the per-stream density is the linear "
-                              "interpolation of the vertex densities ('dtfe', also spelled 'linear')"), str(e)
-        else:
-            raise AssertionError("stream_density='geometric' was accepted")
 
         class Started(Exception):
             pass
@@ -792,15 +794,14 @@ def t_estimator_stream_density():
         real = E.subprocess.Popen
         E.subprocess.Popen = popen
         try:
-            for sd in ("dtfe", "linear"):
-                try:
-                    E.Estimator(snap, binary=fake, stream_density=sd)
-                except Started:
-                    pass
+            try:
+                E.Estimator(snap, binary=fake)
+            except Started:
+                pass
         finally:
             E.subprocess.Popen = real
-        want = ["--serve", "--input-format", "105", "--verbose", "0", "--periodic", "--ps-stream-density", "linear"]
-        assert len(seen) == 2 and all(c[:2] == [fake, str(snap)] and c[3:] == want for c in seen), seen
+        want = ["--serve", "--input-format", "105", "--verbose", "0", "--periodic"]
+        assert len(seen) == 1 and seen[0][:2] == [fake, str(snap)] and seen[0][3:] == want, seen
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -2409,7 +2410,7 @@ def t_pk_script():
         assert code == 1 and "failed: [98]" in text, (code, text[-200:])
         code, text, names = run(["--snaps", "99", "--ref-snap", "50"])
         assert code == 0 and "reference snapshot 050" in text, text[-300:]
-        # non-default --nbins / --ref-snap are tagged, the default names untouched: untagged, a rerun with other bins
+        # non-default --n-bins / --ref-snap are tagged, the default names untouched: untagged, a rerun with other bins
         # or another reference would write over the default figure and npz
         assert "pk_ps_ref50_z0.00.npz" in names and "pk_ps_z0.00.npz" in names, names
         before = (root / "out" / "pk_ps_z0.00.npz").read_bytes()
@@ -2808,7 +2809,7 @@ def t_caustic_skeleton_script():
     cut-out. Then main() in process on synthetic snapshots (its outputs and the caches pointed at
     temp dirs): .json/.txt/.png per redshift, a strict JSON, --connectivity passed on, nothing in the default folder
     under --out; a
-    snapshot without a grid, without a snapdir or with a parity-only grid exits 1; a failed --voids (the frame
+    snapshot without a grid, without a snapdir or with a parity-only grid exits 1; a failed --per-void (the frame
     refusal) exits 1 with 'voids_error' in the JSON; a delivered one writes the 'voids' block and npz
     without a RuntimeWarning. Names: a non-default option tags the set ('_c6', '_reff', '_shells...',
     '_overlaps', '_cut<N>'), a plain run removes the set's earlier _voids.npz, and the void panel's title says
@@ -2931,7 +2932,7 @@ def t_caustic_skeleton_script():
             code, text, names = run(["--snaps", "50", "99", "98", "97"])
             assert code == 1 and names == base and "failed: [99, 98, 97]" in text, (code, names, text[-600:])
             assert "no caustic_class grid" in text and "parity-only" in text, text[-600:]
-            # --voids asked for and refused (the header's 100 Mpc / 8 cell is not config.CELL_SIZE: the frame guard)
+            # --per-void asked for and refused (the header's 100 Mpc / 8 cell is not config.CELL_SIZE: the frame guard)
             assert abs(100.0 / n - config.CELL_SIZE) > 1e-3 * config.CELL_SIZE, config.CELL_SIZE
             code, text, names = run(["--snaps", "50", "--per-void", "--radius", "r_eff", "--keep-overlaps"])
             assert code == 1 and names == files("_reff_overlaps") and "failed: [50]" in text and "voids: FAILED" in text, (code, names, text[-600:])
@@ -2939,7 +2940,7 @@ def t_caustic_skeleton_script():
             assert "cell" in j.get("voids_error", "") and "voids" not in j, j.get("voids_error")
             assert not list((root / "cache").rglob("*.npz"))                     # no catalogue written (into the temp cache)
 
-            # --voids delivered: a catalogue in config's frame (a stub of pipeline.products for this script only)
+            # --per-void delivered: a catalogue in config's frame (a stub of pipeline.products for this script only)
             class _FS:
                 grid_n = n
                 meta = types.SimpleNamespace(box_mpc=config.CELL_SIZE * n, redshift=0.5)
@@ -2981,7 +2982,7 @@ def t_caustic_skeleton_script():
                                             "shells"], zv.files
                 assert list(zv["index"]) == [0] and bool(zv["bounded"][0]) and np.isnan(zv["dist_cells"][0]) and np.isnan(zv["dist_reff"][0])
             assert not (root / "default_out").exists()
-            # the names. The default --voids set is untagged; a plain run into the same folder rewrites the three
+            # the names. The default --per-void set is untagged; a plain run into the same folder rewrites the three
             # files and removes that set's _voids.npz (an earlier run's, not this one's); other shells are '_shells...'
             code, text, names = run(["--snaps", "50", "--per-void"])
             assert code == 0 and names == sorted(base + ["caustic_skeleton_z0.50_voids.npz"]), (code, names, text[-600:])
@@ -3589,7 +3590,7 @@ def t_pointeval_supersample_and_estimator():
         assert got_den.shape == (1, nv, nu) and np.allclose(got_den, want_den, rtol=0, atol=0) \
             and np.array_equal(got_st, want_st), (got_den.shape, got_st.shape)
         out = root / "panels.png"
-        rc, log = _run_py([plot / "plot_pointeval_panels.py", "--prefix", d / "ps_output", "--plane", side, "-o", out,
+        rc, log = _run_py([plot / "plot_pointeval_panels.py", "--root", d / "ps_output", "--plane", side, "-o", out,
                            "--image", "--panels", "density"])
         assert rc == 0 and out.is_file(), (rc, log[-1500:])
         assert mimg.imread(str(out)).shape[:2] == (nv, nu), mimg.imread(str(out)).shape   # one image pixel per PIXEL
@@ -3889,19 +3890,16 @@ def t_void_radius_and_physical_smoothing():
         assert pipeline.smoothing_tag() == ""                     # the production smoothing: the default names
     finally:
         config.SMOOTHING_SIGMA_CELLS, config.FOOTPRINT_SIZE, config.SMOOTHING_SIGMA_MPC = old
-    # DTFE_SMOOTH_MPC at import (the module-level copies and analyze.py follow), in a fresh interpreter per box (its
-    # older name DTFE_SIGMA_MPC: tests/py_cli_alias_test.py)
+    # DTFE_SMOOTH_MPC at import (the module-level copies and analyze.py follow), in a fresh interpreter per box
     py = Path(__file__).resolve().parents[1] / "python"
     probe = "import config; print(config.SMOOTHING_SIGMA_CELLS, config.FOOTPRINT_SIZE, round(config.SMOOTHING_SIGMA_MPC, 6))"
     for sim, sig, want in (("TNG300-3-Dark", "2.1625", (2.1625 / (302.62769412459404 / 512), 5)),
                            ("TNG50-4-Dark", str(10 * 51.668142899320934 / 512), (10.0, 11))):
         env = dict(_os.environ, DTFE_SIM=sim, DTFE_SMOOTH_MPC=sig)
-        env.pop("DTFE_SIGMA_MPC", None)
         out = _sp.run([_sys.executable, "-c", probe], cwd=py, env=env, capture_output=True, text=True).stdout.split()
         assert len(out) == 3 and abs(float(out[0]) - want[0]) < 1e-6 and int(out[1]) == want[1], (sim, out)
     # the core figures (saved under their production names) are safe from it: analyze.py compute/plot/all refuse
     env = dict(_os.environ, DTFE_SIM="TNG100-3-Dark", DTFE_SMOOTH_MPC="5.0")
-    env.pop("DTFE_SIGMA_MPC", None)
     r = _sp.run([_sys.executable, "analyze.py", "plot"], cwd=py, env=env, capture_output=True, text=True)
     assert r.returncode != 0 and "refused" in (r.stderr + r.stdout), (r.returncode, r.stderr[-300:])
 
@@ -4436,7 +4434,7 @@ def t_cache_prune():
     keys = ("SMOOTHING_SIGMA_CELLS", "FOOTPRINT_SIZE", "FIELD_RESOLUTION", "VOID_EIGENVALUE_CRITERION",
             "GRADIENT_THRESHOLD", "SMOOTHING_SIGMA_MPC")
     old = {k: getattr(config, k) for k in keys}
-    old_env = {k: os.environ.pop(k, None) for k in ("DTFE_SMOOTH_MPC", "DTFE_SIGMA_MPC")}
+    old_env = {k: os.environ.pop(k, None) for k in ("DTFE_SMOOTH_MPC",)}
     try:
         config.SMOOTHING_SIGMA_CELLS, config.FOOTPRINT_SIZE, config.FIELD_RESOLUTION = 10.0, 11, 512
         config.VOID_EIGENVALUE_CRITERION, config.GRADIENT_THRESHOLD = "trace", 0.1
@@ -4518,7 +4516,7 @@ def main():
     check("analyze.py cache --prune lists the '_v1' and unreachable-smoothing namespaces, old fate links and dead temp files (dry run by default), --yes deletes exactly those, --keep-mpc (synthetic)", t_cache_prune)
     check("caustic skeleton: classes, periodic merge across a face/edge/corner, 6/18/26-connectivity, components, cusp vs swallowtail bits and 'not computed', the parity-only refusal, json_safe, per-void shells + the wall distance (synthetic)", t_caustic_skeleton)
     check("the geometric fold flag: caustic_is_fold with streams/hidden, its slabs and checks, FieldSet.fold_mask on a sample-flagged grid and its fallbacks (synthetic)", t_caustic_fold_exact)
-    check("plot_caustic_skeleton.py end to end: files per redshift, strict JSON, '--' cusp rows, --connectivity, nothing in the default folder under --out, no grid / parity-only / failed --voids exit 1, void_block with no or censored voids, the option name tags, the stale _voids.npz removed, the 'distinct' title (synthetic)", t_caustic_skeleton_script)
+    check("plot_caustic_skeleton.py end to end: files per redshift, strict JSON, '--' cusp rows, --connectivity, nothing in the default folder under --out, no grid / parity-only / failed --per-void exit 1, void_block with no or censored voids, the option name tags, the stale _voids.npz removed, the 'distinct' title (synthetic)", t_caustic_skeleton_script)
     check("plot_web_streams.py end to end: files per redshift, a truncated web, an unreadable snapshot file mid-series, the exit rule, the _snaps / _<prefix> / _raw name tags (synthetic)", t_webstreams_script)
     check("analyze.py compute: a missing snapdir and an unreadable snapshot file are counted failed, each with its own reason (synthetic)", t_compute_missing_data)
     check("analyze.py check / compute / export on the snapdirs on disk: PS-DTFE grids complete, absent = 'not on disk' (no failure), incomplete or nothing at all exit 1, the default ids (synthetic)", t_analyze_ladder_on_disk)
@@ -4538,15 +4536,13 @@ def main():
     check("find_critical_points' minimum/maximum box filters slab-threaded == scipy's serial filters bit "
           "for bit at 256^3 (synthetic)", t_threaded_critical_points)
     check("FieldSet caustic loader (synthetic)", t_caustic_field_loader)
-    check("Estimator: stream_density 'geometric' refused with the reason, 'dtfe' and 'linear' the same command "
-          "(synthetic)", t_estimator_stream_density)
+    check("Estimator: a phase-space server's command with the defaults (synthetic)", t_estimator_command)
     check("Estimator: env reaches the binary over this environment (DTFE_GPU, as the launcher pins its server), none "
           "leaves it as it is; the command the same (synthetic)", t_estimator_env)
     check("velocity_single_stream float-streams + hidden-streams mask (synthetic)", t_velocity_single_stream_float_mask)
     check("FieldSet velocity_scale u-units conversion (synthetic)", t_velocity_scale)
-    check("run-log reader: the averaging spellings read by the binary, PS-DTFE's kept; the exact average's older "
-          "names read as --exact (synthetic)",
-          t_runlog_averaging_by_binary)
+    check("run-log readers (dtfelib.io): a log in current names, the header lines alone, a production-style log with "
+          "'--ps-volume-weighted', no log (synthetic)", t_runlog_readers)
     check("FieldSet.face_gradient of the unaveraged grids: the run log's gradient line decides, one route for both "
           "passes; no log, an older binary's log and a pass that fell back read as before (synthetic)",
           t_face_gradient_unaveraged)

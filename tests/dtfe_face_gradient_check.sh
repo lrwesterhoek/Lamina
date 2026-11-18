@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The standard binary's '--face-gradient' (docs/cleanup-plan.md P10.2): the velocity gradient and the fields built on
+# The standard binary's '--face-gradient': the velocity gradient and the fields built on
 # it from EXACT FACE INTEGRALS of the interpolant (Gauss: (1/V) times the integral of v n over a cell's faces is the
 # cell average of grad v), instead of adding up each tetrahedron's gradient. For standard DTFE's interpolant -- linear
 # in every tetrahedron, continuous across them -- the two routes agree to rounding; this suite pins that, and what
@@ -15,8 +15,8 @@
 #       sub-domain's FACE-CHECK passing; the periodic box mean of the divergence below 1e-6 of its rms (8e-10)
 #   G5  '--face-gradient' with '--cic' stops at option parsing with exit 1 and the error naming the DTFE method
 #   G6  (a GPU build) the GPU exact average on '--partition 3 3 3' against one domain: every output byte-identical
-#       (cmp of every output file) -- every tetrahedron's shares are formed in the grid frame
-#       (plan P10.8), from vertex densities summed exactly over each vertex's star and from single-cell volumes in
+#       (cmp of every output file) -- every tetrahedron's shares are formed in the grid frame,
+#       from vertex densities summed exactly over each vertex's star and from single-cell volumes in
 #       a vertex order of their own (canonicalTetVolume, not CGAL's labelling), and summed in the run's fixed-point
 #       unit (src/fixed_units.h RunUnits), and the face pass, whose
 #       sums replace the deposit's gradient (the 3^3 run g3 passes DTFE_FACE_CHECK=1, the one-domain g does not:
@@ -50,12 +50,10 @@ SNAP="demo/z0_64.gadget"
 [ -f "$SNAP" ] || { echo "FAIL: $SNAP is missing (it is tracked in the repository)"; exit 1; }
 TMP="${DTFE_TEST_TMP}/dtfe_face_gradient_check"
 rm -rf "$TMP"; mkdir -p "$TMP"
-OBJ=o; precision_double && OBJ=o_d
+OBJ="$DTFE_OBJ"
 GPU=0
 [ -n "$(gpu_backend_of "$OBJ")" ] && GPU=1
-FAIL=0
-pass() { echo "   PASS  $*"; }
-fail() { echo "   FAIL  $*"; FAIL=1; }
+# pass / fail (FAIL=1 on a failure): tests/lib.sh
 
 C=(--grid 64 --periodic --padding 12 --field density_a divergence_a shear_a)
 # run <name> [env assignments ...] -- [extra args ...]
@@ -67,7 +65,7 @@ run() {
     env ${envs[@]+"${envs[@]}"} "${DTFE_BIN}" "$SNAP" "$TMP/$name" "${C[@]}" "$@" > "$TMP/$name.log" 2>&1 \
         || { echo "FAIL: run $name (see $TMP/$name.log)"; exit 1; }
 }
-same() { cmp -s "$TMP/$1.a_velDiv" "$TMP/$2.a_velDiv" && cmp -s "$TMP/$1.a_velShear" "$TMP/$2.a_velShear"; }
+same_div_shear() { cmp -s "$TMP/$1.a_velDiv" "$TMP/$2.a_velDiv" && cmp -s "$TMP/$1.a_velShear" "$TMP/$2.a_velShear"; }
 # differing <run a> <run b>: the outputs of a that are not byte-identical to b's, and those only b wrote (empty: every
 # output identical); the logs and the run's bookkeeping are not outputs
 differing() {
@@ -90,7 +88,7 @@ differing() {
 }
 
 echo ">> demo/z0_64.gadget at 64^3: --exact with --per-tet-gradient and with --face-gradient (one domain, one thread)"
-run e  OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 -- --exact --per-tet-gradient   # the deposit's own gradient (the face route is the default since 2026-11-09)
+run e  OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 -- --exact --per-tet-gradient   # the deposit's own gradient (the face route is the default)
 run f  OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 DTFE_FACE_CHECK=1 -- --exact --face-gradient
 line="$(grep -a 'FACE-CHECK' "$TMP/f.log" | head -1 | sed 's/.*FACE-CHECK/FACE-CHECK/')"
 read -r mx above <<< "$(echo "$line" | awk '{for (i=1;i<=NF;i++) { if ($i=="max_rel") m=$(i+1); if ($i=="above_1e-4") a=$(i+1) } print m, a}')"
@@ -103,15 +101,15 @@ fi
 echo ">> deposit threads 3 and 10 (one domain); the Monte-Carlo average; the GPU"
 run f3  OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=3  -- --exact --face-gradient
 run f10 OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=10 -- --exact --face-gradient
-if same f f3 && same f f10; then pass "G2 1, 3 and 10 deposit threads: byte-identical divergence and shear"
+if same_div_shear f f3 && same_div_shear f f10; then pass "G2 1, 3 and 10 deposit threads: byte-identical divergence and shear"
 else fail "G2 the deposit threads change the face gradient"; fi
-run m  OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 -- --sampled --face-gradient   # (the exact average is the default since 2026-11-09)
-if same f m; then pass "G3 the Monte-Carlo average's face gradient == the exact average's (byte-identical)"
+run m  OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 -- --sampled --face-gradient   # (the exact average is the default)
+if same_div_shear f m; then pass "G3 the Monte-Carlo average's face gradient == the exact average's (byte-identical)"
 else fail "G3 the Monte-Carlo average changes the face gradient"; fi
 if [ "$GPU" = "1" ]; then
     run g OMP_NUM_THREADS=1 DTFE_DEPOSIT_THREADS=1 -- --exact --face-gradient --gpu
     if grep -q "using the CPU interpolation" "$TMP/g.log"; then fail "G3 the --gpu run fell back to the CPU (see $TMP/g.log)"
-    elif same f g; then pass "G3 the GPU deposit's face gradient == the CPU's (byte-identical)"
+    elif same_div_shear f g; then pass "G3 the GPU deposit's face gradient == the CPU's (byte-identical)"
     else fail "G3 the GPU deposit changes the face gradient"; fi
 else
     echo "   (G3's GPU half: not a GPU build)"
@@ -145,7 +143,7 @@ for good, what in ((d_fe <= 1e-4 and s_fe <= 1e-4,
 sys.exit(0 if ok else 1)
 PY
 
-echo ">> the GPU exact average on a 3^3 split against one domain (the deposit's grid frame, plan P10.8)"
+echo ">> the GPU exact average on a 3^3 split against one domain (the deposit's grid frame)"
 if [ "$GPU" = "1" ]; then
     run g3 DTFE_FACE_CHECK=1 -- --exact --face-gradient --gpu --partition 3 3 3 --max-concurrent 1
     if grep -q "using the CPU interpolation" "$TMP/g3.log"; then fail "G6 the --gpu 3^3 run fell back to the CPU (see $TMP/g3.log)"

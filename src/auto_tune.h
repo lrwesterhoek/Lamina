@@ -3,16 +3,14 @@
    Called from DTFE_setup once the input is loaded and the options are finalized; it only
    fills in values the user did NOT give -- explicit flags always win.
 
-   The peak-memory model is calibrated against measured runs (TNG50-4 512^3 = 45 GB measured
-   vs ~50 GB modeled; TNG300-3 5x5x5/mc2 target ~40 GB vs ~36 GB modeled) and deliberately
+   The peak-memory model is calibrated against measured runs and deliberately
    errs HIGH so the tuner never picks a configuration that measured tighter than predicted.
    Model constants (bytes/vertex etc.) were pinned with a compiled sizeof probe; see the
    README 'Memory' section for the empirical anchors.
 
    Memory budget (autoTuneBudget): 60% of physical RAM, and never more than what the OTHER
    programs leave free at start-up minus 4 GB of headroom -- the machine stays usable while a
-   run goes (80% of RAM alone makes a 64 GB Mac swap with a browser, the GUI and the desktop
-   open next to a 50 GB run).
+   run goes.
 
    Environment overrides (for tests and unusual machines):
      DTFE_RAM_GB        physical-RAM override in GB (default: queried from the OS); simulates a
@@ -24,11 +22,7 @@
      DTFE_FREE_GB       test hook: the memory the other programs leave free, in GB (default: queried); the
                         partition memory gate and the budget cap read it instead of the OS
      DTFE_AUTO_MINN     minimum particle count before auto-partitioning engages (default 2e6;
-                        below it a single domain always fits and partition seams are not worth it)
-     DTFE_AUTO_SPAN     0 = PS-DTFE books a partition's sub-grid as G/n + 40 cells per axis (the model before
-                        2026-11-07) instead of each partition's Eulerian span measured on the particles (default 1)
-     DTFE_DYNAMIC_CONCURRENCY  0 = PS-DTFE's partition loop runs the plan's number of partitions at once; by default,
-                        over a concurrency the tuner chose, more while the live memory holds them (PartitionMemoryGate) */
+                        below it a single domain always fits and partition seams are not worth it) */
 
 /* This header is the tuner's interface: the machine queries (RAM, free memory, the budget, the cores), the report,
    the partition memory gate and the entry points. The model itself -- the bytes per cell and per vertex, the
@@ -92,31 +86,14 @@ inline double autoTunePhysicalRAM()
 }
 
 // The memory the PS-DTFE CPU deposit threads' private accumulator copies may take per partition:
-// 20% of physical RAM (at least 2 GB), or DTFE_DEPOSIT_MEM_GB. ps_interpolation.cc lowers its
-// thread count to fit (a 256^3 grid with density, velocity and dispersion is ~1 GB per float copy);
+// 20% of physical RAM, at least 2 GB. ps_interpolation.cc lowers its thread count to fit (a 256^3 grid with
+// density, velocity and dispersion is ~1 GB per float copy);
 // the partition model below budgets the same amount. With the fixed-point grids and the shared counts
-// and flags the single build copies nothing by default: the budget binds only the float sums (double
-// build, DTFE_GPU_FLOAT_*).
+// and flags the single build copies nothing: the budget binds only the double build's Real sums.
 inline double psDepositThreadBytes()
 {
-    if ( double const v = Env::real( "DTFE_DEPOSIT_MEM_GB", -1. ); v >= 0. )
-        return v * 1.e9;
     return std::max( 2.e9, 0.2 * autoTunePhysicalRAM() );
 }
-
-#ifdef PHASE_SPACE
-// PS-DTFE's face walk beside the GPU deposit (ps_interpolation.cc PSEarlyFaceWalk): a '--face-gradient' pass that
-// deposits on the GPU walks its face sums on a helper thread while the device deposits, instead of after the deposit.
-// The pass then makes the face sums' words before its device call and holds them through it, which the partition
-// model books (auto_tune.cc AutoTunePSInputs::earlyFace) wherever this says the walk is on. The walk is the default
-// (the same output bytes as the walk after the deposit); DTFE_FACE_WALK_EARLY=0 is a developer's off switch, to
-// measure the walk after the deposit against it once more, and =1 means what the default means. Not a user option.
-constexpr bool kPsFaceWalkEarlyDefault = true;
-inline bool psFaceWalkEarly()
-{
-    return Env::flag( "DTFE_FACE_WALK_EARLY", kPsFaceWalkEarlyDefault );
-}
-#endif
 
 // Bytes free for NEW allocations right now (what every program, this one included, leaves free);
 // < 0 when the OS cannot tell. DTFE_FREE_GB overrides it (tests).
@@ -200,7 +177,7 @@ inline double autoTuneFreeForRun()
     return free < 0. ? -1. : free + own;
 }
 
-// The live free-memory figure behind a budget it did not cut (plan P8.7): '' on a simulated machine (DTFE_RAM_GB,
+// The live free-memory figure behind a budget it did not cut: '' on a simulated machine (DTFE_RAM_GB,
 // the tests: their lines stay fixed), else what the other programs leave free and the headroom, or that the OS
 // did not say. A budget the free memory cuts says so itself.
 inline std::string autoTuneFreeNote(bool simulated, double freeForRun, double headroom)
@@ -298,34 +275,39 @@ struct AutoTuneReport
     double predictedWholeLanes = 0.;   // ... 'predicted' with every lane whole: the staged merge's park room
     int    inFlightCap = 0;     // ... the most partitions in flight that booking holds for (0: no limit)
     double streamsEstimate = -1., streamsBudgeted = 0.;
-    // PS-DTFE, for the partition loop's dynamic concurrency (plan P8.10): whether the tuner chose the concurrency (a
+    // PS-DTFE, for the partition loop's dynamic concurrency: whether the tuner chose the concurrency (a
     // user's --max-concurrent is kept as given), and what the run still allocates once its partitions are in flight --
     // after the loop (the derived grids, the finalized point outputs) and as the partitions merge (the point stream
     // records, budgeted: their unmerged share is still to come)
     bool   concChosen = false;
     double reserveEnd = 0., reserveFirstMerge = 0., reserveRecords = 0.;
-    // PS-DTFE under --scratch-dir on macOS (plan P8.2 as rescoped in phase R, 2026-11-09): the start-up peak of
+    // PS-DTFE under --scratch-dir on macOS: the start-up peak of
     // psReserveGrids, which zero-fills each scratch-backed full grid in anonymous memory before its file is mapped
     // over it (ScratchAlloc::ZeroFillScope): the particles + the read blocks kept + the largest pre-sized grid.
     // 'predicted' is at least this (0: no scratch-backed grid, or Linux, where the scope is a no-op)
     double reservePeak = 0.;
-    // PS-DTFE with the face walk beside the GPU deposit (auto_tune.h psFaceWalkEarly): the face sums' words one
-    // partition holds through its device call, booked beside every lane's hold (in 'predicted'; 0: no such walk)
+    // PS-DTFE with the face walk beside the GPU deposit (ps_interpolation.cc PSEarlyFaceWalk): the face sums' words
+    // one partition holds through its device call, booked beside every lane's hold (in 'predicted'; 0: no such walk)
     double faceWalk = 0.;
+    // PS-DTFE, one partition in flight on the GPU under --scratch-dir: the input reader's freed buffers the allocator
+    // keeps beside the loop (auto_tune.cc finishReport; in 'predicted'; 0: not booked)
+    double readKeptLoop = 0.;
     std::string line() const
     {
         if ( not valid ) return "AUTO-TUNE-REPORT unsupported";
         // (the GPU snapshot and the look-ahead are in 'predicted' too, listed so a check can see each term, and so
-        // are the face walk's words, only where they are booked, so every other line stays as it was; the parsers
-        // read key=value pairs, and over_budget stays last)
+        // are the face walk's words and the read buffers kept beside a one-at-a-time loop, each only where it is
+        // booked, so every other line stays as it was; the parsers read key=value pairs, and over_budget stays last)
+        char kept[64] = "";
+        if ( readKeptLoop > 0. ) snprintf( kept, sizeof(kept), "readkept_gb=%.3f ", readKeptLoop/1.e9 );
         char walk[64] = "";
         if ( faceWalk > 0. ) snprintf( walk, sizeof(walk), "facewalk_gb=%.3f ", faceWalk/1.e9 );
         char b[480];
         snprintf( b, sizeof(b), "AUTO-TUNE-REPORT partition=%d mc=%d predicted_gb=%.2f budget_gb=%.2f "
                   "fixed_gb=%.2f pts_gb=%.3f streams_est=%.3f streams_budget=%.3f snapshot_gb=%.3f lookahead_gb=%.3f "
-                  "%sover_budget=%d",
+                  "%s%sover_budget=%d",
                   partition, maxConcurrent, predicted/1.e9, budget/1.e9, fixed/1.e9, pts/1.e9,
-                  streamsEstimate, streamsBudgeted, gpuSnapshot/1.e9, lookAhead/1.e9, walk,
+                  streamsEstimate, streamsBudgeted, gpuSnapshot/1.e9, lookAhead/1.e9, kept, walk,
                   predicted > budget ? 1 : 0 );
         return b;
     }
@@ -340,10 +322,10 @@ AutoTuneReport autoTunePartitioning(User_options &u,
                                     std::vector<Particle_data> const *particles = nullptr);
 
 /* '--gpu-share auto' (PS-DTFE; DTFE.cpp psResolveGpuShare, before the plan): the per mille of a partitioned '--gpu'
-   run's exact deposits that run on the GPU, the others on the free cores at once (auto_tune.cc; the run modes'
-   decision D11, docs/cleanup-plan.md). In performance, for the single build without the float sums, from
+   run's exact deposits that run on the GPU, the others on the free cores at once (auto_tune.cc). In performance,
+   for the single build without DTFE_MASS_AUDIT, from
    DTFE_AUTO_MINN particles and at 4 or more start-up threads N0, it is 50*lround(20/(1 + rho (N0 - 1.8))) clamped to
-   [500, 1000] (600 on the 10-core M1 Max; rho 0.09, DTFE_GPU_SHARE_RHO); else 1000. everyMode ('--gpu-share mixed')
+   [500, 1000] (600 on the 10-core M1 Max; rho 0.09); else 1000. everyMode ('--gpu-share mixed')
    applies the same model in gentle and balanced too, on the mode's own threads in place of N0 (balanced 750 on the
    M1 Max's 6; never a '--max-concurrent' raise). 'why' says which rule decided and its inputs, beginning with the
    run mode, e.g. 'performance, 10 threads, rho 0.09', 'balanced, 6 threads, rho 0.09' or 'balanced: every partition
@@ -396,7 +378,7 @@ struct PartitionMemoryGate
     std::mutex m;
     std::condition_variable cv;
     int inFlight = 0, held = 0;
-    /* DYNAMIC CONCURRENCY (plan P8.10; DTFE.cpp starts more loop threads than the plan's mc, single build only). Up to
+    /* DYNAMIC CONCURRENCY (DTFE.cpp starts more loop threads than the plan's mc, single build only). Up to
        'floor' (the plan's mc) partitions pass by the rule above. One more only while the LEDGER holds it: the free
        memory read when the loop started (startFree), less the headroom, the reserve (what the run has still to allocate:
        reserveEnd, the grids the first merge sizes until it has run, the unmerged share of the budgeted point records)

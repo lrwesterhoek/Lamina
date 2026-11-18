@@ -23,24 +23,17 @@
     every partition.
 
     SAFE: the manifest carries the run's SETTINGS KEY: the build configuration and the binary (its revision and
-    link time: a rebuilt binary does not resume), the command line (every deprecated option name in its canonical
-    spelling, User_options::commandTokens: '--ps-gpu' and '--gpu' give one key) minus the
+    link time: a rebuilt binary does not resume), the command line (the short letters in their long names,
+    User_options::commandTokens: '-g 64' and '--grid 64' give one key) minus the
     options that cannot change a grid value (--resume, --ps-merge, --no-overlap, --verbose,
     --max-concurrent, --run-mode, --scratch-dir, --tessellation-cache) and '--gpu-share' (as typed, 'auto' and the
     number it resolves to would differ), the input files' size+mtime, the resolved
     '_a' average (exact or sampled) and gradient route (face or per-tet), which an environment pin can change
     without the command line, the resolved device (a 'device=gpu' or 'device=cpu' line: DTFE_GPU or the program's
-    pick of the device changes it without the command line), the run-wide fixed-point units' rule and test shift
-    (a 'units=' line, fixed_units.h runUnitsKeyLine: DTFE_RUN_UNITS_LEGACY, PS-DTFE's DTFE_PS_RUN_UNITS, DTFE_TEST_RUN_UNIT_SHIFT; under
-    PS-DTFE's word merge -- '--ps-merge fixed-point' in the single 3-D build, User_options::psWordMerge -- the same
-    line ends with every PS-DTFE accumulator's K, the units its checkpoint's words are in: wordMergeKeyUnits),
-    PS-DTFE's merge mode (a 'merge=fixed-point' line: '--ps-merge' itself is left out of the command line above), the
-    resolved GPU share of a mixed '--gpu' run (a 'gpu-share=' line below 1000; an all-GPU run has none), PS-DTFE's
-    'vertex-order=legacy' under DTFE_PS_VERTEX_ORDER_LEGACY=1 (CGAL's vertex numbering; a default run has no such
-    line) and its 'face-sums=f32' under DTFE_FACE_F32=1 or DTFE_GPU_FACES=1 (the face sums' canonical float
-    arithmetic, the single 3-D build; likewise), the resolved partition split and the grid. '--resume' refuses, naming
-    the lines that differ, when the key differs (a '--ps-merge fixed-point' run first by its merge mode and then by
-    its units line alone, each in a message of its own: beginLoop).
+    pick of the device changes it without the command line), standard DTFE's run-wide fixed-point units' rule and
+    test shift (a 'units=' line, fixed_units.h runUnitsKeyLine: DTFE_TEST_RUN_UNIT_SHIFT; PS-DTFE has none), the
+    resolved GPU share of a mixed GPU run (a 'gpu-share=' line below 1000; an all-GPU run has none), the resolved
+    partition split and the grid. '--resume' refuses, naming the lines that differ, when the key differs (beginLoop).
     It over-refuses rather than under-refuses (a reordered command line is a different key).
 
     MERGE ORDER: the manifest lists the merged partitions as a SET, so a run merging in completion order
@@ -85,8 +78,7 @@
     ('--max-concurrent' is the thread split inside each partition there, and each thread's sub-box carries its own
     padding: left out of the key as for PS, so a run killed for memory can resume with fewer threads, at float
     rounding where the padding is ample -- 2.8e-2 of the peak on the z = 0 demo at padding 5, 1 against 2 threads);
-    a '--gpu' run's too, since its sums are exact (64-bit fixed point; with DTFE_GPU_FLOAT_GRIDS=1 within the
-    float atomics' run-to-run rounding). The same file layout, key, room rule,
+    a '--gpu' run's too, since its sums are exact (fixed-point words). The same file layout, key, room rule,
     5% throttle, refusals and test hooks; what differs is named per build below (BUILD): the file's first line,
     the off switch (DTFE_CHECKPOINT=0 for standard), the driver a refusal names (the knob, DTFE_RESUME=0, is the same in both drivers)
     and the messages' 'DTFE:' label; standard implies no ordered merge (its loop is serial anyway). The progress
@@ -202,19 +194,16 @@ inline std::string directoryFor(User_options const &u)
 }
 
 // the command line as option groups ('--grid 64 64 64' is one line), minus the options that cannot change a
-// grid value; positional arguments (the input and output names) keep their own lines. The tokens come canonical
-// (User_options::commandTokens: a deprecated spelling already in its canonical name), so each drop list holds the
-// canonical names (the old merge switches arrive as '--ps-merge MODE'); '--ps-no-overlap' stays in it for a caller
-// that hands raw tokens.
+// grid value; positional arguments (the input and output names) keep their own lines. The tokens come with the
+// short letters in their long names (User_options::commandTokens), so each drop list holds the long names.
 inline std::string commandKeyLines(std::vector<std::string> const &tokens)
 {
     // '--ps-merge': the index and the completion order move the grids at float rounding only, and a run killed
-    // under one order must resume under the other (--resume merges in index order); fixed-point is dropped here
-    // because the key's own 'merge=fixed-point' line carries it. '--run-mode': like '--max-concurrent' it changes no
-    // PS-DTFE single-precision byte, and a run killed in one mode must resume in another (a balanced run of the day
-    // overnight in performance). '--gpu-share': the key's own 'gpu-share=' line carries the resolved share
-    static char const *const dropFlag[]  = { "--resume", "--ps-no-overlap",
-                                             "--no-overlap" };  // (the look-ahead switch of both binaries)
+    // under one order must resume under the other (--resume merges in index order). '--run-mode': like
+    // '--max-concurrent' it changes no PS-DTFE single-precision byte but through the GPU share, and a run killed in
+    // one mode must resume in another (a balanced run of the day overnight in performance). '--gpu-share': the key's
+    // own 'gpu-share=' line carries the resolved share
+    static char const *const dropFlag[]  = { "--resume", "--no-overlap" };  // ('--no-overlap': both binaries' look-ahead)
     static char const *const dropValue[] = { "--verbose", "-v", "--max-concurrent", "--scratch-dir", "--tessellation-cache",
                                              "--ps-merge", "--run-mode", "--gpu-share" };
     auto isOption = [](std::string const &t)
@@ -242,43 +231,15 @@ inline std::string commandKeyLines(std::vector<std::string> const &tokens)
     return out.str();
 }
 
-#ifdef PHASE_SPACE
-// The word merge's units in the key ('--ps-merge fixed-point' in the single 3-D build: User_options::psWordMerge):
-// the K of every PS-DTFE accumulator in slot order (fixed_units.h RU_PS_MASS .. RU_PS_FACE_P, named as the
-// checkpoint's blobs: quantities.h PSWordGrids::key), appended to the units line. Its checkpoint holds the merged
-// words in these units (ps_fixed_merge.h wordBlobs), which no run of other units can add to; they follow from the
-// grid, the box, the mean density, the particles, the moment weight (by volume in PS-DTFE), '--subsamples' and
-// DTFE_TEST_RUN_UNIT_SHIFT, so the key refuses such a resume by name (restoreWords compares them once more,
-// accumulator by accumulator, after the load).
-inline std::string wordMergeKeyUnits(RunUnits const &ru)
-{
-    std::string t = " K=";
-    for (int g = RU_PS_MASS; g <= RU_PS_FACE_P; ++g)
-        t += std::string( g == RU_PS_MASS ? "" : "," ) + PSWordGrids::key( g ) + ":" + std::to_string( ru.K[g] );
-    return t;
-}
-#endif
-
-// the first line of a settings key that starts with 'prefix' ("(none)" when there is none): the beginLoop
-// refusals that name one line
-inline std::string keyLineOf(std::string const &key, char const *prefix)
-{
-    std::istringstream is( key );
-    std::string l;
-    while ( std::getline( is, l ) )
-        if ( l.rfind( prefix, 0 ) == 0 ) return l;
-    return "(none)";
-}
-
 // the run's settings key (the header comment): compared verbatim on '--resume'
 inline std::string settingsKey(User_options const &u)
 {
     std::ostringstream k;
     k << cacheBuildLines();
     // the BINARY too: a resume after a rebuild would combine partitions deposited by the old code with the
-    // new code's, while the run log names only the new 'Build:' -- which the launcher's fix registry reads to tell a
-    // grid made before an output-changing fix. The link time as well: every uncommitted rebuild has the same
-    // '<hash>-dirty' revision. Over-refusal is the design; the refusal names DTFE_RESUME=0.
+    // new code's, while the run log's 'Build:' line names only the new code as the code that made the outputs.
+    // The link time as well: every uncommitted rebuild has the same '<hash>-dirty' revision. Over-refusal is the
+    // design; the refusal names DTFE_RESUME=0.
     k << "binary=" << dtfeBuildRevision() << " (built " << dtfeBuildTime() << ")\n";
     k << "output=" << absoluteOutput( u.outputFilename ) << '\n';
     k << commandKeyLines( u.commandTokens );
@@ -293,23 +254,11 @@ inline std::string settingsKey(User_options const &u)
     // command line -- a plane rewritten in place would otherwise pass. Runs without points get no such line.
     if ( not u.psSamplePointsFile.empty() )
         k << cacheFileLine( "sample-points", u.psSamplePointsFile ) << '\n';
-#ifdef PHASE_SPACE
-    // the merge mode: a '--ps-merge fixed-point' checkpoint holds integer words instead of the summed Real
-    // grids, so neither mode can resume the other's (beginLoop refuses it by name). The option itself is left out of
-    // the command line (commandKeyLines), so this line carries it.
-    if ( u.psFixedPointMerge )
-        k << "merge=fixed-point\n";
+#ifndef PHASE_SPACE
+    // the run-wide fixed-point units' rule (fixed_units.h runUnitsKeyLine): DTFE_TEST_RUN_UNIT_SHIFT changes the
+    // units without changing the command line. Standard DTFE only: PS-DTFE's passes take units of their own.
+    k << runUnitsKeyLine() << '\n';
 #endif
-    // the run-wide fixed-point units' rule (fixed_units.h runUnitsKeyLine): DTFE_RUN_UNITS_LEGACY, PS-DTFE's
-    // DTFE_PS_RUN_UNITS and DTFE_TEST_RUN_UNIT_SHIFT change the units without changing the command line. Both
-    // binaries. Under PS-DTFE's word merge the line ends with the units themselves (wordMergeKeyUnits): the merge of
-    // the passes' rounded grids (the other builds, DTFE_RUN_UNITS_LEGACY=1, a binary before the word merge) writes
-    // 'units=legacy' or no K, so neither merge resumes the other's checkpoint (beginLoop says so by name).
-    k << runUnitsKeyLine();
-#ifdef PHASE_SPACE
-    if ( u.psWordMerge ) k << wordMergeKeyUnits( u.runUnits );
-#endif
-    k << '\n';
     // the resolved '_a' average and gradient route: an environment pin (DTFE_EXACT_AVERAGE, DTFE_FACE_GRADIENT) or
     // a default changes them without changing the command line. Always written, so a checkpoint from before these
     // lines never matches.
@@ -327,20 +276,9 @@ inline std::string settingsKey(User_options const &u)
     k << "device=" << ( u.useMetal ? "gpu" : "cpu" ) << '\n';
 #endif
 #ifdef PHASE_SPACE
-    // the resolved share of a mixed '--gpu' run (DTFE.cpp psResolveGpuShare): which partitions deposit on the GPU, a
+    // the resolved share of a mixed GPU run (DTFE.cpp psResolveGpuShare): which partitions deposit on the GPU, a
     // rule of their index; an all-GPU run writes no line
     if ( u.psGpuShareMille < 1000 ) k << "gpu-share=" << u.psGpuShareMille << '\n';
-    // CGAL's vertex numbering (DTFE_PS_VERTEX_ORDER_LEGACY=1, ps_vertex_order.h): an environment pin that moves the
-    // grids' last bits without changing the command line, so neither numbering resumes the other's partitions;
-    // written only when set, so a default key has no such line
-    if ( Env::flag( "DTFE_PS_VERTEX_ORDER_LEGACY" ) ) k << "vertex-order=legacy\n";
-#if !defined(DOUBLE) && NO_DIM == 3
-    // the face sums' canonical float arithmetic (DTFE_FACE_F32=1, or DTFE_GPU_FACES=1, which implies it:
-    // ps_interpolation.cc psFaceF32): an environment switch that moves the face grids' last bits, so neither
-    // arithmetic resumes the other's partitions (the two switches give the same words, so one line for both);
-    // written only when set
-    if ( Env::flag( "DTFE_FACE_F32" ) || Env::tristate( "DTFE_GPU_FACES" ) == 1 ) k << "face-sums=f32\n";
-#endif
 #endif
     k << "partition=";
     for ( size_t p : u.partition ) k << p << ',';
@@ -471,22 +409,6 @@ inline void removeStaleTemps(std::string const &dir)
     for ( auto const &s : stale ) std::remove( s.c_str() );
 }
 
-// A raw array kept beside the grids: the fixed-point merge's integer words, carries and state
-// (ps_fixed_merge.h), whose Real grids do not exist during its loop -- under the word merge the merged words
-// ('x.fxw.<side>.<accumulator>'; the face sums once per face, and on a grid that is not periodic their boundary
-// planes 'x.fxw.<side>.<face sum>.plane<a>'), one sorted carry per accumulator ('x.fxk...'), the int counts
-// ('x.fxn.<side>') and their K and sizes ('x.fxwords.state'). Listed as 'field x.<name> <elemSize> <count>' after the
-// u and a fields
-// (none with count 0); a load calls 'resize' for the listed ones and reads into its bytes.
-struct Blob
-{
-    std::string name;
-    size_t elemSize = 0;
-    std::function<size_t()> count;                 // the elements to write now
-    std::function<void const *()> data;            // their bytes
-    std::function<void *(size_t)> resize;          // load: room for n elements, their bytes
-};
-
 // The run's checkpoint state (one per process: a partition loop runs once -- PS-DTFE's, or standard DTFE's)
 struct Checkpointer
 {
@@ -506,7 +428,6 @@ struct Checkpointer
     bool points = false;              // this run evaluates points: save their records with every checkpoint
     std::vector<char> pointsSaved;    // per partition: its 'points.<i>' is this run's (written, or read on resume)
     bool pointsCleaned = false;       // an earlier run's unlisted 'points.<i>' files removed (after the first write)
-    std::vector<Blob> blobs;          // '--ps-merge fixed-point': its integer grids, beside the Real ones
 };
 
 inline Checkpointer &state()
@@ -564,8 +485,6 @@ inline bool write(Quantities &u, Quantities &a, std::string &why)
     };
     listFields( "u", u );
     listFields( "a", a );
-    for ( Blob const &b : c.blobs )
-        if ( b.count() > 0 ) h << "field x." << b.name << ' ' << b.elemSize << ' ' << b.count() << '\n';
     h << "key-begin\n" << c.key << "key-end\nheader-end\n";
     std::string const header = h.str();
     // room: the new file beside the old one, and the outputs still to come (about the grids' size again: beside
@@ -577,7 +496,6 @@ inline bool write(Quantities &u, Quantities &a, std::string &why)
     };
     addBytes( u );
     addBytes( a );
-    for ( Blob const &b : c.blobs ) bytes += double( b.count() ) * double( b.elemSize );
     // '--sample-points': the records of the partitions merged since the last write (each partition's once)
     if ( c.points )
         bytes += psPointEvalUnsavedBytes( c.merged, c.pointsSaved );
@@ -627,9 +545,6 @@ inline bool write(Quantities &u, Quantities &a, std::string &why)
     };
     writeFields( u );
     writeFields( a );
-    for ( Blob const &b : c.blobs )
-        if ( ok and b.count() > 0 )
-            ok = std::fwrite( b.data(), b.elemSize, b.count(), f ) == b.count();
     ok = ok and std::fflush( f ) == 0 and ::fsync( ::fileno( f ) ) == 0;
     int const err = errno;
     ok = ( std::fclose( f ) == 0 ) and ok;
@@ -684,14 +599,6 @@ inline bool load(std::string const &dir, Manifest const &m, Quantities &u, Quant
         };
         check( "u", u );
         check( "a", a );
-        for ( Blob const &b : state().blobs )
-            if ( fe.name == "x." + b.name )
-            {
-                found = true;
-                if ( fe.elemSize != b.elemSize )
-                    why = "field '" + fe.name + "' has " + std::to_string( fe.elemSize ) + "-byte elements, this build "
-                          + std::to_string( b.elemSize );
-            }
         if ( not found ) why = "the checkpoint holds a field this build does not know: '" + fe.name + "'";
         if ( not why.empty() ) return false;
     }
@@ -718,9 +625,6 @@ inline bool load(std::string const &dir, Manifest const &m, Quantities &u, Quant
         };
         fill( "u", u );
         fill( "a", a );
-        for ( Blob const &b : state().blobs )
-            if ( ok and fe.name == "x." + b.name )
-                ok = std::fread( b.resize( fe.count ), b.elemSize, fe.count, f ) == fe.count;
     }
     std::fclose( f );
     if ( not ok ) why = "reading the grids of '" + path + "' failed";
@@ -773,34 +677,6 @@ inline int beginLoop(User_options const &options, int const totalPartitions, Qua
         std::string why;
         if ( not readManifest( dir, m, why ) )
             throwError( "'--resume': nothing to resume -- ", why, ". Run without '--resume' to start the run." );
-#ifdef PHASE_SPACE
-        // the merge mode first: the other mode's grids are not this mode's (Real sums / integer words)
-        bool const savedFx = m.key.find( "\nmerge=fixed-point\n" ) != std::string::npos;
-        if ( savedFx != options.psFixedPointMerge )
-            throwError( "'--resume' refused: the checkpoint '", dir, std::string( "' was written by a run " )
-                        + ( savedFx ? "with '--ps-merge fixed-point' (its grids are integer words); this run merges into "
-                                      "the float grids (the default merge)"
-                                    : "with the default merge (its grids are float sums); this run has '--ps-merge fixed-point'" )
-                        + ". Resume with the killed run's merge mode, or run without '--resume' to start over (" + START_OVER
-                        + ").", "" );
-        // ... then, under '--ps-merge fixed-point', its units (the key's 'units=' line, settingsKey): the word
-        // merge's checkpoint holds words in the units its K list names, and the merge of the passes' rounded grids
-        // ('units=legacy', or no K list: DTFE_RUN_UNITS_LEGACY=1, a 2-D build, a binary before the word merge) holds
-        // integers of a table of its own -- words of other units cannot be added to this run's
-        if ( options.psFixedPointMerge )
-        {
-            std::string const savedUnits = keyLineOf( m.key, "units=" ), nowUnits = keyLineOf( key, "units=" );
-            if ( savedUnits != nowUnits )
-                throwError( "'--resume' refused: the checkpoint '", dir, "' holds the '--ps-merge fixed-point' sums "
-                            "of other fixed-point units than this run's:\n\t  checkpoint: " + savedUnits
-                            + "\n\t  this run  : " + nowUnits, std::string( "\n\tA checkpoint of the merge of the "
-                            "passes' rounded grids ('units=legacy': DTFE_RUN_UNITS_LEGACY=1, or a binary before the "
-                            "word merge) cannot be continued by the word merge, nor the other way round, nor one of "
-                            "another K (the particles, the grid or DTFE_TEST_RUN_UNIT_SHIFT changed). Resume with "
-                            "the killed run's settings, or run without '--resume' to start over (" ) + START_OVER
-                            + ").", "" );
-        }
-#endif
         if ( m.key != key )
             throwError( "'--resume' refused: the checkpoint '", dir, "' was written by a run with other settings. "
                         "The lines that differ:", keyDifference( m.key, key ),
@@ -823,12 +699,7 @@ inline int beginLoop(User_options const &options, int const totalPartitions, Qua
                 << nDone << " of " << totalPartitions << MESSAGE::cReset() << " partitions are already in the "
                 << "checkpoint '" << dir << "'; computing the other " << ( totalPartitions - nDone )
 #ifdef PHASE_SPACE
-                << ( options.psWordMerge
-                     ? " (each one's words added to the checkpoint's as it finishes: --ps-merge fixed-point).\n"
-                     : options.psFixedPointMerge
-                     ? " (each added as it finishes: --ps-merge fixed-point).\n"
-                     : " (merged in partition order: --resume always merges in index order).\n" )
-                << MESSAGE::Flush;
+                << " (merged in partition order: --resume always merges in index order).\n" << MESSAGE::Flush;
 #else
                 << ".\n" << MESSAGE::Flush;
 #endif

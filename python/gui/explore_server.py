@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QFileDialog, QMessageBox, QTableWidgetItem
 
 import explore as _ex
 import grids as G
+import runspec as rs
 
 
 class ServerWorker(QObject):
@@ -130,13 +131,13 @@ class ServerMixin:
         if kw is None:
             return None
         cache = Path(self.cache_edit.text().strip() or _ex.default_cache_dir(str(o.dir))).expanduser()
-        ps = bool(kw.get("phase_space", True))   # the standard binary has no streams: it refuses --per-stream
+        ps = bool(kw.get("phase_space", True))   # the standard binary has no streams: it refuses --ps-per-stream
         # run_mode balanced: the server runs beside the launcher, as the exact zoom does (explore_zoom.py). DTFE_GPU
-        # pinned to 0, the device of its command (it names no '--gpu': the server evaluates points and deposits
-        # nothing), as every program the launcher starts gets its pin (runspec.gpu_pin_env)
+        # pinned to auto, the program's pick (runspec.gpu_pin_env(None): the server evaluates points and deposits
+        # nothing, so the program keeps it on the CPU), as every program the launcher starts gets its pin
         kw.update(per_stream=ps, lagrangian_positions=ps, caustics=ps, velocity_gradient=True,
                   tessellation_cache=str(cache), verbose=1, progress=True, run_mode="balanced",
-                  env={"DTFE_GPU": "0"})
+                  env=rs.gpu_pin_env(None))
         if self.server_partition:
             kw["partition"] = int(self.server_partition)
         # (how many partitions a composite server keeps in memory is the binary's: it fits them to the free memory)

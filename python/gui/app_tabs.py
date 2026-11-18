@@ -360,8 +360,8 @@ class TabsMixin:
         pair.changed.connect(self._changed)
         note = FormNote()                   # what the choice is for the tab's estimator (_sync_quality)
         row, combo, cells = grid_row(self, self._changed)
-        # the machine use (--run-mode, the drivers' DTFE_RUN_MODE), then where the run goes: the device the quality
-        # implies (rs.runs_on_text), information only
+        # the machine use (--run-mode, the drivers' DTFE_RUN_MODE), then where the run goes (rs.runs_on_text: a Device
+        # override, else the program's pick, named once a memory check reported it), information only
         mode = QComboBox()
         mode.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)   # (its long items: the forms
         mode.setMinimumContentsLength(24)                                           # scroll only vertically)
@@ -383,8 +383,9 @@ class TabsMixin:
 
     def _sync_quality(self, tab: str):
         """A run tab's two grey lines after a change: what its quality is for its estimator (rs.QUALITY_TEXT, the
-        Pipeline's PS-DTFE), and where the run goes (rs.runs_on_text, from the job: _read_widgets came first), with
-        the precise statement as its tooltip where the job shares the CPU and the GPU (rs.runs_on_tip)."""
+        Pipeline's PS-DTFE), and where the run goes (rs.runs_on_text, from the job: _read_widgets came first, and
+        the memory checks of its settings, self.mem_results: the device the program reported), with the precise
+        statement as its tooltip where the job shares the CPU and the GPU (rs.runs_on_tip)."""
         spec = self._tab_spec(tab)
         est = getattr(spec, "estimator", "ps")
         q = spec.quality if spec.quality in rs.QUALITIES else rs.QUALITY_DEFAULT
@@ -393,8 +394,8 @@ class TabsMixin:
             text = rs.QUALITY_TEXT_PS_FAST_SAMPLES
         self._shared(tab, "quality_note").setText(text)
         runs_on = self._shared(tab, "runs_on")
-        runs_on.setText(rs.runs_on_text(spec))
-        runs_on.setToolTip(rs.runs_on_tip(spec))
+        runs_on.setText(rs.runs_on_text(spec, self.mem_results))
+        runs_on.setToolTip(rs.runs_on_tip(spec, self.mem_results))
 
     def _ps_options_group(self, tab: str, *rows) -> QGroupBox:
         """The 'Phase space' group of a run tab: the caustics and the cusps they enable, then the tab's own rows (the
@@ -739,7 +740,7 @@ class TabsMixin:
 
     def _own_file_changed(self):
         """A new file: guess its format from the name, and its dimensions from its contents (the user can still
-        change both). Its device follows from the quality and its particle count (CustomSpec.mode)."""
+        change both)."""
         f = self.o_file.text().strip()
         if not f or f == self._own_last_file:
             return
@@ -765,7 +766,8 @@ class TabsMixin:
         self.p_sims.setToolTip("Tick the simulations to run. They run from the top down: drag one to change the order")
         self.p_sims.model().rowsMoved.connect(lambda *_: self._changed())
         v.addWidget(self.p_sims)
-        v.addWidget(_note("Computes every snapshot whose slice is missing or out of date."))
+        v.addWidget(_note("Computes every snapshot whose slice is missing or out of date, or whose run log an older "
+                          "version of the programs wrote."))
         col.addWidget(g)
 
         g = QGroupBox("Image plane")

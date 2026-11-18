@@ -7,8 +7,8 @@ Homebrew's and `/usr/local`'s that imports numpy and h5py).
 The binaries' `-h` lists in short what a user of the two modes needs, their `--full-help` every option (the developer
 options, for tests and comparisons, in a group of their own); `--full-help` and each script's `--help` are the
 reference for every option and default.
-Both binaries share one name per shared option (`--gpu`, `--exact`, `--sampled`, `--run-mode`, `--no-overlap`, `--full-help`, `--lambda-th`);
-the older spellings are deprecated and still accepted for one release, with a warning.
+Both binaries share one name per shared option (`--gpu`, `--exact`, `--sampled`, `--run-mode`, `--no-overlap`,
+`--full-help`, `--lambda-th`).
 
 ---
 
@@ -30,10 +30,10 @@ python3 -m pip install -e python  # dtfelib alone (editable: finds ./DTFE, ./PS-
 
 make DTFE METAL=1 -j10            # standard DTFE, Apple-GPU '_a' interpolation backend
 make PS-DTFE METAL=1 -j10         # phase-space DTFE, Apple-GPU deposit backend
-                                  # (CUDA=1 / HIP=1 / CUDAEMU=1 stop the build: the retired CUDA/HIP port is on
-                                  #   the branch archive/cuda-hip-2026-11-08)
+                                  # (CUDA=1 / HIP=1 / CUDAEMU=1 stop the build with a message naming the archive
+                                  #   branch of the CUDA/HIP port)
 make DTFE PS-DTFE DOUBLE=1 METAL=1 -j10   # the double-precision pair as well (./DTFE-double, ./PS-DTFE-double,
-                                          # objects in o_d / o_ps_d; float64 end to end, ~2x memory; the GPU
+                                          # objects in o_d / o_ps_d; float64 end to end, more memory; the GPU
                                           # deposits float copies of the tetrahedra). Run scripts:
                                           # DTFE_PRECISION=double ./scripts/run_ps_dtfe.sh ...
 make DTFE PS-DTFE DIM=2           # the 2D pair: ./DTFE-2d and ./PS-DTFE-2d (own object dirs o_2d / o_ps_2d,
@@ -44,7 +44,8 @@ make DTFE PS-DTFE DIM=2           # the 2D pair: ./DTFE-2d and ./PS-DTFE-2d (own
 make PS-DTFE TBB=1                # REQUIRE tbb's parallel CGAL triangulation (the default TBB=auto compiles it in
                                   #   when tbb is installed, TBB=0 leaves it out); at run time the binary inserts
                                   #   a tessellation of at least 1e6 points in parallel when cores are free, and
-                                  #   --parallel-triangulation (or DTFE_TRIANGULATION_THREADS=N, N > 1) forces it at any size;
+                                  #   --parallel-triangulation (or DTFE_TRIANGULATION_THREADS=N, N > 1) forces it
+                                  #   at any size;
                                   #   PS-DTFE's single-precision grids still repeat to the byte; its point
                                   #   values and double build move at rounding
 make DTFE PS-DTFE LIBDEFLATE=0    # the tessellation cache with zlib instead of libdeflate (default auto)
@@ -66,12 +67,12 @@ object directory automatically. Header edits rebuild all affected objects (auto-
 ## Download (`scripts/download_snapshots.sh`)
 
 API key: `-k KEY` (`--api-key`), or `TNG_API_KEY` env, or `~/.tng_api_key` (recommended). The letters have long
-forms: `-c` `--groupcats`, `-t` `--trees`, `-i` `--ics`, `-s` `--sim`, `-d` `--sim-dir` (merge_HDF5.py's spellings). The data root, the folder that
-holds the simulations, is REQUIRED and has no default: `export DTFE_DATA_ROOT=~/IllustrisTNG` (or any
-`/path/to/IllustrisTNG`) before any script below; without it every script stops with "no data root" (`-d` does
-not replace it). Everything lands in the simulation's folder, `sim_dir <SIM>` in `scripts/config.sh`
-(Python: `dtfelib.cli.sim_dir`); `-d` overrides. The simulations may sit in FAMILY folders --
-`<root>/<family>/<sim>/`, e.g. `TNG100/TNG100-3-Dark`, family = the name up to its first `-` -- or
+forms: `-c` `--groupcats`, `-t` `--trees`, `-i` `--ics`, `-s` `--sim`, `-d` `--sim-dir` (merge_HDF5.py's
+spellings). The data root, the folder that holds the simulations, is REQUIRED and has no default:
+`export DTFE_DATA_ROOT=~/IllustrisTNG` (or any `/path/to/IllustrisTNG`) before any script below; without it every
+script stops with "no data root" (`-d` does not replace it). Everything lands in the simulation's folder,
+`sim_dir <SIM>` in `scripts/config.sh` (Python: `dtfelib.cli.sim_dir`); `-d` overrides. The simulations may sit in
+FAMILY folders (`<root>/<family>/<sim>/`, e.g. `TNG100/TNG100-3-Dark`, family = the name up to its first `-`) or
 flat, `<root>/<sim>/`; an existing flat folder wins, and a new simulation goes beside its family's
 folder when that exists. A data root that does not exist (a disk not mounted) stops the scripts rather
 than letting them write elsewhere. Anything whose merged/converted product already exists is skipped automatically.
@@ -103,15 +104,12 @@ python3 python/tools/merge_HDF5.py -d "$SIMDIR" --ics             # ICs conversi
 python3 python/tools/merge_HDF5.py -d "$SIMDIR" \
     --snapshots-too --groupcats --trees --ics --delete-chunks --snaps 0 4 17 33 50 99
 
-# upgrade PRE-unification combined files in place (idempotent, chunk-free):
-python3 python/tools/merge_HDF5.py -d "$SIMDIR" --fix-units
-
 # standalone ICs conversion (what --ics wraps):
 python3 python/tools/convert_ic_units.py "$SIMDIR/ics.hdf5" "$SIMDIR/combined_ics.hdf5"
 ```
 
 `--hubble 0.6774` is only a fallback when a file lacks `HubbleParam`; `-n N` forces the chunk
-count instead of globbing. `-d` (the simulation's folder) is required -- there is no default simulation -- and
+count instead of globbing. `-d` (the simulation's folder) is required (there is no default simulation), and
 without snapshot numbers it merges 0 4 17 33 50.
 
 ---
@@ -119,14 +117,15 @@ without snapshot numbers it merges 0 4 17 33 50.
 ## Run scripts (`scripts/run_ps_dtfe.sh`, `run_dtfe.sh`, `run_ps_pipeline.sh`)
 
 Config comes from `scripts/config.sh` (`DTFE_DATA_ROOT`, `DTFE_SIM` env; the simulation folder is
-resolved by `sim_dir`, flat or per-family -- see Download above) plus flags. The data root is REQUIRED (the lines
+resolved by `sim_dir`, flat or per-family, see Download above) plus flags. The data root is REQUIRED (the lines
 below assume `export DTFE_DATA_ROOT=~/IllustrisTNG`), and so is the simulation: `-s SIM` or `DTFE_SIM` (no default;
 the lines below without `-s` assume `export DTFE_SIM=TNG100-3-Dark`). Positional
 arguments override the snapshot list (default: 99). Partitioning is auto-tuned unless `PARTITION` /
-`MAX_CONCURRENT` are set. Both default to the production settings (512^3; the GPU on a GPU build, but standard
-DTFE's sampled average on the CPU in every run mode; the T-web and V-web at `LAMBDA_TH` 0.3) and, since 2026-11-09, to the exact cell average (`--exact`); `--sampled`,
-`DTFE_EXACT_AVERAGE=0` or a `SUBSAMPLES` count (`-n`) selects the sampled one. They pass the run mode on every run,
-`balanced` unless `--run-mode` or `DTFE_RUN_MODE` says otherwise (`performance` inside a SLURM or PBS job).
+`MAX_CONCURRENT` are set. Both default to the production settings (512^3; the binary's device pick: the GPU on a
+GPU build, but standard DTFE's sampled average on the CPU in every run mode; the T-web and V-web at `LAMBDA_TH` 0.3)
+and to the exact cell average (`--exact`); `--sampled`, `DTFE_EXACT_AVERAGE=0` or a `SUBSAMPLES`
+count (`-n`) selects the sampled one. The run mode is the binary's too, `balanced` unless `--run-mode` or
+`DTFE_RUN_MODE` says otherwise (`performance` inside a SLURM or PBS job).
 
 ```bash
 ./scripts/run_ps_dtfe.sh                                  # PS-DTFE, snapshot 99 of $DTFE_SIM (exact deposit)
@@ -141,14 +140,14 @@ DTFE's sampled average on the CPU in every run mode; the T-web and V-web at `LAM
 DTFE_SIM=TNG100-3-Dark ./scripts/run_ps_dtfe.sh 0 50 99   # sim via env
 PARTITION="5 5 5" MAX_CONCURRENT=2 ./scripts/run_ps_dtfe.sh -s TNG300-3-Dark 99   # manual memory plan
 THREADS=4 SUBSAMPLES=3 ./scripts/run_ps_dtfe.sh 99        # cap threads; the sampled deposit at 3^3 points per cell
-                                                          #   (the count before 2026-11-14: a smoother cell average
-                                                          #   than the default 1, more time)
+                                                          #   (a smoother cell average than the default 1, more time)
 DRY_RUN=1 ./scripts/run_ps_dtfe.sh 99                     # print the expanded command, run nothing
 AUTO_TUNE_REPORT=1 ./scripts/run_ps_dtfe.sh 99            # only the auto-tuner's split + predicted peak
 
 ./scripts/run_dtfe.sh -s TNG50-3-Dark -g 512 99           # standard DTFE (exact cell average, padding 15)
 DTFE_GPU=0 ./scripts/run_dtfe.sh 99                       # the CPU on a GPU build (the GPU is the default there)
-DTFE_EXACT_AVERAGE=0 ./scripts/run_dtfe.sh 99             # Monte-Carlo cell means instead of the exact average, on the CPU
+DTFE_EXACT_AVERAGE=0 ./scripts/run_dtfe.sh 99             # Monte-Carlo cell means instead of the exact average,
+                                                          #   on the CPU
 ./scripts/run_dtfe.sh --sampled -n 4 99                   # the same with 4^3 points per cell (-n alone selects it too)
 OUTPUT_PREFIX=output_mc ./scripts/run_dtfe.sh 99          # a variant beside output.* (a ps_* prefix is refused)
 ```
@@ -158,22 +157,22 @@ OUTPUT_PREFIX=output_mc ./scripts/run_dtfe.sh 99          # a variant beside out
 ```bash
 PS_VERTEX_MASS=1        # [--ps-vertex-mass]     DEFAULT 1: chart-independent tet masses.
                         #                        Set 0 only for true-lattice Lagrangian input.
-PS_VOLUME_WEIGHTED=1    # [--ps-volume-weighted] DEFAULT 1; 0 stops the driver (exit 2): PS-DTFE always
-                        #                        volume-weights the velocity moments (the dispersion stays
-                        #                        mass-weighted); the flag is accepted and changes nothing
 DTFE_EXACT_AVERAGE=0    # [--sampled]            the nSub^3 sampled deposit, one point per cell unless SUBSAMPLES
                         #                        is set (a SUBSAMPLES count selects it too);
-                        #                        DEFAULT the exact deposit [--exact] (-e; r3d on the CPU, a z-sweep with -m)
+                        #                        DEFAULT the exact deposit [--exact] (-e; r3d on the CPU, a z-sweep
+                        #                        with -m)
 FACE_GRADIENT=0         # [--per-tet-gradient]   the stream average of each stream's own gradient; DEFAULT (empty) the
                         #                        binary's: with the exact deposit the MEAN flow's
                         #                        divergence/shear from exact face sums (as standard DTFE stores them)
                         #                        + .a_velDivStreams (+ .a_velShearStreams ...: the streams' own),
                         #                        .a_massFluxDiv (1 = --face-gradient, asked for)
-DTFE_GPU=0              # [--gpu]                default auto: the GPU deposit on a GPU build (1 = -m); 0 = the CPU
-DTFE_RUN_MODE=gentle    # [--run-mode]           gentle / balanced / performance; default auto: balanced
-                        #                        (performance inside a SLURM or PBS job)
+DTFE_GPU=0              # [as --gpu]             read by the binary as set: 1 (= -m) the GPU, 0 the CPU; unset (or
+                        #                        auto) the binary's pick, the GPU deposit on a GPU build
+DTFE_RUN_MODE=gentle    # [as --run-mode]        read by the binary as set: gentle / balanced / performance (any
+                        #                        case); unset (or auto) balanced, performance inside a SLURM or PBS job
 GPU_SHARE=0.5           # [--gpu-share]          the exact deposit on the GPU: the share of the partitions deposited
-                        #                        on the GPU, the rest on the free cores; default auto (the run mode's)
+                        #                        on the GPU, the rest on the free cores; default auto (the run mode's,
+                        #                        the binary's own default: nothing passed)
 SUBSAMPLES=2            # [--subsamples]         nSub of the sampled '_a' pass (unset: the binary's 1, one point
                         #                        per cell; more points: a smoother cell average, more time); set,
                         #                        it selects the sampled deposit [--sampled] unless
@@ -186,29 +185,27 @@ SCRATCH_DIR=/tmp/dtfe   # [--scratch-dir]        back the full-grid accumulators
 PS_CAUSTICS=0           # [--ps-caustics]        DEFAULT 1: '.caustic' fold flag + '.causticClass'
 PS_CAUSTIC_CUSPS=1      # [--ps-caustic-cusps]   + bit7 A3 cusp AND bit8 A4 swallowtail
                         #                        indicators (needs PS_CAUSTICS=1; opt-in, bit7
-                        #                        0.01% false positives, ~1.8x caustic cost)
+                        #                        0.01% false positives, a slower caustic pass)
 PARALLEL_TRIANGULATION=1  # [--parallel-triangulation]  the parallel Delaunay insert at any size (default 0:
                         #                        the binary's rule, from 1e6 points where cores are free); the
                         #                        single-precision grids repeat to the byte; point values and
                         #                        the double build move at rounding
 PS_LAGRANGIAN_PADDING=0  # [--ps-lagrangian-padding]  the Eulerian padding rule (default: the binary's 8 spacings)
 TESSELLATION_CACHE=/tmp/dtfe-t  # [--tessellation-cache] reuse the tessellation across runs (created if
-                        #                        missing; LOCAL dir, ~0.15 KB/vertex -- deflated)
+                        #                        missing; a LOCAL dir; the files are deflated)
 LAMBDA_TH=0.3           # [--lambda-th]          T-web/V-web eigenvalue threshold
                         #                        (script default 0.3, the binary's default too)
 PS_LAGRANGIAN_INPUT=ics.h5  # [--ps-lagrangian-input]  override the auto-detected combined_ics.hdf5
 OUTPUT_PREFIX=ps_ab     # writes <prefix>.* so an A/B grid set can sit beside the production one
-FIELDS="density_a ..."  # [--field]              override the field list (default: density_a velocity_a divergence_a shear_a)
+FIELDS="density_a ..."  # [--field]              override the field list (default: density_a velocity_a
+                        #                        divergence_a shear_a)
 PARTITION="4 4 4"       # [--partition]          explicit Lagrangian split (else auto-tuned; "1" = one triangulation)
 MAX_CONCURRENT=2        # [--max-concurrent]     cap simultaneous partition pipelines
 PS_MERGE=completion-order  # [--ps-merge]       merge as the partitions finish (default index-order, passed
-                        #                        explicitly: the memory gate stays on under the auto-tuner's speed split)
-PS_MERGE=fixed-point    # [--ps-merge]           opt-in order-free integer merge
+                        #                        explicitly: the memory gate stays on under the auto-tuner's speed
+                        #                        split)
 DTFE_RESUME=0           # start a killed partitioned run over (default 1: --resume from its checkpoint)
 THREADS=4               # OMP_NUM_THREADS cap
-# older names, deprecated (read for one release with a warning): PS_EXACT, PS_GPU, PS_METAL, AVG_SUBSAMPLES,
-# older names, deprecated: PTS_CONVENTIONS, PS_PARALLEL_TRI, PS_LAG_PADDING, TESS_CACHE, LAGRANGIAN_INPUT,
-# older names, deprecated: ORDERED_MERGE, FIXED_POINT_MERGE, PS_RESUME (README.md, Running on TNG snapshots: the table)
 ```
 
 `run_ps_pipeline.sh` is **compute-only** (no plotting): per snapshot it regenerates the
@@ -241,7 +238,7 @@ GRID_SIZE=512 PTS_VEL_GRAD=1 ./scripts/run_ps_pipeline.sh
 ./DTFE demo/z0_64.gadget out --grid 64 --field density --periodic --padding 12
 
 # standard DTFE, all main fields, GPU '_a' pass, exact by default (run_dtfe.sh adds --exact --padding 15
-# and the T-web / V-web at --lambda-th 0.3; that padding and threshold are the binary's own defaults now)
+# and the T-web / V-web at --lambda-th 0.3; that padding and threshold are also the binary's own defaults)
 ./DTFE combined_099.hdf5 out --grid 512 --periodic --input-format 105 --mpc-unit 1000 \
     --field density_a velocity_a gradient_a --gpu
 
@@ -254,12 +251,11 @@ GRID_SIZE=512 PTS_VEL_GRAD=1 ./scripts/run_ps_pipeline.sh
 ./PS-DTFE combined_099.hdf5 ps_out --grid 512 --periodic --input-format 105 --mpc-unit 1000 \
     --field density_a velocity_a dispersion_a --ps-lagrangian-input combined_ics.hdf5 \
     --ps-vertex-mass          `# chart-independent tet masses (removes the 1-D(z_ic)/D(z) bias)` \
-    --ps-volume-weighted      `# accepted (the driver passes it); PS-DTFE always volume-weights` \
     --ps-caustics             `# the caustic classes (.caustic, .causticClass)` \
-    --exact                   `# the exact deposit (the default; the driver passes it, with --gpu on a GPU build)`
+    --exact                   `# the exact deposit (the default; the driver passes it; the GPU on a GPU build)`
 
-# the exact deposit on the GPU and the free CPU cores at once: performance's auto share (0.6 on a 10-core
-# M1 Max; the drivers pass '--gpu-share auto' whenever the exact deposit runs on the GPU)
+# the exact deposit on the GPU and the free CPU cores at once: performance's auto share (0.6 at 10 threads;
+# '--gpu-share auto' is the default, and a GPU build picks the GPU without '--gpu': both named here)
 ./PS-DTFE combined_099.hdf5 ps_out --grid 512 --periodic --input-format 105 --mpc-unit 1000 \
     --field density_a velocity_a dispersion_a --gpu --exact --run-mode performance --gpu-share auto
 
@@ -299,11 +295,12 @@ GRID_SIZE=512 PTS_VEL_GRAD=1 ./scripts/run_ps_pipeline.sh
                                                    #   wave with no cusps bit7 flags 0.01% of the
                                                    #   fold cells; an exact A4 lights 74.5% of the
                                                    #   cusp cells against 0.5% for a pure A3.
-                                                   #   bit8 is NOT a subset of bit7. ~1.8x the
+                                                   #   bit8 is NOT a subset of bit7. It slows the
                                                    #   caustic pass, so off by default.
 ./PS-DTFE snap.hdf5 out ... --ps-halo-release 300  # halo-interior tets -> centroid deposit
 ./PS-DTFE snap.hdf5 out ... --exact                     # exact deposit, the default with an '_a' field (r3d on the
-                                                          #   CPU; on the GPU, a GPU build's default: a z-sweep); without '_a' fields it is opt-in
+                                                          #   CPU; on the GPU, a GPU build's default: a z-sweep);
+                                                          #   without '_a' fields it is opt-in
 ./PS-DTFE snap.hdf5 out ... --sampled                   # the nSub^3 sampled deposit instead (--subsamples k, default 1:
                                                           #   one point per cell, quick, noisy; smooth before use)
 ./PS-DTFE snap.hdf5 out ... --scratch-dir /tmp/dtfe       # out-of-core full-grid accumulators
@@ -313,7 +310,7 @@ GRID_SIZE=512 PTS_VEL_GRAD=1 ./scripts/run_ps_pipeline.sh
 # reuse the tessellation across runs: the first run writes it, later runs with the SAME inputs
 # load it and skip both the triangulation and the vertex-density pass. The grid, the fields and
 # the sample points may all change and it still hits; a changed input file, --mean-density or
-# geometry is a MISS (rebuild). Needs a LOCAL directory and ~0.15 KB per tessellation vertex.
+# geometry is a MISS (rebuild). Needs a LOCAL directory.
 # Partitioned runs cache every tessellation they build (PS: one file per partition; standard:
 # one per thread sub-box, or per partition under --sample-points).
 mkdir -p /private/tmp/dtfe-tess
@@ -323,11 +320,13 @@ mkdir -p /private/tmp/dtfe-tess
     --sample-points b.bin --tessellation-cache /private/tmp/dtfe-tess     # reuses it
 ./PS-DTFE snap.hdf5 out ... --tessellation-cache DIR --verbose 3          # says why a lookup missed
 ./PS-DTFE snap.hdf5 out ... --field vweb --lambda-th 0.3 --scale-factor 0.25 --hubble 0.6774
-./DTFE   snap.hdf5 out ... --exact                 # exact '_a' averaging, the default (the GPU on a GPU build; r3d on the CPU elsewhere or with DTFE_GPU=0)
-./DTFE   snap.hdf5 out ... --sampled               # Monte-Carlo '_a' averages (--subsamples k, --average-method; the CPU unless --gpu)
+./DTFE   snap.hdf5 out ... --exact                 # exact '_a' averaging, the default (the GPU on a GPU build;
+                                                  #   r3d on the CPU elsewhere or with DTFE_GPU=0)
+./DTFE   snap.hdf5 out ... --sampled               # Monte-Carlo '_a' averages (--subsamples k, --average-method;
+                                                  #   the CPU unless --gpu)
 ./PS-DTFE snap.hdf5 out --grid 4096 --periodic --mpc-unit 1 --exact \
     --grid-window 20 30 20 30 50 50.1               # only the window's cells of the 4096^3 grid: the
-                                                  # full run's cells there, in seconds (the launcher's exact zoom)
+                                                  # full run's cells there (the launcher's exact zoom)
 ./PS-DTFE snap.hdf5 out --grid 4096 --periodic --mpc-unit 1 --exact --grid-window 20 30 20 30 50 50.1 \
     --partition 4 4 4 --tessellation-cache /private/tmp/dtfe-tess   # the query server's split and cache:
                                                   # cached partitions are loaded, those whose occupancy maps
@@ -340,18 +339,21 @@ mkdir -p /private/tmp/dtfe-tess
 Common to both: `--grid N [NY NZ]`, `--periodic`, `--input-format 101|105|106|111|112|121|122`,
 `--mpc-unit <units per Mpc>` (default 1000), `--partition X Y Z`, `--max-concurrent N`, `--verbose 0..3`,
 `--run-mode gentle|balanced|performance` (default `balanced`, `performance` inside a batch job: `SLURM_JOB_ID` or
-`PBS_JOBID` set and not empty; `--run-mode` beats `DTFE_RUN_MODE`, which beats that default), `--lambda-th` (default 0.3),
-`--padding` (default 15 mean spacings in standard DTFE, 5 in PS-DTFE; `--region` / `--region-mpc` only in the standard binary: PS-DTFE refuses them, use `--box`). Input 101 = binary Gadget, 105 = Gadget HDF5 (default), 106 = its HI data, 111 = text
-`x y z w`, 112 = text positions-only, 121 / 122 = raw binary (count, box, pos, weights, vels / structured).
+`PBS_JOBID` set and not empty; `--run-mode` beats `DTFE_RUN_MODE`, which beats that default), `--lambda-th`
+(default 0.3), `--padding` (default 15 mean spacings in standard DTFE, 5 in PS-DTFE; `--region` / `--region-mpc`
+only in the standard binary: PS-DTFE refuses them, use `--box`). Input 101 = binary Gadget, 105 = Gadget HDF5
+(default), 106 = its HI data, 111 = text `x y z w`, 112 = text positions-only, 121 / 122 = raw binary (count, box,
+pos, weights, vels / structured).
 
 **Which flags reach the GPU** (`METAL=1` build): the grid deposit, and
 `--ps-vertex-mass`, `--ps-caustics`,
 the exact deposit (`--exact`) and `--grid-window` all compose with `--gpu`; the standard binary's
 exact average (`--exact`) and the scalar fields (`NO_SCALARS=1` builds) with `--gpu`. CPU-only: point
 evaluation (`--sample-points`/`--serve`: multi-threaded over the tessellation, exact point location).
-Without `--gpu` the binary picks the device: on a GPU build PS-DTFE deposits a run with an `_a` field on the GPU,
-standard DTFE its exact average where that has a GPU path, and standard DTFE's sampled average stays on the CPU. `DTFE_GPU=0` keeps the CPU,
-`DTFE_GPU=1` is `--gpu`, and `--gpu` beats `DTFE_GPU=0`; the run log's device line says which ran and why.
+Without `--gpu` the binary picks the device: on a GPU build PS-DTFE deposits on the GPU,
+standard DTFE its exact average where that has a GPU path, and standard DTFE's sampled average stays on the CPU.
+`DTFE_GPU=0` keeps the CPU, `DTFE_GPU=1` is `--gpu`, and `--gpu` beats `DTFE_GPU=0`; the run log's device line says
+which ran and why.
 
 ### Interactive point evaluation (`--serve`, `dtfelib.Estimator`)
 
@@ -373,30 +375,26 @@ Estimator("big.hdf5", partition=4, resident=3,      # COMPOSITE: 4^3 partition t
           tessellation_cache="/scratch/dtfe-tess")  #   at most 3 in memory (default: the RAM budget)
 Estimator.from_arrays(x, velocities=v, lagrangian=q, values=phi, box=100.0)   # numpy arrays in
 ```
-The answers are bit-identical to a `--sample-points` run on the same points; a single point takes
-~20 us from Python (a cell index built at start-up). Velocities come back in peculiar km/s
+The answers are bit-identical to a `--sample-points` run on the same points; a single point is a quick query from
+Python (a cell index is built at start-up). Velocities come back in peculiar km/s
 (`peculiar=False` for raw Gadget units). The binary side, for other clients:
-`./PS-DTFE snap.hdf5 unused --serve --mpc-unit 1 ...` -- logs on stderr, a binary protocol on
+`./PS-DTFE snap.hdf5 unused --serve --mpc-unit 1 ...`: logs on stderr, a binary protocol on
 stdin/stdout (protocol version 2, documented at the top of `src/CGAL_triangulation/ps_serve.cc`).
 With `--partition` (or when one tessellation would not fit and `--tessellation-cache` is given) the server
 is a COMPOSITE of partition tessellations, each with a 64^3 occupancy map ('<cache file>.occ'): a request
-visits only the partitions that can hold its points, at most `--serve-resident N` stay in memory (LRU, ~666
-B/vertex; `DTFE_SERVE_BUDGET_GB` overrides the budget), and the answers equal `--sample-points --partition`
-with the same split. `--serve-progress` writes progress lines to stderr (the launcher's progress bar);
-`DTFE_SERVE_INDEX=0|1` forces the walk or the cell index.
+visits only the partitions that can hold its points, at most `--serve-resident N` stay in memory (LRU; the budget
+counts 666 B per vertex, and `DTFE_SERVE_BUDGET_GB` overrides the budget), and the answers equal
+`--sample-points --partition` with the same split. `--serve-progress` writes progress lines to stderr (the launcher's
+progress bar).
 
-```bash
-python3 python/tools/upgrade_tess_cache.py "$DTFE_DATA_ROOT/.dtfe-tessellation-cache"  # old cache files -> chunked
-```
 Cache files are written in 16 MB chunks, compressed and decompressed on several cores
-(`DTFE_TESSELLATION_CACHE_THREADS=N` pins the threads per file, `DTFE_TESSELLATION_CACHE_LEGACY=1` writes the old
-single stream; `DTFE_TESSELLATION_CACHE_ZLIB=1` uses zlib where the build has libdeflate (`make ... LIBDEFLATE=0`
-builds without it); `DTFE_TESSELLATION_CACHE_CGAL_IO=1` reads and writes the triangulation through CGAL's own stream
-operators instead of the block reader/writer, and `DTFE_TESSELLATION_CACHE_FINGERPRINT=1` prints a hash of each
-loaded structure -- both for comparisons). A partitioned run with a cache also records the snapshot's particle totals there
+(`DTFE_TESSELLATION_CACHE_ZLIB=1` uses zlib where the build has libdeflate (`make ... LIBDEFLATE=0` builds without
+it); `DTFE_TESSELLATION_CACHE_CGAL_IO=1` reads and writes the triangulation through CGAL's own stream operators
+instead of the block reader/writer, and `DTFE_TESSELLATION_CACHE_FINGERPRINT=1` prints a hash of each loaded
+structure; both for comparisons). A partitioned run with a cache also records the snapshot's particle totals there
 (`globals_<hash>.txt`): a later `--grid-window` run whose partitions are all cached then never reads the
-snapshot. `DTFE_PTS_THREADS=N` pins the point-evaluation
-thread count (default: all cores, or cores / concurrent partitions inside a partitioned PS run).
+snapshot. `DTFE_PTS_THREADS=N` pins the point-evaluation thread count (default: all cores, or cores / concurrent
+partitions inside a partitioned PS run).
 
 ```bash
 # per-stream Lagrangian origin and any per-particle dataset, in a batch run too
@@ -420,9 +418,11 @@ thread count (default: all cores, or cores / concurrent partitions inside a part
                                                             #   ONLY (other fields rejected);
                                                             #   '--field density_a' -> '.a_den'
 ./DTFE snap.hdf5 out --grid 256 --periodic --cic --interlace  # anti-aliasing (2D and PS-DTFE too; without
-                                                               # --periodic it needs a --region half a cell inside
-                                                               # the box). Only the density is interlaced: the T-web
-                                                               # comes from the first, un-interlaced pass.
+                                                               # --periodic the standard binary needs a --region half
+                                                               # a cell inside the box, and PS-DTFE, which takes no
+                                                               # --region, needs --periodic). Only the density is
+                                                               # interlaced: the T-web comes from the first,
+                                                               # un-interlaced pass.
 
 # approximate phase-space density f = rho * g: a SECOND Delaunay in velocity space.
 # Standard binary only; the result lands in the scalar output field. It ASSUMES the local
@@ -439,9 +439,6 @@ thread count (default: all cores, or cores / concurrent partitions inside a part
           --ps-lagrangian-input ics.hdf5                                             # exact rho, sigma
 ./PS-DTFE snap.hdf5 exp --grid 32 --periodic --sample-points pts.bin --ps-per-stream \
           --ps-lagrangian-input ics.hdf5      # the exact f itself: (rho_s, v_s) for every stream
-#   then, in python:
-#     from dtfelib.fields import pseudo_phase_space_density
-#     Q = pseudo_phase_space_density(fs.density(units="mean"), np.sqrt(fs.load("dispersion")))
 
 # redshift cone (spherical) grid instead of a box
 ./DTFE survey.hdf5 out --grid 128 --redshift-cone 0 200 -30 30 -30 30 --cone-origin 0 0 0
@@ -464,11 +461,15 @@ thread count (default: all cores, or cores / concurrent partitions inside a part
 
 ## Analysis (`python/analyze.py`, `python/plot/*.py`)
 
-All plot scripts share the CLI from `dtfelib.cli`: `--data-root PATH` (else `DTFE_DATA_ROOT`: one of the two
-is required, there is no default), `--sim NAME`,
-`--snap N`, `--estimator auto|ps|dtfe`, `--raw` (unaveraged grids), `--smooth SIGMA_CELLS`,
-`--prefix` (an alternate `OUTPUT_PREFIX` grid set). `--sim` is required unless `DTFE_SIM` is set (there is no
-default simulation); `analyze.py` takes `--sim`, `--data-root` and `--snaps` too. The lines below without either
+The plot scripts built on `dtfelib.cli.make_parser` (all of `python/plot/` but plot_pointeval.py,
+plot_pointeval_panels.py and plot_void_crossbox.py) take `--data-root PATH` (else `DTFE_DATA_ROOT`: one of the two
+is required, there is no default), `--sim NAME`, `--snap N` (plot_void_tracking.py and plot_halo_tracking.py:
+`--start-snap N`, the snapshot they follow back from), `--estimator auto|ps|dtfe`, `--raw` (unaveraged grids),
+`--smooth SIGMA_CELLS`, `--prefix` (an alternate `OUTPUT_PREFIX` grid set). The other three take options of their
+own: plot_pointeval.py `--sims` (names or `all`; required), `--snaps`, `--maps`, `--smooth-px SIGMA_PIXELS`;
+plot_pointeval_panels.py `--root` (a PS-DTFE output root) and `--plane` (both required), `--panels`, `--project`;
+plot_void_crossbox.py `--sims` (required), `--smooth-mpc`. `--sim` is required unless `DTFE_SIM` is set (there is
+no default simulation); `analyze.py` takes `--sim`, `--data-root` and `--snaps` too. The lines below without either
 assume `export DTFE_SIM=TNG100-3-Dark`.
 
 ```bash
@@ -490,8 +491,10 @@ python3 python/plot/plot_halo_tracking.py --sim TNG50-3-Dark --estimator ps
 python3 python/plot/plot_marked_correlation_BBKS.py --snap 99
 python3 python/plot/plot_caustic_skeleton.py --sim TNG100-3-Dark --snap 99 --prefix ps_caustic --per-void
 DTFE_SIM=TNG50-3-Dark python3 python/plot/plot_void_fate.py --sim TNG50-3-Dark --exclusive
-DTFE_VOID_GATE=none DTFE_SIM=TNG100-3-Dark python3 python/plot/plot_void_population.py --sim TNG100-3-Dark --size-fixed-r
-python3 python/plot/plot_void_crossbox.py --sims TNG50-3-Dark TNG100-3-Dark TNG300-3-Dark --smooth-mpc 2.1625   # side by side
+DTFE_VOID_GATE=none DTFE_SIM=TNG100-3-Dark python3 python/plot/plot_void_population.py --sim TNG100-3-Dark \
+    --size-fixed-r
+# the three boxes side by side:
+python3 python/plot/plot_void_crossbox.py --sims TNG50-3-Dark TNG100-3-Dark TNG300-3-Dark --smooth-mpc 2.1625
 # also: plot_cosmic_web, plot_eigenvalues, plot_shear_triaxial, plot_velDiv_den, plot_PDF_CDF,
 #       plot_phi_delta, plot_tidal_correlation, plot_shape_filter, plot_contour_filter,
 #       plot_ellipses_contour_3D, plot_smoothing_comparison, plot_pk_compare, plot_web_streams,
@@ -501,8 +504,9 @@ python3 python/plot/plot_void_crossbox.py --sims TNG50-3-Dark TNG100-3-Dark TNG3
 
 # point-evaluation figure pipeline (grid-free, publication resolution)
 python3 python/tools/make_image_plane.py --combined combined_099.hdf5 --axis z --nu 8192 -o plane
-python3 python/plot/plot_pointeval.py                     # one figure per field, all snapshots
-python3 python/plot/plot_pointeval_panels.py              # 3-panel density/sheet/N_streams
+python3 python/plot/plot_pointeval.py --sims TNG100-3-Dark   # one figure per field, all snapshots (the pipeline's)
+python3 python/plot/plot_pointeval_panels.py --root ps_out --plane plane.json
+                                     # 3-panel density/sheet/N_streams of a PS-DTFE run with --sample-points plane.bin
 python3 python/tools/compare_deposits.py --sim TNG100-3-Dark --snap 99 --prefix-a ps_sampled --prefix-b ps_output
                                                           # A/B a sampled against an exact-deposit grid set
 python3 python/tools/void_outlines.py --sim TNG100-3-Dark --snap 99 --smooth-mpc 2.1625 --csv voids.csv   # void table
@@ -539,14 +543,16 @@ binary on any snapshot file), Pipeline, Plots, Explore (maps of any run + click-
 beside the log: Queue, Figures, Runs (every run log on disk, stale-output flags, load settings,
 move to Trash) and Running now (every DTFE run on the machine, with Stop). Every job shows its commands;
 Export saves them as a bash script or SLURM job. The modules: `app.py` + `app_*.py`, `explore.py` +
-`explore_*.py`, `runspec.py` + `runspec_*.py` (README, Graphical launcher).
+`explore_*.py`, `runspec.py` + `runspec_*.py` (docs/launcher-and-analysis.md; the modules: docs/developer-guide.md,
+Source layout).
 
 ## Tests
 
 `tests/ci_suite.sh build|core|double|2d|gui|oldpy|variants|all` runs the suites CI runs (the list with
-the reasons is in its header; README, Tests). Single suites:
+the reasons is in its header; docs/developer-guide.md, Tests). Single suites:
 
 ```bash
+make check                                    # after a build: both programs, three suites, no simulation data
 tests/ci_suite.sh core                        # every CPU suite against ./DTFE and ./PS-DTFE
 DTFE_TEST_PRECISION=double tests/ps_window_check.sh --no-build    # any suite, against the double pair
 python3 tests/run_tests.py                    # standard-DTFE suite + the stored regression reference
@@ -555,9 +561,9 @@ tests/ps_smoke_test.sh                        # build + Zel'dovich pancake sanit
 tests/ps_smoke_test.sh --no-build             # reuse the existing binary (all .sh support this)
 python3 tests/ps_regression_test.py --update-baseline   # regenerate the PS metric baseline
 N=32 GRID=64 tests/ps_point_eval_check.sh --no-build    # bigger problem via env
-python3 tests/docs_drift_check.py             # README / COMMANDS.md flags and knobs against the code
+python3 tests/docs_drift_check.py             # the documents' flags and knobs against the code
 ~/.venvs/dtfe-gui/bin/python tests/py_gui_app_test.py   # the window, offscreen, end to end
-python3 python/selftest.py                    # sandboxed pipeline+plots selftest (~2 min)
+python3 python/selftest.py                    # sandboxed pipeline+plots selftest
 tests/ps_scaling_benchmark.sh                 # strong-scaling table (MIN_EFFICIENCY=0.4); not in CI
 
 # GPU (METAL=1) builds only, by hand:
@@ -572,7 +578,7 @@ python3 tests/generate_ps_test_data.py --out snap.hdf5 --n 32 --box 100 \
     --margin-frac 0.2           `# non-periodic clump in vacuum instead`
 ```
 
-CI (`.github/workflows/ci.yml`) runs three jobs: build-and-test (`ci_suite.sh build core gui double 2d`,
-the standard-DTFE regression against its stored reference and the auto-tune and `--scratch-dir` suites
-included), old-python and compile-variants. The Metal GPU path and the GPU suites are
-local-only.
+CI (`.github/workflows/ci.yml`) runs on a push to any branch, on pull requests and by hand, in three jobs:
+build-and-test (`ci_suite.sh build core gui double 2d`, the standard-DTFE regression against its stored reference and
+the auto-tune and `--scratch-dir` suites included), old-python and compile-variants. The Metal GPU path and the GPU
+suites are local-only.

@@ -80,11 +80,9 @@ class PipelineSpec:
         self.advanced = _rs.clean_advanced(self.advanced, type(self))
 
     def mode(self) -> _rs.QualityMode:
-        """What this job's quality implies (runspec.quality_mode); its device by the largest simulation's
-        particles; with the Advanced overrides it passes (runspec.apply_advanced), as RunSpec's."""
-        return _rs.apply_advanced(_rs.quality_mode(
-            self.quality, "ps", self.fields, lambda: max((_rs.dm_particles(s) or 0 for s in self.sims), default=0)
-            or None, _rs.job_precision(self), run_mode=self.run_mode), self)
+        """What this job's quality implies (runspec.quality_mode), with the Advanced overrides it passes
+        (runspec.apply_advanced), as RunSpec's."""
+        return _rs.apply_advanced(_rs.quality_mode(self.quality), self)
 
     def plane_json(self, sim: str, nu: int | None = None) -> Path:
         return _rs.sim_dir(sim, self.data_root) / f"hires_plane_{self.axis}{nu or self.nu}.json"
@@ -142,8 +140,9 @@ class PipelineSpec:
 
     def check_step(self, sim: str, snaps: list[int], nu: int) -> _rs.Step:
         """run_ps_dtfe.sh in report mode with every setting run_ps_pipeline.sh would pass it (the run
-        options through the environment, the GPU flag, this plane) -- a plane not generated yet, or one
-        the script will regenerate, is sized by its point count."""
+        options through the environment, its pinned DTFE_GPU among them, which '-m' repeats for a Device GPU,
+        and this plane) -- a plane not generated yet, or one the script will regenerate, is sized by its
+        point count."""
         argv = [str(_rs.PS_SCRIPT), "-s", sim, "-g", str(self.grid)] + (["-m"] if self.mode().gpu else []) \
             + [str(n) for n in sorted(snaps)]
         env = {k: v for k, v in self.command()[1].items() if k not in _rs.PIPELINE_ONLY_KEYS}
@@ -153,7 +152,7 @@ class PipelineSpec:
             env["SAMPLE_POINTS"] = str(plane_bin)
         else:
             env["DTFE_AUTO_PTS_N"] = str(self.plane_points(nu))
-            env["DTFE_AUTO_PTS_VEL_GRAD"] = "1" if self.vel_grad else "0"   # the binaries' knob (DTFE_AUTO_PTS_VELGRAD before P6.7)
+            env["DTFE_AUTO_PTS_VEL_GRAD"] = "1" if self.vel_grad else "0"   # the binaries' knob
         return _rs.Step(f"memory check {sim} {nu}^2", argv, env)
 
     def stale(self, sim: str, nu: int | None = None) -> tuple[list[int], int]:
@@ -161,8 +160,13 @@ class PipelineSpec:
         <prefix>.pts_den newer than the combined file and the plane and holding the plane's point count
         (+ .pts_velGrad present), and a plane file of this job's geometry (a differing one is regenerated:
         everything is stale then). The count: else a 4096^2 slice newer than an older 8192^2 plane
-        would read as current, so the script would skip the compute and every render fail on the size mismatch."""
+        would read as current, so the script would skip the compute and every render fail on the size mismatch.
+        And a snapshot whose <prefix>.runlog an older version of the programs wrote (no header 'run mode' line:
+        results.older_log, the script's own test on the log's head) is computed again, as the script recomputes it;
+        a snapshot without a run log is judged by the file times alone."""
         import json
+
+        import results as R                 # (pure Python, no Qt: the run-log readers)
         sp = _rs.sim_dir(sim, self.data_root)
         plane_bin = self.plane_json(sim, nu).with_suffix(".bin")
         plane_ok = (plane_bin.is_file() and self.plane_json(sim, nu).is_file()
@@ -181,7 +185,8 @@ class PipelineSpec:
             fresh = (not self.force and plane_ok
                      and den.is_file() and den.stat().st_mtime > max(f.stat().st_mtime, plane_bin.stat().st_mtime)
                      and den.stat().st_size // 8 == want_pts
-                     and (not self.vel_grad or (f.parent / f"{self.output_prefix}.pts_velGrad").is_file()))
+                     and (not self.vel_grad or (f.parent / f"{self.output_prefix}.pts_velGrad").is_file())
+                     and not R.older_log(f.parent / f"{self.output_prefix}.runlog"))
             if not fresh:
                 todo.append(n)
         return todo, total
@@ -265,20 +270,15 @@ class PipelineSpec:
                "PLANES": str(self.planes), "SUPERSAMPLE": str(self.supersample),
                # the run options, always spelled out (as RunSpec does): a stray knob exported in the
                # login shell must not leak into a run. The count only for the sampled deposit; pinned EMPTY for the
-               # exact one, which takes no count from the job, and its older name AVG_SUBSAMPLES pinned empty beside it
-               # (as RunSpec.command pins it; the comment above runspec.OLDER_KNOB_NAMES says why)
+               # exact one, which takes no count from the job (as RunSpec.command pins it)
                "SUBSAMPLES": str(m.nsub) if m.deposit != "exact" else "",
-               **({"AVG_SUBSAMPLES": ""} if m.deposit == "exact" else {}),
                "PS_VERTEX_MASS": "1" if m.vertex_mass else "0",
-               "PS_VOLUME_WEIGHTED": "1" if m.volume_weighted else "0",
                "PS_CAUSTICS": "1" if self.caustics else "0",
                "PS_CAUSTIC_CUSPS": "1" if self.caustic_cusps else "0",
-               "PS_LINEAR_DEPOSIT": "1" if m.linear_deposit else "0",
                "FACE_GRADIENT": _rs.face_gradient_env(self),
                "DTFE_FACE_GRADIENT": ""}              # the binary's own switch, pinned unset as RunSpec pins it
         env.update(_rs.ps_exact_env(m.deposit == "exact"))
-        env.update(_rs.ps_run_env(self))            # the GPU (-m only switches it on), merge order, start over ...
-        env.update(_rs.ps_conventions_env(m.pts_conventions))
+        env.update(_rs.ps_run_env(self))            # the device knob, merge order, start over ...
         if self.planes > 1:
             env["THICKNESS"] = _rs._num(self.thickness)
         try:
@@ -376,7 +376,7 @@ class PipelineSpec:
 
     @classmethod
     def from_dict(cls, d: dict) -> "PipelineSpec":
-        """A saved job: an older one's deposit read as its quality (runspec.migrate_quality), unknown keys dropped,
-        bad overrides too (__post_init__)."""
-        d = _rs.migrate_quality(_rs._current_figures_root(d))
+        """A saved job: unknown keys dropped (a key the launcher does not know leaves its default), bad overrides too
+        (__post_init__)."""
+        d = _rs._current_figures_root(d)
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})

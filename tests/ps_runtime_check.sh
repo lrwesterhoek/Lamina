@@ -8,8 +8,7 @@
 #       to '--no-overlap', and the log says it ran
 #   R3  GPU builds only: the look-ahead of a '--gpu' run at --max-concurrent 1 (on by default) against
 #       '--no-overlap': every grid byte-identical (.den, .a_den, .streams, ... and the velocity, an exact
-#       fixed-point sum like the rest); SKIP on a CPU build. Under the debug switch DTFE_GPU_FLOAT_MOMENTS or
-#       DTFE_GPU_FLOAT_MASS (GPU sums as float atomics: two identical runs differ) only the byte comparison SKIPs
+#       fixed-point sum like the rest); SKIP on a CPU build
 #   R4  crash-safe outputs: a finished run leaves no '<file>.part.<pid>' and no progress sidecar; a stale
 #       '.part.<pid>' of a dead pid is removed at the start, one of a live pid is kept, and one whose final file
 #       is missing is kept with its mv (it may be the only copy); a run whose output
@@ -27,8 +26,9 @@
 #       byte-identical to R1's '--ps-merge index-order' run; DTFE_MERGE_STAGE_GB=0 (no staging: the plain ordered merge) and
 #       a stage cap no partition fits under (no room to stage) wait instead, and a machine with no free memory
 #       (DTFE_FREE_GB=0.001) runs one partition at a time behind the memory gate; all byte-identical too;
-#       '--ps-merge completion-order' says so, stages nothing and equals R1 to float rounding; the deprecated
-#       '--completion-order-merge' and '--ordered-merge' together are refused, and so is '--ps-merge ordered'; a default run killed after 10 merges (DTFE_TEST_EXIT_AFTER_PARTITIONS=10) while
+#       '--ps-merge completion-order' says so, stages nothing and equals R1 to float rounding; another value
+#       ('ordered', 'fixed-point') stops the program at option parsing, naming the value and the two modes, with no
+#       output; a default run killed after 10 merges (DTFE_TEST_EXIT_AFTER_PARTITIONS=10) while
 #       partitions are staged has checkpointed exactly partitions 0-9 (the merge order is the index order) and
 #       resumes to R1's grids byte for byte; with the concurrency left to the auto-tuner (the memory gate guards
 #       every partition start) a partition is always staged, and the grids equal DTFE_MERGE_STAGE_GB=0's byte for byte.
@@ -46,8 +46,9 @@
 #   R8  the progress sidecar of a run that does not finish: one that stops on an error (a missing input, found by the
 #       reader after the sidecar is armed; also the standard binary when it is built) exits 1 and leaves none, as the
 #       launcher then reads a failed attempt from its run log instead of a death; one killed after 2 partitions
-#       (DTFE_TEST_EXIT_AFTER_PARTITIONS=2, exit 137) keeps it; one whose outputs could not be put in place (a folder
-#       where the '.den' goes, exit 3) keeps it with phase 'rescued'
+#       (DTFE_TEST_EXIT_AFTER_PARTITIONS=2, exit 137) keeps it, and under DTFE_PROGRESS=0 and DTFE_CHECKPOINT=0 the same
+#       kill leaves neither the sidecar nor a checkpoint (the standard binary too, when it is built); one whose outputs
+#       could not be put in place (a folder where the '.den' goes, exit 3) keeps it with phase 'rescued'
 # Usage: tests/ps_runtime_check.sh [--no-build]   (--no-build is accepted and ignored: the binaries are used as built)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,9 +63,7 @@ rm -rf "$TMP"; mkdir -p "$TMP"
 SNAP="$TMP/waves.hdf5"
 "$PY" tests/generate_ps_test_data.py --out "$SNAP" --n 40 --box 100 --amplitude-factor 1.8 \
     --jitter-frac 0.02 --seed 7 --crossed-waves >/dev/null || { echo "FAIL data gen"; exit 1; }
-PASS=0; FAILS=0
-check() { if [ "$2" = 0 ]; then PASS=$((PASS+1)); echo "  PASS $1"; else FAILS=$((FAILS+1)); echo "  FAIL $1"; fi; }
-# same <a> <b>: tests/lib.sh
+# check / check_result, same <a> <b>, merged_bits: tests/lib.sh
 C=(--grid 48 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density velocity density_a)
 
 echo ">> R1: --ps-merge index-order, --partition 3 3 3 --max-concurrent 4, twice"
@@ -132,7 +131,7 @@ grep -q "every one with sub-grids is spilled to disk" "$TMP/sf.log" && [ "${nsf:
     && same "$TMP/m1" "$TMP/sf"
 check "R7 DTFE_MERGE_SPILL=1 (the system temp folder): all ${nsf:-?} parked partition(s) spilled, byte-identical to --max-concurrent 1" $?
 DTFE_MERGE_SPILL=1 DTFE_SPILL_MIN_GB=2 DTFE_TEST_EXIT_AFTER_PARTITIONS=10 "${R7[@]}" "$TMP/sk3" "${C[@]}" "${P3[@]}" > "$TMP/sk3.log" 2>&1; rc1=$?
-bits="$(grep -a -m1 '^merged ' "$TMP/sk3.runlog.checkpoint/checkpoint" 2>/dev/null | awk '{print $2}')"
+bits="$(merged_bits "$TMP/sk3.runlog.checkpoint" 2>/dev/null)"
 DTFE_MERGE_SPILL=1 DTFE_SPILL_MIN_GB=2 OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/sk3" "${C[@]}" "${P3[@]}" --resume > "$TMP/sk4.log" 2>&1; rc2=$?
 [ "$rc1" = 137 ] && [ "$bits" = "111111111100000000000000000" ] && [ "$rc2" = 0 ] && same "$TMP/m1" "$TMP/sk3"
 check "R7 spilling run killed after 10 merges (exit $rc1): partitions 0-9 checkpointed (${bits:-none}), resumed byte-identical (exit $rc2)" $?
@@ -146,14 +145,14 @@ for e in ("den", "a_den", "vel"):
     if a.size != b.size or not a.size or np.abs(a - b).max() > 1e-5 * max(np.abs(a).max(), 1e-300): sys.exit(1)
 PYEOF
 check "R7 --ps-merge completion-order: completion order, nothing staged, the grids equal R1's to float rounding" $?
-"$BIN" "$SNAP" "$TMP/bad" "${C[@]}" "${P3[@]}" --ordered-merge --completion-order-merge > "$TMP/bad.log" 2>&1; rc=$?
-[ "$rc" != 0 ] && grep -q "contradict each other" "$TMP/bad.log" && [ ! -e "$TMP/bad.den" ]
-check "R7 '--ordered-merge --completion-order-merge' (the deprecated pair) refused (exit $rc)" $?
-"$BIN" "$SNAP" "$TMP/badv" "${C[@]}" "${P3[@]}" --ps-merge ordered > "$TMP/badv.log" 2>&1; rc=$?
-[ "$rc" != 0 ] && grep -q "Unknown value 'ordered' for '--ps-merge'" "$TMP/badv.log" && [ ! -e "$TMP/badv.den" ]
-check "R7 '--ps-merge ordered' (no such mode) refused, naming the value (exit $rc)" $?
+for v in ordered fixed-point; do   # no mode of '--ps-merge': refused at option parsing, nothing written
+    "$BIN" "$SNAP" "$TMP/badv" "${C[@]}" "${P3[@]}" --ps-merge "$v" > "$TMP/badv.log" 2>&1; rc=$?
+    [ "$rc" != 0 ] && grep -qF "Unknown value '$v' for '--ps-merge'; use 'index-order' (the default) or 'completion-order'." \
+        "$TMP/badv.log" && [ ! -e "$TMP/badv.den" ]
+    check "R7 '--ps-merge $v' (no such mode) refused, naming the value and the two modes, no output (exit $rc)" $?
+done
 DTFE_TEST_EXIT_AFTER_PARTITIONS=10 "${R7[@]}" "$TMP/sk" "${C[@]}" "${P3[@]}" > "$TMP/sk.log" 2>&1; rc1=$?
-bits="$(grep -a -m1 '^merged ' "$TMP/sk.runlog.checkpoint/checkpoint" 2>/dev/null | awk '{print $2}')"
+bits="$(merged_bits "$TMP/sk.runlog.checkpoint" 2>/dev/null)"
 OMP_NUM_THREADS=4 "$BIN" "$SNAP" "$TMP/sk" "${C[@]}" "${P3[@]}" --resume > "$TMP/sk2.log" 2>&1; rc2=$?
 [ "$rc1" = 137 ] && [ "$bits" = "111111111100000000000000000" ] && [ "$rc2" = 0 ] && same "$TMP/o1" "$TMP/sk"
 check "R7 killed after 10 merges with partitions staged (exit $rc1): partitions 0-9 checkpointed (${bits:-none}), resumed byte-identical (exit $rc2)" $?
@@ -192,20 +191,13 @@ R7_ROOM_LANES=0.9      # the RAM room, in lanes (the dynamic start line's partit
 R7_PLAN_RAM_MIN=3      # the plan's own run (sgp): at least this many waited in memory
 R7_DYN_RAM_MAX=2       # the dynamic run (sgd): at most this many waited in memory ...
 R7_DYN_SPILL_MIN=2     # ... and at least this many spilled to disk
-# With DTFE_GPU_FLOAT_MOMENTS, DTFE_GPU_FLOAT_MASS or DTFE_MASS_AUDIT set (empty and 0/false/no/off are unset; an old
-# PS_ name counts while its DTFE_ name is empty or unset, as the binaries read it: src/env_knobs.h) the single build
-# keeps the plan's count as well: those sums follow the thread order. R3_SW: the two float switches among them, under
-# which R3's GPU grids are float atomic sums (R3 says why)
-R7_SW=""; R3_SW=""
-for sw in DTFE_GPU_FLOAT_MOMENTS DTFE_GPU_FLOAT_MASS DTFE_MASS_AUDIT \
-          PS_GPU_FLOAT_MOMENTS PS_GPU_FLOAT_MASS PS_MASS_AUDIT; do
-    case "$sw" in PS_*) tw="DTFE_${sw#PS_}"; [ -z "${!tw:-}" ] || continue ;; esac   # the new name set: it is the one read
-    case "$(printf '%s' "${!sw:-0}" | tr '[:upper:]' '[:lower:]')" in
-        0|false|no|off) ;;
-        *) R7_SW="${R7_SW:+${R7_SW} }${sw}"
-           case "$sw" in *_FLOAT_*) R3_SW="${R3_SW:+${R3_SW} }${sw}" ;; esac ;;
-    esac
-done
+# With DTFE_MASS_AUDIT set (empty and 0/false/no/off are unset, as the binaries read it: src/env_knobs.h) the single
+# build keeps the plan's count as well: those sums follow the thread order
+R7_SW=""
+case "$(printf '%s' "${DTFE_MASS_AUDIT:-0}" | tr '[:upper:]' '[:lower:]')" in
+    0|false|no|off) ;;
+    *) R7_SW=DTFE_MASS_AUDIT ;;
+esac
 if precision_double; then
     echo "  SKIP R7: the RAM room beyond the plan's partitions (the double build runs no dynamic concurrency)"
 elif [ -n "${R7_SW}" ]; then
@@ -255,7 +247,7 @@ same "$TMP/n2" "$TMP/l2" && same "$TMP/n2" "$TMP/l3"
 check "R2 ... grids and '.pts_*' byte-identical (look-ahead building, look-ahead loading, no look-ahead)" $?
 
 echo ">> R3: the look-ahead of a --gpu run"
-OBJ=o_ps; precision_double && OBJ=o_ps_d
+OBJ="$PS_OBJ"
 if [ ! -d "$OBJ" ] || [ -f "$OBJ/.gpu_mode_off" ] || [ ! -f "$OBJ/.gpu_mode_metal" ]; then
     echo "  SKIP R3: $OBJ is not a Metal GPU build"
 else
@@ -265,22 +257,12 @@ else
     grep -q "look-ahead on: .* on the GPU" "$TMP/gl.log" \
         && ! grep -q "using the CPU deposit\|deposit unavailable\|ran on the CPU instead" "$TMP/gl.log" "$TMP/gn.log"
     check "R3 a --gpu run at --max-concurrent 1 looks ahead by default (and neither run fell back to the CPU)" $?
-    # The byte comparison needs the GPU's sums to be order-free. The two float switches (R3_SW, read above R7) make
-    # some of them float atomics, whose result follows the order the device threads add in, so two identical --gpu
-    # runs differ with the look-ahead or without it: DTFE_GPU_FLOAT_MOMENTS hands the device no fixed-point units
-    # (ps_interpolation.cc fxGpuWanted): the moment grids and the exact deposit's per-tetrahedron weight totals, which
-    # divide every share (the mass's too), are float sums; DTFE_GPU_FLOAT_MASS keeps the mass grid a float sum
-    # (ps_metal_host.cc floatMass). DTFE_MASS_AUDIT keeps every grid exact: it is compared.
-    if [ -n "${R3_SW}" ]; then
-        echo "  SKIP R3 GPU look-ahead vs --no-overlap byte for byte: ${R3_SW} set (float atomic sums on the GPU differ between any two runs)"
-    else
-        ok=0
-        # the velocity too: every PS grid of a GPU deposit is an exact fixed-point sum
-        for e in den a_den streams a_streams hidden_streams a_hidden_streams vel; do
-            cmp -s "$TMP/gn.$e" "$TMP/gl.$e" || { echo "    differs: .$e"; ok=1; }
-        done
-        check "R3 GPU look-ahead vs --no-overlap: every grid (the velocity included) byte-identical" $ok
-    fi
+    ok=0
+    # the velocity too: every PS grid of a GPU deposit is an exact fixed-point sum
+    for e in den a_den streams a_streams hidden_streams a_hidden_streams vel; do
+        cmp -s "$TMP/gn.$e" "$TMP/gl.$e" || { echo "    differs: .$e"; ok=1; }
+    done
+    check "R3 GPU look-ahead vs --no-overlap: every grid (the velocity included) byte-identical" $ok
 fi
 
 echo ">> R4: crash-safe outputs"
@@ -385,6 +367,20 @@ DTFE_TEST_EXIT_AFTER_PARTITIONS=2 "$BIN" "$SNAP" "$TMP/k8" "${C[@]}" --partition
     > "$TMP/k8.log" 2>&1; rc=$?
 [ "$rc" = 137 ] && [ -s "$TMP/k8.runlog.progress" ]
 check "R8 a run killed after 2 partitions (exit $rc, 137 = SIGKILL) keeps its progress sidecar" $?
+# the switches that turn the sidecar and the checkpoints off: a run killed after 2 partitions leaves both, the same
+# kill under DTFE_PROGRESS=0 and DTFE_CHECKPOINT=0 neither
+for b in "${E8[@]}"; do
+    n="$(basename "$b")"
+    DTFE_TEST_EXIT_AFTER_PARTITIONS=2 "$b" "$SNAP" "$TMP/q8on_$n" "${C[@]}" --partition 2 2 2 --max-concurrent 1 \
+        > "$TMP/q8on_$n.log" 2>&1; rc1=$?
+    DTFE_PROGRESS=0 DTFE_CHECKPOINT=0 DTFE_TEST_EXIT_AFTER_PARTITIONS=2 "$b" "$SNAP" "$TMP/q8off_$n" "${C[@]}" \
+        --partition 2 2 2 --max-concurrent 1 > "$TMP/q8off_$n.log" 2>&1; rc2=$?
+    [ "$rc1" = 137 ] && [ "$rc2" = 137 ] && [ -s "$TMP/q8on_$n.runlog.progress" ] \
+        && [ -s "$TMP/q8on_$n.runlog.checkpoint/checkpoint" ] && [ ! -e "$TMP/q8off_$n.runlog.progress" ] \
+        && [ ! -e "$TMP/q8off_$n.runlog.checkpoint" ]
+    check "R8 $n: killed after 2 partitions, a run keeps its progress sidecar and checkpoint, one under DTFE_PROGRESS=0 and DTFE_CHECKPOINT=0 neither (exit $rc1, $rc2)" $?
+    rm -rf "$TMP/q8on_$n.runlog.checkpoint"
+done
 # exit 3 in a writable folder (a missing one, as in R4, never gets a sidecar): the 'rescued' sidecar is kept
 mkdir -p "$TMP/c8.den"; : > "$TMP/c8.den/blocker"   # a folder where the '.den' output goes: its rename fails
 "$BIN" "$SNAP" "$TMP/c8" "${C[@]}" --partition 2 2 2 --max-concurrent 1 > "$TMP/c8.log" 2>&1; rc=$?
@@ -393,6 +389,4 @@ phase="$("$PY" -c 'import json, sys; print(json.load(open(sys.argv[1]))["phase"]
 check "R8 outputs that could not be put in place (exit $rc) keep the progress sidecar, phase '${phase:-none}'" $?
 rm -rf "$TMP/c8.den" "$TMP"/c8.*.part.* "$TMP/c8.runlog.checkpoint" "$TMP/k8.runlog.checkpoint"
 
-echo "RESULT: $PASS passed, $FAILS failed"
-[ "$FAILS" = 0 ] || exit 1
-exit 0
+check_result

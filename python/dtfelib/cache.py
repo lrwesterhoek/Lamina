@@ -81,7 +81,7 @@ def cache_inventory(root=None, keep_mpc=(), keep_cells=()):
     cells_ok = {f"{float(c):g}" for c in (sig0, *config.SMOOTHING_COMPARISON_SIGMAS, *FIXED_R_CELLS, *keep_cells)}
     mpcs = list(CACHE_SMOOTHING_MPC) + [float(m) for m in keep_mpc]
     from dtfelib.cli import smooth_mpc_env
-    env_mpc = smooth_mpc_env()                      # DTFE_SMOOTH_MPC (DTFE_SIGMA_MPC: its older name)
+    env_mpc = smooth_mpc_env()                      # DTFE_SMOOTH_MPC
     if env_mpc:
         mpcs.append(float(env_mpc))
     try:

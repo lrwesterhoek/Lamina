@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for the size function's raw-density radius: dtfelib.raw_radius (the enclosed -0.8 radius on
-the RAW rho/rho_bar about the catalogue's centres, its cache) and plot_void_population's '--size-rv delta08raw'.
+the RAW rho/rho_bar about the catalogue's centres, its cache) and plot_void_population's
+'--size-rv-definition delta08raw'.
 
 Two tiers:
   * SYNTHETIC (always run, CI): the size function at fixed R (--size-fixed-r: range, ratio, bootstrap, verdict,
@@ -373,7 +374,7 @@ def t_figure():
 
 
 def t_help():
-    """--size-rv offers delta08raw (and the help says what it is)."""
+    """--size-rv-definition offers delta08raw (and the help says what it is)."""
     import subprocess
     pr = subprocess.run([sys.executable, str(REPO / "python" / "plot" / "plot_void_population.py"), "--help"],
                         capture_output=True, text=True, timeout=120)
