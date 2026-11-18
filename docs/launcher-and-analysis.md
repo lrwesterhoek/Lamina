@@ -219,7 +219,11 @@ Explore > Open Output…), then the **Field**, **Component** (with in-plane **ve
   average's `*Streams` fields and the mass flux divergence (`.a_massFluxDiv`).
 - **Compare**: a figure grid of one field across redshifts, one snapshot across fields or across outputs.
 - **Save image…** with the presets *Standard*, *Publication* (vector PDF, 300 dpi), *Bare image* (the map alone,
-  one image pixel per data pixel) and *Slide* (larger fonts).
+  one image pixel per data pixel) and *Slide* (larger fonts). The contour lines on screen are in every saved
+  picture, the Bare image too; a PDF or SVG keeps them as lines up to 16000 pieces a colour and holds more as an
+  image. The file name offered says what the picture shows: simulation, field, redshift,
+  output prefix, grid, plane and slice position, smoothing, log or lin, and the overlays drawn, as in
+  `TNG100-3-Dark_density_z0.00_ps_output1024_grid1024_xy-plane_z55.52Mpc_smooth0_log_contours.svg`.
 
 **Voids** draws the catalogue's distinct voids (see [Voids](#voids)) over the map, the figure grid and the 3D
 view, found at the production 10 cells or at the σ beside the tick (in Mpc, two cells or more; a search estimated

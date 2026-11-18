@@ -337,7 +337,7 @@ def grid_figure(req: dict, items: list, dpi: float = 200.0, opts: dict | None = 
         hi = it["hi"] if it["hi"] > it["lo"] else it["lo"] + 1.0
         im = ax.imshow(data, origin="lower", extent=e, cmap=it["cmap"], vmin=it["lo"], vmax=hi,
                        aspect="equal", interpolation="nearest")
-        lines = it.get("lines") if CT.in_saves(o_) else None
+        lines = it.get("lines")
         if lines:                           # the panel's contour lines, as on screen
             n0, n1 = lines["shape"]
             G.draw_contours_mpl(ax, lines["segments"], lines["colours"],
@@ -409,8 +409,8 @@ def grid_figure(req: dict, items: list, dpi: float = 200.0, opts: dict | None = 
         for i, (key, (im, it)) in enumerate(bars.items()):
             cax = fig.add_axes([cb_x, top - (i + 1) * h - i * gap, cb_w, h])
             cb = fig.colorbar(im, cax=cax)
-            if CT.in_saves(o_):                 # the quantity's panels share its range, so its levels
-                G.mark_levels_mpl(cb, it.get("lines"), it["lo"], it["hi"], CT.LINE_WIDTH_PT)
+            # the quantity's panels share its range, so its levels
+            G.mark_levels_mpl(cb, it.get("lines"), it["lo"], it["hi"], CT.LINE_WIDTH_PT)
             label, ctext, _w, _t = panel_names(it)
             text = ("log₁₀ " if it["log"] else "") + label + ("\n" + ctext.strip() if ctext else "")
             size = 8 * fs * float(np.clip(h * H / 1.6, 0.6, 1.0))   # a short bar (many of them): smaller text
@@ -442,12 +442,13 @@ def grid_dpi(fig, req: dict, items: list, opts: dict) -> float:
 
 def grid_full_pixels(req: dict, items: list, opts: dict):
     """The grid at full resolution: (rgb, overlay or None) for figsave.write_pixels -- the screen's tiles (grid_tiles,
-    the colours and ranges as shown) with each panel at the largest panel's own pixels instead of 1024 at most, and
-    each panel's void outlines over it, clipped to its tile, when the options keep them."""
+    the colours and ranges as shown) with each panel at the largest panel's own pixels instead of 1024 at most, the
+    panels' contour lines as on screen, and each panel's void outlines over it, clipped to its tile, when the options
+    keep them."""
     sizes = [it["img"].shape[0] for it in items if it is not None]
     T = max(sizes)
     rgb, _labels, _bar = grid_tiles(req, items, max_tile=T)
-    segs, colours, _shared = grid_tile_contours(req, items, max_tile=T) if CT.in_saves(opts) else ([], [], None)
+    segs, colours, _shared = grid_tile_contours(req, items, max_tile=T)
     lines = any(np.size(s) for s in segs)
     solid, dashed, clips = grid_tile_circles(req, items, max_tile=T) if opts["voids"] else ([], [], [])
     marks, mark_clips = grid_tile_marks(req, items, max_tile=T) if opts["voids"] else ([], [])
@@ -1037,7 +1038,7 @@ class GridMixin:
     def _save_grid_dialog(self):
         if self.current is None:
             return
-        f, _fmt = self._ask_image_path("Save the figure grid", "figure_grid")
+        f, _fmt = self._ask_image_path("Save the figure grid", self.grid_save_stem())
         if not f:
             return
         QApplication.setOverrideCursor(Qt.WaitCursor)

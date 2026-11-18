@@ -92,7 +92,9 @@
      In the window: off by default and nothing changes; ticked, each layer's lines with the slice, ringing a void's
      centre pixel, the levels marked on the colour bar; unticked the same picture pixel for pixel; a fixed range keeps
      the levels across layers; the smoothing, a difference map and a zoom followed; remembered; the saved map and the
-     figure grid (screen and saved) carry them, the Bare image preset not. The level slider beside the tick: dozens
+     figure grid (screen and saved) carry them, the Bare image preset too; the file name a save offers says what the
+     picture shows (simulation, field, redshift, prefix, grid, plane and place, smoothing, log or lin, the overlays;
+     the figure grid's and the 3D view's own). The level slider beside the tick: dozens
      of positions, its default the rule's own levels, each position right a slightly closer spacing (one factor on
      every step, the same on every layer: still nested, the density mostly below its mean and the mean a level), at
      least two lines at the coarsest, a bounded number at the finest; the map, the grid and the 3D view following it,
@@ -5243,10 +5245,6 @@ def contours_pure():
     check("13. array point (i, j) is image pixel (i + 0.5, n1 - j - 0.5): the map's plane.T[::-1]",
           np.allclose(im, [[[0.5, 7.5], [2.5, 4.5]]]) and np.allclose(CT.image_segments(seg, 2.0, 0.5)[0],
                                                                        [[[1.0, 3.75], [5.0, 2.25]]]), f"{im}")
-    import figsave as FS
-    check("13. a saved map carries the lines when the options keep an overlay: every preset but Bare image",
-          CT.in_saves(FS.options()) and CT.in_saves(FS.preset("publication")) and not CT.in_saves(FS.preset("bare"))
-          and CT.in_saves(dict(FS.options(), arrows=False)))
 
 
 # the colour ranges (1-99 %) of real slices where the level slider's ends are tightest (TNG300-3-Dark 099, ps_output,
@@ -5741,6 +5739,19 @@ def contours_3d_gui():
                                                                           np.bincount(q[basin], minlength=256)),
               f"{ok} {floor} {sh and sh['levels']}")
         x.save_3d_png(TMP / "shells_on.png")
+        import explore_save as ES
+        asked3d = []
+        orig_dlg3d = ES.QFileDialog.getSaveFileName
+        ES.QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (asked3d.append(a[2]), ("", ""))[1])
+        try:
+            x._save_image()
+        finally:
+            ES.QFileDialog.getSaveFileName = orig_dlg3d
+        name3d = ES.view3d_stem(x._3d_res["request"])
+        check("14. Save image (3D) offers the view's own name: the field, the grid, '3D-volume' and its detail, log "
+              "or lin, 'contours' with the shells on", len(asked3d) == 1 and Path(asked3d[0]).name == name3d + ".png"
+              and x.save_stem() == name3d and "_3D-volume_detail" in name3d and name3d.endswith("_contours")
+              and name3d.startswith(f"{SIM}_density_"), f"{asked3d} {name3d}")
         x.contours.setChecked(False)
         ready()
         x.save_3d_png(TMP / "shells_off.png")
@@ -5952,29 +5963,164 @@ def contours_gui():
         import matplotlib.pyplot as plt
         orig_close, figs = plt.close, []
         plt.close = lambda fig=None: figs.append(fig)
+        no_overlays = dict(FS.options(), arrows=False, voids=False)
         try:
             x.save_png(TMP / "contours.png")
             x.save_png(TMP / "contours_bare.png", FS.preset("bare"))
+            x.save_png(TMP / "contours_no_overlays.png", no_overlays)
+            lines_kept, x._contours = x._contours, None     # the same Bare image of a map without lines
+            try:
+                x.save_png(TMP / "contours_bare_plain.png", FS.preset("bare"))
+            finally:
+                x._contours = lines_kept
         finally:
             plt.close = orig_close
+
+        def line_pieces(fig):
+            return sum(len(p_.get_path().vertices) // 2 for p_ in fig.axes[0].patches if isinstance(p_, PathPatch))
         patches = [p_ for p_ in figs[0].axes[0].patches if isinstance(p_, PathPatch)] if figs else []
-        n_saved = sum(len(p_.get_path().vertices) // 2 for p_ in patches)
+        n_saved = line_pieces(figs[0]) if figs else 0
         cbar = getattr(figs[0].axes[1], "_colorbar", None) if figs and len(figs[0].axes) > 1 else None
         bar_lines = sum(len(lc.get_segments()) for lc in getattr(cbar, "lines", []))
-        check("13. Save image: the same pieces (one path per line colour), the levels across its colour bar; the "
-              "Bare image preset leaves them out (the map alone)",
-              patches and n_saved == sum(len(s_) for s_ in x._contours["segments"])
-              and bar_lines == len(x._contours["levels"])
-              and (TMP / "contours_bare.png").is_file() and _png(TMP / "contours_bare.png").shape[:2] == (N, N),
+        n_lines = sum(len(s_) for s_ in x._contours["segments"])
+        check("13. Save image: the same pieces (one path per line colour), the levels across its colour bar",
+              patches and n_saved == n_lines and bar_lines == len(x._contours["levels"]),
               f"{len(patches)} {n_saved} {bar_lines}")
+        bare, plain = _png(TMP / "contours_bare.png"), _png(TMP / "contours_bare_plain.png")
+        drawn = int(np.any(bare[..., :3] != plain[..., :3], axis=-1).sum()) if bare.shape[:2] == plain.shape[:2] else -1
+        check("13. ... the lines the map shows are in every saved picture: the Bare image preset (the map's own "
+              "pixels, the lines over them) and a figure whose options keep no overlay",
+              bare.shape[:2] == (N, N) and plain.shape[:2] == (N, N) and drawn > N
+              and len(figs) == 2 and line_pieces(figs[1]) == n_lines, f"{bare.shape} {drawn} {len(figs)}")
         for f_ in figs:
             orig_close(f_)
-        dlg = FS.make_dialog(x, x.save_options, x.save_context())
-        kept = dlg.options()
-        dlg.deleteLater()
-        check("13. the Save options dialog on this map (no arrows, no outlines on screen, so both greyed out) keeps "
-              "the lines in its options", not x.save_context()["arrows"] and not x.save_context()["voids"]
-              and E.CT.in_saves(kept), f"{kept.get('arrows')} {kept.get('voids')}")
+        # the file name a save offers: what the picture shows
+        import explore_save as ES
+        from types import SimpleNamespace as _NS
+        # (a phase-space output without the face gradient: its stored derivatives are the stream average, the mean
+        # field is computed when asked for; the standard output's are the mean field)
+        tng = _NS(sim="TNG100-3-Dark", snap=99, redshift=2.2e-16, prefix="ps_output1024", n=1024, dim=3,
+                  dir=Path("/data/snapdir_099"), lo=np.zeros(3), length=np.full(3, 110.7), box=((0,) * 3, (110.7,) * 3),
+                  gradient_family=lambda name, grad="stored": "" if name != "divergence" else
+                  "mean" if grad == "mean-field" else "stream", face_gradient=False, _estimator="PS-DTFE")
+        std = _NS(**dict(vars(tng), prefix="output1024", _estimator="DTFE",
+                         gradient_family=lambda name, grad="stored": "mean" if name == "divergence" else ""))
+        own = _NS(sim="", snap=None, redshift=None, prefix="out", n=64, dim=3, dir=Path("/data/my run (v2)"),
+                  lo=np.zeros(3), length=np.full(3, 64.0), box=None, gradient_family=lambda name, grad="stored": "")
+        flat = _NS(**dict(vars(own), dim=2, snap=7))
+        base = {"output": tng, "field": "density", "component": "value", "axis": 2, "index": 346, "log": True,
+                "smooth": 0.0, "smooth3d": False}
+        div = dict(base, field="divergence", log=False, ps_gradient="mean-field")
+        window = (2, 346, [0, 1], np.array([10.0, 20.0]), np.array([12.5, 22.5]), 512, 512)
+        side = {"axis": "z", "u_axis": "x", "v_axis": "y", "center": 55.35, "nu": 4096, "nv": 4096}
+        names = {
+            "map": ES.map_stem(base, overlays=["contours"]),
+            "overlays": ES.map_stem(dict(base, smooth=1.0), overlays=["contours", "arrows", "voids"]),
+            "derivative": ES.map_stem(dict(div, smooth=1.5, smooth3d=True, axis=0)),
+            "stored": ES.map_stem(dict(div, ps_gradient="stored", component="trace (divergence)")),
+            "standard": ES.map_stem(dict(div, output=std)),
+            "custom": ES.map_stem(dict(base, output=own, field="velocity", component="x", axis=1, index=10,
+                                       log=False)),
+            "2d": ES.map_stem(dict(base, output=flat)),
+            "diff": ES.map_stem(dict(base, compare=std, compare_mode="diff", log=False)),
+            "ratio": ES.map_stem(dict(base, compare=_NS(**dict(vars(std), sim="TNG300-3-Dark", redshift=0.4999)),
+                                      compare_mode="ratio", log=False)),
+            "hires": ES.map_stem(dict(div, pts="plane", smooth=1.5, smooth3d=True), pts_side=side),
+            "zoom": ES.map_stem(dict(base, smooth=2.0), window, zoom={"exact": True}),
+            "zoom derivative": ES.map_stem(div, window, zoom={}),
+            "3d": ES.view3d_stem(dict(div, log=True, style="volume", detail=512, contours=True)),
+            "3d planes": ES.view3d_stem(dict(div, style="planes", smooth=1.0)),
+            "grid": ES.grid_stem({"panels": [dict(base), None, dict(base, field="velocity", component="norm")],
+                                  "rows": 1, "cols": 3, "axis": 2, "rel": 0.338, "smooth": 2.0, "smooth3d": False,
+                                  "contours": False}),
+            "grid of two runs": ES.grid_stem({"panels": [dict(div, cmap="RdBu_r"),
+                                                         dict(div, output=std, cmap="RdBu_r")],
+                                              "rows": 1, "cols": 2, "axis": 2, "rel": 0.338, "index": 346,
+                                              "position_at": (2, 37.4585), "smooth": 0.0, "contours": True,
+                                              "ps_gradient": "mean-field"}),
+            "grid of classes": ES.grid_stem({"panels": [dict(base, field="tweb", cmap="viridis")], "rows": 1, "cols": 1,
+                                             "axis": 0, "rel": 0.5, "smooth": 0.0, "contours": True}),
+        }
+        want = {
+            "map": "TNG100-3-Dark_density_z0.00_ps_output1024_grid1024_xy-plane_z37.46Mpc_smooth0_log_contours",
+            "overlays": "TNG100-3-Dark_density_z0.00_ps_output1024_grid1024_xy-plane_z37.46Mpc_smooth1_log_"
+                        "contours_arrows_voids",
+            "derivative": "TNG100-3-Dark_divergence-mean-field_z0.00_ps_output1024_grid1024_yz-plane_x37.46Mpc_"
+                          "smooth1.5-3D_lin",
+            "stored": "TNG100-3-Dark_divergence-trace-divergence-stream-average_z0.00_ps_output1024_grid1024_"
+                      "xy-plane_z37.46Mpc_smooth0_lin",
+            "standard": "TNG100-3-Dark_divergence_z0.00_output1024_grid1024_xy-plane_z37.46Mpc_smooth0_lin",
+            "custom": "my-run-v2_velocity-x_out_grid64_xz-plane_y-cell10_smooth0_lin",
+            "2d": "my-run-v2_density_snap007_out_grid64_smooth0_log",
+            "diff": "TNG100-3-Dark_density_z0.00_ps_output1024_minus_output1024_grid1024_xy-plane_z37.46Mpc_smooth0",
+            "ratio": "TNG100-3-Dark_density_z0.00_ps_output1024_log-ratio-to_TNG300-3-Dark_z0.50_output1024_grid1024_"
+                     "xy-plane_z37.46Mpc_smooth0",
+            "hires": "TNG100-3-Dark_divergence-stream-average_z0.00_ps_output1024_grid1024_xy-plane_z55.35Mpc_"
+                     "hires4096x4096_smooth1.5_lin",
+            "zoom": "TNG100-3-Dark_density_z0.00_ps_output1024_grid1024_xy-plane_z37.46Mpc_"
+                    "zoom-x10.00to12.50-y20.00to22.50Mpc_512pts-exact_log",
+            "zoom derivative": "TNG100-3-Dark_divergence-stream-average_z0.00_ps_output1024_grid1024_xy-plane_"
+                               "z37.46Mpc_zoom-x10.00to12.50-y20.00to22.50Mpc_512pts_lin",
+            "3d": "TNG100-3-Dark_divergence-stream-average_z0.00_ps_output1024_grid1024_3D-volume_detail512_log_"
+                  "contours",
+            "3d planes": "TNG100-3-Dark_divergence-mean-field_z0.00_ps_output1024_grid1024_3D-planes_smooth1_lin",
+            "grid": "TNG100-3-Dark_z0.00_ps_output1024_grid1024_figure-grid-1x3_xy-plane_z34pct_smooth2_log",
+            "grid of two runs": "TNG100-3-Dark_divergence-mean-field_z0.00_grid1024_figure-grid-1x2_xy-plane_"
+                                "z37.46Mpc_smooth0_lin_contours",
+            "grid of classes": "TNG100-3-Dark_tweb_z0.00_ps_output1024_grid1024_figure-grid-1x1_yz-plane_x50pct_"
+                               "smooth0_log",
+        }
+        check("13. the file name a save offers says what the picture shows: simulation, field (component, a "
+              "phase-space derivative's family: the map's choice, a hi-res slice's and a point zoom's stream "
+              "average, the 3D volume's stored grid), redshift, prefix, grid, plane and place, smoothing (not a "
+              "zoom's; a hi-res slice's never '3D'), log or lin, the overlays; a custom output its folder and the "
+              "cell; 2D no plane; a difference map or ratio the other output and what differs of it; the figure "
+              "grid what its panels share, the map's place, 'contours' only where a panel can have lines; a "
+              "redshift of -1e-9 is 'z0.00'", names == want
+              and ES.output_pieces(_NS(**dict(vars(tng), redshift=-1e-9)))[1] == "z0.00",
+              "; ".join(f"{k}: {names[k]}" for k in names if names[k] != want[k]))
+        # a full-resolution map's lines in a PDF or SVG: no path larger than every reader takes
+        import io
+        from matplotlib.backends.backend_agg import FigureCanvasAgg as _Canvas
+        from matplotlib.figure import Figure as _Figure
+        white, black = (1.0, 1.0, 1.0, 0.7), (0.0, 0.0, 0.0, 0.7)
+        rng_ = np.random.default_rng(5)
+        few_, many_ = rng_.random((G.PATH_PIECES, 2, 2)), rng_.random((G.PATH_PIECES + 1, 2, 2))
+        fig_many = _Figure(figsize=(2, 2), dpi=100)
+        _Canvas(fig_many)
+        ax_many = fig_many.add_axes([0, 0, 1, 1])
+        n_many = G.draw_contours_mpl(ax_many, [few_, many_[:1], many_[1:]], [black, white, white], lambda xy: xy)
+        flags_ = [(len(p_.get_path().vertices) // 2, bool(p_.get_rasterized())) for p_ in ax_many.patches]
+        svg_, png_ = io.StringIO(), io.BytesIO()
+        fig_many.savefig(svg_, format="svg", dpi=100)
+        fig_many.savefig(png_, format="png", dpi=100)
+        svg_ = svg_.getvalue()
+        import re as _re
+        longest_ = max((len(m_) for m_ in _re.findall(r'\bd="([^"]*)"', svg_)), default=0)
+        check("13. ... in a PDF or SVG a colour of more than 16000 line pieces is an image at the file's "
+              "resolution, not a path no reader takes (Qt's SVG reader stops a path at 32767 elements, libxml2 "
+              "readers at 10 MB); 16000 pieces stay one path; a PNG is drawn as ever, one path a colour",
+              G.PATH_PIECES == 16000 and n_many == 2 * G.PATH_PIECES + 1
+              and flags_ == [(G.PATH_PIECES, False), (G.PATH_PIECES + 1, True)] and svg_.count("<image") == 1
+              and 0 < longest_ < 2_000_000 and len(png_.getvalue()) > 0
+              and all(not p_.get_rasterized() for p_ in patches),
+              f"{n_many} {flags_} {svg_.count('<image')} {longest_}")
+        stem = x.save_stem()
+        asked = []
+        orig_dlg = ES.QFileDialog.getSaveFileName
+        ES.QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (asked.append(a[2]), ("", ""))[1])
+        try:
+            x._save_image()
+        finally:
+            ES.QFileDialog.getSaveFileName = orig_dlg
+        clean = all(c.isascii() and (c.isalnum() or c in "._+-") for c in stem)
+        check("13. ... Save image offers that name for the map on screen (its field, grid, 'log', 'contours'; no "
+              "spaces), with the options' format; a name typed without a suffix still gets one",
+              clean and stem == ES.map_stem(x._req, x._geometry(), None, x._pts_side, ["contours"])
+              and stem.endswith("_log_contours") and f"_grid{N}_" in stem and "_density_" in stem
+              and len(asked) == 1 and Path(asked[0]).name == f"{stem}.{FS.FORMATS[x.save_options['format']][1][0]}"
+              and FS.with_format(Path("/t") / stem, "svg").name == stem + ".svg"
+              and FS.format_of(Path("/t") / stem, "tiff") == "tiff", f"{stem} {asked}")
         # a class map and a discrete colour map: greyed out, why in the tooltip, the tick kept
         x.snap_combo.setCurrentIndex(x.snap_combo.findData(50))
         shown(lambda: x.current.snap == 50)
@@ -6033,6 +6179,20 @@ def contours_gui():
         # the figure grid: each panel's lines on screen and in the saved figure
         x.grid_set_layout(1, 2)
         x.grid_fill("redshifts")
+        # Save figure with the map still on screen: the grid's own name, not the map's
+        asked = []
+        ES.QFileDialog.getSaveFileName = staticmethod(lambda *a, **k: (asked.append(a[2]), ("", ""))[1])
+        try:
+            x._save_grid_dialog()
+        finally:
+            ES.QFileDialog.getSaveFileName = orig_dlg
+        grid_name = ES.grid_stem(x.grid_request())
+        check("13. Save figure offers the figure grid's name whatever is on screen (here the map): the simulation, "
+              "the field and what else the panels share, 'figure-grid-1x2', the plane and the map's place, "
+              "'contours'", not x._grid_shown and len(asked) == 1 and Path(asked[0]).stem == grid_name
+              and grid_name != x.save_stem() and "_figure-grid-1x2_xy-plane_z" in grid_name
+              and grid_name.startswith(f"{SIM}_density_") and grid_name.endswith("Mpc_smooth0_log_contours"),
+              f"{asked} {grid_name}")
         x.show_grid(True)
         ok = wait_for(qa, lambda: x._grid_shown and not x._grid_busy and x._grid_pending is None
                       and view.canvas.contours is not None, 60)
@@ -6046,8 +6206,37 @@ def contours_gui():
         bare_panels = [sum(isinstance(p_, PathPatch) for p_ in ax.patches) for ax in bare_fig.axes[:2]]
         plt2.close(bare_fig)
         check("13. the figure grid: each panel's own lines on screen (its tile) and in the saved figure, its colour "
-              "bar marked; none in Bare", ok and per_panel[0] > 0 and per_panel[1] > 0 and bare_panels == [0, 0]
+              "bar marked; as many line paths in the Bare image preset's figure",
+              ok and per_panel[0] > 0 and per_panel[1] > 0 and bare_panels == per_panel
               and len(marked) == 2 and all(m_ >= 1 for m_ in marked), f"{ok} {per_panel} {bare_panels} {marked}")
+        # the Bare image preset's own file: the panels' pixels (grid_full_pixels), the lines over them
+        import explore_grid as EG
+        x.save_grid(TMP / "grid_bare.png", FS.preset("bare"))
+        greq = x.grid_request()
+        gitems = E.grid_items(greq)
+        plain_rgb, no_overlay = EG.grid_full_pixels(
+            greq, [None if it_ is None else {k_: v_ for k_, v_ in it_.items() if k_ != "lines"} for it_ in gitems],
+            FS.preset("bare"))
+        gsegs, _gcol, _gsh = E.grid_tile_contours(greq, gitems, max_tile=max(it_["img"].shape[0] for it_ in gitems
+                                                                              if it_ is not None))
+        gbare = _png(TMP / "grid_bare.png")
+        changed = np.any(gbare[..., :3] != plain_rgb[..., :3], axis=-1) if gbare.shape[:2] == plain_rgb.shape[:2] \
+            else np.zeros((1, 1), bool)
+        # every changed pixel within two pixels of a line piece (the pieces in the picture's pixels, y down)
+        near = np.zeros(changed.shape, bool)
+        for s_ in gsegs:
+            ends_ = np.asarray(s_, float).reshape(-1, 2, 2)
+            pts_ = np.concatenate([ends_[:, 0] + t_ * (ends_[:, 1] - ends_[:, 0]) for t_ in np.linspace(0, 1, 9)])
+            for dx_ in range(-2, 3):
+                for dy_ in range(-2, 3):
+                    cx_ = np.clip(np.round(pts_[:, 0] - 0.5).astype(int) + dx_, 0, changed.shape[1] - 1)
+                    cy_ = np.clip(np.round(pts_[:, 1] - 0.5).astype(int) + dy_, 0, changed.shape[0] - 1)
+                    near[cy_, cx_] = True
+        check("13. ... the Bare image preset's file of the grid: the panels' own pixels with each panel's lines over "
+              "them, every changed pixel beside a line piece of that panel (its tile, not flipped)",
+              no_overlay is None and gbare.shape[:2] == plain_rgb.shape[:2] and int(changed.sum()) > N
+              and int((changed & ~near).sum()) == 0 and x.save_stem() == grid_name,
+              f"{gbare.shape} {plain_rgb.shape} {int(changed.sum())} {int((changed & ~near).sum())}")
         count0, paths0 = x.contour_count.text(), view.canvas.contours
         x.contour_detail.setValue(E.CT.DETAIL_MAX)
         ok = wait_for(qa, lambda: x._grid_shown and not x._grid_busy and x._grid_pending is None
@@ -6085,6 +6274,15 @@ def contours_gui():
               x.is_zoomed() and zl is not None and zl["shape"] == (res, res) and len(zring) > 8
               and float(np.hypot(zc[0] - 20.0, zc[1] - 27.0)) < 0.5 and len(view.colorbar.level_marks()) > 0,
               f"{zl and zl['shape']} {zc}")
+        x.smooth.setValue(2.0)                  # the slice's smoothing: a zoom's points are drawn as they are
+        spin(qa, 60)
+        zname = x.save_stem()
+        x.smooth.setValue(0.0)
+        spin(qa, 60)
+        check("13. ... and its file name: the window and its points after the slice's place, no smoothing (a zoom is "
+              "not smoothed)", x.is_zoomed() and f"_zoom-x10.00to20.00-y34.00to44.00Mpc_{res}pts_log" in zname
+              and "smooth" not in zname and zname.startswith(f"{SIM}_density_") and zname.endswith("_contours"),
+              zname)
         x.zoom_back()
         spin(qa, 60)
     finally:

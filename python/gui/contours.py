@@ -528,13 +528,6 @@ def describe_shells(shells: dict | None) -> str:
             f"the top left); lower the opacity to see them past the walls in front")
 
 
-def in_saves(opts: dict) -> bool:
-    """Whether a saved map or figure grid (figsave's options 'opts') carries the contour lines the screen shows: when
-    the options keep an overlay -- the arrows or the void outlines -- so the Bare image preset ('only the map') is the
-    map alone and every other preset has them; the options have no tick of their own for the lines (yet)."""
-    return bool(opts.get("arrows") or opts.get("voids"))
-
-
 def image_segments(lines: dict, scale0: float = 1.0, scale1: float = 1.0) -> list[np.ndarray]:
     """map_lines' pieces in the IMAGE pixels of the map (image = plane.T[::-1]: x along the plane's rows, y downward;
     a sample's centre at x = i + 0.5, y = n1 - j - 0.5), times scale0 / scale1 for a picture resampled to other sizes

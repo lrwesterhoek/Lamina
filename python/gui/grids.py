@@ -1205,12 +1205,21 @@ def draw_void_circles_mpl(ax, circles_mpc, dashed=(), color="white"):
     return n
 
 
+# The most line pieces of one colour a saved PDF or SVG keeps as a path. A full-resolution map can carry hundreds of
+# thousands, and as one path that is a file many programs cannot read (Qt's SVG reader stops a path at 32767
+# elements, two a piece; readers built on libxml2 refuse an attribute over 10 MB, some 200,000 pieces). Cut into
+# several paths the translucent lines would stack where they crowd. So beyond this the colour's lines go into the
+# file as an image at its resolution (matplotlib's 'rasterized'): the picture a PNG shows.
+PATH_PIECES = 16000
+
+
 def draw_contours_mpl(ax, per_level, colours, to_xy, lw: float = 0.6, clip=None) -> int:
     """Contour lines (contours.map_lines' 'segments': one (k, 2, 2) array per level, in the plane's array
     coordinates) on a matplotlib axes as the screen draws them: each level in its colour (contours.colours, RGBA
-    0..1), one path per colour stroked once -- a translucent line keeps one shade where its pieces meet. 'to_xy'
-    maps an (m, 2) array of (i, j) to the axes' data coordinates; 'clip' a matplotlib patch to clip to (a figure
-    grid's tile). Returns the number of pieces drawn."""
+    0..1), one path per colour stroked once -- a translucent line keeps one shade where its pieces meet. In a PDF
+    or SVG a colour of more than PATH_PIECES pieces is an image, not a path (see there). 'to_xy' maps an (m, 2)
+    array of (i, j) to the axes' data coordinates; 'clip' a matplotlib patch to clip to (a figure grid's tile).
+    Returns the number of pieces drawn."""
     from matplotlib.patches import PathPatch
     from matplotlib.path import Path as MPath
     groups: dict = {}
@@ -1223,7 +1232,7 @@ def draw_contours_mpl(ax, per_level, colours, to_xy, lw: float = 0.6, clip=None)
         pts = to_xy(np.concatenate(parts))
         codes = np.tile(np.array([MPath.MOVETO, MPath.LINETO], dtype=MPath.code_type), len(pts) // 2)
         patch = PathPatch(MPath(pts, codes), fill=False, ec=rgba, lw=lw, capstyle="round", joinstyle="round",
-                          clip_on=True)
+                          clip_on=True, rasterized=len(pts) // 2 > PATH_PIECES)
         ax.add_patch(patch)
         if clip is not None:
             patch.set_clip_path(clip)

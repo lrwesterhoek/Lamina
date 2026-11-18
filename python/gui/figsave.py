@@ -89,8 +89,8 @@ PRESET_TIPS = {
                 "outlines as on screen, PNG at 200 dpi, cropped tight",
     "publication": "Everything on, as a vector PDF (the text stays text, editable); a PNG or TIFF chosen in the file "
                    "dialog gets 300 dpi",
-    "bare": "Only the map: no frame, axes, title, colour bar, arrows or outlines; one data pixel per image pixel (a "
-            "4096² plane gives a 4096² image), the colours and range as on screen",
+    "bare": "Only the map and the contour lines it shows: no frame, axes, title, colour bar, arrows or outlines; one "
+            "data pixel per image pixel, the colours and range as on screen",
     "slide": "Everything on with fonts 1.8 times larger, for a projector",
     "last": "The options you used last (remembered between sessions)",
     "custom": "Your changes to a preset",
@@ -598,8 +598,8 @@ def _dialog_class():
             size = f" ({px[0]} × {px[1]} px)" if px else ""
             what = "the panels" if self.ctx.get("grid") else "the map"
             self.kind_full = q["QRadioButton"](f"Full resolution: {what} alone" + size)
-            self.kind_full.setToolTip("One data pixel is one image pixel: no interpolation, the colours and range as "
-                                      "on screen,\nthe arrows and void outlines when ticked below.")
+            self.kind_full.setToolTip("One data pixel is one image pixel: no interpolation, the colours, range and "
+                                      "contour lines\nas on screen, the arrows and void outlines when ticked below.")
             self.kind_full.setWhatsThis(self.kind_full.toolTip() + "\n\nA hi-res slice larger than 4096 points a "
                                         "side is written as shown, block-averaged to 4096.")
             self.kind_figure.setToolTip("The figure as matplotlib draws it, at the resolution below")

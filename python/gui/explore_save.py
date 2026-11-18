@@ -1,10 +1,11 @@
 """The Explore tab's Save image: SaveMixin, the part of ExploreControls that writes the map on screen -- the Save
-options (remembered between sessions), the file dialog, the decorated matplotlib figure or the map's own pixels with
-its contour lines, arrows and void outlines, the table of the voids outlined, and the map's values as .npy or
-.csv."""
+options (remembered between sessions), the file dialog and the file name it offers (map_stem, grid_stem,
+view3d_stem: what the picture shows), the decorated matplotlib figure or the map's own pixels with its contour lines,
+arrows and void outlines, the table of the voids outlined, and the map's values as .npy or .csv."""
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,166 @@ import contours as CT
 import explore as _ex
 import figsave as FS
 import grids as G
+
+# ---------------------------------------------------------------- the file name a save offers
+# One piece per thing that tells a picture from another, joined by '_': simulation, field, redshift, the output's
+# prefix, its grid, the plane and where it lies, the smoothing, log or lin, the overlays drawn. No Qt: a pure function
+# of the request the picture was drawn from.
+GRADIENT_PIECE = {"mean": "mean-field", "stream": "stream-average"}
+
+
+def _piece(text) -> str:
+    """One piece of a file name: letters, digits, '.', '_', '+' and '-' as they are, every run of anything else one
+    '-' (none at the ends)."""
+    return re.sub(r"[^A-Za-z0-9._+-]+", "-", str(text)).strip("-.")
+
+
+def _num(v, decimals: int = 2) -> str:
+    """A number in a file name: fixed decimals, never '-0.00'."""
+    s = f"{float(v):.{decimals}f}"
+    return s.lstrip("-") if float(s) == 0 else s
+
+
+def output_pieces(o) -> tuple[str, str, str, str]:
+    """What names an output in a file name: (the simulation -- a custom output's folder --, the redshift 'z0.00' --
+    'snap099' where only the snapshot number is known, '' where neither is --, the prefix, 'grid1024')."""
+    when = f"z{_num(o.redshift)}" if o.redshift is not None else f"snap{int(o.snap):03d}" if o.snap is not None else ""
+    return _piece(o.sim or o.dir.name), when, _piece(o.prefix), f"grid{int(o.n)}"
+
+
+def name_piece(req: dict) -> str:
+    """The field of a request and its component (not a scalar's 'value'): 'density', 'velocity-x'."""
+    parts = [req["field"]] + ([] if req.get("component", "value") in ("value", "") else [req["component"]])
+    return "-".join(q for q in (_piece(p) for p in parts) if q)
+
+
+def family_of(req: dict) -> str:
+    """Which velocity derivative the map of a request shows ('' another field, 'mean', 'stream'): the output's
+    (grids.OutputSet.gradient_family, by the request's 'ps_gradient'); a hi-res slice is a point evaluation, the
+    stream average."""
+    fam = req["output"].gradient_family(req["field"], req.get("ps_gradient", "stored"))
+    return "stream" if fam and req.get("pts") else fam
+
+
+def zoom_family(req: dict, zoom: dict) -> str:
+    """The same for a zoom of that map (ZoomMixin._render_zoom's rule): a point evaluation, so a phase-space output's
+    stream average, but the mean field in an exact zoom of an output that stored it; standard DTFE's the mean
+    field."""
+    o = req["output"]
+    if req["field"] not in G.GRADIENT_FIELDS:
+        return ""
+    ps = G.estimator_label(o) == "PS-DTFE"
+    return "stream" if ps and not (zoom.get("exact") and o.face_gradient) else "mean"
+
+
+def field_piece(req: dict, family: str | None = None) -> str:
+    """The field of a request as a file name says it: name_piece, and for a phase-space output's velocity
+    derivatives the family shown, 'mean-field' or 'stream-average' ('family', else family_of the request)."""
+    fam = family_of(req) if family is None else family
+    ps = bool(fam) and G.estimator_label(req["output"]) == "PS-DTFE"
+    return name_piece(req) + (f"-{GRADIENT_PIECE[fam]}" if ps else "")
+
+
+def smooth_piece(req: dict) -> str:
+    """'smooth0', 'smooth1.5' (the Gaussian's sigma in cells), 'smooth1.5-3D' when smoothed in 3D (never a hi-res
+    slice: its points are smoothed in their plane)."""
+    s = float(req.get("smooth", 0.0))
+    return f"smooth{s:g}" + ("-3D" if s > 0 and req.get("smooth3d") and not req.get("pts") else "")
+
+
+def _join(pieces) -> str:
+    return "_".join(p for p in pieces if p)
+
+
+def map_stem(req: dict, geometry=None, zoom: dict | None = None, pts_side: dict | None = None,
+             overlays=()) -> str:
+    """The file name (without suffix) Save image offers for the map drawn from request 'req', e.g.
+    'TNG100-3-Dark_density_z0.00_ps_output1024_grid1024_xy-plane_z55.52Mpc_smooth0_log_contours': the simulation,
+    the field (field_piece), the redshift, the output's prefix (and the output a difference map compares with),
+    the grid, the plane and where the slice lies (Mpc; the cell without a box; nothing for a 2D output), a hi-res
+    slice's points or a zoom's window and points ('geometry' = the map's _geometry(), 'zoom' its zoom), the
+    smoothing (not a zoom's: its points are drawn as they are), log or lin (not for a comparison: its mode says),
+    and 'overlays', the names of what is drawn over the map."""
+    o = req["output"]
+    sim, when, prefix, grid = output_pieces(o)
+    axes = _ex.AXES
+    zoomed = zoom is not None and geometry is not None
+    versus, scale = [], ["log" if req.get("log") else "lin"]
+    b = req.get("compare")
+    if b is not None:                           # what differs of B, after 'minus' or 'log-ratio-to'
+        bsim, bwhen, bprefix, bgrid = output_pieces(b)
+        versus = ["minus" if req.get("compare_mode") == "diff" else "log-ratio-to"] \
+            + [p for p, mine in ((bsim, sim), (bwhen, when)) if p != mine] + [bprefix] \
+            + ([bgrid] if bgrid != grid else [])
+        scale = []
+    place = []
+    if req.get("pts") and pts_side is not None:     # a hi-res slice: its own plane and points
+        sd = pts_side
+        place = [f"{sd['u_axis']}{sd['v_axis']}-plane", f"{sd['axis']}{_num(sd.get('center', 0.0))}Mpc",
+                 f"hires{int(sd['nu'])}x{int(sd['nv'])}"]
+    elif o.dim == 3:
+        axis = int(req["axis"])
+        rest = [a for a in range(3) if a != axis]
+        pos = o.lo[axis] + (req["index"] + 0.5) * o.length[axis] / o.n
+        place = [f"{axes[rest[0]]}{axes[rest[1]]}-plane",
+                 f"{axes[axis]}{_num(pos)}Mpc" if o.box is not None else f"{axes[axis]}-cell{int(req['index'])}"]
+    if zoomed:
+        _axis, _index, rest, lo, hi, n0, _n1 = geometry
+        unit = "Mpc" if o.box is not None else "cells"
+        place += [f"zoom-{axes[rest[0]]}{_num(lo[0])}to{_num(hi[0])}-{axes[rest[1]]}{_num(lo[1])}to{_num(hi[1])}{unit}",
+                  f"{int(n0)}pts" + ("-exact" if zoom.get("exact") else "")]
+    field = field_piece(req, zoom_family(req, zoom) if zoomed else None)
+    return _join([sim, field, when, prefix, *versus, grid, *place, "" if zoomed else smooth_piece(req), *scale,
+                  *[_piece(v) for v in overlays]])
+
+
+def view3d_stem(req: dict) -> str:
+    """The file name (without suffix) offered for the 3D view drawn from its request: simulation, field (the volume
+    is of the stored grid: its family, whatever the map's choice), redshift, prefix, grid, '3D-volume' with the
+    detail it is drawn at or '3D-planes' with the smoothing, log or lin, 'contours' when the planes' lines or the
+    volume's shells are on."""
+    sim, when, prefix, grid = output_pieces(req["output"])
+    volume = req.get("style") == "volume"
+    return _join([sim, field_piece(dict(req, ps_gradient="stored") if volume else req), when, prefix, grid,
+                  "3D-volume" if volume else "3D-planes",
+                  f"detail{int(req['detail'])}" if volume and req.get("detail") else "",
+                  "" if volume else smooth_piece(req), "log" if req.get("log") else "lin",
+                  "contours" if req.get("contours") else ""])
+
+
+def grid_stem(req: dict) -> str:
+    """The file name (without suffix) offered for the figure grid of request 'req' (grid_request): what every panel
+    shares of simulation, field (and, with a phase-space panel among them, the derivatives' family), redshift, prefix
+    and grid (a piece the panels differ in is left out), 'figure-grid-2x3', the plane and where the slice lies (the
+    map's place; how far through the box where the request does not say), the smoothing, log or lin where every
+    panel agrees, 'contours' when ticked and a panel can have lines."""
+    panels = [p for p in req["panels"] if p]
+    if not panels:
+        return "figure-grid"
+
+    def shared(values) -> str:
+        values = list(values)
+        return values[0] if all(v == values[0] for v in values) else ""
+    named = [output_pieces(p["output"]) for p in panels]
+    sim, when, prefix, grid = (shared(n[i] for n in named) for i in range(4))
+    asked = [dict(p, ps_gradient=req.get("ps_gradient", "stored")) for p in panels]
+    field = shared(name_piece(p) for p in asked)
+    fam = shared(family_of(p) for p in asked)
+    if field and fam and any(G.estimator_label(p["output"]) == "PS-DTFE" for p in panels):
+        field += f"-{GRADIENT_PIECE[fam]}"
+    axes, axis = _ex.AXES, int(req["axis"])
+    rest = [a for a in range(3) if a != axis]
+    place = []
+    if all(p["output"].dim == 3 for p in panels):
+        at = req.get("position_at")
+        boxed = all(p["output"].box is not None for p in panels)
+        where = f"{axes[axis]}{round(100 * req['rel'])}pct" if at is None else \
+            f"{axes[at[0]]}{_num(at[1])}Mpc" if boxed else f"{axes[axis]}-cell{int(req['index'])}"
+        place = [f"{axes[rest[0]]}{axes[rest[1]]}-plane", where]
+    lines = req.get("contours") and any(not CT.why_not(p["field"], p.get("cmap", "")) for p in panels)
+    return _join([sim, field, when, prefix, grid, f"figure-grid-{int(req['rows'])}x{int(req['cols'])}", *place,
+                  smooth_piece(req), shared("log" if p["log"] else "lin" for p in panels),
+                  "contours" if lines else ""])
 
 
 class SaveMixin:
@@ -97,12 +258,46 @@ class SaveMixin:
             self.set_save_options(dict(self.save_options, format=fmt))
         return str(FS.with_format(f, fmt)), fmt
 
+    def grid_save_stem(self) -> str:
+        """The file name (without suffix) Save figure offers: the figure grid's own (grid_stem of the panels as they
+        stand, shown or not); 'figure-grid' with no panel or a name that cannot be built."""
+        try:
+            req = self.grid_request()
+            return grid_stem(req) if req is not None else "figure-grid"
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            return "figure-grid"
+
+    def save_stem(self) -> str:
+        """The file name (without suffix) Save image offers for the picture on screen: the figure grid's
+        (grid_save_stem), the 3D view's (view3d_stem, once the picture of its request is there) or the map's
+        (map_stem, with the overlays a saved map will carry: the contour lines it shows, the arrows and void
+        outlines the Save options keep); 'explore' with no picture or a name that cannot be built (a save never
+        fails for its name)."""
+        if self._grid_shown:
+            return self.grid_save_stem()
+        try:
+            if self._3d_shown:
+                req = (self._3d_res or {}).get("request")
+                shown = req is not None and (req.get("style") != "volume" or self.view.view3d.volume is not None)
+                return view3d_stem(req) if shown else "explore-3D"
+            if self._req is None or self._plane is None:
+                return "explore"
+            ctx, opts = self.save_context(), self.save_options
+            overlays = [name for name, on in (("contours", bool(getattr(self, "_contours", None))),
+                                              ("arrows", ctx["arrows"] and opts["arrows"]),
+                                              ("voids", ctx["voids"] and opts["voids"])) if on]
+            return map_stem(self._req, self._geometry(), self._zoom if self.is_zoomed() else None, self._pts_side,
+                            overlays)
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            return "explore"
+
     def _save_image(self):
         if self._grid_shown:
             self._save_grid_dialog()
             return
         if self._3d_shown:                      # the 3D view as on screen: a PNG of its pixels
-            f, _chosen = QFileDialog.getSaveFileName(self, "Save the 3D view", str(Path.home() / "explore_3d.png"),
+            f, _chosen = QFileDialog.getSaveFileName(self, "Save the 3D view",
+                                                     str(Path.home() / f"{self.save_stem()}.png"),
                                                      "PNG image (*.png)")
             if f:
                 try:
@@ -113,8 +308,9 @@ class SaveMixin:
         if self._plane is None:
             return
         void_filter = "CSV table of the voids outlined (*.csv)"
-        f, chosen = self._ask_image_path("Save the map", "explore", ["NumPy array of the values (*.npy)",
-                                                                     "CSV table: x, y, value (*.csv)", void_filter])
+        f, chosen = self._ask_image_path("Save the map", self.save_stem(), ["NumPy array of the values (*.npy)",
+                                                                            "CSV table: x, y, value (*.csv)",
+                                                                            void_filter])
         if not f:
             return
         if chosen == void_filter:
@@ -150,8 +346,8 @@ class SaveMixin:
         the default figure: a matplotlib PNG at 200 dpi with title, axes, colour bar, arrows and the void
         outlines as on screen), in the format of the file's suffix (.png, .pdf, .svg, .tif). At full resolution,
         and with no margins and 'match the data' (figsave.writes_pixels): the map's own pixels
-        (_write_full_map). With outlines drawn, '<name>_voids.csv' beside it: the table of those voids.
-        The paths."""
+        (_write_full_map). The contour lines the map shows are in every one of them. With outlines drawn,
+        '<name>_voids.csv' beside it: the table of those voids. The paths."""
         opts = FS.options(self.save_options if options is None else options)
         fmt = FS.format_of(f, opts["format"])
         written = [str(f)]
@@ -168,15 +364,16 @@ class SaveMixin:
                     FS.savefig(fig, f, opts, dpi, fmt)     # the pixel guard, the titles' line breaks, savefig
                 finally:
                     plt.close(fig)
-        if opts["voids"] and self.voids_shown():
-            written.append(self.save_voids_csv(Path(f).with_name(Path(f).stem + "_voids.csv")))
+        if opts["voids"] and self.voids_shown():        # (a name that ends in '_voids' already: not said twice)
+            written.append(self.save_voids_csv(Path(f).with_name(Path(f).stem.removesuffix("_voids") + "_voids.csv")))
         return written
 
     def map_figure(self, options: dict | None = None):
         """The decorated map as a pyplot figure and the dpi to save it at (the options' dpi, or the one matching the
         data): title, axes (frame, ticks, tick labels, axis names in the unit chosen), colour bar and its label, the
-        arrows and void outlines as on screen, each as the options say; margins 'none' = the map alone filling the
-        figure. The caller closes it (plt.close) and applies figsave.rc for a font scale."""
+        arrows and void outlines as on screen, each as the options say, and the contour lines the map shows; margins
+        'none' = the map alone filling the figure. The caller closes it (plt.close) and applies figsave.rc for a
+        font scale."""
         opts = FS.options(self.save_options if options is None else options)
         import matplotlib
         matplotlib.use("Agg", force=False)
@@ -222,8 +419,8 @@ class SaveMixin:
                     cb = fig.colorbar(im, ax=ax, label=self.view.colorbar.label)
                 else:
                     cb = fig.colorbar(im, ax=ax)
-                if CT.in_saves(opts):           # the contour levels across the bar, as on screen
-                    G.mark_levels_mpl(cb, getattr(self, "_contours", None), lo, hi, CT.LINE_WIDTH_PT)
+                # the contour levels across the bar, as on screen
+                G.mark_levels_mpl(cb, getattr(self, "_contours", None), lo, hi, CT.LINE_WIDTH_PT)
         self._map_overlays(ax, opts, um, rest, glo, ghi, ext)
         try:
             FS.fit_width(fig, opts, opts["dpi"])
@@ -235,11 +432,11 @@ class SaveMixin:
 
     def _map_overlays(self, ax, opts: dict, um, rest, glo, ghi, ext) -> None:
         """The contour lines, the arrows and the void outlines over a saved map as on screen, in the coordinates of
-        the unit map 'um' (the axes' unit), each when the options keep it (the lines: contours.in_saves, with any
-        overlay)."""
+        the unit map 'um' (the axes' unit): the lines whenever the map shows them (every preset, the Bare image too),
+        the arrows and the outlines when the options keep them."""
         o = self._req["output"]
         lines = getattr(self, "_contours", None)
-        if lines and CT.in_saves(opts):
+        if lines:
             n0, n1 = lines["shape"]
             (u0, v0), (u1, v1) = (float(glo[0]), float(glo[1])), (float(ghi[0]), float(ghi[1]))
 
@@ -276,8 +473,8 @@ class SaveMixin:
 
     def _write_full_map(self, f, fmt: str, opts: dict) -> None:
         """The map at its own resolution: the screen's pixels, one per cell, zoom point or hi-res point (the colours
-        and range as shown; a hi-res slice over 4096 points a side as shown, block-averaged), the arrows and outlines
-        over them when the options keep them."""
+        and range as shown; a hi-res slice over 4096 points a side as shown, block-averaged), the contour lines over
+        them when the map shows them, the arrows and outlines when the options keep them."""
         req = self._req
         rgb = None if self._grid_shown else self.view.canvas._buf
         if rgb is None or rgb.shape[:2] != self._plane.T.shape:     # not the map's own pixels: colour them again
@@ -288,7 +485,7 @@ class SaveMixin:
         ext = [glo[0], ghi[0], glo[1], ghi[1]]
         arrows = self._arrows is not None and self._arrows["vmax"] > 0 and opts["arrows"]
         voids = opts["voids"] and self._void_result() is not None and self.view.canvas.circles is not None
-        lines = bool(getattr(self, "_contours", None)) and CT.in_saves(opts)
+        lines = bool(getattr(self, "_contours", None))
 
         def overlay(ax):
             ax.set_xlim(ext[0], ext[1])
