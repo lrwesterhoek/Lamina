@@ -494,7 +494,7 @@ def _download_merge(tmp):
         n4 = 270 ** 3
         check("size estimate skips merged snapshots and chunks already on disk",
               rs.DataSpec(data_root=str(tmp), sim="TNG50-4-Dark", snapshots=[50, 99, 67]).download_bytes()
-              == (n4 * 61, 2 * n4 * 32))
+              == (n4 * 64, 2 * n4 * 52))
         check("the ladder plus what is on disk", 99 in rs.data_snapshots(dsim) and 8 in rs.data_snapshots(dsim))
         done = rs.DataSpec(data_root=str(tmp), sim="TNG50-4-Dark", snapshots=[50], download_snapshots=True)
         lv, msg = levels(done)

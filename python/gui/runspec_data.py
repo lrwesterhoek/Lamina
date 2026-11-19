@@ -195,8 +195,9 @@ class DataSpec:
             if empty:
                 out.append(("warning", "no group-catalogue chunks to merge for " + " ".join(f"{n:03d}" for n in empty)))
         if self.delete_chunks:
-            out.append(("warning", "deleting the raw chunks after the merge removes "
-                                   "the only copy of the fields the merge drops (potential, Subfind densities)"))
+            out.append(("warning", "deleting the raw chunks after the merge removes the only copy of what a merged "
+                                   "snapshot does not keep (the positions in double precision; a full-physics run's "
+                                   "gas and stars)"))
         raw, merged = self.download_bytes()
         stale = self.stale_partials()
         if stale:

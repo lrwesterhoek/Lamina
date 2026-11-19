@@ -634,6 +634,29 @@ instead of the snapshots (`--snapshots-too` does both). The launcher's Data tab 
 python3 python/tools/merge_HDF5.py --sim-dir /path/to/data/TNG100/TNG100-3-Dark --snaps 50 99
 ```
 
+A merged snapshot holds the dark-matter particles (`PartType1`) and no other type; the programs read their
+positions, velocities and IDs. The file also carries every other per-particle dataset the chunks hold of them, in
+the particles' order and h-free: for TNG's dark-matter runs `Potential`, `SubfindDMDensity`, `SubfindDensity`,
+`SubfindHsml` and `SubfindVelDisp`, each with TNG's unit attributes and the power of h taken out in
+`h_power_applied`. A merged snapshot keeps the positions in single precision (the chunks hold them in double).
+
+`--add-fields` puts those datasets into a combined file merged before it carried them, from the chunks that are
+still there; the disk needs room for a copy of the file. Positions, velocities, IDs and the file's time stamp stay
+as they are, so no grid built from it looks out of date. The file is larger afterwards: the programs build their
+cached tessellations of that snapshot anew once (the old ones can be deleted), and a killed run of it can no
+longer `--resume`: run it while no run or query server uses the snapshot, and finish a killed run first.
+
+`--verify` compares each combined file with its chunks, particle for particle and dataset for dataset, and changes
+nothing; it exits 1 when a file does not hold everything its chunks do, and names a snapshot whose chunks are gone
+as not compared. With `--delete-chunks`, `--add-fields` and `--verify` delete chunks only after that comparison: of
+the snapshots that compare the same, and of no other. Chunks that also hold gas or stars do not compare the same
+and are kept; a plain merge with `--delete-chunks` removes them once the dark-matter totals verify.
+
+```bash
+python3 python/tools/merge_HDF5.py --sim-dir /path/to/data/TNG100/TNG100-3-Dark --snaps 50 99 --add-fields
+python3 python/tools/merge_HDF5.py --sim-dir /path/to/data/TNG100/TNG100-3-Dark --snaps 50 99 --verify
+```
+
 **2. Run an estimator.** `scripts/run_ps_dtfe.sh` runs PS-DTFE, `scripts/run_dtfe.sh` standard DTFE; with no
 snapshot numbers both run snapshot 99.
 

@@ -15,27 +15,55 @@ UNITS: every combined_* file is h-FREE (ckpc, 1e10 Msun, ckpc km/s), one convent
 all input data. Converted quantities: snapshot Coordinates, header BoxSize and MassTable;
 every groupcat/tree length, mass and spin column per the curated _H_DIVIDE map below (raw
 TNG stores them as ckpc/h / 1e10 Msun/h / ckpc/h km/s). Velocities (km/s), counts, indices
-and IDs carry no h. Self-describing markers record the conversion: each converted dataset
-gets a 'divided_by_h' attribute (= h) and each file an 'HFreeUnits' attribute, which is how
-dtfelib.groupcat/trees restore their documented RAW-unit API when reading merged files, and
-how FieldSet distinguishes new headers from pre-conversion combined snapshots. A column not
-in either unit map is copied raw with a LOUD warning -- classify it before trusting it.
+and IDs carry no h. Self-describing markers record the conversion: each converted groupcat
+or tree column gets a 'divided_by_h' attribute (= h) and each file an 'HFreeUnits' attribute,
+which is how dtfelib.groupcat/trees restore their documented RAW-unit API when reading merged
+files, and how FieldSet distinguishes new headers from pre-conversion combined snapshots. A
+column not in either unit map is copied raw with a LOUD warning -- classify it before
+trusting it.
+
+A SNAPSHOT'S OTHER PARTICLE FIELDS: a merged snapshot holds the dark-matter particles
+(PartType1) and no other type. Beside the positions, velocities and IDs the programs read,
+it carries every other per-particle dataset its chunks hold of them (TNG's -Dark chunks:
+Potential, SubfindDMDensity, SubfindDensity, SubfindHsml, SubfindVelDisp), in the particles'
+order and h-free like the rest: the raw value times h^p, p the chunk's own 'h_scaling'
+attribute (else _H_POWER below; the scale-factor powers are left as TNG has them). Each such
+dataset keeps TNG's unit attributes, 'h_scaling' set to 0, and says the power applied in
+'h_power_applied'. A merge is refused unless every dataset has a value for every particle.
+--add-fields puts them into a combined file written before this (its chunks must still be
+there): positions, velocities and IDs are copied as they are, bit for bit, and the file
+keeps its time stamp, so no grid built from it looks out of date; it is larger afterwards,
+so the programs' cached tessellations of it are built anew once and a killed run of it can
+no longer --resume. What a merged snapshot does not keep is the chunks' double precision:
+its Coordinates are single. --verify compares a combined file with its chunks, particle for
+particle and dataset for dataset, and changes nothing. A merged snapshot's datasets are
+written at their full size, in one piece: it reads two to four times as fast as one grown
+chunk by chunk.
 
 dtfelib.groupcat / dtfelib.trees / the DTFE run scripts all PREFER the combined files when
 present, so after a successful merge the chunk files are redundant: pass --delete-chunks to
-remove them (only after the merged row counts verify against the header totals).
-download_snapshots.sh skips re-downloading anything whose combined product exists.
+remove them. A merge deletes them only after the merged row counts verify against the header
+totals (the other particle types of a full-physics snapshot go with them); --verify and
+--add-fields only after the full comparison, of the snapshots that hold everything their
+chunks do. A new file's bytes are forced to the disk before it takes its final name, and
+(where the file system can) that name before a chunk is deleted. download_snapshots.sh skips
+re-downloading anything whose combined product exists.
 
-h is read from the input file's HubbleParam header (fallback: --hubble).
+h is read from the input file's HubbleParam header (fallback: --hubble); --add-fields and
+--verify take it from the combined file's own 'HFreeUnits'.
 
 Usage:
     python3 merge_HDF5.py -d DIR                                     # snapshot defaults below
     python3 merge_HDF5.py --sim-dir /path/to/TNG50-4-Dark --snaps 8 17 33   # merge snapshots 8, 17, 33
+    python3 merge_HDF5.py -d DIR --add-fields --snaps 50 99          # the other particle fields into old merges
+    python3 merge_HDF5.py -d DIR --verify --snaps 50 99              # each combined file against its chunks
     python3 merge_HDF5.py -d DIR --groupcats --snaps 0 50 99         # groupcats for snaps 0, 50, 99
     python3 merge_HDF5.py -d DIR --trees --ics --delete-chunks
 """
 
+import fcntl
 import os
+import shutil
 import subprocess
 import sys
 
@@ -50,6 +78,7 @@ SNAPSHOT_NUMBERS = [0, 4, 17, 33, 50]
 
 H_VALUE = 0.6774
 
+# what the programs read of a snapshot, in the types a merged file stores
 DATASETS_INFO = {
     "PartType1": {
         "Coordinates": {"shape": (None, 3), "dtype": 'float32'},
@@ -57,6 +86,15 @@ DATASETS_INFO = {
         "Velocities": {"shape": (None, 3), "dtype": 'float32'},
     }
 }
+
+# The other per-particle datasets of TNG's -Dark snapshots and the power of h in their raw units (the TNG data
+# specification, PartType1: Potential (km/s)^2/a, the two Subfind densities (1e10 Msun/h)/(ckpc/h)^3, SubfindHsml
+# ckpc/h, SubfindVelDisp km/s): h-free value = raw * h^power. Only the fallback: a chunk's own 'h_scaling'
+# attribute says the same and is read first. A dataset with neither is copied raw, with a loud warning.
+_H_POWER = {"Potential": 0.0, "SubfindDMDensity": 2.0, "SubfindDensity": 2.0, "SubfindHsml": -1.0,
+            "SubfindVelDisp": 0.0}
+# TNG's unit attributes of a dataset (cgs value = raw * a^a_scaling * h^h_scaling * to_cgs), kept on a carried one
+_UNIT_ATTRS = ("a_scaling", "h_scaling", "length_scaling", "mass_scaling", "velocity_scaling", "to_cgs")
 
 # Groupcat/tree columns whose raw TNG units carry an h (lengths ckpc/h, masses 1e10 Msun/h,
 # spin ckpc/h km/s): divided by h at merge. Curated against the TNG data specification for
@@ -87,8 +125,10 @@ _H_NONE = {
 
 def _sorted_chunks(directory, pattern):
     """Chunk files sorted by their trailing index -- concatenation order defines the global
-    particle/row offsets, so it must match the chunk numbering."""
-    return sorted(Path(directory).glob(pattern), key=lambda p: int(p.stem.split(".")[-1]))
+    particle/row offsets, so it must match the chunk numbering. A name whose index is not a number (a copy
+    made by hand beside the chunks) is not a chunk."""
+    chunks = [p for p in Path(directory).glob(pattern) if p.stem.split(".")[-1].isdigit()]
+    return sorted(chunks, key=lambda p: int(p.stem.split(".")[-1]))
 
 
 class ChunkError(RuntimeError):
@@ -140,18 +180,32 @@ def _expected_chunks(found, attr):
     if not found:
         return None
     with _open_chunk(found[0]) as f:
-        v = f["Header"].attrs.get(attr) if "Header" in f else None
+        try:                                # a chunk truncated past its superblock fails here, not at open
+            v = f["Header"].attrs.get(attr) if "Header" in f else None
+        except (OSError, RuntimeError) as e:
+            raise _chunk_error(found[0], e) from e
     return int(v) if v is not None else None
 
 
-def _report_missing(input_files, n_header):
+def _refetch(name):
+    """How the chunks of a snapshot that has its combined file come back (the download skips such a snapshot)."""
+    return (f"run scripts/download_snapshots.sh from a shell with {name} moved aside (it skips a snapshot whose "
+            "combined file is there, and the launcher's Data tab would merge the snapshot anew), then move it back")
+
+
+def _report_missing(input_files, n_header, merged=None):
+    """The chunks that are not there. 'merged': the combined file's name, in the modes that work on one that
+    exists (--add-fields, --verify), where the download has to be told to fetch."""
     missing = [f for f in input_files if not f.exists()]
     print(f"\nProblem: Can't find {len(missing) or 'any'} subfile(s)"
           + (f" (the header promises {n_header})" if n_header else "") + ":")
     for f in missing:
         print(f"  Missing: {f}")
-    print("  No combined file was written. Run the download again (it fetches what is missing), "
-          "or check -d / -n.\n")
+    if merged:
+        print(f"  Nothing was changed. To fetch what is missing, {_refetch(merged)}; or check -d / -n.\n")
+    else:
+        print("  No combined file was written. Run the download again (it fetches what is missing), "
+              "or check -d / -n.\n")
 
 
 def _partial(output_file):
@@ -162,13 +216,59 @@ def _partial(output_file):
     return partial
 
 
+def _flush(path):
+    """A file's (or a folder's) bytes on the disk itself, not only handed to the system: macOS' full flush where
+    there is one (a plain fsync stops at the drive's own cache there), else fsync."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        try:
+            fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
+        except (AttributeError, OSError):       # not macOS, or a file system without it
+            os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _put(partial, output_file):
+    """The finished .partial under its final name, its bytes on the disk first: a power cut or an unplugged disk
+    right after must not leave that name on a file whose end never arrived. False, the .partial removed and what
+    was under the name before as it was, when the disk refuses."""
+    try:
+        _flush(partial)
+        os.replace(partial, output_file)
+    except OSError as e:
+        partial.unlink(missing_ok=True)
+        print(f"\nError: could not put {Path(output_file).name} in place: {e}\n  Nothing was changed.")
+        return False
+    except BaseException:                       # a Ctrl-C during the flush: no .partial is left
+        partial.unlink(missing_ok=True)
+        raise
+    return True
+
+
 def _delete_chunks(files, verified, what):
     if not verified:
         print(f"  NOT deleting {what} chunks: the merged totals did not verify.")
         return
+    for folder in {f.parent for f in files}:    # the combined file's name on the disk before its sources go
+        try:
+            _flush(folder)
+        except OSError:                         # a file system that cannot flush a folder
+            pass
     for f in files:
         f.unlink()
     print(f"  Deleted {len(files)} {what} chunk file(s).")
+
+
+def _snapshot_chunks(snapshot_str, snapshot_dir, num_subfiles):
+    """(the chunk files a snapshot's header promises, the chunks found on disk, the header's count or None). The
+    count is -n when given, else the header's, and the files on disk only when the header has none."""
+    found = _sorted_chunks(snapshot_dir, f"snap_{snapshot_str}.*.hdf5")
+    n_header = _expected_chunks(found, "NumFilesPerSnapshot")
+    if num_subfiles and n_header is not None and n_header != num_subfiles:
+        print(f"  WARNING: -n {num_subfiles} given, but the header says {n_header} chunk(s) per snapshot")
+    n_files = num_subfiles or n_header or len(found)
+    return [snapshot_dir / f"snap_{snapshot_str}.{i}.hdf5" for i in range(n_files)], found, n_header
 
 
 def merge_snapshot_files(snapshot_num, num_subfiles, base_dir, h_value, datasets_info,
@@ -196,18 +296,10 @@ def _merge_snapshot(snapshot_str, snapshot_dir, output_file, num_subfiles, h_val
     """merge_snapshot_files' body; True when combined_NNN.hdf5 was written and verified (or is there
     already and its chunks are gone: a merge with --delete-chunks run again)."""
     partial = _partial(output_file)         # first: a merge stopped half-way may have left a big one
-    found = _sorted_chunks(snapshot_dir, f"snap_{snapshot_str}.*.hdf5")
+    input_files, found, n_header = _snapshot_chunks(snapshot_str, snapshot_dir, num_subfiles)
     if not found and output_file.exists():
         print(f"  {output_file.name} already exists and no chunks are left: nothing to merge")
         return True
-    n_header = _expected_chunks(found, "NumFilesPerSnapshot")
-    if num_subfiles:
-        if n_header is not None and n_header != num_subfiles:
-            print(f"  WARNING: -n {num_subfiles} given, but the header says {n_header} chunk(s) per snapshot")
-        n_files = num_subfiles
-    else:   # the header's count; the files on disk only when the header has none
-        n_files = n_header or len(found)
-    input_files = [snapshot_dir / f"snap_{snapshot_str}.{i}.hdf5" for i in range(n_files)]
     print(f"Merging {len(input_files)} subfiles...")
 
     if not input_files or any(not f.exists() for f in input_files):
@@ -219,8 +311,8 @@ def _merge_snapshot(snapshot_str, snapshot_dir, output_file, num_subfiles, h_val
         box_size_physical = box_size / h_value
 
     try:
-        total_counts, expected, types = _write_snapshot(partial, input_files, h_value, datasets_info,
-                                                        box_size_physical)
+        total_counts, expected, types, short = _write_snapshot(partial, input_files, h_value, datasets_info,
+                                                               box_size_physical)
     except ChunkError:
         partial.unlink(missing_ok=True)
         raise
@@ -228,7 +320,7 @@ def _merge_snapshot(snapshot_str, snapshot_dir, output_file, num_subfiles, h_val
         partial.unlink(missing_ok=True)
         print(f"\nError: could not write {partial}: {e}\n  No combined file was written.")
         return False
-    except Exception:                       # whatever else: never leave a .partial behind
+    except BaseException:                   # whatever else, a Ctrl-C too: never leave a .partial behind
         partial.unlink(missing_ok=True)
         raise
     verified = all(int(expected[t]) == int(total_counts[t]) for t in types)
@@ -239,7 +331,13 @@ def _merge_snapshot(snapshot_str, snapshot_dir, output_file, num_subfiles, h_val
         print("  No combined file was written: the chunks do not hold what the header promises. Run the "
               "download again, then the merge.")
         return False
-    os.replace(partial, output_file)
+    if short:                               # a column shorter than the particles would be misaligned for good
+        partial.unlink(missing_ok=True)
+        print("  No combined file was written: not every particle has a value of " + ", ".join(short)
+              + " (a chunk without that dataset). Run the download again, then the merge.")
+        return False
+    if not _put(partial, output_file):
+        return False
     print(f"Saved to: {output_file}")
     print(f"  Physical box size: {box_size_physical:.2f} kpc")
     if delete_chunks:
@@ -247,9 +345,106 @@ def _merge_snapshot(snapshot_str, snapshot_dir, output_file, num_subfiles, h_val
     return True
 
 
+def _h_power(name, attrs):
+    """The power of h in a chunk dataset's raw units (h-free = raw * h^power): its own 'h_scaling' attribute, else
+    the table of the known fields; None when neither says."""
+    if "h_scaling" in attrs:
+        return float(np.asarray(attrs["h_scaling"]).ravel()[0])
+    return _H_POWER.get(name)
+
+
+def _extra_fields(input_files, datasets_info, group_name):
+    """{name: (shape tail, dtype, h power or None, TNG's unit attributes)} of the per-particle datasets a group of
+    the chunks holds beside the ones in datasets_info: the union over the chunks (a dataset some chunk lacks makes
+    a short column, which the merge refuses; one of another shape or type in a later chunk is refused here). The
+    power is None, the field copied raw, when nothing says it or the values are whole numbers with an h in their
+    unit (an h cannot be taken out of those)."""
+    fields = {}
+    for fname in input_files:
+        with _open_chunk(fname) as f_in:
+            try:
+                src = f_in.get(group_name)
+                if src is None:
+                    continue
+                for name, obj in src.items():
+                    if not isinstance(obj, h5py.Dataset) or name in datasets_info[group_name] or not obj.shape:
+                        continue
+                    if name in fields:
+                        if (obj.shape[1:], obj.dtype) != fields[name][:2]:
+                            raise ChunkError(f"Error: {group_name}/{name} has another shape or type in "
+                                             f"{Path(fname).name} than in an earlier chunk.\n"
+                                             "  No combined file was written.")
+                        continue
+                    power = _h_power(name, obj.attrs)
+                    if power and not np.issubdtype(obj.dtype, np.floating):
+                        power = None
+                    units = {k: obj.attrs[k] for k in _UNIT_ATTRS if k in obj.attrs}
+                    fields[name] = (obj.shape[1:], obj.dtype, power, units)
+            except ChunkError:
+                raise
+            except (KeyError, OSError, RuntimeError) as e:     # a chunk truncated past its superblock
+                raise _chunk_error(fname, e) from e
+    return fields
+
+
+def _create_extra(group, name, rows, tail, dtype, power, units):
+    """A dataset for a carried field at its full size, with TNG's unit attributes: 'h_scaling' 0 and the power
+    applied once the h is out; as they are for a field without a power, which is copied raw."""
+    d = group.create_dataset(name, shape=(rows,) + tuple(tail), dtype=dtype)
+    for k, v in units.items():
+        d.attrs[k] = 0.0 if k == "h_scaling" and power is not None else v
+    if power is None:
+        print(f"  WARNING: {group.name}/{name} cannot be made h-free (no 'h_scaling' attribute and not a known field, "
+              "or whole numbers with an h in their unit) -- copied RAW; classify it in merge_HDF5.py (_H_POWER) "
+              "before trusting its values")
+    else:
+        d.attrs["h_power_applied"] = power
+    return d
+
+
+def _converted(data, power, h_value, dtype):
+    """A chunk's values of a carried field, h-free: times h^power in double, stored in the source type; as they
+    are without a power (0, or None)."""
+    if not power:
+        return data
+    return (data.astype(np.float64) * h_value ** power).astype(dtype)
+
+
+def _merged_values(name, data, h_value, extras):
+    """What a merge writes for a chunk's block of dataset 'name': Coordinates over h, a carried field h-free
+    (_converted), every other dataset as it is. --verify compares a combined file with exactly this."""
+    if name == "Coordinates":
+        return data / h_value if h_value else data
+    if name in extras:
+        _tail, dtype, power, _units = extras[name]
+        return _converted(data, power, h_value, dtype)
+    return data
+
+
+def _chunk_rows(input_files, names_of):
+    """{group: {dataset: rows}} summed over the chunks, from the datasets' shapes alone (no particle is read).
+    A dataset a chunk lacks adds nothing there, which leaves its column short of the particles'."""
+    rows = {g: {n: 0 for n in names} for g, names in names_of.items()}
+    for fname in input_files:
+        with _open_chunk(fname) as f_in:
+            try:
+                for g, names in rows.items():
+                    if g in f_in:
+                        for n in names:
+                            if n in f_in[g]:
+                                rows[g][n] += f_in[g][n].shape[0]
+            except (KeyError, OSError, RuntimeError) as e:     # a chunk truncated past its superblock
+                raise _chunk_error(fname, e) from e
+    return rows
+
+
 def _write_snapshot(output_file, input_files, h_value, datasets_info, box_size_physical):
-    """The merged file at 'output_file'. Returns (counts merged per type, the header's totals, the
-    particle types merged). A chunk that fails to read raises ChunkError (nothing is skipped)."""
+    """The merged file at 'output_file'. Returns (counts merged per type, the header's totals, the particle types
+    merged, the datasets that do not hold a value for every particle). The chunks' row counts are read first:
+    a set that does not hold what its header promises, or lacks a dataset in one chunk, is refused before a
+    particle is written (the caller removes the file), and the datasets are created at their full size, so the
+    file is laid out in one piece -- read two to four times as fast as one grown chunk by chunk. A chunk that
+    fails to read, or holds other rows than when they were counted, raises ChunkError (nothing is skipped)."""
     with h5py.File(output_file, 'w') as f_out:
         with _open_chunk(input_files[0]) as f_first:
             for group_name in ["Config", "Parameters"]:
@@ -265,54 +460,12 @@ def _write_snapshot(output_file, input_files, h_value, datasets_info, box_size_p
         f_out["Header"].attrs["MassTable"] = np.asarray(f_out["Header"].attrs["MassTable"]) / h_value
         f_out["Header"].attrs["HFreeUnits"] = h_value
 
-        for group_name in datasets_info:
-            f_out.create_group(group_name)
-
-        out_datasets = {}
-        for group_name, dsets in datasets_info.items():
-            out_datasets[group_name] = {}
-            group = f_out[group_name]
-            for dset_name, props in dsets.items():
-                initial_shape = (0,) + props["shape"][1:] if len(props["shape"]) > 1 else (0,)
-                maxshape = (None,) + props["shape"][1:] if len(props["shape"]) > 1 else (None,)
-                out_datasets[group_name][dset_name] = group.create_dataset(
-                    dset_name, 
-                    shape=initial_shape, 
-                    maxshape=maxshape,
-                    dtype=props["dtype"], 
-                    chunks=True
-                )
-        
+        # the other per-particle datasets of the chunks: carried too, h-free (see the top)
+        extras = {g: _extra_fields(input_files, datasets_info, g) for g in datasets_info}
+        rows = _chunk_rows(input_files, {g: list(datasets_info[g]) + list(extras[g]) for g in datasets_info})
         total_counts = np.zeros(6, dtype=np.int64)
-
-        for file_idx, fname in enumerate(input_files):
-            progress = f"[{file_idx + 1}/{len(input_files)}]"
-            print(f"  {progress} Reading {fname.name}...")
-
-            with _open_chunk(fname) as f_in:
-                for group_name, dsets in datasets_info.items():
-                    for dset_name in dsets:
-                        try:                        # a chunk truncated past its superblock fails here, not at open
-                            have = group_name in f_in and dset_name in f_in[group_name]
-                            data = f_in[group_name][dset_name][...] if have else None
-                        except (OSError, RuntimeError) as e:
-                            raise _chunk_error(fname, e) from e
-                        if have:
-                            if dset_name == "Coordinates":
-                                data = data / h_value
-
-                            out_dset = out_datasets[group_name][dset_name]
-                            old_size = out_dset.shape[0]
-                            new_size = old_size + data.shape[0]
-                            new_shape = (new_size,) + out_dset.shape[1:]
-                            out_dset.resize(new_shape)
-                            out_dset[old_size:new_size, ...] = data
-
-                            if dset_name == "ParticleIDs":
-                                particle_type_num = int(group_name[-1])
-                                total_counts[particle_type_num] += data.shape[0]
-                        else:
-                            print(f"    Warning: {group_name}/{dset_name} not found in this file")
+        for group_name in datasets_info:
+            total_counts[int(group_name[-1])] = rows[group_name]["ParticleIDs"]
 
         header = f_out["Header"]
         # chunk-0 global counts; TNG splits them into a low and a high 32-bit word (the -1 runs exceed 2^32)
@@ -322,8 +475,410 @@ def _write_snapshot(output_file, input_files, h_value, datasets_info, box_size_p
             header.attrs["NumPart_Total_HighWord"] = np.zeros(6, dtype=np.uint32)   # the totals below are int64
         header.attrs["NumPart_ThisFile"] = total_counts
         header.attrs["NumPart_Total"] = total_counts
-    types = {int(g[-1]) for g in datasets_info}       # a merged type with 0 particles must verify too
-    return total_counts, expected, types
+        types = {int(g[-1]) for g in datasets_info}       # a merged type with 0 particles must verify too
+        # every dataset of a merged type holds one row a particle, or the merge is refused
+        short = [f"{g}/{name}" for g, names in rows.items() for name, r in names.items()
+                 if r != total_counts[int(g[-1])]]
+        if short or any(int(expected[t]) != int(total_counts[t]) for t in types):
+            return total_counts, expected, types, short
+
+        out_datasets = {}
+        for group_name, dsets in datasets_info.items():
+            group = f_out.create_group(group_name)
+            n = int(total_counts[int(group_name[-1])])
+            out_datasets[group_name] = {
+                name: group.create_dataset(name, shape=(n,) + tuple(props["shape"][1:]), dtype=props["dtype"])
+                for name, props in dsets.items()}
+            for name, (tail, dtype, power, units) in extras[group_name].items():
+                out_datasets[group_name][name] = _create_extra(group, name, n, tail, dtype, power, units)
+            if extras[group_name]:
+                print(f"  {group_name}: also carrying {', '.join(sorted(extras[group_name]))}")
+
+        filled = {g: {name: 0 for name in dsets} for g, dsets in out_datasets.items()}
+        for file_idx, fname in enumerate(input_files):
+            progress = f"[{file_idx + 1}/{len(input_files)}]"
+            print(f"  {progress} Reading {fname.name}...")
+
+            with _open_chunk(fname) as f_in:
+                for group_name, dsets in out_datasets.items():
+                    for name, dset in dsets.items():
+                        try:                        # a chunk truncated past its superblock fails here, not at open
+                            have = group_name in f_in and name in f_in[group_name]
+                            data = f_in[group_name][name][...] if have else None
+                            n = f_in[group_name]["ParticleIDs"].shape[0] if have else 0
+                        except (KeyError, OSError, RuntimeError) as e:
+                            raise _chunk_error(fname, e) from e
+                        if not have:
+                            continue                # a chunk without particles of this type
+                        if data.shape[0] != n:      # rows that shift between chunks: the totals may still add up
+                            raise ChunkError(f"Error: {fname.name} holds {data.shape[0]} rows of {group_name}/{name}"
+                                             f", its particles {n}.\n  No combined file was written.")
+                        data = _merged_values(name, data, h_value, extras[group_name])
+                        at = filled[group_name][name]
+                        if at + data.shape[0] > dset.shape[0]:      # the chunk changed since its rows were counted
+                            raise ChunkError(f"Error: {fname.name} holds more rows of {group_name}/{name} than "
+                                             "when the merge began.\n  No combined file was written.")
+                        dset[at:at + data.shape[0], ...] = data
+                        filled[group_name][name] = at + data.shape[0]
+        unfilled = [f"{g}/{name}" for g, dsets in out_datasets.items() for name, dset in dsets.items()
+                    if filled[g][name] != dset.shape[0]]
+        if unfilled:                                                # ... or lost rows since
+            raise ChunkError(f"Error: the chunks hold fewer rows of {', '.join(unfilled)} than when the merge "
+                             "began.\n  No combined file was written.")
+    return total_counts, expected, types, short
+
+
+def _chunk_problem(e, merged):
+    """A ChunkError's own line, with what to do in the modes that work on a combined file that exists."""
+    print(f"\n{str(e).splitlines()[0]}\n  Nothing was changed. To fetch a damaged chunk anew, delete it and "
+          f"{_refetch(merged)}.")
+
+
+def add_snapshot_fields(snapshot_num, num_subfiles, base_dir, datasets_info):
+    """--add-fields for one snapshot: the per-particle datasets its chunks hold beside the merged ones, put into
+    the combined file that is there already (written before merges carried them). True when the file carries
+    them all afterwards; None when no chunk is left and the file carries none (whether its chunks held any
+    cannot be told). No chunk is deleted here: that is --verify's, after the full comparison."""
+    snapshot_str = f"{snapshot_num:03d}"
+    snapshot_dir = Path(base_dir) / f"snapdir_{snapshot_str}"
+    output_file = snapshot_dir / f"combined_{snapshot_str}.hdf5"
+    print(f"\n{'='*60}")
+    print(f"Adding the other particle fields to snapshot {snapshot_str}")
+    print(f"Directory: {snapshot_dir}")
+    partial = _partial(output_file)
+    ok = False
+    try:
+        ok = _add_fields(snapshot_str, snapshot_dir, output_file, partial, num_subfiles, datasets_info)
+    except ChunkError as e:
+        _chunk_problem(e, output_file.name)
+    except (KeyError, OSError, RuntimeError) as e:      # the combined file or the disk, not a chunk
+        print(f"\nError: could not read {output_file.name} or write its copy {partial.name}: {e}\n"
+              "  Nothing was changed.")
+    finally:                                            # whatever happened, a Ctrl-C too: no .partial is left
+        partial.unlink(missing_ok=True)
+    print('='*60)
+    return ok
+
+
+_BLOCK = 1 << 22        # rows a pass over a dataset reads at a time
+
+
+def _same_datasets(f_a, f_b):
+    """Whether every dataset of f_a is in f_b with the same shape, type and values, read in blocks; the first
+    difference's name, else ''. The proof that a rewritten file kept what it had."""
+    names = []
+    f_a.visititems(lambda name, obj: names.append(name) if isinstance(obj, h5py.Dataset) else None)
+    for name in names:
+        a, b = f_a[name], f_b.get(name)
+        if b is None or a.shape != b.shape or a.dtype != b.dtype:
+            return name
+        if a.shape == ():
+            if not np.array_equal(a[()], b[()]):
+                return name
+            continue
+        for i in range(0, a.shape[0], _BLOCK):
+            if a[i:i + _BLOCK].tobytes() != b[i:i + _BLOCK].tobytes():      # bit for bit (a NaN equals itself here)
+                return name
+    return ""
+
+
+def _copy_laid_out(src, dst_group, name):
+    """Dataset 'src' into dst_group in one piece (not in the small pieces an older merge grew it by), its type,
+    values and attributes as they are."""
+    d = dst_group.create_dataset(name, shape=src.shape, dtype=src.dtype)
+    for k, v in src.attrs.items():
+        d.attrs[k] = v
+    if src.shape == ():
+        d[()] = src[()]
+    for i in range(0, src.shape[0] if src.shape else 0, _BLOCK):
+        d[i:i + _BLOCK] = src[i:i + _BLOCK]
+    return d
+
+
+def _add_fields(snapshot_str, snapshot_dir, output_file, partial, num_subfiles, datasets_info):
+    """add_snapshot_fields' body. The combined file is never opened for writing: a copy grows beside it
+    ('partial', which the caller removes whatever happens) and takes its place only when (1) the chunks'
+    particles are the file's, ID for ID in order, (2) every added dataset holds one row a particle, and (3) every
+    dataset the file had is in the copy bit for bit. The copy is laid out in one piece (see _write_snapshot) and
+    takes the file's time stamp before its name: what the programs read of it did not change, so no grid built
+    from it is out of date."""
+    if not output_file.exists():
+        print(f"  Problem: there is no {output_file.name} to add to. Merge the snapshot first (without --add-fields).")
+        return False
+    input_files, found, n_header = _snapshot_chunks(snapshot_str, snapshot_dir, num_subfiles)
+    stamp = output_file.stat()
+    with h5py.File(output_file, "r") as f_old:
+        if not found:
+            have = [n for g in datasets_info if g in f_old for n in sorted(set(f_old[g]) - set(datasets_info[g]))]
+            if have:
+                print(f"  {output_file.name} carries {', '.join(have)} and no chunks are left: nothing to add")
+                return True
+            print(f"  No chunk of snapshot {snapshot_str} is left, and {output_file.name} carries nothing beside "
+                  "positions, velocities and IDs: nothing to add from.\n  If its chunks held other fields (TNG's "
+                  f"full snapshots do), {_refetch(output_file.name)}; then --add-fields.")
+            return None
+        if any(not f.exists() for f in input_files):
+            _report_missing(input_files, n_header, output_file.name)
+            return False
+        h_value = float(f_old["Header"].attrs.get("HFreeUnits", 0.0))
+        if not h_value:
+            print(f"  Problem: {output_file.name} has no 'HFreeUnits' marker (a merge from before the unit "
+                  "conversion). Merge the snapshot anew instead.")
+            return False
+        todo = {}
+        for g in datasets_info:
+            fields = _extra_fields(input_files, datasets_info, g)
+            todo[g] = {n: v for n, v in fields.items() if g not in f_old or n not in f_old[g]}
+        if not any(todo.values()):
+            print(f"  {output_file.name} already carries every per-particle dataset of its chunks: nothing to add")
+            return True
+        print("  Adding " + ", ".join(f"{g}/{n}" for g, v in todo.items() for n in sorted(v)))
+        # before anything is written: one row a particle in every dataset to add, room for the copy, and the
+        # chunks' particles the file's own, ID for ID in order
+        rows = _chunk_rows(input_files, {g: ["ParticleIDs"] + list(v) for g, v in todo.items() if v})
+        count = {g: f_old[g]["ParticleIDs"].shape[0] if g in f_old else -1 for g in rows}
+        short = sorted(f"{g}/{n}" for g, names in rows.items() for n, r in names.items() if r != count[g])
+        if short:
+            print("\n  Problem: not every particle has a value of " + ", ".join(short)
+                  + " (the chunks hold another number of particles than the file, or one lacks the dataset). "
+                  "Nothing was changed.")
+            return False
+        need = stamp.st_size + sum(count[g] * np.dtype(dtype).itemsize * int(np.prod(tail, dtype=np.int64))
+                                   for g in rows for tail, dtype, _power, _units in todo[g].values())
+        free = shutil.disk_usage(snapshot_dir).free
+        if free < need:
+            print(f"\n  Problem: the copy needs {need / 1e9:.1f} GB beside the file, and the disk has "
+                  f"{free / 1e9:.1f} GB free. Nothing was changed.")
+            return False
+        at = {g: 0 for g in rows}
+        for fname in input_files:
+            with _open_chunk(fname) as f_in:
+                for g in rows:
+                    if g not in f_in:
+                        continue
+                    try:
+                        ids = f_in[g]["ParticleIDs"][...]
+                    except (KeyError, OSError, RuntimeError) as e:
+                        raise _chunk_error(fname, e) from e
+                    if not np.array_equal(f_old[g]["ParticleIDs"][at[g]:at[g] + ids.shape[0]], ids):
+                        print(f"\n  Problem: the particles of {fname.name} are not the ones at row {at[g]} "
+                              f"of {output_file.name} (other IDs or another order): these chunks are not "
+                              "the ones it was merged from. Nothing was changed.")
+                        return False
+                    at[g] += ids.shape[0]
+        with h5py.File(partial, "w") as f_out:
+            for k, v in f_old.attrs.items():
+                f_out.attrs[k] = v
+            for name in f_old:
+                if name not in datasets_info:           # Header, Config, Parameters: as they are
+                    f_old.copy(f_old[name], f_out, name)
+                    continue
+                group = f_out.create_group(name)
+                for k, v in f_old[name].attrs.items():
+                    group.attrs[k] = v
+                for dname, obj in f_old[name].items():
+                    if isinstance(obj, h5py.Dataset):
+                        _copy_laid_out(obj, group, dname)
+                    else:
+                        f_old.copy(obj, group, dname)
+            new = {g: {n: _create_extra(f_out.require_group(g), n, count[g], *v) for n, v in todo[g].items()}
+                   for g in rows}
+            at = {g: 0 for g in rows}
+            for idx, fname in enumerate(input_files):
+                print(f"  [{idx + 1}/{len(input_files)}] Reading {fname.name}...")
+                with _open_chunk(fname) as f_in:
+                    for g in rows:
+                        if g not in f_in:
+                            continue
+                        for name, dset in new[g].items():
+                            try:
+                                n = f_in[g]["ParticleIDs"].shape[0]
+                                data = f_in[g][name][...]
+                            except (KeyError, OSError, RuntimeError) as e:
+                                raise _chunk_error(fname, e) from e
+                            if data.shape[0] != n:
+                                raise ChunkError(f"Error: {fname.name} holds {data.shape[0]} rows of {g}/{name}, its "
+                                                 f"particles {n}.")
+                            if at[g] + n > count[g]:                # the chunk changed since the ID pass
+                                raise ChunkError(f"Error: {fname.name} holds more particles than when they were "
+                                                 "compared.")
+                            dset[at[g]:at[g] + n, ...] = _merged_values(name, data, h_value, todo[g])
+                        at[g] += n
+            lost = [g for g in rows if at[g] != count[g]]
+            if lost:
+                raise ChunkError(f"Error: the chunks hold fewer particles of {', '.join(lost)} than when they "
+                                 "were compared.")
+        with h5py.File(partial, "r") as f_new:
+            differs = _same_datasets(f_old, f_new)
+        if differs:
+            print(f"\n  Problem: {differs} did not come through the copy bit for bit. Nothing was changed.")
+            return False
+    os.utime(partial, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))    # before the name: never a new time on show
+    if not _put(partial, output_file):
+        return False
+    print(f"\n  Added to: {output_file}")
+    print("  Positions, velocities and IDs are the file's own, bit for bit, and it keeps its time stamp: the grids "
+          "built from it stay current.\n  The file is larger now: the programs' cached tessellations of this "
+          "snapshot are built anew once (the old ones can be deleted), and a killed run of it can no longer "
+          "--resume.")
+    return True
+
+
+def verify_snapshot(snapshot_num, num_subfiles, base_dir, datasets_info, delete_chunks=False):
+    """--verify for one snapshot: does combined_NNN.hdf5 hold everything its chunks do? Read only, but for
+    --delete-chunks: the chunks of a snapshot that compares the same are deleted, and of no other. Returns 'same',
+    'no chunks' (none is left to compare with), or what did not come out, in the words of the run's summary."""
+    snapshot_str = f"{snapshot_num:03d}"
+    snapshot_dir = Path(base_dir) / f"snapdir_{snapshot_str}"
+    output_file = snapshot_dir / f"combined_{snapshot_str}.hdf5"
+    print(f"\n{'='*60}")
+    print(f"Comparing snapshot {snapshot_str} with its chunks")
+    print(f"Directory: {snapshot_dir}")
+    same, chunks = False, []
+    try:
+        same, chunks = _verify(snapshot_str, snapshot_dir, output_file, num_subfiles, datasets_info)
+    except ChunkError as e:
+        _chunk_problem(e, output_file.name)
+    except (KeyError, OSError, RuntimeError) as e:      # the combined file, not a chunk
+        print(f"\n  Problem: {output_file.name} cannot be read: {e}")
+    status = "no chunks" if same is None else "same" if same else "not verified against its chunks"
+    if delete_chunks and same:
+        try:
+            _flush(output_file)                         # its bytes on the disk itself before its sources go
+            _delete_chunks(chunks, True, "snapshot")
+        except OSError as e:
+            print(f"  Problem: the chunks of snapshot {snapshot_str} could not be deleted: {e}")
+            status = "its chunks could not be deleted"
+    elif delete_chunks and same is False:
+        print(f"  NOT deleting the chunks of snapshot {snapshot_str}.")
+    print('='*60)
+    return status
+
+
+def _verify(snapshot_str, snapshot_dir, output_file, num_subfiles, datasets_info):
+    """verify_snapshot's body: (True, False or None; the chunk files). Chunk by chunk, in order: the particle IDs
+    the file's; every dataset of the chunk in the file with exactly the values a merge writes for it
+    (_merged_values: Coordinates over h in the file's type, a carried field h-free, the others as they are), bit
+    for bit, one row for each of the chunk's particles; then no row beyond the chunks', no particle type in the
+    chunks that the file lacks, and the header the chunks' (the totals; box size and mass table over h; redshift
+    and time)."""
+    if not output_file.exists():
+        print(f"  Problem: there is no {output_file.name} to compare.")
+        return False, []
+    input_files, found, n_header = _snapshot_chunks(snapshot_str, snapshot_dir, num_subfiles)
+    if not found:
+        print(f"  No chunk of snapshot {snapshot_str} is left: nothing to compare {output_file.name} with (and "
+              "nothing to delete).")
+        return None, []
+    if any(not f.exists() for f in input_files):
+        _report_missing(input_files, n_header, output_file.name)
+        return False, input_files
+    with _open_chunk(input_files[0]) as f_first:
+        try:                                # a chunk truncated past its superblock fails here, not at open
+            first = dict(f_first["Header"].attrs)
+        except (KeyError, OSError, RuntimeError) as e:
+            raise _chunk_error(input_files[0], e) from e
+    problems = []
+    with h5py.File(output_file, "r") as f_m:
+        head = f_m["Header"].attrs
+        h_value = float(head.get("HFreeUnits", 0.0))
+        if not h_value:                     # such a file has its positions and box over h and its masses not
+            print(f"  Problem: {output_file.name} has no 'HFreeUnits' marker (a merge from before the unit "
+                  "conversion): not compared. Merge the snapshot anew.")
+            return False, input_files
+        for key, per_h in (("BoxSize", True), ("Redshift", False), ("Time", False)):
+            if key not in first:
+                continue
+            want = float(first[key]) / (h_value if per_h else 1.0)
+            if key not in head:
+                problems.append(f"the header has no {key}")
+            elif abs(float(head[key]) - want) > 1e-12 * max(1.0, abs(want)):
+                problems.append(f"the header's {key} is {float(head[key]):.10g}, the chunks give {want:.10g}")
+        table = np.asarray(first["MassTable"]) / h_value if "MassTable" in first else None
+        if table is not None and ("MassTable" not in head
+                                  or not np.allclose(np.asarray(head["MassTable"]), table, rtol=1e-12, atol=0.0)):
+            problems.append("the header's MassTable is not the chunks' over h")
+        # the particles the chunks' own header counts, type by type: one the file does not carry (a full-physics
+        # run's gas, stars, ...) is a problem here, the merged types' counts further down
+        low = np.asarray(first.get("NumPart_Total", ()), dtype=np.int64).ravel()
+        high = np.asarray(first.get("NumPart_Total_HighWord", ()), dtype=np.int64).ravel()
+        promised = [int(low[t]) + (int(high[t]) << 32 if t < high.size else 0) for t in range(low.size)]
+        for t, n in enumerate(promised):
+            if n and f"PartType{t}" not in datasets_info:
+                problems.append(f"the chunks hold {n} particles of PartType{t}, which a merged snapshot does not carry")
+        extras = {g: _extra_fields(input_files, datasets_info, g) for g in datasets_info}
+        at = {g: 0 for g in datasets_info}
+        absent = set()                      # the chunks' datasets the file does not carry at all
+        for idx, fname in enumerate(input_files):
+            bad = []
+            with _open_chunk(fname) as f_in:
+                for g in datasets_info:
+                    if g not in f_in:
+                        continue
+                    try:
+                        n = f_in[g]["ParticleIDs"].shape[0]
+                        names = {name: obj.shape for name, obj in f_in[g].items() if isinstance(obj, h5py.Dataset)}
+                    except (KeyError, OSError, RuntimeError) as e:
+                        raise _chunk_error(fname, e) from e
+                    for name, shape in names.items():
+                        if not shape:
+                            bad.append(f"{g}/{name} is no per-particle dataset: a merged snapshot does not carry it")
+                            continue
+                        if g not in f_m or name not in f_m[g]:
+                            absent.add(f"{g}/{name}")
+                            continue
+                        merged = f_m[g][name]
+                        if shape[0] != n:
+                            bad.append(f"{g}/{name} holds {shape[0]} rows, the chunk's particles {n}")
+                            continue
+                        if at[g] + n > merged.shape[0]:
+                            bad.append(f"{g}/{name} has {merged.shape[0]} rows, the chunks hold more")
+                            continue
+                        for i in range(0, n, _BLOCK):
+                            try:
+                                data = f_in[g][name][i:i + _BLOCK]
+                            except (OSError, RuntimeError) as e:
+                                raise _chunk_error(fname, e) from e
+                            want = np.asarray(_merged_values(name, data, h_value, extras[g])).astype(merged.dtype)
+                            if merged[at[g] + i:at[g] + i + want.shape[0]].tobytes() != want.tobytes():
+                                bad.append(f"{g}/{name} differs within rows {at[g] + i} to {at[g] + i + want.shape[0]}")
+                                break
+                    at[g] += n
+            print(f"  [{idx + 1}/{len(input_files)}] {fname.name}: "
+                  + ("; ".join(bad) if bad else "the same" + (" (in what the file carries)" if absent else "")))
+            problems += [f"{fname.name}: {b}" for b in bad]
+        if absent:
+            problems.append(f"{output_file.name} does not carry {', '.join(sorted(absent))}")
+        for g in datasets_info:
+            t = int(g[-1])
+            if t < len(promised) and promised[t] != at[g]:
+                problems.append(f"the chunks' header counts {promised[t]} particles of type {t}, the chunks hold "
+                                f"{at[g]}")
+            if g not in f_m:
+                continue
+            for name, obj in f_m[g].items():
+                if isinstance(obj, h5py.Dataset) and obj.shape[:1] != (at[g],):
+                    problems.append(f"{g}/{name} has {obj.shape[0] if obj.shape else 'no'} rows, the chunks hold "
+                                    f"{at[g]} particles")
+            totals = head.get("NumPart_Total")
+            total = int(np.asarray(totals).ravel()[t]) if totals is not None else -1
+            if total != at[g]:
+                problems.append(f"the header counts {total if total >= 0 else 'no'} particles of type {t}, the "
+                                f"chunks hold {at[g]}")
+        carried = {g: sorted(f_m[g]) for g in datasets_info if g in f_m}
+    if problems:
+        print(f"\n  NOT the same: {output_file.name} does not hold everything its {len(input_files)} chunks do.")
+        for p in problems[:12]:
+            print(f"    {p}")
+        if len(problems) > 12:
+            print(f"    ... and {len(problems) - 12} more")
+        if absent:
+            print("  --add-fields puts them into the file.")
+    else:
+        print(f"\n  VERIFIED: {output_file.name} holds everything its {len(input_files)} chunks do, in their order ("
+              + "; ".join(f"{g}: {at[g]} particles, {', '.join(v)}" for g, v in carried.items())
+              + "); positions in the file's precision.")
+    return not problems, input_files
 
 
 def _concat_datasets(f_out, out_group, columns, chunk_files, h_value, group_path=None):
@@ -423,7 +978,7 @@ def _merge_groupcat(snapshot_str, group_dir, output_file, delete_chunks):
         partial.unlink(missing_ok=True)
         print(f"\nError: could not write {partial}: {e}\n  No combined file was written.")
         return False
-    except Exception:
+    except BaseException:
         partial.unlink(missing_ok=True)
         raise
     verified = (n_g == expected_g and n_s == expected_s
@@ -435,7 +990,8 @@ def _merge_groupcat(snapshot_str, group_dir, output_file, delete_chunks):
         partial.unlink(missing_ok=True)
         print("  No combined file was written: the chunks do not hold what the header promises.")
         return False
-    os.replace(partial, output_file)
+    if not _put(partial, output_file):
+        return False
     print(f"  Saved: {output_file}")
     if delete_chunks:
         _delete_chunks(chunk_files, verified, "group catalog")
@@ -535,7 +1091,7 @@ def merge_tree_files(base_dir, delete_chunks=False, h_fallback=H_VALUE):
         print(f"\nError: could not write {partial}: {e}\n  No combined file was written.")
         print('='*60)
         return False
-    except Exception:
+    except BaseException:
         partial.unlink(missing_ok=True)
         raise
 
@@ -548,7 +1104,9 @@ def merge_tree_files(base_dir, delete_chunks=False, h_fallback=H_VALUE):
         print("  No combined file was written: the columns disagree on their row counts.")
         print('='*60)
         return False
-    os.replace(partial, output_file)
+    if not _put(partial, output_file):
+        print('='*60)
+        return False
     print(f"  Saved: {output_file}")
     if delete_chunks:
         _delete_chunks(chunk_files, verified, "tree")
@@ -573,13 +1131,15 @@ def convert_ics(base_dir, delete_chunks=False):
         return False
     print(f"Converting ICs: {raw} -> {output_file}")
     partial = _partial(output_file)         # the converter opens 'w-': a stale one must be gone
-    rc = subprocess.run([sys.executable, str(SCRIPT_DIR / "convert_ic_units.py"),
-                         str(raw), str(partial)]).returncode
-    verified = rc == 0 and partial.is_file()
-    if verified:                            # the final name only once the whole conversion succeeded
-        os.replace(partial, output_file)
-    else:
+    try:
+        rc = subprocess.run([sys.executable, str(SCRIPT_DIR / "convert_ic_units.py"),
+                             str(raw), str(partial)]).returncode
+    except BaseException:                   # a Ctrl-C: the converter's half-written file goes
         partial.unlink(missing_ok=True)
+        raise
+    # the final name only once the whole conversion succeeded
+    verified = rc == 0 and partial.is_file() and _put(partial, output_file)
+    partial.unlink(missing_ok=True)
     if delete_chunks:
         _delete_chunks([raw], verified, "IC")
     if not verified:
@@ -609,11 +1169,24 @@ def main():
                     help="merge the SubLink tree_extended chunks (whole simulation)")
     ap.add_argument("--ics", action="store_true",
                     help="convert ics.hdf5 -> combined_ics.hdf5 (whole simulation)")
+    ap.add_argument("--add-fields", action="store_true",
+                    help="snapshots: instead of merging, add the per-particle datasets the chunks hold beside "
+                         "positions, velocities and IDs to the combined files that are there already (those "
+                         "three and the file's time stamp stay as they are; the chunks must still be there, and "
+                         "the disk needs room for a copy of the file)")
+    ap.add_argument("--verify", action="store_true",
+                    help="snapshots: instead of merging, compare each combined file with its chunks, particle for "
+                         "particle: read only; exit 1 when one does not hold everything its chunks do (after "
+                         "--add-fields when both are given). A snapshot whose chunks are gone has nothing to "
+                         "compare and is named")
     ap.add_argument("--delete-chunks", action="store_true",
-                    help="delete the source chunk files after a VERIFIED merge")
+                    help="delete the source chunk files after a VERIFIED merge (with --add-fields or --verify: "
+                         "after the comparison, of the snapshots that compare the same and of no other)")
     args = ap.parse_args()
     snapshots = args.snaps if args.snaps else SNAPSHOT_NUMBERS
     other_modes = args.groupcats or args.trees or args.ics
+    if (args.add_fields or args.verify) and other_modes:
+        ap.error("--add-fields and --verify work on snapshots alone: drop --groupcats / --trees / --ics")
     do_snapshots = (not other_modes) or args.snapshots_too
 
     print("\nHDF5 Snapshot Merger")
@@ -622,7 +1195,24 @@ def main():
         print(f"Snapshots to process: {snapshots}")
 
     failed = []                 # what asked for a merge and got no verified combined file
-    if do_snapshots:
+    not_done = []               # what --add-fields or --verify was asked for and did not come out
+    uncompared = []             # snapshots --verify had no chunk left to compare with
+    no_source = []              # ... and --add-fields none to add from, the file carrying no other field
+    if args.add_fields or args.verify:
+        for snapshot_num in snapshots:
+            where = (snapshot_num, args.num_subfiles, args.data_dir, DATASETS_INFO)
+            added = add_snapshot_fields(*where) if args.add_fields else True
+            if added is None:
+                no_source.append(f"{snapshot_num:03d}")
+            elif not added:
+                not_done.append(f"not added: the other particle fields of snapshot {snapshot_num:03d}")
+            elif args.verify or args.delete_chunks:     # a chunk is deleted only after the comparison
+                status = verify_snapshot(*where, delete_chunks=args.delete_chunks)
+                if status == "no chunks":
+                    uncompared.append(f"{snapshot_num:03d}")
+                elif status != "same":
+                    not_done.append(f"{status}: snapshot {snapshot_num:03d}")
+    elif do_snapshots:
         for snapshot_num in snapshots:
             # h from the data itself when available; the CLI value is only a fallback
             first = Path(args.data_dir) / f"snapdir_{snapshot_num:03d}" / f"snap_{snapshot_num:03d}.0.hdf5"
@@ -656,8 +1246,13 @@ def main():
         if not convert_ics(args.data_dir, delete_chunks=args.delete_chunks):
             failed.append("initial conditions")
 
-    if failed:                  # the launcher and shell chains see a failed step, not a quiet 'Done!'
-        print(f"\nDone, with problems: no combined file for {', '.join(failed)}.")
+    if no_source:
+        print(f"\nNothing to add from, no chunks left: snapshot {', '.join(no_source)}.")
+    if uncompared:
+        print(f"\nNot compared, no chunks left: snapshot {', '.join(uncompared)}.")
+    if failed or not_done:      # the launcher and shell chains see a failed step, not a quiet 'Done!'
+        print("\nDone, with problems: " + "; ".join(([f"no combined file for {', '.join(failed)}"] if failed else [])
+                                                    + not_done) + ".")
         sys.exit(1)
     print("\nDone!")
 

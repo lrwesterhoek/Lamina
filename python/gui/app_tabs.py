@@ -162,8 +162,8 @@ class TabsMixin:
                         (self.d_mg_gc, "Writes combined_fof_subhalo_tab_NNN.hdf5"),
                         (self.d_mg_tree, "Writes combined_tree_extended.hdf5"),
                         (self.d_mg_ics, "Writes combined_ics.hdf5"),
-                        (self.d_delete, "The chunks are the only copy of the fields the merge drops "
-                                        "(potential, Subfind densities)")):
+                        (self.d_delete, "The chunks are the only copy of what a merged snapshot does not keep: "
+                                        "the positions in double precision, a full-physics run's gas and stars")):
             cb.setToolTip(text)
             cb.toggled.connect(self._changed)
             v.addWidget(cb)

@@ -342,7 +342,7 @@ the particles within R_v into the next snapshot; a void survives when half of th
 
 | tool (`python/tools`) | what it makes | main options |
 |---|---|---|
-| `merge_HDF5.py` | h-free combined files from downloaded chunks | `--sim-dir`, `--snaps`, `--trees` |
+| `merge_HDF5.py` | h-free combined files from downloaded chunks | `--sim-dir`, `--snaps`, `--trees`, `--add-fields`, `--verify` |
 | `convert_ic_units.py` | a TNG initial-conditions file in h-free units | input and output path |
 | `make_image_plane.py` | a `--sample-points` image plane and its JSON sidecar | `--sim`, `--nu`, `--planes` |
 | `compare_deposits.py` | a sampled grid set against an exact one | `--prefix-a`, `--prefix-b` |

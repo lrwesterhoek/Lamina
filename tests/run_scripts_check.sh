@@ -34,6 +34,11 @@
 #     run_ps_dtfe.sh): the standard binary's own report line per snapshot ('snap=099'), exit 0, nothing written.
 #  I) download_snapshots.sh + merge_HDF5.py never turn a half-finished download into a merged snapshot; a chunk the
 #     data host refuses once is fetched on the retry ('attempt 2 of 3', exit 0), one refused every time is an error.
+#     A merged snapshot carries the chunks' other per-particle fields, h-free, or the merge is refused; --add-fields
+#     puts them into a file merged without them, which keeps its positions, velocities, IDs and time stamp; --verify
+#     compares a combined file with its chunks and changes nothing (--delete-chunks, also beside --add-fields, then
+#     only of what compares the same: a moved position or a changed value keeps the chunks, so does a particle type
+#     the file lacks); the datasets are written in one piece.
 #  J) --help runs nothing (run_ps_pipeline.sh --help must not start the whole batch), --version prints the
 #     revision, an argument to the pipeline is an error, DRY_RUN=1 prints the drivers' commands and runs nothing.
 #     There is no default data root or simulation: every driver without DTFE_DATA_ROOT (or without -s / DTFE_SIM /
@@ -634,6 +639,227 @@ rc=0; ( ulimit -f 40; PYTHONUNBUFFERED=1 merge_dl --snaps 99 ) >"${TMP}/i_merge_
 check_rc "$([ "${rc}" != "0" ] && [ ! -e "${DL}/snapdir_099/combined_099.hdf5" ] && [ ! -e "${DL}/snapdir_099/combined_099.hdf5.partial" ] && echo 0 || echo 1)" \
       "a write failure (file size limit): non-zero exit, no combined file, no .partial (${rc})"
 check_rc "$(has01 "${TMP}/i_merge_disk.log" 'could not write .*combined_099\.hdf5\.partial')" "... reported as the disk's, not a chunk's"
+# the chunks' other per-particle fields (TNG: the potential and four Subfind quantities, each with its unit
+# attributes): carried into the merged file h-free, or the merge refused; --add-fields for a file merged without
+DF="${TMP}/DF"
+"${PY}" - "${DF}" <<'PYEOF'
+import sys
+from pathlib import Path
+import h5py, numpy as np
+root, chunks, per, h = Path(sys.argv[1]), 4, 300, 0.6774
+units = {"Potential": 0.0, "SubfindDMDensity": 2.0, "SubfindDensity": 2.0, "SubfindHsml": -1.0, "SubfindVelDisp": 0.0}
+for sim, drop in (("NEW", None), ("SHORT", (2, "SubfindHsml")), ("OLD", None), ("OLD2", None), ("OTHER", None),
+                  ("UNITS", None), ("GAS", None)):
+    d = root / sim / "snapdir_099"; d.mkdir(parents=True)
+    rng = np.random.default_rng(11)
+    for c in range(chunks):
+        with h5py.File(d / f"snap_099.{c}.hdf5", "w") as f:
+            hd = f.create_group("Header").attrs
+            hd["BoxSize"], hd["HubbleParam"], hd["Redshift"], hd["Time"] = 75000.0, h, 0.0, 1.0
+            hd["MassTable"] = np.array([0, 0.5, 0, 0, 0, 0], dtype=float)
+            hd["NumPart_ThisFile"] = np.array([0, per, 0, 0, 0, 0], dtype=np.int64)
+            hd["NumPart_Total"] = np.array([0, per * chunks, 0, 0, 0, 0], dtype=np.uint32)
+            hd["NumFilesPerSnapshot"] = chunks
+            p = f.create_group("PartType1")
+            p["Coordinates"] = rng.uniform(0, 75000.0, (per, 3))
+            p["ParticleIDs"] = rng.permutation(np.arange(c * per, (c + 1) * per, dtype=np.uint64))
+            p["Velocities"] = rng.normal(0, 100, (per, 3)).astype(np.float32)
+            for name, power in units.items():
+                if drop != (c, name):
+                    p.create_dataset(name, data=rng.lognormal(0, 1, per).astype(np.float32)).attrs["h_scaling"] = power
+            if sim == "UNITS":          # an attribute other than the table has; no attribute; a field nothing knows
+                p["SubfindVelDisp"].attrs["h_scaling"] = 1.0
+                del p["SubfindHsml"].attrs["h_scaling"]
+                p["Potential"].attrs["to_cgs"] = 2.5
+                p["Unknown"] = rng.normal(0, 1, per).astype(np.float32)
+            if sim == "GAS":            # a full-physics run: the header counts gas too
+                hd["NumPart_Total"] = np.array([5, per * chunks, 0, 0, 0, 0], dtype=np.uint32)
+    if sim in ("OLD", "OLD2", "OTHER"): # a file as merges wrote it before: the three datasets, h-free, nothing else
+        with h5py.File(d / "combined_099.hdf5", "w") as f, h5py.File(d / "snap_099.0.hdf5", "r") as f0:
+            f.copy(f0["Header"], "Header")
+            hd = f["Header"].attrs
+            hd["BoxSize"], hd["MassTable"], hd["HFreeUnits"] = hd["BoxSize"] / h, np.asarray(hd["MassTable"]) / h, h
+            hd["NumPart_ThisFile"] = hd["NumPart_Total"] = np.array([0, per * chunks, 0, 0, 0, 0], dtype=np.int64)
+            p = f.create_group("PartType1")
+            get = lambda name: np.concatenate([h5py.File(d / f"snap_099.{c}.hdf5", "r")["PartType1"][name][...] for c in range(chunks)])
+            p.create_dataset("Coordinates", data=(get("Coordinates") / h).astype(np.float32), chunks=True)
+            p.create_dataset("ParticleIDs", data=get("ParticleIDs"), chunks=True)
+            p.create_dataset("Velocities", data=get("Velocities"), chunks=True)
+    if sim == "OTHER":                  # ... and chunks that are not the ones it was merged from
+        with h5py.File(d / "snap_099.1.hdf5", "r+") as f:
+            f["PartType1"]["ParticleIDs"][...] = f["PartType1"]["ParticleIDs"][...][::-1].copy()
+PYEOF
+merge_df() { "${PY}" python/tools/merge_HDF5.py -d "${DF}/$1" --snaps 99 "${@:2}"; }
+fields_df() {   # <sim>: the merged file's other fields against its chunks; 'FIELDS OK', or what is wrong
+"${PY}" - "${DF}/$1/snapdir_099" <<'PYEOF'
+import sys
+from pathlib import Path
+import h5py, numpy as np
+d, h = Path(sys.argv[1]), 0.6774
+units = {"Potential": 0.0, "SubfindDMDensity": 2.0, "SubfindDensity": 2.0, "SubfindHsml": -1.0, "SubfindVelDisp": 0.0}
+get = lambda name: np.concatenate([h5py.File(d / f"snap_099.{c}.hdf5", "r")["PartType1"][name][...] for c in range(4)])
+with h5py.File(d / "combined_099.hdf5", "r") as f:
+    g = f["PartType1"]
+    bad = [n for n, p in units.items() if n not in g
+           or not np.array_equal(g[n][...], (get(n).astype(np.float64) * h ** p).astype(np.float32))
+           or float(g[n].attrs["h_power_applied"]) != p or float(g[n].attrs["h_scaling"]) != 0.0]
+    base = (np.array_equal(g["ParticleIDs"][...], get("ParticleIDs")) and np.array_equal(g["Velocities"][...], get("Velocities"))
+            and np.array_equal(g["Coordinates"][...], (get("Coordinates") / h).astype(np.float32)) and len(g) == 8)
+print("FIELDS OK" if base and not bad else f"FIELDS BAD {bad} {base}")
+PYEOF
+}
+rc=0; merge_df NEW >"${TMP}/i_fields_new.log" 2>&1 || rc=$?
+fields_df NEW >"${TMP}/i_fields_new.check" 2>&1
+check_rc "$([ "${rc}" = "0" ] && grep -q '^FIELDS OK' "${TMP}/i_fields_new.check" && echo 0 || echo 1)" \
+      "a merge carries the chunks' other particle fields: the raw values times h^h_scaling in the particles' order, the power applied recorded; positions, velocities and IDs as before (${rc})"
+check_rc "$(has01 "${TMP}/i_fields_new.log" 'also carrying Potential, SubfindDMDensity, SubfindDensity, SubfindHsml, SubfindVelDisp')" "... and names them"
+layout_df() { "${PY}" - "$1" <<'PYEOF'
+import sys, h5py
+with h5py.File(sys.argv[1], "r") as f:
+    print("ONE PIECE" if all(f["PartType1"][n].chunks is None for n in f["PartType1"]) else "IN PIECES")
+PYEOF
+}
+check_rc "$([ "$(layout_df "${DF}/NEW/snapdir_099/combined_099.hdf5")" = "ONE PIECE" ] && echo 0 || echo 1)" "... every dataset written at its full size, in one piece"
+sum0="$(cksum < "${DF}/NEW/snapdir_099/combined_099.hdf5")"
+rc=0; merge_df NEW --verify >"${TMP}/i_fields_verify.log" 2>&1 || rc=$?
+check_rc "$([ "${rc}" = "0" ] && [ "$(cksum < "${DF}/NEW/snapdir_099/combined_099.hdf5")" = "${sum0}" ] && [ "$(ls "${DF}"/NEW/snapdir_099/snap_099.*.hdf5 | wc -l | tr -d ' ')" = "4" ] && echo 0 || echo 1)" \
+      "--verify of that file: exit 0, the file and its chunks untouched (${rc})"
+check_rc "$(has01 "${TMP}/i_fields_verify.log" 'VERIFIED: combined_099\.hdf5 holds everything its 4 chunks do')" "... VERIFIED, particle for particle"
+# the comparison gates --delete-chunks: one position a single float step off, one carried value doubled
+"${PY}" - "${DF}/NEW/snapdir_099/combined_099.hdf5" <<'PYEOF'
+import sys, h5py, numpy as np
+with h5py.File(sys.argv[1], "r+") as f:
+    c = f["PartType1"]["Coordinates"]
+    c[100, 2] = np.nextafter(c[100, 2], np.float32(np.inf))
+    f["PartType1"]["SubfindHsml"][700] *= 2
+PYEOF
+rc=0; merge_df NEW --verify --delete-chunks >"${TMP}/i_fields_verify_bad.log" 2>&1 || rc=$?
+check_rc "$([ "${rc}" = "1" ] && [ "$(ls "${DF}"/NEW/snapdir_099/snap_099.*.hdf5 | wc -l | tr -d ' ')" = "4" ] && echo 0 || echo 1)" \
+      "a position one float step off and a carried value doubled: --verify --delete-chunks exit 1, NO chunk deleted (${rc})"
+check_rc "$(has01 "${TMP}/i_fields_verify_bad.log" 'snap_099\.0\.hdf5: PartType1/Coordinates differs within rows 0 to 300')" "... the position's dataset and rows named"
+check_rc "$(has01 "${TMP}/i_fields_verify_bad.log" 'snap_099\.2\.hdf5: PartType1/SubfindHsml differs within rows 600 to 900')" "... and the carried value's"
+rc=0; merge_df NEW --add-fields --delete-chunks >"${TMP}/i_fields_add_bad.log" 2>&1 || rc=$?
+check_rc "$([ "${rc}" = "1" ] && [ "$(ls "${DF}"/NEW/snapdir_099/snap_099.*.hdf5 | wc -l | tr -d ' ')" = "4" ] && echo 0 || echo 1)" \
+      "--add-fields --delete-chunks of that file (nothing to add): compared first, exit 1, NO chunk deleted (${rc})"
+check_rc "$(has01 "${TMP}/i_fields_add_bad.log" 'Done, with problems: not verified against its chunks: snapshot 099')" "... and the summary says so"
+rc=0; merge_df NEW --groupcats --verify --delete-chunks >"${TMP}/i_fields_modes.log" 2>&1 || rc=$?
+check_rc "$([ "${rc}" = "2" ] && [ "$(ls "${DF}"/NEW/snapdir_099/snap_099.*.hdf5 | wc -l | tr -d ' ')" = "4" ] && echo 0 || echo 1)" \
+      "--verify beside --groupcats: refused before anything is done, exit 2 (${rc})"
+check_rc "$(has01 "${TMP}/i_fields_modes.log" 'work on snapshots alone')" "... and says why"
+rc=0; merge_df SHORT >"${TMP}/i_fields_short.log" 2>&1 || rc=$?
+check_rc "$([ "${rc}" = "1" ] && [ ! -e "${DF}/SHORT/snapdir_099/combined_099.hdf5" ] && [ ! -e "${DF}/SHORT/snapdir_099/combined_099.hdf5.partial" ] && echo 0 || echo 1)" \
+      "a chunk without one of the fields: exit 1, no combined file, no .partial (${rc})"
+check_rc "$(has01 "${TMP}/i_fields_short.log" 'not every particle has a value of PartType1/SubfindHsml')" "... the short field named"
+old_sum() { "${PY}" - "$1" <<'PYEOF'
+import hashlib, sys, h5py
+with h5py.File(sys.argv[1], "r") as f:
+    print(hashlib.sha256(b"".join(f["PartType1"][n][...].tobytes() for n in ("Coordinates", "ParticleIDs", "Velocities"))).hexdigest())
+PYEOF
+}
+OLDF="${DF}/OLD/snapdir_099/combined_099.hdf5"
+rc=0; merge_df OLD --verify --delete-chunks >"${TMP}/i_fields_verify_old.log" 2>&1 || rc=$?
+check_rc "$([ "${rc}" = "1" ] && [ "$(ls "${DF}"/OLD/snapdir_099/snap_099.*.hdf5 | wc -l | tr -d ' ')" = "4" ] && echo 0 || echo 1)" \
+      "--verify --delete-chunks of a file merged without the other fields: exit 1, NO chunk deleted (${rc})"
+check_rc "$([ "$(grep -c 'does not carry PartType1/Potential, PartType1/SubfindDMDensity' "${TMP}/i_fields_verify_old.log")" = "1" ] && echo 0 || echo 1)" \
+      "... the fields it lacks named, once"
+check_rc "$([ "$(grep -c 'the same (in what the file carries)' "${TMP}/i_fields_verify_old.log")" = "4" ] && echo 0 || echo 1)" \
+      "... its positions, velocities and IDs the chunks' own, in each of the 4 chunks"
+check_rc "$(has01 "${TMP}/i_fields_verify_old.log" 'Done, with problems: not verified against its chunks: snapshot 099')" "... and the summary says so"
+touch -t 202601020304.05 "${OLDF}" "${TMP}/i_fields_stamp"
+sum0="$(old_sum "${OLDF}")"; size0="$(wc -c < "${OLDF}" | tr -d ' ')"
+rc=0; merge_df OLD --add-fields >"${TMP}/i_fields_add.log" 2>&1 || rc=$?
+fields_df OLD >"${TMP}/i_fields_add.check" 2>&1
+check_rc "$([ "${rc}" = "0" ] && grep -q '^FIELDS OK' "${TMP}/i_fields_add.check" && echo 0 || echo 1)" \
+      "--add-fields puts them into a file merged without them (${rc})"
+check_rc "$([ "$(old_sum "${OLDF}")" = "${sum0}" ] && [ "$(wc -c < "${OLDF}" | tr -d ' ')" -gt "${size0}" ] && [ ! -e "${OLDF}.partial" ] && echo 0 || echo 1)" \
+      "... positions, velocities and IDs bit for bit as they were; the file grew; no .partial"
+check_rc "$([ ! "${OLDF}" -nt "${TMP}/i_fields_stamp" ] && [ ! "${TMP}/i_fields_stamp" -nt "${OLDF}" ] && echo 0 || echo 1)" \
+      "... and it keeps its time stamp: no grid built from it looks out of date"
+check_rc "$(has01 "${TMP}/i_fields_add.log" 'keeps its time stamp')" "... which the tool says"
+check_rc "$([ "$(layout_df "${OLDF}")" = "ONE PIECE" ] && echo 0 || echo 1)" "... and its datasets, grown in pieces before, are in one piece now"
+rc=0; merge_df OLD --verify >"${TMP}/i_fields_verify_added.log" 2>&1 || rc=$?
+check_rc "$([ "${rc}" = "0" ] && echo 0 || echo 1)" "... --verify of it now: exit 0 (${rc})"
+rc=0; merge_df OLD --add-fields >"${TMP}/i_fields_add2.log" 2>&1 || rc=$?
+check_rc "$([ "${rc}" = "0" ] && echo 0 || echo 1)" "the same again: exit 0 (${rc})"
+check_rc "$(has01 "${TMP}/i_fields_add2.log" 'already carries every per-particle dataset')" "... nothing to add"
+OTHF="${DF}/OTHER/snapdir_099/combined_099.hdf5"
+sum0="$(cksum < "${OTHF}")"
+rc=0; merge_df OTHER --add-fields >"${TMP}/i_fields_other.log" 2>&1 || rc=$?
+check_rc "$([ "${rc}" = "1" ] && [ "$(cksum < "${OTHF}")" = "${sum0}" ] && [ ! -e "${OTHF}.partial" ] && echo 0 || echo 1)" \
+      "--add-fields with chunks whose particles are not the file's, ID for ID: exit 1, the file untouched, no .partial (${rc})"
+check_rc "$(has01 "${TMP}/i_fields_other.log" 'are not the ones at row 300 of combined_099\.hdf5')" "... the first row that differs named"
+check_rc "$(has01 "${TMP}/i_fields_other.log" 'Done, with problems: not added: the other particle fields of snapshot 099')" "... and the summary says what was not added"
+rc=0; merge_df OTHER --add-fields --delete-chunks >"${TMP}/i_fields_other_del.log" 2>&1 || rc=$?
+check_rc "$([ "${rc}" = "1" ] && [ "$(cksum < "${OTHF}")" = "${sum0}" ] && [ "$(ls "${DF}"/OTHER/snapdir_099/snap_099.*.hdf5 | wc -l | tr -d ' ')" = "4" ] && echo 0 || echo 1)" \
+      "... the same beside --delete-chunks: exit 1, the file untouched, NO chunk deleted (${rc})"
+line_of() { grep -n -- "$2" "$1" | head -1 | cut -d: -f1; }     # <log> <text>: the first line that holds it
+rc=0; merge_df OLD --verify --delete-chunks >"${TMP}/i_fields_verify_del.log" 2>&1 || rc=$?
+check_rc "$([ "${rc}" = "0" ] && [ "$(ls "${DF}/OLD/snapdir_099" | grep -c '^snap_099')" = "0" ] && [ -f "${OLDF}" ] && echo 0 || echo 1)" \
+      "--verify --delete-chunks of a file that holds everything: exit 0, its 4 chunks deleted (${rc})"
+check_rc "$([ "$(line_of "${TMP}/i_fields_verify_del.log" 'VERIFIED')" -lt "$(line_of "${TMP}/i_fields_verify_del.log" 'Deleted 4 snapshot chunk file')" ] && echo 0 || echo 1)" \
+      "... after the comparison"
+rc=0; merge_df OLD --verify >"${TMP}/i_fields_verify_nochunk.log" 2>&1 || rc=$?
+check_rc "$([ "${rc}" = "0" ] && echo 0 || echo 1)" "--verify with no chunks left: exit 0 (${rc})"
+check_rc "$(has01 "${TMP}/i_fields_verify_nochunk.log" 'Not compared, no chunks left: snapshot 099')" "... the snapshot named as not compared"
+rc=0; merge_df OLD2 --add-fields --delete-chunks >"${TMP}/i_fields_add_del.log" 2>&1 || rc=$?
+check_rc "$([ "${rc}" = "0" ] && [ "$(ls "${DF}/OLD2/snapdir_099" | grep -c '^snap_099')" = "0" ] && [ "$(layout_df "${DF}/OLD2/snapdir_099/combined_099.hdf5")" = "ONE PIECE" ] && echo 0 || echo 1)" \
+      "--add-fields --delete-chunks of a file merged without the fields: exit 0, its chunks deleted (${rc})"
+check_rc "$([ "$(line_of "${TMP}/i_fields_add_del.log" 'Added to:')" -lt "$(line_of "${TMP}/i_fields_add_del.log" 'VERIFIED')" ] && [ "$(line_of "${TMP}/i_fields_add_del.log" 'VERIFIED')" -lt "$(line_of "${TMP}/i_fields_add_del.log" 'Deleted 4 snapshot chunk file')" ] && echo 0 || echo 1)" \
+      "... in this order: added, compared with the chunks, deleted"
+rc=0; merge_df OLD2 --add-fields --delete-chunks >"${TMP}/i_fields_add_del2.log" 2>&1 || rc=$?
+check_rc "$([ "${rc}" = "0" ] && echo 0 || echo 1)" "... the same again, the chunks gone: exit 0 (${rc})"
+check_rc "$(has01 "${TMP}/i_fields_add_del2.log" 'Not compared, no chunks left: snapshot 099')" "... the snapshot named as not compared"
+rm -f "${DF}"/OTHER/snapdir_099/snap_099.*.hdf5
+rc=0; merge_df OLD --add-fields >"${TMP}/i_fields_nochunk.log" 2>&1 || rc=$?
+check_rc "$([ "${rc}" = "0" ] && echo 0 || echo 1)" "--add-fields with no chunks left and the fields in the file: exit 0, nothing to add (${rc})"
+check_rc "$(has01 "${TMP}/i_fields_nochunk.log" 'no chunks are left: nothing to add')" "... and says so"
+rc=0; merge_df OTHER --add-fields >"${TMP}/i_fields_nochunk2.log" 2>&1 || rc=$?
+check_rc "$([ "${rc}" = "0" ] && [ "$(cksum < "${OTHF}")" = "${sum0}" ] && echo 0 || echo 1)" "... and NO other field in the file: exit 0, the file untouched (${rc})"
+check_rc "$(has01 "${TMP}/i_fields_nochunk2.log" 'Nothing to add from, no chunks left: snapshot 099')" "... the snapshot named: nothing to add from"
+rc=0; merge_df UNITS >"${TMP}/i_fields_units.log" 2>&1 || rc=$?
+"${PY}" - "${DF}/UNITS/snapdir_099" >"${TMP}/i_fields_units.check" 2>&1 <<'PYEOF' || true
+import sys
+from pathlib import Path
+import h5py, numpy as np
+d, h = Path(sys.argv[1]), 0.6774
+get = lambda name: np.concatenate([h5py.File(d / f"snap_099.{c}.hdf5", "r")["PartType1"][name][...] for c in range(4)])
+times = lambda name, p: (get(name).astype(np.float64) * h ** p).astype(np.float32)
+with h5py.File(d / "combined_099.hdf5", "r") as f:
+    g = f["PartType1"]
+    ok = [np.array_equal(g["SubfindVelDisp"][...], times("SubfindVelDisp", 1.0)) and float(g["SubfindVelDisp"].attrs["h_power_applied"]) == 1.0,
+          np.array_equal(g["SubfindHsml"][...], times("SubfindHsml", -1.0)) and float(g["SubfindHsml"].attrs["h_power_applied"]) == -1.0
+          and "h_scaling" not in g["SubfindHsml"].attrs,
+          float(g["Potential"].attrs["to_cgs"]) == 2.5 and float(g["Potential"].attrs["h_scaling"]) == 0.0,
+          np.array_equal(g["Unknown"][...], get("Unknown")) and len(g["Unknown"].attrs) == 0]
+print("UNITS OK" if all(ok) else f"UNITS BAD {ok}")
+PYEOF
+check_rc "$([ "${rc}" = "0" ] && grep -q '^UNITS OK' "${TMP}/i_fields_units.check" && echo 0 || echo 1)" \
+      "the power of h: a chunk's own h_scaling before the table, the table when it has none, the other unit attributes kept; a field nothing knows copied raw (${rc})"
+check_rc "$(has01 "${TMP}/i_fields_units.log" 'WARNING: /PartType1/Unknown cannot be made h-free')" "... with the loud warning"
+rc=0; merge_df UNITS --verify >"${TMP}/i_fields_units_verify.log" 2>&1 || rc=$?
+check_rc "$([ "${rc}" = "0" ] && echo 0 || echo 1)" "... and --verify agrees with what the merge wrote: exit 0 (${rc})"
+# rows that shift between two chunks while the totals still add up: one row a particle is checked chunk by chunk
+"${PY}" - "${DF}/UNITS/snapdir_099" <<'PYEOF'
+import sys, h5py, numpy as np
+for c, rows in ((1, 299), (2, 301)):
+    with h5py.File(f"{sys.argv[1]}/snap_099.{c}.hdf5", "r+") as f:
+        del f["PartType1"]["Potential"]
+        f["PartType1"].create_dataset("Potential", data=np.ones(rows, dtype=np.float32)).attrs["h_scaling"] = 0.0
+PYEOF
+sum0="$(cksum < "${DF}/UNITS/snapdir_099/combined_099.hdf5")"
+rc=0; merge_df UNITS --verify --delete-chunks >"${TMP}/i_fields_rows_verify.log" 2>&1 || rc=$?
+check_rc "$([ "${rc}" = "1" ] && [ "$(ls "${DF}"/UNITS/snapdir_099/snap_099.*.hdf5 | wc -l | tr -d ' ')" = "4" ] && echo 0 || echo 1)" \
+      "a field with 299 rows in one chunk and 301 in the next: --verify --delete-chunks exit 1, NO chunk deleted (${rc})"
+check_rc "$(has01 "${TMP}/i_fields_rows_verify.log" 'snap_099\.1\.hdf5: PartType1/Potential holds 299 rows, the chunk.s particles 300')" "... the chunk and its rows named"
+rc=0; merge_df UNITS >"${TMP}/i_fields_rows_merge.log" 2>&1 || rc=$?
+check_rc "$([ "${rc}" = "1" ] && [ "$(cksum < "${DF}/UNITS/snapdir_099/combined_099.hdf5")" = "${sum0}" ] && [ ! -e "${DF}/UNITS/snapdir_099/combined_099.hdf5.partial" ] && echo 0 || echo 1)" \
+      "... a merge of those chunks is refused: exit 1, the combined file that was there untouched, no .partial (${rc})"
+check_rc "$(has01 "${TMP}/i_fields_rows_merge.log" 'snap_099\.1\.hdf5 holds 299 rows of PartType1/Potential, its particles 300')" "... the same rows named"
+rc=0; merge_df GAS >"${TMP}/i_fields_gas.log" 2>&1 || rc=$?
+rc2=0; merge_df GAS --verify --delete-chunks >"${TMP}/i_fields_gas_verify.log" 2>&1 || rc2=$?
+check_rc "$([ "${rc}" = "0" ] && [ "${rc2}" = "1" ] && [ "$(ls "${DF}"/GAS/snapdir_099/snap_099.*.hdf5 | wc -l | tr -d ' ')" = "4" ] && echo 0 || echo 1)" \
+      "chunks whose header counts gas too: the merge works (${rc}); --verify --delete-chunks exit 1, NO chunk deleted (${rc2})"
+check_rc "$(has01 "${TMP}/i_fields_gas_verify.log" 'the chunks hold 5 particles of PartType0, which a merged snapshot does not carry')" "... the type the file lacks named"
 # group catalogues: the header's NumFiles, an empty chunk without Group/Subhalo groups, a missing chunk
 rc=0; merge_dl --groupcats --snaps 99 >"${TMP}/i_gc_ok.log" 2>&1 || rc=$?
 check_rc "$([ "${rc}" = "0" ] && [ -f "${DL}/groups_099/combined_fof_subhalo_tab_099.hdf5" ] && [ ! -e "${DL}/groups_099/combined_fof_subhalo_tab_099.hdf5.partial" ] && echo 0 || echo 1)" \

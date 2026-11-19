@@ -1590,13 +1590,14 @@ MERGE_TOOL = REPO_ROOT / "python" / "tools" / "merge_HDF5.py"
 API_KEY_FILE = Path.home() / ".tng_api_key"     # download_snapshots.sh reads it (or TNG_API_KEY)
 
 # DM particles per side of every TNG run (the -Dark twin has the same DM count). A raw -Dark
-# snapshot is ~61 bytes per particle (measured: TNG50-3/100-3/300-3, 4 chunks each),
-# the merged combined_NNN.hdf5 32 (float32 x3 + uint64 + float32 x3).
+# snapshot is 64 bytes per particle (measured: TNG50-3/100-3/300-3, 4 chunks each: positions in
+# double, velocities, IDs, the potential and four Subfind fields), the merged combined_NNN.hdf5
+# 52 (float32 x3 + uint64 + float32 x3, and those five fields; measured on TNG100-3).
 TNG_DM_PER_SIDE = {"TNG50-1": 2160, "TNG50-2": 1080, "TNG50-3": 540, "TNG50-4": 270,
                    "TNG100-1": 1820, "TNG100-2": 910, "TNG100-3": 455,
                    "TNG300-1": 2500, "TNG300-2": 1250, "TNG300-3": 625}
 TNG_SIMULATIONS = [f"{run}{suffix}" for run in TNG_DM_PER_SIDE for suffix in ("-Dark", "")]
-RAW_BYTES_PER_PARTICLE, MERGED_BYTES_PER_PARTICLE = 61, 32
+RAW_BYTES_PER_PARTICLE, MERGED_BYTES_PER_PARTICLE = 64, 52
 
 
 def _snapshot_ladder() -> dict[int, float]:
