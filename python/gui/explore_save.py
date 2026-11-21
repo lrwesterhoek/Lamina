@@ -44,8 +44,12 @@ def output_pieces(o) -> tuple[str, str, str, str]:
 
 
 def name_piece(req: dict) -> str:
-    """The field of a request and its component (not a scalar's 'value'): 'density', 'velocity-x'."""
-    parts = [req["field"]] + ([] if req.get("component", "value") in ("value", "") else [req["component"]])
+    """The field of a request and its component (not a scalar's 'value'): 'density', 'velocity-x'; a per-particle
+    scalar by its dataset ('Potential', grids.scalar_dataset) where the run names one."""
+    field = req["field"]
+    if field == "scalar" and req.get("output") is not None:
+        field = G.scalar_dataset(req["output"]) or field
+    parts = [field] + ([] if req.get("component", "value") in ("value", "") else [req["component"]])
     return "-".join(q for q in (_piece(p) for p in parts) if q)
 
 
@@ -65,7 +69,7 @@ def zoom_family(req: dict, zoom: dict) -> str:
     if req["field"] not in G.GRADIENT_FIELDS:
         return ""
     ps = G.estimator_label(o) == "PS-DTFE"
-    return "stream" if ps and not (zoom.get("exact") and o.face_gradient) else "mean"
+    return "stream" if ps and not (zoom.get("exact") and G.zoom_mean_field(o)) else "mean"
 
 
 def field_piece(req: dict, family: str | None = None) -> str:

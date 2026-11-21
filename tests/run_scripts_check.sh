@@ -24,7 +24,10 @@
 #     family and lets a flat <root>/<sim> win, and run_ps_pipeline.sh discovers nested sims -- and exits 1
 #     when it finds nothing to compute (no data root, a mistyped SIMS, a SNAPS matching nothing). Its default call of
 #     run_ps_dtfe.sh: the exact deposit, and no device or run mode (no -m, no DTFE_GPU or DTFE_RUN_MODE word).
-#  H) scripts/run_dtfe.sh passes --exact to the standard binary by default (-e, --exact and DTFE_EXACT_AVERAGE=1 too)
+#  H) scripts/run_dtfe.sh passes --exact to the standard binary by default (-e, --exact and DTFE_EXACT_AVERAGE=1 too);
+#     SCALAR_DATASET grids a particle value as the scalar (run_dtfe.sh: a constant one comes back in every cell;
+#     run_ps_dtfe.sh: its planned command carries it), and a scalar field without it, or an option inside FIELDS, is
+#     refused before anything runs
 #     (and an unknown run-mode word, '--run-mode fast', reaches the binary, which refuses it: the snapshot fails and
 #     the driver exits 1)
 #     and --sampled for DTFE_EXACT_AVERAGE=0 or --sampled, or a SUBSAMPLES count (-n) while the knob is unset (then
@@ -111,6 +114,7 @@ precision_double && export DTFE_PRECISION=double     # the drivers' own switch (
 # default run mode and their own device pick), so it unsets both: a case that wants one sets it itself, and the
 # binaries started directly in (K) get the pins back there
 unset DTFE_RUN_MODE DTFE_GPU
+unset SCALAR_DATASET                    # (a developer's export would add a particle field to every driver run here)
 
 export PYTHON="${PY}"                   # (tests/lib.sh) run_ps_pipeline.sh runs make_image_plane.py with the same python
 
@@ -427,6 +431,59 @@ if [ -x "${DTFE_BIN}" ]; then
     check_rc "$([ -f "${TMP}/HASIC/snapdir_099/output.a_tweb" ] || ls "${TMP}/HASIC/snapdir_099/"output.*tweb* >/dev/null 2>&1; echo $?)" \
         "... and the T-web grid is written"
     rm -rf "$(dirname "${TC_DIR}")"
+    # SCALAR_DATASET: a particle value gridded as the scalar -- '--scalar-dataset NAME', scalar_a and density_a join
+    # FIELDS; a constant, negative value (the potential's sign) is that constant in every cell, the interpolant of a
+    # constant being the constant
+    mkdir -p "${TMP}/HASPOT/snapdir_099"
+    "${PY}" - "${TMP}/HASIC/snapdir_099/combined_099.hdf5" "${TMP}/HASPOT/snapdir_099/combined_099.hdf5" <<'PYEOF'
+import shutil, sys
+import h5py, numpy as np
+shutil.copy(sys.argv[1], sys.argv[2])
+with h5py.File(sys.argv[2], "r+") as f:
+    g = f["PartType1"]
+    g.create_dataset("Potential", data=np.full(g["ParticleIDs"].shape[0], -5.0, dtype=np.float32))
+PYEOF
+    rc_sc=0; SCALAR_DATASET=Potential FIELDS=velocity_a OUTPUT_PREFIX=pot scripts/run_dtfe.sh -s HASPOT -g 16 99 \
+        >"${TMP}/h_scalar.log" 2>&1 || rc_sc=$?
+    "${PY}" - "${TMP}/HASPOT/snapdir_099/pot.a_scalar" >"${TMP}/h_scalar.check" 2>&1 <<'PYEOF' || true
+import sys
+import numpy as np
+import os
+v = np.fromfile(sys.argv[1], dtype=np.dtype(os.environ.get("DTFE_TEST_REAL", "float32")))
+ok = v.size == 16 ** 3 and bool(np.all(np.abs(v + 5.0) < 1e-4))
+print("SCALAR OK" if ok else f"SCALAR BAD size {v.size} range {v.min() if v.size else 0} {v.max() if v.size else 0}")
+PYEOF
+    check_rc "$([ "${rc_sc}" = "0" ] && grep -q '^SCALAR OK' "${TMP}/h_scalar.check" && echo 0 || echo 1)" \
+        "run_dtfe.sh SCALAR_DATASET=Potential: the particles' constant -5 is -5 in every cell of '.a_scalar' (${rc_sc})"
+    check_rc "$(has01 "${TMP}/h_scalar.log" 'RUNNING: .*--field density_a velocity_a scalar_a +--lambda-th 0.3 +--scalar-dataset Potential')" \
+        "... density_a and scalar_a joined FIELDS, and the dataset reached the binary (--scalar-dataset)"
+    rc_scp=0; DRY_RUN=1 SCALAR_DATASET=Potential FIELDS=density_a OUTPUT_PREFIX=ps_pot scripts/run_ps_dtfe.sh -s HASPOT -g 16 99 \
+        >"${TMP}/h_scalar_ps.log" 2>&1 || rc_scp=$?
+    check_rc "$([ "${rc_scp}" = "0" ] && echo 0 || echo 1)" "run_ps_dtfe.sh takes the same SCALAR_DATASET (${rc_scp})"
+    check_rc "$(has01 "${TMP}/h_scalar_ps.log" '--field +density_a +scalar_a +--lambda-th +0\.3 +--scalar-dataset +Potential( |$)')" \
+        "... its command carries scalar_a and --scalar-dataset too"
+    rc_z=0; FIELDS="density_a scalar_a" OUTPUT_PREFIX=pot0 scripts/run_dtfe.sh -s HASPOT -g 16 99 >"${TMP}/h_scalar_zero.log" 2>&1 || rc_z=$?
+    rc_o=0; FIELDS="density_a --scalar-dataset Potential" OUTPUT_PREFIX=pot0 scripts/run_ps_dtfe.sh -s HASPOT -g 16 99 \
+        >"${TMP}/h_scalar_opt.log" 2>&1 || rc_o=$?
+    check_rc "$([ "${rc_z}" = "2" ] && [ "${rc_o}" = "2" ] && ! ls "${TMP}/HASPOT/snapdir_099/"pot0.* >/dev/null 2>&1 && echo 0 || echo 1)" \
+        "a scalar field without SCALAR_DATASET, and an option inside FIELDS: refused, exit 2, nothing written (${rc_z} ${rc_o})"
+    check_rc "$(has01 "${TMP}/h_scalar_zero.log" 'write zeros')" "... the first says the grid would be zeros"
+    check_rc "$(has01 "${TMP}/h_scalar_opt.log" 'not options.*SCALAR_DATASET=NAME')" "... the second names SCALAR_DATASET"
+    rm -rf "${TMP}/HASPOT"
+    # the pipeline's settings comparison (run_ps_pipeline.sh same_settings) knows the dataset: grids made for Potential
+    # satisfy a plain want and a Potential want, not a SubfindHsml one
+    eval "$(sed -n '/^run_settings() {/,/^}/p; /^same_settings() {/,/^}/p' scripts/run_ps_pipeline.sh)"
+    ss_have="$(run_settings 'RUNNING: ./PS-DTFE in out --grid 16 --field density_a scalar_a --lambda-th 0.3 --scalar-dataset Potential --exact')"
+    ss_plain="$(run_settings './PS-DTFE in out --grid 16 --field density_a --lambda-th 0.3 --exact')"
+    ss_same="$(run_settings './PS-DTFE in out --grid 16 --field density_a scalar_a --lambda-th 0.3 --scalar-dataset Potential --exact')"
+    ss_other="$(run_settings './PS-DTFE in out --grid 16 --field density_a scalar_a --lambda-th 0.3 --scalar-dataset SubfindHsml --exact')"
+    ss_r=""
+    same_settings "${ss_have}" "${ss_plain}" && ss_r="${ss_r}p"
+    same_settings "${ss_have}" "${ss_same}" && ss_r="${ss_r}s"
+    same_settings "${ss_have}" "${ss_other}" || ss_r="${ss_r}o"
+    same_settings "${ss_plain}" "${ss_same}" || ss_r="${ss_r}n"
+    check_rc "$([ "${ss_r}" = "pson" ] && echo 0 || echo 1)" \
+        "run_ps_pipeline.sh compares the dataset: a Potential set serves a plain or a Potential want, not a SubfindHsml one, and a plain set no Potential want (${ss_r})"
     # SAMPLE_POINTS: the standard DTFE interpolant at a points file too (the launcher's hi-res slice)
     printf '1 1 1\n2 3 4\n5 5 5\n' > "${TMP}/h_pts.txt"
     rc_sp=0; SAMPLE_POINTS="${TMP}/h_pts.txt" PTS_VEL_GRAD=1 scripts/run_dtfe.sh -s HASIC -g 16 99 \

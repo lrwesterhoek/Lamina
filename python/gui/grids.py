@@ -70,7 +70,11 @@ FIELD_HELP = {
     "caustic": "1 = a fold caustic crosses the cell: a folded tetrahedron overlaps it (stream count above 1, or "
                "hidden-streams bit 1). Exact for every periodic phase-space run, also those made before "
                "2026-10-13, whose stored caustic grid missed the folds thinner than the sampling.",
-    "scalar": "The particles' own value (the run's scalar dataset, e.g. a potential), interpolated like the density.",
+    "scalar": "The particles' own value of the run's scalar dataset (SCALAR_DATASET, e.g. the potential): in standard "
+              "DTFE the cell average of the linear interpolant of the particles' values, in PS-DTFE the streams' mean "
+              "weighted by their volume in the cell. A TNG field is shown in physical units: the stored value times "
+              "a^a_scaling, its own attribute in the snapshot (the potential in (km/s)², the Subfind densities in "
+              "10¹⁰ M☉/kpc³, the smoothing length in kpc).",
     **{f"{n}_streams": f"The stream average of each stream's own {what} (from ⟨∇v⟩), written beside an Exact "
                        f"run's {what} of the mean flow (from ∇⟨v⟩, exact face sums): the grid a Fast run stores as "
                        f"its {what}. The two agree in single-stream cells."
@@ -91,6 +95,9 @@ FIELD_HELP = {
 # which (field_label).
 GRADIENT_FIELDS = frozenset(MEAN_FIELD_NAMES)
 PS_GRADIENT_DEFAULT = "mean-field"
+# the velocity derivatives a phase-space output lists without a stored grid (OutputSet.derived_fields): its run kept
+# only the velocity (the 1024^3 PS-DTFE sets), and these are computed from it as the mean field, plane by plane
+DERIVED_FIELDS = ("divergence", "shear")
 # the vorticity grids: the binary stores the antisymmetric part of a gradient, shown as its curl (component_values)
 CURL_FIELDS = frozenset({"vorticity", "vorticity_streams"})
 # vector fields that can be drawn as arrows (their in-plane components) over the colour map
@@ -211,6 +218,29 @@ def _ambiguous_dim(root: Path, plane: tuple[int, np.dtype], cube: tuple[int, np.
 LOG_DEFAULT = {"density", "dispersion", "tet_touch"}
 DIVERGING = {"divergence", "vorticity", "gradient", "shear", "tweb_eigenvalues", "vweb_eigenvalues",
              "divergence_streams", "vorticity_streams", "gradient_streams", "shear_streams", "mass_flux_divergence"}
+# The per-particle datasets of a merged TNG snapshot a run can grid as its 'scalar' (run_dtfe.sh / run_ps_dtfe.sh
+# SCALAR_DATASET, '--scalar-dataset NAME'; scalar_dataset), with the unit a map shows each in: the stored value times
+# a^a_scaling, the dataset's own TNG attribute, is physical once the merge took the h out (its 'h_power_applied';
+# scalar_units). The potential is signed -- a volume mean of about 0, wells in the haloes, hills in the voids -- so its
+# map is diverging about 0; the Subfind densities span decades: a log map
+SCALAR_UNITS = {"Potential": "(km/s)²", "SubfindVelDisp": "km/s", "SubfindHsml": "kpc",
+                "SubfindDensity": "10¹⁰ M☉/kpc³", "SubfindDMDensity": "10¹⁰ M☉/kpc³"}
+SIGNED_SCALARS = frozenset({"Potential"})
+LOG_SCALARS = frozenset({"SubfindDensity", "SubfindDMDensity"})
+# the name a map of a dataset's scalar shows, where it is not the dataset's own
+SCALAR_NAMES = {"Potential": "Gravitational potential"}
+
+
+def diverging(o, name: str) -> bool:
+    """Whether a map of a field is diverging, about 0 (a symmetric range, RdBu_r): the DIVERGING fields, and the
+    'scalar' of an output whose dataset is signed (SIGNED_SCALARS: the potential)."""
+    return name in DIVERGING or (name == "scalar" and o is not None and scalar_dataset(o) in SIGNED_SCALARS)
+
+
+def log_default(o, name: str) -> bool:
+    """Whether a map of a field opens on a log scale: the LOG_DEFAULT fields, and the 'scalar' of an output whose
+    dataset spans decades (LOG_SCALARS: the Subfind densities)."""
+    return name in LOG_DEFAULT or (name == "scalar" and o is not None and scalar_dataset(o) in LOG_SCALARS)
 
 
 @dataclass
@@ -477,7 +507,27 @@ class OutputSet:
         return bool(self.files) and bool(self.n)
 
     def fields(self) -> list[str]:
-        return [n for n in FIELD_LABELS if n in self.files]
+        """The fields a map can show: the stored grids and the derived ones (derived_fields), in FIELD_LABELS' order."""
+        derived = self.derived_fields()
+        return [n for n in FIELD_LABELS if n in self.files or n in derived]
+
+    def derived_fields(self) -> dict[str, int]:
+        """The velocity derivatives this output lists without a grid file, name -> the components a stored grid of it
+        would hold: a phase-space output's DERIVED_FIELDS it did not store, where mean_field_reason allows the mean
+        field (its velocity grid, a periodic cube of a known box) -- shown as the mean field grad<v> computed from the
+        velocity one plane at a time (slice(), _mean_field_plane), as the 'mean-field' choice for a stored stream
+        average. Empty for standard DTFE (it stores the mean field) and for every other output. Cached on the object."""
+        d = getattr(self, "_derived", None)
+        if d is None:
+            d = {} if not self.files or not self.n or estimator_label(self) != "PS-DTFE" or self.mean_field_reason() \
+                else {nm: ncomp_of(nm, self.dim) for nm in DERIVED_FIELDS if nm not in self.files}
+            self._derived = d
+        return d
+
+    def ncomp(self, name: str) -> int:
+        """The components of a field's grid: the stored file's, or a derived field's (derived_fields)."""
+        ff = self.files.get(name)
+        return ff.ncomp if ff is not None else self.derived_fields()[name]
 
     # lo and length always have three entries: a 2D grid is the plane z = 0 of zero thickness, so the
     # slice machinery (an axis, an index along it) treats it as the one z slice it has
@@ -521,7 +571,10 @@ class OutputSet:
 
     def velocity_factor(self, name: str) -> float:
         """The factor from a field's stored units to the map's: u-units -> peculiar km/s (FieldSet) for the
-        velocity and its derivatives at a known redshift, else 1."""
+        velocity and its derivatives at a known redshift; a^a_scaling for the per-particle scalar where the snapshot's
+        dataset says it (scalar_units: physical); else 1."""
+        if name == "scalar":
+            return scalar_units(self)[0]
         exp = _VELOCITY_SCALE_EXP.get(name)
         if exp is None or self.redshift is None:
             return 1.0
@@ -599,6 +652,8 @@ class OutputSet:
         output's stored stream average."""
         if name not in GRADIENT_FIELDS:
             return ""
+        if name in self.derived_fields():                                   # computed from the velocity: no other
+            return "mean"
         if estimator_label(self) != "PS-DTFE" or self.face_gradient:   # (a face run stores the mean field)
             return "mean"
         return "mean" if gradient == "mean-field" and not self.mean_field_reason() else "stream"
@@ -627,11 +682,12 @@ class OutputSet:
         map of a periodic phase-space run is the exact fold flag, not the stored grid (fold_exact).
         gradient 'mean-field': a phase-space output's velocity derivatives as the mean field, computed
         from its velocity grid (gradient_family 'mean'; a face-gradient output's stored grid is the mean field
-        already); 'stored' (the default) or any other field: the file's grid."""
+        already); 'stored' (the default) or any other field: the file's grid. A derived field (derived_fields) is
+        the mean field computed from the velocity either way."""
         index = self.n // 2 if index is None else int(index)
         if name == "caustic" and self.fold_exact():
             return self._fold_plane(int(axis), index)
-        if gradient == "mean-field" and self.gradient_family(name, gradient) == "mean" \
+        if name in self.derived_fields() or gradient == "mean-field" and self.gradient_family(name, gradient) == "mean" \
                 and estimator_label(self) == "PS-DTFE" and not self.face_gradient:
             plane = self._mean_field_plane(name, int(axis), index)
         else:
@@ -645,13 +701,13 @@ class OutputSet:
         and its derivatives in km/s (velocity_factor). One rule for the map, its saved figures and the 3D volume.
         'fresh' True: always a new array (a factor of 1 multiplied too, as slice() always did); False: a factor of 1
         not applied, so a float64 scalar block comes back as it is (the volume's temporaries: no copy)."""
-        ff = self.files[name]
+        nc = self.ncomp(name)
         f64 = lambda a: np.asarray(a, dtype=np.float64)        # noqa: E731
         if name in CURL_FIELDS:         # [W_xy, W_xz, W_yz] = [-w_z, w_y, -w_x] / 2 -> the curl w
-            arr = -2.0 * f64(arr) if ff.ncomp == 1 else \
+            arr = -2.0 * f64(arr) if nc == 1 else \
                 2.0 * np.stack([-f64(arr[..., 2]), f64(arr[..., 1]), -f64(arr[..., 0])], -1)
-        if ff.ncomp > 1:
-            comps = components(name, ff.ncomp, self.dim)
+        if nc > 1:
+            comps = components(name, nc, self.dim)
             if component not in comps:
                 component = comps[0]
             if component == "norm":     # component by component in float64: never the whole array at once
@@ -661,7 +717,7 @@ class OutputSet:
                     acc += c * c
                 arr = np.sqrt(acc)
             elif component.startswith("trace"):
-                d = int(round(ff.ncomp ** 0.5))
+                d = int(round(nc ** 0.5))
                 arr = sum(f64(arr[..., i * d + i]) for i in range(d))
             else:
                 idx = comps.index(component) - (1 if comps[0] == "norm" or comps[0].startswith("trace") else 0)
@@ -763,21 +819,96 @@ def _mf_gradient_plane(o: OutputSet, axis: int, index: int) -> np.ndarray:
     return g
 
 
+def snapshot_file(o) -> str | None:
+    """The snapshot an output was computed from: the TNG layout's combined file beside it, or a custom run's input
+    (its settings sidecar); None when not known."""
+    if getattr(o, "sim", ""):
+        own = Path(o.dir) / f"combined_{int(o.snap):03d}.hdf5" if getattr(o, "snap", None) is not None else None
+        if own is not None and own.is_file():
+            return str(own)
+        files = sorted(Path(o.dir).glob("combined_[0-9][0-9][0-9].hdf5"))
+        return str(files[0]) if files else None
+    src = (sidecar(o.root) or {}).get("input_file")
+    return str(src) if src else None
+
+
+def _cache_on(o, attr: str, value):
+    """'value', kept on the output as 'attr' where it can be (an OutputSet; a stand-in without attributes keeps
+    nothing)."""
+    try:
+        setattr(o, attr, value)
+    except AttributeError:
+        pass
+    return value
+
+
+def scalar_dataset(o) -> str:
+    """The particle dataset an output's 'scalar' grid holds (run_dtfe.sh / run_ps_dtfe.sh SCALAR_DATASET, the
+    binary's '--scalar-dataset'), '' when not known: the custom run's settings sidecar, else the run log -- the
+    binary's "reading the scalar dataset 'NAME'" line, else the last '--scalar-dataset NAME' of the command it ran --
+    else, the same, the log of the run that made the scalar grid when it was added to the set afterwards: that run's
+    '<prefix>.runlog' kept beside the grid as '<prefix>.a_scalar.log' (the set's own log is of a run without it).
+    Read once per output and cached on it."""
+    if hasattr(o, "_scalar_ds"):
+        return o._scalar_ds
+    root = getattr(o, "root", None)             # (a stand-in without one names none)
+    name = str((sidecar(root) or {}).get("scalar_dataset") or "") if root is not None else ""
+    for log in (".runlog", ".a_scalar.log") if not name and root is not None else ():
+        try:
+            text = Path(str(root) + log).read_text(errors="replace")
+        except OSError:
+            continue
+        found = (re.findall(r"reading the scalar dataset '([^'/\s]+)'", text)
+                 or re.findall(r"--scalar-dataset[ =]+([^\s/]+)", text))
+        if found:
+            name = found[-1]
+            break
+    return _cache_on(o, "_scalar_ds", name)
+
+
+def scalar_units(o) -> tuple[float, str]:
+    """(factor, unit) of an output's 'scalar' map: for a dataset of a merged snapshot (the merge took its h out:
+    'h_power_applied'), a^a_scaling -- the scale factor from the snapshot's header 'Time', a_scaling the dataset's own
+    TNG attribute -- and the unit of SCALAR_UNITS: the physical value. (1.0, '') -- the stored value -- for any other
+    dataset or when the snapshot is not known. Read once per output and cached on it; a read that fails (a disk asleep
+    or gone) is not kept, so the next map asks again."""
+    if hasattr(o, "_scalar_units"):
+        return o._scalar_units
+    out = (1.0, "")
+    name = scalar_dataset(o)
+    src = snapshot_file(o) if name else None
+    if src:
+        try:
+            import h5py
+            with h5py.File(src, "r") as f:
+                ds = next((f[g][name] for g in sorted(f) if g.startswith("PartType") and name in f[g]), None)
+                a = float(f["Header"].attrs.get("Time", 0.0)) if "Header" in f else 0.0
+                if ds is not None and "a_scaling" in ds.attrs and "h_power_applied" in ds.attrs and a > 0:
+                    out = (a ** float(np.asarray(ds.attrs["a_scaling"]).ravel()[0]), SCALAR_UNITS.get(name, ""))
+        except Exception:
+            return (1.0, "")
+    return _cache_on(o, "_scalar_units", out)
+
+
+def field_key(o, name: str) -> str:
+    """What a map of a field shows, as one word: the field's name, a per-particle scalar with its dataset
+    ('scalar:Potential'): two outputs' 'scalar' grids may hold different quantities (a comparison, the figure grid's
+    shared ranges and colours, a fixed range keep to one)."""
+    ds = scalar_dataset(o) if name == "scalar" and o is not None else ""
+    return f"{name}:{ds}" if ds else name
+
+
 def header_hubble(o) -> float | None:
     """HubbleParam of the snapshot an output was computed from, whatever unit its box is in (hubble() asks an h-free
     box): the h the binary's V-web takes from the Gadget header (H0 = 100 h), for the mean-field V-web.
-    The TNG layout's combined file, or a custom run's HDF5 input; None = not known (the binary's fallback, 1). Read once
-    per output (a header only) and cached on it."""
+    The TNG layout's combined file, or a custom run's HDF5 input (snapshot_file); None = not known (the binary's
+    fallback, 1). Read once per output (a header only) and cached on it."""
     if hasattr(o, "_header_h"):
         return o._header_h
     h = None
     try:
         import h5py
-        if getattr(o, "sim", ""):
-            files = sorted(Path(o.dir).glob("combined_[0-9][0-9][0-9].hdf5"))
-            src = files[0] if files else None
-        else:
-            src = (sidecar(o.root) or {}).get("input_file")
+        src = snapshot_file(o)
         if src:
             with h5py.File(src, "r") as f:
                 a = f["Header"].attrs
@@ -797,6 +928,9 @@ def field_label(o, name: str, family: str = "", qualify: bool | None = None) -> 
     divergence (mean field ∇⟨v⟩)' or '(stream average ⟨∇v⟩)' (family: OutputSet.gradient_family) for a phase-space
     output -- or, with 'qualify', for every output: a comparison or a figure grid with a phase-space panel names the
     standard-DTFE panel's family too (its stored grid is the mean field). A standard-DTFE map alone keeps its name."""
+    if name == "scalar" and o is not None and scalar_dataset(o):    # the dataset's name, its unit where known
+        shown, unit = SCALAR_NAMES.get(scalar_dataset(o), scalar_dataset(o)), scalar_units(o)[1]
+        return f"{shown} [{unit}]" if unit else shown
     base = FIELD_LABELS.get(name, name)
     if not family:
         return base
@@ -891,7 +1025,8 @@ def smooth3d_why(o, name: str, gradient: str = "stored", hires: bool = False) ->
 
 def _smooth3d_kind(o, name: str, gradient: str = "stored", hires: bool = False) -> str:
     """smooth3d_why without the memory: '' when the map is a slice of a stored 3D grid, else why not."""
-    if o is None or name not in getattr(o, "files", {}):
+    derived = o.derived_fields() if hasattr(o, "derived_fields") else {}
+    if o is None or (name not in getattr(o, "files", {}) and name not in derived):
         return "no map shown"
     if o.dim != 3:
         return "a 2D grid is its one plane"
@@ -901,10 +1036,21 @@ def _smooth3d_kind(o, name: str, gradient: str = "stored", hires: bool = False) 
         return "the fold map is computed slice by slice"
     if name in ("tweb", "vweb"):
         return "a class map is not smoothed"
-    if gradient == "mean-field" and o.gradient_family(name, gradient) == "mean" and estimator_label(o) == "PS-DTFE" \
-            and not o.face_gradient:
+    if name in derived or gradient == "mean-field" and o.gradient_family(name, gradient) == "mean" \
+            and estimator_label(o) == "PS-DTFE" and not o.face_gradient:
         return "this map is computed slice by slice from the velocity (the mean field)"
     return ""
+
+
+def zoom_mean_field(o) -> bool:
+    """An exact zoom of this output computes the mean flow's derivatives (PS-DTFE '--face-gradient'), as its map
+    shows them: a face-gradient output (OutputSet.face_gradient), or one that stored no velocity derivative at all, whose
+    map shows them as the mean field computed from the velocity (OutputSet.derived_fields). Any other phase-space
+    output's exact zoom keeps its run's stored stream average ('--per-tet-gradient')."""
+    if getattr(o, "face_gradient", False):
+        return True
+    derived = o.derived_fields() if hasattr(o, "derived_fields") else {}
+    return bool(derived) and not any(n in getattr(o, "files", {}) for n in GRADIENT_FIELDS)
 
 
 def smooth3d_need(o, name: str) -> float:
@@ -927,7 +1073,8 @@ def _cube_cached(path, dtype, shape) -> bool:
 def _smooth3d_key(o, name: str, component: str, sigma: float):
     ff = o.files[name]
     k = cube_key(ff.path, o.dtype, (o.n,) * 3 + ((ff.ncomp,) if ff.ncomp > 1 else ()))
-    return None if k is None else (k, name, component, round(float(sigma), 6))
+    # (the factor to the map's units too: a scalar's depends on what its run log names, not on the file alone)
+    return None if k is None else (k, name, component, round(float(sigma), 6), round(o.velocity_factor(name), 12))
 
 
 def smoothed3d_kept(o, name: str, component: str, sigma: float) -> bool:
@@ -1978,7 +2125,9 @@ def server_settings(out: OutputSet, snapshot: str | None = None) -> dict | None:
     combined = [Path(snapshot)] if snapshot else sorted(out.dir.glob("combined_[0-9][0-9][0-9].hdf5"))
     if not combined:
         return None
-    kw = {"snapshot": str(combined[0]), "phase_space": not out.prefix == "output", "periodic": True}
+    # the output's own estimator (estimator_label: a streams grid, else a 'ps' prefix): a standard set under another
+    # prefix than 'output' (output1024, output1024_potential) is served and zoomed by standard DTFE, as its map says
+    kw = {"snapshot": str(combined[0]), "phase_space": estimator_label(out) == "PS-DTFE", "periodic": True}
     ics = combined[0].parent.parent / "combined_ics.hdf5"
     if kw["phase_space"] and ics.is_file():
         kw["lagrangian_input"] = str(ics)

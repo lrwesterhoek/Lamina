@@ -34,8 +34,9 @@
 #   the gradient, vorticity, T-web and V-web stay available through FIELDS), LAMBDA_TH 0.3.
 #   Knobs (environment; each is explained where the script reads it): PARTITION MAX_CONCURRENT DTFE_GPU DTFE_RUN_MODE
 #   DTFE_EXACT_AVERAGE SUBSAMPLES THREADS FACE_GRADIENT SCRATCH_DIR SAMPLE_POINTS PTS_VEL_GRAD TESSELLATION_CACHE
-#   LAMBDA_TH DTFE_RESUME OUTPUT_PREFIX FIELDS DTFE_PRECISION DRY_RUN AUTO_TUNE_REPORT, and config.sh's GRID_SIZE,
-#   PADDING, SPACE_CHECK. A switch is off for 0, false, no or off and on for any other value (the binaries' rule).
+#   LAMBDA_TH DTFE_RESUME OUTPUT_PREFIX FIELDS SCALAR_DATASET DTFE_PRECISION DRY_RUN AUTO_TUNE_REPORT, and config.sh's
+#   GRID_SIZE, PADDING, SPACE_CHECK. A switch is off for 0, false, no or off and on for any other value (the
+#   binaries' rule).
 #   OUTPUT_PREFIX (default 'output'): the files are <snapdir>/<prefix>.*; another prefix keeps a variant beside
 #   the default set (dtfelib reads 'output.' for standard DTFE). A 'ps_*' prefix is refused: that is PS-DTFE's
 #   naming (an OUTPUT_PREFIX exported for run_ps_dtfe.sh would otherwise overwrite the phase-space grids).
@@ -155,11 +156,19 @@ if [ -z "${FIELDS// }" ]; then
     echo "Error: no field standard DTFE computes in FIELDS (the velocity dispersion is a PS-DTFE field)" >&2
     exit 2
 fi
+SCALAR_DATASET="${SCALAR_DATASET:-}"   # a per-particle dataset of the input to grid as the 'scalar' field, e.g.
+                                 # Potential (a merged TNG snapshot also carries SubfindDMDensity, SubfindDensity,
+                                 # SubfindHsml, SubfindVelDisp): --scalar-dataset NAME, scalar_a (and density_a) added
+                                 # to FIELDS (config.sh scalar_dataset_resolve, the same knob as run_ps_dtfe.sh's). The
+                                 # cell value is the cell average of the linear interpolant of the particles' values, in
+                                 # the dataset's own units. Give it a prefix of its own, e.g.
+                                 # OUTPUT_PREFIX=output1024_potential
 
 knob_bool DTFE_EXACT_AVERAGE FACE_GRADIENT DRY_RUN AUTO_TUNE_REPORT PTS_VEL_GRAD DTFE_RESUME   # 1 or 0 (config.sh)
 usage() { echo "Usage: $0 [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n SUBSAMPLES] [-m] [-e | --sampled] [--run-mode MODE] [snapshot ...]"; }
 
 driver_help_version "${BASH_SOURCE[0]}" "${1:-}"   # -h / --help print the header and run nothing; --version the revision
+scalar_dataset_resolve           # (SCALAR_DATASET, above; after --help, which a stray export must not block)
 # OUTPUT_PREFIX (above): one word, and not PS-DTFE's 'ps_*' naming (after --help, which a stray export must not block)
 case "${OUTPUT_PREFIX}" in
     ""|*/*|*" "*|.*)
@@ -203,6 +212,7 @@ runlog_contract_start
 echo "Starting DTFE processing..."
 echo "Data directory: ${DATA_DIR}"
 echo "Grid size: ${GRID_SIZE}   Fields: ${FIELDS}   Output prefix: ${OUTPUT_PREFIX}"
+[ -n "${SCALAR_DATASET}" ] && echo "Particle value gridded as the scalar: ${SCALAR_DATASET} (--scalar-dataset)"
 if [ "${DTFE_EXACT_AVERAGE}" = "1" ]; then
     echo "Cell averages: exact (--exact; ${average_src})"
 else
@@ -269,6 +279,7 @@ for i in "${SNAPSHOTS[@]}"; do
         ${part_args[@]+"${part_args[@]}"}
         --field ${FIELDS}
         --lambda-th ${LAMBDA_TH}
+        ${scalar_args[@]+"${scalar_args[@]}"}
         ${scratch_args[@]+"${scratch_args[@]}"}
         ${tess_args[@]+"${tess_args[@]}"}
         ${sp_args[@]+"${sp_args[@]}"}

@@ -2064,13 +2064,17 @@ def _map_axes(w, tmp, root, x):
     x._zoom = {"axis": 2, "output": x.current}
     x._zoom_fields = _types.SimpleNamespace(density=np.ones((4, 4, 1)), scalar=np.full((4, 4, 1), 7.0))
     sp = x._zoom_plane("scalar", "")
+    x._zoom = {"axis": 2, "output": _types.SimpleNamespace(dim=3, velocity_factor=lambda name: 2.0)}
+    sp_phys = x._zoom_plane("scalar", "")         # an output whose map shows the scalar times a^a_scaling = 2
     x._zoom, x._zoom_fields = saved_zoom
     sroot = tmp / "scalar_zoom"
     np.ones(8, dtype=np.float32).tofile(str(sroot) + ".a_den")
     np.full(8, 3.0, dtype=np.float32).tofile(str(sroot) + ".a_scalar")
     ez = E.load_exact_planes(sroot, (2, 2, 2))
-    check("a zoom shows the scalar field (the exact zoom's '.a_scalar' is read; the server's answer has none)",
-          sp is not None and np.all(sp == 7.0) and getattr(ez, "scalar", None) is not None and np.all(ez.scalar == 3.0))
+    check("a zoom shows the scalar field (the exact zoom's '.a_scalar' is read; the server's answer has none), in the "
+          "map's units (times the output's factor)",
+          sp is not None and np.all(sp == 7.0) and getattr(ez, "scalar", None) is not None and np.all(ez.scalar == 3.0)
+          and sp_phys is not None and np.all(sp_phys == 14.0))
 
 
 def _figure_grid(qa, w, tmp, sim, json, x, s99):

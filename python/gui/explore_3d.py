@@ -1629,13 +1629,30 @@ class View3DMixin:
         req = {"output": o, "field": name, "component": self.component.currentText(), "cmap": self.cmap.currentText(),
                "log": log, "clip": self.clip.value(), "smooth": self.smooth.value(),
                "smooth3d": self.smooth3d.isChecked() and self.smooth3d.isEnabled(),
-               "symmetric": name in G.DIVERGING and not log,
+               "symmetric": G.diverging(o, name) and not log,
                "ps_gradient": self.ps_gradient.currentData() or G.PS_GRADIENT_DEFAULT,
                "index": list(self._3d_index), "shown": [cb.isChecked() for cb in self.view3d_axes],
                "lo": np.asarray(lo, dtype=np.float64), "hi": np.asarray(hi, dtype=np.float64), "style": style,
                # the map's Contours tick: the planes' lines, the volume's shells (never on a class map: why_not)
                "contours": self.contours.isChecked() and not CT.why_not(name, self.cmap.currentText()),
                "contour_detail": self.contour_detail.value()}
+        if style == "volume" and name in o.derived_fields():
+            # the volume averages a stored grid; a derived field is computed from the velocity plane by plane. The
+            # volume of the field before is moot: its averaging stopped, its result forgotten (a colour change would
+            # otherwise bring it back under this field's name)
+            self._3d_pending = None
+            self._3d_cancel()
+            self._3d_res = None
+            text = ("This output stores no grid of this field: it is computed from the velocity one plane at a time, "
+                    "so the volume cannot show it. The Planes style does.")
+            self.view3d_state.setText("")
+            self.view.view3d.set_volume(None)
+            self.view.view3d.message = text
+            self.view.view3d.update()
+            label = G.field_label(o, name, o.gradient_family(name))
+            self.view.title.setText(f"<b>{label}</b> — {o.title} — 3D: no volume of this field")
+            self.view.colorbar.set(req["cmap"], (0.0, 1.0), "no volume: the Planes style shows this field")
+            return
         if style == "volume":
             req["want"] = int(self.view3d_detail.currentData())
             req["detail"], req["note"] = self._3d_detail(o, req["lo"], req["hi"])
@@ -1743,7 +1760,8 @@ class View3DMixin:
             self._3d_emit(req)
         req = res["request"]
         if not self._3d_shown or self._shut or not self._same(req["output"], self.current) \
-                or req.get("style", "planes") != self.view3d_style.currentData():
+                or req.get("style", "planes") != self.view3d_style.currentData() \
+                or req.get("field") != self.field.currentData():        # (another field is shown by now)
             return
         if (req.get("progress") or {}).get("cancel"):  # made moot while it was coloured: what is shown stays
             if self._3d_res is not None:

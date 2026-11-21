@@ -302,7 +302,7 @@ def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: 
         # the velocity gradient's route as the output's own run took it (its '.a_velDivStreams' marks the mean flow's
         # derivatives from exact face sums, an Exact run's in 3D without the halo release): the zoom's derivatives are
         # then the map's, and an output that stored the stream average (a Fast run's) keeps it
-        cmd.append("--face-gradient" if o.face_gradient else "--per-tet-gradient")
+        cmd.append("--face-gradient" if G.zoom_mean_field(o) else "--per-tet-gradient")   # (or none stored)
         # chart-independent tet masses: as the custom run recorded it, or, for a TNG output (no
         # sidecar: the batch script's default, on, when the converted ICs are the Lagrangian input)
         if (bool(side.get("vertex_mass")) if side else bool(kw.get("lagrangian_input"))):
@@ -341,9 +341,11 @@ def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: 
         # corners are followed by '--field'
         if not any(str(v) in ("--padding", "--padding-mpc") for v in kw.get("options", [])):
             cmd += ["--padding", f"{STANDARD_PADDING:g}"]
-        cmd += ["--region-mpc", *corners, "--field", "density_a", "velocity_a", "gradient_a", "--exact"]
-        if side.get("scalar_dataset"):
-            cmd += ["scalar_a", "scalarGradient_a", "--scalar-dataset", str(side["scalar_dataset"])]
+        ds = G.scalar_dataset(o)                                    # the custom run's sidecar or the run log
+        cmd += ["--region-mpc", *corners, "--field", "density_a", "velocity_a", "gradient_a",
+                *(["scalar_a"] if ds else []), "--exact"]
+        if ds:
+            cmd += ["--scalar-dataset", ds]
         cmd += ["--run-mode", "balanced"]                           # (beside the launcher, as the phase-space zoom)
         plan["snapshot"] = str(kw["snapshot"])
     plan.update(cmd=cmd, root=str(root), grid=grid, edges=(a0n, a1n), window=window_mpc)
@@ -681,8 +683,8 @@ class ZoomMixin:
         if name == "streams":
             return None if f.streams is None else sq(f.streams)
         if name == "scalar":                    # an exact zoom of a run with a scalar dataset; the server has none
-            sc = getattr(f, "scalar", None)
-            return None if sc is None else sq(sc)
+            sc = getattr(f, "scalar", None)     # (in the map's units: OutputSet.velocity_factor, a^a_scaling)
+            return None if sc is None else sq(sc) * self._zoom["output"].velocity_factor("scalar")
         if name == "caustic" and f.caustic is not None:
             return sq(((np.asarray(f.caustic) & 3) == 3).astype(np.float64))
         if name == "caustic_class" and f.caustic is not None:
@@ -764,13 +766,16 @@ class ZoomMixin:
         # its route); standard DTFE's the containing tetrahedron's
         o = req["output"]
         ps = G.estimator_label(o) == "PS-DTFE"
-        face = bool(z.get("exact")) and o.face_gradient
+        face = bool(z.get("exact")) and G.zoom_mean_field(o)
         fam = "" if req["field"] not in G.GRADIENT_FIELDS else "stream" if ps and not face else "mean"
         label = G.field_label(o, req["field"], fam)
         self.ps_gradient_note.setText("")
         self._out_form_map.setRowVisible(self.ps_gradient_note, False)
-        if fam == "stream" and req.get("ps_gradient") == "mean-field":
-            note += " · its velocity derivatives are the stream average (a point evaluation has no mean field)"
+        derived = req["field"] in (o.derived_fields() if hasattr(o, "derived_fields") else {})
+        if fam == "stream" and (req.get("ps_gradient") == "mean-field" or derived):
+            note += (" · its velocity derivatives are the stream average ("
+                     + ("this output's run stored the stream average)" if z.get("exact")
+                        else "a point evaluation has no mean field)"))
         if z.get("exact") and z.get("mass_weighted_map"):
             # an older output made with mass-weighted moments: PS-DTFE has only the volume-weighted ones now
             note += " · the zoom's velocities are volume-weighted, this older output's mass-weighted"

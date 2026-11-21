@@ -1823,12 +1823,12 @@ def two_quality_modes(tmp: Path):
     ps_common = {"DTFE_DATA_ROOT": root, "DTFE_FACE_GRADIENT": "", "DTFE_RESUME": "1", "DTFE_RUN_MODE": "balanced",
                  "FIELDS": "density_a velocity_a divergence_a shear_a", "GPU_SHARE": "auto",
                  "OUTPUT_PREFIX": "ps_output", "PARALLEL_TRIANGULATION": "0", "PS_CAUSTICS": "1",
-                 "PS_CAUSTIC_CUSPS": "0", "PS_MERGE": "index-order", "PS_VERTEX_MASS": "1"}
+                 "PS_CAUSTIC_CUSPS": "0", "PS_MERGE": "index-order", "PS_VERTEX_MASS": "1", "SCALAR_DATASET": ""}
     auto = {"DTFE_GPU": "auto"}
     ps_exact = dict(ps_common, SUBSAMPLES="", DTFE_EXACT_AVERAGE="1", FACE_GRADIENT="1")
     ps_fast = dict(ps_common, DTFE_EXACT_AVERAGE="0", FACE_GRADIENT="")
     dt_common = {"DTFE_DATA_ROOT": root, "DTFE_FACE_GRADIENT": "", "DTFE_RESUME": "1", "FACE_GRADIENT": "",
-                 "SUBSAMPLES": "", "THREADS": ""}
+                 "SUBSAMPLES": "", "THREADS": "", "SCALAR_DATASET": ""}
     dt_env = lambda q, mode: dict(dt_common, DTFE_EXACT_AVERAGE=q, DTFE_GPU="auto",             # noqa: E731
                                   DTFE_RUN_MODE=mode)
     pipe_common = {"AXIS": "z", "GRID_SIZE": "512", "NU": "8192", "PLANES": "1", "SUPERSAMPLE": "1", "SIMS": "Toy-64",
@@ -3512,6 +3512,56 @@ def explore_extras(tmp: Path):
         check("a snapshot chosen by hand serves an output whose own is not found (and only an existing file)",
               kw0 is None and kw1 is not None and kw1["snapshot"] == str(snap)
               and G.server_settings(o, str(sim / "nope.hdf5")) is None, f"{kw0} {kw1}")
+        # a Grids job pins SCALAR_DATASET empty (a login shell's export cannot add a particle field behind it)
+        js = rs.RunSpec(data_root=str(tmp), sim="SIM", snapshots=[50], estimator="dtfe")
+        jp = rs.RunSpec(data_root=str(tmp), sim="SIM", snapshots=[50])
+        check("a Grids job, standard or phase-space, pins SCALAR_DATASET empty",
+              js.command()[1].get("SCALAR_DATASET") == "" and jp.command()[1].get("SCALAR_DATASET") == "",
+              f"{js.command()[1].get('SCALAR_DATASET')!r} {jp.command()[1].get('SCALAR_DATASET')!r}")
+        # the scalar named by its dataset: the run log's, with the unit and the factor to physical (a^a_scaling) from
+        # the snapshot's own attributes; a signed dataset's map diverging about 0, a density's on a log scale; an
+        # output that names none keeps the old label and its stored values
+        plain = (G.field_label(o, "scalar"), o.velocity_factor("scalar"), G.diverging(o, "scalar"))
+        import h5py
+        with h5py.File(sd / "combined_050.hdf5", "w") as f:
+            f.create_group("Header").attrs["Time"] = 0.5
+            for nm, a_s, h_p in (("Potential", -1.0, 0.0), ("SubfindDensity", -3.0, 2.0)):
+                ds = f.require_group("PartType1").create_dataset(nm, data=np.zeros(3, dtype=np.float32))
+                ds.attrs["a_scaling"], ds.attrs["h_scaling"], ds.attrs["h_power_applied"] = a_s, 0.0, h_p
+        (sd / "ps_output.runlog").write_text("RUNNING: ./PS-DTFE in out --field density_a scalar_a --lambda-th 0.3 "
+                                             "--scalar-dataset Potential --exact\n reading the scalar dataset "
+                                             "'Potential' ... Done\n")
+        pot = G.OutputSet(sd / "ps_output", box=((0, 0, 0), (10, 10, 10)), redshift=1.0, sim="SIM", snap=50)
+        plane = pot.slice("scalar", 2, 0, "value")
+        check("a scalar run's map is named by its dataset (the run log's Potential: 'Gravitational potential "
+              "[(km/s)²]'), in physical units (the stored 1 times a^-1 = 2 at a = 0.5), diverging about 0, linear",
+              G.field_label(pot, "scalar") == "Gravitational potential [(km/s)²]"
+              and pot.velocity_factor("scalar") == 2.0
+              and bool(np.allclose(plane, 2.0)) and G.diverging(pot, "scalar") and not G.log_default(pot, "scalar"),
+              f"{G.field_label(pot, 'scalar')} {pot.velocity_factor('scalar')} {G.diverging(pot, 'scalar')}")
+        (sd / "ps_output.runlog").write_text("RUNNING: ./PS-DTFE in out --scalar-dataset SubfindDensity --exact\n")
+        den = G.OutputSet(sd / "ps_output", redshift=1.0, sim="SIM", snap=50)
+        check("... a Subfind density: 10¹⁰ M☉/kpc³, times a^-3, on a log scale; an output naming no dataset as before",
+              G.field_label(den, "scalar") == "SubfindDensity [10¹⁰ M☉/kpc³]" and den.velocity_factor("scalar") == 8.0
+              and G.log_default(den, "scalar") and not G.diverging(den, "scalar")
+              and plain == ("per-particle scalar", 1.0, False) and G.diverging(o, "divergence"),
+              f"{G.field_label(den, 'scalar')} {den.velocity_factor('scalar')} {plain}")
+        # a scalar grid added to a set afterwards: the set's own run log names no dataset, the log of the run that
+        # made the grid ('<prefix>.a_scalar.log') does; the set's other fields stay as they are
+        (sd / "ps_output.runlog").write_text("RUNNING: ./PS-DTFE in out --field density_a velocity_a --exact\n")
+        (sd / "ps_output.a_scalar.log").write_text("RUNNING: ./PS-DTFE in work --field density_a scalar_a "
+                                                   "--scalar-dataset Potential --exact\n reading the scalar dataset "
+                                                   "'Potential' ... Done\n")
+        add = G.OutputSet(sd / "ps_output", redshift=1.0, sim="SIM", snap=50)
+        got = (G.field_label(add, "scalar"), add.velocity_factor("scalar"), G.diverging(add, "scalar"),
+               G.field_key(add, "scalar"), "scalar" in add.fields())
+        (sd / "ps_output.a_scalar.log").unlink()
+        bare = G.OutputSet(sd / "ps_output", redshift=1.0, sim="SIM", snap=50)
+        got_bare = (G.field_label(bare, "scalar"), bare.velocity_factor("scalar"))
+        check("a scalar grid added to a set later is named by its own run's log ('<prefix>.a_scalar.log'): "
+              "'Gravitational potential [(km/s)²]', times a^-1, diverging; without that log as before",
+              got == ("Gravitational potential [(km/s)²]", 2.0, True, "scalar:Potential", True)
+              and got_bare == ("per-particle scalar", 1.0), f"{got} {got_bare}")
     finally:
         shutil.rmtree(sim.parent, ignore_errors=True)
     pts = tmp / "pts.txt"

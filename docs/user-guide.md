@@ -687,6 +687,28 @@ the drivers hand `DTFE_GPU` and `DTFE_RUN_MODE` on as you set them. Their option
 `DRY_RUN=1` prints each snapshot's command and runs nothing; `AUTO_TUNE_REPORT=1` prints the auto-tuner's report per
 snapshot and writes nothing.
 
+**A particle field as a grid.** `SCALAR_DATASET=NAME` grids one of the snapshot's per-particle datasets, such as
+`Potential`, as the scalar field (`<prefix>.a_scalar`): the driver passes `--scalar-dataset NAME` and adds `scalar_a`,
+and `density_a` when it is missing, to `FIELDS`. Standard DTFE's cell value is the cell average of the linear
+interpolant of the particles' values, which suits a single-valued field such as the potential; PS-DTFE's is the
+streams' mean weighted by their volume in the cell. The values keep the dataset's units. Give the run a prefix of its
+own, since a rerun into an existing prefix moves the earlier set's files it does not rewrite aside. A scalar field in
+`FIELDS` without `SCALAR_DATASET` is refused: the program would read no value and write zeros.
+
+To add the field to a set that exists, run it as above (at the set's grid size, with the same estimator) and move two
+files beside that set: `<prefix>.a_scalar` as `<set>.a_scalar` and the run's `<prefix>.runlog` as
+`<set>.a_scalar.log`. Explore then lists the field in that set and takes the dataset from that log; the potential
+shows as "Gravitational potential". A later rerun into the set without `SCALAR_DATASET` moves both aside with the rest.
+
+```bash
+SCALAR_DATASET=Potential FIELDS=density_a OUTPUT_PREFIX=output1024_potential \
+    DTFE_SIM=TNG100-3-Dark scripts/run_dtfe.sh -g 1024 99
+```
+
+For PS-DTFE keep the `ps_` prefix, such as `OUTPUT_PREFIX=ps_output1024_potential`: the launcher tells the two
+estimators' outputs apart by it. The pipeline compares the dataset too: grids made for another `SCALAR_DATASET` are
+recomputed.
+
 **3. The pipeline.** `scripts/run_ps_pipeline.sh` runs `run_ps_dtfe.sh` over every snapshot of every simulation in
 `SIMS` and evaluates a full-box image plane per snapshot in the same run (made by `python/tools/make_image_plane.py`).
 It takes no arguments: its knobs are environment variables. It resumes: a snapshot is skipped when its outputs are
@@ -720,6 +742,7 @@ switch is off for `0`, `false`, `no` or `off` and on for any other value, as in 
 | `GRID_SIZE` (`-g`) | cells per axis | 512 |
 | `PADDING` | the padding of each partition or thread sub-box, in mean spacings | standard 15, PS-DTFE 50 |
 | `FIELDS` | the fields | density, velocity, divergence and shear (`_a`) |
+| `SCALAR_DATASET` | a per-particle dataset gridded as the scalar; adds `scalar_a` and `density_a` | unset |
 | `OUTPUT_PREFIX` | the files' prefix; `run_dtfe.sh` refuses a `ps_*` prefix | `ps_output` (PS-DTFE), `output` |
 | `LAMBDA_TH` | the T-web and V-web threshold (`--lambda-th`) | 0.3 |
 | `DTFE_GPU` (`-m`) | the device: `1` the GPU, `0` the CPU, `auto` as unset; passed on | unset: the program's pick |

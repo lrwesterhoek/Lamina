@@ -63,7 +63,8 @@
 # The other run options reach run_ps_dtfe.sh through the environment exactly as from a terminal:
 # SUBSAMPLES, PS_VERTEX_MASS, PS_CAUSTICS, PS_CAUSTIC_CUSPS, PARALLEL_TRIANGULATION,
 # PARTITION, MAX_CONCURRENT, SCRATCH_DIR, TESSELLATION_CACHE, DTFE_PRECISION, OUTPUT_PREFIX, LAMBDA_TH,
-# THREADS, PS_MERGE, DTFE_RESUME, GPU_SHARE (see its header for each). The GUI's Pipeline tab sets all of them.
+# THREADS, PS_MERGE, DTFE_RESUME, GPU_SHARE, SCALAR_DATASET (see its header for each). The GUI's Pipeline tab sets
+# all of them (SCALAR_DATASET empty).
 # Snapshots are auto-discovered (snapdir_*/combined_NNN.hdf5). The plane file is generated
 # once per simulation (box size is constant across its snapshots) and reused -- as long as its
 # sidecar has the requested geometry (make_image_plane.py --same-as, exit 3 = differs); otherwise it
@@ -161,7 +162,7 @@ run() { echo "+ $*"; [ "${DRY_RUN}" = "1" ] || "$@"; }
 run_settings() {
     printf '%s\n' "$1" | awk '
         function out(l) { if (l ~ /^--subsamples( |$)/) subs = l; else print l }
-        BEGIN { split("--grid --padding --subsamples --field --lambda-th " \
+        BEGIN { split("--grid --padding --subsamples --field --lambda-th --scalar-dataset " \
                       "--ps-lagrangian-padding --ps-alpha-shape --ps-halo-release", v); for (i in v) val[v[i]] = 1
                 split("--periodic --ps-vertex-mass --exact " \
                       "--ps-caustics --ps-caustic-cusps --pts-vel-grad --face-gradient --per-tet-gradient", b)
@@ -194,9 +195,15 @@ older_log() {
 
 # same_settings <have> <want> (run_settings outputs): equal, except that the grids on disk may carry MORE
 # fields than asked for (grids made with a longer FIELDS list hold every field a rerun with a shorter one asks
-# for: that rerun must not recompute them)
+# for: that rerun must not recompute them) -- a particle field among them: a want that names a dataset
+# (SCALAR_DATASET) needs grids made with the same one, a want that names none is content with either
 same_settings() {
-    [ "$(printf '%s\n' "$1" | grep -v '^--field ')" = "$(printf '%s\n' "$2" | grep -v '^--field ')" ] || return 1
+    local skip='^--field |^--scalar-dataset '
+    [ "$(printf '%s\n' "$1" | grep -v -E "${skip}")" = "$(printf '%s\n' "$2" | grep -v -E "${skip}")" ] || return 1
+    local want_ds have_ds
+    want_ds="$(printf '%s\n' "$2" | grep '^--scalar-dataset ' || true)"
+    have_ds="$(printf '%s\n' "$1" | grep '^--scalar-dataset ' || true)"
+    [ -z "${want_ds}" ] || [ "${want_ds}" = "${have_ds}" ] || return 1
     local have=" $(printf '%s\n' "$1" | sed -n 's/^--field //p') " f
     for f in $(printf '%s\n' "$2" | sed -n 's/^--field //p'); do
         case "${have}" in *" ${f} "*) ;; *) return 1 ;; esac

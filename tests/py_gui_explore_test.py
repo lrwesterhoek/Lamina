@@ -4115,6 +4115,51 @@ def mean_field_pure():
           lab == ("velocity divergence (mean field ∇⟨v⟩)", "velocity divergence (stream average ⟨∇v⟩)",
                   "velocity divergence", "velocity divergence (mean field ∇⟨v⟩)", "density ρ/ρ̄")
           and not any("--" in t for t in lab), str(lab))
+    # a phase-space output that stored no velocity derivatives (density and velocity alone: the 1024^3 sets) lists
+    # the divergence and the shear as the mean field from its velocity (the same planes the 'mean-field' choice gives
+    # beside a stored stream average), whatever the choice; the other derivatives are not listed; standard DTFE and a
+    # PS output storing them list nothing derived; no 3D smoothing of a derived map; components as a stored grid's
+    bare = data / "bare"
+    bare.mkdir(exist_ok=True)
+    write_grids(bare, "ps_bare", MF_N)
+    import shutil as _sh
+    _sh.copyfile(d / "ps_output.a_vel", bare / "ps_bare.a_vel")
+    bare_o = G.OutputSet(bare / "ps_bare", box=ps_o.box, redshift=ps_o.redshift)
+    dbad = []
+    for name in ("divergence", "shear"):
+        for comp in G.components(name, bare_o.ncomp(name)):
+            for axis in range(3):
+                for grad in ("stored", "mean-field"):
+                    got = bare_o.slice(name, axis, 9, comp, grad)
+                    want = ref_o.slice(name, axis, 9, comp)
+                    err = float(np.abs(got - want).max() / max(np.abs(want).max(), 1e-30))
+                    if not err < 1e-5:
+                        dbad.append(f"{name} [{comp}] axis {axis} {grad}: {err:.2e}")
+    check("9. a PS output without stored velocity derivatives lists the divergence and the shear (no other), as the "
+          "mean field from its velocity: every component and axis equals dtfelib's mean field, with either choice; "
+          "family 'mean', labelled so; components as a stored grid's; not smoothed in 3D; a stored set and standard "
+          "DTFE derive nothing",
+          not dbad and bare_o.fields() == ["density", "streams", "velocity", "divergence", "shear"]
+          and bare_o.derived_fields() == {"divergence": 1, "shear": ps_o.files["shear"].ncomp}
+          and bare_o.gradient_family("divergence", "stored") == "mean" == bare_o.gradient_family("shear", "stored")
+          and G.field_label(bare_o, "shear", bare_o.gradient_family("shear")) == "shear (mean field ∇⟨v⟩)"
+          and "slice by slice" in G.smooth3d_why(bare_o, "divergence") and G.smooth3d_why(bare_o, "density") == ""
+          and ps_o.derived_fields() == {} and dt_o.derived_fields() == {}
+          and abs(bare_o.value("divergence", (3, 4, 9)) - float(ref_o.slice("divergence", 0, 3)[4, 9]))
+          <= 1e-5 * float(np.abs(ref_o.slice("divergence", 0, 3)).max()),
+          "; ".join(dbad[:6]) + f" {bare_o.fields()} {bare_o.derived_fields()}")
+    # an exact zoom of an output that stored no velocity derivative takes the face gradient (the map's mean field);
+    # one that stored the stream average keeps it; a face-gradient output takes it; the 3D-smoothing reason of a
+    # hi-res slice comes first, as for every map
+    check("9. an exact zoom of an output that stored no velocity derivative computes the mean field ('--face-gradient'), "
+          "one that stored the stream average keeps it; a hi-res slice's 3D-smoothing reason comes first",
+          G.zoom_mean_field(bare_o) and not G.zoom_mean_field(ps_o) and not G.zoom_mean_field(dt_o)
+          and "hi-res" in G.smooth3d_why(bare_o, "divergence", hires=True),
+          f"{G.zoom_mean_field(bare_o)} {G.zoom_mean_field(ps_o)} {G.smooth3d_why(bare_o, 'divergence', hires=True)}")
+    # a PS output whose grids leave no mean field (not periodic) derives nothing
+    np_o = G.OutputSet(other / "np", box=G.custom_box(G.sidecar(other / "np")))
+    check("9. ... nor one whose mean field cannot be computed (not periodic): its list is its files",
+          np_o.derived_fields() == {} and "shear" not in np_o.fields(), str(np_o.fields()))
     # a face-gradient output (PS-DTFE's default with the exact deposit and the volume weighting): its run writes the
     # stream average's divergence beside the family ('.a_velDivStreams'), whose stored grids are then the mean field
     # itself -- shown as stored with either choice, and labelled the mean field. The same grids without the marker
@@ -4273,6 +4318,37 @@ def face_gradient_zoom():
           and all("--exact" in c for c in cmds.values()) and not any("--gpu" in c for c in cmds.values())
           and [p for p, plan in plans.items() if plan.get("mass_weighted_map")] == ["ps_mw"],
           f"{routes} {[plan.get('note') for plan in plans.values()]}")
+    # a standard-DTFE TNG output under a prefix of its own (output1024_potential: no streams grid, no 'ps'), its run
+    # log naming the dataset it gridded: served and zoomed by standard DTFE, as its map is named; the exact zoom's
+    # field list carries scalar_a before '--exact', the dataset after it
+    tsd = TMP / "pot tng" / "TNG100" / "TNG100-3-Dark" / "snapdir_050"
+    tsd.mkdir(parents=True, exist_ok=True)
+    shutil.copy(face / "combined_050.hdf5", tsd / "combined_050.hdf5")
+    for p in face.glob("ps_face.a_den"):
+        shutil.copy(p, tsd / "output1024_potential.a_den")
+        shutil.copy(p, tsd / "output1024_potential.a_scalar")
+    (tsd / "output1024_potential.runlog").write_text("RUNNING: ./DTFE in out --field density_a scalar_a "
+                                                     "--lambda-th 0.3 --scalar-dataset Potential --exact\n")
+    pot = G.OutputSet(tsd / "output1024_potential", box=box, redshift=MF_Z, sim="TNG100-3-Dark", snap=50)
+    kw_pot = G.server_settings(pot)
+    fake_std = tsd / "DTFE-standin"
+    fake_std.write_text("")
+    XZ.rs.binary_name = lambda estimator, precision="single", dim=3: str(fake_std)
+    try:
+        plan_pot = XZ.exact_zoom_plan(pot, 2, 9, [0, 1], (4.0, 12.0), (4.0, 12.0), 16, None, str(face / "cache"), 0)
+    finally:
+        XZ.rs.binary_name = real_name
+        if plan_pot.get("root"):
+            shutil.rmtree(Path(plan_pot["root"]).parent, ignore_errors=True)
+    c = plan_pot.get("cmd") or []
+    at = {a: c.index(a) for a in ("--field", "scalar_a", "--exact", "--scalar-dataset") if a in c}
+    check("9. a standard TNG output under its own prefix: the query server and the exact zoom are standard DTFE (no "
+          "Lagrangian input); the zoom's field list holds scalar_a before '--exact', '--scalar-dataset Potential' "
+          "after it (the run log's dataset)",
+          kw_pot is not None and not kw_pot["phase_space"] and not kw_pot.get("lagrangian_input")
+          and len(at) == 4 and at["--field"] < at["scalar_a"] < at["--exact"] < at["--scalar-dataset"]
+          and c[at["--scalar-dataset"] + 1] == "Potential" and "scalarGradient_a" not in c
+          and not plan_pot.get("ps"), f"{kw_pot} {c}")
     # the run itself (L2): the worker starts the program with DTFE_GPU pinned to auto (runspec.gpu_pin_env(None): the
     # program picks its device), over the launcher's own environment, where a login shell's export lands; a stand-in
     # for subprocess.Popen records the environment and starts nothing (the worker then reports a failure). Its 'root'
@@ -6040,6 +6116,9 @@ def contours_gui():
                                               "ps_gradient": "mean-field"}),
             "grid of classes": ES.grid_stem({"panels": [dict(base, field="tweb", cmap="viridis")], "rows": 1, "cols": 1,
                                              "axis": 0, "rel": 0.5, "smooth": 0.0, "contours": True}),
+            "particle field": ES.map_stem(dict(base, output=_NS(**dict(vars(std), prefix="output1024_potential",
+                                                                    _scalar_ds="Potential")),
+                                               field="scalar", log=False)),
         }
         want = {
             "map": "TNG100-3-Dark_density_z0.00_ps_output1024_grid1024_xy-plane_z37.46Mpc_smooth0_log_contours",
@@ -6069,6 +6148,8 @@ def contours_gui():
                                 "z37.46Mpc_smooth0_lin_contours",
             "grid of classes": "TNG100-3-Dark_tweb_z0.00_ps_output1024_grid1024_figure-grid-1x1_yz-plane_x50pct_"
                                "smooth0_log",
+            "particle field": "TNG100-3-Dark_Potential_z0.00_output1024_potential_grid1024_xy-plane_z37.46Mpc_"
+                              "smooth0_lin",
         }
         check("13. the file name a save offers says what the picture shows: simulation, field (component, a "
               "phase-space derivative's family: the map's choice, a hi-res slice's and a point zoom's stream "

@@ -46,7 +46,8 @@
 #   Knobs (environment; each is explained where the script reads it): PARTITION MAX_CONCURRENT SUBSAMPLES THREADS
 #   SCRATCH_DIR SAMPLE_POINTS PTS_VEL_GRAD DTFE_GPU DTFE_RUN_MODE GPU_SHARE DTFE_EXACT_AVERAGE
 #   FACE_GRADIENT PS_VERTEX_MASS PS_CAUSTICS PS_CAUSTIC_CUSPS
-#   PARALLEL_TRIANGULATION PS_LAGRANGIAN_PADDING TESSELLATION_CACHE OUTPUT_PREFIX FIELDS LAMBDA_TH PS_LAGRANGIAN_INPUT
+#   PARALLEL_TRIANGULATION PS_LAGRANGIAN_PADDING TESSELLATION_CACHE OUTPUT_PREFIX FIELDS SCALAR_DATASET LAMBDA_TH
+#   PS_LAGRANGIAN_INPUT
 #   DTFE_PRECISION DRY_RUN AUTO_TUNE_REPORT (1 = only the auto-tuner's memory report per snapshot, nothing computed)
 #   PS_MERGE DTFE_RESUME, and config.sh's GRID_SIZE, PADDING, SPACE_CHECK. A switch is off for 0, false, no or off
 #   and on for any other value (the binaries' rule). DTFE_GPU, DTFE_RUN_MODE, DTFE_EXACT_AVERAGE and DTFE_RESUME are
@@ -298,6 +299,13 @@ LAMBDA_TH="${LAMBDA_TH:-0.3}"
 # classes are written only when FIELDS names them (all nine: the grids of the production runs).
 # Env-overridable, e.g. FIELDS="density_a velocity_a" for a lighter batch.
 FIELDS="${FIELDS:-density_a velocity_a divergence_a shear_a}"
+SCALAR_DATASET="${SCALAR_DATASET:-}"   # a per-particle dataset of the input to grid as the 'scalar' field, e.g.
+                           # Potential: --scalar-dataset NAME, scalar_a (and density_a) added to FIELDS (config.sh
+                           # scalar_dataset_resolve, the same knob as run_dtfe.sh's). Each stream carries the linear
+                           # interpolant of its tetrahedron's values; a cell holds their mean weighted by each stream's
+                           # volume in it, in the dataset's own units. A single-valued field such as the potential is
+                           # standard DTFE's natural estimate (run_dtfe.sh). Give it a prefix of its own
+scalar_dataset_resolve
 
 cd "$REPO_ROOT" || exit 1
 
@@ -325,6 +333,7 @@ runlog_contract_start
 echo "Starting PS-DTFE processing..."
 echo "Data directory: ${DATA_DIR}"
 echo "Grid size: ${GRID_SIZE}   Partition: [${PARTITION:-auto}]   Fields: ${FIELDS}"
+[ -n "${SCALAR_DATASET}" ] && echo "Particle value gridded as the scalar: ${SCALAR_DATASET} (--scalar-dataset)"
 if [ "${DTFE_EXACT_AVERAGE}" = "1" ]; then
     echo "Cell averages: exact deposit (--exact; ${average_src})"
 else
@@ -450,6 +459,7 @@ for i in "${SNAPSHOTS[@]}"; do
         --mpc-unit ${MPC_UNIT}
         --field ${FIELDS}
         --lambda-th ${LAMBDA_TH}
+        ${scalar_args[@]+"${scalar_args[@]}"}
         ${exact_args[@]+"${exact_args[@]}"}
         ${vmass_args[@]+"${vmass_args[@]}"}
         ${ptri_args[@]+"${ptri_args[@]}"}

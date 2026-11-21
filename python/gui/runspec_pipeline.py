@@ -276,7 +276,8 @@ class PipelineSpec:
                "PS_CAUSTICS": "1" if self.caustics else "0",
                "PS_CAUSTIC_CUSPS": "1" if self.caustic_cusps else "0",
                "FACE_GRADIENT": _rs.face_gradient_env(self),
-               "DTFE_FACE_GRADIENT": ""}              # the binary's own switch, pinned unset as RunSpec pins it
+               "DTFE_FACE_GRADIENT": "",               # the binary's own switch, pinned unset as RunSpec pins it
+               "SCALAR_DATASET": ""}                   # no particle field, pinned as RunSpec pins it
         env.update(_rs.ps_exact_env(m.deposit == "exact"))
         env.update(_rs.ps_run_env(self))            # the device knob, merge order, start over ...
         if self.planes > 1:

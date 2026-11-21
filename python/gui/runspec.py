@@ -740,6 +740,9 @@ class RunSpec:
         if self.lambda_th != LAMBDA_TH_DEFAULT:
             env["LAMBDA_TH"] = f"{self.lambda_th:g}"
         env.update(_run_option_env(self))
+        # SCALAR_DATASET pinned EMPTY (the drivers' default, read as unset): the Grids tab grids no particle field,
+        # and one exported in the login shell would add scalar_a and '--scalar-dataset' behind the command it shows
+        env["SCALAR_DATASET"] = ""
         snaps = [str(n) for n in sorted(self.snapshots)]
         if self.estimator == "dtfe":
             argv = [str(DTFE_SCRIPT), "-s", self.sim, "-g", str(self.grid)]

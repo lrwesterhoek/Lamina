@@ -205,6 +205,11 @@ Explore shows any run's grids as maps. Choose the output by **Simulation**, **Re
 Explore > Open Output…), then the **Field**, **Component** (with in-plane **vectors**), **Slice**, **Colours**,
 **Range** and **Smoothing**.
 
+- **A particle field** gridded with `SCALAR_DATASET` (or the Custom tab's per-particle value) is listed under its
+  dataset's name. A TNG field is shown in physical units, the stored value times a^a_scaling from the snapshot's own
+  attributes: the potential in (km/s)² on a scale centred on zero, the Subfind densities in 10¹⁰ M☉/kpc³ on a log
+  scale, the smoothing length in kpc; an exact zoom carries it, a hi-res slice and a point zoom have none. A
+  comparison or a figure grid keeps one dataset per colour range, and a saved file's name says the dataset.
 - **Start query server** runs a `dtfelib.Estimator` on the snapshot behind the map; a click then lists every
   stream at that point with its density, velocity and Lagrangian origin (PS-DTFE velocities are the plain mean
   over the streams).
@@ -216,7 +221,10 @@ Explore > Open Output…), then the **Field**, **Component** (with in-plane **ve
 - **PS derivatives**: a phase-space output's velocity derivatives and V-web are shown as the mean field ∇⟨v⟩ (the
   default: an Exact run's stored grids, else computed from the velocity grid) or as the stored grids, the stream
   average ⟨∇v⟩ of a run without the face gradient. An output with the face gradient also lists the stream
-  average's `*Streams` fields and the mass flux divergence (`.a_massFluxDiv`).
+  average's `*Streams` fields and the mass flux divergence (`.a_massFluxDiv`). A phase-space output that stored
+  no velocity derivatives (a run of the density and the velocity alone) lists the divergence and the shear all the
+  same, as the mean field computed from its velocity grid one plane at a time; the 3D view shows them as planes,
+  not as a volume.
 - **Compare**: a figure grid of one field across redshifts, one snapshot across fields or across outputs.
 - **Save image…** with the presets *Standard*, *Publication* (vector PDF, 300 dpi), *Bare image* (the map alone,
   one image pixel per data pixel) and *Slide* (larger fonts). The contour lines on screen are in every saved

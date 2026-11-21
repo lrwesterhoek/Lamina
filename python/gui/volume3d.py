@@ -186,7 +186,8 @@ def volume_key(o, name: str, component: str, idx, detail: int) -> tuple | None:
             return None
         keys.append(k)
     window = tuple((int(i[0]), len(i)) for i in idx)
-    return (tuple(keys), name, component, window, int(detail))
+    # (the factor to the map's units too: a scalar's depends on what its run log names, not on the files alone)
+    return (tuple(keys), name, component, window, int(detail), round(o.velocity_factor(name), 12))
 
 
 def drop_volumes() -> int:

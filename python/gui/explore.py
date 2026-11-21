@@ -198,7 +198,7 @@ def pts_plane(o, side, field: str, component: str):
     pp = PointPlane(o.root, side, redshift=o.redshift)
     name = PTS_FIELDS.get(field)
     if name is None or name not in pp.available():
-        raise ValueError(f"this hi-res slice has no {G.FIELD_LABELS.get(field, field)}"
+        raise ValueError(f"this hi-res slice has no {G.field_label(o, field)}"
                          + (" (it needs the velocity gradient points)" if field in ("divergence", "shear", "vorticity")
                             else ""))
     arr = pp.field(name)
@@ -704,7 +704,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self.fixed.toggled.connect(self._fixed_toggled)
         fx.addWidget(self.fixed)
         self.vmin_edit, self.vmax_edit = QLineEdit(placeholderText="min"), QLineEdit(placeholderText="max")
-        self._fixed_for = None              # the field the fixed range was set for: another field drops it
+        self._fixed_for = None              # the field the fixed range was set for (grids.field_key): another drops it
         self._fixed_warned = False
         for e in (self.vmin_edit, self.vmax_edit):
             e.setMaximumWidth(90)
@@ -1305,7 +1305,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self.field.blockSignals(True)
         self.field.clear()
         for name in o.fields():
-            self.field.addItem(G.FIELD_LABELS[name], name)
+            self.field.addItem(G.field_label(o, name), name)
             if name in G.FIELD_HELP:
                 self.field.setItemData(self.field.count() - 1, G.FIELD_HELP[name], Qt.ToolTipRole)
         self.field.blockSignals(False)
@@ -1349,29 +1349,29 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         name = self.field.currentData()
         if o is None or name is None:
             return
-        if self.fixed.isChecked() and self._fixed_for not in (None, name):    # a range belongs to its field
-            self.fixed.blockSignals(True)
+        if self.fixed.isChecked() and self._fixed_for not in (None, G.field_key(o, name)):    # a range belongs to
+            self.fixed.blockSignals(True)                                                           # its field
             self.fixed.setChecked(False)
             self.fixed.blockSignals(False)
-            self.status.emit(f"the fixed range was set for {G.FIELD_LABELS.get(self._fixed_for, self._fixed_for)}: off "
-                             "for this field (tick 'fixed' to use it here)")
-        ff = o.files[name]
+            was = G.FIELD_LABELS.get(self._fixed_for, self._fixed_for.split(":", 1)[-1])
+            self.status.emit(f"the fixed range was set for {was}: off for this field (tick 'fixed' to use it here)")
+        nc = o.ncomp(name)                  # (a derived field has no file: OutputSet.derived_fields)
         self.component.blockSignals(True)
         self.component.clear()
-        self.component.addItems(G.components(name, ff.ncomp, o.dim))
-        self.component.setEnabled(ff.ncomp > 1)
+        self.component.addItems(G.components(name, nc, o.dim))
+        self.component.setEnabled(nc > 1)
         self.component.blockSignals(False)
-        vec = name in G.VECTOR_FIELDS and ff.ncomp == o.dim
+        vec = name in G.VECTOR_FIELDS and nc == o.dim
         self.vectors.blockSignals(True)
         self.vectors.setProperty("can", vec)
         self.vectors.setEnabled(vec)
         self.vectors.setChecked(vec and name == "velocity")     # the velocity map opens as a vector field
         self.vectors.blockSignals(False)
-        for w, on in ((self.log, name in G.LOG_DEFAULT),):
+        for w, on in ((self.log, G.log_default(o, name)),):
             w.blockSignals(True)
             w.setChecked(on)
             w.blockSignals(False)
-        cmap = "RdBu_r" if name in G.DIVERGING else "tab10" if name in ("tweb", "vweb") else \
+        cmap = "RdBu_r" if G.diverging(o, name) else "tab10" if name in ("tweb", "vweb") else \
             "magma" if name in ("density", "dispersion") else "viridis"
         self.cmap.blockSignals(True)
         self.cmap.setCurrentText(cmap)
@@ -1419,7 +1419,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
                "component": self.component.currentText(), "cmap": self.cmap.currentText(),
                "log": self.log.isChecked(), "clip": self.clip.value(), "smooth": self.smooth.value(),
                "smooth3d": self.smooth3d.isChecked() and self.smooth3d.isEnabled(),
-               "symmetric": name in G.DIVERGING and not self.log.isChecked(),
+               "symmetric": G.diverging(o, name) and not self.log.isChecked(),
                "arrows": self.vectors.isEnabled() and self.vectors.isChecked(),
                "ps_gradient": self.ps_gradient.currentData() or G.PS_GRADIENT_DEFAULT}
         if self.pts_combo.currentData():
@@ -1508,7 +1508,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
             req = self.request()                        # ... with the comparison, which the zoom left out
         if req.get("smooth3d") and req["smooth"] > 0 and not req.get("pts") \
                 and not G.smoothed3d_kept(o, req["field"], req["component"], req["smooth"]):
-            self.status.emit(f"smoothing the whole {G.FIELD_LABELS.get(req['field'], req['field'])} cube in 3D at "
+            self.status.emit(f"smoothing the whole {G.field_label(o, req['field'])} cube in 3D at "
                              f"{req['smooth']:g} cells (once per field and smoothing: a few seconds)")
         if self._busy:
             self._pending = req             # only the latest request is served
@@ -1533,7 +1533,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
 
     def _fixed_toggled(self, on: bool):
         if on:
-            self._fixed_for = self.field.currentData()
+            self._fixed_for = G.field_key(self.current, self.field.currentData())
         if on and not (self.vmin_edit.text().strip() and self.vmax_edit.text().strip()):
             self._take_range()              # nothing typed yet: start from the map on screen
             return
@@ -1541,7 +1541,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
 
     def _fixed_edited(self):
         if self.fixed.isChecked():
-            self._fixed_for = self.field.currentData()
+            self._fixed_for = G.field_key(self.current, self.field.currentData())
             self.render()
 
     def _sync_fixed(self, log: bool) -> None:
@@ -1563,7 +1563,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         lo, hi = self.view.colorbar.vrange
         if self.view.colorbar.log:
             lo, hi = 10.0 ** lo, 10.0 ** hi
-        self._fixed_for = self.field.currentData()
+        self._fixed_for = G.field_key(self.current, self.field.currentData())
         self.vmin_edit.setText(f"{lo:.4g}")
         self.vmax_edit.setText(f"{hi:.4g}")
         if not self.fixed.isChecked():
@@ -1699,8 +1699,9 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         """B can be subtracted from A cell by cell: another output on the same cells (dim, grid, box) holding
         the field with the same components."""
         return (a is not None and b is not None and str(a.root) != str(b.root) and a.dim == b.dim and a.n == b.n
+                and G.field_key(a, field) == G.field_key(b, field)      # (a per-particle scalar: the same dataset)
                 and (a.box is None) == (b.box is None) and np.allclose(a.lo, b.lo) and np.allclose(a.length, b.length)
-                and field in b.files and field in a.files and b.files[field].ncomp == a.files[field].ncomp)
+                and field in b.fields() and field in a.fields() and b.ncomp(field) == a.ncomp(field))
 
     def _compare_fill(self):
         """The 'Compare with' menu: off, then every comparable output -- this snapshot's other runs first."""
@@ -1720,7 +1721,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         j = self.compare.findData(keep) if keep is not None else 0
         self.compare.setCurrentIndex(max(j, 0))
         self.compare.blockSignals(False)
-        signed = name in G.DIVERGING or name in ("velocity", "tweb", "vweb")
+        signed = G.diverging(o, name) or name in ("velocity", "tweb", "vweb")
         self.compare_mode.model().item(1).setEnabled(not signed)      # log A/B: positive fields only
         if signed:
             self.compare_mode.blockSignals(True)
@@ -1778,6 +1779,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
 
     def _compare_changed(self, *_):
         self._compare_sync()
+        self._smooth3d_sync()               # (B may not be smoothed in 3D: then neither is A)
         self.render()
 
     def _ps_gradient_changed(self, *_):
@@ -1791,8 +1793,12 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         user's tick kept either way. Asked when the output, the field, the hi-res slice or the family changes (the
         free memory is read then, not per layer)."""
         o, name = self.current, self.field.currentData()
-        why = G.smooth3d_why(o, name, self.ps_gradient.currentData() or G.PS_GRADIENT_DEFAULT,
-                             hires=bool(self.pts_combo.currentData())) if o is not None and name else "no map shown"
+        grad = self.ps_gradient.currentData() or G.PS_GRADIENT_DEFAULT
+        why = G.smooth3d_why(o, name, grad, hires=bool(self.pts_combo.currentData())) if o is not None and name \
+            else "no map shown"
+        b = self._compare_output() if not why else None
+        if b is not None and G.smooth3d_why(b, name, grad):     # A - B: both smoothed one way
+            why = f"the compared output B: {G.smooth3d_why(b, name, grad)}"
         self.smooth3d.setEnabled(not why)
         if why:
             self.smooth3d.setToolTip(f"Smoothing in 3D: {why}.")
@@ -1818,6 +1824,8 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
             fam, note = "stream", "a hi-res slice is a point evaluation: the stream average"
         elif fam == "stream" and grad == "mean-field":
             note = f"this output shows the stored stream average: {o.mean_field_reason()}"
+        elif grad == "stored" and name in o.derived_fields():
+            note = "this output stores no grid of this field: the mean field, computed from its velocity"
         b = req.get("compare")
         fam_b = b.gradient_family(name, grad) if b is not None else fam
         if fam_b == "stream" and grad == "mean-field" and b is not None and not note:

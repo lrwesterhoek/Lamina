@@ -43,7 +43,7 @@ def grid_items(req: dict) -> list:
         # read and smoothed as the map is (in 2D, or the slice of the cube smoothed in 3D: grids.map_plane)
         plane = G.map_plane(o, name, axis, idx, comp, grad, smooth, bool(req.get("smooth3d")))
         log, cmap = p["log"], p["cmap"]
-        symmetric = name in G.DIVERGING and not log
+        symmetric = G.diverging(o, name) and not log
         img = np.ascontiguousarray(plane.T[::-1])          # the map's orientation: horizontal = first rest axis
         lo, hi = G.value_range(img, log, (clip, 100 - clip), symmetric)
         finite = bool(np.isfinite(plane).any() and (not log or bool((plane > 0).any())))
@@ -78,9 +78,9 @@ def grid_items(req: dict) -> list:
 
 
 def quantity(it: dict) -> tuple:
-    """What a grid panel shows, for its colour range, colour bar and name: (field, component, family of velocity
-    derivatives: '' / 'mean' / 'stream')."""
-    return it["field"], it["component"], it.get("family", "")
+    """What a grid panel shows, for its colour range, colour bar and name: (field -- a per-particle scalar with its
+    dataset, grids.field_key --, component, family of velocity derivatives: '' / 'mean' / 'stream')."""
+    return G.field_key(it["output"], it["field"]), it["component"], it.get("family", "")
 
 
 def panel_names(it: dict) -> tuple[str, str, str, str]:
@@ -678,7 +678,7 @@ class GridMixin:
         fld.clear()
         if o is not None:
             for name in o.fields():
-                fld.addItem(G.FIELD_LABELS.get(name, name), name)
+                fld.addItem(G.field_label(o, name), name)
         j = fld.findData(keep) if keep else -1
         fld.setCurrentIndex(j if j >= 0 else 0)
         fld.setEnabled(o is not None)
@@ -692,8 +692,8 @@ class GridMixin:
         keep = cmp.currentText() if keep_component else None
         cmp.blockSignals(True)
         cmp.clear()
-        if o is not None and name in o.files:
-            cmp.addItems(G.components(name, o.files[name].ncomp, o.dim))
+        if o is not None and name in o.fields():
+            cmp.addItems(G.components(name, o.ncomp(name), o.dim))
         if keep and cmp.findText(keep) >= 0:
             cmp.setCurrentText(keep)
         cmp.setEnabled(cmp.count() > 1)
@@ -846,14 +846,19 @@ class GridMixin:
         if with_signals:
             self.show_grid(True)
 
-    def _grid_cmap(self, name: str) -> str:
-        if name == self.field.currentData():
+    def _same_as_map(self, o, name: str) -> bool:
+        """A panel shows what the map shows (its colours and log tick then carry over): the same field, a
+        per-particle scalar of the same dataset."""
+        return name == self.field.currentData() and G.field_key(o, name) == G.field_key(self.current, name)
+
+    def _grid_cmap(self, o, name: str) -> str:
+        if self._same_as_map(o, name):
             return self.cmap.currentText()
-        return "RdBu_r" if name in G.DIVERGING else "tab10" if name in ("tweb", "vweb") else \
+        return "RdBu_r" if G.diverging(o, name) else "tab10" if name in ("tweb", "vweb") else \
             "magma" if name in ("density", "dispersion") else "viridis"
 
-    def _grid_log(self, name: str) -> bool:
-        return self.log.isChecked() if name == self.field.currentData() else name in G.LOG_DEFAULT
+    def _grid_log(self, o, name: str) -> bool:
+        return self.log.isChecked() if self._same_as_map(o, name) else G.log_default(o, name)
 
     def grid_request(self) -> dict | None:
         """Everything the grid needs, read from the widgets on the GUI thread: the panels with their colour
@@ -866,7 +871,8 @@ class GridMixin:
         rows, cols = self.grid_dims()
         axis, index = self.axis.currentIndex(), self.index.value()
         return {"panels": [None if p is None else {"output": p[0], "field": p[1], "component": p[2],
-                                                    "cmap": self._grid_cmap(p[1]), "log": self._grid_log(p[1]),
+                                                    "cmap": self._grid_cmap(p[0], p[1]),
+                                                    "log": self._grid_log(p[0], p[1]),
                                                     "voids": self._panel_voids(p[0])}
                            for p in panels],
                 "rows": rows, "cols": cols, "axis": axis, "contours": self.contours.isChecked(),
@@ -874,13 +880,21 @@ class GridMixin:
                 "ps_gradient": self.ps_gradient.currentData() or G.PS_GRADIENT_DEFAULT,
                 "rel": 0.5 if cur.n <= 1 or cur.dim == 2 else index / (cur.n - 1),
                 "index": index, "clip": self.clip.value(), "smooth": self.smooth.value(),
-                "smooth3d": self.smooth3d.isChecked() and self.smooth3d.isEnabled(),
+                "smooth3d": self.smooth3d.isChecked() and self.smooth3d.isEnabled() and self._grid_smooth3d(panels),
                 "shared": self.grid_shared.isChecked(),
                 "merged": self.grid_merge.isChecked() and self._grid_merge_applicable(),
                 "position": self.position.text() if cur.dim == 3 else "",
                 # the same place as a number (Mpc, cells without a box): a saved title's in its unit
                 "position_at": (axis, float(cur.lo[axis] + (index + 0.5) * cur.length[axis] / cur.n))
                 if cur.dim == 3 else None}
+
+    def _grid_smooth3d(self, panels) -> bool:
+        """The panels of the map's field are smoothed one way: in 3D only when every one of them can be (a panel whose
+        map is computed slice by slice -- a phase-space output's mean field from its velocity -- takes them all to 2D,
+        rather than one panel in 2D beside the others in 3D under one colour range)."""
+        name = self.field.currentData()
+        grad = self.ps_gradient.currentData() or G.PS_GRADIENT_DEFAULT
+        return all(not G.smooth3d_why(p[0], p[1], grad) for p in panels if p is not None and p[1] == name)
 
     def show_grid(self, on: bool):
         """The toggle: the panels as tiles in place of the map (the worker colours them, like the single

@@ -135,6 +135,45 @@ expected_output_bytes() {
     echo $(( g * g * g * b * n * 11 / 10 ))
 }
 
+# scalar_dataset_resolve: SCALAR_DATASET=NAME grids the particles' own value NAME -- a per-particle dataset of the
+# input, e.g. Potential, SubfindDensity or SubfindHsml in a merged TNG snapshot -- as the 'scalar' field ('.a_scalar'):
+# scalar_a joins FIELDS unless it names the scalar ('scalar' or 'scalar_a'; its gradient alone gets the average too),
+# and density_a when the density is not (the launcher's Explore
+# finds an output by its density grid), and scalar_args carries '--scalar-dataset NAME'. Refused, exit 2: a scalar
+# field in FIELDS without SCALAR_DATASET (the program would read no value and write zeros), an option in FIELDS
+# (FIELDS names fields), a NAME with '/', a space or a leading '-'. Run it into a prefix of its own (OUTPUT_PREFIX,
+# e.g. output1024_potential): a rerun into a prefix moves the earlier set's files it does not rewrite aside.
+scalar_dataset_resolve() {
+    local f has_den=0 has_scalar=0
+    scalar_args=()
+    for f in ${FIELDS}; do
+        case "${f}" in
+            -*) echo "Error: FIELDS names fields, not options (got '${f}');" \
+                     "a particle value to grid is SCALAR_DATASET=NAME." >&2
+                exit 2 ;;
+            density|density_a) has_den=1 ;;
+            scalar|scalar_a|scalarGradient|scalarGradient_a) has_scalar=1 ;;
+        esac
+    done
+    if [ -z "${SCALAR_DATASET}" ]; then
+        if [ "${has_scalar}" = "1" ]; then
+            echo "Error: FIELDS names a scalar field but SCALAR_DATASET is not set: the program would read no" >&2
+            echo "       particle value and write zeros. Name the dataset, e.g. SCALAR_DATASET=Potential." >&2
+            exit 2
+        fi
+        return 0
+    fi
+    case "${SCALAR_DATASET}" in
+        */*|*" "*|-*)
+            echo "Error: SCALAR_DATASET must be the NAME of a per-particle dataset, e.g. Potential" \
+                 "(got '${SCALAR_DATASET}')." >&2
+            exit 2 ;;
+    esac
+    case " ${FIELDS} " in *" scalar "*|*" scalar_a "*) ;; *) FIELDS="${FIELDS} scalar_a" ;; esac
+    [ "${has_den}" = "1" ] || FIELDS="density_a ${FIELDS}"
+    scalar_args=(--scalar-dataset "${SCALAR_DATASET}")
+}
+
 # output_space_problem <output dir> <bytes needed>: 1 (with the reason) when the folder the grids go to
 # is not writable or has less free space than the grids need. The grids are written beside the old ones
 # and renamed at the end (<file>.part.<pid>), so the old set does not count as free. SPACE_CHECK=0
