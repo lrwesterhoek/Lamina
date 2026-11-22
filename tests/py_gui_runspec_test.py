@@ -1648,7 +1648,7 @@ def device_cpu_gpu(tmp: Path):
         errors = {e: [m for lvl, m in s.problems() if lvl == "error" and "extra options" in m]
                   for e, s in named.items()}
         auto_note = rs.automatic_text(cust({}, extra_args="--gpu"), "gpu")
-        plain = cust({}, extra_args="--ps-merge completion-order")
+        plain = cust({}, extra_args="--ps-merge completion-order").command()
         # a Device CPU beside a GPU share they give alone is passed (the run stays on the CPU); beside their '--gpu'
         # it is not
         cpu_share = cust({"gpu": False}, extra_args="--gpu-share 0.5")
@@ -1669,7 +1669,7 @@ def device_cpu_gpu(tmp: Path):
           and all(any("Device set to CPU + GPU is not passed: the extra options name the device" in m for m in w)
                   for w in warned.values())
           and not any(errors.values()) and auto_note == "Automatic: the extra options name the device"
-          and "--gpu" not in plain.command() and after(plain.command(), "--gpu-share") == "auto",
+          and "--gpu" not in plain and after(plain, "--gpu-share") == "auto",
           f"{cmds} {lines} {warned} {errors}")
     shared = "Runs on: the GPU (as the memory check reported, with their GPU share)"
     check("... after a memory check that reported the GPU the line says so (the program's report before the extra "
