@@ -729,14 +729,22 @@ struct Avg1Words
     bool    on[5] = {};
     FxWords f[5];
     double  scale[5] = {}, cap[5] = {};     // 2^K as a double, and the cap on one share's integer (RunUnits::cap)
+    double  fast[5] = {};                   // fxFast64(cap): below it a share takes the 64-bit add
     std::vector<FxCarryList> lists[5];      // [grid][thread]
     // one share of grid g -- the float the deposit formed -- into component 'at' by thread th: its integer at the unit
     // (the exact product rounded to nearest even, fxShare); a share without one below the cap (a NaN, an infinity)
-    // adds nothing and is counted in the grid's slot, as the GPU's guard does
+    // adds nothing and is counted in the grid's slot, as the GPU's guard does. Nearly every share is below 2^63 units
+    // and takes the 64-bit add (fixed_units.h fxAddOwned64: the same word and carry entry as the 128-bit statements)
     inline void add(int const th, int const g, size_t const at, Real const share)
     {
+        double const product = double( share ) * scale[g];
+        if ( std::fabs( product ) < fast[g] )   // (false for a NaN too)
+        {
+            fxAddOwned64( f[g].w[at], int64_t( std::llrint( product ) ), uint64_t( at ), lists[g][size_t( th )] );
+            return;
+        }
         __int128 q;
-        if ( not fxShare( double( share ) * scale[g], cap[g], q ) )
+        if ( not fxShare( product, cap[g], q ) )
         {
             fixedShareDropped( g );
             return;
@@ -1338,6 +1346,7 @@ static void avg1FacePass( DT &dt, GridFrame const &F, Bbox &fullBox, size_t *nGr
     size_t const gridSize = nGrid[0]*nGrid[1]*nGrid[2];
     std::vector<FxCarryList> lists( words ? size_t( nT ) : 0 );   // [thread]: its crossings of the int64 range
     double const wordScale = words ? std::ldexp( 1., words->K ) : 0.;
+    double const wordFast = fxFast64( wordCap );   // below it a flux takes the 64-bit add (fxAddOwned64)
     if ( words )
     {
         words->w.assign( gridSize * noGradComp, 0 );
@@ -1457,11 +1466,18 @@ static void avg1FacePass( DT &dt, GridFrame const &F, Bbox &fullBox, size_t *nGr
                                 for (int i = 0; i < 3; ++i) vj += velGrad[i][j] * q[i];
                                 Fj[j] = vj * m[0];
                             }
-                            __int128 Fq[noVelComp] = {};   // ... as one integer at the face unit (words)
-                            bool FqOk[noVelComp] = {};
+                            // ... as one integer at the face unit (words): in 64 bits below wordFast (Fs, nearly
+                            // every flux), else in 128 (Fq), or none (a NaN, an infinity: Fk 0)
+                            int64_t Fs[noVelComp] = {};
+                            __int128 Fq[noVelComp] = {};
+                            unsigned char Fk[noVelComp] = {};   // 0 none, 1 Fs, 2 Fq
                             if ( words )
                                 for (size_t j = 0; j < noVelComp; ++j)
-                                    FqOk[j] = fxShare( Fj[j] * wordScale, wordCap, Fq[j] );
+                                {
+                                    double const p = Fj[j] * wordScale;
+                                    if ( std::fabs( p ) < wordFast ) { Fs[j] = int64_t( std::llrint( p ) ); Fk[j] = 1; }
+                                    else if ( fxShare( p, wordCap, Fq[j] ) ) Fk[j] = 2;
+                                }
                             int cell[3];
                             cell[u] = g[0]; cell[w] = g[1];
                             for (int side = 0; side < 2; ++side)   // the cell below the plane (+), the cell above (-)
@@ -1474,10 +1490,14 @@ static void avg1FacePass( DT &dt, GridFrame const &F, Bbox &fullBox, size_t *nGr
                                     size_t const at = flat( cell[0], cell[1], cell[2] ) * noGradComp + size_t(a);
                                     for (size_t j = 0; j < noVelComp; ++j)
                                     {
-                                        if ( not FqOk[j] ) { fixedShareDropped( AVG1_FACE_DROP_SLOT ); continue; }
+                                        if ( Fk[j] == 0 ) { fixedShareDropped( AVG1_FACE_DROP_SLOT ); continue; }
                                         size_t const k = at + j*NO_DIM;
-                                        fxAddOwned( words->w[k], side == 0 ? Fq[j] : -Fq[j], uint64_t( k ),
-                                                    lists[size_t( th )] );
+                                        if ( Fk[j] == 1 )
+                                            fxAddOwned64( words->w[k], side == 0 ? Fs[j] : -Fs[j], uint64_t( k ),
+                                                          lists[size_t( th )] );
+                                        else
+                                            fxAddOwned( words->w[k], side == 0 ? Fq[j] : -Fq[j], uint64_t( k ),
+                                                        lists[size_t( th )] );
                                     }
                                     continue;
                                 }
@@ -1909,6 +1929,7 @@ void interpolateGrid_averaged_1(DT &dt,
             words.f[g].K = ru.K[RU_DENSITY + g];
             words.scale[g] = ru.scaleD( RU_DENSITY + g );
             words.cap[g] = ru.cap( RU_DENSITY + g );
+            words.fast[g] = fxFast64( words.cap[g] );
             words.lists[g].resize( size_t( nT ) );
         }
         // The cap (fixed_units.h) lets one cell component receive 2^32 shares, one per tetrahedron at most: a

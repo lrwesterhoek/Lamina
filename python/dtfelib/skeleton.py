@@ -27,16 +27,15 @@ same cell) through scipy.sparse.csgraph.connected_components -- no Python loop o
 millions at 512^3 -- and relabels the interior consecutively, largest component first.
 
 PER VOID (void_shell_fractions, nearest_wall_distance): the fold and sheet fractions of the shell 1.0-1.3
-R_eff (profiles.shell_means by nearest cell, the void's cell centre as its centre), and the distance from
-the void's centre to the nearest sheet cell, from the Euclidean distance transform of a periodic cut-out
-of 'cutout_cells' half-width around the centre (np.take with wrap); no sheet in the cut-out -> NaN with
-the cut-out's half-width as the lower bound.
+R_eff (profiles.shell_means by nearest cell, the void's cell centre as its centre), and the periodic Euclidean
+distance from the void's centre to the nearest sheet cell (a k-d tree of the sheet's boundary cells, WallIndex);
+none within 'cutout_cells' -> NaN with that distance as the lower bound.
 
 THE CONTROL (the per-void numbers alone -- per-sample fold shell 0.285 against a box fold fraction of 0.249, the
 wall at 0.105 R_v -- cannot be interpreted): random_sphere_null draws the same metrics in random spheres with the
 voids' own radii, null_zscores gives the voids' median against the null's mean +- std as a z-score, and
 filter_components keeps only the sheet components above a size (cells) or mass threshold before the shells and the
-distance transform see them.
+wall search see them.
 """
 
 from __future__ import annotations
@@ -192,54 +191,65 @@ def void_shell_fractions(caustic_class, centers_frac, r_eff_cells, shells=(1.0, 
     r_eff = np.asarray(r_eff_cells, dtype=np.float64).reshape(-1)
     out = {"shells": np.asarray(shells, dtype=np.float64), "per_shell": {}}
     for name, mask in (("fold", masks["fold"]), ("sheet", masks["sheet"])):
+        grid = np.asarray(mask, dtype=np.float32)           # once per mask (a 512^3 bool mask is a 512 MB copy)
         per = np.empty((len(r_eff), len(shells)))
         for j, x in enumerate(shells):
-            per[:, j] = shell_means(mask.astype(np.float32), centers, x * r_eff, dirs, mode="ngp")
+            per[:, j] = shell_means(grid, centers, x * r_eff, dirs, mode="ngp")
         out["per_shell"][name] = per
         out[name] = per.mean(axis=1)
     return out
 
 
-def _wall_distance_in(mask, ci, half):
-    """The distance (cells) from integer centre 'ci' to the nearest True cell of 'mask' within a periodic cut-out
-    of half-width 'half', or None when none lies within 'half' (one there could sit outside the cut-out)."""
-    n = mask.shape[0]
-    offs = np.arange(-half, half + 1)
-    idx = [(ci[k] + offs) % n for k in range(3)]
-    cut = mask[np.ix_(idx[0], idx[1], idx[2])]
-    if not cut.any():
-        return None
-    if cut[half, half, half]:
-        return 0.0
-    d = float(ndimage.distance_transform_edt(~cut)[half, half, half])
-    return d if d <= half else None                          # beyond 'half': the nearest may sit outside the cut-out
+class WallIndex:
+    """A sheet mask (a cubic bool grid, the box periodic) prepared for nearest_wall_distance: the mask, and a
+    periodic k-d tree of its boundary cells (those with a face neighbour outside the mask). The mask cell nearest
+    to a cell outside the mask is always a boundary cell: from an interior cell, one step towards the centre along
+    the offset's largest component is a mask cell that is nearer. Build it once for many searches
+    (random_sphere_null)."""
+
+    def __init__(self, sheet_mask):
+        from scipy.spatial import cKDTree
+        self.mask = np.asarray(sheet_mask, dtype=bool)
+        if self.mask.ndim != 3 or len(set(self.mask.shape)) != 1:
+            raise ValueError(f"the wall search needs a cubic 3D mask, not one of shape {self.mask.shape}")
+        self.n = int(self.mask.shape[0])
+        inner = self.mask.copy()
+        for ax in range(3):
+            for step in (1, -1):
+                inner &= np.roll(self.mask, step, axis=ax)
+        self.cells = np.argwhere(self.mask & ~inner)        # (m, 3) int64
+        self.tree = cKDTree(self.cells.astype(np.float64), boxsize=float(self.n)) if len(self.cells) else None
 
 
-def nearest_wall_distance(sheet_mask, centers_cells, cutout_cells: int = 32, start_cells: int = 32) -> tuple[np.ndarray, np.ndarray]:
-    """(distance, bounded): per centre (cells, (n, 3)), the Euclidean distance in cells to the nearest
-    True cell of 'sheet_mask', searched in periodic cut-outs of half-width 'start_cells', doubled for the
-    centres not yet resolved, up to 'cutout_cells'; with no sheet cell within that the distance is NaN and
-    'bounded' True (the half-width is a lower bound). A wall found at d <= the half-width is THE nearest (every
-    closer cell lies inside the cube), so the result is the one of a single search at 'cutout_cells' -- at a
-    fraction of the cost: a 100-cell cut-out for every void is 31x slower than 32."""
-    mask = np.asarray(sheet_mask, dtype=bool)
+def nearest_wall_distance(sheet_mask, centers_cells, cutout_cells: int = 32) -> tuple[np.ndarray, np.ndarray]:
+    """(distance, bounded): per centre (cells, (n, 3), rounded to the nearest cell), the periodic Euclidean
+    distance in cells to the nearest True cell of 'sheet_mask' (a mask, or its WallIndex); 0 for a centre on the
+    mask. With no sheet cell within max(1, cutout_cells) the distance is NaN and 'bounded' True (that distance is a
+    lower bound). The distance is formed from the integer offset to the nearest cell, sqrt(dx^2 + dy^2 + dz^2) in
+    float64: the value the Euclidean distance transform of a cut-out around the centre gives."""
+    index = sheet_mask if isinstance(sheet_mask, WallIndex) else WallIndex(sheet_mask)
     centers = np.asarray(centers_cells, dtype=np.float64).reshape(-1, 3)
-    full = int(cutout_cells)
+    bound = max(1, int(cutout_cells))
     dist = np.full(len(centers), np.nan)
     bounded = np.ones(len(centers), dtype=bool)
-    todo = np.arange(len(centers))
-    half = max(1, min(int(start_cells), full))
-    while todo.size:
-        left = []
-        for i in todo:
-            d = _wall_distance_in(mask, np.rint(centers[i]).astype(np.int64), half)
-            if d is None:
-                left.append(i)
-            else:
-                dist[i], bounded[i] = d, False
-        if half >= full:
-            break
-        todo, half = np.asarray(left, dtype=np.int64), min(2 * half, full)
+    if not len(centers):
+        return dist, bounded
+    n = index.n
+    ci = np.mod(np.rint(centers).astype(np.int64), n)
+    on = index.mask[ci[:, 0], ci[:, 1], ci[:, 2]]
+    dist[on], bounded[on] = 0.0, False
+    off = np.flatnonzero(~on)
+    if index.tree is None or not off.size:
+        return dist, bounded
+    # the tree's nearest cell within the bound (its distance only selects: the value is recomputed exactly below)
+    d, k = index.tree.query(ci[off].astype(np.float64), k=1, distance_upper_bound=bound + 1.0)
+    found = np.isfinite(d)
+    off, k = off[found], k[found]
+    delta = np.abs(index.cells[k] - ci[off])
+    delta = np.minimum(delta, n - delta)                   # the nearest periodic image, per axis
+    exact = np.sqrt((delta * delta).sum(axis=1).astype(np.float64))
+    near = exact <= bound
+    dist[off[near]], bounded[off[near]] = exact[near], False
     return dist, bounded
 
 
@@ -276,14 +286,15 @@ def _median(a):
     return float(np.median(a)) if a.size else float("nan")
 
 
-def sphere_metrics(masks, centers_cells, r_cells, n_grid: int, shells, cutout_cells: int) -> dict:
+def sphere_metrics(masks, centers_cells, r_cells, n_grid: int, shells, cutout_cells: int, wall=None) -> dict:
     """The per-sphere wall metrics of plot_caustic_skeleton's --per-void for spheres at integer cells 'centers_cells'
     (n, 3), centred on the cells' centres, of radii 'r_cells' (n,): {'fold', 'sheet' (shell fractions), 'dist_r'
-    (nearest-sheet distance / r, NaN beyond the cut-out), 'bounded'}."""
+    (nearest-sheet distance / r, NaN beyond the cut-out), 'bounded'}. 'wall': the sheet's WallIndex, when the
+    caller has built it (else it is built from masks['sheet'])."""
     c = np.asarray(centers_cells, dtype=np.int64).reshape(-1, 3)
     r = np.asarray(r_cells, dtype=np.float64).reshape(-1)
     sh = void_shell_fractions(None, (c + 0.5) / n_grid, r, shells=tuple(shells), masks=masks)
-    dist, bounded = nearest_wall_distance(masks["sheet"], c, cutout_cells=cutout_cells)
+    dist, bounded = nearest_wall_distance(masks["sheet"] if wall is None else wall, c, cutout_cells=cutout_cells)
     return {"fold": sh["fold"], "sheet": sh["sheet"], "dist_r": dist / r, "bounded": bounded}
 
 
@@ -294,16 +305,19 @@ def random_sphere_null(masks, r_cells, n_grid: int, shells, cutout_cells: int, n
     exactly), the same metrics (sphere_metrics) and per realisation their median over the spheres: {metric:
     (n_draws,) medians, 'bounded_fraction': (n_draws,)}. A void sample whose median sits several null standard
     deviations away from these is related to the walls; one inside them is not distinguishable from a random place
-    of that size. Seeded: the same call gives the same null."""
+    of that size. Seeded: the same call gives the same null. The masks are prepared once for all realisations: as
+    float32 grids for the shells and as the sheet's WallIndex for the distances."""
     rng = np.random.default_rng(int(seed))
     r = np.asarray(r_cells, dtype=np.float64).reshape(-1)
     out = {k: np.full(int(n_draws), np.nan) for k in NULL_METRICS}
     out["bounded_fraction"] = np.full(int(n_draws), np.nan)
     if not r.size:
         return out
+    grids = {name: np.asarray(masks[name], dtype=np.float32) for name in ("fold", "sheet")}
+    wall = WallIndex(masks["sheet"])
     for i in range(int(n_draws)):
         c = rng.integers(0, int(n_grid), size=(r.size, 3))
-        m = sphere_metrics(masks, c, r, n_grid, shells, cutout_cells)
+        m = sphere_metrics(grids, c, r, n_grid, shells, cutout_cells, wall=wall)
         for k in NULL_METRICS:
             out[k][i] = _median(m[k])
         out["bounded_fraction"][i] = float(np.mean(m["bounded"]))

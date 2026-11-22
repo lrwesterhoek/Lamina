@@ -2478,7 +2478,8 @@ def t_caustic_skeleton():
     (6 / 18 / 26), the tilted sheet under 26 vs 6, component sizes and mass, the cusp and swallowtail bits
     told apart and 'not computed' told from 0%, the parity-only refusal, json_safe, the per-void shell
     fractions (fold vs sheet vs line, the mean of the 1.0-1.3 R_eff shells against Archimedes' hat-box) and the
-    nearest-wall distance: both 'beyond the cut-out' branches, d = half exact, the cut-out wrapping every axis.
+    nearest-wall distance: beyond the bound with a wall in reach and with none, d = the bound exactly, every axis
+    wrapping.
     The real crossed-waves run is t_caustic_crossed_waves (data-backed)."""
     import json
     from scipy import ndimage
@@ -2607,18 +2608,17 @@ def t_caustic_skeleton():
     assert np.abs(sh["per_shell"]["fold"][1] - hat).max() < 0.015, (sh["per_shell"]["fold"][1], hat)
     d, bounded = sk.nearest_wall_distance(sheet, [(13, 13, 16), (13, 13, 31)], cutout_cells=32)
     assert abs(d[0] - np.sqrt(128.0)) < 1e-9 and not bounded[0] and d[1] == 0.0 and not bounded[1], (d, bounded)   # cell (5, 5, 16)
-    # the 'd > half' branch: a sheet cell, (5, 5, 16), lies INSIDE the 17^3 cut-out but at sqrt(128) = 11.3 > 8, where
-    # a nearer one could sit just outside the cut-out: NaN, the half-width a lower bound
+    # beyond the bound: the nearest sheet cell, (5, 5, 16), lies at sqrt(128) = 11.3 > 8 -- within 8 along every axis,
+    # so the old cut-out search saw it and refused it: NaN, the bound a lower bound
     d8, b8 = sk.nearest_wall_distance(sheet, [(13, 13, 16)], cutout_cells=8)
     assert np.isnan(d8[0]) and b8[0], (d8, b8)
-    # the EMPTY cut-out branch: the sheet's z < 10 part has no cell within 4 of (13, 13, 24) (the mask is not empty:
+    # no sheet cell in reach: the sheet's z < 10 part has no cell within 4 of (13, 13, 24) (the mask is not empty:
     # (5, 5, 6) of it is found at 0) -> NaN and bounded
     de, be = sk.nearest_wall_distance(sheet & (Z < 10), [(13, 13, 24), (5, 5, 6)], cutout_cells=4)
     assert np.isnan(de[0]) and be[0] and de[1] == 0.0 and not be[1], (de, be)
-    # the cut-out WRAPS the box (a clipped one sees nothing across the face): the z = 31 plane is 2 cells below z = 1;
-    # at z = 27 it lies ON the cut-out's face, d = half exactly -- exact, since every cell outside the cut-out is further
-    # than half (not censored); at z = 26 it is outside. A single cell (0, 0, 0) across the corner from (31, 31, 31) and
-    # across the y face only from (1, 30, 1): every axis wraps
+    # the search WRAPS the box (a clipped one sees nothing across the face): the z = 31 plane is 2 cells below z = 1;
+    # from z = 27 it lies at the bound, d = 4 exactly (found, not censored); from z = 26 it is beyond. A single cell
+    # (0, 0, 0) across the corner from (31, 31, 31) and across the y face only from (1, 30, 1): every axis wraps
     dw, bw = sk.nearest_wall_distance(sheet & (Z == n - 1), [(13, 13, 1), (13, 13, 27), (13, 13, 26)], cutout_cells=4)
     assert list(dw[:2]) == [2.0, 4.0] and np.isnan(dw[2]) and list(bw) == [False, False, True], (dw, bw)
     pt = np.zeros((n, n, n), bool)
@@ -3810,15 +3810,29 @@ def t_science_fixes():
             raise AssertionError("a zero smoothing length gave bins")
         except ValueError:
             pass
-        # the wall search in growing cut-outs equals one search at the full half-width
+        # the wall search (a k-d tree of the mask's boundary cells) equals a brute-force periodic search over every
+        # mask cell, to the bit, with the same WallIndex reused; one wall cell: near, far and unreachable voids
         from dtfelib import skeleton as _sk
         m = np.zeros((48, 48, 48), dtype=bool)
-        m[0, 0, 0] = True                                         # one wall cell; near, far (doubling) and unreachable voids
+        m[0, 0, 0] = True
         cen = np.array([[3, 0, 0], [10, 5, 0], [15, 0, 0], [47, 47, 47], [24, 24, 24]])
-        d1, b1 = _sk.nearest_wall_distance(m, cen, 20, start_cells=2)
-        d2, b2 = _sk.nearest_wall_distance(m, cen, 20, start_cells=20)
-        assert np.array_equal(b1, b2) and np.allclose(d1, d2, equal_nan=True), (d1, d2, b1, b2)
+        d1, b1 = _sk.nearest_wall_distance(m, cen, 20)
         assert np.allclose(d1[:4], [3.0, np.sqrt(125.0), 15.0, np.sqrt(3.0)]) and list(b1) == [False] * 4 + [True], (d1, b1)
+        rng = np.random.default_rng(4)
+        m = np.zeros((24, 24, 24), dtype=bool)
+        m[rng.integers(0, 24, 60), rng.integers(0, 24, 60), rng.integers(0, 24, 60)] = True
+        m[3:9, 4:12, 10:13] = True                                 # a slab with an interior (not in the tree)
+        cen = rng.integers(-24, 48, size=(200, 3))
+        wall = _sk.WallIndex(m)
+        cells = np.argwhere(m)
+        for cut in (1, 4, 11, 30):
+            d, b = _sk.nearest_wall_distance(wall, cen, cut)
+            off = np.abs(cells[None, :, :] - np.mod(cen, 24)[:, None, :])
+            off = np.minimum(off, 24 - off)
+            ref = np.sqrt((off * off).sum(axis=2).min(axis=1).astype(np.float64))
+            ref[ref > cut] = np.nan
+            assert np.array_equal(d, ref, equal_nan=True) and np.array_equal(b, np.isnan(ref)), (cut, d, ref)
+        assert len(wall.cells) < int(m.sum()), "the slab's interior cells are in the tree"
         # profile bins in sigma, closed at the wrap cap
         e = prof.default_edges_mpc(2.1625, 110.717449, "r_eff")
         assert np.allclose(e, (0.0, 10.8125, 12.975, 15.1375, 110.717449 / 6)), e

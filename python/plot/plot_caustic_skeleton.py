@@ -235,8 +235,9 @@ def main():
     parser.add_argument("--per-void", dest="voids", action="store_true",
                         help="per void: the shell's fold fraction and the nearest sheet (pipeline catalogue)")
     parser.add_argument("--cutout", type=int, default=None,
-                        help="half-width in cells of the cut-out for the wall distance (default 10 smoothing lengths: "
-                             "R_eff is 5-7 sigma, so the old 32 cells left almost every void 'beyond the cut-out')")
+                        help="the farthest wall distance searched, in cells: a void with no sheet that near is 'beyond the "
+                             "cut-out' (default 10 smoothing lengths: R_eff is 5-7 sigma, so the old 32 cells left "
+                             "almost every void beyond it)")
     parser.add_argument("--radius", choices=("r_v", "r_eff"), default="r_v",
                         help="the void radius the shells and the wall distance are in: r_v, the measured one (default), "
                              "or r_eff, the ellipsoid's (~1.75 r_v)")

@@ -309,6 +309,20 @@ inline void fxAddOwned(int64_t &w, __int128 const q, uint64_t const key, FxCarry
     w = r;
 }
 
+// The 64-bit route through fxShare + fxAddOwned, which nearly every share takes: a product whose magnitude is below
+// fxFast64(cap) = min(cap, 2^63) units has its integer in an int64 (llrint rounds as nearbyint does, in the one
+// rounding mode, and the result fits) and no part beyond the low word, so fxAddOwned64 of llrint(product) adds what
+// fxShare + fxAddOwned add: the same word, the same carry entry. Any other product (2^63 units or more, at or beyond
+// the cap, a NaN, an infinity) takes fxShare + fxAddOwned. On arm64 the 128-bit route costs a library call per
+// share (the double to __int128 conversion).
+inline double fxFast64(double const cap) { return std::min( cap, 0x1p63 ); }
+inline void fxAddOwned64(int64_t &w, int64_t const q, uint64_t const key, FxCarryList &list)
+{
+    int64_t r;
+    if ( __builtin_add_overflow( w, q, &r ) ) list.push_back( FxCarry( key, q > 0 ? 1 : -1 ) );
+    w = r;
+}
+
 // ... into a word other threads add to as well: an atomic add, whose returned old value tells the crossing (the word
 // after the add holds old + low modulo 2^64, formed in unsigned arithmetic; it crossed iff it moved the other way);
 // the atomics of one word form one total order, so every crossing is recorded once, whatever the interleaving
