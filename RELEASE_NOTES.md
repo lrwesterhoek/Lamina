@@ -97,6 +97,9 @@ values are noisy, so smooth its grids before use.
 - PS-DTFE renumbers every tessellation in a canonical vertex order, so its single-precision grids repeat to the byte
   under the parallel insert. Its grids moved once against 1.0.0's: in the last bits of most cells, by more in a few
   cells at caustics.
+- PS-DTFE's exact deposit on the GPU tests a run of a tetrahedron's cells before it clips any, and spends about a
+  sixth less GPU time in that deposit. Its exact GPU grids moved once more, in the last bits (a median of 1e-7 of a
+  cell's density); standard DTFE's did not.
 - Standard DTFE's single-precision exact grids no longer depend on the split, the thread count or the insertion
   order: every grid sums in one fixed-point unit for the whole run.
 - The parallel (TBB) Delaunay insert is in every binary built with TBB and engages by itself for tessellations of at

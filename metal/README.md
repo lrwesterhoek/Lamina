@@ -102,6 +102,17 @@ velocity gradient, `EX_DISP_KAPPA2`) is left out of phase 0 (only phase 0 decide
 weights were summed) and deferred by `depositFields` to the CPU's double deposit; every other piece's mean velocity
 and covariance are clamped to bounds a correct value always meets.
 
+**Tests first, clips after.** A thread takes its item's cells in runs of 32: first the cheap tests of every cell of
+the run (inside the sub-box, not wholly outside a face plane of the tetrahedron) into a bit mask, then the clip and the
+deposit of the cells that passed, in the same order. The lanes of a SIMD group run in step, so with one loop every
+cell at which any lane clipped cost the whole group a clip; now a group waits for the clips of its busiest lane.
+`depositExactAverage` does the same. Measured on 2026-11-22 on a synthetic Zel'dovich box (256^3 particles, a 256^3
+grid, one partition at a time, `DTFE_GPU_TIMING=1`, four runs each): PS-DTFE's phase 0 took 31% less device time
+and its phase 1 5% less, standard DTFE's kernel about 13% less. PS-DTFE's exact GPU grids moved once, in the last
+bits (a median of 1e-7 of a cell's density; the mass is unchanged): fast math compiles the clip differently inside
+the new loop. The standard kernel's grids did not move. Calling `exact_cell_clip`, with its own test, inside the
+second loop did not restore the old bytes and lost a third of phase 0's gain.
+
 **The clipping** (`sweep_moments` in `exact_clip.metal.inc`, shared by `depositExactItems` and `depositExactAverage`)
 is not an r3d port: it sweeps the tetrahedron in z. Between breakpoints (the middle vertices' z, the z where a
 tetrahedron edge crosses a side plane of the cell, the z where a vertical cell edge enters or leaves the tetrahedron)

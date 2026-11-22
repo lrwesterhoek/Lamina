@@ -1013,34 +1013,54 @@ kernel void depositExactAverage(
     float3 const tlo = min(min(float3(0.0f), t1), min(t2, t3));   // the tet's bbox (vertex-0 frame)
     float3 const thi = max(max(float3(0.0f), t1), max(t2, t3));
 
-    for (; w < wEnd; ++w) {
-        int const c[3] = { iLo[0] + a0, iLo[1] + a1, iLo[2] + a2 };            // local cell offsets
-        int const pos[3] = { cb[0] + c[0], cb[1] + c[1], cb[2] + c[2] };          // sub-grid indices
-        if (ulong(++a2) == n2) { a2 = 0; if (ulong(++a1) == n1) { a1 = 0; ++a0; } }
-        // the cell in the vertex-0 frame: a cell wholly outside a face plane holds no piece
-        float3 const ccen = float3((float(c[0]) + 0.5f) * P.dx[0] - base[0],
-                                   (float(c[1]) + 0.5f) * P.dx[1] - base[1],
-                                   (float(c[2]) + 0.5f) * P.dx[2] - base[2]);
-        if (box_outside_tet(faces, ccen, hcell)) continue;
-        // clipped in the OVERLAP frame (exact_clip.metal.inc: origin at the centre of the tet bbox's
-        // overlap with the cell, where the piece lies -- no frame far from the piece cancels)
-        float3 const clo = ccen - hcell, chi = ccen + hcell;
-        float3 const org = 0.5f * (max(clo, tlo) + min(chi, thi));
-        float mo[10];   // sweep_moments clears all 10; order 1 fills mo[0..3]
-        sweep_moments(-org, t1 - org, t2 - org, t3 - org, clo - org, chi - org, false, mo);
-        if (!(mo[0] > 0.0f)) continue;
-        float const dV = mo[0];
-        float const cen[3] = { org.x + mo[1]/mo[0], org.y + mo[2]/mo[0], org.z + mo[3]/mo[0] };   // the piece's centroid, vertex-0 frame
-        float denS = den0;
-        for (int i=0;i<3;++i) denS += cen[i]*densGrad[i];
-        float velS[3] = {0.0f,0.0f,0.0f};
-        if (P.fVel)
-            for (int j=0;j<3;++j) {
-                velS[j]=u0[j];
-                for (int i=0;i<3;++i) velS[j] += vG[i][j]*cen[i];
-            }
-        float scS = s0;
-        if (P.fScal) for (int i=0;i<3;++i) scS += cen[i]*sG[i];
-        depositCell(G, P, ulong(fullFlat(P, pos)), denS, velS, gradFlat, scS, sG, dV);
+    // The item's cells in runs of 32: first the cheap test of every cell of the run (not wholly outside a face plane)
+    // into a bit mask, then the clip of the cells that passed, in the same ascending order. A SIMD group then waits
+    // for the clips of its busiest lane, not for every cell at which some lane clips.
+    while (w < wEnd) {
+        uint const nRun = uint(min(wEnd - w, 32ul));
+        int const r0 = a0, r1 = a1, r2 = a2;   // the run's first cell
+        uint hits = 0u;
+        for (uint j = 0u; j < nRun; ++j) {
+            int const c[3] = { iLo[0] + a0, iLo[1] + a1, iLo[2] + a2 };        // local cell offsets
+            if (ulong(++a2) == n2) { a2 = 0; if (ulong(++a1) == n1) { a1 = 0; ++a0; } }
+            // the cell in the vertex-0 frame: a cell wholly outside a face plane holds no piece
+            float3 const ccen = float3((float(c[0]) + 0.5f) * P.dx[0] - base[0],
+                                       (float(c[1]) + 0.5f) * P.dx[1] - base[1],
+                                       (float(c[2]) + 0.5f) * P.dx[2] - base[2]);
+            if (!box_outside_tet(faces, ccen, hcell)) hits |= 1u << j;
+        }
+        w += ulong(nRun);
+        while (hits != 0u) {
+            uint const j = ctz(hits);
+            hits &= hits - 1u;
+            // cell j of the run: the first cell stepped j times along the innermost axis, with its carries
+            uint const s2 = uint(r2) + j;
+            uint const c1 = uint(r1) + s2 / uint(n2);
+            int const c[3] = { iLo[0] + r0 + int(c1 / uint(n1)), iLo[1] + int(c1 % uint(n1)), iLo[2] + int(s2 % uint(n2)) };
+            int const pos[3] = { cb[0] + c[0], cb[1] + c[1], cb[2] + c[2] };          // sub-grid indices
+            float3 const ccen = float3((float(c[0]) + 0.5f) * P.dx[0] - base[0],
+                                       (float(c[1]) + 0.5f) * P.dx[1] - base[1],
+                                       (float(c[2]) + 0.5f) * P.dx[2] - base[2]);
+            // clipped in the OVERLAP frame (exact_clip.metal.inc: origin at the centre of the tet bbox's
+            // overlap with the cell, where the piece lies -- no frame far from the piece cancels)
+            float3 const clo = ccen - hcell, chi = ccen + hcell;
+            float3 const org = 0.5f * (max(clo, tlo) + min(chi, thi));
+            float mo[10];   // sweep_moments clears all 10; order 1 fills mo[0..3]
+            sweep_moments(-org, t1 - org, t2 - org, t3 - org, clo - org, chi - org, false, mo);
+            if (!(mo[0] > 0.0f)) continue;
+            float const dV = mo[0];
+            float const cen[3] = { org.x + mo[1]/mo[0], org.y + mo[2]/mo[0], org.z + mo[3]/mo[0] };   // the piece's centroid, vertex-0 frame
+            float denS = den0;
+            for (int i=0;i<3;++i) denS += cen[i]*densGrad[i];
+            float velS[3] = {0.0f,0.0f,0.0f};
+            if (P.fVel)
+                for (int j=0;j<3;++j) {
+                    velS[j]=u0[j];
+                    for (int i=0;i<3;++i) velS[j] += vG[i][j]*cen[i];
+                }
+            float scS = s0;
+            if (P.fScal) for (int i=0;i<3;++i) scS += cen[i]*sG[i];
+            depositCell(G, P, ulong(fullFlat(P, pos)), denS, velS, gradFlat, scS, sG, dV);
+        }
     }
 }

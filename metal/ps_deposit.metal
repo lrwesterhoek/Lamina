@@ -536,6 +536,26 @@ static inline float exact_full_weight(float vol, bool fLinear, float d0, thread 
     return vol * (d0 + dG[0]*c.x + dG[1]*c.y + dG[2]*c.z);
 }
 
+// The window cell 'raw''s centre in the tet's vertex-0 frame.
+static inline float3 exact_cell_centre(thread const ExactTet& E, thread const int raw[3], constant DepositParams& P)
+{
+    return float3((float(raw[0] - E.ic0[0]) - E.f0[0] + 0.5f) * P.dx[0],
+                  (float(raw[1] - E.ic0[1]) - E.f0[1] + 0.5f) * P.dx[1],
+                  (float(raw[2] - E.ic0[2]) - E.f0[2] + 0.5f) * P.dx[2]);
+}
+
+// exact_cell_clip's first test alone: true when the window cell 'raw' lies wholly outside a face plane of the tet
+// (it then holds none of it)
+static inline bool exact_cell_outside(thread const ExactTet& E, thread const int raw[3], constant DepositParams& P)
+{
+    return box_outside_tet(E.faces, exact_cell_centre(E, raw, P), E.hcell);
+}
+
+// exact_cell_clip after its first test (the caller made it: exact_cell_outside was false)
+static inline bool exact_cell_piece(thread const ExactTet& E, thread const int raw[3],
+                                    constant DepositParams& P, bool full, bool fLinear,
+                                    thread float mo[10], thread float& w, thread float3& cc);
+
 // Clips the tet against the window cell 'raw'. False when they do not overlap; otherwise mo holds
 // the piece's moments (volume and first moments only unless 'full': pass 0 discards the rest) and
 // w its deposit weight -- V_int, or the exact linear-profile integral under fLinear (clamped at 0).
@@ -544,11 +564,15 @@ static inline bool exact_cell_clip(thread const ExactTet& E, thread const int ra
                                    thread float mo[10], thread float& w, thread float3& cc)
 {
     // a cell wholly outside a face plane cannot hold any of the tet
-    float3 const ccen = float3((float(raw[0] - E.ic0[0]) - E.f0[0] + 0.5f) * P.dx[0],
-                               (float(raw[1] - E.ic0[1]) - E.f0[1] + 0.5f) * P.dx[1],
-                               (float(raw[2] - E.ic0[2]) - E.f0[2] + 0.5f) * P.dx[2]);
-    if (box_outside_tet(E.faces, ccen, E.hcell)) return false;
+    if (exact_cell_outside(E, raw, P)) return false;
+    return exact_cell_piece(E, raw, P, full, fLinear, mo, w, cc);
+}
 
+static inline bool exact_cell_piece(thread const ExactTet& E, thread const int raw[3],
+                                    constant DepositParams& P, bool full, bool fLinear,
+                                    thread float mo[10], thread float& w, thread float3& cc)
+{
+    float3 const ccen = exact_cell_centre(E, raw, P);
     // clip the tet against this cell in the OVERLAP frame (exact_clip.metal.inc: origin at the centre
     // of the tet bbox's overlap with the cell, where the piece lies): the moments come out about that
     // origin 'cc' (vertex-0 frame), which the caller adds back to the centroid
@@ -1446,23 +1470,46 @@ kernel void depositExactItems(
     ulong accQ = 0ul;
     uint  accBad = 0u;
     float acc = 0.0f;
-    for (; w < wEnd; ++w) {
-        int const raw[3] = { iMin[0] + a0, iMin[1] + a1, iMin[2] + a2 };
-        if (ulong(++a2) == n2) { a2 = 0; if (ulong(++a1) == n1) { a1 = 0; ++a0; } }
-        uint flat;
-        if (window_flat(raw, P, flat) != 2) continue;   // outside the sub-box / window
-        float mo[10], wt;
-        float3 cc;
-        if (!exact_cell_clip(E, raw, P, fullMoments, fLinear, mo, wt, cc)) continue;
-        if (!deposit) {
-            if (sumWInt) {
-                float const p = wt * E.wScale;
-                if (fixedShareOk(p)) accQ += ulong(long(rint(p)));
-                else ++accBad;                                      // (the non-finite guard, per cell)
-            }
-            else acc += wt;
+    // The item's cells in runs of 32: first the cheap tests of every cell of the run (inside the sub-box, not wholly
+    // outside a face plane) into a bit mask, then the clip of the cells that passed, in the same ascending order. A
+    // SIMD group then waits for the clips of its busiest lane, not for every cell at which some lane clips.
+    while (w < wEnd) {
+        uint const nRun = uint(min(wEnd - w, 32ul));
+        int const r0 = a0, r1 = a1, r2 = a2;   // the run's first cell
+        uint hits = 0u;
+        for (uint j = 0u; j < nRun; ++j) {
+            int const raw[3] = { iMin[0] + a0, iMin[1] + a1, iMin[2] + a2 };
+            if (ulong(++a2) == n2) { a2 = 0; if (ulong(++a1) == n1) { a1 = 0; ++a0; } }
+            uint flat;
+            if (window_flat(raw, P, flat) != 2) continue;   // outside the sub-box / window
+            if (exact_cell_outside(E, raw, P)) continue;
+            hits |= 1u << j;
         }
-        else exact_cell_deposit(G, flat, mo, wt * shareFac, E, fVel, fDisp, fGrad, fVolW, fCaustic, fScal, fSGrad, cc);
+        w += ulong(nRun);
+        while (hits != 0u) {
+            uint const j = ctz(hits);
+            hits &= hits - 1u;
+            // cell j of the run: the first cell stepped j times along the innermost axis, with its carries
+            uint const s2 = uint(r2) + j;
+            uint const c1 = uint(r1) + s2 / uint(n2);
+            int const raw[3] = { iMin[0] + r0 + int(c1 / uint(n1)), iMin[1] + int(c1 % uint(n1)),
+                                 iMin[2] + int(s2 % uint(n2)) };
+            uint flat;
+            window_flat(raw, P, flat);                       // (2: the run's test)
+            float mo[10], wt;
+            float3 cc;
+            if (!exact_cell_piece(E, raw, P, fullMoments, fLinear, mo, wt, cc)) continue;
+            if (!deposit) {
+                if (sumWInt) {
+                    float const p = wt * E.wScale;
+                    if (fixedShareOk(p)) accQ += ulong(long(rint(p)));
+                    else ++accBad;                                  // (the non-finite guard, per cell)
+                }
+                else acc += wt;
+            }
+            else exact_cell_deposit(G, flat, mo, wt * shareFac, E, fVel, fDisp, fGrad, fVolW, fCaustic, fScal, fSGrad,
+                                    cc);
+        }
     }
     if (!deposit && sumWInt) {
         if (accQ != 0ul) addFixedQ(sumWX, ulong(tet), accQ);
