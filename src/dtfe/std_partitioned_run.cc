@@ -166,6 +166,12 @@ static void dtfePartitionedRun(DTFE_State &state, vector<Sample_point> &samples,
         psPointEvalSetPartition( i );
         DTFE_parallelImpl( &P.part, samples, tempOpt, &temp_uQuantities, &temp_aQuantities, P.built ? &P.sub : nullptr );
         psPointEvalSetPartition( -1 );
+#ifndef PHASE_SPACE
+        // this partition's tessellations are done with: released, and the TBB allocator's kept blocks handed back, so
+        // the next partition starts from the live memory the auto-tuner books (triangulation.cpp)
+        P.sub = DTFEPrepared();
+        dtfeReleaseTessellationMemory();
+#endif
 
         // map this partition's sub-grid results back into the full output grids
         auto const tCopy = std::chrono::steady_clock::now();
@@ -204,8 +210,9 @@ static void dtfePartitionedRun(DTFE_State &state, vector<Sample_point> &samples,
        interpolation is unchanged, and each partition still ASSIGNS its own part of the grids in index order, so
        every output is byte-identical (tests/dtfe_resume_check.sh D14). It holds the next partition's particle copy
        and tessellations; before each look-ahead the free memory, less 4 GB of headroom, is checked against that
-       (auto_tune.h stdLookAheadBytes, the uniform count of one partition, or the auto-tuner's booked figure when
-       larger: its count x kStdLookAheadFactor), and the partition is prepared in turn when it does not fit; the
+       (the auto-tuner's booked figure: its build of the partition that needs the most, counted from the particles;
+       without a plan auto_tune.h stdLookAheadBytes, the uniform count of one partition), and the partition is
+       prepared in turn when it does not fit; the
        auto-tuner counts it in its prediction and switches it off for a run whose budget cannot hold it
        (stdLookAheadOffBudget). '--no-overlap' switches it off; DTFE_OVERLAP=1 forces it on a CPU run too (the
        tests' byte-identity check on any build), DTFE_OVERLAP=0 switches it off. A '--resume' looks ahead to the
@@ -226,14 +233,16 @@ static void dtfePartitionedRun(DTFE_State &state, vector<Sample_point> &samples,
         overlap = toCompute.size() > 1 and state.options.DTFE and not state.options.stdNoOverlap
                   and not state.options.stdLookAheadOffBudget and not overlapBanned and ( gpuDeposit or overlapForced );
     }
-    // what one partition's look-ahead holds: its padded particle copy + the tessellations of its sub-domains
-    // (auto_tune.h, the model's bytes per padded vertex); the partitions hold about the same particles (the split
-    // balances them), so the uniform count of the partition's geometry -- or the auto-tuner's booked figure (its
-    // count from the particles of the partition that needs the most, x kStdLookAheadFactor: auto_tune.cc
-    // reportSplit) when it is larger (on clustered data the padding shells
-    // of a dense partition hold more than the uniform count: auto_tune.h StdTuneDensity)
+    // what one partition's look-ahead holds: the builds of its sub-domains and a team's padded particle copy
+    // (auto_tune.h, the model's items). Where the auto-tuner planned, its booked figure: the partition that needs the
+    // most, counted from the particles (auto_tune.cc reportSplit). Else the uniform count of the partition's geometry
+    // (the split balances the particles), which misjudges a clustered run both ways: a dense partition's padding
+    // shells hold more than it, and a small partition's box is padded far beyond its particles' share (TNG50-3 at
+    // 512^3 in 4^3 partitions: 20.86 GB against the 9.36 GB the auto-tuner counted).
     aheadBytes = [&](int const i) -> double
     {
+        if ( state.options.stdLookAheadCounted > 0. )
+            return state.options.stdLookAheadCounted;
         User_options o = state.options;
         o.partNo = i;
         copySubgridInformation( &o, subgridList, subgridCoords );
@@ -248,9 +257,8 @@ static void dtfePartitionedRun(DTFE_State &state, vector<Sample_point> &samples,
             len[d] = double( o.region[2*d+1] - o.region[2*d] );
             pad[d] = double( o.paddingLength[2*d] + o.paddingLength[2*d+1] ) / 2.;
         }
-        return std::max( state.options.stdLookAheadCounted,
-                         stdLookAheadBytes( state.options, double( state.particles.size() ) / double( totalPartitions ),
-                                            len, pad, tGrid ) );
+        return stdLookAheadBytes( state.options, double( state.particles.size() ) / double( totalPartitions ),
+                                  len, pad, tGrid );
     };
     if ( overlap )
     {

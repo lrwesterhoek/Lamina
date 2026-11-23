@@ -29,11 +29,17 @@
 #include "../thread_count.h"   // coresPerTeam: the exact average's CPU threads
 #include "ps_deposit_params.h"   // fixedShareDropped: the run-wide words' guard counts its dropped shares (any build)
 #include <stdio.h>
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <limits>
+#include <new>
+#include <system_error>
 #include <thread>
+#include <type_traits>
 #include <vector>
 #include <gsl/gsl_qrng.h>
 #ifdef OPEN_MP
@@ -163,7 +169,9 @@ inline uint64_t mcVertexHash(Vertex_handle const &v)
 //   CGAL's labelling correlates with density. The product is a systematic mass loss in an '_a' grid. A pseudo-random,
 //   order-free slot assignment decorrelates the slots from the density AND makes the realization of each
 //   tetrahedron independent of the insertion order, the thread count and the partition split.
-inline McCell mcVertexOrder(Finite_cells_iterator &cell)
+// 'cell': a finite-cell iterator or a cell handle.
+template <typename CellRef>
+inline McCell mcVertexOrder(CellRef const &cell)
 {
     McCell c;
     for (int i=0; i<NO_DIM+1; ++i)
@@ -440,6 +448,16 @@ static inline void avg1ZeroGrids(User_options &userOptions, Field &field, size_t
     }
 }
 
+// Runs work(0) .. work(n-1) at once, work(0) on the calling thread and the others on threads of their own.
+template <typename Work>
+static void avg1OnThreads(int const n, Work const &work)
+{
+    std::vector<std::thread> pool;
+    for (int i = 1; i < n; ++i) pool.emplace_back( [&work, i] { work( i ); } );
+    if ( n > 0 ) work( 0 );
+    for (std::thread &x : pool) x.join();
+}
+
 #ifdef DTFE_GPU_ACTIVE
 // Whether this pass may use the GPU deposit: the GPU (useMetal), at most one scalar component and fewer than 2^32
 // grid cells -- of the pass's own grid (a thread's sub-domain, a partition, one domain), which the program's pick
@@ -485,15 +503,42 @@ struct Avg1GpuCtx
     double dxDeposit[3];               // the kernel's cell size: the grid frame's for the exact average, the sub-domain's for Monte Carlo
 };
 
+// Sorts v ascending on up to 'threads' threads: contiguous runs sorted at once, then merged pairwise. The elements
+// are distinct (a strict total order), so the result is the one std::sort gives, at any thread count.
+template <typename T>
+static void avg1ParallelSort(std::vector<T> &v, int const threads)
+{
+    size_t const n = v.size();
+    size_t const runs = size_t( std::max( 1, std::min( threads, int( std::min( n / 65536, size_t(64) ) ) ) ) );
+    if ( runs <= 1 )
+    {
+        std::sort( v.begin(), v.end() );
+        return;
+    }
+    std::vector<size_t> edge( runs + 1 );
+    for (size_t r = 0; r <= runs; ++r) edge[r] = n * r / runs;
+    avg1OnThreads( int( runs ), [&](int const r) { std::sort( v.begin() + edge[r], v.begin() + edge[r+1] ); } );
+    std::vector<T> merged( n );
+    for (size_t width = 1; width < runs; width *= 2)
+    {   // runs [r, r + width) and [r + width, r + 2 width) into one; a run without a partner is copied
+        size_t const pairs = ( runs + 2*width - 1 ) / ( 2*width );
+        avg1OnThreads( int( pairs ), [&](int const i) {
+            size_t const r = size_t(i) * 2*width;
+            size_t const lo = edge[r], mid = edge[std::min( runs, r + width )], hi = edge[std::min( runs, r + 2*width )];
+            std::merge( v.begin() + lo, v.begin() + mid, v.begin() + mid, v.begin() + hi, merged.begin() + lo ); } );
+        v.swap( merged );
+    }
+}
+
 // Orders the tetrahedra along a Morton curve of their base cell before dispatch, so the
 // threads running together deposit into neighbouring cells: the deposit is bound by its
 // atomics, and scattered cells cost far more of its throughput than local ones (TLB and
 // cache reach). No cost sort (by sample count, so that a chunk's threads are uniformly
 // sized) is needed: the
 // work items bound every thread to itemSamples samples (the per-tet A/B kernel,
-// DTFE_GPU_ITEMS=0, pays for that with its imbalance). The permutation is applied one
-// array at a time so only a single extra copy is alive at once.
-static inline void avg1MortonOrder(Avg1GpuCtx &c)
+// DTFE_GPU_ITEMS=0, pays for that with its imbalance). The order is (key, index), the same on any number of
+// 'threads'; the permutation is applied one array at a time, so only a single extra copy is alive at once.
+static inline void avg1MortonOrder(Avg1GpuCtx &c, int const threads)
 {
     std::vector<float> &tetVerts = c.tetVerts, &tetDens = c.tetDens, &tetVels = c.tetVels, &tetScal = c.tetScal,
                        &tetVols = c.tetVols;
@@ -502,11 +547,16 @@ static inline void avg1MortonOrder(Avg1GpuCtx &c)
     bool const needVel = c.needVel, needScal = c.needScal;
     int const mortonShift = c.mortonShift;
     size_t const nT = tetCnts.size();
+    int const nTh = int( std::max<size_t>( 1, std::min( size_t( std::max( 1, threads ) ), nT / 65536 ) ) );
+    auto range = [&](int const th, size_t &lo, size_t &hi) { lo = nT * size_t(th) / size_t(nTh); hi = nT * size_t(th + 1) / size_t(nTh); };
     std::vector< std::pair<uint32_t,uint32_t> > order(nT);
-    for (size_t t=0; t<nT; ++t)
-        order[t] = std::make_pair( tetKeys[t], uint32_t(t) );
+    avg1OnThreads( nTh, [&](int const th) {
+        size_t lo, hi;
+        range( th, lo, hi );
+        for (size_t t=lo; t<hi; ++t)
+            order[t] = std::make_pair( tetKeys[t], uint32_t(t) ); } );
     std::vector<uint32_t>().swap( tetKeys );
-    std::sort( order.begin(), order.end() );
+    avg1ParallelSort( order, nTh );
     if ( Env::flag( { "DTFE_GPU_TIMING" } ) )
     {   // how many distinct base cells the 32 consecutive work items of a SIMD group touch
         // (16-sample items; a lower bound on the cell sharing a SIMD-group reduction could use)
@@ -525,53 +575,26 @@ static inline void avg1MortonOrder(Avg1GpuCtx &c)
         fprintf( stderr, "DTFE Metal order: %zu tetrahedra, %zu SIMD groups of 32 items, %.1f distinct base cells per group (Morton shift %d)\n",
                  nT, groups, groups ? double(sumDistinct)/double(groups) : 0., mortonShift );
     }
-    {
-        std::vector<float> sv(nT*12);
-        for (size_t i=0; i<nT; ++i)
-        { size_t const src = order[i].second; for (int k=0; k<12; ++k) sv[i*12+k] = tetVerts[src*12+k]; }
-        tetVerts.swap(sv);
-    }
-    {
-        std::vector<float> sd(nT*4);
-        for (size_t i=0; i<nT; ++i)
-        { size_t const src = order[i].second; for (int k=0; k<4; ++k) sd[i*4+k] = tetDens[src*4+k]; }
-        tetDens.swap(sd);
-    }
-    if ( needVel )
-    {
-        std::vector<float> su(nT*12);
-        for (size_t i=0; i<nT; ++i)
-        { size_t const src = order[i].second; for (int k=0; k<12; ++k) su[i*12+k] = tetVels[src*12+k]; }
-        tetVels.swap(su);
-    }
-    if ( needScal )
-    {
-        std::vector<float> ss(nT*4);
-        for (size_t i=0; i<nT; ++i)
-        { size_t const src = order[i].second; for (int k=0; k<4; ++k) ss[i*4+k] = tetScal[src*4+k]; }
-        tetScal.swap(ss);
-    }
-    {
-        std::vector<float> so(nT);
-        for (size_t i=0; i<nT; ++i) so[i] = tetVols[order[i].second];
-        tetVols.swap(so);
-    }
-    {
-        std::vector<uint32_t> sc(nT);
-        for (size_t i=0; i<nT; ++i) sc[i] = tetCnts[order[i].second];
-        tetCnts.swap(sc);
-    }
-    {
-        std::vector<uint32_t> sf(nT);
-        for (size_t i=0; i<nT; ++i) sf[i] = tetFlats[order[i].second];
-        tetFlats.swap(sf);
-    }
-    {
-        std::vector<int32_t> sl(nT*3);
-        for (size_t i=0; i<nT; ++i)
-        { size_t const src = order[i].second; for (int k=0; k<3; ++k) sl[i*3+k] = tetCells[src*3+k]; }
-        tetCells.swap(sl);
-    }
+    // one array in the new order: its w entries per tetrahedron gathered on the threads, then swapped in
+    auto permute = [&](auto &a, size_t const w) {
+        typename std::remove_reference<decltype(a)>::type s( nT * w );
+        avg1OnThreads( nTh, [&](int const th) {
+            size_t lo, hi;
+            range( th, lo, hi );
+            for (size_t i=lo; i<hi; ++i)
+            {
+                size_t const src = order[i].second;
+                for (size_t k=0; k<w; ++k) s[i*w+k] = a[src*w+k];
+            } } );
+        a.swap( s ); };
+    permute( tetVerts, 12 );
+    permute( tetDens, 4 );
+    if ( needVel ) permute( tetVels, 12 );
+    if ( needScal ) permute( tetScal, 4 );
+    permute( tetVols, 1 );
+    permute( tetCnts, 1 );
+    permute( tetFlats, 1 );
+    permute( tetCells, 3 );
 }
 
 // Deposits the extracted tetrahedra on the GPU into a grid of its own that is copied into the output. False: the CPU
@@ -1313,6 +1336,31 @@ static inline void avg1McTet(Avg1CpuCtx const &C, McCell &mc, double vertexMatri
     }
 }
 
+#if NO_DIM==3   // (the 3D walks only: the GPU extraction and the face pass)
+// The finite cells in walk order, cut into blocks of kAvg1Block for the walks that several threads share block by
+// block (avg1ForBlocks): each block's first cell (a block ends where the next begins, the last one at the end).
+static size_t const kAvg1Block = size_t(1) << 15;
+static std::vector<Finite_cells_iterator> avg1CellBlocks(DT &dt)
+{
+    std::vector<Finite_cells_iterator> start;
+    start.reserve( dt.number_of_finite_cells() / kAvg1Block + 1 );
+    size_t i = 0;
+    for (Finite_cells_iterator itC = dt.finite_cells_begin(); itC != dt.finite_cells_end(); ++itC, ++i)
+        if ( i % kAvg1Block == 0 ) start.push_back( itC );
+    return start;
+}
+
+// work(b) for every block b < nBlocks, on up to 'threads' threads that take the blocks in turn
+template <typename Work>
+static void avg1ForBlocks(int const threads, size_t const nBlocks, Work const &work)
+{
+    std::atomic<size_t> next{ 0 };
+    avg1OnThreads( int( std::min( size_t( std::max( 1, threads ) ), std::max<size_t>( 1, nBlocks ) ) ), [&](int) {
+        for (size_t b; ( b = next.fetch_add( 1, std::memory_order_relaxed ) ) < nBlocks; )
+            work( b ); } );
+}
+#endif
+
 #if NO_DIM==3 && defined(VELOCITY) && !defined(MY_SCALAR)
 /* '--face-gradient': the cell average of the velocity gradient from the FACES. By Gauss,
    (1/V) times the integral of v n over a grid cell's six faces is the cell average of grad v; the DTFE interpolant is
@@ -1332,15 +1380,19 @@ static inline void avg1McTet(Avg1CpuCtx const &C, McCell &mc, double vertexMatri
    (the double product times 2^K, rounded to nearest even), added to the cell below the plane and subtracted from the
    cell above, so the sums are exact and the same in every split and walk order; a flux without an integer below
    wordCap (a NaN, an infinity) adds nothing and is counted (AVG1_FACE_DROP_SLOT). Otherwise acc: the same sums in
-   double, in walk order. The x planes are dealt out as in the deposit (thread th adds only to the cells of its own
-   slabs, every thread walking every tetrahedron in order: every add is owned, so no two threads write one word, and
-   each thread keeps its crossings of the int64 range in its own list, summed after the threads by fxCarryFinish), so
-   the sums are bit-identical at any thread count. degenerate (when not null) collects the cells a tetrahedron with a
-   zeroed inverse can reach: its velocity is constant there, so its faces carry jumps that the per-tetrahedron
-   gradient (0) does not see -- the DTFE_FACE_CHECK comparison skips them. */
+   double, in walk order. With several threads the x cells are dealt out in contiguous ranges, one per thread, and
+   thread th adds only to the cells of its own range: every add is owned, so no two threads write one word, and
+   each thread keeps its crossings of the int64 range in its own list, summed after the threads by fxCarryFinish. A
+   pre-pass lists the tetrahedra that cross a plane, with their x windows, in walk order (block by block, the blocks
+   at once); the ranges are cut so that each holds about as many of them, and each thread takes the ones whose window
+   reaches its range, in that order: each cell gets the adds of the one-thread walk in the same order, so the sums
+   are bit-identical at any thread count. degenerate (when not null) collects the
+   cells a tetrahedron with a zeroed inverse can reach: its velocity is constant there, so its faces carry jumps that
+   the per-tetrahedron gradient (0) does not see -- the DTFE_FACE_CHECK comparison skips them. */
 static int const AVG1_FACE_DROP_SLOT = 5;   // the guard's slot of the face pass (0..4: the deposits' grids; DTFE.cpp)
+
 static void avg1FacePass( DT &dt, GridFrame const &F, Bbox &fullBox, size_t *nGrid, int const nT,
-                          int const slabW, std::vector<double> &acc,
+                          std::vector<double> &acc,
                           std::vector<unsigned char> *degenerate, FxWords *words, double const wordCap )
 {
     size_t const gridSize = nGrid[0]*nGrid[1]*nGrid[2];
@@ -1355,172 +1407,267 @@ static void avg1FacePass( DT &dt, GridFrame const &F, Bbox &fullBox, size_t *nGr
     else
         acc.assign( gridSize * noGradComp, 0. );
     if ( degenerate ) degenerate->assign( gridSize, 0 );
-    auto owns = [&](int const th, int const gi) { return nT == 1 or ( gi / slabW ) % nT == th; };
+    std::vector<int> ownerOf;   // [x cell]: its thread (several threads: set below, before they run)
+    auto owns = [&](int const th, int const gi) { return nT == 1 or ownerOf[size_t(gi)] == th; };
     auto flat = [&](int const i, int const j, int const k) {
         return ( size_t(i)*nGrid[1] + size_t(j) )*nGrid[2] + size_t(k); };
-    auto pass = [&](int const th)
+    // the grid planes a tetrahedron may own a section of (min <= plane < max; sub-grid indices), and its window of
+    // grid cells, from its vertices' absolute positions X (in any vertex order: only their bounds count); false when
+    // it crosses no plane
+    auto planeWindow = [&](double const X[4][3], int pFirst[3], int pLast[3], int iLo[3], int iHi[3])
     {
-        for (Finite_cells_iterator itC = dt.finite_cells_begin(); itC != dt.finite_cells_end(); ++itC)
+        bool crosses = false;
+        for (int d = 0; d < 3; ++d)
         {
-            if ( cellOutsideRegion( dt, itC, fullBox ) )
-                continue;
-            McCell mc = mcVertexOrder( itC );   // the deposits' vertex order (hashed), base = vertex 0
-            double vertexMatrix[NO_DIM][NO_DIM];
-            for (int v = 0; v < NO_DIM; ++v)
-                for (int d = 0; d < NO_DIM; ++d)
-                    vertexMatrix[v][d] = double( mc.v[v+1]->point()[d] ) - double( mc.v[0]->point()[d] );
-            // X: the vertices' ABSOLUTE positions, exact in double. The planes' sides are decided on these against
-            // F.plane(), ONE expression of the global plane index, so every tetrahedron sharing a vertex, in any
-            // sub-domain, computes the same signed distance, and two tetrahedra never decide a shared face lying in a
-            // grid plane differently (face_sweep.h). p: the base-relative frame, X[v] - X[0] exactly.
-            double X[4][3], p[4][3];
-            for (int v = 0; v < 4; ++v)
-                for (int d = 0; d < 3; ++d)
-                {
-                    X[v][d] = double( mc.v[v]->point()[d] );
-                    p[v][d] = v == 0 ? 0. : vertexMatrix[v-1][d];
-                }
-            // the grid planes the tetrahedron may own a section of (min <= plane < max; sub-grid indices), and its
-            // window of grid cells
-            int pFirst[3], pLast[3], iLo[3], iHi[3];
-            bool crosses = false;
+            double mn = X[0][d], mx = X[0][d];
+            for (int v = 1; v < 4; ++v) { mn = std::min( mn, X[v][d] ); mx = std::max( mx, X[v][d] ); }
+            long g0 = F.cellOf( mn, d );                  // the first plane at or above mn
+            while ( F.plane( g0, d ) < mn ) ++g0;
+            while ( F.plane( g0 - 1, d ) >= mn ) --g0;
+            long g1 = F.cellOf( mx, d );                  // the last plane below mx
+            while ( F.plane( g1, d ) >= mx ) --g1;
+            while ( F.plane( g1 + 1, d ) < mx ) ++g1;
+            pFirst[d] = int( std::max( 0L, g0 - F.offset[d] ) );
+            pLast[d] = int( std::min( long(nGrid[d]), g1 - F.offset[d] ) );
+            crosses = crosses or pFirst[d] <= pLast[d];
+            iLo[d] = int( F.cellOf( mn, d ) - F.offset[d] );
+            iHi[d] = int( F.cellOf( mx, d ) - F.offset[d] ) + 1;
+        }
+        return crosses;
+    };
+    // thread th's tetrahedron? (its x range of cells -- one more on each side, the x planes' two cells -- holds a
+    // cell of th's slabs)
+    auto ownsWindow = [&](int const th, int const iLo0, int const iHi0)
+    {
+        int const a = std::max( 0, iLo0 - 1 ), b = std::min( int(nGrid[0]), iHi0 + 1 );
+        for (int gi = a; gi < b; ++gi)
+            if ( owns( th, gi ) ) return true;
+        return false;
+    };
+    // one tetrahedron inside the region (a finite-cell iterator or a cell handle), on thread th
+    auto passCell = [&](int const th, auto const &itC)
+    {
+        McCell mc = mcVertexOrder( itC );   // the deposits' vertex order (hashed), base = vertex 0
+        double vertexMatrix[NO_DIM][NO_DIM];
+        for (int v = 0; v < NO_DIM; ++v)
+            for (int d = 0; d < NO_DIM; ++d)
+                vertexMatrix[v][d] = double( mc.v[v+1]->point()[d] ) - double( mc.v[0]->point()[d] );
+        // X: the vertices' ABSOLUTE positions, exact in double. The planes' sides are decided on these against
+        // F.plane(), ONE expression of the global plane index, so every tetrahedron sharing a vertex, in any
+        // sub-domain, computes the same signed distance, and two tetrahedra never decide a shared face lying in a
+        // grid plane differently (face_sweep.h). p: the base-relative frame, X[v] - X[0] exactly.
+        double X[4][3], p[4][3];
+        for (int v = 0; v < 4; ++v)
             for (int d = 0; d < 3; ++d)
             {
-                double mn = X[0][d], mx = X[0][d];
-                for (int v = 1; v < 4; ++v) { mn = std::min( mn, X[v][d] ); mx = std::max( mx, X[v][d] ); }
-                long g0 = F.cellOf( mn, d );                  // the first plane at or above mn
-                while ( F.plane( g0, d ) < mn ) ++g0;
-                while ( F.plane( g0 - 1, d ) >= mn ) --g0;
-                long g1 = F.cellOf( mx, d );                  // the last plane below mx
-                while ( F.plane( g1, d ) >= mx ) --g1;
-                while ( F.plane( g1 + 1, d ) < mx ) ++g1;
-                pFirst[d] = int( std::max( 0L, g0 - F.offset[d] ) );
-                pLast[d] = int( std::min( long(nGrid[d]), g1 - F.offset[d] ) );
-                crosses = crosses or pFirst[d] <= pLast[d];
-                iLo[d] = int( F.cellOf( mn, d ) - F.offset[d] );
-                iHi[d] = int( F.cellOf( mx, d ) - F.offset[d] ) + 1;
+                X[v][d] = double( mc.v[v]->point()[d] );
+                p[v][d] = v == 0 ? 0. : vertexMatrix[v-1][d];
             }
-            // a tetrahedron owning no section adds nothing to any face (its cell's faces lie outside it)
-            if ( not crosses ) continue;
-            // this thread's? (an x range of cells -- one more on each side, the x planes' two cells -- of its own)
-            if ( nT > 1 )
+        int pFirst[3], pLast[3], iLo[3], iHi[3];
+        // a tetrahedron owning no section adds nothing to any face (its cell's faces lie outside it)
+        if ( not planeWindow( X, pFirst, pLast, iLo, iHi ) ) return;
+        if ( nT > 1 and not ownsWindow( th, iLo[0], iHi[0] ) ) return;
+        // the gradient in double, from the double inverse (not the float rounding of the labelling)
+        double posInv[NO_DIM][NO_DIM];
+        matrixInverseDouble( vertexMatrix, posInv );
+        double velGrad[NO_DIM][noVelComp];
+        velocityGradDouble( mc, posInv, velGrad );
+        double vb[noVelComp];
+        for (size_t j = 0; j < noVelComp; ++j) vb[j] = double( mc.v[0]->info().velocity(j) );
+        if ( degenerate )
+        {
+            bool zero = true;
+            for (int i = 0; i < 3 and zero; ++i)
+                for (int j = 0; j < 3 and zero; ++j) zero = posInv[i][j] == 0.;
+            if ( zero )
+                for (int i = std::max( 0, iLo[0] - 1 ); i < std::min( int(nGrid[0]), iHi[0] + 1 ); ++i)
+                    if ( owns( th, i ) )
+                        for (int j = std::max( 0, iLo[1] - 1 ); j < std::min( int(nGrid[1]), iHi[1] + 1 ); ++j)
+                            for (int k = std::max( 0, iLo[2] - 1 ); k < std::min( int(nGrid[2]), iHi[2] + 1 ); ++k)
+                                (*degenerate)[flat( i, j, k )] = 1;
+        }
+        for (int a = 0; a < 3; ++a)
+        {
+            int u, w;
+            faceSweep::planeAxes( a, u, w );
+            int win0[2] = { std::max( 0, iLo[u] ), std::max( 0, iLo[w] ) };
+            int win1[2] = { std::min( int(nGrid[u]), iHi[u] ), std::min( int(nGrid[w]), iHi[w] ) };
+            for (int pl = pFirst[a]; pl <= pLast[a]; ++pl)
             {
-                int const a = std::max( 0, iLo[0] - 1 ), b = std::min( int(nGrid[0]), iHi[0] + 1 );
-                bool mine = false;
-                for (int gi = a; gi < b and not mine; ++gi) mine = owns( th, gi );
-                if ( not mine ) continue;
-            }
-            // the gradient in double, from the double inverse (not the float rounding of the labelling)
-            double posInv[NO_DIM][NO_DIM];
-            matrixInverseDouble( vertexMatrix, posInv );
-            double velGrad[NO_DIM][noVelComp];
-            velocityGradDouble( mc, posInv, velGrad );
-            double vb[noVelComp];
-            for (size_t j = 0; j < noVelComp; ++j) vb[j] = double( mc.v[0]->info().velocity(j) );
-            if ( degenerate )
-            {
-                bool zero = true;
-                for (int i = 0; i < 3 and zero; ++i)
-                    for (int j = 0; j < 3 and zero; ++j) zero = posInv[i][j] == 0.;
-                if ( zero )
-                    for (int i = std::max( 0, iLo[0] - 1 ); i < std::min( int(nGrid[0]), iHi[0] + 1 ); ++i)
-                        if ( owns( th, i ) )
-                            for (int j = std::max( 0, iLo[1] - 1 ); j < std::min( int(nGrid[1]), iHi[1] + 1 ); ++j)
-                                for (int k = std::max( 0, iLo[2] - 1 ); k < std::min( int(nGrid[2]), iHi[2] + 1 ); ++k)
-                                    (*degenerate)[flat( i, j, k )] = 1;
-            }
-            for (int a = 0; a < 3; ++a)
-            {
-                int u, w;
-                faceSweep::planeAxes( a, u, w );
-                int win0[2] = { std::max( 0, iLo[u] ), std::max( 0, iLo[w] ) };
-                int win1[2] = { std::min( int(nGrid[u]), iHi[u] ), std::min( int(nGrid[w]), iHi[w] ) };
-                for (int pl = pFirst[a]; pl <= pLast[a]; ++pl)
-                {
-                    // an x plane: its two cells' slabs; a y or z plane: its strips' (in-plane u = x, below)
-                    if ( a == 0 and nT > 1 and not ( ( pl > 0 and owns( th, pl - 1 ) ) or ( pl < int(nGrid[0]) and owns( th, pl ) ) ) )
-                        continue;
-                    double const P = F.plane( long(pl) + F.offset[a], a );
-                    double dist[4];
-                    for (int v = 0; v < 4; ++v) dist[v] = X[v][a] - P;
-                    faceSweep::Polygon sec;
-                    if ( not faceSweep::section( p, a, dist, sec ) ) continue;
-                    double const c = P - X[0][a];                    // the plane in the base-relative frame
-                    faceSweep::sweep( sec, win0, win1,
-                        [&](int const k, int const g, double &blo, double &bhi)
+                // an x plane: its two cells' slabs; a y or z plane: its strips' (in-plane u = x, below)
+                if ( a == 0 and nT > 1 and not ( ( pl > 0 and owns( th, pl - 1 ) ) or ( pl < int(nGrid[0]) and owns( th, pl ) ) ) )
+                    continue;
+                double const P = F.plane( long(pl) + F.offset[a], a );
+                double dist[4];
+                for (int v = 0; v < 4; ++v) dist[v] = X[v][a] - P;
+                faceSweep::Polygon sec;
+                if ( not faceSweep::section( p, a, dist, sec ) ) continue;
+                double const c = P - X[0][a];                    // the plane in the base-relative frame
+                faceSweep::sweep( sec, win0, win1,
+                    [&](int const k, int const g, double &blo, double &bhi)
+                    {
+                        int const ax = k == 0 ? u : w;
+                        blo = F.plane( long(g) + F.offset[ax], ax ) - X[0][ax];
+                        bhi = F.plane( long(g) + 1 + F.offset[ax], ax ) - X[0][ax];
+                    },
+                    [&](int const k, int const g) -> long
+                    { return ( k == 0 and u == 0 and nT > 1 and not owns( th, g ) ) ? -1 : g; },
+                    [&](int const *g, long const *, double const m[3])
+                    {
+                        double q[3];
+                        q[a] = c; q[u] = m[1] / m[0]; q[w] = m[2] / m[0];
+                        double Fj[noVelComp];   // the piece's flux of each velocity component
+                        for (size_t j = 0; j < noVelComp; ++j)
                         {
-                            int const ax = k == 0 ? u : w;
-                            blo = F.plane( long(g) + F.offset[ax], ax ) - X[0][ax];
-                            bhi = F.plane( long(g) + 1 + F.offset[ax], ax ) - X[0][ax];
-                        },
-                        [&](int const k, int const g) -> long
-                        { return ( k == 0 and u == 0 and nT > 1 and not owns( th, g ) ) ? -1 : g; },
-                        [&](int const *g, long const *, double const m[3])
-                        {
-                            double q[3];
-                            q[a] = c; q[u] = m[1] / m[0]; q[w] = m[2] / m[0];
-                            double Fj[noVelComp];   // the piece's flux of each velocity component
+                            double vj = vb[j];
+                            for (int i = 0; i < 3; ++i) vj += velGrad[i][j] * q[i];
+                            Fj[j] = vj * m[0];
+                        }
+                        // ... as one integer at the face unit (words): in 64 bits below wordFast (Fs, nearly
+                        // every flux), else in 128 (Fq), or none (a NaN, an infinity: Fk 0)
+                        int64_t Fs[noVelComp] = {};
+                        __int128 Fq[noVelComp] = {};
+                        unsigned char Fk[noVelComp] = {};   // 0 none, 1 Fs, 2 Fq
+                        if ( words )
                             for (size_t j = 0; j < noVelComp; ++j)
                             {
-                                double vj = vb[j];
-                                for (int i = 0; i < 3; ++i) vj += velGrad[i][j] * q[i];
-                                Fj[j] = vj * m[0];
+                                double const p = Fj[j] * wordScale;
+                                if ( std::fabs( p ) < wordFast ) { Fs[j] = int64_t( std::llrint( p ) ); Fk[j] = 1; }
+                                else if ( fxShare( p, wordCap, Fq[j] ) ) Fk[j] = 2;
                             }
-                            // ... as one integer at the face unit (words): in 64 bits below wordFast (Fs, nearly
-                            // every flux), else in 128 (Fq), or none (a NaN, an infinity: Fk 0)
-                            int64_t Fs[noVelComp] = {};
-                            __int128 Fq[noVelComp] = {};
-                            unsigned char Fk[noVelComp] = {};   // 0 none, 1 Fs, 2 Fq
+                        int cell[3];
+                        cell[u] = g[0]; cell[w] = g[1];
+                        for (int side = 0; side < 2; ++side)   // the cell below the plane (+), the cell above (-)
+                        {
+                            cell[a] = side == 0 ? pl - 1 : pl;
+                            if ( cell[a] < 0 or cell[a] >= int(nGrid[a]) ) continue;
+                            if ( nT > 1 and not owns( th, cell[0] ) ) continue;
                             if ( words )
+                            {   // (a flux left out counts once per add: each add is one thread's, at any count)
+                                size_t const at = flat( cell[0], cell[1], cell[2] ) * noGradComp + size_t(a);
                                 for (size_t j = 0; j < noVelComp; ++j)
                                 {
-                                    double const p = Fj[j] * wordScale;
-                                    if ( std::fabs( p ) < wordFast ) { Fs[j] = int64_t( std::llrint( p ) ); Fk[j] = 1; }
-                                    else if ( fxShare( p, wordCap, Fq[j] ) ) Fk[j] = 2;
+                                    if ( Fk[j] == 0 ) { fixedShareDropped( AVG1_FACE_DROP_SLOT ); continue; }
+                                    size_t const k = at + j*NO_DIM;
+                                    if ( Fk[j] == 1 )
+                                        fxAddOwned64( words->w[k], side == 0 ? Fs[j] : -Fs[j], uint64_t( k ),
+                                                      lists[size_t( th )] );
+                                    else
+                                        fxAddOwned( words->w[k], side == 0 ? Fq[j] : -Fq[j], uint64_t( k ),
+                                                    lists[size_t( th )] );
                                 }
-                            int cell[3];
-                            cell[u] = g[0]; cell[w] = g[1];
-                            for (int side = 0; side < 2; ++side)   // the cell below the plane (+), the cell above (-)
-                            {
-                                cell[a] = side == 0 ? pl - 1 : pl;
-                                if ( cell[a] < 0 or cell[a] >= int(nGrid[a]) ) continue;
-                                if ( nT > 1 and not owns( th, cell[0] ) ) continue;
-                                if ( words )
-                                {   // (a flux left out counts once per add: each add is one thread's, at any count)
-                                    size_t const at = flat( cell[0], cell[1], cell[2] ) * noGradComp + size_t(a);
-                                    for (size_t j = 0; j < noVelComp; ++j)
-                                    {
-                                        if ( Fk[j] == 0 ) { fixedShareDropped( AVG1_FACE_DROP_SLOT ); continue; }
-                                        size_t const k = at + j*NO_DIM;
-                                        if ( Fk[j] == 1 )
-                                            fxAddOwned64( words->w[k], side == 0 ? Fs[j] : -Fs[j], uint64_t( k ),
-                                                          lists[size_t( th )] );
-                                        else
-                                            fxAddOwned( words->w[k], side == 0 ? Fq[j] : -Fq[j], uint64_t( k ),
-                                                        lists[size_t( th )] );
-                                    }
-                                    continue;
-                                }
-                                double *out = &acc[flat( cell[0], cell[1], cell[2] ) * noGradComp];
-                                for (size_t j = 0; j < noVelComp; ++j)
-                                    out[j*NO_DIM + size_t(a)] += side == 0 ? Fj[j] : -Fj[j];
+                                continue;
                             }
-                        } );
-                }
+                            double *out = &acc[flat( cell[0], cell[1], cell[2] ) * noGradComp];
+                            for (size_t j = 0; j < noVelComp; ++j)
+                                out[j*NO_DIM + size_t(a)] += side == 0 ? Fj[j] : -Fj[j];
+                        }
+                    } );
             }
         }
     };
     if ( nT == 1 )
-        pass( 0 );
+    {
+        for (Finite_cells_iterator itC = dt.finite_cells_begin(); itC != dt.finite_cells_end(); ++itC)
+            if ( not cellOutsideRegion( dt, itC, fullBox ) )
+                passCell( 0, itC );
+    }
     else
     {
-        std::vector<std::thread> pool;
-        for (int th = 1; th < nT; ++th) pool.emplace_back( pass, th );
-        pass( 0 );
-        for (std::thread &x : pool) x.join();
+        // the tetrahedra inside the region that cross a plane, in walk order, with their x window (one list per block
+        // of the walk, the blocks listed at once); each thread then takes those of its slabs, in that order
+        struct FaceEntry { Cell_handle c; int iLo0, iHi0; };
+        std::vector<Finite_cells_iterator> const blockStart = avg1CellBlocks( dt );
+        Finite_cells_iterator const cellsEnd = dt.finite_cells_end();
+        std::vector< std::vector<FaceEntry> > crossing( blockStart.size() );
+        avg1ForBlocks( nT, blockStart.size(), [&](size_t const b) {
+            Finite_cells_iterator itC = blockStart[b];
+            for (size_t j = 0; j < kAvg1Block and itC != cellsEnd; ++j, ++itC)
+            {
+                if ( cellOutsideRegion( dt, itC, fullBox ) )
+                    continue;
+                double X[4][3];
+                for (int v = 0; v < 4; ++v)
+                    for (int d = 0; d < 3; ++d) X[v][d] = double( itC->vertex(v)->point()[d] );
+                int pFirst[3], pLast[3], iLo[3], iHi[3];
+                if ( planeWindow( X, pFirst, pLast, iLo, iHi ) )
+                    crossing[b].push_back( FaceEntry{ Cell_handle( itC ), iLo[0], iHi[0] } );
+            } } );
+        // the x cells dealt out in nT contiguous ranges of about equal work (the crossing tetrahedra, each counted at
+        // the middle of its window), so that only the tetrahedra at the nT - 1 cuts are sectioned by two threads
+        size_t const nx = nGrid[0];
+        std::vector<size_t> work( nx, 0 );
+        size_t total = 0;
+        for (std::vector<FaceEntry> const &block : crossing)
+            for (FaceEntry const &e : block)
+            {
+                long const mid = std::max( 0L, std::min( long(nx) - 1, ( long(e.iLo0) + long(e.iHi0) - 1 ) / 2 ) );
+                ++work[size_t(mid)];
+                ++total;
+            }
+        ownerOf.assign( nx, nT - 1 );
+        {
+            size_t done = 0;
+            int th = 0;
+            for (size_t gi = 0; gi < nx; ++gi)
+            {
+                while ( th < nT - 1 and done >= total * size_t( th + 1 ) / size_t( nT ) ) ++th;
+                ownerOf[gi] = th;
+                done += work[gi];
+            }
+        }
+        avg1OnThreads( nT, [&](int const th) {
+            for (std::vector<FaceEntry> const &block : crossing)
+                for (FaceEntry const &e : block)
+                    if ( ownsWindow( th, e.iLo0, e.iHi0 ) )
+                        passCell( th, e.c ); } );
     }
     if ( words ) fxCarryFinish( *words, lists, "the face gradient ('--face-gradient')" );
 }
+
+// The face pass beside the GPU deposit (interpolateGrid_averaged_1): avg1FacePass on a thread of its own while the
+// caller waits in the device call, joined right after that call. The pass reads the tessellation and writes its own
+// sums only, which the device call does not touch, and the sums do not depend on the deposit: they stand whatever the
+// call does (after a failed call the CPU deposit runs, and the sums are kept). A thread the system refuses, or one
+// without the memory to start, leaves 'started' false: the pass then runs after the deposit. The destructor joins, so
+// an exception on the caller's thread cannot leave the pass running on a tessellation being torn down.
+struct Avg1FaceBeside
+{
+    std::thread th;
+    std::exception_ptr error;
+    double sec = 0.;        // the pass's wall time
+    bool started = false;
+    Avg1FaceBeside() = default;
+    Avg1FaceBeside(Avg1FaceBeside const &) = delete;
+    Avg1FaceBeside &operator=(Avg1FaceBeside const &) = delete;
+    ~Avg1FaceBeside() { if ( th.joinable() ) th.join(); }
+    template <typename Pass>
+    void start(Pass const &pass)
+    {
+        try
+        {
+            th = std::thread( [this, &pass]
+            {
+                try
+                {
+                    auto const t0 = std::chrono::steady_clock::now();
+                    pass();
+                    sec = std::chrono::duration<double>( std::chrono::steady_clock::now() - t0 ).count();
+                }
+                catch (...) { error = std::current_exception(); }
+            } );
+            started = true;
+        }
+        catch (std::system_error const &) { started = false; }
+        catch (std::bad_alloc const &) { started = false; }
+    }
+    // waits for the pass; an exception it met is thrown here, on the caller's thread
+    void join()
+    {
+        if ( th.joinable() ) th.join();
+        if ( error ) std::rethrow_exception( error );
+    }
+};
 #endif
 
 // Volume-averaged grid interpolation (method 1): quasi-Monte-Carlo sampling inside each Delaunay cell,
@@ -1670,6 +1817,28 @@ void interpolateGrid_averaged_1(DT &dt,
         for (int j=0; j<NO_DIM; ++j)
             c[j] = 1./double(NO_DIM+1) - prefixSum[n*NO_DIM+j] / double(n); };
 
+#if NO_DIM==3 && defined(VELOCITY) && !defined(MY_SCALAR)
+    // --face-gradient: the face pass (avg1FacePass) and its sums. With the GPU deposit it runs beside the device call
+    // (Avg1FaceBeside), otherwise after the deposit, below; DTFE_FACE_CHECK compares its sums with the deposit's
+    // gradient, so there it runs after the deposit too. The sums: the run-wide words at the face unit (fixed_units.h
+    // RU_FACE), whatever the deposit -- exact, Monte-Carlo or GPU -- so every route gives the same face gradient
+    // (avg1RunWords: the single build); otherwise the double sums.
+    bool const faceOn = userOptions.faceGradient and ( field.velocity_gradient or faceSuppliesGradient );
+    bool const faceCheck = Env::flag( "DTFE_FACE_CHECK" );
+    RunUnits const &ru = userOptions.runUnits;
+    bool const faceOnWords = avg1RunWords( userOptions ) and ru.has( RU_FACE );
+    std::vector<double> faceAcc;
+    std::vector<unsigned char> faceDegen;
+    FxWords faceWords;
+    faceWords.K = ru.K[RU_FACE];
+    // (its threads counted here, on the caller's thread: a thread of the pass's own is outside the partition's OpenMP
+    // team, which coresPerTeam divides the cores by)
+    int const faceThreads = exactAverageThreads();
+    auto facePass = [&]() {
+        avg1FacePass( dt, frame, fullBoxExact, nGrid, faceThreads, faceAcc, faceCheck ? &faceDegen : nullptr,
+                      faceOnWords ? &faceWords : nullptr, ru.cap( RU_FACE ) ); };
+    Avg1FaceBeside faceBeside;
+#endif
 
     // GPU deposit (--gpu, GPU build): extract flat per-tetrahedron arrays using the CPU
     // loop's own helpers (classification, sample counts, volumes -- so both paths make identical
@@ -1694,10 +1863,6 @@ void interpolateGrid_averaged_1(DT &dt,
 #endif
         bool const needScal = fScal or fSGrad;
 
-        // reserve for all finite cells (upper bound; a counting pre-pass would cost a full extra
-        // CGAL cell walk, which measures comparably to the whole extraction -- the padded fraction
-        // outside the region is small for standard-DTFE partitions, unlike the PS Lagrangian ones)
-        size_t const nKept = dt.number_of_finite_cells();
         // the single-cell share's volume (the exact kernel reads a tetrahedron's volume only there):
         // canonicalTetVolume, the same whatever CGAL's labelling of the cell, where the CPU's exact sums take the
         // run-wide words too (avg1RunWords: the single build); CGAL's otherwise, and for the sample count
@@ -1706,8 +1871,6 @@ void interpolateGrid_averaged_1(DT &dt,
         std::vector<float>    tetVerts, tetDens, tetVels, tetScal, tetVols;
         std::vector<uint32_t> tetCnts, tetFlats, tetKeys;
         std::vector<int32_t>  tetCells;
-        tetVerts.reserve( nKept*12 );
-        tetKeys.reserve( nKept );
         // Morton key of a grid cell (sub-grid coordinates clamped into the grid; axes coarsened to
         // <= 1024 cells so 3 x 10 bits suffice)
         int mortonShift = 0;
@@ -1724,19 +1887,19 @@ void interpolateGrid_averaged_1(DT &dt,
                 key |= spread( uint32_t(c >> mortonShift) ) << d;
             }
             return key; };
-        tetDens.reserve( nKept*4 );
-        if ( needVel ) tetVels.reserve( nKept*12 );
-        if ( needScal ) tetScal.reserve( nKept*4 );
-        tetVols.reserve( nKept );
-        tetCnts.reserve( nKept );
-        tetFlats.reserve( nKept );
-        tetCells.reserve( nKept*NO_DIM );
 
-        for (Finite_cells_iterator itC = dt.finite_cells_begin(); itC != dt.finite_cells_end(); ++itC)
+        // One tetrahedron's entries of the arrays (makeRecord, from a cell inside the region), and the grid cells its
+        // dummy-point flags reach (TEST_PADDING: into incD / incF, the density's and the other fields' lists)
+        struct TetRecord
         {
-            if ( cellOutsideRegion(dt, itC, depositBox) )
-                continue;
-
+            float verts[(NO_DIM+1)*NO_DIM], dens[NO_DIM+1], vels[(NO_DIM+1)*noVelComp], scal[NO_DIM+1], vol;
+            int32_t cell[NO_DIM];
+            uint32_t cnt, flat, key;
+        };
+        size_t const wVerts = (NO_DIM+1)*NO_DIM, wDens = NO_DIM+1, wVels = (NO_DIM+1)*noVelComp, wScal = NO_DIM+1;
+        auto makeRecord = [&](Finite_cells_iterator itC, TetRecord &r, std::vector<size_t> *incD, std::vector<size_t> *incF)
+        {
+            (void)incD; (void)incF;
             // the CPU loop's vertex order (mcVertexOrder: the hashed order); the kernels take vertex 0 as the base,
             // in the order given
             McCell mc = mcVertexOrder( itC );
@@ -1786,24 +1949,24 @@ void interpolateGrid_averaged_1(DT &dt,
             // CPU's Real basePosition exactly), cell 0
             for (int v=0; v<NO_DIM+1; ++v)
                 for (int d=0; d<NO_DIM; ++d)
-                    tetVerts.push_back( float( double(mc.v[v]->point()[d]) - ( exactAvg ? tf.corner[d] : double(boxCoordinates[2*d]) ) ) );
+                    r.verts[v*NO_DIM+d] = float( double(mc.v[v]->point()[d]) - ( exactAvg ? tf.corner[d] : double(boxCoordinates[2*d]) ) );
             for (int d=0; d<NO_DIM; ++d)
-                tetCells.push_back( exactAvg ? int32_t(tf.cell[d]) : 0 );
+                r.cell[d] = exactAvg ? int32_t(tf.cell[d]) : 0;
             if ( centreThis )
             {
                 double f[NO_DIM+1];
                 for (int v=0; v<NO_DIM+1; ++v) f[v] = double( mc.v[v]->info().density() );
                 double const c = shiftOf( f );
-                for (int v=0; v<NO_DIM+1; ++v) tetDens.push_back( float(f[v] + c) );
+                for (int v=0; v<NO_DIM+1; ++v) r.dens[v] = float(f[v] + c);
             }
             else
                 for (int v=0; v<NO_DIM+1; ++v)
-                    tetDens.push_back( float(mc.v[v]->info().density()) );
+                    r.dens[v] = float(mc.v[v]->info().density());
             // DTFE_TEST_NAN_SHARE (ps_deposit_params.h): this tetrahedron's vertex densities NaN, so the
             // kernel's density shares of it are NaN and the non-finite guard drops and counts them
             if ( fixedShareTestNanEvery() and fixedShareTestNan( double(mc.v[0]->point()[0]), double(mc.v[0]->point()[1]),
                                                                  double(mc.v[0]->point()[2]) ) )
-                for (int v=0; v<NO_DIM+1; ++v) tetDens[tetDens.size() - 1 - size_t(v)] = std::numeric_limits<float>::quiet_NaN();
+                for (int v=0; v<NO_DIM+1; ++v) r.dens[v] = std::numeric_limits<float>::quiet_NaN();
 #ifdef VELOCITY
             if ( needVel )
             {
@@ -1817,8 +1980,8 @@ void interpolateGrid_averaged_1(DT &dt,
                     }
                 for (int v=0; v<NO_DIM+1; ++v)
                     for (size_t j=0; j<noVelComp; ++j)
-                        tetVels.push_back( centreThis ? float( double(mc.v[v]->info().velocity(j)) + c[j] )
-                                                      : float( mc.v[v]->info().velocity(j) ) );
+                        r.vels[size_t(v)*noVelComp+j] = centreThis ? float( double(mc.v[v]->info().velocity(j)) + c[j] )
+                                                                   : float( mc.v[v]->info().velocity(j) );
             }
 #endif
 #ifdef SCALAR
@@ -1828,16 +1991,13 @@ void interpolateGrid_averaged_1(DT &dt,
                 for (int v=0; v<NO_DIM+1; ++v) f[v] = double( mc.v[v]->info().myScalar()[0] );
                 double const c = centreThis ? shiftOf( f ) : 0.;
                 for (int v=0; v<NO_DIM+1; ++v)
-                    tetScal.push_back( centreThis ? float(f[v] + c) : float(mc.v[v]->info().myScalar()[0]) );
+                    r.scal[v] = centreThis ? float(f[v] + c) : float(mc.v[v]->info().myScalar()[0]);
             }
 #endif
-            if ( canonicalVolumes and cnt == 0 )
-                tetVols.push_back( float( canonicalTetVolume( itC ) ) );
-            else
-                tetVols.push_back( float(cellVolume) );
-            tetCnts.push_back( cnt );
-            tetFlats.push_back( flat );
-            tetKeys.push_back( mortonKey( baseGridCell ) );
+            r.vol = ( canonicalVolumes and cnt == 0 ) ? float( canonicalTetVolume( itC ) ) : float(cellVolume);
+            r.cnt = cnt;
+            r.flat = flat;
+            r.key = mortonKey( baseGridCell );
 
 #ifdef TEST_PADDING
             // the GPU deposits this tetrahedron's field values; replicate only the dummy-cell
@@ -1848,8 +2008,8 @@ void interpolateGrid_averaged_1(DT &dt,
             {
                 if ( cnt==0 )
                 {
-                    if ( dummyNeighbors ) updateDummyGridCells( size_t(flat), &incompleteCells_d );
-                    if ( dummyVertices ) updateDummyGridCells( size_t(flat), &incompleteCells );
+                    if ( dummyNeighbors ) updateDummyGridCells( size_t(flat), incD );
+                    if ( dummyVertices ) updateDummyGridCells( size_t(flat), incF );
                 }
                 else
                 {
@@ -1858,11 +2018,109 @@ void interpolateGrid_averaged_1(DT &dt,
                     for (size_t i=0; i<cnt; ++i)
                         if ( isGridCellIndex( nGrid, dx, randomPoints[i], basePosition, &index ) )
                         {
-                            if ( dummyNeighbors ) updateDummyGridCells( index, &incompleteCells_d );
-                            if ( dummyVertices ) updateDummyGridCells( index, &incompleteCells );
+                            if ( dummyNeighbors ) updateDummyGridCells( index, incD );
+                            if ( dummyVertices ) updateDummyGridCells( index, incF );
                         }
                 }
             }
+#endif
+        };
+
+        /* The walk over the cells, in CGAL's order. On one thread (a sub-domain of a team): one pass that appends each
+           record, the arrays reserved for all finite cells (an upper bound, untouched beyond what is used). On a whole
+           tessellation's threads (exactAverageThreads): the walk's blocks (avg1CellBlocks), one pass counting each
+           block's cells inside the region, then each block's records written at its offset, the blocks taken by the
+           threads in turn -- the arrays, and the dummy lists joined in block order, are those of the one-thread walk. */
+        int const nWalk = exactAverageThreads();
+#ifdef TEST_PADDING
+        std::vector<size_t> *const walkD = &incompleteCells_d, *const walkF = &incompleteCells;
+#else
+        std::vector<size_t> *const walkD = nullptr, *const walkF = nullptr;
+#endif
+        Timer tExtract; tExtract.start();
+        if ( nWalk <= 1 )
+        {
+            size_t const nKept = dt.number_of_finite_cells();
+            tetVerts.reserve( nKept*wVerts );
+            tetDens.reserve( nKept*wDens );
+            if ( needVel ) tetVels.reserve( nKept*wVels );
+            if ( needScal ) tetScal.reserve( nKept*wScal );
+            tetVols.reserve( nKept );
+            tetCnts.reserve( nKept );
+            tetFlats.reserve( nKept );
+            tetKeys.reserve( nKept );
+            tetCells.reserve( nKept*NO_DIM );
+            TetRecord r;
+            for (Finite_cells_iterator itC = dt.finite_cells_begin(); itC != dt.finite_cells_end(); ++itC)
+            {
+                if ( cellOutsideRegion(dt, itC, depositBox) )
+                    continue;
+                makeRecord( itC, r, walkD, walkF );
+                tetVerts.insert( tetVerts.end(), r.verts, r.verts + wVerts );
+                tetCells.insert( tetCells.end(), r.cell, r.cell + NO_DIM );
+                tetDens.insert( tetDens.end(), r.dens, r.dens + wDens );
+                if ( needVel ) tetVels.insert( tetVels.end(), r.vels, r.vels + wVels );
+                if ( needScal ) tetScal.insert( tetScal.end(), r.scal, r.scal + wScal );
+                tetVols.push_back( r.vol );
+                tetCnts.push_back( r.cnt );
+                tetFlats.push_back( r.flat );
+                tetKeys.push_back( r.key );
+            }
+        }
+        else
+        {
+            std::vector<Finite_cells_iterator> const blockStart = avg1CellBlocks( dt );
+            Finite_cells_iterator const cellsEnd = dt.finite_cells_end();
+            size_t const nBlocks = blockStart.size();
+            std::vector<size_t> offset( nBlocks + 1, 0 );   // the records before block b
+            avg1ForBlocks( nWalk, nBlocks, [&](size_t const b) {
+                Finite_cells_iterator itC = blockStart[b];
+                size_t n = 0;
+                for (size_t j = 0; j < kAvg1Block and itC != cellsEnd; ++j, ++itC)
+                    if ( not cellOutsideRegion( dt, itC, depositBox ) ) ++n;
+                offset[b+1] = n; } );
+            for (size_t b = 0; b < nBlocks; ++b) offset[b+1] += offset[b];
+            size_t const nTet = offset[nBlocks];
+            tetVerts.resize( nTet*wVerts );
+            tetDens.resize( nTet*wDens );
+            if ( needVel ) tetVels.resize( nTet*wVels );
+            if ( needScal ) tetScal.resize( nTet*wScal );
+            tetVols.resize( nTet );
+            tetCnts.resize( nTet );
+            tetFlats.resize( nTet );
+            tetKeys.resize( nTet );
+            tetCells.resize( nTet*NO_DIM );
+            std::vector< std::vector<size_t> > blockD( nBlocks ), blockF( nBlocks );   // (TEST_PADDING)
+            avg1ForBlocks( nWalk, nBlocks, [&](size_t const b) {
+                Finite_cells_iterator itC = blockStart[b];
+                size_t k = offset[b];
+                TetRecord r;
+                for (size_t j = 0; j < kAvg1Block and itC != cellsEnd; ++j, ++itC)
+                {
+                    if ( cellOutsideRegion( dt, itC, depositBox ) )
+                        continue;
+                    makeRecord( itC, r, &blockD[b], &blockF[b] );
+                    std::copy( r.verts, r.verts + wVerts, tetVerts.begin() + std::ptrdiff_t( k*wVerts ) );
+                    std::copy( r.cell, r.cell + NO_DIM, tetCells.begin() + std::ptrdiff_t( k*NO_DIM ) );
+                    std::copy( r.dens, r.dens + wDens, tetDens.begin() + std::ptrdiff_t( k*wDens ) );
+                    if ( needVel ) std::copy( r.vels, r.vels + wVels, tetVels.begin() + std::ptrdiff_t( k*wVels ) );
+                    if ( needScal ) std::copy( r.scal, r.scal + wScal, tetScal.begin() + std::ptrdiff_t( k*wScal ) );
+                    tetVols[k] = r.vol;
+                    tetCnts[k] = r.cnt;
+                    tetFlats[k] = r.flat;
+                    tetKeys[k] = r.key;
+                    ++k;
+                } } );
+#ifdef TEST_PADDING
+            // the blocks' flagged cells in walk order, each skipping a repeat of the one before (updateDummyGridCells),
+            // as the one-thread walk appends them
+            for (size_t b = 0; b < nBlocks; ++b)
+            {
+                for (size_t const g : blockD[b]) updateDummyGridCells( g, walkD );
+                for (size_t const g : blockF[b]) updateDummyGridCells( g, walkF );
+            }
+#else
+            (void)walkD; (void)walkF;
 #endif
         }
 
@@ -1870,10 +2128,24 @@ void interpolateGrid_averaged_1(DT &dt,
                         needScal, mortonShift, tetVerts, tetDens, tetVels, tetScal, tetVols, tetCnts, tetFlats, tetKeys,
                         tetCells, { exactAvg ? frame.dxG[0] : double(dx[0]), exactAvg ? frame.dxG[1] : double(dx[1]),
                                     exactAvg ? frame.dxG[2] : double(dx[2]) } };
-        avg1MortonOrder( gpu );
+        printComputationTime( &tExtract, &userOptions, "GPU deposit: the tetrahedra's arrays (extraction)" );
+        Timer tOrder; tOrder.start();
+        avg1MortonOrder( gpu, nWalk );
+        printComputationTime( &tOrder, &userOptions, "GPU deposit: the tetrahedra's Morton order" );
+#if NO_DIM==3 && defined(VELOCITY) && !defined(MY_SCALAR)
+        if ( faceOn and not faceCheck ) faceBeside.start( facePass );
+#endif
         Timer tGpu; tGpu.start();
         metalDeposited = avg1GpuDispatch( gpu, grids, quasiRandomNumbers_buf );
         printComputationTime( &tGpu, &userOptions, "GPU deposit (upload, dispatch, read-back)" );   // (phase_totals.h)
+#if NO_DIM==3 && defined(VELOCITY) && !defined(MY_SCALAR)
+        if ( faceBeside.started )
+        {   // what is left of the pass after the device call: the caller's time (the rest ran beside the call)
+            Timer tWait; tWait.start();
+            faceBeside.join();
+            printComputationTime( &tWait, &userOptions, "face gradient pass: wait after the GPU deposit" );
+        }
+#endif
     }
 #else
     avg1NoGpuWarning( userOptions );
@@ -2176,28 +2448,27 @@ void interpolateGrid_averaged_1(DT &dt,
     // --face-gradient: the velocity gradient's cell integrals from the faces (avg1FacePass) replace the deposit's;
     // DTFE_FACE_CHECK=1 first compares them (one 'FACE-CHECK' line on stderr per call, i.e. per sub-domain)
     if ( faceSuppliesGradient ) field.velocity_gradient = true;   // (the deposits skipped it; see the top)
-    if ( userOptions.faceGradient and field.velocity_gradient )
+    if ( faceOn )
     {
-        int const nTf = exactAverageThreads();
-        int const slabWf = std::max( 1, int( nGrid[0] / size_t( 8 * nTf ) ) );
-        bool const check = Env::flag( "DTFE_FACE_CHECK" );
-        std::vector<double> acc;
-        std::vector<unsigned char> degen;
-        // the run-wide words at the face unit (fixed_units.h RU_FACE), whatever the deposit -- exact, Monte-Carlo or
-        // GPU -- so every route gives the same face gradient (avg1RunWords: the single build); otherwise the double
-        // sums
-        RunUnits const &ru = userOptions.runUnits;
-        bool const faceOnWords = avg1RunWords( userOptions ) and ru.has( RU_FACE );
-        FxWords faceWords;
-        faceWords.K = ru.K[RU_FACE];
-        Timer tFace; tFace.start();
-        avg1FacePass( dt, frame, fullBoxExact, nGrid, nTf, slabWf, acc, check ? &degen : nullptr,
-                      faceOnWords ? &faceWords : nullptr, ru.cap( RU_FACE ) );
-        printComputationTime( &tFace, &userOptions, "face gradient pass (--face-gradient)" );   // (phase_totals.h)
+        std::vector<double> &acc = faceAcc;
+        std::vector<unsigned char> &degen = faceDegen;
+        if ( faceBeside.started )   // (beside the GPU call: its own wall time, of which only the wait was the caller's)
+        {
+            PhaseTotals::add( "face gradient pass (--face-gradient)", faceBeside.sec );
+            message << MESSAGE::cGreen() << "  >>> Time: " << faceBeside.sec
+                    << " sec. (face gradient pass (--face-gradient), beside the GPU deposit)" << MESSAGE::cReset() << "\n"
+                    << MESSAGE::Flush;
+        }
+        else
+        {
+            Timer tFace; tFace.start();
+            facePass();
+            printComputationTime( &tFace, &userOptions, "face gradient pass (--face-gradient)" );   // (phase_totals.h)
+        }
         // component i's integral in double: from the words (their exact integer, rounded once), or the double sum
         auto faceAt = [&](size_t const i) -> double
         { return faceOnWords ? fxToReal<double>( fxValue( faceWords, i ), faceWords.K ) : acc[i]; };
-        if ( check )
+        if ( faceCheck )
         {
             // relative to the rms of the deposit's integrals over all cells and components
             double ss = 0.;

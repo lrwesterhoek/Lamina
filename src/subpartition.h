@@ -77,7 +77,22 @@ void findParticlesInBoxLagrangianPeriodic(std::vector<Particle_data> &p,
 {
     MESSAGE::Message message( verboseLevel );
     message << "Finding particles (with on-the-fly periodic images) with Lagrangian positions in box " << paddedBox.print() << " ... " << MESSAGE::Flush;
-    output->reserve( p.size() / 4 );  // rough estimate
+    // the reserve: the padded box's share of the particles, whose Lagrangian positions fill their extent nearly
+    // uniformly, and a margin (a quarter of them without the extent). A quarter of 94M particles is a 1.3 GB array:
+    // under '--scratch-dir' a scratch file per partition, for the 1-2% of the particles a 6x6x6 partition selects.
+    size_t guess = p.size() / 4;
+    if ( lagExtent )
+    {
+        double share = 1.;
+        for (int d = 0; d < NO_DIM; ++d)
+        {
+            double const span = double( lagExtent[2*d+1] ) - double( lagExtent[2*d] );
+            double const width = double( paddedBox.coords[2*d+1] ) - double( paddedBox.coords[2*d] );
+            if ( span > 0. ) share *= std::min( periodic ? 3. : 1., std::max( 0., width / span ) );
+        }
+        guess = std::min( size_t( 1.15 * share * double( p.size() ) ) + 1024, p.size() * ( periodic ? 27u : 1u ) );
+    }
+    output->reserve( guess );
 
     size_t const noOffsets = periodic ? (NO_DIM==2 ? 9 : 27) : 1;
     for (size_t n=0; n<noOffsets; ++n)
@@ -668,9 +683,11 @@ void optimalPartitionSplit(std::vector<Particle_data> &particles,
 				std::vector<size_t> tempCounts;
 				tempCounts.assign( grid[2], size_t(0) );
 				
-				// project the counts onto the z-axis
+				// project the counts onto the z-axis, over this column's own y range (its slab's y cuts, set
+				// above: ySplitIndices holds only the last slab's)
+				std::vector<size_t> const &column = subgrid->at( i*partition[1]*partition[2] + j*partition[2] );
 				for (int i1=xSplitIndices[i]; i1<xSplitIndices[i+1]; ++i1)
-					for (int i2=ySplitIndices[j]; i2<ySplitIndices[j+1]; ++i2)
+					for (int i2=int(column[2]); i2<int(column[3]); ++i2)
 						for (int i3=0; i3<grid[2]; ++i3)
 						{
 							size_t index = i1*grid[1]*grid[2] + i2*grid[2] + i3;

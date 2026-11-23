@@ -345,7 +345,7 @@ struct User_options
     bool   stdTessellationPrebuilt; // set by dtfeInterpolatePrebuilt (triangulation.cpp): the look-ahead built this sub-domain's tessellation already, so DTFE_interpolation skips buildTessellation
     bool   stdNoOverlap;        // --no-overlap: no look-ahead tessellation of partition k+1 while partition k deposits on the GPU
     bool   stdLookAheadOffBudget; // set by the auto-tuner: the busiest partition plus the next one's tessellations do not fit the memory budget, so this run has no look-ahead (its predicted peak counts none)
-    double stdLookAheadCounted; // the auto-tuner's booked look-ahead: kStdLookAheadFactor x its count of the partition that needs the most, from the particles (0 = no plan); the loop's free-memory check takes the larger of it and its own uniform count
+    double stdLookAheadCounted; // the auto-tuner's booked look-ahead: the build of the partition that needs the most, from its count of the particles (0 = no plan); the loop's free-memory check takes it, or its own uniform count without a plan
     double stdLookAheadRoom;    // what the memory budget leaves beside the grids, particles, the GPU snapshot and ONE partition (the auto-tuner's budget - fixed - gpuSnapshot - perPartition); HUGE_VAL = no budget known
 #endif
     // both binaries (standard DTFE resumes its partition loop through the same partition_checkpoint.h)

@@ -9,15 +9,18 @@ namespace {
 // a finished PS-DTFE tessellation, per vertex: the 112 B vertex (with the uint64 ParticleID and the double volume
 // accumulator) + 6.77 cells x 72 B (CGAL's cell) + allocator slack; a compiled sizeof probe and measured runs
 constexpr double kPSVertexBytes = 666.;
-// ... and a standard-DTFE one (no ParticleID; stdBytesPerPaddedVertex adds the double build's wider vertex data): the
-// measured 648 B and the 8 B of the exact star sum's high limb (vertexData::_volAccHi, the standard binary only, in
-// every build: the field is compiled in)
-constexpr double kStdVertexBytes = 648. + 8.;
-// '--parallel-triangulation' (TBB): the sorted point+payload copy and CGAL's own copy of it, per vertex in flight.
-// Fitted: +4.4 GB max RSS for one partition of ~5.7M padded vertices inserted on 6 threads (TNG100 z=0, 512^3).
-constexpr double kParInsertBytes = 800.;
 // Delaunay tetrahedra per vertex of a 3D tessellation (the Poisson mean, which the measured runs follow)
 constexpr double kTetsPerVertex = 6.77;
+// ... and a standard-DTFE one, itemized (CGAL's Tds with Parallel_tag): the vertex -- its cell handle and base (16 B),
+// Point_3<Epick> (24) and vertexData (48 in single precision: std_plan.cc stdVertexDataBytes, which also widens it for
+// the double build) -- and 6.77 cells of 72 B (four neighbour and four vertex handles and the cell's data, padded).
+// Measured 571-573 B per vertex with the padding test's dummy points on the partitions of TNG100-3-Dark at 512^3, the
+// allocators handing freed memory back (std_plan.cc)
+constexpr double kStdVertexBytes = 16. + 24. + 48. + kTetsPerVertex * 72.;
+// PS-DTFE's '--parallel-triangulation' (TBB): the sorted point+payload copy and CGAL's own copy of it, per vertex in
+// flight. Fitted: +4.4 GB max RSS for one partition of ~5.7M padded vertices inserted on 6 threads (TNG100 z=0, 512^3),
+// with macOS's allocator cache on. (Standard DTFE books the itemized copies: std_plan.cc stdInsertBytes.)
+constexpr double kParInsertBytes = 800.;
 // the PS GPU deposit's flat arrays per tetrahedron: the 16-float record (64 B), the mass and the finite-cell ordinal
 // (4 B each)
 constexpr double kGpuTetBytes = 72.;
@@ -25,29 +28,9 @@ constexpr double kGpuTetBytes = 72.;
 constexpr double kGpuTetVelBytes = 48.;
 // ... and the allocator's slack on those arrays
 constexpr double kGpuTetSlack = 1.3;
-// the standard GPU deposit's tetrahedra per particle of a thread's own box: x this for the ones crossing its faces
-constexpr double kStdFaceTets = 1.3;
-// standard DTFE: the share of the busiest partition's bytes still in the footprint once the partition loop is over and
-// the derived grids are allocated (stdPeak). Fitted with kStdPostKeepGrids and kStdLookAheadFactor on a record of 27
-// logged standard runs: at least -4.7%, mean +8.7%; the 6^3 face-gradient runs come out up to 41% over, accepted (see
-// kStdPostKeepGrids) ...
-constexpr double kStdPostKeep = 0.35;
-// ... but a small partition stays whole: up to this many bytes are booked in full (tests/dtfe_auto_tune_check.sh E,
-// 128^3: all of a 0.42 GB partition stayed, the derived grids came on top). Both fitted from the SUMMARY's 'before
-// post-proc' line. The absolute floor: kStdPostKeepGrids raises it where the post-processing allocates more than 2 GB
-constexpr double kStdPostKeepFloor = 1.e9;
-// ... and the floor of what stays after the loop, as a share of the grids only the post-processing allocates
-// (fixed - fixedLoop: the derived fields and the T-web stage; 0 with '--scratch-dir' or without derived fields).
-// FITTED on ONE run (a 6^3 split with '--per-tet-gradient'): it needs >= 0.476 for -5%, and the 4^3 timing plan stays
-// chosen up to 0.511. Its face-gradient twins peaked below 'fixed': which state a run gets depends on the machine, not
-// on the gradient route
-constexpr double kStdPostKeepGrids = 0.5;
-// standard DTFE: what a look-ahead build holds beyond the tessellations and particle copy it is counted with
-// (StdPlan::aheadMax). Not itemized, FITTED on the same 27-run record: the build's transients (at one thread per
-// partition the TBB insert's sorted copies by the default rule, triangulation.cpp) and the count grid's under-count of
-// the busiest partition at 4-6 threads. The record needs >= 1.258 for -5%; a run with sample points keeps its
-// look-ahead under its budget up to 1.294
-constexpr double kStdLookAheadFactor = 1.275;
+// the standard GPU deposit's tetrahedra crossing a box's faces: a shell about one mean spacing deep on its 6 faces,
+// booked this many times (std_plan.cc stdTetsOfBox)
+constexpr double kStdFaceShell = 2.;
 // a split for speed must predict less than this share of the best wall time so far: a clear gain only
 constexpr double kSpeedSplitGain = 0.85;
 // the '--sample-points' HitSink block one point-walk thread fills before handing it over (ps_point_eval.cc's size)

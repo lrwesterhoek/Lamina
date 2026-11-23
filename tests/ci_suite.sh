@@ -19,14 +19,40 @@
 #                               build without the optional libraries), 'make library' (libDTFE) and the
 #                               demo/examples program linked against it; CI runs it as its own job
 #   tests/ci_suite.sh all       build core double 2d
-# Several stages may be given at once; the first failing suite stops the run (set -e).
+# Several stages may be given at once; the first failing suite stops the run (set -e), but with CI_KEEP_GOING=1 (the
+# local battery's choice): every failing command is reported and the run goes on to the end, which then exits 1 and
+# names the steps that failed. Every exit lists the steps with their wall times.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$(dirname "$SCRIPT_DIR")"
 source "${SCRIPT_DIR}/lib.sh"   # PY: the python with numpy and h5py
 ARCH="${ARCH_FLAGS:--mtune=generic}"
 JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
-step() { echo; echo "==== $*"; }
+# a step's header closes the step before it with its wall seconds; the list is printed at every exit (step_report)
+STEP_NAME=""; STEP_T0=$SECONDS; STEP_LOG=(); STEP_FAILED=()
+step_close() {
+    if [ -n "$STEP_NAME" ]; then STEP_LOG+=( "$(printf '%6d s  %s' $((SECONDS - STEP_T0)) "$STEP_NAME")" ); fi
+    STEP_NAME=""
+}
+step() { step_close; STEP_NAME="$*"; STEP_T0=$SECONDS; echo; echo "==== $*"; }
+step_report() {
+    step_close
+    [ -n "${STEP_LOG[*]-}" ] || return 0      # (the usage text, an unknown stage: no step ran)
+    echo; echo "==== the steps' wall times"
+    local l
+    for l in ${STEP_LOG[@]+"${STEP_LOG[@]}"}; do echo "$l"; done
+}
+trap step_report EXIT
+if [ "${CI_KEEP_GOING:-0}" = 1 ]; then
+    set +e -E
+    step_failed() {   # a stage's step once, whatever number of its commands fail
+        local rc=$1 name="${STAGE:-}: ${STEP_NAME:-before the first step}" f
+        echo "==== FAILED (exit $rc), going on: $name"
+        for f in ${STEP_FAILED[@]+"${STEP_FAILED[@]}"}; do [ "$f" = "$name" ] && return 0; done
+        STEP_FAILED+=( "$name" )
+    }
+    trap 'step_failed $?' ERR
+fi
 
 stage_build() {
     step "build: the single pair"
@@ -223,11 +249,18 @@ stage_gui() {
 }
 
 [ "$#" -gt 0 ] || { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "${SCRIPT_DIR}/${BASH_SOURCE[0]##*/}"; exit 2; }
+STAGE=""
 for s in "$@"; do
+    STAGE="$s"
     case "$s" in
         build|core|double|2d|gui|oldpy|variants) "stage_$s" ;;
-        all) stage_build; stage_core; stage_double; stage_2d ;;
+        all) STAGE=build; stage_build; STAGE=core; stage_core; STAGE=double; stage_double; STAGE=2d; stage_2d ;;
         *) echo "unknown stage '$s' (build core double 2d gui oldpy variants all)"; exit 2 ;;
     esac
 done
+if [ -n "${STEP_FAILED[*]-}" ]; then
+    echo; echo "==== ci_suite: $* FAILED in:"
+    for f in "${STEP_FAILED[@]}"; do echo "     $f"; done
+    exit 1
+fi
 echo; echo "==== ci_suite: $* PASSED"

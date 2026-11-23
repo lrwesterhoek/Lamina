@@ -183,6 +183,18 @@ MTL::ComputePipelineState* itemPso(Ctx& c, bool fDen, bool fVel, bool fGrad, boo
 }
 
 
+// Releases a buffer whose contents are no longer needed, its pages at once: marked empty (discardable) first. Metal
+// otherwise keeps the memory of a released buffer for a while: on TNG100-3-Dark at 512^3 in 27 partitions, Exact,
+// about 3.3 GB of one partition's batch (IOAccelerator, footprint -p) was still counted when the next partition began
+// in 11 of them, so the footprint between partitions wandered between 10.4 and 14.1 GB.
+inline void releaseBuffer(MTL::Buffer*& b)
+{
+    if (!b) return;
+    b->setPurgeableState(MTL::PurgeableStateEmpty);
+    b->release();
+    b = nullptr;
+}
+
 // ---------------------------------------------------------------- the accumulated grids
 struct Grids
 {
@@ -251,7 +263,7 @@ struct Grids
     }
     void release()
     {
-        for (MTL::Buffer** b : {&den, &vel, &grad, &scal, &sgrad}) if (*b) { (*b)->release(); *b = nullptr; }
+        for (MTL::Buffer** b : {&den, &vel, &grad, &scal, &sgrad}) releaseBuffer(*b);
     }
 };
 
@@ -268,7 +280,7 @@ struct Batch
 
     void release()
     {
-        for (MTL::Buffer** b : {&bV, &bD, &bU, &bVol, &bCnt, &bFlt, &bS, &bG, &bB, &bSc, &bC}) if (*b) { (*b)->release(); *b = nullptr; }
+        for (MTL::Buffer** b : {&bV, &bD, &bU, &bVol, &bCnt, &bFlt, &bS, &bG, &bB, &bSc, &bC}) releaseBuffer(*b);
     }
 };
 

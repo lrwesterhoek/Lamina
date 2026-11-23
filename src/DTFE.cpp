@@ -96,6 +96,8 @@ std::shared_ptr<void> dtfePrebuildTessellation(vector<Particle_data> *p, User_op
 void dtfeInterpolatePrebuilt(std::shared_ptr<void> &tessellation, vector<Sample_point> &samples,
                              User_options &userOptions, Quantities *uQuantities, Quantities *aQuantities);
 #endif
+// the TBB allocator's kept tessellation blocks back to the system (triangulation.cpp; standard DTFE's runs)
+void dtfeReleaseTessellationMemory();
 // One standard partition's sub-domains as the look-ahead prepared them: DTFE_parallel's thread split of
 // the partition (or its single tessellation) and every sub-domain's tessellation, built; DTFE_parallelImpl then only
 // interpolates them. (Declared in both builds, used by the standard partition loop only.)
@@ -372,6 +374,9 @@ void DTFE(vector<Particle_data> *allParticles,
         // single triangulation over the whole (padded) box
         DTFE_preparePadding( state, userOptions );
         DTFE_parallel( &state.particles, samples, state.options, uQuantities, aQuantities );
+#ifndef PHASE_SPACE
+        dtfeReleaseTessellationMemory();   // before the derived fields: the tessellations are gone
+#endif
     }
 
     dtfeFinishFields( state, userOptions, uQuantities, aQuantities );

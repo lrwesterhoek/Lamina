@@ -28,6 +28,9 @@
 #include "triangulation_common.h"
 #include <atomic>
 #include <thread>
+#if defined(PARALLEL_TRIANGULATION)
+#include <tbb/scalable_allocator.h>   // dtfeReleaseTessellationMemory
+#endif
 #if defined(PARALLEL_TRIANGULATION) && NO_DIM==3
 #include <tbb/task_arena.h>
 #include <cstdlib>
@@ -39,6 +42,21 @@
 #ifdef OPEN_MP
 #include <omp.h>
 #endif
+
+/* Hands back the memory the TBB allocator keeps from released tessellations. With PARALLEL_TRIANGULATION a
+   tessellation's cells and vertices come from tbbmalloc (CGAL's Concurrent_compact_container with
+   tbb::scalable_allocator), which keeps an unpredictable part of a released tessellation's blocks for later requests:
+   a probe kept 0.1, 2.4 and 3.9 GB of three released builds of 5.9, 4.7 and 7.0 GB, and standard DTFE's footprint
+   between the partitions of one run (TNG50-3-Dark z=0, 512^3, 3^3 partitions) wandered from 17.4 to 26.0 GB, the
+   particles and grids being 12.7 GB. TBBMALLOC_CLEAN_ALL_BUFFERS returns them (0.05 s for 6 GB). Standard DTFE calls
+   it after each partition and after a one-domain run, so its footprint is the live memory its auto-tuner books;
+   PS-DTFE's memory model books the kept blocks (auto_tune/model.cc) and does not call it. */
+void dtfeReleaseTessellationMemory()
+{
+#if defined(PARALLEL_TRIANGULATION)
+    scalable_allocation_command( TBBMALLOC_CLEAN_ALL_BUFFERS, nullptr );
+#endif
+}
 
 // Interpolation functions defined in separate compilation units.
 void interpolateGrid(DT &dt, User_options &userOptions, Quantities *quantities);

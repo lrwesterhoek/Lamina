@@ -342,9 +342,9 @@ long autoTuneGpuShare(User_options const &u, double nParticles, std::string &why
 void autoTuneServe(User_options &u, size_t const nParticles);
 
 #ifndef PHASE_SPACE
-/* What the standard partition loop's LOOK-AHEAD holds for one partition (DTFE.cpp): its padded particle
-   copy and, built from it on a team of their own, the tessellations of its thread sub-domains (each padded again on
-   its own sub-box). The UNIFORM count: 'nOwn' particles in the partition (the split balances them), its box lengths
+/* What the standard partition loop's LOOK-AHEAD holds for one partition (DTFE.cpp): the builds of its thread
+   sub-domains (each padded again on its own sub-box: its tessellation and the insert's transient) and, for a team,
+   its padded particle copy they are built from. The UNIFORM count: 'nOwn' particles in the partition (the split balances them), its box lengths
    'len' and per-side padding 'pad' (the mean of the two sides), split 'tGrid' threads per axis. The plan (auto_tune.cc)
    counts the same from the particles (its look-ahead term); the loop checks the free memory against this before each
    one. */

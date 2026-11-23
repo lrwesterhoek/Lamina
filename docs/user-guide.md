@@ -426,9 +426,22 @@ options you give always win, and `--partition 1` keeps one tessellation. The bud
 (`DTFE_MEM_FRACTION`), never more than the other programs leave free less 4 GB; `DTFE_MEM_BUDGET_GB` sets it
 outright, still capped by the free memory. In PS-DTFE, below 2e6 particles (`DTFE_AUTO_MINN`) a run stays in one
 domain unless a split into 8 or 27 partitions is predicted clearly faster; such a split merges in a fixed order, so it
-is reproducible, but differs from one domain at float rounding (section 12, *Reproducibility*). Standard DTFE takes
-the coarsest split, one domain first, that fits the budget with every thread, else the one that fits with the most
-threads. The `SUMMARY` at the end of a run compares the predicted peak with the measured one.
+is reproducible, but differs from one domain at float rounding (section 12, *Reproducibility*). Standard DTFE with
+the GPU deposit takes the coarsest split that fits the budget, one domain first: one domain with the most threads that
+fit, partitions with one tessellation each where that fits (its walks use every core, its insert too from a million
+points, and it needs less memory than a team of sub-domains), else with the most threads that fit. On the CPU it
+takes the coarsest split that fits with every thread, else the one that fits with the most threads. The `SUMMARY` at
+the end of a run compares the predicted peak with the measured one.
+
+**Freed memory on macOS.** The system's allocator keeps a freed block in the process's memory and hands it out only
+for a later request of about its size; the partitions' arrays differ in size, so a split run would grow by the blocks
+it cannot reuse. Standard DTFE turns that cache off when it starts (it sets `MallocLargeCache=0` and starts itself
+again, unless the variable is already set), hands the memory of each partition's tessellations back after the
+partition (the TBB allocator keeps it otherwise) and releases the GPU's buffers at once: its peak is the memory it
+uses. On TNG50-3-Dark at 512^3 in 27 partitions this lowered the peak from 51.2 to 29.6 GB and made the run up to 5%
+longer, the grids unchanged; the memory model books what the run holds item by item, and predicted 4-25% above the
+measured peaks of the runs it was checked on. `MallocLargeCache=1` keeps the cache. PS-DTFE keeps all three, and its
+memory model books the kept blocks.
 
 `--auto-tune-report` reads the input, plans exactly as a real run would, prints one `AUTO-TUNE-REPORT` line
 (`partition=.. mc=.. predicted_gb=.. budget_gb=.. ... over_budget=0|1`) and exits without computing anything; the
@@ -596,6 +609,7 @@ GPU knobs are in [metal/README.md](../metal/README.md), the variables for tests 
 | `DTFE_OUTPUT_WAIT` | seconds to wait for a missing output folder before the rescue copy | 300 |
 | `DTFE_SERVE_BUDGET_GB` | composite `--serve`: the memory for the resident partitions, in GB | the auto-tuner's |
 | `OMP_NUM_THREADS` | the thread count, which the run mode keeps | the run mode's |
+| `MallocLargeCache` | macOS, standard DTFE: `1` keeps the allocator's cache of freed blocks (section 11) | unset: off |
 | `SLURM_JOB_ID`, `PBS_JOBID` | set and not empty: the run mode defaults to `performance` | unset |
 | `TMPDIR` | the rescue folder, and the merge spills without `--scratch-dir` | `/tmp` |
 | `NO_COLOR` | no colours, for any non-empty value | colours on a terminal |

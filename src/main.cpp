@@ -26,7 +26,12 @@
 #include <sys/resource.h>   // getrusage -> peak RSS report
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#if defined(__APPLE__) && !defined(PHASE_SPACE)
+#include <mach-o/dyld.h>    // _NSGetExecutablePath
+#include <unistd.h>         // execv
+#endif
 
 #include "DTFE.h"
 #include "io/io.h"
@@ -35,6 +40,7 @@
 #include "ps_globals_record.h"
 #include "run_progress.h"     // '<output>.runlog.progress'
 #include "output_staging.h"   // '<file>.part.<pid>' + rename, rescue folder
+#include "env_knobs.h"       // Env::isSet
 
 using namespace std;
 
@@ -62,9 +68,39 @@ char const *dtfeBuildTime();
 static char const *const BINARY_NAME = DTFE_BINARY_BASE DTFE_BINARY_DIM DTFE_BINARY_PRECISION;
 
 
+#if defined(__APPLE__) && !defined(PHASE_SPACE)
+/* Standard DTFE on macOS runs with the allocator's large cache off: unless MallocLargeCache is set (an empty value is
+   unset), the program sets it to 0 and executes itself again, once, with the same arguments and in the same process
+   (libmalloc reads the variable only when a process starts). With the cache on, a freed block stays in the footprint
+   and serves only a later request of about its size: the partitions' arrays differ in size from one partition to the
+   next, so the footprint ratchets up over the partition loop (TNG50-3-Dark z=0 at 512^3 in 27 partitions, Exact on
+   the GPU: a peak footprint of 51.2 GB, 29.6 GB with the cache off, the grids byte-identical, the run up to 5% longer:
+   the freed memory comes back as fresh pages). MallocLargeCache=1 keeps the cache. PS-DTFE's memory model books the
+   cache's kept blocks (auto_tune/model.cc kAllocKeepBytes) and keeps it. If the executable cannot be found or run,
+   the run goes on as it is. */
+static void dtfeAllocatorReexec(char *argv[])
+{
+    if ( Env::isSet( "MallocLargeCache" ) )
+        return;
+    char path[4096];
+    uint32_t size = sizeof path;
+    if ( _NSGetExecutablePath( path, &size ) != 0 )
+        return;
+    if ( setenv( "MallocLargeCache", "0", 1 ) != 0 )
+        return;
+    execv( path, argv );   // returns only on failure: the run goes on with the cache
+    unsetenv( "MallocLargeCache" );
+}
+#endif
+
+
 // Reads options/input, runs the interpolation (with optional interlacing), writes output, prints a run summary.
 int main( int argc, char *argv[] )
 {
+#if defined(__APPLE__) && !defined(PHASE_SPACE)
+    dtfeAllocatorReexec( argv );   // first: before anything is printed or opened
+#endif
+
     // stderr line-buffered: each diagnostic line leaves in ONE write. Unbuffered, glibc (2.37 and later) stages an
     // fprintf in 128-byte pieces, so a long line from one partition thread (the PS mass audit, GPU timing and retry
     // lines that tests parse) could be cut by another thread's output in a log that holds both streams. Every

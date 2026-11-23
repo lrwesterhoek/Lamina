@@ -514,22 +514,76 @@ void setQueryPoints(std::vector<double> &&pts, int const bucketFloor)
     setQueryRecords();
 }
 
-// Buckets the installed points on a uniform grid (~4 points per bucket, at least 'bucketFloor' per
-// axis, capped so empty-bucket overhead stays negligible for small point sets). A composite request
-// re-buckets once when a partition walks its cells although the request was bucketed for the index.
+// Buckets the installed points (~4 points per bucket, at least 'bucketFloor' layers per axis). A cloud that fills
+// the box takes n layers on every axis, n^NO_DIM ~ points / 4, at most 256. A set that holds points in at most an
+// eighth of an axis's layers (a plane of image points across that axis) keeps that axis at n layers, of which only
+// the ones with points get buckets, and the other axes take finer layers (up to 2048, at most 2^24 buckets in
+// all), so a small tetrahedron near the plane tests a few points instead of a coarse bucket's hundreds. The set of
+// points a tetrahedron tests changes, not which ones contain it. A composite request re-buckets once when a
+// partition walks its cells although the request was bucketed for the index.
 void bucketQueryPoints(int const bucketFloor)
 {
     {
-        int n = int( std::pow( double(g_pe.ctx.nPoints) / 4., 1. / double(NO_DIM) ) ) + 1;   // ~4 points per bucket
+        size_t const N = g_pe.ctx.nPoints;
+        int n = int( std::pow( double(N) / 4., 1. / double(NO_DIM) ) ) + 1;   // ~4 points per bucket
         if ( n < bucketFloor ) n = bucketFloor;
         if ( n < 1 )   n = 1;
         if ( n > 256 ) n = 256;
-        size_t nTotal = 1;
+        // the layer of point i along axis d in a grid of bInvW[d] layers per unit length (non-periodic points may
+        // lie outside the box: the edge layers take them)
+        auto layerOf = [&](size_t i, int d) -> int
+        {
+            int c = int( std::floor( (g_pe.ctx.pos[i*NO_DIM+d] - g_pe.ctx.boxLo[d]) * g_pe.ctx.bInvW[d] ) );
+            if ( c < 0 ) c = 0;
+            if ( c >= g_pe.ctx.nB[d] ) c = g_pe.ctx.nB[d] - 1;
+            return c;
+        };
+        // the layers that hold points, per axis, at the current nB and bInvW
+        auto occupancy = [&](int d) -> std::vector<char>
+        {
+            std::vector<char> occ( size_t( g_pe.ctx.nB[d] ), 0 );
+            for (size_t i = 0; i < N; ++i) occ[ size_t( layerOf(i, d) ) ] = 1;
+            return occ;
+        };
+        bool sparse[NO_DIM];
+        double sparseLayers = 1.;
+        int nDense = 0;
         for (int d = 0; d < NO_DIM; ++d)
         {
             g_pe.ctx.nB[d]    = n;
             g_pe.ctx.bInvW[d] = double(n) / g_pe.ctx.boxLen[d];
-            nTotal *= size_t(n);
+            size_t used = 0;
+            for (char const o : occupancy(d)) used += size_t(o);
+            sparse[d] = N > 0 and n >= 8 and used * 8 <= size_t(n);
+            if ( sparse[d] ) sparseLayers *= double(used);
+            else ++nDense;
+        }
+        if ( nDense > 0 and nDense < NO_DIM )
+        {
+            double const want = std::pow( std::max( 1., double(N) / 4. ) / sparseLayers, 1. / double(nDense) );
+            double const room = std::pow( double(1u << 24) / sparseLayers, 1. / double(nDense) );
+            int const fine = std::max( n, std::min( { int(want), int(room), 2048 } ) );
+            for (int d = 0; d < NO_DIM; ++d)
+                if ( not sparse[d] )
+                {
+                    g_pe.ctx.nB[d]    = fine;
+                    g_pe.ctx.bInvW[d] = double(fine) / g_pe.ctx.boxLen[d];
+                }
+        }
+        size_t nTotal = 1;
+        for (int d = 0; d < NO_DIM; ++d)
+        {
+            std::vector<char> const occ = occupancy(d);
+            g_pe.ctx.bMap[d].assign( occ.size(), -1 );
+            g_pe.ctx.bOcc[d].assign( occ.size() + 1, 0 );
+            int k = 0;
+            for (size_t c = 0; c < occ.size(); ++c)
+            {
+                if ( occ[c] ) g_pe.ctx.bMap[d][c] = k++;
+                g_pe.ctx.bOcc[d][c+1] = k;
+            }
+            g_pe.ctx.nC[d] = k;
+            nTotal *= size_t(k);
         }
 
         std::vector<size_t> count( nTotal, 0 );
@@ -537,22 +591,17 @@ void bucketQueryPoints(int const bucketFloor)
         {
             size_t b = 0;
             for (int d = 0; d < NO_DIM; ++d)
-            {
-                int c = int( std::floor( (g_pe.ctx.pos[i*NO_DIM+d] - g_pe.ctx.boxLo[d]) * g_pe.ctx.bInvW[d] ) );
-                if ( c < 0 ) c = 0;                             // non-periodic points may lie outside the box
-                if ( c >= g_pe.ctx.nB[d] ) c = g_pe.ctx.nB[d] - 1;
-                b = b * size_t(g_pe.ctx.nB[d]) + size_t(c);
-            }
+                b = b * size_t(g_pe.ctx.nC[d]) + size_t( g_pe.ctx.bMap[d][ size_t( layerOf(i, d) ) ] );
             return b;
         };
-        for (size_t i = 0; i < g_pe.ctx.nPoints; ++i)
+        for (size_t i = 0; i < N; ++i)
             count[ bucketOf(i) ]++;
         g_pe.ctx.bucketStart.assign( nTotal + 1, 0 );
         for (size_t b = 0; b < nTotal; ++b)
             g_pe.ctx.bucketStart[b+1] = g_pe.ctx.bucketStart[b] + count[b];
         g_pe.ctx.bucketPts.resize( g_pe.ctx.nPoints );
         std::vector<size_t> fill( g_pe.ctx.bucketStart.begin(), g_pe.ctx.bucketStart.end() - 1 );
-        for (size_t i = 0; i < g_pe.ctx.nPoints; ++i)
+        for (size_t i = 0; i < N; ++i)
             g_pe.ctx.bucketPts[ fill[ bucketOf(i) ]++ ] = uint32_t(i);
     }
 }
@@ -594,15 +643,31 @@ inline bool nextBucket(int bc[NO_DIM], int const bLo[NO_DIM], int const bHi[NO_D
     while ( d >= 0 and ++bc[d] > bHi[d] ) { bc[d] = bLo[d]; --d; }
     return d >= 0;
 }
+// The bucket of layers bc, or SIZE_MAX when a layer of it holds no point (no bucket).
+size_t const NO_BUCKET = SIZE_MAX;
 inline size_t bucketIndex(int const bc[NO_DIM])
 {
     size_t b = 0;
     for (int d = 0; d < NO_DIM; ++d)
     {
         int const w = g_pe.ctx.periodic ? ((bc[d] % g_pe.ctx.nB[d] + g_pe.ctx.nB[d]) % g_pe.ctx.nB[d]) : bc[d];
-        b = b * size_t(g_pe.ctx.nB[d]) + size_t(w);
+        int const m = g_pe.ctx.bMap[d][ size_t(w) ];
+        if ( m < 0 ) return NO_BUCKET;
+        b = b * size_t(g_pe.ctx.nC[d]) + size_t(m);
     }
     return b;
+}
+
+// Whether the layers [lo, hi] of axis d (a periodic range wraps; it spans fewer than nB layers or exactly the
+// tetBucketRange's 0 .. nB-1) hold any point.
+inline bool layersHoldPoints(int const d, int const lo, int const hi)
+{
+    int const n = g_pe.ctx.nB[d];
+    std::vector<int> const &occ = g_pe.ctx.bOcc[d];
+    int const l = g_pe.ctx.periodic ? ((lo % n + n) % n) : lo;
+    int const len = hi - lo + 1;
+    if ( l + len <= n ) return occ[ size_t(l + len) ] > occ[ size_t(l) ];
+    return occ[ size_t(n) ] > occ[ size_t(l) ] or occ[ size_t(l + len - n) ] > 0;
 }
 
 
@@ -610,11 +675,13 @@ inline size_t bucketIndex(int const bc[NO_DIM])
 // cheap test that lets a tetrahedron with no point anywhere near it skip all per-tet work.
 inline bool anyPointInBuckets(int const bLo[NO_DIM], int const bHi[NO_DIM])
 {
+    for (int d = 0; d < NO_DIM; ++d)                 // an axis whose layers in range hold no point: none
+        if ( not layersHoldPoints( d, bLo[d], bHi[d] ) ) return false;
     int bc[NO_DIM];
     for (bool more = firstBucket(bc, bLo, bHi); more; more = nextBucket(bc, bLo, bHi))
     {
         size_t const b = bucketIndex(bc);
-        if ( g_pe.ctx.bucketStart[b+1] > g_pe.ctx.bucketStart[b] ) return true;
+        if ( b != NO_BUCKET and g_pe.ctx.bucketStart[b+1] > g_pe.ctx.bucketStart[b] ) return true;
     }
     return false;
 }
@@ -780,6 +847,7 @@ void interpolatePoints_phaseSpace(DT &dt, User_options &userOptions)
         for (bool more = firstBucket(bc, bLo, bHi); more; more = nextBucket(bc, bLo, bHi))
         {
             size_t const b = bucketIndex(bc);
+            if ( b == NO_BUCKET ) continue;
 
             for (size_t s = g_pe.ctx.bucketStart[b]; s < g_pe.ctx.bucketStart[b+1]; ++s)
             {
@@ -929,6 +997,7 @@ void interpolatePoints_standardOwn(DT &dt, User_options &userOptions, OwnBox con
         for (bool more = firstBucket(bc, bLo, bHi); more; more = nextBucket(bc, bLo, bHi))
         {
             size_t const b = bucketIndex(bc);
+            if ( b == NO_BUCKET ) continue;
 
             for (size_t s = g_pe.ctx.bucketStart[b]; s < g_pe.ctx.bucketStart[b+1]; ++s)
             {

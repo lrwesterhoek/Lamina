@@ -542,31 +542,32 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     double const fixed = partBytes*N + (u.scratchDir.empty() ? gridTotal*bCell : 0.) + ptsBytes;
     // ... and while the partition loop runs: its own grids only, the derived ones come after it (stdPeak)
     double const fixedLoop = partBytes*N + (u.scratchDir.empty() ? gridTotal*bCellDeposit : 0.) + ptsBytes;
-    // per padded vertex: the thread's particle copy (alive while its triangulation grows) + the triangulation, and 6%
-    // for the dummy points the padding test adds (stdBytesPerPaddedVertex, shared with the partition loop's look-ahead)
-    double const perVertex = stdBytesPerPaddedVertex( u );
-
-    /* The GPU deposit of the '_a' pass (averaged_interpolation_1.cc -> dtfe_metal_host.cc), the
-       same for the sampled and the exact average (see StdTuneDensity's comment): per tetrahedron of a thread's own box
-       the flat arrays (vertices 48, densities 16, velocities 48 when a velocity-derived '_a' grid is asked, the scalar
-       16, volume, sample count, flat index and Morton key 4 each), the Morton order pairs (8), one array's sort copy
-       (<= 48) and the work-item table (4) -- the arrays become the uploaded batch one at a time -- and per sub-grid
-       cell the per-call deposit's device grid and its host copy (bGpuCell each). Charging 6.77 x 120 B per PADDED
-       vertex would count every tetrahedron of the padding as extracted: only the ones touching the thread's own
-       box are. */
+    /* The GPU deposit of the '_a' pass (averaged_interpolation_1.cc -> dtfe_metal_host.cc), the same for the sampled
+       and the exact average, itemized. Per tetrahedron it extracts (std_plan.cc stdTetsOfBox) the flat arrays --
+       vertices 48 B, densities 16, the vertex velocities 48 where a velocity grid is deposited, the scalar 16,
+       volume, sample count and flat index 4 each, the base cell 12 (the Morton key's 4 go before the peak) -- and
+       the Morton order holds its (key, index) pairs (8) and one array's gathered copy (<= 48) beside them
+       (avg1MortonOrder), the peak of the arrays: the upload then turns them into the device batch one at a time.
+       Per sub-grid cell the call's host grid (bGpuCell: 4-B floats of the grids it deposits) and the device grids
+       in words of 2 or 4 of those floats (deviceWordFactor: 64-bit sampled, 128-bit exact sums). The face pass
+       (--face-gradient, the default without DTFE_FACE_CHECK=1) supplies the velocity gradient: the deposit then
+       neither extracts the velocities for it nor deposits it (averaged_interpolation_1.cc faceSuppliesGradient). */
     bool gpuVel = false, gpuScal = false;
     double bGpuCell = 0.;
-    if ( metalActive and u.aField.selected() )
+    bool const gpuDeposit = metalActive and u.aField.selected();
+    if ( gpuDeposit )
     {
         bool const den  = u.aField.density or u.aField.velocity_tweb;
         bool const grad = u.aField.velocity_gradient or u.aField.selectedVelocityDerivatives();
-        gpuVel  = u.aField.velocity or grad;
+        bool const faceSupplies = NO_DIM == 3 and grad and u.faceGradient and not Env::flag( "DTFE_FACE_CHECK" );
+        bool const gradDeposited = grad and not faceSupplies;
+        gpuVel  = u.aField.velocity or gradDeposited;
         gpuScal = u.aField.scalar or u.aField.scalar_gradient;
-        bGpuCell = ( den ? 4. : 0. ) + ( u.aField.velocity ? 12. : 0. ) + ( grad ? 36. : 0. )
+        bGpuCell = ( den ? 4. : 0. ) + ( u.aField.velocity ? 12. : 0. ) + ( gradDeposited ? 36. : 0. )
                  + ( u.aField.scalar ? 4. : 0. ) + ( u.aField.scalar_gradient ? 12. : 0. );
     }
-    double const perTet = bGpuCell > 0. ? 80. + ( gpuVel ? 48. : 0. ) + ( gpuScal ? 16. : 0. ) + 8. + 48. + 4. : 0.;
-    double const tetsPerOwn = kTetsPerVertex * kStdFaceTets;   // per particle of the thread's own box, + the ones crossing its faces
+    double const perTet = gpuDeposit ? 48. + 16. + ( gpuVel ? 48. : 0. ) + ( gpuScal ? 16. : 0. ) + 4. + 4. + 4. + 12.
+                                       + 8. + 48. : 0.;
     /* The GPU deposit's host SNAPSHOT (PS's snapshotBytes, auto_tune/ps_planner.cc). The standard deposit
        resumes a failed command buffer from a checkpoint (dtfe_metal_host.cc runBatch, gpu_metal_retry.h GpuSnapshot):
        it keeps a host copy of the batch's device grids, taken every ~10 s of GPU work.
@@ -576,18 +577,15 @@ AutoTuneReport autoTunePartitioning(User_options &u,
        partition_checkpoint.h, writes the full grids from where they are, allocating nothing; the partition's own
        sub-grids are still alive then and already in its bytes.)
          An exact run's batches sum in the run-wide 128-bit words instead (dtfe_gpu_fixed.h dtfeBatchParams): 16 B
-       per 4-B component, so the snapshot takes 4 x bGpuCell per cell, and the
-       device words grow by 8 B per component beyond the 8 B the fitted '2. * cells * bGpuCell' of planOf's
-       gridBytes holds (left as fitted). Device words exist only for the batch holding the device mutex and the one
-       still converting its words outside it (dtfe_metal_host.cc dtfeGpuDepositAveraged1: allocated under the mutex,
-       converted and released after it), so the growth is booked ONCE per run beside the snapshot, for two batches
-       of the largest sub-grid: 2 x 2 x bGpuCell per cell (deviceWordGrowth). The sampled average keeps the 64-bit
-       words. */
+       per 4-B component, so the snapshot takes 4 x bGpuCell per cell. The device grids are in the same words, and
+       exist only for the batch holding the device mutex and the one still converting its words outside it
+       (dtfe_metal_host.cc dtfeGpuDepositAveraged1: allocated under the mutex, converted and released after it): planOf
+       books two batches of the largest sub-grid (deviceWordFactor). */
     bool const runWideWords = u.exactAverage;
     double const snapWordFactor = runWideWords ? 4. : 2.;
-    double const deviceWordGrowth = runWideWords ? 4. : 0.;
+    double const deviceWordFactor = snapWordFactor;
     // the look-ahead (DTFE.cpp) runs with the GPU deposit when more than one partition is computed
-    bool const lookAheadPossible = metalActive and bGpuCell > 0. and u.DTFE and u.method == 1
+    bool const lookAheadPossible = gpuDeposit and u.DTFE and u.method == 1
                                    and not u.stdNoOverlap and not u.redshiftConeOn;
 
     // the count grid of the particles (StdTuneDensity: one pass); without particles in memory, the uniform count
@@ -632,7 +630,7 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     in.ptsWalkBytes      = ptsWalkBytes;
     in.fixed             = fixed;
     in.fixedLoop         = fixedLoop;
-    in.perVertex         = perVertex;
+    in.gpuDeposit        = gpuDeposit;
     in.bGpuCell          = bGpuCell;
     // the face pass (averaged_interpolation_1.cc avg1FacePass): its accumulator over the cells of the sub-domain the
     // '_a' interpolation runs on, one per concurrent sub-domain call, which together cover the partition
@@ -676,13 +674,14 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     // ... and what '--per-tet-gradient' would book less per sub-domain cell, for the 'no split fits' warning's way
     // out (text only): the face sums, less the gradient words that route deposits in their place (above: the face
     // default without DTFE_FACE_CHECK=1 skips them) -- nothing in the single build's CPU exact average, the face
-    // pass's 72 B per cell elsewhere
-    in.faceWayOutCell = in.faceCell - ( ( in.faceCell > 0. and cpuGradWords and not Env::flag( "DTFE_FACE_CHECK" ) )
-                                        ? 8. * double(noGradComp) : 0. );
+    // pass's 72 B per cell on the CPU otherwise. None on the GPU deposit: without the face pass it deposits the
+    // gradient (its host and device grids, its snapshot) and extracts the velocities for it, which books more
+    in.faceWayOutCell = gpuDeposit ? 0. : in.faceCell - ( ( in.faceCell > 0. and cpuGradWords
+                                                            and not Env::flag( "DTFE_FACE_CHECK" ) )
+                                                          ? 8. * double(noGradComp) : 0. );
     in.perTet            = perTet;
-    in.tetsPerOwn        = tetsPerOwn;
     in.snapWordFactor    = snapWordFactor;
-    in.deviceWordGrowth  = deviceWordGrowth;
+    in.deviceWordFactor  = deviceWordFactor;
     in.lookAheadPossible = lookAheadPossible;
     in.tuneStart         = tuneStart;
     in.countSec          = countSec;

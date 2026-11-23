@@ -5,8 +5,9 @@
 # 'build_lib'), about 1.5-2 h on 10 cores.
 # It builds the three binary pairs first (METAL=1, METAL=1 DOUBLE=1, DIM=2) and runs on this checkout; do not edit
 # the tree while it runs (the summary says if it changed).
-# split_bytes_check, ps_auto_tune_check and ps_scratch_check (their GPU halves too) run only inside ci_core, which
-# stops at its first failing step.
+# split_bytes_check, ps_auto_tune_check and ps_scratch_check (their GPU halves too) run only inside ci_core. ci_core
+# and ci_double go on past a failing step (CI_KEEP_GOING=1) and name every failed step at the end of their logs, with
+# each step's wall time.
 #
 # Usage: tests/dev/battery.sh <scratch dir> [--ci-python PATH] [--gui-python PATH] [--only NAME,NAME...] [--list]
 #   <scratch dir>   logs (<scratch>/battery/<stage>.log and SUMMARY.txt), the suites' temporary files and the
@@ -100,8 +101,8 @@ run build_2d    make "$J" DTFE PS-DTFE DIM=2
 # the shared library too, when one is built: tests/dtfe_sampling_check.sh links its user-sampling driver against it,
 # and a header change (User_options grew fields on 2026-11-09) makes a stale library crash that driver
 [ -e "$ROOT/libDTFE.dylib" ] || [ -e "$ROOT/libDTFE.so" ] && run build_lib make "$J" library METAL=1
-run ci_core     tests/ci_suite.sh core
-run ci_double   tests/ci_suite.sh double
+run ci_core     env CI_KEEP_GOING=1 tests/ci_suite.sh core
+run ci_double   env CI_KEEP_GOING=1 tests/ci_suite.sh double
 run ci_2d       tests/ci_suite.sh 2d
 run ci_gui      env DTFE_GUI_PYTHON="$GUI_PY" tests/ci_suite.sh gui
 run dtfe_metal  tests/dtfe_metal_check.sh --no-build

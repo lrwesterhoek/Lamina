@@ -371,17 +371,26 @@ def cached_cube(path: Path, dtype, shape, axis: int | None = None, read: bool = 
 _cached_cube = cached_cube              # the name the tests reach
 
 
+# The axis-2 planes cut from one pass over a grid file: a window of up to 16 neighbouring planes (at most
+# PLANE_WIN_BYTES), the last two windows kept, least recently used first, under _CUBES_LOCK. A plane across the last
+# axis costs a pass over the whole file (4.3 GB for a 1024^3 float grid: 0.6 s from the page cache, 4.4 s from the
+# external disk), and it is read so only when the cube is not cached (while a job runs the cube cache keeps 1 GB): a
+# slice stepped along z then reads the file once per window, not once per step. Keyed by cube_key, so a grid written
+# again is read again; drop_cubes() empties it.
+_PLANE_WIN: dict[tuple, np.ndarray] = {}
+PLANE_WIN_BYTES = int(64e6)
+
+
 def _read_plane(path: Path, dtype, n: int, ncomp: int, axis: int, index: int) -> np.ndarray:
     """One plane of an (n, n, n[, ncomp]) C-order grid file by plain reads (no memmap: see OutputSet._memmap):
     axis 0 is one contiguous block, axis 1 one block per row, axis 2 the file in slabs of whole x-layers (the
-    same bytes a memmap would touch), keeping one plane. Raises ValueError for a short file, OSError when
-    the file cannot be read (a drive gone)."""
+    same bytes a memmap would touch), keeping a window of planes around it (_PLANE_WIN). Raises ValueError for a
+    short file, OSError when the file cannot be read (a drive gone)."""
     dt = np.dtype(dtype)
     if not 0 <= index < n:
         raise ValueError(f"plane {index} outside 0..{n - 1}")
     row = n * ncomp                         # values per (i, j) row along the last axis
     layer = n * row                         # values per x-layer i
-    out = np.empty((n, n, ncomp) if ncomp > 1 else (n, n), dtype=dt)
     with open(path, "rb") as f:
         def block(offset_values: int, count: int) -> np.ndarray:
             f.seek(offset_values * dt.itemsize)
@@ -390,17 +399,36 @@ def _read_plane(path: Path, dtype, n: int, ncomp: int, axis: int, index: int) ->
                 raise ValueError(f"{Path(path).name} is shorter than its grid (an interrupted write?)")
             return a
         if axis == 0:
-            return block(index * layer, layer).reshape(out.shape)
+            return block(index * layer, layer).reshape((n, n, ncomp) if ncomp > 1 else (n, n))
         if axis == 1:
+            out = np.empty((n, n, ncomp) if ncomp > 1 else (n, n), dtype=dt)
             for i in range(n):
                 out[i] = block(i * layer + index * row, row).reshape(out.shape[1:])
             return out
+        key = cube_key(Path(path), dt, (n, n, n, ncomp) if ncomp > 1 else (n, n, n))
+        w = max(1, min(16, PLANE_WIN_BYTES // (n * row * dt.itemsize)))     # planes in a window
+        w0 = index // w * w
+        w1 = min(n, w0 + w)
+        if key is not None:
+            with _CUBES_LOCK:
+                win = _PLANE_WIN.get((key, w0))
+                if win is not None:
+                    _PLANE_WIN[(key, w0)] = _PLANE_WIN.pop((key, w0))    # most recently used last
+                    return win[:, :, index - w0].copy()
+        win = np.empty((n, n, w1 - w0, ncomp) if ncomp > 1 else (n, n, w1 - w0), dtype=dt)
         step = max(1, int(64e6 // (layer * dt.itemsize)))      # ~64 MB of x-layers per read
         for i0 in range(0, n, step):
             k = min(step, n - i0)
             slab = block(i0 * layer, k * layer).reshape((k, n, n, ncomp) if ncomp > 1 else (k, n, n))
-            out[i0:i0 + k] = slab[:, :, index]
-        return out
+            win[i0:i0 + k] = slab[:, :, w0:w1]
+        if key is not None:
+            with _CUBES_LOCK:
+                for stale in [k for k in _PLANE_WIN if k[0][0] == key[0] and k[0] != key]:   # the file written again
+                    _PLANE_WIN.pop(stale)
+                _PLANE_WIN[(key, w0)] = win
+                while len(_PLANE_WIN) > 2:
+                    _PLANE_WIN.pop(next(iter(_PLANE_WIN)))
+        return win[:, :, index - w0].copy()
 
 
 # The other caches of grid data in this process (the 3D view's averaged and prepared cubes: volume3d registers its
@@ -415,15 +443,17 @@ def on_drop_cubes(fn) -> None:
 
 
 def drop_cubes() -> int:
-    """Forget every cached cube and mean-field plane, and every cache registered with on_drop_cubes (the bytes they
-    held). The launcher calls it when a job or a memory check starts: the caches are anonymous memory of the GUI
-    process, and the binary's auto-tuner budgets from the memory that is free at that moment. What is on screen stays:
-    the map's plane, and the 3D view's volume and its GPU copy (View3D holds them, not the caches: volume3d's
-    drop_volumes says why; the 3D view's own memory check, its detail choice, counts them)."""
+    """Forget every cached cube, mean-field plane and plane window, and every cache registered with on_drop_cubes
+    (the bytes they held). The launcher calls it when a job or a memory check starts: the caches are anonymous memory
+    of the GUI process, and the binary's auto-tuner budgets from the memory that is free at that moment. What is on
+    screen stays: the map's plane, and the 3D view's volume and its GPU copy (View3D holds them, not the caches:
+    volume3d's drop_volumes says why; the 3D view's own memory check, its detail choice, counts them)."""
     with _CUBES_LOCK:
-        n = sum(a.nbytes for a in _CUBES.values()) + sum(a.nbytes for a in _MF_PLANES.values())
+        n = sum(a.nbytes for a in _CUBES.values()) + sum(a.nbytes for a in _MF_PLANES.values()) \
+            + sum(a.nbytes for a in _PLANE_WIN.values())
         _CUBES.clear()
         _MF_PLANES.clear()
+        _PLANE_WIN.clear()
     for fn in list(_DROP_CALLBACKS):    # outside the lock: each cache takes its own
         n += int(fn() or 0)
     return n

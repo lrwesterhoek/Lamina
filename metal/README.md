@@ -106,12 +106,16 @@ and covariance are clamped to bounds a correct value always meets.
 the run (inside the sub-box, not wholly outside a face plane of the tetrahedron) into a bit mask, then the clip and the
 deposit of the cells that passed, in the same order. The lanes of a SIMD group run in step, so with one loop every
 cell at which any lane clipped cost the whole group a clip; now a group waits for the clips of its busiest lane.
-`depositExactAverage` does the same. Measured on 2026-11-22 on a synthetic Zel'dovich box (256^3 particles, a 256^3
-grid, one partition at a time, `DTFE_GPU_TIMING=1`, four runs each): PS-DTFE's phase 0 took 31% less device time
-and its phase 1 5% less, standard DTFE's kernel about 13% less. PS-DTFE's exact GPU grids moved once, in the last
-bits (a median of 1e-7 of a cell's density; the mass is unchanged): fast math compiles the clip differently inside
-the new loop. The standard kernel's grids did not move. Calling `exact_cell_clip`, with its own test, inside the
-second loop did not restore the old bytes and lost a third of phase 0's gain.
+`depositExactAverage` does the same. On TNG100-3-Dark at redshift 0 (the PS-DTFE Exact command of
+[docs/timings.md](../docs/timings.md) with its plan given, `DTFE_GPU_TIMING=1`, one run each, 2026-11-23) the exact
+items took 537.6 s of device time against 850.7 s (phase 0 182.1 against 329.2 s, phase 1 355.5 against 521.5 s)
+and the run 1199 s against 1292 s. On a synthetic Zel'dovich box (256^3 particles, a 256^3 grid, one partition at a
+time, four runs each) the gain was smaller, 31% in phase 0 and 5% in phase 1, and standard DTFE's kernel took about
+13% less. PS-DTFE's exact GPU grids moved once, in the last bits (on TNG100 a median of 1.3e-7 of a cell's density,
+the mean density the same to nine digits; the velocity dispersion, a difference of two moments, by more in
+single-stream cells): fast math compiles the clip differently inside the new loop. The standard kernel's grids did
+not move. Calling `exact_cell_clip`, with its own test, inside the second loop did not restore the old bytes and lost
+a third of phase 0's gain.
 
 **The clipping** (`sweep_moments` in `exact_clip.metal.inc`, shared by `depositExactItems` and `depositExactAverage`)
 is not an r3d port: it sweeps the tetrahedron in z. Between breakpoints (the middle vertices' z, the z where a

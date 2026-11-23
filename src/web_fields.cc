@@ -54,10 +54,19 @@ void postProcessWebFields(User_options &userOptions,
                           Quantities *uQuantities,
                           Quantities *aQuantities)
 {
+    auto const start = std::chrono::steady_clock::now();
+    bool const any = ( not uQuantities->velocity_gradient.empty() and userOptions.uField.selectedVelocityDerivatives() )
+                     or ( not aQuantities->velocity_gradient.empty() and userOptions.aField.selectedVelocityDerivatives() );
     computeDivergenceShearVorticity( userOptions.uField, userOptions.verboseLevel, uQuantities );
     computeDivergenceShearVorticity( userOptions.aField, userOptions.verboseLevel, aQuantities );
     computeWebClassification( userOptions.uField, userOptions.verboseLevel, userOptions.lambda_th, userOptions.hubbleParam, userOptions.scaleFactor, uQuantities );
     computeWebClassification( userOptions.aField, userOptions.verboseLevel, userOptions.lambda_th, userOptions.hubbleParam, userOptions.scaleFactor, aQuantities );
+    if ( any )
+    {
+        MESSAGE::Message message( userOptions.verboseLevel );
+        message << "  >>> Time: " << std::chrono::duration<double>( std::chrono::steady_clock::now() - start ).count()
+                << " sec. (velocity divergence, shear, vorticity and V-web from the gradient)\n" << MESSAGE::Flush;
+    }
     computeTidalWebClassification( userOptions.uField, userOptions, uQuantities );
     computeTidalWebClassification( userOptions.aField, userOptions, aQuantities );
 }
@@ -216,12 +225,15 @@ void computeWebClassification(Field &fields,
     // V-web: shear tensor Sigma_ij
     if ( fields.velocity_vweb )
     {
-        q->velocity_vweb.reserve( N );
-        q->velocity_vweb_eigenvalues.reserve( N );
+        q->velocity_vweb.assign( N, Real(0.) );
+        q->velocity_vweb_eigenvalues.assign( N, Pvector<Real,NO_DIM>::zero() );
+        Real const norm = -sqrtA / (Real(2.) * H0_norm);   // sqrtA: u-units -> peculiar km/s
+#ifdef OPEN_MP
+        #pragma omp parallel for
+#endif
         for (size_t i=0; i<N; ++i)
         {
             Pvector<Real,noGradComp> &g = q->velocity_gradient[i];
-            Real norm = -sqrtA / (Real(2.) * H0_norm);   // sqrtA: u-units -> peculiar km/s
             Real s00 = norm * (g[0*NO_DIM+0] + g[0*NO_DIM+0]);
             Real s11 = norm * (g[1*NO_DIM+1] + g[1*NO_DIM+1]);
             Real s01 = norm * (g[0*NO_DIM+1] + g[1*NO_DIM+0]);
@@ -233,8 +245,8 @@ void computeWebClassification(Field &fields,
 #elif NO_DIM == 2
             Pvector<Real,NO_DIM> eig = symmetricEigenvalues3x3(s00, s01, Real(0.), s11, Real(0.), Real(0.));
 #endif
-            q->velocity_vweb_eigenvalues.push_back( eig );
-            q->velocity_vweb.push_back( Real(classifyWeb(eig, lambda_th)) );
+            q->velocity_vweb_eigenvalues[i] = eig;
+            q->velocity_vweb[i] = Real(classifyWeb(eig, lambda_th));
         }
     }
 
@@ -309,6 +321,9 @@ void computeTidalWebClassification(Field &fields,
     if ( mean <= 0. ) { skip("the density grid has non-positive mean."); return; }
 
     std::vector<double, FftwAligned<double> > work(N);
+#ifdef OPEN_MP
+    #pragma omp parallel for
+#endif
     for (size_t i = 0; i < N; ++i) work[i] = double(q->density[i]) / mean - 1.;
 
     // the half-spectra: std::complex<double> has fftw_complex's layout (FFTW manual, "Complex numbers")
@@ -378,6 +393,9 @@ void computeTidalWebClassification(Field &fields,
         }
         fftw_execute(planB);          // -> work (real tensor component)
         tens[c].resize(N);
+#ifdef OPEN_MP
+        #pragma omp parallel for
+#endif
         for (size_t i = 0; i < N; ++i) tens[c][i] = Real(work[i]);
     }
     fftw_destroy_plan(planB);
@@ -429,26 +447,36 @@ void computeDivergenceShearVorticity(Field &fields,
 {
     if ( q->velocity_gradient.empty() ) return;
 
+    // every cell on its own (the same arithmetic as one after another), in parallel, into arrays sized first
+    std::vector< Pvector<Real,noGradComp> > &grad = q->velocity_gradient;
+    size_t const N = grad.size();
     if ( fields.velocity_divergence )
     {
-        q->velocity_divergence.reserve( q->velocity_gradient.size() );
-        for (std::vector< Pvector<Real,noGradComp> >::iterator it=q->velocity_gradient.begin(); it!=q->velocity_gradient.end(); ++it )
-            q->velocity_divergence.push_back( velocityDivergence(*it) );
+        q->velocity_divergence.assign( N, Real(0.) );
+#ifdef OPEN_MP
+        #pragma omp parallel for
+#endif
+        for (size_t i = 0; i < N; ++i) q->velocity_divergence[i] = velocityDivergence( grad[i] );
     }
 
     if ( fields.velocity_shear )
     {
-        q->velocity_shear.reserve( q->velocity_gradient.size() );
-        for (std::vector< Pvector<Real,noGradComp> >::iterator it=q->velocity_gradient.begin(); it!=q->velocity_gradient.end(); ++it )
-            q->velocity_shear.push_back( velocityShear(*it) );
+        q->velocity_shear.assign( N, Pvector<Real,noShearComp>::zero() );
+#ifdef OPEN_MP
+        #pragma omp parallel for
+#endif
+        for (size_t i = 0; i < N; ++i) q->velocity_shear[i] = velocityShear( grad[i] );
     }
-    
+
     if ( fields.velocity_vorticity )
     {
-        q->velocity_vorticity.reserve( q->velocity_gradient.size() );
-        for (std::vector< Pvector<Real,noGradComp> >::iterator it=q->velocity_gradient.begin(); it!=q->velocity_gradient.end(); ++it )
-            q->velocity_vorticity.push_back( velocityVorticity(*it) );
+        q->velocity_vorticity.assign( N, Pvector<Real,noVortComp>::zero() );
+#ifdef OPEN_MP
+        #pragma omp parallel for
+#endif
+        for (size_t i = 0; i < N; ++i) q->velocity_vorticity[i] = velocityVorticity( grad[i] );
     }
+
     
     // free the gradient unless the gradient itself or the V-web classification still needs it
     // (the T-web is computed from the density grid, never the gradient); swap-with-empty

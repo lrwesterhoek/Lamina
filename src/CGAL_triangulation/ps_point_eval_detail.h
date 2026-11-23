@@ -184,10 +184,15 @@ struct Context
     size_t nPoints = 0;
     std::vector<double> pos;        // 3*nPoints, wrapped into the box when periodic
 
-    // uniform bucket grid over the query points (CSR layout)
+    // a bucket grid over the query points (CSR layout): nB[d] layers of width 1 / bInvW[d] along axis d; only the
+    // layers that hold a point have buckets (bMap: a layer's index among those, -1 for an empty one; nC of them;
+    // bOcc: how many of them lie below each layer, nB + 1 entries, the per-axis test of anyPointInBuckets)
     int    nB[NO_DIM];
     double bInvW[NO_DIM];
-    std::vector<size_t>   bucketStart;   // nB^3 + 1 offsets
+    int    nC[NO_DIM];
+    std::vector<int> bMap[NO_DIM];
+    std::vector<int> bOcc[NO_DIM];
+    std::vector<size_t>   bucketStart;   // prod(nC) + 1 offsets
     std::vector<uint32_t> bucketPts;     // point indices grouped by bucket
 
     // The stream records of every point, appended in BLOCKS by (possibly concurrent) workers.

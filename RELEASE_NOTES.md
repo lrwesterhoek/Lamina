@@ -98,10 +98,29 @@ values are noisy, so smooth its grids before use.
   under the parallel insert. Its grids moved once against 1.0.0's: in the last bits of most cells, by more in a few
   cells at caustics.
 - PS-DTFE's exact deposit on the GPU tests a run of a tetrahedron's cells before it clips any, and spends about a
-  sixth less GPU time in that deposit. Its exact GPU grids moved once more, in the last bits (a median of 1e-7 of a
-  cell's density); standard DTFE's did not.
+  third less GPU time in that deposit; a PS-DTFE Exact run of TNG100-3-Dark at 512^3 took 7% less time. Its exact
+  GPU grids moved once more, in the last bits (a median of 1e-7 of a cell's density); standard DTFE's did not.
 - Standard DTFE's single-precision exact grids no longer depend on the split, the thread count or the insertion
   order: every grid sums in one fixed-point unit for the whole run.
+- Standard DTFE with the GPU deposit runs a split with one tessellation per partition where that fits, at the coarsest
+  split that fits (it took the most threads per partition, the split then the coarsest that holds them). One
+  tessellation now inserts in parallel and walks its tetrahedra on every core: the GPU deposit's arrays, their order
+  and the face gradient's sums, which run beside the GPU deposit. TNG50-3-Dark at 512^3, Exact on the GPU: 3^3
+  partitions in 13 min 8 s, where the old choice, 6^3 with a team of 5 threads, took 37 min 40 s; the grids do not
+  depend on the split. Without the GPU deposit the choice is unchanged.
+- Standard DTFE hands freed memory back on macOS (user guide, section 11): it turns the allocator's cache of freed
+  blocks off when it starts, returns each partition's tessellation memory after the partition and releases the GPU's
+  buffers at once, so a split run's peak no longer grows by blocks it cannot reuse (TNG50-3-Dark at 512^3 in 27
+  partitions: 51.2 GB before, 29.6 GB now). `MallocLargeCache=1` keeps the system allocator's cache.
+- Standard DTFE's memory model books the run item by item (the tessellation, the insert's copies, the GPU deposit's
+  arrays and grids, the post-processing without the freed particles) where it had fitted constants: its predictions
+  were 12-41% above the measured peaks with the memory handed back, and are 4-25% above them now (TNG50-3-Dark and
+  TNG100-3-Dark at 512^3, a 256^3 Zel'dovich box). A split run's look-ahead is checked against the auto-tuner's
+  count of the partition that needs the most, where it planned, and no longer against a uniform guess that took a
+  small dense partition's padding for its particles (TNG50-3-Dark at 4^3 kept no look-ahead: 20.86 GB guessed, 9.36
+  GB counted).
+- The standard auto-tuner replays the run's split cell by cell (it cut on bins of 4 cells at 512^3, and its count of
+  the busiest partition was off by up to 21%).
 - The parallel (TBB) Delaunay insert is in every binary built with TBB and engages by itself for tessellations of at
   least a million points where cores are free; `--sequential-triangulation` keeps the sequential insert.
 - `--ps-lagrangian-input` needs an HDF5 Gadget snapshot (`--input-format 105`), the only reader that gives the
@@ -141,6 +160,11 @@ values are noisy, so smooth its grids before use.
   check too; the split, the partitions in flight and the look-ahead are chosen as before; the room the ordered merge
   parks finished partitions in shrinks by the same amount. For one such run, of 94 million particles on a 512^3
   grid, the prediction went from 28.5 to 36.0 GB, against a peak memory footprint of 29.2 GB.
+- Standard DTFE's load-balanced split cut each column of partitions along z by the particles of another column (the
+  last x slab's), so its partitions were uneven: on TNG50-3-Dark at 3^3 the busiest held 16.6 million padded particles
+  where the even split gives 14.5 million. The exact grids do not depend on the split; a split run's Fast density,
+  velocity and T-web eigenvalues move at float rounding (by at most 3e-6 of a grid's largest value in a test of 16.8
+  million particles on a 128^3 grid in 3^3 partitions), its classes and velocity derivatives not.
 - Standard DTFE: an unaveraged grid or redshift-cone row that left the convex hull came out zero for the rest of the
   row (non-periodic runs with `--no-padding-test`); `--average-method 2` drew different points from one `--seed`
   under GCC and Clang; a library sample outside `--region` was dropped, which shifted the entries after it.
