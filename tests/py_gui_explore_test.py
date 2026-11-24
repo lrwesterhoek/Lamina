@@ -245,6 +245,22 @@ def pure():
           and VO.coarsening(512, 10.0, 20e9) == 1 and VO.coarsening(512, 5.0, 5e9) is None
           and VO.coarsening(1024, 20.0, 4.5e9) is None and VO.coarsening(1000, 20.0, 26e9) == 2
           and VO.coarsening(1023, 20.0, 26e9) is None)
+    import explore_voids as XV0
+    real_avail = G.available_gb
+    try:
+        G.available_gb = lambda: 29.0
+        est_29 = XV0.void_build_gb(1024, 20.0)
+        G.available_gb = lambda: 2.0
+        est_2 = XV0.void_build_gb(1024, 20.0)
+        G.available_gb = lambda: 29.0
+        est_512 = XV0.void_build_gb(512, 10.0)
+    finally:
+        G.available_gb = real_avail
+    check("the memory a void search asks about is the build the helper would run (void_build_gb): a 1024^3 set at 20 "
+          "cells with 29 GB free is its 2^3 average (~11 GB, not the full 86), with 2 GB free none fits (the full "
+          "86 GB is said), a 512^3 set its own", abs(est_29 - 80 * 512 ** 3 / 1e9) < 1e-6
+          and abs(est_2 - 80 * 1024 ** 3 / 1e9) < 1e-6 and abs(est_512 - 80 * 512 ** 3 / 1e9) < 1e-6
+          and XV0.void_build_gb(0, 10.0) is None, f"{est_29} {est_2} {est_512}")
     check("r_v_stale / needs_build: the pipeline's own R_v test; older or unrecorded settings are stale and gated",
           st["today"] is None and all(st[n] for n in ("older", "unrecorded", "no_rv"))
           and "older settings" in st["older"] and not any("--" in str(v) for v in st.values())

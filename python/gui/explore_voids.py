@@ -52,6 +52,18 @@ def duration_text(seconds: float) -> str:
     return f"about {int(round(seconds / 60.0))} min"
 
 
+
+def void_build_gb(n: int, sigma_cells: float) -> float | None:
+    """The memory (GB) a catalogue build of an n^3 grid at sigma_cells takes as the helper would run it: at the grid's
+    own resolution when that fits in what is free, else on the grid averaged 2^3 or 4^3 (void_outlines.coarsening;
+    a 1024^3 set: ~11 GB, not the 86 GB of its full build); the full build when none fits. None for an unknown grid."""
+    if not n:
+        return None
+    vo = _explore()._void_tool()
+    free = G.available_gb()
+    k = vo.coarsening(int(n), float(sigma_cells), None if free is None else free * 1e9) or 1
+    return vo.BUILD_BYTES_PER_CELL * (float(n) / k) ** 3 / 1e9
+
 class VoidSigmaBox(QDoubleSpinBox):
     """The smoothing the voids are found at, in Mpc: 0 is 'production' (the special value); a real value is at least
     two cells of the shown grid (or the production value, on a grid so coarse that it is less). The first step up from
@@ -308,8 +320,10 @@ class VoidsMixin:
             return
         self._voids_stop()                          # another output's search: this one is wanted now
         n = int(o.n or 0)
+        cell = float(o.length[0]) / float(n) if n and o.box is not None else 1.0
+        cells = key[-1] / cell if key[-1] > 0 else self.void_sigma.production / cell
         if not self.heavy_ok("Find the voids", f"Finding the voids of {o.title} builds its catalogue when it is "
-                             f"not cached yet; that", 80.0 * n ** 3 / 1e9 if n else None):
+                             f"not cached yet; that", void_build_gb(n, cells)):
             self._void_cache[key] = {"error": "not started while a DTFE run is going (tick again to retry)"}
             self.status.emit("void outlines not started: a DTFE run is going")
             self._void_note()
@@ -334,8 +348,6 @@ class VoidsMixin:
             args += ["--prefix", o.prefix]          # the production set: no prefix, so the analysis scripts' cache is shared
         if key[-1] > 0:
             args += ["--smooth-mpc", repr(key[-1])]  # a common physical sigma: its own cache namespace
-        cell = float(o.length[0]) / float(n) if n and o.box is not None else 1.0
-        cells = key[-1] / cell if key[-1] > 0 else self.void_sigma.production / cell
         self._void_t0, self._void_est = time.time(), search_seconds(n, cells)
         cache = _explore().VOID_CACHE_DIR
         proc.start(rs.PYTHON, args + (["--cache-dir", str(cache)] if cache else []))

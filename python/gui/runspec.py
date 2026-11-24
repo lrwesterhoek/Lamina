@@ -81,9 +81,39 @@ def sim_dir(sim: str, data_root) -> Path:
     return _cli_sim_dir(sim, Path(data_root).expanduser() if str(data_root).strip() else _NO_ROOT)
 
 
-# the interpreter for the figure scripts (numpy/scipy/matplotlib/h5py): $PYTHON as in the
-# pipeline script, else the python3 on PATH -- NOT the GUI's own venv interpreter
-PYTHON = os.environ.get("PYTHON") or shutil.which("python3") or sys.executable
+# the interpreter for the figure scripts, the void helper and the data tools (numpy/scipy/matplotlib/h5py): $PYTHON as
+# in the pipeline script, else the first of the python3 on PATH and the GUI's own venv interpreter that has those
+# packages (Homebrew relinks python3 to a new version without them: on 2026-11-23 to 3.15, while the venv is on 3.14);
+# never sys.executable inside Lamina.app, which is the bundle's host binary, not a plain interpreter
+ANALYSIS_PACKAGES = ("numpy", "scipy", "h5py", "matplotlib")
+
+
+def _has_packages(python: str) -> bool:
+    """Whether 'python' finds the analysis packages (located, not imported: a few tens of ms)."""
+    code = ("import importlib.util as u, sys; sys.exit(0 if all(u.find_spec(m) for m in %r) else 1)"
+            % (ANALYSIS_PACKAGES,))
+    try:
+        return subprocess.run([python, "-c", code], capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def analysis_python() -> str:
+    """The PYTHON rule above; the python3 on PATH (or this interpreter) when none has the packages, so the setup
+    check names what is missing."""
+    if os.environ.get("PYTHON"):
+        return os.environ["PYTHON"]
+    venv = Path(sys.prefix) / "bin" / "python3"
+    seen = []
+    for c in (shutil.which("python3"), str(venv) if venv.exists() else None):
+        if c and c not in seen:
+            seen.append(c)
+            if _has_packages(c):
+                return c
+    return shutil.which("python3") or sys.executable
+
+
+PYTHON = analysis_python()
 
 # (name passed to --field, label). run_ps_dtfe.sh takes any subset via FIELDS; run_dtfe.sh the subset it computes
 # (DTFE_ALLOWED_FIELDS: no dispersion). Both drivers default to the same analysis set, DEFAULT_FIELDS.

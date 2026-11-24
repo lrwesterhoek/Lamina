@@ -91,6 +91,32 @@ def double_pair(built: bool):
         rs.binary_built = orig
 
 
+def analysis_python_choice(tmp):
+    """rs.analysis_python: $PYTHON first; else a python3 on PATH without numpy/scipy/h5py/matplotlib (a Homebrew python
+    relinked to a new version) is passed over for the launcher's own venv interpreter."""
+    fake = Path(tmp) / "fakebin"
+    fake.mkdir(exist_ok=True)
+    (fake / "python3").write_text("#!/bin/sh\nexit 1\n")
+    (fake / "python3").chmod(0o755)
+    saved_path, saved_py = os.environ.get("PATH", ""), os.environ.pop("PYTHON", None)
+    try:
+        os.environ["PATH"] = f"{fake}{os.pathsep}{saved_path}"
+        got_bare = rs.analysis_python()
+        os.environ["PYTHON"] = "/some/python"
+        got_env = rs.analysis_python()
+    finally:
+        os.environ["PATH"] = saved_path
+        os.environ.pop("PYTHON", None)
+        if saved_py is not None:
+            os.environ["PYTHON"] = saved_py
+    venv = str(Path(sys.prefix) / "bin" / "python3")
+    has = rs._has_packages(venv) if Path(venv).exists() else False
+    check("the scripts' python: $PYTHON when set; a python3 on PATH without the analysis packages passed over for the "
+          "launcher's own venv interpreter (when that has them)", got_env == "/some/python"
+          and (got_bare == venv if has else got_bare == str(fake / "python3")) and not rs._has_packages(str(fake / "python3")),
+          f"{got_bare} {got_env} {venv} {has}")
+
+
 def main():
     tmp = Path(tempfile.mkdtemp(prefix="gui_runspec_")) / "Illustris TNG"
     try:
@@ -389,6 +415,7 @@ def _plots(tmp, sim, spec):
     check("core set, mode 'export': analyze.py export with the snapshots and no --only",
           [a[a.index("export"):] for a in argv_e if "export" in a] == [["export", "--snaps", "004", "099"]], str(argv_e))
     core_grids_warning()
+    analysis_python_choice(tmp)
     tick_helpers()
     run_outputs_not_inputs()
     run_options(tmp)
