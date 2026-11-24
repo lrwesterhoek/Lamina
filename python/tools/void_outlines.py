@@ -116,6 +116,22 @@ def coarsening(n: int, sigma_cells: float, free) -> int | None:
     return None
 
 
+def coarse_cached(snap, sim, method, prefix, data_root, k: int) -> bool:
+    """Whether the catalogue of the grid averaged k x k x k (pipeline.products(coarsen=k)) is cached and usable as it
+    is: present, of this grid, its R_v and settings today's (needs_build says no). Leaves config's frame as it was."""
+    from dtfelib import pipeline
+    saved = (pipeline.config.FIELD_RESOLUTION, pipeline.config.BOX_SIZE, pipeline.config.CELL_SIZE,
+             pipeline.config.SMOOTHING_SIGMA_CELLS, pipeline.config.FOOTPRINT_SIZE, pipeline.config.SMOOTHING_SIGMA_MPC)
+    prod = pipeline.products(int(snap), sim=sim, method=method, prefix=prefix, data_root=data_root, coarsen=k)
+    try:
+        pipeline.adopt_snapshot_grid(prod)
+        return not needs_build(prod)
+    finally:
+        prod.release()
+        (pipeline.config.FIELD_RESOLUTION, pipeline.config.BOX_SIZE, pipeline.config.CELL_SIZE,
+         pipeline.config.SMOOTHING_SIGMA_CELLS, pipeline.config.FOOTPRINT_SIZE, pipeline.config.SMOOTHING_SIGMA_MPC) = saved
+
+
 def needs_build(prod) -> bool:
     """voids() would BUILD the catalogue (none cached for this grid) or re-measure its radii from the smoothed field
     (r_v_stale), not just read it: either reads the density grid and smooths it, so the memory gate applies."""
@@ -208,7 +224,12 @@ def outlines(sim, snap, prefix=None, data_root=None, method="auto", sigma_mpc=No
         cell, box, n = pipeline.adopt_snapshot_grid(prod)
         if needs_build(prod):
             free = available_bytes()
-            k = coarsening(n, float(pipeline.config.SMOOTHING_SIGMA_CELLS), free)
+            sigma_cells = float(pipeline.config.SMOOTHING_SIGMA_CELLS)
+            # an averaged catalogue already cached is taken first, whatever the free memory says today (a tighter
+            # day would otherwise build another at 4x beside the cached 2x)
+            k = next((c for c in (2, 4) if n % c == 0 and sigma_cells / c >= COARSE_MIN_SIGMA_CELLS
+                      and coarse_cached(snap, sim, method, prefix, data_root, c)), None) \
+                or coarsening(n, sigma_cells, free)
             if k is None:
                 need = BUILD_BYTES_PER_CELL * float(n) ** 3
                 raise MemoryError(f"its catalogue is not cached (or its R_v is re-measured), and building it ({n}^3) "
