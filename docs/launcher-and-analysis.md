@@ -226,20 +226,33 @@ Explore > Open Output…), then the **Field**, **Component** (with in-plane **ve
   same, as the mean field computed from its velocity grid one plane at a time; the 3D view shows them as planes,
   not as a volume.
 - **Compare**: a figure grid of one field across redshifts, one snapshot across fields or across outputs.
-- **Save image…** with the presets *Standard*, *Publication* (vector PDF, 300 dpi), *Bare image* (the map alone,
-  one image pixel per data pixel) and *Slide* (larger fonts). The contour lines on screen are in every saved
+- **Units and classes.** Every colour bar and saved label gives the unit of what the map shows: km/s for the
+  velocity, km/s/Mpc for its derivatives, (km/s)² for the dispersion σ² (the trace), the dataset's own unit for a
+  per-particle scalar such as the potential and its gradient. The T-web and V-web classes are four named colours
+  (void, wall, filament, node), the shear's components are xx, xy, xz, yy and yz, and the web eigenvalues are λ1 ≥
+  λ2 ≥ λ3. The scalar's gradient (`.a_scalarGrad`) and standard DTFE's velocity spread in a cell (`.a_velStd`)
+  are listed when a run wrote them.
+- **Save image…** with the presets *Standard*, *Publication* (vector PDF, 300 dpi, in the figure scripts' serif
+  style), *Bare image* (the map alone, one image pixel per data pixel) and *Slide* (larger fonts). In 3D it writes a
+  PNG drawn at 3000 pixels on its longer side (the Save options' width when set in pixels), with the title and the
+  colour bar. The contour lines on screen are in every saved
   picture, the Bare image too; a PDF or SVG keeps them as lines up to 16000 pieces a colour and holds more as an
   image. The file name offered says what the picture shows: simulation, field, redshift,
   output prefix, grid, plane and slice position, smoothing, log or lin, and the overlays drawn, as in
   `TNG100-3-Dark_density_z0.00_ps_output1024_grid1024_xy-plane_z55.52Mpc_smooth0_log_contours.svg`.
 
-**Voids** draws the catalogue's distinct voids (see [Voids](#voids)) over the map, the figure grid and the 3D
-view, found at the production 10 cells or at the σ beside the tick (in Mpc, two cells or more; a search estimated
-over two minutes asks first). Draw them *as ellipsoids* (the default), with semi-axes √(2 |δ_min| / λ) where the
-Hessian's quadratic fit returns to the mean density, or *as spheres of R_v*, the other radius dashed if ticked; on
-the map each is the ellipse where it cuts the slice. **Sizes** keeps a range of radii, a click opens the
-inspector, and Save image also writes the outlines and a CSV. Tick **3D** beside Smoothing to see the field the
-voids belong to.
+**Voids** draws the voids (see [Voids](#voids)) over the map, the figure grid and the 3D view, found at the
+production 10 cells or at the σ beside the tick (in Mpc, two cells or more; a search estimated over two minutes
+asks first). Draw them *as ellipsoids* (the default) or *as spheres of R_v*, the other radius dashed if ticked.
+An ellipsoid is the Hessian's quadratic fit around the minimum at half its depth, semi-axes √(|δ_min| / λ); every
+deep minimum is drawn (as `plot/plot_ellipses_contour_3D.py` does), except one inside a deeper one's ellipsoid and
+one ten times longer than wide (the catalogue's axis-ratio limit). On
+the map each is the exact section where its ellipsoid cuts the slice, growing and shrinking as you scroll, with a
+dot at the minimum on its own layer; the spheres are the catalogue's distinct voids. A grid whose catalogue would not
+fit in the free memory at its own resolution (a 1024^3 set: about 86 GB) gets its voids from the grid averaged in
+2^3 or 4^3 blocks, at the same smoothing in Mpc, and the status line says so. **Sizes** keeps a range of
+radii, a click opens the inspector, and Save image also writes the outlines and a CSV. Tick **3D** beside
+Smoothing to see the field the voids belong to.
 
 **Show in 3D** draws the field as a translucent volume or on three planes, with the voids. Drag to turn it,
 right-drag to move it, scroll to zoom; in perspective (the default) scrolling in moves the eye through the field

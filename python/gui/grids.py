@@ -36,9 +36,13 @@ from dtfelib.cli import PS_GRADIENT_CHOICES  # noqa: E402,F401  (the figure scri
 from dtfelib.io import (FIELDS as _IO_FIELDS, LEGACY_SUFFIX, MEAN_FIELD_NAMES, _VELOCITY_SCALE_EXP,  # noqa: E402
                         caustic_is_fold, run_lambda_th)
 
-# the launcher's field table: dtfelib's + the per-particle scalar a run with a scalar dataset writes ('.a_scalar',
-# '--field scalar_a'; dtfelib's analysis never reads it, the Explore map can)
-FIELDS = {**_IO_FIELDS, "scalar": ("scalar", 1, False)}
+# the launcher's field table: dtfelib's + the grids its analysis never reads but the Explore map can show: the
+# per-particle scalar a run with a scalar dataset writes ('.a_scalar', '--field scalar_a') and its gradient
+# ('.a_scalarGrad', '--field scalarGradient_a': for the potential, minus the gravitational acceleration), and standard
+# DTFE's spread of the sampled velocities in a cell ('.a_velStd', '--field velocityStd_a')
+FIELDS = {**_IO_FIELDS, "scalar": ("scalar", 1, False), "scalar_gradient": ("scalarGrad", 3, False),
+          "velocity_std": ("velStd", 1, False)}
+SCALE_EXP = {**_VELOCITY_SCALE_EXP, "velocity_std": 0.5}     # u-units -> peculiar km/s, as the velocity
 
 # the two families of a phase-space output's velocity derivatives, as a map's name says them (field_label)
 GRADIENT_QUALIFIER = {"mean": "mean field ∇⟨v⟩", "stream": "stream average ⟨∇v⟩"}
@@ -59,7 +63,8 @@ FIELD_LABELS = {
     "dispersion_tensor": "dispersion tensor", "caustic": "caustic (fold) cells",
     "caustic_class": "caustic class", "tet_touch": "tetrahedra touching",
     "tweb": "T-web class", "tweb_eigenvalues": "T-web eigenvalues", "vweb": "V-web class",
-    "vweb_eigenvalues": "V-web eigenvalues", "scalar": "per-particle scalar",
+    "vweb_eigenvalues": "V-web eigenvalues", "scalar": "per-particle scalar", "scalar_gradient": "scalar gradient",
+    "velocity_std": "velocity spread in the cell",
 }
 # what a map's values mean, where the label cannot say it (the field list's tooltips)
 FIELD_HELP = {
@@ -82,6 +87,10 @@ FIELD_HELP = {
                        ("gradient", "velocity gradient"))},
     "mass_flux_divergence": "∇·(Σ ρ_s v_s), the streams' momentum (ρ/ρ̄ times velocity) out of the cell per volume, "
                             "from exact face sums: by continuity the rate the cell loses mass (an Exact run in 3D).",
+    "scalar_gradient": "The gradient of the run's per-particle scalar (its norm or one component); for the potential "
+                       "this is minus the gravitational acceleration, per Mpc.",
+    "velocity_std": "Standard DTFE: the standard deviation of the velocities sampled in the cell (the spread its "
+                    "cell average is taken over), in km/s.",
 }
 # The velocity derivatives (dtfelib.io.MEAN_FIELD_NAMES). Standard DTFE stores them as the derivatives of
 # its one velocity field, the mean field grad<v>; so does a PS-DTFE run with the face gradient (its default with the
@@ -103,15 +112,59 @@ CURL_FIELDS = frozenset({"vorticity", "vorticity_streams"})
 # vector fields that can be drawn as arrows (their in-plane components) over the colour map
 VECTOR_FIELDS = {"velocity"} | CURL_FIELDS
 # which component menu a field offers; 'norm' = the vector's length
-COMPONENTS = {3: ["norm", "x", "y", "z"], 5: ["1", "2", "3", "4", "5"], 6: ["xx", "xy", "xz", "yy", "yz", "zz"],
+# the shear's five: the traceless symmetric tensor's xx, xy, xz, yy, yz (zz = -xx - yy; src/web_fields.cc velocityShear)
+COMPONENTS = {3: ["norm", "x", "y", "z"], 5: ["xx", "xy", "xz", "yy", "yz"], 6: ["xx", "xy", "xz", "yy", "yz", "zz"],
               9: ["trace (divergence)", "xx", "xy", "xz", "yx", "yy", "yz", "zx", "zy", "zz"]}
 # A 2D build's grids (NO_DIM = 2, define.h): the fields whose component count differs from 3D --
 # velocity 2, the gradient 2x2, the symmetric dispersion tensor (xx, xy, yy), the traceless shear
 # (xx, xy), the eigenvalue pairs; the vorticity is one number (the z component of the curl)
 NCOMP_2D = {"velocity": 2, "gradient": 4, "dispersion_tensor": 3, "shear": 2, "vorticity": 1,
-            "tweb_eigenvalues": 2, "vweb_eigenvalues": 2}
+            "tweb_eigenvalues": 2, "vweb_eigenvalues": 2, "scalar_gradient": 2}
 COMPONENTS_2D = {"velocity": ["norm", "x", "y"], "gradient": ["trace (divergence)", "xx", "xy", "yx", "yy"],
-                 "dispersion_tensor": ["xx", "xy", "yy"]}
+                 "dispersion_tensor": ["xx", "xy", "yy"], "shear": ["xx", "xy"], "shear_streams": ["xx", "xy"],
+                 "scalar_gradient": ["norm", "x", "y"],
+                 "gradient_streams": ["trace (divergence)", "xx", "xy", "yx", "yy"]}
+# the unit of each field's values as a map shows them (the velocity and its derivatives in peculiar km/s after
+# velocity_factor; the dispersion is the trace of sigma^2; the T-web eigenvalues are of the potential's Hessian with
+# del^2 phi = delta, the V-web's of the shear in units of H0: both pure numbers); the colour bars and saved figures
+# say it (colourbar_label). The per-particle scalar names its own (scalar_units)
+FIELD_UNITS = {
+    "velocity": "km/s", "divergence": "km/s/Mpc", "vorticity": "km/s/Mpc", "shear": "km/s/Mpc",
+    "gradient": "km/s/Mpc", "divergence_streams": "km/s/Mpc", "vorticity_streams": "km/s/Mpc",
+    "shear_streams": "km/s/Mpc", "gradient_streams": "km/s/Mpc", "mass_flux_divergence": "km/s/Mpc",
+    "dispersion": "(km/s)²", "dispersion_tensor": "(km/s)²", "velocity_std": "km/s",
+}
+# the cosmic-web class maps: a cell's class is the number of eigenvalues above the threshold (src/web_fields.cc:
+# 0 void, 1 wall, 2 filament, 3 node; in 2D 0 void, 1 filament, 2 node), drawn in four fixed colours with the classes'
+# names on the colour bar, never as a continuous scale
+WEB_FIELDS = frozenset({"tweb", "vweb"})
+WEB_CMAP = "web classes"
+WEB_COLOURS = ("#26456e", "#6fa8c9", "#f0a830", "#c3262d")
+WEB_RANGE = (-0.5, 3.5)
+
+
+def web_classes(dim: int = 3) -> tuple[str, ...]:
+    """The class names of a T-web / V-web map, by value (0, 1, ...)."""
+    return ("void", "filament", "node") if dim == 2 else ("void", "wall", "filament", "node")
+
+
+def mpl_cmap(cmap: str):
+    """A colour map name as matplotlib takes it: the web classes' listed colours, any other name as it is."""
+    if cmap == WEB_CMAP:
+        from matplotlib.colors import ListedColormap
+        return ListedColormap(WEB_COLOURS, name=WEB_CMAP)
+    return cmap
+
+
+def class_colorbar_mpl(cb, dim: int = 3) -> None:
+    """A saved figure's colour bar of a web-class map: a tick at each class value, labelled with its name."""
+    names = web_classes(dim)
+    cb.set_ticks(list(range(len(names))))
+    cb.set_ticklabels(list(names))
+    cb.ax.tick_params(length=0)
+
+
+EIGEN_FIELDS = frozenset({"tweb_eigenvalues", "vweb_eigenvalues"})
 
 
 def sym_diag(dim: int) -> list[int]:
@@ -129,6 +182,8 @@ def components(name: str, ncomp: int, dim: int = 3) -> list[str]:
     field has one (they are computed, not stored)."""
     if ncomp <= 1:
         return ["value"]
+    if name in EIGEN_FIELDS:            # the eigenvalues, stored largest first (src/web_fields.cc)
+        return ["λ1", "λ2", "λ3"][:ncomp]
     if dim == 2:
         return COMPONENTS_2D.get(name, [str(i + 1) for i in range(ncomp)])
     return COMPONENTS.get(ncomp, [str(i + 1) for i in range(ncomp)])
@@ -231,9 +286,12 @@ LOG_SCALARS = frozenset({"SubfindDensity", "SubfindDMDensity"})
 SCALAR_NAMES = {"Potential": "Gravitational potential"}
 
 
-def diverging(o, name: str) -> bool:
+def diverging(o, name: str, component: str | None = None) -> bool:
     """Whether a map of a field is diverging, about 0 (a symmetric range, RdBu_r): the DIVERGING fields, and the
-    'scalar' of an output whose dataset is signed (SIGNED_SCALARS: the potential)."""
+    'scalar' of an output whose dataset is signed (SIGNED_SCALARS: the potential); never a vector's norm (it is
+    never negative: a sequential map of it)."""
+    if component == "norm":
+        return False
     return name in DIVERGING or (name == "scalar" and o is not None and scalar_dataset(o) in SIGNED_SCALARS)
 
 
@@ -442,15 +500,20 @@ def on_drop_cubes(fn) -> None:
         _DROP_CALLBACKS.append(fn)
 
 
+_DROP_GEN = 0                           # drop_cubes()' count: a source plane kept from before a drop is not served
+
+
 def drop_cubes() -> int:
     """Forget every cached cube, mean-field plane and plane window, and every cache registered with on_drop_cubes
     (the bytes they held). The launcher calls it when a job or a memory check starts: the caches are anonymous memory
     of the GUI process, and the binary's auto-tuner budgets from the memory that is free at that moment. What is on
     screen stays: the map's plane, and the 3D view's volume and its GPU copy (View3D holds them, not the caches:
     volume3d's drop_volumes says why; the 3D view's own memory check, its detail choice, counts them)."""
+    global _DROP_GEN
     with _CUBES_LOCK:
         n = sum(a.nbytes for a in _CUBES.values()) + sum(a.nbytes for a in _MF_PLANES.values()) \
             + sum(a.nbytes for a in _PLANE_WIN.values())
+        _DROP_GEN += 1                  # every output's kept source plane (OutputSet._slice_source) goes too
         _CUBES.clear()
         _MF_PLANES.clear()
         _PLANE_WIN.clear()
@@ -603,9 +666,9 @@ class OutputSet:
         """The factor from a field's stored units to the map's: u-units -> peculiar km/s (FieldSet) for the
         velocity and its derivatives at a known redshift; a^a_scaling for the per-particle scalar where the snapshot's
         dataset says it (scalar_units: physical); else 1."""
-        if name == "scalar":
+        if name in ("scalar", "scalar_gradient"):
             return scalar_units(self)[0]
-        exp = _VELOCITY_SCALE_EXP.get(name)
+        exp = SCALE_EXP.get(name)
         if exp is None or self.redshift is None:
             return 1.0
         return (1.0 / (1.0 + self.redshift)) ** exp       # u-units -> peculiar km/s (FieldSet)
@@ -717,12 +780,28 @@ class OutputSet:
         index = self.n // 2 if index is None else int(index)
         if name == "caustic" and self.fold_exact():
             return self._fold_plane(int(axis), index)
-        if name in self.derived_fields() or gradient == "mean-field" and self.gradient_family(name, gradient) == "mean" \
-                and estimator_label(self) == "PS-DTFE" and not self.face_gradient:
-            plane = self._mean_field_plane(name, int(axis), index)
-        else:
-            plane = self._raw_plane(name, int(axis), index)
-        return self.component_values(name, plane, component)
+        return self.component_values(name, self._slice_source(name, int(axis), index, gradient), component)
+
+    def _slice_source(self, name: str, axis: int, index: int, gradient: str = "stored") -> np.ndarray:
+        """The plane slice() takes a map's values from, as stored (components last) or the mean field computed from
+        the velocity -- the last one kept on the output, keyed by the field, plane, family and the file's version
+        (mtime, size): a map and its arrows (two components of one vector), or a colour change, read and cut it
+        once. Never modified by its users (component_values makes new arrays)."""
+        mean = name in self.derived_fields() or gradient == "mean-field" and \
+            self.gradient_family(name, gradient) == "mean" and estimator_label(self) == "PS-DTFE" and not self.face_gradient
+        ff = self.files.get("velocity") if mean else self.files.get(name)     # the file the plane comes from
+        try:
+            st = ff.path.stat() if ff is not None else None
+        except OSError:
+            st = None
+        key = (name, int(axis), int(index), bool(mean), None if st is None else (st.st_mtime_ns, st.st_size),
+               _DROP_GEN)
+        kept = getattr(self, "_source_kept", None)
+        if kept is not None and kept[0] == key and st is not None:
+            return kept[1]
+        plane = self._mean_field_plane(name, int(axis), int(index)) if mean else self._raw_plane(name, int(axis), int(index))
+        self._source_kept = (key, plane)
+        return plane
 
     def component_values(self, name: str, arr: np.ndarray, component: str, fresh: bool = True) -> np.ndarray:
         """The values a map of 'name' shows, from its grid's values 'arr' as stored (a plane, or the 3D view's block
@@ -770,8 +849,10 @@ class OutputSet:
         if ff is None or ff.ncomp != self.dim:          # a vector: one component per axis
             return None
         rest = [0, 1] if self.dim == 2 else [a for a in range(3) if a != axis]
-        u = self.slice(name, axis, index, "xyz"[rest[0]], gradient)      # rows = rest[0], columns = rest[1]
-        v = self.slice(name, axis, index, "xyz"[rest[1]], gradient)
+        index = self.n // 2 if index is None else int(index)
+        src = self._slice_source(name, int(axis), index, gradient)                   # one plane for both components
+        u = self.component_values(name, src, "xyz"[rest[0]])           # rows = rest[0], columns = rest[1]
+        v = self.component_values(name, src, "xyz"[rest[1]])
         if smooth > 0:
             try:
                 from scipy.ndimage import gaussian_filter
@@ -924,7 +1005,7 @@ def field_key(o, name: str) -> str:
     """What a map of a field shows, as one word: the field's name, a per-particle scalar with its dataset
     ('scalar:Potential'): two outputs' 'scalar' grids may hold different quantities (a comparison, the figure grid's
     shared ranges and colours, a fixed range keep to one)."""
-    ds = scalar_dataset(o) if name == "scalar" and o is not None else ""
+    ds = scalar_dataset(o) if name in ("scalar", "scalar_gradient") and o is not None else ""
     return f"{name}:{ds}" if ds else name
 
 
@@ -958,8 +1039,10 @@ def field_label(o, name: str, family: str = "", qualify: bool | None = None) -> 
     divergence (mean field ∇⟨v⟩)' or '(stream average ⟨∇v⟩)' (family: OutputSet.gradient_family) for a phase-space
     output -- or, with 'qualify', for every output: a comparison or a figure grid with a phase-space panel names the
     standard-DTFE panel's family too (its stored grid is the mean field). A standard-DTFE map alone keeps its name."""
-    if name == "scalar" and o is not None and scalar_dataset(o):    # the dataset's name, its unit where known
+    if name in ("scalar", "scalar_gradient") and o is not None and scalar_dataset(o):   # the dataset's name, its unit
         shown, unit = SCALAR_NAMES.get(scalar_dataset(o), scalar_dataset(o)), scalar_units(o)[1]
+        if name == "scalar_gradient":
+            shown, unit = f"{shown} gradient", (f"{unit}/Mpc" if unit else "")
         return f"{shown} [{unit}]" if unit else shown
     base = FIELD_LABELS.get(name, name)
     if not family:
@@ -970,14 +1053,21 @@ def field_label(o, name: str, family: str = "", qualify: bool | None = None) -> 
 
 
 def component_suffix(component: str) -> str:
-    """A map's component as its title and colour bar append it: ' [x]'; nothing for a scalar's 'value'."""
-    return "" if component in ("value", "") else f" [{component}]"
+    """A map's component as its title and colour bar append it: ', x'; nothing for a scalar's 'value'."""
+    return "" if component in ("value", "") else f", {component}"
+
+
+def field_unit(name: str) -> str:
+    """The unit of a field's map values (FIELD_UNITS), '' for a pure number or a count."""
+    return FIELD_UNITS.get(name, "")
 
 
 def colourbar_label(label: str, req: dict) -> str:
     """The colour bar's text of a map request (the slice, a zoom, the 3D view): 'log₁₀ ' on a log map, the field's
-    label (field_label), its component (component_suffix)."""
-    return ("log₁₀ " if req["log"] else "") + label + component_suffix(req["component"])
+    label (field_label), its component (component_suffix) and its unit in brackets (field_unit; the per-particle
+    scalar's label carries its own)."""
+    unit = field_unit(req.get("field", ""))
+    return ("log₁₀ " if req["log"] else "") + label + component_suffix(req["component"]) + (f" [{unit}]" if unit else "")
 
 
 def smoothed(plane, sigma: float):
@@ -1198,11 +1288,14 @@ _LUTS: dict[str, np.ndarray] = {}
 def lut(cmap: str) -> np.ndarray:
     """(256, 3) uint8 colour table of a matplotlib colormap (a grey ramp without matplotlib)."""
     if cmap not in _LUTS:
-        try:
-            import matplotlib
-            table = matplotlib.colormaps[cmap](np.linspace(0, 1, 256))[:, :3]
-        except Exception:
-            table = np.repeat(np.linspace(0, 1, 256)[:, None], 3, axis=1)
+        if cmap == WEB_CMAP:            # four blocks over WEB_RANGE: values 0, 1, 2, 3 at their centres
+            table = np.repeat([[int(h[i:i + 2], 16) / 255.0 for i in (1, 3, 5)] for h in WEB_COLOURS], 64, axis=0)
+        else:
+            try:
+                import matplotlib
+                table = matplotlib.colormaps[cmap](np.linspace(0, 1, 256))[:, :3]
+            except Exception:
+                table = np.repeat(np.linspace(0, 1, 256)[:, None], 3, axis=1)
         _LUTS[cmap] = (table * 255 + 0.5).astype(np.uint8)
     return _LUTS[cmap]
 
@@ -1240,7 +1333,10 @@ def colorize(plane: np.ndarray, cmap: str = "viridis", log: bool = False,
              vrange: tuple | None = None) -> tuple[np.ndarray, tuple[float, float]]:
     """plane -> (H, W, 3) uint8 RGB and the (vmin, vmax) shown. log10 of positive values (the rest
     at the bottom of the scale); range from the percentiles 'clip' unless 'vrange' is given;
-    'symmetric' centres a diverging map on 0."""
+    'symmetric' centres a diverging map on 0. The web classes' colour map (WEB_CMAP) always shows its classes over
+    WEB_RANGE, never on a log scale."""
+    if cmap == WEB_CMAP:
+        log, symmetric, vrange = False, False, WEB_RANGE
     data = _scaled(plane, log)
     if vrange is not None:
         vmin, vmax = vrange
@@ -1460,10 +1556,11 @@ def drawn_ellipsoids(res: dict) -> dict:
     """The voids' ellipsoids as Explore draws them -- the ONE place their size is computed: the map's sections, the
     3D view, the inspector, the Sizes range and the saved CSV all read this. The quadratic fit around each minimum,
     delta(x) = delta_min + 1/2 sum lambda_i x_i^2 (the catalogue's Hessian eigenvalues lambda_i and eigenvectors), at
-    the MEAN density delta = 0: centre the minimum, axes the eigenvectors, semi-axes sqrt(2 |delta_min| / lambda_i)
-    (= the catalogue's 2 cell / sqrt(lambda_i) times sqrt(|delta_min| / 2)). Only where it exists: delta_min < 0 and
-    all three eigenvalues > 0 (a true minimum below the mean) of a resolved void; elsewhere NaN and 'ok' False (drawn
-    as its centre mark alone). {'semi' (k, 3) Mpc, a >= b >= c; 'dirs' (k, 3, 3) unit directions in rows; 'M'
+    HALF its depth, delta = delta_min / 2 (Luuk's choice 2026-11-24 over the mean density, which a flat-bottomed void
+    overshoots: the inner part, where the quadratic holds): centre the minimum, axes the eigenvectors, semi-axes
+    sqrt(|delta_min| / lambda_i) (= the catalogue's 2 cell / sqrt(lambda_i) times sqrt(|delta_min|) / 2). Only where it exists: delta_min < 0 and
+    all three eigenvalues > 0 (a true minimum below the mean), whether or not the catalogue's fit passed its size cuts;
+    elsewhere NaN and 'ok' False (drawn as its centre mark alone). {'semi' (k, 3) Mpc, a >= b >= c; 'dirs' (k, 3, 3) unit directions in rows; 'M'
     (k, 3, 3) the semi-axis vectors in columns (view3d's shape matrix); 'ok' (k,); 'r' (k,) (a b c)^(1/3) Mpc, 'R_ell'}. Kept
     in the result ('_drawn'). A result without 'eigenvalues_cells' (an older helper) takes the catalogue's |lambda|
     from its semi-axes, their signs unknown."""
@@ -1481,10 +1578,54 @@ def drawn_ellipsoids(res: dict) -> dict:
         ok = (np.isfinite(delta) & (delta < 0) & np.all(np.isfinite(ev) & (ev > 0), axis=1)
               & np.all(np.isfinite(dirs).reshape(n, 9), axis=1))
         lam = np.where(ev > 0, ev, np.nan)
-        semi = np.where(ok[:, None], cell * np.sqrt(2.0 * np.abs(delta)[:, None] / lam), np.nan)
+        semi = np.where(ok[:, None], cell * np.sqrt(np.abs(delta)[:, None] / lam), np.nan)
     out = {"semi": semi, "dirs": dirs, "M": np.swapaxes(dirs, 1, 2) * semi[:, None, :], "ok": ok,
            "r": np.cbrt(np.prod(semi, axis=1))}
     res["_drawn"] = out
+    return out
+
+
+ELL_MAX_AXIS_RATIO = 10.0       # config.ELLIPSOID_CUT_RULES' max_axis_ratio, the one size rule the drawn sample keeps
+
+
+def ellipsoid_sample(res: dict) -> np.ndarray:
+    """The voids drawn as ellipsoids (bool per catalogue row): the deep minima (void_outlines' 'deep') with a drawn
+    ellipsoid (drawn_ellipsoids' 'ok'), deepest first, each kept unless its minimum lies inside the drawn ellipsoid
+    of a deeper one already kept (periodic): a minimum inside a deeper void's ellipsoid is a dip within that void,
+    not a void of its own; none with a / c above ELL_MAX_AXIS_RATIO (a minimum almost flat along one axis: a needle
+    across the box). The catalogue's distinct sample does the same with spheres of R_v among the voids whose fit
+    passes its size cuts, which leaves out the largest, flattest voids; the drawn ellipsoids need no such cut.
+    Kept in the result ('_ell_sample')."""
+    kept = res.get("_ell_sample")
+    if kept is not None:
+        return kept
+    d = drawn_ellipsoids(res)
+    n = len(d["ok"])
+    deep = np.asarray(res["deep"], dtype=bool) if res.get("deep") is not None \
+        else np.asarray(res.get("distinct") or [False] * n, dtype=bool)
+    with np.errstate(invalid="ignore", divide="ignore"):    # the catalogue's own axis-ratio limit: a needle (a
+        needle = d["semi"][:, 0] / d["semi"][:, 2] > ELL_MAX_AXIS_RATIO      # minimum flat along one axis) is no void
+    cand = np.nonzero(deep & d["ok"] & ~needle)[0]
+    delta = np.array([np.nan if v is None else v for v in res["delta"]], dtype=np.float64)
+    c = np.asarray(res["centres_mpc"], dtype=np.float64).reshape(-1, 3)
+    box = float(res["box_mpc"])
+    out = np.zeros(n, dtype=bool)
+    if cand.size:
+        from scipy.spatial import cKDTree
+        tree = cKDTree(c[cand] % box, boxsize=box)          # every candidate's minimum, periodic
+        inside = np.zeros(n, dtype=bool)                    # a minimum inside a kept, deeper one's ellipsoid
+        for k in cand[np.argsort(delta[cand], kind="stable")]:
+            if inside[k]:
+                continue
+            out[k] = True                                   # kept: the minima inside its ellipsoid are left out
+            near = cand[np.asarray(tree.query_ball_point(c[k] % box, float(np.nanmax(d["semi"][k]))), dtype=np.int64)]
+            near = near[near != k]
+            if near.size:
+                dx = c[near] - c[k]
+                dx -= box * np.round(dx / box)
+                u = np.linalg.solve(d["M"][k], dx.T).T          # u = M^-1 (x - centre): inside where |u| < 1
+                inside[near[np.einsum("ki,ki->k", u, u) < 1.0]] = True
+    res["_ell_sample"] = out
     return out
 
 
@@ -1548,20 +1689,21 @@ def void_overlay(v: dict | None, axis: int, position: float, rest, lo, hi, n0, n
     catalogue's. 'v' (explore_voids: the rows shown): {'rows', 'centres', 'box', 'shape' ('ellipsoid' or 'sphere'),
     'r_v', 'M' and 'reach' (the drawn ellipsoids, NaN where none; reach (k, 3) their half extents along x, y, z, or
     (k,) along 'axis'), 'other' (the dashed circles' radii, or None)}.
-    Spheres: R_v's circles, as before the ellipsoids existed. Ellipsoids: each one's section and the mark of its
-    centre while the slice cuts it, a void without one its mark on its own layer."""
+    Spheres: R_v's circles, as before the ellipsoids existed. Ellipsoids: each one's exact section by the slice, and
+    the mark of its centre (the minimum) on its own layer (within 'half', half a cell)."""
     out = {"circles": [], "dashed": [], "ellipses": [], "marks": []}
     if not v or not len(v["rows"]):
         return out
     rows = np.asarray(v["rows"], dtype=np.int64)
     box = float(v["box"])
     if v.get("shape") == "ellipsoid":
+        # each ellipsoid's exact section by the slice (it grows and shrinks as the slices are scrolled), and the void's
+        # centre -- its minimum -- marked on the minimum's own layer only
         out["ellipses"] = [(x, y, rx, ry, a, int(rows[k])) for x, y, rx, ry, a, k in
                            void_ellipses(v["centres"], v["M"], box, axis, position, rest, lo, hi, n0, n1, periodic)]
-        reach = np.asarray(v["reach"], dtype=np.float64)
-        reach = reach[:, axis] if reach.ndim == 2 else reach            # (k, 3): the half extent along each axis
         out["marks"] = [(x, y, int(rows[k]), own) for x, y, k, own in
-                        void_marks(v["centres"], reach, box, axis, position, rest, lo, hi, n0, n1, half, periodic)]
+                        void_marks(v["centres"], np.zeros(len(rows)), box, axis, position, rest, lo, hi, n0, n1, half,
+                                   periodic)]
     else:
         out["circles"] = [(x, y, rx, ry, int(rows[k])) for x, y, rx, ry, k in
                           void_circles(v["centres"], v["r_v"], box, axis, position, rest, lo, hi, n0, n1, periodic)]
@@ -1703,8 +1845,8 @@ def void_info(res: dict, k: int, short: bool = False) -> str:
     ell = ellipsoid_text(res, k)
     lines = [f"<b>void {k}</b> · {flags} · centre ({', '.join(f'{float(v):.2f}' for v in c)}) Mpc",
              " · ".join(radii),
-             (f"drawn ellipsoid (where the fit returns to the mean density): a, b, c = {ell}" if ell else
-              "no ellipsoid at the mean density (δ not below the mean, or not a minimum along every axis): its "
+             (f"drawn ellipsoid (where the Hessian fit reaches half the depth, δ_min/2): a, b, c = {ell}" if ell else
+              "no ellipsoid (δ not below the mean, or not a minimum along every axis): its "
               "centre is marked"),
              f"catalogue's fit: R_eff {mpc(res['r_eff_mpc'][k])} ((a b c)^⅓{_semi_axes_text(res, k)}) · "
              f"central δ {d_text}"]

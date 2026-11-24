@@ -55,6 +55,7 @@ DEFAULTS = {
     "margins": "tight",         # "tight" (matplotlib's 0.1 in), "pad" (the padding below) or "none"
     "pad": 0.1,                 # inches, for "pad"
     "font_scale": 1.0,
+    "serif": False,             # serif text with Computer Modern maths: the figure scripts' style (dtfelib.figures)
     "transparent": False,
     "title": True,
     "panel_titles": True,       # the figure grid: each panel's title (or its inside label when merged)
@@ -79,7 +80,7 @@ _RANGES = {"dpi": (DPI_MIN, DPI_MAX), "width": (0.0, 100000.0), "pad": (0.0, 2.0
 _BARE = {"kind": "full", "margins": "none", "title": False, "panel_titles": False, "frame": False, "ticks": False,
          "tick_labels": False, "axis_names": False, "colorbar": False, "colorbar_label": False, "arrows": False,
          "voids": False}
-PRESETS = {"standard": {}, "publication": {"format": "pdf", "dpi": 300}, "bare": _BARE,
+PRESETS = {"standard": {}, "publication": {"format": "pdf", "dpi": 300, "serif": True}, "bare": _BARE,
            "slide": {"font_scale": 1.8}}
 PRESET_NAMES = (("standard", "Standard (as before)"), ("publication", "Publication: vector PDF, 300 dpi"),
                 ("bare", "Bare image: the map alone, full resolution"), ("slide", "Slide: large fonts"))
@@ -87,8 +88,8 @@ PRESET_SHORT = {"standard": "Standard", "publication": "Publication", "bare": "B
 PRESET_TIPS = {
     "standard": "What Save image and Save figure always wrote: title, axes in Mpc, colour bar, arrows and void "
                 "outlines as on screen, PNG at 200 dpi, cropped tight",
-    "publication": "Everything on, as a vector PDF (the text stays text, editable); a PNG or TIFF chosen in the file "
-                   "dialog gets 300 dpi",
+    "publication": "Everything on, as a vector PDF (the text stays text, editable) in the figure scripts' serif "
+                   "style; a PNG or TIFF chosen in the file dialog gets 300 dpi",
     "bare": "Only the map and the contour lines it shows: no frame, axes, title, colour bar, arrows or outlines; one "
             "data pixel per image pixel, the colours and range as on screen",
     "slide": "Everything on with fonts 1.8 times larger, for a projector",
@@ -283,6 +284,9 @@ def rc(opts: dict, fmt: str = "png") -> dict:
     s = float(opts.get("font_scale", 1.0))
     if s != 1.0:
         d["font.size"] = float(matplotlib.rcParams["font.size"]) * s
+    if opts.get("serif"):                   # the figure scripts' look (dtfelib.figures.apply)
+        d["font.family"] = "serif"
+        d["mathtext.fontset"] = "cm"
     if fmt == "pdf":
         d["pdf.fonttype"] = 42
     if fmt == "svg":
@@ -566,7 +570,7 @@ def _dialog_class():
             self._fill(self.opened)
             self._select_preset()
             self.preset.currentIndexChanged.connect(self._preset_picked)
-            for wdg in (self.kind_figure, self.kind_full, self.match, self.transparent, self.colorbar,
+            for wdg in (self.kind_figure, self.kind_full, self.match, self.transparent, self.serif, self.colorbar,
                         self.colorbar_label, self.arrows, self.voids, self.title, self.panel_titles, self.frame,
                         self.ticks, self.tick_labels, self.axis_names, self.units):
                 wdg.toggled.connect(self._edited)
@@ -665,6 +669,9 @@ def _dialog_class():
             self.font_scale.setSuffix(" %")
             self.font_scale.setToolTip("Every text of the figure scaled by this")
             form.addRow("Font size", self.font_scale)
+            self.serif = q["QCheckBox"]("Serif text, as the figure scripts")
+            self.serif.setToolTip("Serif text with Computer Modern maths: the look of the paper figures the scripts make")
+            pv.addWidget(self.serif)
             self.transparent = q["QCheckBox"]("Transparent background")
             self.transparent.setToolTip("No white behind the axes and text (PNG, TIFF, PDF, SVG)")
             pv.addWidget(self.transparent)
@@ -785,6 +792,7 @@ def _dialog_class():
                 self.pad.setValue(float(o["pad"]))
                 self.font_scale.setValue(int(round(100 * o["font_scale"])))
                 self.transparent.setChecked(o["transparent"])
+                self.serif.setChecked(o["serif"])
                 for k in ("title", "panel_titles", "frame", "ticks", "tick_labels", "axis_names", "units", "colorbar",
                           "colorbar_label", "arrows", "voids"):
                     getattr(self, k).setChecked(bool(o[k]))
@@ -801,6 +809,7 @@ def _dialog_class():
                 "width": self.width.value(), "width_unit": self.width_unit.currentData(),
                 "margins": self.margins.currentData(), "pad": self.pad.value(),
                 "font_scale": self.font_scale.value() / 100.0, "transparent": self.transparent.isChecked(),
+                "serif": self.serif.isChecked(),
                 **{k: getattr(self, k).isChecked() for k in ("title", "panel_titles", "frame", "ticks", "tick_labels",
                                                               "axis_names", "units", "colorbar", "colorbar_label",
                                                               "arrows", "voids")},
@@ -847,7 +856,7 @@ def _dialog_class():
             deco = not full and not borderless             # title, axes and colour bar can be drawn
             grid = bool(self.ctx.get("grid"))
             for wdg in (self.dpi, self.match, self.width, self.width_unit, self.margins, self.font_scale,
-                        self.transparent):
+                        self.transparent, self.serif):
                 wdg.setEnabled(not full)
             self.dpi.setEnabled(not full and not self.match.isChecked())
             self.pad.setEnabled(not full and self.margins.currentData() == "pad")

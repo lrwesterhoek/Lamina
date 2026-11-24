@@ -43,9 +43,11 @@ def grid_items(req: dict) -> list:
         # read and smoothed as the map is (in 2D, or the slice of the cube smoothed in 3D: grids.map_plane)
         plane = G.map_plane(o, name, axis, idx, comp, grad, smooth, bool(req.get("smooth3d")))
         log, cmap = p["log"], p["cmap"]
-        symmetric = G.diverging(o, name) and not log
+        web = cmap == G.WEB_CMAP                            # a class map: its classes over their fixed range
+        log = log and not web
+        symmetric = G.diverging(o, name, comp) and not log and not web
         img = np.ascontiguousarray(plane.T[::-1])          # the map's orientation: horizontal = first rest axis
-        lo, hi = G.value_range(img, log, (clip, 100 - clip), symmetric)
+        lo, hi = G.WEB_RANGE if web else G.value_range(img, log, (clip, 100 - clip), symmetric)
         finite = bool(np.isfinite(plane).any() and (not log or bool((plane > 0).any())))
         rest = [a for a in range(3) if a != axis] if o.dim == 3 else [0, 1]
         ext = [o.lo[rest[0]], o.lo[rest[0]] + o.length[rest[0]], o.lo[rest[1]], o.lo[rest[1]] + o.length[rest[1]]]
@@ -88,10 +90,16 @@ def panel_names(it: dict) -> tuple[str, str, str, str]:
     (grids.field_label, the item's 'qualify')."""
     o, name, comp = it["output"], it["field"], it["component"]
     label = G.field_label(o, name, it.get("family", ""), it.get("qualify"))
-    ctext = "" if comp in ("value", "") else f" [{comp}]"
+    ctext = G.component_suffix(comp)
     who = o.sim or o.dir.name
     when = f"z = {o.redshift:.2f}" if o.redshift is not None else (o.title.split(" · ")[1] if " · " in o.title else "")
     return label, ctext, who, when
+
+
+def unit_text(it: dict) -> str:
+    """' [km/s]': a panel's unit for its colour bar (grids.field_unit), '' for a pure number."""
+    unit = G.field_unit(it["field"])
+    return f" [{unit}]" if unit else ""
 
 
 def type_tag(o) -> str:
@@ -247,7 +255,8 @@ def grid_tiles(req: dict, items: list, max_tile: int = 1024) -> tuple[np.ndarray
     if len(diff["quantities"]) == 1 and (req["shared"] or req["merged"] or len(diff["outs"]) == 1):
         it0 = next(it for it in items if it is not None)
         label, ctext, _w, _t = panel_names(it0)
-        bar = (it0["cmap"], (it0["lo"], it0["hi"]), ("log₁₀ " if it0["log"] else "") + label + ctext, it0["log"])
+        bar = (it0["cmap"], (it0["lo"], it0["hi"]), ("log₁₀ " if it0["log"] else "") + label + ctext + unit_text(it0),
+               it0["log"])
     return out, labels, bar
 
 
@@ -335,7 +344,7 @@ def grid_figure(req: dict, items: list, dpi: float = 200.0, opts: dict | None = 
         if it["log"]:
             data = np.log10(np.where(data > 0, data, np.nan))
         hi = it["hi"] if it["hi"] > it["lo"] else it["lo"] + 1.0
-        im = ax.imshow(data, origin="lower", extent=e, cmap=it["cmap"], vmin=it["lo"], vmax=hi,
+        im = ax.imshow(data, origin="lower", extent=e, cmap=G.mpl_cmap(it["cmap"]), vmin=it["lo"], vmax=hi,
                        aspect="equal", interpolation="nearest")
         lines = it.get("lines")
         if lines:                           # the panel's contour lines, as on screen
@@ -373,9 +382,11 @@ def grid_figure(req: dict, items: list, dpi: float = 200.0, opts: dict | None = 
             if bars_on:
                 cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
                 if o_["colorbar_label"]:
-                    cb.set_label(("log₁₀ " if it["log"] else "") + label + ctext, fontsize=8 * fs)
+                    cb.set_label(("log₁₀ " if it["log"] else "") + label + ctext + unit_text(it), fontsize=8 * fs)
                 cb.ax.tick_params(labelsize=7 * fs)
                 G.mark_levels_mpl(cb, lines, it["lo"], hi, CT.LINE_WIDTH_PT)
+                if it["cmap"] == G.WEB_CMAP:
+                    G.class_colorbar_mpl(cb, o.dim)
     auto = shown = grid_suptitle(req, items)
     first = next((it["output"] for it in items if it is not None), None)
     if o_["unit"] != "mpc" and req.get("position_at") and first is not None:
@@ -412,7 +423,10 @@ def grid_figure(req: dict, items: list, dpi: float = 200.0, opts: dict | None = 
             # the quantity's panels share its range, so its levels
             G.mark_levels_mpl(cb, it.get("lines"), it["lo"], it["hi"], CT.LINE_WIDTH_PT)
             label, ctext, _w, _t = panel_names(it)
-            text = ("log₁₀ " if it["log"] else "") + label + ("\n" + ctext.strip() if ctext else "")
+            text = ("log₁₀ " if it["log"] else "") + label + ("\n" + ctext.strip(", ") if ctext else "") \
+                + unit_text(it)
+            if it["cmap"] == G.WEB_CMAP:
+                G.class_colorbar_mpl(cb, it["output"].dim)
             size = 8 * fs * float(np.clip(h * H / 1.6, 0.6, 1.0))   # a short bar (many of them): smaller text
             if o_["colorbar_label"]:
                 cb.set_label(text, fontsize=size)
@@ -854,7 +868,8 @@ class GridMixin:
     def _grid_cmap(self, o, name: str) -> str:
         if self._same_as_map(o, name):
             return self.cmap.currentText()
-        return "RdBu_r" if G.diverging(o, name) else "tab10" if name in ("tweb", "vweb") else \
+        return "RdBu_r" if G.diverging(o, name, G.components(name, o.ncomp(name), o.dim)[0]) else \
+            G.WEB_CMAP if name in G.WEB_FIELDS else \
             "magma" if name in ("density", "dispersion") else "viridis"
 
     def _grid_log(self, o, name: str) -> bool:

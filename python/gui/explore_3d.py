@@ -39,7 +39,7 @@ VIEW3D_TIP = ("Show the map's field in 3D: the whole box as a translucent volume
               "voids at their true size. The volume: the field averaged down to the detail chosen, its "
               "low values see-through and its high values opaque in the map's colours; the planes: the map's own "
               "slice and the middle of the other two. The voids as the Map group's 'Voids' row draws them: their "
-              "ellipsoids at the mean density (the planes show the same sections as the map), or spheres of R_v; "
+              "Hessian ellipsoids (the planes show where each one cuts them), or spheres of R_v; "
               "the other outline dashed when ticked there. A void near a face is drawn once, at its catalogue "
               "centre, and may reach past the box. Any change to the map's field or colours follows (the planes: "
               "its slice too); the voids need 'Voids' ticked.")
@@ -74,6 +74,11 @@ OPACITY_TIP = ("How opaque the densest cells are: the opacity of a cell at the h
 FAST_SCALE = 0.5                # while the view turns: the coarse cube on a half-size picture
 SHARP_CELL_PX = 3.0             # the settled picture: no finer than this many device pixels a cell
 PREVIEW_SCALE = 0.5             # a large cube settles in two steps: first at half the settled picture's pixels a side
+# Save image in 3D: the picture's longer side in pixels (the Save options' width when it is set in pixels), drawn
+# offscreen at that resolution -- the volume, the outlines, the title above and the colour bar below -- not a grab of
+# the screen; never above SAVE_3D_MAX
+SAVE_3D_SIDE = 3000
+SAVE_3D_MAX = 8192
 PREVIEW_CELLS = 384             # (a cube of at least this many cells along an axis: 512^3 and 1024^3), then whole --
                                 # at 1024^3 on a Retina screen the first in 1.25 s instead of the whole one's 2.1
 TURN_BUDGET_MS = 20.0           # the GPU: a frame's drawing while the view turns, at most (the read-back, the overlays
@@ -92,12 +97,11 @@ HOVERED = QColor(120, 220, 255)
 SHAPE_ITEMS = (("as ellipsoids", "ellipsoid"), ("as spheres of R_v", "sphere"))
 SHAPE_TIP = ("How the voids are drawn on the map and in the 3D view: as their ellipsoids, or as spheres of R_v. "
              "Ellipsoids: around each density minimum the quadratic fit of its curvature (the Hessian's eigenvalues "
-             "and eigenvectors), cut where it returns to the mean density: semi-axes a >= b >= c along their own "
-             "directions, R_ell = (a b c)^⅓. The map draws the ellipse where it cuts the slice and a dot at the "
-             "minimum; the 3D view the ellipsoid, all three principal sections on the void inspected, and the planes "
-             "where each one cuts them. A void without such an ellipsoid (its minimum not below the mean) is its dot "
-             "alone. Spheres of R_v: where the spherical average of the smoothed density returns to the mean, drawn "
-             "as before. A close-up sizes its cube by R_ell, or R_v, and always holds the whole shape.")
+             "and eigenvectors), cut where it reaches half its depth: semi-axes a >= b >= c along their own "
+             "directions, R_ell = (a b c)^⅓, for every deep minimum. The map draws the ellipse where it cuts the "
+             "slice and a dot at the minimum on its own layer; the 3D view the ellipsoid, all three principal sections on the void inspected, and the planes where each "
+             "one cuts them. Spheres of R_v (the distinct voids): where the spherical average of the smoothed density "
+             "returns to the mean. A close-up sizes its cube by R_ell, or R_v, and always holds the whole shape.")
 MARK_CELLS = 1.5                # a void without an ellipsoid: a sphere of this many cells at its centre (its mark)
 EDGE = QColor(12, 12, 14)                   # the dark edge under an outline: it reads over a bright plane
 DIM = QColor(120, 122, 128)                 # a close-up's neighbours: opaque grey (a translucent line is slow)
@@ -113,6 +117,8 @@ CROWD_FILL_ALPHA = {"planes": 20, "volume": 8}  # each void's fill (of 255): ove
 CROWD_LINE_ALPHA = {"planes": 0, "volume": 90}  # each void's outline (of 255) over the volume, where the fill cannot be
                                                 # seen: thin and faint, so the ellipsoids read without a hairball
 CROWD_DOT_PX = 1.8
+CROWD_TUNED = 250               # the voids the alphas above were set for (TNG300-3-Dark's distinct ones): more voids,
+                                # proportionally fainter each (the ellipsoids' sample there is ~560), so the sum stays
 AXIS_COLOURS = (QColor(235, 95, 85), QColor(110, 205, 105), QColor(95, 150, 245))
 SHELL_COPY_CELLS = 512 ** 3     # a close-up's cube of up to this many cells gets a copy of its levels with its own
                                 # void's shells only (two bytes a cell more); a larger one shows every void's shells
@@ -372,6 +378,34 @@ def _pen(colour, width: float, style=Qt.SolidLine) -> QPen:
 
 
 # ==================================================================== the widget
+def render_at(widget, k: float) -> QImage:
+    """A widget drawn offscreen at k image pixels per widget pixel (its own paintEvent on an image of that device
+    pixel ratio: text and lines drawn at that resolution, not scaled up)."""
+    w, h = max(widget.width(), 1), max(widget.height(), 1)
+    img = QImage(int(round(w * k)), int(round(h * k)), QImage.Format_ARGB32_Premultiplied)
+    img.setDevicePixelRatio(k)
+    img.fill(widget.palette().window().color())
+    widget.render(img)
+    return img
+
+
+def compose_vertical(images: list, background) -> QImage:
+    """Images stacked top to bottom on 'background', each at its own pixels (one device pixel ratio: theirs)."""
+    W = max(im.width() for im in images)
+    H = sum(im.height() for im in images)
+    out = QImage(W, H, QImage.Format_ARGB32_Premultiplied)
+    out.fill(background)
+    p = QPainter(out)
+    y = 0
+    for im in images:
+        im = QImage(im)
+        im.setDevicePixelRatio(1.0)
+        p.drawImage(0, y, im)
+        y += im.height()
+    p.end()
+    return out
+
+
 class View3D(QWidget):
     """The box in 3D: a volume (set_volume, drawn through set_transfer's transfer function) or planes (per axis None
     or planes3d's entry), as 'style' says, the window lo..hi they fill (Mpc) and the voids (set_voids); the mouse
@@ -424,6 +458,7 @@ class View3D(QWidget):
         # the GPU's picture (volume_gl), where OpenGL is: the cube goes up in ticks, the picture kept while only the
         # overlays change; QPainter's for Save image (painter_only) and wherever OpenGL is not
         self.painter_only = False
+        self.save_ratio: float | None = None    # Save image: the picture's pixels per widget pixel while it is drawn
         self.gl_note = ""                   # why the GPU does not draw it ('' when it does, or was never asked)
         self._gl_pic = None                 # (key, QImage)
         self._gl_step: int | None = None    # the turning frames' step (TURN_STEPS), adapted frame by frame ...
@@ -663,6 +698,8 @@ class View3D(QWidget):
         return img
 
     def _ratio(self) -> float:
+        if self.save_ratio:
+            return float(self.save_ratio)
         try:
             return max(1.0, float(self.devicePixelRatioF()))
         except (AttributeError, RuntimeError):
@@ -673,7 +710,7 @@ class View3D(QWidget):
         SHARP_CELL_PX device pixels a cell (at the target's depth): beyond that a cell is only spread over more
         pixels, at four times the cost a doubling (a 512³ cube zoomed in)."""
         r = self._ratio()
-        if self.volume is None or self.lo is None:
+        if self.volume is None or self.lo is None or self.save_ratio:     # a save: every pixel it asks for
             return r
         cell = self.cam.scale * float(np.min((self.hi - self.lo) / np.asarray(self.volume["fine"]["shape"])))
         return float(min(r, max(1.0, SHARP_CELL_PX / max(cell, 1e-9))))
@@ -983,9 +1020,12 @@ class View3D(QWidget):
             p.save()
             p.setPen(Qt.NoPen)
             p.setTransform(QTransform(u[0], u[1], w[0], w[1], x, y))
-            p.setBrush(QColor(colour.red(), colour.green(), colour.blue(), CROWD_FILL_ALPHA.get(self.style, 20)))
+            fade = min(1.0, CROWD_TUNED / max(len(self.voids["rows"]), 1))
+            p.setBrush(QColor(colour.red(), colour.green(), colour.blue(),
+                              max(2, int(round(CROWD_FILL_ALPHA.get(self.style, 20) * fade)))))
             p.drawEllipse(unit)
-            line = CROWD_LINE_ALPHA.get(self.style, 0)
+            line = int(round(CROWD_LINE_ALPHA.get(self.style, 0) * fade))
+            line = max(line, 30) if CROWD_LINE_ALPHA.get(self.style, 0) else 0
             if line:
                 p.setBrush(Qt.NoBrush)
                 p.setPen(_pen(QColor(colour.red(), colour.green(), colour.blue(), line), 1.0))
@@ -1629,7 +1669,7 @@ class View3DMixin:
         req = {"output": o, "field": name, "component": self.component.currentText(), "cmap": self.cmap.currentText(),
                "log": log, "clip": self.clip.value(), "smooth": self.smooth.value(),
                "smooth3d": self.smooth3d.isChecked() and self.smooth3d.isEnabled(),
-               "symmetric": G.diverging(o, name) and not log,
+               "symmetric": G.diverging(o, name, self.component.currentText()) and not log,
                "ps_gradient": self.ps_gradient.currentData() or G.PS_GRADIENT_DEFAULT,
                "index": list(self._3d_index), "shown": [cb.isChecked() for cb in self.view3d_axes],
                "lo": np.asarray(lo, dtype=np.float64), "hi": np.asarray(hi, dtype=np.float64), "style": style,
@@ -2293,17 +2333,31 @@ class View3DMixin:
         if row is not None:
             self.close_up_3d(row)
 
-    def save_3d_png(self, path) -> str:
-        """The 3D view as it is on screen (its pixels at the screen's resolution) to a PNG: the volume's settled
-        picture finished first (not the quick one still shown while it is drawn)."""
+    def save_3d_png(self, path, side: int | None = None) -> str:
+        """The 3D view to a PNG at a resolution of its own: 'side' pixels on its longer side (default the Save
+        options' width when set in pixels, else SAVE_3D_SIDE; at most SAVE_3D_MAX), the volume's settled picture
+        drawn at that resolution by QPainter (not the GPU's screen picture), with the view's title above and its colour
+        bar below, drawn at the same resolution."""
         v3 = self.view.view3d
+        if side is None:
+            opts = getattr(self, "save_options", None) or {}
+            side = int(opts.get("width") or 0) if opts.get("width_unit") == "px" else 0
+            side = side or SAVE_3D_SIDE
+        k = max(1.0, min(float(side), SAVE_3D_MAX) / max(v3.width(), v3.height(), 1))
+        screen = v3._sharp                      # the screen's settled picture, kept: shown again at once after
         v3.painter_only = True                  # QPainter's picture, as the tests hold it (not the GPU's)
+        v3.save_ratio = k
         try:
             v3._fast = False                    # the settled picture: the planes' lines and cuts too
             if v3.style == "volume" and v3.volume is not None:
                 v3.volume_picture()
-            if not v3.grab().save(str(path)):
+            parts = [render_at(w, k) for w in (self.view.title, v3, self.view.colorbar) if w is v3 or not w.isHidden()]
+            self.last_3d_save = (v3._sharp[0] if v3._sharp is not None else None, k)   # (the key drawn, the ratio)
+            if not compose_vertical(parts, self.view.palette().window().color()).save(str(path)):
                 raise OSError(f"could not write {path}")
         finally:
             v3.painter_only = False
+            v3.save_ratio = None
+            v3._sharp = screen
+            v3.update()
         return str(path)

@@ -238,6 +238,13 @@ def pure():
         def _cached(self, _name):
             return self.path
     st = {n: VO.r_v_stale(TMP / f"rv_{n}.npz") for n in ("today", "older", "unrecorded", "no_rv")}
+    check("a catalogue that would not fit at the grid's resolution is found on the grid averaged 2x or 4x "
+          "(void_outlines.coarsening), only while the smoothing spans 4 coarser cells and the grid divides: 1024^3 at "
+          "20 cells with 26 GB free -> 2; unknown memory -> 1; 512^3 at 5 cells -> none; too little even at 4x -> none",
+          VO.coarsening(1024, 20.0, 26e9) == 2 and VO.coarsening(1024, 20.0, None) == 1
+          and VO.coarsening(512, 10.0, 20e9) == 1 and VO.coarsening(512, 5.0, 5e9) is None
+          and VO.coarsening(1024, 20.0, 4.5e9) is None and VO.coarsening(1000, 20.0, 26e9) == 2
+          and VO.coarsening(1023, 20.0, 26e9) is None)
     check("r_v_stale / needs_build: the pipeline's own R_v test; older or unrecorded settings are stale and gated",
           st["today"] is None and all(st[n] for n in ("older", "unrecorded", "no_rv"))
           and "older settings" in st["older"] and not any("--" in str(v) for v in st.values())
@@ -1202,23 +1209,45 @@ def voids_pure():
     res = {"centres_mpc": [[1.5, 2.5, 3.5], [10.5, 11.5, 12.5], [20.5, 3.5, 5.5], [30.5, 30.5, 30.5]],
            "box_mpc": 64.0, "n_grid": 64, "cell_mpc": 1.0, "delta": [-0.8, 0.2, -0.6, -0.5],
            "semi_axes_mpc": [[8.0, 5.0, 4.0], [6.0, 5.0, 4.0], [7.0, 6.0, 3.0], None],
-           "ellipsoid_axes": [np.eye(3).tolist()] * 3 + [None],
+           "ellipsoid_axes": [np.eye(3).tolist()] * 4,
            "eigenvalues_cells": [[4 / 64, 4 / 25, 4 / 16], [4 / 36, 4 / 25, 4 / 16], [-4 / 49, 4 / 36, 4 / 9],
                                  [0.1, 0.2, 0.3]]}
     dr = G.drawn_ellipsoids(res)
-    want = np.array([8.0, 5.0, 4.0]) * np.sqrt(0.8 / 2)
-    check("15. the drawn ellipsoid (grids.drawn_ellipsoids): semi-axes sqrt(2 |delta| / lambda) = the catalogue's "
-          "times sqrt(|delta|/2), R_ell their (a b c)^(1/3); none above the mean, none with a negative eigenvalue, "
-          "none for an unresolved void", list(dr["ok"]) == [True, False, False, False]
+    want = np.array([8.0, 5.0, 4.0]) * np.sqrt(0.8) / 2
+    check("15. the drawn ellipsoid (grids.drawn_ellipsoids): the Hessian quadratic at half its depth, semi-axes "
+          "sqrt(|delta| / lambda) = the catalogue's times sqrt(|delta|)/2, R_ell their (a b c)^(1/3); none above the "
+          "mean, none with a negative eigenvalue; an unresolved minimum (no catalogue semi-axes) gets one too",
+          list(dr["ok"]) == [True, False, False, True]
           and np.allclose(dr["semi"][0], want) and np.isclose(dr["r"][0], np.cbrt(np.prod(want)))
-          and np.isnan(dr["semi"][1:]).all() and G.drawn_ellipsoids(res) is dr
-          and np.allclose(dr["M"][0], np.diag(want)), f"{dr['ok']} {dr['semi'][0]}")
+          and np.isnan(dr["semi"][1:3]).all() and np.allclose(dr["semi"][3], np.sqrt(0.5 / np.array([0.1, 0.2, 0.3])))
+          and G.drawn_ellipsoids(res) is dr and np.allclose(dr["M"][0], np.diag(want)), f"{dr['ok']} {dr['semi'][0]}")
     old = dict(res)
     old.pop("eigenvalues_cells")
     old.pop("_drawn", None)
     do = G.drawn_ellipsoids(old)
     check("15. ... a result without the eigenvalues (an older helper): the catalogue's semi-axes times "
-          "sqrt(|delta|/2), still none above the mean", np.allclose(do["semi"][0], want) and list(do["ok"][:2]) == [True, False])
+          "sqrt(|delta|)/2, still none above the mean", np.allclose(do["semi"][0], want) and list(do["ok"][:2]) == [True, False])
+    # the sample drawn as ellipsoids: the deep minima, deepest first, none whose minimum is inside a deeper one's
+    smp = {"centres_mpc": [[1.0, 10.0, 10.0], [4.0, 10.0, 10.0], [40.0, 40.0, 40.0], [62.0, 10.0, 10.0],
+                           [30.0, 30.0, 30.0], [50.0, 10.0, 50.0], [30.0, 50.0, 10.0]],
+           "box_mpc": 64.0, "n_grid": 64, "cell_mpc": 1.0, "delta": [-0.9, -0.5, -0.6, -0.4, -0.05, 0.1, -0.5],
+           "deep": [True, True, True, True, False, False, True], "ellipsoid_axes": [np.eye(3).tolist()] * 7,
+           "eigenvalues_cells": [[0.9 / 16, 0.9 / 9, 0.9 / 4]] + [[0.1, 0.1, 0.1]] * 5 + [[0.0009, 0.1, 0.1]]}
+    es = G.ellipsoid_sample(smp)
+    check("15. the ellipsoids' sample (grids.ellipsoid_sample): a deep minimum inside a deeper one's ellipsoid is left "
+          "out (3 Mpc along its 4 Mpc axis), also across the box's face (periodic: 3 Mpc through it); a shallow or an "
+          "overdense minimum is not deep; a needle (a / c 10.5) is left out",
+          list(es) == [True, False, True, False, False, False, False]
+          and G.ellipsoid_sample(smp) is es, f"{list(es)}")
+    vov = {"rows": np.array([0]), "centres": np.array([[20.0, 20.0, 20.0]]), "box": 64.0, "shape": "ellipsoid",
+           "r_v": np.array([5.0]), "M": np.diag([6.0, 4.0, 3.0])[None], "reach": np.array([[6.0, 4.0, 3.0]]),
+           "other": None}
+    on_layer = G.void_overlay(vov, 2, 20.2, [0, 1], lo, hi, 64, 64, 0.5)
+    off_layer = G.void_overlay(vov, 2, 22.0, [0, 1], lo, hi, 64, 64, 0.5)
+    check("15. the map's ellipsoids: the exact section on every slice the ellipsoid reaches (smaller off its centre), "
+          "the minimum's dot on its own layer only", len(on_layer["ellipses"]) == 1 and len(off_layer["ellipses"]) == 1
+          and off_layer["ellipses"][0][2] < on_layer["ellipses"][0][2] and on_layer["marks"] == [(20.0, 44.0, 0, True)]
+          and off_layer["marks"] == [], f"{on_layer} {off_layer}")
     info = G.void_info(dict(res, r_v_mpc=[9.0, 5.0, 6.0, None], r_eff_mpc=[5.4, 4.9, 5.0, None],
                             resolved=[True] * 3 + [False], distinct=[True] * 4), 0)
     info2 = G.void_info(dict(res, r_v_mpc=[9.0, 5.0, 6.0, None], r_eff_mpc=[5.4, 4.9, 5.0, None],
@@ -1402,9 +1431,9 @@ def voids_ellipsoids_gui():
             areas[di] = max([np.pi * e[2] * e[3] for e in c.circles or [] if len(e) == 6 and e[-1] == k0], default=0.0)
             fills[di] = {m[3] for m in c.marks or [] if m[2] == k0}
         grow = all(areas[d] < areas[d + 1] for d in range(-4, 0)) and all(areas[d] > areas[d + 1] for d in range(0, 4))
-        check("15. scrolling through a void: its ellipse grows, is largest on the layer of its minimum and shrinks; the "
-              "minimum's mark filled on that layer, a ring on the others", grow and areas[-4] > 0 and fills[0] == {True}
-              and fills[2] == {False} and fills[-2] == {False}, f"{areas} {fills}")
+        check("15. scrolling through a void: its ellipse (the ellipsoid's section) grows, is largest on the layer of its "
+              "minimum and shrinks; the minimum's dot on that layer only", grow and areas[-4] > 0 and fills[0] == {True}
+              and fills[2] == set() and fills[-2] == set(), f"{areas} {fills}")
         x.index.setValue(i0)
         wait_for(qa, lambda: not x._busy and x._req["index"] == i0, 30)
         g = x._geometry()
@@ -1452,7 +1481,7 @@ def voids_ellipsoids_gui():
               "screen; the CSV beside it carries the drawn ellipsoid's a, b, c and R_ell (the inspector's numbers)",
               fig is not None and n_ell == 2 * len(c.circles) and n_circ == 2 * len(c.dashed)
               and n_mark == 2 * len(c.marks) and head[-4:] == ["ell_a_mpc", "ell_b_mpc", "ell_c_mpc", "r_ell_mpc"]
-              and row0 and abs(float(row0[-4]) - dr["semi"][k0][0]) < 1e-4 and "mean density" in lines[0],
+              and row0 and abs(float(row0[-4]) - dr["semi"][k0][0]) < 1e-4 and "half its depth" in lines[0],
               f"{n_ell} {n_circ} {n_mark} {head[-4:]} {row0}")
         if fig is not None:
             orig_close(fig)
@@ -1490,11 +1519,12 @@ def voids_ellipsoids_gui():
               "periodic Gaussian); the grey line goes while the map shows the voids' own field", ok
               and np.abs(x._plane - want_plane).max() < 1e-5 * np.abs(want_plane).max() and not x.void_note.text()
               and not x.void_note.isVisibleTo(x), f"{np.abs(x._plane - want_plane).max()} {x.void_note.text()}")
-        shown_saved = res["_shown"].copy()
-        res["_shown"][:] = False                    # a catalogue without a distinct void, the map on its field
+        shown_saved, ell_saved = res["_shown"].copy(), res["_shown_ell"].copy()
+        res["_shown"][:] = False                    # a catalogue without a void to draw, the map on its field
+        res["_shown_ell"][:] = False
         x._void_note()
         none_text, none_vis = x.void_note.text(), x.void_note.isVisibleTo(x)
-        res["_shown"][:] = shown_saved
+        res["_shown"][:], res["_shown_ell"][:] = shown_saved, ell_saved
         x._void_note()
         other_field = next(x.field.itemData(i_) for i_ in range(x.field.count()) if x.field.itemData(i_) != "density")
         x.field.setCurrentIndex(x.field.findData(other_field))
@@ -1502,9 +1532,9 @@ def voids_ellipsoids_gui():
         other_text = x.void_note.text()
         x.field.setCurrentIndex(x.field.findData("density"))
         wait_for(qa, lambda: not x._busy and x._req["field"] == "density", 60)
-        check("15. ... the grey line says 'no distinct voids' even while the map shows their field (the tick on, "
+        check("15. ... the grey line says 'no voids' even while the map shows their field (the tick on, "
               "nothing drawn); on another field it asks only for what differs: show the density",
-              none_text == "no distinct voids at this smoothing" and none_vis
+              none_text == "no voids at this smoothing" and none_vis
               and other_text.startswith("found in the density smoothed in 3D")
               and other_text.endswith(": show the density to see that field"), f"{none_text} | {other_text}")
         t0 = time.time()
@@ -1667,7 +1697,7 @@ def voids_ellipsoids_gui():
               len(asked) == 1 and x._void_proc is None and x._void_sigma_now == 0.0 and box.value() == 0.0
               and x.void_note.text().startswith("not started"), f"{asked} {x.void_note.text()}")
         XV.SEARCH_ASK_S = real_ask
-        # a void without an ellipsoid at the mean density: its centre's mark alone, counted
+        # a void whose ellipsoid is undefined (NaN): its centre's mark alone
         dr2 = G.drawn_ellipsoids(res)
         kk = int(x.void_rows(res)[0])
         saved_ok = dr2["ok"][kk]
@@ -1686,9 +1716,8 @@ def voids_ellipsoids_gui():
         marks_off = [m for m in c.marks or [] if m[2] == kk]
         dr2["ok"][kk], dr2["M"][kk], dr2["r"][kk], res["_r_ell"][kk] = saved_ok, saved_m, saved_r, saved_r
         x._voids_redraw()
-        check("15. a void without an ellipsoid at the mean density: no outline, its centre's mark on its own layer only "
-              "(filled), counted beside Sizes", marks_k and all(m[3] for m in marks_k) and not outl_k
-              and not marks_off and "1 without an ellipsoid (centre only)" in count_text, f"{marks_k} {count_text}")
+        check("15. a void whose ellipsoid is undefined: no outline, its centre's mark on its own layer only (filled)",
+              marks_k and all(m[3] for m in marks_k) and not outl_k and not marks_off, f"{marks_k} {count_text}")
         # remembered: the new key; an old state's spheres (the old default, saved by everyone) not read back
         x.void3d_shape.setCurrentIndex(x.void3d_shape.findData("sphere"))
         st = x.state()
@@ -2036,17 +2065,23 @@ def view3d_gui():
         x.void3d_shape.setCurrentIndex(x.void3d_shape.findData("ellipsoid"))
         qa.processEvents()
         v3.repaint()
-        dr = G.drawn_ellipsoids(res)                        # the ellipsoids drawn: at the mean density
-        M = V.ellipsoid_matrices(dr["semi"][rows], dr["dirs"][rows])
+        dr = G.drawn_ellipsoids(res)                        # the ellipsoids drawn: at half the depth
+        rows_e = [int(k) for k in np.nonzero(res["_shown_ell"])[0]]     # their sample: the deep minima, not nested
+        M = V.ellipsoid_matrices(dr["semi"][rows_e], dr["dirs"][rows_e])
         u, w = V.outline_axes(v3.cam, M)
         drawn = {o[4]: o for o in v3._outlines}
-        check("10. 'as ellipsoids': every void drawn as its ellipsoid at the mean density (the catalogue's semi-axes "
-              "times sqrt(|delta|/2), the outline its projection's), labelled with its semi-axes; remembered",
-              sorted(drawn) == rows and bool(dr["ok"][rows].all())
-              and np.allclose(dr["semi"][rows], semi * np.sqrt(np.abs(np.asarray(res["delta"], float)[rows]) / 2)[:, None])
-              and all(np.allclose(drawn[k][2], u[j]) and np.allclose(drawn[k][3], w[j]) for j, k in enumerate(rows))
-              and v3.voids["labels"][0].startswith(f"void {rows[0]} · a, b, c = ")
-              and x.state().get("void_as") == "ellipsoid", f"{sorted(drawn)} {rows}")
+        ev_e = np.array([res["eigenvalues_cells"][k] for k in rows_e], dtype=float)
+        dl_e = np.abs(np.asarray(res["delta"], float)[rows_e])
+        check("10. 'as ellipsoids': every void of the ellipsoids' sample (grids.ellipsoid_sample: more than the distinct "
+              "ones) drawn as its Hessian ellipsoid at half the depth (sqrt(|delta| / lambda) cells: the catalogue's "
+              "semi-axes times sqrt(|delta|)/2 where it has them, the outline its projection's), labelled with its "
+              "semi-axes; remembered",
+              sorted(drawn) == rows_e and bool(dr["ok"][rows_e].all()) and set(rows) <= set(rows_e) | set(rows)
+              and np.allclose(dr["semi"][rows_e], float(res["cell_mpc"]) * np.sqrt(dl_e[:, None] / ev_e))
+              and np.allclose(dr["semi"][rows], semi * np.sqrt(np.abs(np.asarray(res["delta"], float)[rows]))[:, None] / 2)
+              and all(np.allclose(drawn[k][2], u[j]) and np.allclose(drawn[k][3], w[j]) for j, k in enumerate(rows_e))
+              and v3.voids["labels"][0].startswith(f"void {rows_e[0]} · a, b, c = ")
+              and x.state().get("void_as") == "ellipsoid", f"{sorted(drawn)} {rows_e}")
         x.close_up_3d(k0)
         ok = wait_for(qa, lambda: not x._3d_busy and x._3d_close is not None
                       and x._3d_res["request"]["lo"][0] == x._3d_close["lo"][0], 30)
@@ -2056,7 +2091,7 @@ def view3d_gui():
               "sorted by R_ell", ok and np.allclose(x._3d_close["lo"], lo_e) and np.allclose(x._3d_close["hi"], hi_e)
               and v3.focus and v3.selected == k0
               and [x.void3d.itemData(j) for j in range(1, x.void3d.count())]
-              == sorted(rows, key=lambda k: -res["_r_ell"][k]) and "R_ell" in x.void3d.itemText(1))
+              == sorted(rows_e, key=lambda k: -res["_r_ell"][k]) and "R_ell" in x.void3d.itemText(1))
         x.whole_box_3d()
         x.void3d_shape.setCurrentIndex(x.void3d_shape.findData("sphere"))
         wait_for(qa, lambda: not x._3d_busy and x._3d_close is None, 30)
@@ -3756,8 +3791,8 @@ def view3d_volume_gui():
                                                                                cy + f * r * np.sin(t)) == k0), None)
         if spot is not None:
             x._3d_hover(*spot)
-        check("11. the voids drawn over the volume (every distinct one); hover over one names it",
-              sorted(circ) == rows and spot is not None and f"void {k0}: R_v" in view.readout.text()
+        check("11. the voids drawn over the volume (every one of the sample of the shape drawn: void_rows); hover over "
+              "one names it", sorted(circ) == sorted(int(k) for k in x.void_rows(res)) and spot is not None and f"void {k0}: R_v" in view.readout.text()
               and v3.hover_row == k0, view.readout.text())
         # close-up: the cube around the void, read again at the grid's resolution
         x.close_up_3d(k0)
@@ -3787,15 +3822,19 @@ def view3d_volume_gui():
         v3.update()
         qa.processEvents()
         x.save_3d_png(png)
-        saved_sharp = v3._sharp is not None and v3._sharp[0] == v3._sharp_key()
+        key, k3 = x.last_3d_save
+        saved_sharp = key is not None and key[0] == "sharp" and abs(key[1] - round(k3, 2)) < 1e-9 \
+            and abs(k3 - X3.SAVE_3D_SIDE / max(v3.width(), v3.height())) < 1e-9
         from PySide6.QtGui import QImage
         im = QImage(str(png))
         x._3d_failed("Cancelled: ")                         # a cancelled averaging: no error, the volume stays
         arr = np.frombuffer(im.convertToFormat(QImage.Format_RGB888).constBits(), np.uint8,
                             count=im.height() * im.convertToFormat(QImage.Format_RGB888).bytesPerLine())
-        check("11. Save image in 3D writes the volume as on screen, its sharp picture finished first (not the quick "
-              "one), not a blank view; a cancelled averaging is no error",
-              png.is_file() and im.width() >= v3.width() and v3.volume is not None and saved_sharp
+        check("11. Save image in 3D writes the volume as on screen, its sharp picture drawn at the save's own "
+              "resolution (SAVE_3D_SIDE pixels on the longer side, not the quick one or a screen grab), not a blank "
+              "view; a cancelled averaging is no error",
+              png.is_file() and max(im.width(), im.height()) >= X3.SAVE_3D_SIDE - 2 and im.width() == round(
+                  v3.width() * k3) and v3.volume is not None and saved_sharp
               and arr.std() > 5 and "Could not" not in v3.message)
         # the planes back, then the map: the volume's slices freed
         x.view3d_style.setCurrentIndex(x.view3d_style.findData("planes"))
@@ -4197,7 +4236,7 @@ def mean_field_pure():
     tw_fields = tw_o.fields()
     tw_same = all(np.array_equal(tw_o.slice(f"{fam}_streams", axis, 9, comp), tw_o.slice(fam, axis, 9, comp))
                   for fam, comps in (("divergence", ("value",)), ("vorticity", ("norm", "x", "z")),
-                                     ("shear", ("1", "4")), ("gradient", ("trace (divergence)", "xy", "zx")))
+                                     ("shear", ("xx", "yy")), ("gradient", ("trace (divergence)", "xy", "zx")))
                   for comp in comps for axis in (0, 2))
     check("9. a face-gradient output's stream-average twins ('.a_velDivStreams', '.a_velGradStreams', "
           "'.a_velShearStreams', '.a_velVortStreams') and its '.a_massFluxDiv' are Explore fields: after the family "
@@ -4230,7 +4269,7 @@ def mean_field_pure():
         G.cap_cubes(True)
         capped = ps_o.slice("divergence", 1, 7, "value", "mean-field")
         n_first = len(slabs)
-        again = ps_o.slice("shear", 1, 7, "1", "mean-field")          # the same plane: no second pass
+        again = ps_o.slice("shear", 1, 7, "xx", "mean-field")         # the same plane: no second pass
         cached_capped = {Path(str(k[0])).name for k in G._CUBES}
         check("9. a job running (the cube cache capped below the velocity grid): the plane is computed from slabs read "
               "off the file, the velocity is not cached whole, the numbers are the same; another derivative of the "
@@ -6371,9 +6410,63 @@ def contours_gui():
         x.shutdown()
 
 
+def fields_units_pure():
+    """Units, class maps, component names and the extra grids (no window but the colour bar)."""
+    print("fields: units, classes, components")
+    check("every velocity-derived map's colour bar says its unit; a count or a pure number says none",
+          G.colourbar_label("velocity", {"field": "velocity", "log": False, "component": "norm"})
+          == "velocity, norm [km/s]"
+          and G.colourbar_label("velocity divergence", {"field": "divergence", "log": False, "component": "value"})
+          == "velocity divergence [km/s/Mpc]"
+          and G.colourbar_label("velocity dispersion", {"field": "dispersion", "log": True, "component": "value"})
+          == "log₁₀ velocity dispersion [(km/s)²]"
+          and G.colourbar_label("stream count", {"field": "streams", "log": False, "component": "value"})
+          == "stream count" and G.field_unit("density") == "" and G.field_unit("tweb_eigenvalues") == "")
+    check("the shear's five components are named as packed (xx, xy, xz, yy, yz; 2D xx, xy); the web eigenvalues "
+          "are lambda1..3, no norm", G.components("shear", 5) == ["xx", "xy", "xz", "yy", "yz"]
+          and G.components("shear", 2, 2) == ["xx", "xy"]
+          and G.components("tweb_eigenvalues", 3) == ["λ1", "λ2", "λ3"]
+          and G.components("vweb_eigenvalues", 2, 2) == ["λ1", "λ2"])
+    check("a vector's norm is never drawn about 0; its signed components are",
+          not G.diverging(None, "vorticity", "norm") and G.diverging(None, "vorticity", "x")
+          and G.diverging(None, "divergence"))
+    rgb, vr = G.colorize(np.array([[0.0, 1.0], [2.0, 3.0]]), G.WEB_CMAP, log=True, clip=(30.0, 70.0))
+    want = [[int(h[i:i + 2], 16) for i in (1, 3, 5)] for h in G.WEB_COLOURS]
+    check("a web-class map: four fixed colours over -0.5..3.5 whatever the log tick or the clipping asks",
+          vr == G.WEB_RANGE and rgb.reshape(4, 3).tolist() == want, f"{vr} {rgb.reshape(4, 3).tolist()}")
+    from PySide6.QtWidgets import QApplication
+    import explore_canvas as EC
+    qa = QApplication.instance() or QApplication([])
+    bar = EC.ColorBar()
+    bar.resize(400, bar.height())
+    bar.set(G.WEB_CMAP, G.WEB_RANGE, "T-web class", classes=G.web_classes(3))
+    names = [t for _x, _l, t in bar.tick_labels(400)]
+    bar.set(G.WEB_CMAP, G.WEB_RANGE, "T-web class", classes=G.web_classes(2))
+    names2 = [t for _x, _l, t in bar.tick_labels(400)]
+    bar.set("viridis", (0.0, 1.0), "x")
+    check("the colour bar of a class map names its classes under their blocks (3D: void, wall, filament, node; 2D: "
+          "void, filament, node); any other map has no classes", names == ["void", "wall", "filament", "node"]
+          and names2 == ["void", "filament", "node"] and bar.classes is None, f"{names} {names2}")
+    qa.processEvents()
+    d = TMP / "extra_fields"
+    d.mkdir(exist_ok=True)
+    n = 8
+    np.ones((n, n, n), np.float32).tofile(d / "output.a_den")
+    np.full((n, n, n, 3), 2.0, np.float32).tofile(d / "output.a_scalarGrad")
+    np.full((n, n, n), 3.0, np.float32).tofile(d / "output.a_velStd")
+    o = G.OutputSet(d / "output", box=((0, 0, 0), (8.0, 8.0, 8.0)), redshift=1.0)
+    check("the scalar's gradient and standard DTFE's velocity spread are listed with the other fields (the spread in "
+          "peculiar km/s: sqrt(a) at z = 1, as the velocity)", {"scalar_gradient", "velocity_std"} <= set(o.fields())
+          and o.ncomp("scalar_gradient") == 3 and np.allclose(o.velocity_factor("velocity_std"), np.sqrt(0.5))
+          and G.colourbar_label(G.field_label(o, "velocity_std"), {"field": "velocity_std", "log": False,
+                                                                   "component": "value"}).endswith("[km/s]"),
+          f"{o.fields()}")
+
+
 def main():
     try:
         pure()
+        fields_units_pure()
         voids_pure()
         contours_pure()
         contours_detail_pure()

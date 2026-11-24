@@ -20,6 +20,8 @@ import re
 import sys
 from pathlib import Path
 
+import threading
+
 import numpy as np
 from PySide6.QtCore import QObject, QProcess, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
@@ -50,18 +52,18 @@ from explore_zoom import ExactZoomWorker, ZoomMixin, load_exact_planes  # noqa: 
 
 VOID_TOOL = rs.REPO_ROOT / "python" / "tools" / "void_outlines.py"     # the voids of one snapshot, as JSON
 VOID_CACHE_DIR = None        # the helper's catalogue cache: None = the pipeline's own (config.CACHE_DIR); tests pin a temp one
-VOID_TIP = ("Draw the voids on the map and in the 3D view: each one's ellipsoid where it cuts this slice, or its "
-            "sphere of R_v. How they are found: the analysis pipeline smooths the density in 3D (its production "
-            "smoothing, or σ beside), takes its local minima, and at each the Hessian (the field's curvature): its "
-            "eigenvectors are the ellipsoid's axes, its eigenvalues λ its shape. The ellipsoid drawn is where that "
-            "quadratic fit around the minimum, δ_min + ½ Σ λ x², returns to the mean density: semi-axes √(2 |δ_min| "
-            "/ λ), its (a b c)^⅓ called R_ell (the catalogue's own fit, 2 cells / √λ, sets only the shape's ratios). "
-            "The map shows its section: an ellipse that grows, is largest on the layer of the minimum (marked by a "
-            "dot, filled on its own layer) and shrinks as you scroll. R_v is where the spherical average of the "
-            "smoothed density returns to the mean. The catalogue is found once per snapshot and smoothing and "
-            "cached; one that would not fit in the free memory is not built, and it says so. Point at a void for its "
-            "sizes; click it for the whole entry. Saved images and the figure grid carry the outlines, and a saved "
-            "PNG gets a CSV table of the voids beside it.")
+VOID_TIP = ("Draw the voids on the map and in the 3D view as their ellipsoids, or as spheres of R_v. How they are "
+            "found: the analysis pipeline smooths the density in 3D (its production smoothing, or σ beside), takes "
+            "its local minima, and at each the Hessian (the field's curvature): its eigenvectors are the ellipsoid's "
+            "axes, its eigenvalues λ its shape, cut where that quadratic fit around the minimum, δ_min + ½ Σ λ x², "
+            "reaches half its depth, δ_min/2: semi-axes √(|δ_min| / λ), its (a b c)^⅓ called R_ell. The map draws the "
+            "ellipsoid of every deep minimum that is not inside a deeper one's (nor ten times longer than wide) where "
+            "it cuts the slice: an ellipse that grows and shrinks as you scroll, and "
+            "a dot at the minimum (the void's centre) on its own layer. R_v is "
+            "where the spherical average of the smoothed density returns to the mean. The catalogue is found once "
+            "per snapshot and smoothing and cached; one that would not fit in the free memory is not built, and it "
+            "says so. Point at a void for its sizes; click it for the whole entry. Saved images and the figure grid "
+            "carry the outlines, and a saved PNG gets a CSV table of the voids beside it.")
 # the drawn shape (the Map group's 'Voids as', for the map and the 3D view alike; explore_3d keeps the items)
 VOID_RV_TIP = ("Also draw each void's sphere of R_v, dashed, around the same centre: where the spherical average of "
                "the smoothed density returns to the mean, the size the catalogue's profiles use")
@@ -97,8 +99,8 @@ VOID_RANGE_TIP = ("Draw only the voids of this size ('any' = no bound), by the s
                   "ellipsoid drawn, or R_v with the spheres. The map, the figure grid, the saved images and their "
                   "CSV, and the 3D view keep the same voids. A few voids have an R_v far larger than their ellipsoid "
                   "(the density never returns to the mean nearby): an upper bound hides them")
-VOID_COUNT_TIP = ("The voids drawn are the catalogue's distinct sample: minima whose fit passes its size limits, "
-                  "outside every deeper void. Its other minima are not drawn")
+VOID_COUNT_TIP = ("Drawn as ellipsoids: the deep minima, none inside a deeper one's ellipsoid. As spheres: the "
+                  "catalogue's distinct voids. The other minima are not drawn")
 VOID_SIGMA_TIP = ("The smoothing the voids are found at: the analysis scripts' own ('production') or one scale in "
                   "Mpc for every box. Production: the scripts' own 10 cells (a different physical scale in every "
                   "box) and their cached catalogue; a value in Mpc smooths every box at that scale (the cross-box "
@@ -112,7 +114,7 @@ SMOOTH3D_TIP = ("Smooth the whole cube in 3D instead of this slice: the slice of
                 "scrolling the layers is instant. The contours and the 3D view's planes follow it. A slice smoothed "
                 "in 2D is another field: its dark patches are not the sections of the 3D minima")
 
-CMAPS = ["viridis", "magma", "inferno", "cividis", "plasma", "RdBu_r", "coolwarm", "gray", "tab10"]
+CMAPS = ["viridis", "magma", "inferno", "cividis", "plasma", "RdBu_r", "coolwarm", "gray", "tab10", G.WEB_CMAP]
 AXES = ["x", "y", "z"]
 # the figure grid's layouts (rows, columns): a field at several redshifts side by side, or several fields of one
 # snapshot, composed as one figure
@@ -229,15 +231,38 @@ def map_contours(plane, req: dict, vrange, compare: bool = False) -> dict | None
     ImageCanvas.layer_size) and this plane's image has the size it was for, the lines already stroked at it ('layer':
     stroke_layer); None where contours do not apply. Run with the slice on the worker's thread, or for a zoom on the
     GUI thread."""
-    lines = CT.map_lines(plane, req["field"], vrange, req["log"], req["cmap"], compare=compare,
-                         detail=req.get("contour_detail", CT.DETAIL))
-    if lines is not None:
-        lines["paths"] = contour_paths(CT.image_segments(lines), lines["colours"])
+    detail = req.get("contour_detail", CT.DETAIL)
+    if CT.why_not(req["field"], req["cmap"], compare):
+        return None
+    key = (req["field"], tuple(float(v) for v in vrange), bool(req["log"]), bool(compare), int(detail), np.shape(plane))
+    kept = getattr(_LINES_KEPT, "last", None)           # this thread's last lines: a colour change keeps them
+    if kept is not None and kept[0] == key and np.array_equal(kept[1], plane, equal_nan=True):
+        old = kept[2]
+        if old is None:
+            return None
+        lines = dict(old)
+        lines["colours"] = CT.colours(lines["levels"], vrange, req["cmap"])
+        if not np.array_equal(lines["colours"], old["colours"]):    # the lines' black or white changed: paths again
+            lines["paths"] = contour_paths(CT.image_segments(lines), lines["colours"])
+            lines.pop("layer", None)
         lines["marks"] = (lines["levels"], lines["colours"])
+    else:
+        lines = CT.map_lines(plane, req["field"], vrange, req["log"], req["cmap"], compare=compare, detail=detail)
+        if lines is not None:
+            lines["paths"] = contour_paths(CT.image_segments(lines), lines["colours"])
+            lines["marks"] = (lines["levels"], lines["colours"])
+    if lines is not None:
         size = req.get("contour_layer")
         if size is not None and tuple(size[3:]) == tuple(np.shape(plane)):      # image = plane.T[::-1]: (n0, n1)
-            lines["layer"] = (tuple(size), lines["paths"], stroke_layer(lines["paths"], size))
+            if not (lines.get("layer") and lines["layer"][0] == tuple(size)):
+                lines["layer"] = (tuple(size), lines["paths"], stroke_layer(lines["paths"], size))
+    _LINES_KEPT.last = (key, np.array(plane, copy=True), lines)
     return lines
+
+
+# map_contours' last result per thread (the slice worker's, the zoom's on the GUI thread): its key, a copy of its
+# plane and the lines -- another colour map over the same plane, range, scale and detail re-colours them only
+_LINES_KEPT = threading.local()
 
 
 def failure_text(e: Exception) -> str:
@@ -538,7 +563,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self.field.currentIndexChanged.connect(self._field_changed)
         f.addRow("Field", self.field)
         self.component = QComboBox()
-        self.component.currentIndexChanged.connect(self.render)
+        self.component.currentIndexChanged.connect(self._component_changed)
         crow = QHBoxLayout()
         crow.addWidget(self.component, 1)
         self.vectors = QCheckBox("vectors")
@@ -1344,6 +1369,27 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         if not self._same(prev, o):
             self._carry_zoom()              # AFTER the render: it dropped the other output's zoom
 
+    @staticmethod
+    def _default_cmap(o, name: str, component: str) -> str:
+        """A map's colours when its field or component is picked: RdBu_r about 0 for a signed quantity (not a norm),
+        the web classes' for a T-web / V-web class, magma for the density and the dispersion, else viridis."""
+        return "RdBu_r" if G.diverging(o, name, component) else G.WEB_CMAP if name in G.WEB_FIELDS else \
+            "magma" if name in ("density", "dispersion") else "viridis"
+
+    def _component_changed(self, *_):
+        """Another component: a norm and a signed component want other colours -- changed only while the map shows
+        the previous component's default (a colour map the user picked stays)."""
+        o, name = self.current, self.field.currentData()
+        prev = getattr(self, "_component_shown", None)
+        now = self.component.currentText()
+        if o is not None and name and prev is not None and prev != now \
+                and self.cmap.currentText() == self._default_cmap(o, name, prev):
+            self.cmap.blockSignals(True)
+            self.cmap.setCurrentText(self._default_cmap(o, name, now))
+            self.cmap.blockSignals(False)
+        self._component_shown = now
+        self.render()
+
     def _field_changed(self, *_):
         o = self.current
         name = self.field.currentData()
@@ -1371,11 +1417,10 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
             w.blockSignals(True)
             w.setChecked(on)
             w.blockSignals(False)
-        cmap = "RdBu_r" if G.diverging(o, name) else "tab10" if name in ("tweb", "vweb") else \
-            "magma" if name in ("density", "dispersion") else "viridis"
         self.cmap.blockSignals(True)
-        self.cmap.setCurrentText(cmap)
+        self.cmap.setCurrentText(self._default_cmap(o, name, self.component.currentText()))
         self.cmap.blockSignals(False)
+        self._component_shown = self.component.currentText()
         self._compare_fill()
         self._smooth3d_sync()
         self.render()
@@ -1419,7 +1464,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
                "component": self.component.currentText(), "cmap": self.cmap.currentText(),
                "log": self.log.isChecked(), "clip": self.clip.value(), "smooth": self.smooth.value(),
                "smooth3d": self.smooth3d.isChecked() and self.smooth3d.isEnabled(),
-               "symmetric": G.diverging(o, name) and not self.log.isChecked(),
+               "symmetric": G.diverging(o, name, self.component.currentText()) and not self.log.isChecked(),
                "arrows": self.vectors.isEnabled() and self.vectors.isChecked(),
                "ps_gradient": self.ps_gradient.currentData() or G.PS_GRADIENT_DEFAULT}
         if self.pts_combo.currentData():
@@ -1882,14 +1927,16 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         # the title as a function of the positions' unit (a figure saved in Mpc/h or cells says so)
         if req.get("compare") is not None:
             mode = dict((m, t) for t, m in COMPARE_MODES)[req["compare_mode"]]
-            self.view.colorbar.set(req["cmap"], res["vrange"], f"{mode}: {label}{comp}", levels=self._contour_marks())
+            unit = G.field_unit(req["field"]) if req["compare_mode"] == "diff" else ""
+            self.view.colorbar.set(req["cmap"], res["vrange"], f"{mode}: {label}{comp}" + (f" [{unit}]" if unit else ""),
+                                   levels=self._contour_marks())
             head = f"<b>{mode}: {label}{comp}</b> — A = {o.title}, B = {req['compare'].title} — "
 
             def where(units=None):
                 return self._position_text(req, units)
         else:
             self.view.colorbar.set(req["cmap"], res["vrange"], G.colourbar_label(label, req), req["log"],
-                                   levels=self._contour_marks())
+                                   levels=self._contour_marks(), classes=G.web_classes(o.dim))
             head = f"<b>{label}{comp}</b> — {o.title} — "
             sd, fct = self._pts_side, res.get("pts_factor") or 1
 

@@ -10,16 +10,20 @@ data root; --sim names the simulation (config reads the box for it; DTFE_SIM is 
 
 With the production grids (no --prefix) the catalogue is the analysis scripts' own cache file. A BUILD costs
 about 80 bytes per cell (10 GB at 512^3, 80 GB at 1024^3): when the catalogue is not cached and that would not fit
-in what the other programs leave free (less 4 GB), the tool refuses instead of starting it (DTFE_FREE_GB overrides
-the free-memory reading, as for the C++ programs).
+in what the other programs leave free (less 4 GB), the catalogue is found on the grid averaged in 2^3 or 4^3 blocks
+at the same smoothing in Mpc (coarsening: 'coarsened' in the JSON, its own cache name), and only when that does not fit
+either does the tool refuse instead of starting it (DTFE_FREE_GB overrides the free-memory reading, as for the C++
+programs).
 
 Prints ONE line of JSON on stdout (the pipeline's own messages go to stderr): the centres (cell centres in Mpc,
 the map's frame), R_v and R_eff in Mpc (null where there is none), 'resolved' (the ellipsoid cuts), 'distinct'
 (catalog.distinct_mask: the resolved voids with an R_v whose centre lies inside the sphere of min(R_v, R_eff) of no
 deeper resolved void, one without R_v claiming its R_eff; the sample of the profiles and the abundance), the
-central delta, each resolved void's fitted ellipsoid ('semi_axes_mpc' a >= b >= c, 'ellipsoid_axes' their unit
-directions in that order; null where not resolved), the Hessian's eigenvalues at every minimum ('eigenvalues_cells',
-signed, in cell units, in the semi-axes' order), and the frame and smoothing they were found at. Exit 1 with the
+central delta, 'deep' (the central delta below config.DEEP_VOID_THRESHOLD: the sample the Explore map draws as
+ellipses, as plot/plot_ellipses_contour_3D.py does), each resolved void's fitted ellipsoid ('semi_axes_mpc'
+a >= b >= c; null where not resolved), the Hessian at every minimum ('eigenvalues_cells', signed, in cell units, and
+'ellipsoid_axes', its unit eigenvectors as rows, both in the semi-axes' order), and the frame and smoothing they were
+found at. Exit 1 with the
 reason on stderr when there is no catalogue (no grids, no snapshot header).
 
 --smooth-mpc S finds the voids at a smoothing of S Mpc instead of the production one (the same physical scale in
@@ -91,6 +95,25 @@ def r_v_stale(path) -> str | None:
     if "r_v_settings" not in cat:
         return "R_v measured before its settings were recorded (re-measured on next read)"
     return "R_v measured with older settings (re-measured on next read)"
+
+
+# a catalogue that would not fit in memory at the grid's own resolution is found on the grid averaged in blocks of
+# 2 or 4 cells a side (coarsening), the smoothing kept in Mpc, while the smoothing spans at least this many of the
+# coarser cells: a 1024^3 set at the production 20 cells (86 GB) on its 512^3 average at 10 cells (11 GB), the same
+# field to the averaging's sigma^2 of a quarter of a fine cell against the smoothing's 400
+COARSE_MIN_SIGMA_CELLS = 4.0
+
+
+def coarsening(n: int, sigma_cells: float, free) -> int | None:
+    """The block size a catalogue build of an n^3 grid smoothed over sigma_cells cells takes: 1 when it fits in
+    'free' bytes (less HEADROOM_BYTES; None = not known: fits), else the smallest of 2 and 4 that fits and keeps
+    the smoothing over COARSE_MIN_SIGMA_CELLS coarser cells and n divisible; None when none does."""
+    for k in (1, 2, 4):
+        if k > 1 and (n % k or sigma_cells / k < COARSE_MIN_SIGMA_CELLS):
+            break
+        if free is None or BUILD_BYTES_PER_CELL * (float(n) / k) ** 3 <= free - HEADROOM_BYTES:
+            return k
+    return None
 
 
 def needs_build(prod) -> bool:
@@ -180,15 +203,23 @@ def outlines(sim, snap, prefix=None, data_root=None, method="auto", sigma_mpc=No
     if sigma_mpc:
         pipeline.set_smoothing(mpc=float(sigma_mpc))
     prod = pipeline.products(int(snap), sim=sim, method=method, prefix=prefix, data_root=data_root)
+    k = 1
     try:
         cell, box, n = pipeline.adopt_snapshot_grid(prod)
         if needs_build(prod):
-            need, free = BUILD_BYTES_PER_CELL * float(n) ** 3, available_bytes()
-            if free is not None and need > free - HEADROOM_BYTES:
+            free = available_bytes()
+            k = coarsening(n, float(pipeline.config.SMOOTHING_SIGMA_CELLS), free)
+            if k is None:
+                need = BUILD_BYTES_PER_CELL * float(n) ** 3
                 raise MemoryError(f"its catalogue is not cached (or its R_v is re-measured), and building it ({n}^3) "
                                   f"needs about {need / 1e9:.0f} GB "
                                   f"with {free / 1e9:.0f} GB free: build it with the analysis scripts when the machine is "
                                   f"free (analyze.py compute), then tick again")
+            if k > 1:                           # the grid averaged k x k x k: the same smoothing in Mpc, own cache
+                prod.release()
+                prod = pipeline.products(int(snap), sim=sim, method=method, prefix=prefix, data_root=data_root,
+                                         coarsen=k)
+                cell, box, n = pipeline.adopt_snapshot_grid(prod)
         cat = prod.voids()
         method = str(prod.fs.method)
     finally:
@@ -198,23 +229,28 @@ def outlines(sim, snap, prefix=None, data_root=None, method="auto", sigma_mpc=No
     defs = r_v_definitions(cat)
     distinct = catalog.distinct_mask(cat, resolved & np.isfinite(r_v), n)
     centres = (np.asarray(cat["coords"], dtype=np.float64) + 0.5) * cell
-    # the fitted ellipsoid of each resolved void (R_eff = (a b c)^(1/3) of it): its semi-axes a >= b >= c in Mpc and
-    # their unit directions in the same order (rows: the catalogue's orientation columns), null where not resolved
+    # the fitted ellipsoid of each resolved void (R_eff = (a b c)^(1/3) of it): its semi-axes a >= b >= c in Mpc, null
+    # where not resolved
     semi = np.asarray(cat["semi_axes"], dtype=np.float64).reshape(-1, 3)
-    dirs = np.swapaxes(np.asarray(cat["orientations"], dtype=np.float64).reshape(-1, 3, 3), 1, 2)
     semi_out = [s.round(6).tolist() if ok else None for s, ok in zip(semi, resolved)]
-    dirs_out = [d.round(6).tolist() if ok else None for d, ok in zip(dirs, resolved)]
-    # the Hessian's eigenvalues at each minimum (the catalogue's, in cell units: d^2 delta / d cell^2), signed, in the
-    # order of the semi-axes above (|lambda| ascending: pipeline._ellipsoid_fits' argsort); the launcher draws the
-    # ellipsoid where the quadratic fit returns to the mean density from them, which needs their signs
+    # the Hessian at EVERY minimum (the catalogue's, in cell units: d^2 delta / d cell^2): its eigenvalues signed, and
+    # its unit eigenvectors as rows, both in the order of the semi-axes above (|lambda| ascending:
+    # pipeline._ellipsoid_fits' argsort; for a resolved void the rows are its orientation columns). The launcher draws
+    # each minimum's ellipsoid where the quadratic fit reaches half its depth from them, resolved or not
     ev = np.asarray(cat["eigenvalues"], dtype=np.float64).reshape(-1, 3)
-    ev = np.take_along_axis(ev, np.argsort(np.abs(ev) + 1e-12, axis=1), axis=1)
+    order = np.argsort(np.abs(ev) + 1e-12, axis=1)
+    ev = np.take_along_axis(ev, order, axis=1)
+    vec = np.take_along_axis(np.asarray(cat["eigenvectors"], dtype=np.float64).reshape(-1, 3, 3), order[:, None, :],
+                             axis=2)
     ev_out = [[float(v) for v in e] if np.isfinite(e).all() else None for e in ev]
-    return {"sim": sim, "snap": int(snap), "prefix": prefix or "", "method": method, "box_mpc": box, "cell_mpc": cell,
+    dirs_out = [d.T.round(6).tolist() if np.isfinite(d).all() else None for d in vec]
+    return {"coarsened": int(k),
+            "sim": sim, "snap": int(snap), "prefix": prefix or "", "method": method, "box_mpc": box, "cell_mpc": cell,
             "n_grid": n, "sigma_mpc": pipeline.smoothing_length_mpc(), "footprint": int(pipeline.config.FOOTPRINT_SIZE),
             "namespace": pipeline._param_hash(), "centres_mpc": centres.round(6).tolist(),
             "r_v_mpc": _finite_or_none(r_v), "r_eff_mpc": _finite_or_none(r_eff),
             "resolved": resolved.tolist(), "distinct": distinct.tolist(),
+            "deep": np.asarray(cat["deep"]).astype(bool).tolist(),
             "delta": _finite_or_none(np.asarray(cat["delta_values"], dtype=np.float64)),
             "sigma_asked_mpc": float(sigma_mpc) if sigma_mpc else 0.0,
             "r_v_defs": {d: _finite_or_none(v) for d, v in defs.items()},

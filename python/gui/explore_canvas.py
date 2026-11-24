@@ -445,14 +445,17 @@ class ColorBar(QWidget):
         self.setFixedHeight(self.BAR + 4 + 2 * QFontMetrics(self.font()).height() + 6)
         self.cmap, self.vrange, self.label, self.log = "viridis", (0.0, 1.0), "", False
         self.levels = None                  # (positions in the bar's units, (k, 4) RGBA): the contour lines' values
+        self.classes: tuple[str, ...] | None = None     # a web-class map: its classes' names, by value
 
-    def set(self, cmap: str, vrange, label: str, log: bool = False, levels=None):
+    def set(self, cmap: str, vrange, label: str, log: bool = False, levels=None, classes=None):
         """'label' is the full text ('log₁₀ ' included: Save image labels its log10 data with it);
         'log': the range is in log10 units, the ticks read 10^k. 'levels': the map's contour levels as (positions,
         colours) -- contours.map_lines' 'levels' and 'colours' -- marked across the bar in the lines' own colours;
-        None (any map without contours) marks none."""
+        None (any map without contours) marks none. A web-class map (grids.WEB_CMAP) shows its classes as blocks named
+        by 'classes' (grids.web_classes: the 3D names by default)."""
         self.cmap, self.vrange, self.label, self.log = cmap, vrange, label, bool(log)
         self.levels = levels
+        self.classes = (tuple(classes) if classes else G.web_classes(3)) if cmap == G.WEB_CMAP else None
         self.update()
 
     def level_marks(self, width: int | None = None) -> list[tuple[float, tuple]]:
@@ -483,6 +486,13 @@ class ColorBar(QWidget):
         fm = QFontMetrics(self.font())
         lo, hi = self.vrange
         span = (hi - lo) if hi > lo else 1.0
+        if self.classes:                    # a class map: each class's name under the middle of its block
+            out = []
+            for v, name in enumerate(self.classes):
+                x = (v - lo) / span * W
+                out.append((x, min(max(x - fm.horizontalAdvance(name) / 2, 0.0), W - fm.horizontalAdvance(name)),
+                            name))
+            return out
         placed, out = [], []
 
         def place(x, text, left=None):
@@ -502,11 +512,19 @@ class ColorBar(QWidget):
         p = QPainter(self)
         W, B = self.width(), self.BAR
         lut = G.lut(self.cmap)
-        g = QLinearGradient(0, 0, W, 0)
-        for i in range(0, 256, 16):
-            g.setColorAt(i / 255, QColor(*[int(v) for v in lut[i]]))
-        g.setColorAt(1.0, QColor(*[int(v) for v in lut[255]]))
-        p.fillRect(0, 0, W, B, g)
+        if self.classes:                    # a class map: one flat block per class, no gradient between them
+            lo, hi = self.vrange
+            span = (hi - lo) if hi > lo else 1.0
+            for v in range(len(self.classes)):
+                x0, x1 = (v - 0.5 - lo) / span * W, (v + 0.5 - lo) / span * W
+                c = lut[int(np.clip((v - lo) / span * 255.0, 0, 255))]
+                p.fillRect(QRectF(x0, 0, x1 - x0, B), QColor(*[int(k) for k in c]))
+        else:
+            g = QLinearGradient(0, 0, W, 0)
+            for i in range(0, 256, 16):
+                g.setColorAt(i / 255, QColor(*[int(v) for v in lut[i]]))
+            g.setColorAt(1.0, QColor(*[int(v) for v in lut[255]]))
+            p.fillRect(0, 0, W, B, g)
         for x, rgba in self.level_marks(W):     # the contour levels: a thin line across the bar in the line's colour
             p.setPen(QPen(QColor(*rgba), 1.0))
             p.drawLine(QPointF(x, 0), QPointF(x, B))

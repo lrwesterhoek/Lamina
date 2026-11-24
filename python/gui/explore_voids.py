@@ -120,11 +120,14 @@ class VoidsMixin:
         return str(o.root), o.n, stamp, round(self._void_sigma_now if sigma is None else float(sigma), 6)
 
     def void_rows(self, res: dict, radius: str | None = None) -> np.ndarray:
-        """The catalogue rows drawn: the distinct, well-resolved voids whose radius 'radius' (default the drawn
-        shape's: R_ell of the ellipsoid, or R_v) lies in the Sizes range (a bound of 0 is none; a radius that is not defined
-        passes only when there is no bound)."""
-        keep = np.asarray(res["_shown"], dtype=bool).copy()
-        r = np.asarray(res[radius or self._void_radius_key()], dtype=np.float64)
+        """The catalogue rows drawn whose radius 'radius' (default the drawn shape's: R_ell of the ellipsoid, or R_v)
+        lies in the Sizes range (a bound of 0 is none; a radius that is not defined passes only when there is no
+        bound): as ellipsoids every deep minimum with one ('_shown_ell', as plot_ellipses_contour_3D.py draws them),
+        as spheres the distinct, well-resolved voids."""
+        radius = radius or self._void_radius_key()
+        keep = np.asarray(res["_shown_ell" if radius == "_r_ell" and "_shown_ell" in res else "_shown"],
+                          dtype=bool).copy()
+        r = np.asarray(res[radius], dtype=np.float64)
         lo, hi = self.void_rmin.value(), self.void_rmax.value()
         with np.errstate(invalid="ignore"):
             if lo > 0:
@@ -362,11 +365,17 @@ class VoidsMixin:
             res["_semi"] = G._rows_array(res.get("semi_axes_mpc"), n, 3)        # none), directions (rows)
             res["_dirs"] = np.array([np.eye(3) if v is None else v for v in res.get("ellipsoid_axes") or [None] * n],
                                     dtype=np.float64).reshape(n, 3, 3)
-            drawn = G.drawn_ellipsoids(res)         # the ellipsoids drawn: at the mean density (the one place)
+            drawn = G.drawn_ellipsoids(res)         # the ellipsoids drawn: at half the depth (the one place)
             res["_r_ell"] = drawn["r"]
+            # the ellipsoids' sample (grids.ellipsoid_sample: the deep minima, none inside a deeper one's ellipsoid);
+            # the spheres keep the catalogue's distinct voids
+            res["_shown_ell"] = G.ellipsoid_sample(res)
             self._void_cache[key] = res
-            shown = int(res["_shown"].sum())
-            self.status.emit(f"voids: {shown} distinct, well-resolved voids at σ {res['sigma_mpc']:.3g} Mpc")
+            k = int(res.get("coarsened") or 1)
+            self.status.emit(f"voids: {int(res['_shown_ell'].sum())} as ellipsoids, {int(res['_shown'].sum())} "
+                             f"distinct with R_v, at σ {res['sigma_mpc']:.3g} Mpc"
+                             + (f" (found on the grid averaged in {k}³-cell blocks, {res['n_grid']}³: the full grid's "
+                                f"catalogue would not fit in memory)" if k > 1 else ""))
             if key[-1] == 0:
                 self._void_sigma_grid()             # the production value in Mpc, now known exactly
         except (ValueError, KeyError, TypeError) as e:
@@ -453,8 +462,8 @@ class VoidsMixin:
         field' while the map shows anything else (the steps that apply: show the density, tick 3D, set Smoothing; none
         where the 3D tick is greyed out on the density, its tooltip saying why); '' while it shows that field; 'no
         distinct voids at this smoothing' when there is none (the tick on, nothing drawn: said whatever the map)."""
-        if not res["_shown"].any():
-            return "no distinct voids at this smoothing"
+        if not (res["_shown"].any() or np.asarray(res.get("_shown_ell", res["_shown"])).any()):
+            return "no voids at this smoothing"
         o = self.current
         cell = float(o.length[0]) / float(o.n)
         sigma = float(res.get("sigma_mpc") or 0.0)
@@ -556,9 +565,9 @@ class VoidsMixin:
         c._redraw()
 
     def _void_count_note(self):
-        """Beside Sizes: how many of the output's distinct voids the range keeps (by the drawn shape's radius), how
-        many of them have no ellipsoid at the mean density (drawn as their centre alone), and how many minima the
-        catalogue holds in all when that is more (the ones outside its distinct sample are not drawn)."""
+        """Beside Sizes: how many of the voids drawn the range keeps (by the drawn shape's radius: the deep minima with
+        an ellipsoid, or the distinct voids with the spheres), and how many minima the catalogue holds in all when that
+        is more (the others are not drawn)."""
         o = self.current
         res = None if o is None or not self.voids.isChecked() or self.voids_applicable(o) else \
             self._void_cache.get(self._void_cache_key(o))
@@ -567,13 +576,10 @@ class VoidsMixin:
             return
         radius = self._void_radius_key()
         rows = self.void_rows(res, radius)
-        n, kept = int(np.count_nonzero(res["_shown"])), len(rows)
+        base = res["_shown_ell"] if radius == "_r_ell" and "_shown_ell" in res else res["_shown"]
+        n, kept = int(np.count_nonzero(base)), len(rows)
         text = (f"all {n} voids" if kept == n else f"{kept} of {n} voids") \
             + (" (by R_ell)" if radius == "_r_ell" else "")
-        if radius == "_r_ell":
-            alone = int(np.count_nonzero(~G.drawn_ellipsoids(res)["ok"][np.nonzero(res["_shown"])[0]]))
-            if alone:
-                text += f"; {alone} without an ellipsoid (centre only)"
         total = len(res["_shown"])
         if total > n:
             text += f" · {total} minima"
@@ -628,4 +634,4 @@ class VoidsMixin:
         cols = {f"ell_{s}_mpc": d["semi"][:, j] for j, s in enumerate("abc")}
         cols["r_ell_mpc"] = d["r"]
         return cols, ("ell_a/b/c = the semi-axes of the ellipsoid drawn, where the quadratic fit around the minimum "
-                      "returns to the mean density (sqrt(2 |delta| / lambda)), r_ell = (a b c)^(1/3) of it")
+                      "reaches half its depth (sqrt(|delta| / lambda)), r_ell = (a b c)^(1/3) of it")

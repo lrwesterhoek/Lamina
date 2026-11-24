@@ -298,7 +298,7 @@ def snapshot_frame(products: SnapshotProducts) -> tuple[float, float, int, str]:
     snapshot header: FieldSet raises FileNotFoundError without a combined file, so 'source' is always
     'header' (kept in the tuple for the provenance)."""
     fs = products.fs
-    n = int(fs.grid_n)
+    n = int(getattr(products, "grid_n", None) or fs.grid_n)     # a coarsened product's grid: its own n
     box = float(fs.meta.box_mpc)
     cell = box / n
     if abs(cell - config.CELL_SIZE) > 1e-6 * max(cell, config.CELL_SIZE):
@@ -325,7 +325,7 @@ def adopt_snapshot_grid(products: SnapshotProducts) -> tuple[float, float, int]:
     under its own namespace (r{n}_...). Returns (cell_mpc, box_mpc, n). NOT for the analysis scripts: their frame is
     DTFE_SIM's on purpose, and snapshot_frame refuses a grid that is not in it."""
     fs = products.fs
-    n, box = int(fs.grid_n), float(fs.meta.box_mpc)
+    n, box = int(getattr(products, "grid_n", None) or fs.grid_n), float(fs.meta.box_mpc)
     if n != int(config.FIELD_RESOLUTION) or abs(box - float(config.BOX_SIZE)) > 1e-6 * box:
         sigma_mpc = float(config.SMOOTHING_SIGMA_CELLS) * float(config.CELL_SIZE)   # not smoothing_length_mpc's floor
         config.FIELD_RESOLUTION, config.BOX_SIZE, config.CELL_SIZE = n, box, box / n
@@ -480,12 +480,16 @@ class SnapshotProducts:
     reused, and an alternate OUTPUT_PREFIX set never shares caches with the primary one.
     """
 
-    def __init__(self, snapshot, redshift=None, sim=None, method=None, prefix=None, data_root=None):
+    def __init__(self, snapshot, redshift=None, sim=None, method=None, prefix=None, data_root=None, coarsen: int = 1):
         self.snapshot = f"{int(snapshot):03d}"   # accepts 99, '99' or '099'
         self.sim = require_sim(sim)              # --sim / DTFE_SIM: there is no default simulation
         self.method = method or "auto"
         self.prefix = prefix                     # alternate OUTPUT_PREFIX set, see FieldSet
         self.data_root = data_root               # None = require_data_root() (DTFE_DATA_ROOT); a script's --data-root
+        # the density averaged in blocks of 'coarsen' cells a side before anything is derived from it (the launcher's
+        # voids of a grid whose own catalogue would not fit in memory: void_outlines), its products in that grid's
+        # frame (grid_n) and under a cache name of their own
+        self.coarsen = int(coarsen)
         self._fs = None
         self._redshift = redshift
         self._ram = {}
@@ -503,6 +507,11 @@ class SnapshotProducts:
         return self.fs.snapdir
 
     @property
+    def grid_n(self) -> int:
+        """The grid the products are derived on: the density grid's n, over 'coarsen'."""
+        return int(self.fs.grid_n) // self.coarsen
+
+    @property
     def redshift(self):
         if self._redshift is None:
             try:
@@ -515,7 +524,12 @@ class SnapshotProducts:
     def density_raw(self):
         """Density in MEAN units (rho/rho_bar) -- identical semantics for ps and dtfe."""
         if 'density_raw' not in self._ram:
-            self._ram['density_raw'] = self.fs.density(units='mean')
+            rho = self.fs.density(units='mean')
+            k = self.coarsen
+            if k > 1:                            # the mean of each k^3 block (mass kept: a block's mean density)
+                m = rho.shape[0] // k
+                rho = np.asarray(rho)[:m * k, :m * k, :m * k].reshape(m, k, m, k, m, k).mean(axis=(1, 3, 5))
+            self._ram['density_raw'] = rho
         return self._ram['density_raw']
 
     @property
@@ -551,6 +565,8 @@ class SnapshotProducts:
         # an alternate OUTPUT_PREFIX set gets its own cache namespace -- A/B validation
         # against e.g. ps_mw.* must never reuse (or poison) the primary ps_output caches
         tag = "" if self.prefix is None else f"{str(self.prefix).rstrip('.')}_"
+        if self.coarsen > 1:                     # derived from the block-averaged grid: never the grid's own
+            tag += f"avg{self.coarsen}_"
         return cache_dir() / f"{self.sim}_{tag}{self.fs.method}_{self.snapshot}_{name}.npz"
 
     def _grid_path(self):
@@ -626,7 +642,7 @@ class SnapshotProducts:
                 cat = {k: z[k] for k in z.files}
             remeasured = False
             # the reach depends on the grid's n: the snapshot's own (snapshot_frame passed: its cell is config's)
-            n_grid = int(self.fs.grid_n)
+            n_grid = self.grid_n
             if not catalog_r_v_ok(cat, n=n_grid) and self._grid_path() is not None:
                 # the radii need the smoothed field, which a refit does not have; the minima are this grid's (the
                 # stamp passed), so only the radii are re-measured: no Hessian, saved once with the rest
@@ -736,11 +752,12 @@ class SnapshotProducts:
 
 
 def products(snapshot: int | str, redshift: float | None = None, sim: str | None = None, method: str | None = None,
-             prefix: str | None = None, data_root: str | Path | None = None) -> SnapshotProducts:
+             prefix: str | None = None, data_root: str | Path | None = None, coarsen: int = 1) -> SnapshotProducts:
     """The derived products of one snapshot. data_root: a script's --data-root (default: require_data_root(),
     so DTFE_DATA_ROOT); the caches stay keyed by (sim, prefix, method, snapshot), as they are for a root
-    set through the environment."""
-    return SnapshotProducts(snapshot, redshift, sim=sim, method=method, prefix=prefix, data_root=data_root)
+    set through the environment. coarsen: SnapshotProducts' (the launcher's voids of a large grid)."""
+    return SnapshotProducts(snapshot, redshift, sim=sim, method=method, prefix=prefix, data_root=data_root,
+                            coarsen=coarsen)
 
 
 def _limits_path(sim=None):

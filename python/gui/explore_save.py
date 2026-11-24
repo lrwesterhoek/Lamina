@@ -404,7 +404,7 @@ class SaveMixin:
         kw = {"interpolation": "nearest"} if opts["match_data"] else {}
         if bare:
             kw["aspect"] = "auto"
-        im = ax.imshow(data, origin="lower", extent=ext, cmap=req["cmap"], vmin=lo, vmax=hi, **kw)
+        im = ax.imshow(data, origin="lower", extent=ext, cmap=G.mpl_cmap(req["cmap"]), vmin=lo, vmax=hi, **kw)
         if not bare:
             FS.style_axes(ax, opts, (_ex.AXES[rest[0]], _ex.AXES[rest[1]]), um.name)
             if opts["title"]:
@@ -423,8 +423,10 @@ class SaveMixin:
                     cb = fig.colorbar(im, ax=ax, label=self.view.colorbar.label)
                 else:
                     cb = fig.colorbar(im, ax=ax)
-                # the contour levels across the bar, as on screen
+                # the contour levels across the bar, as on screen; a class map's classes by name
                 G.mark_levels_mpl(cb, getattr(self, "_contours", None), lo, hi, CT.LINE_WIDTH_PT)
+                if req["cmap"] == G.WEB_CMAP:
+                    G.class_colorbar_mpl(cb, o.dim)
         self._map_overlays(ax, opts, um, rest, glo, ghi, ext)
         try:
             FS.fit_width(fig, opts, opts["dpi"])

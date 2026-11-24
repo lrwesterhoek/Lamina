@@ -58,7 +58,7 @@ MAX_STREAM_LINES = 12       # the stream count: lines at the even counts, thinne
 MAX_SIDE = 256
 # maps whose colours are classes or flags, not a scale: no contours (the stream count is a count: see levels())
 CLASS_FIELDS = frozenset({"hidden_streams", "caustic", "caustic_class", "tweb", "vweb"})
-DISCRETE_CMAPS = frozenset({"tab10"})
+DISCRETE_CMAPS = frozenset({"tab10", "web classes"})
 ALPHA = 0.7                 # the lines' opacity (his figures: black at 70 %); one point wide on screen
 LINE_WIDTH_PT = 0.6         # a saved figure's: his figures' linewidths=0.6
 LIGHT = 0.5                 # a colour of this luminance or more takes a black line, a darker one a white line

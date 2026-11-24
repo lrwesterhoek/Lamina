@@ -700,7 +700,8 @@ class ZoomMixin:
                 return None if sig is None else sq(sig)
             d = sq(f.dispersion)                # packed xx, xy, xz, yy, yz, zz (2D: xx, xy, yy)
             dim = 2 if d.shape[-1] == 3 else 3
-            return np.sqrt(np.maximum(sum(d[..., i] for i in G.sym_diag(dim)), 0.0))
+            # the trace sigma^2, in (km/s)^2: the grid's '.velDisp', the hi-res slice's and the exact zoom's quantity
+            return np.maximum(sum(d[..., i] for i in G.sym_diag(dim)), 0.0)
         if name == "dispersion_tensor":
             if f.dispersion is None:
                 return None
