@@ -395,6 +395,7 @@ struct AutoTuneStdInputs
     double snapWordFactor = 0.;      // the GPU snapshot's bytes per 4 B grid component (2: 64-bit words; 4: 128-bit)
     double deviceWordFactor = 0.;    // ... and the device grids' (the same words)
     bool lookAheadPossible = false;  // the partition look-ahead runs (GPU deposit, more than one partition)
+    double scratchZeroFill = 0.;     // the --scratch-dir start-up peak, macOS (auto_tune.cc: 0 where there is none)
     std::chrono::steady_clock::time_point tuneStart;   // when the tuner started (DTFE_AUTO_TUNE_DEBUG)
     double countSec = 0.;            // ... and the seconds its count grid took
     bool oneTessellation = false;    // '--sample-points': one tessellation per partition (no thread split)
@@ -729,8 +730,26 @@ inline AutoTuneReport AutoTuneStdPlanner::reportSplit(int const bestP, int const
         // ... and one tessellation per partition is booked by its phases (stdLonePhases)
         report.perPartition = chosen.bytesNoAhead;
     }
-    double const predicted = stdPeak( report.perPartition + chosen.snapshot + report.lookAhead, chosen.parts );
+    double const loopPeak = stdPeak( report.perPartition + chosen.snapshot + report.lookAhead, chosen.parts );
+    // the start-up peak under --scratch-dir (scratchZeroFill): no split lowers it, so the loop still chooses the plan,
+    // and this lifts the prediction, and the over-budget check, where it is the run's peak (the 1024^3 class). Only a
+    // run that sizes its full grids before the loop has it: a partitioned one, or one domain on a team (one
+    // tessellation of the whole box sizes no full grid ahead: DTFE.cpp dtfeParallelSingle)
+    bool const gridsSizedAhead = chosen.parts > 1 or ( bestT > 1 and not oneTessellation and not u.redshiftConeOn
+                                                       and not u.userDefinedSampling );
+    double const startUp = gridsSizedAhead ? scratchZeroFill : 0.;
+    report.reservePeak = startUp;
+    double const predicted = std::max( loopPeak, startUp );
     report.predicted = predicted;
+    if ( startUp > loopPeak )
+        message << MESSAGE::cBold() << "AUTO-TUNE:" << MESSAGE::cReset() << " the predicted peak is the start-up one: "
+                << "the particles, the grids left on the heap and the zero fill of the largest scratch-backed grid (~"
+                << startUp/1.e9
+                << " GB in all) exceed the partition loop's ~" << loopPeak/1.e9 << " GB; the plan is the loop's"
+                << ( startUp > budget ? " -- and no split lowers it: it is over the budget whatever the plan "
+                                                "(a smaller grid, fewer fields, a larger DTFE_MEM_BUDGET_GB, or Linux, "
+                                                "where the zero fill goes to the file)" : "" )
+                << ".\n" << MESSAGE::Flush;
     if ( Env::flag( "DTFE_AUTO_TUNE_DEBUG" ) )
     {
         std::fprintf( stderr, "AUTO-TUNE-DEBUG standard: %s (count grid %.3f s, %zu plans %.3f s); busiest partition "

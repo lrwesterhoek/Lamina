@@ -387,6 +387,30 @@ inline double autoTuneDerivedBytes(Field &f)
     return b;
 }
 
+// ... the same grids one entry per allocation, for the standard plan under --scratch-dir (auto_tune.cc: an allocation of
+// at least DTFE_SCRATCH_MIN_GB is a file): the derived grids and the web labels and eigenvalues, and the tidal stage's
+// work array, its two half-spectra (each ~8.016 B: n/2+1 complex values per row) and its six tensor components, all
+// through operator new (web_fields.cc FftwAligned). Their sum is autoTuneDerivedBytes.
+inline std::vector<double> autoTuneStdDerivedPerCell(Field &f)
+{
+    std::vector<double> g;
+    if ( not f.selected() ) return g;
+    double const R = double(sizeof(Real));
+    if ( f.velocity_divergence ) g.push_back( R );
+    if ( f.velocity_shear ) g.push_back( 5.*R );
+    if ( f.velocity_vorticity ) g.push_back( 3.*R );
+    if ( f.velocity_tweb ) { g.push_back( R ); g.push_back( 3.*R ); }
+    if ( f.velocity_vweb ) { g.push_back( R ); g.push_back( 3.*R ); }
+    if ( f.velocity_tweb )
+    {
+        g.push_back( 8. );
+        g.push_back( 16.032 / 2. );
+        g.push_back( 16.032 / 2. );
+        for (int c = 0; c < 6; ++c) g.push_back( R );
+    }
+    return g;
+}
+
 // Full-grid bytes per cell for one field selection, for ONE of the two phases:
 //
 //   phase 0 = DEPOSIT. What is resident while the partition triangulations run, i.e. the term
@@ -460,6 +484,27 @@ inline double autoTuneBytesPerCell(Field &f, AutoTunePS const &ps, int const pha
         if ( ps.haloRelease and not ps.exactDeposit and phase == 0 ) b += R;
     }
     return b;
+}
+
+// Standard DTFE's pre-sized full grids of a field set, in bytes per cell each: what Quantities::reserveMemory sizes
+// before the partition loop (the deposit-phase grids of autoTuneBytesPerCell; the derived fields come after it). Under
+// --scratch-dir an allocation of at least DTFE_SCRATCH_MIN_GB is backed by a file and the smaller ones stay on the
+// heap (scratch_alloc.cc), so the standard plan books them apart (auto_tune.cc).
+inline std::vector<double> autoTuneStdGridsPerCell(Field &f)
+{
+    std::vector<double> g;
+    if ( not f.selected() ) return g;
+    double const R = double(sizeof(Real));
+    bool const gradient = f.velocity_gradient or f.velocity_divergence or f.velocity_shear
+                          or f.velocity_vorticity or f.velocity_vweb;
+    if ( f.density or f.velocity_tweb ) g.push_back( R );
+    if ( f.velocity_std ) g.push_back( R );
+    if ( f.velocity or f.velocity_dispersion ) g.push_back( 3.*R );
+    if ( gradient ) g.push_back( 9.*R );
+    if ( f.velocity_dispersion ) g.push_back( 6.*R );
+    if ( f.scalar ) g.push_back( double(noScalarComp)*R );
+    if ( f.scalar_gradient ) g.push_back( double(noScalarGradComp)*R );
+    return g;
 }
 
 // The largest single pre-sized full grid of a field set, in bytes per cell: the deposit-phase grids psReserveGrids

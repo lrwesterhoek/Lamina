@@ -118,7 +118,15 @@ values are noisy, so smooth its grids before use.
   TNG100-3-Dark at 512^3, a 256^3 Zel'dovich box). A split run's look-ahead is checked against the auto-tuner's
   count of the partition that needs the most, where it planned, and no longer against a uniform guess that took a
   small dense partition's padding for its particles (TNG50-3-Dark at 4^3 kept no look-ahead: 20.86 GB guessed, 9.36
-  GB counted).
+  GB counted). Under `--scratch-dir` it books the full grids too small for a scratch file (under 1 GB) in memory, and
+  on macOS its prediction includes the start-up zero fill of the largest file-backed grid beside them and the
+  particles, as PS-DTFE's does (TNG100-3-Dark at 1024^3: 42.05 GB predicted, 42.08 measured, where it said 32.09); the
+  `SUMMARY` says when the peak was set before the partition loop. After the loop it books the derived grids under 1
+  GB beside them, which it left out (a 256^3 Zel'dovich box at 512^3, all fields in 4^3 partitions: 5.97 GB for the
+  post-processing, 5.85 measured, where it booked 1.14). A partition's own blocks of 1 GB or more, which
+  `--scratch-dir` puts in files too, stay booked as memory: they are its working set, in the page cache while it runs,
+  and a plan that left them out chose one domain on a team of 4 for that box at 512^3 (39.64 GB and 2m10s, against
+  11.65 GB and 1m46s for 2^3 partitions); the `SUMMARY` says they are in the prediction but not in the footprint.
 - The standard auto-tuner replays the run's split cell by cell (it cut on bins of 4 cells at 512^3, and its count of
   the busiest partition was off by up to 21%).
 - The parallel (TBB) Delaunay insert is in every binary built with TBB and engages by itself for tessellations of at

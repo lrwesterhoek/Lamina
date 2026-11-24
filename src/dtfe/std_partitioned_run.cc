@@ -69,8 +69,10 @@ static void dtfePartitionedRun(DTFE_State &state, vector<Sample_point> &samples,
         dtfeServeComposite( state, userOptions, totalPartitions );   // never returns
 #endif
 
+    double const peakBeforeGrids = runProgressPeak();
     uQuantities->reserveMemory( &(state.options.gridSize[0]), state.options.uField );
     aQuantities->reserveMemory( &(state.options.gridSize[0]), state.options.aField );
+    runProgressNoteStartPeak( peakBeforeGrids );   // the SUMMARY's attribution: the full grids' sizing (run_progress.h)
 
     std::vector< std::vector<size_t> > subgridList;
     std::vector< Box > subgridCoords;

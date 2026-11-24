@@ -262,9 +262,6 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     double const bCellDeposit = autoTuneBytesPerCell(u.uField, ps, 0) + autoTuneBytesPerCell(u.aField, ps, 0);
     double const bCellPost    = autoTuneBytesPerCell(u.uField, ps, 1) + autoTuneBytesPerCell(u.aField, ps, 1);
     double const bCell        = std::max( bCellDeposit, bCellPost );
-    // the largest pre-sized full grid, for the --scratch-dir start-up peak (AutoTunePSPlanner::reserveZeroFillPeak)
-    double const largestGridBytes = std::max( autoTuneLargestGridBytesPerCell(u.uField, ps),
-                                              autoTuneLargestGridBytesPerCell(u.aField, ps) ) * gridTotal;
 
     // padding fraction of the box per axis (paddingLength was resolved to Mpc by updateEntries)
     double padFrac[NO_DIM];
@@ -277,6 +274,9 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     MESSAGE::Message message( u.verboseLevel );
 
 #ifdef PHASE_SPACE
+    // the largest pre-sized full grid, for the --scratch-dir start-up peak (AutoTunePSPlanner::reserveZeroFillPeak)
+    double const largestGridBytes = std::max( autoTuneLargestGridBytesPerCell(u.uField, ps),
+                                              autoTuneLargestGridBytesPerCell(u.aField, ps) ) * gridTotal;
     // ---- PS-DTFE: Lagrangian partitions run in PARALLEL; concurrency is the throughput knob
     // and each concurrent partition holds a full padded triangulation (the dominant cost). ----
     // per padded vertex: the tessellation (kPSVertexBytes) and, beside it while it grows, the particle copy
@@ -473,8 +473,7 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     in.scratchOn       = scratchOn;
     in.largestGridBytes = largestGridBytes;
     in.readKeptAll     = u.psParticlesDeferred ? 0. : autoTuneReadKeptBytes( u, N );
-    // the same knob and default as the route itself (DTFE.cpp: ScratchAlloc::scratchArm)
-    in.scratchMinBytes = scratchOn ? ( Env::real( "DTFE_SCRATCH_MIN_GB", 0. ) > 0. ? Env::real( "DTFE_SCRATCH_MIN_GB", 0. ) : 1. ) * 1.e9 : 0.;
+    in.scratchMinBytes = u.scratchThresholdBytes();   // the route's own (user_options.cc)
     in.nPts            = nPts;
     in.ptsStreamsWhy   = ptsStreamsWhy;
     in.ptsBytes        = ptsBytes;
@@ -536,12 +535,37 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     // ... and each point-walk thread fills one 16 MB block of records before it hands it over (HitSink), per partition
     double const ptsWalkBytes = nPts > 0 ? double(dtfeHardwareThreads()) * kHitSinkBlockBytes : 0.;
 
-    // --scratch-dir: the full-grid accumulators are mmap-backed and leave the RAM model. (The process itself -- code,
-    // libraries, the GPU runtime -- is left out, as in the PS model: it matters on
-    // sub-GB runs only, where it would make the tests' simulated small machines plan around it.)
-    double const fixed = partBytes*N + (u.scratchDir.empty() ? gridTotal*bCell : 0.) + ptsBytes;
+    /* --scratch-dir: an allocation of at least DTFE_SCRATCH_MIN_GB (1 GB) is an mmap'ed file (scratch_alloc.cc), so the
+       full grids leave the RAM model one by one: a smaller grid stays on the heap (heapGrids: the 512^3 density grid's
+       0.54 GB, say), the largest file-backed one sets the start-up peak below (scratchZeroFill), and after the loop the
+       derived grids under it join them (heapPost: a 512^3 run's divergence, the web labels, the T-web's tensor
+       components; none was booked until 2026-11-23). A partition's own blocks stay booked in full, files or not: they
+       are its working memory, in the page cache while it runs (a 256^3 Zel'dovich box at 512^3 in 2^3 partitions: a
+       max RSS of 19.98 GB with --scratch-dir, a footprint of 11.65, against a footprint of 19.65 without it), and a
+       plan that books them out takes splits whose working set the budget does not hold (the same box in one domain
+       on a team of 4: 39.64 GB, and 2m10s against 1m46s). (The process itself -- code, libraries, the GPU runtime --
+       is left out, as in the PS model: it matters on sub-GB runs only, where it would make the tests' simulated small
+       machines plan around it.) */
+    double const scratchMinBytes = u.scratchThresholdBytes();   // (0: no --scratch-dir)
+    bool const scratchOn = scratchMinBytes > 0.;
+    double heapGrids = 0., heapPost = 0., largestScratchGrid = 0.;
+    if ( scratchOn )
+    {
+        for (Field *f : { &u.uField, &u.aField })
+            for (double const perCell : autoTuneStdGridsPerCell( *f ))
+            {
+                double const bytes = perCell * gridTotal;
+                if ( bytes < scratchMinBytes ) heapGrids += bytes;
+                else largestScratchGrid = std::max( largestScratchGrid, bytes );
+            }
+        heapPost = heapGrids;
+        for (Field *f : { &u.uField, &u.aField })
+            for (double const perCell : autoTuneStdDerivedPerCell( *f ))
+                if ( perCell * gridTotal < scratchMinBytes ) heapPost += perCell * gridTotal;
+    }
+    double const fixed = partBytes*N + (scratchOn ? heapPost : gridTotal*bCell) + ptsBytes;
     // ... and while the partition loop runs: its own grids only, the derived ones come after it (stdPeak)
-    double const fixedLoop = partBytes*N + (u.scratchDir.empty() ? gridTotal*bCellDeposit : 0.) + ptsBytes;
+    double const fixedLoop = partBytes*N + (scratchOn ? heapGrids : gridTotal*bCellDeposit) + ptsBytes;
     /* The GPU deposit of the '_a' pass (averaged_interpolation_1.cc -> dtfe_metal_host.cc), the same for the sampled
        and the exact average, itemized. Per tetrahedron it extracts (std_plan.cc stdTetsOfBox) the flat arrays --
        vertices 48 B, densities 16, the vertex velocities 48 where a velocity grid is deposited, the scalar 16,
@@ -683,6 +707,18 @@ AutoTuneReport autoTunePartitioning(User_options &u,
     in.snapWordFactor    = snapWordFactor;
     in.deviceWordFactor  = deviceWordFactor;
     in.lookAheadPossible = lookAheadPossible;
+    /* The start-up peak under --scratch-dir (macOS): Quantities::reserveMemory sizes each full grid at the loop's start
+       and ScratchAlloc::zeroResize fills a scratch-backed one with zeros in anonymous memory before its file is mapped
+       over it (ZeroFillScope), one grid at a time: the particles, the grids left on the heap and the largest
+       file-backed grid (the gradient's 36 B a cell where a velocity derivative is asked) are held at once, before any
+       partition. TNG100-3-Dark z=0 at 1024^3, Exact, density velocity divergence shear: 3.39 + 38.65 = 42.04 GB, a
+       peak footprint of 42.08 GB measured (the loop's plan 32.09); a 256^3 Zel'dovich box at 512^3, density velocity
+       divergence: 0.60 + 0.54 (the density grid, on the heap) + 4.83 = 5.97 GB, 5.99 measured. The reader's freed arrays no longer stay (main.cpp dtfeAllocatorReexec). Linux: none, the scope
+       is a no-op there (scratch_alloc.h). PS-DTFE books the same (ps_planner.cc reserveZeroFillPeak). */
+#ifdef __APPLE__
+    if ( largestScratchGrid > 0. )   // (beside the heap grids, which are sized as well)
+        in.scratchZeroFill = partBytes * N + heapGrids + largestScratchGrid;
+#endif
     in.tuneStart         = tuneStart;
     in.countSec          = countSec;
     in.oneTessellation   = oneTessellation;

@@ -2537,3 +2537,14 @@ void User_options::outputBox(Box &out) const
         out.coords[2*d+1] = Real( double(b.coords[2*d]) + double(this->psWindowLo[d] + this->psWindowDims[d]) * dx );
     }
 }
+
+
+/* --scratch-dir's threshold (scratch_alloc.cc): an allocation of at least this many bytes through operator new is an
+   mmap'ed file, out of the footprint -- DTFE_SCRATCH_MIN_GB in decimal GB, 1 by default; 0 without --scratch-dir. The
+   route's arming (dtfe/setup.cc), both planners (auto_tune.cc) and the SUMMARY (main.cpp) read it here. */
+double User_options::scratchThresholdBytes() const
+{
+    if ( scratchDir.empty() ) return 0.;
+    double const gb = Env::real( "DTFE_SCRATCH_MIN_GB", 0. );
+    return ( gb > 0. ? gb : 1. ) * 1.e9;
+}

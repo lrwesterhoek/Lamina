@@ -466,7 +466,11 @@ hold them; the grids are the same. `--max-concurrent` sets a fixed number.
 **Out of core.** `--scratch-dir DIR` backs every allocation of 1 GB or more (`DTFE_SCRATCH_MIN_GB`), in practice the
 full-size grids, with memory-mapped files in DIR, so a grid larger than the RAM runs against a local disk with
 bit-identical results. DIR must exist on a local, non-synced volume; iCloud paths are refused. The files are unlinked
-when made, so they vanish even if the run crashes.
+when made, so they vanish even if the run crashes. On large grids a partition's own large blocks (its face sums, its
+sub-grid's gradient, its tetrahedron arrays) pass the threshold too. The auto-tuner leaves the full grids out of its
+memory model but books those blocks as memory: they are the partition's working set and stay in the page cache while
+it runs. On macOS the peak footprint the `SUMMARY` measures does not count them, so a scratch run's measured peak can
+be below the prediction; on Linux the max RSS counts them while their pages are resident, the full grids' too.
 
 **Padding.** Every partition, and in standard DTFE every thread's sub-box, carries its own padding. Standard DTFE's
 `--padding` default is 15 mean spacings, which the drivers, dtfelib and the launcher pass too. An incomplete padding

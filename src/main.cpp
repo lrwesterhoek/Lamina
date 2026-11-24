@@ -349,12 +349,37 @@ int main( int argc, char *argv[] )
 #endif
                            maxRss/1.e9, (measured - predicted)/1.e9, 100.*(measured - predicted)/predicted );
             std::cout << MESSAGE::cYellowD() << "   memory model      : " << MESSAGE::cReset() << line << "\n" << std::flush;
+#ifndef PHASE_SPACE
+            // --scratch-dir: the standard plan books a partition's blocks of the threshold or more as memory, though
+            // they are scratch files, and leaves the full grids out (auto_tune.cc): the footprint counts neither
+            // file, the max RSS their resident pages
+            if ( double const thr = userOptions.scratchThresholdBytes(); thr > 0. )
+                std::cout << "                       (--scratch-dir: the partitions' blocks of " << thr/1.e9
+                          << " GB or more are in the prediction but in scratch files, which the "
+#ifdef __APPLE__
+                          << "footprint leaves out; the full grids are in neither"
+#else
+                          << "max RSS counts while their pages are resident, as it does the full grids, which the "
+                             "prediction leaves out"
+#endif
+                          << ")\n" << std::flush;
+#endif
         }
-        // ... and the peak when the post-processing began: equal to the run's peak when the partition loop set it
+        // ... and the peak when the post-processing began: equal to the run's peak when the partition loop set it,
+        // or the start-up before it (the full grids' sizing: their zero fill under --scratch-dir, run_progress.h)
         if ( double const loopPeak = runProgressLoopPeak(); loopPeak > 0. and measured > 0. )
+        {
+            double const startPeak = runProgressStartPeak(), preGrids = runProgressPreGridsPeak();
+            char const *who = loopPeak < measured ? "the post-processing raised it"
+                            : ( preGrids > 0. and preGrids >= measured ) ? "set before the partition loop, before its "
+                                                                           "grids were sized"
+                            : ( startPeak > 0. and startPeak >= measured ) ? "set before the partition loop: the full "
+                                                                             "grids' sizing"
+                            : "the loop set the run's peak";
             std::cout << MESSAGE::cYellowD() << "   before post-proc  : " << MESSAGE::cReset() << std::fixed
-                      << std::setprecision(2) << loopPeak/1.e9 << " GB peak (" << ( loopPeak >= measured ? "the loop set "
-                      "the run's peak" : "the post-processing raised it" ) << ")\n" << std::defaultfloat << std::flush;
+                      << std::setprecision(2) << loopPeak/1.e9 << " GB peak (" << who << ")\n" << std::defaultfloat
+                      << std::flush;
+        }
         std::cout << MESSAGE::cYellowD() << "   total wall time   : " << MESSAGE::cReset()
                   << MESSAGE::cGreen() << MESSAGE::formatDuration(wallSec) << MESSAGE::cReset() << "\n"
                   << MESSAGE::cCyan() << MESSAGE::hrule() << MESSAGE::cReset() << "\n" << std::flush;

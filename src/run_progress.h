@@ -70,6 +70,8 @@ struct RunProgress
     double eta = -1.;
     double predicted = -1.;   // the auto-tuner's predicted peak, bytes (-1: none)
     double loopPeak = -1.;    // the peak when the post-processing began (the partition loop's), bytes (-1: none)
+    double startPeak = -1.;   // ... and once the partition loop's full grids were sized, before any partition
+    double preGridsPeak = -1.;  // ... and just before they were sized
     std::mutex m;
 };
 
@@ -147,6 +149,35 @@ inline void runProgressNoteLoopPeak()
     RunProgress &p = runProgressState();
     std::lock_guard<std::mutex> lock( p.m );
     p.loopPeak = peak;
+}
+
+// the peak once the partition loop has sized its full grids, before its first partition (std_partitioned_run.cc,
+// ps_partitioned_run.cc): under --scratch-dir on macOS each scratch-backed grid is filled with zeros in anonymous
+// memory before its file is mapped over it (scratch_alloc.h ZeroFillScope), and the largest of them beside the
+// particles can be the run's peak (TNG100-3-Dark at 1024^3: 42.08 GB, against a loop of ~32). 'before' is the peak
+// read just before the sizing (runProgressPeak), so the SUMMARY can tell the sizing's peak from an earlier one (the
+// input's read). Read once.
+inline void runProgressNoteStartPeak(double const before)
+{
+    double const peak = runProgressPeak();
+    RunProgress &p = runProgressState();
+    std::lock_guard<std::mutex> lock( p.m );
+    p.startPeak = peak;
+    p.preGridsPeak = before;
+}
+
+inline double runProgressPreGridsPeak()
+{
+    RunProgress &p = runProgressState();
+    std::lock_guard<std::mutex> lock( p.m );
+    return p.preGridsPeak;
+}
+
+inline double runProgressStartPeak()
+{
+    RunProgress &p = runProgressState();
+    std::lock_guard<std::mutex> lock( p.m );
+    return p.startPeak;
 }
 
 inline double runProgressLoopPeak()

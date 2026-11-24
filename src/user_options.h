@@ -290,6 +290,7 @@ struct User_options
     // additional options
     std::string configFilename;// config file from which program options were read
     std::string scratchDir;    // --scratch-dir: back >=1 GB allocations (the full-grid accumulators) with mmap'ed files in this LOCAL directory instead of RAM; empty = off. See scratch_alloc.h
+    double scratchThresholdBytes() const;   // ... its threshold: an allocation of at least this is a file (DTFE_SCRATCH_MIN_GB, 1 GB); 0 = off
     bool   NGP;           // true if to use NGP grid interpolation instead of DTFE
     bool   CIC;           // true if to use CIC grid interpolation instead of DTFE
     bool   TSC;           // true if to use TSC grid interpolation instead of DTFE

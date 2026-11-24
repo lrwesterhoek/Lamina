@@ -142,7 +142,9 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     if ( state.options.psServe )
         psServeComposite( state, userOptions, plan, partitionOptions );   // never returns
 
+    double const peakBeforeGrids = runProgressPeak();
     psReserveGrids( state, uQuantities, aQuantities );
+    runProgressNoteStartPeak( peakBeforeGrids );   // the SUMMARY's attribution: the full grids' sizing (run_progress.h)
 
     // periodic=true here only drives grid-level index wrapping; data periodicity comes
     // from the Lagrangian copies and Eulerian unwrapping

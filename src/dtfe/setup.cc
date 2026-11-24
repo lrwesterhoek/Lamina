@@ -85,10 +85,9 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
     // build, whose scratch_alloc STUB never hijacks the host program's allocator.
     if ( not userOptions.scratchDir.empty() )
     {
-        double thresholdGB = 1.0;
-        if ( double const v = Env::real( "DTFE_SCRATCH_MIN_GB", 0. ); v > 0. )
-            thresholdGB = v;
-        if ( ScratchAlloc::scratchArm( userOptions.scratchDir.c_str(), size_t(thresholdGB*1.e9) ) )
+        double const thresholdBytes = userOptions.scratchThresholdBytes();
+        double const thresholdGB = thresholdBytes / 1.e9;
+        if ( ScratchAlloc::scratchArm( userOptions.scratchDir.c_str(), size_t( thresholdBytes ) ) )
         {
             MESSAGE::Message message( userOptions.verboseLevel );
             message << MESSAGE::cBold() << "SCRATCH:" << MESSAGE::cReset() << " allocations >= "

@@ -63,6 +63,15 @@
 #  M) the uniform count (DTFE_TEST_TUNE_UNIFORM=1: the plan of a call without the particles) plans the team the run
 #     forms: '--max-concurrent 5' is DTFE_parallel's team of 4 (2 x 2 x 1 sub-boxes, each padded on its own faces),
 #     the same report as '--max-concurrent 4' but its mc, and that team's padded vertices.
+#  N) the --scratch-dir start-up peak: each scratch-backed full grid is filled with zeros in anonymous memory before
+#     its file is mapped over it (macOS; scratch_alloc.h ZeroFillScope), the largest beside the particles, before any
+#     partition, and the grids under DTFE_SCRATCH_MIN_GB (1 GB) stay on the heap. On a 384^3 grid in 4^3 partitions (a
+#     loop far smaller than the grid) N1 the report predicts the particles, the density and velocity grids (on the
+#     heap) and the 9-component gradient (file-backed) of 384^3, and says the peak is the start-up one (on Linux: none
+#     booked, the zero fill goes to the file); N2 without --scratch-dir no such peak; N3 after the loop the derived
+#     divergence (on the heap at 384^3) is booked beside the heap grids; N4 with a threshold no allocation reaches
+#     (DTFE_SCRATCH_MIN_GB=1000) the report is the one without --scratch-dir, every derived field and the T-web's
+#     arrays booked one by one adding up to the post phase's grids.
 #  O) the CPU exact average's run-wide words are booked for the grids the loop gives words, the ones with a run-wide
 #     unit (single build): one domain at 256^3 with density_a, scalar_a and scalarGradient_a (a scalar dataset in a
 #     copy of the snapshot), each plan against its measured figure: 40 B per cell (0.671 GB) of words where every
@@ -530,6 +539,50 @@ ve="$(awk -v n="${N}" 'BEGIN{printf "%.0f", n*n*n/8 * (1 + 80/n)^2 * (1 + 40/n)}
 check_ok "M2 ... and pads each of the team's 2 x 2 x 1 sub-boxes on its own faces: ${vm:-?} padded vertices (${ve})" \
       "$(awk -v v="${vm:-0}" -v e="${ve}" 'BEGIN{exit !(v > e*0.995 && v < e*1.005)}' && echo 1 || echo 0)"
 rm -f "${TMP}"/da_m*
+
+# ---------- (N) the --scratch-dir start-up peak ----------
+echo ">> N: the zero fill of the largest scratch-backed grid at start-up (--scratch-dir)"
+NSC="${TMP}/da_n_scratch"; mkdir -p "${NSC}"
+NR=("${SNAP}" "${TMP}/da_n" --grid 384 "${COMMON[@]}" --field density_a velocity_a divergence_a --partition 4 4 4
+    --max-concurrent 1 --auto-tune-report)
+env DTFE_RAM_GB=64 "${BIN}" "${NR[@]}" --scratch-dir "${NSC}" > "${TMP}/da_n1.txt" 2>&1 || true
+env DTFE_RAM_GB=64 "${BIN}" "${NR[@]}" > "${TMP}/da_n0.txt" 2>&1 || true
+pn="$(field predicted_gb "${TMP}/da_n1.txt")"
+# the particles (36 B a particle, 72 in the double build), the density, velocity and gradient grids (1, 3 and 9
+# components) each on the heap under 1 GB and file-backed from it, the largest file-backed one zero-filled
+if precision_double; then npb=72; nrb=8; else npb=36; nrb=4; fi
+nexp="$(awk -v n="${N}" -v p="${npb}" -v r="${nrb}" 'BEGIN{heap = 0; big = 0; split("1 3 9", c, " ");
+    for (i = 1; i <= 3; ++i) { b = 384^3 * c[i] * r; if (b < 1e9) heap += b; else if (b > big) big = b }
+    printf "%.4f", (n*n*n*p + heap + big)/1e9}')"
+if [ "$(uname -s)" = Darwin ]; then
+    check_ok "N1 --scratch-dir (macOS): predicted ${pn:-?} GB, the particles, the heap grids and the zero fill of the 384^3 gradient (${nexp} GB), said" \
+          "$(grep -q 'the predicted peak is the start-up one' "${TMP}/da_n1.txt" \
+             && awk -v a="${pn:-0}" -v e="${nexp}" 'BEGIN{d = a - e; exit !(d > -0.011 && d < 0.011)}' && echo 1 || echo 0)"
+else
+    check_ok "N1 --scratch-dir (Linux): no start-up peak booked, the zero fill goes to the file" \
+          "$(grep -Eq "${REPORT_RE}" "${TMP}/da_n1.txt" && ! grep -q 'the predicted peak is the start-up one' "${TMP}/da_n1.txt" \
+             && echo 1 || echo 0)"
+fi
+check_ok "N2 without --scratch-dir: no start-up peak (the grids are in the plan's own bytes)" \
+      "$(grep -Eq "${REPORT_RE}" "${TMP}/da_n0.txt" && ! grep -q 'the predicted peak is the start-up one' "${TMP}/da_n0.txt" \
+         && echo 1 || echo 0)"
+# the post phase: the derived divergence (1 component) beside the density and velocity grids, each on the heap under
+# 1 GB, with the particles
+nf="$(field fixed_gb "${TMP}/da_n1.txt")"
+fexp="$(awk -v n="${N}" -v p="${npb}" -v r="${nrb}" 'BEGIN{heap = 0; split("1 3 9 1", c, " ");
+    for (i = 1; i <= 4; ++i) { b = 384^3 * c[i] * r; if (b < 1e9) heap += b }
+    printf "%.4f", (n*n*n*p + heap)/1e9}')"
+check_ok "N3 --scratch-dir: after the loop the derived divergence on the heap beside the heap grids: fixed ${nf:-?} GB (${fexp})" \
+      "$(awk -v a="${nf:-0}" -v e="${fexp}" 'BEGIN{d = a - e; exit !(d > -0.011 && d < 0.011)}' && echo 1 || echo 0)"
+NA=("${SNAP}" "${TMP}/da_n" --grid 128 "${COMMON[@]}" --field density_a velocity_a gradient_a divergence_a shear_a
+    vorticity_a tweb_a vweb_a --lambda-th 0.3 --partition 2 2 2 --max-concurrent 1 --auto-tune-report)
+env DTFE_RAM_GB=64 DTFE_SCRATCH_MIN_GB=1000 "${BIN}" "${NA[@]}" --scratch-dir "${NSC}" > "${TMP}/da_n4s.txt" 2>&1 || true
+env DTFE_RAM_GB=64 "${BIN}" "${NA[@]}" > "${TMP}/da_n4.txt" 2>&1 || true
+r4s="$(grep -E "${REPORT_RE}" "${TMP}/da_n4s.txt" | head -1 || true)"
+r4="$(grep -E "${REPORT_RE}" "${TMP}/da_n4.txt" | head -1 || true)"
+check_ok "N4 --scratch-dir with no allocation at the threshold (DTFE_SCRATCH_MIN_GB=1000): the report without it" \
+      "$([ -n "${r4}" ] && [ "${r4}" = "${r4s}" ] && echo 1 || echo 0)"
+rm -rf "${TMP}"/da_n*
 
 # ---------- (O) the CPU exact average's words: only for the grids with a run-wide unit ----------
 echo ">> O: the CPU exact average's run-wide words in the plan (none for the scalar grids under --approx-phase-space-density)"
