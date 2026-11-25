@@ -1,10 +1,6 @@
 """The launcher's own small widgets and widget helpers (moved from app.py, which re-exports CheckDelegate and
 FigureBrowser): CheckDelegate, which draws the tick boxes of a checkable list or table; FigureBrowser, the
-Figures tab's list of the figures a run wrote, with a preview; the helpers the window's forms are built
-and read with (_mono, _note, _checkable, _grow_fields, _scroll, _dir_row, _checked, _grid_combo, _state_text,
-_int); and the style helpers every tab builds its groups with: the spacing constants, group, Collapsible,
-ChoiceRadios (the run tabs' Quality pair and the like), FormNote, AutoRow (a row of the opt-in Advanced group),
-labelled_row, field_grid, grid_row, button_row and tip."""
+Figures tab's list of the figures a run wrote, with a preview."""
 
 from __future__ import annotations
 
@@ -211,10 +207,8 @@ class ElidedLabel(QLabel):
 
 class Collapsible(QGroupBox):
     """A group that folds to one line: its title, an arrow and a summary of what it holds (the summary function's
-    text, kept up to date by update_summary). The body's form is 'form', the body itself 'body': folding hides the
-    body, never the fields in it (their own isHidden() stays false). With settings, whether it is open is kept
-    under OPEN_KEY ({key: open}) and comes back at the next start; without (a window that does not remember),
-    nothing is read or written. Opening or folding it is its 'opened' signal."""
+    text, kept up to date by update_summary). The body's form is 'form', the body itself 'body': folding hides
+    the body, never the fields in it (their own isHidden() stays false)."""
     opened = Signal(bool)            # (not 'toggled': QGroupBox has a signal of that name)
 
     def __init__(self, title: str, key: str, settings=None, summary=None, start_open: bool = False):
@@ -318,10 +312,7 @@ class FormNote(QLabel):
 
 class AutoRow(QWidget):
     """One row of the opt-in Advanced group (app_advanced.py): its control, whose first choice is Automatic, and
-    beside it a grey note (what Automatic gives the job now, or why the row's value is not passed). The control is a
-    drop-down of (value, text) choices (set_choices), or for a number range number = (lo, hi) a number box whose
-    lowest step, one below lo, reads Automatic (as the controls before the two modes read 'auto' at 0). value() is
-    None on Automatic. set_choices and set_value never emit 'changed': only a change by the user does, once."""
+    beside it a grey note (what Automatic gives the job now, or why the row's value is not passed)."""
     changed = Signal()
 
     def __init__(self, number: tuple[int, int] | None = None):
@@ -390,9 +381,8 @@ class AutoRow(QWidget):
 
 class CheckDelegate(QStyledItemDelegate):
     """Draws the tick boxes of a checkable list or table itself. The native macOS style (Qt 6, dark
-    appearance) paints the check indicator of the CURRENT row only, so every other row looks as if
-    it has none. Fusion's indicator, drawn over the rectangle the view's own style reserves for it
-    (so a click there still toggles the item), shows in both appearances."""
+    appearance) paints the check indicator of the CURRENT row only, so every other row looks as
+    if it has none."""
     _fusion = None
 
     def paint(self, painter, option, index):
@@ -500,7 +490,7 @@ class FigureBrowser(QWidget):
 
     def __init__(self):
         super().__init__()
-        QImageReader.setAllocationLimit(4096)       # 8192^2 point-eval PNGs exceed Qt's 256 MB default
+        QImageReader.setAllocationLimit(4096)
         self.roots: list[Path] = [rs.FIGURES_ROOT]
         self.since: float | None = None
         self._current: Path | None = None

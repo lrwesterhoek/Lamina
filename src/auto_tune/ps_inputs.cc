@@ -1,22 +1,11 @@
-// Part of src/auto_tune.cc, inside its #ifdef PHASE_SPACE and its anonymous namespace: included once, in order, by
-// that file and compiled only as part of its object, never alone.
-// The PS planner's inputs: the partition spans, the sample points' streams and bytes, the scratch space check,
-// one thread's copy per cell, and AutoTunePSInputs.
+// Part of src/auto_tune.cc (inside its PHASE_SPACE block and anonymous namespace), included once by that file, never compiled
+// alone: the PS planner's inputs (partition spans, the sample points' streams and bytes, the scratch check, a thread's copy per cell).
 
-/* The cells of the largest partition sub-grid of each n^NO_DIM split, n = 1 .. 6 (cells[n]), and of the user's own
-   split k[] when it is not cubic (cellsUser), from the particles (0: not known), and the mean over the
-   split's partitions (mean[n], meanUser): the lane share's floor (laneSpread). The binary crops a
-   partition's grids to the Eulerian span of its kept tetrahedra per axis (psSubgridBox, ps_interpolation.cc), and that
-   span grows as structure forms. (A single domain never crops: the planner books the whole grid there,
-   gpuSubCells.)
-   The partitions are equal slices of the Lagrangian box -- on a periodic run of the period [seam - L, seam), the seam
-   placed by the partition padding (DTFE.cpp regions(), lagPadding; subpartition.h psPeriodicSeam, replayed below
-   without its exactness test) -- owned by the tetrahedra's Lagrangian centroids. So per split: the particles binned on
-   a B^NO_DIM grid over that Lagrangian domain (a partition's edge rounded to the nearest bin), each bin's Eulerian
-   extent per axis in grid cells (periodic: each particle the minimal image of the bin's first one, as the deposit
-   wraps a tetrahedron about its first vertex); a partition's touched planes = its bins' extents widened below for the
-   tetrahedra; then psSubgridBox's rule (their [lo, hi], or on a periodic axis touched at both ends the complement of
-   the largest untouched run), at most the axis. */
+/* The cells of the largest partition sub-grid of each n^NO_DIM split, n = 1 .. 6 (cells[n]), and of the user's own split k[]
+   when not cubic (cellsUser), from the particles (0: not known), and the mean over the split's partitions: the lane share's
+   floor (laneSpread). Partitions crop their grids to the Eulerian span of their kept tets (psSubgridBox); a single domain never
+   crops. Partitions are equal slices of the Lagrangian box (periodic: [seam - L, seam), psPeriodicSeam replayed below), owned by
+   the tets' centroids: particles binned on a B^NO_DIM grid, each bin's Eulerian extent per axis widened, then psSubgridBox's rule. */
 inline void psPartitionSpans(std::vector<Particle_data> const &p, User_options &u, double const padFrac[NO_DIM],
                              int const *userK, double (&cells)[7], double &cellsUser, double (&mean)[7],
                              double &meanUser)
@@ -110,10 +99,9 @@ inline void psPartitionSpans(std::vector<Particle_data> const &p, User_options &
             }
         }
     };
-    // a tetrahedron reaches about one particle spacing past the particles it joins: per axis, each bin's extent is
-    // widened by a spacing at the bin's own stretch (its Eulerian extent over its Lagrangian width, at least 1) and a
-    // cell -- inside the partition and into the padding alike. Measured against psSubgridBox on pancakes and crossed
-    // waves: 1.00 - 2.09x the largest sub-grid, never below
+    // a tetrahedron reaches about one particle spacing past the particles it joins: per axis, each bin's extent is widened by a
+    // spacing at the bin's own stretch (its Eulerian extent over its Lagrangian width, at least 1) and a cell, inside the
+    // partition and into the padding alike
     double const spacingBins = double(B) / std::pow( N, 1. / double(NO_DIM) );   // a particle spacing in bin widths
     std::vector<int> diff[NO_DIM];
     // the largest sub-grid of the split k[] (partitions per axis), and the mean over its partitions (avg)
@@ -261,8 +249,7 @@ inline void autoTunePSPointStreams(User_options &u, double const N, size_t const
                                                   haveRegion ? rLo : nullptr, haveRegion ? rHi : nullptr );
         if ( est > 0. )
         {
-            // 1 + 1.4 (est - 1): at least 5% above the measured stream count of each calibration set (TNG100-3-Dark
-            // z=0 and z=1, TNG50-3-Dark z=0; 1.3 would leave 1% at z=1)
+            // 1 + 1.4 (est - 1): at least 5% above the stream count of each calibration set (TNG100-3-Dark z=0 and z=1, TNG50-3-Dark z=0)
             ptsMeanStreams = std::max( 1., 1. + 1.4*(est - 1.) );
             report.streamsEstimate = est;
             snprintf( ptsStreamsWhy, sizeof(ptsStreamsWhy),
@@ -392,12 +379,9 @@ struct AutoTunePSInputs
     double ptsRecordBytes = 0.;      // ... of which the stream records (written as the partitions merge)
     double ptsOutputBytes = 0.;      // ... and the finalized outputs (allocated at the end)
     double particleBytes = 0.;       // the particles held (0 with deferred particles)
-    double readKept = 0.;            // the read buffers the allocator keeps (--grid-window)
-    double readKeptAll = 0.;         // ... what every run still holds right after the read (the reserve peak:
-                                     // auto_tune/ps_planner.cc reserveZeroFillPeak)
     double largestGridBytes = 0.;    // the largest pre-sized full grid (autoTuneLargestGridBytesPerCell x the cells)
     double scratchMinBytes = 0.;     // --scratch-dir's threshold: grids of at least this are scratch-backed (0: no scratch)
-    double fixed = 0.;               // the irreducible term: particles + read buffers + grids + points
+    double fixed = 0.;               // the irreducible term: particles + grids + points
     bool psVel = false, psDisp = false, psGrad = false, psExact = false;   // the GPU deposit's grid selection
     double gridB = 0.;               // the GPU grids' bytes per cell and copy
     bool psDensity = false;          // a density grid is selected

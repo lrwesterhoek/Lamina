@@ -1,46 +1,9 @@
 #!/usr/bin/env bash
-# The standard-DTFE GPU deposit ('--gpu', ./DTFE): the PS deposit's chunk checkpoints and
-# cause-aware retry (src/CGAL_triangulation/gpu_metal_retry.h, shared with the PS host;
-# the pass loop is runBatch in dtfe_metal_host.cc), and its exact sums -- the '_a' grids as
-# fixed-point sums (the sampled average's in 64-bit words, the exact average's in the run-wide 128-bit words),
-# metal/dtfe_deposit.metal's header -- which make two runs byte-identical (with float
-# atomics two fault-free runs differ in 26-49% of the cells, up to 1e-6). tests/gpu_retry_check.sh is the PS twin of
-# this suite and its fault hook is the same: DTFE_GPU_FAULT_AT=<k>[:innocent|timeout|oom|persist] lets the k-th command
-# buffer of the process run to completion -- its atomics ARE in the grids -- and then reports it as
-# failed, so only a correct restore keeps the grids exact. Asserted on a synthetic snapshot with pinned opening chunks
-# (DTFE_GPU_CHUNK 4096) and a checkpoint every 2 buffers:
-#   E1  exact sums: two fault-free runs with different opening chunks (4096 and 65536 work items) write
-#       byte-identical '.a_den', '.a_vel', '.a_velGrad' -- the item kernel over 9 sub-domains whose batches race
-#       for the device, the per-tetrahedron kernel (DTFE_GPU_ITEMS=0), and --exact
-#   E2  the default agrees with the CPU's box mean to 1e-5 of the peak (tests/dtfe_metal_check.sh is the full CPU
-#       parity suite)
-#   R1  the item kernel in one batch (--max-concurrent 1), an 'innocent victim' fault at buffer 3: the batch
-#       resumes from the checkpoint at the same pace (250 ms) and its three grids are byte-identical to E1's
-#       fault-free one-batch run
-#   R2  --exact, an 'oom' fault: classified 'resource', the pace escalates (62 ms), grids byte-identical
-#   R3  9 sub-domains under --partition 2 2 2, a 'timeout' (watchdog) fault at buffer 9: byte-identical
-#   R4  a 'persist' fault (every buffer from the 3rd on fails) under --exact: the sub-domain goes to the
-#       CPU after 3 failures of the same chunk, the run says how many sub-domains ran on the CPU, and the CPU's
-#       '.a_den' agrees with the GPU's to 1e-4 of the peak
-#   R5  the failed buffers are counted: 1, 1, 3 (the deposit's summary lines)
-#   R6  the run's closing 'GPU deposit retries: N (innocent a, timeout b, oom c, other d)' -- the line the
-#       launcher's Runs tab reads; the progress sidecar's gpu_retries_by_cause has the same counters -- R1 innocent
-#       1, R2 oom 1, R3 timeout 1, R4 innocent 3, and none for a fault-free run
-#   R7  the escalated pace eases back after a clean stretch (DTFE_GPU_PACE_RECOVER_SEC=0) to the default 250 ms
-#       buffers / 8 ms gaps, grids byte-identical; R3's default 90 s holds it
-#   R8  the image-plane shape of the recipe's dtfe27planes stage: '--sample-points' with
-#       '--exact' under --partition 2 2 2 (one triangulation per partition, DTFE_parallel's single-
-#       triangulation branch) and a 'persist' fault, so every partition's grid falls back to the CPU: the fallback
-#       runs the THREADED exact average (DTFE_DEPOSIT_THREADS=4: the log says so once per partition), and its
-#       '.a_*' grids and '.pts_*' answers are byte-identical to a one-thread CPU run
-#   N1  the non-finite guard of the exact sums (ps_deposit_params.h psFixedShareOk): DTFE_TEST_NAN_SHARE=50
-#       makes about one tetrahedron in 50 hand the kernel NaN vertex densities; the run reports once how many density
-#       shares it left out, and its '.a_den' has no NaN or infinity
-#   N2  the same under --exact, whose batches sum in the run-wide 128-bit words (src/fixed_units.h RunUnits; the
-#       guard is fixed_words.metal.inc shareLimbs): reported once, '.a_den' finite; and the exact runs' timing lines
-#       (x1) say 'run-wide 128-bit fixed-point sums' for every batch
-# GPU builds only (METAL=1): skipped (exit 0) otherwise, a local GPU suite like tests/gpu_retry_check.sh (not in
-# tests/ci_suite.sh). ~30 s on Metal (M1 Max). DTFE_TEST_PRECISION=double runs ./DTFE-double.
+# The standard-DTFE GPU deposit ('--gpu', ./DTFE): chunk checkpoints, cause-aware retry and exact fixed-point sums that make
+# runs byte-identical. DTFE_GPU_FAULT_AT=<k>[:innocent|timeout|oom|persist] fails the k-th buffer AFTER it ran, so only a
+# correct restore keeps the grids exact. PS twin: tests/gpu_retry_check.sh. Pinned chunks (DTFE_GPU_CHUNK 4096), checkpoint every 2 buffers.
+#   R5  the failed buffers are counted in the deposit's summary lines
+#   R6  the run's closing 'GPU deposit retries: N' line counts the retries by cause
 # Usage: tests/dtfe_gpu_retry_check.sh [--no-build]   (--no-build is accepted and ignored)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -63,15 +26,13 @@ run() { local out="$1"; shift; "$@" > "$out.log" 2>&1 || { echo "FAIL: $(basenam
         grep -q "using the CPU interpolation\|ran on the CPU instead" "$out.log" \
             && { echo "FAIL: $(basename "$out") fell back to the CPU (see $out.log)"; exit 1; }; return 0; }
 # pinned opening chunks (the controller rescales by elapsed time from there; every chunk starts at a multiple of
-# 256 items, which the exact sums need) and a checkpoint every 2 buffers: the fault at buffer 3 then lands after
-# the checkpoint at buffer 2
+# 256 items, which the exact sums need) and a checkpoint every 2 buffers
 export DTFE_GPU_CHUNK=4096 DTFE_GPU_CHECKPOINT_CHUNKS=2
 unset DTFE_GPU_FAULT_AT DTFE_GPU_ITEMS
 C=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --verbose 2 --field density_a velocity_a gradient_a --partition 1 1 1)
 ONE=(--max-concurrent 1)                 # one sub-domain: one batch, so 'buffer k' is a buffer of that batch
 # The kernels of E1's item and per-tet runs, R1, R3, R7 and N1 are the Monte-Carlo ones, so those runs and E2's CPU
 # run pass '--sampled' (the exact average is the default).
-# C and P name no mode: the exact runs (E1's x, R2, R4) share C and add '--exact'.
 echo ">> E1: two fault-free runs with different opening chunks (item kernel over 9 sub-domains, per-tet kernel, exact)"
 run "$TMP/a1" env DTFE_GPU_TIMING=1 "${DTFE_BIN}" "$SNAP" "$TMP/a1" "${C[@]}" --gpu --sampled
 run "$TMP/a2" env DTFE_GPU_CHUNK=65536 "${DTFE_BIN}" "$SNAP" "$TMP/a2" "${C[@]}" --gpu --sampled

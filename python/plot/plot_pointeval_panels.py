@@ -1,12 +1,5 @@
 """Publication-resolution continuous-field maps from '--sample-points' output.
 
-Renders the point-evaluated PS-DTFE planes written by the binary for a slab generated
-with tools/make_image_plane.py: projected density (physical units, log-gray on black),
-the same projection inverted (the fine sheet/tessellation structure, black on white),
-and the pointwise stream count N_streams (discrete colormap). Because the points sample
-the continuous piecewise-linear field, the maps are grid-free: resolution is set by the
-pixel count of the plane file, limited only by the tessellation itself.
-
     python3 plot/plot_pointeval_panels.py --root <PS-DTFE output root> --plane plane_100_99.json
 """
 

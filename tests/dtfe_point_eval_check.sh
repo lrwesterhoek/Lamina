@@ -1,37 +1,10 @@
 #!/usr/bin/env bash
-# STANDARD-DTFE --sample-points check (the sibling of ps_point_eval_check.sh).
-#
-# The standard binary shares the PS point-evaluation machinery (ps_point_eval.cc) but
-# evaluates the EULERIAN tessellation: exactly one containing tetrahedron per point, so
-# '.pts_streams' is a 0/1 coverage flag and '.pts_velDisp' is identically zero. Verified:
-#  A) uniform jittered lattice, cell-centre points: full coverage, stream count exactly 1,
-#     density ~1 (DTFE estimator level), velocity and dispersion exactly 0.
-#  B) pancake, standard vs PS-DTFE at the same cell centres: single-stream point values
-#     agree at the tolerances of ps_standard_cross_check.py (velocity median rel <= 1e-3,
-#     density median rel <= 0.15 -- the two tessellations differ, so agreement is at
-#     estimator level, not exact).
-#  C) text vs binary point-file readers give byte-identical outputs.
-#  D) --pts-den-grad: adding the flag leaves the other outputs byte-identical; on a
-#     jitter-free pancake the transverse gradient vanishes and grad_x matches a central
-#     finite difference of '.pts_den' at x +- eps probe points.
-#  E) clear rejections: --ps-per-stream (PS-only: not an option of this binary) and --partition-index (one partition
-#     would answer only its own share of the points). '--partition' is accepted:
-#  F) --partition: each partition triangulates its padded sub-box and answers the points inside
-#     the tetrahedra whose Eulerian centroid lies in its sub-box (the composite server's ownership),
-#     so every point is answered exactly once, by the tetrahedron the single triangulation uses.
-#     Periodic crossed waves at cell centres, random points, PARTICLE POSITIONS (vertex ties, the
-#     symbolic tie-break), float32 grid-line coordinates (the partition cuts) and points 1e-5 from
-#     the box faces (the periodic seam): split 2x2x2, 3x3x3 and 3x2x1 (a partition spanning a whole
-#     periodic axis) give the single run's '.pts_streams' exactly and every value to 1e-12 of the
-#     field's peak (measured ~1e-15: only the vertex order and the vertex densities' summation
-#     order differ). A non-periodic cloud: the same 1.5 spacings or more inside the particles'
-#     bounding box -- closer, a partition can tessellate the convex hull differently (flat hull
-#     tetrahedra have huge circumspheres), as the composite server's help says. A too small
-#     '--padding' is reported (points owned twice / periodic points covered by none). A GPU build
-#     (--gpu) writes the CPU's points byte for byte (point evaluation is CPU-only). 2D (DTFE-2d,
-#     single pass) the same. demo/z0_64.gadget (z = 0, voids): 128^2 planes through the box
-#     middle and ON the periodic seam x = 0 at the production padding 15 equal the single run.
-#
+# STANDARD-DTFE --sample-points check (sibling of ps_point_eval_check.sh): the Eulerian tessellation gives exactly one
+# containing tetrahedron per point, so '.pts_streams' is a 0/1 flag and '.pts_velDisp' is identically zero.
+# Shares the PS point-evaluation machinery (ps_point_eval.cc).
+#   A  uniform jittered lattice, cell-centre points: full coverage
+#   B  pancake, standard vs PS-DTFE at the same cell centres
+#   F  --partition: each partition triangulates its padded sub-box and answers the points
 # Usage: tests/dtfe_point_eval_check.sh [--no-build]
 
 set -euo pipefail
@@ -61,8 +34,7 @@ build_target "${1:-}" DTFE o
 [ -x "${BIN}" ] || { echo "FAIL: ${BIN} not built"; exit 1; }
 
 # capture FIRST -- piping the binary straight into grep -q would SIGPIPE it under pipefail
-# a help that fails is a broken binary, not a missing feature; a missing feature fails under DTFE_TEST_REQUIRED=1
-# (skip_or_fail, tests/lib.sh)
+# a help that fails is a broken binary, not a missing feature.
 FULL_HELP="$("${BIN}" --full-help 2>/dev/null)" || { echo "FAIL: ${BIN} --full-help exited non-zero"; exit 1; }
 if ! grep -q -- '--sample-points' <<<"${FULL_HELP}"; then
     skip_or_fail "this DTFE has no --sample-points support."
@@ -178,8 +150,6 @@ set -e
     || { echo "FAIL: --partition-index + --sample-points was not rejected"; exit 1; }
 echo "   OK"
 
-# ---------------------------------------------------------------------------------------------
-# (F) --partition: partitioned point evaluation == the single triangulation
 # ---------------------------------------------------------------------------------------------
 SNAP_X="${TMP}/dpe_input_crossed.hdf5"
 SNAP_NP="${TMP}/dpe_input_cloud.hdf5"

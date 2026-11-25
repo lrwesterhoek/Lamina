@@ -1,7 +1,5 @@
-# Sourced by scripts/config.sh and tests/lib.sh. h5py_python prints the python the scripts and test suites run for
-# numpy + h5py: $PYTHON when set (taken as given), else the first of the python3 on PATH, Homebrew's and /usr/local's
-# that imports both (a python3 first on PATH may lack h5py, or carry one built for another architecture), else
-# python3, whose import error then names what is missing.
+# Sourced by scripts/config.sh and tests/lib.sh. h5py_python prints the python for numpy + h5py: $PYTHON when set,
+# else the first of the python3 on PATH, Homebrew's and /usr/local's that imports both, else python3.
 h5py_python() {
     if [ -n "${PYTHON:-}" ]; then echo "${PYTHON}"; return 0; fi
     local p

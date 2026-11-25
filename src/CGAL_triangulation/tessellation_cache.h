@@ -1,32 +1,6 @@
-/* On-disk cache of the Delaunay tessellation and its per-vertex payload ('--tessellation-cache').
- *
- * PROBLEM: building the tessellation and its vertex densities is the dominant fixed cost of a run,
- * and it is repeated in full every time. Re-querying the same snapshot with a different
- * '--sample-points' set, a different grid, or different field flags pays all of it again --
- * which is most of the cost of the iterative point-evaluation figure workflow.
- *
- * MECHANISM: after the tessellation is built AND its vertex densities computed, the whole thing
- * is written to '<dir>/<stem>.tess'; a later run whose inputs are identical loads it instead of
- * rebuilding. The structure travels through CGAL's own binary stream operators (which rebuild the
- * TDS adjacencies directly rather than re-inserting points -- several times faster than the
- * spatial_sort+insert path), followed by the vertexData payload as flat arrays
- * in finite-vertex-iteration order. Nothing downstream changes: both PS consumers (the grid
- * deposit in ps_interpolation.cc and the point evaluation in ps_point_eval.cc) only ever iterate
- * finite cells and vertices, so a loaded tessellation is indistinguishable from a built one.
- *
- * CORRECTNESS: a cache that is silently stale would corrupt the science, so the identity of every
- * input that can change the tessellation or its payload is written into the file as a plain-text
- * DESCRIPTOR and compared VERBATIM on load (see makeDescriptor: the input files' size+mtime, the
- * geometry, the partition, the sub-sampling, and the compile-time configuration). Any difference
- * -- including a different NO_DIM, Real width or PHASE_SPACE/VELOCITY/SCALAR build -- is a miss,
- * and a miss simply rebuilds. The cache is never consulted unless the user passes the flag.
- *
- * COST: the body is DEFLATED, to about 0.15 KB per vertex (BYTES_PER_VERTEX), and the Lagrangian
- * padding multiplies particle counts by ~4x. Reading is no slower (the smaller read pays for the
- * inflation); WRITING costs more than an uncompressed save, which is why the level is 1 and not 6
- * (see DEFLATE_LEVEL). The caller still checks free space and declines to write rather than filling
- * the volume.
- */
+/* On-disk cache of the Delaunay tessellation and its per-vertex payload ('--tessellation-cache'). Written after the
+   vertex densities are computed; a later run with identical inputs loads it instead of rebuilding. Every input that can
+   change the result is a plain-text DESCRIPTOR stored in the file and compared VERBATIM on load (makeDescriptor). */
 
 #ifndef TESSELLATION_CACHE_HEADER
 #define TESSELLATION_CACHE_HEADER
@@ -77,36 +51,23 @@ namespace TessellationCache
 
 // bumped whenever the on-disk layout changes, so old files miss instead of misreading: the descriptor's first line
 // names it, and the file's name is the descriptor's hash (cachePath)
-// 3 = the chunked deflated body only, a PS-DTFE file's cells in the canonical vertex order (older files simply miss)
 static const uint32_t FORMAT_VERSION = 3;
 static const char     MAGIC[8]       = { 'D','T','F','E','T','E','S','S' };
 
-/* Measured bytes per tessellation vertex, for the free-space check. The body is deflated, which
-   takes 735 MB down to 214 MB at 1.5e6 vertices -- about 150 B/vertex. The figure is deliberately
-   rounded up: it gates whether the write is attempted at all, and over-estimating merely declines a
-   marginal case, while under-estimating fills the volume. */
+/* Bytes per tessellation vertex for the free-space check (the deflated body; fitted on a 1.5e6-vertex
+   tessellation). Rounded up: over-estimating only declines a marginal write, under-estimating fills the volume. */
 static const double BYTES_PER_VERTEX = 176.;
 
-/* zlib level 1, chosen on the WRITE cost. Level 6 buys a few percent of file size for a write more than
-   twice as long on every cache WRITE -- it would make the first run several times the uncached one, which
-   defeats the point of a cache people are meant to leave on. Level 1 reads just as fast. (Judging this on
-   size and inflate time alone picks the wrong level: those two axes both favour 6 and neither of them is the
-   one that hurts.) */
+/* zlib level 1, chosen on the WRITE cost: level 6 buys a few percent of file size for a write more than twice as
+   long, which would make the first run several times the uncached one; level 1 reads just as fast. */
 static const int    DEFLATE_LEVEL    = 1;
 
 
-/* The CHUNKED body. The tessellation body goes through zlib rather than straight to the file: the file shrinks
-   several times, and because the read is I/O-bound the HIT gets no slower. The HEADER stays uncompressed: a staleness
-   check then costs one small read and no inflation. Loading a cached partition is inflate + CGAL deserialization, and
-   one zlib stream inflates on one core, a large share of the load. The body is therefore
-   written as independent gzip members of CHUNK_BYTES each (compressed in parallel on the write, which also shortens
-   it), followed by an index of their sizes in a footer; a load inflates members AHEAD on a few threads into a bounded
-   window while the parser drains them in order. Layout after the plaintext header (magic, length, descriptor --
-   shared by the header checks, the occupancy maps and the '.tess' names):
-       CHUNK_MARKER (8 bytes)   member_0 ... member_{n-1}   (each a complete gzip member)
+/* The CHUNKED body: after the uncompressed header (magic, length, descriptor: a staleness check is one small read),
+   independent gzip members of CHUNK_BYTES each, compressed in parallel on write and inflated ahead on load:
+       CHUNK_MARKER (8 bytes)   member_0 ... member_{n-1}
        index: uint64 n, then n x (uint64 compressed size, uint64 uncompressed size)
-       footer: uint64 index offset (from the file start), CHUNK_FOOTER (8 bytes)
-   The members concatenate to a valid multi-member gzip file. */
+       footer: uint64 index offset (from the file start), CHUNK_FOOTER (8 bytes) */
 static const char   CHUNK_MARKER[8] = { 'D','T','F','E','C','H','K','1' };
 static const char   CHUNK_FOOTER[8] = { 'D','T','F','E','C','H','K','E' };
 static const size_t CHUNK_BYTES     = size_t(16) << 20;
@@ -122,11 +83,9 @@ inline size_t chunkThreads()
     return std::max<size_t>( 1, std::min<size_t>( 4, size_t(hw) / size_t(1 + others) / 2 ) );
 }
 
-/* libdeflate (Makefile: compiled in when installed, LIBDEFLATE=0 forces zlib): the chunks are whole
-   buffers of known size, exactly what its one-shot API wants. Its level-1 compression is faster than zlib's
-   and slightly smaller; its decompression gains little over macOS's own zlib (Apple tunes it for its chips),
-   more against stock zlib. The members stay plain gzip (libdeflate checks the CRC itself), so every build
-   reads every cache. DTFE_TESSELLATION_CACHE_ZLIB=1 uses zlib for both directions (for comparisons). */
+/* libdeflate (compiled in when installed, LIBDEFLATE=0 forces zlib): the chunks are whole buffers of known size, what
+   its one-shot API wants. The members stay plain gzip, so every build reads every cache.
+   DTFE_TESSELLATION_CACHE_ZLIB=1 uses zlib for both directions. */
 inline bool useLibdeflate()
 {
 #ifdef DTFE_HAVE_LIBDEFLATE
@@ -437,39 +396,27 @@ inline std::string makeDescriptor(User_options const &userOptions)
     for (size_t i=0; i<userOptions.partition.size(); ++i) d << userOptions.partition[i] << ',';
     d << " partNo=" << userOptions.partNo << '\n';
 #ifdef PHASE_SPACE
-    /* THE per-partition identity in the PS path. 'partNo' stays -1 for every partition of a
-       Lagrangian split (DTFE.cpp: psPartitioned = partitionOn and partNo<0), so without this line
-       all partitions would share one descriptor and partitions 2..N would load the FIRST
-       partition's tessellation. The unpadded Lagrangian region is what selects the particles:
-       the padded box is lagRegion +- lagPadding, and both the padding and the periodic-copy rule
-       are fixed by options already recorded above, so region + globals determine the vertex set
-       exactly. The two partition-path switches ride along because they change how the per-tet
-       quantities are normalized before they reach the cached vertices. */
+    /* THE per-partition identity in the PS path. 'partNo' stays -1 for every partition of a Lagrangian split
+       (DTFE.cpp psPartitioned), so without this line all partitions would share one descriptor and load the FIRST
+       partition's tessellation. The unpadded Lagrangian region plus the globals determine the vertex set; the two
+       switches change how the per-tet quantities are normalized before they reach the cached vertices. */
     d << "lagRegion=";
     for (size_t i=0; i<userOptions.lagrangianRegion.coords.size(); ++i)
         d << userOptions.lagrangianRegion.coords[i] << ',';
     d << " subgrid=" << (userOptions.psUseSubgrid?1:0)
       << " deferNorm=" << (userOptions.psDeferNormalization?1:0) << '\n';
-    // --ps-lagrangian-padding sets the padded box instead of the Eulerian fraction recorded above. Written
-    // only when it is in force -- k > 0 on a Lagrangian-partitioned run (PSPartitionPlan; a single triangulation
-    // has no partition padding): '--ps-lagrangian-padding 0' (the Eulerian padding) writes no line, so its caches
-    // keep the descriptor they have without the option
+    // --ps-lagrangian-padding sets the padded box instead of the Eulerian fraction. Written only when in force (k > 0 on
+    // a Lagrangian-partitioned run), so the caches of runs without it keep their descriptor
     if ( userOptions.psLagPadding > Real(0.) and userOptions.partitionOn and userOptions.partNo < 0 )
         d << "lagPadding=" << userOptions.psLagPadding << '\n';
 #endif
-    /* (The standard binary's per-partition identity: written out, no line of its own.) A partitioned
-       standard run caches one file per THREAD SUB-DOMAIN of every partition (DTFE_parallel: 'partNo' = the thread,
-       'region' = its sub-box, 'partition' = the thread grid, and 'box' = its PARTITION's region, which DTFE_parallel
-       makes the sub-domain's full box -- the box whose padded copy its particles are selected from), or one per
-       partition when the partition is one tessellation ('--sample-points', one thread: 'partNo' = the partition,
-       'region' = its box, as PS's lagRegion is). The lines above therefore name the partition already; a
-       'partitionRegion' line repeating 'box' would only make every existing cache miss. */
-    // anything that changes WHICH particles are triangulated, or their coordinates. The random
-    // SEED belongs here only when '--particle-fraction' is on, because that is the one case where it
-    // decides which particles enter the triangulation (random.cc); otherwise it merely seeds the
-    // method-2 Monte-Carlo interpolation, which runs after the cached stages -- and since an
-    // unspecified '--seed' is std::rand() per run, including it unconditionally would make every
-    // lookup a miss.
+    /* (The standard binary's per-partition identity needs no line of its own.) A partitioned standard run caches one
+       file per thread sub-domain ('partNo' = the thread, 'region' = its sub-box, 'partition' = the thread grid, 'box' =
+       its partition's region), or one per partition ('partNo' = the partition, 'region' = its box). The lines above
+       name the partition already; a 'partitionRegion' line repeating 'box' would only make every cache miss. */
+    // anything that changes WHICH particles are triangulated, or their coordinates. The random SEED belongs here only
+    // with '--particle-fraction' (it then decides which particles enter, random.cc); otherwise it only seeds the later
+    // method-2 Monte-Carlo, and an unspecified '--seed' is std::rand() per run, so including it would always miss.
     d << "randomSample=" << userOptions.randomSample << '\n';
     if ( userOptions.randomSample >= Real(0.) )
         d << "sampleSeed=" << userOptions.randomSeed << '\n';
@@ -491,11 +438,9 @@ inline std::string makeDescriptor(User_options const &userOptions)
 }
 
 
-/* '<dir>/tess_<descriptor hash>_p<partNo>.tess'. The name is derived from the DESCRIPTOR, i.e. from
-   the inputs -- never from the output name: the whole point is that a second run which writes
-   different outputs (a new '--sample-points' set, another grid, other fields) reuses the same
-   tessellation. The hash only locates the file; the full descriptor stored inside is still compared
-   verbatim before it is used, so a collision cannot produce a wrong load. */
+/* '<dir>/tess_<descriptor hash>_p<partNo>.tess'. The name derives from the DESCRIPTOR (the inputs), never from the
+   output name, so a run with different outputs reuses the tessellation. The full descriptor inside is still compared
+   verbatim, so a hash collision cannot produce a wrong load. */
 inline std::string cachePath(User_options const &userOptions)
 {
     std::string const desc = makeDescriptor( userOptions );
@@ -513,25 +458,11 @@ inline std::string cachePath(User_options const &userOptions)
 }
 
 
-/* Is the cache usable for this run at all?
- *
- * Multi-partition runs ARE cached: each partition triangulates a different subset, and the subset
- * is identified in the descriptor by its unpadded Lagrangian region (see makeDescriptor). One file
- * per partition therefore, keyed by that region rather than by 'partNo' -- which stays -1 for every
- * partition of a Lagrangian split (DTFE.cpp: psPartitioned = partitionOn and partNo<0) and cannot
- * tell them apart.
- *
- * The STANDARD binary caches its partitioned runs too, per sub-domain: every tessellation it builds
- * is one partition's (or one of its threads' sub-boxes), and buildTessellation only ever sees
- * those options, where 'partNo' is the partition or the thread (>= 0) and 'region' the box the
- * tessellation covers (plus, for a thread's sub-box, its partition's region as its 'box':
- * makeDescriptor). The refusal below is for an options set that names a split but no part of it (partitionOn with
- * partNo < 0), which never reaches a build; tests/ps_tessellation_cache_check.sh (G2) checks that a
- * partitioned standard run caches.
- *
- * This must be checked HERE and not only at option parsing: the auto-tuner turns partitioning on
- * at RUNTIME (auto_tune.h), long after the flags are validated.
- */
+/* Is the cache usable for this run at all? Multi-partition runs ARE cached, one file per partition (PS: keyed by the
+ * unpadded Lagrangian region, as 'partNo' stays -1 in a Lagrangian split; standard: per partition or thread
+ * sub-domain). The refusal below is for a split with no part named (partitionOn with partNo < 0), which never
+ * reaches a build (tests/ps_tessellation_cache_check.sh G2). Checked HERE, not only at option parsing: the
+ * auto-tuner turns partitioning on at RUNTIME (auto_tune.h). */
 inline bool usable(User_options const &userOptions)
 {
 #ifdef PHASE_SPACE
@@ -589,20 +520,10 @@ inline void removeStaleParts(std::string const &path)
 
 
 /* ---------------------------------------------------------------- the triangulation, read in blocks
-   CGAL writes a 3D triangulation in binary mode (Triangulation_3.h operator<<, CGAL 6) as: the
-   dimension (int), the number of finite vertices n (size_t), each finite vertex's point (three
-   doubles; neither the vertex info nor the hierarchy pointers are written), the number of cells m
-   (size_t), every cell's four vertex indices (size_t, 0 = the infinite vertex), every cell's four
-   neighbour indices (size_t), and nothing per cell after that. Its reader pulls each of those numbers
-   through its own istream::read -- a sentry, a mode lookup and a state update per 8 bytes -- which
-   makes that parsing, not the decompression, most of a load (2.0 of 2.4 s for 3.65M vertices / 24M
-   cells). This reads the same bytes in blocks and
-   builds the data structure through the same calls in the same order (create_vertex in file order,
-   create_cell in file order, a vertex's cell = the LAST cell naming it, as CGAL's set_cell leaves
-   it), so the loaded triangulation -- its iteration order included -- is CGAL's. Only dimension 3 is
-   handled: a cached partition is never flat, and anything else is reported as unreadable (a miss,
-   rebuilt). Writing goes the same way (writeTriangulationBlocks: CGAL's bytes, written in blocks).
-   DTFE_TESSELLATION_CACHE_CGAL_IO=1 uses CGAL's own reader and writer instead (for comparisons). */
+   CGAL's 3D binary format: dimension, n, n points (3 doubles), m, each cell's 4 vertex then 4 neighbour indices
+   (size_t, 0 = infinite vertex). This reads the same bytes in blocks (CGAL's reader pays a sentry per number) and
+   builds through CGAL's calls in file order (a vertex's cell = the LAST cell naming it), so the loaded triangulation,
+   iteration order included, is CGAL's. Only dimension 3 (else a miss); DTFE_TESSELLATION_CACHE_CGAL_IO=1 uses CGAL's. */
 
 template <class Tr> using Tds_of = typename Tr::Triangulation_data_structure;
 
@@ -766,10 +687,9 @@ inline bool readTriangulationBlocks(std::streambuf &sb, Tr &dt)
 }
 
 
-// DTFE_TESSELLATION_CACHE_FINGERPRINT=1: after a load, print a hash of the loaded STRUCTURE -- every vertex's
-// point and the index of the cell it stores, every cell's vertex and neighbour indices, in iteration
-// order -- so the tests can show that the block reader builds exactly what CGAL's reader builds (the
-// outputs alone could not: a point location gives the same answer from any starting cell).
+// DTFE_TESSELLATION_CACHE_FINGERPRINT=1: after a load, print a hash of the loaded STRUCTURE (every point, the cell it
+// stores, every cell's vertex and neighbour indices, in iteration order), so the tests can show that the block reader
+// builds exactly what CGAL's reader builds.
 template <class Tr>
 inline void printStructureFingerprint(Tr const &dt)
 {
@@ -804,8 +724,7 @@ inline void printStructureFingerprint(Tr const &dt)
             mix( a, sizeof a );
         }
     // On a line of its own, in ONE write: other threads' progress output may have left the current line open, and
-    // through the line-buffered stderr the leading newline would leave on its own (macOS flushes that stream at
-    // every newline), so a progress figure of another thread could still land between it and the line.
+    // the line-buffered stderr would flush the leading newline alone, letting another thread's figure land between.
     char line[96];
     int const n = std::snprintf( line, sizeof line, "\nTESS_FINGERPRINT %zu %zu %016llx\n",
                                  size_t( dt.number_of_vertices() ), size_t( dt.tds().number_of_cells() ),
@@ -816,10 +735,8 @@ inline void printStructureFingerprint(Tr const &dt)
 
 
 /* ---------------------------------------------------------------- payload (de)serialization
-   vertexData is written through its public accessors as flat per-field arrays in
-   finite-vertex-iteration order: one contiguous block per field, so the layout is explicit and
-   independent of struct padding. The order is identical on write and read, and CGAL's stream
-   round-trip preserves the finite-vertex order (asserted by the count check on load). */
+   vertexData is written through its public accessors as flat per-field arrays in finite-vertex-iteration order,
+   identical on write and read (CGAL's stream round-trip preserves it; the count check on load asserts it). */
 
 inline void writePayload(std::ostream &os, DT &dt)
 {
@@ -932,10 +849,9 @@ inline bool readPayload(std::istream &is, DT &dt)
 
 /* ---------------------------------------------------------------- the two entry points */
 
-// True when this partition's cache file exists and was written for exactly these inputs in this format (the
-// descriptor's 'format=' line, FORMAT_VERSION, and the chunked body's marker after it -- the tests of the tuner's
-// scan, auto_tune.cc cachedServeSplits): the header check of tryLoad, without reading (or inflating) the body. The
-// composite '--serve' startup uses it to register a partition without loading its tessellation.
+// True when this partition's cache file exists and was written for exactly these inputs in this format (the header
+// check of tryLoad, without inflating the body; the tests of auto_tune.cc cachedServeSplits). The composite '--serve'
+// startup uses it to register a partition without loading its tessellation.
 inline bool headerMatches(User_options const &userOptions)
 {
     if ( userOptions.tessellationCacheDir.empty() or not usable( userOptions ) ) return false;
@@ -956,11 +872,9 @@ inline bool headerMatches(User_options const &userOptions)
 }
 
 
-// Loads the tessellation for this partition into 'dt'. Returns false (a miss) whenever the file is
-// absent, unreadable, or was written for different inputs -- the caller then builds as usual.
-// The cells keep the file's vertex numbering (both the block reader and CGAL's set every cell's vertex and
-// neighbour slots in the order the writer wrote them). PS-DTFE: a file of this format holds the canonical vertex
-// order (ps_vertex_order.h; buildTessellation saves after its pass), so a loaded tessellation needs no pass.
+// Loads the tessellation for this partition into 'dt'. Returns false (a miss) when the file is absent, unreadable or
+// written for different inputs. The cells keep the file's vertex numbering; a PS-DTFE file holds the canonical vertex
+// order (ps_vertex_order.h), so a loaded tessellation needs no pass.
 inline bool tryLoad(DT &dt, User_options const &userOptions)
 {
     if ( userOptions.tessellationCacheDir.empty() ) return false;
@@ -1024,10 +938,9 @@ inline bool tryLoad(DT &dt, User_options const &userOptions)
         catch ( std::bad_alloc const & ) { structureOk = false; }
     }
 #else
-    // 2D: CGAL's Triangulation_data_structure_2 writes its counts with a formatted '<<' even in
-    // binary mode ("n m dim" with no separators), so its binary files never read back; the 2D cache
-    // uses CGAL's ASCII mode at 17 significant digits instead (an exact round trip for doubles; 2D
-    // tessellations are small). The descriptor's 'tds2d=ascii17' line keeps any 2D file without it a miss.
+    // 2D: CGAL's Triangulation_data_structure_2 writes its counts with a formatted '<<' even in binary mode, so its
+    // binary files never read back; the 2D cache uses CGAL's ASCII mode at 17 significant digits instead (an exact
+    // round trip for doubles). The descriptor's 'tds2d=ascii17' line keeps any 2D file without it a miss.
     CGAL::IO::set_ascii_mode( zin );
     zin >> dt;
     // the ASCII text ends before its own trailing whitespace: read through the end marker the
@@ -1096,10 +1009,8 @@ inline void save(DT &dt, User_options const &userOptions)
     }
 
     std::string const path = cachePath( userOptions );
-    // write aside, rename: a crash leaves no half file. The temp name is this writer's own: two
-    // processes saving one partition at once (a batch run beside the composite server, which shares the cache
-    // folder) would both truncate one shared '<path>.part', and the first rename could publish a file with a
-    // zero-filled hole
+    // write aside, rename: a crash leaves no half file. The temp name is this writer's own: two processes saving one
+    // partition at once (a batch run beside the composite server) would otherwise truncate one shared '<path>.part'.
     std::string const tmp  = path + ".part." + std::to_string( long( ::getpid() ) );
     removeStaleParts( path );
     {

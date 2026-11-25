@@ -1,8 +1,5 @@
-/*
- *  Interlacing: Fourier-space averaging of two half-cell-offset density grids to
- *  cancel leading-order aliasing in power spectrum measurements. Requires FFTW3
- *  (single-precision fftwf unless DOUBLE is defined).
- */
+/* Interlacing: Fourier-space averaging of two half-cell-offset density grids to cancel leading-order aliasing.
+   Requires FFTW3 (single-precision fftwf unless DOUBLE is defined). */
 
 #ifndef INTERLACING_HEADER
 #define INTERLACING_HEADER

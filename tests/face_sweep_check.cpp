@@ -1,16 +1,7 @@
-// tests/face_sweep_check.sh compiles and runs this: the face sweep's geometry (src/CGAL_triangulation/face_sweep.h)
-// against exact references, with no binary and no data.
-//   F1  section(): the plane sections of a tetrahedron, integrated along the plane's axis, give the tetrahedron's
-//       VOLUME and FIRST MOMENTS. A(c) is quadratic and c-weighted first moments cubic between two vertex levels, so
-//       2-point Gauss-Legendre per interval is exact: relative error <= 1e-12, 2000 random tetrahedra x 3 axes.
-//   F2  sweep(): the pieces of a section over a 2D grid add up to the section's area and moments (<= 1e-9: a
-//       section near a vertex is tiny against its pieces' coordinates, so its relative rounding is larger; measured
-//       3e-11 with fused multiply-adds (arm64) and 1.4e-10 without them (CI's x86 runner)).
-//   F3  Gauss on a tessellation: a box of Kuhn-split cubes (6 tetrahedra each) carries ONE linear field
-//       v(q) = a + B q. For every grid cell inside the box, the face integrals (each face piece added to the cell
-//       below and subtracted from the cell above) equal B times the cell volume (<= 1e-11 of |B| V). Grid planes
-//       are placed both off and ON the lattice's vertex levels (the half-open rule: faces lying in a grid plane
-//       counted once) and the grid is rotated against nothing (axis-aligned cubes) and shifted.
+// Compiled by tests/face_sweep_check.sh: the face sweep's geometry (src/CGAL_triangulation/face_sweep.h) against exact
+// references, no binary and no data. F1 section(): plane sections integrate to a tetrahedron's volume and first
+// moments (2-point Gauss-Legendre is exact); F2 sweep(): the pieces over a 2D grid add up to the section; F3 Gauss on
+// a Kuhn-split box with one linear field: the face integrals equal B times the cell volume.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>

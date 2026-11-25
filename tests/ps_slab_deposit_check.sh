@@ -1,19 +1,6 @@
 #!/usr/bin/env bash
-# PS-DTFE slab-mode CPU deposit: bit-identity with the single-threaded deposit.
-#
-# When the per-thread accumulator copies would not fit (a fine grid: one copy of the density+velocity
-# accumulators is 24 GB at 1024^3), the CPU deposit runs in SLAB mode: each thread owns a slab of
-# local x planes, takes whole slabs as it comes free, and walks the slab's tetrahedra in the loop's
-# own order (ps_interpolation.cc). Every cell then receives its contributions in the order the
-# single-threaded loop gives them, so the outputs must be BYTE-IDENTICAL to DTFE_DEPOSIT_THREADS=1,
-# whatever the thread or slab count. On test-sized grids the copies always fit, so the suite forces
-# the mode (DTFE_DEPOSIT_SLABS=1) and compares every output file with cmp, for every deposit variant:
-# sampled (nSub 1 and 3), exact (its gradient on the route the binary's default gives it), vertex mass,
-# caustics, halo release, a non-periodic box, a --grid-window, --partition 2 2 2 (periodic sub-grids that
-# wrap), and a few slabs that each hold many tetrahedra (DTFE_DEPOSIT_NSLABS=3) next to many thin ones --
-# every variant with PS-DTFE's volume-weighted velocity moments and mass-weighted dispersion. The 2D build
-# too.
-#
+# PS-DTFE slab-mode CPU deposit (DTFE_DEPOSIT_SLABS=1): every output file byte-identical to DTFE_DEPOSIT_THREADS=1,
+# for every deposit variant.
 # Usage: tests/ps_slab_deposit_check.sh [--no-build]
 
 set -euo pipefail

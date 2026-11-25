@@ -1,93 +1,28 @@
-//  Standard-DTFE volume-averaged (method 1) grid interpolation -- Metal compute kernel.
-//
-//  Mirrors the CPU loop in averaged_interpolation_1.cc: fields are linear inside each
-//  tetrahedron (constant gradient from the inverse vertex-difference matrix). A tetrahedron
-//  that fits inside one grid cell deposits its centroid value times its volume into that
-//  cell; larger ones scatter value * (V_tet / nSamples) at shared quasi-random (Sobol)
-//  sample points. The caller divides the accumulated grids by the grid-cell volume
-//  afterwards, exactly like the CPU path.
-//
-//  Two kernels share that arithmetic:
-//    depositAveraged1       one thread per tetrahedron, one atomic per field per SAMPLE (the
-//                           kernel kept for A/B runs, DTFE_GPU_ITEMS=0).
-//    depositAveraged1Items  one thread per WORK ITEM = (tetrahedron, run of at most
-//                           itemSamples samples; implicit, see itemOf), with a small per-thread cell cache that
-//                           sums the samples landing in the same grid cell and issues one
-//                           atomic per field per distinct CELL. On fine grids (512^3 and up)
-//                           most tetrahedra span several cells with hundreds of samples
-//                           each, so the per-sample kernel issues hundreds of atomics per
-//                           tetrahedron -- 54 G atomics for 7.1M particles on 512^3, 10x
-//                           slower than the CPU's plain '+=' -- and its unbounded per-thread
-//                           loops (up to maxNN = 10000 samples) trip the GPU watchdog.
-//                           Items bound the work per thread, so the chunked dispatch stays
-//                           uniform, and the cache cuts the atomics to about one set per
-//                           cell a tetrahedron covers. The samples, their positions and
-//                           weights are identical; only the summation order changes.
-//
-//  The per-tet volume, sample count, and single-cell flat index are precomputed on the
-//  CPU with the CPU loop's own helpers, so both paths use the same classification and
-//  sample counts; the shared Sobol table gives them the same barycentric coordinates.
-//  Remaining CPU/GPU differences are float rounding (double vertex differences on the
-//  CPU) and, in a batch that sums in float atomics (P.fixedSum 0, below), atomic summation order.
-//
-//  Exact sums. The grids are FIXED-POINT sums by default (DepositParams.fixedSum; a sampled batch's in 64-bit words,
-//  the phase-space mass grid's scheme, metal/ps_deposit.metal depositMass): every share becomes the
-//  integer rint(share * scale) and is added in two 32-bit words with the carry done by hand, so a cell's
-//  total does not depend on the order the atomics land in, and two runs write byte-identical grids.
-//  Float atomics change 26-49% of the cells run to run (up to 1e-6).
-//  Integer sums alone are not enough: the item kernel also sums in float BEFORE its atomics -- the
-//  SIMD-group reduction of a flush, the threadgroup cell table -- and which items share a SIMD group
-//  moves with the chunk boundaries, which the dispatch controller sets from the elapsed time. So (a)
-//  the host starts every chunk at a multiple of 256 items (dtfe_metal_host.cc runBatch): a SIMD group is
-//  then always the same 32 items, its simd_sum the same float; (b) every value is converted where it
-//  leaves a thread or a SIMD group (the leader's sums, an eviction, a per-sample or per-piece deposit),
-//  and the threadgroup table holds integers too. The scale per grid is 2^k from a bound of the batch's
-//  sum of |share| that the host computes before the upload, so no cell can overflow
-//  (src/CGAL_triangulation/dtfe_gpu_fixed.h batchFixedScales).
-//  The EXACT batches (the exact-average kernel, P.fixedSum = 2) sum in 128-bit words instead, four 32-bit limbs per
-//  component (fixed_words.metal.inc), in units 2^-K fixed for the whole run from global quantities
-//  (src/fixed_units.h RunUnits): a batch's unit then no longer depends on which tetrahedra the split put in it, so
-//  every split rounds every share alike, and a cap on each share's integer (P.fxCapBits) keeps every cell sum below
-//  2^126 in any order, where no bound per batch exists. They have no float pre-sum (one integer per piece), so the
-//  chunk alignment does not concern them. An exact batch without the run-wide units (RunUnits not filled, as for a
-//  library caller that skips DTFE_setup's runUnitsSetup) sums in the 64-bit words of the batch's own units, as a
-//  sampled batch does; a batch whose own bound is not finite sums in float atomics (P.fixedSum 0; dtfe_gpu_fixed.h
-//  dtfeBatchParams).
-//  Measured cost (0.26M particles at 256^3 on a GPU shared with another
-//  run, so indicative): the exact-average kernel none; the item kernel 1.6-1.9x for density + velocity
-//  (the integer table holds half the entries and every value takes two atomics), 10-15% with the velocity
-//  gradient, 0-15% for the density alone.
-//
-//  Vertex positions arrive relative to the region's lower corner, so the grid index is
-//  floor(pos/dx) directly; samples outside [0,nGrid) are dropped. Periodicity is
-//  pre-baked into padded particle copies before triangulation (as on the CPU), so the
-//  kernel needs no wrapping.
+//  Standard-DTFE volume-averaged (method 1) grid interpolation, Metal compute kernels mirroring averaged_interpolation_1.cc:
+//  depositAveraged1 (a thread per tet), depositAveraged1Items (a thread per work item, with a cell cache) and
+//  depositExactAverage (--exact). Positions are relative to the region's lower corner; periodicity is pre-baked.
 
 #include <metal_stdlib>
 using namespace metal;
 
-// Which fields the item kernels deposit, fixed when the pipeline is built (the host makes one
-// pipeline per field set): the compiler drops the velocity and gradient code and their registers
-// from a density-only pipeline, and the item kernel is register-bound (832 threads per threadgroup
-// with its K = 2 cache slots, against the 1024 of a lean kernel), so this buys occupancy.
+// Which fields the item kernels deposit, fixed per pipeline: the compiler drops the unused velocity and gradient code
+// and registers (the item kernel is register-bound), which buys occupancy.
 constant bool FC_DEN  [[function_constant(0)]];
 constant bool FC_VEL  [[function_constant(1)]];
 constant bool FC_GRAD [[function_constant(2)]];
-// the scalar field (ONE component, NO_SCALARS=1 builds; the caller declines the GPU otherwise) and
-// its gradient: deposited exactly like the density and the velocity gradient -- the scalar is linear
-// over the tetrahedron (buffer 13 holds the four vertex values), its gradient a per-tetrahedron
-// constant. Grids: buffer 14 (nCell) and 15 (nCell*3, [flat*3+i] = ds/dx_i).
+// the scalar field (ONE component, NO_SCALARS=1 builds) and its gradient, deposited like the density and the velocity
+// gradient: buffer 13 holds the four vertex values; grids: buffer 14 (nCell) and 15 (nCell*3, [flat*3+i] = ds/dx_i).
 constant bool FC_SCAL  [[function_constant(3)]];
 constant bool FC_SGRAD [[function_constant(4)]];
-// the exact sums (P.fixedSum): the item pipelines are specialized on the mode too -- one kernel
-// carrying both paths would take registers from the float one (threads per threadgroup 832 -> 704 for density +
-// velocity), and the host builds the pipeline matching the batch's P.fixedSum anyway
+// The exact sums (P.fixedSum): the item pipelines are specialized on the mode too (one kernel with both paths would take
+// registers from the float one). Fixed-point sums make the grids independent of the order the atomics land in; the item
+// kernel's float pre-sums (SIMD reduction, threadgroup table) stay fixed because the host starts every chunk at a
+// multiple of 256 items (dtfe_metal_host.cc runBatch) and every value is converted where it leaves a thread or SIMD
+// group. Scales: src/CGAL_triangulation/dtfe_gpu_fixed.h batchFixedScales; P.fixedSum 2: RunUnits (src/fixed_units.h).
 constant bool FC_FIXED [[function_constant(5)]];
 
-// The parameter block (buffer 10), one batch = one sub-domain's tetrahedra: DTFEDepositParams in
-// src/CGAL_triangulation/dtfe_deposit_params.h, the hosts' own struct, which the Makefile prepends to this source after
-// exact_clip.metal.inc and fixed_words.metal.inc -- one definition, so the kernels and the hosts cannot drift apart.
-// Its fields are documented there.
+// The parameter block (buffer 10), one batch = one sub-domain's tets: DTFEDepositParams (dtfe_deposit_params.h), the
+// hosts' own struct, prepended to this source by the Makefile so kernels and hosts cannot drift apart.
 typedef DTFEDepositParams DepositParams;
 
 // The accumulated grids of one dispatch, float and fixed-point views of the same buffers (one of the two
@@ -102,13 +37,9 @@ struct DGrids {
     device atomic_uint*  bad;   // the non-finite guard's counters, one word per grid (buffer 21, fxq)
 };
 
-// A share in fixed-point units: rint(v * scale). scale is 2^k, so the float product is exact (barring
-// overflow, which the host's bound rules out) and rint rounds to nearest even -- the integer the host
-// would compute (ps_deposit_params.h psFixedShareOk, which also says why the non-finite guard exists). The
-// guard (metal/ps_common.metal.inc fixedShareOk is the same test): a product not below 2^63 in
-// magnitude -- NaN, inf, an overflow -- has no int64 (the conversion is unspecified there); it gives 0, which every
-// add below skips, and is counted in its grid's word of 'bad'. The float's bits are tested (fast math cannot fold
-// an integer compare away): one compare, and a finite in-range share keeps its integer, bit for bit.
+// A share in fixed-point units: rint(v * scale), exact since scale is 2^k. A product not below 2^63 in magnitude (NaN,
+// inf, overflow) has no int64: it gives 0, which every add skips, and is counted in its grid's word of 'bad'
+// (ps_common.metal.inc fixedShareOk is the same bit test, which fast math cannot fold away).
 static inline ulong fxq(float v, float scale, device atomic_uint* bad, uint slot) {
     float const p = v * scale;
     if ((as_type<uint>(p) & 0x7fffffffu) < 0x5f000000u) return as_type<ulong>(long(rint(p)));
@@ -116,12 +47,9 @@ static inline ulong fxq(float v, float scale, device atomic_uint* bad, uint slot
     return 0ul;
 }
 
-// Adds a two's-complement 64-bit integer, given as its (low, high) words, to the two-word cell at index 'at'
-// (the phase-space depositMass scheme): the low word's carry is read off the value its atomic returns (the add
-// wrapped iff the result is below it), the high words add modulo 2^32, so once every thread is done the words
-// hold the exact sum, whatever the interleaving. The words stay separate on purpose: rebuilding a ulong from two
-// threadgroup atomic loads (the table flush) crashed the Metal compiler service (XPC_ERROR_CONNECTION_INTERRUPTED,
-// macOS 27) when it built the item pipelines.
+// Adds a 64-bit two's-complement integer, given as (low, high) words, to the two-word cell 'at': the low word's carry
+// is read off the value its atomic returns, the high words add modulo 2^32, so the sum is exact in any order. The
+// words stay separate: rebuilding a ulong from two threadgroup atomic loads crashed the Metal compiler service.
 static inline void addWordsLH(device atomic_uint* g, ulong at, uint lo, uint hi) {
     if (lo == 0u && hi == 0u) return;
     uint const old = atomic_fetch_add_explicit(&g[at * 2ul], lo, memory_order_relaxed);
@@ -166,11 +94,9 @@ static inline void addSG(thread const DGrids& G, constant DepositParams& P, bool
     else atomic_fetch_add_explicit(&G.sg[at], v, memory_order_relaxed);
 }
 
-// One share of grid slot g into the run-wide 128-bit words (P.fixedSum == 2, the exact batches): the same float
-// share as above, its integer in the run's unit 1/P.fxScale[g] as four limbs (fixed_words.metal.inc shareLimbs),
-// added limb by limb at component 'at' (addLimbs). A share without an integer below the grid's cap -- a NaN, an
-// infinity, a product at or above 2^capLog2 units (P.fxCapBits[g]) -- adds nothing and is counted in the grid's word
-// of 'bad', as fxq's are: below the cap, no interleaving of a batch's adds can wrap a cell (src/fixed_units.h).
+// One share of grid slot g into the run-wide 128-bit words (P.fixedSum == 2): its integer in the run's unit
+// 1/P.fxScale[g] (shareLimbs), added limb by limb at component 'at'. A share with no integer below the grid's cap
+// (P.fxCapBits[g]) adds nothing and is counted in 'bad'; below the cap no interleaving can wrap a cell.
 static inline void addRun(device atomic_uint* x, device atomic_uint* bad, constant DepositParams& P, uint g,
                           ulong at, float v) {
     uint a[4];
@@ -375,18 +301,10 @@ kernel void depositAveraged1(
 }
 
 
-// ---------------------------------------------------------------------------------------
-// Work-item kernel: thread = (tetrahedron, samples [s0, min(n, s0+itemSamples))).
-//
-// Per-thread cell cache: K slots of (flat cell, sum den, sum vel, sample count). The slot
-// arrays are only ever indexed inside fully unrolled loops over K with a predicate
-// (k == hit), so they stay in registers (a dynamically indexed thread array would spill to
-// memory). Replacement is round robin; a victim is flushed with one atomic per field. Every
-// sum is multiplied by the per-tet weight factor = V_tet/n once, at the flush, and the
-// velocity gradient -- constant over the tetrahedron, the matrix vG kept in registers --
-// gets vG * (count * factor), the same total the per-sample kernel adds in 'count' pieces.
-// The flush at the end of an item is the SIMD-group reduction described there.
-// ---------------------------------------------------------------------------------------
+// Work-item kernel: thread = (tetrahedron, samples [s0, min(n, s0+itemSamples))), with a per-thread cache of K slots
+// (flat cell, sums, count), each flushed with one atomic per field. The slot arrays are indexed only inside fully
+// unrolled loops with a predicate, so they stay in registers. Sums are weighted by V_tet/n once, at the flush; the
+// velocity gradient (constant over the tet) gets vG * (count * factor).
 template <int K>
 struct CellCache {
     uint  flat[K];
@@ -439,15 +357,10 @@ static inline void flushSlot(thread const DGrids& G, constant DepositParams& P,
     }
 }
 
-// Work items are implicit (no per-item buffer: 180 M items of a 512^3 sub-domain would be
-// 1.4 GB, built on the host under the dispatch mutex); see itemOf below.
-// itemStart[t] is the first item of tetrahedron t (a prefix sum of max(1, ceil(cnt/itemSamples)),
-// nTet+1 entries); blockTet[iid >> ITEM_BLOCK_SHIFT] the tetrahedron holding that block's first
-// item. An item's tetrahedron is the last t in [blockTet[blk], blockTet[blk+1]] with
-// itemStart[t] <= iid: a binary search over at most one block's worth of tetrahedra (<= 2^shift
-// + 1 entries, a handful of dependent loads from a hot table). Any tetrahedron order works --
-// the host orders them along a Morton curve so neighbouring threads deposit into neighbouring
-// cells (a binary search over the whole prefix array cost a third of the kernel).
+// Work items are implicit (no per-item buffer). itemStart[t] is the first item of tet t (a prefix sum of
+// max(1, ceil(cnt/itemSamples))); blockTet[iid >> ITEM_BLOCK_SHIFT] the tet holding that block's first item. An item's
+// tet is the last t in [blockTet[blk], blockTet[blk+1]] with itemStart[t] <= iid (binary search). Any tet order works;
+// the host uses a Morton curve so neighbouring threads deposit into neighbouring cells.
 #define ITEM_BLOCK_SHIFT 5
 // -> (tetrahedron, index of this item among the tetrahedron's items, items of the tetrahedron)
 static inline uint3 itemOf(device const uint* itemStart, device const uint* blockTet, uint nTet, uint iid) {
@@ -462,22 +375,11 @@ static inline uint3 itemOf(device const uint* itemStart, device const uint* bloc
     return uint3(lo, iid - first, itemStart[lo + 1u] - first);
 }
 
-// ---------------------------------------------------------------------------------------
-// Threadgroup cell table: where the per-thread cache's EVICTIONS go. In the void regime a
-// tetrahedron spans hundreds of cells and its ~10 000 samples never repeat a cell within one
-// item, so every sample evicts; the same cell is hit ~20 times, but across the tetrahedron's
-// ~200 items -- which sit in the same threadgroup (consecutive items). The table (open
-// addressing, linear probing, 32-bit cell keys claimed by compare-exchange, threadgroup float
-// atomics for the sums) collects those, and the threadgroup flushes it once at its end with one
-// device atomic per field per entry, in place of 13 device atomics per evicted sample. The
-// gradient sums vG * w directly (nine floats per entry), since entries mix tetrahedra. A full
-// probe sequence falls back to the direct device atomics of flushSlot. Layout per entry:
-// key, den, vx, vy, vz, [g0..g8]; the host sizes the memory per pipeline (grad or not).
-// Under FC_FIXED (the pipelines of P.fixedSum) the values are two-word integers (tValsX,
-// threadgroup(2): value v of an entry is words [2v] low, [2v+1] high; tVals is then a 16-byte dummy): a
-// float table sums the evictions of a threadgroup's threads in the order they run, so the exact grids
-// would inherit that order. The integer table halves the entries that fit the 32 KB.
-// ---------------------------------------------------------------------------------------
+// Threadgroup cell table: where the per-thread cache's EVICTIONS go. A void tet's samples rarely repeat a cell within
+// one item but do across its items, which share a threadgroup: the table (open addressing, 32-bit keys claimed by
+// compare-exchange) collects them, the threadgroup flushes it once; a full probe falls back to flushSlot's atomics.
+// Entry: key, den, vx, vy, vz, [g0..g8]. Under FC_FIXED the values are two-word integers (tValsX: value v at words
+// [2v], [2v+1]; tVals a dummy), so the exact grids do not inherit the order a float table sums the evictions in.
 #define TABLE_EMPTY 0xffffffffu
 #define TABLE_PROBES 8u
 
@@ -543,10 +445,8 @@ static inline bool tableAdd(threadgroup atomic_uint* tKeys, threadgroup atomic_f
     return false;
 }
 
-// The item kernel's body, templated on the cache size K (the kernel below instantiates it with K = 2:
-// a function constant cannot size an array). Fewer slots = fewer registers = more threads in
-// flight; more slots = fewer flushes for tetrahedra spanning many cells (metal/README.md, the item
-// kernel, says why 2).
+// The item kernel's body, templated on the cache size K (a function constant cannot size an array); the kernel
+// instantiates K = 2, as it is register-bound.
 template <int K>
 static inline void depositItem(
     device const float*     verts, device const float* dens, device const float* vels,
@@ -628,9 +528,7 @@ static inline void depositItem(
 
     factor = vol / float(n);
 
-    // Samples are dealt to a tetrahedron's items round-robin, so at every loop step the items of
-    // one tetrahedron (consecutive lanes) read consecutive table entries: one 512-byte run per
-    // SIMD group instead of 32 scattered lines. The set of samples per tetrahedron is unchanged.
+    // Samples are dealt to a tet's items round-robin, so consecutive lanes read consecutive table entries.
     for (uint s = sub; s < n; s += perTet) {
         float4 const q = sobol[s];
         float const q0 = q.x, q1 = q.y, q2 = q.z;
@@ -700,15 +598,10 @@ static inline void depositItem(
     }
     }   // sampled path
 
-    // ---- flush with a SIMD-group reduction by cell. The lanes of a SIMD group are 32 consecutive
-    // items; the host orders the tetrahedra along a Morton curve, so they are the items of one
-    // tetrahedron and its neighbours and their slots name the same few cells (measured 1.0-1.3
-    // distinct base cells per 32 items at 512^3). Per slot: elect the smallest pending key, sum
-    // the pre-weighted values of every lane holding it with simd_sum, and let one lane add them
-    // -- one atomic per field per distinct cell per SIMD group instead of per lane. Control flow
-    // is uniform (simd_any); lanes that exited early (no item, see the kernel) are inactive and
-    // take no part. The sums only reorder the float additions. Under FC_FIXED the leader converts its
-    // SIMD sums to integers (the lanes of a SIMD group are fixed items: the host aligns the chunks).
+    // ---- flush with a SIMD-group reduction by cell: per slot, elect the smallest pending key, simd_sum the pre-weighted
+    // values of every lane holding it and let one lane add them. Control flow is uniform (simd_any); lanes that exited
+    // early are inactive. Under FC_FIXED the leader converts its SIMD sums to integers (a SIMD group is always the same
+    // 32 items: the host aligns the chunks).
     for (int k = 0; k < K; ++k) {
         bool  pend = k < used;
         uint  key  = pend ? C.flat[k] : 0xffffffffu;
@@ -874,20 +767,11 @@ kernel void NAME(                                                               
 DTFE_ITEM_KERNEL(depositAveraged1Items2, 2)
 
 
-// ---------------------------------------------------------------------------------------
-// depositExactAverage: --exact on the GPU. One thread per ITEM = (tetrahedron, block of
-// P.itemSamples consecutive cells of its bounding-box window, in gi-gj-gk order), the phase-space
-// depositExactItems' split: each piece of the tetrahedron inside a cell deposits the LINEAR
-// interpolant's integral over the piece -- its centroid value times the piece volume (order-1
-// moments, sweep_moments of metal/exact_clip.metal.inc) -- and the gradients
-// times the piece volume, exactly as the CPU loop of averaged_interpolation_1.cc. There is no
-// per-tetrahedron normalization (the volume average has none), so a single dispatch. A single-cell
-// tetrahedron (cnts == 0) has one item, which deposits its centroid value times its volume: the
-// CPU fast path, shared with the sampled mode. The items reuse the itemStart/blockTet map
-// (itemOf); the host bounds every window from its double-precision copy of the vertices, and a
-// surplus block (the kernel's float window is smaller) idles. No cell cache: a piece is visited
-// once per (tetrahedron, cell), so every deposit is one atomic per field.
-// ---------------------------------------------------------------------------------------
+// depositExactAverage: --exact on the GPU. One thread per ITEM = (tet, block of P.itemSamples consecutive cells of its
+// bounding-box window), as the phase-space depositExactItems: each piece of the tet inside a cell deposits its centroid
+// value times the piece volume (order-1 moments of sweep_moments), the gradients times the piece volume, as the CPU
+// loop. No per-tet normalization, so one dispatch; a single-cell tet (cnts == 0) deposits centroid value * volume. The
+// host bounds every window from its double-precision vertices; a surplus block idles. No cell cache.
 kernel void depositExactAverage(
     device const float*     verts    [[buffer(0)]],
     device const float*     dens     [[buffer(1)]],

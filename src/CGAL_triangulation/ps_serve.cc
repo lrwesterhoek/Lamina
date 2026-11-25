@@ -1,8 +1,6 @@
-/* '--serve' (both binaries): the point-evaluation server over stdin/stdout -- one tessellation, or a COMPOSITE
-   of partition tessellations (--serve + --partition, or when one tessellation would not fit) -- and the partitions'
-   occupancy maps, which a batch '--grid-window' run reads too. Every request is answered by the '--sample-points'
-   machinery of ps_point_eval.cc (ps_point_eval_detail.h), so an answer is bit-identical to a batch run's. The
-   protocol is documented below. */
+/* '--serve' (both binaries): the point-evaluation server over stdin/stdout, one tessellation or a COMPOSITE of partition
+   tessellations, plus the partitions' occupancy maps (which a batch '--grid-window' run reads too). Every request is answered by
+   the '--sample-points' machinery of ps_point_eval.cc, so an answer is bit-identical to a batch run's. */
 
 #include "ps_point_eval_detail.h"   // the point evaluation's context, records and workers
 
@@ -17,52 +15,18 @@
 bool buildTessellation(std::vector<Particle_data> *p, User_options &userOptions, DT &dt);
 
 
-/* ---- --serve: interactive point evaluation over stdin/stdout ------------------------------
-
-   The tessellation is built once; every request is then answered from it by exactly the
-   --sample-points machinery (same exact containment, same threads, same reduction), so a
-   request's answer is bit-identical to a '--sample-points' run on the same points. Client:
-   python/dtfelib/estimator.py. All integers little-endian, doubles native (IEEE-754):
-
-   server -> client, once, when the tessellation is ready:
-       char[8]  "DTFESRV2"
-       uint32   flags: bit0 PS-DTFE build, bit1 --ps-per-stream, bit2 --ps-per-stream-ids,
-                       bit3 --pts-den-grad, bit4 --pts-vel-grad, bit5 --ps-caustics,
-                       bit6 reserved (always 0; it was the removed geometric stream density), bit7 periodic,
-                       bit8 --pts-scalar, bit9 --ps-per-stream-lagrangian, bit10 composite (partitioned)
-       uint32   S           scalar components per value (--pts-scalar; 0 otherwise)
-       uint64   tessellation vertex count (a composite: summed over its partitions)
-       double   region[6]   xlo xhi ylo yhi zlo zhi (the box the points are wrapped into)
-       uint32   partitions  (1 for a single tessellation)
-       uint32   resident    at most this many partitions are held in memory at once
-   client -> server, per request:
-       uint64   n           number of points; 0 (or closing stdin) ends the session
-       double   xyz[3n]
-   server -> client, per request -- the '.pts_*' arrays of a --sample-points run, in order:
-       char[8]  "DTFEPTS1",  uint64 n,  uint64 R (per-stream records; 0 without --ps-per-stream)
-       double den[n], vel[3n], velDisp[6n];  int32 streams[n]
-       int32  caustic[n]        (--ps-caustics)       double denGrad[3n]  (--pts-den-grad)
-       double velGrad[9n]       (--pts-vel-grad)      uint64 offsets[n+1] (--ps-per-stream)
-       double records[4R]       (--ps-per-stream)        uint64 ids[4R]      (--ps-per-stream-ids)
-       double recGrad[3R]       (--ps-per-stream + --pts-den-grad)
-       double scalar[S n]       (--pts-scalar)        double recScalar[S R] (--pts-scalar + --ps-per-stream)
-       double recLag[3R]        (--ps-per-stream-lagrangian)
-   a request the server rejects (non-finite coordinates, too many points, a partition whose
-   cached tessellation vanished) is answered with
-       char[8]  "DTFEERR1",  uint64 length,  char message[length]
-   and the session continues.
-
-   Version 2 has the scalar/Lagrangian arrays and the partition counts that version 1 lacks; its
-   header differs too, so a version-1 client stops at the handshake instead of misreading. */
+/* --serve protocol (client: python/dtfelib/estimator.py). Integers little-endian, doubles native. Server -> client once: "DTFESRV2", uint32 flags
+   (bit0 PS build, 1 per-stream, 2 per-stream-ids, 3 den-grad, 4 vel-grad, 5 caustics, 6 reserved 0, 7 periodic, 8 scalar,
+   9 per-stream-lagrangian, 10 composite, 11 2D), uint32 S (scalar components), uint64 vertex count, double region[2 NO_DIM],
+   uint32 partitions, uint32 resident. Per request: uint64 n (0 or closing stdin ends), double xyz[n NO_DIM]; the reply is
+   "DTFEPTS1", n, R, then the '.pts_*' arrays in the order of the writer below; a rejected request gets "DTFEERR1", length, text. */
 
 namespace psPointEvalDetail {
 
-// The server's cell index: every finite cell registered in the uniform buckets its Eulerian
-// bounding box overlaps -- min-image wrapped and padded exactly like tetBucketRange, so a cell
-// containing a point is always registered in that point's bucket. Built once; a small request
-// then lists only the cells of its points' buckets (deduplicated by a per-request stamp) and
-// the workers run on that list instead of the whole tessellation. Identical per-cell work on
-// a superset of the containing cells, so the answers stay bit-identical to a full walk.
+// The server's cell index: every finite cell registered in the buckets its Eulerian bounding box overlaps (wrapped and padded
+// like tetBucketRange, so a containing cell is always in its point's bucket). A small request lists only the cells of its points'
+// buckets (deduplicated by a per-request stamp); identical per-cell work on a superset of the containing cells keeps answers
+// bit-identical to a full walk.
 struct ServeIndex
 {
     int    n[NO_DIM];
@@ -74,41 +38,19 @@ struct ServeIndex
     uint32_t request = 0;
 };
 
-/* ---- composite '--serve' (--serve + --partition) -------------------------------------------
-
-   CosmoDTFE's CompositeEstimator routes each query to one of several local estimators; here the
-   same idea serves boxes that do not fit in memory as ONE tessellation. The partitions are the
-   run's usual ones -- Lagrangian sub-boxes in PS-DTFE (a stream is owned by exactly one partition
-   via the Lagrangian-centroid test in psFilterCell), Eulerian sub-boxes in the standard binary
-   (a tetrahedron is owned by the partition whose region holds its centroid, OwnBox) -- so the
-   union of the partitions' owned tetrahedra is exactly the single tessellation's, and a request
-   answered partition by partition is bit-identical to one answered by a single server (the
-   records are sorted before any reduction).
-
-   Routing: every partition keeps an OCCUPANCY map, one bit per bucket of a coarse OCC_N^NO_DIM grid over
-   the box, set wherever one of its owned tetrahedra's Eulerian bounding boxes reaches (min-image
-   wrapped and padded like tetBucketRange). A tetrahedron containing a point always covers that
-   point's bucket, so a request only visits the partitions whose map holds one of its points.
-
-   Out of core: with '--tessellation-cache' each partition's tessellation lives on disk (the batch
-   runs' own per-partition cache files: the descriptors match, so a batch run with the cache warms
-   the server and vice versa) and its occupancy map beside it ('<cache file>.occ', stamped with the
-   same descriptor). At most 'resident' partitions are held in memory; the least recently used one
-   is dropped when another must be loaded. A session whose inputs are unchanged registers every
-   partition from these files without building or even loading anything. Without the cache all
-   partitions stay in memory (an in-memory composite: faster to build, since the partitions are
-   triangulated in parallel, but not smaller than one tessellation). */
+/* ---- composite '--serve' (--serve + --partition) ---------------------------------------------------------------------------
+   Boxes that do not fit in memory are served as ONE tessellation by the run's usual partitions (Lagrangian sub-boxes in PS-DTFE,
+   Eulerian ones in the standard binary: OwnBox), so the union of the owned tetrahedra is the single tessellation's and an answer
+   is bit-identical to a single server's (records are sorted before any reduction). Routing: each partition has an OCCUPANCY map,
+   one bit per bucket of a coarse OCC_N grid. With '--tessellation-cache' at most 'resident' partitions are in memory (LRU). */
 
 static const int OCC_N = 64;                 // occupancy buckets per axis (32 KB per partition)
-// A partition's cell index is built only once the partition has answered this many requests by
-// walking its cells while in memory. Fitted on TNG100-3-Dark's partitions, where building the index costs
-// about 15 walks and a request through it a fraction of one: building it on the first request would make the
-// first zoom or click in a region several times slower, and a partition evicted again (a region needing more
-// partitions than fit) would rebuild it every time.
+// A partition's cell index is built only once it has answered this many requests by walking its cells while in memory.
+// Fitted on TNG100-3-Dark's partitions: building it on the first request would slow the first zoom, and an evicted partition
+// would rebuild it every time.
 static const uint64_t INDEX_AFTER_WALKS = 8;
-// Memory of a resident partition, for the automatic resident set: its tessellation per vertex (fitted
-// on the server's RSS with 8 resident partitions; the same figures as auto_tune.h autoTuneServe) and,
-// before one is built, its cell index per vertex (the index's own arrays are counted once it exists).
+// Memory of a resident partition, for the automatic resident set: its tessellation per vertex (fitted on the server's RSS with
+// 8 resident partitions; the figures of auto_tune.h autoTuneServe) and, before one is built, its cell index per vertex.
 #ifdef PHASE_SPACE
 static const double SERVE_TRI_BYTES_PER_VERTEX = 666.;
 #else
@@ -389,12 +331,10 @@ static void serveProgress(char const *fmt, ...)
     std::fflush( stderr );
 }
 
-/* The request loop shared by the single and the composite server. 'evaluate' collects the streams
-   of the installed query points (the workers append to g_pe.ctx's records) and returns an empty
-   string, or an error message -- the request is then refused and the session continues.
-   'indexCells' = the cell count a request is compared against: fewer points than 1/64 of it go
-   through the servers' cell indices ('useIndex'), more walk the tessellation(s) with buckets about
-   'bucketFloor' per axis, so cells far from every point still fail the cheap occupancy test. */
+/* The request loop shared by the single and the composite server. 'evaluate' collects the streams of the installed query points
+   and returns an empty string, or an error message (the request is then refused and the session continues). 'indexCells': fewer
+   points than 1/64 of it go through the servers' cell indices ('useIndex'), more walk the tessellation(s) with buckets about
+   'bucketFloor' per axis. */
 template <typename Evaluate>
 [[noreturn]] void serveLoop(User_options &userOptions, size_t const indexCells, int const bucketFloor,
                             Evaluate evaluate)
@@ -892,12 +832,9 @@ namespace psPointEvalDetail {
 static void compositeResidentSet(User_options const &userOptions, size_t const nParts, uint64_t const nVertMax,
                                  size_t const nCached)
 {
-    // which cached partitions may be in memory at once: --serve-resident N of them, else as many as
-    // fit in the auto-tune memory budget -- their tessellations (SERVE_TRI_BYTES_PER_VERTEX) plus the
-    // cell indexes that exist (built only when they fit too, see the request loop). Counting an index
-    // for every partition would keep fewer partitions resident than fit, so a zoom needing one more
-    // would reload one every time.
-    // DTFE_SERVE_BUDGET_GB overrides the budget (tests).
+    // which cached partitions may be in memory at once: --serve-resident N, else as many as fit in the auto-tune memory budget
+    // (their tessellations plus the cell indexes that exist; counting an index for every partition would keep fewer resident than
+    // fit). DTFE_SERVE_BUDGET_GB overrides the budget (tests).
     g_serve.comp.byBytes = false;
     if ( userOptions.serveResident > 0 )
         g_serve.comp.maxResident = size_t( userOptions.serveResident );
@@ -958,13 +895,9 @@ struct CompositeLoads
     ~CompositeLoads() { for (std::thread &t : loaders) if ( t.joinable() ) t.join(); }
 };
 
-// PARALLEL LOADS: the needed partitions that are not in memory are read back from the cache by
-// background threads -- as many as fit under the resident cap once the partitions this request
-// does not need are dropped -- while the resident ones are evaluated. A load (inflate + CGAL
-// deserialization, seconds for a large partition) is independent of every other, so
-// k loads take about one load's time on k cores. The evaluation ORDER does not depend on the
-// loads (resident first, then the others in 'need' order), so no answer does. Partitions beyond the
-// cap are loaded one at a time afterwards (compositeEvaluatePartition: ensureResident).
+// PARALLEL LOADS: the needed partitions not in memory are read back from the cache by background threads (as many as fit under
+// the resident cap once the unneeded ones are dropped) while the resident ones are evaluated. The evaluation ORDER does not
+// depend on the loads (resident first, then the others in 'need' order), so no answer does. The rest load one at a time afterwards.
 static void compositeStartLoads(std::vector<size_t> const &need, size_t const nParts, CompositeLoads &L)
 {
     std::vector<char> inNeed( nParts, 0 );
@@ -1185,12 +1118,9 @@ static void compositeRequestReport(User_options const &userOptions, size_t const
 // Batch partition runs and the occupancy maps (DTFE.cpp's Lagrangian partition loop).
 // --------------------------------------------------------------------------------------
 
-// --grid-window: can partition 'partOpts' deposit into the window of 'mainOpts'? 1 = its occupancy
-// map has a bucket inside the window, 0 = none (the partition's streams never reach the window, so
-// it is skipped: no particle selection, no tessellation load or build), -1 = no usable map (process
-// it). The map is the one a composite server or an earlier batch run wrote beside the partition's
-// cached tessellation, validated by the same full descriptor. The window's bucket range is widened
-// by one bucket on each side, so float rounding at its edges can never drop a partition.
+// --grid-window: can partition 'partOpts' deposit into the window of 'mainOpts'? 1 = its occupancy map has a bucket inside the
+// window, 0 = none (skipped: no selection, load or build), -1 = no usable map (process it). The map is validated by the same full
+// descriptor as the cached tessellation; the window's bucket range is widened by one bucket each side so rounding never drops one.
 int psOccupancyTouchesWindow(User_options const &partOpts, User_options const &mainOpts)
 {
     using namespace psPointEvalDetail;
@@ -1280,11 +1210,9 @@ bool psTessellationCached(User_options const &opts)
     return not opts.tessellationCacheDir.empty() and TessellationCache::headerMatches( opts );
 }
 
-// A batch partition run with '--tessellation-cache' leaves the partition's occupancy map beside its
-// cached tessellation when none is there yet (the server writes its own): a later --grid-window run
-// (the launcher's exact zoom) then skips the partitions that never reach its window, and a
-// composite server registers the partition without loading it. One pass of the cell filter over
-// the tessellation, seconds per partition, paid once.
+// A batch partition run with '--tessellation-cache' leaves the partition's occupancy map beside its cached tessellation when
+// none is there yet, so a later --grid-window run skips the partitions that never reach its window and a composite server
+// registers the partition without loading it. One pass of the cell filter, paid once.
 void psWriteOccupancyIfMissing(DT &dt, User_options &partOpts)
 {
 #ifdef PHASE_SPACE

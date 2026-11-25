@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
-# PS-DTFE build + run smoke test: build, generate a Zel'dovich pancake with shell crossing,
-# run PS-DTFE, and check the output is physically sane (finite non-negative density, mass
-# roughly conserved, multi-stream regions). Proves the build runs; accuracy is a separate test.
-#
-# Usage:
-#   tests/ps_smoke_test.sh                 # build, run, check
-#   tests/ps_smoke_test.sh --no-build      # skip 'make', reuse existing PS-DTFE
-#   N=48 GRID=96 BOX=100 tests/ps_smoke_test.sh   # override problem size
-# Requires the build toolchain plus python3 with numpy and h5py. Exits non-zero on first failure.
+# PS-DTFE build + run smoke test: generate a Zel'dovich pancake, run PS-DTFE, check the output is sane.
+# Usage: tests/ps_smoke_test.sh [--no-build]   (N=48 GRID=96 BOX=100 override the size; needs numpy and h5py)
 
 set -euo pipefail
 
@@ -40,11 +33,8 @@ echo "============================================================"
 
 if [ "${DO_BUILD}" -eq 1 ]; then
     echo ">> [1/4] Building PS-DTFE ..."
-    # macOS SDK handling (MACOS_ISYSROOT) lives in the Makefile; needed because an
-    # OS/CLT update can leave Homebrew clang pointing at a non-existent SDK.
-    # Respect the current build mode: a plain 'make PS-DTFE' would silently strip the
-    # GPU support from a METAL=1 binary (the Makefile wipes o_ps on mode changes and
-    # records the mode's make argument in o_ps/.build_mode).
+    # macOS SDK handling (MACOS_ISYSROOT) lives in the Makefile.
+    # Respect the build mode: a plain 'make PS-DTFE' would strip the GPU support from a METAL=1 binary.
     BUILD_MODE="$(cat o_ps/.build_mode 2>/dev/null || true)"
     make PS-DTFE ${BUILD_MODE:+"$BUILD_MODE"}
 else
@@ -88,9 +78,8 @@ def load(path):
              f"expected {ncells*4} (f32) or {ncells*8} (f64) for {grid}^3.")
 
 
-# Density. The '.den' output is mean-normalized (rho/rho_bar, with rho_bar = N*m/L^3 the
-# physical mean printed by the generator), so the mass-conserving deposit must give a grid
-# mean of ~1 regardless of the input's physical units.
+# Density: '.den' is mean-normalized (rho/rho_bar), so the mass-conserving deposit must give a grid mean of ~1
+# whatever the input's physical units.
 den = load(den_file)
 n_finite = np.isfinite(den).sum()
 mean = den.mean()

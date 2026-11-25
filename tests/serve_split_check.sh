@@ -1,15 +1,7 @@
 #!/usr/bin/env bash
-# The composite server's partition split (auto_tune.h autoTuneServe), chosen when '--serve' runs out of
-# memory for one tessellation and no '--partition' is given:
-#   A  nothing cached: the split that holds ~8 partitions in memory (finer than the coarsest that fits)
-#   B  a complete split of THIS snapshot in the cache: reused, nothing rebuilt
-#   C  a split cached for ANOTHER snapshot: ignored (the scan compares the snapshot's key lines)
-#   D  a cached split too coarse for the memory budget: not reused, and said so
-#   E  a split cached under ANOTHER partition padding ('--ps-lagrangian-padding 0', as every older partition cache):
-#      ignored -- the run would miss all of it
-# A small set and a small DTFE_MEM_BUDGET_GB force the composite path; every cache is a fresh folder. 40^3 and
-# 0.075 GB: with the default '--ps-lagrangian-padding 8' a 24^3 set pads a coarse partition by a third of
-# the box, so no budget keeps A finer than a cached 3^3 that still fits (B); at 40^3 0.06-0.09 GB all give A = 4^3.
+# The composite server's partition split (auto_tune.h autoTuneServe) when '--serve' runs out of memory and no '--partition' is given.
+#   A nothing cached: ~8 partitions in memory   B complete split of this snapshot reused   C another snapshot's split ignored
+#   D a cached split too coarse is not reused   E a split cached under another partition padding is ignored
 # Usage: tests/serve_split_check.sh [--no-build]
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

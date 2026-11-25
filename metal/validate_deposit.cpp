@@ -1,40 +1,5 @@
-//  PS-DTFE Metal deposit -- correctness validation harness.
-//
-//  Validates the Metal kernels against a float-exact CPU reference AND against analytic
-//  expectations. Tests:
-//    T1  single tetrahedron contained in one grid cell -> all mass in that cell
-//    T2  tiny tetrahedron (below sub-sample spacing) -> centroid fallback, mass conserved
-//    T3  periodic wrap: tet straddling the box boundary == same tet shifted by whole cells
-//    T4  degenerate (flat) tetrahedron -> dropped identically by CPU and GPU
-//    T5  nSub sweep (1..4): GPU total mass == CPU total mass
-//    T6  determinism: two identical GPU dispatches agree to atomic-order ULP
-//    T7  random stress set (normal + flat/caustic + tiny): all output grids CPU vs GPU
-//    T8  Zel'dovich pancake (real multi-stream caustic flow, 6-tet Freudenthal tessellation):
-//        mass conservation, full-coverage, density & stream-count profiles vs ANALYTIC
-//        solution of z = q + A sin(kq), dispersion invariants (sigma_xx=sigma_yy=0 for
-//        z-only flow; single-stream sigma_zz ~ 0 at nSub=1, where single-stream means
-//        streams==1 AND not '.hidden_streams' bit 1), CPU vs GPU on all fields.
-//    T9  analytic velocity-field checks: constant field reproduced exactly; linear field
-//        v = Gx recovers the gradient in every covered cell
-//    T10 partition sub-grid support (subOrigin/subDims deposit window)
-//    T11 --ps-volume-weighted path (fVolW): two coincident tets with different masses give
-//        the analytic volume-weighted mean in mom/momw and mass-weighted mean in dispvel/dispw
-//    T12 --ps-caustics path (fCaustic): a tet and its orientation-flip stamp distinct bits;
-//        together every covered cell reads exactly 3 (the fold-caustic flag)
-//    T13 --exact path (fExact): the 6-tet Freudenthal cube at density 1 deposits
-//        exactly mass 1 and multiplicity 1 into each of the 8 cells it tiles, nothing outside
-//    T14 the production exact path, depositExactItems (a tet's window split over many threads,
-//        two phases through a per-tet weight total): T13's analytic cube with one cell per item,
-//        and every grid equal to the one-thread depositFields path on stress sets (periodic,
-//        partition sub-grid, non-periodic), with the leftover/deferred tets routed as in production
-//    T15 a tet cut by a non-periodic grid face keeps only its inside share (exact, both paths, and
-//        sampled): a --box region of a larger cloud must not collect the outside mass on its faces;
-//        T15c with large tets, whose samples beyond the grid the kernel counts column by column
-//
-//  Every test runs the production kernel, 'depositFields' (T14 also 'depositExactItems'; tests without velocities switch its
-//  moment grids off). Its inside test is exact, the reference's (cpuDeposit) a float test with a
-//  +-1e-6 tolerance, so stream counts may differ in samples on a shared face (T7 allows it).
-//
+//  PS-DTFE Metal deposit correctness harness: validates the kernels against a float-exact CPU reference and analytic expectations (T1-T15).
+//  Every test runs depositFields (T14 also depositExactItems). Its inside test is exact, the reference's (cpuDeposit) a float test with a +-1e-6 tolerance.
 //  Build: bash metal/build_prototype.sh          Run: ./metal/validate_deposit
 
 #define NS_PRIVATE_IMPLEMENTATION
@@ -261,13 +226,10 @@ struct Gpu {
         return psoFld!=nullptr;
     }
 
-    // Runs the production kernel (depositFields) on tets given as ABSOLUTE vertices (12 floats per tet): builds each
-    // tet's record as the host does (ps_deposit_params.h psFillTetRecord; the centroid-fallback cell as cpuDeposit
-    // computes it), dispatches, and deposits the tets the kernel DEFERRED with cpuDeposit, as the production host
-    // does with its CPU loop, so the outputs are complete. The record's frame is the plain grid frame (the tests write
-    // no periodic copies). Without 'vels' the moment flags are off (density only). Returns 1 when the moment grids
-    // were filled, else 0. causticMask (fCaustic only): per-tet masks for the kernel; tets beyond its end get the
-    // parity bit from det(Ax).
+    // Runs the production kernel (depositFields) on tets given as ABSOLUTE vertices (12 floats per tet): builds each tet's record
+    // as the host does (psFillTetRecord), dispatches, and deposits the DEFERRED tets with cpuDeposit as the production host does.
+    // Without 'vels' the moment flags are off. Returns 1 when the moment grids were filled, else 0. causticMask (fCaustic only):
+    // per-tet masks for the kernel; tets beyond its end get the parity bit from det(Ax).
     int run(const std::vector<float>& verts, const std::vector<float>& vels,
             const std::vector<float>& masses, const DepositParams& P, CpuOut& o,
             const std::vector<uint32_t>& causticMask = {}) {
@@ -320,11 +282,8 @@ struct Gpu {
         MTL::Buffer* bG  =zbuf(Pk.fGrad? nCell*36 : 4);
         MTL::Buffer* bS  =zbuf(nCell*4);
 
-        // flag-gated buffers: REAL when the P flag requests the path, 4-byte dummies otherwise
-        // (T1-T10 run with the flags off, so their dispatches are unchanged)
-        // dens (fLinear=0 always here). Under fCaustic the host parks each tet's caustic mask in
-        // slot 0 of this otherwise-unused buffer (ps_interpolation.cc) and the kernel reads it
-        // there rather than re-deriving the parity -- so a 4-byte dummy gave every tet mask 0.
+        // flag-gated buffers: REAL when the P flag requests the path, 4-byte dummies otherwise. Under fCaustic the host parks each
+        // tet's caustic mask in slot 0 of the otherwise-unused dens buffer (fLinear=0 here) and the kernel reads it there.
         // Mirror the parity half (sign of det Ax); 'causticMask' overrides it per tet.
         MTL::Buffer* bD=nullptr;
         if (P.fCaustic){
@@ -651,12 +610,9 @@ static void t8_zeldovich(Gpu& g,int nSub){
     const float L=100.f, dq=L/N, k=2.f*float(M_PI)/L, A=1.8f/k;   // A*k=1.8 -> 3-stream pancake
     const float rhoBar=1.f, mTet=dq*dq*dq/6.f;
     const float off[3]={0.171f,0.313f,0.457f};   // per-axis Lagrangian phase offsets (units of dq)
-    // Small linear shear z += alpha*x + beta*y: an affine map (tets stay conforming, Jacobian
-    // unchanged) that gives every (x,y) column a different z-phase relative to the grid, so tet
-    // quantization noise decorrelates across a slab instead of adding coherently. The exact
-    // expected profile becomes the 1D PL pushforward convolved with two box kernels of widths
-    // alpha*L and beta*L (the shift alpha*x+beta*y is uniform per axis). Kernel widths are integer
-    // multiples of the fine reference bin so the convolution below is exact.
+    // Small linear shear z += alpha*x + beta*y: an affine map (tets stay conforming) that gives every (x,y) column a different
+    // z-phase, so quantization noise decorrelates across a slab. The expected profile is the 1D PL pushforward convolved with two
+    // box kernels of widths alpha*L and beta*L, integer multiples of the fine reference bin so the convolution is exact.
     const int FSUB=64;                                    // fine sub-bins per profile bin
     const int wA=152, wB=88;                              // box widths in fine bins (of L/(NG*FSUB))
     const float alpha=float(wA)/(NG*FSUB), beta=float(wB)/(NG*FSUB);
@@ -784,7 +740,7 @@ static void t8_zeldovich(Gpu& g,int nSub){
              minMass/cellVol/rhoBar,zeroMass);
     // nSub=1 point-samples one position per cell: per-cell noise is expected (mass still conserved);
     // require full coverage only. nSub>=3 must also stay near the physical void floor: 0.15 rhoBar
-    // is ~4 sigma below the 0.36 rhoBar PL floor at the ~14% per-cell sampling noise (262k cells).
+    // is several sigma below the 0.36 rhoBar PL floor at the per-cell sampling noise.
     verdict((std::string("T8 full coverage ")+tag).c_str(),
             zeroMass==0 && (nSub==1 || minMass/cellVol>0.15*rhoBar), detail);
 
@@ -930,13 +886,9 @@ static void t10_subgrid(Gpu& g){
     verdict("T10 partition sub-grid equivalence",ok,detail);
 }
 
-// T11: --ps-volume-weighted kernel path (fVolW, + the dispersion's own mass-weighted mean).
-// Two COINCIDENT tets with equal volume, masses 1 and 3, constant per-tet velocities
-// (10,0,0) and (-2,0,0). Every covered cell then has ANALYTIC weighted means:
-//   volume-weighted   mom/momw       = (10 + -2)/2            = 4   (equal volume shares)
-//   mass-weighted     dispvel/dispw  = (1*10 + 3*-2)/(1+3)    = 1
-// and the normalizers integrate to momw = 2*V_tet, dispw = m1+m2. This is precisely the
-// mass/volume split the flag introduces -- one number each side, no CPU mirror needed.
+// T11: --ps-volume-weighted kernel path (fVolW, + the dispersion's own mass-weighted mean). Two COINCIDENT tets of equal volume,
+// masses 1 and 3, constant velocities (10,0,0) and (-2,0,0): every covered cell has volume-weighted mean mom/momw = 4 and
+// mass-weighted mean dispvel/dispw = 1, and the normalizers integrate to momw = 2*V_tet, dispw = m1+m2.
 static void t11_volumeWeighted(Gpu& g){
     if(!g.psoFld){ printf("  [T11 ] fields kernel missing, skipped\n"); return; }
     DepositParams P; makeParams(P,8,8.f,3,0); P.fVolW=1; P.nTet=2;
@@ -971,14 +923,10 @@ static void t11_volumeWeighted(Gpu& g){
     verdict("T11 fVolW mass/volume split",ok,detail);
 }
 
-// T12: --ps-caustics kernel path (fCaustic, atomic-OR orientation bits). A tetrahedron and
-// its orientation-flip (two vertices swapped) must stamp two DIFFERENT single bits whose OR
-// is 3, and depositing both together must give exactly 3 in every covered cell -- the
-// "both orientations present = fold caustic crosses the cell" flag. Convention-independent:
-// only distinctness and the OR are asserted, not which sign gets which bit. The kernel reads
-// each tet's mask from slot 0 of the 'dens' buffer (the host builds it: parity + stratification
-// bits); Gpu::run mirrors the parity half, and a final run hands it a full mask with the A4 bit
-// (bit 8, beyond a byte) to check the whole CausticMask survives the float slot and the OR.
+// T12: --ps-caustics kernel path (fCaustic, atomic-OR orientation bits). A tet and its orientation flip (two vertices swapped)
+// must stamp two different single bits whose OR is 3, so both together give exactly 3 in every covered cell (only distinctness
+// and the OR are asserted). The kernel reads each tet's mask from slot 0 of the 'dens' buffer; Gpu::run mirrors the parity half,
+// and a final run hands it a full mask with the A4 bit (bit 8, beyond a byte) to check CausticMask survives the float slot.
 static void t12_causticBits(Gpu& g){
     if(!g.psoFld){ printf("  [T12 ] fields kernel missing, skipped\n"); return; }
     DepositParams P; makeParams(P,8,8.f,3,0); P.fCaustic=1;
@@ -1012,12 +960,9 @@ static void t12_causticBits(Gpu& g){
     verdict("T12 fCaustic orientation OR",ok,detail);
 }
 
-// T13: --exact kernel path (fExact, the z-sweep of exact_clip.metal.inc). A cube split into the
-// 6-tet Freudenthal tessellation with density 1 (mass = tet volume) has a FULLY analytic
-// exact deposit: the cube [2,4]^3 covers 8 grid cells of dx=1 exactly, so each receives
-// mass 1.000..., the multiplicity sum(V_int)/V_cell is exactly 1 in each (the tessellation
-// tiles the cube once), nothing lands outside, and the total is the cube volume. The
-// sampled deposit CANNOT do this exactly at any nSub -- only the clipper can.
+// T13: --exact kernel path (fExact, exact_clip.metal.inc). A cube split into the 6-tet Freudenthal tessellation with density 1
+// has a FULLY analytic exact deposit: the cube [2,4]^3 covers 8 cells of dx=1, each gets mass 1 and multiplicity exactly 1,
+// nothing lands outside, the total is the cube volume. The sampled deposit cannot do this at any nSub.
 static void t13_exactDeposit(Gpu& g){
     if(!g.psoFld){ printf("  [T13 ] fields kernel missing, skipped\n"); return; }
     DepositParams P; makeParams(P,8,8.f,1,0); P.fExact=1; P.nTet=6;
@@ -1053,12 +998,10 @@ static void t13_exactDeposit(Gpu& g){
     verdict("T13 fExact analytic cube",ok,detail);
 }
 
-// T14: the production exact path, depositExactItems. (a) T13's analytic cube with ONE cell per item
-// (every tet split over ~8 threads, most of them surplus); (b) every grid against the one-thread
-// depositFields path -- the same clipping and moments, so equal to float atomic-order rounding and
-// the tet-touch counts identical -- on the stress set (thin, tiny and degenerate tets included, so
-// leftovers and deferrals occur), windows up to ~12 cells a side, 7 cells per item (items cross
-// window rows and planes): periodic, a periodic partition sub-grid, and non-periodic.
+// T14: the production exact path, depositExactItems. (a) T13's cube with ONE cell per item (every tet split over ~8 threads);
+// (b) every grid against the one-thread depositFields path (equal to float atomic-order rounding, tet-touch counts identical)
+// on the stress set (leftovers and deferrals occur), windows up to ~12 cells a side, 7 cells per item: periodic, a periodic
+// partition sub-grid, non-periodic.
 static void t14_exactItems(Gpu& g){
     if(!g.psoFld || !g.psoItems){ printf("  [T14 ] depositExactItems kernel missing, skipped\n"); return; }
     {
@@ -1121,12 +1064,10 @@ static void t14_exactItems(Gpu& g){
     }
 }
 
-// T15: a tet cut by a NON-PERIODIC grid face keeps only its inside share (a --box region taken from
-// a larger cloud). T13's Freudenthal cube, density 1, shifted to straddle x=0: [-1,1]x[2,4]x[2,4] on
-// the 8^3 grid [0,8). Exact deposit (both the one-thread and the items path): the 4 inside cells
-// (x in [0,1]) hold mass exactly 1 each, total 4 of 8 -- renormalizing over the inside pieces put
-// the whole 8 there. Sampled deposit (nSub=3): GPU == the float reference, total within sample
-// quantization of 4. A second cube wholly beyond the grid ([-5,-3]) deposits nothing.
+// T15: a tet cut by a NON-PERIODIC grid face keeps only its inside share (a --box region of a larger cloud). T13's cube,
+// density 1, shifted to straddle x=0 on the 8^3 grid [0,8): the exact deposit (both paths) puts mass exactly 1 in each of the
+// 4 inside cells, total 4 of 8. Sampled deposit (nSub=3): GPU == the float reference, total within sample quantization of 4.
+// A cube wholly beyond the grid deposits nothing.
 static void t15_regionFace(Gpu& g){
     float const a=-1.f, b=1.f;
     auto C=[&](float x0,int x,int y,int z,std::vector<float>& v){ v.push_back(x0+(x?b-a:0.f)+a); v.push_back(y?4.f:2.f); v.push_back(z?4.f:2.f); };

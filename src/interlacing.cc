@@ -63,13 +63,9 @@ void applyInterlacing(std::vector<Real> &field1,
     FFTW_DESTROY(plan_fwd1);
     FFTW_DESTROY(plan_fwd2);
 
-    /* Average in Fourier space with the half-cell-shift phase correction. The second grid is the first
-       one moved half a cell along every axis (main.cpp: region + dx/2), i.e. it samples f(x + dx/2), so
-       its transform carries exp(+i k.dx/2); undone by exp(-i k.dx/2) = exp(-i pi sum_d m_d/n_d) with
-       m_d the SIGNED frequency. FFTW keeps a full axis's negative frequencies at index > n/2 (m =
-       index - n; the Nyquist index counted negative, as the T-web's kFull); the last axis is the half
-       spectrum, index = m >= 0. The raw index on every axis would put the phase off by pi for half the
-       modes, flipping the sign of their correction (tests/interlacing_check.sh). */
+    /* The second grid samples f(x + dx/2), so its transform carries exp(+i k.dx/2); undo it with
+       exp(-i pi sum_d m_d/n_d), m_d the SIGNED frequency (index - n above n/2; the last axis is the half spectrum,
+       m >= 0). The raw index would flip the sign of the correction for half the modes (tests/interlacing_check.sh). */
     for (size_t c = 0; c < Ncomplex; ++c)
     {
         size_t rem = c;

@@ -1,27 +1,6 @@
-"""Contour lines of a map: marching squares in numpy (no matplotlib, no scipy), the levels a map's colour scale
-gives and the colour each line is drawn in. Qt-free: the Explore map strokes the pieces with QPainter, a saved figure
-with matplotlib, the 3D view through each plane's own transform.
-
-  segments(values, level)         one level's line pieces, (k, 2, 2) in ARRAY coordinates: point (i, j) is the
-                                  sample values[i, j]; each piece runs between two crossings on the grid's edges
-  plane_segments(values, levels)  every level's pieces, from a block-averaged copy when the plane is wider than
-                                  MAX_SIDE (a fine grid stays fluent to scroll), in the full plane's coordinates
-  levels(field, vrange, log)      the values the lines are drawn at, in the colour bar's units (log10 on a log map)
-  colours(levels, vrange, cmap)   per level black or white, whichever shows on the map's colour at that value
-  map_lines(plane, ...)           all of it for one map: the levels, colours and pieces (None: no contours there)
-  shell_plan(field, levels, ...)  the 3D view's volume: a few of those levels as thin shells of constant value where
-                                  the volume is clear (the density: around the voids' minima), for its transfer
-                                  function (volume3d.transfer's 'shells')
-
-The levels follow the owner's figure scripts (dtfelib.figures.delta_contour_levels: 20 levels evenly spaced in the
-colour scale's own space; for the density three quarters of them on the void side of the mean, and the mean itself),
-on ROUND steps anchored at the mean (0 elsewhere): the map's colour range is the slice's own percentiles unless it is
-fixed, so it moves from layer to layer. The steps are 1 and 5 x 10^k (STEPS), each a whole multiple of every finer
-one, so a line drawn on two layers is the same value on both: while the range drifts a line appears or goes at the
-ends, and when it changes enough for another step the coarser layer's lines are among the finer one's. The level
-slider (its position 'detail') multiplies every step by one factor of its own (factor(): 1 at its default), never by
-anything of the layer's, so at any position the levels keep that nesting: a line keeps its value from layer to layer.
-"""
+"""Contour lines of a map: marching squares in numpy (no matplotlib, no scipy), the levels a map's colour scale gives
+and the colour each line is drawn in. Qt-free: the Explore map strokes the pieces with QPainter, a saved figure
+with matplotlib, the 3D view through each plane's own transform."""
 
 from __future__ import annotations
 
@@ -39,10 +18,7 @@ STEPS = (1.0, 5.0, 10.0)
 # of the field: 1 at DETAIL = 0 (the rule's own levels, bit for bit), COARSEST times wider at DETAIL_MIN, FINEST at
 # DETAIL_MAX, and the lines per unit of the colour scale (1 / factor) in even steps in between, so each position right
 # spaces the lines a little closer (a slider of round steps had four positions, one of counts would draw the same
-# lines over most of its travel). The ends hold on ANY range, as _nice_step's step is at most sqrt(5) times its
-# share of the range: the coarsest draws two lines or more (the density: a step of up to 4.47 times the rule's leaves
-# a line besides the mean, or two where the range misses the mean; elsewhere up to 2.68 times leaves two, a diverging
-# map its 0 and one each side) ...
+# lines over most of its travel).
 DETAIL, DETAIL_MIN, DETAIL_MAX = 0, -36, 36
 COARSEST = {"density": 4.4, "": 2.6}
 # ... and the finest at most 1 / FINEST times the default's lines: the reach of the old finest stop (a rung of 2 or 5
@@ -59,7 +35,7 @@ MAX_SIDE = 256
 # maps whose colours are classes or flags, not a scale: no contours (the stream count is a count: see levels())
 CLASS_FIELDS = frozenset({"hidden_streams", "caustic", "caustic_class", "tweb", "vweb"})
 DISCRETE_CMAPS = frozenset({"tab10", "web classes"})
-ALPHA = 0.7                 # the lines' opacity (his figures: black at 70 %); one point wide on screen
+ALPHA = 0.7
 LINE_WIDTH_PT = 0.6         # a saved figure's: his figures' linewidths=0.6
 LIGHT = 0.5                 # a colour of this luminance or more takes a black line, a darker one a white line
 
@@ -140,20 +116,7 @@ def _ladder(anchor: float, step: float, lo: float, hi: float, side: int, g: floa
 def level_plan(field: str, vrange, log: bool = False, compare: bool = False, detail: int = DETAIL) -> dict:
     """The contour levels of a map and how they were chosen: {'levels': array in the colour bar's units (log10 on a
     log map), 'mean': the mean's level or None, 'below' / 'above': the spacings below and above it (the density),
-    'step': the one spacing elsewhere, 'factor': the level slider's (factor())}. 'vrange' is the map's shown colour
-    range (the one colorize returned, in the bar's units).
-
-    The density (rho/rho_bar, not a difference map) with its mean (1; 0 on a log map) inside the range: the script's
-    rule -- about three quarters of the levels below the mean, a round step (mean - lo) / 15 apart, the mean itself,
-    and above it a round step (hi - mean) / 5 apart but never closer than below (a slice near the mean is mostly noise
-    there). The stream count: the even counts inside the range (each line the edge between n - 1 and n + 1 streams,
-    '2' the edge of the single-stream regions). Anything else: the multiples of a round step of about (hi - lo) /
-    N_OTHER from 0 (a diverging map has its 0); the density with its mean outside the range: of about (hi - lo) /
-    N_LEVELS from the mean.
-
-    'detail' (the level slider, DETAIL_MIN..DETAIL_MAX): every one of those steps times factor(detail, field), about
-    the same anchor (the mean, else 0), so the density keeps its share below the mean and the mean itself; the stream
-    count thins its even counts to about MAX_STREAM_LINES / factor."""
+    'step': the one spacing elsewhere, 'factor': the level slider's (factor())}."""
     detail = int(detail)
     g = factor(detail, field, compare)
     plan = {"levels": np.zeros(0), "mean": None, "below": 0.0, "above": 0.0, "step": 0.0, "factor": g}
@@ -234,10 +197,8 @@ def _edge_points(v: np.ndarray, level: float, edge: np.ndarray, I: np.ndarray, J
 
 def segments(values, level: float) -> np.ndarray:
     """Marching squares: the pieces of the line where 'values' (a 2D array) equals 'level', as a (k, 2, 2) float
-    array -- piece, end, (i, j) in array coordinates (the point (i, j) is the sample values[i, j]; a piece's ends lie
-    on the edges between neighbouring samples, linearly interpolated). A sample counts as above when >= level; a
-    saddle cell is split by the mean of its four corners; a cell with a non-finite corner (a ratio map's grey) has no
-    piece. Empty (0, 2, 2) when the level is outside the values or the array is smaller than 2 x 2."""
+    array -- piece, end, (i, j) in array coordinates (the point (i, j) is the sample values[i, j]; a piece's ends
+    lie on the edges between neighbouring samples, linearly interpolated)."""
     v = np.asarray(values, dtype=np.float64)
     empty = np.zeros((0, 2, 2))
     if v.ndim != 2 or v.shape[0] < 2 or v.shape[1] < 2 or not np.isfinite(level):
@@ -273,8 +234,7 @@ def segments(values, level: float) -> np.ndarray:
 def reduced(values, max_side: int = MAX_SIDE):
     """(copy, centres0, centres1): 'values' block-averaged to at most max_side samples a side (blocks of f x f, f the
     smallest whole factor that fits; the last block of an axis takes the rest), with the position of each block's
-    centre in the full array's coordinates; the array itself and its own positions when it fits. A block with a
-    non-finite sample is non-finite (no line through a ratio map's grey)."""
+    centre in the full array's coordinates; the array itself and its own positions when it fits."""
     v = np.asarray(values, dtype=np.float64)
     n0, n1 = v.shape
     f = max(1, int(np.ceil(max(n0, n1) / float(max_side))))
@@ -313,9 +273,7 @@ def map_lines(plane, field: str, vrange, log: bool = False, cmap: str = "viridis
               max_side: int = MAX_SIDE, detail: int = DETAIL) -> dict | None:
     """The contour lines of one map: {'levels' (the bar's units), 'values' (the field's own values: 10^level on a log
     map), 'colours' (k, 4), 'segments' (one (m, 2, 2) per level, array coordinates of 'plane': point (i, j) is
-    plane[i, j]), 'shape', 'plan' (level_plan)}; None where contours do not apply (why_not) or no level falls inside
-    the range. 'plane' holds the field's values (not log10: 'log' scales them as the colours do); 'vrange' the colour
-    range shown, in the bar's units; 'detail' the level slider's (level_plan)."""
+    plane[i, j]), 'shape', 'plan' (level_plan)}."""
     if why_not(field, cmap, compare):
         return None
     plan = level_plan(field, vrange, log, compare, detail)
@@ -330,9 +288,7 @@ def map_lines(plane, field: str, vrange, log: bool = False, cmap: str = "viridis
 
 def clip_segments(segs, x0: float, y0: float, x1: float, y1: float) -> np.ndarray:
     """The parts of line pieces ((k, 2, 2): piece, end, (x, y)) inside the rectangle x0..x1, y0..y1 (Liang-Barsky,
-    all pieces at once): a piece inside kept as it is, one crossing an edge cut there, one outside dropped. The 3D
-    view's planes are drawn in quads (the parts between the other planes, painted in depth order): each quad strokes
-    the part of its plane's lines on it."""
+    all pieces at once): a piece inside kept as it is, one crossing an edge cut there, one outside dropped."""
     s = np.asarray(segs, dtype=np.float64).reshape(-1, 2, 2)
     if not s.size:
         return np.zeros((0, 2, 2))
@@ -369,17 +325,8 @@ def solid_colours(levs, vrange, cmap: str, alpha: float = ALPHA) -> np.ndarray:
 # The volume draws the levels as thin shells of constant value through its transfer function (volume3d.transfer's
 # 'shells': a narrow band of values around each level, in a colour of its own), which QPainter's slices and the GPU's
 # shader read alike -- each colours a cell by its level and then blends the colours. Only where the volume is clear
-# (below the shown range's low end, the density's voids): there a shell hides nothing, and the voids' minima are what
-# the shells are for. The levels are the map's rule (level_plan) on the volume's own range, so a shell has the value
-# of a map line of the same field whenever the map's step divides its.
-#
-# A band of values is a shell only where the field runs through it steeply enough: on a flat void floor near its value
-# it fills a whole region (fog), where the field crosses it within less than a cell it breaks into dots. So each band
-# is made about SHELL_CELLS cells thick from the field's slope at its level (volume3d.level_slopes), a shell the field
-# crosses within less than a cell of the next one is left out, and each shell's opacity follows the share of cells
-# its band holds (SHELL_INK): a small shell around a minimum is clear to see, a large one through many voids faint.
+# (below the shown range's low end, the density's voids): there a shell hides nothing.
 SHELL_FIELDS = frozenset({"density"})   # the fields with shells: the voids' minima are what they are for; another
-                            # field's clear part is most of the box (the speed's slow 70 %), its shells a fog over it
 NO_SHELLS = ("No contour shells in the volume for this field: they are drawn for the density, around its voids' "
              "minima; the planes show any field's lines")
 N_SHELLS = 4                # at most this many shells: every k-th level of the rule, k the smallest that keeps so few
@@ -412,9 +359,8 @@ def _percentile(levels, counts, pct: float) -> float:
 
 def band(shown, value: float, half: float) -> np.ndarray:
     """A shell's band: its weight on each level of a cube ('shown': the levels' values as the opacity reads them) --
-    a tent of half-width 2 x half about 'value' (the mass of a band of +-half, with soft edges: no stair-steps where
-    it crosses the cells), the level nearest 'value' always whole (a band narrower than a level is not lost); level 0
-    (no value) none. volume3d.shell_weights draws it, shell_plan counts its cells."""
+    a tent of half-width 2 x half about 'value' (the mass of a band of +-half, with soft edges: no stair-steps
+    where it crosses the cells)."""
     with np.errstate(invalid="ignore"):
         w = np.clip(1.0 - np.abs(shown - value) / max(2.0 * half, 1e-30), 0.0, 1.0)
     w[~np.isfinite(w)] = 0.0
@@ -429,24 +375,7 @@ def shell_plan(field: str, levels, counts, lo: float, log: bool = False, symmetr
                detail: int = DETAIL) -> dict | None:
     """The 3D volume's contour shells: {'levels' (the bar's units: log10 on a log map), 'values' (the field's own),
     'colours' ((k, 3) uint8, nearest the shown range first), 'half' (each band's half-width, the bar's units),
-    'cover' (the share of the cube's cells in each band), 'alpha' (each one's opacity per cell), 'opacity' (the same
-    per reference cell: volume3d.transfer's), 'spacing', 'step', 'plan', 'field', 'log', 'symmetric'}, or None (no
-    shell, a field without shells: SHELL_FIELDS, or one contours do not apply to: why_not). From the prepared cube's
-    level values and counts (volume3d.prepare's 'levels', 'counts'), the shown range's low end 'lo' (|value| when
-    'symmetric', as the volume shows such a field), the field's slope per level ('slopes': volume3d.level_slopes) and
-    the cube's cells along its longest side ('cells': a shell's opacity follows the cells in its band against the
-    picture they spread over, SHELL_INK, and is converted to the reference cell's, volume3d.REF_CELLS across the
-    window). 'counts' may be of a region only (a close-up's void): the bands' cells are counted there.
-
-    The levels: the map's (level_plan) over the cube's own range; of them those where the volume is clear (below
-    'lo'), for the density only its void side (below the mean), and above the cube's SHELL_LOW_PCT percentile closing
-    around at most SHELL_ENCLOSED of its cells -- or, given a 'floor' (a close-up: the value at the bottom of the void
-    looked at), every one above it, so that the shells nest around that void's own minimum however deep it is.
-    Thinned to every k-th of the rule's steps from its anchor (the mean, else 0), at most N_SHELLS, evenly spaced: on
-    a log density with steps of 0.1 and a floor at -1.25 the shells sit at -0.2, -0.4, -0.6, -0.8 (k = 2), rho/rho_bar
-    = 0.63, 0.40, 0.25, 0.16. Then with the slopes, those the field crosses within less than a cell of the next shell
-    are left out (dots, not a surface) and each band is made about SHELL_CELLS cells thick (within one level and
-    SHELL_WIDTH of the spacing)."""
+    'cover' (the share of the cube's cells in each band), 'alpha' (each one's opacity per cell)."""
     if field not in SHELL_FIELDS or why_not(field, cmap):
         return None
     lv = np.asarray(levels, dtype=np.float64)

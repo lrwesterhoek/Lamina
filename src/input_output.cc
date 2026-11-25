@@ -104,12 +104,10 @@ FunctionReadInputData chooseInputDataReadFunction(int const inputFileType)
 
 
 
-// The quickstart footgun: the build's default input type is 105 (Gadget HDF5, Makefile
-// INPUT_FILE_DEFAULT), but a plain binary Gadget snapshot (type 101, e.g. demo/z0_64.gadget)
-// is not an HDF5 file, so the HDF5 open would die with an opaque H5 exception. A real HDF5
-// file always begins with the 8-byte HDF5 signature; a binary Gadget file begins with a
-// Fortran record marker (256 for type 1, 8 for type 2, either endianness). Redirect exactly
-// that case to the binary Gadget reader; anything else keeps the requested type.
+// The quickstart footgun: the default input type is 105 (Gadget HDF5), but a plain binary Gadget snapshot (type 101) is not
+// HDF5, so the HDF5 open would die with an opaque exception. A real HDF5 file begins with the 8-byte HDF5 signature; a
+// binary Gadget file with a Fortran record marker (256 for type 1, 8 for type 2, either endianness). Redirect exactly that
+// case to the binary Gadget reader; anything else keeps the requested type.
 static int sniffGadgetBinaryInput(std::string const &filename, int const inputFileType,
                                   int const verboseLevel)
 {

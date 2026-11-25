@@ -1,7 +1,5 @@
-// Part of src/CGAL_triangulation/ps_interpolation.cc, inside its #ifdef PHASE_SPACE: included once, in order, by
-// that file and compiled only as part of its object, never alone.
-// The CPU deposit's threads: their count and mode (psDepositThreadMode), the slab binning (psSlabBinning) and
-// each thread's start (psDepositThreadsInit).
+// Part of ps_interpolation.cc (included in order inside its #ifdef PHASE_SPACE, never compiled alone). The CPU deposit's
+// threads: count and mode (psDepositThreadMode), slab binning (psSlabBinning), each thread's start (psDepositThreadsInit).
 
 // The CPU deposit's thread count and mode (private copies, or slabs of the x axis), and the copy mode's line.
 static inline void psDepositThreadMode(PSPassCtx const &passCtx, PSLayoutCtx const &layoutCtx, bool const metalDeposited,
@@ -27,22 +25,19 @@ static inline void psDepositThreadMode(PSPassCtx const &passCtx, PSLayoutCtx con
         nDepThreads = std::max( 1, std::min( nDepThreads, blockCap ) );
         int const slabThreads = std::max( 1, std::min( wantThreads, blockCap ) );
         int const slabSetting = Env::tristate( "DTFE_DEPOSIT_SLABS" );     // 1 force, 0 never, unset automatic
-        // automatic: only when the copies leave fewer than HALF the threads -- a slab run classifies a
-        // straddling tet once per slab (~1.6x the work), so the copies win while they keep half the threads.
-        // The fixed-point grids, the counts and the flags are shared (psAddCount), so the single build copies
-        // nothing and this rule only meets the float sums (the double build) on fine grids.
+        // automatic: only when the copies leave fewer than HALF the threads (a slab run classifies a straddling tet once per
+        // slab, so copies win while they keep half). The fixed-point grids, counts and flags are shared (psAddCount), so the
+        // single build copies nothing and this rule only meets the float sums (the double build).
         if ( slabSetting != 0 and slabThreads > 1 and subDims[0] >= 2
              and ( slabSetting == 1 or 2 * nDepThreads < slabThreads ) and noTotalCells < size_t(UINT32_MAX) )
         {
             slabMode = true;
             nDepThreads = slabThreads;
         }
-        // THE DYNAMIC TEAM (PSBlockClaim): the copy mode with nothing copied -- the single build, where every
-        // accumulator is a shared integer word, count, flag or mask (accBytes == 0) -- claims its blocks from one
-        // counter, and unless DTFE_DEPOSIT_THREADS pins the team it follows the free cores (CorePool), up to every core
-        // (and the blocks' cap). The double build and a pass with a float grid (a bound without a unit) keep the
-        // static rule: their per-thread copies are summed in thread order, so their sums depend on which
-        // thread took which block. So does DTFE_MASS_AUDIT's per-thread double tallies (its line would vary).
+        // THE DYNAMIC TEAM (PSBlockClaim): the copy mode with nothing copied (the single build: accBytes == 0) claims its blocks
+        // from one counter and, unless DTFE_DEPOSIT_THREADS pins the team, follows the free cores (CorePool). The double build
+        // and a pass with a float grid keep the static rule: their per-thread copies are summed in thread order, so their sums
+        // depend on which thread took which block (so do DTFE_MASS_AUDIT's per-thread double tallies).
         if ( !slabMode && accBytes == 0. && std::is_same<Real, float>::value && !massAudit )
         {
             bool const pinned = Env::integer( "DTFE_DEPOSIT_THREADS", 0 ) > 0;
@@ -100,13 +95,9 @@ static inline void psSlabBinning(PSPassCtx const &passCtx, PSLayoutCtx const &la
     std::vector<uint8_t> &slabFirst = layoutCtx.slabFirst;
     if ( slabMode )
     {
-        // binning: each tetrahedron's x range of global cells -- the bounding box of its Eulerian
-        // vertices, minimum-image wrapped EXACTLY as psFilterCell wraps them (same Real operations, so the
-        // same positions), widened by two cells: a superset of every cell the deposit writes (the sample
-        // window is the bounding box itself, the centroid fallback lies inside it). No
-        // filter here: running it once more per tetrahedron would cost a full extra pass (a large part of the
-        // slab run on a clustered box, where a tet covers few cells); the deposit filters, and counts a
-        // rejection in the tet's first slab. After a GPU deposit: only the deferred cells, in loop order.
+        // binning: each tet's x range of global cells, the bounding box of its Eulerian vertices wrapped EXACTLY as psFilterCell
+        // wraps them, widened by two cells: a superset of every cell the deposit writes. No filter here (an extra pass per tet);
+        // the deposit filters and counts a rejection in the tet's first slab. After a GPU deposit: the deferred cells only.
         if ( metalDeposited )
         {
             slabTets.reserve( deferredOrd.size() );
@@ -196,12 +187,10 @@ static inline void psSlabBinning(PSPassCtx const &passCtx, PSLayoutCtx const &la
                 f( loc );
             }
         };
-        // The slab boundaries balance the WORK, not the width: halos put most tetrahedra into a few
-        // planes of a clustered box, where equal-width slabs would leave the thread holding them
-        // alone. Each tet's cost (bbox cells + overhead) is spread over its planes, the slabs cut at
-        // equal cumulative cost. Their number is a multiple of the threads (k slabs each, picked up
-        // dynamically), k ~ the planes per thread over four mean tetrahedron extents (a straddler
-        // then costs ~25% extra), at least 2, at most 64 slabs.
+        // The slab boundaries balance the WORK, not the width: halos put most tets into a few planes, where equal-width slabs
+        // would leave one thread holding them. Each tet's cost (bbox cells + overhead) is spread over its planes and the slabs
+        // cut at equal cumulative cost; their number is a multiple of the threads (k each, picked up dynamically), at least 2,
+        // at most 64.
         std::vector<double> planeCost( size_t(nx), 0. );
         {
             std::vector< std::vector<double> > part( size_t(nDepThreads), std::vector<double>( size_t(nx), 0. ) );

@@ -1,18 +1,6 @@
-"""FoF/Subfind group catalogs + subhalo member particles, without offset files.
-
-Reads the fof_subhalo_tab_NNN.X.hdf5 chunks downloaded by `download_snapshots.sh -c` into
-<data root>/<sim>/groups_NNN/, and (for shape/orientation work) the raw snapshot chunks in
-snapdir_NNN/ -- TNG snapshots store particles in FoF-group order (each group's subhalo
-particles first, catalog order, then the group's "fuzz"), so a subhalo's particle range is
-computable from GroupLenType / GroupNsubs / GroupFirstSub / SubhaloLenType alone:
-
-    offset(sub s) = groupOffset(GrNr(s)) + sum SubhaloLenType[firstSub(GrNr) : s]
-
-All returned quantities keep RAW TNG units (ckpc/h, 1e10 Msun/h) unless stated otherwise.
-The merged combined_fof_subhalo_tab_NNN.hdf5 files (merge_HDF5.py --groupcats) store h-FREE
-values on disk; their per-dataset 'divided_by_h' / header 'HFreeUnits' markers are used here
-to restore the raw-unit API, so chunked and merged reads return the same numbers.
-"""
+"""FoF/Subfind group catalogs + subhalo member particles, without offset files: reads the fof_subhalo_tab chunks
+and the raw snapshot chunks (particles are in FoF-group order, so a subhalo's range follows from the group
+lengths). Quantities keep RAW TNG units (ckpc/h, 1e10 Msun/h); merged h-free files are restored by their markers."""
 
 from __future__ import annotations
 
@@ -107,9 +95,7 @@ def subhalo_particle_range(sim: str, snap: int, subfind_id: int) -> tuple[int, i
 def read_subhalo_coordinates(sim: str, snap: int, subfind_id: int,
                              max_particles: int = 2_000_000) -> np.ndarray:
     """Comoving DM Coordinates (ckpc/h) of one subhalo, read across raw snapshot chunks.
-
-    Subsamples deterministically above max_particles (plenty for a shape tensor).
-    """
+    Subsamples deterministically above max_particles."""
     off, length = subhalo_particle_range(sim, snap, subfind_id)
     if length == 0:
         return np.empty((0, 3), dtype=np.float32)
@@ -153,11 +139,8 @@ def read_subhalo_coordinates(sim: str, snap: int, subfind_id: int,
 
 
 def shape_from_coords(coords: np.ndarray, center: np.ndarray, box_ckpc_h: float) -> dict:
-    """Mass-tensor shape of an equal-mass particle set around `center` (periodic min-image).
-
-    Returns axis lengths a>=b>=c (relative), ratios b/a, c/a, triaxiality T, and the unit
-    eigenvectors (rows: major, intermediate, minor).
-    """
+    """Mass-tensor shape of an equal-mass particle set around `center` (periodic min-image): axis lengths
+    a>=b>=c (relative), ratios b/a, c/a, triaxiality T, and the unit eigenvectors (rows: major, intermediate, minor)."""
     d = coords - np.asarray(center, dtype=np.float64)
     d -= box_ckpc_h * np.rint(d / box_ckpc_h)
     m = (d[:, :, None] * d[:, None, :]).mean(axis=0)     # 3x3 mass tensor
@@ -180,10 +163,8 @@ def shape_from_coords(coords: np.ndarray, center: np.ndarray, box_ckpc_h: float)
 # ------------------------------------------------------------------ redshift table
 @lru_cache(maxsize=4)
 def redshift_table(sim: str) -> dict[int, float]:
-    """snap -> redshift from every header available on disk (groupcats, snapshots, combined).
-
-    Snapshots without any file get a log-a interpolation between the nearest anchors
-    (TNG outputs are near-uniform in log a, good to ~1%)."""
+    """snap -> redshift from every header available on disk (groupcats, snapshots, combined). Snapshots without
+    any file get a log-a interpolation between the nearest anchors."""
     root = sim_dir(sim)
     anchors: dict[int, float] = {}
     for d in sorted(root.glob("groups_*")):

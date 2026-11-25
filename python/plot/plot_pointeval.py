@@ -1,25 +1,8 @@
 """Render POINT-EVALUATED field maps ('--sample-points') for many snapshots at once.
 
-The plotting half of the pipeline: run_ps_pipeline.sh computes the grids and the '.pts_*'
-image planes, this script turns the latter into figures. Unlike the grid slice maps of
-plot_PS_DTFE.py -- cell-averaged, one cell thick -- these evaluate the tessellation AT each
-pixel centre, giving a zero-thickness cross-section at a resolution limited only by the
-tessellation (see dtfelib/pointeval.py for the estimator differences). Styling is identical
-to the grid maps, and files sit beside them under the same naming convention:
-
-    <figures>/fields/<sim>/snapNNN/<plane>/ps_<field>_pointeval_<plane>_z<z>.png
-
-Fields come from whatever the run wrote: density, streams, speed, dispTrace, dispMag and --
-for runs with PTS_VEL_GRAD=1 -- velDiv, velShear, velVort (plus denGradMag with
---pts-den-grad). Snapshots and simulations are auto-discovered; nothing is recomputed here.
-
     python3 plot/plot_pointeval.py --sims all               # every sim, every snapshot
-    python3 plot/plot_pointeval.py --sims TNG300-3-Dark      # one simulation
-    python3 plot/plot_pointeval.py --sims TNG300-3-Dark --snaps 0 4 17 33   # selected snapshots
-    python3 plot/plot_pointeval.py --sims all --maps density velDiv --force
+    python3 plot/plot_pointeval.py --sims TNG300-3-Dark --snaps 0 4 17 33 --maps density velDiv --force
     python3 plot/plot_pointeval.py --sims all --estimator dtfe   # the standard-DTFE slice (output.pts_*)
-
-The lists are space-separated.
 """
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)

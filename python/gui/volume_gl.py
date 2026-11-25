@@ -1,27 +1,6 @@
 """The 3D view's volume drawn on the GPU (OpenGL 4.1 core, macOS's own): the same picture as explore_3d's QPainter
-slice stack, at the speed of the graphics chip -- a 1024^3 cube turns in real time instead of 2 s a settled picture.
-
-How: the cube's levels (volume3d.prepare's 'q', one byte a cell) are one 3D integer texture, the transfer function's
-256 RGBA64 entries (volume3d.transfer) a 256 x 1 RGBA16 texture, and a fragment shader casts each pixel's ray
-through the cube. It is not a free ray-marcher: it walks the very slices QPainter draws -- the planes through the
-cells' centres normal to slice_plan's axis (perspective: each pixel the axis its ray runs along most, slice_plan's
-parts, so an eye inside the cube sees the field all around) -- and at each it takes the sample QPainter's bilinear
-drawImage takes
-there: the four nearest cells' colours (looked up first, then mixed: the slice images are coloured before they are
-resampled) mixed by the ray's place between them, composited front to back with the 'under' operator. So it is the
-QPainter picture computed in 32-bit floats instead of 16-bit integers per slice, the same opacity correction (the
-reference ray's, the same table) and the same order. While the view turns, a frame may take every stride-th slice
-only, the opacity corrected for that longer path (the table's exponent x stride: the same look), and of the cube's
-half (2^3 cells averaged in value space, quantised on the same range: mip_layer) rather than of the cube itself:
-skipping slices of the cube aliases (a dense knot is hit or missed), the half averages it, and at 1024^3 every slice
-of the half (17 ms) is cheaper than every 8th of the cube (23 ms). Blocks of BLOCK^3 cells whose every level is
-transparent are skipped when striding (exact: the same pixels).
-
-Drawn offscreen (a QOffscreenSurface and a framebuffer object) and read back into a QImage that View3D draws as it
-draws QPainter's picture: the window stays a plain raster widget (a QOpenGLWidget would switch the whole launcher
-window to OpenGL composition) and every overlay is drawn as before. No OpenGL under QT_QPA_PLATFORM=offscreen (the
-tests), none on a machine without it: renderer() is None (unavailable_reason says why) and View3D keeps QPainter;
-Save image and the tests always use QPainter (View3D.volume_picture)."""
+slice stack, at the speed of the graphics chip -- a 1024^3 cube turns in real time instead of 2 s a settled
+picture."""
 
 from __future__ import annotations
 
@@ -47,16 +26,10 @@ GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_COMPLETE = 0x8D40, 0x8CE0, 
 GL_RENDERBUFFER = 0x8D41
 GL_MAX_3D_TEXTURE_SIZE = 0x8073
 
-BLOCK = 4                       # empty-space skipping: blocks of BLOCK^3 cells (a 1024^3 cube: 256^3 blocks, 32 MB)
-SKIP_FROM_STRIDE = 4            # ... used from this stride on: measured on TNG100-3-Dark 1024^3 (2000 x 1600, the
-                                # same pixels either way), stride 4 34 ms against 57 without, stride 8 15 against 22
-                                # (1000 x 800); at stride 1 the block test, a fetch each sample waits on, makes it
-                                # 2.2x slower (107 -> 240 ms): consecutive samples there hit the cache anyway
+BLOCK = 4
+SKIP_FROM_STRIDE = 4
 MIP_FROM = 64                   # a cube of at least this many cells a side also gets its half (2^3 cells averaged) for
-                                # the turning frames: TNG100-3-Dark 1024^3 at 2000 x 1600 every slice of the half cube
-                                # 17 ms, against 23 ms for every 8th slice of the cube itself (which aliases: a dense
-                                # knot is hit or missed, never averaged)
-UPLOAD_SLAB_BYTES = 24 << 20    # the cube goes up in slabs of whole layers of about this much (~18 ms each)
+UPLOAD_SLAB_BYTES = 24 << 20
 DONE_ALPHA = 1.0 - 1.0 / 1024   # a ray ends once this opaque: what is left behind adds under 1/1024 (half an 8-bit
                                 # step); the parity image (16 bits) goes on to 1 - 2^-17
 
@@ -243,8 +216,7 @@ def mip_shape(shape) -> tuple:
 def mip_layer(q: np.ndarray, vt: np.ndarray, qrange, log: bool, j: int) -> np.ndarray:
     """Layer j of the cube's half: the mean value over blocks of 2^3 cells (volume3d.block_edges: as equal as whole
     cells allow), taken in value space as volume3d averages the grid (a log scale's levels are 10^level first: a
-    dense cell among empty ones keeps its mass), quantised again on the cube's own range (the same transfer table
-    colours both); a block holding a cell without a value has none (NaN, level 0), as in the averaging."""
+    dense cell among empty ones keeps its mass)."""
     e = [VOL.block_edges(m, (m + 1) // 2) for m in q.shape]
     blk = vt[q[e[0][j]:e[0][j + 1]]]
     blk = np.add.reduceat(blk, e[2][:-1], axis=2)
@@ -557,12 +529,7 @@ class Renderer:
     def render(self, cam, lo, hi, plan: dict, lut: np.ndarray, width: int, height: int, stride: int = 1,
                deep: bool = False, level: int = 0) -> np.ndarray:
         """The volume's picture of the cube on the GPU (ready()) as 'cam' sees it: width x height pixels over the
-        camera's view (cam.width x cam.height), slices along plan['axis'] (volume3d.slice_plan of the cube's shape;
-        perspective: along each pixel's own axis, the plan's parts, the slice nearest the eye faded as its 'first'),
-        coloured by 'lut' (volume3d.transfer, corrected for stride x the plan's path). Returns premultiplied pixels,
-        rows from the top: (h, w, 4) uint8 B, G, R, A (QImage.Format_ARGB32_Premultiplied's bytes), or with 'deep'
-        (h, w, 4) uint16 R, G, B, A (Format_RGBA64_Premultiplied's). 'level' 1: the cube's half (plan and lut made
-        for its shape)."""
+        camera's view (cam.width x cam.height), slices along plan['axis']."""
         t = time.perf_counter()
         self.current()
         lv = self.levels[level]

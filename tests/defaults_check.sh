@@ -1,107 +1,7 @@
 #!/usr/bin/env bash
-# The programs' own choice of the device: '--gpu', the environment's DTFE_GPU (1 = as '--gpu', 0 = the CPU; unset,
-# empty or 'auto' = the program picks: PS-DTFE the GPU for every deposit, averaged or not, exact or sampled, standard
-# DTFE the GPU for the exact average and the CPU for the sampled one, each only where the build and the run have a
-# GPU path), the run
-# log's device line that says which and why, the checkpoint key's device line, the header's padding (standard
-# DTFE 15, PS-DTFE 5; src/user_options.cc checkGpuOptions, printOptions; src/partition_checkpoint.h settingsKey),
-# PS-DTFE's GPU share when none is given ('auto': src/DTFE.cpp psResolveGpuShare) and a grid above the 2^32 cells the
-# GPU kernels number (the passes test their own grids, not the pick: user_options.cc gpuPathRuns), with the passes'
-# own fall-back under a cap lowered by a test hook.
-# Elsewhere: the run mode's default in tests/run_mode_check.sh (M1, M1b, M3), the T-web threshold's in
-# tests/tweb_check.sh (L), standard DTFE's padding on a void-rich snapshot in tests/point_exact_serve_check.sh (P3),
-# the 2D programs' device line in tests/ps_2d_check.sh (DV).
-# tests/lib.sh pins DTFE_GPU=0 and DTFE_RUN_MODE=performance for every suite: each run here unsets DTFE_GPU and sets it
-# where a case gives it (the mode stays pinned, so a GPU run's 'run mode' line names 250 ms buffers). The device line
-# is the header's "\t '_a' interpolation     : <text>" (standard DTFE) or "\t PS deposit             : <text>"
-# (PS-DTFE), compared whole. Both binaries of the suite's precision, on a synthetic 16^3 snapshot of crossed waves,
-# grid 16; whether a binary has a GPU path is read from the Metal stamp of its object folder (o / o_ps, o_d / o_ps_d),
-# as the other suites do, and 'Metal GPU' is the only backend's name. A deposit ran on the GPU when its dispatch line
-# is in the log ('Metal GPU (<device>, N tetrahedra)', 'PS-DTFE: Metal GPU deposit (') and no fall-back line is.
-# D: one triangulation ('--partition 1') on one thread, '--field density_a velocity_a':
-#   D1  '--gpu': 'Metal GPU (--gpu)', on the GPU; a build without a GPU path: 'CPU (--gpu given but this binary was
-#       built without GPU support; falling back)' and the deposit's '--gpu requested but this binary was built without
-#       GPU support' warning
-#   D2  DTFE_GPU=1 is '--gpu': 'Metal GPU (DTFE_GPU=1)', on the GPU (elsewhere the CPU line and the warning, naming
-#       'DTFE_GPU=1'), and every output of D1 byte for byte
-#   D3  '--gpu' beats DTFE_GPU=0: D1's line and D1's outputs
-#   D4  DTFE_GPU=0 and DTFE_GPU=OFF (the value as given): 'CPU (DTFE_GPU=0)' and 'CPU (DTFE_GPU=OFF)', no dispatch
-#       line, no GPU warning, no GPU buffers in the 'run mode' line, the same outputs
-#   D5  nothing given (DTFE_GPU unset; 'auto' and empty alike): a Metal build picks the GPU for the exact average --
-#       standard DTFE 'Metal GPU (the default for the exact average; DTFE_GPU=0 keeps the run on the CPU)', PS-DTFE
-#       'Metal GPU (the default; DTFE_GPU=0 keeps the run on the CPU)' -- deposits there ('; GPU buffers up to 250 ms'
-#       in the 'run mode' line), warns nothing and writes D1's outputs byte for byte; a build without a GPU path:
-#       'CPU (this binary was built without GPU support)', no warning, D4's outputs
-#   D6  '--sampled', nothing given: standard DTFE keeps the CPU, on a Metal build 'CPU (the default for the sampled
-#       average; --gpu runs it on the GPU)', no dispatch line, the outputs of the DTFE_GPU=0 run; PS-DTFE picks the
-#       GPU for it too (D5's line, on the GPU); a build without a GPU path: the 'built without' line; no warning
-#   D7  a run without a GPU path, nothing given: standard '--average-method 2' and PS-DTFE '--ps-caustics
-#       --ps-caustic-cusps' read 'CPU (the default: this average has no GPU path)' ('this deposit' in PS-DTFE) on a
-#       Metal build (the 'built without' line elsewhere), no dispatch line, no warning; asked, they warn as '--gpu'
-#       does, naming the source:
-#       '--gpu accelerates only the method-1 ...' and 'DTFE_GPU=1 accelerates only the method-1 ...' (every build),
-#       PS-DTFE '... DTFE_GPU=1 is not used for the deposit of this run.' (a Metal build; elsewhere 'DTFE_GPU=1
-#       requested but this binary was built without GPU support')
-#   D8  no '_a' field ('--field density'), nothing given: standard DTFE has no device line, no dispatch line and no
-#       GPU warning (its GPU path averages); PS-DTFE's deposit makes the field on the device it picks for an '_a'
-#       field: D5's device line, on the GPU of a Metal build without a word (the 'built without' line elsewhere)
-#   D9  the header's padding (D4's runs): 'number padding particles: 15' in standard DTFE, 5 in PS-DTFE
-#   D10 the header's GPU share line, no '--gpu-share' given: "auto (the run mode's share, resolved with the plan)" in
-#       PS-DTFE on a Metal build for the exact deposit on the GPU (D1, D2, D3, D5 and its 'auto' and empty), where a
-#       given 'auto' is resolved; none on the CPU (D4), for the sampled deposit (D6), without a GPU path (D7) or an
-#       '_a' field (D8), in standard DTFE and in a build without a GPU path
-# K: '--partition 2 2 2 --max-concurrent 2' on two threads; K1-K4 '--exact --field density_a velocity_a':
-#   K1  a run killed after 3 partitions under DTFE_GPU=0: the line after its key's 'gradient=' line is 'device=cpu',
-#       and its 'average=' line names the exact average ('average=exact')
-#   K2  its '--resume' under DTFE_GPU=1 (an asked GPU: 'device=gpu' in every build) is refused, naming
-#       'checkpoint: device=cpu' and 'this run  : device=gpu'; the checkpoint is kept
-#   K3  a Metal build: its '--resume' with nothing given (the program picks the GPU) is refused likewise
-#   K4  the resume that keeps the CPU (DTFE_GPU=0 on a Metal build, nothing given elsewhere) finishes: every output of
-#       the uninterrupted DTFE_GPU=0 run byte for byte, the checkpoint removed
-#   K5  the sampled average, selected by a count alone ('--subsamples 2 --lambda-th 0.3 --no-overlap', in PS-DTFE
-#       also '--ps-lagrangian-padding 8 --ps-merge index-order' and dispersion_a; no '--exact'), killed after 3
-#       partitions under DTFE_GPU=0: its key's 'average=' line names the sampled average ('average=sampled')
-# S: PS-DTFE's GPU share without '--gpu-share' (a Metal build; SKIP otherwise): the exact deposit on the picked GPU,
-#    '--run-mode performance', OMP_NUM_THREADS=10, DTFE_AUTO_MINN=1000 (the share's model applies to this snapshot):
-#   S1  '--auto-tune-report' (DTFE_RAM_GB=64): no option plans as '--gpu-share auto' -- the same header share line,
-#       AUTO-TUNE line and report line; the single build's AUTO-TUNE line names 'GPU deposit with the free cores (GPU
-#       share ', unlike the plan of '--gpu-share 1'; the double build's is that plan's (', GPU deposit', no share)
-#   S2  a run at '--partition 3 3 3 --max-concurrent 2': no option is '--gpu-share auto' -- the same loop note
-#       ('PS-DTFE: GPU share <f> (--gpu-share auto: performance...'), every output byte for byte, no CPU fall-back
-# C: a full grid above 2^32 cells, '--grid 2048 --auto-tune-report' (a Metal build; SKIP otherwise; plan-only: the run
-#    allocates no grid; DTFE_RAM_GB=64, OMP_NUM_THREADS=2, DTFE_AUTO_TUNE_DEBUG=1), nothing given:
-#   C1  both programs pick the GPU (D5's device line, the run mode's GPU buffers) and plan as '--gpu' does (the same
-#       report line); PS-DTFE splits (partition >= 2) and books each sub-grid under 2^32 cells
-#   C2  PS-DTFE '--partition 1 1 1' (one sub-grid above the cap): the planner's warning ('... above the 2^32 the GPU
-#       kernels number ...') for the picked GPU as for '--gpu'
-# G: the passes' own guard of that cap, lowered to one cell by the test hook DTFE_TEST_GPU_CELL_CAP=1
-#    (src/CGAL_triangulation/gpu_host.h gpuCellCap), so every pass is above it (a Metal build; SKIP otherwise);
-#    '--exact --field density_a velocity_a' on one thread: standard DTFE one domain ('--partition 1': one sub-domain),
-#    PS-DTFE '--partition 2 2 2 --max-concurrent 1 --gpu-share 1' (eight passes, each meant for the GPU; only the
-#    partition loop prints PS-DTFE's count) with '--no-overlap' (a GPU run at one partition at a time would
-#    tessellate the next one ahead, the CPU run would not):
-#   G1  '--gpu': exit 0, the pass's warning ('the GPU interpolation does not support 2^32 or more grid cells in one
-#       pass; ...', PS-DTFE '... 2^32 or more cells per partition sub-grid ...'), the closing count ('1 sub-domain
-#       deposit(s) were meant for the GPU and ran on the CPU instead', PS-DTFE '8 partition deposit pass(es) ...'),
-#       no dispatch line, and every output of the same run under DTFE_GPU=0 without '--gpu' byte for byte (that run
-#       has no fall-back line: the cap does not touch a run on the CPU)
-#   G2  nothing given (the program picks the GPU): the same
-# A: the programs' own choice of the '_a' average (src/user_options.cc resolveAverageMode), one domain on the CPU
-#    (DTFE_GPU=0) and two threads, crossed waves of 24^3 particles on a 24^3 grid, '--field density_a velocity_a': the
-#    run log's header line that names the average and why (the literals the drivers and python/ read), with the
-#    outputs of the run it stands for, in both programs:
-#   A1  no flag is '--exact, the default', the outputs of '--exact'; '--sampled' samples
-#   A2  PS-DTFE's '--sampled' without a count deposits on one point per cell axis: its header's
-#       'avg sub-samples (nSub) : 1', the outputs of '--sampled --subsamples 1'
-#   A3  PS-DTFE's exact default without a count keeps the count 3 where an exact pass still reads one (its header's
-#       'count 3', the outputs of '--exact --subsamples 3')
-#   A4  DTFE_EXACT_AVERAGE=0 / =1 alone sample / integrate exactly, each said in the header
-#   A5  a flag beats the pin both ways (DTFE_EXACT_AVERAGE=0 with '--exact', =1 with '--sampled')
-#   A6  a '--subsamples' count alone selects the sampled average, said in the header
-#   A7  standard DTFE's '--average-method' of any value (1, the default method, included) selects it too
-#   A8  standard DTFE on a redshift cone grid: '--exact' warns and samples, no flag samples silently, both the outputs
-#       of '--sampled' and the header 'SAMPLED (a redshift cone grid has no exact form)'
-#   A9  '--exact --sampled' is refused at option parsing, naming both
+# The programs' own choice of the device: '--gpu', DTFE_GPU (1 = GPU, 0 = CPU, unset/empty/'auto' = the program picks),
+# the run log's device line, the checkpoint key's device line, the header's padding, PS-DTFE's default GPU share and the
+# 2^32-cell grid limit of the GPU kernels. Other defaults: tests/run_mode_check.sh, tweb_check.sh, ps_2d_check.sh.
 # Usage: tests/defaults_check.sh [--no-build]   (--no-build is accepted and ignored: the binaries are used as built)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -132,8 +32,7 @@ GPU_PS=0; [ -d "$OBJ_PS" ] && [ ! -f "$OBJ_PS/.gpu_mode_off" ] && [ -n "$(gpu_ba
 echo ">> GPU path (the Metal stamp of $OBJ / $OBJ_PS): standard DTFE $GPU_STD, PS-DTFE $GPU_PS"
 
 # go <out> <binary> <args...>: one run of '<binary> <snapshot> <out> <args...>', stdout and stderr in <out>.log, with
-# DTFE_GPU unset and then the NAME=value list RUN_ENV (DTFE_GPU=<value> where a case gives it); the exit status is the
-# binary's (the shell's own 'Killed: 9' line for a DTFE_TEST_EXIT_AFTER_PARTITIONS run is not output)
+# DTFE_GPU unset and then the NAME=value list RUN_ENV (DTFE_GPU=<value> where a case gives it).
 RUN_ENV=()
 go() {
     local out="$1" bin="$2"; shift 2
@@ -497,8 +396,6 @@ for b in STD PS; do
         check "A7 $b: '--average-method 1' alone selects the sampled average, the outputs of '--sampled' (exit $r1)" $?
         # a redshift cone grid has no exact form (its '_a' fields are sampled, method 2): '--exact' warns and
         # samples, the default samples without a word; both give the outputs of '--sampled'. The seed is pinned:
-        # method 2 draws random points, and without '--seed' the generator starts from the clock (two of the
-        # three runs then agree only when they start within the same second).
         K=(--input-format 105 --mpc-unit 1 --periodic --grid 4 4 6 --redshift-cone 5 40 30 150 0 300
            --cone-origin 50 50 50 --partition 1 --field density_a velocity_a --seed 7)
         KW="'--exact' does not apply to a redshift cone grid"; KS="${SL}a redshift cone grid has no exact form)"

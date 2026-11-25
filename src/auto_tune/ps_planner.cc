@@ -1,7 +1,5 @@
-// Part of src/auto_tune.cc, inside its #ifdef PHASE_SPACE and its anonymous namespace: included once, in order, by
-// that file and compiled only as part of its object, never alone.
-// The PS planner (AutoTunePSPlanner): its memory model of a split, its report, and the phases that choose the
-// split (choose, irreducibleCase, smallSetCase, overBudgetCase, memorySplit).
+// Part of src/auto_tune.cc (inside its PHASE_SPACE block and anonymous namespace), included once by that file, never compiled
+// alone: the PS planner (AutoTunePSPlanner), its memory model of a split, its report, and the phases that choose the split.
 
 /* The PS-DTFE plan once its inputs are known (autoTunePartitioning): the memory model of a split (partitionBytes,
    oneDomainPeak, snapshotBytes, lookAheadBytes, loneLaneSubGrids), the report of a choice (finishReport) and the
@@ -13,26 +11,18 @@ struct AutoTunePSPlanner : AutoTunePSInputs
     AutoTuneReport &report;          // the report it completes (fixed, budget and the points' terms already set)
     MESSAGE::Message &message;       // the AUTO-TUNE lines
 
-    // ONE DOMAIN on the CPU ('--partition 1 1 1', or one domain picked here: partitionOn false): the triangulation
-    // deposits straight into the run's own grids (DTFE_interpolation: no reserveMemory, sub-grid or addFromSubgrid),
-    // so the grids 'fixed' books are the deposit's own; partitionBytes(1) would book them twice (copyOne) and every
-    // grid's conversion at once. Modelled per pass (u, then a), in ps_interpolation.cc's order: during the loop the
-    // fixed-point words (the density's 8 B, each moment grid's 2 x its Real bytes), the int stream count, the flags
-    // and the Real accumulators that are not fixed-point sums; after it each moment grid's Real grid beside its
-    // words, the words freed grid by grid (psFxToReal), then the face sums' the same way (words in every build:
-    // autoTuneFaceBytes), then the density from the mass words; then the export grids ('.streams' or '.tetTouch',
-    // '.hidden_streams', the caustic bits, the volume-weighted dispersion's density copy).
-    // A freed block under kAllocKeepBytes stays in the footprint, so the export grids pile on top of freed words
-    // smaller than that; the next pass reuses what the previous one freed, and the derived fields come last. Bytes,
-    // for 'cells' sub-grid cells.
-    double oneDomainPeak(double const cells) const
+    // ONE DOMAIN on the CPU ('--partition 1 1 1', or one domain picked here): the triangulation deposits straight into the run's own
+    // grids, so the grids 'fixed' books are the deposit's own (partitionBytes(1) would book them twice). Modelled per pass (u, then a)
+    // in ps_interpolation.cc's order: during the loop the fixed-point words, the int stream count, the flags and the Real accumulators;
+    // after it each moment grid's Real grid beside its words (freed grid by grid), the face sums the same way, the density, the export
+    // grids. Freed memory goes back to the system (main.cpp dtfeAllocatorReexec), so the peak is live memory. 'loopBytes': the loop's own.
+    double oneDomainPeak(double const cells, double const loopBytes) const
     {
-        double const B4 = kAllocKeepBytes;      // the allocator returns a freed block of this size or more
         double const R = double(sizeof(Real));
         bool const fxOn = ps.phaseSpace and sizeof(Real) == 4;
-        double live = 0., kept = 0., peak = 0.;
-        auto alloc = [&](double const b) { live += b*cells; peak = std::max( peak, live + kept ); };
-        auto release = [&](double const b) { live -= b*cells; if ( b*cells < B4 ) kept += b*cells; };
+        double live = 0., peak = 0.;
+        auto alloc = [&](double const b) { live += b*cells; peak = std::max( peak, live ); };
+        auto release = [&](double const b) { live -= b*cells; };
         for (Field *f : { &u.uField, &u.aField })
         {
             if ( not f->selected() ) continue;
@@ -47,10 +37,8 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             // the loop's temporaries: the pass's slots, less the grids made after it, plus the words and the int count
             double const pre = autoTuneBytesPerCell(*f, ps, 0) - E - sumG - ( massFx ? R : 0. ) - faceRf
                              + 2.*sumG + ( massFx ? 8. : 0. ) + faceW + double(sizeof(int));
-            double const reuse = std::min( kept, pre*cells );   // ... in what the previous pass freed
-            kept -= reuse;
-            live += pre*cells;
-            peak = std::max( peak, live + kept );
+            alloc( pre );
+            peak = std::max( peak, live + loopBytes );   // the deposit's loop, then its copies and lists are freed
             for (double const g : G) { alloc( g ); release( 2.*g ); }
             if ( faceRf > 0. )   // fx.faceS, faceN, faceP: each one's Real grid beside its words, the words then freed
                 for (double const c : { double(noVelComp), 1., 1. }) { alloc( 2.*NO_DIM*c*R ); release( 2.*NO_DIM*c*8. ); }
@@ -75,9 +63,8 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         double const fPad = padFactorOf( n );   // k spacings, or the Eulerian rule's floor of 0.3 partition widths
         double const nPad = nOwn * fPad;
         double m = nPad * (partBytes + kPSVertexBytes + kParInsert);   // particle copy coexists with the growing triangulation
-        // '--sample-points': each worker fills a LOCAL hits buffer (pair<uint32,StreamRec>,
-        // padded to 176 B) and merges it under the mutex at the end, so this part DOES scale
-        // down with a finer split -- roughly this partition's share of the total records.
+        // '--sample-points': each worker fills a LOCAL hits buffer (pair<uint32,StreamRec>, 176 B padded) and merges it under the
+        // mutex at the end, so this part scales down with a finer split
         if ( nPts > 0 )
             m += double(dtfeHardwareThreads()) * kHitSinkBlockBytes;   // one HitSink block per thread
         // Eulerian sub-grid this partition allocates (subGridCells below)
@@ -92,14 +79,11 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         }
         if ( metalActive )
         {
-            // flat tet arrays (the 16-float record 64 + masses 4 + the finite-cell ordinal 4 B/tet,
-            // + vels 48 when velocity-derived grids are requested; the cost-sort permutes IN PLACE,
-            // so no gather copy) + the PSGpuGrids host and device copies of the selected grids
-            // (gpuCellBytes; under --grid-window held once, snapshotBytes) -- or what the lane holds once its
-            // deposit has let go of the device, where a face pass makes that the larger (gpuAfterHoldCellBytes).
-            // With the face walk beside the deposit (earlyFace) a face pass holds its face sums' words beside the
-            // hold, and every lane holds them from before its device call, its wait for the device included: under
-            // --grid-window those words alone (snapshotBytes takes them out of the deposit it books once)
+            // flat tet arrays (the 16-float record 64 + masses 4 + the finite-cell ordinal 4 B/tet, + vels 48 with velocity-derived
+            // grids; the cost-sort permutes IN PLACE) + the PSGpuGrids host and device copies of the selected grids (gpuCellBytes; under
+            // --grid-window held once, snapshotBytes) -- or what the lane holds once its deposit has let go of the device, where a face
+            // pass makes that the larger (gpuAfterHoldCellBytes). With the face walk beside the deposit (earlyFace) every lane holds the
+            // face sums' words from before its device call (under --grid-window those alone: snapshotBytes takes them out)
             double const perTet = (kGpuTetBytes + (psVel or psDisp or psGrad ? kGpuTetVelBytes : 0.))
                                 * kGpuTetSlack;
             m += perTet*kTetsPerVertex*nOwn
@@ -122,16 +106,11 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         }
         else
         {
-            // CPU deposit sub-grids + the deposit threads' private copies, as many as the copy budget allows, unless
-            // that leaves fewer than half the threads: the deposit then runs in SLAB mode (ps_interpolation.cc, the
-            // same rule) with no copies, holding a cell handle, a first-slab byte and ~2 slab-list entries per tet
-            // (+ the binning arrays). The fixed-point words (fxCell, fxMom) count during the deposit, and again at
-            // their conversion after the loop only where that exceeds the copies or slab lists, freed by then. A
-            // private copy holds neither the words nor the shared counts, flags and masks (autoTunePSCountBytes), so
-            // the default single build has copyPriv = 0 and every core in the copy mode, as ps_interpolation.cc's
-            // accBytes; only the double build's Real sums book copies. The face sums are
-            // words in every build: fxFace beyond their Real grids during the deposit, and those grids (faceR)
-            // beside the words at the conversion.
+            // CPU deposit sub-grids + the deposit threads' private copies, as many as the copy budget allows, unless that leaves fewer
+            // than half the threads: then SLAB mode (ps_interpolation.cc, same rule), no copies, a cell handle, a first-slab byte and ~2
+            // slab-list entries per tet. The fixed-point words (fxCell, fxMom) count during the deposit and again at their conversion only
+            // where that exceeds the copies or slab lists. A private copy holds neither the words nor the shared counts, flags and masks
+            // (autoTunePSCountBytes), so the default single build has copyPriv = 0 (accBytes). Face sums: fxFace beyond their Real grids, faceR beside the words.
             double const copyOne = bCellDeposit*subCells;
             double const copyPriv = std::max( 0., copyCell )*subCells;   // (auto_tune/ps_inputs.cc copyCell: one pass's copy)
             int const copyThreads = copyPriv > 0.
@@ -139,11 +118,11 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             double const slabBytes = kTetsPerVertex * nPad * ( 8. + 1. + 2.*4. + 20. );
             double const helpers = 2 * copyThreads < cores ? slabBytes : double(copyThreads - 1) * copyPriv;
             // One domain (oneDomainPeak above): its grids are 'fixed''s, so only what the deposit holds beyond them
-            // counts here, with the copies or slab lists and the threads' sample lists, all kept by the allocator
-            // once freed. A user's split such as '--partition 1 2 2' runs the partition path (userPartitionOn), and
-            // with --scratch-dir 'fixed' has no grid term: both keep the partition formula.
+            // counts here, the copies or slab lists and the threads' sample lists through each pass's loop. A user's
+            // split such as '--partition 1 2 2' runs the partition path (userPartitionOn), and with --scratch-dir
+            // 'fixed' has no grid term: both keep the partition formula.
             if ( n == 1 and not userPartitionOn and not scratchOn )
-                m += helpers + threadScratch + std::max( 0., oneDomainPeak( subCells ) - bCell*subCells );
+                m += std::max( 0., oneDomainPeak( subCells, helpers + threadScratch ) - bCell*subCells );
             else
                 m += copyOne + (fxCell + fxMom + fxFace)*subCells
                    + std::max( helpers, (fxCell + fxMom + faceR)*subCells );
@@ -151,16 +130,11 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         return m;
     }
 
-    /* A MIXED run ('--gpu-share' below 1, DTFE.cpp psResolveGpuShare): the share's partitions deposit on the GPU, the
-       others on the CPU, at the same time. The GPU deposit's device grids and their host copies exist only while a
-       deposit holds the GPU (ps_metal_host.cc: the buffers are made once ctxMutex is taken, the output grids allocated
-       only then), so one lane at a time holds them: snapshotBytes adds them once. A lane waiting for the GPU holds
-       only what is built before the lock -- the flat tet arrays and the exact items -- and a CPU lane its deposit's
-       sub-grids with the copies or slab lists; a GPU lane after its hold keeps the host grids the copy-back made, and
-       with a face pass the face sums too (gpuAfterLockCellBytes, beside its arrays: booked, not left to the CPU lane
-       being the larger). So a lane books the larger of the two (partitionBytes), each with its branch's expressions
-       above, the GPU's without the lock holder's grids (gpuCellBytes). For a split only (n >= 2): one domain has no
-       partition loop, and so no share. */
+    /* A MIXED run ('--gpu-share' below 1, DTFE.cpp psResolveGpuShare): the share's partitions deposit on the GPU, the others on the
+       CPU, at the same time. The GPU deposit's device grids and host copies exist only while a deposit holds the GPU
+       (ps_metal_host.cc, after ctxMutex), so snapshotBytes adds them once. A lane waiting for the GPU holds what is built before the
+       lock (flat tet arrays, exact items), a CPU lane its sub-grids with the copies or slab lists, a GPU lane after its hold the host
+       grids (and a face pass's sums: gpuAfterLockCellBytes). A lane books the larger. Splits only (n >= 2): one domain has no share. */
     void mixedLane(int n, double &cpu, double &gpuPre) const
     {
         double const nOwn = N / partsOf( n );
@@ -229,13 +203,15 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             return std::max( cpu, gpuPre + gpuAfterLockCellBytes( n )*subCells )
                    - std::max( f*cpuShare*cpu, gpuPre + f*after*subCells );
         }
-        // (the face walk beside the deposit: each lane holds its face sums' words whole from before its device
-        // call, so the first lane books them beside the hold, as partitionBytes, and each other one beside the hold's
-        // share; the share after the hold holds them already. earlyFace is 0 without the walk, and a mixed run's face
-        // pass takes no share: laneShareOn)
+        // the face walk beside the deposit (earlyFace > 0; a mixed run's face pass takes no share: laneShareOn): the
+        // first lane books the hold with the face sums' words, as partitionBytes, and each other one the measured
+        // share of that whole grid state (kPSLaneShareFace). Without the walk: the hold's share, or the state after
+        // the hold at the lanes' share where that is the larger
         double const hold = gpuCellBytes();
-        return ( std::max( hold + earlyFace, after ) - std::max( kPSLaneShareHold*hold + earlyFace, f*after ) )
-               * subCells;
+        double const state = std::max( hold + earlyFace, after );
+        if ( earlyFace > 0. )
+            return ( 1. - kPSLaneShareFace ) * state * subCells;
+        return ( state - std::max( kPSLaneShareHold*hold, f*after ) ) * subCells;
     }
     // the full grids --scratch-dir leaves in RAM ('fixed' books none), less the point outputs 'fixed' books but the
     // loop never holds (allocated after it): what the share must still book, once
@@ -260,26 +236,11 @@ struct AutoTunePSPlanner : AutoTunePSInputs
                - std::max( 0., double(c - 1)*laneShareCut( n ) - laneShareCover() );
     }
 
-    // The GPU deposit's host snapshot (ps_metal_host.cc GpuSnapshot): to resume a failed command buffer the deposit
-    // keeps a host copy of every buffer its kernel writes -- the device grids (gridB, with the 8 B fixed-point mass for
-    // the 4 B float one: +4 B/cell), the per-tet masses (4 B/tet) and the exact items' weight totals (4 B/tet) -- taken
-    // at each pass's start and every ~10 s of GPU work. It can be larger than the gate's 4 GB headroom. Not in
-    // partitionBytes(): the deposits run one at a time (ctxMutex), so whatever the concurrency there is ONE such copy,
-    // added once to every plan below.
-    // --grid-window: every partition's sub-grid is the whole window (subGridCells), and the grids of the deposit
-    // running are held once in the same way -- the device and host copies (gpuCellBytes) and, beside them, the
-    // partition's own sub-grids (bCellDeposit: its density, counts and flags; fxCell + fxMom: the fixed-point words
-    // while they are converted; fxFace: a face pass's words, or all it holds after the hold where that is more),
-    // all freed and kept by the allocator for the next partition's deposit. In flight and waiting, a partition
-    // holds only its tessellation (with the window's cells counted per partition, three in flight would book them
-    // three times).
-    // A mixed run's split (mixedLane) holds the device and host copies (gpuCellBytes) the same way: the deposit holding
-    // the GPU has them, one at a time, so they are added here once and not per partition.
-    // With the face walk beside the deposit (earlyFace) the window's face sums' words are not the deposit's alone: a
-    // partition makes them before its device call and holds them through its wait for the device, so partitionBytes
-    // books them for every partition in flight and they leave the term booked once here (bCellDeposit holds their
-    // Real grids, the max their fxFace): one partition in flight books what it did without the walk. (A mixed run's
-    // lane books them after its lock already, gpuAfterLockCellBytes, so its window term keeps them.)
+    // The GPU deposit's host snapshot (ps_metal_host.cc GpuSnapshot): a host copy of every buffer the kernel writes (the device grids
+    // gridB, +4 B/cell for the 8 B fixed-point mass; the per-tet masses and exact items' weight totals, 4 B/tet), kept to resume a
+    // failed command buffer. Not in partitionBytes(): deposits run one at a time (ctxMutex), so it is ONE copy, added once to every plan.
+    // --grid-window (and a mixed run's mixedLane): the deposit running holds the device and host copies (gpuCellBytes) and the partition's
+    // own sub-grids (bCellDeposit, fxCell + fxMom, fxFace) once; with the face walk beside it (earlyFace) the words are booked per partition.
     double snapshotBytes(int n) const
     {
         if ( not metalActive ) return 0.;
@@ -299,84 +260,37 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         return r;
     }
 
-    // the GPU deposit's grids per sub-grid cell: gridB (auto_tune/ps_inputs.cc) -- every buffer in PSGpuGrids --
-    // mirrored host and device (the x2), + 4 B/cell: the device's mass grid is a 64-bit fixed-point sum
-    // (ps_metal_host.cc), + 4 B/cell more on the host, which receives those 8 B words instead of a 4 B float grid
-    // (PSGpuGrids::massFx) -- unless a density is selected: the caller then allocates its density sub-grid (4 B; 8 in
-    // the double build) only after the call, from the words, so the peak (the copy-back) is no higher than a float
-    // grid's
+    // the GPU deposit's grids per sub-grid cell: gridB (auto_tune/ps_inputs.cc), every buffer in PSGpuGrids, mirrored host and device
+    // (the x2), + 4 B/cell: the device's mass grid is a 64-bit fixed-point sum (ps_metal_host.cc), + 4 B/cell more on the host, which
+    // receives those 8 B words (PSGpuGrids::massFx) -- unless a density is selected: the caller then allocates its density sub-grid
+    // only after the call, from the words, so the peak is no higher than a float grid's
     double gpuCellBytes() const
     {
         double const hostFx = ( ps.phaseSpace and not psDensity ) ? 4. : 0.;
         return 2.*gridB + 4. + hostFx;
     }
 
-    // A GPU lane AFTER its hold of the device, per sub-grid cell, when its pass makes the face sums ('--face-gradient';
-    // 0 otherwise). The device grids are gone by then; the host keeps what the deposit handed back (gridB + 4: the
-    // mass and moment words), and only now come the face sums' words (ps_interpolation.cc psCpuFixedUnits, filled by
-    // psFaceWalk on the CPU; fxFace + faceR). Then all of them are converted grid by grid into the partition's
-    // sub-grids (psFixedToReal: a grid's Real values allocated, its words freed), the allocator keeping the freed
-    // words. The sub-grids are the partition's own (bCellDeposit; one domain: the run's grids, in 'fixed', as in the
-    // CPU branch), less what the conversion takes from freed words instead (afterHoldReuse). Every lane in flight
-    // can be in that state at once -- the walk is CPU work, nothing serializes it -- so it is booked per lane, in
-    // place of the hold where it is the larger. Without the face sums the lane books the hold
-    // alone, and a lane with one partition in flight books its own sub-grids beside it once (loneLaneSubGrids): this
-    // term is the face pass's alone.
+    // A GPU lane AFTER its hold of the device, per sub-grid cell, when its pass makes the face sums ('--face-gradient'; 0 otherwise).
+    // The device grids are gone; the host keeps what the deposit handed back (gridB + 4), and now come the face sums' words (psFaceWalk
+    // on the CPU; fxFace + faceR). All are then converted grid by grid into the partition's sub-grids (psFixedToReal), every one booked
+    // beside every word (bCellDeposit); fitted on a one-lane Zel'dovich run. Every lane can be in this state at once, so it is booked
+    // per lane, in place of the hold where larger. Without face sums the lane books the hold alone (loneLaneSubGrids).
     double gpuAfterHoldCellBytes(int n) const
     {
         if ( faceR <= 0. ) return 0.;
         double const own = ( n == 1 and not userPartitionOn and not scratchOn ) ? 0. : bCellDeposit;
-        return own + gridB + 4. + fxFace + faceR - afterHoldReuse( subGridCells( n ) );
+        return own + gridB + 4. + fxFace + faceR;
     }
 
-    // A GPU lane of a MIXED run after its hold, per sub-grid cell (partitionBytes' mixed branch). The device grids are
-    // gone; the host keeps the words the copy-back made (ps_metal_host.cc psHostCopyBack: the mass as 8 B words, the
-    // moment words, the stream counts) until the pass has turned them into its sub-grids: gridB + 4, as
-    // gpuAfterHoldCellBytes books the same words. An all-GPU lane books the whole hold, which holds them; a mixed lane
-    // books the hold once (snapshotBytes), so it books them here, beside its arrays -- or a face pass's state behind
-    // the hold, which holds the same words and is the larger (gpuAfterHoldCellBytes). --grid-window: snapshotBytes
-    // holds them once (gridB + 4 in its window term).
+    // A GPU lane of a MIXED run after its hold, per sub-grid cell (partitionBytes' mixed branch). The device grids are gone; the host
+    // keeps the words the copy-back made (ps_metal_host.cc psHostCopyBack) until the pass has turned them into its sub-grids: gridB + 4,
+    // as gpuAfterHoldCellBytes books the same words. An all-GPU lane books the whole hold; a mixed lane books the hold once
+    // (snapshotBytes), so it books them here, beside its arrays -- or a face pass's state behind the hold, the larger.
+    // --grid-window: snapshotBytes holds them once (gridB + 4 in its window term).
     double gpuAfterLockCellBytes(int n) const
     {
         double const host = u.psWindowOn ? 0. : gridB + 4.;
         return std::max( host, gpuAfterHoldCellBytes( n ) );
-    }
-
-    // The Real bytes per sub-grid cell that the conversion after a face pass's GPU deposit takes from freed words and
-    // not from new memory, for sub-grids of 'cells' cells: the single build with fixed-point moments, where the
-    // device's words are the host's (swapped in) and psFixedToReal converts them one grid at a time -- the moment
-    // grids in autoTuneFxGrids' order, the three face sums, the mass last. A freed block under kAllocKeepBytes goes
-    // to a later request of about half its size or more, so the dispersion's Real grid goes into the velocity's
-    // freed words, the gradient's into the dispersion's, the face velocities' into the gradient's. Counted here
-    // only for a request of MORE than half the block (the smallest such block): a request of exactly half was
-    // served at one sub-grid size and not at another. The smaller of the passes' sums (the face words are booked
-    // for the larger pass); 0 in the double build, whose copy-back fills Real grids beside all the words.
-    double afterHoldReuse(double const cells) const
-    {
-        if ( not ( ps.phaseSpace and sizeof(Real) == 4 ) ) return 0.;
-        double const B4 = kAllocKeepBytes;      // the allocator returns a freed block of this size or more
-        double const R = double(sizeof(Real));
-        double least = -1.;
-        for (Field *f : { &u.uField, &u.aField })
-        {
-            if ( autoTuneFaceBytes( *f, ps ) <= 0. ) continue;
-            std::vector<double> kept;           // the freed words not yet taken, bytes per cell each
-            double reused = 0.;
-            auto convert = [&](double const real, double const words)
-            {
-                int best = -1;
-                for (size_t i = 0; i < kept.size(); ++i)
-                    if ( kept[i] >= real and kept[i] < 2.*real and ( best < 0 or kept[i] < kept[size_t(best)] ) )
-                        best = int(i);
-                if ( best >= 0 ) { reused += real; kept.erase( kept.begin() + best ); }
-                if ( words*cells < B4 ) kept.push_back( words );
-            };
-            for (double const g : autoTuneFxGrids( *f, ps )) convert( g, 2.*g );
-            for (double const c : { double(noVelComp), 1., 1. }) convert( 2.*NO_DIM*c*R, 2.*NO_DIM*c*8. );
-            if ( f->density or f->velocity_tweb ) convert( R, 8. );
-            least = least < 0. ? reused : std::min( least, reused );
-        }
-        return std::max( 0., least );
     }
 
     // The partition look-ahead (DTFE.cpp): at one partition in flight with the GPU deposit, the NEXT
@@ -399,15 +313,15 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         return bCellDeposit * subGridCells( n );
     }
 
-    // the start-up peak of psReserveGrids under --scratch-dir (finishReport): every
-    // scratch-backed full grid is zero-filled in anonymous memory before its file is mapped over it (ZeroFillScope),
-    // the largest one on top of the particles and the read blocks the allocator still keeps. 0 when no grid is
-    // scratch-backed, and on Linux, where the scope is a no-op (scratch_alloc.cc).
+    // the start-up peak of psReserveGrids under --scratch-dir (finishReport): every scratch-backed full grid is zero-filled in anonymous
+    // memory before its file is mapped over it (ZeroFillScope), the largest one on top of the particles and the full grids below the
+    // threshold, which stay on the heap (kPSScratchRamGrids). Fitted, with freed memory handed back, on a 256^3 Zel'dovich box and
+    // TNG100-3-Dark and TNG50-3-Dark planes. 0 when no grid is scratch-backed, and on Linux (scratch_alloc.cc).
     double reserveZeroFillPeak() const
     {
 #ifdef __APPLE__
         if ( not scratchOn or scratchMinBytes <= 0. or largestGridBytes < scratchMinBytes ) return 0.;
-        return particleBytes + readKeptAll + largestGridBytes;
+        return particleBytes + std::min( gridTotal*bCellDeposit, kPSScratchRamGrids*scratchMinBytes ) + largestGridBytes;
 #else
         return 0.;
 #endif
@@ -459,7 +373,9 @@ struct AutoTunePSPlanner : AutoTunePSInputs
                           "share %.3f, scratch grids %.3f GB, used for 2 to %d in flight (%d planned)\n",
                           partitionBytes( report.partition )/1.e9,
                           ( partitionBytes( report.partition ) - laneShareCut( report.partition ) )/1.e9,
-                          laneSpread( report.partition ), std::max( kPSLaneShare, laneSpread( report.partition ) ),
+                          laneSpread( report.partition ),
+                          ( earlyFace > 0. and not laneMixed( report.partition ) )
+                              ? kPSLaneShareFace : std::max( kPSLaneShare, laneSpread( report.partition ) ),
                           laneShareCover()/1.e9, laneShareCap( report.partition ), inFlight );
         // the TBB insert's copies, where the insert runs in parallel (parInsertBytes)
         report.perPartition += parInsertBytes( report.partition, inFlight );
@@ -491,13 +407,10 @@ struct AutoTunePSPlanner : AutoTunePSInputs
         double const base = fixed + report.gpuSnapshot + report.laneOnce + double(inFlight) * report.perPartition
                             + laneCover + lone;
         report.lookAhead = lookAheadBytes( report.partition, inFlight );
-        // the split above is chosen without the look-ahead; adding it here anyway would make a plan that fits
-        // report over_budget=1 (the launcher's memory check would halve a plane that fits) and run past a
-        // budget set on purpose. Every return passes here, so this is where the
-        // plan, its prediction and the run are made to agree: a look-ahead that does not fit beside one
-        // partition is switched off for this run (DTFE.cpp reads psLookAheadOffBudget), and the prediction
-        // is then the grids + particles + one partition. Over budget anyway, the look-ahead only adds to it.
-        // (readKeptLoop, below, is in the predictions only: a plan may keep its look-ahead and report over budget by it)
+        // the split above is chosen without the look-ahead; adding it here would make a plan that fits report over_budget=1 and run
+        // past a budget set on purpose. Every return passes here, so this is where the plan, its prediction and the run agree: a
+        // look-ahead that does not fit beside one partition is switched off for this run (DTFE.cpp reads psLookAheadOffBudget), and the
+        // prediction is then the grids + particles + one partition. Over budget anyway, the look-ahead only adds to it.
         if ( report.lookAhead > 0. and base + report.lookAhead > budget )
         {
             message << MESSAGE::cBold() << "AUTO-TUNE:" << MESSAGE::cReset() << " look-ahead off for this run: one "
@@ -508,9 +421,8 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             u.psLookAheadOffBudget = true;
             report.lookAhead = 0.;
         }
-        // the start-up peak of psReserveGrids under --scratch-dir (reserveZeroFillPeak): the loop term above still
-        // chooses the split; this lifts the prediction, and so the over-budget check, where that transient is the
-        // run's peak -- the 1024^3 class with few partitions in flight
+        // the start-up peak of psReserveGrids under --scratch-dir (reserveZeroFillPeak): the loop term above still chooses the
+        // split; this lifts the prediction, and so the over-budget check, where that transient is the run's peak
         report.reservePeak = reserveZeroFillPeak();
         // the normalization: the regular part's twins and a face pass's stream-average
         // divergence beside the deposit phase's full grids (normR), no partition in flight; the loop term still
@@ -522,27 +434,14 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             std::fprintf( stderr, "AUTO-TUNE-DEBUG PS normalization: the regular part's twins and the stream "
                           "average's divergence %.0f B/cell beside the deposit phase's %.0f (bCell %.0f), %.3f GB in "
                           "all\n", normR, bCellDeposit, bCell, normPeak/1.e9 );
-        // the input reader's freed buffers that macOS's allocator keeps (autoTuneReadKeptBytes: readKeptAll), beside a
-        // loop of one partition at a time (a split: one domain has no loop) on the GPU under --scratch-dir: the full
-        // grids the scratch files hold take
-        // none of those blocks, and no second lane's share covers them -- with two or more in flight the lane share's
-        // fitted booking of the other lanes does (it was fitted on runs that held them). Booked whole: a measured
-        // run held about as much in empty blocks near its peak. In the predictions only (with them the staged merge's
-        // park room, predictedWholeLanes), as the start-up and normalization peaks are: the split, the count and the
-        // look-ahead stay the loop's. (--grid-window books them in 'fixed': readKept)
-        report.readKeptLoop = ( inFlight == 1 and partsOf( report.partition ) > 1. and metalActive
-                                and not report.mixedLanes and scratchOn and not u.psWindowOn ) ? readKeptAll : 0.;
-        if ( report.readKeptLoop > 0. and Env::flag( "DTFE_AUTO_TUNE_DEBUG" ) )
-            std::fprintf( stderr, "AUTO-TUNE-DEBUG PS one partition in flight under --scratch-dir: the read buffers "
-                          "the allocator keeps beside the loop, %.3f GB\n", report.readKeptLoop/1.e9 );
-        double const loopPeak = base + report.lookAhead + report.readKeptLoop;
+        double const loopPeak = base + report.lookAhead;
         report.predicted = std::max( { loopPeak, report.reservePeak, normPeak } );
         // ... and with every lane whole (the staged merge's park room, DTFE.cpp): 'predicted' itself without the share
         report.predictedWholeLanes = std::max( { loopPeak - laneCover + double(inFlight - 1) * report.laneOnce,
                                                  report.reservePeak, normPeak } );
         if ( report.reservePeak > loopPeak )
             message << MESSAGE::cBold() << "AUTO-TUNE:" << MESSAGE::cReset() << " the predicted peak is the start-up "
-                    << "one: the particles, the read buffers kept and the zero fill of the largest scratch-backed grid "
+                    << "one: the particles, the grids on the heap and the zero fill of the largest scratch-backed grid "
                     << "(~" << report.reservePeak/1.e9 << " GB in all) exceed the partition loop's ~"
                     << loopPeak/1.e9 << " GB; the plan is the loop's"
                     << ( report.reservePeak > budget ? " -- and no split lowers it: it is over the budget whatever the"
@@ -619,8 +518,7 @@ struct AutoTunePSPlanner : AutoTunePSInputs
             return fixed + snapshotBytes( n ) + double(f)*( m + parInsertBytes( n, f ) ) <= budget; };
         while ( c > 1 and not fitsWithCopies( c ) )
             --c;
-        // one partition in flight (cMem's, or what the copies left) books finishReport's figure there (less the read
-        // buffers kept, readKeptLoop, which are in the predictions only): its insert's
+        // one partition in flight (cMem's, or what the copies left) books finishReport's figure there: its insert's
         // copies where the insert runs in parallel (a tessellation of parallelInsertMinPoints points or more with
         // 2 or more threads for it, or forced: parInsertBytes) and, on the GPU, its own sub-grids beside the hold. A
         // split whose one partition fits only without them is not taken -- the next finer split is tried -- unless the
@@ -722,8 +620,6 @@ inline std::optional<AutoTuneReport> AutoTunePSPlanner::irreducibleCase(int cons
         else
             warning << "With the grids on scratch disk, ";
         warning << (partBytes*N)/1.e9 << " GB of particles";
-        if ( readKept > 0. )
-            warning << ", " << readKept/1.e9 << " GB of read buffers the allocator keeps (--grid-window)";
         if ( nPts > 0 )
             warning << " and " << ptsBytes/1.e9 << " GB for the " << double(nPts) << " --sample-points ("
                     << ptsStreamsWhy << ")";
@@ -789,13 +685,11 @@ inline std::optional<AutoTuneReport> AutoTunePSPlanner::smallSetCase(int const u
             if ( autoConc ) u.maxConcurrent = cores;
             return finishReport( userN, autoConc ? cores : userC );
         }
-        // The one stage a split parallelises is the sequential triangulation (+ vertex densities):
-        // the deposit and the point evaluation already use every core inside one domain. A
-        // triangulation-bound run (a slice of a small box) therefore gains from
-        // 2^3 partitions, each triangulating a padded eighth on its own core; a deposit-bound one
-        // (a 256^3 grid at 0.26M particles) does not, and loses the padding.
-        // Predicted wall time per split, from per-unit costs measured on a 10-core Apple Silicon
-        // (single-thread seconds):
+        // The one stage a split parallelises is the sequential triangulation (+ vertex densities): the deposit and the point
+        // evaluation already use every core inside one domain. A triangulation-bound run (a slice of a small box) gains from 2^3
+        // partitions, each triangulating a padded eighth on its own core; a deposit-bound one (a 256^3 grid at 0.26M particles)
+        // does not, and loses the padding. Predicted wall time per split, from per-unit costs (single-thread seconds) fitted on a
+        // 10-core Apple Silicon:
         constexpr double tVertex = 3.6e-6, tSample = 3.5e-7, tPoint = 7.5e-7;
         double fCopy = 1.;                              // the single domain's periodic copies (none without --periodic)
         if ( u.periodic )
@@ -899,15 +793,11 @@ inline std::optional<AutoTuneReport> AutoTunePSPlanner::overBudgetCase(int const
 inline AutoTuneReport AutoTunePSPlanner::memorySplit(int const userC, int const nGpuMin) const
 {
     char buf[1024];
-    // Concurrency target = the core count, GPU or not. The GPU deposits do serialize on one
-    // queue (ps_metal_host.cc ctxMutex), but the dominant per-partition cost is the CPU work
-    // AROUND them -- Lagrangian triangulation + vertex densities, most of a partition's time --
-    // which runs fully in parallel: a cap of 3 would run 8 partitions in three waves, slower than
-    // the CPU deposit alone. Memory still bounds it:
-    // partitionBytes() counts the GPU buffers a waiting partition holds, and cMem caps c, with the TBB insert's copies
-    // where c leaves 2 threads a partition (parInsertBytes; at one in flight too, where a split that fits only without
-    // them gives way to a finer one). Where only the first lane is booked whole (laneShareCut), the concurrency rises
-    // past cMem up to laneShareCap.
+    // Concurrency target = the core count, GPU or not: the GPU deposits serialize on one queue (ps_metal_host.cc ctxMutex), but the
+    // dominant per-partition cost is the CPU work AROUND them, which runs in parallel. Memory still bounds it: partitionBytes() counts
+    // the GPU buffers a waiting partition holds, and cMem caps c, with the TBB insert's copies where c leaves 2 threads a partition
+    // (parInsertBytes; at one in flight too, where a split that fits only without them gives way to a finer one). Where only the first
+    // lane is booked whole (laneShareCut), the concurrency rises past cMem up to laneShareCap.
     int const targetC = cores;
 
     int bestN = -1, bestC = 0;

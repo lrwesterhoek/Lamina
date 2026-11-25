@@ -1,28 +1,5 @@
 #!/usr/bin/env python3
-"""Lamina, the launcher of the DTFE and PS-DTFE programs (PySide6).
-
-Six tabs; the first five are jobs (runspec.py):
-  Data       scripts/download_snapshots.sh and python/tools/merge_HDF5.py: snapshots, group
-             catalogues, merger trees and initial conditions onto disk, as h-free combined files
-  Grids      scripts/run_ps_dtfe.sh or run_dtfe.sh for the chosen snapshots
-  Custom snapshot  the binary itself on any snapshot file (not IllustrisTNG): units, box, periodicity
-             and initial positions spelled out
-  Pipeline   scripts/run_ps_pipeline.sh (grids + a full-box image plane for every stale
-             snapshot), then the point-evaluated figures
-  Plots      the figure scripts of python/plot and analyze.py
-  Explore    any run's grids as maps, and a click-to-query server on its snapshot (explore.py)
-Each job shows the exact terminal commands it stands for (and exports them as a script or a
-SLURM job), checks the combinations the scripts reject, and runs the commands one after another
-with live progress -- now, or as a job in the queue, which runs its jobs in sequence (and waits
-for other DTFE runs on the machine). The figures a run writes appear in the Figures browser, and
-every run on disk in the Runs browser (runs_view.py), which also flags outputs to look at before
-use (an older version of the programs made them, a later attempt rewrote them, ...). A GUI run
-is always one you could have typed. First launch: setup_wizard.py.
-View > Advanced Settings (off by default) adds an Advanced group to the run tabs: settings the code
-otherwise chooses, each on Automatic until changed (app_advanced.py).
-
-    scripts/gui.sh
-"""
+"""Lamina, the launcher of the DTFE and PS-DTFE programs (PySide6)."""
 
 from __future__ import annotations
 
@@ -191,10 +168,7 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, Advanc
         self.opt_widgets: dict[tuple[str, str], tuple[rs.Opt, QWidget]] = {}
 
     def _build_left_pane(self) -> QWidget:
-        """The tab bar on top, the data panel every tab shares under it, then the active tab's form. The tab bar
-        sits above the panel, whose height changes with the tab (the Grids and Plots tabs show the simulation and
-        its snapshots), so it never moves: it is the tab widget's own bar's stand-in (self.tabs keeps every page,
-        its texts and its current index; tab_bar follows it both ways)."""
+        """The tab bar on top, the data panel every tab shares under it, then the active tab's form."""
         left = QWidget()
         lv = QVBoxLayout(left)
         lv.setContentsMargins(0, 0, 0, 0)
@@ -761,10 +735,8 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, Advanc
 
     def _register_custom_output(self, spec: rs.CustomSpec, final: bool = False):
         """A custom-snapshot job is starting (or, 'final', has finished): remember its folder, and keep
-        its settings beside the outputs ('<name>.gui.json') -- the Explore tab's query server reads the
-        snapshot from them, the figure grid's Type column its estimator. At the start the file is written
-        only when there is none yet: a re-run under the same name that is stopped or fails leaves the
-        grids of the old run on disk, and its sidecar must keep describing THOSE."""
+        its settings beside the outputs ('<name>.gui.json') -- the Explore tab's query server reads
+        the snapshot from them, the figure grid's Type column its estimator."""
         root = spec.output_root()
         d = str(root.parent)
         if d not in self.custom_dirs:
@@ -784,10 +756,8 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, Advanc
 
     def _load_run_settings(self, rec: R.RunRecord):
         """The Runs browser's 'Load settings': a TNG run's options into the Grids tab; a custom-snapshot run's
-        (its settings sidecar, with the Advanced settings it ran with: they turn the switch on) into the Custom
-        tab. Either way a sampled PS-DTFE run's count where Fast takes another is the job's Advanced Samples
-        (rs.keep_run_count). Nothing for a log without any command, nor for an older version's (RunRecord.older:
-        its settings are not read); the browser does not offer it for either, the status line says why."""
+        (its settings sidecar, with the Advanced settings it ran with: they turn the switch on) into the
+        Custom tab."""
         if not rec.command:
             self.status_message(f"{rec.prefix}: its log holds no command, so there are no settings to load")
             return
@@ -940,12 +910,9 @@ def smoke_report(w: MainWindow) -> str:
 
 
 def _macos_app_name(name: str) -> bool:
-    """Make the macOS menu bar (and its Hide / Quit items) say `name` instead of "Python".
-
-    macOS takes that name from the main bundle's CFBundleName, and this process's main bundle is
-    Python.app; overwriting the entry in the bundle's (mutable) info dictionary before the
-    application object exists is enough. Plain ctypes on the Objective-C runtime, so no PyObjC.
-    Returns whether the name is now set."""
+    """Make the macOS menu bar (and its Hide / Quit items) say `name` instead of "Python". macOS
+    takes that name from the main bundle's CFBundleName, and this process's main bundle is
+    Python.app."""
     if sys.platform != "darwin":
         return False
     try:

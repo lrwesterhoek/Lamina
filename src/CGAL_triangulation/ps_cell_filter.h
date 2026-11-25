@@ -1,14 +1,6 @@
-/* Shared PS-DTFE per-cell filter chain: dummy-vertex skip, Lagrangian-centroid partition
-   ownership, bad-density hull handling, minimum-image wrap of the Eulerian vertices, the
-   Eulerian edge matrix with its relative-determinant degeneracy test, and (optionally) the
-   matrixInverse() zero-inverse check.
-
-   Used by the CPU grid deposit, the GPU tet extraction and the sub-grid pass in
-   ps_interpolation.cc, and by the point evaluation in ps_point_eval.cc. The partition
-   protocol requires every consumer to classify borderline cells IDENTICALLY (a stream must
-   be contributed by exactly one Lagrangian partition, and the point-eval stream set must
-   equal the grid deposit's), so the chain lives here once and every consumer runs the same
-   arithmetic in the same precision. */
+/* Shared PS-DTFE per-cell filter chain (dummy skip, partition ownership, hull handling, wrap, degeneracy test). Every
+   consumer (grid deposit, GPU extraction, point evaluation) must classify borderline cells IDENTICALLY, so the chain
+   lives here once and runs the same arithmetic in the same precision. */
 
 #ifndef PS_CELL_FILTER_HEADER
 #define PS_CELL_FILTER_HEADER
@@ -28,30 +20,13 @@ struct PSCellGeometry
     bool   useVolumeRatioDensity;      // zero/negative-density hull vertex found (kept: non-periodic cloud surface)
 };
 
-// Runs the filter chain on one Delaunay cell. Returns false when the cell must be skipped;
-// on success 'g' holds the wrapped positions and edge-matrix geometry every consumer needs.
-//
-// checkSingularInverse: additionally drop cells whose matrixInverse() is the ALL-ZERO matrix
-// (|det| below REAL_PRECISSION x the product of the edge lengths: a RELATIVE test, as an absolute one would
-// drop small well-shaped tetrahedra; counted in *nDegenerateInverse when given). A zero inverse makes every
-// barycentric coordinate exactly 0, which the point-in-simplex test reads as "inside" for every grid point of the
-// cell's bounding box: the cell floods its bbox, the grid-aligned "square" artefacts at caustics. The
-// degeneracy pre-filter below already implies this test (see there), so it is a safety net, kept because the
-// zero sentinel is what the artefact comes from and the Metal kernel mirrors it. It must stay consistent
-// with matrixInverse()'s degeneracy criterion.
-// 'skipOwnership': apply every CHART-INDEPENDENT filter (dummy, hull artefact, degeneracy)
-// but NOT the Lagrangian-partition ownership tiling. Used by the --ps-vertex-mass degree
-// pass, which must count a vertex's GLOBALLY-depositing incident tets: ownership only decides
-// WHICH partition deposits a tet, not WHETHER it deposits, so degrees must ignore it -- while
-// the drop filters decide 'whether' and are computed identically in every partition that sees
-// the cell (padded vertices carry their full neighborhood).
+// Runs the filter chain on one cell; false = skip it, else 'g' holds the wrapped geometry. checkSingularInverse also
+// drops a zero matrixInverse() (it reads as "inside" for the whole bbox; the Metal kernel mirrors it, keep the two in step).
+// skipOwnership keeps every chart-independent filter but not the ownership tiling (vertex degrees count globally).
 // No early rejection (the default of psFilterCell's last argument).
 struct PSNoEarlyReject { bool operator()(Real const (&)[NO_DIM+1][NO_DIM]) const { return false; } };
 
-// 'earlyReject(eulerPos)' -- given the wrapped Eulerian positions, before the edge matrix,
-// determinant and inverse -- lets a caller drop a cell it will discard anyway on its positions
-// alone (--grid-window's GPU extraction: a tetrahedron that misses the window), at a fraction of the
-// filter's cost. The default rejects nothing.
+// earlyReject(eulerPos) drops a cell on its wrapped positions alone, before the edge matrix (default: none).
 template <class EarlyReject = PSNoEarlyReject>
 inline bool psFilterCell(Cell_handle &cell,
                          User_options &userOptions,
@@ -72,12 +47,10 @@ inline bool psFilterCell(Cell_handle &cell,
     }
 #endif
 
-    // Lagrangian-partition ownership: padding zones overlap, so a cell is kept only if its Lagrangian centroid (not
-    // an arbitrary vertex) lies in the primary box, and the partitions tile without double counting. Decided per edge
-    // as sum_v (x_v - lo) >= 0 and sum_v (x_v - hi) < 0: each x_v - edge is exact in double, and so is their sum where
-    // the answer is close, in any vertex order. A tetrahedron and its periodic copy (an exact shift by L,
-    // subpartition.h psPeriodicSeam) thus get complementary answers bit for bit: exactly one is owned. (Summing the
-    // raw coordinates first can round, and then both or neither may be owned.)
+    // Partition ownership: a cell is kept only if its Lagrangian centroid lies in the primary box, decided per edge as
+    // sum_v (x_v - lo) >= 0 and sum_v (x_v - hi) < 0. Each x_v - edge is exact in double, and so is the sum where the
+    // answer is close, in any vertex order: a tetrahedron and its periodic copy (exact shift by L) get complementary
+    // answers bit for bit. (Summing the raw coordinates first can round: both or neither owned.)
     if ( !skipOwnership && !userOptions.lagrangianRegion.isNullBox() )
     {
         bool owned = true;
@@ -97,13 +70,10 @@ inline bool psFilterCell(Cell_handle &cell,
         if (!owned) { return false; }
     }
 
-    // Non-periodic clouds (--ps-alpha-shape): keep only the cloud's ALPHA SHAPE, the tetrahedra whose Lagrangian
-    // circumradius is at most psLagAlphaRadius (default 3 mean spacings; interior tetrahedra of lattice-like ICs stay
-    // below ~0.9). This drops the hull slivers and the tetrahedra bridging concavities, which are no flow elements
-    // and smear spurious mass and streams across the region. They are also GLOBAL objects that each partition builds
-    // differently, whereas a tetrahedron within the cut is in a partition's triangulation exactly when it is in the
-    // global one (its empty circumsphere lies inside the padded box: the plan pads by >= 4 cuts).
-    // A drop filter, so it applies with skipOwnership too; a function of the four vertices only.
+    // Non-periodic clouds (--ps-alpha-shape): keep only tetrahedra whose Lagrangian circumradius is at most
+    // psLagAlphaRadius, dropping hull slivers. A function of the four vertices only, and a tetrahedron within the cut
+    // is in a partition's triangulation exactly when in the global one (the plan pads by >= 4 cuts). Applies with
+    // skipOwnership too.
     if ( userOptions.psLagAlphaRadius > 0. )
     {
 #if NO_DIM==3
@@ -152,8 +122,7 @@ inline bool psFilterCell(Cell_handle &cell,
         }
     }
 
-    // Gather the Eulerian vertex positions; the minimum-image convention (below) keeps boundary
-    // cells from spuriously spanning the whole periodic box.
+    // Gather the Eulerian positions; the minimum-image wrap below keeps boundary cells from spanning the periodic box.
     for (int v = 0; v <= NO_DIM; ++v)
         for (int d = 0; d < NO_DIM; ++d)
             g.eulerPos[v][d] = cell->vertex(v)->info().eulerianPosition(d);
@@ -184,13 +153,10 @@ inline bool psFilterCell(Cell_handle &cell,
     g.cellDet = determinant(g.Ax);
     g.cellAbsDet = std::fabs(g.cellDet);
 
-    // Drop only degenerate cells (near-zero Eulerian volume -> divergent 1/volume density): |det| < tol * edge^3,
-    // resolution-independent. The edge scale is the LARGEST over the vertices of the mean squared length of the edges
-    // meeting there: a function of the tetrahedron, not of CGAL's labelling. (Vertex 0 follows the insertion history,
-    // which differs with --partition / --padding / --ps-lagrangian-padding / parallel insert, and folded caustic tets sit
-    // right at the cut, so a vertex-0 scale would keep a tet's mass in one run and drop it in another.) The maximum
-    // bounds the vertex-0 scale of EVERY labelling, so a kept tet also passes matrixInverse()'s relative test (product
-    // of the vertex-0 rows <= their mean^3, AM-GM) and the GPU kernels' float re-check (vertex-0 mean) in any order.
+    // Drop degenerate cells: |det| < tol * edge^3. The edge scale is the LARGEST over the vertices of the mean squared
+    // edge length there, a function of the tetrahedron and not of CGAL's labelling (vertex 0 follows the insertion
+    // history), so a tet is kept or dropped identically in every run. It bounds every labelling's vertex-0 scale, so a
+    // kept tet also passes matrixInverse()'s relative test (AM-GM) and the GPU kernels' float re-check.
     double const DEGENERATE_DET_TOL = 1.e-6;
     {
         // squared edge lengths, each unordered pair once (wrapped positions, the frame of Ax)
@@ -245,16 +211,10 @@ inline bool psFilterCell(Cell_handle &cell,
 }
 
 
-/* --ps-vertex-mass, shared by the grid deposit (ps_interpolation.cc) and the point evaluation (ps_point_eval.cc),
-   so that both read one definition.
-
-   psForEachDepositingCell(dt, ..., f) calls f(cell, geometry) for every finite cell that DEPOSITS -- every
-   chart-independent drop filter of psFilterCell, the Lagrangian ownership skipped (it decides WHICH partition
-   deposits a cell, not WHETHER; see the 'skipOwnership' note above) -- in the tessellation's cell order.
-   psVertexDegreePass counts those cells per vertex after a reset, so a second pass over the same tessellation
-   (the unaveraged and averaged grid passes share one) gives the same counts. A tetrahedron's mass is then the sum
-   of its vertices' weight/degree shares (psVertexShareMass), so the masses of the deposited tetrahedra add up to
-   the particles' masses exactly. */
+/* --ps-vertex-mass, shared by the grid deposit and the point evaluation so both read one definition.
+   psForEachDepositingCell calls f(cell, geometry) for every cell that deposits (all drop filters, ownership skipped).
+   psVertexDegreePass counts those cells per vertex after a reset, so repeated passes give the same counts; a
+   tetrahedron's mass is the sum of its vertices' weight/degree shares, so the masses add up to the particles' exactly. */
 template <class F>
 inline void psForEachDepositingCell(DT &dt, User_options &userOptions, Box &boxCoordinates, F &&f)
 {
@@ -285,8 +245,7 @@ inline void psVertexDegreePass(DT &dt, User_options &userOptions, Box &boxCoordi
     } );
 }
 
-// per-tet vertex-share mass: sum over the cell's vertices of weight/degree (a degree that is not positive -- not
-// computed, or every incident cell dropped -- contributes nothing)
+// per-tet vertex-share mass: sum over the cell's vertices of weight/degree (a non-positive degree contributes nothing)
 inline double psVertexShareMass(Cell_handle const &cell)
 {
     double m = 0.;

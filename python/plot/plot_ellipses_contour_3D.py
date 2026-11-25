@@ -1,11 +1,4 @@
-"""3D void-shape maps: deep-void minima and Hessian ellipses on delta contour slices.
-
-Method-, snapshot- and simulation-agnostic via dtfelib/pipeline:
-
-    python3 plot/plot_ellipses_contour_3D.py                  # whole series, auto method
-    python3 plot/plot_ellipses_contour_3D.py --snap 99 --estimator dtfe
-    python3 plot/plot_ellipses_contour_3D.py --sim TNG50-3-Dark
-"""
+"""3D void-shape maps: deep-void minima and Hessian ellipses on delta contour slices."""
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
 from pathlib import Path

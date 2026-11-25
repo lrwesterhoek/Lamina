@@ -1,20 +1,4 @@
-"""The data side of the GUI's Explore tab. Pure numpy (no Qt): tests/py_gui_runspec_test.py.
-
-  OutputSet(root)          one run's grid files '<dir>/<prefix>.[a_]<suffix>': which fields exist,
-                           the grid size, one slice of any field (read through a memmap, so a
-                           1024^3 cube costs one plane of memory), a value at a cell. A 2D run's
-                           grids (n^2 cells) are one plane: its slice is the whole grid
-  find_outputs(...)        every output set under the data root and the custom-snapshot output directories
-  colorize(plane, ...)     a 2D array -> RGB bytes with a matplotlib colormap (percentile range,
-                           optional log10), plus the value range used
-  server_settings(out)     how to start a dtfelib.Estimator on the snapshot behind an output (the
-                           Explore tab's click-to-query), from the TNG layout or the custom-snapshot
-                           job's settings sidecar ('<prefix>.gui.json')
-  field_label(o, name, ..) a map's name for a field, the velocity derivatives' family said (a phase-space
-                           output's divergence, shear, vorticity, gradient and V-web as the mean field grad<v> --
-                           a face-gradient output's stored grids, else computed slice by slice from its velocity
-                           grid -- or as its stored stream average <grad v>)
-"""
+"""The data side of the GUI's Explore tab. Pure numpy (no Qt): tests/py_gui_runspec_test.py."""
 
 from __future__ import annotations
 
@@ -92,16 +76,11 @@ FIELD_HELP = {
     "velocity_std": "Standard DTFE: the standard deviation of the velocities sampled in the cell (the spread its "
                     "cell average is taken over), in km/s.",
 }
-# The velocity derivatives (dtfelib.io.MEAN_FIELD_NAMES). Standard DTFE stores them as the derivatives of
-# its one velocity field, the mean field grad<v>; so does a PS-DTFE run with the face gradient (its default with the
-# exact deposit; OutputSet.face_gradient). A PS-DTFE run without it
-# stores, in a multi-stream cell, the stream average of each stream's own gradient <grad v> (dtfelib/io.py, the note
-# above FIELDS: a divergence whose box mean is not 0, a V-web with almost no filaments) -- so a map of such a PS
-# divergence beside a standard one compares two quantities. Explore shows that phase-space output's as either
-# ('PS velocity derivatives'): 'mean-field', computed from its velocity grid
-# one slice at a time (dtfelib.fields.mean_field_gradient_plane, the figure scripts' spectral derivative and their
-# default, '--ps-gradient' of dtfelib.cli), or 'stored'. Every map, title, colour bar and figure-grid panel says
-# which (field_label).
+# The velocity derivatives (dtfelib.io.MEAN_FIELD_NAMES). Standard DTFE stores them as the derivatives of its one
+# velocity field, the mean field grad<v>; so does a PS-DTFE run with the face gradient (its default with the exact
+# deposit; OutputSet.face_gradient). A PS-DTFE run without it stores, in a multi-stream cell, the stream average of
+# each stream's own gradient <grad v> (dtfelib/io.py, the note above FIELDS: a divergence whose box mean is not 0, a
+# V-web with almost no filaments) -- so a map of such a PS divergence beside a standard one compares two quantities.
 GRADIENT_FIELDS = frozenset(MEAN_FIELD_NAMES)
 PS_GRADIENT_DEFAULT = "mean-field"
 # the velocity derivatives a phase-space output lists without a stored grid (OutputSet.derived_fields): its run kept
@@ -235,9 +214,7 @@ def _look_like_stream_counts(path: Path, dtype) -> bool:
 def _ambiguous_dim(root: Path, plane: tuple[int, np.dtype], cube: tuple[int, np.dtype]) -> int:
     """The dimension of an output whose files read equally well as an n x n plane and an m^3 cube,
     plane = (n, dtype), cube = (m, dtype): only scalar grids (density, stream counts) and no
-    settings sidecar saying which. Same bytes, two readings: n^2 = m^3 in one precision (512^2 =
-    64^3, 4096^2 = 256^3), or a float32 plane against a float64 cube, n^2 = 2 m^3 (256^2 = 32^3 in
-    double), and the reverse (128^2 in double = 32^3 in float)."""
+    settings sidecar saying which."""
     if plane[1] != cube[1]:             # the readings differ in precision: a phase-space run's stream
         for sfx in ("a_streams", "streams"):            # counts are whole numbers in the right one only
             p = root.parent / f"{root.name}.{sfx}"
@@ -249,10 +226,9 @@ def _ambiguous_dim(root: Path, plane: tuple[int, np.dtype], cube: tuple[int, np.
         return 3                        # no evidence: the 3D reading
     # One precision (a 512^2 plane or a 64^3 cube): neighbouring cells of a real grid are alike. Read flat,
     # the cube's second axis steps m values and the plane's rows step n; in the wrong reading that stride
-    # lands far away (m cells along a row of the plane, or sqrt(m) cells along the cube's second axis),
-    # so the true neighbour stride shows clearly the smaller differences. A field without structure
-    # across them (constant, noise, one varying along the slowest axis only) cannot tell: 3D.
-    # Reads the first 64 rows of the plane at most (1 MB for 4096^2 in float32).
+    # lands far away (m cells along a row of the plane, or sqrt(m) cells along the cube's second axis), so
+    # the true neighbour stride shows clearly the smaller differences. A field without structure across
+    # them (constant, noise, one varying along the slowest axis only) cannot tell: 3D.
     path = next((p for p in (root.parent / f"{root.name}.{sfx}" for sfx in ("a_den", "den")) if p.is_file()), None)
     n, m = int(plane[0]), int(cube[0])
     if path is None or n <= m:
@@ -311,10 +287,7 @@ class FieldFile:
 
 # whole fields up to this size are read into memory once (a strided z-plane read touches every
 # page of the file: 1.9 s for a 512^3 grid on an external disk, every time); bigger ones go
-# through a memmap per slice. The cache holds a quarter of the machine's memory, at most 16 GB
-# (DTFE_GUI_CUBE_GB overrides): the figure grid shows four or nine outputs at once, and at
-# 1.5 GB four 512^3 cubes evict each other, so every slice step re-reads them all (75 ms each
-# instead of 1 ms).
+# through a memmap per slice.
 
 
 def _cube_cache_bytes() -> int:
@@ -332,9 +305,6 @@ def _cube_cache_bytes() -> int:
 
 
 CUBE_CACHE_BYTES = _cube_cache_bytes()
-# A cube above this is read whole only when a slice runs along its last axis (a memmap touches every page
-# of the file for that one anyway) or once it is cached already: a single x or y plane of a 1024^3 field
-# must not cost the whole 4 GB read (the 16 GB cap alone would make it so).
 CUBE_EAGER_BYTES = min(int(2e9), CUBE_CACHE_BYTES)
 # module-wide, least recently used first; the key carries the file's mtime and size, so a grid written
 # again by a re-run is read again (keyed on the path alone, Explore would keep showing the old run's values
@@ -343,9 +313,6 @@ CUBE_EAGER_BYTES = min(int(2e9), CUBE_CACHE_BYTES)
 # Run button must never wait on a slow external disk).
 _CUBES: dict[tuple, np.ndarray] = {}
 _CUBES_LOCK = threading.Lock()
-# While the launcher runs a job the cache keeps at most RUN_CUBE_BYTES: the binary's auto-tuner budgets from the
-# memory free at ITS start, and Explore stepping through slices meanwhile must not refill 16 GB under it (a
-# 512^3 float32 cube, 0.5 GB, still fits: stepping stays smooth). cap_cubes() is the launcher's switch.
 RUN_CUBE_BYTES = int(1e9)
 _CAPPED = False
 
@@ -391,10 +358,7 @@ def cube_key(path: Path, dtype, shape) -> tuple | None:
 
 def cached_cube(path: Path, dtype, shape, axis: int | None = None, read: bool = True) -> np.ndarray | None:
     """The whole array of a grid file, cached, or None when the caller should memmap it instead: it is
-    larger than the cache, or larger than CUBE_EAGER_BYTES and not cached yet while 'axis' (the plane
-    axis the caller slices next, 0 or 1 of a 3D grid) is one a memmap reads cheaply. axis None = the
-    caller reads the whole array (a 2D grid) or slices along the last axis. read False = only a cube cached
-    already, never a new read (the fold map's planes)."""
+    larger than the cache, or larger than CUBE_EAGER_BYTES and not cached yet while 'axis'."""
     nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize
     budget = _cube_budget()
     if nbytes > budget:
@@ -430,11 +394,8 @@ _cached_cube = cached_cube              # the name the tests reach
 
 
 # The axis-2 planes cut from one pass over a grid file: a window of up to 16 neighbouring planes (at most
-# PLANE_WIN_BYTES), the last two windows kept, least recently used first, under _CUBES_LOCK. A plane across the last
-# axis costs a pass over the whole file (4.3 GB for a 1024^3 float grid: 0.6 s from the page cache, 4.4 s from the
-# external disk), and it is read so only when the cube is not cached (while a job runs the cube cache keeps 1 GB): a
-# slice stepped along z then reads the file once per window, not once per step. Keyed by cube_key, so a grid written
-# again is read again; drop_cubes() empties it.
+# PLANE_WIN_BYTES), the last two windows kept, least recently used first, under _CUBES_LOCK. Keyed by cube_key, so a
+# grid written again is read again; drop_cubes() empties it.
 _PLANE_WIN: dict[tuple, np.ndarray] = {}
 PLANE_WIN_BYTES = int(64e6)
 
@@ -442,8 +403,7 @@ PLANE_WIN_BYTES = int(64e6)
 def _read_plane(path: Path, dtype, n: int, ncomp: int, axis: int, index: int) -> np.ndarray:
     """One plane of an (n, n, n[, ncomp]) C-order grid file by plain reads (no memmap: see OutputSet._memmap):
     axis 0 is one contiguous block, axis 1 one block per row, axis 2 the file in slabs of whole x-layers (the
-    same bytes a memmap would touch), keeping a window of planes around it (_PLANE_WIN). Raises ValueError for a
-    short file, OSError when the file cannot be read (a drive gone)."""
+    same bytes a memmap would touch), keeping a window of planes around it (_PLANE_WIN)."""
     dt = np.dtype(dtype)
     if not 0 <= index < n:
         raise ValueError(f"plane {index} outside 0..{n - 1}")
@@ -474,7 +434,7 @@ def _read_plane(path: Path, dtype, n: int, ncomp: int, axis: int, index: int) ->
                     _PLANE_WIN[(key, w0)] = _PLANE_WIN.pop((key, w0))    # most recently used last
                     return win[:, :, index - w0].copy()
         win = np.empty((n, n, w1 - w0, ncomp) if ncomp > 1 else (n, n, w1 - w0), dtype=dt)
-        step = max(1, int(64e6 // (layer * dt.itemsize)))      # ~64 MB of x-layers per read
+        step = max(1, int(64e6 // (layer * dt.itemsize)))
         for i0 in range(0, n, step):
             k = min(step, n - i0)
             slab = block(i0 * layer, k * layer).reshape((k, n, n, ncomp) if ncomp > 1 else (k, n, n))
@@ -505,10 +465,8 @@ _DROP_GEN = 0                           # drop_cubes()' count: a source plane ke
 
 def drop_cubes() -> int:
     """Forget every cached cube, mean-field plane and plane window, and every cache registered with on_drop_cubes
-    (the bytes they held). The launcher calls it when a job or a memory check starts: the caches are anonymous memory
-    of the GUI process, and the binary's auto-tuner budgets from the memory that is free at that moment. What is on
-    screen stays: the map's plane, and the 3D view's volume and its GPU copy (View3D holds them, not the caches:
-    volume3d's drop_volumes says why; the 3D view's own memory check, its detail choice, counts them)."""
+    (the bytes they held). The launcher calls it when a job or a memory check starts: the caches are anonymous
+    memory of the GUI process, and the binary's auto-tuner budgets from the memory that is free at that moment."""
     global _DROP_GEN
     with _CUBES_LOCK:
         n = sum(a.nbytes for a in _CUBES.values()) + sum(a.nbytes for a in _MF_PLANES.values()) \
@@ -522,11 +480,8 @@ def drop_cubes() -> int:
     return n
 
 
-# The mean-field velocity gradient of the planes shown lately: (velocity file's cube_key, axis, index,
-# box) -> float64 (N, N, 3, 3), least recently used first, under _CUBES_LOCK. A plane costs one pass over the velocity
-# grid (0.3-0.6 s at 512^3 from the cube cache, a read of its 1.6 GB file otherwise); every derivative of it (the
-# divergence, shear, vorticity, gradient, V-web) and every colour or range change then comes from here. At most a
-# quarter of the cube cache's budget, 256 MB (13 planes of 512^2, 3 of 1024^2): the grid's panels fit.
+# The mean-field velocity gradient of the planes shown lately: (velocity file's cube_key, axis, index, box) -> float64
+# (N, N, 3, 3), least recently used first, under _CUBES_LOCK.
 _MF_PLANES: dict[tuple, np.ndarray] = {}
 MF_PLANE_BYTES = int(256e6)
 
@@ -607,9 +562,7 @@ class OutputSet:
     def derived_fields(self) -> dict[str, int]:
         """The velocity derivatives this output lists without a grid file, name -> the components a stored grid of it
         would hold: a phase-space output's DERIVED_FIELDS it did not store, where mean_field_reason allows the mean
-        field (its velocity grid, a periodic cube of a known box) -- shown as the mean field grad<v> computed from the
-        velocity one plane at a time (slice(), _mean_field_plane), as the 'mean-field' choice for a stored stream
-        average. Empty for standard DTFE (it stores the mean field) and for every other output. Cached on the object."""
+        field (its velocity grid, a periodic cube of a known box)."""
         d = getattr(self, "_derived", None)
         if d is None:
             d = {} if not self.files or not self.n or estimator_label(self) != "PS-DTFE" or self.mean_field_reason() \
@@ -644,11 +597,8 @@ class OutputSet:
         return out
 
     def _memmap(self, name: str, axis: int | None = None, index: int = 0, cache: bool = True) -> np.ndarray:
-        """The field's array -- the cached cube when cached_cube() keeps one -- or, for a 3D grid, just the
-        plane 'index' along 'axis', read from the file. NEVER a memmap: a mapped page of a drive unplugged
-        meanwhile (an external disk) kills the whole launcher with SIGBUS, which Python cannot catch; a read fails with
-        an OSError the slice worker reports. A 2D grid is read whole. cache False: a cube cached
-        already, else the plane; no new cube read."""
+        """The field's array -- the cached cube when cached_cube() keeps one -- or, for a 3D grid, just the plane
+        'index' along 'axis', read from the file."""
         ff = self.files[name]
         shape = (self.n,) * self.dim + ((ff.ncomp,) if ff.ncomp > 1 else ())
         cube = cached_cube(ff.path, self.dtype, shape, axis if self.dim == 3 else None, read=cache)
@@ -688,22 +638,15 @@ class OutputSet:
         return mm                           # already the plane (read from the file)
 
     def fold_exact(self) -> bool:
-        """The 'caustic' map is the exact fold flag: a phase-space output with a streams grid, in a
-        periodic box (every TNG run; a custom run's settings sidecar says). dtfelib.io.caustic_is_fold: streams > 1
-        or '.hidden_streams' bit 1 (OR the class mask's fold bits) -- what '.caustic' stores; computing it here also
-        covers the grids of older binaries, whose '.caustic' is set only where a folded tetrahedron deposited a
-        SAMPLE (21.0% of the cells of TNG100-3-Dark z=1 against 33.6%). In a
-        non-periodic run the union over-flags (a sheet's edge overlaps without folding): the stored grid is shown."""
+        """In a non-periodic run the union over-flags (a sheet's edge overlaps without folding): the stored grid is
+        shown."""
         if self._fold_exact is None:
             self._fold_exact = "streams" in self.files and bool((sidecar(self.root) or {}).get("periodic", True))
         return self._fold_exact
 
     def _fold_plane(self, axis: int, index: int) -> np.ndarray:
         """The exact fold flag on one plane, 0/1 float64 (fold_exact), from up to three fields (the class mask, the
-        streams, the hidden streams). When the three cubes together do not fit in the cube cache -- while a job runs
-        it keeps 1 GB, and three 512³ cubes are 1.5 GB -- only their planes are read (a cube cached already is still
-        used): read whole, 0.5 GB each, they would evict each other, so every step of the slice would read 1.5 GB
-        into memory beside the run the cap is there for."""
+        streams, the hidden streams)."""
         names = [n for n in ("caustic_class", "streams", "hidden_streams") if n in self.files]
         cache = sum(self._nbytes(n) for n in names) <= _cube_budget()
 
@@ -713,11 +656,8 @@ class OutputSet:
         return np.asarray(fold, dtype=np.float64)
 
     def mean_field_reason(self) -> str:
-        """'' when this output's velocity derivatives can be shown as the mean field grad<v>, else why
-        not, in plain words: a standard-DTFE output stores the mean field itself; a phase-space one needs its velocity
-        grid, a 3D grid of a known cubic box, and a periodic one -- the spectral derivative wraps around the box, so
-        not a non-periodic run nor a window of the grid (a custom run's settings sidecar says). Cached on the object
-        (a refresh of the outputs makes new ones)."""
+        """'' when this output's velocity derivatives can be shown as the mean field grad<v>, else why not, in plain
+        words: a standard-DTFE output stores the mean field itself."""
         if self._mf_reason is None:
             side = sidecar(self.root) or {}
             self._mf_reason = (
@@ -732,17 +672,14 @@ class OutputSet:
 
     @property
     def face_gradient(self) -> bool:
-        """A phase-space output whose run took the face gradient (PS-DTFE's default with the exact deposit,
-        or '--face-gradient'): its stored velocity derivatives ARE the
-        mean field grad<v>, from exact face sums. The marker is the stream average's divergence the run writes beside
-        them ('.a_velDivStreams'), as dtfelib's FieldSet.face_gradient reads it."""
+        """A phase-space output whose run took the face gradient (PS-DTFE's default with the exact deposit, or
+        '--face-gradient'): its stored velocity derivatives ARE the mean field grad<v>, from exact face sums."""
         return estimator_label(self) == "PS-DTFE" and "divergence_streams" in self.files
 
     def gradient_family(self, name: str, gradient: str = "stored") -> str:
-        """Which velocity derivative a map of 'name' shows: '' none (another field); 'mean' the mean field
-        grad<v> (a standard-DTFE output's or a face-gradient output's stored grid, or with gradient 'mean-field' a
-        phase-space output's computed from its velocity where mean_field_reason allows); 'stream' a phase-space
-        output's stored stream average."""
+        """Which velocity derivative a map of 'name' shows: '' none (another field); 'mean' the mean field grad<v>
+        (a standard-DTFE output's or a face-gradient output's stored grid, or with gradient 'mean-field' a
+        phase-space output's computed from its velocity where mean_field_reason allows)."""
         if name not in GRADIENT_FIELDS:
             return ""
         if name in self.derived_fields():                                   # computed from the velocity: no other
@@ -752,10 +689,7 @@ class OutputSet:
         return "mean" if gradient == "mean-field" and not self.mean_field_reason() else "stream"
 
     def _mean_field_plane(self, name: str, axis: int, index: int) -> np.ndarray:
-        """The mean-field 'name' on one plane in the stored grid's layout and units (raw u-units per Mpc, the
-        binary's component order; slice() scales and picks components as for the stored grid): dtfelib.fields'
-        mean_field_from_gradient of the plane's spectral gradient (_mf_gradient_plane), the V-web at the snapshot's
-        a and h and the run log's lambda_th, as FieldSet.mean_field classifies it."""
+        """The mean-field 'name' on one plane in the stored grid's layout and units."""
         from dtfelib import fields as F
         web = name in ("vweb", "vweb_eigenvalues")
         a = None if self.redshift is None else 1.0 / (1.0 + float(self.redshift))
@@ -766,17 +700,9 @@ class OutputSet:
 
     def slice(self, name: str, axis: int = 2, index: int | None = None, component: str = "norm",
               gradient: str = "stored") -> np.ndarray:
-        """One plane of a field, (N, N) float64, rows = the first remaining axis (a 2D grid: the whole
-        grid, rows = x; axis and index are ignored). Components of a vector/tensor field by name
-        (components()); 'norm' = |v|, 'trace ...' = the trace. The vorticity is the curl of the
-        velocity: the binary stores the antisymmetric part of the gradient, W_ab = (dv_a/dx_b -
-        dv_b/dx_a)/2 for a < b (xy, xz, yz), which this turns into the curl's x, y, z (a 2D grid: its
-        z, a single number); measured on a rigid rotation (curl = 2 Omega). The 'caustic'
-        map of a periodic phase-space run is the exact fold flag, not the stored grid (fold_exact).
-        gradient 'mean-field': a phase-space output's velocity derivatives as the mean field, computed
-        from its velocity grid (gradient_family 'mean'; a face-gradient output's stored grid is the mean field
-        already); 'stored' (the default) or any other field: the file's grid. A derived field (derived_fields) is
-        the mean field computed from the velocity either way."""
+        """One plane of a field, (N, N) float64, rows = the first remaining axis (a 2D grid: the whole grid, rows
+        = x; axis and index are ignored). Components of a vector/tensor field by name (components()); 'norm' =
+        |v|, 'trace ...' = the trace."""
         index = self.n // 2 if index is None else int(index)
         if name == "caustic" and self.fold_exact():
             return self._fold_plane(int(axis), index)
@@ -784,9 +710,8 @@ class OutputSet:
 
     def _slice_source(self, name: str, axis: int, index: int, gradient: str = "stored") -> np.ndarray:
         """The plane slice() takes a map's values from, as stored (components last) or the mean field computed from
-        the velocity -- the last one kept on the output, keyed by the field, plane, family and the file's version
-        (mtime, size): a map and its arrows (two components of one vector), or a colour change, read and cut it
-        once. Never modified by its users (component_values makes new arrays)."""
+        the velocity -- the last one kept on the output, keyed by the field, plane, family and the file's
+        version (mtime, size): a map and its arrows (two components of one vector), or a colour change."""
         mean = name in self.derived_fields() or gradient == "mean-field" and \
             self.gradient_family(name, gradient) == "mean" and estimator_label(self) == "PS-DTFE" and not self.face_gradient
         ff = self.files.get("velocity") if mean else self.files.get(name)     # the file the plane comes from
@@ -806,10 +731,7 @@ class OutputSet:
     def component_values(self, name: str, arr: np.ndarray, component: str, fresh: bool = True) -> np.ndarray:
         """The values a map of 'name' shows, from its grid's values 'arr' as stored (a plane, or the 3D view's block
         of rows: components last): its component in float64 -- 'norm' = |v|, 'trace ...' = the trace, else one by
-        name (components()); an unknown one the first -- the vorticity turned into the curl (slice()), a velocity
-        and its derivatives in km/s (velocity_factor). One rule for the map, its saved figures and the 3D volume.
-        'fresh' True: always a new array (a factor of 1 multiplied too, as slice() always did); False: a factor of 1
-        not applied, so a float64 scalar block comes back as it is (the volume's temporaries: no copy)."""
+        name (components())."""
         nc = self.ncomp(name)
         f64 = lambda a: np.asarray(a, dtype=np.float64)        # noqa: E731
         if name in CURL_FIELDS:         # [W_xy, W_xz, W_yz] = [-w_z, w_y, -w_x] / 2 -> the curl w
@@ -839,12 +761,9 @@ class OutputSet:
 
     def arrow_field(self, name: str, axis: int = 2, index: int | None = None, per_side: int = 32,
                     smooth: float = 0.0, gradient: str = "stored") -> dict | None:
-        """Arrows for a vector field on one slice, in IMAGE coordinates (the Explore image is
-        plane.T[::-1]: x = the first in-plane axis rightward, y = the second, drawn upward, in
-        cell units from the image's top-left corner). The two in-plane components are
-        block-averaged to about 'per_side' arrows along each side; dx, dy are scaled so the
-        longest arrow is 1 (times 'spacing' cells when drawn). None for a non-vector field. 'gradient': slice()'s
-        (the vorticity's arrows of the family its colours show)."""
+        """Arrows for a vector field on one slice, in IMAGE coordinates (the Explore image is plane.T[::-1]: x =
+        the first in-plane axis rightward, y = the second, drawn upward, in cell units from the image's
+        top-left corner)."""
         ff = self.files.get(name)
         if ff is None or ff.ncomp != self.dim:          # a vector: one component per axis
             return None
@@ -900,10 +819,7 @@ class OutputSet:
 
 def _mf_gradient_plane(o: OutputSet, axis: int, index: int) -> np.ndarray:
     """The mean-field velocity gradient g[..., a, b] = dv_a/dx_b on one plane of a phase-space output (raw u-units per
-    Mpc), from _MF_PLANES or computed (dtfelib.fields.mean_field_gradient_plane: one pass over the velocity grid).
-    The velocity grid as the cube cache's rules give it -- the cached cube, or read whole when it fits the cache and
-    CUBE_EAGER_BYTES (1.6 GB at 512^3: stepping then costs no read), else in 16 MB slabs from the file, never more:
-    while a job runs (the 1 GB cap) a 512^3 plane takes about 100 MB, not the 3-7.5 GB of the whole-cube FFTs."""
+    Mpc), from _MF_PLANES or computed (dtfelib.fields.mean_field_gradient_plane: one pass over the velocity grid)."""
     from dtfelib import fields as F
     ff = o.files["velocity"]
     shape = (o.n, o.n, o.n, 3)
@@ -954,12 +870,7 @@ def _cache_on(o, attr: str, value):
 
 
 def scalar_dataset(o) -> str:
-    """The particle dataset an output's 'scalar' grid holds (run_dtfe.sh / run_ps_dtfe.sh SCALAR_DATASET, the
-    binary's '--scalar-dataset'), '' when not known: the custom run's settings sidecar, else the run log -- the
-    binary's "reading the scalar dataset 'NAME'" line, else the last '--scalar-dataset NAME' of the command it ran --
-    else, the same, the log of the run that made the scalar grid when it was added to the set afterwards: that run's
-    '<prefix>.runlog' kept beside the grid as '<prefix>.a_scalar.log' (the set's own log is of a run without it).
-    Read once per output and cached on it."""
+    """Read once per output and cached on it."""
     if hasattr(o, "_scalar_ds"):
         return o._scalar_ds
     root = getattr(o, "root", None)             # (a stand-in without one names none)
@@ -979,10 +890,8 @@ def scalar_dataset(o) -> str:
 
 def scalar_units(o) -> tuple[float, str]:
     """(factor, unit) of an output's 'scalar' map: for a dataset of a merged snapshot (the merge took its h out:
-    'h_power_applied'), a^a_scaling -- the scale factor from the snapshot's header 'Time', a_scaling the dataset's own
-    TNG attribute -- and the unit of SCALAR_UNITS: the physical value. (1.0, '') -- the stored value -- for any other
-    dataset or when the snapshot is not known. Read once per output and cached on it; a read that fails (a disk asleep
-    or gone) is not kept, so the next map asks again."""
+    'h_power_applied'), a^a_scaling -- the scale factor from the snapshot's header 'Time', a_scaling the dataset's
+    own TNG attribute -- and the unit of SCALAR_UNITS: the physical value."""
     if hasattr(o, "_scalar_units"):
         return o._scalar_units
     out = (1.0, "")
@@ -1011,9 +920,7 @@ def field_key(o, name: str) -> str:
 
 def header_hubble(o) -> float | None:
     """HubbleParam of the snapshot an output was computed from, whatever unit its box is in (hubble() asks an h-free
-    box): the h the binary's V-web takes from the Gadget header (H0 = 100 h), for the mean-field V-web.
-    The TNG layout's combined file, or a custom run's HDF5 input (snapshot_file); None = not known (the binary's
-    fallback, 1). Read once per output (a header only) and cached on it."""
+    box): the h the binary's V-web takes from the Gadget header (H0 = 100 h), for the mean-field V-web."""
     if hasattr(o, "_header_h"):
         return o._header_h
     h = None
@@ -1035,10 +942,8 @@ def header_hubble(o) -> float | None:
 
 
 def field_label(o, name: str, family: str = "", qualify: bool | None = None) -> str:
-    """A map's name for a field (FIELD_LABELS'), with the velocity derivatives' family said: 'velocity
-    divergence (mean field ∇⟨v⟩)' or '(stream average ⟨∇v⟩)' (family: OutputSet.gradient_family) for a phase-space
-    output -- or, with 'qualify', for every output: a comparison or a figure grid with a phase-space panel names the
-    standard-DTFE panel's family too (its stored grid is the mean field). A standard-DTFE map alone keeps its name."""
+    """A map's name for a field (FIELD_LABELS'), with the velocity derivatives' family said: 'velocity divergence
+    (mean field ∇⟨v⟩)' or '(stream average ⟨∇v⟩)' (family: OutputSet.gradient_family) for a phase-space output."""
     if name in ("scalar", "scalar_gradient") and o is not None and scalar_dataset(o):   # the dataset's name, its unit
         shown, unit = SCALAR_NAMES.get(scalar_dataset(o), scalar_dataset(o)), scalar_units(o)[1]
         if name == "scalar_gradient":
@@ -1085,12 +990,6 @@ def smoothed(plane, sigma: float):
 # The map's Smoothing filters the SLICE; with its '3D' tick the whole cube is smoothed instead (the field the voids
 # are found in: the catalogue smooths the cube) and the map shows a slice of that. One cube per (grid file, field,
 # component, sigma), smoothed once on the slice worker and kept: scrolling the layers then costs a copy of a plane.
-# Measured on a synthetic 512^3 float32 cube (this machine, numpy 2.4): 3.5 s, 0.8 GB above the cube itself while it
-# runs, 0.54 GB kept. An exact periodic Gaussian by numpy's FFT (the catalogue's is scipy's, cut at 4 sigma: on
-# TNG300-3-Dark 512^3 the two contrasts differ by 4e-3 at most): separable, so one axis at a time over slabs of
-# about SMOOTH3D_CHUNK bytes -- the whole-cube rfftn peaked at 5.4 GB for the same cube. The smoothed cubes share the
-# cube cache's budget with the grids' own cubes (_make_room), and those of another output go when the map's output
-# changes (drop_smoothed3d): a few smoothings of a 1024^3 grid are 4.3 GB each.
 SMOOTH3D_CHUNK = 32e6
 SMOOTH3D_HEADROOM_GB = 4.0      # the tick is greyed out when the smoothing would leave less than this free
 _SMOOTH3D: dict = {}            # (cube_key, field, component, sigma) -> float32 cube, least recently used first
@@ -1123,10 +1022,7 @@ def gauss3d(cube, sigma: float, chunk: float = SMOOTH3D_CHUNK) -> np.ndarray:
 def smooth3d_why(o, name: str, gradient: str = "stored", hires: bool = False) -> str:
     """'' when the map of field 'name' can be smoothed in 3D (the whole cube), else why not in plain words: a 2D grid,
     a hi-res slice, a map computed slice by slice (the fold flag, a phase-space output's mean-field derivatives), a
-    class map; a smoothed cube larger than the cube cache keeps (while a job runs its cap: every layer would smooth
-    the whole cube again); a cube whose smoothing would not fit in the memory free now (less SMOOTH3D_HEADROOM_GB)
-    says what it needs. The tick asks it; map_plane asks it again before smoothing a cube (a comparison's B, a grid
-    panel, or a job started since the tick was set)."""
+    class map."""
     why = _smooth3d_kind(o, name, gradient, hires)
     if why:
         return why
@@ -1163,10 +1059,9 @@ def _smooth3d_kind(o, name: str, gradient: str = "stored", hires: bool = False) 
 
 
 def zoom_mean_field(o) -> bool:
-    """An exact zoom of this output computes the mean flow's derivatives (PS-DTFE '--face-gradient'), as its map
-    shows them: a face-gradient output (OutputSet.face_gradient), or one that stored no velocity derivative at all, whose
-    map shows them as the mean field computed from the velocity (OutputSet.derived_fields). Any other phase-space
-    output's exact zoom keeps its run's stored stream average ('--per-tet-gradient')."""
+    """An exact zoom of this output computes the mean flow's derivatives (PS-DTFE '--face-gradient'), as its map shows
+    them: a face-gradient output (OutputSet.face_gradient), or one that stored no velocity derivative at all, whose
+    map shows them as the mean field computed from the velocity (OutputSet.derived_fields)."""
     if getattr(o, "face_gradient", False):
         return True
     derived = o.derived_fields() if hasattr(o, "derived_fields") else {}
@@ -1206,9 +1101,7 @@ def smoothed3d_kept(o, name: str, component: str, sigma: float) -> bool:
 
 def smoothed3d_cube(o, name: str, component: str, sigma: float) -> np.ndarray:
     """The whole cube of a field's component (the map's values: slice()'s components and units) smoothed in 3D by a
-    periodic Gaussian of 'sigma' cells (gauss3d), float32; kept (least recently used dropped first) within the cube
-    cache's budget, shared with the grids' own cubes (_make_room) -- while a job runs its 1 GB cap -- and dropped
-    with it (drop_cubes)."""
+    periodic Gaussian of 'sigma' cells (gauss3d), float32."""
     key = _smooth3d_key(o, name, component, sigma)
     if key is None:
         raise OSError(f"{o.files[name].path} cannot be read")
@@ -1266,9 +1159,8 @@ class Smooth3DRefused(ValueError):
 def map_plane(o, name: str, axis: int, index: int, component: str, gradient: str = "stored", smooth: float = 0.0,
               smooth3d: bool = False) -> np.ndarray:
     """A map's plane as every view reads it (the map and its comparison, the figure grid's panels, the 3D view's
-    planes): the slice smoothed in 2D (smoothed), or with 'smooth3d' the slice of the cube smoothed in 3D at 'smooth'
-    cells (smoothed3d_cube); float64. A cube not smoothed yet is smoothed only where smooth3d_why allows it (the
-    memory free now, the cache's budget), else Smooth3DRefused saying why (the view shows it)."""
+    planes): the slice smoothed in 2D (smoothed), or with 'smooth3d' the slice of the cube smoothed in 3D at
+    'smooth' cells (smoothed3d_cube); float64."""
     if smooth3d and smooth > 0 and not _smooth3d_kind(o, name, gradient):
         if not smoothed3d_kept(o, name, component, smooth):
             why = smooth3d_why(o, name, gradient)
@@ -1331,10 +1223,9 @@ def value_range(plane: np.ndarray, log: bool = False, clip: tuple = (1.0, 99.0),
 def colorize(plane: np.ndarray, cmap: str = "viridis", log: bool = False,
              clip: tuple = (1.0, 99.0), symmetric: bool = False,
              vrange: tuple | None = None) -> tuple[np.ndarray, tuple[float, float]]:
-    """plane -> (H, W, 3) uint8 RGB and the (vmin, vmax) shown. log10 of positive values (the rest
-    at the bottom of the scale); range from the percentiles 'clip' unless 'vrange' is given;
-    'symmetric' centres a diverging map on 0. The web classes' colour map (WEB_CMAP) always shows its classes over
-    WEB_RANGE, never on a log scale."""
+    """plane -> (H, W, 3) uint8 RGB and the (vmin, vmax) shown. log10 of positive values (the rest at the bottom
+    of the scale); range from the percentiles 'clip' unless 'vrange' is given; 'symmetric' centres a diverging
+    map on 0."""
     if cmap == WEB_CMAP:
         log, symmetric, vrange = False, False, WEB_RANGE
     data = _scaled(plane, log)
@@ -1424,11 +1315,7 @@ def colorbar_ticks(lo: float, hi: float, log: bool = False, n: int = 5) -> list[
 def void_circles(centres, radii, box: float, axis: int, position: float, rest, lo, hi, n0: int, n1: int,
                  periodic: bool = True) -> list[tuple[float, float, float, float, int]]:
     """Where spheres (the voids: centres (k, 3) and radii in Mpc) cut the shown slice, in IMAGE pixels of the
-    Explore map: [(x, y, rx, ry, k)], k the sphere's row. The slice is the plane at 'position' along 'axis'; a
-    sphere at (periodic) distance d < R from it leaves a circle of radius sqrt(R^2 - d^2), kept (with each periodic
-    image) when it reaches the shown region lo..hi of the 'rest' axes. The map's convention: image = plane.T[::-1],
-    so x runs along rest[0] (n0 pixels over lo[0]..hi[0]) and y DOWN along rest[1] (n1 pixels, hi[1] at the top);
-    rx, ry differ when the pixels are not square in Mpc."""
+    Explore map: [(x, y, rx, ry, k)], k the sphere's row."""
     c = np.asarray(centres, dtype=np.float64).reshape(-1, 3)
     r = np.asarray(radii, dtype=np.float64).reshape(-1)
     L = float(box)
@@ -1458,8 +1345,7 @@ def void_circles(centres, radii, box: float, axis: int, position: float, rest, l
 def void_circles_mpc(centres, radii, box: float, axis: int, position: float, rest, lo, hi,
                      periodic: bool = True) -> list[tuple[float, float, float, int]]:
     """void_circles in the DATA frame of a matplotlib imshow(extent=[lo0, hi0, lo1, hi1], origin='lower'):
-    [(u, v, radius, k)] in Mpc, for a saved figure's matplotlib Circle patches. One pixel per Mpc
-    and y measured down from hi1 make void_circles' image pixels the data offsets."""
+    [(u, v, radius, k)] in Mpc, for a saved figure's matplotlib Circle patches."""
     (u0, v0), (u1, v1) = (float(lo[0]), float(lo[1])), (float(hi[0]), float(hi[1]))
     return [(u0 + x, v1 - y, rx, k) for x, y, rx, _ry, k in
             void_circles(centres, radii, box, axis, position, rest, lo, hi, u1 - u0, v1 - v0, periodic)]
@@ -1478,21 +1364,16 @@ def draw_void_circles_mpl(ax, circles_mpc, dashed=(), color="white"):
     return n
 
 
-# The most line pieces of one colour a saved PDF or SVG keeps as a path. A full-resolution map can carry hundreds of
-# thousands, and as one path that is a file many programs cannot read (Qt's SVG reader stops a path at 32767
-# elements, two a piece; readers built on libxml2 refuse an attribute over 10 MB, some 200,000 pieces). Cut into
-# several paths the translucent lines would stack where they crowd. So beyond this the colour's lines go into the
-# file as an image at its resolution (matplotlib's 'rasterized'): the picture a PNG shows.
+# The most line pieces of one colour a saved PDF or SVG keeps as a path. Cut into several paths the translucent
+# lines would stack where they crowd. So beyond this the colour's lines go into the file as an image at its
+# resolution (matplotlib's 'rasterized'): the picture a PNG shows.
 PATH_PIECES = 16000
 
 
 def draw_contours_mpl(ax, per_level, colours, to_xy, lw: float = 0.6, clip=None) -> int:
     """Contour lines (contours.map_lines' 'segments': one (k, 2, 2) array per level, in the plane's array
-    coordinates) on a matplotlib axes as the screen draws them: each level in its colour (contours.colours, RGBA
-    0..1), one path per colour stroked once -- a translucent line keeps one shade where its pieces meet. In a PDF
-    or SVG a colour of more than PATH_PIECES pieces is an image, not a path (see there). 'to_xy' maps an (m, 2)
-    array of (i, j) to the axes' data coordinates; 'clip' a matplotlib patch to clip to (a figure grid's tile).
-    Returns the number of pieces drawn."""
+    coordinates) on a matplotlib axes as the screen draws them: each level in its colour (contours.colours,
+    RGBA 0..1), one path per colour stroked once -- a translucent line keeps one shade where its pieces meet."""
     from matplotlib.patches import PathPatch
     from matplotlib.path import Path as MPath
     groups: dict = {}
@@ -1553,17 +1434,8 @@ def _rows_array(values, n: int, width: int) -> np.ndarray:
 
 
 def drawn_ellipsoids(res: dict) -> dict:
-    """The voids' ellipsoids as Explore draws them -- the ONE place their size is computed: the map's sections, the
-    3D view, the inspector, the Sizes range and the saved CSV all read this. The quadratic fit around each minimum,
-    delta(x) = delta_min + 1/2 sum lambda_i x_i^2 (the catalogue's Hessian eigenvalues lambda_i and eigenvectors), at
-    HALF its depth, delta = delta_min / 2 (Luuk's choice 2026-11-24 over the mean density, which a flat-bottomed void
-    overshoots: the inner part, where the quadratic holds): centre the minimum, axes the eigenvectors, semi-axes
-    sqrt(|delta_min| / lambda_i) (= the catalogue's 2 cell / sqrt(lambda_i) times sqrt(|delta_min|) / 2). Only where it exists: delta_min < 0 and
-    all three eigenvalues > 0 (a true minimum below the mean), whether or not the catalogue's fit passed its size cuts;
-    elsewhere NaN and 'ok' False (drawn as its centre mark alone). {'semi' (k, 3) Mpc, a >= b >= c; 'dirs' (k, 3, 3) unit directions in rows; 'M'
-    (k, 3, 3) the semi-axis vectors in columns (view3d's shape matrix); 'ok' (k,); 'r' (k,) (a b c)^(1/3) Mpc, 'R_ell'}. Kept
-    in the result ('_drawn'). A result without 'eigenvalues_cells' (an older helper) takes the catalogue's |lambda|
-    from its semi-axes, their signs unknown."""
+    """The voids' ellipsoids as Explore draws them -- the ONE place their size is computed: the map's sections, the 3D
+    view, the inspector, the Sizes range and the saved CSV all read this."""
     kept = res.get("_drawn")
     if kept is not None:
         return kept
@@ -1590,12 +1462,7 @@ ELL_MAX_AXIS_RATIO = 10.0       # config.ELLIPSOID_CUT_RULES' max_axis_ratio, th
 
 def ellipsoid_sample(res: dict) -> np.ndarray:
     """The voids drawn as ellipsoids (bool per catalogue row): the deep minima (void_outlines' 'deep') with a drawn
-    ellipsoid (drawn_ellipsoids' 'ok'), deepest first, each kept unless its minimum lies inside the drawn ellipsoid
-    of a deeper one already kept (periodic): a minimum inside a deeper void's ellipsoid is a dip within that void,
-    not a void of its own; none with a / c above ELL_MAX_AXIS_RATIO (a minimum almost flat along one axis: a needle
-    across the box). The catalogue's distinct sample does the same with spheres of R_v among the voids whose fit
-    passes its size cuts, which leaves out the largest, flattest voids; the drawn ellipsoids need no such cut.
-    Kept in the result ('_ell_sample')."""
+    ellipsoid (drawn_ellipsoids' 'ok'), deepest first."""
     kept = res.get("_ell_sample")
     if kept is not None:
         return kept
@@ -1632,13 +1499,8 @@ def ellipsoid_sample(res: dict) -> np.ndarray:
 def void_ellipses(centres, M, box: float, axis: int, position: float, rest, lo, hi, n0, n1,
                   periodic: bool = True) -> list[tuple[float, float, float, float, float, int]]:
     """Where ellipsoids (centres (k, 3) Mpc, shape matrices M (k, 3, 3): view3d's centre + M u, |u| <= 1) cut the
-    shown slice, in IMAGE pixels of the map (void_circles' frame: x along rest[0], y DOWN along rest[1]):
-    [(x, y, rx, ry, angle, k)], the ellipse centred at (x, y) with semi-axes rx >= ry, the rx axis turned by 'angle'
-    degrees from the image's x axis toward its y axis (QPainter's rotate; clockwise on the screen). The exact plane
-    section, view3d.plane_cuts (the 3D view's planes draw the very same): with Q = M M^T it exists while the plane's
-    distance d from the centre has d^2 < Q_aa; its centre moves in the plane by Q_ra d / Q_aa (a tilted ellipsoid's
-    section is off its centre), its shape is (Q_rr - Q_ra Q_ar / Q_aa)(1 - d^2 / Q_aa). Each periodic image that
-    reaches the region lo..hi kept; NaN shapes skipped."""
+    shown slice, in IMAGE pixels of the map (void_circles' frame: x along rest[0], y DOWN along rest[1]): [(x, y,
+    rx, ry, angle, k)], the ellipse centred at (x, y) with semi-axes rx >= ry."""
     import view3d as V
     if list(rest) != list(V.rest_axes(axis)):
         raise ValueError(f"the rest axes {list(rest)} are not the map's for axis {axis}")
@@ -1653,9 +1515,7 @@ def void_ellipses(centres, M, box: float, axis: int, position: float, rest, lo, 
 def void_marks(centres, reach, box: float, axis: int, position: float, rest, lo, hi, n0, n1, half: float,
                periodic: bool = True) -> list[tuple[float, float, int, bool]]:
     """Where the voids' centres (the minima) project into the shown slice, in image pixels: [(x, y, k, own)] for the
-    voids within 'reach' (k,) of the plane along its normal (an ellipsoid's half extent along it: its section is
-    drawn; NaN: only on the centre's own layer), own = the slice is the centre's own layer (|d| < 'half', half a cell), each
-    periodic image inside the region lo..hi."""
+    voids within 'reach' (k,) of the plane along its normal."""
     c = np.asarray(centres, dtype=np.float64).reshape(-1, 3)
     reach = np.nan_to_num(np.asarray(reach, dtype=np.float64).reshape(-1), nan=0.0)
     L = float(box)
@@ -1685,12 +1545,7 @@ def void_overlay(v: dict | None, axis: int, position: float, rest, lo, hi, n0, n
                  periodic: bool = True) -> dict:
     """The void outlines of one slice in image pixels, for the map, a zoom, a figure grid's panel and the saves alike:
     {'circles': [(x, y, rx, ry, row)] (spheres of R_v), 'dashed': the same for the other radius asked for,
-    'ellipses': [(x, y, rx, ry, angle, row)] (void_ellipses), 'marks': [(x, y, row, own)] (void_marks)}, rows the
-    catalogue's. 'v' (explore_voids: the rows shown): {'rows', 'centres', 'box', 'shape' ('ellipsoid' or 'sphere'),
-    'r_v', 'M' and 'reach' (the drawn ellipsoids, NaN where none; reach (k, 3) their half extents along x, y, z, or
-    (k,) along 'axis'), 'other' (the dashed circles' radii, or None)}.
-    Spheres: R_v's circles, as before the ellipsoids existed. Ellipsoids: each one's exact section by the slice, and
-    the mark of its centre (the minimum) on its own layer (within 'half', half a cell)."""
+    'ellipses': [(x, y, rx, ry, angle, row)] (void_ellipses), 'marks': [(x, y, row, own)] (void_marks)}."""
     out = {"circles": [], "dashed": [], "ellipses": [], "marks": []}
     if not v or not len(v["rows"]):
         return out
@@ -1790,8 +1645,7 @@ def draw_pixel_overlay(ax, ellipses=(), ellipse_clips=(), marks=(), mark_clips=(
 def outline_pick(x: float, y: float, circles=(), ellipses=(), marks=(), mark_radius: float = 3.0):
     """The catalogue row under image position (x, y): of the outlines that contain it -- circles [(x, y, rx, ry, row)]
     and turned ellipses [(x, y, rx, ry, angle, row)] -- the smallest (void_at's rule: a small void drawn inside a
-    big one stays reachable); else the nearest centre mark within 'mark_radius' pixels (a void drawn as its mark
-    alone); None."""
+    big one stays reachable)."""
     best = None
     for o in list(circles or ()) + list(ellipses or ()):
         cx, cy, rx, ry = o[:4]
@@ -1824,9 +1678,8 @@ def ellipsoid_text(res: dict, k: int) -> str:
 
 def void_info(res: dict, k: int, short: bool = False) -> str:
     """What the inspector says about catalogue row k of a void_outlines.py result: R_v (every definition the
-    catalogue has), the drawn ellipsoid (drawn_ellipsoids: its semi-axes and R_ell), the catalogue's own fit (R_eff,
-    its a, b, c), the central delta, the resolved / distinct flags and the centre. 'short' = one line for the hover
-    readout."""
+    catalogue has), the drawn ellipsoid (drawn_ellipsoids: its semi-axes and R_ell), the catalogue's own fit
+    (R_eff, its a, b, c), the central delta, the resolved / distinct flags and the centre."""
     def mpc(v):
         return "none" if v is None or v != v else f"{float(v):.2f} Mpc"
     r_v = res["r_v_mpc"][k]
@@ -1885,11 +1738,8 @@ def _tng_box(snapdir: Path) -> tuple[tuple, float | None] | tuple[None, None]:
 
 
 def hubble(o) -> float | None:
-    """h of an output's box, for the saved figures' Mpc/h axes, or None when it is not known: the
-    HubbleParam of the snapshot the box was read from, when that box is in h-free Mpc. A TNG-layout output: its
-    snapdir's combined file (merge_HDF5.py writes it h-free, the box Explore uses); a custom or opened run: its
-    sidecar's HDF5 input when that file carries the 'HFreeUnits' mark (else its box may already be in Mpc/h).
-    Read once per output (a header only) and cached on it."""
+    """h of an output's box, for the saved figures' Mpc/h axes, or None when it is not known: the HubbleParam
+    of the snapshot the box was read from, when that box is in h-free Mpc."""
     if hasattr(o, "_hubble"):
         return o._hubble
     h = None
@@ -1930,9 +1780,8 @@ PS_PREFIX, DTFE_PREFIX = "ps_output", "output"       # the run scripts' default 
 
 def estimator_label(o) -> str:
     """'PS-DTFE' or 'DTFE' for an output. The run's sidecar says (a custom-snapshot job records its
-    estimator); else a streams grid decides -- only the phase-space binary writes one; else the prefix
-    (the scripts' ps_* are phase-space). A phase-space run of the density alone has no streams grid, so
-    the absence of one never means DTFE on its own. Cached on the object."""
+    estimator); else a streams grid decides -- only the phase-space binary writes one; else the
+    prefix (the scripts' ps_* are phase-space)."""
     cached = getattr(o, "_estimator", None)
     if cached:
         return cached
@@ -1957,9 +1806,8 @@ def type_label(o) -> str:
 
 def type_order(o, pref=None) -> tuple:
     """Sort key of a snapshot's outputs for the Type menu and the composer's fills: the estimator (DTFE
-    first), then that estimator's default prefix, then the user's preferred one ('pref'), then the rest
-    by prefix -- plain text order would put ps_mw (an A/B run kept beside ps_output) before the production
-    run, so 'this snapshot across outputs' would compare the standard DTFE with the wrong phase-space run."""
+    first), then that estimator's default prefix, then the user's preferred one ('pref'), then the rest by
+    prefix."""
     lab = estimator_label(o)
     default = PS_PREFIX if lab == "PS-DTFE" else DTFE_PREFIX
     return (lab, o.prefix != default, o.prefix != pref, o.prefix)
@@ -1988,10 +1836,8 @@ def custom_box(settings: dict) -> tuple | None:
 
 def custom_redshift(settings: dict) -> float | None:
     """The redshift of a custom-snapshot run's input, for the u-unit velocity scaling (sqrt(a), as FieldSet and the
-    TNG layout apply it): the sidecar's 'redshift' (the Custom tab records the Gadget header's), else
-    the header of its HDF5 input (input type 105) when it carries one; None = no scaling (no header, another input
-    type, no Redshift attribute: a non-cosmological snapshot has no defined a). Without it a z > 0 Gadget snapshot
-    would show its velocities in u-units, 1/sqrt(a) too large (1.41x at z = 1)."""
+    TNG layout apply it): the sidecar's 'redshift' (the Custom tab records the Gadget header's), else the header
+    of its HDF5 input (input type 105) when it carries one."""
     if "redshift" in settings:          # recorded (None = the header has none): no need to open the snapshot
         try:
             return None if settings["redshift"] is None else float(settings["redshift"])
@@ -2059,10 +1905,7 @@ def machine_ram_bytes() -> int:
 
 
 def server_cost(snapshot, phase_space: bool = True, ram_bytes: int | None = None) -> dict | None:
-    """What starting a query server on this snapshot will take, before it is started -- the
-    binary's own serve model (auto_tune.h autoTuneServe) in round numbers: particles, memory of
-    one tessellation, whether it will be split (budget 60% of RAM) and then the cache on disk
-    (~150 B per cached vertex, the padded partitions hold ~4x the particles). None if unreadable."""
+    """None if unreadable."""
     try:
         import h5py
         with h5py.File(snapshot, "r") as h:
@@ -2137,12 +1980,8 @@ def _file_stamp(path) -> str:
 
 def cached_partition_sets(cache_dir, snapshot, lagrangian=None, periodic: bool | None = None) -> dict:
     """This snapshot's partition tessellations in a tessellation cache, by partition triple (nx, ny, nz)
-    (a pair for a 2D run):
-    a list of {'tess', 'occ' (Path or None), 'bytes', 'region' (6 floats), 'periodic'} per cached
-    partition. Matched on the descriptor's format line (_TESS_FORMAT: a file of another format is a miss
-    the binary rebuilds), its input line (path and size:mtime stamp), the Lagrangian file and the
-    periodicity -- only to choose a split and estimate a run: the binary itself compares the whole
-    descriptor before it uses a file."""
+    (a pair for a 2D run): a list of {'tess', 'occ' (Path or None), 'bytes', 'region' (6 floats),
+    'periodic'} per cached partition."""
     sets: dict = {}
     d = Path(cache_dir).expanduser() if cache_dir else None
     if d is None or not d.is_dir():
@@ -2241,9 +2080,8 @@ def occupancy_touches(occ_bits, region, periodic: bool, window) -> bool:
 
 def find_pts_planes(o) -> list[tuple[str, Path]]:
     """The point-evaluated hi-res slices of an output: '<root>.pts_den' and every plane sidecar (tools/
-    make_image_plane.py, in the simulation's folder or beside the output) whose geometry matches the file's
-    size -- (label, sidecar). The '.pts_*' files carry no axis, so planes of one size (the x, y, z views)
-    are all listed, each with its axis: the user picks."""
+    make_image_plane.py, in the simulation's folder or beside the output) whose geometry matches the
+    file's size -- (label, sidecar)."""
     den = Path(str(o.root) + ".pts_den")
     if not den.is_file():
         return []
@@ -2267,10 +2105,9 @@ def find_pts_planes(o) -> list[tuple[str, Path]]:
 
 
 def server_settings(out: OutputSet, snapshot: str | None = None) -> dict | None:
-    """dtfelib.Estimator arguments for the snapshot behind an output set, or None when unknown.
-    TNG layout: the snapdir's combined file (+ the simulation's converted ICs when present);
-    a custom-snapshot run: the job's own settings sidecar. 'snapshot': a file chosen by hand (Explore's
-    'Snapshot…', when the input moved or the output has no sidecar) -- it replaces the one found."""
+    """dtfelib.Estimator arguments for the snapshot behind an output set, or None when unknown. TNG
+    layout: the snapdir's combined file (+ the simulation's converted ICs when present); a
+    custom-snapshot run: the job's own settings sidecar."""
     s = sidecar(out.root)
     if snapshot and not Path(snapshot).is_file():
         return None

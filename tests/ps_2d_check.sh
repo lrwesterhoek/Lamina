@@ -1,59 +1,6 @@
 #!/usr/bin/env bash
-# The 2D phase-space build (PS-DTFE-2d, 'make PS-DTFE DIM=2') against analytic 2D Zel'dovich flows, and
-# the 2D standard build (DTFE-2d). Synthetic 2D snapshots: two-column HDF5 datasets
-# (tests/generate_ps_test_data.py --dim 2).
-#   P  the pancake (a 1-D wave in 2D, A*k = 1.8): the stream count in every column equals the
-#      analytic number of Zel'dovich streams, for the sampled AND the exact deposit; mass conserved
-#      (to 1e-3 under the default Lagrangian-area masses, which drop the few triangles squeezed flat
-#      on the caustic, as in 3D; exactly under --ps-vertex-mass); the exact multiplicity averages to
-#      the analytic stream count
-#   C  single-stream density converges to the analytic profile (L1 error falls by > 40%, < 0.008)
-#   V  single-stream velocity = the analytic 100 A sin(k q(x)) of the stream
-#   X  crossed waves: point stream counts in {1, 3, 9}, and their fractions are the products of the
-#      1-D fractions (the flow is separable)
-#   E  the sampled deposit converges to the exact one: away from the caustics the density difference
-#      halves from nSub 6 to 12 (first order in the sample spacing); velocity and dispersion agree
-#   H  '.hidden_streams' bit 1 (a folded triangle overlaps the cell) marks no cell of the analytic
-#      single-stream region away from the caustics, and every analytic multi-stream column
-#   F  --ps-caustics: '.caustic' (both orientations overlap the cell) is exactly the parity bits of
-#      '.causticClass', set throughout the analytic multi-stream region and nowhere in the single-
-#      stream one; the collapse multiplicity is k = 1 inside the pancake and k = 0 outside
-#   S  --partition 2 2 == one triangulation (streams identical; density identical to float rounding
-#      but in the few caustic cells where a copy's float rounding flips a flat triangle's drop);
-#      --ps-vertex-mass and --ps-halo-release conserve mass;
-#      a non-periodic clump conserves mass and covers its interior; the tessellation cache hits and
-#      reproduces the run bit for bit; --gpu on the 2D build (no GPU backend in DIM=2) runs every
-#      partition on the CPU, exits 0 and says how many passes fell back
-#   D  the standard 2D build runs on the same file: its mean density is the particle density
-#   PE point evaluation (--sample-points): at the cell centres the point stream
-#      counts equal the same run's nSub = 1 grid counts EXACTLY; single-stream point velocities are
-#      the analytic ones; a --partition 2 2 run gives the same points; a text points file the same
-#      outputs as the binary one; the standard DTFE-2d evaluates points too; and the interactive
-#      server (--serve): dtfelib's Estimator(dim=2) answers byte-identical to
-#      --sample-points, a composite (partition 2 2) server equals the same split's point run, and
-#      Estimator.from_arrays builds a 2D estimator from (N, 2) arrays
-#   W  --grid-window: the window run's cells are the full run's -- the stream counts and the
-#      hidden-stream masks bit for bit, the sums within 1e-8 of the peak with the sampled deposit (a window pass takes
-#      its own fixed-point units, ps_interpolation.cc fxBoundWalk), to float rounding with the exact one
-#   CU --ps-caustic-cusps on a pancake modulated along y, psi_x = A sin(kq_x)
-#      (1 + eps cos(kq_y)), whose fold lens closes in two analytic cusps: both are flagged, every flag
-#      lies on the ridge k q_x = pi where the null-direction derivative of lambda_c vanishes (the
-#      indicator marks that ridge within its fold band, as in 3D), the unmodulated pancake -- no cusps
-#      -- gets none, and no swallowtail bit is ever set in 2D
-#   CO the 2D redshift cone (DTFE-2d --redshift-cone, origin x != y): the Monte Carlo cell averages agree with the
-#      centre values (with origin x for y the samples would average another cell)
-#   DM a 3-column snapshot through DTFE-2d / PS-DTFE-2d (and a 2-column one through DTFE / PS-DTFE, when built)
-#      is refused with a message naming the binaries to use (not a segfault or a garbage grid at exit 0)
-#   RS the standard DTFE-2d's seeded Monte-Carlo average ('--average-method 2 --subsamples 3 --seed 11'), '--partition
-#      2 2 --max-concurrent 2' on two threads, crossed waves, grid 48: killed after 2 of its 4 partitions
-#      (DTFE_TEST_EXIT_AFTER_PARTITIONS, exit 137, 2 in the checkpoint) and resumed with '--resume': every output the
-#      uninterrupted run's bytes, the checkpoint removed
-#   EA the standard DTFE-2d's --exact (triangles clipped by ps_clip2d.h):
-#      density 1 to float rounding on a perfect lattice (the sampled average is off by percents), mass
-#      conserved on a pancake, and the sampled average agrees with it to its own noise
-#   DV the device line of both 2D programs' headers: 'CPU (this binary was built without GPU support)' with DTFE_GPU
-#      unset (the program picks; a 2D build has no GPU path) and no GPU warning, 'CPU (DTFE_GPU=0)' under
-#      tests/lib.sh's pin (every other run here)
+# The 2D phase-space build (PS-DTFE-2d, 'make PS-DTFE DIM=2') and the 2D standard build (DTFE-2d) against analytic 2D
+# Zel'dovich flows, on synthetic two-column HDF5 snapshots (tests/generate_ps_test_data.py --dim 2).
 # Usage: tests/ps_2d_check.sh [--no-build]
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -145,9 +92,7 @@ echo ">> a redshift cone off the diagonal (origin x != y), and snapshots of the 
 GEN --out "$TMP/cone.hdf5" --n 64 --box 100 --amplitude-factor 0.5 --crossed-waves --jitter-frac 0.02 --seed 4
 RUN "$TMP/cone" ./DTFE-2d "$TMP/cone.hdf5" "$TMP/cone" --grid 16 64 --periodic --mpc-unit 1 --verbose 2 \
     --field density density_a --redshift-cone 2 25 0 359 --cone-origin 30 60
-# a 3-column (3D) snapshot through the 2D binaries, a 2-column one through the 3D binaries (when built): refused
-# by name before any read -- else HDF5 writes 3N values into a 2N buffer (a segfault or a garbage grid
-# at exit 0) or reads 3N values from a 2N dataset (a garbage grid at exit 0)
+# a 3-column (3D) snapshot through the 2D binaries, a 2-column one through the 3D binaries (when built).
 "$PY" tests/generate_ps_test_data.py --dim 3 --out "$TMP/dim3.hdf5" --n 8 --box 100 >/dev/null || { echo "FAIL data gen 3D"; exit 1; }
 : > "$TMP/dimcheck.txt"
 for pair in "./DTFE-2d dim3 3" "./PS-DTFE-2d dim3 3" "./DTFE pan 2" "./PS-DTFE pan 2"; do
@@ -159,8 +104,7 @@ for pair in "./DTFE-2d dim3 3" "./PS-DTFE-2d dim3 3" "./DTFE pan 2" "./PS-DTFE p
     echo "$(basename "$1") $rc $said" >> "$TMP/dimcheck.txt"
 done
 # the standard 2D build's seeded Monte-Carlo average split 2 x 2 (two threads on every run: method 2 adds 1000 x the
-# sub-domain number to its seed), killed after 2 of its 4 partitions and resumed; a stale checkpoint or output of an
-# earlier pass of the suite would stand in for this one's, so they go first
+# sub-domain number to its seed), killed after 2 of its 4 partitions and resumed.
 echo ">> DTFE-2d '--average-method 2 --seed 11', --partition 2 2: killed after 2 partitions, resumed"
 RS=(--input-format 105 --mpc-unit 1 --periodic --grid 48 --partition 2 2 --max-concurrent 2 --average-method 2
     --subsamples 3 --seed 11 --field density_a velocity_a)

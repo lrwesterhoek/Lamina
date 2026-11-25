@@ -1,15 +1,7 @@
 #!/usr/bin/env bash
-# PS-DTFE strong-scaling benchmark: times 1/2/4/8 threads (capped at core AND partition
-# count, since parallelism is coarse-grained over Lagrangian partitions) and prints a
-# wall/speedup/efficiency table. Also a regression guard: FAILS if the top-core speedup
-# drops below MIN_EFFICIENCY x cores, catching a serialized partition loop.
-#
-# Usage:
-#   tests/ps_scaling_benchmark.sh                 # build, benchmark, assert
-#   tests/ps_scaling_benchmark.sh --no-build
-#   N=64 GRID=128 tests/ps_scaling_benchmark.sh   # bigger problem
-#   MIN_EFFICIENCY=0.3 tests/ps_scaling_benchmark.sh   # looser guard (loaded box)
-# Requires the build toolchain plus python3 with numpy and h5py.
+# PS-DTFE strong-scaling benchmark: times 1/2/4/8 threads and prints a speedup table; FAILS if the top-core speedup
+# drops below MIN_EFFICIENCY x cores (a serialized partition loop).
+# Usage: tests/ps_scaling_benchmark.sh [--no-build]   (N=64 GRID=128 for a bigger problem; needs numpy and h5py)
 
 set -euo pipefail
 

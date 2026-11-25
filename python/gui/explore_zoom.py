@@ -1,9 +1,6 @@
 """The Explore tab's zoom: a rectangle dragged on the map evaluated again, point by point through the query server,
 or by an exact run of the program itself on the region (ExactZoomWorker on its own thread, load_exact_planes for
-the grid it writes; explore.py re-exports them); exact_zoom_plan, the run behind an exact zoom (a plain function of
-the output and the pane's choices); ZoomMixin, the part of ExploreControls that plans, estimates and starts a zoom,
-carries its window to other outputs and redshifts, draws it, and keeps the earlier levels and recent zooms in
-memory."""
+the grid it writes; explore.py re-exports them)."""
 
 from __future__ import annotations
 
@@ -45,9 +42,7 @@ def _fmt_duration(sec: float) -> str:
 
 class ExactZoomWorker(QObject):
     """The exact zoom: runs the binary itself on the dragged region (over the whole snapshot, seconds
-    to minutes) and loads the thin grid it writes. Lives on its own thread so the server keeps
-    answering; reports its progress from the binary's own lines and can be cancelled (cancel(),
-    from the GUI thread, kills the run: failed then reports CANCELLED)."""
+    to minutes) and loads the thin grid it writes."""
     done = Signal(object, object)       # (zoom request, the fields on the region's grid)
     failed = Signal(str)
     progress = Signal(str)              # what the run is doing now, for the status line
@@ -135,12 +130,7 @@ class ExactZoomWorker(QObject):
 
 def load_exact_planes(root, grid, redshift=None):
     """The grids an exact zoom wrote (shape 'grid', one cell thick along the slice axis; a 2D run's
-    'grid' has two entries), as an object with the attributes of a dtfelib point evaluation
-    (density, streams, caustic, velocity, dispersion, velocity_gradient; None when the run did not
-    write them), so the zoom's renderer reads both the same way. The binary writes velocities in the
-    snapshot's u-units; with the output's redshift the velocity-like planes get the same (1/(1+z))^exp
-    factor the slice map (OutputSet.slice) and the point zoom (Estimator, peculiar) apply -- without
-    it an exact zoom at z=2 would show velocities 1.73x the slice map's."""
+    'grid' has two entries), as an object with the attributes of a dtfelib point evaluation."""
     import types
     root = Path(root)
     shape = tuple(int(v) for v in grid)
@@ -158,7 +148,6 @@ def load_exact_planes(root, grid, redshift=None):
                 continue
             dt = np.float32 if size // n == 4 else np.float64
             arr = np.fromfile(p, dtype=dt)  # the file's precision: the renderer up-casts the ONE plotted component
-                                            # (float64 of a 9-component gradient at 4096^2 is 2.4 GB)
             planes[name] = arr.reshape(shape + ((ncomp,) if ncomp > 1 else ()))
     if redshift is not None:
         for name in list(planes):
@@ -185,10 +174,8 @@ def load_exact_planes(root, grid, redshift=None):
 
 
 def exact_partition(o, kw: dict, side: dict, cache: Path, server_partitions: int = 0) -> tuple[tuple | None, dict]:
-    """The split an exact zoom of a phase-space run uses, and this snapshot's cached partition sets:
-    the running query server's (its cache is then complete; 'server_partitions' = its partition count when it
-    serves this output, else 0), else the most complete set in the cache, else the run's own split, else none (the
-    binary's auto-tuner)."""
+    """The split an exact zoom of a phase-space run uses, and this snapshot's cached partition sets: the running
+    query server's."""
     d = o.dim
     sets = {t: v for t, v in G.cached_partition_sets(cache, kw["snapshot"], kw.get("lagrangian_input"),
                                                      bool(kw.get("periodic", True))).items() if len(t) == d}
@@ -207,22 +194,9 @@ def exact_partition(o, kw: dict, side: dict, cache: Path, server_partitions: int
 
 def exact_zoom_plan(o, axis: int, index: int, rest, a0, a1, res: int, snapshot: str | None = None,
                     cache_dir: str = "", server_partitions: int = 0) -> dict:
-    """Everything about the run behind an exact zoom of output 'o': the command ('cmd', None with a
-    'note' when it cannot be built), its output 'root' and 'grid' dims, the region as the run will
-    grid it ('edges' (a0, a1) and 'window' (3, 2) in Mpc), and for a phase-space run the tessellation
-    'cache_dir', the 'partition' split and the cached partition 'sets' (for the estimate). The region
-    = the dragged rectangle, one slice cell thick; its grid res x res x 1 (in the axis' place).
-    Standard DTFE cuts the region from the box (regionMpc, periodic or not) and integrates the
-    interpolant exactly. PS-DTFE tessellates the whole box as the original run did (periodic or not)
-    and deposits only into a WINDOW of a virtual full grid whose cell is the rectangle's / res
-    (--grid-window): the window's cells equal the full grid's, so the zoom is what a run at that
-    resolution would show there. It reuses the tessellations the query server keeps on disk (the same
-    cache folder and split), and the binary skips the partitions whose occupancy maps never reach
-    the window. The window is snapped to that grid's cell edges, so the returned edges can differ
-    from the drag by up to half a zoom cell. A 2D output: the same on its plane, with no slice axis
-    (a res x res grid, a window and a region of two axes). 'snapshot': the snapshot file chosen by hand for this
-    output (None: found beside it); 'cache_dir': the query server's cache folder as typed ('': the default near
-    the output); 'server_partitions': exact_partition's."""
+    """Everything about the run behind an exact zoom of output 'o': the command ('cmd', None with a 'note' when
+    it cannot be built), its output 'root' and 'grid' dims, the region as the run will grid it ('edges' (a0,
+    a1) and 'window' (3, 2) in Mpc), and for a phase-space run the tessellation 'cache_dir'."""
     import tempfile
     plan = {"cmd": None, "note": "", "root": None, "grid": None, "edges": None, "window": None,
             "ps": False, "cache_dir": None, "partition": None, "sets": {}, "snapshot": None,
@@ -409,13 +383,9 @@ class ZoomMixin:
         self.changed.emit()
 
     def _carry_zoom(self, server_started: bool = False):
-        """The zoom window kept from another output or redshift (self._keep['zoom']) on the output shown
-        now, the same Mpc window at the same resolution on this output's kept slice: from memory when this output's
-        zoom of it was made before (switching back and forth is then instant), else by the query server when it runs
-        on this output. Never by an exact run: a switch neither starts one nor asks about one (an exact zoom is a
-        drag with exact cell averages chosen). Otherwise the map stays the slice, the window stays kept for the next
-        output (or for the server, once started here: server_started), and the zoom line and the status line say
-        why."""
+        """Never by an exact run: a switch neither starts one nor asks about one (an exact zoom is a drag with exact
+        cell averages chosen). Otherwise the map stays the slice, the window stays kept for the next output (or
+        for the server, once started here: server_started), and the zoom line and the status line say why."""
         m, o = self._keep, self.current
         w = (m or {}).get("zoom")
         if not w or o is None or self._shut or self.is_zoomed():
@@ -479,8 +449,7 @@ class ZoomMixin:
     def exact_zoom_estimate(self, plan: dict) -> dict | None:
         """How long the exact zoom of a phase-space run will take (None for standard DTFE, which
         triangulates only the region): {'seconds', 'n_total', 'n_skip', 'n_load', 'n_build',
-        'new_gb', 'particles', 'cache_dir'}. From the cache on disk -- which partitions are cached and,
-        by their occupancy maps, which reach the region -- and the measured rates above (EST_*)."""
+        'new_gb', 'particles', 'cache_dir'}."""
         if not plan.get("ps") or not plan.get("snapshot"):
             return None
         if len(plan.get("grid") or ()) == 2:
@@ -655,8 +624,7 @@ class ZoomMixin:
             return                               # map stays the slice (drawn in the zoom's frame it would misplace clicks)
         if (not self._same(req["output"], self.current) or req["axis"] != self.axis.currentIndex()
                 or req["index"] != self.index.value()):
-            # the slice changed while the zoom was evaluated: drawn, it would take the new slice's axes, scale bar
-            # and clicked positions (render() saw no zoom yet). It is memoised; the map stays the slice
+            # It is memoised; the map stays the slice
             self.zoom_state.setText("the zoom finished after the slice changed, so it is not shown: zoom again on "
                                     "this slice")
             self.changed.emit()
@@ -778,7 +746,6 @@ class ZoomMixin:
                      + ("this output's run stored the stream average)" if z.get("exact")
                         else "a point evaluation has no mean field)"))
         if z.get("exact") and z.get("mass_weighted_map"):
-            # an older output made with mass-weighted moments: PS-DTFE has only the volume-weighted ones now
             note += " · the zoom's velocities are volume-weighted, this older output's mass-weighted"
         comp = G.component_suffix(req["component"])
         self.view.colorbar.set(req["cmap"], vrange, G.colourbar_label(label, req), req["log"],
@@ -814,9 +781,7 @@ class ZoomMixin:
 
     def _zoom_contours(self, plane, req: dict, vrange):
         """The zoom's contour lines (explore.map_contours), on the GUI thread as the zoom's colours are: a zoom plane
-        is drawn once per zoom or colour change, at most contours.MAX_SIDE a side after its block averaging. The
-        last one is kept, so a change that leaves the field, the range, the scale and the colour map alone (the
-        void outlines, the window's size) costs nothing."""
+        is drawn once per zoom or colour change, at most contours.MAX_SIDE a side after its block averaging."""
         if not req.get("contours"):
             return None
         key = (req["field"], req["component"], tuple(float(v) for v in vrange), bool(req["log"]), req["cmap"],

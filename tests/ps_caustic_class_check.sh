@@ -1,21 +1,13 @@
 #!/usr/bin/env bash
-# PS-DTFE caustic-stratification check ('.causticClass', written by --ps-caustics on the CPU).
-#
-# The stratification comes from the deformation tensor J = Ax * Lag^-1, which is CONSTANT inside a
-# linearly mapped tetrahedron and therefore exact: the number of negative real eigenvalues of J is
-# the number of principal axes along which the sheet has collapsed and inverted (k = 0 uncollapsed,
-# 1 wall, 2 filament, 3 node). Asserted here on the crossed-wave snapshot, where three independent
-# 1-D collapses make the multiplicity structure known by construction:
-#  A) '.causticClass' is written and uses only the documented bits (0..6).
-#  B) The parity bits agree EXACTLY with '.caustic': cells with both bits set are precisely the
-#     cells the fold flag marks. (This is what proves the class bits leave the fold bits alone.)
-#  C) k = 0 in every single-stream cell -- no axis can have collapsed where there is one stream.
-#  D) The mean stream count increases strictly with k: uncollapsed < wall < filament < node.
-#  E) The GPU deposit reproduces BOTH '.caustic' and '.causticClass' byte-for-byte.
-#  J) The fold flag is the GEOMETRIC overlap of a folded tetrahedron, not a per-sample
-#     hit: on thin young folds it equals dtfelib's (streams > 1 + tol) | (hidden_streams & 1) cell for
-#     cell, is the same for nSub 1, nSub 3 and the exact deposit, and is split- and GPU-invariant.
-#
+# PS-DTFE caustic stratification ('.causticClass', --ps-caustics on the CPU): the number of negative real eigenvalues of the
+# deformation tensor J = Ax * Lag^-1 (constant, hence exact, per tetrahedron) is k = 0 uncollapsed, 1 wall, 2 filament, 3 node.
+# Asserted on the crossed-wave snapshot, whose multiplicity structure is known by construction.
+#   A  '.causticClass' is written and uses only the documented bits (0..6).
+#   B  The parity bits agree EXACTLY with '.caustic'
+#   C  k = 0 in every single-stream cell -- no axis can have collapsed where there is one stream.
+#   D  The mean stream count increases strictly with k: uncollapsed < wall < filament < node.
+#   E  The GPU deposit reproduces BOTH '.caustic' and '.causticClass' byte-for-byte.
+#   J  The fold flag is the GEOMETRIC overlap of a folded tetrahedron
 # Usage: tests/ps_caustic_class_check.sh [--no-build]
 
 set -euo pipefail
@@ -92,8 +84,7 @@ check(len(means) >= 3 and all(a < b for a, b in zip(means, means[1:])),
       "mean streams increase strictly with k: " + " < ".join(f"{x:.1f}" for x in means))
 
 # (D4) the umbilic indicator must live ON the caustic: two eigenvalues vanishing together makes the
-# map singular there by construction, so a flagged cell on no fold cannot be an umbilic. Without the
-# at-zero half of the test 15% of cells are flagged, two thirds of them off-fold.
+# map singular there by construction, so a flagged cell on no fold cannot be an umbilic.
 umb = ((m >> 6) & 1) != 0
 fold_cells = (m & 3) == 3
 check(int((umb & ~fold_cells).sum()) == 0,
@@ -147,11 +138,7 @@ for i, bit in enumerate(COLLAPSE):
 
 check(int(m.max()) <= 0x7F, f"only bits 0..6 used (max mask {int(m.max())})")
 
-# One-way implications, and the identity they combine to. With exact point location a
-# multi-stream point always lies in an inverted tetrahedron (the map has degree 1, so
-# streams = 1 + 2 x folds crossed), whose negative eigenvalue gives k >= 1; so k = 0 <=>
-# streams = 1 exactly. (A +-1e-6 tolerance, which lets a point on a shared face be claimed by
-# both tetrahedra, makes it only a near-identity.)
+# One-way implications, and the identity they combine to.
 covered = s > 0
 check(bool((k[s == 1] == 0).all()), f"every single-stream point has k = 0 ({int((s==1).sum())} points)")
 check(bool((s[(m & 3) == 3] > 1).all()), "every point flagged on a fold is multi-stream")
@@ -218,10 +205,7 @@ g = mask("pcc_c1.8")
 fold = ((g & 3) == 3)
 cusp = ((g >> 7) & 1) != 0
 rate = float(cusp.sum()) / max(int(fold.sum()), 1)
-# Finite differences on an irregular tessellation are never perfectly clean, but the
-# vertex-incident stencil keeps the floor on this provably cusp-free case at ~0.01% of the
-# fold cells (~7% with only the four face neighbours). The bound is set well above the
-# measured value and far below the narrow stencil's, so it catches a regression back to it.
+# Finite differences on an irregular tessellation are never perfectly clean.
 check(rate < 0.01, f"A*k=1.8 (no cusps exist): false-positive rate {rate*100:.3f}% of fold cells, bound 1%")
 
 t = mask("pcc_c1.0")
@@ -300,8 +284,7 @@ check(floor * 20.0 < rate,
       f"A4 signal ({rate*100:.2f}%) clears the A3 floor ({floor*100:.2f}%) by more than 20x")
 
 # The flagged cells must sit where the analytic A4 planes land in EULERIAN space: the wave displaces
-# q = L/3 and 2L/3 to x ~= 49 and 51. A flag scattered over the volume would be noise, whatever the
-# counts say.
+# q = L/3 and 2L/3 to x ~= 49 and 51. A flag scattered over the volume would be noise.
 sw = (((mask("pcc_a4") >> 8) & 1) != 0).reshape(G, G, G)
 slabs = np.where(sw.any(axis=(1, 2)))[0]
 check(len(slabs) > 0 and slabs.min() >= 21 and slabs.max() <= 26,
@@ -442,8 +425,6 @@ echo "    (the double build, whose GPU works on float copies, to 1e-4 of the cel
 echo "    The per-tet mask reaches the kernel through the otherwise-unused 'dens' buffer."
 # GPU grid == CPU grid ($1 = extension): byte for byte in the single build. The double build hands the GPU
 # float copies of its double tetrahedra (ps_double_check D5), so a sample on a face may count differently there:
-# up to 1e-4 of the cells may differ (a cell whose GPU sample counts 2 streams instead of 1 differs in its
-# fold class too)
 gpu_matches() {
     cmp -s "${OUT}.$1" "${OUT}_gpu.$1" && return 0
     precision_double || return 1

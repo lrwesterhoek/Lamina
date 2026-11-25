@@ -1,29 +1,7 @@
-/* Out-of-core backing for the full-grid accumulators (--scratch-dir).
- *
- * PROBLEM: the full-resolution output grids are IRREDUCIBLE by --partition (every Lagrangian
- * partition deposits into the same shared grid), so a 1024^3 run with the production field set
- * needs ~146 GB of accumulators against a 64 GB machine. No tuning can fix that in RAM.
- *
- * MECHANISM: scratch_alloc.cc REPLACES the global operator new/delete (a standard C++
- * replaceable-function hook). Once armed, an allocation of at least the threshold (default
- * 1 GB; DTFE_SCRATCH_MIN_GB overrides -- tests set it tiny to exercise the route on small
- * grids) is served from an mmap'ed, immediately-unlinked file in the scratch directory:
- *   - std::vector code is UNTOUCHED -- std::allocator calls ::operator new, so every full-grid
- *     .assign()/.resize() lands here with zero type ripple through quantities.h;
- *   - unlink-after-mmap: the kernel reclaims the disk space when the process exits, INCLUDING
- *     on a crash -- stale scratch files are impossible;
- *   - dirty pages are written back by the kernel under memory pressure, so peak RSS stays
- *     bounded while the arithmetic is bit-identical (it is ordinary memory);
- *   - everything below the threshold (per-partition subgrid temps, CGAL, the works) takes the
- *     ordinary malloc path with one atomic load of overhead.
- *
- * LINKING: only the two BINARIES get scratch_alloc.o (the real hook). libDTFE gets
- * scratch_alloc_stub.o instead, whose scratchArm() refuses -- a library must never hijack its
- * host program's global allocator.
- *
- * The scratch directory must be on a LOCAL volume: an mmap scratch file on a cloud-synced one (iCloud
- * Drive) would be uploaded, ~146 GB for a large run, so user_options.cc refuses such paths.
- */
+/* Out-of-core backing for the full-grid accumulators (--scratch-dir): scratch_alloc.cc replaces the global operator
+ * new/delete; once armed, an allocation >= the threshold (1 GB, DTFE_SCRATCH_MIN_GB) comes from an mmap'ed, unlinked
+ * file (reclaimed at exit, crashes included), so std::vector code and arithmetic are unchanged. Only the binaries
+ * link the real hook (libDTFE gets scratch_alloc_stub.o, whose scratchArm() refuses). The directory must be LOCAL. */
 
 #ifndef SCRATCH_ALLOC_HEADER
 #define SCRATCH_ALLOC_HEADER
@@ -42,17 +20,11 @@ namespace ScratchAlloc
     long scratchLiveBytes();
     long scratchTotalAllocs();
 
-    // ZERO FILLS. std::vector zero-fills what it allocates, and on a scratch mapping those zeros are WRITES: every
-    // page of a fresh, all-zero file turns dirty and goes back to the disk before any work is done (a large run
-    // stalls on a slow disk, the machine swapping). Open a ZeroFillScope around
-    // a fill of ZEROS into a block nothing else writes to before the scope ends -- assign(n, 0), or resize(n, 0) of
-    // an EMPTY vector -- and a scratch mapping made in this thread meanwhile is handed out as anonymous memory
-    // (zero pages cost next to nothing there) and moved onto its never-written scratch file when the scope ends:
-    // the same zeros, nothing written. Thread-local; a no-op where scratch is not armed, and in libDTFE (stub).
-    // macOS only: elsewhere a no-op too. The macOS memory compressor keeps those zero pages for next to nothing;
-    // Linux keeps every one resident until the remap, the largest grid at once -- the memory --scratch-dir is there
-    // to save (a grid larger than the memory is OOM-killed inside the scope; without it, its zeros go through the
-    // file's page cache, which the kernel writes back and frees).
+    // ZERO FILLS: std::vector zero-fills what it allocates, and on a scratch mapping those zeros are WRITES (every page
+    // goes dirty). Open a ZeroFillScope around a fill of ZEROS into a block nothing else writes (assign(n, 0), or
+    // resize(n, 0) of an EMPTY vector): a scratch mapping made in this thread meanwhile is handed out as anonymous
+    // memory and moved onto its never-written file at scope end. Thread-local; a no-op where scratch is not armed and
+    // off macOS (Linux would keep every zero page resident).
     class ZeroFillScope
     {
     public:

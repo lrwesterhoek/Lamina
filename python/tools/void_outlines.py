@@ -1,36 +1,19 @@
 """The voids of one snapshot's grids as JSON, for the launcher's Explore map ('voids': the outlines over the slice).
 
-Runs the analysis pipeline's own catalogue (pipeline.SnapshotProducts.voids(): the smoothing, minima, Hessian,
-ellipsoid cuts and R_v of the void scripts; cached, so only the first call per snapshot costs a minute) in config's
-frame ADOPTED from the grid itself (pipeline.adopt_snapshot_grid: its header's box over its n, the smoothing kept
-in Mpc), so any full-box grid set of a simulation works, at any resolution. Run it with DTFE_DATA_ROOT set to the
-data root; --sim names the simulation (config reads the box for it; DTFE_SIM is its default):
+Runs the pipeline's own catalogue (pipeline.SnapshotProducts.voids(), cached) in config's frame ADOPTED from the
+grid itself (pipeline.adopt_snapshot_grid), so any full-box grid set of a simulation works, at any resolution.
+Run with DTFE_DATA_ROOT set; --sim names the simulation (default DTFE_SIM):
 
     python3 tools/void_outlines.py --sim TNG100-3-Dark --snap 99 --estimator ps
 
-With the production grids (no --prefix) the catalogue is the analysis scripts' own cache file. A BUILD costs
-about 80 bytes per cell (10 GB at 512^3, 80 GB at 1024^3): when the catalogue is not cached and that would not fit
-in what the other programs leave free (less 4 GB), the catalogue is found on the grid averaged in 2^3 or 4^3 blocks
-at the same smoothing in Mpc (coarsening: 'coarsened' in the JSON, its own cache name), and only when that does not fit
-either does the tool refuse instead of starting it (DTFE_FREE_GB overrides the free-memory reading, as for the C++
-programs).
+When the catalogue is not cached and a build would not fit in the free memory (DTFE_FREE_GB overrides the
+reading), it is found on the grid averaged in 2^3 or 4^3 blocks at the same smoothing in Mpc ('coarsened' in the
+JSON); only when that does not fit either does the tool refuse. Prints ONE line of JSON on stdout (messages go to
+stderr): centres, R_v and R_eff in Mpc, the flags 'resolved' / 'distinct' / 'deep', the fitted ellipsoids, the
+Hessian eigenvalues and eigenvectors at every minimum, and the frame and smoothing. Exit 1 when there is no catalogue.
 
-Prints ONE line of JSON on stdout (the pipeline's own messages go to stderr): the centres (cell centres in Mpc,
-the map's frame), R_v and R_eff in Mpc (null where there is none), 'resolved' (the ellipsoid cuts), 'distinct'
-(catalog.distinct_mask: the resolved voids with an R_v whose centre lies inside the sphere of min(R_v, R_eff) of no
-deeper resolved void, one without R_v claiming its R_eff; the sample of the profiles and the abundance), the
-central delta, 'deep' (the central delta below config.DEEP_VOID_THRESHOLD: the sample the Explore map draws as
-ellipses, as plot/plot_ellipses_contour_3D.py does), each resolved void's fitted ellipsoid ('semi_axes_mpc'
-a >= b >= c; null where not resolved), the Hessian at every minimum ('eigenvalues_cells', signed, in cell units, and
-'ellipsoid_axes', its unit eigenvectors as rows, both in the semi-axes' order), and the frame and smoothing they were
-found at. Exit 1 with the
-reason on stderr when there is no catalogue (no grids, no snapshot header).
-
---smooth-mpc S finds the voids at a smoothing of S Mpc instead of the production one (the same physical scale in
-every box: the cross-box comparison), cached under that smoothing's own namespace; 'r_v_defs' carries every R_v
-definition the catalogue has (catalog.R_V_DEFINITIONS once it exists: 'crossing', 'delta08', 'ridge'). --csv PATH
-also writes the table of the voids (write_csv: centre, the R_v's, R_eff, delta, the flags), as the launcher's
-Explore map does for the voids it shows.
+--smooth-mpc S finds the voids at a smoothing of S Mpc (cached under its own namespace); 'r_v_defs' carries every
+R_v definition. --csv PATH also writes the table of the voids (write_csv).
 """
 
 import contextlib
@@ -80,10 +63,9 @@ _R_V_KEYS = ("r_v_settings", "r_v_cells", "r_v_delta08_cells", "r_v_ridge_cells"
 
 
 def r_v_stale(path) -> str | None:
-    """Why voids() would re-measure the radii of the cached catalogue at 'path' (the pipeline's own test,
-    pipeline.catalog_r_v_ok: the current R_v settings and all three radii), None when it reads them as they are. Only
-    the four keys are loaded (an npz loads per key), so the Runs tab's status stays cheap; testing for
-    'r_v_cells' alone would call a cache with older R_v settings, or none recorded, 'cached'."""
+    """Why voids() would re-measure the radii of the cached catalogue at 'path' (pipeline.catalog_r_v_ok: the
+    current R_v settings and all three radii), None when it reads them as they are. Only four keys are loaded,
+    so the Runs tab's status stays cheap."""
     import numpy as np
     from dtfelib import pipeline
     with np.load(path) as z:
@@ -99,8 +81,7 @@ def r_v_stale(path) -> str | None:
 
 # a catalogue that would not fit in memory at the grid's own resolution is found on the grid averaged in blocks of
 # 2 or 4 cells a side (coarsening), the smoothing kept in Mpc, while the smoothing spans at least this many of the
-# coarser cells: a 1024^3 set at the production 20 cells (86 GB) on its 512^3 average at 10 cells (11 GB), the same
-# field to the averaging's sigma^2 of a quarter of a fine cell against the smoothing's 400
+# coarser cells.
 COARSE_MIN_SIGMA_CELLS = 4.0
 
 
@@ -167,11 +148,8 @@ CSV_HEAD = ("void", "x_mpc", "y_mpc", "z_mpc")
 
 def write_csv(res: dict, path, rows=None, extra=None, extra_note: str = "") -> str:
     """The voids of an outlines() result as a CSV table (one row per void; 'rows' = the catalogue rows to write, all
-    by default): the centre (cell centre, Mpc), R_v (the 'crossing' definition) and every other R_v definition the
-    result has, R_eff, the central delta, resolved and distinct (0/1), then 'extra' columns ({name: values per
-    catalogue row}: the launcher's drawn ellipsoid, said by 'extra_note' in the '#' line). Empty fields where a value
-    is undefined. A '#' line first says the snapshot, the frame and the smoothing, so a quoted number can be traced
-    back."""
+    by default): the centre, R_v and every other R_v definition, R_eff, the central delta, resolved and distinct
+    (0/1), then 'extra' columns. A '#' line first says the snapshot, the frame and the smoothing."""
     import csv
     path = Path(path)
     n = len(res["centres_mpc"])
@@ -254,10 +232,8 @@ def outlines(sim, snap, prefix=None, data_root=None, method="auto", sigma_mpc=No
     # where not resolved
     semi = np.asarray(cat["semi_axes"], dtype=np.float64).reshape(-1, 3)
     semi_out = [s.round(6).tolist() if ok else None for s, ok in zip(semi, resolved)]
-    # the Hessian at EVERY minimum (the catalogue's, in cell units: d^2 delta / d cell^2): its eigenvalues signed, and
-    # its unit eigenvectors as rows, both in the order of the semi-axes above (|lambda| ascending:
-    # pipeline._ellipsoid_fits' argsort; for a resolved void the rows are its orientation columns). The launcher draws
-    # each minimum's ellipsoid where the quadratic fit reaches half its depth from them, resolved or not
+    # the Hessian at EVERY minimum (cell units): its eigenvalues signed, and its unit eigenvectors as rows, both in
+    # the order of the semi-axes above (|lambda| ascending). The launcher draws each minimum's ellipsoid from them.
     ev = np.asarray(cat["eigenvalues"], dtype=np.float64).reshape(-1, 3)
     order = np.argsort(np.abs(ev) + 1e-12, axis=1)
     ev = np.take_along_axis(ev, order, axis=1)

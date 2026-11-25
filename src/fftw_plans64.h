@@ -1,11 +1,6 @@
-/* Real <-> half-complex FFT plans with 64-bit sizes (3D, and any rank for the interlacing).
-
-   FFTW's ordinary planners (fftw_plan_dft_r2c_3d and kin) take int sizes, so a grid of more than
-   2^31 cells (1291^3) cannot be described to them. The 64-bit guru interface (FFTW manual,
-   "64-bit Guru Interface") describes the same row-major transform -- real (nx, ny, nz) to
-   half-complex (nx, ny, nz/2+1) and back -- with ptrdiff_t sizes and strides. For grids the
-   ordinary planners accept it is the same problem, planned the same way. Used by the T-web
-   (web_fields.cc) and the interlacing (interlacing.cc), in double and in float. */
+/* Real <-> half-complex FFT plans with 64-bit sizes (3D, and any rank for the interlacing): FFTW's ordinary planners
+   take int sizes, so grids above 2^31 cells need the 64-bit guru interface. Same row-major transform, in double and
+   float; used by the T-web (web_fields.cc) and the interlacing. */
 
 #ifndef DTFE_FFTW_PLANS64_HEADER
 #define DTFE_FFTW_PLANS64_HEADER

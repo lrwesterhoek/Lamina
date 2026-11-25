@@ -1,31 +1,4 @@
-"""Density power spectrum P(k): the estimators' grids against linear theory.
-
-For every snapshot: P(k) of rho/rho_bar - 1 from every estimator whose grids the snapshot has (the
-standard DTFE 'output.*' and the phase-space 'ps_output.*', or the --prefix given), the linear-theory
-P(k) of config.COSMOLOGY at that redshift (Eisenstein & Hu 1998 no-wiggle, sigma_8-normalised, D(z)^2;
-dtfelib.spectra), and their ratios. The Nyquist k = pi N / L is marked: the grid's sampling aliases the
-power above about half of it, and there is no assignment window to deconvolve (a DTFE grid is a cell
-average, not a CIC assignment), so the comparison is read below k_Ny / 2. With one estimator on disk
-the figure shows that one against linear theory and says so.
-
-The lowest bins hold a handful of modes (TNG100: 3, 6, 4, 3 independent complex modes in the first four), so
-ONE realisation scatters far from linear theory there: TNG100's 2 k_f bin (k = 0.113 /Mpc) sits at 0.09x
-linear -- 0.3% in the chi^2 tail -- and the SAME dip is in its z = 127 initial conditions (0.10x), while the
-PS-DTFE grid equals a plain particle CIC there to 0.1%. Hence: the error bars are the chi^2_M/M
-68% interval (not +-P sqrt(2/M), which is symmetric and far too narrow below at M = 6), the ratio panel shades
-the 95% cosmic-variance band where linear theory holds (Delta^2_lin < 1, the nonlinear scale: k < ~0.15 /Mpc at
-z = 0), and a
-third panel divides by the
-SAME realisation's early spectrum grown linearly (--ref-snap, default snapshot 0, z = 20): its phases and
-amplitudes cancel, so what is left is growth (1 where linear) -- the dip disappears there. The default
-binning stays 40 log bins (single |n| shells at low k); --n-bins 0 gives k_f-wide linear bins.
-
-Files: pk_<dtfe+ps | method | prefix>_z<z>.npz/.png; a non-default --n-bins adds '_nb<N>' and a non-default --ref-snap
-'_ref<S>' ('_noref' for -1) before the redshift, so a rerun with other bins never replaces the default.
-
-    python3 plot/plot_pk_compare.py --sim TNG100-3-Dark --snaps 99 50
-    python3 plot/plot_pk_compare.py --sim TNG50-4-Dark --snap 99 --estimator dtfe --n-bins 30
-"""
+"""Density power spectrum P(k): the estimators' grids against linear theory."""
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
 import config
@@ -70,19 +43,14 @@ def same_edges(a, b) -> bool:
 
 
 def chi2_interval(P, modes, lo=0.16, hi=0.84):
-    """The (lo, hi) interval of the true P given the measured P of a bin of 'modes' Hermitian-weighted modes
-    (P_hat / P ~ chi^2_M / M for a Gaussian field): P M / chi2.ppf(hi, M) .. P M / chi2.ppf(lo, M)."""
+    """P M / chi2.ppf(lo, M)."""
     m = np.asarray(modes, dtype=np.float64)
     return P * m / chi2.ppf(hi, m), P * m / chi2.ppf(lo, m)
 
 
 def plot_pk(ps, z, box, title, path, labels=None, note=None, ref=None):
     """The spectra of 'ps' ({method: power_spectrum dict}) against linear theory, with each estimator's own
-    k_Ny (dashed) and k_Ny/2 (dotted) when the grids differ in size (one grey pair when they agree), the
-    ratio panel on a LOG axis spanning the plotted bins (a linear 0-50 cap hid the bins below k_Ny/2 and
-    squashed the linear regime) with the 95% Gaussian band where linear theory holds, a note inside the axes
-    (titles are off under the house style); with ref = ({method: power_spectrum dict}, z_ref) a third panel,
-    P / [P_ref (D(z)/D(z_ref))^2] -- the same realisation, so its cosmic variance cancels."""
+    k_Ny (dashed) and k_Ny/2 (dotted) when the grids differ in size (one grey pair when they agree)."""
     labels = labels or LABEL
     ref_ps, z_ref = ref if ref else ({}, None)
     use_ref = z_ref is not None and abs(z_ref - z) > 1e-6 and any(

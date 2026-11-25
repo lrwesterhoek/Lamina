@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# The face sweep's geometry (src/CGAL_triangulation/face_sweep.h, the face method)
-# against exact references: tests/face_sweep_check.cpp (F1 sections integrate to the tetrahedron's volume and first
-# moments; F2 the pieces of a section add up to it; F3 Gauss on a Kuhn tessellation with a linear field, grid planes
-# on and off the vertex levels). Header-only: compiled here with $CXX (else clang++ on macOS, g++ elsewhere), no
-# binary or data needed.
+# The face sweep's geometry (src/CGAL_triangulation/face_sweep.h) against exact references (tests/face_sweep_check.cpp).
+# Header-only: compiled here with $CXX (else clang++ on macOS, g++ elsewhere); no binary or data needed.
 # Usage: tests/face_sweep_check.sh [--no-build]   (the flag is accepted for the battery; this always compiles)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

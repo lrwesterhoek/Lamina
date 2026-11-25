@@ -1,12 +1,7 @@
 /* Unit check of applyInterlacing (src/interlacing.cc), compiled by tests/interlacing_check.sh.
- *
- * Interlacing averages the grid with a second one computed half a cell further along every axis
- * (main.cpp shifts the region by +dx/2), after undoing that shift in Fourier space. For a band-limited
- * field the two grids hold EXACT samples, f(x_j) and f(x_j + dx/2), and the result must be f(x_j)
- * itself. The field mixes Fourier modes whose frequency is negative along x only, along y only, along
- * both, and along neither: FFTW stores a full axis's negative frequencies at index > N/2, so a phase
- * computed from the raw index is off by pi for them -- wrong for the first two kinds, right by
- * accident for the third (two sign flips). Exit status 0 = recovered to float rounding. */
+ * Interlacing averages the grid with a second one shifted half a cell, after undoing the shift in Fourier space; for a
+ * band-limited field the result must be f(x_j). The modes include negative frequencies along x only, y only, both and
+ * neither (FFTW stores them at index > N/2, so a phase from the raw index is off by pi). Exit 0 = recovered. */
 #include <cmath>
 #include <cstdio>
 #include <vector>

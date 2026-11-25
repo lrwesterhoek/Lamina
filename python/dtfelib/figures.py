@@ -1,9 +1,5 @@
-"""Figure styling and output for the plot scripts: colormaps, rcParams, colour norms,
-and save_figure (a figure saved where it belongs, its folder made first).
-
-Import as `from dtfelib import figures as style` (the scripts' alias). Reads config
-only at call time, so a test harness can patch config before running a script.
-"""
+"""Figure styling and output for the plot scripts: colormaps, rcParams, colour norms and save_figure.
+Import as `from dtfelib import figures as style`. Reads config only at call time."""
 
 from __future__ import annotations
 
@@ -83,11 +79,8 @@ from matplotlib import colors as _mcolors
 
 
 def plot_finite(ax, x, y, *fmt, **kw):
-    """Line+marker plot connected through FINITE samples only.
-
-    Sparse quantities (shape/orientation/environment exist only at snapshots with data on
-    disk) are NaN elsewhere; a plain plot() breaks the line at every NaN, leaving isolated
-    unreadable markers. Connecting the finite points keeps the time evolution legible."""
+    """Line+marker plot connected through FINITE samples only (sparse quantities are NaN elsewhere; a plain
+    plot() would break the line at every NaN)."""
     x, y = _np.asarray(x, dtype=float), _np.asarray(y, dtype=float)
     ok = _np.isfinite(x) & _np.isfinite(y)
     return ax.plot(x[ok], y[ok], *fmt, **kw)
@@ -260,10 +253,8 @@ def robust_vmax(data) -> float:
 
 
 def symmetric_limits(data, pct: float | None = None) -> tuple[float, float]:
-    """(-m, m) for a diverging map centred on 0 (a divergence, an eigenvalue): m = the 'pct' (default
-    config.PERCENTILE_CLIP[1]) percentile of the finite |values|; (-1, 1) when the slice is empty or all
-    zero, so imshow never gets vmin == vmax. A percentile pair (1, 99) of the signed values would put 0 off
-    centre whenever the slice is skewed (plot_DTFE's divergence map)."""
+    """(-m, m) for a diverging map centred on 0: m = the 'pct' (default config.PERCENTILE_CLIP[1]) percentile of
+    the finite |values|; (-1, 1) when the slice is empty or all zero, so imshow never gets vmin == vmax."""
     a = _finite(data)
     m = float(_np.percentile(_np.abs(a), config.PERCENTILE_CLIP[1] if pct is None else pct)) if a.size else 0.0
     if not m > 0 and a.size:            # a MOSTLY-zero slice: its percentile is 0, its few values are not
@@ -316,12 +307,9 @@ def save_figure(fig, path: str | Path, dpi: float | None = None, **kwargs) -> No
 
 # ---------------------------------------------------------------- slice maps in the house style
 # plot_DTFE.py, plot_PS_DTFE.py and plot_cosmic_web.py draw their maps as thin calls of slice_map / slice_row,
-# sharing one font, SHOW_TITLES, the colour maps and ranges, and the axis-label and DPI constants. The scripts keep
-# their transposes (the data is passed rows-as-vertical, as imshow wants it), their file names and their choices of
-# which maps to write; the house style is: serif text and no titles (SHOW_TITLES), lowercase axis letters from
-# config.SLICE_PLANES, ONE rule per quantity (the web colours of plot_cosmic_web, the eigenvalue triptychs on
-# norm_signed_log at the field's linthresh), and the density/streams colour floors (set_bad / set_under at the map's
-# lowest colour) applied by both scripts.
+# sharing one font, SHOW_TITLES, the colour maps and ranges, and the axis-label and DPI constants. Style: serif
+# text, no titles, lowercase axis letters from config.SLICE_PLANES, ONE rule per quantity, and the density/streams
+# colour floors (set_bad / set_under at the map's lowest colour).
 from .io import STREAM_TOL as _STREAM_TOL
 
 MAP_LABELS = {
@@ -365,9 +353,8 @@ def cmap_floored(name: str) -> _mcolors.Colormap:
 
 def norm_log_range(data, fixed: tuple | None = None, floor: float = 1e-6) -> _mcolors.LogNorm | None:
     """A LogNorm for a positive field: 'fixed' = (vmin, vmax) with a None end taken from the slice's own
-    log_limits; None only when an end must come from a slice with no positive value (a caller with a fixed
-    range checks for an empty slice itself: plot_DTFE / plot_PS_DTFE.plot_density). The explicit range
-    wins over config.FIELD_LIMITS (norm_positive_log's lookup): the map scripts pass DENSITY_MAP_RANGE."""
+    log_limits; None only when an end must come from a slice with no positive value. The explicit range wins
+    over config.FIELD_LIMITS."""
     own = log_limits(data, floor)
     lo, hi = (None, None) if fixed is None else fixed
     if (lo is None or hi is None) and own is None:

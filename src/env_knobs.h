@@ -1,17 +1,8 @@
-/* The environment variables the binaries read (README.md 'Environment variables of the binaries' and
-   metal/README.md 'Knobs' list each one). Every read goes through these helpers, so one rule holds everywhere:
-   - an EMPTY value is the same as an unset one (for every kind of value);
-   - a flag is off when set to 0, false, no or off (in any case) and on when set to anything else (flag(n, true): a
-     switch that is on by default, which only those values turn off);
-   - a tristate (a switch with an automatic default: DTFE_FACE_GRADIENT, the velocity gradient's route,
-     DTFE_EXACT_AVERAGE, a pin of the '_a' average, --exact or --sampled, and DTFE_GPU, a pin of the device, 1 as
-     --gpu and 0 the CPU -- the drivers' name; the compile-time macro of that name is another thing, and a string
-     literal is not expanded; both binaries read all three, and the flags beat them) is -1 while unset or set to
-     auto, else the flag;
-   - a number is the value read by std::atol / std::atof; the caller checks its range and keeps its default otherwise.
-   Each variable has one name; PS_GPU_CHUNK and standard DTFE's DTFE_GPU_CHUNK are two variables (one counts
-   tetrahedra, the other work items). Plain C++17 with no other header of the project, so any translation unit can
-   include it. */
+/* The environment variables the binaries read (the README's table lists each one). Every read goes through these
+   helpers, so one rule holds: an EMPTY value is an unset one; a flag is off for 0, false, no, off (any case), else on;
+   a tristate (DTFE_FACE_GRADIENT, DTFE_EXACT_AVERAGE, DTFE_GPU) is -1 while unset or auto, else the flag (the
+   command-line flags beat it); a number is read by std::atol / std::atof and range-checked by the caller.
+   Plain C++17 with no other project header. */
 #ifndef DTFE_ENV_KNOBS_H
 #define DTFE_ENV_KNOBS_H
 

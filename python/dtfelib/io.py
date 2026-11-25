@@ -1,45 +1,6 @@
-"""Unified loader for DTFE / PS-DTFE raw field grids.
-
-One class, FieldSet, hides everything that differs between the two estimators so every
-analysis/plot script works with either method unchanged:
-
-  * file naming        ps_output.a_den  vs  output.a_den   (method='ps' | 'dtfe' | 'auto')
-  * DENSITY UNITS      PS-DTFE writes PHYSICAL density (1e10 Msun / Mpc^3, box mean ~2.66 for
-                       TNG50-x-Dark); standard DTFE writes density NORMALIZED TO THE BOX MEAN
-                       (rho/rho_bar, mean ~1, from factor=(NO_DIM+1)/averageDensity in
-                       triangulation.cpp). FieldSet.density(units=...) converts either way using
-                       rho_bar derived from the snapshot header, so scripts never see the
-                       difference. Files produced before the h-free unit overhaul of
-                       combined_*.hdf5 are stale and should be regenerated.
-  * metadata           grid N inferred from file size; box size [Mpc], redshift, h, particle
-                       mass/count read from the snapshot's combined_*.hdf5 header (kills the
-                       hardcoded BOX_SIZE / FIELD_RESOLUTION / REDSHIFT constants).
-  * availability       PS-only fields (streams, dispersion, ...) raise a clear error under
-                       method='dtfe'; use .has(name) to branch.
-  * same name, other   the velocity-GRADIENT family (gradient, divergence, shear, vorticity,
-    quantity           vweb) is the gradient of the mean velocity under DTFE and under a PS-DTFE
-                       run with the face gradient (its default where the run qualifies:
-                       FieldSet.face_gradient), but the stream average of each stream's own
-                       gradient <grad v> under a PS-DTFE run without it; the two agree
-                       only in single-stream cells (see the note above FIELDS). load(name,
-                       mean_field=True) gives the DTFE quantity for both. The fold-caustic
-                       flag of older grids is per sample and low: take it
-                       from FieldSet.fold_mask(), never from the raw 'caustic' grid.
-  * memory             load() AUTO-TUNES against the machine: fields within the load budget
-                       (DTFE_PY_LOAD_FRAC x available RAM; DTFE_PY_RAM_GB overrides) read
-                       eagerly, bigger ones return a read-only memmap. Per-plane
-                       access via load_slice(), streaming via iter_slabs()/field_stats() --
-                       a 1024^3 velGrad (38.6 GB) plots and summarizes at MB-level RSS.
-
-Usage:
-    fs = FieldSet("$DTFE_DATA_ROOT/TNG50-4-Dark/snapdir_099")                   # auto-detect method
-    rho   = fs.density(units="mean")            # rho/rho_bar for BOTH methods
-    v     = fs.load("velocity")                 # (N,N,N,3) km/s
-    v1    = fs.velocity_single_stream()         # velocity, NaN unless single-stream (PS only)
-    div   = fs.load("divergence", mean_field=True)  # div<v> for BOTH methods (PS: stored, or by FFT of 'velocity')
-    if fs.has("streams"): s = fs.load("streams")
-    print(fs)                                   # method, grid, box, z, rho_bar
-"""
+"""Unified loader for DTFE / PS-DTFE raw field grids: FieldSet hides what differs between the estimators (file
+naming, density units, metadata from the combined_*.hdf5 header, PS-only fields, the velocity-gradient family)
+and load() auto-tunes eager vs memmap reads. Usage: FieldSet(snapdir).density(units="mean"), .load("velocity")."""
 
 from __future__ import annotations
 
@@ -48,54 +9,19 @@ from pathlib import Path
 
 import numpy as np
 
-# canonical field name -> (file suffix, components, ps_only)
-# The 'a_' averaged prefix is inserted automatically (averaged=True default).
-#
-# PS-DTFE STORES THE MEAN FLOW'S grad<v> BY DEFAULT where the run qualifies (the exact deposit, no halo release, 3D;
-# the face gradient): such a run writes '.a_velDivStreams' beside the
-# family, FieldSet.face_gradient is True and load(name, mean_field=True) returns the stored grid. Its unaveraged
-# ('_u') grids carry no marker of their own: their route is the run's, read from its run log (run_face_gradient).
-# What follows holds for a run without it ('--per-tet-gradient', the sampled deposit, the halo release, 2D, and the
-# runs of an older binary: from before that default, or with mass-weighted moments).
-#
-# THE VELOCITY-GRADIENT FAMILY UNDER PS-DTFE: 'gradient', 'divergence',
-# 'shear', 'vorticity' and the V-web ('vweb', 'vweb_eigenvalues', classified from that gradient with
-# the Hoffman thresholds) hold, in a multi-stream cell, the STREAM AVERAGE OF EACH STREAM'S OWN
-# GRADIENT <grad v> = sum_s w_s grad(v_s) / sum_s w_s (w_s = the stream's Eulerian volume in the cell,
-# PS-DTFE's weighting; its mass in an older run made without --ps-volume-weighted) -- NOT the gradient of the
-# mean velocity grad<v> that standard DTFE (one single-valued field) stores. The two agree in
-# single-stream cells only (deep void interiors agree to <1.5%); in folds they differ in sign and
-# size: the inverted stream inside a wall has a POSITIVE divergence (in 1-D dv/dx = Ddot psi'/(1 +
-# D psi') changes sign with the Jacobian, and diverges at the caustic) while the mean velocity
-# converges onto the wall. Consequences, measured on TNG100-3-Dark z=1:
-#   * the box mean of 'divergence' is NOT 0 (DTFE's is, by Gauss on a periodic single-valued field):
-#     with volume weights the box mean of divergence * streams is the growth rate of the total
-#     stream volume, (1/V_box) d(sum_tets V_tet)/dt (the two agree to 4%: 159.7 vs 154.0 u-units);
-#   * the PS V-web finds almost no filaments or nodes (void/wall/filament/node 62.9/35.3/1.78/0.005%
-#     against DTFE's 54.2/39.0/6.62/0.20%) -- a different quantity, not a worse estimate;
-#   * a velocity-divergence--density relation from PS grids needs an intercept or the single-stream
-#     mask (velocity_single_stream / single_stream_mask): multi-stream cells add +12 to +56 km/s/Mpc.
-# Compare PS with DTFE stored gradients in single-stream cells only -- or compare the MEAN-FIELD quantity:
-# FieldSet.load(name, mean_field=True) returns, for every name of MEAN_FIELD_NAMES, the derivatives
-# of the mean velocity grad<v> under BOTH methods: standard DTFE's stored grid as it is, and for PS-DTFE the
-# spectral (FFT) derivatives of its 'velocity' grid with the binary's components, units and V-web normalisation
-# (dtfelib/fields.py, mean_field_derivatives: applied to a standard run's own a_vel it reproduces the binary's
-# a_velDiv to correlation 0.995-0.998 and its V-web label in 96.5-98.4% of the cells, tests/py_meanfield_test.py;
-# on a PS run the divergence's box mean is 0 again and the V-web finds filaments where the stored one does not).
-# FieldSet.mean_field() computes it from the velocity grid for either method. The figure scripts that set PS
-# beside DTFE or theory use it for PS by default ('--ps-gradient stored' restores the stored grids; dtfelib/cli.py):
-# plot_velDiv_den, plot_cosmic_web, plot_web_streams, plot_shear_triaxial, plot_DTFE and plot_halo_tracking
-# (through environment.sample_fields_at), and the launcher's Explore (its 'PS velocity derivatives'
-# choice, the mean field by default: fields.mean_field_plane, one slice at a time). The raw-field viewer
-# plot_PS_DTFE shows the stored PS grids.
+# canonical field name -> (file suffix, components, ps_only); the 'a_' averaged prefix is inserted automatically.
+# Velocity-gradient family under PS-DTFE: a face-gradient run (the default where it qualifies) stores the MEAN flow's
+# grad<v> and writes '.a_velDivStreams' (FieldSet.face_gradient); any other run stores the STREAM AVERAGE <grad v>,
+# which differs from standard DTFE's in folds. load(name, mean_field=True) gives the mean-field derivatives for BOTH
+# methods (fields.mean_field_derivatives); '--ps-gradient stored' restores the stored grids.
 FIELDS = {
     "density":           ("den",           1, False),
     "velocity":          ("vel",           3, False),
     "streams":           ("streams",       1, True),
-    "hidden_streams":    ("hidden_streams", 1, True),  # bitmask: bit 1 = multi-stream volume the stream count does not show (a folded tetrahedron overlaps the cell while '.streams' reads 1 -- a fold thinner than the sampling; exact in a periodic box), bit 2 = the cell holds mass from a tetrahedron none of whose sub-samples lies in it (a quadrature note, usually the SAME stream). Single-stream mask = streams==1 and not (hidden_streams & 1): velocity_single_stream does it. An output with '.unresolved' instead holds a 0/1 mass flag there (read as bit 1: conservative; see LEGACY_SUFFIX); an output with neither counts those tets in '.streams'
-    "caustic":         ("caustic",       1, True),   # 0/1 fold-caustic cell flag (--ps-caustics): tetrahedra of BOTH orientations overlap the cell. Geometric (the det<0 half is the separating-axis overlap test, the raw '.hidden_streams' bit 1); older grids set it only where a folded tetrahedron deposited a sample and miss every fold thinner than the sampling (TNG100-3-Dark z=1: 21.0% of the cells against the exact 33.6%; ~2x low at z>=3). Read the fold with FieldSet.fold_mask() (= caustic_is_fold(mask, streams=, hidden=)), exact for either kind of grid
-    "caustic_class":     ("causticClass",  1, True),   # --ps-caustics (CPU or GPU): caustic stratification bitmask. bit0/1 = a det(J)>0 / det(J)<0 tetrahedron overlaps the cell (both = fold, i.e. '.caustic'; bit1 is the geometric overlap, per sample in older grids -- see 'caustic'), bits 2-5 = a tetrahedron with 0/1/2/3 collapsed axes deposited a sample here (1 = wall, 2 = filament, 3 = node; PER SAMPLE, so they depend on nSub and a fold thinner than the sampling shows only the k of the streams around it, typically k = 0 -- bit 0 and bits 6-8 are per sample too), bit6 = two eigenvalues coincide AT ZERO (umbilic/D4 INDICATOR, not a D4 identification; both halves matter -- merely coincident eigenvalues occur throughout caustic-free volume), bit7 = the A3 CUSP indicator and bit8 = the A4 SWALLOWTAIL indicator, both present only under '--ps-caustic-cusps'. See src/CGAL_triangulation/ps_caustic_class.h; decode with caustic_collapse_max() / caustic_is_fold() / caustic_is_cusp() / caustic_is_swallowtail()
-    "tet_touch":         ("tetTouch",      1, True),   # --exact (the exact deposit): raw count of tetrahedra touching the cell (geometric multiplicity, runs to hundreds -- NOT a stream count; use 'streams' for that)
+    "hidden_streams":    ("hidden_streams", 1, True),  # bitmask: bit 1 = multi-stream volume the stream count does not show (a fold thinner than the sampling), bit 2 = mass from a tetrahedron none of whose sub-samples lies in the cell. Single-stream mask = velocity_single_stream; '.unresolved' outputs hold a 0/1 mass flag instead (read as bit 1)
+    "caustic":         ("caustic",       1, True),   # 0/1 fold-caustic cell flag (--ps-caustics): tetrahedra of BOTH orientations overlap the cell. Older grids miss folds thinner than the sampling: read the fold with FieldSet.fold_mask()
+    "caustic_class":     ("causticClass",  1, True),   # --ps-caustics: caustic stratification bitmask (bits 0/1 parity = fold, 2-5 collapsed axes, 6 umbilic indicator, 7 A3 cusp, 8 A4 swallowtail; per sample); see src/CGAL_triangulation/ps_caustic_class.h and io.caustic_collapse_max / caustic_is_fold
+    "tet_touch":         ("tetTouch",      1, True),   # --exact: raw count of tetrahedra touching the cell (NOT a stream count; use 'streams')
     "dispersion":        ("velDisp",       1, True),
     "dispersion_tensor": ("velDispTensor", 6, True),   # xx,xy,xz,yy,yz,zz
     "divergence":        ("velDiv",        1, False),   # PS: grad<v> (face gradient) or <grad v> (note above FIELDS)
@@ -106,11 +32,9 @@ FIELDS = {
     "tweb_eigenvalues":  ("twebEig",       3, False),
     "vweb":              ("velVweb",       1, False),   # PS: from grad<v> (face gradient) or <grad v> (see FIELDS)
     "vweb_eigenvalues":  ("velVwebEig",    3, False),   # PS: from grad<v> (face gradient) or <grad v> (see FIELDS)
-    # the face gradient (PS: its default where the run qualifies, or --face-gradient):
-    # the run's velocity-gradient family above is then the MEAN flow's grad<v> (from exact face sums), and this one
-    # holds the divergence of the stream average <grad v>, the family of a run without it; these three its gradient,
-    # shear and vorticity, each where the run wrote the mean flow's (the bytes a
-    # '--per-tet-gradient' run writes as 'gradient', 'shear', 'vorticity'). load(name, stream_average=True) reads them
+    # the face gradient: the velocity-gradient family above is then the MEAN flow's grad<v> (from exact face sums),
+    # and this one holds the divergence of the stream average <grad v>; these three its gradient, shear and
+    # vorticity, each where the run wrote the mean flow's. load(name, stream_average=True) reads them
     "divergence_streams": ("velDivStreams", 1, True),
     "gradient_streams":   ("velGradStreams", 9, True),
     "shear_streams":      ("velShearStreams", 5, True),
@@ -123,9 +47,8 @@ FIELDS = {
 _PREFIX = {"ps": "ps_output.", "dtfe": "output."}
 
 # The velocity-gradient family load(..., mean_field=True) serves (fields.MEAN_FIELD_NAMES, kept here too so that
-# importing io never needs scipy), and the V-web threshold of a run whose log does not say it: the run scripts'
-# LAMBDA_TH default (run_dtfe.sh / run_ps_dtfe.sh pass --lambda-th 0.3; the binary's own default is 0.3 too, an older
-# binary's was 0, which its T-web report in the log names).
+# importing io never needs scipy), and the V-web threshold of a run whose log does not say it (the run scripts'
+# LAMBDA_TH default: 0.3).
 MEAN_FIELD_NAMES = ("gradient", "divergence", "shear", "vorticity", "vweb", "vweb_eigenvalues")
 DEFAULT_LAMBDA_TH = 0.3
 # The family load(..., stream_average=True) serves: the stream average <grad v> under either gradient route
@@ -149,42 +72,17 @@ CAUSTIC_SWALLOWTAIL = 1 << 8
 
 
 def caustic_is_cusp(mask):
-    """Boolean mask of the A3 CUSP indicator (bit 7) of a 'caustic_class' / '.pts_caustic' grid.
-
-    Only ever set when the run passed '--ps-caustic-cusps' (CPU deposit); otherwise all False.
-
-    TREAT THIS AS A CANDIDATE MAP, NOT A CLASSIFICATION. The condition is that the critical
-    eigenvalue of the deformation tensor stops varying along its own null direction, and the
-    gradient it needs does not exist inside a tetrahedron where the deformation is constant -- it is
-    estimated by least squares over the tetrahedra sharing a vertex with each near-fold tetrahedron.
-    On a 1-D Zel'dovich wave whose caustic is two parallel planes, and which therefore has NO cusps
-    anywhere, about 0.01% of the fold cells are still flagged (7% with a fit over only the
-    four face neighbours). Good enough to map, but it remains an indicator at the tessellation's
-    resolution rather than a pointwise A3 identification.
-    """
+    """Boolean mask of the A3 CUSP indicator (bit 7) of a 'caustic_class' / '.pts_caustic' grid. Only set when the
+    run passed '--ps-caustic-cusps'. A CANDIDATE MAP, not a classification: the gradient it needs is a least-squares
+    estimate over neighbouring tetrahedra, at the tessellation's resolution."""
     import numpy as np
     return (np.asarray(mask).astype(np.int64) & CAUSTIC_CUSP) != 0
 
 
 def caustic_is_swallowtail(mask):
-    """Boolean mask of the A4 SWALLOWTAIL indicator (bit 8) of a 'caustic_class' grid.
-
-    Set only when the run passed '--ps-caustic-cusps', which computes bits 7 and 8 from the same
-    stencil; otherwise all False.
-
-    PROXIMITY, NOT MEMBERSHIP -- more strongly than for the cusp bit. A4 points are codimension 3,
-    so they are isolated and generically lie inside no tetrahedron. The bit marks the neighbourhood
-    along the cusp curve where the second derivative of lambda_c along its null direction has
-    dropped to the stencil's noise floor, over a band whose width is a fixed fraction of the stencil
-    radius -- it shrinks with the tessellation, never with a tolerance.
-
-    Measured on 1-D waves with known strata: an exact A4 lights 74.5% of the cusp cells, a pure A3
-    (the hard control, genuinely tangent too) 0.5%, a generic A2 fold none -- a factor ~146.
-
-    NOT a subset of caustic_is_cusp(): near a true swallowtail lambda_c varies as the CUBE of the
-    distance along the null direction, which the cusp bit's linear fit reads as a spurious slope, so
-    it stays off there. OR the two if you want the whole A3-and-above skeleton.
-    """
+    """Boolean mask of the A4 SWALLOWTAIL indicator (bit 8) of a 'caustic_class' grid (same '--ps-caustic-cusps'
+    run). PROXIMITY, not membership: A4 points are isolated, so the bit marks a band along the cusp curve.
+    Not a subset of caustic_is_cusp(); OR the two for the whole A3-and-above skeleton."""
     import numpy as np
     return (np.asarray(mask).astype(np.int64) & CAUSTIC_SWALLOWTAIL) != 0
 
@@ -193,40 +91,9 @@ _FOLD_SLAB_CELLS = 16 << 20     # caustic_is_fold's slab size in cells (a module
 
 
 def caustic_is_fold(mask=None, streams=None, hidden=None, tol: float | None = None):
-    """Boolean mask of the fold (A2) condition: tetrahedra of BOTH orientations overlap the cell/point.
-
-    mask only: BOTH parity bits set in a 'caustic_class' / '.pts_caustic' mask -- identical to the 0/1
-    '.caustic' grid of the same run. Exact for point masks and for grids whose
-    det<0 bit is the geometric overlap (the current binary's). NOT for older grids: their bits are set only
-    where a folded tetrahedron deposited a SAMPLE, so every fold thinner than the sampling is missed
-    (TNG100-3-Dark z=1: 21.0% of the cells against 33.6%, about 2x low at z >= 3, and nSub-dependent).
-
-    streams (and hidden): THE fold definition for grids, exact for either kind of grid:
-
-        fold = (streams > 1 + tol)  |  (hidden_streams & 1)  [ | both parity bits of mask ]
-
-    In a periodic box the Lagrangian->Eulerian map has degree 1, so a point is multi-stream exactly where a
-    folded (det<0) tetrahedron covers it, and then positive ones cover it too: "a folded tetrahedron
-    overlaps the cell" IS the fold flag. '.hidden_streams' bit 1 holds exactly that overlap (the binary's
-    separating-axis test) wherever '.streams' reads single-stream, and '.streams' > 1 implies it everywhere
-    else, so the union is the geometric flag. On the TNG100-3-Dark z=1
-    grids no '.caustic' cell lies outside it (33.6% of the cells), and tests/ps_caustic_class_check.sh (J) checks
-    that the binary's '.caustic' equals it cell for cell. Either streams grid works ('.streams' with '.hidden_streams',
-    or the averaged 'a_' pair: both reduce to the same overlap). With 'mask' given its fold cells are OR-ed in, which
-    never changes the result (they lie inside the union) but keeps it whole if a grid is missing.
-
-    Caveats. Periodic runs only: a non-periodic sheet has an edge whose image can overlap without folding,
-    and there '.hidden_streams' bit 1 also carries the conservative mass flag, so the union over-flags. A
-    cell that '.streams' counts twice without a fold -- the Lagrangian periodic seam's double cover, a few
-    hundred cells per snapshot in older outputs -- reads as fold here. Outputs with '.unresolved'
-    store a 0/1 mass flag there (read as bit 1: over-flags); outputs without either grid leave only
-    streams > 1 (per sample: under-flags, like an older '.caustic').
-
-    Inputs may be read-only memmaps of any size: the work runs in axis-0 slabs, so the only full-size array
-    is the boolean result (1 byte per cell). The streams test is single_stream_mask's own float32 arithmetic
-    (s - 1 > tol), so ~single_stream_mask(streams, hidden) == fold | (streams < 1 - tol): every cell that is
-    neither single-stream nor empty is a fold cell.
-    """
+    """Boolean mask of the fold (A2) condition: tetrahedra of BOTH orientations overlap the cell/point. fold =
+    (streams > 1 + tol) | (hidden_streams & 1) [| both parity bits of mask]: in a periodic box a point is multi-stream
+    exactly where a folded tetrahedron covers it. Periodic runs only; inputs may be memmaps (axis-0 slabs)."""
     import numpy as np
     pair = CAUSTIC_PARITY_POS | CAUSTIC_PARITY_NEG
     if streams is None:
@@ -263,12 +130,8 @@ def caustic_is_fold(mask=None, streams=None, hidden=None, tol: float | None = No
 
 
 def caustic_collapse_max(mask):
-    """Highest collapse multiplicity k present in each cell of a 'caustic_class' grid.
-
-    k counts the principal axes along which the sheet has already collapsed and inverted:
-    0 = single-stream/uncollapsed, 1 = wall/pancake, 2 = filament, 3 = node. Cells with no
-    collapse bit at all (never deposited into) come back as -1.
-    """
+    """Highest collapse multiplicity k present in each cell of a 'caustic_class' grid: 0 = single-stream,
+    1 = wall, 2 = filament, 3 = node; -1 where nothing was deposited."""
     import numpy as np
     m = np.asarray(mask).astype(np.int64)
     out = np.full(m.shape, -1, dtype=np.int8)
@@ -276,15 +139,11 @@ def caustic_collapse_max(mask):
         out = np.where((m & bit) != 0, np.int8(k), out)
     return out
 
-# Velocity-derived fields are stored in Gadget u-units (u = v_pec/sqrt(a)): the binaries
-# difference the snapshot velocities verbatim. FieldSet.load() converts them to peculiar
-# km/s by scaling with a**exp -- exp = 0.5 for first moments (velocity and its spatial
-# derivatives), 1.0 for second moments (the dispersion is a velocity VARIANCE), in one
-# place for every consumer: raw u-units are 1/sqrt(a) inflated at high z (4.6x at
-# z=20). At z=0 the factor is exactly 1.0, so the values there are the raw ones bit for bit.
-# NOT listed: vweb/vweb_eigenvalues -- the BINARY applies sqrt(a) itself
-# (scaling here would double-correct); tweb is density-based; caustic/streams/tetTouch are
-# dimensionless.
+# Velocity-derived fields are stored in Gadget u-units (u = v_pec/sqrt(a)). FieldSet.load() converts them to
+# peculiar km/s by scaling with a**exp: 0.5 for first moments, 1.0 for second moments (the dispersion is a
+# velocity VARIANCE). At z=0 the factor is exactly 1.0 (bit for bit). NOT listed: vweb/vweb_eigenvalues -- the
+# BINARY applies sqrt(a) itself (scaling here would double-correct); tweb, caustic, streams, tetTouch are
+# dimensionless or density-based.
 _VELOCITY_SCALE_EXP = {
     "velocity": 0.5, "divergence": 0.5, "shear": 0.5, "vorticity": 0.5, "gradient": 0.5,
     "divergence_streams": 0.5, "gradient_streams": 0.5, "shear_streams": 0.5, "vorticity_streams": 0.5,
@@ -292,22 +151,16 @@ _VELOCITY_SCALE_EXP = {
     "dispersion": 1.0, "dispersion_tensor": 1.0,
 }
 
-# Tolerance for comparing 'streams' against an integer multiplicity. '.streams' is a float32
-# under every deposit -- the sampled one carries a sub-sample mean, the exact one the analytic
-# volume-weighted multiplicity -- so an exact '== 1' test is never correct (it would mask the whole
-# grid under --exact (the exact deposit), where single-stream cells land on 1.0 +/- float32 eps).
+# Tolerance for comparing 'streams' against an integer multiplicity: '.streams' is a float32 under every deposit,
+# so an exact '== 1' test is never correct.
 STREAM_TOL = 1e-3
 
 
 # ---------------------------------------------------------------- machine awareness
-# The C++ side auto-tunes against the machine (src/auto_tune.h); these are the Python
-# loader's equivalents. FieldSet.load(mode="auto") returns an eager ndarray
-# whenever the field fits the budget -- memmap only kicks in where an eager load would
-# swap (1024^3 velGrad is 38.6 GB).
-#
-# Env overrides (mirroring the binary's DTFE_RAM_GB style; also what makes tests deterministic):
-#   DTFE_PY_RAM_GB     available-RAM override in GB
-#   DTFE_PY_LOAD_FRAC  fraction of available RAM one eager load may use (default 0.5)
+# The Python loader's equivalent of the C++ auto-tune (src/auto_tune.h): FieldSet.load(mode="auto") returns an
+# eager ndarray whenever the field fits the budget, else a memmap. Env overrides (also what makes tests
+# deterministic): DTFE_PY_RAM_GB (available-RAM override in GB), DTFE_PY_LOAD_FRAC (fraction of available RAM
+# one eager load may use, default 0.5).
 
 def _available_ram_bytes() -> int:
     """Available (not total) RAM in bytes, best effort across platforms."""
@@ -364,14 +217,9 @@ _MOMENTS_LINE = r"^\s*velocity moments\s+:\s+volume-weighted"
 
 
 def run_velocity_weighting(method: str, runlog) -> tuple[str, str]:
-    """How the velocity grid of a 'method' run whose log is 'runlog' was deposited, and how that is known:
-    ('volume' | 'mass', why) (FieldSet.velocity_weighting). A coarser view of it must be the mean a coarser run of
-    the SAME deposit gives: the plain block mean of a volume-weighted grid, sum rho v / sum rho of a mass-weighted
-    one. Standard DTFE's cell-averaged velocity is the volume average. PS-DTFE volume-weights its velocity moments
-    in every run, and its run log says so in the header line 'velocity moments : volume-weighted'; an older binary
-    printed no such line and volume-weighted only when its command carried '--ps-volume-weighted', so a log with
-    neither is an older run's, mass-weighted. The header line is read first: a log that carries it is never read as
-    mass-weighted for want of the flag. Without the log the volume weighting is assumed, and said."""
+    """How the velocity grid of a 'method' run whose log is 'runlog' was deposited: ('volume' | 'mass', why). A coarser
+    view must be the mean a coarser run of the SAME deposit gives. A PS log with neither the header line 'velocity
+    moments : volume-weighted' nor the flag is an older mass-weighted run; without the log, volume is assumed, and said."""
     import re
     if method != "ps":
         return "volume", "standard DTFE: the volume average"
@@ -389,10 +237,8 @@ def run_velocity_weighting(method: str, runlog) -> tuple[str, str]:
 
 
 def run_lambda_th(runlog) -> float:
-    """The web threshold of the run whose log is 'runlog' (FieldSet.lambda_th; the launcher's Explore reads its
-    outputs' logs with it): the last '--lambda-th X' in it, as written (the binary's command line on the 'RUNNING:'
-    line run_dtfe.sh / run_ps_dtfe.sh write), else the binary's own T-web report '(lambda_th = X)', else
-    DEFAULT_LAMBDA_TH (0.3, the run scripts' default; also for a log that cannot be read)."""
+    """The web threshold of the run whose log is 'runlog': the last '--lambda-th X' in it, else the binary's own
+    T-web report '(lambda_th = X)', else DEFAULT_LAMBDA_TH (0.3; also for a log that cannot be read)."""
     import re
     try:
         text = Path(runlog).read_text(errors="replace")
@@ -417,16 +263,9 @@ _FACE_OFF_FOR_A_PASS = "'--face-gradient' is off for this pass"
 
 
 def run_face_gradient(runlog) -> bool:
-    """Did the PS-DTFE run whose log is 'runlog' take the face gradient? FieldSet.face_gradient asks it for the
-    unaveraged ('_u') grids, which no file marks: the binary writes the stream average's divergence
-    ('.a_velDivStreams', the marker of the '_a' grids) for the '_a' pass only (src/input_output.cc). The route is
-    the run's, one for both passes (src/CGAL_triangulation/ps_interpolation.cc fx.face: the run's route, its exact
-    deposit and a field built on the gradient), so the header's last 'velocity gradient' line
-    names it for the '_u' grids too: 'from EXACT FACE sums' for the face gradient. False without the log or one
-    that cannot be read, for a log without that line (a PS-DTFE binary before its face-gradient default
-    printed none), and where a pass's face sums found no
-    fixed-point unit (that pass kept the stream average and the warning does not say which; with False
-    load(name, mean_field=True) still gives the mean flow, from the velocity grid)."""
+    """Did the PS-DTFE run whose log is 'runlog' take the face gradient? The unaveraged ('_u') grids carry no
+    marker, so the route is read from the header's last 'velocity gradient' line ('from EXACT FACE sums'). False
+    without the log, without that line, or where a pass's face sums found no fixed-point unit."""
     import re
     try:
         text = Path(runlog).read_text(errors="replace")
@@ -469,10 +308,9 @@ class FieldSet:
             raise FileNotFoundError(f"snapshot directory not found: {self.snapdir}")
         self.averaged = averaged
         if prefix is not None:
-            # alternate on-disk prefix (run_ps_dtfe.sh's OUTPUT_PREFIX override), e.g.
-            # prefix='ps_mw' reads ps_mw.a_den etc. Only the PS run script can write
-            # alternate prefixes, so method 'auto' resolves to 'ps'; pass method='dtfe'
-            # explicitly for a hand-produced standard-DTFE set.
+            # alternate on-disk prefix (run_ps_dtfe.sh's OUTPUT_PREFIX override), e.g. 'ps_mw'. Only the PS run
+            # script writes alternate prefixes, so method 'auto' resolves to 'ps'; pass method='dtfe' for a
+            # hand-produced standard-DTFE set.
             prefix = prefix.rstrip(".") + "."
             self.method = "ps" if method == "auto" else method
         else:
@@ -525,13 +363,9 @@ class FieldSet:
 
     @property
     def face_gradient(self) -> bool:
-        """Did this PS run store the MEAN flow's velocity derivatives itself (the face gradient, exact face sums:
-        PS-DTFE's default where the run qualifies, or '--face-gradient')? Its marker is the
-        stream-average divergence it writes beside them ('.a_velDivStreams'). The unaveraged grids (averaged=False)
-        have no marker on disk (the binary writes it for the '_a' pass only): there the run log's route decides,
-        one route for both passes (run_face_gradient; a log of a binary before the PS-DTFE face default names none,
-        so such a folder reads False). Standard DTFE: False (its stored derivatives are the mean flow's
-        anyway)."""
+        """Did this PS run store the MEAN flow's velocity derivatives itself (the face gradient)? Marker: the
+        stream-average divergence '.a_velDivStreams'; the unaveraged grids have no marker, so the run log's route
+        decides (run_face_gradient). Standard DTFE: False."""
         if self.method != "ps":
             return False
         try:
@@ -542,10 +376,8 @@ class FieldSet:
         return not self.averaged and run_face_gradient(self.snapdir / f"{self.prefix}runlog")
 
     def has(self, name: str, mean_field: bool = False, stream_average: bool = False) -> bool:
-        """Is the grid on disk? mean_field=True asks whether load(name, mean_field=True) can serve it: under
-        PS-DTFE that needs the 'velocity' grid (the mean field is derived from it), under standard DTFE the stored
-        grid itself. stream_average=True asks the same of load(name, stream_average=True): a face-gradient run's
-        '_streams' grid, any other run's stored grid."""
+        """Is the grid on disk? mean_field=True asks whether load(name, mean_field=True) can serve it (PS-DTFE needs
+        the 'velocity' grid); stream_average=True the same for load(name, stream_average=True)."""
         if mean_field and stream_average:
             raise ValueError("mean_field=True and stream_average=True ask for two different quantities: give one")
         if stream_average and self.method == "ps" and self.face_gradient and name in STREAM_AVERAGE_NAMES:
@@ -612,11 +444,8 @@ class FieldSet:
     # ------------------------------------------------------------------ loading
     @property
     def velocity_scale(self) -> float:
-        """sqrt(a): the u-units -> peculiar km/s factor for FIRST velocity moments.
-
-        Second moments (the dispersion) scale with its square, a. load() applies these
-        automatically per _VELOCITY_SCALE_EXP; exactly 1.0 at z=0.
-        """
+        """sqrt(a): the u-units -> peculiar km/s factor for FIRST velocity moments (second moments scale with a).
+        load() applies these per _VELOCITY_SCALE_EXP; exactly 1.0 at z=0."""
         return float(np.sqrt(1.0 / (1.0 + self.meta.redshift)))
 
     def _scale_factor32(self, name: str) -> np.float32 | None:
@@ -645,35 +474,10 @@ class FieldSet:
 
     def load(self, name: str, scaled: bool = True, mode: str = "auto", mean_field: bool = False,
              stream_average: bool = False) -> np.ndarray:
-        """Field as stored on disk, shape (N,N,N) or (N,N,N,ncomp) -- with velocity-derived
-        fields converted from Gadget u-units to peculiar km/s (see _VELOCITY_SCALE_EXP;
-        a no-op at z=0). Pass scaled=False for the raw on-disk numbers.
-
-        mode='auto' (default) AUTO-TUNES the read against the machine, mirroring the
-        binary's auto_tune: a field within the load budget (DTFE_PY_LOAD_FRAC x available
-        RAM, DTFE_PY_RAM_GB overrides detection) is read eagerly --
-        scaling happens IN PLACE on the freshly read buffer, so there is no second
-        full-grid copy -- while a larger one comes back as a READ-ONLY np.memmap that the
-        kernel pages against the file (velGrad at 1024^3 is 38.6 GB; slicing and reductions
-        work, writes raise). mode='ram' / mode='memmap' force either path.
-
-        A memmap cannot carry the u-units factor without materializing the cube, so an
-        over-budget field that NEEDS scaling (velocity-derived, z>0) raises MemoryError
-        naming the escape hatches: load_slice() for plot planes, iter_slabs() for
-        streaming statistics, scaled=False for raw u-units, or mode='ram' to accept the
-        memory hit. At z=0 (every factor exactly 1) memmap serves ANY field.
-
-        mean_field=True (names of MEAN_FIELD_NAMES only): the derivatives of the MEAN velocity grad<v>,
-        the quantity standard DTFE stores, whatever the method -- the stored grid under standard DTFE (exactly what
-        load(name) returns), under PS-DTFE the stored grid of a face-gradient run (face_gradient), else
-        mean_field(name) computed from the 'velocity' grid instead of the stored stream average <grad v> (the note
-        above FIELDS). Same units and layout as the stored grids; the computed grid is always an in-memory array
-        ('mode' does not apply to it).
-
-        stream_average=True (names of STREAM_AVERAGE_NAMES only): the stream average <grad v> under either gradient
-        route -- a PS face-gradient run's '_streams' grid (FIELDS: 'gradient_streams', ...; the bytes a
-        '--per-tet-gradient' run stores under the plain name), any other PS run's stored grid (which is that average),
-        a standard run's stored grid (one stream). The opposite of mean_field=True: give one of the two."""
+        """Field as stored on disk, shape (N,N,N) or (N,N,N,ncomp), velocity-derived fields converted from Gadget u-units
+        to peculiar km/s (scaled=False: raw). mode='auto' reads eagerly within the load budget, else a READ-ONLY memmap
+        ('ram' / 'memmap' force either); an over-budget field needing scaling raises MemoryError. mean_field=True /
+        stream_average=True: the mean-flow / stream-average velocity derivatives (MEAN_FIELD_NAMES / STREAM_AVERAGE_NAMES)."""
         if mode not in ("auto", "ram", "memmap"):
             raise ValueError(f"mode must be 'auto', 'ram' or 'memmap', got {mode!r}")
         if stream_average:
@@ -736,27 +540,14 @@ class FieldSet:
 
     @property
     def lambda_th(self) -> float:
-        """The web threshold this output was classified with: the '--lambda-th X' of its run log '<prefix>runlog'
-        (the binary's command line, which run_dtfe.sh / run_ps_dtfe.sh write on its 'RUNNING:' line), else the
-        binary's own T-web report '(lambda_th = X)' in that log, else DEFAULT_LAMBDA_TH (0.3, the run scripts'
-        default). mean_field() classifies its V-web with it, so a PS mean-field V-web uses its own run's threshold."""
+        """The web threshold this output was classified with (run_lambda_th of its run log '<prefix>runlog', else
+        DEFAULT_LAMBDA_TH). mean_field() classifies its V-web with it."""
         return run_lambda_th(self.snapdir / f"{self.prefix}runlog")
 
     def mean_field(self, names, scaled: bool = True, lambda_th: float | None = None):
-        """The MEAN-FIELD velocity derivatives computed from this output's 'velocity' grid, for EITHER method
-        (load(name, mean_field=True) is the call that picks the stored grid for standard DTFE): the spectral
-        derivatives of the periodic velocity grid in the binary's layout (dtfelib/fields.py, mean_field_derivatives).
-
-        names: one name of MEAN_FIELD_NAMES (returns its grid) or a sequence of them (returns {name: grid}; asking
-        for several at once shares the FFTs, e.g. ('vweb', 'vweb_eigenvalues')). Units follow load(): the
-        gradient family scaled by sqrt(a) to peculiar km/s/Mpc (scaled=False: the binary's raw u-units/Mpc); the
-        V-web normalised as the binary does it, -sqrt(a)/(2 * 100 h) (g + g^T) with a = 1/(1+z) and h from the
-        snapshot header, classified with lambda_th (default: self.lambda_th, the run's own threshold).
-
-        The velocity grid is read through a memmap one component at a time and the work runs in float32 (float64 for
-        a DOUBLE=1 grid); fields.mean_field_peak_bytes() is the peak (512^3: divergence ~3.2 GB, V-web ~6.5 GB).
-        A grid whose estimate exceeds the available RAM (DTFE_PY_RAM_GB overrides the detection) raises
-        MemoryError rather than swapping. Periodic full-box grids only, as every FieldSet grid."""
+        """The MEAN-FIELD velocity derivatives computed from this output's 'velocity' grid, for either method
+        (fields.mean_field_derivatives). names: one name of MEAN_FIELD_NAMES (returns its grid) or a sequence (returns
+        {name: grid}). Units follow load(); classified with lambda_th. Raises MemoryError rather than swap."""
         from . import fields as _fields
         single = isinstance(names, str)
         wanted = (names,) if single else tuple(names)
@@ -782,18 +573,9 @@ class FieldSet:
 
     def load_slice(self, name: str, axis: int = 2, index: int | None = None,
                    scaled: bool = True) -> np.ndarray:
-        """One plane of a field -- shape (N,N) or (N,N,ncomp) -- WITHOUT loading the cube.
-
-        Reads via a read-only memmap and copies out only the requested plane, so peak
-        memory is one plane (4 MB at 1024^3) instead of the full grid (4.3-38.6 GB).
-        index=None takes the mid-plane, matching FieldSet.slice(). Same u-units ->
-        peculiar km/s scaling as load().
-
-        I/O note: the grids are row-major, so axis=0 planes are contiguous on disk (a
-        single small read); axis 1/2 planes are strided and stream through the file's
-        pages -- still bounded memory, just more read traffic. Either way nothing close
-        to the cube is ever resident.
-        """
+        """One plane of a field, shape (N,N) or (N,N,ncomp), WITHOUT loading the cube: a read-only memmap, copying
+        out only the plane. index=None takes the mid-plane. Same scaling as load(). axis=0 planes are contiguous
+        on disk; axis 1/2 planes are strided (more read traffic, same bounded memory)."""
         if not 0 <= axis <= 2:
             raise ValueError(f"axis must be 0, 1 or 2, got {axis}")
         n = self.grid_n
@@ -812,14 +594,9 @@ class FieldSet:
         return plane
 
     def iter_slabs(self, name: str, scaled: bool = True, max_bytes: int | None = None):
-        """Stream a field as (start, stop, slab) tuples of axis-0 slabs, each a SCALED,
-        writable ndarray -- bounded memory at any grid size, for statistics/histograms
-        over grids that must not be loaded whole.
-
-        Axis-0 slabs are contiguous on disk, so this is pure sequential I/O. Slab
-        thickness auto-tunes so one slab stays within max_bytes (default: 1/8 of the
-        load budget, at least one plane). Concatenating every slab reproduces
-        load(name, mode='ram') exactly, scaling included."""
+        """Stream a field as (start, stop, slab) tuples of axis-0 slabs, each a SCALED, writable ndarray: bounded
+        memory at any grid size. A slab stays within max_bytes (default 1/8 of the load budget, at least one
+        plane); concatenating every slab reproduces load(name, mode='ram')."""
         mm = self._open_memmap(name)
         n = self.grid_n
         row_bytes = int(np.prod(mm.shape[1:], dtype=np.int64)) * mm.dtype.itemsize
@@ -852,17 +629,9 @@ class FieldSet:
         return {"n": cnt, "min": mn, "max": mx, "mean": mean, "std": var ** 0.5}
 
     def density(self, units: str = "mean") -> np.ndarray:
-        """Density with METHOD-INDEPENDENT units.
-
-        units='mean'     -> rho / rho_bar   (dimensionless; 1 = cosmic mean)
-        units='physical' -> 1e10 Msun / Mpc^3 (comoving, h-free)
-
-        The on-disk convention is AUTO-DETECTED from the grid's own mean (mass conservation
-        pins it to either 1 or rho_bar): current binaries write rho/rho_bar for BOTH methods;
-        older PS files store the physical mass density and load correctly too. A grid whose mean matches neither
-        convention (e.g. standard DTFE outputs from before the h-free unit overhaul) triggers a loud warning --
-        regenerate those with the current binary before using absolute values.
-        """
+        """Density with METHOD-INDEPENDENT units: units='mean' -> rho/rho_bar, 'physical' -> 1e10 Msun/Mpc^3
+        (comoving, h-free). The on-disk convention is auto-detected from the grid's own mean; a grid matching
+        neither (an outdated standard-DTFE output) triggers a loud warning."""
         raw = self.load("density")
         conv = self._density_convention(raw)
         if units == "mean":
@@ -888,34 +657,9 @@ class FieldSet:
         return guess
 
     def velocity_single_stream(self) -> np.ndarray:
-        """Velocity (N,N,N,3) km/s with NaN wherever the stream multiplicity differs from 1.
-
-        PS-DTFE only (raises ValueError under method='dtfe'). In single-stream regions the
-        multi-stream velocity reduces to the standard DTFE flow, so this isolates the cold,
-        single-valued flow (void interiors) from multi-stream walls and caustics.
-
-        The mask is a TOLERANCE (|streams - 1| > 1e-3), never an exact float equality: only
-        the sampled deposit's raw grid holds integers. Under '--exact' (the exact deposit) '.streams'
-        is the analytic volume-weighted multiplicity (1/V_cell) sum V_int -- a float32 that
-        sits at 1.0 +/- eps in single-stream cells, so an '!= 1' test masked the whole grid.
-        The plateau is sharp either way (the pancake check finds every single-stream cell
-        inside 1e-5 of 1.0), so 1e-3 admits float noise without admitting real structure.
-
-        Which grid is masked follows this FieldSet: averaged=True uses the fractional
-        'a_streams' sub-sample mean (any partially multi-stream cell is masked too);
-        averaged=False uses the raw '.streams' grid.
-
-        Cells with bit 1 of 'hidden_streams' set are masked as well: multi-stream volume that
-        '.streams' does not show. '.streams' counts sub-samples, so a folded sliver too thin to
-        catch one (a collapsed wall crossing a cell) deposits mass and momentum there without
-        raising the count. The flag is geometric and exact in a periodic box -- a point is
-        multi-stream exactly where a folded tetrahedron covers it -- so every cell this keeps
-        is single-stream at every point, and none is dropped just for holding a small tet of
-        its own stream (bit 2, which the mask ignores). Outputs with '.unresolved' instead store a
-        conservative 0/1 mass flag, which reads as bit 1; outputs without either grid
-        count such tets +1 in '.streams', so the streams test alone is correct
-        there.
-        """
+        """Velocity (N,N,N,3) km/s with NaN wherever the stream multiplicity differs from 1. PS-DTFE only (ValueError
+        under method='dtfe'). The mask is a TOLERANCE (|streams - 1| > 1e-3), never an exact float equality; cells with
+        bit 1 of 'hidden_streams' set are masked as well. averaged=True uses 'a_streams', False the raw '.streams'."""
         if self.method != "ps":
             raise ValueError("velocity_single_stream() needs PS-DTFE outputs (method='ps'); "
                              "the stream-count field is only produced by PS-DTFE")
@@ -929,17 +673,9 @@ class FieldSet:
         return vel
 
     def fold_mask(self) -> np.ndarray:
-        """bool (N,N,N): the fold-caustic cells of this PS output -- a folded (det<0) tetrahedron overlaps the
-        cell, so it holds several streams -- EXACT for older and current grids alike, whatever their
-        '.caustic' (see caustic_is_fold: streams > 1 + tol, or '.hidden_streams' bit 1, OR the class mask's
-        fold bits when the run wrote one). Use this, never the raw 'caustic' grid, wherever a fold fraction is
-        measured: an older '.caustic' is set per deposited sample and ~1.6x low at z=1, ~2x at z>=3.
-
-        Needs no '--ps-caustics' grid at all: every current PS output carries 'streams' and
-        'hidden_streams'. Which pair is read follows this FieldSet (averaged=True: 'a_streams' with
-        'a_hidden_streams'); both give the same overlap. An output without a streams grid falls back to the
-        class mask's parity bits or the 0/1 'caustic' grid, with that grid's own (in older grids: per-sample) meaning.
-        Grids are opened as memmaps and reduced in slabs: the result is the only full-size array."""
+        """bool (N,N,N): the fold-caustic cells of this PS output (see caustic_is_fold: streams > 1 + tol, or
+        '.hidden_streams' bit 1, OR the class mask's fold bits). Use this, never the raw 'caustic' grid, wherever a
+        fold fraction is measured. Needs no '--ps-caustics' grid; grids are reduced in slabs from memmaps."""
         if self.method != "ps":
             raise ValueError("fold_mask() needs PS-DTFE outputs (method='ps'): standard DTFE has no streams")
         mask = self.load("caustic_class", mode="memmap") if self.has("caustic_class") else None
@@ -974,13 +710,9 @@ class FieldSet:
 
 def plane_geometry_matches(side: dict, center=None, planes: int = 1, thickness: float = 2.0,
                            supersample: int = 1, window=None) -> bool:
-    """Does an image-plane sidecar (tools/make_image_plane.py's .json) describe this geometry?
-    run_ps_pipeline.sh regenerates a plane whose sidecar differs -- which makes every snapshot's
-    slice stale -- and the launcher predicts that, so both ask here. The centre counts only when
-    one is given (None = whatever the file has, as the script treats an unset CENTER); a sidecar
-    without 'supersample' predates the option (K = 1); the thickness matters only across several
-    planes; 'window' is (u0, u1, v0, v1) in Mpc, None (or None entries) = the whole box. Pixel
-    count and axis are not compared: the file name carries them."""
+    """Does an image-plane sidecar (tools/make_image_plane.py's .json) describe this geometry? run_ps_pipeline.sh
+    regenerates a plane whose sidecar differs, and the launcher predicts that. The centre counts only when one is
+    given; a sidecar without 'supersample' means K = 1; 'window' is (u0, u1, v0, v1) in Mpc."""
     try:
         box = float(side["box"])
         if center is not None and abs(float(side["center"]) - float(center)) > 1e-9:
@@ -998,22 +730,9 @@ def plane_geometry_matches(side: dict, center=None, planes: int = 1, thickness: 
 
 
 class PointPlane:
-    """Point-evaluated image plane: the '<prefix>.pts_*' outputs of a '--sample-points' run
-    on a plane generated by tools/make_image_plane.py, plus that tool's JSON sidecar.
-
-    Grid-free continuous-field maps: each field is returned as the CENTRAL sampled plane,
-    a (nv, nu[, c]) array at the plane file's pixel resolution. Units mirror FieldSet.load:
-    velocities (and the velocity gradient) are scaled by sqrt(a) to peculiar km/s [/Mpc],
-    the dispersion (a velocity VARIANCE) by a; density is rho/rho_bar; exact no-op at z=0.
-
-        pp = PointPlane(snapdir / "ps_output", simdir / "hires_plane_z8192.json")
-        rho = pp.field("density")          # (nv, nu)
-        div = pp.field("velDiv")           # from .pts_velGrad (--pts-vel-grad runs)
-
-    Derived names (velDiv/velShear/velVort) need '.pts_velGrad'; available() lists what the
-    on-disk files support. Files are float64 as written by the binary; no memmap is needed
-    (a single 8192^2 plane is ~0.5 GB).
-    """
+    """Point-evaluated image plane: the '<prefix>.pts_*' outputs of a '--sample-points' run on a plane from
+    tools/make_image_plane.py, plus its JSON sidecar. field(name) returns the CENTRAL sampled plane (nv, nu[, c]).
+    Units mirror FieldSet.load; derived names (velDiv/velShear/velVort) need '.pts_velGrad'; see available()."""
 
     #: field -> (file extension, components, u-unit scale exponent as in _VELOCITY_SCALE_EXP)
     _PTS_FIELDS = {
@@ -1046,10 +765,8 @@ class PointPlane:
         if project not in ("plane", "slab"):
             raise ValueError("project must be 'plane' or 'slab'")
         self.project = project
-        # The plane file is generated ONCE per simulation and reused for every snapshot, so
-        # its sidecar redshift belongs to whichever snapshot defined the geometry -- using it
-        # would apply the wrong sqrt(a) to every other snapshot's velocities. Authoritative
-        # order: explicit argument > this snapshot's own header > sidecar (last resort).
+        # The plane file is generated once and reused for every snapshot, so its sidecar redshift belongs to
+        # whichever snapshot defined it. Order: explicit argument > this snapshot's header > sidecar.
         if redshift is not None:
             self.redshift = float(redshift)
         else:
@@ -1092,10 +809,8 @@ class PointPlane:
         shape = (self.planes, self.nv * k, self.nu * k) + ((comps,) if comps > 1 else ())
         arr = raw.reshape(shape)
         if name == "caustic":
-            # A BITMASK must never be averaged: the mean of two masks is not a mask. Both
-            # reductions are a bitwise OR instead, which is exactly how the grid merges the
-            # same bits across partitions -- so a supersampled or slab plane reports "this
-            # pixel is covered by a tetrahedron with these properties", the intended meaning.
+            # A BITMASK must never be averaged: both reductions are a bitwise OR, as the grid merges the same bits
+            # across partitions, so a pixel reports "covered by a tetrahedron with these properties".
             arr = np.bitwise_or.reduce(arr, axis=0) if self.project == "slab" \
                   else arr[self.planes // 2]
             if k > 1:
@@ -1169,11 +884,9 @@ class PointPlane:
 
 
 def single_stream_mask(streams, hidden=None, tol: float = STREAM_TOL):
-    """Boolean (N,N,N): the cells that are single-stream -- |streams - 1| <= tol (the float contract of
-    '.streams': a sub-sample mean or the exact volume-weighted multiplicity, see velocity_single_stream)
-    AND, when a 'hidden_streams' grid is given, bit 1 clear (multi-stream volume the count does not show).
-    THE one rule: velocity_single_stream masks its complement, webstreams.stream_bins names its bins by it,
-    profiles samples it on the voids' shells."""
+    """Boolean (N,N,N): the single-stream cells, |streams - 1| <= tol, and, when 'hidden_streams' is given,
+    bit 1 clear. THE one rule: velocity_single_stream masks its complement, webstreams.stream_bins and
+    profiles.sample it."""
     import numpy as np
     s = np.asarray(streams, dtype=np.float32)
     out = np.abs(s - 1.0) <= tol

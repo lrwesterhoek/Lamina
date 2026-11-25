@@ -1,16 +1,11 @@
-// Part of src/CGAL_triangulation/ps_interpolation.cc, inside its #ifdef PHASE_SPACE: included once, in order, by
-// that file and compiled only as part of its object, never alone.
-// The tetrahedron-box overlap test (TetBoxSAT), the CPU deposit's thread count (psDepositThreads) and the count
-// of a straddling tetrahedron's samples beyond a non-periodic grid (psCountBeyondGrid).
+// Part of ps_interpolation.cc (included in order inside its #ifdef PHASE_SPACE, never compiled alone). The tet-box overlap
+// test (TetBoxSAT), the CPU deposit's thread count (psDepositThreads), the samples beyond a non-periodic grid (psCountBeyondGrid).
 
 namespace {
-/* Does a tetrahedron overlap an axis-aligned box with POSITIVE volume? The separating-axis test
-   over the 3 box normals, the 4 face normals and the 18 (edge x box axis) products, which is
-   complete for two convex polyhedra. Contact of zero volume (a shared face, edge or vertex) counts
-   as separated. Double throughout, in a frame relative to the tetrahedron's vertex 0; the tet's
-   projections and the box's projected half-widths depend only on the tet (all boxes are one grid
-   cell), so they are set once and each box costs one dot product per axis. Used by the '.hidden_streams'
-   multi-stream flag (see flippedFlag). */
+/* Does a tetrahedron overlap an axis-aligned box with POSITIVE volume? The separating-axis test over the 3 box normals, the 4 face
+   normals and the 18 edge x box-axis products (complete for two convex polyhedra); zero-volume contact counts as separated.
+   Double, in the frame of the tet's vertex 0; the tet's projections are set once (all boxes are one grid cell). Used by the
+   '.hidden_streams' multi-stream flag (flippedFlag). */
 struct TetBoxSAT
 {
     int n = 0;
@@ -82,14 +77,10 @@ static int psDepositThreads()
     return coresPerTeam( "DTFE_DEPOSIT_THREADS" );
 }
 
-// The samples of a straddling tetrahedron that lie BEYOND a non-periodic grid, counted for the sampled
-// deposit's share m / (in + beyond). Kept OUT of the deposit loop's lambda, not inlined, and handed
-// COPIES of the tetrahedron's state, on purpose: written inline, its nested lambdas would capture the
-// loop's hoisted locals by reference; as a function taking the loop's invD / vertex positions by
-// reference, their addresses would escape and every in-grid sample test -- every tetrahedron's hot path
-// -- would reload them from memory. Either costs the deposit several times what this counting takes. The
-// function keeps its own copy of the exact-test cache (rawPos / exactTet): at most one extra setup per
-// tetrahedron.
+// The samples of a straddling tetrahedron BEYOND a non-periodic grid, counted for the sampled deposit's share m / (in + beyond).
+// Kept OUT of the deposit loop's lambda and handed COPIES of the tet's state on purpose: inlined, its nested lambdas would capture
+// the loop's hoisted locals by reference, their addresses would escape and every in-grid sample test would reload them from
+// memory. It keeps its own copy of the exact-test cache (rawPos / exactTet): at most one extra setup per tetrahedron.
 struct PSBeyondGrid
 {
     size_t nGrid[NO_DIM];
@@ -122,13 +113,11 @@ static PSBeyondCount psCountBeyondGrid(PSBeyondGrid const &grid, PSBeyondTet con
     bool rawPosReady = false;
     psExactInside::TetTest exactTet;
     size_t nOutside = 0;
-    // The samples beyond the grid are only COUNTED, so they are taken one sample COLUMN at a time, along
-    // the tet's LONGEST window axis (fewest columns): along a column every barycentric is affine in the
-    // position, so the samples that clear tier 1's band by a margin on all four faces form one run,
-    // counted in bulk, and so do those that cannot be inside. Only the few in neither -- within the band
-    // of a face -- take the per-sample exact test below, so the count is exactly the per-sample one,
-    // whichever axis the columns run along. Only columns that HAVE samples beyond the grid and lie
-    // inside the tet's projection are visited. Short columns take the per-sample test.
+    // The samples beyond the grid are only COUNTED, so they go one sample COLUMN at a time along the tet's LONGEST window axis:
+    // along a column every barycentric is affine in the position, so samples clearing tier 1's band on all four faces form one
+    // run counted in bulk, and so do those that cannot be inside. Only the few within a face's band take the per-sample exact
+    // test below, so the count is exactly the per-sample one whichever axis the columns run along. Only columns that HAVE samples
+    // beyond the grid and lie inside the tet's projection are visited. Short columns take the per-sample test.
     int ax[NO_DIM] = { 0, 1, 2 };   // ax[2]: the column axis; ax[0] rows, ax[1] the inner loop
     {
         int best = 0;

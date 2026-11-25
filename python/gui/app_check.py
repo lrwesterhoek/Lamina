@@ -1,7 +1,5 @@
 """MainWindow's memory check (CheckMixin, moved from app.py): asking the binary's own auto-tuner what the
-Grids, Custom snapshot or Pipeline settings need per snapshot (one process per pass; a pipeline snapshot
-over budget is tried again at half the plane size), cancelling it, and the check-list lines its results
-give. The names app.py defines are read through _app, imported last (see app_tabs.py)."""
+Grids, Custom snapshot or Pipeline settings need per snapshot."""
 
 from __future__ import annotations
 
@@ -19,10 +17,8 @@ class CheckMixin:
     # ================================================================ memory check
     def check_memory(self):
         """Ask the binary's own auto-tuner (run_ps_dtfe.sh AUTO_TUNE_REPORT=1, or the binary's
-        --auto-tune-report for a custom snapshot) what the current Grids, Custom snapshot or Pipeline
-        settings need per snapshot. For the pipeline, a snapshot over budget is
-        checked again at half the plane size, down to 1024^2 -- which is both the suggestion shown
-        and, with 'Adaptive', the plan the pipeline then runs."""
+        --auto-tune-report for a custom snapshot) what the current Grids, Custom snapshot or
+        Pipeline settings need per snapshot."""
         if self._mcheck is not None:            # the button reads "Cancel check"
             self._cancel_check()
             return
@@ -51,7 +47,6 @@ class CheckMixin:
                 return
         else:
             return
-        # the settings as they are NOW: a change during the check must not mix into its later passes
         spec = (rs.RunSpec.from_dict(self.spec.to_dict()) if tab == _app.GRIDS
                 else rs.CustomSpec.from_dict(self.custom.to_dict()) if tab == _app.OWN
                 else rs.PipelineSpec.from_dict(self.pipe.to_dict()))
@@ -198,7 +193,7 @@ class CheckMixin:
                 else:
                     fits.append(r)
             if fits and not unchecked:
-                big = max(fits, key=lambda r: r["predicted_gb"])      # (the budget is measured live, per check)
+                big = max(fits, key=lambda r: r["predicted_gb"])
                 out.append(("ok", f"memory: all {len(fits)} snapshot{'s' if len(fits) != 1 else ''} fit (the "
                                   f"largest needs ~{big['predicted_gb']:.0f} of its {big['budget_gb']:.0f} GB budget)"))
             elif unchecked and (s.slice_plane or s.grid >= 512):

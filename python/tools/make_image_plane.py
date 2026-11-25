@@ -1,27 +1,16 @@
 """Generate a '--sample-points' input for high-resolution slab images.
 
-The PS-DTFE field is continuous (piecewise linear over the tessellation), so image
-resolution is a *sampling* choice, not a grid property: this script writes the pixel
-centres of an nu x nv image, replicated on '--planes' equally spaced planes across a
-slab of '--thickness' centred at '--center' along '--axis', as the raw float64 N x 3
-binary that '--sample-points' auto-detects. A JSON sidecar records the geometry and
-snapshot metadata so plot/plot_pointeval_panels.py is self-configuring.
-
-Coordinates are in the box coordinate system the binary sees: header lengths divided
-by '--mpc-unit' (h-free Mpc for the merged TNG snapshots, which store h-free ckpc and
-run with --mpc-unit 1000; the synthetic test inputs use --mpc-unit 1).
+Writes the pixel centres of an nu x nv image, replicated on '--planes' equally spaced planes across a slab of
+'--thickness' centred at '--center' along '--axis', as the raw float64 N x 3 binary that '--sample-points'
+auto-detects, plus a JSON sidecar of the geometry. Coordinates are in the binary's box system (header lengths
+divided by '--mpc-unit').
 
     python3 tools/make_image_plane.py --sim TNG100-3-Dark --snap 99 \
         --axis z --center 55 --thickness 3 --planes 4 --nu 8192 -o plane_100_99
 
-    python3 tools/make_image_plane.py --combined "${TMPDIR:-/tmp}/dtfe-tests/ps_regression_test/ps_regression.hdf5" \
-        --mpc-unit 1 --nu 1024 -o /tmp/plane_test
-
     python3 tools/make_image_plane.py --same-as plane_100_99.json --planes 4 --thickness 3   # exit 0: same
-        (nothing written: does an existing plane's sidecar have this geometry? run_ps_pipeline.sh asks
-        before reusing a plane. Exit 0 = same, 3 = differs or the sidecar cannot be read (the script
-        then regenerates the plane, which makes every snapshot stale); any other status is a failure
-        of the tool itself -- bad input, a missing module -- and must not be read as 'differs'.)
+        (writes nothing: does an existing plane's sidecar have this geometry? Exit 0 = same, 3 = differs or
+        unreadable; any other status is a failure of the tool itself and must not be read as 'differs'.)
 """
 
 import argparse

@@ -28,7 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#if defined(__APPLE__) && !defined(PHASE_SPACE)
+#ifdef __APPLE__
 #include <mach-o/dyld.h>    // _NSGetExecutablePath
 #include <unistd.h>         // execv
 #endif
@@ -68,16 +68,12 @@ char const *dtfeBuildTime();
 static char const *const BINARY_NAME = DTFE_BINARY_BASE DTFE_BINARY_DIM DTFE_BINARY_PRECISION;
 
 
-#if defined(__APPLE__) && !defined(PHASE_SPACE)
-/* Standard DTFE on macOS runs with the allocator's large cache off: unless MallocLargeCache is set (an empty value is
-   unset), the program sets it to 0 and executes itself again, once, with the same arguments and in the same process
-   (libmalloc reads the variable only when a process starts). With the cache on, a freed block stays in the footprint
-   and serves only a later request of about its size: the partitions' arrays differ in size from one partition to the
-   next, so the footprint ratchets up over the partition loop (TNG50-3-Dark z=0 at 512^3 in 27 partitions, Exact on
-   the GPU: a peak footprint of 51.2 GB, 29.6 GB with the cache off, the grids byte-identical, the run up to 5% longer:
-   the freed memory comes back as fresh pages). MallocLargeCache=1 keeps the cache. PS-DTFE's memory model books the
-   cache's kept blocks (auto_tune/model.cc kAllocKeepBytes) and keeps it. If the executable cannot be found or run,
-   the run goes on as it is. */
+#ifdef __APPLE__
+/* On macOS both programs run with the allocator's large cache off: unless MallocLargeCache is set (an empty value is unset),
+   the program sets it to 0 and executes itself again, once, with the same arguments (libmalloc reads it only at process
+   start). With the cache on, a freed block under 4 GiB stays in the footprint and serves only a later request of about its
+   size, so the footprint ratchets up over a partition loop (the grids stay byte-identical). The memory models book the live
+   memory. MallocLargeCache=1 keeps the cache. If the executable cannot be run, the run goes on as it is. */
 static void dtfeAllocatorReexec(char *argv[])
 {
     if ( Env::isSet( "MallocLargeCache" ) )
@@ -97,14 +93,12 @@ static void dtfeAllocatorReexec(char *argv[])
 // Reads options/input, runs the interpolation (with optional interlacing), writes output, prints a run summary.
 int main( int argc, char *argv[] )
 {
-#if defined(__APPLE__) && !defined(PHASE_SPACE)
+#ifdef __APPLE__
     dtfeAllocatorReexec( argv );   // first: before anything is printed or opened
 #endif
 
-    // stderr line-buffered: each diagnostic line leaves in ONE write. Unbuffered, glibc (2.37 and later) stages an
-    // fprintf in 128-byte pieces, so a long line from one partition thread (the PS mass audit, GPU timing and retry
-    // lines that tests parse) could be cut by another thread's output in a log that holds both streams. Every
-    // stderr message ends in a newline, so none is held back; macOS writes a line whole either way.
+    // stderr line-buffered: each diagnostic line leaves in ONE write (unbuffered, glibc stages an fprintf in 128-byte pieces,
+    // so a long line from one partition thread could be cut by another thread's output in a log holding both streams).
     static char stderrBuffer[1 << 16];
     std::setvbuf( stderr, stderrBuffer, _IOLBF, sizeof stderrBuffer );
 
@@ -230,13 +224,10 @@ int main( int argc, char *argv[] )
 
         if ( !density1.empty() )
         {
-            // second pass: the grid moved by half a cell along every axis. Shifting 'region' alone is not
-            // enough: the pass-2 setup (updateEntries, DTFE_preparePadding, the PS path) resets it to the box
-            // when no '--region' was given, so pass 2 would grid the SAME cells (pass 1 low-passed, not
-            // de-aliased).
-            //   periodic: move the PARTICLES by -dx/2 instead (wrapped into the box), which is the same grid for
-            //     every estimator and needs no region: PS-DTFE refuses '--region' (it would crop an Eulerian box
-            //     of a Lagrangian tessellation), and its displacements are unwrapped modulo the box anyway
+            // second pass: the grid moved by half a cell along every axis. Shifting 'region' alone is not enough: the pass-2
+            // setup resets it to the box when no '--region' was given, so pass 2 would grid the SAME cells.
+            //   periodic: move the PARTICLES by -dx/2 instead (wrapped into the box): the same grid for every estimator,
+            //     no region needed (PS-DTFE refuses '--region', and its displacements are unwrapped modulo the box)
             //   non-periodic: a '--region' is required (checked above); shift it, it survives the setup
             User_options shiftedOptions = userOptions;
             shiftedOptions.interlace = false;  // guard against future re-entrant refactoring
@@ -349,10 +340,9 @@ int main( int argc, char *argv[] )
 #endif
                            maxRss/1.e9, (measured - predicted)/1.e9, 100.*(measured - predicted)/predicted );
             std::cout << MESSAGE::cYellowD() << "   memory model      : " << MESSAGE::cReset() << line << "\n" << std::flush;
-#ifndef PHASE_SPACE
-            // --scratch-dir: the standard plan books a partition's blocks of the threshold or more as memory, though
-            // they are scratch files, and leaves the full grids out (auto_tune.cc): the footprint counts neither
-            // file, the max RSS their resident pages
+            // --scratch-dir: both plans book a partition's blocks of the threshold or more as memory, though they are
+            // scratch files, and leave the full grids out (auto_tune.cc): the footprint counts neither file, the max
+            // RSS their resident pages
             if ( double const thr = userOptions.scratchThresholdBytes(); thr > 0. )
                 std::cout << "                       (--scratch-dir: the partitions' blocks of " << thr/1.e9
                           << " GB or more are in the prediction but in scratch files, which the "
@@ -363,7 +353,6 @@ int main( int argc, char *argv[] )
                              "prediction leaves out"
 #endif
                           << ")\n" << std::flush;
-#endif
         }
         // ... and the peak when the post-processing began: equal to the run's peak when the partition loop set it,
         // or the start-up before it (the full grids' sizing: their zero fill under --scratch-dir, run_progress.h)

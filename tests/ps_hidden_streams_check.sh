@@ -1,36 +1,7 @@
 #!/usr/bin/env bash
-# PS-DTFE '.hidden_streams' bit 1 is EXACT: a cell it leaves clear, with '.streams' == 1, is
-# single-stream at every point -- and it does not drop single-stream cells just because a
-# tetrahedron of their own stream is too small to hold a sub-sample.
-#
-# The flag (quantities.h) is geometric: a folded (negatively oriented) tetrahedron overlaps the
-# cell with positive volume. In a periodic box the map has degree 1, so a point is multi-stream
-# exactly where a folded tetrahedron covers it. Checked against two references that share no
-# code with the flag:
-#
-#  X) DENSE EXACT POINT EVALUATION: 4^3 points per cell (--sample-points, the exact SoS
-#     inside test). Every point of a cell with streams==1 and no bit 1 must be single-stream
-#     (0 violations, nSub=1 and nSub=3 grids). The cells a conservative mass flag would
-#     drop but bit 1 keeps are counted and must exist (else the test is vacuous).
-#  Y) THE EXACT DEPOSIT (--exact): its '.streams' is the analytic cell-mean stream
-#     count (1/V_cell) sum V(tet ^ cell), which is 1 iff the cell is single-stream almost
-#     everywhere. Unflagged single-stream cells must read 1 (to float rounding); EVERY cell
-#     whose multi-stream volume the samples missed (streams==1 but exact > 1) must be flagged;
-#     flagged cells must hold real multi-stream volume (exact deposit or a dense point).
-#  Z) SAME FLAG EVERYWHERE: serial vs --partition 2 2 2 and CPU vs GPU (a Metal build) give
-#     byte-identical '.hidden_streams' and '.streams' on both grids -- except the partitioned
-#     '.a_streams', a float sum of count/nSub^3 per partition (a few ulps).
-#
-# Two geometries just past shell crossing, where the walls are thinner than the sampling (the
-# case the flag exists for): the Zel'dovich pancake (plane folds, amplitude 1.05) and
-# --crossed-waves (3D folds, amplitude 1.3). 27 particles per axis on a 48^3 grid, so the
-# particle lattice and the sample lattices do not line up. On the crossed waves the samples miss
-# the walls of ~12k cells; a mass flag catches only ~40% of them.
-#
-# Usage:
-#   tests/ps_hidden_streams_check.sh              # build, run, check
-#   tests/ps_hidden_streams_check.sh --no-build
-# Requires the build toolchain plus python3 with numpy and h5py.
+# PS-DTFE '.hidden_streams' bit 1 is exact: a cell it leaves clear, with '.streams' == 1, is single-stream at every point.
+#   X dense exact point evaluation   Y the exact deposit   Z same flag serial vs --partition 2 2 2 and CPU vs GPU
+# Usage: tests/ps_hidden_streams_check.sh [--no-build]   (needs numpy and h5py)
 
 set -euo pipefail
 
@@ -162,10 +133,8 @@ for geo, title in (("pan", "pancake"), ("crw", "crossed waves")):
         else:
             check(f"Z serial == --partition 2 2 2 on {ext}", np.array_equal(a, b))
         if gpu and _os.environ.get("DTFE_TEST_PRECISION") == "double" and ext in (".streams", ".a_streams"):
-            # double build: the GPU gets float copies of the double tetrahedra (ps_double_check D5), so a
-            # sample on a face may count differently; both flag grids stay exact. '.streams' (one sample per
-            # cell) too: an exact match there depends on CGAL's vertex labelling (one crossed-wave cell can
-            # count 2 streams instead of 3 on the GPU while the CPU grids are bit-identical)
+            # double build: the GPU gets float copies of the double tetrahedra (ps_double_check D5), so a sample
+            # on a face may count differently; both flag grids stay exact
             g = load(f"{base}_gpu", ext)
             fr = float(np.mean(a != g)); d = float(np.abs(a.astype(np.float64) - g).max())
             check(f"Z CPU ~ GPU on {ext} (double build: float kernel geometry)", fr <= 1e-4,

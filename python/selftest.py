@@ -1,13 +1,6 @@
-"""Smoke test of the python analysis stack on a synthetic dataset.
-
-Builds a fake two-snapshot DTFE output set in a temp dir, then runs the compute phase and
-each core plot script against it. Every target runs in its OWN subprocess (fresh
-interpreter), so matplotlib/numpy memory is returned to the OS after each step --
-peak RSS stays at a single script's footprint instead of accumulating across all of
-them. The child mode (--run-one) applies the config overrides and runs one target.
-
-    python3 python/selftest.py
-"""
+"""Smoke test of the python analysis stack on a synthetic dataset: builds a fake two-snapshot DTFE output set in a
+temp dir, then runs the compute phase and each core plot script against it, every target in its OWN subprocess
+(--run-one is the child mode). Usage: python3 python/selftest.py"""
 
 import argparse
 import os
@@ -30,10 +23,8 @@ REDSHIFTS = {'000': 20.05, '099': 0.00}
 SIM = 'TNG50-3-Dark'
 BOX_CKPC = 51668.142899320934   # matches config.SIMULATION_BOX_MPC[SIM] (h-free ckpc)
 
-# The compute phase first (produces the caches the plots read); then the core figure
-# scripts. The tracking scripts (plot_PS_DTFE, plot_cosmic_web,
-# plot_halo_tracking, plot_void_*) need PS grids and/or
-# merger trees and are exercised by tests/py_dtfelib_test.py instead.
+# The compute phase first (produces the caches the plots read); then the core figure scripts. The tracking
+# scripts need PS grids and/or merger trees and are exercised by tests/py_dtfelib_test.py instead.
 # 'module:arg' runs the module's main() with that single CLI argument.
 TARGETS = [
     'analyze:compute',
@@ -87,10 +78,8 @@ def run_one(target, tmp):
     import matplotlib
     matplotlib.use('Agg')
 
-    # The data-root/simulation sandbox comes from the DTFE_DATA_ROOT / DTFE_SIM env vars
-    # set by the parent (config reads DTFE_SIM at import, dtfelib.cli reads DTFE_DATA_ROOT
-    # where data is needed, so pipeline paths and the --sim defaults all resolve inside
-    # tmp). Patch here only what has no environment hook.
+    # The data-root/simulation sandbox comes from the DTFE_DATA_ROOT / DTFE_SIM env vars set by the parent.
+    # Patch here only what has no environment hook.
     import config
     assert config.SIMULATION == SIM, "selftest child must run with DTFE_SIM set"
     config.FIELD_RESOLUTION = N

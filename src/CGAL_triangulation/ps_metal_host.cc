@@ -1,8 +1,6 @@
-/* Metal backend of the PS-DTFE GPU deposit (implements gpu_host.h). Owns the metal-cpp
-   implementation symbols for the whole binary; compiled only when METAL=1 (which defines
-   PS_GPU for the callers). The kernel source is embedded at build time (o_ps/ps_deposit_msl.h,
-   generated from metal/ps_deposit.metal) and runtime-compiled once, by the first deposit (pipes(), behind a
-   "#define PS_FX_WORDS 0" line: the 64-bit words); the pipeline states are cached. */
+/* Metal backend of the PS-DTFE GPU deposit (implements gpu_host.h), compiled only when METAL=1. Owns the metal-cpp symbols
+   for the whole binary; the kernel source is embedded at build time (o_ps/ps_deposit_msl.h) and runtime-compiled once, by
+   the first deposit (pipes(), behind a "#define PS_FX_WORDS 0" line); the pipeline states are cached. */
 
 #define NS_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
@@ -182,13 +180,10 @@ std::string gpuDeviceName()
 
 
 // ---- chunk-level checkpoints and the cause-aware retry policy ----
-// Every pass keeps a snapshot of the buffers its kernel writes (the accumulator grids, the exact items' sumW,
-// the per-tet masses the kernel negates when it defers a tet), taken at the pass's start and every
-// DTFE_GPU_CHECKPOINT_CHUNKS chunks; a failed buffer (which may have deposited part or all of its atomics)
-// restores the last snapshot and continues from its chunk, instead of redoing the WHOLE partition deposit
-// (gpu_metal_retry.h's header says why). The policy (GpuFault, the pace, the fault hook, GpuSnapshot) and its pass
-// loop, gpuRunPass, live in gpu_metal_retry.h, shared with the standard-DTFE host (dtfe_metal_host.cc);
-// psGpuDepositFields' runChunked below runs each pass through it.
+// Every pass snapshots the buffers its kernel writes (grids, the exact items' sumW, the per-tet masses the kernel negates
+// when it defers a tet) at its start and every DTFE_GPU_CHECKPOINT_CHUNKS chunks; a failed buffer (which may have deposited
+// part of its atomics) restores the last snapshot and continues from its chunk. The policy and its pass loop, gpuRunPass, live
+// in gpu_metal_retry.h, shared with the standard-DTFE host; psGpuDepositFields' runChunked runs each pass through it.
 namespace {
 
 #include "gpu_metal_retry.h"
@@ -235,20 +230,18 @@ PSHostBuffers psHostUploadBuffers(PSHostUploadArgs const& u, ZeroBuf& zeroBuf)
     size_t const nCell = u.nCell;
     MTL::Buffer* bV = c.dev->newBuffer(verts.data(),  verts.size()  * sizeof(float), MTL::ResourceStorageModeShared);
     std::vector<float>().swap(verts);
-    // vels is empty for density-only runs (kernel never reads it then): bind a dummy. Whether it
-    // is real matters at bind time: the per-chunk offset below must NOT be applied to the 4-byte
-    // dummy, or every chunk after the first binds past its end -- undefined behaviour that the
-    // kernel gets away with only because it never dereferences the pointer in that case.
+    // vels is empty for density-only runs (the kernel never reads it then): bind a dummy. Whether it is real matters at bind
+    // time: the per-chunk offset below must NOT be applied to the 4-byte dummy, or every chunk after the first binds past its
+    // end (undefined behaviour the kernel survives only because it never dereferences the pointer).
     bool const haveVels = not vels.empty();
     MTL::Buffer* bU = vels.empty() ? zeroBuf(4)
                     : c.dev->newBuffer(vels.data(), vels.size() * sizeof(float), MTL::ResourceStorageModeShared);
     std::vector<float>().swap(vels);
     MTL::Buffer* bM = c.dev->newBuffer(masses.data(), masses.size() * sizeof(float), MTL::ResourceStorageModeShared);
     std::vector<float>().swap(masses);
-    // per-tet vertex densities (fLinear, which the host does not set); dummy when the uniform deposit runs
-    // 'dens' carries either the per-tet vertex densities (fLinear) or, when fCaustic runs without
-    // fLinear, the per-tet caustic mask in slot 0. Either way the buffer is real and its per-chunk
-    // offset must be applied -- keyed on the vector being non-empty, not on fLinear.
+    // 'dens' carries either the per-tet vertex densities (fLinear, which the host does not set) or, when fCaustic runs without
+    // fLinear, the per-tet caustic mask in slot 0; dummy when neither. Either way a real buffer needs its per-chunk offset,
+    // keyed on the vector being non-empty, not on fLinear.
     bool const haveDens = not dens.empty();
     MTL::Buffer* bD = (haveDens)
                     ? c.dev->newBuffer(dens.data(), dens.size() * sizeof(float), MTL::ResourceStorageModeShared)
@@ -455,10 +448,9 @@ bool psGpuDepositFields(std::vector<float>& verts,
 
     NS::AutoreleasePool* pool = NS::AutoreleasePool::alloc()->init();
 
-    // --exact: split the work below the tet (depositExactItems in ps_deposit.metal), items of
-    // blockCells cells of a tet's window (psExactItemBounds in gpu_host.h), as the
-    // compact map psBuildExactItemMap. The items follow the caller's cost order, keeping a SIMD group's threads on
-    // similar work. DTFE_GPU_ITEMS=0 keeps the one-thread-per-tet kernel (A/B).
+    // --exact: split the work below the tet (depositExactItems), items of blockCells cells of a tet's window (psExactItemBounds)
+    // in the compact map psBuildExactItemMap, following the caller's cost order so a SIMD group's threads do similar work.
+    // DTFE_GPU_ITEMS=0 keeps the one-thread-per-tet kernel (A/B).
     bool useItems = fExact;
     useItems = useItems && Env::flag("DTFE_GPU_ITEMS", true);
     MTL::Buffer* bItems = nullptr;
@@ -470,21 +462,16 @@ bool psGpuDepositFields(std::vector<float>& verts,
                                         blockCells, bItems, nItems, ph });
 
     auto const tAsk = std::chrono::steady_clock::now();   // DTFE_GPU_TIMING: the wait for the queue, and its hold
-    // From here to the return this thread sleeps: first in the queue for the GPU, then in each buffer's
-    // waitUntilCompleted (its own work in the hold, the uploads and the copy-back, is a few percent of it). Its core
-    // is lent to the core pool for that time (thread_count.h: one helper more may be claimed), so the CPU work that
-    // follows the free cores can take it: the sub-grid merge and the normalization, and in a run that deposits a
-    // share of its partitions on the CPU ('--gpu-share', DTFE.cpp) their deposit teams. A claim on the pool
-    // never changes a result. (CoreLend: above.)
+    // From here to the return this thread sleeps: first in the queue for the GPU, then in each buffer's waitUntilCompleted. Its
+    // core is lent to the core pool for that time (thread_count.h), so CPU work that follows the free cores (the sub-grid merge,
+    // the normalization, the deposit teams of a '--gpu-share' run) can take it. A claim on the pool never changes a result.
     CoreLend const coreLend;
     std::unique_lock<std::mutex> lock(ctxMutex());   // serialize dispatches (single queue); let go after the releases
     auto const tGot = std::chrono::steady_clock::now();
     tPh = tGot;
 
-    // newBuffer(ptr,...) copies the host array into the MTL buffer; free each host array
-    // IMMEDIATELY so at most one array is double-held at a time (instead of all three, a
-    // multi-GB difference per partition at production scale). On failure the CPU fallback
-    // re-deposits from the triangulation, never from these arrays.
+    // newBuffer(ptr,...) copies the host array into the MTL buffer; each host array is freed IMMEDIATELY so at most one is
+    // double-held. On failure the CPU fallback re-deposits from the triangulation, never from these arrays.
     auto zeroBuf = [&](size_t bytes) {
         MTL::Buffer* b = c.dev->newBuffer(bytes, MTL::ResourceStorageModeShared);
         if (b) std::memset(b->contents(), 0, bytes);
@@ -504,8 +491,7 @@ bool psGpuDepositFields(std::vector<float>& verts,
         if (bSumW) std::memset(bSumW->contents(), 0, sumWBytes);
         else
         {   // too big for GPU-visible memory: the one-thread-per-tet kernel still works
-            bItems->release();
-            bItems = nullptr;
+            releaseBuffer(bItems);
             useItems = false;
         }
     }
@@ -513,28 +499,23 @@ bool psGpuDepositFields(std::vector<float>& verts,
     if (!bV || !bU || !bM || !bD || !bSc || !bP || !bMass || !bMassFx || !bMom || !bM2 || !bGrad || !bStr || !bMomW || !bCaust || !bSV || !bDV || !bDW || !bScal || !bSG || !bBad)
     {
         err = "Metal buffer allocation failed (out of GPU-visible memory?)";
-        for (MTL::Buffer* b : {bV,bU,bM,bD,bSc,bP,bMass,bMassFx,bMom,bM2,bGrad,bStr,bMomW,bCaust,bSV,bDV,bDW,bScal,bSG,bBad,bItems,bSumW}) if (b) b->release();
+        for (MTL::Buffer* b : {bV,bU,bM,bD,bSc,bP,bMass,bMassFx,bMom,bM2,bGrad,bStr,bMomW,bCaust,bSV,bDV,bDW,bScal,bSG,bBad,bItems,bSumW}) releaseBuffer(b);
         pool->release();
         return false;
     }
 
-    // Dispatch in CHUNKS, one short command buffer each, fully serialized with a host-side gap between
-    // buffers: the macOS GPU watchdog ("Impacting Interactivity") kills a long buffer when the display needs
-    // the GPU, and back-to-back buffers too, even ~0.1 s ones -- it reacts to starvation; the gaps let
-    // WindowServer in. The chunk size adapts toward pace.targetSec. A killed buffer may have deposited part of
-    // its atomics, so a failure resumes from the pass's last snapshot (runChunked below); the caller deposits
-    // the partition on the CPU only after a fatal error, 3 failures of one chunk or 16 in the deposit, or
-    // when no snapshot can be held. PS_GPU_CHUNK=<n> sets the per-tet kernel's starting
-    // chunk size.
+    // Dispatch in CHUNKS, one short command buffer each, serialized with a host-side gap between buffers: the macOS GPU
+    // watchdog kills a long buffer when the display needs the GPU, and back-to-back buffers too (it reacts to starvation); the
+    // gaps let WindowServer in. The chunk size adapts toward pace.targetSec. A killed buffer may have deposited part of its
+    // atomics, so a failure resumes from the pass's last snapshot; the caller deposits on the CPU only after a fatal error, 3
+    // failures of one chunk or 16 in the deposit, or when no snapshot can be held. PS_GPU_CHUNK=<n> sets the starting chunk size.
     size_t const MIN_CHUNK = fExact ? 50 : 2000;
     size_t const MAX_CHUNK = 500000;
-    // The exact items have a cap of their own, the run mode's (run_mode.h psItemCap). Under 500k items a buffer stays
-    // at a few tens of ms: the short buffers of gentle and balanced, with which the display never waited longer than a
-    // frame. Performance raises it to 4M, somewhat faster with the same grids, but the display may then wait several
-    // frames when something else wants the GPU. The chunk size changes no item's deposit, and the fixed-point sums do
-    // not depend on the order.
+    // The exact items have a cap of their own, the run mode's (run_mode.h psItemCap): the short buffers of gentle and balanced
+    // keep the display responsive, performance raises it at the cost of longer waits. The chunk size changes no item's deposit
+    // and the fixed-point sums do not depend on the order.
     size_t const MAX_CHUNK_ITEMS = runModeState().psItemCap;
-    GpuPace& pace = gpuPace();        // the run mode's target (0.25 s performance, 0.05 s otherwise), 8 ms gaps, until escalated
+    GpuPace& pace = gpuPace();        // the run mode's target and gaps, until escalated
     size_t baseChunk = psHostFirstChunk(fExact, pace.targetSec, MIN_CHUNK);
     std::string lastErr;
 
@@ -544,20 +525,16 @@ bool psGpuDepositFields(std::vector<float>& verts,
     std::vector<MTL::Buffer*> const gridBufs = { bMass, bMassFx, bMom, bM2, bGrad, bStr, bMomW, bCaust, bSV, bDV, bDW, bScal, bSG };
     GpuSnapshot snap;
     int nFailed = 0, nResumedCk = 0;   // failed buffers of this deposit, and how many resumed from a periodic checkpoint
-    // The shares the non-finite guard dropped in this deposit, by slot (ps_deposit_params.h
-    // psFixedShareOk): each pass zeroes its counter words before a command buffer and adds them here after one that
-    // succeeded, and a restore rolls these sums back to the held snapshot's -- so a failed buffer (which may have
-    // counted part or all of its shares) and the redone ones count once. Handed to the run's counters only when
-    // the deposit is kept (a CPU fallback deposits, and counts, the partition itself).
+    // The shares the non-finite guard dropped in this deposit, by slot (psFixedShareOk): each pass zeroes its counter words
+    // before a command buffer and adds them here after one that succeeded, and a restore rolls these sums back to the snapshot's,
+    // so failed and redone buffers count once. Handed to the run's counters only when the deposit is kept.
     unsigned long long badRun[FX_DROP_SLOTS] = {};
     GpuRetryRun run{ snap, nFailed, nResumedCk, lastErr, badRun };
 
-    // One paced, chunked run of 'pso' over nThreads threads (gpu_metal_retry.h gpuRunPass); bind(enc, start, n)
-    // binds the buffers for the chunk [start, start+n). 'extras' are the non-grid buffers the kernel WRITES (sumW,
-    // the per-tet masses it negates); gridsZero: the grids are all zero at the pass's start (snapshotted as such,
-    // without a copy); gridsKeepZero: the pass never writes them (the exact items' phase 0), so its periodic
-    // checkpoints skip them too. False (lastErr set) when the pass gave up (the caller falls back).
-    // badW: this pass's counter words of the non-finite guard (badRun above).
+    // One paced, chunked run of 'pso' over nThreads threads (gpuRunPass); bind(enc, start, n) binds the buffers for the chunk
+    // [start, start+n). 'extras' are the non-grid buffers the kernel WRITES (sumW, the negated per-tet masses); gridsZero: the
+    // grids are all zero at the pass's start; gridsKeepZero: the pass never writes them (exact items' phase 0). False (lastErr
+    // set) when the pass gave up (the caller falls back). badW: this pass's counter words of the guard (badRun).
     auto runChunked = [&](MTL::ComputePipelineState* pso, size_t nThreads, size_t firstChunk,
                           size_t minChunk, size_t maxChunk, std::vector<MTL::Buffer*> const& extras, bool gridsZero,
                           bool gridsKeepZero, uint32_t* badW, auto&& bind) -> bool
@@ -610,10 +587,8 @@ bool psGpuDepositFields(std::vector<float>& verts,
         enc->setBuffer(bSG,   0, 29);
     };
 
-    // depositFields over the tets [0,nT) of the given records. The grids are bound whole; the
-    // per-tet buffers at the chunk's offset (P.nTet = chunk size, rewritten per chunk: safe, the
-    // previous chunk completed). The kernel negates the masses of the tets it defers, so mB is
-    // part of the snapshot: a redo then runs exactly the same code path.
+    // depositFields over the tets [0,nT) of the given records. The grids are bound whole; the per-tet buffers at the chunk's
+    // offset. The kernel negates the masses of the tets it defers, so mB is part of the snapshot: a redo runs the same path.
     auto runPerTet = [&](MTL::Buffer* vB, MTL::Buffer* uB, MTL::Buffer* mB, MTL::Buffer* dB, MTL::Buffer* sB, size_t nT,
                          bool gridsZero) -> bool
     {
@@ -650,11 +625,9 @@ bool psGpuDepositFields(std::vector<float>& verts,
     uint32_t const badAt = uint32_t(std::max<size_t>(nTetTotal, 1) * (pl.sumWFixed ? 2 : 1));   // past the per-tet totals
     auto runItems = [&](uint32_t phase) -> bool
     {
-        // an item clips at most blockCells cells: far cheaper and more uniform than a whole tet.
-        // Phase 0 writes only sumW (the grids are still zero), phase 1 only the grids (sumW is read).
-        // fLinear (the unused linear deposit) runs both phases on the one pipeline that reads the phase from IP
-        // (kItemsPhase 2 in metal/ps_deposit.metal): its weights come from the clip's first moments, which two
-        // pipelines may round apart, so the summed total would miss the weights deposited by about 1e-8 of a tet's mass
+        // an item clips at most blockCells cells. Phase 0 writes only sumW, phase 1 only the grids. fLinear (the unused linear
+        // deposit) runs both phases on the one pipeline (kItemsPhase 2): its weights come from the clip's first moments, which
+        // two pipelines may round apart, so the summed total would miss the weights deposited.
         MTL::ComputePipelineState* const pso = pp.psoItems[P.fLinear != 0 ? 2u : phase];
         if (P.fLinear != 0 && !pp.psoItems[2])
         {   // that pipeline did not compile (pipesInit): the caller deposits this partition on the CPU
@@ -695,13 +668,10 @@ bool psGpuDepositFields(std::vector<float>& verts,
         });
     };
 
-    // The tets the items pass leaves over (sumW still 0: float-degenerate, or a window that clips
-    // empty or lies outside the grid) run through depositFields, which falls through to the sampled
-    // path / centroid fallback or defers them, exactly as the one-thread path does; their
-    // deferrals (negated masses) are copied back into bM. A few leftovers run on compacted copies
-    // of their records; many (a --box region cut from a larger cloud leaves most of an outer
-    // partition's tets outside) run in place with every other tet's mass masked to 0 (skipped by
-    // the kernel), 4 B per tet instead of a ~130 B copy each.
+    // The tets the items pass leaves over (sumW still 0: float-degenerate, or a window that clips empty or lies outside the grid)
+    // run through depositFields, which falls through to the sampled path / centroid fallback or defers them as the one-thread
+    // path does; deferrals are copied back into bM. A few run on compacted copies of their records; many (a --box region cut
+    // from a larger cloud) run in place with every other tet's mass masked to 0, 4 B per tet instead of a record copy.
     auto runLeftovers = [&]() -> bool
     {
         auto tL = std::chrono::steady_clock::now();   // (DTFE_GPU_TIMING: this lambda's own host work, not its kernels)
@@ -751,8 +721,8 @@ bool psGpuDepositFields(std::vector<float>& verts,
                 if (v < 0.f) mb[left[k]] = v;
             }
         }
-        if (lM) lM->release();
-        if (compact) for (MTL::Buffer* b : {lV, lU, lD, lS}) if (b) b->release();
+        releaseBuffer(lM);
+        if (compact) for (MTL::Buffer* b : {lV, lU, lD, lS}) releaseBuffer(b);
         ph.leftovers += PSGpuPhaseTimes::lap(tL);
         return ok;
     };
@@ -766,12 +736,13 @@ bool psGpuDepositFields(std::vector<float>& verts,
     // as it takes the queue, and the auto-tuner books ONE deposit's buffers (ctxMutex serializes them), so this
     // call's buffers -- and the pool, whose completed command buffers still retain them -- go before the unlock
     tPh = std::chrono::steady_clock::now();
-    for (MTL::Buffer* b : {bItems, bSumW}) if (b) b->release();
+    releaseBuffer(bItems);
+    releaseBuffer(bSumW);
     ph.releases += PSGpuPhaseTimes::lap(tPh);
     if (!success)
     {
         err = lastErr;
-        for (MTL::Buffer* b : {bV,bU,bM,bD,bSc,bP,bMass,bMassFx,bMom,bM2,bGrad,bStr,bMomW,bCaust,bSV,bDV,bDW,bScal,bSG,bBad}) b->release();
+        for (MTL::Buffer* b : {bV,bU,bM,bD,bSc,bP,bMass,bMassFx,bMom,bM2,bGrad,bStr,bMomW,bCaust,bSV,bDV,bDW,bScal,bSG,bBad}) releaseBuffer(b);
         pool->release();
         return false;
     }
@@ -781,11 +752,10 @@ bool psGpuDepositFields(std::vector<float>& verts,
     psHostCopyBack(PSHostCopyArgs{ B, pl, nCell, nTetTotal, fCaustic, out, deferred });
     ph.copyBack += PSGpuPhaseTimes::lap(tPh);
 
-    for (MTL::Buffer* b : {bV,bU,bM,bD,bSc,bP,bMass,bMassFx,bMom,bM2,bGrad,bStr,bMomW,bCaust,bSV,bDV,bDW,bScal,bSG,bBad}) b->release();
+    for (MTL::Buffer* b : {bV,bU,bM,bD,bSc,bP,bMass,bMassFx,bMom,bM2,bGrad,bStr,bMomW,bCaust,bSV,bDV,bDW,bScal,bSG,bBad}) releaseBuffer(b);
     pool->release();
-    // ... and the passes' snapshot, the host copies of the grids: the auto-tuner books one for the run
-    // (snapshotBytes), so it goes before the next partition can take the GPU and make its own. No pass restores from
-    // it any more; its seconds (snap.sec) stay for the timing line below
+    // ... and the passes' snapshot, the host copies of the grids: the auto-tuner books one for the run (snapshotBytes), so
+    // it goes before the next partition can take the GPU and make its own; its seconds (snap.sec) stay for the timing line below
     std::vector<GpuSnapshot::Blob>().swap(snap.blobs);
     ph.releases += PSGpuPhaseTimes::lap(tPh);
     auto const tFree = tPh;

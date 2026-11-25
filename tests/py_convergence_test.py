@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for the resolution and estimator convergence of the void statistics: dtfelib.convergence
-(the frame context, block averages, catalogues of any grid, void-by-void matching) and plot_void_convergence.py
-(its panels, the estimator table, the panels it cannot draw).
-
-Two tiers:
-  * SYNTHETIC (always run, CI): analytic compensated voids on a 64^3 grid, hand-made catalogues and results.
-  * DATA-BACKED (TNG100-3-Dark z = 0's grid and cached catalogues under DTFE_DATA_ROOT): the 256^3 block-averaged
-    catalogue against the native one; skipped with a note when DTFE_DATA_ROOT is unset or the data is not there.
-
-Usage:  python3 tests/py_convergence_test.py            (exit 0 = pass)
-"""
+"""Tests for the resolution and estimator convergence of the void statistics: dtfelib.convergence (the frame context,
+block averages, catalogues of any grid, void-by-void matching) and plot_void_convergence.py.
+Usage:  python3 tests/py_convergence_test.py            (exit 0 = pass)"""
 
 import io
 import os
@@ -94,11 +86,7 @@ def t_frame_and_blocks():
 
 
 def t_velocity_weighting():
-    """The coarse velocity follows the run's deposit. 'volume' (PS-DTFE's in every run, and standard DTFE's) is the
-    plain block mean, not sum rho v / sum rho; velocity_weighting reads it from the run log: its header line
-    'velocity moments : volume-weighted' (every PS-DTFE run prints it), else '--ps-volume-weighted' on its command
-    line, else 'mass' (an older run's log with neither: the reason says so, not 'the default'); a log with the
-    header line is never mass-weighted for want of the flag; 'volume' (said) without a log and for standard DTFE."""
+    """The coarse velocity follows the run's deposit."""
     from types import SimpleNamespace
     from dtfelib import convergence as cv
     rng = np.random.default_rng(3)
@@ -351,7 +339,7 @@ def t_cli():
 # ---------------------------------------------------------------- data-backed
 def t_tng100_grid():
     """TNG100-3-Dark z = 0 (snapshot 99): the 256^3 block-mean catalogue at the production sigma keeps the distinct
-    voids (median R_v ratio within 3% of 1, >= 85% of the native voids matched; measured: 0.997, 73 of 77)."""
+    voids (median R_v ratio within 3% of 1, >= 85% of the native voids matched)."""
     from dtfelib import cli
     sim = "TNG100-3-Dark"
     if not (cli.sim_dir(sim, data_root()) / "snapdir_099").is_dir():

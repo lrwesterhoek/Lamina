@@ -1,19 +1,6 @@
 #!/usr/bin/env python3
-"""PS-DTFE convergence test: single-stream density profile vs the analytic Zel'dovich solution.
-
-Test-design notes:
-  * Uses the volume-AVERAGED field (density_a, --subsamples 3): since the deposit is
-    mass-conserving, the plain (nSub=1) field carries per-tetrahedron quantization noise that
-    GROWS as tets shrink toward the cell size -- the '_a' fields are the science-quality
-    estimator (see run_ps_dtfe.sh) and the ones whose convergence is meaningful.
-  * The particle series stays at N <= GRID/2: at N ~ GRID the synthetic lattice is
-    commensurate with the sampling grid and aliasing noise (slab-correlated moire from the
-    tet/sub-sample lattices) dominates the window error, which says nothing about the
-    estimator's truncation error.
-  * The error is expected to fall and then PLATEAU at the estimator noise floor set by the
-    jitter and the fixed grid/nSub, so the criteria compare finest vs coarsest rather than
-    demanding strict monotonicity.
-"""
+"""PS-DTFE convergence test: single-stream density profile vs the analytic Zel'dovich solution. Uses the volume-
+averaged density_a (--subsamples 3), which converges; the plain field carries per-tetrahedron noise."""
 
 import argparse
 import functools

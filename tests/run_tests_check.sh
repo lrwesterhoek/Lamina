@@ -1,27 +1,6 @@
 #!/usr/bin/env bash
-# The suites' own skip / fail contract. A suite that cannot run says SKIP and exits 0, unless
-# DTFE_TEST_REQUIRED=1 (ci_suite.sh's double and 2d stages, after building what they test) makes that a FAILURE;
-# a binary that is broken is never a skip; and a check with nothing to compare against says so. Copies of the
-# suites run in scratch trees beside stand-in binaries, so every case is deterministic and needs no build. The
-# stand-in ./DTFE hands everything but --full-help to the real ./DTFE: the other tests of run_tests.py still
-# pass, so an exit 1 can only come from the case under test.
-#   R1  run_tests.py, a ./DTFE whose --full-help exits 3: both exact-average tests FAIL ('--full-help exited
-#       with 3', not a skip: a crash is not a missing flag) and the run exits 1, with or without
-#       DTFE_TEST_REQUIRED=1
-#   R2  run_tests.py, a ./DTFE whose --full-help lacks --sampled (the tests' gate, as in a binary from before
-#       2026-11-09): both tests SKIP and the run exits 0;
-#       under DTFE_TEST_REQUIRED=1 both FAIL ('DTFE_TEST_REQUIRED=1, but ...') and it exits 1
-#   R3  run_tests.py, a fresh DTFE_TEST_REFERENCE_DIR: the regression is a SKIP (', 1 skipped' in the Results
-#       line) and the run exits 0 EVEN under DTFE_TEST_REQUIRED=1 (no build can supply a reference; ci_suite.sh
-#       compares with the stored one: R5); the next run compares against the reference written
-#   R5  run_tests.py against the STORED reference (tests/reference/regression_periodic.txt, which CI compares
-#       with): it PASSES as stored, and with every value moved by 5e-5 relative (rounding-level, under
-#       the 3e-4 tolerance); ONE value moved by 1e-3 relative (the size of moving one of the 1000 particles by
-#       0.05% of the box) makes it FAIL and the run exit 1
-#   R4  run_tests.py, DTFE_TEST_PRECISION=double with no ./DTFE-double: 'SKIP:' and exit 0, or 'FAIL
-#       (required):' and exit 1 under DTFE_TEST_REQUIRED=1
-#   D1  ps_double_check.sh in a tree with only ./DTFE and ./PS-DTFE: 'SKIP:' and exit 0, or 'FAIL (required):'
-#       on stderr and exit 1 under DTFE_TEST_REQUIRED=1
+# The suites' own skip / fail contract (SKIP exits 0 unless DTFE_TEST_REQUIRED=1), run on copies beside stand-in binaries.
+# Cases R1-R5 and D1 print their own labels.
 # Usage: tests/run_tests_check.sh [--no-build]   (--no-build is accepted and ignored: nothing is built)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

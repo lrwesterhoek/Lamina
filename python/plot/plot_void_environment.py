@@ -1,46 +1,5 @@
-"""Void-in-void versus void-in-cloud across cosmic time: which voids sit in an overdense region and are
-expected to shrink, and how their sizes, depths and shapes differ from the voids that keep expanding.
-
-Per snapshot of the ladder, every distinct well-resolved void of the pipeline catalogue (the profiles' sample) is
-classified by dtfelib.classify under one of its CRITERIA (--criterion): S-type, VOID-IN-CLOUD, being squeezed,
-R-type, VOID-IN-VOID, otherwise (the void-in-cloud process of Sheth & van de Weygaert 2004). R_v is the measured
-void radius (catalog.r_v_mpc).
-  velocity          (default) the shell between 2 and 3 R_v has net INFALL: its volume-weighted mean
-                    peculiar radial velocity is negative. Its strength is drawn as v_r / (H(z) a R_v).
-  density_smoothed  the smoothed density contrast enclosed within 3 R_v is positive (the large-scale environment).
-  density_raw       the raw density contrast enclosed within 2 R_v is positive (Ceccarelli et al. 2013, MNRAS 434,
-                    1435): kept for comparison; the 1-2 R_v shell carries the walls' halos.
-The 3 R_v shell of the first two leaves out the voids with R_v > L/6 (the wrap rule), the largest and mostly
-void-in-void ones: their fractions hold for the voids below that size.
-Every criterion's measure is computed for every void in one pass; the figures and the npz carry the void-in-cloud
-fraction under each and their agreement (the fraction of voids two criteria label the same), the type follows the
-chosen one.
-
-Outputs (config.figures_path('void_environment')/<sim>/; a default run's names end in '_velocity', see below):
-  environment_evolution.png   the void-in-cloud fraction (bootstrap 16-84% band; the other criteria's fractions
-                              dotted) and the medians of R_v, the central delta, the BBKS e, p and the shell's
-                              v_r / (H a R_v) per type against 1 + z
-  environment_z<z>.png        per snapshot: the R_v, central delta, the three criteria's measures, e, p and c/a
-                              distributions of the two types, their mean density profiles out to 2 R_v, the deciding
-                              measure against R_v, the shell velocity against the smoothed Delta(<3 R_v), and the
-                              fractions and agreements
-  environment_tracking.png    the voids followed by plot_void_tracking.py (its void<K>_track.npz files, read only,
-                              from --tracking-dir), typed at their reference snapshot: R_v, depth, e and p along
-                              their tracks; skipped with a note when no tracking files exist for the simulation
-  environment_stats.npz       per snapshot the counts and fractions (f_vic under the chosen criterion, f_vic_<c> under
-                              each, agree_<a>__<b> per pair), and per void its catalogue row, every criterion's
-                              measure and verdict, type, R_v, depth and shape
-Those names are for PS-DTFE's default grids and the density_raw criterion: the untagged names keep the meaning they
-had before the velocity became the default, so EVERY other criterion adds '_<criterion>', the default
-one too (environment_evolution_velocity.png, environment_stats_velocity.npz). Another estimator or --prefix adds
-'_<method>' / '_<prefix>', --keep-overlaps '_overlaps', a --factor other than 2 '_x<factor>' (the raw criterion's
-radius), and a non-default smoothing writes into its own folder (plot_void_population's rules).
-
-Examples:
-  python3 plot/plot_void_environment.py --sim TNG100-3-Dark
-  python3 plot/plot_void_environment.py --sim TNG100-3-Dark --criterion density-raw
-  python3 plot/plot_void_environment.py --sim TNG50-3-Dark --tracking-dir ~/tracking/TNG50-3-Dark
-"""
+"""Void-in-void versus void-in-cloud across cosmic time: which voids sit in an overdense region and are expected to
+shrink, and how their sizes, depths and shapes differ from the voids that keep expanding."""
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
 import re
@@ -108,7 +67,7 @@ def snapshot_summary(envd, n_boot=1000, seed=0):
     out = {"n": int(vic.size), "n_S": int(vic.sum()), "n_R": int((~vic).sum()), "f_vic": f, "f_vic_lo": lo,
            "f_vic_hi": hi, "dropped": int(envd["dropped"])}
     measured = tuple(envd.get("measured", (envd.get("criterion", "density_raw"),)))
-    for c in classify.CRITERIA:                   # each criterion's fraction over the voids it measured
+    for c in classify.CRITERIA:
         m = np.asarray(envd.get(DECIDING[c], np.full(vic.size, np.nan)), dtype=float)
         ok = np.isfinite(m) if c in measured else np.zeros(vic.size, dtype=bool)
         v_c = np.asarray(envd.get(f"vic_{c}", np.zeros(vic.size, dtype=bool)), dtype=bool)
@@ -273,11 +232,8 @@ def tracking_files(tdir, tag=""):
 
 def classify_tracks(files, sim, method, prefix, data_root, factor, criterion=classify.DEFAULT_CRITERION):
     """Each tracked void's type at its reference snapshot under 'criterion' (its measure around the void's centre
-    there: the 2-3 R_v shell's v_r, the smoothed Delta(<3 R_v) or the raw Delta(<factor R_v)), with R_v from
-    the track (its reference row) or, when that is NaN, from the catalogue void nearest to the centre (within one
-    R_eff). The centre is the track's own (center0_frac): its catalog_index0 belongs to the catalogue of the day it
-    was written. Returns {K: dict(track arrays, 'type', 'delta_enclosed' (raw), 'measure' (the criterion's),
-    'ref_snap')}; tracks it cannot type are left out with a note. Only the grid the criterion needs is read."""
+    there: the 2-3 R_v shell's v_r, the smoothed Delta(<3 R_v) or the raw Delta(<factor R_v)), with R_v from the
+    track (its reference row) or, when that is NaN."""
     by_ref, tracks = {}, {}
     for k, f in files.items():
         with np.load(f, allow_pickle=False) as z:

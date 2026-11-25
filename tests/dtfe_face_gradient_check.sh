@@ -1,43 +1,15 @@
 #!/usr/bin/env bash
-# The standard binary's '--face-gradient': the velocity gradient and the fields built on
-# it from EXACT FACE INTEGRALS of the interpolant (Gauss: (1/V) times the integral of v n over a cell's faces is the
-# cell average of grad v), instead of adding up each tetrahedron's gradient. For standard DTFE's interpolant -- linear
-# in every tetrahedron, continuous across them -- the two routes agree to rounding; this suite pins that, and what
-# the face route adds. The geometry itself is tests/face_sweep_check.sh's. Asserted on demo/z0_64.gadget (262144
-# particles, z=0, tracked in the repo) at 64^3, --periodic --padding 12, density_a divergence_a shear_a:
-#   G1  DTFE_FACE_CHECK=1: the face integrals equal the exact average's per-tetrahedron gradient in every cell to
-#       1e-4 of the gradient's rms (measured at most 1.1e-5, rms 1.2e-7; the demo has no degenerate tetrahedron)
-#   G2  the deposit threads, one domain (DTFE_DEPOSIT_THREADS 1, 3, 10): '.a_velDiv' and '.a_velShear' byte-identical
-#   G3  the face gradient does not depend on the deposit: the Monte-Carlo average's ('--sampled') and, in a GPU build, the --gpu
-#       deposit's '.a_velDiv' and '.a_velShear' byte-identical to the exact CPU run's
-#   G4  the final grids: face vs per-tetrahedron divergence and shear within 1e-4 of their rms (measured 4.4e-6 and
-#       9.0e-6); a '--partition 2 2 2' split within 1e-4 of the single domain (measured 1.8e-6) with every
-#       sub-domain's FACE-CHECK passing; the periodic box mean of the divergence below 1e-6 of its rms (8e-10)
+# The standard binary's '--face-gradient': the velocity gradient and its fields from exact face integrals of the interpolant,
+# which must agree with the per-tetrahedron gradient to rounding. Geometry: tests/face_sweep_check.sh.
+# On demo/z0_64.gadget at 64^3, --periodic --padding 12, density_a divergence_a shear_a.
+#   G1  DTFE_FACE_CHECK=1: the face integrals equal the exact average
+#   G2  the deposit threads, one domain (DTFE_DEPOSIT_THREADS 1, 3, 10)
+#   G3  the face gradient does not depend on the deposit (Monte-Carlo average, --gpu)
+#   G4  the final grids: face vs per-tetrahedron divergence and shear within 1e-4 of their rms
 #   G5  '--face-gradient' with '--cic' stops at option parsing with exit 1 and the error naming the DTFE method
-#   G6  (a GPU build) the GPU exact average on '--partition 3 3 3' against one domain: every output byte-identical
-#       (cmp of every output file) -- every tetrahedron's shares are formed in the grid frame,
-#       from vertex densities summed exactly over each vertex's star and from single-cell volumes in
-#       a vertex order of their own (canonicalTetVolume, not CGAL's labelling), and summed in the run's fixed-point
-#       unit (src/fixed_units.h RunUnits), and the face pass, whose
-#       sums replace the deposit's gradient (the 3^3 run g3 passes DTFE_FACE_CHECK=1, the one-domain g does not:
-#       S3 of tests/split_bytes_check.sh pins that the check moves no byte), sums each face piece's flux as an
-#       integer in its own run-wide unit, so the split moves no sum; the shear, the off-diagonal gradient of the
-#       demo's v = 1000 x flow, sits at the last bits of the face sums' cancellation, which identical integers repeat.
-#       The double build keeps its double face sums (walk order): there each grid is compared within 1e-7 of its rms.
-#       And every sub-domain's FACE-CHECK against the GPU deposit within the full-size bound (rms_rel <= 3e-6 per
-#       record, above_1e-4 <= 1e-5 of the cells pooled)
-#   G7  (the single build) the order of the work does not reach the grids: the CPU exact average in a team of 2
-#       sub-domains (OMP_NUM_THREADS=2) byte-identical to G2's one-domain run, and -- in a build with the parallel
-#       insert (TBB), on a machine of 4 threads or more -- with each sub-domain inserted on 2 TBB threads
-#       (DTFE_TRIANGULATION_THREADS=2: another cell order and labelling, from run to run) byte-identical to the
-#       sequential insert, on the CPU and (a GPU build) on the GPU against G3's one-domain run: the vertex densities
-#       are exact star sums and the single-cell volumes canonical (src/CGAL_triangulation/triangulation.cpp
-#       vertexDensityStarSums, triangulation_miscellaneous.h canonicalTetVolume). The double build keeps its double
-#       sums: SKIP there
-#   G8  '--interlace' (two passes, the second on the particles moved by half a cell, of which only the density is
-#       kept: main.cpp): G1's face run with it takes the face gradient (its header's 'velocity gradient' line) and
-#       writes every output of the run without it byte for byte but '.a_den', which is interlaced
-# About 65 s on the Mac (12 runs of 2-7 s), before G8's interlaced run (TO MEASURE: two passes of G1's run).
+#   G6  (a GPU build) the GPU exact average on '--partition 3 3 3' against one domain
+#   G7  (the single build) the order of the work does not reach the grids
+#   G8  '--interlace' takes the face gradient; every output but '.a_den' is byte-identical to the run without it
 # Usage: tests/dtfe_face_gradient_check.sh [--no-build]   (--no-build is accepted and ignored: nothing is built)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

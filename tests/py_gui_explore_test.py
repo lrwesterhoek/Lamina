@@ -1,130 +1,5 @@
 #!/usr/bin/env python3
-"""The Explore tab's void features, offscreen, on a synthetic snapshot (no simulation data, no binary):
-
-  1. the void inspector: hovering an outline names the void (R_v, R_eff, delta, flags), clicking it fills the
-     inspector (every R_v definition the catalogue has, R_eff, central delta, flags, centre), 'Go to its centre'
-     moves the slice there, 'R_eff too' adds dashed outlines;
-  2. the outlines carried into the saved PNG (matplotlib circles) with a CSV of the voids shown beside it
-     (tools/void_outlines.write_csv), and into the figure grid (each panel's own catalogue, its tiles clipped);
-  3. the void smoothing: 'production' or a sigma in Mpc, passed to the helper as --smooth-mpc, its own cache key and
-     cache namespace;
-  4. the memory guard: no question while no DTFE run is going; with one, a question (free memory said), and a
-     'no' starts nothing (server, exact zoom, catalogue); a need that fits in the free memory less 4 GB starts
-     without a question even then.
-  5. the caustic (fold) map of a periodic PS run is the exact fold flag (dtfelib io.caustic_is_fold),
-     not the stored per-sample grid of older runs; the caustic-class map stays the stored mask; an
-     exact zoom's fold and class maps read its class grid (the 0/1 '.caustic' would give no fold at all).
-  6. the Save options (figsave.py): the default save is the reference one pixel for pixel (and byte for byte);
-     full resolution = the data's shape and the screen's pixels, with or without the outlines; no axes, title, colour
-     bar, units (Mpc, Mpc/h from the header's h, cells), overlays, margins none, width, dpi, PDF/SVG text kept as
-     text, TIFF, transparency, font size; the same for the figure grid (separate and merged panels); the presets,
-     the dialog (no '--' in its texts) and the options remembered between sessions in QSettings.
-  7. the slice kept across outputs and redshifts: another output or redshift of the same simulation
-     shows the same axis and place in the box (the nearest cell of its grid: 64^3 and 32^3 outputs, the user's own
-     place remembered, not re-read off the coarser grid), and the zoom window (from memory, through the query server,
-     or not shown with the reason in the zoom and status lines); another simulation, a custom run or opened file in
-     a box of another size start at the middle with the whole box, as the first open does; a 2D output on the way
-     leaves the slice and the window to the next 3D output.
-  8. the Save options' details: the title's slice position in the axes' unit (map and grid); TIFF
-     LZW-compressed, pixel-identical; 'match the data' below 72 dpi shrinks the figure (the map keeps the data's
-     pixel count), and with no margins writes the map's own pixels; Mpc/h where h is not known falls back to Mpc,
-     said in the status line and the dialog, the choice kept (the grid: every panel); the fold map reads only its
-     planes while a job caps the cube cache.
-  9. a phase-space output's velocity derivatives as the mean field grad<v> (the default, as the figure
-     scripts') or the stored stream average <grad v>: the mean-field planes equal dtfelib's FieldSet.load(name,
-     mean_field=True) cut there (the six names, every axis, through slice()'s components and units); standard DTFE
-     unchanged; 2D, non-periodic and window outputs keep the stored grid and say why; while a job caps the cube cache
-     the velocity is read in slabs, never cached whole, the same numbers; a rewritten velocity grid is not served
-     from the plane cache; a face-gradient output (its '.a_velDivStreams', PS-DTFE's default with the exact deposit
-     and the volume weighting) shows its stored grids, the mean field, with either choice, and its exact zoom takes
-     '--face-gradient' (an output without the marker '--per-tet-gradient'). In the window: the map, its title,
-     colour bar and saved figure say the family, the choice
-     reaches Compare with (A's and B's families) and the figure grid (a stored PS panel never shares a colour bar
-     with a mean-field one), it is remembered, a zoom says the stream average (and its zoom line is text).
- 10. the 3D view (view3d.py, explore_3d.py): the camera's rotation is orthonormal and right-handed, a sphere of radius
-     R is a circle of R x scale at any turn and an ellipsoid's outline is its projection's, the planes' quads are
-     painted in an exact back-to-front order (checked ray by ray), the principal sections' arcs and the textures'
-     affine maps land where the 3D points project, an ellipsoid's cut on a plane agrees with the inside test (spheres':
-     the map's circles), picking takes the smallest outline, the close-up window and the periodic cell window. In
-     perspective (the checks labelled 12): a zoom in moves the eye along the cursor's line of sight, into the box
-     and on through the field, and never out of it again; a cursor off the box keeps the plain rule; a zoom out
-     backs away; a line or a picture's rectangle that passes the eye is cut to its part in front of it
-     (segment_on_screen, screen_polygon); from inside, the void cuts on a plane that passes the eye and the point
-     picked under the cursor. In the window: Show in 3D shows the map's slice and the middle of
-     the other axes as stored (the same values), the distinct voids as spheres of R_v x scale; the slider moves its
-     plane; hover names a void and reads a plane's value; a click inspects the void (the inspector, the menu), a
-     double-click closes up on it (the planes through its centre, cut to the window periodically, the neighbours at
-     their nearest image); Whole box restores the planes; the fitted ellipsoids reach the launcher ((a b c)^(1/3) =
-     R_eff) and 'as ellipsoids' draws each as its ellipsoid at the mean density, a close-up then sized by R_ell and
-     holding the whole ellipsoid, its neighbours dim, the menu by R_ell; the figure grid and the 3D
-     view replace each other; the PNG is written; the map comes back. The Sizes range keeps the same voids on the
-     map, the grid's panels and the 3D view (by R_v; the ellipsoids by R_eff), says how many, keeps a close-up's void
-     and is remembered.
- 11. the 3D view's volume (volume3d.py, explore_3d.py): the grid averaged over blocks as equal as whole cells allow
-     (each the block's mean, the integral kept), a window across the faces read periodically, a vector's component
-     as slice() takes it, plain reads (a cube the map cached used, none added), a grid written again read again,
-     an averaging cancelled; the levels within half a step; the transfer function transparent below the range,
-     monotone, premultiplied, corrected for the path through a slice, |value| for a diverging field; the slices'
-     images placed where their 3D corners project, front first; in perspective each pixel is drawn from the stack
-     across the axis its ray crosses the most slices of (slice_plan, part_ids: a part for each axis and sense),
-     and with the eye inside the cube QPainter's picture is, pixel by pixel, the march along that pixel's own
-     ray. QPainter's 16-bit compositing equals the reference
-     'under' compositing; the front half is what is seen from either side; a dense ball is opaque, a ray missing it
-     transparent. In the window: the volume is the default (the planes one choice away), of the stored values, a
-     density from rho/rho_bar = 1 in the map's colours with the bar on that range; the ray through a void is
-     clearer than the densest column, as the reference says; the range sliders keep their order, Default range
-     restores; a colour map recolours without a read; the voids are drawn over it; a close-up reads the void's cube
-     at the grid's cells, Whole box comes from memory; Save image; the planes back; leaving frees the slices. The
-     GPU's picture (volume_gl): offscreen there is no OpenGL and QPainter draws (the state line, the turning policy's
-     contract); in a process of its own on the default platform, where an OpenGL context can be made, the GPU's
-     picture equals QPainter's within 1.5/255 at every pixel not within 1/32 px of a slice's projected edge (Qt
-     rasterises polygons to 1/64 px: a pixel there may take one slice more or less), smooth and spiky fields, both
-     projections, three turns, from outside and with the eye in the window; skipping empty blocks changes no
-     pixel; the window's own picture against volume_picture(), fitted and zoomed in (else SKIP: no display, no
-     OpenGL).
- 12. the Explore and 3D-view tooltips take at most two lines (the map, the voids, the 3D view in both styles, the
-     Save options dialog); a long text is its first sentence, the whole text the control's What's This.
- 13. the contour lines (contours.py, the Contours tick): marching squares on fields with a known answer (a radial
-     field's level is a circle of its radius, closed; a plane's a straight open line; nothing outside the values or
-     through a NaN cell; saddles), the block-averaged copy of a wide plane, the levels fixed by the colour range and
-     not by the layer (round steps, the density's three quarters below the mean and the mean itself, a diverging
-     map's 0, the stream count's even counts), no lines on class maps and discrete colour maps, the lines' colours.
-     In the window: off by default and nothing changes; ticked, each layer's lines with the slice, ringing a void's
-     centre pixel, the levels marked on the colour bar; unticked the same picture pixel for pixel; a fixed range keeps
-     the levels across layers; the smoothing, a difference map and a zoom followed; remembered; the saved map and the
-     figure grid (screen and saved) carry them, the Bare image preset too; the file name a save offers says what the
-     picture shows (simulation, field, redshift, prefix, grid, plane and place, smoothing, log or lin, the overlays;
-     the figure grid's and the 3D view's own). The level slider beside the tick: dozens
-     of positions, its default the rule's own levels, each position right a slightly closer spacing (one factor on
-     every step, the same on every layer: still nested, the density mostly below its mean and the mean a level), at
-     least two lines at the coarsest, a bounded number at the finest; the map, the grid and the 3D view following it,
-     a drag asking for no slice per position, remembered (an old saved stop at the nearest position); the worker
-     strokes the lines' layer at the canvas's size.
- 14. the contours in the 3D view (the same tick): each plane's lines, cut to its quads and mapped to the screen by
-     its own map (pieces behind the eye left out), in the map's colour over its level, opaque; not drawn while the view
-     turns. The volume's shells in its transfer function: the table unchanged without them and changed only in their
-     bands with them; the map's round levels where the volume is clear (the density's void side), nested, at most
-     four, a quarter of the cells at most inside each in the whole box, from the void's own floor in a close-up; the
-     field's slope per level; a void's basin (not its neighbour's across a ridge); a close-up's copy of the levels
-     with the shells of its void only, the volume itself the same on it; a turned, stretched dip's shells along its
-     own axes. QPainter draws a shell as its ring; the
-     GPU's picture with shells is QPainter's (within 1.5/255). In the window: planes and volume, ticked and unticked
-     (the very same pictures), the colour bar's marks and tooltip, the shells' key, a close-up with fitted
-     ellipsoids, Save image.
- 15. the voids as their ellipsoids (the default): the plane sections with a known answer (an axis-aligned ellipsoid
-     cut at its centre and at a height, a tilted one's centre and area as the formula gives them, a plane that misses,
-     the periodic image; the map's sections are the 3D planes' cuts), the drawn size in one place (the catalogue's
-     semi-axes times sqrt(|delta|/2), none above the mean or with a negative eigenvalue), picking a turned ellipse and
-     a centre's mark, spheres of R_v drawn as before, the CSV's columns, the 3D smoothing (the whole cube's FFT
-     Gaussian), the search's rough time. In the window: the helper's eigenvalues, each layer's ellipses and marks
-     (growing, largest on the minimum's layer, shrinking), hover and click inside an ellipse, R_v dashed, Save image
-     and its CSV, the figure grid, the grey line naming the voids' field, the '3D' tick (the cube smoothed in 3D, kept,
-     greyed out without the memory), the 3D view's ellipsoids, the smoothing box (two cells at least, its steps, a
-     search once committed and said while it runs, a long one asked first), remembered (an old saved sphere not).
-
-The pure parts (grids.void_at, void_circles_mpc, void_info, void_outlines.write_csv, view3d, volume3d) run without Qt; the rest needs
-PySide6 and reports SKIP (exit 0) without it. Usage: ~/.venvs/dtfe-gui/bin/python tests/py_gui_explore_test.py
-"""
+"""The Explore tab."""
 
 import json
 import os
@@ -1167,9 +1042,8 @@ def gui():
 
 def voids_pure():
     """15. the voids as their ellipsoids, no Qt: the plane sections with a known answer (an axis-aligned ellipsoid cut
-    at its centre and at a height, a tilted one's area and centre, a plane that misses, the periodic image), the drawn
-    size (the catalogue's times sqrt(|delta|/2), and the guard), picking a turned ellipse, the marks, the overlay of
-    spheres as before, the saved CSV's columns, the 3D smoothing, the search's time."""
+    at its centre and at a height, a tilted one's area and centre, a plane that misses, the periodic image), the
+    drawn size (the catalogue's times sqrt(|delta|/2), and the guard), picking a turned ellipse, the marks."""
     import view3d as V
     print("voids as ellipsoids (pure)")
     L = 64.0
@@ -1392,10 +1266,8 @@ def voids_pure():
 
 def voids_ellipsoids_gui():
     """15. the voids as their ellipsoids in the window, on gui()'s synthetic snapshot: the helper's eigenvalues, each
-    layer's sections and centre marks as the formula gives them (growing, largest on the minimum's layer, shrinking),
-    a click inside an ellipse, R_v dashed, the saved PNG and CSV, the figure grid, the 3D view's shapes, the grey line
-    naming the voids' field and the map smoothed in 3D, the smoothing box (its smallest value, its steps, a search
-    only once the value is committed, its line while it runs, a long one asked first), remembered."""
+    layer's sections and centre marks as the formula gives them (growing, largest on the minimum's layer,
+    shrinking), a click inside an ellipse, R_v dashed, the saved PNG and CSV, the figure grid."""
     try:
         from PySide6.QtWidgets import QApplication
     except ImportError as e:
@@ -3174,10 +3046,7 @@ def volume_render():
 
 
 def _slice_edge_px(cam, lo, hi, shape, plan, W, H) -> np.ndarray:
-    """Each pixel centre's distance (px) to the nearest projected edge of a slice the plan draws (the quads of
-    every part's slices, exactly: a projective map takes a quad's edges to segments; with the eye in the window,
-    the stretch of an edge in front of the eye): where QPainter's 1/64-pixel polygon rasterisation and an exact
-    inside test (the GPU's, a ray march's) may disagree on one slice."""
+    """Each pixel centre."""
     import view3d as V
     d = (hi - lo) / np.asarray(shape, dtype=np.float64)
     yy, xx = np.mgrid[0:H, 0:W] + 0.5
@@ -3219,10 +3088,7 @@ def _part_seams(plan, W, H) -> np.ndarray:
 
 def _ray_march(cam, lo, hi, rgba, W, H) -> np.ndarray:
     """A perspective view's volume picture ((H, W, 4), premultiplied, 0..1) by the rule alone, without Qt: each
-    pixel's ray from the eye through the pixel's centre; the stack across the axis the ray runs along most, in
-    cells (ties to the lower axis); its slices ahead of the eye, nearest first, each sampled bilinearly where the
-    ray crosses it (nothing outside the image), the nearest one at its distance in slices; composited 'under'.
-    rgba: per axis, the (m, h, w, 4) premultiplied colours of volume3d's slice images."""
+    pixel's ray from the eye through the pixel."""
     import view3d as V
     shape = np.array([rgba[b].shape[0] for b in range(3)])
     cell = (hi - lo) / shape
@@ -3950,10 +3816,8 @@ def view3d_volume_gui():
 
 
 def fold_map():
-    """Explore's 'caustic (fold) cells' map of a periodic PS run is the exact fold
-    flag, dtfelib.io.caustic_is_fold(class mask, streams=, hidden=) -- the stored '.caustic' of older grids
-    is set only where a folded tetrahedron deposited a sample and misses every fold thinner than the
-    sampling -- in the map, the click readout and its tooltip; the caustic-class map stays the stored mask."""
+    """Explore's 'caustic (fold) cells' map of a periodic PS run is the exact fold flag,
+    dtfelib.io.caustic_is_fold(class mask, streams=, hidden=) -- the stored '.caustic."""
     try:
         from PySide6.QtCore import Qt
         from PySide6.QtWidgets import QApplication
@@ -4002,9 +3866,8 @@ def fold_map():
         ok = wait_for(qa, lambda: not x._busy and x._req is not None and x._req["field"] == "caustic_class", 30)
         check("... and the caustic-class map stays the stored mask",
               ok and np.array_equal(np.asarray(x._plane), np.take(ccm, x._req["index"], axis=x._req["axis"])))
-        # a job running caps the cube cache (1 GB; here 2.5 cubes): the three cubes of the fold map do not
-        # fit together, so only their planes are read -- read whole they would evict each other, three
-        # 0.5 GB reads per step at 512³. Uncapped (they fit) the cubes are cached: stepping stays fast.
+        # a job running caps the cube cache: the three cubes of the fold map do not fit together, so only their
+        # planes are read (read whole they would evict each other); uncapped (they fit) the cubes are cached.
         real_read, real_run = G._read_plane, G.RUN_CUBE_BYTES
         reads = []
 
@@ -4324,9 +4187,8 @@ def face_outputs(d: Path) -> Path:
 
 def face_gradient_zoom():
     """9. the exact zoom of a phase-space output takes the output's own velocity-gradient route: '--face-gradient' for
-    a face-gradient output (its '.a_velDivStreams'), '--per-tet-gradient' for one without it; every zoom is
-    volume-weighted (PS-DTFE's only velocity moments), an older output saved with mass-weighted moments too -- the
-    plan only (a stand-in for the binary, nothing run)."""
+    a face-gradient output (its '.a_velDivStreams'), '--per-tet-gradient' for one without it; every zoom is volume-
+    weighted (PS-DTFE's only velocity moments), an older output saved with mass-weighted moments too."""
     try:
         from PySide6.QtWidgets import QApplication
     except ImportError as e:
@@ -4806,9 +4668,8 @@ def keep_slice():
 
 def volume_rule_pure():
     """11. one rule for the values a map shows (grids.OutputSet.component_values): the 3D volume's cube at one grid
-    cell a block is the map's slices themselves, bit for bit -- a vector's norm and components, the vorticity's curl,
-    a tensor's trace and one of its components, a scalar; with the velocity factor and without (z = 0). The averaging's
-    'done' counted only where asked (volume3d._run's 'count'), one worker count for both pools."""
+    cell a block is the map's slices themselves, bit for bit -- a vector's norm and components, the vorticity's
+    curl, a tensor's trace and one of its components, a scalar; with the velocity factor and without (z = 0)."""
     import volume3d as VOL
     print("3D volume: the map's values")
     n = 12
@@ -5389,11 +5250,8 @@ REAL_RANGES = (("density", (-1.105, 1.247), True), ("density", (-1.046, 0.999), 
 
 def contours_detail_pure():
     """13. the level slider (contours' 'detail'): dozens of positions, its default the rule's own levels; each
-    position right a slightly closer spacing (one factor on every step, the same on every layer), so the count grows
-    with it; the coarsest still draws two lines on any range, the finest a bounded number; at any position the levels
-    stay nested (a line on two layers whose ranges drift is the same value), multiples of the spacing from the anchor,
-    and the density keeps most of them below its mean and the mean itself; an old saved stop maps to the nearest
-    position; the 3D volume's shells follow it within their own rule."""
+    position right a slightly closer spacing (one factor on every step, the same on every layer), so the count
+    grows with it; the coarsest still draws two lines on any range, the finest a bounded number."""
     import contours as CT
     import volume3d as VOL
     print("contour level slider (pure)")
@@ -5529,10 +5387,8 @@ def _two_dips(m: int = 48, sigma: float = 5.0):
 
 def contours_3d_pure():
     """14. the contours in the 3D view, their pure parts: the planes' line pieces cut to a quad and mapped to the
-    screen, their opaque colour; the volume's shells -- the transfer function unchanged without them and changed only
-    in their bands with them, their levels (the map's rule on the volume's range, where it is clear, the density's
-    void side, round, nested, at most four; in a close-up from the void's own floor), the field's slope per level,
-    a void's basin, and a close-up's copy of the levels with the shells of that basin only."""
+    screen, their opaque colour; the volume's shells -- the transfer function unchanged without them and changed
+    only in their bands with them, their levels."""
     import contours as CT
     import view3d as V
     import volume3d as VOL
@@ -5663,10 +5519,7 @@ def contours_3d_pure():
 
 def contours_3d_gui():
     """14. the contours in the 3D view, in the window, on gui()'s synthetic snapshot (its catalogue cached by then):
-    the Contours tick draws the map's lines on the three planes (each plane's own, at the levels of their shared
-    range, marked on the colour bar; not while the view turns) and the volume's shells (in its transfer function,
-    with their key; a close-up's from its void's floor and around that void only); unticked, the very same pictures;
-    the saved image carries them; QPainter draws a shell around a dip as the ring it is seen as."""
+    the Contours tick draws the map's lines on the three planes."""
     try:
         from PySide6.QtWidgets import QApplication
     except ImportError as e:
@@ -5902,9 +5755,8 @@ def _vr_of(x):
 
 def contours_gui():
     """13. the Contours tick in the window: off by default and nothing changes; ticked, the lines of every layer with
-    the slice (worker), the levels marked on the colour bar and said in its tooltip; scrolling keeps the levels on a
-    fixed range; greyed out with its reason on a class map and a discrete colour map (the tick kept); remembered;
-    unticked, the very same picture as before; the saved map, the figure grid (screen and saved) and a zoom."""
+    the slice (worker), the levels marked on the colour bar and said in its tooltip; scrolling keeps the levels on
+    a fixed range; greyed out with its reason on a class map and a discrete colour map (the tick kept)"""
     try:
         from PySide6.QtWidgets import QApplication, QFormLayout
     except ImportError as e:
@@ -6296,7 +6148,7 @@ def contours_gui():
               st.get("contours") is True and x2.contours.isChecked() and st.get("contour_position") == -17
               and "contour_detail" not in st and x2.contour_detail.value() == -17,
               f"{st.get('contours')} {st.get('contour_position')}")
-        # a state saved before the slider was continuous: its stop ('contour_detail', -2..+1) at the nearest position
+        # a state saved with the older stepped slider: its stop ('contour_detail', -2..+1) at the nearest position
         olds_ = {}
         for stop_ in (-2, 1, -1, 0, "x"):
             old_ = {k_: v_ for k_, v_ in st.items() if k_ != "contour_position"}

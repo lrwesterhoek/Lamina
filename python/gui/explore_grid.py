@@ -1,8 +1,5 @@
 """The Explore tab's figure grid (Compare): several maps composed as one figure -- a field at several redshifts,
-several fields of one snapshot, or the outputs of one snapshot side by side. The pure parts (grid_items, grid_tiles,
-grid_figure, ...: numpy and matplotlib on OutputSets and a request dict, run on the slice worker's thread for the
-screen and on the GUI thread for a save; explore.py re-exports them) and GridMixin, ExploreControls' composer: the
-table of panels, the Fill buttons, merged axes and shared colour ranges, the tiles on screen and Save figure…"""
+several fields of one snapshot, or the outputs of one snapshot side by side."""
 
 from __future__ import annotations
 
@@ -25,12 +22,7 @@ from app_widgets import tip_auto
 # numpy on OutputSets and the request dict only, no widgets.
 
 def grid_items(req: dict) -> list:
-    """Per panel of the request: its plane on the slice and the colour range it gets (None for an empty
-    panel). The range is colorize()'s (log10 where the panel is log, centred on 0 for a diverging field);
-    with 'shared' or 'merged', panels of one (field, component) take the union of their ranges -- and of one family
-    of velocity derivatives: a phase-space panel's stored stream average never shares a range, a colour
-    bar or a name with a mean-field panel (grids.OutputSet.gradient_family); with a phase-space panel in the grid every
-    velocity-derivative panel says its family ('qualify', grids.field_label)."""
+    """Per panel of the request: its plane on the slice and the colour range it gets (None for an empty panel)."""
     axis, rel, clip, smooth = req["axis"], req["rel"], req["clip"], req["smooth"]
     grad = req.get("ps_gradient", "stored")
     items = []
@@ -195,9 +187,8 @@ def grid_tile_marks(req: dict, items: list, max_tile: int = 1024) -> tuple[list,
 
 def grid_tile_contours(req: dict, items: list, max_tile: int = 1024) -> tuple[list, list, dict | None]:
     """The panels' contour lines over grid_tiles' picture: (pieces, colours, shared) -- one (k, 2, 2) array of the
-    picture's pixels per level of every panel (each panel's lines scaled to its tile and offset by it: they lie inside
-    it), the levels' colours, and the first panel's contours.map_lines dict when every panel with lines has the same
-    levels (the colour bar below the picture then marks them), else None."""
+    picture's pixels per level of every panel (each panel's lines scaled to its tile and offset by it: they lie
+    inside it), the levels' colours."""
     cols = req["cols"]
     sizes = [it["img"].shape[0] for it in items if it is not None]
     if not sizes:
@@ -222,9 +213,7 @@ def grid_tile_contours(req: dict, items: list, max_tile: int = 1024) -> tuple[li
 
 def grid_tiles(req: dict, items: list, max_tile: int = 1024) -> tuple[np.ndarray, list, tuple | None]:
     """The screen's picture: every panel coloured straight to pixels (colorize, the single map's way) and
-    tiled, thin white gaps unless merged, resampled to one tile size (nearest). Returns (rgb, labels,
-    bar): labels = [(x, y, text)] in image pixels, bar = (cmap, vrange, label, log) when every panel shows one
-    quantity on one range (shown below the picture), else None."""
+    tiled, thin white gaps unless merged, resampled to one tile size (nearest)."""
     rows, cols, clip = req["rows"], req["cols"], req["clip"]
     sizes = [it["img"].shape[0] for it in items if it is not None]
     T = min(max(sizes), max_tile)
@@ -291,12 +280,9 @@ def grid_suptitle(req: dict, items: list, position: str | None = None) -> str:
 
 
 def grid_figure(req: dict, items: list, dpi: float = 200.0, opts: dict | None = None):
-    """The full matplotlib figure (what Save figure… writes): axes in Mpc, per-panel titles and colour bars,
-    or -- merged -- touching panels with inside labels and the bars in one column at the right, one per
-    quantity. 'opts' = the Save options (figsave.options; None = the defaults):
-    the title, the panel titles, frame, ticks, tick labels, axis names and their unit, the colour bars and their
-    labels, the void outlines, the font size, the width; margins 'none' tiles the panels over the whole figure
-    with nothing around them. Returns (Figure, panel count)."""
+    """The full matplotlib figure (what Save figure… writes): axes in Mpc, per-panel titles and colour bars, or
+    -- merged -- touching panels with inside labels and the bars in one column at the right, one per
+    quantity."""
     import matplotlib
     matplotlib.use("Agg", force=False)
     from matplotlib.figure import Figure
@@ -457,8 +443,7 @@ def grid_dpi(fig, req: dict, items: list, opts: dict) -> float:
 def grid_full_pixels(req: dict, items: list, opts: dict):
     """The grid at full resolution: (rgb, overlay or None) for figsave.write_pixels -- the screen's tiles (grid_tiles,
     the colours and ranges as shown) with each panel at the largest panel's own pixels instead of 1024 at most, the
-    panels' contour lines as on screen, and each panel's void outlines over it, clipped to its tile, when the options
-    keep them."""
+    panels' contour lines as on screen, and each panel's void outlines over it, clipped to its tile."""
     sizes = [it["img"].shape[0] for it in items if it is not None]
     T = max(sizes)
     rgb, _labels, _bar = grid_tiles(req, items, max_tile=T)
@@ -562,11 +547,7 @@ class GridMixin:
     @staticmethod
     def _grid_snap_key(o):
         """The Redshift menu's key of an output: the snapshot number in a simulation (a folder whose name
-        gives none: the folder itself, so two renamed snapdirs never share one '(?)' entry); for a custom
-        run the snapshot FILE it read (the sidecar's input_file: the DTFE and PS-DTFE runs of one snapshot
-        meet in the Type menu whatever folder they wrote to, and two snapshots run into one folder --
-        the Custom tab's default ~/DTFE-output -- stay apart); else the folder (a file opened by hand
-        without a sidecar). Cached on the object (a refresh makes new objects)."""
+        gives none: the folder itself, so two renamed snapdirs never share one '(?)' entry)."""
         cached = getattr(o, "_grid_key", None)
         if cached is not None:
             return cached
@@ -641,12 +622,7 @@ class GridMixin:
 
     def _grid_row_types(self, i: int, keep_root: str | None = None):
         """Row i's Type menu: the outputs of its snapshot -- the standard DTFE, the phase-space run, other
-        prefixes (grids.type_label; two runs with one label get their folder). Keeps the exact output
-        ('keep_root': a refresh, a fill), else the row's remembered choice (_grid_type_pref: the user's
-        pick or the fill's) by its root, else its prefix WITH its estimator, else its estimator, else its
-        prefix, else the Output menus' preference (ps_output first): a row set to DTFE stays DTFE when its
-        redshift changes, and a run of the same name as another estimator's (custom runs in two folders)
-        comes back after a snapshot without it. Ends in the field menu, which recomposes once."""
+        prefixes (grids.type_label; two runs with one label get their folder)."""
         sim, snap, typ = (self.grid_table.cellWidget(i, c) for c in (_ex._C_SIM, _ex._C_SNAP, _ex._C_TYPE))
         grp, key = sim.currentData(), snap.currentData()
         prev_prefix, prev_kind, prev_root = self._grid_type_pref.get(
@@ -807,9 +783,8 @@ class GridMixin:
 
     def grid_fill(self, mode: str):
         """Fill the panels from the map: 'map' = this output, field and component in every panel;
-        'redshifts' = this field at this simulation's snapshots that have it, the latest ones, oldest
-        first; 'fields' = this output's fields in the order of the field list, starting at the map's;
-        'types' = this field from every output of this snapshot (DTFE, PS-DTFE, other prefixes)."""
+        'redshifts' = this field at this simulation's snapshots that have it, the latest ones,
+        oldest first."""
         o, name, comp = self.current, self.field.currentData(), self.component.currentText()
         if o is None or name is None:
             return
@@ -1040,9 +1015,8 @@ class GridMixin:
 
     def save_grid(self, path, options: dict | None = None) -> str:
         """Write the figure of the current panels as the Save options say ('options', else the ones chosen): PNG,
-        PDF, SVG or TIFF by the file's suffix, the decorated figure or the panels at full resolution (no margins with
-        'match the data' too: the panels' own pixels, touching as in that figure); the path written. The
-        status line says when the axes are not in the unit asked for (grid_unit)."""
+        PDF, SVG or TIFF by the file's suffix, the decorated figure or the panels at full resolution (no margins
+        with 'match the data' too: the panels' own pixels, touching as in that figure); the path written."""
         opts = FS.options(self.save_options if options is None else options)
         fmt = FS.format_of(path, opts["format"])
         req = self.grid_request()

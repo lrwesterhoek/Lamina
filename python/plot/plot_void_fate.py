@@ -1,44 +1,4 @@
-"""The FATE of the voids: a census over every snapshot of a box.
-
-Each distinct well-resolved void (the profile / abundance sample, catalog.distinct_mask: the FOLLOWED voids) of
-every snapshot of the ladder is linked to the voids of the next one by its MATTER (dtfelib.lagrangian): its member
-particles -- those within R_v of its centre, at most lagrangian.FATE_MAX_SIGMA (15) smoothing lengths (the R_v
-search reaches 24; the membership spheres stay at the 15 the census is made with) -- are found again
-by ParticleID, and the voids holding them there are its descendants. The descendants are drawn from EVERY minimum of the
-next catalogue with a usable radius (lagrangian.void_pool; the followed ones with their R_v), not from the followed ones
-alone: at z = 0 those are a fifth of the minima, and a void whose matter sits in an unfollowed minimum would count as
-vanished.
-Classes (Lagrangian linking, lagrangian.py's constants): SURVIVE (>= 50% of the members in one followed descendant),
-MERGE (two or more progenitors pass >= 50% to the same followed descendant), UNRESOLVED (survive or merge, but into
-a minimum that is not followed: not distinct, not well resolved or without R_v -- the void lives on, out of the
-sample), SPLIT (no 50% descendant, but two or more with >= 25% each) and VANISH (no void of the next snapshot
-receives these thresholds: a void-in-cloud crushed, or its matter spread thin). The census tells whether a falling
-void count comes from mergers or from void-in-cloud collapse.
-
-Outputs (figures/void_fate/<sim>/):
-  fate_census.png   (a) counts per class per interval (stacked bars), (b) the fraction of each snapshot's voids
-                    still holding a FOLLOWED main descendant (survive or merge; a chain ends at an unresolved
-                    descendant, which is not followed further) at the last snapshot, against log(1+z),
-                    (c) class fractions against the progenitor's R_v in smoothing lengths, (d) against its central
-                    delta (all intervals pooled)
-  fate_table.csv    one row per (interval, progenitor void): position, R_v, central delta, members, enclosed delta,
-                    class, main descendant (catalogue row), whether it is followed, how many progenitors pass half
-                    their matter to it, its shared fraction, the two largest over every void and the largest in a
-                    followed one
-  fate_census.npz   the per-interval class counts, the chained survival and the direct --ref-snap -> last link
-The per-interval links (shared-particle contingency tables) are cached in the pipeline cache
-(<sim>_<method>_fate_<a>_<b>.npz, rebuilt when either catalogue's voids or R_v settings changed -- the catalogue's
-own r_v_settings record -- and once for the descendant pool: lagrangian.LINK_VERSION); the classes are
-taken at plot
-time, so a changed lagrangian.SURVIVE_FRAC / SPLIT_FRAC needs no particle read. Those names are PS-DTFE's default
-grids; another estimator or --prefix adds '_<method>' / '_<prefix>', --exclusive '_exclusive' (each particle in one
-void only: the nearest centre in R_v units; the default follows lagrangian's DEFINITIONS, overlapping spheres share
-particles), a non-default smoothing writes into its own folder.
-
-Examples:
-  python3 python/plot/plot_void_fate.py --sim TNG50-3-Dark
-  python3 python/plot/plot_void_fate.py --sim TNG100-3-Dark --ref-snap 33
-"""
+"""The FATE of the voids: a census over every snapshot of a box."""
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
 import resource
@@ -210,7 +170,7 @@ def plot_census(intervals, direct, chain, ztab, args, path):
     ax.legend(fontsize=9)
 
     sig = pipeline.smoothing_length_mpc()
-    rv = np.concatenate([r_v_mpc(a) / sig for a, _b, _l, _f in intervals])     # the measured R_v, not the cap
+    rv = np.concatenate([r_v_mpc(a) / sig for a, _b, _l, _f in intervals])
     dc = np.concatenate([np.asarray(a.cat["delta_values"], float)[a.rows] for a, _b, _l, _f in intervals])
     cls = np.concatenate([f["cls"] for _a, _b, _l, f in intervals])
     for ax, x, edges, xlab in ((axes[1, 0], rv, np.geomspace(max(np.nanmin(rv), 1e-3), np.nanmax(rv) * 1.0001, 8)

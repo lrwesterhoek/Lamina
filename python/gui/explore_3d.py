@@ -1,20 +1,6 @@
 """The Explore tab's 3D view: View3D, the right pane's picture of the box turned in 3D -- the map's field as a
-translucent volume (or on three orthogonal planes), the voids as spheres of their true size, the box's edges, an axis
-triad and a scale bar -- and View3DMixin, the part of ExploreControls that fills it (the volume or the planes read on
-the slice worker, planes3d), follows the map's field, colours and slice, and inspects the voids: hover names one, a
-click fills the void inspector, a double-click (or Close up) flies to it, the volume or the planes then read from the
-grid at its full resolution around it.
-
-Drawn by QPainter: an orthographic camera (view3d.py) maps each plane, and each slice of the volume, to the screen by
-one affine transform and each sphere to a circle. The volume is direct volume rendering by texture slicing
-(volume3d.py): the averaged cube's slices along the axis facing the viewer, coloured and made translucent by a
-transfer function on the map's scale, composited front to back in 16 bits a channel. On screen, where OpenGL is
-there, the volume's picture comes from the GPU instead (volume_gl.py: the same slices, samples and compositing, in
-real time at 1024^3); offscreen (the tests, which have no OpenGL), for Save image and without OpenGL from QPainter
-(volume_picture), the overlays always from QPainter.
-
-With the map's Contours tick the planes carry the map's contour lines (each plane's own, mapped by its transform)
-and the volume the levels as thin shells (contours.shell_plan, in its transfer function), with their key."""
+translucent volume (or on three orthogonal planes), the voids as spheres of their true size, the box's edges, an
+axis triad and a scale bar."""
 
 from __future__ import annotations
 
@@ -82,7 +68,6 @@ SAVE_3D_MAX = 8192
 PREVIEW_CELLS = 384             # (a cube of at least this many cells along an axis: 512^3 and 1024^3), then whole --
                                 # at 1024^3 on a Retina screen the first in 1.25 s instead of the whole one's 2.1
 TURN_BUDGET_MS = 20.0           # the GPU: a frame's drawing while the view turns, at most (the read-back, the overlays
-                                # and the window's flush add some 5-8 ms: over 30 frames a second)
 TURN_STEPS = ((0, 1), (0, 2), (1, 1), (1, 2), (1, 4), (1, 8))
                                 # ... the turning frames' steps, finer (dearer) first: (cube, stride) = every stride-th
                                 # slice (the opacity corrected for the longer path: the same look) of the volume (0)
@@ -144,9 +129,8 @@ def volume_scene(req: dict) -> dict:
 
 def planes3d(req: dict) -> dict:
     """The slice worker's part of a 3D request: the shown planes read and smoothed as the map's slices are, cut to
-    the window (periodic: a close-up near a face reads across it), strided to at most view3d.MAX_TEXTURE pixels a
-    side and coloured on one range (the map's fixed range, else the clip percentiles of all three together). A
-    volume request (req['style'] 'volume') goes to volume_scene."""
+    the window (periodic: a close-up near a face reads across it), strided to at most view3d.MAX_TEXTURE pixels
+    a side and coloured on one range (the map's fixed range, else the clip percentiles of all three together)."""
     if req.get("style") == "volume":
         return volume_scene(req)
     o: G.OutputSet = req["output"]
@@ -238,8 +222,7 @@ def _faded(px: np.ndarray, weight: float) -> np.ndarray:
 def _composite(img: QImage, S: QTransform, part: dict, slices, region: QRegion | None = None) -> None:
     """Draw (index, (h, w) uint64 RGBA64 pixels) slices of a plan's part onto img, front first, with the 'under'
     operator (DestinationOver), each by its transform (then S) and smoothly (bilinear) resampled; only within
-    'region' (img's pixels: the part's own, part_regions) when given. The part's nearest slice at its weight
-    (slice_plan's 'first')."""
+    'region' (img's pixels: the part's own, part_regions) when given."""
     w, h = part["size"]
     first = part.get("first")
     q = QPainter(img)
@@ -258,9 +241,7 @@ def _composite(img: QImage, S: QTransform, part: dict, slices, region: QRegion |
 def render_slices(stacks, plan: dict, width: int, height: int, scale: float = 1.0) -> QImage:
     """The volume's picture on a width x height view (drawn at 'scale' of it: smaller while turning, larger on a
     high-density screen): the slices of 'stacks' (by slicing axis, a dict or a sequence: (m, h, w) uint64,
-    Format_RGBA64_Premultiplied pixels, volume3d.transfer of the levels; or the one array across plan['axis'] when
-    that part draws the whole picture, as orthographic) placed by 'plan' (volume3d.slice_plan), each part within its
-    own pixels, and composited front to back onto a transparent 16-bit image. Transparent where nothing is."""
+    Format_RGBA64_Premultiplied pixels, volume3d.transfer of the levels."""
     img, S = _canvas(width, height, scale)
     for part, region in part_regions(plan, img.width(), img.height()):
         if not isinstance(stacks, np.ndarray):
@@ -276,8 +257,7 @@ def render_slices(stacks, plan: dict, width: int, height: int, scale: float = 1.
 class SharpPicture:
     """A settled volume picture drawn a few slices at a time (pump), so the window stays responsive while a large
     cube is drawn at the screen's full resolution: each slice's colours gathered from its levels on volume3d's
-    threads (numpy lets go of the GIL), a few slices ahead, and composited in order here, part by part (a
-    perspective view draws from up to three slicing axes: volume3d.slice_plan)."""
+    threads (numpy lets go of the GIL), a few slices ahead, and composited in order here."""
     AHEAD = 24                                  # slices gathered ahead of the one drawn
 
     def __init__(self, key, src: dict, lut: np.ndarray, plan: dict, width: int, height: int, ratio: float):
@@ -353,10 +333,7 @@ def next_turn_step(step: int, costs: dict, budget_ms: float = TURN_BUDGET_MS) ->
     # Design: the step moves one at a time. Coarser while the current step is over budget; finer when the finer one
     # is known to fit or, not tried yet in this turn, when the current one costs under 0.4 of the budget (a step
     # roughly halves the cost, never quite: the cache helps). A step known too dear is never tried again in the same
-    # turn, so it cannot flicker between two. Measured on TNG100-3-Dark 1024^3, 2000 x 1600 on a busy M1 Max: (0, 1)
-    # 96 ms, (0, 2) 69, (1, 1) 17, (1, 2) 11, (1, 4) ~10. Not chosen: jumping straight to the finest step known to
-    # fit, aiming at the mouse's own event rate instead of a fixed budget, keeping the last turn's costs (they hold
-    # only while the cube, the screen and the range stay).
+    # turn, so it cannot flicker between two.
     cur = costs.get(step)
     if cur is None:
         return step
@@ -370,8 +347,7 @@ def next_turn_step(step: int, costs: dict, budget_ms: float = TURN_BUDGET_MS) ->
 
 
 def _pen(colour, width: float, style=Qt.SolidLine) -> QPen:
-    """A pen whose width is in screen pixels whatever the painter's transform. Opaque whenever wider than one pixel:
-    Qt strokes a translucent wide line as a filled path, ten times slower (300 outlines: 116 ms against 12)."""
+    """A pen whose width is in screen pixels whatever the painter's transform."""
     pen = QPen(colour, width, style)
     pen.setCosmetic(True)
     return pen
@@ -680,8 +656,6 @@ class View3D(QWidget):
             return self._picture[1]
         src = vol["coarse"] if vol.get("coarse") is not None else vol["fine"]
         plan = VOL.slice_plan(self.cam, self.lo, self.hi, src["shape"])
-        # the coloured stacks kept from frame to frame, one per slicing axis in use (a perspective view draws from
-        # up to three: 33 MB each at 160^3); all remade when the cube, the range or the exponent changes
         skey = (id(src), round(plan["exponent"], 2), self.transfer)
         hit = self._stacks.get("quick")
         if hit is None or hit[0] != skey:
@@ -749,8 +723,7 @@ class View3D(QWidget):
         self._pump.stop()
 
     def _pump_tick(self):
-        """A few more slices of the settled picture being drawn (about 25 ms); shown when complete. A large cube's
-        preview, once complete, is shown and the sharp picture begun at once."""
+        """A large cube's preview, once complete, is shown and the sharp picture begun at once."""
         job = self._job
         if job is None or self._fast or job.key not in (self._sharp_key(), self._preview_key()):
             self._stop_job()
@@ -817,9 +790,8 @@ class View3D(QWidget):
 
     def _plane_cuts(self, a: int, pl: dict, T9=None) -> list:
         """Where the voids cut plane a: [((x, y, L, row), dashed, screen)] in its texture's pixels, the cut being
-        (x, y) + L (cos t, sin t) (view3d.plane_cuts: for spheres the map's outlines); dashed = the R_eff spheres;
-        screen = in perspective the cut's ellipse on the screen through the plane's map T9 (view3d.cut_images: drawn
-        with an affine map, not through the homography), else None."""
+        (x, y) + L (cos t, sin t) (view3d.plane_cuts: for spheres the map's outlines); dashed = the R_eff
+        spheres."""
         v = self.voids
         if not v or self._fast:
             return []
@@ -904,12 +876,7 @@ class View3D(QWidget):
 
     def _draw_lines(self, p: QPainter, lines: dict, rect: QRectF, T: QTransform):
         """A plane's contour lines (planes3d's 'lines': per level its pieces in the texture's pixels and its opaque
-        colour) on the quad showing 'rect' of the texture: cut to it, mapped by the plane's map T in numpy (no Qt
-        clip or projective stroke: view3d.segments_on_screen) and stroked by a cosmetic one-pixel pen, antialiased,
-        at the planes' opacity (the painter's). The colour is the map's line laid over its own level's colour
-        (contours.solid_colours): what the map shows along it. On a high-dpi screen the stroke is repeated one device
-        pixel right and one down, the map's rule (explore_canvas: a wider pen outlines the whole path first, seconds
-        for a rough plane): about one point wide, as the map's."""
+        colour) on the quad showing 'rect' of the texture: cut to it."""
         T9 = (T.m11(), T.m12(), T.m13(), T.m21(), T.m22(), T.m23(), T.m31(), T.m32(), T.m33())
         box = (rect.left(), rect.top(), rect.right(), rect.bottom())
         key = (id(lines), box, T9, self.cam.width, self.cam.height)
@@ -1615,7 +1582,7 @@ class View3DMixin:
             self._3d_shown = False
             self._3d_cancel()
             self._3d_within = self._3d_basin_kept = None    # a close-up's copy of its levels with its shells freed
-            view.view3d.set_volume(None)            # its coloured slices (128 MB at 256³) freed; the averaged
+            view.view3d.set_volume(None)
             view.view3d.setVisible(False)           # cube stays in volume3d's cache: shown again at once
             view.canvas.setVisible(True)
             view.streams.setVisible(True)
@@ -1655,9 +1622,8 @@ class View3DMixin:
 
     def _3d_request(self):
         """Read the planes or the volume (on the slice worker; only the latest request is served): the map's field,
-        component and colours; the planes with its range clip, fixed range and smoothing, the volume averaged down
-        to the detail chosen (its range its own: the sliders); never the map's comparison or hi-res slice. A volume
-        already shown or on its way is not read again: a change of colours only recolours it."""
+        component and colours; the planes with its range clip, fixed range and smoothing, the volume averaged
+        down to the detail chosen (its range its own: the sliders); never the map's comparison or hi-res slice."""
         if not self._3d_shown or self._shut or self.current is None or self._3d_index is None:
             return
         o, name = self.current, self.field.currentData()
@@ -1726,11 +1692,8 @@ class View3DMixin:
         self._3d_emit(req)
 
     def _3d_detail(self, o, lo, hi) -> tuple[int, str]:
-        """The detail chosen, and why not when it is not: a cube that would not fit in the free memory less 2 GB (the
-        volume shown, given back when this one replaces it, counted as free) falls back to the finest that does; one
-        needing more than 1 GB while a DTFE run is going is asked about first (heavy_ok: the run's auto-tuner
-        budgeted from the memory free at its start), a 'no' falling back to one under 1 GB. The choice shown now
-        for this window is kept as it is: a recolour or a slice step never re-reads it at another detail."""
+        """The choice shown now for this window is kept as it is: a recolour or a slice step never re-reads it at
+        another detail."""
         want = int(self.view3d_detail.currentData())
         shown = (self._3d_res or {}).get("request") or {}
         if shown.get("style") == "volume" and shown.get("want") == want and self._same(shown.get("output"), o) \
@@ -2044,10 +2007,8 @@ class View3DMixin:
 
     def _3d_void_floor(self, res: dict) -> float | None:
         """A density volume's close-up: the lowest value (the map's scale) near the centre of the void looked at --
-        within VOID_FLOOR_SHARE of its smallest radius (the fitted ellipsoid's c when drawn so, else R_v), at least
-        one cell -- for its contour shells to nest around that void's own minimum (contours.shell_plan's 'floor').
-        None for the whole box, another field or a void without a radius. Kept for the cube, the void and its
-        shape."""
+        within VOID_FLOOR_SHARE of its smallest radius (the fitted ellipsoid's c when drawn so, else R_v), at
+        least one cell."""
         close, vres, prep = self._3d_close, self._void_result_3d(), res.get("volume")
         if close is None or vres is None or prep is None or (res.get("request") or {}).get("field") != "density":
             return None
@@ -2079,9 +2040,7 @@ class View3DMixin:
     def _3d_basin(self, prep: dict, top: float) -> dict | None:
         """A close-up's void up to its outer contour shell (volume3d.basin from its centre), where its shells are
         drawn: {'key', 'top', 'counts' (its cells' level counts), 'slopes' (the field's slope per level there)};
-        None when the centre is not below 'top'. Kept for the cube, the void and the value (a range slider dragged
-        does not remake it); the mask itself is made again when a copy of the levels needs it (_3d_shell_cube), not
-        held (a byte a cell)."""
+        None when the centre is not below 'top'."""
         close = self._3d_close
         key = (id(prep), tuple(np.round(close["centre"], 9)), round(top, 9))
         if self._3d_basin_kept is None or self._3d_basin_kept["key"] != key:
@@ -2334,10 +2293,7 @@ class View3DMixin:
             self.close_up_3d(row)
 
     def save_3d_png(self, path, side: int | None = None) -> str:
-        """The 3D view to a PNG at a resolution of its own: 'side' pixels on its longer side (default the Save
-        options' width when set in pixels, else SAVE_3D_SIDE; at most SAVE_3D_MAX), the volume's settled picture
-        drawn at that resolution by QPainter (not the GPU's screen picture), with the view's title above and its colour
-        bar below, drawn at the same resolution."""
+        """The 3D view to a PNG at a resolution of its own: 'side' pixels on its longer side."""
         v3 = self.view.view3d
         if side is None:
             opts = getattr(self, "save_options", None) or {}

@@ -1,20 +1,7 @@
 #!/usr/bin/env python3
-"""Launcher features (python/gui): run-directory files of a run going (contract C1) in the Runs
-browser, the memory status strip, the 'Running now' panel, the void-catalogue status and its build job, keep-awake,
-the void Plots sets, the memory check's log; the Explore menu's Save Options…; the plane
-conventions' menu on the Grids, Custom and Pipeline tabs.
-
-Three tiers:
-  * HEADLESS (always run; Ubuntu CI, numpy 1.26): results.py / runspec.py / void_cache.py on synthetic run folders
-    and synthetic processes (a 'sleep' renamed to look like PS-DTFE through bash's exec -a, or run through a
-    symlink named PS-DTFE where ps's comm must say so).
-  * QT (when PySide6 imports, else SKIP): the RunningNow table, the Runs browser's Voids column, the window's
-    status strip, 'Build void catalogue' -> a queue job, and a failed memory-check pass landing in the log.
-  * DATA-BACKED (DTFE_DATA_ROOT, else SKIP): the void-catalogue status of the real TNG100-3-Dark grids.
-
-Usage:  python3 tests/py_gui_app2_test.py            (exit 0 = pass)
-        ~/.venvs/dtfe-gui/bin/python tests/py_gui_app2_test.py    (also the Qt tier)
-"""
+"""Launcher features (python/gui): run-directory files of a run going (contract C1) in the Runs browser, the memory
+status strip, the 'Running now' panel, the void-catalogue status and its build job, keep-awake.
+Usage:  python3 tests/py_gui_app2_test.py            (exit 0 = pass)"""
 
 import atexit
 import json
@@ -655,9 +642,7 @@ def t_qt_gpu_retries(tmp: Path):
 
 def t_qt_older_load(tmp: Path, w):
     """'Load settings' needs a log whose settings the launcher reads: the Runs tab offers it for a current log (the
-    header's 'run mode' line), not for an older version's (a command without that line; a custom run's with its
-    settings sidecar too) nor for a log without any command; for those the window's load returns at once, says why
-    on the status line and leaves every job as it was."""
+    header's 'run mode' line), not for an older version's."""
     import runs_view as RV
     root = tmp / "older_root"
     older = "".join(ln for ln in LOG_OK.splitlines(True) if "run mode" not in ln)
@@ -698,13 +683,7 @@ def t_qt_older_load(tmp: Path, w):
 
 def t_qt_advanced(tmp: Path, spin):
     """The opt-in Advanced settings (python/gui/app_advanced.py). View > Advanced Settings is off in a new window, and
-    off the run tabs are the two-mode ones: no group, row or grey line of it anywhere, the same widgets and sizes. On:
-    one open group 'Advanced' after the Grids, Custom snapshot and Pipeline tabs' own groups, the rows runspec's
-    advanced_rows names for the job (estimator, dimension, build), each on Automatic with its grey note. An override
-    reaches the command, the folded summary, the grey 'Advanced:' line under 'Runs on', the checks list and (a Device
-    override) the 'Runs on' line. A queued job keeps its overrides, marked. Off puts the three jobs back to Automatic
-    and says how many; a job loaded with overrides turns the switch on and says so; only a window that remembers
-    keeps the switch (one settings key)."""
+    off the run tabs are the two-mode ones: no group, row or grey line of it anywhere, the same widgets and sizes."""
     print("Advanced settings (app_advanced.py):")
     import re
     import app as A

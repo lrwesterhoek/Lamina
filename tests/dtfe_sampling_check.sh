@@ -1,57 +1,14 @@
 #!/usr/bin/env bash
-# Golden and analytic checks of the standard binary's sampling variants that no other suite runs: the volume
-# average '--average-method 2' (random points in each grid cell, seeded), the redshift-cone grid ('--redshift-cone',
-# unaveraged and averaged), the regular grid's point values, and user-given
-# sampling points (unaveraged and averaged; only the library API reaches them: tests/dtfe_user_sampling.cpp, built
-# against libDTFE when 'make library' has made one): averaged_interpolation_2.cc, unaveraged_interpolation.cc and
-# the sample_eval.h they share, so that a change to them is held to these numbers.
-#
-# A seeded synthetic snapshot: 4096 particles uniform in a 10 Mpc box (an LCG, so the positions do not depend on
-# numpy), NOT periodic, with a LINEAR velocity field v = A x + b. The DTFE interpolant of a linear field is the field
-# itself inside the particles' hull, so every velocity is known in closed form; the densities are checked against
-# other code paths or against stored values. Everything but S8 is sampled inside the region [2.5, 7.5]^3 (well inside
-# the hull); '--no-padding-test' everywhere, since '--sample-points' turns the padding test's dummy points off and they move the
-# densities near the hull. OMP_NUM_THREADS=1 on every run: method 2 adds 1000 x the sub-domain number to its seed,
-# and more threads split a regular grid into sub-domains.
-#   S1  the regular grid's point values: velocity = A x + b and gradient = A at the cell centres; density = the
-#       '--sample-points' evaluation at the same points (exact point location, another code path)
-#   S3  method 2, 20 random points: gradient_a = A; the samples' mean position, A^-1 (velocity_a - b), lies inside
-#       its own cell and scatters about the centre by dx / sqrt(12 x 20) per axis (within 40%); density_a against
-#       '--exact' (Monte-Carlo noise only: rms 0.082 of the mean, 0.04-0.16 accepted); velocityStd_a's mean
-#       square = the linear field's expectation |A|_F^2 dx^2 / 12 x 19/20 (within 10%). These hold for any
-#       realization; the realization itself is golden in S7 (the coordinates are drawn in separate statements,
-#       x, y, z, so no compiler can reorder the draws)
-#   S4  the redshift cone, point values: density = '--sample-points' at the cone cell centres (computed here from
-#       the cone's definition), velocity = A x + b, gradient = A
-#   S5  the redshift cone, averaged (method 2, the only one it has): gradient_a = A, the samples' mean position
-#       within the cone cell's extent around its centre
-#   S6  user sampling points (libDTFE): point values as S4; averaged (method 2 in a cube of the given size about
-#       each point): gradient_a = A, mean positions inside the cube, scatter as in S3
-#   S7  GOLDEN: the seeded realizations of the cone's, the user points' and the regular grid's method-2 density_a
-#       and velocity_a (every loop draws the coordinates in separate statements, so the order is fixed) against
-#       tests/reference/sampling_golden.txt (the single build's), 1e-4 relative per value (of the largest value for
-#       the vector fields): the single build repeats it to the print rounding (5e-8), the double build sits 7e-7
-#       from it, so another platform's rounding fits; the stream itself is fixed by '--seed' and Boost's mt19937,
-#       whose sequence is specified
-#   S8  past the convex hull, point values: a cone that leaves the particles' hull (origin 1 Mpc from the box face)
-#       and a regular grid whose z-rows start below a slab of particles (z in [3, 10]); each run evaluates its own
-#       centres with '--sample-points' too. Every centre the point evaluation covers has its density and
-#       velocity = A x + b, also the ones after an infinite cell in the same row (the row's coordinate used to stop
-#       advancing there, so the rest of the row came out 0); a centre beyond the particles (outside the box, below
-#       the slab) is exactly 0
-#   S9  user points outside the region (libDTFE): one before and two after the 64 points; the outputs keep one entry
-#       per sample, 0 at the outside ones, and the 64 others equal the plain run's bit for bit (point values and
-#       method 2: an outside sample neither locates nor draws)
-#   S10 the options no other run spells: the files named by '--input-file' and '--output-file', '--output-format 101',
-#       '--scalars-extensive' (read by the SPH scalar path; this run has no scalar field), '--sph 32' and
-#       '--particle-fraction 0.5 --seed 11', on an 8^3 grid without a region, '--field density': exit 0, and SPH's
-#       cell values in '.a_den' (8^3 finite values, some above 0; no '.den'). Every build has these options
-# The user-sampling part (S6, S7's user values, S9) needs libDTFE (single precision): without it, or in the double pass,
-# it is a SKIP line and the rest still runs; '--require-library' makes a missing library a failure.
-# About 4 s on the Mac (eight runs of 4096 particles), plus ~10 s to build the user-sampling driver the first time.
+# Golden and analytic checks of the standard binary's sampling variants no other suite runs: '--average-method 2', '--redshift-cone',
+# regular-grid point values and user sampling points (library API: tests/dtfe_user_sampling.cpp).
+# A seeded 4096-particle snapshot with a LINEAR velocity field, so every velocity inside the hull is known exactly.
+#   S1  the regular grid
+#   S3  method 2, 20 random points: gradient_a = A; the samples
+#   S4  the redshift cone, point values: density = '--sample-points' at the cone cell centres
+#   S5  the redshift cone, averaged (method 2, the only one it has): gradient_a = A
+#   S8  past the convex hull, point values: a cone that leaves the particles' hull
+#   S9  user points outside the region (libDTFE): one before and two after the 64 points
 # Usage: tests/dtfe_sampling_check.sh [--no-build] [--require-library] [--update-reference]
-#   --no-build           accepted and ignored: nothing of the binaries is built (the driver is, when it is stale)
-#   --update-reference   rewrite tests/reference/sampling_golden.txt from this run (single precision, with libDTFE)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$SCRIPT_DIR")"
@@ -103,11 +60,7 @@ np.savetxt(os.path.join(tmp, "g2pts.txt"), grid_centres(*SLAB_REGION, SLAB_GRID)
 np.savetxt(os.path.join(tmp, "user_out.txt"), outside_samples(us))
 PYEOF
 
-# method 2's 20 random points per cell (NS), with which S7's golden values are drawn: a total that no '--subsamples k'
-# (k^3) gives, so the method-2 runs name no count and take method 2's own default, 20 (user_options.cc
-# readAveragingOptions; the cone and the user points keep it too). '--padding 5': S7's golden
-# values and the measured bounds below were made at the binary's padding of before (5 mean spacings; 15 since), so
-# every run names it
+# method 2's 20 random points per cell (NS), with which S7's golden values are drawn.
 C0=(--input-format 105 --mpc-unit 1 --no-padding-test --verbose 1 --padding 5)
 C=("${C0[@]}" --region-mpc 2.5 7.5 2.5 7.5 2.5 7.5)
 CONE=(--grid 4 4 6 --redshift-cone 0.5 2.0 30 150 0 300 --cone-origin 5 5 5)
@@ -203,8 +156,6 @@ ng = xc.shape[0]
 cone_x = cone_centres()
 nc = cone_x.shape[0]
 us = user_samples()
-# measured on the Mac (single; the double build is closer): velocities 8e-8, gradients 8e-6 (a thin tetrahedron's
-# rounding), densities against the point evaluation 2e-6
 TOL_V, TOL_G, TOL_D = 1e-6, 1e-4, 2e-5    # relative to the largest |v|, to max|A|, per value
 
 def vel_check(tag, what, v, x):
@@ -262,9 +213,7 @@ if user_ok:
     mean_check("S6", "user points, method 2", rd("us", "a_vel", 3), us[:, :3], us[:, 3:] / 2,
                float(np.sqrt((us[:, 3:] ** 2).mean()) / np.sqrt(12 * NS)))
 # S8 past the convex hull: a centre the point evaluation covers has its own values (the rows go on after an
-# infinite cell); one it does not cover is 0 (outside the hull) or, on the hull's skin where CGAL's locate and the
-# exact point location may disagree, still its own velocity; a centre beyond the particles (outside the box, below
-# the slab) is exactly 0
+# infinite cell); one it does not cover is 0 (outside the hull) or.
 c2x, g2x = cone_centres(origin=np.array([9.0, 5.0, 5.0])), grid_centres(*SLAB_REGION, SLAB_GRID)
 for name, x, nrow, outside, where in (
         ("c2", c2x, CONE[2][2], ((c2x < 0) | (c2x > 10)).any(axis=1), "outside the box"),

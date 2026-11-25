@@ -1,55 +1,7 @@
 #!/usr/bin/env bash
-# The partition loop's run-time features, on small synthetic snapshots:
-#   R1  '--ps-merge index-order': two runs at --max-concurrent 4 merge in index order and write byte-identical grids; the
-#       partitions start in index order (at most 13 of the 27 parked at once, 3 measured; 21 under a static-steal
-#       schedule -- the margin is for a loaded CI runner); the 'merge time:' line counts the 27 merged partitions and
-#       gives the seconds of their adds and checkpoints (>= 0)
-#   R2  the partition look-ahead (forced on the CPU deposit with DTFE_OVERLAP=1): every output byte-identical
-#       to '--no-overlap', and the log says it ran
-#   R3  GPU builds only: the look-ahead of a '--gpu' run at --max-concurrent 1 (on by default) against
-#       '--no-overlap': every grid byte-identical (.den, .a_den, .streams, ... and the velocity, an exact
-#       fixed-point sum like the rest); SKIP on a CPU build
-#   R4  crash-safe outputs: a finished run leaves no '<file>.part.<pid>' and no progress sidecar; a stale
-#       '.part.<pid>' of a dead pid is removed at the start, one of a live pid is kept, and one whose final file
-#       is missing is kept with its mv (it may be the only copy); a run whose output
-#       folder is missing writes the whole set to $TMPDIR/dtfe-rescue/<folder>_<name>, byte-identical to a
-#       normal run, says so and exits 3
-#   R5  the progress sidecar '<output>.runlog.progress' while a run goes: the contract's keys, phase
-#       'partitions', done counting up to total; also predicted_gb (> 0: a split and concurrency given in full
-#       are predicted too) and peak_gb (> 0)
-#   R6  the SUMMARY's 'memory model' line: a run whose concurrency the auto-tuner picks prints its
-#       predicted peak against the measured one (macOS: the peak footprint), both positive; so does R5's run,
-#       whose plan is given in full
-#   R7  the STAGED ordered merge, the default. Partition 0 is held 2 s before its merge
-#       (DTFE_TEST_DELAY_PARTITION=0:2), so the others finish first: with NO merge flag the run says it merges in
-#       index order, its 'ordered merge:' line counts staged partitions (> 0, none waiting), and every output is
-#       byte-identical to R1's '--ps-merge index-order' run; DTFE_MERGE_STAGE_GB=0 (no staging: the plain ordered merge) and
-#       a stage cap no partition fits under (no room to stage) wait instead, and a machine with no free memory
-#       (DTFE_FREE_GB=0.001) runs one partition at a time behind the memory gate; all byte-identical too;
-#       '--ps-merge completion-order' says so, stages nothing and equals R1 to float rounding; another value
-#       ('ordered', 'fixed-point') stops the program at option parsing, naming the value and the two modes, with no
-#       output; a default run killed after 10 merges (DTFE_TEST_EXIT_AFTER_PARTITIONS=10) while
-#       partitions are staged has checkpointed exactly partitions 0-9 (the merge order is the index order) and
-#       resumes to R1's grids byte for byte; with the concurrency left to the auto-tuner (the memory gate guards
-#       every partition start) a partition is always staged, and the grids equal DTFE_MERGE_STAGE_GB=0's byte for byte.
-#       THE SPILL: with no RAM room to park (DTFE_TEST_PARK_ROOM_GB=0) a parked partition is spilled to disk (--scratch-dir, which is
-#       empty afterwards: the files are unlinked) instead of waiting -- the 'ordered merge:' line counts the spills,
-#       none waited -- and DTFE_MERGE_SPILL=1 spills every parked one (the system temp folder, with DTFE_SPILL_MIN_GB=2:
-#       a CI runner has less than its 16 GB margin free; and under the memory gate): every output byte-identical to a
-#       '--max-concurrent 1' run and to R1; a spilling run killed after 10 merges checkpointed partitions 0-9 and
-#       resumes byte-identical; DTFE_MERGE_SPILL=0 brings back the wait. The 'merge time:' line: partitions parked
-#       behind the held-back partition 0 (> 0 s parked), none parked but threads waiting with DTFE_MERGE_STAGE_GB=0
-#       (> 0 s holding a thread), the resumed run's count (the 17 it merged), the completion-order run's lock wait;
-#       under the dynamic concurrency (DTFE_TEST_PLAN_MC=1, single build) the RAM room is a lane less for each
-#       partition in flight beyond the plan's: at 0.9 of a lane the dynamic run spills what the plan's own 4 keep in
-#       memory, byte-identical
-#   R8  the progress sidecar of a run that does not finish: one that stops on an error (a missing input, found by the
-#       reader after the sidecar is armed; also the standard binary when it is built) exits 1 and leaves none, as the
-#       launcher then reads a failed attempt from its run log instead of a death; one killed after 2 partitions
-#       (DTFE_TEST_EXIT_AFTER_PARTITIONS=2, exit 137) keeps it, and under DTFE_PROGRESS=0 and DTFE_CHECKPOINT=0 the same
-#       kill leaves neither the sidecar nor a checkpoint (the standard binary too, when it is built); one whose outputs
-#       could not be put in place (a folder where the '.den' goes, exit 3) keeps it with phase 'rescued'
-# Usage: tests/ps_runtime_check.sh [--no-build]   (--no-build is accepted and ignored: the binaries are used as built)
+# The partition loop's run-time features (merge order, look-ahead, crash-safe outputs, progress sidecar, memory model), on small synthetic snapshots.
+# Checks R1-R7 and later print their own labels.
+# Usage: tests/ps_runtime_check.sh [--no-build]   (--no-build is accepted and ignored)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$SCRIPT_DIR")"
@@ -109,16 +61,14 @@ mwait() { sed -n 's/.*merge time: .*waiting for their turn: \([0-9.]*\) s parked
 read -r stp _ <<< "$(mwait "$TMP/st.log")"; read -r s0p s0h <<< "$(mwait "$TMP/st0.log")"
 awk -v a="${stp:-0}" -v b="${s0p:--1}" -v h="${s0h:-0}" 'BEGIN { exit !(a > 0 && b == 0 && h > 0) }'
 check "R7 the 'merge time:' line: ${stp:-?} s parked behind partition 0; DTFE_MERGE_STAGE_GB=0: ${s0p:-?} s parked, ${s0h:-?} s holding a thread" $?
-# THE SPILL: the reference is the same split at --max-concurrent 1 (no parking at all), on ONE thread:
-# four partitions on four threads deposit each on one, and the double build's CPU sums are equal between thread
-# counts only to rounding (README: run-to-run identical grids)
+# THE SPILL: the reference is the same split at --max-concurrent 1 on ONE thread (the double build's CPU sums
+# match between thread counts only to rounding)
 OMP_NUM_THREADS=1 "$BIN" "$SNAP" "$TMP/m1" "${C[@]}" --partition 3 3 3 --max-concurrent 1 --no-overlap > "$TMP/m1.log" 2>&1 \
     || { echo "FAIL: m1 (see $TMP/m1.log)"; exit 1; }
 nspill() { sed -n 's/.*ordered merge: .* \([0-9]*\) spilled to disk.*/\1/p' "$1"; }
 SPD="$TMP/spill"; mkdir -p "$SPD"
-# no RAM room to park (DTFE_TEST_PARK_ROOM_GB=0) while the free memory admits the partitions: a partition that finishes
-# before its turn goes to disk. (Not 'no free memory': the memory gate then runs one partition at a time in index
-# order, so none finishes before its turn -- the gate let later partitions past it before 2026-11-07, out of order.)
+# no RAM room to park (DTFE_TEST_PARK_ROOM_GB=0) while free memory admits the partitions: one that finishes before
+# its turn goes to disk (not 'no free memory': the gate then runs one partition at a time in index order)
 DTFE_FREE_GB=1000 DTFE_TEST_PARK_ROOM_GB=0 "${R7[@]}" "$TMP/sp" "${C[@]}" "${P3[@]}" --scratch-dir "$SPD" > "$TMP/sp.log" 2>&1 || { echo "FAIL: sp (see $TMP/sp.log)"; exit 1; }
 nsp="$(nspill "$TMP/sp.log")"
 grep -q "when the memory cannot hold it, spilled to disk in '$SPD'" "$TMP/sp.log" && [ "${nsp:-0}" -gt 0 ] \
@@ -171,22 +121,15 @@ nsgs="$(nspill "$TMP/sgs.log")"
 grep -q "the memory gate admits the next partition" "$TMP/sgs.log" && [ "${nsgs:-0}" -gt 0 ] && same "$TMP/sg0" "$TMP/sgs"
 check "R7 ... and spilling under the memory gate (DTFE_MERGE_SPILL=1): ${nsgs:-?} spilled, byte-identical" $?
 # the budget room: the free memory plentiful (DTFE_FREE_GB=1000), but no room in the budget beside the
-# plan's predicted peak -- every parked partition must spill (on the free-memory rule alone TNG100 z=0 parks 74 GB)
+# plan's predicted peak -- every parked partition must spill
 DTFE_TEST_PARK_ROOM_GB=0 DTFE_SPILL_MIN_GB=2 "${GA[@]}" "$TMP/sgr" "${C[@]}" --partition 3 3 3 > "$TMP/sgr.log" 2>&1 || { echo "FAIL: sgr (see $TMP/sgr.log)"; exit 1; }
 nsgr="$(nspill "$TMP/sgr.log")"
 nstr="$(sed -n 's/.*ordered merge: \([0-9]*\) partition(s) finished before their turn.*/\1/p' "$TMP/sgr.log")"
 grep -q "the memory budget leaves beside the plan" "$TMP/sgr.log" && [ "${nsgr:-0}" -gt 0 ] && [ "$nsgr" = "$nstr" ] \
     && same "$TMP/sg0" "$TMP/sgr"
 check "R7 ... and no room in the memory budget (DTFE_TEST_PARK_ROOM_GB=0): all ${nsgr:-?} parked partition(s) spilled, byte-identical" $?
-# ... and that room a lane less for each partition the dynamic concurrency runs beyond the plan's. DTFE_TEST_PLAN_MC=1
-# stands for a plan of one partition at a time, which the dynamic concurrency runs 4 at once; the room is 0.9 of a
-# lane (the dynamic start line's partition less its once part, DTFE_AUTO_TUNE_DEBUG=1). At the plan's own 4 (nothing
-# beyond it) partitions park in RAM within it; in the dynamic run one that parks beside two or more others in flight
-# finds no room left and spills, so only the last few wait in memory. The double build runs the plan's one at a time
-# (its sums follow the thread count): nothing parks there.
-# The counts follow the timing (partition 0's 2 s hold against the others on three threads): the thresholds below are
-# the ones to tune from a run's log; the dynamic run keeping fewer in memory than the plan's own, under the same room
-# and the same hold, is the part that tells the rule from the old one
+# ... and that room a lane less for each partition the dynamic concurrency runs beyond the plan's (DTFE_TEST_PLAN_MC=1
+# plans one at a time, the dynamic run starts 4). The thresholds below follow the timing: tune them from a run's log.
 R7_ROOM_LANES=0.9      # the RAM room, in lanes (the dynamic start line's partition less its once part)
 R7_PLAN_RAM_MIN=3      # the plan's own run (sgp): at least this many waited in memory
 R7_DYN_RAM_MAX=2       # the dynamic run (sgd): at most this many waited in memory ...

@@ -11,30 +11,22 @@
 #   scripts/install_gui_app.sh --remove      take both away again (macOS: the app goes to the Trash)
 #
 # The app only starts scripts/gui.sh of THIS repository, so it needs the GUI's PySide6 environment
-# (scripts/install.sh sets it up) and must be re-made if the repository moves. Apps started from
-# Finder get a bare PATH, so the launcher reads PATH and the DTFE settings (DTFE_*, TNG_API_KEY,
-# PYTHON) from the user's login shell, as a Terminal window would have them: the GUI then runs
-# the same python3, wget and data root as the terminal. Its output goes to
-# ~/Library/Logs/Lamina.log. Re-running replaces the app it made before (and only that), and takes away an app it
-# made under the name "DTFE Launcher" (the same bundle identifiers).
+# (scripts/install.sh sets it up) and must be re-made if the repository moves. The launcher reads PATH and the
+# DTFE settings (DTFE_*, TNG_API_KEY, PYTHON) from the user's login shell, so the GUI runs the same python3, wget
+# and data root as the terminal. Its output goes to ~/Library/Logs/Lamina.log. Re-running replaces the app it
+# made before (and only that), and takes away an app it made under the name "DTFE Launcher".
 #
-# macOS privacy protection: an app started from Finder may not read iCloud Drive or an external
-# drive (where the repository or the data may be) until it is given access, and for this app
-# macOS does not ask -- it refuses. Give it Full Disk Access once (System Settings > Privacy &
-# Security > Full Disk Access > +); the launcher explains this and opens that pane when it is
-# refused. macOS gives that access to the PROCESS that is the app, so the bundle's executable is
-# a small compiled program that stays alive as the parent of everything the GUI starts: with a
-# shell script as the executable the process would be /bin/bash to macOS, which the access given
-# to "Lamina" does not cover (tried: refused even with Full Disk Access switched on).
-# The bundle is ad-hoc signed and rebuilt byte-identically, so the access given survives
-# re-running this script (until the repository moves or the launcher itself changes).
+# macOS privacy protection: an app started from Finder may not read iCloud Drive or an external drive until it
+# is given access, and macOS refuses without asking. Give it Full Disk Access once (System Settings > Privacy &
+# Security > Full Disk Access > +); the launcher explains this and opens that pane when it is refused.
+# macOS gives that access to the PROCESS that is the app, so the bundle's executable is a small compiled program
+# that stays alive as the parent of everything the GUI starts (a shell script would be /bin/bash to macOS).
+# The bundle is ad-hoc signed and rebuilt byte-identically, so the access survives re-running this script.
 #
-# The GUI itself runs in a second, small bundle next to its PySide6 environment
-# (~/.venvs/dtfe-gui/Lamina.app): an executable that embeds the environment's Python.
-# macOS names a running app after the bundle of its process, and Python's own process belongs
-# to Python.app -- so without it the Dock and Cmd-Tab say "Python". Started directly (e.g. kept
-# in the Dock) it hands over to the real app above. Built for framework Pythons (Homebrew,
-# python.org); scripts/gui.sh falls back to the plain interpreter when it is missing.
+# The GUI itself runs in a second, small bundle next to its PySide6 environment (~/.venvs/dtfe-gui/Lamina.app):
+# an executable that embeds the environment's Python, so the Dock and Cmd-Tab say "Lamina", not "Python".
+# Started directly it hands over to the real app above. Built for framework Pythons (Homebrew, python.org);
+# scripts/gui.sh falls back to the plain interpreter when it is missing.
 
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -203,8 +195,8 @@ if ! head -c 1 "$REPO/scripts/gui.sh" >/dev/null 2>&1; then
     settings_alert "macOS has not given Lamina access to the repository ($REPO) -- iCloud Drive and external drives are protected. In System Settings > Privacy & Security > Full Disk Access, add Lamina (the + button, then Applications) and switch it on, then open Lamina again."
     exit 1
 fi
-# Finder starts apps with a bare PATH: take PATH and the DTFE settings from the login shell, as a
-# Terminal window would have them. Capped at 15 s so a profile that waits for input cannot hang it.
+# Finder starts apps with a bare PATH: take PATH and the DTFE settings from the login shell (capped at 15 s so a
+# profile that waits for input cannot hang it).
 SH="${SHELL:-/bin/zsh}"
 ENVFILE="$(mktemp -t dtfe-launcher-env)"
 "$SH" -ilc 'command env' </dev/null >"$ENVFILE" 2>/dev/null &
@@ -229,10 +221,9 @@ exec "$REPO/scripts/gui.sh" "$@" >> "$LOG" 2>&1
 EOF
 } > "$B/Resources/launcher.sh"
 
-# the executable: runs launcher.sh as its CHILD and waits, so it stays the process macOS asks
-# about file access (the GUI and every job it starts inherit it). It also runs an (invisible) AppKit
-# event loop: a second double-click while the GUI is open makes macOS "reopen" THIS app, which has no
-# window, so it brings the GUI forward instead.
+# the executable: runs launcher.sh as its CHILD and waits, so it stays the process macOS asks about file access.
+# It also runs an invisible AppKit event loop: a second double-click makes macOS "reopen" THIS app, which then
+# brings the GUI forward.
 command -v cc >/dev/null 2>&1 || { echo "no C compiler (xcode-select --install)" >&2; exit 1; }
 cat > "$BUILD/launcher.m" <<'EOF'
 #import <AppKit/AppKit.h>
@@ -312,8 +303,7 @@ EOF
 cc -O2 -Wall -Wextra -fobjc-arc -DHOST_ID="\"$HOST_ID\"" -framework AppKit \
     -o "$B/MacOS/$NAME" "$BUILD/launcher.m"
 
-# ad-hoc signature: a stable identity for macOS's privacy settings (the same bytes give the same
-# signature, so Full Disk Access given once survives a re-run of this script)
+# ad-hoc signature: a stable identity for macOS's privacy settings (the same bytes give the same signature)
 codesign --force --sign - "$BUILD/$NAME.app" >/dev/null 2>&1 || echo "note: could not sign the app (codesign)" >&2
 
 # replace the previous version (ours, checked above: a bundle this script regenerates in full),

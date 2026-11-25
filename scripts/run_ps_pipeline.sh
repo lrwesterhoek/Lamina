@@ -1,85 +1,26 @@
 #!/usr/bin/env bash
-# COMPUTE ONLY: for every snapshot of every simulation, regenerate the analysis grids
-# (the production physics: --ps-vertex-mass, a default, and PS-DTFE's volume-weighted velocity moments)
-# AND point-evaluate a full-box high-resolution image plane of the continuous phase-space field. Both share the
-# snapshot's single triangulation (run_ps_dtfe.sh SAMPLE_POINTS), so the image planes cost
-# only the point evaluation on top of the grid regen.
+# COMPUTE ONLY: for every snapshot of every simulation in SIMS, run run_ps_dtfe.sh and point-evaluate a full-box
+# image plane of the phase-space fields in the same run (one triangulation). No plotting: render the figures with
+#     python3 python/plot/plot_pointeval.py --sims all
 #
-# This script does no plotting. Render the figures afterwards with:
-#     python3 python/plot/plot_pointeval.py --sims all # all sims/snapshots, one file per field
-# (the .pts_* files stay on disk, so figures can be restyled any time without recomputing).
-#
-#   SIMS=all ./run_ps_pipeline.sh                   # everything: all sims, all snapshots on disk
+#   SIMS=all ./run_ps_pipeline.sh                   # every simulation and snapshot on disk
 #   SIMS="TNG100-3-Dark" ./run_ps_pipeline.sh       # one simulation
 #   DRY_RUN=1 ./run_ps_pipeline.sh                  # print the plan, run nothing
 #   ./run_ps_pipeline.sh --help                     # this header, nothing run (--version: the revision)
 #
-# RESUMABLE: a snapshot is skipped when its <prefix>.pts_den exists and is newer than both
-# its combined_*.hdf5 and the plane file (and, with PTS_VEL_GRAD=1, its .pts_velGrad exists),
-# AND the settings in its <prefix>.runlog match this run's (grid, sub-samples, padding, lambda-th,
-# precision, the deposit options, and every requested field among its fields; not the GPU/CPU
-# choice, the run mode, the GPU share, the split or the build).
-# A snapshot whose run log has no header 'run mode' line (an older version of the programs wrote it) is recomputed;
-# one without a run log is judged by the file times alone (said per snapshot).
-# Interrupted batches continue where they stopped. FORCE=1 recomputes everything.
-#
-# Env knobs:
-#   DTFE_DATA_ROOT  the folder that holds the simulations -- REQUIRED, no default
-#   SIMS          simulations to process -- REQUIRED, no default: names, or 'all' for every simulation under
-#                 $DTFE_DATA_ROOT with snapshots, in either layout -- flat <sim>/ or per-family <family>/<sim>/)
-#   The rest are optional:
-#   NU            image-plane pixels across the box (default 8192; ~13 kpc/px at TNG100-3)
-#   AXIS, CENTER  plane orientation/position (default z, box centre). Changing CENTER with an
-#                 existing plane file regenerates the plane -- which makes every snapshot's
-#                 image plane stale, so the batch recomputes (as it must: geometry changed).
-#   GRID_SIZE     analysis grid passed to run_ps_dtfe.sh (default 512)
-#   FIELDS        forwarded to run_ps_dtfe.sh (default: its own, density velocity divergence shear)
-#   SNAPS         only these snapshot numbers, e.g. "50 67 99" (default: every snapshot on disk);
-#                 the GUI's adaptive plane size runs the pipeline once per plane size with it
-#   FORCE         1 = ignore all freshness checks (default 0)
-#   PTS_VEL_GRAD  1 (default) = also evaluate the velocity gradient at every sample point
-#                 (.pts_velGrad), which is what makes the velDiv/velShear/velVort maps
-#                 possible. A snapshot lacking it counts as STALE, so a rerun recomputes it.
-#   PLANES, THICKNESS, SUPERSAMPLE, PLANE_WINDOW
-#                 the plane's geometry, forwarded to make_image_plane.py: PLANES sampling planes
-#                 (default 1 = one crisp cross-section; a handful ghosts, use >= 16 with
-#                 plot_pointeval.py --project slab) across a slab of THICKNESS Mpc (default 2), KxK sub-samples per pixel
-#                 averaged into pixel-area means (default 1), and "u0 u1 v0 v1" in Mpc to image
-#                 only that part of the plane (default: the whole box).
-#   DTFE_GPU      1 = the deposit on the GPU, 0 = the CPU; unset (or auto) = the binary's pick: the GPU of a GPU
-#                 build, for every field and either deposit (PS_CAUSTIC_CUSPS=1: the CPU). Read by the PS binary
-#                 itself, which every run_ps_dtfe.sh run starts with the caller's value
-#   DTFE_EXACT_AVERAGE  1 (default) = the exact deposit (--exact), 0 = the sampled one (--sampled); unset, a
-#                 SUBSAMPLES count selects the sampled one (run_ps_dtfe.sh's rule, config.sh average_resolve).
-#                 A run log that does not name '--exact' is read as a sampled run's: its grids are stale for the
-#                 exact default and current for a sampled pipeline run with the same count (SUBSAMPLES=3 for a log
-#                 that names 3; no count is the binary's 1, one point per cell).
-#   DTFE_RUN_MODE gentle | balanced | performance (any case): how hard each run may lean on the machine (the
-#                 binary's --run-mode); unset (or auto) = the binary's default, balanced, or performance inside a
-#                 SLURM or PBS job. Read by the PS binary itself, as DTFE_GPU: another word stops each run there
-#                 (after the plane is made); nothing runs as another mode. It never makes grids stale.
-#   PYTHON        the python that makes the plane (default: config.sh h5py_python, the first with numpy and h5py)
-# A switch is off for 0, false, no or off and on for any other value (the binaries' rule).
-# The other run options reach run_ps_dtfe.sh through the environment exactly as from a terminal:
-# SUBSAMPLES, PS_VERTEX_MASS, PS_CAUSTICS, PS_CAUSTIC_CUSPS, PARALLEL_TRIANGULATION,
-# PARTITION, MAX_CONCURRENT, SCRATCH_DIR, TESSELLATION_CACHE, DTFE_PRECISION, OUTPUT_PREFIX, LAMBDA_TH,
-# THREADS, PS_MERGE, DTFE_RESUME, GPU_SHARE, SCALAR_DATASET (see its header for each). The GUI's Pipeline tab sets
-# all of them (SCALAR_DATASET empty).
-# Snapshots are auto-discovered (snapdir_*/combined_NNN.hdf5). The plane file is generated
-# once per simulation (box size is constant across its snapshots) and reused -- as long as its
-# sidecar has the requested geometry (make_image_plane.py --same-as, exit 3 = differs); otherwise it
-# is regenerated, which makes every snapshot of that simulation stale (the geometry changed, so it
-# must). A comparison that FAILS (no python, a bad PLANE_WINDOW, a missing module) is not 'differs': the
-# plane is kept, the simulation skipped with a '!!' line, and the script exits 1.
-#
-# DISK: the per-point files are KEPT (~9 GB per snapshot at NU=8192) -- they are the input
-# to every figure. Delete <snapdir>/<prefix>.pts_vel* by hand once the figures are final.
+# Resumable: a snapshot is skipped when its outputs are newer than its inputs and its run log shows the same settings
+# (not the device, run mode, GPU share, split or build); FORCE=1 recomputes everything. The plane file is made once
+# per simulation and remade, making every snapshot stale, when its geometry changes. The .pts_* files stay on disk:
+# they are the input of every figure.
+# Knobs (environment; the README's pipeline table): DTFE_DATA_ROOT and SIMS (both required), SNAPS, NU, AXIS, CENTER,
+# PLANES, THICKNESS, SUPERSAMPLE, PLANE_WINDOW, PTS_VEL_GRAD, FORCE, PYTHON; the others (GRID_SIZE, FIELDS, DTFE_GPU,
+# DTFE_EXACT_AVERAGE, DTFE_RUN_MODE, ...) go on to run_ps_dtfe.sh.
 
 set -uo pipefail   # no -e: a failed simulation is said and the batch goes on (config.sh, 'Strictness')
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"   # python/ and the binaries live one level up
-# -h / --help print this header and run nothing; --version the revision; anything else is an error (rather than
-# starting the whole batch) -- the knobs are environment variables
+# -h / --help print this header and run nothing; --version the revision; anything else is an error (the knobs are
+# environment variables)
 case "${1:-}" in
     -h|--help) sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed -e 's/^# \{0,1\}//'; exit 0 ;;
     --version) git -C "${REPO_ROOT}" describe --always --dirty 2>/dev/null || echo unknown; exit 0 ;;
@@ -103,8 +44,7 @@ FORCE="${FORCE:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 PREFIX="${OUTPUT_PREFIX:-ps_output}"
 knob_bool PTS_VEL_GRAD FORCE DRY_RUN   # 1 or 0 (config.sh)
-# PS_MERGE's value, refused here before anything runs (a dry run too), in run_ps_dtfe.sh's words: that driver
-# refuses it as well, but its dry run below keeps no stderr and its runs fail per simulation
+# PS_MERGE's value, refused here before anything runs (a dry run too), in run_ps_dtfe.sh's words
 case "${PS_MERGE:-}" in
     ''|index-order|completion-order) ;;
     *) echo "Error: PS_MERGE must be 'index-order' or 'completion-order' (got '${PS_MERGE}')." >&2; exit 2 ;;
@@ -120,9 +60,8 @@ if [ -n "${PLANE_WINDOW}" ]; then
     fi
     plane_args+=(--plane-window "${w_u0}" "${w_u1}" "${w_v0}" "${w_v1}")
 fi
-# The deposit run_ps_dtfe.sh will run, by its own rule (config.sh average_resolve): DTFE_EXACT_AVERAGE when given
-# (true is 1 there too), else the sampled one when SUBSAMPLES is set, else the exact one, the default. Handed on as
-# DTFE_EXACT_AVERAGE (env_args below), so the deposit the banner names is the one run_ps_dtfe.sh runs.
+# The deposit run_ps_dtfe.sh will run, by its own rule (config.sh average_resolve): DTFE_EXACT_AVERAGE when given,
+# else the sampled one when SUBSAMPLES is set, else the exact one. Handed on as DTFE_EXACT_AVERAGE (env_args below).
 _caller_exact="${DTFE_EXACT_AVERAGE:-}"
 average_resolve
 
@@ -144,21 +83,11 @@ echo "Run mode: $(run_mode_given)"   # (GPU: and Run mode: as given, config.sh d
 
 run() { echo "+ $*"; [ "${DRY_RUN}" = "1" ] || "$@"; }
 
-# run_settings <command line>: the options of a run_ps_dtfe.sh command that change its grids, one per line,
-# sorted -- from the RUNNING: line a run log starts with, or from a DRY_RUN=1 'would run' line (its %q
-# quoting only touches the paths, which are not compared). The binary's name carries the precision. val[] / flag[]
-# name the options compared, in their current names (a run log without the header's 'run mode' line, an older
-# version's, is recomputed before its command gets here: older_log). The merge mode is not compared (it moves the
-# last float bits only), nor are '--run-mode' and '--gpu-share', for the same reason. The deposit: '--exact' is
-# compared, '--sampled' is not compared (the drivers pass '--exact' or '--sampled' on every run, so a log without
-# '--exact' is read as a sampled run's), and the '--subsamples' count only for the sampled deposit: beside
-# '--exact' the driver passes none (the binary keeps its own count there, src/user_options.cc
-# kPsExactSliverSubsamples); a sampled command without a count runs the binary's own 1, one point per cell, and
-# reads as '--subsamples 1'. The caller appends a log's header count ('avg sub-samples (nSub)', the count its run
-# took) after its command; the last count read is the one compared.
-# The velocity gradient's route is compared as named ('--face-gradient', '--per-tet-gradient'); a command naming
-# neither takes the binary's default, whichever route that is: the slice, the pipeline's product, does not depend on
-# the route, and FORCE=1 or FACE_GRADIENT=1 recomputes the grids.
+# run_settings <command line>: the options of a run_ps_dtfe.sh command that change its grids, one per line, sorted,
+# from the RUNNING: line of a run log or a DRY_RUN=1 'would run' line. Not compared: merge mode, '--run-mode',
+# '--gpu-share', the velocity gradient's route. '--exact' is compared, '--sampled' is not (a log without '--exact'
+# is read as a sampled run's); '--subsamples' only for the sampled deposit (no count reads as 1; a log's header
+# count, the last one read, is the one compared).
 run_settings() {
     printf '%s\n' "$1" | awk '
         function out(l) { if (l ~ /^--subsamples( |$)/) subs = l; else print l }
@@ -184,18 +113,15 @@ run_settings() {
 }
 
 # older_log <run log>: the log has no header 'run mode' line ('\t run mode               : balanced (...)',
-# src/user_options.cc): blanks, 'run mode', blanks, ':', blanks and the mode (the launcher's Pipeline tab predicts
-# with the same test: python/gui/results.py, older_log). The programs print it on every run; a log without it was
-# written by an older version of the programs, whose command may spell its options in names run_settings does not
-# read.
+# src/user_options.cc); its command may spell options in names run_settings does not read. The launcher's
+# Pipeline tab predicts with the same test: python/gui/results.py, older_log.
 older_log() {
     local pat='^[[:blank:]]*run mode[[:blank:]]+:[[:blank:]]+(gentle|balanced|performance)([^[:alnum:]_]|$)'
     ! grep -a -q -E -e "${pat}" "$1"
 }
 
-# same_settings <have> <want> (run_settings outputs): equal, except that the grids on disk may carry MORE
-# fields than asked for (grids made with a longer FIELDS list hold every field a rerun with a shorter one asks
-# for: that rerun must not recompute them) -- a particle field among them: a want that names a dataset
+# same_settings <have> <want> (run_settings outputs): equal, except that grids on disk may carry MORE fields than
+# asked for (a rerun with a shorter FIELDS list must not recompute them); a want that names a dataset
 # (SCALAR_DATASET) needs grids made with the same one, a want that names none is content with either
 same_settings() {
     local skip='^--field |^--scalar-dataset '
@@ -245,10 +171,8 @@ for sim in ${SIMS}; do
     plane="${simdir}/hires_plane_${AXIS}${NU}"
     plane_new=0        # set when the plane is (re)generated: invalidates every slice/figure
     if [ -f "${plane}.json" ]; then
-        # a stored geometry differing from the requested one (CENTER when given, planes, thickness,
-        # sub-samples, window) must regenerate the plane -- and thereby invalidate every slice
-        # computed against the old one. Exit 3 = differs (or an unreadable sidecar); any other failure
-        # of the tool (no python, a bad PLANE_WINDOW, a missing module) keeps the plane and skips the sim.
+        # a stored geometry differing from the requested one must regenerate the plane (and so invalidate every slice).
+        # Exit 3 = differs (or an unreadable sidecar); any other failure of the tool keeps the plane and skips the sim.
         same_rc=0
         same_err="$("${PYTHON}" "${REPO_ROOT}/python/tools/make_image_plane.py" --same-as "${plane}.json" \
                     "${plane_args[@]}" 2>&1 >/dev/null)" || same_rc=$?
@@ -273,9 +197,8 @@ for sim in ${SIMS}; do
         echo "-- reusing ${plane}.bin"
     fi
     # The points a slice of THIS plane holds: planes x nv x nu x K^2 from its sidecar (K = 1 when the sidecar
-    # has no 'supersample' entry), else the plane file's own count (3 float64 per point). The file times alone would take
-    # an older 4096^2 slice for current against an even older hires_plane_z8192 (the default NU 8192), so the
-    # compute would be skipped and every render fail on the size mismatch.
+    # has no 'supersample' entry), else the plane file's own count (3 float64 per point). File times alone
+    # would take a slice of another plane size for current.
     plane_pts=""
     if [ "${plane_new}" != "1" ]; then
         plane_pts="$("${PYTHON}" -c 'import json, sys
@@ -286,13 +209,11 @@ print(int(s.get("planes", 1)) * int(s["nv"]) * int(s["nu"]) * int(s.get("supersa
     fi
 
     # ---- grids + point evaluation, one triangulation per snapshot ------------------------
-    # run_ps_dtfe.sh's deposit (DTFE_EXACT_AVERAGE) is the one resolved above; DTFE_GPU, DTFE_RUN_MODE and the other
-    # run options reach it, and its binary, in the environment as the caller set them
+    # run_ps_dtfe.sh's deposit (DTFE_EXACT_AVERAGE) is the one resolved above; the other options reach it through the environment
     env_args=(SAMPLE_POINTS="${plane}.bin" PTS_VEL_GRAD="${PTS_VEL_GRAD}" DTFE_EXACT_AVERAGE="${DTFE_EXACT_AVERAGE}")
     [ -n "${FIELDS:-}" ] && env_args+=(FIELDS="${FIELDS}")
     # The settings this batch would run each snapshot with, asked from run_ps_dtfe.sh itself (DRY_RUN=1: reads,
-    # runs and writes nothing), so the comparison below cannot drift from what it runs (file times alone would
-    # print 'up to date' for every snapshot after a changed grid or field list).
+    # runs and writes nothing), so the comparison below cannot drift from what it runs.
     planned=""
     if [ "${FORCE}" != "1" ] && [ "${plane_new}" != "1" ]; then
         planned="$(env "${env_args[@]}" DRY_RUN=1 "${SCRIPT_DIR}/run_ps_dtfe.sh" -s "${sim}" -g "${GRID_SIZE}" \
@@ -307,8 +228,7 @@ print(int(s.get("planes", 1)) * int(s["nv"]) * int(s["nu"]) * int(s.get("supersa
     for n in "${snaps[@]}"; do
         sd="${simdir}/snapdir_$(printf "%03d" "$n")"
         cf="${sd}/combined_$(printf "%03d" "$n").hdf5"
-        # with PTS_VEL_GRAD on, a snapshot lacking .pts_velGrad is stale even if its
-        # .pts_den is current (a run without the flag made it)
+        # with PTS_VEL_GRAD on, a snapshot lacking .pts_velGrad is stale even if its .pts_den is current
         vg_ok=1
         if [ "${PTS_VEL_GRAD}" = "1" ] && [ ! -f "${sd}/${PREFIX}.pts_velGrad" ]; then vg_ok=0; fi
         if [ "${FORCE}" != "1" ] && [ "${plane_new}" != "1" ] && [ "${vg_ok}" = "1" ] \
@@ -330,8 +250,7 @@ print(int(s.get("planes", 1)) * int(s["nv"]) * int(s["nu"]) * int(s.get("supersa
             elif [ -z "${want}" ]; then
                 echo "-- snap ${n}: ${PREFIX}.pts_den up to date by file times (this run's settings could not be worked out: run_ps_dtfe.sh's dry run failed), skipping compute"
             else
-                # (the log's own count line after its command: run_settings keeps the last count it reads, and an
-                # exact log has no such line)
+                # (the log's own count line after its command: run_settings keeps the last count it reads)
                 have_s="$(run_settings "$(grep -a -m1 '^RUNNING:' "${rl}") $(grep -a -m1 -o 'avg sub-samples (nSub) : [0-9]*' "${rl}" | sed 's/.*: /--subsamples /')")"
                 want_s="$(run_settings "${want}")"
                 if same_settings "${have_s}" "${want_s}"; then
@@ -358,10 +277,8 @@ print(int(s.get("planes", 1)) * int(s["nv"]) * int(s["nu"]) * int(s.get("supersa
 done
 
 echo ""
-# Finding NOTHING is a failure, as in run_ps_dtfe.sh: with the data drive unmounted, a mistyped SIMS or a
-# SNAPS matching no snapshot, nothing runs, and ALL DONE with exit 0 would show as a success in the
-# launcher's Pipeline tab. Every snapshot found is either computed, up to
-# date, or in a simulation that failed with a '!!' line (overall_rc 1), so a partial skip stays exit 0.
+# Finding NOTHING is a failure, as in run_ps_dtfe.sh (an unmounted drive, a mistyped SIMS, a SNAPS matching no
+# snapshot): ALL DONE with exit 0 would look like success in the launcher's Pipeline tab. A skip stays exit 0.
 if [ "${n_found}" -eq 0 ]; then
     echo "!! nothing to compute: no combined snapshot${SNAPS:+ numbered ${SNAPS}} of $([ -n "${SIMS// }" ] && echo ${SIMS} || echo "any simulation") under '${DATA_ROOT}'"
     if [ ! -d "${DATA_ROOT}" ]; then

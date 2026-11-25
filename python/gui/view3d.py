@@ -1,18 +1,6 @@
 """The Explore tab's 3D view, its Qt-free part (explore_3d.py draws and wires it): a camera over the box in Mpc,
 orthographic or perspective, the three orthogonal slice planes cut into the quads a painter's algorithm can order
-exactly, the voids' outlines on the screen, the close-up window around one void, and the planes' pixels read off the
-grids.
-
-Orthographic: a parallel projection maps every slice plane to the screen by one affine transform (its texture drawn
-exactly, through QPainter's transform), and a sphere of radius R to a circle of radius R x scale, so a void's outline
-is its true size against the box at every turn and zoom. Perspective (the eye at a finite distance, the box's near
-side drawn larger, as the eye expects; an orthographic box reads as widening toward the back): a plane maps by one
-projective transform (a homography: QTransform's m13, m23), an ellipsoid's outline is still an ellipse (the image of
-its tangent cone: the dual conic P Q* P^T), but its size depends on its depth; 'scale' holds at the target's depth.
-
-Screen convention: x to the right, y DOWN (Qt's), depth in Mpc growing away from the viewer. A plane's texture is the
-map's image of that slice (grids' image = plane.T[::-1]): columns along its first remaining axis, rows along the
-second, the top row at the high end."""
+exactly, the voids' outlines on the screen, the close-up window around one void."""
 
 from __future__ import annotations
 
@@ -59,10 +47,7 @@ def rotation(yaw: float, pitch: float) -> np.ndarray:
 
 class Camera:
     """A view of the box: 'target' (Mpc) at the centre of a width x height screen, 'scale' pixels per Mpc (at the
-    target's depth), turned by yaw and pitch (degrees); orthographic, or with 'perspective' an eye on the line
-    through the target toward the viewer, focal/scale away (PERSPECTIVE_FOCAL: a fixed field of view, so zooming
-    moves the eye: along the cursor's line of sight, into 'bounds' (lo, hi: the window drawn) and on through them
-    up to their far side; see zoom)."""
+    target's depth), turned by yaw and pitch (degrees)."""
 
     def __init__(self, target=(0.0, 0.0, 0.0), scale: float = 1.0, yaw: float = DEFAULT_YAW,
                  pitch: float = DEFAULT_PITCH, width: int = 800, height: int = 600, perspective: bool = False):
@@ -160,18 +145,7 @@ class Camera:
         self.target -= (dx * R[0] - dy * R[1]) / self.scale
 
     def zoom(self, factor: float, x: float | None = None, y: float | None = None):
-        """Magnify by 'factor' about screen point (x, y) (the centre by default): what is under it stays.
-        Perspective: the field of view is fixed, so the eye moves instead, along the line of sight under (x, y),
-        every point of which stays under the cursor: zooming in it goes its share (1 - 1 / factor) of the way to a
-        point on that line. That point is where the line meets the target's plane (the plain rule: scale x
-        factor), kept on the part of the line inside 'bounds' (the window drawn): no nearer than DOLLY_MIN of the
-        bounds' largest side ahead of the eye (past where the line enters them, the eye outside), so every step
-        flies the same distance on through the field, and no farther than where the line leaves them, so the eye
-        closes in on the far wall and never passes it. A line of sight that misses the bounds keeps the plain
-        rule. The target, on the eye's own line of view, follows: where the plain rule puts it, but with the eye
-        inside the bounds no nearer than DOLLY_MIN of the largest side ahead of it and no farther than the wall
-        ahead, so it stays in the bounds too. Zooming out backs the eye away along the line of sight by the plain
-        rule, and no slower than from a target DOLLY_MIN of the largest side ahead."""
+        """Magnify by 'factor' about screen point (x, y) (the centre by default): what is under it stays."""
         if x is None or y is None:
             x, y = 0.5 * self.width, 0.5 * self.height
         factor = float(factor)
@@ -256,9 +230,7 @@ def box_corners(lo, hi) -> np.ndarray:
 
 def hidden_edges(cam: Camera, lo, hi) -> set[int]:
     """The edges (indices into BOX_EDGES) behind the box: orthographic, the three meeting at its corner farthest
-    away; perspective, every edge whose two faces both turn away from the eye (four when the eye is level with a
-    face's span, as straight in front of a face; all twelve for an eye inside the box: each is seen through the
-    field)."""
+    away; perspective, every edge whose two faces both turn away from the eye."""
     if not cam.perspective:
         _, depth = cam.project(box_corners(lo, hi))
         far = int(np.argmax(depth))
@@ -275,9 +247,7 @@ def hidden_edges(cam: Camera, lo, hi) -> set[int]:
 
 def segment_on_screen(cam: Camera, a, b) -> tuple | None:
     """The screen ends ((x0, y0), (x1, y1)) of the part of the segment a-b (Mpc) that can be drawn: in front of the
-    eye (perspective: cut NEAR_EDGE of the eye's distance in front of it, where project() would give NaN beyond)
-    and within three view sizes of the view (a line's far end right beside the eye lands millions of pixels away);
-    None when no part is."""
+    eye."""
     pts = np.array([a, b], dtype=np.float64)
     if cam.perspective:
         d = cam.distance()
@@ -332,11 +302,7 @@ def plane_quads(lo, hi, pos, shown=(True, True, True)) -> list[dict]:
 
 
 def paint_order(quads: list[dict], centres, cam: Camera, pos, lo, hi) -> list[tuple[str, int]]:
-    """The order to paint the quads and the spheres (centres (k, 3)) back to front: [('quad', i) | ('sphere', k)].
-    The planes split space into octants; a quad lies in one plane and wholly on one side of the other two
-    (plane_quads), so ordering by side, plane by plane (a BSP walk: the far side, the plane, the near side), is exact
-    for the quads. A sphere goes in its centre's octant, behind or in front of its neighbours by depth there: exact
-    unless it crosses a plane."""
+    """The order to paint the quads and the spheres (centres (k, 3)) back to front: [('quad', i) | ('sphere', k)]."""
     pos = np.asarray(pos, dtype=np.float64)
     lo, hi = np.asarray(lo, dtype=np.float64), np.asarray(hi, dtype=np.float64)
     splits = {q["axis"] for q in quads}                  # only a drawn plane splits space
@@ -376,9 +342,8 @@ def texture_map(axis: int, pos: float, lo2, hi2, width: int, height: int, cam: C
 
 def plane_transform(cam: Camera, origin, ex, ey) -> tuple[float, ...]:
     """The map from image pixels (x right, y down) of a picture lying in 3D -- pixel (x, y) at origin + x ex + y ey
-    (Mpc) -- to the screen, either projection: QTransform's nine numbers (m11, m12, m13, m21, m22, m23, m31, m32,
-    m33): x' = (m11 x + m21 y + m31) / w, y' = (m12 x + m22 y + m32) / w, w = m13 x + m23 y + m33 (orthographic:
-    m13 = m23 = 0, m33 = 1, texture_map's affine map)."""
+    (Mpc) -- to the screen, either projection: QTransform's nine numbers (m11, m12, m13, m21, m22, m23, m31,
+    m32, m33): x' = (m11 x + m21 y + m31) / w, y' = (m12 x + m22 y + m32) / w."""
     P = cam.matrix()
     hx, hy = P[:, :3] @ np.asarray(ex, dtype=np.float64), P[:, :3] @ np.asarray(ey, dtype=np.float64)
     h0 = P @ np.append(np.asarray(origin, dtype=np.float64), 1.0)
@@ -411,9 +376,7 @@ def texture_rect(q: dict, lo2, hi2, width: int, height: int) -> tuple[float, flo
 def segments_on_screen(segs, T9, width: float, height: float) -> np.ndarray:
     """Line pieces ((k, 2, 2) in a picture's pixels) on the screen under plane_transform's nine numbers T9, as (m, 2,
     2) screen pixels: each end divided by its w (a homography keeps a line straight, so a piece is its two ends). A
-    piece with an end behind the eye or near its plane (w at most 1e-6 of the largest), or one reaching past the view
-    grown by its own size to any side, is left out: in perspective, with the eye inside the window, a piece beside
-    the eye lands anywhere (screen_polygon's reason), and one so long on the screen is only that near."""
+    piece with an end behind the eye or near its plane (w at most 1e-6 of the largest), or one reaching past the view"""
     s = np.asarray(segs, dtype=np.float64).reshape(-1, 2)
     if not s.size:
         return np.zeros((0, 2, 2))
@@ -430,9 +393,8 @@ def segments_on_screen(segs, T9, width: float, height: float) -> np.ndarray:
 
 def screen_polygon(T9, rect, width: float, height: float) -> np.ndarray:
     """The outline on the screen of the part of a picture's rectangle 'rect' (x, y, w, h in its pixels) that lies in
-    front of the eye and in the view grown by its own size, under plane_transform's nine numbers T9: (k, 2) pixels
-    in order, k = 0 when nothing of it is there. A rectangle partly behind the eye has no outline as a whole (the
-    corners behind it land on the other side of the screen), so it is cut before the division by w."""
+    front of the eye and in the view grown by its own size, under plane_transform's nine numbers T9: (k, 2)
+    pixels in order, k = 0 when nothing of it is there."""
     m11, m12, m13, m21, m22, m23, m31, m32, m33 = (float(v) for v in T9)
     x, y, w, h = (float(v) for v in rect)
     c = np.array([(x, y), (x + w, y), (x + w, y + h), (x, y + h)])
@@ -511,13 +473,8 @@ def section_axes(cam: Camera, A, B) -> tuple[np.ndarray, np.ndarray]:
 
 
 def outline_ellipses(cam: Camera, centres, M) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """The shapes' outlines on the screen, either projection: (xy, u, v), each (k, 2) pixels, the outline being
-    xy + cos t u + sin t v. Orthographic: xy the centre's projection and outline_axes' u, v. Perspective: the image
-    of the cone from the eye tangent to the ellipsoid, an ellipse: with the shape's dual quadric
-    Q* = [[M M^T - c c^T, -c], [-c^T, -1]] (the unit sphere's diag(1, 1, 1, -1) carried by [[M, c], [0, 1]]) and the
-    camera matrix P, the outline's dual conic is P Q* P^T; scaled to -1 in its corner it is [[N N^T - x x^T, -x],
-    [-x^T, -1]] for the ellipse x + N w, |w| = 1. NaN for a shape not wholly in front of the eye (the eye inside it,
-    or the shape reaching behind it): no ellipse to draw."""
+    """The shapes' outlines on the screen, either projection: (xy, u, v), each (k, 2) pixels, the outline being xy +
+    cos t u + sin t v. Orthographic: xy the centre's projection and outline_axes' u, v."""
     c = np.asarray(centres, dtype=np.float64).reshape(-1, 3)
     M = np.asarray(M, dtype=np.float64).reshape(-1, 3, 3)
     if not cam.perspective:
@@ -556,10 +513,9 @@ def _ellipse_from_dual(C: np.ndarray, ok: np.ndarray) -> tuple[np.ndarray, np.nd
 
 
 def circle_images(M3) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """The images of the unit circle under projective maps M3 ((k, 3, 3): (cos t, sin t, 1) -> the homogeneous
-    screen point): ellipses (x, u, v) as outline_ellipses gives them -- a circle's dual conic diag(1, 1, -1) carried to
-    M3 diag(1, 1, -1) M3^T. NaN where the curve is not wholly in front of the eye (w = M3[2] (cos, sin, 1) > 0 for
-    every t)."""
+    """The images of the unit circle under projective maps M3 ((k, 3, 3): (cos t, sin t, 1) -> the homogeneous screen
+    point): ellipses (x, u, v) as outline_ellipses gives them -- a circle's dual conic diag(1, 1, -1) carried to M3
+    diag(1, 1, -1) M3^T."""
     M3 = np.asarray(M3, dtype=np.float64).reshape(-1, 3, 3)
     C = M3 @ np.diag([1.0, 1.0, -1.0]) @ np.swapaxes(M3, 1, 2)
     ok = M3[:, 2, 2] - np.hypot(M3[:, 2, 0], M3[:, 2, 1]) > 1e-9 * np.abs(M3[:, 2, 2])
@@ -582,9 +538,8 @@ def texture_matrix(T) -> np.ndarray:
 
 def cut_images(T, cuts) -> list:
     """Where the cuts on a plane (plane_cuts' (x, y, L, k): the ellipse (x, y) + L (cos t, sin t) in its texture's
-    pixels) land on the screen through the plane's map T (plane_transform's numbers): [(x, u, v) or None], an ellipse
-    drawn with an affine map instead of each cut through the projective one (twenty times dearer in Qt). None
-    where the cut is not wholly in front of the eye (then draw it through T)."""
+    pixels) land on the screen through the plane's map T (plane_transform's numbers): [(x, u, v) or None], an
+    ellipse drawn with an affine map instead of each cut through the projective one (twenty times dearer in Qt)."""
     if not cuts:
         return []
     H = texture_matrix(T)
@@ -598,9 +553,7 @@ def cut_images(T, cuts) -> list:
 def section_arcs(cam: Camera, centres, A, B) -> tuple[np.ndarray, ...]:
     """The curves centre + cos t A + sin t B (Mpc, (k, 3) each: sections of the shapes through their centres) on the
     screen of either camera, as ellipses with their near half: (x, u, v, start, span), the ellipse x + cos s u +
-    sin s v and its near half the arc from s = start over the signed angle span; the far half the rest. Near: on
-    the viewer's side of the plane through the centre facing the viewer (the eye, in perspective). A central
-    section's image is the unit circle's image under P [[A, B, c], [0, 0, 1]] (circle_images)."""
+    sin s v and its near half the arc from s = start over the signed angle span; the far half the rest."""
     c = np.asarray(centres, dtype=np.float64).reshape(-1, 3)
     A, B = np.asarray(A, dtype=np.float64).reshape(-1, 3), np.asarray(B, dtype=np.float64).reshape(-1, 3)
     G = np.zeros((len(c), 4, 3))
@@ -659,10 +612,8 @@ def outline_at(outlines, x: float, y: float):
 def plane_cuts(centres, M, box: float, axis: int, pos: float, lo2, hi2, width: int, height: int,
                periodic: bool = True) -> list[tuple[float, float, np.ndarray, int]]:
     """Where the shapes cut the plane normal to 'axis' at 'pos', in its texture's pixels (texture_map's frame:
-    width x height over lo2..hi2, the top row at hi2[1]): [(x, y, L, k)], the cut being (x, y) + L (cos t, sin t),
-    k the shape's row; each periodic image that reaches the texture kept (grids.void_circles' rule; for spheres
-    the same circles). With S = M M^T the cut at distance d from the centre is the conditional ellipse: centre
-    shifted by S_ra d / S_aa, shape (S_rr - S_ra S_ar / S_aa)(1 - d^2 / S_aa)."""
+    width x height over lo2..hi2, the top row at hi2[1]): [(x, y, L, k)], the cut being (x, y) + L (cos t, sin
+    t), k the shape's row; each periodic image that reaches the texture kept."""
     c = np.asarray(centres, dtype=np.float64).reshape(-1, 3)
     M = np.asarray(M, dtype=np.float64).reshape(-1, 3, 3)
     S = M @ np.swapaxes(M, 1, 2)
@@ -721,14 +672,11 @@ def in_window(centres, radii, lo, hi) -> np.ndarray:
 
 def close_up_window(centre, radius: float, cell: float, box: float, reach: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
     """The cube a close-up shows around a void of radius 'radius' (Mpc: R_v, or an ellipsoid's R_eff) at 'centre':
-    (lo, hi) in Mpc, the box's frame (it may reach past a face: the planes are read periodically). 'reach' is how far
-    the drawn shape reaches (a sphere's R_v, an ellipsoid's a), 'cell' the grid's cell, 'box' the periodic box's
-    side."""
+    (lo, hi) in Mpc, the box's frame (it may reach past a face: the planes are read periodically)."""
     # Design: a close-up shows two radii (CLOSE_UP_RADII) around the void. That takes in the compensation ridge just
     # outside R_v and some of the neighbouring walls; a smaller factor fills the view with the void's interior, a
     # larger one shows its neighbours. The cube stays under the box (it must not meet its own periodic image) and
-    # keeps CLOSE_UP_MIN_CELLS cells to show structure. Measured on TNG100-3-Dark z = 0: two of an ellipsoid's a made
-    # a median void's cube 72 Mpc of the 111; two R_eff, 49 Mpc, near a sphere's two R_v, 42.
+    # keeps CLOSE_UP_MIN_CELLS cells to show structure.
     half = max(CLOSE_UP_RADII * float(radius), CLOSE_UP_MIN_CELLS * float(cell), CLOSE_UP_FIT * float(reach))
     if box > 0:
         half = min(half, 0.5 * float(box))

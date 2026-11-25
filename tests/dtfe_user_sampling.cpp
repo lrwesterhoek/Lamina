@@ -1,10 +1,5 @@
-/* The user-sampling path of standard DTFE (interpolateUserSampling and interpolateUserSampling_averaged_2), which
-   only the library API reaches: no input reader fills the sample list, so the binaries never take it. This driver
-   is the DTFE program with a sample list: it reads the particles as the binary does, the samples from a text file
-   (one 'x y z dx dy dz' line per sample: its position and the size of its sampling cell, in the box's units after
-   '--mpc-unit'), calls DTFE() and writes the outputs as the binary does. tests/dtfe_sampling_check.sh builds it
-   against libDTFE ('make library') with demo/examples/Makefile's flags and checks its outputs.
-
+/* DTFE with a user sample list, the library-only path (interpolateUserSampling, interpolateUserSampling_averaged_2).
+   Reads 'x y z dx dy dz' lines from a text file; built by tests/dtfe_sampling_check.sh against libDTFE.
    Usage: dtfe_user_sampling <samples file> <the DTFE command line: input, output, options> */
 
 #include <cstdlib>

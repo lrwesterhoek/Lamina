@@ -1,11 +1,4 @@
-"""Hessian eigenvalue slice maps + per-snapshot statistics + evolution summary.
-
-Method-, snapshot- and simulation-agnostic via the shared pipeline/FieldSet layer:
-
-    python3 plot/plot_eigenvalues.py --sim TNG50-4-Dark  # full series, auto method
-    python3 plot/plot_eigenvalues.py --estimator dtfe
-    python3 plot/plot_eigenvalues.py --snap 99           # single snapshot only
-"""
+"""Hessian eigenvalue slice maps + per-snapshot statistics + evolution summary."""
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
 from pathlib import Path

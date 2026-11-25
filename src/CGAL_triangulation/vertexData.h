@@ -35,14 +35,14 @@ struct vertexData : public Data_structure
     protected:
     bool   dummy;         // true if vertex is a dummy test point (padding-efficiency test)
     bool   dummyNeighbor; // true if vertex has at least one dummy neighbor (padding test for density)
-    double _volAcc;       // vertexDensity's per-vertex volume sum (triangulation.cpp); -1 marks a convex-hull vertex. +8 B/vertex, see auto_tune.h
+    double _volAcc;   // vertexDensity's volume sum (triangulation.cpp); -1 marks a convex-hull vertex
 #ifndef PHASE_SPACE
-    uint64_t _volAccHi;   // the high limb of vertexDensity's exact star sum (volumeLimbs); +8 B/vertex, auto_tune.cc
+    uint64_t _volAccHi;   // high limb of vertexDensity's exact star sum
 #endif
 #ifdef PHASE_SPACE
-    Pvector<Real,NO_DIM> _eulerianPos; // Eulerian position (triangulation vertices store Lagrangian coords in PS-DTFE mode)
-    uint64_t _particleID;              // snapshot ParticleID (stream identities, --ps-per-stream-ids); +8 B/vertex, see auto_tune.h
-    int32_t  _psDeg;                   // --ps-vertex-mass: finite (non-dummy) cells incident to this vertex; +4 B/vertex
+    Pvector<Real,NO_DIM> _eulerianPos;   // triangulation vertices store Lagrangian coords in PS-DTFE mode
+    uint64_t _particleID;   // snapshot ParticleID (--ps-per-stream-ids)
+    int32_t  _psDeg;   // --ps-vertex-mass: finite cells incident to this vertex
 #endif
 
 
@@ -81,20 +81,19 @@ struct vertexData : public Data_structure
     }
 
 #ifdef PHASE_SPACE
-    inline Pvector<Real,NO_DIM>& eulerianPosition() { return _eulerianPos; }      // full Eulerian position
-    inline Real& eulerianPosition(int const i) { return _eulerianPos[i]; }        // one Eulerian component
-    inline uint64_t particleID() { return _particleID; }                          // snapshot ParticleID (0 if the reader has none)
-    inline void setParticleID(uint64_t const id) { _particleID = id; }             // restoring a cached tessellation (tessellation_cache.h)
-    inline int32_t& psDegree() { return _psDeg; }                                 // --ps-vertex-mass incident-cell count (see ps_interpolation.cc)
+    inline Pvector<Real,NO_DIM>& eulerianPosition() { return _eulerianPos; }
+    inline Real& eulerianPosition(int const i) { return _eulerianPos[i]; }
+    inline uint64_t particleID() { return _particleID; }
+    inline void setParticleID(uint64_t const id) { _particleID = id; }
+    inline int32_t& psDegree() { return _psDeg; }
 #endif
     // remaining accessors for 'Data_structure' are in "particle_data.h"
 
-    inline double& volumeAccumulator() { return _volAcc; }                       // vertexDensity's scratch (triangulation.cpp)
+    inline double& volumeAccumulator() { return _volAcc; }
 #ifndef PHASE_SPACE
-    // vertexDensity's exact star sum (triangulation.cpp vertexDensityStarSums), a 128-bit integer: its low 64 bits in
-    // the 8 bytes of the double scratch above (copied, never read through the double), its high 64 bits in _volAccHi,
-    // which also carries the sum's marks (markVolumeLimbs: a value no sum reaches). Once the sum is converted, the
-    // double view volumeAccumulator() is the scratch again.
+    // vertexDensity's exact 128-bit star sum: low 64 bits in the 8 bytes of the double scratch (copied, never read
+    // through the double), high 64 bits in _volAccHi, which also carries the marks (markVolumeLimbs: a value no
+    // sum reaches).
     inline __int128 volumeLimbs() const
     {
         uint64_t lo;
@@ -115,8 +114,8 @@ struct vertexData : public Data_structure
         _volAccHi = uint64_t( high );
     }
 #endif
-    inline void setDummy() { dummy=true; dummyNeighbor=true; setDensity(0.); }    // mark as a dummy test point
-    inline void setDummyNeighbor() { dummyNeighbor=true; }                        // mark as adjacent to a dummy
+    inline void setDummy() { dummy=true; dummyNeighbor=true; setDensity(0.); }
+    inline void setDummyNeighbor() { dummyNeighbor=true; }
     inline bool isDummy() { return dummy; }
     inline bool hasDummyNeighbor() { return dummyNeighbor; }
 };

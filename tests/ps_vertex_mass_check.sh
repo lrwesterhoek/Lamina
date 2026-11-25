@@ -1,28 +1,6 @@
 #!/usr/bin/env bash
-# PS-DTFE --ps-vertex-mass correctness check.
-#
-# The flag replaces the default per-tetrahedron mass rho_bar*V_lag with the chart-independent
-# sum over the tet's vertices of particleMass/degree(vertex). It exists to remove the
-# IC-Lagrangian bias: when the "Lagrangian" input is a PERTURBED IC snapshot (TNG's z=127
-# coordinates, which already carry delta_ic = D(z_ic)/D(z) * delta), V_lag varies with the
-# perturbation and every density mode comes out filtered by 1 - D(z_ic)/D(z). It is ON BY
-# DEFAULT in run_ps_dtfe.sh, so this is the production path. Verified here:
-#  A) MASS CONSERVATION with the flag: grid mean rho/rho_bar = 1 on a uniform box AND on the
-#     multi-stream pancake (the clean-tessellation cases; the known z=0 TNG deficit comes from
-#     dropped degenerate tets, which these snapshots do not have).
-#  B) DEGREE-PASS IDEMPOTENCY: the unaveraged and averaged passes share ONE triangulation and
-#     each re-runs the vertex-degree count. If the second pass accumulated instead of reset,
-#     every mass would double/halve -- so .den AND .a_den must BOTH conserve mass in the same
-#     run, and (pancake, nSub=1) .den must equal .a_den bit-for-bit as usual.
-#  C) THE BIAS ITSELF: a synthetic perturbed-IC pancake with
-#     InitialCoordinates = q + alpha*(x - q), alpha=0.1645 (min-image displacement) must show
-#     a density-contrast transfer slope of ~(1-alpha) vs the true-IC run WITHOUT the flag --
-#     that is the artefact -- and ~1 WITH it. Measured on a SINGLE-STREAM pancake
-#     (amplitude 0.8, no shell crossing) where the linear statement is exact.
-#  D) CPU vs GPU parity with the flag (GPU builds only).
-#  E) MASS SURVIVES DROPPED TETS: crossed waves drop a few degenerate tets, and with the flag
-#     the grid mean rho/rho_bar is still 1 (a vertex's degree counts only the depositing tets).
-#
+# PS-DTFE --ps-vertex-mass (vertex mass = sum of particleMass/degree over a tet's vertices; the production default).
+# Checks mass conservation, degree-pass idempotency, the perturbed-IC bias, CPU/GPU parity and dropped tets; runs print their own labels.
 # Usage: tests/ps_vertex_mass_check.sh [--no-build]
 
 set -euo pipefail
@@ -50,8 +28,7 @@ build_target "${1:-}" PS-DTFE o_ps
 GPU_BUILT=0
 [ -f o_ps/.gpu_mode_off ] || GPU_BUILT=1
 # capture FIRST -- piping the binary straight into grep -q would SIGPIPE it under pipefail
-# a help that fails is a broken binary, not a missing feature; a missing feature fails under DTFE_TEST_REQUIRED=1
-# (skip_or_fail, tests/lib.sh)
+# a help that fails is a broken binary, not a missing feature (skip_or_fail, tests/lib.sh)
 FULL_HELP="$("${BIN}" --full-help 2>/dev/null)" || { echo "FAIL: ${BIN} --full-help exited non-zero"; exit 1; }
 if ! grep -q -- '--ps-vertex-mass' <<<"${FULL_HELP}"; then
     skip_or_fail "this PS-DTFE has no --ps-vertex-mass support."
@@ -177,11 +154,8 @@ check("C perturbed-IC mass conserved (default)", abs((dp + 1).mean() - 1.0) < 1e
 check("C perturbed-IC mass conserved (vertex-mass)", abs((dv + 1).mean() - 1.0) < 1e-4,
       f"mean = {(dv+1).mean():.6f}")
 
-# ---------- (E) mass survives dropped tets: the degree counts only DEPOSITING tets ----------
-# Crossed waves at this amplitude drop a handful of degenerate (non-invertible) Eulerian
-# cells. Because deg(v) counts only deposit-surviving tets, the dropped tets' vertex shares
-# renormalize onto the kept tets and the total stays sum(m_v) -- counting every tet would let each dropped
-# tet take its shares with it (deficit ~ the dropped fraction; 0.74% at TNG z=0, 5.8e-4 here).
+# ---------- (E) mass survives dropped tets: deg(v) counts only DEPOSITING tets ----------
+# Crossed waves drop a few degenerate cells; their vertex shares renormalize onto the kept tets (the total stays sum(m_v)).
 dc = load(f"{tmp}/pvm_crw_vm", ".den")
 check("E crossed-waves mass survives dropped tets", abs(dc.mean() - 1.0) < 5e-5,
       f"mean = {dc.mean():.8f} (counting every tet: ~0.99942)")

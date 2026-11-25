@@ -83,7 +83,7 @@ User_options::User_options()
     partitionGiven = false;
     partNo = -1;
     maxConcurrent = 0;    // 0 = build as many concurrent triangulations as threads (no memory cap)
-    psParallelTriangulation = true;       // both binaries: the parallel insert for tessellations of at least parallelInsertMinPoints (1e6) points where more than one core is free (the demo and the test inputs stay sequential); --sequential-triangulation turns it off, --parallel-triangulation forces it at any size
+    psParallelTriangulation = true;       // the parallel insert for tessellations of at least parallelInsertMinPoints (1e6) points where more than one core is free; --sequential-triangulation turns it off, --parallel-triangulation forces it
     parallelTriangulationForced = false;  // --parallel-triangulation
     sequentialTriangulation = false;
     autoTuneReport = false;
@@ -241,13 +241,11 @@ static std::vector<std::string> canonicalCommandTokens(int argc, char *argv[])
 }
 
 
-// Register every program option. Each option is declared ONCE, in one of the groups below; every group goes into
-// 'allOptions' (what the command line and a '--config' file are parsed against: an option missing there is an
-// unknown option) and into 'visibleOptions' (what '--full-help' prints, through helpInformation). The groups, in
-// their printed order: Input; Grid and fields; Cell average (the two modes); Device and machine use; Split, memory
-// and resume; Region; Points and server; Phase space (PS-DTFE only); Other estimators; Other; Developer options
-// (the options the two modes set themselves, for tests and comparisons); Help. The short help ('-h', shortHelp)
-// shows a few of the same options under the same captions. 'hidden' holds the two positional file names (never shown).
+// Register every program option. Each is declared ONCE, in one group below; every group goes into 'allOptions' (what the
+// command line and a '--config' file are parsed against: a missing one is an unknown option) and into 'visibleOptions'
+// ('--full-help', through helpInformation). Groups in printed order: Input; Grid and fields; Cell average; Device and
+// machine use; Split, memory and resume; Region; Points and server; Phase space (PS-DTFE only); Other estimators; Other;
+// Developer options; Help. 'hidden' holds the two positional file names (never shown).
 void User_options::addOptions(po::options_description &allOptions,
                               po::options_description &visibleOptions,
                               po::positional_options_description &p)
@@ -552,17 +550,11 @@ void User_options::helpInformation( po::options_description &visibleOptions, cha
     message << visibleOptions << "\n" << MESSAGE::Flush;
     exit( EXIT_SUCCESS );
 }
-// Prints the short help ('-h') and exits: the usage line, the two modes, and the options a user of the two modes
-// needs, one short entry each (PS-DTFE 28 names, standard DTFE 26), under the captions of the same-named '--full-help'
-// groups: Input, Grid and fields, Cell average (the two modes), Device and machine use, Split, memory and resume,
-// Other estimators (the seven other estimators' short lines) and Help. Where the two programs' lines differ, a group
-// gives the PS-DTFE lines and the standard ones under '#ifdef PHASE_SPACE'. This is a display-only second list: its
-// declarations bind nothing (the program exits here, before any parse), so each must keep the short letter and the
-// 'arg' (or none) of its real declaration in addOptions, and its name must be a '--full-help' name
-// (tests/docs_drift_check.py rule G checks that). Every group here is a '--full-help' group too, so every name
-// shown here is shown there too. The lines keep boost's own format
-// ('  -g [ --grid ] arg   text') at its default 80 columns: tests/run_scripts_check.sh and tests/docs_drift_check.py
-// (help_names) read this screen in that format, as python/gui/presets.py (parse_help) reads '--full-help'.
+// Prints the short help ('-h') and exits: the usage line, the two modes and a short entry per option of the same-named
+// '--full-help' groups (PS-DTFE and standard lines differ under '#ifdef PHASE_SPACE'). A display-only second list: each
+// declaration must keep the short letter and 'arg' of its real declaration in addOptions, and a '--full-help' name
+// (tests/docs_drift_check.py rule G). The lines keep boost's format ('  -g [ --grid ] arg   text') at 80 columns:
+// tests/run_scripts_check.sh, tests/docs_drift_check.py (help_names) and python/gui/presets.py (parse_help) read it.
 void User_options::shortHelp( char *progName )
 {
     // (po::value<std::string>() without a bind target: the line shows 'arg', nothing is stored)
@@ -1237,30 +1229,18 @@ void User_options::readRegionOptions(po::variables_map &vm)
 
 
 #ifdef PHASE_SPACE
-// The count an EXACT PS-DTFE run without '--subsamples' keeps (resolveAverageMode). The exact deposit ignores the count
-// where it clips, but a pass still reads it in two places: the tetrahedra r3d leaves with no piece (a sliver below its
-// resolution) fall through to the sampled path at that count (ps_interpolation.cc), and a partition's sub-grid box
-// takes a one-cell ring for a count above 1 (psSubgridBox). The sampled deposit's default is 1; 3 keeps an exact
-// run's outputs byte for byte. A run with no '_a' field keeps it too: its one grid
-// pass takes one point by construction (triangulation.cpp).
+// The count an EXACT PS-DTFE run without '--subsamples' keeps (resolveAverageMode). The exact deposit ignores it where it
+// clips, but still reads it for the slivers r3d leaves with no piece (they fall through to the sampled path,
+// ps_interpolation.cc) and for a partition sub-grid box's one-cell ring when above 1 (psSubgridBox). The sampled default is 1;
+// 3 keeps an exact run's outputs byte for byte; a run with no '_a' field keeps it too (one point per grid pass).
 static constexpr int kPsExactSliverSubsamples = 3;
 #endif
 
-// The '_a' average, EXACT (standard DTFE: the cell integrals of the interpolant; PS-DTFE: the exact deposit) or
-// SAMPLED (Monte Carlo; PS-DTFE: the nSub^D sub-sampled deposit), into exactAverage / psExactDeposit, with the reason
-// the run log's header gives (averageModeSource). The first rule that matches wins:
-//   both '--exact' and '--sampled': refused;  '--sampled': sampled;  '--exact': exact;
-//   DTFE_EXACT_AVERAGE=1 as '--exact', an off value as '--sampled' (a flag beats the pin);
-//   a sampling count or method given (standard: '--subsamples', '--average-method' of any value;
-//   PS-DTFE: '--subsamples'): sampled;
-//   else exact where it applies, else sampled silently, the cause as the reason.
-// The exact default never turns a command line into an error: where an explicit '--exact' is refused
-// (checkGpuOptions, checkPsDepositOptions, readAveragingOptions, which read the resolved member) it does not apply,
-// so the default samples there. Runs before every reader of the two members, once the field choice is final: the
-// default field (density_a) is set by readFieldOptions; applyMethodFieldRules, much later, only drops what this build
-// compiled out (done here on a copy) and moves the NGP/CIC/TSC/PCS/SPH fields to '_a' (never exact). The method
-// flags and the redshift cone are read from 'vm' (their members are set later, readAdditionalOptions and
-// readRedshiftConeOptions).
+// The '_a' average, EXACT (standard: cell integrals of the interpolant; PS-DTFE: the exact deposit) or SAMPLED, into
+// exactAverage / psExactDeposit, with the reason averageModeSource gives the run log. First matching rule wins: both
+// '--exact' and '--sampled': refused; '--sampled'; '--exact'; DTFE_EXACT_AVERAGE=1 as '--exact', an off value as
+// '--sampled' (a flag beats the pin); a sampling count or method given: sampled; else exact where it applies, else sampled
+// silently. The exact default never turns a command line into an error (an explicit '--exact' refused elsewhere samples here).
 void User_options::resolveAverageMode(po::variables_map &vm)
 {
     if ( this->exactFlag and this->sampledFlag )
@@ -1333,15 +1313,11 @@ void User_options::resolveAverageMode(po::variables_map &vm)
 }
 
 
-// The run mode (run_mode.h) into runMode, with the reason the run log's 'run mode' line gives (runModeSource). The
-// first that is given wins: '--run-mode MODE' (exact lower case; boost refuses a second one), DTFE_RUN_MODE (any
-// case; unset, empty or 'auto' is not given), else the binaries' default: performance inside a batch job, where
-// SLURM_JOB_ID or else PBS_JOBID is set and not empty (the job's cores are the run's), else balanced; any other word
-// is an error.
-// PS-DTFE's '--gpu-share': 'auto' (the default: the run mode's share, resolved with the plan), 'mixed' (auto's model
-// in every run mode, so both devices work in gentle and balanced too) or a fraction from 0 to 1, kept in per mille;
-// DTFE.cpp psResolveGpuShare decides where it applies (psGpuShareMille). The levers themselves are set by
-// applyRunMode, once every option is read.
+// The run mode (run_mode.h) into runMode, with the reason the run log's 'run mode' line gives (runModeSource). First given
+// wins: '--run-mode MODE' (exact lower case), DTFE_RUN_MODE (any case; unset, empty or 'auto' is not given), else the
+// default: performance inside a batch job (SLURM_JOB_ID or PBS_JOBID set and not empty), else balanced; any other word errors.
+// PS-DTFE's '--gpu-share': 'auto' (default: the run mode's share, resolved with the plan), 'mixed' (auto's model in every run
+// mode) or a fraction 0..1 kept in per mille; DTFE.cpp psResolveGpuShare decides where it applies. applyRunMode sets the levers.
 void User_options::resolveRunMode(po::variables_map &vm)
 {
     auto const modeOf = [](std::string const &w, RunMode &m)
@@ -1419,13 +1395,11 @@ static constexpr bool kPsFaceGradientDefault = true;
 #endif
 
 
-// Why the face gradient (the velocity gradient from exact face integrals) is not this run's
-// default route, or "" where it is: it is 3D, on the DTFE interpolant, not in the MY_SCALAR build; PS-DTFE's face
-// sums are integrated beside the exact deposit, give the gradient of the VOLUME-weighted mean velocity (the velocity
-// moments of every PS-DTFE run) and need every tetrahedron's faces (no halo release), and are its default only while
-// kPsFaceGradientDefault says so.
-// checkGpuOptions asks only when neither flag nor DTFE_FACE_GRADIENT decides; the run then keeps the deposit's own
-// gradient, goes on, and its header's 'velocity gradient' line gives this reason.
+// Why the face gradient (the velocity gradient from exact face integrals) is not this run's default route, or "" where it is:
+// it is 3D, on the DTFE interpolant, not in the MY_SCALAR build; PS-DTFE's face sums are integrated beside the exact
+// deposit, give the gradient of the VOLUME-weighted mean velocity and need every tetrahedron's faces (no halo release), and
+// are its default only while kPsFaceGradientDefault says so. checkGpuOptions asks only when neither flag nor
+// DTFE_FACE_GRADIENT decides; the run then keeps the deposit's own gradient and the header's line gives this reason.
 std::string User_options::faceGradientBlocker(po::variables_map const &vm) const
 {
     std::string why;
@@ -1456,21 +1430,10 @@ std::string User_options::faceGradientBlocker(po::variables_map const &vm) const
 }
 
 
-// Whether this run's grid work has a GPU path: what a '--gpu' needs to put it on the GPU without a word, as far as
-// the options tell -- a build with the GPU deposit (GPU_PATH_BUILT, the deposits' own guard); a field the GPU makes
-// (standard DTFE: an '_a' field; PS-DTFE: any field of its deposit, averaged or not, which one device deposits) of
-// the (PS-)DTFE method on a regular grid ('--grid': a run without one stops in updateEntries; no '--redshift-cone';
-// '--serve' deposits no grid: it answers points on the CPU); at most one scalar component (avg1GpuUsable,
-// psGpuEligible); standard DTFE averaging method 1 (the other methods sample on the CPU: DTFE.cpp gpuDeposit,
-// triangulation.cpp), PS-DTFE no '--ps-caustic-cusps' (its stencil is the CPU deposit's: psGpuEligible). Read at the
-// parse, like faceGradientBlocker, before the other methods' and the cone's members are set (readAdditionalOptions,
-// readRedshiftConeOptions), so from 'vm'. The program picks the GPU only where it holds (checkGpuOptions). What only
-// a pass can test, it tests: the 2^32 cells the kernels number, of the grid the pass deposits -- a partition's or a
-// thread's sub-grid, a window, one domain's whole grid, never larger than the full one (avg1GpuUsable, psGpuEligible;
-// PS-DTFE's planner aims the sub-grids of a split it chooses under it) -- and the Delaunay cells per triangulation
-// (psGpuEligible): such a pass takes the CPU with a warning and a counted fall-back, whoever chose the GPU.
-// User-given sampling points, known once the input is read, take method 2 (updateEntries turns a picked GPU off
-// there). Keep it in step with those guards.
+// Whether this run's grid work has a GPU path, as far as the options tell: a GPU build; a (PS-)DTFE field on a regular
+// '--grid' (no '--redshift-cone', no '--serve'); at most one scalar component; averaging method 1; in PS-DTFE no
+// '--ps-caustic-cusps'. A pass can still take the CPU (the 2^32-cell limit: avg1GpuUsable, psGpuEligible), with a warning
+// and a counted fall-back. Keep in step with those guards.
 bool User_options::gpuPathRuns(po::variables_map const &vm) const
 {
 #ifdef GPU_PATH_BUILT
@@ -1525,17 +1488,10 @@ void User_options::checkGpuOptions(po::variables_map &vm)
         throwError( "'--parallel-triangulation' and '--sequential-triangulation' exclude each other." );
     if ( this->sequentialTriangulation )
         this->psParallelTriangulation = false;
-    // THE DEVICE of the grid work, into the member the GPU path reads (useMetal / psUseMetal), once, after the average
-    // and the run mode. The first that is given wins: '--gpu' ASKS for the GPU; DTFE_GPU
-    // (the drivers' name, Env::tristate: 0, false, no or off keeps the CPU, any other value asks for the GPU exactly
-    // as the flag does, unset, empty or 'auto' is not given); else THE PROGRAM PICKS: the GPU where this run's grid
-    // work has a GPU path (gpuPathRuns) and, in standard DTFE, the average is the exact one (its sampled average stays
-    // on the CPU in every run mode), the CPU elsewhere. An asked GPU is '--gpu' in every respect: its warnings (they
-    // name deviceSource, gpuRequest) and its fall-back on a build without a GPU path. A picked one is on only where the
-    // options say the GPU path runs, so it meets none of those (gpuPicked); a pass above the kernels' 2^32 cells, which
-    // only the pass can test, warns and counts a fall-back for either. deviceLine is the text of the run log's device
-    // line (printOptions): the device and why. The launcher reads it by one rule: a text that starts with 'CPU' is the
-    // CPU, else one that holds ' GPU' is the GPU.
+    // THE DEVICE of the grid work (useMetal / psUseMetal), once, after the average and the run mode. First given wins:
+    // '--gpu' asks for the GPU; DTFE_GPU (Env::tristate); else the program picks the GPU where the grid work has a GPU
+    // path (gpuPathRuns) and, in standard DTFE, the average is exact. An asked GPU gets the warnings and the fall-back, a
+    // picked one none. The launcher reads a deviceLine starting with 'CPU' as the CPU, else one holding ' GPU' as the GPU.
     {
         int const pin = Env::tristate( "DTFE_GPU" );   // 1 = as '--gpu', 0 = the CPU, -1 = unset or auto
         std::string const pinSource = "DTFE_GPU=" + Env::text( "DTFE_GPU" );
@@ -1601,12 +1557,11 @@ void User_options::checkGpuOptions(po::variables_map &vm)
 #endif
     }
 
-    // The velocity gradient's route (both binaries): the face gradient is the DEFAULT where
-    // faceGradientBlocker finds nothing against it, unless '--per-tet-gradient' or DTFE_FACE_GRADIENT=0 keeps the
-    // deposit's per-tetrahedron gradient (PS-DTFE: the stream average of each stream's own); '--face-gradient' or
-    // DTFE_FACE_GRADIENT=1 ask for the face route explicitly and are checked (below; PS-DTFE:
-    // checkPsDepositOptions). Where the default does not apply the run keeps the deposit's gradient and goes on;
-    // faceGradientSource, the header's 'velocity gradient' line, says why.
+    // The velocity gradient's route (both binaries): the face gradient is the DEFAULT where faceGradientBlocker finds nothing
+    // against it, unless '--per-tet-gradient' or DTFE_FACE_GRADIENT=0 keeps the deposit's per-tetrahedron gradient (PS-DTFE:
+    // the stream average of each stream's own); '--face-gradient' or DTFE_FACE_GRADIENT=1 ask for the face route explicitly
+    // and are checked (PS-DTFE: checkPsDepositOptions). Where the default does not apply the run keeps the deposit's
+    // gradient; faceGradientSource says why.
     if ( this->faceGradient and this->perTetGradient )
         throwError( "'--face-gradient' and '--per-tet-gradient' exclude each other: the velocity gradient comes from the exact face integrals or from the tetrahedra's own gradients." );
     {
@@ -1677,10 +1632,8 @@ void User_options::checkDirectoryOptions()
     // Validate the path HERE, before any big allocation could route through it.
     if ( not this->scratchDir.empty() )
     {
-        // iCloud/cloud-synced volumes are refused outright: the scratch files hold up to
-        // hundreds of GB and, although unlinked immediately, a sync daemon that raced the
-        // unlink would try to upload them. With the outputs in iCloud Drive, the "obvious"
-        // choice of a subdirectory next to them is exactly the wrong one.
+        // iCloud/cloud-synced volumes are refused outright: the scratch files can hold hundreds of GB and a sync daemon
+        // that raced the unlink would try to upload them (a subdirectory beside outputs in iCloud Drive is exactly wrong).
         if ( this->scratchDir.find("Mobile Documents") != std::string::npos
              or this->scratchDir.find("com~apple~CloudDocs") != std::string::npos )
             throwError( "'--scratch-dir ", this->scratchDir, "' points into iCloud Drive. The scratch files hold up to hundreds of GB of grid data and must live on a LOCAL, non-synced volume -- use e.g. '/private/tmp/dtfe-scratch' (create it first)." );
@@ -1710,12 +1663,10 @@ void User_options::checkPointEvalOptions(po::variables_map &vm)
 {
     // point evaluation (--sample-points) options, both binaries
 #ifdef PHASE_SPACE
-    // '--partition-index' and '--region' crop the PARTICLES to an Eulerian box (findParticlesInBox -> Box::isParticleInBox
-    // reads p.pos), which is sound for standard DTFE, whose tessellation is Eulerian. PS-DTFE triangulates in
-    // LAGRANGIAN space, where the tessellation of an Eulerian-selected subset is NOT the subset of the tessellation,
-    // so the result would be silently wrong (the error texts give the measured numbers). The correct PS path is
-    // DTFE.cpp's Lagrangian partition loop, gated on 'partNo<0'. Nor is cropping a memory route: Lagrangian
-    // partitions overlap in Eulerian space and are SUMMED into the shared full grid.
+    // '--partition-index' and '--region' crop the PARTICLES to an Eulerian box (findParticlesInBox reads p.pos), sound for
+    // standard DTFE (Eulerian tessellation). PS-DTFE triangulates in LAGRANGIAN space, where the tessellation of an
+    // Eulerian-selected subset is NOT the subset of the tessellation, so the result would be silently wrong. The right PS
+    // path is DTFE.cpp's Lagrangian partition loop (gated on 'partNo<0'): its partitions are SUMMED into the shared full grid.
     if ( vm.count("partition-index") )
         throwError( "'--partition-index' is not supported by PS-DTFE. It selects this partition's particles by their EULERIAN position, but PS-DTFE builds the tessellation in LAGRANGIAN space, so the result is silently wrong (measured: 626% error, 3.5% of cells uncovered) rather than merely partitioned. Use '--partition' WITHOUT '--partition-index': PS-DTFE partitions in Lagrangian space internally and sums the partitions itself." );
     if ( this->regionOn or this->regionMpcOn )
@@ -1841,11 +1792,10 @@ void User_options::readPartitionOptions(po::variables_map &vm)
         else throwError( "Unknown value '", mode, "' for '--ps-merge'; use 'index-order' (the default) or "
                          "'completion-order'." );
     }
-    // '--resume' implies the ordered merge: the resumed partitions then add in index order, and a run
-    // killed under the ordered merge resumes to byte-identical grids. The FLAG too, not only the order: it keeps
-    // the memory gate on (DTFE.cpp), which a resumed memory-driven split needs. It wins over a '--ps-merge
-    // completion-order' silently: run_ps_dtfe.sh adds --resume on its own when a checkpoint exists, and a refusal
-    // there would stop an unattended run
+    // '--resume' implies the ordered merge: resumed partitions add in index order, so a run killed under it resumes to
+    // byte-identical grids. The FLAG too: it keeps the memory gate on (DTFE.cpp). It wins over a '--ps-merge
+    // completion-order' silently: run_ps_dtfe.sh adds --resume on its own when a checkpoint exists, and a refusal there
+    // would stop an unattended run.
     if ( this->psResume )
         this->psOrderedMergeFlag = true;
     // the (staged) index-order merge is the default; '--ps-merge completion-order' asks for completion order
@@ -1909,12 +1859,10 @@ void User_options::readPaddingOptions(po::variables_map &vm)
     }
     if ( vm.count("no-padding-test") ) this->testPaddedBoundaries = false;
 #ifndef PHASE_SPACE
-    // Point evaluation (--sample-points / --serve) needs the PARTICLES' own tessellation. The padding
-    // test's dummy points are inserted INTO it, and on a non-periodic box they sit against the convex
-    // hull and change the vertex densities there (on a crossed-wave cube by up to an order of magnitude, and
-    // differently for every composite partition). Periodic runs are
-    // unaffected while the padding is complete -- their dummies lie beyond the image copies; at a padding too
-    // short for the voids they do change cells near the faces.
+    // Point evaluation (--sample-points / --serve) needs the PARTICLES' own tessellation. The padding test's dummy points are
+    // inserted INTO it; on a non-periodic box they sit against the convex hull and change the vertex densities there
+    // (differently for every composite partition). Periodic runs are unaffected while the padding is complete (the dummies
+    // lie beyond the image copies).
     if ( this->psServe or not this->psSamplePointsFile.empty() )
         this->testPaddedBoundaries = false;
 #endif
@@ -2142,15 +2090,13 @@ void User_options::applyMethodFieldRules()
 
 
 
-// The run mode's levers (run_mode.h), once the options are read and before any thread exists. The thread budget: from
-// N0, the OpenMP default at start-up (the hardware threads without OpenMP), by the mode's formula (runModeCoreBudget,
-// on the performance cores where the system names them), unless an explicit lever beats the mode: a non-empty
-// OMP_NUM_THREADS keeps its count, and a '--max-concurrent' above the mode's threads raises them ('--max-concurrent
-// 0' is the mode's). It goes into the process-wide state the thread counts read (dtfeOmpMax, dtfeHardwareThreads)
-// and, when the mode lowered it, into this thread's OpenMP default, which the bare OpenMP regions follow (a thread
-// started later adopts it: dtfeAdoptCoreBudget). The GPU buffer target and PS-DTFE's exact item cap: performance's
-// long buffers (0.25 s, 4M items), the short ones (0.05 s, 500k) in gentle and balanced. Gentle on Linux also lowers
-// the priority to nice 10 (never raises it; the threads created later inherit it); no mode sets one on macOS.
+// The run mode's levers (run_mode.h), once the options are read and before any thread exists. Thread budget: from N0, the
+// OpenMP default at start-up, by the mode's formula (runModeCoreBudget), unless an explicit lever beats it: a non-empty
+// OMP_NUM_THREADS keeps its count, a '--max-concurrent' above the mode's threads raises them. It goes into the process-wide
+// state the thread counts read and, when lowered, into this thread's OpenMP default (dtfeAdoptCoreBudget for later threads).
+
+// GPU buffer target / PS exact item cap: performance 0.25 s / 4M items, gentle and balanced 0.05 s / 500k. Gentle on Linux
+// also lowers the priority to nice 10.
 void User_options::applyRunMode()
 {
 #ifdef OPEN_MP

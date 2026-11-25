@@ -1,40 +1,4 @@
-"""The caustic skeleton of a '--ps-caustics' run: walls, filaments and nodes from the caustic_class grid.
-
-For every snapshot with a caustic_class grid: dtfelib.skeleton's summary (the exclusive collapse classes'
-volume and mass fractions, the fold / cusp / swallowtail / umbilic indicator fractions, and per cumulative
-class -- sheet k >= 1, line k >= 2, node k = 3 -- the periodic components: count, the largest one's share,
-the top sizes) as JSON + text, and a figure: the class map of the middle slice (k = 0 .. 3 with the fold
-outlined), the component size distributions, and -- with --per-void, from the pipeline's void catalogue --
-the fold fraction of each distinct void's shells (--shells, default 0.8-1.2 R_v: around the wall, R_v being the
-measured void radius; --radius r_eff for the ellipsoid's, ~1.75 R_v, with 1.0-1.3) and its distance to the nearest
-sheet in units of that radius (searched within --cutout cells, default 10 smoothing lengths). The cusp and swallowtail rows are '--' unless the grid carries bit 7/8 (only --ps-caustic-cusps on
-the CPU deposit sets them); a parity-only grid (an older binary's --ps-linear-deposit --gpu run: the fold flag
-without the collapse bits) is refused. THE FOLD is FieldSet.fold_mask() -- streams > 1 or '.hidden_streams' bit 1,
-the geometric 'a folded tetrahedron overlaps the cell' -- for the fractions, the void shells, the null and the
-outline alike: older caustic_class grids set their fold bits per deposited sample and miss
-every fold thinner than the sampling (TNG100-3-Dark z=1: 21.0% of the cells against 33.6%); the collapse classes
-(bits 2-5) are per sample. Only a run with --ps-caustics writes the grid (e.g. a ps_caustic.* set, read with
---prefix ps_caustic).
-
-Names: caustic_skeleton_z<z>.* for the defaults; a non-default option adds its tag, so a rerun with
-another one never overwrites them: '_<prefix>' (not ps_output), '_c6' / '_c18' (--connectivity), and with
---per-void '_reff' (--radius r_eff), '_shells<a>-<b>-...' (not the radius's default shells), '_overlaps'
-(--keep-overlaps), '_cut<N>' (--cutout) and the smoothing tag. A run without --per-void removes the set's _voids.npz.
-
-The control: with --per-void the same metrics are measured in --null-draws (default 50) realisations of
-random spheres, one per void at a random cell with that void's radius, and the voids' median fold / sheet shell
-fraction and wall distance are reported against the null's mean +- std with a z-score (JSON 'null', the text, and the
-grey / orange bands of the void panel); --min-component N / --min-component-mass F keep only the sheet components of
-at least N cells / that fraction of the box's mass for the void metrics and the null ('sheet_filter' in the JSON).
---sheet-min-density RHO keeps only the sheet cells denser than RHO x the mean (applied first: the k >= 1 sheet
-percolates through the voids themselves). Their non-default values tag the set: '_null<K>', '_seed<S>', '_min<N>',
-'_minm<F>', '_dens<RHO>'. --all-caustic runs every snapshot
-that has a caustic_class grid under the prefix.
-
-    python3 plot/plot_caustic_skeleton.py --sim TNG100-3-Dark --snap 99 --per-void
-    python3 plot/plot_caustic_skeleton.py --sim TNG50-4-Dark --snaps 99 50 --connectivity 6
-    python3 plot/plot_caustic_skeleton.py --sim TNG100-3-Dark --prefix ps_caustic --all-caustic --per-void --min-component 1000
-"""
+"""The caustic skeleton of a '--ps-caustics' run: walls, filaments and nodes from the caustic_class grid."""
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
 import config
@@ -117,13 +81,9 @@ def _median_or_none(a):
 
 def void_block(cc, cat, cell_c, n_grid, cutout, shells=(1.0, 1.1, 1.2, 1.3), radius="r_eff", distinct=False,
                masks=None):
-    """--per-void: per well-resolved void of the catalogue with that radius ('r_eff', or 'r_v' the measured one; only
-    the distinct ones with distinct=True), the fold / sheet fractions of its shells (x the radius) and the distance
-    to the nearest sheet (cells, and in units of the radius; NaN + bounded beyond the cut-out, which is at most half
-    the grid). The keys keep their names ('dist_reff', 'r_eff_cells') whatever the radius: 'radius' says which.
-    Returns (the arrays for the _voids.npz, the summary's 'voids' entry -- medians None when undefined:
-    no well-resolved void, or every one beyond the cut-out). 'masks' {'fold', 'sheet'}: the grids the metrics are
-    taken on (default: cc's classes; --min-component passes a filtered sheet)."""
+    """The keys keep their names ('dist_reff', 'r_eff_cells') whatever the radius: 'radius' says which. Returns (the
+    arrays for the _voids.npz, the summary's 'voids' entry -- medians None when undefined: no well-resolved void,
+    or every one beyond the cut-out)."""
     r_all = catalog.r_v_mpc(cat) if radius == "r_v" else catalog.r_eff_mpc(cat)
     res = np.asarray(cat["well_resolved"]).astype(bool) & np.isfinite(r_all)
     if distinct:

@@ -72,11 +72,9 @@ def load(path, grid, ncomp=1):
 
 
 def run(cmd, log=None, echo="head", quiet=False, **kw):
-    """Run a command the way the suites run the binaries. With 'log', stdout and stderr go to that file, and a
-    failed run prints the file's last 40 lines before it raises. Without a log, 'quiet' sends stdout to /dev/null
-    (the data generators).
-    'echo' prints the command first: 'head' its first three words, 'full' the whole line when it is short, None
-    nothing. Other keywords go to subprocess.run (cwd=...)."""
+    """Run a command the way the suites run the binaries. With 'log', stdout and stderr go to that file (a failed run
+    prints its last 40 lines before raising); else 'quiet' sends stdout to /dev/null. 'echo' prints the command first
+    ('head': its first three words, 'full': the whole line when short, None: nothing). Other keywords go to subprocess.run."""
     if echo == "head":
         print("   $ " + " ".join(cmd[:3]) + " ...")
     elif echo == "full":

@@ -1,49 +1,10 @@
 #!/usr/bin/env bash
-# PS-DTFE --tessellation-cache correctness check.
-#
-# The flag reuses the Delaunay tessellation (and its vertex densities) across runs. Because a
-# stale or mismatched cache would silently corrupt the science rather than fail, the contract is
-# mostly about WHEN the cache must NOT be used. Asserted here:
-#  A) A first run MISSES and writes a cache file; a second identical run HITS.
-#  B) Every output of a HIT run is BIT-IDENTICAL to the same run without the cache -- including
-#     the point-evaluation ('--sample-points') files, which read the tessellation independently
-#     of the grid deposit.
-#  C) A run with a DIFFERENT GRID still HITS: the grid does not enter the tessellation, and this
-#     is the whole point of the flag (re-query one snapshot cheaply).
-#  D) Staleness is detected: touching the input file (its mtime is part of the cache identity)
-#     forces a MISS, as does changing '--mean-density' (which rescales the cached vertex densities).
-#  E) A MULTI-PARTITION run caches every partition SEPARATELY: one file each, all restored on the
-#     next run, and demonstrably different tessellations. 'partNo' stays -1 for all of them, so the
-#     descriptor separates them by their unpadded Lagrangian region -- without that, partitions
-#     2..N would silently load the first partition's tessellation.
-#  E2) The partition padding is part of a partition's identity. The partitions are padded by '--ps-lagrangian-padding 8'
-#     mean spacings BY DEFAULT (not the Eulerian '--padding' fraction, floored at 0.3 of a partition, which
-#     selects other particles): a default partition records 'lagPadding=8', a default run MISSES the caches of the
-#     Eulerian padding (what '--ps-lagrangian-padding 0' writes, and every older partition cache), and
-#     '--ps-lagrangian-padding 0' hits them.
-#  F) A partitioned cache hit also reproduces the uncached run bit-for-bit.
-#  G) The standard binary caches its thread sub-domains too.
-#  G2) ... and a PARTITIONED standard run every partition's: one file per thread sub-box of each
-#     partition, whose descriptor names its partition's region (its 'box=' line: DTFE_parallel makes the partition's
-#     region the sub-domain's full box), a warm run that loads them all (the folder left untouched) and outputs
-#     byte-identical to the uncached run; under '--sample-points' one file per partition (keyed by the partition's own
-#     'region='), byte-identical too.
-#  H) New files carry the CHUNKED body and say 'format=3'; a file of format 2 (a new file with its format line
-#     rewritten) is a MISS, and the run rebuilds it: rewritten as format 3, outputs bit-identical, then hit.
-#  I) The block-wise triangulation reader builds exactly CGAL's triangulation (structure hashes),
-#     and the block-wise writer writes exactly CGAL's bytes.
-#  J) A symlinked or relative name of the input hits the cache its absolute name wrote (canonical keys).
-#  K) libdeflate (when compiled in) and zlib read each other's chunked files.
-#  L) Two runs writing one cache folder at the same moment both succeed and leave a whole cache and no temp
-#     file: each writer has its own '<file>.part.<pid>' / '<map>.occ.tmp.<pid>'.
-#  M) A save removes the temp files of DEAD writers of that file and keeps a live writer's.
-#  N) A PS-DTFE file holds the canonical vertex order of src/CGAL_triangulation/ps_vertex_order.h (the cells are
-#     renumbered after the insert, before the save): a run that loads it renumbers no cell and writes the uncached
-#     run's grids byte for byte.
-#  A2) The body is DEFLATED while magic/version/descriptor stay plaintext, so a staleness check
-#     needs no inflation. Compression takes 735 MB down to 225 MB per 1.5e6 vertices at zlib
-#     level 1 -- level 6 saves a further 5% but costs 24 s more on every write.
-#
+# PS-DTFE --tessellation-cache: a stale or mismatched cache would corrupt results silently, so most checks are about when it must NOT be used.
+#   A miss then hit   A2 body deflated, header plaintext   B hit outputs bit-identical   C another grid still hits
+#   D touched input or --mean-density misses   E partitions cached separately   E2 partition padding is part of the identity
+#   F partitioned hit bit-identical   G standard binary caches thread sub-domains   G2 ... and per partition
+#   H chunked format=3, format 2 misses   I block-wise reader/writer match CGAL   J symlinked or relative input name hits
+#   K libdeflate and zlib read each other's files   L concurrent writers   M dead writers' temp files removed   N canonical vertex order
 # Usage: tests/ps_tessellation_cache_check.sh [--no-build]
 
 set -euo pipefail
@@ -58,9 +19,8 @@ BIN="${PS_BIN}"
 precision_require "${BIN}"
 TMP="${DTFE_TEST_TMP}"
 SNAP="${TMP}/ptc_input.hdf5"
-# The cache must live on a LOCAL volume -- the binary rejects iCloud Drive, where a repository may sit.
-# ${TMPDIR:-/tmp} keeps this working on Linux CI, where /private/tmp does not exist and the binary
-# would refuse the path for not being a directory.
+# The cache must live on a LOCAL volume (the binary rejects iCloud Drive); ${TMPDIR:-/tmp} also works on Linux CI,
+# where /private/tmp does not exist.
 CACHE="${TESS_CACHE_DIR:-${TMPDIR:-/tmp}/dtfe-tesscache-test}"
 
 echo "============================================================"
@@ -112,9 +72,8 @@ check_yes "$([ "$(hits)" -ge "1" ] && echo 1 || echo 0)" "second run HITS (diffe
 
 echo ""
 echo "(A2) the file is compressed, with a PLAINTEXT header"
-# The body is deflated (gzip wrapper) but magic + version + descriptor stay uncompressed, so a
-# staleness check costs one small read and no inflation. Asserting the layout keeps a future change
-# from silently reverting to an uncompressed body (3.3x the disk) or compressing the header.
+# The body is deflated but magic + version + descriptor stay plaintext, so a staleness check needs no inflation;
+# asserting the layout stops a silent revert to an uncompressed body.
 tessfile=$(ls -1 "${CACHE}"/*.tess 2>/dev/null | head -1)
 if [ -n "${tessfile}" ]; then
     head -c 8 "${tessfile}" | grep -q "DTFETESS" \
@@ -161,9 +120,8 @@ check_yes "$([ "$(hits)" = "0" ] && echo 1 || echo 0)" "touched input file MISSE
 
 echo ""
 echo "(E) a multi-partition run caches EACH partition separately"
-# 'partNo' is -1 for every partition of a Lagrangian split, so the descriptor must separate them by
-# their unpadded Lagrangian region. If it did not, partitions 2..N would load the first partition's
-# tessellation -- the same vertex count everywhere, and wrong results.
+# 'partNo' is -1 for every partition of a Lagrangian split, so the descriptor must separate them by their unpadded
+# Lagrangian region, else partitions 2..N would load the first partition's tessellation.
 PCACHE="${CACHE}-part"; rm -rf "${PCACHE}"; mkdir -p "${PCACHE}"
 run "${TMP}/ptc_part_cold" "${GRID}" --tessellation-cache "${PCACHE}" --partition 2 2 2
 nfiles=$(ls -1 "${PCACHE}"/*.tess 2>/dev/null | wc -l | tr -d ' ')
@@ -174,9 +132,8 @@ check_yes "$([ "$(hits)" = "8" ] && echo 1 || echo 0)" "warm partitioned run hit
 # the partitions must NOT all be the same tessellation
 ndistinct=$(echo "${RUN_OUT}" | grep -oE "Reused the cached tessellation \([0-9]+" | grep -oE "[0-9]+$" | sort -u | wc -l | tr -d ' ')
 check_yes "$([ "${ndistinct}" -ge "2" ] && echo 1 || echo 0)" "partitions restored DIFFERENT tessellations (${ndistinct} distinct vertex counts)"
-# E2: the default padding is k = 8 spacings and its descriptor says so; an Eulerian-padded cache
-# (no 'lagPadding' line: what '--ps-lagrangian-padding 0' writes, and every older partition cache)
-# must MISS in a default run, and '--ps-lagrangian-padding 0' must still find it
+# E2: the default padding is 8 spacings ('lagPadding=8'); an Eulerian-padded cache (no 'lagPadding' line) must MISS
+# in a default run, and '--ps-lagrangian-padding 0' must find it
 ndesc=$( { grep -l -a "lagPadding=8" "${PCACHE}"/*.tess 2>/dev/null || true; } | wc -l | tr -d ' ')
 check_yes "$([ "${ndesc}" = "8" ] && echo 1 || echo 0)" "E2 every default partition records 'lagPadding=8' in its descriptor (got ${ndesc} of 8)"
 LCACHE2="${CACHE}-lagpad"; rm -rf "${LCACHE2}"; mkdir -p "${LCACHE2}"
@@ -201,10 +158,8 @@ done
 
 echo ""
 echo "(G) the STANDARD binary caches its processor-split sub-domains too"
-# DTFE splits the box across threads and merges via copySubgridResultsToMain. Those sub-domains are
-# NOT --partition: they are distinguished in the descriptor by their region, so each gets its own
-# cache file. Only one 'Reused' line is printed (non-master threads run at verbosity 0), so the
-# evidence that all of them hit is that the warm run adds no new files and is much faster.
+# DTFE's thread sub-domains are not --partition: each has its own region in the descriptor and its own cache file.
+# Only one 'Reused' line prints (other threads run at verbosity 0), so the evidence is that the warm run adds no files.
 SCACHE="${CACHE}-std"; rm -rf "${SCACHE}"; mkdir -p "${SCACHE}"
 if [ -x "${DTFE_BIN}" ]; then
     "${DTFE_BIN}" "${SNAP}" "${TMP}/ptc_std_cold" --grid "${GRID}" --periodic --field density \
@@ -229,11 +184,8 @@ fi
 
 echo ""
 echo "(G2) a PARTITIONED standard run caches every partition's sub-domains"
-# A standard partition is split into thread sub-boxes, each its own tessellation (DTFE_parallel), so a 2x2x2 split at
-# 2 threads writes 16 files; a sub-box's particles are selected from its partition's padded copy, so its descriptor
-# names the partition's region too (as its 'box=': 8 distinct ones over the 16 files). Under '--sample-points' a
-# partition is ONE tessellation: one file each, keyed by the partition's own region (the composite '--serve'
-# of the same split shares them).
+# A standard partition is split into thread sub-boxes, each its own tessellation, so a 2x2x2 split at 2 threads writes
+# 16 files, each descriptor naming its partition's region. Under '--sample-points' a partition is ONE tessellation.
 PSCACHE="${CACHE}-stdpart"; rm -rf "${PSCACHE}"; mkdir -p "${PSCACHE}"
 if [ -x "${DTFE_BIN}" ]; then
     # the seeded Monte Carlo average, as written: '--seed' alone does not select it beside the '_a' fields
@@ -336,12 +288,8 @@ rm -rf "${FCACHE}"
 
 echo ""
 echo "(I) the block-wise reader and writer: exactly CGAL's triangulation, exactly CGAL's bytes"
-# tessellation_cache.h reads the triangulation in blocks (readTriangulationBlocks) instead of through
-# CGAL's operator>> (3.4x faster loads). DTFE_TESSELLATION_CACHE_CGAL_IO=1 restores CGAL's reader, and
-# DTFE_TESSELLATION_CACHE_FINGERPRINT=1 prints a hash of the loaded STRUCTURE (points, every vertex's stored
-# cell, every cell's vertices and neighbours, in iteration order). Same files, both readers: the same
-# hashes and bit-identical outputs, for one tessellation, for 8 partitions, and for the standard
-# binary's sub-domains (its hierarchy triangulation shares the format).
+# The block-wise reader (readTriangulationBlocks) replaces CGAL's operator>>: DTFE_TESSELLATION_CACHE_CGAL_IO=1
+# restores CGAL's, and DTFE_TESSELLATION_CACHE_FINGERPRINT=1 prints a hash of the loaded structure; same hashes expected.
 fprints() { echo "${RUN_OUT}" | grep "^TESS_FINGERPRINT" | sort || true; }
 export DTFE_TESSELLATION_CACHE_FINGERPRINT=1
 for which in single part; do
@@ -366,9 +314,8 @@ for which in single part; do
 done
 if [ -x "${DTFE_BIN}" ]; then
     SCACHE="${CACHE}-std"; rm -rf "${SCACHE}"; mkdir -p "${SCACHE}"
-    # The plan is pinned to one partition: the three runs must see the same split, and the auto-tuner reads the
-    # live free memory, so a loaded machine could give the writer and a reader different plans (the thread
-    # sub-domains within the partition are the same at any load).
+    # The plan is pinned to one partition: the auto-tuner reads live free memory, so a loaded machine could give the
+    # writer and a reader different plans.
     "${DTFE_BIN}" "${SNAP}" "${TMP}/ptc_std_rd0" --grid "${GRID}" --periodic --field density --mpc-unit 1 \
            --partition 1 1 1 --tessellation-cache "${SCACHE}" >/dev/null 2>&1 || true
     # Each reader's whole output stays beside its grids: a mismatch that a rerun does not repeat (a loaded machine)
@@ -467,12 +414,8 @@ fi
 
 echo ""
 echo "(L) two runs writing ONE cache folder at the same moment: each writer has its own temp file"
-# Two writers of one partition (a batch run beside the composite server, which shares the folder) that shared one
-# '<file>.part' -- or one '<map>.occ.tmp', or the globals record's '.part' -- would both truncate it, so the first
-# rename could publish a file with a hole. So each writes '<file>.part.<pid>' (the map '.occ.tmp.<pid>') and renames it
-# into place. Whether the two saves really overlap depends on the timing; what must hold either way: both runs succeed
-# and reproduce the uncached run (F's ptc_part_ref), no temp file is left, and the cache they leave is whole (a third
-# run hits all 8 partitions, bit-identically).
+# Two writers of one partition must not share one '<file>.part': each writes '<file>.part.<pid>' (the map
+# '.occ.tmp.<pid>') and renames it into place. Either way both succeed, no temp file is left, and the cache is whole.
 CC="${CACHE}-conc"; rm -rf "${CC}"; mkdir -p "${CC}"
 CARGS=(--grid "${GRID}" "${COMMON[@]}" --partition 2 2 2 --tessellation-cache "${CC}" --verbose 3)
 "${BIN}" "${SNAP}" "${TMP}/ptc_conc1" "${CARGS[@]}" > "${TMP}/ptc_conc1.log" 2>&1 & pid1=$!
@@ -498,10 +441,8 @@ check_yes "$([ "$(hits)" = "8" ] && [ "${same}" = 1 ] && echo 1 || echo 0)" "a t
 
 echo ""
 echo "(M) a DEAD writer's temp file is removed by the next save of that file; a live writer's is kept"
-# Per-writer names would strand a SIGKILLed writer's file (multi-GB on TNG50), so save() first removes the
-# '<file>.part.<pid>' siblings whose writer no longer exists (kill(pid, 0) fails with ESRCH). It keeps a running
-# writer's file, a shared (pid-less) '<file>.part' and the files of other cache files (only a save scans, and only
-# beside the file it writes). The dead pid is one that has just exited: a fixed number could be alive on Linux.
+# save() first removes the '<file>.part.<pid>' siblings whose writer is dead (kill(pid, 0) fails with ESRCH) and keeps
+# a live writer's; the dead pid is one that has just exited (a fixed number could be alive on Linux).
 victim=$(ls -1 "${CC}"/*.tess 2>/dev/null | head -1)
 other=$(ls -1 "${CC}"/*.tess 2>/dev/null | sed -n 2p)
 if [ -n "${victim}" ] && [ -n "${other}" ]; then
@@ -527,9 +468,8 @@ rm -rf "${CC}"
 
 echo ""
 echo "(N) a cache file holds the canonical vertex order: its load renumbers no cell"
-# PS-DTFE renumbers every cell in a canonical vertex order after the insert, before the vertex densities and the save,
-# so a cache file holds that order and a load runs no pass of its own: the hit writes the uncached run's grids byte
-# for byte.
+# PS-DTFE renumbers every cell canonically before the vertex densities and the save, so a cache file holds that order
+# and the hit writes the uncached run's grids byte for byte.
 OCACHE="${CACHE}-order"; rm -rf "${OCACHE}"; mkdir -p "${OCACHE}"
 ORD=(--grid "${GRID}" --periodic --partition 1 --max-concurrent 1 --mpc-unit 1 --verbose 3
      --field density velocity density_a velocity_a)

@@ -2,13 +2,11 @@
 // The run's setup: standard DTFE's run-wide units (runUnitsSetup), DTFE_setup, the padding, the thread
 // sub-domains (dtfeSubdomainOptions, dtfePrepareSubdomains), psUnwrapEulerian and fixedShareDropsReact.
 
-/* The run-wide fixed-point units (fixed_units.h RunUnits) of standard DTFE: one unit per accumulator for the whole
-   run, from the grid, the mean density and one pass over the particles the run uses (after '--poisson' and
-   '--random-sample'). Set here, before the planner, the partition loop and any thread sub-domain, so every split holds
-   the same units; the copies of the options carry them. The cell sides are the grid box over '--grid' -- 'region':
-   the box, or the '--region' box DTFE_setup crops to below -- as the grid frame's (user_options.h gridFrame). A run
-   without a grid (sample points only) has none. One run-log line, from global quantities only, so it is the same at
-   every split. PS-DTFE sets none: its passes take units of their own. */
+/* The run-wide fixed-point units (fixed_units.h RunUnits) of standard DTFE: one unit per accumulator for the whole run, from the grid,
+   the mean density and one pass over the particles the run uses (after '--poisson' and '--random-sample'). Set before the planner, the
+   partition loop and any thread sub-domain, so every split holds the same units. The cell sides are the grid box over '--grid' ('region':
+   the box, or the '--region' box DTFE_setup crops to below), as the grid frame's (user_options.h gridFrame); a run without a grid has none.
+   One run-log line, from global quantities only. PS-DTFE sets none: its passes take units of their own. */
 #ifndef PHASE_SPACE
 static void runUnitsSetup(User_options &u, vector<Particle_data> &particles)
 {
@@ -134,16 +132,11 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
                 << MESSAGE::printElements( m.partition, "," ) << "] is the checkpoint's.\n" << MESSAGE::Flush;
     }
 
-    /* '--region' / '--region-mpc' (standard DTFE; PS-DTFE rejects them at option parsing): the run triangulates only
-       the region plus its padding, so the auto-tuner must plan THAT, not the whole snapshot: planned from the
-       snapshot's particle count and box, a launcher exact zoom of a small region would be split into partitions
-       and threads -- sub-triangulations each padded again around its tiny sub-box -- far slower than one domain.
-       So the region is cropped HERE, before the tuner, and the
-       tuner is handed a copy of the options whose box is the region, with the particles inside the UNPADDED
-       region as its count. That is the same pairing as a whole-box run (the box's particles; the model adds the
-       padding on top as a fraction of the box), so one domain predicts one padded region. Only the split and the
-       concurrency it chooses are copied back: nothing else of the standard branch (or of autoTuneServe) is read
-       later. */
+    /* '--region' / '--region-mpc' (standard DTFE; PS-DTFE rejects them at option parsing): the run triangulates only the region plus its
+       padding, so the auto-tuner must plan THAT, not the whole snapshot (a small exact zoom would be split into partitions and threads,
+       far slower than one domain). The region is cropped HERE, before the tuner, which gets a copy of the options whose box is the region,
+       with the particles inside the UNPADDED region as its count (as a whole-box run: the model adds the padding). Only the split and the
+       concurrency it chooses are copied back. */
     vector<Particle_data> particlesRegion;   // the padded region's particles, for the crop below
     bool regionCropped = false;
     User_options tuneOptions;                // the options the tuner plans a region run with
@@ -219,12 +212,10 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
             // only, a budget set low on purpose would be passed by one tessellation)
             userOptions.psLookAheadRoom = report.budget - report.fixed - report.gpuSnapshot - report.perPartition
                                         - report.laneOnce;
-            // what the budget leaves beside the predicted peak -- with every lane booked whole (predictedWholeLanes:
-            // the measured runs that set the lane share spilled under that booking) -- for partitions parked by the
-            // staged ordered merge: the prediction does not count them, and on macOS the free-memory reading alone
-            // does not stop them (the compressor and swap keep 'free' above the spill threshold); a lane less for
-            // each partition the dynamic concurrency runs beyond the plan's (parkWhere). DTFE_TEST_PARK_ROOM_GB sets
-            // it (tests).
+            // what the budget leaves beside the predicted peak (predictedWholeLanes: every lane booked whole) for partitions parked by the
+            // staged ordered merge: the prediction does not count them, and on macOS the free-memory reading alone does not stop them (the
+            // compressor and swap keep 'free' above the spill threshold); a lane less for each partition the dynamic concurrency runs beyond
+            // the plan's (parkWhere). DTFE_TEST_PARK_ROOM_GB sets it (tests).
             userOptions.psParkRoom = report.budget - report.predictedWholeLanes;
             // the partition loop's dynamic concurrency: only over a concurrency the tuner chose
             userOptions.psDynamicConcurrency = report.concChosen;
@@ -288,10 +279,9 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
             | ( userOptions.aField.velocity_vorticity ? 4u : 0u ) )
         : 0u;
 #endif
-    // the T-web is computed from the density grid (tidal tensor): make sure density is interpolated.
-    // Drop the tweb flag itself from the internal copy -- the interpolation never fills the T-web
-    // grids, so keeping it only makes reserveMemory pre-allocate them (16 B/cell) during the
-    // partition loop; computeTidalWebClassification() re-creates them from the summed density.
+    // the T-web is computed from the density grid (tidal tensor): make sure density is interpolated. Drop the tweb flag from the internal
+    // copy: the interpolation never fills the T-web grids, so keeping it only makes reserveMemory pre-allocate them during the partition
+    // loop; computeTidalWebClassification() re-creates them from the summed density.
     if ( userOptions.uField.velocity_tweb ) { state.options.uField.density = true; state.options.uField.velocity_tweb = false; }
     if ( userOptions.aField.velocity_tweb ) { state.options.aField.density = true; state.options.aField.velocity_tweb = false; }
 
@@ -307,10 +297,8 @@ DTFE_State DTFE_setup(vector<Particle_data> *allParticles,
         state.options.periodic = false;
         state.options.updateFullBox( state.options.region );
 
-        // FREE the snapshot's particles, not just clear() them: clear() keeps the whole array's capacity for the
-        // rest of the run -- 36 B per particle of the whole snapshot under a triangulation of a few
-        // million, which the auto-tuner (planning the region) does not count. Callers get the vector back
-        // empty either way ('Clears allParticles'); main's '--interlace' keeps its own copy for the second pass.
+        // FREE the snapshot's particles, not just clear() them: clear() keeps the array's capacity for the rest of the run, which the
+        // auto-tuner (planning the region) does not count. Callers get the vector back empty either way; main's '--interlace' keeps its own copy.
         std::vector<Particle_data>().swap( *particlePointer );
         state.particles = std::move(particlesRegion);
         particlePointer = &state.particles;
@@ -379,12 +367,11 @@ void DTFE_preparePadding(DTFE_State &state, User_options const &userOptions)
 }
 
 
-// Standard binary, PARTITIONED point evaluation: the Eulerian box whose tetrahedra partition i of a
-// split owns -- 'range' its grid-index range (optimalPartitionSplit's subgridList[i]) in the split's 'grid', and
-// 'region' its sub-box. A face is on the run's outer boundary when its INDEX is 0 or the grid's end (the float cut
-// region[0] + dx*n can miss the box face by an ulp); psPointEvalOwnBox resolves those faces (ps_point_eval.cc).
-// Shared by the composite '--serve' and the batch '--sample-points --partition' loop, so both own alike. (Compiled
-// in PS-DTFE too, whose build keeps the standard partition branch as unreachable code.)
+// Standard binary, PARTITIONED point evaluation: the Eulerian box whose tetrahedra partition i of a split owns -- 'range' its grid-index range
+// (optimalPartitionSplit's subgridList[i]) in the split's 'grid', 'region' its sub-box. A face is on the run's outer boundary when its INDEX is 0
+// or the grid's end (the float cut region[0] + dx*n can miss the box face by an ulp); psPointEvalOwnBox resolves those faces (ps_point_eval.cc).
+// Shared by the composite '--serve' and the batch '--sample-points --partition' loop, so both own alike. (Compiled in PS-DTFE too, whose
+// build keeps the standard partition branch as unreachable code.)
 static void standardPartitionOwnBox(std::vector<size_t> const &range, std::vector<size_t> const &grid,
                                     Box const &region, double ownLo[], double ownHi[])
 {
@@ -460,13 +447,11 @@ static User_options dtfeSubdomainOptions(User_options const &userOptions, int co
 }
 
 #ifndef PHASE_SPACE
-/* The standard look-ahead's PREPARE stage: partition k+1's sub-domains, on the look-ahead thread while
-   partition k deposits. The thread count is the CALLER's (dtfeParallelThreads on the loop's thread: a fresh thread's
-   OpenMP defaults need not be the loop's), the rest is DTFE_parallel's own code above: the single-tessellation choice,
-   parallelGrid, optimalPartitionSplit on the partition's particles, each sub-domain's options and particles, and
-   buildTessellation (dtfePrebuildTessellation) -- with the cache when '--tessellation-cache' is on. The sub-domains are
-   built on a team of their own (an OpenMP team started from this thread), as many at once as DTFE_parallel runs, and
-   every one silently ('verbose 0': the log's progress line reports the look-ahead). Frees the partition's particles. */
+/* The standard look-ahead's PREPARE stage: partition k+1's sub-domains, on the look-ahead thread while partition k deposits. The thread
+   count is the CALLER's (a fresh thread's OpenMP defaults need not be the loop's), the rest is DTFE_parallel's own code above:
+   single-tessellation choice, parallelGrid, optimalPartitionSplit, each sub-domain's options and particles, buildTessellation (with the
+   cache when '--tessellation-cache' is on). The sub-domains are built on a team of their own, as many at once as DTFE_parallel runs, each
+   silently ('verbose 0'). Frees the partition's particles. */
 static void dtfePrepareSubdomains(vector<Particle_data> *partParticles, vector<Sample_point> &samples,
                                   User_options const &partOptions, int const threads, DTFEPrepared &P)
 {
@@ -532,13 +517,11 @@ static void psUnwrapEulerian(std::vector<Particle_data> &particles, User_options
 }
 #endif
 
-// The host's reaction to shares the non-finite guard of the exact fixed-point sums dropped (ps_deposit_params.h
-// psFixedShareOk: a NaN, an infinity or a product beyond 2^63 -- in the run-wide 128-bit words, at or above the
-// share cap, fixed_units.h RunUnits -- adds nothing and is counted, on the CPU and in every GPU kernel). THE one
-// place that decides what such a run does: a warning that names each grid and its count,
-// once per DTFE() call (the counts are taken and reset here), and the run goes on -- the grids are written,
-// without those shares (a float sum would turn their cells NaN). To fail the run instead, throw here
-// (throwError). Nothing is printed when nothing was dropped.
+// The host's reaction to shares the non-finite guard of the exact fixed-point sums dropped (ps_deposit_params.h psFixedShareOk: a NaN, an
+// infinity or a product beyond 2^63, or at or above the share cap of the run-wide words, adds nothing and is counted). THE one place that
+// decides what such a run does: a warning that names each grid and its count, once per DTFE() call (the counts are taken and reset here),
+// and the run goes on, the grids written without those shares (a float sum would turn their cells NaN). To fail the run instead, throw
+// here (throwError). Nothing is printed when nothing was dropped.
 static void fixedShareDropsReact(User_options const &userOptions)
 {
 #ifdef PHASE_SPACE

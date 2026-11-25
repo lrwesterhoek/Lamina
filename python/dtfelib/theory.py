@@ -1,49 +1,6 @@
-"""Linear-theory expectations for the void statistics: the void size function and the shapes of the
-minima of a Gaussian random field, to draw beside what the catalogues measure.
-
-    from dtfelib import theory
-    dn = theory.void_size_function(r_mpc, z=0.0)                  # dn/dlnR [Mpc^-3], the Vdn model
-    q = theory.minima_shape_percentiles(nu=-delta_min / s0, gamma=theory.bbks_gamma(sigma_mpc)[0])
-
-UNITS: h-free like the rest of the code base -- R in Mpc (comoving), k in 1/Mpc, n in Mpc^-3.
-
-COSMOLOGY. config.COSMOLOGY, TNG's Planck 2015 (Planck Collaboration 2016, XIII): Omega_m 0.3089, Omega_L 0.6911,
-Omega_b 0.0486, h 0.6774, sigma_8 0.8159, n_s 0.9667. The linear spectrum is spectra.linear_pk's: the Eisenstein &
-Hu (1998) no-wiggle transfer function normalised to sigma_8, times D(z)^2, D the exact growth factor of flat LambdaCDM
-(D(0) = 1). This module adds the vectorised top-hat sigma(R, z) the size function needs and the Gaussian-smoothed
-spectral moments the BBKS shapes need; spectra stays the one place the spectrum itself is written.
-
-THE SIZE FUNCTION. Sheth & van de Weygaert (2004, SvdW): a void is a region whose linear density, smoothed on R_L,
-first crosses the shell-crossing threshold DELTA_V (linear -2.71, the -0.8 of a nonlinear spherical void) without
-having crossed the collapse threshold DELTA_C = 1.686 on a larger scale (the void-in-cloud term). The first-crossing
-distribution of the two-barrier random walk in ln(1/sigma) (their eq 4, as Jennings, Li & Hu 2013 eq 8 write it):
-
-    f_lnsigma(sigma) = 2 sum_j exp(-(j pi x)^2 / 2) j pi x^2 sin(j pi D),  D = |dv| / (dc + |dv|),  x = D sigma / |dv|
-
-summed to convergence (small x, where the sum converges slowly, takes its exact one-barrier limit
-sqrt(2/pi) (|dv|/sigma) exp(-dv^2 / 2 sigma^2), within 1e-6 of the sum below SMALL_X; tests/py_population_test.py
-checks both). A linear void of R_L has the nonlinear radius R = R_L (1 + dv_NL)^(-1/3) = 1.71 R_L. Two ways to count:
-
-  * 'svdw' : dn/dlnR = f(sigma) / V(R_L) dln(1/sigma)/dlnR_L     (SvdW: number conserved through the expansion)
-  * 'vdn'  : dn/dlnR = f(sigma) / V(R)   dln(1/sigma)/dlnR_L     (Jennings, Li & Hu 2013 eq 12: VOLUME conserved;
-             the volume fraction in voids is then the walks' probability, at most dc / (dc + |dv|) = 0.38, where
-             SvdW's grows to 1.71^3 times that and fills more than the box)
-
-both at R = 1.71 R_L, sigma = sigma(R_L, z) with a top-hat window. Jennings et al. find Vdn the one that fits
-simulated voids; it is the default. Each threshold is a module constant.
-
-MINIMA SHAPES (Bardeen, Bond, Kaiser & Szalay 1986, BBKS). A minimum of the smoothed delta is a peak of -delta. With
-lambda_1 >= lambda_2 >= lambda_3 > 0 the Hessian's eigenvalues there (fields.calculate_shape_parameters writes the
-same e and p) and x = (lambda_1 + lambda_2 + lambda_3) / sigma_2, the shape distribution at fixed x is BBKS eq 7.6,
-
-    P(e, p | x) = 3^2 5^(5/2) / sqrt(2 pi) x^8 / f(x) e (e^2 - p^2) (1 - 2p) ((1 + p)^2 - 9 e^2) exp(-5x^2 (3e^2 + p^2)/2)
-
-on 0 <= e <= 1/4, -e <= p <= e and 1/4 <= e <= 1/2, 3e - 1 <= p <= e, with f(x) of eq A15, and the curvature of a
-peak of height nu = -delta_min / sigma_0 is distributed as f(x) exp(-(x - gamma nu)^2 / (2 (1 - gamma^2))) (eq A14),
-gamma = sigma_1^2 / (sigma_0 sigma_2) from the spectrum smoothed with the pipeline's Gaussian (window
-exp(-k^2 sigma^2 / 2), pipeline.delta_smoothed). Over ALL minima (nu integrated out) x goes as f(x) exp(-x^2/2), so
-their shapes are the same for every spectrum: the spectrum enters through nu only.
-"""
+"""Linear-theory expectations for the void statistics: the void size function (Sheth & van de Weygaert 2004; the
+'vdn' volume-conserving count of Jennings, Li & Hu 2013 is the default) and the shapes of the minima of a Gaussian
+random field (Bardeen, Bond, Kaiser & Szalay 1986). h-free units; the linear spectrum is spectra.linear_pk's."""
 
 from __future__ import annotations
 

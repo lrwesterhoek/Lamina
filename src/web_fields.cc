@@ -113,11 +113,9 @@ Pvector<Real,noVortComp> velocityVorticity(Pvector<Real,noGradComp> &velGrad)
 }
 
 // Eigenvalues of a 3x3 symmetric matrix via Cardano's formula, sorted descending (lambda1 >= lambda2 >= lambda3).
-// Computed in DOUBLE whatever Real is: where two eigenvalues (nearly) coincide -- every cell of a field
-// that varies along one axis, and the axis-symmetric parts of walls and filaments -- r = det(B)/2 sits
-// at +-1, where acos has an infinite slope, so its rounding error eps turns into sqrt(eps) in the
-// eigenvalues: in float, 6e-4 for a cell with delta = 3 (the T-web of a 1D pancake reads {3.096, 6e-4,
-// -6e-4} for {3.096, 0, 0}; tests/tweb_check.sh). In double, ~1e-8.
+// Computed in DOUBLE whatever Real is: where two eigenvalues (nearly) coincide, r = det(B)/2 sits at +-1, where acos has
+// an infinite slope, so its rounding error eps turns into sqrt(eps) in the eigenvalues (float: a 1D pancake's T-web reads
+// {3.096, 6e-4, -6e-4} for {3.096, 0, 0}; tests/tweb_check.sh). In double the error is ~1e-8.
 Pvector<Real,NO_DIM> symmetricEigenvalues3x3(Real a00r, Real a01r, Real a02r,
                                               Real a11r, Real a12r, Real a22r)
 {
@@ -257,22 +255,14 @@ void computeWebClassification(Field &fields,
 }
 
 
-// T-web classification from the TIDAL tensor of the gravitational potential (Hahn et al. 2007;
-// Forero-Romero et al. 2009), Poisson-solved from the density grid by FFT. Dimensionless
-// convention: T_ij = F^-1[ (k_i k_j / k^2) delta_hat ] so that tr T = delta exactly and
-// lambda_th is dimensionless (literature thresholds ~0.2-0.4 apply directly; the same
-// convention was validated against an independent Python implementation, trace identity ~1e-6).
-// Computed from the RAW density grid -- NO smoothing here by design (the binary outputs raw
-// fields only; smoothing is a plot-time choice in python/plot_PS_DTFE.py). Note the labels are
-// therefore sensitive to FFT ringing from point-like halo density spikes; labels are categorical,
-// so a smoothed CLASSIFICATION (not just a smoothed picture) requires re-deriving the tensor from
-// a smoothed density, i.e. a rerun. Periodic, full-box grids only, 2D or 3D (the kernel k_i k_j / k^2
-// is the same in any dimension; 2D has three tensor components and two eigenvalues); assumes square
-// grid cells (k ratios use per-cell wavenumbers). Runs on the merged full grid after normalization,
-// so it is independent of the partition path.
-// The FFT buffers of the T-web: as aligned as fftw_alloc makes them (64 B covers every SIMD width FFTW
-// uses), through the aligned operator new -- which '--scratch-dir' replaces too (scratch_alloc.cc), so
-// above its threshold they live in the scratch files like the grids. fftw_alloc would bypass it.
+// T-web classification from the TIDAL tensor of the gravitational potential (Hahn et al. 2007; Forero-Romero et al. 2009),
+// Poisson-solved from the density grid by FFT. Dimensionless convention: T_ij = F^-1[ (k_i k_j / k^2) delta_hat ], so
+// tr T = delta and lambda_th is dimensionless. Computed from the RAW density grid (smoothing is a plot-time choice), so the
+// labels are sensitive to FFT ringing from halo density spikes. Periodic, full-box grids only, 2D or 3D, square grid cells;
+// runs on the merged full grid after normalization, so it is independent of the partition path.
+
+// The FFT buffers are 64 B aligned (every SIMD width FFTW uses) through the aligned operator new, which '--scratch-dir'
+// replaces too (scratch_alloc.cc), so above its threshold they live in the scratch files like the grids.
 template <class T>
 struct FftwAligned
 {
@@ -305,10 +295,8 @@ void computeTidalWebClassification(Field &fields,
     size_t N = 1;
     for (int d = 0; d < NO_DIM; ++d) { n[d] = userOptions.gridSize[d]; N *= n[d]; }
     if ( q->density.size() != N ) { skip("it needs the density field on the full grid (select 'density'/'density_a' too)."); return; }
-    // Above 2^31 cells (~1290^3) FFTW's ordinary planners overflow their int sizes: the plans are made
-    // with the 64-bit guru interface (fftw_plans64.h). Every buffer below is an ordinary allocation
-    // (std::vector), so '--scratch-dir' backs it with disk like the grids: the chain needs ~48 bytes
-    // per cell at its peak (the real work array, two half-spectra, the six float tensor components).
+    // Above 2^31 cells FFTW's ordinary planners overflow their int sizes: the plans use the 64-bit guru interface
+    // (fftw_plans64.h). Every buffer below is an ordinary allocation, so '--scratch-dir' backs it with disk like the grids.
 
     auto const tidalStart = std::chrono::steady_clock::now();
     message << "\nComputing the T-web from the tidal tensor of the raw density grid (lambda_th = "

@@ -1,12 +1,6 @@
 #!/usr/bin/env python3
-"""Headless checks for the GUI's job specifications (python/gui/runspec.py): the commands
-RunSpec, PipelineSpec, PlotSpec and CustomSpec stand for, the combinations they refuse, script
-export, progress parsing and data discovery; and the GUI's other Qt-free modules: run logs, stale
-outputs, time estimates and failure advice (results.py), presets and the binary's own help text
-(presets.py), and the Explore tab's grid reader (grids.py). No Qt needed.
-
-Usage: python3 tests/py_gui_runspec_test.py
-"""
+"""Headless checks for the GUI.
+Usage: python3 tests/py_gui_runspec_test.py"""
 
 import contextlib
 import os
@@ -1031,11 +1025,9 @@ def run_modes(tmp: Path):
 
 
 def runs_on_line():
-    """The run tabs' grey line under the Machine use (runspec.runs_on_text) of a job on Automatic, and the Device row's
-    note beside it (runspec.automatic_text): before a memory check that the program picks the device; after one the
-    device the program reported (runspec.reported_device; where a PS-DTFE Exact job in performance shares, the
-    precise statement as the line's tooltip); another job's check, a check taken under another build, or reports
-    that disagree, count for nothing; the 2D programs and a CPU-only build said as such; never a number or a '--'."""
+    """The run tabs' grey line under the Machine use (runspec.runs_on_text) of a job on Automatic, and the Device
+    row's note beside it (runspec.automatic_text): before a memory check that the program picks the device; after
+    one the device the program reported."""
     print("launcher: the 'Runs on' line:")
     picks = "Runs on: the device the program picks ('Check memory' names it)"
 
@@ -1100,12 +1092,7 @@ def runs_on_line():
 def advanced_settings(tmp: Path):
     """The opt-in Advanced settings (the owner: 'an advanced mode in the GUI that lets the user ticker with the
     settings more? but make it opt in'): one field, advanced, on the Grids, Pipeline and Custom jobs, keyed by
-    ADVANCED_KEYS (the removed fields' names), an absent key Automatic. G1: a job without an override saves and builds
-    as the two-mode job. G2: an override builds the launcher's explicit setting before the two modes (its flags and
-    knobs, in their places), at least once per row and tab, spelled out from the code of that launcher. Saved
-    overrides are cleaned, an older saved job never becomes one with overrides, an override the job cannot honour is
-    not passed and the checks list says why, the 'Runs on' line follows a Device override, and one place
-    (runspec._refusal, read through mode() and the four accessors) decides what is passed."""
+    ADVANCED_KEYS (the removed fields' names), an absent key Automatic."""
     import inspect
     import json
     import re
@@ -1512,15 +1499,7 @@ def advanced_settings(tmp: Path):
 
 def device_cpu_gpu(tmp: Path):
     """The Advanced Device row's three choices (the owner: 'shouldnt there be a CPU+GPU option as well?'): CPU, GPU
-    and CPU + GPU, saved as False, True and 'mixed'. GPU keeps every partition of PS-DTFE's exact deposit on the GPU
-    in every machine use ('--gpu-share 1'); CPU + GPU shares it at the program's own share in every machine use
-    ('--gpu-share mixed', GPU_SHARE=mixed); a share is passed only where it applies (PS-DTFE's exact deposit on the
-    GPU in 3D), never for standard DTFE, Fast or 2D. CPU + GPU is offered on a GPU build of a PS-DTFE job in 3D and
-    single precision, and refused with its reason elsewhere. Automatic: the program picks (the row's note and the 'Runs
-    on' line say so, and after a memory check the device it reported); the memory check and the cluster script carry
-    the run's device and share. A Custom job's extra options that name the device set it alone, but for a Device CPU
-    beside a '--gpu-share' they give alone (the run stays on the CPU). The caustic cusps warn on a Device GPU (or
-    CPU + GPU) only."""
+    and CPU + GPU, saved as False, True and 'mixed'."""
     print("launcher: the Device row (CPU, GPU, CPU + GPU):")
     picks = "Runs on: the device the program picks ('Check memory' names it)"
     root = str(tmp / "dev")
@@ -1753,11 +1732,7 @@ def device_cpu_gpu(tmp: Path):
 
 
 def finishing_round(tmp: Path):
-    """The launcher's open points closed in the finishing round (2026-11-13): a refused Advanced setting leaves the
-    memory key alone; a saved queue entry keeps its title; the parallel insertion is not offered without TBB, its
-    Automatic note says so; the full-resolution
-    grids are the most a run holds at once (a face run's face sums are gone before the derived fields and the web
-    classes are made), so a 512^3 PS-DTFE job with the default fields and the web classes needs no scratch folder."""
+    """The launcher."""
     print("launcher: the finishing round's open points:")
     root = str(tmp / "fin")
     run = lambda adv, **k: rs.RunSpec(data_root=root, sim="Toy-64", snapshots=[1], advanced=adv, **k)  # noqa
@@ -1805,11 +1780,8 @@ def finishing_round(tmp: Path):
 
 def two_quality_modes(tmp: Path):
     """The two quality modes (the owner's 'one faster but less correct, one slower but exact for each method'): one
-    field, quality, on the Grids, Pipeline and Custom jobs, Exact first and the default; what each implies decided in
-    one place (runspec.quality_mode, read through each job's mode()); the golden rule -- an Exact job builds today's
-    default command and environment, a Fast one today's sampled job at the removed controls' defaults but its count
-    (one point per cell axis) -- for both
-    estimators on every run tab, on a GPU build and a CPU-only one."""
+    field, quality, on the Grids, Pipeline and Custom jobs, Exact first and the default; what each implies decided
+    in one place (runspec.quality_mode, read through each job's mode()); the golden rule."""
     import inspect
     import re
     print("launcher: the two quality modes (Exact, Fast):")
@@ -2014,11 +1986,9 @@ def tick_helpers():
 
 
 def core_grids_warning():
-    """The Core analysis set warns when a snapshot has no standard-DTFE grids in the modes
-    that READ them -- all, compute and export (analyze.export builds its FieldSet from the grids, like compute) --
-    and not in plot / check (they read python/cache). Phase-space grids do not count: compute reads the standard
-    DTFE. Its own data root: an empty snapdir_099, then PS grids only, then a standard-DTFE run. The estimator and
-    grid prefix the user set for the OTHER sets do not count either: the core step passes analyze.py neither."""
+    """The Core analysis set warns when a snapshot has no standard-DTFE grids in the modes that READ them -- all,
+    compute and export (analyze.export builds its FieldSet from the grids, like compute) -- and not in plot / check
+    (they read python/cache). Phase-space grids do not count: compute reads the standard DTFE."""
     root = Path(tempfile.mkdtemp(prefix="gui_core_"))
     try:
         sd = root / "TNG100" / "TNG100-3-Dark" / "snapdir_099"
@@ -2248,10 +2218,7 @@ def _custom_snapshot(tmp, np, P):
     # a PS-DTFE run that takes the face gradient keeps more full grids per cell: the face sums (30 floats), the stream
     # average's divergence and the mass flux divergence (2), the twin of each gradient (9), shear (5) and vorticity
     # (3) asked, and the mean velocity (3) where 'velocity_a' is not asked; nothing without a field built on the
-    # gradient, nothing in 2D. A job passes it where its route is the face gradient (face_route_on). Not all at once
-    # (src/auto_tune.cc, the planner's max(bCell, bCellDeposit + normR)): the face sums and that mean velocity go
-    # before the derived fields and the web classes are made, beside which only the two outputs and the twins stay;
-    # the deposited grids (density, velocity, the gradient, the counts) are held throughout
+    # gradient, nothing in 2D. A job passes it where its route is the face gradient (face_route_on).
     face = lambda f, **k: rs.grids_gb(100, f, face=True, **k) * 1e9 / 100 ** 3     # noqa: E731
     prod = ["density_a", "velocity_a", "divergence_a", "shear_a"]
     every = ["velocity_a", "gradient_a", "divergence_a", "shear_a", "vorticity_a", "vweb_a"]
@@ -2544,8 +2511,8 @@ def _presets_help(sim, P, R):
           and h.get("--a-really-long-option-name-that-pushes") == "the text goes on the next line", str(h))
     spec = rs.RunSpec(grid=512, fields=list(rs.PS_DEFAULT_FIELDS))
     planes = [sim / "hires_plane_z64.bin"]
-    # three built-ins, in the two-mode model: each names its quality and nothing the code decides; their words name
-    # no measured number (no seconds, minutes, GB or percent: they go stale)
+    # three built-ins: each names its quality and nothing the code decides; their words name no measured number (no
+    # seconds, minutes, GB or percent: they go stale)
     measured = re.compile(r"\d\s*(s|sec|seconds?|min|minutes?|h|hours?|GB|MB|%)(?![A-Za-z])|about a minute")
     check("three built-in presets, Quick look (Fast), Standard and Publication (Exact): each names its quality, none a "
           "setting outside the preset keys; no measured number in their words",
@@ -2600,8 +2567,7 @@ def _presets_help(sim, P, R):
     check("... a preset sets only the preset keys (a stray machine use, prefix or scratch folder in it is left out)",
           ch_odd == ["grid"] and odd.run_mode == "gentle" and odd.output_prefix == rs.RunSpec().output_prefix
           and odd.scratch_dir == rs.RunSpec().scratch_dir, str(ch_odd))
-    # the Quality pair's tips (the cell-average labels went with the cell-average menu): Exact names itself the default,
-    # Fast does not; no timing in either (PS-DTFE's Fast is not measured to be quicker by any amount)
+    # the Quality pair's tips: Exact names itself the default, Fast does not; no timing in either
     check("the Quality pair's tips name Exact the default (Fast not), without a digit or a '--'; no label of a removed "
           "control is left in the option texts",
           "default" in rs.QUALITY_TIP["exact"] and "default" not in rs.QUALITY_TIP["fast"]
@@ -3308,10 +3274,9 @@ _VOID_SCRIPT_DEFAULTS = {
 
 
 def plot_void_script_options(tmp: Path):
-    """The void scripts' own options on the Plots tab: population size function, tracking link,
-    fate links, convergence factors, environment factor and R_v definition, profile-evolution R_v definition,
-    skeleton null and wall cuts. Defaults equal the scripts' own and add no flag; every set value reaches its
-    flag, each one the script's parser knows; a malformed list is an error, not a crash in the script."""
+    """The void scripts' own options on the Plots tab: population size function, tracking link, fate links,
+    convergence factors, environment factor and R_v definition, profile-evolution R_v definition, skeleton null and
+    wall cuts."""
     import subprocess as _sp
     repo = Path(__file__).resolve().parents[1]
     base = dict(data_root=str(tmp), sim="TNG100-3-Dark", snapshots=[50, 99])
@@ -4304,11 +4269,8 @@ def void_outline_geometry():
 
 
 def run_log_contract():
-    """The run-log contract: a run writes '<prefix>.runlog.partial'; exit 0 renames it onto
-    '<prefix>.runlog' (the log of the grids on disk), a failure or stop onto '<prefix>.runlog.failed' (the old
-    '.runlog' untouched). The Runs browser reads the three names as ONE output set: the log of record, and a
-    newer failed, running or killed attempt noted on it (results.py). Plus the deposit settings and the GPU-retry
-    wording a log is read for, and the Pipeline job's render chained to its pipeline call."""
+    """The run-log contract: a run writes '<prefix>.runlog.partial'; exit 0 renames it onto '<prefix>.runlog' (the log
+    of the grids on disk), a failure or stop onto '<prefix>.runlog.failed' (the old '.runlog' untouched)."""
     import results as R
     print("run-log contract:")
     base = Path(tempfile.mkdtemp(prefix="gui_runlogs_"))
@@ -4514,10 +4476,9 @@ def run_log_contract():
               and hr["hs"].options_text().split(", ")[0] == "Fast" and hr["ps"].options_text().split(", ")[0] == "Fast"
               and not dm.exact and not std.exact, str(got))
         # the sampled deposit's count read from a log: the command's '--subsamples k', else the header's count line
-        # (every sampled PS-DTFE run with an '_a' field prints it, src/user_options.cc). An older run that names none ran at the
-        # binary's default then, 3 per cell axis, and must not read as Fast's one now: not in the Options column, not
-        # in a Fast job's time estimate, not in the job 'Load settings' makes (rs.keep_run_count: its Advanced
-        # Samples). A new log reads its own count
+        # (every sampled PS-DTFE run with an '_a' field prints it, src/user_options.cc). A log that names none ran at
+        # the binary's default, 3 per cell axis, and must not read as Fast's one: not in the Options column, not in a
+        # Fast job's time estimate, not in the job 'Load settings' makes (rs.keep_run_count)
         def nsub_line(k):               # (an older binary's words at 3, today's at 1: the count is read alike)
             tail = ("one point per '_a' cell, at its centre: noisy per-cell values, smooth before use" if k == 1 else
                     f"each '_a' cell volume-averaged over nSub^3 = {k ** 3} points; this sets the dominant '_a' "
@@ -4725,8 +4686,7 @@ def ordered_merge_settings():
 def older_version_logs():
     """RunRecord.older on three run logs: a command and the header's 'run mode' line (a current log, read as written);
     a command and no such line (an older version's: listed, its settings 'older version', none to load, no time
-    estimate, one stale notice); no command at all (a run that died before the program printed its header: not an
-    older version's, no settings, nothing to load, no notice)."""
+    estimate, one stale notice); no command at all."""
     import results as R
     print("run logs of an older version:")
     d = Path(tempfile.mkdtemp(prefix="gui_older_"))

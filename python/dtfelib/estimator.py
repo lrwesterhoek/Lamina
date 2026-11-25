@@ -1,36 +1,6 @@
-"""Interactive DTFE / PS-DTFE: build the tessellation ONCE, then evaluate it at any points.
-
-The batch workflow writes '.pts_*' files for one fixed '--sample-points' set per run. An
-Estimator instead keeps a DTFE / PS-DTFE process alive in '--serve' mode, holding the
-tessellation and its vertex densities in memory, and answers every call from it -- no
-rebuild, no files:
-
-    from dtfelib import Estimator
-
-    with Estimator("snap_099.hdf5") as est:             # PS-DTFE; tessellation built here
-        f = est(points)                                 # (N, 3) box coordinates [Mpc]
-        f.density, f.velocity, f.streams, f.dispersion  # per-point numpy arrays
-        rho = est.density(halo_centres)                 # convenience accessors
-        cube = est.grid(xs, ys, zs)                     # fields on the tensor-product grid
-
-Every answer is exactly what '--sample-points' would write for the same points (the server
-runs the same code), including the exact, tie-consistent stream counting: a point on a
-shared face, edge or vertex -- e.g. a particle position -- is counted once per stream.
-PS-DTFE weights its velocity moments by volume, so a point's velocity, velocity gradient and
-scalar are the plain means over its streams, and its dispersion stays mass-weighted (PointFields).
-
-Units mirror FieldSet.load / PointPlane: density is rho/rho_bar; velocities (and velocity
-gradients) are converted to peculiar km/s with sqrt(a), the dispersion (a velocity variance)
-with a, where a is the snapshot's header 'Time' (no-op at z=0; pass peculiar=False for the
-raw Gadget units). Point coordinates are in the box coordinate system the binary uses, i.e.
-Mpc after the '--mpc-unit' conversion (the binary's default is 1000, for ckpc/h snapshots).
-
-Session cost: the build (the same as one batch run's triangulation + vertex densities) is
-paid once; each call then costs roughly the cheap per-tetrahedron occupancy test over the
-tessellation plus the work proportional to the points -- milliseconds to tens of ms for small
-requests, and the multi-threaded batch speed for large ones. '--tessellation-cache' makes
-even the build instant on a snapshot seen before (tessellation_cache=...).
-"""
+"""Interactive DTFE / PS-DTFE: build the tessellation ONCE, then evaluate it at any points with est(points).
+Answers equal '--sample-points' output for the same points; units mirror FieldSet.load (density rho/rho_bar,
+peculiar km/s; points in the binary's box coordinates). '--tessellation-cache' makes a repeat build instant."""
 
 from __future__ import annotations
 
@@ -47,23 +17,18 @@ import numpy as np
 
 __all__ = ["Estimator", "PointFields", "find_binary", "STANDARD_PADDING"]
 
-# The standard (Eulerian) server's '--padding', in mean particle spacings, when the caller gives none (the standard
-# binary's own default is 15 too; it is named so that an older binary, whose default was 5, gets it as well).
-# 5 is too thin near the box faces: on demo/z0_64 (z = 0) 0.5-0.9% of the points of a
-# plane 0.05 Mpc inside a face are off by up to ~4% against padding 30-40, computed from the wrong hull tetrahedra
-# (they still report coverage 1, so nothing flags them), while 10 to 40 agree to float rounding (1e-14;
-# tests/point_exact_serve_check.sh P2). 15 is scripts/run_dtfe.sh's default, complete (no
-# '*.badGridPoints*' file) on the z = 0 grids of TNG50/100/300-3-Dark, where 10 is not. The
-# phase-space server pads in Lagrangian space by its own rules and keeps the binary's default. The launcher's
-# standard exact zoom (gui/explore.py) passes the same value to its '--region-mpc' run.
+# The standard server's '--padding', in mean particle spacings, when the caller gives none (also the standard
+# binary's own default; named so that an older binary gets it too). 5 is too thin near the box faces: points are
+# computed from the wrong hull tetrahedra and still report coverage 1. 15 is scripts/run_dtfe.sh's default; the
+# phase-space server pads in Lagrangian space by its own rules and keeps the binary's default.
 STANDARD_PADDING = 15.0
 
 _HELLO = b"DTFESRV2"
 _REPLY = b"DTFEPTS1"
 _ERROR = b"DTFEERR1"
 
-# handshake flag bits (ps_point_eval.cc, '--serve' protocol version 2); bit 6 (_F_GEOMETRIC) stays reserved: it was
-# the geometric per-stream density's, which PS-DTFE no longer has, and nothing reads it
+# handshake flag bits (ps_point_eval.cc, '--serve' protocol version 2); bit 6 (_F_GEOMETRIC) stays reserved and
+# unread (PS-DTFE has no geometric per-stream density)
 (_F_PS, _F_PER_STREAM, _F_IDS, _F_DEN_GRAD, _F_VEL_GRAD, _F_CAUSTIC, _F_GEOMETRIC, _F_PERIODIC,
  _F_SCALAR, _F_LAGRANGIAN, _F_COMPOSITE, _F_DIM2) = (1 << i for i in range(12))   # _F_DIM2: a 2D build
 
@@ -96,35 +61,9 @@ def find_binary(phase_space: bool = True, precision: str = "single", dim: int = 
 
 @dataclass
 class PointFields:
-    """Per-point fields of one Estimator call (the '.pts_*' outputs as arrays). The shapes are for a 3D
-    server; a 2D one (dim=2) has 2 velocity components, 3 dispersion components (xx xy yy), 2x2
-    velocity gradients, 3 particle IDs per stream and 2-component positions.
-
-    density     (N,)      rho/rho_bar, summed over streams
-    velocity    (N, 3)    the plain mean velocity over the point's streams: every stream fills the point, so
-                          PS-DTFE's volume weighting gives each the same share (standard DTFE: its one stream)
-    dispersion  (N, 6)    velocity dispersion tensor, xx xy xz yy yz zz (0 for 1 stream): mass-weighted, the
-                          density-weighted second moment about the density-weighted mean velocity
-    streams     (N,)      number of streams (tetrahedra) containing the point; the standard
-                          binary reports 0/1 coverage
-    caustic     (N,)      caustic mask (caustics=True), bits as in '.causticClass'
-    density_gradient  (N, 3)       d(rho/rho_bar)/dx_i (density_gradient=True)
-    velocity_gradient (N, 3, 3)    [.., d, j] = dv_j/dx_d, the plain mean over the point's streams, as
-                                   velocity (velocity_gradient=True)
-    scalar      (N,)      the particles' scalar value (scalars=True / scalar_dataset=...), the
-                          plain mean over the point's streams, as velocity; (N, S) for S > 1
-    per-stream decomposition (per_stream=True; ragged, point i owns rows
-    offsets[i]:offsets[i+1], densest stream first):
-    offsets (N+1,), stream_density (R,), stream_velocity (R, 3),
-    stream_ids (R, 4) sorted Lagrangian-vertex ParticleIDs (per_stream_ids=True),
-    stream_density_gradient (R, 3) (per_stream=True and density_gradient=True),
-    stream_scalar (R,) each stream's own scalar value (per_stream=True and scalars=True),
-    stream_lagrangian (R, 3) each stream's Lagrangian coordinate q(x) -- where the matter it
-                          brings to the point started (lagrangian_positions=True)
-
-    grid() reshapes the per-point arrays to the grid's shape; the ragged per-stream arrays
-    keep their flat layout (index them through offsets.reshape(-1) as usual).
-    """
+    """Per-point fields of one Estimator call (the '.pts_*' outputs as arrays; 2D servers have 2-component vectors):
+    density, velocity (plain mean over the streams), dispersion, streams, caustic, gradients, scalar, and the ragged
+    per-stream arrays (per_stream=True; point i owns rows offsets[i]:offsets[i+1], densest stream first)."""
     density: np.ndarray
     velocity: np.ndarray
     dispersion: np.ndarray
@@ -157,58 +96,37 @@ class Estimator:
     """A live DTFE / PS-DTFE tessellation answering point queries (see the module docstring).
 
     snapshot           Gadget snapshot the binary reads (HDF5 by default, input_type=105).
-    phase_space        True: PS-DTFE (multi-stream fields; needs Lagrangian positions, from the
-                       snapshot's 'InitialCoordinates' or lagrangian_input). False: standard DTFE.
-                       lagrangian_input ('--ps-lagrangian-input') needs input_type 105: only the HDF5
-                       Gadget reader gives the particle IDs the Lagrangian positions are matched by.
+    phase_space        True: PS-DTFE (needs Lagrangian positions: the snapshot's 'InitialCoordinates' or
+                       lagrangian_input, which needs input_type 105). False: standard DTFE.
     periodic           periodic box (default True).
-    mpc_unit           '--mpc-unit' (length of 1 Mpc in input units); None keeps the binary's
-                       default (1000, for ckpc/h snapshots).
+    mpc_unit           '--mpc-unit' (length of 1 Mpc in input units); None keeps the binary's default.
     per_stream, per_stream_ids, density_gradient, velocity_gradient, caustics
                        the matching '--sample-points' outputs (--ps-per-stream, --ps-per-stream-ids,
                        --pts-den-grad, --pts-vel-grad, --ps-caustics).
-    scalars            interpolate the particles' scalar value too ('--pts-scalar'); needs a
-                       scalar source, normally scalar_dataset.
-    scalar_dataset     per-particle HDF5 dataset read as that scalar ('--scalar-dataset', e.g.
-                       'Potential'); implies scalars=True.
+    scalars            interpolate the particles' scalar value too ('--pts-scalar'); needs a scalar source.
+    scalar_dataset     per-particle HDF5 dataset read as that scalar ('--scalar-dataset'); implies scalars.
     lagrangian_positions
-                       PS-DTFE: also return each stream's Lagrangian coordinate q(x)
-                       ('--ps-per-stream-lagrangian'; implies per_stream).
-    tessellation_cache directory for '--tessellation-cache' (a LOCAL, non-synced path): the
-                       first session writes the tessellation, later ones load it instantly.
-    partition          int or (nx, ny, nz): serve a COMPOSITE of partition tessellations
-                       ('--partition') -- for boxes too large for one tessellation. With
-                       tessellation_cache the partitions live on disk and at most 'resident'
-                       ('--serve-resident'; default: what the memory budget allows) are held in
-                       memory; answers are bit-identical to an unpartitioned server.
-    max_concurrent     partitions triangulated at once while the composite starts
-                       ('--max-concurrent').
-    run_mode           '--run-mode': how hard the server leans on the machine, 'gentle', 'balanced' or
-                       'performance'; None (default) keeps the binary's default: balanced, or performance inside a
-                       batch job (SLURM_JOB_ID or PBS_JOBID set).
-    peculiar           convert velocities to peculiar km/s with the snapshot's scale factor
-                       (FieldSet convention); False returns the binary's raw units.
-    padding            '--padding' in mean particle spacings. None (default): STANDARD_PADDING (15) for the
-                       standard estimator -- the standard binary's own default too; an older binary's 5 gives
-                       wrong values near the box faces -- and the binary's default for PS-DTFE. A
-                       '--padding'/'--padding-mpc' in 'options' wins.
+                       PS-DTFE: also return each stream's Lagrangian coordinate q(x) (implies per_stream).
+    tessellation_cache directory for '--tessellation-cache' (a LOCAL, non-synced path).
+    partition          int or (nx, ny, nz): serve a COMPOSITE of partition tessellations ('--partition') for
+                       boxes too large for one; with tessellation_cache at most 'resident' ('--serve-resident')
+                       are held in memory. Answers are bit-identical to an unpartitioned server.
+    max_concurrent     partitions triangulated at once while the composite starts ('--max-concurrent').
+    run_mode           '--run-mode': 'gentle', 'balanced' or 'performance'; None keeps the binary's default.
+    peculiar           convert velocities to peculiar km/s with the snapshot's scale factor (FieldSet
+                       convention); False returns the binary's raw units.
+    padding            '--padding' in mean particle spacings. None: STANDARD_PADDING for the standard
+                       estimator, the binary's default for PS-DTFE. A '--padding'/'--padding-mpc' in
+                       'options' wins.
     options            extra command-line arguments, passed through verbatim.
     binary             explicit path to the executable (default: find_binary()).
-    dim                2 for a 2D snapshot and build (PS-DTFE-2d / DTFE-2d): points are (N, 2), every
-                       vector has 2 components; the server's handshake says which it is.
-    precision          'single' (default) or 'double': which build find_binary() picks when no binary
-                       is given -- the double pair interpolates in float64 (its answers are float64 either way)
-    verbose            the binary's '--verbose' level; its log goes to this process's stderr
-                       when > 0 and is otherwise kept (and shown if the server fails).
-    progress           the server writes plain progress lines to its log ('--serve-progress'):
-                       '[partitions k/N] ...' while it builds, '[request k/P] partition p: in memory |
-                       loading from the cache' and '[request done] ...' for every request -- whatever
-                       'verbose' says. A launcher follows them for its progress bar and timings.
-    log_path           write the server's log to this file instead, at the 'verbose' level (a
-                       GUI follows the tessellation build there: '[partitions k/N]' lines).
-    env                environment variables set for the binary on top of this process's own (None, the
-                       default: this process's environment as it is). E.g. {"DTFE_GPU": "0"}: the binaries read
-                       DTFE_GPU, and a launcher pins it so that the shell's export does not reach its server.
+    dim                2 for a 2D snapshot and build (PS-DTFE-2d / DTFE-2d): points are (N, 2).
+    precision          'single' (default) or 'double': which build find_binary() picks when no binary is given.
+    verbose            the binary's '--verbose' level; its log goes to stderr when > 0.
+    progress           the server writes plain progress lines to its log ('--serve-progress'), for a launcher.
+    log_path           write the server's log to this file instead, at the 'verbose' level.
+    env                environment variables set for the binary on top of this process's own, e.g.
+                       {"DTFE_GPU": "0"}.
     """
 
     def __init__(self, snapshot, *, phase_space: bool = True, periodic: bool = True,
@@ -576,27 +494,9 @@ class Estimator:
     def from_arrays(cls, positions, *, velocities=None, masses=None, lagrangian=None, values=None,
                     ids=None, box=None, periodic: bool | None = None, phase_space: bool | None = None,
                     tmpdir=None, **kwargs) -> "Estimator":
-        """An Estimator over particles held in numpy arrays (positions, optional weights, Lagrangian
-        coordinates and values) instead of a snapshot file. The arrays are written to a temporary Gadget-HDF5 file
-        that the server reads (deleted again by close()), so every option of the constructor applies.
-
-        positions   (N, 3) Eulerian positions, in Mpc (any consistent length unit: the box and
-                    the query points use the same one; --mpc-unit is 1). (N, 2) builds a 2D Estimator
-                    (the DIM=2 binaries), with every array below 2-component too
-        velocities  (N, 3), returned as given (no scale-factor conversion); default zeros
-        masses      scalar or (N,); default 1 per particle. Densities come out as rho/rho_bar,
-                    so only relative masses matter
-        lagrangian  (N, 3) Lagrangian (initial) positions -> the phase-space estimator
-        values      (N,) any per-particle quantity, interpolated per stream like the velocity
-                    (the Estimator's 'scalar' / 'stream_scalar' outputs)
-        ids         (N,) uint64 particle IDs (default 1..N; the per_stream_ids output)
-        box         L (the periodic cube [0, L]^3), or ((xlo, ylo, zlo), (xhi, yhi, zhi)); default:
-                    the particles' bounding box, non-periodic
-        periodic    default: True when a box is given
-        phase_space default: True when lagrangian is given
-        tmpdir      where the temporary file goes (default: the system temp dir; must be local)
-        **kwargs    passed to Estimator (per_stream, velocity_gradient, partition, ...)
-        """
+        """An Estimator over particles held in numpy arrays instead of a snapshot file (written to a temporary Gadget-HDF5
+        file, removed by close()). positions (N,3) in Mpc ((N,2) = 2D); optional velocities, masses, lagrangian
+        (-> phase space), values, ids, box, periodic, phase_space, tmpdir (local); **kwargs go to Estimator."""
         try:
             import h5py
         except ImportError as e:        # pragma: no cover - h5py is a dtfelib dependency

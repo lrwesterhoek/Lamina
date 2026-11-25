@@ -1,20 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for the size function's raw-density radius: dtfelib.raw_radius (the enclosed -0.8 radius on
-the RAW rho/rho_bar about the catalogue's centres, its cache) and plot_void_population's
-'--size-rv-definition delta08raw'.
-
-Two tiers:
-  * SYNTHETIC (always run, CI): the size function at fixed R (--size-fixed-r: range, ratio, bootstrap, verdict,
-    figure, gate refusal) on populations drawn from Vdn; an analytic top-hat void (Delta(<R) = -0.9 inside R0: the
-    -0.8 radius is R0 (0.9/0.8)^(1/3)), the periodic wrap, a wisp on the centre, never-below and capped voids, the outward blocks,
-    the cache (round trip, keyed on the catalogue's minima, the grid stamp and the settings; only missing rows
-    measured), snapshot_stats / size_function_figure with the raw radii, --help.
-  * DATA-BACKED (TNG100-3-Dark z = 0's grids and production catalogue under DTFE_DATA_ROOT): the raw radius is defined
-    for most distinct voids and is not the smoothing length; skipped with a note when DTFE_DATA_ROOT is unset or the
-    data or the catalogue is not there.
-
-Usage:  python3 tests/py_size_function_test.py            (exit 0 = pass)
-"""
+"""Tests for the size function's raw-density radius: dtfelib.raw_radius (the enclosed -0.8 radius on the RAW
+rho/rho_bar about the catalogue's centres, its cache) and plot_void_population's '--size-rv-definition delta08raw'.
+Usage:  python3 tests/py_size_function_test.py            (exit 0 = pass)"""
 
 import io
 import shutil
@@ -83,10 +70,7 @@ def t_centre_wisp():
 
 
 def t_not_smoothing():
-    """The point of the raw radius: on the SAME void it does not depend on the smoothing that found the centre.
-    The smoothed delta08 (pipeline.void_radii_cells on the field smoothed at sigma) of a top-hat void of R0 = 8
-    cells moves with sigma; the raw one is computed without sigma at all, so only the centre can move it: a centre
-    one cell off changes it by less than a cell."""
+    """The point of the raw radius: on the SAME void it does not depend on the smoothing that found the centre."""
     from dtfelib import raw_radius as rr
     from dtfelib import pipeline
     from dtfelib import fields as dtfe
@@ -202,10 +186,9 @@ def _bowl(centre, r0=R0, n=N):
 
 
 def t_recentre():
-    """raw_radius RE-CENTRING: a catalogue centre 5-6 cells off a void's raw centre gives a raw -0.8
-    radius well below the void's (the off-centre sphere takes in the wall early); re-centred, the centre walks back to
-    within a cell of the raw minimum (also across the periodic edge) and the radius is the one about the true centre.
-    A centre already on the minimum does not move."""
+    """raw_radius RE-CENTRING: a catalogue centre 5-6 cells off a void's raw centre gives a raw -0.8 radius well below
+    the void's (the off-centre sphere takes in the wall early); re-centred, the centre walks back to within a cell
+    of the raw minimum (also across the periodic edge) and the radius is the one about the true centre."""
     from dtfelib import raw_radius as rr
     true = np.array([62, 20, 30])                          # straddles the x edge (r0 = 8 > 64 - 62)
     g = _bowl(true)
@@ -420,11 +403,9 @@ def _vdn_sample(rng, box, lo, hi, z=0.0, scale=1.0):
 
 
 def t_fixed_r():
-    """--size-fixed-r: the theory's bin average and range integral; the smoothings (default,
-    Mpc ones, a duplicate scale dropped); the common range (3 x the largest sigma .. the scarcest smoothing's 5th
-    largest radius, empty when too few); a population drawn from Vdn gives ratio ~1 and 'consistent' at every
-    smoothing, one at 0.4 of it does not; the sub-cube bootstrap's draws; the figure, the npz arrays and the verdicts;
-    the name tags; the refusal under the ellipsoid gate; --help."""
+    """--size-fixed-r: the theory's bin average and range integral; the smoothings (default, Mpc ones, a duplicate
+    scale dropped); the common range (3 x the largest sigma .. the scarcest smoothing's 5th largest radius, empty
+    when too few)"""
     import config
     from dtfelib import theory
     import plot_void_population as pop
@@ -545,10 +526,7 @@ def t_fixed_r_half_open():
 
 
 def t_fixed_r_paired():
-    """The smoothings' agreement is tested on the PAIRED sub-cube bootstrap (identical
-    resamples for every smoothing), not on independent errors: two catalogues of one population, the second missing
-    a random 10% of its voids, differ by ~sqrt(0.1 N) voids in the paired draws but by ~sqrt(2 N) with independent
-    errors, so the independent-error chi^2 (kept for reference) says 'agree' while the paired test finds the 10% deficit."""
+    """The smoothings."""
     import plot_void_population as pop
     rng = np.random.default_rng(11)
     box = 200.0                                    # a few hundred voids: the independent errors (~5%) hide 10%

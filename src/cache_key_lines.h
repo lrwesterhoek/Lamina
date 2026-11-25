@@ -1,7 +1,5 @@
-/* Pieces of the tessellation-cache key (tessellation_cache.h makeDescriptor) that a cheap reader needs
-   too: the build-configuration lines and the input files' stamps. The server's tuner (auto_tune.h
-   autoTuneServe) scans the cache folder for the partition splits of the SAME snapshot and build that
-   are already cached, and must compare exactly the text the cache writes -- so both build it here. */
+/* Pieces of the tessellation-cache key (tessellation_cache.h makeDescriptor) that autoTuneServe also needs: it must
+   compare exactly the text the cache writes, so both build the build-configuration and input-stamp lines here. */
 
 #ifndef DTFE_CACHE_KEY_LINES_HEADER
 #define DTFE_CACHE_KEY_LINES_HEADER

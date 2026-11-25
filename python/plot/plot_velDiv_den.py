@@ -1,20 +1,6 @@
-"""Velocity divergence vs density contrast analysis across snapshots.
-
-Data access goes through dtfelib.FieldSet, so the script is method- (DTFE / PS-DTFE),
-simulation- and snapshot-agnostic. Snapshots without fields on disk are skipped.
-
-    python3 plot/plot_velDiv_den.py --sim TNG50-4-Dark  # all snapshots, auto method
-    python3 plot/plot_velDiv_den.py --estimator dtfe --snap 99
-
-PS-DTFE grids: the divergence is the MEAN FIELD div<v> by default (FieldSet.load('divergence', mean_field=True)),
-the quantity standard DTFE stores and linear theory predicts (theta = -a H f delta for the mean flow): a
-face-gradient run's own grid (the PS binary's default with the exact deposit, from exact
-face sums), else the FFT divergence of the PS velocity grid. The PS grid of a run without the face gradient is the
-stream average of each stream's divergence <div v>, whose box mean is +40 km/s/Mpc at TNG100-3-Dark z=1 from
-multi-stream cells (dtfelib/io.py, the note above FIELDS), which the through-origin fit below cannot absorb;
-'--ps-gradient stored' still uses it (a face-gradient run's stored grid is the mean field either way). The summary
-file names which one a PS run used.
-"""
+"""Velocity divergence vs density contrast analysis across snapshots. Data access goes through dtfelib.FieldSet,
+so the script is method- (DTFE / PS-DTFE), simulation- and snapshot-agnostic. Snapshots without fields on disk
+are skipped."""
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
 from pathlib import Path

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Docs-drift check: what the documents (DOCS: README.md, the guides and the timings page in docs/,
-demo/COMMANDS.md, metal/README.md) tell a user to type must exist in the code, and the knobs the drivers read must
-be documented somewhere a user looks.
+"""Docs-drift check: what the README tells a user to type must exist in the code, and the knobs the drivers read
+must be documented somewhere a user looks.
 
   A) every '--flag' in the documents is DECLARED: an entry of the binaries'
      option table (src/user_options.cc), a script's case arm (scripts/*.sh), a python parser's option (an
@@ -12,7 +11,7 @@ be documented somewhere a user looks.
      script's '${NAME' or '$NAME', the Makefile's '$(NAME)', a python os.environ / getenv read, a C++ Env:: or
      getenv read or macro test (env_reads); a comment, an 'unset', a pop, an assignment or a string that only
      names the variable is no read;
-  C) the knob table of docs/user-guide.md (KNOB_DOC): each knob it names is read by the code (B's reads), and
+  C) the README's knob table (KNOB_DOC): each knob it names is read by the code (B's reads), and
      where the table gives a plain value as the default it equals the scripts' 'VAR="${VAR:-default}"'
      (scripts/config.sh / run_ps_dtfe.sh / run_dtfe.sh);
   D) the other way round: every knob of the drivers and the pipeline, and every DTFE_* variable that
@@ -38,11 +37,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-# RELEASE_NOTES.md is left out on purpose: it names the removed options, variables and knobs (its table of old and
-# new names, its Removed list, the examples of old settings), which rules A, B and E would fail by design
-DOCS = ("README.md", "docs/user-guide.md", "docs/launcher-and-analysis.md", "docs/developer-guide.md",
-        "docs/timings.md", "demo/COMMANDS.md", "metal/README.md")
-KNOB_DOC = "docs/user-guide.md"                     # the document that holds the drivers' knob table (rule C)
+DOCS = ("README.md",)
+KNOB_DOC = "README.md"                              # the document that holds the drivers' knob table (rule C)
 DRIVERS = ("scripts/config.sh", "scripts/run_ps_dtfe.sh", "scripts/run_dtfe.sh")   # the knob table's defaults
 KNOB_SCRIPTS = DRIVERS + ("scripts/run_ps_pipeline.sh",)
 SKIP_PARTS = {"tmp", "cache", "__pycache__", "figures", "reference"}

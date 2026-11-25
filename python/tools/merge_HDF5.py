@@ -1,65 +1,6 @@
 """Merge per-snapshot TNG chunk files into a single h-free combined_NNN.hdf5, and merge the
-other downloaded chunked products so their subfiles can be deleted to save space:
-
-  snapshots (default)  snapdir_NNN/snap_NNN.X.hdf5      -> combined_NNN.hdf5
-  --groupcats          groups_NNN/fof_subhalo_tab_NNN.X.hdf5
-                                                        -> combined_fof_subhalo_tab_NNN.hdf5
-  --trees              Merger Trees/tree_extended.X.hdf5 -> combined_tree_extended.hdf5
-                       (SubLink trees are wholly contained in a chunk and stored
-                       contiguously, so concatenating chunks in order preserves the
-                       row(id) = row(known) + (id - SubhaloID[known]) navigation arithmetic)
-  --ics                ics.hdf5 (or snap_ics.hdf5)       -> combined_ics.hdf5 (via
-                       convert_ic_units.py -- the PS-DTFE --ps-lagrangian-input file)
-
-UNITS: every combined_* file is h-FREE (ckpc, 1e10 Msun, ckpc km/s), one convention across
-all input data. Converted quantities: snapshot Coordinates, header BoxSize and MassTable;
-every groupcat/tree length, mass and spin column per the curated _H_DIVIDE map below (raw
-TNG stores them as ckpc/h / 1e10 Msun/h / ckpc/h km/s). Velocities (km/s), counts, indices
-and IDs carry no h. Self-describing markers record the conversion: each converted groupcat
-or tree column gets a 'divided_by_h' attribute (= h) and each file an 'HFreeUnits' attribute,
-which is how dtfelib.groupcat/trees restore their documented RAW-unit API when reading merged
-files, and how FieldSet distinguishes new headers from pre-conversion combined snapshots. A
-column not in either unit map is copied raw with a LOUD warning -- classify it before
-trusting it.
-
-A SNAPSHOT'S OTHER PARTICLE FIELDS: a merged snapshot holds the dark-matter particles
-(PartType1) and no other type. Beside the positions, velocities and IDs the programs read,
-it carries every other per-particle dataset its chunks hold of them (TNG's -Dark chunks:
-Potential, SubfindDMDensity, SubfindDensity, SubfindHsml, SubfindVelDisp), in the particles'
-order and h-free like the rest: the raw value times h^p, p the chunk's own 'h_scaling'
-attribute (else _H_POWER below; the scale-factor powers are left as TNG has them). Each such
-dataset keeps TNG's unit attributes, 'h_scaling' set to 0, and says the power applied in
-'h_power_applied'. A merge is refused unless every dataset has a value for every particle.
---add-fields puts them into a combined file written before this (its chunks must still be
-there): positions, velocities and IDs are copied as they are, bit for bit, and the file
-keeps its time stamp, so no grid built from it looks out of date; it is larger afterwards,
-so the programs' cached tessellations of it are built anew once and a killed run of it can
-no longer --resume. What a merged snapshot does not keep is the chunks' double precision:
-its Coordinates are single. --verify compares a combined file with its chunks, particle for
-particle and dataset for dataset, and changes nothing. A merged snapshot's datasets are
-written at their full size, in one piece: it reads two to four times as fast as one grown
-chunk by chunk.
-
-dtfelib.groupcat / dtfelib.trees / the DTFE run scripts all PREFER the combined files when
-present, so after a successful merge the chunk files are redundant: pass --delete-chunks to
-remove them. A merge deletes them only after the merged row counts verify against the header
-totals (the other particle types of a full-physics snapshot go with them); --verify and
---add-fields only after the full comparison, of the snapshots that hold everything their
-chunks do. A new file's bytes are forced to the disk before it takes its final name, and
-(where the file system can) that name before a chunk is deleted. download_snapshots.sh skips
-re-downloading anything whose combined product exists.
-
-h is read from the input file's HubbleParam header (fallback: --hubble); --add-fields and
---verify take it from the combined file's own 'HFreeUnits'.
-
-Usage:
-    python3 merge_HDF5.py -d DIR                                     # snapshot defaults below
-    python3 merge_HDF5.py --sim-dir /path/to/TNG50-4-Dark --snaps 8 17 33   # merge snapshots 8, 17, 33
-    python3 merge_HDF5.py -d DIR --add-fields --snaps 50 99          # the other particle fields into old merges
-    python3 merge_HDF5.py -d DIR --verify --snaps 50 99              # each combined file against its chunks
-    python3 merge_HDF5.py -d DIR --groupcats --snaps 0 50 99         # groupcats for snaps 0, 50, 99
-    python3 merge_HDF5.py -d DIR --trees --ics --delete-chunks
-"""
+other downloaded chunked products (--groupcats, --trees, --ics) so their subfiles can be deleted. Every combined_*
+file is h-FREE; --add-fields, --verify and --delete-chunks are described by their --help. Usage: merge_HDF5.py -d DIR"""
 
 import fcntl
 import os
@@ -87,10 +28,9 @@ DATASETS_INFO = {
     }
 }
 
-# The other per-particle datasets of TNG's -Dark snapshots and the power of h in their raw units (the TNG data
-# specification, PartType1: Potential (km/s)^2/a, the two Subfind densities (1e10 Msun/h)/(ckpc/h)^3, SubfindHsml
-# ckpc/h, SubfindVelDisp km/s): h-free value = raw * h^power. Only the fallback: a chunk's own 'h_scaling'
-# attribute says the same and is read first. A dataset with neither is copied raw, with a loud warning.
+# The other per-particle datasets of TNG's -Dark snapshots and the power of h in their raw units (TNG data
+# specification, PartType1): h-free value = raw * h^power. Only the fallback: a chunk's own 'h_scaling' attribute
+# is read first. A dataset with neither is copied raw, with a loud warning.
 _H_POWER = {"Potential": 0.0, "SubfindDMDensity": 2.0, "SubfindDensity": 2.0, "SubfindHsml": -1.0,
             "SubfindVelDisp": 0.0}
 # TNG's unit attributes of a dataset (cgs value = raw * a^a_scaling * h^h_scaling * to_cgs), kept on a carried one
@@ -173,10 +113,9 @@ def _open_chunk(path):
 
 
 def _expected_chunks(found, attr):
-    """The chunk count the header of the first chunk found promises ('NumFilesPerSnapshot' for
-    snapshots, 'NumFiles' for group catalogues), or None when there is no chunk or no such attribute.
-    Counting the files on disk instead would let a download that stopped early merge into a 'complete'
-    file with missing particles."""
+    """The chunk count the header of the first chunk found promises ('NumFilesPerSnapshot' for snapshots,
+    'NumFiles' for group catalogues), or None. Counting files on disk instead would let a download that stopped
+    early merge into a 'complete' file with missing particles."""
     if not found:
         return None
     with _open_chunk(found[0]) as f:
@@ -355,10 +294,8 @@ def _h_power(name, attrs):
 
 def _extra_fields(input_files, datasets_info, group_name):
     """{name: (shape tail, dtype, h power or None, TNG's unit attributes)} of the per-particle datasets a group of
-    the chunks holds beside the ones in datasets_info: the union over the chunks (a dataset some chunk lacks makes
-    a short column, which the merge refuses; one of another shape or type in a later chunk is refused here). The
-    power is None, the field copied raw, when nothing says it or the values are whole numbers with an h in their
-    unit (an h cannot be taken out of those)."""
+    the chunks holds beside the ones in datasets_info: the union over the chunks (a chunk lacking one makes a short
+    column, which the merge refuses). The power is None, the field copied raw, when nothing says it."""
     fields = {}
     for fname in input_files:
         with _open_chunk(fname) as f_in:
@@ -440,11 +377,8 @@ def _chunk_rows(input_files, names_of):
 
 def _write_snapshot(output_file, input_files, h_value, datasets_info, box_size_physical):
     """The merged file at 'output_file'. Returns (counts merged per type, the header's totals, the particle types
-    merged, the datasets that do not hold a value for every particle). The chunks' row counts are read first:
-    a set that does not hold what its header promises, or lacks a dataset in one chunk, is refused before a
-    particle is written (the caller removes the file), and the datasets are created at their full size, so the
-    file is laid out in one piece -- read two to four times as fast as one grown chunk by chunk. A chunk that
-    fails to read, or holds other rows than when they were counted, raises ChunkError (nothing is skipped)."""
+    merged, the datasets not holding a value for every particle). A set not holding what its header promises is
+    refused before a particle is written; a chunk that fails to read or changes raises ChunkError."""
     with h5py.File(output_file, 'w') as f_out:
         with _open_chunk(input_files[0]) as f_first:
             for group_name in ["Config", "Parameters"]:
@@ -535,10 +469,9 @@ def _chunk_problem(e, merged):
 
 
 def add_snapshot_fields(snapshot_num, num_subfiles, base_dir, datasets_info):
-    """--add-fields for one snapshot: the per-particle datasets its chunks hold beside the merged ones, put into
-    the combined file that is there already (written before merges carried them). True when the file carries
-    them all afterwards; None when no chunk is left and the file carries none (whether its chunks held any
-    cannot be told). No chunk is deleted here: that is --verify's, after the full comparison."""
+    """--add-fields for one snapshot: the per-particle datasets its chunks hold beside the merged ones, put into the
+    combined file that is there already. True when the file carries them all afterwards; None when no chunk is
+    left and the file carries none. No chunk is deleted here: that is --verify's."""
     snapshot_str = f"{snapshot_num:03d}"
     snapshot_dir = Path(base_dir) / f"snapdir_{snapshot_str}"
     output_file = snapshot_dir / f"combined_{snapshot_str}.hdf5"
@@ -596,12 +529,9 @@ def _copy_laid_out(src, dst_group, name):
 
 
 def _add_fields(snapshot_str, snapshot_dir, output_file, partial, num_subfiles, datasets_info):
-    """add_snapshot_fields' body. The combined file is never opened for writing: a copy grows beside it
-    ('partial', which the caller removes whatever happens) and takes its place only when (1) the chunks'
-    particles are the file's, ID for ID in order, (2) every added dataset holds one row a particle, and (3) every
-    dataset the file had is in the copy bit for bit. The copy is laid out in one piece (see _write_snapshot) and
-    takes the file's time stamp before its name: what the programs read of it did not change, so no grid built
-    from it is out of date."""
+    """add_snapshot_fields' body. A copy grows beside the combined file ('partial', removed by the caller) and
+    replaces it only when particles match ID for ID, added datasets have one row a particle and old datasets are bit
+    for bit in the copy; it keeps the file's time stamp, so no grid built from it looks out of date."""
     if not output_file.exists():
         print(f"  Problem: there is no {output_file.name} to add to. Merge the snapshot first (without --add-fields).")
         return False
@@ -757,11 +687,8 @@ def verify_snapshot(snapshot_num, num_subfiles, base_dir, datasets_info, delete_
 
 def _verify(snapshot_str, snapshot_dir, output_file, num_subfiles, datasets_info):
     """verify_snapshot's body: (True, False or None; the chunk files). Chunk by chunk, in order: the particle IDs
-    the file's; every dataset of the chunk in the file with exactly the values a merge writes for it
-    (_merged_values: Coordinates over h in the file's type, a carried field h-free, the others as they are), bit
-    for bit, one row for each of the chunk's particles; then no row beyond the chunks', no particle type in the
-    chunks that the file lacks, and the header the chunks' (the totals; box size and mass table over h; redshift
-    and time)."""
+    the file's and every dataset of the chunk in the file with exactly the values a merge writes for it (bit for
+    bit); then no row beyond the chunks', no particle type the file lacks, and the header the chunks'."""
     if not output_file.exists():
         print(f"  Problem: there is no {output_file.name} to compare.")
         return False, []
@@ -882,10 +809,9 @@ def _verify(snapshot_str, snapshot_dir, output_file, num_subfiles, datasets_info
 
 
 def _concat_datasets(f_out, out_group, columns, chunk_files, h_value, group_path=None):
-    """Concatenate `columns` ({name: (shape_tail, dtype)}) across `chunk_files` in order,
-    dividing the _H_DIVIDE columns by h (computed in float64, stored in the source dtype;
-    marker attribute 'divided_by_h' = h). Reads whole columns per chunk (chunks are at most
-    a few hundred MB per column). Returns {name: rows_written}."""
+    """Concatenate `columns` ({name: (shape_tail, dtype)}) across `chunk_files` in order, dividing the _H_DIVIDE
+    columns by h (float64, stored in the source dtype; marker attribute 'divided_by_h' = h).
+    Returns {name: rows_written}."""
     dsets, written, convert = {}, {}, {}
     for name, (tail, dtype) in columns.items():
         dsets[name] = out_group.create_dataset(name, shape=(0,) + tail,
@@ -1040,11 +966,9 @@ def _find_h(base_dir, fallback):
 
 
 def merge_tree_files(base_dir, delete_chunks=False, h_fallback=H_VALUE):
-    """tree_extended.X.hdf5 -> combined_tree_extended.hdf5 (same directory), h-FREE (mass,
-    length and spin columns divided by h with marker attributes; dtfelib.trees restores its
-    documented raw-unit API from the markers). Each SubLink tree is wholly contained in one
-    chunk and stored contiguously, so concatenating the chunks in index order preserves the
-    within-tree row arithmetic dtfelib.trees relies on."""
+    """tree_extended.X.hdf5 -> combined_tree_extended.hdf5 (same directory), h-FREE (columns divided by h with
+    marker attributes). Each SubLink tree is wholly contained in one chunk and stored contiguously, so
+    concatenating the chunks in index order preserves the within-tree row arithmetic dtfelib.trees relies on."""
     base = Path(base_dir)
     tree_dir = None
     cands = (base / "Merger Trees", base / "postprocessing" / "trees" / "SubLink")

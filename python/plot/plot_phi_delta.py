@@ -1,11 +1,4 @@
-"""Potential maxima <-> void minima correspondence (full-box slices + stacked profiles).
-
-Method- and simulation-agnostic via dtfelib/pipeline:
-
-    python3 plot/plot_phi_delta.py --sim TNG50-4-Dark    # all config snapshots
-    python3 plot/plot_phi_delta.py --estimator dtfe
-    python3 plot/plot_phi_delta.py --sim TNG50-3-Dark --snap 50
-"""
+"""Potential maxima <-> void minima correspondence (full-box slices + stacked profiles)."""
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
 from pathlib import Path

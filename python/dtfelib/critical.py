@@ -1,7 +1,5 @@
-"""Critical points of the smoothed density contrast: its minima, maxima and the two kinds of saddle, each with
-the Hessian eigenvalues at its cell (find_critical_points; SnapshotProducts.critical_points caches them). The
-minima filter is config.FOOTPRINT_SIZE wide, a saddle a near-zero gradient (below config.GRADIENT_THRESHOLD of the
-largest) at a local maximum of gmax - |grad|. Moved out of dtfelib.pipeline, which re-exports both functions."""
+"""Critical points of the smoothed density contrast: minima, maxima and the two kinds of saddle, each with the
+Hessian eigenvalues at its cell (find_critical_points; SnapshotProducts.critical_points caches them)."""
 
 from __future__ import annotations
 
@@ -31,10 +29,8 @@ def eigh_at_coords(hessian: dict, coords) -> tuple[np.ndarray, np.ndarray]:
 
 def find_critical_points(delta_s: np.ndarray, hessian: dict, grad_mag: np.ndarray) -> dict:
     """The critical points of the smoothed contrast 'delta_s': {'minima', 'maxima', 'saddle1', 'saddle2'}, each
-    {'coords', 'values', 'eigenvalues'}, plus 'field_mean' / 'field_std'. Minima and maxima are the cells equal to
-    their config.FOOTPRINT_SIZE box minimum / maximum (periodic); a saddle candidate has a gradient below
-    config.GRADIENT_THRESHOLD of the largest at a local maximum of gmax - |grad| and is classed by its number of
-    negative eigenvalues (1 or 2)."""
+    {'coords', 'values', 'eigenvalues'}, plus 'field_mean' / 'field_std'. Extrema are the cells equal to their
+    config.FOOTPRINT_SIZE box extremum (periodic); a saddle has a gradient below config.GRADIENT_THRESHOLD."""
     # the three box filters run slab-threaded (dtfe.box_filter, bit-identical to scipy's serial minimum_filter /
     # maximum_filter): at 512^3 serial filters are ~3 passes of several seconds each
     fp = config.FOOTPRINT_SIZE

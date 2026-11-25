@@ -1,28 +1,21 @@
-"""Generic grid-field utilities (smoothing, slices, minima, shape parameters, cosmology, and the
-mean-field velocity derivatives: mean_field_derivatives, the V-web of the mean flow for PS-DTFE grids; and
-the same on one plane in a single pass over the grid, mean_field_plane, for the launcher's Explore).
-
-Plain numpy/scipy only -- no config or I/O; callers pass everything in. Import as
-`from dtfelib import fields as dtfe` (the alias the plot scripts use).
-"""
+"""Generic grid-field utilities (smoothing, slices, minima, shape parameters, cosmology, and the mean-field
+velocity derivatives). Plain numpy/scipy only -- no config or I/O; callers pass everything in.
+Import as `from dtfelib import fields as dtfe`."""
 
 from __future__ import annotations
 
-import os
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from scipy.ndimage import (gaussian_filter, gaussian_filter1d, maximum_filter, maximum_filter1d, minimum_filter,
                            minimum_filter1d)
 
-# The separable filters below run slab-threaded: scipy's ndimage filters are single-threaded, and a
-# 512^3 smoothing at sigma 10 takes ~11 s on one core (the 'environment' step: ~100 of its 140 s per box). Each 1-D
-# pass is split into slabs along ANOTHER axis, so every filtered line lies whole inside one slab and is the same
-# float computation as scipy's own pass; the passes go in scipy's order (axis 0, 1, 2) with the same intermediate
-# dtype, so the result is bit-identical to gaussian_filter / minimum_filter (tests/py_dtfelib_test.py). Fields
-# below _THREAD_MIN elements keep the plain call (threads would cost more than they save).
-_THREAD_MIN = 1 << 21
-_THREADS = max(1, min(8, os.cpu_count() or 1))
+from ._threads import THREAD_MIN as _THREAD_MIN, THREADS as _THREADS
+
+# The separable filters below run slab-threaded (scipy's ndimage filters are single-threaded). Each 1-D pass is
+# split into slabs along ANOTHER axis, so every filtered line is the same float computation as scipy's own pass,
+# in scipy's order (axis 0, 1, 2) and intermediate dtype: bit-identical to gaussian_filter / minimum_filter.
+# Fields below _THREAD_MIN elements keep the plain call.
 
 
 def _separable_threaded(fn1d, field, args, kwargs):
@@ -70,11 +63,8 @@ def extract_2d_slice(field, slice_dim=2, slice_index=None):
 
 
 def block_mean_slice(a, step, weight=None):
-    """Block means of a 2D slice over step x step cells (the edge blocks hold the remainder: no cell is dropped), and
-    each block's centre in cell units (index + 0.5 for a cell). weight: a slice of the same shape, the WEIGHTED mean
-    sum w a / sum w (the plain mean where a block's weights sum to 0) -- the density for a mass-weighted velocity
-    grid (an older PS-DTFE run's: FieldSet.velocity_weighting), so the coarse value is the one a coarser run of the
-    same deposit gives.
+    """Block means of a 2D slice over step x step cells (edge blocks hold the remainder) and each block's centre in
+    cell units. weight: the WEIGHTED mean sum w a / sum w (plain mean where the weights sum to 0).
     Returns (mean, centres along axis 0, centres along axis 1)."""
     a = np.asarray(a, dtype=np.float64)
     step = max(int(step), 1)
@@ -139,10 +129,8 @@ def unit_cos(v, w):
 
 
 def calculate_shape_parameters(eigenvalues):
-    # Vectorized over voids; keeps the original per-void semantics bit-for-bit (native
-    # eigenvalue dtype throughout, float64 output rows, NaN for trace <= 1e-12 /
-    # lambda1 <= 1e-12 / a failed 0 <= c/a <= b/a <= 1 sanity gate). Covered by the
-    # reference-equivalence test in tests/py_dtfelib_test.py.
+    # Vectorized over voids; keeps the per-void semantics bit-for-bit (native eigenvalue dtype, float64 output,
+    # NaN for trace <= 1e-12 / lambda1 <= 1e-12 / a failed 0 <= c/a <= b/a <= 1 gate).
     n_voids = len(eigenvalues)
 
     if n_voids == 0:
@@ -211,44 +199,14 @@ def get_cosmology_params(z, H0=67.74, Omega_m0=0.3089, Omega_Lambda0=0.6911):
 
 
 # ---------------------------------------------------------------- mean-field velocity derivatives
-# THE SAME QUANTITY FOR BOTH ESTIMATORS. Standard DTFE stores the derivatives of its one single-valued velocity
-# field: 'a_velGrad' is the cell average of the gradient of the linear interpolant, the gradient of the MEAN
-# velocity grad<v>. PS-DTFE stores, in a multi-stream cell, the stream average of each stream's own gradient
-# <grad v> (dtfelib/io.py, the note above FIELDS): its divergence has a box mean of +40 km/s/Mpc at TNG100-3-Dark
-# z=1 (standard DTFE: 0, by Gauss) and its V-web finds 1.8% filaments against standard DTFE's 6.6%.
-# The functions below give a PS output the standard quantity -- the derivatives of the velocity GRID
-# itself ('a_vel', the stream-mean velocity: volume-weighted; the mass-weighted mean in an older run made without
-# --ps-volume-weighted) -- by spectral (FFT) differentiation on the periodic box, in the binary's conventions:
-#   gradient          9 components, c = a*3 + b holds dv_a/dx_b (field_computation.h velocityGradient writes
-#                     [j*3+i] = dv_j/dx_i; gui/explore.py reads it so); axis 0 of the grid is x, as the T-web's FFT
-#   divergence        dv_x/dx + dv_y/dy + dv_z/dz
-#   shear             the traceless symmetric part (g_ab + g_ba)/2 - delta_ab div/3, 5 components in the order
-#                     xx, xy, xz, yy, yz (web_fields.cc velocityShear; zz = -(xx + yy))
-#   vorticity         (g_ab - g_ba)/2 for ab = xy, xz, yz (web_fields.cc velocityVorticity)
-#   vweb_eigenvalues  the eigenvalues, DESCENDING, of Sigma_ab = -sqrt(a)/(2 H0) (g_ab + g_ba), H0 = 100 h km/s/Mpc
-#                     and g in Gadget u-units per Mpc (web_fields.cc computeWebClassification: the Hoffman et al. 2012
-#                     V-web; sqrt(a) takes u-units to peculiar km/s), by the binary's Cardano formula in double
-#   vweb              the number of those eigenvalues above lambda_th: 0 void, 1 wall, 2 filament, 3 node
-# Units: those of the velocity grid per Mpc of a box_mpc box -- pass the RAW u-unit grid (FieldSet.load(...,
-# scaled=False)) for the binary's on-disk numbers; FieldSet.mean_field() then applies load()'s sqrt(a). No smoothing:
-# the binary's V-web classifies the raw cell gradient too (lambda_th = 0.3 in the run scripts).
-# WHY SPECTRAL: for a band-limited field the FFT derivative of the cell AVERAGES is exactly the cell average of the
-# derivative (the box filter commutes with d/dx), and the cell average is what an '_a' grid holds. The odd derivative
-# of the Nyquist mode is set to zero (its sine vanishes at every grid point). Measured on a synthetic Zel'dovich field
-# (32^3 particles, standard binary with --exact, grids 32/64/128^3): applied to the binary's own 'a_vel' it
-# reproduces its 'a_velDiv' with correlation 0.998/0.995/0.998 (rms difference 7/10/6% of the rms) and its V-web
-# label in 98.5/96.6/97.8% of the cells; central second-order differences do worse (0.992/0.995/0.997, 95.8/96.6/
-# 97.4%). The rest is the interpolant's power above the grid's Nyquist frequency, which no derivative of the cell
-# averages can recover. tests/py_meanfield_test.py repeats that comparison against the binary.
-# MEMORY: float32 throughout for a float32 grid (float64 for a DOUBLE=1 grid); a velocity component's spectrum is
-# made when first needed and dropped after its last use (the divergence holds one at a time, the shear three), the
-# V-web keeps its six tensor components and reduces them to eigenvalues in slabs. mean_field_peak_bytes() estimates
-# the peak: at 512^3 float32 the divergence ~3.2 GB, the V-web (labels and eigenvalues together) ~6.5 GB, the
-# 9-component gradient ~7.5 GB (the 9 float64 components a naive version would hold: 9.7 GB, before any FFT).
+# Standard DTFE stores the gradient of its single-valued velocity field, PS-DTFE the stream average <grad v>. These
+# give a PS output the standard quantity by spectral (FFT) differentiation of the velocity GRID on the periodic box,
+# in the binary's conventions (gradient c = a*3 + b holds dv_a/dx_b; V-web eigenvalues DESCENDING of
+# -sqrt(a)/(2 H0) (g + g^T), Hoffman et al. 2012). Units: per Mpc; pass the RAW u-unit grid (scaled=False) for the binary's.
 MEAN_FIELD_NAMES = ("gradient", "divergence", "shear", "vorticity", "vweb", "vweb_eigenvalues")
 _MF_NCOMP = {"gradient": 9, "divergence": 1, "shear": 5, "vorticity": 3, "vweb": 1, "vweb_eigenvalues": 3}
 _VWEB_PAIRS = ((0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2))     # symmetricEigenvalues3x3's argument order
-_EIG_SLAB_CELLS = 1 << 20     # cells per eigenvalue slab: Cardano's float64 temporaries then hold ~0.4-0.8 GB (measured)
+_EIG_SLAB_CELLS = 1 << 20     # cells per eigenvalue slab (bounds Cardano's float64 temporaries)
 
 
 def _velgrad_terms(name: str) -> list:
@@ -287,9 +245,8 @@ def _wavenumbers(n: int, box_mpc: float, half: bool) -> np.ndarray:
 
 def symmetric_eigenvalues3(a00, a01, a02, a11, a12, a22) -> np.ndarray:
     """Eigenvalues of the symmetric 3x3 matrices [[a00 a01 a02] [a01 a11 a12] [a02 a12 a22]], DESCENDING along a new
-    last axis, in float64: the binary's symmetricEigenvalues3x3 (web_fields.cc, Cardano's formula in double, the
-    acos argument clamped to [-1, 1]; a matrix within 1e-15 of a multiple of the identity returns its diagonal),
-    vectorized. Inputs broadcast; any float dtype."""
+    last axis, in float64: the binary's symmetricEigenvalues3x3 (Cardano's formula in double, the acos argument
+    clamped to [-1, 1]), vectorized. Inputs broadcast; any float dtype."""
     a00, a01, a02, a11, a12, a22 = (np.asarray(x, dtype=np.float64) for x in (a00, a01, a02, a11, a12, a22))
     p1 = a01 * a01 + a02 * a02 + a12 * a12
     q = (a00 + a11 + a22) / 3.0
@@ -351,10 +308,8 @@ def _mf_max_spectra(jobs) -> int:
 
 def mean_field_peak_bytes(n: int, names, itemsize: int = 4) -> int:
     """The peak memory of mean_field_derivatives(names) on an n^3 grid of itemsize-byte floats, an estimate: the
-    larger of its two stages -- the FFTs (the velocity spectra alive at once, two complex work buffers, one copied-out
-    velocity component and the inverse FFT's output, the results, the V-web's six tensor components) and the V-web's
-    eigenvalue pass (the tensor, the results, the float64 temporaries of one slab). Checked against the process's
-    peak footprint at 256^3 and 320^3 (within 15%); at 512^3 the FFT stage dominates."""
+    larger of the FFT stage and the V-web's eigenvalue pass. Checked against the process's peak footprint at
+    256^3 and 320^3."""
     names = (names,) if isinstance(names, str) else tuple(names)
     cells = int(n) ** 3
     spec = int(n) * int(n) * (int(n) // 2 + 1) * 2 * itemsize
@@ -367,18 +322,14 @@ def mean_field_peak_bytes(n: int, names, itemsize: int = 4) -> int:
         return fft_stage
     web_out = (3 * cells * itemsize if "vweb_eigenvalues" in names else 0) + (cells * 4 if "vweb" in names else 0)
     # the slab's temporaries: ~48 float64 arrays of numpy's own, about as much again in the allocator's caches
-    # (RSS measured at 256^3 and 320^3: 0.4 GB above numpy's traced peak, whatever the grid)
     return max(fft_stage, plain + tensor + web_out + 96 * min(cells, _EIG_SLAB_CELLS) * 8)
 
 
 def mean_field_derivatives(velocity, box_mpc: float, names=("divergence",), *, scale_factor: float | None = 1.0,
                            hubble_h: float | None = None, lambda_th: float = 0.3, workers: int | None = None) -> dict:
-    """{name: grid} of the MEAN-FIELD velocity derivatives (the section comment above): the spectral gradient of the
-    periodic (N,N,N,3) 'velocity' grid of a box_mpc box (h-free Mpc), in the binary's component order and in the
-    velocity's units per Mpc. names: any of MEAN_FIELD_NAMES; 'vweb'/'vweb_eigenvalues' need scale_factor (a: the
-    sqrt(a) of u-units; None or <= 0 = 1, the binary's fallback) and hubble_h (H0 = 100 h; None or <= 0 = 1, the
-    binary's fallback) and use lambda_th. 'velocity' may be a read-only memmap: the components are copied out one at
-    a time. Shapes: (N,N,N) for divergence/vweb, (N,N,N,c) otherwise; float32 for a float32 grid (float64 for float64)."""
+    """{name: grid} of the MEAN-FIELD velocity derivatives: the spectral gradient of the periodic (N,N,N,3) 'velocity'
+    grid of a box_mpc box (h-free Mpc), in the binary's component order. names: any of MEAN_FIELD_NAMES; 'vweb' and
+    'vweb_eigenvalues' need scale_factor and hubble_h (None or <= 0 = 1) and use lambda_th. May be a memmap."""
     from scipy import fft as sfft
 
     names = (names,) if isinstance(names, str) else tuple(names)
@@ -454,26 +405,14 @@ def mean_field_derivatives(velocity, box_mpc: float, names=("divergence",), *, s
 
 
 # ---------------------------------------------------------------- the same derivatives on ONE plane
-# The launcher's Explore shows a PS output's divergence / shear / vorticity / gradient / V-web as the mean field
-# (the figure scripts' default) one slice at a time, beside a running job whose memory budget it must leave alone:
-# mean_field_derivatives' whole-cube FFTs peak at 3.2-7.5 GB on a 512^3 grid. The spectral derivative is separable:
-# d/dx_b of the 3D transform multiplies by i k_b alone, so it is the 1-D spectral derivative along axis b of every
-# line of the grid -- a periodic convolution with the fixed kernel K = irfft(i k) (the 1-D wavenumbers with the
-# Nyquist mode zeroed, _wavenumbers), (D v)_i = sum_j K[(i - j) mod n] v_j. On the plane 'index' normal to 'axis'
-# the in-plane derivatives are then 1-D FFTs of the plane itself, and the normal one the kernel's weighted sum over
-# the line through each pixel: one pass over the grid in slabs along axis 0, holding one slab (16 MB by default) and
-# a few planes -- about 100 MB in all at 512^3 (the slab, its float64 copy in the contraction; 64 MB slabs: 350 MB,
-# no faster). The same linear operator as the cube's, so the same numbers to float rounding (measured 2e-7 of the
-# largest value on random, not band-limited, float32 grids of even and odd n, every axis; tests/
-# py_meanfield_test.py repeats it for the six names). Cost: one read of the velocity grid per plane (0.3-0.6 s at
-# 512^3 from memory, 0.6-1.0 s from a file in the page cache; measured on a loaded machine).
+# For the launcher's Explore, one slice at a time without the whole-cube FFTs' memory. The spectral derivative is
+# separable: a periodic convolution along axis b with the fixed kernel K = irfft(i k) (Nyquist zeroed, _wavenumbers).
+# In-plane derivatives are 1-D FFTs of the plane, the normal one the kernel's weighted sum over the line through each
+# pixel: one pass over the grid in slabs along axis 0, the same linear operator as the cube's (same numbers).
 def mean_field_gradient_plane(velocity, box_mpc: float, axis: int, index: int, *, slab_bytes: int = 16 << 20):
-    """g[..., a, b] = dv_a/dx_b, float64 (N, N, 3, 3), on the plane 'index' normal to 'axis' of the periodic
-    (N,N,N,3) 'velocity' grid of a box_mpc box: exactly mean_field_derivatives' spectral gradient there (its
-    'gradient' cut as np.take(cube, index, axis), reshaped to 3 x 3), from one pass over the grid (the section
-    comment above). 'velocity': anything with .shape, .dtype and [s:e] slabs along axis 0 -- an array, a memmap,
-    or a reader that does plain reads (the launcher never maps a file: a page of an unplugged drive is a SIGBUS);
-    slabs of about slab_bytes (16 MB: ~100 MB in all at 512^3). Units: the velocity's per Mpc."""
+    """g[..., a, b] = dv_a/dx_b, float64 (N, N, 3, 3), on the plane 'index' normal to 'axis' of the periodic (N,N,N,3)
+    'velocity' grid of a box_mpc box: mean_field_derivatives' spectral gradient there, in one pass over the grid.
+    'velocity': anything with .shape, .dtype and [s:e] slabs along axis 0; slabs of about slab_bytes."""
     shape = tuple(int(v) for v in np.shape(velocity))
     if len(shape) != 4 or shape[3] != 3 or not (shape[0] == shape[1] == shape[2]):
         raise ValueError(f"mean_field_gradient_plane needs an (N,N,N,3) velocity grid, got {shape}")
@@ -512,10 +451,8 @@ def mean_field_gradient_plane(velocity, box_mpc: float, axis: int, index: int, *
 def mean_field_from_gradient(g, names=("divergence",), *, real=np.float32, scale_factor: float | None = 1.0,
                              hubble_h: float | None = None, lambda_th: float = 0.3) -> dict:
     """{name: array} of mean_field_derivatives' results from a velocity gradient g[..., a, b] = dv_a/dx_b (any
-    leading shape; mean_field_gradient_plane's plane): the same combinations of the components (_velgrad_terms), each
-    rounded to 'real' as the cube's inverse FFTs are (float32 for a float32 grid), the V-web's tensor likewise
-    before its eigenvalues (the same normalisation, Cardano and labels). Shapes: g's leading shape, with the
-    components last where there are several."""
+    leading shape; mean_field_gradient_plane's plane): the same combinations of the components, rounded to
+    'real' as the cube's inverse FFTs are. Shapes: g's leading shape, with the components last where several."""
     names = (names,) if isinstance(names, str) else tuple(names)
     for nm in names:
         if nm not in MEAN_FIELD_NAMES:

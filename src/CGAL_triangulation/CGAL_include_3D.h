@@ -30,7 +30,7 @@
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Delaunay_triangulation_3.h>
 #include <CGAL/Triangulation_vertex_base_with_info_3.h>
-#include <CGAL/Real_timer.h>   // wall-clock timer; not CGAL::Timer, whose CPU time sums across partition threads and overstates per-stage seconds
+#include <CGAL/Real_timer.h>   // wall-clock; CGAL::Timer sums CPU time across partition threads
 #include <CGAL/Cartesian.h>
 #include <CGAL/Bbox_2.h>
 #include <CGAL/spatial_sort.h>
@@ -56,10 +56,8 @@ typedef CGAL::Exact_predicates_inexact_constructions_kernel         K;
 typedef CGAL::Triangulation_vertex_base_with_info_3<vertexData, K>  Vb;    // vertex stores a vertexData payload
 
 #ifdef PARALLEL_TRIANGULATION
-// TBB-parallel Delaunay build (PARALLEL_TRIANGULATION: compiled in with TBB=auto, the default, where the tbb
-// library is installed; TBB_STD follows it for the standard binaries). Parallel_tag enables parallel
-// insert_with_info. Fast_location (the sequential point-location hierarchy) is left out: PS-DTFE iterates cells
-// and locates no points; the standard binaries' point location (sample_eval.h) runs without it.
+// TBB-parallel Delaunay build (PARALLEL_TRIANGULATION; TBB=auto by default). Fast_location is left out:
+// PS-DTFE locates no points, and the standard binaries' point location (sample_eval.h) runs without it.
 #include <CGAL/Triangulation_cell_base_3.h>
 typedef CGAL::Triangulation_data_structure_3<Vb, CGAL::Triangulation_cell_base_3<K>, CGAL::Parallel_tag> Tds;
 typedef CGAL::Delaunay_triangulation_3<K, Tds>                      DT;

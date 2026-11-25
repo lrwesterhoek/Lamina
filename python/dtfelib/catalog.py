@@ -1,32 +1,6 @@
-"""Void catalogue export: one row per void of
-pipeline.SnapshotProducts.voids(), as CSV and HDF5, with units and the parameters it was built with.
-
-    from dtfelib import catalog, pipeline
-    p = pipeline.products("099", 0.0)
-    paths = catalog.export_voids(p, "figures/void_catalog/TNG50-4-Dark")   # [.csv, .h5]
-
-    import pandas as pd;  df = pd.read_csv(paths[0], comment="#")           # the CSV: '#' lines = provenance
-    import h5py;          f = h5py.File(paths[1]);  f.attrs["sigma_cells"];  f["voids/r_eff_mpc"][:]
-
-The columns (COLUMNS below, same order in both files) come straight from the catalogue dict: the grid
-cell of the smoothed-delta minimum and that cell's CENTRE in Mpc (the dict's positions_mpc are its corner), the
-central delta, the three Hessian eigenvalues (ASCENDING, as numpy.linalg.eigh gives them), the BBKS shape (e, p) and the axis ratios
-from those eigenvalues, the ellipsoid fit (semi-axes a >= b >= c -- sorted by |lambda|, which is NOT the
-eigenvalue order -- the effective radius (a b c)^(1/3), the fit's ellipticity 1 - c/a and prolateness,
-the major and minor axis directions) and the two sample flags (well_resolved: passes
-pipeline.ellipsoid_cuts_mpc() from config.ELLIPSOID_CUT_RULES; deep: central delta below config.DEEP_VOID_THRESHOLD). Fit columns are NaN for a
-void that is not well resolved, as plot_void_population treats them. R_eff is r_eff_mpc(), the one
-definition in the code base (plot_void_population.snapshot_stats uses it). The measured radii come
-in three definitions (R_V_DEFINITIONS: r_v_mpc, r_v_delta08_mpc, r_v_ridge_mpc), the settings they were measured
-with in the provenance (r_v_*), as is the void gate (void_gate: DTFE_VOID_GATE).
-
-THE FRAME: the catalogue's positions and semi-axes are computed with config.CELL_SIZE, which comes
-from the DTFE_SIM simulation's box (config.py), not from the snapshot a script's --sim names. So the
-snapshot header's cell (box / grid) must equal config's, else frame_of (pipeline.snapshot_frame, which
-SnapshotProducts.voids() calls first) refuses before any cache is read or written. A cache built under
-another frame or other ellipsoid cuts is re-derived on load (pipeline.refit_catalog: milliseconds, no
-field). The export needs the snapshot header: without a combined file FieldSet raises FileNotFoundError.
-"""
+"""Void catalogue export: one row per void of pipeline.SnapshotProducts.voids(), as CSV and HDF5, with units and
+the parameters it was built with (COLUMNS, same order in both files). The catalogue's positions and semi-axes use
+config.CELL_SIZE, so the snapshot's cell must equal config's: frame_of refuses a mismatch."""
 
 from __future__ import annotations
 
@@ -174,19 +148,16 @@ DEFAULT_PREFIX = {"ps": "ps_output.", "dtfe": "output."}         # io's: an esti
 
 
 def output_tag(used, keep_overlaps: bool = False) -> str:
-    """The tag a void-population figure or table carries: '' for PS-DTFE's default grids, else '_<grids>' with
-    <grids> every (method, prefix) pair of 'used' named -- the method when the prefix is that estimator's own
-    (DEFAULT_PREFIX), else the prefix without its trailing dot -- sorted and joined by '+' ('_dtfe', '_ps_mw',
-    '_dtfe+ps'); then '_overlaps' for a run that keeps the overlapping minima. It names caches and figures, so a
-    run on other grids never overwrites (or orphans) the default ones."""
+    """The tag a void-population figure or table carries: '' for PS-DTFE's default grids, else '_<grids>' from
+    the (method, prefix) pairs of 'used' ('_dtfe', '_ps_mw', '_dtfe+ps'), then '_overlaps' for a run that
+    keeps the overlapping minima. It names caches and figures, so another run never overwrites the default."""
     grids = "+".join(sorted({m if p == DEFAULT_PREFIX.get(m) else p.rstrip(".") for m, p in used}))
     return ("" if grids == "ps" else f"_{grids}") + ("_overlaps" if keep_overlaps else "")
 
 
 # The measured void radii, all from ONE shell loop (pipeline.void_radii_cells) on the smoothed delta:
 #   'crossing' the first up-crossing of the mean (0) of the shell-averaged delta: THE R_v
-#   'delta08'  where the ENCLOSED contrast Delta(<R) first reaches pipeline.R_V_DELTA08 (-0.8, the nonlinear
-#              shell-crossing value of the spherical model; Sheth & van de Weygaert 2004) going outward
+#   'delta08'  where the enclosed contrast first reaches pipeline.R_V_DELTA08 (-0.8; Sheth & van de Weygaert 2004)
 #   'ridge'    the maximum of the shell-averaged delta (the compensation ridge) inside the R_v search range
 R_V_DEFINITIONS = ("crossing", "delta08", "ridge")
 R_V_KEYS = {"crossing": "r_v_cells", "delta08": "r_v_delta08_cells", "ridge": "r_v_ridge_cells"}
@@ -215,15 +186,9 @@ def r_v_mpc(cat, definition: str = "crossing") -> np.ndarray:
 
 
 def distinct_mask(cat, sample, n_grid: int) -> np.ndarray:
-    """The DISTINCT voids among those where 'sample' (bool per row) is True: pipeline.distinct_voids over EVERY
-    well-resolved void (deepest first, none whose centre lies inside the region a deeper kept one claims: the sphere
-    of min(R_v, R_eff), of its R_eff when it has no R_v), then narrowed to 'sample'. The claims come from all the
-    resolved voids whatever the sample: the callers pass the resolved voids WITH an R_v, so with the sample's claims
-    alone a void without one (the larger, deeper 10-17%) would claim nothing and the minima inside it would be counted,
-    stacked and drawn as voids of their own (TNG300 z=0 at sigma 3.66 cells: 1639 distinct instead of 1585). A sample
-    narrower by depth (the deep voids) gets what a de-duplication within it would give, as nothing shallower can block a
-    deeper void; a row that
-    is not well resolved is never distinct. Made when the sample is (so it follows the cuts); nothing of it is cached."""
+    """The DISTINCT voids among those where 'sample' (bool per row) is True: pipeline.distinct_voids over every
+    well-resolved void (so a void without an R_v still blocks the minima in it), then narrowed to 'sample'.
+    Made when the sample is; nothing of it is cached."""
     sample = np.asarray(sample, dtype=bool)
     out = np.zeros(len(sample), dtype=bool)
     r_eff = r_eff_mpc(cat)
@@ -240,10 +205,9 @@ def distinct_mask(cat, sample, n_grid: int) -> np.ndarray:
 
 
 def provenance(products, n_voids: int, frame, cat=None) -> dict:
-    """What the catalogue was built from and with: the HDF5 root attributes, the CSV's '#' lines. The R_v settings
-    are the catalogue's own record when 'cat' is given and has one, else the current ones (pipeline.r_v_settings,
-    which SnapshotProducts.voids() guarantees a served catalogue was measured with); the cuts are the ones its
-    well_resolved was taken with under the void gate (pipeline.gate_cuts_mpc: max axis inf under 'none')."""
+    """What the catalogue was built from and with: the HDF5 root attributes, the CSV's '#' lines. The R_v
+    settings are the catalogue's own record when 'cat' has one, else the current ones; the cuts are the ones
+    its well_resolved was taken with under the void gate (pipeline.gate_cuts_mpc)."""
     cell, box, n, source = frame
     cuts = pipeline.gate_cuts_mpc()
     rv = pipeline.r_v_settings()
@@ -374,10 +338,9 @@ def read_csv(path) -> tuple[dict, dict]:
 
 
 def export_voids(products, out_dir, formats=("csv", "hdf5"), stem: str | None = None) -> list[Path]:
-    """Write the void catalogue of 'products' (pipeline.SnapshotProducts) under out_dir as
-    voids_<sim>_<method>_<snapshot>_z<z>.csv and .h5 (the suffix APPENDED to the stem: with_suffix would
-    eat the redshift's decimals). Returns the paths written. Raises ValueError on a frame mismatch
-    (frame_of), FileNotFoundError when the snapshot has no grids."""
+    """Write the void catalogue of 'products' under out_dir as voids_<sim>_<method>_<snapshot>_z<z>.csv and .h5
+    (suffix appended to the stem). Returns the paths. Raises ValueError on a frame mismatch (frame_of),
+    FileNotFoundError when the snapshot has no grids."""
     cat = products.voids()
     frame = frame_of(products)
     assert_frame(cat, frame[0])

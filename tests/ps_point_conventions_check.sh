@@ -1,30 +1,6 @@
 #!/usr/bin/env bash
-# PS-DTFE point evaluation in the grids' conventions.
-#
-# The points follow the run's grid conventions (ps_point_eval.cc, 'The grid deposit's conventions at the points'):
-# its mass model (--ps-vertex-mass) and PS-DTFE's velocity moments, volume-weighted in every run (the dispersion
-# mass-weighted): with evolved (z = 127) initial positions as the Lagrangian input, the rho_bar*V_lag tetrahedron
-# masses of a run without --ps-vertex-mass put a plane's density contrast (and that run's grid's) at ~0.8 of the true
-# one at z = 20. Verified here, on synthetic boxes:
-#  B) THE IC BIAS: single-stream crossed waves whose InitialCoordinates are displaced towards the final positions
-#     by alpha = 0.1645 (TNG's D(z=127)/D(z=20)), --ps-vertex-mass --exact, a slab
-#     of four sub-planes through one cell layer: the plane's cell blocks against the grid's cells (and against the
-#     analytic cell averages) have slope ~1, and the perturbed-IC plane equals the true-IC plane to ~1%. The control:
-#     the same plane from a run without --ps-vertex-mass has slope ~1-alpha (the box does carry the bias). The exact
-#     deposit isolates the points: the sampled nSub=3 deposit of this one-particle-per-cell box is itself noisy at
-#     the cell scale (printed).
-#  C) MASS AND NOISE on a uniform near-lattice box (jitter 0.01, TNG-like initial conditions): random points
-#     average to rho_bar, and the point noise stays below the vertex-share grid's own (the per-tetrahedron
-#     m_tet/V_eul -- the grid's density -- puts a normal mass into near-flat slivers no point hits: a mean of 0.89).
-#  D) THE WEIGHTS at the points, recomputed from the per-stream records of ONE run (a pancake, --ps-per-stream):
-#     '.pts_vel' is the plain mean of the stream velocities (the volume weighting: every stream fills the point)
-#     and '.pts_velDisp' the density-weighted second moment about the density-weighted mean velocity (the
-#     dispersion stays mass-weighted, as in the grids), 0 at a single-stream point; on this plane the
-#     density-weighted mean velocity is another value at the multi-stream points (the weighting is seen).
-#  E) PARTITIONS: --partition 2 2 2 equals the single run to float rounding with --ps-vertex-mass (the vertex
-#     ratios need the partition's 2-ring, inside its padding).
-#  F) --serve (dtfelib.Estimator with --ps-vertex-mass): bit-identical to the --sample-points run with
-#     --ps-vertex-mass.
+# PS-DTFE point evaluation in the grids' conventions (--ps-vertex-mass, volume-weighted velocity moments), on synthetic boxes.
+#   B IC bias   C mass and noise   D weights at the points   E partitions   F --serve equals --sample-points
 # Usage: tests/ps_point_conventions_check.sh [--no-build]
 
 set -euo pipefail

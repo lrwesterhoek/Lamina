@@ -1,8 +1,6 @@
 """The Explore tab's voids: VoidsMixin, the part of ExploreControls that finds a snapshot's voids (the analysis
 pipeline's catalogue, through tools/void_outlines.py in a helper process, one at a time, cached per output and
-smoothing), draws them over the map and the figure grid's panels -- as the sections of their ellipsoids at the mean
-density (grids.drawn_ellipsoids, the default) or as the circles of their spheres of R_v -- and inspects the void
-under the mouse or clicked (its entry, a jump to the slice through its centre). VoidSigmaBox is the smoothing box."""
+smoothing), draws them over the map and the figure grid's panels."""
 
 from __future__ import annotations
 
@@ -25,10 +23,7 @@ def _explore():
     return explore
 
 
-# The cost of a void search (a catalogue not cached yet), measured on TNG300-3-Dark 512^3 (cell 0.591 Mpc): about
-# 10 s at the production 10 cells, 23 s at 4.1 cells (7477 minima), 225 s at 1.4 cells (115669 minima: an 18 MB
-# result nobody can read on a map). Fitted as (n / 512)^3 (SEARCH_BASE_S + SEARCH_PER_S * sigma_cells^-SEARCH_POWER):
-# the minima's count, and so the radii measured, grows as the smoothing shrinks. A cached catalogue takes a second.
+# A cached catalogue takes a second.
 SEARCH_BASE_S = 10.0
 SEARCH_PER_S = 520.0
 SEARCH_POWER = 2.6
@@ -54,9 +49,7 @@ def duration_text(seconds: float) -> str:
 
 
 def void_build_gb(n: int, sigma_cells: float) -> float | None:
-    """The memory (GB) a catalogue build of an n^3 grid at sigma_cells takes as the helper would run it: at the grid's
-    own resolution when that fits in what is free, else on the grid averaged 2^3 or 4^3 (void_outlines.coarsening;
-    a 1024^3 set: ~11 GB, not the 86 GB of its full build); the full build when none fits. None for an unknown grid."""
+    """None for an unknown grid."""
     if not n:
         return None
     vo = _explore()._void_tool()
@@ -66,10 +59,7 @@ def void_build_gb(n: int, sigma_cells: float) -> float | None:
 
 class VoidSigmaBox(QDoubleSpinBox):
     """The smoothing the voids are found at, in Mpc: 0 is 'production' (the special value); a real value is at least
-    two cells of the shown grid (or the production value, on a grid so coarse that it is less). The first step up from
-    production lands on the production value itself, then each step is one cell; a step down from the smallest value
-    goes back to production. 'stepped' tells the owner the change came from the arrows (it then waits for a pause
-    before searching)."""
+    two cells of the shown grid (or the production value, on a grid so coarse that it is less)."""
 
     def __init__(self):
         super().__init__()
@@ -133,9 +123,7 @@ class VoidsMixin:
 
     def void_rows(self, res: dict, radius: str | None = None) -> np.ndarray:
         """The catalogue rows drawn whose radius 'radius' (default the drawn shape's: R_ell of the ellipsoid, or R_v)
-        lies in the Sizes range (a bound of 0 is none; a radius that is not defined passes only when there is no
-        bound): as ellipsoids every deep minimum with one ('_shown_ell', as plot_ellipses_contour_3D.py draws them),
-        as spheres the distinct, well-resolved voids."""
+        lies in the Sizes range."""
         radius = radius or self._void_radius_key()
         keep = np.asarray(res["_shown_ell" if radius == "_r_ell" and "_shown_ell" in res else "_shown"],
                           dtype=bool).copy()
@@ -471,9 +459,8 @@ class VoidsMixin:
 
     def _void_field_text(self, res: dict) -> str:
         """'found in the density smoothed in 3D at 5.91 Mpc (10 cells): tick 3D and set Smoothing to 10 to see that
-        field' while the map shows anything else (the steps that apply: show the density, tick 3D, set Smoothing; none
-        where the 3D tick is greyed out on the density, its tooltip saying why); '' while it shows that field; 'no
-        distinct voids at this smoothing' when there is none (the tick on, nothing drawn: said whatever the map)."""
+        field' while the map shows anything else (the steps that apply: show the density, tick 3D, set Smoothing;
+        none where the 3D tick is greyed out on the density, its tooltip saying why)."""
         if not (res["_shown"].any() or np.asarray(res.get("_shown_ell", res["_shown"])).any()):
             return "no voids at this smoothing"
         o = self.current

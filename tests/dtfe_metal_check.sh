@@ -1,20 +1,7 @@
 #!/usr/bin/env bash
-# CPU vs GPU (--gpu) parity check for the standard-DTFE method-1 '_a' interpolation.
-#
-# Runs ./DTFE on a synthetic Zel'dovich snapshot -- on the CPU and with --gpu -- for both
-# the single-box and the partitioned path, and compares the raw output grids. The GPU
-# deposit is expected to match to float rounding only (atomic summation order, float vs
-# double sample placement), so the tolerances mirror tests/ps_parallel_check.sh: means must
-# agree to ~1e-5 relative, per-cell differences to max|field| must stay below REL_TOL
-# outside a tiny borderline-cell fraction. The single box also runs the GPU twice (two runs
-# may differ by atomic summation order only, REPEAT_TOL -- a watchdog retry that let stray
-# deposits through would show as whole samples, ~1e-2) and once with the per-tetrahedron
-# kernel (DTFE_GPU_ITEMS=0), which places the same samples with the same float arithmetic and
-# so must agree with the work-item kernel to the same REPEAT_TOL.
-#
-# Requires a Metal build; fails loudly if the binary fell back to the CPU (then the two
-# runs would be identical, which defeats the test). The backend is taken from the
-# current build mode (o/.build_mode), the GPU_BUILD env var, or defaults to METAL=1.
+# CPU vs GPU (--gpu) parity of the standard-DTFE method-1 '_a' interpolation on a synthetic Zel'dovich snapshot, single box and partitioned.
+# Float-rounding tolerances (tests/ps_parallel_check.sh); the single box also runs the GPU twice and with the per-tetrahedron kernel.
+# Requires a Metal build; fails loudly if the binary fell back to the CPU.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,9 +33,7 @@ FIELDS="density_a velocity_a gradient_a"
 # --per-tet-gradient: this suite validates the KERNEL's gradient against the CPU's; the face gradient (the default since
 # 2026-11-09) would make both sides the same CPU face pass
 COMMON=(--grid 96 --periodic --input-format 105 --mpc-unit 1 --field $FIELDS --per-tet-gradient)
-# The single-box and partitioned runs pass '--sampled': they validate the Monte-Carlo kernels (the item and the
-# per-tetrahedron one) against the CPU's samples, and the exact average is the default since 2026-11-09. COMMON
-# itself names no mode, because the exact pair (e) below runs with it too.
+# The single-box and partitioned runs pass '--sampled'.
 
 run() { # run <label> <outprefix> [extra args...]
     local label="$1" out="$2"; shift 2
@@ -57,8 +42,6 @@ run() { # run <label> <outprefix> [extra args...]
 }
 
 # The '<Backend> GPU (' dispatch line prints BEFORE the deposit call, so its presence alone
-# does not prove the GPU ran; the fallback warning ('...; using the CPU interpolation') is
-# printed on every failure path, so its absence is the actual success criterion.
 assert_gpu() { # assert_gpu <label> <log>
     grep -q " GPU (" "$2" || { echo "FAIL: $1 run did not attempt the GPU"; exit 1; }
     grep -q "using the CPU interpolation" "$2" && { echo "FAIL: $1 run fell back to the CPU at runtime"; exit 1; }
@@ -74,10 +57,7 @@ assert_gpu "--gpu (second run)" "$TMP/s_gpu2.log"
 echo ">> single box, per-tetrahedron kernel (DTFE_GPU_ITEMS=0: the A/B reference kernel)"
 DTFE_GPU_ITEMS=0 run gpu-pertet "$TMP/s_gpu0" --sampled --gpu
 assert_gpu "--gpu per-tet kernel" "$TMP/s_gpu0.log"
-# A coarse grid makes most tetrahedra single-cell: the fast path, whose flat cell index the extraction computes in
-# the sub-domain's own grid and, where the run is split, the CPU copy places in the main grid (a 96^3 grid, with hardly any single-cell
-# tetrahedron, would not catch a wrong index). The GPU run is compared with the CPU. These runs, and the face runs
-# below, pass '--sampled' (the Monte-Carlo kernels).
+# A coarse grid makes most tetrahedra single-cell: the fast path.
 echo ">> coarse 32^3 grid: the single-cell fast path"
 COARSE=(--grid 32 --periodic --input-format 105 --mpc-unit 1 --field $FIELDS --per-tet-gradient --sampled)   # (the kernel's gradient, as COMMON)
 "${DTFE_BIN}" "$SNAP" "$TMP/c_cpu" "${COARSE[@]}" > "$TMP/c_cpu.log" 2>&1 || { echo "FAIL run coarse cpu"; exit 1; }
@@ -97,16 +77,12 @@ echo ">> partitioned (2 2 2)"
 run cpu-part  "$TMP/p_cpu" --partition 2 2 2 --max-concurrent 2 --sampled
 run gpu-part  "$TMP/p_gpu" --partition 2 2 2 --max-concurrent 2 --sampled --gpu
 assert_gpu "partitioned --gpu" "$TMP/p_gpu.log"
-# --exact: the analytic volume average (r3d) on the GPU (depositExactAverage) against the
-# CPU's double-precision r3d -- no sampling at all, so this pair should sit well inside the sampled
-# tolerances (only the float clipping and the atomic order differ)
+# --exact: the analytic volume average (r3d) on the GPU (depositExactAverage) against the CPU's double-precision r3d
 echo ">> exact volume average (--exact)"
 run cpu-exact "$TMP/e_cpu" --exact
 run gpu-exact "$TMP/e_gpu" --exact --gpu
 assert_gpu "--exact --gpu" "$TMP/e_gpu.log"
-# a FINE region (the launcher's exact zoom: 512^2 cells of 1.95 kpc): the GPU clips each piece in a
-# frame near the piece -- in the tetrahedron's vertex-0 frame a kpc piece Mpc away would lose its volume
-# to float cancellation. Same tolerance as the box above, the cells are 260x smaller.
+# a FINE region (the launcher's exact zoom, 512^2 cells of 1.95 kpc): the GPU clips each piece in a frame near it
 FINE=(--grid 512 512 1 --periodic --input-format 105 --mpc-unit 1 --field density_a velocity_a --exact --region-mpc 40 41 40 41 50 50.002)
 "${DTFE_BIN}" "$SNAP" "$TMP/f_cpu" "${FINE[@]}" > "$TMP/f_cpu.log" 2>&1 || { echo "FAIL run fine region cpu"; exit 1; }
 "${DTFE_BIN}" "$SNAP" "$TMP/f_gpu" "${FINE[@]}" --gpu > "$TMP/f_gpu.log" 2>&1 || { echo "FAIL run fine region gpu"; exit 1; }
@@ -120,14 +96,7 @@ REL_TOL   = 5e-2    # per-cell ceiling (borderline tets flip a sample across a c
 FRAC_TOL  = 1e-3    # at most this fraction of cells may exceed 1e-3 relative
 MEAN_TOL  = 1e-5    # field means must agree this closely (relative to max|field|)
 REPEAT_TOL = 1e-4   # two GPU runs: atomic summation order only (a stray deposit would be ~1e-2)
-# the velocity GRADIENT is constant per tetrahedron and jumps across its faces, so one borderline sample that the
-# float GPU puts in the neighbouring tetrahedron moves a cell by a whole jump (7.7e-2 in 3.4e-5 of the values, as
-# once measured). Only that case is let past the peak ceiling: a SAMPLED pair ('s', 'p';
-# the exact average 'e' samples nothing, so nothing can flip there), a differing fraction 10x below FRAC_TOL and a
-# peak still bounded: a misplaced deposit in a few hundred cells exceeds that fraction. A gradient's signed mean is ~0
-# on a periodic box, blind to a corrupted or scaled gradient, so it is also held to its mean |value|
-# (tests/gpu_scalar_check.sh's rule; measured 3e-7 - 2e-6 on the Mac, CI's worst case bounded by 270 values x 7.7e-2
-# x max/mean|g| ~ 110 -> 3e-4; a pure permutation leaves it unchanged, the fraction catches that).
+# the velocity GRADIENT is constant per tetrahedron and jumps across its faces.
 GRAD_FRAC_TOL = 1e-4
 GRAD_PEAK_TOL = 0.5
 GRAD_MEANABS_TOL = 1e-3
@@ -176,7 +145,7 @@ for pre in ("s", "p", "e"):
         else:
             print("PASS " + line)
         if pre == "s":   # the item kernel repeated, and the per-tet kernel, against the first GPU run
-            # both kernels place the same samples with the same float arithmetic (measured 2e-6 apart),
+            # both kernels place the same samples with the same float arithmetic,
             # so like the repeat only the atomic summation order may differ
             for other, what in (("s_gpu2", "repeat"), ("s_gpu0", "per-tet kernel")):
                 h = np.fromfile(f"{tmp}/{other}.{suf}", dtype=REAL)

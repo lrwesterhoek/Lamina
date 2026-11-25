@@ -1,12 +1,6 @@
-/* The standard-DTFE GPU deposit's exact sums: the units of its fixed-point grids, for
-   the GPU host of the standard binary (dtfe_metal_host.cc). Host-side only, plain C++ (no
-   backend includes). An exact batch takes the run-wide units and 128-bit words (src/fixed_units.h RunUnits,
-   dtfeBatchParams below); a sampled batch takes the 64-bit words in units from its own bound (batchFixedScales),
-   whose rule is the phase-space mass grid's (ps_deposit_params.h: psMassFixedScale picks the unit, psMassFixedMass
-   converts a cell back). Why the grids are integer sums, and how the kernels keep them independent of the order
-   their atomics land in: metal/dtfe_deposit.metal's header.
-   Below batchFixedScales: the other host-side steps that need no Metal type (the knobs, a batch's parameter block
-   and item map, the timing line). */
+/* The standard-DTFE GPU deposit's exact sums: the units of its fixed-point grids, for the GPU host of the standard
+   binary (dtfe_metal_host.cc), plus the host-side steps that need no Metal type (knobs, batch parameter block, item
+   map, timing line). Why the grids are integer sums: metal/dtfe_deposit.metal's header. Host-side plain C++. */
 #ifndef DTFE_GPU_FIXED_H
 #define DTFE_GPU_FIXED_H
 
@@ -22,21 +16,11 @@
 #include "ps_deposit_params.h"
 #include "../env_knobs.h"
 
-// The per-batch units (a sampled batch's 64-bit grids, an exact batch's of a run without the units, and an exact
-// batch's grid without a run-wide unit: dtfeBatchParams; the kernel's header says why the grids are integer sums):
-// grid g holds integers in units of 1/scale[g], scale = 2^k, set per BATCH from a bound B of the sum of |share| over
-// everything the batch can deposit -- no cell, holding part of that sum, can exceed it. psMassFixedScale (the PS mass
-// grid's rule) puts 2B at 2^61..2^62 units, so B itself sits at 2^60..2^61: a factor 4 below the 2^63 of the signed
-// words for the kernel's float rounding of a sample value (the inverse edge matrix of a tetrahedron near the
-// degeneracy cut amplifies it; a few per cent at worst). B, per grid, sums V_tet * max|value| over the batch's
-// tetrahedra: a sample, a clipped piece's centroid and the single-cell centroid all lie in the tetrahedron, where the
-// linear interpolant is a convex combination of the vertex values as uploaded (the Monte-Carlo centring shift is in
-// them already). The two gradients are per-tetrahedron constants: computed here in double from the kernel's own
-// float edges and differences, with the degeneracy cut relaxed to half the kernel's (inverse3zero's 1e-6 of the
-// row-length product), so a tetrahedron the float kernel keeps is never bounded as zero. The resolution this
-// leaves: a 512^3 sub-domain of 1.5e7 cells puts a cell holding 1e-3 of the mean share at ~2^26 units -- 2^-26 of
-// its own value, finer than the float (2^-24) the grid is handed over in. False (the batch keeps the float atomics) when a bound is not
-// finite or has no usable power of two; an all-zero grid gets unit 1.
+// Per-batch units: grid g holds integers in units of 1/scale[g], scale = 2^k, from a bound B of sum |share| over
+// everything the batch can deposit (V_tet * max|value| per tetrahedron; the interpolant is a convex combination of
+// vertex values). psMassFixedScale puts B at 2^60..2^61: a factor 4 below the signed 2^63 for the kernel's float
+// rounding of a sample value. The gradient bound uses the kernel's float edges with the degeneracy cut relaxed to
+// half the kernel's. False (float atomics) when a bound is not finite or has no power of two; all-zero grid: unit 1.
 inline bool batchFixedScales(const std::vector<float>& verts, const std::vector<float>& dens, const std::vector<float>& vels,
                              const std::vector<float>& scal, const std::vector<float>& vols,
                              bool fDen, bool fVel, bool fGrad, bool fScal, bool fSGrad, float scale[5])
@@ -109,14 +93,10 @@ inline bool batchFixedScales(const std::vector<float>& verts, const std::vector<
 
 
 // ---------------------------------------------------------------- knobs
-// Work items (default): every tetrahedron becomes max(1, ceil(cnt / itemSamples)) threads, so no
-// thread loops over more than itemSamples samples -- the sample count per tetrahedron reaches
-// maxNN = 10000 on fine grids, which makes the per-tet kernel's chunks wildly non-uniform and
-// trips the GPU watchdog -- and the kernel's per-thread cell cache turns hundreds of per-sample
-// atomics into one set per distinct cell (see the kernel header). DTFE_GPU_ITEMS=0 runs the
-// per-tet kernel for A/B comparisons. An item runs at most itemSamples = 48 samples; the cell cache
-// has 2 slots (the kernel depositAveraged1Items2). Longer items ran faster up to about 48 samples and
-// gained little beyond, and dropping the atomics altogether saved little: the kernel is compute/occupancy-bound.
+// Work items (default): every tetrahedron becomes max(1, ceil(cnt / itemSamples)) threads, so none loops over more
+// than itemSamples = 48 samples (up to maxNN = 10000 would trip the GPU watchdog), and the per-thread cell cache
+// (2 slots, kernel depositAveraged1Items2) merges the per-sample atomics per distinct cell.
+// DTFE_GPU_ITEMS=0 runs the per-tet kernel for A/B comparisons.
 struct DTFEGpuKnobs
 {
     bool     useItems    = true;
@@ -134,19 +114,11 @@ inline DTFEGpuKnobs dtfeGpuKnobs(bool itemsOk)
 
 
 // ---------------------------------------------------------------- one sub-domain's batch
-// The batch's parameter block, in the host's DepositParams (zeroed by the host; the fields named here are
-// the same in both): the exact sums' mode and units, before the upload consumes the batch's values, the grids'
-// geometry, the field flags and the item length.
-//   The exact sums. An EXACT batch (--exact) sums in the run-wide 128-bit words (P.fixedSum = 2): every grid in the
-// run's unit 2^-units.K[g] and below its share cap (fixed_units.h RunUnits: one unit per grid for the whole run, from
-// global quantities, so every partition and thread split rounds every share alike; no bound pass runs). A grid
-// without a run-wide unit (units.has false: its K outside [-120, 120], or a scalar grid of
-// '--approx-phase-space-density') takes this batch's own unit (batchFixedScales) in the same words, which hold either.
-// A SAMPLED batch, and every batch of a run without the units (units.on false), sums in the 64-bit words in units
-// from the batch's own bound (P.fixedSum = 1), or in float atomics (0) when a bound is not finite.
-// DTFE_TEST_RUN_UNIT_SHIFT=n makes the run-wide units 2^n finer (RunUnits::fill); the batch's own units take no shift.
-// Returns the exact kernel's item, a block of exactCells = 16 cells of the tetrahedron's window, which is then
-// P.itemSamples.
+// The batch's parameter block (zeroed by the host). An EXACT batch (--exact) sums in the run-wide 128-bit words
+// (P.fixedSum = 2), each grid in the run's unit 2^-units.K[g] below its share cap (fixed_units.h RunUnits: global,
+// so every split rounds every share alike); a grid without one takes batchFixedScales' own unit. A sampled batch,
+// or a run without units, uses 64-bit words from its own bound (1), or float atomics (0). Returns the exact kernel's
+// item size (exactCells = 16). DTFE_TEST_RUN_UNIT_SHIFT=n makes the run-wide units 2^n finer.
 template <class Params>
 inline uint32_t dtfeBatchParams(Params& P, DTFEGpuKnobs const& k, const std::vector<float>& verts,
                                 const std::vector<float>& dens, const std::vector<float>& vels,
@@ -197,13 +169,11 @@ inline uint32_t dtfeBatchParams(Params& P, DTFEGpuKnobs const& k, const std::vec
     return exactCells;
 }
 
-// The item map (see the kernel's itemOf): itemStart[t] = first item of tetrahedron t (nTet+1 entries) and, per
-// block of 2^blockShift items, the tetrahedron holding the block's first. A tetrahedron of n samples takes
-// ceil(n / itemSamples) items, a single-cell one (n = 0) one; under 'exact' a sampled one takes
-// ceil(window / exactCells) items of an UPPER bound of the kernel's cell window (its float floor can differ from
-// this double one only within rounding of an integer, which the margin covers; surplus blocks idle). Without
-// items only the counts are taken. Adds the batch's items, samples and single-cell tetrahedra to nItems /
-// nSamples / nSingle; false (err set) beyond 2^32 items.
+// The item map (kernel's itemOf): itemStart[t] = first item of tetrahedron t, and per block of 2^blockShift items the
+// tetrahedron holding the first. n samples take ceil(n / itemSamples) items, a single-cell tetrahedron one; under
+// 'exact' ceil(window / exactCells) of an UPPER bound of the kernel's cell window (its float floor differs from the
+// double one only within rounding of an integer, which the margin covers). Adds to nItems / nSamples / nSingle;
+// false (err set) beyond 2^32 items.
 inline bool dtfeItemMap(std::vector<float> const& verts, std::vector<uint32_t> const& cnts,
                         std::vector<int32_t> const& cells, const double dx[3],
                         const size_t nGrid[3], bool useItems, bool exact, uint32_t itemSamples, uint32_t exactCells,

@@ -1,95 +1,23 @@
-/*  Resume for a killed partitioned PS-DTFE run: a large run takes hours, and a kill late in it (a restart, a
-    disk dropping off, an out-of-memory SIGKILL) must not throw every merged partition away. The
-    partition loop CHECKPOINTS its merged accumulators: after a partition has been added into the full grids
-    (DTFE.cpp, under the merge mutex, so the grids are not changing), the grids and the list of merged
-    partitions go to
+/*  Resume for a killed partitioned run (PS-DTFE and standard DTFE): the partition loop CHECKPOINTS its merged
+    accumulators after each merge (under the merge mutex) to <output>.runlog.checkpoint/checkpoint or, with --scratch-dir,
+    <scratch>/<basename>.<FNV-1a hash of the absolute output path>.runlog.checkpoint/checkpoint (config.sh mirrors it). */
 
-        <output>.runlog.checkpoint/checkpoint                        (beside the outputs), or, with --scratch-dir,
-        <scratch>/<output basename>.<FNV-1a 64 of the absolute output path, 16 hex>.runlog.checkpoint/checkpoint
+// ATOMIC: one file holds the manifest (a text header) and the grids, written as 'checkpoint.tmp.<pid>' and renamed over
+// 'checkpoint', so a kill never leaves a manifest that disagrees with its grids (the resume would add partitions
+// twice); the merged partitions' 'points.<i>' files are written before the rename.
 
-    (the scratch name carries the whole path's hash: run_ps_dtfe.sh's snapshots all write '<snapdir>/ps_output',
-    so a basename would let one snapshot's checkpoint meet another's, and the flattened path itself was longer
-    than a file name may be; config.sh ps_checkpoint_dir computes the same name). '--resume' loads it, skips the
-    partitions it lists and merges the rest; the directory is removed once the outputs are in place.
+// SETTINGS KEY: the build and binary, the command line less the options that cannot change a grid (--resume, --ps-merge,
+// --no-overlap, --verbose, --max-concurrent, --run-mode, --scratch-dir, --tessellation-cache; --gpu-share has its own
+// line), the inputs' size and mtime, the resolved average, gradient route and device, the fixed-point units, the split,
+// the grid and the sample-point file. '--resume' refuses on any difference, naming the lines: it over-refuses.
 
-    ATOMIC: ONE file holds the manifest (a text header) AND the grids, written as 'checkpoint.tmp.<pid>' and
-    renamed over 'checkpoint'. A kill at any moment leaves either the previous checkpoint or the new one,
-    never a manifest that disagrees with its grids (a manifest listing fewer partitions than the grids hold
-    would make the resume add those partitions twice).
+// MERGE ORDER: the merged partitions are a set, so a completion-order run can resume; the resume merges in index order,
+// byte-identical to an uninterrupted ordered run at the same --max-concurrent and thread count.
 
-    CHEAP: a checkpoint is written after a merge unless the previous one took more than 5% of the time since
-    it was written (the write time is measured), so the overhead stays near 5% at worst whatever the grid
-    and partition sizes: a 1024^3 run's multi-GB write happens every few partitions, a small run's after
-    every partition.
-
-    SAFE: the manifest carries the run's SETTINGS KEY: the build configuration and the binary (its revision and
-    link time: a rebuilt binary does not resume), the command line (the short letters in their long names,
-    User_options::commandTokens: '-g 64' and '--grid 64' give one key) minus the
-    options that cannot change a grid value (--resume, --ps-merge, --no-overlap, --verbose,
-    --max-concurrent, --run-mode, --scratch-dir, --tessellation-cache) and '--gpu-share' (as typed, 'auto' and the
-    number it resolves to would differ), the input files' size+mtime, the resolved
-    '_a' average (exact or sampled) and gradient route (face or per-tet), which an environment pin can change
-    without the command line, the resolved device (a 'device=gpu' or 'device=cpu' line: DTFE_GPU or the program's
-    pick of the device changes it without the command line), standard DTFE's run-wide fixed-point units' rule and
-    test shift (a 'units=' line, fixed_units.h runUnitsKeyLine: DTFE_TEST_RUN_UNIT_SHIFT; PS-DTFE has none), the
-    resolved GPU share of a mixed GPU run (a 'gpu-share=' line below 1000; an all-GPU run has none), the resolved
-    partition split and the grid. '--resume' refuses, naming the lines that differ, when the key differs (beginLoop).
-    It over-refuses rather than under-refuses (a reordered command line is a different key).
-
-    MERGE ORDER: the manifest lists the merged partitions as a SET, so a run merging in completion order
-    ('--ps-merge completion-order') can be resumed too. '--resume'
-    merges in index order for the rest of the run; when the killed run merged in index order too (the default,
-    or '--max-concurrent 1'), the resumed grids are byte-identical to an
-    uninterrupted ordered run (tests/ps_resume_check.sh) -- at the
-    same '--max-concurrent' and thread count: the CPU deposit inside a partition splits its sums over the
-    threads a partition gets, so another count changes the grids at float rounding (--max-concurrent 2 and 4
-    differ in '.den' by ~1e-7 relative). The key leaves the two out on
-    purpose: a resume at a lower --max-concurrent (the run was killed for memory) must stay possible.
-
-    ROOM: a write needs the grids' bytes + 1 GB free while it goes (the new file beside the old one), and,
-    counting the old file's bytes as free, twice the grids' bytes + 2 GB (the checkpoint and the outputs still
-    to be written: on a nearly full data disk the checkpoint must never be what makes their write fail);
-    short of that the write is skipped with a warning (once) and the previous checkpoint stays.
-
-    POINTS: a '--sample-points' run is checkpointed too. Its per-point stream records (ps_point_eval.cc)
-    are kept per partition, and a write saves the merged partitions' records not saved yet as 'points.<i>' files
-    in the same folder BEFORE the manifest is renamed into place, so a manifest never lists a partition whose
-    records are not on disk; '--resume' reads them back with the grids. Each partition's records are written once
-    (they do not change after its merge), and they count in the room rule and the 5% throttle like the grids.
-    The settings key then also names the sample-point file (size + mtime).
-
-    NOT CHECKPOINTED: '--interlace' runs (two passes, the second on a half-cell-shifted grid, would share one
-    folder and key), and with DTFE_CHECKPOINT=0. The scratch-backed grids are written to the
-    checkpoint file like any other: their mmap files are unlinked at creation (scratch_alloc.cc) and are modified in place by the next merge,
-    so they cannot serve as an atomic checkpoint themselves.
-
-    TEST HOOKS: DTFE_TEST_EXIT_AFTER_PARTITIONS=K writes a checkpoint after the K-th partition merged in this
-    process and then SIGKILLs the process, which leaves exactly what a kill leaves. DTFE_TEST_CHECKPOINT_FREE_BYTES
-    replaces the volume's free bytes in the room rule.
-
-    STANDARD DTFE TOO. The standard binary's partition loop (DTFE.cpp: serial, one partition at a time
-    with its threads inside) checkpoints through this same code -- beginLoop() before the loop, afterMerge() after
-    each partition, reportWrites() at its end; the PS loop calls the same three. There each partition ASSIGNS its
-    own disjoint sub-grid of the full grids (copySubgridResultsToMain), so the full grids after k partitions plus
-    the list of those k are the run's whole state: '--resume' loads them and computes only the partitions the list
-    lacks. The T-web and the V-web come after the loop from the full density and velocity-gradient grids
-    (postProcessWebFields), which the loop's options force on, so they are in the checkpoint like every other
-    accumulator. A resumed CPU run writes outputs byte-identical to an uninterrupted run's AT THE SAME THREAD COUNT
-    ('--max-concurrent' is the thread split inside each partition there, and each thread's sub-box carries its own
-    padding: left out of the key as for PS, so a run killed for memory can resume with fewer threads, at float
-    rounding where the padding is ample -- 2.8e-2 of the peak on the z = 0 demo at padding 5, 1 against 2 threads);
-    a '--gpu' run's too, since its sums are exact (fixed-point words). The same file layout, key, room rule,
-    5% throttle, refusals and test hooks; what differs is named per build below (BUILD): the file's first line,
-    the off switch (DTFE_CHECKPOINT=0 for standard), the driver a refusal names (the knob, DTFE_RESUME=0, is the same in both drivers)
-    and the messages' 'DTFE:' label; standard implies no ordered merge (its loop is serial anyway). The progress
-    sidecar of a resumed standard run counts the restored partitions as done (DTFE.cpp). '--interlace' runs write no
-    checkpoint, as for PS. A standard '--sample-points' run (with '--partition') is checkpointed
-    too, exactly as PS-DTFE's (POINTS above): the standard loop tags each partition's point records
-    with psPointEvalSetPartition around its DTFE_parallel call -- under '--sample-points' that call triangulates the
-    partition once, on the loop's own thread (DTFE_parallel's single-triangulation branch), so the thread-local tag
-    reaches the point walk's sinks (ps_point_eval.cc forEachCellParallel) -- and each point is answered by the one
-    partition owning its tetrahedron, so a partition's records are complete once it is in the grids; a standard
-    run that also writes a 4096^2 image plane is such a run. tests/dtfe_resume_check.sh (D13). */
+// ROOM: a write needs the grids' bytes + 1 GB free (twice that + 2 GB, counting the old file as free), else it is skipped
+// with one warning; it is also skipped while the previous write took over 5% of the time since it. Standard DTFE uses the
+// same code: each partition assigns its own sub-grid, so the grids plus the merged list are the whole state.
+// Test hooks: DTFE_TEST_EXIT_AFTER_PARTITIONS=K (SIGKILL after the K-th merge), DTFE_TEST_CHECKPOINT_FREE_BYTES.
 #ifndef PARTITION_CHECKPOINT_H
 #define PARTITION_CHECKPOINT_H
 // both binaries' partition loops; the library compiles it too
@@ -259,9 +187,8 @@ inline std::string settingsKey(User_options const &u)
     // units without changing the command line. Standard DTFE only: PS-DTFE's passes take units of their own.
     k << runUnitsKeyLine() << '\n';
 #endif
-    // the resolved '_a' average and gradient route: an environment pin (DTFE_EXACT_AVERAGE, DTFE_FACE_GRADIENT) or
-    // a default changes them without changing the command line. Always written, so a checkpoint from before these
-    // lines never matches.
+    // the resolved '_a' average and gradient route: an environment pin (DTFE_EXACT_AVERAGE, DTFE_FACE_GRADIENT) or a
+    // default changes them without changing the command line. Always written.
 #ifdef PHASE_SPACE
     k << "average=" << ( u.psExactDeposit ? "exact" : "sampled" ) << '\n';
 #else
@@ -632,14 +559,10 @@ inline bool load(std::string const &dir, Manifest const &m, Quantities &u, Quant
 }
 
 /* The three steps of a checkpointed partition loop, shared by the PS and the standard loops.
-
-   beginLoop: after the full grids are reserved (sized: a resume reads into them) and before the first partition.
-   Sets up state() for this run (folder, key, split, test hook), removes a dead writer's temp file, and under
-   '--resume' refuses unless the checkpoint is this run's (manifest readable, key equal, same partition count,
-   every field the right size), then LOADS its grids into u/a (PS-DTFE '--sample-points': and the merged partitions'
-   point records) and marks its partitions in state().merged -- the
-   caller skips those (PS: like a --grid-window skip, still a turn in the ordered merge; standard: not computed at
-   all). Says where checkpoints go, or why there are none. Returns the number of partitions restored. */
+   beginLoop: after the full grids are reserved and before the first partition. Sets up state() (folder, key, split,
+   test hook), removes a dead writer's temp file and, under '--resume', refuses unless the checkpoint is this run's
+   (manifest readable, key equal, same partition count, every field the right size), LOADS its grids (and point
+   records) into u/a and marks its partitions in state().merged; the caller skips those. Returns the number restored. */
 inline int beginLoop(User_options const &options, int const totalPartitions, Quantities &u, Quantities &a,
                      bool const pointEval, int const verboseLevel)
 {

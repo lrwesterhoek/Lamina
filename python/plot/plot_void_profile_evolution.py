@@ -1,41 +1,4 @@
-"""The void profiles across cosmic time on ONE figure, and the universal-profile fits per R_v bin and redshift.
-
-For every snapshot on disk: the shells of the DISTINCT well-resolved voids (dtfelib.profiles, as
-plot_void_profiles.py), and from them
-  (a) the stacked RAW rho/rho_bar against r / R_v of the voids with R_v in --rv-range (in smoothing lengths, default
-      2.5-5 sigma: the same voids in sigma units at every z), one curve per redshift, colour = z;
-  (b) their stacked radial velocity in units of the Hubble flow at the void's own radius, v_r / (a H(z) R_v), per
-      void before stacking (nine redshifts in km/s do not share an axis), with the linear-theory prediction dashed:
-      v_lin(r) = -(1/3) f(z) H(z) a r Delta(<r), f = Omega_m(z)^0.55, Delta(<r) from the stacked density
-      (profiles.linear_v_r), which in these units is -(1/3) f x Delta(<x) whatever R_v is;
-  (c) the interior single-stream VOLUME fraction, r < 0.5 R_v and r < R_v, against 1 + z (profiles.
-      interior_single_fraction: the cells whose centres lie inside, single stream = streams == 1 and no
-      hidden-streams bit, io.single_stream_mask), mean over the voids with a 16-84% bootstrap band, beside the whole
-      box's single-stream fraction (phase-space grids only);
-  (d) v_r / v_lin at r = 0.5 and 1 R_v against 1 + z: 1 is linear expansion.
-A 16-84% bootstrap band of the voids goes with every curve. 1 + z is on a log axis: 6 of the 9 TNG snapshots sit at
-z < 3. The density crossing 1 at r = R_v is the definition of R_v (the first up-crossing of the SMOOTHED profile), a
-check of the smoothing against the raw density, not a finding; the infall radius, the ridge and the interior
-single-stream fraction are.
-
-THE FITS. Hamaus, Sutter & Wandelt (2014, PRL 112, 251302): delta(r) = delta_c (1 - (r/r_s)^alpha) / (1 + (r/R_v)^beta)
-fitted (profiles.fit_stack: scipy curve_fit, the error of each shell the stack's scatter std / sqrt(n)) to the stacked
-density of every R_v bin (--edges in Mpc; default profiles.default_edges_mpc: 0, 2.5, 3.5, 5 sigma and the wrap cap
-L/6) at every redshift, with r in units of each void's own R_v. Written as a table (json + txt) and a figure of
-delta_c, r_s / R_v, alpha and beta against 1 + z. The shells of one stack share its voids, so chi2/dof is a guide.
-
-CACHE. Each snapshot's per-void profiles go into per_snapshot/profiles_<snap><tag>.npz in the output folder;
---replot reads those and redraws everything (other --rv-range, --edges, --n-boot) without touching a grid.
-
-Outputs in figures/void_profile_evolution/<sim>/ (config.figures_path; a non-default smoothing in its own subfolder):
-  profile_evolution.png, profile_evolution.npz     panels (a)-(d) and their curves
-  profile_fits.png, profile_fits.json, profile_fits.txt
-Standard DTFE or a --prefix adds '_dtfe' / '_<prefix>' to every name, --sample deep '_deep', --keep-overlaps
-'_overlaps', an R_v definition other than 'crossing' '_rv<definition>'.
-
-    DTFE_SIM=TNG100-3-Dark python3 plot/plot_void_profile_evolution.py --sim TNG100-3-Dark
-    DTFE_SIM=TNG100-3-Dark python3 plot/plot_void_profile_evolution.py --sim TNG100-3-Dark --replot --rv-range 2 4
-"""
+"""The void profiles across cosmic time on ONE figure, and the universal-profile fits per R_v bin and redshift."""
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
 import json

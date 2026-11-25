@@ -1,10 +1,5 @@
-/* Build provenance of the DTFE / PS-DTFE binaries (not the library).
-
-   The Makefile recompiles this file on EVERY link with the current git revision
-   ('git describe --always --dirty') and the UTC link time, so every run's log names the exact
-   code that produced its outputs (the run date alone cannot: a stale binary can run long after
-   the code changed). Outside a git checkout, or when the defines are missing, the fields read
-   'unknown'. */
+/* Build provenance of the binaries (not the library): the Makefile recompiles this file on every link with the git
+   revision and UTC link time, so each run log names its code. The fields read 'unknown' outside a git checkout. */
 
 #ifndef DTFE_BUILD_REV
 #define DTFE_BUILD_REV "unknown"
@@ -16,7 +11,6 @@
 char const *dtfeBuildRevision() { return DTFE_BUILD_REV; }
 char const *dtfeBuildTime()     { return DTFE_BUILD_TIME; }
 
-// true in the programs, which link this file. partition_checkpoint.h checkpoints a partition loop only
-// there: the checkpoint folder is removed once main.cpp has committed the outputs (output_staging.h), which a
-// libDTFE host program never does, so a library run would leave it behind. The header's weak fallback says false.
+// true in the programs, which link this file. partition_checkpoint.h checkpoints only there: the checkpoint folder
+// is removed once main.cpp commits the outputs, which a libDTFE host never does. The header's weak fallback is false.
 bool dtfeIsProgram() { return true; }

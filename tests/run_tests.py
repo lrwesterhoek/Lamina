@@ -157,8 +157,7 @@ def test_uniform_lattice_density(tmpdir):
     write_text_input(infile, particles, (0, box_size, 0, box_size, 0, box_size))
 
     # An OPEN box: the lattice's outer cells reach the dummy points beyond the padding, so the mean depends on the
-    # padding (0.47 at 5 mean spacings, 0.35 at 15). The bound below was set at 5, the binary's default then (now
-    # 15), so the run names it.
+    # padding; the bound below holds at 5 mean spacings, so the run names it.
     ok, out = run_dtfe(infile, outfile, grid_size=12, input_type=111, extra_args=["--padding", "5"])
     if not ok:
         report(name, False, "DTFE execution failed")
@@ -464,10 +463,8 @@ def test_output_size_matches_grid(tmpdir):
 
 
 def _has_flag(name, flag):
-    """True when the built binary's --full-help mentions the given option (feature gate for
-    tests of flags newer than the binary; captured, never piped -- see the .sh scripts). Else
-    test NAME is a SKIP (a failure under DTFE_TEST_REQUIRED=1); a binary that exits non-zero on
-    --full-help FAILS it: a broken binary is not one without the flag."""
+    """True when the built binary's --full-help mentions the given option (feature gate for tests of flags newer than
+    the binary; captured, never piped -- see the .sh scripts)."""
     result = subprocess.run([DTFE_BIN, "--full-help"], capture_output=True, text=True)
     binary = os.path.basename(DTFE_BIN)
     if result.returncode != 0:
@@ -485,10 +482,9 @@ EXACT_GATE = "--sampled"
 
 
 def test_exact_average_lattice(tmpdir):
-    """--exact on a PERFECT periodic lattice: every vertex density equals the mean
-    exactly, the linear interpolant is the constant 1, so the exact cell integration must
-    return 1 in EVERY grid cell to float rounding (the sampled average is only ~1 on
-    average). Gated on the binary knowing the flags (EXACT_GATE)."""
+    """--exact on a PERFECT periodic lattice: every vertex density equals the mean exactly, the linear interpolant is
+    the constant 1, so the exact cell integration must return 1 in EVERY grid cell to float rounding (the sampled
+    average is only ~1 on average). Gated on the binary knowing the flags (EXACT_GATE)."""
     name = "exact_average_lattice"
     if not _has_flag(name, EXACT_GATE):
         return
@@ -519,10 +515,9 @@ def test_exact_average_lattice(tmpdir):
 
 
 def test_exact_average_convergence(tmpdir):
-    """Method-1 sampled '_a' density approaches the --exact grid MONOTONICALLY as
-    --subsamples grows (5, 10, 22: 125, 1000, 10648 points per cell; Sobol quasi-random sampling:
-    deterministic, no seed involved; the count alone selects the sampled average). Gated
-    on the binary knowing the flags (EXACT_GATE)."""
+    """Method-1 sampled '_a' density approaches the --exact grid MONOTONICALLY as --subsamples grows (5, 10, 22: 125,
+    1000, 10648 points per cell; Sobol quasi-random sampling: deterministic, no seed involved; the count alone
+    selects the sampled average). Gated on the binary knowing the flags (EXACT_GATE)."""
     name = "exact_average_convergence"
     if not _has_flag(name, EXACT_GATE):
         return
@@ -559,26 +554,12 @@ def test_exact_average_convergence(tmpdir):
 
 
 # The standard-DTFE regression: a stored reference CI compares with, on every platform. Not a NON-periodic cloud,
-# whose padding-test dummy points sit on a regular lattice against the convex hull: co-spherical ties that CGAL
-# breaks differently per platform (rel err ~1.6 Mac vs Linux), so no stored reference could hold. Instead: a
-# PERIODIC box of 1000 seeded random points (no exact ties: the Delaunay tessellation is unique, so every correct
-# CGAL builds the same one), the point-sampled density and the --exact cell average (no Monte Carlo: the
-# sampled density_a depends on insertion order -- 25% per cell when the input is shuffled), written as binary
-# floats (the text output keeps 6 digits). The reference was made at the binary's padding of 5 mean spacings, its
-# default then (now 15), so the run names it.
+# whose padding-test dummy points sit on a regular lattice against the convex hull: co-spherical ties that CGAL breaks
+# differently per platform (rel err ~1.6 Mac vs Linux), so no stored reference could hold.
 REGRESSION_REF = "regression_periodic.txt"
 REGRESSION_ARGS = ["-i", "111", "-o", "101", "-g", "12", "-f", "density", "density_a", "--mpc-unit", "1",
                    "--periodic", "--exact", "--padding", "5"]
-# Per value |new - ref| <= RTOL * |ref| (every density here is >= 0.35, so no absolute floor is needed). Measured on
-# the Mac, against this reference (max rel over the 2 x 1728 values, two seeds):
-#   the double build (no float rounding at all)       2.7e-5      one thread (another reduction order)   2.5e-5
-#   coordinates perturbed by 1e-7 relative            7.2e-6      the input order shuffled               6.0e-7
-#   --seed / --no-padding-test                        0 (bit-identical)
-# against REAL changes of the input or the estimator:
-#   one of the 1000 particles moved 0.05% of the box  1.2e-3      one particle's weight +1%              3.2e-3
-#   one particle moved 0.5% of the box                5.3e-2
-# 3e-4 sits 11x above everything rounding, threads or another compiler can do (the double build bounds a
-# different float evaluation order) and 4x below the smallest real change tried.
+# Per value |new - ref| <= RTOL * |ref| (every density here is >= 0.35, so no absolute floor is needed).
 REGRESSION_RTOL = 3e-4
 
 
@@ -769,11 +750,8 @@ def test_gadget_mass_block_skip(tmpdir):
 
 
 def test_thin_region_threads(tmpdir):
-    """A multi-threaded run on a THIN --region-mpc (the launcher's exact-zoom shape, here 1 x 1 x
-    2e-5 Mpc) must run and match the one-thread run. Each thread's particle search must not
-    reserve p.size() * padded-box/region volume = a multi-PB vector: std::bad_alloc on Linux
-    already at 2 kpc thickness (macOS overcommits that, so it needs this thinner slab), while
-    OMP_NUM_THREADS=1 never takes that path."""
+    """A multi-threaded run on a THIN --region-mpc (the launcher's exact-zoom shape, here 1 x 1 x 2e-5 Mpc) must run
+    and match the one-thread run."""
     name = "thin_region_threads"
     box = 100.0
     infile = os.path.join(tmpdir, f"{name}.txt")
@@ -814,12 +792,8 @@ def _offset_lattice(nx, ny, nz, lx, ly, lz, frac=0.3):
 
 
 def test_mass_assignment_periodic_faces(tmpdir):
-    """Periodic CIC/TSC/PCS on a uniform (offset) lattice in a NON-CUBIC box (z twice as long, so its cells
-    are twice as tall): every cell is the mean density, at the box faces and at the auto-tuner's partition
-    seams too. PCS and CIC without padding have no periodic images (PCS 0.27-0.94 at
-    faces and seams; CIC extrapolated instead, 1.4 / 0.8 in the face cells), and a derived TSC/NGP/DTFE
-    padding that took the z faces' width from the x length and grid ([i%2] for the axis i/2) is half the TSC
-    reach here."""
+    """Periodic CIC/TSC/PCS on a uniform (offset) lattice in a NON-CUBIC box (z twice as long, so its cells are twice
+    as tall): every cell is the mean density, at the box faces and at the auto-tuner's partition seams too."""
     name = "mass_assignment_periodic_faces"
     lx, lz = 100.0, 200.0
     infile = os.path.join(tmpdir, f"{name}.txt")
@@ -844,10 +818,9 @@ def test_mass_assignment_periodic_faces(tmpdir):
 
 
 def test_mass_assignment_thin_partitions(tmpdir):
-    """'--partition 1 4 4' on an 8^3 grid gives partitions ONE cell thick: the clipped boundary stencil
-    must still give the mean density everywhere on a uniform lattice: a TSC edge case for the first cell that
-    also writes cell 1 of a one-cell grid is a heap overflow (9% off here, rc 133/139 on a thread's slab), CIC's
-    extrapolation is 1.74 off and PCS without padding 0.78 off."""
+    """'--partition 1 4 4' on an 8^3 grid gives partitions ONE cell thick: the clipped boundary stencil must still
+    give the mean density everywhere on a uniform lattice: a TSC edge case for the first cell that also writes cell
+    1 of a one-cell grid is a heap overflow."""
     name = "mass_assignment_thin_partitions"
     infile = os.path.join(tmpdir, f"{name}.txt")
     write_text_input(infile, _offset_lattice(8, 8, 8, 100.0, 100.0, 100.0), (0, 100, 0, 100, 0, 100))
@@ -870,11 +843,8 @@ def test_mass_assignment_thin_partitions(tmpdir):
 
 
 def test_partition_split_never_empty(tmpdir):
-    """More partitions along an axis than half its cells ('--partition 1 5 5' and '1 8 8' on an 8^3 grid), and a
-    cloud whose first slab holds every particle ('--partition 4 1 1', the 8^3 lattice squeezed into the first
-    x cell): the load-balancing split (subpartition.h optimalSplit) keeps at least one cell in every partition (on
-    an '8*0*0' grid TSC/CIC/PCS segfault, rc 139); a split that already does is unchanged. Each run must equal the
-    single-domain run of the same input to 1e-5."""
+    """More partitions along an axis than half its cells ('--partition 1 5 5' and '1 8 8' on an 8^3 grid), and a cloud
+    whose first slab holds every particle ('--partition 4 1 1', the 8^3 lattice squeezed into the first x cell)"""
     name = "partition_split_never_empty"
     lat = os.path.join(tmpdir, f"{name}_lattice.txt")
     write_text_input(lat, _offset_lattice(8, 8, 8, 100.0, 100.0, 100.0), (0, 100, 0, 100, 0, 100))
@@ -912,10 +882,8 @@ def test_partition_split_never_empty(tmpdir):
 
 
 def test_mass_assignment_centroid(tmpdir):
-    """A mass-assignment kernel is symmetric about the particle: the centroid of one isolated particle's
-    deposit is its position (8 particles at random sub-cell offsets, one per 8^3-cell block). PCS taking
-    its 4 cells from the cell HOLDING the particle and the distance to that cell's left edge would put
-    every deposit half a cell too far along each axis (centroid +0.50 cells)."""
+    """A mass-assignment kernel is symmetric about the particle: the centroid of one isolated particle's deposit is
+    its position (8 particles at random sub-cell offsets, one per 8^3-cell block)."""
     name = "mass_assignment_centroid"
     import random
     rnd = random.Random(1)
@@ -953,10 +921,8 @@ def test_mass_assignment_centroid(tmpdir):
 
 
 def test_fractional_region_noncubic(tmpdir):
-    """On a non-cubic box, '--region' (box fractions) is the same region as '--region-mpc' in Mpc, and
-    '--padding' (box fractions) the same padding as '--padding-mpc': byte-identical grids. The
-    conversion reads the box per axis [i/2]; per entry [i%2] z would take the x length:
-    '--region 0 1 0 1 0.5 1' on a 0-200 z axis would grid z = 50-100 instead of 100-200."""
+    """On a non-cubic box, '--region' (box fractions) is the same region as '--region-mpc' in Mpc, and '--padding'
+    (box fractions) the same padding as '--padding-mpc': byte-identical grids."""
     name = "fractional_region_noncubic"
     lx, lz = 100.0, 200.0
     infile = os.path.join(tmpdir, f"{name}.txt")

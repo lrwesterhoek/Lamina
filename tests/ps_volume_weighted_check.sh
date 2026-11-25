@@ -1,17 +1,6 @@
 #!/usr/bin/env bash
-# PS-DTFE's velocity moments are volume-weighted in every run: the velocity, its gradient and the fields built on it
-# (divergence, shear, vorticity) are Eulerian-VOLUME-weighted means over the streams -- the standard-DTFE '_a'
-# convention that linear theory's -aHf*delta refers to -- and the dispersion stays mass-weighted (sigma_ij is an
-# f-weighted moment by definition). Asserted on the multi-stream pancake:
-#  H) THE HEADER LINE: every PS-DTFE run's log carries the line
-#         '<tab> velocity moments       : volume-weighted (the dispersion mass-weighted)'
-#     once, at exactly the verbosities that print its 'RUNNING:' line: at the lowest one that does, the line is
-#     there; a '--verbose 0' log holds neither. A standard-DTFE run at that verbosity prints its 'RUNNING:' line
-#     and no 'velocity moments' line.
-#  E) CPU vs GPU parity of the moments (GPU builds only).
-# (That the points' velocity is the plain stream mean and their dispersion the density-weighted one is
-# tests/ps_point_conventions_check.sh D.)
-#
+# PS-DTFE velocity moments are volume-weighted in every run (the dispersion mass-weighted); checked on the multi-stream pancake.
+#   H the 'velocity moments' header line at verbosity 0-3 and in a standard-DTFE run   E CPU vs GPU parity (GPU builds)
 # Usage: tests/ps_volume_weighted_check.sh [--no-build]
 
 set -euo pipefail

@@ -1,7 +1,5 @@
-// Part of src/DTFE.cpp, inside its #ifdef PHASE_SPACE: included once, in order, by that file and compiled only as
-// part of its object, never alone.
-// The PS partition loop: the staged ordered merge (StagedPartition, PSMergeStaging), the loop's context and
-// progress, psMergeInTurn, psRunPartitionLoop and psReportLoopEnd.
+// Part of src/DTFE.cpp (inside its PHASE_SPACE block), included once by that file, never compiled alone: the PS partition loop
+// (staged ordered merge, loop context and progress, psMergeInTurn, psRunPartitionLoop, psReportLoopEnd).
 
 // A partition the staged ordered merge parks until its turn (psPartitionedRun).
 struct StagedPartition
@@ -414,15 +412,11 @@ static void psRunPartitionLoop(PSLoopCtx &c, PartitionMemoryGate &memoryGate, Pr
     auto &psConcurrency = c.psConcurrency;
     auto &skipPartition = c.skipPartition;
     int const toProcess = c.progress.toProcess;
-    // The LOOK-AHEAD. At --max-concurrent 1 with the GPU deposit the cores would idle while the
-    // GPU works (the deposit is most of a run), and each next partition's selection +
-    // triangulation + vertex densities would wait behind it. So partition k+1 is prepared on a CPU thread
-    // while partition k deposits (runLookAhead, DTFE.cpp), as without the look-ahead (same particles, same sequential
-    // insert), and the merge stays in index order, so the outputs are byte-identical (tests/ps_runtime_check.sh). It
-    // holds one more partition's particles + tessellation; before each look-ahead the free memory is checked against
-    // that (the auto-tuner's prediction counts it too) and the partition is prepared in turn when it does not fit.
-    // '--no-overlap' switches it off; DTFE_OVERLAP=1 forces it on a CPU deposit too (the test suite's byte-identity
-    // check on a build without a GPU), DTFE_OVERLAP=0 switches it off.
+    // The LOOK-AHEAD. At --max-concurrent 1 with the GPU deposit the cores would idle while the GPU works, so partition k+1 is
+    // prepared on a CPU thread while k deposits (runLookAhead, DTFE.cpp): same particles, same sequential insert, merge in index
+    // order, so the outputs are byte-identical (tests/ps_runtime_check.sh). It holds one more partition's particles + tessellation:
+    // the free memory is checked first (the auto-tuner counts it too), else the partition is prepared in turn. '--no-overlap' switches
+    // it off; DTFE_OVERLAP=1 forces it on a CPU deposit too (the byte-identity check without a GPU), DTFE_OVERLAP=0 switches it off.
     bool gpuDeposit = false;
 #if defined(PS_GPU) && NO_DIM==3
     gpuDeposit = state.options.psUseMetal;
@@ -433,8 +427,7 @@ static void psRunPartitionLoop(PSLoopCtx &c, PartitionMemoryGate &memoryGate, Pr
     bool overlap = psConcurrency == 1 and toProcess > 1 and not state.options.psNoOverlap
                    and not state.options.psLookAheadOffBudget   // the auto-tuner's: it does not fit the budget
                    and not overlapBanned and ( gpuDeposit or overlapForced );
-    // what the look-ahead holds: one partition's padded particle copy + its tessellation (auto_tune.h's
-    // model: Particle_data + 666 B per vertex, padding included)
+    // what the look-ahead holds: one partition's padded particle copy + its tessellation (auto_tune.h's model)
     double aheadBytes = 0.;
     if ( overlap )
     {

@@ -1,25 +1,7 @@
 #!/usr/bin/env bash
-# The Metal GPU deposit's MASS grid: an exact 64-bit fixed-point sum (two atomic words per cell,
-# metal/ps_deposit.metal depositMass), not a float atomic add, which loses small shares downward and
-# depends on the atomic order (TNG50-3-Dark z=0: box mean 0.99941). Asserted on synthetic snapshots:
-#   M1  two identical --gpu runs write byte-identical '.a_den', on one domain and with --partition 2 2 2
-#       --max-concurrent 1 (the float grid differs run to run), and byte-identical '.a_vel'
-#       too: the moment grids are exact fixed-point sums as well (tests/ps_fixed_moments_check.sh covers every
-#       grid). One partition at a time: concurrent partitions merged in completion order ('--ps-merge
-#       completion-order'; index order is the default) give float sums that differ in the last bit from run to run
-#       on the CPU as well (--max-concurrent 4: 259 of 32^3 cells at 1e-16 in the double build), which is not the
-#       deposit's doing; the pin keeps the check independent of the merge
-#   M3  heavy accumulation (a 128^3 pancake on a 2^3 grid, nSub 1: 1.47e7 tetrahedra, ~1.8e6 deposits per
-#       cell): the GPU box mean equals the CPU's to 3e-6 (measured 8.7e-7 against the single-precision CPU,
-#       1.5e-8 against the double one; the float grid gives 7.8e-6 on the same case, so it would fail here)
-#   M4  the run log splits 'field interpolation' into its phases (extraction walk, cost sort, GPU
-#       deposit, deferred tets on the CPU, normalization), with the deferred-tet count equal to the GPU deposit's
-#       own count, and a partitioned run prints the run's totals over all 8 passes (the per-partition deferred
-#       line is suppressed there, so these totals are the only place the deferred work shows)
-#   M5  many GPU-deferred tetrahedra (48^3 crossed waves, A k = 3, on 96^3 at nSub 3: ~12000 of them) are
-#       deposited on several CPU threads in slab mode (one thread would outlast the GPU deposit on such
-#       data), and the grids are byte-identical to the one-thread loop (DTFE_DEPOSIT_SLABS=0)
-# GPU builds only (METAL=1): skipped (exit 0) otherwise, like tests/gpu_scalar_check.sh, and a local GPU suite (not in tests/ci_suite.sh). M3 takes ~40 s.
+# The Metal GPU deposit's MASS grid is an exact 64-bit fixed-point sum (metal/ps_deposit.metal depositMass), not a float atomic add,
+# so it does not depend on the atomic order. Asserted on synthetic snapshots:
+#   M4  the run log splits 'field interpolation' into its phases
 # Usage: tests/gpu_mass_check.sh [--no-build]   (--no-build is accepted and ignored)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

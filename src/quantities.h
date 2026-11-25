@@ -41,12 +41,8 @@
 
 
 #ifdef PHASE_SPACE
-// Tolerance for testing the stream multiplicity ('stream_count', written as '.streams') against
-// an integer. It is a FLOAT sum under every deposit, so single-stream cells land on 1.0 +/- eps
-// and an exact '== 1' / '> 1' test is always wrong: on the 48^3 Zel'dovich pancake '> 1.0f'
-// reports 28.33% of cells as multi-stream where the true slab is 16.67%. Mirrors
-// dtfelib.STREAM_TOL on the Python side -- keep the two in sync. The plateau is sharp (every
-// single-stream cell measures inside 1e-5 of 1.0), so 1e-3 admits noise but no real structure.
+// Tolerance for testing the stream multiplicity ('stream_count', '.streams') against an integer: it is a FLOAT sum under
+// every deposit, so an exact '== 1' / '> 1' test is wrong. Mirrors dtfelib.STREAM_TOL on the Python side: keep in sync.
 Real const PS_STREAM_TOL = Real(1.e-3);
 
 // A partition sub-grid cell (local coords c; sub-grid dims m, global origin o) -> its index in the full grid 'full'
@@ -96,23 +92,19 @@ struct Quantities
     std::vector<Real>                         velocity_vweb;        // V-web classification label (0=void, 1=wall, 2=filament, 3=node)
     std::vector< Pvector<Real,NO_DIM> >       velocity_vweb_eigenvalues; // V-web eigenvalues (sorted descending)
 #ifdef PHASE_SPACE
-    std::vector<Real>                         stream_count;       // stream multiplicity at each grid point: the sampled deposit's sample-mean, or --exact's analytic volume-weighted (1/V_cell)sum(V_int). A FLOAT under both -- compare against integers with PS_STREAM_TOL, never with ==/> 1 exactly (see below)
-    std::vector<Real>                         tet_touch;          // --exact only: raw INTEGER count of tetrahedra with a nonzero intersection with the cell (incl. corner grazes), written as '.tetTouch'. A geometric multiplicity, NOT a stream count -- 'stream_count' carries the volume-weighted (physical) multiplicity under every deposit.
-    std::vector<Real>                         mass_weight;        // per-cell summed moment weight (the EULERIAN-VOLUME shares: PS-DTFE's velocity moments are volume-weighted); normalizes velocity/gradient/scalar. Internal to normalizePhaseSpace, never written out
-    // dispersion only: the dispersion stays MASS-weighted (sigma_ij is a
-    // moment of the phase-space distribution f, so it is f- i.e. mass-weighted by definition),
-    // while velocity/gradient are volume-weighted. sigma_ij = <v_i v_j>_m - <v_i>_m <v_j>_m then
-    // needs its OWN mass-weighted mean and normalizer, since 'velocity' now holds the volume-
-    // weighted one. Both are internal to normalizePhaseSpace and never written out.
+    std::vector<Real>                         stream_count;       // stream multiplicity: the sampled deposit's sample-mean, or --exact's volume-weighted value; a FLOAT: compare with PS_STREAM_TOL, never ==/> 1
+    std::vector<Real>                         tet_touch;          // --exact only: raw INTEGER count of tetrahedra touching the cell ('.tetTouch'); a geometric multiplicity, not a stream count
+    std::vector<Real>                         mass_weight;        // per-cell summed moment weight (the Eulerian-volume shares); normalizes velocity/gradient/scalar; internal, never written
+    // dispersion only: it stays MASS-weighted (sigma_ij is a moment of f) while velocity/gradient are volume-weighted,
+    // so it needs its own mass-weighted mean and normalizer; both are internal to normalizePhaseSpace.
     std::vector<Real>                         disp_weight;        // sum(m_s)
     std::vector< Pvector<Real,noVelComp> >    disp_velocity;      // sum(m_s v_s)
-    std::vector<Real>                         caustic_bits;       // --ps-caustics: per-cell caustic mask, small exact ints in float (bit0 = a det(Ax)>0 stream overlaps the cell, bit1 = det<0, higher bits = the stratification of CGAL_triangulation/ps_caustic_class.h). OR-merged across partitions (addFrom/addFromSubgrid) and kept FULL right through post-processing: writeOutputData emits '.causticClass' from it and only then binarizes it in place to the 0/1 fold flag for '.caustic'. There is deliberately no second grid -- see the note there
-    // --face-gradient: each cell's FACE sums of the streams, its lower and its upper face
-    // per axis (side 0 / 1): face_velocity[(side*NO_DIM + a)*3 + j] = the integral over that face of S_j, S = the sum of
-    // the streams' velocities; face_coverage[side*NO_DIM + a] = the integral of N, their count (the covered area). A
-    // face's two cells hold the same sums. normalizePhaseSpace makes the gradient of the face-averaged MEAN velocity
-    // from them, (S_up/N_up - S_lo/N_lo) / dx: conservative (it telescopes: a periodic box's mean divergence is 0), the
-    // stream average itself where the stream count is constant through the cell, exact for a planar flow. Never written.
+    std::vector<Real>                         caustic_bits;       // --ps-caustics: per-cell caustic mask, small exact ints in float (bit0 = a det(Ax)>0 stream overlaps the cell, bit1 = det<0, higher bits = ps_caustic_class.h stratification); OR-merged, kept FULL until writeOutputData emits '.causticClass', then binarized in place for '.caustic'
+    // --face-gradient: each cell's FACE sums of the streams, its lower and upper face per axis (side 0 / 1):
+    // face_velocity[(side*NO_DIM + a)*3 + j] = the integral over that face of S_j (S = the sum of the streams'
+    // velocities); face_coverage[side*NO_DIM + a] = the integral of N, their count. A face's two cells hold the same
+    // sums. normalizePhaseSpace makes the gradient of the face-averaged mean velocity from them, (S_up/N_up -
+    // S_lo/N_lo) / dx: conservative, exact for a planar flow. Never written.
     std::vector< Pvector<Real,2*NO_DIM*noVelComp> > face_velocity;
     std::vector< Pvector<Real,2*NO_DIM> >          face_coverage;
     // ... and the momentum through each face: face_momentum[side*NO_DIM + a] = the integral of sum_s rho_s v_s,a
@@ -122,8 +114,8 @@ struct Quantities
     // --face-gradient: div(sum_s rho_s v_s) per cell, rho/rho_bar times velocity per length: by continuity -a d(1+delta)/dt
     // (the rate a region gains or loses mass), written as '.a_massFluxDiv'
     std::vector<Real>                         mass_flux_divergence;
-    // --face-gradient: the divergence of the stream average of each stream's own gradient (the deposit's regular part,
-    // what 'velocity_gradient' held before the mean flow's replaced it), written as '.a_velDivStreams'
+    // --face-gradient: the divergence of the stream average of each stream's own gradient (the deposit's regular part),
+    // written as '.a_velDivStreams'
     std::vector<Real>                         velocity_divergence_streams;
     // ... and that regular part's own gradient, shear and vorticity, each made only where
     // the run writes its mean-flow twin ('gradient_a', 'shear_a', 'vorticity_a': User_options::psStreamsTwins), by the
@@ -182,25 +174,21 @@ struct Quantities
         std::vector< Pvector<Real,2*NO_DIM> >().swap( face_coverage );
         std::vector< Pvector<Real,2*NO_DIM> >().swap( face_momentum );
     }
-    std::vector<Real>                         hidden_streams;     // PS-DTFE: a small bitmask in Real, written as '.hidden_streams'. BIT 1 (value 1) = the cell holds multi-stream volume its '.streams' does not show: a negatively oriented (folded) tetrahedron overlaps it with positive volume while '.streams' reads single-stream -- a fold thinner than the sub-sample spacing. Exact in a periodic box (degree-1 map: a point is multi-stream iff a flipped tet covers it), so the single-stream mask is '.streams == 1 (to PS_STREAM_TOL) and not (hidden_streams & 1)': every point of such a cell lies on one stream. BIT 2 (value 2) = the cell received MASS from a tetrahedron none of whose sub-samples lies in it (the centroid fallback, or a --ps-halo-release tet): the cell mean includes a sub-resolution piece, possibly of the SAME stream -- a quadrature note, not a stream count (non-periodic runs also set bit 1 there, conservatively). Legacy '.unresolved' files hold only 0/1 (the mass flag), which reads as bit 1 and so stays conservative. OR-merged like caustic_bits; finalizeHiddenStreams() clears bit 1 where '.streams' already reads multi-stream
+    // BIT 1 = multi-stream volume that '.streams' does not show (a folded tetrahedron overlaps the cell while '.streams' reads
+    // single-stream; exact in a periodic box). BIT 2 = the cell got MASS from a tetrahedron with no sub-sample in it
+    // (centroid fallback or --ps-halo-release): a quadrature note, not a stream count. Legacy '.unresolved' 0/1 reads
+    // as bit 1. finalizeHiddenStreams() clears bit 1 where '.streams' already reads multi-stream.
+    std::vector<Real>                         hidden_streams;     // PS-DTFE bitmask in Real, written as '.hidden_streams' (bits above); OR-merged
     // PS-DTFE partition sub-grid in global grid-cell units, so addFromSubgrid() can map cells back.
     size_t ps_subOrigin[NO_DIM] = {0};
     size_t ps_subDims[NO_DIM]   = {0};   // [0]==0 means "not a sub-grid" (vectors span the full grid)
 #endif
 
-    /* THE FIELD LIST. forEachField(f) calls f(info, merge, member) for every grid above, in this order, which is also
-       the checkpoint's field order (partition_checkpoint.h forEachAccumulator) and the merge spill's
-       (ps_merge_spill.h). Everything that walks the grids goes through it: size, copyFromSubgrid, addFrom,
-       addFromSubgrid and reserveMemory (quantities.cc), and that list. A new grid is added HERE, with its tags;
-       besides, only what is particular to it: its output file (input_output.cc writeOutputData) and, when it is made
-       from other grids, its derivation (web_fields.cc).
-         info.name            the stable name (the checkpoint's)
-         info.flag            the Field flag that asks for it (nullptr: a PS-DTFE accumulator the options size)
-         info.sizing          which grids reserveMemory sizes before a partition loop (FieldSizing)
-         merge                MergeTag<FIELD_SUM> ('+=' across partitions), <FIELD_OR> (a bit mask: OR) or
-                              <FIELD_DERIVED> (never merged: the web labels, made after the merge) -- a type, so a
-                              merge can pick its code with 'if constexpr'
-         member               &Quantities::<grid>, so one walk can visit the same grid of two Quantities */
+    /* THE FIELD LIST. forEachField(f) calls f(info, merge, member) for every grid above, in this order, which is also the
+       checkpoint's field order and the merge spill's. Everything that walks the grids goes through it; a new grid is added HERE,
+       plus its output file (input_output.cc writeOutputData) and, if derived, web_fields.cc. info.name: stable name; info.flag:
+       the Field flag asking for it (nullptr: a PS accumulator the options size); info.sizing: FieldSizing tag; merge:
+       MergeTag<FIELD_SUM | FIELD_OR | FIELD_DERIVED> (for 'if constexpr'); member: &Quantities::<grid>. */
     enum FieldMerge { FIELD_SUM, FIELD_OR, FIELD_DERIVED };
     template <int M> using MergeTag = std::integral_constant<int, M>;
     enum FieldSizing
@@ -269,16 +257,13 @@ struct Quantities
     void reserveMemory(size_t *gridSize, Field &field, User_options const *psRun = nullptr);
     void addFrom(Quantities const &other); // element-wise accumulate from another Quantities (PS-DTFE partitioning)
 #ifdef PHASE_SPACE
-    // Turn the summed moments into means (call once, after all partitions added): the velocity family by its
-    // moment weight (the volume shares), the dispersion by its own mass normalizer where disp_weight holds it.
-    // When the partitions aliased the weight to the density grid (density field selected and mass-weighted
-    // moments -> no mass_weight was filled), pass weightFromDensityScale =
-    // cellVolume * averageDensity so the per-cell mass is reconstructed from the summed
-    // (rho/rho_bar) density; 0 normalizes by the mass_weight grid only.
-    // streamsTwins: the regular part's twins of a face pass (psFaceGradientBegin's 'twins')
+    // Turn the summed moments into means (once, after all partitions): the velocity family by its moment weight, the
+    // dispersion by its own mass normalizer where disp_weight holds it. If the partitions aliased the weight to the
+    // density grid (no mass_weight filled), pass weightFromDensityScale = cellVolume * averageDensity to rebuild the
+    // per-cell mass; 0 normalizes by the mass_weight grid only. streamsTwins: the regular part's twins of a face pass.
     void normalizePhaseSpace(Field const &field, Real const weightFromDensityScale = Real(0.),
                              unsigned const streamsTwins = 0u);
-    void addFromSubgrid(Quantities const &other, size_t const *fullGrid, size_t const *mainOrigin = nullptr, size_t const *mainDims = nullptr);   // mainOrigin/mainDims: this grid is itself a window of the full grid (--grid-window) // like addFrom but 'other' stores only its Eulerian box; maps each cell into the full grid (dims fullGrid)
+    void addFromSubgrid(Quantities const &other, size_t const *fullGrid, size_t const *mainOrigin = nullptr, size_t const *mainDims = nullptr);   // mainOrigin/mainDims: this grid is itself a window of the full grid (--grid-window); maps each cell of 'other' (its Eulerian box only) into the full grid
     void finalizeHiddenStreams();   // after the merge: clear '.hidden_streams' bit 1 where '.streams' reads multi-stream (idempotent)
 #endif
 };

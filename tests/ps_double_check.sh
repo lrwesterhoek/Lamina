@@ -1,22 +1,6 @@
 #!/usr/bin/env bash
-# The double-precision pair (DTFE-double / PS-DTFE-double, 'make DTFE PS-DTFE DOUBLE=1 [METAL=1]')
-# against the single-precision pair, on the same crossed-wave snapshot:
-#   D1  the double binaries write float64 grids (file size = 8 bytes per value) and the float ones float32
-#   D2  phase-space sampled cell averages, CPU: double vs single agree the way two float paths do (means to
-#       1e-5, per cell to 5e-2 of the peak outside a 1e-3 fraction: a few borderline samples change cell, and a
-#       handful of co-spherical tetrahedra resolve differently in double); stream counts and caustic flags identical
-#   D3  phase-space point evaluation (slice): double vs single densities in the same class, streams identical
-#   D4  standard-DTFE cell averages, CPU: double vs single in the same class
-#   D5  GPU deposits of the DOUBLE binaries (--gpu, both binaries): the GPU kernels are single precision and the
-#       double build hands them float copies of its tetrahedra, so each must match ITS OWN CPU run the way the
-#       single build's GPU matches its CPU (means to 1e-5, per-cell to 5e-2 outside a 1e-3 fraction) and must
-#       conserve mass; skipped when the double pair was built without METAL=1. Its stream counts are IDENTICAL to
-#       the CPU's, as in the single build: the host builds the GPU's per-tet record from the double vertices
-#       (ps_deposit_params.h psFillTetRecord). Rounding them to float first would shift them by more than the
-#       kernel's error bound covers (it covers the record's own roundings), so a sub-sample that close to a
-#       face could be counted on the wrong side -- 0-2 cells of 48^3 on five of six seeds of this wave.
-#   D6  the Python side reads float64 grids: python/gui/grids.py infers the dtype from the file size
-# Both pairs must be built (./DTFE ./PS-DTFE ./DTFE-double ./PS-DTFE-double); --no-build is accepted and ignored.
+# The double-precision pair (DTFE-double / PS-DTFE-double, 'make DTFE PS-DTFE DOUBLE=1 [METAL=1]') against the
+# single-precision pair on the same crossed-wave snapshot:
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$SCRIPT_DIR")"

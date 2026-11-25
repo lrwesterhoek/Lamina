@@ -1,70 +1,22 @@
-/* THE RUN-WIDE FIXED-POINT UNITS AND WORDS (both binaries).
+/* THE RUN-WIDE FIXED-POINT UNITS AND WORDS (both binaries): one unit 2^-K per accumulator for the whole run, from global
+   quantities only (DTFE.cpp runUnitsSetup, before the planner and any partition), so every split rounds every share to
+   the same integer; the integers add exactly in any order. Plain C++17 (and __int128): no Metal or Objective-C. */
 
-   A grid summed in fixed point counts in a unit 2^-K: a share s becomes the integer rint(s * 2^K) (an exact product,
-   a power of two, rounded half to even), and the integers add exactly in any order. The unit decides a share's
-   integer, so a unit taken per GPU batch or per PS-DTFE pass from that batch's own bound rounds the same share to
-   another integer in another partition split. RunUnits holds ONE unit per accumulator for the whole run, from global
-   quantities only, fixed before the planner and before any partition or thread sub-domain exists (DTFE.cpp
-   runUnitsSetup, right after the mean density): every split rounds every share alike. Standard DTFE's deposits take
-   them; PS-DTFE's passes take units of their own, and the PS-DTFE binary sets none.
+// THE RULE. K_g = N_g - e_g, with the accumulator's per-cell scale S_g in [2^(e_g - 1), 2^e_g), from the grid's cell
+// sides, rho_bar and one serial pass over the particles (vmax, smax, total mass, count). N_g: 48 for the density, the
+// velocity, the per-tet gradient and the scalar; 61 for the standard face pass; 72 for the vertex star sums. A scale
+// not positive and finite falls back to its weight's scale, else 1; K outside [-120, 120] leaves the accumulator on its
+// per-batch rule (has() false), as do the standard scalar grids under '--approx-phase-space-density'.
 
-   THE RULE. K_g = N_g - e_g, where the accumulator's natural per-cell scale S_g lies in [2^(e_g - 1), 2^e_g), so S_g
-   sits at [2^(N_g - 1), 2^N_g) units. The inputs: the grid's cell sides dx_a (its box over its cells, as the grid
-   frame's dxG: user_options.h gridFrame), V_cell, dx_min and the largest cell face A = V_cell / dx_min; rho_bar (the
-   run's mean density); and one serial pass over the particles the run uses (measure): vmax = the largest |velocity
-   component|, smax = the largest |scalar component|, M = the total mass and their count n. The maxima are exact and
-   the sum runs over one array in one order, so every split gets the same bits.
-       accumulator                             one share             S_g                                N_g
-       standard density                        (rho/rho_bar) dV      V_cell                             48
-       standard velocity (each component)      v dV                  V_cell vmax                        48
-       standard per-tet gradient               dv/dx dV              V_cell vmax / dx_min               48
-       standard scalar, its gradient           s dV, ds/dx dV        V_cell smax, V_cell smax / dx_min  48
-       standard face pass (9 words per cell)   v_j A (a double)      2 vmax A                           61
-       vertex star sums                        a cell's volume       (NO_DIM+1) (M / n) / rho_bar       72
-   A scale that is not positive and finite falls back to its weight's scale, else 1 (fill's 'pick'). K outside
-   [-120, 120] (psMassFixedScale's range, ps_deposit_params.h): that accumulator has no run-wide unit (has() false) and
-   keeps its per-batch or per-pass rule; the units line names it and the run warns once. The standard scalar grids
-   under '--approx-phase-space-density' have none either: their scalar is f = rho g, formed after the units are set, so
-   smax does not measure it (DTFE.cpp runUnitsSetup clears their ok[]).
+// THE CAP. One share's integer stays below 2^(126 - c) units, c = log2 of the most shares one cell component gets in
+// one batch (32), so every partial sum of a 128-bit word stays below 2^126 in any order; a share at or above the cap
+// adds nothing and is counted (psFixedShareOk). The face pass is bounded by 2 vmax A (< 2^61): its cap guards NaN only.
 
-   THE CAP. One share's integer must stay below 2^capLog2 units, capLog2 = 126 - c, c = log2 of the most shares one cell
-   component can receive in one batch or pass: 32 for the standard deposits and the vertex star sums (at most 2^32
-   tetrahedra in one batch, pass or vertex star). The standard face pass needs no count: its per-cell bound (below)
-   holds every partial sum, so its cap only guards against a NaN or an infinity, at 2^118, the largest a share's device
-   limbs take (fixed_words.metal.inc shareLimbs); that leaves the test shift its room (N = 61 lies 33 bits below 2^94).
-   A share at or above the cap -- a NaN or an infinity too -- adds nothing and is counted, as the 2^63 guard of the
-   64-bit words does (ps_deposit_params.h psFixedShareOk). At N = 48 the cap is about 2^46.5 S_g.
+// THE WORDS. GPU: four 32-bit atomic limbs per component (fixed_words.metal.inc). Host (FxWords): an int64 per component
+// plus an exact sparse carry list, value = w[i] + 2^64 carry_i in any add order (fxAddOwned, fxAddShared, fxCarryFinish).
+// fxToReal rounds the 128-bit integer once, then scales exactly (a double then a float conversion would round twice).
 
-   WHY NOTHING WRAPS. A 128-bit word holds |x| < 2^127. Every integer added is below 2^(126 - c) and one cell component
-   receives at most 2^c of them, so every partial sum -- a subset sum, in whatever order the adds land -- stays below
-   2^126. The device's four limbs hold the sum modulo 2^128 exactly (fixed_words.metal.inc), and so the sum
-   itself. FxWords hold word + 2^64 carry exactly for any |value| below 2^127. The standard face pass: one tessellation
-   tiles each grid plane once and every vertex velocity is a particle's, so a cell's face word lies within 2 vmax A,
-   below 2^61 units -- an int64 holds it with room for a float excess of a share up to a factor just under 4, and the
-   carry holds anything beyond. The vertex star sums: each volume's integer is below 2^94 and a vertex has fewer than
-   2^32 tetrahedra, so a sum stays below 2^126.
-
-   THE WORDS. On the GPU (metal/fixed_words.metal.inc): four 32-bit atomic limbs per component, 16 B. On the host
-   (FxWords): an int64 per component plus an exact sparse carry, so the host grids stay at 8 B per component: the
-   value of component i is w[i] + 2^64 carry_i whatever order the adds came in; the carry holds only the components
-   whose adds crossed the int64 range on balance, sorted by index. A thread that owns its cells adds with
-   __builtin_add_overflow (fxAddOwned); threads that share cells add atomically and read a crossing off the old value
-   their own atomic returns (fxAddShared): the atomics of one word form one total order, so every crossing is
-   recorded once. Each thread keeps its own crossing list; fxCarryFinish sorts and sums them. A share of 2^63 units
-   or more (below the cap) goes in as its low 64 bits plus a carry entry for the rest.
-
-   THE CONVERSION. fxToReal(X, K) = ldexp(Real(X), -K): one rounding of the 128-bit integer to nearest even (the
-   compiler's __int128 conversion), then a scaling that is exact while the result is a normal float. A double
-   conversion and then a float one would round twice.
-
-   THE HOOK. DTFE_TEST_RUN_UNIT_SHIFT=n (runUnitShift, read once) makes every N_g larger by n, every unit 2^n finer:
-   -20 makes nearly every share round, +40 pushes cells into limbs 2 and 3 and into the host carries. Standard DTFE's
-   checkpoint key names it (runUnitsKeyLine), so a resume across it is refused. The vertex star sums take no shift:
-   their shares are double volumes, which round at any unit, and their cap lies only 2^22 W_bar above a cell's
-   integer, so a finer unit would only send their cells to the double sums of their fallback (triangulation.cpp
-   vertexDensityStarSums) and a coarser one round small stars away.
-
-   Plain C++17 (and the GCC / Clang __int128): no Metal or Objective-C, so every build includes it (user_options.h). */
+// DTFE_TEST_RUN_UNIT_SHIFT=n makes every unit 2^n finer but the vertex star sums'; the checkpoint key names it.
 #ifndef DTFE_FIXED_UNITS_H
 #define DTFE_FIXED_UNITS_H
 
@@ -201,12 +153,10 @@ struct RunUnits
     // grid g has a run-wide unit (else its deposit keeps its per-batch or per-pass rule)
     bool has(int const g) const { return filled and ok[g]; }
 
-    // Whether vertexDensity sums the vertex stars exactly (triangulation.cpp vertexDensityStarSums) in a tessellation
-    // of mean density meanDensity: the standard binary's single build (PS-DTFE, which sets no units, and the double
-    // build keep the double sums), the unit set, and the run's own mean density -- the unit is W_bar = (NO_DIM+1)
-    // (M / n) / rho_bar, so a tessellation of another mean density (the velocity-space one of
-    // '--approx-phase-space-density') keeps the double sums. The tessellation cache's key names it
-    // (tessellation_cache.h makeDescriptor): the vertex densities a cache file holds differ between the two.
+// Whether vertexDensity sums the vertex stars exactly (triangulation.cpp vertexDensityStarSums) in a tessellation of
+// mean density meanDensity: the standard binary's single build with the unit set and the run's own mean density (unit
+// W_bar = (NO_DIM+1)(M / n)/rho_bar); PS-DTFE, the double build and another mean density ('--approx-phase-space-density')
+// keep the double sums. The tessellation cache's key names it (tessellation_cache.h makeDescriptor).
     bool starSums(double const meanDensity) const
     {
         return sizeof(Real) == 4 and has( RU_VERTEX_VOLUME ) and meanDensity == rhoBar;
@@ -272,8 +222,7 @@ typedef std::vector<FxCarry> FxCarryList;   // one per thread while a pass adds;
 
 // One grid's exact sums: an int64 per component, plus the exact sparse carry. The value of component i is
 // int128(w[i]) + 2^64 * carry_i, whatever order the adds came in. carry holds only the components whose adds
-// crossed the int64 range on balance, sorted by index. (Under '--scratch-dir' an allocation of >= 1 GB is backed by
-// scratch_alloc.cc, as every grid's is.)
+// crossed the int64 range on balance, sorted by index.
 struct FxWords
 {
     std::vector<int64_t> w;
@@ -309,12 +258,10 @@ inline void fxAddOwned(int64_t &w, __int128 const q, uint64_t const key, FxCarry
     w = r;
 }
 
-// The 64-bit route through fxShare + fxAddOwned, which nearly every share takes: a product whose magnitude is below
-// fxFast64(cap) = min(cap, 2^63) units has its integer in an int64 (llrint rounds as nearbyint does, in the one
-// rounding mode, and the result fits) and no part beyond the low word, so fxAddOwned64 of llrint(product) adds what
-// fxShare + fxAddOwned add: the same word, the same carry entry. Any other product (2^63 units or more, at or beyond
-// the cap, a NaN, an infinity) takes fxShare + fxAddOwned. On arm64 the 128-bit route costs a library call per
-// share (the double to __int128 conversion).
+// The 64-bit route through fxShare + fxAddOwned, which nearly every share takes: a product below fxFast64(cap) =
+// min(cap, 2^63) units has its integer in an int64 (llrint rounds as nearbyint does) and no part beyond the low word, so
+// fxAddOwned64 of llrint(product) adds what fxShare + fxAddOwned add: the same word and carry entry. Any other product
+// takes fxShare + fxAddOwned. (On arm64 the 128-bit route costs a library call per share.)
 inline double fxFast64(double const cap) { return std::min( cap, 0x1p63 ); }
 inline void fxAddOwned64(int64_t &w, int64_t const q, uint64_t const key, FxCarryList &list)
 {

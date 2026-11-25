@@ -131,18 +131,7 @@ run = functools.partial(_run, echo="full")   # the whole command line, as this s
 
 
 def check_caustics(binary, snap, grid=GRID, box=BOX, amp=AMP):
-    """Gated --ps-caustics section: analytic fold positions + partition invariance.
-
-    The flag marks every cell overlapped by tetrahedra of BOTH map orientations. In the
-    pancake's 3-stream slab the middle stream has negative parity THROUGHOUT, so the whole
-    slab is (correctly) flagged; the fold caustics x(q): 1 + AMP cos(k q) = 0 are the
-    BOUNDARIES of the flagged region (folds bound multi-stream regions -- the caustic-
-    skeleton statement). Asserted here: (a) values are exactly {0,1}; (b) the flagged set
-    is an x-slab whose edges lie within +-2 cells of the analytic caustic planes (jitter
-    tolerance) and NOTHING is flagged outside it; (c) the edges coincide with the .streams
-    1<->3 transitions to +-1 cell; (d) '--partition 2 2 2' gives a byte-identical
-    '.caustic' (the orientation bits merge with an order-independent bitwise OR).
-    """
+    """Gated --ps-caustics section: analytic fold positions + partition invariance."""
     full_help = subprocess.run([binary, "--full-help"], capture_output=True,
                                text=True).stdout
     if "--ps-caustics" not in full_help:
@@ -220,12 +209,8 @@ def analyze(den, streams, grid=GRID, box=BOX, amp=AMP, n=N,
             extra_metrics=None, extra_tol=None, pts_streams=None):
     f_analytic, xlo_a, xhi_a = analytic_pancake(amp)
 
-    # Stream statistics use the EXACT containment counts from the point evaluation
-    # (--sample-points at the cell centres) when available. The deposit's .streams at
-    # nSub=1 is the same quantity -- one sample per cell, at the centre -- and must
-    # agree with them (checked below); counting every centroid-FALLBACK deposit of a
-    # sub-cell tetrahedron as a stream as well would inflate ~1/4 of the counts at
-    # N=grid/2.
+    # Stream statistics use the EXACT containment counts of the point evaluation (--sample-points at the cell
+    # centres) when available; the deposit's .streams at nSub=1 is the same quantity and must agree (checked below).
     counts = pts_streams if pts_streams is not None else streams
 
     rho_1d = den.mean(axis=(1, 2))

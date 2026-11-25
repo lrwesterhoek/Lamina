@@ -1,26 +1,7 @@
 """The void catalogue of a run's grids: is it cached, and building it -- for the launcher's Runs tab and its
 'Build void catalogue' queue job.
 
-The catalogue is the analysis pipeline's own (pipeline.SnapshotProducts.voids(), cached under python/cache or
-DTFE_CACHE_DIR), in the frame ADOPTED from the grid (pipeline.adopt_snapshot_grid), exactly as the Explore tab's
-void outlines (tools/void_outlines.py) read it: for the production grids that is the analysis scripts' cache
-file. Run with DTFE_DATA_ROOT set to the data root; config reads the box for the simulation, which 'status' takes
-from DTFE_SIM (the one simulation of its list) and 'build' from --sim (void_outlines.name_simulation's rule):
-
-    DTFE_SIM=TNG100-3-Dark python3 python/gui/void_cache.py status < runs.json
-    python3 python/gui/void_cache.py build --sim TNG100-3-Dark --snap 99 --estimator ps
-
-status  reads a JSON list of {sim, snap, method, prefix} on stdin and prints ONE JSON line: a list of
-        {'state', 'why'} in the same order, state one of
-          'cached'  a catalogue built from the density grid on disk now (pipeline._cached's grid stamp test)
-          'stale'   a catalogue is there but from another version of the grid (rewritten since): the next
-                    reader rebuilds it; or its radii R_v are not today's (pipeline.catalog_r_v_ok: older R_v
-                    settings, none recorded, or no R_v at all): the next reader re-measures them
-          'absent'  none built yet
-          'error'   no grid or header to judge by (why says what)
-        Nothing is built and nothing is written (the cache folder is not even created).
-build   builds (or confirms) one snapshot's catalogue, refusing when it would not fit in the memory the other
-        programs leave free (void_outlines' rule), and prints how many voids it holds. Exit 1 with the reason.
+    DTFE_SIM=<sim> python3 python/gui/void_cache.py status < runs.json  |  ... build --sim S --snap N --estimator E
 """
 
 from __future__ import annotations

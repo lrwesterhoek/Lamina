@@ -1,39 +1,6 @@
-/* Per-tetrahedron caustic stratification for '--ps-caustics'.
- *
- * WHAT THIS COMPUTES. The Lagrangian->Eulerian map of a phase-space tetrahedron is LINEAR, so its
- * deformation tensor J = dx/dq is CONSTANT inside the tetrahedron and exactly recoverable from the
- * two edge matrices the deposit already builds: with rows holding the edge vectors of vertices
- * 1..NO_DIM relative to vertex 0, Ax = Lag * J^T, hence J^T = Lag^-1 * Ax. Eigenvalues are
- * invariant under transposition, so the routine below analyses M = Lag^-1 * Ax directly.
- *
- * The number of NEGATIVE real eigenvalues of J is the number of principal axes along which the
- * sheet has already collapsed and inverted -- the collapse multiplicity k. It refines the fold
- * flag exactly: sign(det J) = (-1)^k, so the existing parity bit is k mod 2, and k additionally
- * separates one-axis collapse (pancakes/walls) from two-axis (filaments) and three-axis (nodes).
- * In 3D k is in 0..3, in 2D in 0..2.
- *
- * DERIVATIVE-FREE OR NOT. The collapse multiplicity above and the D4 (umbilic) indicator are
- * pointwise. D4 is where TWO eigenvalues of J vanish TOGETHER, and both halves matter: a test for
- * coincidence alone is not an umbilic test, it fires across a box with no caustic in it (see
- * UMBILIC_ZERO_BAND).
- *
- * A2/A3/A4 are not pointwise. They are separated by successive directional derivatives of the
- * critical eigenvalue along its own eigenvector (D_n = the n-th derivative of lambda_c along v_c):
- *
- *     A2  lambda_c = 0, D1 != 0                 surface in Lagrangian space (codimension 1)
- *     A3  lambda_c = 0, D1 = 0, D2 != 0         curve                       (codimension 2)
- *     A4  lambda_c = 0, D1 = D2 = 0, D3 != 0    isolated points             (codimension 3)
- *
- * None of those exist inside a tetrahedron where J is constant, so they are fitted across the
- * surrounding tetrahedra (foldDerivatives). BIT_CUSP and BIT_SWALLOWTAIL are therefore indicators at
- * the stencil's resolution, not identifications of the strata -- most sharply for A4, whose points
- * are isolated and so lie inside no tetrahedron generically. The 1-D validation waves are
- * translation-symmetric, which inflates their A3/A4 sets into planes; that is what makes them
- * measurable at all.
- *
- * The per-cell export ORs these per-tetrahedron bits together, exactly like the parity bits, so the
- * result stays independent of the partition and thread schedule (OR is commutative and idempotent).
- */
+/* Per-tetrahedron caustic stratification for '--ps-caustics': J = dx/dq is constant in a tetrahedron (J^T = Lag^-1 * Ax);
+ * the number k of NEGATIVE real eigenvalues of J is the collapse multiplicity (sign det J = (-1)^k). The A3/A4 bits are
+ * fitted across neighbouring tetrahedra, so they are indicators at the stencil's resolution. Per-cell bits are OR-ed. */
 
 #ifndef PS_CAUSTIC_CLASS_HEADER
 #define PS_CAUSTIC_CLASS_HEADER
@@ -48,15 +15,13 @@
 namespace PSCausticClass
 {
 
-/* Wider than a byte on purpose: bit 8 does not fit in an unsigned char. Every accumulator the mask
-   is OR-ed into must use this typedef, or bit 8 is truncated with no compiler warning (a narrowing
-   OR into an existing byte). The '.causticClass' export stays float32, which is exact to 2^24. */
+/* Wider than a byte on purpose: bit 8 does not fit in an unsigned char, and a narrowing OR into a byte truncates it with
+   no warning, so every accumulator must use this typedef. The '.causticClass' export is float32, exact to 2^24. */
 typedef unsigned short CausticMask;
 
-/* Bit layout of the per-cell mask exported as '.causticClass'. Bits 0..1 repeat the parity bits of
-   '.caustic' so the mask is self-contained; bits 2..5 record WHICH collapse multiplicities occur
-   among the tetrahedra overlapping the cell; bit 6 is the umbilic-degeneracy indicator; bits 7..8
-   are the two Arnold-stratum indicators, both of which need the '--ps-caustic-cusps' stencil. */
+/* Bit layout of the per-cell '.causticClass' mask. Bits 0..1 repeat the parity bits of '.caustic'; bits 2..5 record which
+   collapse multiplicities occur among the overlapping tetrahedra; bit 6 is the umbilic indicator; bits 7..8 are the
+   Arnold-stratum indicators and need the '--ps-caustic-cusps' stencil. */
 enum
 {
     BIT_PARITY_POS  = 1 << 0,  // a det(J) > 0 tetrahedron overlaps the cell
@@ -75,66 +40,30 @@ enum
                     | BIT_COLLAPSE_2 | BIT_COLLAPSE_3 | BIT_DEGENERATE
 };
 
-/* D4 (umbilic) thresholds. A D4 point is where two eigenvalues of J vanish TOGETHER, so the test
- * has two halves and needs both: the pair must coincide, and it must sit at zero.
- *
- * Coincidence alone is near-vacuous -- any locally isotropic patch satisfies it. Without the
- * zero-band it flags most touched cells of a weak wave that has no caustic anywhere, and on crossed
- * waves cells that lie on no fold, which an umbilic cannot do.
- *
- * Both tolerances are relative to the tetrahedron's eigenvalue SPREAD, not to the pair's own
- * magnitudes: |l_i - l_j| <= tol*(|l_i| + |l_j|) becomes unsatisfiable exactly where D4 lives. */
+/* D4 (umbilic) thresholds: two eigenvalues of J vanish TOGETHER, so the pair must coincide AND sit at zero (coincidence
+ * alone fires on any locally isotropic patch). Both tolerances are relative to the tetrahedron's eigenvalue SPREAD, not to
+ * the pair's magnitudes: |l_i - l_j| <= tol*(|l_i| + |l_j|) becomes unsatisfiable exactly where D4 lives. */
 static const double DEGENERACY_REL_TOL = 1.e-3;
 static const double UMBILIC_ZERO_BAND  = 0.25;
 
-/* A3 (cusp) detection thresholds.
- *
- * A fold is the surface where the critical eigenvalue lambda_c of J passes through zero. It is an
- * ordinary A2 fold where lambda_c varies at first order ALONG its own null direction v_c, and an A3
- * cusp where that variation stops: grad(lambda_c) . v_c = 0. Both quantities are needed only near
- * the fold itself, so a tetrahedron is considered only when |lambda_c| is small compared with the
- * spread of the eigenvalues (FOLD_BAND), and the tangency test is then made scale-free by
- * comparing |grad . v_c| against |grad| (CUSP_REL_TOL).
- *
- * grad(lambda_c) does not exist inside one tetrahedron -- J is constant there -- so it is estimated
- * by least squares from the neighbouring tetrahedra, which makes this an INDICATOR on the
- * tessellation's own resolution scale, not a pointwise identification of the A3 stratum. */
+/* A3 (cusp) thresholds. A fold is where the critical eigenvalue lambda_c of J passes through zero; it is an A3 cusp
+ * where grad(lambda_c) . v_c = 0. Only near the fold (|lambda_c| small against the eigenvalue spread: FOLD_BAND), with
+ * the tangency made scale-free by comparing |grad . v_c| against |grad| (CUSP_REL_TOL). grad is a least-squares estimate
+ * from the neighbouring tetrahedra, so this is an INDICATOR at the tessellation's resolution. */
 static const double FOLD_BAND    = 0.25;
 static const double CUSP_REL_TOL = 0.15;
 
-/* A4 (swallowtail) thresholds, applied to the derivatives from foldDerivatives() below.
- *
- * A4 asks for one more derivative to vanish than A3: D1 = 0 AND D2 = 0. The test is NOT "each
- * derivative is small" -- derivatives of different order have different units and no common scale.
- *
- * What is actually being asked is that the Taylor series of lambda_c along v_c START at cubic order,
- * i.e. that the cubic term dominate over the stencil. With h the stencil radius the contributions
- *
- *     c1 = |D1| h ,   c2 = |D2| h^2 / 2 ,   c3 = |D3| h^3 / 6
- *
- * are dimensionless once compared with each other, and the strata separate: A2 is dominated by c1,
- * A3 by c2, A4 by c3. TERM_TOL is how far below c3 the two lower terms must sit.
- *
- * SIGNAL_MIN keeps the ratios from being noise where lambda_c is flat, and rejects A5+ (where D3
- * vanishes too). Note it is UNTUNED: none of the three analytic waves exercises it, and sweeping it
- * from 0.15 to 0.90 moves the counts by at most one cell.
- *
- * TERM_TOL is calibrated on the three 1-D waves (A4-flagged cells as a fraction of A3-flagged, with the
- * deduplicated nearest-64 stencil of ps_interpolation.cc): none on a generic A2 fold, a 0.51% floor on an
- * exact A3, a 74.5% signal on an exact A4. 0.35 holds the floor but drops the signal to 15%; 0.65 buys
- * signal for a 0.66% floor. The signal can exceed 100% at large TERM_TOL because bit 8 is not a
- * subset of bit 7 -- see foldDerivatives.
- *
- * The flagged band has a width no tolerance can sharpen: at Lagrangian distance delta from the A4
- * point the fit sees D2 = 6*C*delta, so c2/c3 = 3*delta/h and the flag survives to delta ~
- * TERM_TOL*h/3 -- a fixed fraction of the STENCIL RADIUS. Hence proximity, not identification. */
+/* A4 (swallowtail) thresholds on the derivatives of foldDerivatives(). The test is that the Taylor series of lambda_c along
+ * v_c STARTS at cubic order: with stencil radius h, c1 = |D1| h, c2 = |D2| h^2/2, c3 = |D3| h^3/6 (A2 is dominated by c1,
+ * A3 by c2, A4 by c3); TERM_TOL is how far below c3 the two lower terms must sit. SIGNAL_MIN keeps the ratios from being
+ * noise where lambda_c is flat and rejects A5+. Both calibrated on the three 1-D analytic waves (nearest-64 stencil). The
+ * flagged band is a fixed fraction of the stencil radius (delta ~ TERM_TOL*h/3), hence proximity, not identification. */
 static const double SWALLOWTAIL_TERM_TOL   = 0.50;
 static const double SWALLOWTAIL_SIGNAL_MIN = 0.25;
 
 
-/* Real eigenvalues of a 3x3 matrix from its characteristic polynomial, in closed form.
-   lambda^3 - p*lambda^2 + q*lambda - r = 0 with p = tr(M), q = sum of principal 2x2 minors,
-   r = det(M). Returns the number of real roots found (1 or 3) and fills 'root'. */
+/* Real eigenvalues of a 3x3 matrix in closed form (lambda^3 - p lambda^2 + q lambda - r = 0). Returns the number of real
+   roots found (1 or 3) and fills 'root'. */
 inline int realEigenvalues3(double const M[3][3], double root[3])
 {
     double const p = M[0][0] + M[1][1] + M[2][2];
@@ -157,12 +86,9 @@ inline int realEigenvalues3(double const M[3][3], double root[3])
         root[0] = root[1] = root[2] = shift;
         return 3;
     }
-    /* A DOUBLE root sits exactly at disc == 0, where rounding routinely pushes the computed value
-       slightly negative (e.g. -4e-5 against terms of order 1 for eigenvalues (-0.5,-0.5,0.9)) and
-       would divert a perfectly real triple into the single-root branch -- losing precisely the
-       coincident pair the umbilic indicator is looking for. Anything within rounding of zero is
-       therefore treated as three real roots; the trigonometric branch clamps its argument, so a
-       marginally out-of-range acos() is safe. */
+    /* A DOUBLE root sits at disc == 0, where rounding pushes the computed value slightly negative and would divert a real
+       triple into the single-root branch, losing the coincident pair the umbilic indicator looks for. Anything within
+       rounding of zero is treated as three real roots; the trigonometric branch clamps acos()'s argument. */
     double const discScale = std::max( std::fabs(4.*a*a*a), std::fabs(27.*b*b) );
     if ( disc >= -1.e-9 * discScale )
     {                                              // trigonometric (Viete) form, all roots real
@@ -184,9 +110,8 @@ inline int realEigenvalues3(double const M[3][3], double root[3])
 }
 
 
-/* The deformation of one tetrahedron: everything the caustic bits are derived from, exposed so the
-   A3 test can reuse the critical eigenvalue and its null direction across neighbouring tetrahedra.
-   'valid' is false when the Lagrangian simplex is too flat to define J. */
+/* The deformation of one tetrahedron, exposed so the A3 test can reuse the critical eigenvalue and its null direction
+   across neighbours. 'valid' is false when the Lagrangian simplex is too flat to define J. */
 struct TetDeformation
 {
     bool   valid    = false;
@@ -220,10 +145,8 @@ inline bool nullVector3(double const M[3][3], double lambda, double v[3])
 #endif
 
 
-/* Full deformation analysis of one tetrahedron from its Eulerian (Ax) and Lagrangian (Lag) edge
-   matrices. classifyTet() below is the thin wrapper the deposit uses when it only wants the bits.
-   Both are built on the two shared primitives declared beneath, so the deformation tensor and the
-   characteristic cubic are each solved exactly once per call. */
+/* Full deformation analysis of one tetrahedron from its Eulerian (Ax) and Lagrangian (Lag) edge matrices; classifyTet()
+   is the thin wrapper for the bits only. Both share two primitives, so the tensor and the cubic are solved once per call. */
 inline TetDeformation analyzeTet(double const Ax[NO_DIM][NO_DIM],
                                  double const Lag[NO_DIM][NO_DIM]);
 inline bool deformationTensor(double const Ax[NO_DIM][NO_DIM],
@@ -232,11 +155,8 @@ inline bool deformationTensor(double const Ax[NO_DIM][NO_DIM],
 inline CausticMask bitsFromSpectrum(double const ev[], int const nReal);
 
 
-/* Classification bits for one tetrahedron, from its Eulerian (Ax) and Lagrangian (Lag) edge
-   matrices. Returns 0 when the Lagrangian simplex is degenerate (no invertible map, so no
-   deformation tensor exists) -- the caller then keeps only the parity bit it already has.
-   This is the deposit's hot path: it wants the bits and nothing else, so it stops at the spectrum
-   and never forms the null vector that analyzeTet needs. */
+/* Classification bits of one tetrahedron from its edge matrices; 0 when the Lagrangian simplex is degenerate (the caller
+   keeps its parity bit). The deposit's hot path: it stops at the spectrum and never forms the null vector. */
 inline CausticMask classifyTet(double const Ax[NO_DIM][NO_DIM],
                                double const Lag[NO_DIM][NO_DIM])
 {
@@ -266,16 +186,13 @@ inline CausticMask classifyTet(double const Ax[NO_DIM][NO_DIM],
 }
 
 
-/* The Lagrangian->Eulerian deformation tensor of one tetrahedron, shared by classifyTet and
-   analyzeTet so the inverse and the matrix product are formed exactly once per call site. */
+/* The Lagrangian->Eulerian deformation tensor of one tetrahedron, shared by classifyTet and analyzeTet. */
 inline bool deformationTensor(double const Ax[NO_DIM][NO_DIM],
                               double const Lag[NO_DIM][NO_DIM],
                               double M[NO_DIM][NO_DIM])
 {
-    /* The inverse is formed HERE in double precision instead of through math_functions.h's
-       matrixInverse(): that one writes a 'Real' result (float in a single-precision build) and
-       zeroes it whenever |det| < 1e-6 as an ABSOLUTE threshold, which small Lagrangian simplices
-       can legitimately fall below -- a zero inverse would then be silently classified as k = 0.
+    /* The inverse is formed HERE in double: math_functions.h's matrixInverse() writes a 'Real' and zeroes it below an
+       ABSOLUTE |det| < 1e-6, which small Lagrangian simplices can fall below (a zero inverse would read as k = 0).
        The guard below is relative to the matrix scale instead. */
     double scale = 0.;
     for (int i=0; i<NO_DIM; ++i)
@@ -321,9 +238,7 @@ inline bool deformationTensor(double const Ax[NO_DIM][NO_DIM],
 }
 
 
-/* The classification bits that follow from an ALREADY-COMPUTED spectrum. Split out so analyzeTet
-   can reuse the eigenvalues it has instead of asking classifyTet to solve the cubic a second time
-   (see the note there). */
+/* The classification bits that follow from an already-computed spectrum (analyzeTet reuses its eigenvalues). */
 inline CausticMask bitsFromSpectrum(double const ev[], int const nReal)
 {
     CausticMask bits = 0;
@@ -348,13 +263,9 @@ inline CausticMask bitsFromSpectrum(double const ev[], int const nReal)
             }
     }
 #elif NO_DIM==2
-    /* nReal is 0 for a complex pair (no collapsed axis to report) and 2 otherwise.
-       No umbilic bit in 2D, deliberately. The 3D test asks that a coincident PAIR sit at zero while
-       a third eigenvalue sets the scale; with only two eigenvalues the pair IS the whole spectrum,
-       so "both at zero relative to the spread" is either vacuous or unsatisfiable depending on what
-       one picks for the scale, and there is no honest third choice. That matches the mathematics: a
-       corank-2 degeneracy needs the entire differential to vanish, which is codimension 3 and so
-       does not occur generically in a 2-parameter Lagrangian family. Nothing claimed. */
+    /* nReal is 0 for a complex pair (no collapsed axis to report) and 2 otherwise. No umbilic bit in 2D, deliberately:
+       the pair would be the whole spectrum, so "both at zero relative to the spread" has no honest scale, and a corank-2
+       degeneracy is codimension 3, not generic in a 2-parameter Lagrangian family. */
     for (int i=0; i<nReal; ++i)
         if ( ev[i] < 0. ) ++nNeg;
 #endif
@@ -371,11 +282,8 @@ inline CausticMask bitsFromSpectrum(double const ev[], int const nReal)
 }
 
 
-/* Deformation tensor M = Lag^-1 * Ax (= J^T, same eigenvalues), its bits, and the eigenvalue
-   nearest zero with its null direction.
-   Shares deformationTensor() + bitsFromSpectrum() with classifyTet so the characteristic cubic is
-   solved once per call, not twice. Not a cold path: under '--ps-caustic-cusps' this runs once per
-   tetrahedron plus once per ring member of every near-fold one. */
+/* Deformation tensor M = Lag^-1 * Ax (= J^T, same eigenvalues), its bits, and the eigenvalue nearest zero with its null
+   direction. Shares deformationTensor() + bitsFromSpectrum() with classifyTet, so the cubic is solved once per call. */
 inline TetDeformation analyzeTet(double const Ax[NO_DIM][NO_DIM],
                                  double const Lag[NO_DIM][NO_DIM])
 {
@@ -429,16 +337,9 @@ inline TetDeformation analyzeTet(double const Ax[NO_DIM][NO_DIM],
 }
 
 
-/* The A3 (cusp) indicator for one tetrahedron.
- *
- * 'self' is its deformation, 'dq' the Lagrangian offsets of the neighbours from its own centroid
- * and 'dLambda' their critical eigenvalue minus its own. The gradient of lambda_c is the least-
- * squares solution of dq . g = dLambda (normal equations on a 3x3 system -- with four neighbours
- * the system is over-determined, which is what makes it usable at all on an irregular
- * tessellation). The cusp condition is that the gradient carries no component along the null
- * direction: |g . v_c| << |g|.
- *
- * Returns false unless the tetrahedron is BOTH near its fold and tangent there. */
+/* The A3 (cusp) indicator: 'self' is the tetrahedron's deformation, 'dq' the Lagrangian offsets of the neighbours from its
+ * centroid and 'dLambda' their critical eigenvalue minus its own. The gradient g of lambda_c is the least-squares solution of
+ * dq . g = dLambda; the cusp condition is |g . v_c| << |g|. False unless the tet is BOTH near its fold and tangent there. */
 inline bool cuspIndicator(TetDeformation const &self,
                           double const dq[][NO_DIM], double const dLambda[], int n)
 {
@@ -473,13 +374,9 @@ inline bool cuspIndicator(TetDeformation const &self,
             for (int j=0; j<3; ++j) T[i][j] = (j==c ? b[i] : A[i][j]);
         g[c] = determinant( T ) / detA;
     }
-    /* The yardstick is the variation actually MEASURED across the neighbours, not the norm of the
-       fitted gradient. |g| is the wrong reference: on an irregular tessellation the transverse
-       components of g absorb fit noise, so a tetrahedron whose neighbours barely differ along v_c
-       -- a set of neighbours clustered in one slab, say -- gets a small |g.v_c| next to a
-       noise-inflated |g| and looks like a cusp: on the 1-D Zel'dovich wave at A*k = 1.8, where
-       theory says the fold is generic and there are NO cusps, that mistake marks fold cells as cusps.
-       The largest observed slope |dlambda|/|dq| is a direct, noise-free scale. */
+    /* The yardstick is the largest observed slope |dlambda|/|dq|, not |g|: on an irregular tessellation g's transverse
+       components absorb fit noise, so neighbours clustered in a slab give a small |g.v_c| beside a noise-inflated |g| and
+       fold cells would be marked as cusps. */
     double slope = 0.;
     for (int k=0; k<n; ++k)
     {
@@ -487,23 +384,16 @@ inline bool cuspIndicator(TetDeformation const &self,
         if ( len > 0. ) slope = std::max( slope, std::fabs(dLambda[k]) / len );
     }
     double const gn = slope;
-    /* A VANISHING variation is the cusp condition in its strongest form -- at an A3 point lambda_c
-       is stationary, so symmetric neighbours legitimately measure no slope (the 1-D Zel'dovich wave
-       at A*k = 1 folds at kq = pi, where lambda_c = 1 + cos(kq) has a quadratic minimum) -- but
-       ONLY when the tetrahedron is also essentially ON the fold. On a regular lattice plenty of
-       tetrahedra have neighbours whose critical eigenvalues happen to coincide while lambda_c
-       itself is far from zero; accepting them marks cusps on fold cells of the A*k = 1.8 wave,
-       which theory says has none at all. FOLD_BAND is deliberately generous so the gradient can
-       be measured on the approach to a fold; this branch, having no gradient to lean on, demands
-       the much stricter statement that lambda_c has actually reached zero. */
+    /* A VANISHING variation is the cusp condition in its strongest form (lambda_c is stationary at an A3 point), but ONLY
+       when the tetrahedron is essentially ON the fold: neighbours whose critical eigenvalues coincide while lambda_c is
+       far from zero would otherwise mark fold cells as cusps. FOLD_BAND is generous so a gradient can be measured on the
+       approach; with no gradient to lean on this branch demands lambda_c has actually reached zero. */
     if ( gn <= 0. ) return std::fabs(self.critical) <= 0.02 * self.spread;
     double const along = std::fabs( g[0]*self.vcrit[0] + g[1]*self.vcrit[1] + g[2]*self.vcrit[2] );
     return along <= CUSP_REL_TOL * gn;
 #elif NO_DIM==2
-    /* 2D, the same test: in a 2D Lagrangian map the generic singularities are folds (A2, lines) and
-       cusps (A3, points) -- where the fold line turns tangent to its null direction. The gradient of
-       lambda_c is the 2x2 least-squares fit over the vertex-incident ring, judged against the largest
-       measured slope, as above. */
+    /* 2D, the same test: the generic singularities are folds (A2, lines) and cusps (A3, points). The gradient of lambda_c is
+       the 2x2 least-squares fit over the vertex-incident ring, judged against the largest measured slope, as above. */
     if ( not self.valid or n < 2 ) return false;
     if ( self.spread <= 0. ) return false;
     if ( std::fabs(self.critical) > FOLD_BAND * self.spread ) return false;   // not near a fold
@@ -574,24 +464,11 @@ inline bool solveSmall(double A[][5], double b[], int n, double x[])
 }
 
 
-/* The first three derivatives of lambda_c along its own null direction v_c, plus the measured
-   yardsticks the A3/A4 tests judge them against.
- *
- * MODEL. With t = dq . v_c the axial coordinate, the fit over the stencil is
- *
- *     dLambda ~= g . dq  +  c * t^2  +  d * t^3        (5 unknowns: g is a full 3-vector)
- *
- * anchored at the tetrahedron's own centroid, so there is no constant term. D1 = g.v_c, D2 = 2c,
- * D3 = 6d. The gradient is kept FULLY three-dimensional while the higher orders are axial only:
- * transverse variation of lambda_c is real and first order, and dropping it would alias straight
- * into the axial coefficients, but transverse second and third order terms are small enough to
- * leave out -- and every extra column is another place for stencil noise to land.
- *
- * THE CUBIC TERM IS NOT OPTIONAL. Near a swallowtail lambda_c ~ C*t^3, and least squares of a
- * purely LINEAR model against a cubic returns g.v_c = C*sum(t^4)/sum(t^2) ~ 0.6*C*h^2 -- about 0.6
- * of the measured slope, four times cuspIndicator's 0.15 threshold. So a genuine A4 point does NOT
- * set BIT_CUSP, and swallowtailIndicator must re-derive D1 from THIS model rather than chain off
- * cuspIndicator. Expect cells flagged A4 but not A3; the two bits are independent measurements. */
+/* The first three derivatives of lambda_c along its null direction v_c, plus the yardsticks the A3/A4 tests judge them by.
+ * Model, with t = dq . v_c: dLambda ~= g . dq + c t^2 + d t^3 (5 unknowns, anchored at the centroid); D1 = g.v_c, D2 = 2c,
+ * D3 = 6d. g stays fully 3-D (dropping the transverse variation would alias into the axial terms). The cubic term is NOT
+ * optional: near a swallowtail a purely linear fit returns g.v_c ~ 0.6 of the slope, above cuspIndicator's threshold, so
+ * swallowtailIndicator re-derives D1 from this model and a cell can be flagged A4 but not A3. */
 struct FoldDerivatives
 {
     bool   valid = false;
@@ -609,8 +486,7 @@ inline FoldDerivatives foldDerivatives(TetDeformation const &self,
 {
     FoldDerivatives fd;
 #if NO_DIM==3
-    // Five unknowns: five samples would fit exactly, with no redundancy, i.e. fit the noise.
-    // Under 10 is not worth a second-derivative claim (and excludes the four-face stencil).
+    // Five unknowns: five samples would fit exactly (fit the noise); under 10 is not worth a second-derivative claim.
     if ( not self.valid or n < 10 ) return fd;
 
     double A[5][5] = {{0.}}, b[5] = {0.,0.,0.,0.,0.};
@@ -644,15 +520,12 @@ inline FoldDerivatives foldDerivatives(TetDeformation const &self,
 }
 
 
-/* The A4 (swallowtail) indicator for one tetrahedron: the fold is tangent to its null direction AND
-   that tangency is itself degenerate. Same stencil and same arguments as cuspIndicator, so the
-   caller gathers the ring once and asks both questions. Proximity along the cusp curve, not
-   membership of the A4 stratum -- see the codimension note at the top of this file. */
+/* The A4 (swallowtail) indicator: the fold is tangent to its null direction AND that tangency is itself degenerate.
+   Same stencil and arguments as cuspIndicator. Proximity along the cusp curve, not membership of the A4 stratum. */
 inline bool swallowtailIndicator(TetDeformation const &self,
                                  double const dq[][NO_DIM], double const dLambda[], int n)
 {
-    // 2D: never set. A swallowtail (A4) is codimension 3, so in a 2D Lagrangian map it appears only at
-    // isolated MOMENTS (a caustic metamorphosis), not at points of a generic snapshot: nothing to flag.
+    // 2D: never set. A swallowtail is codimension 3, so in 2D it appears only at isolated moments: nothing to flag.
 #if NO_DIM==3
     if ( not self.valid or self.spread <= 0. ) return false;
     if ( std::fabs(self.critical) > FOLD_BAND * self.spread ) return false;   // not near a fold

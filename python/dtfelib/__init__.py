@@ -1,9 +1,6 @@
 """dtfelib: unified access to DTFE / PS-DTFE outputs for the analysis pipeline.
 
-Contract: the C++ binaries (DTFE, PS-DTFE) are the only producers of raw field grids;
-everything downstream (smoothing, statistics, plots) is Python and goes through this
-package so scripts are agnostic to the estimator, snapshot, simulation, and units.
-"""
+The C++ binaries are the only producers of raw field grids; everything downstream goes through this package."""
 
 from .io import FieldSet, FIELDS, STREAM_TOL, SnapshotMeta, PointPlane
 try:

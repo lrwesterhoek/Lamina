@@ -28,15 +28,10 @@
 #ifndef GRID_DEPOSIT_ENGINE_H
 #define GRID_DEPOSIT_ENGINE_H
 
-/* Shared regular-grid mass-assignment engine for the CIC / TSC / PCS methods (NGP keeps its
-   own simpler path). Each method supplies a kernel policy with: STENCIL (cells per dimension),
-   PAD_CELLS (kernel reach in cells, sets the outer selection box), CELL_OFFSET (subtracted from the
-   position in cells before the host cell is found), name(), interiorWeights() and boundaryCells().
-   Every boundaryCells() is the interior stencil clipped to the grid (clipStencil below): a
-   hand-written edge case that extrapolates past the face gives negative weights to a particle left
-   of cell 0's centre, and one that assumes >= 2 cells overflows a grid ONE cell thick (a thread's
-   slab of a small grid).
-
+/* Shared regular-grid mass-assignment engine for the CIC / TSC / PCS methods. Each method supplies a kernel policy:
+   STENCIL (cells per dimension), PAD_CELLS (kernel reach, sets the outer selection box), CELL_OFFSET, name(),
+   interiorWeights() and boundaryCells(). Every boundaryCells() is the interior stencil clipped to the grid
+   (clipStencil): hand-written edge cases give negative weights or overflow a grid one cell thick.
    The loop nesting and accumulation order are part of the contract: they decide the outputs' last bits. */
 
 #include <vector>

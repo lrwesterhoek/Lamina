@@ -1,9 +1,6 @@
-/* The run's PHASE TOTALS: the seconds every timed computation stage took, summed over all threads and sub-domains
-   of the process, by the stage's label. printComputationTime (CGAL_triangulation/triangulation_miscellaneous.h)
-   adds every stage it times, whatever the verbosity (the sub-domain threads print nothing), and phaseTotalsReport
-   prints one line per stage at the end of a run (DTFE.cpp dtfeFinishFields), for both binaries. The sums are wall
-   seconds of the stages, so with concurrent sub-domains they exceed the run's wall time: a stage's share of the
-   machine, not of the clock. Header-only; one registry per process (an inline function-local static). */
+/* The run's PHASE TOTALS: seconds per timed stage label, summed over all threads and sub-domains (so with
+   concurrent sub-domains they exceed the wall time). Fed by printComputationTime, printed by phaseTotalsReport.
+   Header-only; one registry per process. */
 #ifndef DTFE_PHASE_TOTALS_H
 #define DTFE_PHASE_TOTALS_H
 

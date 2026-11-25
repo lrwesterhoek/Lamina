@@ -1,31 +1,27 @@
 #!/usr/bin/env bash
 # The local battery (macOS, Apple Silicon): CI's stages plus what CI cannot run -- the Metal GPU suites, single and
 # double precision -- and the Python suites under CI's numpy 1.26 / matplotlib 3.6 (Ubuntu 24.04's versions), with
-# no simulation data (DTFE_DATA_ROOT points at an empty folder, as on CI). 29 stages (30 when a libDTFE exists:
-# 'build_lib'), about 1.5-2 h on 10 cores.
+# no simulation data (DTFE_DATA_ROOT points at an empty folder, as on CI). Stages: see --list.
 # It builds the three binary pairs first (METAL=1, METAL=1 DOUBLE=1, DIM=2) and runs on this checkout; do not edit
 # the tree while it runs (the summary says if it changed).
-# split_bytes_check, ps_auto_tune_check and ps_scratch_check (their GPU halves too) run only inside ci_core. ci_core
-# and ci_double go on past a failing step (CI_KEEP_GOING=1) and name every failed step at the end of their logs, with
-# each step's wall time.
+# split_bytes_check, ps_auto_tune_check and ps_scratch_check run only inside ci_core. ci_core and ci_double go on
+# past a failing step (CI_KEEP_GOING=1) and name every failed step at the end of their logs.
 #
 # Usage: tests/dev/battery.sh <scratch dir> [--ci-python PATH] [--gui-python PATH] [--only NAME,NAME...] [--list]
 #   <scratch dir>   logs (<scratch>/battery/<stage>.log and SUMMARY.txt), the suites' temporary files and the
 #                   empty data root; any folder (a /tmp folder is fine: nothing in it is needed afterwards)
-#   --ci-python     python with CI's package versions for the 13 '*_np126' stages (default $DTFE_CI_PYTHON, else
+#   --ci-python     python with CI's package versions for the '*_np126' stages (default $DTFE_CI_PYTHON, else
 #                   ~/.venvs/dtfe-ci/bin/python); tests/dev/make_ci_venv.sh makes one
 #   --gui-python    python with PySide6 for the 'ci_gui' stage (default $DTFE_GUI_PYTHON, else
 #                   ~/.venvs/dtfe-gui/bin/python)
-#   --only          run only these stages (names as --list prints them; a name --list does not print, such as the
-#                   former split_bytes, auto_tune and scratch, now inside ci_core, selects nothing)
+#   --only          run only these stages (names as --list prints them; a name --list does not print selects nothing)
 #   --list          print the stage names and exit
 # Exit 0 when every stage that ran passed and the tree did not change during the run.
 set -uo pipefail
 unset DTFE_EXACT_AVERAGE   # the '_a' average's pin: an export from the caller's shell would steer every stage's runs
 unset DTFE_FACE_GRADIENT  # the gradient route's pin: both binaries read it, so an export would steer every PS stage too
-# the run mode and the device, as tests/lib.sh pins them for the suites that source it: the suites' runs were written
-# for the programs' earlier defaults (performance, and the CPU unless '--gpu'); exported here, they reach the direct
-# python runs below too, and a login export does not steer the runs. A suite that tests the defaults unsets them itself
+# the run mode and the device, as tests/lib.sh pins them for the suites that source it; exported here, they reach
+# the direct python runs below too. A suite that tests the defaults unsets them itself
 export DTFE_RUN_MODE=performance
 export DTFE_GPU=0
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -99,7 +95,7 @@ run build       make "$J" DTFE PS-DTFE METAL=1
 run build_d     make "$J" DTFE PS-DTFE METAL=1 DOUBLE=1
 run build_2d    make "$J" DTFE PS-DTFE DIM=2
 # the shared library too, when one is built: tests/dtfe_sampling_check.sh links its user-sampling driver against it,
-# and a header change (User_options grew fields on 2026-11-09) makes a stale library crash that driver
+# and a stale library would crash that driver
 [ -e "$ROOT/libDTFE.dylib" ] || [ -e "$ROOT/libDTFE.so" ] && run build_lib make "$J" library METAL=1
 run ci_core     env CI_KEEP_GOING=1 tests/ci_suite.sh core
 run ci_double   env CI_KEEP_GOING=1 tests/ci_suite.sh double

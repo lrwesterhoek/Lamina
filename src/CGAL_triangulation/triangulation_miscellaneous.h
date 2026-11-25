@@ -186,14 +186,10 @@ inline Real volume(DT & dt,
 #endif
 }
 
-// The area (2D) or volume (3D) of a Delaunay cell, in double, whatever CGAL's labelling of its vertices: the vertices
-// sorted lexicographically by their exact coordinates, the NO_DIM edges taken from the smallest, |det| / NO_DIM!.
-// volume() above takes CGAL's vertex 0 as the base, and the tessellations of two partition or thread splits can label
-// one cell differently, so the last bit of its volume can differ between them; here the same four (three) points give
-// the same operations and the same bits. The vertices are distinct points, so the order is total (a NaN coordinate
-// compares false and leaves the order as given). The run-wide sums take it where a whole cell's volume is summed: the
-// vertex star sums (triangulation.cpp vertexDensity) and the single-cell share of the exact average
-// (averaged_interpolation_1.cc).
+// The area/volume of a Delaunay cell in double, whatever CGAL's labelling of its vertices: vertices sorted
+// lexicographically by exact coordinates, edges from the smallest, |det| / NO_DIM!. volume() takes CGAL's vertex 0
+// as base, so two partition or thread splits can differ in the last bit; here the same points give the same bits.
+// Used where a whole cell's volume is summed (vertexDensity star sums, the exact average's single-cell share).
 template <typename DTCell>
 inline double canonicalTetVolume(DTCell cell)   // a cell handle or a finite-cell iterator (copied: both are small)
 {

@@ -17,11 +17,11 @@
 #   ./install.sh --no-gui     skip step 5 (the GUI's PySide6 environment; e.g. on a cluster)
 #   ./install.sh --no-app     set up the GUI, but no "Lamina" app / Desktop shortcut
 #   ./install.sh --double     ALSO build the double-precision pair (DTFE-double / PS-DTFE-double, DOUBLE=1,
-#                             same GPU backend): every position and field in double, ~2x the memory
+#                             same GPU backend): every position and field in double
 #
 # The GUI (scripts/gui.sh) gets its own virtual environment, ~/.venvs/dtfe-gui (DTFE_GUI_VENV
 # overrides), made with --system-site-packages so it sees this Python's numpy/h5py, holding
-# PySide6 (~1 GB). Already set up -> left alone. It never fails the install: the binaries come first.
+# PySide6. Already set up -> left alone. It never fails the install: the binaries come first.
 # Then scripts/install_gui_app.sh makes it launchable like any application: "Lamina.app" in
 # /Applications + a Desktop shortcut on macOS (give it Full Disk Access once: the repository and
 # the data are on protected locations), a .desktop entry on Linux.
@@ -30,9 +30,8 @@
 #     from dtfelib import Estimator
 #     est = Estimator("snapshot.hdf5"); est(points).density
 #
-# Idempotent: safe to re-run any time; the Makefile's build-mode stamps guarantee objects
-# from different GPU modes are never mixed (a mode switch wipes the object directory), and the
-# double and 2D pairs already built are rebuilt as well (2D: CPU-only, as the Setup wizard does).
+# Idempotent: safe to re-run any time; the double and 2D pairs already built are rebuilt as well
+# (2D: CPU-only, as the Setup wizard does).
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."   # run from the repo root (this script lives in scripts/)
@@ -147,15 +146,11 @@ fi
 info "step 2/6: build backend -> ${BACKEND}"
 
 # ---------------------------------------------------------------- 3/6 clean rebuild
-# The binaries already there are kept aside until the new ones have LINKED: 'make clean' then a failing
-# compile would leave a user (re-running install.sh to add --double, say) with no ./PS-DTFE at all. The
-# build goes through a log; on a failure its tail and the usual causes are printed and the old binaries
-# come back.
+# The binaries already there are kept aside until the new ones have LINKED; the build goes through a log, and on
+# a failure its tail and the usual causes are printed and the old binaries come back.
 info "step 3/6: make clean + rebuild (jobs: ${JOBS})"
 # 'make clean' deletes EVERY binary set, the double and 2D ones too: the sets already built are noted first
-# and rebuilt below, with the double pair's backend and the 2D programs CPU-only as the Setup wizard builds
-# them: rebuilding only the single pair would silently drop a 2D pair built from the launcher's Setup (or a
-# double pair built without --double).
+# and rebuilt below, with the double pair's backend and the 2D programs CPU-only as the Setup wizard builds them.
 EXTRA_SETS=()                              # make arguments per extra set, after the single pair
 EXTRA_NAMES=""
 if [ -n "$PREC_ARG" ] || [ -f DTFE-double ] || [ -f PS-DTFE-double ]; then
@@ -236,8 +231,7 @@ if [ "$DO_GUI" -eq 1 ]; then
         GUI_STATE="ready"
     fi
     if [ "$GUI_STATE" = "ready" ]; then
-        # the GUI imports dtfelib (numpy, h5py) from this Python, and loads Qt's libraries: check
-        # both now, headless, instead of letting the first launch fail
+        # the GUI imports dtfelib (numpy, h5py) and loads Qt's libraries: check both now, headless
         if ! "$GUI_PY" -c "import numpy, h5py" >/dev/null 2>&1; then
             warn "the GUI needs numpy and h5py in '$PY' (its venv sees that Python's packages):"
             warn "    $PY -m pip install numpy h5py     (or: brew install numpy / apt-get install python3-h5py)"

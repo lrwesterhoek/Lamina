@@ -10,19 +10,10 @@ import sys
 import numpy as np
 
 
-# Three-harmonic 1-D wave with an EXACT A4 (swallowtail), the analytic control for bit 8.
-#
-# For x = q + a1 sin(u) + a2 sin(2u) + a3 sin(3u) with u = k*q, the deformation is
-#     J(u) = 1 + A cos u + 2B cos 2u + 3C cos 3u,   A = a1*k, B = a2*k, C = a3*k
-# which in c = cos u is the cubic  J = 12C c^3 + 4B c^2 + (A - 9C) c + (1 - 2B).
-#
-# An exact A4 needs J to have a TRIPLE root. Matching against 12C (c - c0)^3 at c0 = -1/2 -- chosen
-# because sin u != 0 there, so the root is not the wave's own symmetry point at u = pi, where every
-# odd derivative vanishes and the degeneracy would be A5 -- gives
-#     C = -1/(6 c0 (2 c0^2 + 3)) = 2/21,   B = -9 C c0 = 3/7,   A = 9C + 36 C c0^2 = 12/7
-# i.e. J(u) = (8/7)(cos u + 1/2)^3: D1 = D2 = 0, D3 != 0 at k*q = 2pi/3 and 4pi/3 (q = L/3, 2L/3),
-# with J < 0 strictly between them, so the wave really does shell-cross. Translation symmetry
-# inflates the A4 points into planes, which is what makes them measurable.
+# Three-harmonic 1-D wave with an EXACT A4 (swallowtail), the analytic control for bit 8: x = q + a1 sin(u) + a2 sin(2u)
+# + a3 sin(3u), u = k*q, A = a1*k, B = a2*k, C = a3*k. J(u) = (8/7)(cos u + 1/2)^3 has a TRIPLE root at c0 = cos u = -1/2
+# (chosen so sin u != 0, else the degeneracy would be A5), giving C = 2/21, B = 3/7, A = 12/7. D1 = D2 = 0, D3 != 0 at
+# k*q = 2pi/3, 4pi/3 with J < 0 between them. Translation symmetry inflates the A4 points into measurable planes.
 SWALLOWTAIL_HARMONICS = (12.0 / 7.0, 3.0 / 7.0, 2.0 / 21.0)   # (A, B, C) = (a1, a2, a3) * k
 
 

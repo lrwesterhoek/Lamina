@@ -1,38 +1,5 @@
-"""Resolution and estimator convergence of the void statistics: are the R_v distribution, the distinct-void
-abundance and the stacked profiles properties of the voids, or of the grid, the particle mass, the field estimator?
-
-Three rows per redshift (dtfelib.convergence holds the machinery; every definition is the pipeline's: minima,
-the void gate of DTFE_VOID_GATE (best none: rows (a) and (b) are R_v statistics), crossing R_v, the
-distinct sample of catalog.distinct_mask, profiles.profile_grids / stack):
-
-  (a) GRID      the snapshot's density grid block-averaged by --factors (512^3 -> 256^3, 128^3: exactly the cell
-                average a coarser deposit gives), voids found at the SAME sigma in Mpc (the footprint following it),
-                matched void by void with the native catalogue within --match-sigma smoothing lengths: the R_v ratio
-                coarse / native of the matched voids, their centre offset, the fractions unmatched both ways, the
-                abundance dn/dlnR_v and the stacked density in r / R_v (R_v in --rv-range smoothing lengths)
-  (b) MASS      TNG50-3 / TNG100-3 / TNG300-3 at one common sigma (plot_void_crossbox.py's per-box .npz files, read
-                only, those of this run's gate; --crossbox-dir, --crossbox-smooth-mpc): dn/dlnR_v, the median R_v
-                against z and the stacked density at z. Different initial conditions: a comparison of distributions,
-                cosmic variance included
-  (c) ESTIMATOR DTFE against PS-DTFE on the same snapshot (output.* AND ps_output.* grids), void by void: R_v ratio
-                DTFE / PS-DTFE, central delta of both, abundance; and a per-void table (txt)
-A panel that cannot be drawn (no crossbox products, no snapshot with both estimators' grids) says so on the figure
-and in the log, and the rest is drawn.
-
-Outputs (figures/void_convergence/<sim>/[<smoothing tag>/]):
-  convergence_<set>_z<z>.png             the three rows at one redshift
-  convergence_<set>.txt                  the numbers (per z: per factor, the masses, the estimators)
-  convergence_<set>.npz                  the same as arrays
-  estimator_voids_<snap>[_<set>].txt     (c)'s void-by-void table when both grids exist
-<set> is the method for its default grids, else the --prefix (set_name); with --prefix, row (c)'s side of
---estimator reads that set too. The coarse velocity is block-averaged as the run deposited it (volume or mass weighted:
-convergence.velocity_weighting, from the run log; named in the txt and npz).
-The coarse catalogues are cached under their own frame's namespace (python/cache/r256_s5_f5_.../..._voids_block2.npz).
-
-Examples:
-  DTFE_SIM=TNG100-3-Dark python3 plot/plot_void_convergence.py --sim TNG100-3-Dark
-  DTFE_SIM=TNG100-3-Dark python3 plot/plot_void_convergence.py --sim TNG100-3-Dark --redshifts 0 --factors 2 4 8
-"""
+"""Resolution and estimator convergence of the void statistics: are the R_v distribution, the distinct-void abundance
+and the stacked profiles properties of the voids, or of the grid, the particle mass, the field estimator?"""
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
 from pathlib import Path
@@ -166,9 +133,8 @@ def estimator_table(est, path):
 
 def load_crossbox(args):
     """(b): the crossbox per-box results at the common sigma UNDER THIS PROCESS'S VOID GATE (plot_void_crossbox's own
-    file tag, sigma_tag: '_gatenone' under DTFE_VOID_GATE=none); [] (said) when none is there. The
-    gate matters: rows (a) and (b) are R_v statistics, best taken ungated, so an ungated run must find
-    the ungated files."""
+    file tag, sigma_tag: '_gatenone' under DTFE_VOID_GATE=none); [] (said) when none is there. The gate matters:
+    rows (a) and (b) are R_v statistics, best taken ungated, so an ungated run must find the ungated files."""
     import plot_void_crossbox as cb
     d = Path(args.crossbox_dir).expanduser()
     tag = cb.sigma_tag(args.crossbox_smooth_mpc)

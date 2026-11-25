@@ -1,44 +1,4 @@
-"""Track VOIDS through cosmic time: size, BBKS shape (e, p) and orientation evolution.
-
-CONSISTENCY: the per-snapshot void properties come from pipeline.SnapshotProducts.voids()
--- the exact same cached catalogs (same smoothing, FFT Hessian, footprint, eigenvalue
-criterion, BBKS shapes and ellipsoid fits) that feed the correlation analyses. This script
-adds only the TIME LINKING:
-
-  1. Reference voids at --start-snap = the deepest well-resolved entries of the pipeline catalog.
-  2. IDENTITY across time from the MERGER TREES: subhalos within --sel-factor x (max
-     semi-axis) of the centre are walked back along their SubLink main branches; the centre
-     moves with the median periodic displacement of the surviving tracers. Before the
-     earliest snapshot the branches reach (trees thin out at z >~ 10), the centre is FROZEN
-     at its earliest tracked position -- proto-voids barely move in comoving coordinates --
-     so the full ladder down to z=20.05 is covered; those epochs are flagged and drawn as
-     open symbols.
-  3. At every snapshot with field grids the tracked centre is matched to the nearest
-     catalog void (within --match-factor x R_eff) and its size (the MEASURED radius R_v --
-     where the smoothed density around the minimum rises back to the mean -- and the ellipsoid's
-     semi-axes and R_eff), BBKS e/p, ellipsoid-fit ell/prol, central delta and major-axis
-     orientation are read from that catalog entry. R_v is the size drawn (--radius r_eff for the
-     ellipsoid's, 1.5-1.9x larger); like the fit, it is read whether or not the void passes the cut.
-
-Works identically for --estimator dtfe and ps.  Examples:
-  python3 plot/plot_void_tracking.py --sim TNG50-3-Dark --estimator dtfe
-  python3 plot/plot_void_tracking.py --sim TNG50-3-Dark --n-voids 10
-Outputs: figures/void_tracking/<sim>/void<K>_evolution.png, voids_summary.png and one .npz
-per void with every tracked quantity. Those names are PS-DTFE's default grids (ps_output.) from snapshot 99; another
-estimator or --prefix adds '_<method>' / '_<prefix>', another --start-snap '_snap<N>', --radius r_eff '_reff' to the
-figures (else an --estimator dtfe or --start-snap run would replace the default files), and the void<K> files of this set
-beyond the voids written now are removed (a smaller --n-voids, or a void skipped, would leave an earlier run's beside
-them).
---link particles adds '_particles', --exclusive (partitioned members) '_exclusive' after it.
-
---link particles follows the void at each earlier snapshot that gave its successor the most member particles. With
-the default (overlapping) members a large R_v sphere at z >= 1 holds the matter of its neighbours too (member pairs
-are 1.5-2x the particles in TNG100 at z = 1.5-5), which favours the largest progenitor spheres; --exclusive
-partitions the matter (lagrangian.void_members) and reads the census's '_excl' links (plot_void_fate.py --exclusive
-builds them). TNG100-3-Dark, the 30 deepest z = 0 voids: median progenitor R_v at z = 1 / 1.5 / 2 is
-23.6 / 23.2 / 27.6 Mpc by default and 15.3 / 17.2 / 22.6 Mpc exclusive, the median share 0.95 against 0.73-0.82;
-the median BBKS e per snapshot agrees within 0.015.
-"""
+"""Track VOIDS through cosmic time: size, BBKS shape (e, p) and orientation evolution."""
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
 import re
@@ -137,7 +97,7 @@ def read_void(t, i, cat, n, j, ref_axis):
     t["well_resolved"][i] = bool(cat["well_resolved"][j])
     t["e"][i], t["p"][i] = cat["bbks_params"][j]
     t["delta_min"][i] = cat["delta_values"][j]
-    t["r_v"][i] = C.r_v_mpc(cat)[j]                      # the measured radius, cut or no cut
+    t["r_v"][i] = C.r_v_mpc(cat)[j]
     # sizes/orientation from the SAME fit formula as the catalog, but without the
     # resolution gate (config.ELLIPSOID_CUT_RULES): shallow high-z proto-voids exceed its max axis
     # and would otherwise vanish from the track; well_resolved records the gate.
@@ -210,13 +170,7 @@ def track_voids_trees(cat0, n0, picked, catalogs, ts, pool_frac, pool_ids, box_c
 def track_voids_particles(vsnaps, n_voids, ztab, links=None):
     """Follow the deepest 'n_voids' distinct resolved voids of the LAST of 'vsnaps' (lagrangian.VoidSnapshot,
     ascending in time) back by their matter: at each earlier snapshot the void is the one that gave its successor
-    the most member particles (lagrangian.main_progenitor). 'links' = [Link a -> b per consecutive pair] (default:
-    lagrangian.cached_link). The track's 'link_frac' is that progenitor's share of the successor's members (the
-    identity quality, as n_tracers is for the trees); before a void without progenitor nothing is read.
-    The walk stays on FOLLOWED voids: a link's progenitors are a's followed voids only, and its
-    descendants b's whole pool with the followed ones first (lagrangian.void_pool), so a followed void's sample index
-    IS its pool index there and main_progenitor hands back a sample index of the earlier snapshot.
-    Returns [(k, track, r_eff0, extra npz fields)] as track_voids_trees."""
+    the most member particles (lagrangian.main_progenitor)."""
     ref = vsnaps[-1]
     order = np.argsort(np.asarray(ref.cat["delta_values"], float)[ref.rows])[:n_voids]
     if links is None:
@@ -471,7 +425,7 @@ def plot_void(t, k, args, outdir, r_eff0):
     plt.close(fig)
 
 
-BAND_MIN_VOIDS = 6     # from this many tracked voids on, the summary draws their median and 16-84% band
+BAND_MIN_VOIDS = 6
 
 
 def summary_bands(summary, key):
@@ -505,7 +459,7 @@ def plot_summary(summary, args, outdir):
         plot_finite(ax2, x, t["e"], "o-", color=c, **kw)
         if not many:
             plot_finite(ax2, x, t["p"], "s--", ms=3, alpha=0.5, color=c)
-    if many and xlabel == "1 + z":         # tens of voids: their median and 16-84% band per snapshot
+    if many and xlabel == "1 + z":
         for ax, key, col, lab in ((ax1, args.radius, "tab:purple", "radius"), (ax2, "e", "tab:blue", "e"),
                                   (ax2, "p", "tab:orange", "p")):
             _s, x, pct = summary_bands(summary, key)

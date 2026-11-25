@@ -1,13 +1,6 @@
-"""Slice-map plots of every raw field the DTFE / PS-DTFE binaries export.
-
-Method-, snapshot- and simulation-agnostic: all file naming, grid geometry, units and
-metadata come from dtfelib.FieldSet. Density is plotted MEAN-NORMALIZED (rho/rho_bar)
-for both estimators; FieldSet auto-detects the on-disk convention (old PS files are physical).
-
-    python3 plot/plot_PS_DTFE.py --sim TNG50-4-Dark    # snap 99, auto method
-    python3 plot/plot_PS_DTFE.py --estimator dtfe --smooth 1
-    python3 plot/plot_PS_DTFE.py --sim TNG50-3-Dark --snap 50
-"""
+"""Slice-map plots of every raw field the DTFE / PS-DTFE binaries export. Method-, snapshot-
+and simulation-agnostic: all file naming, grid geometry, units and metadata come from
+dtfelib.FieldSet."""
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
 import config

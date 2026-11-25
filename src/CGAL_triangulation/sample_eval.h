@@ -1,17 +1,13 @@
 #ifndef SAMPLE_EVAL_HEADER
 #define SAMPLE_EVAL_HEADER
 
-/* The per-sample machinery of the sampling interpolations: the point values of unaveraged_interpolation.cc (regular
-   grid, redshift cone, user points) and the cell averages of averaged_interpolation_2.cc (method 2). Each of
-   those functions is a traversal (which centres, in which order) and a sample source; locating a point, the zero
-   record outside the hull, the cell's inverse matrix, the field block and the padding report are written here once.
-   Everything is inline and keeps no state between calls: the functions run inside the OpenMP sub-domain threads.
-   The position expressions keep their operand types (Real temporaries, double random draws) and are never split or
-   merged: those set the rounding, and with it every output. Include after triangulation_common.h. */
+/* The per-sample machinery of the sampling interpolations (unaveraged_interpolation.cc, averaged_interpolation_2.cc):
+   locating a point, the zero record outside the hull, the inverse matrix, the field block and the padding report.
+   Inline and stateless (runs inside the OpenMP sub-domain threads). The position expressions keep their operand
+   types (Real temporaries, double draws) and are never split or merged: they set the rounding of every output. Include after triangulation_common.h. */
 
 
-// The helpers that run once per point or per Monte-Carlo sample are forced inline: left to itself the inliner keeps
-// the bigger ones out of line, which made the shared loops measurably slower than the loops written out per function.
+// Forced inline: left to itself the inliner keeps the bigger ones out of line, which slows the shared loops.
 #if defined(__GNUC__)
 #define SAMPLE_EVAL_INLINE inline __attribute__((always_inline))
 #else

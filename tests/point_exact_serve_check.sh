@@ -1,82 +1,17 @@
 #!/usr/bin/env bash
-# Exact point location + the '--serve' / dtfelib.Estimator contract, both binaries.
-#
-# What is verified, and why these are the right bounds:
-#  X) EXACT, TIE-CONSISTENT STREAM COUNTING (PS-DTFE --sample-points). On crossed waves every
-#     point off a caustic has an ODD number of streams (a folded sheet covers it 1, 3, 9 or 27
-#     times), so any even count is a double-count or a gap -- the bound is exactly zero:
-#       X1  grid cell centres: no even count. (A +-1e-6 barycentric tolerance would count a
-#           point within 1e-6 of a shared face twice: ~50 even counts per 2.1M points.)
-#       X2  AT PARTICLE POSITIONS -- every query sits ON a vertex shared by ~25 tetrahedra:
-#           no even count, mean streams < 12. (A tolerance counts the whole vertex star:
-#           mean ~27, 69% even.)
-#       (The single-tessellation runs below pass --partition 1 1 1: the auto-tuner
-#       splits a small set for SPEED, and a split's sums differ from one tessellation's at float
-#       rounding; serve == sample-points holds for the SAME partitioning.)
-#       X3  --partition 2 2 2 gives byte-identical stream counts at both point sets (every
-#           tie is broken the same way in every partition: periodic copies are mapped to one
-#           canonical coordinate).
-#       X4  1 thread vs the default pool: byte-identical outputs.
-#  D) THE GRID DEPOSIT uses the same exact test for its sub-samples, and at nSub=1 its samples
-#     are the cell centres, so its '.streams' IS the exact count there:
-#       D1  '.streams' == the X1 point counts in every cell. (With a +-1e-6 tolerance
-#           ~67 of 2.1M cells read one stream too many -- a sample near a shared face counted
-#           by both tetrahedra.)
-#       D2  --partition 2 2 2 gives a byte-identical '.streams'. (A tolerance trips
-#           differently on each run's periodic copies: 2 of 2.1M cells differ.)
-#       D3  (GPU builds) the --gpu deposit reaches the SAME decisions: '.streams' and
-#           '.hidden_streams' byte-identical to the CPU's. The kernel classifies in float with a
-#           rigorous error bound and defers the undecidable tets to the CPU's exact test.
-#       D4  (GPU builds) the same with --partition 2 2 2 -- whose periodic sub-grids WRAP the
-#           seam (a sampled path that skips the wrap misses most of each partition's cells).
-#  S) STANDARD DTFE --sample-points: coverage is exactly 1 at every cell centre AND every
-#     particle position (tiny/flat tetrahedra are not dropped, and a query at a vertex
-#     lands in exactly one tetrahedron).
-#  V) --serve through dtfelib.Estimator, both binaries: answers are BIT-IDENTICAL to a
-#     --sample-points run on the same points (same code, same reduction) -- for a request
-#     answered through the server's cell index (few points) and for one that walks the whole
-#     tessellation (many points); every optional output (--ps-per-stream, --ps-per-stream-ids,
-#     --pts-den-grad, --pts-vel-grad) round-trips unchanged; a request with a NaN is
-#     rejected and the session keeps serving; grid() returns the tensor-product shape.
-#  C) COMPOSITE SERVER (--serve --partition, CosmoDTFE's CompositeEstimator, out of core):
-#       C1  PS, all partitions in memory: bit-identical to --sample-points --partition 2 2 2
-#           (every output incl. per-stream records, ids, scalars, Lagrangian positions).
-#       C2  PS with --tessellation-cache and ONE resident partition (every request reloads
-#           partitions from disk): bit-identical again; a second session starts from the
-#           cache + occupancy files without building (its log says 'cached'), same answers.
-#       C3  standard DTFE composite (Eulerian partitions, centroid ownership): coverage exactly
-#           1 at cell centres AND particle positions, density within 1e-5 of the single server
-#           (partitions round their periodic copies differently), both with 2x2x2 and 3x2x1.
-#       C4  --serve + --tessellation-cache under a memory budget too small for ONE tessellation
-#           (DTFE_MEM_BUDGET_GB): the auto-tuner makes it a composite by itself, and its answers
-#           equal --sample-points with the split it chose.
-#       C5  the automatic resident set counts BYTES (DTFE_SERVE_BUDGET_GB): with room for all 8
-#           tessellations nothing reloads, and a cell index is built only when it fits too (else
-#           the request walks); with room for 3 a request needing 8 evicts and reloads; answers
-#           bit-identical throughout.
-#  L) PER-STREAM LAGRANGIAN POSITIONS AND SCALARS (--ps-per-stream-lagrangian, --pts-scalar):
-#       L1  every stream satisfies x - q(x) = v/100 (Zel'dovich: v = 100 s, and x, q, v are
-#           interpolated with the same barycentric weights) to float rounding.
-#       L2  a periodic per-particle scalar f(q) (--scalar-dataset) comes back within the linear-
-#           interpolation bound; the point value is the plain mean over the streams (PS-DTFE's volume-weighted
-#           stream mean: every stream fills the point).
-#  A) Estimator.from_arrays: numpy arrays in, bit-identical to the snapshot-file server (PS);
-#     a non-periodic standard cloud with negative coordinates reproduces a linear field.
-#  T) the tessellation cache keys on --periodic: a non-periodic run never loads the cache a
-#     periodic run wrote.
-#  P) THE STANDARD SERVER'S PADDING: dtfelib.Estimator passes '--padding 15' to the standard binary
-#     (dtfelib.estimator.STANDARD_PADDING, run_dtfe.sh's value) unless the caller gives one; the phase-space server
-#     keeps the binary's own. On demo/z0_64 (z = 0), at two 200^2-point planes 0.05 Mpc inside the box faces, the
-#     default server is bit-identical to '--sample-points --padding 15' and within 1e-10 of '--padding 30', while
-#     '--padding 5' (the standard binary's default before it became 15) is off by up to ~4% at several hundred
-#     points -- with coverage 1 everywhere, so nothing flagged it (P2). (The standard references of S and V5 run at
-#     '--padding 15' for the same reason.) P3: a run without '--padding' says 15 in its header and answers those
-#     points as '--padding 15' does, bit for bit. SKIP P2 and P3 without the demo file.
-#
-# Usage:
-#   tests/point_exact_serve_check.sh              # build, run, check
-#   tests/point_exact_serve_check.sh --no-build
-# Requires python3 with numpy and h5py.
+# Exact point location and the '--serve' / dtfelib.Estimator contract, both binaries.
+# Single-tessellation runs pass --partition 1 1 1: the auto-tuner splits small sets, and a split's sums differ from one
+# tessellation's at float rounding; serve == sample-points holds for the SAME partitioning.
+#   X  EXACT, TIE-CONSISTENT STREAM COUNTING (PS-DTFE --sample-points)
+#   D  THE GRID DEPOSIT uses the same exact test for its sub-samples
+#   S  STANDARD DTFE --sample-points: coverage is exactly 1 at every cell centre AND
+#   V  --serve through dtfelib.Estimator, both binaries
+#   C  COMPOSITE SERVER
+#   L  PER-STREAM LAGRANGIAN POSITIONS AND SCALARS
+#   A  Estimator.from_arrays: numpy arrays in, bit-identical to the snapshot-file server
+#   T  the tessellation cache keys on --periodic
+#   P  THE STANDARD SERVER'S PADDING: dtfelib.Estimator passes '--padding 15' to the standard binary
+# Usage: tests/point_exact_serve_check.sh [--no-build]
 
 set -euo pipefail
 
@@ -220,9 +155,7 @@ if gpu_built:
         gu = np.fromfile(f"{tmp}/{root}.hidden_streams", dtype=REAL)
         nd = int((gs != g1).sum()) + int((gu != u1).sum())
         if _os.environ.get("DTFE_TEST_PRECISION") == "double":
-            # the double build hands the float GPU kernels float copies of its tetrahedra, so a sample
-            # within float rounding of a face may land differently than in the CPU's double geometry
-            # (ps_double_check D5); a mapping bug (D4's guard: 91% of cells) is still far outside this
+            # the double build hands the float GPU kernels float copies of its tetrahedra.
             check(tag, nd <= 1e-4 * g1.size,
                   f"--gpu{' --partition 2 2 2' if tag == 'D4' else ''} vs CPU (double build): '.streams' "
                   f"{int((gs != g1).sum())} and '.hidden_streams' {int((gu != u1).sum())} cells differ "

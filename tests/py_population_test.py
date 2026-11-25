@@ -1,16 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for the void-population theory and figures: dtfelib.theory (EH98 sigma(R), D(z), the SvdW /
-Vdn size function, the BBKS shapes of Gaussian-field minima), plot_void_population's size function figure and its
-R_v-definition fallback, plot_void_crossbox's shape row, and analyze.py's void-script registration and void-gate
-refusal.
-
-Two tiers:
-  * SYNTHETIC (always run, CI): known values and limits of the theory, the figures from hand-made statistics.
-  * DATA-BACKED (the cached TNG100-3-Dark z = 0 catalogue under DTFE_DATA_ROOT): the size function's sample and ratio
-    on real voids; skipped with a note when DTFE_DATA_ROOT is unset or the data or the cache is not there.
-
-Usage:  python3 tests/py_population_test.py            (exit 0 = pass)
-"""
+"""Tests for the void-population theory and figures: dtfelib.theory (EH98 sigma(R), D(z), the SvdW / Vdn size
+function, the BBKS shapes of Gaussian-field minima)
+Usage:  python3 tests/py_population_test.py            (exit 0 = pass)"""
 
 import io
 import math
@@ -175,10 +166,9 @@ def t_size_function_figure():
 
 
 def t_size_smooth():
-    """--size-smooth: smoothing_cells sets the size function's catalogue smoothing (its own cache
-    namespace, the production footprint) and restores the process's even on an exception; the names are untagged at
-    the default and '_ss<cells>' otherwise; snapshot_stats reports the fraction of the distinct voids whose
-    size-function radius exists; the option is in the script's help."""
+    """--size-smooth: smoothing_cells sets the size function's catalogue smoothing (its own cache namespace, the
+    production footprint) and restores the process's even on an exception; the names are untagged at the default
+    and '_ss<cells>' otherwise."""
     import subprocess
     import config
     import plot_void_population as pop
@@ -339,7 +329,7 @@ def t_tng100_size_function():
 def t_tng100_size_smooth():
     """The --size-smooth catalogue of TNG100-3-Dark at z = 0 and 1 (snapshots 99, 50; 5 cells, from the cache that
     plot_void_population.py builds): the delta08 radius exists for more of the distinct voids than at the production
-    10 cells (31% at z = 0), and measured / Vdn at its median is finite."""
+    cell count, and measured / Vdn at its median is finite."""
     from dtfelib import cli
     sim = "TNG100-3-Dark"
     if not (cli.sim_dir(sim, data_root()) / "snapdir_099").is_dir():

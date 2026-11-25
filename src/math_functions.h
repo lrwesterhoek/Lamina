@@ -29,13 +29,9 @@
 #include <algorithm>
 #include "define.h"
 
-// Singularity threshold of matrixInverse(), RELATIVE: a matrix counts as singular when |det| is
-// below REAL_PRECISSION times the product of its row norms. By Hadamard's inequality that ratio is
-// a pure shape measure in [0,1] (1 for orthogonal rows), so the test is independent of the length
-// unit and of the simplex's size. An ABSOLUTE |det| < 1e-6, in (length unit)^3, would declare every
-// well-shaped tetrahedron with edges below ~0.01 Mpc singular: the PS-DTFE deposit would DROP it
-// (much of the mass at TNG50-1 resolution) and the standard binary
-// would interpolate a constant field (zero gradient) inside it.
+// Singularity threshold of matrixInverse(), RELATIVE: singular when |det| is below REAL_PRECISSION times the product
+// of the row norms (a shape measure in [0,1] by Hadamard, independent of the length unit and the simplex size).
+// An absolute |det| limit would drop every small well-shaped tetrahedron.
 #define REAL_PRECISSION 1.e-6
 
 // Product of the row norms of an NxN matrix (the Hadamard bound on |det|).
@@ -102,13 +98,11 @@ inline double determinant(double matrix[][NO_DIM])
 
 
 #if NO_DIM==2 || NO_DIM==3
-// The closed-form 2x2 / 3x3 inverse by the adjugate: the ONE copy of its arithmetic. det comes from the first row's
-// cofactors, then inv = adj(m) * (1/det), each entry written once, in this order. Every inverse of the code base keeps
-// exactly these operations -- matrixInverse below (the grid deposits), psExactInside::inverseNd (its double twin, which
-// must keep the same cells) and the point evaluation's unguarded inverse -- and dtfe_gpu_fixed.h mirrors them, so do
-// not reorder them. Only the singularity GUARD differs between the callers, so it is theirs: 'singular(det)' is tested
-// between the determinant and the inverse. When it holds, inv is left as it was and the result is false; otherwise
-// inv is written (T(...) narrows each entry to the caller's type) and the result is true. det = the determinant.
+// The closed-form 2x2 / 3x3 inverse by the adjugate: the ONE copy of its arithmetic (det from the first row's cofactors,
+// then inv = adj(m) * (1/det), each entry written once, in this order). matrixInverse, psExactInside::inverseNd and the
+// point evaluation's inverse keep exactly these operations and dtfe_gpu_fixed.h mirrors them: do not reorder them.
+// Only the singularity GUARD differs: 'singular(det)' is tested between det and inverse; when it holds, inv is left
+// as it was and the result is false; otherwise inv is written (T(...) narrows each entry) and the result is true.
 template <typename T, typename Singular>
 inline bool adjugateInverse(double const m[][NO_DIM], T inv[][NO_DIM], double &det, Singular const &singular)
 {

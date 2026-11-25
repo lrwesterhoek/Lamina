@@ -1,7 +1,5 @@
-// Part of src/CGAL_triangulation/ps_interpolation.cc, inside its #ifdef PHASE_SPACE: included once, in order, by
-// that file and compiled only as part of its object, never alone.
-// GPU 3D builds only (its own guard): the GPU part of the pass (PSGpuCtx), the face walk beside the GPU deposit
-// (PSEarlyFaceWalk) and the GPU extraction and deposit (psGpuExtractAndDeposit).
+// Part of ps_interpolation.cc (included in order inside its #ifdef PHASE_SPACE, never compiled alone). GPU 3D builds only:
+// the GPU part of the pass (PSGpuCtx), the face walk beside the GPU deposit (PSEarlyFaceWalk) and psGpuExtractAndDeposit.
 
 #if defined(PS_GPU) && NO_DIM==3
 // The GPU deposit's part of the pass (interpolateGrid_phaseSpace): what the GPU walk needs beyond the pass and its grids.
@@ -21,15 +19,11 @@ struct PSGpuCtx
     std::vector<uint32_t> &deferredOrd;
 };
 
-// The face walk beside the GPU deposit (psGpuExtractAndDeposit says where it runs; elsewhere it runs after the
-// deposit): psFaceWalk on a thread of its own while the pass's thread waits in the device call, joined
-// right after that call and before the copy-back. The walk reads the tessellation, the pass's box and the vertex
-// degrees and writes the face words only; the device call touches none of them. Its dropped shares are counted apart
-// ('drops'), and its sums are the pass's only once the device call has succeeded: after a failed call the caller
-// throws both away, and the CPU deposit makes the face sums as it does when the walk runs after the deposit. The
-// thread counts as one core of the pool while it runs (the pass's own core is lent for the device call:
-// ps_metal_host.cc CoreLend); the walk's team is psFaceWalk's. The destructor joins, so an exception on the pass's
-// thread cannot leave the walk running on a pass that is being torn down.
+// The face walk beside the GPU deposit: psFaceWalk on a thread of its own while the pass's thread waits in the device call,
+// joined right after it and before the copy-back. It reads the tessellation, box and degrees and writes the face words only,
+// its dropped shares counted apart ('drops'); its sums are the pass's only once the device call succeeded (else the caller
+// throws both away and the CPU deposit makes the face sums). It counts as one core of the pool while it runs; the destructor
+// joins, so an exception on the pass's thread cannot leave the walk running.
 struct PSEarlyFaceWalk
 {
     std::thread th;
@@ -81,10 +75,8 @@ static inline void psFaceWalkEarlyCount(bool const kept, double const walkSec, d
     psFaceEarlyWaitUs.fetch_add( (long long)( waitSec * 1e6 ) );
 }
 
-// GPU deposit (--gpu, GPU build): the extraction walk (with the CPU loop's filters), the cost sort, the call, and
-// the GPU's grids taken over as the pass's (the released tets added on the host); metalDeposited on success, else the
-// CPU deposits the pass (a template: the audit, the phase clock and the grid sum are the pass's types). The walk stays
-// in here as one loop (no call per tetrahedron).
+// GPU deposit (--gpu): the extraction walk (the CPU loop's filters, one loop), the cost sort, the call, and the GPU's grids
+// taken over as the pass's (released tets added on the host); metalDeposited on success, else the CPU deposits the pass.
 template <class MassAudit, class Lap, class GridSum>
 static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &lap, GridSum const &gridSum)
 {
@@ -185,12 +177,9 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
         tetMasses.reserve( psKeptCells );
         if ( psCaustics )
             tetDens.reserve( psKeptCells*4 );
-        // --ps-halo-release: released tets never reach the GPU arrays; their single-cell
-        // centroid deposits (same arithmetic as the CPU fallback) are collected here and
-        // applied on the host AFTER the GPU grids are copied back (the copy ASSIGNS, so
-        // these are the only further accumulations). Discarded if the GPU dispatch fails --
-        // the CPU loop then re-handles every cell. momw = the moment weight (V_eul); orient = the caustic
-        // orientation bits.
+        // --ps-halo-release: released tets never reach the GPU arrays; their single-cell centroid deposits (the CPU fallback's
+        // arithmetic) are collected here and applied on the host AFTER the GPU grids are copied back (the copy ASSIGNS), and
+        // discarded if the GPU dispatch fails (the CPU loop then re-handles every cell). momw = moment weight (V_eul).
         struct ReleasedTet { size_t flat; Real mass; Real momw; Real volFrac; PSCausticClass::CausticMask orient; Real vel[noVelComp]; Real grad[noGradComp]; Real scal; Real sgrad[NO_DIM]; };
         std::vector<ReleasedTet> releasedTets;
         // per GPU tet, its finite-cell ordinal (kept in lockstep through the cost sort): maps the
@@ -198,14 +187,11 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
         std::vector<uint32_t> tetOrd;
         tetOrd.reserve( psKeptCells );
         uint32_t cellOrdCounter = 0;
-        // the bounds of the moment grids' fixed-point units (fxg): every tet that passes the filter --
-        // the ones handed to the GPU (those it will defer to the CPU included), the released ones the host deposits
-        // itself, and those of no mass -- summed per block of 256 finite cells and then block by block, EXACTLY as
-        // the CPU deposit's bound walk sums them (psFxBoundWalk), so a GPU and a CPU deposit of the same pass
-        // take the same units. Under --grid-window both count only the tets that reach the window (this loop skips
-        // the others before the filter; the CPU walk applies the same test, psFxBoundWalk says why),
-        // and the window's MASS unit is taken from these bounds as well (B[DW], PSFixedUnits.massTotal).
-        // Every pass sums them (fxBoundsWanted: the walk's test below is always true).
+        // the bounds of the moment grids' fixed-point units (fxg): every tet that passes the filter (handed to the GPU, deferred
+        // ones included, the released ones and those of no mass), summed per block of 256 finite cells and then block by block,
+        // EXACTLY as the CPU deposit's bound walk (psFxBoundWalk), so a GPU and a CPU deposit of one pass take the same units.
+        // Under --grid-window both count only the tets that reach the window, and the window's MASS unit is taken from these
+        // bounds too (B[DW], PSFixedUnits.massTotal). Every pass sums them (fxBoundsWanted is always true).
         bool const fxBoundsWanted = true;
         std::vector<PSFixedBounds> gpuBoundPart( noTotalCells / 256 + 1 );
         // grid and canonical frame of the per-tet records (the CPU exact test's own definitions)
@@ -339,12 +325,9 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
         }
 
         lap( PS_PH_EXTRACT );
-        // Sort tetrahedra by grid-footprint cost before dispatch. A GPU chunk finishes when its
-        // SLOWEST thread finishes: one stretched void tet (spanning thousands of grid cells) mixed
-        // among cheap halo tets leaves most of the GPU idle until the chunk boundary. Cost-ordering makes
-        // every chunk's threads uniformly sized, so all GPU cores stay busy, and the adaptive
-        // chunk-size controller tracks a smooth monotone cost curve instead of a noisy mix.
-        // a tet's grid-footprint cost: the cells of its window (extent + [1, 2) cells per axis, no sample margin)
+        // Sort tetrahedra by grid-footprint cost before dispatch. A GPU chunk finishes when its SLOWEST thread finishes: one
+        // stretched void tet among cheap halo tets leaves most of the GPU idle. Cost-ordering makes every chunk's threads
+        // uniformly sized, so the adaptive chunk-size controller tracks a smooth monotone cost curve.
         auto windowCells = [&](size_t const t) -> float
         {
             float const* rec = &tetVerts[t*PS_TET_STRIDE];   // edges at [6..14]
@@ -364,9 +347,8 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
         };
         {
             size_t const nT = tetMasses.size();
-            // Counting sort on the log2 cost, quantized to 2048 steps per doubling (0.03%): linear
-            // time, and balancing the chunks needs no finer order. (std::sort of (cost, index)
-            // pairs is slower; this also needs 6 B/tet instead of 8.)
+            // Counting sort on the log2 cost, quantized to 2048 steps per doubling: linear time, and balancing the chunks needs
+            // no finer order (6 B/tet).
             std::vector<uint16_t> costKey(nT);
             for (size_t t = 0; t < nT; ++t)
             {
@@ -382,9 +364,8 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
                 for (size_t t = 0; t < nT; ++t) order[ slot[costKey[t]]++ ] = uint32_t(t);
             }
             std::vector<uint16_t>().swap(costKey);
-            // apply the permutation IN PLACE by cycle-walking all arrays in lockstep: a gather
-            // into a fresh array would transiently hold a second nT*12-float copy (~90 MB per
-            // million tets); this needs only one element of scratch plus an nT-byte mask
+            // apply the permutation IN PLACE by cycle-walking all arrays in lockstep: a gather into a fresh array would
+            // transiently hold a second copy; this needs one element of scratch plus an nT-byte mask
             {
                 std::vector<char> visited(nT, 0);
                 bool const haveU = not tetVels.empty();
@@ -461,14 +442,11 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
         // takes it (fxBoundWalk), not from the host's sum of the masses it is handed
         if ( windowMode ) fxUnits.massTotal = gpuBounds.B[PS_FX_DW];
         lap( PS_PH_SORT );
-        // The face walk (--face-gradient) starts here, beside the device call, instead of after the deposit --
-        // where the walk after the deposit would take its units from these same bounds (psFxBoundsFromGpu: a single
-        // build without the NaN test hook) and they give a unit. Its words are that walk's: the same units, the same
-        // order-free integer sums. (The face words are then held through the device call, its wait for the device
-        // included, which the planner books: auto_tune.cc AutoTunePSInputs::earlyFace.) In the double build and under
-        // the NaN test hook the walk runs after the deposit (psFaceWalk below the CPU loop, ps_interpolation.cc), as it
-        // does when there is no room for the face words before the call (std::bad_alloc: they are let go) or the system
-        // refuses the walk its thread (PSEarlyFaceWalk::start).
+        // The face walk (--face-gradient) starts here, beside the device call, when the walk after the deposit would take its
+        // units from these same bounds (psFxBoundsFromGpu: a single build without the NaN test hook); its words are that walk's.
+        // They are held through the device call, which the planner books (AutoTunePSInputs::earlyFace). In the double build,
+        // under the NaN test hook, when there is no room for the face words (std::bad_alloc) or the system refuses the thread
+        // (PSEarlyFaceWalk::start), the walk runs after the deposit (psFaceWalk below the CPU loop).
         PSEarlyFaceWalk earlyFace;
         bool earlyWalk = false;
         try
@@ -559,13 +537,11 @@ static void psGpuExtractAndDeposit(PSGpuCtx const &ctx, MassAudit &audit, Lap &l
             {
                 return gpuFixed ? psMassFixedMass( gpuFx[i], gpuOut.massScale ) : double( gpuOut.mass[i] );
             };
-            // The moment grids (fxg): a grid the GPU returns as words becomes this pass's fixed-point grid
-            // as it is (the single build; the deferred and released tets are added into it, and it is converted after
-            // the CPU loop, like the mass); otherwise its Real grid is set here, cell by cell, from the GPU's floats,
-            // or (the double build) from its words converted to double. The moment normalizer MOMW is the GPU's
-            // volume-share grid; the dispersion's normalizer DW is the mass grid when the kernel skipped it
-            // (dispwIsMass) -- and once the mass grid is this pass's own exact words (massFxOn) DW is not
-            // accumulated at all: it becomes the density after the loop (see massFx).
+            // The moment grids (fxg): a grid the GPU returns as words becomes this pass's fixed-point grid as it is (single
+            // build; deferred and released tets are added into it and it is converted after the CPU loop, like the mass);
+            // otherwise its Real grid is set here from the GPU's floats, or (double build) from its words. MOMW is the GPU's
+            // volume-share grid; DW is the mass grid when the kernel skipped it (dispwIsMass), and once the mass grid is this
+            // pass's own words (massFxOn) DW is not accumulated at all: it becomes the density after the loop.
             std::vector<float> const *const gpuFloat[PS_FX_N] = { &gpuOut.mom, &gpuOut.m2, &gpuOut.grad, &gpuOut.momw,
                 &gpuOut.streamvol, &gpuOut.dispvel, &gpuOut.dispw, &gpuOut.scal, &gpuOut.sgrad };
             bool const dwIsMass = gpuOut.dispwIsMass;

@@ -1,16 +1,4 @@
-"""Shear magnitude and triaxiality slice maps + per-snapshot statistics.
-
-Method-, snapshot- and simulation-agnostic via the shared dtfelib.FieldSet layer:
-
-    python3 plot/plot_shear_triaxial.py --sim TNG50-4-Dark  # full series, auto method
-    python3 plot/plot_shear_triaxial.py --estimator dtfe
-    python3 plot/plot_shear_triaxial.py --snap 99          # single snapshot only
-
-PS-DTFE grids: the shear is the MEAN-FIELD one by default -- the traceless symmetric FFT gradient of
-the PS velocity grid (FieldSet.load('shear', mean_field=True)), the tensor standard DTFE stores; the binary's PS
-grids hold the stream average of each stream's gradient <grad v> (dtfelib/io.py, the note above FIELDS) and
-'--ps-gradient stored' uses them. The summary's 'Data source' line says which.
-"""
+"""Shear magnitude and triaxiality slice maps + per-snapshot statistics."""
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
 from pathlib import Path

@@ -1,30 +1,6 @@
 #!/usr/bin/env bash
-# PS-DTFE --ps-halo-release correctness check.
-#
-# The halo-interior release deposits any tetrahedron whose geometric stream density
-# rho_geo = rho_bar*V_lag/V_eul exceeds the threshold D monolithically at its Eulerian
-# centroid cell (the mass-conserving sub-sample-spacing fallback) instead of rasterizing
-# it over its bbox. Verified here on the Zel'dovich pancake AND a --crossed-waves snapshot:
-#  A) the flag actually releases tetrahedra (D=2 is deliberately low so released tets are
-#     large enough to have covered cell centres -- outputs must CHANGE in the multi-stream
-#     region) while the grid means of .den and .a_den stay 1 to float accumulation (mass
-#     conservation is exact per tetrahedron, so the mean is UNCHANGED vs the base run).
-#  B) cells that are single-stream in the base run keep BIT-IDENTICAL .den/.vel/.streams:
-#     released tets live in multi-stream regions by construction. Single-stream means
-#     streams==1 AND '.hidden_streams' == 0: a cell that already holds a never-sampled tet's mass
-#     in the base run is where that tet's release adds its volume fraction to '.streams'.
-#  C) partition/thread invariance with the flag on: two '--partition 2 2 2' runs at 1 and
-#     all threads give bit-exact integer '.streams' (the exact sample counts: the protocol the
-#     deposit guarantees) and float-rounding FP fields. A cell holding a RELEASED tet carries
-#     its volume fraction, a float32 sum whose order depends on the deposit-thread split and on
-#     the order the concurrent partitions merge in, so those cells are held to a few ulps only
-#     (one cell in 262144 differs by one ulp in about one run of six; the same run with
-#     --max-concurrent 1 splits each partition's deposit over all threads and moves 1100 cells
-#     by <= 1e-6). Serial-vs-partitioned keeps the KNOWN +-1-stream centroid-cell
-#     edge at periodic faces, so it is not asserted bit-exact here.
-#  D) GPU parity (GPU builds): the GPU deposit classifies kept/released identically
-#     (equal released counts) and matches the CPU deposit within the usual tolerances.
-#
+# PS-DTFE --ps-halo-release correctness on the Zel'dovich pancake and a --crossed-waves snapshot.
+#   A releases tetrahedra, mean density kept   B single-stream cells bit-identical   C partition/thread invariance   D GPU parity
 # Usage: tests/ps_halo_release_check.sh [--no-build]
 
 set -euo pipefail
@@ -52,8 +28,7 @@ GPU_BUILT=0
 [ -f o_ps/.gpu_mode_off ] || GPU_BUILT=1
 
 # capture FIRST -- piping the binary straight into grep -q would SIGPIPE it under pipefail
-# a help that fails is a broken binary, not a missing feature; a missing feature fails under DTFE_TEST_REQUIRED=1
-# (skip_or_fail, tests/lib.sh)
+# a help that fails is a broken binary, not a missing feature (skip_or_fail, tests/lib.sh)
 FULL_HELP="$("${BIN}" --full-help 2>/dev/null)" || { echo "FAIL: ${BIN} --full-help exited non-zero"; exit 1; }
 if ! grep -q -- '--ps-halo-release' <<<"${FULL_HELP}"; then
     skip_or_fail "this PS-DTFE has no --ps-halo-release support."
@@ -66,9 +41,8 @@ echo ">> generating test snapshots ..."
     --amplitude-factor 1.8 --crossed-waves >/dev/null
 
 run() {  # $1 = threads, $2 = output root, $3 = input snapshot, rest = extra flags
-    # out comes right after the input: multitoken options (--partition X Y Z) must not be
-    # able to swallow the trailing positional. The sampled deposit at nSub 3 ('density_a' would select the
-    # exact one): the integer '.streams' and the sub-sample fallback asserted below are its own
+    # out comes right after the input: multitoken options (--partition X Y Z) must not swallow the trailing positional.
+    # The sampled deposit at nSub 3 ('density_a' would select the exact one)
     local threads="$1" out="$2" snap="$3"; shift 3
     rm -f "${out}".*
     local log="${out}.log"
@@ -139,9 +113,8 @@ for tag, rel in (("pan", rel_pan), ("crw", rel_crw)):
           f"base {db.mean():.8f} vs released {df.mean():.8f}")
     check(f"A [{tag}] .a_den mean unchanged", abs(float(af.mean()) - float(ab.mean())) < 1e-6,
           f"base {ab.mean():.8f} vs released {af.mean():.8f}")
-    # 1e-3 absolute: the crossed-waves BASE deposit already sits ~5e-4 below 1 (mass of
-    # dropped degenerate cells; flag-independent). The exact-conservation statement for the
-    # RELEASE is the mean-unchanged check above (1e-6 vs base).
+    # 1e-3 absolute: the crossed-waves base deposit already sits ~5e-4 below 1 (dropped degenerate cells).
+    # Exact conservation of the release is the mean-unchanged check above.
     check(f"A [{tag}] mass conserved", abs(float(df.mean()) - 1.0) < 1e-3,
           f"mean rho/rho_bar = {df.mean():.6f}")
     changed = int((af != ab).sum())
@@ -186,9 +159,8 @@ if gpu:
     eq = float((sf == sg).mean())
     mrel = float(np.abs(df - dg).mean() / (np.abs(df).max() + 1e-30))
     if _os.environ.get("DTFE_TEST_PRECISION") == "double":
-        # the double build hands the (float) GPU kernels float copies of its double tetrahedra: a sample
-        # within float rounding of a face can fall on the other side than in the CPU's double geometry
-        # (ps_double_check D5), so exact equality is a single-build contract
+        # the double build gives the float GPU kernels float copies of its double tetrahedra (ps_double_check D5),
+        # so exact equality is a single-build contract
         check("D GPU streams match CPU (double build: float kernel geometry)", eq >= 1 - 1e-4,
               f"{eq*100:.4f}% equal (at least 99.99%)")
     else:

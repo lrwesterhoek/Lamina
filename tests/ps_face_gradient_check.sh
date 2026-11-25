@@ -1,98 +1,6 @@
 #!/usr/bin/env bash
-# PS-DTFE's '--face-gradient': the gradient of the volume-weighted MEAN velocity from exact
-# face sums -- each cell's lower and upper face per axis carry the integrals of S (the sum of the streams' velocities)
-# and of N (their count), and the gradient is the difference of the face-averaged mean velocities, (S_up/N_up -
-# S_lo/N_lo) / dx -- instead of the stream average of each stream's own gradient, which the run writes beside it as
-# '.a_velDivStreams'. On Zel'dovich pancakes (tests/generate_ps_test_data.py, 32^3 particles, box 100 Mpc, 20% jitter,
-# 32^3 grid, --exact, density_a velocity_a gradient_a divergence_a shear_a vorticity_a):
-#   P1  single stream (amplitude factor 0.6): the face gradient equals the stream average to 1e-5 of the divergence's
-#       rms (measured 9.5e-7), and '.a_velDivStreams' is byte-identical to the divergence of a '--per-tet-gradient' run
-#   P2  three streams across two folds (amplitude factor 2): the periodic box mean of the mean flow's divergence is 0 to
-#       1e-6 of its rms (measured 5e-11; Gauss: the face form telescopes), while the stream average's is not (+0.98 of
-#       its rms: the streams expand after shell crossing); in the cells whose stream count is an integer, and their six
-#       neighbours' too (no caustic on a face), the two agree to 1e-4 of the rms (measured 1.5e-6)
-#   P3  the folds carry the mean flow's convergence: the two fold planes' mean divergence is below -5 x the
-#       single-stream region's mean and the two agree to 1e-3 of each other (the pancake is symmetric)
-#   P4  determinism: 10 deposit threads and slab mode (DTFE_DEPOSIT_SLABS=1, 6 threads) byte-identical to one thread
-#       (the double build's stream average to 1e-12: its float sums are per thread count, as every double-build moment)
-#   P5  '--partition 2 2 2': within 1e-5 of the rms of one domain (measured 9e-7), box mean below 1e-6 of the rms
-#   P6  '--grid-window' (one z cell across the box): the full run's z = 16 slice, byte-identical in the single build
-#       (the double build shows the window's own fixed-point unit: within 1e-9 of the rms, measured 2e-11)
-#   P7  refusals at option parsing (exit 1): with '--sampled' (the exact deposit is the default for these '_a' fields,
-#       so only the sampled one asked for conflicts); both route flags at once ('--face-gradient --per-tet-gradient');
-#       DTFE_FACE_GRADIENT=1 beside '--sampled' (read as the flag)
-#   P11 (a GPU build) '--gpu': the GPU exact deposit with the face sums from the CPU walk beside it:
-#       the mean flow's divergence and the mass flux divergence byte-identical to the CPU run's (the same face
-#       words, the same units), the density within the GPU deposit's float tolerance, the stream average within 5e-2
-#       of its rms (the device's float per-stream gradient), and the run neither fell back nor skipped the walk
-#   P12 (a GPU build, but for the lattice's CPU check) the face walk keeps the tetrahedra the CPU deposit loop keeps:
-#       a CPU and a '--gpu' run write the mean flow's grids and the mass flux divergence
-#       byte for byte in a one-cell '--grid-window', in a non-periodic '--box', under the NaN test hook
-#       (DTFE_TEST_NAN_SHARE=50, single build, with the same number of face shares left out) and for a real NaN vertex
-#       mass (one particle's mass NaN under '--ps-vertex-mass', '--mean-density' given; the same). In a '--box' whose
-#       upper x face is a particle plane of a lattice without jitter (tetrahedra outside the box with a face in that
-#       plane, which own the box's section there: both devices deposit it, psOwnsUpperBoundarySection), both runs on
-#       one domain ('--partition 1 1 1': the two devices cannot plan different splits), the mean flow's grids and the
-#       mass flux divergence are byte-identical in every layer. On every build (a CPU-only build too: the CPU run
-#       alone) the last x layer's upper face carries that section: the flow is along x alone, so where that face had
-#       no stream '.a_velDiv' was the stream average '.a_velDivStreams' to the byte; now it is the face value in at
-#       least half as many of that layer's cells as in the layer below (whose faces are all covered), and as a
-#       single-stream cell must, within 1e-5 of the rms of the stream average. In the single build the bounds a face
-#       pass takes over from the GPU extraction equal the bound walk's (DTFE_DEBUG_FX_BOUNDS=1)
-#   P13 (every build) that lattice box split 2^3 on the CPU ('--partition 2 2 2 --max-concurrent 2'): the section
-#       survives the split (the sub-grid of the partition that holds the tetrahedra beyond the box must hold the last
-#       x layer): the last x layer's divergence is the face value in at least half as many cells as on one domain
-#       (and P12's way, within 1e-5 of the rms of the stream average), and the mass flux divergence and the mean
-#       flow's divergence and shear are within 1e-5 of the one-domain rms in every x layer (P5's tolerance; a lost
-#       section would leave the mass flux divergence off by the whole outflow through that face). A failure names
-#       the count, or the field, its deviation and the x layers
-#   P14 the default (read from the run's header, so the check follows
-#       src/user_options.cc kPsFaceGradientDefault): a qualifying run without a route flag (--exact) writes the face
-#       run's files byte for byte; DTFE_FACE_GRADIENT=0 writes the '--per-tet-gradient' run's; the face run differs
-#       from that one only in the gradient family and its extra files ('.a_massFluxDiv', '.a_velDivStreams' and P15's '.a_velGradStreams',
-#       '.a_velShearStreams', '.a_velVortStreams'); a run that does not qualify (the sampled deposit, the halo release)
-#       exits 0, keeps the stream average and names the cause in its 'velocity gradient' line
-#   P15 the regular part's twins: '.a_velGradStreams', '.a_velShearStreams' and
-#       '.a_velVortStreams' are byte-identical to the '.a_velGrad', '.a_velShear', '.a_velVort' of a
-#       '--per-tet-gradient' run (one stream and three); a 'shear_a'-only run makes the shear twin alone (the bytes of
-#       a '--per-tet-gradient' run's '.a_velShear' at the same fields); the gradient twin's trace is
-#       '.a_velDivStreams' byte for byte; on a linear velocity field (a non-periodic clump, v = G x) the twins and
-#       the mean flow's gradient are G's own to 4e-5 of max|G| (measured 3.5e-6 single, 1.2e-6 double); with '--gpu'
-#       the twins are within 5e-2 of the CPU's (of the gradient twin's rms) and the trace holds; P4 and P9 compare
-#       the twins too, as their other grids; P6 holds a window's twins to the window's own fixed-point units (the
-#       contract of tests/ps_window_check.sh: a window pass rounds its sums in its own units): 1e-8 of the gradient
-#       twin's rms in the single build (measured 7.7e-11, in 2 of the slice's 9216 gradient values, both near zero),
-#       1e-9 in the double build (measured 0); dtfelib's load(name, stream_average=True) gives the same grid for a
-#       face run and a '--per-tet-gradient' run
-#   P16 (a GPU build) the face walk beside the device call: in the single build a '--gpu' run says that its face
-#       sums were made beside the GPU deposit -- on one domain, where 4 deposit threads write P11's run's grids byte
-#       for byte (the mean flow's, the mass flux divergence, the density and the velocity), in a one-cell
-#       '--grid-window' (the mean flow of the CPU run), and on a 2^3 split with 4 partitions in flight, whose closing
-#       line counts the walks: all 8 kept, none thrown away (P9's CPU split prints no such line). After a device call
-#       that fails (DTFE_GPU_FAULT_AT=1:persist) the walk's sums are thrown away and the CPU deposit makes them: the
-#       mean flow the CPU run's; on the split no walk is kept and all 8 are thrown away (every partition's device call
-#       fails under the persistent fault, and each of them had started its walk), the mean flow that of the split
-#       whose calls succeed. A NaN vertex mass leaves out, and counts, the same face shares with the walk beside a device
-#       call that succeeds and beside one that fails (once, not twice); under the NaN test hook (P12's run) the walk
-#       stays after the deposit. So it does in the double build, whose face pass takes its bounds from a bound walk of
-#       its own (4 deposit threads: the same grids)
-#   P19 '--interlace' (two passes, the second on the particles moved by half a cell, of which only the density is
-#       kept: main.cpp): P14's default run with it takes the same gradient route (its header's 'velocity gradient'
-#       line) and writes every file of the run without it byte for byte -- the face gradient's family, the mass flux
-#       divergence and the stream average's twins included -- but '.a_den', which is interlaced
-#   P8  dtfelib: FieldSet.face_gradient is True for the run (False with '--per-tet-gradient') and load('divergence',
-#       mean_field=True) returns the stored grid itself
-#   P9  the face sums ride the checkpoint: a '--partition 2 2 2' run killed after 3 partitions
-#       (DTFE_TEST_EXIT_AFTER_PARTITIONS=3, exit 137) and resumed ('--resume') writes the uninterrupted run's grids
-#       byte for byte; a one-cell window over a 2^3 split equals the full run's slice as P6 does
-#   P10 the mass flux divergence '.a_massFluxDiv': periodic box mean 0 to 1e-6 of its rms; in the double build,
-#       continuity over a drift of the 3-stream pancake and of crossed waves (24^3, amplitude factor 1.5: the y and z
-#       momentum words) (x + v t, 9 times in [-1e-4, 1e-4]): each cell's mass change equals minus its outflow
-#       integrated by Simpson's rule, caustic cells included, to 0.05 max / 2e-3 rms of the rms (measured 0.022 /
-#       7.2e-4 and 0.028 / 7.1e-4), and 4 -> 8 intervals shrink the rms by at least 2.5 (measured 3.8 and 4.0); the
-#       thread, slab-mode and resume checks (P4, P9) compare '.a_massFluxDiv' too
-# About 47 s on the Mac in a GPU build (single; 38 s in the double build, where P16 is one run; each measured once,
-# on another set of runs than this one: TO MEASURE).
+# PS-DTFE '--face-gradient': the volume-weighted mean-velocity gradient from exact face sums, against the stream average
+# ('.a_velDivStreams') and '--per-tet-gradient'; checks P1-P19 on Zel'dovich pancakes, crossed waves and lattice boxes.
 # Usage: tests/ps_face_gradient_check.sh [--no-build]   (--no-build is accepted and ignored: nothing is built)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -157,9 +65,8 @@ if [ "$rc_kill" = "137" ] && grep -q -- "--resume: 3 of 8 partitions" "$TMP/res8
 else
     fail "P9 the resumed face run (kill exit $rc_kill; see $TMP/res8.log)"
 fi
-# the mean flow's grids come from fixed-point face sums alone: byte-identical in both builds. The stream average
-# ('.a_velDivStreams') is a float sum per private copy in the double build (deterministic per thread count only, as
-# every double-build moment): byte-identical in the single build, to 1e-12 of the rms in the double (measured 2.5e-15)
+# the mean flow's grids are fixed-point face sums: byte-identical in both builds; the stream average
+# ('.a_velDivStreams') is float per thread copy in the double build, byte-identical in the single build only
 meanflow() { cmp -s "$TMP/$1.a_velDiv" "$TMP/$2.a_velDiv" && cmp -s "$TMP/$1.a_velShear" "$TMP/$2.a_velShear" \
              && cmp -s "$TMP/$1.a_massFluxDiv" "$TMP/$2.a_massFluxDiv"; }
 if precision_double; then
@@ -259,11 +166,10 @@ w = rd("win.a_velDiv").reshape(n, n, -1)
 ws = rd("win.a_velDivStreams").reshape(n, n, -1)
 full, fulls = f.reshape(n, n, n), rd("f2.0.a_velDivStreams").reshape(n, n, n)
 # the window's face words take the window's own fixed-point unit (as every fixed-point grid of a window run does): the
-# single build's float output rounds that away (byte-identical); the double build shows it (measured 2e-11 of the rms)
+# single build's float output rounds that away (byte-identical); the double build shows it
 e = np.abs(w[:, :, 0] - full[:, :, 16]).max() / rmsf if w.shape[2] == 1 else 1.0
-# (the regular part's twins, P15: a window's stream-average sums round in the window's own units too, and the single
-# build's float output shows that in a few values near zero: 1e-8 of the gradient twin's rms, measured 7.7e-11 in 2 of
-# the slice's 9216 gradient values; the double build 1e-9, measured 0. The divergence twin: the full run's bytes)
+# (P15: a window's stream-average sums round in the window's own fixed-point units, so the gradient twin
+# is held to 1e-8 of its rms there; the divergence twin is the full run's bytes)
 rmsg = np.sqrt((rd("f2.0.a_velGradStreams") ** 2).mean())
 et = max(np.abs(rd("win." + s).reshape(n, n, -1, c)[:, :, 0] - rd("f2.0." + s).reshape(n, n, n, c)[:, :, 16]).max()
          for s, c in (("a_velGradStreams", 9), ("a_velShearStreams", 5), ("a_velVortStreams", 3))) / rmsg \
@@ -283,12 +189,8 @@ sys.exit(0 if ok else 1)
 PY
 
 echo ">> the mass flux: periodic box mean; continuity over a drift (the double build)"
-# P10: '.a_massFluxDiv' = div(sum_s rho_s v_s) from the face momentum sums. Its periodic box mean telescopes to 0. The
-# double build drifts the 3-stream pancake's particles (and, for the y and z momentum words, crossed waves: 24^3
-# particles, amplitude factor 1.5, 20% jitter) along their velocities, x + v t, for t in [-T, T] at 9 times:
-# a cell's mass change M(T) - M(-T) equals minus the time integral of its outflow, caustic cells too (the PS model is
-# exact for each tetrahedron at each instant). Simpson's rule on 8 intervals converges (4 -> 8 intervals: rms x 3.8)
-# but slowly where a caustic sheet crosses a face in the interval (the flux is not smooth in t there).
+# P10: '.a_massFluxDiv' = div(sum_s rho_s v_s); its periodic box mean telescopes to 0. The double build drifts
+# the particles (x + v t) and checks each cell's mass change against minus its outflow integrated by Simpson's rule.
 if precision_double; then
     "$PY" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "$TMP/cw.hdf5" --n 24 --box 100 --amplitude-factor 1.5 \
         --jitter-frac 0.2 --crossed-waves > "$TMP/gen_cw.log" 2>&1 \
@@ -350,9 +252,8 @@ sys.exit(0 if ok else 1)
 PY
 
 echo ">> the regular part's twins of a linear velocity field (a non-periodic clump, v = G x)"
-# P15: without displacements the clump is one stream, and a linear field's gradient is G in every tetrahedron and in
-# every cell, the stream average's and the mean flow's alike. The box [30, 70] lies inside the clump (about [20.6,
-# 79.4] on each axis); a cell counts where '.a_streams' is 1 (to 1e-3)
+# P15: without displacements the clump is one stream and a linear field's gradient is G in every cell; the box
+# [30, 70] lies inside the clump, and a cell counts where '.a_streams' is 1 (to 1e-3)
 "$PY" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "$TMP/lin.hdf5" --n 32 --box 100 --amplitude-factor 0 \
     --jitter-frac 0.2 --margin-frac 0.2 --linear-velocity 3 7 -2 -5 1 4 6 -3 -2.5 > "$TMP/gen_lin.log" 2>&1 \
     || { echo "FAIL: generate_ps_test_data.py --linear-velocity (see $TMP/gen_lin.log)"; exit 1; }
@@ -378,7 +279,7 @@ for s, w in want.items():
         e = np.abs(rd(s, w.size)[cov] - w).max() / gm if cov.any() else 1.0
     except (OSError, ValueError) as err:
         e = float("inf"); print(f"   (lin.{s}: {err})")
-    good = e <= 4e-5      # (about ten times the single build's largest measured error, 3.5e-6: the mean flow's)
+    good = e <= 4e-5
     print(("   PASS  " if good else "   FAIL  ") + f"P15 linear field v = G x: {s} is G's own to {e:.2g} of max|G|")
     ok = ok and good
 sys.exit(0 if ok else 1)
@@ -549,12 +450,8 @@ runb lc8 lat OMP_NUM_THREADS=1 -- "${LBOX[@]}" --partition 2 2 2 --max-concurren
 import numpy as np, sys
 tmp, dt = sys.argv[1], np.dtype(sys.argv[2])
 n, ok = 32, True
-# the last layer upper face carries the section of the tetrahedra resting on the box face from outside
-# (psOwnsUpperBoundarySection). The flow is along x alone (v_y = v_z = 0 at every particle),
-# so the divergence is the x gradient alone: with no stream on that face it fell back to the stream average, and
-# .a_velDiv equalled .a_velDivStreams there to the byte (0 cells apart). From the face sums it is the face value,
-# whose last bits differ from the stream average in nearly every cell, as in the layer below (all faces covered).
-# The box face lies in the single-stream region, where the two agree to rounding (P1: 1e-5 of the rms).
+# the last layer's upper face carries the section of tetrahedra resting on the box face from outside
+# (psOwnsUpperBoundarySection): the x divergence is the face value there, not the stream average
 d, s = (np.fromfile(f"{tmp}/lc.{k}", dtype=dt).reshape(n, n, n).astype(np.float64) for k in ("a_velDiv", "a_velDivStreams"))
 last, below = int((d[n - 1] != s[n - 1]).sum()), int((d[n - 2] != s[n - 2]).sum())
 rs = float(np.sqrt((s ** 2).mean())) or 1.0
@@ -566,11 +463,8 @@ else:
     print(f"   FAIL  P12 a particle plane as the box face: the last x layer divergence is the face value in {last} of "
           f"{n * n} cells (the layer below: {below}; want at least half as many), {e:.2g} of the rms from the stream "
           f"average (want <= 1e-5)"); ok = False
-# P13: the same box split 2^3. The section must survive the split (the sub-grid of the partition that holds the
-# tetrahedra beyond the box must hold the last x layer). Where a split lost it, the x gradient falls
-# back to the stream average (the count sees that: within rounding of the face value, no tolerance does) and the
-# mass flux divergence misses the whole outflow through that face (far beyond the tolerance). Not byte for byte:
-# a split merges its partitions in float (P5), so the count is held to half of the one-domain count, not to it.
+# P13: the same box split 2^3; a lost section falls back to the stream average (counted) and loses the face's mass
+# flux. Not byte for byte (a split merges in float): the count is held to half the one-domain count.
 rd = lambda run, suf: np.fromfile(f"{tmp}/{run}.{suf}", dtype=dt).astype(np.float64)
 d8, s8 = (rd("lc8", k).reshape(n, n, n) for k in ("a_velDiv", "a_velDivStreams"))
 last8, below8 = int((d8[n - 1] != s8[n - 1]).sum()), int((d8[n - 2] != s8[n - 2]).sum())
@@ -658,9 +552,8 @@ EOF
         else
             fail "P12 the NaN hook: face shares left out CPU '${dc}' / GPU '${dg}', or the grids differ (see $TMP/ng.log)"
         fi
-        # a real NaN vertex mass (one particle's mass NaN under --ps-vertex-mass; --mean-density keeps rho_bar finite,
-        # which the particles' own mean would not be): the walk keeps the NaN as the loop does, so both devices leave
-        # out, and count, the same face shares
+        # a real NaN vertex mass (--mean-density keeps rho_bar finite): the walk keeps the NaN as the loop does,
+        # so both devices leave out, and count, the same face shares
         "$PY" - "$TMP/pan_2.0.hdf5" "$TMP/pan_nanm.hdf5" > "$TMP/gen_nanm.log" 2>&1 <<'EOF' \
             || { echo "FAIL: the NaN-mass snapshot (see $TMP/gen_nanm.log)"; exit 1; }
 import shutil, sys

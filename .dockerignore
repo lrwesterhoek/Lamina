@@ -20,16 +20,10 @@ metal/validate_deposit
 # the whole directory breaks the image build. Only metal-cpp is macOS-only and safe to drop.
 third_party/metal-cpp/
 figures/
-# docs/ and demo/ stay out but for what the test stage reads: the bundled snapshot, and the documents the core
-# stage's documents check reads (tests/docs_drift_check.py, its DOCS; README.md and metal/README.md ship anyway)
+# docs/ and demo/ stay out but for the bundled snapshot the test stage reads (README.md ships anyway)
 docs/
-!docs/user-guide.md
-!docs/launcher-and-analysis.md
-!docs/developer-guide.md
-!docs/timings.md
 demo/
 !demo/z0_64.gadget
-!demo/COMMANDS.md
 # generated analysis output, not build input (python/figures alone is >7 GB)
 python/figures/
 python/cache/

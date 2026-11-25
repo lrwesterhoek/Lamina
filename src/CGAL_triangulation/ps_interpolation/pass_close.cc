@@ -1,7 +1,5 @@
-// Part of src/CGAL_triangulation/ps_interpolation.cc, inside its #ifdef PHASE_SPACE: included once, in order, by
-// that file and compiled only as part of its object, never alone.
-// The pass's close: the fixed-point words to Real, the messages, the moments' normalization, the mass audit's
-// line, the stream statistics and export, the phase report (psPhaseReport).
+// Part of ps_interpolation.cc (included in order inside its #ifdef PHASE_SPACE, never compiled alone). The pass's close:
+// fixed-point words to Real, messages, moment normalization, mass audit line, stream statistics and export, phase report.
 
 // The fixed-point words become their Real grids, each cell rounded once: the moment grids', then the density.
 static inline void psFixedToReal(PSPassCtx const &passCtx, PSGridsCtx const &gridsCtx, PSFxState &fx)
@@ -13,10 +11,8 @@ static inline void psFixedToReal(PSPassCtx const &passCtx, PSGridsCtx const &gri
     bool &massFxOn = gridsCtx.massFxOn;
     bool const dispNeedsOwnWeight = gridsCtx.dispNeedsOwnWeight;
     std::vector<Real> &dispWeight = gridsCtx.dispWeight;
-    // Grid by grid (fxg), each grid's words freed before the next is converted; the mass words last, into the float
-    // density (see massFx) that the rho/rho_bar conversion after the moments' normalization reads. Here, after the
-    // private copies, the slab lists and (on the final call) the triangulation are freed, the 4 B float grid and the
-    // 8 B words briefly coexist.
+    // Grid by grid (fxg), each grid's words freed before the next is converted; the mass words last, into the float density
+    // (see massFx) that the rho/rho_bar conversion reads. The 4 B float grid and the 8 B words briefly coexist.
     for (int g = 0; g < PS_FX_CPU_N; ++g) fx.toReal( g );
     if ( fx.face )   // --face-gradient: the face sums, the same way (normalizePhaseSpace turns them into the gradient)
     {
@@ -35,10 +31,9 @@ static inline void psFixedToReal(PSPassCtx const &passCtx, PSGridsCtx const &gri
         } );
         massFx.release();
         massFxOn = false;
-        // The dispersion's own mass normalizer (dispWeight) sums the very shares this grid sums, at the same
-        // sites (the GPU's dispw likewise), so it takes these exact sums too (a float sum of its own would part
-        // from them at the last bit).
-        // (dispWeight is not even accumulated then -- it may be EMPTY here: dwOffL in the loop)
+        // The dispersion's own mass normalizer (dispWeight) sums the very shares this grid sums, at the same sites (the GPU's
+        // dispw likewise), so it takes these exact sums too (a float sum of its own would part from them at the last bit);
+        // dispWeight may be EMPTY here (dwOffL in the loop).
         if ( dispNeedsOwnWeight )
             dispWeight = quantities->density;
     }
@@ -246,11 +241,9 @@ static inline void psExportStreams(PSPassCtx const &passCtx, PSGridsCtx const &g
     std::vector<Real> &exactMult = gridsCtx.exactMult;
     std::vector<PSCausticClass::CausticMask> &orientBits = gridsCtx.orientBits;
     bool const psExact = gridsCtx.psExact, psCaustics = gridsCtx.psCaustics;
-    // Export the per-grid-point stream count: the sampled deposit's sample-mean multiplicity,
-    // or -- under --exact -- the ANALYTIC cell-mean multiplicity (1/V_cell) sum V_int,
-    // its exact nSub->infinity limit. Both are the same physical quantity on the same scale, so
-    // single-stream cells select the same way under either deposit -- but only TO A TOLERANCE
-    // (PS_STREAM_TOL / dtfelib.STREAM_TOL): this is a float, never exactly 1.
+    // Export the stream count: the sampled deposit's sample-mean multiplicity, or under --exact the ANALYTIC cell-mean
+    // multiplicity (1/V_cell) sum V_int, its nSub->infinity limit. Same quantity on the same scale, so single-stream cells
+    // select alike under either deposit, but only TO A TOLERANCE (PS_STREAM_TOL / dtfelib.STREAM_TOL): a float.
     if ( psExact )
         quantities->stream_count.swap(exactMult);   // same type and exactMult is dead below: no copy
     else
@@ -266,12 +259,10 @@ static inline void psExportStreams(PSPassCtx const &passCtx, PSGridsCtx const &g
         } );
     }
 
-    // '.hidden_streams' bitmask (quantities.h): bit 1 = the exact multi-stream flag (a flipped tet
-    // overlaps the cell; DTFE() clears it where '.streams' already reads multi-stream), bit 2 = the
-    // mass flag (a never-sampled tet deposited here: the cell mean includes a centroid-fallback
-    // piece). The degree-1 argument behind bit 1 needs the periodic box's complete sheet; a
-    // non-periodic sheet has an edge whose image can overlap without folding, so there bit 1
-    // keeps the conservative mass flag as well.
+    // '.hidden_streams' bitmask (quantities.h): bit 1 = the exact multi-stream flag (a flipped tet overlaps the cell; DTFE()
+    // clears it where '.streams' already reads multi-stream), bit 2 = the mass flag (a never-sampled tet deposited here).
+    // The degree-1 argument behind bit 1 needs the periodic box's complete sheet; a non-periodic sheet has an edge whose image
+    // can overlap without folding, so there bit 1 keeps the conservative mass flag as well.
     quantities->hidden_streams.resize(totalGrid);
     bool const massIsMulti = !userOptions.periodic;
     psCellRanges( totalGrid, [&](size_t const lo, size_t const hi)
@@ -281,10 +272,8 @@ static inline void psExportStreams(PSPassCtx const &passCtx, PSGridsCtx const &g
                                             | (subSampleMassFlag[i] ? 2 : 0) );
     } );
 
-    // --exact: also export the raw integer tet-touch count ('.tetTouch'), the
-    // number of tetrahedra with a nonzero intersection with the cell. Kept as a geometric
-    // diagnostic (tessellation multiplicity, hundreds in resolved regions); it is NOT a
-    // stream count and is not comparable to the sampled deposit's '.streams'.
+    // --exact: also export the raw integer tet-touch count ('.tetTouch'): tetrahedra with a nonzero intersection with the cell.
+    // A geometric diagnostic, NOT a stream count and not comparable to the sampled deposit's '.streams'.
     if ( psExact )
     {
         quantities->tet_touch.resize(totalGrid);
@@ -297,25 +286,11 @@ static inline void psExportStreams(PSPassCtx const &passCtx, PSGridsCtx const &g
 
     // Export the caustic orientation bits (0..3, exact in float); OR-merged across partitions, and collapsed to
     // the 0/1 fold flag once, in writeOutputData (input_output.cc), after '.causticClass' is written.
-    /* The parity bit 1 (det < 0) is the GEOMETRIC overlap flag.
-       orientBits gets its bits only where a tetrahedron DEPOSITS A SAMPLE, so a fold thinner than
-       the sub-sample spacing -- every young wall, and the edge of every older one -- sets no
-       negative-parity bit in the cells it crosses: per sample, '.caustic' would mark far fewer
-       cells than the folded tetrahedra overlap, with a fraction depending on nSub, although the
-       '--ps-caustics' help, ps_caustic_class.h and dtfelib promise
-       "a det < 0 tetrahedron OVERLAPS the cell". flippedFlag is exactly that
-       statement: the separating-axis tet-box test (TetBoxSAT; 2D: the triangle clip) of every
-       folded tetrahedron, marked in both deposit paths (the host loop marks the GPU's tets) and
-       still RAW here -- Quantities::finalizeHiddenStreams clears it in multi-stream cells only
-       after the merge, and only in '.hidden_streams'. OR-ing it in keeps the export partition-,
-       thread- and backend-invariant (OR of two OR-merged geometric masks).
-       Only bit 1 comes from the geometry. Bit 0 (det > 0) stays per sample: in a periodic box the
-       map has degree 1, so every point of the cell lies in a positive tetrahedron and any sample
-       of the cell sets it -- '(bits & 3) == 3' is therefore the geometric fold flag in every cell
-       a sample reached. The collapse and indicator bits 2..8 are per sample too, NOT geometric:
-       a fold cell whose samples all fell outside the folded tetrahedra carries the parity of the
-       fold but only the k of the streams its samples saw (typically k = 0) -- nSub-limited, as
-       the README notes. */
+    /* The parity bit 1 (det < 0) is the GEOMETRIC overlap flag. orientBits gets bits only where a tet DEPOSITS A SAMPLE, so a
+       fold thinner than the sub-sample spacing would set no negative-parity bit (a fraction depending on nSub), against the
+       promise that a det < 0 tetrahedron OVERLAPS the cell. flippedFlag is exactly that (the tet-box SAT test, marked in both
+       deposit paths and still RAW here), and OR-ing it in keeps the export partition-, thread- and backend-invariant.
+       Only bit 1 is geometric: bit 0 and the collapse/indicator bits 2..8 stay per sample (nSub-limited, as the README notes). */
     if ( psCaustics )
     {
         quantities->caustic_bits.resize(totalGrid);

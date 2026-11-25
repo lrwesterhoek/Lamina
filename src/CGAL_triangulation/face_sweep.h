@@ -1,23 +1,6 @@
-/* The face sweep: exact integrals of a linear field over the grid's FACES, for the face method of the velocity
-   gradient ('--face-gradient').
-
-   By Gauss, the average over a grid cell of the gradient of a field v is (1/V) times the integral of v n over the
-   cell's six faces. For standard DTFE's interpolant -- linear in every tetrahedron and continuous across them --
-   that is exactly the cell average of the per-tetrahedron gradient the deposit adds up; for PS-DTFE, where
-   the streams overlap and the mean velocity jumps at the caustics, it is the finite-volume gradient of the
-   cell-averaged mean flow. Both need the same geometry, here:
-
-   - section(): the plane x_axis = c cuts a tetrahedron in a convex polygon (a triangle or a quadrilateral), given in
-     the plane's own coordinates (u, w), the other two axes in increasing order (x: (y, z), y: (x, z), z: (x, y)).
-     HALF-OPEN RULE: a tetrahedron owns its section when min_axis <= c < max_axis. The plane cuts the tessellation
-     into the tetrahedra's sections, which then tile it; a tetrahedron face lying IN the plane belongs to the
-     tetrahedron on its + side only (the one with min_axis = c), so no area is counted twice or lost.
-   - sweep(): the section clipped to every face square of the plane's 2D grid it overlaps, strip by strip along u
-     and cell by cell along w (the 2D counterpart of exact_sweep.h's slab/column/cell walk, with the same early
-     exits), and the area and first moments of each piece (Green's theorem over its boundary, as ps_clip2d.h). For a
-     linear field the integral over a piece is its value at the piece's centroid times its area.
-
-   Everything is in double, in the caller's frame (the deposits' base-vertex-relative coordinates). */
+/* The face sweep: exact integrals of a linear field over the grid's faces (the face method of the velocity
+   gradient, '--face-gradient'). A tetrahedron owns its plane section when min_axis <= c < max_axis (half-open),
+   so a face lying in the plane is counted once. Everything is in double, in the caller's frame. */
 
 #ifndef FACE_SWEEP_HEADER
 #define FACE_SWEEP_HEADER
@@ -36,8 +19,7 @@ inline void planeAxes( int const axis, int &u, int &w )
     w = ( axis == 2 ) ? 1 : 2;
 }
 
-// Area and first moments [A, A*u_c, A*w_c] of a polygon, counter-clockwise or not (the sign is taken off, so the
-// centroid m[1]/m[0], m[2]/m[0] holds either way). Green's theorem over the boundary, as ps_clip2d.h.
+// Area and first moments [A, A*u_c, A*w_c] of a polygon (sign taken off); Green's theorem, as ps_clip2d.h.
 inline void moments1( Polygon const &p, double m[3] )
 {
     m[0] = m[1] = m[2] = 0.;
@@ -53,13 +35,9 @@ inline void moments1( Polygon const &p, double m[3] )
     if ( m[0] < 0. ) { m[0] = -m[0]; m[1] = -m[1]; m[2] = -m[2]; }
 }
 
-/* The section of the tetrahedron with vertices p[4][3] by the plane x_axis = c, as a counter-clockwise convex polygon
-   in the plane's (u, w). d[4]: the vertices' SIGNED DISTANCES to the plane, which decide the sides and the half-open
-   rule (the top): the tetrahedron owns a section when min d <= 0 < max d. The caller computes them from coordinates
-   every tetrahedron sharing a vertex computes alike (the deposits' absolute region-frame positions), so two
-   tetrahedra never decide a shared face lying in the plane differently, whatever the rounding of their own frames;
-   p only places the corners. False when the tetrahedron owns no section of positive area. A vertex with d = 0 is a
-   corner; an edge whose ends lie strictly on opposite sides gives the corner where it crosses. At most four. */
+/* The section of the tetrahedron p[4][3] by the plane x_axis = c, counter-clockwise in (u, w). d[4]: the vertices'
+   signed distances to the plane, computed by the caller from coordinates all tetrahedra sharing a vertex agree
+   on, so a shared face in the plane is never decided two ways. False when the section has no positive area. */
 inline bool section( double const p[4][3], int const axis, double const d[4], Polygon &out )
 {
     out.n = 0;
@@ -112,12 +90,9 @@ inline bool section( double const p[4][3], int const axis, double const c, Polyg
     return section( p, axis, d, out );
 }
 
-/* Every face square of the window [lo, hi) (indices along u, then w) whose piece of the section 'sec' has positive
-   area, in iu-iw order:
-     bounds(k, idx, lo, hi): the face square's planes along in-plane axis k (0: u, 1: w) in the caller's frame
-     local(k, idx) -> long:  the index's position in the caller's grid, or < 0 to skip it (another thread's strip)
-     visit(idx[2], loc[2], m[3]): the piece's area and first moments [A, A*u_c, A*w_c] (A > 0)
-   A strip or cell beyond the section's extent ends its axis, as in exact_sweep.h. */
+/* Every face square of the window [lo, hi) whose piece of the section 'sec' has positive area, in iu-iw order.
+   bounds(k, idx, lo, hi): the square's planes along in-plane axis k; local(k, idx): grid position, < 0 to skip;
+   visit(idx[2], loc[2], m[3]): the piece's area and first moments. Early exits as exact_sweep.h. */
 template <class Bounds, class Local, class Visit>
 inline void sweep( Polygon const &sec, int const lo[2], int const hi[2], Bounds &&bounds, Local &&local, Visit &&visit )
 {

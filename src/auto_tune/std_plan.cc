@@ -1,62 +1,14 @@
-// Part of src/auto_tune.cc: included once, in order, by that file and compiled only as part of its object, never
-// alone.
-// Standard DTFE only (its own #ifndef PHASE_SPACE and anonymous namespaces): the density replay, the
-// look-ahead's bytes (stdLookAheadBytes, declared in auto_tune.h) and the planner (AutoTuneStdPlanner).
+// Part of src/auto_tune.cc, included once by that file (never compiled alone). Standard DTFE only: the density replay,
+// the look-ahead's bytes (stdLookAheadBytes, declared in auto_tune.h) and the planner (AutoTuneStdPlanner).
 
 #ifndef PHASE_SPACE
 namespace {
 
-/* ---- Standard DTFE: what one partition's thread sub-triangulations hold, from the data --------------------------
-   The standard '--exact' run peaks well above the sampled one in footprint, yet what the code allocates has no
-   exact-average term:
-     - CPU (averaged_interpolation_1.cc): the exact loop clips each tetrahedron against its cell window with r3d on the
-       stack -- no per-tetrahedron or per-cell storage that the Monte-Carlo loop does not have;
-     - GPU (dtfe_metal_host.cc): BOTH averages extract the same flat arrays of the tetrahedra that
-       touch the thread's region (vertices 48 B, densities 16, velocities 48, volume, count, flat index, Morton key
-       4 each), sort them in place, upload them into buffers of the same size, and deposit into the same per-call
-       sub-grid (device + host copy). The exact kernel's only extra is its work-item table (4 B per tetrahedron and
-       4 B per 32 items), which the sampled item kernel builds as well.
-   What changes is WHEN memory is held. The exact kernel is several times slower, and the thread sub-domains of a
-   partition queue on the ONE device (ctxMutex): every thread then waits with its triangulation and its uploaded
-   batch alive, so all of a partition's sub-triangulations coexist -- the worst case this model assumes. In a
-   sampled run the GPU drains a batch quickly, the small sub-domains finish and free theirs before the
-   largest one is built, and the peak stays below the worst case. So the model needs the worst case to be RIGHT,
-   and the box-average particle count per sub-box, (N / P^3) x the padding factor, is not: the
-   load-balanced split (optimalPartitionSplit) gives a dense partition a small VOLUME, while the padding is a fixed
-   length (k mean spacings), so on clustered data the padding shells hold most of the vertices (the busiest
-   partition holds more as structure grows).
-   So the plan replays the run's own split on the particles: a coarse count grid of the box (or, without periodic
-   wrap, of the box and its padding) with a summed-area table gives the particles in any box; the partition split
-   (optimalSplit along x, then y per slab, then z per column -- optimalPartitionSplit's order, on bins of the run's
-   grid cells), the thread grid of each partition (parallelGrid, as DTFE_parallel) and its split are replayed with
-   the run's functions, and every padded thread box is counted, periodic images included. A partition costs, item by
-   item (the helpers below say what each is and how it was measured):
-     - per thread box, its tessellation of its padded points and the padding test's dummy points (stdTessBytes) and,
-       while it is built, the insert's transient (stdInsertBytes: the TBB insert's copies where the box inserts in
-       parallel, else the particle copy it inserts from);
-     - on the GPU, per tetrahedron the box extracts (stdTetsOfBox: its own particles' and the ones crossing its faces)
-       the flat arrays and the Morton order's copies (perTet), per sub-grid cell the call's host grid, and the device
-       grids of two batches (the one holding the device and the one converting its words);
-     - its grids: the partition's own, the threads' copies, the face pass's sums and the CPU exact average's words;
-     - a team's padded particle copy of the partition (one tessellation inserts from it), or one domain's periodic
-       copies of the whole box;
-   one tessellation holds its insert's transient or its deposit, not both (stdLonePhases), a team every box's
-   larger phase; and the plan is the busiest partition's sum, on top of the particles and the loop's full grids
-   ('fixedLoop'), against the post-processing's grids ('fixed', stdPeak). The footprints it was measured against are
-   the live memory: the standard binary hands freed memory back (main.cpp dtfeAllocatorReexec, triangulation.cpp
-   dtfeReleaseTessellationMemory, dtfe_metal_host.cc releaseBuffer), where the system's allocators kept up to 21.6
-   GB of a TNG50-3-Dark run's freed partitions until 2026-11-23. Against measured peaks (Exact unless said; balanced,
-   the production fields): TNG50-3-Dark z=0 at 512^3, 3^3 one tessellation per partition 31.24 GB predicted, 29.58
-   measured; TNG100-3-Dark z=0, 3^3 one tessellation with the look-ahead 29.45 / 23.59, 3^3 a team of 4 with it
-   32.59 / 26.99, Fast on the CPU 2^3 x 6 threads 31.84 / 30.44; a 256^3 Zel'dovich box at 512^3, 2^3 with the
-   look-ahead 22.55 / 20.44, at 256^3 in one domain Fast 23.48 / 22.36 and Exact on the CPU 24.01 / 22.36 (the
-   look-ahead's build is booked whole beside the busiest deposit, where they overlap in part). The counted padded
-   vertices agree with the run's own
-   to ~1% on TNG50-3 and TNG100-3 at 512^3 (the busiest partition's at 3^3 and 4^3) and to ~5% on clustered test sets
-   (tests/dtfe_auto_tune_check.sh). The count grid is one pass over the particles (128^NO_DIM cells); a full
-   search is <= 60 plans, independent of N; a run without particles in memory keeps
-   the uniform count. DTFE_AUTO_TUNE_DEBUG=1 prints the busiest partition's predicted padded count per thread (for
-   comparison with the run's own 'Thread i had' lines). */
+/* ---- Standard DTFE: what one partition's thread sub-triangulations hold, from the data ---------------------------
+   The plan replays the run's own split on the particles (the box-average count per sub-box is wrong on clustered data: the
+   padding is a fixed length): a count grid with a summed-area table gives the particles in any box; the partition split and
+   each thread grid are replayed with the run's functions and every padded thread box is counted. The helpers below itemize a
+   partition's bytes; the plan is the busiest partition's sum on top of the particles and the loop's grids ('fixedLoop'). */
 
 // The particles in any box, from a coarse count grid and its summed-area table: the density is taken as constant
 // inside a coarse cell, so the cumulative count is multilinear in each cell and a box costs 2^NO_DIM interpolations.
@@ -223,11 +175,8 @@ struct StdTuneDensity
 
 // optimalPartitionSplit's split of a box of the run's grid -- x first, then y within each x slab, then z within each
 // column, every cut where optimalSplit puts it -- replayed on the count grid. Ranges are in grid cells relative to
-// 'origin' (the box's lower corner) with cell size dx; the counts are per cell of the run's grid, as the run counts
-// them (the count grid interpolates inside its coarse cells: on TNG50-3 at 512^3 a 128^3 count grid puts the busiest
-// partition's padded count within 1.5% of a 512^3 one, while bins of 4 cells moved the cuts by up to 24 cells and the
-// busiest count by 15-21%). An axis with fewer cells than pieces (the run refuses that split) is cut into equal
-// pieces.
+// 'origin' (the box's lower corner) with cell size dx; counts are per cell of the run's grid (the count grid interpolates
+// inside its coarse cells). An axis with fewer cells than pieces (the run refuses that split) is cut into equal pieces.
 inline std::vector< std::vector<double> > stdTuneSplit(StdTuneDensity const &dens, double const origin[NO_DIM],
                                                        double const dx[NO_DIM], std::vector<double> const &range,
                                                        size_t const parts[NO_DIM])
@@ -275,26 +224,22 @@ inline std::vector< std::vector<double> > stdTuneSplit(StdTuneDensity const &den
     return out;
 }
 
-/* The itemized bytes of a standard tessellation, its build and its deposit. Measured on the partitions of TNG100-3-Dark
-   and TNG50-3-Dark z=0 at 512^3 (Exact on the GPU, the production fields) with the allocators handing freed memory
-   back (main.cpp dtfeAllocatorReexec, triangulation.cpp dtfeReleaseTessellationMemory, dtfe_metal_host.cc
-   releaseBuffer), so that a footprint is the live bytes, every phase of every partition sampled every 20 ms. */
+/* The itemized bytes of a standard tessellation, its build and its deposit. Fitted on the partitions of TNG100-3-Dark and
+   TNG50-3-Dark z=0 at 512^3 (Exact on the GPU, the production fields) with freed memory handed back (main.cpp
+   dtfeAllocatorReexec, triangulation.cpp dtfeReleaseTessellationMemory, dtfe_metal_host.cc releaseBuffer), so that a footprint is live bytes. */
 // a vertex's vertexData (vertexData.h): Data_structure (weight, density, the velocity, the scalar: 6 Reals), the
 // padding test's two flags (8 with padding) and the star sum's two 8-B limbs
 inline double stdVertexDataBytes() { return 6. * double(sizeof(Real)) + 8. + 16.; }
-// ... a finished tessellation per vertex: kStdVertexBytes, its vertexData widened in the double build (measured 571-573
-// B per vertex with the dummy points; the model's 575 is kStdVertexBytes in single precision)
+// ... a finished tessellation per vertex: kStdVertexBytes, its vertexData widened in the double build
 inline double stdBytesPerTessVertex() { return kStdVertexBytes + ( stdVertexDataBytes() - 48. ); }
-// ... of V padded points with the padding test's dummy points, 6 V^(2/3) on the padded box's faces (triangulation.cpp;
-// measured 0.032 V where 6 / V^(1/3) = 0.032)
+// ... of V padded points with the padding test's dummy points, 6 V^(2/3) on the padded box's faces (triangulation.cpp)
 inline double stdTessBytes(double const V)
 {
     return V > 0. ? stdBytesPerTessVertex() * ( V + 6. * std::cbrt( V * V ) ) : 0.;
 }
 /* ... and the insert's transient beside it at its end, the build's peak: the parallel insert's point+payload copy
    (Point_3<Epick> 24 + vertexData) and CGAL's own index, point and info vectors (8 + 24 + vertexData), grown by
-   push_back to the next power of two (g in [1, 2)); the sequential insert's particle copy, freed when it is done
-   (measured 154-267 B per vertex against the parallel term's 161-224) */
+   push_back to the next power of two (g in [1, 2)); the sequential insert's particle copy, freed when it is done */
 inline double stdInsertBytes(double const V, bool const parallel)
 {
     if ( not ( V > 0. ) ) return 0.;
@@ -302,10 +247,9 @@ inline double stdInsertBytes(double const V, bool const parallel)
     double const g = V > 1. ? std::exp2( std::ceil( std::log2( V ) ) ) / V : 1.;
     return V * ( ( 24. + stdVertexDataBytes() ) + ( 8. + 24. + stdVertexDataBytes() ) * g );
 }
-// The GPU deposit's extracted tetrahedra of a box with 'own' particles: every finite cell whose bounding box meets the
-// box (averaged_interpolation_1.cc cellOutsideRegion), kTetsPerVertex per particle and the ones crossing its faces, a
-// shell about one mean spacing deep on its 6 faces, booked kStdFaceShell times (measured 6.33-7.45 per own particle
-// on the 27 and 64 partitions of TNG100-3 and TNG50-3 at 512^3, mean 6.72; this books 7.30 and 7.37 there)
+// The GPU deposit's extracted tetrahedra of a box with 'own' particles: every finite cell whose bounding box meets the box
+// (averaged_interpolation_1.cc cellOutsideRegion), kTetsPerVertex per particle and the ones crossing its faces, a shell about
+// one mean spacing deep on its 6 faces, booked kStdFaceShell times (fitted on the 27 and 64 partitions of TNG100-3 and TNG50-3)
 inline double stdTetsOfBox(double const own)
 {
     return own > 0. ? kTetsPerVertex * own * ( 1. + kStdFaceShell * 6. / std::cbrt( own ) ) : 0.;
@@ -334,12 +278,10 @@ double stdLookAheadBytes(User_options const &u, double const nOwn, double const 
 
 namespace {
 
-// The busiest partition of a split (P per axis, or the user's own) with up to T threads in each: its bytes on top
-// of 'fixed', the padded vertices its sub-triangulations hold, and those per thread (DTFE_AUTO_TUNE_DEBUG)
-// (+ the GPU snapshot of its largest thread sub-grid, and the look-ahead's booked bytes: the tessellation stage
-// of the partition that needs the most, which may be any partition's turn to be prepared ahead)
-// (+ bytesNoAhead: the busiest partition's bytes where no look-ahead runs after all -- a budget that switches it off,
-// reportSplit --, one tessellation per partition by its phases: stdLonePhases)
+// The busiest partition of a split (P per axis, or the user's own) with up to T threads in each: its bytes on top of 'fixed',
+// the padded vertices its sub-triangulations hold, and those per thread (DTFE_AUTO_TUNE_DEBUG) (+ the GPU snapshot of its
+// largest thread sub-grid, and the look-ahead's booked bytes: the tessellation stage of the partition that needs the most)
+// (+ bytesNoAhead: the busiest partition's bytes where no look-ahead runs after all: stdLonePhases)
 struct StdPlan { double bytes = 0., vertices = 0., snapshot = 0., ahead = 0., bytesNoAhead = 0.; int part = -1;
                  size_t parts = 1; std::vector<double> perThread; };
 
@@ -435,12 +377,10 @@ struct AutoTuneStdPlanner : AutoTuneStdInputs
         auto gridBytes = [&](double cells, size_t nThreads) {
             return ( nParts > 1. ? cells * bCellDeposit : 0. ) + ( nThreads > 1 ? cells * bCellDeposit : 0. )
                    + cells * ( bGpuCell + faceCell + bCpuWordCell ); };
-        /* One partition from its thread boxes (own particles, padded particles, sub-grid cells each; one box: one
-           tessellation, several: DTFE_parallel's team, which builds and deposits them at once), its padded particle
-           copy and its cells. Every box holds its tessellation (stdTessBytes) and, while it is built, the insert's
-           transient (stdInsertBytes) or, while it deposits, its extracted tetrahedra (stdTetsOfBox x perTet: the
-           arrays and the Morton order's copies); the device grids are those of the batch holding the device and of
-           the one converting its words, of the largest box. */
+        /* One partition from its thread boxes (own particles, padded particles, sub-grid cells each; one box: one tessellation,
+           several: DTFE_parallel's team), its padded particle copy and its cells. Every box holds its tessellation (stdTessBytes)
+           and, while it is built, the insert's transient (stdInsertBytes) or, while it deposits, its extracted tets (stdTetsOfBox x
+           perTet); the device grids are those of the batch holding the device and of the one converting its words, of the largest box. */
         struct PartBytes { double bytes = 0., noAhead = 0., ahead = 0., vertices = 0., maxCells = 0.; };
         auto partitionBytes = [&](std::vector< std::array<double,3> > const &boxes, double const partPadded,
                                   double const cells) -> PartBytes
@@ -570,28 +510,21 @@ struct AutoTuneStdPlanner : AutoTuneStdInputs
         return plans.emplace( key, plan ).first->second;
     }
 
-    /* The run's peak with 'loop' bytes (the busiest partition, its GPU snapshot and look-ahead) in the partition loop
-       of a plan of 'parts' partitions. The loop holds the particles and its own grids -- density, velocity and the
-       gradient (bCellDeposit; DTFE.cpp swaps the derived fields for the gradient while it runs) -- ('fixedLoop'); the
-       derived grids are allocated after it (postProcessWebFields, 'fixed'), when the partitions are gone and, in a
-       partitioned run, the particles too (std_partitioned_run.cc frees them). The larger phase is the peak: the
-       allocators hand the freed partitions back (main.cpp dtfeAllocatorReexec, triangulation.cpp
-       dtfeReleaseTessellationMemory, dtfe_metal_host.cc releaseBuffer), where until 2026-11-23 a share of the busiest
-       partition was booked beside the derived grids. */
+    /* The run's peak with 'loop' bytes (the busiest partition, its GPU snapshot and look-ahead) in the partition loop of a plan of
+       'parts' partitions. The loop holds the particles and its own grids (bCellDeposit; DTFE.cpp swaps the derived fields for the
+       gradient while it runs): 'fixedLoop'; the derived grids are allocated after it ('fixed'), when the partitions are gone and, in
+       a partitioned run, the particles too (std_partitioned_run.cc). The larger phase is the peak; the allocators hand the freed
+       partitions back (main.cpp dtfeAllocatorReexec, dtfeReleaseTessellationMemory, dtfe_metal_host.cc releaseBuffer). */
     double stdPeak(double loop, size_t const parts) const
     {
         return std::max( fixedLoop + loop, fixed - ( parts > 1 ? partBytes * N : 0. ) );
     }
 
-    /* '--run-mode balanced': a chosen team of T threads whose busiest partition
-       leaves no room for the look-ahead (reportSplit would switch it off) gives way to the largest smaller team that
-       has room -- DTFE_parallel's teams, 2^a 3^b threads, down to 2. A smaller team pads fewer sub-boxes, so it holds
-       fewer padded vertices both in the busiest partition and in the next one's look-ahead build (which the loop
-       prepares with the same thread grid); the larger GPU snapshot of its larger sub-grids and, where a sub-domain then
-       gets 2 threads or more, the parallel insert's copies count against it (planOf). Not one tessellation: wherever
-       it fits chooseSplit has taken it already (the look-ahead needs the GPU deposit, under which it is chosen first).
-       Only where the tuner chose the threads, and only under balanced. 'tried': a smaller team was looked for.
-       Returns the team, or T. */
+    /* '--run-mode balanced': a chosen team of T threads whose busiest partition leaves no room for the look-ahead (reportSplit would
+       switch it off) gives way to the largest smaller team that has room (DTFE_parallel's teams, 2^a 3^b threads, down to 2): it
+       pads fewer sub-boxes, so it holds fewer padded vertices in the busiest partition and in the next one's look-ahead build; its
+       larger GPU snapshot and the parallel insert's copies count against it (planOf). Not one tessellation (chooseSplit took it
+       already). Only where the tuner chose the threads, under balanced. 'tried': a smaller team was looked for. Returns the team, or T. */
     int lookAheadTeam(int const P, int const T, bool &tried) const
     {
         tried = false;
@@ -616,15 +549,11 @@ struct AutoTuneStdPlanner : AutoTuneStdInputs
     AutoTuneReport reportSplit(int const bestP, int const chosenT, bool const nothingFits) const;
 };
 
-/* Searches the splits for the coarsest one that fits (or, when none fits, the least demanding). Its threads: with the
-   GPU deposit one tessellation per partition where that fits (more than one partition), else the most threads that
-   fit; without it the most threads, the split then the coarsest that holds them. One tessellation per partition
-   inserts on TBB and walks its tetrahedra on every core (averaged_interpolation_1.cc), and it needs less memory
-   than a team of the same split, whose sub-domains are each padded. Measured with Exact on the GPU at 512^3 (the
-   production fields, balanced, 41.2 GB budget; before the split fix, subpartition.h, and with the allocator's
-   cache on): TNG100-3 z=0 3^3 one tessellation 6m39s, a team of 4 6m37s; TNG50-3 z=0 one tessellation 3^3 12m31s,
-   4^3 16m06s, 5^3 20m40s, the old choice 6^3 with a team of 5 37m40s; zel256 2^3 one tessellation 2m12s-2m16s, a
-   team of 4 2m21s. The CPU deposit has no such record: it keeps the most threads. */
+/* Searches the splits for the coarsest one that fits (or, when none fits, the least demanding). Its threads: with the GPU deposit
+   one tessellation per partition where that fits (more than one partition), else the most threads that fit; without it the most
+   threads, the split then the coarsest that holds them. One tessellation per partition inserts on TBB and walks its tets on every
+   core (averaged_interpolation_1.cc) and needs less memory than a team of the same split, whose sub-domains are each padded. The
+   CPU deposit keeps the most threads. Chosen on Exact GPU runs of TNG100-3, TNG50-3 z=0 and a 256^3 Zel'dovich box at 512^3. */
 inline AutoTuneReport AutoTuneStdPlanner::chooseSplit() const
 {
     int const pLo = autoPart ? 1 : int(userSplit[0]);
@@ -731,10 +660,9 @@ inline AutoTuneReport AutoTuneStdPlanner::reportSplit(int const bestP, int const
         report.perPartition = chosen.bytesNoAhead;
     }
     double const loopPeak = stdPeak( report.perPartition + chosen.snapshot + report.lookAhead, chosen.parts );
-    // the start-up peak under --scratch-dir (scratchZeroFill): no split lowers it, so the loop still chooses the plan,
-    // and this lifts the prediction, and the over-budget check, where it is the run's peak (the 1024^3 class). Only a
-    // run that sizes its full grids before the loop has it: a partitioned one, or one domain on a team (one
-    // tessellation of the whole box sizes no full grid ahead: DTFE.cpp dtfeParallelSingle)
+    // the start-up peak under --scratch-dir (scratchZeroFill): no split lowers it, so the loop still chooses the plan, and this
+    // lifts the prediction and the over-budget check where it is the run's peak. Only a run that sizes its full grids before the
+    // loop has it: a partitioned one, or one domain on a team (one tessellation of the whole box sizes none ahead: dtfeParallelSingle)
     bool const gridsSizedAhead = chosen.parts > 1 or ( bestT > 1 and not oneTessellation and not u.redshiftConeOn
                                                        and not u.userDefinedSampling );
     double const startUp = gridsSizedAhead ? scratchZeroFill : 0.;

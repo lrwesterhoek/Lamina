@@ -78,17 +78,11 @@ static void dtfePartitionedRun(DTFE_State &state, vector<Sample_point> &samples,
     std::vector< Box > subgridCoords;
     optimalPartitionSplit( state.particles, state.options, state.options.partition, &subgridList, &subgridCoords );
 
-    /* Crash resume, as PS-DTFE's and through the same code (partition_checkpoint.h):
-       after a partition is copied into the full grids they are checkpointed (unless the last write took more than
-       5% of the time since it) with the list of the partitions in them, to '<output>.runlog.checkpoint' or under
-       '--scratch-dir'; '--resume' loads them and computes only the partitions the list lacks. That is the whole
-       state: each partition ASSIGNS its own disjoint sub-grid (copySubgridResultsToMain), the split is a function
-       of the particles and the options (both in the settings key), nothing else carries from one partition to the
-       next, and the T-web / V-web are made after the loop from the density / gradient grids saved here. So a
-       resumed CPU run's outputs are byte-identical to an uninterrupted run's at the same thread count; '--gpu'
-       ones too (its sums are exact). The
-       progress counts the restored partitions as done (the sidecar's done/total and the '[partitions k/N]' line:
-       N is every partition) and the ETA from this process's own rate. */
+    /* Crash resume, as PS-DTFE's through the same code (partition_checkpoint.h): after a partition is copied into the full grids they are
+       checkpointed (unless the last write took more than 5% of the time since it) with the list of the partitions in them, to
+       '<output>.runlog.checkpoint' or under '--scratch-dir'; '--resume' loads them and computes only the partitions the list lacks. That
+       is the whole state: each partition ASSIGNS its own disjoint sub-grid and the split is a function of the particles and options, so a
+       resumed run's outputs ('--gpu' too: its sums are exact) are byte-identical to an uninterrupted one's at the same thread count. */
     PartitionCheckpoint::Checkpointer &checkpoint = PartitionCheckpoint::state();
     int const nRestored = PartitionCheckpoint::beginLoop( state.options, totalPartitions, *uQuantities, *aQuantities,
                                                           psPointEvalActive(), userOptions.verboseLevel );
@@ -159,12 +153,10 @@ static void dtfePartitionedRun(DTFE_State &state, vector<Sample_point> &samples,
             psPointEvalSetOwnership( ownLo, ownHi );
         }
         Quantities temp_uQuantities, temp_aQuantities;
-        // '--sample-points': tag this partition's point records, as the PS loop does, so the checkpoint
-        // saves them per partition ('points.<i>', partition_checkpoint.h) and '--resume' reads them back. The tag is
-        // thread-local; under point evaluation DTFE_parallel triangulates the partition once ON THIS THREAD (its
-        // single-triangulation branch), and the point walk copies the tag into its sinks before it starts its own
-        // threads (ps_point_eval.cc forEachCellParallel). A no-op without '--sample-points'. (The look-ahead only
-        // BUILDS on its own thread; the interpolation, and so the walk, stays on this one.)
+        // '--sample-points': tag this partition's point records, as the PS loop does, so the checkpoint saves them per partition
+        // ('points.<i>') and '--resume' reads them back. The tag is thread-local; under point evaluation DTFE_parallel triangulates the
+        // partition ON THIS THREAD and the point walk copies the tag into its sinks before it starts its own threads (ps_point_eval.cc
+        // forEachCellParallel). A no-op without '--sample-points'. (The look-ahead only BUILDS on its own thread.)
         psPointEvalSetPartition( i );
         DTFE_parallelImpl( &P.part, samples, tempOpt, &temp_uQuantities, &temp_aQuantities, P.built ? &P.sub : nullptr );
         psPointEvalSetPartition( -1 );
@@ -202,23 +194,11 @@ static void dtfePartitionedRun(DTFE_State &state, vector<Sample_point> &samples,
     for (int i=0; i<totalPartitions; ++i)
         if ( not checkpoint.merged[size_t(i)] ) toCompute.push_back( i );
 
-    /* The LOOK-AHEAD (the PS loop's, dtfe/ps_partition_loop.cc, for the standard loop). Without it, with '--gpu'
-       every partition's volume-averaged pass waits for the partition's particle selection and the Delaunay
-       triangulations + vertex densities of all its thread sub-boxes, while the GPU idles. So partition k+1 is
-       prepared -- selected, split into DTFE_parallel's sub-domains and triangulated (or loaded from
-       '--tessellation-cache'), on a team of CPU threads of its own -- while partition k is interpolated, at most
-       one ahead. Every sub-domain is built from the same particles with the same options as without the
-       look-ahead (dtfePrepareSubdomains: DTFE_parallel's own split and options, the sequential insert), the
-       interpolation is unchanged, and each partition still ASSIGNS its own part of the grids in index order, so
-       every output is byte-identical (tests/dtfe_resume_check.sh D14). It holds the next partition's particle copy
-       and tessellations; before each look-ahead the free memory, less 4 GB of headroom, is checked against that
-       (the auto-tuner's booked figure: its build of the partition that needs the most, counted from the particles;
-       without a plan auto_tune.h stdLookAheadBytes, the uniform count of one partition), and the partition is
-       prepared in turn when it does not fit; the
-       auto-tuner counts it in its prediction and switches it off for a run whose budget cannot hold it
-       (stdLookAheadOffBudget). '--no-overlap' switches it off; DTFE_OVERLAP=1 forces it on a CPU run too (the
-       tests' byte-identity check on any build), DTFE_OVERLAP=0 switches it off. A '--resume' looks ahead to the
-       next partition it computes, not to the next index. */
+    /* The LOOK-AHEAD (the PS loop's, ps_partition_loop.cc). Without it, with '--gpu' every partition's volume-averaged pass waits for its
+       particle selection and the triangulations of all its thread sub-boxes while the GPU idles. So partition k+1 is prepared on a team of
+       CPU threads while k is interpolated, at most one ahead, built exactly as without it (dtfePrepareSubdomains) and merged in index order:
+       every output is byte-identical (tests/dtfe_resume_check.sh D14). The free memory less 4 GB is checked against the auto-tuner's booked
+       figure (without a plan, stdLookAheadBytes), else the partition is prepared in turn. '--no-overlap' off; DTFE_OVERLAP=1 forces it on a CPU run. */
     bool gpuDeposit = false;
 #if defined(DTFE_GPU) && NO_DIM==3 && !defined(PHASE_SPACE)
     gpuDeposit = state.options.useMetal and state.options.method==1 and state.options.aField.selected()
@@ -235,12 +215,10 @@ static void dtfePartitionedRun(DTFE_State &state, vector<Sample_point> &samples,
         overlap = toCompute.size() > 1 and state.options.DTFE and not state.options.stdNoOverlap
                   and not state.options.stdLookAheadOffBudget and not overlapBanned and ( gpuDeposit or overlapForced );
     }
-    // what one partition's look-ahead holds: the builds of its sub-domains and a team's padded particle copy
-    // (auto_tune.h, the model's items). Where the auto-tuner planned, its booked figure: the partition that needs the
-    // most, counted from the particles (auto_tune.cc reportSplit). Else the uniform count of the partition's geometry
-    // (the split balances the particles), which misjudges a clustered run both ways: a dense partition's padding
-    // shells hold more than it, and a small partition's box is padded far beyond its particles' share (TNG50-3 at
-    // 512^3 in 4^3 partitions: 20.86 GB against the 9.36 GB the auto-tuner counted).
+    // what one partition's look-ahead holds: the builds of its sub-domains and a team's padded particle copy (auto_tune.h). Where the
+    // auto-tuner planned, its booked figure: the partition that needs the most (auto_tune.cc reportSplit). Else the uniform count of the
+    // partition's geometry, which misjudges a clustered run both ways: a dense partition's padding shells hold more than it, and a small
+    // partition's box is padded far beyond its particles' share.
     aheadBytes = [&](int const i) -> double
     {
         if ( state.options.stdLookAheadCounted > 0. )

@@ -1,27 +1,7 @@
 #!/usr/bin/env bash
-# The Linux CI suite, ONE list shared by .github/workflows/ci.yml and the Dockerfile so the two cannot
-# drift. CPU-only: the GPU suites (dtfe_metal_check, gpu_scalar_check, gpu_mass_check, gpu_retry_check, and the
-# standard binary's dtfe_gpu_retry_check) need a Metal build and stay local (the GPU code is Metal-only).
-# ps_auto_tune_check and ps_scratch_check run here (portable: the peak RSS from getrusage, not '/usr/bin/time -l';
-# a temp folder, not /private/tmp; their GPU parts SKIP).
-#
-#   tests/ci_suite.sh build     the single pair, the double pair (DOUBLE=1) and the 2D pair (DIM=2)
-#   tests/ci_suite.sh core      every CPU suite against ./DTFE and ./PS-DTFE
-#   tests/ci_suite.sh double    ps_double_check, then the program-running suites against the double
-#                               pair (DTFE_TEST_PRECISION=double: float64 grids, tests/precision.sh), all
-#                               but face_sweep_check and interlacing_check, which read no precision
-#   tests/ci_suite.sh 2d        tests/ps_2d_check.sh (the 2D pair against analytic 2D flows)
-#   tests/ci_suite.sh gui       the launcher's job specifications; the end-to-end window test too when
-#                               DTFE_GUI_PYTHON names a Python with PySide6 (QT_QPA_PLATFORM=offscreen)
-#   tests/ci_suite.sh oldpy     every .py parses under the oldest supported Python: OLD_PYTHON (CI: setup-python
-#                               3.10), else python3.10 / python3.11 on PATH; none found is a FAILURE here
-#   tests/ci_suite.sh variants  what users build beyond the pairs: PS-DTFE + DTFE with TBB=0 LIBDEFLATE=0 (the
-#                               build without the optional libraries), 'make library' (libDTFE) and the
-#                               demo/examples program linked against it; CI runs it as its own job
-#   tests/ci_suite.sh all       build core double 2d
-# Several stages may be given at once; the first failing suite stops the run (set -e), but with CI_KEEP_GOING=1 (the
-# local battery's choice): every failing command is reported and the run goes on to the end, which then exits 1 and
-# names the steps that failed. Every exit lists the steps with their wall times.
+# The Linux CI suite: ONE list shared by .github/workflows/ci.yml and the Dockerfile so the two cannot drift.
+# CPU-only: the GPU suites need a Metal build and stay local. Several stages may be given; the first failing suite stops the run
+# (CI_KEEP_GOING=1 reports every failure and goes on). Every exit lists the steps with their wall times.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$(dirname "$SCRIPT_DIR")"
@@ -67,10 +47,6 @@ stage_build() {
 }
 
 # the suites that run the programs (also the double pass, but for face_sweep_check and interlacing_check: they
-# read no precision, so a double-pass run would repeat the single pass's); the python ones take --no-build
-# The standard-DTFE regression compares with the STORED reference (tests/reference/regression_periodic.txt, a
-# periodic set without Delaunay ties, to 3e-4 relative: run_tests.py says why); writing a fresh one here would
-# compare nothing. The double pass compares the same reference (the double build sits 2.7e-5 from it).
 run_program_suites() {
     step "standard DTFE regression (stored reference)"; env -u DTFE_TEST_REFERENCE_DIR "$PY" tests/run_tests.py
     step "standard DTFE Monte-Carlo average (unbiased, split-invariant)"; tests/dtfe_mc_average_check.sh --no-build
@@ -124,16 +100,13 @@ run_program_suites() {
     step "resume of a killed partitioned run";  tests/ps_resume_check.sh --no-build
     step "resume of a killed partitioned standard run"; tests/dtfe_resume_check.sh --no-build
     step "run modes (gentle / balanced / performance, --gpu-share)"; tests/run_mode_check.sh --no-build
-    # the device the programs choose without '--gpu' (DTFE_GPU, the pick), its header and checkpoint key lines, the
-    # header's padding; each case checks the row of the build it runs on (a CPU-only one here, Metal in the battery);
-    # the '_a' average without a flag (DTFE_EXACT_AVERAGE, a count) and its header line
+    # the device the programs choose without '--gpu' (DTFE_GPU, the pick), its header and checkpoint key lines.
     step "the programs' defaults: the device, its header and key lines, the padding, the '_a' average"; tests/defaults_check.sh --no-build
     step "resume with --sample-points";         tests/ps_resume_points_check.sh --no-build
 }
 
 # The oldest supported Python (pyproject: >= 3.10) must PARSE every file: a PEP 701 f-string (3.12) is a
-# SyntaxError there, and the suites run under a newer interpreter that cannot see it. Needs a REAL 3.10/3.11 --
-# ast.parse(feature_version=) under 3.12+ does not catch it.
+# SyntaxError there, and the suites run under a newer interpreter that cannot see it.
 old_python_parse() {
     local p
     for p in ${OLD_PYTHON:-} python3.10 python3.11; do
@@ -170,9 +143,6 @@ stage_core() {
     step "auto-tune (memory model, budget, splits)"; tests/ps_auto_tune_check.sh --no-build
     # the standard binary's tuner too (its report, the counted padded vertices of the run's own split, the
     # user's thread count, the SUMMARY's memory model line). CPU-only here: its GPU half (E with --gpu --exact)
-    # skips on a build whose o/.build_mode names no GPU, H runs on the DTFE-2d the build stage makes; it pins
-    # OMP_NUM_THREADS=10 on purpose (the plans of a 10-core machine), so a 4-core runner only oversubscribes. The one
-    # timing-sensitive check is E's measured peak <= 1.35x the prediction (getrusage max RSS on Linux; a --sampled run)
     step "standard auto-tune (report, counted split, memory model)"; tests/dtfe_auto_tune_check.sh --no-build
     step "--scratch-dir (out-of-core accumulators)"; tests/ps_scratch_check.sh --no-build
     # AFTER the program suites: ps_caustic_class_check.sh leaves the crossed-waves run (pcc_out.*) under the
@@ -192,7 +162,7 @@ stage_core() {
     step "void-in-cloud criteria";               MPLBACKEND=Agg "$PY" tests/py_vic_test.py
     step "python CLIs: each script's options parse, none guessed from an abbreviation; DTFE_SMOOTH_MPC"; MPLBACKEND=Agg "$PY" tests/py_cli_alias_test.py
     # what the README tells a user to type exists in the code, and the drivers' knobs are documented
-    step "docs drift (README / COMMANDS.md against the code)"; "$PY" tests/docs_drift_check.py
+    step "docs drift (README against the code)"; "$PY" tests/docs_drift_check.py
     # the python analysis stack end to end on a synthetic two-snapshot set (pins its own temp folders)
     step "python selftest (synthetic pipeline + the core plot scripts)"; MPLBACKEND=Agg "$PY" python/selftest.py
 }
@@ -222,9 +192,7 @@ stage_variants() {
     fi
 }
 
-# after stage_build the pairs EXIST: a suite that would skip for a missing binary or feature is a failure here
-# (DTFE_TEST_REQUIRED=1 turns every skip_or_fail into exit 1; run_tests.py's regression compares with the stored
-# reference here too)
+# after stage_build the pairs EXIST.
 stage_double() {
     step "the double pair against the single pair"; DTFE_TEST_REQUIRED=1 tests/ps_double_check.sh --no-build
     export DTFE_TEST_PRECISION=double DTFE_TEST_REQUIRED=1

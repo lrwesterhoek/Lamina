@@ -21,14 +21,7 @@
  */
 
 
-/** This file contain an example of how one can access the Delaunay tessellation of the point set using the DTFE function.
-
-NOTE: For this code to work you must compile with the Makefile option: TRIANGULATION
-
-Ported to the current library API (2026-10-11): DTFE() and writeOutputData() take the unaveraged AND the
-cell-averaged quantities, the field selectors are User_options::uField / aField, and the input/output
-functions come from libDTFE (io/io.h) instead of an #include of input_output.cc.
-*/
+/** Example: access the Delaunay tessellation of the point set through the DTFE() library call. */
 
 #include <vector>
 #include <fstream>

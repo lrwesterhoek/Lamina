@@ -1,7 +1,5 @@
 """The Explore tab's point-query server: ServerWorker, a dtfelib.Estimator on the snapshot behind an output living
-on its own thread (a composite of partitions, out of core, when one tessellation would not fit in memory;
-explore.py re-exports it), and ServerMixin, the part of ExploreControls that starts, follows and stops it and
-answers a click on the map with the streams at that point."""
+on its own thread."""
 
 from __future__ import annotations
 
@@ -19,10 +17,8 @@ import runspec as rs
 
 
 class ServerWorker(QObject):
-    """A dtfelib.Estimator living on its own thread: start (the tessellation build, possibly long),
-    query (milliseconds for a few points), stop. Cancel kills a build in progress. A phase-space server's point
-    velocities, velocity gradients and scalars are the plain means over the point's streams (PS-DTFE's volume
-    weighting), its dispersion the mass-weighted one (dtfelib.estimator.PointFields)."""
+    """A dtfelib.Estimator living on its own thread: start (the tessellation build, possibly long), query
+    (milliseconds for a few points), stop. Cancel kills a build in progress."""
     started = Signal(str, object)       # (description, the server's region (3, 2) in Mpc)
     answered = Signal(object, object)   # (points, PointFields)
     zoomed = Signal(object, object)     # (zoom request, PointFields on its plane of points)

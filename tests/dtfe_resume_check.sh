@@ -1,68 +1,7 @@
 #!/usr/bin/env bash
-# Resume of a killed partitioned STANDARD-DTFE run: the standard partition loop checkpoints through
-# PS-DTFE's code (src/partition_checkpoint.h: beginLoop / afterMerge / reportWrites; tests/ps_resume_check.sh is
-# the PS half). demo/z0_64.gadget (262144 particles, z=0, tracked in the repo) on a 40^3 grid, --periodic
-# --padding 5, split 3 3 3 (27 partitions), 2 threads each (OMP_NUM_THREADS=2 --max-concurrent 2), the fields
-# density velocity density_a velocity_a gradient_a tweb_a vweb_a: the T-web and the V-web are made AFTER the loop
-# from the full density / gradient grids, so they test that the checkpoint holds what the post-processing needs.
-#   D1  '--resume' is in both helps; an uninterrupted run (the reference) says where its checkpoints go, writes
-#       some, and removes '<output>.runlog.checkpoint' once its outputs are in place; its 'merge time:' line counts
-#       the 27 partitions copied into the full grids, with the seconds of the copies and checkpoints (>= 0)
-#   D2  a run killed after 10 partitions (DTFE_TEST_EXIT_AFTER_PARTITIONS=10: a SIGKILL right after a checkpoint)
-#       exits 137, writes no output, and leaves a checkpoint listing exactly 10 of 27 (the loop is serial)
-#   D3  '--resume' with a changed setting ('--grid') refuses, names the differing line and DTFE_RESUME=0 (the
-#       launcher's results.py RESUME_REFUSED keys on "'--resume' refused"), keeps the checkpoint
-#   D4  '--resume' continues and is killed again after 3 more partitions: its progress sidecar counts the restored
-#       ones as done (done 12 of 27 -- the 3rd computed one died in its checkpoint write, before its progress line);
-#       a second '--resume' (with '--tessellation-cache', which the key leaves out) computes the last 14 only
-#       (its 'merge time:' line counts 14), every
-#       output -- the T-web and V-web included -- byte-identical to the reference, the checkpoint removed, a dead
-#       writer's temp file cleaned up
-#   D5  '--resume' with nothing to resume refuses; on a run of one triangulation ('--partition 1') it refuses too
-#   D6  '--scratch-dir': the checkpoint goes to the scratch folder under the name scripts/config.sh
-#       ps_checkpoint_dir computes, and the resume from there is byte-identical
-#   D7  '--interlace' (two passes) writes no checkpoint; '--resume --interlace' is refused. DTFE_CHECKPOINT=0
-#       writes none either
-#   D8  a checkpoint of another binary ('binary=' key line) is refused, naming the line and DTFE_RESUME=0; a PS-DTFE
-#       checkpoint is not read as a standard one
-#   D9  the production path: NO --partition, the auto-tuner splits (DTFE_RAM_GB=0.08: 5 5 5 at 1-2 threads);
-#       killed, then '--resume' without --partition on a "bigger machine" (DTFE_RAM_GB=64, where the tuner
-#       alone would not split) adopts the checkpoint's split and finishes, byte-identical, at the killed run's thread
-#       count (passed as --max-concurrent: the count is left out of the key on purpose, as PS-DTFE's --max-concurrent,
-#       but another count re-splits each partition, which with this short padding moves the grids beyond rounding)
-#   D10 outputs that could not be put in place (exit 3) keep the checkpoint
-#   D11 scripts/run_dtfe.sh (copied beside a stand-in binary): a checkpoint file beside the outputs, or under
-#       SCRATCH_DIR, makes the run pass --resume and say so; DTFE_RESUME=0, and a folder without a 'checkpoint'
-#       file, do not
-#   D12 GPU builds only (a GPU stamp in o/ or o_d/; SKIP otherwise): a killed '--gpu --exact' run (the
-#       production standard) resumes; '.den' (CPU) byte-identical, and the '_a' grids too (the GPU's exact fixed-point
-#       sums)
-#   D13 a '--sample-points --pts-vel-grad' plane (64^2 points across the box, the shape of the
-#       dtfe27planes runs) with the same split: the uninterrupted run checkpoints its point answers too and removes the
-#       checkpoint; killed after 10 partitions it leaves exactly one 'points.<i>' file per merged partition; a resume
-#       with another point file under the same name refuses, naming the 'sample-points' key line; '--resume' reads the
-#       10 partitions' answers back, computes the other 17, and every output -- the '.pts_*' files and the grids -- is
-#       byte-identical to the uninterrupted run
-#   D14 the partition loop's LOOK-AHEAD (partition k+1 selected, split and triangulated on CPU threads of
-#       its own while partition k is interpolated; on by default under '--gpu', DTFE_OVERLAP=1 forces it on the CPU):
-#       every output byte-identical to the run without it -- the grids of D1's reference (the log says it ran;
-#       '--no-overlap' wins over DTFE_OVERLAP=1), a run killed after 10 partitions while the 11th was being prepared,
-#       resumed for 2 more with '--no-overlap' (out of the settings key) and then with the look-ahead (it looks ahead
-#       to the next partition the checkpoint lacks), D13's plane (one tessellation
-#       per partition), a cold and a warm '--tessellation-cache' (the warm run loads every sub-domain: the cache
-#       folder is left untouched), a machine without the free memory for it (the look-ahead pauses), and on GPU builds D12's '--gpu --exact' reference against '--no-overlap'
-#       and a '--gpu --sampled' (Monte-Carlo average) pair with and without it
-#   D15 the run-wide fixed-point units' line of the settings key (src/fixed_units.h runUnitsKeyLine: the test shift
-#       changes the units without the command line): a run killed at the default units is not resumed under
-#       DTFE_TEST_RUN_UNIT_SHIFT=-20; the refusal names the 'units=' lines that differ, and the checkpoint is kept
-#   D16 the seeded Monte-Carlo average ('--average-method 2 --subsamples 3 --seed 11'; random points, from the clock
-#       without a seed) on a 24^3 grid split 2 2 2 (--periodic --padding 5, two threads, --max-concurrent 2), '--field
-#       density density_a velocity_a': killed after 3 of its 8 partitions and resumed, every output byte-identical to
-#       the uninterrupted run, the checkpoint removed
-# The CPU runs but D16's name no averaging mode, so their '_a' fields take the default, the exact average: every
-# check here holds one run's outputs against another's of the same split, byte for byte, which the exact CPU
-# average gives as the Monte-Carlo one does (its sums do not depend on the deposit's thread count).
-# About a minute on the Mac (about 30 runs of 2-4 s).
+# Resume of a killed partitioned STANDARD-DTFE run: the partition loop checkpoints through PS-DTFE's code
+# (src/partition_checkpoint.h; PS half: tests/ps_resume_check.sh). demo/z0_64.gadget, 40^3 grid, --periodic --padding 5, split 3 3 3,
+# 2 threads each; the T-web and V-web are made after the loop, so they test that the checkpoint holds what post-processing needs.
 # Usage: tests/dtfe_resume_check.sh [--no-build]   (--no-build is accepted and ignored: the binaries are used as built)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

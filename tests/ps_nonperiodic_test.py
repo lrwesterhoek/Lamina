@@ -37,12 +37,10 @@ REGION_BOX, REGION_GRID = (46.0, 54.0), 32
 REGION_OFF = 24          # (46 - 40) / 0.25
 CPU_TOL, GPU_TOL = 1e-5, 1e-4   # max |region - full| / peak (CPU: equal but for summation order)
 
-# Part 3, --partition: the same clump split 2x2x2 must equal the single triangulation (the partial
-# sums differ only in summation order). The convex hull of a finite cloud is a GLOBAL object -- the
-# flat slivers on a nearly planar face join particles a whole face apart -- so each partition would
-# build different hull tetrahedra: 0.04% of cells off by up to 1% of peak, mass 0.99997. The
-# Lagrangian domain is the cloud's alpha shape (--ps-alpha-shape, 3 mean spacings), which is
-# local; '--ps-alpha-shape 0' restores the hull, and must still show that difference.
+# Part 3, --partition: the same clump split 2x2x2 must equal the single triangulation (the partial sums differ only in
+# summation order). The convex hull of a finite cloud is a GLOBAL object -- the flat slivers on a nearly planar face
+# join particles a whole face apart -- so each partition would build different hull tetrahedra: 0.04% of cells off by
+# up to 1% of peak, mass 0.99997.
 SPLIT_TOL = 1e-5
 
 

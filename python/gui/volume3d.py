@@ -1,29 +1,6 @@
 """The 3D view's volume, its Qt-free part (explore_3d.py draws it): the map's field over the window averaged down to
 at most 'detail' cells a side (128^3 to 1024^3), quantised to 256 levels, a transfer function giving each level a
-colour and an opacity, and the geometry of the slice stack that QPainter composites into the picture.
-
-How it is drawn -- direct volume rendering by 2D texture slicing, the software form of the classic GPU method: the
-averaged cube is cut into slices along the axis that faces the viewer most (orthographic: |cos| >= 1/sqrt 3, never
-edge on; perspective: slice_axis), each slice an image of premultiplied RGBA (colour x opacity per cell, from the
-transfer function), and the slices are composited front to back with the 'under' operator (QPainter's
-DestinationOver), each one drawn onto the screen by the one map the camera gives its plane (view3d.plane_transform:
-affine for an orthographic camera, a homography for a perspective one). The ray through a pixel crosses the slices
-1/|cos| of their spacing apart, so the opacity of a slice is corrected for that path length: alpha' = 1 - (1 -
-alpha)^(path / reference), the reference 1/REF_CELLS of the window's longest side. The look is then the same at any
-detail, any window and any turn (orthographic; in perspective each ray's path differs from the reference ray's:
-slice_plan). Compositing runs in 16 bits a channel: 8 bits lose most of a faint wall (256 slices of alpha 2/255
-composite to 0.75 instead of 0.87, its blue to 0).
-
-The grid is read by plain reads in slabs of whole x-layers, never memmapped (grids.OutputSet._memmap: a mapped page
-of an external disk unplugged meanwhile kills the launcher with SIGBUS), a cube the map has cached already taken from
-the cache, never added to it. The work runs on a small thread pool (numpy and file reads let go of the GIL: 8
-threads gather a 1024^3 cube's colours 7.8x faster than one); memory stays near the cube's own size: its float32
-average, its levels (1 byte a cell) and their transposed copy (the slices along z), and one coarse copy of at most
-COARSE_MAX cells a side drawn while the view turns.
-
-The Contours tick lays the map's levels into the transfer function as thin shells (transfer's 'shells', their bands:
-contours.band), so both renderers draw them as they draw the rest; level_slopes, basin and shells_within serve a
-close-up, whose copy of the levels holds the shells of its own void only."""
+colour and an opacity, and the geometry of the slice stack that QPainter composites into the picture."""
 
 from __future__ import annotations
 
@@ -42,16 +19,14 @@ import view3d as V
 DETAILS = (128, 256, 512, 1024)  # the averaged cube's cells a side, at most (a smaller window or grid: its own)
 DEFAULT_DETAIL = 256
 COARSE_MAX = 160                # the copy drawn while turning: at most this many cells a side, at least halved
-                                # (a 512^3 cube turns at 24 ms a frame: 40 a second; at 256 a side, 47 ms)
 LEVELS = 256                    # level 0: no value (NaN), transparent; 1..255 the scaled value's range
 REF_CELLS = 128                 # the opacity is that of a cell 1/REF_CELLS of the window's longest side thick
 OPACITY_RANGE = (0.003, 1.0)    # the opacity control's ends: a reference cell's opacity at the top of the range
 DEFAULT_OPACITY = 0.3           # TNG100-3-Dark z = 0 at 256^3: filaments solid, haloes bright, the voids clear
 DEFAULT_GAMMA = 1.6             # opacity ~ t^gamma along the shown range: walls faint, filaments and haloes solid
-VOLUME_CACHE_BYTES = int(6e8)   # averaged cubes kept (float32: 67 MB at 256^3, 0.5 GB at 512^3; 1024^3 never)
-PREPARED_BYTES = int(2.5e9)     # prepared cubes kept (2 bytes a cell: 2.1 GB at 1024^3); always the last one
+VOLUME_CACHE_BYTES = int(6e8)
+PREPARED_BYTES = int(2.5e9)
 BYTES_PER_CELL = 10.0           # a volume's peak memory a cell: float32 average, levels, transposed levels and the
-                                # chunks' temporaries (measured: 9.5 GB at 1024^3, 1.7 GB at 512^3)
 WORKERS = max(2, min(8, (os.cpu_count() or 4) - 2))     # the threads of each pool (pool(), gui_pool()), and the
                                 # tasks _run keeps queued on one
 
@@ -85,9 +60,8 @@ def gui_pool() -> ThreadPoolExecutor:
 def _run(fn, items, executor: ThreadPoolExecutor | None = None, progress: dict | None = None,
          count: bool = False) -> None:
     """fn over items on 'executor' (pool()), at most its thread count (WORKERS) queued at a time (another caller's
-    task waits behind a few chunks, never a whole pass); the first failure raised once the running ones are done.
-    'progress' with 'cancel' set stops it (Cancelled), checked before each item is queued; with 'count',
-    progress['done'] goes up by one as each item finishes, in order (average_window's blocks: the GUI shows it)."""
+    task waits behind a few chunks, never a whole pass); the first failure raised once the running ones are
+    done."""
     ex = executor or pool()
     flying: deque = deque()
 
@@ -192,10 +166,7 @@ def volume_key(o, name: str, component: str, idx, detail: int) -> tuple | None:
 
 def drop_volumes() -> int:
     """Forget the averaged and prepared cubes (the bytes they held). grids.drop_cubes() calls it (registered below):
-    a job start and a memory check release these with the map's cubes. The volume on screen and its GPU copy stay:
-    View3D holds them (its prepared cube, two bytes a cell, and the GPU's byte a cell) until another volume replaces
-    them or the 3D view closes -- the user is looking at it, and reading it again would cost more memory than it
-    frees (the averaging's peak, BYTES_PER_CELL); the 3D view's own memory check (its detail choice) counts both."""
+    a job start and a memory check release these with the map's cubes."""
     with _LOCK:
         n = sum(v["values"].nbytes for v in _VOLUMES.values()) + sum(prepared_bytes(p) for p in _PREPARED.values())
         _VOLUMES.clear()
@@ -219,12 +190,9 @@ def need_bytes(shape) -> float:
 
 def average_window(o, name: str, component: str, lo, hi, detail: int = DEFAULT_DETAIL, progress: dict | None = None
                    ) -> dict:
-    """The field over the window lo..hi (Mpc, periodic: cell_window's cells), block-averaged to at most 'detail'
-    cells a side: {'values': float32 (m0, m1, m2), 'lo', 'hi' (the window snapped to whole cells, Mpc), 'cells'
-    (its fine cells a side), 'key'}. Read in blocks of whole x-layers on the pool, one block of averaged cells a task;
-    the whole grid at its own cells, already in the cube cache, is that array itself (no copy). 'progress' (a dict
-    shared with the GUI thread): 'done' / 'total' blocks are written as it goes, and 'cancel' set true stops it
-    (Cancelled)."""
+    """The field over the window lo..hi (Mpc, periodic: cell_window's cells), block-averaged to at most 'detail' cells
+    a side: {'values': float32 (m0, m1, m2), 'lo', 'hi' (the window snapped to whole cells, Mpc), 'cells' (its fine
+    cells a side), 'key'}."""
     n = int(o.n)
     cell = o.length / n
     idx, wlo, whi = V.cell_window(lo, hi, o.lo, cell, n)
@@ -342,8 +310,7 @@ def _chunks(m: int, step: int = 8):
     return [(i, min(i + step, m)) for i in range(0, m, step)]
 
 
-CHUNK_CELLS = 1 << 20           # the cells a pass over the cube takes at a time: 4 MB of float32, in the core's cache
-                                # (whole 8-row chunks of a 1024^3 cube, 32 MB, went to memory and back at every op)
+CHUNK_CELLS = 1 << 20
 
 
 def _cell_chunks(shape) -> list[tuple[int, int]]:
@@ -535,11 +502,8 @@ def prepared_bytes(p: dict) -> int:
 
 def prepare(avg: dict, log: bool, progress: dict | None = None) -> dict:
     """What the GUI thread needs to draw an averaged cube: {'fine': its levels q (C order) and qT (q's slices along z,
-    contiguous), 'coarse': the copy drawn while turning (its three stacks of slice images: oriented) or None, 'shape',
-    'qrange', 'levels' (each level's scaled value), 'counts', 'lo', 'hi', 'cells', 'log'}. Runs on the slice worker,
-    in chunks on the pool; the last ones kept up to PREPARED_BYTES (back from a close-up: no second quantisation),
-    none while the launcher runs a job (grids.cap_cubes: the view holds the one it shows). 'progress' gets stage
-    'colouring' while it runs, and its 'cancel' stops it between chunks (Cancelled)."""
+    contiguous), 'coarse': the copy drawn while turning (its three stacks of slice images: oriented) or None,
+    'shape', 'qrange', 'levels' (each level's scaled value), 'counts', 'lo', 'hi', 'cells', 'log'}."""
     key = None if avg.get("key") is None else (avg["key"], bool(log))
     with _LOCK:
         hit = _PREPARED.get(key) if key is not None else None
@@ -606,11 +570,8 @@ BASIN_CELLS = 64                # basin: the flood runs on blocks of the cube, a
 
 def level_slopes(prep: dict, region: np.ndarray | None = None) -> np.ndarray:
     """How steeply the field runs through each level of a prepared cube: per level (LEVELS,) the mean |gradient| of
-    its cells, in the scaled value per cell (central differences of the levels along the three axes, times a level's
-    step), NaN where no sampled cell has that level -- from about SLOPE_SAMPLES cells (every s-th along each axis;
-    tens of ms at 1024^3); of the cells in 'region' only (a boolean mask of the cube: a close-up's void, basin) when
-    given. The whole cube's are kept in prep['slopes']. The contour shells' bands follow it (contours.shell_plan's
-    'slopes'): a band of values is a shell of about the same thickness in cells wherever the shell runs."""
+    its cells, in the scaled value per cell (central differences of the levels along the three axes, times a
+    level's step), NaN where no sampled cell has that level."""
     if region is None and prep.get("slopes") is not None:
         return prep["slopes"]
     q = prep["fine"]["q"]
@@ -639,12 +600,8 @@ def level_slopes(prep: dict, region: np.ndarray | None = None) -> np.ndarray:
 
 def basin(prep: dict, centre, top: float) -> np.ndarray | None:
     """The basin of a prepared cube's minimum near 'centre' (Mpc) up to the scaled value 'top': a boolean mask of its
-    cells (the cube's shape), those at or below 'top' within a block of the region below it connected (face to face)
-    to the centre -- a close-up's own void up to its outer contour shell, without its neighbours unless they join it
-    below that value. Flooded on blocks of the cube (at most BASIN_CELLS a side) through the blocks wholly below
-    'top' (a wall thinner than a block between two voids still parts them), then grown by a block (the basin's edge
-    in partly lower blocks) and cut to the cells below 'top'. None when the centre is not in such a block or lies
-    outside the cube."""
+    cells (the cube's shape), those at or below 'top' within a block of the region below it connected (face to
+    face) to the centre."""
     q = prep["fine"]["q"]
     m = np.asarray(q.shape)
     lo, hi = np.asarray(prep["lo"], dtype=np.float64), np.asarray(prep["hi"], dtype=np.float64)
@@ -713,12 +670,7 @@ def shell_weights(levels: np.ndarray, shells, symmetric: bool = False) -> tuple[
 
 def shells_within(prep: dict, region: np.ndarray, shells, symmetric: bool = False) -> dict:
     """A copy of a prepared cube whose contour shells (contours.shell_spec, drawn by transfer) show only within
-    'region' (a boolean mask of the cube: a close-up's own void, basin), not around its neighbours. Outside it every
-    cell whose level lies in a shell's band is moved to the nearest level in none -- a cell the volume shows clear
-    either way (the bands lie below the shown range: contours.shell_plan), its value moved by at most a band's width:
-    the volume's own picture is the same, the GPU's half cube (its value means) nearly so. Its levels 'q' and 'qT'
-    and the coarse copy's stacks are new (the GPU takes it as another cube); the rest is the cube's own. Without a
-    shell, the cube itself. On the GUI's threads (gui_pool): it runs on the GUI thread."""
+    'region' (a boolean mask of the cube: a close-up's own void, basin), not around its neighbours."""
     v = np.asarray(prep["levels"], dtype=np.float64)
     inband = shell_weights(v, shells, symmetric)[0] > 0
     free = np.nonzero(~inband)[0]
@@ -748,12 +700,7 @@ def shells_within(prep: dict, region: np.ndarray, shells, symmetric: bool = Fals
 def transfer(levels: np.ndarray, lo: float, hi: float, opacity: float, exponent: float, colours: np.ndarray,
              symmetric: bool = False, gamma: float = DEFAULT_GAMMA, shells=None) -> np.ndarray:
     """The 16-bit premultiplied RGBA of each level as QImage.Format_RGBA64_Premultiplied stores it (one uint64 a
-    level: R, G, B, A halfwords in memory order): levels below 'lo' (and level 0) transparent, the opacity rising to
-    'opacity' at 'hi' (opacity_curve) and corrected for the path through a slice ('exponent': the path over the
-    reference thickness), the colour 'colours' ((256, 3) uint8, the colour map) over lo..hi. 'symmetric' (a field
-    centred on 0, a diverging map): lo..hi bound |value|, the colour spans -hi..hi. 'shells' (contours.shell_spec,
-    the Contours tick): thin shells of constant value laid over the cells at their levels (shell_weights), corrected
-    for the path as the rest; None leaves the table exactly as without."""
+    level: R, G, B, A halfwords in memory order): levels below 'lo' (and level 0) transparent."""
     v = np.asarray(levels, dtype=np.float64)
     span = hi - lo if hi > lo else 1.0
     a = np.abs(v) if symmetric else v
@@ -811,9 +758,7 @@ def visible_fraction(prep: dict, lo: float, symmetric: bool = False) -> float:
 # ---------------------------------------------------------------------- the slices on the screen
 def slice_axis(cam: V.Camera, lo, hi, shape=None) -> tuple[int, np.ndarray]:
     """The slicing axis and the reference ray's direction (unit, toward the window): orthographic, the axis facing
-    the viewer most (|cos| >= 1/sqrt 3: never edge on) and the view direction. Perspective: every pixel's ray has
-    its own direction and its own axis (slice_plan's parts); these are the ray through the middle of the view and
-    the axis whose slices it crosses most of ('shape': the cells along each axis; cubic cells without it)."""
+    the viewer most (|cos| >= 1/sqrt 3: never edge on) and the view direction."""
     lo, hi = np.asarray(lo, dtype=np.float64), np.asarray(hi, dtype=np.float64)
     t = cam.toward()
     if not cam.perspective:
@@ -851,27 +796,7 @@ def _slice_transforms(cam: V.Camera, lo, cell, shape, a: int) -> tuple[np.ndarra
 def slice_plan(cam: V.Camera, lo, hi, shape) -> dict:
     """How the slice stacks of a cube of 'shape' cells filling lo..hi (Mpc) land on the screen of 'cam':
     {'perspective', 'exponent' (the path through a slice over the reference thickness, along the reference ray),
-    'parts': the stacks to draw, each {'axis', 'sign' (+1: its rays run up the axis), 'order' (slice indices,
-    front first), 'transforms' ((m, 9): slice i's image pixels -> screen, view3d.plane_transform's numbers; image
-    rows along the first remaining axis, columns along the second, as slice_images gives them), 'size' (the
-    image's width, height), 'first'}, and 'axis', 'order', 'transforms', 'size' of the part that draws the middle
-    of the view}.
-
-    Orthographic: one part draws the whole picture (slice_axis's), exactly.
-
-    Perspective: each pixel's ray has its own direction, and the eye may be anywhere, also inside the window. A
-    pixel is drawn from the stack across the axis its ray crosses the most slices of (in cells: the largest
-    component of its direction), so the picture has up to six parts (an axis and a sense each: the faces of a
-    cube around the eye; part_ids gives each pixel's), no slice is seen at more than 55 degrees from face on, and
-    only the slices ahead of the eye along a part's sense are drawn, nearest first. Where two parts meet, a ray
-    crosses as many slices of the one as of the other, so one exponent serves all: the reference ray's (through
-    the middle of the view). A ray's true path through a slice is the spacing over its own |cos|, so a uniform
-    field's optical depth varies across the picture by that ratio to the reference ray's (at most sqrt 3) -- 2D
-    texture slicing's inherent error. 'first' = (slice, weight): the nearest slice ahead of the eye stands for the
-    stretch between the eye and itself, so it counts by its distance in slices (weight < 1 within one slice of the
-    eye): flying through the field, a slice fades as the eye reaches it and never pops. 'view' = (q0, qx, qy, eye):
-    screen point (x, y) lies at q0 + x qx + y qy in cells from 'lo' on the target's plane, the eye at 'eye';
-    'screen' = the view's size (cam.width, cam.height)."""
+    'parts': the stacks to draw, each {'axis', 'sign' (+1: its rays run up the axis)."""
     lo, hi = np.asarray(lo, dtype=np.float64), np.asarray(hi, dtype=np.float64)
     shape = tuple(int(n) for n in shape)
     cell = (hi - lo) / np.asarray(shape, dtype=np.float64)

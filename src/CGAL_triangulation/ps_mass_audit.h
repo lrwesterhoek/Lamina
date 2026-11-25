@@ -1,24 +1,6 @@
-/* DTFE_MASS_AUDIT=1: the PS-DTFE deposit's mass bookkeeping (a diagnostic, OFF by default --
-   unset, none of it runs and every output is unchanged). Each grid pass (interpolateGrid_phaseSpace) prints
-   one 'PS mass audit: partition i ...' line to stderr, and a partitioned run one 'PS mass audit: run ...'
-   line per pass kind after the merge (DTFE.cpp). All sums in double, in mass units:
-     (a) owned    the weight of the vertices this pass OWNS (Lagrangian position in the ownership box, the
-                  filter's half-open test; no box: every non-dummy vertex)
-     (b) tets     the mass of the tetrahedra that pass psFilterCell with ownership (the deposit's input:
-                  vertex shares under --ps-vertex-mass, else rho_bar V_lag)
-     (c) deg0     the owned vertices of degree 0 (every incident tet dropped): their weight reaches no tet
-     (d) dropped  the owned tetrahedra the drop filters reject (their rho_bar V_lag: LOST without
-                  --ps-vertex-mass, handed to the neighbours through the degrees with it); 'after' = kept
-                  tets the deposit then skips (zero float mass, released centroid beyond the region)
-     (e) gpu      the mass handed to the GPU, its deferred part, the fixed-point grid's exact total and that
-                  grid as the floats the host keeps
-     (f) cpu      the tets the CPU loop deposits (all of them, or the GPU-deferred ones), the shares it
-                  writes, and what the float grid actually gained
-     (g) grid     the pass's mass grid before the merge (before and after the rho/rho_bar conversion)
-     (h) run      Sum over the passes vs the merged grid vs the input mass, and the grid mean - 1
-   The closures that must hold: Sum (a) = input; Sum (b) + Sum (c) = input under --ps-vertex-mass (the
-   degrees agree across partitions); per pass gpu handed - deferred = fixed-point total, cpu shares = tets
-   (less the drops), grid gained = shares; Sum (g) = the merged grid. */
+/* DTFE_MASS_AUDIT=1: the PS-DTFE deposit's mass bookkeeping, a diagnostic (OFF by default: unset, none of it
+   runs and every output is unchanged). Prints 'PS mass audit' lines to stderr per pass and per run, all sums in
+   double in mass units; the closures it checks are in the audit lines. */
 
 #ifndef PS_MASS_AUDIT_HEADER
 #define PS_MASS_AUDIT_HEADER
@@ -31,9 +13,7 @@
 
 namespace PSMassAudit
 {
-    // read once: the switch is per run. 2 adds the per-particle closure (ps_interpolation.cc), on ONE domain
-    // only (partition < 0): the auto-tuner splits even small runs into partitions, so pass --partition 1 1 1
-    // or --gpu to get one
+    // read once. 2 adds the per-particle closure on ONE domain only (partition < 0): pass --partition 1 1 1 or --gpu
     inline int level()
     {
         static int const v = int( Env::integer( "DTFE_MASS_AUDIT", 0 ) );

@@ -1,16 +1,7 @@
 """Shared command-line interface for analysis/plot scripts.
 
-Every script gains the same flags so the whole pipeline is method- and snapshot-agnostic:
-
-    python3 plot/plot_PS_DTFE.py --sim TNG50-3-Dark                # snap 99, method auto
-    python3 plot/plot_PS_DTFE.py --sim TNG50-3-Dark --estimator dtfe
-    DTFE_SIM=TNG100-3-Dark python3 plot/plot_PS_DTFE.py --snap 50 --smooth 1.5
-
-There is no default simulation: every run names it, with --sim or DTFE_SIM (require_sim).
-
-Scripts call make_fieldset() and get a ready FieldSet plus the parsed args for their own
-extra options (pass extra=... to register script-specific flags on the same parser).
-"""
+Every script gains the same flags (--sim or DTFE_SIM, --snap, --estimator, --smooth, ...); make_fieldset() returns a
+ready FieldSet plus the parsed args; extra= adds script-specific flags."""
 
 from __future__ import annotations
 
@@ -66,19 +57,16 @@ def require_sim(sim: str | None = None) -> str:
                        + (f" (under {root}: {', '.join(found)})" if found else ""))
 
 
-# Where every figure goes (config.LOCAL_FIGURES_ROOT, the launcher's figure browser): DTFE_FIGURES_ROOT, else
-# python/figures (git-ignored). Not derived from the data root: the launcher hands its data root only to the scripts
-# it runs, so the launcher and its scripts would look in different places. The tests set DTFE_FIGURES_ROOT to a
-# temp dir.
+# Where every figure goes (config.LOCAL_FIGURES_ROOT): DTFE_FIGURES_ROOT, else python/figures (git-ignored).
+# Not derived from the data root, so the launcher and its scripts look in the same place.
 FIGURES_ROOT = Path(os.environ.get("DTFE_FIGURES_ROOT") or Path(__file__).resolve().parents[1] / "figures")
 DEFAULT_SNAP = 99
 
 
 def sim_dir(sim: str, root=None) -> Path:
-    """Directory of simulation `sim` under `root` (default require_data_root()), in either layout: flat
-    <root>/<sim>, or per family <root>/<family>/<sim> with <family> the name up to its first '-'
-    (TNG100-3-Dark -> TNG100). An existing directory wins; a simulation not on disk yet goes into
-    its family folder when that exists, else flat. Mirrors sim_dir in scripts/config.sh."""
+    """Directory of simulation `sim` under `root` (default require_data_root()), flat <root>/<sim> or per family
+    <root>/<family>/<sim> (family = the name up to its first '-'). An existing directory wins; a new one goes
+    into its family folder when that exists. Mirrors sim_dir in scripts/config.sh."""
     root = require_data_root(root)
     flat = root / sim
     family = root / sim.split("-", 1)[0]
@@ -113,10 +101,9 @@ def snapshot_ladder(sim: str, root=None, require=None) -> list[int]:
 
 
 def use_data_root(root) -> Path | None:
-    """Make `root` this process's data root: what a script's --data-root means for every dtfelib helper that is
-    not handed a root explicitly (groupcat, trees, environment, pipeline.products without data_root=...).
-    require_data_root() reads it at call time, so the switch reaches them all. None (a script run without
-    --data-root) clears it: DTFE_DATA_ROOT applies again. Returns the root now in force, None when none is."""
+    """Make `root` this process's data root, for every dtfelib helper not handed a root explicitly.
+    require_data_root() reads it at call time. None clears it: DTFE_DATA_ROOT applies again.
+    Returns the root now in force, None when none is."""
     global _data_root_override
     _data_root_override = Path(root).expanduser() if root else None
     try:
@@ -224,10 +211,8 @@ def add_estimator_arg(parser: argparse.ArgumentParser, choices=ESTIMATORS, defau
 def make_parser(description: str = "", snap_default: int | None = DEFAULT_SNAP,
                 snap_help: str | None = None, snap_option: str = "--snap") -> argparse.ArgumentParser:
     """The parser every figure script starts from: --data-root, --sim (add_sim_arg), --snap, --estimator, --prefix,
-    --raw and --smooth. snap_default / snap_help: a series script's --snap (default None = the whole series) and
-    its help; by default snapshot DEFAULT_SNAP. snap_option: the option's name where the snapshot means something
-    more particular -- the tracking scripts' '--start-snap', the snapshot they follow back from -- always args.snap.
-    No abbreviation is guessed (new_parser)."""
+    --raw and --smooth. snap_default / snap_help set a series script's --snap; snap_option renames it where the
+    snapshot means something more particular (always args.snap). No abbreviation is guessed (new_parser)."""
     p = new_parser(description=description)
     p.add_argument("--data-root", type=Path, default=None,
                    help="the folder that holds the simulations (default: DTFE_DATA_ROOT; one of the two is needed)")
@@ -245,16 +230,10 @@ def make_parser(description: str = "", snap_default: int | None = DEFAULT_SNAP,
     return p
 
 
-# The PS-DTFE velocity-gradient family a figure script uses: the scripts that set PS beside standard DTFE
-# or linear theory -- plot_velDiv_den, plot_cosmic_web, plot_web_streams, plot_shear_triaxial, plot_DTFE,
-# plot_halo_tracking -- read PS's divergence / shear / vorticity / gradient / V-web as the MEAN FIELD by default,
-# the quantity standard DTFE stores (FieldSet.load(name, mean_field=True)): a face-gradient run's own grids (the
-# PS binary's default with the exact deposit, src/user_options.cc '--face-gradient';
-# FieldSet.face_gradient), else the FFT derivatives of the PS velocity grid (dtfelib/fields.py). '--ps-gradient
-# stored' reads the binary's PS grids as they are: the stream average <grad v> of a run without the face gradient
-# ('--per-tet-gradient', the sampled deposit, an older binary's run), and the
-# mean-flow grids of a face-gradient run (the same grids the default reads then). Standard-DTFE grids are read as
-# stored either way (they are the mean field).
+# The PS-DTFE velocity-gradient family (divergence / shear / vorticity / gradient / V-web) is read as the MEAN
+# FIELD by default, the quantity standard DTFE stores (FieldSet.load(name, mean_field=True)): a face-gradient
+# run's own grids, else the FFT derivatives of the PS velocity grid. '--ps-gradient stored' reads the binary's
+# PS grids as they are. Standard-DTFE grids are read as stored either way.
 PS_GRADIENT_CHOICES = ("mean-field", "stored")
 
 
@@ -302,10 +281,9 @@ def mean_field_wanted(args) -> bool:
 
 
 # ---------------------------------------------------------------- series scripts
-# The core figure scripts (plot_PDF_CDF, plot_eigenvalues, plot_contour_filter, plot_ellipses_contour_3D,
-# plot_shape_filter, plot_velDiv_den, plot_shear_triaxial, plot_marked_correlation_BBKS) run one snapshot after the
-# other: snapshot_series names them, run_series runs them, report_series prints the closing lines. The lines are the
-# scripts' own (tests read 'Completed: n/m' and 'Successfully processed: n/m'); the launcher goes by the exit code.
+# The core figure scripts run one snapshot after the other: snapshot_series names them, run_series runs them,
+# report_series prints the closing lines. The lines are the scripts' own (tests read 'Completed: n/m' and
+# 'Successfully processed: n/m'); the launcher goes by the exit code.
 
 def snapshot_series(args) -> list:
     """The (snapshot id, redshift) pairs a series script runs over: config's whole ladder in its order
@@ -319,10 +297,9 @@ def snapshot_series(args) -> list:
 
 
 def run_series(items, fn, catch: bool = False) -> tuple:
-    """Run fn(snapshot, redshift) for every (snapshot, redshift) pair of 'items', in order. Returns (outcomes,
-    failed): outcomes[i] what the call for items[i] returned, failed the pairs whose call failed. Without 'catch' a
-    call fails by returning None or False; with it a call fails only by raising an Exception, reported as
-    'Failed to process snapshot S (z=Z): why' (its outcome None), and the series goes on."""
+    """Run fn(snapshot, redshift) for every pair of 'items', in order. Returns (outcomes, failed). Without
+    'catch' a call fails by returning None or False; with it only by raising an Exception, reported as
+    'Failed to process snapshot S (z=Z): why', and the series goes on."""
     outcomes, failed = [], []
     for snapshot, redshift in items:
         if catch:
@@ -363,11 +340,8 @@ def snapdir(args) -> Path:
 
 
 def make_fieldset(description: str = "", extra=None, argv=None):
-    """Parse standard flags (+ optional script-specific ones) and open the FieldSet.
-
-    extra: callable(parser) that registers additional arguments.
-    Returns (fieldset, args).
-    """
+    """Parse standard flags (+ optional script-specific ones via extra(parser)) and open the FieldSet.
+    Returns (fieldset, args)."""
     parser = make_parser(description)
     if extra is not None:
         extra(parser)

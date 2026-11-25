@@ -1,29 +1,6 @@
 """Sample DTFE / PS-DTFE grid fields at (halo) positions -- the merger-tree <-> field bridge.
-
-Positions are converted to FRACTIONAL box coordinates using the raw-snapshot box size
-(ckpc/h, the same frame as SubLink SubhaloPos), so sampling is independent of whichever
-unit convention the field grid was produced under: the grid always spans the full box.
-
-Works identically for both estimators via FieldSet (method='ps' | 'dtfe' | 'auto'):
-
-    from dtfelib.environment import branch_environment
-    env = branch_environment("TNG50-3-Dark", branch, method="dtfe",
-                             fields=("density", "tweb", "vweb"))
-    env["density"]   # rho/rho_bar at the halo position, one value per branch snapshot
-    env["tweb"]      # web label 0..3 (NGP-sampled; labels are never interpolated)
-
-Continuous fields are sampled trilinearly (periodic), categorical web labels by
-nearest-grid-point. Snapshots without fields on disk yield NaN with a note in env["missing"].
-
-The velocity-gradient family (vweb, divergence, ...) is the MEAN-FIELD one for both estimators by default
-(mean_field=True): FieldSet.load(name, mean_field=True), i.e. standard DTFE's stored grids, a PS-DTFE
-face-gradient run's stored grids too (FieldSet.face_gradient: the PS binary's default with the exact deposit),
-and for any other PS-DTFE run the same quantity derived from its velocity grid instead of
-its stored stream average <grad v> (dtfelib/io.py, the note above FIELDS). That derivation costs a PS output an FFT
-computation per call (seconds to a minute at 512^3): sample every position of a snapshot in ONE sample_fields_at
-call. mean_field=False reads the stored PS grids as they are (the stream average, or a face-gradient run's mean
-flow).
-"""
+Positions are fractional box coordinates from the raw-snapshot box size (ckpc/h). Continuous fields are sampled
+trilinearly (periodic), web labels by nearest grid point; snapshots without fields give NaN (env["missing"])."""
 
 from __future__ import annotations
 
@@ -31,6 +8,7 @@ from __future__ import annotations
 import h5py
 import numpy as np
 
+from ._threads import map_chunks
 from .cli import sim_dir, snapdir_path
 from .io import FieldSet, MEAN_FIELD_NAMES
 
@@ -39,11 +17,8 @@ LABEL_FIELDS = {"tweb", "vweb"}
 
 
 def box_ckpc_h(sim: str, snap: int) -> float:
-    """Box size in ckpc/h (the SubLink/raw-snapshot frame) for `sim` at `snap`.
-
-    Prefers a raw snapshot chunk or groupcat header (always ckpc/h); falls back to the
-    merged combined_*.hdf5, which is h-free ckpc by the current convention (BoxSize * h).
-    """
+    """Box size in ckpc/h (the SubLink/raw-snapshot frame) for `sim` at `snap`: from a raw chunk or groupcat
+    header, else the merged combined_*.hdf5 (BoxSize * h)."""
     root = sim_dir(sim)
     snapdir = snapdir_path(sim, snap)
     for pat in (f"snap_{snap:03d}.*.hdf5",):
@@ -65,11 +40,16 @@ def box_ckpc_h(sim: str, snap: int) -> float:
 
 
 def sample_grid(grid: np.ndarray, frac: np.ndarray, mode: str = "trilinear") -> np.ndarray:
-    """Sample a periodic (N,N,N) or (N,N,N,C) grid at fractional positions frac (M,3) in [0,1).
+    """Sample a periodic (N,N,N) or (N,N,N,C) grid at fractional positions frac (M,3) in [0,1), mode='trilinear'
+    (continuous) or 'ngp' (labels). Cell i covers [i/N, (i+1)/N); centres sit at (i+0.5)/N. Threaded over the
+    points when there are many (each point the same computation: bit-identical)."""
+    frac = np.asarray(frac, dtype=np.float64)
+    parts = map_chunks(len(frac), lambda lo, hi: _sample_grid(grid, frac[lo:hi], mode), min_size=1 << 18)
+    return parts[0] if len(parts) == 1 else np.concatenate(parts)
 
-    mode='trilinear' (continuous fields) or 'ngp' (categorical labels).
-    Grid cell i covers [i/N, (i+1)/N); cell centres sit at (i+0.5)/N.
-    """
+
+def _sample_grid(grid: np.ndarray, frac: np.ndarray, mode: str = "trilinear") -> np.ndarray:
+    """sample_grid on one chunk of points."""
     n = grid.shape[0]
     frac = np.mod(np.asarray(frac, dtype=np.float64), 1.0)
     if mode == "ngp":
@@ -100,13 +80,9 @@ def sample_fields_at(sim: str, snap: int, pos_ckpc_h: np.ndarray,
                      fields=("density", "tweb", "vweb"),
                      method: str = "auto", averaged: bool = True,
                      prefix: str | None = None, mean_field: bool = True) -> dict:
-    """Sample `fields` at positions (M,3) in ckpc/h for one snapshot.
-
-    Density is returned in mean units (rho/rho_bar) for both estimators; other fields raw.
-    Missing individual fields come back as NaN arrays (check FieldSet.has upstream if needed).
-    prefix reads an alternate OUTPUT_PREFIX grid set (e.g. 'ps_mw'), see FieldSet.
-    mean_field: the velocity-gradient family as the mean field for both estimators (module docstring).
-    """
+    """Sample `fields` at positions (M,3) in ckpc/h for one snapshot. Density is rho/rho_bar for both estimators;
+    missing fields come back as NaN. prefix reads an alternate grid set (e.g. 'ps_mw'); mean_field selects the
+    mean-field velocity-gradient family (see FieldSet.load)."""
     fs = FieldSet(snapdir_path(sim, snap), method=method, averaged=averaged,
                   prefix=prefix)
     frac = np.asarray(pos_ckpc_h, dtype=np.float64) / box_ckpc_h(sim, snap)
@@ -118,10 +94,8 @@ def sample_fields_at(sim: str, snap: int, pos_ckpc_h: np.ndarray,
             continue
         grid = fs.load(name, mean_field=mf)
         if name == "density":
-            # mean units via the grid's OWN mean: mass conservation makes the volume mean
-            # equal rho_bar in whatever units the file was written, so this is correct for
-            # both estimators AND for grids from older unit conventions (unlike
-            # FieldSet.density, which trusts the current on-disk convention).
+            # mean units via the grid's OWN mean: mass conservation makes the volume mean equal rho_bar
+            # in whatever units the file was written (unlike FieldSet.density).
             m = float(grid.mean())
             if m > 0:
                 grid = grid / m
@@ -132,13 +106,9 @@ def sample_fields_at(sim: str, snap: int, pos_ckpc_h: np.ndarray,
 def branch_environment(sim: str, branch: dict, fields=("density", "tweb", "vweb"),
                        method: str = "auto", averaged: bool = True, prefix: str | None = None,
                        mean_field: bool = True) -> dict:
-    """Field environment along a SubLink branch (output of TreeSet.main_branch, which must
-    include 'SubhaloPos'). One sampled value per branch snapshot; NaN where no field grids
-    exist on disk. Returns {field: (n,) array, ..., "missing": [snap, ...], "method": {snap: m}}.
-    prefix: an alternate grid set, as sample_fields_at.
-    mean_field: as sample_fields_at; it samples one position per call, so a PS mean-field V-web is computed once
-    per branch snapshot -- for many branches sample per snapshot instead (plot_halo_tracking.add_environment).
-    """
+    """Field environment along a SubLink branch (output of TreeSet.main_branch, which must include 'SubhaloPos').
+    One value per branch snapshot, NaN where no grids exist. Returns {field: (n,), "missing": [...], "method": {...}}.
+    prefix, mean_field: as sample_fields_at; it samples one position per call."""
     snaps = branch["SnapNum"].astype(int)
     pos = np.asarray(branch["SubhaloPos"], dtype=np.float64)
     out = {name: np.full(snaps.size, np.nan) for name in fields}

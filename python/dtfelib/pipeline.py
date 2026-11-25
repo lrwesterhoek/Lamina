@@ -1,13 +1,6 @@
 """The derived-product pipeline of the void and correlation analyses: the smoothed density contrast and its FFT
-derivatives (hessian_from_field, gradient_magnitude_from_field, potential_from_delta), the void catalogue
-(build_void_catalog: minima, ellipsoid fits, the measured radii), the smoothing a process runs at (set_smoothing,
-smoothing_tag), the void gate and the catalogue frame, and the per-snapshot products cache (SnapshotProducts /
-products(), python/cache/<param hash>/) with the cross-epoch colour limits.
-
-The critical points (dtfelib.critical) and the void-radius measurement (dtfelib.void_radius) have modules of their
-own; their names are re-exported here, and setting one of the R_V_* knobs on this module (pipeline.R_V_MAX_SIGMA =
-...) sets it in dtfelib.void_radius, where the measurement reads it.
-"""
+derivatives, the void catalogue (build_void_catalog), the void gate and frame, and the per-snapshot products cache
+(SnapshotProducts / products()). Critical points and void radii live in dtfelib.critical / void_radius."""
 
 from __future__ import annotations
 
@@ -127,9 +120,8 @@ def hessian_slice(hessian: dict, slice_dim: int, index: int | None = None) -> di
 
 def build_void_catalog(delta_s: np.ndarray, hessian: dict) -> dict:
     """The void catalogue of one smoothed density contrast: its local minima (config.FOOTPRINT_SIZE) kept by
-    config.VOID_EIGENVALUE_CRITERION on the Hessian there, with their shapes, the ellipsoid fits and the
-    well_resolved / deep flags, the three measured radii (void_radius.void_radii_cells) and the records a cache is
-    checked against (r_v_settings, cell_mpc, cuts_mpc, deep_threshold)."""
+    config.VOID_EIGENVALUE_CRITERION on the Hessian there, with their shapes, ellipsoid fits, well_resolved / deep
+    flags, the three measured radii and the records a cache is checked against."""
     fp = config.FOOTPRINT_SIZE
     _, coords = dtfe.find_local_minima(delta_s, footprint_size=fp)
     evals, evecs = eigh_at_coords(hessian, coords)
@@ -166,12 +158,9 @@ def build_void_catalog(delta_s: np.ndarray, hessian: dict) -> dict:
 
 
 def set_smoothing(cells: float | None = None, mpc: float | None = None) -> float:
-    """Set the smoothing length for this process: in cells (a script's --smooth: the footprint stays as it is, the
-    smoothing comparison's r512_s5_f11 / s20_f11 caches rely on that) or in Mpc (--smooth-mpc: the same physical
-    scale in every box, the footprint following it -- config.footprint_for). Keeps config.SMOOTHING_SIGMA_MPC in step. In cells the
-    footprint is the PRODUCTION one even after an Mpc setting or under DTFE_SMOOTH_MPC (else '--smooth 10' would give
-    r512_s10_f5, neither the production s10_f11 nor the Mpc run). Returns sigma
-    in cells. Neither given (or <= 0): nothing changes."""
+    """Set the smoothing length for this process: in cells (--smooth: the footprint stays the PRODUCTION one) or in
+    Mpc (--smooth-mpc: the same physical scale in every box, the footprint following it, config.footprint_for).
+    Keeps config.SMOOTHING_SIGMA_MPC in step. Returns sigma in cells; neither given (or <= 0): nothing changes."""
     if cells and mpc:
         raise ValueError("give the smoothing in cells or in Mpc, not both")
     if mpc and float(mpc) > 0:
@@ -204,12 +193,9 @@ def apply_smoothing_args(args: argparse.Namespace, tag: str = "pipeline") -> flo
 
 
 def smoothing_tag() -> str:
-    """'' at the production smoothing (config.PRODUCTION_SMOOTHING: 10 cells, footprint 11), else a tag for file
-    and folder names -- 's2.1625Mpc_f5' -- so a --smooth / --smooth-mpc run never overwrites the default products.
-    Six significant digits: '.3g' would make 2.16 and 2.1625 Mpc one tag over two different caches.
-    A non-default void gate (DTFE_VOID_GATE, void_gate) adds 'gatenone': 'gatenone' alone at the
-    production smoothing, 's2.1625Mpc_f5_gatenone' with both -- so every caller that keys names on this tag keeps
-    the ungated products apart with no change of its own."""
+    """'' at the production smoothing (config.PRODUCTION_SMOOTHING), else a tag for file and folder names
+    ('s2.1625Mpc_f5') so a --smooth / --smooth-mpc run never overwrites the default products. Six significant
+    digits, so 2.16 and 2.1625 Mpc stay distinct. A non-default void gate adds 'gatenone'."""
     parts = []
     sig0, fp0 = config.PRODUCTION_SMOOTHING
     if (float(config.SMOOTHING_SIGMA_CELLS), int(config.FOOTPRINT_SIZE)) != (float(sig0), int(fp0)):
@@ -259,13 +245,9 @@ def gate_cuts_mpc() -> dict[str, float]:
 
 
 def gate_view(cat: dict) -> dict:
-    """The catalogue as the samples see it under void_gate(). 'ellipsoid': 'cat' itself. 'none' (under the gate
-    the R_v abundance and profiles inherit the 10-sigma max-axis cut, which drops a void because its CURVATURE
-    length is large, not because its R_v is unresolved -- about 77-79% of the z = 0 minima): a copy whose ellipsoid
-    fits, well_resolved and 'cuts_mpc' are re-derived without the max-axis clause (min axis and axis ratio kept), so
-    every sample built on well_resolved -- the R_v ones, and the R_eff / shape ones too -- is ungated, with no change
-    in its script. NEVER saved: the cache keeps the production flags, so processes with either gate share it; the
-    outputs are kept apart by smoothing_tag()'s 'gatenone'. Marked 'void_gate' = 'none'."""
+    """The catalogue as the samples see it under void_gate(). 'ellipsoid': 'cat' itself. 'none': a copy whose
+    ellipsoid fits, well_resolved and 'cuts_mpc' are re-derived without the max-axis clause (min axis and axis
+    ratio kept). NEVER saved: the cache keeps the production flags; outputs are kept apart by smoothing_tag()."""
     if void_gate() == 'ellipsoid':
         return cat
     out = dict(cat)
@@ -291,12 +273,9 @@ def catalog_cuts_ok(cat: dict) -> bool:
 
 
 def snapshot_frame(products: SnapshotProducts) -> tuple[float, float, int, str]:
-    """(cell_mpc, box_mpc, grid_n, source) of a snapshot: its header's box over its grid -- THE truth about
-    the frame -- which must be config.CELL_SIZE (the DTFE_SIM box over FIELD_RESOLUTION), the frame every
-    catalogue is built, cut and exported in; else ValueError, BEFORE any cache is read or written
-    (with DTFE_SIM unset a refit would turn a correct TNG100 cache into TNG50's frame). It needs the
-    snapshot header: FieldSet raises FileNotFoundError without a combined file, so 'source' is always
-    'header' (kept in the tuple for the provenance)."""
+    """(cell_mpc, box_mpc, grid_n, source) of a snapshot: its header's box over its grid, which must be
+    config.CELL_SIZE (the DTFE_SIM box over FIELD_RESOLUTION); else ValueError, BEFORE any cache is read or
+    written. Needs the snapshot header (FileNotFoundError without a combined file); 'source' is always 'header'."""
     fs = products.fs
     n = int(getattr(products, "grid_n", None) or fs.grid_n)     # a coarsened product's grid: its own n
     box = float(fs.meta.box_mpc)
@@ -319,11 +298,9 @@ def snapshot_frame(products: SnapshotProducts) -> tuple[float, float, int, str]:
 
 
 def adopt_snapshot_grid(products: SnapshotProducts) -> tuple[float, float, int]:
-    """Make config's frame THIS snapshot's (its header's box over its grid n) for a tool that shows one snapshot --
-    the launcher's void outlines -- keeping the smoothing length in Mpc (the footprint follows, set_smoothing): a
-    256^3 or 1024^3 run, or a simulation config does not pin, gets its catalogue at the same physical sigma, cached
-    under its own namespace (r{n}_...). Returns (cell_mpc, box_mpc, n). NOT for the analysis scripts: their frame is
-    DTFE_SIM's on purpose, and snapshot_frame refuses a grid that is not in it."""
+    """Make config's frame THIS snapshot's (its header's box over its grid n) for a tool that shows one snapshot,
+    keeping the smoothing length in Mpc (the footprint follows, set_smoothing); cached under its own namespace
+    (r{n}_...). Returns (cell_mpc, box_mpc, n). NOT for the analysis scripts: their frame is DTFE_SIM's on purpose."""
     fs = products.fs
     n, box = int(getattr(products, "grid_n", None) or fs.grid_n), float(fs.meta.box_mpc)
     if n != int(config.FIELD_RESOLUTION) or abs(box - float(config.BOX_SIZE)) > 1e-6 * box:
@@ -334,12 +311,9 @@ def adopt_snapshot_grid(products: SnapshotProducts) -> tuple[float, float, int]:
 
 
 def refit_catalog(cat: dict) -> dict:
-    """The ellipsoid fits of a cached catalogue re-derived in THIS frame with THESE cuts: positions_mpc,
-    the semi-axes, orientations, ellipticity, prolateness and well_resolved all follow from the cached
-    minima (coords) and Hessian eigen-decomposition (in cell units: frame-free), so a catalogue built
-    under another DTFE_SIM's cell, or before a change of the cuts (ellipsoid_cuts_mpc), is put right without the
-    field (18 s and 10 GB at 512^3 for the whole build; this is milliseconds). 'deep' is retaken from the
-    cached minima against config.DEEP_VOID_THRESHOLD; the frame, the cuts and the threshold are recorded."""
+    """The ellipsoid fits of a cached catalogue re-derived in THIS frame with THESE cuts: positions_mpc, semi-axes,
+    orientations, ellipticity, prolateness and well_resolved follow from the cached minima and Hessian eigen-
+    decomposition (frame-free), without the field. 'deep' is retaken; the frame, cuts and threshold are recorded."""
     out = dict(cat)
     out.update(_ellipsoid_fits(np.asarray(cat['coords']), np.asarray(cat['eigenvalues']), np.asarray(cat['eigenvectors'])))
     out['deep'] = np.asarray(cat['delta_values']) < config.DEEP_VOID_THRESHOLD
@@ -371,13 +345,9 @@ def catalog_frame_ok(cat: dict, cell_mpc: float | None = None, rtol: float = 1e-
 
 
 def ellipsoid_fit_one(evals: np.ndarray, evecs: np.ndarray, cell: float) -> dict | None:
-    """Cut-free ellipsoid fit of ONE void from its Hessian eigen-decomposition.
-
-    The single source of the fit formulas: semi-axes 2*cell/sqrt(|lambda|) ordered a>=b>=c,
-    orientation columns in the same order (major axis first), ell = 1-c/a and
-    prol = (a^2-b^2)/(a^2-c^2). Used by _ellipsoid_fits (which then applies the
-    ellipsoid_cuts_mpc resolution gate) and by the void tracker (which reports sub-resolution
-    epochs explicitly instead of dropping them). Returns None for degenerate eigenvalues."""
+    """Cut-free ellipsoid fit of ONE void from its Hessian eigen-decomposition: the single source of the fit
+    formulas (semi-axes 2*cell/sqrt(|lambda|) ordered a>=b>=c, ell = 1-c/a, prol = (a^2-b^2)/(a^2-c^2)). Used by
+    _ellipsoid_fits (which applies the resolution gate) and the void tracker. Returns None for degenerate eigenvalues."""
     ev = np.asarray(evals, dtype=np.float64)
     if np.any(np.abs(ev) < 1e-10):
         return None
@@ -453,11 +423,9 @@ def cache_dir() -> Path:
 
 
 def _save_npz(path, **arrays):
-    """Write a cache whole or not at all: into a sibling temp file, then os.replace onto 'path'. Written
-    in place, a build killed mid-save (a memory-pressure SIGKILL, the launcher's void helper stopped when the output
-    changes, Ctrl-C) or two processes saving the same snapshot would leave a cut zip that every later np.load refuses.
-    The
-    temp name ends in .npz (numpy appends one otherwise) and carries the pid, so two writers never share it."""
+    """Write a cache whole or not at all: into a sibling temp file, then os.replace onto 'path', so a killed
+    build or two writers never leave a cut zip. The temp name ends in .npz (numpy appends one otherwise) and
+    carries the pid, so two writers never share it."""
     path = Path(path)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp.npz")
     try:
@@ -470,15 +438,9 @@ def _save_npz(path, **arrays):
 
 
 class SnapshotProducts:
-    """Per-snapshot derived products (delta, hessian, phi, voids, ...) with disk caching.
-
-    Backed by dtfelib.FieldSet, so it works for BOTH estimators: pass method='ps' or
-    method='dtfe' (default 'auto' = whichever exists in the snapshot directory). Density
-    enters all derived products in MEAN units (rho/rho_bar) for either method, so every
-    downstream quantity is method-independent by construction. Caches are namespaced by
-    (sim, [prefix,] method, snapshot) -- caches keyed by snapshot alone are never
-    reused, and an alternate OUTPUT_PREFIX set never shares caches with the primary one.
-    """
+    """Per-snapshot derived products (delta, hessian, phi, voids, ...) with disk caching, backed by FieldSet so it
+    works for BOTH estimators (method 'ps' | 'dtfe' | 'auto'). Density enters in MEAN units (rho/rho_bar).
+    Caches are namespaced by (sim, [prefix,] method, snapshot); an alternate OUTPUT_PREFIX set never shares them."""
 
     def __init__(self, snapshot, redshift=None, sim=None, method=None, prefix=None, data_root=None, coarsen: int = 1):
         self.snapshot = f"{int(snapshot):03d}"   # accepts 99, '99' or '099'
@@ -594,13 +556,9 @@ class SnapshotProducts:
         _save_npz(p, **dict(arrays, grid_stamp=self._grid_stamp()))
 
     def _cached(self, name):
-        """The cache file of product 'name' when it may be used: present AND from the density grid on disk now.
-        Every product is a function of that grid, and the cache key holds only the parameters (a rerun that
-        rewrites the grids would otherwise go unnoticed). A cache
-        carries the grid's (size, mtime_ns) and must match it exactly (a copied cache, a future
-        grid mtime, a grid rewritten mid-build: none fools an equality); a cache without the stamp is
-        judged by modification time (older than the grid = stale). A stale cache is rebuilt, and says so; None
-        then (and when there is no cache). So is an UNREADABLE one (a cut zip: BadZipFile / EOFError)."""
+        """The cache file of product 'name' when it may be used: present AND from the density grid on disk now (the
+        cache carries the grid's (size, mtime_ns); one without the stamp is judged by modification time). None, said,
+        when stale; None also when absent or UNREADABLE (a cut zip)."""
         p = self._cpath(name)
         if not p.exists():
             return None
@@ -625,16 +583,9 @@ class SnapshotProducts:
         return p
 
     def voids(self):
-        """The void catalogue. From the cache, whose minima and eigenvalues (cell units) never go stale; the
-        ellipsoid fits on top of them are re-derived (refit_catalog, milliseconds, no field) and the cache
-        rewritten when their FRAME is not config.CELL_SIZE -- the positions and semi-axes scale with the
-        cell of the DTFE_SIM simulation at build time, which a script's --sim does not change: a
-        TNG100-3-Dark catalogue built under TNG50's frame (positions up to 51.6 Mpc in a
-        110.7 Mpc box) reads as hundreds of 'resolved' voids where the right frame leaves a handful --
-        or when the cuts (ellipsoid_cuts_mpc) changed since it was built (they are not in the cache's parameter
-        hash). Says so. A cache whose radii were measured with other settings (catalog_r_v_ok) gets them re-measured
-        from the smoothed field. The cache always
-        holds the PRODUCTION gate; DTFE_VOID_GATE=none is applied to the returned dict only (gate_view)."""
+        """The void catalogue, from the cache, whose minima and eigenvalues (cell units) never go stale. The ellipsoid
+        fits are re-derived (refit_catalog) and the cache rewritten when their FRAME is not config.CELL_SIZE or the
+        cuts changed; the cache always holds the PRODUCTION gate (DTFE_VOID_GATE=none is applied by gate_view only)."""
         snapshot_frame(self)                    # the header's frame must be config's: refuse before any cache is touched
         p = self._cpath('voids')
         if self._cached('voids') is not None:
@@ -795,15 +746,9 @@ def canonical_snapshot_id(snap: int | str) -> str:
 
 
 def record_limits(updates: dict | None, canonical=None, sim: str | None = None) -> tuple:
-    """analyze.py compute's bookkeeping. 'updates' = {snapshot: {field: amplitude}} for the snapshots
-    just computed of simulation 'sim' (default DTFE_SIM). They go into the per-snapshot store
-    (snapshot_limits_<sim>.json, beside global_limits_<sim>.json under the same parameter-hashed cache
-    dir, so a change of smoothing or criterion invalidates both); the global limits are then the MAXIMUM
-    over every stored snapshot of the canonical series, not over
-    the snapshots of one run (a run on a subset, or on an unknown id, would shrink or empty the
-    cross-epoch limits every later plot uses). Returns (limits, covered, missing): the limits written
-    (None when nothing was computed: the global file is left alone), the canonical snapshots with an
-    entry, and those still without one."""
+    """analyze.py compute's bookkeeping. 'updates' = {snapshot: {field: amplitude}} for the snapshots just computed
+    of 'sim' (default DTFE_SIM), merged into the per-snapshot store; the global limits are the MAXIMUM over every
+    stored snapshot, not one run. Returns (limits, covered, missing): the limits written (None if nothing computed)."""
     canonical = [canonical_snapshot_id(s) for s in (canonical if canonical is not None
                                                      else config.SNAPSHOT_TO_REDSHIFT)]
     store = load_snapshot_limits(sim)

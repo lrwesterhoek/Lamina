@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """Draw the GUI launcher's icon: a small cosmic web -- haloes joined by filaments of particles,
-each particle linked to its nearest neighbours like a Delaunay tessellation -- on a dark rounded
-square with the proportions of a macOS app icon. Deterministic (fixed seed), no data needed.
-
-    python make_icon.py OUT.png                 # one 1024 x 1024 PNG
-    python make_icon.py OUT.png --iconset DIR   # ... plus DIR/icon_*.png for `iconutil -c icns DIR`
-
-Needs PySide6 and numpy (the GUI's environment); runs headless.
-"""
+    python make_icon.py OUT.png [--iconset DIR]   # a 1024 x 1024 PNG, plus DIR/icon_*.png for iconutil
+Needs PySide6 and numpy; runs headless and deterministic."""
 
 from __future__ import annotations
 

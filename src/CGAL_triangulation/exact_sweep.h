@@ -1,25 +1,6 @@
-/* The CPU exact deposits' tetrahedron-cell clipping, done once per slab and column instead of once
-   per cell: '--exact' in both binaries (ps_interpolation.cc and averaged_interpolation_1.cc).
-
-   A per-cell clip cuts the whole tetrahedron by the six planes of EVERY cell of its bounding box
-   (r3d_clip(&piece, planes, 6), planes in the order x-lo, x-hi, y-lo, y-hi, z-lo, z-hi). r3d_clip
-   applies its planes one at a time, each to the polyhedron the previous ones left, so that clip is
-   the tetrahedron clipped by the cell's two x planes (its SLAB), that polyhedron clipped by the two y
-   planes (its COLUMN), and that one clipped by the two z planes. sweep() keeps the slab and the column
-   and reuses them for every cell they hold: each cell's piece comes from the same r3d_clip calls on the
-   same vertices as in the per-cell clip, so its moments are bit-identical. The work per cell drops from six planes
-   on the tetrahedron to two on the column, and the cells, columns and slabs outside their parent
-   piece's extent are skipped without clipping (Powell & Abel 2015 voxelize by splitting along the grid
-   planes, which is cheaper still but interpolates each vertex through a different chain of planes:
-   the same pieces to rounding, not to the bit).
-
-   The skip is r3d_clip's own decision. A plane n.x + d >= 0 with n = +-e_axis gives a vertex the signed
-   distance x - lo (or hi - x) rounded once, so its sign is exact; r3d_clip leaves the polyhedron alone
-   when no distance is negative and empties it when, besides, none is positive. So the lo plane empties
-   it exactly when min x < lo and max x <= lo, and -- the lo plane then clipping nothing -- the hi plane
-   exactly when min x >= hi and max x > hi. (A polyhedron flat in a cell plane, every distance 0, is
-   kept, as r3d keeps it.) The cell bounds grow with the index, so the first cell past the extent ends
-   the axis. */
+/* The CPU exact deposits' tetrahedron-cell clipping, done once per slab and column instead of once per cell.
+   Each cell's piece comes from the same r3d_clip calls on the same vertices as a per-cell clip (x planes, then y,
+   then z), so its moments are bit-identical. */
 
 #ifndef EXACT_SWEEP_HEADER
 #define EXACT_SWEEP_HEADER
@@ -30,16 +11,16 @@
 
 namespace exactSweep {
 
-// The live vertices only: an r3d_poly holds R3D_MAX_VERTS of them (4.6 KB at 128), and copying it whole for
-// every cell cost more than clipping the cell.
+// The live vertices only: copying a whole r3d_poly (R3D_MAX_VERTS, 4.6 KB) per cell costs more than the clip.
 inline void copyPoly( r3d_poly &dst, r3d_poly const &src )
 {
     dst.nverts = src.nverts;
     if ( src.nverts > 0 ) std::memcpy( dst.verts, src.verts, size_t(src.nverts) * sizeof(r3d_vertex) );
 }
 
-// r3d_clip by the planes lo <= x <= hi of an axis would empty a polyhedron of extent [mn, mx] along it
-// (see the top): beyond the cell's lo side, and beyond its hi side
+// r3d_clip by the planes lo <= x <= hi empties a polyhedron of extent [mn, mx] exactly when (signs are exact):
+// mn < lo && mx <= lo, or mn >= hi && mx > hi; a polyhedron flat in a cell plane is kept, as r3d keeps it.
+// The cell bounds grow with the index, so the first cell past the extent ends the axis.
 inline bool beyondLo( double const mn, double const mx, double const lo ) { return mn < lo && mx <= lo; }
 inline bool beyondHi( double const mn, double const mx, double const hi ) { return mn >= hi && mx > hi; }
 
@@ -68,15 +49,10 @@ inline bool clipAxis( r3d_poly &dst, r3d_poly const &src, int const axis, double
     return dst.nverts > 0;
 }
 
-// r3d_reduce at polyorder 1 or 2 (moments [1, x, y, z] or [1, x, y, z, xx, xy, xz, yy, yz, zz]),
-// unrolled: much of the CPU deposit's time would go into r3d_reduce's general-order recursion, which per
-// triangle loops over its trinomial pyramid in small run-time-indexed arrays. This is that recursion
-// written out for the two orders, with every floating-point operation r3d does, in its order and
-// grouping -- the same face walk, a += b*c where r3d has one (accumulators starting from 0), the same
-// constants and divisors -- so the moments are bit-identical where the compiler fuses a*b + c the same
-// way in both. Clang fuses within an expression only (-ffp-contract=on, its default for r3d.c and
-// here), so the same expressions fuse alike; GCC fuses across statements by default in r3d.c (and not
-// at all in this code: the Makefile's -ffp-contract=off), so GCC builds keep calling r3d_reduce.
+// r3d_reduce at polyorder 1 or 2, unrolled: it repeats r3d's face walk and every floating-point operation in
+// r3d's order and grouping, so the moments are bit-identical where the compiler fuses a*b + c alike. Clang fuses
+// within an expression only (as in r3d.c); GCC fuses across statements in r3d.c but not here
+// (-ffp-contract=off), so GCC builds keep calling r3d_reduce.
 template <int ORDER>
 inline void reduce( r3d_poly &poly, r3d_real *moments )
 {
@@ -180,18 +156,14 @@ inline void reduce( r3d_poly &poly, r3d_real *moments )
 #endif
 }
 
-// Every cell of the window [cLo, cHi) whose piece of 'tet' is not empty, in gi-gj-gk order (a per-cell
-// triple loop's order, so the callers' sums add in the same order).
-//   bounds(axis, idx, lo, hi): the cell planes along an axis in the tetrahedron's frame (the caller's
-//                              per-cell expressions: they must not depend on the other two indices)
-//   local(axis, idx) -> long:  the index's position in the caller's grid, or < 0 to skip it (another
-//                              thread's plane, outside the sub-box); also asked before any clipping
-//   visit(idx[3], loc[3], piece): the cell's piece, never empty
+// Every cell of the window [cLo, cHi) whose piece of 'tet' is not empty, in gi-gj-gk order (the per-cell loop's
+// order, so the callers' sums add alike). bounds(axis, idx, lo, hi) must not depend on the other two indices;
+// local(axis, idx) is the grid position, < 0 to skip (also asked before any clipping); visit(idx, loc, piece).
 template <class Bounds, class Local, class Visit>
 inline void sweep( r3d_poly const &tet, int const cLo[3], int const cHi[3], Bounds &&bounds, Local &&local, Visit &&visit )
 {
     if ( tet.nverts <= 0 ) return;
-    // three polyhedra of 4.6 KB each: per thread, not on the deposit threads' stacks
+    // per thread, not on the deposit threads' stacks (4.6 KB each)
     static thread_local r3d_poly slab, column, piece;
     int idx[3];
     long loc[3];

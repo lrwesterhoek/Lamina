@@ -1,7 +1,5 @@
-// Part of src/CGAL_triangulation/ps_interpolation.cc, inside its #ifdef PHASE_SPACE: included once, in order, by
-// that file and compiled only as part of its object, never alone.
-// The CPU deposit's fixed-point sums: the mass add, the moment sinks and words (PSFxSink, PSFxWords), the atomic
-// count / flag / mask adds, the words to Real (psFxToReal), and in 3D the face sums' deposit (psDepositFaces).
+// Part of ps_interpolation.cc (included in order inside its #ifdef PHASE_SPACE, never compiled alone). The CPU deposit's
+// fixed-point sums: mass add, moment sinks and words, atomic count/flag/mask adds, words to Real, the face sums' deposit.
 
 // One share into the fixed-point MASS grid (see 'massFx' in interpolateGrid_phaseSpace): a plain add
 // where one thread owns the cell (the serial loop, a slab), a relaxed atomic add where the threads of the copy mode
@@ -23,10 +21,8 @@ struct PSFxSink
     double fast = 0.;
     FxCarryList *list = nullptr;
 };
-// The run-wide words' rare cases, kept out of line so that the add below stays small at every deposit site: a
-// crossing of the int64 range into the thread's list; and a share of 2^63 units or more, or one with no integer at
-// all (a NaN, an infinity, at or beyond the cap), which takes the 128-bit statements (psFixedShareOk's count in
-// 'slot', then fxAddOwned / fxAddShared)
+// The run-wide words' rare cases, out of line to keep the add below small: a crossing of the int64 range into the thread's
+// list, and a share of 2^63 units or more or with no integer (NaN, infinity, beyond the cap): the 128-bit statements.
 __attribute__((noinline, cold)) static void psFxCross(FxCarryList *const list, size_t const at, int64_t const c)
 {
     list->push_back( FxCarry( uint64_t( at ), c ) );
@@ -40,15 +36,9 @@ __attribute__((noinline)) static void psFxAddWide(int64_t *const w, FxCarryList 
     if ( atomic ) fxAddShared( w + at, q, uint64_t( at ), *list );
     else fxAddOwned( w[at], q, uint64_t( at ), *list );
 }
-// One share into a grid's words, the one add of the CPU deposit: the share times the unit, its integer by the guard
-// (ps_deposit_params.h psFixedShareOk: none is counted in 'slot'), added plainly where this thread owns the word and
-// atomically where the threads share it. The 64-bit words take psAddMassFixed's add; the run-wide words add below
-// the share cap and record each crossing of the int64 range in the thread's list (fxAddOwned / fxAddShared), so the
-// sum is exact at any magnitude and in any order. A share below 2^63 units (nearly every one) is added here in 64
-// bits: llrint gives the integer nearbyint gives (one rounding mode, and it fits), the share has no part beyond the
-// word, and the add and its crossing test are fxAddOwned's / fxAddShared's own -- the same word and the same list
-// entries as the 128-bit statements, which take the rest (psFxAddWide). Always inlined: one multiply, one rounding
-// and one add at each deposit site.
+// One share into a grid's words, the one add of the CPU deposit: share times unit, its integer by the guard (psFixedShareOk),
+// added plainly where this thread owns the word and atomically where threads share it, so the sum is exact in any order.
+// A share below 2^63 units takes a 64-bit add (llrint = nearbyint there, same word and list entries as the 128-bit path).
 static inline __attribute__((always_inline))
 void psFxAdd(PSFxSink const &s, size_t const at, double const share, int const slot, bool const atomic)
 {
@@ -158,17 +148,10 @@ inline void psFxToReal(PSFxWords &F, std::vector<Elem> &grid, size_t const nCell
 }
 
 #if NO_DIM==3
-/* --face-gradient: one kept tetrahedron's FACE sums. Every grid plane it owns a section of
-   (face_sweep.h's half-open rule, decided on region-frame coordinates every tetrahedron sharing a vertex computes
-   alike) is cut into the face squares it covers; a piece's integral of the stream's linear velocity is its centroid
-   value times its area. The piece's integrals go to the UPPER face of the cell below the plane and the LOWER face of
-   the cell above (Quantities::face_velocity / face_coverage / face_momentum's slots): S = the sum of the streams'
-   velocities, S.w[cell*18 + (side*3 + a)*3 + j], N = their count, N.w[cell*6 + side*3 + a] (the covered area), and P
-   = the sum of rho_s v_a, the momentum through the face (rhoTet: the tet's uniform density, rho/rho_bar), P.w like
-   N.w. The frame, the raw grid indices and the sub-box map are the exact deposit's (its r3d sweep's bounds and local
-   index); a cell outside the sub-box (or, in slab mode, outside [slabLo, slabHi) along local x) gets nothing here: its
-   own partition or slab adds it. Fixed point (psFxAdd into the calling thread's sinks, the non-finite guard's slots
-   FX_DROP_FACE_*): order-free. */
+/* --face-gradient: one kept tetrahedron's FACE sums. Every grid plane it owns a section of (face_sweep.h's half-open rule) is
+   cut into the face squares it covers; a piece's integral of the stream's linear velocity is its centroid value times its
+   area, going to the UPPER face of the cell below and the LOWER face of the cell above. S = velocities, N = covered area,
+   P = momentum rho_s v_a through the face. A cell outside the sub-box or slab gets nothing here. Fixed point (psFxAdd): order-free. */
 static void psDepositFaces( Real const (&eulerPos)[NO_DIM+1][NO_DIM], Real const *boxL, Real const *dxL,
                             size_t const *nGridL, bool const periodic, size_t const *subOrigin, size_t const *subDims,
                             long const slabLo, long const slabHi, Real const (&velGrad)[NO_DIM][noVelComp],

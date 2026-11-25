@@ -1,16 +1,7 @@
 """A/B a sampled-deposit grid set (--sampled) against an exact-deposit (--exact, the default) one.
 
-Answers the practical question "how far is the sampled deposit from the exact one?" with
-numbers instead of impressions, focused on the regimes that matter for void work:
-
-  * mass conservation      (both should be ~1; the exact deposit is exact by construction)
-  * global agreement       median/percentile relative differences, cell by cell
-  * VOID interiors         rho/rho_bar < 0.2 -- where sampling noise is worst in relative
-                           terms, because a cell holds few sub-sample hits
-  * the density PDF        low-density tail, where a void catalogue's thresholds live
-  * per-field summaries    velocity divergence / dispersion when both sets have them
-
-Both sets must come from the SAME snapshot and grid; pass the two on-disk prefixes:
+Reports mass conservation, global agreement, void interiors (rho/rho_bar < 0.2), the density PDF tail and
+per-field summaries. Both sets must come from the SAME snapshot and grid:
 
     python3 tools/compare_deposits.py --sim TNG300-3-Dark --snap 99 \
         --prefix-a ps_sampled --prefix-b ps_output
@@ -32,12 +23,8 @@ EMPTY = 1e-12   # a cell at or below this is EMPTY: the tessellation is space-fi
 
 
 def rel_diff(a, b, mask=None):
-    """Relative difference |b-a|/|a| over cells where BOTH sets are non-empty.
-
-    Cells where either set is empty are excluded and reported separately: dividing by a
-    spurious zero manufactures 1e30-scale 'differences' that swamp the real signal (and
-    that is exactly the artifact this comparison exists to measure).
-    """
+    """Relative difference |b-a|/|a| over cells where BOTH sets are non-empty; cells where either is empty are
+    excluded and reported separately (dividing by a spurious zero manufactures huge 'differences')."""
     if mask is not None:
         a, b = a[mask], b[mask]
     both = (np.abs(a) > EMPTY) & (np.abs(b) > EMPTY)

@@ -1,16 +1,6 @@
-/* The thread count of one triangulation's CPU work -- the PS-DTFE CPU deposit (ps_interpolation.cc
-   psDepositThreads), the standard binary's '_a' cell average, exact and Monte-Carlo (averaged_interpolation_1.cc
-   exactAverageThreads), and the point evaluation of both binaries (ps_point_eval.cc pointEvalThreads) -- in ONE place:
-   - every core when this is the only triangulation being processed (a single-domain run);
-   - inside a partition loop's OpenMP team of concurrent partitions (or DTFE_parallel's team of sub-domains), the
-     cores left per team member, so the two levels never oversubscribe;
-   - a positive value of the environment variable 'envOverride' pins it (benchmarks, tests): DTFE_DEPOSIT_THREADS
-     for the two deposits, DTFE_PTS_THREADS for the point evaluation.
-   The callers run their threads as std::thread pools, not as a nested OpenMP region (disabled by default). The
-   core budget of the run mode (run_mode.h) is the OpenMP maximum here: dtfeOmpMax() and dtfeHardwareThreads().
-   DTFE.cpp's dtfeParallelThreads is another rule (the OpenMP maximum capped by '--max-concurrent', with no
-   override) and stays out of this one. Below it: the process-wide core pool (CorePool) of the work that may follow
-   the free cores, and the range helpers that run on them (parallelRanges, poolRanges). */
+/* The thread count of one triangulation's CPU work (PS deposit, standard '_a' average, point evaluation) in ONE place:
+   every core when alone, the cores left per member inside a partition loop's team, or a positive 'envOverride' value.
+   The run mode's core budget (run_mode.h) is the OpenMP maximum here. Below: the core pool and the range helpers. */
 #ifndef DTFE_THREAD_COUNT_H
 #define DTFE_THREAD_COUNT_H
 
@@ -46,24 +36,11 @@ inline int coresPerTeam(char const *envOverride)
     return std::max( 1, cores );
 }
 
-/* THE CORE POOL of the PS-DTFE CPU work that can follow the free cores (the CPU deposit's dynamic team and a pass's
-   cell loops, ps_interpolation.cc; the parallel sub-grid merge and the normalization, quantities.cc). Process-wide:
-   - total(): the cores the process may use (the OpenMP maximum, as coresPerTeam counts them);
-   - holders(): the threads that hold a core of their own -- inside a partition loop its LIVE partitions (DTFE.cpp's
-     planned concurrency, at most the partitions not yet finished: triangulation.cpp's two counters, the bound its
-     parallel insertion takes too), else the OpenMP team the caller runs in, else the caller alone;
-   - extra(): the helper threads running beside their callers now: the pool's own (each claimed by take and given
-     back by give when it ends) and those of the teams that do not ask it, each counted by a Hold for its lifetime --
-     the PS-DTFE grid pass's static teams (ps_interpolation.cc: the copy- and slab-mode CPU deposit, a pinned
-     dynamic team, the slab binning, the copies' merge, the fixed-point bound walk, the face walk), the point
-     evaluation's team (ps_point_eval.cc forEachCellParallel), a partition loop's look-ahead thread (DTFE.cpp
-     runLookAhead) and the parallel insertion's TBB arena (triangulation.cpp). Not counted: the standard binary's
-     '_a' average (averaged_interpolation_1.cc): that binary has no pool user (no take), so nothing would read it.
-   free = total - holders - extra: what a helper may take (take) without oversubscribing the cores; a partition that
-   finishes frees its core here. A counted team does not wait for free cores (its size is its own rule's): the pool's
-   users yield to it, not it to them. A claim never changes a result: only work whose outcome is independent of how
-   many threads share it (and which takes which block) asks the pool -- the integer fixed-point sums, the counts and
-   flags of the default single build, and a merge that adds every cell once. */
+/* THE CORE POOL for PS-DTFE CPU work that can follow the free cores: free = total() - holders() - extra(). total() is
+   the OpenMP maximum; holders() the threads with a core of their own (a loop's live partitions, else the caller's
+   team, else the caller); extra() the helpers running beside their callers (the pool's own take/give, and the teams
+   that do not ask it, each counted by a Hold). A counted team does not wait for free cores: pool users yield to it.
+   A claim never changes a result: only work independent of the thread count (fixed-point sums, a merge) asks. */
 extern std::atomic<int> dtfeTriangulationConcurrency;
 extern std::atomic<int> dtfeTriangulationsRemaining;
 
@@ -114,10 +91,8 @@ inline int take(int const want)
 
 inline void give(int const n) { if ( n > 0 ) extra().fetch_sub( n, std::memory_order_relaxed ); }
 
-// A team that does not ask the pool (a fixed size, beside its caller, a holder already) counts its other 'n' threads
-// in extra() while it runs: constructed before its first thread starts, destroyed after the last has joined. The
-// pool's users then see those cores taken. Counting a thread that failed to start, or a moment before or after the
-// threads run, only has them take fewer helpers (take stops at no free core); it never changes a result.
+// A team that does not ask the pool counts its other 'n' threads in extra() while it runs (constructed before its
+// first thread starts, destroyed after the last joins). A miscount only makes pool users take fewer helpers.
 struct Hold
 {
     explicit Hold(int const n) : held( std::max( 0, n ) )

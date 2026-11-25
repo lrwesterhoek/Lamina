@@ -1,26 +1,7 @@
 #!/usr/bin/env bash
-# PS-DTFE partition/padding independence check.
-#
-# A partitioned run must deposit the same tetrahedra as one single triangulation, whatever the padding:
-# ownership tiles them, and a tetrahedron's keep/drop decision must be a function of the tetrahedron.
-# A degeneracy cut that scales |det| by the edges at CGAL's vertex 0 is not: which vertex is 0 follows the
-# insertion history -- different for every --partition / --padding / --ps-lagrangian-padding variant. Folded
-# tetrahedra on a caustic sit right at such a cut, so ~20 of them are kept by one run and dropped by another:
-# '.a_den' moves by up to 0.8 relative in ~40 cells (2,000 with --ps-vertex-mass, whose degrees then change
-# too), hidden-stream flags flip, and the vertex-mass total is off by ~5e-6. With psFilterCell's cut a
-# function of the tetrahedron alone the differences are pure rounding (double: <= 4e-15 relative).
-#
-# 32^3 crossed waves (two fold planes per axis), --grid 64, --ps-vertex-mass (the run_ps_dtfe.sh default),
-# CPU deposit; runs: single, --partition 2 2 2 at the default padding, at --padding 50, and at
-# --ps-lagrangian-padding 8. Checks against the single run:
-#   P1 '.a_hidden_streams' identical (integer flags)
-#   P2 '.a_den' per cell within rounding (float 1e-4, double 1e-10, relative, cells above 1e-6 of the peak)
-#   P3 '.a_streams' within rounding (absolute 1e-3: one moved sub-sample is 1/64)
-#   P4 vertex-mass conservation in every run: sum('.a_den') = grid cells (mean density 1) to 1e-6
-#
-# Usage:
-#   tests/ps_partition_padding_check.sh [--no-build]
-#   DTFE_TEST_PRECISION=double tests/ps_partition_padding_check.sh --no-build
+# PS-DTFE partition/padding independence: a partitioned run deposits the same tetrahedra as one triangulation, whatever the padding.
+#   P1 hidden-stream flags   P2 '.a_den'   P3 '.a_streams'   P4 vertex-mass conservation
+# Usage: tests/ps_partition_padding_check.sh [--no-build]   (DTFE_TEST_PRECISION=double for the double build)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

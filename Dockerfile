@@ -6,7 +6,7 @@
 #   docker run --rm -v $PWD/data:/data dtfe /opt/dtfe/PS-DTFE /data/snap.hdf5 /data/out \
 #       --grid 128 --periodic --field density --mpc-unit 1
 #
-# License: GPL-3.0 (see LICENSE.md) -- this Dockerfile only packages the build.
+# License: GPL-3.0 (see LICENSE) -- this Dockerfile only packages the build.
 
 FROM ubuntu:24.04 AS build
 ENV DEBIAN_FRONTEND=noninteractive

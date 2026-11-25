@@ -1,22 +1,12 @@
-//  The run-wide fixed-point words of the GPU deposits (src/fixed_units.h says why, and why nothing wraps): a signed
-//  128-bit integer per grid component, held as four 32-bit atomic limbs, little-endian at [4*at .. 4*at+3] (16 B per
-//  component; the host folds them into its 64-bit words with an exact carry, fixed_units.h fxFoldLimbs). Only 32-bit
-//  atomics: each limb's carry (or borrow) is read off the old value its own atomic returns and goes to the next limb as
-//  one more add (subtract), so once every thread is done the four limbs hold the exact sum modulo 2^128, whatever the
-//  interleaving -- and the host's caps keep every partial sum below 2^126 in magnitude (RunUnits::capLog2). The limbs
-//  stay separate words, as the two-word adds of the 64-bit grids do (dtfe_deposit.metal addWordsLH).
-//  A share below 2^63 units can go in as one signed 64-bit add (addShare, addLimbs63: the PS-DTFE adds of one share);
-//  the limb arrays (shareLimbs, addLimbs, addLimbsN) take a share from 2^63 units up to the cap, the batched adds
-//  and the standard kernel's adds. The two ways leave the same bits and may meet on one word.
-//  The Makefile prepends this file to both kernel sources, after exact_clip.metal.inc. Self-contained.
+//  The run-wide fixed-point words of the GPU deposits (src/fixed_units.h): a signed 128-bit integer per grid
+//  component, four 32-bit atomic limbs, little-endian at [4*at .. 4*at+3]; the host folds them into 64-bit words.
+//  Prepended to both kernel sources by the Makefile, after exact_clip.metal.inc. Self-contained.
 #include <metal_stdlib>
 using namespace metal;
 
-// The magnitude of rint(v * scale) as four limbs a[0..3] and its sign, or false: the share has no integer below the
-// cap and adds nothing (the caller counts it in its slot, as the 64-bit grids' guard does). scale = 2^K, so the float
-// product is exact; capBits = the float bits of the cap 2^capLog2 (RunUnits::capBits; capLog2 at most 118): the
-// product is below the cap iff its bits without the sign are below capBits, and a NaN or an infinity lies above. The
-// float's bits are tested, as the 64-bit guard's are (fast math cannot fold an integer compare away).
+// The magnitude of rint(v * scale) as limbs a[0..3] and its sign, or false: no integer below the cap, nothing is
+// added and the caller counts it. scale = 2^K, so the product is exact; capBits = float bits of the cap 2^capLog2
+// (RunUnits::capBits, capLog2 <= 118). The bits are tested, so fast math cannot fold the compare away.
 static inline bool shareLimbs(float v, float scale, uint capBits, thread uint a[4], thread bool& neg) {
     float const p = v * scale;
     uint const bits = as_type<uint>(p) & 0x7fffffffu;
@@ -35,11 +25,9 @@ static inline bool shareLimbs(float v, float scale, uint capBits, thread uint a[
     return true;
 }
 
-// The magnitude a[0..3] added to (neg: subtracted from) the four-limb word at 'at' of x (sign-magnitude, so a small
-// negative share touches one or two limbs, not four). Each limb's carry (borrow) is read off the old value its own
-// atomic returns and passes to the next limb: whatever order the atomics land in, limb i ends at its start plus its
-// deltas modulo 2^32 and passes on exactly the carries those deltas made, so the four limbs hold the exact
-// two's-complement sum modulo 2^128. It stops at the first limb with no carry and no higher magnitude limb.
+// The magnitude a[0..3] added to (neg: subtracted from) the four-limb word at 'at' of x (sign-magnitude). Each
+// limb's carry (borrow) is read off the old value its atomic returns and passes to the next limb, so the limbs hold
+// the exact sum modulo 2^128 whatever the order. Stops at the first limb with no carry and no higher magnitude limb.
 static inline void addLimbs(device atomic_uint* x, ulong at, thread const uint a[4], bool neg) {
     uint c = 0u;
     for (uint i = 0u; i < 4u; ++i) {
@@ -56,13 +44,9 @@ static inline void addLimbs(device atomic_uint* x, ulong at, thread const uint a
     }
 }
 
-// A signed 64-bit integer r added to the four-limb word at 'at' of x, in two's complement: r's two words into limbs 0
-// and 1, then its sign extension (0 or 0xffffffff) into limbs 2 and 3, each limb's carry read off the old value its
-// own atomic returns and added to the next limb's addend, as in addLimbs. Adding 2^128 - |r| is subtracting |r|
-// modulo 2^128, so the word ends on the bits addLimbs leaves for the same integer, whatever the interleaving, and the
-// two may meet on one word. A limb whose addend comes to zero is not touched (an addend 0xffffffff plus a carry is
-// zero with the carry passed on), and for r >= 0 nothing above limb 1 is touched once no carry is left: no limb
-// arrays and no loop, and as many atomics as addLimbs needs for the same integer.
+// A signed 64-bit integer r added to the four-limb word at 'at' of x in two's complement (r's sign extension into
+// limbs 2 and 3), carries as in addLimbs. The word ends on the bits addLimbs leaves for the same integer, so the two
+// may meet on one word. Untouched limbs: addend zero, or r >= 0 with no carry left.
 static inline void addLimbs63(device atomic_uint* x, ulong at, long r) {
     if (r == 0l) return;                                 // below half a unit: nothing to add
     ulong const q = as_type<ulong>(r);
@@ -91,10 +75,9 @@ static inline void addLimbs63(device atomic_uint* x, ulong at, long r) {
     if (d != 0u) atomic_fetch_add_explicit(&w[3], d, memory_order_relaxed);
 }
 
-// One share rint(v * scale) into the four-limb word at 'at' of x, or false: the share has no integer below the cap
-// (shareLimbs' test on the same bits), nothing is added and the caller counts it. Below 2^63 units -- the integer
-// the 64-bit grids add, and nearly every share -- it goes in as one signed 64-bit add (addLimbs63); from 2^63 units
-// up to the cap, as limbs (shareLimbs, addLimbs). A cap below 2^63 units still binds: both tests must hold.
+// One share rint(v * scale) into the four-limb word at 'at' of x, or false (above the cap, counted by the caller).
+// Below 2^63 units, nearly every share, it goes in as one 64-bit add (addLimbs63), above as limbs. A cap below 2^63
+// units still binds: both tests must hold.
 static inline bool addShare(device atomic_uint* x, ulong at, float v, float scale, uint capBits) {
     float const p = v * scale;
     uint const bits = as_type<uint>(p) & 0x7fffffffu;
@@ -108,9 +91,8 @@ static inline bool addShare(device atomic_uint* x, ulong at, float v, float scal
     return true;
 }
 
-// n times the magnitude a[0..3] into b[0..3], limb by limb: the low 32 bits of a[i] * n, plus the carry from the limb
-// below, and the high 32 bits (mulhi) carried up. The caps keep n * |q| below 2^94 (the PS-DTFE cap holds the
-// ceil(log2 nSub^3) bits a batched add of n <= nSub^3 equal shares takes), so nothing leaves limb 3.
+// n times the magnitude a[0..3] into b[0..3], limb by limb. The caps keep n * |q| below 2^94 (the PS-DTFE cap holds
+// the ceil(log2 nSub^3) bits of a batched add), so nothing leaves limb 3.
 static inline void mulLimbs(thread const uint a[4], uint n, thread uint b[4]) {
     uint carry = 0u;
     for (uint i = 0u; i < 4u; ++i) {
@@ -122,8 +104,8 @@ static inline void mulLimbs(thread const uint a[4], uint n, thread uint b[4]) {
     }
 }
 
-// n equal shares as ONE add of n * q (the batched adds of the sampled path, addMomentN / depositMassN): integer adds
-// are exact, so the word ends where n adds of q leave it. A share shareLimbs refuses counts n times in its slot.
+// n equal shares as ONE add of n * q (the batched adds of the sampled path): integer adds are exact. A share
+// shareLimbs refuses counts n times in its slot.
 static inline void addLimbsN(device atomic_uint* x, ulong at, thread const uint a[4], bool neg, uint n) {
     if (n == 0u) return;
     uint b[4];

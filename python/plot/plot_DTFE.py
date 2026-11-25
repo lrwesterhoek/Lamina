@@ -1,20 +1,5 @@
 """Slice-map plots of the standard-DTFE field family (density, velocity, divergence, shear)
-across a snapshot series.
-
-All file naming, grid geometry, units and metadata come from dtfelib.FieldSet; density is
-plotted MEAN-NORMALIZED (rho/rho_bar, identical colorbars for both estimators;
-FieldSet auto-detects the on-disk convention). --estimator defaults to
-'dtfe' (this is the standard-DTFE plot script); pass --estimator ps to plot the PS-DTFE
-versions of the same fields -- the divergence and the shear of PS's MEAN flow by default, the
-quantities standard DTFE stores (a face-gradient run's own grids, the PS binary's default with
-the exact deposit; else derived from its velocity grid),
-'--ps-gradient stored' for the PS binary's grids as stored (the stream average <grad v> of a run
-without the face gradient, a face-gradient run's mean flow).
-
-    python3 plot/plot_DTFE.py --sim TNG50-4-Dark       # full snapshot series
-    python3 plot/plot_DTFE.py --snap 99                # single snapshot
-    python3 plot/plot_DTFE.py --sim TNG50-3-Dark --snaps 0 17 50 99 --smooth 1
-"""
+across a snapshot series."""
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
 import config
@@ -61,8 +46,7 @@ def plot_velocity(velocity_field, slice_dim, box_size, quiver_step,
                   redshift=None, save_path=None, density_field=None):
     """The velocity slice as arrows, each the MEAN velocity of a quiver_step x quiver_step block of cells drawn at the
     block's centre (every cell counts, not every quiver_step-th one). density_field: the block means are
-    density-weighted (an older PS run's mass-weighted velocity grid: FieldSet.velocity_weighting); None: the plain
-    mean (a volume-weighted grid: standard DTFE and PS-DTFE)."""
+    density-weighted (an older PS run's mass-weighted velocity grid: FieldSet.velocity_weighting)."""
     X, Y, U, V = extract_velocity_slice(velocity_field, slice_dim)
     U, V = U.T, V.T
     W = None if density_field is None else extract_slice(density_field, slice_dim).T

@@ -1,18 +1,5 @@
-"""Cosmic-web classification and eigenvalue plots (T-web / V-web / residual).
-
-Method-, snapshot- and simulation-agnostic: all file naming, grid geometry and
-metadata come from dtfelib.FieldSet.
-
-    python3 plot/plot_cosmic_web.py --sim TNG50-4-Dark    # snap 99, auto method
-    python3 plot/plot_cosmic_web.py --estimator dtfe
-    python3 plot/plot_cosmic_web.py --sim TNG50-3-Dark --snap 50
-
-PS-DTFE grids: the V-web is the MEAN-FIELD one by default -- classified from the FFT gradient of the
-PS velocity grid with the binary's normalisation and the run's lambda_th (FieldSet.mean_field), the V-web standard
-DTFE stores. The binary's PS V-web classifies the stream average of each stream's gradient <grad v> and finds
-almost no filaments or nodes (TNG100-3-Dark z=1: 1.8% filaments against standard DTFE's 6.6%; dtfelib/io.py, the
-note above FIELDS); '--ps-gradient stored' plots it instead. The T-web is the binary's for both methods.
-"""
+"""Cosmic-web classification and eigenvalue plots (T-web / V-web / residual). Method-, snapshot- and
+simulation-agnostic: all file naming, grid geometry and metadata come from dtfelib.FieldSet."""
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
 import config

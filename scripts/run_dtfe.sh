@@ -1,152 +1,73 @@
 #!/usr/bin/env bash
 #
-# Batch-run standard DTFE over a set of TNG snapshots (redshifts).
+# Batch-run standard DTFE over TNG snapshots. Needs DTFE_DATA_ROOT (or -d, one simulation's folder) and the
+# simulation (-s or DTFE_SIM); the shared defaults live in config.sh.
 #
-# Companion to download_snapshots.sh, which fetches the snapshot files first.
-# DTFE_DATA_ROOT (the folder that holds the simulations; -d names a simulation's folder instead) and the simulation
-# (-s or DTFE_SIM) are required; the
-# shared defaults (SNAPSHOTS, GRID_SIZE) live in config.sh. PADDING, the
-# padding in mean particle spacings, defaults to 15 here, not config.sh's 50 (the PS-DTFE scripts' value).
-#
-# Usage:
-#   ./run_dtfe.sh [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n SUBSAMPLES] [-m] [-e | --sampled]
-#                 [--run-mode MODE] [snapshot ...]
-#     long forms: --sim-dir, --sim, --grid, --subsamples, --gpu, --exact (the same as the letters); --sampled,
-#          --run-mode
-#     -m   run the '_a' interpolation on the GPU: the binary is started with DTFE_GPU=1, which asks for the GPU as
-#          its '--gpu' does. Without -m the binary reads DTFE_GPU as the caller set it (0 the CPU, 1 the GPU); unset
-#          (or auto) the binary picks: the GPU of a GPU build for the exact average of an '_a' field, else the CPU.
-#     -e   every '_a' cell the EXACT average of the linear interpolant over the cell (--exact). The DEFAULT
-#          (DTFE_EXACT_AVERAGE=1, the production standard: no sampling noise, the mass exact to ~3e-8); -e overrides
-#          an exported DTFE_EXACT_AVERAGE=0 and keeps the exact average beside a SUBSAMPLES count (ignored, said).
-#     --sampled  the Monte-Carlo sample mean instead (the same as DTFE_EXACT_AVERAGE=0).
-#     -n   SUBSAMPLES: k sampling points per axis (k^3 per cell) of the Monte-Carlo mean (--subsamples k, the same
-#          unit as run_ps_dtfe.sh's); passed only when set (the binary's own default otherwise). While
-#          DTFE_EXACT_AVERAGE is unset (and neither -e nor --sampled is given) a count selects the Monte-Carlo mean,
-#          as the binary does; beside -e or DTFE_EXACT_AVERAGE=1 it is ignored.
-#     --run-mode MODE  how hard the run may lean on the machine, passed to the binary as given: gentle (half the
-#          performance cores, short GPU buffers, on Linux nice 10), balanced (the performance cores less a quarter,
-#          short GPU buffers) or performance (every core, long GPU buffers); auto passes nothing. Without a mode the
-#          binary reads DTFE_RUN_MODE (the same words, in any case), else takes balanced, performance in a batch job.
-#     The drivers' letters are their own: -m is the GPU and -s the simulation here.
-#   Production defaults: GRID_SIZE 512 (config.sh), padding 15, the binary's device pick, the exact cell
-#   average, FIELDS = density, velocity, its divergence and shear (the analysis set, the same as run_ps_dtfe.sh's;
-#   the gradient, vorticity, T-web and V-web stay available through FIELDS), LAMBDA_TH 0.3.
-#   Knobs (environment; each is explained where the script reads it): PARTITION MAX_CONCURRENT DTFE_GPU DTFE_RUN_MODE
-#   DTFE_EXACT_AVERAGE SUBSAMPLES THREADS FACE_GRADIENT SCRATCH_DIR SAMPLE_POINTS PTS_VEL_GRAD TESSELLATION_CACHE
-#   LAMBDA_TH DTFE_RESUME OUTPUT_PREFIX FIELDS SCALAR_DATASET DTFE_PRECISION DRY_RUN AUTO_TUNE_REPORT, and config.sh's
-#   GRID_SIZE, PADDING, SPACE_CHECK. A switch is off for 0, false, no or off and on for any other value (the
-#   binaries' rule).
-#   OUTPUT_PREFIX (default 'output'): the files are <snapdir>/<prefix>.*; another prefix keeps a variant beside
-#   the default set (dtfelib reads 'output.' for standard DTFE). A 'ps_*' prefix is refused: that is PS-DTFE's
-#   naming (an OUTPUT_PREFIX exported for run_ps_dtfe.sh would otherwise overwrite the phase-space grids).
-#   A rerun into a prefix that holds an earlier run's files: once it exits 0, the files it did not write (an image
-#   plane, caustics or a field the new run lacks) are MOVED into <prefix>.superseded/<date_time>/ with the old
-#   run log (config.sh supersede_extras; never deleted), so the folder holds one run's set.
-#   -h / --help prints this header and runs nothing; --version the repository revision.
-#   DRY_RUN=1 ./run_dtfe.sh ...   prints every snapshot's expanded command and paths, runs nothing (exit 0
-#          when at least one snapshot is planned).
-#   AUTO_TUNE_REPORT=1 ./run_dtfe.sh ...   only asks the binary's auto-tuner what each snapshot would need (one
-#          'AUTO-TUNE-REPORT snap=NNN partition=.. mc=.. predicted_gb=..' line each; mc = the threads of a partition,
-#          the partitions run one after the other); nothing is computed or written (as run_ps_dtfe.sh).
-#   Run logs, beside the outputs: output.runlog belongs to the grids on disk, output.runlog.failed to the
-#   last failed or stopped attempt, output.runlog.partial to a run still going (or killed outright).
-#   While a snapshot runs, <prefix>.runlog.lock (a folder holding the driver's pid) refuses a second driver on
-#   it; a lock left by a killed driver is removed with a note. Before anything runs: the data disk must be
-#   there (exit 2 otherwise) and the output folder writable with room for the grids (SPACE_CHECK=0 skips
-#   the space half).
-#   DTFE_RESUME (default 1): a partitioned run killed part-way resumes, as run_ps_dtfe.sh's does. When the
-#   snapshot's checkpoint (<prefix>.runlog.checkpoint, or in SCRATCH_DIR) exists, the next run passes --resume and
-#   computes only the partitions it lacks; DTFE_RESUME=0 starts over (the new run replaces the checkpoint). A run with
-#   SAMPLE_POINTS too (the binary saves each finished partition's point answers beside the grids).
+# Options: -d DIR (--sim-dir), -s SIM (--sim), -g N (--grid), -n K (--subsamples: k^3 Monte-Carlo points per cell),
+#   -m (--gpu: starts the program with DTFE_GPU=1), -e (--exact, the default) or --sampled, --run-mode MODE (gentle,
+#   balanced or performance; auto passes nothing), -h (--help), --version; then snapshot numbers (default 99).
+# Defaults: 512^3 cells, padding 15, the exact cell average, the density, the velocity and its divergence and shear,
+#   LAMBDA_TH 0.3. Every knob (environment) is in the README's knob table; DRY_RUN=1 prints the commands and runs
+#   nothing, AUTO_TUNE_REPORT=1 prints the auto-tuner's report per snapshot and computes nothing.
+# Outputs: <snapdir>/<OUTPUT_PREFIX>.* (default 'output'; a 'ps_*' prefix is refused) beside <prefix>.runlog. A rerun
+#   moves the earlier run's files it did not write to <prefix>.superseded/; a killed partitioned run resumes from its
+#   checkpoint (DTFE_RESUME=0 starts over); <prefix>.runlog.lock refuses a second driver on the snapshot.
 
 set -uo pipefail   # no -e: a batch goes on after a failed snapshot (config.sh, 'Strictness')
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"   # the binaries and Makefile live one level up
-# Padding (mean interparticle spacings) of each partition and of each thread's sub-box: standard DTFE's own default
-# is 15, not config.sh's 50 (which stays the PS-DTFE scripts' value). 15 is complete -- no '*.badGridPoints*' file --
-# on the z = 0 snapshots of TNG50/100/300-3-Dark, the hardest case (the emptiest voids give the largest Delaunay
-# circumspheres at the partition edges), and 22-29% faster than 20 there; 10 is not complete at z = 0, and 50 costs
-# 33x the vertices. A PADDING from the caller still wins: config.sh keeps what the caller set in CALLER_PADDING before
-# it fills PADDING with its own default.
+# Padding of each partition and of each thread's sub-box: standard DTFE's default is 15, not config.sh's 50
+# (the PS-DTFE scripts' value). 15 is complete (no '*.badGridPoints*' file) on the z = 0 snapshots of
+# TNG50/100/300-3-Dark. A PADDING from the caller wins: config.sh keeps it in CALLER_PADDING.
 source "${SCRIPT_DIR}/config.sh"
 PADDING="${CALLER_PADDING:-15}"
 
 # ---- Script-specific configuration ----------------------------------------
-PARTITION="${PARTITION:-}"       # EMPTY (default) = the binary AUTO-TUNES the split from the particle
-                                 # count, grid, fields and available RAM/cores (see the AUTO-TUNE line
-                                 # it prints). Set to override, e.g. PARTITION="2 2 2".
-MAX_CONCURRENT="${MAX_CONCURRENT:-}"  # cap on concurrent triangulations to bound peak RAM (0 = all cores).
-                                 # EMPTY (default) = auto-tuned together with the partition split.
-# DTFE_GPU (1 = the '_a' interpolation on the GPU, 0 = the CPU; unset or auto = the binary's pick) and DTFE_RUN_MODE
-# (how hard the run may lean on the machine: gentle, balanced or performance, in any case; unset or auto = the
-# binary's default, balanced or, inside a SLURM or PBS job, performance) reach the binary in its environment as the
-# caller set them, and it reads them by its own rule; -m sets DTFE_GPU=1, and --run-mode MODE wins over
-# DTFE_RUN_MODE. The same knobs as run_ps_dtfe.sh's.
+PARTITION="${PARTITION:-}"       # EMPTY (default) = the binary AUTO-TUNES the split; set to override, e.g. PARTITION="2 2 2"
+MAX_CONCURRENT="${MAX_CONCURRENT:-}"  # cap on concurrent triangulations to bound peak RAM (0 = all cores); EMPTY = auto-tuned
+# DTFE_GPU and DTFE_RUN_MODE reach the binary in its environment as the caller set them (-m sets DTFE_GPU=1,
+# --run-mode wins over DTFE_RUN_MODE); same knobs as run_ps_dtfe.sh's.
 _caller_exact="${DTFE_EXACT_AVERAGE:-}"   # (the caller's own value: unset, a SUBSAMPLES count selects the sampled mean)
-DTFE_EXACT_AVERAGE="${DTFE_EXACT_AVERAGE:-1}"  # 1 (default, the production standard) = exact cell
-                                 # averages (--exact: no sampling noise, mass exact to ~3e-8); 0 = the Monte-Carlo
+DTFE_EXACT_AVERAGE="${DTFE_EXACT_AVERAGE:-1}"  # 1 (default) = exact cell averages (--exact); 0 = the Monte-Carlo
                                  # sample mean (--sampled). Unset, a SUBSAMPLES count makes it 0 (config.sh
-                                 # average_resolve, the binary's rule). The same knob, default and rule as
-                                 # run_ps_dtfe.sh's; the driver passes --exact or --sampled on every run
+                                 # average_resolve, the binary's rule); the driver passes --exact or --sampled every run
 SUBSAMPLES="${SUBSAMPLES:-}"     # k = --subsamples k: k points per axis, k^3 per cell, for the Monte-Carlo mean;
                                  # EMPTY (default) = the binary's own count. Set while DTFE_EXACT_AVERAGE is unset, it
-                                 # selects the Monte-Carlo mean; beside an exact one it is ignored. The same unit
-                                 # as run_ps_dtfe.sh's SUBSAMPLES; -n k sets it
+                                 # selects the Monte-Carlo mean; beside an exact one it is ignored; -n k sets it
 THREADS="${THREADS:-}"           # cap OpenMP threads globally (OMP_NUM_THREADS); empty = all cores (as run_ps_dtfe.sh)
-FACE_GRADIENT="${FACE_GRADIENT:-}"   # the velocity gradient's route (and the divergence and shear built on it). EMPTY
-                                 # (default) = the binary's own: the exact face integrals of the
-                                 # interpolant (Gauss), in double, the same for every
-                                 # deposit and device; 1 = --face-gradient (the same, asked explicitly); 0 =
-                                 # --per-tet-gradient, the deposit's own per-tetrahedron gradient (float32 on the
-                                 # GPU; the route of the production grids made before that default). 3D only.
-                                 # run_ps_dtfe.sh's FACE_GRADIENT is the same knob with the same default (PS-DTFE:
-                                 # the mean flow's gradient where the run qualifies)
+FACE_GRADIENT="${FACE_GRADIENT:-}"   # the velocity gradient's route. EMPTY (default) = the binary's own: the exact face
+                                 # integrals of the interpolant (Gauss), in double; 1 = --face-gradient (the same,
+                                 # explicit); 0 = --per-tet-gradient, the deposit's per-tetrahedron gradient
+                                 # (float32 on the GPU). 3D only. Same knob as run_ps_dtfe.sh's.
 DRY_RUN="${DRY_RUN:-0}"          # 1 = print the commands and paths, run nothing
 AUTO_TUNE_REPORT="${AUTO_TUNE_REPORT:-0}"  # 1 = only ASK the binary's auto-tuner what this run would need
-                                 # (--auto-tune-report): per snapshot one line
-                                 #   AUTO-TUNE-REPORT snap=NNN partition=.. mc=.. predicted_gb=.. budget_gb=.. ... over_budget=0|1
-                                 # after reading the input; nothing is computed or written (the snapshot's .runlog,
-                                 # lock and space check are left alone). The launcher's memory check uses it.
-DTFE_PRECISION="${DTFE_PRECISION:-single}"  # double = the double-precision binary ./DTFE-double ('make DTFE DOUBLE=1'):
-                                 # everything in double from the input read onward, float64 outputs, ~2x the memory
+                                 # (--auto-tune-report): one AUTO-TUNE-REPORT line per snapshot after reading the
+                                 # input; nothing is computed or written. The launcher's memory check uses it.
+DTFE_PRECISION="${DTFE_PRECISION:-single}"  # double = the double-precision binary ./DTFE-double ('make DTFE DOUBLE=1')
 SCRATCH_DIR="${SCRATCH_DIR:-}"   # out-of-core mode (--scratch-dir): the full-resolution grids as mmap'ed files in this
-                                 # LOCAL directory instead of RAM (bit-identical results; iCloud paths are refused) --
-                                 # the same knob as run_ps_dtfe.sh; the launcher's scratch folder arrives here
-SAMPLE_POINTS="${SAMPLE_POINTS:-}"  # a --sample-points file: the standard DTFE interpolant at those points too
-                                 # ('.pts_*'). With PARTITION (or an auto-tuned split) as well: each
-                                 # partition answers the points inside the tetrahedra it owns, equal to one triangulation
-                                 # of the whole box to float rounding, so a full-box image plane fits at production
-                                 # scale; such a partition is ONE triangulation (no thread sub-boxes), its grids equal a
-                                 # run without points to float rounding (the dummy-point padding test is off). A killed
-                                 # one resumes (DTFE_RESUME), its finished partitions' points kept
+                                 # LOCAL directory instead of RAM (bit-identical results; iCloud paths are refused)
+SAMPLE_POINTS="${SAMPLE_POINTS:-}"  # a --sample-points file: the standard DTFE interpolant at those points too ('.pts_*').
+                                 # With a partition split each partition answers the points inside the tetrahedra it
+                                 # owns (one triangulation per partition, no thread sub-boxes); a killed run resumes
+                                 # (DTFE_RESUME) with its finished partitions' points kept
 PTS_VEL_GRAD="${PTS_VEL_GRAD:-0}"   # 1 = with SAMPLE_POINTS, also the velocity gradient at each point
 TESSELLATION_CACHE="${TESSELLATION_CACHE:-}"  # a LOCAL folder: reuse the Delaunay tessellation of an identical earlier run
-                                 # (--tessellation-cache; created if missing; a partitioned run caches one file per
-                                 # thread sub-box of each partition, one per partition with SAMPLE_POINTS) -- the
-                                 # same knob as run_ps_dtfe.sh
-LAMBDA_TH="${LAMBDA_TH:-0.3}"    # eigenvalue threshold of the T-web / V-web classes (--lambda-th), the SAME default as
-                                 # run_ps_dtfe.sh and the binary's own; passed on every run, so the run log names it
-DTFE_RESUME="${DTFE_RESUME:-1}"  # 1 (default) = resume a killed partitioned run, the same knob as run_ps_dtfe.sh's:
-                                 # when the snapshot's checkpoint file exists (<prefix>.runlog.checkpoint/checkpoint
-                                 # beside the outputs, or under SCRATCH_DIR; config.sh ps_checkpoint_dir, the same rule
-                                 # for both binaries), --resume is passed and only the partitions it lacks are computed.
-                                 # The binary refuses, naming the differing settings, when the settings changed; then
-                                 # DTFE_RESUME=0 starts over (the new run replaces the checkpoint)
+                                 # (--tessellation-cache; created if missing), the same knob as run_ps_dtfe.sh
+LAMBDA_TH="${LAMBDA_TH:-0.3}"    # eigenvalue threshold of the T-web / V-web classes (--lambda-th); passed on every run
+DTFE_RESUME="${DTFE_RESUME:-1}"  # 1 (default) = resume a killed partitioned run when the snapshot's checkpoint exists
+                                 # (config.sh ps_checkpoint_dir): --resume is passed, only missing partitions are
+                                 # computed. The binary refuses when the settings changed; DTFE_RESUME=0 starts over
 
 DATA_DIR=""                # default: sim_dir $SIMULATION (config.sh); override with -d
-OUTPUT_PREFIX="${OUTPUT_PREFIX:-output}"   # -> <snapdir>/<prefix>.* (default 'output'). Another
-                                 # prefix keeps a variant beside the default set, e.g. OUTPUT_PREFIX=output_mc with
-                                 # DTFE_EXACT_AVERAGE=0; dtfelib reads 'output.' for standard DTFE. 'ps_*' is refused
-                                 # below: PS-DTFE's naming, so an export meant for run_ps_dtfe.sh cannot overwrite
-                                 # the phase-space grids with standard ones
+OUTPUT_PREFIX="${OUTPUT_PREFIX:-output}"   # -> <snapdir>/<prefix>.* (default 'output'); another prefix keeps a variant
+                                 # beside the default set, e.g. OUTPUT_PREFIX=output_mc with DTFE_EXACT_AVERAGE=0.
+                                 # 'ps_*' is refused below (PS-DTFE's naming)
 
 # the grids to write; env-overridable as in run_ps_dtfe.sh, e.g. FIELDS="density_a velocity_a" for a lighter run
-# (the launcher passes its ticks here; no dispersion_a: that is a phase-space field). The default is the analysis
-# set, the same in both drivers: density, velocity, divergence, shear. Divergence and shear come from the per-tet
-# velocity gradient (the binary deposits it and derives them after the loop, without writing it), so the gradient,
-# vorticity, T-web and V-web grids are only written when FIELDS names them (+104 B per cell at their peak)
+# (the launcher passes its ticks here; no dispersion_a: that is a phase-space field). Divergence and shear come from
+# the per-tet velocity gradient (derived after the loop, not written), so the gradient, vorticity, T-web and V-web
+# grids are only written when FIELDS names them
 FIELDS="${FIELDS:-density_a velocity_a divergence_a shear_a}"
 case " ${FIELDS} " in               # a FIELDS exported for run_ps_dtfe.sh may carry the phase-space dispersion
     *" dispersion"*) echo "Note: the velocity dispersion is a PS-DTFE field; standard DTFE leaves it out"
@@ -156,13 +77,10 @@ if [ -z "${FIELDS// }" ]; then
     echo "Error: no field standard DTFE computes in FIELDS (the velocity dispersion is a PS-DTFE field)" >&2
     exit 2
 fi
-SCALAR_DATASET="${SCALAR_DATASET:-}"   # a per-particle dataset of the input to grid as the 'scalar' field, e.g.
-                                 # Potential (a merged TNG snapshot also carries SubfindDMDensity, SubfindDensity,
-                                 # SubfindHsml, SubfindVelDisp): --scalar-dataset NAME, scalar_a (and density_a) added
-                                 # to FIELDS (config.sh scalar_dataset_resolve, the same knob as run_ps_dtfe.sh's). The
-                                 # cell value is the cell average of the linear interpolant of the particles' values, in
-                                 # the dataset's own units. Give it a prefix of its own, e.g.
-                                 # OUTPUT_PREFIX=output1024_potential
+SCALAR_DATASET="${SCALAR_DATASET:-}"   # a per-particle dataset of the input to grid as the 'scalar' field, e.g. Potential:
+                                 # --scalar-dataset NAME, scalar_a (and density_a) added to FIELDS (config.sh
+                                 # scalar_dataset_resolve, as run_ps_dtfe.sh). The cell value is the cell average of the
+                                 # linear interpolant of the particles' values, in the dataset's own units.
 
 knob_bool DTFE_EXACT_AVERAGE FACE_GRADIENT DRY_RUN AUTO_TUNE_REPORT PTS_VEL_GRAD DTFE_RESUME   # 1 or 0 (config.sh)
 usage() { echo "Usage: $0 [-d DATA_DIR] [-s SIMULATION] [-g GRID_SIZE] [-n SUBSAMPLES] [-m] [-e | --sampled] [--run-mode MODE] [snapshot ...]"; }

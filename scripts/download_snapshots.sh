@@ -11,9 +11,8 @@
 #   initial conds  (-i, --ics) : ics.hdf5 -> <DATA_DIR>/ (single file, whole simulation). The TNG
 #                         API only serves ICs under the BARYONIC run's name, so for a
 #                         '-Dark' simulation the '-Dark' suffix is stripped for the API call
-#                         (same ICs; the Dark run is the DM-only evolution of them). Feed
-#                         the file to python/tools/convert_ic_units.py to produce the
-#                         h-free combined_ics.hdf5 that run_ps_dtfe.sh expects.
+#                         (same ICs). Feed the file to python/tools/convert_ic_units.py to produce
+#                         the h-free combined_ics.hdf5 that run_ps_dtfe.sh expects.
 #
 # Usage:
 #   ./download_snapshots.sh [-k API_KEY] [-c|-t|-i] [-d SIM_DIR] [-s SIMULATION] [snapshot ...]
@@ -33,9 +32,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/config.sh"
 
 # ---- Defaults (override with flags / positional args) ---------------------
-# API key resolution: -k flag > TNG_API_KEY env > ~/.tng_api_key file. The key file lives
-# OUTSIDE the repository so it can never be committed; create it once with:
-#   echo "<your-key>" > ~/.tng_api_key && chmod 600 ~/.tng_api_key
+# API key resolution: -k flag > TNG_API_KEY env > ~/.tng_api_key file (outside the repository, so it is never
+# committed): echo "<your-key>" > ~/.tng_api_key && chmod 600 ~/.tng_api_key
 API_KEY="${TNG_API_KEY:-}"
 if [ -z "${API_KEY}" ] && [ -r "${HOME}/.tng_api_key" ]; then
     API_KEY="$(head -n1 "${HOME}/.tng_api_key" | tr -d '[:space:]')"
@@ -47,8 +45,7 @@ MODE="snapshot"                   # 'snapshot' or 'groupcat' (-c)
 # short default list from config.sh with the full redshift ladder.
 SNAPSHOTS=(1 2 3 4 5 8 13 17 21 25 33 40 50 67 72 78 84 91 99)
 
-# The key travels in a header: https only. Every failed fetch is counted and the exit status says so --
-# otherwise a wget that fails would leave the script exiting 0 and the launcher reading "Download complete!".
+# The key travels in a header: https only. Every failed fetch is counted and the exit status says so.
 errors=0
 finish() {
     echo ""
@@ -60,13 +57,10 @@ finish() {
     exit 0
 }
 
-# A chunk left half-written by a stopped download is skipped by wget -nc for ever, and a merge of it
-# would be a snapshot with missing particles (merge_HDF5.py refuses that): before fetching, drop
-# the files of this product that HDF5 calls truncated or signature-less, or that are too small to be
-# a chunk at all (< 4 KB; the SAME two rules as merge_HDF5.py's _is_incomplete -- keep them in step)
-# -- only those (a lock or a permission error keeps the file) and only when nothing wrote them in the
-# last minute (another download may be running). A chunk that is kept although it does not open, or
-# that could not be removed, is an ERROR of this run: wget -nc would skip it and the merge refuse it.
+# A chunk left half-written by a stopped download is skipped by wget -nc for ever, and a merge of it would miss
+# particles: before fetching, drop the files of this product that HDF5 calls truncated or signature-less, or that
+# are < 4 KB (the SAME two rules as merge_HDF5.py's _is_incomplete -- keep them in step), only when nothing wrote
+# them in the last minute. A chunk kept although it does not open is an ERROR of this run.
 # Needs a python with h5py (PYTHON, as the merge step; else the check is skipped with a note).
 prune_incomplete() {        # <dir> <glob>  -> 0, or 1 when a chunk that does not open is still there
     local dir="$1" pat="$2" py="${PYTHON:-python3}"
@@ -122,17 +116,15 @@ fetched_none() {            # <dir> <glob>
     return 0
 }
 
-# Fetch every chunk a product's listing names. The API's listing links its chunks over plain http://
-# (every simulation), which a recursive '--https-only' crawl skips -- it fetched nothing.
-# So read the JSON listing, upgrade each link to https (the key header never travels over plain http;
-# the API redirects each chunk to a tokenized https data host), and fetch exactly those links.
+# Fetch every chunk a product's listing names. The listing links its chunks over plain http://, which a recursive
+# '--https-only' crawl skips: read the JSON listing, upgrade each link to https (the key header never travels over
+# plain http) and fetch exactly those links.
 fetch_listing() {           # <listing URL, no query> <dest dir>  -> 1 when the listing or a chunk failed
     local listing urls
     listing="$(wget -q -O - --https-only --header="API-Key: ${API_KEY}" "$1?format=json")" || return 1
     urls="$(printf '%s\n' "${listing}" | grep -o '"https\{0,1\}://[^"]*\.hdf5"' | tr -d '"' | sed 's|^http://|https://|')"
     [ -n "${urls}" ] || return 0            # nothing listed: fetched_none names it
-    # The data host now and then answers one chunk with a 403 that a rerun does not get:
-    # try the list up to three times; -nc skips the chunks already here.
+    # the data host sometimes answers a chunk with a 403: try the list up to three times; -nc skips chunks already here.
     local try
     for try in 1 2 3; do
         printf '%s\n' "${urls}" | wget -nc -nv --https-only --content-disposition \

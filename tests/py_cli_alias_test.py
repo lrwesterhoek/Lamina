@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
-"""The python CLIs' option names: each script's command line in the current names parses to the values given
-(one argv per script, CURRENT; make_image_plane.py's --plane-window also as its --same-as reads it); no option is
-guessed from an abbreviation (allow_abbrev=False); the smoothing variable DTFE_SMOOTH_MPC fixes the void smoothing
-in Mpc.
-
-Each script runs in a fresh interpreter, its parser stopped right after parse_args (argparse patched to raise with
-the Namespace): nothing is read or written, no data is needed (make_image_plane.py --same-as reads a sidecar this
-test writes, nothing else).
-
-Usage:  python3 tests/py_cli_alias_test.py            (exit 0 = pass)
-"""
+"""The python CLIs' option names: each script's command line in the current names parses to the values given; no
+option is guessed from an abbreviation (allow_abbrev=False); DTFE_SMOOTH_MPC fixes the void smoothing in Mpc.
+Usage:  python3 tests/py_cli_alias_test.py            (exit 0 = pass)"""
 
 import json
 import os

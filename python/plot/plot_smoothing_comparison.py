@@ -1,11 +1,4 @@
-"""Void-catalog robustness against the Gaussian smoothing scale.
-
-Method-, snapshot- and simulation-agnostic via the shared pipeline/FieldSet layer:
-
-    python3 plot/plot_smoothing_comparison.py --sim TNG50-4-Dark  # panel snapshots, auto method
-    python3 plot/plot_smoothing_comparison.py --estimator dtfe
-    python3 plot/plot_smoothing_comparison.py --snap 99        # single snapshot only
-"""
+"""Void-catalog robustness against the Gaussian smoothing scale."""
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
 from pathlib import Path

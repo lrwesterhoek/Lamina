@@ -1,55 +1,6 @@
-"""Void-in-void versus void-in-cloud: each distinct resolved void classified as S-type, VOID-IN-CLOUD
-(being squeezed by an overdense surrounding, expected to shrink or be crushed), or R-type, VOID-IN-VOID (inside a
-larger underdense region, expanding), by one of CRITERIA; every criterion's measure is reported for each void.
-
-    from dtfelib import pipeline, classify
-    p = pipeline.products("099", 0.0)
-    env = classify.classify_voids(p)          # per void: the shell's v_r, Delta(<3 R_v) smoothed, Delta(<2 R_v) raw
-    env["vic"].mean()                         # the void-in-cloud fraction under the chosen criterion
-    classify.agreement(env)                   # the fraction of voids two criteria label the same
-
-THE CRITERIA (classify.CRITERIA, DEFAULT_CRITERION = 'velocity'; CRITERION_SHELL gives each one's shell in R_v):
-  'velocity'          (default) the mean peculiar RADIAL velocity of the shell between 2 and 3 R_v is
-                      negative: the surroundings beyond the compensation ridge are falling IN, the void is being
-                      squeezed. This is the dynamical statement Sheth & van de Weygaert (2004, MNRAS 350, 517) make
-                      about the void-in-cloud process, measured directly instead of inferred from the density.
-  'density_smoothed'  the enclosed contrast of the SMOOTHED density (config.SMOOTHING_SIGMA_CELLS, the catalogue's
-                      own field) within 3 R_v is positive: the large-scale environment is overdense.
-  'density_raw'       the rule of Ceccarelli, Paz, Lares, Padilla & Lambas (2013, MNRAS 434, 1435): the enclosed
-                      contrast of the RAW density within ENV_FACTOR (2) R_v is positive. Kept for comparison: the
-                      1-2 R_v shell carries the halos of the walls (the mean profile of the S voids reaches rho ~2 at
-                      2 R_v), so it measures the walls more than the larger-scale environment.
-WHY THE VELOCITY BY DEFAULT: the velocity in the 2-3 R_v shell, beyond the ridge, responds to the mass of the whole
-region inside it (linear theory: v_r = -(1/3) f H a r Delta(<r)), which smooths over individual walls and haloes,
-and it says directly whether the void is being squeezed. Measured (TNG100-3-Dark / TNG50-3-Dark): it
-labels 80-94% of the voids (R_v <= L/6) void-in-cloud, against 40-46% of random centres with the same radii (whose
-mean flux is ~0), agrees with the smoothed Delta(<3 R_v) on 87-95% of the voids and with the raw rule on 70-88%,
-and its S voids are the smaller ones at every z and the shallower ones at z >= 1 (Sheth & van de Weygaert's
-prediction), where the raw rule shows no clear split. The voids beyond the 3 R_v wrap rule, the largest ones, are
-mostly void-in-void by the raw rule: the fraction holds for R_v <= L/6, not for the whole population.
-
-THE MEASUREMENTS. All three sample spherical shells around the void's cell CENTRE ((i + 0.5) / N) with
-profiles.profile_grids (Fibonacci directions, trilinear, periodic through environment.sample_grid):
-  * Delta(<X R) = 3 / X^3 int_0^X (rho/rho_bar - 1) x^2 dx, x = r / R, from SHELLS shell means out to X R_v
-    (enclosed_contrast: the profile linear between the shells on a fine grid, flat inside the first one, the
-    integral of profiles.linear_v_r), of the raw density (X = ENV_FACTOR) and of 1 + the smoothed delta (X = 3);
-  * the shell velocity: v_r = v . r_hat (POSITIVE = OUTFLOW) on VEL_SHELLS shells from 2 to 3 R_v, VOLUME weighted
-    across the shells, v_shell = int v_r x^2 dx / int x^2 dx (trapezoid). The velocity is the grid as stored (its
-    per-cell weighting is PS-DTFE's), read with FieldSet.load, which applies the sqrt(a) factor -> peculiar km/s;
-    the void's bulk velocity is a dipole over each shell and cancels in the mean, as in profiles.py. 'v_shell_norm'
-    = v_shell / (H(z) a R_v), R_v comoving Mpc, H in km/s/Mpc (fields.get_cosmology_params, linear_v_r's factor):
-    linear theory gives v_shell_norm = -(1/3) f(z) x Delta(<x) averaged over the shell, so it reads directly as
-    the strength of the squeeze (-0.04 for Delta(<2.5 R_v) = +0.1 at z = 0, f = 0.52).
-A void whose outer shell would reach beyond half the box is dropped for that measure (profile_grids' wrap rule: in a
-periodic box it would sample its own interior); the rows returned are those the CHOSEN criterion keeps, and another
-criterion's measure is NaN where its own (larger) shell is dropped.
-
-THE SAMPLE is the profiles': every well-resolved void with a measured R_v (catalog.r_v_mpc), only the DISTINCT ones
-(catalog.distinct_mask) unless distinct=False. Nothing is cached: the grid reads dominate (density 0.5 GB, velocity
-1.6 GB at 512^3) and the shell sampling takes seconds; the figure script stores the per-void table in its own npz.
-classify_grid / classify_catalog default to the raw-density criterion; the default
-criterion is the velocity at the snapshot level, classify_voids, which has the FieldSet to read the velocity from.
-"""
+"""Void-in-void versus void-in-cloud: each distinct resolved void is classified as S-type (void-in-cloud,
+squeezed by an overdense surround) or R-type (void-in-void, expanding) by one of CRITERIA (Sheth & van de
+Weygaert 2004; raw-density rule of Ceccarelli et al. 2013). Default 'velocity': mean radial v of the 2-3 R_v shell < 0."""
 
 from __future__ import annotations
 
@@ -98,9 +49,8 @@ def enclosed_contrast(bins, density_profile) -> np.ndarray:
 def classify_grid(density, centers_frac, r_v_cells, factor: float = ENV_FACTOR, shells: int = SHELLS,
                   m: int = DIRS) -> dict:
     """Delta(< factor x R_v) and the type of every void given as (centre fraction (n, 3), R_v in cells (n,)) on the
-    rho/rho_bar grid 'density': {'delta_enclosed': (n,) NaN where dropped, 'vic': (n,) bool, 'type': (n,) 'S'/'R'/'',
-    'kept': (n,) bool, 'dropped': k, 'bins', 'profile': (n, shells) rho/rho_bar}. Dropped: no finite positive R_v,
-    or the outer shell beyond half the box."""
+    rho/rho_bar grid 'density': {'delta_enclosed', 'vic', 'type' 'S'/'R'/'', 'kept', 'dropped', 'bins', 'profile'}.
+    Dropped: no finite positive R_v, or the outer shell beyond half the box."""
     bins = shell_bins(factor, shells)
     r = np.asarray(r_v_cells, dtype=np.float64).reshape(-1)
     prof = profile_grids({"density": density}, centers_frac, r, bins=bins, m=m)
@@ -130,11 +80,9 @@ def void_sample(cat, n_grid: int, distinct: bool = True, definition: str = "cros
 
 def velocity_shell_grid(velocity, centers_frac, r_v_cells, inner: float = 2.0, outer: float = 3.0,
                         shells: int = VEL_SHELLS, m: int = DIRS) -> dict:
-    """The volume-weighted mean radial velocity of the shell between 'inner' and 'outer' x R_v around every void
-    given as (centre fraction (n, 3), R_v in cells (n,)) on the (N,N,N,3) velocity grid (the caller's units, km/s
-    from FieldSet.load): {'v_shell': (n,) NaN where dropped, 'kept', 'dropped', 'bins' (shells' x), 'v_r' (n, shells)}.
-    v_shell = int v_r x^2 dx / int x^2 dx over the shells (trapezoid; POSITIVE = OUTFLOW). Dropped: no finite
-    positive R_v, or the outer shell beyond half the box (profile_grids' wrap rule)."""
+    """The volume-weighted mean radial velocity of the shell between 'inner' and 'outer' x R_v around every void,
+    on the (N,N,N,3) velocity grid (km/s from FieldSet.load): {'v_shell', 'kept', 'dropped', 'bins', 'v_r'}.
+    v_shell = int v_r x^2 dx / int x^2 dx (POSITIVE = OUTFLOW). Dropped as in classify_grid."""
     bins = np.linspace(float(inner), float(outer), int(shells))
     r = np.asarray(r_v_cells, dtype=np.float64).reshape(-1)
     centers = np.asarray(centers_frac, dtype=np.float64).reshape(-1, 3)
@@ -157,11 +105,9 @@ def velocity_shell_grid(velocity, centers_frac, r_v_cells, inner: float = 2.0, o
 
 def measure_grid(density, centers_frac, r_v_mpc, cell_mpc: float, factor: float = ENV_FACTOR, *, velocity=None,
                  density_smoothed=None, redshift=None, criterion: str = "density_raw") -> dict:
-    """Every criterion's measure for the voids given as (centre fraction (n, 3), R_v in Mpc (n,)) on the grids handed
-    in (see classify_catalog), the type by 'criterion': (n,) arrays 'delta_enclosed', 'delta_smoothed_enclosed',
-    'v_shell_kms', 'v_shell_norm' (NaN where not measured or dropped), 'vic_<c>' for every criterion, 'kept' (the
-    chosen criterion's wrap rule), 'vic', 'type' ('S' / 'R', '' where not kept); plus 'dropped', 'bins', 'profile'
-    (raw rho/rho_bar out to factor R_v), 'shell' (the criterion's (inner, outer) in R_v), 'measured'."""
+    """Every criterion's measure for the voids given as (centre fraction (n, 3), R_v in Mpc (n,)) on the grids
+    handed in (see classify_catalog): 'delta_enclosed', 'delta_smoothed_enclosed', 'v_shell_kms', 'v_shell_norm'
+    (NaN where not measured), 'vic_<c>' per criterion, 'kept', 'vic', 'type', plus 'dropped', 'bins', 'profile'."""
     if criterion not in CRITERIA:
         raise ValueError(f"criterion must be one of {CRITERIA}, got {criterion!r}")
     if criterion == "velocity" and velocity is None:
@@ -210,19 +156,9 @@ def measure_grid(density, centers_frac, r_v_mpc, cell_mpc: float, factor: float 
 def classify_catalog(cat, density, cell_mpc: float, factor: float = ENV_FACTOR, distinct: bool = True,
                      definition: str = "crossing", *, velocity=None, density_smoothed=None, redshift=None,
                      criterion: str = "density_raw") -> dict:
-    """Every criterion's measure for a catalogue's sample (void_sample) on the grids handed in, the type by
-    'criterion': the raw density rho/rho_bar 'density' (always: Delta(< factor R_v), 'delta_enclosed'), the smoothed
-    rho/rho_bar 'density_smoothed' (Delta(<3 R_v), 'delta_smoothed_enclosed'), the (N,N,N,3) peculiar 'velocity' in
-    km/s (the 2-3 R_v shell's 'v_shell_kms', and 'v_shell_norm' in units of H(z) a R_v, which needs 'redshift').
-    A measure without its grid is NaN; asking for a criterion whose grid is missing raises ValueError (no silent
-    fallback to another criterion). The default criterion here is the raw density, the grid every caller passes;
-    classify_voids, which reads the snapshot's grids itself, defaults to DEFAULT_CRITERION (the velocity).
-    One row per void the CHOSEN criterion keeps (its wrap rule; the rest counted in 'dropped') with 'index'
-    (catalogue row), 'delta_enclosed', 'delta_smoothed_enclosed', 'v_shell_kms', 'v_shell_norm', 'vic' and 'type'
-    (the criterion's), 'vic_<criterion>' for every criterion (False where its measure is NaN), 'r_v_mpc', 'delta_c'
-    (central smoothed delta, the depth), 'e', 'p' (BBKS), 'b_over_a', 'c_over_a', 'r_eff_mpc', 'center_frac';
-    plus 'n_sample', 'dropped', 'factor', 'bins', 'profile' (raw rho/rho_bar out to factor R_v), 'definition',
-    'criterion', 'shell' (its (inner, outer) in R_v), 'measured' (the criteria that had their grid)."""
+    """Every criterion's measure for a catalogue's sample (void_sample) on the grids handed in: raw 'density',
+    'density_smoothed' and the peculiar 'velocity' (km/s; 'v_shell_norm' needs 'redshift'). A criterion whose grid is
+    missing raises ValueError. One row per void the chosen criterion keeps ('index' = catalogue row)."""
     n_grid = int(density.shape[0])
     rows = void_sample(cat, n_grid, distinct, definition)
     coords = np.asarray(cat["coords"])[rows]
@@ -249,11 +185,9 @@ def classify_catalog(cat, density, cell_mpc: float, factor: float = ENV_FACTOR, 
 
 def classify_voids(products, factor: float = ENV_FACTOR, distinct: bool = True, definition: str = "crossing",
                    criterion: str = DEFAULT_CRITERION) -> dict:
-    """classify_catalog on one snapshot (pipeline.SnapshotProducts): its catalogue (the frame checked by
-    catalog.frame_of), its raw density rho/rho_bar, 1 + its smoothed delta, and its velocity (FieldSet.load:
-    peculiar km/s, read into RAM, dropped on return; skipped when the snapshot has none and the criterion is not
-    the velocity). Every criterion's measure is filled; 'criterion' decides the type. Adds 'cell_mpc', 'box_mpc',
-    'n_grid', 'method', 'prefix', 'redshift'."""
+    """classify_catalog on one snapshot (pipeline.SnapshotProducts): its catalogue, raw density, 1 + smoothed
+    delta and velocity (FieldSet.load, peculiar km/s; skipped when absent and not the criterion). Adds 'cell_mpc',
+    'box_mpc', 'n_grid', 'method', 'prefix', 'redshift'."""
     if criterion not in CRITERIA:
         raise ValueError(f"criterion must be one of {CRITERIA}, got {criterion!r}")
     cell, box, n_grid, _src = catalog.frame_of(products)

@@ -9,27 +9,12 @@
 
 #include "../env_knobs.h"
 
-// Per-tetrahedron record of the GPU deposit: PS_TET_STRIDE floats per tet in the 'verts'
-// buffer, laid out as documented at TET_STRIDE in metal/ps_deposit.metal (which must match).
+// GPU per-tet record: PS_TET_STRIDE floats per tet; the layout is documented at TET_STRIDE in metal/ps_deposit.metal.
 constexpr int PS_TET_STRIDE = 16;
 
-// Fills one record. cv = the tet's four vertices in the CANONICAL frame of the exact inside
-// test (ps_exact_inside.h canonicalCoord: every periodic image of a particle at one position),
-// in the build's own Real -- the very coordinates that test compares in; gridLo/gridLen/nGrid =
-// the deposit grid, as the CPU test forms its sample positions
-// lo + ((g + frac) * len) / n; canonShift = how far the canonical frame sits above the grid (the
-// box length when periodic, else 0); wrapL = the box length for the minimum-image edge wrap
-// (0 = no wrap); centroidFlat = the flat sub-grid index of the centroid-fallback cell as the
-// CPU deposit computes it (0xFFFFFFFF = outside this partition, dropped).
-// Vertex 0 is stored as a cell index plus an in-cell fraction and the edges as double
-// differences rounded once to float, so the kernel forms every sample offset from small numbers.
-// The double build passes its DOUBLE vertices: rounding them to float would move a vertex by up to
-// half a float ulp of its canonical coordinate (~8e-6 Mpc in a 100 Mpc box), which the kernel's
-// error bound (the record's own roundings) does not cover, so a sub-sample that close to a face
-// could be counted on the wrong side of the double CPU test (tests/ps_double_check.sh D5 compares
-// the stream counts with the double CPU run). A double edge difference rounds by 2^-53 of the edge
-// before its float rounding, far inside the bound's safety factor of two; float vertices give the
-// same bytes either way.
+// Fills one record from cv (the tet's vertices in the canonical frame of the exact inside test, in the build's own
+// Real) and the grid, shift and wrap parameters; vertex 0 = cell index + fraction, edges = double differences rounded
+// once to float. The double build passes DOUBLE vertices: float-rounding them could flip a sub-sample vs the CPU test.
 template <typename V>
 inline void psFillTetRecord(float *rec, V const cv[4][3], double const gridLo[3],
                             double const gridLen[3], int32_t const nGrid[3],
@@ -58,48 +43,23 @@ inline void psFillTetRecord(float *rec, V const cv[4][3], double const gridLo[3]
     std::memcpy(&rec[15], &centroidFlat, sizeof(centroidFlat));
 }
 
-// The deposit's MOMENT grids are exact 64-bit fixed-point sums, like the mass grid: float sums would depend on
-// the order the GPU atomics land in (two runs would differ in the last bits of every velocity, dispersion and
-// gradient cell) and, on the CPU, on the thread count (thread-private float copies summed in thread order).
-// Each share v*w becomes the integer rint(v*w * scale[g]) (scale = 2^k, so the product is
-// exact and both sides round it the same way: psFixedShareOk's rule) and the integers are added -- in any
-// order, by any number of threads, with the same result. Grid g of this list ([g] = the index into
-// PSDepositParams.fxScale, PSGpuGrids::fx and the CPU's own words):
-//   MOM   sum(wm v_j)             the velocity moment (3 components)
-//   M2    sum(w v_i v_j)          the dispersion's second moment (6, upper triangle)
-//   GRAD  sum(wm dv_i/dx_j)       the velocity-gradient moment (9)
-//   MOMW  sum(wm)                 the moment normalizer: the volume shares (PS-DTFE's velocity moments are
-//                                 volume-weighted); with User_options::psVolumeWeighted false (CPU, no density
-//                                 selected) the mass shares
-//   SV    sum(V_int)/V_cell       the exact deposit's cell-mean multiplicity (1)
-//   DV    sum(w v_j)              the dispersion's own mass-weighted mean (3), as PS-DTFE's velocity moments are
-//                                 volume-weighted
-//   DW    sum(w)                  its normalizer (1). On the GPU it is NOT deposited when the mass grid is fixed:
-//                                 it sums the very shares the mass grid sums, so the caller takes the mass words
-//   SCAL  sum(wm s)               the scalar moment (one component)
-//   SG    sum(wm ds/dx_i)         the scalar-gradient moment (3)
-//   RM    sum(V_tet)/V_cell       --ps-halo-release on the sampled deposit: the released tets' multiplicity (CPU
-//                                 accumulator only; the GPU never sees a released tet)
-// w = the mass share, wm = the moment weight: the Eulerian-volume share (PS-DTFE's velocity moments are
-// volume-weighted), or w where User_options::psVolumeWeighted is false.
+// The MOMENT grids are exact 64-bit fixed-point sums like the mass grid: float sums would depend on the GPU atomics'
+// order and the CPU thread count. Each share becomes rint(share * scale[g]) (scale = 2^k, exact product, both sides
+// round alike: psFixedShareOk) and the integers add in any order. g indexes PSDepositParams.fxScale, PSGpuGrids::fx.
 enum PSFxGrid { PS_FX_MOM = 0, PS_FX_M2, PS_FX_GRAD, PS_FX_MOMW, PS_FX_SV, PS_FX_DV, PS_FX_DW, PS_FX_SCAL, PS_FX_SG,
                 PS_FX_N,                 // the grids a GPU deposit can hold as words (PSDepositParams.fxScale)
                 PS_FX_RM = PS_FX_N,      // + the CPU-only one
                 PS_FX_CPU_N };
-// PSDepositParams.fxMask: bit g (1u << g) = grid g is a fixed-point sum (its words bound at buffer 22 + its slot,
-// metal/ps_deposit.metal), except bit PS_FX_DW, which means "dispw is the mass grid: not deposited"; and
-// PS_FX_SUMW_BIT = the exact items' per-tet weight totals are fixed-point sums too (see depositExactItems).
+// MOM sum(wm v_j) (3); M2 sum(w v_i v_j) (6); GRAD sum(wm dv_i/dx_j) (9); MOMW sum(wm), the normalizer; SV sum(V_int)/V_cell;
+// DV sum(w v_j) (3); DW sum(w), not deposited on the GPU when the mass grid is fixed (the mass words serve); SCAL sum(wm s);
+// SG sum(wm ds/dx_i) (3); RM sum(V_tet)/V_cell (CPU only, --ps-halo-release). w = mass share, wm = moment weight (volume share, or w).
+// PSDepositParams.fxMask: bit g = grid g is fixed-point (words at buffer 22 + slot), except bit PS_FX_DW = "dispw is the mass
+// grid"; PS_FX_SUMW_BIT = the exact items' per-tet weight totals are fixed-point sums too.
 static uint32_t const PS_FX_SUMW_BIT = 1u << 16;
 
-// The unit of each moment grid: scale[g] = 2^k from a bound B of the sum of |share| over everything
-// the pass can deposit into grid g -- no cell, holding part of that sum, can exceed it. psMassFixedScale (the mass
-// grid's rule) puts 2B at 2^61..2^62 units, so B sits at 2^60..2^61: a factor 4 below the 2^63 of the signed words,
-// for the GPU's float rounding of a value (the kernel's float inverse of a tetrahedron near the degeneracy cut
-// amplifies it; a few per cent at worst, as for the standard deposit: dtfe_gpu_fixed.h). The bound is a sum
-// over the tetrahedra of (its weight total) x (the largest |value| it can deposit) -- PSFixedBounds::addTet. The
-// resolution this leaves: a cell holding 2^-40 of B keeps 2^20 units, a few times finer than its float.
-// False (the grid keeps the float sums) for a bound that is not finite or gives no usable power of two; an empty
-// bound (nothing to deposit) gets unit 1.
+// The unit of each moment grid: scale[g] = 2^k from a bound B of the sum of |share| into grid g (PSFixedBounds::addTet);
+// 2B sits at 2^61..2^62 units (psMassFixedScale), a factor 4 below 2^63 for the GPU's float rounding of a value.
+// False for a bound that is not finite or gives no power of two; an empty bound gets unit 1.
 inline bool psMassFixedScale(double totalMass, float &scale);   // (below)
 inline bool psMomentFixedScale(double bound, float &scale)
 {
@@ -109,13 +69,9 @@ inline bool psMomentFixedScale(double bound, float &scale)
     return psMassFixedScale( 2. * bound, scale );
 }
 
-// The bounds B[g] of one pass, summed tetrahedron by tetrahedron. w = the tet's mass (its shares
-// add up to it), V = its Eulerian volume |det|/NO_DIM!, wm = V (PS-DTFE's velocity moments are volume-weighted);
-// vMax = the largest |velocity component| at its vertices (a sample, a piece's centroid or the centroid fallback
-// lies in the tet, where the linear profile is a convex
-// combination of the vertex values; the exact deposit's second moment <v_a v_b> over a piece is bounded by vMax^2
-// likewise), gMax = the largest |dv_i/dx_j| of its constant gradient, sMax / sgMax the same for the scalar;
-// cellVol = the grid cell's volume.
+// The bounds B[g] of one pass, summed per tetrahedron: w = its mass, V = Eulerian volume, wm = V; vMax, gMax, sMax, sgMax =
+// largest |v|, |dv/dx|, |s|, |ds/dx| there (a sample or centroid lies in the tet, so the linear profile is bounded by the
+// vertex values); cellVol = the grid cell's volume.
 struct PSFixedBounds
 {
     double B[PS_FX_CPU_N] = {};
@@ -132,9 +88,8 @@ struct PSFixedBounds
         B[PS_FX_SG]   += wm * sgMax;
         B[PS_FX_RM]   += V / cellVol;
     }
-    // --face-gradient (CPU only; not a PSFxGrid, so the GPU's grids and counters are untouched): the face sums of the
-    // streams' velocity and of their covered area. S = an upper bound on the tet's section area summed over the grid
-    // planes it crosses; every face share of it is at most vMax times a piece of that area.
+    // --face-gradient (CPU only; not a PSFxGrid): face sums of the streams' velocity and covered area. S = an upper bound
+    // on the tet's section area over the grid planes it crosses.
     double faceS = 0., faceN = 0., faceP = 0.;
     // rho = the tet's uniform density in rho/rho_bar (its mass over its Eulerian volume): the normal momentum's bound
     void addFace(double vMax, double S, double rho) { faceS += vMax * S; faceN += S; faceP += rho * vMax * S; }
@@ -145,44 +100,28 @@ struct PSFixedBounds
     }
 };
 
-// The units a pass's caller hands the GPU host: scale[g] > 0 = grid g as a fixed-point sum in units
-// of 1/scale[g] (the host still deposits only the grids its flags select), 0 = float atomics
-// (a bound without a unit); sumW = the exact items' per-tet
-// weight totals as fixed-point sums as well. A plain struct, so that gpu_host.h stays free of the DTFE headers.
+// The units a pass's caller hands the GPU host: scale[g] > 0 = grid g as a fixed-point sum in units of 1/scale[g], 0 = float
+// atomics; sumW = the exact items' per-tet weight totals as fixed-point sums too. Plain, so gpu_host.h stays free of DTFE headers.
 struct PSFixedUnits
 {
     float scale[PS_FX_N] = {};
     bool  sumW = false;
-    // the total the mass grid's unit is taken from (psMassFixedScale) when > 0 (a --grid-window pass, so
-    // that the GPU and the CPU window deposits take the same unit -- ps_interpolation.cc fxBoundWalk); 0 = the host's
-    // own sum of the masses it is handed plus massExtra.
+    // the total the mass unit is taken from when > 0 (a --grid-window pass: GPU and CPU take the same unit); 0 = the host's own sum
     double massTotal = 0.;
 };
 
-// The non-finite guard of the fixed-point shares. rint(share * scale) -> int64 is UNSPECIFIED for a
-// NaN, an infinity or a product beyond the signed 64-bit range (C++ llrint / the GPU's float->long conversion:
-// arm64 gives 0 for a NaN and saturates the rest, x86-64 gives 0x8000000000000000 for all of them), so one such
-// share would silently corrupt an exact sum, where a float sum would show a NaN. The policy, the same
-// on the CPU and in Metal: a share whose product is not below 2^63 in magnitude
-// -- NaN, +-inf and an overflow alike -- adds NOTHING and is COUNTED, per grid slot (below); the host reports the
-// run's counts once (fixedShareDropsReact, DTFE.cpp). Hot path: one compare. The kernels test the float product's
-// bits, (bits & 0x7fffffff) < 0x5f000000 (= 2^63), as fast math cannot fold an integer compare away; the CPU
-// tests the double product, which is the same float times the same 2^k, exactly. A finite in-range share takes
-// the same integer as without the guard, so normal data is unaffected bit for bit. The run-wide 128-bit words
-// (src/fixed_units.h) take the run's share cap 2^capLog2 in place of 2^63 (the overload with 'cap' below; the
-// kernels' shareLimbs): a share at or above it adds nothing and is counted the same way.
-// The count slots: PS-DTFE g = PSFxGrid (0 .. PS_FX_CPU_N-1), the mass grid, the exact items' per-tet weight totals;
-// standard DTFE 0..4 = its grids (dtfe_gpu_fixed.h: density, velocity, velocity gradient, scalar, its gradient; the
-// CPU exact average's run-wide words count in the same slots, averaged_interpolation_1.cc Avg1Words), 5 = the face
-// pass's words (avg1FacePass).
+// Non-finite guard of the fixed-point shares: rint(share * scale) -> int64 is UNSPECIFIED for a NaN, an infinity or a product
+// beyond 2^63 (arm64 and x86-64 differ). Policy, the same on CPU and in Metal: a share whose product is not below 2^63 in
+// magnitude adds NOTHING and is COUNTED per slot (reported once, fixedShareDropsReact in DTFE.cpp). The kernels test the float
+// product's bits (fast math cannot fold that away), the CPU the double product, the same value; in-range shares are unaffected.
+// The 128-bit run-wide words (src/fixed_units.h) use their share cap 2^capLog2 in place of 2^63. Slots: g = PSFxGrid, the mass grid, the per-tet weight totals; standard DTFE 0..4 = its grids, 5 = face pass.
 enum FixedShareSlot { FX_DROP_MASS = 10, FX_DROP_SUMW = 11, FX_DROP_FACE_S = 12, FX_DROP_FACE_N = 13, FX_DROP_FACE_P = 14,
                       FX_DROP_SLOTS = 16 };
 static_assert( int(PS_FX_CPU_N) <= int(FX_DROP_MASS), "a moment grid's slot would be the mass grid's" );
 // The run's dropped shares by slot: every pass (CPU, or a GPU host after a deposit it kept) adds its counts here
 inline std::atomic<unsigned long long> fixedShareDrops[FX_DROP_SLOTS] = {};
-// A thread whose counts are not the run's yet points this at FX_DROP_SLOTS counters of its own (null: the run's). The
-// face walk beside the GPU deposit does (ps_interpolation.cc PSEarlyFaceWalk): its sums are thrown away when the
-// device call fails, and the CPU deposit then counts the same shares itself.
+// A thread whose counts are not the run's yet points this at its own FX_DROP_SLOTS counters (null: the run's); the face walk
+// beside the GPU deposit does: its sums are thrown away if the device call fails and the CPU then counts the same shares.
 inline thread_local unsigned long long *fixedShareDropSink = nullptr;
 struct FixedShareDropSinkScope   // sets the sink for a scope of the calling thread
 {
@@ -202,13 +141,9 @@ inline void fixedShareDropped(int const slot, unsigned long long const n = 1)
     if ( fixedShareDropSink ) { fixedShareDropSink[slot] += n; return; }
     fixedShareDrops[slot].fetch_add( n, std::memory_order_relaxed );
 }
-// The guard itself: the share's integer in q, or false (q = 0, counted in 'slot') for a product that has none.
-// One share in fixed-point units: the float share the deposit formed (the float a float sum would add) times the
-// 2^k unit, rounded to nearest even -- the integer rint(share * scale) the kernels add (metal/ps_deposit.metal
-// addMoment, depositMass). The scale is 2^k, so the float product there and the double product here are both exact,
-// and rint gives the same integer: a share adds the same units whichever side deposits it. The CPU deposit
-// (ps_interpolation.cc psFxAdd) adds these into the partition's fixed-point grids -- the GPU's own words when the GPU
-// deposited the partition -- so such a grid is ONE exact integer sum, independent of the order and the thread count.
+// The guard: the share's integer in q, or false (q = 0, counted in 'slot'). The share times the 2^k unit is exact in float and
+// double alike, so rint gives the integer the kernels add (metal/ps_deposit.metal addMoment, depositMass): a share adds the same
+// units whichever side deposits it, and the grid is ONE exact integer sum independent of order and thread count.
 inline bool psFixedShareOk(double const product, int const slot, int64_t &q)
 {
     if ( !( std::fabs( product ) < 9223372036854775808.0 ) )   // 2^63; false for a NaN too
@@ -220,10 +155,8 @@ inline bool psFixedShareOk(double const product, int const slot, int64_t &q)
     q = int64_t( std::llrint( product ) );
     return true;
 }
-// ... for the run-wide 128-bit words: below cap = 2^capLog2 (RunUnits::cap) the share's integer (src/fixed_units.h
-// fxShare's statements: nearbyint rounds to nearest even, the integer llrint gives below 2^63, and a double holding
-// an integer below 2^127 converts to __int128 exactly), else false (q = 0, counted in 'slot'). At cap = 2^63 it
-// gives the integer of the guard above.
+// ... for the run-wide 128-bit words: below cap = 2^capLog2 the share's integer (as src/fixed_units.h fxShare), else false
+// (q = 0, counted in 'slot'). At cap = 2^63 it gives the integer of the guard above.
 inline bool psFixedShareOk(double const product, double const cap, int const slot, __int128 &q)
 {
     if ( !( std::fabs( product ) < cap ) )   // false for a NaN too
@@ -236,12 +169,8 @@ inline bool psFixedShareOk(double const product, double const cap, int const slo
     return true;
 }
 
-// The guard's test hook: DTFE_TEST_NAN_SHARE=<k> makes the deposit's input NaN for about one
-// tetrahedron in k -- PS-DTFE its mass (the GPU extraction and the CPU loop alike, so every share of it is NaN), the
-// standard GPU deposit its vertex densities -- picked by a hash of its first vertex's coordinates (fixedShareTestNan),
-// which every path sees the same way. The units and bounds leave those values out (a NaN is no maximum, and the GPU
-// hosts' mass total skips it), so the rest of the grid stays exact and the guard drops and counts the NaN shares.
-// 0 / unset: off (tests/ps_fixed_moments_check.sh, tests/dtfe_gpu_retry_check.sh use it).
+// Test hook DTFE_TEST_NAN_SHARE=<k>: the deposit's input is NaN for about one tet in k (picked by a hash of its first vertex,
+// so every path agrees). Units and bounds leave those out, so the rest stays exact and the guard drops and counts them. 0 = off.
 inline unsigned long fixedShareTestNanEvery()
 {
     static unsigned long const k = [] { long const v = Env::integer( "DTFE_TEST_NAN_SHARE", 0 );
@@ -263,18 +192,14 @@ inline bool fixedShareTestNan(double const x, double const y, double const z)
     return h % k == 0;
 }
 
-// The parameter block of the PS-DTFE GPU deposit, PSDepositParams (and the exact items' PSExactItemParams): ONE
-// definition in ps_kernel_params.h, shared by the hosts (ps_metal_host.cc, metal/validate_deposit.cpp)
-// and the Metal kernels, to whose source the Makefile prepends it. Its fxScale holds one unit per PSFxGrid.
+// The parameter block of the PS-DTFE GPU deposit (PSDepositParams, PSExactItemParams): ONE definition in ps_kernel_params.h,
+// shared by the hosts and the Metal kernels, to whose source the Makefile prepends it.
 #include "ps_kernel_params.h"
 static_assert( int(PS_FX_N) == 9, "PSDepositParams.fxScale[9] holds one unit per PSFxGrid (ps_kernel_params.h)" );
 
-// The unit of the mass grid's fixed-point sum (the kernel's DepositParams.massFixed says why):
-// scale = 2^k with the mass handed to the deposit (a partition's tets) at 2^61..2^62 units -- the finest unit
-// at which no cell overflows the signed 64-bit sum, even holding all of it plus every share's rounding. The
-// unit must be fine: with the mean TET mass at 2^32 units, the 3 kpc cells of a --grid-window zoom
-// (pieces of ~1e-8 of a tet) would come out 5e-4 off. Here a cell holding 2^-40 of the partition's
-// mass still has 2^21 units. False when the mass gives no usable power of two (the caller keeps the float grid).
+// The unit of the mass grid's fixed-point sum: scale = 2^k with the partition's mass at 2^61..2^62 units, the finest unit
+// at which no cell overflows the signed 64-bit sum. It must be fine: zoom cells hold tiny pieces of a tet. False when
+// the mass gives no usable power of two (the caller keeps the float grid).
 inline bool psMassFixedScale(double totalMass, float &scale)
 {
     if ( !(totalMass > 0.) || !std::isfinite( totalMass ) ) return false;

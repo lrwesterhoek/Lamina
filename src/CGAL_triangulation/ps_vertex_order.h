@@ -1,38 +1,6 @@
-/* PS-DTFE: the canonical vertex order of the tessellation's cells.
-
-   CGAL numbers a cell's vertices in the order its insertion history leaves them. That history differs between the
-   sequential and the parallel insert, between two parallel inserts (their threads' timing), with the input's particle
-   order and with the partition split. Every per-tetrahedron quantity of PS-DTFE is formed in the cell's vertex-0
-   frame -- the Eulerian edge matrix and its inverse, the velocity and scalar gradients, the Lagrangian volume (the
-   mass), the periodic wrap to vertex 0's image, the centroid, the exact deposit's clipping planes, the face sections,
-   the GPU record (vertex 0's cell and fraction, the edges from it) -- so in CGAL's numbering their rounding follows the
-   history: under the parallel insert two identical runs would differ in the last bits of the velocity moments,
-   although every grid of the single build is an order-free fixed-point sum.
-
-   psCanonicalVertexOrder renumbers every finite cell ONCE, right after the tessellation exists (buildTessellation in
-   triangulation.cpp: after the insert, before the vertex densities and the cache save; a cache file therefore holds
-   the canonical numbering, and a tessellation loaded from it -- by buildTessellation or by the composite '--serve',
-   ps_serve.cc -- needs no pass), so every reader -- the CPU deposit and its walks, the GPU extraction and kernel, the
-   vertex densities, the point evaluation, '--serve' -- sees one numbering whatever the insertion order:
-   - the vertices sorted by their Lagrangian position (CGAL's own points; x, then y, then z), which a tessellation
-     holds once each, so the order is strict;
-   - where that sort is an ODD permutation of CGAL's numbering, the last two swapped back. CGAL numbers every finite
-     cell with positive orientation, and the deposits read the sign of the Eulerian edge matrix's determinant as the
-     stream's parity (the folded flag, the caustic parity bits, r3d's orientation swap, the kernels' fold test); an
-     even permutation keeps that sign. Two CGAL numberings of one cell differ by an even permutation, so the result
-     depends on the vertex set alone;
-   - each neighbour moves with its vertex (neighbor(i) stays opposite vertex(i)), and every vertex's cell pointer
-     stays valid (the cell still holds the vertex). No cell is created, freed or moved, so the iteration orders and
-     every handle stay as they are. PS-DTFE inserts, removes or locates nothing afterwards, and the tessellation
-     cache's writer and reader keep every cell's vertex and neighbour slots (tessellation_cache.h).
-   A Lagrangian periodic copy is an exact shift of its original where the seam allows one (subpartition.h
-   psPeriodicSeam), which keeps the order, so a copy of a tetrahedron takes its original's frame; on the fallback
-   seam a copy can round off its original, but identical runs make the same copies and so still repeat. The
-   deposits' samples are grid points and their containment test is exact and labelling-free (ps_exact_inside.h): the
-   order changes no realization, only the rounding.
-   One thread per tessellation on purpose: CGAL keeps the compact container's bookkeeping in a cell's neighbour slot
-   (Triangulation_ds_cell_base_3::for_compact_container, N[0]), so renumbering a cell while another thread's iterator
-   walks past it would be a data race. */
+/* PS-DTFE: the canonical vertex order of the tessellation's cells: every per-tetrahedron quantity (formed in the
+   vertex-0 frame) then rounds the same whatever CGAL's insertion history was. Vertices sort by Lagrangian position;
+   an odd permutation gets the last two swapped back, so CGAL's positive orientation (the stream parity) is kept. */
 
 #ifndef PS_VERTEX_ORDER_HEADER
 #define PS_VERTEX_ORDER_HEADER
@@ -91,6 +59,8 @@ inline bool psCanonicalCell(Cell_handle const &c)
 }
 
 // The pass over the finite cells; returns how many it renumbers (none for a tessellation of lower dimension).
+// One thread per tessellation: CGAL keeps the compact container's bookkeeping in a cell's neighbour slot, so
+// renumbering a cell while another thread's iterator passes it would be a data race.
 inline size_t psCanonicalVertexOrder(DT &dt)
 {
     if ( dt.dimension() != NO_DIM ) return 0;
@@ -107,8 +77,7 @@ inline size_t psCanonicalVertexOrder(DT &dt)
     return changed;
 }
 
-// The pass after a tessellation is built (triangulation.cpp buildTessellation; one loaded from the cache holds the
-// order already), timed as its own phase ("canonical vertex order" in the phase totals).
+// The pass after a tessellation is built; a tessellation loaded from the cache holds the order already.
 inline void psVertexOrderPass(DT &dt, User_options &userOptions)
 {
     Timer t;

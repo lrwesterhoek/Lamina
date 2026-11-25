@@ -22,13 +22,8 @@
 
 
 /*
-    Runtime user messages, filtered by 'verboseLevel':
-        3 - all messages, including progress
-        2 - user messages, warnings and errors
-        1 - warnings and errors only
-        0 - errors only
-    Messages are streamed with operator<<, e.g. Message m(level); m << "x = " << 10 << "\n";
-*/
+    Runtime user messages, filtered by 'verboseLevel' (3 all, incl. progress; 2 user messages, warnings, errors; 1 warnings
+    and errors; 0 errors only). Streamed with operator<<, e.g. Message m(level); m << "x = " << 10 << "\n"; */
 
 
 #ifndef MESSAGE_HEADER

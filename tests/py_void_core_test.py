@@ -1,22 +1,6 @@
 #!/usr/bin/env python3
-"""Tests for the void-catalogue core (dtfelib.pipeline / catalog, config):
-
-  * the three R_v definitions (catalog.R_V_DEFINITIONS: crossing, delta08, ridge) from one shell matrix
-    (pipeline.void_radii_cells) on an analytic compensated void, the crossing bit for bit void_radius_cells';
-  * catalog.r_v_cells / r_v_mpc per definition (NaN without the key), the export's radius columns and provenance;
-  * the R_v settings in the cache identity: a catalogue without them, or with other ones, is re-measured once
-    (the smoothed field read, the Hessian not), then served silently;
-  * DTFE_CACHE_DIR and DTFE_VOID_GATE (config at import; the gate applied to the served dict, never to the cache,
-    and tagged through pipeline.smoothing_tag).
-  * config.CROSSBOX_SMOOTHING_MPC, the one cross-box smoothing, and the R_v search cap of 24 sigma.
-  * the R_v search's half-box margin with the reach recorded; the cache folder setting, 'analyze.py cache
-    --move' and the setup's offer to keep the caches out of iCloud Drive.
-
-SYNTHETIC tests always run (CI: no data); the DATA-BACKED one (TNG100-3-Dark z = 0 under DTFE_DATA_ROOT) is skipped
-when DTFE_DATA_ROOT is unset or the snapshot is not on disk.
-
-Usage:  python3 tests/py_void_core_test.py            (exit 0 = pass)
-"""
+"""Tests for the void-catalogue core (dtfelib.pipeline / catalog, config): * the three R_v definitions.
+Usage:  python3 tests/py_void_core_test.py            (exit 0 = pass)"""
 
 import atexit
 import io
@@ -314,8 +298,8 @@ def t_env_overrides():
 
 def t_real_tng100_z0():
     """TNG100-3-Dark z = 0 (under DTFE_DATA_ROOT): the served catalogue carries the current R_v settings and all
-    three radii; the crossing median of the distinct voids is 7.42 Mpc (6.94 under a 15-sigma cap). A fresh
-    interpreter (DTFE_SIM decides config's frame); the shared cache is read, or re-measured once if stale."""
+    three radii. A fresh interpreter (DTFE_SIM decides config's frame); the shared cache is read, or re-measured once
+    if stale."""
     from dtfelib.cli import sim_dir
     if not (sim_dir("TNG100-3-Dark", data_root()) / "snapdir_099").is_dir():
         raise Skip("TNG100-3-Dark snapdir_099 not on disk")
@@ -358,10 +342,8 @@ def t_crossbox_constant():
 
 
 def t_r_v_cap():
-    """The R_v search cap: 24 sigma, not 15 (17-25% of the underdense minima have no crossing within
-    15 sigma), never above half the production box minus a sigma. A void negative out to 20 sigma (40 cells at sigma
-    = 2, in a 128^3 box whose L/2 = 64 cells is not what binds): its crossing is measured, ~40 cells; under a
-    15-sigma cap (30 cells) it would be NaN."""
+    """The R_v search cap: 24 sigma, not 15 (17-25% of the underdense minima have no crossing within 15 sigma), never
+    above half the production box minus a sigma."""
     import config
     from dtfelib import pipeline
     n, sig = 128, 2.0
@@ -378,12 +360,8 @@ def t_r_v_cap():
 
 
 def t_r_v_half_box_margin():
-    """The R_v search's half-box clause has a sigma's margin, min(cap sigma, L/2 - sigma), and
-    the catalogue records the reach it searched (r_v_settings' sixth element) rather than an algorithm number. A
-    catalogue recorded WITHOUT a reach (a legacy cache) is served as it is where the margin changes
-    nothing (cap sigma <= L/2 - sigma: the production 10 cells at 512^3) and re-measured, once, where it binds (a large
-    sigma). The fixture: 48^3, sigma = 1 cell; cap 24 reaches L/2 = 24 (no margin) but not L/2 - sigma = 23; a
-    cap of 10 is short of both."""
+    """The R_v search's half-box clause has a sigma's margin, min(cap sigma, L/2 - sigma), and the catalogue records
+    the reach it searched (r_v_settings' sixth element) rather than an algorithm number."""
     import config
     from dtfelib import pipeline
     # the rule itself, on the real namespaces' numbers
@@ -456,12 +434,9 @@ def _synthetic_cache(root):
 
 
 def t_cache_move():
-    """'analyze.py cache --move DIR' on a synthetic cache: a dry run by default (nothing
-    moved, no setting); refused while a cache user runs, into a folder holding a namespace of the same name, or when a
-    copy does not verify (the old cache untouched, no partial copy left); with --yes every entry moved byte for byte,
-    the source removed, the setting recorded -- and a NEW interpreter's config.CACHE_DIR is the moved folder,
-    with DTFE_CACHE_DIR still first. cache_users: an analysis python counts, an
-    editor on analyze.py does not, nor this process and its ancestors; a DTFE binary does."""
+    """'analyze.py cache --move DIR' on a synthetic cache: a dry run by default (nothing moved, no setting); refused
+    while a cache user runs, into a folder holding a namespace of the same name, or when a copy does not verify
+    (the old cache untouched, no partial copy left)"""
     import config
     import analyze
     root = Path(tempfile.mkdtemp(prefix="void_core_move_"))
@@ -557,10 +532,9 @@ def t_cache_move():
 
 
 def t_setup_wizard_cache_offer():
-    """The setup's first page offers to keep the caches outside iCloud Drive only while
-    the repository is synced AND the caches are inside it (config.icloud_cache_offer: ~/Library/Caches/DTFE on macOS,
-    ~/.cache/dtfe elsewhere), and its button runs analyze.py's own move (cache_move_command), here on a synthetic
-    cache: moved, the setting recorded, this process pointed at the new folder. Needs PySide6 (skipped without)."""
+    """The setup's first page offers to keep the caches outside iCloud Drive only while the repository is synced AND
+    the caches are inside it (config.icloud_cache_offer: ~/Library/Caches/DTFE on macOS, ~/.cache/dtfe elsewhere),
+    and its button runs analyze.py's own move (cache_move_command), here on a synthetic cache."""
     import config
     try:
         from PySide6.QtWidgets import QApplication

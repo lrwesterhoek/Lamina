@@ -1,7 +1,6 @@
 """The Plots tab's job, moved out of runspec.py: PlotSpec, the figure scripts in python/plot (and analyze.py), one
 step per script call, built from the declarative figure sets that stay in runspec (FIGURE_SETS, Opt, the void
-scripts' default options). runspec re-exports it and is the module to import; this one reads runspec's own names
-through it at call time (_rs.NAME)."""
+scripts' default options). runspec re-exports it and is the module to import."""
 
 from __future__ import annotations
 
@@ -45,9 +44,7 @@ class PlotSpec:
 
     def _snap_estimator(self, n: int) -> str:
         """'ps' or 'dtfe' for snapshot n: the estimator chosen, else what a script's FieldSet(method='auto') loads
-        there (a grid prefix means PS-DTFE; PS-DTFE grids when present, else standard DTFE): turning 'auto' into 'ps'
-        would fail the void catalogue build on every snapshot of a box with standard-DTFE grids only, which its
-        check accepts."""
+        there."""
         if self.method in ("ps", "dtfe"):
             return self.method
         sd = self.sim_path() / f"snapdir_{n:03d}"
@@ -57,9 +54,7 @@ class PlotSpec:
 
     def _pts_prefix(self, n: int) -> str:
         """The '.pts_*' prefix (without the dot) the point-evaluated sets read for snapshot n: the grid prefix when
-        one is set, else the estimator's own (output for standard DTFE); with 'auto' the slice that is there, PS-DTFE
-        first, as plot_pointeval.py picks it: assuming ps_output would leave a standard-DTFE hi-res slice beside
-        PS-DTFE grids unrenderable from the launcher."""
+        one is set, else the estimator's own (output for standard DTFE)."""
         if self.prefix:
             return self.prefix
         if self.method in ("ps", "dtfe"):
@@ -144,11 +139,9 @@ class PlotSpec:
                 self._numbers(self.opt("voidpop", "fixed_r_smooth_mpc")))
 
     def _fixed_r_step(self, base: list[str], env: dict[str, str]) -> _rs.Step:
-        """The Void population set's size function at fixed R: its own call, since the script's
-        --size-fixed-r makes ONLY that figure (the population figures stay in their step, under the caller's gate),
-        and UNGATED in its own environment: the script refuses it under the ellipsoid gate. A copy of env, which
-        every step of the job shares. The estimator and grid prefix only: the smoothings are its own (the common
-        --smooth and the population's --smooth-mpc would only mislead), and so are its snapshots (z = 0, 0.5, 1, 2)."""
+        """The Void population set's size function at fixed R: its own call, since the script's --size-fixed-r makes
+        ONLY that figure (the population figures stay in their step, under the caller's gate), and UNGATED in its
+        own environment: the script refuses it under the ellipsoid gate."""
         cells, mpc = self._fixed_r_smoothings()
         a = base + ["--sim", self.sim]
         if self.method != "auto":

@@ -1,9 +1,6 @@
 """The measured void radius R_v and its two companions, from ONE matrix of shell means of the smoothed delta about
-each minimum (void_radii_cells): the crossing (the first up-crossing of the mean: THE R_v), delta08 (where the
-enclosed contrast reaches -0.8) and the compensation ridge; the record a catalogue keeps of the settings they were
-measured with (r_v_settings, r_v_record) and the check a cache is read against (catalog_r_v_ok); the distinct voids
-(distinct_voids). Moved out of dtfelib.pipeline, which re-exports every name: setting one of the R_V_* knobs on
-pipeline (pipeline.R_V_MAX_SIGMA = ...) sets it here too."""
+each minimum (void_radii_cells): the crossing (the first up-crossing of the mean: THE R_v), delta08 and the
+compensation ridge; their settings record and cache check; and the distinct voids (distinct_voids)."""
 
 from __future__ import annotations
 
@@ -14,36 +11,24 @@ import config
 
 R_V_STEP_SIGMA = 0.2      # radial step of the R_v search, in smoothing lengths (the crossing is interpolated)
 R_V_MAX_SIGMA = 24.0      # how far out it looks (capped at half the box)
-# Why 24 (15 = 32.4 Mpc on TNG100): at 15 sigma 17-25% of the underdense minima of TNG100-3-Dark and
-# TNG50-3-Dark (z = 0, 1, 3, 5; 10-cell smoothing) have NO crossing within reach (NaN, 88-104 per catalogue) or cross
-# in its last sigma, 8-17% of the well-resolved ones -- the R_v tail is cut, not measured. Same count at 20 / 24 / 25
-# sigma / L/2: 5-8% / 1.1-2.6% / 0.6-1.8% / 0.4-1.2% (well-resolved 4-8% / 0-2.9% / 0-2% / 0-2%). Half the 512^3 box is
-# 25.6 sigma at 10 cells; 24 is the largest whole cap a sigma short of it (shells beyond L/2 meet the centre's periodic
-# images; within the last sigma the smoothed field already feels them). The distinct-void median crossing R_v
-# (Mpc, 15 -> 24 sigma) at z = 0 / 1 / 3 / 5: TNG100 6.94 -> 7.42 / 7.59 -> 7.85 / 6.82 -> 7.64 / 6.27 -> 6.79,
-# TNG50 2.82 -> 2.88 / 3.41 -> 3.98 / 3.68 -> 3.97 / 3.13 -> 3.73, and 6-13% more distinct voids (TNG100 z = 0: 77 ->
-# 83) as fewer deep voids lack a radius. It is in r_v_settings, so a catalogue measured otherwise is re-measured once
-# (~15 s and 2.4 GB per 512^3 snapshot: reading and smoothing the grid; the shells themselves 1-2 s). The half-box
-# clause has a sigma's margin of its own (r_v_reach_cells: min(cap sigma, L/2 - sigma); min(cap sigma, L/2) would let
-# a large-sigma search run right up to the centre's periodic images: TNG50 at 2.1625 Mpc = 21.4 cells would reach
-# exactly 256 cells, not 234.6). The margin changes nothing while cap sigma <= L/2 - sigma, i.e. sigma <=
-# 10.24 cells at 512^3 (the production 10 included), so the catalogue records the reach it searched (r_v_settings'
-# sixth element) instead of a new algorithm number: a cache without one is served when the current reach equals the
-# margin-free rule's and re-measured only where the margin binds (catalog_r_v_ok).
+# R_V_MAX_SIGMA = 24: at 15 sigma 17-25% of the underdense minima have no crossing within reach, so the R_v tail
+# is cut, not measured (fitted on TNG100-3-Dark and TNG50-3-Dark, z = 0, 1, 3, 5, 10-cell smoothing). 24 is the
+# largest whole cap a sigma short of L/2 at 10 cells (512^3). The half-box clause keeps a sigma's margin
+# (r_v_reach_cells: min(cap sigma, L/2 - sigma)); the catalogue records the reach it searched (r_v_settings'
+# sixth element), so a cache without one is re-measured only where the margin binds (catalog_r_v_ok).
 R_V_DIRS = 128            # Fibonacci directions per shell
 R_V_DELTA08 = -0.8        # the enclosed contrast of the 'delta08' radius: shell crossing of the spherical model
                           # (nonlinear -0.8 <-> linear -2.71; Sheth & van de Weygaert 2004)
-# The R_v ALGORITHM, bumped by hand when the measurement changes (a cache records it, r_v_settings, and is re-measured
-# when it differs): 1 = the first up-crossing alone, the loop stopping at it; 2 = the
-# full shell matrix out to the search range, giving the crossing (bit-identical to 1), delta08 and ridge.
+# The R_v ALGORITHM, bumped by hand when the measurement changes (a cache records it and is re-measured when it
+# differs): 1 = the first up-crossing alone; 2 = the full shell matrix out to the search range (crossing bit-identical
+# to 1, plus delta08 and ridge).
 R_V_ALGORITHM = 2
 
 
 def r_v_settings() -> np.ndarray:
-    """What a catalogue's radii were measured with, as it records them ('r_v_settings'): [step in sigma, reach in
-    sigma, directions, algorithm, delta08 threshold]. Read at call time, so a changed module constant counts. A
-    catalogue's record carries a sixth element, the reach in cells it searched
-    (r_v_record); these five are the settings every other reader keys on (exports, the fate links)."""
+    """What a catalogue's radii were measured with ('r_v_settings'): [step in sigma, reach in sigma, directions,
+    algorithm, delta08 threshold]. Read at call time. A catalogue's record carries a sixth element, the reach in
+    cells it searched (r_v_record)."""
     return np.array([R_V_STEP_SIGMA, R_V_MAX_SIGMA, R_V_DIRS, R_V_ALGORITHM, R_V_DELTA08], dtype=np.float64)
 
 
@@ -63,13 +48,8 @@ def r_v_record(sigma_cells: float, n: int) -> np.ndarray:
 
 def catalog_r_v_ok(cat: dict, sigma_cells: float | None = None, n: int | None = None) -> bool:
     """Whether a catalogue's radii were measured with the current settings (r_v_settings) out to the current reach
-    (r_v_reach_cells for sigma_cells / n: config's smoothing and grid by default, the namespace the catalogue lives
-    in) and it holds all three (catalog.R_V_DEFINITIONS). A cache without a record: not ok,
-    re-measured once (else a changed R_V_MAX_SIGMA or algorithm would leave every cache with stale
-    radii and NaNs). A record of the five settings alone (no reach) is ok
-    when the margin-free half-box rule reaches as far as the current one does -- every sigma <= 10.24 cells at 512^3,
-    the production
-    smoothing included -- so the margin re-measures only the catalogues it changes."""
+    (r_v_reach_cells) and it holds all three definitions. A cache without a record is re-measured once; a record
+    of the five settings alone is ok when the margin-free half-box rule reaches as far as the current one."""
     if 'r_v_settings' not in cat or any(k not in cat for k in ('r_v_cells', 'r_v_delta08_cells', 'r_v_ridge_cells')):
         return False
     have = np.asarray(cat['r_v_settings'], dtype=np.float64).reshape(-1)
@@ -106,9 +86,8 @@ def r_v_stale_reason(cat: dict, sigma_cells: float | None = None, n: int | None 
 
 def _enclosed_contrast(radii, shells):
     """Delta(<r) at every radius of 'radii' (r_0 = 0 first) from the shell means 'shells' (rows = voids, column 0 =
-    the value at r = 0): delta taken piecewise LINEAR in r between the shells and r^2 dr integrated exactly over each
-    piece, so a constant profile gives Delta = that constant (a trapezoid on r^2 delta gives 1.5x it at the first
-    shell). Column 0 is the central value itself."""
+    the value at r = 0): delta piecewise LINEAR in r between the shells and r^2 dr integrated exactly over each
+    piece, so a constant profile gives Delta = that constant."""
     a, b = radii[:-1], radii[1:]
     va, vb = shells[:, :-1], shells[:, 1:]
     d3 = (b ** 3 - a ** 3) / 3.0
@@ -121,22 +100,9 @@ def _enclosed_contrast(radii, shells):
 
 
 def void_radii_cells(delta_s: np.ndarray, coords, sigma_cells: float) -> dict[str, np.ndarray]:
-    """The three measured radii per minimum, in cells, from ONE matrix of shell means of the SMOOTHED delta
-    (trilinear, R_V_DIRS directions about the minimum's cell centre, every R_V_STEP_SIGMA sigma out to R_V_MAX_SIGMA
-    sigma or half the box less a sigma, r_v_reach_cells; column 0 the minimum itself at r = 0)
-    (catalog.R_V_DEFINITIONS):
-      'r_v_cells'          the first up-crossing of 0 (the mean), linearly interpolated from the last negative shell
-                           -- void_radius_cells, bit for bit;
-      'r_v_delta08_cells'  where the enclosed contrast Delta(<R) (_enclosed_contrast) first reaches R_V_DELTA08 going
-                           outward, interpolated likewise; NaN when the minimum itself is not below it (no sphere
-                           about it is that empty: on a field smoothed at sigma this is the common case for shallow
-                           minima) or it is not reached within reach;
-      'r_v_ridge_cells'    the radius of the MAXIMUM of the shell mean over the search range (the compensation ridge),
-                           refined by a parabola through it and its neighbours; NaN when the maximum is the outermost
-                           shell (the profile still rising: the range truncated it, no ridge was seen).
-    All three NaN for a minimum that is not underdense (delta_s >= 0). The question behind delta08 and the ridge:
-    is the z < 3 shrinkage of the crossing R_v a property of the voids or the first-crossing rule latching onto an
-    inner wall? A void whose crossing R_v falls while delta08 and the ridge hold is the latter."""
+    """The three measured radii per minimum, in cells, from ONE matrix of shell means of the SMOOTHED delta:
+    'r_v_cells' the first up-crossing of 0, 'r_v_delta08_cells' where Delta(<R) first reaches R_V_DELTA08,
+    'r_v_ridge_cells' the maximum of the shell mean (NaN at the outermost shell). NaN for a non-underdense minimum."""
     from .profiles import fibonacci_sphere, shell_means          # here: profiles imports catalog, which imports this module
     coords = np.asarray(coords, dtype=np.int64).reshape(-1, 3)
     out = {k: np.full(len(coords), np.nan) for k in ('r_v_cells', 'r_v_delta08_cells', 'r_v_ridge_cells')}
@@ -183,29 +149,15 @@ def void_radii_cells(delta_s: np.ndarray, coords, sigma_cells: float) -> dict[st
 
 def void_radius_cells(delta_s: np.ndarray, coords, sigma_cells: float) -> np.ndarray:
     """R_v per minimum, in cells (NaN when there is none): the radius at which the spherically averaged SMOOTHED
-    density contrast around the minimum first rises to 0 -- the underdense region the void is, MEASURED. The
-    ellipsoid's 2 / sqrt|lambda| is where a QUADRATIC rises by a fixed 2 whatever the void's depth, ~1.6x the radius
-    where the stacked density reaches the mean, v_r turns to infall and the single-stream fraction bottoms out
-    (TNG100 z = 0). Shell means of delta_s (trilinear, R_V_DIRS directions, centred on the minimum's
-    cell centre) every R_V_STEP_SIGMA sigma out to R_V_MAX_SIGMA sigma or half the box; the crossing linearly
-    interpolated from the last negative shell (from r = 0: the minimum itself). Defined at every redshift (delta_s
-    < 0 at a void's minimum); NaN for a minimum that is not underdense or never reaches 0 within reach. The
-    'crossing' of void_radii_cells (one shell matrix gives all three definitions)."""
+    density contrast first rises to 0, linearly interpolated from the last negative shell (trilinear shell means,
+    R_V_DIRS directions). NaN for a minimum that is not underdense or never reaches 0. The 'crossing' of void_radii_cells."""
     return void_radii_cells(delta_s, coords, sigma_cells)['r_v_cells']
 
 
 def distinct_voids(coords, delta_values, r_v_cells, n_grid: int, r_eff_cells=None) -> np.ndarray:
     """Which of the given voids are DISTINCT: deepest first, a void whose centre lies inside the region a deeper void
-    already kept claims is a sub-minimum of the same underdense region (periodic distances, cells). With r_eff_cells
-    (catalog.distinct_mask always passes it) each void CLAIMS the sphere of min(R_v, R_eff) (a missing one ignored),
-    so a void without R_v still takes part with its R_eff, and the tail of the deepest voids, whose R_v reaches 1.2-3
-    R_eff (84th percentile R_v/R_eff 1.2-1.5), does not swallow 20-27% of the sample (R_v spheres alone, TNG300 z=0:
-    11 voids with R_v > 10 sigma drop 99 of 365). Without it the claim is the R_v sphere alone, and a void without
-    R_v is not distinct and claims no region. Meant for the WELL-RESOLVED voids (catalog.distinct_mask runs it over
-    all of them, then narrows the result to the caller's sample):
-    the smoothed field's minima within an 11-cell footprint often share one void -- 63% of the TNG100 z=0
-    resolved voids have another centre within R_eff -- while over ALL minima a few deep ones that fail the cut,
-    with R_v up to 14 sigma, would swallow three quarters of the resolved sample (24 of 103 left)."""
+    already kept claims is a sub-minimum of the same region (periodic, cells). With r_eff_cells each void CLAIMS the
+    sphere of min(R_v, R_eff); without it the R_v sphere alone. Meant for the WELL-RESOLVED voids."""
     coords = np.asarray(coords, dtype=np.float64).reshape(-1, 3)
     r_v = np.asarray(r_v_cells, dtype=np.float64).reshape(-1)
     if r_eff_cells is not None:

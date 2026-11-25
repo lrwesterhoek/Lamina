@@ -1,30 +1,10 @@
-/*  The run's progress sidecar: '<output>.runlog.progress', a small JSON file the binary rewrites
-    at every phase change and after every partition, so the launcher (and a phone, through the Runs tab) can
-    follow a run started from a terminal without parsing a 200 KB log. The run directory contract:
+/* The run's progress sidecar '<output>.runlog.progress': a small JSON file ({pid, phase, done, total, elapsed_s, eta_s,
+   rss_gb, gpu_retries, gpu_retries_by_cause, predicted_gb, peak_gb, updated}) rewritten at every phase change and
+   partition so the launcher can follow a run. Memory is in GB of 1e9 bytes, -1 = unknown. */
 
-        {"pid":..,"phase":"..","done":..,"total":..,"elapsed_s":..,"eta_s":..,"rss_gb":..,
-         "gpu_retries":..,"gpu_retries_by_cause":{"innocent":..,"timeout":..,"oom":..,"other":..},
-         "predicted_gb":..,"peak_gb":..,"updated":<unix time>}
-
-    predicted_gb is the auto-tuner's predicted peak (-1 when it decided nothing: '--partition' and
-    '--max-concurrent' both given) and peak_gb the measured peak so far -- the peak physical footprint on macOS
-    (what /usr/bin/time -l calls 'peak memory footprint': it counts Metal's shared buffers, which RSS can miss),
-    the maximum RSS elsewhere -- both in GB of 1e9 bytes, the tuner's unit (main.cpp's SUMMARY prints the pair
-    too). eta_s is -1 when unknown. gpu_retries is the total of gpu_retries_by_cause, by construction:
-    the sidecar writes the sum of the four counters it prints (psGpuRetries -- dtfeGpuRetries in the standard binary,
-    which counts its GPU retries the same way --, the hosts' own total, is for the
-    closing log line, written after the partitions with no failure in flight): an innocent
-    victim (another process hung the GPU; retried at once), a timeout (a watchdog kill: Metal's
-    Impacting Interactivity), out of memory, anything else. Written atomically ('.tmp.<pid>' then rename), so a reader never sees half a
-    file; removed when the run finishes successfully (main.cpp) and when it stops on an error: throwError
-    ends in exit(), which runs the atexit handler below but not main()'s destructors, so the removal cannot be
-    a guard object in main. A sidecar that remains therefore belongs to a run that is still going, one that
-    died (a SIGKILL or out-of-memory kill, another fatal signal, an abort: none runs an atexit handler; its pid
-    then no longer exists), or one whose outputs went to the rescue folder or could not be put in place (exit 3,
-    phase 'rescued': kept on purpose, the evidence that the outputs are not where the launcher looks). A run
-    that failed with a message leaves only its run log, which says so. Off for '--serve' and
-    '--auto-tune-report', which compute no grid, and with DTFE_PROGRESS=0. Header-only: the state is
-    one function-local static shared by DTFE.cpp and main.cpp. */
+/* Written atomically ('.tmp.<pid>' then rename). Removed on success and by the atexit handler on an error (throwError
+   ends in exit(), which skips main()'s destructors); a leftover means a live or killed run, or phase 'rescued' (exit 3:
+   outputs not where the launcher looks). Off for '--serve', '--auto-tune-report' and DTFE_PROGRESS=0. Header-only. */
 #ifndef RUN_PROGRESS_H
 #define RUN_PROGRESS_H
 
@@ -45,15 +25,12 @@
 #include "env_knobs.h"
 
 #ifdef PHASE_SPACE
-// failed GPU command buffers (each one resumes the pass from its last checkpoint; 3 failures of one chunk send
-// the partition to the CPU);
-// counted by the GPU host (ps_metal_host.cc), defined in ps_interpolation.cc
+// failed GPU command buffers (3 failures of one chunk send the partition to the CPU), counted by the GPU host
+// (ps_metal_host.cc), defined in ps_interpolation.cc
 extern std::atomic<int> psGpuRetries;
 extern std::atomic<int> psGpuRetriesByCause[4];   // innocent, timeout, oom, other
 #else
-// the standard binary's: the same policy in its GPU host (dtfe_metal_host.cc: a
-// failed buffer resumes the sub-domain's batch from its last checkpoint; 3 failures of one chunk send the
-// sub-domain to the CPU), defined in averaged_interpolation_1.cc -- zero in a CPU-only build
+// the standard binary's, same policy (dtfe_metal_host.cc), defined in averaged_interpolation_1.cc; zero in a CPU-only build
 extern std::atomic<int> dtfeGpuRetries;
 extern std::atomic<int> dtfeGpuRetriesByCause[4];   // innocent, timeout, oom, other
 // the sub-domain deposits since the last reset that were meant for the GPU (asked or picked) and ran on the CPU instead
@@ -151,12 +128,9 @@ inline void runProgressNoteLoopPeak()
     p.loopPeak = peak;
 }
 
-// the peak once the partition loop has sized its full grids, before its first partition (std_partitioned_run.cc,
-// ps_partitioned_run.cc): under --scratch-dir on macOS each scratch-backed grid is filled with zeros in anonymous
-// memory before its file is mapped over it (scratch_alloc.h ZeroFillScope), and the largest of them beside the
-// particles can be the run's peak (TNG100-3-Dark at 1024^3: 42.08 GB, against a loop of ~32). 'before' is the peak
-// read just before the sizing (runProgressPeak), so the SUMMARY can tell the sizing's peak from an earlier one (the
-// input's read). Read once.
+// the peak once the partition loop has sized its full grids, before its first partition: under --scratch-dir on macOS
+// each scratch-backed grid is zero-filled in anonymous memory first (scratch_alloc.h ZeroFillScope), which can be the
+// run's peak. 'before' is the peak read just before the sizing, so the SUMMARY can tell the two apart. Read once.
 inline void runProgressNoteStartPeak(double const before)
 {
     double const peak = runProgressPeak();
@@ -236,12 +210,9 @@ inline void runProgressWriteLocked(RunProgress &p)
         std::remove( tmp.c_str() );
 }
 
-// exit() of a run still armed (an error: throwError, a writer that could not open its file): the sidecar goes, so
-// the launcher reads the failure from the run log instead of showing a death. The lock is only tried: a worker's
-// throwError may call exit() while another thread is mid-write, and then the file goes all the same (the path is
-// fixed after runProgressInit, and 'on' only ever turns off). Threads keep running during exit(), so a write in
-// flight can still put the file back in that window; that is accepted. No logging here: exit() may have cut a
-// message in half.
+// exit() of a run still armed (an error: throwError): the sidecar goes, so the launcher reads the failure from the
+// run log. The lock is only tried: a worker's throwError may call exit() mid-write of another thread; a write in
+// flight can still put the file back in that window (accepted). No logging here: exit() may have cut a message.
 inline void runProgressAtExit()
 {
     RunProgress &p = runProgressState();
@@ -292,8 +263,7 @@ inline void runProgressFinish()
     p.on = false;
 }
 
-// the outputs are in the rescue folder or could not be put in place (exit 3): the 'rescued' sidecar stays, so the
-// exit handler must not take it and nothing writes over it
+// the outputs are in the rescue folder or could not be put in place (exit 3): the 'rescued' sidecar stays and nothing writes over it
 inline void runProgressDisarm()
 {
     RunProgress &p = runProgressState();

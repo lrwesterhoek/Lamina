@@ -1,28 +1,6 @@
-"""Resolution and estimator convergence of the void statistics (plot/plot_void_convergence.py draws it).
-
-Are the R_v distribution, the distinct-void abundance and the stacked profiles a property of the voids, or of the
-grid / particle mass / field estimator they were measured with? Three comparisons, all at ONE physical smoothing
-length (the void catalogue's sigma in Mpc), each with the pipeline's own definitions (pipeline.build_void_catalog:
-minima, Hessian, ellipsoid fits and gate, the three R_v; catalog.distinct_mask: the abundance sample):
-
-  * GRID resolution: the snapshot's density grid (rho / rho_bar, a cell AVERAGE for both estimators) block-averaged
-    by a factor f (512^3 -> 256^3, 128^3) is exactly the cell average on the coarser grid, so a catalogue built from
-    it (coarse_catalog, at the same sigma in Mpc, the footprint following it as for --smooth-mpc) is what a coarser
-    run would give from the same particles. Matched void by void with the native catalogue (match).
-  * MASS resolution: different boxes (TNG50-3 / TNG100-3 / TNG300-3) at a common sigma; distribution level only
-    (different initial conditions), from plot_void_crossbox.py's per-box products.
-  * ESTIMATOR: DTFE against PS-DTFE on the same snapshot (both grids present), matched void by void (match).
-
-Matching uses dtfelib.voids.match_catalog_void (periodic nearest centre), within a radius in smoothing lengths;
-it is done both ways, so the reference voids WITHOUT a partner (lost by the test) and the test voids without one
-(born of it) are both counted, and 'mutual' marks pairs that are each other's nearest.
-
-The coarse catalogue cannot go through SnapshotProducts.voids(): every catalogue function reads the frame (cell,
-grid, sigma in cells, footprint) from config at call time and voids() refuses a grid that is not config's frame.
-frame() sets that frame for the coarse grid and restores it whatever happens; the coarse catalogue is cached under
-the coarse frame's own namespace (pipeline.cache_dir() inside frame(): 'r256_s5_f5_...'), named '..._voids_block<f>'
-so it never poses as a real 256^3 run's, with the native density grid's stamp (rebuilt when that grid changes).
-"""
+"""Resolution and estimator convergence of the void statistics (plot/plot_void_convergence.py draws it): grid
+resolution by block-averaging the density grid, mass resolution across boxes, and DTFE against PS-DTFE, matched
+void by void (voids.match_catalog_void) at one physical smoothing length. coarse_catalog runs inside frame()."""
 
 from __future__ import annotations
 
@@ -88,9 +66,8 @@ def velocity_weighting(products) -> tuple[str, str]:
 
 def block_average_velocity(velocity, density, factor: int, weighting: str = "volume") -> np.ndarray:
     """The coarse cell's velocity from a (N,N,N,3) velocity grid as a coarser run of the same deposit gives it:
-    'volume' (a volume-weighted deposit: standard DTFE's and PS-DTFE's, velocity_weighting) the plain block mean;
-    'mass' (an older PS-DTFE run made without --ps-volume-weighted) the MASS-weighted block mean (sum rho v / sum rho
-    over each block; the plain mean where a block holds no mass)."""
+    'volume' (volume-weighted deposit) the plain block mean; 'mass' the MASS-weighted block mean (plain mean
+    where a block holds no mass)."""
     if weighting not in VELOCITY_WEIGHTINGS:
         raise ValueError(f"block_average_velocity: weighting must be one of {VELOCITY_WEIGHTINGS}, got {weighting!r}")
     f = int(factor)
@@ -174,11 +151,9 @@ def centres_frac(cat, rows, n_grid: int) -> np.ndarray:
 
 
 def match(ref_cat, ref_rows, ref_n: int, test_cat, test_rows, test_n: int, box_mpc: float, max_dist_mpc: float) -> dict:
-    """Void-by-void matching of the reference sample (ref_rows of ref_cat, an n_grid ref_n catalogue) to the test
-    sample, by centre (voids.match_catalog_void: periodic nearest, within max_dist_mpc). Per reference void:
-    'test' (row of test_cat or -1), 'dist_mpc' (to the nearest test centre, matched or not), 'mutual' (the test void's
-    nearest reference void is this one), the two crossing R_v and central deltas ('r_v_ref', 'r_v_test', NaN when
-    unmatched; 'delta_ref', 'delta_test'); and 'test_matched' (bool per test row: some reference void matched it)."""
+    """Void-by-void matching of the reference sample (ref_rows of ref_cat) to the test sample by centre
+    (voids.match_catalog_void: periodic nearest, within max_dist_mpc). Per reference void: 'test' (row or -1),
+    'dist_mpc', 'mutual', 'r_v_ref' / 'r_v_test', 'delta_ref' / 'delta_test'; and 'test_matched' per test row."""
     ref_rows, test_rows = np.asarray(ref_rows, int), np.asarray(test_rows, int)
     out = {"ref": ref_rows, "test": np.full(ref_rows.size, -1), "dist_mpc": np.full(ref_rows.size, np.nan),
            "mutual": np.zeros(ref_rows.size, bool), "test_rows": test_rows,

@@ -1,7 +1,6 @@
-"""The Explore tab's drawing widgets (explore.py re-exports them): ImageCanvas, the map -- an RGB array scaled to
-fit, with its axes, scale bar, contour lines, vector arrows, void outlines and the figure grid's panel labels,
-reporting the image pixel under the mouse, clicks and dragged rectangles -- and ColorBar, the map's colour scale with
-its ticks, the contour levels and the quantity's name. Qt and numpy only: no workers, no state of the Explore pane."""
+"""The Explore tab's drawing widgets (explore.py re-exports them): ImageCanvas, the map -- an RGB array scaled to fit,
+with its axes, scale bar, contour lines, vector arrows, void outlines and the figure grid's panel labels, reporting
+the image pixel under the mouse, clicks and dragged rectangles."""
 
 from __future__ import annotations
 
@@ -18,10 +17,7 @@ import grids as G
 
 def segments_path(segs) -> QPainterPath:
     """One QPainterPath of line pieces ((k, 2, 2) arrays, or a list of them): a move to each piece's first end and a
-    line to its second. Read from QDataStream bytes made in numpy -- QPainterPath's stream format: the element count,
-    each element's type and x, y (big-endian int32 and doubles), the start of the last subpath and the fill rule (two
-    int32) -- so a slice's hundreds of thousands of pieces cost no Python loop; built element by element should the
-    stream not give them all back."""
+    line to its second."""
     parts = segs if isinstance(segs, (list, tuple)) else [segs]
     arrs = [np.asarray(s, dtype=np.float64).reshape(-1, 2, 2) for s in parts]
     pts = np.concatenate([a.reshape(-1, 2) for a in arrs]) if arrs else np.zeros((0, 2))
@@ -56,12 +52,8 @@ def contour_paths(per_level, colours) -> list:
 
 def stroke_layer(paths, size: tuple) -> QImage:
     """The contour lines' layer: contour_paths' 'paths' (image pixels) stroked opaque and antialiased on a transparent
-    picture of 'size' = (width, height, device pixel ratio, image width, image height) -- the layer ImageCanvas lays
-    over its map (ImageCanvas.layer_size). The pen is a cosmetic ONE pixel wide: Qt strokes those directly, while a
-    wider pen outlines the whole path first (a slice's hundreds of thousands of pieces take seconds then, not
-    milliseconds); on a high-dpi screen the line is that stroke repeated one device pixel right and one down, about
-    one point wide. Runs on any thread (a QImage): the slice worker strokes a new slice's lines at the size the canvas
-    showed the last one, so a scroll (or the level slider) does not stroke them on the GUI thread."""
+    picture of 'size' = (width, height, device pixel ratio, image width, image height) -- the layer ImageCanvas
+    lays over its map (ImageCanvas.layer_size)."""
     w, h, dpr, iw, ih = size
     layer = QImage(int(w), int(h), QImage.Format_ARGB32_Premultiplied)
     layer.fill(Qt.transparent)
@@ -217,9 +209,7 @@ class ImageCanvas(QLabel):
 
     def _draw_contours(self, p: QPainter, t: QRectF, dpr: float):
         """The contour lines: their layer (stroke_layer) laid over the map at contours.ALPHA -- stroked opaque, as a
-        translucent pen would darken every point where two pieces of a line meet. The layer the slice worker stroked
-        with the lines is taken when it has this size; else (a new size: the window resized, a first slice) it is
-        stroked here. Kept until the lines, the map's place or the screen's scale change (a drag redraws often)."""
+        translucent pen would darken every point where two pieces of a line meet."""
         key = (round(t.left(), 3), round(t.top(), 3), round(t.width(), 3), round(t.height(), 3), dpr,
                self._img.width(), self._img.height())
         held = self._contour_layer
@@ -448,11 +438,8 @@ class ColorBar(QWidget):
         self.classes: tuple[str, ...] | None = None     # a web-class map: its classes' names, by value
 
     def set(self, cmap: str, vrange, label: str, log: bool = False, levels=None, classes=None):
-        """'label' is the full text ('log₁₀ ' included: Save image labels its log10 data with it);
-        'log': the range is in log10 units, the ticks read 10^k. 'levels': the map's contour levels as (positions,
-        colours) -- contours.map_lines' 'levels' and 'colours' -- marked across the bar in the lines' own colours;
-        None (any map without contours) marks none. A web-class map (grids.WEB_CMAP) shows its classes as blocks named
-        by 'classes' (grids.web_classes: the 3D names by default)."""
+        """'label' is the full text ('log₁₀ ' included: Save image labels its log10 data with it); 'log': the range is
+        in log10 units, the ticks read 10^k."""
         self.cmap, self.vrange, self.label, self.log = cmap, vrange, label, bool(log)
         self.levels = levels
         self.classes = (tuple(classes) if classes else G.web_classes(3)) if cmap == G.WEB_CMAP else None

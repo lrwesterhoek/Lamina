@@ -1,23 +1,6 @@
-"""Field maps from POINT EVALUATION of the tessellation ('--sample-points').
-
-The counterpart of the grid slice maps in plot/plot_PS_DTFE.py, and the difference is the
-estimator, not just the pixel count:
-
-  grid slice map   the mass-conserving DEPOSIT grid. Each pixel is the density AVERAGED over
-                   a cubic cell (0.59 Mpc at 512^3 in a 302 Mpc box) and the slice is one
-                   cell THICK. Mass is conserved by construction; this is what every
-                   statistical product (void catalogues, correlations) is built on.
-  point-eval map   the field EVALUATED AT A POINT: for each pixel centre, every tetrahedron
-                   containing it is found and its streams' densities summed (the continuous
-                   'dtfe' estimator by default). No cell average, no thickness -- a true
-                   zero-width cross-section -- and the resolution is limited only by the
-                   tessellation, not by any grid. It is an interpolant, so it does NOT
-                   conserve mass and is not the right input for mass-weighted statistics.
-
-Both are rendered with identical styling (see STYLES) so they can be compared directly.
-Shared by plot/plot_PS_DTFE.py (single snapshot) and plot/plot_pointeval.py (batch);
-the '.pts_*' inputs come from run_ps_pipeline.sh.
-"""
+"""Field maps from POINT EVALUATION of the tessellation ('--sample-points'): the field evaluated at each pixel
+centre, a zero-width cross-section limited only by the tessellation, not the mass-conserving grid deposit of
+plot_PS_DTFE.py. An interpolant, so not for mass-weighted statistics. Shared by plot_PS_DTFE and plot_pointeval."""
 
 from pathlib import Path
 
@@ -27,16 +10,9 @@ import matplotlib.colors as colors
 
 from .io import PointPlane
 
-#: Styling matches the grid slice maps of plot/plot_PS_DTFE.py and plot/plot_DTFE.py -- same
-#: colormaps, colorbar geometry, title/axis conventions and font sizes -- so a point-evaluated
-#: map and a grid map of the same field are visually interchangeable (only the resolution
-#: differs). The colormaps are the grid maps' ones, not free choices:
-#:   density  plasma   dtfelib.figures.CMAP['density'], plot_DTFE.py, plot_PS_DTFE.py
-#:   shear    plasma   CMAP['shear'], plot_DTFE.plot_shear
-#:   velDiv   RdBu_r   CMAP['divergence'], plot_DTFE.plot_divergence
-#:   streams  inferno  plot_PS_DTFE.plot_streams
-#:   |v|, dispersion, and the other velocity-derived scalar MAGNITUDES: magma, the
-#:            plot_PS_DTFE.plot_scalar_log convention those panels are drawn with.
+#: Styling matches the grid slice maps of plot/plot_PS_DTFE.py and plot/plot_DTFE.py (colormaps, colorbar
+#: geometry, fonts), so a point-evaluated map and a grid map are interchangeable. Colormaps: density and shear
+#: plasma, velDiv RdBu_r, streams inferno, |v|, dispersion and other velocity magnitudes magma.
 #: field -> (title, colormap, norm kind, colorbar label)
 STYLES = {
     "density":    ("Density",                     "plasma",  "log",    r"Density $\rho/\bar{\rho}$"),
@@ -53,22 +29,15 @@ STYLES = {
 #: projection axis -> the slice-plane name plot_PS_DTFE.py uses for its grid maps
 PLANE_NAME = {"x": "yz_plane", "y": "xz_plane", "z": "xy_plane"}
 
-#: Fields whose LOW END IS A TRUE NULL, where a black floor is meaningful: 90% of a z=0
-#: slice sits at exactly 1 stream / exactly zero dispersion, so black reads correctly as
-#: "single-stream, no shell crossing here" (and matches the literature's N_streams panels).
-#: Every OTHER field is positive everywhere -- its minimum is a real measurement, not an
-#: absence -- so rendering it black makes real data look like missing data. Those get the
-#: colormap's black floor trimmed away (CMAP_LIFT) and start at a visible tone instead.
+#: Fields whose LOW END IS A TRUE NULL (single-stream, zero dispersion), where a black floor is meaningful. Every
+#: other field is positive everywhere, so those get the colormap's black floor trimmed away (CMAP_LIFT) and start
+#: at a visible tone.
 NULL_AT_BOTTOM = {"streams", "dispTrace", "dispMag"}
 CMAP_LIFT = 0.18          # fraction of the dark end to drop, for near-black colormaps only
 
-#: Gradient-derived fields. In DTFE the velocity (and density) is piecewise LINEAR over the
-#: tessellation, so its spatial GRADIENT is piecewise CONSTANT -- one value per tetrahedron,
-#: jumping across every face. At full point-eval resolution that shows as flat triangular
-#: facets (worst in voids, where tets are huge). These fields therefore get a SECOND,
-#: Gaussian-smoothed rendering ('..._smooth<sigma>.png') alongside the raw one -- the point-
-#: eval analogue of the deposit grid's cell-averaging. Density/velocity/streams/dispersion
-#: are continuous or caustic-bounded and are NOT faceted, so they get no smoothed variant.
+#: Gradient-derived fields. In DTFE the velocity is piecewise LINEAR over the tessellation, so its gradient is
+#: piecewise CONSTANT and shows as flat triangular facets at full resolution. These fields get a SECOND,
+#: Gaussian-smoothed rendering ('..._smooth<sigma>.png') alongside the raw one; the other fields are not faceted.
 DERIVATIVE_FIELDS = {"velDiv", "velShear", "velVort", "denGradMag"}
 DERIVATIVE_SMOOTH = 10.0   # default Gaussian sigma in OUTPUT PIXELS for the smoothed variant
 
@@ -78,13 +47,9 @@ TITLE_FONTSIZE = 14
 LABEL_FONTSIZE = 12
 MIN_DPI = 300             # plot_PS_DTFE.DPI; raised per figure to reach native resolution
 
-# The grid maps' fixed density range (plot_PS_DTFE.DENSITY_VMIN/DENSITY_VMAX, shared with
-# plot_DTFE.py). Available via fixed_range=True for side-by-side comparison with those
-# panels, but NOT the default here: measured on TNG300 z=0 it clips 25.7% of a point-eval
-# image (35.1% of a grid slice!) to the single darkest colour, because the median density is
-# 0.151 -- the whole void population, 62% of the volume, is crushed against vmin. The
-# default is a percentile stretch, which shows the void structure and also adapts across
-# redshift (a z=20 map spans well under one decade).
+# The grid maps' fixed density range (plot_PS_DTFE.DENSITY_VMIN/DENSITY_VMAX, shared with plot_DTFE.py), available
+# via fixed_range=True but NOT the default: it clips the whole void population against vmin. The default is a
+# percentile stretch, which also adapts across redshift.
 DENSITY_VMIN, DENSITY_VMAX = 1e-1, 1e4
 
 
@@ -106,12 +71,8 @@ def lift_cmap(cmap, lo):
 
 
 def norm_and_cmap(kind, cmap_name, data, fixed_range=False, lift=0.0):
-    """Colour normalization + colormap, following the grid maps' conventions.
-
-    Under-range and masked values take the colormap's lowest colour (cmap.set_under /
-    set_bad), exactly as plot_PS_DTFE does, so empty or clipped cells read as background
-    instead of white holes.
-    """
+    """Colour normalization + colormap, following the grid maps' conventions. Under-range and masked values take
+    the colormap's lowest colour (cmap.set_under / set_bad), as plot_PS_DTFE does."""
     cmap = lift_cmap(plt.get_cmap(cmap_name), lift).copy()
     cmap.set_bad(cmap(0))
     cmap.set_under(cmap(0))
@@ -126,17 +87,13 @@ def norm_and_cmap(kind, cmap_name, data, fixed_range=False, lift=0.0):
         top = max(float(np.percentile(data, 99.9)), 2.0)
         return cmap, colors.LogNorm(vmin=0.9, vmax=top)
     if kind == "signed":
-        # divergence spans ~6 decades at z=0 (median ~40, caustics ~1e6): a linear symmetric
-        # scale shows only the extremes and renders the web white. Use the repo's signed
-        # symlog convention (dtfelib.figures.norm_signed_log), which is what plot_eigenvalues
-        # and plot_shape_filter already use for signed fields.
+        # divergence spans ~6 decades: a linear symmetric scale renders the web white, so use the signed symlog
+        # convention (dtfelib.figures.norm_signed_log).
         from . import figures as style
         return cmap, style.norm_signed_log(data=data)
     if kind == "poslog":
-        # positive quantities spanning many decades (shear, vorticity, |sigma^2|): a linear
-        # stretch puts the 99.9th percentile far below the caustic peaks and renders the map
-        # black. Log between robust percentiles of the POSITIVE values; zeros (single-stream
-        # cells) fall under vmin and take cmap(0), i.e. the background colour.
+        # positive quantities spanning many decades: log between robust percentiles of the POSITIVE values; zeros
+        # (single-stream cells) fall under vmin and take cmap(0), the background colour.
         pos = data[data > 0]
         if pos.size == 0:
             return cmap, colors.Normalize(vmin=0.0, vmax=1.0)
@@ -151,18 +108,9 @@ def norm_and_cmap(kind, cmap_name, data, fixed_range=False, lift=0.0):
 
 
 def find_point_plane(fs, project="plane", plane=None):
-    """PointPlane for this snapshot's '.pts_*' files, or None when there are none.
-
-    plane: an explicit sidecar path pins the geometry -- REQUIRED to disambiguate when a
-    simulation has several planes of the SAME pixel count (the three orthogonal xy/xz/yz
-    views), since the '.pts_*' files carry no axis and geometry-matching alone cannot tell
-    equal-sized sidecars apart. Without it, the sidecar is auto-discovered by geometry (fine
-    when only one exists).
-
-    The redshift comes from the FieldSet, NOT the sidecar -- the sidecar records whichever
-    snapshot defined the geometry, so using it would misscale every other snapshot's
-    velocities by sqrt(a_sidecar/a_snapshot).
-    """
+    """PointPlane for this snapshot's '.pts_*' files, or None when there are none. plane: an explicit sidecar path
+    pins the geometry (REQUIRED when several planes share a pixel count); else it is auto-discovered by geometry.
+    The redshift comes from the FieldSet, NOT the sidecar (it records whichever snapshot defined the geometry)."""
     prefix = fs.snapdir / fs.prefix.rstrip(".")
     if not Path(f"{prefix}.pts_den").is_file():
         return None
@@ -183,25 +131,9 @@ def find_point_plane(fs, project="plane", plane=None):
 def render_fields(fs, out_dir, fields=None, label=None, force=True, quiet=False,
                   fixed_range=False, project="plane", smooth=0.0, plane=None,
                   smooth_derivatives=DERIVATIVE_SMOOTH):
-    """Render one figure per available point-evaluated field into out_dir.
-
-    Styled like the grid slice maps of plot/plot_PS_DTFE.py (same colormaps, colorbar,
-    titles, fonts), but saved at a dpi that puts at least one output pixel on every sampled
-    pixel -- so the figure looks identical to a grid panel and carries the full resolution.
-
-    fields:     restrict to these names (default: everything the files support).
-    force:      False skips a field whose PNG is newer than its '.pts_*' source.
-    fixed_range: use the grid maps' fixed density range (DENSITY_VMIN..DENSITY_VMAX) for
-                side-by-side comparison with them. Default is a percentile stretch, because
-                the fixed range clips a quarter of a z=0 image to the darkest colour.
-    project:    'plane' = central sampling plane (zero-thickness cross-section);
-                'slab'  = mean over all planes (a slab-volume average, like the grid's
-                          finite cell thickness -- needs enough planes, see make_image_plane).
-    smooth:     Gaussian sigma in OUTPUT PIXELS applied to the map before plotting
-                (the point-eval analogue of plot_PS_DTFE's --smooth, which is in cells).
-    Returns (written_paths, n_up_to_date); written_paths is empty and n_up_to_date is -1
-    when the snapshot has no point-evaluated fields at all.
-    """
+    """Render one figure per available point-evaluated field into out_dir, styled like the grid slice maps. fields
+    restricts the names; force=False skips a PNG newer than its '.pts_*' source; fixed_range: the grid maps' density
+    range; project 'plane' or 'slab'; smooth: Gaussian sigma in OUTPUT PIXELS. Returns (written_paths, n_up_to_date)."""
     pp = find_point_plane(fs, project=project, plane=plane)
     if pp is None:
         return [], -1

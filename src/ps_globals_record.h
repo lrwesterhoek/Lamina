@@ -1,21 +1,6 @@
-/* The particle-derived GLOBALS of a snapshot, recorded in the tessellation cache folder (PS-DTFE).
-
-   A periodic, partitioned phase-space run derives a few quantities from ALL its particles before the
-   partition loop: their number (which sets the padding), the mean density (a sum of their masses) and
-   the bounding box of their initial positions (which places every partition). All of them enter the
-   identity of every cached partition (tessellation_cache.h makeDescriptor), and none follows from the
-   file header alone. Any such run with '--tessellation-cache' writes them here, EXACTLY (hexadecimal
-   floats), keyed by everything that decides which particles are read: the input files' paths and
-   size:mtime stamps, the file type, the length unit, the periodicity, the species, a user box, the
-   sub-sampling options. A record of an earlier version has another key, so it is not found: the run
-   reads the particles and writes this version's record. A line the reader does not know is skipped.
-
-   A later '--grid-window' run (the launcher's exact zoom) whose inputs match then starts WITHOUT reading
-   the particles, taking these globals from the record. The particles
-   are read only if a partition the window needs turns out not to be cached (DTFE.cpp, at the skip
-   set): the run is then the ordinary one from that point on. The record can only shorten a run, never
-   change it: the partitions it loads are still checked against their full descriptors, and a late read
-   verifies that the snapshot still gives the recorded box and particle count. */
+/* The particle-derived GLOBALS of a snapshot (count, mean density, initial-position box), recorded EXACTLY (hex
+   floats) in the tessellation cache folder, keyed by everything that decides which particles are read. A later
+   '--grid-window' run with matching inputs skips reading the particles; the record only shortens a run. */
 
 #ifndef PS_GLOBALS_RECORD_HEADER
 #define PS_GLOBALS_RECORD_HEADER
@@ -181,10 +166,8 @@ inline bool read(User_options const &u, Record &r)
     return got == 127 and r.n > 0 and r.averageDensity > 0.;
 }
 
-// A run that may start without its particles: a phase-space '--grid-window' run over a periodic box
-// with a tessellation cache and an explicit partition split, reading a Gadget snapshot, with nothing
-// that selects or generates particles differently (a region, sub-sampling, Poisson particles, a
-// redshift-space shift, sample points, interlacing) and the mean density taken from the particles.
+// A run that may start without its particles: a phase-space '--grid-window' run over a periodic box with a tessellation
+// cache and a partition split, reading a Gadget snapshot, with nothing that selects or generates particles differently.
 inline bool eligible(User_options const &u)
 {
 #if defined(PHASE_SPACE) && NO_DIM==3

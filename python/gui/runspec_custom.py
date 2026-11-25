@@ -1,8 +1,6 @@
 """The Custom tab's job, moved out of runspec.py: CustomSpec (the binary itself on any snapshot file: Gadget
-HDF5/binary or text, units, box, periodicity and initial positions spelled out), the snapshot-file probes it uses
-(dimension, and the HDF5 header's box size, redshift and datasets) and the first-run demo job.
-runspec re-exports all of it and is the module to import; this one reads runspec's own names through it at call
-time (_rs.NAME)."""
+HDF5/binary or text, units, box, periodicity and initial positions spelled out), the snapshot-file probes it
+uses."""
 
 from __future__ import annotations
 
@@ -20,10 +18,7 @@ from runspec import CUSTOM_OUT_DEFAULT, LAMBDA_TH_DEFAULT, QUALITY_DEFAULT   # t
 @dataclass
 class CustomSpec:
     """The binary on the user's own snapshot file: one call, every assumption the TNG scripts make
-    (layout, kpc units, the IC file) spelled out as options. Writes '<output_dir>/<name>.*' and a
-    run log beside it; the GUI keeps these settings next to the outputs ('<name>.gui.json') so
-    the Explore tab can query the same snapshot later. dim = 2 runs the 2D set (DTFE-2d, PS-DTFE-2d:
-    a snapshot whose coordinates have two columns), CPU only."""
+    (layout, kpc units, the IC file) spelled out as options."""
     input_file: str = ""
     input_type: int = 105
     dim: int = 3                    # 2: the 2D programs (make DIM=2) on a 2D snapshot (snapshot_dim)
@@ -129,8 +124,6 @@ class CustomSpec:
         if self.tess_cache:
             a += ["--tessellation-cache", str(Path(self.tess_cache).expanduser())]
         if ps:
-            # the cell average named either way (the binaries share both names), never left to the binary's default:
-            # the run log then says which it was to any reader, and the count only beside the sampled deposit
             if m.deposit == "exact":
                 a.append("--exact")
             else:
@@ -207,11 +200,7 @@ class CustomSpec:
 
     def _extra_device_flags(self) -> frozenset:
         """The device options the extra options give themselves: '--gpu' and, for PS-DTFE, '--gpu-share' (any value;
-        standard DTFE has no such option, which problems() calls an error). Where they give one, the tab adds neither
-        of its own and a Device setting is not passed but the CPU beside a '--gpu-share' alone (runspec._refusal: the
-        run then stays on the CPU, DTFE_GPU=0); before a memory check the 'Runs on' line says the extra options set
-        the GPU where they give '--gpu' (runspec.runs_on_text), and with '--gpu-share' alone the program picks the
-        device."""
+        standard DTFE has no such option, which problems() calls an error)."""
         device = ("--gpu", "--gpu-share") if self.estimator == "ps" else ("--gpu",)
         return frozenset(n for t in _extra_options(self.extra_args) for n in [t.split("=", 1)[0]] if n in device)
 
@@ -232,14 +221,8 @@ class CustomSpec:
 
     def run_env(self) -> dict[str, str]:
         """The binary's environment (the cache is an argument here, not TESSELLATION_CACHE): the Advanced memory
-        budget, DTFE_MEM_BUDGET_GB, when set (runspec._run_option_env), and DTFE_FACE_GRADIENT pinned
-        empty (the binary reads that as unset), for both estimators: a standard run names no gradient route, nor does
-        a phase-space run that does not qualify for the face gradient (or a 2D one), so a 0 exported in the login
-        shell cannot turn it to the deposit's own gradient behind the command shown, nor a 1 make the binary refuse a
-        sampled run (a route the command names beats the variable anyway). And DTFE_GPU pinned to the job's device
-        (runspec.gpu_pin_env: 'auto', the program's pick, unless a Device override is passed, '1' the GPU, '0' the
-        CPU; a '--gpu' among the extra options beats the variable), so a DTFE_GPU from the login shell does not
-        decide."""
+        budget, DTFE_MEM_BUDGET_GB, when set (runspec._run_option_env), and DTFE_FACE_GRADIENT pinned empty (the
+        binary reads that as unset), for both estimators: a standard run names no gradient route."""
         env = {k: v for k, v in _rs._run_option_env(self).items() if k != "TESSELLATION_CACHE"}
         env["DTFE_FACE_GRADIENT"] = ""
         env.update(_rs.gpu_pin_env(self.mode().gpu))
@@ -420,10 +403,7 @@ def _extra_options(text: str) -> list[str]:
 
 
 def snapshot_dim(path, input_type: int = 105) -> int | None:
-    """2 or 3: the dimension of a snapshot file, None when the file cannot tell. Gadget HDF5: the
-    columns of its particles' Coordinates (a 2D snapshot holds (N, 2) datasets, as
-    tests/generate_ps_test_data.py --dim 2 writes); the text formats: the box on the second line
-    holds 2 x dim numbers (io/text_io.cc); Gadget binary carries no dimension (None)."""
+    """2 or 3: the dimension of a snapshot file, None when the file cannot tell."""
     p = Path(path).expanduser()
     if not p.is_file():
         return None

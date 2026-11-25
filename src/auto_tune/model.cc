@@ -1,26 +1,20 @@
-// Part of src/auto_tune.cc: included once, in order, by that file and compiled only as part of its object, never
-// alone.
-// The memory model (its own anonymous namespace): the model's constants, the sample-point file's count and
-// bounds, and the bytes per vertex, cell and grid both planners share, up to autoTuneParallelInsert.
+// Part of src/auto_tune.cc, included once by that file (never compiled alone): the memory model's constants, the
+// sample-point file's count and bounds, and the bytes per vertex, cell and grid both planners share.
 
 namespace {
 
-// ---- The model's constants: one name and one source each ---------------------------------------------------------
-// a finished PS-DTFE tessellation, per vertex: the 112 B vertex (with the uint64 ParticleID and the double volume
-// accumulator) + 6.77 cells x 72 B (CGAL's cell) + allocator slack; a compiled sizeof probe and measured runs
+// ---- The model's constants: one name and one source each ----
+// a finished PS-DTFE tessellation, per vertex: the 112 B vertex + 6.77 cells x 72 B (CGAL's cell) + slack (sizeof probe and runs)
 constexpr double kPSVertexBytes = 666.;
 // Delaunay tetrahedra per vertex of a 3D tessellation (the Poisson mean, which the measured runs follow)
 constexpr double kTetsPerVertex = 6.77;
-// ... and a standard-DTFE one, itemized (CGAL's Tds with Parallel_tag): the vertex -- its cell handle and base (16 B),
-// Point_3<Epick> (24) and vertexData (48 in single precision: std_plan.cc stdVertexDataBytes, which also widens it for
-// the double build) -- and 6.77 cells of 72 B (four neighbour and four vertex handles and the cell's data, padded).
-// Measured 571-573 B per vertex with the padding test's dummy points on the partitions of TNG100-3-Dark at 512^3, the
-// allocators handing freed memory back (std_plan.cc)
+// ... and a standard-DTFE one, itemized (CGAL's Tds with Parallel_tag): the vertex (16 B), Point_3<Epick> (24), vertexData
+// (48 in single precision: std_plan.cc stdVertexDataBytes) and 6.77 cells of 72 B. Fitted on the TNG100-3-Dark partitions at 512^3.
 constexpr double kStdVertexBytes = 16. + 24. + 48. + kTetsPerVertex * 72.;
-// PS-DTFE's '--parallel-triangulation' (TBB): the sorted point+payload copy and CGAL's own copy of it, per vertex in
-// flight. Fitted: +4.4 GB max RSS for one partition of ~5.7M padded vertices inserted on 6 threads (TNG100 z=0, 512^3),
-// with macOS's allocator cache on. (Standard DTFE books the itemized copies: std_plan.cc stdInsertBytes.)
-constexpr double kParInsertBytes = 800.;
+// PS-DTFE's '--parallel-triangulation' (TBB): the sorted point+payload copy and CGAL's own copy, per vertex in flight, beyond the
+// finished tessellation. Fitted on the 27 partitions of a 256^3 Zel'dovich box at 512^3, 6 threads, with freed memory handed back
+// (main.cpp dtfeAllocatorReexec); TNG partitions inserting in parallel are not measured. (Standard DTFE: std_plan.cc stdInsertBytes.)
+constexpr double kParInsertBytes = 250.;
 // the PS GPU deposit's flat arrays per tetrahedron: the 16-float record (64 B), the mass and the finite-cell ordinal
 // (4 B each)
 constexpr double kGpuTetBytes = 72.;
@@ -37,38 +31,33 @@ constexpr double kSpeedSplitGain = 0.85;
 constexpr double kHitSinkBlockBytes = double(16 << 20);
 // below this many particles a split is chosen for speed only (DTFE_AUTO_MINN overrides; see the header comment)
 constexpr double kAutoMinN = 2.e6;
-// macOS's allocator returns a freed block of this size (4 GiB) or more to the system; a smaller one stays in the
-// footprint and serves later requests of at least half its size
-constexpr double kAllocKeepBytes = 4294967296.;
 // the GPU kernels number a partition's sub-grid cells with 32 bits: a larger sub-grid deposits on the CPU
 constexpr double kGpuCellCap = double(UINT32_MAX);
 // the Eulerian padding rule's floor, in partition widths (DTFE.cpp's PSPartitionPlan; autoTunePadWidths)
 constexpr double kPartitionPadFloor = 0.3;
-// PS-DTFE LANE SHARE (memorySplit's plans only, see AutoTunePSPlanner::laneShareOn). Beside the first
-// partition in flight, booked whole (partitionBytes), each other lane books this share of its own sub-grid state: a CPU
-// deposit's sub-grids and words (times the CPU share of a mixed run's partitions), a face pass's state after the GPU
-// hold. FITTED, not derived, on 9 TNG100-3-Dark z=0 runs at 512^3 (6^3, exact, sample points; mixed and all-GPU, 3 to
-// 6 in flight): the all-GPU face run sets the ceiling, 0.562 at +15%; a small face run without points needs 0.489 or
-// more. Never below the split's mean sub-grid over its largest (laneSpread).
+// PS-DTFE LANE SHARE (memorySplit's plans only, AutoTunePSPlanner::laneShareOn): beside the first partition in flight, booked
+// whole, each other lane books this share of its own sub-grid state (a CPU deposit's sub-grids and words, a face pass's state
+// after the GPU hold). FITTED on 9 TNG100-3-Dark z=0 runs at 512^3 (6^3, exact, sample points; mixed and all-GPU, 3 to 6 in
+// flight). Never below the split's mean sub-grid over its largest (laneSpread).
 constexpr double kPSLaneShare = 0.55;
-// ... and the share of the GPU hold grids (gpuCellBytes) each other all-GPU lane books: one deposit holds the device at
-// a time (ctxMutex), and a lane after its hold keeps its own sub-grids (bCellDeposit).
-// FITTED on the 7 all-GPU TNG runs with points of the same record, whose ceiling is 0.36 (one at +15%); a flat 4-lane
-// run outside the share needs 0.052 or more.
+// ... and the share of the GPU hold grids (gpuCellBytes) each other all-GPU lane books: one deposit holds the device at a time
+// (ctxMutex), a lane after its hold keeps its own sub-grids (bCellDeposit). FITTED on the 7 all-GPU TNG runs with points.
 constexpr double kPSLaneShareHold = 0.30;
-// the most partitions in flight the shares hold for: what was measured (mixed runs up to 6, all-GPU runs 4). Above it
-// every lane is booked whole, and the dynamic concurrency stops there (DTFE.cpp psInFlightCap)
+// ... and, where the face walk runs beside the GPU deposit with every deposit on the GPU (the production command), the share of
+// its whole grid state each other lane books (tessellation, tet arrays and HitSink blocks stay whole). FITTED with freed memory
+// handed back (main.cpp dtfeAllocatorReexec) on TNG100-3-Dark z=0 at 512^3 in 6^3, the 4096^2 plane, 1, 2 and 4 lanes in flight.
+// The two shares above stay for the runs without the walk and the mixed runs.
+constexpr double kPSLaneShareFace = 0.25;
+// the most partitions in flight the shares hold for (mixed runs 6, all-GPU runs 4: the most measured). Above it every lane is
+// booked whole, and the dynamic concurrency stops there (DTFE.cpp psInFlightCap)
 constexpr int kPSLaneShareMax = 6;
 constexpr int kPSLaneShareMaxGpu = 4;
-// under --scratch-dir the full grids below its threshold stay in RAM and 'fixed' books none of them: 3.2-3.8 GB at
-// 512^3 in the production selection, here in units of the threshold (scratchMinBytes, 1 GB
-// by default). The lane share books them (laneShareCover); with every lane booked whole that booking hid them
+// under --scratch-dir the full grids below its threshold stay in RAM and 'fixed' books none of them: in units of the threshold
+// (scratchMinBytes, 1 GB by default), fitted on the TNG100-3-Dark 512^3 production selection. The lane share books them (laneShareCover)
 constexpr double kPSScratchRamGrids = 3.8;
 
-// Number of query points a '--sample-points' file holds, WITHOUT reading it (auto-tune runs
-// long before psPointEvalInit). Raw binary is N x 3 float64 = 24 B/point; a text file is
-// probed the same way readSamplePoints does and estimated from its average line length.
-// Returns 0 when the file is absent/unreadable, which switches the model off.
+// Number of query points a '--sample-points' file holds, WITHOUT reading it (auto-tune runs long before psPointEvalInit): raw
+// binary is N x 3 float64 (24 B/point), a text file is estimated as readSamplePoints probes it. 0 when absent/unreadable (model off).
 inline size_t autoTuneSamplePointCount(std::string const &file)
 {
     if ( file.empty() ) return 0;
@@ -177,13 +166,10 @@ struct AutoTunePS
                                             // (the '_a' field: autoTuneFaceVelocity; not set = either pass)
 };
 
-// '--face-gradient' in PS-DTFE: the pass deposits the face sums -- ps_interpolation.cc
-// fx.faceS, faceN and faceP, 2 x NO_DIM x (3 + 1 + 1) components per sub-grid cell. Their accumulators are int64
-// words in EVERY build, shared by the deposit threads (no private copies), made only after a GPU lane's hold of the
-// device (psCpuFixedUnits; psFaceWalk fills them on the CPU) and converted to their Real grids
-// (Quantities::face_velocity, face_coverage, face_momentum) after the moment grids. So the planner books them on
-// their own (AutoTunePSInputs::faceR and fxFace) and not with the moment words, which only the single build holds
-// as words.
+// '--face-gradient' in PS-DTFE: the pass deposits the face sums (ps_interpolation.cc fx.faceS, faceN, faceP; 2 x NO_DIM x
+// (3 + 1 + 1) components per sub-grid cell) as int64 words in EVERY build, shared by the deposit threads and made only after a
+// GPU lane's hold of the device; they become Real grids (Quantities::face_velocity, face_coverage, face_momentum) after the
+// moment grids. So the planner books them on their own (AutoTunePSInputs::faceR and fxFace), not with the moment words.
 inline bool autoTuneFaceOn(Field &f, AutoTunePS const &ps)
 {
     return f.selected() and ps.phaseSpace and ps.faceGradient and ps.exactDeposit
@@ -218,13 +204,10 @@ inline double autoTuneStreamsTwinBytes(Field &f, AutoTunePS const &ps)
              + ( f.velocity_vorticity ? double(noVortComp) : 0. ) ) * R;
 }
 
-// ... and the two grids every face pass's normalization makes and keeps to the output
-// (Quantities::psFaceGradientBegin, one Real per cell each): the stream average's divergence
-// (velocity_divergence_streams, written as '.a_velDivStreams') and the mass flux divergence (mass_flux_divergence,
-// '.a_massFluxDiv'). The '_u' pass makes them too, though the writer writes the '_a' pass's only. In the post phase
-// both (autoTuneBytesPerCell's phase 1); at the normalization the divergence alone (postPhase false), since the
-// deposit phase books the mass flux's grid already (its '+ R' below, which the deposit-phase figures --
-// bCellDeposit, a partition's own sub-grids -- keep as they were).
+// ... and the two grids every face pass's normalization makes and keeps (Quantities::psFaceGradientBegin, one Real per cell
+// each): the stream average's divergence (.a_velDivStreams) and the mass flux divergence (.a_massFluxDiv); the '_u' pass makes
+// them too. In the post phase both; at the normalization the divergence alone (postPhase false), as the deposit phase books
+// the mass flux's grid already (its '+ R' below).
 inline double autoTuneFaceOutputBytes(Field &f, AutoTunePS const &ps, bool const postPhase)
 {
     if ( not autoTuneFaceOn( f, ps ) ) return 0.;
@@ -232,12 +215,11 @@ inline double autoTuneFaceOutputBytes(Field &f, AutoTunePS const &ps, bool const
     return postPhase ? 2.*R : R;
 }
 
-// One pass's MOMENT accumulators in the PS deposit, in Real bytes per sub-grid cell: the grids
-// ps_interpolation.cc holds as fixed-point words while the pass deposits ('fxg' -- velocity, gradient,
-// dispersion, scalar and its gradient, the moment weight, the dispersion's own mean and weight, the exact and the
-// released multiplicities), with the same selection rules as autoTuneBytesPerCell's deposit phase below. In the
-// single build the words take 8 B per component where these floats take 4, and the deposit threads share ONE set
-// of them (no private copies). The dispersion weight is the density there when one is selected (not accumulated).
+// One pass's MOMENT accumulators in the PS deposit, in Real bytes per sub-grid cell: the grids ps_interpolation.cc holds as
+// fixed-point words while the pass deposits ('fxg': velocity, gradient, dispersion, scalar and its gradient, the moment weight,
+// the dispersion's own mean and weight, the exact and released multiplicities), selected as in autoTuneBytesPerCell's deposit
+// phase. The single build's words take 8 B per component and the deposit threads share ONE set. The dispersion weight is the
+// density when one is selected.
 inline double autoTuneFxMomentBytes(Field &f, AutoTunePS const &ps)
 {
     if ( not f.selected() or not ps.phaseSpace ) return 0.;
@@ -295,39 +277,6 @@ inline std::vector<double> autoTuneFxGrids(Field &f, AutoTunePS const &ps)
     return g;
 }
 
-// What the input reader frees and macOS's allocator keeps, in bytes: the reader's flat arrays (gadget_reader_HDF5.cc:
-// the positions, masses and velocities 'readParticleData' asks for, the scalars, the Lagrangian positions and the
-// IDs), freed one by one as Read_data::transferData builds the particles, and with '--ps-lagrangian-input' the IC file's
-// coordinates and IDs and the by-ID table (input_output.cc; a sort index of 8 B instead of the table's 12 when the
-// IDs are not contiguous). Each block under kAllocKeepBytes stays in the footprint until a request of about half its
-// size or more takes it over. A run with full-size grids allocates them right away; a --grid-window run does not --
-// its window grids, the partitions' particle copies, the tessellations (TBB's own pools) and the GPU's buffers are all
-// far smaller or elsewhere -- so the whole residue is still there when the first wave of partitions tessellates. Later
-// partitions' large allocations take the blocks over, so the residue is gone a few partitions in.
-inline double autoTuneReadKeptBytes(User_options const &u, double const N)
-{
-    double const B4 = kAllocKeepBytes;   // a freed block of this size or more goes back to the system
-    double const R = double(sizeof(Real));
-    auto kept = [&](double const perParticle) { return perParticle*N < B4 ? perParticle*N : 0.; };
-    auto reads = [&](size_t const i) { return u.readParticleData.size() > i and u.readParticleData[i] != 0; };
-    double b = 0.;
-    if ( reads(0) ) b += kept( NO_DIM*R );                    // positions
-    if ( reads(1) ) b += kept( R );                           // masses
-#ifdef VELOCITY
-    if ( reads(2) ) b += kept( noVelComp*R );                 // velocities
-#endif
-#ifdef SCALAR
-    for (size_t i = 3; i < u.readParticleData.size(); ++i)
-        if ( reads(i) ) { b += kept( R ); break; }            // the scalar
-#endif
-#ifdef PHASE_SPACE
-    b += kept( NO_DIM*R ) + kept( 8. );                       // the Lagrangian positions, the IDs
-    if ( not u.lagrangianInputFilename.empty() )
-        b += kept( NO_DIM*4. ) + kept( 8. ) + kept( NO_DIM*4. );   // the IC file's coordinates and IDs, the by-ID table
-#endif
-    return b;
-}
-
 // One Quantities' PS COUNT, FLAG and MASK grids in bytes per sub-grid cell (part of autoTuneBytesPerCell): none of
 // them is a private copy of the deposit's copy mode -- the deposit's own int stream count, its two byte flags and
 // its caustic mask are shared by the threads (ps_interpolation.cc psAddCount), and the others are
@@ -342,11 +291,9 @@ inline double autoTunePSCountBytes(Field &f, AutoTunePS const &ps, int const pha
     if ( phase == 0 )      b += 2.;                            // subSampleMassFlag + flippedFlag, the deposit's byte accumulators
     if ( ps.caustics )     b += R;                             // caustic_bits (psReserveGrids, DTFE.cpp)
     if ( ps.exactDeposit ) b += R;                             // tet_touch    (psReserveGrids, DTFE.cpp)
-    /* orientBits, the deposit's per-cell accumulator (ps_interpolation.cc): a CausticMask,
-       not a byte, since the A4 indicator needs bit 8. Deposit phase only -- freed before the
-       derived fields are allocated. Counted once per selected Quantities, like caustic_bits;
-       when only one of the u/a pair is deposited that over-counts slightly, deliberately,
-       since for a memory budget the safe rounding direction is up. */
+    /* orientBits, the deposit's per-cell accumulator (ps_interpolation.cc): a CausticMask, not a byte, since the A4 indicator
+       needs bit 8. Deposit phase only. Counted once per selected Quantities, like caustic_bits; with only one of the u/a pair
+       deposited that over-counts slightly, deliberately (the safe rounding direction is up). */
     if ( ps.caustics and phase == 0 ) b += double(sizeof(PSCausticClass::CausticMask));
     return b;
 }
@@ -411,22 +358,11 @@ inline std::vector<double> autoTuneStdDerivedPerCell(Field &f)
     return g;
 }
 
-// Full-grid bytes per cell for one field selection, for ONE of the two phases:
-//
-//   phase 0 = DEPOSIT. What is resident while the partition triangulations run, i.e. the term
-//             that coexists with partitionBytes(). Includes the PS weight grids.
-//   phase 1 = POST. What is resident afterwards, when the derived fields are computed. The
-//             weights have been freed by normalizePhaseSpace (swap-with-empty, quantities.cc)
-//             in psNormalizeMoments (DTFE.cpp) BEFORE postProcessWebFields (web_fields.cc) allocates
-//             div/shear/vort.
-//
-// The two peaks are disjoint sets, so the caller takes max(deposit, post) rather than summing.
-// A single blended number would bound the deposit only by luck: for a density+velocity+
-// dispersion volume-weighted run it gives 44 B/cell where the deposit really needs 64.
-//
-// 'ps' carries the PS flags: they gate real full-grid accumulators and are all finalized before
-// the DTFE.cpp call site. Byte counts verified against quantities.cc / ps_interpolation.cc with
-// a compiled sizeof probe (Real=4, Pvector<Real,n> = 4n exactly, no padding).
+// Full-grid bytes per cell for one field selection, for ONE of the two phases: phase 0 = DEPOSIT (resident while the partition
+// triangulations run, coexisting with partitionBytes(); includes the PS weight grids); phase 1 = POST (resident afterwards, when
+// the derived fields are computed; normalizePhaseSpace has freed the weights before postProcessWebFields allocates div/shear/vort).
+// The two peaks are disjoint: the caller takes max(deposit, post). 'ps' carries the PS flags, finalized before the call site.
+// Byte counts checked against quantities.cc / ps_interpolation.cc with a compiled sizeof probe (Real=4, no padding).
 inline double autoTuneBytesPerCell(Field &f, AutoTunePS const &ps, int const phase)
 {
     if ( not f.selected() ) return 0.;
@@ -511,7 +447,7 @@ inline std::vector<double> autoTuneStdGridsPerCell(Field &f)
 // sizes before the partition loop (the merge-grown weights and face sums of autoTuneMergeGrownBytes come at the first
 // merge, the derived fields after the loop). Under --scratch-dir ScratchAlloc::zeroResize fills each of them with zeros
 // in anonymous memory before its file is mapped over it (ZeroFillScope, macOS), so the largest one is a start-up peak
-// of the run: particles + the read blocks kept + this grid (AutoTunePSPlanner::reserveZeroFillPeak).
+// of the run: particles + the grids on the heap + this grid (AutoTunePSPlanner::reserveZeroFillPeak).
 inline double autoTuneLargestGridBytesPerCell(Field &f, AutoTunePS const &ps)
 {
     if ( not f.selected() ) return 0.;
@@ -529,12 +465,10 @@ inline double autoTuneLargestGridBytesPerCell(Field &f, AutoTunePS const &ps)
     return comps * R;
 }
 
-/* A Lagrangian partition's padding on one axis, in units of the partition's own width, for an n^3 split of N
-   particles: with '--ps-lagrangian-padding <k>' (the default, k = 8) k mean spacings -- k n /
-   N^(1/NO_DIM) partition widths, at most one period (n widths) on a periodic run -- and at least 4.2
-   '--ps-alpha-shape' cuts on a non-periodic one, with no floor; with '--ps-lagrangian-padding 0' the Eulerian '--padding'
-   fraction floored at 'floorFrac' of a partition (DTFE.cpp's PSPartitionPlan). One definition for the models of
-   auto_tune.cc and auto_tune/ps_planner.cc. */
+/* A Lagrangian partition's padding on one axis, in partition widths, for an n^3 split of N particles: with
+   '--ps-lagrangian-padding <k>' (default 8) k mean spacings (k n / N^(1/NO_DIM) widths), at most one period on a periodic run
+   and at least 4.2 '--ps-alpha-shape' cuts on a non-periodic one; with k = 0 the Eulerian '--padding' fraction floored at
+   'floorFrac' of a partition (DTFE.cpp's PSPartitionPlan). One definition for auto_tune.cc and auto_tune/ps_planner.cc. */
 inline double autoTunePadWidths(User_options const &u, double const padFracAxis, int const n, double const N,
                                 double const floorFrac)
 {
@@ -550,12 +484,11 @@ inline double autoTunePadWidths(User_options const &u, double const padFracAxis,
     return std::max( floorFrac, padFracAxis * double(n) );
 }
 
-/* The partition splits of THIS snapshot already in the tessellation cache folder: n -> the number of
-   cached n^3 partition files. Reads only each file's uncompressed header (magic, length, descriptor) and the
-   chunked body's marker after it, and compares the format line and the lines that name the snapshot and the
-   build -- exactly the text tessellation_cache.h writes (FORMAT_VERSION and CHUNK_MARKER there, KEEP IN STEP;
-   cache_key_lines.h) -- plus the periodicity and length unit; the rest of a partition's key follows from the
-   split. A file of another format misses in the run, so it does not steer the split either. Read-only. */
+/* The partition splits of THIS snapshot already in the tessellation cache folder: n -> the number of cached n^3 partition
+   files. Reads only each file's uncompressed header and the chunked body's marker, and compares the format line and the lines
+   that name the snapshot and the build, exactly the text tessellation_cache.h writes (FORMAT_VERSION and CHUNK_MARKER there,
+   KEEP IN STEP; cache_key_lines.h), plus periodicity and length unit. A file of another format misses in the run, so it does
+   not steer the split either. Read-only. */
 inline std::map<int,int> cachedServeSplits(User_options const &u)
 {
     std::map<int,int> out;
@@ -636,12 +569,11 @@ inline char const *autoTuneOverrideNote(bool const autoPart, bool const autoConc
                                       "memory limits come from it).";
 }
 
-// Whether a tessellation of 'padded' points is inserted in parallel (CGAL's TBB insert, whose sorted copies the
-// planners book at kParInsertBytes a point) while 'builds' tessellations are built at once: triangulation.cpp's rule
-// (delaunayTriangulation) at the planned count. On the default rule (at least User_options::parallelInsertMinPoints),
-// with '--parallel-triangulation' or with DTFE_TRIANGULATION_THREADS set (both: any size; a count of 1 keeps the insert
-// sequential, and a count beats a run mode's lowered thread budget), where the machine's threads divided by the builds
-// leave 2 or more. The OpenMP cap is not followed: at 1 thread it books copies the run does not make (the safe side).
+// Whether a tessellation of 'padded' points is inserted in parallel (CGAL's TBB insert, whose sorted copies the planners book at
+// kParInsertBytes a point) while 'builds' tessellations are built at once: triangulation.cpp's rule (delaunayTriangulation) at
+// the planned count: the default rule (at least User_options::parallelInsertMinPoints), '--parallel-triangulation' or
+// DTFE_TRIANGULATION_THREADS (any size; a count of 1 keeps the insert sequential) when the threads divided by the builds leave
+// 2 or more. The OpenMP cap is not followed: at 1 thread it books copies the run does not make (the safe side).
 inline bool autoTuneParallelInsert(User_options const &u, double const padded, int const builds)
 {
 #if defined(PARALLEL_TRIANGULATION) && NO_DIM==3

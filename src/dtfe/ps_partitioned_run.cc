@@ -1,7 +1,5 @@
-// Part of src/DTFE.cpp, inside its #ifdef PHASE_SPACE: included once, in order, by that file and compiled only as
-// part of its object, never alone.
-// The PS partitioned run: the close-out of the summed moments (psCloseOutMoments, psNormalizeMoments), the
-// aggregate report (psAggregateReport) and psPartitionedRun.
+// Part of src/DTFE.cpp (inside its PHASE_SPACE block), included once by that file, never compiled alone: the PS partitioned run
+// (psCloseOutMoments, psNormalizeMoments, psAggregateReport, psPartitionedRun).
 
 // THE CLOSE-OUT of the summed moments, once over all partitions. Returns the cell volume.
 static Real psCloseOutMoments(DTFE_State &state, Quantities *uQuantities, Quantities *aQuantities)
@@ -162,17 +160,11 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     psConcurrency = std::min( psConcurrency, dtfeOmpMax() );
 #endif
     if ( psConcurrency < 1 ) psConcurrency = 1;
-    /* DYNAMIC CONCURRENCY. The plan fixes the split and what one partition adds, but its concurrency is
-       a prediction, and a cautious one can leave most of the budget unused. When the tuner chose
-       the concurrency, the loop starts up to one thread per core instead, and the memory gate (auto_tune.h) admits a
-       partition beyond the plan's mc only while the live free memory, less the headroom and what the run has still to
-       allocate, holds what it adds, and the run's own footprint plus that stays within the budget. The ordered merge
-       sums in index order, so the outputs do not depend on it -- in the single build, whose deposit sums are integer
-       words whatever the team size; the double build sums per-thread copies in thread order, so its grids would
-       follow the in-flight count, and so would DTFE_MASS_AUDIT's per-thread tallies: they keep the plan's.
-       Not for a user's --max-concurrent, the speed split (no gate), or a start whose free memory (records aside: the
-       gate books their unmerged share as it goes) holds no partition beyond the plan's (that run keeps its look-ahead),
-       and never past the lane share's cap (psInFlightCap: the memory model was measured up to there). */
+    /* DYNAMIC CONCURRENCY. The plan's concurrency is a prediction, and a cautious one can leave budget unused. When the tuner chose it,
+       the loop starts up to one thread per core, and the memory gate (auto_tune.h) admits a partition beyond the plan's mc only while
+       the live free memory, less the headroom and what the run has still to allocate, holds what it adds and the footprint stays in the
+       budget. The ordered merge sums in index order, so outputs do not depend on it in the single build (integer words); the double build
+       keeps the plan's. Not for a user's --max-concurrent, the speed split (no gate), or a start with no spare memory; never past psInFlightCap. */
     int const psFloor = psConcurrency;   // the plan's mc
     bool dynamicConc = false;
     char const *dynamicWhyNot = nullptr;
@@ -251,39 +243,11 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     for (int pi=0; pi<totalPartitions; ++pi)
         if ( not skipPartition[size_t(pi)] ) progress.costTotal += progress.partCost[size_t(pi)];
     runProgressPhase( "partitions", 0, progress.toProcess );
-    // THE ORDERED MERGE (the default of every split; the auto-tuner's speed split always): the full grids receive
-    // partition 0, then 1, 2 ..., exactly the adds of a '--max-concurrent 1' run, so the merged grids are
-    // byte-identical to those. '--ps-merge completion-order' adds partitions as they finish instead, so the last bits
-    // vary run to run (in the double build and for the GPU mass grid too; tests/gpu_mass_check.sh pins
-    // --max-concurrent 1).
-    // STAGING: a partition that finishes before its turn moves its two sub-grid Quantities into 'staged' (no copy;
-    // its particle copy is freed) and its thread takes the next one instead of idling behind a slow partition.
-    // Whoever merges the partition whose turn it is merges every staged one after it, in index order
-    // under the same lock, writing each checkpoint (afterMerge) in that order: the checkpoint, its 'points.<i>'
-    // files and the test hook see an unstaged merge's sequence. Under the MEMORY GATE (an auto-tuned plan with
-    // partitions in flight: psPartitionBytes > 0, not the speed split) a finished partition always parks, since
-    // the gate admits by the free memory, parked bytes included; without it, only while the free memory less 4 GB
-    // holds it, else it waits (counted on the 'ordered merge:' line). DTFE_MERGE_STAGE_GB=X caps the parked bytes
-    // at X GB instead (0 = never park). No deadlock: the partition whose turn it is never waits or parks, each
-    // partition merges once, the dynamic schedule hands them out in index order, and the gate waits only behind
-    // lower-numbered partitions in flight (parked ones have left it).
-    // THE SPILL: the gate must admit a partition with no lower one in flight whatever the free memory, so parking
-    // only in RAM could exceed the machine. A partition that must park goes
-    //   1. to RAM while the free memory less 4 GB (under the gate also less one psPartitionBytes) holds it
-    //      (DTFE_MERGE_STAGE_GB=X: while the parked RAM stays under X GB); the free-memory reading already
-    //      includes the sub-grids, a margin of one sub-grid kept on purpose;
-    //   2. else to DISK (ps_merge_spill.h): one unlinked file in --scratch-dir (SCRATCH_DIR), else $TMPDIR, else
-    //      /tmp, while that volume keeps 2 GB free (scratch_alloc.cc's margin) beside the spills being written and
-    //      the --scratch-dir mappings' full size; at its turn it is read back into the same Quantities and merged
-    //      by the same mergeOne (byte-identical to an in-RAM park). Written outside the merge lock; a partition
-    //      whose turn comes during its write merges from RAM and drops the file;
-    //   3. else, under the gate without a DTFE_MERGE_STAGE_GB cap, to RAM anyway (the same memory as waiting);
-    //      otherwise it waits for its turn holding its thread.
-    // DTFE_MERGE_SPILL=0 switches the spill off (the gate then parks in RAM always), =1 spills EVERY parked
-    // partition with sub-grids (the tests' hook); DTFE_MERGE_STAGE_GB=0 parks nothing, RAM or disk. The 'ordered
-    // merge:' line counts the spills (number, most at once, GB written). A spilled partition has left the gate
-    // like a parked one; the tuner's model does not count parked sub-grids (the gate keeps them honest).
-    // (the state of all this: PSMergeStaging in dtfe/ps_partition_loop.cc, with parkWhere)
+    // THE ORDERED MERGE (default of every split): the full grids receive partition 0, 1, 2 ..., exactly the adds of a '--max-concurrent 1'
+    // run, byte-identical; '--ps-merge completion-order' adds as they finish (the last bits vary). STAGING: a partition finishing before
+    // its turn parks its sub-grids, in RAM while the free memory less 4 GB holds it (DTFE_MERGE_STAGE_GB=X caps it; 0 = never park), else
+    // SPILLED to an unlinked file (ps_merge_spill.h; --scratch-dir, else $TMPDIR, while the volume keeps 2 GB free), else it waits holding
+    // its thread; the turn's partition merges every staged one after it, in index order. DTFE_MERGE_SPILL=0 switches the spill off, =1 spills all.
     PSMergeStaging merge( state.options, psConcurrency );
     if ( dynamicConc ) merge.parkFloor = psFloor;   // (parkWhere: the partitions beyond the plan's shrink its RAM room)
     // test hook: DTFE_TEST_DELAY_PARTITION=i:s holds partition i for s seconds before its merge, so the partitions
@@ -328,20 +292,11 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
         dtfePartitionsInFlight.store( 1, std::memory_order_relaxed );
     }
 
-    // One partition's work, in two stages: PREPARE (select its particles; with 'build', also its tessellation and
-    // vertex densities) and DEPOSIT (the grid passes, then the merge). The look-ahead (psRunPartitionLoop,
-    // dtfe/ps_partition_loop.cc) runs the prepare stage of partition k+1 on another thread while partition k deposits.
-    // THE GPU SHARE ('--gpu-share', resolved before the plan: psResolveGpuShare) = the per mille of a GPU run's
-    // exact deposits that run on the GPU; 1000 is all of them ('auto', the default, outside performance). The other
-    // partitions deposit on the CPU at the same time, so that both devices work at once: a GPU run keeps ~2 cores busy
-    // beside a GPU that every partition queues for, and a CPU run leaves the GPU idle. Which partition goes where is a
-    // rule of its index alone (the GPU's share spread evenly over the indices), never of the timing, the concurrency or
-    // the window and resume skips, so a rerun or a resume deposits every partition on the same device. A CPU partition
-    // takes the path of the GPU fallback (ps_interpolation.cc: the same fixed-point units as a GPU deposit of the pass,
-    // so the merge sees no difference) without counting as one; its grids differ from a GPU deposit's at the float
-    // rounding of the two exact integrations, so a mixed run equals neither the GPU run nor the CPU run to the last
-    // bit. The resolved share below 1000 is in the checkpoint key (partition_checkpoint.h settingsKey): a resume with
-    // another is refused.
+    // One partition's work, in two stages: PREPARE (select its particles; with 'build', also its tessellation and vertex densities) and
+    // DEPOSIT (the grid passes, then the merge); the look-ahead prepares k+1 while k deposits. THE GPU SHARE ('--gpu-share', psResolveGpuShare)
+    // = the per mille of a GPU run's exact deposits on the GPU (1000 all), the others on the CPU at the same time: a rule of the index alone,
+    // never of timing or skips, so a rerun or resume deposits every partition on the same device (a CPU partition takes the GPU fallback's path,
+    // same fixed-point units). A resolved share below 1000 is in the checkpoint key (settingsKey): a resume with another is refused.
     long const psGpuShare = state.options.psGpuShareMille;
     auto depositsOnCpu = [psGpuShare](int const pi) -> bool
     { return ( long(pi) + 1 ) * psGpuShare / 1000 == long(pi) * psGpuShare / 1000; };
@@ -414,6 +369,10 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
                 psInterpolatePrebuilt( P.pre, samples, P.opt, &temp_uQuantities, &temp_aQuantities );
             else   // PS-DTFE: DTFE_parallel calls serial interpolation directly (no nested OpenMP region)
                 DTFE_parallel( &P.part, samples, P.opt, &temp_uQuantities, &temp_aQuantities );
+            // the partition's tessellation is gone (cleared after its last deposit, ps_interpolation.cc, or with
+            // its owner here): the TBB allocator's kept blocks of it go back, so the next partition starts from the
+            // live memory the auto-tuner books (triangulation.cpp)
+            dtfeReleaseTessellationMemory();
             PSMassAudit::partition = -1;
             psPointEvalSetPartition( -1 );
         }
@@ -445,7 +404,7 @@ static void psPartitionedRun(DTFE_State &state, vector<Sample_point> &samples, U
     psReportLoopEnd( loop );
 
     // every partition copied its own particles (tempPart); the global array is not needed by
-    // the normalization, post-processing or write phases -- free its ~48 B/particle now
+    // the normalization, post-processing or write phases -- free its memory now
     std::vector<Particle_data>().swap( state.particles );
 
     psNormalizeMoments( state, uQuantities, aQuantities, auditInputMass );

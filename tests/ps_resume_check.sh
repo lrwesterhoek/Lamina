@@ -1,37 +1,7 @@
 #!/usr/bin/env bash
-# Resume of a killed partitioned PS-DTFE run (src/partition_checkpoint.h), on a small synthetic
-# snapshot split into 64 partitions:
-#   C1  an uninterrupted '--ps-merge index-order' run (the reference) checkpoints, says what it cost, and removes its
-#       '<output>.runlog.checkpoint' once the outputs are in place
-#   C2  a run killed after 20 partitions (DTFE_TEST_EXIT_AFTER_PARTITIONS=20: a SIGKILL right after a checkpoint)
-#       exits 137, writes no output, and leaves the checkpoint with its manifest of >= 20 merged partitions
-#   C3  '--resume' with a changed setting ('--grid') refuses, names the differing line, keeps the checkpoint
-#   C4  '--resume' (with '--no-overlap' and '--tessellation-cache', which the settings key leaves out) continues: every
-#       output byte-identical to the reference, the checkpoint removed; a dead writer's temp file is cleaned up.
-#       The same --max-concurrent and thread count as the killed run: the deposit inside a partition splits its
-#       sums by the threads a partition gets, so another count differs at float rounding (C6 covers that case)
-#   C5  '--resume' with nothing to resume refuses
-#   C6  a run killed while merging in COMPLETION order ('--ps-merge completion-order') resumes too: mass conserved
-#   C7  '--scratch-dir': the checkpoint goes to the scratch folder under the name scripts/config.sh
-#       ps_checkpoint_dir computes (the basename + a hash of the whole output path)
-#   C9  too little room for a checkpoint (DTFE_TEST_CHECKPOINT_FREE_BYTES): the run warns, writes none, and finishes
-#       with the same outputs
-#   C10 the production path: NO --partition (run_ps_dtfe.sh's default), the auto-tuner splits (DTFE_RAM_GB=0.05:
-#       a memory-driven 6^3 split); killed, then '--resume' without --partition on a "bigger machine"
-#       (DTFE_RAM_GB=64, where the tuner alone picks 2 2 2) adopts the checkpoint's split and finishes; the grids equal an
-#       uninterrupted run's (byte-identical when both ran at the same --max-concurrent)
-#   C11 '--interlace' (two passes, the second on a half-cell-shifted grid) writes no checkpoint, and '--resume' with it
-#       is refused: one checkpoint and key for both passes would mix the shifted and unshifted grids
-#   C12 a run killed before any checkpoint could be written leaves no (empty) checkpoint folder for the driver to resume
-#   C13 a checkpoint of another binary ('binary=' key line: the revision AND link time) is refused, naming DTFE_RESUME=0
-#   C14 a commit whose renames failed (exit 3, the outputs left as '.part.<pid>') keeps the checkpoint
-#   C15 the short letters share their long names' settings key: a run killed with '-g48 -p -i 105 -f ... -v2' (a value
-#       attached and apart) resumes under '--grid 48 --periodic --input-format 105 --field ... --verbose 2', every
-#       output byte-identical to an uninterrupted run with the long names
-#   C8  GPU builds only: a killed '--gpu' run resumes to the exactly summed
-#       grids of an uninterrupted '--gpu' run byte for byte in EVERY grid, the velocity and dispersion included (exact
-#       fixed-point sums); SKIP otherwise
-# Usage: tests/ps_resume_check.sh [--no-build]   (--no-build is accepted and ignored: the binaries are used as built)
+# Resume of a killed partitioned PS-DTFE run (src/partition_checkpoint.h), on a synthetic snapshot split into 64 partitions.
+# Checks C1-C15 are labelled by their own output lines.
+# Usage: tests/ps_resume_check.sh [--no-build]   (--no-build is accepted and ignored)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$SCRIPT_DIR")"
@@ -244,9 +214,8 @@ else
         && ! grep -q "ran on the CPU instead" "$TMP/gref.log" "$TMP/g1.log" "$TMP/g2.log"
     check "C8 killed after 12 GPU partitions, resumed the other 52 on the GPU (no CPU fallback)" $?
     ok=0
-    # every grid, the velocity included: every PS grid of a GPU deposit is an exact fixed-point sum
-    # (the moments too, ps_deposit_params.h PSFxGrid) and the partitions merge in index order, so the resumed run
-    # is byte-identical in all of them
+    # every PS grid of a GPU deposit is an exact fixed-point sum and the partitions merge in index order, so the
+    # resumed run is byte-identical in every grid
     for e in den a_den streams a_streams hidden_streams a_hidden_streams vel a_vel a_velDisp; do
         cmp -s "$TMP/gref.$e" "$TMP/g.$e" || { echo "    differs: .$e"; ok=1; }
     done

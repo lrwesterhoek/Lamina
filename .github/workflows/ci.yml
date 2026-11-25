@@ -1,21 +1,13 @@
-# Three jobs. build-and-test -- the Linux CPU build of all three binary pairs (single, DOUBLE=1, DIM=2)
-# and the test battery through tests/ci_suite.sh, the SAME list the Dockerfile runs, so the two cannot
-# drift (this job is CPU-only: it exists to catch "does not compile on Linux", "the deposit broke" and
-# "the GUI no longer runs what it shows" regressions). The Metal GPU path is macOS-only and validated locally
-# (tests/dtfe_metal_check.sh, tests/gpu_scalar_check.sh, tests/gpu_mass_check.sh, metal/validate_deposit.cpp).
-# old-python -- every .py parses under Python 3.10, the oldest pyproject supports (ci_suite's own check
-# skips on the runner, which has no 3.10, so without this job a PEP 701 f-string could pass CI).
-# compile-variants -- what users build beyond the pairs: no TBB and no libdeflate (neither installed),
-# 'make library' and the demo/examples program linked against it (tests/ci_suite.sh variants).
-# The GPU code is Metal-only, so no job here builds a GPU backend (the retired CUDA/HIP port lives on the branch
-# archive/cuda-hip-2026-11-08).
-# The C++ jobs share their compiler output through ccache (Debian's /usr/lib/ccache masquerade: the
-# Makefile's 'which g++' finds it first on PATH, so nothing in the Makefile changes).
+# Three jobs: build-and-test (Linux CPU build of all three binary pairs: single, DOUBLE=1, DIM=2, and the battery
+# of tests/ci_suite.sh, the same list the Dockerfile runs), old-python (every .py parses under Python 3.10, the oldest
+# pyproject supports) and compile-variants (no TBB, no libdeflate, 'make library' and the demo/examples program).
+# The Metal GPU path is macOS-only and validated locally. The C++ jobs share compiler output through ccache
+# (Debian's /usr/lib/ccache masquerade is found first on PATH by the Makefile's 'which g++').
 
 name: ci
 
-# The workflow runs on a push to any branch (not on a tag) and on pull requests. workflow_dispatch adds a manual
-# "Run workflow" button. A newer run of the same branch or pull request cancels the older one, except on master.
+# Runs on a push to any branch (not a tag), on pull requests and manually (workflow_dispatch). A newer run of the
+# same branch or pull request cancels the older one, except on master.
 on:
   push:
     branches: ['**']
@@ -29,8 +21,7 @@ concurrency:
 jobs:
   build-and-test:
     runs-on: ubuntu-24.04
-    # the single-precision battery alone outgrows 60 min on the 4-core runner (locally it is 18 min on 10 cores),
-    # and the double and 2D passes come after it
+    # the single-precision battery alone outgrows 60 min on the 4-core runner
     timeout-minutes: 150
     env:
       CCACHE_MAXSIZE: 500M
@@ -55,22 +46,17 @@ jobs:
           key: ccache-build-and-test-${{ hashFiles('Makefile', 'src/**') }}
           restore-keys: ccache-build-and-test-
 
-      # single + DOUBLE=1 + DIM=2: each is a separate compile of every translation unit, so only a
-      # build catches a float-only or 3D-only construct creeping in
+      # single + DOUBLE=1 + DIM=2: each compiles every translation unit separately
       - name: Build the single, double and 2D binaries (CPU-only)
         run: tests/ci_suite.sh build
 
-      # every CPU suite against ./DTFE and ./PS-DTFE (tests/ci_suite.sh lists them, with why), the
-      # standard-DTFE regression against its STORED reference and the auto-tune and --scratch-dir
-      # suites (free of macOS-only commands) included
+      # every CPU suite against ./DTFE and ./PS-DTFE (tests/ci_suite.sh lists them)
       - name: Test battery (single precision)
         run: tests/ci_suite.sh core
 
-      # The GUI (python/gui). The job-spec test is pure Python; the end-to-end test drives the real
-      # window offscreen through REAL runs of every tab on synthetic data (the Data tab through a
-      # fake wget, so no network), which needs PySide6 (in a venv: Ubuntu's python refuses pip), the
-      # libraries of Qt's offscreen platform, and matplotlib + scipy for the plot scripts.
-      # DTFE_GUI_TEST_REQUIRED=1 (set by ci_suite.sh) turns its "PySide6 missing" skip into a failure.
+      # The GUI (python/gui): a job-spec test and an end-to-end test that drives the real window offscreen (the Data
+      # tab through a fake wget). Needs PySide6 (in a venv: Ubuntu's python refuses pip), Qt's offscreen libraries
+      # and matplotlib + scipy. DTFE_GUI_TEST_REQUIRED=1 (set by ci_suite.sh) turns a missing PySide6 into a failure.
       - name: GUI job specifications + end-to-end (PySide6, offscreen)
         run: |
           sudo apt-get install -y --no-install-recommends \
@@ -80,9 +66,8 @@ jobs:
           "$RUNNER_TEMP/gui-venv/bin/pip" install --quiet PySide6
           DTFE_GUI_PYTHON="$RUNNER_TEMP/gui-venv/bin/python" tests/ci_suite.sh gui
 
-      # the double pair against the single pair, then the program-running suites again against the
-      # double pair (DTFE_TEST_PRECISION=double reads their float64 grids; tests/precision.sh), all but
-      # face_sweep_check and interlacing_check, which read no precision
+      # the double pair against the single pair, then the program-running suites against the double pair
+      # (DTFE_TEST_PRECISION=double; tests/precision.sh), except those that read no precision
       - name: Test battery (double precision)
         run: tests/ci_suite.sh double
 
@@ -98,7 +83,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      # update-environment false: the 3.10 stays OFF the PATH (it has no numpy); the stage is handed its path
+      # update-environment false: the 3.10 stays off the PATH (it has no numpy); the stage is handed its path
       - id: py310
         uses: actions/setup-python@v5
         with:

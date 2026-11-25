@@ -1,93 +1,6 @@
 #!/usr/bin/env bash
-# The run modes: '--run-mode gentle|balanced|performance' in both binaries (or the
-# environment's DTFE_RUN_MODE), PS-DTFE's '--gpu-share auto|mixed|<fraction>', and the run log's lines that say what
-# was set and why (src/run_mode.h; src/user_options.cc printOptions). On a synthetic 16^3 snapshot of crossed waves,
-# grid 16.
-# The thread budgets expected here are src/run_mode.h runModeCoreBudget recomputed from this machine: N0 = its
-# threads (nproc on Linux, hw.logicalcpu on macOS), perf = its performance cores (hw.perflevel0.logicalcpu on macOS,
-# else none), base = min(N0, perf) where perf is known, else N0; gentle max(1, base/2), balanced
-# max(1, base - clamp(round(base/4), 1, 4)), performance N0. The header line checked is
-#   '\t run mode               : <mode> (<source>; <threads>[; GPU buffers up to <250|50> ms][; <priority>])'.
-# Every run that names no mode runs under tests/lib.sh's pin, DTFE_RUN_MODE=performance (the binaries' default of
-# before), and every run under its DTFE_GPU=0 (the CPU unless '--gpu', so no line gains a GPU buffers part); the
-# default cases (M1, M1b, M3) unset the mode's pin per run, and SLURM_JOB_ID and PBS_JOBID are unset for the whole
-# suite (M1b sets them per run).
-# CPU block (every build, both precisions):
-#   M1  no flag, with DTFE_RUN_MODE, SLURM_JOB_ID, PBS_JOBID and OMP_NUM_THREADS unset, both binaries: 'balanced
-#       (--run-mode balanced, the default; B of N0 threads)'
-#   M1b inside a batch job the default is performance, both binaries: SLURM_JOB_ID=1 reads 'performance (--run-mode
-#       performance, the default inside a batch job (SLURM_JOB_ID); N0 of N0 threads)', PBS_JOBID=1 the same with
-#       '(PBS_JOBID)', both set the SLURM_JOB_ID line; SLURM_JOB_ID and PBS_JOBID set but empty give M1's line;
-#       DTFE_RUN_MODE=gentle beats SLURM_JOB_ID=1 ('--run-mode gentle from DTFE_RUN_MODE=gentle'), and
-#       '--run-mode balanced' beats both
-#   M2  '--run-mode balanced' and '--run-mode gentle', both binaries: 'B of N0 threads' and 'G of N0 threads'; PS-DTFE's
-#       plan of '--partition 3 3 3' (DTFE_RAM_GB=64, DTFE_AUTO_MINN=1000, '--auto-tune-report') runs min(27, the
-#       budget) partitions at once, and its report line still ends with 'over_budget'
-#   M3  DTFE_RUN_MODE=GENTLE reads '--run-mode gentle from DTFE_RUN_MODE=GENTLE'; DTFE_RUN_MODE=auto and an empty
-#       DTFE_RUN_MODE give M1's line
-#   M4  the flag beats the variable: DTFE_RUN_MODE=gentle with '--run-mode performance' is '(--run-mode performance;'
-#   M5  refused (a non-zero exit, the binary's text): '--run-mode fast', DTFE_RUN_MODE=fast and '--run-mode' twice in
-#       both binaries, PS-DTFE's '--gpu-share 600', '--gpu-share x' and '--gpu-share both' (the text names 'auto' and
-#       'mixed'), standard DTFE's '--gpu-share 1' (no such option)
-#   M6  OMP_NUM_THREADS=2 under gentle keeps its count ('2 threads (kept: OMP_NUM_THREADS=2 was given)'), and the PS
-#       plan runs at most 2 partitions at once
-#   M7  gentle with '--max-concurrent G+1' (where G+1 <= N0) raises the budget to G+1 ('(raised: --max-concurrent G+1
-#       was given)'), both binaries
-#   M7b gentle with DTFE_TRIANGULATION_THREADS=G+1 (where G+1 <= N0; a build with the parallel insert, else SKIP):
-#       PS-DTFE's one domain inserts on G+1 threads, as it does under performance ('(parallel, TBB, G+1 threads)');
-#       the standard team (the largest 2^a*3^b <= G sub-domains) on min(G+1, N0/team) threads each -- a pinned count
-#       is cut by the machine's threads shared among the builds, not by the mode's lowered budget
-#   M8  Linux: gentle runs at nice 10 ('; nice 10)'), under 'nice -n 15' it keeps 15 ('; nice 15 kept)'); balanced
-#       and performance name no nice; macOS: no mode's line names one
-#   M9a OMP_NUM_THREADS=2: PS-DTFE '--exact --partition 2 2 2 --max-concurrent 2' and standard '--exact --partition 1'
-#       write byte-identical outputs in all three modes
-#   M9b single precision, no thread pin: the same PS-DTFE run under gentle and performance, byte-identical (the double
-#       build's CPU sums follow the thread count)
-#   M10 a run killed after 3 partitions under gentle (DTFE_TEST_EXIT_AFTER_PARTITIONS=3) resumes under '--resume
-#       --run-mode performance' to the uninterrupted outputs; its checkpoint's settings key has no 'run-mode' or
-#       'gpu-share' line, and its device line is 'device=cpu' (DTFE_GPU=0)
-#   M11 '--gpu-share 0.5' on a run on the CPU (no '--gpu', DTFE_GPU=0): one note ("does not apply to a run on the
-#       CPU"; a build without the GPU deposit names 'this CPU-only build' instead) and no key line; '--gpu-share auto'
-#       and '--gpu-share mixed' there are silent
-# GPU block (a Metal build of the precision's pair; SKIP otherwise):
-#   G1  '--gpu --exact --partition 2 2 2 --max-concurrent 2', gentle against performance: 'GPU buffers up to 50 ms'
-#       against '250 ms', byte-identical grids, no CPU fallback
-#   G2  '--gpu-share 1' is the run without the flag (the outputs and the checkpoint key, whose device line is
-#       'device=gpu'); '--gpu-share 0 --gpu' is the run without '--gpu'; '--gpu-share 0.5' twice: byte-identical,
-#       'PS-DTFE: GPU share 0.50 (--gpu-share 0.5): 4 of the 8 partitions ...', 'gpu-share=500' in the key, no CPU
-#       fallback
-#   G3  a 0.5 run killed after 3 partitions: '--resume --gpu-share 1' is refused, naming 'gpu-share=500'; '--resume
-#       --gpu-share auto --run-mode performance' takes the checkpoint's share ("the GPU share 0.50 is the
-#       checkpoint's") and writes the uninterrupted 0.5 run's outputs; a second such killed run resumed with
-#       '--resume --gpu-share mixed --run-mode balanced' does the same (at 2 threads mixed alone would be 1)
-#   G4  OMP_NUM_THREADS=10, DTFE_AUTO_MINN=1000: '--run-mode performance --gpu-share auto --partition 3 3 3' at
-#       '--max-concurrent' 1, 2 and 4 is 'GPU share 0.60' each time, byte-identical; '--run-mode balanced' is 'GPU share
-#       1 (--gpu-share auto: balanced' with no mixed line (the double build's auto share is 1 in every mode)
-#   G4b '--gpu-share mixed' (auto's model in every mode), G4's set-up at '--max-concurrent 2': under balanced and
-#       gentle (10 threads, kept) 'GPU share 0.60 (--gpu-share mixed: balanced, 10 threads, rho 0.09): 16 of the 27
-#       ...' and the header's 'GPU share : mixed (the GPU and the free cores in every mode, resolved with the plan)';
-#       under performance the same with 'performance', and in all three modes the grids of G4's auto run at
-#       '--max-concurrent 2'; the double build: 'GPU share 1 (--gpu-share mixed: <mode>, the double build: every
-#       partition on the GPU)'. Without OMP_NUM_THREADS (single precision) balanced counts the mode's own threads:
-#       '(--gpu-share mixed: balanced, B threads', at '--max-concurrent 1' and at B+1 (a raise moves no share: the
-#       same grids)
-#   G5  '--gpu-share 0.5' with '--sampled', and with '--partition 1': the 'sampled deposit' and 'one domain' notes
-#   G6  balanced, a watchdog fault at buffer 3 (DTFE_GPU_FAULT_AT=3:timeout) and DTFE_GPU_PACE_RECOVER_SEC=0: the
-#       pace eases back to '50 ms buffers, 8 ms gaps (the run mode's)', and no line of the run names 250 ms
-#   G7  '--auto-tune-report' (OMP_NUM_THREADS=10, DTFE_AUTO_MINN=1000, DTFE_RAM_GB=64) of '--gpu --exact --gpu-share
-#       auto --run-mode performance': the AUTO-TUNE line's 'GPU deposit with the free cores (GPU share 0.60)', the
-#       report line as before ('over_budget' last); balanced: no 'GPU share' on the AUTO-TUNE line (the double build:
-#       none in either mode)
-#   G8  the dynamic concurrency of a mixed run (single precision; DTFE_TEST_PLAN_MC=1, DTFE_FREE_GB=1000, grid 128,
-#       '--gpu-share 0.5 --partition 2 2 2', DTFE_AUTO_TUNE_DEBUG=1): the start check's line names a 'once' part
-#       between 0 and the partition's bytes, more than the plan's 1 partition is in flight, and the grids are the
-#       '--max-concurrent 1' run's; an all-GPU run's line names its GPU snapshot as the once part (below the mixed
-#       run's); with DTFE_MEM_BUDGET_GB at own + reserve
-#       + 2 lanes + 1.5 times the once part the dynamic concurrency starts (the once part is booked once, not per
-#       partition) and a second partition gets in flight (the ledger books it once too), at own + reserve + 2 lanes
-#       + half the once part it does not start (it is booked); each of the two runs' own start lines puts its budget
-#       on that side of the start check's total, and the summary's predictions of the two differ by a lane for each
-#       partition the first had in flight beyond the plan's (the once part is in both once)
+# The run modes: '--run-mode gentle|balanced|performance' (or DTFE_RUN_MODE), PS-DTFE's '--gpu-share', and the run log's lines that say what was set.
+# Thread budgets are src/run_mode.h runModeCoreBudget recomputed from this machine; runs on a synthetic 16^3 crossed-waves snapshot, grid 16.
 # Usage: tests/run_mode_check.sh [--no-build]   (--no-build is accepted and ignored: the binaries are used as built)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -101,11 +14,8 @@ STD="$(cd "$(dirname "${DTFE_BIN}")" && pwd)/$(basename "${DTFE_BIN}")"
 TMP="${DTFE_TEST_TMP}/run_mode_check"
 rm -rf "$TMP"; mkdir -p "$TMP"
 TMP="$(cd "$TMP" && pwd -P)"
-# what the cases set themselves: the thread count (an export from a login shell would steer every run), a batch job's
-# names (a suite run inside one: M1b sets them per run), the GPU retry hooks, what moves the auto share off its
-# formula (the mass audit: src/auto_tune.cc autoTuneGpuShare), and what
-# steers the plan and the dynamic concurrency (G8). The mode stays tests/lib.sh's pin, performance, for every run that
-# names none; the default cases unset it per run (UNPIN, the head of their RUN_ENV: env's options come first)
+# what the cases set themselves: the thread count, a batch job's names, the GPU retry hooks, what moves the auto share
+# (autoTuneGpuShare) and what steers the plan (G8). The mode stays tests/lib.sh's pin, performance (UNPIN unsets it).
 unset OMP_NUM_THREADS OMP_THREAD_LIMIT SLURM_JOB_ID PBS_JOBID DTFE_GPU_FAULT_AT DTFE_GPU_PACE_RECOVER_SEC PS_GPU_CHUNK \
       DTFE_GPU_CHECKPOINT_CHUNKS DTFE_MASS_AUDIT \
       DTFE_MEM_BUDGET_GB DTFE_MEM_FRACTION DTFE_TEST_PLAN_MC DTFE_AUTO_TUNE_DEBUG
@@ -145,10 +55,8 @@ if [ "$LINUX" = 1 ]; then
 fi
 echo ">> this machine: N0 = $N0 threads, $PERF performance cores: gentle $G, balanced $B, performance $N0 threads${NICE_NOTE:+ (gentle: $NICE_NOTE)}"
 
-# go <out> <binary> <args...>: one run of '<binary> <snapshot> <out> <args...>', stdout and stderr in <out>.log, with
-# the NAME=value list RUN_ENV in its environment (OMP_NUM_THREADS too comes only from it) and the command RUN_WRAP
-# ('nice -n 15') in front; the exit status is the binary's (the shell's own 'Killed: 9' line for a
-# DTFE_TEST_EXIT_AFTER_PARTITIONS run is not output)
+# go <out> <binary> <args...>: one run, stdout and stderr in <out>.log, with RUN_ENV in its environment and RUN_WRAP
+# ('nice -n 15') in front; the exit status is the binary's
 RUN_ENV=(); RUN_WRAP=()
 go() {
     local out="$1" bin="$2"; shift 2
@@ -306,9 +214,8 @@ else
 fi
 
 echo ">> M7b: a pinned DTFE_TRIANGULATION_THREADS keeps its count under gentle"
-# src/CGAL_triangulation/triangulation.cpp delaunayTriangulation: the pin is an explicit lever, like OMP_NUM_THREADS
-# and '--max-concurrent' -- capped by the machine's threads shared among the builds in flight (and by
-# OMP_NUM_THREADS), not by the mode's lowered budget
+# delaunayTriangulation: the pin is an explicit lever, like OMP_NUM_THREADS and '--max-concurrent': capped by the
+# machine's threads shared among builds in flight, not by the mode's lowered budget
 if [ "$K" -le "$N0" ]; then
     PINNED="(parallel, TBB, $K threads)"
     RUN_ENV=(DTFE_TRIANGULATION_THREADS="$K")
@@ -322,8 +229,7 @@ if [ "$K" -le "$N0" ]; then
         echo "  SKIP M7b PS: no '$PINNED' line under performance (a build without the parallel insert; exit $r0)"
     fi
     # the standard team under gentle: NP sub-domains, the largest 2^a*3^b <= G (src/subpartition.h parallelGrid),
-    # each on min(K, N0/NP) threads. Whether the build has the parallel insert shows under performance with a
-    # team of 2 (N0/2 threads each, capped at the 2 pinned).
+    # each on min(K, N0/NP) threads
     NP=1; a=1
     while [ "$a" -le "$G" ]; do
         b=$a; while [ "$b" -le "$G" ]; do [ "$b" -gt "$NP" ] && NP=$b; b=$((b * 3)); done

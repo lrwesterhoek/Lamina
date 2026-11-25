@@ -1,10 +1,5 @@
 """MainWindow's job tabs (TabsMixin, moved from app.py): the shared data panel, and the Data, Grids, Custom
-snapshot, Pipeline and Plots tabs with their option groups (presets, the Quality pair, fields, phase space, the
-folded More group, a figure set's options) and the reactions that stay inside a tab (the Data tab's snapshot table,
-a new custom snapshot file). The three run tabs (Grids, Custom snapshot, Pipeline) build the groups they share from
-one table, SHARED_WIDGETS, which also keeps each tab's attribute names for them. The
-names app.py defines are read through _app at call time; that import comes last because app.py also runs as a
-script: importing it again under its own name then needs this module's class to exist already."""
+snapshot, Pipeline and Plots tabs with their option groups."""
 
 from __future__ import annotations
 
@@ -383,9 +378,8 @@ class TabsMixin:
 
     def _sync_quality(self, tab: str):
         """A run tab's two grey lines after a change: what its quality is for its estimator (rs.QUALITY_TEXT, the
-        Pipeline's PS-DTFE), and where the run goes (rs.runs_on_text, from the job: _read_widgets came first, and
-        the memory checks of its settings, self.mem_results: the device the program reported), with the precise
-        statement as its tooltip where the job shares the CPU and the GPU (rs.runs_on_tip)."""
+        Pipeline's PS-DTFE), and where the run goes (rs.runs_on_text, from the job: _read_widgets came first,
+        and the memory checks of its settings, self.mem_results: the device the program reported)."""
         spec = self._tab_spec(tab)
         est = getattr(spec, "estimator", "ps")
         q = spec.quality if spec.quality in rs.QUALITIES else rs.QUALITY_DEFAULT
@@ -489,8 +483,7 @@ class TabsMixin:
     def _more_group(self, tab: str, *rows) -> Collapsible:
         """A run tab's folded 'More' group: the output prefix and the start-over tick (Grids and Pipeline: the
         Custom snapshot tab names its output in its Output group and never resumes), the scratch folder and the
-        tessellation cache, then the tab's own rows (the Custom tab's extra options). Folded to a one-line summary
-        (_more_summary)."""
+        tessellation cache, then the tab's own rows (the Custom tab's extra options)."""
         g = Collapsible(L["more"], f"{tab}.more", self._section_settings(), lambda: self._more_summary(tab))
         f = g.form
         widgets = {}

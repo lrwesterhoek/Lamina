@@ -26,17 +26,13 @@ SNAPSHOT_TO_REDSHIFT = {
 PANEL_SNAPSHOTS = ['000', '017', '050', '099']
 
 # ---- Active simulation & box geometry ---------------------------------------------------
-# One simulation is analysed at a time, named by DTFE_SIM; there is no default (None when unset). Every script
-# that opens fields via dtfelib.cli names it per run with --sim instead. The box-derived constants below (BOX_SIZE,
-# CELL_SIZE, SMOOTHING_SIGMA_MPC) exist only once a simulation is named: reading one without it raises
-# dtfelib.cli.NoSimulation (module __getattr__ at the end of this file).
+# One simulation is analysed at a time, named by DTFE_SIM (None when unset; no default). The box-derived constants
+# below exist only once a simulation is named: reading one without it raises dtfelib.cli.NoSimulation.
 from dtfelib.cli import FIGURES_ROOT, require_sim, sim_dir, smooth_mpc_env
 SIMULATION = os.environ.get("DTFE_SIM") or None
 
-# Comoving box sizes in h-free Mpc (raw BoxSize[ckpc/h] / h / 1000). Known simulations are
-# pinned here (immune to stale on-disk headers from older unit conventions); a simulation
-# NOT in this table gets its box read from a combined_*.hdf5 header on disk. When adding a
-# new simulation, either add an entry here or make sure its merged snapshots exist first.
+# Comoving box sizes in h-free Mpc (raw BoxSize[ckpc/h] / h / 1000). A simulation not in this table gets its
+# box from a combined_*.hdf5 header on disk.
 SIMULATION_BOX_MPC = {
     "TNG50-3-Dark":  51.668142899320934,
     "TNG50-4-Dark":  51.668142899320934,
@@ -75,10 +71,8 @@ COSMOLOGY = {
 }
 
 
-# Gaussian smoothing (grid cells) for the derived-product pipeline (delta, Hessian, void
-# catalogs, critical points). 10.0 is the production value: the default correlation and void
-# catalogues are built with it (cache namespaces r512_s10_*); at 0 the catalogs degenerate into
-# single-cell noise dips.
+# Gaussian smoothing (grid cells) for the derived-product pipeline (delta, Hessian, void catalogues, critical
+# points). 10.0 is the production value; at 0 the catalogues degenerate into single-cell noise dips.
 SMOOTHING_SIGMA_CELLS = 10.0
 
 RAW_MAPS_SIGMA = 0.0
@@ -98,13 +92,10 @@ def footprint_for(sigma_cells):
     return max(3, 2 * int(round((1.1 * float(sigma_cells) - 1.0) / 2.0)) + 1)
 
 
-# A smoothing length FIXED IN Mpc: DTFE_SMOOTH_MPC=2.16 (dtfelib.cli.smooth_mpc_env) smooths every box at the same
-# physical scale -- 10 cells is 1.0 / 2.2 / 5.9 Mpc in TNG50 / 100 / 300, so their 10-cell catalogues are different
-# voids -- and the footprint follows it (footprint_for). Here, at import, so every module-level copy follows; the
-# void scripts' --smooth-mpc does the same at run time (dtfelib.pipeline.set_smoothing). FOR THE VOID SCRIPTS AND
-# 'analyze.py export' (which tag their outputs): analyze.py compute/plot/all refuse to run under it (the core
-# figures are saved under their production names). The cells are rounded to 1e-9, so 10 x CELL_SIZE gives exactly
-# 10.0 cells, footprint 11 and the production caches.
+# A smoothing length FIXED IN Mpc: DTFE_SMOOTH_MPC (dtfelib.cli.smooth_mpc_env) smooths every box at the same
+# physical scale, and the footprint follows it (footprint_for). For the void scripts and 'analyze.py export';
+# analyze.py compute/plot/all refuse to run under it. The cells are rounded to 1e-9 so that 10 x CELL_SIZE
+# gives exactly 10.0 cells and the production caches.
 _SMOOTH_MPC_ENV = smooth_mpc_env()
 if _SMOOTH_MPC_ENV:
     SMOOTHING_SIGMA_CELLS = round(float(_SMOOTH_MPC_ENV)
@@ -113,10 +104,8 @@ if _SMOOTH_MPC_ENV:
 if SIMULATION:
     SMOOTHING_SIGMA_MPC = SMOOTHING_SIGMA_CELLS * CELL_SIZE
 
-# The cross-box comparison's common smoothing length in Mpc: 10.0002 TNG100-3-Dark cells
-# (110.7 Mpc / 512; production 10 cells = 2.16245 Mpc). ONE number every Python user imports --
-# plot_void_crossbox.DEFAULT_SIGMA_MPC, analyze.py's cache inventory (CACHE_SMOOTHING_MPC), the launcher
-# (gui/runspec.py) -- because it names cache namespaces (r512_s21.4291_f23 on TNG50): 2.16 next to 2.1625 makes a
+# The cross-box comparison's common smoothing length in Mpc: 10.0002 TNG100-3-Dark cells (110.7 Mpc / 512).
+# ONE number every Python user imports: it names cache namespaces, so 2.16 next to 2.1625 would make a
 # second, unreachable namespace.
 CROSSBOX_SMOOTHING_MPC = 2.1625
 
@@ -124,13 +113,9 @@ GRADIENT_THRESHOLD = 0.1
 
 DEEP_VOID_THRESHOLD = -0.1
 # The ellipsoid fit's resolution gate (a void's well_resolved flag) as RULES in the field's own scales; in Mpc
-# only at call time, through dtfelib.pipeline.ellipsoid_cuts_mpc(), so a script's --smooth reaches it. A
-# fixed 10 Mpc gate -- TNG50's 10 sigma -- would keep 2 of 495 TNG100 voids and 0 of 650
-# TNG300 voids at z = 0: the semi-axes are curvature lengths of the smoothed field and grow with the smoothing.
-# 10 sigma reproduces the 10 Mpc TNG50-3-Dark sample (+72/-0 of 8433 flags over its snapshots) and keeps 103
-# (TNG100) and 409 (TNG300) voids at z = 0. The box
-# clause: a semi-axis beyond L/2 overlaps its own periodic image (inert at sigma = 10 cells, binding above 25.6).
-# The minimum axis and the axis ratio never decide a void at sigma = 10 cells.
+# only at call time (dtfelib.pipeline.ellipsoid_cuts_mpc), so a script's --smooth reaches it. The semi-axes
+# are curvature lengths of the smoothed field and grow with the smoothing, so a fixed Mpc gate does not transfer.
+# Box clause: a semi-axis beyond L/2 overlaps its own periodic image (inert at sigma = 10 cells).
 ELLIPSOID_CUT_RULES = {
     'min_axis_cells': 1.0,
     'max_axis_sigma': 10.0,
@@ -154,10 +139,8 @@ CORRELATION_BAND_PERCENTILES = (2.5, 97.5)
 CORRELATION_M_YLIM = 0.2
 CORRELATION_SEED = 42
 
-# Draw the shaded central-95% (2.5-97.5 percentile) Monte-Carlo null
-# envelopes on the correlation / alignment / profile plots
-# (plot_marked_correlation_BBKS, plot_tidal_correlation, plot_phi_delta). Off by default. The null statistics are still
-# computed and reported in the console/summary output regardless of this flag.
+# Draw the shaded central-95% (2.5-97.5 percentile) Monte-Carlo null envelopes on the correlation / alignment /
+# profile plots. Off by default; the null statistics are reported regardless.
 SHOW_NULL_BANDS = False
 
 EXTREMA_MATCH_DISTANCE_CELLS = 11.0
@@ -206,13 +189,9 @@ def figures_path(analysis_key):
 # Data location: dtfelib.cli (DTFE_DATA_ROOT, required: require_data_root; the simulation from DTFE_SIM); every
 # plot script can also give them per run with --data-root / --sim.
 
-# DTFE_CACHE_DIR moves the derived-product caches (python/cache: the void catalogues, slices, limits)
-# elsewhere, e.g. off a cloud-synced folder such as iCloud Drive, which syncs every catalogue; unset, python/cache.
-# A PERSISTENT per-user setting does the same without an environment variable: the
-# one line of cache_setting_file() (~/.config/dtfe/cache_dir, or under $XDG_CONFIG_HOME), written by
-# 'analyze.py cache --move DIR' and the launcher's setup, which move the existing cache there first. Order: the
-# variable, then the setting, then python/cache. In a repository inside iCloud Drive the 1.2 GB of
-# catalogues would sync on every rebuild.
+# DTFE_CACHE_DIR moves the derived-product caches (python/cache) elsewhere, e.g. off a cloud-synced folder.
+# A persistent per-user setting does the same: the one line of cache_setting_file() (~/.config/dtfe/cache_dir),
+# written by 'analyze.py cache --move DIR'. Order: the variable, then the setting, then python/cache.
 DEFAULT_CACHE_DIR = _REPO_ROOT / 'cache'
 
 

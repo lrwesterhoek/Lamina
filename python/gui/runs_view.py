@@ -1,16 +1,4 @@
-"""The GUI's Runs browser: every output set on disk, read back from its run log (results.py).
-
-One row per run -- simulation, snapshot, output name, grid, options, when, how long, peak memory,
-size on disk -- and a status that flags outputs to look at before use (results.stale_reasons: an
-older version of the programs made them, a later attempt rewrote them, ...). Actions: open the log,
-load the run's settings into the Grids tab (re-run with the same settings), open it in Explore, show
-it in Finder, move its outputs to the Trash (never a hard delete), and build the run's void
-catalogue as a queue job; the 'Voids' column says whether that catalogue is cached, stale (the grid
-was rewritten after it) or absent, read in a background thread (results.void_status).
-
-RunningNow: the runs going on this machine wherever they were started (nohup, a terminal script,
-this launcher), from the processes' command lines and their progress sidecars (runspec.running_now), with a Stop.
-"""
+"""The GUI's Runs browser: every output set on disk, read back from its run log (results.py)."""
 
 from __future__ import annotations
 
@@ -326,11 +314,8 @@ def running_cells(e: dict) -> list[str]:
 
 
 class RunningNow(QWidget):
-    """The runs going on this machine, wherever they were started: the launcher's own, a terminal
-    script, a nohup'ed overnight batch. Filled by the window's background poll (runspec.running_now): simulation
-    and snapshot from the binary's command line, phase, done/total, ETA and memory from its progress sidecar
-    '<output>.runlog.progress' (C1), elapsed from ps. A leftover sidecar whose pid is gone reads 'died'. Stop
-    sends the binary SIGTERM (its run script's trap then keeps the attempt's log as '.runlog.failed')."""
+    """The runs going on this machine, wherever they were started: the launcher's own, a terminal script, a
+    nohup'ed overnight batch."""
     message = Signal(str)
 
     def __init__(self):

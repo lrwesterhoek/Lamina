@@ -1,14 +1,4 @@
-"""Presets and help text for the GUI's run settings. Pure Python (no Qt).
-
-  PRESETS / preset_names / apply_preset   named starting points for a Grids / custom-snapshot run
-                                          (built in, plus the user's own, kept in the GUI's settings)
-  OPTION_TEXT                             plain-language label + the binary flag behind each option
-  LABELS                                  the window's words that several tabs share (group titles, buttons)
-  flag_help(binary)                       {flag: description} parsed from the binary's own
-                                          '--full-help', so a tooltip can never drift from the code:
-                                          short_tooltip (its first sentence, at most two lines) is the
-                                          tooltip, tooltip (all of it) the control's What's This
-"""
+"""Presets and help text for the GUI's run settings. Pure Python (no Qt)."""
 
 from __future__ import annotations
 
@@ -62,9 +52,7 @@ def capture(spec) -> dict:
 
 
 def apply_preset(spec, settings: dict, planes=()) -> list[str]:
-    """Sets the preset's fields (PRESET_KEYS) on spec, in place; returns what was changed, for the status line.
-    planes: the simulation's image-plane files, for 'slice_plane': 'largest'. A setting outside PRESET_KEYS (or one
-    the job does not have) is left out."""
+    """A setting outside PRESET_KEYS (or one the job does not have) is left out."""
     changed = []
     known = spec.to_dict()
     for k, v in settings.items():

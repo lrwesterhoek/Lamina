@@ -1,8 +1,6 @@
-"""The pipeline cache's housekeeping, behind 'analyze.py cache': every namespace of config.CACHE_DIR with its size and
-whether the current code can still reach it (cache_inventory), the listing and the prune (cache_command), and the
-move to another folder with the setting recorded (move_cache), refused while a figure script, an analysis, the
-launcher or a DTFE binary may be using the cache (cache_users). Moved out of analyze.py, which re-exports every name
-(the 'cache' subcommand stays there)."""
+"""The pipeline cache's housekeeping, behind 'analyze.py cache': the inventory of config.CACHE_DIR namespaces,
+the prune, and the move to another folder (move_cache), refused while a script, the launcher or a DTFE binary
+may be using the cache (cache_users)."""
 
 import os
 import re
@@ -16,9 +14,8 @@ import config
 # ---------------------------------------------------------------- cache (list / prune the namespaces)
 
 # The physical smoothings (Mpc) the current code asks for by default: the cross-box comparison's sigma,
-# config.CROSSBOX_SMOOTHING_MPC (the one number plot_void_crossbox, the launcher and this read). A
-# namespace made with another Mpc value (2.16: r512_s21.4043_f23 next to 2.1625's
-# r512_s21.4291_f23) is reached only by typing that value again; 'cache --keep-mpc' and DTFE_SMOOTH_MPC add values.
+# config.CROSSBOX_SMOOTHING_MPC. A namespace made with another Mpc value is reached only by typing that value
+# again; 'cache --keep-mpc' and DTFE_SMOOTH_MPC add values.
 CACHE_SMOOTHING_MPC = (config.CROSSBOX_SMOOTHING_MPC,)
 NAMESPACE_RE = r"^r(?P<res>\d+)_s(?P<sig>[^_]+)_f(?P<fp>\d+)_(?P<crit>.+)_g(?P<g>[^_]+)_v(?P<ver>\d+)$"
 
@@ -54,20 +51,9 @@ FIXED_R_CELLS = (10.0, 5.0, 3.0, 2.0)     # see cache_inventory
 
 
 def cache_inventory(root=None, keep_mpc=(), keep_cells=()):
-    """Every entry of the pipeline cache (config.CACHE_DIR) with a verdict: a list of
-    {'path', 'kind' ('namespace' / 'file'), 'bytes', 'files', 'newest', 'prune' (bool), 'reason'}.
-
-    A NAMESPACE (r<N>_s<sigma>_f<footprint>_<criterion>_g<threshold>_v<version>, pipeline._param_hash) is UNREACHABLE,
-    and pruned, when
-      * its version is not the current one ('_v1': the format before the h-free unit overhaul; nothing reads it), or
-      * no smoothing the current code asks for produces its sigma/footprint: the production one
-        (config.PRODUCTION_SMOOTHING),
-        a --smooth in cells with the production footprint for config.SMOOTHING_COMPARISON_SIGMAS (+ keep_cells), or a
-        smoothing in Mpc -- CACHE_SMOOTHING_MPC, DTFE_SMOOTH_MPC and keep_mpc -- for a simulation whose files it holds
-        (round(mpc / cell, 9) cells, config.footprint_for), the way config / pipeline.set_smoothing spell it.
-    Another resolution, criterion or gradient threshold is a config change away: kept. Inside a kept namespace a FILE
-    is pruned when it is an interrupted save's temp file ('<name>.npz.<pid>.tmp.npz', pipeline._save_npz) whose
-    process is gone, or a fate link (lagrangian) of an older LINK_VERSION, which cached_link never serves."""
+    """Every entry of the pipeline cache (config.CACHE_DIR) with a verdict: a list of {'path', 'kind', 'bytes',
+    'files', 'newest', 'prune' (bool), 'reason'}. A namespace is pruned when its version is not current or no current
+    smoothing produces its sigma/footprint; a file when it is a dead save's temp file or an older fate link."""
     import re
     root = Path(config.CACHE_DIR if root is None else root)
     out = []
@@ -207,14 +193,9 @@ def cache_command(prune=False, yes=False, keep_mpc=(), keep_cells=(), root=None)
 
 # ---------------------------------------------------------------- cache --move
 
-# what reads or writes the cache: the figure / analysis scripts, the launcher (its Explore tab and Runs status read
-# catalogues in-process, its jobs run the scripts) and the binaries a Pipeline job runs before its analysis. A python
-# whose command line names one of these is a user; the binaries are found by name, as the launcher's own check does
-# (runspec.dtfe_processes' pgrep pattern). The interpreter may also be the macOS host bundle scripts/gui.sh starts the
-# launcher in ('<venv>/Lamina.app/Contents/MacOS/Lamina <repo>/python/gui/app.py', or 'DTFE Launcher' for a host made
-# by an older install_gui_app.sh; its sys.executable,
-# runspec.PYTHON's last fallback for the jobs), and the launcher is matched by its script path whatever runs it: a
-# pattern that wants a 'python...' word before it misses the usual way the launcher is open.
+# What reads or writes the cache: the figure / analysis scripts, the launcher and the binaries a Pipeline job
+# runs. A python whose command line names one of these is a user; the binaries are found by name. The launcher
+# is matched by its script path whatever interpreter runs it (it may be the macOS host bundle Lamina.app).
 _CACHE_USER_SCRIPTS = re.compile(r"(?i)(?:python[^\s/]*|Lamina|DTFE Launcher)\s.*?(?:\banalyze\.py|\bselftest\.py|"
                                  r"\bplot_\w+\.py|\bvoid_outlines\.py|\bvoid_cache\.py)(?:\s|$)"
                                  r"|(?:^|[\s/])gui/app\.py(?:\s|$)")
@@ -237,11 +218,9 @@ def _ps_table():
 
 
 def cache_users(table=None, dtfe_names=None, me=None):
-    """[(pid, what)] of the processes that may be using the pipeline cache now: a python running an analysis or
-    figure script or the launcher, and the DTFE / PS-DTFE binaries (a Pipeline job runs one, then its analysis).
-    This process and its ANCESTORS are left out: 'analyze.py cache --move' run by the launcher's setup is the
-    launcher's own child, and the launcher then points itself at the new folder. 'table' ({pid: (ppid, args)})
-    and 'dtfe_names' ({pid: name}) are for tests; by default ps and pgrep are asked."""
+    """[(pid, what)] of the processes that may be using the pipeline cache now. This process and its ANCESTORS
+    are left out ('cache --move' run by the launcher's setup is its child). 'table' and 'dtfe_names' are for tests;
+    by default ps and pgrep are asked."""
     table = _ps_table() if table is None else table
     if dtfe_names is None:
         try:
@@ -309,15 +288,9 @@ def _same_tree(a, b):
 
 
 def move_cache(dest, yes=False, src=None, users=None, setting_file=None):
-    """'analyze.py cache --move DIR' (and the launcher's setup): move the pipeline cache (config.CACHE_DIR) to DIR
-    and record DIR as the cache folder (config.write_cache_setting), so every later script and the launcher use it
-    without DTFE_CACHE_DIR. A DRY RUN unless yes: it lists what would move, how much, the room there, and whatever
-    would stop it. With yes, refused (exit 1, nothing touched) while a run, a figure script or the launcher may be
-    using the cache (cache_users; 'users' replaces the check in tests), when DIR is inside the cache or holds a
-    namespace of the same name, or without room. Then EVERY entry is copied into a hidden '.<name>.<pid>.partial'
-    beside its final name and verified byte for byte before anything is renamed: a failure leaves the old cache as
-    it was and removes the copies. Only then each copy is renamed to its name (atomic: same folder), the setting
-    written, and each source removed -- copy, verify, then remove. Returns the exit code."""
+    """'analyze.py cache --move DIR': move the pipeline cache to DIR and record DIR as the cache folder. A dry run
+    unless yes; refused while the cache may be in use or without room. Every entry is copied to a hidden partial
+    and verified byte for byte before anything is renamed, so a failure leaves the old cache intact. Returns the exit code."""
     import shutil
     src = Path(config.CACHE_DIR if src is None else src).expanduser()
     dest = Path(os.path.expanduser(str(dest))).resolve()
@@ -351,11 +324,9 @@ def move_cache(dest, yes=False, src=None, users=None, setting_file=None):
     except OSError:
         free = None
     why = []
-    # an EVICTED iCloud file is a '.<name>.icloud' stub beside where it was: copying moves the stub, and removing it
-    # from iCloud Drive deletes the file in the cloud -- the catalogue would be gone. Current macOS writes
-    # no stubs: it evicts in place under the real name with SF_DATALESS in st_flags (_evicted), and copying
-    # one downloads it first, onto the source's disk -- so its bytes count twice in the room needed when the
-    # destination shares that disk (the copy takes up to 2x).
+    # An EVICTED iCloud file is a '.<name>.icloud' stub: copying moves the stub, and removing it deletes the file
+    # in the cloud. Current macOS evicts in place (SF_DATALESS in st_flags, _evicted); copying one downloads it
+    # first onto the source's disk, so its bytes count twice in the room needed when the destination shares it.
     evicted = [q for p in items for q in ([p] if p.is_file() else [p, *p.rglob('*')]) if _evicted(q)]
     evicted_bytes = sum(_lstat_size(q) for q in evicted if not q.name.endswith('.icloud'))
     if evicted:

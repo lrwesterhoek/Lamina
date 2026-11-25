@@ -1,28 +1,25 @@
-/* The Metal GPU hosts' chunk-level checkpoints and cause-aware retry policy, shared by ps_metal_host.cc and the
-   standard-DTFE host, dtfe_metal_host.cc, so both run the SAME policy.
+/* The Metal GPU hosts' chunk checkpoints and cause-aware retry policy, shared by ps_metal_host.cc and
+   dtfe_metal_host.cc: a failed command buffer restores the last snapshot of the written buffers and resumes there.
+   Included by the hosts INSIDE their anonymous namespace, after <Metal/Metal.hpp>, "../message.h" and the std headers;
+   the host includes "../run_mode.h" at file scope first. A binary links ONE Metal host, so the process-wide statics
+   below (the pace, the fault hook) are that binary's. */
 
-   Without checkpoints a failed command buffer would redo the WHOLE deposit (a PS partition: up to tens of minutes
-   on a large snapshot; a standard-DTFE sub-domain batch: the whole batch). So every pass keeps a snapshot of the
-   buffers its kernel writes (the accumulator grids; PS also the exact items' sumW and the
-   per-tet masses the kernel negates when it defers a tet), taken at the pass's start and every
-   DTFE_GPU_CHECKPOINT_CHUNKS chunks; a failed buffer (which may have deposited part or all of its atomics)
-   restores the last snapshot and continues from its chunk, at a pace that depends on the cause (GpuFault).
+// Releases a buffer whose contents are no longer needed, its pages at once (marked empty first): Metal otherwise
+// keeps a released buffer's memory for a while, so the footprint between partitions wanders. Both hosts release
+// this way, so the footprint is the live memory the auto-tuner books.
+inline void releaseBuffer(MTL::Buffer*& b)
+{
+    if (!b) return;
+    b->setPurgeableState(MTL::PurgeableStateEmpty);
+    b->release();
+    b = nullptr;
+}
 
-   Included by the two Metal hosts INSIDE their anonymous namespace, after <Metal/Metal.hpp>, "../message.h" (which
-   brings env_knobs.h) and the std headers (<algorithm> <chrono> <cmath> <cstdio> <cstdlib> <cstring> <memory> <new>
-   <string> <vector> <unistd.h>). The host includes "../run_mode.h" (runModeState: the run mode's pace base) at file
-   scope, before its anonymous namespace. A binary links ONE Metal host (PS-DTFE: ps_metal_host.cc, DTFE and libDTFE:
-   dtfe_metal_host.cc), so the process-wide statics below (the pace, the fault hook) are that binary's. */
-
-// What a failed command buffer says about its cause. Both watchdog flavours share Metal's Timeout code (2), so
-// the description is read first:
-//   Victim    "Innocent Victim": another process's buffer hung the GPU and ours was collateral -> retry at
-//             once at the same pace (slowing down would only cost time, our buffers were not the problem)
-//   Watchdog  "Impacting Interactivity" / a GPU timeout: our buffers starved the display -> shorter buffers,
-//             wider gaps (the pacing the chunking exists for)
-//   Resource  out of memory, page fault, invalid resource, internal: escalate as for the watchdog and let the
-//             system settle 2 s first
-//   Fatal     device removed / not permitted / access revoked: no retry can help -> straight to the CPU
+// What a failed command buffer says about its cause (both watchdog flavours share Timeout code 2: read the text):
+//   Victim    "Innocent Victim": another process hung the GPU -> retry at once at the same pace
+//   Watchdog  "Impacting Interactivity" / a GPU timeout -> shorter buffers, wider gaps
+//   Resource  out of memory, page fault, invalid resource, internal -> as Watchdog, after 2 s to settle
+//   Fatal     device removed / not permitted / access revoked -> straight to the CPU
 enum class GpuFault { Victim, Watchdog, Resource, Fatal };
 
 char const* gpuFaultName(GpuFault f)
@@ -63,19 +60,11 @@ int gpuRetryCause(GpuFault f, long code, std::string const& desc)
     return k;
 }
 
-// The dispatch pace, kept across partitions once escalated (dtfe_metal_host.cc's batches share it):
-// a machine whose display load killed one partition's buffers will kill the next one's at the same pace.
-// But not for the rest of the PROCESS: one 'Impacting Interactivity' fault -- a moment of display
-// use -- would then slow every later partition (72% GPU duty after one escalation, 29% after two: hours
-// on a long run). So the pace
-// steps back one notch -- the inverse of one escalation, buffers x4 and gaps /3, toward the run mode's base (gpuPace
-// below: 0.25 s / 8 ms in performance, 0.05 s / 8 ms in gentle and balanced) -- after
-// every DTFE_GPU_PACE_RECOVER_SEC (default 90) seconds of GPU work (buffers + gaps) without a fault of ours;
-// counted in GPU work, not wall time, so the triangulations between deposits are no evidence the display is
-// quiet. An escalation within a deposit therefore holds for at least that long. An innocent victim neither
-// escalates nor resets the clean count. Guarded by the host's ctxMutex (only touched inside psGpuDepositFields,
-// or dtfe_metal_host.cc's runBatch, whose callers hold it). The pass loop (gpuRunPass, below) steps it with
-// onFault / onClean.
+// The dispatch pace, kept across partitions once escalated (the batches of dtfe_metal_host.cc share it). It steps
+// back one notch (buffers x4, gaps /3, toward the run mode's base, gpuPace) after every DTFE_GPU_PACE_RECOVER_SEC
+// (default 90) s of GPU work without a fault of ours, counted in GPU work, not wall time. An innocent victim neither
+// escalates nor resets the clean count. Guarded by the host's ctxMutex (touched only inside psGpuDepositFields or
+// runBatch, whose callers hold it).
 double const GPU_PACE_TARGET0 = 0.25;   // the default pace (performance's base; the state of a caller that skips readOptions)
 useconds_t const GPU_PACE_GAP0 = 8000;
 struct GpuPace
@@ -106,9 +95,8 @@ struct GpuPace
         return true;
     }
 };
-// The process's pace, from the run mode's base (run_mode.h): 0.25 s buffers in performance and 0.05 s in gentle and
-// balanced, 8 ms gaps in every mode; a recovery returns to it. First touched inside a deposit, after main's
-// readOptions applied the mode (a caller that never reads the options, libDTFE, keeps performance's).
+// The process's pace, from the run mode's base (run_mode.h); a recovery returns to it. First touched inside a
+// deposit, after readOptions applied the mode (a caller that never reads the options, libDTFE, keeps performance's).
 GpuPace& gpuPace()
 {
     static GpuPace p = [] {
@@ -120,12 +108,11 @@ GpuPace& gpuPace()
     return p;
 }
 
-// The test hook DTFE_GPU_FAULT_AT=<k>[:<kind>]: the k-th command buffer of the PROCESS (1-based, counted over
-// every pass and partition; buffers that failed for real are not counted) runs to completion -- its atomics ARE deposited, the worst case of a buffer killed
-// late -- and is then reported as failed, so only a correct restore keeps the grids exact. Kinds: 'innocent'
-// (default), 'timeout', 'oom', and 'persist' (every buffer from the k-th on fails as an innocent victim: the
-// retry policy must then give the partition to the CPU). One-shot except 'persist'. The hook's settings, how many
-// buffers have run so far, and whether the one-shot fault has fired: the binary's one process-wide hook.
+// The test hook DTFE_GPU_FAULT_AT=<k>[:<kind>]: the k-th command buffer of the PROCESS (1-based, over every pass and
+// partition; real failures are not counted) runs to completion, its atomics deposited (the worst case), and is then
+// reported as failed, so only a correct restore keeps the grids exact. Kinds: 'innocent' (default), 'timeout', 'oom',
+// 'persist' (every buffer from the k-th on fails as an innocent victim: the CPU must take the partition). One-shot
+// except 'persist'. The binary's one process-wide hook.
 struct GpuFaultHook { long at = 0; std::string kind = "innocent"; long count = 0; bool fired = false; };
 GpuFaultHook& gpuFaultHook()
 {
@@ -262,17 +249,11 @@ struct GpuPassSpec
     double busy = 0., gaps = 0.;         // the successful buffers' seconds; the idle gaps' and settling sleeps'
 };
 
-// The loop: serialized command buffers of 'chunk' threads (the opening chunk in, the controller's last one out),
-// each retargeted toward the pace's buffer length and followed by its idle gap, with a periodic checkpoint every
-// DTFE_GPU_CHECKPOINT_CHUNKS buffers (default ~10 s of GPU work). A failed buffer (which may have deposited part or
-// all of its atomics) gives up -- false, run.lastErr set -- on a fatal cause, without a snapshot, after
-// GPU_MAX_FAILS_SAME_CHUNK failures of one chunk or GPU_MAX_FAILS_TOTAL in the deposit; otherwise, unless an
-// innocent victim, it escalates the pace and shrinks the chunk, then restores and continues from the snapshot.
-// The host supplies:
-//   encode(enc, start, n)   binds the chunk [start, start + n) (and fills its parameter block)
-//   restore() -> size_t     puts the grids back as the held snapshot has them and returns the first thread to
-//                           redo
-//   escalate()              the host's own part of an escalation, after the chunk shrank
+// The loop: serialized command buffers of 'chunk' threads, each retargeted toward the pace's buffer length and
+// followed by its idle gap, with a periodic checkpoint every DTFE_GPU_CHECKPOINT_CHUNKS buffers. A failed buffer (it
+// may have deposited part of its atomics) gives up (false, run.lastErr set) on a fatal cause, without a snapshot,
+// or after GPU_MAX_FAILS_SAME_CHUNK / GPU_MAX_FAILS_TOTAL failures; else it escalates the pace, shrinks the chunk,
+// calls restore() (grids back to the snapshot, returns the first thread to redo) and escalate() (the host's part).
 template <class Encode, class Restore, class Escalate>
 bool gpuRunPass(GpuPassSpec& p, GpuRetryRun& run, size_t& chunk, Encode&& encode, Restore&& restore,
                 Escalate&& escalate)

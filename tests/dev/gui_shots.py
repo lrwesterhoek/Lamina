@@ -1,28 +1,10 @@
 #!/usr/bin/env python3
 """Screenshots of the launcher, to SEE layout bugs the suites cannot (clipped fields, overlapping rows, a short table).
 
-Renders every tab at each window size, then the Explore tab with "Show in 3D" on (volume, then planes), and prints for
-each scrolled tab the width its form needs against the width it is given (a form wider than its viewport is clipped:
-the scroll bars are off), folded and with every folded group (More) open. The window never remembers
-anything (remember=False: no saved settings are read or written) and the figures go to a temporary folder, which
-is removed at exit.
-
-    tests/dev/gui_shots.py <out dir> [--native] [--open] [--fast-dtfe] [--advanced] [--data-root DIR]
-                           [--sizes 1500x950,1100x750]
-
-  --native     draw in a real window on the default platform (macOS: the system style, the widths a user sees); the
-               default is Qt's offscreen platform, whose generic style sizes some widgets differently
-  --open       take the tabs' shots with every folded group open (the widths are measured both ways regardless)
-  --fast-dtfe  the run tabs at Fast, the Grids and Custom snapshot tabs on standard DTFE (their PS-only groups hidden)
-  --advanced   View > Advanced Settings on: the run tabs' Advanced groups (folded, unless --open), every row on
-               Automatic (the window remembers nothing: the switch is not saved)
-  --data-root  a simulation root to show (default: a synthetic one made in a temporary folder: one 64^3 PS-DTFE grid
-               set, so Explore has a volume to draw)
-
-Needs PySide6 (the launcher's python). The PNGs are named <tab index>_<tab>_<width>.png (the window),
-<tab index>_<tab>_<width>_form.png (a tab's whole form, below the fold too; Explore: its left pane) and
-explore3d_<style>_<width>.png.
-"""
+Usage: tests/dev/gui_shots.py <out dir> [--native] [--open] [--fast-dtfe] [--advanced] [--data-root DIR] [--sizes ...]"""
+# --native: a real window on the default platform (default: Qt's offscreen); --open: every folded group open;
+# --fast-dtfe: run tabs at Fast, standard DTFE; --advanced: View > Advanced Settings on; --data-root: a simulation
+# root (default: a synthetic one in a temporary folder). Needs PySide6. PNGs: <tab index>_<tab>_<width>[_form].png.
 import argparse
 import atexit
 import os

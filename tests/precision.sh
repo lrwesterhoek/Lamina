@@ -1,17 +1,6 @@
-# Sourced by the shell suites: the precision they run at.
-#
-#   DTFE_TEST_PRECISION=single (default)  ./PS-DTFE and ./DTFE, grid outputs float32
-#   DTFE_TEST_PRECISION=double            ./PS-DTFE-double and ./DTFE-double ('make DTFE PS-DTFE DOUBLE=1
-#                                         [METAL=1]'), grid outputs float64
-#
-# Every GRID output (.den, .a_den, .streams, .hidden_streams, .caustic, .causticClass, .tetTouch, ...)
-# is written in the build's Real type, the masks and counts included; the point-evaluation outputs
-# (.pts_*) have the same fixed types in both builds. So a suite reads grids with the dtype exported
-# here (DTFE_TEST_REAL, numpy's name) and leaves its .pts_* reads alone. In double mode a suite never
-# rebuilds (the pair is built by 'make ... DOUBLE=1'), and skips when the pair is missing.
-# PS_BIN / DTFE_BIN name the pair, PS_OBJ / DTFE_OBJ its object folders (whose '.gpu_mode_*' stamp says whether the
-# build has a GPU path).
-# tests/lib.sh: PY (a python with a working h5py) and the helpers several suites share (skip_or_fail among them).
+# Sourced by the shell suites: the precision they run at. DTFE_TEST_PRECISION=single (default) uses ./PS-DTFE and ./DTFE
+# (float32 grids), =double uses ./PS-DTFE-double and ./DTFE-double ('make DTFE PS-DTFE DOUBLE=1 [METAL=1]', float64 grids).
+# Grids are read with DTFE_TEST_REAL; .pts_* outputs have fixed types. PS_BIN / DTFE_BIN name the pair, PS_OBJ / DTFE_OBJ its object folders.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 case "${DTFE_TEST_PRECISION:-single}" in
     double)

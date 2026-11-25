@@ -89,7 +89,7 @@ struct Particle_data : public Data_structure
     Pvector<Real,NO_DIM>   pos;    // Eulerian position
 #ifdef PHASE_SPACE
     Pvector<Real,NO_DIM>   lagPos; // Lagrangian (initial) position
-    uint64_t               partID = 0; // snapshot ParticleID (0 for readers without IDs); periodic image copies keep the original's ID -- that is what makes the point-eval stream identities partition-invariant
+    uint64_t               partID = 0; // snapshot ParticleID (0 without IDs); periodic image copies keep the original's ID (partition-invariant point-eval streams)
 #endif
 
     inline Pvector<Real,NO_DIM>& position() { return pos;}

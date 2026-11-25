@@ -1,7 +1,5 @@
-// Part of src/DTFE.cpp, inside its #ifdef PHASE_SPACE: included once, in order, by that file and compiled only as
-// part of its object, never alone.
-// The PS partitioned run's setup: the cloud's normalization, the Lagrangian periodic setup, the window, the
-// composite serve, the grids, the window's skips and the deferred particle read (psReadDeferredParticles).
+// Part of src/DTFE.cpp (inside its PHASE_SPACE block), included once by that file, never compiled alone: the PS partitioned run's
+// setup (cloud normalization, Lagrangian periodic setup, window, composite serve, grids, window skips, psReadDeferredParticles).
 
 // PS-DTFE, neither periodic nor --region: the cloud's Lagrangian mean density and the --ps-alpha-shape radius.
 static void psCloudNormalization(DTFE_State &state, User_options &userOptions)
@@ -205,12 +203,11 @@ static void psLagrangianPeriodicSetup(DTFE_State &state, User_options &userOptio
                 << " periodic copies are generated per-partition (deferred) to keep peak memory low.\n" << MESSAGE::Flush;
         }
 
-        // primary periodic box: the centroid ownership check keeps one image of each cell and tiles the box;
-        // overridden per partition in the partition path. It is ONE PERIOD, [seam - L, seam), not the snapshot box
-        // [0, L): on a lattice the box edge lies halfway between particle planes, so a straddling tet's centroid is
-        // ON the edge and its float-rounded copies can put both images outside (mass lost on a single-precision
-        // lattice; tests/tweb_check.sh). The period ends at the exact seam (subpartition.h psPeriodicSeam)
-        // where the padding allows, at the top particle plane otherwise.
+        // primary periodic box: the centroid ownership check keeps one image of each cell and tiles the box; overridden per partition in the
+        // partition path. It is ONE PERIOD, [seam - L, seam), not the snapshot box [0, L): on a lattice the box edge lies halfway between
+        // particle planes, so a straddling tet's centroid is ON the edge and its float-rounded copies can put both images outside (mass lost
+        // on a single-precision lattice; tests/tweb_check.sh). The period ends at the exact seam (psPeriodicSeam) where the padding allows,
+        // at the top particle plane otherwise.
         for (int d=0; d<NO_DIM; ++d)
         {
             state.options.lagrangianRegion[2*d]   = seamG[d] - eulerLen[d];

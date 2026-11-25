@@ -1,56 +1,6 @@
-# Cross-platform Makefile for compiling the DTFE code on Mac and Linux systems
-#
-# SUPPORTED ARCHITECTURES:
-# ========================
-# - x86_64 (Intel/AMD 64-bit) on both macOS and Linux
-# - ARM64 (aarch64/Apple Silicon) on both macOS and Linux
-# The Makefile automatically detects the architecture and sets appropriate paths.
-#
-# USAGE:
-# ======
-# This Makefile automatically detects your operating system and sets appropriate
-# defaults for library paths and compiler settings.
-#
-# macOS (Homebrew):
-#   Default paths assume Homebrew installation. Just run 'make DTFE'
-#
-# Linux:
-#   Uses standard system paths (/usr). Install development packages:
-#   sudo apt-get install libgsl-dev libboost-dev libboost-thread-dev libboost-filesystem-dev \
-#       libboost-program-options-dev libcgal-dev libmpfr-dev libhdf5-dev libgmp-dev libtbb-dev libfftw3-dev
-#   or equivalent for your distribution, then run 'make DTFE'
-#
-# CUSTOMIZATION:
-# ==============
-# Override library paths by setting environment variables or make variables:
-#   make DTFE GSL_PATH_OVERRIDE=/custom/path/to/gsl
-#   make DTFE BOOST_PATH_OVERRIDE=/custom/path/to/boost
-#   make DTFE CC_OVERRIDE=g++-11
-#
-# Or set them as environment variables:
-#   export GSL_PATH_OVERRIDE=/custom/path/to/gsl
-#   make DTFE
-#
-# Build in debug mode with sanitizers:
-#   make DTFE BUILD_MODE=debug
-#   make library BUILD_MODE=debug
-#
-# Add or override compiler flags:
-#   make DTFE EXTRA_FLAGS="-Wno-unused -march=native"
-#
-# Note: Library headers are included with -isystem to suppress warnings from
-# external code you cannot modify. Your own code warnings will still be shown.
-#
-# TARGETS:
-# ========
-# make DTFE                      - Build standard DTFE executable (Eulerian triangulation)
-# make PS-DTFE                   - Build PS-DTFE executable (phase-space, Lagrangian triangulation)
-# make DTFE BUILD_MODE=debug     - Build with debug symbols, no optimization, and sanitizers
-# make library                   - Build the shared library (libDTFE.so/.dylib)
-# make library BUILD_MODE=debug  - Build library in debug mode
-# make clean                     - Clean object files and executables
-# make check                     - Quick test of the built ./DTFE and ./PS-DTFE (three suites; no simulation data)
-#
+# Makefile for DTFE and PS-DTFE on macOS and Linux (x86_64, arm64). Targets: DTFE, PS-DTFE, library, clean, check.
+# Override paths and flags on the command line (GSL_PATH_OVERRIDE=, BOOST_PATH_OVERRIDE=, CC_OVERRIDE=,
+# EXTRA_FLAGS=, BUILD_MODE=debug); see README.md for the build options and dependencies.
 
 # Detect operating system
 UNAME_S := $(shell uname -s)
@@ -101,10 +51,7 @@ else ifeq ($(PLATFORM),linux)
     HDF5_PATH  = /usr
     GMP_PATH = /usr
     FFTW_PATH = /usr
-    # Debian/Ubuntu put the serial HDF5 headers and libraries in a sub-directory that is NOT
-    # on the default search path (libhdf5-dev installs to /usr/include/hdf5/serial), so a
-    # plain -I/usr/include build dies on '#include <H5Cpp.h>'. Pick the sub-directory up
-    # automatically when it exists (harmless elsewhere).
+    # Debian/Ubuntu keep the serial HDF5 headers in /usr/include/hdf5/serial, off the default path.
     HDF5_EXTRA_INC := $(firstword $(wildcard /usr/include/hdf5/serial))
     HDF5_EXTRA_LIB := $(firstword $(wildcard /usr/lib/*/hdf5/serial))
     CC := $(shell which g++ 2>/dev/null || which clang++ 2>/dev/null || echo "g++")
@@ -125,9 +72,7 @@ FFTW_PATH  := $(or $(FFTW_PATH_OVERRIDE),$(FFTW_PATH))
 CC         := $(or $(CC_OVERRIDE),$(CC))
 
 
-# paths to where to put the object files and the executables files. If you build the DTFE library than you also need to specify the directory where to put the library and the directory where to copy the header files needed by the library (choose an empty directory for the header files).
-# o / o_ps hold the single-precision pair's objects, o_d / o_ps_d the DOUBLE=1 pair's (OBJ_SUFFIX
-# is set in the precision block below; make expands it when the directory names are used)
+# paths for the object files, executables and library; o / o_ps hold the single-precision objects, o_d / o_ps_d the DOUBLE=1 ones
 OBJ_DIR = ./o$(OBJ_SUFFIX)
 OBJ_DIR_PS = ./o_ps$(OBJ_SUFFIX)
 BIN_DIR = ./
@@ -139,25 +84,16 @@ INC_DIR = ./DTFE_include
 ############################# Overall options ##################################
 # Common options shared by both standard DTFE and PS-DTFE builds
 OPTIONS_COMMON =
-#------------------------ set the number of spatial dimensions (2 or 3 dimensions)
-# Override per build with 'make DTFE DIM=2'. The dimension is part of the object-directory
-# stamp below, so switching it wipes the objects exactly like a backend switch does -- mixing
-# 2D and 3D objects would otherwise link into a binary that disagrees with itself about NO_DIM.
+#------------------------ set the number of spatial dimensions (2 or 3); 'make DTFE DIM=2'
+# The dimension is part of the object-directory stamp, so switching it wipes the objects.
 DIM ?= 3
 ifeq ($(filter $(DIM),2 3),)
 $(error DIM must be 2 or 3 (got '$(DIM)'))
 endif
 OPTIONS_COMMON += -DNO_DIM=$(DIM)
-#------------------------ floating-point precision: 'make PS-DTFE DOUBLE=1' builds every position,
-# density, field and accumulator in double (Real = double; outputs become float64), end to end
-# including the HDF5 reads (TNG stores Coordinates in float64, which the default float build
-# rounds on read). Costs ~2x the memory. The double pair is a SEPARATE set of binaries,
-# DTFE-double / PS-DTFE-double, built from its own object directories o_d / o_ps_d, so both
-# precisions coexist (the run scripts pick a pair with DTFE_PRECISION=double, the GUI with its
-# precision setting). METAL=1 is allowed: the GPU deposit kernels themselves are single
-# precision, so a double build hands the GPU float copies of its tetrahedra and adds the float
-# sums into its double grids -- everything else (reading, triangulation, densities, point
-# evaluation, the CPU deposits) stays double.
+#------------------------ floating-point precision: 'make PS-DTFE DOUBLE=1' builds everything in double (Real = double)
+# as a separate pair of binaries (DTFE-double / PS-DTFE-double, objects in o_d / o_ps_d). With METAL=1 the GPU kernels
+# stay single precision: a double build hands them float copies and adds the float sums into its double grids.
 DOUBLE ?= 0
 ifeq ($(DOUBLE),1)
 OPTIONS_COMMON += -DDOUBLE
@@ -173,8 +109,7 @@ OBJ_SUFFIX =
 else
 $(error DOUBLE must be 0 or 1 (got '$(DOUBLE)'))
 endif
-# DIM=2 builds are a set of their own as well: DTFE-2d / PS-DTFE-2d (-2d-double with DOUBLE=1), objects in
-# o_2d / o_ps_2d (_2d_d), so the 2D and 3D binaries coexist instead of a 2D build replacing ./DTFE.
+# DIM=2 builds are a set of their own: DTFE-2d / PS-DTFE-2d (-2d-double with DOUBLE=1), objects in o_2d / o_ps_2d (_2d_d).
 ifeq ($(DIM),2)
 BIN_SUFFIX := -2d$(BIN_SUFFIX)
 OBJ_SUFFIX := _2d$(OBJ_SUFFIX)
@@ -193,22 +128,19 @@ OPTIONS_COMMON += -DSCALAR
 OPTIONS_COMMON += -DNO_SCALARS=1
 
 ############################# Input and output operations default settings ##################################
-#------------------------ set which are the default input and output functions for doing data io
-# default function to read the input data (101-binary gadget snapshot in one file or several, 105-HDF5 gadget file, 111-text file, ... see documentation for more options). The input file type can be set during runtime using the option '--input-format'. This makefile option only sets a default input file in the case none is given via the program options.
+# default input function (101 binary gadget, 105 HDF5 gadget, 111 text); the run-time option '--input-format' overrides it
 OPTIONS_COMMON += -DINPUT_FILE_DEFAULT=105
-# default value for the units of the input data (value=what is 1 Mpc in the units of the data - in this example the data is in kpc). You can change this also during runtime using the program option '--mpc-unit'.
+# default unit of the input data (what is 1 Mpc in the data units); overridden by '--mpc-unit'
 OPTIONS_COMMON += -DMPC_UNIT=1000
-# default function to write the output data (101-binary file, 111-text file, ... see documentation for more options). The output file type can be set during runtime using the option '--output-format'. This makefile option only sets a default output file in the case none is given via the program options.
+# default output function (101 binary, 111 text); the run-time option '--output-format' overrides it
 OPTIONS_COMMON += -DOUTPUT_FILE_DEFAULT=101
-#101 for binary file, 100 my density file
 
 ############################# additional compiler options ##################################
 # enable this option if to use OpenMP (share the workload between CPU cores sharing the same RAM)
 OPTIONS_COMMON += -DOPEN_MP
 # enable to check if the padding gives a complete Delaunay Tesselation of the region of interest
 OPTIONS_COMMON += -DTEST_PADDING
-# keeps the '--redshiftSpace' option registered; the shift itself is NOT implemented in this version (the option
-# refuses the run with a clear error rather than silently skipping the shift)
+# keeps the '--redshiftSpace' option registered; the shift is not implemented and the option refuses the run
 OPTIONS_COMMON += -DREDSHIFT_SPACE
 
 # Standard DTFE build: no PHASE_SPACE flag (triangulates in Eulerian space, standard density)
@@ -217,12 +149,9 @@ OPTIONS = $(OPTIONS_COMMON)
 # PS-DTFE build: includes PHASE_SPACE flag (triangulates in Lagrangian space, multi-stream regions)
 OPTIONS_PS = $(OPTIONS_COMMON) -DPHASE_SPACE
 
-# ---- GPU backend (optional): METAL=1 on macOS/Apple Silicon, the only one. It defines DTFE_GPU / PS_GPU (the
-# guards used by the callers) plus GPU_BACKEND_NAME, links the Metal host object and frameworks, and the binary is
-# run with '--gpu' (both binaries). Without it the build is CPU-only and the flag falls
-# back to the CPU with a warning. Metal embeds + runtime-compiles the kernels in metal/*.metal. The CUDA/HIP port
-# and its CPU emulation (CUDA=1, HIP=1, CUDAEMU=1) are kept on the branch archive/cuda-hip-2026-11-08, not here:
-# an old command line naming them stops at once rather than building a CPU-only binary under that name.
+# ---- GPU backend (optional): METAL=1 on macOS/Apple Silicon only. It defines DTFE_GPU / PS_GPU and GPU_BACKEND_NAME,
+# links the Metal host object and frameworks; the binary is run with '--gpu'. Without it the build is CPU-only.
+# CUDA=1, HIP=1 and CUDAEMU=1 stop at once (that port is on the branch archive/cuda-hip-2026-11-08).
 ifneq ($(filter 1,$(CUDA) $(HIP) $(CUDAEMU)),)
 $(error CUDA=1, HIP=1 and CUDAEMU=1 are gone: this tree is Metal-only (METAL=1); the CUDA/HIP port is on the branch archive/cuda-hip-2026-11-08)
 endif
@@ -237,8 +166,7 @@ PS_GPU_OBJS =
 GPU_LIBS =
 GPU_BUILD_ARG =
 
-# The GPU kernels deposit tetrahedra into 3D cells: a DIM=2 build is CPU-only whatever backend is
-# asked for (its --gpu then falls back with the usual warning).
+# The GPU kernels deposit into 3D cells: a DIM=2 build is CPU-only whatever backend is asked for.
 ifeq ($(DIM),2)
 ifneq ($(GPU_MODE),off)
 $(info >> DIM=2: the GPU kernels are 3D only; this 2D build is CPU-only)
@@ -255,10 +183,9 @@ GPU_LIBS = -framework Metal -framework Foundation
 GPU_BUILD_ARG = METAL=1
 endif
 
-# A build must never mix GPU-mode and plain objects (an incremental 'make PS-DTFE' after a
-# METAL=1 build would silently produce a binary whose components disagree about PS_GPU).
-# The mode is stamped in the object dir; when it changes, all its objects are wiped first. '.build_mode' records the make argument ("METAL=1",
-# empty for CPU-only) so tests can rebuild in the same mode: make PS-DTFE $$(cat o_ps/.build_mode)
+# A build must never mix GPU-mode and plain objects (they disagree about PS_GPU). The mode is stamped in the
+# object dir; when it changes, all its objects are wiped first. '.build_mode' records the make argument
+# ("METAL=1", empty for CPU-only) so tests can rebuild in the same mode: make PS-DTFE $$(cat o_ps/.build_mode)
 .PHONY: ps_gpu_mode_check
 ps_gpu_mode_check:
 	@$(MKDIR_P) $(OBJ_DIR_PS)
@@ -269,8 +196,7 @@ ps_gpu_mode_check:
 		printf '%s' "$(strip $(GPU_BUILD_ARG) $(PREC_BUILD_ARG) $(TBB_BUILD_ARG) $(DIM_BUILD_ARG))" > $(OBJ_DIR_PS)/.build_mode; \
 	fi
 
-# Same guard for the standard build: the mode is stamped in o/ (which also holds the *_l library
-# objects); when it changes, all standard objects are wiped first.
+# Same guard for the standard build: the mode is stamped in o/ (which also holds the *_l library objects).
 .PHONY: dtfe_gpu_mode_check
 dtfe_gpu_mode_check:
 	@$(MKDIR_P) $(OBJ_DIR)
@@ -295,11 +221,9 @@ OPTIONS_COMMON += -DBOOST_ALLOW_DEPRECATED_HEADERS
 ###############  DO NOT MODIFY BELOW THIS LINE  ###########################
 # do not modify below this line
 SRC = ./src
-# third-party headers come in by -isystem: their own warnings (Boost's under recent LLVM) stay out of
-# the build log, while every warning in this code is still reported. sysinc gives a folder its -isystem,
-# except the compiler's own system folders (a Linux package's /usr/include): an explicit -isystem moves
-# them ahead of libstdc++'s headers, whose '#include_next <math.h>' then fails under GCC, and they are
-# system folders (no warnings) already
+# third-party headers come in by -isystem so their warnings stay out of the log. sysinc skips the compiler's own
+# system folders (a Linux /usr/include): an explicit -isystem there moves them ahead of libstdc++'s headers,
+# whose '#include_next <math.h>' then fails under GCC
 sysinc = $(if $(filter /usr/include /usr/local/include,$(abspath $(strip $(1)))),,-isystem $(strip $(1)))
 INCLUDES =
 LIBRARIES =
@@ -360,11 +284,8 @@ else
     DEBUG_FLAGS =
 endif
 
-# macOS SDK pinning: after an OS / Command-Line-Tools update the Homebrew clang
-# can derive a non-existent SDK (e.g. .../MacOSX26.sdk) and then fail on the
-# C/C++ standard headers (mbstate_t, wcschr, FP_NAN, ...). Detect an SDK that
-# actually exists and pass it explicitly as -isysroot (a command-line -isysroot
-# overrides clang's bad guess). Empty on Linux. Override with MACOS_SDK_OVERRIDE.
+# macOS SDK pinning: Homebrew clang can derive a non-existent SDK after an OS update; pass an existing one
+# explicitly as -isysroot. Empty on Linux. Override with MACOS_SDK_OVERRIDE.
 MACOS_ISYSROOT =
 ifeq ($(PLATFORM),macos)
     MACOS_SDK := $(or $(MACOS_SDK_OVERRIDE),$(shell s=$$(xcrun --show-sdk-path 2>/dev/null); \
@@ -377,30 +298,21 @@ ifeq ($(PLATFORM),macos)
     endif
 endif
 
-# Minimal compiler flags (from original Makefile)
-# Additional warnings and quality flags can be enabled in the EXTRA_FLAGS section above
-# -Wno-deprecated-declarations: silences Boost.MultiArray's internal use of the
-# deprecated boost::array::assign() (third-party headers, not our code).
-# -MMD -MP: every compile also writes a .d makefile next to its object with the REAL include
-# graph (-MP adds phony targets so a deleted header cannot strand a stale .d). The .d files are
-# pulled in by the -include lines further down; they supplement the hand-written
-# prerequisite lists (which are correct but incomplete), so header edits rebuild every affected
-# object without a clean.
+# Minimal compiler flags
+# -Wno-deprecated-declarations: silences Boost.MultiArray's use of boost::array::assign() (third-party).
+# -MMD -MP: each compile also writes a .d file with the real include graph (-MP adds phony targets so a deleted
+# header cannot strand a stale .d), so header edits rebuild every affected object.
 COMPILE_FLAGS = $(BASE_CFLAGS) -std=c++17 -Wno-psabi -Wno-cpp -Wno-deprecated-declarations -frounding-math -MMD -MP $(DEBUG_FLAGS) $(EXTRA_FLAGS) $(MACOS_ISYSROOT)
 COMPILE_FLAGS_PS = $(BASE_CFLAGS_PS) -std=c++17 -Wno-psabi -Wno-cpp -Wno-deprecated-declarations -frounding-math -MMD -MP $(DEBUG_FLAGS) $(EXTRA_FLAGS) $(MACOS_ISYSROOT)
-# NOTE: no -lboost_system: Boost.System is header-only since Boost 1.69,
-# and recent Homebrew/Boost do not ship libboost_system ("library not found").
+# NOTE: no -lboost_system: Boost.System is header-only since Boost 1.69.
 BASE_LIBS = -lboost_thread -lboost_filesystem -lboost_program_options -lgsl -lgslcblas -lm -lgmp -lmpfr -lfftw3f -lfftw3
 HDF5_LIBS = -lhdf5 -lhdf5_cpp
-# zlib: the tessellation cache deflates its body (CGAL_triangulation/tessellation_cache.h). A system
-# library on both platforms, and HDF5 already depends on it.
+# zlib: the tessellation cache deflates its body (CGAL_triangulation/tessellation_cache.h).
 BASE_LIBS += -lz
 
-# libdeflate (optional): the cache's chunked gzip members are compressed and decompressed with it when
-# it is installed (macOS: brew install libdeflate; Debian/Ubuntu: libdeflate-dev) -- 2.4x faster
-# compression than zlib, decompression 1.13x faster than macOS's tuned zlib (more against stock zlib).
-# The files stay plain gzip, so any build reads any cache. LIBDEFLATE=auto (default) uses it when found,
-# LIBDEFLATE=0 forces zlib, LIBDEFLATE=1 requires it; LIBDEFLATE_PATH_OVERRIDE=/path points elsewhere.
+# libdeflate (optional): faster cache compression; the files stay plain gzip, so any build reads any cache.
+# LIBDEFLATE=auto (default) uses it when found, LIBDEFLATE=0 forces zlib, LIBDEFLATE=1 requires it;
+# LIBDEFLATE_PATH_OVERRIDE=/path points elsewhere.
 LIBDEFLATE ?= auto
 ifeq ($(PLATFORM),macos)
     LIBDEFLATE_PATH := $(or $(LIBDEFLATE_PATH_OVERRIDE),$(BREW_PREFIX)/opt/libdeflate)
@@ -425,14 +337,9 @@ ifeq ($(HAVE_LIBDEFLATE),1)
     BASE_LIBS += -ldeflate
 endif
 
-# TBB-parallel Delaunay insertion (CGAL's Parallel_tag data structure + lock grid,
-# CGAL_triangulation/triangulation.cpp). At run time the parallel insert builds tessellations of at least
-# 1e6 points where more than one core is free for them (the result is the same
-# Delaunay tessellation), or always with --parallel-triangulation or
-# DTFE_TRIANGULATION_THREADS. 'auto': compiled in when the tbb package
-# is installed (macOS: `brew install tbb`; Debian/Ubuntu: libtbb-dev); TBB=0 forces it off, TBB=1 requires it.
-# The DT type changes with it, so o_ps/ is stamped and wiped on a toggle like the GPU mode. Override the TBB
-# location with TBB_PATH_OVERRIDE=/path.
+# TBB-parallel Delaunay insertion (CGAL Parallel_tag, CGAL_triangulation/triangulation.cpp); the result is the
+# same Delaunay tessellation. 'auto': compiled in when tbb is installed; TBB=0 forces it off, TBB=1 requires it.
+# The DT type changes with it, so o_ps/ is stamped and wiped on a toggle. Override the location with TBB_PATH_OVERRIDE=/path.
 TBB ?= auto
 ifeq ($(PLATFORM),macos)
     TBB_PATH := $(or $(TBB_PATH_OVERRIDE),$(BREW_PREFIX)/opt/tbb)
@@ -457,10 +364,9 @@ else
     PS_TBB_LIBS  :=
     TBB_BUILD_ARG := $(if $(filter 0,$(TBB)),TBB=0,)
 endif
-# TBB_STD: the same data structure in the STANDARD binaries (DTFE, DTFE-double, DTFE-2d and the library); follows
-# TBB; TBB_STD=0 keeps them on the sequential insert with the Fast_location hierarchy. The DT type is part of the
-# library's DTFE() signature, so a program linked against libDTFE must be compiled with the same defines:
-# demo/examples/Makefile repeats this block (keep the two the same). o/ is stamped and wiped on a toggle.
+# TBB_STD: the same data structure in the STANDARD binaries and the library; follows TBB; TBB_STD=0 keeps the
+# sequential insert. The DT type is part of the library's DTFE() signature, so a program linked against libDTFE
+# must use the same defines: demo/examples/Makefile repeats this block (keep the two the same). o/ is stamped.
 TBB_STD ?= $(TBB_PS)
 ifeq ($(TBB_STD),1)
     OPTIONS      += -DPARALLEL_TRIANGULATION -DCGAL_LINKED_WITH_TBB
@@ -479,10 +385,8 @@ else ifeq ($(PLATFORM),linux)
     COMPILE_FLAGS_PS += -fopenmp
 endif
 
-# Native-CPU tuning: let the compiler vectorise/schedule the interpolation hot loop for
-# this exact chip. Pure tuning -- no -ffast-math, and with GCC no fused multiply-adds (below),
-# so FP results stay bit-identical to a generic build (safe for comparing runs). Override with
-# ARCH_FLAGS=..., disable with ARCH_FLAGS=
+# Native-CPU tuning of the interpolation hot loop. No -ffast-math, and with GCC no fused multiply-adds (below),
+# so FP results stay bit-identical to a generic build. Override with ARCH_FLAGS=..., disable with ARCH_FLAGS=
 ifeq ($(PLATFORM),macos)
     ifeq ($(ARCH),arm64)
         ARCH_FLAGS ?= -mcpu=native
@@ -495,25 +399,19 @@ endif
 COMPILE_FLAGS    += $(ARCH_FLAGS)
 COMPILE_FLAGS_PS += $(ARCH_FLAGS)
 
-# GCC fuses a*b + c into one rounding (FMA) ACROSS statements by default (-ffp-contract=fast)
-# wherever the target has FMA -- every arm64 machine, and x86 under -march=native -- so two code
-# paths written to do the same arithmetic round differently, and a value's last bit depends on
-# what the optimizer fused. With -ffp-contract=off a GCC build rounds each product where the
-# source writes it, so its outputs do not depend on what the optimizer fused.
-# Clang (the macOS build) only fuses within one expression, and is left as it is.
+# GCC fuses a*b + c (FMA) across statements by default where the target has FMA, so a value's last bit would depend
+# on the optimizer; -ffp-contract=off rounds each product where the source writes it. Clang fuses only within
+# one expression and is left as it is.
 CC_IS_GCC := $(shell $(CC) --version 2>/dev/null | grep -qi 'free software foundation' && echo 1)
 ifeq ($(CC_IS_GCC),1)
     COMPILE_FLAGS    += -ffp-contract=off
     COMPILE_FLAGS_PS += -ffp-contract=off
 endif
-# stamped in the object dirs (the mode checks above): objects compiled without the flag are
-# wiped once instead of being linked with the new ones. Clang builds carry no stamp (no flag added).
+# stamped in the object dirs (the mode checks above): objects compiled without the flag are wiped once.
 FPC_STAMP := $(if $(filter 1,$(CC_IS_GCC)),.fpc_off,)
 comma := ,
-# BUILD_MODE, ARCH_FLAGS and EXTRA_FLAGS change every object as well: stamped in the object dirs (the mode
-# and a checksum of the three), so a switch wipes the objects like a GPU-mode switch (otherwise
-# 'make DTFE BUILD_MODE=debug' after a release build would find every object up to date and link the -O3
-# objects with the sanitizers).
+# BUILD_MODE, ARCH_FLAGS and EXTRA_FLAGS change every object: stamped in the object dirs (the mode and a checksum
+# of the three), so a switch wipes the objects like a GPU-mode switch.
 FLAGS_SUM := $(shell printf '%s' '$(subst ',,$(BUILD_MODE)|$(ARCH_FLAGS)|$(EXTRA_FLAGS))' | cksum | cut -d' ' -f1)
 FLAGS_STAMP := .flags_$(BUILD_MODE)_$(FLAGS_SUM)
 
@@ -527,9 +425,8 @@ else
 endif
 
 
-# Build provenance (src/build_info.cc): recompiled by the programs' link recipe (program_rule), i.e. on every link, so
-# the binary always reports the revision and time it was linked at ('--version', and the 'Build:'
-# line every run prints into its log). Outside a git checkout the revision reads 'unknown'.
+# Build provenance (src/build_info.cc): recompiled on every link so the binary reports the revision and time
+# it was linked at ('--version', and the 'Build:' line of every run log). Outside git the revision reads 'unknown'.
 BUILD_REV  := $(shell git describe --always --dirty --abbrev=10 2>/dev/null || echo unknown)
 BUILD_TIME := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 BUILD_INFO_FLAGS = -DDTFE_BUILD_REV='"$(BUILD_REV)"' -DDTFE_BUILD_TIME='"$(BUILD_TIME)"'
@@ -538,15 +435,12 @@ BUILD_INFO_FLAGS = -DDTFE_BUILD_REV='"$(BUILD_REV)"' -DDTFE_BUILD_TIME='"$(BUILD
 HEADERS_1 = DTFE.h define.h user_options.h particle_data.h quantities.h Pvector.h math_functions.h  message.h box.h miscellaneous.h interpolations.h env_knobs.h run_mode.h fixed_units.h
 HEADERS_2 = $(addprefix CGAL_triangulation/, CGAL_include_2D.h CGAL_include_3D.h vertexData.h particle_data_traits.h)
 
-# Make's built-in rules are off: every object and binary here has a rule of its own, and make must never fall back on
-# one of its own. After a build-mode switch it once ran its built-in link rule ('%: %.o') on a few objects while it
-# re-read the .d files below ('clang++ o/r3d.o -o o/r3d', failing, the error ignored as for any -include'd file).
-# That was never reproduced since; without the rule it cannot happen.
+# Make's built-in rules are off: every object and binary here has its own rule, and make must never fall back on
+# one of its own (e.g. '%: %.o' while it re-reads the .d files below).
 .SUFFIXES:
 %: %.o
 
-# compiler-generated header dependencies (see -MMD -MP at COMPILE_FLAGS); wildcard expands to
-# nothing on a fresh checkout / after clean, so missing .d files never break the build
+# compiler-generated header dependencies (see -MMD -MP at COMPILE_FLAGS); wildcard expands to nothing on a fresh checkout
 -include $(wildcard $(OBJ_DIR)/*.d)
 -include $(wildcard $(OBJ_DIR_PS)/*.d)
 
@@ -555,17 +449,14 @@ HEADERS_2 = $(addprefix CGAL_triangulation/, CGAL_include_2D.h CGAL_include_3D.h
 
 
 ############################# Objects ##################################
-# One object per NAME.deps below, compiled the same way by the three builds: the standard programs in $(OBJ_DIR), the
-# PS programs in $(OBJ_DIR_PS) (COMPILE_FLAGS_PS: -DPHASE_SPACE) and the library, whose position-independent *_l
-# objects sit next to the standard ones. NAME.deps lists an object's source first, then the files it is rebuilt for
-# (under $(SRC)): correct but incomplete lists, which the compiler's .d files (-MMD -MP at COMPILE_FLAGS) complete.
+# One object per NAME.deps below: the standard programs in $(OBJ_DIR), the PS programs in $(OBJ_DIR_PS)
+# (COMPILE_FLAGS_PS: -DPHASE_SPACE) and the library (position-independent *_l objects). NAME.deps lists an object's
+# source first, then the files it is rebuilt for (under $(SRC)); the compiler's .d files complete the lists.
 IO_SOURCES = $(addprefix io/, input_output.h gadget_reader_header.cc gadget_reader_binary.cc gadget_reader_HDF5.cc text_io.cc binary_io.cc)
 TRIANG_HEADERS = $(addprefix CGAL_triangulation/, triangulation_common.h triangulation_miscellaneous.h field_computation.h sample_eval.h padding_test.h my_function.h CGAL_include_2D.h CGAL_include_3D.h vertexData.h particle_data_traits.h) define.h particle_data.h user_options.h box.h quantities.h Pvector.h message.h math_functions.h miscellaneous.h ps_point_eval.h thread_count.h
 # The parts of the three split units, relative to $(SRC): each root (DTFE.cpp, auto_tune.cc,
-# CGAL_triangulation/ps_interpolation.cc) includes its folder's parts in order and is still ONE object; a part is never
-# compiled alone, so no object list may come from a glob over the sources. The parts follow their root's source in
-# its NAME.deps, so an edit of a part rebuilds the root's objects in every build; they are set here, above the rules
-# below, because $(eval) expands NAME.deps where it runs.
+# CGAL_triangulation/ps_interpolation.cc) includes its parts in order and is still ONE object; a part is never
+# compiled alone, so no object list may come from a glob. Set here, above the rules, because $(eval) expands NAME.deps where it runs.
 DTFE_PARTS      = $(patsubst $(SRC)/%,%,$(wildcard $(SRC)/dtfe/*.cc))
 AUTO_TUNE_PARTS = $(patsubst $(SRC)/%,%,$(wildcard $(SRC)/auto_tune/*.cc))
 PS_INTERP_PARTS = $(patsubst $(SRC)/%,%,$(wildcard $(SRC)/CGAL_triangulation/ps_interpolation/*.cc))
@@ -586,8 +477,8 @@ random.deps                   = random.cc define.h user_options.h
 web_fields.deps               = web_fields.cc web_fields.h define.h user_options.h quantities.h message.h fftw_plans64.h
 # the auto-tuner's model (auto_tune.h is its interface: an edit of the model rebuilds this object only)
 auto_tune.deps                = auto_tune.cc $(AUTO_TUNE_PARTS) auto_tune.h user_options.h define.h
-# --scratch-dir out-of-core backing replaces the global operator new/delete, so it goes into the programs only; the
-# library links scratch_alloc_stub (which refuses) instead
+# --scratch-dir out-of-core backing replaces the global operator new/delete, so it goes into the programs only;
+# the library links scratch_alloc_stub (which refuses) instead
 scratch_alloc.deps            = scratch_alloc.cc scratch_alloc.h
 scratch_alloc_stub.deps       = scratch_alloc_stub.cc scratch_alloc.h
 unaveraged_interpolation.deps = CGAL_triangulation/unaveraged_interpolation.cc $(TRIANG_HEADERS)
@@ -598,8 +489,7 @@ ps_point_eval.deps            = CGAL_triangulation/ps_point_eval.cc CGAL_triangu
 ps_serve.deps                 = CGAL_triangulation/ps_serve.cc CGAL_triangulation/ps_point_eval_detail.h $(TRIANG_HEADERS)
 ps_mean_streams.deps          = CGAL_triangulation/ps_mean_streams.cc $(TRIANG_HEADERS)
 
-# The objects in link order (the order fixes the binaries' layout). build_info is compiled by the programs' link
-# recipe itself; kdtree2 and r3d have rules of their own (below), and the library links $(OBJ_DIR)'s r3d.
+# The objects in link order (the order fixes the binaries' layout). build_info, kdtree2 and r3d have rules of their own.
 CC_STEMS     = user_options quantities NGP_interpolation CIC_interpolation TSC_interpolation PCS_interpolation SPH_interpolation interlacing random web_fields
 TRIANG_STEMS = unaveraged_interpolation averaged_interpolation_1 averaged_interpolation_2 ps_interpolation ps_point_eval ps_serve ps_mean_streams
 PROGRAM_HEAD = DTFE triangulation main kdtree2 r3d
@@ -623,10 +513,8 @@ $(foreach n,DTFE triangulation scratch_alloc_stub $(CC_STEMS) auto_tune input_ou
 $(OBJ_DIR)/kdtree2$(OBJ_EXT) $(OBJ_DIR_PS)/kdtree2$(OBJ_EXT) $(OBJ_DIR)/kdtree2_l$(OBJ_EXT): $(SRC)/kdtree/kdtree2.hpp $(SRC)/kdtree/kdtree2.cpp Makefile
 	$(CC) -O3 -ffast-math -fomit-frame-pointer $(PIC) -Wno-deprecated-declarations -MMD -MP $(MACOS_ISYSROOT) $(DTFE_INC) -o $@ -c $(SRC)/kdtree/kdtree2.cpp
 
-# vendored r3d (third_party/r3d, plain C99; see its README for license/citation): exact
-# tetrahedron-cell intersection moments for --exact (both binaries' default '_a' average). One
-# object per dir; -fPIC so the o/ object also links into libDTFE (one shared object,
-# no _l twin). -x c: $(CC) is a C++ driver.
+# vendored r3d (third_party/r3d, plain C99): exact tetrahedron-cell intersection moments for --exact. One object
+# per dir; -fPIC so the o/ object also links into libDTFE. -x c: $(CC) is a C++ driver.
 R3D_SRC = third_party/r3d/r3d.c
 R3D_FLAGS = -x c -std=c99 -O3 -fPIC -fomit-frame-pointer -MMD -MP $(MACOS_ISYSROOT)
 
@@ -634,11 +522,8 @@ $(OBJ_DIR)/r3d$(OBJ_EXT) $(OBJ_DIR_PS)/r3d$(OBJ_EXT): $(R3D_SRC) third_party/r3d
 	$(CC) $(R3D_FLAGS) -o $@ -c $(R3D_SRC)
 
 # The Metal GPU deposit hosts (METAL=1 only) embed their kernel source through a generated header, so the binary
-# needs no runtime file lookup; Metal compiles it once (ps_metal_host.cc pipes()). $(call embed_kernel,DIR,NAME,
-# ARRAY,PIECES) writes DIR/NAME_msl.h: the PIECES, concatenated in this order, as the string ARRAY. The pieces: the
-# exact clip helpers and the run-wide fixed-point words (metal/fixed_words.metal.inc), the host's own parameter header
-# (plain C++ that is valid MSL: ps_kernel_params.h / dtfe_deposit_params.h), for the PS kernels their shared guard,
-# 64-bit add and items' map reader (metal/ps_common.metal.inc), then the kernels.
+# needs no runtime file lookup. $(call embed_kernel,DIR,NAME,ARRAY,PIECES) writes DIR/NAME_msl.h: the PIECES,
+# concatenated in this order, as the string ARRAY (shared helpers and parameter headers first, then the kernels).
 define embed_kernel
 $(1)/$(2)_msl.h: $(4) Makefile
 	@$$(MKDIR_P) $(1)
@@ -656,12 +541,9 @@ $(OBJ_DIR)/dtfe_metal_host$(OBJ_EXT) $(OBJ_DIR)/dtfe_metal_host_l$(OBJ_EXT): $(S
 	$(CC) $(COMPILE_FLAGS) $(PIC) -isystem third_party/metal-cpp -I $(OBJ_DIR) -o $@ -c $(SRC)/CGAL_triangulation/dtfe_metal_host.cc
 
 ############################# The programs and the library ##################################
-# DTFE triangulates in Eulerian space (standard DTFE); PS-DTFE (-DPHASE_SPACE) in Lagrangian space (multi-stream
-# regions); DOUBLE=1 and DIM=2 name their pairs by BIN_SUFFIX.
-# The mode check must FINISH before any object/header rule starts: under -j its wipe runs
-# concurrently with sibling prerequisites and can delete files mid-recipe (observed: the
-# generated *_msl.h lost its opening raw-string line). The recursive $(MAKE) starts only
-# after the check's recipe completes, so the real build can never race the wipe.
+# DOUBLE=1 and DIM=2 name their pairs by BIN_SUFFIX.
+# The mode check must FINISH before any object/header rule starts: under -j its wipe would run concurrently with
+# sibling prerequisites and delete files mid-recipe. The recursive $(MAKE) starts only after the check's recipe.
 DTFE: dtfe_gpu_mode_check
 	@$(MAKE) DTFE-build
 
@@ -690,12 +572,8 @@ clean:
 	$(RM_RF) $(BIN_DIR)/DTFE$(EXE_EXT) $(BIN_DIR)/PS-DTFE$(EXE_EXT) $(BIN_DIR)/DTFE-double$(EXE_EXT) $(BIN_DIR)/PS-DTFE-double$(EXE_EXT) $(BIN_DIR)/DTFE-2d*$(EXE_EXT) $(BIN_DIR)/PS-DTFE-2d*$(EXE_EXT) ./o_2d*/*$(OBJ_EXT) ./o_ps_2d*/*$(OBJ_EXT) ./o_2d*/*.d ./o_ps_2d*/*.d ./o/*$(OBJ_EXT) ./o_ps/*$(OBJ_EXT) ./o/*.d ./o_ps/*.d ./o_d/*$(OBJ_EXT) ./o_ps_d/*$(OBJ_EXT) ./o_d/*.d ./o_ps_d/*.d $(LIB_DIR)/*DTFE$(SHARED_EXT)
 
 # ---- make check: a quick test of the built 3D pair, ./DTFE and ./PS-DTFE, with no simulation data. It builds nothing
-# (a plain 'make DTFE' could change the build mode and wipe a METAL=1 build). tests/run_tests.py: standard DTFE on
-# small inputs it writes, the last test against the stored reference in tests/reference;
-# tests/dtfe_mc_average_check.sh: standard DTFE on the bundled demo/z0_64.gadget (the '_a' average keeps the mass,
-# whatever the split); tests/ps_smoke_test.sh: PS-DTFE end to end on a generated Zel'dovich pancake (finite, mass kept,
-# multi-stream). The runs use the CPU, but for the demo suite's '--gpu' part on a Metal build. Needs the python with
-# numpy and h5py that scripts/h5py_python.sh finds. The full suites: tests/ci_suite.sh.
+# (a plain 'make DTFE' could change the build mode and wipe a METAL=1 build). Runs tests/run_tests.py,
+# tests/dtfe_mc_average_check.sh and tests/ps_smoke_test.sh with the python that scripts/h5py_python.sh finds.
 .PHONY: check
 check:
 	@for b in DTFE PS-DTFE; do [ -x ./$$b ] || { echo ">> make check: ./$$b is not built (make DTFE PS-DTFE)"; exit 1; }; done
@@ -704,9 +582,8 @@ check:
 	@env -u DTFE_TEST_PRECISION tests/ps_smoke_test.sh --no-build
 	@echo ">> make check PASSED: tests/run_tests.py, tests/dtfe_mc_average_check.sh, tests/ps_smoke_test.sh"
 
-# ---- deps-check: verify the required headers/libraries exist BEFORE a long compile dies
-# mid-build with a cryptic missing-header error, and print the per-platform install command
-# for anything missing. Each spec is header:name:brew-package:apt-package; the header is
+# ---- deps-check: verify the required headers/libraries exist before a long compile dies with a cryptic error,
+# and print the per-platform install command. Each spec is header:name:brew-package:apt-package; the header is
 # searched in every -I directory this Makefile will pass to the compiler.
 DEPS_SPECS = \
 	gsl/gsl_math.h:GSL:gsl:libgsl-dev \
@@ -775,9 +652,7 @@ endif
 	@echo "Include flags: $(INCLUDES)"
 	@echo "Libraries: $(DTFE_LIB)"
 
-# the folders are made here too: under 'make -j' this rule can run before set_directories_2, and on a
-# fresh checkout (CI) './DTFE_include' does not exist yet -- 'make library' would fail with 'cp: target ... No such
-# file'
+# the folders are made here too: under 'make -j' this rule can run before set_directories_2
 copy_headers:
 	@$(MKDIR_P) $(INC_DIR)/CGAL_triangulation
 	cp $(addprefix $(SRC)/, $(HEADERS_1)) $(INC_DIR)

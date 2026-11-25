@@ -1,37 +1,5 @@
-"""Track (sub)halos along their SubLink main-progenitor branch: SIZE, SHAPE, ORIENTATION,
-MERGERS and the DTFE / PS-DTFE FIELD ENVIRONMENT.
-
-Per tracked subhalo, walking back in time from --start-snap:
-  SIZE        : total subhalo mass, half-mass radius, R_200c of the host (centrals)
-                -- straight from the extended tree nodes (no group catalogs needed).
-  SHAPE       : axis ratios b/a, c/a and triaxiality T from the DM mass tensor of the
-                subhalo's member particles. Needs BOTH the group catalog (groups_NNN, for
-                particle membership offsets) and the raw snapshot chunks (snapdir_NNN) at
-                that snapshot; snapshots missing either are skipped for shape with a note.
-  ORIENTATION : drift of the major axis, |cos angle| w.r.t. the z=0 (--start-snap) major axis,
-                and the same for the SubhaloSpin vector (catalog-level fallback that works
-                even without particle data).
-  MERGERS     : secondary progenitors joining the branch (SubLink NextProgenitor chains);
-                events above --min-ratio are ticked on the mass panel.
-  ENVIRONMENT : the density contrast rho/rho_bar and (where available) the T-web/V-web
-                class at the halo position, sampled from the DTFE or PS-DTFE grids of
-                every snapshot on disk (--estimator ps|dtfe|auto via dtfelib.FieldSet, so it
-                works identically for both estimators). Grids are loaded once per snapshot
-                for all tracked halos. The V-web is the MEAN-FIELD one for both:
-                a PS output's is derived from its velocity grid, the V-web standard DTFE
-                stores; '--ps-gradient stored' samples the stored PS grid (stream average).
-
-Selection: --subhalos ID [ID ...] (SubfindIDs at --start-snap), or --n-halos N most massive centrals
-(default 5) chosen from the trees themselves.
-
-Examples:
-  python3 plot/plot_halo_tracking.py --sim TNG50-3-Dark                 # top 5 centrals, z=0
-  python3 plot/plot_halo_tracking.py --sim TNG50-3-Dark --subhalos 0 17 --estimator dtfe
-  python3 plot/plot_halo_tracking.py --sim TNG300-3-Dark --n-halos 10 --estimator ps
-Outputs: figures/halo_tracking/<sim>/subhalo<ID>_evolution.png + branch data as .npz (named
-_<prefix> / _raw after the ID's files for --prefix / --raw: their environment comes from other grids;
-_stored for --ps-gradient stored).
-"""
+"""Track (sub)halos along their SubLink main-progenitor branch: SIZE, SHAPE, ORIENTATION, MERGERS and
+the DTFE / PS-DTFE FIELD ENVIRONMENT."""
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
 import config
@@ -117,16 +85,8 @@ def track_one(ts: TreeSet, sim: str, snap0: int, subfind0: int, hubble: float,
 
 def add_environment(tracks: dict, sim: str, method: str, prefix: str | None = None, averaged: bool = True,
                     mean_field: bool = True):
-    """Sample the field environment for every tracked halo, one grid load per snapshot.
-
-    tracks: {subfind0: track dict}. Adds env_density / env_tweb / env_vweb arrays in place
-    (NaN where no field grids exist on disk) and returns the set of sampled snapshots.
-    prefix / averaged: the grid set (--prefix, e.g. ps_caustic) and the '_a' fields or not (--raw), as every
-    other script reads them (else the default ps_output grids would be sampled whatever the launcher's Figures tab
-    chose).
-    mean_field: a PS-DTFE output's V-web is the mean-field one, the V-web standard DTFE stores (derived
-    from the velocity grid once per snapshot, environment.sample_fields_at); False = the stored PS grid.
-    """
+    """Sample the field environment for every tracked halo, one grid load per snapshot. tracks: {subfind0: track
+    dict}."""
     for t in tracks.values():
         for name in ENV_FIELDS:
             t[f"env_{name}"] = np.full(t["snap"].size, np.nan)

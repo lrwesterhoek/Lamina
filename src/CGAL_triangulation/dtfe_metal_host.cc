@@ -1,21 +1,11 @@
-/* Metal backend of the standard-DTFE method-1 deposit (implements gpu_host.h). Owns the
-   metal-cpp implementation symbols for the DTFE binary; compiled only when METAL=1 (which
-   defines DTFE_GPU for the callers). The kernel source is embedded at build time
-   (o/dtfe_deposit_msl.h, generated from metal/dtfe_deposit.metal) and runtime-compiled once
-   per process; the pipeline states are cached.
+/* Metal backend of the standard-DTFE method-1 deposit (implements gpu_host.h); owns the metal-cpp symbols for the
+   DTFE binary, compiled only with METAL=1. The kernel source (metal/dtfe_deposit.metal) is embedded at build time and
+   runtime-compiled once per process; the pipeline states are cached. */
 
-   One way in: dtfeGpuDepositAveraged1() deposits one tetrahedron set, a sub-domain's batch, into
-   grids of its own (the per-call path). Each thread uploads its batch concurrently, and the
-   dispatches queue on the device (serialized by ctxMutex), through the Batch / runBatch machinery
-   below.
-
-   The chunked, watchdog-safe dispatch discipline is the one validated in ps_metal_host.cc --
-   see the long comment at the dispatch loop -- and so is its retry policy: chunk
-   checkpoints, the cause of a failed buffer, the process-wide pace that eases back after a clean
-   stretch, the run's retry counters (gpu_metal_retry.h, shared with that host). The grids are
-   exact fixed-point sums (metal/dtfe_deposit.metal's header), so two runs write byte-identical '_a' grids: an
-   exact batch's in 128-bit words in the run-wide units (src/fixed_units.h RunUnits), the same in every partition and
-   thread split; a sampled batch's in 64-bit words in its own units (dtfe_gpu_fixed.h dtfeBatchParams). */
+// The grids are exact fixed-point sums (metal/dtfe_deposit.metal's header), so two runs write byte-identical '_a'
+// grids: an exact batch's in 128-bit words in the run-wide units (fixed_units.h RunUnits), the same in every
+// partition and thread split; a sampled batch's in 64-bit words in its own units (dtfe_gpu_fixed.h). The chunked,
+// watchdog-safe dispatch and the retry policy are those of ps_metal_host.cc (gpu_metal_retry.h).
 
 #define NS_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
@@ -51,13 +41,11 @@ namespace {
 // the parameter block: dtfe_deposit_params.h, the one definition the kernels share (prepended to their source)
 using DepositParams = DTFEDepositParams;
 
-// The checkpoints and the cause-aware retry policy of the GPU deposit (shared with ps_metal_host.cc, see
-// gpu_metal_retry.h): GpuFault, gpuRetryCause, the process-wide GpuPace, the DTFE_GPU_FAULT_AT test hook and
-// GpuSnapshot, and the pass loop gpuRunPass that runBatch below runs a batch through.
+// The checkpoints and cause-aware retry policy, shared with ps_metal_host.cc (gpu_metal_retry.h); runBatch runs a
+// batch through its pass loop gpuRunPass.
 #include "gpu_metal_retry.h"
 
-// the run's retry counters (the progress sidecar's gpu_retries / gpu_retries_by_cause and DTFE.cpp's closing
-// 'GPU deposit retries:' line), by gpuRetryCause's index; averaged_interpolation_1.cc defines them
+// the run's retry counters by gpuRetryCause's index; averaged_interpolation_1.cc defines them
 void countGpuRetry(GpuFault f, long code, std::string const& desc)
 {
     int const k = gpuRetryCause(f, code, desc);
@@ -183,18 +171,6 @@ MTL::ComputePipelineState* itemPso(Ctx& c, bool fDen, bool fVel, bool fGrad, boo
 }
 
 
-// Releases a buffer whose contents are no longer needed, its pages at once: marked empty (discardable) first. Metal
-// otherwise keeps the memory of a released buffer for a while: on TNG100-3-Dark at 512^3 in 27 partitions, Exact,
-// about 3.3 GB of one partition's batch (IOAccelerator, footprint -p) was still counted when the next partition began
-// in 11 of them, so the footprint between partitions wandered between 10.4 and 14.1 GB.
-inline void releaseBuffer(MTL::Buffer*& b)
-{
-    if (!b) return;
-    b->setPurgeableState(MTL::PurgeableStateEmpty);
-    b->release();
-    b = nullptr;
-}
-
 // ---------------------------------------------------------------- the accumulated grids
 struct Grids
 {
@@ -213,11 +189,9 @@ struct Grids
     size_t nCell() const { return full[0] * full[1] * full[2]; }
     size_t compBytes() const { return words == 2u ? 16 : words == 1u ? 8 : 4; }
     std::vector<MTL::Buffer*> buffers() const { return { den, vel, grad, scal, sgrad }; }
-    // The buffers are zeroed with ONE blit on the device (the per-call path allocates under the device mutex, where a
-    // CPU memset of a 512^3 sub-domain's exact words -- up to 3.2 GB in the 128-bit words -- would idle the GPU); a
-    // failed blit falls back to a memset. A grid longer than the device's largest buffer
-    // (maxBufferLength: the 128-bit words of a large sub-domain's velocity gradient can reach it) is not asked for:
-    // err names it, and the caller's sub-domain goes to the CPU as on any failed allocation.
+    // The buffers are zeroed with ONE blit on the device (a CPU memset of a large sub-domain's exact words under the
+    // device mutex would idle the GPU); a failed blit falls back to a memset. A grid longer than maxBufferLength is
+    // not asked for: err names it, and the caller's sub-domain goes to the CPU as on any failed allocation.
     bool alloc(Ctx& c, const size_t fullGrid[3], bool d, bool v, bool g, bool s, bool sg, uint32_t wordsMode)
     {
         for (int i = 0; i < 3; ++i) full[i] = fullGrid[i];
@@ -313,10 +287,8 @@ bool uploadBatch(Ctx& c, std::vector<float>& verts, std::vector<float>& dens, st
                      itemStart, blockTet, b.nItems, b.nSamples, b.nSingle, err))
         return false;
 
-    // newBuffer(ptr,...) copies the host array into the MTL buffer; free each host array
-    // IMMEDIATELY so at most one array is double-held at a time (a multi-GB difference per
-    // sub-domain at production grids). On failure the CPU fallback re-interpolates from the
-    // triangulation, never from these arrays.
+    // newBuffer(ptr,...) copies the host array into the MTL buffer; free each host array IMMEDIATELY so at most one
+    // is double-held. On failure the CPU fallback re-interpolates from the triangulation, never from these arrays.
     auto upload = [&](const void* ptr, size_t bytes) {
         return bytes ? c.dev->newBuffer(ptr, bytes, MTL::ResourceStorageModeShared)
                      : c.dev->newBuffer(4, MTL::ResourceStorageModeShared);
@@ -344,25 +316,15 @@ bool uploadBatch(Ctx& c, std::vector<float>& verts, std::vector<float>& dens, st
     return true;
 }
 
-// The chunk controller's chunk starts afresh in every batch. The pace -- the buffers' target length and the gaps --
-// is the process-wide GpuPace (gpu_metal_retry.h), whose base is the run mode's (run_mode.h: 0.25 s buffers in
-// performance, 0.05 s in gentle and balanced): a per-call pace would die with its sub-domain, and the next one, on
-// the same busy display, would meet the watchdog at the full pace again.
+// The chunk controller's chunk starts afresh in every batch; the pace is the process-wide GpuPace (gpu_metal_retry.h):
+// a per-call pace would die with its sub-domain, and the next one would meet the watchdog at the full pace again.
 struct Stats { int chunks = 0, retries = 0; };
 
-// Runs one batch into the grids (CALLER HOLDS ctxMutex). Chunked, serialized dispatch with host-side gaps --
-// the watchdog-safe discipline validated for the PS deposit (see ps_metal_host.cc for the full rationale) --
-// and that host's retry policy, through the same pass loop (gpu_metal_retry.h gpuRunPass): a killed command buffer
-// may have deposited part or all of its atomics, so it is never retried alone; the batch restores its last
-// snapshot and continues from there.
-//   - the snapshot: the per-call grids (all zero at the start: no copy) and a checkpoint every ~10 s of GPU work
-//     (DTFE_GPU_CHECKPOINT_CHUNKS=<n> buffers);
-//   - the cause (gpu_metal_retry.h GpuFault, GpuPace and gpuRunPass say how) decides the retry, the pace and when
-//     the sub-domain goes to the CPU (the caller);
-//   - every failed buffer counts into the run's retry counters by cause (countGpuRetry).
-// Work items are uniform (<= itemSamples samples each), so their chunks can be larger and the controller never
-// meets a 100x jump in per-thread work; the per-tet kernel keeps more cautious sizes. Every chunk
-// starts at a multiple of CHUNK_ALIGN items (the exact sums need it, see there).
+// Runs one batch into the grids (CALLER HOLDS ctxMutex): chunked, serialized dispatch with host-side gaps and the
+// PS host's retry policy through gpuRunPass. A killed command buffer may have deposited part of its atomics, so it is
+// never retried alone: the batch restores its last snapshot (the per-call grids, all zero at the start; a checkpoint
+// every DTFE_GPU_CHECKPOINT_CHUNKS buffers) and continues. Every chunk starts at a multiple of CHUNK_ALIGN items
+// (the exact sums need it); item chunks are uniform, so they can be larger than the per-tet kernel's.
 bool runBatch(Ctx& c, Batch& b, Grids& g, Stats& st, std::string& err)
 {
     bool const exact = b.exact;
@@ -374,8 +336,7 @@ bool runBatch(Ctx& c, Batch& b, Grids& g, Stats& st, std::string& err)
     size_t firstChunk = exact ? 8192 : useItems ? 65536 : 25088;
     // DTFE_GPU_CHUNK: the opening chunk
     if (long const v = Env::integer({"DTFE_GPU_CHUNK"}, 0); v > 0) firstChunk = size_t(v);
-    GpuPace& pace = gpuPace();        // the run mode's pace until escalated: 8 ms gaps after buffers of 0.25 s
-                                      // (performance: ~3% idle) or 0.05 s (gentle, balanced: ~14%)
+    GpuPace& pace = gpuPace();        // the run mode's pace until escalated
     // a pace below the default's (an earlier batch's failures, or a gentler mode) opens with a proportionally smaller chunk
     if (pace.targetSec < GPU_PACE_TARGET0)
         firstChunk = std::max(size_t(double(firstChunk) * pace.targetSec / GPU_PACE_TARGET0), MIN_CHUNK);
@@ -582,11 +543,10 @@ bool dtfeGpuDepositAveraged1(std::vector<float>& verts,
     double el = 0.;
     {
         std::lock_guard<std::mutex> lock(ctxMutex());   // serialize dispatches (single queue)
-        // The grids are allocated HERE, under the device mutex: allocated before it, every sub-domain waiting
-        // for the device would hold its zeroed grids (all of them at once while the batches queue up), and the
-        // exact sums' words are 8 B per component (a sampled batch) or 16 B (an exact batch's run-wide words) --
-        // a 512^3 run with the velocity gradient would wait on ~1.6 GB (3.2 GB) per sub-domain. So one batch's at a
-        // time (and the one being converted below), zeroed on the GPU.
+        // The grids are allocated HERE, under the device mutex: allocated before it, every sub-domain waiting for the
+        // device would hold its zeroed grids (the exact sums' words are 8 B per component, or 16 B for an exact
+        // batch), all of them at once while the batches queue up. So one batch's at a time (and the one being
+        // converted below), zeroed on the GPU.
         if (!g.alloc(c, nGrid, fDen, fVel, fGrad, fScal, fSGrad, b.P.fixedSum))
         {
             err = g.err.empty() ? "Metal buffer allocation failed (out of GPU-visible memory?)" : g.err;

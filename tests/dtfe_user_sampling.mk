@@ -1,10 +1,7 @@
-# Builds tests/dtfe_user_sampling.cpp against libDTFE with demo/examples/Makefile's compiler, flags and libraries (its
-# OPTIONS block matches the root Makefile's OPTIONS_COMMON, which sets the data-structure layout). Read after it:
+# Builds tests/dtfe_user_sampling.cpp against libDTFE with demo/examples/Makefile's compiler, flags and libraries.
 #   make -C demo/examples -f Makefile -f ../../tests/dtfe_user_sampling.mk USER_SAMPLING_BIN=<path> <path>
-# (tests/dtfe_sampling_check.sh does). On macOS it adds the SDK the way the root Makefile pins it (an existing SDK
-# passed as -isysroot: after an OS update the Homebrew clang may guess a missing one). The rpath finds libDTFE.so at
-# run time on Linux; on macOS the library's install name is its build path relative to the repository root, where
-# the suite runs the driver.
+# On macOS it pins the SDK as the root Makefile does. The rpath finds libDTFE.so on Linux; on macOS the library's
+# install name is its build path relative to the repository root, where the suite runs the driver.
 USER_SAMPLING_BIN ?= dtfe_user_sampling
 USER_SAMPLING_SYSROOT =
 ifeq ($(UNAME_S),Darwin)

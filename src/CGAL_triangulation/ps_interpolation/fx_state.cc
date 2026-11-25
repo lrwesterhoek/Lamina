@@ -1,11 +1,8 @@
-// Part of src/CGAL_triangulation/ps_interpolation.cc, inside its #ifdef PHASE_SPACE: included once, in order, by
-// that file and compiled only as part of its object, never alone.
-// The pass's fixed-point moment state (PSFxState), the walk that bounds its words (psFxBoundWalk) and, in 3D,
-// the face walk (psFaceWalk).
+// Part of ps_interpolation.cc (included in order inside its #ifdef PHASE_SPACE, never compiled alone). The pass's
+// fixed-point moment state (PSFxState), the walk that bounds its words (psFxBoundWalk) and the face walk (psFaceWalk).
 
-// The pass's moment grids as fixed-point sums (see fxg in interpolateGrid_phaseSpace): which grids it accumulates,
-// their words, their Real accumulators and what their bounds and units are made of. Used per pass, never per cell:
-// the deposit loop reads the words straight from fxg (fxAddL).
+// The pass's moment grids as fixed-point sums (fxg in interpolateGrid_phaseSpace): which grids it accumulates, their words,
+// their Real accumulators and their bounds and units. Used per pass, never per cell.
 struct PSFxState
 {
     PSFxWords (&fxg)[PS_FX_CPU_N];
@@ -18,15 +15,13 @@ struct PSFxState
     std::vector< Pvector<Real,noVelComp> > &dispVel;
     bool fxVelBound, fxScalSel, fxSGradSel;
     Real cellVolume;
-    // --face-gradient: this pass accumulates the face sums (the exact CPU deposit), their
-    // words (faceS: 9 per cell, faceN: NO_DIM) -- outside the PSFxGrid set, so the GPU's grids and counters are
-    // untouched -- and the grid spacing their bound counts planes with
+    // --face-gradient: this pass accumulates the face sums (the exact CPU deposit): words faceS (9 per cell), faceN (NO_DIM),
+    // outside the PSFxGrid set so the GPU's grids and counters are untouched, and the grid spacing their bound counts planes with
     bool face = false;
     PSFxWords faceS, faceN, faceP;   // (faceP: the normal momentum through each face, the mass flux)
     Real const *gridDx = nullptr;
-    // the bounds the GPU extraction summed for this pass (psGpuExtractAndDeposit: the bound walk's sums over the same
-    // tetrahedra in the same block order), kept for the face sums' units, so that no second bound walk runs after a
-    // GPU deposit (psFxBoundsFromGpu says when they stand in for the walk's)
+    // the bounds the GPU extraction summed for this pass (same tets, same block order), kept for the face sums' units so no
+    // second bound walk runs after a GPU deposit (psFxBoundsFromGpu says when they stand in for the walk's)
     PSFixedBounds gpuBounds;
     bool gpuBoundsValid = false;
     // the face walk ran beside the GPU deposit (the default, PSEarlyFaceWalk) and the device call succeeded:
@@ -121,10 +116,9 @@ struct PSFxState
         default: break;
         }
     }
-    // One kept tetrahedron's terms of the bounds (PSFixedBounds::addTet): the largest |value| it can deposit per
-    // grid, from the vertex values and the constant gradients the CPU deposit itself forms (geo.posMatInv, Real).
-    // The GPU kernel forms its gradients in float from its own record; near the degeneracy cut they may exceed
-    // these by a few per cent, which the factor 4 of headroom in the unit absorbs (psMomentFixedScale).
+    // One kept tet's terms of the bounds (PSFixedBounds::addTet): the largest |value| it can deposit per grid, from the vertex
+    // values and the gradients the CPU deposit forms (geo.posMatInv, Real). The GPU kernel's float gradients may exceed these
+    // near the degeneracy cut; the factor-4 headroom in the unit absorbs it (psMomentFixedScale).
     void tetBound(Cell_handle const &cell, PSCellGeometry const &geo, double const tetMass, PSFixedBounds &fb) const
     {
         double const V = geo.cellAbsDet / double(factorial(NO_DIM));
@@ -229,21 +223,11 @@ struct PSFxState
     }
 };
 
-// The bounds of the pass's fixed-point units: one walk over the cells with the deposit's own filter (psFilterCell,
-// the inverse included) and tet mass, summing PSFixedBounds per tet (fx.tetBound). The cells go in blocks of 256, and
-// the team's threads claim whole blocks from one counter as they come free (PSBlockClaim, as the deposit's dynamic
-// team; no thread idles on a static split's slow share, and each walks only the cells of its own blocks). Every
-// output is a double sum -- the 10 moment bounds and the 3 face bounds; the maxima (vMax, gMax, ...) are each one
-// tetrahedron's, inside tetBound -- and each block's sums are made by the one thread that claimed it, from zero, in
-// the cells' order, then added in block order on this thread: so the 13 doubles are the same at every thread count
-// and claim order, and the same a GPU deposit of the pass takes (gpuBoundPart sums the same blocks in that order).
-// --grid-window: only the tets that reach the window count (windowTouched, the test the GPU extraction drops the
-// others with), so a GPU and a CPU window deposit of one pass take the same units. That is cheaper than the full
-// run's units (no walk over every tet of the partition, no full --ps-vertex-mass degree pass) and finer in a zoom's
-// small cells. The price: a window matches the full run's cells to the rounding of shares below ~2^-38 of the
-// bound, not byte for byte (tests/ps_window_check.sh); GPU and CPU window grids still differ in the last bits (the
-// kernels form their shares in float). The mass grid's unit follows the same rule under --grid-window
-// (psCpuFixedUnits, ps_interpolation/pass_setup.cc).
+// The bounds of the pass's fixed-point units: one walk over the cells with the deposit's own filter and tet mass, summing
+// PSFixedBounds per tet. Cells go in blocks of 256 claimed by the team's threads (PSBlockClaim); each block's sums are made by
+// the one thread that claimed it, from zero, in the cells' order, then added in block order: the 13 doubles are the same at every
+// thread count and claim order, and the same a GPU deposit takes (gpuBoundPart). --grid-window: only tets that reach the window
+// count (windowTouched, as the GPU extraction), so GPU and CPU window deposits take the same units.
 static PSFixedBounds psFxBoundWalk(PSPassCtx const &passCtx, PSFxState const &fx, bool const psVertexMass)
 {
     DT &dt = passCtx.dt;   // (PS_FINITE_CELLS_BEGIN / END)
@@ -328,20 +312,11 @@ static PSFixedBounds psFxBoundWalk(PSPassCtx const &passCtx, PSFxState const &fx
 }
 
 #if NO_DIM==3
-// --face-gradient beside a GPU deposit: the face sums (psDepositFaces) of every kept
-// tetrahedron from ONE CPU walk over the tessellation, on the bound walk's skeleton (the same filter, mass, gradient
-// and block order as the deposit loop; the GPU-deferred tetrahedra included, so the deposit loop skips its own face
-// block under metalDeposited), into the words psCpuFixedUnits allocated. The tetrahedra are the deposit loop's own:
-// its filter, then its span test (psLoopSpanReaches: the grid of a non-periodic run, the window of --grid-window), or,
-// outside a non-periodic grid without a window, its face-only test (psOwnsUpperBoundarySection: the section in an upper
-// boundary plane).
-// Mass, velocity, the per-stream gradient and
-// the dispersion stay the device's: this walk writes the face words only, shared by its threads (relaxed atomics,
-// order-free like the deposit loop's). Costs the walk the CPU face deposit costs beside its exact deposit.
-// 'threads': the walk's team, the caller's psDepositThreads() (the walk beside the GPU deposit runs on a thread of
-// its own, outside the partition loop's team, where that count would be the whole machine's). 'dropsOut' (FX_DROP_SLOTS
-// counters, or null: the run's): where the walk's dropped shares are counted, for a walk whose sums may yet be thrown
-// away (PSEarlyFaceWalk). In the deposit loop's arithmetic (psDepositFaces), wherever the walk runs.
+// --face-gradient beside a GPU deposit: the face sums (psDepositFaces) of every kept tetrahedron from ONE CPU walk, on the bound
+// walk's skeleton (same filter, mass, gradient and block order as the deposit loop, GPU-deferred tets included), then the
+// deposit loop's span test or face-only test (psOwnsUpperBoundarySection). It writes the face words only, shared by its threads
+// (relaxed atomics, order-free). 'threads': the walk's team (it runs outside the partition loop's team). 'dropsOut': where
+// dropped shares are counted (FX_DROP_SLOTS counters, or null: the run's), for a walk whose sums may be thrown away.
 static void psFaceWalk(PSPassCtx const &passCtx, PSFxState &fx, bool const psVertexMass, int const threads,
                        unsigned long long *const dropsOut)
 {

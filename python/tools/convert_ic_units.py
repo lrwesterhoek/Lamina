@@ -1,20 +1,7 @@
 #!/usr/bin/env python3
 """Convert a TNG initial-conditions snapshot from ckpc/h to h-removed ckpc.
-
-PS-DTFE matches Lagrangian positions (--ps-lagrangian-input) to the snapshot's
-Coordinates by ParticleID, so the IC file must be in the SAME units as the
-merged snapshots (combined_NNN.hdf5, which python/tools/merge_HDF5.py writes
-with the little-h removed). This applies the identical convention to the ICs:
-
-    Coordinates   -> Coordinates / h      (ckpc/h -> ckpc)
-    Header BoxSize -> BoxSize / h
-    Velocities, ParticleIDs, MassTable, all other attributes: unchanged
-
-Usage:
-    python3 python/tools/convert_ic_units.py <snap_ics.hdf5> <combined_ics.hdf5>
-
-h is taken from the input file's Header/HubbleParam.
-"""
+Coordinates and Header BoxSize are divided by h, as in the merged snapshots (PS-DTFE's Lagrangian positions).
+Usage: convert_ic_units.py <snap_ics.hdf5> <combined_ics.hdf5>"""
 
 import argparse
 import sys

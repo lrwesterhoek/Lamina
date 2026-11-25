@@ -1,28 +1,7 @@
 #!/usr/bin/env bash
-# Resume of a killed partitioned PS-DTFE run WITH '--sample-points' (src/partition_checkpoint.h 'POINTS',
-# ps_point_eval.cc '--resume with --sample-points'). On a synthetic
-# crossed-wave snapshot split into 64 partitions, with a plane of points and every per-point option the production
-# runs use (--ps-per-stream --pts-vel-grad --ps-caustics, --ps-vertex-mass):
-#   R1  an uninterrupted '--ps-merge index-order' run (the reference) checkpoints its point records too and removes the
-#       checkpoint once the outputs are in place
-#   R2  a run killed after 20 partitions (DTFE_TEST_EXIT_AFTER_PARTITIONS) leaves a manifest of >= 20 merged
-#       partitions and exactly one 'points.<i>' file for each of them
-#   R3  '--resume' with the sample-point file changed (same name, other points) refuses, naming the 'sample-points'
-#       key line, and keeps the checkpoint
-#   R4  '--resume' continues: EVERY output -- the '.pts_*' files and the grids -- byte-identical to the reference,
-#       and the log says the records were read back; the checkpoint is removed
-#   R5  a damaged 'points.<i>' (cut short) is refused, naming the file
-#   R6  a run killed while merging in COMPLETION order (--ps-merge completion-order) resumes too: the '.pts_*' files are
-#       byte-identical to the reference all the same (every point's records are sorted before any sum), the grids
-#       equal to float rounding
-#   R7  a fresh run (no --resume) over an old checkpoint replaces it: after its first write the folder holds only
-#       its own partitions' 'points.<i>' files
-#   R8  the look-ahead path (--max-concurrent 1, DTFE_OVERLAP=1: partition k+1 tessellated on another thread
-#       while k deposits) tags the records with the right partition: killed and resumed, byte-identical
-#   R10 '--scratch-dir': the 'points.<i>' files go to the scratch folder with the checkpoint (config.sh
-#       ps_checkpoint_dir's name), and the resume from there is byte-identical
-#   R9  GPU builds only: a killed '--gpu' run resumes to the same points (the point evaluation is CPU work)
-# Usage: tests/ps_resume_points_check.sh [--no-build]   (--no-build is accepted and ignored: the binaries are used as built)
+# Resume of a killed partitioned PS-DTFE run with '--sample-points' (point records in the checkpoint).
+# Checks R1-R10 are labelled by their own output lines.
+# Usage: tests/ps_resume_points_check.sh [--no-build]   (--no-build is accepted and ignored)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$SCRIPT_DIR")"

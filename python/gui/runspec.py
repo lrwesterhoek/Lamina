@@ -1,25 +1,4 @@
-"""Job specifications behind the DTFE / PS-DTFE GUI (app.py).
-
-Three jobs, one per GUI tab, each holding what the terminal workflow sets for it plus the checks
-for combinations the scripts reject, and the EXACT commands it stands for (``steps()``):
-
-  RunSpec       one scripts/run_ps_dtfe.sh or run_dtfe.sh call: grids (+ a hi-res slice)
-  PipelineSpec  scripts/run_ps_pipeline.sh (grids + image plane for every stale snapshot of
-                the chosen simulations), optionally followed by plot_pointeval.py per simulation
-  PlotSpec      the figure scripts in python/plot (and analyze.py), one step per script call,
-                described declaratively by FIGURE_SETS
-  DataSpec      scripts/download_snapshots.sh (snapshots, group catalogues, trees, ICs) and
-                python/tools/merge_HDF5.py (the h-free combined files the other jobs read)
-  CustomSpec    the binary itself on ANY snapshot file (Gadget HDF5/binary, text): the "your
-                file" tab, for data that is not IllustrisTNG -- units, box, periodicity and the
-                initial positions spelled out instead of assumed
-
-QueuedJob freezes any of them for the GUI's job queue (kind + settings; commands at start).
-
-The GUI never runs anything the terminal could not: it shows those commands and executes them.
-
-Pure Python (no Qt), so it is testable headless: tests/py_gui_runspec_test.py.
-"""
+"""Job specifications behind the DTFE / PS-DTFE GUI (app.py)."""
 # PipelineSpec, PlotSpec, DataSpec and CustomSpec, with the helpers only they use, live in runspec_pipeline.py,
 # runspec_plot.py, runspec_data.py and runspec_custom.py; imported back below (before JOB_KINDS), so every
 # runspec.<name> still works.
@@ -81,10 +60,6 @@ def sim_dir(sim: str, data_root) -> Path:
     return _cli_sim_dir(sim, Path(data_root).expanduser() if str(data_root).strip() else _NO_ROOT)
 
 
-# the interpreter for the figure scripts, the void helper and the data tools (numpy/scipy/matplotlib/h5py): $PYTHON as
-# in the pipeline script, else the first of the python3 on PATH and the GUI's own venv interpreter that has those
-# packages (Homebrew relinks python3 to a new version without them: on 2026-11-23 to 3.15, while the venv is on 3.14);
-# never sys.executable inside Lamina.app, which is the bundle's host binary, not a plain interpreter
 ANALYSIS_PACKAGES = ("numpy", "scipy", "h5py", "matplotlib")
 
 
@@ -158,16 +133,10 @@ _POST_FIELDS = ("divergence_a", "shear_a", "vorticity_a", "tweb_a", "vweb_a")
 _GRADIENT_BYTES = 36
 _FROM_GRADIENT = ("gradient_a", "divergence_a", "shear_a", "vorticity_a", "vweb_a")
 # ... and a PS-DTFE run that takes the face gradient (face_route_on) keeps more full-resolution grids, per cell
-# (src/quantities.h, one Real each): the face sums from the deposit to the normalization, 30 numbers
-# (face_velocity: 2 sides x 3 axes x 3 components, face_coverage 6, face_momentum 6); the two grids every face pass
-# makes (Quantities::psFaceGradientBegin), the stream average's divergence and the mass flux divergence, written as
-# '.a_velDivStreams' and '.a_massFluxDiv' (src/input_output.cc); the stream average's twin of each of 'gradient_a',
-# 'shear_a', 'vorticity_a' asked (src/DTFE.cpp psStreamsTwins; '.a_velGradStreams', '.a_velShearStreams',
-# '.a_velVortStreams'); and the mean velocity, deposited for the face gradient whether or not 'velocity_a' is written
-# (src/DTFE.cpp). The face sums (and that mean velocity) are freed once the gradient is made from them, before the
-# derived fields: the planner books the larger of the normalization (the deposit's grids, the twins, the two outputs)
-# and the derived phase (auto_tune.cc: max(bCell, bCellDeposit + normR)). Standard DTFE's face sums are per
-# sub-domain and it writes no twins: nothing is added for it
+# (src/quantities.h, one Real each): the face sums from the deposit to the normalization, 30 numbers (face_velocity:
+# 2 sides x 3 axes x 3 components, face_coverage 6, face_momentum 6); the two grids every face pass makes
+# (Quantities::psFaceGradientBegin), the stream average's divergence and the mass flux divergence, written as
+# '.a_velDivStreams' and '.a_massFluxDiv' (src/input_output.cc).
 _FACE_SUM_BYTES = 30 * 4
 _FACE_OUTPUT_BYTES = 2 * 4
 _FACE_TWIN_BYTES = {"gradient_a": 36, "shear_a": 20, "vorticity_a": 12}
@@ -177,8 +146,7 @@ _FACE_TWIN_BYTES = {"gradient_a": 36, "shear_a": 20, "vorticity_a": 12}
 # One choice per estimator and job: Exact (first, the default) or Fast. quality_mode() is the ONE place that says what
 # a choice implies; each job's mode() asks it and puts the job's Advanced overrides on top (apply_advanced), and every
 # command and environment builder, the memory estimate and the checks read only that (and the four accessors of the
-# overrides the mode does not hold). The launcher pins what it passed for these settings before the two modes, so a
-# setting the binaries come to decide themselves is a deletion here.
+# overrides the mode does not hold).
 QUALITIES = ("exact", "fast")
 QUALITY_DEFAULT = "exact"
 QUALITY_NAME = {"exact": "Exact", "fast": "Fast"}
@@ -201,9 +169,8 @@ QUALITY_TIP = {"exact": "Slower, exact: the default",
 @dataclass(frozen=True)
 class QualityMode:
     """What a job's quality implies (quality_mode): the values its former controls had by default for that cell
-    average (but the sampled deposit's count: one point per cell axis, the program's default now), in the controls'
-    own terms, which the builders turn into flags and driver knobs as before; with the job's Advanced overrides on
-    top (apply_advanced), where it passes them."""
+    average (but the sampled deposit's count: one point per cell axis, the program's default now), in the
+    controls' own terms, which the builders turn into flags and driver knobs as before."""
     deposit: str                    # the cell average: "exact" (-e, --exact) | "sampled" (-n nsub, --sampled)
     nsub: int                       # the sampled PS-DTFE deposit's points per cell axis (standard DTFE: the binary's)
     gpu: bool | None                # the device: None = Automatic, the program picks (DTFE_GPU=auto, no -m / --gpu);
@@ -223,13 +190,7 @@ class QualityMode:
 
 def quality_mode(quality: str) -> QualityMode:
     """What 'quality' (QUALITIES) implies for a job. Exact: the exact cell average (PS-DTFE's exact deposit and its
-    face gradient wherever the job qualifies; standard DTFE's exact cell average). Fast: the sampled one, at one point
-    per cell axis for PS-DTFE (the program's default: quick, with noisy per-cell values; standard DTFE: the binary's
-    own count). Both: the device the program picks (gpu None: DTFE_GPU=auto, no -m / --gpu) with the machine use's
-    GPU share ('auto'), the vertex masses of a TNG job, no forced parallel insertion (the binary's own rule) and the
-    index order merge. Nothing at all is passed for the partition, the concurrency and the memory budget (the
-    binary's auto-tuner) nor for a TNG job's precision (single). A job's Advanced overrides come on top, in each job's
-    mode() and the accessors (apply_advanced). An unknown quality reads as Exact (the checks call it an error)."""
+    face gradient wherever the job qualifies; standard DTFE's exact cell average)."""
     deposit = "sampled" if quality == "fast" else "exact"
     return QualityMode(deposit=deposit, nsub=1, gpu=None, face_gradient=True, vertex_mass=True,
                        parallel_triangulation=False, ordered_merge=True)
@@ -238,17 +199,11 @@ def quality_mode(quality: str) -> QualityMode:
 # ---------------------------------------------------------------------- the opt-in Advanced settings
 # The launcher's Advanced switch (off by default) brings back some controls the two modes removed, as overrides of a
 # job's mode: each run job's 'advanced' dict, keyed by the removed field's name, with the meaning and range that field
-# had before the two modes; a key that is absent is Automatic (the mode's own value, nothing new passed). The rules
-# below are the ONE place that says which override a job passes and why another is not passed (_refusal); each job's
-# mode() applies them (apply_advanced), and every command and environment builder, the memory estimate, the checks
-# and the 'Runs on' line read that and the four accessors (job_partition, job_concurrency, job_memory_budget,
-# job_precision), so "the binary decides this itself" stays a deletion here. Not brought back on purpose: the vertex
-# masses of a TNG job.
+# had before the two modes; a key that is absent is Automatic (the mode's own value, nothing new passed).
 ADVANCED_KEYS = ("gpu", "nsub", "face_gradient", "partition", "max_concurrent", "mem_budget_gb",
                  "parallel_triangulation", "ordered_merge", "precision")
 # the keys QualityMode holds (apply_advanced puts a passed one there); the other four have the accessors
 _MODE_KEYS = ("gpu", "nsub", "face_gradient", "parallel_triangulation", "ordered_merge")
-# the number rows' ranges, the old controls' (the spin boxes before the two modes; their 0 was 'auto', Automatic now)
 ADVANCED_RANGE = {"nsub": (1, 6), "partition": (1, 8), "max_concurrent": (1, 16), "mem_budget_gb": (1, 4096)}
 AUTOMATIC = "Automatic"
 # each row's title in the Advanced group
@@ -327,12 +282,7 @@ def _with_advanced(spec, d: dict) -> dict:
 
 
 def _refusal(spec, key: str, value, deposit: str) -> str:
-    """Why this job does not pass the override key=value ('' when it does): the controls' rules before the two
-    modes (where each was enabled, what the run could use), so an override never makes a command the launcher
-    could not make then -- but for the Device's CPU + GPU, which asks the program for '--gpu-share mixed' (only
-    where its share applies: PS-DTFE's exact deposit on a GPU build, in 3D, single precision). deposit: the cell
-    average of the job's quality (its mode's), which only the samples, the face integrals and the shared device
-    depend on. A refused override is not passed: the job builds the Automatic command there (for the Device:
+    """A refused override is not passed: the job builds the Automatic command there (for the Device:
     DTFE_GPU=auto, no -m / --gpu), and the checks list says so ('Automatic applies', advanced_problems)."""
     est, dim = getattr(spec, "estimator", "ps"), getattr(spec, "dim", 3)
     ps = est == "ps"
@@ -398,10 +348,7 @@ def extra_device_flags(spec) -> frozenset:
 
 def apply_advanced(mode: QualityMode, spec) -> QualityMode:
     """The job's mode (quality_mode's answer for its quality) with the overrides it passes (_refusal) of the five
-    settings QualityMode holds; the same object when there are none. The Device's value becomes the mode's device
-    (False the CPU, True the GPU and CPU + GPU; without a passed one it stays None, the program's pick) and, where a
-    GPU share applies (PS-DTFE's exact deposit on the GPU in 3D), its share: '1' for the GPU (every partition on it,
-    in every machine use), 'mixed' for CPU + GPU; elsewhere the share stays 'auto', which the drivers do not pass."""
+    settings QualityMode holds; the same object when there are none."""
     passed = {k: v for k, v in job_advanced(spec).items()
               if k in _MODE_KEYS and not _refusal(spec, k, v, mode.deposit)}
     if "gpu" in passed:
@@ -415,11 +362,8 @@ def apply_advanced(mode: QualityMode, spec) -> QualityMode:
 
 def job_mixes(spec, m: QualityMode | None = None, reported: str = "") -> bool:
     """Does the job deposit on the CPU and the GPU together? PS-DTFE's exact deposit on the GPU in 3D, single
-    precision (the double build keeps one device), whose share mixes: 'mixed' (Device CPU + GPU) in every machine use,
-    'auto' in performance (the machine use's own share). The program mixes only a run split into partitions, and
-    keeps a small one on the GPU (runs_on_tip). On the GPU: the Device override the job passes, else (Automatic) the
-    device the program reported for it, 'reported' (reported_device: 'gpu', 'cpu' or '' for none). m: the job's
-    mode, when the caller has it."""
+    precision (the double build keeps one device), whose share mixes: 'mixed' (Device CPU + GPU) in every machine
+    use, 'auto' in performance (the machine use's own share)."""
     m = m or spec.mode()
     on_gpu = m.gpu if m.gpu is not None else reported == "gpu"
     if not (getattr(spec, "estimator", "ps") == "ps" and getattr(spec, "dim", 3) != 2 and on_gpu
@@ -489,10 +433,8 @@ def advanced_value_text(key: str, value) -> str:
 
 def advanced_choices(spec, key: str) -> list[tuple]:
     """A row's choices for this job, (value, text), Automatic (None) first: Device CPU, GPU only on a GPU build of
-    the program the job runs, and CPU + GPU where a GPU share applies to it (PS-DTFE in 3D, single precision; under
-    Fast it is offered and refused: only the exact deposit is shared); the velocity derivatives' two routes; the
-    parallel insertion On on a build with TBB; the merge in completion order; Double. A number row has none here: its
-    range is ADVANCED_RANGE."""
+    the program the job runs, and CPU + GPU where a GPU share applies to it (PS-DTFE in 3D, single precision;
+    under Fast it is offered and refused: only the exact deposit is shared)."""
     est, dim, prec = getattr(spec, "estimator", "ps"), getattr(spec, "dim", 3), job_precision(spec)
     gpu = gpu_built(est, prec, dim)
     values = {"gpu": (False,) + ((True,) if gpu else ())
@@ -505,8 +447,7 @@ def advanced_choices(spec, key: str) -> list[tuple]:
 def advanced_rows(spec) -> tuple[str, ...]:
     """The rows the Advanced group shows for this job (its tab, estimator, dimension and build), where each control
     was before the two modes: the device in 3D; the samples, the merge order (2D too) for PS-DTFE; the velocity
-    derivatives and the parallel insertion for PS-DTFE in 3D; the partitions, concurrency and memory budget always;
-    the precision on the Grids and Pipeline tabs when the double program is built (Custom has its own row)."""
+    derivatives and the parallel insertion for PS-DTFE in 3D."""
     est, dim = getattr(spec, "estimator", "ps"), getattr(spec, "dim", 3)
     ps, three = est == "ps", dim != 2
     shown = {"gpu": three, "nsub": ps, "face_gradient": ps and three, "partition": True, "max_concurrent": True,
@@ -543,10 +484,7 @@ def advanced_count_text(n: int) -> str:
 
 def automatic_text(spec, key: str, checks: dict | None = None) -> str:
     """What a row left on Automatic gives this job now (the grey text beside it): the job's mode without that
-    override. The device: the CPU where the program the job runs has no GPU (job_gpu_built, as the 'Runs on' line
-    reads it first); else the program picks it, and after a memory check of these settings (checks, as reported_device
-    reads them) the device the program reported, the CPU or the GPU (the check names no share: runs_on_tip says where
-    the job mixes the two). No measured number."""
+    override."""
     est, dim = getattr(spec, "estimator", "ps"), getattr(spec, "dim", 3)
     other = replace(spec, advanced={k: v for k, v in job_advanced(spec).items() if k != key})
     m = other.mode()
@@ -573,9 +511,8 @@ def automatic_text(spec, key: str, checks: dict | None = None) -> str:
 
 def keep_run_count(spec, rec):
     """'Load settings' of a sampled PS-DTFE run (rec: a results.RunRecord, duck-typed): its count (RunRecord.nsub,
-    the log's) becomes the loaded job's Advanced Samples where the job's Fast takes another -- a run made before Fast
-    became one point per cell axis, or at a count of its own -- so the loaded job is that run (the override turns the
-    switch on). Nothing for a job that holds a count of its own, a count outside the row's range or any other run."""
+    the log's) becomes the loaded job's Advanced Samples where the job's Fast takes another -- a run made before
+    Fast became one point per cell axis, or at a count of its own."""
     n, (lo, hi) = getattr(rec, "nsub", None), ADVANCED_RANGE["nsub"]
     if (getattr(rec, "estimator", "") != "ps" or rec.exact or not n or not lo <= n <= hi
             or getattr(spec, "estimator", "ps") != "ps" or "nsub" in job_advanced(spec)):
@@ -610,11 +547,7 @@ def advanced_problems(spec) -> list[tuple[str, str]]:
 
 def reported_device(spec, checks: dict | None = None) -> str:
     """The device the program reported for this job in a memory check of its current settings: 'gpu' or 'cpu', the
-    'device' of the report records (parse_reports) kept under the job's memory_key() in 'checks' (the launcher's
-    memory-check results, MainWindow.mem_results: {memory key: {(sim, snapshot, plane size): record}}), each with
-    the build fact it was taken under ('gpu_built', job_gpu_built at check time: app_check); '' when no check of
-    these settings ran under the build there is now (a record taken under another one counts for nothing), none of
-    its records names a device, or they name two."""
+    'device' of the report records (parse_reports) kept under the job's memory_key() in 'checks'."""
     if not checks:
         return ""
     built = job_gpu_built(spec)
@@ -625,13 +558,7 @@ def reported_device(spec, checks: dict | None = None) -> str:
 
 def runs_on_text(spec, checks: dict | None = None) -> str:
     """The run tabs' grey line under the Machine use: where a Grids, Pipeline or Custom job (duck-typed) runs, in
-    words. The 2D programs and a build without the GPU say so first; then its Advanced Device override ('set in
-    Advanced': the CPU, the GPU, or the CPU and the GPU together, job_mixes in the Device row's words); else
-    (Automatic) the device the program reported in a memory check of these settings (reported_device of 'checks',
-    the launcher's memory-check results: 'as the memory check reported', the GPU with the extra options' GPU share
-    where they give one; the check names the device, not a share: runs_on_tip says where the job mixes the two);
-    before one, a Custom job's extra options that name the GPU ('set in the Extra options'), else that the program
-    picks the device. Information only, no control behind it."""
+    words."""
     if getattr(spec, "dim", 3) == 2:
         return "Runs on: the CPU (the 2D programs have no GPU)"
     if not job_gpu_built(spec):
@@ -677,7 +604,6 @@ class RunSpec:
     run_mode: str = "balanced"       # DTFE_RUN_MODE, the machine use (RUN_MODES): how hard the run may lean on the
                                      # machine; balanced, the binaries' default outside a batch job
     caustics: bool = True            # --ps-caustics: on, as run_ps_dtfe.sh's default and every
-                                     # production PS grid (+33% time, +1.2 GB on TNG)
     caustic_cusps: bool = False
     slice_plane: str = ""            # a --sample-points file (hi-res slice); "" = none
     slice_vel_grad: bool = True
@@ -794,10 +720,8 @@ class RunSpec:
             # login shell cannot leak in. An OMP_NUM_THREADS export still reaches the binary (run_dtfe.sh sets it
             # only for a non-empty THREADS)
             env["SUBSAMPLES"] = env["THREADS"] = ""
-            # the gradient route, pinned EMPTY the same way: run_dtfe.sh's own default, the binary's (the face
-            # gradient, standard DTFE's default since 2026-11-09, whatever the cell average). A standard job names no
-            # route, so a FACE_GRADIENT=0 exported in the login shell cannot turn it into '--per-tet-gradient', nor a
-            # 1 add '--face-gradient' to the command (and the run log) the job shows
+            # A standard job names no route, so a FACE_GRADIENT=0 exported in the login shell cannot turn it into
+            # '--per-tet-gradient', nor a 1 add '--face-gradient' to the command (and the run log) the job shows
             env["FACE_GRADIENT"] = ""
             # ... and the binary's own switch the same way (it reads an empty value as unset): install_gui_app.sh
             # imports every DTFE_* from the login shell, where a DTFE_FACE_GRADIENT=0 would turn the job to the
@@ -912,11 +836,9 @@ def script_text(steps: list[Step]) -> str:
 
 
 def export_script(steps: list[Step], title: str, slurm: dict | None = None) -> str:
-    """The job as a runnable bash script (run from the repository root, as the GUI does), or as a
-    SLURM batch job for a cluster (e.g. Hábrók): slurm = {job_name, time, cpus, mem, partition,
-    mail} (empty values are left out). Like the GUI, the script goes on after a failed step. A SLURM job runs in
-    performance: each step's DTFE_RUN_MODE, and a Custom step's '--run-mode' value, become 'performance' (the
-    launcher's machine use is for this machine)."""
+    """The job as a runnable bash script (run from the repository root, as the GUI does), or as a SLURM batch
+    job for a cluster (e.g. Hábrók): slurm = {job_name, time, cpus, mem, partition, mail} (empty values are
+    left out). Like the GUI, the script goes on after a failed step."""
     if slurm is not None:
         steps = [_cluster_step(st) for st in steps]
     lines = ["#!/usr/bin/env bash"]
@@ -956,10 +878,7 @@ def _cluster_step(st: Step) -> Step:
 
 
 def _export_line(st: Step) -> str:
-    """One step of an exported script. A step with a run log keeps the run-log contract as the launcher's own
-    tee does (_close_tee): the output goes into '<log>.partial', which becomes '<log>' on exit 0 (a stale
-    '<log>.failed' goes) and '<log>.failed' otherwise, so a failed re-run never truncates the log of the grids on
-    disk. pipefail (set by the header) makes the pipe's status the program's, not tee's."""
+    """One step of an exported script."""
     if not st.tee:
         return st.line() + " || failed=$((failed + 1))"
     log, part = _q(st.tee), _q(st.tee + ".partial")
@@ -1032,21 +951,14 @@ def _run_option_env(spec) -> dict[str, str]:
 def gpu_pin_env(gpu: bool | None) -> dict[str, str]:
     """DTFE_GPU for every program or driver the launcher starts, from a job's device (QualityMode.gpu): 'auto' for
     None (Automatic: the program picks its device), '1' for the GPU, '0' for the CPU. Pinned, never left unset:
-    install_gui_app.sh imports every DTFE_* from the login shell, and a DTFE_GPU there must not decide. The drivers
-    hand the value on to the binary as set (RunSpec.command, ps_run_env), which reads 'auto' as not given; a Custom
-    job (CustomSpec.run_env), the exact zoom and the query server start the binary with it themselves."""
+    install_gui_app.sh imports every DTFE_* from the login shell, and a DTFE_GPU there must not decide."""
     return {"DTFE_GPU": "auto" if gpu is None else "1" if gpu else "0"}
 
 
 def ps_run_env(spec) -> dict[str, str]:
     """run_ps_dtfe.sh's run switches as a Grids or Pipeline job pins them (spelled out both ways: a stray export
-    cannot leak in): the device (gpu_pin_env: 'auto' unless a Device override is passed; -m only switches the GPU on),
-    the parallel triangulation and the merge order of its quality (spec.mode()), and the start-over tick. The index
-    order is given explicitly (PS_MERGE=index-order, which keeps the memory gate on under the auto-tuner's speed
-    split). The machine use (DTFE_RUN_MODE, which the driver hands on to the binary) and the GPU share of the mode
-    (GPU_SHARE: 'auto', the machine use's share of an exact deposit on the GPU and the binary's own default, which the
-    driver does not pass; a Device override's '1' or 'mixed' only where it applies, apply_advanced: the driver passes
-    any other value whatever the run), pinned the same way."""
+    cannot leak in): the device (gpu_pin_env: 'auto' unless a Device override is passed; -m only switches the GPU
+    on), the parallel triangulation and the merge order of its quality (spec.mode()), and the start-over tick."""
     m = spec.mode()
     on = lambda b: "1" if b else "0"
     return {**gpu_pin_env(m.gpu), "PARALLEL_TRIANGULATION": on(m.parallel_triangulation),
@@ -1093,10 +1005,8 @@ _REPORT = re.compile(r"AUTO-TUNE-REPORT (?:snap=(\d+) )?(\w+=.*)$")
 
 
 def parse_reports(text: str) -> dict[int, dict]:
-    """{snapshot: {partition, mc, predicted_gb, budget_gb, ..., over_budget, device}} from report output
-    (the script's lines carry 'snap=NNN'; the bare binary's line is snapshot 0). 'device' ('cpu' | 'gpu'): the device
-    the program picked, from the header's device line of the run the report belongs to (the output since its
-    'RUNNING:' line, read as a run log's, results.read_device); absent where that run printed none."""
+    """{snapshot: {partition, mc, predicted_gb, budget_gb, ..., over_budget, device}} from report output (the
+    script's lines carry 'snap=NNN'; the bare binary's line is snapshot 0)."""
     import results as R
     text = strip_ansi(text)
     out, run_start, pos = {}, 0, 0
@@ -1175,10 +1085,8 @@ def face_gradient_applies(spec) -> bool:
 
 def face_gradient_env(spec) -> str:
     """The velocity gradient's route of a PS-DTFE job, as run_ps_dtfe.sh's FACE_GRADIENT: '1' (--face-gradient) where
-    its quality asks for the face gradient (spec.mode()) and the job qualifies, '' (the binary's default, which keeps
-    the stream average there and says why in the run log) where it does not qualify, '0' (--per-tet-gradient) where
-    the quality asks for the stream average. Spelled out every time, so a FACE_GRADIENT exported in the login shell
-    cannot leak in."""
+    its quality asks for the face gradient (spec.mode()) and the job qualifies, '' (the binary's default, which
+    keeps the stream average there and says why in the run log) where it does not qualify."""
     if not spec.mode().face_gradient:
         return "0"
     return "1" if face_gradient_applies(spec) else ""
@@ -1187,18 +1095,12 @@ def face_gradient_env(spec) -> str:
 def face_route_on(spec) -> bool:
     """Does this job's run take the face gradient and keep its full grids (grids_gb)? A PS-DTFE job (duck-typed:
     Grids, Pipeline and Custom; a job without an estimator is the Pipeline's) whose route is the face gradient
-    (face_gradient_env '1'). The binary takes it only where a field built on the gradient is asked, which grids_gb
-    checks itself."""
+    (face_gradient_env '1')."""
     return getattr(spec, "estimator", "ps") == "ps" and face_gradient_env(spec) == "1"
 
 
 def _quality_problems(spec, derivatives: bool = True) -> list[tuple[str, str]]:
-    """What a PS-DTFE job's quality leaves out (Grids, Pipeline and Custom jobs, duck-typed), said before the run. The
-    velocity derivatives, where a field built on the velocity gradient is ticked (_FROM_GRADIENT; not when
-    'derivatives' is False: a Custom job's extra options name the route): Exact takes the mean flow's from exact face
-    sums wherever the job qualifies (face_gradient_applies); in 2D and with the halo release it keeps the stream
-    average (and writes no mass-flux divergence), and the sampled deposit always does (the face sums need the exact
-    one). The caustic classes of the sampled deposit are set per sample point, so a fold cell can show none."""
+    """What a PS-DTFE job's quality leaves out (Grids, Pipeline and Custom jobs, duck-typed), said before the run."""
     m, out = spec.mode(), []
     if derivatives and any(f in _FROM_GRADIENT for f in spec.fields) and not face_gradient_applies(spec):
         if m.deposit != "exact":
@@ -1242,10 +1144,7 @@ def words(text) -> list[str]:
 
 def grids_gb(grid: int, fields: list[str], precision: str = "single", dim: int = 3, face: bool = False) -> float:
     """The full-resolution grids a run holds at once at its peak, in GB (roughly: src/auto_tune.cc has the exact
-    model): the deposited grids throughout, and the larger of what the deposit and the normalization add beside them
-    and what the derived fields and web classes add after them (_POST_FIELDS). face: a PS-DTFE run that takes the
-    face gradient (face_route_on): its face sums (and the mean velocity it deposits for them) to the normalization,
-    its two face outputs and the twins from there to the output (_FACE_*)."""
+    model): the deposited grids throughout."""
     b = 8 + sum(_FIELD_BYTES.get(f, 12) for f in fields if f not in _POST_FIELDS)   # + stream counts/weights
     before, after = 0, sum(_FIELD_BYTES[f] for f in fields if f in _POST_FIELDS)
     if any(f in _FROM_GRADIENT for f in fields):
@@ -1326,9 +1225,8 @@ def _plot_env(data_root: str, sim: str) -> dict[str, str]:
 @dataclass(frozen=True)
 class Opt:
     """One option of a figure set. kind: bool | int | float | choice | text | plane | multi (a checklist of
-    'choices', the value a comma-separated string of the ticked ones). limits: a float's (min, max, decimals)
-    when the default box (0-1000, 2 decimals) cannot hold its values. row: options sharing one row title sit
-    side by side on one line under it (the void scripts' own options: compact), label then short."""
+    'choices', the value a comma-separated string of the ticked ones). limits: a float's (min, max,
+    decimals) when the default box."""
     key: str
     label: str
     kind: str
@@ -1622,10 +1520,7 @@ DOWNLOAD_SCRIPT = REPO_ROOT / "scripts" / "download_snapshots.sh"
 MERGE_TOOL = REPO_ROOT / "python" / "tools" / "merge_HDF5.py"
 API_KEY_FILE = Path.home() / ".tng_api_key"     # download_snapshots.sh reads it (or TNG_API_KEY)
 
-# DM particles per side of every TNG run (the -Dark twin has the same DM count). A raw -Dark
-# snapshot is 64 bytes per particle (measured: TNG50-3/100-3/300-3, 4 chunks each: positions in
-# double, velocities, IDs, the potential and four Subfind fields), the merged combined_NNN.hdf5
-# 52 (float32 x3 + uint64 + float32 x3, and those five fields; measured on TNG100-3).
+# DM particles per side of every TNG run (the -Dark twin has the same DM count).
 TNG_DM_PER_SIDE = {"TNG50-1": 2160, "TNG50-2": 1080, "TNG50-3": 540, "TNG50-4": 270,
                    "TNG100-1": 1820, "TNG100-2": 910, "TNG100-3": 455,
                    "TNG300-1": 2500, "TNG300-2": 1250, "TNG300-3": 625}
@@ -1775,9 +1670,7 @@ def snapshots(sim_path: Path, prefix: str = "ps_output", estimator: str = "ps", 
 
 def has_outputs(snapdir: Path, prefix: str, estimator: str) -> bool:
     """A density grid of the run: PS-DTFE '<prefix>.a_den' (or the unaveraged '.den'); standard DTFE 'output.*',
-    what run_dtfe.sh writes for a Grids job (it passes no prefix) and dtfelib's FieldSet reads (not
-    'output*.a_den', which matches every 'output_<variant>' beside it too -- 'output_plane.a_den', a plane run's
-    one-field grid, would mark a snapshot without the grids done)."""
+    what run_dtfe.sh writes for a Grids job (it passes no prefix) and dtfelib's FieldSet reads."""
     if estimator == "ps":
         return (snapdir / f"{prefix}.a_den").exists() or (snapdir / f"{prefix}.den").exists()
     return ((snapdir / "output.a_den").exists() or (snapdir / "output.den").exists()
@@ -1904,16 +1797,8 @@ _ZOOM_ROOT = re.compile(r"/" + re.escape(ZOOM_DIR_PREFIX) + r"[^/\s]*/zoom(\s|$)
 
 def dtfe_processes(max_age: float = 2.0) -> dict:
     """The DTFE / PS-DTFE binaries alive on this machine (from any terminal), classified once per max_age
-    seconds (pgrep costs ~30 ms and the checks run on every click):
       'runs'     [(pid, name, gb)]  jobs that compute and occupy the machine; gb = their resident memory
-                                    (None when ps could not say)
-      'servers'  [(pid, name, gb)]  query servers ('--serve': resident, idle between requests, but their
-                                    tessellations are real memory a large run has to live beside)
-    Not listed at all: report-mode runs ('--auto-tune-report', a memory check from any tab or terminal) and
-    this process's own exact zoom (a direct child writing into a ZOOM_DIR_PREFIX folder; its Custom-tab runs DO
-    count). Counted as runs, the servers would make every
-    tab warn while Explore's server is up and a queue with 'wait' ticked wait forever; the jobs the
-    launcher runs through a script are grandchildren (bash -> binary) and do count."""
+                                    (None when ps could not say)"""
     global _JOBS_CACHE
     now = time.monotonic()
     if now - _JOBS_CACHE[0] > max_age:
@@ -1973,12 +1858,9 @@ def _classify(names: dict[int, str]) -> dict:
 
 
 def _kind(ppid: int, args: str, me: int) -> str:
-    """What a DTFE binary with this parent and command line is: 'run' (occupies the machine), 'server'
-    (a query server: resident memory, idle CPU), 'report' (a memory check: the tuner's prediction only),
-    'own' (a direct child of this launcher writing into an exact-zoom folder: its exact zoom).
-    Report-mode runs are never counted (the memory check from any tab or terminal is not a run), servers are
-    listed apart with their memory instead of being counted or hidden. A Custom-tab run is a direct child too
-    (the binary itself, no script between), so only the zoom's output folder makes a child 'own'."""
+    """What a DTFE binary with this parent and command line is: 'run' (occupies the machine), 'server' (a
+    query server: resident memory, idle CPU), 'report' (a memory check: the tuner's prediction only),
+    'own' (a direct child of this launcher writing into an exact-zoom folder: its exact zoom)."""
     if _SERVE.search(args):              # a server is a server, the launcher's own included (its memory counts)
         return "server"
     if _REPORT_RUN.search(args):
@@ -2000,9 +1882,7 @@ SELF_CAFFEINATED = ("run_ps_dtfe.sh", "run_dtfe.sh", "run_ps_pipeline.sh")
 
 def keep_awake_argv(step_argv, pid: int) -> list[str] | None:
     """The command that keeps the Mac awake while process 'pid' (a step the launcher started) lives, or None
-    (not macOS, no caffeinate, or a run script that holds its own assertion). A Custom-tab run executes the
-    binary directly, a long analysis or a multi-hour download from the Data tab has no script that
-    caffeinates, and an idle-sleeping Mac suspends them (wget loses its connection)."""
+    (not macOS, no caffeinate, or a run script that holds its own assertion)."""
     if sys.platform != "darwin" or not pid or any(Path(str(a)).name in SELF_CAFFEINATED for a in step_argv):
         return None
     exe = shutil.which("caffeinate")
@@ -2015,10 +1895,7 @@ _SWAP = re.compile(r"total = ([\d.]+)([MG])\s+used = ([\d.]+)([MG])")
 
 def memory_status() -> dict:
     """{'free_gb', 'swap_used_gb', 'swap_total_gb'} of this machine now (a value None when the OS will not say;
-    the launcher's status strip). Free = what the other programs leave: DTFE_FREE_GB when set (as for
-    the C++ programs and the void helper), else macOS vm_stat's free + inactive + speculative + purgeable pages
-    (void_outlines.available_bytes' rule), else Linux MemAvailable. Swap: macOS sysctl vm.swapusage, Linux
-    SwapTotal - SwapFree. Two short subprocess calls on a Mac: call it off the GUI thread."""
+    the launcher's status strip)."""
     out = {"free_gb": None, "swap_used_gb": None, "swap_total_gb": None}
     if os.environ.get("DTFE_FREE_GB"):
         try:
@@ -2112,11 +1989,8 @@ def _etime_seconds(text: str) -> float | None:
 
 def running_now(progress_files=(), procs: dict | None = None) -> list[dict]:
     """The runs going on this machine, wherever they were started (nohup, a terminal script, this launcher), for
-    the launcher's 'Running now' panel: one dict per live DTFE / PS-DTFE run (dtfe_processes()
-    'runs') with its pid, program, resident GB, elapsed seconds (ps), what its command line says (parse_run_args:
-    simulation, snapshot, output root) and its progress sidecar '<output root>.runlog.progress' (C1; read with
-    results.read_progress), plus one 'died' entry per leftover sidecar in progress_files whose pid is gone.
-    Keys: pid, name, gb, elapsed_s, sim, snap, output, progress (dict or None), state ('running' | 'died')."""
+    the launcher's 'Running now' panel: one dict per live DTFE / PS-DTFE run (dtfe_processes() 'runs') with
+    its pid, program, resident GB, elapsed seconds (ps)."""
     import results as R
     procs = procs if procs is not None else dtfe_processes(0.0)
     pids = [pid for pid, _n, _g in procs.get("runs", [])]

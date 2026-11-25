@@ -1,44 +1,4 @@
-"""The void population of several boxes (TNG50 / TNG100 / TNG300) side by side at ONE physical smoothing length.
-
-At the production smoothing (10 cells) every box smooths on its own scale, and the cross-box differences of the void
-statistics are that scale (at sigma = 2.1625 Mpc TNG100 and TNG300 agree on the distinct-void density to
-0.3% and on R_v to 3% at z = 0, 7-11% at z = 0.5-1, the resolved fraction to 2 points). This figure makes
-the comparison at a common sigma in Mpc (--smooth-mpc, default 2.1625: 10.0002 TNG100-3-Dark cells, a hair above
-its production 10 cells = 2.16245 Mpc, config.CROSSBOX_SMOOTHING_MPC; the minima footprint follows it in
-each box, pipeline.set_smoothing). The definitions are the per-box scripts':
-
-  * resolved      : well_resolved (config.ELLIPSOID_CUT_RULES, in Mpc via pipeline.ellipsoid_cuts_mpc)
-  * R_v           : the measured radius (catalog.r_v_mpc: where the smoothed delta around the minimum rises to 0)
-  * distinct      : the resolved voids with an R_v, deepest first, none inside a deeper one's region
-                    (catalog.distinct_mask) -- plot_void_population.snapshot_stats, the abundance sample
-  * shapes        : the BBKS ellipticity e and prolateness p of the minima (the BBKS-valid sample of
-                    plot_void_population.bbks_valid), medians with bootstrap 68% intervals,
-                    against the minima of a Gaussian random field with the same smoothed linear spectrum
-                    (dtfelib.theory, BBKS 1986 eqs 7.6, A14, A15): at each void's own height nu = -delta_min /
-                    sigma_0(z) (gamma and sigma_0 of the linear EH98 spectrum smoothed with this sigma), and over all
-                    minima (the same for any spectrum)
-  * profiles      : profiles.void_profiles of the distinct resolved voids in r / R_v, stacked over ONE common R_v
-                    range in Mpc (--rv-range, in smoothing lengths: 2.5-5 sigma by default); the wrap rule
-                    (3 R_v <= L/2) leaves a small box only its smaller voids, said in the legend
-
-Every box runs in its OWN process (DTFE_SIM=<sim>: config's frame -- cell, box -- is fixed at import), writing
-crossbox_<sim>_<method>_s<sigma>Mpc.npz; this process draws them together. Catalogues come from (and go into) the
-pipeline cache under the sigma's own namespace, so a rerun is fast; --replot only redraws from the .npz files.
-
-Outputs (figures/void_crossbox/):
-  crossbox_<method>_s<sigma>Mpc_z<z>.png   top: resolved fraction, distinct voids per (100 Mpc)^3 (beside all minima
-                                           and the minima with an R_v: the gate, not formation, sets the rise and
-                                           fall) and median R_v against z; middle, at z: dn/dlnR_v and the stacked
-                                           density and v_r; bottom: e and p against z with the Gaussian-field
-                                           expectation, and the e distribution at z against it
-  crossbox_<method>_s<sigma>Mpc.txt        the numbers per box and snapshot
-  crossbox_<sim>_<method>_s<sigma>Mpc.npz  one per box (the worker's output)
-
-Examples:
-  python3 plot/plot_void_crossbox.py                                  # the three -3-Dark boxes, sigma 2.1625 Mpc
-  python3 plot/plot_void_crossbox.py --sims TNG100-3-Dark TNG300-3-Dark --smooth-mpc 3 --redshifts 0 1
-  python3 plot/plot_void_crossbox.py --replot                         # redraw from the saved .npz files
-"""
+"""The void population of several boxes (TNG50 / TNG100 / TNG300) side by side at ONE physical smoothing length."""
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
 import os
@@ -63,7 +23,7 @@ DEFAULT_RV_RANGE = (2.5, 5.0)         # the common R_v range of the stacks, in s
 Z_TOLERANCE = 0.05                    # a box's snapshot counts as 'at z' within this
 FIGURE_ROOT = Path(config.figures_path("void_crossbox"))
 PER_VOLUME = 1.0e6                    # densities per (100 Mpc)^3
-SHAPE_CI = (16, 84)                   # the bootstrap interval of the e, p medians (68%)
+SHAPE_CI = (16, 84)
 
 
 def median_ci(x, n_boot=200, seed=0):
@@ -109,9 +69,8 @@ def worker_path(out_dir: Path, sim: str, method: str, sigma_mpc: float) -> Path:
 def measure(sim, method="ps", prefix=None, data_root=None, zs=DEFAULT_Z, rv_range_sigma=DEFAULT_RV_RANGE,
             points=None, n_boot=200, log=print) -> dict:
     """Every snapshot of 'sim' with grids: plot_void_population.snapshot_stats (counts, R_v of the distinct
-    resolved voids); at the snapshots nearest 'zs' (within Z_TOLERANCE) the profiles of the distinct resolved voids
-    in r/R_v, stacked over rv_range_sigma x sigma. Uses the smoothing as set NOW (pipeline.set_smoothing) and
-    config's frame, which must be this sim's. Returns flat arrays for an .npz."""
+    resolved voids); at the snapshots nearest 'zs' (within Z_TOLERANCE) the profiles of the distinct resolved
+    voids in r/R_v, stacked over rv_range_sigma x sigma."""
     from dtfelib import pipeline, catalog, profiles, use_data_root, require_data_root, snapshot_ladder
     from dtfelib import groupcat as gc
     import plot_void_population as pop
@@ -325,7 +284,7 @@ def draw(results, z_target, args, out_dir) -> Path:
             axes[0, 1].plot(z[ok], (np.asarray(r["n_rv_all"], float) / vol * PER_VOLUME)[ok], "-.", lw=0.8, color=c)
         pc = np.asarray(r["r_v_pct"], float)
         axes[0, 2].plot(z[ok], pc[ok, 1], "o-", ms=4, color=c, label=lab)
-        for q in (0, 2):                           # the 16/84% as thin lines: three overlapping bands hid the medians
+        for q in (0, 2):
             axes[0, 2].plot(z[ok], pc[ok, q], "--", lw=0.8, color=c, alpha=0.7)
     axes[0, 0].set_ylabel("resolved fraction of the minima")
     axes[0, 1].set_ylabel(r"distinct voids per $(100\,$Mpc$)^3$")
@@ -404,7 +363,6 @@ def draw_shapes(results, z_target, row, colors):
     grf_all = (np.asarray(results[0]["grf_all_e_pct"], float), np.asarray(results[0]["grf_all_p_pct"], float))
     for ax, key, lab, g in ((row[0], "e", "BBKS ellipticity e (median)", grf_all[0]),
                             (row[1], "p", "BBKS prolateness p (median)", grf_all[1])):
-        # the median only: the field's 16-84% of single minima (e 0.13-0.25) would dwarf the medians' intervals
         ax.axhline(g[1], color="0.5", lw=0.9, label="Gaussian field, all minima (median)")
         for r in results:
             c, lab_ = colors[r["sim"]], short(r["sim"])

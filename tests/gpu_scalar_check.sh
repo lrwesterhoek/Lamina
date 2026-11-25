@@ -1,17 +1,6 @@
 #!/bin/bash
-# GPU scalar-field parity check, both binaries: the 'scalar_a' and 'scalarGradient_a' grids of a
-# per-particle dataset ('--scalar-dataset', a smooth function of position written into the test
-# snapshot) must agree between the CPU and the GPU deposit the way the velocity and its gradient do.
-# Builds with ONE scalar component (the default, NO_SCALARS=1): the GPU declines other builds.
-#   DTFE    sampled '_a' interpolation (--sampled): the item kernel (default), the per-tet kernel (DTFE_GPU_ITEMS=0)
-#   PS-DTFE the sampled deposit (nSub 2) and the exact deposit (--exact)
-# Tolerance = the parity class of the velocity fields on the same box: values (scalar, density,
-# velocity) mean 1e-3 and per-cell 5e-2 beyond a 1e-3 fraction; GRADIENTS at caustics are a
-# float-sensitive quantity (the inverse edge matrix of a tetrahedron near a fold amplifies the
-# float rounding of its edges by |rows|^3/|det|, up to ~1e6 at the degeneracy cut), so the two
-# gradients are held to the phase-space VELOCITY gradient's class:
-# the mean of |g| within 5e-2 (3-4% on this folded box, far less on standard DTFE), per-cell
-# 5e-2 beyond a 2e-3 fraction. The scalar gradient comes out tighter than the velocity gradient.
+# GPU scalar-field parity, both binaries: 'scalar_a' and 'scalarGradient_a' of a per-particle dataset must agree between
+# CPU and GPU deposit the way velocity and its gradient do. One scalar component only (NO_SCALARS=1: the GPU declines other builds).
 # Skipped (exit 0) when the binaries carry no GPU stamp. --no-build is accepted and ignored.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,8 +30,7 @@ PYEOF
 G=32
 FIELDS=(--field density_a velocity_a gradient_a scalar_a scalarGradient_a --scalar-dataset Phi)
 # the kernel's gradient is what this suite compares: the deposit's own route (the face gradient is the standard
-# binary's default, and PS-DTFE's for its exact run below, whose velocity moments are volume-weighted as in every
-# PS-DTFE run); the environment switch, which both binaries read, keeps the deposit's own gradient in every run
+# binary's default, and PS-DTFE's for its exact run below.
 export DTFE_FACE_GRADIENT=0
 # one domain for both runs: on <= 8 cores the time-aware tuner splits the CPU reference, and a split sampled deposit
 # differs from one domain by ~4e-3, which would fail this suite on Linux

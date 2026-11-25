@@ -1,15 +1,6 @@
 """MainWindow's opt-in Advanced settings (AdvancedMixin): the View menu's switch 'Advanced Settings', off by default
 and remembered under one settings key (ADVANCED_SETTING), and while it is on a folded group 'Advanced' on each run
-tab (Grids, Custom snapshot, Pipeline) after the tab's own groups. Its rows are the settings the code otherwise
-chooses (runspec.ADVANCED_KEYS: controls the two quality modes removed), each on Automatic first with a grey note
-of what Automatic gives the job now; a tab whose job has an override says so on a grey line under its 'Runs on' line.
-
-Off is the two-mode launcher: the groups, their rows and the grey lines are built when the switch goes on and
-deleted when it goes off, which puts the three tabs' jobs back to Automatic (a queued job keeps what it was queued
-with). A job loaded with overrides while it is off turns it on. Every rule -- which rows a job shows, what a row
-offers, what Automatic gives, which override is passed -- is runspec's (advanced_rows, advanced_choices,
-automatic_text, advanced_refused); this module only shows them. The names app.py defines are read through _app,
-imported last (see app_tabs.py)."""
+tab (Grids, Custom snapshot, Pipeline) after the tab's own groups."""
 
 from __future__ import annotations
 
@@ -25,8 +16,6 @@ ADVANCED_SETTING = "advanced_settings"     # the launcher's settings key of the 
 ADVANCED_TITLE = "Advanced"
 ADVANCED_INTRO = ("For tests and special cases. Automatic lets the code choose, which is right for almost every "
                   "run.")
-# each row's tooltip (at most two lines) and What's This, from the texts of the controls before the two modes and the
-# programs' own help; no measured number
 ADVANCED_TIP = {
     "gpu": ("CPU, GPU, or CPU + GPU (PS-DTFE Exact: a split run's partitions shared between the two).\n"
             "Automatic: the program picks the device; 'Check memory' names its pick.",
@@ -106,9 +95,8 @@ class AdvancedMixin:
 
     def _set_advanced(self, on: bool, open_now: bool = False):
         """The switch's state, the menu item and the groups, without reading, refreshing or saving the jobs (a load
-        calls this midway); the settings key is written only by a window that remembers. open_now: the switch has
-        just been turned on (by the user or a load), so the groups open; a window that starts with it on shows each
-        group as it was left (open the first time)."""
+        calls this midway); the settings key is written only by a window that remembers. open_now: the switch
+        has just been turned on (by the user or a load), so the groups open."""
         self.advanced_on = on
         if self.remember:
             self.settings.setValue(ADVANCED_SETTING, "true" if on else "false")
@@ -128,9 +116,7 @@ class AdvancedMixin:
                 g.set_open(True)
 
     def _load_advanced(self):
-        """The end of _load_into_widgets: the jobs' overrides into the rows. A job loaded with overrides while the
-        switch is off (a remembered job, a run's settings, a job given to the window) turns it on, and the status line
-        says so; self._advanced_loaded is then how many overrides that was (0: no switch)."""
+        """The end of _load_into_widgets: the jobs' overrides into the rows."""
         self._advanced_loaded = 0
         if not self.advanced_on:
             n = sum(len(rs.job_advanced(self._tab_spec(tab))) for tab in RUN_TABS)
@@ -159,9 +145,7 @@ class AdvancedMixin:
     def _build_advanced_tab(self, tab: str):
         """The tab's Advanced group, after its own groups (before the column's closing stretch): the grey first line,
         then a row per override key of the tab's job class (runspec.advanced_keys), shown where the job takes it
-        (_sync_advanced_tab); and the grey 'Advanced: ...' line under the tab's 'Runs on' line. Whether the group is
-        open is kept as the other folded groups' is, under its own key (not the '<tab>.advanced' of the launcher
-        before the two modes)."""
+        (_sync_advanced_tab); and the grey 'Advanced: ...' line under the tab's 'Runs on' line."""
         spec = self._tab_spec(tab)
         g = Collapsible(ADVANCED_TITLE, f"{tab}.advanced_settings", self._section_settings(),
                         lambda t=tab: self._advanced_summary(t), start_open=True)
@@ -227,11 +211,7 @@ class AdvancedMixin:
 
     def _sync_advanced_tab(self, tab: str):
         """A tab's rows after a change of its job: shown where the job takes the setting (runspec.advanced_rows) or
-        while it holds a value (so it can be set back); each row's choices and value; its grey note -- on Automatic
-        what Automatic gives now (the device: the CPU on a build without the GPU, else the program's pick, named once
-        a memory check of these settings reported it, self.mem_results), else why the value is not passed, if it is
-        not. The samples row is greyed under Exact (it uses none) unless it holds a value. Then the grey
-        'Advanced: ...' line and the summary."""
+        while it holds a value (so it can be set back); each row's choices and value."""
         spec = self._tab_spec(tab)
         g, rows, line = self.adv_boxes[tab], self.adv_rows[tab], self.adv_lines[tab]
         adv = rs.job_advanced(spec)

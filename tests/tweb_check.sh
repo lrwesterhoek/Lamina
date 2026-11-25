@@ -1,32 +1,7 @@
 #!/usr/bin/env bash
-# T-web (tidal-tensor classification, '--field tweb') correctness check.
-#
-# The T-web solves Poisson's equation for the density contrast on the grid by FFT and classifies each
-# cell by the eigenvalues of the tidal tensor T_ij = d_i d_j phi. Two exact properties are tested:
-#  A) the TRACE: T_xx + T_yy + T_zz = laplacian(phi) = delta for ANY density field, so the three
-#     eigenvalues of every cell sum to its delta (the k = 0 mode is zero on both sides). Both binaries.
-#  B) a field that depends on x ALONE has T_xx = delta and every other component zero, so each cell's
-#     eigenvalues are {delta, 0, 0}. The phase-space density of a 1D pancake on an UNJITTERED lattice is
-#     such a field: every tetrahedron in a slab between two lattice planes has the same density, and
-#     the slab's faces map to planes x = const. The EXACT deposit (--exact) integrates that
-#     field over the cells, so each x-plane of the grid is uniform too (the sampled deposit spreads a
-#     tetrahedron's mass over the samples it happens to hold, which is not); the check verifies it.
-#  C) the classification is the number of eigenvalues above --lambda-th (cells within rounding of the
-#     threshold are left out).
-# The 2D builds compute it too (two eigenvalues, {delta, 0} for the 1D field): the same
-# three checks run on a 2D pancake with PS-DTFE-2d and DTFE-2d when they are built (single precision), and
-#  D) on 2D crossed waves (a large xy cross term) the eigenvalues equal an independent numpy FFT solve of
-#     the same density grid (full axis: Nyquist negative; half axis: positive).
-#  L) the threshold's default, 0.3 (the production value): a 3D run without '--lambda-th' writes every output of
-#     the same run with '--lambda-th 0.3' byte for byte, and its classes differ from those of '--lambda-th 0' (on
-#     this pancake some cells lie between the two thresholds), both binaries (standard DTFE with STD=1), one
-#     triangulation ('--partition 1'); a SKIP line when TH is not 0.3.
-#
-# Usage: tests/tweb_check.sh [--no-build]
-#   GRID=1300 STD=0 STRICT=0 PS_ARGS="--subsamples 1" EXTRA="--scratch-dir /path" TWEB_TMP=/path \
-#       tests/tweb_check.sh --no-build                 -- the >2^31-cell run: the exact deposit would take
-#   an hour there, and the sampled one is not exactly 1D, so STRICT=0 reports the premise and (B) as
-#   information; (A) and (C) stay exact. The checks stream the grids plane by plane, at any size.
+# T-web ('--field tweb') correctness: A the trace equals delta   B a 1D field has eigenvalues {delta,0,0}   C classification by --lambda-th
+#   D 2D crossed waves against a numpy FFT solve   L the default threshold 0.3 equals '--lambda-th 0.3'
+# Usage: tests/tweb_check.sh [--no-build]   (GRID=1300 STD=0 STRICT=0 ... runs the >2^31-cell case; A and C stay exact)
 
 set -euo pipefail
 
@@ -56,9 +31,8 @@ if [ "${1:-}" != "--no-build" ] && ! precision_double; then
     make DTFE $(cat o/.build_mode 2>/dev/null || true) >/dev/null
 fi
 
-# single-stream (A*k = 0.8, max delta = 4): at a caustic a slab can be thinner than float rounding, and
-# a single-precision build then keeps some of its flat tetrahedra and drops others -- a plane is no
-# longer uniform there, which is the deposit's float limit, not the T-web's
+# single-stream (A*k = 0.8): at a caustic a slab can be thinner than float rounding, so a single-precision build
+# keeps some flat tetrahedra and drops others: the deposit's float limit, not the T-web's
 echo ">> generating an unjittered 1D pancake (single-stream) ..."
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAP}" --n "${N}" --box "${BOX}" \
     --amplitude-factor 0.8 --jitter-frac 0 >/dev/null
@@ -111,9 +85,8 @@ else
     else echo "   SKIP  2D (no ${PS_BIN}-2d / ${DTFE_BIN}-2d: make DTFE PS-DTFE DIM=2)"; fi
 fi
 
-# L) the threshold's default against '--lambda-th 0.3' and '--lambda-th 0': three runs per binary, each one
-# triangulation, so that the two compared runs make the same plan; the results go to the python checks below as
-# '<1 or 0>|<text>' lines
+# L) the threshold's default against '--lambda-th 0.3' and '--lambda-th 0': three runs per binary on one triangulation
+# (the same plan); the results go to the python checks below as '<1 or 0>|<text>' lines
 LCHK=()
 if [ "${TH}" = "0.3" ]; then
     echo ">> L: no '--lambda-th' (the default) against '--lambda-th 0.3' and '--lambda-th 0' ..."
@@ -200,9 +173,8 @@ def verify(g, dim, ps, stdpre):
   if strict:
     check(sep <= tol, f"{tag}B PS-DTFE: eigenvalues are {{delta{zeros}}} (max error {sep:.3g} <= {tol:.2g})")
   else:
-    # The off-axis parts of the tidal tensor are Riesz transforms of delta's in-plane noise (|k_i k_j / k^2|
-    # <= 1, so by Parseval their rms cannot exceed the noise's): a correct transform keeps the rms
-    # deviation from {delta, 0, 0} at the noise's level, a broken one makes it of the order of delta itself.
+    # The off-axis tidal-tensor parts are Riesz transforms of delta's in-plane noise (|k_i k_j / k^2| <= 1): a correct
+    # transform keeps the rms deviation from {delta, 0, 0} at the noise's level, a broken one at delta's.
     check(rms_err <= 2. * rms_noise + 1e-5,
           f"{tag}B' PS-DTFE: rms deviation from {{delta{zeros}}} {rms_err:.3g} <= 2 x the rms in-plane noise of delta "
           f"{rms_noise:.3g} (the sampled deposit is not exactly 1D; max deviation {sep:.3g}, max plane spread {spread:.3g})")

@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for the void FATE stack: dtfelib.lagrangian (members, links, classes), plot_void_fate.py
-(census, table, figure, the link cache) and plot_void_tracking.py (the tracker on synthetic merger trees, and its
---link particles mode).
-
-Two tiers:
-  * SYNTHETIC (always run, CI): particles and catalogues built here, a SubLink-like tree object.
-  * DATA-BACKED (DTFE_DATA_ROOT, else skipped): one chunk of the real TNG50-3-Dark combined snapshot.
-
-Usage:  python3 tests/py_fate_test.py            (exit 0 = pass)
-"""
+"""Tests for the void FATE stack: dtfelib.lagrangian (members, links, classes), plot_void_fate.py (census, table,
+figure, the link cache) and plot_void_tracking.py.
+Usage:  python3 tests/py_fate_test.py            (exit 0 = pass)"""
 
 import sys
 from pathlib import Path
@@ -328,11 +321,8 @@ def t_fate_census_script():
 
 
 def _pool_universe(seed=7):
-    """Four followed progenitors (A) and a later snapshot (B) with two FOLLOWED voids S0, S1 and two UNFOLLOWED
-    minima of its pool, U0 and U1 (U1 a sub-minimum overlapping S1): P0 -> inside S0 (survive); P1 -> inside U0
-    only (a census whose descendants are the followed voids alone would call it a vanish; it
-    lives on, 'unresolved'); P2 -> into no sphere at all (vanish: no void receives the thresholds); P3 -> wholly in
-    U1 and most of it in S1 (the followed void is preferred: survive)."""
+    """Four followed progenitors (A) and a later snapshot (B) with two FOLLOWED voids S0, S1 and two UNFOLLOWED minima
+    of its pool, U0 and U1 (U1 a sub-minimum overlapping S1): P0 -> inside S0 (survive); P1 -> inside U0 only."""
     rng = np.random.default_rng(seed)
     ca = np.array([[0.2, 0.2, 0.2], [0.4, 0.6, 0.2], [0.6, 0.4, 0.8], [0.8, 0.8, 0.8]])
     ra = np.full(4, 0.04)
@@ -425,11 +415,9 @@ def t_void_pool():
 
 
 def t_membership_cap():
-    """The membership spheres are capped at FATE_MAX_SIGMA (15) smoothing lengths -- the R_v search reaches
-    24, the census keeps the spheres its numbers come from: a followed void and a pool minimum whose
-    radius exceeds the cap get the capped sphere (an explicit sigma, or config's), one below it keeps its radius, the
-    particles between the cap and R_v are no members, the catalogue's R_v is untouched, and a link cache made with an
-    uncapped sphere is relinked while one the cap does not change is served."""
+    """The membership spheres are capped at FATE_MAX_SIGMA (15) smoothing lengths -- the R_v search reaches 24, the
+    census keeps the spheres its numbers come from: a followed void and a pool minimum whose radius exceeds the cap
+    get the capped sphere."""
     import config
     from dtfelib import lagrangian as L
     n, sig = 128, 2.0
@@ -486,10 +474,9 @@ def _link_arrays_equal(x, y):
 
 
 def t_stream_identical():
-    """link_stream (the census's descendant side, never holding the pool's member pairs) gives the SAME
-    links as link(a, void_members(pool)) -- prog, desc, count, members, dtypes -- for two progenitor sets at once,
-    across chunks and the wrap, with and without 'exclusive'; the followed members it keeps are exactly
-    void_members(pool).sample(); and its peak allocation is far below holding the pool (tracemalloc)."""
+    """link_stream (the census's descendant side, never holding the pool's member pairs) gives the SAME links as
+    link(a, void_members(pool)) -- prog, desc, count, members, dtypes -- for two progenitor sets at once, across
+    chunks and the wrap, with and without 'exclusive'."""
     import tracemalloc
     from dtfelib import lagrangian as L
     rng = np.random.default_rng(11)

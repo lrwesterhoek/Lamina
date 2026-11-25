@@ -1,7 +1,5 @@
 """The Data tab's job, moved out of runspec.py: DataSpec (scripts/download_snapshots.sh for snapshots, group
-catalogues, merger trees and ICs, then python/tools/merge_HDF5.py), with the TNG API key test and the on-disk
-state of a simulation's snapshots and whole-simulation products. runspec re-exports all of it and is the module to
-import; this one reads runspec's own names through it at call time (_rs.API_KEY_FILE, which a test redirects)."""
+catalogues, merger trees and ICs, then python/tools/merge_HDF5.py)."""
 
 from __future__ import annotations
 

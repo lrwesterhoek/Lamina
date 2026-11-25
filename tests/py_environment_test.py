@@ -1,16 +1,6 @@
 #!/usr/bin/env python3
-"""Tests for the void-environment classification and the caustic skeleton's control.
-
-  * SYNTHETIC (always run): the enclosed contrast against analytic profiles; void-in-cloud / void-in-void on a
-    top-hat grid with and without a compensating shell, the wrap rule; classify_catalog's sample; the figure
-    script plot_void_environment.py end to end on a stubbed pipeline (its files, the tracking panel by type);
-    skeleton.filter_components (size and mass thresholds), the random-sphere null and its z-scores;
-    plot_caustic_skeleton's null text and option tags.
-  * DATA-BACKED (DTFE_DATA_ROOT; skipped with a note without it): TNG100-3-Dark z = 0 classified in a fresh interpreter
-    (DTFE_SIM sets the frame), a void-in-cloud fraction strictly between 0 and 1.
-
-Usage:  python3 tests/py_environment_test.py            (exit 0 = pass)
-"""
+"""Tests for the void-environment classification and the caustic skeleton.
+Usage:  python3 tests/py_environment_test.py            (exit 0 = pass)"""
 
 import io as _io
 import os

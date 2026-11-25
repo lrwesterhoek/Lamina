@@ -1,7 +1,5 @@
-// Part of src/CGAL_triangulation/ps_interpolation.cc, inside its #ifdef PHASE_SPACE: included once, in order, by
-// that file and compiled only as part of its object, never alone.
-// The pass's setup: the sub-grid box, the sample positions, the mass audit's count, the moment grids, the GPU's
-// eligibility (GPU 3D builds), the debug self-checks and the fixed-point units (psCpuFixedUnits).
+// Part of ps_interpolation.cc (included in order inside its #ifdef PHASE_SPACE, never compiled alone). The pass's setup:
+// sub-grid box, sample positions, audit count, moment grids, GPU eligibility, debug self-checks, fixed-point units.
 
 // The pass's sub-grid box: the --grid-window box, or (psUseSubgrid) the Eulerian bbox of the partition's kept cells.
 static inline void psSubgridBox(PSPassCtx const &passCtx, size_t &psKeptCells)
@@ -46,12 +44,9 @@ static inline void psSubgridBox(PSPassCtx const &passCtx, size_t &psKeptCells)
             if (lo<0) { subOrigin[d]=0; subDims[d]=nGrid[d]; }                                 // no cells touched: keep full axis (harmless)
             else if (touched[d][0] && touched[d][nGrid[d]-1])
             {
-                // Touched planes reach both ends. Under --periodic that is the NORMAL case for
-                // any partition whose Eulerian footprint straddles the box seam, and keeping the
-                // full axis here would make every boundary-touching Lagrangian slab allocate
-                // the whole grid. The footprint is really a WRAPPED arc, so crop to it: its complement is the
-                // largest run of untouched planes, and because both ends are touched that run is
-                // strictly interior and a plain linear scan finds it.
+                // Touched planes reach both ends: the NORMAL case under --periodic for a partition straddling the box seam, and
+                // keeping the full axis would make every such slab allocate the whole grid. The footprint is a WRAPPED arc, so crop
+                // to it: its complement is the largest run of untouched planes, strictly interior, found by a linear scan.
                 int bestLen=0, bestStart=-1, curStart=-1;
                 for (int g=0; g<(int)nGrid[d]; ++g)
                 {
@@ -240,11 +235,9 @@ static inline void psAllocMoments(PSPassCtx const &passCtx, bool const haveVel, 
 }
 
 #if defined(PS_GPU) && NO_DIM==3
-// Clears tryMetal (with a warning) for a pass the GPU cannot deposit: cusps, a multi-component scalar, 2^32 cells.
-// The program's pick of the device (User_options::gpuPathRuns, user_options.cc GPU_PATH_BUILT for this guard's
-// builds) never picks the GPU where the options already tell (cusps, the scalar); what only the pass can tell (the
-// triangulation's cells, the cells of the sub-grid it deposits: a partition's crop, a window, one domain's whole grid)
-// takes the CPU with the warning and a counted fall-back, for a picked GPU as for an asked one.
+// Clears tryMetal (with a warning) for a pass the GPU cannot deposit: cusps, a multi-component scalar, 2^32 cells. The
+// program's pick of the device never picks the GPU where the options already tell; what only the pass can tell (its cells,
+// the sub-grid it deposits) takes the CPU with the warning and a counted fall-back, for a picked GPU as for an asked one.
 static inline void psGpuEligible(PSPassCtx const &passCtx, size_t const subTotal, bool &tryMetal)
 {
     User_options &userOptions = passCtx.userOptions;
@@ -252,9 +245,8 @@ static inline void psGpuEligible(PSPassCtx const &passCtx, size_t const subTotal
     Field &field = passCtx.field;
 #endif
     size_t const noTotalCells = passCtx.noTotalCells;
-    // The A3/A4 indicators of --ps-caustic-cusps fit each near-fold tetrahedron over its vertex ring (a CGAL
-    // neighbour gather), which only the CPU deposit has: a GPU deposit would leave bits 7 and 8 unset in every cell
-    // it fills. So such a run deposits on the CPU.
+    // The A3/A4 indicators of --ps-caustic-cusps fit each near-fold tet over its vertex ring (a CGAL neighbour gather), which
+    // only the CPU deposit has: a GPU deposit would leave bits 7 and 8 unset. So such a run deposits on the CPU.
     if ( tryMetal && userOptions.psCausticCusps )
     {
         static std::atomic<bool> told{ false };
@@ -275,15 +267,11 @@ static inline void psGpuEligible(PSPassCtx const &passCtx, size_t const subTotal
         ++psGpuFallbacks;
     }
 #endif
-    // The kernels index cells with a 32-bit 'uint flat' (metal/ps_deposit.metal).
-    // Above 2^32 cells it wraps -- and because the buffers are LARGER than 2^32, the wrapped index
-    // is still in bounds: no crash, no OOB, just atomics landing in the wrong cells. Fall back to
-    // the CPU instead, mirroring the standard-DTFE guard in averaged_interpolation_1.cc. This is
-    // checked on subTotal, the only quantity that knows about the wrap-to-full-axis case above:
-    // the cap is on the PARTITION's sub-box, so a finer --partition can bring a big grid back
-    // under it. Uniform across field selections -- the moment offsets are already 64-bit. The cap is
-    // gpuCellCap (gpu_host.h: 2^32 cells; the test hook DTFE_TEST_GPU_CELL_CAP lowers it); the
-    // Delaunay cells' guard just below keeps its own 2^32.
+    // The kernels index cells with a 32-bit 'uint flat' (metal/ps_deposit.metal). Above 2^32 cells it wraps, and as the buffers
+    // are LARGER than 2^32 the wrapped index stays in bounds: atomics would land in the wrong cells silently. Fall back to the
+    // CPU instead (as the standard-DTFE guard in averaged_interpolation_1.cc). Checked on subTotal, the PARTITION's sub-box
+    // (a finer --partition can bring a big grid back under it); the cap is gpuCellCap (gpu_host.h: 2^32; the test hook
+    // DTFE_TEST_GPU_CELL_CAP lowers it).
     if ( tryMetal and noTotalCells > size_t(UINT32_MAX) )
     {   // the deferred tets are mapped back to their cells through 32-bit finite-cell ordinals
         MESSAGE::Warning warning( userOptions.verboseLevel );
@@ -336,11 +324,9 @@ static inline void psDebugDegreesCheck(PSPassCtx const &passCtx, bool const degr
     }
 }
 
-// Whether the bounds of the GPU extraction (fx.gpuBounds) stand in for the bound walk's after a GPU deposit: only
-// where the two are the same words. The extraction rounds the tet mass to float and the walk to Real, so a single
-// build only; and under the NaN test hook (DTFE_TEST_NAN_SHARE) the extraction's bound leaves the hooked tetrahedra's
-// mass out while the walk keeps it, so not then either. Everything else is the same code on the same tetrahedra
-// (psFilterCell with the window test, fx.tetBound per tet, blocks of 256 finite cells summed in block order).
+// Whether the bounds of the GPU extraction (fx.gpuBounds) stand in for the bound walk's after a GPU deposit: only where the two
+// are the same words. The extraction rounds the tet mass to float and the walk to Real, so a single build only; and under the
+// NaN test hook (DTFE_TEST_NAN_SHARE) the extraction's bound leaves the hooked tets' mass out while the walk keeps it.
 static inline bool psFxBoundsFromGpu(bool const metalDeposited, PSFxState const &fx)
 {
     return metalDeposited && fx.gpuBoundsValid && std::is_same<Real, float>::value && fixedShareTestNanEvery() == 0;
@@ -413,9 +399,8 @@ static inline void psCpuFixedUnits(PSPassCtx const &passCtx, PSGridsCtx const &g
     bool const massFxWanted = gridsCtx.massFxWanted, fxMomWanted = gridsCtx.fxMomWanted;
     PSFixedBounds walkBounds;
     bool walked = false;
-    // the pass's bounds, once per pass whoever asks first (the mass grid under --grid-window, the moment grids, the face
-    // sums): the bound walk -- or, after a GPU deposit, the sums its extraction already made over the same tetrahedra
-    // (fx.gpuBounds, where psFxBoundsFromGpu lets them stand in; only the face sums ask then), so no second walk runs
+    // the pass's bounds, once per pass whoever asks first (mass grid under --grid-window, moment grids, face sums): the bound
+    // walk, or after a GPU deposit the sums its extraction made over the same tets (fx.gpuBounds; only the face sums ask then)
     bool const boundsFromGpu = psFxBoundsFromGpu( metalDeposited, fx );
     auto bounds = [&]() -> PSFixedBounds const &
     {
@@ -424,14 +409,11 @@ static inline void psCpuFixedUnits(PSPassCtx const &passCtx, PSGridsCtx const &g
         return walkBounds;
     };
 
-    // The CPU deposits the whole pass (no GPU, or the GPU declined or gave up): its mass accumulator is allocated
-    // here, the density itself (the double build) or the fixed-point grid from zero (massFx).
-    // Its unit must hold the pass's mass before the loop sees a tet, so it comes from an upper bound found in one walk
-    // over the vertices: under --ps-vertex-mass the kept tets hold at most the vertices' total weight (the degrees
-    // count every kept tet); otherwise at most rho_bar times the vertices' Lagrangian bounding box (the cells tile
-    // their hull). The larger of the two, over by a factor of a few (padding, periodic copies): a bit or two of the
-    // 2^61..2^62 units. Deterministic (the triangulation's vertex order). --grid-window: the window's own total, B[DW]
-    // of the bound walk, which a GPU window deposit takes too (PSFixedUnits.massTotal): both deposit the same integers.
+    // The CPU deposits the whole pass (no GPU, or declined or gave up): its mass accumulator is allocated here, the density (double
+    // build) or the fixed-point grid from zero (massFx). Its unit must hold the pass's mass before the loop sees a tet, so it
+    // comes from an upper bound found in one walk over the vertices: under --ps-vertex-mass the vertices' total weight, else
+    // rho_bar times the vertices' Lagrangian bounding box; the larger of the two, deterministic. --grid-window: the window's own
+    // total, B[DW] of the bound walk, which a GPU window deposit takes too (PSFixedUnits.massTotal): both deposit the same integers.
     if ( !metalDeposited && field.density && !massFxWanted )
         quantities->density.assign( totalGrid, Real(0.) );   // the float (double build: double) accumulator
     else if ( !metalDeposited && field.density )
@@ -473,11 +455,9 @@ static inline void psCpuFixedUnits(PSPassCtx const &passCtx, PSGridsCtx const &g
             quantities->density.assign( totalGrid, Real(0.) );   // (no vertices / no mass: the float grid)
     }
 
-    // The CPU deposits the whole pass and the moment grids are to be fixed-point sums (fxg): their units
-    // need bounds of what the loop will deposit, before it deposits. No cheap vertex walk bounds the gradients or the
-    // Eulerian volumes, so they come from the bound walk above (fxBoundWalk: under --grid-window the window's tets
-    // only, as for the mass). DW is not accumulated when the mass grid is this pass's own
-    // fixed-point words (it becomes the density after the loop).
+    // The CPU deposits the whole pass and the moment grids are to be fixed-point sums (fxg): their units need bounds before the
+    // loop deposits. No cheap vertex walk bounds the gradients or volumes, so they come from the bound walk (fxBoundWalk; under
+    // --grid-window the window's tets only). DW is not accumulated when the mass grid is this pass's own words.
     if ( !metalDeposited && fxMomWanted )
     {
         bool any = false;
@@ -497,13 +477,10 @@ static inline void psCpuFixedUnits(PSPassCtx const &passCtx, PSGridsCtx const &g
             for (int g = 0; g < PS_FX_CPU_N; ++g)
                 if ( !( g == PS_FX_DW && massFxOn ) ) fx.ensureReal( g );   // (nothing selected: a no-op)
     }
-    // --face-gradient: the face sums' units, from the same bounds; their words (int64: the dynamic team's threads add in
-    // any order) for every cell of the pass. No unit (a bound that is not finite): the face gradient is off for the pass.
-    // Under a GPU deposit too: the words are then psFaceWalk's, one CPU walk over the kept
-    // tetrahedra after the device's deposit, and their units come from the bounds the extraction summed (bounds()
-    // above; the same sums as the walk's, so a GPU and a CPU deposit of one pass take the same face units). Where
-    // those do not stand in (a double build, the NaN test hook), the bound walk runs once more for them.
-    // (fx.faceWalked: the walk beside the GPU deposit took the units from those bounds and filled the words already.)
+    // --face-gradient: the face sums' units, from the same bounds; their int64 words for every cell of the pass. No unit (a
+    // bound that is not finite): the face gradient is off for the pass. Under a GPU deposit the words are psFaceWalk's and the
+    // units come from the bounds the extraction summed (same sums as the walk's); where those do not stand in (double build,
+    // NaN test hook) the bound walk runs once more. (fx.faceWalked: the walk beside the GPU deposit already filled the words.)
     if ( fx.face && !fx.faceWalked )
     {
         bool const units = psFaceUnits( fx, bounds(), totalGrid );

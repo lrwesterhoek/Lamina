@@ -1,45 +1,6 @@
-"""Stream multiplicity and caustic class by cosmic-web environment.
-
-A pure accumulation over the grids of one PS-DTFE output: for every class of the T-web or V-web
-(0 void, 1 wall, 2 filament, 3 node; any other label is reported as 'other'), the volume and mass
-fractions of the box and, WITHIN the class, the distribution of the stream multiplicity in both
-weightings, the mean multiplicity, and -- when the run wrote a 'caustic_class' grid (--ps-caustics) --
-the fold fraction and the distribution of the collapse multiplicity k (0 uncollapsed, 1 wall, 2
-filament, 3 node; 'none' = no collapse bit at all, a cell never deposited into). The fold is
-io.caustic_is_fold(caustic_class, streams=, hidden=): streams > 1 + tol, hidden-streams
-bit 1 or the mask's fold bits -- the geometric 'a folded tetrahedron overlaps the cell', exact for
-older caustic_class grids too, whose own fold bits are set per deposited sample and
-low. So the fold fraction of a class is its 'hidden multi' share plus every bin above 1 (and the rare
-empty cell with the hidden bit); the collapse bins are still per sample.
-
-'.streams' is a FLOAT (dtfelib.STREAM_TOL): the averaged 'a_streams' grid is a sub-sample MEAN, so a
-partly multi-stream cell reads 1.5 and the bins are named by THRESHOLD, not by a stream count:
-    empty         s < 1 - tol            fewer than one stream on average: no sub-sample saw one (a cell
-                                         the sampled deposit never reached, 0) or only some did (an averaged
-                                         2/3). Counted apart, never as single or multi-stream. How many there
-                                         are depends on the run: the TNG300 z=0 sampled run has
-                                         7.9% (mostly voids), the production TNG100-3-Dark 512^3 grids 12 cells.
-    single        |s - 1| <= tol and no hidden-streams bit 1
-    hidden multi  |s - 1| <= tol with the bit: multi-stream volume the count does not show (a fold
-                                         thinner than the sampling; velocity_single_stream masks it too)
-    1 < s <= 3, 3 < s <= 5, s > 5        (each with the tolerance on its lower edge)
-Mass weights are the density grid as stored (rho/rho_bar or the physical density: both are the cell
-mass up to one constant, which cancels in every fraction). The grids may be memmaps: the accumulation
-runs in slabs along axis 0, every grid sliced with the SAME [start:stop] (FieldSet.iter_slabs picks a
-thickness per dtype, so it is not used here): 256 MB of float32 per grid and slab, and add()'s temporaries
-(the float64 copies of the streams and the density, the int label arrays, the bincount indices) take
-about ten times that, so a run of any size stays within a few GB.
-
-    from dtfelib import webstreams as ws
-    table = ws.environment_table(fs.load("tweb", mode="memmap"), fs.load("streams", mode="memmap"),
-                                 hidden=fs.load("hidden_streams", mode="memmap"),
-                                 density=fs.load("density", mode="memmap"))
-    print(ws.table_text(table, "TNG100-3-Dark z=0, T-web"))
-
-The web grid is the caller's choice: plot_web_streams.py passes the MEAN-FIELD V-web of a PS output by default
-(fs.load("vweb", mean_field=True), the V-web standard DTFE stores), not the stored PS grid, whose
-<grad v> classes put the inverted fold streams in 'void' (dtfelib/io.py, the note above FIELDS).
-"""
+"""Stream multiplicity and caustic class by cosmic-web environment: for every T-web or V-web class (0 void, 1 wall,
+2 filament, 3 node) the volume and mass fractions and, WITHIN the class, the stream-multiplicity distribution and
+the fold / collapse fractions. '.streams' is a FLOAT (dtfelib.STREAM_TOL): bins are named by threshold; slabs along axis 0."""
 
 from __future__ import annotations
 

@@ -1,19 +1,7 @@
 #!/usr/bin/env python3
-"""Tests for the void-in-cloud criteria: the velocity criterion (net infall in the 2-3 R_v shell, the
-default), the smoothed Delta(<3 R_v) and the raw Delta(<2 R_v), and plot_void_environment.py's --criterion.
-
-  * SYNTHETIC (always run): the shell velocity of a linear (Hubble-like) flow against its analytic volume-weighted
-    mean, its sign and wrap rule; v_shell_norm in units of H(z) a R_v; three voids built so that the three criteria
-    disagree in a known way (types, vic_<criterion> columns, agreement); the refusals (a criterion without its grid,
-    an unknown criterion, a velocity without a redshift); classify_voids' default = the velocity on a stubbed
-    snapshot; the figure script end to end on a stubbed pipeline (default untagged, '_density_raw' tagged, the npz
-    keys, the figure text names the criterion and its shell, no option syntax in it).
-  * DATA-BACKED (DTFE_DATA_ROOT; skipped without it): TNG100-3-Dark z = 0 in a fresh interpreter (DTFE_SIM sets
-    the frame): the void-in-cloud fraction under every criterion strictly between 0 and 1, and the voids' infall fraction above
-    that of random centres with the same radii, whose mean v_shell_norm is ~0 (a periodic flow has no net flux).
-
-Usage:  python3 tests/py_vic_test.py            (exit 0 = pass)
-"""
+"""Tests for the void-in-cloud criteria: the velocity criterion (net infall in the 2-3 R_v shell, the default), the
+smoothed Delta(<3 R_v) and the raw Delta(<2 R_v)
+Usage:  python3 tests/py_vic_test.py            (exit 0 = pass)"""
 
 import io as _io
 import os
@@ -110,13 +98,9 @@ def t_velocity_norm():
 
 
 def _three_voids(n=64):
-    """Three voids, R = 4 cells, built so the criteria disagree in a known way:
-      A (16,16,16): a compensating ridge 4-8 (raw Delta(<2R) > 0), an underdense 8-12 shell (smoothed Delta(<3R) < 0),
-                    outflow 2-3 R                   -> raw S, smoothed R, velocity R
-      B (48,48,48): bare (rho 1 beyond R), infall    -> raw R, smoothed R, velocity S
-      C (16,48,48): a broad overdense 4-12 surrounding, infall -> S under all three
-    The grids handed in as both the raw and the smoothed density (the test checks the criteria's logic, not the
-    smoothing)."""
+    """Three voids, R = 4 cells, built so the criteria disagree in a known way: A (16,16,16): a compensating ridge 4-8
+    (raw Delta(<2R) > 0), an underdense 8-12 shell (smoothed Delta(<3R) < 0), outflow 2-3 R -> raw S, smoothed R,
+    velocity R B (48,48,48): bare (rho 1 beyond R), infall -> raw R, smoothed R, velocity S C (16,48,48)"""
     r = 4.0
     rho = _density(n, [((16, 16, 16), r, [(0, 4, 0.2), (4, 8, 1.6), (8, 12, 0.5)]),
                        ((48, 48, 48), r, [(0, 4, 0.2)]),
@@ -283,8 +267,7 @@ def t_environment_script():
             assert list(z["tracked_type"]) == ["R", "S"] and z["tracked_measure"][0] > 0 > z["tracked_measure"][1]
         assert titles and all("--" not in t for t in titles), titles
         assert all("v_r(2-3 R_v) < 0" in t for t in titles), titles
-        # the raw criterion: the UNTAGGED files (existing density_raw files keep their names), its own
-        # fraction, D (3 R_v beyond the wrap rule) now kept
+        # the raw criterion: the UNTAGGED files (existing density_raw files keep their names), its own fraction, D
         titles.clear()
         with redirect_stdout(_io.StringIO()):
             pev.main(args + ["--criterion", "density-raw"])

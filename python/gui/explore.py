@@ -1,17 +1,5 @@
 """The GUI's Explore tab: look at any run's grids without writing a plot script, and ask the
-snapshot's own tessellation what is at a point.
-
-  ExploreControls   the left pane: which output, field, component, axis and slice, colours,
-                    and the point-query server (a dtfelib.Estimator on the snapshot behind the
-                    output -- a composite of partitions, out of core, when one tessellation would
-                    not fit in memory)
-  ExploreView       the right pane: the slice (any size, scaled to fit), hover readout, colour
-                    bar, and the answer for a clicked point: its streams, each with its density,
-                    velocity and Lagrangian origin q(x)
-
-The data side (grids.py) is Qt-free; this module only draws and wires. Slices load and queries
-run on worker threads, so a 1024^3 z-plane or a tessellation build never freezes the window.
-"""
+snapshot's own tessellation what is at a point."""
 
 from __future__ import annotations
 
@@ -149,8 +137,8 @@ ZOOM_EXACT_TIP = ("Runs DTFE / PS-DTFE again on the dragged region, one slice ce
 
 def default_cache_dir(near: str) -> Path:
     """Where the query server keeps its tessellations: beside the data they come from (a TNG
-    output: the data root; your own file's output: its folder) -- that disk has the room, ~0.15 KB
-    per tessellation vertex -- unless it is iCloud Drive or read-only, else the user cache."""
+    output: the data root; your own file's output: its folder) -- that disk has the room, ~0.15
+    KB per tessellation vertex -- unless it is iCloud Drive or read-only, else the user cache."""
     root = Path(near)
     if str(near).strip() and root.is_dir() and "Mobile Documents" not in str(root.resolve()) \
             and os.access(root, os.W_OK):
@@ -161,9 +149,7 @@ def default_cache_dir(near: str) -> Path:
 
 def kept_index(frac: float, n: int) -> int:
     """The cell of an n-cell axis holding the place 'frac' of the box along it (0 = the low face, 1 = the high
-    one): the slice another output or redshift is shown at. A place on a cell face (a coarser grid's
-    cell centre on a finer one) takes the upper cell, whatever float rounding does; clamped to the grid, so the
-    same grid gives back its own index: (i + 0.5) / n -> i."""
+    one): the slice another output or redshift is shown at."""
     return int(min(n - 1, max(0, int(np.floor(float(frac) * n + 1e-9)))))
 
 
@@ -193,9 +179,8 @@ NO_SNAPSHOT_TEXT = "no snapshot known for this output (its input file is not bes
 
 def pts_plane(o, side, field: str, component: str):
     """(plane[u, v] for the map, the sidecar dict, the block factor) of a point-evaluated hi-res slice: the same
-    quantity as the grid field where both exist -- the dispersion as the trace sigma^2 (the grid's '.velDisp'),
-    the caustic as the fold flag, the velocity as its norm or a component; the shear and the vorticity as the
-    magnitudes PointPlane derives."""
+    quantity as the grid field where both exist -- the dispersion as the trace sigma^2 (the grid's
+    '.velDisp'), the caustic as the fold flag, the velocity as its norm or a component."""
     from dtfelib.io import PointPlane
     pp = PointPlane(o.root, side, redshift=o.redshift)
     name = PTS_FIELDS.get(field)
@@ -226,11 +211,8 @@ def pts_plane(o, side, field: str, component: str):
 # ==================================================================== workers
 def map_contours(plane, req: dict, vrange, compare: bool = False) -> dict | None:
     """The contour lines of a map (contours.map_lines on its plane, its colour range 'vrange' as shown, its scale,
-    colour map and the level slider's detail) with the canvas's paths of them ('paths', image pixels), their marks for
-    the colour bar ('marks') and, when the request names the canvas's layer size ('contour_layer':
-    ImageCanvas.layer_size) and this plane's image has the size it was for, the lines already stroked at it ('layer':
-    stroke_layer); None where contours do not apply. Run with the slice on the worker's thread, or for a zoom on the
-    GUI thread."""
+    colour map and the level slider's detail) with the canvas's paths of them ('paths', image pixels), their marks
+    for the colour bar ('marks') and."""
     detail = req.get("contour_detail", CT.DETAIL)
     if CT.why_not(req["field"], req["cmap"], compare):
         return None
@@ -353,15 +335,8 @@ class SliceWorker(QObject):
 # allocates the window only; the grid just sets the cell size)
 WINDOW_GRID_MAX = 1 << 20
 
-# The time an exact zoom of a phase-space run will take, from measured rates (TNG100-3-Dark,
-# 94M particles, from an external SSD, M1 Max): reading snapshot + initial conditions 16 s for 6.0 GB
-# (skipped when the snapshot's globals are recorded and every needed partition is cached); per BUILT
-# partition 3 s selecting its particles (all 94M scanned; a cached one skips it); loading a cached
-# 6.0M-vertex tessellation (a 0.88 GB file) at EST_LOAD_BPS: 8.4 s inflated on one thread, and the cache's
-# chunks, inflated on several, load 1.68x faster (measured 1.53 -> 0.91 s on the synthetic 2.1M-particle
-# partitions); ~1.6 s for its exact deposit; building one from scratch 26 s per 7M vertices (the production
-# run) plus writing it to the cache. The binary runs several partitions at a time (its auto-tuner, from the
-# free memory): the estimate assumes EST_CONCURRENCY.
+# The binary runs several partitions at a time (its auto-tuner, from the free memory): the estimate assumes
+# EST_CONCURRENCY.
 EST_READ_BPS = 3.8e8
 EST_SELECT_S_PER_PARTICLE = 3.2e-8
 EST_LOAD_BPS = 1.05e8 * 1.68
@@ -1106,8 +1081,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
     def refresh_if_vanished(self) -> bool:
         """Look for outputs again when one listed here has lost its grids (the Runs browser's Move to Trash, the
         Finder): neither the menus nor the figure grid may offer it, and its next slice read would fail with
-        FileNotFoundError. One stat per output; files opened by hand are the user's. True when it
-        looked again."""
+        FileNotFoundError. One stat per output; files opened by hand are the user's."""
         for _, o in self.outputs:
             if self._group(o) != GROUP_OPENED and o.files and not next(iter(o.files.values())).path.is_file():
                 self.refresh_outputs()
@@ -1135,9 +1109,8 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
 
     def _rebuild_snaps(self, select=None, prefer=None):
         """The second menu for the chosen simulation: its snapshots by redshift (earliest first, so
-        today is last and the default); for the custom snapshots and opened files, the runs by name.
-        'select' (an OutputSet) picks its entry; else 'prefer' (a key: the snapshot shown in another
-        simulation) when the menu has it."""
+        today is last and the default); for the custom snapshots and opened files, the runs by
+        name."""
         grp = self.sim_combo.currentData()
         outs = [o for _, o in self.outputs if self._group(o) == grp]
         c = self.snap_combo
@@ -1272,11 +1245,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
                     and np.allclose(a.length[:d], b.length[:d], rtol=1e-6, atol=1e-6))
 
     def _keep_for(self, prev, o) -> dict:
-        """The kept slice (self._keep) for showing output 'o' after 'prev'. It is kept for another output
-        or redshift of the same simulation (the boxes are comoving: the same place is the same comoving Mpc at every
-        redshift), and for another custom run or opened file in the same box; another simulation, or a box of
-        another size, starts afresh (the middle, the whole box). On the way out of a 3D output it takes that
-        output's slice when something set the index unseen, and the zoom window on screen."""
+        """The kept slice (self._keep) for showing output 'o' after 'prev'."""
         m = self._keep
         if m is not None and prev is not None and prev.dim == 3 and self._same(m.get("ref"), prev):
             axis, index = self.axis.currentIndex(), self.index.value()
@@ -1313,12 +1282,8 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         m.update(axis=self.axis.currentIndex(), frac=(self.index.value() + 0.5) / o.n)
 
     def _show_output(self, o):
-        """Show an output: its field list, info line, slice controls, and the first map. The same
-        output again (after a refresh: a new object for the same files) keeps the slice. Another output or
-        redshift of the same simulation keeps it too: the same axis, the same place in the box at the
-        nearest cell of this grid, and the zoom window where it can be shown (_carry_zoom); another simulation, or
-        a custom run or opened file in a box of another size, starts at the middle with the whole box (_keep_for).
-        A 2D output shows its one plane and leaves the kept slice to the next 3D output."""
+        """Show an output: its field list, info line, slice controls, and the first map. The same output again
+        (after a refresh: a new object for the same files) keeps the slice."""
         prev = self.current
         same_grid = self._same(prev, o) and prev.n == o.n and prev.dim == o.dim
         slice_now = self.index.value()
@@ -1638,9 +1603,6 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
             j = self.ps_gradient.findData(d.get("ps_gradient"))       # for every output too
             if j >= 0 and j != self.ps_gradient.currentIndex():
                 self.ps_gradient.setCurrentIndex(j)
-            # how the voids are drawn: 'void_as'; a state from before the ellipsoids were the default kept
-            # 'void_shape' for the 3D view alone, where spheres were the default everyone saved: only its 'ellipsoid'
-            # is read
             old = "ellipsoid" if d.get("void_shape") == "ellipsoid" else None
             shape = d.get("void_as") if "void_as" in d else old
             j = self.void3d_shape.findData(shape)
@@ -1651,9 +1613,6 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
             self.restore_state_3d(d)                                    # its style, perspective, opacity, detail
             if isinstance(d.get("contours"), bool):                     # the contour lines: for every output too
                 self.contours.setChecked(d["contours"])
-            # ... and how many: the slider's position (clamped to it; read as restore_state_3d reads its numbers), or
-            # in a state from before the slider was continuous its old stop ('contour_detail', rungs of the round
-            # steps) at the nearest position
             try:
                 if "contour_position" in d:
                     self.contour_detail.setValue(int(d["contour_position"]))
@@ -1698,11 +1657,8 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
 
     # ---------------------------------------------------------------- memory guard
     def heavy_ok(self, title: str, what: str, need_gb: float | None = None) -> bool:
-        """Before a memory-heavy action (a query server, an exact zoom, a void catalogue build): True at once when
-        no DTFE run is going (rs.dtfe_processes: never blocks then), or when one is but what this needs fits in what
-        is free less HEAVY_HEADROOM_GB (said in the status line); else ask, naming the runs with their resident
-        memory, what this needs and what is free now. The run's auto-tuner budgets only from the memory free
-        at its own start: a heavy action started later can make the run die of memory pressure."""
+        """The run's auto-tuner budgets only from the memory free at its own start: a heavy action started later can
+        make the run die of memory pressure."""
         runs = rs.dtfe_processes()["runs"]
         if not runs:
             return True
@@ -1834,9 +1790,8 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
 
     def _smooth3d_sync(self):
         """The Smoothing row's '3D' tick for the map shown: greyed out, its tooltip saying why, where the map is not a
-        slice of a stored 3D grid or the cube's smoothing would not fit in the free memory (grids.smooth3d_why); the
-        user's tick kept either way. Asked when the output, the field, the hi-res slice or the family changes (the
-        free memory is read then, not per layer)."""
+        slice of a stored 3D grid or the cube's smoothing would not fit in the free memory (grids.smooth3d_why);
+        the user's tick kept either way."""
         o, name = self.current, self.field.currentData()
         grad = self.ps_gradient.currentData() or G.PS_GRADIENT_DEFAULT
         why = G.smooth3d_why(o, name, grad, hires=bool(self.pts_combo.currentData())) if o is not None and name \
@@ -1859,8 +1814,7 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
     def _gradient_label(self, req: dict) -> str:
         """The field's name on the map for request 'req' (grids.field_label): a phase-space output's velocity
         derivatives say their family -- the mean field, the stored stream average, or (a hi-res slice: a point
-        evaluation) the stream average; with a comparison both outputs' families, A's and B's when they differ. The
-        note under the choice says when a phase-space map is not what the choice asks, and why."""
+        evaluation) the stream average; with a comparison both outputs' families, A's and B's when they differ."""
         o, name, grad = req["output"], req["field"], req.get("ps_gradient", "stored")
         ps = G.estimator_label(o) == "PS-DTFE"
         fam = o.gradient_family(name, grad)

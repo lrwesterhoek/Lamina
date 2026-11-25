@@ -1,41 +1,11 @@
 #!/usr/bin/env bash
-# The standard-DTFE Monte-Carlo cell average ('_a', method 1, '--sampled'; the exact average '--exact' is the default
-# since 2026-11-09, so every Monte-Carlo run below says '--sampled' or passes a sample count) is UNBIASED
-# and independent of the partition / thread / padding split. Mapping the same short Sobol prefix from CGAL's
-# vertex(0) into every tetrahedron is neither: the prefix does not average to the centroid and CGAL's vertex
-# slots follow density, so such '_a' grids lose 0.17-0.29% of their mass, and the realization changes by ~10-23%
-# rms per cell with the thread count or the partitioning. So the vertices are ordered by a hash of the cell's
-# vertex set and every sample is centred (averaged_interpolation_1.cc interpolateGrid_averaged_1: the comment on the
-# vertex order and the centring). Asserted on
-# demo/z0_64.gadget (262144 particles, z=0, tracked in the repo) at 64^3, --periodic --padding 12, density_a velocity_a:
-#   A1  box mean of '.a_den' within 1e-4 of 1 (measured +2.0e-5; double build +1.4e-5), and with '--subsamples 2'
-#       (8 points per cell: a tetrahedron under a sixth of a grid cell takes the minimum count, 8/6 + 1 = 2 in
-#       integer division, the shortest Sobol prefix; measured +2.4e-5, double build -1.3e-5). The bound holds for
-#       any count: the centred samples give every tetrahedron its exact mass and deposit it inside it
-#       (averaged_interpolation_1.cc interpolateGrid_averaged_1, the same comment)
-#   A2  the per-cell noise against --exact, rms(a - exact) / <exact>, is below 0.07 (measured 0.0625, both builds)
-#   A3  split invariance: --partition 2 2 2 --max-concurrent 1, OMP_NUM_THREADS=1 and --padding 20 against
-#       the default run: the cells agree to float summation order (measured 6e-6 relative), except where a
-#       sample lies EXACTLY on a cell face, which the region frames of two splits may round to different sides
-#       (the demo's float-kpc positions and the dyadic Sobol samples put one there in the double build: two
-#       cells 3e-3 apart); at most 1e-4 of the cells may differ by more than 1e-4, and the box sums agree to
-#       1e-6
-#   A4  the momentum: the box sum of '.a_vel' agrees with --exact's to 1e-4 of sum|v| (measured 1.2e-5)
-#   A5  GPU builds only (a GPU stamp in o/ or o_d/; SKIP otherwise, so CI's CPU-only build runs A1-A4): --gpu
-#       keeps the box mean within 1e-4 of 1 and matches the CPU grid like tests/dtfe_metal_check.sh (means
-#       to 1e-5 of the peak, at most 1e-3 of the cells more than 1e-3 apart: a sample on a cell face)
-#   A6  'velocityStd_a' only with '--average-method 2': method 1 (the default; with no flag a 'velocityStd_a' run is
-#       sampled, since the exact average cannot compute it), --exact and --cic stop
-#       at option parsing with exit 1 and their error (method 1's: 'You cannot use the averaging method 1 ...'),
-#       rather than leaving the grid empty and segfaulting in the sub-domain merge; '--average-method 2' writes a finite,
-#       non-negative '.a_velStd'
-#   A7  'dispersion' and 'dispersion_a' (PS-DTFE fields) stop at option parsing with exit 1 and the error that names
-#       PS-DTFE, in this binary and in ./DTFE-2d when it is built (not after the triangulation with an internal
-#       size error in 3D and a segfault in 2D)
-#   A8  '--average-method 3' (the methods are 1 and 2) stops at option parsing with exit 1 and the error of a bad
-#       method value, which names 1 and 2, and writes no grid, in this binary and in ./DTFE-2d when it is built
-# --exact itself does not sample (tests/run_tests.py's stored
-# regression covers it). About 20 s on the Mac (6 runs of 2-3 s, and A6's, A7's and A8's short ones).
+# The standard-DTFE Monte-Carlo cell average ('_a', '--sampled') is UNBIASED and independent of the partition, thread and padding split:
+# the cell's vertices are ordered by a hash of its vertex set and every sample is centred (averaged_interpolation_1.cc).
+# On demo/z0_64.gadget at 64^3, --periodic --padding 12, density_a velocity_a.
+#   A1  box mean of '.a_den' within 1e-4 of 1
+#   A2  the per-cell noise against --exact, rms(a - exact) / <exact>, is below 0.07
+#   A3  split invariance: --partition 2 2 2 --max-concurrent 1
+#   A4  the momentum: the box sum of '.a_vel' agrees with --exact's to 1e-4 of sum|v|
 # Usage: tests/dtfe_mc_average_check.sh [--no-build]   (--no-build is accepted and ignored: nothing is built)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

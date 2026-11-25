@@ -1,30 +1,5 @@
-"""What earlier runs left on disk, read back from their run logs -- for the GUI's Runs browser,
-its time estimates and its failure advice. Pure Python (no Qt): tests/py_gui_runspec_test.py.
-
-  scan_runs(root, extra_dirs)   every '<prefix>.runlog' under the data root (per-family layout)
-                                and under the custom-snapshot output directories -> RunRecord, with
-                                a later failed, killed or running attempt ('.runlog.failed/.partial')
-  stale_reasons(record)         what to know before using a run's outputs: an older version of the
-                                programs made them (RunRecord.older), they show a known problem
-                                (stream counts, no tetrahedron masses), the attempt after the run
-                                (attempt_note)
-  older_log(path)               run_ps_pipeline.sh's test of a run log, on its head (the Pipeline
-                                tab's prediction of what the script recomputes)
-  read_device(text, ...)        the device a run's header names (a run log's, a memory check's)
-  time_estimate(records, ...)   the median wall time of comparable earlier runs
-  diagnose(log, exit_codes)     plain-language causes and fixes for a failed job
-  void_status(records, root)    whether each run's void catalogue is cached, stale or absent (void_cache.py)
-  read_progress / is_run_file   the run-directory files of a run going (contract C1): the binary's
-                                '<prefix>.runlog.progress', the scripts' '.runlog.lock' and '<grid>.part.<pid>'
-                                are never outputs nor logs; a '.partial' with a live sidecar shows its progress
-  notify_command(title, text)   the OS command that shows a desktop notification
-
-A run log is the binary's own output, tee'd next to its outputs by run_ps_dtfe.sh, run_dtfe.sh
-and the GUI's custom-snapshot jobs, followed (macOS) by '/usr/bin/time -l'. The run-log contract:
-a run writes '<prefix>.runlog.partial'; exit 0 renames it onto '<prefix>.runlog' (the log of the
-grids on disk), a failure or stop onto '<prefix>.runlog.failed' (the last failed attempt, the old
-'.runlog' untouched); a '.partial' left behind is a run still going, or one killed outright.
-"""
+"""What earlier runs left on disk, read back from their run logs -- for the GUI's Runs browser, its time
+estimates and its failure advice. Pure Python (no Qt): tests/py_gui_runspec_test.py."""
 
 from __future__ import annotations
 
@@ -69,8 +44,7 @@ _RUN_MODE_HEAD = re.compile(r"^\s*run mode\s+:\s+(gentle|balanced|performance)\b
 _DEVICE = re.compile(r"^\s*(?:'_a' interpolation|PS deposit)\s+:\s+(.*)$", re.M)
 # the run-log header's line on the cell average, the run's own word on it: standard DTFE 'volume averaging : EXACT
 # cell-tetrahedron integration ...' or 'SAMPLED (...)', PS-DTFE 'grid deposit : EXACT tetrahedron-cell intersection
-# moments ...' or 'SAMPLED on nSub^3 sub-points (...)'. Binaries since 2026-11-09 print it either way (the exact
-# average is their default, so a command without a flag says nothing); older ones printed only the exact line
+# moments ...' or 'SAMPLED on nSub^3 sub-points (...)'.
 _AVERAGE = re.compile(r"^\s*(?:volume averaging|grid deposit)\s+:\s+(EXACT (?:cell-tetrahedron integration"
                       r"|tetrahedron-cell intersection moments)|SAMPLED\b)", re.M)
 # the run-log header's line on the velocity gradient's route (both binaries, where a field built on the gradient is
@@ -138,12 +112,7 @@ _DTFE_NAME = re.compile(r"^(PS-)?DTFE(-.*)?$")    # every binary set (runspec.dt
 
 
 def dtfe_pid_alive(pid) -> bool | None:
-    """Whether process 'pid' is alive AND a DTFE / PS-DTFE binary (None: cannot say). A bare pid test is not
-    enough for a leftover sidecar: a run killed outright with its driver (a reboot, a group SIGKILL)
-    leaves its sidecar, and once the launcher's own polling has wrapped the pids (~a day) its pid belongs to some
-    other process, which would read as the run still going. 'ps -o comm=' is argv[0] on macOS (a path, maybe with
-    spaces) and the executable's 15-character name on Linux: its basename is matched. Without ps the bare pid
-    test stands."""
+    """Whether process 'pid' is alive AND a DTFE / PS-DTFE binary (None: cannot say)."""
     alive = pid_alive(pid)
     if not alive:
         return alive
@@ -158,11 +127,8 @@ def dtfe_pid_alive(pid) -> bool | None:
 
 
 def read_progress(path) -> dict | None:
-    """The binary's progress sidecar '<prefix>.runlog.progress' (C1) as a dict, with 'state' added: 'running'
-    (its pid is a live DTFE binary, dtfe_pid_alive), 'died' (the pid is gone or now another program's: a run
-    killed outright leaves the sidecar behind; a run that finishes removes it) or 'unknown'. None without a
-    readable sidecar (the binary writes it atomically, so a half-written one is never seen; a missing key reads
-    as absent)."""
+    """None without a readable sidecar (the binary writes it atomically, so a half-written one is never seen; a
+    missing key reads as absent)."""
     try:
         d = json.loads(Path(path).read_text())
     except (OSError, ValueError):
@@ -295,11 +261,8 @@ class RunRecord:
     @property
     def older(self) -> bool:
         """A log of an older version of the programs: it has a RUNNING line and no header 'run mode' line (every
-        run's since the run modes prints one, and every log the drivers and the launcher wrote since then spells its
-        options in the current names). Its settings are not read: it is listed with its name, time, outcome and
-        files, its settings read 'older version' (options_text), 'Load settings' is not offered for it (settings()
-        gives nothing), time_estimate leaves it out and stale_reasons says to recompute it. A log without any
-        command (a run that died before the program printed its header) is not one: it has no settings to read."""
+        run's since the run modes prints one, and every log the drivers and the launcher wrote since then spells
+        its options in the current names)."""
         return bool(self.command) and not self.header_run_mode
 
     def has(self, flag: str) -> bool:
@@ -309,9 +272,8 @@ class RunRecord:
     @property
     def exact(self) -> bool:
         """The run's cell averages were exact (standard DTFE's '_a' fields; PS-DTFE's grid deposit): the header's line
-        says so when the log has one (a binary since 2026-11-09 prints it either way, and resolves a command without a
-        flag to its exact default); else the command, '--exact' against '--sampled' or nothing -- an older log without
-        either was sampled, the default until then."""
+        says so when the log has one (a binary since 2026-11-09 prints it either way, and resolves a command
+        without a flag to its exact default)."""
         if self.header_average:
             return self.header_average == "exact"
         return self.has("--exact")
@@ -320,8 +282,7 @@ class RunRecord:
     def face_gradient(self) -> bool:
         """PS-DTFE: the run's velocity-gradient family is the mean flow's, from exact face sums -- the header's line
         says so when the log has one (the binary prints it where a field built on the gradient is computed, and
-        resolves a command without a route flag to its default); else the command's '--face-gradient' (an older
-        binary's run without it holds the stream average, that binary's only default)."""
+        resolves a command without a route flag to its default)."""
         if self.header_gradient:
             return self.header_gradient == "face"
         return self.has("--face-gradient")
@@ -519,9 +480,7 @@ INPUT_SUFFIXES = (".hdf5", ".h5", ".hdf")      # snapshots: the binaries read th
 
 def run_inputs(rec: RunRecord) -> set[Path]:
     """The files a run READ that sit beside its outputs: every existing file named on its command line and
-    the settings sidecar's input_file. A custom run named after its input (the default) in the input's own
-    folder has 'X.hdf5' beside 'X.a_den': the input must never be one of the run's outputs (the Runs
-    browser's Move to Trash takes the outputs)."""
+    the settings sidecar's input_file."""
     found = set()
     try:
         words = shlex.split(rec.command)
@@ -561,9 +520,8 @@ _LOG_CACHE: dict[str, tuple[int, int, dict]] = {}
 
 def read_device(text: str, pos: int = 0, endpos: int | None = None) -> str:
     """The device a run's header names (_DEVICE) in text[pos:endpos] (one run's output: from its RUNNING line to the
-    next): 'cpu', 'gpu', or '' without a device line. The LAST such line counts (a picked GPU that met method 2 prints
-    a replacing line). Read for a run log (RunRecord.header_device) and for a memory check's reports
-    (runspec.parse_reports)."""
+    next): 'cpu', 'gpu', or '' without a device line. The LAST such line counts (a picked GPU that met method 2
+    prints a replacing line)."""
     ds = list(_DEVICE.finditer(text, pos, len(text) if endpos is None else endpos))
     if not ds:
         return ""
@@ -651,10 +609,8 @@ _OLDER_CACHE: dict[str, tuple[int, int, bool]] = {}
 
 def older_log(path, nbytes: int = 65536) -> bool:
     """run_ps_pipeline.sh's test of the run log at 'path' (the script's older_log), on the log's head, where the
-    header is: no header 'run mode' line, so an older version of the programs wrote it and the script recomputes its
-    snapshot. The Pipeline tab predicts that with it (runspec_pipeline.PipelineSpec.stale); the verdict is kept per
-    log by its (size, mtime_ns), as parse_runlog keeps its reads. False for a missing log (the script judges a
-    snapshot without a run log by the file times) and for one that cannot be read (the script recomputes that one)."""
+    header is: no header 'run mode' line, so an older version of the programs wrote it and the script recomputes
+    its snapshot."""
     try:
         st = Path(path).stat()
         hit = _OLDER_CACHE.get(str(path))
@@ -705,9 +661,8 @@ def _tail(p: Path, nbytes: int = 65536) -> str:
 
 def _read_run(logs: dict[str, Path], sim: str = "", snap: int | None = None) -> RunRecord | None:
     """The record of one output set from its logs ({suffix: path}, the run-log contract): '<prefix>.runlog'
-    when there is one, the attempt after it ('.runlog.failed' or '.runlog.partial', the newer one) noted on
-    it; without one the attempt is the record (a stopped or failed re-run does not truncate the log of the
-    grids on disk, so the Runs tab keeps showing them as they are). None: the logs went meanwhile."""
+    when there is one, the attempt after it ('.runlog.failed' or '.runlog.partial', the newer one) noted
+    on it."""
     record = logs.get(".runlog")
     t0 = _mtime(record) if record is not None else None
     attempts = [(t, sfx, p) for sfx, p in logs.items() if sfx != ".runlog"
@@ -732,8 +687,7 @@ def _read_run(logs: dict[str, Path], sim: str = "", snap: int | None = None) -> 
 def scan_runs(root, extra_dirs=()) -> list[RunRecord]:
     """Every run under the data root (<family>/<sim>/snapdir_NNN or flat <sim>/snapdir_NNN) and in the
     extra (custom-snapshot output) directories, one per output prefix with any of the three log names
-    (_read_run), newest first. A '.runlog.partial' is 'running' when a live process names its root, else
-    'killed' (a run killed outright: no exit code reached its end)."""
+    (_read_run), newest first."""
     out: list[RunRecord] = []
     root = Path(root).expanduser() if str(root).strip() else None     # an empty root is none, not the working dir
     groups: dict[Path, tuple[dict, str, int | None]] = {}       # '<dir>/<prefix>' -> ({suffix: log}, sim, snap)
@@ -882,7 +836,6 @@ def stale_reasons(rec: RunRecord) -> list[tuple[str, str]]:
         out.append(("warning", "the stream counts still include centroid-fallback tetrahedra (+1 each; "
                                "fixed 2026-09-28): stream fractions are inflated, so regenerate "
                                "before quoting them"))
-    # '--ps-vertex-mass' was never renamed, so this reads an older version's log too
     if rec.estimator == "ps" and rec.sim.startswith("TNG") and rec.command and not rec.has("--ps-vertex-mass"):
         out.append(("warning", "made without tetrahedron masses from the particles: with TNG's z=127 "
                                "initial positions the density contrast is suppressed by 1 - D(127)/D(z)"))
@@ -894,17 +847,8 @@ def time_estimate(records, *, sim: str, grid: int, estimator: str, gpu: bool | N
                   sliced: bool, precision: str = "single", dim: int = 3,
                   run_mode: str = "performance", exact: bool | None = None,
                   nsub: int | None = None) -> tuple[float, int] | None:
-    """(median seconds per snapshot, number of runs) of successful earlier runs with the same
-    simulation, grid, estimator, GPU use (RunRecord.gpu; 'gpu' None, a job on Automatic: runs on either device, as
-    the program picks the same device for the same settings on the same build), slice/no slice, precision,
-    dimension, machine use and, when 'exact' is given, quality (RunRecord.exact: Exact True, Fast False), and when
-    'nsub' is given (a sampled PS-DTFE job's count) that count (RunRecord.nsub); None without any (a
-    double-precision run takes about twice as long: it must not predict a single one; a gentle run on half the
-    performance cores must not predict a performance one, nor the other way round; a Fast run must not predict an
-    Exact one, nor a run at another count a Fast one). 'run_mode' defaults to performance. An older version's log
-    (RunRecord.older) is left out: its settings are not read.
-    A run under a second is one: the binary's SUMMARY prints its wall time in whole seconds ('0s', 0.0 here), and
-    a truthiness test would drop such runs as if they had no time (the launcher test's 32^3 run takes 0.5 s)."""
+    """(median seconds per snapshot, number of runs) of successful earlier runs with the same simulation, grid,
+    estimator, GPU use."""
     times = [r.wall_seconds for r in records
              if r.ok and not r.older and r.wall_seconds is not None and r.sim == sim and r.grid == grid
              and r.estimator == estimator and (gpu is None or r.gpu == gpu) and r.sliced == sliced

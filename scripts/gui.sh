@@ -22,9 +22,8 @@ if [ -z "${PY}" ]; then
     VENV="${DTFE_GUI_VENV:-${HOME}/.venvs/dtfe-gui}"
     if [ -x "${VENV}/bin/python" ]; then PY="${VENV}/bin/python"; else PY=python3; fi
 fi
-# macOS: run inside the GUI host bundle scripts/install_gui_app.sh puts next to the venv, so the
-# Dock, Cmd-Tab and the menu bar say "Lamina" rather than "Python" (the plain interpreter
-# is the fallback whenever the host is missing or cannot import PySide6)
+# macOS: run inside the GUI host bundle scripts/install_gui_app.sh puts next to the venv, so the Dock and menu bar
+# say "Lamina"; the plain interpreter is the fallback when the host is missing or cannot import PySide6
 HOST="${VENV:-}/Lamina.app/Contents/MacOS/Lamina"
 if [ "$(uname -s)" = "Darwin" ] && [ -n "${VENV:-}" ] && [ "${PY}" = "${VENV}/bin/python" ] \
    && [ -x "${HOST}" ] && "${HOST}" -c "import PySide6" 2>/dev/null; then

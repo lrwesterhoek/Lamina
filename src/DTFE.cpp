@@ -96,7 +96,7 @@ std::shared_ptr<void> dtfePrebuildTessellation(vector<Particle_data> *p, User_op
 void dtfeInterpolatePrebuilt(std::shared_ptr<void> &tessellation, vector<Sample_point> &samples,
                              User_options &userOptions, Quantities *uQuantities, Quantities *aQuantities);
 #endif
-// the TBB allocator's kept tessellation blocks back to the system (triangulation.cpp; standard DTFE's runs)
+// the TBB allocator's kept tessellation blocks back to the system (triangulation.cpp)
 void dtfeReleaseTessellationMemory();
 // One standard partition's sub-domains as the look-ahead prepared them: DTFE_parallel's thread split of
 // the partition (or its single tessellation) and every sub-domain's tessellation, built; DTFE_parallelImpl then only
@@ -139,15 +139,11 @@ struct ConcurrentTriangulationGuard
     ~ConcurrentTriangulationGuard() { --dtfeTriangulationsRemaining; }
 };
 
-/* THE LOOK-AHEAD of both partition loops (psRunPartitionLoop, dtfePartitionedRun; their comments say why). The
-   partitions in 'order' are deposited in that order on this thread (deposit(i, P)), each prepared before
-   (prepare(i, build, P)): the first in turn, every next one with its tessellation built (build = true) on a thread of
-   its own while the current one deposits -- when the free memory less 4 GB of headroom holds the needBytes(next) it
-   takes and canPrefetch(next) -- else in turn after the deposit (build = false). The preparation alone overlaps, so the
-   outputs are those of the loop without it. An exception of either stage is rethrown once the thread has joined.
-   Scope: constructed at each iteration's start and destroyed at its end, after the next partition is prepared (the PS
-   loop counts its triangulations off with it). The 'prepared in' line names the next partition by its index plus
-   label.shownBase and ends 'during <label.during>'; it is not said for a partition P.emptyPartition marks. */
+/* THE LOOK-AHEAD of both partition loops (psRunPartitionLoop, dtfePartitionedRun). The partitions in 'order' are deposited
+   in that order on this thread (deposit(i, P)), each prepared before (prepare(i, build, P)): every next one with its
+   tessellation built (build = true) on a thread of its own while the current one deposits, when the free memory less 4 GB
+   of headroom holds needBytes(next) and canPrefetch(next), else in turn (build = false). Only the preparation overlaps, so
+   the outputs are those of the loop without it. An exception of either stage is rethrown once the thread has joined. */
 struct LookAheadLabel
 {
     int shownBase;          // added to a partition's index on the 'prepared in' line (PS-DTFE 0, standard DTFE 1)
@@ -265,14 +261,12 @@ static void dtfeFinishFields(DTFE_State &state, User_options &userOptions, Quant
         psPointEvalFinalize( state.options );
 
 #ifdef PHASE_SPACE
-    // --ps-caustics: by now every partition has OR-merged its orientation bits -- a fold straddling a
-    // partition boundary gets its two orientations from different partitions, so collapsing the bits any
-    // earlier would lose it. The mask is deliberately NOT collapsed here: it stays full until writeOutputData
-    // (input_output.cc), which writes '.causticClass' from it and only then collapses it in place to the 0/1
-    // fold flag for '.caustic' (bits==3, both parities overlap -> 1, else 0) -- one grid instead of two, saving
-    // 4 B/cell per Quantities across the post-processing window where peak RSS is set. The write order there is
-    // load-bearing. The collapse is not idempotent (1 -> 0 on a second pass) and runs once per invocation
-    // (--interlace is rejected with this flag at option parsing).
+    // --ps-caustics: by now every partition has OR-merged its orientation bits (a fold straddling a boundary gets its two
+    // orientations from different partitions). The mask is deliberately NOT collapsed here: writeOutputData
+    // (input_output.cc) writes '.causticClass' from it and only then collapses it in place to the 0/1 fold flag for
+    // '.caustic' (one grid instead of two). That write order is load-bearing: the collapse is not idempotent and runs
+    // once per invocation (--interlace is rejected with this flag).
+
     // '.hidden_streams' bit 1: only now, after the merge, with '.streams' summed over every partition
     uQuantities->finalizeHiddenStreams();
     aQuantities->finalizeHiddenStreams();
@@ -374,9 +368,7 @@ void DTFE(vector<Particle_data> *allParticles,
         // single triangulation over the whole (padded) box
         DTFE_preparePadding( state, userOptions );
         DTFE_parallel( &state.particles, samples, state.options, uQuantities, aQuantities );
-#ifndef PHASE_SPACE
         dtfeReleaseTessellationMemory();   // before the derived fields: the tessellations are gone
-#endif
     }
 
     dtfeFinishFields( state, userOptions, uQuantities, aQuantities );

@@ -1,22 +1,6 @@
-/*  Crash-safe outputs: every result is in RAM until the very last step, so a disk that drops off during a long
-    run must not throw the grids away, and a kill during the write phase must not leave a mixed old/new set:
-
-      * each output file is written as '<file>.part.<pid>' and the whole set is renamed into place only once
-        every file is written (outputStageCommit), so the folder only ever shows a complete old or new set;
-      * before the first file, the output folder is probed; while it is missing or read-only the run waits for
-        it (DTFE_OUTPUT_WAIT seconds, default 300: a USB disk that dropped off and comes back), then writes the
-        whole set to the RESCUE folder $TMPDIR/dtfe-rescue/<folder>_<name> instead, says where and how to move
-        it, and exits with status 3 -- the hours of computing are kept;
-      * a folder that vanishes after some files were written sends the remaining ones to the rescue folder; the
-        files staged before it went may still be on the disk as '.part.<pid>' (a USB disk that comes back): the
-        run lists them with the mv that puts each in place;
-      * at the start of a run, '.part.<pid>' leftovers of THIS output name whose pid no longer runs are deleted --
-        except one whose final file is missing: it may be the only copy of that output, so it is kept and its
-        place and mv are printed.
-
-    Header-only: the state is one function-local static shared by main.cpp, input_output.cc (the grid
-    writers' openOutput*File) and ps_point_eval.cc (the '.pts_*' writer). Before outputStageBegin() every
-    path passes through unchanged, so a writer used outside the write phase writes straight to its path. */
+/* Crash-safe outputs: each file is written as '<file>.part.<pid>' and the whole set is renamed into place only
+   once every file is written (outputStageCommit). A missing or read-only output folder is waited for
+   (DTFE_OUTPUT_WAIT s), then the set goes to $TMPDIR/dtfe-rescue (exit 3). Header-only; before outputStageBegin() paths pass unchanged. */
 #ifndef OUTPUT_STAGING_H
 #define OUTPUT_STAGING_H
 
@@ -231,9 +215,8 @@ inline int outputStageCommit()
     if ( not s.rescue and unplaced.empty() ) { s.committedOk = true; return 0; }
     if ( not unplaced.empty() )
     {
-        // these are not lost: a disk that drops off and comes back still holds them as
-        // '.part.<pid>' -- the next run keeps a part whose final file is missing (outputStageCleanStale), yet
-        // deletes it where an older final file exists, so the mv must happen before the rerun
+        // not lost: the disk may still hold them as '.part.<pid>'; the next run deletes a part where an older final
+        // file exists, so the mv must happen before the rerun
         std::fprintf( stderr, "~~~ OUTPUT RESCUE ~~~ %zu file(s) written to '%s' before it went away could not be put "
                       "in place. They may still be there as '.part.%ld' files: once the folder is back, and BEFORE "
                       "running this snapshot again, put them in place with:\n", unplaced.size(), s.outDir.c_str(),

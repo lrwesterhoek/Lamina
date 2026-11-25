@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
-"""Tests for the void-profile evolution and the universal-profile fits: dtfelib/profiles.py's
-interior_single_fraction, stack_scatter, hsw_delta / fit_hsw / fit_stack, r_v_by_definition, and
-python/plot/plot_void_profile_evolution.py end to end.
-
-Two tiers:
-  * SYNTHETIC (always run, CI): exact cell counts on hand-built masks (periodic), a known HSW profile recovered
-    within its errors, the normalised linear-theory identity, the R_v-definition fallback, and the script on two
-    synthetic 64^3 snapshots (per-snapshot caches, strict JSON, --replot reproduces the tables without a grid).
-  * DATA-BACKED (TNG100-3-Dark z = 0 under DTFE_DATA_ROOT; skipped when it is unset or the snapshot is not on disk):
-    the script on the real snapshot.
-
-Usage:  python3 tests/py_profiles_test.py            (exit 0 = pass)
-"""
+"""Tests for the void-profile evolution and the universal-profile fits: dtfelib/profiles.py.
+Usage:  python3 tests/py_profiles_test.py            (exit 0 = pass)"""
 
 import io as _io
 import json

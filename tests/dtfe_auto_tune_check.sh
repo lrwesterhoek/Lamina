@@ -1,83 +1,7 @@
 #!/usr/bin/env bash
-# The STANDARD-DTFE auto-tuner (src/auto_tune.h): the report, the counted split and the thread plan of PS-DTFE's
-# tuner, and the memory model of the production '--exact' runs.
-#
-# The exact average allocates little extra (on the CPU its run-wide words: 8 B per deposited component of each
-# sub-domain cell); what drives the peak is the padded vertex count. The load-balanced split
-# gives a dense partition a small volume and a fixed-length padding shell, so a box-average particle count per thread
-# sub-box under-counts it (TNG50-3-Dark z=0: 35.4M padded particles in one partition's 4 threads, 7.8M at the box
-# average; the exact run, whose threads all wait on the GPU with their triangulations alive, peaks at 44.5 GB). The
-# tuner replays the run's own split on a count grid of the particles. Verified here, on synthetic crossed waves
-# (clustered knots) and the repository's binaries:
-#
-#  A) '--auto-tune-report' on the standard binary: ONE valid 'AUTO-TUNE-REPORT partition=.. mc=..' line (not
-#     'AUTO-TUNE-REPORT unsupported'), exit 0, nothing written; a hand-set split and thread count are reported as
-#     given (mc = the threads of a partition; the partitions run one after another).
-#  B) the counted padded vertices (DTFE_AUTO_TUNE_DEBUG=1) against the run's own 'Thread i had N particles' lines:
-#     the same busiest partition, its sum and every thread's count within 10%, at 3^3 x 8 and 4^3 x 4 threads.
-#  C) the reason for B: on this clustered set the busiest partition holds well over the box-average count
-#     (N / P^3 x the padding factor) -- at least 1.5x.
-#  D) a user's --max-concurrent is the thread count the tuner plans with when it chooses the split (not every
-#     core, whatever the user gave).
-#  E) an auto-tuned run ends its SUMMARY with the 'memory model' line (predicted vs measured, as PS runs do), and the
-#     measured peak stays within 1.35x of the prediction (the allocator keeps freed triangulation memory between
-#     partitions: up to ~30% above the plan on sub-GB runs, while at TNG scale the prediction is 19-90% HIGH, see
-#     auto_tune.h): CPU sampled average ('--sampled': the 1.35x was set on its measured peak; the exact average is
-#     the default since 2026-11-09), and the GPU exact average when the build has a GPU.
-#     The other runs name no mode (but G's budget check and O: '--exact'): the standard tuner's terms for the
-#     exact average (auto_tune.cc: its CPU words and its GPU words) are a few bytes per grid cell, and what A-D and F-I
-#     check -- the plan, the threads' particle counts, a byte identity -- holds under either average.
-#  F) the tuner only chooses: an auto-tuned run is byte-identical to the same split given by hand.
-#  G) on a simulated small machine the tuner picks a split its counted model says fits (over_budget=0) and names the
-#     busiest partition's vertex count in its AUTO-TUNE line. Single precision, on 128^3 particles: G1 the CPU deposit,
-#     at a budget that holds 3^3 x 10 threads and 2^3 x 2 but not 2^3 x 10, plans 3^3 x 10: the most threads, at the
-#     coarsest split that holds them; G2 (GPU builds) the GPU deposit, at a budget that holds 2^3 with one
-#     tessellation per partition but no plan of one domain, plans 2^3 x 1: one tessellation per partition at the
-#     coarsest split that holds it. No such budget (a gap under 0.1 GB between the plans) is a failure.
-#  H) the 2D build (DTFE-2d, when built): a valid report from the counted model, counts within 15% of the run's.
-#  I) the plan's further terms, each a field of the report line: I1 a '--sample-points' plane's records
-#     (pts_gb: 326 B per point with --pts-vel-grad, one record per point, in fixed_gb too; DTFE_AUTO_PTS_N sizes a plane
-#     that is not on disk); on GPU builds I2 the GPU deposit's host snapshot of its grids (snapshot_gb: the exact
-#     average's run-wide 128-bit words, 16 B per 4-B component, twice the sampled average's 64-bit words; none on the
-#     CPU; the device grids of two batches are in the partition's bytes), I3 the
-#     partition loop's look-ahead (lookahead_gb, in predicted_gb; none with --no-overlap or on one domain) and I4 a
-#     budget that holds the plan but not its look-ahead: the look-ahead is switched off for the run (said,
-#     lookahead_gb=0, over_budget=0).
-#  J) the parallel insert's transient (TBB builds, 4 threads or more), on the CPU deposit (DTFE_GPU=0: no extracted
-#     tetrahedra, so a box's insert phase is its larger phase) and without a look-ahead: at '--max-concurrent 2' a
-#     forced '--parallel-triangulation' adds, per padded vertex of the busiest partition, its point+payload copy and
-#     CGAL's own vectors at their power-of-two capacity less the particle copy the sequential insert holds (std_plan.cc
-#     stdInsertBytes: 36 + 80 g B in single precision, 24 + 104 g in double, g in [1, 2)). One tessellation
-#     ('--max-concurrent 1') books the larger of its insert phase and its deposit phase: at 32^3, where the deposit's
-#     grids are small, the forced insert adds the same; at 192^3, where the grids hold more, nothing.
-#  K) the look-ahead's switch-off with the insert's copies (GPU and TBB builds, 4 threads or more): K1 a team of 2 on
-#     128^3 particles, whose look-ahead books its build with the insert's transient: a budget that holds the plan with
-#     its look-ahead but not with the forced insert's in it switches the look-ahead off (said, lookahead_gb=0,
-#     over_budget=0, the plan predicted as with '--no-overlap'), without them it stays; K2 one tessellation: a budget
-#     that switches its look-ahead off books the partition by its phases again (predicted as with '--no-overlap').
-#  L) the GPU deposit with a given split and the threads left to the tuner (GPU builds): one tessellation per
-#     partition in every run mode, the same report line as '--max-concurrent 1'; at a budget that holds it but not its
-#     look-ahead it runs without the look-ahead (said), and '--run-mode balanced' does not give it up for a team that
-#     would keep one (lookAheadTeam: a team is chosen only where one tessellation does not fit, which no plan of the
-#     suite's sizes reaches -- a team of these sizes pads more vertices than one tessellation inserts).
-#  M) the uniform count (DTFE_TEST_TUNE_UNIFORM=1: the plan of a call without the particles) plans the team the run
-#     forms: '--max-concurrent 5' is DTFE_parallel's team of 4 (2 x 2 x 1 sub-boxes, each padded on its own faces),
-#     the same report as '--max-concurrent 4' but its mc, and that team's padded vertices.
-#  N) the --scratch-dir start-up peak: each scratch-backed full grid is filled with zeros in anonymous memory before
-#     its file is mapped over it (macOS; scratch_alloc.h ZeroFillScope), the largest beside the particles, before any
-#     partition, and the grids under DTFE_SCRATCH_MIN_GB (1 GB) stay on the heap. On a 384^3 grid in 4^3 partitions (a
-#     loop far smaller than the grid) N1 the report predicts the particles, the density and velocity grids (on the
-#     heap) and the 9-component gradient (file-backed) of 384^3, and says the peak is the start-up one (on Linux: none
-#     booked, the zero fill goes to the file); N2 without --scratch-dir no such peak; N3 after the loop the derived
-#     divergence (on the heap at 384^3) is booked beside the heap grids; N4 with a threshold no allocation reaches
-#     (DTFE_SCRATCH_MIN_GB=1000) the report is the one without --scratch-dir, every derived field and the T-web's
-#     arrays booked one by one adding up to the post phase's grids.
-#  O) the CPU exact average's run-wide words are booked for the grids the loop gives words, the ones with a run-wide
-#     unit (single build): one domain at 256^3 with density_a, scalar_a and scalarGradient_a (a scalar dataset in a
-#     copy of the snapshot), each plan against its measured figure: 40 B per cell (0.671 GB) of words where every
-#     grid has a unit, 8 B per cell (0.134 GB, the density alone) under '--approx-phase-space-density', whose scalar
-#     grids keep their Real sums (DTFE.cpp runUnitsSetup).
-#
+# The STANDARD-DTFE auto-tuner (src/auto_tune.h): the report, the counted split, the thread plan and the memory model
+# of the production '--exact' runs, on synthetic crossed waves and the repository's binaries. The tuner replays the run's own
+# split on a count grid, since a box-average particle count per thread under-counts a dense partition's padded vertices.
 # Usage: tests/dtfe_auto_tune_check.sh [--no-build]     (DTFE_TEST_TMP, DTFE_TEST_PRECISION=double as the others)
 
 set -euo pipefail
@@ -92,8 +16,6 @@ source "${SCRIPT_DIR}/precision.sh"     # DTFE_TEST_PRECISION=double: the double
 BIN="${DTFE_BIN}"
 precision_require "${BIN}"
 # The thread count is pinned to a 10-core machine's (as ps_auto_tune_check.sh H1 does): the tuner plans with every
-# core, so C, D, F and G would plan other splits on a 4-core runner; the real runs (B, E, F) then use the same threads
-# the plan assumed, oversubscribed on a smaller machine, which changes nothing they check.
 export OMP_NUM_THREADS=10
 TMP="${DTFE_TEST_TMP}/dtfe_auto_tune"; mkdir -p "${TMP}"
 N="${N:-64}"; BOX="${BOX:-100.0}"
@@ -235,19 +157,7 @@ env DTFE_RAM_GB=1.2 "${BIN}" "${SNAP}" "${TMP}/da_g" --grid 96 "${COMMON[@]}" --
 agrep "G the plan fits its budget (over_budget=0) with a split" "^AUTO-TUNE-REPORT partition=[2-6] mc=[0-9]+ .*over_budget=0$" "${TMP}/da_g.txt"
 agrep "G ... and the AUTO-TUNE line names the busiest partition's padded vertices" \
       "AUTO-TUNE: .*the busiest partition triangulates ~[0-9.]+ M padded vertices at once" "${TMP}/da_g.txt"
-# A budget between two plans, on 128^3 particles of their own: on the suite's 64^3 the padding of 10 spacings outweighs
-# a partition's own particles, and at 10 threads the finer split books more than the coarser one. The plans are given
-# by hand, without the look-ahead (its switch-off would move the bookings): their predictions are chooseSplit's own
-# test quantity. A gap under 0.1 GB between the plans fails, so that a planner change that closes it is seen. The
-# machine's own core count books nothing here (the threads are OMP_NUM_THREADS's, above): there are no sample points,
-# and no tessellation of these plans reaches the parallel insert's 1e6 points. Single precision (the double build's
-# wider vertices move the plans).
-#  G1 the CPU deposit (DTFE_GPU=0): the budget lies half way between the larger of 2^3 x 2 and 3^3 x 10 threads and
-#     2^3 x 10 (it is 60% of DTFE_RAM_GB), so 2^3 fits with fewer threads and 3^3 with all 10: the plan is 3^3 x 10, the
-#     most threads at the coarsest split that holds them.
-#  G2 the GPU deposit (GPU builds): half way between 2^3 with one tessellation per partition and the least of one
-#     domain's plans (1, 2, 4 and 10 threads), so that 2^3 is the coarsest split that fits: the plan is 2^3 x 1, one
-#     tessellation per partition (chooseSplit takes it before a team where it fits).
+# A budget between two plans, on 128^3 particles of their own.
 if ! precision_double; then
     SNAPG="${TMP}/dat_crossed128_g.hdf5"
     "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAPG}" --n 128 --box "${BOX}" --crossed-waves \
@@ -388,10 +298,7 @@ if grep -aq "parallel, TBB" "${BIN}" && [ "${NCPU}" -ge 4 ]; then
     env DTFE_GPU=0 DTFE_RAM_GB=64 DTFE_AUTO_TUNE_DEBUG=1 "${BIN}" "${JC[@]}" > "${TMP}/da_jc.txt" 2>&1 || true
     env DTFE_GPU=0 DTFE_RAM_GB=64 DTFE_AUTO_TUNE_DEBUG=1 "${BIN}" "${JC[@]}" --parallel-triangulation > "${TMP}/da_jcf.txt" 2>&1 || true
     busiest() { sed -n 's/^AUTO-TUNE-DEBUG standard: .* busiest partition [0-9]* of [0-9]*: \([0-9]*\) padded vertices.*/\1/p' "$1" | head -1; }
-    # per padded vertex the parallel insert's transient less the sequential insert's particle copy: base + slope x g,
-    # g in [1, 2) (std_plan.cc stdInsertBytes: Point_3 24 + vertexData, CGAL's vectors 8 + 24 + vertexData, the
-    # particle 36 B; the double build's vertexData is 72 B and its particle 72); the forced plan's busiest partition can
-    # be another one: the rise lies between the least for either one's vertices and the most
+    # per padded vertex the parallel insert's transient less the sequential insert's particle copy.
     if precision_double; then jbase=24; jslope=104; else jbase=36; jslope=80; fi
     rise() { awk -v a="${1:-0}" -v b="${2:-0}" -v u="${3:-0}" -v f="${4:-0}" -v c="${jbase}" -v s="${jslope}" \
                  'BEGIN{e = b - a; lo = (u < f ? u : f) * (c + s) / 1.e9; hi = (u > f ? u : f) * (c + 2. * s) / 1.e9;
@@ -422,10 +329,7 @@ if [ "${GPU}" = 1 ] && grep -aq "parallel, TBB" "${BIN}" && [ "${NCPU}" -ge 4 ];
         local tag="$1" ram="$2"; shift 2
         env DTFE_RAM_GB="${ram}" "${BIN}" "${KR[@]}" "$@" > "${TMP}/da_k_${tag}.txt" 2>&1 || true
     }
-    # K1, a team of 2 on 128^3 particles (on the suite's 64^3 the forced insert adds too little to the look-ahead to
-    # stand clear of the report's three decimals): b the plan without its look-ahead with the forced insert, p0 and p1
-    # the predictions with the look-ahead without and with it (the look-ahead books its build with the insert's
-    # transient); the budget lies half way between p0 and p1
+    # K1, a team of 2 on 128^3 particles (on 64^3 the forced insert moves the look-ahead too little to show in the report)
     SNAPK="${TMP}/dat_crossed128_k.hdf5"
     "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${SNAPK}" --n 128 --box "${BOX}" --crossed-waves \
         --amplitude-factor 3.0 >/dev/null
@@ -457,8 +361,7 @@ if [ "${GPU}" = 1 ] && grep -aq "parallel, TBB" "${BIN}" && [ "${NCPU}" -ge 4 ];
     fi
     rm -f "${SNAPK}"
     # K2, one tessellation: the look-ahead's factor holds its copies, so the forced insert books none while the
-    # look-ahead runs; a budget half a look-ahead above the plan switches it off, and the partition is booked by its
-    # phases again: predicted as '--no-overlap' predicts, with the forced insert (b1) and without it (q1)
+    # look-ahead runs; a budget half a look-ahead above the plan switches it off.
     k_rep q1 64 --max-concurrent 1 --no-overlap
     k_rep b1 64 --max-concurrent 1 --no-overlap --parallel-triangulation
     k_rep l1 64 --max-concurrent 1 --parallel-triangulation
@@ -614,8 +517,7 @@ PYEOF
     n1="$(on_top "${TMP}/da_n_plain.txt")"; n1s="$(on_top "${TMP}/da_n_plain_sampled.txt")"
     n2="$(on_top "${TMP}/da_n_approx.txt")"; n2s="$(on_top "${TMP}/da_n_approx_sampled.txt")"
     # 256^3 cells x 8 B per component of words: density 1 + scalar 1 + its gradient 3 = 40 B (0.671 GB); the density
-    # alone 8 B (0.134 GB). The sampled average sums no words on the CPU, so each difference is the words' bytes
-    # (the GB carry three decimals, so it is good to 0.001).
+    # alone 8 B (0.134 GB). The sampled average sums no words on the CPU.
     nd() {  # nd <exact> <sampled twin> <lo> <hi>: 1 when both are numbers and their difference lies in (lo, hi)
         awk -v a="${1:-x}" -v b="${2:-x}" -v lo="$3" -v hi="$4" \
             'BEGIN{d = a - b; print (a != "x" && b != "x" && d > lo && d < hi) ? 1 : 0}'

@@ -1,26 +1,7 @@
 #!/usr/bin/env bash
-# PS-DTFE parallel-vs-serial correctness check: runs serial and all-cores, asserts
-# outputs agree (a race shows up as a mismatch). .streams must match exactly (integer
-# counts are order-independent), float fields only within tolerance.
-# Then the CPU deposit's dynamic team (ps_interpolation.cc PSBlockClaim): on all cores, the default run and
-# DTFE_DEPOSIT_THREADS=1 (one thread per partition, the serial loop) and =4 (a pinned team of 4) must write
-# BYTE-IDENTICAL grids, and the verbose-3 log must say which rule ran: the dynamic team in the single build
-# (every accumulator a shared integer word), the static copy mode in the double build (its sums depend on the
-# block assignment, so it must keep the static rule). So must a slab team of 4 (DTFE_DEPOSIT_SLABS=1
-# DTFE_DEPOSIT_THREADS=4): a static team, counted in the core pool (thread_count.h CorePool::Hold), beside the
-# other partitions' pooled loops.
-# Then the parallel insert (DTFE_TRIANGULATION_THREADS=4, forced at this size) against
-# the sequential one ('--sequential-triangulation') must write the same bytes -- the cells' canonical vertex order
-# (src/CGAL_triangulation/ps_vertex_order.h) -- for the exact deposit with the face gradient and the caustics, the
-# sampled deposit with the vertex mass on partitions, an exact lattice, the cusp stencil on that lattice and, on a
-# Metal build, the GPU, with the same fixed-point units; single build only, and only where the build has the
-# parallel insert (else SKIP).
-#
-# Usage:
-#   tests/ps_parallel_check.sh                 # build, run x2, compare
-#   tests/ps_parallel_check.sh --no-build
-#   N=64 GRID=128 tests/ps_parallel_check.sh   # bigger problem
-# Requires the build toolchain plus python3 with numpy and h5py.
+# PS-DTFE parallel-vs-serial check: .streams must match exactly, float fields within tolerance.
+# Then the CPU deposit's team (DTFE_DEPOSIT_THREADS, slab team) and the parallel insert must write byte-identical grids.
+# Usage: tests/ps_parallel_check.sh [--no-build]   (N=64 GRID=128 for a bigger problem; needs numpy and h5py)
 
 set -euo pipefail
 
@@ -106,9 +87,8 @@ def compare(ext, ncomp, exact, tol=1e-3):
         fails.append(f"{ext} relΔ {rel:.2e} exceeds {tol:.0e} -- possible race")
 
 compare(".streams",  1, True)       # integer counts -> order-independent -> exact
-# .a_streams is volume-averaged (fractional): partitions sum in a run-dependent order,
-# so it agrees only to ~1 float32 ULP. Benign FP non-associativity, not a race (a race
-# would drop/double whole streams, rel ~1e-2 >> tol).
+# .a_streams is volume-averaged: partitions sum in a run-dependent order, so it agrees to ~1 float ULP
+# (benign non-associativity; a race would drop or double whole streams)
 compare(".a_streams", 1, False)
 compare(".den",      1, False)
 compare(".a_den",    1, False)
@@ -169,17 +149,8 @@ fi
 echo "   PASS: the grids agree across the four team rules ($(precision_double && echo "double build: .streams, the slab team every grid" || echo "every grid byte for byte"))"
 
 echo ">> the parallel insert against the sequential one, byte for byte (the canonical vertex order)"
-# src/CGAL_triangulation/ps_vertex_order.h renumbers every cell in a canonical vertex order, so each tetrahedron's
-# arithmetic does not depend on CGAL's numbering, and every grid of the single build is an order-free fixed-point
-# sum: a tessellation inserted in parallel (another cell order, another numbering) must give the sequential run's
-# bytes. At this small size the insert is forced both ways: '--sequential-triangulation' against
-# DTFE_TRIANGULATION_THREADS=4 (a count forces the parallel insert at any size). Cases: the exact deposit with the
-# face gradient and the caustics on one tessellation; the sampled deposit with the vertex mass on the suite's
-# partitions (index-order merge, one in flight, so every partition logs its units); an exact lattice
-# (--jitter-frac 0: CGAL's symbolic perturbation must give the same tetrahedra in any insertion order); the cusp
-# stencil of '--ps-caustic-cusps' on that lattice (its distance ties take the strict order); the GPU's exact deposit
-# on a Metal build. The fixed-point units lines (--verbose 3) are compared too, so a unit that moved would be named.
-# A build without the parallel insert has one order only (SKIP). The double build sums in walk order (SKIP).
+# ps_vertex_order.h renumbers every cell canonically, so a parallel insert must give the sequential run's bytes:
+# '--sequential-triangulation' against DTFE_TRIANGULATION_THREADS=4 (a count forces it); SKIP without it or in double
 order_fail=0
 if precision_double; then
     echo "   SKIP: the double build sums in walk order (its private copies, its serial adds)"

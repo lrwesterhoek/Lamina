@@ -1,17 +1,7 @@
 #!/usr/bin/env python3
-"""PS-DTFE 3D stream-topology test: three crossed Zel'dovich waves vs separable analytics.
-
-Test-design notes (why these parameters and criteria):
-  * N=48 with grid=96 keeps the tessellation coarser than the sampling grid. At N=grid the
-    synthetic lattice's sample points coincide EXACTLY with undisplaced tessellation
-    faces/edges and the inclusive point-in-tet test counts every incident tet -- a
-    measurement artifact of commensurate lattices, impossible on real (glass-IC, fully-3D)
-    data. Jitter also helps break these coincidences.
-  * The MEAN stream count is compared after CLIPPING at the analytic maximum (27): the
-    caustic tips stack an unbounded number of near-degenerate flattened tets in cells that
-    are measure-zero analytically, so the raw mean diverges with resolution by construction.
-    Clipping makes the statistic volume-dominated, which is what the analytics describe.
-"""
+"""PS-DTFE 3D stream-topology test: three crossed Zel'dovich waves vs separable analytics. N=48 with grid=96 keeps the
+tessellation coarser than the sampling grid, so commensurate lattice points do not coincide with tessellation faces
+(a measurement artifact)."""
 
 import argparse
 import math

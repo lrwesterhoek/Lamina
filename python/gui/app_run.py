@@ -1,8 +1,6 @@
 """MainWindow's run panel, runs and queue (RunMixin, moved from app.py): the panel beside the tabs (commands,
-checks, Run / Add to queue / Stop, progress and the clock, the failure banner, the Log, Queue, Figures, Runs
-and Running now tabs, find in the log), running a job's steps with live progress and a run log beside the
-outputs, stopping it, and the job queue (adding, ordering, waiting for other DTFE runs, saving it). The names
-app.py defines are read through _app, imported last (see app_tabs.py)."""
+checks, Run / Add to queue / Stop, progress and the clock, the failure banner, the Log, Queue, Figures,
+Runs and Running now tabs, find in the log)."""
 
 from __future__ import annotations
 
@@ -522,9 +520,8 @@ class RunMixin:
 
     def _close_tee(self, code: int | None = None):
         """Close the run-log copy. With the step's exit code it is also put in place (the run-log contract):
-        '<log>.partial' becomes '<log>' on exit 0 (and a stale '<log>.failed' goes), else
-        '<log>.failed', leaving the log of the old grids alone. Without one (a write error mid-run) only the
-        handle closes; the step's end still renames it. Never raises."""
+        '<log>.partial' becomes '<log>' on exit 0 (and a stale '<log>.failed' goes), else '<log>.failed',
+        leaving the log of the old grids alone."""
         tee, self._tee = self._tee, None
         if tee is not None:
             try:

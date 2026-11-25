@@ -1,15 +1,6 @@
-/* Host interface to the GPU deposit kernels, implemented by the Metal backend
-   (ps_metal_host.cc / dtfe_metal_host.cc, 'make <target> METAL=1' on macOS/Apple Silicon). The
-   callers see only these declarations and the guards below, never a Metal type.
-
-   A GPU build defines PS_GPU (PS-DTFE) / DTFE_GPU (standard); the callers in
-   ps_interpolation.cc and averaged_interpolation_1.cc guard every use on those and fall
-   back to the CPU path on any failure. The GPU results match the CPU path to float
-   rounding (atomic summation order) -- the parity contract is validated by
-   tests/dtfe_metal_check.sh and metal/validate_deposit.cpp.
-
-   This header is self-contained (no DTFE/CGAL/backend includes; ps_deposit_params.h is plain C++, and
-   ../message.h gives the shared host steps at the end their colours). */
+/* Host interface to the GPU deposit kernels, implemented by the Metal backend (ps_metal_host.cc, dtfe_metal_host.cc).
+   Callers see only these declarations and the guards (PS_GPU / DTFE_GPU), never a Metal type, and fall back to the CPU
+   path on any failure; results match it to float rounding. Self-contained: no DTFE/CGAL/backend includes. */
 
 #ifndef GPU_HOST_HEADER
 #define GPU_HOST_HEADER
@@ -35,12 +26,10 @@ std::string gpuBackendName();
 std::string gpuDeviceName();
 
 // The cells per pass the GPU kernels number: 2^32 (32-bit cell indices). A pass whose own grid holds this many cells
-// or more deposits on the CPU with a warning and a counted fall-back, for a picked GPU as for an asked one:
-// ps_interpolation.cc psGpuEligible (a partition's sub-grid, a window, one domain's grid) and
-// averaged_interpolation_1.cc avg1GpuUsable (a thread's sub-domain, a partition, one domain). The planner books its
-// splits under 2^32 with a constant of its own (auto_tune.cc kGpuCellCap), which this does not move.
-// The test hook DTFE_TEST_GPU_CELL_CAP=<n> lowers the cap to n cells (an integer from 1 to 2^32; else it stays 2^32),
-// read once, so that a small grid reaches both guards (tests/defaults_check.sh G); the warnings still name 2^32.
+// or more deposits on the CPU with a warning and a counted fall-back (ps_interpolation.cc psGpuEligible,
+// averaged_interpolation_1.cc avg1GpuUsable); the planner's own cap is auto_tune.cc kGpuCellCap. The test hook
+// DTFE_TEST_GPU_CELL_CAP=<n> lowers it to n cells (1..2^32), read once, so a small grid reaches both guards
+// (tests/defaults_check.sh G); the warnings still name 2^32.
 inline size_t gpuCellCap()
 {
     static size_t const cap = [] {
@@ -52,20 +41,14 @@ inline size_t gpuCellCap()
 
 
 // ---------------------------------------------------------------- PS-DTFE deposit
-// Output grids, all sized to the partition sub-grid (subDims product = subTotal). Only the
-// grids selected by the fVel/fDisp/fGrad flags are allocated (mom/m2/grad stay EMPTY when
-// their flag is off -- the m2 and grad grids alone are 24+36 B per sub-grid cell); mass and
-// streams are always produced.
+// Output grids, sized to the partition sub-grid (subTotal cells). Grids not selected by fVel/fDisp/fGrad stay EMPTY;
+// mass and streams are always produced.
 struct PSGpuGrids
 {
-    // The MASS grid (density = mass / cellVolume), in one of two forms:
-    //   massScale > 0  'massFx' holds each cell's exact fixed-point sum in units of 1/massScale (the
-    //                  kernels' own words, handed over unconverted) and 'mass' stays EMPTY. The caller adds the
-    //                  GPU-deferred and released tetrahedra into the same integers and converts to float once
-    //                  (ps_interpolation.cc), so no deposit after the kernel rounds a share away.
-    //   massScale = 0  the float grid in 'mass' (a total mass that gives no usable unit) and
-    //                  'massFx' stays EMPTY.
-    // Every fixed-point grid comes back as the kernels' 64-bit words, unconverted.
+    // The MASS grid (density = mass / cellVolume): massScale > 0: 'massFx' holds each cell's exact fixed-point sum in
+    // units of 1/massScale (the kernels' own 64-bit words) and 'mass' stays EMPTY; the caller adds the deferred and
+    // released tets into the same integers and converts once, so no deposit rounds a share away. massScale = 0: the
+    // float grid in 'mass' (a total mass that gives no usable unit).
     std::vector<float>    mass;     // subTotal      accumulated MASS (float form; see above)
     std::vector<int64_t>  massFx;   // subTotal      accumulated MASS (fixed-point form; see above)
     float                 massScale = 0.f;
@@ -80,11 +63,9 @@ struct PSGpuGrids
     std::vector<float>    streamvol;// subTotal      exact cell-mean multiplicity sum(V_int)/V_cell (fExact; else EMPTY). 'streams' then carries the raw integer tet-touch count.
     std::vector<float>    scal;     // subTotal      scalar moment sum(wm s), one component (fScal; else EMPTY)
     std::vector<float>    sgrad;    // subTotal*3    scalar-gradient moment sum(wm ds/dx_i) [i*3+d] (fSGrad; else EMPTY)
-    // The moment grids as exact fixed-point sums (PSFxGrid in ps_deposit_params.h): fxScale[g] > 0 =
-    // grid g came back as words in fx[g] (subTotal x its components, the float vector's layout), in units of
-    // 1/fxScale[g], and its float vector above stays EMPTY -- the caller adds the deferred and released tetrahedra
-    // into the same integers and converts once, as for the mass.
-    // 0 = the float vector.
+    // The moment grids as exact fixed-point sums (PSFxGrid): fxScale[g] > 0 = grid g came back as words in fx[g] (the
+    // float vector's layout) in units of 1/fxScale[g] and its float vector stays EMPTY; the caller adds the deferred
+    // and released tets into the same integers and converts once, as for the mass. 0 = the float vector.
     // dispwIsMass: the kernel did not deposit 'dispw' (the fixed mass grid sums the same shares): read massFx.
     std::vector<int64_t>  fx[PS_FX_N];
     float                 fxScale[PS_FX_N] = {};
@@ -94,55 +75,11 @@ struct PSGpuGrids
     double auditFixedTotal = -1., auditDeferredMass = -1.;
 };
 
-// Runs the mass-conserving tetrahedral deposit on the default GPU device. 'verts' holds one
-// PS_TET_STRIDE-float record per tet (ps_deposit_params.h psFillTetRecord: vertex 0 as cell
-// index + fraction and the edges, in the canonical frame of the exact inside test).
-// Thread-safe: the calls prepare their work and copy their grids back concurrently, and serialize their device
-// work (uploads and passes) on one device queue/stream.
-// The kernel decides which samples each tet contains exactly as the CPU deposit does
-// (ps_exact_inside.h): in float, with a rigorous error bound. A tet with a sample inside that
-// bound is NOT deposited; its index (into the arrays as passed) is returned in 'deferred', and
-// the caller must deposit it with the CPU's exact test.
-// fVel = velocity moments (velocity selected; the dispersion keeps its own mean), fDisp = second moments
-// (dispersion), fGrad = velocity-gradient moments; unselected grids are neither allocated on
-// the device (4-byte dummies) nor on the host. 'vels' may be EMPTY when all three are off.
-// fLinear (the linear deposit; no option selects it, the caller passes false) weights the
-// interior samples by the linear density built from the per-tet vertex densities in 'dens'
-// (nTet*4; may be EMPTY when fLinear is off), renormalized per tet so the deposited total still
-// equals the tet mass exactly.
-// fVolW (the volume-weighted velocity moments: the host passes true, as PS-DTFE always
-// volume-weights them) switches the mom/grad/scalar moment weights to equal Eulerian-volume
-// shares (|det|/6 per tet, computed in-kernel) and fills out.momw with their normalizer; the
-// mass grid and the dispersion's second moment m2 keep the mass shares (with fDisp the
-// dispersion gets its own mass-weighted mean and normalizer, dispvel and dispw).
-// fCaustic (--ps-caustics) ORs each tet's orientation bits (1 = det>0,
-// 2 = det<0) into out.caustic at every deposited sample -- OR is order-invariant, so the
-// result matches the CPU deposit's bits (float-vs-double det sign only differs below the
-// degeneracy cut, where cells are dropped).
-// fExact (--exact) replaces the nSub^3 sampling by the kernels' float32 exact clipping
-// (sweep_moments in metal/exact_clip.metal.inc: a sweep in z, analytic tet-cell volume + order-2 moments); nSub is then
-// read only by a tetrahedron whose clip window comes up empty (the sampled path, as on the CPU:
-// ps_kernel_params.h fExact). The CPU path stays the DOUBLE-precision reference: the GPU exact deposit agrees
-// with it to float rounding.
-// fScal / fSGrad: the scalar field (ONE component, NO_SCALARS=1 builds; the caller declines the GPU
-// otherwise): 'scal' holds the four vertex scalars per tet (nTet*4; EMPTY when both are off), and
-// the kernel deposits the linear profile's value (and the constant gradient) times the moment
-// weight, exactly as the velocity moment, into out.scal / out.sgrad.
-// windowMode (--grid-window): the sub-box is a window of the full grid, not a partition's own box --
-// every sample / clipped piece of a tet is counted for its normalization as in the full run, only
-// those inside the sub-box are deposited.
-// massExtra: the mass the caller adds to the mass grid itself on top of 'masses' (the
-// --ps-halo-release centroid deposits); the fixed-point unit (psMassFixedScale) is set from sum(masses) +
-// massExtra, so the caller's own integer adds cannot overflow a cell. The deferred tets are part of 'masses'.
-// fxUnits: the units of the moment grids, chosen by the caller from bounds that cover its own adds
-// too (the deferred and released tets): a grid with scale > 0 is deposited as an exact fixed-point sum and
-// handed back as words (out.fx), the rest as float atomics; sumW makes the exact items' weight totals exact.
-// Returns false with 'err' set if there is no device, setup fails or the GPU gives up on the deposit; 'out' is then
-// untouched (its grids are shaped and filled only after a deposit the GPU kept; the caller reads 'out' only
-// after true).
-// CONSUMES verts/vels/masses/dens/scal (several GB per partition at scale): the backend frees each one
-// right after copying it to the device, so they may be empty when the call returns --
-// the CPU fallback deposits from the triangulation, not from these arrays.
+// Runs the mass-conserving tetrahedral deposit on the default GPU device (thread-safe: calls prepare and copy back
+// concurrently, device work is serialized). The kernel decides which samples a tet contains exactly as the CPU
+// deposit does (ps_exact_inside.h, rigorous float bound); a tet with a sample inside the bound is NOT deposited: its
+// index goes to 'deferred' for the CPU's exact test. Returns false with 'err' set if the GPU gives up ('out' then
+// untouched). CONSUMES verts/vels/masses/dens/scal: freed right after upload (the CPU fallback uses the triangulation).
 bool psGpuDepositFields(std::vector<float>& verts,   // nTet*PS_TET_STRIDE: the per-tet records
                         std::vector<float>& vels,    // nTet*12: 4 vertex velocities (empty if unused)
                         std::vector<float>& masses,  // nTet: tet mass (rho_bar * V_lag, or the --ps-vertex-mass shares)
@@ -152,7 +89,14 @@ bool psGpuDepositFields(std::vector<float>& verts,   // nTet*PS_TET_STRIDE: the 
                         const size_t nGrid[3], const size_t subOrigin[3], const size_t subDims[3],
                         int nSub, bool periodic,
                         bool fVel, bool fDisp, bool fGrad, bool fLinear,
+                        // fVolW: moment weights = equal Eulerian-volume shares (out.momw their normalizer); fCaustic: ORs
+                        // orientation bits (order-invariant, so equal to the CPU's); fExact (--exact): float32 exact
+                        // clipping, nSub read only by a tet with an empty window; fScal / fSGrad: ONE scalar component
+                        // ('scal' = four vertex scalars per tet); windowMode (--grid-window): the sub-box is a window of
+                        // the full grid, normalized as in the full run
                         bool fVolW, bool fCaustic, bool fExact, bool fScal, bool fSGrad, bool windowMode,
+                        // massExtra: mass the caller adds itself; the fixed unit covers sum(masses) + massExtra. fxUnits:
+                        // the moment grids' units (cover the caller's own adds); scale > 0: handed back as words in out.fx
                         double massExtra, PSFixedUnits const& fxUnits,
                         PSGpuGrids& out, std::vector<uint32_t>& deferred, std::string& err);
 
@@ -170,12 +114,10 @@ struct DTFEGpuGrids
     std::vector<float> scalar_grad; // nCell*3  accumulated scalar gradient * volume [i*3 + d] (fSGrad)
 };
 
-// The run-wide fixed-point units of the five grids (fixed_units.h RunUnits, slots RU_DENSITY .. RU_SCALAR_GRADIENT,
-// which the caller copies in from its options): grid g = density, velocity, velocity gradient, scalar, its gradient,
-// the order of DTFEDepositParams.fxScale. One unit 2^-K[g] per grid for the whole run, so every split rounds every
-// share of an exact batch alike (dtfe_gpu_fixed.h dtfeBatchParams). on false: a run without them (the batches keep
-// their own units); has[g] false: that grid's K lies outside [-120, 120], or it is a scalar grid of
-// '--approx-phase-space-density' (DTFE.cpp runUnitsSetup), and it keeps its batch's unit.
+// The run-wide fixed-point units of the five grids (fixed_units.h RunUnits; order of DTFEDepositParams.fxScale: density,
+// velocity, velocity gradient, scalar, its gradient). One unit 2^-K[g] per grid for the whole run, so every split
+// rounds every share of an exact batch alike. on false: a run without them (batches keep their own units); has[g]
+// false: K lies outside [-120, 120], or a scalar grid of '--approx-phase-space-density' (DTFE.cpp runUnitsSetup).
 struct DTFEGpuRunUnits
 {
     bool     on = false;
@@ -184,30 +126,11 @@ struct DTFEGpuRunUnits
     uint32_t capBits[5] = {};   // the float bits of each grid's share cap (RunUnits::capBits; the kernels' compare)
 };
 
-// Runs the method-1 volume-averaged deposit on the default GPU device. Vertex positions
-// must be relative to the region's lower corner; vols/cnts/flats carry the CPU-computed
-// tetrahedron volume, sample count (0 = single-grid-cell fast path), and fast-path flat
-// grid index. 'sobol' is the shared quasi-random barycentric table (maxNN*3, every count
-// is <= maxNN). Thread-safe (serialized).
-// Returns false with 'err' set on any failure; outputs untouched in the "no device" case.
-// CONSUMES verts/dens/vels/vols/cnts/flats (see psGpuDepositFields); the CPU fallback
-// interpolates from the triangulation, not from these arrays.
-// fScal / fSGrad: the scalar field (ONE component, NO_SCALARS=1 builds; the caller declines the GPU
-// otherwise): 'scal' holds the four vertex scalars per tet (empty when both are off); the kernels
-// deposit it like the density (linear over the tet) and its constant gradient like the velocity
-// gradient.
-// exact (--exact): the analytic volume average instead of the samples -- every tetrahedron
-// is clipped against each grid cell of its bounding box (the kernels' float32 z-sweep, sweep_moments) and
-// deposits the linear interpolant's integral over each piece; 'cnts' then only marks the
-// single-cell tetrahedra (0), which take the centroid fast path as on the CPU. Matches the CPU's
-// double-precision r3d to float rounding.
-// The device sums every grid as an exact fixed-point integer per cell (metal/dtfe_deposit.metal's header says how
-// the kernels keep the sum independent of the order their threads add in) and the host converts each cell to these
-// floats once, so two runs give byte-identical grids (float atomics only where a batch's bound gives no unit:
-// dtfe_gpu_fixed.h). An exact batch sums in 128-bit words in the run-wide units 'units' (the same in every split;
-// units.on false: as a sampled batch); a sampled batch in 64-bit words, its units set by dtfe_gpu_fixed.h from a
-// bound of the batch's shares. A failed command buffer resumes from the batch's last checkpoint, the PS deposit's
-// policy (gpu_metal_retry.h); a false return after the upload means that policy gave up.
+// Runs the method-1 volume-averaged deposit on the default GPU device (thread-safe, serialized). Positions are relative
+// to the base cell / region corner; cnts = sample count (0 = single-cell fast path); exact (--exact): analytic volume
+// average, 'cnts' only marks single-cell tets. Every grid is an exact fixed-point sum per cell (metal/dtfe_deposit.metal
+// header), converted to float once, so two runs give byte-identical grids: 128-bit words in the run-wide 'units' for
+// an exact batch, else 64-bit words (dtfe_gpu_fixed.h). False with 'err' set on failure; CONSUMES the host arrays.
 bool dtfeGpuDepositAveraged1(std::vector<float>& verts,      // nTet*12: 4 vertices, relative to the base cell's corner (cells) or the region's
                              std::vector<float>& dens,       // nTet*4:  vertex densities
                              std::vector<float>& vels,       // nTet*12: 4 vertex velocities (empty if unused)
@@ -222,12 +145,11 @@ bool dtfeGpuDepositAveraged1(std::vector<float>& verts,      // nTet*12: 4 verti
                              DTFEGpuRunUnits const& units,   // the run-wide units (exact batches)
                              DTFEGpuGrids& out, std::string& err);
 
-// --grid-window, the exact deposit (CPU loop and the PS GPU host's item bounds; the kernel carries a twin):
-// the contiguous hull, in RAW (unwrapped) cell indices, of the part of a tetrahedron's span [lo, hi)
-// that lies in the window [o, o+m) or one of its periodic images (o+m may exceed n: a window wrapping
-// the seam). False when the span misses the window. A tetrahedron is shorter than the box, so at
-// most two images meet its span; their hull can hold a gap of in-grid cells outside the window,
-// which the per-cell window test skips cheaply. A non-periodic span is clamped to the grid first.
+// --grid-window, the exact deposit (CPU loop and the PS GPU host's item bounds; the kernel carries a twin): the
+// contiguous hull, in RAW (unwrapped) cell indices, of the part of a tetrahedron's span [lo, hi) inside the window
+// [o, o+m) or one of its periodic images (o+m may exceed n). False when the span misses the window. At most two
+// images meet a span; their hull can hold a gap of cells outside the window, which the per-cell test skips. A
+// non-periodic span is clamped to the grid first.
 inline bool psWindowHull(long lo, long hi, long n, bool periodic, long o, long m, long& outLo, long& outHi)
 {
     if (hi <= lo || m <= 0 || n <= 0) return false;
@@ -261,10 +183,9 @@ inline bool psWindowHull(long lo, long hi, long n, bool periodic, long o, long m
 // components per cell of the moment grids, by PSFxGrid index
 inline constexpr size_t PS_FX_COMPS[PS_FX_N] = { 3, 6, 9, 1, 1, 3, 1, 1, 3 };
 
-// One call's plan. Only the requested moment grids are allocated, host- and device-side: the m2 (24 B/cell) and
-// grad (36 B/cell) grids dominate the deposit's footprint and most runs need neither. A grid the caller gave a
-// fixed-point unit (fxUnits) is an integer sum: 8 B per component in place of the float's 4 (64-bit words), bound at
-// its float index AND at its word index (22 + slot, ps_deposit.metal). An unselected grid's bytes are 4 (a dummy).
+// One call's plan. Only the requested moment grids are allocated, host- and device-side. A grid with a fixed-point
+// unit (fxUnits) is an integer sum: 8 B per component (64-bit words) in place of 4, bound at its float index AND at
+// its word index (22 + slot, ps_deposit.metal). An unselected grid's bytes are 4 (a dummy).
 struct PSGpuPlan
 {
     bool     fVel = false, fDisp = false, fGrad = false, fVolW = false, fCaustic = false, fExact = false,
@@ -400,18 +321,11 @@ inline PSDepositParams psGpuParams(PSGpuPlan const& p, PSFixedUnits const& fxUni
     return P;
 }
 
-// --exact's work items: an item is (tet, block of blockCells cells of its bbox window); the host only
-// needs an UPPER bound of each window -- the kernel re-derives it in float and idles surplus blocks. The float and
-// double floors can differ only when the value is within rounding of an integer, so only such a bound is widened
-// (by eps, far above the float error): padding every axis by a cell instead would inflate a 2-3 cell window up to
-// 8x, and each idle item still pays the setup. Under windowMode the kernel's items cover the window's hull only
-// (window_hull), so the bound does too. recs = the nTet records (PS_TET_STRIDE floats each); bound[t] = tet t's
-// window cells, 0 for a window wholly outside the grid (no item: a leftover); blockCells grows so that at most
-// ~32M items result (16 to 32 cells per item run about as fast); nItems = the item count. Returns the summed bound.
-// The cap and blockCells also fix the item counts, and with them the bytes of the exact GPU grids: under the 64-bit
-// words the binaries compile (PS_FX_WORDS 0), the summing pass of depositExactItems (metal/ps_deposit.metal) sums
-// each item's cell weights in float and rounds that sum once into the tetrahedron's total sumW, so another cap or
-// block size changes sumW, every share m / sumW and the GPU exact grids.
+// --exact's work items: an item is (tet, block of blockCells cells of its bbox window); the host needs only an UPPER
+// bound of each window (the kernel re-derives it in float and idles surplus blocks), widened by eps only where the
+// float and double floors can differ; under windowMode it covers the window's hull. bound[t] = tet t's window cells
+// (0: no item, a leftover); blockCells grows so that at most ~32M items result. Returns the summed
+// bound. Cap and blockCells fix sumW (depositExactItems rounds each item's float sum once): another value changes it.
 inline double psExactItemBounds(float const* recs, size_t nTet, PSDepositParams const& P, const size_t nGrid[3],
                                 bool periodic, bool windowMode, std::vector<uint64_t>& bound, uint32_t& blockCells,
                                 size_t& nItems)
@@ -454,15 +368,11 @@ inline double psExactItemBounds(float const* recs, size_t nTet, PSDepositParams 
     return total;
 }
 
-// The exact items as a compact map from psExactItemBounds' per-tet bounds, the standard-DTFE kernel's form
-// (dtfe_gpu_fixed.h dtfeItemMap): tet t's items are its blocks k = 0 .. ceil(bound[t] / blockCells) - 1, item
-// numbers itemStart[t] + k, in tet order -- the same (tet, block) pairs in the same order as a list of pairs, at
-// 4 B per tet plus 4 B per 2^PS_ITEM_BLOCK_SHIFT items instead of 8 B per item. The kernels decode an item with a
-// short binary search (psItemOf in metal/ps_deposit.metal). 'map' holds psExactItemMapWords
-// words: itemStart[0 .. nTet] (itemStart[nTet] = nItems), then blockTet[b] = the tet holding item b << SHIFT, for
-// b = 0 .. (nItems >> SHIFT) + 1 (the last ones past the items hold nTet - 1). A tet with no items (bound 0: a
-// leftover) has itemStart[t] == itemStart[t + 1] and no block points at it. The Metal host fills its GPU buffer
-// in place. Item numbers are 32-bit: psExactItemMapFits first.
+// The exact items as a compact map from psExactItemBounds' bounds (dtfe_gpu_fixed.h dtfeItemMap's form): tet t's
+// items are its blocks k = 0 .. ceil(bound[t] / blockCells) - 1, numbered itemStart[t] + k in tet order. 'map' holds
+// psExactItemMapWords words: itemStart[0 .. nTet] (itemStart[nTet] = nItems), then blockTet[b] = the tet holding item
+// b << SHIFT, b = 0 .. (nItems >> SHIFT) + 1 (those past the items hold nTet - 1); the kernels decode an item by a
+// short binary search (psItemOf). Item numbers are 32-bit: psExactItemMapFits first.
 inline bool psExactItemMapFits(size_t nTet, size_t nItems) { return nTet < 0xFFFFFFFFu && nItems < 0xFFFFFFFFu; }
 inline size_t psExactItemMapWords(size_t nTet, size_t nItems) { return (nTet + 1) + (nItems >> PS_ITEM_BLOCK_SHIFT) + 2; }
 inline void psBuildExactItemMap(std::vector<uint64_t> const& bound, uint32_t const blockCells, size_t const nItems,
@@ -488,10 +398,8 @@ inline void psBuildExactItemMap(std::vector<uint64_t> const& bound, uint32_t con
 // escalated pace (paceTargetSec: the backend's GpuPace::targetSec).
 inline size_t psHostFirstChunk(bool const fExact, double const paceTargetSec, size_t const MIN_CHUNK)
 {
-    // --exact costs ~1-2 orders of magnitude more per tet (analytic clipping of
-    // every cell in the window vs a barycentric test per sample), so start far smaller: the
-    // adaptive controller only retargets AFTER the first chunk, and one oversized opening
-    // buffer is exactly what the watchdog kills.
+    // --exact costs far more per tet (analytic clipping of every cell in the window), so start far smaller: the
+    // controller only retargets AFTER the first chunk, and one oversized opening buffer is what the watchdog kills.
     size_t baseChunk = fExact ? 500 : 25000;
     if (long const v = Env::integer({"PS_GPU_CHUNK"}, 0); v > 0) baseChunk = size_t(v);
     // an escalated pace (an earlier partition's failures) opens with a proportionally smaller chunk
@@ -510,11 +418,9 @@ struct PSHostCkEnv
 // Reads how often a pass checkpoints and after how much clean GPU work an escalated pace steps back.
 inline PSHostCkEnv psHostCheckpointEnv()
 {
-    // DTFE_GPU_CHECKPOINT_CHUNKS=<n>: a checkpoint every n command buffers (0 = only the pass-start
-    // snapshot). Unset: every ~10 s of GPU work (n = 10 s / the current buffer target, so an escalated pace of
-    // 0.02 s buffers does not checkpoint 12x as often). A checkpoint copies the accumulator grids (~24 B per cell
-    // for density + velocity: ~0.4 GB at 256^3) into ONE spare host
-    // copy, allocated at the first checkpoint and freed before the deposit lets go of the GPU (one at a time).
+    // DTFE_GPU_CHECKPOINT_CHUNKS=<n>: a checkpoint every n command buffers (0 = only the pass-start snapshot). Unset:
+    // every ~10 s of GPU work (n = 10 s / the current buffer target). A checkpoint copies the accumulator grids into
+    // ONE spare host copy, allocated at the first checkpoint and freed before the deposit lets go of the GPU.
     long ckChunks = -1;
     if (Env::isSet("DTFE_GPU_CHECKPOINT_CHUNKS")) ckChunks = std::max(0L, Env::integer("DTFE_GPU_CHECKPOINT_CHUNKS", 0));
     // DTFE_GPU_PACE_RECOVER_SEC=<s>: the clean GPU work after which an escalated pace steps back (GpuPace)
@@ -540,26 +446,9 @@ inline void psHostReportPasses(char const* backend, char const* unit, bool const
 }
 
 // DTFE_GPU_TIMING=1: where a psGpuDepositFields call spends its time, phase by phase, in seconds (both hosts). The
-// hold of the GPU runs from taking the host's ctxMutex to the release of the call's buffers: the GPU idles in all
-// of it but 'kernels'. The call prepares its work before it takes the lock, so the partitions that queue for the
-// GPU do that work while another one holds it; it copies its grids back and frees its buffers before it lets go,
-// so one deposit's buffers exist at a time: the auto-tuner books them once (unified memory).
-//   before the hold:
-//   device     the device and its kernels' first use (ctx(): the runtime compile of the Metal source, once)
-//   plan       the plan and the parameter block (psGpuPlan, psGpuParams)
-//   bounds     the exact items' window bounds (psExactItemBounds)
-//   fill       the exact items' map (psBuildExactItemMap, into its GPU buffer)
-//   in the hold:
-//   uploads    the per-tet records to the device, the zeroed grids and the exact items' per-tet totals
-//              (psHostUploadBuffers)
-//   kernels    the passes' command buffers that succeeded (their 'busy' seconds)
-//   gaps       the idle gaps between them (the pace) and the settling sleeps after a failure
-//   leftovers  the exact items' leftovers around their own kernels: the scan, the gathers, the write-back
-//   copyBack   the output grids' shapes (psGpuInitGrids), the deferred tets' scan and the grids back to the host
-//              (psHostCopyBack)
-//   releases   the device buffers' release and the snapshot's host copies
-// The checkpoints' copies are GpuSnapshot::sec; what is left of the hold (encoding, the guard counters' reads, the
-// failed buffers' own time) is reported as 'other'.
+// call prepares before it takes the host's ctxMutex (device, plan, bounds, fill), then holds the GPU (uploads, kernels,
+// gaps, leftovers, copyBack, releases); the GPU idles in all of the hold but 'kernels'. The checkpoints' copies are
+// GpuSnapshot::sec; the rest of the hold (encoding, guard-counter reads, failed buffers) is reported as 'other'.
 struct PSGpuPhaseTimes
 {
     double device = 0., plan = 0., uploads = 0., bounds = 0., fill = 0., kernels = 0., gaps = 0., leftovers = 0.,

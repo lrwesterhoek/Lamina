@@ -1,43 +1,6 @@
 #!/usr/bin/env bash
-# Output bytes that do not depend on the split: the run-wide fixed-point units (src/fixed_units.h RunUnits). Every
-# exact '_a' grid of an all-GPU or all-CPU standard-DTFE run sums its shares in ONE unit per grid for the whole run,
-# set before any partition or thread sub-domain exists (DTFE.cpp runUnitsSetup), in words no order of the adds can
-# wrap -- the GPU's four 32-bit limbs (metal/fixed_words.metal.inc), the CPU's and the face pass's 64-bit words with
-# an exact carry (FxWords) -- from inputs that follow neither CGAL's cell order nor its labelling (the exact vertex
-# star sums, triangulation.cpp vertexDensityStarSums; the single-cell volumes, canonicalTetVolume). So the partition
-# split, the thread sub-domain split, the deposit's thread count and the parallel insert's order reach no output
-# byte. Every comparison is cmp of every output file. demo/z0_64.gadget (tracked in the repo) at 64^3, --periodic
-# --padding 12 (enough for every split to hold the same tetrahedra), '--exact', density_a velocity_a divergence_a
-# shear_a (the gradient family from the face pass, the default), single precision:
-#   U1  every run prints ONE 'fixed-point units (run-wide):' line, the same in every run of one test shift, whatever
-#       its split, threads or device
-#   S1  (a GPU build) '--gpu' at '--partition 1 1 1' (OMP_NUM_THREADS=1: one sub-domain), '2 2 2' (4: a team of 4
-#       sub-domains in each partition) and '3 3 3' (6): every output byte-identical, and every batch's timing line
-#       says 'run-wide 128-bit fixed-point sums'; with DTFE_TEST_RUN_UNIT_SHIFT=-20 (every unit 2^20 coarser, so
-#       nearly every share rounds) '1 1 1' and '3 3 3' byte-identical too, and different from the shift-0 run (the
-#       hook reaches the words)
-#   S2  the same without '--gpu' (the CPU exact average in the run-wide words), and DTFE_DEPOSIT_THREADS 1 against
-#       6 at '2 2 2': every output byte-identical
-#   S3  DTFE_FACE_CHECK=1 (the deposits compute the per-tetrahedron gradient as well; the face words replace it, and
-#       the FACE-CHECK lines compare the two) at '1 1 1' and '3 3 3' on each device: byte-identical to each other and
-#       to the run without it; and the GPU's '3 3 3' face family ('.a_velDiv', '.a_velShear') == the CPU's (the face
-#       pass reads the tessellation only, whatever the deposit)
-#   S4  the parallel insert: DTFE_TRIANGULATION_THREADS=6 (OMP_NUM_THREADS=6, '--partition 1 1 1 --max-concurrent 1':
-#       one tessellation on up to 6 TBB threads, its cell order and labelling other than the sequential insert's)
-#       against S1's / S2's sequential '1 1 1' run: every output byte-identical. Without a '(parallel, TBB, N
-#       threads)' line (a build without TBB, or one free core) the pair compares 6 threads against 1 only
-#   O1  limbs and carries, density_a velocity_a (no face pass: at these shifts every face flux would take a carry
-#       entry): shift +40 on the GPU (a cell of the mean density holds 2^87..2^88 units: device limb 2; limb 3 in
-#       cells of a few hundred times the mean), +17 on the CPU (a cell of the mean density holds 2^64..2^65 units:
-#       the words wrap, the carry lists take the crossings and the high parts of shares of 2^63 units or more; at
-#       +40 every CPU share would take an entry). No share left out (each density share lies below 4.01 cell
-#       volumes, 2^90 units at +40, the cap 2^94); '1 1 1' and '3 3 3' byte-identical; each grid within 1e-6 of
-#       its rms of the shift-0 run
-#   O2  the share cap: shift +60, density_a velocity_a, puts nearly every share at or above the cap of 2^94 units:
-#       each run warns once, naming its left-out density and velocity shares; on the CPU '1 1 1' and '3 3 3'
-#       byte-identical; on the GPU (a GPU build) one '1 1 1' run, for the device's cap compare
-# The double build keeps its double CPU sums, its double vertex star sums and CGAL's single-cell volumes, whose last
-# bits follow the split: SKIP there. 24 runs (13 on the CPU, 11 more on the GPU in a GPU build).
+# Output bytes that do not depend on the split: the run-wide fixed-point units (src/fixed_units.h RunUnits); cmp of every output file.
+# Checks U1, S1-S4, O1, O2 print their own labels; the double build SKIPs (its CPU sums are doubles).
 # Usage: tests/split_bytes_check.sh [--no-build]   (--no-build is accepted and ignored: nothing is built)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,9 +32,8 @@ COMMON=(--grid 64 --periodic --padding 12 --exact --run-mode performance --verbo
 F=(--field density_a velocity_a divergence_a shear_a)
 FDV=(--field density_a velocity_a)
 
-# run <name> [VAR=value ...] -- [args ...]: the standard binary on SNAP with COMMON and the args, its log in
-# <name>.log. A failed run, or a '--gpu' run that fell back to the CPU, stops the suite. Its units line is filed for U1
-# under its test shift (read from the assignments).
+# run <name> [VAR=value ...] -- [args ...]: the standard binary on SNAP, its log in <name>.log. A failed run, or a
+# '--gpu' run that fell back to the CPU, stops the suite; its units line is filed for U1 under its test shift.
 run() {
     local name="$1"; shift
     local envs=()

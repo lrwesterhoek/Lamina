@@ -267,16 +267,11 @@ struct PSPartitionPlan
     }
 };
 
-/* Each partition's predicted COST, for the partition loop's ETA. Partitions hold about the same
-   number of particles (a Lagrangian split of a lattice), so the particle count says nothing; what makes one
-   partition far dearer than another is the collapsed structure in it -- folded tetrahedra inside a halo span
-   the halo in Eulerian space, so the deposit visits ~(halo size)^3 cells for each of them. The proxy: each
-   particle weighs the number of particles in its cell of a coarse Eulerian count grid with ~1.6 Mpc cells
-   (the size of the largest haloes; 8..256 cells per axis), i.e. the sum of the local density over the
-   partition's particles -- a pair count that grows with the mass in dense regions. Checked against one
-   TNG50-3-Dark z=0 run of 125 partitions: log-correlation 0.86 with the measured partition times; finer cells
-   and a squared weight per particle do worse. One O(N) pass. Uniform weights when the particles are not in
-   memory. */
+/* Each partition's predicted COST, for the partition loop's ETA. Partitions hold about the same number of particles, so the particle
+   count says nothing; collapsed structure makes one dearer (folded tets inside a halo span it in Eulerian space). The proxy: each
+   particle weighs the number of particles in its cell of a coarse Eulerian count grid (~1.6 Mpc cells, the size of the largest
+   haloes; 8..256 cells per axis), i.e. the sum of the local density over the partition's particles. Fitted on one TNG50-3-Dark z=0
+   run of 125 partitions. One O(N) pass; uniform weights when the particles are not in memory. */
 static std::vector<double> psPartitionCosts(std::vector<Particle_data> const &particles, PSPartitionPlan &plan,
                                             User_options const &options)
 {
@@ -346,18 +341,11 @@ static void psGpuShareNote(User_options const &u, char const *cause, char const 
             << ": every partition deposits on " << device << ".\n" << MESSAGE::Flush;
 }
 
-/* THE GPU SHARE ('--gpu-share'; the partition loop's rule of the index, psPartitionedRun): of a partitioned GPU
-   run's exact deposits, the per mille that run on the GPU, the others on the CPU at the same time. Resolved before the
-   plan, since the tuner books a mixed run's partitions by it (auto_tune.cc). First match wins:
-     1. where it does not apply -- a build without the 3D GPU deposit, a run on the CPU, the sampled deposit --
-        1000, and a number given is told why ('auto' and 'mixed' are silent);
-     2. a number given;
-     3. 'auto' or 'mixed' with '--resume': the checkpoint's, from its key's 'gpu-share=' line (none: 1000), as the
-        split is adopted from it (DTFE_setup); a checkpoint that cannot be read leaves it to the next rule and the
-        resume's own refusal;
-     4. 'auto' (the default): the run mode's (autoTuneGpuShare); 'mixed': the same model in every run mode, so that
-        gentle and balanced use both devices too (every other guard of the model stays).
-   One domain has no partition loop, and the plan alone tells: DTFE_setup sets 1000 after it. */
+/* THE GPU SHARE ('--gpu-share'; the partition loop's rule of the index, psPartitionedRun): the per mille of a partitioned GPU run's
+   exact deposits that run on the GPU, the others on the CPU at the same time. Resolved before the plan (the tuner books a mixed run
+   by it). First match wins: 1. where it does not apply (no 3D GPU deposit, a CPU run, the sampled deposit): 1000, a given number is
+   told why; 2. a number given; 3. 'auto' or 'mixed' with '--resume': the checkpoint's (its key's 'gpu-share=' line; none: 1000);
+   4. 'auto': the run mode's (autoTuneGpuShare); 'mixed': the same model in every run mode. One domain has no partition loop. */
 static void psResolveGpuShare(User_options &u, size_t const nParticles)
 {
     bool const number = u.psGpuShareSpec >= 0;   // (only a given number: 'auto' is the default)

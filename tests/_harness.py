@@ -1,9 +1,6 @@
-"""The shared harness of the Python suites (tests/py_*_test.py): the preamble, the PASS / FAIL / SKIP lists, Skip,
-check(name, fn), check_ok(name, ok, detail) and the closing RESULT line.
-
-Import it before any python/ module and call setup() first: the figure root must point at a temp folder before
-config is imported. Standard library only, so it never imports config itself.
-"""
+"""The shared harness of the Python suites (tests/py_*_test.py): PASS / FAIL / SKIP lists, check(), check_ok() and the
+RESULT line. Import it before any python/ module and call setup() first (the figure root must point at a temp folder
+before config is imported). Standard library only."""
 
 import atexit
 import os
@@ -22,10 +19,8 @@ class Skip(Exception):
 
 
 def setup(prefix, paths=("python", "python/plot"), mpl_agg=True, figures_sub=None):
-    """The suites' preamble: each of 'paths' (repo-relative) inserted at the front of sys.path in turn (the last one
-    ends up first), a fresh temp folder (mkdtemp 'prefix') as DTFE_FIGURES_ROOT -- or its subfolder 'figures_sub'
-    -- removed at exit, so a suite never writes into the real figure root; mpl_agg defaults MPLBACKEND to Agg.
-    Returns the temp folder."""
+    """The suites' preamble: each of 'paths' (repo-relative) put at the front of sys.path, a fresh temp folder
+    (mkdtemp 'prefix') as DTFE_FIGURES_ROOT (or its subfolder 'figures_sub'), removed at exit. Returns the temp folder."""
     for p in paths:
         sys.path.insert(0, str(REPO / p))
     tmp = tempfile.mkdtemp(prefix=prefix)
@@ -46,11 +41,9 @@ def data_root():
 
 
 def check(name, fn, missing=(), data_backed=False, required=False, crash_traceback=True):
-    """Run fn() and print one line: PASS when it returns; SKIP on Skip -- a FAIL instead when 'required' and
-    DTFE_TEST_REQUIRED=1; FAIL with the message on an AssertionError. An exception of the 'missing' types, or
-    dtfelib's NoDataRoot (DTFE_DATA_ROOT unset), is a SKIP ('data not on disk') when data_backed; a 'missing' one is
-    a FAIL otherwise. Any other exception is this check's FAIL, not the end of the run, followed by the traceback's
-    last six lines unless crash_traceback is False."""
+    """Run fn() and print one PASS / SKIP / FAIL line: SKIP on Skip (a FAIL when 'required' and DTFE_TEST_REQUIRED=1),
+    FAIL on an AssertionError. A 'missing'-type exception or NoDataRoot is a SKIP when data_backed, else a FAIL.
+    Any other exception is this check's FAIL, with the traceback's last six lines unless crash_traceback is False."""
     try:
         fn()
         PASS.append(name)

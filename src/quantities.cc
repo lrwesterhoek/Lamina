@@ -183,12 +183,9 @@ void Quantities::finalizeHiddenStreams()
 
 
 #ifdef PHASE_SPACE
-// PS-DTFE partition path: partitions accumulate weighted moments sum(w_s f_s) and per-cell weights
-// sum(w_s) (the Eulerian-volume shares of the velocity family, the dispersion's own mass shares); divide once
-// here after all partitions are summed, since averaging is non-linear.
-// The weight is either the explicit mass_weight grid, or -- when the density field was selected and
-// the partitions aliased the weight to it -- reconstructed as density * weightFromDensityScale
-// (= density * cellVolume * averageDensity, undoing the rho/rho_bar conversion; saves 4 B/cell).
+// PS-DTFE partition path: partitions accumulate weighted moments sum(w_s f_s) and weights sum(w_s); divide once here
+// after all partitions are summed (averaging is non-linear). The weight is the mass_weight grid or, when the partitions
+// aliased it to the density field, density * weightFromDensityScale (undoing the rho/rho_bar conversion).
 void Quantities::normalizePhaseSpace(Field const &field, Real const weightFromDensityScale,
                                      unsigned const streamsTwins)
 {
@@ -283,14 +280,10 @@ void Quantities::psStreamsTwinsCell(size_t const i, Pvector<Real,noGradComp> g)
 }
 
 
-// The cell map of a sub-grid merge (addFromSubgrid): 'src' is a sub-grid (dims m, global origin o) of the full grid
-// 'full', or -- mainOrigin/mainDims given -- of this grid's own window of it (--grid-window). Each local cell goes where
-// subgridTarget (quantities.h) sends it, axis by axis, so the map is one table per axis: the destination coordinate
-// of every local index, or -1 outside the window.
-// The merge then runs ROW by row (the last axis: contiguous in both grids), each row's destination start computed
-// once and the row cut into runs only where the periodic wrap (or the window) breaks it -- no per-cell divisions and
-// modulos -- and, since every destination cell receives at most one source cell, the rows split over threads: each
-// element still gets the one '+=' (or OR) it got, so the sums are the same bit for bit.
+// The cell map of a sub-grid merge (addFromSubgrid): 'src' is a sub-grid (dims m, origin o) of 'full' or of this grid's
+// own window of it (--grid-window); subgridTarget (quantities.h) sends each local cell to a destination, axis by axis
+// (-1 outside the window). The merge runs ROW by row, cut into runs where the wrap or window breaks it, and the rows
+// split over threads: each destination cell gets the one '+=' (or OR) it got before, so the sums are bit-identical.
 struct SubgridRowMap
 {
     std::vector<long> axis[NO_DIM];
@@ -372,8 +365,8 @@ void mergeSubgridRows(std::vector<T> const &src, std::vector<T> &dst, SubgridRow
     }
 }
 
-// the same, cell by cell in local order (the merge's former loop): a sub-grid wider than the full grid on some axis
-// sends two of its cells to one destination cell, whose adds must then keep their order
+// the same, cell by cell in local order: a sub-grid wider than the full grid on some axis sends two of its cells to
+// one destination cell, whose adds must keep their order
 template <typename T, class Op>
 void mergeSubgridCells(std::vector<T> const &src, std::vector<T> &dst, size_t const *o, size_t const *m,
                        size_t const *full, size_t const *mainOrigin, size_t const *mainDims, Op const &op)
@@ -429,7 +422,7 @@ void Quantities::addFromSubgrid(Quantities const &other, size_t const *fullGrid,
         } );
     };
     if ( !map.oneToOne )
-    {   // (not a sub-box of the full grid: the former cell-by-cell order, on this thread)
+    {   // (not a sub-box of the full grid: cell-by-cell order, on this thread)
         forEachField( [&](FieldInfo const &, auto merge, auto member)
         {
             auto const &src = other.*member;

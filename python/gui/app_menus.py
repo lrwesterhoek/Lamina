@@ -1,8 +1,6 @@
 """MainWindow's menu bar (MenusMixin, moved from app.py): the File, Edit, View, Run, Explore, Queue, Figures and
-Runs menus, the _sync_*_actions methods that keep them in step with the window's buttons, and what they
-offer beyond those buttons: copying, showing and exporting a job's commands (a bash script or a SLURM job),
-the Setup dialog and the demo. The names app.py defines are read through _app, imported last (see
-app_tabs.py)."""
+Runs menus, the _sync_*_actions methods that keep them in step with the window's buttons, and what they offer
+beyond those buttons: copying, showing and exporting a job's commands (a bash script or a SLURM job)."""
 
 from __future__ import annotations
 
@@ -24,9 +22,7 @@ class MenusMixin:
     def _build_menus(self):
         """The menu bar: Setup, running (Run, Add to Queue, Stop, the memory check), the Explore
         tab's, the queue's, the figure browser's and the Runs browser's actions, the commands
-        behind a run (shown, copied, exported), and Help. Each also has its button in the window
-        (Help aside); the _sync_*_actions methods keep the Run, Explore, Queue, Figures and Runs
-        menus in step with those buttons."""
+        behind a run (shown, copied, exported), and Help."""
         bar = self.menuBar()
         for build in (self._build_file_menu, self._build_edit_menu, self._build_view_menu, self._build_run_menu,
                       self._build_explore_menu, self._build_queue_menu, self._build_figures_menu,
@@ -195,10 +191,7 @@ class MenusMixin:
         getattr(self.runs, "b_" + what).click()
 
     def _figures_menu(self, what: str, mode: int = 0):
-        """A Figures menu item: its button (or drop-down) in the figure browser. Refreshing and
-        choosing which figures to list work from anywhere and bring the browser up; opening and
-        revealing act on the figure selected there, so they are only offered while it is on
-        screen."""
+        """A Figures menu item: its button (or drop-down) in the figure browser."""
         if what in ("refresh", "mode"):
             self._bring_up(self.figures)
             if what == "mode":

@@ -1,64 +1,6 @@
-"""Lagrangian (particle-ID) linking of voids between snapshots: the FATE of every void.
-
-The merger-tree tracers of voids.py follow a void through the few subhalos near it, which a DM-only void barely
-holds at z > 3. Here the void is followed through its own MATTER instead: the particles inside it at one snapshot
-are found again, by ParticleID, at the next, and the voids that hold them there are its descendants.
-
-    from dtfelib import lagrangian as L
-    a = L.void_members(L.combined_path(sim, 50), *L.void_spheres(cat50, 512, rows50))   # MemberSet (followed)
-    pool, r_cells = L.void_pool(cat67, 512, rows67)                                       # followed first, then the rest
-    b = L.void_members(L.combined_path(sim, 67), *L.void_spheres(cat67, 512, pool, r_cells), n_sample=rows67.size)
-    lk = L.link(a, b)                     # sparse contingency: shared particle counts (prog, desc, count)
-    fate = L.classify(lk)                 # per progenitor: class, main descendant, shared fractions
-    (lk,), _ = L.link_stream([a], L.combined_path(sim, 67), *L.void_spheres(cat67, 512, pool, r_cells),
-                             n_sample=rows67.size)                # the same link, b never held (big boxes)
-
-DEFINITIONS (each threshold is a module constant below):
-  * the voids FOLLOWED (the progenitors, and the only voids a chain continues through) are the DISTINCT
-    well-resolved voids with a measured radius R_v (catalog.distinct_mask, the profile / abundance sample):
-    neighbouring minima of one void are not linked as voids of their own;
-  * the DESCENDANTS are drawn from the whole POOL of the next catalogue (void_pool): the followed voids
-    with their R_v spheres, then EVERY other minimum with a usable radius -- min(R_v, R_eff), R_eff where it has no
-    R_v and R_v where it has no R_eff (not well resolved), the claim rule of catalog.distinct_mask. At late times the
-    followed sample is a small part of the minima (TNG100-3-Dark z = 0: 77 of 495; 416 have a usable radius), and with
-    the sample as the only descendants a void whose matter sits in an unfollowed minimum would count as VANISHED,
-    mixing real dissolution with dropping out of the sample (the census's title question);
-  * a void's MEMBERS are the particles within its radius of its centre (the centre of its minimum's grid cell,
-    periodic), the radius capped at FATE_MAX_SIGMA (15) smoothing lengths for followed and pool voids alike
-    (the R_v search reaches 24: FATE_MAX_SIGMA below); overlapping spheres may share a particle, so a progenitor's
-    shared fractions can sum above 1;
-  * SURVIVE: >= SURVIVE_FRAC (50%) of its members end in one descendant void, which no other progenitor also gets
-    >= 50% of its members into; MERGE: two or more progenitors pass >= 50% to the same descendant; SPLIT: no
-    descendant gets 50%, but two or more get >= SPLIT_FRAC (25%) each; UNRESOLVED: it would survive or merge, but its
-    main descendant is not followed (a minimum that is not distinct, not well resolved or without an R_v); VANISH:
-    NO void of the pool receives these thresholds (collapsed, crushed between walls, or spread thinner than 25% over
-    every minimum). The main descendant is the followed void with the largest share when one holds >= 50% (an
-    unfollowed minimum overlapping it -- often a sub-minimum of the same void -- may hold more: the matter is still in
-    the followed void), else the pool void with the largest share.
-  CAVEAT (measured on TNG50-3-Dark): at z >= 2 the R_v spheres of the distinct voids overlap heavily (the
-  member pairs are 1.2-1.8x the particles), so two overlapping progenitors that share their matter both pass 50% to
-  one descendant: MERGE is over-counted there against a partition of the matter. EXCLUSIVE members
-  (void_members(..., exclusive=True); plot_void_fate.py --exclusive) give each particle to the sphere whose centre is
-  nearest in units of its R_v: a partition, not the literal definition, so it is an option. Of the pool, a particle
-  inside any followed sphere goes to a followed void (so the progenitors' members are the same as without the pool);
-  only the matter outside every followed sphere is shared out among the other minima.
-
-MEMORY: a combined snapshot holds the whole box (TNG50-3-Dark: 1.57e8 particles, 3.1 GB of IDs and positions); it is
-read in CHUNK-particle slices (h5py, float32 positions), each sorted into a periodic cKDTree only for the time its
-spheres are queried. The descendant POOL's member pairs (5-7e8 on TNG100-3-Dark: the ungated minima are large,
-median R_v ~70 cells of 512) are NEVER held (link_stream): each chunk's particles are looked up in
-the progenitor sets and the matched pairs counted into a dense (progenitor, descendant) table. What remains is the
-FOLLOWED voids' member pairs, of the progenitor snapshot (12 bytes each) and of the one being read (kept from the
-same pass for the next link: 8 bytes each, one packed id << 32 | void key, sorted in place: _PairCollector), plus a
-chunk's working set; the census keeps a third set for the direct link (--ref-snap) and makes the last interval's two
-links in one pass. Measured (maximum RSS, whole census, R_v reach 15 sigma): TNG100-3-Dark 11.6 GB (30.6 GB when
-the pool's pairs are held), TNG50-3-Dark 15 GB; TNG300-3-Dark z = 10 -> 5 -> 3 18.6 GB. The pairs
-scale with the membership spheres: uncapped at the 24 sigma R_v reach, the followed spheres of z >= 3 hold 5-7 pairs
-per particle (TNG100 z = 5: 6.2e8) and TNG100 peaks at 29.6 GB over z = 20 -> 3 -- hence FATE_MAX_SIGMA, which holds
-the spheres, and these numbers, at the 15 sigma reach whatever pipeline.R_V_MAX_SIGMA is. The
-chunks run in up to FATE_WORKERS_MAX threads (fate_workers: capped by the free memory, DTFE_FATE_WORKERS=1 serial),
-each adding a chunk's working set to these peaks.
-"""
+"""Lagrangian (particle-ID) linking of voids between snapshots: the FATE of every void. The particles inside a
+void are found again by ParticleID at the next snapshot; classes SURVIVE / MERGE / SPLIT / UNRESOLVED / VANISH
+follow from the shared fractions (thresholds are module constants). Chunked reads, link_stream never holds the pool."""
 
 from __future__ import annotations
 
@@ -84,26 +26,18 @@ CLASS_CODE = {c: i for i, c in enumerate(CLASSES)}
 # the cached links' format: 2 = descendants from the whole pool; a version-1 link (descendants = the
 # followed sample only) counts the matter in unfollowed minima as vanished, so it is never served
 LINK_VERSION = 2
-CHUNK = int(os.environ.get("DTFE_FATE_CHUNK", 8_000_000))   # particles per read slice (8e6: ~0.6 GB with its tree)
-# The membership sphere's largest radius, in smoothing lengths of the catalogue's own smoothing: members
-# are the particles within min(radius, FATE_MAX_SIGMA sigma) of the centre, followed and pool spheres alike. The R_v
-# SEARCH reaches 24 sigma (pipeline.R_V_MAX_SIGMA: at 15 the R_v tail is cut, not measured), but the
-# census keeps 15 sigma spheres. Uncapped, the minima without a crossing within
-# 15 sigma (17-25% of them, pipeline.R_V_MAX_SIGMA's note) get spheres of 15-24 sigma, up to 240 of 512 cells
-# (43% of the box volume); a sphere's pairs go with R^3, so the followed member pairs triple (TNG100-3-Dark z = 5:
-# 6.2e8 for 9.4e7 particles, ~2e8 at 15 sigma; 29.6 GB over z = 20 -> 3, TNG300 ~60 GB on a 64 GB machine) and the
-# giant overlapping spheres inflate MERGE at z >= 3. The measured R_v is not touched: the catalogue keeps it, and the
-# fate table and figure report it.
+CHUNK = int(os.environ.get("DTFE_FATE_CHUNK", 8_000_000))   # particles per read slice
+# The membership sphere's largest radius, in smoothing lengths of the catalogue's own smoothing: members are the
+# particles within min(radius, FATE_MAX_SIGMA sigma) of the centre, followed and pool spheres alike. The R_v
+# SEARCH reaches 24 sigma, but uncapped the pair count grows with R^3 and the giant overlapping spheres inflate
+# MERGE at z >= 3. The measured R_v is not touched.
 FATE_MAX_SIGMA = 15.0
 
 
-# Chunks made at once, in threads.
-# A chunk's tree build, ball queries, running best / pair pieces and ID lookups mostly release the GIL; the chunks
-# are handed out in their serial order, so every result is the serial one bit for bit. Measured on TNG100-3-Dark
-# 050 -> 067 (exclusive, members + streamed link, a loaded machine): 190-203 s on one core, 81-84 s with 4 workers
-# (2.4x), peak 5.8-6.0 -> 7.4 GB. Each worker holds one chunk's working set -- its slice, the tree, the query
-# pieces (all pairs of the chunk without 'exclusive') -- so the count is capped by the memory the other programs
-# leave (_available_bytes) at the start of each pass: DTFE_FATE_WORKERS overrides (1 = serial).
+# Chunks made at once, in threads. A chunk's tree build, ball queries and ID lookups mostly release the GIL; the
+# chunks are handed out in their serial order, so every result is the serial one bit for bit. Each worker holds a
+# chunk's working set, so the count is capped by the free memory (_available_bytes): DTFE_FATE_WORKERS overrides
+# (1 = serial).
 FATE_WORKERS_MAX = 4
 _WORKER_BYTES_PER_PARTICLE = {True: 160, False: 400}    # exclusive / overlapping members, per particle of a CHUNK
 
@@ -185,10 +119,9 @@ def void_sample(cat, n_grid: int) -> np.ndarray:
 
 
 def membership_cap_cells(sigma_cells=None) -> float:
-    """The largest membership radius, in cells: FATE_MAX_SIGMA smoothing lengths of the catalogue's
-    smoothing 'sigma_cells' -- by default config.SMOOTHING_SIGMA_CELLS, the smoothing the pipeline serves (and measures
-    R_v in) the catalogue at; a catalogue records no sigma of its own. A sigma below one cell counts as one, as in the
-    R_v search (pipeline.void_radii_cells), so the cap is a 15 sigma reach also for an unsmoothed (s0) set."""
+    """The largest membership radius, in cells: FATE_MAX_SIGMA smoothing lengths of 'sigma_cells' (default
+    config.SMOOTHING_SIGMA_CELLS; a catalogue records no sigma of its own). A sigma below one cell counts as one,
+    as in the R_v search (pipeline.void_radii_cells)."""
     if sigma_cells is None:
         import config
         sigma_cells = config.SMOOTHING_SIGMA_CELLS
@@ -196,13 +129,9 @@ def membership_cap_cells(sigma_cells=None) -> float:
 
 
 def void_pool(cat, n_grid: int, sample_rows, sigma_cells=None) -> tuple[np.ndarray, np.ndarray]:
-    """(catalogue rows, radii in CELLS) of the DESCENDANT pool: the followed sample first, in its order and
-    with its R_v (so pool index == sample index for the first len(sample_rows), and a followed void's sphere is the
-    same as progenitor and as descendant), then every other row with a usable radius, ascending: min(R_v, R_eff), R_eff
-    where it has no R_v (catalog.distinct_mask's claim rule) and R_v where it has no R_eff -- a minimum the ellipsoid
-    gate dropped (its curvature length, not its R_v, is large: ~78% of the z = 0 minima) is a void the matter can be
-    in. A row with neither radius cannot hold members and is left out. Every radius, followed or not, is capped at
-    membership_cap_cells(sigma_cells) (FATE_MAX_SIGMA smoothing lengths; a NaN stays NaN: no members)."""
+    """(catalogue rows, radii in CELLS) of the DESCENDANT pool: the followed sample first (pool index == sample
+    index), then every other row with a usable radius, ascending: min(R_v, R_eff), R_eff where it has no R_v and
+    R_v where it has no R_eff. Every radius is capped at membership_cap_cells(sigma_cells); a NaN stays NaN."""
     from . import catalog, pipeline
     sample_rows = np.asarray(sample_rows, dtype=np.int64)
     rv = catalog.r_v_cells(cat)
@@ -258,12 +187,9 @@ class MemberSet:
 
 
 class _PairCollector:
-    """Member pairs gathered piece by piece and handed back sorted by id (the census's memory): while every
-    id fits 32 bits (TNG300-3-Dark: 2.4e8 particles) a pair is ONE uint64 key id << 32 | void, sorted IN PLACE -- 8
-    bytes per pair while gathering and at most 16 while joined, where separate ids + voids + an argsort index + the
-    sorted copies take ~32. The order is the stable argsort's: a particle lives in one chunk, and its pairs arrive in
-    sphere order (void ascending) there, so (id, void) order IS the arrival order of equal ids. Larger ids: the
-    separate arrays and the stable argsort."""
+    """Member pairs gathered piece by piece and handed back sorted by id. While every id fits 32 bits a pair is ONE
+    uint64 key id << 32 | void, sorted IN PLACE; the order is the stable argsort's, since a particle lives in one
+    chunk and its pairs arrive in sphere order. Larger ids: separate arrays and the stable argsort."""
 
     def __init__(self):
         self.packed, self.keys, self.ids, self.void = True, [], [], []
@@ -304,12 +230,9 @@ class _PairCollector:
 
 
 def void_members(particles, centres, radii, exclusive: bool = False, n_sample: int | None = None) -> MemberSet:
-    """Members (within R_v of the centre, periodic) of every sphere, from an iterable of (ids, frac) chunks --
-    iter_particles(path), or a single in-memory (ids, frac) pair in a list. exclusive: a particle
-    inside several spheres belongs only to the one whose centre is nearest in units of its R_v -- a partition of
-    the matter, so overlapping progenitors cannot both pass 50% of the same particles (EXCLUSIVE below). 'n_sample':
-    the first n_sample spheres are the followed voids of a pool; under 'exclusive' a particle inside any
-    of them goes to the nearest of THOSE, so MemberSet.sample() is exactly the followed spheres' own partition."""
+    """Members (within R_v of the centre, periodic) of every sphere, from an iterable of (ids, frac) chunks.
+    exclusive: a particle inside several spheres goes to the one whose centre is nearest in units of its R_v. n_sample:
+    the first n_sample spheres are a pool's followed voids; under 'exclusive' a particle goes to the nearest of THOSE."""
     radii = np.asarray(radii, dtype=np.float64).reshape(-1)
     k = radii.size
     n_s = k if n_sample is None else int(n_sample)
@@ -328,14 +251,8 @@ def void_members(particles, centres, radii, exclusive: bool = False, n_sample: i
 def _chunk_pairs(particles, centres, radii, exclusive: bool, n_s: int, with_index: bool = False, workers=None,
                  post=None):
     """Per chunk of 'particles' (a path or an iterable of (ids, frac)): ([ids pieces], [void pieces], particles in
-    the chunk) -- the member pairs of the chunk's particles (the module's DEFINITIONS, or the 'exclusive' partition
-    with void_members' n_s rule), in the order void_members gathers them: one piece per sphere in sphere order
-    (exclusive: one piece, by id). Shared by void_members and the streamed link, so both see the same pairs.
-    with_index: also ([chunk-local particle index pieces], the chunk's ids), so the streamed link looks every
-    PARTICLE up once instead of every pair (~7 pairs per particle in TNG100's pool).
-    workers: chunks made at once in threads (None: fate_workers(exclusive)), handed out in chunk order,
-    so the consumer sees exactly the serial sequence; 'post' (optional) runs on each chunk's tuple in its worker and
-    its return value is yielded instead (the streamed link's ID lookups)."""
+    the chunk), in void_members' order; shared with the streamed link. with_index: also ([chunk-local particle index
+    pieces], the chunk's ids). workers: chunks made at once, yielded in chunk order; 'post' runs on each in its worker."""
     if isinstance(particles, (str, Path)):
         particles = iter_particles(particles)
     centres = np.mod(np.asarray(centres, dtype=np.float64).reshape(-1, 3), 1.0)
@@ -373,12 +290,10 @@ def _pairs_of_chunk(ids, frac, centres, radii, exclusive: bool, n_s: int, with_i
     tree = cKDTree(np.mod(frac, 1.0), boxsize=1.0 + 1e-12, balanced_tree=False, compact_nodes=False)
     c_ids, c_void, c_idx = [], [], []
     if exclusive:
-        # a particle lives in ONE chunk, so the nearest sphere is chosen here, chunk by chunk, as a RUNNING best
-        # per chunk particle: a lexsort of every (id, q) pair -- 4-12 pairs per particle in a TNG100 pool --
-        # costs far more (TNG100-3-Dark 050 -> 067, one core: members 145 vs 48 s, streamed link 912 vs 163 s,
-        # peak 12.1 vs 5.2 GB; every array identical) and holds four joined pair arrays. The spheres come in order and
-        # the test is strict ('<'), so an equal q keeps the LOWER sphere: the stable lexsort's choice, the same pairs
-        # bit for bit (tests/py_fate_test.py)
+        # a particle lives in ONE chunk, so the nearest sphere is chosen here as a RUNNING best per chunk particle
+        # (a lexsort of every (id, q) pair is far slower and holds four joined arrays). The spheres come in order
+        # and the test is strict ('<'), so an equal q keeps the LOWER sphere: the stable lexsort's choice, bit for
+        # bit (tests/py_fate_test.py)
         best_q = np.full(ids.size, np.inf, dtype=np.float32)
         best_v = np.full(ids.size, -1, dtype=np.int32)
     for v in range(k):
@@ -454,8 +369,7 @@ def link(a: MemberSet, b: MemberSet, block: int = 20_000_000) -> Link:
     the progenitors (MemberSet.sample() of a pool), 'b' the descendant pool (its n_sample = the followed ones)."""
     k_b = b.n_members.size
     acc = np.zeros(0, np.int64), np.zeros(0, np.int64)
-    # in blocks of progenitor pairs: at z = 20 nearly every particle is a member, and one join over all of them
-    # held ~10 GB of index arrays at once
+    # in blocks of progenitor pairs: one join over all of them would hold too many index arrays at once
     for lo_i in range(0, a.ids.size, block):
         ids, void = a.ids[lo_i:lo_i + block], a.void[lo_i:lo_i + block]
         lo = np.searchsorted(b.ids, ids, side="left")
@@ -486,10 +400,8 @@ DENSE_MAX = 50_000_000
 
 def _join_into(acc, a: MemberSet, lo_p, mult_p, idx, desc_void, k_b, block):
     """Add to 'acc' the shared counts of descendant pairs with the progenitor set 'a' (sorted ids): pair i is the
-    particle idx[i] of the chunk, in pool void desc_void[i]; lo_p / mult_p are each chunk PARTICLE's first position
-    and multiplicity in a.ids (one sorted lookup per particle, not per pair). The join of link() with the roles turned:
-    every matched (progenitor pair, descendant pair) counted once whichever side is walked. 'acc' is a dense int64
-    table of k_a * k_b cells (key = prog * k_b + desc) or a sparse (keys, counts) pair compacted to one entry per key."""
+    particle idx[i] of the chunk, in pool void desc_void[i]; lo_p / mult_p are each chunk particle's first position
+    and multiplicity in a.ids. 'acc' is a dense int64 table (key = prog * k_b + desc) or a sparse (keys, counts)."""
     dense = not isinstance(acc, tuple)
     for lo_i in range(0, idx.size, block):
         px, bv = idx[lo_i:lo_i + block], desc_void[lo_i:lo_i + block]
@@ -517,15 +429,9 @@ def _join_into(acc, a: MemberSet, lo_p, mult_p, idx, desc_void, k_b, block):
 
 def link_stream(progs, particles, centres, radii, exclusive: bool = False, n_sample: int | None = None,
                 keep_sample: bool = True, block: int = 4_000_000, workers=None) -> tuple[list[Link], MemberSet | None]:
-    """The links of every progenitor set of 'progs' (MemberSets, sorted ids) to the descendant POOL whose spheres are
-    (centres, radii), WITHOUT holding the pool's member pairs: the particles are read chunk by chunk
-    (_chunk_pairs: void_members' own pairs), each chunk's pairs are joined with every progenitor set at once and only
-    the sparse (progenitor, descendant) counts are kept. IDENTICAL to [link(a, void_members(...)) for a in progs]
-    (prog, desc, count, members; tests/py_fate_test.py), but the pool's pairs -- 5-7e8 on TNG100-3-Dark, ~8 GB plus
-    their sort, the census's peak -- are never held. keep_sample: also return the followed spheres' members (the
-    first n_sample spheres: void_members(...).sample(), the same pairs in the same order) for this snapshot's own
-    link to the next; else None. workers: chunks made at once, each with its ID lookups, in threads
-    (_chunk_pairs; None = fate_workers): the joins still run in chunk order, so the counts are the serial ones."""
+    """The links of every progenitor set of 'progs' to the descendant POOL whose spheres are (centres, radii), WITHOUT
+    holding the pool's member pairs: chunk by chunk, keeping only the sparse (progenitor, descendant) counts; identical
+    to [link(a, void_members(...)) for a in progs]. keep_sample: also return the followed spheres' members."""
     radii = np.asarray(radii, dtype=np.float64).reshape(-1)
     k = radii.size
     n_s = k if n_sample is None else int(n_sample)
@@ -536,9 +442,7 @@ def link_stream(progs, particles, centres, radii, exclusive: bool = False, n_sam
 
     def lookup(r):
         """In the chunk's worker: each particle of the chunk looked up once in every progenitor set -- its first
-        position and multiplicity in a.ids -- in id order (sorted queries: a cache-friendly binary search). A dense
-        table over ParticleID instead (measured on TNG100-3-Dark exclusive 050 -> 067): 1.17x serial, 1.02x
-        with the workers, +1.3 GB -- not worth it."""
+        position and multiplicity in a.ids -- in id order (sorted queries: a cache-friendly binary search)."""
         c_ids, c_void, n_c, c_idx, ids_c = r
         if not c_ids:
             return [], [], n_c, [], []
@@ -609,13 +513,9 @@ def _top_two(prog, desc, f, k_a):
 
 
 def classify(lk: Link, survive_frac: float = SURVIVE_FRAC, split_frac: float = SPLIT_FRAC) -> dict:
-    """Per progenitor (over the whole descendant pool): 'cls' (code into CLASSES), 'desc' (main descendant pool
-    index, -1 if none: the followed void with the largest share when that share is >= survive_frac, else the pool
-    void with the largest share, also for a split), 'in_sample' (that descendant is followed: its pool index is its
-    sample index at the later snapshot), 'f_desc' (its share), 'f_max' and 'f_second' (the two largest shared
-    fractions over the pool), 'f_sample' (the largest in a followed void), 'n_split' (pool voids holding
-    >= split_frac) and 'n_main' (progenitors passing >= survive_frac to the same main descendant: >= 2 is a merge,
-    also into an unfollowed one). A progenitor without members vanishes."""
+    """Per progenitor (over the whole descendant pool): 'cls' (code into CLASSES), 'desc' (main descendant pool index,
+    -1 if none), 'in_sample', 'f_desc', 'f_max' / 'f_second' (the two largest shared fractions), 'f_sample', 'n_split'
+    (pool voids holding >= split_frac) and 'n_main' (>= 2 is a merge). A progenitor without members vanishes."""
     k_a = lk.n_prog_members.size
     k_s = lk.n_followed()
     f = np.zeros(lk.count.size)
@@ -665,11 +565,8 @@ def main_progenitor(lk: Link) -> tuple[np.ndarray, np.ndarray]:
 
 def chain_survival(fates: list[dict]) -> np.ndarray:
     """Whether each void of the FIRST interval's progenitors still has a main descendant (survive or merge) after
-    every interval of 'fates' (consecutive, each 'desc' indexing the next one's progenitors). The chain follows only
-    main descendants that are themselves FOLLOWED: a void whose matter went into an unfollowed minimum
-    ('unresolved') has no fate of its own at the next step, so its chain ends there (not alive) -- the chained
-    survival is a lower limit on the matter's survival as a void, and the direct link (plot_void_fate --ref-snap)
-    the check of how much it loses."""
+    every interval of 'fates'. The chain follows only FOLLOWED descendants, so it is a lower limit on the matter's
+    survival as a void; the direct link (plot_void_fate --ref-snap) checks how much it loses."""
     alive = np.ones(fates[0]["cls"].size, dtype=bool)
     cur = np.arange(fates[0]["cls"].size)
     for fate in fates:
@@ -695,14 +592,9 @@ def link_from_arrays(z) -> Link:
 
 # ------------------------------------------------------------------ one snapshot's linked voids, and cached links
 class VoidSnapshot:
-    """One snapshot's linked voids: the pipeline catalogue, the FOLLOWED rows (void_sample) and their spheres
-    (fractional; 'radii' are the MEMBERSHIP radii, R_v capped at FATE_MAX_SIGMA smoothing lengths of 'sigma_cells'
-    -- the catalogue's 'r_v_cells' keep the measured R_v), the descendant POOL (void_pool: pool_rows,
-    pool_centres, pool_radii; the followed first, with the same spheres), the frame, the particle count and the
-    catalogue's R_v settings (r_v_record: the link caches' key); the pool is read
-    from the combined snapshot as the descendant side of a link in ONE streamed pass (stream_links:
-    its members are never held, only the followed ones' for the next link: prog_members). ValueError (the frame guard: DTFE_SIM is
-    not 'sim') and FileNotFoundError (no grids, no combined file) are the caller's to report."""
+    """One snapshot's linked voids: the catalogue, the FOLLOWED rows (void_sample) and their spheres ('radii' are the
+    MEMBERSHIP radii, R_v capped at FATE_MAX_SIGMA), the descendant POOL (void_pool), the frame, the particle count and
+    the catalogue's R_v settings (r_v_record). The pool is read in ONE streamed pass (stream_links)."""
 
     def __init__(self, sim, snap, method=None, prefix=None, data_root=None, exclusive=False):
         import config
@@ -784,10 +676,9 @@ class VoidSnapshot:
 
 
 def link_tag(method, prefix) -> str:
-    """The grid set's tag in link-cache and census names: '' for PS-DTFE's default grids, else '_<method>' (another
-    estimator's own grids) or '_<prefix>'. One rule for plot_void_fate and plot_void_tracking --link particles:
-    without the tag a --prefix run would read and rewrite the default set's link files (the
-    sphere check relinking them, each run undoing the other's)."""
+    """The grid set's tag in link-cache and census names: '' for PS-DTFE's default grids, else '_<method>' or
+    '_<prefix>'. One rule for plot_void_fate and plot_void_tracking, so a --prefix run never rewrites the default
+    set's link files."""
     default_prefix = {"ps": "ps_output.", "dtfe": "output."}
     g = method if prefix == default_prefix.get(method) else str(prefix).rstrip(".")
     return "" if g == "ps" else f"_{g}"
@@ -847,14 +738,8 @@ def _cached_or_none(p: Path, a, b, spheres: dict, r_v: dict, log) -> Link | None
 
 def cached_links(progs, b: VoidSnapshot, tag: str = "", log=print, keep_prog: bool = True) -> list[Link]:
     """The shared-particle links p -> b for every p of 'progs' (p's followed voids -> b's whole pool): from the cache
-    when it is of the current LINK_VERSION, made with both catalogues' R_v settings (a changed R_v search
-    -- step, reach, directions, algorithm -- moves the radii and with them the members; the record is the
-    catalogue's own, r_v_record) and both snapshots' spheres are the ones it was made with; else from the particles
-    (then cached, atomically as every pipeline cache). The missing links are made in ONE streamed pass over b
-    (VoidSnapshot.stream_links: b's pool members are never held; keep_prog keeps b's followed voids' for its own link
-    to the next). The classes are not cached: they are taken from the counts at call time (classify), so new
-    thresholds need no particle read. A version-1 cache (descendants = the followed
-    sample alone) is rebuilt, whatever its spheres."""
+    when it is of the current LINK_VERSION and made with the same R_v settings and spheres, else from the particles
+    (then cached atomically; missing links in ONE streamed pass over b). The classes are taken from the counts (classify)."""
     from . import pipeline
     out, todo = [], []
     for a in progs:

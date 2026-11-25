@@ -1,44 +1,7 @@
 #!/usr/bin/env bash
-# PS-DTFE periodic seam check.
-#
-# A periodic run tiles one Lagrangian period [s - L, s) per axis with the tetrahedra whose centroid lies in it
-# (psFilterCell). That tiles the box only when the tessellation at the two edges of the period is the same up to
-# the shift L, i.e. when the periodic copies beyond the edges are exact translates. A period that ends at the
-# top particle plane pads with the +L copies of the bottom particles, which round in float (y + L of a
-# y near 0 keeps only ulp(L)); on near-lattice initial conditions those roundings flip near-degenerate Delaunay
-# choices, so the two frames' tetrahedra overlap or leave gaps: on TNG, up to 394 double-covered and tens of
-# uncovered '.a_streams' cells near the box faces and +-1e-7 of the box mass per snapshot.
-# So the period ends where every copy is an exact -L shift (subpartition.h psPeriodicSeam).
-#
-# The defect needs a near-degenerate tessellation AND rounding copies; at TNG's N it is ~1e-5 of a spacing, at a
-# test's N=32 ~1e-6. Two ways to make it testable:
-#   OFFSET  the box [131022, 131122] straddles the float binade 2^17: the +L copies of the bottom particles round
-#           to 2^-6 (2.5e-3 of a spacing, 100x TNG's), the -L copies are exact -- the same structure as a [0, L)
-#           box at TNG's N, amplified. Jittered lattice (0.2 spacings), crossed waves.
-#   NEARLAT the snapshot box [0, 100), a lattice jittered by only 1e-5 spacings (TNG's IC lattices are
-#           near-degenerate too): a top-plane seam's copies have different Delaunay stars (degrees 22 vs 26), so
-#           under --ps-vertex-mass ~400 particles deposit more or less than their weight.
-# Runs (--grid 64, --ps-vertex-mass, DTFE_MASS_AUDIT=2 for the per-particle closure on one domain), checks ("top
-# plane": what a seam at the top particle plane gives, so each check is seen to catch it):
-#   S1 OFFSET, single stream (A k = 0.5), --partition 1, 2 2 2, 3 3 3: '.a_streams' = 1 in EVERY cell (top plane:
-#      177 cells below 1, down to 0.11, and 18 above, the same in all three), box mean of '.a_den' = 1 (top plane:
-#      -6.4e-5), the per-particle closure exact (top plane: 123 particles off). (Not '.a_den' cell by cell across the
-#      partitionings: at 131000 the float sample positions sit 2^-7 apart, and with the partitions' sub-grid
-#      origins they catch a few near-flat tetrahedra differently -- ~60 interior cells O(1) apart, with either
-#      seam; tests/ps_partition_padding_check.sh holds that to rounding in a [0, L) box.)
-#   S2 OFFSET, crossed waves A k = 1.8, ONE sample per cell (--subsamples 1), --partition 1 and 2 2 2: every
-#      sample's stream count is odd (top plane: 167 even counts -- 0, 2, 8, 10 -- along the faces), mean density 1
-#   S3 NEARLAT, single stream: the per-particle closure exact (top plane: 409 off), mean 1 (top plane: +6.1e-5),
-#      '.a_streams' = 1 within 4 cells of every face (an interior near-flat tetrahedron of this degenerate lattice
-#      double-covers one cell with either seam: not the seam)
-#   S4 the logs name the exact seam on every axis (no "top particle plane" fallback)
-# Tolerances: float 1e-7 (mean), 1e-5 (streams), double 1e-12 / 1e-9. The double build reads the same float32
-# coordinates; its copies round 2^29 times less, so it passes with either seam -- it checks the exact seam keeps the
-# double path exact. ~15 s.
-#
-# Usage:
-#   tests/ps_periodic_seam_check.sh [--no-build]
-#   DTFE_TEST_PRECISION=double tests/ps_periodic_seam_check.sh --no-build
+# PS-DTFE periodic seam: the period must end where every periodic copy is an exact -L shift (subpartition.h psPeriodicSeam).
+#   S1 OFFSET single stream   S2 OFFSET crossed waves   S3 NEARLAT single stream   S4 the logs name the exact seam
+# Usage: tests/ps_periodic_seam_check.sh [--no-build]   (DTFE_TEST_PRECISION=double for the double build)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -68,9 +31,7 @@ OFFBOX=(--box "${X0}" "${X1}" "${X0}" "${X1}" "${X0}" "${X1}")
 "${PY}" "${SCRIPT_DIR}/generate_ps_test_data.py" --out "${TMP}/nearlat.hdf5" --n 32 --box 100 \
     --amplitude-factor 0.5 --crossed-waves --jitter-frac 0.00001 >/dev/null
 
-# the sampled deposit ('density_a' would select the exact one): the closure audit and the top-plane counts above are
-# its own, at 3 points per cell axis for S1 and S3 ('--subsamples 3' on each run) and 1 for S2 (its
-# '--subsamples 1')
+# the sampled deposit ('density_a' would select the exact one): 3 points per cell axis for S1 and S3, 1 for S2
 run() {  # $1 = output name, $2 = snapshot, rest = extra options
     local name="$1" snap="$2"; shift 2
     local out="${TMP}/run_${name}"

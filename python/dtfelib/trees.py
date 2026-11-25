@@ -1,25 +1,6 @@
-"""SubLink merger-tree access (self-contained; no illustris_python or offset files needed).
-
-Works directly on the `tree_extended.X.hdf5` chunks (e.g. in "<sim>/Merger Trees/"). Key ideas:
-
-  * A subhalo at (snap, subfind_id) is located via SubhaloIDRaw = snap*10^12 + subfind_id
-    by scanning the (cached) SubhaloIDRaw columns -- no offset files required.
-  * Within a chunk, each tree is stored contiguously and SubhaloID is assigned sequentially
-    in storage order, so the row of any tree-internal ID is
-        row(id) = row(known) + (id - SubhaloID[known])
-    which makes walking FirstProgenitorID links O(1) per hop (the standard SubLink trick).
-  * The extended trees carry the full group-catalog columns per node (SubhaloMass, SubhaloPos,
-    SubhaloHalfmassRad, SubhaloSpin, Group_R_Crit200, ...), so catalog-level tracking needs
-    no separate group catalogs at all.
-
-Units are RAW TNG tree units: lengths ckpc/h (comoving), masses 1e10 Msun/h, spins ckpc/h km/s.
-(The merged combined_tree_extended.hdf5 stores h-FREE values on disk; its per-dataset
-'divided_by_h' markers are applied on read so the API returns raw units either way.)
-
-    ts = TreeSet("TNG50-3-Dark")
-    branch = ts.main_branch(99, 0, fields=["SnapNum", "SubhaloMass", "SubhaloPos"])
-    top = ts.subhalos_at(99, order_by="SubhaloMass", n=10)   # selection without a groupcat
-"""
+"""SubLink merger-tree access (self-contained; no illustris_python or offset files needed): works on the
+`tree_extended.X.hdf5` chunks, locating a subhalo by SubhaloIDRaw = snap*10^12 + subfind_id and walking links in
+O(1) per hop. Units are RAW TNG tree units (ckpc/h, 1e10 Msun/h); merged h-free files are restored on read."""
 
 from __future__ import annotations
 
@@ -164,9 +145,7 @@ class TreeSet:
 
     def main_branch(self, snap: int, subfind_id: int, fields: list[str]) -> dict:
         """Main progenitor branch of (snap, subfind_id), ordered from `snap` back in time.
-
-        Returns {field: array}, always including 'SnapNum' and 'SubfindID'.
-        """
+        Returns {field: array}, always including 'SnapNum' and 'SubfindID'."""
         chunk, row = self.find(snap, subfind_id)
         return self._rows_to_fields(chunk, self._main_branch_rows(chunk, row), fields)
 
@@ -190,20 +169,9 @@ class TreeSet:
     # ------------------------------------------------------------------ mergers
     def mergers_along_branch(self, snap: int, subfind_id: int, min_ratio: float = 0.0,
                              mass_field: str = "SubhaloMass", ratio_at: str = "maxpast") -> dict:
-        """Merger events onto the main-progenitor branch of (snap, subfind_id).
-
-        A merger at descendant snapshot S is a secondary progenitor at S-1 (the
-        FirstProgenitor's NextProgenitor chain) that vanishes into the branch.
-
-        ratio_at='maxpast' (default, the SubLink convention of Rodriguez-Gomez et al. 2015):
-        the ratio compares the two progenitors at the snapshot where the SECONDARY reached
-        its maximum past mass -- infalling subhalos are tidally stripped long before they
-        merge, so instantaneous ratios ('instant') classify nearly every merger as minor.
-        `min_ratio` filters minor mergers (e.g. 0.1 keeps >=1:10).
-
-        Returns {"snap" (descendant snapshot), "ratio", "sec_mass", "main_mass",
-        "sec_subfind"} arrays ordered from late to early times.
-        """
+        """Merger events onto the main-progenitor branch of (snap, subfind_id): a secondary progenitor at S-1 that
+        vanishes into the branch. ratio_at='maxpast' (default; Rodriguez-Gomez et al. 2015) or 'instant'; `min_ratio`
+        filters minor mergers. Returns {"snap", "ratio", "sec_mass", "main_mass", "sec_subfind"}, late to early."""
         if ratio_at not in ("maxpast", "instant"):
             raise ValueError("ratio_at must be 'maxpast' or 'instant'")
         chunk, row = self.find(snap, subfind_id)

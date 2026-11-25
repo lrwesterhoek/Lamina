@@ -1,20 +1,6 @@
 #!/usr/bin/env bash
-# PS-DTFE grid deposit check: the exact conservative deposit ('--exact', r3d) against the sampled one ('--sampled').
-#
-# Verified here, on a multi-stream Zel'dovich pancake:
-#  A) the exact deposit: mass conservation at (or below) the sampled deposit's float floor, '.den' == '.a_den'
-#     bit-exact (the exact deposit is nSub-independent), the raw integer '.tetTouch' count bit-exact between
-#     same-split partitioned runs at 1 and N threads, '.streams' (the volume-weighted multiplicity -- a float, hence
-#     checked to a tolerance, not bit-exactly) hitting the pancake's ANALYTIC values of 1 and 3, the sampled '.a_den'
-#     at nSub = 1/3/5 approaching the exact grid MONOTONICALLY (L1), and (GPU builds) the GPU exact deposit against
-#     the CPU's (a float32 z-sweep against the double r3d clip: float parity).
-#  B) (GPU builds) the GPU exact deposit's item passes run on its two pipelines ('depositExactItems'; DTFE_GPU_TIMING
-#     names them), and they conserve mass to the float rounding of their shares: DTFE_MASS_AUDIT's
-#     'handed-deferred-fixed' within 1e-7 of the mass handed to the GPU, in every pass.
-#  C) '--ps-lagrangian-input' with an input type other than 105 (a binary Gadget snapshot, demo/z0_64.gadget, read as
-#     type 101) stops the program with its message and writes no grid: only the HDF5 Gadget reader gives the particle
-#     IDs the Lagrangian positions are matched by.
-#
+# PS-DTFE grid deposit: the exact conservative deposit ('--exact', r3d) against the sampled one ('--sampled'),
+# on a multi-stream Zel'dovich pancake.
 # Usage: tests/ps_deposit_check.sh [--no-build]
 
 set -euo pipefail
@@ -151,12 +137,10 @@ check("A mass conserved (exact <= sampled floor)",
 check("A .den == .a_den (nSub-independent)",
       np.array_equal(ex, exa), "the exact deposit is the nSub->infinity limit")
 # '.tetTouch': the RAW INTEGER count of tetrahedra with a nonzero cell intersection.
-# This is the field that carries the integer stream-count contract -- quantities.cc
-# sums it linearly across partitions, so it stays bit-exact under any thread order.
+# This is the field that carries the integer stream-count contract.
 tx = np.fromfile(f"{tmp}/pdep_pan_ex.tetTouch", dtype=REAL).astype(np.float64)
 # 'integer-valued' alone is vacuous -- any int < 2^24 casts exactly, so an all-zero or
-# scrambled grid would pass it. Pin the count to >= 1 as well: the periodic tessellation
-# is space-filling, so EVERY cell is touched by at least one tet (measured min = 2).
+# scrambled grid would pass it. Pin the count to >= 1 as well
 check("A exact tetTouch integer-valued and >= 1",
       bool(np.allclose(tx, np.round(tx), atol=1e-6)) and tx.min() >= 1,
       f"max frac dev = {np.abs(tx - np.round(tx)).max():.2e}, "
@@ -167,13 +151,9 @@ check("A partitioned tetTouch thread-invariant (bit-exact)", np.array_equal(t1, 
       "same split, 1 vs all threads (integer counts merge order-independently)")
 
 # '.streams' is the VOLUME-WEIGHTED multiplicity (1/V_cell) sum V_int -- a float, so
-# neither integer-valued nor bit-exact (float shares sum order-dependently). What this
-# definition buys is that it is the ANALYTIC nSub->infinity limit, so the two properties
-# below are exact statements about the Zel'dovich pancake rather than sampling artefacts.
+# neither integer-valued nor bit-exact (float shares sum order-dependently).
 sx = np.fromfile(f"{tmp}/pdep_pan_ex.streams", dtype=REAL).astype(np.float64)
-# The pancake folds into exactly 3 streams behind the caustic. The sampled deposit
-# overshoots this badly (a grazing sub-sample counts a full +1; run 1's 'su' reports
-# ~14), while the exact deposit weights each tet by its intersected volume and lands on 3.
+# The pancake folds into exactly 3 streams behind the caustic.
 check("A exact streams max == analytic 3", abs(sx.max() - 3.0) < 0.01,
       f"max = {sx.max():.6f} (analytic 3.00; the sampled deposit gives {su.max():.2f})")
 # Outside the caustic the tessellation covers each cell exactly once, so those cells
@@ -183,10 +163,7 @@ check("A exact streams single-stream cells == 1.0",
       sx.min() > 1.0 - 1e-3 and near1.mean() > 0.5,
       f"min = {sx.min():.6f}, {near1.mean()*100:.2f}% of cells within 1e-3 of 1.0")
 # ties the two fields together: each touching tet contributes exactly 1 to '.tetTouch' and
-# its volume share V_int/V_cell <= 1 to '.streams', so streams <= tetTouch pointwise. This
-# is what would catch a zeroed/mis-normalized accumulator in EITHER field. (The bound needs
-# the bbox rasterization -- --ps-halo-release's centroid fallback deposits V_tet/V_cell,
-# which may exceed 1 for a tet bigger than a cell. No run here uses it.)
+# its volume share V_int/V_cell <= 1 to '.streams', so streams <= tetTouch pointwise.
 viol = int(np.sum(sx > tx + 1e-6))
 check("A exact streams <= tetTouch (pointwise)", viol == 0,
       f"{viol} cells violate; min slack = {(tx - sx).min():.6f}")

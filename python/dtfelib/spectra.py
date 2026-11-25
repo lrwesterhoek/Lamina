@@ -1,32 +1,6 @@
-"""Density power spectra: P(k) of a grid, and the linear-theory P(k) of the
-simulation's cosmology to compare it with.
-
-    from dtfelib import spectra
-    ps = spectra.power_spectrum(fs.density(units="mean") - 1.0, fs.meta.box_mpc)   # k [1/Mpc], P [Mpc^3]
-    pl = spectra.linear_pk(ps["k"], z=fs.meta.redshift)                            # Mpc^3, the same k
-
-UNITS: h-free, like every length in this code base -- k in 1/Mpc (comoving), P(k) in Mpc^3. The transfer
-function's own variables (Eisenstein & Hu 1998 want k in h/Mpc) and sigma_8's radius (8/h Mpc = 11.8 Mpc
-h-free) are converted INSIDE those functions only.
-
-THE ESTIMATOR. delta sampled on N^3 cells of a box L: with numpy's unnormalised transform
-delta_k = sum_x delta(x) e^{-i k x}, the estimate is P(k) = V / N^6 |delta_k|^2 (V = L^3), averaged over
-the modes of each |k| bin; a mode of the rfft half-cube counts twice (its conjugate is not stored) except
-on the self-conjugate planes k_z = 0 and k_z = N/2, which count once; k = 0 (the mean) is left out. The
-bins are the fundamental mode's multiples (k_f = 2 pi / L, edges at (i + 1/2) k_f) up to the Nyquist
-k_Ny = pi N / L, or 'nbins' logarithmic ones. 'modes' per bin is the Hermitian-weighted count: the sample
-variance of a bin's P is about P sqrt(2 / modes). THERE IS NO ASSIGNMENT WINDOW TO DECONVOLVE: a DTFE or
-PS-DTFE grid is the field averaged over cells (or point-sampled), not a CIC mass assignment, and the cell
-average damps power towards k_Ny (a sinc^2 per axis); the grid's sampling aliases the power above about
-k_Ny / 2 back down, so read the comparison with linear theory below that.
-
-THE LINEAR SPECTRUM. P_lin(k, z) = A k^n_s T(k)^2 D(z)^2 with T the Eisenstein & Hu (1998) no-wiggle
-transfer function (their eqs 26-31: the baryon suppression through the sound horizon and alpha_Gamma, no
-acoustic oscillations -- the TNG box resolves k down to 2 pi / 110 Mpc, the wiggles sit below), A fixed by
-config.COSMOLOGY's sigma_8 at z = 0 (the top-hat integral at R = 8/h Mpc), and D the exact LambdaCDM growth
-factor D(a) proportional to H(a) integral_0^a da' / (a' H(a'))^3, D(1) = 1 (growth_factor); growth_rate is
-its logarithmic derivative, f = dlnD/dlna (within 0.5% of Omega_m(z)^0.55).
-"""
+"""Density power spectra: P(k) of a grid, and the linear-theory P(k) of the simulation's cosmology. h-free like
+the rest of the code: k in 1/Mpc, P in Mpc^3. P(k) = V / N^6 |delta_k|^2 per |k| bin (no window to deconvolve);
+linear_pk = A k^n_s T(k)^2 D(z)^2 with the Eisenstein & Hu (1998) no-wiggle T(k), A from sigma_8, D the exact growth."""
 
 from __future__ import annotations
 
@@ -34,6 +8,7 @@ import numpy as np
 
 import config
 
+from ._threads import map_chunks
 from ._fft import rfftn as _rfftn                         # scipy.fft on every core, else numpy.fft
 
 _COSMO = dict(config.COSMOLOGY)
@@ -43,10 +18,9 @@ T_CMB = 2.7255
 
 
 def power_spectrum(delta, box_mpc: float, nbins: int | None = None, kmax: float | None = None) -> dict:
-    """P(k) of the cubic grid 'delta' (N,N,N) in a periodic box of 'box_mpc': {'k': the mean |k| of each
-    bin [1/Mpc], 'P': [Mpc^3], 'modes': the Hermitian-weighted mode count, 'edges', 'k_f', 'k_nyquist',
-    'box_mpc', 'n'}. Linear bins of k_f up to 'kmax' (default k_Ny) or, with 'nbins', that many
-    logarithmic bins from k_f to kmax. See the module docstring."""
+    """P(k) of the cubic grid 'delta' (N,N,N) in a periodic box of 'box_mpc': {'k' [1/Mpc], 'P' [Mpc^3], 'modes'
+    (Hermitian-weighted count), 'edges', 'k_f', 'k_nyquist', 'box_mpc', 'n'}. Linear bins of k_f up to 'kmax'
+    (default k_Ny) or, with 'nbins', that many logarithmic bins from k_f to kmax."""
     d = np.asarray(delta)
     n = d.shape[0]
     if d.ndim != 3 or d.shape != (n, n, n):
@@ -72,7 +46,14 @@ def power_spectrum(delta, box_mpc: float, nbins: int | None = None, kmax: float 
         edges = k_f * (np.arange(0, int(np.ceil(kmax / k_f)) + 1) + 0.5)
     else:
         edges = np.geomspace(k_f * 0.5, kmax, int(nbins) + 1)
-    which = np.digitize(kmag.ravel(), edges) - 1
+    kflat = kmag.ravel()
+    which = np.empty(kflat.size, dtype=np.intp)
+
+    def _bins(lo, hi):
+        which[lo:hi] = np.digitize(kflat[lo:hi], edges)
+
+    map_chunks(kflat.size, _bins)
+    which -= 1
     ok = (which >= 0) & (which < len(edges) - 1)
     wf, pf, kf = weights.ravel()[ok], p3.ravel()[ok], kmag.ravel()[ok]
     idx = which[ok]
@@ -120,11 +101,8 @@ def growth_rate(z, cosmo: dict | None = None, eps: float = 1e-3) -> np.ndarray:
 
 
 def transfer_eh98(k_mpc, cosmo: dict | None = None, h: float = _H, t_cmb: float = T_CMB) -> np.ndarray:
-    """Eisenstein & Hu (1998) no-wiggle transfer function T(k), k in 1/Mpc (h-free). The sound horizon s
-    (their eq 26, in Mpc) and alpha_Gamma (eq 31) carry the baryons' suppression into Gamma_eff (eq 30),
-    whose k s is k in 1/Mpc times s in Mpc (Eisenstein's own TFnowiggles converts to 1/Mpc first; a k in
-    h/Mpc there would put the suppression 1/h too far in k); only q (eq 28) is written with
-    k in h/Mpc. T from q (eq 29)."""
+    """Eisenstein & Hu (1998) no-wiggle transfer function T(k), k in 1/Mpc (h-free): the sound horizon (eq 26) and
+    alpha_Gamma (eq 31) enter Gamma_eff (eq 30) with k s in 1/Mpc x Mpc; only q (eq 28) is written with k in h/Mpc."""
     c = cosmo or _COSMO
     om, ob = c["Omega_m"], c["Omega_b"]
     omh2, obh2 = om * h * h, ob * h * h

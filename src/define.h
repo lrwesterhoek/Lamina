@@ -1,8 +1,6 @@
 
-/*
-  Compile-time configuration: dimensionality (NO_DIM), the Real float type, and the per-field
-  component counts derived from NO_DIM. Included almost everywhere; edit with care.
-*/
+/* Compile-time configuration: dimensionality (NO_DIM), the Real float type, and the per-field component counts
+   derived from NO_DIM. Included almost everywhere; edit with care. */
 
 #ifndef DEFINE_HEADER
 #define DEFINE_HEADER

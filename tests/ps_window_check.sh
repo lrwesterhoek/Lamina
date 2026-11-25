@@ -1,29 +1,7 @@
 #!/bin/bash
-# --grid-window: a window run EQUALS the full run's window cells. Periodic crossed waves, full run at
-# grid 64 vs window runs of a sub-box -- one straddling the periodic seam -- for the sampled deposit
-# (nSub 2), the exact deposit, --ps-vertex-mass --ps-caustics, --ps-halo-release, and a
-# --partition 2 2 2 split (held to the partitioned full run: partitions differ from the single
-# triangulation by summation order). Then the launcher's zoom shape: an anisotropic 256x256x16 grid
-# windowed to one coarse slice, exact deposit, with the wall times of both runs.
-# Contracts: the SAMPLED deposit counts a straddling tet's samples over its whole bounding box, so the CPU window has
-# the full run's values. A window pass takes ITS OWN fixed-point units (from the tets that reach the window, the same
-# on the GPU and the CPU: ps_interpolation.cc fxBoundWalk), so a share below ~2^-38 of the bound can round to another
-# last unit than in the full run (peak-relative < 1e-8; measured 1e-10, in the velocity gradient only, on these
-# waves); the double build's CPU deposit sums in doubles. In both the sampled CPU window is held to peak-relative
-# 1e-8 (its counts and masks still identical bytes). The EXACT deposit clips only the window's cells and normalizes
-# each tet by the larger of its pieces' summed weight and its whole weight, the full run by the summed weight, so its
-# moments agree to float rounding (the counts, masks and multiplicity are still identical bytes); the GPU takes the
-# usual parity class. The cache's globals record is version 2 ('globals=2'), and neither a cached nor an uncached
-# window run prints a 'fixed-point units (run-wide):' line (PS-DTFE's passes take units of their own).
-# GPU builds: a GPU window and the CPU window of the same pass (--partition 2 2 2, --verbose 3) take the same
-# fixed-point units -- their 'fixed-point units' lines, one per pass, are equal -- and their grids agree to the GPU
-# parity class (the kernels form their shares in float). A window run split 2x2x2 ('--max-concurrent 2', two threads,
-# '--exact', density_a velocity_a) killed after 2 partitions (DTFE_TEST_EXIT_AFTER_PARTITIONS) and resumed with
-# '--resume' writes the uninterrupted window run's bytes. With
-# '--tessellation-cache', a window run skips the partitions whose occupancy maps (written by a composite server or by an
-# earlier batch run) never reach the window: identical bytes to the uncached run, the skip count reported. The units
-# comparison runs in the single build only (the double build's CPU sums are doubles). --no-build is accepted and
-# ignored.
+# --grid-window: a window run equals the full run's window cells (sampled, exact, vertex mass, halo release, partitions, resume).
+# Also the launcher's zoom shape, the window's own fixed-point units (single build only) and the occupancy-map skip. Labels name each run.
+# Usage: tests/ps_window_check.sh [--no-build]   (--no-build is accepted and ignored)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$SCRIPT_DIR")"
@@ -103,9 +81,8 @@ run "$TMP/zoom_full" "$PS_BIN" "$SNAP" "$TMP/zoom_full" --grid 256 256 16 "${BAS
 run "$TMP/zoom_win"  "$PS_BIN" "$SNAP" "$TMP/zoom_win"  --grid 256 256 16 "${BASE[@]}" --exact --grid-window 25 75 25 75 50 56.25
 if [ $GPU = 1 ]; then
     run "$TMP/zoom_wingpu" "$PS_BIN" "$SNAP" "$TMP/zoom_wingpu" --grid 256 256 16 "${BASE[@]}" --exact --grid-window 25 75 25 75 50 56.25 --gpu
-    # the units of a GPU and a CPU window pass: both must bound the same tets (the window's), else the two take
-    # different units (and different last bits). Single build only: the double build's CPU deposit keeps double
-    # sums (no units to compare)
+    # the units of a GPU and a CPU window pass: both must bound the same tets (the window's), else the units differ.
+    # Single build only (the double build's CPU sums are doubles)
     precision_double && echo ">> GPU vs CPU window units: SKIP (the double build's CPU sums are doubles)"
     precision_double || echo ">> GPU vs CPU window: the same fixed-point units per pass (--partition 2 2 2, --verbose 3)"
     precision_double || for v in "sampled:--subsamples 2" "exact:--exact --ps-vertex-mass" "hr:--ps-halo-release 2"; do

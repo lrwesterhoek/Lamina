@@ -1,36 +1,9 @@
 #!/usr/bin/env bash
-# Chunk-level checkpoints inside the GPU deposit and its cause-aware retry policy
-# (src/CGAL_triangulation/ps_metal_host.cc). A failed command buffer does not redo the whole partition
-# deposit: the pass restores its last snapshot (its start, or a checkpoint every DTFE_GPU_CHECKPOINT_CHUNKS
-# buffers) and continues from there. The test hook DTFE_GPU_FAULT_AT=<k>[:<kind>] lets the k-th command
-# buffer of the process run to completion -- its atomics ARE in the grids -- and then reports it as failed,
-# so only a correct restore keeps the grids exact. Asserted on a synthetic snapshot (pinned chunk sizes,
-# PS_GPU_CHUNK=2000, and a checkpoint every 2 buffers, so the fault lands after a checkpoint):
-#   R1  one-thread-per-tet deposit, an 'innocent victim' fault at buffer 3: the run stays on the GPU, logs
-#       the resume from the checkpoint at the same pace, its '.a_den' (the exact fixed-point mass grid) is
-#       byte-identical to a run without the fault, '.a_streams' identical, and so is '.a_vel': the moment
-#       grids are exact fixed-point sums too
-#   R2  --exact (the items passes + leftovers), an 'oom' fault: same assertions, and the pace
-#       escalates (shorter buffers) as a resource error should; its '.a_streams' (the exact multiplicity) is a
-#       fixed-point sum as well: identical
-#   R3  --partition 2 2 2 --max-concurrent 1, a 'timeout' (watchdog) fault in a later partition: same
-#   R4  a 'persist' fault (every buffer from the k-th on fails): the policy gives the partition to the CPU
-#       after 3 failures of the same chunk, and the run still finishes
-#   R5  the failed buffers count into the run's retry counter (the progress sidecar's gpu_retries reads the
-#       same counter, src/run_progress.h; the sidecar itself is removed when a run succeeds, so the count is
-#       read from the deposit's summary line)
-#   R6  the same counts by cause: each run's log ends its computation with 'GPU deposit
-#       retries: N (innocent a, timeout b, oom c, other d)' -- R1 innocent 1, R2 oom 1, R3 timeout 1, R4
-#       innocent 3 -- and a fault-free run prints no such line (the progress sidecar's gpu_retries_by_cause
-#       reads the same counters)
-#   R7  the escalated pace recovers: the same watchdog fault as R3 with DTFE_GPU_PACE_RECOVER_SEC=0
-#       (the clean GPU work after which a notch is undone; 90 s by default) steps the pace back to the default
-#       250 ms buffers / 8 ms gaps at the next clean buffer, and the grids stay exact; R3 itself (the default
-#       90 s, a ~1 s run) keeps the escalation for the rest of its deposits. The pace is process-wide, so the
-#       later partitions start from the eased pace -- inferred from the log line, not observed with a second
-#       injected fault.
-# GPU builds only (METAL=1): skipped (exit 0) otherwise, a local GPU suite like tests/gpu_mass_check.sh (not in
-# tests/ci_suite.sh). ~20 s on Metal (M1 Max).
+# Chunk-level checkpoints inside the PS GPU deposit and its cause-aware retry (src/CGAL_triangulation/ps_metal_host.cc).
+# DTFE_GPU_FAULT_AT=<k>[:<kind>] fails the k-th command buffer AFTER it ran, so only a correct restore keeps the grids exact.
+# Pinned chunk sizes (PS_GPU_CHUNK=2000), checkpoint every 2 buffers.
+#   R5  the failed buffers count into the run
+#   R6  the same counts by cause, from the run log's closing 'GPU deposit retries' line
 # Usage: tests/gpu_retry_check.sh [--no-build]   (--no-build is accepted and ignored)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

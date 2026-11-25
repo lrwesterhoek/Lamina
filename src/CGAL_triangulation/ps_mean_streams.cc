@@ -8,19 +8,10 @@
 #include "triangulation_common.h"
 
 
-// ======================================================================================
-// Auto-tune support: the mean number of streams at a random point of the box, estimated from
-// the particles before any triangulation exists (declared in ps_point_eval.h).
-//
-// Every tetrahedron of the Lagrangian tessellation covers its Eulerian volume exactly once, so
-// the mean stream count at a uniformly random point is sum|V_Euler| / sum V_Lagrange over all
-// tetrahedra. That ratio is estimated on up to 256 random Lagrangian patches of 20 mean spacings
-// on a side: Delaunay-triangulate each patch's Lagrangian positions (the tessellation PS-DTFE
-// itself uses), keep the tetrahedra whose Lagrangian centroid lies 3 spacings inside the patch
-// (hull tetrahedra are artefacts of the cut), and sum both volumes. A real plane's '.pts_streams'
-// can still differ from it, mostly because the plane's own count differs from the box mean (its strips
-// vary widely), which is why the tuner books the multi-stream excess with a margin (autoTunePSPointStreams).
-// ======================================================================================
+// Auto-tune support: the mean stream count at a random point is sum|V_Euler| / sum V_Lagrange over all tetrahedra, estimated on
+// up to 256 random Lagrangian patches of 20 mean spacings a side: Delaunay-triangulate each patch, keep the tets whose Lagrangian
+// centroid lies 3 spacings inside it (hull tets are artefacts of the cut), sum both volumes. A real plane's '.pts_streams' can
+// differ (its own count differs from the box mean), so the tuner books a margin.
 #if NO_DIM == 3 && defined(PHASE_SPACE)      // Lagrangian positions exist only in the PS build
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Delaunay_triangulation_3.h>
@@ -39,11 +30,9 @@ double psEstimateMeanStreams(std::vector<Particle_data> const &particles, double
     if ( patchesUsed ) *patchesUsed = 0;
     size_t const N = particles.size();
     if ( N < 2000 or N > size_t(4294967295u) ) return -1.;
-    // The Lagrangian domain the patches tile. Periodic: the box. Non-periodic: the particles' OWN
-    // Lagrangian bounding box -- the output region ('--box') can be smaller than the cloud, and
-    // wrapping initial positions into it would fold particles from far apart into one patch, whose
-    // Delaunay tetrahedra would then span the whole cloud in Eulerian space (millions of "streams"
-    // per point).
+    // The Lagrangian domain the patches tile. Periodic: the box. Non-periodic: the particles' OWN Lagrangian bounding box (the
+    // output region '--box' can be smaller than the cloud, and wrapping into it would fold far-apart particles into one patch
+    // whose tets would span the whole cloud in Eulerian space).
     double boxLo[3], boxLen[3];
     for (int d=0; d<3; ++d) { boxLo[d] = boxLoIn[d]; boxLen[d] = boxLenIn[d]; }
     if ( not periodic )
@@ -94,10 +83,8 @@ double psEstimateMeanStreams(std::vector<Particle_data> const &particles, double
         return sum;
     };
 
-    // '--sample-points' region: the candidate patches are the Lagrangian cells whose Eulerian image
-    // meets the region -- the image's bounding box from one pass over the particles, each position taken at its
-    // minimum image from the cell's Lagrangian centre (displacements stay below half a box), so a cell across the
-    // box edge is not stretched over the whole axis
+    // '--sample-points' region: the candidate patches are the Lagrangian cells whose Eulerian image meets the region (the image's
+    // bounding box from one pass over the particles, each position at its minimum image from the cell's Lagrangian centre).
     bool useRegion = regionLo != nullptr and regionHi != nullptr;
     double regionVol = 1.;
     std::vector<size_t> order;
@@ -158,10 +145,8 @@ double psEstimateMeanStreams(std::vector<Particle_data> const &particles, double
             if ( patchOf[c] >= 0 ) members[ patchOf[c] ].push_back( uint32_t(i) );
             continue;
         }
-        // with a region the counted tetrahedra must TILE the Lagrangian space (a patch shrunk by its margin would
-        // count a slab that falls in the margins as empty), so a patch
-        // counts the tetrahedra with their centroid in its WHOLE cell and also holds the particles within the
-        // margin around it -- a particle near a cell face belongs to up to 8 patches
+        // with a region the counted tets must TILE the Lagrangian space, so a patch counts the tets with their centroid in its
+        // WHOLE cell and also holds the particles within the margin around it (a particle near a cell face belongs to up to 8 patches)
         int gs[3][2], ng[3];
         for (int d=0; d<3; ++d)
         {

@@ -1,29 +1,6 @@
-/* Exact, tie-consistent point-in-tetrahedron test, shared by the point evaluation
-   (ps_point_eval.cc, both binaries) and the CPU grid deposit (ps_interpolation.cc).
-
-   A point must be counted by exactly one tetrahedron of every stream, including a point ON a
-   shared face, edge or vertex -- which a float test with a tolerance gets wrong both ways: it
-   counts a point near a shared face in both neighbours, and whether it does depends on the
-   rounding of each run's periodic copies. Two ingredients make the decision exact:
-     * every periodic image of a particle is mapped to one canonical coordinate
-       (canonicalCoord), so tetrahedra sharing a face see bit-identical vertices even when one
-       holds the original particle and the other its (float-shifted) periodic copy;
-     * the decision uses exact orientation predicates (CGAL, filtered) with a symbolic
-       perturbation of the query point (simulation of simplicity) that breaks every tie the
-       same way in all tetrahedra.
-   Three tiers keep it cheap, each deciding only what it provably can: (1) barycentrics on the
-   wrapped ('fine') geometry, outside the tetrahedron's fineBand; (2) a double-precision
-   classification in the canonical frame, outside its own much narrower band; (3) the exact
-   predicate. Every tier-1/2 decision equals the exact one, so the whole test IS the exact one,
-   at the cost of a plain barycentric test for all but the points hugging a face.
-
-   The consistency argument needs every periodic copy to be ONE Real +-L addition to the
-   original (DTFE.cpp's global copies, subpartition.h's per-partition copies, the standard
-   binary's findParticlesInBox) -- keep it that way.
-
-   2D (a DIM=2 phase-space build): the same three tiers for a point in a TRIANGLE. The
-   frame, the canonical images and tier 1 are dimension-free; the exact predicate is the 2D
-   orientation, and its simulation of simplicity reduces to exact comparisons of coordinates. */
+/* Exact, tie-consistent point-in-tetrahedron (2D: triangle) test, shared by the point evaluation and the CPU grid deposit.
+   A point must be counted by exactly one tetrahedron of every stream: periodic images map to one canonical coordinate and
+   a symbolic perturbation breaks ties; three tiers (fine barycentrics, double canonical, exact predicate) decide alike. */
 
 #ifndef PS_EXACT_INSIDE_HEADER
 #define PS_EXACT_INSIDE_HEADER
@@ -84,12 +61,9 @@ inline bool inverseNd(double const m[NO_DIM][NO_DIM], double inv[NO_DIM][NO_DIM]
 }
 
 
-// Canonical image of a stored Eulerian coordinate. Periodic copies are made by ONE Real
-// addition of +-L to the original, and '+L' drops low bits when the original is small.
-// Replaying '+L' until the value reaches the top of the box maps the original and all of its
-// copies to the same float: a +L copy IS the first step of the original's replay, and a -L
-// copy (exact by Sterbenz -- such originals lie in the upper half of the box) returns to the
-// original exactly on its first step. Non-periodic runs have no copies: identity.
+// Canonical image of a stored Eulerian coordinate. Every periodic copy must be ONE Real addition of +-L to the original
+// (DTFE.cpp, subpartition.h, findParticlesInBox), and +L drops low bits when the original is small. Replaying +L until the
+// value reaches the top of the box maps the original and its copies to the same float (a -L copy is exact by Sterbenz).
 inline Real canonicalCoord(Frame const &F, Real v, int d)
 {
     if ( not F.periodic ) return v;
@@ -120,13 +94,10 @@ inline void canonicalQuery(Frame const &F, double const pos[NO_DIM], double pc[N
 }
 
 #if NO_DIM==3
-// Exact sign of det[a;b;c] -- the orientation of the triangle abc as seen from the query
-// point, which sits at the origin of these coordinates -- with the query point symbolically
-// perturbed by delta = (e, e^2, e^3), e -> 0+ (simulation of simplicity), so it is never 0.
-// Moving the point by +delta moves the vertices by -delta:
-//     det[a-delta; b-delta; c-delta] = det[a;b;c] - delta . n,   n = (b-a) x (c-a),
-// so a zero determinant takes the sign of -n_x, else -n_y, else -n_z; each n component is the
-// exact 2D orientation of the triangle projected onto the other two axes.
+// Exact sign of det[a;b;c], the orientation of triangle abc seen from the query point at the origin, with the point
+// perturbed by delta = (e, e^2, e^3), e -> 0+ (simulation of simplicity), so it is never 0: moving the point by +delta moves
+// the vertices by -delta, det[a-delta; b-delta; c-delta] = det[a;b;c] - delta . n, n = (b-a) x (c-a), so a zero determinant
+// takes the sign of -n_x, else -n_y, else -n_z (each the exact 2D orientation of the projected triangle).
 inline int orient0Sos(double const a[NO_DIM], double const b[NO_DIM], double const c[NO_DIM])
 {
     typedef K::Point_3 P3;

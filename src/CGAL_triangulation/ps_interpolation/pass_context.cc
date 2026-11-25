@@ -1,7 +1,5 @@
-// Part of src/CGAL_triangulation/ps_interpolation.cc, inside its #ifdef PHASE_SPACE: included once, in order, by
-// that file and compiled only as part of its object, never alone.
-// The cell-loop macros (never #undef'd: the later parts and interpolateGrid_phaseSpace use them), the pass's
-// contexts (PSPassCtx, PSGridsCtx, PSLayoutCtx, PSBlockClaim) and its per-tetrahedron tests.
+// Part of ps_interpolation.cc (included in order inside its #ifdef PHASE_SPACE, never compiled alone). The cell-loop macros
+// (never #undef'd: later parts use them), the pass's contexts (PSPassCtx, PSGridsCtx, PSLayoutCtx, PSBlockClaim), its tet tests.
 
 // The cell iteration of the pass and its phases: the finite faces (2D) / cells (3D) of the triangulation 'dt'.
 #if NO_DIM==2
@@ -70,14 +68,11 @@ struct PSLayoutCtx
     std::vector<uint8_t> &slabFirst;
 };
 
-// THE DYNAMIC TEAM of the CPU deposit (psDepositThreadMode says when): the finite cells in blocks of 'blockLen' (the
-// loop's DEP_BLOCK), each block claimed whole from one shared counter by whichever thread of the team is free, and the
-// team grown by its first thread whenever the core pool (thread_count.h CorePool) has a free core -- a finished
-// partition's. Only where every accumulator is shared and order-free: the single build's integer fixed-point words,
-// the int counts, the byte flags and the masks (relaxed atomics), no private copies. Their sums do not depend on which
-// thread deposits which block, nor on how many threads there are, so the grids are those of DTFE_DEPOSIT_THREADS=1
-// byte for byte. The block index holds each block's first cell (an iterator, 8 B per block): one walk builds it, and a
-// thread walks only the cells of the blocks it claims (the static rule has every thread walk every cell).
+// THE DYNAMIC TEAM of the CPU deposit (psDepositThreadMode says when): the finite cells in blocks of 'blockLen' (DEP_BLOCK),
+// each claimed whole from one shared counter by whichever thread is free, the team grown by its first thread whenever the core
+// pool (CorePool) has a free core. Only where every accumulator is shared and order-free (integer fixed-point words, counts,
+// flags, masks; relaxed atomics, no private copies): the sums do not depend on which thread deposits which block, so the grids
+// are those of DTFE_DEPOSIT_THREADS=1 byte for byte. The block index holds each block's first cell; one walk builds it.
 template <class CellIt>
 struct PSBlockClaim
 {
@@ -136,15 +131,11 @@ static inline bool psWindowTouched(PSPassCtx const &passCtx, Real const (&ep)[NO
     return true;
 }
 
-// The exact CPU deposit loop's own test of whether a tetrahedron reaches the grid and, under --grid-window, the
-// window, on its wrapped Eulerian positions: the loop's bounding-box cell span, formed in Real exactly as its block
-// "iMin / iMax" forms it (interpolateGrid_phaseSpace -- KEEP THE TWO IN STEP). psFaceWalk rejects on this test, not on
-// psWindowTouched: that one divides in double, and in a single build the loop's float quotient can round up onto
-// a grid plane where the double one stays below it, so the two spans can differ by one cell for a vertex within a
-// rounding of a plane -- and psWindowTouched has no rule for a tetrahedron wholly outside a non-periodic grid, which
-// the loop skips ("outsideGrid"). With this test and psOwnsUpperBoundarySection the face sums beside a GPU deposit come
-// from exactly the tetrahedra the CPU loop deposits faces for (the loop's face block sits right after its span test,
-// before any volume test; its face-only block in the "outsideGrid" branch).
+// The exact CPU deposit loop's own test of whether a tetrahedron reaches the grid (and, under --grid-window, the window), on
+// its wrapped positions: the loop's bounding-box cell span formed in Real exactly as its "iMin / iMax" block (KEEP THE TWO IN
+// STEP). psFaceWalk rejects on this test, not psWindowTouched: that one divides in double, and the loop's float quotient can
+// round onto a grid plane where the double one does not, and it has no rule for a tet wholly outside a non-periodic grid.
+// So the face sums beside a GPU deposit come from exactly the tets the CPU loop deposits faces for.
 static inline bool psLoopSpanReaches(Real const (&ep)[NO_DIM+1][NO_DIM], Real const *boxL, Real const *dxL,
                                      size_t const *nGridL, bool const periodic, bool const windowMode,
                                      size_t const *subOriginL, size_t const *subDimsL)
@@ -171,23 +162,11 @@ static inline bool psLoopSpanReaches(Real const (&ep)[NO_DIM+1][NO_DIM], Real co
     return true;
 }
 
-// --face-gradient in a non-periodic run without a window: does a tetrahedron the span test puts OUTSIDE the grid (the
-// loop's "outsideGrid", psLoopSpanReaches) own the grid's section in an UPPER boundary plane? That section is the upper
-// face of the last layer of cells, and no tetrahedron inside the grid owns it (face_sweep.h's half-open rule gives one
-// whose top lies in the plane none): skipped, it left that face without a stream, and the layer's gradient across it
-// fell back to the stream average, each device's own float sum. True when, on every axis where the span starts at the
-// grid's end (iMinU == nGrid, the loop's Real quotient), the lowest vertex lies in the plane or below it -- tested in
-// double, since a float quotient may round a vertex just below the plane onto it, against the same rounded product
-// nGrid * dx that psDepositFaces' first-plane test forms (exact in a single build, where dx is a float, but not always
-// in a double build; the shared rounding is what makes the two agree) -- and on every other axis the span reaches the
-// grid. (A lattice puts three particles in the plane; other data at most a vertex
-// within a rounding of it.) The lower boundary plane needs no rule: its owners reach the grid (iMaxU > 0). The deposit
-// loop and psFaceWalk deposit such a tetrahedron's face sums and nothing else of it; psDepositFaces then finds just the
-// boundary section (its other planes lie beyond the grid). Not under --grid-window: a window's fixed-point units come
-// from the bounds of the tetrahedra that reach it (psFxBoundWalk, the GPU extraction) and, on the GPU under
-// --ps-vertex-mass, so do its vertex degrees (lazyDegrees), none of which covers a tetrahedron outside the grid; a
-// window keeps the deposit loop's tetrahedra, as at its own planes inside the grid. KEEP IN STEP with the loop's span
-// block and psLoopSpanReaches.
+// --face-gradient in a non-periodic run without a window: does a tet the span test puts OUTSIDE the grid own the grid's section in
+// an UPPER boundary plane (the upper face of the last layer, which no tet inside owns: face_sweep.h's half-open rule)? True when,
+// on every axis where the span starts at the grid's end, the lowest vertex lies in or below the plane (in double, against the same
+// rounded nGrid * dx as psDepositFaces' first plane test) and on every other axis the span reaches the grid. Not under
+// --grid-window. KEEP IN STEP with the loop's span block and psLoopSpanReaches.
 static inline bool psOwnsUpperBoundarySection(Real const (&ep)[NO_DIM+1][NO_DIM], Real const *boxL, Real const *dxL,
                                               size_t const *nGridL, bool const periodic, bool const windowMode)
 {
@@ -213,22 +192,11 @@ static inline bool psOwnsUpperBoundarySection(Real const (&ep)[NO_DIM+1][NO_DIM]
     return atEnd;
 }
 
-// The centroid-fallback cell of a tetrahedron: its Eulerian centroid (Real, from the wrapped
-// positions) and that centroid's flat sub-grid index; false when it lies outside this grid/
-// partition region, where the deposit drops the tet. ONE definition for the CPU fallback,
-// the released tets and the GPU record: all three must put the mass in the same cell.
-//
-// The cell is found in double from the vertices' differences from vertex 0 and from vertex 0's offset from the box
-// corner, reduced into the period when periodic -- not from the Real centroid. The cell of a tetrahedron's centroid
-// must not depend on which periodic image deposits it, and that image is the one whose Lagrangian centroid lies in
-// the ownership period (subpartition.h psPeriodicSeam), whose seam moves with the padding: a split run and the one
-// domain deposit the tetrahedra near the seam through different images. Where the periodic copies are exact shifts
-// by the period (psPeriodicSeam; psReportSeam counts the Eulerian copies that round), the differences and the offset
-// reduced by that same period -- the Real box length, as the copies were shifted -- are the same bits in every
-// image; a Real sum of the four positions rounds at the ulp of the image's own coordinates instead, and a centroid
-// within a few ulps of a cell plane then lands in one cell or its neighbour by image -- the whole tetrahedron's mass
-// and moments with it. The returned centroid stays the Real one: the fallback's moments are evaluated there, a
-// rounding of a position only.
+// The centroid-fallback cell of a tetrahedron: its Eulerian centroid (Real) and that centroid's flat sub-grid index; false when
+// outside this partition region. ONE definition for the CPU fallback, the released tets and the GPU record: all three must put
+// the mass in the same cell. The cell is found in double from the vertices' differences from vertex 0 and its offset from the box
+// corner, reduced by the Real box length where periodic, so it is the same in every periodic image (a Real sum of the four
+// positions rounds at the image's own ulp and could move a centroid near a plane). The returned centroid stays the Real one.
 static inline bool psCentroidCell(PSPassCtx const &passCtx, Real const (&ep)[NO_DIM+1][NO_DIM], Real (&centroid)[NO_DIM],
                                   size_t &flat)
 {

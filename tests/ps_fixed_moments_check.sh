@@ -1,35 +1,7 @@
 #!/usr/bin/env bash
-# Every PS-DTFE grid is an exact, order-independent sum. The MASS grid is a fixed-point sum (GPU and
-# CPU), and so are the moment grids -- velocity, the dispersion's second moment, its own
-# mean and weight (PS-DTFE weights the velocity moments by volume and the dispersion by mass), the velocity gradient,
-# the moment weight, the scalar and its gradient,
-# the exact deposit's multiplicity, the released tets' multiplicity: float sums would depend on the order the GPU
-# atomics land in (two runs differ in the last bits of ~30-50% of the cells) and, on the CPU, on the thread count
-# (thread-private copies summed in thread order). Each is a set of integer words in a power-of-two unit, converted to
-# float once: int64 words in a unit from a bound of everything the pass deposits (ps_deposit_params.h PSFxGrid).
-# Asserted on 32^3 crossed waves (folds everywhere: deferred tets, multi-stream cells, large gradients):
-#   F1  two --gpu runs with different opening chunk sizes (PS_GPU_CHUNK 2000 and 25000: other
-#       atomics share a command buffer, other orders) write byte-identical grids -- every '.a_*' output -- for the
-#       sampled deposit, '--exact --per-tet-gradient' (its items' per-tet weight totals are exact too; the route flag
-#       keeps the deposit's own gradient words in the pass: a bare exact run takes the face gradient, F6's)
-#       and --ps-halo-release (the host's released tets), each volume-weighted, as every PS-DTFE run. GPU builds only.
-#   F2  the CPU deposit on 1 thread, 6 threads in the copy mode (DTFE_DEPOSIT_SLABS=0: one set of words, atomic
-#       adds) and 6 in the slab mode writes byte-identical grids, for the same three variants. Single build only:
-#       the double build keeps its double CPU sums (agreeing to ~1e-15, not bit for bit), as for the mass.
-#   F4  --partition 2 2 2 --max-concurrent 1 (partitions merge in index order): two GPU runs byte-identical, and
-#       1 vs 6 CPU threads byte-identical (single build) -- the whole run, not only one partition's sub-grid
-#   F5  the non-finite guard (ps_deposit_params.h psFixedShareOk): DTFE_TEST_NAN_SHARE=50 gives about one
-#       tetrahedron in 50 a NaN mass, on the CPU and (GPU builds) in the kernel; each run says once how many shares
-#       it left out, by grid (the mass grid among them), its '.a_den' has no NaN or infinity, and a run without
-#       the hook says nothing of the kind. Single build only (the double build's CPU sums are doubles, no words).
-#   F6  the bound walk (ps_interpolation.cc psFxBoundWalk: its threads claim blocks of 256 cells from one counter)
-#       gives the same 13 sums -- the moment bounds and the face bounds, each a double -- at 1, 3 and 6 threads, word
-#       for word: DTFE_DEBUG_FX_BOUNDS=1 prints them in hex, once per walk. The exact deposit with --face-gradient
-#       (the face bounds non-zero), on the whole box and in a --grid-window (the window filter and the mass bound);
-#       the 6-thread walk runs on a team of more than one thread; the grids of 1 and 6 threads byte-identical.
-#       Single build only, as F2.
-# 2D (PS-DTFE-2d, when built): F2's thread independence for the sampled deposit.
-# ~1-2 min (M-series Mac, 10 cores).
+# Every PS-DTFE grid is an exact, order-independent fixed-point sum; this checks byte identity of the moment grids on 32^3 crossed waves.
+#   F1  two --gpu runs with different PS_GPU_CHUNK are byte-identical (GPU builds)
+#   F2  CPU deposit on 1 thread, 6 in copy mode and 6 in slab mode are byte-identical (single build only)
 # Usage: tests/ps_fixed_moments_check.sh [--no-build]   (--no-build is accepted and ignored)
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

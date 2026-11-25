@@ -1,55 +1,8 @@
 #!/usr/bin/env bash
 # PS-DTFE arbitrary-point evaluation (--sample-points) correctness check.
-#
-# What is verified, and why these are the right bounds:
-#  A) UNIFORM box (amp=0: Eulerian == Lagrangian bit-for-bit). Every vertex density is rho_bar
-#     to float32 rounding, so the per-stream density (the linear interpolation of the vertex
-#     densities) gives rho/rho_bar = 1 at every point to that rounding -- and matches the
-#     (exactly mass-conserving) nSub=1 grid deposit's mean at float level. Every point lies in
-#     exactly one stream, and the velocities are identically zero.
-#  B) PANCAKE (amp=1.8, multi-stream): cross-checks against the nSub=1 grid deposit at the
-#     48^3 cell centers.
-#       - stream counts: the deposit's .streams at nSub=1 counts the tetrahedra containing the
-#         cell centre with the SAME exact test (a sub-cell tetrahedron's centroid-fallback
-#         deposit moves mass only and is not counted) -> equal in every cell.
-#       - VELOCITY: at nSub=1 the deposit evaluates each stream's velocity AT the cell centre,
-#         so single-stream cells must match the point evaluation to float32 rounding -- once
-#         '.hidden_streams' cells are excluded: there a sub-cell tetrahedron's centroid deposit
-#         adds its velocity AT ITS CENTROID to the cell's (volume-weighted) mean. This is
-#         the float-level deposit cross-check; the deposit's DENSITY cannot match pointwise
-#         because it deposits mass shares m/N (quantized at tetrahedron scale), so density is
-#         checked in aggregate (mean ratio) and via the uniform case (A, to float32 rounding).
-#       - single-stream points have exactly zero dispersion.
-#  C) PARTITION-SPLIT CONSISTENCY: --partition 2 2 2 vs serial must agree to float rounding
-#     (stream records are collected per tetrahedron and reduced in a deterministically sorted
-#     order, so only float-ULP wrap differences of periodic-image copies remain).
-#  D) Ragged --ps-per-stream layout invariants (sum of per-stream densities == total; sorted
-#     descending; offsets consistent).
-#  E) Text and binary sample-point inputs give byte-identical outputs.
-#  F) --ps-per-stream-ids (when the binary supports it): adding the flag leaves every existing
-#     output byte-identical; '.pts_stream_ids' has sum(streams) records of 4 ascending
-#     uint64 snapshot ParticleIDs and is byte-identical between serial and --partition 2 2 2
-#     (the id quadruple is sorted, so it is orientation- and partition-invariant).
-#  G) --pts-den-grad (when the binary supports it): adding the flag leaves every existing
-#     output byte-identical; on a jitter-free pancake (density varies only along x) the
-#     transverse gradients vanish, grad_x matches a central finite difference of '.pts_den'
-#     at x +- eps probe points away from the caustics, the per-point gradient equals the sum
-#     of its per-stream gradients, and serial vs --partition 2 2 2 agree to float rounding.
-#  H) --pts-vel-grad (when the binary supports it and G ran): '.pts_den', '.pts_vel',
-#     '.pts_velDisp' and '.pts_streams' are byte-identical to G's run without a gradient flag;
-#     '.pts_velGrad' holds one 3x3 tensor per point; on the jitter-free pancake every component
-#     but dvx/dx vanishes at the single-stream points, dvx/dx matches a central finite
-#     difference of '.pts_vel' at G's probe points, and serial vs --partition 2 2 2 agree to
-#     float rounding.
-#  I) PACKED RECORDS: the per-point stream records are stored with only the members the options
-#     fill (RecLayout, ps_point_eval.cc); DTFE_PTS_FULL_RECORDS=1 stores every member as before.
-#     Both must give byte-identical outputs -- with no options, and with every per-stream option
-#     on at once across a --partition 2 2 2 merge.
-#
-# Usage:
-#   tests/ps_point_eval_check.sh              # build, run, check
-#   tests/ps_point_eval_check.sh --no-build
-# Requires the build toolchain plus python3 with numpy and h5py.
+#   A uniform box   B pancake against the nSub=1 deposit   C partition split   D ragged --ps-per-stream layout   E text vs binary input
+#   F --ps-per-stream-ids   G --pts-den-grad   H --pts-vel-grad   I packed records (DTFE_PTS_FULL_RECORDS=1)
+# Usage: tests/ps_point_eval_check.sh [--no-build]   (needs numpy and h5py)
 
 set -euo pipefail
 
@@ -377,7 +330,7 @@ if have_grad:
     check("G1 gradient layout", grad.shape[0] == ncell and sgrad.shape[0] == rec_g.shape[0],
           f"{grad.shape[0]} points, {sgrad.shape[0]} stream records")
     # jitter-free pancake: density is a function of x only -> transverse components vanish up
-    # to float32 vertex-density rounding (measured ~1e-6 of the grad_x scale; 3x headroom)
+    # to float32 vertex-density rounding
     m1 = st_g == 1
     gxs = np.abs(grad[m1, 0]).max()
     tr = np.abs(grad[m1, 1:]).max()

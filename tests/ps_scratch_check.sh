@@ -1,25 +1,7 @@
 #!/usr/bin/env bash
-# --scratch-dir (out-of-core mmap accumulators, src/scratch_alloc.cc) correctness check.
-#
-# The scratch route replaces the global operator new/delete: allocations >= a threshold are
-# served from mmap'ed, immediately-unlinked files so the full-grid accumulators live on disk.
-# DTFE_SCRATCH_MIN_GB is set TINY here so even this test's small grids exercise the route.
-# Verified:
-#  A) BIT-IDENTICAL OUTPUTS vs a normal in-RAM run, on the partitioned (--max-concurrent 1,
-#     the deterministic merge order -- mc>1 float merges are order-nondeterministic even
-#     WITHOUT scratch) and the unpartitioned deposit paths. It is the same memory semantics,
-#     so anything but equality is a bug. And on macOS the partitioned run's grids took the
-#     zero-fill route (its log's "N zero-filled in memory", N > 0; elsewhere it is off: N = 0).
-#  B) GPU parity path (GPU builds): scratch + --gpu also bit-identical to plain --gpu (exact
-#     fixed-point GPU sums).
-#  C) NO LEFTOVER FILES: scratch files are unlinked at creation, so the directory must be
-#     empty after every run -- even though GBs flowed through it.
-#  D) GUARDS: an iCloud path and a nonexistent directory are both rejected up front.
-#  S) the staged ordered merge's SPILL into the scratch folder, with the sub-grids themselves in
-#     scratch mappings: bit-identical to A's --max-concurrent 1 run, and C covers its files too.
-#
-# Portable: runs on Linux too (tests/ci_suite.sh core); B is GPU-only and SKIPs on a CPU build.
-#
+# --scratch-dir (out-of-core mmap accumulators, src/scratch_alloc.cc): outputs must be bit-identical to an in-RAM run.
+# DTFE_SCRATCH_MIN_GB is set tiny so small grids use the route. Portable to Linux; B (GPU) SKIPs on a CPU build.
+#   C no leftover files in the scratch folder   D an iCloud path and a missing folder are rejected   S staged-merge spill
 # Usage: tests/ps_scratch_check.sh [--no-build]
 
 set -euo pipefail
@@ -87,12 +69,8 @@ DTFE_SCRATCH_MIN_GB=0.0001 "${BIN}" "${SNAP}" "${TMP}/scr_u_mm" "${BASEARGS[@]}"
     --scratch-dir "${SC}" > "${TMP}/scr_u_mm.log" 2>&1
 compare_outputs "${TMP}/scr_u_ref" "${TMP}/scr_u_mm" "A unpartitioned"
 if grep -q "SCRATCH:" "${TMP}/scr_p_mm.log"; then check_ok "A arming banner printed" 1; else check_ok "A arming banner printed" 0; fi
-# the zero-fill route (ScratchAlloc::ZeroFillScope, scratch_alloc.h): on macOS psReserveGrids zero-fills every grid
-# in anonymous memory and moves it onto its scratch file unwritten. A silently disabled scope would leave the outputs
-# identical (the plain route writes the same zeros through the file: a write-back stall, not a wrong value), so the
-# count it prints is the only proof. Every grid here is a scratch mapping (the tiny threshold), so N > 0. Elsewhere
-# the scope is a no-op by design (Linux would keep the zeros resident: the header says why): N = 0 there. The
-# unpartitioned run reserves its grids elsewhere (reserveMemory) and prints no count.
+# the zero-fill route (ScratchAlloc::ZeroFillScope): on macOS every grid is zero-filled then moved onto its scratch file,
+# so N > 0 here (the printed count is the only proof); elsewhere N = 0, and the unpartitioned run prints no count.
 NZF="$(sed -n 's/^SCRATCH: .*; \([0-9][0-9]*\) zero-filled in memory.*/\1/p' "${TMP}/scr_p_mm.log" | head -1)"
 if [ "$(uname -s)" = Darwin ]; then
     check_ok "A ${NZF:-no} grid(s) zero-filled in memory and moved onto their scratch file (the zero-fill route)" \
@@ -102,10 +80,8 @@ else
         $([ "${NZF:-x}" = 0 ] && echo 1 || echo 0)
 fi
 
-# ---------- (B) GPU parity path ----------
-# Every grid of a GPU deposit is an exact 64-bit fixed-point sum (the mass and the moments; ps_deposit_params.h
-# PSFxGrid), and --max-concurrent 1 merges the partitions in index order, so the scratch run equals the plain
-# --gpu run byte for byte, as the CPU runs of A do.
+# ---------- (B) GPU parity path: exact fixed-point sums, merged in index order, so the scratch run ----------
+# equals the plain --gpu run byte for byte
 if [ "${GPU_BUILT}" -eq 1 ]; then
     echo ">> B: GPU deposit path (exact fixed-point sums: bit-identity)"
     "${BIN}" "${SNAP}" "${TMP}/scr_g_ref" "${BASEARGS[@]}" --gpu --partition 2 2 2 \
@@ -124,10 +100,7 @@ else
 fi
 
 # ---------- (S) the staged ordered merge's spill into the scratch folder ----------
-# four partitions in flight, partition 0 held back so the others park, every parked one SPILLED (DTFE_MERGE_SPILL=1)
-# to --scratch-dir while the tiny threshold puts their sub-grids themselves in scratch mappings: freed mappings and
-# sub-grids read back into new ones, through the replaced operator new/delete. Byte-identical to A's mc=1 run, and
-# section C below then checks the folder is empty (the spill files are unlinked at creation too).
+# four partitions in flight, partition 0 held back, parked ones SPILLED (DTFE_MERGE_SPILL=1); byte-identical to A's mc=1 run
 echo ">> S: the ordered merge's spill to the scratch folder (4 in flight, mmap'ed sub-grids)"
 DTFE_MERGE_SPILL=1 DTFE_TEST_DELAY_PARTITION=0:2 DTFE_SCRATCH_MIN_GB=0.0001 OMP_NUM_THREADS=4 "${BIN}" "${SNAP}" \
     "${TMP}/scr_s_mm" "${BASEARGS[@]}" --partition 2 2 2 --max-concurrent 4 --scratch-dir "${SC}" \

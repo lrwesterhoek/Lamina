@@ -1,8 +1,6 @@
-/* The point evaluation's private header: what ps_point_eval.cc (point evaluation, '--sample-points') and
-   ps_serve.cc ('--serve', the composite server and the occupancy maps) share -- the stream records and their packed
-   layout, the evaluation context and its one instance (g_pe), the bucket walk, and the two per-cell steps a server
-   repeats per tessellation (the PS vertex-mass pass, the standard cell filter). Include it from those two files only;
-   the public interface is ../ps_point_eval.h. */
+/* The point evaluation's private header, shared by ps_point_eval.cc and ps_serve.cc ('--serve'): the stream records and their
+   packed layout, the evaluation context (g_pe), the bucket walk and the two per-cell steps a server repeats per tessellation.
+   Include it from those two files only; the public interface is ../ps_point_eval.h. */
 
 #ifndef PS_POINT_EVAL_DETAIL_HEADER
 #define PS_POINT_EVAL_DETAIL_HEADER
@@ -82,13 +80,10 @@ struct StreamRec
     double lag[NO_DIM];         // --ps-per-stream-lagrangian (PS-DTFE): the stream's Lagrangian coordinate q(x), wrapped into the box when periodic (0 otherwise)
 };
 
-// The STORED form of a StreamRec: only the members this run's options fill. The core (both
-// densities, the velocity, the caustic mask) always; the density gradient, velocity gradient and
-// vertex IDs only with --pts-den-grad / --pts-vel-grad / --ps-per-stream-ids. The records ARE the
-// memory of a large --sample-points run, and packed they take 42 B without those options, 114 B
-// with --pts-vel-grad.
-// unpack() zeroes the members that were not stored -- exactly what the record builders put there
-// when the option is off -- so finalize() sorts and reduces the SAME records: bit-identical output.
+// The STORED form of a StreamRec: only the members this run's options fill (the core always; density gradient, velocity gradient
+// and vertex IDs only with --pts-den-grad / --pts-vel-grad / --ps-per-stream-ids), as the records ARE the memory of a large run.
+// unpack() zeroes the members not stored, exactly what the builders put there when the option is off, so finalize() reduces the
+// SAME records: bit-identical output.
 struct RecLayout
 {
     bool   grad = false, vgrad = false, ids = false, scal = false, lag = false;
@@ -171,11 +166,9 @@ struct Context
     // exact containment: the canonical-image frame (ps_exact_inside.h, whose header says why)
     Frame  canon;
 
-    // Standard binary: which tetrahedra this triangulation OWNS -- those whose Eulerian centroid
-    // (vertices min-image wrapped to vertex 0) lies in [lo, hi). A periodic single triangulation
-    // holds boundary tetrahedra twice (original + image in the padding) and owns the primary-box
-    // one; a composite server's partition owns its own region. The PS worker's ownership is the
-    // Lagrangian-centroid test inside psFilterCell (the partition's lagrangianRegion) instead.
+    // Standard binary: which tets this triangulation OWNS, those whose Eulerian centroid (min-image wrapped to vertex 0) lies in
+    // [lo, hi): a periodic single triangulation holds boundary tets twice (original + image) and owns the primary-box one; a
+    // composite server's partition owns its own region. The PS worker uses the Lagrangian-centroid test in psFilterCell instead.
     OwnBox own;
     // a batch '--sample-points --partition' run set a partition's box here (psPointEvalSetOwnership):
     // finalize() then words its overlap warning for partitions
@@ -195,12 +188,9 @@ struct Context
     std::vector<size_t>   bucketStart;   // prod(nC) + 1 offsets
     std::vector<uint32_t> bucketPts;     // point indices grouped by bucket
 
-    // The stream records of every point, appended in BLOCKS by (possibly concurrent) workers.
-    // An entry is the uint32 point index followed by the PACKED record (RecLayout: only the
-    // members the options fill); finalize() groups the entries by point with a counting sort.
-    // A worker holds one block at most: one std::vector per point (a heap block each), with every
-    // worker holding its partition's hits UNPACKED until one merge at the end, would take several
-    // times the memory.
+    // The stream records of every point, appended in BLOCKS by (possibly concurrent) workers. An entry is the uint32 point index
+    // followed by the PACKED record (RecLayout); finalize() groups the entries by point with a counting sort. A worker holds one
+    // block at most: one std::vector per point with every worker holding its hits UNPACKED until one merge would take far more memory.
     std::vector< std::vector<unsigned char> > recBlocks;
     // the partition each block's records belong to (psPointEvalSetPartition; -1 outside a partition loop), one
     // per block: a worker's sink serves one triangulation, so a block never mixes partitions. The '--resume'
@@ -275,44 +265,11 @@ inline void forEachBucketIn(int const lo[NO_DIM], int const hi[NO_DIM], int cons
 
 namespace psPointEvalDetail {
 
-/* The grid deposit's conventions at the points.
-
-   Without them the planes and grids of the same run measure different things: the grids use --ps-vertex-mass
-   (tetrahedron masses from the particles, m_tet = sum_v m_v/deg_v) and volume-weighted velocity moments (every
-   PS-DTFE run), plain points would take rho_bar*V_lag masses and density-weighted stream means. With TNG's evolved
-   z = 127 positions as the Lagrangian input rho_bar*V_lag carries the initial contrast, so every density mode of
-   a plane comes out filtered by 1 - D(z_ic)/D(z).
-
-   Under --ps-vertex-mass the point densities carry the grid's tetrahedron masses, through ONE number per
-   vertex: the ratio of the two mass models over the vertex's star of depositing tetrahedra,
-
-       c_v = sum_{t in star(v)} m_tet / sum_{t in star(v)} rho_bar V_lag(t)      (the grid's / rho_bar V_lag),
-
-   i.e. the Lagrangian density of the grid's masses around v in units of rho_bar (the IC contrast the default
-   masses miss, plus their vertex-share noise). Then
-     'dtfe'       rho_v -> rho_v c_v: the vertex density rho_bar V_lag(star)/V_eul(star) becomes
-                  M(star)/V_eul(star), the grid's mass around v over its Eulerian volume (exactly so where
-                  no cell of the star is dropped: vertexDensity sums every cell, c_v the depositing ones);
-     denGeo       rho_tet -> rho_tet <c_v>, the mean over the tetrahedron's vertices: (V_lag/V_eul)(t) times the
-                  local Lagrangian density (a hull cell's density, and the sort's second key). Over the
-                  depositing cells this conserves the grid's mass exactly,
-                  sum_t V_lag(t) <c_v> rho_bar = sum_v M(star_v)/(d+1) = sum_t m_tet.
-   With the default masses c_v = 1 and both are the plain estimators. Why not m_tet/V_eul(t) itself, the grid's own
-   per-tetrahedron density: near-lattice initial conditions (TNG's) tile with near-flat slivers whose equal vertex
-   shares give them a normal mass in almost no volume -- a cell average of the grid holds that mass, a POINT is
-   almost never inside such a sliver, so a point set's mean density comes out below 1. And not standard DTFE's
-   (d+1) m_v/V_eul(star) either: on a near-lattice the star volumes vary with the tetrahedralization, which
-   M(star) averages over the star. The non-periodic hull cells keep their constant density,
-   corrected the same way; the density gradient (--pts-den-grad) belongs to the corrected 'dtfe' profile. The
-   per-point velocity, its gradient and the scalar are equal-weight stream means, as the grid's velocity moments
-   are volume-weighted (psPointEvalFinalize). Without --ps-vertex-mass the points take the plain densities.
-
-   c_v is computed by prepareVertexMass over the whole tessellation (the batch worker per partition, before the
-   grid deposit, which recounts its degrees after a reset; a server once per tessellation it builds or loads) and
-   left in the vertex's volumeAccumulator() -- vertexDensity's scratch, unused once the vertex densities are set,
-   and not cached with the tessellation. Its two passes over the depositing cells (psForEachDepositingCell, the
-   grid's own walk) keep their per-vertex sums in a side table indexed through psDegree() (20 B per vertex, freed
-   at the end), which then gets the vertex's true degree back. */
+/* The grid deposit's conventions at the points (else planes and grids of one run measure different things). Under --ps-vertex-mass
+   the point densities carry the grid's tet masses through ONE number per vertex, c_v = sum m_tet / sum rho_bar V_lag over the
+   vertex's star of depositing tets: 'dtfe' rho_v -> rho_v c_v, denGeo -> rho_tet <c_v>; c_v = 1 with the default masses. Not
+   m_tet/V_eul(t) itself: near-flat slivers carry a normal mass in almost no volume, which a POINT almost never hits. Velocity,
+   gradient and scalar are equal-weight stream means (the grid's moments are volume-weighted). prepareVertexMass fills volumeAccumulator(). */
 inline void prepareVertexMass(DT &dt, User_options &userOptions)
 {
     Box boxCoordinates = userOptions.region;
@@ -375,13 +332,11 @@ inline void prepareVertexMass(DT &dt, User_options &userOptions)
 
 namespace psPointEvalDetail {
 
-// The standard worker's per-cell filter, shared with the composite server's occupancy pass:
-// the vertex densities/velocities (false when one is not positive -- a degenerate hull
-// configuration), the Eulerian vertex positions min-image wrapped to vertex 0 (eulerPos) and as
-// stored (rawPos, for the exact test's canonical frame), and ownership: a periodic run holds a
-// boundary tetrahedron once per image, a composite partition also its neighbours' tetrahedra in
-// its padding, and exactly ONE copy -- the one whose centroid lies in 'own' -- is kept, so a point
-// near a boundary receives exactly one record from each physical tetrahedron.
+// The standard worker's per-cell filter, shared with the composite server's occupancy pass: the vertex densities/velocities
+// (false when one is not positive), the Eulerian vertex positions min-image wrapped to vertex 0 (eulerPos) and as stored (rawPos,
+// for the exact test's canonical frame), and ownership: a periodic run holds a boundary tet once per image, a composite partition
+// also its neighbours' tets in its padding, and exactly ONE copy (centroid in 'own') is kept, so a point near a boundary
+// receives one record from each physical tetrahedron.
 inline bool standardCell(Cell_handle &cell, OwnBox const &own, double rho[NO_DIM+1],
                          double vel[NO_DIM+1][noVelComp], Real eulerPos[NO_DIM+1][NO_DIM],
                          Real rawPos[NO_DIM+1][NO_DIM])

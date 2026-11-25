@@ -1,21 +1,4 @@
-"""First-run setup: the four things a new user needs before the launcher is any use.
-
-  1  Data folder      where simulations and grids live (defaults to the configured root when it
-                      exists -- an external disk that is unplugged is said so -- else ~/DTFE-data); and, when
-                      the repository sits in iCloud Drive with the analysis caches still inside it, an offer
-                      to keep those caches outside it (analyze.py cache --move, the same move)
-  2  Programs         are DTFE / PS-DTFE built, with which GPU backend (Metal) and (PS-DTFE) the TBB parallel
-                      triangulation, are the optional double-precision pair and the 2D programs there,
-                      and does the Python that runs the figure scripts have its packages? 'Build' runs
-                      make (the commands are shown; ticks add the double pair and the 2D programs)
-  3  TNG API key      optional, only for downloading IllustrisTNG data: saved to ~/.tng_api_key with
-                      owner-only permissions, never shown again or put on a command line
-  4  Try it           a synthetic demo (32^3 crossed waves, streams 1/3/9/27): generated and run at
-                      Exact, then opened in the Explore tab -- no download
-
-Shown on the first launch and from the window's Setup button. Nothing here runs a computation
-itself: 'Build' runs make, and the demo is queued as an ordinary custom-snapshot job.
-"""
+"""First-run setup: the four things a new user needs before the launcher is any use."""
 
 from __future__ import annotations
 
@@ -74,9 +57,8 @@ def python_status() -> tuple[bool, str]:
 
 def build_command(double: bool = False, dim: int = 3) -> list[str]:
     """make for both binaries -- with the GPU backend this machine can build (Metal on a Mac; elsewhere
-    CPU-only), as scripts/install.sh does; double=True builds the
-    double-precision pair (DTFE-double, PS-DTFE-double) instead, same backend; dim=2 the 2D programs
-    (DTFE-2d, PS-DTFE-2d: CPU only, the GPU kernels are 3D)."""
+    CPU-only), as scripts/install.sh does; double=True builds the double-precision pair
+    (DTFE-double, PS-DTFE-double) instead, same backend."""
     cmd = ["make", "DTFE", "PS-DTFE", f"-j{os.cpu_count() or 4}"]
     gpu = rs.gpu_compiler() if dim == 3 else ""
     if gpu:

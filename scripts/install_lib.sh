@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Helpers for install.sh (sourced): keep the binaries a user already has until a rebuild has LINKED new
-# ones, and say something useful when a build fails. Testable on their own (tests/run_scripts_check.sh K):
+# Helpers for install.sh (sourced), testable on their own (tests/run_scripts_check.sh K):
 #   backup_binaries DIR          copy every built binary (DTFE, PS-DTFE, their -double and -2d variants) into DIR
-#   restore_binaries DIR         put them back (a failed 'make' after 'make clean' would otherwise leave NOTHING)
+#   restore_binaries DIR         put them back
 #   build_failed_hint LOG [N]    the last N lines of the build log plus the usual causes
 #   term_colours                 BLUE GREEN YELLOW RED NC for install.sh and install_dependencies.sh
 
@@ -19,7 +18,7 @@ term_colours() {
     fi
 }
 
-# the 2D double pair too: install.sh rebuilds it, so a failed build must be able to restore it
+# the 2D double pair too: install.sh rebuilds it
 INSTALL_BINARIES=(DTFE PS-DTFE DTFE-double PS-DTFE-double DTFE-2d PS-DTFE-2d DTFE-2d-double PS-DTFE-2d-double)
 
 backup_binaries() {

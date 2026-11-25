@@ -1,67 +1,13 @@
-/* Arbitrary-point evaluation (--sample-points), shared by BOTH binaries.
-
-   PS-DTFE: evaluates the multi-stream phase-space fields at user-supplied Eulerian points
-   instead of (only) on a regular grid. The triangulation is built in Lagrangian space;
-   every Delaunay cell maps to a (possibly folded) Eulerian tetrahedron, and a query point
-   receives one stream per tetrahedron that contains it. Per point we report the total
-   density, the mean velocity over the streams, the velocity dispersion tensor and the
-   stream count; --ps-per-stream additionally records every stream's own density and velocity,
-   and --ps-per-stream-ids each stream's identity (the sorted Lagrangian-vertex ParticleIDs).
-   --pts-den-grad adds the density gradient: per stream the constant gradient of the linear
-   'dtfe' profile, per point the sum over its streams.
-
-   Standard DTFE (no PHASE_SPACE): the same interface and .pts_* file formats over the
-   EULERIAN tessellation -- exactly one containing tetrahedron per point, so the stream
-   count is the 0/1 coverage flag, the density is the plain linear DTFE interpolant and the
-   dispersion is identically 0. The context, bucket index, reduction and writers below are
-   shared verbatim; only the per-triangulation worker differs (interpolatePoints_standard).
-   --ps-per-stream/--ps-per-stream-ids are PS-only (rejected at option parsing); the
-   Sample_point mechanism is a separate path.
-
-   The per-stream density (the 'dtfe' profile below) is the linear interpolation of the Lagrangian-vertex
-   DTFE densities inside the tetrahedron -- the PhaseSpaceDTFE class of the method authors'
-   reference implementation (github.com/jfeldbrugge/PS-DTFE, Python/density.py). Continuous within
-   a stream, but not mass-conserving. Each stream record also keeps the tetrahedron's constant
-   density rho_bar V_lag/V_eul (denGeo): the density of a non-periodic hull cell, whose vertex
-   densities are undefined, and the second key of the streams' sort. The points follow the run's
-   grid conventions: under --ps-vertex-mass the densities carry the grid's tetrahedron masses
-   through a per-vertex mass-model ratio, and as the grid's velocity moments are volume-weighted the
-   per-point velocity, its gradient and the scalar are equal-volume stream means, the dispersion
-   density-weighted (see 'The grid deposit's conventions at the points', ps_point_eval_detail.h). A partitioned run's
-   stream records are checkpointed per partition for '--resume' ('--resume with --sample-points' below).
-
-   The candidate search buckets the (static, read-only) QUERY POINTS on a uniform grid and
-   streams the partition's tetrahedra through it: each kept tetrahedron looks up only the
-   buckets its Eulerian bounding box overlaps. This is the same O(T + P + hits) complexity
-   as a hierarchy over the tetrahedron boxes, with the smaller (point) set indexed.
-
-   Partition protocol: the cell filters below are the CPU grid deposit's filters VERBATIM
-   (ps_interpolation.cc) -- dummy-vertex skip, Lagrangian-centroid ownership, bad-density
-   drop under periodic, minimum-image wrap of vertices 1..NO_DIM to vertex 0, relative-
-   determinant degeneracy and the zero-inverse check -- so a stream is contributed by
-   exactly one Lagrangian partition and the union over partitions is exactly the serial
-   stream set. Per-point stream records accumulate across partitions (the analogue of
-   psDeferNormalization: moments are formed only once, in psPointEvalFinalize, from the
-   deterministically sorted records, so results do not depend on partition/thread order).
-
-   Containment is EXACT and tie-consistent (pointInTet; the machinery lives in
-   ps_exact_inside.h, which the CPU grid deposit shares for its sub-samples): a point is counted by
-   exactly one tetrahedron of every stream, including points ON a shared face, edge or
-   vertex -- e.g. a query at a particle position, which a tolerance-based test counts once
-   per incident tetrahedron (~25 fake streams). How (canonical periodic images, exact predicates with
-   simulation of simplicity, three tiers): the header of ps_exact_inside.h. Only the points within a
-   rigorous per-tetrahedron band of a face reach the exact predicates, so the common path costs what a
-   tolerance test would.
-
-   Each triangulation's cells are processed by a small thread pool (pointEvalThreads): all
-   cores for a single-triangulation run, cores / concurrent partitions inside the
-   partitioned PS loop, so the partition-level parallelism is never oversubscribed.
-
-   The same machinery answers '--serve' requests: ps_serve.cc holds the servers (the single and the
-   composite one; the protocol is documented at the top of that file) and the partitions' occupancy maps,
-   ps_mean_streams.cc the auto-tuner's stream-count estimate. ps_point_eval_detail.h is what they share. */
+/* Arbitrary-point evaluation (--sample-points), shared by BOTH binaries: the phase-space fields (PS-DTFE: one stream per
+   tetrahedron containing the point) or the plain DTFE interpolant (standard binary: one containing tet), at Eulerian points.
+   The bucket index, reduction and writers are shared; ps_serve.cc holds the '--serve' servers, ps_point_eval_detail.h what they share. */
 
 #include "ps_point_eval_detail.h"   // the context, records and helpers shared with ps_serve.cc
+
+// Partition protocol: the cell filters below are the CPU grid deposit's VERBATIM (ps_interpolation.cc), so a stream is
+// contributed by exactly one Lagrangian partition and the union over partitions is the serial stream set. Per-point records
+// accumulate across partitions and the moments are formed once, in psPointEvalFinalize, from the deterministically sorted
+// records, so results do not depend on partition or thread order. Containment is EXACT and tie-consistent (ps_exact_inside.h).
 
 #include "../output_staging.h"   // the .pts_* files are staged with the grids (crash-safe outputs)
 #include "../env_knobs.h"
@@ -125,11 +71,9 @@ inline double inverse3x3Unguarded(double const m[NO_DIM][NO_DIM], double inv[NO_
 }
 
 
-// Eulerian bounding box of a wrapped tetrahedron -> point-bucket range and rel-space bbox
-// pre-test bounds. The slack covers the canonical-vs-wrapped geometry discrepancy (epsAbs),
-// so no point the exact test could accept is ever culled here. Shared by the PS and standard
-// workers so the candidate search is identical in both binaries. Returns false when the
-// (non-periodic) range misses every bucket.
+// Eulerian bounding box of a wrapped tetrahedron -> point-bucket range and rel-space bbox pre-test bounds. The slack covers the
+// canonical-vs-wrapped discrepancy (epsAbs), so no point the exact test could accept is culled. Shared by the PS and standard
+// workers. Returns false when the (non-periodic) range misses every bucket.
 inline bool tetBucketRange(Real const eulerPos[NO_DIM+1][NO_DIM],
                            double relLo[NO_DIM], double relHi[NO_DIM],
                            int bLo[NO_DIM], int bHi[NO_DIM])
@@ -174,15 +118,11 @@ inline void canonicalQuery(uint32_t p, double pc[NO_DIM])
 }
 
 
-// Minimum-image displacement of query point p to (wrapped) vertex 0 and the rel-space bbox
-// pre-test, then the containment decision in three tiers, each deciding only what it provably
-// can: (1) the usual barycentrics on the wrapped geometry, outside the tetrahedron's fineBand;
-// (2) a double-precision classification in the canonical frame, outside its own (much
-// narrower) band; (3) the exact predicate. Every tier-1/2 decision equals the exact one, so
-// the whole test IS the exact, tie-consistent one -- at the cost of a plain tolerance test
-// for all but the points hugging a face. The returned bary[] are the usual interpolation
-// weights on the wrapped geometry (Ax stores edges as rows, so bary = inv^T * rel -- note the
-// [i][v] transpose). Shared by the PS and standard workers.
+// Minimum-image displacement of query point p to (wrapped) vertex 0 and the rel-space bbox pre-test, then the containment
+// decision in three tiers, each deciding only what it provably can: (1) barycentrics on the wrapped geometry outside the tet's
+// fineBand; (2) a double classification in the canonical frame outside its own narrower band; (3) the exact predicate. Every
+// tier-1/2 decision equals the exact one. bary[] are the interpolation weights (Ax stores edges as rows: bary = inv^T * rel,
+// note the [i][v] transpose). Shared by the PS and standard workers.
 inline bool pointInTet(uint32_t p, Real const eulerPos[NO_DIM+1][NO_DIM],
                        Real const rawPos[NO_DIM+1][NO_DIM], TetTest &T, double const band1,
                        double const inv[NO_DIM][NO_DIM],
@@ -213,21 +153,17 @@ inline bool pointInTet(uint32_t p, Real const eulerPos[NO_DIM+1][NO_DIM],
 }
 
 
-// Threads for one triangulation's point evaluation: every core when this is the only
-// triangulation being processed; inside the partitioned PS loop (an OpenMP team of
-// concurrent partitions), the cores left per partition -- so the two levels never
-// oversubscribe (thread_count.h). std::thread rather than a nested OpenMP region, which is disabled by
-// default. DTFE_PTS_THREADS pins it (benchmarks, tests).
+// Threads for one triangulation's point evaluation: every core when this is the only triangulation being processed; inside the
+// partitioned PS loop the cores left per partition, so the two levels never oversubscribe (thread_count.h). std::thread, as
+// a nested OpenMP region is disabled by default. DTFE_PTS_THREADS pins it.
 inline int pointEvalThreads()
 {
     return coresPerTeam( "DTFE_PTS_THREADS" );
 }
 
-// Runs work(cell, hits) over every finite cell of dt -- or only over g_pe.cellList when the server
-// has narrowed a request to the cells near its points -- with nThreads threads. Walking dt, each
-// thread takes every nThreads-th block of 256 cells, so no index array is materialized; each
-// thread's HitSink hands its packed records to the shared store in blocks (record order is
-// irrelevant: finalize sorts every point's records, so any order gives bit-identical outputs).
+// Runs work(cell, hits) over every finite cell of dt (or only g_pe.cellList when the server narrowed a request) with nThreads
+// threads, each taking every nThreads-th block of 256 cells. Each thread's HitSink hands its packed records to the shared
+// store in blocks; record order is irrelevant: finalize sorts every point's records, so any order gives identical outputs.
 template <typename Work>
 void forEachCellParallel(DT &dt, int nThreads, Work work)
 {
@@ -434,17 +370,11 @@ void psPointEvalInit(User_options &userOptions)
 }
 
 
-/* Partitioned point evaluation in the standard binary (ps_point_eval.h). The Eulerian tessellation of
-   the whole box is cut into the partitions' sub-boxes, each triangulated with its padding, and a tetrahedron is
-   OWNED by the partition whose sub-box holds its centroid (vertices min-image wrapped to vertex 0, standardCell).
-   The sub-boxes tile the box -- neighbours share the SAME float cut (optimalPartitionSplit forms both sides from one
-   expression), half-open [lo, hi) -- so every tetrahedron of the single tessellation has exactly one owner, and the
-   exact, tie-consistent containment (pointInTet) hands every point to exactly one of them: the same tetrahedron
-   the single-domain run finds, wherever the owner's padding reproduces its neighbourhood (the vertex densities come
-   from the owner's own triangulation, so the values agree to float rounding). Only the box's outer faces need care:
-   on a periodic box they are the single run's primary-box faces, bit for bit, so the two images of a tetrahedron
-   that straddles the seam are told apart exactly as in the single run; on a non-periodic one they open to
-   infinity, as the single run keeps every tetrahedron. */
+/* Partitioned point evaluation in the standard binary (ps_point_eval.h). A tet is OWNED by the partition whose sub-box holds its
+   centroid (standardCell). The sub-boxes tile the box (neighbours share the SAME float cut, half-open [lo, hi), both sides
+   from one expression in optimalPartitionSplit), so every tet has exactly one owner and the exact containment hands every
+   point to one of them. A periodic box's outer faces are the single run's primary-box faces bit for bit; a non-periodic
+   one opens to infinity. */
 void psPointEvalOwnBox(double const lo[], double const hi[], bool const outerLo[], bool const outerHi[],
                        double ownLo[], double ownHi[])
 {
@@ -514,13 +444,10 @@ void setQueryPoints(std::vector<double> &&pts, int const bucketFloor)
     setQueryRecords();
 }
 
-// Buckets the installed points (~4 points per bucket, at least 'bucketFloor' layers per axis). A cloud that fills
-// the box takes n layers on every axis, n^NO_DIM ~ points / 4, at most 256. A set that holds points in at most an
-// eighth of an axis's layers (a plane of image points across that axis) keeps that axis at n layers, of which only
-// the ones with points get buckets, and the other axes take finer layers (up to 2048, at most 2^24 buckets in
-// all), so a small tetrahedron near the plane tests a few points instead of a coarse bucket's hundreds. The set of
-// points a tetrahedron tests changes, not which ones contain it. A composite request re-buckets once when a
-// partition walks its cells although the request was bucketed for the index.
+// Buckets the installed points (~4 points per bucket, at least 'bucketFloor' layers per axis). A cloud that fills the box takes
+// n layers per axis, n^NO_DIM ~ points / 4, at most 256. A set with points in at most an eighth of an axis's layers (a plane of
+// image points) keeps that axis at n layers and the other axes take finer ones (up to 2048, at most 2^24 buckets), so a small tet
+// near the plane tests few points; this changes which points a tet tests, not which contain it.
 void bucketQueryPoints(int const bucketFloor)
 {
     {
@@ -691,10 +618,9 @@ inline bool anyPointInBuckets(int const bLo[NO_DIM], int const bHi[NO_DIM])
 
 #ifdef PHASE_SPACE
 
-/* Collects this partition's stream contributions for every query point. Called once per
-   Lagrangian partition (and once for a single-triangulation run) after vertexDensity().
-   The tessellation is read-only here (apart from the vertex-mass pass above); the cells are split over
-   pointEvalThreads() threads, and concurrent workers only synchronize on the short record merge at the end. */
+/* Collects this partition's stream contributions for every query point. Called once per Lagrangian partition (or once for a
+   single-triangulation run) after vertexDensity(); the tessellation is read-only here and concurrent workers synchronize
+   only on the short record merge at the end. */
 void interpolatePoints_phaseSpace(DT &dt, User_options &userOptions)
 {
     if ( not g_pe.ctx.active || dt.number_of_vertices() < NO_DIM + 1 )
@@ -831,12 +757,9 @@ void interpolatePoints_phaseSpace(DT &dt, User_options &userOptions)
             rec.vgrad[q] = 0.;
         if ( g_pe.ctx.ptsVelGrad )
         {
-            // constant velocity gradient of this stream: dv_j/dx_d = sum_v inv[d][v]
-            // (vel_{v+1,j} - vel_{0,j}), same affine convention as the density gradient and
-            // the same matrix as the grid deposit's velGrad (ps_interpolation.cc
-            // matrixMultiplication(posMatInv, dvel)), stored TRANSPOSED: the grid writes it
-            // [j*3+d] (field_computation.h velocityGradient), a point [d*3+j]. The velocity profile is linear on
-            // every kept cell -- hull cells included -- so there is no volume-ratio gate here.
+            // constant velocity gradient of this stream: dv_j/dx_d = sum_v inv[d][v] (vel_{v+1,j} - vel_{0,j}), the same matrix
+            // as the grid deposit's velGrad, stored TRANSPOSED: the grid writes it [j*3+d], a point [d*3+j]. The velocity
+            // profile is linear on every kept cell (hull cells included), so there is no volume-ratio gate here.
             for (int d = 0; d < NO_DIM; ++d)
                 for (size_t j = 0; j < noVelComp; ++j)
                     for (int v = 0; v < NO_DIM; ++v)
@@ -907,19 +830,11 @@ void interpolatePoints_phaseSpace(DT &dt, User_options &userOptions)
 
 #else // !PHASE_SPACE
 
-/* Standard-DTFE worker: the tessellation itself is Eulerian, so a query point has exactly
-   one containing tetrahedron (stream count = 0/1 coverage; the exact containment test makes
-   that hold for points ON shared faces too, and psPointEvalFinalize keeps a 1-record cap
-   as a safety net). Reuses the PS candidate search verbatim (bucketed points,
-   tetBucketRange/pointInTet);
-   the estimator differences:
-     (a) vertex positions come from the Delaunay points themselves, min-image-wrapped to
-         vertex 0 under --periodic exactly like the PS Eulerian wrap (ps_cell_filter.h);
-     (b) --periodic pads the box with particle COPIES, so a boundary tetrahedron appears as
-         several images: exactly ONE is kept (Eulerian centroid inside the primary box) --
-         the standard-build analogue of the PS Lagrangian-centroid partition ownership;
-     (c) there is no Lagrangian volume, so no V_lag/V_eul density: denGeo aliases the 'dtfe'
-         value, so the shared sort behaves identically. */
+/* Standard-DTFE worker: the tessellation is Eulerian, so a query point has exactly one containing tetrahedron (stream count =
+   0/1 coverage; psPointEvalFinalize keeps a 1-record cap as a safety net). It reuses the PS candidate search verbatim; the
+   differences: (a) vertex positions are the Delaunay points, min-image-wrapped to vertex 0 as in ps_cell_filter.h; (b) --periodic
+   pads the box with particle COPIES, so exactly ONE image of a boundary tet is kept (Eulerian centroid in the primary box);
+   (c) there is no Lagrangian volume, so denGeo aliases the 'dtfe' value and the shared sort behaves identically. */
 
 // (standardCell, the per-cell filter it shares with the composite server: ps_point_eval_detail.h)
 void interpolatePoints_standardOwn(DT &dt, User_options &userOptions, OwnBox const &own)
@@ -936,13 +851,10 @@ void interpolatePoints_standardOwn(DT &dt, User_options &userOptions, OwnBox con
         Real eulerPos[NO_DIM+1][NO_DIM], rawPos[NO_DIM+1][NO_DIM];
         if ( not standardCell( cell, own, rho, vel, eulerPos, rawPos ) ) { return; }
 
-        // Eulerian edge matrix. Unlike the PS worker (whose stream set must equal the grid
-        // deposit's, degeneracy drops included), NO tetrahedron is dropped for being small or
-        // flat: the Eulerian tessellation tiles the box, so every drop is a hole -- a point in
-        // it, or a query AT a vertex whose tie-break lands in it, would come out uncovered.
-        // Containment is decided exactly regardless of shape (fineBand grows as the tet
-        // flattens, handing the decision to the exact tiers), and a guard-free inverse gives
-        // the interpolation weights; only an exactly zero-volume cell holds no points.
+        // Eulerian edge matrix. Unlike the PS worker (whose stream set must equal the grid deposit's), NO tet is dropped for being
+        // small or flat: the Eulerian tessellation tiles the box, so every drop is a hole. Containment is decided exactly
+        // regardless of shape (fineBand grows as the tet flattens, handing the decision to the exact tiers) and a guard-free
+        // inverse gives the weights; only an exactly zero-volume cell holds no points.
         double relLo[NO_DIM], relHi[NO_DIM];
         int bLo[NO_DIM], bHi[NO_DIM];
         if ( not tetBucketRange(eulerPos, relLo, relHi, bLo, bHi) ) { return; }
@@ -1182,11 +1094,9 @@ static void finalizeReducePoint(size_t const i, std::vector<StreamRec> &recs, do
     }
     if ( g_pe.ctx.volumeWeighted and nS > 0 )
     {
-        // PS-DTFE (the grid's conventions): the grid weights each stream's
-        // velocity, gradient and scalar by the Eulerian volume it fills in the cell, and at a point every one
-        // of its streams fills the point -- equal shares, so the plain mean over the streams (the sorted
-        // order, as above). The DISPERSION stays what the grid keeps it: the mass-weighted second moment about
-        // the mass-weighted mean (the f-weighted CBE moment; see the 'dispersion' field).
+        // PS-DTFE (the grid's conventions): the grid weights each stream's velocity, gradient and scalar by the Eulerian volume it
+        // fills in the cell, and at a point every stream fills the point equally: the plain mean over the streams (sorted order).
+        // The DISPERSION stays the mass-weighted second moment about the mass-weighted mean (see the 'dispersion' field).
         double const invN = 1. / double( nS );
         double sum1[noVelComp] = {0.}, sumG[NO_DIM*NO_DIM] = {0.}, sumS[noScalarComp] = {0.};
         for (size_t s = 0; s < nS; ++s)
@@ -1289,12 +1199,10 @@ static void finalizeReport(User_options const &userOptions, size_t const N, Fina
             << ( counts.covered < N ? "  (uncovered points lie outside the tessellation or in empty regions)" : "" )
             << "\n" << MESSAGE::Flush;
 #ifndef PHASE_SPACE
-    // The safety net of phase 3 warns: the Eulerian tessellation gives every point exactly one
-    // containing tetrahedron (exact containment), and on a periodic box every point has one. A second record, or
-    // none on a periodic box, means that a tetrahedron was OWNED twice or not at all: by partitions (or a composite
-    // server's) whose padding does not reproduce the tessellation near their faces, or -- the same in a single run --
-    // by the two images of a tetrahedron across a periodic box face, whose centroids come from periodic copies that
-    // the box shift rounds (on a box starting at 0 the -L copies are exact and the +L ones round at ~ulp(L)).
+    // The safety net of phase 3 warns: the Eulerian tessellation gives every point exactly one containing tet (and on a periodic
+    // box every point has one). A second record, or none on a periodic box, means a tet was OWNED twice or not at all: by
+    // partitions whose padding does not reproduce the tessellation near their faces, or by the two images of a tet across a
+    // periodic face, whose centroids come from periodic copies the box shift rounds.
     bool const holes = g_pe.ctx.periodic and counts.covered < N;
     if ( counts.overlapped > 0 or holes )
     {
@@ -1464,28 +1372,11 @@ void psPointEvalWriteOutputs(User_options const &userOptions)
 }
 
 
-/* ---- '--resume' with '--sample-points' ---------------------------------------------------------------------
-
-   The planes are made by the grid runs themselves, so without checkpoints a killed run (hours, several
-   partitions in flight) would restart from zero. The point evaluation's only accumulators are the
-   stream records, and each record belongs to the one partition that owns its tetrahedron; one pool filled by
-   every partition in flight could not say which records go with the partitions a checkpoint lists, so every
-   block carries its partition (a sink serves one triangulation, so a block never mixes two), and a checkpoint
-   (partition_checkpoint.h) writes, BEFORE its manifest, one file per merged partition not saved yet:
-
-       <checkpoint dir>/points.<i>   a text header -- the magic line, 'hash' (the checkpoint key's), 'partition',
-                                     'points' (the point count), 'entry_bytes' (uint32 point index + the packed
-                                     record, RecLayout), 'records', 'header-end' -- then the entries as stored
-
-   written once each (a temp file, fsync, rename). '--resume' reads the files of the partitions its manifest lists
-   back into the store and skips those partitions. psPointEvalFinalize sorts each point's records into a strict
-   order before any sum, so it does not matter which records were read back and which computed: the '.pts_*'
-   outputs are byte-identical to an uninterrupted run's (tests/ps_resume_points_check.sh). The files hold the
-   bytes the run keeps in memory anyway, once, inside the checkpoint's 5% time throttle and room rule.
-   The STANDARD binary's partition loop tags its records the same way (DTFE.cpp; one record per
-   point there, from the partition owning its tetrahedron), so a standard '--sample-points --partition' run is
-   checkpointed and resumed by the same files ('DTFE-PS-POINTS 1' names the format, shared by both binaries; the
-   key hash in each header keeps a standard run's files from being read into a PS run and the other way round). */
+/* ---- '--resume' with '--sample-points' --------------------------------------------------------------------------------
+   Every stream-record block carries its partition, and a checkpoint (partition_checkpoint.h) writes, BEFORE its manifest, one
+   file per merged partition not saved yet (<checkpoint dir>/points.<i>: text header, then the entries), once each (temp file,
+   fsync, rename). '--resume' reads them back and skips those partitions; finalize sorts each point's records strictly before
+   any sum, so outputs are byte-identical to an uninterrupted run's. The STANDARD binary shares the format ('DTFE-PS-POINTS 1'). */
 
 namespace psPointEvalDetail {
 

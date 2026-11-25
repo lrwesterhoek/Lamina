@@ -1,15 +1,6 @@
-# Standalone example: access the Delaunay tessellation via the DTFE() library call.
-#
-# STATUS: ported to the current API 2026-10-11 (DTFE()/writeOutputData() with the
-# unaveraged + averaged quantities, User_options::uField); CI builds it after
-# 'make library' (tests/ci_suite.sh variants), so it keeps compiling.
-#
-# Builds against the shared library produced by `make library` at the repo root
-# (run automatically as a prerequisite). The OPTIONS block below MUST match the
-# root Makefile's OPTIONS_COMMON (they set the data-structure layout, so a
-# mismatch gives silent ABI corruption, not a link error), and the TBB block
-# must match the root's TBB / TBB_STD block (the triangulation type).
-#
+# Standalone example: access the Delaunay tessellation via the DTFE() library call; builds against libDTFE
+# (made by 'make library'). The OPTIONS and TBB blocks below must match the root Makefile (they set the data
+# layout and the triangulation type; a mismatch gives silent ABI corruption or an undefined reference).
 #   make            # builds ../../libDTFE and then DTFE_particle_density
 
 ROOT = ../..
@@ -40,9 +31,7 @@ else
     OPENMP_FLAG = -fopenmp
 endif
 
-# macOS SDK pinning, the root Makefile's: after an OS or Command-Line-Tools update the Homebrew clang can derive an
-# SDK that does not exist and then fails on the C/C++ standard headers. An SDK that exists is passed as -isysroot.
-# Empty on Linux. Override with MACOS_SDK_OVERRIDE.
+# macOS SDK pinning, as in the root Makefile (an SDK that exists is passed as -isysroot; override with MACOS_SDK_OVERRIDE).
 MACOS_ISYSROOT =
 ifeq ($(UNAME_S),Darwin)
     MACOS_SDK := $(or $(MACOS_SDK_OVERRIDE),$(shell s=$$(xcrun --show-sdk-path 2>/dev/null); \
@@ -80,11 +69,8 @@ LIBS = -L$(ROOT) -lDTFE $(LIBRARIES) -lboost_thread -lboost_filesystem -lboost_p
        -lgsl -lgslcblas -lm -lgmp -lmpfr
 
 # ---- MUST match the root Makefile's TBB / TBB_STD block ----
-# The library's Delaunay type follows TBB_STD there: with the tbb package installed (TBB=auto) libDTFE is built
-# with CGAL's parallel data structure (-DPARALLEL_TRIANGULATION), and a caller compiled without that define asks
-# for a DTFE() overload the library does not have (undefined reference at link time). The same detection is
-# repeated here, so 'make', 'make TBB=0', 'make TBB_STD=0' and TBB_PATH_OVERRIDE=/path give a matching pair (the
-# command-line variables reach the 'make library' below as well).
+# libDTFE's Delaunay type follows TBB_STD there (-DPARALLEL_TRIANGULATION with tbb installed); a caller compiled
+# without that define asks for a DTFE() overload the library lacks. Command-line variables reach 'make library' too.
 TBB ?= auto
 ifeq ($(UNAME_S),Darwin)
     TBB_PATH := $(or $(TBB_PATH_OVERRIDE),$(BREW_PREFIX)/opt/tbb)

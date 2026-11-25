@@ -1,7 +1,6 @@
 """The Pipeline tab's job, moved out of runspec.py: PipelineSpec (scripts/run_ps_pipeline.sh -- the grids and a
 full-box image plane for every stale snapshot of the chosen simulations, then optionally plot_pointeval.py per
-simulation) and the plane-window parser only it uses. runspec re-exports both and is the module to import; this one
-reads runspec's own names through it at call time (_rs.NAME), so whatever a test patches there reaches it too."""
+simulation) and the plane-window parser only it uses. runspec re-exports both and is the module to import."""
 
 from __future__ import annotations
 
@@ -33,9 +32,7 @@ def _window_values(text: str) -> list[float] | None:
 class PipelineSpec:
     """scripts/run_ps_pipeline.sh: grids + a full-box image plane for every STALE snapshot of the
     chosen simulations (resumable; snapshots are discovered, not chosen), then optionally the
-    point-evaluated figures. The run options travel to run_ps_dtfe.sh through the environment, as
-    the Grids job's do (the quality's settings from mode(), as RunSpec's); the plane's geometry reaches
-    tools/make_image_plane.py the same way."""
+    point-evaluated figures."""
     data_root: str = field(default_factory=lambda: _rs.default_data_root())
     sims: list[str] = field(default_factory=list)
     nu: int = 8192                  # image-plane pixels across the box
@@ -115,10 +112,7 @@ class PipelineSpec:
         return self.planes * nu * nv * self.supersample ** 2
 
     def plane_matches(self, sim: str, nu: int | None = None) -> bool | None:
-        """Whether the plane file on disk has this job's geometry. False also for a missing or unreadable
-        sidecar (make_image_plane.py --same-as says 'differs' then, and the script regenerates the plane,
-        which makes every snapshot of that simulation stale); None when this job's own window or centre
-        is malformed (problems() reports that)."""
+        """Whether the plane file on disk has this job's geometry."""
         import json
         try:
             side = json.loads(self.plane_json(sim, nu).read_text())
@@ -139,10 +133,9 @@ class PipelineSpec:
                                + _rs.PIPELINE_RENDER_KEYS)
 
     def check_step(self, sim: str, snaps: list[int], nu: int) -> _rs.Step:
-        """run_ps_dtfe.sh in report mode with every setting run_ps_pipeline.sh would pass it (the run
-        options through the environment, its pinned DTFE_GPU among them, which '-m' repeats for a Device GPU,
-        and this plane) -- a plane not generated yet, or one the script will regenerate, is sized by its
-        point count."""
+        """run_ps_dtfe.sh in report mode with every setting run_ps_pipeline.sh would pass it (the run options
+        through the environment, its pinned DTFE_GPU among them, which '-m' repeats for a Device GPU, and
+        this plane)."""
         argv = [str(_rs.PS_SCRIPT), "-s", sim, "-g", str(self.grid)] + (["-m"] if self.mode().gpu else []) \
             + [str(n) for n in sorted(snaps)]
         env = {k: v for k, v in self.command()[1].items() if k not in _rs.PIPELINE_ONLY_KEYS}
@@ -156,14 +149,9 @@ class PipelineSpec:
         return _rs.Step(f"memory check {sim} {nu}^2", argv, env)
 
     def stale(self, sim: str, nu: int | None = None) -> tuple[list[int], int]:
-        """(snapshots the pipeline would compute, snapshots on disk) -- the script's own test:
-        <prefix>.pts_den newer than the combined file and the plane and holding the plane's point count
-        (+ .pts_velGrad present), and a plane file of this job's geometry (a differing one is regenerated:
-        everything is stale then). The count: else a 4096^2 slice newer than an older 8192^2 plane
-        would read as current, so the script would skip the compute and every render fail on the size mismatch.
-        And a snapshot whose <prefix>.runlog an older version of the programs wrote (no header 'run mode' line:
-        results.older_log, the script's own test on the log's head) is computed again, as the script recomputes it;
-        a snapshot without a run log is judged by the file times alone."""
+        """(snapshots the pipeline would compute, snapshots on disk) -- the script's own test: <prefix>.pts_den
+        newer than the combined file and the plane and holding the plane's point count (+ .pts_velGrad present),
+        and a plane file of this job's geometry (a differing one is regenerated: everything is stale then)."""
         import json
 
         import results as R                 # (pure Python, no Qt: the run-log readers)

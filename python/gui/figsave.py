@@ -1,24 +1,4 @@
-"""How the Explore tab saves its pictures.
-
-  options(d)          the save options, checked and completed: the DEFAULTS draw exactly the reference pictures of
-                      Save image… and Save figure… (a test compares the pixels), so nothing changes for whoever
-                      never opens the dialog; PRESETS fill several in one go (Publication, Bare image, Slide)
-  unit_map            the axes' unit: Mpc as stored (h-free), Mpc/h when the box's h is known, or cells
-  position            a position along any axis in that unit (the slice position in a saved title)
-  style_axes          frame, ticks, tick labels and axis names of one matplotlib Axes as the options say
-  rc / save_kwargs    the matplotlib settings (font size, text kept as text in PDF and SVG) and savefig() arguments
-                      (a TIFF compressed losslessly, LZW)
-  fit_width           the figure scaled so the saved file has the width asked for
-  match_dpi           the dpi that puts one data pixel on one image pixel inside the map's axes (a plane too small
-                      for 72 dpi shrinks the figure instead)
-  settle_wraps        wrapped titles given their drawn line breaks, so every matplotlib version measures them alike
-  savefig             a matplotlib figure saved with the options (pixel guard, settled wraps, save_kwargs)
-  writes_pixels       the options that save the data's own pixels: full resolution, or no margins + match the data
-  write_pixels        the full-resolution file: one image pixel per data pixel, the screen's colours, overlays optional
-  SaveOptionsDialog   the one dialog behind Save image…, Save figure… and Explore > Save Options…
-
-Matplotlib only (no pyplot) and numpy; the dialog is the only Qt part.
-"""
+"""How the Explore tab saves its pictures."""
 
 from __future__ import annotations
 
@@ -35,10 +15,6 @@ MARGINS = (("tight", "Tight crop (as before)"), ("pad", "Tight crop with this pa
            ("none", "None: the map fills the file"))
 DPI_MIN, DPI_MAX = 72, 1200
 FULL_DPI = 100.0                # the full-resolution file's nominal dpi: the outlines' line widths, a vector page size
-# the largest side of a figure drawn for a save: matplotlib allocates the whole picture (4 bytes a
-# pixel) already while laying it out, so a width meant in pixels but typed in inches (50 in at 1200 dpi: 24 GB) must
-# stop before that; 16384 a side is 1 GB for the canvas alone (the image resampled into it takes more: a 1200 dpi map
-# of 7 in peaks at about 2 GB)
 MAX_SIDE_PX = 16384
 # a TIFF's compression: LZW, lossless (the same pixels, a test reads them
 # back) and read by every TIFF reader (the 'TIFF with LZW' journals ask for); Pillow's libtiff writes it, for the
@@ -167,17 +143,15 @@ def describe(opts: dict) -> str:
 
 def title_text(opts: dict, auto: str, shown: str | None = None) -> str:
     """The title drawn: the typed one when it was typed for this map (its own title then was 'auto'), else the map's
-    own title: 'shown' when given ('auto' with its positions in the axes' unit, Mpc/h or cells; 'auto'
-    stays the key a typed title is tied to, so changing the unit never detaches it), else 'auto'."""
+    own title: 'shown' when given ('auto' with its positions in the axes' unit, Mpc/h or cells; 'auto' stays the
+    key a typed title is tied to, so changing the unit never detaches it), else 'auto'."""
     t = (opts.get("title_text") or "").strip()
     return t if t and opts.get("title_for", auto) == auto else (auto if shown is None else shown)
 
 
 def writes_pixels(opts: dict) -> bool:
     """The save writes the data's own pixels (write_pixels: one image pixel per data pixel, the screen's colours, no
-    resampling): full resolution, or no margins with 'match the data' and no width asked (that borderless figure is
-    the same file as full resolution: matplotlib's picture of the map at the matched dpi, 72 at least, would resample
-    a plane under ~390 points across)."""
+    resampling): full resolution, or no margins with 'match the data' and no width asked."""
     o = options(opts)
     return o["kind"] == "full" or (o["margins"] == "none" and o["match_data"] and not o["width"] > 0)
 
@@ -228,10 +202,7 @@ class UnitMap:
 
 
 def unit_map(o, rest, unit: str, hubble: float | None = None) -> tuple[UnitMap, str]:
-    """(UnitMap, a note when the unit asked for cannot be used) for the in-plane axes 'rest' of output 'o'. 'mpc' is
-    the stored unit (cells for an output without a box, as the map says); 'mpc_h' multiplies by the box's h
-    ('hubble', grids.hubble: None when unknown, then Mpc and a note); 'cells' counts the grid's cells from the box's
-    low corner."""
+    """(UnitMap, a note when the unit asked for cannot be used) for the in-plane axes 'rest' of output 'o'."""
     if o.box is None:
         return UnitMap("cells"), ("" if unit == "cells" or unit == "mpc" else "no box known: the axes are in cells")
     if unit == "cells":
@@ -311,11 +282,7 @@ def save_kwargs(opts: dict, dpi: float, fmt: str = "png") -> dict:
 
 def settle_wraps(fig, dpi: float) -> None:
     """Give every wrapped text of 'fig' the line breaks it gets at the figure's current size and 'dpi', as explicit
-    newlines with wrapping off; the original text is kept on the artist, so a later call re-wraps it after a resize.
-    matplotlib 3.6 (Ubuntu 24.04, the CI) wraps text only while drawing: its extents, get_tightbbox and savefig's
-    tight crop measure a wrapped title unwrapped, so without this fit_width does not converge (a map asked 900 px wide
-    comes out 907) and the crop takes the unwrapped title's width. matplotlib 3.10 lays the wrapped lines out
-    everywhere, and the same breaks give the same file there."""
+    newlines with wrapping off."""
     from matplotlib.text import Text
     own = fig.dpi
     fig.set_dpi(dpi)
@@ -406,16 +373,7 @@ def fit_width(fig, opts: dict, dpi: float, relayout=None) -> None:
 
 def match_dpi(fig, axes_px, relayout=None) -> float:
     """The dpi at which the widest data plane fills its axes pixel for pixel: max over (axes, data pixels across) of
-    pixels / the axes' drawn width in inches, at most DPI_MAX. A plane too small for DPI_MIN (fewer than 72 points per
-    inch of its axes: every plane under ~390 points across in the 7 in map, a 256³ grid's slice too) SHRINKS THE
-    FIGURE instead: at DPI_MIN its axes then hold the plane pixel for pixel, so the saved map has the data's pixel
-    count (stopping the dpi at 72 would resample a 64-cell map to 389 pixels), while the text keeps its size in
-    points, readable at 72 dpi (a dpi below it draws 8 pt text one to three pixels high).
-    The shrink is uniform with the layout's fractions kept, which is exact in one step (the aspect of every axes box
-    is kept, so its width scales with the figure); 'relayout' (the separate panels' tight_layout) is re-run between
-    such steps while it still fits the text, and a last step makes the size exact whatever it did. A tiny plane
-    (64 cells) leaves little room for the text: legible, tightly packed. The caller's check_pixels guard stays (a
-    shrunk figure only gets smaller)."""
+    pixels / the axes' drawn width in inches, at most DPI_MAX."""
     import warnings
 
     def need():                                     # (dpi wanted, data pixels of that axes)
@@ -462,10 +420,9 @@ def match_dpi(fig, axes_px, relayout=None) -> float:
 
 
 def write_pixels(path, rgb: np.ndarray, fmt: str, overlay=None, transparent: bool = False) -> None:
-    """The full-resolution file: 'rgb' (rows from the top, uint8) one image pixel per element. 'overlay(ax)' draws
-    on an invisible Axes spanning the image exactly (it sets its own limits: arrows, outlines); None writes the array
-    as it is (PNG and TIFF straight through Pillow; a TIFF LZW-compressed, TIFF_COMPRESSION). A PDF or SVG embeds the
-    pixels unresampled on a page of width / 100 inches."""
+    """The full-resolution file: 'rgb' (rows from the top, uint8) one image pixel per element. 'overlay(ax)' draws on
+    an invisible Axes spanning the image exactly (it sets its own limits: arrows, outlines); None writes the array
+    as it is (PNG and TIFF straight through Pillow; a TIFF LZW-compressed, TIFF_COMPRESSION)."""
     rgb = np.ascontiguousarray(rgb)
     if overlay is None and fmt in ("png", "tiff"):
         from PIL import Image                       # matplotlib's own dependency: the RGB as it is

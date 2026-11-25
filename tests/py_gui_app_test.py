@@ -1,20 +1,7 @@
 #!/usr/bin/env python3
-"""End-to-end check of the PySide6 GUI (python/gui/app.py), offscreen, on a synthetic per-family
-data root: discovery and the command preview; REAL runs through the Run button of all three
-tabs -- Grids (a two-snapshot PS-DTFE run: progress, log, exit summary, 'done' marks), Plots
-(plot_PS_DTFE.py per snapshot, the figures appearing in the browser), Pipeline (plan only,
-then grids + image plane + plot_pointeval.py) and Data (download through a FAKE wget that copies
-local TNG-like chunks -- no network -- then merge_HDF5.py) -- and Stop killing the process tree.
-
-Every figure goes into a temp folder (DTFE_FIGURES_ROOT, set before the launcher is imported and inherited
-by the scripts it runs) -- never the real figures root.
-
-Needs PySide6 and the built ./PS-DTFE (make PS-DTFE); without either it reports SKIP and exits
-0 -- unless DTFE_GUI_TEST_REQUIRED=1 (as in CI), where a skip is a failure, so a broken PySide6
-install can never turn the suite silently green.
-
-Usage: ~/.venvs/dtfe-gui/bin/python tests/py_gui_app_test.py
-"""
+"""End-to-end check of the PySide6 GUI (python/gui/app.py), offscreen, on a synthetic per-family data root: discovery
+and the command preview; REAL runs through the Run button of all three tabs.
+Usage: ~/.venvs/dtfe-gui/bin/python tests/py_gui_app_test.py"""
 
 import os
 import shutil
@@ -229,11 +216,8 @@ def _window(qa, w, spec):
 
 
 def _form_widths(qa, w):
-    """Every tab's form fits its pane (the forms scroll only vertically: a wider one was cut off at the right edge,
-    the preset row's Delete button with it): folded, and with every group open on a build without the GPU (whose note
-    is in the grey 'Runs on' line) and with the longest 'Runs on' line (a Custom job whose extra options give a GPU
-    share, after a memory check that reported the GPU), the Custom tab in 2D too. And the Pipeline tab's quality,
-    grid and machine use have a group of their own."""
+    """Every tab's form fits its pane (the forms scroll only vertically; a wider one is cut off at the right edge):
+    folded."""
     print("form widths:")
     from PySide6.QtCore import QPoint, QRect
     from PySide6.QtWidgets import QScrollArea
@@ -712,12 +696,8 @@ def _memory_check(qa, w, sim):
     w.p_prefix.editingFinished.emit()
     w.p_render.setChecked(False)
     qa.processEvents()
-    # Planes large enough that their points, not the tessellation, set the difference (1024²: ~0.2
-    # GB of point records, 512²: ~0.05). The budget must sit between the two sizes' SMALLEST
-    # possible footprints: the tuner splits a small particle set whose one domain
-    # does not fit, so a budget between the unsplit predictions is met by a split at the larger
-    # plane, and nothing would be halved. A budget just above the fixed part (the full grid and
-    # the points, which no split reduces) makes the binary report that smallest split.
+    # Planes large enough that their points, not the tessellation, set the difference. The budget must sit between the
+    # two sizes' SMALLEST possible footprints: the tuner splits a small particle set whose one domain does not fit.
     steps = {nu: w.pipe.check_step(SIM, [99], nu) for nu in (1024, 512)}
 
     def report(nu, budget=None):
@@ -970,9 +950,8 @@ def _stop(qa, w):
     check("... and starts the run: now Stop is offered and Run is not",
           w.proc is not None and w.stop_action.isEnabled() and not w.run_action.isEnabled())
     pid = int(w.proc.processId())
-    # poll for the binary rather than wait a fixed time: the run lasts only a few seconds (2.9 s for this exact
-    # 256^3 deposit), and a fixed 3 s wait sampled the tree after it had exited (bash and the keep-awake
-    # caffeinate were all that was left)
+    # poll for the binary rather than wait a fixed time: the run lasts only a few seconds, and a fixed wait could
+    # sample the tree after it had exited
     names = []
     for _ in range(100):                          # up to 10 s
         spin(100)
@@ -1141,10 +1120,7 @@ def _layout(qa, w):
 
 
 def _polish(qa, w):
-    """The launcher's polish: the tab bar above the data panel, the folded More groups (their one-line summaries,
-    their state kept by a window that remembers), short tooltips, the shared run-tab groups, the Quality pair on each
-    run tab (Exact first and ticked; switching it changes the grey line and the job as its mode says), and no trace
-    of the controls the two modes replaced."""
+    """The launcher."""
     print("polish:")
     import atexit
     import json as _json
@@ -2227,7 +2203,7 @@ def _figure_grid(qa, w, tmp, sim, json, x, s99):
           ok and [r[0].prefix for r in rows if r] == ["output", "ps_q2"] and labels == want_types and typ0.isEnabled(),
           f"{[r[0].prefix for r in rows if r]} {labels} want {want_types} (preferred {x._pref_prefix})")
     # type_order's 2nd key: from the standard DTFE the other estimator's pick is its DEFAULT prefix (ps_output), not
-    # the first by name (ps_alt); the preferred prefix is now 'output' (picked by name), so only that key can say so
+    # the first by name (ps_alt)
     x.select_root(str(std))
     ok_std = wait_for(lambda: x._plane is not None and not x._busy and x.current is not None and x.current.prefix == "output", 30)
     x.grid_set_layout(1, 2)
@@ -2327,9 +2303,8 @@ def _figure_grid(qa, w, tmp, sim, json, x, s99):
     check("two opened folders named 'elsewhere' read 'opened_a/elsewhere' and 'opened_b/elsewhere' in the Redshift menu, "
           "and the row kept its output", texts == ["opened_a/elsewhere", "opened_b/elsewhere"]
           and x.grid_row(0) is not None and str(x.grid_row(0)[0].root) == str(opened[0]), str(texts))
-    # a refresh re-lists row 0's opened file under the custom snapshots (its folder joined
-    # them): the row follows its OUTPUT into that group -- kept on 'Opened files', which no longer holds it, the row
-    # would swap to opened_b
+    # a refresh re-lists row 0's opened file under the custom snapshots (its folder joined them): the row follows its
+    # OUTPUT into that group
     w.custom_dirs.append(str(opened[0].parent))
     try:
         x.refresh_outputs()
@@ -2820,10 +2795,9 @@ def _exact_zoom(w, tmp, x, img):
           and "--verbose" in cmd and cmd[cmd.index("--verbose") + 1] == "2"
           and cmd.count("--run-mode") == 1 and cmd[cmd.index("--run-mode") + 1] == "balanced", str(cmd))
     x.zoom_res.setValue(64)
-    # an 8-of-32-cell square: the zoom's virtual grid (64 cells across it) then tiles the box exactly, so the
-    # window is the same region as the slice's cells; the on-disk run is the demo's exact deposit (the default since
-    # 2026-11-09), so the two region masses agree but for rounding; a sampled demo's differed by what the
-    # straddling streams put across the edge (a few percent here), which the 5% bound still allows
+    # an 8-of-32-cell square: the zoom's virtual grid (64 cells across it) then tiles the box exactly, so the window
+    # is the same region as the slice's cells; the demo's exact deposit makes the two region masses agree but for
+    # rounding (the 5% bound allows for a sampled demo)
     sq = (img.height() // 4, img.width() // 4, img.height() // 2 - 1, img.width() // 2 - 1)
     ref = region_mean(x, *sq)
     x._dragged(*sq)
@@ -3236,10 +3210,9 @@ def _job_clock(qa, w, tmp, data, demo, root):
 
 
 def trash_and_vanish(qa, w, x, tmp, root):
-    """Explore drops an output whose grids left the disk (a trashed run left listed would fail its next
-    slice read), and the Runs browser's Move to Trash takes every log of the set (a '.runlog.failed' or
-    '.partial' left behind would show up as a failed run without outputs). The Trash and its question are stood in
-    for: nothing leaves the temp folder."""
+    """Explore drops an output whose grids left the disk (a trashed run left listed would fail its next slice read),
+    and the Runs browser's Move to Trash takes every log of the set (a '.runlog.failed' or '.partial' left behind
+    would show up as a failed run without outputs)."""
     import types as _types
     import runs_view as RV
     print("trash and vanished outputs:")
@@ -3303,10 +3276,9 @@ def trash_and_vanish(qa, w, x, tmp, root):
 
 
 def launcher_run_log(qa, w, tmp):
-    """The launcher's own run log keeps the run-log contract: a step with a tee writes '<log>.partial';
-    exit 0 renames it onto '<log>' (a stale '<log>.failed' goes), any other end -- a failure, a program that cannot
-    start, Stop -- onto '<log>.failed', so the log of the grids still on disk is never truncated. And every step's
-    Python is unbuffered: its lines reach the log while it runs, not when it exits."""
+    """The launcher's own run log keeps the run-log contract: a step with a tee writes '<log>.partial'; exit 0 renames
+    it onto '<log>' (a stale '<log>.failed' goes), any other end -- a failure, a program that cannot start, Stop --
+    onto '<log>.failed', so the log of the grids still on disk is never truncated."""
     print("the launcher's run log, unbuffered steps:")
     d = tmp / "run log"
     d.mkdir()
@@ -3411,7 +3383,7 @@ def two_d_gui(qa, w, tmp):
     wait_for(lambda: not x._busy and x._req["field"] == "tweb_eigenvalues", 30)
     ecomps = [x.component.itemText(i) for i in range(x.component.count())]
     check("the 2D T-web: its classes and two eigenvalues are maps",
-          "tweb" in o.fields() and o.files["tweb_eigenvalues"].ncomp == 2 and ecomps == ["1", "2"]
+          "tweb" in o.fields() and o.files["tweb_eigenvalues"].ncomp == 2 and ecomps == ["λ1", "λ2"]
           and x._plane is not None and x._plane.shape == (64, 64), f"{o.fields()} {ecomps}")
     x.field.setCurrentIndex(x.field.findData("velocity"))
     wait_for(lambda: not x._busy and x._req["field"] == "velocity", 30)

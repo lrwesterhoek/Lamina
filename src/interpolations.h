@@ -1,7 +1,4 @@
-/*
- *  Forward declarations for the interpolation methods and random sampling functions
- *  (defined in their respective .cc files).
- */
+/* Forward declarations of the interpolation methods and random sampling functions (defined in their .cc files). */
 
 #ifndef INTERPOLATIONS_HEADER
 #define INTERPOLATIONS_HEADER

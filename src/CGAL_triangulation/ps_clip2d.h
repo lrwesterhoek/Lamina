@@ -1,15 +1,6 @@
-/* The 2D counterpart of r3d for '--exact' in a DIM=2 phase-space build: a triangle clipped
-   to an axis-aligned grid cell, and the moments of the piece up to second order.
-
-   r3d (third_party/r3d, Powell & Abel 2015) clips a tetrahedron against a cell's six planes and
-   integrates [1, x, y, z, xx, xy, xz, yy, yz, zz] over the piece. In 2D the piece of a triangle
-   inside a square is a convex polygon of at most 7 vertices, found by clipping against the four
-   edges in turn (Sutherland-Hodgman), and its moments [1, x, y, xx, xy, yy] follow exactly from the
-   vertices (Green's theorem over the boundary). The moment layout matches r3d's -- order 0, the
-   first moments, then the second moments a <= b row by row -- so the deposit reads both the same way.
-
-   The triangle must be counter-clockwise (positive area); the caller swaps two vertices of a
-   folded one, as it does for r3d. */
+/* The 2D counterpart of r3d for '--exact' in a DIM=2 phase-space build: a triangle clipped to a grid cell
+   (Sutherland-Hodgman) and the polygon's moments up to second order, in r3d's layout.
+   The triangle must be counter-clockwise; the caller swaps two vertices of a folded one, as for r3d. */
 
 #ifndef PS_CLIP2D_HEADER
 #define PS_CLIP2D_HEADER
@@ -47,8 +38,7 @@ inline void clipHalfPlane(Polygon const &in, int const axis, double const bound,
     }
 }
 
-/* tri: the triangle's vertices (counter-clockwise), lo/hi: the cell; mom: the moments of the
-   intersection. Returns false when the intersection is empty. */
+/* tri: counter-clockwise triangle, lo/hi: the cell; mom: moments of the intersection. False when empty. */
 inline bool clipTriangleToCell(double const tri[3][2], double const lo[2], double const hi[2],
                                double mom[MOMENTS])
 {

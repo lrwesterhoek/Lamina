@@ -11,23 +11,17 @@
 The simulation is --sim NAME or DTFE_SIM (there is no default), the data root --data-root or DTFE_DATA_ROOT; the
 snapshots are --snaps.
 
-Phase 1 does the expensive 512^3 work once per snapshot into python/cache/<param-hash>/;
-phase 2 reads the cache. Changing sigma/footprint/criterion in config.py changes the hash
-and triggers a recompute. Under 'all' the compute phase runs in its own subprocess, so its
-working set is returned to the OS before the plot scripts start. Without snapshot ids,
+Phase 1 computes the shared products once per snapshot into python/cache/<param-hash>/; phase 2 reads the cache.
+Changing sigma/footprint/criterion in config.py changes the hash and triggers a recompute. Without snapshot ids,
 compute and export take config's ladder where the snapdir exists.
 
-'voids' runs VOID_SCRIPTS with --sim config.SIMULATION (DTFE_SIM): each writes per-simulation folders and tags a
-non-default smoothing itself, so DTFE_SMOOTH_MPC is allowed there. A script named there (or in --only) that is not in
-python/plot yet is skipped with a note, not failed.
+'voids' runs VOID_SCRIPTS with --sim; a script not in python/plot is skipped with a note.
+DTFE_SMOOTH_MPC is allowed there.
 
-'cache' lists python/cache's namespaces with their sizes and whether the current code can still reach
-them (cache_inventory: an older '_v<N>' format, or a smoothing no current setting produces); '--prune' is a DRY RUN
-listing what would be deleted and its size, and only '--prune --yes' deletes. '--keep-mpc' / '--keep-cells' count
-more smoothings as current. 'cache --move DIR' moves the whole cache to DIR -- every entry
-copied and verified before any source is removed -- and records DIR as the cache folder (config.cache_setting_file,
-read after DTFE_CACHE_DIR), e.g. out of iCloud Drive; a DRY RUN without '--yes', refused while a figure script, an
-analysis, the launcher or a DTFE binary may be using the cache (move_cache, cache_users).
+'cache' lists the cache namespaces with their sizes and whether the current code can still reach them. '--prune'
+is a dry run; only '--prune --yes' deletes. '--keep-mpc' / '--keep-cells' count more smoothings as current.
+'cache --move DIR' copies and verifies every entry, then removes the sources and records DIR as the cache folder;
+a dry run without '--yes', refused while a script, the launcher or a DTFE binary may be using the cache.
 """
 
 import argparse
@@ -77,11 +71,8 @@ PLOT_SCRIPTS = [
     'plot_tidal_correlation.py'
 ]
 
-# The void-population scripts, run by 'voids', in this order: the catalogue statistics first (the
-# population script also draws the size function), then the profiles, their evolution, the environment (S/R
-# types), the fate census and the convergence check of the void statistics across resolution and estimator
-# (plot_void_convergence.py; default arguments '--sim <SIM>' like the others).
-# Registered by name; a missing one is skipped with a note (run_scripts).
+# The void-population scripts run by 'voids', in order: catalogue statistics, profiles, evolution, environment,
+# fate census, convergence. Registered by name; a missing one is skipped with a note (run_scripts).
 VOID_SCRIPTS = [
     'plot_void_population.py',
     'plot_void_profiles.py',
@@ -121,9 +112,8 @@ def snapshots_on_disk():
 # ---------------------------------------------------------------- check
 
 def check_data():
-    """Per config snapshot: absent (not on disk: compute and plot leave it out), or the estimator the scripts load
-    there and whether its grids are complete. Counting standard DTFE's output.* alone, a box with
-    PS-DTFE grids alone would read INCOMPLETE everywhere while compute and plot use those grids.
+    """Per config snapshot: absent (not on disk), or the estimator the scripts load there and whether its grids
+    are complete. A box with only PS-DTFE grids counts as complete.
     'missing' = the incomplete snapdirs (exit 1), and no snapdir at all."""
     from dtfelib.cli import sim_dir, snapdir_path
     base = sim_dir(config.SIMULATION)

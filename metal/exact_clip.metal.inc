@@ -1,18 +1,12 @@
-//  The GPU exact tetrahedron-cell intersection: the volume and the first and second moments of one
-//  tetrahedron intersected with one axis-aligned grid cell, in float32. Shared by the phase-space
-//  deposit (ps_deposit.metal: --exact) and the standard-DTFE exact volume average
-//  (dtfe_deposit.metal: --exact); the Makefile PREPENDS this file to both kernel sources
-//  when it embeds them (and metal/validate_deposit.cpp does the same when it loads the source).
+//  The GPU exact tetrahedron-cell intersection (volume, first and second moments, float32). Shared by ps_deposit.metal
+//  and dtfe_deposit.metal; the Makefile PREPENDS it to both kernel sources (validate_deposit.cpp does the same).
 //  Keep it self-contained: it is compiled before everything else in each kernel source.
 #include <metal_stdlib>
 using namespace metal;
 
-// The tet's four face planes, outward (n.x <= off inside), in the vertex-0 frame: a cell lying
-// wholly beyond one of them cannot intersect the tet, so it is skipped before any clipping. A
-// stretched (folded, sheet-like) tet's axis-aligned window holds mostly such cells -- a diagonal
-// 16x16x0.1 Mpc sheet spans ~40^3 cells of 0.4 Mpc and touches ~40^2 -- and clipping every one of
-// them twice made the exact deposit crawl when cells are much smaller than tets (0.26M particles
-// on 256^3: >17 min). Skipped cells clip to nothing anyway: same output, to float rounding.
+// The tet's four outward face planes (n.x <= off inside), in the vertex-0 frame: a cell wholly beyond one of them
+// cannot intersect the tet and is skipped before clipping (a stretched, sheet-like tet's window holds mostly such
+// cells). Skipped cells clip to nothing anyway: same output, to float rounding.
 struct TetPlanes { float3 n[4]; float off[4]; };
 
 static inline TetPlanes tet_planes(float3 t1, float3 t2, float3 t3) {
@@ -41,81 +35,11 @@ static inline bool box_outside_tet(thread const TetPlanes& F, float3 c, float3 h
     return false;
 }
 
-// ================================================================================================
-// sweep_moments: the moments [V, x, y, z, xx, xy, xz, yy, yz, zz] of a tetrahedron T intersected
-// with an axis-aligned box B, as true integrals (V = the volume, x = the integral of x over T∩B,
-// ...), about the frame origin. order2=false fills mom[0..3] only.
-//
-// The method is a sweep in z. The horizontal cross-section of T at height z is a convex polygon
-// of 3 or 4 vertices, each on a tet edge; with the vertices sorted by z they sit in 4 fixed SLOTS
-// (s0 on edge 03; s1 on 01 or 13; s2 on 01, 12 or 23; s3 on 02 or 23; one vertex twice where the
-// section is a triangle), counter-clockwise for a positive tet and reversed otherwise. Its
-// intersection with the cell's rectangle R changes shape only at BREAKPOINTS: the z of the tet's
-// middle vertices, the z where a tet edge crosses one of R's four side planes within R's range
-// along that side (with a margin of 1e-4 of the cell: an extra breakpoint costs one interval, a
-// missed one the accuracy), and the z where one of R's four vertical edges enters or leaves T --
-// at most SW_NCAND = 34. Between two breakpoints every vertex of the clipped polygon moves
-// linearly in z, so its area and 2D moments are polynomials in z (the area of degree 2, the
-// second moments of degree 4, and the z-weighted moments at most 4), and the 3-point
-// Gauss-Legendre rule (exact to degree 5) integrates each interval exactly up to float rounding.
-//
-// The 2D moments at a node come from Green's theorem along a closed chain: the polygon's 4 edges,
-// each Liang-Barsky clipped to R, plus the chords along R's 4 sides between the outermost
-// crossings of that side. Every (slot, side) pair has ONE signed distance and every (edge, side)
-// pair ONE crossing, used by both the edge and the chord, so the chain closes in every degeneracy
-// (a vertex on a side, an edge along it, a collapsed slot). Each node's 2D moments are taken about
-// the centre of the section's bounding box intersected with R and shifted back, so they do not
-// cancel when the section is small against the frame.
-//
-// Everything lives in registers. Apple GPUs cannot index registers at run time: a thread array
-// indexed by a run-time value sits in memory. The r3d port this replaced (a vertex graph of up to
-// 48 vertices with neighbour lists, clipped plane by plane and reduced by a walk over its faces)
-// spilled 832 B/thread and was latency-bound. Here every array access has a compile-time index
-// after unrolling (the candidate list, the 4 slots, the 4 sides); the two run-time loops -- the
-// walk over the intervals and the 3 Gauss nodes, which stays rolled because unrolling it made the
-// sweep 0.6x as fast -- index nothing.
-//
-// Two numerical rules, both found by validation and both required:
-//  - The Green cross term of a segment P->Q is written c = px*(qy - py) - py*(qx - px), not
-//    px*qy - qx*py. Both are the same number in exact arithmetic, but a clipped-away edge is a
-//    COLLAPSED segment (P == Q) and fast math may contract the product difference into an FMA;
-//    the difference form is then still exactly 0, the product form leaves the rounding of one
-//    product (~eps |P|^2) per dead segment. That noise broke tiny pieces (whose moments it
-//    exceeded), the order-1 against order-2 agreement and validate_deposit.
-//  - No breakpoint merging: the next breakpoint is the smallest candidate STRICTLY above the
-//    current one, however close. Merging close candidates integrated a polynomial across a kink
-//    and broke thin tilted slivers. The Gauss nodes lie strictly inside each interval and never on
-//    its ends, where the section changes shape and the slot choice (z <= v1.z, z <= v2.z) is a tie:
-//    each node sees the one polygon valid on the open interval.
-//
-// The order-1 path (order2=false) does the same arithmetic for V and the first moments as the
-// order-2 one and skips the rest, so the exact deposit's pass 0 (weights) and pass 1 (deposit)
-// see identical volumes. Only the volumes: compiled as two pipelines, Metal's fast math may contract
-// the first moments differently (measured: ~17% of pairs off, by at most 3.7e-8 of the cell),
-// which would reach a deposit only through --ps-linear-deposit's weight (about 1e-8 of a tet's
-// mass): that deposit runs both passes at order 2 in one pipeline (ps_deposit.metal,
-// depositExactItems' kItemsPhase 2), so both passes form the same weights and its total carries
-// only the rounding of each item's float sum, as the uniform deposit's does.
-//
-// The frame. The exact deposits clip in a frame whose origin is the centre of the OVERLAP of the
-// tet's bounding box with the cell, so the clipped piece -- which lies in that overlap -- has
-// coordinates of its own size and its volume and moments do not cancel. The r3d port took the
-// piece's volume from origin-apex simplices, so a piece far from the origin cancelled: in the
-// vertex-0 frame a piece a few Mpc from vertex 0 lost its volume once cells were small (a zoom's
-// virtual grid: 1.6% per cell at 12 kpc, 20% at 3 kpc), and in the cell-centre frame a small tet
-// in a large cell did the same. The overlap is near the piece in both regimes, and the sweep keeps
-// it: its z moments and every second moment are taken about the frame origin, and the callers'
-// centroids and covariances subtract the frame's offset back out.
-//
-// Metal has no double, so the moments match the CPU exact deposits (double r3d) to float
-// rounding. Against the CPU on a 0.26M-particle box at 256^3 the phase-space a_den differs by
-// 1.2e-3 of its rms at most (as with the r3d port) and a_velDisp by 2.5e-3 (the r3d port: 3.0e-2);
-// causticClass is identical. One known residual: a tet face lying exactly in a cell plane (a
-// perfect lattice) leaves a slab <= 1e-7 cell thick in the cell it only touches, which then
-// counts as a tet touch; its mass is ~1e-7 of the tet's. Speed (M1 Max, one partition, the whole
-// --exact): 18.1 -> 8.7 s for 0.26M particles on 256^3, 10.8 -> 6.2 s for 2.1M on
-// 128^3, 35.7 -> 18.1 s for 2.1M on 256^3, against the r3d port.
-// ================================================================================================
+// sweep_moments: the moments [V, x, y, z, xx, xy, xz, yy, yz, zz] of a tet intersected with an axis-aligned box, as
+// true integrals about the frame origin (order2=false fills mom[0..3] only). A sweep in z: the section is a convex
+// 4-slot polygon whose clip with the cell rectangle changes shape only at breakpoints; between them the moments are
+// polynomials in z that 3-point Gauss-Legendre integrates exactly up to rounding. Everything lives in registers
+// (Apple GPUs cannot index them at run time): every array index is compile-time after unrolling.
 #define SW_NCAND 34
 #define SW_BIG 3.0e38f   // a finite sentinel: fast math may assume no infinities
 
@@ -123,8 +47,8 @@ struct SwM2 { float a, sx, sy, sxx, sxy, syy; };
 
 // one segment P->Q of the closed Green chain (the normalizations are applied once, at the end)
 static inline void sw_green(thread SwM2& m, float px, float py, float qx, float qy, bool order2) {
-    // the cross term from the segment's own difference: EXACTLY 0 for a collapsed (dead) segment even when the
-    // compiler contracts it into an FMA (px*qy - qx*py leaves the rounding of one product: absolute noise ~eps |P|^2)
+    // cross term from the segment's own difference: EXACTLY 0 for a collapsed (dead) segment even when fast math
+    // contracts it into an FMA (px*qy - qx*py leaves the rounding of one product)
     float const c = px*(qy - py) - py*(qx - px);
     m.a  += c;
     m.sx += (px + qx)*c;  m.sy += (py + qy)*c;
@@ -198,7 +122,9 @@ static inline float sw_edge_cand(float3 a, float3 b, int ax, float pc, float olo
     return (ok && o >= olo && o <= ohi) ? z : SW_BIG;
 }
 
-// The tet (p0..p3, either orientation) ∩ the box [lo, hi], all in the caller's frame; see the header above.
+// The tet (p0..p3, either orientation) ∩ the box [lo, hi], in the caller's frame, whose origin is the centre of the
+// overlap of the tet's bounding box with the cell (so the piece's moments do not cancel; callers subtract it back).
+// The order-1 path does the same arithmetic for V and the first moments as order 2: both exact-deposit passes agree.
 static inline void sweep_moments(float3 p0, float3 p1, float3 p2, float3 p3, float3 lo, float3 hi,
                                  bool order2, thread float* mom)
 {
@@ -247,15 +173,15 @@ static inline void sweep_moments(float3 p0, float3 p1, float3 p2, float3 p3, flo
         }
     }
 
-    // the walk over the intervals [cur, nxt]: the next breakpoint is the smallest candidate strictly
-    // above cur (no merging, see the header)
+    // the walk over the intervals [cur, nxt]: the next breakpoint is the smallest candidate strictly above cur, with
+    // no merging (merging close candidates integrates a polynomial across a kink)
     float cur = Zlo;
     for (int it = 0; it < SW_NCAND + 1 && cur < Zhi; ++it) {     // run-time trip count, no indexing by it
         float nxt = Zhi;
         #pragma unroll
         for (int k = 0; k < SW_NCAND; ++k) { float const c = cand[k]; nxt = (c > cur && c < nxt) ? c : nxt; }
         float const h = 0.5f*(nxt - cur), zm = 0.5f*(nxt + cur);
-        // 3-point Gauss-Legendre, nodes strictly inside the interval; rolled (unrolled it was 0.6x as fast)
+        // 3-point Gauss-Legendre, nodes strictly inside the interval (never on a shape-change tie); kept rolled
         #pragma clang loop unroll(disable)
         for (int g = 0; g < 3; ++g) {
             float const xi = (g == 0) ? -0.7745966692414834f : ((g == 1) ? 0.0f : 0.7745966692414834f);

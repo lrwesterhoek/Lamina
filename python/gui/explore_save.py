@@ -1,7 +1,6 @@
 """The Explore tab's Save image: SaveMixin, the part of ExploreControls that writes the map on screen -- the Save
 options (remembered between sessions), the file dialog and the file name it offers (map_stem, grid_stem,
-view3d_stem: what the picture shows), the decorated matplotlib figure or the map's own pixels with its contour lines,
-arrows and void outlines, the table of the voids outlined, and the map's values as .npy or .csv."""
+view3d_stem: what the picture shows)."""
 
 from __future__ import annotations
 
@@ -94,12 +93,8 @@ def _join(pieces) -> str:
 def map_stem(req: dict, geometry=None, zoom: dict | None = None, pts_side: dict | None = None,
              overlays=()) -> str:
     """The file name (without suffix) Save image offers for the map drawn from request 'req', e.g.
-    'TNG100-3-Dark_density_z0.00_ps_output1024_grid1024_xy-plane_z55.52Mpc_smooth0_log_contours': the simulation,
-    the field (field_piece), the redshift, the output's prefix (and the output a difference map compares with),
-    the grid, the plane and where the slice lies (Mpc; the cell without a box; nothing for a 2D output), a hi-res
-    slice's points or a zoom's window and points ('geometry' = the map's _geometry(), 'zoom' its zoom), the
-    smoothing (not a zoom's: its points are drawn as they are), log or lin (not for a comparison: its mode says),
-    and 'overlays', the names of what is drawn over the map."""
+    'TNG100-3-Dark_density_z0.00_ps_output1024_grid1024_xy-plane_z55.52Mpc_smooth0_log_contours': the
+    simulation, the field (field_piece), the redshift."""
     o = req["output"]
     sim, when, prefix, grid = output_pieces(o)
     axes = _ex.AXES
@@ -136,8 +131,7 @@ def map_stem(req: dict, geometry=None, zoom: dict | None = None, pts_side: dict 
 def view3d_stem(req: dict) -> str:
     """The file name (without suffix) offered for the 3D view drawn from its request: simulation, field (the volume
     is of the stored grid: its family, whatever the map's choice), redshift, prefix, grid, '3D-volume' with the
-    detail it is drawn at or '3D-planes' with the smoothing, log or lin, 'contours' when the planes' lines or the
-    volume's shells are on."""
+    detail it is drawn at or '3D-planes' with the smoothing, log or lin."""
     sim, when, prefix, grid = output_pieces(req["output"])
     volume = req.get("style") == "volume"
     return _join([sim, field_piece(dict(req, ps_gradient="stored") if volume else req), when, prefix, grid,
@@ -149,10 +143,8 @@ def view3d_stem(req: dict) -> str:
 
 def grid_stem(req: dict) -> str:
     """The file name (without suffix) offered for the figure grid of request 'req' (grid_request): what every panel
-    shares of simulation, field (and, with a phase-space panel among them, the derivatives' family), redshift, prefix
-    and grid (a piece the panels differ in is left out), 'figure-grid-2x3', the plane and where the slice lies (the
-    map's place; how far through the box where the request does not say), the smoothing, log or lin where every
-    panel agrees, 'contours' when ticked and a panel can have lines."""
+    shares of simulation, field (and, with a phase-space panel among them, the derivatives' family), redshift,
+    prefix and grid (a piece the panels differ in is left out), 'figure-grid-2x3'."""
     panels = [p for p in req["panels"] if p]
     if not panels:
         return "figure-grid"
@@ -273,10 +265,8 @@ class SaveMixin:
 
     def save_stem(self) -> str:
         """The file name (without suffix) Save image offers for the picture on screen: the figure grid's
-        (grid_save_stem), the 3D view's (view3d_stem, once the picture of its request is there) or the map's
-        (map_stem, with the overlays a saved map will carry: the contour lines it shows, the arrows and void
-        outlines the Save options keep); 'explore' with no picture or a name that cannot be built (a save never
-        fails for its name)."""
+        (grid_save_stem), the 3D view's (view3d_stem, once the picture of its request is there) or the
+        map's."""
         if self._grid_shown:
             return self.grid_save_stem()
         try:
@@ -348,10 +338,7 @@ class SaveMixin:
     def save_png(self, f, options: dict | None = None) -> list[str]:
         """The map as a file, as the Save options say ('options', else the ones chosen; until the dialog is used,
         the default figure: a matplotlib PNG at 200 dpi with title, axes, colour bar, arrows and the void
-        outlines as on screen), in the format of the file's suffix (.png, .pdf, .svg, .tif). At full resolution,
-        and with no margins and 'match the data' (figsave.writes_pixels): the map's own pixels
-        (_write_full_map). The contour lines the map shows are in every one of them. With outlines drawn,
-        '<name>_voids.csv' beside it: the table of those voids. The paths."""
+        outlines as on screen), in the format of the file's suffix (.png, .pdf, .svg, .tif)."""
         opts = FS.options(self.save_options if options is None else options)
         fmt = FS.format_of(f, opts["format"])
         written = [str(f)]
@@ -374,10 +361,8 @@ class SaveMixin:
 
     def map_figure(self, options: dict | None = None):
         """The decorated map as a pyplot figure and the dpi to save it at (the options' dpi, or the one matching the
-        data): title, axes (frame, ticks, tick labels, axis names in the unit chosen), colour bar and its label, the
-        arrows and void outlines as on screen, each as the options say, and the contour lines the map shows; margins
-        'none' = the map alone filling the figure. The caller closes it (plt.close) and applies figsave.rc for a
-        font scale."""
+        data): title, axes (frame, ticks, tick labels, axis names in the unit chosen), colour bar and its label,
+        the arrows and void outlines as on screen, each as the options say."""
         opts = FS.options(self.save_options if options is None else options)
         import matplotlib
         matplotlib.use("Agg", force=False)

@@ -1,20 +1,15 @@
-# Shared configuration for run_dtfe.sh, run_ps_dtfe.sh, run_ps_pipeline.sh and download_snapshots.sh.
-# Sourced, not executed. Every value can be overridden per run:
-#   - environment: DTFE_DATA_ROOT=/path/to/IllustrisTNG DTFE_SIM=TNG50-3-Dark ./run_ps_dtfe.sh
-#                  GRID_SIZE=256 PADDING=40 ./run_ps_dtfe.sh -s TNG50-3-Dark
-#   - script flags: ./run_ps_dtfe.sh -s TNG50-3-Dark -d /path/to/sim -g 256 99
-#                   (long forms: --sim, --sim-dir, --grid, --gpu, --exact, --sampled, --subsamples, --run-mode)
-# The data root and the simulation have NO default: every run sets DTFE_DATA_ROOT (require_data_root; a driver's -d,
-# the simulation's own folder, stands in for it) and names the simulation with -s or DTFE_SIM (require_simulation).
-# The Python side (python/dtfelib/cli.py) honours the same DTFE_DATA_ROOT / DTFE_SIM variables.
+# Shared configuration for run_dtfe.sh, run_ps_dtfe.sh, run_ps_pipeline.sh and download_snapshots.sh (sourced).
+# Every value can be overridden per run by environment (DTFE_DATA_ROOT=/path DTFE_SIM=TNG50-3-Dark GRID_SIZE=256 ...)
+# or by script flag (-s, -d, -g; long forms --sim, --sim-dir, --grid, --gpu, --exact, --sampled, --subsamples, --run-mode).
+# The data root and the simulation have NO default: every run sets DTFE_DATA_ROOT (require_data_root; a driver's -d
+# stands in for it) and names the simulation with -s or DTFE_SIM (require_simulation). dtfelib.cli honours the same variables.
 
 source "$(dirname "${BASH_SOURCE[0]}")/h5py_python.sh"   # h5py_python: the python with numpy and h5py
 
 # ---- the knobs' values ---------------------------------------------------------------------------------------
 # An EMPTY value is the same as an unset one, and a switch is off for 0, false, no or off (any case) and on for
-# anything else -- the binaries' own rule (src/env_knobs.h), so PS_CAUSTICS=true is on, as DTFE_PROGRESS=true is.
-# A knob with a default gives it on one 'VAR="${VAR:-default}"' line (tests/docs_drift_check.py and
-# py_gui_runspec_test.py read those lines).
+# anything else -- the binaries' own rule (src/env_knobs.h). A knob with a default gives it on one
+# 'VAR="${VAR:-default}"' line (tests/docs_drift_check.py and py_gui_runspec_test.py read those lines).
 
 # knob_on NAME: status 0 when the switch NAME is on (set, not empty, and not 0/false/no/off).
 knob_on() {
@@ -24,8 +19,7 @@ knob_on() {
     return 0
 }
 
-# knob_bool NAME...: each switch normalised in place to 1 or 0 (knob_on's rule; an empty one is left empty), so the
-# driver's own tests, banners and the knobs it hands on read one spelling.
+# knob_bool NAME...: each switch normalised in place to 1 or 0 (knob_on's rule; an empty one is left empty).
 knob_bool() {
     local k
     for k in "$@"; do
@@ -35,16 +29,13 @@ knob_bool() {
 }
 
 # Root of the simulation data, the folder that holds the simulations. Two layouts are recognised (see sim_dir):
-#   per family  $DATA_ROOT/<family>/<sim>/snapdir_NNN/   e.g. TNG100/TNG100-3-Dark, TNG300/TNG300-3-Dark, ...
+#   per family  $DATA_ROOT/<family>/<sim>/snapdir_NNN/   e.g. TNG100/TNG100-3-Dark
 #   flat        $DATA_ROOT/<sim>/snapdir_NNN/            e.g. TNG100-3-Dark
-# where <family> is the simulation name up to its first '-' (TNG100-3-Dark -> TNG100). A root that does not
-# exist (a data disk not mounted) stops the run scripts rather than letting them write elsewhere.
+# A root that does not exist (a data disk not mounted) stops the run scripts rather than letting them write elsewhere.
 DATA_ROOT="${DTFE_DATA_ROOT:-}"
 
-# The directory of simulation $1 under DATA_ROOT, in whichever layout holds it: an existing
-# <sim> or <family>/<sim> directory wins; a simulation not on disk yet goes into its family
-# folder when that exists (so downloads land beside their siblings), else flat.
-# Python: dtfelib.cli.sim_dir -- keep the two in step.
+# The directory of simulation $1 under DATA_ROOT: an existing <sim> or <family>/<sim> directory wins; else the
+# family folder when that exists, else flat. Python: dtfelib.cli.sim_dir -- keep the two in step.
 sim_dir() {
     local sim="$1" fam="${1%%-*}"
     if [ -d "${DATA_ROOT}/${sim}" ]; then
@@ -60,7 +51,6 @@ sim_dir() {
 SIMULATION="${DTFE_SIM:-}"
 
 # Stops a driver that was not told where the simulations are (after its option parsing, so --help still works).
-# Every driver that reads or writes data calls it unless its -d names the simulation's folder itself.
 require_data_root() {
     [ -n "${DATA_ROOT}" ] && return 0
     echo "Error: no data root: set DTFE_DATA_ROOT to the folder that holds the simulations (e.g. DTFE_DATA_ROOT=~/IllustrisTNG)." >&2
@@ -74,18 +64,13 @@ require_simulation() {
     exit 2
 }
 
-# Snapshot numbers (each corresponds to a redshift) the run scripts process by default;
-# positional arguments to the scripts override this list.
+# Snapshot numbers the run scripts process by default; positional arguments override this list.
 SNAPSHOTS=(99)
 
-# Interpolation grid cells per axis and padding (mean interparticle spacings).
-# Environment-overridable like DATA_ROOT above. The run scripts source this file BEFORE parsing
-# their flags, so precedence is:  -g flag  >  environment  >  the default here. PADDING's 50 is the PS-DTFE
-# scripts' default; run_dtfe.sh has its own, 15 (complete at z = 0 on TNG50/100/300; see there).
-# GRID_SIZE 512: the production grids of both estimators (run_ps_pipeline.sh's and the launcher's default too)
-# are 512^3; 1024 would make a bare driver run a grid 8x the production one (~14 GB per field set, a scratch dir
-# needed) that nothing downstream reads. CALLER_GRID_SIZE / CALLER_PADDING: what the caller set (empty: nothing), for
-# a script with a default of its own (run_dtfe.sh's padding 15).
+# Interpolation grid cells per axis and padding (mean interparticle spacings), environment-overridable. The run
+# scripts source this file BEFORE parsing their flags, so precedence is: -g flag > environment > the default here.
+# PADDING's 50 is the PS-DTFE scripts' default; run_dtfe.sh has its own, 15. GRID_SIZE 512 is the production grid.
+# CALLER_GRID_SIZE / CALLER_PADDING: what the caller set (empty: nothing), for a script with a default of its own.
 CALLER_GRID_SIZE="${GRID_SIZE:-}"
 CALLER_PADDING="${PADDING:-}"
 GRID_SIZE="${GRID_SIZE:-512}"
@@ -98,13 +83,10 @@ knob_bool SPACE_CHECK
 INPUT_SUBDIR="snapdir"
 
 # ---- run guard + preflight, shared by run_dtfe.sh and run_ps_dtfe.sh -------------------------------
-# Functions only: nothing here runs or exits when the file is sourced (run_ps_pipeline.sh and
-# download_snapshots.sh source it too and print their own messages).
+# Functions only: nothing here runs or exits when the file is sourced.
 
-# data_root_problem <data dir>: prints why the data cannot be there and returns 1 when the DATA ROOT
-# itself is missing (a data disk not mounted, or mounted under another name); returns 0 otherwise. A
-# missing SIMULATION under an existing root is not this function's business: the drivers keep skipping
-# its snapshots and exit 1 with 'nothing processed'.
+# data_root_problem <data dir>: prints why the data cannot be there and returns 1 when the DATA ROOT itself is
+# missing (a data disk not mounted); returns 0 otherwise. A missing SIMULATION under an existing root is not its business.
 data_root_problem() {
     local dir="$1" root="${DATA_ROOT}"
     [ -d "${dir}" ] && return 0
@@ -115,10 +97,9 @@ data_root_problem() {
     return 1
 }
 
-# expected_output_bytes <grid> <bytes per value> <fields...>: an APPROXIMATE size of the grids a run
-# writes -- components per field from a TNG100 512^3 run's files (density 1, velocity 3, gradient 9,
-# divergence 1, shear 5, vorticity 3, dispersion 1+6, tweb/vweb 1+3 eigenvalues), plus the stream count
-# and the hidden-streams flag every PS run writes, plus 10% for the point files and the caustic grids.
+# expected_output_bytes <grid> <bytes per value> <fields...>: an APPROXIMATE size of the grids a run writes
+# (components per field from a TNG100 512^3 run's files), plus the stream count, the hidden-streams flag and 10%
+# for the point files and the caustic grids.
 expected_output_bytes() {
     local g="$1" b="$2" f n=2; shift 2
     for f in "$@"; do
@@ -135,14 +116,10 @@ expected_output_bytes() {
     echo $(( g * g * g * b * n * 11 / 10 ))
 }
 
-# scalar_dataset_resolve: SCALAR_DATASET=NAME grids the particles' own value NAME -- a per-particle dataset of the
-# input, e.g. Potential, SubfindDensity or SubfindHsml in a merged TNG snapshot -- as the 'scalar' field ('.a_scalar'):
-# scalar_a joins FIELDS unless it names the scalar ('scalar' or 'scalar_a'; its gradient alone gets the average too),
-# and density_a when the density is not (the launcher's Explore
-# finds an output by its density grid), and scalar_args carries '--scalar-dataset NAME'. Refused, exit 2: a scalar
-# field in FIELDS without SCALAR_DATASET (the program would read no value and write zeros), an option in FIELDS
-# (FIELDS names fields), a NAME with '/', a space or a leading '-'. Run it into a prefix of its own (OUTPUT_PREFIX,
-# e.g. output1024_potential): a rerun into a prefix moves the earlier set's files it does not rewrite aside.
+# scalar_dataset_resolve: SCALAR_DATASET=NAME grids the particles' own value NAME (a per-particle dataset of the input,
+# e.g. Potential) as the 'scalar' field ('.a_scalar'): scalar_a joins FIELDS, and density_a when the density is not;
+# scalar_args carries '--scalar-dataset NAME'. Refused, exit 2: a scalar field in FIELDS without SCALAR_DATASET, an
+# option in FIELDS, a NAME with '/', a space or a leading '-'. Run it into a prefix of its own (OUTPUT_PREFIX).
 scalar_dataset_resolve() {
     local f has_den=0 has_scalar=0
     scalar_args=()
@@ -174,10 +151,9 @@ scalar_dataset_resolve() {
     scalar_args=(--scalar-dataset "${SCALAR_DATASET}")
 }
 
-# output_space_problem <output dir> <bytes needed>: 1 (with the reason) when the folder the grids go to
-# is not writable or has less free space than the grids need. The grids are written beside the old ones
-# and renamed at the end (<file>.part.<pid>), so the old set does not count as free. SPACE_CHECK=0
-# skips the space half (the estimate is approximate).
+# output_space_problem <output dir> <bytes needed>: 1 (with the reason) when the folder is not writable or has less
+# free space than the grids need. The grids are written beside the old ones (<file>.part.<pid>), so the old set does
+# not count as free. SPACE_CHECK=0 skips the space half.
 output_space_problem() {
     local dir="$1" need="$2" avail_kb
     if [ ! -w "${dir}" ]; then
@@ -194,17 +170,13 @@ output_space_problem() {
     return 0
 }
 
-# The single-instance lock: '<prefix>.runlog.lock' is a DIRECTORY made with mkdir
-# (atomic on every filesystem; macOS has no flock(1)) holding 'pid', the driver's pid, for as long as a
-# driver runs that snapshot into that prefix (two drivers on the same snapshot side by side both get
-# SIGKILLed for memory). A lock whose pid is gone, or now
-# belongs to a process that is not one of the drivers (a reused pid), is stale: removed with a message --
-# unless a live process still works on that snapshot: a driver SIGKILLed on its own leaves its
-# binary (and tee) running, and removing that lock would start a second 40-50 GB binary beside the orphan.
+# The single-instance lock: '<prefix>.runlog.lock' is a DIRECTORY made with mkdir (atomic; macOS has no flock(1))
+# holding 'pid', the driver's pid. A lock whose pid is gone or belongs to a process that is not a driver (a reused
+# pid) is stale and removed, unless a live process still works on that snapshot (a SIGKILLed driver leaves its binary).
+
 # run_lock_take <lock dir>: 0 = taken; 1 = held by a live driver or process (the refusal printed).
-# run_lock_live_process <output root>: prints 'pid args' of the first live process naming the root on its
-# command line (the binary's output argument, or tee's '<root>.runlog.partial'), as the launcher's
-# _live_roots does (python/gui/results.py); status 1 when there is none or ps cannot say
+# run_lock_live_process <output root>: prints 'pid args' of the first live process naming the root on its command
+# line, as the launcher's _live_roots does (python/gui/results.py); status 1 when there is none or ps cannot say
 run_lock_live_process() {
     local root="$1" line pid args
     [ -n "${root}" ] || return 1
@@ -263,24 +235,12 @@ run_lock_release() {
     return 0
 }
 
-# ---- a rerun's left-over files -------------------------------------------------------------------------------
-# The binary replaces its outputs as a set (output_staging.h: '<file>.part.<pid>' renamed into place only once all
-# are written), but it never removes what an EARLIER run with the same prefix wrote and this one does not: a rerun
-# without the image plane, the caustics or the T-web would leave the old '.pts_*', '.caustic*' or '.a_tweb*' beside
-# the new grids, a mixed set that reads as one run (the README promises a folder never holds a mix). So the drivers,
-# after a run that EXITED 0, move every '<prefix>.*' file the run did not write into '<prefix>.superseded/<stamp>/'
-# beside them -- moved, never deleted -- with a copy of the old run's log, so the moved files keep their provenance.
-# 'Did not write': the file existed before the run with the same inode (the binary renames every output into place,
-# so a written file is a new inode) AND is not newer than the run's start (the one output written in place, a
-# thread's '.badGridPoints<n>', keeps its inode but not its time). A failed, stopped or killed run moves nothing:
-# the old set stays complete, as the run-log contract keeps its log. Neither a dry run nor an auto-tune report
-# writes anything, so neither moves anything. Not moved: the run's own bookkeeping ('<prefix>.runlog' and every
-# '<prefix>.runlog.*': the failed / partial log, the lock, the progress sidecar, a PS checkpoint), the launcher's
-# settings sidecar '<prefix>.gui.json' and the binary's own '<file>.part.<pid>' (output_staging.h handles those).
-# The launcher's Runs browser does not see the folder (it reads '<snapdir>/<prefix>.runlog*' and only the FILES
-# '<prefix>.*' as a run's outputs).
-#
-# supersede_snapshot <output root>: what a run may later supersede, recorded BEFORE it starts -- one line
+# The binary never removes what an EARLIER run with the same prefix wrote and this one does not, so after a run that
+# EXITED 0 the drivers move every '<prefix>.*' file it did not write (same inode as before, not newer than the run's
+# start) into '<prefix>.superseded/<stamp>/' (never deleted), with the old run's log. A failed, stopped or dry run and
+# an auto-tune report move nothing; not moved: '<prefix>.runlog*', '<prefix>.gui.json', '<file>.part.<pid>'.
+
+# supersede_snapshot <output root>: what a run may later supersede, recorded BEFORE it starts: one line
 # '<inode> <name>' per candidate file (stdout); the caller keeps the text and passes it back afterwards.
 supersede_snapshot() {
     local root="$1" f n ino
@@ -297,10 +257,9 @@ supersede_snapshot() {
     return 0
 }
 # supersede_extras <output root> <recorded list> <run start marker file> <saved old runlog or ''>: after a run that
-# exited 0, moves each recorded file the run did not write (same inode, not newer than the marker) into
-# '<root>.superseded/<YYYY-MM-DD_HHMMSS>/' (the marker's time; '-<pid>' added when that folder exists), with the
-# saved old log as '<prefix>.runlog' there. Prints one line per move and a summary; a failed move is said and left
-# (the run itself succeeded). Never deletes, never overwrites ('mv -n', checked). Returns 0.
+# exited 0, moves each recorded file the run did not write into '<root>.superseded/<YYYY-MM-DD_HHMMSS>/' ('-<pid>'
+# added when that folder exists), with the saved old log as '<prefix>.runlog' there. Never deletes, never
+# overwrites ('mv -n', checked); a failed move is said and left. Returns 0.
 supersede_extras() {
     local root="$1" list="$2" marker="$3" oldlog="$4" dir pfx line ino n f now dest moved=0
     [ -n "${list}" ] || return 0
@@ -337,12 +296,10 @@ supersede_extras() {
     return 0
 }
 
-# ps_checkpoint_dir <output root> [<scratch dir>]: where PS-DTFE -- and standard DTFE, by the same rule -- keeps
-# the checkpoint of a partitioned run (src/partition_checkpoint.h directoryFor -- keep the two in step):
-# '<output>.runlog.checkpoint' beside the outputs, or with a scratch dir '<scratch>/<basename>.<FNV-1a 64 of the
-# absolute output path, 16 hex>.runlog.checkpoint'. run_ps_dtfe.sh and run_dtfe.sh pass '--resume' when its 'checkpoint'
-# file exists. The absolute path is the one the binary sees: a relative output is taken from the physical current
-# directory (getcwd, so 'pwd -P').
+# ps_checkpoint_dir <output root> [<scratch dir>]: where a partitioned run keeps its checkpoint, for PS-DTFE and
+# standard DTFE alike (src/partition_checkpoint.h directoryFor -- keep the two in step): '<output>.runlog.checkpoint'
+# beside the outputs, or '<scratch>/<basename>.<FNV-1a 64 of the absolute output path, 16 hex>.runlog.checkpoint'.
+# The absolute path is the one the binary sees (a relative output is taken from 'pwd -P').
 ps_checkpoint_dir() {
     local out="$1" scratch="${2:-}"
     if [ -z "${scratch}" ]; then
@@ -360,28 +317,19 @@ ps_checkpoint_dir() {
 }
 
 # ---- the drivers' shared steps (run_dtfe.sh, run_ps_dtfe.sh; snapshot_args also download_snapshots.sh) -------
-# They read and set the drivers' own variables where a comment says so: n_str (the snapshot being run, '099'),
-# DATA_DIR, OUTPUT_PREFIX, GRID_SIZE, FIELDS, SCRATCH_DIR, AUTO_TUNE_REPORT, REPO_ROOT and the run-log state of
-# runlog_contract_start.
-#
-# Strictness: the batch drivers (run_dtfe.sh, run_ps_dtfe.sh, run_ps_pipeline.sh, download_snapshots.sh) run under
-# 'set -uo pipefail' -- an unset variable is an error, and a pipeline fails when any part of it fails -- but NOT -e,
-# on purpose: a batch goes on after a failed snapshot (a binary that exits non-zero, a missing input, a refused lock,
-# a failed fetch), counts it and moves to the next, and its exit status says so at the end. Under -e the first failing
-# command would end the whole batch, and so would a '[ ... ] && ...' line whose test is false when it ends a
-# function. So each command whose failure matters is checked where it runs. Everything here must hold under
-# 'set -u' (a value that may be unset is read as "${VAR:-}", an array that may be empty as ${ARR[@]+"${ARR[@]}"}:
-# bash 3.2, macOS's /bin/bash, calls even an empty array unset) and run on bash 3.2: no associative arrays, no ';&'
-# or ';;&', no ${var,,} / ${var^^}, no mapfile / readarray.
+# They read and set the drivers' own variables where a comment says so: n_str, DATA_DIR, OUTPUT_PREFIX, GRID_SIZE,
+# FIELDS, SCRATCH_DIR, AUTO_TUNE_REPORT, REPO_ROOT and the run-log state of runlog_contract_start.
+
+# Strictness: the batch drivers run under 'set -uo pipefail' but NOT -e, on purpose: a batch goes on after a failed
+# snapshot and exits non-zero at the end. Everything here must hold under 'set -u' (a possibly unset value is
+# "${VAR:-}", a possibly empty array ${ARR[@]+"${ARR[@]}"}) and run on bash 3.2: no associative arrays, no ';&',
+# no ${var,,} / ${var^^}, no mapfile / readarray.
 
 # driver_options <own option letters> <handler> "$@": the option loop of run_dtfe.sh, run_ps_dtfe.sh and
-# download_snapshots.sh. The options they share are handled here: -d DATA_DIR (the simulation's own folder),
-# -s SIMULATION and -h (the caller's 'usage', exit 0); an unknown option, or one missing its value, prints getopts'
-# message and the usage and exits 1. Each of the caller's own letters (getopts' spelling: 'g:' takes a value) goes to
-# '<handler> <letter>', with its value in OPTARG. Then the two checks every driver makes after its options (so that -h
-# works without them): the data root (require_data_root) unless -d named the simulation's folder, and the
-# simulation (require_simulation). The caller drops the options afterwards: shift $((OPTIND - 1)).
-# The long forms (driver_long_options) are read as their letters, where the caller has the letter.
+# download_snapshots.sh. The shared options -d, -s and -h are handled here; an unknown option, or one missing its
+# value, prints the usage and exits 1. Each own letter goes to '<handler> <letter>' with its value in OPTARG. Then the
+# data root (unless -d) and the simulation are required. The caller drops the options: shift $((OPTIND - 1)).
+# The long forms (driver_long_options) are read as their letters.
 driver_options() {
     local own="$1" handler="$2" opt
     shift 2
@@ -401,16 +349,11 @@ driver_options() {
     require_simulation
 }
 
-# driver_long_options <getopts spec> "$@": _drv_args = the arguments with each long option the drivers share spelled
-# as its letter, token for token (so the caller's 'shift $((OPTIND - 1))' on its own arguments stays right):
+# driver_long_options <getopts spec> "$@": _drv_args = the arguments with each long option spelled as its letter,
+# token for token (so the caller's 'shift $((OPTIND - 1))' stays right):
 #   --sim S -> -s S, --sim-dir D -> -d D, --grid N -> -g N, --gpu -> -m, --exact -> -e, --sampled -> -S,
 #   --subsamples K -> -n K, --run-mode M -> -R M, --help -> -h; download_snapshots.sh's --groupcats -> -c, --trees -> -t,
-#   --ics -> -i, --api-key K -> -k K (merge_HDF5.py's names for the same products); '--grid=N' -> '-gN'. -S and -R only
-#   carry --sampled and --run-mode to getopts (the usage lines do not offer the letters: the sampled average and the
-#   run mode are asked for by name).
-# Only up to the first argument that is not an option (or '--'), as getopts reads them, and a letter's value is never
-# translated (-s --gpu names a simulation '--gpu'). A long option whose letter the script lacks, or an unknown one,
-# prints the usage and exits 1, as an unknown letter does.
+# Only up to the first non-option argument; a letter's value is never translated. An unknown long option exits 1.
 driver_long_options() {
     local spec="$1" t name val letter i c want=0 stop=0
     shift
@@ -456,8 +399,8 @@ driver_long_options() {
     done
 }
 
-# average_option e|S: a driver's -e (--exact) or --sampled (-S, see driver_long_options): DTFE_EXACT_AVERAGE becomes 1
-# or 0, and _avg_flag names the option for average_resolve ('both' once the two were given: refused there).
+# average_option e|S: a driver's -e (--exact) or --sampled (-S): DTFE_EXACT_AVERAGE becomes 1 or 0, and _avg_flag
+# names the option for average_resolve ('both' once the two were given: refused there).
 average_option() {
     local f=--sampled v=0
     if [ "$1" = "e" ]; then f=-e; v=1; fi
@@ -468,15 +411,10 @@ average_option() {
     fi
 }
 
-# average_resolve [what]: DTFE_EXACT_AVERAGE, the knob both drivers read, as 1 or 0 by the binaries' own rule (the
-# exact cell average / deposit is the default and the sampled one an option): -e or --sampled first
-# (average_option; the two together are refused), then DTFE_EXACT_AVERAGE when the caller set it (_caller_exact, its
-# value before the driver filled in the default; empty is unset, and so is 'auto' in any case, as the binaries read
-# it), then a SUBSAMPLES count (the environment or -n),
-# which asks for the sampled one, then the default, exact. average_src names which of these decided (the banner says
-# it). With <what> ('cell average', 'deposit'): an exact one asked for beside a count earns one note that the count is
-# ignored (the drivers pass no count beside --exact). The drivers then pass --exact or --sampled on every run, so the
-# run log says which ran; run_ps_pipeline.sh calls it without <what> (the driver it starts says the note).
+# average_resolve [what]: DTFE_EXACT_AVERAGE as 1 or 0 by the binaries' own rule (exact is the default). Order: -e or
+# --sampled (not both), then DTFE_EXACT_AVERAGE when the caller set it (_caller_exact; empty and 'auto' are unset),
+# then a SUBSAMPLES count (environment or -n: the sampled one), then the default. average_src names which decided.
+# With <what> an exact one beside a count earns one note that the count is ignored (run_ps_pipeline.sh passes none).
 average_resolve() {
     case "${_caller_exact:-}" in [Aa][Uu][Tt][Oo]) _caller_exact="" ;; esac   # no pin (src/env_knobs.h tristate)
     if [ "${_avg_flag:-}" = "both" ]; then
@@ -497,20 +435,16 @@ average_resolve() {
     fi
 }
 
-# run_mode_option <mode>: a driver's --run-mode MODE (-R, see driver_long_options), passed on to the binary as given:
-# run_mode_args=(--run-mode MODE), the last one given (the binary checks the word: gentle, balanced or performance).
-# 'auto' chooses nothing (run_mode_args empty), as when the option is not given: the binary then reads DTFE_RUN_MODE
-# as the caller set it, else takes its default (balanced; performance inside a SLURM or PBS job).
+# run_mode_option <mode>: a driver's --run-mode MODE (-R), passed on to the binary as given: run_mode_args=(--run-mode MODE),
+# the last one given. 'auto' chooses nothing (empty): the binary then reads DTFE_RUN_MODE, else takes its default.
 run_mode_option() {
     if [ "$1" = "auto" ]; then run_mode_args=(); else run_mode_args=(--run-mode "$1"); fi
 }
 
-# device_given, run_mode_given: a driver's banner words for the device and the run mode, what the driver was GIVEN
-# (the binary resolves both; its run log's device and 'run mode' lines say what ran and why).
-# device_given: 'the GPU (-m)' after -m (_gpu_flag; -m exports DTFE_GPU=1, so it wins over the caller's value), else
-# 'DTFE_GPU=<value>' when DTFE_GPU is set and not empty, else "the program's pick".
-# run_mode_given: '--run-mode MODE' when the option named a mode (run_mode_args), else 'DTFE_RUN_MODE=<value>' when
-# that is set and not empty, else "the program's default".
+# device_given, run_mode_given: a driver's banner words for the device and the run mode, as the driver was GIVEN them.
+# device_given: 'the GPU (-m)' after -m (_gpu_flag), else 'DTFE_GPU=<value>' when set, else "the program's pick".
+# run_mode_given: '--run-mode MODE' when the option named a mode, else 'DTFE_RUN_MODE=<value>' when set, else
+# "the program's default".
 device_given() {
     if [ -n "${_gpu_flag:-}" ]; then
         printf '%s\n' "the GPU (-m)"
@@ -531,8 +465,7 @@ run_mode_given() {
 }
 
 # driver_help_version <script> [its first argument]: '-h' / '--help' prints the script's header (line 2 up to the
-# first blank line, '# ' stripped) and the caller's usage line (its 'usage' function); '--version' prints the
-# repository revision. Both exit 0; any other argument returns.
+# first blank line, '# ' stripped) and the caller's usage line; '--version' prints the revision. Both exit 0.
 driver_help_version() {
     case "${2:-}" in
         -h|--help) sed -n '2,/^$/p' "$1" | sed -e 's/^# \{0,1\}//'; usage; exit 0 ;;
@@ -540,9 +473,8 @@ driver_help_version() {
     esac
 }
 
-# snapshot_args [snapshot ...]: positional arguments, when there are any, replace SNAPSHOTS; every entry is then
-# read as a decimal number (bash's printf reads a leading zero as OCTAL, so '010' would become 008 and '099' an
-# error, then 000 -- the folders are named snapdir_0NN, so typing them that way is natural). A non-number exits 2.
+# snapshot_args [snapshot ...]: positional arguments, when there are any, replace SNAPSHOTS; every entry is read as a
+# decimal number (bash's printf reads a leading zero as OCTAL, so '010' would become 008). A non-number exits 2.
 snapshot_args() {
     local _k _s
     if [ "$#" -gt 0 ]; then
@@ -558,9 +490,8 @@ snapshot_args() {
     done
 }
 
-# driver_binary <variable> <binary> <precision>: sets <variable> to './<binary>' for precision 'single' or to
-# './<binary>-double' for 'double' (the DTFE_PRECISION knob); exits 1 for another precision, or when that binary is
-# not executable (naming the make command that builds it). Nothing falls back silently.
+# driver_binary <variable> <binary> <precision>: sets <variable> to './<binary>' ('single') or './<binary>-double'
+# ('double'); exits 1 for another precision or a binary that is not executable. Nothing falls back silently.
 driver_binary() {
     local bin
     case "$3" in
@@ -579,9 +510,8 @@ driver_binary() {
     fi
 }
 
-# time_wrap_resolve: TIME_WRAP, the peak-memory wrapper put in front of the binary, resolved once and OPTIONAL:
-# macOS spells the flag -l, GNU -v, a bare container has no /usr/bin/time. Without one TIME_WRAP is empty and the
-# run identical, just with no peak-memory line.
+# time_wrap_resolve: TIME_WRAP, the optional peak-memory wrapper put in front of the binary (macOS spells the flag
+# -l, GNU -v, a bare container has no /usr/bin/time); without one it is empty and the run identical.
 time_wrap_resolve() {
     TIME_WRAP=()
     if [ -x /usr/bin/time ]; then
@@ -601,18 +531,13 @@ keep_awake() {
     fi
 }
 
-# The run-log contract, the same in run_dtfe.sh, run_ps_dtfe.sh and the launcher's own runs: while the
-# binary runs, its log is '<prefix>.runlog.partial'. Exit 0 renames it onto '<prefix>.runlog' (the log
-# of the grids now on disk) and removes a stale '<prefix>.runlog.failed'; a failure or a stop renames it
-# to '<prefix>.runlog.failed' and leaves '<prefix>.runlog' alone. A log tee'd straight into
-# '<prefix>.runlog' would let a re-run that failed early, or was stopped or killed, replace the log of the
-# grids still on disk: the Runs browser would show those grids as a failed run with the new settings,
-# and their own settings, build stamp, wall time and peak memory would be gone. A '.runlog.partial' left
-# behind is a run killed outright (SIGKILL), or one still going.
-#
-# runlog_contract_start: the driver's run-log state, empty, and its traps. A stop (the launcher's Stop sends
-# SIGTERM to the binary, then to the driver; ^C sends SIGINT) runs on_stop once the binary's pipeline has ended;
-# any other way out (an error, set -u) still releases the lock and the temp files.
+# The run-log contract, the same in run_dtfe.sh, run_ps_dtfe.sh and the launcher's own runs: while the binary runs,
+# its log is '<prefix>.runlog.partial'. Exit 0 renames it onto '<prefix>.runlog' (the log of the grids now on disk)
+# and removes a stale '<prefix>.runlog.failed'; a failure or a stop renames it to '<prefix>.runlog.failed' and
+# leaves '<prefix>.runlog' alone, so a failed rerun never replaces the log of the grids still on disk.
+
+# runlog_contract_start: the driver's run-log state, empty, and its traps. A stop (SIGTERM, SIGINT) runs on_stop once
+# the binary's pipeline has ended; any other way out still releases the lock and the temp files.
 runlog_contract_start() {
     live_log=""; live_rc=""            # the .partial being written, and its binary's exit status once known
     live_lock=""                       # this driver's '<prefix>.runlog.lock' (run_lock_take), while held
@@ -624,9 +549,8 @@ sup_clean() { rm -f ${sup_marker:+"${sup_marker}"} ${sup_oldlog:+"${sup_oldlog}"
 finish_runlog() {                  # <the .partial> <the binary's exit status>
     local part="$1" final="${1%.partial}"
     [ -f "${part}" ] || return 0
-    # Strip ANSI colour codes so the kept log stays grep-able. Written through a temp file rather
-    # than 'sed -i': BSD sed needs a suffix ARGUMENT after -i and GNU sed does not, so the portable
-    # spelling of in-place editing is not to use it.
+    # Strip ANSI colour codes so the kept log stays grep-able. Written through a temp file, not 'sed -i' (BSD and GNU
+    # sed differ on its suffix argument).
     if sed -E $'s/\033\\[[0-9;]*m//g' "${part}" > "${part}.tmp" 2>/dev/null; then
         mv "${part}.tmp" "${part}"
     else
@@ -638,8 +562,8 @@ finish_runlog() {                  # <the .partial> <the binary's exit status>
         mv -f "${part}" "${final}.failed"
     fi
 }
-# on_stop <signal name>: the attempt's log becomes '.runlog.failed', the lock and the temp files are released, and
-# the signal is re-raised, so a caller (run_ps_pipeline.sh) sees a stop, not a plain failure it would continue past.
+# on_stop <signal name>: the attempt's log becomes '.runlog.failed', the lock and temp files are released, and the
+# signal is re-raised, so a caller (run_ps_pipeline.sh) sees a stop.
 on_stop() {
     trap - "$1"
     if [ -n "${live_log}" ] && [ -f "${live_log}" ]; then
@@ -651,9 +575,8 @@ on_stop() {
     kill -s "$1" $$
 }
 
-# snapshot_start <snapshot number>: n_str ('099'), input_dir (<DATA_DIR>/snapdir_099), input_file (its
-# combined_099.hdf5) and output_root (<input_dir>/<OUTPUT_PREFIX>: the outputs are <output_root>.*) of the snapshot,
-# and its 'Processing' line. Returns 1, after saying so, when the input file is missing (the snapshot is skipped).
+# snapshot_start <snapshot number>: n_str ('099'), input_dir, input_file and output_root (<input_dir>/<OUTPUT_PREFIX>)
+# of the snapshot, and its 'Processing' line. Returns 1, after saying so, when the input file is missing.
 snapshot_start() {
     n_str=$(printf "%03d" "$1")
     input_dir="${DATA_DIR}/${INPUT_SUBDIR}_${n_str}"
@@ -668,11 +591,8 @@ snapshot_start() {
 }
 
 # resume_args_for <output root> <resume knob> <its value>: resume_args=(--resume) when a killed partitioned run left
-# its checkpoint (the binary removes it once the outputs are in place; ps_checkpoint_dir, under SCRATCH_DIR when one
-# is set) and the knob (DTFE_RESUME) is not 0; either way it says so. Empty for a report
-# (AUTO_TUNE_REPORT=1 computes nothing, so there is nothing to resume). The FILE, not the folder: a folder with no
-# 'checkpoint' in it (a kill during the first write) holds nothing to resume, the binary refuses '--resume' there,
-# and every rerun of the snapshot would fail the same way.
+# its checkpoint (ps_checkpoint_dir) and the knob (DTFE_RESUME) is not 0. Empty for a report. The FILE 'checkpoint'
+# is tested, not the folder: the binary refuses '--resume' on an empty folder, and every rerun would fail the same way.
 resume_args_for() {
     local ckpt_dir
     resume_args=()
@@ -687,8 +607,7 @@ resume_args_for() {
     fi
 }
 
-# dry_run_print <input file> <output root> <run log> <command...>: what DRY_RUN=1 prints for a snapshot (the
-# expanded command and the paths) instead of running it.
+# dry_run_print <input file> <output root> <run log> <command...>: what DRY_RUN=1 prints instead of running.
 dry_run_print() {
     local input="$1" root="$2" log="$3"; shift 3
     echo "  DRY RUN -- would run:"
@@ -697,8 +616,8 @@ dry_run_print() {
     echo "  outputs: ${root}.* and the run log ${log}"
 }
 
-# auto_tune_report_line <temp log> <the binary's exit status>: prints the snapshot's AUTO-TUNE-REPORT line from the
-# report run's temp log and removes the log; returns 1, with an error line, when the run failed or wrote no report.
+# auto_tune_report_line <temp log> <exit status>: prints the AUTO-TUNE-REPORT line from the report run's temp log and
+# removes it; returns 1, with an error line, when the run failed or wrote no report.
 auto_tune_report_line() {
     local report
     report=$(grep -a '^AUTO-TUNE-REPORT' "$1" | head -1)
@@ -711,9 +630,9 @@ auto_tune_report_line() {
     return 1
 }
 
-# snapshot_preflight <input dir> <run log> <precision>: room in <input dir> for the grids of GRID_SIZE and FIELDS
-# (output_space_problem; 8 bytes a value for precision 'double', else 4), then the snapshot's single-instance lock
-# '<run log>.lock' (run_lock_take), held in live_lock. Returns 1, with the reason, when either refuses: nothing ran.
+# snapshot_preflight <input dir> <run log> <precision>: room for the grids of GRID_SIZE and FIELDS (output_space_problem;
+# 8 bytes a value for 'double', else 4), then the single-instance lock '<run log>.lock' (held in live_lock). Returns 1
+# with the reason when either refuses.
 snapshot_preflight() {
     local bpv=4
     [ "$3" = "double" ] && bpv=8
@@ -728,9 +647,8 @@ snapshot_preflight() {
     live_lock="$2.lock"
 }
 
-# sup_record <output root> <run log>: before a run, what an earlier run with this prefix left (sup_list,
-# supersede_snapshot), the run's start marker (sup_marker) and, when there is something to supersede, a copy of the
-# old run log (sup_oldlog). What the run does not rewrite is moved aside once it has exited 0 (run_finish).
+# sup_record <output root> <run log>: before a run, what an earlier run with this prefix left (supersede_snapshot),
+# the run's start marker and a copy of the old run log; run_finish moves aside what the run did not rewrite.
 sup_record() {
     sup_clean
     sup_marker="$(mktemp "${TMPDIR:-/tmp}/dtfe-run-start.XXXXXX" 2>/dev/null)" || sup_marker=""
@@ -741,9 +659,9 @@ sup_record() {
     fi
 }
 
-# run_finish <the binary's exit status> <output root>: after the run, the de-ANSI'd log becomes '<prefix>.runlog'
-# on success and '<prefix>.runlog.failed' otherwise (finish_runlog); on exit 0 the earlier run's files this one did
-# not write are moved aside (supersede_extras); the temp files and the lock are released.
+# run_finish <exit status> <output root>: the de-ANSI'd log becomes '<prefix>.runlog' on success and
+# '<prefix>.runlog.failed' otherwise; on exit 0 the earlier run's unwritten files are moved aside (supersede_extras);
+# the temp files and the lock are released.
 run_finish() {
     finish_runlog "${live_log}" "$1"
     live_log=""
@@ -752,10 +670,9 @@ run_finish() {
     run_lock_release "${live_lock}"; live_lock=""
 }
 
-# peak_memory_text <run log>: the run's peak memory from the TIME_WRAP lines in its log, as 'F GB footprint, R GB
-# resident' or 'R GB resident'; nothing without such a line. macOS also reports the peak FOOTPRINT: what the run
-# really needed, including the memory the system compressed or swapped out -- RSS alone hid 90 GB behind "47 GB" at
-# TNG100-3 z=0. The dialects:
+# peak_memory_text <run log>: the run's peak memory from the TIME_WRAP lines, as 'F GB footprint, R GB resident' or
+# 'R GB resident'; nothing without such a line. macOS also reports the peak FOOTPRINT, which includes compressed or
+# swapped memory that RSS alone hides. The dialects:
 #   BSD/macOS : "  1234567  maximum resident set size"            -- BYTES in $1
 #   GNU       : "  Maximum resident set size (kbytes): 1234"      -- KBYTES in $NF
 peak_memory_text() {
@@ -774,10 +691,9 @@ peak_memory_text() {
     fi
 }
 
-# snapshot_outcome <the binary's exit status> <its log>: the wall time (SECONDS since the run started) and the
-# snapshot's result line. Exit 3 means the run finished but its output folder could not be written, so the binary
-# put the grids in its rescue folder: the log's OUTPUT RESCUE line names it and the mv that puts them in place.
-# Returns 0 for a processed snapshot, 1 for a failed one.
+# snapshot_outcome <exit status> <its log>: the wall time and the snapshot's result line. Exit 3 means the grids went to
+# the binary's rescue folder: the log's OUTPUT RESCUE line names it and the mv that puts them in place. Returns 0 for
+# a processed snapshot, 1 for a failed one.
 snapshot_outcome() {
     echo "  Wall time: $((SECONDS/60)) min $((SECONDS%60)) s"
     if [ "$1" -eq 0 ]; then

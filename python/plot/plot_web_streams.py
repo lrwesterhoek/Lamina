@@ -1,29 +1,4 @@
-"""Stream multiplicity (and caustic class, when the run wrote one) by cosmic-web environment.
-
-For every snapshot: the table of dtfelib.webstreams for the T-web and the V-web of a PS-DTFE output
--- per class (void, wall, filament, node) its share of the box in volume and mass, and within the
-class the stream-multiplicity bins in both weightings -- as JSON + text, and a stacked-bar figure;
-with several snapshots, the single-stream fraction of each class against redshift.
-
-NOT in analyze.py's PLOT_SCRIPTS: that series is the standard-DTFE core set, this needs the
-phase-space grids (streams, hidden_streams; caustic_class is optional).
-
-Names: web_streams_<web>_z<z>.* and single_stream_vs_z_<web>.png for the default grids (ps_output.,
-averaged) over every snapshot of the simulation on disk; another --prefix or --raw adds '_<prefix>' / '_raw', and a
-series over fewer snapshots '_snaps<a>-<b>-...', so none of them overwrites the default files.
-
-    python3 plot/plot_web_streams.py --sim TNG100-3-Dark --snaps 99 67 50 40
-    python3 plot/plot_web_streams.py --sim TNG100-3-Dark --snap 99 --web tweb --raw
-
-THE V-WEB is the MEAN-FIELD one by default: classified from the FFT gradient of the PS velocity grid
-with the binary's normalisation and the run's lambda_th (FieldSet.load('vweb', mean_field=True)), the V-web standard
-DTFE stores and the literature means. The binary's own PS V-web classifies the stream average of each stream's
-gradient <grad v>, in which the inverted stream inside a fold has a POSITIVE divergence, so fold cells read as
-'void' (dtfelib/io.py, the note above FIELDS) -- the very cells this table counts as multi-stream. '--ps-gradient
-stored' tables it anyway, under the name tag '_stored' (web_streams_vweb_stored_z<z>.*, single_stream_vs_z_vweb_stored
-...), so the two never overwrite each other; the table's 'vweb_source' says which it holds. The T-web is the
-binary's either way.
-"""
+"""Stream multiplicity (and caustic class, when the run wrote one) by cosmic-web environment."""
 
 import _bootstrap  # noqa: F401  (puts python/ on sys.path)
 import config
@@ -106,10 +81,9 @@ def web_tag(key, mean_field=True):
 
 
 def process(fs, sim, snap, webs, series, problems, out_dir, mean_field=True):
-    """The tables and figures of one snapshot: each web's table goes into series[web] AS SOON AS it is made
-    (a later web's failure cannot lose it), a missing grid or a failure is noted in 'problems' as
-    (snapshot, web label, what); returns the number of tables written. mean_field: the V-web is the mean-field
-    one (module docstring); False = the stored PS grid."""
+    """The tables and figures of one snapshot: each web's table goes into series[web] AS SOON AS it is made (a
+    later web's failure cannot lose it), a missing grid or a failure is noted in 'problems' as (snapshot,
+    web label, what)."""
     z = fs.meta.redshift
     done = 0
     if not fs.has("streams"):
