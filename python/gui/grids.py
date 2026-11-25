@@ -301,7 +301,7 @@ def _cube_cache_bytes() -> int:
         ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     except (ValueError, OSError, AttributeError):
         ram = 8e9
-    return int(min(max(0.25 * ram, 1.5e9), 16e9))
+    return int(min(max(0.25 * ram, 1.5e9), 16 * 2 ** 30))    # (16 GiB: a 1024^3 density and velocity, 2^34 bytes)
 
 
 CUBE_CACHE_BYTES = _cube_cache_bytes()
@@ -315,6 +315,69 @@ _CUBES: dict[tuple, np.ndarray] = {}
 _CUBES_LOCK = threading.Lock()
 RUN_CUBE_BYTES = int(1e9)
 _CAPPED = False
+
+# The reads of a worker's job report to the job's progress dict (watched; the 3D view's averaging keeps its own
+# counts in the same dict): 'read_file', 'read_done' and 'read_total' (bytes) of the grid being read, a chunk at a
+# time; a True 'cancel' there stops the read (LoadCancelled) and nothing partly read is kept. Chunks of READ_CHUNK
+# read as fast as one np.fromfile of the whole file (the disk is the bound: 0.98 GB/s either way on the T7).
+READ_CHUNK = 64 << 20
+_WATCH = threading.local()
+
+
+class LoadCancelled(Exception):
+    """A read stopped: its job's progress dict said 'cancel' (a newer request wants other data, or the window
+    closes)."""
+
+
+class watched:
+    """with watched(progress): the reads on this thread report to the dict 'progress' and stop on its 'cancel'."""
+
+    def __init__(self, progress: dict | None):
+        self.progress = progress
+
+    def __enter__(self):
+        self.before, _WATCH.progress = getattr(_WATCH, "progress", None), self.progress
+        return self.progress
+
+    def __exit__(self, *_exc):
+        _WATCH.progress = self.before
+        return False
+
+
+def _read_values(f, dtype, count: int, name: str, done: int = 0, total: int | None = None) -> np.ndarray:
+    """'count' values of 'dtype' from the open binary file 'f' at its position (np.fromfile(f, dtype, count)'s
+    bytes), READ_CHUNK at a time, reported to this thread's progress as bytes done + 'done' of 'total' (default:
+    these bytes); a short file raises ValueError, a cancelled job LoadCancelled."""
+    out = np.empty(int(count), dtype=np.dtype(dtype))
+    buf = memoryview(out).cast("B")
+    total = buf.nbytes if total is None else int(total)
+    prog = getattr(_WATCH, "progress", None)
+    got = 0
+    while got < buf.nbytes:
+        if prog is not None:
+            if prog.get("cancel"):
+                raise LoadCancelled(f"{name}: no longer wanted")
+            prog.update(read_file=name, read_done=done + got, read_total=total)
+        k = f.readinto(buf[got:got + READ_CHUNK])
+        if not k:
+            raise ValueError(f"{name} is shorter than its grid (an interrupted write?)")
+        got += k
+    if prog is not None:
+        prog.update(read_file=name, read_done=done + got, read_total=total)
+    return out
+
+
+def read_grid(path, dtype, shape) -> np.ndarray:
+    """A whole grid file as an array of 'shape' (np.fromfile(path, dtype).reshape(shape)'s values), read in chunks
+    reported to this thread's progress (watched); ValueError when the file's size is not that grid's."""
+    path = Path(path)
+    count = int(np.prod(shape))
+    with open(path, "rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        if size != count * np.dtype(dtype).itemsize:
+            raise ValueError(f"{path.name}: {size} bytes is not a {' x '.join(map(str, shape))} "
+                             f"{np.dtype(dtype).name} grid")
+        return _read_values(f, dtype, count, path.name).reshape(shape)
 
 
 def cap_cubes(on: bool) -> None:
@@ -375,7 +438,7 @@ def cached_cube(path: Path, dtype, shape, axis: int | None = None, read: bool = 
         return None
     if nbytes > min(CUBE_EAGER_BYTES, budget) and axis is not None and axis < 2:
         return None
-    cube = np.fromfile(path, dtype=dtype).reshape(shape)         # outside the lock: nobody waits on the disk
+    cube = read_grid(path, dtype, shape)         # outside the lock: nobody waits on the disk (a cancel keeps nothing)
     with _CUBES_LOCK:
         other = _CUBES.get(key)
         if other is not None:                 # another thread read it meanwhile: one copy, theirs
@@ -410,12 +473,12 @@ def _read_plane(path: Path, dtype, n: int, ncomp: int, axis: int, index: int) ->
     row = n * ncomp                         # values per (i, j) row along the last axis
     layer = n * row                         # values per x-layer i
     with open(path, "rb") as f:
-        def block(offset_values: int, count: int) -> np.ndarray:
+        def block(offset_values: int, count: int, whole: bool = False) -> np.ndarray:
+            """'count' values at 'offset_values'; 'whole': a slab of a pass over the file, reported as its place in
+            the file (the other reads are one plane's: their own bytes)."""
             f.seek(offset_values * dt.itemsize)
-            a = np.fromfile(f, dtype=dt, count=count)
-            if a.size != count:
-                raise ValueError(f"{Path(path).name} is shorter than its grid (an interrupted write?)")
-            return a
+            return _read_values(f, dt, count, Path(path).name, *((offset_values * dt.itemsize, n * layer * dt.itemsize)
+                                                                 if whole else ()))
         if axis == 0:
             return block(index * layer, layer).reshape((n, n, ncomp) if ncomp > 1 else (n, n))
         if axis == 1:
@@ -437,7 +500,7 @@ def _read_plane(path: Path, dtype, n: int, ncomp: int, axis: int, index: int) ->
         step = max(1, int(64e6 // (layer * dt.itemsize)))
         for i0 in range(0, n, step):
             k = min(step, n - i0)
-            slab = block(i0 * layer, k * layer).reshape((k, n, n, ncomp) if ncomp > 1 else (k, n, n))
+            slab = block(i0 * layer, k * layer, whole=True).reshape((k, n, n, ncomp) if ncomp > 1 else (k, n, n))
             win[i0:i0 + k] = slab[:, :, w0:w1]
         if key is not None:
             with _CUBES_LOCK:
@@ -501,11 +564,10 @@ class _SlabFile:
     def __getitem__(self, sl: slice) -> np.ndarray:
         s, e, _step = sl.indices(self.shape[0])
         per = int(np.prod(self.shape[1:]))
+        item = self.dtype.itemsize
         with open(self.path, "rb") as f:
-            f.seek(s * per * self.dtype.itemsize)
-            a = np.fromfile(f, dtype=self.dtype, count=(e - s) * per)
-        if a.size != (e - s) * per:
-            raise ValueError(f"{self.path.name} is shorter than its grid (an interrupted write?)")
+            f.seek(s * per * item)
+            a = _read_values(f, self.dtype, (e - s) * per, self.path.name, s * per * item, self.shape[0] * per * item)
         return a.reshape((e - s,) + self.shape[1:])
 
 
@@ -605,7 +667,7 @@ class OutputSet:
         if cube is not None:
             return cube
         if self.dim == 2 or axis is None:
-            return np.fromfile(ff.path, dtype=self.dtype).reshape(shape)
+            return read_grid(ff.path, self.dtype, shape)
         return _read_plane(ff.path, self.dtype, self.n, ff.ncomp, int(axis), int(index))
 
     def _nbytes(self, name: str) -> int:
@@ -708,12 +770,25 @@ class OutputSet:
             return self._fold_plane(int(axis), index)
         return self.component_values(name, self._slice_source(name, int(axis), index, gradient), component)
 
+    def _from_velocity(self, name: str, gradient: str = "stored") -> bool:
+        """A map of 'name' is the mean field computed from the velocity grid (not read from a file of its own)."""
+        return name in self.derived_fields() or gradient == "mean-field" and \
+            self.gradient_family(name, gradient) == "mean" and estimator_label(self) == "PS-DTFE" and not self.face_gradient
+
+    def source_files(self, name: str, gradient: str = "stored") -> tuple[str, ...]:
+        """The grid files a map of 'name' reads: its own, the velocity's for the mean field, the exact fold flag's
+        three (slice)."""
+        if name == "caustic" and self.fold_exact():
+            names = ("caustic_class", "streams", "hidden_streams")
+        else:
+            names = ("velocity" if self._from_velocity(name, gradient) else name,)
+        return tuple(str(self.files[n].path) for n in names if n in self.files)
+
     def _slice_source(self, name: str, axis: int, index: int, gradient: str = "stored") -> np.ndarray:
         """The plane slice() takes a map's values from, as stored (components last) or the mean field computed from
         the velocity -- the last one kept on the output, keyed by the field, plane, family and the file's
         version (mtime, size): a map and its arrows (two components of one vector), or a colour change."""
-        mean = name in self.derived_fields() or gradient == "mean-field" and \
-            self.gradient_family(name, gradient) == "mean" and estimator_label(self) == "PS-DTFE" and not self.face_gradient
+        mean = self._from_velocity(name, gradient)
         ff = self.files.get("velocity") if mean else self.files.get(name)     # the file the plane comes from
         try:
             st = ff.path.stat() if ff is not None else None
@@ -832,7 +907,9 @@ def _mf_gradient_plane(o: OutputSet, axis: int, index: int) -> np.ndarray:
         if g is not None:
             _MF_PLANES[k] = _MF_PLANES.pop(k)               # most recently used last
             return g
-    vel = cached_cube(ff.path, o.dtype, shape, axis=0)      # axis 0: a cube above CUBE_EAGER_BYTES is not read whole
+    # every plane is a pass over the whole grid (as a z-plane is): read whole and kept within the cube budget, so the
+    # next plane is the arithmetic alone; above the budget (or a job's cap) the pass reads slabs off the file
+    vel = cached_cube(ff.path, o.dtype, shape)
     g = F.mean_field_gradient_plane(vel if vel is not None else _SlabFile(ff.path, o.dtype, shape),
                                     float(o.length[0]), int(axis), int(index))
     del vel
@@ -1867,6 +1944,7 @@ def find_outputs(data_root, extra_dirs=()) -> list[tuple[str, OutputSet]]:
     out = []
     root = Path(data_root).expanduser()
     seen = set()
+    boxes: dict[Path, tuple] = {}               # a snapshot's header, read once for all its outputs
     if str(data_root).strip() and root.is_dir():         # an empty root is none, not the working directory
         for pattern in ("*/snapdir_*/*.a_den", "*/*/snapdir_*/*.a_den", "*/snapdir_*/*.den", "*/*/snapdir_*/*.den"):
             for f in sorted(root.glob(pattern)):
@@ -1875,7 +1953,9 @@ def find_outputs(data_root, extra_dirs=()) -> list[tuple[str, OutputSet]]:
                 if key in seen:
                     continue
                 seen.add(key)
-                box, z = _tng_box(f.parent)
+                if f.parent not in boxes:
+                    boxes[f.parent] = _tng_box(f.parent)
+                box, z = boxes[f.parent]
                 snap = f.parent.name.split("_")[-1]
                 title = f"{f.parent.parent.name} · {snap}" + (f" (z={z:.2f})" if z is not None else "") + f" · {prefix}"
                 o = OutputSet(key, box=box, redshift=z, title=title, sim=f.parent.parent.name,

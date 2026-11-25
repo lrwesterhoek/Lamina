@@ -408,7 +408,7 @@ div = fs.load("divergence", mean_field=True)    # div<v> for both estimators
 | `DTFE_PY_RAM_GB`, `DTFE_PY_LOAD_FRAC` | the RAM `FieldSet.load` sees; the share one grid may take before it is memory-mapped | detected, 0.5 |
 | `DTFE_FATE_WORKERS`, `DTFE_FATE_CHUNK` | `plot_void_fate.py`'s parallel chunks; its particles per read | up to 4, 8000000 |
 | `DTFE_BIN_DIR` | the folder holding the programs, for `Estimator` | the repository root, then `PATH` |
-| `DTFE_GUI_CUBE_GB` | the memory in GB Explore keeps whole grids in | a quarter of the memory, 1.5 to 16 |
+| `DTFE_GUI_CUBE_GB` | the memory in GB Explore keeps whole grids in | a quarter of the memory, 1.5 GB to 16 GiB |
 
 ## Tests
 

@@ -6331,6 +6331,130 @@ def fields_units_pure():
           f"{o.fields()}")
 
 
+def load_watch():
+    """Loading a field: a grid is read in chunks reported to the job's progress (the busy line over the map); a newer
+    request for other data stops a read in flight (nothing partly read is cached), another slice of the same field
+    lets it finish; an output shown with a state set on top of it (the tab's first opening) is one map, not two."""
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        print(f"SKIP (load watch): PySide6 is not importable ({e})")
+        return
+    import explore as E
+    print("LOAD WATCH")
+    qa = QApplication.instance() or QApplication([])
+    d = TMP / "load"
+    d.mkdir(parents=True, exist_ok=True)
+    m = 24
+    write_grids(d, "out", m)
+    den = d / "out.a_den"
+    want = np.fromfile(den, dtype=np.float32).reshape(m, m, m)
+    real_chunk = G.READ_CHUNK
+    G.READ_CHUNK = 4096                         # many chunks on these small grids
+    try:
+        prog = {}
+        with G.watched(prog):
+            got = G.read_grid(den, np.float32, (m, m, m))
+        G.drop_cubes()
+        try:
+            with G.watched({"cancel": True}):
+                G.cached_cube(den, np.float32, (m, m, m))
+            stopped = False
+        except G.LoadCancelled:
+            stopped = True
+        kept = any(Path(str(k[0])).name == "out.a_den" for k in G._CUBES)
+        short = d / "short.a_den"
+        short.write_bytes(den.read_bytes()[:-4])
+        try:
+            G.read_grid(short, np.float32, (m, m, m))
+            refused = False
+        except ValueError:
+            refused = True
+        short.unlink()
+        check("a grid read in chunks: np.fromfile's values, its progress at the file's size; a cancelled read raises "
+              "LoadCancelled and caches nothing; a short file is a ValueError",
+              np.array_equal(got, want) and prog.get("read_done") == prog.get("read_total") == den.stat().st_size
+              and prog.get("read_file") == "out.a_den" and stopped and not kept and refused, str(prog))
+
+        view = E.ExploreView()
+        x = E.ExploreControls(view, lambda: "", lambda: [])
+        view.resize(900, 800)
+        sent = []
+        real_send = x.render_request
+        x.render_request = lambda req: (sent.append((req["field"], req["axis"], req["index"])), real_send(req))
+        with x.one_render():
+            x.open_file(str(den))
+            x.field.setCurrentIndex(x.field.findData("velocity"))
+            x.axis.setCurrentIndex(0)
+            x.index.setValue(5)
+        ok = wait_for(qa, lambda: not x._busy and x._plane is not None, 30)
+        check("an output shown and a state set on top of it (one_render): one map, of the end state",
+              ok and sent == [("velocity", 0, 5)], str(sent))
+
+        # a read in flight, held after its first chunk
+        G.drop_cubes()
+        entered, release = threading.Event(), threading.Event()
+        real_rv = G._read_values
+
+        class Held:
+            def __init__(self, f):
+                self.f, self.calls = f, 0
+
+            def readinto(self, b):
+                self.calls += 1
+                if self.calls > 1:
+                    entered.set()
+                    prog = getattr(G._WATCH, "progress", None) or {}
+                    while not release.is_set() and not prog.get("cancel"):
+                        time.sleep(0.005)
+                return self.f.readinto(b)
+
+        G._read_values = lambda f, dtype, count, name, *a, **k: real_rv(
+            Held(f) if name == "out.a_vel" else f, dtype, count, name, *a, **k)
+        try:
+            x.axis.setCurrentIndex(2)           # the velocity along z: its cube is read
+            ok_in = wait_for(qa, lambda: entered.is_set(), 10)
+            job = x._inflight
+            x.index.setValue(6)                 # another slice of the same field: the read goes on
+            same_on = not job["progress"].get("cancel")
+            job["progress"]["t0"] = time.monotonic() + 60   # in flight for less than LOAD_SHOW_S: no busy line
+            x._load_progress()
+            early = not view.loading.isHidden()
+            job["progress"]["t0"] = time.monotonic() - E.LOAD_SHOW_S - 0.1     # past it (the ticker's look, now)
+            x._load_progress()
+            line = (not view.loading.isHidden(), view.loading_text.text(), view.loading_bar.value())
+            x.field.setCurrentIndex(x.field.findData("density"))    # another field: the read stops
+            stopped = bool(job["progress"].get("cancel"))
+            ok = wait_for(qa, lambda: not x._busy and x._req is not None and x._req["field"] == "density"
+                          and x._plane is not None and x._plane.shape == (m, m), 30)
+        finally:
+            release.set()
+            G._read_values = real_rv
+        vel_kept = any(Path(str(k[0])).name == "out.a_vel" for k in G._CUBES)
+        check("a field read in flight: another slice of it lets the read go on, the busy line says the file and how "
+              "much of it is read, another field stops it (nothing of it cached) and is shown; then the line goes",
+              ok_in and same_on and not early and line[0] and "reading out.a_vel" in line[1] and 0 < line[2] < 1000
+              and stopped and ok and not vel_kept and np.array_equal(x._plane, want[:, :, 6].astype(np.float64))
+              and view.loading.isHidden(), f"{ok_in} {same_on} {early} {line} {stopped} {ok} {vel_kept}")
+        # going back to the field in flight lets its read go on again; another derivative of the same velocity
+        # (the mean field) reads the same file: no stop
+        o = x.current
+        write_grids(d, "ps_out", m)                 # a phase-space output in a known periodic box: its velocity
+        ps = G.OutputSet(d / "ps_out", box=((0.0,) * 3, (float(m),) * 3))     # derivatives are its mean field
+        a = {"output": ps, "field": "velocity", "ps_gradient": "mean-field"}
+        check("the stop follows the files a map reads (another slice or component of a field, a mean-field "
+              "derivative of the velocity in flight: none; another field, a comparison, a hi-res slice: a stop)",
+              "divergence" in ps.derived_fields() and not x._reads_other(a, dict(a, field="divergence"))
+              and not x._reads_other(dict(a, field="shear"), dict(a, field="divergence"))
+              and x._reads_other(a, dict(a, field="density")) and x._reads_other(a, dict(a, compare=o))
+              and x._reads_other(a, dict(a, pts="plane.json"))
+              and ps.source_files("divergence", "mean-field") == (str(d / "ps_out.a_vel"),),
+              str(ps.source_files("divergence", "mean-field")))
+        x.shutdown()
+    finally:
+        G.READ_CHUNK = real_chunk
+
+
 def main():
     try:
         pure()
@@ -6358,6 +6482,7 @@ def main():
         explore_details()
         fold_map()
         keep_slice()
+        load_watch()
         mean_field_gui()
         face_gradient_zoom()
         save_settings()

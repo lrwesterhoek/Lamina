@@ -165,7 +165,7 @@ class _Slabs:
 def t_plane():
     """mean_field_plane: the plane 'index' normal to 'axis' of mean_field_derivatives' result, from one
     pass in slabs -- the normal derivative as the periodic kernel irfft(i k) summed along the line, the in-plane ones
-    as 1-D FFTs of the plane."""
+    as 1-D FFTs of the plane; an array in memory (its slabs threaded) gives the slab reader's bits exactly."""
     from dtfelib import fields
     rng = np.random.default_rng(11)
     names, lam = fields.MEAN_FIELD_NAMES, 0.3
@@ -179,6 +179,10 @@ def t_plane():
                 got = fields.mean_field_plane(src, 40.0, names, axis, index, scale_factor=0.5, hubble_h=0.7,
                                               lambda_th=lam, slab_bytes=slab)
                 assert src.asked[0] == (0, 4) and src.asked[-1][1] == n and len(src.asked) == -(-n // 4), src.asked
+                if index in (0, 7):                 # an array in memory has its slabs done threaded: the same bits
+                    assert np.array_equal(fields.mean_field_gradient_plane(v, 40.0, axis, index, slab_bytes=slab),
+                                          fields.mean_field_gradient_plane(_Slabs(v), 40.0, axis, index,
+                                                                           slab_bytes=slab)), (n, axis, index)
                 for nm in names:
                     want = np.take(cube[nm], index, axis=axis)
                     assert got[nm].dtype == want.dtype and got[nm].shape == want.shape, (nm, got[nm].dtype, want.shape)
@@ -478,7 +482,8 @@ def main():
     check("symmetric_eigenvalues3 (the binary's Cardano) against numpy: random, isotropic, the pancake; classify_web", t_cardano)
     check("the spectra plan, the peak estimate, a memmap input, the shape refusals", t_plan_and_memmap)
     check("mean_field_plane (Explore): one plane in slabs == the cube's result cut there, six names, every "
-          "axis, faces and slab boundaries, float32 / float64, even / odd size, a minimal slab reader", t_plane)
+          "axis, faces and slab boundaries, float32 / float64, even / odd size, a minimal slab reader (an array in "
+          "memory, threaded: the same bits)", t_plane)
     check("FieldSet: PS mean field == analytic x sqrt(a), standard DTFE's stored grid kept, has(), the run log's lambda_th, refusals, the memory gate", t_fieldset_api)
     check("figure scripts: plot_web_streams / plot_cosmic_web / plot_shear_triaxial read PS's mean field by default, '--ps-gradient stored' the grids", t_scripts_default)
     print("binary (acceptance)")

@@ -412,7 +412,9 @@ def mean_field_derivatives(velocity, box_mpc: float, names=("divergence",), *, s
 def mean_field_gradient_plane(velocity, box_mpc: float, axis: int, index: int, *, slab_bytes: int = 16 << 20):
     """g[..., a, b] = dv_a/dx_b, float64 (N, N, 3, 3), on the plane 'index' normal to 'axis' of the periodic (N,N,N,3)
     'velocity' grid of a box_mpc box: mean_field_derivatives' spectral gradient there, in one pass over the grid.
-    'velocity': anything with .shape, .dtype and [s:e] slabs along axis 0; slabs of about slab_bytes."""
+    'velocity': anything with .shape, .dtype and [s:e] slabs along axis 0; slabs of about slab_bytes. An array in
+    memory has its slabs done THREADS at a time (each slab's product as alone; axis 0's sum added in slab order:
+    bit-identical); a slab reader one at a time (the disk is the bound)."""
     shape = tuple(int(v) for v in np.shape(velocity))
     if len(shape) != 4 or shape[3] != 3 or not (shape[0] == shape[1] == shape[2]):
         raise ValueError(f"mean_field_gradient_plane needs an (N,N,N,3) velocity grid, got {shape}")
@@ -426,20 +428,40 @@ def mean_field_gradient_plane(velocity, box_mpc: float, axis: int, index: int, *
     step = max(1, int(slab_bytes) // (n * n * 3 * item))
     plane = np.empty((n, n, 3))
     normal = np.zeros((n, n, 3))
-    for s in range(0, n, step):
+
+    def one(s):
+        """Slab [s, s + step): its rows of 'normal' and 'plane' (axis 1, 2), or its term of axis 0's sum."""
         e = min(n, s + step)
         slab = np.asarray(velocity[s:e])
         if axis == 0:
-            normal += np.tensordot(w[s:e], slab, axes=(0, 0))
             if s <= index < e:
                 plane[...] = slab[index - s]
-        elif axis == 1:
+            return np.tensordot(w[s:e], slab, axes=(0, 0))
+        if axis == 1:
             normal[s:e] = np.tensordot(slab, w, axes=(1, 0))
             plane[s:e] = slab[:, index]
         else:
             normal[s:e] = np.tensordot(slab, w, axes=(2, 0))
             plane[s:e] = slab[:, :, index]
-        del slab
+        return None
+
+    def add(lo, hi, terms):
+        for term in terms:                                  # every element's terms in slab order, as one pass adds
+            normal[lo:hi] += term[lo:hi]
+
+    starts = list(range(0, n, step))
+    if not isinstance(velocity, np.ndarray) or len(starts) == 1 or _THREADS == 1:
+        for s in starts:                                    # on this thread: a slab reader's reads stay the caller's
+            term = one(s)
+            if term is not None:
+                normal += term
+    else:
+        rows = np.linspace(0, n, _THREADS + 1).astype(int)
+        with ThreadPoolExecutor(_THREADS) as ex:
+            for b in range(0, len(starts), _THREADS):       # a batch at a time: axis 0 keeps at most THREADS terms
+                terms = [t for t in ex.map(one, starts[b:b + _THREADS]) if t is not None]
+                if terms:
+                    list(ex.map(lambda lo_hi: add(*lo_hi, terms), zip(rows[:-1], rows[1:])))
     g = np.empty((n, n, 3, 3))
     g[..., axis] = normal
     for pa, b in enumerate(rest):                          # the plane's axis pa is the grid's axis b

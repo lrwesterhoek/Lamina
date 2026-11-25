@@ -424,9 +424,10 @@ class MainWindow(TabsMixin, SpecsMixin, RunMixin, MenusMixin, CheckMixin, Advanc
             f.setRowVisible(field, shared)
         if tab == EXPLORE and not self.explore.outputs:
             saved, self._explore_saved = self._explore_saved, {}
-            self.explore.refresh_outputs(select=(saved or {}).get("root") or None)
-            if saved:
-                self.explore.restore_state(saved)       # the output, field, slice and range of last time
+            with self.explore.one_render():             # one map: the remembered one, not the default one first
+                self.explore.refresh_outputs(select=(saved or {}).get("root") or None)
+                if saved:
+                    self.explore.restore_state(saved)   # the output, field, slice and range of last time
 
     def _explore_keys(self, *_, tab: int | None = None):
         """The Explore arrow keys are on only on the Explore tab. Up / down also step off while a

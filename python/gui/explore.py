@@ -3,17 +3,18 @@ snapshot's own tessellation what is at a point."""
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import sys
-from pathlib import Path
-
 import threading
+import time
+from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QObject, QProcess, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+    QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton, QSlider, QSpinBox, QTableWidget,
     QToolButton, QVBoxLayout, QWidget,
 )
@@ -81,6 +82,9 @@ CONTOUR_DETAIL_TIP = ("Fewer contour lines (left) or more (right): each step spa
 # each position is new lines on the slice worker, and the 3D volume's shells and a zoom's lines are made on the GUI
 # thread; a click, a key or a programmatic move redraws at once
 CONTOUR_DRAG_MS = 120
+# a map or a figure grid that takes longer than this gets the busy line over the picture: what it reads (the file, how
+# much of it), else that it is computing; the picture under it stays the last one until the new one is there
+LOAD_SHOW_S = 0.4
 VOID_REFF_TIP = ("Also draw each void's R_eff = (a b c)^⅓ of the catalogue's fitted ellipsoid, dashed, around the "
                  "same centre: R_eff is about 1.6 R_v, the open question of which radius describes the void")
 VOID_RANGE_TIP = ("Draw only the voids of this size ('any' = no bound), by the size drawn: R_ell = (a b c)^⅓ of the "
@@ -273,7 +277,8 @@ class SliceWorker(QObject):
     @Slot(object)
     def render_grid(self, req: dict):
         try:
-            items = grid_items(req)
+            with G.watched(req.get("progress")):        # its reads report to the busy line
+                items = grid_items(req)
             rgb, labels, bar = grid_tiles(req, items)
             circles, dashed, clips = grid_tile_circles(req, items)
             marks, mark_clips = grid_tile_marks(req, items)     # the centres of the voids drawn as ellipsoids
@@ -294,33 +299,41 @@ class SliceWorker(QObject):
         except Exception as e:
             self.grid_failed.emit(failure_text(e))
 
+    @staticmethod
+    def _planes(req: dict):
+        """(the map's plane, (A, B) of a difference map or None, the hi-res slice's sidecar and block factor or
+        None): everything a map reads."""
+        out: G.OutputSet = req["output"]
+        pts_side = pts_factor = None
+        if req.get("pts"):                      # the point-evaluated hi-res slice in place of the grid's
+            plane, pts_side, pts_factor = pts_plane(out, req["pts"], req["field"], req["component"])
+            plane = G.smoothed(plane, req.get("smooth", 0))
+        else:                                   # (a phase-space output's velocity derivatives: the family asked
+            grad = req.get("ps_gradient", "stored")     # for, grids.OutputSet.slice; smoothed in 2D, or the cube's
+            plane = G.map_plane(out, req["field"], req["axis"], req["index"], req["component"], grad,   # slice in 3D
+                                req.get("smooth", 0), req.get("smooth3d", False))
+        planes = None
+        if req.get("compare") is not None:      # B read and smoothed the same way; the map is A - B or log10 A/B
+            b = G.map_plane(req["compare"], req["field"], req["axis"], req["index"], req["component"],
+                            req.get("ps_gradient", "stored"), req.get("smooth", 0), req.get("smooth3d", False))
+            planes = (plane, b)
+            plane = compare_planes(plane, b, req["compare_mode"])
+        return plane, planes, pts_side, pts_factor
+
     @Slot(object)
     def render(self, req: dict):
         try:
-            out: G.OutputSet = req["output"]
-            pts_side = pts_factor = None
-            if req.get("pts"):                      # the point-evaluated hi-res slice in place of the grid's
-                plane, pts_side, pts_factor = pts_plane(out, req["pts"], req["field"], req["component"])
-                plane = G.smoothed(plane, req.get("smooth", 0))
-            else:                                   # (a phase-space output's velocity derivatives: the family
-                grad = req.get("ps_gradient", "stored")     # asked for, grids.OutputSet.slice; smoothed in 2D, or
-                plane = G.map_plane(out, req["field"], req["axis"], req["index"], req["component"], grad,   # the
-                                    req.get("smooth", 0), req.get("smooth3d", False))     # cube's slice in 3D
-            planes = None
-            if req.get("compare") is not None:      # B read and smoothed the same way; the map is A - B or log10 A/B
-                b = G.map_plane(req["compare"], req["field"], req["axis"], req["index"], req["component"],
-                                req.get("ps_gradient", "stored"), req.get("smooth", 0), req.get("smooth3d", False))
-                planes = (plane, b)
-                plane = compare_planes(plane, b, req["compare_mode"])
+            with G.watched(req.get("progress")):    # its reads report to the busy line and stop on its 'cancel'
+                plane, planes, pts_side, pts_factor = self._planes(req)
+                arrows = None if not req.get("arrows") or req.get("pts") else req["output"].arrow_field(
+                    req["field"], req["axis"], req["index"], smooth=req.get("smooth", 0),
+                    gradient=req.get("ps_gradient", "stored"))
             # image: horizontal = the first remaining axis, vertical = the second, increasing upward
             img = np.ascontiguousarray(plane.T[::-1])
             rgb, vrange = G.colorize(img, req["cmap"], log=req["log"], clip=(req["clip"], 100 - req["clip"]),
                                      symmetric=req["symmetric"], vrange=req.get("vrange"))
             if planes is not None:
                 rgb[~np.isfinite(img)] = NAN_GREY   # colorize paints NaN as vmin: on RdBu_r that would read 'A >> B'
-            arrows = out.arrow_field(req["field"], req["axis"], req["index"], smooth=req.get("smooth", 0),
-                                     gradient=req.get("ps_gradient", "stored")) \
-                if req.get("arrows") and not req.get("pts") else None
             lines = map_contours(plane, req, vrange, compare=planes is not None) if req.get("contours") else None
             self.done.emit({"rgb": np.ascontiguousarray(rgb), "plane": plane, "vrange": vrange, "request": req,
                             "arrows": arrows, "planes": planes, "pts_side": pts_side, "pts_factor": pts_factor,
@@ -390,6 +403,23 @@ class ExploreView(QWidget):
         self.save_btn = QPushButton("Save image…")
         self.canvas = ImageCanvas()
         v.addWidget(self.canvas, 1)
+        # the busy line in the map's top-left corner (ExploreControls._load_progress): what the map or the figure grid
+        # being made reads and how much of it; a child of the canvas, so nothing in the layout moves
+        self.loading = QFrame(self.canvas)
+        self.loading.setObjectName("loading")
+        self.loading.setStyleSheet("QFrame#loading { background: rgba(32, 32, 32, 200); border-radius: 4px; } "
+                                   "QLabel { color: white; }")
+        row = QHBoxLayout(self.loading)
+        row.setContentsMargins(8, 4, 8, 4)
+        self.loading_text = QLabel("")
+        self.loading_bar = QProgressBar()
+        self.loading_bar.setTextVisible(False)
+        self.loading_bar.setFixedSize(120, 8)
+        row.addWidget(self.loading_text)
+        row.addWidget(self.loading_bar)
+        self.loading.setAttribute(Qt.WA_TransparentForMouseEvents)     # hover and drags reach the map under it
+        self.loading.move(8, 8)
+        self.loading.hide()
         self.view3d = View3D()                  # in the canvas's place while 'Show in 3D' is on
         self.view3d.setVisible(False)
         v.addWidget(self.view3d, 1)
@@ -413,6 +443,21 @@ class ExploreView(QWidget):
         hdr.setMinimumSectionSize(fm.horizontalAdvance("ρ/ρ̄") + 3 * fm.averageCharWidth())
         self.streams.setMaximumHeight(170)
         v.addWidget(self.streams)
+
+    def show_loading(self, text: str | None, frac: float | None = None):
+        """The busy line: 'text' and its bar ('frac' of it done; None: busy, no measure); text None hides it."""
+        if text is None:
+            self.loading.hide()
+            return
+        self.loading_text.setText(text)
+        if frac is None:
+            self.loading_bar.setRange(0, 0)
+        else:
+            self.loading_bar.setRange(0, 1000)
+            self.loading_bar.setValue(int(round(1000 * min(1.0, max(0.0, frac)))))
+        self.loading.adjustSize()
+        self.loading.show()
+        self.loading.raise_()
 
 
 class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin, ZoomMixin, QWidget):
@@ -455,6 +500,10 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self._req = None
         self._pending = None
         self._busy = False
+        self._inflight = None                   # the map's request with the slice worker ('progress': the busy line)
+        self._grid_inflight = None              # ... and the figure grid's
+        self._hold = 0                          # one_render: renders held back while several controls are set ...
+        self._held = False                      # ... and whether one was asked for meanwhile
         self._server_output: G.OutputSet | None = None
         self._server_log: Path | None = None
         self._zoom: dict | None = None          # the zoomed region (see _dragged) once its fields arrived
@@ -992,6 +1041,8 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self._shut = False                      # shutdown() ran: nothing may start a thread again
         self._build_timer = QTimer(self, interval=1000)
         self._build_timer.timeout.connect(self._poll_build)
+        self._load_tick = QTimer(self, interval=100)     # the busy line follows a map's or the grid's reading
+        self._load_tick.timeout.connect(self._load_progress)
 
     def _wire_view(self, view):
         """The right pane's signals: the map's hover, click and drag, and the save buttons."""
@@ -1483,7 +1534,23 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
             self.contour_count.setText("")
         return on
 
+    @contextlib.contextmanager
+    def one_render(self):
+        """Hold the map back while several controls are set (an output shown, then a remembered state on top): one map
+        for the end result, not one per step -- each would read its grid."""
+        self._hold += 1
+        try:
+            yield
+        finally:
+            self._hold -= 1
+            if not self._hold and self._held:
+                self._held = False
+                self.render()
+
     def render(self, *_):
+        if self._hold:
+            self._held = True
+            return
         req = self.request()
         if req is None or self._shut:
             return
@@ -1521,12 +1588,50 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
             self.status.emit(f"smoothing the whole {G.field_label(o, req['field'])} cube in 3D at "
                              f"{req['smooth']:g} cells (once per field and smoothing: a few seconds)")
         if self._busy:
-            self._pending = req             # only the latest request is served
+            self._pending = req             # only the latest request is served; the one in flight stops reading
+            if self._inflight is not None:  # when it reads other data (going back to it lets it go on again)
+                self._inflight["progress"]["cancel"] = self._reads_other(self._inflight, req)
             return
-        self._busy = True
         self._req = req
         self._threads()
-        self._to_render.emit(req)
+        self.render_request(req)
+
+    @staticmethod
+    def _reads_other(a: dict, b: dict) -> bool:
+        """Does map request b read other files than request a (OutputSet.source_files: the field's own grid, the
+        velocity for every mean-field derivative and the velocity itself; a comparison's too; a hi-res slice's
+        plane)? Another slice, component, colour or smoothing, or another derivative of the same velocity, reads the
+        same file, so a read in flight for it is let finish (a field scrolled through before its cube is in would
+        otherwise start its read again at every step)."""
+        def files(r):
+            if r.get("pts"):
+                return (str(r["pts"]),)
+            grad, cmp = r.get("ps_gradient", "stored"), r.get("compare")
+            return r["output"].source_files(r["field"], grad) + (() if cmp is None else
+                                                                  cmp.source_files(r["field"], grad))
+        return files(a) != files(b)
+
+    def _load_progress(self):
+        """The busy line over the picture while the map or the figure grid being made has taken over LOAD_SHOW_S:
+        the file it reads and how much of it, else that it is computing; gone when nothing is in flight."""
+        job = self._inflight if self._busy else self._grid_inflight if self._grid_busy else None
+        if job is None or self._shut:
+            self._load_tick.stop()
+            self.view.show_loading(None)
+            return
+        prog = job["progress"]
+        if time.monotonic() - prog["t0"] < LOAD_SHOW_S:     # (another job's line, from before, goes)
+            self.view.show_loading(None)
+            return
+        what = "the figure grid" if job is self._grid_inflight else G.field_label(job["output"], job["field"])
+        done, total = prog.get("read_done", 0), prog.get("read_total", 0)
+        if total and done < total:
+            gb = total >= 1e9                   # a smaller file in MB
+            size = (lambda b: f"{b / 1e9:.1f}") if gb else (lambda b: f"{b / 1e6:.0f}")     # noqa: E731
+            self.view.show_loading(f"{what}: reading {prog['read_file']}, {size(done)} of {size(total)} "
+                                   f"{'GB' if gb else 'MB'}", done / total)
+        else:
+            self.view.show_loading(f"{what}: computing…")
 
     def _fixed_range(self, log: bool):
         """The fixed colour range in the bar's units (log10 on a log map), or None: off, unreadable, empty, or
@@ -1853,9 +1958,11 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
 
     def _rendered(self, res: dict):
         self._busy = False
+        self._inflight = None
         if self._pending is not None:
             req, self._pending = self._pending, None
             self.render_request(req)
+        self._load_progress()                   # the busy line follows what is in flight now
         if self.is_zoomed():                    # asked for before a zoom landed (a field changed meanwhile): the zoom
             return                              # stays; drawn, the slice would take the zoom's geometry
         req = res["request"]
@@ -1907,7 +2014,12 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         self.changed.emit()
 
     def render_request(self, req):
+        """Send a map's request to the slice worker, with its own progress dict (the busy line; a 'cancel' there
+        stops its reading)."""
+        req["progress"] = {"t0": time.monotonic()}
         self._busy = True
+        self._inflight = req
+        self._load_tick.start()
         self._to_render.emit(req)
 
     def _set_contours(self, lines: dict | None):
@@ -1938,9 +2050,14 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
 
     def _render_failed(self, msg):
         self._busy = False
+        self._inflight = None
         if self._pending is not None:           # a newer slice is wanted: its result decides, not this one's
             req, self._pending = self._pending, None
             self.render_request(req)
+            self._load_progress()
+            return
+        self._load_progress()
+        if msg.startswith(G.LoadCancelled.__name__):    # stopped on purpose (the window closing): the picture stays
             return
         if self.is_zoomed():                    # a slice asked for before the zoom landed: the zoom stays
             return
@@ -2022,6 +2139,10 @@ class ExploreControls(View3DMixin, VoidsMixin, SaveMixin, GridMixin, ServerMixin
         """Stop the server and the threads (the window is closing). Idempotent."""
         self._shut = True
         self._3d_cancel()                               # a 3D volume being read: the slice thread comes back soon
+        for job in (self._inflight, self._grid_inflight):   # ... and so does a map's or the grid's grid being read
+            if job is not None:
+                job["progress"]["cancel"] = True
+        self._load_tick.stop()
         if self._server_log is not None:
             try:
                 self._server_log.unlink(missing_ok=True)

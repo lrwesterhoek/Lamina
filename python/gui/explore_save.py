@@ -328,7 +328,10 @@ class SaveMixin:
             self.status.emit(f"could not save {f}: {e}")
         except Exception as e:
             if FS.format_of(f) in ("png", "tiff"):
+                busy = not self.view.loading.isHidden()     # the busy line is not part of the picture
+                self.view.loading.hide()
                 self.view.canvas.grab().save(f)
+                self.view.loading.setVisible(busy)
                 self.status.emit(f"saved {f} as the screen shows it (the figure failed: {e})")
             else:
                 self.status.emit(f"could not save {f}: {e}")

@@ -3,6 +3,7 @@ several fields of one snapshot, or the outputs of one snapshot side by side."""
 
 from __future__ import annotations
 
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -928,16 +929,24 @@ class GridMixin:
         if self._grid_busy:
             self._grid_pending = req                # only the latest request is served
             return
-        self._grid_busy = True
         self._threads()
+        self._grid_emit(req)
+
+    def _grid_emit(self, req: dict):
+        """Send the grid's request to the slice worker, with its own progress dict (the busy line)."""
+        req["progress"] = {"t0": time.monotonic()}
+        self._grid_busy = True
+        self._grid_inflight = req
+        self._load_tick.start()
         self._to_render_grid.emit(req)
 
     def _grid_rendered(self, res: dict):
         self._grid_busy = False
+        self._grid_inflight = None
         if self._grid_pending is not None:
             req, self._grid_pending = self._grid_pending, None
-            self._grid_busy = True
-            self._to_render_grid.emit(req)
+            self._grid_emit(req)
+        self._load_progress()                       # the busy line follows what is in flight now
         if not self._grid_shown or self._shut:
             return
         req = res["request"]
@@ -979,11 +988,12 @@ class GridMixin:
         self.changed.emit()
 
     def _grid_failed(self, msg: str):
+        self._grid_inflight = None
+        self._load_progress()
         self.grid_state.setText(f"⚠ could not compose the grid: {msg}")
         if self._grid_pending is not None:          # a newer request waits (a panel was changed meanwhile): its
             req, self._grid_pending = self._grid_pending, None     # result decides whether the grid stays
-            self._grid_busy = True
-            self._to_render_grid.emit(req)
+            self._grid_emit(req)
             return
         self._grid_busy = False
         if self._grid_shown:                        # a panel that cannot be read: the map, not a stale picture
